@@ -302,6 +302,8 @@ Phase 7 `Harness Init` can start when:
 If no real task metrics exist yet, Phase 7 may still produce a draft package,
 but it must be marked as unvalidated.
 
+Phase 7 package details live in `docs/harness-init.md`.
+
 ## Out of Scope
 
 Phase 6 does not implement:

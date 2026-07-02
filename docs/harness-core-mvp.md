@@ -24,6 +24,7 @@ Harness Core MVP consumes:
 - `docs/multi-agent-v1.md` after Phase 4
 - `docs/parallelism-long-running.md` after Phase 5
 - `docs/harness-evaluation-loop.md` after Phase 6
+- `docs/harness-init.md` after Phase 7
 - current Linear issue or project
 - user request
 
@@ -376,3 +377,12 @@ Phase 6 can evaluate harness quality only after tasks leave durable evidence.
 
 Phase 6 details live in `docs/harness-evaluation-loop.md`. Harness Core MVP
 continues to provide the task-level evidence that Phase 6 measures.
+
+## Handoff to Phase 7
+
+Phase 7 can package the harness for future projects only as an explicit opt-in
+asset.
+
+Phase 7 details live in `docs/harness-init.md`. Harness Core MVP remains the
+runtime fallback for repositories that have not installed a future harness-init
+skill.

@@ -183,17 +183,24 @@ Completion criteria:
 - loop profile remains explicit and optional
 - setup records where contracts and runtime assets live
 
+Output:
+
+- `docs/harness-init.md`
+- `templates/harness-init/`
+
 ## Current Status
 
-Phase 0 through Phase 5 have local design artifacts. They define the basis,
+Phase 0 through Phase 7 have local design artifacts. They define the basis,
 Task Contract, Harness Core MVP, non-loop profiles, Multi-Agent v1 role
-boundaries, and controlled parallelism/long-running work rules.
+boundaries, controlled parallelism/long-running work rules, and the harness
+evaluation loop. Phase 7 adds a draft harness-init package for future projects.
 
-Do not package the harness for future projects yet. Phase 6 must first define
-how harness changes are measured, how repeated failures become backlog items,
-and what evidence is required before calling a harness change an improvement.
+The harness-init package is draft and unvalidated until it is applied to a
+separate target project with explicit approval. Do not install global skills or
+modify future repositories automatically. New projects must explicitly opt in.
 
 The next practical sequence is:
 
-1. Phase 6 Harness Evaluation Loop
-2. Phase 7 Harness Init
+1. Validate the draft package on a separate target project
+2. Record metrics from that validation
+3. Promote or revise the package based on evidence
