@@ -26,7 +26,8 @@ the current repository.
 6. Show the files that would be created or appended.
 7. Ask for explicit approval.
 8. Append project instructions only if equivalent rules are missing.
-9. Copy selected templates without overwriting files.
+9. Copy the default target files listed in `docs/harness-init.md` without
+   overwriting; copy additional templates only on explicit request.
 10. Record installed paths in Linear.
 11. Report that loop profile remains uninstalled unless separately requested.
 12. If Claude Code is the Orchestrator, provide

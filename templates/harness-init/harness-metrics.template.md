@@ -9,8 +9,8 @@ harness_metric:
   profile: "loop | non-loop | none"
   non_loop_profile: "research | documentation | ui-review | product-spec-review | none"
   outcome: "in_review | blocked | canceled | returned_for_changes"
-  task_started_at: "YYYY-MM-DD HH:mm KST"
-  task_finished_at: "YYYY-MM-DD HH:mm KST_OR_NONE"
+  task_started_at: "YYYY-MM-DD HH:mm TIMEZONE"
+  task_finished_at: "YYYY-MM-DD HH:mm TIMEZONE_OR_NONE"
   verification:
     command: "COMMAND_OR_NONE"
     result: "pass | fail | not_applicable | unavailable"

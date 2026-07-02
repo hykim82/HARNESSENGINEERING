@@ -95,10 +95,17 @@ docs/harness-records.md
 docs/harness-progress.md
 docs/harness-metrics.md
 docs/non-loop-evidence.md
+docs/model-routing.md
 ```
 
 These files are suggestions, not mandatory global paths. A target repository may
 choose different paths if the Task Contract records them.
+
+Packet templates (`handoff-packet`, `question-packet`) and role prompts are not
+copied by default. Roles reference them from the source package
+`templates/harness-init/`, or copy them into the target only on explicit
+request. This list is the single source of truth for default installation;
+`templates/harness-init/README.md` and `skill/SKILL.md` defer to it.
 
 ## Loop Profile Boundary
 

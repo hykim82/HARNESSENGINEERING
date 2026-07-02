@@ -46,7 +46,9 @@ administrative decision, the output may be only a Linear record.
 
 ### Orchestrator
 
-In the MVP, the active Codex session acts as orchestrator.
+In the MVP, the active orchestrator session acts as orchestrator. Engine
+assignment follows `docs/claude-orchestrator-handoff.md` (Claude Code is the
+primary Orchestrator; Codex may orchestrate as fallback).
 
 Responsibilities:
 
@@ -61,7 +63,7 @@ Responsibilities:
 
 ### Worker
 
-In the MVP, the same Codex session may also perform worker duties for document
+In the MVP, the same orchestrator session may also perform worker duties for document
 or code changes. This is acceptable only because multi-agent execution is not
 implemented yet.
 

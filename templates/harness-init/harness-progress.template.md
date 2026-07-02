@@ -17,5 +17,5 @@ progress_record:
     - "COMMAND_ARTIFACT_CHECKLIST_RESULT_OR_NONE"
   blockers:
     - "BLOCKER_OR_NONE"
-  updated_at: "YYYY-MM-DD HH:mm KST"
+  updated_at: "YYYY-MM-DD HH:mm TIMEZONE"
 ```

@@ -31,11 +31,14 @@ model_routing:
     fallback_model_class: "fast Codex model for non-authoritative secondary checks"
     authority: "scope, risk, evidence, and non-loop checklist review"
   human:
-    owner: "한용"
+    owner: "HUMAN_OWNER"
     authority: "final Done, subjective decisions, irreversible approval"
 ```
 
 Keep the role boundary even when a different model is selected. A stronger model
 does not gain extra authority, and a faster model must not be used as the sole
 authority for verifier PASS or high-risk review.
+
+Codex model names above are examples as of `source_date`; if the model selector
+shows newer equivalents, keep the role boundary and choose by capability class.
 

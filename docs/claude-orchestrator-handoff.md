@@ -139,6 +139,10 @@ Codex Reviewer must not:
 
 Before asking Codex to verify or review, Claude should provide:
 
+The canonical handoff format is `templates/harness-init/handoff-packet.template.md`.
+This section mirrors it for convenience; if the two ever differ, the template
+wins.
+
 ```yaml
 handoff_packet:
   issue: "<Linear issue id>"
@@ -147,6 +151,7 @@ handoff_packet:
   profile: "loop | non-loop | none"
   non_loop_profile: "research | documentation | ui-review | product-spec-review | none"
   goal: "<one sentence>"
+  task_contract_location: "<path or Linear comment>"
   write_scope:
     - "<path or none>"
   protected_artifacts:
@@ -165,8 +170,31 @@ handoff_packet:
   requested_action: "<verify | review | spec-audit>"
   known_gaps:
     - "<gap or none>"
+  decision_needed_by: "ORCHESTRATOR | HUMAN | NONE"
   confidence: "high | medium | low"
+  next_owner_after_response: "Claude Orchestrator"
 ```
+
+## Windows Headless Execution
+
+These rules were validated in HYK-69 on Windows:
+
+- Coder can run as a headless Claude Code session: pipe the prompt file into
+  `claude -p --permission-mode acceptEdits --allowedTools "Bash(git:*)"` with
+  the target repository as working directory.
+- Verifier and Reviewer can run as headless Codex: pipe the prompt into
+  `codex exec --sandbox read-only -C <repo> -`. Always pipe stdin; launching
+  `codex exec` detached without closing stdin hangs on "Reading additional
+  input from stdin".
+- The Codex read-only sandbox may intermittently fail to launch processes
+  (`CreateProcessAsUserW failed: 5`). The reviewer must substitute equivalent
+  read-only evidence and state the limitation instead of guessing.
+- Subagent spawning via the OMC plugin requires WSL + tmux on Windows; headless
+  CLI sessions are the validated fallback.
+- Monitor live output by opening the background output file or
+  `Get-Content <output-file> -Wait`.
+- These headless sessions keep the same role boundaries; the launcher
+  (Orchestrator) does not gain the launched role's authority.
 
 ## Session Start Checklist
 

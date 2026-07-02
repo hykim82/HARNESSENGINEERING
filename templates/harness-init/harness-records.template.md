@@ -8,7 +8,7 @@ harness_record:
   issue: "LINEAR_OR_LOCAL_TASK_ID"
   attempted_linear_action: "ACTION"
   failure_reason: "FAILURE_POINT"
-  fallback_recorded_at: "YYYY-MM-DD HH:mm KST"
+  fallback_recorded_at: "YYYY-MM-DD HH:mm TIMEZONE"
   profile: "loop | non-loop | none"
   evidence_that_would_have_been_posted:
     - "EVIDENCE"

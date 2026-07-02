@@ -35,6 +35,10 @@ the harness.
 - Do not create Linear projects without asking.
 - Do not write global Codex assets in draft mode.
 - Record all installed files in Linear.
+- Loop verification commands assume bash; on Windows, Git Bash is required.
+- Default installation copies only the target files listed in
+  `docs/harness-init.md`; packet and prompt templates are referenced from this
+  package unless explicitly requested.
 
 ## Suggested Install
 
