@@ -315,6 +315,8 @@ Phase 6 should measure:
 Phase 5 defines the records. Phase 6 decides how to calculate trends and turn
 repeated failures into backlog items.
 
+Phase 6 details live in `docs/harness-evaluation-loop.md`.
+
 ## Out of Scope
 
 Phase 5 does not implement:

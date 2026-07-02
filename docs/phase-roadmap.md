@@ -158,6 +158,10 @@ Completion criteria:
 - harness changes are measured before and after
 - no change is called an improvement without evidence
 
+Output:
+
+- `docs/harness-evaluation-loop.md`
+
 ## Phase 7: Harness Init
 
 Goal:
@@ -181,16 +185,15 @@ Completion criteria:
 
 ## Current Status
 
-Phase 0 through Phase 4 have local design artifacts. They define the basis,
-Task Contract, Harness Core MVP, non-loop profiles, and Multi-Agent v1 role
-boundaries.
+Phase 0 through Phase 5 have local design artifacts. They define the basis,
+Task Contract, Harness Core MVP, non-loop profiles, Multi-Agent v1 role
+boundaries, and controlled parallelism/long-running work rules.
 
-Do not start unrestricted parallel execution yet. Phase 5 must first define
-worktree ownership, write locks, retry limits, blocked policy, handoff
-artifacts, and resume rules.
+Do not package the harness for future projects yet. Phase 6 must first define
+how harness changes are measured, how repeated failures become backlog items,
+and what evidence is required before calling a harness change an improvement.
 
 The next practical sequence is:
 
-1. Phase 5 Parallelism and Long-Running Work
-2. Phase 6 Harness Evaluation Loop
-3. Phase 7 Harness Init
+1. Phase 6 Harness Evaluation Loop
+2. Phase 7 Harness Init

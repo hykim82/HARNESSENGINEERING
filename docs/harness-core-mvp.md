@@ -23,6 +23,7 @@ Harness Core MVP consumes:
 - `docs/non-loop-profiles.md`
 - `docs/multi-agent-v1.md` after Phase 4
 - `docs/parallelism-long-running.md` after Phase 5
+- `docs/harness-evaluation-loop.md` after Phase 6
 - current Linear issue or project
 - user request
 
@@ -368,3 +369,10 @@ Multi-Agent v1 role boundaries are fixed.
 Phase 5 details live in `docs/parallelism-long-running.md`. Harness Core MVP
 remains the fallback when work is sequential or when ownership records are not
 available.
+
+## Handoff to Phase 6
+
+Phase 6 can evaluate harness quality only after tasks leave durable evidence.
+
+Phase 6 details live in `docs/harness-evaluation-loop.md`. Harness Core MVP
+continues to provide the task-level evidence that Phase 6 measures.
