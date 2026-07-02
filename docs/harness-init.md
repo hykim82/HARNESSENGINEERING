@@ -37,6 +37,10 @@ Contents:
 - `harness-records.template.md`: Linear outage fallback record template
 - `harness-progress.template.md`: long-running progress template
 - `harness-metrics.template.md`: evaluation metric template
+- `claude-orchestrator-prompt.template.md`: Claude Code Orchestrator startup prompt
+- `codex-verifier-prompt.template.md`: Codex Verifier startup prompt
+- `codex-reviewer-prompt.template.md`: Codex Reviewer startup prompt
+- `handoff-packet.template.md`: Claude-to-Codex handoff format
 - `skill/SKILL.md`: draft skill instructions for a future `harness-init` skill
 
 ## Opt-In Rule
@@ -172,12 +176,15 @@ Harness init should not change these paths in draft mode.
 Before calling this package stable:
 
 1. Choose a separate target repository.
-2. Apply harness init with explicit approval.
-3. Create one non-loop Task Contract.
-4. Run one task to In Review.
-5. Record a metric using `harness-metrics.template.md`.
-6. Confirm no loop files were installed unless explicitly requested.
-7. Confirm the target repository can remove the harness files cleanly.
+2. Start Claude Code as Orchestrator using
+   `claude-orchestrator-prompt.template.md`.
+3. Apply harness init with explicit approval.
+4. Create one non-loop Task Contract.
+5. Run one task to In Review.
+6. Send one handoff packet from Claude Orchestrator to Codex Reviewer.
+7. Record a metric using `harness-metrics.template.md`.
+8. Confirm no loop files were installed unless explicitly requested.
+9. Confirm the target repository can remove the harness files cleanly.
 
 Stable status requires evidence from a real target project.
 

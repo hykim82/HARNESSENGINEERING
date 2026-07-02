@@ -29,6 +29,9 @@ the current repository.
 9. Copy selected templates without overwriting files.
 10. Record installed paths in Linear.
 11. Report that loop profile remains uninstalled unless separately requested.
+12. If Claude Code is the Orchestrator, provide
+    `claude-orchestrator-prompt.template.md` and require handoff packets before
+    Codex verifier or reviewer work.
 
 ## Template Source
 

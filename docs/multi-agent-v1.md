@@ -211,6 +211,24 @@ role_assignment:
   freeze_point: "<loop freeze point or none>"
 ```
 
+## VSCode Tool Mapping
+
+When the user chooses Claude Code as Orchestrator, use this mapping:
+
+| Terminal | Tool | Harness role |
+| --- | --- | --- |
+| `[ORCH-CLAUDE]` | Claude Code | Orchestrator |
+| `[CODER-CLAUDE]` | Claude Code | Coder |
+| `[VERIFY-CODEX]` | Codex | Verifier |
+| `[REVIEW-CODEX]` | Codex | Reviewer or Spec Auditor |
+
+The Orchestrator role may be implemented by Claude Code, but the authority
+rules do not change. Claude Orchestrator still stops at In Review and must not
+claim verifier PASS without Codex Verifier evidence.
+
+Claude Orchestrator handoff details live in
+`docs/claude-orchestrator-handoff.md`.
+
 ## Handoff Note
 
 Every role handoff should use a short durable note.
