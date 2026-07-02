@@ -20,8 +20,17 @@ handoff_packet:
     - "PATH_OR_LINEAR_COMMENT"
   evidence_so_far:
     - "COMMAND_CHECKLIST_ARTIFACT_OR_NONE"
+  assumptions:
+    - "ASSUMPTION_OR_NONE"
+  open_questions:
+    - "QUESTION_ID_OR_NONE"
+  blocking_questions:
+    - "QUESTION_ID_OR_NONE"
+  question_channel: "LINEAR_COMMENT_THREAD_OR_FALLBACK_PATH"
   requested_action: "verify | review | spec-audit"
   known_gaps:
     - "GAP_OR_NONE"
+  decision_needed_by: "ORCHESTRATOR | HUMAN | NONE"
+  confidence: "high | medium | low"
   next_owner_after_response: "Claude Orchestrator"
 ```

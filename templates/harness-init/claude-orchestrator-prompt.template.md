@@ -8,6 +8,7 @@ Read first:
 - `docs/task-contract.md` if present
 - `docs/harness-core-mvp.md` if present
 - `docs/multi-agent-v1.md` if present
+- `docs/model-orchestration.md` if present
 - `docs/claude-orchestrator-handoff.md` if present
 
 ## Duties
@@ -19,7 +20,9 @@ Read first:
 - Choose `non_loop_profile` when profile is `non-loop`.
 - Declare write scope and protected artifacts.
 - Assign Coder, Verifier, Reviewer, and Human roles.
+- Select model routing for each role.
 - Post role assignment and progress in Linear.
+- Answer or escalate pre-work question packets.
 - Produce handoff packets for Codex Verifier or Codex Reviewer.
 
 ## Hard Limits
@@ -29,6 +32,8 @@ Read first:
 - Do not install loop profile without explicit human approval.
 - Do not let Coder work outside the declared write scope.
 - Do not hide verifier failures or reviewer gaps.
+- Do not let Coder, Verifier, or Reviewer proceed while a blocking question for
+  that role is open.
 
 ## Start Procedure
 
@@ -38,15 +43,26 @@ Read first:
 4. Create or connect the task issue.
 5. Draft the Task Contract.
 6. Classify profile.
-7. Assign terminals:
+7. Select model routing:
+   - Claude most capable available model for `[ORCH-CLAUDE]`
+   - Claude Sonnet-class or stronger for `[CODER-CLAUDE]`
+   - Codex strongest available model for `[VERIFY-CODEX]`
+   - Codex strongest available model for high-risk `[REVIEW-CODEX]`
+   - fast Codex model only for non-authoritative checks
+8. Assign terminals:
    - `[ORCH-CLAUDE]`
    - `[CODER-CLAUDE]`
    - `[VERIFY-CODEX]`
    - `[REVIEW-CODEX]`
-8. Record role assignment in Linear.
-9. Begin work only after scope is fixed.
+9. Record role assignment in Linear.
+10. Open the question channel in Linear.
+11. Begin work only after scope is fixed and blocking questions are answered or
+    escalated.
 
 ## Handoff Requirement
 
 Before asking Codex to verify or review, provide a handoff packet using
 `templates/harness-init/handoff-packet.template.md`.
+
+Before asking any role to start work, allow that role to submit a question
+packet using `templates/harness-init/question-packet.template.md`.

@@ -25,6 +25,7 @@ Multi-Agent v1 consumes:
 - `docs/harness-core-mvp.md`
 - `docs/loop-profile-contract.md`
 - `docs/non-loop-profiles.md`
+- `docs/model-orchestration.md`
 - the active Linear issue
 - the user's latest request
 
@@ -35,6 +36,7 @@ Each multi-agent task must leave:
 - a Task Contract or equivalent Linear comment
 - role assignment record
 - handoff notes between roles
+- question packets when a role needs clarification before work
 - verification or review evidence matching the selected profile
 - final In Review transition record
 
@@ -53,6 +55,7 @@ Responsibilities:
 - choose the non-loop subtype when `profile = non-loop`
 - declare loop test freeze point when `profile = loop`
 - assign the next role
+- answer or escalate pre-work questions from assigned roles
 - collect handoff artifacts
 - decide whether evidence is sufficient to move to In Review
 
@@ -68,6 +71,7 @@ Must not:
 - install the loop profile without human approval
 - move Linear issues to Done
 - treat missing evidence as success
+- let a role continue while its blocking question is unresolved
 
 ### Coder
 
@@ -80,6 +84,8 @@ Responsibilities:
 - respect protected artifacts
 - for loop tasks, write or strengthen tests before freeze when needed
 - stop when scope, ownership, or acceptance criteria become unclear
+- ask the Orchestrator a question packet before work when the uncertainty is
+  blocking
 - produce a handoff note for Verifier or Reviewer
 
 Allowed changes:
@@ -105,6 +111,8 @@ Verifier applies only when `profile = loop`.
 Responsibilities:
 
 - run the real verification command from the contract
+- ask the Orchestrator before running verification when the command, profile, or
+  protected artifacts are unclear
 - record the command, exit code, and actual output summary
 - compare protected artifact state against the freeze rule when evidence exists
 - return PASS or FAIL based only on the command and contract
@@ -134,6 +142,8 @@ Responsibilities:
 
 - check that the work stayed inside scope
 - check that required evidence exists
+- ask the Orchestrator before review when the source of truth or acceptance rule
+  is unclear
 - identify gaps, contradictions, and unhandled risks
 - for non-loop tasks, mark checklist items as met, gap, or not applicable
 - recommend In Review only when unresolved blockers are absent or listed
@@ -226,6 +236,7 @@ The Orchestrator role may be implemented by Claude Code, but the authority
 rules do not change. Claude Orchestrator still stops at In Review and must not
 claim verifier PASS without Codex Verifier evidence.
 
+Model-level routing details live in `docs/model-orchestration.md`.
 Claude Orchestrator handoff details live in
 `docs/claude-orchestrator-handoff.md`.
 
@@ -251,6 +262,19 @@ handoff:
 
 Handoff notes belong in Linear first. If Linear is unavailable, use
 `docs/harness-records.md` as the fallback path defined by Harness Core MVP.
+
+## Question Packet
+
+Any role may ask the Orchestrator a pre-work question when the Task Contract or
+handoff packet is not enough to proceed.
+
+Question packets belong in Linear first. If Linear is unavailable, use the
+fallback path named in the Task Contract.
+
+Use `templates/harness-init/question-packet.template.md`.
+
+Blocking questions stop the asking role until Orchestrator answers or escalates.
+Non-blocking questions may continue with a recorded assumption.
 
 ## Loop Task Flow
 

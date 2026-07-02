@@ -20,10 +20,12 @@ the harness.
 - `harness-records.template.md`: Linear outage fallback record template
 - `harness-progress.template.md`: long-running progress template
 - `harness-metrics.template.md`: evaluation metric template
+- `model-routing.template.md`: engine and model routing template
 - `claude-orchestrator-prompt.template.md`: Claude Code Orchestrator prompt
 - `codex-verifier-prompt.template.md`: Codex Verifier prompt
 - `codex-reviewer-prompt.template.md`: Codex Reviewer prompt
 - `handoff-packet.template.md`: Claude-to-Codex handoff packet
+- `question-packet.template.md`: role-to-Orchestrator question packet
 - `skill/SKILL.md`: draft skill instructions
 
 ## Rules
@@ -45,3 +47,4 @@ the harness.
 7. Leave loop profile uninstalled unless explicitly requested.
 8. Start Claude Code with `claude-orchestrator-prompt.template.md` when using
    Claude as the primary Orchestrator.
+9. Give every role access to `question-packet.template.md` before work starts.

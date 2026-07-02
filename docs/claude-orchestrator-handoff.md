@@ -5,6 +5,14 @@
 This document prepares Claude Code to act as the primary Orchestrator in a
 VSCode multi-terminal workflow.
 
+Read this together with:
+
+- `docs/multi-agent-v1.md`
+- `docs/model-orchestration.md`
+- `templates/harness-init/claude-orchestrator-prompt.template.md`
+- `templates/harness-init/handoff-packet.template.md`
+- `templates/harness-init/question-packet.template.md`
+
 The harness roles do not change. Only the tool assignment changes:
 
 - Claude Code becomes the primary Orchestrator.
@@ -37,6 +45,14 @@ Claude may review only when Codex is unavailable or when the Task Contract names
 Claude as reviewer. Claude must not review its own implementation as the only
 review evidence.
 
+For model-level routing, use `docs/model-orchestration.md`. In short:
+
+- Claude Code owns orchestration and primary implementation.
+- Codex owns independent verification and review.
+- use the strongest available model for Orchestrator, Verifier, and high-risk
+  Reviewer work.
+- use faster models only for low-risk secondary checks.
+
 ## Claude Orchestrator Duties
 
 Claude Orchestrator must:
@@ -50,6 +66,7 @@ Claude Orchestrator must:
 - declare write scope and protected artifacts
 - assign Coder, Verifier, Reviewer, and Human roles
 - produce handoff packets between terminals
+- answer or escalate pre-work question packets
 - move AI-managed work only to In Review
 
 Claude Orchestrator must not:
@@ -59,6 +76,30 @@ Claude Orchestrator must not:
 - install loop profile without human approval
 - let Coder edit outside write scope
 - hide reviewer gaps or verifier failures
+- let a role continue while its blocking question is open
+
+## Pre-Work Questions
+
+Coder, Verifier, Reviewer, and Spec Auditor may ask Claude Orchestrator a
+question before starting their assigned work.
+
+Use `templates/harness-init/question-packet.template.md`.
+
+Questions must be treated as blocking when they affect:
+
+- scope
+- profile
+- acceptance criteria
+- write scope
+- protected artifacts
+- loop installation
+- test freeze
+- irreversible action
+
+Claude Orchestrator answers in the Linear issue comment thread when possible.
+If Linear is unavailable, use the fallback record path named in the Task
+Contract. If the answer requires product direction or final acceptance, Claude
+Orchestrator escalates to Human.
 
 ## Codex Verifier Duties
 
@@ -114,9 +155,17 @@ handoff_packet:
     - "<path or Linear comment>"
   evidence_so_far:
     - "<command, checklist, artifact, or none>"
+  assumptions:
+    - "<assumption or none>"
+  open_questions:
+    - "<question id or none>"
+  blocking_questions:
+    - "<question id or none>"
+  question_channel: "<Linear issue comment thread or fallback path>"
   requested_action: "<verify | review | spec-audit>"
   known_gaps:
     - "<gap or none>"
+  confidence: "high | medium | low"
 ```
 
 ## Session Start Checklist
@@ -130,9 +179,10 @@ Claude Orchestrator should run this checklist at the beginning of each task:
 5. Create or connect the issue.
 6. Write the Task Contract.
 7. Choose profile and non-loop subtype if needed.
-8. Assign terminal roles.
-9. Post role assignment in Linear.
-10. Start Coder only after scope is fixed.
+8. Select model routing from `docs/model-orchestration.md`.
+9. Assign terminal roles.
+10. Post role assignment in Linear.
+11. Start Coder only after scope is fixed and blocking questions are closed.
 
 ## Completion Checklist
 
@@ -140,6 +190,7 @@ Claude Orchestrator can move work to In Review when:
 
 - Task Contract exists
 - profile evidence exists
+- blocking questions are answered or escalated
 - Codex verifier PASS exists for loop tasks
 - Codex reviewer or spec auditor evidence exists for non-loop tasks
 - gaps are resolved or explicitly listed
@@ -157,8 +208,10 @@ Use this scenario before calling the Claude Orchestrator setup stable:
 4. Create one small non-loop documentation task.
 5. Have `[CODER-CLAUDE]` produce the artifact.
 6. Send a handoff packet to `[REVIEW-CODEX]`.
-7. Record review evidence in Linear.
-8. Move issue to In Review.
-9. Record one harness metric.
+7. Send a question packet from `[REVIEW-CODEX]` to `[ORCH-CLAUDE]` and record
+   the answer.
+8. Record review evidence in Linear.
+9. Move issue to In Review.
+10. Record one harness metric.
 
 Do not test with a large feature first.

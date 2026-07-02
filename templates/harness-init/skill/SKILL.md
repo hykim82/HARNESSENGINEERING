@@ -32,6 +32,9 @@ the current repository.
 12. If Claude Code is the Orchestrator, provide
     `claude-orchestrator-prompt.template.md` and require handoff packets before
     Codex verifier or reviewer work.
+13. Provide `model-routing.template.md` and
+    `question-packet.template.md` so each role can choose the right engine and
+    ask the Orchestrator before work when scope is unclear.
 
 ## Template Source
 
@@ -49,4 +52,5 @@ Report:
 - skipped existing files
 - Linear issue used
 - loop profile status
+- question channel location
 - any fallback records
