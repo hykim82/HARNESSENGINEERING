@@ -20,6 +20,29 @@
 
 ## Relay rules
 
-- Human says "go to the <role> terminal" → role reads `.harness/<role>-task.md`.
-- Role result: `.harness/<role>.md` + `>>> DONE: <role> @ <time>`.
-- Role → Human: "<role> done" → Human reads and updates this board.
+Read these once; do not re-derive them after a `/clear`.
+
+1. **Role assignment is the Orchestrator's call.** The Orchestrator decides
+   which role or terminal a task goes to. Do not ask the human to confirm
+   "where should this run" — the human relays messages, they do not route
+   them.
+2. **Task handoff = file drop.** The Orchestrator writes the next task to
+   `.harness/<role>-task.md` in the target repository, including the target
+   repo path, exact commands, prohibitions, and required output format. Do
+   not hand a role pasted text instead of a task file.
+3. **Trigger word = "go".** The human types `go` in a role's terminal; that
+   role reads `.harness/<role>-task.md` and executes it.
+4. **Result = file + DONE line.** The role writes its result to
+   `.harness/<role>.md` and ends with exactly
+   `>>> DONE: <role> @ <YYYY-MM-DD HH:MM>` (get the timestamp from a real
+   command; do not guess it).
+5. **Human relays completion, not content.** The human tells the
+   Orchestrator "<role> done" (or the project's equivalent phrase); the
+   Orchestrator then reads `.harness/<role>.md` itself and updates this
+   board. The human does not paste file contents.
+6. **Target repository and role definitions.** State explicitly which
+   repository each kind of work belongs to when a project spans more than
+   one (do not assume a single repo). Roles: CODER = implementation or
+   writing (write access within declared scope), VERIFY = runs the
+   verification command and reports the real exit code (loop tasks only),
+   REVIEW = independent read-only review, Human = final acceptance (Done).

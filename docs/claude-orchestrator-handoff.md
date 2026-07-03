@@ -252,6 +252,9 @@ replaying history.
   `.harness/STATUS.md` if present, plus the named Linear issues — nothing else
   until needed. See the boot line in
   `templates/harness-init/claude-orchestrator-prompt.template.md`.
+- When booting this way, also compare STATUS issue states against Linear for
+  the named issues (see Session Start Checklist). Treat Linear as the source
+  of truth on drift and rewrite STATUS before continuing.
 - Templates: `phase-handoff.template.md` and `status.template.md` in
   `templates/harness-init/`. Both live under gitignored `.harness/` in the
   target repo, alongside the relay files.
@@ -268,7 +271,10 @@ Claude Orchestrator should run this checklist at the beginning of each task:
 
 1. Confirm the target repository.
 2. Read `AGENTS.md`. Read `.harness/PHASE-HANDOFF.md` and `.harness/STATUS.md`
-   if present, to resume a rotated session cheaply.
+   if present, to resume a rotated session cheaply. Compare `STATUS.md` issue
+   states against the actual Linear issue states for the named issues; if
+   they drift, treat Linear as the source of truth and rewrite `STATUS.md`
+   to match before continuing.
 3. Confirm Linear project.
 4. Check if any In Progress issue already exists.
 5. Create or connect the issue.

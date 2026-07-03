@@ -15,7 +15,12 @@ Read first:
 
 If `.harness/PHASE-HANDOFF.md` or `.harness/STATUS.md` exist, resume from them
 plus the named Linear issues and do not re-read the rest of the repo until a
-task needs it.
+task needs it. If the relay or handoff procedure is unclear after reading
+those, read `docs/claude-orchestrator-handoff.md` before proceeding — do not
+re-derive the procedure from memory. At boot, also compare `STATUS.md` issue
+states against the actual Linear issue states for the named issues; if they
+drift, treat Linear as the source of truth and rewrite `STATUS.md` to match
+before continuing.
 
 ## Duties
 

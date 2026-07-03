@@ -195,7 +195,9 @@ Before calling this package stable:
 
 1. Choose a separate target repository.
 2. Start Claude Code as Orchestrator using
-   `claude-orchestrator-prompt.template.md`.
+   `claude-orchestrator-prompt.template.md`. If operating procedure is
+   unclear from that prompt and `.harness/STATUS.md` alone, read
+   `docs/claude-orchestrator-handoff.md` before proceeding.
 3. Apply harness init with explicit approval.
 4. Create one non-loop Task Contract.
 5. Run one task to In Review.

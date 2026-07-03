@@ -10,6 +10,10 @@ Start a new chat with one line:
 > issues, then continue. Read the rest of the code/docs only when a task needs
 > it (save tokens)."
 
+If operating procedure is unclear after that, read
+`docs/claude-orchestrator-handoff.md` before proceeding — do not re-derive it
+from memory.
+
 ## Previous phase result
 
 - <what completed / not done>
