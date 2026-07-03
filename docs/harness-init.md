@@ -11,13 +11,20 @@ human or orchestrator install the harness only after an explicit request.
 Status:
 
 ```text
-draft / unvalidated
+stable
 ```
 
 Reason:
 
 - Phase 0-6 design documents exist and are committed.
-- The package has not yet been validated on a separate target project.
+- Validated on two separate target repositories: HARNESS_VALIDATION_TARGET
+  (non-loop documentation path, Linear HYK-69) and 모바일마크다운에디터 (loop
+  path via a markdown parser, Linear HYK-76).
+- Relay Protocol v2 and the Windows/WSL execution lessons are folded in
+  (HYK-77); see `docs/claude-orchestrator-handoff.md` for the protocol.
+- Honesty note: the ui-review non-loop profile is defined but not yet
+  run-validated end-to-end (the documentation profile was); it will be
+  exercised during the target project's UI phases.
 - No global `harness-init` skill has been installed from this repository.
 
 ## Package Contents

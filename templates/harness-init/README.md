@@ -39,6 +39,11 @@ the harness.
 - Default installation copies only the target files listed in
   `docs/harness-init.md`; packet and prompt templates are referenced from this
   package unless explicitly requested.
+- Role relay uses `.harness/<role>-task.md` (orchestrator to role) and
+  `.harness/<role>.md` (role to orchestrator); add `.harness/` to the target
+  repo `.gitignore`.
+- Roles end each task with `>>> DONE: <role>` and a human-next-action line.
+  Full protocol: `docs/claude-orchestrator-handoff.md` (Relay Protocol v2).
 
 ## Suggested Install
 

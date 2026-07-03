@@ -24,12 +24,14 @@ model_routing:
     preferred_model_class: "gpt-5.5 or strongest available Codex model"
     fallback_model_class: "gpt-5.4"
     authority: "real command-based PASS or FAIL for loop tasks"
+    codex_reasoning_effort: "Medium — runs a command and reports real output; deep reasoning is not needed"
   reviewer:
     terminal: "[REVIEW-CODEX]"
     engine: "Codex"
     preferred_model_class: "gpt-5.5 for high-risk review, gpt-5.4 for normal review"
     fallback_model_class: "fast Codex model for non-authoritative secondary checks"
     authority: "scope, risk, evidence, and non-loop checklist review"
+    codex_reasoning_effort: "High for scope/risk/gap judgment. Extra High only for rare high-stakes reviews — it is token-expensive, not a default."
   human:
     owner: "HUMAN_OWNER"
     authority: "final Done, subjective decisions, irreversible approval"

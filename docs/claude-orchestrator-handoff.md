@@ -195,6 +195,36 @@ These rules were validated in HYK-69 on Windows:
   `Get-Content <output-file> -Wait`.
 - These headless sessions keep the same role boundaries; the launcher
   (Orchestrator) does not gain the launched role's authority.
+- Codex on Windows may run its shell under WSL2 (Linux), where the Windows
+  Node install is reachable only as `node.exe` via `/mnt/c/...` and not as
+  bare `node`. Loop verify scripts must resolve a node runner (`node` or
+  `node.exe`) rather than assume `node` is on PATH.
+- Before relying on the verifier, run a one-shot pre-check of the real verify
+  command inside the verifier's own environment; a spurious FAIL there is an
+  environment problem, not a code failure.
+
+## Relay Protocol v2 (File Drop)
+
+Purpose: eliminate copy/paste between the human operator and role terminals.
+
+- The orchestrator writes each role's next task to `.harness/<role>-task.md`
+  (roles: coder, verify, review).
+- The human types a short trigger `go` in the role terminal; the role reads
+  `.harness/<role>-task.md` and executes.
+- The role writes its result or handoff to `.harness/<role>.md` (not long
+  terminal output) and ends with exactly two lines: `>>> DONE: <role>` and a
+  human-next-action line (for example, tell the Orchestrator "<role> 됐어").
+- Blocking-question variant: the role writes a question_packet to
+  `.harness/<role>.md` and ends with `>>> QUESTION: <role>` plus a
+  human-next-action line; the role does not start work.
+- The orchestrator reads `.harness/<role>.md` directly (no paste needed) and
+  records the result to Linear.
+- `.harness/` MUST be gitignored: it holds transient relay state, not project
+  code.
+- Role terminals do not touch Linear; the orchestrator is the sole Linear
+  scribe.
+- This keeps role independence: launching or relaying a role's task does not
+  grant the launcher that role's authority.
 
 ## Session Start Checklist
 
