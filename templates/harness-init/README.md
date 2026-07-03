@@ -28,6 +28,8 @@ the harness.
 - `codex-reviewer-prompt.template.md`: Codex Reviewer prompt
 - `handoff-packet.template.md`: Claude-to-Codex handoff packet
 - `question-packet.template.md`: role-to-Orchestrator question packet
+- `phase-handoff.template.md`: phase-boundary handoff for session rotation
+- `status.template.md`: short "where am I" status board
 - `skill/SKILL.md`: draft skill instructions
 
 ## Rules
@@ -46,6 +48,11 @@ the harness.
   repo `.gitignore`.
 - Roles end each task with `>>> DONE: <role>` and a human-next-action line.
   Full protocol: `docs/claude-orchestrator-handoff.md` (Relay Protocol v2).
+- At phase boundaries the Orchestrator writes `.harness/PHASE-HANDOFF.md` and
+  keeps `.harness/STATUS.md` current so a fresh session resumes cheaply; the
+  Orchestrator ends every response with an `— YYYY-MM-DD HH:MM KST` timestamp.
+  Rules: `docs/claude-orchestrator-handoff.md` (Phase Handoff and Session
+  Rotation, Orchestrator Timestamp).
 
 ## Suggested Install
 

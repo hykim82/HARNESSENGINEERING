@@ -50,6 +50,8 @@ Contents:
 - `codex-reviewer-prompt.template.md`: Codex Reviewer startup prompt
 - `handoff-packet.template.md`: Claude-to-Codex handoff format
 - `question-packet.template.md`: role-to-Orchestrator question format
+- `phase-handoff.template.md`: phase-boundary handoff for session rotation
+- `status.template.md`: short "where am I" status board
 - `skill/SKILL.md`: draft skill instructions for a future `harness-init` skill
 
 ## Opt-In Rule

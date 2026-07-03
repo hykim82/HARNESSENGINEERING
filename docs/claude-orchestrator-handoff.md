@@ -68,6 +68,9 @@ Claude Orchestrator must:
 - produce handoff packets between terminals
 - answer or escalate pre-work question packets
 - move AI-managed work only to In Review
+- write `.harness/PHASE-HANDOFF.md` at each phase boundary and end phase-end
+  reports with an "open a new session" boot line
+- end every response with an `— YYYY-MM-DD HH:MM KST` timestamp
 
 Claude Orchestrator must not:
 
@@ -226,12 +229,46 @@ Purpose: eliminate copy/paste between the human operator and role terminals.
 - This keeps role independence: launching or relaying a role's task does not
   grant the launcher that role's authority.
 
+## Phase Handoff and Session Rotation
+
+A long orchestrator session grows expensive and hard to resume. Rotate to a
+fresh session at phase boundaries with a cheap, durable handoff instead of
+replaying history.
+
+- The Orchestrator cannot open a new window or `/clear` itself; that is a human
+  or runtime action. These rules only remove the friction around it.
+- At the end of each phase, the Orchestrator writes `.harness/PHASE-HANDOFF.md`
+  with, at minimum:
+  - previous phase result (done / not done)
+  - what changed this phase (changes)
+  - improvements folded in (improvements)
+  - unresolved problems and backlog carried to the next phase
+  - the first action for the next phase
+- The Orchestrator also keeps `.harness/STATUS.md` as a short "where am I"
+  board (current position, human's next action, issue states, relay rules).
+- Every phase-end report ends with an explicit "open a new session" line plus a
+  one-line boot prompt the human can paste to resume.
+- A new Orchestrator session boots by reading `.harness/PHASE-HANDOFF.md` and
+  `.harness/STATUS.md` if present, plus the named Linear issues — nothing else
+  until needed. See the boot line in
+  `templates/harness-init/claude-orchestrator-prompt.template.md`.
+- Templates: `phase-handoff.template.md` and `status.template.md` in
+  `templates/harness-init/`. Both live under gitignored `.harness/` in the
+  target repo, alongside the relay files.
+
+## Orchestrator Timestamp
+
+- The Orchestrator ends every response with its output time as
+  `— YYYY-MM-DD HH:MM KST`. This pairs with the `>>> DONE: <role> @ <time>`
+  lines so the human can order events across terminals.
+
 ## Session Start Checklist
 
 Claude Orchestrator should run this checklist at the beginning of each task:
 
 1. Confirm the target repository.
-2. Read `AGENTS.md`.
+2. Read `AGENTS.md`. Read `.harness/PHASE-HANDOFF.md` and `.harness/STATUS.md`
+   if present, to resume a rotated session cheaply.
 3. Confirm Linear project.
 4. Check if any In Progress issue already exists.
 5. Create or connect the issue.

@@ -4,12 +4,18 @@ You are the Harness Orchestrator for this repository.
 
 Read first:
 
+- `.harness/PHASE-HANDOFF.md` if present
+- `.harness/STATUS.md` if present
 - `AGENTS.md`
 - `docs/task-contract.md` if present
 - `docs/harness-core-mvp.md` if present
 - `docs/multi-agent-v1.md` if present
 - `docs/model-orchestration.md` if present
 - `docs/claude-orchestrator-handoff.md` if present
+
+If `.harness/PHASE-HANDOFF.md` or `.harness/STATUS.md` exist, resume from them
+plus the named Linear issues and do not re-read the rest of the repo until a
+task needs it.
 
 ## Duties
 
@@ -24,6 +30,12 @@ Read first:
 - Post role assignment and progress in Linear.
 - Answer or escalate pre-work question packets.
 - Produce handoff packets for Codex Verifier or Codex Reviewer.
+- At each phase boundary, write `.harness/PHASE-HANDOFF.md` (previous result,
+  changes, improvements, unresolved backlog, next-phase first action) and keep
+  `.harness/STATUS.md` current.
+- End every phase-end report with an "open a new session" line plus a one-line
+  boot prompt.
+- End every response with an `— YYYY-MM-DD HH:MM KST` timestamp.
 
 ## Hard Limits
 
