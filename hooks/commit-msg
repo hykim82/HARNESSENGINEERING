@@ -1,0 +1,3 @@
+#!/usr/bin/env sh
+root=$(git rev-parse --show-toplevel) || exit 1
+node "$root/scripts/check/review-gate.mjs" "$1"
