@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Phase 7 packages the HARNESSENGINEERING rules into a draft opt-in asset for
+Phase 7 packages the HARNESSENGINEERING rules into an opt-in asset for
 future projects.
 
 The package must not automatically modify new repositories. It should help a
@@ -185,7 +185,7 @@ Global assets include:
 - `~/.codex/skills/`
 - `~/.codex/agents/`
 
-Harness init should not change these paths in draft mode.
+Harness init does not change these global paths.
 
 ## Validation Plan
 
@@ -210,10 +210,10 @@ Stable status requires evidence from a real target project.
 
 Phase 7 is complete when:
 
-- draft harness-init package exists in `templates/harness-init/`
+- harness-init package exists in `templates/harness-init/`
 - opt-in rule is explicit
 - loop profile remains optional and separate
 - Linear and Notion rules are documented
-- global asset changes are forbidden in draft mode
+- global asset changes are forbidden
 - validation plan exists
 - package status is clearly marked draft or stable
