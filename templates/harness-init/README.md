@@ -1,14 +1,16 @@
-# Harness Init Draft Package
+# Harness Init Package
 
-This directory contains a draft opt-in package for applying HARNESSENGINEERING
+This directory contains an opt-in package for applying HARNESSENGINEERING
 rules to a future project.
 
 Status:
 
 ```text
-draft / unvalidated
+stable
 ```
 
+Validated on two separate target repositories (non-loop: Linear HYK-69; loop:
+Linear HYK-76). See `docs/harness-init.md` for the full status and evidence.
 Use this package only after the target project owner explicitly asks to apply
 the harness.
 
@@ -33,7 +35,7 @@ the harness.
 - Do not overwrite existing target files.
 - Do not install loop profile by default.
 - Do not create Linear projects without asking.
-- Do not write global Codex assets in draft mode.
+- Do not write global Codex assets.
 - Record all installed files in Linear.
 - Loop verification commands assume bash; on Windows, Git Bash is required.
 - Default installation copies only the target files listed in
