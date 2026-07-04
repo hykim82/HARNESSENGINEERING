@@ -42,24 +42,111 @@ test("(c) HYK tag + approved review evidence -> ok", () => {
   });
 });
 
-test("(d) skip-review token with reason -> ok", () => {
+test("(d) skip-review trailer with reason -> ok", () => {
   withFixtureDir((dir) => {
     const reviewPath = join(dir, "review.md");
     const result = checkReviewGate({
-      message: "fix: hotfix (HYK-999) [skip-review: prod outage, approved out-of-band]",
+      message: "fix: hotfix (HYK-999)\n\nskip-review: prod outage, approved out-of-band\n",
       reviewPath,
     });
     assert.equal(result.ok, true);
   });
 });
 
-test("(e) skip-review token with empty reason -> blocked", () => {
+test("(e) skip-review trailer with empty reason -> blocked", () => {
   withFixtureDir((dir) => {
     const reviewPath = join(dir, "review.md");
     const result = checkReviewGate({
-      message: "fix: hotfix (HYK-999) [skip-review: ]",
+      message: "fix: hotfix (HYK-999)\n\nskip-review: \n",
       reviewPath,
     });
     assert.equal(result.ok, false);
+  });
+});
+
+test("(f) inline bracket mention of skip-review is not a trailer; evidence path wins -> ok", () => {
+  withFixtureDir((dir) => {
+    const reviewPath = join(dir, "review.md");
+    writeFileSync(reviewPath, "for: HYK-999\nverdict: approved\n", "utf8");
+    const result = checkReviewGate({
+      message:
+        "fix: hotfix (HYK-999)\n\nDocs mention the `[skip-review: ]` token here.\n",
+      reviewPath,
+    });
+    assert.equal(result.ok, true);
+  });
+});
+
+test("(g) inline bracket mention of skip-review, no matching evidence -> blocked with missing-evidence reason", () => {
+  withFixtureDir((dir) => {
+    const reviewPath = join(dir, "review.md");
+    writeFileSync(reviewPath, "for: HYK-000\nverdict: approved\n", "utf8");
+    const result = checkReviewGate({
+      message:
+        "fix: hotfix (HYK-999)\n\nDocs mention the `[skip-review: whatever]` token here.\n",
+      reviewPath,
+    });
+    assert.equal(result.ok, false);
+    assert.match(result.reason, /missing review evidence/);
+  });
+});
+
+test("(h) real trailer line -> ok", () => {
+  withFixtureDir((dir) => {
+    const reviewPath = join(dir, "review.md");
+    const result = checkReviewGate({
+      message: "fix: x (HYK-999)\n\nskip-review: prod outage\n",
+      reviewPath,
+    });
+    assert.equal(result.ok, true);
+  });
+});
+
+test("(i) HYK tag only in body prose, not in subject -> ok (not issue work)", () => {
+  withFixtureDir((dir) => {
+    const reviewPath = join(dir, "review.md");
+    const result = checkReviewGate({
+      message: "chore: cleanup\n\nRelated to HYK-123 sometime.\n",
+      reviewPath,
+    });
+    assert.equal(result.ok, true);
+  });
+});
+
+test("(j) skip-review line mid-message (not the trailer paragraph), no matching evidence -> blocked with missing-evidence reason", () => {
+  withFixtureDir((dir) => {
+    const reviewPath = join(dir, "review.md");
+    writeFileSync(reviewPath, "for: HYK-000\nverdict: approved\n", "utf8");
+    const result = checkReviewGate({
+      message: "fix: x (HYK-999)\n\nskip-review: sneaky\n\nSome closing prose.\n",
+      reviewPath,
+    });
+    assert.equal(result.ok, false);
+    assert.match(result.reason, /missing review evidence/);
+  });
+});
+
+test("(k) skip-review example inside a code fence, no matching evidence -> blocked with missing-evidence reason", () => {
+  withFixtureDir((dir) => {
+    const reviewPath = join(dir, "review.md");
+    writeFileSync(reviewPath, "for: HYK-000\nverdict: approved\n", "utf8");
+    const result = checkReviewGate({
+      message: "fix: x (HYK-999)\n\n```\nskip-review: example only\n```\n",
+      reviewPath,
+    });
+    assert.equal(result.ok, false);
+    assert.match(result.reason, /missing review evidence/);
+  });
+});
+
+test("(l) empty skip-review example inside a code fence, evidence present -> ok via evidence path", () => {
+  withFixtureDir((dir) => {
+    const reviewPath = join(dir, "review.md");
+    writeFileSync(reviewPath, "for: HYK-999\nverdict: approved\n", "utf8");
+    const result = checkReviewGate({
+      message: "fix: x (HYK-999)\n\n```\nskip-review:\n```\n",
+      reviewPath,
+    });
+    assert.equal(result.ok, true);
   });
 });
