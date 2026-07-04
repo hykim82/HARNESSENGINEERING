@@ -45,14 +45,24 @@ export function checkReviewGate({ message, reviewPath = join(repoRoot(), ".harne
   }
   const content = readFileSync(reviewPath, "utf8");
   const hasFor = new RegExp(`for:\\s*${issueId}\\b`).test(content);
-  const hasVerdict = /verdict:\s*approved/.test(content) || /ready_for_review/.test(content);
-  if (hasFor && hasVerdict) {
-    return { ok: true, reason: `review evidence found for ${issueId}` };
+  if (!hasFor) {
+    return {
+      ok: false,
+      reason: `missing review evidence for ${issueId} in ${reviewPath} (need "for: ${issueId}" + approved verdict)`,
+    };
   }
-  return {
-    ok: false,
-    reason: `missing review evidence for ${issueId} in ${reviewPath} (need "for: ${issueId}" + approved verdict)`,
-  };
+  const hasApproved = /verdict:\s*approved/i.test(content);
+  if (!hasApproved) {
+    return { ok: false, reason: `review not approved for ${issueId} (need verdict: approved)` };
+  }
+  const hasIndependentReviewer = /role:\s*REVIEW/i.test(content);
+  if (!hasIndependentReviewer) {
+    return {
+      ok: false,
+      reason: `self-certification blocked: review evidence for ${issueId} lacks an independent reviewer (need role: REVIEW-*)`,
+    };
+  }
+  return { ok: true, reason: `independent review evidence found for ${issueId}` };
 }
 
 const invokedDirectly = process.argv[1] && process.argv[1].replace(/\\/g, "/").endsWith("scripts/check/review-gate.mjs");

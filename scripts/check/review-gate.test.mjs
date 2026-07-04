@@ -30,10 +30,10 @@ test("(b) HYK tag + missing review file -> blocked", () => {
   });
 });
 
-test("(c) HYK tag + approved review evidence -> ok", () => {
+test("(c) HYK tag + approved review evidence with independent reviewer marker -> ok", () => {
   withFixtureDir((dir) => {
     const reviewPath = join(dir, "review.md");
-    writeFileSync(reviewPath, "for: HYK-999\nverdict: approved\n", "utf8");
+    writeFileSync(reviewPath, "for: HYK-999\nverdict: approved\nrole: REVIEW-CODEX\n", "utf8");
     const result = checkReviewGate({
       message: "feat: add thing (HYK-999)",
       reviewPath,
@@ -67,7 +67,7 @@ test("(e) skip-review trailer with empty reason -> blocked", () => {
 test("(f) inline bracket mention of skip-review is not a trailer; evidence path wins -> ok", () => {
   withFixtureDir((dir) => {
     const reviewPath = join(dir, "review.md");
-    writeFileSync(reviewPath, "for: HYK-999\nverdict: approved\n", "utf8");
+    writeFileSync(reviewPath, "for: HYK-999\nverdict: approved\nrole: REVIEW-CODEX\n", "utf8");
     const result = checkReviewGate({
       message:
         "fix: hotfix (HYK-999)\n\nDocs mention the `[skip-review: ]` token here.\n",
@@ -142,11 +142,61 @@ test("(k) skip-review example inside a code fence, no matching evidence -> block
 test("(l) empty skip-review example inside a code fence, evidence present -> ok via evidence path", () => {
   withFixtureDir((dir) => {
     const reviewPath = join(dir, "review.md");
-    writeFileSync(reviewPath, "for: HYK-999\nverdict: approved\n", "utf8");
+    writeFileSync(reviewPath, "for: HYK-999\nverdict: approved\nrole: REVIEW-CODEX\n", "utf8");
     const result = checkReviewGate({
       message: "fix: x (HYK-999)\n\n```\nskip-review:\n```\n",
       reviewPath,
     });
     assert.equal(result.ok, true);
+  });
+});
+
+test("(m) for + approved + independent reviewer role -> ok", () => {
+  withFixtureDir((dir) => {
+    const reviewPath = join(dir, "review.md");
+    writeFileSync(reviewPath, "for: HYK-999\nverdict: approved\nrole: REVIEW-CODEX\n", "utf8");
+    const result = checkReviewGate({
+      message: "feat: add thing (HYK-999)",
+      reviewPath,
+    });
+    assert.equal(result.ok, true);
+  });
+});
+
+test("(n) for + approved but no reviewer role marker -> blocked as self-certification", () => {
+  withFixtureDir((dir) => {
+    const reviewPath = join(dir, "review.md");
+    writeFileSync(reviewPath, "for: HYK-999\nverdict: approved\n", "utf8");
+    const result = checkReviewGate({
+      message: "feat: add thing (HYK-999)",
+      reviewPath,
+    });
+    assert.equal(result.ok, false);
+    assert.match(result.reason, /independent reviewer/);
+  });
+});
+
+test("(o) for + approved + role is not REVIEW-* -> blocked as self-certification", () => {
+  withFixtureDir((dir) => {
+    const reviewPath = join(dir, "review.md");
+    writeFileSync(reviewPath, "for: HYK-999\nverdict: approved\nrole: ORCH-CLAUDE\n", "utf8");
+    const result = checkReviewGate({
+      message: "feat: add thing (HYK-999)",
+      reviewPath,
+    });
+    assert.equal(result.ok, false);
+    assert.match(result.reason, /independent reviewer/);
+  });
+});
+
+test("(p) ready_for_review alone (no verdict: approved) is not a pass, regardless of role marker", () => {
+  withFixtureDir((dir) => {
+    const reviewPath = join(dir, "review.md");
+    writeFileSync(reviewPath, "for: HYK-999\nready_for_review\nrole: REVIEW-CODEX\n", "utf8");
+    const result = checkReviewGate({
+      message: "feat: add thing (HYK-999)",
+      reviewPath,
+    });
+    assert.equal(result.ok, false);
   });
 });
