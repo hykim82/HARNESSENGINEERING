@@ -35,13 +35,12 @@ Source: HYK-80 design comment (2026-07-03, human-approved).
 | --- | --- | --- | --- |
 | D1 | Boot reads state but not procedure, so a post-`/clear` session re-derives (and misremembers) the rules. | Boot-line pointer to `docs/claude-orchestrator-handoff.md` in the prompt template, `harness-init.md`, and `phase-handoff.template.md`. | Done (HYK-79) |
 | D2 | Orchestrator can skip the contract's required independent review and self-certify. | `commit-msg` git hook (`hooks/commit-msg` → `scripts/check/review-gate.mjs`): an issue-tagged commit is blocked unless `.harness/review.md` carries matching `for: <id>` + `verdict: approved` + an independent-reviewer `role: REVIEW-*` marker, or the message carries an audited `skip-review: <reason>` trailer line. | Implemented this issue (v2, HYK-81), see below |
-| D3 | Relay has no task identity or acknowledgment, so a stale `<role>-task.md` can run under an ambiguous "go". | `<role>-task.md` gets a `task_id` + `dropped_at` header; `<role>.md` must echo `for: <id>` as its first line; a script diffs the two and rejects a stale or mismatched echo. | Sub-issue HYK-82 |
+| D3 | Relay has no task identity or acknowledgment, so a stale `<role>-task.md` can run under an ambiguous "go". | `<role>-task.md` carries `task_id:` + `dropped_at:` headers; `<role>.md` must echo the same `task_id:` and end with `>>> DONE: ... @ <time KST>`; `scripts/check/relay-handshake.mjs` diffs the two and rejects a mismatched id or a DONE timestamp that predates the drop. | Implemented this issue (HYK-82), see below |
 | D4 | `STATUS.md` drifts from the real Linear issue state and poisons the next boot. | Script diffs Linear against `STATUS.md`; run at boot and at commit time (needs network access, so it is orchestrator-invoked rather than a local-only hook). | Design only in this issue |
 | D5 | The Task Contract can silently contradict a governing document (e.g. role split in `multi-agent-v1.md`). | Contract-vs-governing-document contradiction flag, to be promoted from a checklist item to a lint check. | Design only in this issue |
 
-D1 is already live. D2 is the first real implementation delivered under this
-issue (substance tracked in HYK-81). D3 is scoped to its own issue. D4 and D5
-are recorded here as committed enforcement design, not yet built.
+D1 is already live. D2 (HYK-81) and D3 (HYK-82) are real implementations. D4
+and D5 are recorded here as committed enforcement design, not yet built.
 
 ## D2 review gate — detailed spec
 
@@ -161,6 +160,84 @@ This installation step is manual and per-clone, matching git's own hook
 model; it is not run automatically by any script in this repository. Because
 the wrapper resolves `$root` at run time instead of assuming its own file
 location, both the copy and the symlink install methods work correctly.
+
+## D3 relay handshake — detailed spec
+
+### Problem restated
+
+Relay v2 uses a single `<role>-task.md` slot plus an ambiguous human "go".
+The original bug: the Orchestrator overwrites the slot with a new task, but a
+stale "go" already in flight runs the *old* task — nothing mechanically
+checks "which task is this go for" or "did the worker actually pick up the
+task the Orchestrator intended." Until now, only the Orchestrator's own eyes
+compared `task_id:`/`for:` by convention, which is exactly the kind of
+convention-only gap this document exists to close.
+
+### Rule
+
+Given a `role` (e.g. `coder`) and a harness directory (default
+`.harness/` under the repository root):
+
+1. `taskPath = <harnessDir>/<role>-task.md`, `resultPath = <harnessDir>/<role>.md`.
+2. If `taskPath` does not exist, blocked: `task file not found: <path>`.
+3. If `resultPath` does not exist, blocked: `result file not found (worker not done?): <path>`.
+4. Extract `task_id:` from the task file (`/^task_id:\s*(\S+)/im`). Missing → blocked: `task file missing task_id header`.
+5. Extract the echoed `task_id:` from the result file (same pattern). Missing → blocked: `result missing task_id echo (need a` `task_id: <id>` `line)`.
+6. If the two ids differ, blocked: `handshake mismatch: task dropped '<taskId>' but result echoes '<resultId>' (stale or wrong task)`.
+7. Staleness is **fail-closed**: timing evidence is required, not optional.
+   - If the task file has no `dropped_at:` header, blocked: `task file missing dropped_at header (required for staleness check)`.
+   - If `dropped_at:` does not parse as a KST timestamp (`YYYY-MM-DD HH:MM KST`), blocked: `task dropped_at not parseable: '<raw>' (need YYYY-MM-DD HH:MM KST)`.
+   - If the result file has no `>>> DONE: ... @ <time>` line, blocked: `result missing ">>> DONE: ... @ <time KST>" line (required)`.
+   - If that DONE timestamp does not parse, blocked: `result DONE timestamp not parseable: '<raw>'`.
+   - If both parse and the DONE time is earlier than the drop time, blocked: `stale result: DONE (<doneAt>) predates task drop (<droppedAt>)`.
+   Missing or unparseable timing evidence is a rejection, not a skip — a
+   revision of this rule briefly let missing/unparseable timestamps skip the
+   staleness check and pass on id match alone; that was fail-*open* (a stale
+   same-id result with no or garbled timing evidence slipped through) and has
+   been replaced by the fail-closed version above.
+8. Otherwise, ok: `relay handshake ok for <taskId>`.
+
+### Known limitation (honesty note)
+
+Unlike the D2 review gate, this check is **not a git hook** — nothing forces
+it to run. It is a script the Orchestrator (an agent) is expected to invoke
+itself (`node scripts/check/relay-handshake.mjs <role>`) before trusting a
+worker's result. If the Orchestrator forgets, or an agent decides the check
+is inconvenient, it simply doesn't run. This is weaker than D2, which fires
+on every commit regardless of agent cooperation. It sits in the same
+unresolved-limitation family as D2's "`role:` string can be typed by hand
+without a real review" — here, an agent could likewise skip running the
+check, or hand-edit `task_id:`/`dropped_at:`/`>>> DONE: ... @` values to make
+a stale result look fresh. Making this actually unbypassable would need an
+external process or daemon that watches the relay files independently of the
+Orchestrator's own goodwill — left for a future revision.
+
+### Implementation
+
+- `scripts/check/relay-handshake.mjs` follows `review-gate.mjs`'s shape:
+  ESM, a `repoRoot()` helper (`git rev-parse --show-toplevel`, falling back
+  to `process.cwd()`), a pure exported function
+  `checkRelayHandshake({ role, harnessDir }) -> { ok, reason }`, and a direct
+  CLI block. `harnessDir` defaults to `.harness` under the repository root
+  (same root-resolution rationale as D2's `reviewPath`).
+  `node relay-handshake.mjs <role> [harnessDir]` exits `0` when `ok` and
+  exits `1` with `reason` on stderr otherwise.
+- `parseKstTimestamp(str)` strips a trailing ` KST`, requires the remainder
+  to match `YYYY-MM-DD HH:MM` (space or `T` separator), and constructs a
+  `Date` with an explicit `+09:00` offset; anything that doesn't match that
+  shape returns `null` rather than throwing (it never crashes the caller).
+  The caller is what changed in this revision: `null` from either timestamp
+  now means "reject", not "skip the check" — see Rule step 7.
+- `scripts/check/relay-handshake.test.mjs` is a fixture-based test suite
+  (node's built-in test runner, `withFixtureDir` pattern from
+  `review-gate.test.mjs`), 11 cases: id match with DONE after the drop
+  (passes); id mismatch; missing task_id echo; missing task_id header;
+  missing result file; missing task file; a DONE timestamp that predates
+  `dropped_at` (stale, blocked); and the four fail-closed timing-evidence
+  cases — a matching id with no DONE line at all, a task with no
+  `dropped_at:` header, an unparseable `dropped_at:`, and an unparseable DONE
+  timestamp (all four blocked). Fixtures live under a temp directory per
+  test; no real `.harness/` state is touched.
 
 ## Not over-engineered / solo-operable
 
