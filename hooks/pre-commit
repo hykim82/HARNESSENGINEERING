@@ -1,0 +1,19 @@
+#!/usr/bin/env sh
+# Engine-agnostic local secret scan (Claude, Codex, or a manual `git commit`
+# all go through git's native pre-commit hook, unlike Claude Code's own
+# PreToolUse hooks which only see Claude's own tool calls).
+root=$(git rev-parse --show-toplevel) || exit 1
+
+if command -v gitleaks >/dev/null 2>&1; then
+  GITLEAKS=gitleaks
+elif command -v gitleaks.exe >/dev/null 2>&1; then
+  GITLEAKS=gitleaks.exe
+else
+  echo "pre-commit hook: gitleaks not found on PATH ('gitleaks' or 'gitleaks.exe') -- skipping local secret scan for this commit." >&2
+  echo "This is fail-open by design: local scanning is fast feedback only. CI (.github/workflows/enforce.yml) runs the authoritative gitleaks scan on every push/PR and will still block a real leak even if it slips past this local hook." >&2
+  echo "Install gitleaks for local feedback: https://github.com/gitleaks/gitleaks#installing" >&2
+  exit 0
+fi
+
+cd "$root" || exit 1
+exec "$GITLEAKS" protect --staged --redact
