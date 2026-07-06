@@ -1,0 +1,28 @@
+name: enforce
+
+on:
+  pull_request:
+  push:
+    branches:
+      - master
+
+jobs:
+  enforce:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: review-gate tests
+        run: node scripts/check/review-gate.test.mjs
+
+      - name: relay-handshake tests
+        run: node scripts/check/relay-handshake.test.mjs
+
+      - name: hooks POSIX syntax check
+        run: sh -n hooks/commit-msg
