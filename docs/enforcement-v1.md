@@ -308,3 +308,29 @@ above. What this design actually guarantees is narrower: skipping review, or
 self-certifying without an independent-reviewer marker, leaves a visible,
 audited trace instead of silently vanishing, which is the actual gap HYK-80
 identified.
+
+## D-CI external anchor — server-side enforcement (HYK-87 / B1)
+
+Everything above (D2 commit-msg gate, D3 handshake) runs *locally* and depends
+on agent cooperation — an agent can `--no-verify`, edit the hook, or skip the
+handshake. The external anchor moves the authority off the agent's machine:
+
+- **`.github/workflows/enforce.yml`** re-runs `review-gate.test.mjs`,
+  `relay-handshake.test.mjs`, and `sh -n hooks/commit-msg` on every pull
+  request and push to `master` (GitHub-hosted runner). The agent cannot skip
+  or fake this.
+- **`master` branch protection** requires a pull request, the `enforce` status
+  check passing, and (B1) at least one approving review, with `enforce_admins`
+  on so even repo admins go through it. Direct pushes to `master` are rejected
+  (`GH006 ... Changes must be made through a pull request`).
+- **Identity separation (B1):** the acting agent operates as a **Write-only**
+  bot collaborator, so it cannot disable branch protection; the independent
+  approval comes from the repo owner (a human, outside the agent). This closes
+  the "agent holds an admin token and could just turn the protection off" gap.
+
+Landing anything on `master` is therefore: `branch → push (as the bot) → open
+PR → enforce CI green → human approval → merge`. Local hooks remain as fast
+feedback, but authority now lives server-side.
+
+Residual: fully removing the human from the loop would need a separate
+automated reviewer identity the acting agent does not control — deferred.
