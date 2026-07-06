@@ -128,7 +128,24 @@ substrate and is left for a future revision.
   ```sh
   #!/usr/bin/env sh
   root=$(git rev-parse --show-toplevel) || exit 1
-  node "$root/scripts/check/review-gate.mjs" "$1"
+  script="$root/scripts/check/review-gate.mjs"
+  msg="$1"
+  if command -v node >/dev/null 2>&1; then
+    NODE=node
+  elif command -v node.exe >/dev/null 2>&1; then
+    NODE=node.exe
+    # node.exe is a Windows binary. Under WSL the paths above are POSIX
+    # (/mnt/c/...) which Windows node reads as C:\mnt\c\... and fails to
+    # resolve. Translate the paths we hand it back into Windows form.
+    if command -v wslpath >/dev/null 2>&1; then
+      script=$(wslpath -w "$script")
+      [ -n "$msg" ] && msg=$(wslpath -w "$msg")
+    fi
+  else
+    echo "commit-msg hook: node runtime not found (need 'node' or 'node.exe' on PATH)" >&2
+    exit 1
+  fi
+  exec "$NODE" "$script" "$msg"
   ```
 
   Resolving `$root` via `git rev-parse --show-toplevel` (rather than
@@ -141,6 +158,36 @@ substrate and is left for a future revision.
   wrapper keeps working after installation. The wrapper is version-controlled
   in the repository; git only runs hooks from `.git/hooks/`, which is never
   checked in.
+
+  The wrapper does not call `node` directly — a plain `node "$root/..."` call
+  failed with exit 127 ("node: not found") under WSL-native bash, where PATH
+  carries no Linux `node` binary, only Windows' `node.exe`. Instead the hook
+  probes for a runner in order: `node` first, then `node.exe`. If neither is
+  on `PATH`, the hook fails loudly with an explicit
+  `node runtime not found (need 'node' or 'node.exe' on PATH)` message on
+  stderr and exit `1`, instead of a silent/confusing 127.
+
+  Finding `node.exe` is necessary but not sufficient under WSL. `git rev-parse
+  --show-toplevel` there returns a POSIX path (`/mnt/c/...`), and handing that
+  to Windows' `node.exe` fails: Windows node reads `/mnt/c/...` as
+  `C:\mnt\c\...` and throws `MODULE_NOT_FOUND` for the script — so even a
+  no-tag commit that should pass would fail with exit `1` for the wrong
+  reason. When the chosen runner is `node.exe` and `wslpath` is available
+  (i.e. we are under WSL), the hook therefore translates both the script path
+  and the commit-message-file argument (`$1`) to Windows form via
+  `wslpath -w` before invoking node. `wslpath -w` resolves relative arguments
+  (git normally passes `.git/COMMIT_EDITMSG`) against the current directory,
+  so both absolute and relative message paths work. In Git-for-Windows sh the
+  `node` branch is taken and `wslpath` is absent, so no translation happens
+  and paths are already Windows-native — the wrapper works unchanged there.
+  The final call uses `exec` so the hook's own exit code is exactly
+  `review-gate.mjs`'s exit code, not a wrapper-introduced pass-through.
+
+  This was verified directly in WSL-native bash (Ubuntu, WSL2): `node` absent,
+  `node.exe` resolved from `/mnt/c/Program Files/nodejs/`; a no-tag message
+  exits `0`; an HYK-tagged message with no evidence reaches review-gate's own
+  missing-evidence rejection (exit `1`) rather than `MODULE_NOT_FOUND`; and
+  removing both runners from `PATH` produces the explicit not-found error.
 
 ### Installing the hook
 
@@ -160,6 +207,12 @@ This installation step is manual and per-clone, matching git's own hook
 model; it is not run automatically by any script in this repository. Because
 the wrapper resolves `$root` at run time instead of assuming its own file
 location, both the copy and the symlink install methods work correctly.
+
+If you installed the hook via `cp` before the node-runner-search change
+above landed, `.git/hooks/commit-msg` is a stale copy and must be
+re-copied (`cp hooks/commit-msg .git/hooks/commit-msg`) to pick up the
+`node`/`node.exe` fallback; a symlink install picks up the change
+automatically since it never copies the file's contents.
 
 ## D3 relay handshake — detailed spec
 

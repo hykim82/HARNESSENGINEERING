@@ -1,3 +1,20 @@
 #!/usr/bin/env sh
 root=$(git rev-parse --show-toplevel) || exit 1
-node "$root/scripts/check/review-gate.mjs" "$1"
+script="$root/scripts/check/review-gate.mjs"
+msg="$1"
+if command -v node >/dev/null 2>&1; then
+  NODE=node
+elif command -v node.exe >/dev/null 2>&1; then
+  NODE=node.exe
+  # node.exe is a Windows binary. Under WSL the paths above are POSIX
+  # (/mnt/c/...) which Windows node reads as C:\mnt\c\... and fails to
+  # resolve. Translate the paths we hand it back into Windows form.
+  if command -v wslpath >/dev/null 2>&1; then
+    script=$(wslpath -w "$script")
+    [ -n "$msg" ] && msg=$(wslpath -w "$msg")
+  fi
+else
+  echo "commit-msg hook: node runtime not found (need 'node' or 'node.exe' on PATH)" >&2
+  exit 1
+fi
+exec "$NODE" "$script" "$msg"
