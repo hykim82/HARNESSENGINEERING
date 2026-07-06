@@ -458,3 +458,162 @@ control) and a future isolated runner (HYK-89) are what make the harness's
 founding claim — verification outside agent control — actually true; this
 guard narrows the window in which the D2/D3 kind of mistake can happen
 locally, in the moment, before it ever reaches a commit.
+
+## Secret scanning ② — gitleaks CI + engine-agnostic git hook (HYK-90)
+
+### Relationship to ① (GitHub secret scanning / push protection)
+
+This repo already has GitHub's native **Secret Scanning + Push Protection**
+(①) live on the public repo — free, and it blocks a push containing a
+recognized *provider* credential pattern (AWS, Stripe, GitHub tokens, and
+similar well-known shapes) before it ever lands. Its gap: **generic
+high-entropy secrets, custom formats, and full-history/PR-diff scanning with
+a configurable ruleset are GitHub Advanced Security features**, which are not
+enabled here (paid). ② closes that gap for free with
+[gitleaks](https://github.com/gitleaks/gitleaks), applied at two points:
+
+- **CI (`enforce` job, server-side, authoritative):** every `push` to
+  `master` and every `pull_request` is scanned; a finding fails the job and
+  blocks the merge (branch protection already requires `enforce` green).
+- **`hooks/pre-commit` (local, git-native, fast feedback):** every `git
+  commit`, by anyone or anything invoking git directly — Claude via a shell
+  tool call, Codex, or a human at the terminal — runs through this hook
+  first, unlike Claude Code's own `PreToolUse` hooks (see the role-guard
+  section above), which only ever see Claude's own tool calls and are blind
+  to Codex or a manual `git commit`. This is the concrete "Codex coverage"
+  gap ② closes that a Claude-only mechanism structurally cannot.
+
+### Pin and provenance
+
+CI installs a specific, checksum-verified gitleaks release rather than a
+floating tag or a third-party Action, per an explicit human decision (Option
+A over Option B, `gitleaks/gitleaks-action`, recorded against HYK-90 — the
+choice to add *any* externally-sourced binary that executes in CI is a
+supply-chain decision this harness treats as requiring a human sign-off
+naming the specific dependency, not something an agent decides unilaterally
+mid-task):
+
+```yaml
+env:
+  GITLEAKS_VERSION: "8.30.1"
+  GITLEAKS_SHA256: "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
+
+# ...
+      - name: Install gitleaks (pinned, checksum-verified)
+        run: |
+          set -e
+          curl -sSL -o gitleaks.tar.gz "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "${GITLEAKS_SHA256}  gitleaks.tar.gz" | sha256sum -c -
+          tar -xzf gitleaks.tar.gz gitleaks
+          chmod +x gitleaks
+          sudo mv gitleaks /usr/local/bin/gitleaks
+
+      - name: gitleaks secret scan
+        run: gitleaks detect --source . --redact
+```
+
+The `GITLEAKS_SHA256` value is the official checksum published in gitleaks'
+own `gitleaks_8.30.1_checksums.txt` release asset; `sha256sum -c` fails the
+step (and the job) if the downloaded archive doesn't match byte-for-byte,
+so a compromised or substituted download is caught before extraction. The
+checkout step also sets `fetch-depth: 0` so `gitleaks detect` (which, run
+inside a real git repository, scans the full accessible commit history, not
+just the working tree) has that history available in CI, not just the single
+shallow commit `actions/checkout` fetches by default.
+
+### `.gitleaks.toml` — ruleset and allowlist policy
+
+```toml
+[extend]
+useDefault = true
+```
+
+extends (does not replace) gitleaks' own default ruleset — every pattern
+listed [here](https://github.com/gitleaks/gitleaks/blob/master/config/gitleaks.toml)
+(AWS/GCP/Stripe/GitHub/generic-api-key/private-key-block/etc., each with its
+own entropy threshold) applies unmodified. Two narrow allowlist entries exist
+on top of that, each scoped to one exact file *and* one exact literal
+substring (never a directory or blanket path exemption):
+
+| File | Exempted literal | Why it's not a secret |
+| --- | --- | --- |
+| `scripts/check/review-gate.test.mjs` | `[skip-review: ...] token` | Test fixture prose describing the skip-review trailer format, not a credential |
+| `templates/harness-init/phase-handoff.template.md` | `(save tokens)` | Refers to LLM context-window tokens, not a credential |
+
+Both were added preemptively per the source task's own examples, not because
+a real gitleaks run flagged them — verified directly: running gitleaks
+against this repo's full history with *only* `useDefault = true` (no
+allowlist at all) already comes back clean (`no leaks found`), because
+neither string is quoted-and-assignment-shaped the way gitleaks' `generic-api-key`
+rule requires (a `key/token/secret/password`-adjacent word alone, with no
+attached random-looking value, doesn't match). The allowlist entries are a
+defensive margin against a future gitleaks ruleset update tightening that
+rule, not a fix for an observed false positive.
+
+### `hooks/pre-commit` — engine-agnostic local scan
+
+```sh
+#!/usr/bin/env sh
+root=$(git rev-parse --show-toplevel) || exit 1
+
+if command -v gitleaks >/dev/null 2>&1; then
+  GITLEAKS=gitleaks
+elif command -v gitleaks.exe >/dev/null 2>&1; then
+  GITLEAKS=gitleaks.exe
+else
+  echo "pre-commit hook: gitleaks not found on PATH ('gitleaks' or 'gitleaks.exe') -- skipping local secret scan for this commit." >&2
+  echo "This is fail-open by design: local scanning is fast feedback only. CI (.github/workflows/enforce.yml) runs the authoritative gitleaks scan on every push/PR and will still block a real leak even if it slips past this local hook." >&2
+  echo "Install gitleaks for local feedback: https://github.com/gitleaks/gitleaks#installing" >&2
+  exit 0
+fi
+
+cd "$root" || exit 1
+exec "$GITLEAKS" protect --staged --redact
+```
+
+Design notes, mirroring `hooks/commit-msg`'s runner-search lesson from
+HYK-83: probe `gitleaks` then `gitleaks.exe` (Windows binary reachable from
+WSL/Git-Bash) in that order; if neither is found, **fail open** — print a
+three-line stderr explanation and `exit 0` rather than blocking every commit
+on every machine that hasn't installed gitleaks yet. This is a deliberate
+asymmetry with `hooks/commit-msg`'s D2 gate, which fails *closed* (blocks)
+when its own dependency (the review-evidence file) is missing: D2's evidence
+file is something this harness's own workflow produces, so its absence is
+itself meaningful, while a missing *third-party scanner binary* just means
+"not installed yet," and CI is the authority regardless. When gitleaks is
+found, `gitleaks protect --staged --redact` scans exactly the staged diff (not
+the whole tree or history — that's what `detect` does, reserved for CI), and
+`exec` passes its exit code straight through: `0` clean, non-zero blocks the
+commit with the finding printed (redacted) to the terminal.
+
+### Installing the hook (per-clone, same pattern as `commit-msg`)
+
+```sh
+cp hooks/pre-commit .git/hooks/pre-commit
+chmod +x .git/hooks/pre-commit
+# or: ln -sf ../../hooks/pre-commit .git/hooks/pre-commit
+```
+
+Git does not read hooks from a version-controlled path automatically (same
+caveat as `commit-msg`); this is a manual, per-clone install step.
+
+### Known limitation (honesty note)
+
+The local hook is explicitly **fail-open** on a missing scanner and, like
+every other local hook in this document, runs in the same environment as the
+agent it watches — an agent (or human) with shell access can edit or delete
+`.git/hooks/pre-commit`, or simply `git commit --no-verify`, and nothing
+locally stops that. **CI is the actual authority**: `enforce.yml`'s gitleaks
+step runs server-side regardless of what happened locally, and branch
+protection means a finding there blocks the merge no matter how the commit
+was made. This mirrors ①'s own model (push protection is server-side) and
+the D-CI external anchor section above — the local hook exists purely for
+fast feedback, not as the security boundary.
+
+**Codex vs. Claude coverage, restated:** the `role-guard` PreToolUse hook
+above only fires on Claude Code's own tool calls (`Edit`/`Write`/`MultiEdit`/
+`NotebookEdit`) and has no visibility into Codex or a manual terminal
+`git commit`. `hooks/pre-commit`, being a native git hook, fires on *any*
+`git commit` regardless of what produced it — this is what makes ② the
+Codex-covering half of the two mechanisms, where role-guard is a
+Claude-specific guardrail.
