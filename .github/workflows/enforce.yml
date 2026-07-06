@@ -24,5 +24,8 @@ jobs:
       - name: relay-handshake tests
         run: node scripts/check/relay-handshake.test.mjs
 
+      - name: role-guard tests
+        run: node scripts/check/role-guard.test.mjs
+
       - name: hooks POSIX syntax check
         run: sh -n hooks/commit-msg
