@@ -334,3 +334,127 @@ feedback, but authority now lives server-side.
 
 Residual: fully removing the human from the loop would need a separate
 automated reviewer identity the acting agent does not control — deferred.
+
+## D — role-boundary guard (role-guard PreToolUse hook, HYK-86)
+
+### Problem restated
+
+In a prior session the Orchestrator misread "코더 됐어" (worker acknowledgment)
+as a cue to activate the CODER role itself, and directly edited source and
+overwrote `coder.md` — a role-boundary violation the harness had no
+mechanical check for. HYK-86 had four branches; A (re-onboarding on resume),
+B (answer format), and C (signal words) are handled by convention/docs
+already. This section is **D: a local guard that mechanically blocks a
+role's agent from writing files outside that role's lane**, catching the same
+mistake in the moment instead of relying on the agent remembering.
+
+Honesty note up front: this is a **PreToolUse hook in the same execution
+environment as the agent it's guarding**. It stops accidental/confused
+writes; it is not airtight against an adversarial agent that edits or removes
+the hook config itself — that requires the external anchors already in
+place, the CI checks in `enforce.yml` (HYK-87/88) and (later) an isolated
+runner (HYK-89). This guard and the CI anchors are defense-in-depth, not
+substitutes for each other.
+
+### Rule
+
+Given a `role` (from the `HARNESS_ROLE` environment variable) and a file
+path a write-family tool is about to touch, resolved relative to the repo
+root — paths outside the repo root are never regulated (e.g. the control
+room under `D:\...` stays freely editable by ORCH):
+
+| Role | Allowed to write (inside repo root) | Everything else |
+| --- | --- | --- |
+| `ORCH` | `.harness/<anything>-task.md` (dropping a task) | denied |
+| `CODER` | anything, **except** `.harness/review.md`, `.harness/verify.md`, `.harness/*-task.md` | denied |
+| `REVIEW` | `.harness/review.md` only | denied |
+| `VERIFY` | `.harness/verify.md` only | denied |
+| unset / unrecognized | everything (unrestricted) | — but a warning is emitted so a silently-inactive guard is visible |
+
+### Implementation
+
+- `scripts/check/role-guard.mjs` follows the same shape as
+  `review-gate.mjs`/`relay-handshake.mjs`: a pure exported function
+  `checkRoleWrite({ role, filePath, repoRoot }) -> { ok, reason, warn? }`
+  plus a CLI entry point. Path normalization
+  (`normalizeToRepoRelative`) lower-cases nothing but converts backslashes to
+  forward slashes and matches drive-letter or POSIX absolute forms, so a
+  Windows-style, WSL-style, or already-relative path all compare correctly
+  against the repo root; anything that doesn't resolve under the repo root is
+  reported as `insideRepo: false` and the write is unconditionally allowed.
+- The CLI block implements the **Claude Code PreToolUse hook contract**: it
+  reads the hook's JSON payload from stdin (`tool_name`,
+  `tool_input.file_path` for `Edit`/`Write`/`MultiEdit`,
+  `tool_input.notebook_path` for `NotebookEdit`), passes through
+  unconditionally (`exit 0`) for any other tool name or a missing/malformed
+  payload, and otherwise calls `checkRoleWrite` with `HARNESS_ROLE` and the
+  repo root (`git rev-parse --show-toplevel`, same helper as the other two
+  checks). The contract chosen is the **exit-code form**: `exit 0` to allow,
+  `exit 2` with the reason on stderr to block — this is fed back to the
+  calling agent as the reason it was stopped, mirroring how `commit-msg`
+  already reports a D2 rejection. A warning branch (unset/unrecognized role)
+  still exits `0` but prints the warning to stderr, so a mis-set
+  `HARNESS_ROLE` is visible instead of silently disabling the guard.
+- `scripts/check/role-guard.test.mjs` is a fixture-free, pure-function test
+  suite (node's built-in test runner), 28 cases covering the full role ×
+  path-type matrix: each role against a source file, its own result file,
+  another role's result file, and a task file; an unset role and an
+  unrecognized role string (both allow-with-warning); a repo-external path
+  for ORCH (control room); backslash-path normalization; an absolute in-repo
+  path resolving the same as its relative form; an absolute path on a
+  different drive letter being treated as outside the repo; and (round 2,
+  below) `.`/`..` traversal and WSL/Git-Bash path-scheme bypasses.
+
+**Round 2 fix (independent review caught two bypasses):** the first cut of
+`normalizeToRepoRelative` compared paths as strings without resolving `.`/`..`
+segments or reconciling path schemes, so `.harness/foo/../review.md` matched
+neither the literal `.harness/review.md` deny-rule nor got blocked, and a
+WSL-style `/mnt/c/...` path was misjudged as outside a `C:/...`-form repo
+root — both let a regulated write through. The fix normalizes drive schemes
+first (`toDriveStyle`: `/mnt/<drive>/...` and `/<drive>/...` → `<DRIVE>:/...`)
+and then resolves `.`/`..` via `node:path`'s `posix.normalize` before the
+repo-relative comparison, so matching happens on the fully-resolved path, not
+the literal string the tool reported.
+
+### Local installation (not version-controlled)
+
+Unlike `hooks/commit-msg`, this hook is wired through Claude Code's own
+settings, not git. `.claude/settings.local.json` is untracked (like
+`.harness/`), so the connection is per-clone/per-operator; only the script
+itself is version-controlled. Register it under `hooks.PreToolUse`:
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node /absolute/path/to/scripts/check/role-guard.mjs"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+And before starting a role's terminal/session, export the role it is acting
+as, e.g. `export HARNESS_ROLE=CODER` (or `ORCH`, `REVIEW`, `VERIFY`) — the
+guard reads this once per invocation from the environment, so it must be set
+in the shell the agent's tool calls actually run in.
+
+### Known limitation (honesty note)
+
+Same environment, same trust boundary as the agent it watches: an agent that
+edits `.claude/settings.local.json` to remove the hook, or unsets/rewrites
+`HARNESS_ROLE`, defeats this guard entirely, and nothing here detects that
+tampering. It is a guardrail against a confused or careless agent repeating
+this session's mistake, not a barrier against an adversarial one. The
+CI-anchored checks in `enforce.yml` (HYK-87/88, server-side, outside agent
+control) and a future isolated runner (HYK-89) are what make the harness's
+founding claim — verification outside agent control — actually true; this
+guard narrows the window in which the D2/D3 kind of mistake can happen
+locally, in the moment, before it ever reaches a commit.
