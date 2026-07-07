@@ -962,14 +962,109 @@ cannot be closed mechanically), it lowers the friction of doing it right:
   the skill's view too — there is no way to recover it retroactively.
 - **Not a hard gate, and not Scope B.** The skill only runs on explicit
   invocation (`/capture-context`); it does not intercept `/clear` and blocks
-  nothing by itself. A `/clear`-time re-orientation *checkpoint* remains
-  separate, not-yet-built follow-up work (HYK-96 Scope B).
+  nothing by itself. A `/clear`-time re-orientation *checkpoint* is separate
+  work, built below as Scope B.
 - **Same local trust boundary as every other mechanism in this document.**
   Nothing stops an agent or operator from skipping the skill, or from
   writing a delta that looks plausible but doesn't actually reflect the
   conversation. The self-check step only proves the resulting card's *form*
   passes `isUsableCard` — it says nothing about whether its *content* is
   honest.
+
+### Scope B (HYK-96) — `/clear-safe` reconciliation checkpoint
+
+**Platform limits, stated up front — read this before anything else in this
+subsection:**
+
+- **There is no hook that can intercept `/clear` conversationally.**
+  `SessionStart`'s `clear|compact` matcher fires *after* `/clear`, in the
+  brand-new session — by then the old context is already gone, far too late
+  to capture anything from it. Scope B is therefore **structurally
+  incapable of being a hard gate** on `/clear` itself; it can only ever be a
+  soft, Stop-hook-driven reminder plus a human convention.
+- **Silent automatic compaction is not covered at all.** A quiet context
+  compaction that happens without an explicit `/clear` gives this mechanism
+  no signal to react to.
+- **What the machine part actually verifies is form, not content** — the
+  same altitude as Scope A's card gate: it can confirm a reconciliation
+  *attestation* was filled in, never that the reconciliation was done well
+  or even done at all in good faith.
+
+With those limits acknowledged, the actual mechanism:
+
+- **Protocol.** Before writing a 🟢 "safe to `/clear`" declaration anywhere
+  on the status board, run `/capture-context` (Scope C) to reconcile this
+  session's goals/intent/hard-constraint delta into `PROJECT-CONTEXT.md`,
+  then record that a reconciliation pass happened via a marker placed next
+  to the 🟢 declaration:
+
+  ```
+  <!-- clear-safe-attest: reconciled=<YYYY-MM-DD HH:MM KST | none> delta=<none|applied|deferred> -->
+  ```
+
+  `reconciled=` must be either a real timestamp or the literal `none`
+  (nothing needed reconciling this session) — never left blank. The
+  human-facing 🟢 prose declaration is unchanged and still coexists with
+  this marker; the marker is the machine-readable half of the same claim.
+- **Soft checker, `Stop` hook.** `scripts/check/clear-safe-check.mjs`
+  exports a pure function `checkClearSafe(statusText) -> { ok, reason }`
+  following the same text-in/struct-out shape as
+  `extractHardConstraints`/`checkStatusFresh`: it looks for a 🟢 declaration
+  co-located with the literal text `/clear` within the same `##`/`###`
+  heading-bounded section (or an explicit `clear-safe: green` marker as a
+  language-neutral escape hatch), and if found, requires the
+  `clear-safe-attest` marker to be present with a non-empty `reconciled=`
+  value. No green signal at all → `ok: true` (nothing to attest — this
+  mirrors Scope C's own "no delta — no update needed" low-friction design).
+  Any parsing trouble fails open (`ok: true`) — consistent with every other
+  check in this harness treating "uncertain" as "not confirmed unsafe."
+  The CLI (`--status <path>`, or `HARNESS_STATUS_PATH`, same convention as
+  `status-fresh.mjs`) exits `0` on `ok`, and **`1`, never `2`,** on a
+  confirmed-missing attestation — deliberately the same soft, non-blocking
+  severity as `status-fresh.mjs`'s own `Stop`-hook contract, not the
+  hard-block `exit 2` used by `role-guard.mjs`/D2's `commit-msg` gate. This
+  keeps the checker inside the "structurally cannot be a hard gate" limit
+  stated above, rather than pretending otherwise.
+- **Relationship to A/C/D.** A (form gate) and D (card structure) are what
+  make a *filled* `PROJECT-CONTEXT.md` mechanically distinguishable from a
+  stub; C (`/capture-context`) is the hand that actually does the
+  reconciling and produces the delta. B is the last piece: the protocol
+  and reminder that ties a 🟢 `/clear`-safe declaration to that
+  reconciliation having actually been invoked, in a way a Stop hook can
+  mechanically nudge on without ever being able to force it.
+- **Template.** `templates/harness-init/status.template.md` documents the
+  marker and protocol under a new "`/clear` safety (reconciliation
+  attestation)" section, so a freshly-installed project's board carries the
+  same convention from the start. `install.mjs` copies
+  `clear-safe-check.mjs`/`.test.mjs` to both profiles alongside the other
+  check scripts; wiring the `Stop` hook itself is, like `status-fresh.mjs`'s
+  own hook, a human, one-time, per-clone step (self-modifying
+  `.claude/settings.local.json` is treated as a human action throughout
+  this harness, not something a task automates). Same JSON shape as
+  `status-fresh.mjs`'s own `Stop` hook entry:
+
+  ```json
+  {
+    "hooks": {
+      "Stop": [
+        {
+          "hooks": [
+            {
+              "type": "command",
+              "command": "node /absolute/path/to/scripts/check/clear-safe-check.mjs --status \"/absolute/path/to/STATUS.md\""
+            }
+          ]
+        }
+      ]
+    }
+  }
+  ```
+
+  This can sit in the same `Stop` array entry as `status-fresh.mjs`'s
+  command (Claude Code's `Stop` hook contract allows multiple commands per
+  event) or its own separate entry — either way, both checks read the same
+  board and both are non-blocking (`status-fresh.mjs` also warns rather
+  than hard-blocks on `Stop`).
 
 ### v1 scope: deliberately minimal
 

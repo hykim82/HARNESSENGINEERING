@@ -318,6 +318,8 @@ function main() {
     "role-guard.test.mjs",
     "context-inject.mjs",
     "context-inject.test.mjs",
+    "clear-safe-check.mjs",
+    "clear-safe-check.test.mjs",
   ]) {
     copyRawFile(path.join(REPO_ROOT, "scripts", "check", name), path.join(targetRepoPath, "scripts", "check", name), { dryRun, executable: false });
   }
