@@ -36,6 +36,9 @@ jobs:
       - name: status-fresh tests
         run: node scripts/check/status-fresh.test.mjs
 
+      - name: context-inject tests
+        run: node scripts/check/context-inject.test.mjs
+
       - name: hooks POSIX syntax check
         run: |
           sh -n hooks/commit-msg

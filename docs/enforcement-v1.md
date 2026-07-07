@@ -766,3 +766,135 @@ the initial "fresh" state and the re-check.
   agent or operator with shell access can remove the Stop hook wiring, or
   simply never install it, and nothing here detects that. This sits in the
   same family as role-guard's and D2/D3's own honesty notes above.
+
+## D6 — project-context injection (context-inject.mjs + SessionStart/UserPromptSubmit hook, HYK-94)
+
+### Relationship to D1
+
+D1 ("boot reads state but not procedure") was closed for the *operating
+procedure* by a boot-line pointer to
+`docs/claude-orchestrator-handoff.md`. What it never covered is
+*project-specific* context — the hard constraints unique to one target repo
+(the running example throughout this harness: TEAM10, where committing
+harness tooling to the shared team repo would be a real incident, not a
+style violation). Until now that knowledge lived in two soft places: a
+human pasting a boot line, or an agent choosing to read the control room
+unprompted. Both depend on someone remembering, every single time,
+including after every `/clear`. D6 moves the *hard constraints* subset of
+that knowledge out of memory and into a file a hook reads mechanically.
+
+### What gets injected
+
+Exactly one section of one file: `.harness/PROJECT-CONTEXT.md`'s
+`## HARD CONSTRAINTS` heading (exact title, case-insensitive), extracted up
+to the next `##` heading or end of file. Everything else in that file
+(freeform background prose) is for a human or agent to read manually — only
+the constraints section is small and load-bearing enough to justify forcing
+it into every session's context automatically.
+
+### Two hooks, one job split each
+
+- **`SessionStart`** (fires on `startup|resume|clear|compact`) — **inject
+  only**. This hook type cannot block: even `exit 2` is ignored and the
+  session proceeds regardless. So its contract here is unconditional:
+  succeed by outputting the constraints as `additionalContext`, or — if the
+  context file or its constraints section is missing — output a loud
+  warning as `additionalContext` instead. Either way it exits `0`; a
+  warning injected into context is the strongest signal this hook type can
+  give.
+- **`UserPromptSubmit`** (fires before every prompt, including the first
+  one after `/clear`) — **gate only, does not re-inject**. If the context
+  file exists, it passes silently (`exit 0`, no output) — this hook does
+  not repeat the injection on every turn, which would waste tokens for no
+  benefit once `SessionStart` has already done it once per session. If the
+  file is confirmed *absent*, it blocks: `exit 2` plus a
+  `{"decision":"block","reason":"..."}` JSON payload, so a project with no
+  constraints card cannot proceed at all rather than silently running
+  unconstrained.
+
+**Enforcement strength, as decided:** "inject + block on absence" — not
+"inject + block on every turn," and not "warn only." A project that never
+created `PROJECT-CONTEXT.md` is stopped cold at the first prompt; a project
+that has one gets it injected once per session start and is otherwise left
+alone.
+
+### v1 scope: deliberately minimal
+
+`UserPromptSubmit` does not track "have I already injected this session" via
+a marker file. The reasoning: `SessionStart`'s trigger list already includes
+`clear`, so a `/clear` should already receive a fresh injection through that
+hook without `UserPromptSubmit` needing session-scoped state — adding a
+marker file here would be solving a problem `SessionStart` is already
+supposed to solve, before confirming it doesn't. Whether `SessionStart`
+actually fires its `additionalContext` payload on `clear` in practice (as
+opposed to on paper) was **not independently reproduced in this task** — see
+"Known limitations" below. If it turns out `clear` does not inject
+reliably, that is a follow-up issue, not a reason to add marker-file state
+to `UserPromptSubmit` pre-emptively (YAGNI, per this task's own explicit
+instruction).
+
+### Implementation
+
+- `scripts/check/context-inject.mjs` follows the same shape as
+  `role-guard.mjs`/`status-fresh.mjs`: a pure exported function
+  `extractHardConstraints(contextText) -> { ok, text | reason }` (file I/O
+  and hook-payload handling live only in the CLI block, so the extraction
+  logic is testable without touching a filesystem or a hook contract) plus
+  a CLI entry point: `node context-inject.mjs --mode
+  <session-start|user-prompt-submit> [--context <path>]`, path also
+  overridable via `HARNESS_CONTEXT_PATH`. Default context path is
+  `<repoRoot>/.harness/PROJECT-CONTEXT.md`, same root-resolution pattern as
+  every other check here.
+- No exception path can crash either hook. `session-start` catches any
+  read/parse failure and falls back to an internal-error warning
+  (`additionalContext`, still `exit 0`); `user-prompt-submit` catches any
+  failure and falls back to `exit 0` (pass-through) rather than blocking —
+  blocking is reserved for the one condition this task specifies
+  (the file is confirmed absent), not for "something went wrong while
+  checking."
+- `scripts/check/context-inject.test.mjs` (`node:test`, 12 cases): 6 cover
+  `extractHardConstraints` directly (extraction, stopping at the next `##`
+  heading, missing heading, blank section, case/whitespace-insensitive
+  heading match, and a heading with extra trailing words correctly *not*
+  matching the exact-title requirement); 6 cover the CLI via
+  `execFileSync` against a real child process (`session-start` with a
+  populated file, with a missing file, and with a file missing the
+  constraints section; `user-prompt-submit` with the file present and
+  absent; and a malformed-JSON stdin payload confirmed not to crash the
+  process — the CLI never actually needs to parse stdin for its own logic,
+  so this test guards against a future change that starts parsing it
+  unsafely).
+- Hook wiring (not installed by this task — see limitations):
+  `.claude/settings.local.json`'s `hooks.SessionStart` and
+  `hooks.UserPromptSubmit`, each running
+  `node ".../scripts/check/context-inject.mjs" --mode <mode> --context "<path>"`.
+
+### Known limitations (honesty notes)
+
+- **Client-side only, by construction.** Unlike D-CI's server-anchored
+  gitleaks/branch-protection checks, context injection has no external
+  anchor to move to — a `SessionStart`/`UserPromptSubmit` hook is
+  inherently a property of the client running the session. This is not a
+  gap to close later; it is what this mechanism *is*.
+- **Same local trust boundary as role-guard and status-fresh.** An agent or
+  operator with shell access can remove the hook wiring from
+  `.claude/settings.local.json`, or delete `PROJECT-CONTEXT.md` and route
+  around the block by editing the check script itself. Nothing here is
+  cryptographically enforced; it raises the cost of skipping the guardrail,
+  it does not make skipping impossible.
+- **Claude-only.** Both hook types are a Claude Code mechanism; a Codex
+  worker session has no equivalent trigger, so REVIEW/VERIFY terminals
+  running Codex are not covered by this injection at all — the same
+  Claude-vs-Codex split already noted for role-guard and status-fresh.
+- **Hook installation is a human, one-time, per-clone step — not done by
+  this task.** Same rationale as status-fresh's Stop hook: writing to
+  `.claude/settings.local.json` is self-modification of the file the
+  role-guard hook itself lives in, which this harness treats as a human
+  action. The JSON snippet above is documentation only.
+- **`clear`-triggered injection was not independently verified end-to-end
+  in this task.** The CLI's own behavior under a simulated `SessionStart`
+  payload (source: `"clear"`) was exercised directly (see verification in
+  the HYK-94 coder report), but whether Claude Code's actual `/clear` flow
+  invokes the hook and surfaces `additionalContext` into the new session's
+  visible context was left for a human to confirm once the hook is wired
+  up — recorded here plainly rather than assumed.
