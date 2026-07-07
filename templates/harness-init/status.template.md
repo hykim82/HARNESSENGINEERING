@@ -1,6 +1,7 @@
 # Status board (start here when you return)
 
 **Updated: <YYYY-MM-DD HH:MM KST>**
+**Profile: <PROFILE>** (`solo-full` | `team-local`)
 
 ## Where I am
 
@@ -46,3 +47,18 @@ Read these once; do not re-derive them after a `/clear`.
    writing (write access within declared scope), VERIFY = runs the
    verification command and reports the real exit code (loop tasks only),
    REVIEW = independent read-only review, Human = final acceptance (Done).
+
+## Profile-specific rules
+
+- **If `<PROFILE>` = `solo-full`:** landing on `<REPO_PATH>`'s protected
+  branch is `branch -> push (as <BOT_ACCOUNT>) -> open PR -> enforce CI
+  green -> human approval -> merge`. Direct pushes to the protected branch
+  are rejected server-side; do not attempt one as a shortcut. Verification
+  runs `<VERIFY_CMD>` locally before a PR is opened, and the same checks
+  re-run in CI as the external anchor.
+- **If `<PROFILE>` = `team-local`:** this account has no branch-protection
+  or CI authority over `<GITHUB_REPO>` (team-owned, shared with other
+  contributors) — do not add or attempt server-side gates. Enforcement here
+  is local only: the installed git hooks and `<VERIFY_CMD>` run before a
+  commit; landing anywhere shared still goes through a feature branch and an
+  upstream PR reviewed by the team's own process, not this harness.

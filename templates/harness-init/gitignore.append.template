@@ -1,0 +1,24 @@
+# harness-init .gitignore append block
+#
+# install.mjs picks exactly one of the two `# @profile:` sections below,
+# matching the profile passed to it, and appends only that section's lines
+# to the target repo's .gitignore. The `# @profile:` / `# @end` lines are
+# markers for the installer, not gitignore syntax to copy verbatim.
+
+# @profile:solo-full
+# Only the relay working directory is ignored; hook scripts and CI config
+# are committed and reviewed like any other repo asset (matches
+# HARNESSENGINEERING's own .gitignore).
+.harness/
+# @end
+
+# @profile:team-local
+# The entire local harness toolchain is ignored on top of the relay
+# directory — this account's personal process tooling must not be forced
+# onto a shared team repo (HYK-92).
+.harness/
+verify.sh
+hooks/commit-msg
+hooks/pre-commit
+scripts/check/
+# @end
