@@ -33,6 +33,9 @@ jobs:
       - name: role-guard tests
         run: node scripts/check/role-guard.test.mjs
 
+      - name: status-fresh tests
+        run: node scripts/check/status-fresh.test.mjs
+
       - name: hooks POSIX syntax check
         run: |
           sh -n hooks/commit-msg

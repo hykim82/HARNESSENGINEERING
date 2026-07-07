@@ -617,3 +617,152 @@ above only fires on Claude Code's own tool calls (`Edit`/`Write`/`MultiEdit`/
 `git commit` regardless of what produced it — this is what makes ② the
 Codex-covering half of the two mechanisms, where role-guard is a
 Claude-specific guardrail.
+
+## STATUS freshness — Tier 2 (status-fresh.mjs + Stop hook, HYK-91)
+
+### Relationship to Tier 1
+
+The human-facing status board (`STATUS.md`) has, until now, been kept
+current purely by convention (Tier 1): every role is *supposed* to update
+its row when it finishes, but nothing checked that it actually happened. A
+skipped self-report leaves the board pointing at stale state, which then
+poisons whatever reads it next — the human, or a fresh Orchestrator session
+after a `/clear`. Tier 2 promotes that convention to a mechanical check:
+`scripts/check/status-fresh.mjs` answers "has real work happened since
+`STATUS.md` was last touched?" and a non-zero exit is meant to be wired to
+Claude Code's `Stop` hook so a turn cannot end silently on a stale board.
+
+### Design: mtime, not the human-readable timestamp string
+
+The board's `**Updated: <YYYY-MM-DD HH:MM KST>**` line is for humans to
+read, not for this check to parse. Freshness is judged by comparing file
+**mtimes** instead:
+
+- `statusMtime` — the mtime of `STATUS.md` itself.
+- `newestWork` — the newest of: every `.harness/*.md` relay file except
+  `STATUS.md` and `PHASE-HANDOFF.md` (task/result files — `*-task.md`,
+  `coder.md`, `review.md`, `verify.md`, and similar), and the current
+  `HEAD` commit's timestamp (`git log -1 --format=%cI`).
+- If `newestWork` is later than `statusMtime` by more than a grace window,
+  the board is stale: exit `1` with a reason naming which file (or `HEAD
+  commit`) is newer and by how much.
+
+This was a deliberate choice over parsing the human-typed timestamp
+string, for two reasons: parsing a hand-typed `YYYY-MM-DD HH:MM KST` string
+inherits every format-drift risk `relay-handshake.mjs`'s `parseKstTimestamp`
+already has to guard against (D3's known limitation), and — the more
+important reason — mtime comparison is **purely relative ordering**, so it
+never depends on the local clock's absolute accuracy. An earlier revision of
+this harness worried the sandbox clock ran ~9h behind real time; a direct
+comparison of PowerShell/Git-Bash/WSL/`git commit` timestamps on
+2026-07-07 found all four agree with real KST, so that specific fear did not
+reproduce — but the mtime design does not need that finding to hold. Even a
+sandbox clock that *is* skewed relative to real time still orders two files
+written by the same clock correctly relative to each other, which is all
+this check needs.
+
+### Grace window
+
+A worker's normal, correct behavior — write its result file, then
+self-report its own `STATUS.md` row in the same turn (see the status
+template's rule 5) — produces two writes a few hundred milliseconds to a
+few seconds apart, with `STATUS.md` written *second* and therefore normally
+newer. A grace window absorbs that ordering plus coarse mtime resolution on
+some filesystems (up to ~1s on FAT-family volumes) without either masking
+real staleness or false-alarming on a normal self-report.
+`DEFAULT_GRACE_MS = 5000` (5s): wide enough to cover both effects, narrow
+enough that it cannot hide a board that is actually stale — real staleness
+means minutes to indefinitely, not single-digit seconds.
+
+### No false positive on Q&A / conversational turns
+
+A turn that only answers a question — no file written under `.harness/`, no
+new commit — leaves `newestWork` unchanged from whatever it already was.
+Since `STATUS.md` was already at or ahead of that value from the previous
+real update, the comparison stays fresh (`ok: true`) and the check does not
+fire on turns that never touched durable state. `status-fresh.test.mjs`
+covers this directly (test (e)) with a fixture where no file changes between
+the initial "fresh" state and the re-check.
+
+### Implementation
+
+- `scripts/check/status-fresh.mjs` follows the same shape as
+  `relay-handshake.mjs`/`role-guard.mjs`: a pure exported function
+  `checkStatusFresh({ statusPath, harnessDir, graceMs, headTime }) -> {
+  ok, reason }` plus a CLI entry point (`node status-fresh.mjs [--status
+  <path>] [--harness-dir <path>]`, or the `HARNESS_STATUS_PATH` /
+  `HARNESS_DIR` env vars). `headTime` is an explicit injection point — pass
+  a `Date` or `null` to bypass the real `git log` call — which is what makes
+  `status-fresh.test.mjs` able to exercise the HEAD-comparison branch
+  without a real git repository in its fixtures.
+- **Path override, required in this repository.** The default `statusPath`
+  (`<repoRoot>/.harness/STATUS.md`) assumes the harness-init default layout
+  where the board lives inside the target repo. HARNESSENGINEERING's own
+  board lives *outside* the repo, at `D:\문서관리\하네스-관제실\STATUS.md`
+  (see "Harness control room" in project memory) — so any live invocation
+  here must pass `--status "D:\문서관리\하네스-관제실\STATUS.md"` (or set
+  `HARNESS_STATUS_PATH`) explicitly; the default path resolves to a file
+  that does not exist in this repo.
+- `scripts/check/status-fresh.test.mjs` (`node:test`, 11 cases): STATUS
+  already newest (fresh); a worker result file newer than STATUS (stale,
+  reason names the file); a difference inside the grace window (fresh, not
+  a false positive) and just past it (stale); `PHASE-HANDOFF.md` alone being
+  newer (excluded, still fresh); the Q&A no-op turn (fresh); a missing
+  STATUS file (blocked, not silently ok); `HEAD` newer than STATUS (stale,
+  reason names `HEAD commit`); `HEAD` older with no work files (fresh); no
+  work files and no HEAD time at all (vacuously fresh); and a `.harness`
+  directory that does not exist yet (falls back to HEAD-only comparison).
+  All fixtures use `fs.utimesSync` under a temp directory to control mtimes
+  directly; no real `.harness/` or repository state is touched.
+- `.github/workflows/enforce.yml` runs `status-fresh.test.mjs` alongside the
+  other three check suites, as a **regression test only** — the live check
+  itself is not a CI gate (see limitation below), so what CI guarantees is
+  narrower: that the check's own logic keeps working, not that any given
+  commit's `STATUS.md` was actually fresh.
+
+### Known limitations (honesty notes)
+
+- **Claude-only, same as role-guard.** The intended trigger is Claude
+  Code's `Stop` hook, which — like the `PreToolUse` role-guard hook — only
+  ever sees Claude's own turns. A Codex worker (REVIEW, VERIFY) finishing a
+  turn triggers no equivalent check; the same Claude-vs-Codex coverage gap
+  documented for role-guard applies here.
+- **Not a CI gate.** Unlike D2's commit-msg hook, staleness is not
+  something a server-side CI run can meaningfully judge after the fact —
+  CI sees a single commit, not the live relay state at the moment a
+  particular turn ended. Only the test suite is CI-anchored; the live
+  freshness check itself only ever runs locally, on the agent's own
+  goodwill to have the Stop hook wired up at all.
+- **Stop hook installation is a human, one-time, per-clone step, done here
+  only as documentation, not by this task.** Wiring `.claude/settings.local.json`
+  is self-modification of the same settings file the role-guard hook lives
+  in, which this harness treats as a human action, not something an agent
+  does to its own operating constraints mid-task. Install by adding, to
+  `.claude/settings.local.json`:
+
+  ```json
+  {
+    "hooks": {
+      "Stop": [
+        {
+          "hooks": [
+            {
+              "type": "command",
+              "command": "node /absolute/path/to/scripts/check/status-fresh.mjs --status \"D:\\문서관리\\하네스-관제실\\STATUS.md\""
+            }
+          ]
+        }
+      ]
+    }
+  }
+  ```
+
+  A non-zero exit from this command is what should cause Claude Code to
+  surface the Stop hook's block/warning to the operator; the exact
+  UX (hard block vs. warning) depends on how Claude Code's `Stop` hook
+  contract handles a failing command, which is outside this document's
+  scope to define.
+- Same trust boundary as every other local check in this document: an
+  agent or operator with shell access can remove the Stop hook wiring, or
+  simply never install it, and nothing here detects that. This sits in the
+  same family as role-guard's and D2/D3's own honesty notes above.
