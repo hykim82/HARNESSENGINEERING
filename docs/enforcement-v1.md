@@ -804,19 +804,60 @@ it into every session's context automatically.
   give.
 - **`UserPromptSubmit`** (fires before every prompt, including the first
   one after `/clear`) — **gate only, does not re-inject**. If the context
-  file exists, it passes silently (`exit 0`, no output) — this hook does
-  not repeat the injection on every turn, which would waste tokens for no
-  benefit once `SessionStart` has already done it once per session. If the
-  file is confirmed *absent*, it blocks: `exit 2` plus a
-  `{"decision":"block","reason":"..."}` JSON payload, so a project with no
-  constraints card cannot proceed at all rather than silently running
-  unconstrained.
+  file exists *and its card is usable* (see "Scope A" below), it passes
+  silently (`exit 0`, no output) — this hook does not repeat the injection
+  on every turn, which would waste tokens for no benefit once
+  `SessionStart` has already done it once per session. It blocks — `exit 2`
+  plus a `{"decision":"block","reason":"..."}` JSON payload — under two
+  *confirmed* conditions: the file is absent, or the file was read
+  successfully and its card is confirmed unusable (empty or unedited
+  placeholder). Anything less certain (a read error on a file that does
+  exist, an unexpected exception) is **not** treated as confirmed-unusable
+  and passes through instead (`exit 0`) — see "fail-open boundary" below.
 
-**Enforcement strength, as decided:** "inject + block on absence" — not
-"inject + block on every turn," and not "warn only." A project that never
-created `PROJECT-CONTEXT.md` is stopped cold at the first prompt; a project
-that has one gets it injected once per session start and is otherwise left
-alone.
+**Enforcement strength, as decided:** "inject + block when the card is
+absent or unusable" — not "inject + block on every turn," and not "warn
+only." A project with no constraints card, or a stub card that was
+installed but never actually filled in, is stopped cold at the first
+prompt; a project with a real, filled-in card gets it injected once per
+session start and is otherwise left alone.
+
+### Scope A (HYK-96) — form gate: catching a stub card, not just a missing one
+
+D6 as originally shipped only asked "does `PROJECT-CONTEXT.md` exist?" — a
+freshly `install.mjs`-installed card technically exists but still carries
+`project-context.template.md`'s own placeholder prose (e.g. the literal
+token `<GITHUB_REPO>`) until someone actually edits it. That stub would pass
+the original `UserPromptSubmit` gate and get treated as real content by
+`SessionStart`, injecting placeholder junk instead of an actual hard
+constraint — an unfilled card is functionally the same failure as no card
+at all, and D6 v1 didn't catch it. Scope A closes that gap:
+
+- `isUsableCard(contextText)` (in `context-inject.mjs`) composes
+  `extractHardConstraints` with one more check: does the extracted body
+  still contain an unresolved template token matching `/<[A-Z][A-Z0-9_]*>/`
+  (this harness's placeholder convention across every template — status,
+  phase-handoff, project-context)? A missing/empty section fails via
+  `extractHardConstraints`'s existing reason; a present-but-unedited section
+  fails with a `reason` naming the exact leftover token (e.g.
+  `unresolved template placeholder <GITHUB_REPO> still present`).
+- `UserPromptSubmit` now blocks on `isUsableCard(...).ok === false` in
+  addition to file-absence, with the `reason` surfaced in the block payload
+  so the person filling in the card knows exactly what's still a stub.
+- `SessionStart` now checks the same `isUsableCard` gate before injecting:
+  an unusable card produces the same warning-`additionalContext` path as a
+  missing one (never injects placeholder text as if it were a real
+  constraint), still `exit 0` (this hook type still cannot block).
+- **Fail-open boundary, restated for Scope A:** blocking requires the file
+  to have been read and its content *confirmed* unusable. A file that
+  exists but can't be read (permission error, race condition) is treated as
+  uncertain, not confirmed-unusable, and passes through — the same
+  fail-open principle D6 v1 already applied to unexpected exceptions, now
+  extended to the new content check rather than only the existence check.
+- Scope B (a `/clear`-time re-orientation checkpoint), C (a skill for
+  authoring/maintaining the card), and D (splitting the card's freeform
+  background from its enforced constraints section into separate files) are
+  **not** part of Scope A and remain open follow-up work.
 
 ### v1 scope: deliberately minimal
 
@@ -891,10 +932,14 @@ instruction).
   `.claude/settings.local.json` is self-modification of the file the
   role-guard hook itself lives in, which this harness treats as a human
   action. The JSON snippet above is documentation only.
-- **`clear`-triggered injection was not independently verified end-to-end
-  in this task.** The CLI's own behavior under a simulated `SessionStart`
-  payload (source: `"clear"`) was exercised directly (see verification in
-  the HYK-94 coder report), but whether Claude Code's actual `/clear` flow
-  invokes the hook and surfaces `additionalContext` into the new session's
-  visible context was left for a human to confirm once the hook is wired
-  up — recorded here plainly rather than assumed.
+- **`clear`-triggered injection: confirmed live (2026-07-07), superseding
+  the HYK-94 open item above.** After the hooks were wired into
+  `.claude/settings.local.json`, a real `/clear` was run and the resulting
+  session listed its hard constraints without having read the file itself
+  — direct evidence that `SessionStart`'s `additionalContext` payload
+  actually reaches the new session's visible context on the `clear`
+  trigger, not just in the CLI's own simulated-payload output. HYK-94's
+  original wording ("not independently verified") is superseded by this
+  entry rather than deleted, so the record shows the claim was raised
+  honestly first and then closed with real evidence, not asserted from the
+  start.

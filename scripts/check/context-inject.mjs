@@ -43,6 +43,29 @@ export function extractHardConstraints(contextText) {
   return { ok: true, text };
 }
 
+// A freshly-installed card that was never edited still has its template's
+// literal placeholder tokens (e.g. `<GITHUB_REPO>`) inside the HARD
+// CONSTRAINTS body -- that is a stub, not real content, even though the
+// section itself is technically non-empty. `<UPPER_SNAKE>` matches this
+// harness's placeholder convention across all templates (status/phase-
+// handoff/project-context), so one regex catches an unedited card
+// regardless of which specific token was left in place.
+const PLACEHOLDER_RE = /<[A-Z][A-Z0-9_]*>/;
+
+// A card is "usable" only if it has a non-empty HARD CONSTRAINTS section
+// AND that section contains no leftover placeholder token. Either failure
+// mode -- section missing/empty (already covered by extractHardConstraints)
+// or section present but unedited -- means the card is not real content.
+export function isUsableCard(contextText) {
+  const extracted = extractHardConstraints(contextText);
+  if (!extracted.ok) return { ok: false, reason: extracted.reason };
+  const placeholderMatch = extracted.text.match(PLACEHOLDER_RE);
+  if (placeholderMatch) {
+    return { ok: false, reason: `unresolved template placeholder ${placeholderMatch[0]} still present` };
+  }
+  return { ok: true };
+}
+
 function fileExists(p) {
   try {
     return existsSync(p);
@@ -64,12 +87,16 @@ function sessionStartOutput(contextPath) {
   } else {
     try {
       const text = readFileSync(contextPath, "utf8");
-      const extracted = extractHardConstraints(text);
-      if (extracted.ok) {
-        additionalContext = `프로젝트 하드 제약(자동 주입):\n${extracted.text}`;
+      const usable = isUsableCard(text);
+      if (usable.ok) {
+        // isUsableCard.ok implies extractHardConstraints.ok, so this
+        // re-extraction cannot fail.
+        additionalContext = `프로젝트 하드 제약(자동 주입):\n${extractHardConstraints(text).text}`;
       } else {
+        // Never inject placeholder junk as if it were real content --
+        // warn instead, same as the file-missing/section-missing cases.
         additionalContext =
-          `⚠️ ${contextPath}에 ## HARD CONSTRAINTS 섹션을 찾지 못함(${extracted.reason}) — ` +
+          `⚠️ ${contextPath}의 HARD CONSTRAINTS를 사용할 수 없음(${usable.reason}) — ` +
           "이 프로젝트의 하드 제약이 주입되지 않았습니다. 맥락 카드를 보완하세요.";
       }
     } catch (err) {
@@ -110,16 +137,37 @@ if (invokedDirectly) {
     console.log(JSON.stringify(output));
     process.exit(0);
   } else if (mode === "user-prompt-submit") {
-    // Blocking is reserved for the one condition this task specifies: the
-    // context file is confirmed absent. Any other failure (permission
-    // error, unexpected exception) must not block a prompt -- fail open.
+    // Blocking is reserved for two conditions this task specifies as
+    // *confirmed*: the context file is absent, or it was read successfully
+    // and its HARD CONSTRAINTS are confirmed empty/placeholder-only. Any
+    // other failure (permission error reading an existing file, unexpected
+    // exception) is "uncertain," not "confirmed unusable" -- fail open.
     try {
-      if (fileExists(contextPath)) {
+      if (!fileExists(contextPath)) {
+        const reason =
+          `PROJECT-CONTEXT.md가 ${contextPath}에 없습니다. ` +
+          "이 프로젝트의 하드 제약 카드를 먼저 만드세요(진행 차단).";
+        console.error(reason);
+        console.log(JSON.stringify({ decision: "block", reason }));
+        process.exit(2);
+      }
+
+      let text;
+      try {
+        text = readFileSync(contextPath, "utf8");
+      } catch {
+        // File exists but couldn't be read -- uncertain, not confirmed
+        // unusable. Fail open.
+        process.exit(0);
+      }
+
+      const usable = isUsableCard(text);
+      if (usable.ok) {
         process.exit(0);
       }
       const reason =
-        `PROJECT-CONTEXT.md가 ${contextPath}에 없습니다. ` +
-        "이 프로젝트의 하드 제약 카드를 먼저 만드세요(진행 차단).";
+        `PROJECT-CONTEXT.md(${contextPath})의 HARD CONSTRAINTS를 사용할 수 없습니다(${usable.reason}). ` +
+        "이 프로젝트의 하드 제약 카드를 채우세요(진행 차단).";
       console.error(reason);
       console.log(JSON.stringify({ decision: "block", reason }));
       process.exit(2);
