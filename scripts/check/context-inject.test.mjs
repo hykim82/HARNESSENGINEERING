@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { extractHardConstraints } from "./context-inject.mjs";
+import { extractHardConstraints, isUsableCard } from "./context-inject.mjs";
 
 const SCRIPT_PATH = fileURLToPath(new URL("./context-inject.mjs", import.meta.url));
 
@@ -109,7 +109,8 @@ test("(i) session-start + file exists but no HARD CONSTRAINTS section -> exit 0,
     const { stdout, status } = runCli(["--mode", "session-start", "--context", contextPath]);
     assert.equal(status, 0);
     const parsed = JSON.parse(stdout);
-    assert.match(parsed.hookSpecificOutput.additionalContext, /HARD CONSTRAINTS 섹션을 찾지 못함/);
+    assert.match(parsed.hookSpecificOutput.additionalContext, /HARD CONSTRAINTS를 사용할 수 없음/);
+    assert.match(parsed.hookSpecificOutput.additionalContext, /no ## HARD CONSTRAINTS section/);
   });
 });
 
@@ -140,5 +141,77 @@ test("(l) malformed stdin payload does not crash the CLI", () => {
     writeFileSync(contextPath, "## HARD CONSTRAINTS\n\n- rule\n", "utf8");
     const { status } = runCli(["--mode", "session-start", "--context", contextPath], "{ not valid json ][");
     assert.equal(status, 0);
+  });
+});
+
+// --- isUsableCard (pure function) + HYK-96 scope A (form gate) ---
+
+test("(m) isUsableCard: normal filled-in body -> ok", () => {
+  const text = "## HARD CONSTRAINTS\n\n- never commit .harness/ to the team repo\n";
+  const result = isUsableCard(text);
+  assert.equal(result.ok, true);
+});
+
+test("(n) isUsableCard: empty section -> ok:false", () => {
+  const text = "## HARD CONSTRAINTS\n\n   \n";
+  const result = isUsableCard(text);
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /empty/);
+});
+
+test("(o) isUsableCard: unresolved placeholder token -> ok:false", () => {
+  const text = "## HARD CONSTRAINTS\n\n- never commit harness tooling to <GITHUB_REPO>\n";
+  const result = isUsableCard(text);
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /<GITHUB_REPO>/);
+});
+
+test("(p) user-prompt-submit + empty HARD CONSTRAINTS -> exit 2, block", () => {
+  withFixtureDir((dir) => {
+    const contextPath = join(dir, "PROJECT-CONTEXT.md");
+    writeFileSync(contextPath, "## HARD CONSTRAINTS\n\n   \n", "utf8");
+    const { stdout, stderr, status } = runCli(["--mode", "user-prompt-submit", "--context", contextPath]);
+    assert.equal(status, 2);
+    assert.match(stderr, /사용할 수 없습니다/);
+    const parsed = JSON.parse(stdout);
+    assert.equal(parsed.decision, "block");
+  });
+});
+
+test("(q) user-prompt-submit + unedited template (placeholder present) -> exit 2, block", () => {
+  withFixtureDir((dir) => {
+    const contextPath = join(dir, "PROJECT-CONTEXT.md");
+    writeFileSync(
+      contextPath,
+      "## HARD CONSTRAINTS\n\n- Never commit or push harness tooling to <GITHUB_REPO>.\n- <this project's own hard constraint>\n",
+      "utf8",
+    );
+    const { stdout, status } = runCli(["--mode", "user-prompt-submit", "--context", contextPath]);
+    assert.equal(status, 2);
+    const parsed = JSON.parse(stdout);
+    assert.equal(parsed.decision, "block");
+    assert.match(parsed.reason, /<GITHUB_REPO>/);
+  });
+});
+
+test("(r) user-prompt-submit + filled-in card -> exit 0, no output (regression)", () => {
+  withFixtureDir((dir) => {
+    const contextPath = join(dir, "PROJECT-CONTEXT.md");
+    writeFileSync(contextPath, "## HARD CONSTRAINTS\n\n- never commit .harness/ to the team repo\n", "utf8");
+    const { stdout, status } = runCli(["--mode", "user-prompt-submit", "--context", contextPath]);
+    assert.equal(status, 0);
+    assert.equal(stdout.trim(), "");
+  });
+});
+
+test("(s) session-start + placeholder card -> exit 0, warning (does not inject placeholder junk)", () => {
+  withFixtureDir((dir) => {
+    const contextPath = join(dir, "PROJECT-CONTEXT.md");
+    writeFileSync(contextPath, "## HARD CONSTRAINTS\n\n- Never commit or push harness tooling to <GITHUB_REPO>.\n", "utf8");
+    const { stdout, status } = runCli(["--mode", "session-start", "--context", contextPath]);
+    assert.equal(status, 0);
+    const parsed = JSON.parse(stdout);
+    assert.doesNotMatch(parsed.hookSpecificOutput.additionalContext, /^프로젝트 하드 제약\(자동 주입\)/);
+    assert.match(parsed.hookSpecificOutput.additionalContext, /<GITHUB_REPO>/);
   });
 });
