@@ -26,7 +26,7 @@
 // when --repo-path is not yet known) and merges it under any CLI flags
 // given (CLI wins on conflicting keys).
 
-import { readFileSync, writeFileSync, existsSync, mkdirSync, appendFileSync, chmodSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, statSync, mkdirSync, appendFileSync, chmodSync } from "node:fs";
 import { execSync } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -244,6 +244,173 @@ function appendAgentsFile(targetRepoPath, { dryRun }) {
   console.log(`${dryRun ? "[dry-run] would install" : "installed"}: ${agentsPath}`);
 }
 
+// Windows-native params.controlRoomPath arrives with backslashes; the live
+// solo-full example this mirrors (.claude/settings.local.json's own
+// `--context "D:/문서관리/..."`) uses forward slashes, so normalize before
+// building a command string.
+function toPosixPath(p) {
+  return p.replace(/\\/g, "/");
+}
+
+function joinPosix(base, file) {
+  return `${toPosixPath(base).replace(/\/+$/, "")}/${file}`;
+}
+
+// Builds the same `hooks` object this repository's own live
+// `.claude/settings.local.json` carries (PreToolUse role-guard, Stop
+// status-fresh + clear-safe-check, SessionStart + UserPromptSubmit
+// context-inject), with STATUS/PROJECT-CONTEXT paths resolved per profile:
+// solo-full points at the control room (outside the repo), team-local has
+// no control room and points at its own `.harness/` via the portable
+// `$CLAUDE_PROJECT_DIR` token (no substitution needed, unlike the other
+// placeholder tokens this installer replaces in template files).
+function buildHooksBlock(params) {
+  const statusPath =
+    params.profile === "solo-full" ? joinPosix(params.controlRoomPath, "STATUS.md") : "$CLAUDE_PROJECT_DIR/.harness/STATUS.md";
+  const contextPath =
+    params.profile === "solo-full"
+      ? joinPosix(params.controlRoomPath, "PROJECT-CONTEXT.md")
+      : "$CLAUDE_PROJECT_DIR/.harness/PROJECT-CONTEXT.md";
+
+  return {
+    PreToolUse: [
+      {
+        matcher: "Edit|Write|MultiEdit|NotebookEdit",
+        hooks: [{ type: "command", command: 'node "$CLAUDE_PROJECT_DIR/scripts/check/role-guard.mjs"' }],
+      },
+    ],
+    Stop: [
+      {
+        hooks: [
+          { type: "command", command: `node "$CLAUDE_PROJECT_DIR/scripts/check/status-fresh.mjs" --status "${statusPath}"` },
+          { type: "command", command: `node "$CLAUDE_PROJECT_DIR/scripts/check/clear-safe-check.mjs" --status "${statusPath}"` },
+        ],
+      },
+    ],
+    SessionStart: [
+      {
+        matcher: "startup|resume|clear|compact",
+        hooks: [
+          {
+            type: "command",
+            command: `node "$CLAUDE_PROJECT_DIR/scripts/check/context-inject.mjs" --mode session-start --context "${contextPath}"`,
+          },
+        ],
+      },
+    ],
+    UserPromptSubmit: [
+      {
+        hooks: [
+          {
+            type: "command",
+            command: `node "$CLAUDE_PROJECT_DIR/scripts/check/context-inject.mjs" --mode user-prompt-submit --context "${contextPath}"`,
+          },
+        ],
+      },
+    ],
+  };
+}
+
+// Generates or merges the target's `.claude/settings.local.json` hooks
+// block. Merge semantics, in order:
+//   1. file absent -> create `{ "hooks": {...} }`.
+//   2. file present, no top-level `hooks` key -> preserve everything else,
+//      add `hooks` (e.g. a file that only has a `permissions` block).
+//   3. file present, `hooks` key already exists -> do not touch it (an
+//      existing wiring could be intentionally different); skip, warn, and
+//      print the hooks block as a snippet for a human to merge by hand.
+//      Auto-merging hook arrays is not attempted -- silently interleaving
+//      commands into an existing hook the operator wrote risks misrouting
+//      it in a way that is hard to notice.
+//   4. file present but not valid JSON -> do not touch it; same snippet
+//      fallback as (3).
+// All object assembly goes through `JSON.stringify(obj, null, 2)` -- no
+// regex/string surgery on existing JSON, so a merge can never corrupt
+// unrelated keys it didn't intend to touch.
+function installSettingsLocal(params, targetRepoPath, { dryRun }) {
+  const settingsPath = path.join(targetRepoPath, ".claude", "settings.local.json");
+  const hooksBlock = buildHooksBlock(params);
+  const hooksOnlySnippet = JSON.stringify({ hooks: hooksBlock }, null, 2);
+  const restartNote =
+    "Restart Claude Code once and confirm the hooks actually fire before relying on them -- this is a one-time human step (self-modifying a live session's own settings mid-task is out of scope for this installer); see docs/harness-init.md.";
+
+  if (!existsSync(settingsPath)) {
+    if (!dryRun) {
+      ensureParentDir(settingsPath);
+      writeFileSync(settingsPath, `${hooksOnlySnippet}\n`, "utf8");
+    }
+    installed.push(settingsPath);
+    console.log(`${dryRun ? "[dry-run] would create" : "created"}: ${settingsPath}\n${hooksOnlySnippet}\n${restartNote}`);
+    return;
+  }
+
+  let existingRaw;
+  try {
+    existingRaw = readFileSync(settingsPath, "utf8");
+  } catch (err) {
+    skipped.push(settingsPath);
+    console.warn(`skip (could not read existing ${settingsPath}: ${err.message}) -- merge this manually:\n${hooksOnlySnippet}`);
+    return;
+  }
+
+  let existingObj;
+  try {
+    existingObj = existingRaw.trim() ? JSON.parse(existingRaw) : {};
+  } catch (err) {
+    skipped.push(settingsPath);
+    console.warn(
+      `skip (existing ${settingsPath} is not valid JSON: ${err.message}) -- not touched. Merge this manually:\n${hooksOnlySnippet}`,
+    );
+    return;
+  }
+
+  if (existingObj.hooks) {
+    skipped.push(settingsPath);
+    console.warn(
+      `skip (${settingsPath} already has a "hooks" key -- not touched, auto-merging hook arrays risks misrouting an existing wiring). Merge this manually:\n${hooksOnlySnippet}`,
+    );
+    return;
+  }
+
+  const merged = { ...existingObj, hooks: hooksBlock };
+  const mergedSnippet = JSON.stringify(merged, null, 2);
+  if (!dryRun) {
+    writeFileSync(settingsPath, `${mergedSnippet}\n`, "utf8");
+  }
+  installed.push(settingsPath);
+  console.log(
+    `${dryRun ? "[dry-run] would merge hooks into" : "merged hooks into"}: ${settingsPath} (existing keys preserved)\n${mergedSnippet}\n${restartNote}`,
+  );
+}
+
+// Installs commit-msg/pre-commit into `<target>/.git/hooks/` (per-clone,
+// untracked by git itself -- this is the one part of a git hook's model
+// that has always required a local, non-committed install step, same as
+// the manual `cp hooks/commit-msg .git/hooks/commit-msg` documented in
+// docs/enforcement-v1.md). Only runs when `<target>/.git` exists as a real
+// directory; a target that is not yet a git repository (or uses some other
+// VCS layout) gets a warning instead of a crash, and the tracked copy under
+// `hooks/` (already installed above) remains available for a manual install
+// later.
+function installGitHooksIntoDotGit(targetRepoPath, { dryRun }) {
+  const gitDir = path.join(targetRepoPath, ".git");
+  let isGitDir = false;
+  try {
+    isGitDir = existsSync(gitDir) && statSync(gitDir).isDirectory();
+  } catch {
+    isGitDir = false;
+  }
+  if (!isGitDir) {
+    console.warn(
+      `skip (.git/hooks/ auto-install): '${gitDir}' is not a directory -- per-clone install is manual here: copy hooks/commit-msg and hooks/pre-commit into .git/hooks/ and chmod +x them.`,
+    );
+    return;
+  }
+  for (const name of ["commit-msg", "pre-commit"]) {
+    copyRawFile(path.join(REPO_ROOT, "hooks", name), path.join(gitDir, "hooks", name), { dryRun, executable: true });
+  }
+}
+
 function soloFullChecklist(params) {
   return `# solo-full GitHub setup checklist (do once, in the GitHub web UI)
 
@@ -261,8 +428,10 @@ Repo: ${params.githubRepo}
       security).
 - [ ] Confirm \`.github/workflows/enforce.yml\` is present and green on the
       first PR.
-- [ ] Install local hooks per-clone: copy \`hooks/commit-msg\` and
-      \`hooks/pre-commit\` into \`.git/hooks/\` (or symlink) and \`chmod +x\` them.
+- [ ] Local hooks: this installer already copied \`hooks/commit-msg\` and
+      \`hooks/pre-commit\` into \`.git/hooks/\` when it ran (if \`.git/\` existed
+      at install time) — confirm they're there and re-install if missing:
+      \`cp hooks/commit-msg hooks/pre-commit .git/hooks/ && chmod +x .git/hooks/commit-msg .git/hooks/pre-commit\`.
 - [ ] Install gitleaks locally for fast pre-commit feedback (optional; CI is
       authoritative regardless): https://github.com/gitleaks/gitleaks#installing
 `;
@@ -318,11 +487,20 @@ function main() {
     "role-guard.test.mjs",
     "context-inject.mjs",
     "context-inject.test.mjs",
+    "status-fresh.mjs",
+    "status-fresh.test.mjs",
     "clear-safe-check.mjs",
     "clear-safe-check.test.mjs",
   ]) {
     copyRawFile(path.join(REPO_ROOT, "scripts", "check", name), path.join(targetRepoPath, "scripts", "check", name), { dryRun, executable: false });
   }
+
+  // .git/hooks/ (per-clone, real install) and .claude/settings.local.json
+  // (Claude Code hook pre-wiring) -- both profiles, both one-shot
+  // completeness fixes for HYK-95. See installGitHooksIntoDotGit/
+  // installSettingsLocal above for the exact conditions and merge rules.
+  installGitHooksIntoDotGit(targetRepoPath, { dryRun });
+  installSettingsLocal(params, targetRepoPath, { dryRun });
 
   if (params.profile === "solo-full") {
     // Server-side anchor: CI workflow + gitleaks ruleset. Never automated
