@@ -37,10 +37,15 @@ Read these once; do not re-derive them after a `/clear`.
    `.harness/<role>.md` and ends with exactly
    `>>> DONE: <role> @ <YYYY-MM-DD HH:MM>` (get the timestamp from a real
    command; do not guess it).
-5. **Human relays completion, not content.** The human tells the
-   Orchestrator "<role> done" (or the project's equivalent phrase); the
-   Orchestrator then reads `.harness/<role>.md` itself and updates this
-   board. The human does not paste file contents.
+5. **Self-report, same turn.** The role that just finished updates its own
+   row on this board — the moment it writes its result file, in the same
+   turn, before anything else. The Orchestrator does not write a worker's
+   row for it; the Orchestrator only updates its own row and the
+   decision/state sections. The human still relays completion ("<role>
+   done"), not board content — the human never pastes file contents in.
+   (If this board lives outside the repository root, a role-boundary guard
+   scoped to the repo does not restrict this write — see
+   `docs/enforcement-v1.md`'s role-guard section.)
 6. **Target repository and role definitions.** State explicitly which
    repository each kind of work belongs to when a project spans more than
    one (do not assume a single repo). Roles: CODER = implementation or
