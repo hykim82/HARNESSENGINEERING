@@ -79,12 +79,20 @@ Both profiles (profile-agnostic core):
 - `.harness/STATUS.md`, `.harness/PHASE-HANDOFF.md` — from
   `status.template.md` / `phase-handoff.template.md`, now carrying a
   `Profile: <PROFILE>` header and profile-conditional relay notes.
-- `verify.sh` — from `verify.sh.template`, a one-line `exec <VERIFY_CMD>`
-  wrapper that propagates the real exit code.
+- `.harness/PROJECT-CONTEXT.md` — from `project-context.template.md`
+  (HYK-94). Its `## HARD CONSTRAINTS` section is what
+  `scripts/check/context-inject.mjs` injects into every new session via a
+  `SessionStart` hook, and what a `UserPromptSubmit` hook blocks all
+  prompts on if the file is missing entirely. See
+  `docs/enforcement-v1.md` ("D6 — project-context injection") for the
+  full mechanism.
+- `verify.sh` — from `verify.sh.template`, a one-line
+  `exec sh -c '<VERIFY_CMD>'` wrapper that runs the whole (possibly
+  `&&`-chained) command through a shell and propagates its real exit code.
 - A `.gitignore` append — from `gitignore.append.template`, which one
   block a profile receives.
 - `hooks/commit-msg`, `hooks/pre-commit`, and
-  `scripts/check/{review-gate,relay-handshake,role-guard}.{mjs,test.mjs}` —
+  `scripts/check/{review-gate,relay-handshake,role-guard,context-inject}.{mjs,test.mjs}` —
   copied **directly from this repository's live files**, not a frozen
   template copy, so an install always ships whatever this repo's
   enforcement layer currently is (the exact drift this v2 exists to avoid).
@@ -113,6 +121,25 @@ Both profiles (profile-agnostic core):
   local harness toolchain — `.harness/`, `verify.sh`, `hooks/commit-msg`,
   `hooks/pre-commit`, `scripts/check/` — on top of the relay directory, so
   none of it ever becomes a tracked change in the shared repo.
+
+### Claude Code hooks are not wired up by `install.mjs`
+
+Two check scripts installed above (both profiles) are meant to run as
+Claude Code hooks, not just as CLI/CI scripts, but `install.mjs` never
+touches `.claude/settings.local.json` to wire them — that file is
+untracked, per-clone, and self-modifying it mid-task is treated as a human
+action throughout this harness (same rationale as not automating
+GitHub branch protection above):
+
+- `scripts/check/status-fresh.mjs` as a `Stop` hook (HYK-91).
+- `scripts/check/context-inject.mjs` as a `SessionStart` hook (inject) and
+  a `UserPromptSubmit` hook (block if `.harness/PROJECT-CONTEXT.md` is
+  missing) (HYK-94).
+
+Both are documented with exact `.claude/settings.local.json` JSON snippets
+in `docs/enforcement-v1.md` ("STATUS freshness — Tier 2" and "D6 —
+project-context injection"); installing them is a one-time, per-clone step
+for a human to do after running `install.mjs`.
 
 ### `install.mjs` usage
 

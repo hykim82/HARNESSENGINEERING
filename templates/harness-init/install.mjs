@@ -198,11 +198,14 @@ function copyRawFile(srcPath, destPath, { dryRun, executable }) {
 function appendGitignoreBlock(profile, targetRepoPath, { dryRun }) {
   const templatePath = path.join(TEMPLATES_DIR, "gitignore.append.template");
   const raw = readFileSync(templatePath, "utf8");
-  const re = new RegExp(`# @profile:${profile}\\n([\\s\\S]*?)# @end`, "m");
+  // \r?\n tolerates the template being saved with either LF or CRLF line
+  // endings (this file has been re-saved as CRLF by Windows-side tooling
+  // before, which silently broke a plain \n-only match).
+  const re = new RegExp(`# @profile:${profile}\\r?\\n([\\s\\S]*?)# @end`, "m");
   const match = raw.match(re);
   if (!match) throw new Error(`gitignore.append.template has no block for profile '${profile}'`);
   const block = match[1]
-    .split("\n")
+    .split(/\r?\n/)
     .filter((line) => !line.trim().startsWith("#") && line.trim() !== "")
     .join("\n");
   const gitignorePath = path.join(targetRepoPath, ".gitignore");
@@ -281,6 +284,7 @@ function main() {
   // Profile-agnostic core.
   writeTemplateFile(path.join(TEMPLATES_DIR, "status.template.md"), path.join(targetRepoPath, ".harness", "STATUS.md"), map, { dryRun });
   writeTemplateFile(path.join(TEMPLATES_DIR, "phase-handoff.template.md"), path.join(targetRepoPath, ".harness", "PHASE-HANDOFF.md"), map, { dryRun });
+  writeTemplateFile(path.join(TEMPLATES_DIR, "project-context.template.md"), path.join(targetRepoPath, ".harness", "PROJECT-CONTEXT.md"), map, { dryRun });
   writeTemplateFile(path.join(TEMPLATES_DIR, "verify.sh.template"), path.join(targetRepoPath, "verify.sh"), map, { dryRun, executable: true });
   appendGitignoreBlock(params.profile, targetRepoPath, { dryRun });
   if (params.profile === "solo-full") {
@@ -299,7 +303,16 @@ function main() {
   // a server-side gate exists on top.
   copyRawFile(path.join(REPO_ROOT, "hooks", "commit-msg"), path.join(targetRepoPath, "hooks", "commit-msg"), { dryRun, executable: true });
   copyRawFile(path.join(REPO_ROOT, "hooks", "pre-commit"), path.join(targetRepoPath, "hooks", "pre-commit"), { dryRun, executable: true });
-  for (const name of ["review-gate.mjs", "review-gate.test.mjs", "relay-handshake.mjs", "relay-handshake.test.mjs", "role-guard.mjs", "role-guard.test.mjs"]) {
+  for (const name of [
+    "review-gate.mjs",
+    "review-gate.test.mjs",
+    "relay-handshake.mjs",
+    "relay-handshake.test.mjs",
+    "role-guard.mjs",
+    "role-guard.test.mjs",
+    "context-inject.mjs",
+    "context-inject.test.mjs",
+  ]) {
     copyRawFile(path.join(REPO_ROOT, "scripts", "check", name), path.join(targetRepoPath, "scripts", "check", name), { dryRun, executable: false });
   }
 
