@@ -215,3 +215,42 @@ test("(s) session-start + placeholder card -> exit 0, warning (does not inject p
     assert.match(parsed.hookSpecificOutput.additionalContext, /<GITHUB_REPO>/);
   });
 });
+
+// --- HYK-96 Scope D: card structure (HARD CONSTRAINTS injected, Goals/Intent/Context stored only) ---
+
+const TWO_SECTION_CARD =
+  "## HARD CONSTRAINTS\n\n" +
+  "- never commit .harness/ to the shared team repo\n\n" +
+  "## 목표·의도·맥락 (Goals / Intent / Context)\n\n" +
+  "- this project exists to pilot the team-local profile end to end\n" +
+  "- long freeform background that should never be repeated into every session\n";
+
+test("(t) extractHardConstraints on a two-section card returns only the HARD CONSTRAINTS body", () => {
+  const result = extractHardConstraints(TWO_SECTION_CARD);
+  assert.equal(result.ok, true);
+  assert.match(result.text, /never commit \.harness\//);
+  assert.doesNotMatch(result.text, /pilot the team-local profile/);
+  assert.doesNotMatch(result.text, /목표·의도·맥락/);
+});
+
+test("(u) session-start injection on a two-section card includes HARD CONSTRAINTS, excludes Goals/Intent/Context", () => {
+  withFixtureDir((dir) => {
+    const contextPath = join(dir, "PROJECT-CONTEXT.md");
+    writeFileSync(contextPath, TWO_SECTION_CARD, "utf8");
+    const { stdout, status } = runCli(["--mode", "session-start", "--context", contextPath]);
+    assert.equal(status, 0);
+    const parsed = JSON.parse(stdout);
+    assert.match(parsed.hookSpecificOutput.additionalContext, /never commit \.harness\//);
+    assert.doesNotMatch(parsed.hookSpecificOutput.additionalContext, /pilot the team-local profile/);
+  });
+});
+
+test("(v) user-prompt-submit on a two-section card with a filled-in HARD CONSTRAINTS -> exit 0 (regression, structure doesn't affect the gate)", () => {
+  withFixtureDir((dir) => {
+    const contextPath = join(dir, "PROJECT-CONTEXT.md");
+    writeFileSync(contextPath, TWO_SECTION_CARD, "utf8");
+    const { stdout, status } = runCli(["--mode", "user-prompt-submit", "--context", contextPath]);
+    assert.equal(status, 0);
+    assert.equal(stdout.trim(), "");
+  });
+});

@@ -854,10 +854,44 @@ at all, and D6 v1 didn't catch it. Scope A closes that gap:
   uncertain, not confirmed-unusable, and passes through — the same
   fail-open principle D6 v1 already applied to unexpected exceptions, now
   extended to the new content check rather than only the existence check.
-- Scope B (a `/clear`-time re-orientation checkpoint), C (a skill for
-  authoring/maintaining the card), and D (splitting the card's freeform
-  background from its enforced constraints section into separate files) are
-  **not** part of Scope A and remain open follow-up work.
+- Scope B (a `/clear`-time re-orientation checkpoint) and C (a skill for
+  authoring/maintaining the card) are **not** part of Scope A and remain
+  open follow-up work. Scope D (splitting the card's freeform background
+  from its enforced constraints section) is covered separately below.
+
+### Scope D (HYK-96) — card structure: constraints vs. context
+
+Putting a project's full background, goals, and evolving narrative into
+`PROJECT-CONTEXT.md` alongside its hard constraints would make the
+`SessionStart` injection payload grow without bound — every session start
+would re-inject an ever-longer wall of text, diluting the signal the
+injected constraints are supposed to carry. Scope D's fix needed no new
+enforcement logic, only a structural convention plus tests that pin it
+down:
+
+- `project-context.template.md` now has **two headings**: `## HARD
+  CONSTRAINTS` (short, imperative, non-negotiable — the only thing that
+  gets injected) followed by `## 목표·의도·맥락` (Goals / Intent / Context —
+  freeform, storage-only, never injected, as long as useful).
+- This split costs nothing to enforce because `extractHardConstraints`
+  (Scope A/D6) already stops at the *next* `##` heading — putting a second
+  section after `HARD CONSTRAINTS` was already excluded from injection by
+  the extraction logic that existed before this task. Scope D is a
+  documentation-and-template change confirmed by test, not a new code path:
+  `context-inject.mjs` was not modified for this scope (verified directly —
+  see the HYK-96D coder report for the exact confirmation command and
+  output).
+- `context-inject.test.mjs` pins this down with a two-section fixture card:
+  `extractHardConstraints` returns only the `HARD CONSTRAINTS` body (the
+  Goals/Intent/Context text is absent from the result), the `SessionStart`
+  CLI's `additionalContext` contains the constraints but not the
+  goals/intent prose, and `UserPromptSubmit`'s pass/block gate is unaffected
+  by the extra section (structure doesn't change gate behavior, only what
+  gets carried into every session).
+- Forward-looking intent, not built in this scope: a future `/clear`-time
+  re-orientation step (Scope B) is expected to append deltas to `## 목표·
+  의도·맥락` over time, making it the project's running memory rather than a
+  one-time background paragraph written once at install time.
 
 ### v1 scope: deliberately minimal
 

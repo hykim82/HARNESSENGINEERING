@@ -80,12 +80,16 @@ Both profiles (profile-agnostic core):
   `status.template.md` / `phase-handoff.template.md`, now carrying a
   `Profile: <PROFILE>` header and profile-conditional relay notes.
 - `.harness/PROJECT-CONTEXT.md` — from `project-context.template.md`
-  (HYK-94). Its `## HARD CONSTRAINTS` section is what
-  `scripts/check/context-inject.mjs` injects into every new session via a
-  `SessionStart` hook, and what a `UserPromptSubmit` hook blocks all
-  prompts on if the file is missing entirely. See
-  `docs/enforcement-v1.md` ("D6 — project-context injection") for the
-  full mechanism.
+  (HYK-94, structure updated HYK-96 Scope D). Two headings, one
+  enforcement-relevant distinction: `## HARD CONSTRAINTS` (short,
+  imperative — the only section `scripts/check/context-inject.mjs` injects
+  into every new session via the `SessionStart` hook) and `## 목표·의도·맥락`
+  (Goals/Intent/Context — freeform storage, never injected, can grow
+  without cost). A `UserPromptSubmit` hook blocks all prompts if the file
+  is missing, or if `HARD CONSTRAINTS` is empty or still has an unedited
+  template placeholder in it (HYK-96 Scope A). See `docs/enforcement-v1.md`
+  ("D6 — project-context injection", "Scope A", "Scope D") for the full
+  mechanism.
 - `verify.sh` — from `verify.sh.template`, a one-line
   `exec sh -c '<VERIFY_CMD>'` wrapper that runs the whole (possibly
   `&&`-chained) command through a shell and propagates its real exit code.
