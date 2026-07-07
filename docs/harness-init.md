@@ -106,13 +106,32 @@ Both profiles (profile-agnostic core):
 - A `.gitignore` append — from `gitignore.append.template`, which one
   block a profile receives.
 - `hooks/commit-msg`, `hooks/pre-commit`, and
-  `scripts/check/{review-gate,relay-handshake,role-guard,context-inject,clear-safe-check}.{mjs,test.mjs}` —
+  `scripts/check/{review-gate,relay-handshake,role-guard,context-inject,status-fresh,clear-safe-check}.{mjs,test.mjs}` —
   copied **directly from this repository's live files**, not a frozen
   template copy, so an install always ships whatever this repo's
   enforcement layer currently is (the exact drift this v2 exists to avoid).
-  `clear-safe-check.mjs` (HYK-96 Scope B) is a soft, non-blocking `/clear`
-  reconciliation reminder — see "Claude Code hooks are not wired up by
-  `install.mjs`" below.
+  `status-fresh.{mjs,test.mjs}` was missing from this list before HYK-95 —
+  a copy-list gap, now fixed. `clear-safe-check.mjs` (HYK-96 Scope B) is a
+  soft, non-blocking `/clear` reconciliation reminder — see "Claude Code
+  hooks: now pre-wired by `install.mjs`" below.
+- **`<target>/.git/hooks/commit-msg` and `<target>/.git/hooks/pre-commit`**
+  (HYK-95) — a *real*, per-clone install of the two git hooks above, on top
+  of the tracked copy under `hooks/`. Only runs when `<target>/.git` exists
+  as a directory (a fresh, not-yet-`git init`'d target gets a warning
+  instead, no crash); never overwrites an existing installed hook
+  (skip + warn, same convention as every other file this installer writes).
+  A target with no `.git/` at all still gets the tracked `hooks/` copy, for
+  a later manual install.
+- **`<target>/.claude/settings.local.json`** (HYK-95) — generated or merged
+  with the same `hooks` block this repository's own live file carries
+  (`PreToolUse` role-guard, `Stop` status-fresh + clear-safe-check,
+  `SessionStart` + `UserPromptSubmit` context-inject), with STATUS/
+  PROJECT-CONTEXT paths resolved per profile (control room for `solo-full`,
+  `$CLAUDE_PROJECT_DIR/.harness/...` for `team-local`). See "Claude Code
+  hooks: now pre-wired by `install.mjs`" below for the merge rules and
+  limits. Both profiles' `.gitignore` block now also ignore
+  `.claude/settings.local.json` — it carries this machine's absolute local
+  paths, not shareable repo content.
 
 `solo-full` only, additionally:
 
@@ -136,35 +155,83 @@ Both profiles (profile-agnostic core):
   checklist.** There is no server-side gate to add.
 - The `gitignore.append.template`'s `team-local` block ignores the entire
   local harness toolchain — `.harness/`, `verify.sh`, `hooks/commit-msg`,
-  `hooks/pre-commit`, `scripts/check/`, `.claude/skills/capture-context/` —
-  on top of the relay directory, so none of it ever becomes a tracked
-  change in the shared repo.
+  `hooks/pre-commit`, `scripts/check/`, `.claude/skills/capture-context/`,
+  `.claude/settings.local.json` — on top of the relay directory, so none of
+  it ever becomes a tracked change in the shared repo.
 
-### Claude Code hooks are not wired up by `install.mjs`
+### Claude Code hooks: now pre-wired by `install.mjs` (HYK-95)
 
-Two check scripts installed above (both profiles) are meant to run as
-Claude Code hooks, not just as CLI/CI scripts, but `install.mjs` never
-touches `.claude/settings.local.json` to wire them — that file is
-untracked, per-clone, and self-modifying it mid-task is treated as a human
-action throughout this harness (same rationale as not automating
-GitHub branch protection above):
+Before HYK-95, three check scripts were meant to run as Claude Code hooks
+but `install.mjs` never touched `.claude/settings.local.json` to wire
+them — a human had to hand-copy a JSON snippet after every install. The
+installer now generates or merges that file directly:
 
 - `scripts/check/status-fresh.mjs` as a `Stop` hook (HYK-91).
+- `scripts/check/clear-safe-check.mjs` as a second `Stop` hook command
+  (HYK-96 Scope B) — soft, non-blocking (`exit 1`, never `exit 2`); it
+  cannot be a hard gate even in principle, since Claude Code has no hook
+  that fires *before* `/clear` clears context, only ones that fire after,
+  in the new session, too late to capture anything.
 - `scripts/check/context-inject.mjs` as a `SessionStart` hook (inject) and
-  a `UserPromptSubmit` hook (block if `.harness/PROJECT-CONTEXT.md` is
-  missing) (HYK-94).
-- `scripts/check/clear-safe-check.mjs` as a `Stop` hook (HYK-96 Scope B) —
-  a soft, non-blocking (`exit 1`, never `exit 2`) reminder that a 🟢
-  `/clear`-safe declaration on the status board has no filled
-  `clear-safe-attest` reconciliation marker next to it. Unlike the other
-  two, this one cannot be a hard gate even in principle — Claude Code has
-  no hook that fires *before* `/clear` clears context, only ones that fire
-  after, in the new session, too late to capture anything.
+  a `UserPromptSubmit` hook (block if the project context card is missing
+  or unusable) (HYK-94).
+- `scripts/check/role-guard.mjs` as the `PreToolUse` hook (HYK-86) — this
+  one was already effectively "pre-wired" in spirit since a fresh install
+  has no prior settings file to conflict with, but it is now included in
+  the same generated block rather than left undocumented.
 
-All three are documented with exact `.claude/settings.local.json` JSON
+**STATUS/PROJECT-CONTEXT path, per profile:** `solo-full` points both hooks
+at `<controlRoomPath>/STATUS.md` and `<controlRoomPath>/PROJECT-CONTEXT.md`
+(forward-slash normalized, matching this repo's own live example);
+`team-local` has no control room, so it points at its own
+`$CLAUDE_PROJECT_DIR/.harness/STATUS.md` / `.../PROJECT-CONTEXT.md` — the
+portable token needs no substitution, unlike the installer's other
+placeholders.
+
+**Merge rules, in order** (never regex/string surgery on existing JSON —
+always parse, modify, and `JSON.stringify(obj, null, 2)`):
+
+1. No `.claude/settings.local.json` yet → create it with just `{ "hooks":
+   {...} }`.
+2. File exists, no top-level `hooks` key (e.g. only `permissions`) →
+   existing keys preserved, `hooks` added.
+3. File exists and already has a `hooks` key → **not touched.**
+   Auto-merging hook arrays risks silently misrouting a wiring the operator
+   already set up on purpose. The installer skips, warns, and prints the
+   generated hooks block as a snippet for a human to merge by hand.
+4. File exists but isn't valid JSON → same as (3): not touched, warning +
+   snippet fallback.
+
+`--dry-run` never writes; it prints what it *would* create or merge (create
+and merge-success paths also print the same snippet, so a preview is
+possible without writing).
+
+**Self-modification boundary, restated (why this is safe to automate now):**
+elsewhere in this document, writing to `.claude/settings.local.json` is
+treated as a human action, because *a currently running session*
+self-modifying its own live settings mid-task is out of scope for an agent
+to do to itself. `install.mjs` targets a **different, not-yet-started**
+target repository, so that specific rationale for a human-only step does
+not apply here — this is scaffolding a new project, not editing an active
+session's own control surface. What is *still* a required human step
+regardless: reviewing the generated file, restarting Claude Code once so
+the new hooks actually load, and confirming they fire. **Never run this
+installer against `HARNESSENGINEERING`'s own `.claude/` directory** — that
+*is* self-modification of an active repo's live settings, exactly the case
+the boundary exists to exclude.
+
+**Git hooks, restated:** `<target>/.git/hooks/{commit-msg,pre-commit}` are
+also now installed for real (not just the tracked `hooks/` copy) when
+`<target>/.git` exists as a directory at install time — this remains
+per-clone by git's own model (`.git/hooks/` is never tracked), so a repo
+cloned later from the freshly-scaffolded one still needs its own install
+(same as before HYK-95, just automated for the repo the installer runs
+against directly).
+
+All hook wiring is documented with exact `.claude/settings.local.json` JSON
 snippets in `docs/enforcement-v1.md` ("STATUS freshness — Tier 2", "D6 —
-project-context injection", "Scope B"); installing them is a one-time,
-per-clone step for a human to do after running `install.mjs`.
+project-context injection", "Scope B") for manual reference, even though
+`install.mjs` now writes the equivalent block itself.
 
 ### `install.mjs` usage
 

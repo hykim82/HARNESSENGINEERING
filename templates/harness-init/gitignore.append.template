@@ -6,10 +6,15 @@
 # markers for the installer, not gitignore syntax to copy verbatim.
 
 # @profile:solo-full
-# Only the relay working directory is ignored; hook scripts and CI config
-# are committed and reviewed like any other repo asset (matches
-# HARNESSENGINEERING's own .gitignore).
+# Only the relay working directory and settings.local.json are ignored;
+# hook scripts and CI config are committed and reviewed like any other repo
+# asset (matches HARNESSENGINEERING's own .gitignore). settings.local.json
+# is per-clone Claude Code config (HYK-95: install.mjs now pre-wires it with
+# absolute, machine-local paths), not a shareable repo asset like the check
+# scripts -- committing it would leak this machine's local paths into a
+# public repo's history.
 .harness/
+.claude/settings.local.json
 # @end
 
 # @profile:team-local
@@ -18,11 +23,13 @@
 # onto a shared team repo (HYK-92). Only the capture-context path is
 # ignored here (not all of .claude/skills/), since a team may keep its own,
 # unrelated skills under that directory that this profile has no business
-# hiding (HYK-96 Scope C).
+# hiding (HYK-96 Scope C). settings.local.json is added for the same
+# per-clone-config reason as the solo-full block above (HYK-95).
 .harness/
 verify.sh
 hooks/commit-msg
 hooks/pre-commit
 scripts/check/
 .claude/skills/capture-context/
+.claude/settings.local.json
 # @end
