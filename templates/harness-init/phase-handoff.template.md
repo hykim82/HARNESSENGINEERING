@@ -1,6 +1,7 @@
 # PHASE HANDOFF — a new session reads this file first
 
 **Written: <YYYY-MM-DD HH:MM KST> (end of Phase <X>)**
+**Profile: <PROFILE>** (`solo-full` | `team-local`)
 
 ## How to boot a new session (Orchestrator)
 
@@ -42,3 +43,19 @@ from memory.
 - Repos: <paths>
 - Terminals / relay orientation: <state>
 - Linear: <team/project>; AI moves work to In Review, Human moves Done.
+
+## Profile-specific handoff notes
+
+- **If `<PROFILE>` = `solo-full`:** `<REPO_PATH>` is public on GitHub
+  (`<GITHUB_REPO>`) with its protected branch requiring a PR, green
+  `enforce` CI, and one human approval; the acting agent pushes only as the
+  Write-only bot `<BOT_ACCOUNT>`, never directly to the protected branch.
+  GitHub-side setup (branch protection, bot collaborator, secret scanning)
+  is a one-time human step done in the GitHub web UI — do not attempt to
+  automate it from a session.
+- **If `<PROFILE>` = `team-local`:** `<REPO_PATH>` is a local clone of a
+  team-owned repo (`<GITHUB_REPO>`); this account holds no branch-protection
+  or CI authority there. Enforcement is local hooks + `<VERIFY_CMD>` only —
+  no server-side gate exists or should be added. Work lands via a feature
+  branch pushed to this account's own remote/fork and an upstream PR
+  reviewed under the team's own process, not this harness's rules.

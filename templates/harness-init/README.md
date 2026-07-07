@@ -29,7 +29,16 @@ the harness.
 - `handoff-packet.template.md`: Claude-to-Codex handoff packet
 - `question-packet.template.md`: role-to-Orchestrator question packet
 - `phase-handoff.template.md`: phase-boundary handoff for session rotation
-- `status.template.md`: short "where am I" status board
+  (carries a `Profile:` field, v2/HYK-92)
+- `status.template.md`: short "where am I" status board (carries a
+  `Profile:` field, v2/HYK-92)
+- `verify.sh.template`: one-line `exec <VERIFY_CMD>` wrapper (v2, HYK-92)
+- `gitignore.append.template`: profile-specific `.gitignore` append block,
+  `solo-full` vs `team-local` (v2, HYK-92)
+- `install.mjs`: Node installer — reads a profile + 5 parameters, copies the
+  matching template/script set into a target repo with placeholder
+  substitution, never overwrites an existing file (v2, HYK-92); see
+  `docs/harness-init.md` ("Profiles (v2, HYK-92)") for usage
 - `skill/SKILL.md`: draft skill instructions
 
 ## Rules

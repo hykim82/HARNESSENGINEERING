@@ -26,6 +26,122 @@ Reason:
   run-validated end-to-end (the documentation profile was); it will be
   exercised during the target project's UI phases.
 - No global `harness-init` skill has been installed from this repository.
+- v2 (HYK-92) parameterizes the package into two install profiles
+  (`solo-full`, `team-local`) and adds `install.mjs`; see "Profiles (v2,
+  HYK-92)" below. Validated by installing `team-local` into a real second
+  repository (`TEAM10`, a shared team SPA) and dry-running `solo-full`
+  against this repository itself.
+
+## Profiles (v2, HYK-92)
+
+This session's enforcement layer (HYK-83/86/87/88/90) was built directly
+into HARNESSENGINEERING itself, not the template — applying it to a new
+project meant manually re-deriving it, which drifts. v2 extracts it into two
+profiles, each backed by a real instance:
+
+- **`solo-full`** — this repository. A single operator, GitHub-public,
+  server-side enforcement: protected default branch (PR + green `enforce`
+  CI + one human approval, `enforce_admins` on), a Write-only bot
+  collaborator doing the pushing (identity separation, B1/HYK-87), gitleaks
+  in CI, plus the local `hooks/commit-msg` / `hooks/pre-commit` and
+  role-guard `PreToolUse` hook for fast local feedback.
+- **`team-local`** — a repo this account does not own or administer (e.g. a
+  shared classroom/team repo). No server-side gate is added — this account
+  cannot add one, and even if it could, imposing it on a repo the whole team
+  uses is out of scope. Enforcement here is **local-only**: the same check
+  scripts and git hooks, run from a personal `verify.sh`, ignored from the
+  shared repo's history entirely (see "team-local gitignore" below). Landing
+  work still goes through a feature branch and an upstream PR under the
+  team's own review process, not this harness's rules.
+
+### Parameters
+
+Five placeholder tokens, filled in at install time (`install.mjs` does
+plain string substitution — no template engine):
+
+| Token | Meaning | solo-full example | team-local example |
+| --- | --- | --- | --- |
+| `<PROFILE>` | which profile was installed | `solo-full` | `team-local` |
+| `<REPO_PATH>` | absolute path to the target repo | `C:\...\HARNESSENGINEERING` | `C:\...\TEAM10` |
+| `<CONTROL_ROOM_PATH>` | path to the operator's control room (outside the repo) | `D:\문서관리\하네스-관제실` | *(omit — team-local has no control room)* |
+| `<GITHUB_REPO>` | `owner/repo` | `hykim82/HARNESSENGINEERING` | `AL06-Class/AL06TEAM10` |
+| `<BOT_ACCOUNT>` | Write-only bot collaborator | `codexlocal101-rgb` | *(omit — team-local pushes directly, no bot)* |
+| `<VERIFY_CMD>` | the one command verify.sh runs | `node scripts/check/review-gate.test.mjs && ...` | `npm run build` |
+
+`<CONTROL_ROOM_PATH>` and `<BOT_ACCOUNT>` are optional and may be blank for
+`team-local`; `install.mjs` requires them only when `<PROFILE>` is
+`solo-full`.
+
+### What each profile installs
+
+Both profiles (profile-agnostic core):
+
+- `.harness/STATUS.md`, `.harness/PHASE-HANDOFF.md` — from
+  `status.template.md` / `phase-handoff.template.md`, now carrying a
+  `Profile: <PROFILE>` header and profile-conditional relay notes.
+- `verify.sh` — from `verify.sh.template`, a one-line `exec <VERIFY_CMD>`
+  wrapper that propagates the real exit code.
+- A `.gitignore` append — from `gitignore.append.template`, which one
+  block a profile receives.
+- `hooks/commit-msg`, `hooks/pre-commit`, and
+  `scripts/check/{review-gate,relay-handshake,role-guard}.{mjs,test.mjs}` —
+  copied **directly from this repository's live files**, not a frozen
+  template copy, so an install always ships whatever this repo's
+  enforcement layer currently is (the exact drift this v2 exists to avoid).
+
+`solo-full` only, additionally:
+
+- `AGENTS.append.md` appended to the target's `AGENTS.md` (skipped if
+  equivalent rules already exist).
+- `.github/workflows/enforce.yml` and `.gitleaks.toml`, copied live from
+  this repo.
+- `.harness/github-setup-checklist.md` — a checklist of the one-time,
+  human-only GitHub web UI steps (branch protection, inviting the
+  Write-only bot, enabling secret scanning). **Never automated** — this
+  mirrors the B1 anchor principle that server-side authority setup is a
+  human action outside agent control.
+
+`team-local` only, differently:
+
+- **`AGENTS.md` is left untouched.** It is shared, committed team state;
+  appending personal harness rules to it would impose this account's
+  tooling on the team repo, which is exactly what this profile exists not
+  to do.
+- **No `.github/workflows/enforce.yml`, no `.gitleaks.toml`, no GitHub
+  checklist.** There is no server-side gate to add.
+- The `gitignore.append.template`'s `team-local` block ignores the entire
+  local harness toolchain — `.harness/`, `verify.sh`, `hooks/commit-msg`,
+  `hooks/pre-commit`, `scripts/check/` — on top of the relay directory, so
+  none of it ever becomes a tracked change in the shared repo.
+
+### `install.mjs` usage
+
+```sh
+node templates/harness-init/install.mjs \
+  --profile solo-full \
+  --repo-path "C:\path\to\repo" \
+  --control-room-path "D:\path\to\control-room" \
+  --github-repo "owner/repo" \
+  --bot-account "bot-account-name" \
+  --verify-cmd "node scripts/check/review-gate.test.mjs && ..." \
+  [--dry-run]
+
+node templates/harness-init/install.mjs \
+  --profile team-local \
+  --repo-path "C:\path\to\team\repo" \
+  --github-repo "owner/repo" \
+  --verify-cmd "npm run build" \
+  [--dry-run]
+```
+
+Parameters may also be supplied via a `harness-init.config.json` placed in
+the target repo (or passed with `--config <path>`); CLI flags override
+matching config-file keys. `install.mjs` never overwrites an existing file
+— an existing path is skipped with a warning, never replaced. `--dry-run`
+logs every action it would take without writing anything, useful for
+confirming the skip path on a repo that already has the harness installed.
+Run output ends with an installed/skipped file summary, and for
+`solo-full`, the GitHub setup checklist.
 
 ## Package Contents
 
