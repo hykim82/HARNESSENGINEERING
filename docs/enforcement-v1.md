@@ -893,6 +893,84 @@ down:
   의도·맥락` over time, making it the project's running memory rather than a
   one-time background paragraph written once at install time.
 
+### Scope C (HYK-96) — `/capture-context` capture-assist skill
+
+D6/Scope A close the *injection* half of the capture problem — a session
+cannot proceed with a missing or stub `PROJECT-CONTEXT.md`. What they never
+address is the *other* half: making a human or agent actually write the
+card's content in the first place. Nothing mechanical enforces that a real
+goal, intent, or hard constraint that came up mid-conversation ever makes it
+into the file — that has always depended on someone remembering to go edit
+it. Scope C does not close that gap (see "Honest limits" below — it
+cannot be closed mechanically), it lowers the friction of doing it right:
+
+- `.claude/skills/capture-context/SKILL.md` (this repository) and
+  `templates/harness-init/skill/capture-context/SKILL.md` (the install
+  template, `<PROFILE>`/`<REPO_PATH>`/`<CONTROL_ROOM_PATH>`/`<GITHUB_REPO>`
+  parameterized) define a `/capture-context` skill: read the current card,
+  scan the conversation for durable facts (as opposed to one-off,
+  this-conversation-only details), propose a **delta** — not a full
+  rewrite — split across the two Scope D sections, present it to the human
+  for edit/approval, then write only the approved delta, and finally
+  self-check the result.
+- **Card-path resolution matches `context-inject.mjs` exactly.** The skill
+  is prose, not code — it cannot import `resolveContextPath` — so it
+  restates the same precedence as an explicit procedure: (a) the
+  `--context <path>` argument baked into `.claude/settings.local.json`'s
+  `SessionStart`/`UserPromptSubmit` hook command for `context-inject.mjs`;
+  (b) the `HARNESS_CONTEXT_PATH` environment variable; (c) the default
+  `<repo-root>/.harness/PROJECT-CONTEXT.md`. This matters concretely in this
+  repository: the active card is the control-room path
+  (`D:/문서관리/하네스-관제실/PROJECT-CONTEXT.md`, resolved via (a)), not
+  `.harness/PROJECT-CONTEXT.md` under this repo, which does not exist here
+  at all — a skill that assumed the repo-local default would silently edit
+  or create the wrong file.
+- **The skill exists to help pass Scope A's gate, not to bypass it.** Its
+  self-check step is literally
+  `node scripts/check/context-inject.mjs --mode user-prompt-submit --context <path>`
+  exiting `0` — the same `isUsableCard` check `UserPromptSubmit` runs — so
+  running the skill to completion is, by construction, a way to turn a stub
+  card into one that passes the existing gate.
+- **Respects the Scope D section split.** Hard, non-negotiable rules go to
+  `## HARD CONSTRAINTS` (kept short, since that section alone is injected
+  every session); everything else — background, evolving intent, narrative
+  — is appended to `## 목표·의도·맥락`, which is explicitly meant to
+  accumulate over time (the running-memory design Scope D already called
+  out as a follow-up).
+- **`install.mjs` ships the skill to both profiles.** `writeTemplateFile`
+  copies `templates/harness-init/skill/capture-context/SKILL.md` to
+  `<repo>/.claude/skills/capture-context/SKILL.md` with the same
+  five-token substitution as every other template file, skip-and-warn if
+  already present, for both `solo-full` and `team-local`.
+- **`team-local` gitignore.** The skill file is harness tooling, so
+  `gitignore.append.template`'s `team-local` block gained
+  `.claude/skills/capture-context/` (narrower than the whole
+  `.claude/skills/` directory, so this profile does not hide a team's own,
+  unrelated skills that might live alongside it). `solo-full`'s block gets
+  no new entry — the skill is a normal repository asset there, committed
+  and reviewed like the hook scripts already are (unchanged from that
+  block's existing rationale).
+
+#### Honest limits (Scope C)
+
+- **Cannot verify completeness or quality mechanically.** "Did this capture
+  everything that mattered" is a judgment call the skill cannot make on its
+  own — it surfaces only what the model *noticed* as durable during the
+  scan; the human's edit/approval step is the only actual quality gate.
+- **Does not see through prior compaction.** If the conversation was already
+  summarized before the skill ran, whatever the summary dropped is gone from
+  the skill's view too — there is no way to recover it retroactively.
+- **Not a hard gate, and not Scope B.** The skill only runs on explicit
+  invocation (`/capture-context`); it does not intercept `/clear` and blocks
+  nothing by itself. A `/clear`-time re-orientation *checkpoint* remains
+  separate, not-yet-built follow-up work (HYK-96 Scope B).
+- **Same local trust boundary as every other mechanism in this document.**
+  Nothing stops an agent or operator from skipping the skill, or from
+  writing a delta that looks plausible but doesn't actually reflect the
+  conversation. The self-check step only proves the resulting card's *form*
+  passes `isUsableCard` — it says nothing about whether its *content* is
+  honest.
+
 ### v1 scope: deliberately minimal
 
 `UserPromptSubmit` does not track "have I already injected this session" via
