@@ -39,6 +39,9 @@ jobs:
       - name: context-inject tests
         run: node scripts/check/context-inject.test.mjs
 
+      - name: clear-safe-check tests
+        run: node scripts/check/clear-safe-check.test.mjs
+
       - name: hooks POSIX syntax check
         run: |
           sh -n hooks/commit-msg

@@ -19,6 +19,26 @@
 - In Review: <ids>
 - Todo / In Progress: <ids>
 
+## /clear safety (reconciliation attestation)
+
+Before declaring 🟢 "safe to `/clear`" anywhere on this board, reconcile this
+session's goals/intent/hard-constraint delta into `PROJECT-CONTEXT.md` (the
+`/capture-context` skill drafts that delta; a human still approves it), then
+record the result right next to the 🟢 declaration with this exact marker:
+
+```
+<!-- clear-safe-attest: reconciled=<YYYY-MM-DD HH:MM KST | none> delta=<none|applied|deferred> -->
+```
+
+Fill `reconciled=` with the real timestamp you did the reconciliation at (or
+the literal `none` if there was nothing to reconcile this session — not a
+blank). `scripts/check/clear-safe-check.mjs`, wired to a `Stop` hook, reminds
+(non-blocking, `exit 1`) when a 🟢 declaration appears without this marker
+filled in. It cannot intercept `/clear` itself and cannot verify the
+attestation's *content* — only that the marker is present and non-empty. See
+`docs/enforcement-v1.md` ("Scope B") for why this can only ever be a soft
+reminder, not a hard gate.
+
 ## Relay rules
 
 Read these once; do not re-derive them after a `/clear`.

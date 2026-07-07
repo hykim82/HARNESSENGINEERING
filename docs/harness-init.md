@@ -106,10 +106,13 @@ Both profiles (profile-agnostic core):
 - A `.gitignore` append — from `gitignore.append.template`, which one
   block a profile receives.
 - `hooks/commit-msg`, `hooks/pre-commit`, and
-  `scripts/check/{review-gate,relay-handshake,role-guard,context-inject}.{mjs,test.mjs}` —
+  `scripts/check/{review-gate,relay-handshake,role-guard,context-inject,clear-safe-check}.{mjs,test.mjs}` —
   copied **directly from this repository's live files**, not a frozen
   template copy, so an install always ships whatever this repo's
   enforcement layer currently is (the exact drift this v2 exists to avoid).
+  `clear-safe-check.mjs` (HYK-96 Scope B) is a soft, non-blocking `/clear`
+  reconciliation reminder — see "Claude Code hooks are not wired up by
+  `install.mjs`" below.
 
 `solo-full` only, additionally:
 
@@ -150,11 +153,18 @@ GitHub branch protection above):
 - `scripts/check/context-inject.mjs` as a `SessionStart` hook (inject) and
   a `UserPromptSubmit` hook (block if `.harness/PROJECT-CONTEXT.md` is
   missing) (HYK-94).
+- `scripts/check/clear-safe-check.mjs` as a `Stop` hook (HYK-96 Scope B) —
+  a soft, non-blocking (`exit 1`, never `exit 2`) reminder that a 🟢
+  `/clear`-safe declaration on the status board has no filled
+  `clear-safe-attest` reconciliation marker next to it. Unlike the other
+  two, this one cannot be a hard gate even in principle — Claude Code has
+  no hook that fires *before* `/clear` clears context, only ones that fire
+  after, in the new session, too late to capture anything.
 
-Both are documented with exact `.claude/settings.local.json` JSON snippets
-in `docs/enforcement-v1.md` ("STATUS freshness — Tier 2" and "D6 —
-project-context injection"); installing them is a one-time, per-clone step
-for a human to do after running `install.mjs`.
+All three are documented with exact `.claude/settings.local.json` JSON
+snippets in `docs/enforcement-v1.md` ("STATUS freshness — Tier 2", "D6 —
+project-context injection", "Scope B"); installing them is a one-time,
+per-clone step for a human to do after running `install.mjs`.
 
 ### `install.mjs` usage
 
