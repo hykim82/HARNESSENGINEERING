@@ -93,6 +93,16 @@ Both profiles (profile-agnostic core):
 - `verify.sh` — from `verify.sh.template`, a one-line
   `exec sh -c '<VERIFY_CMD>'` wrapper that runs the whole (possibly
   `&&`-chained) command through a shell and propagates its real exit code.
+- `.claude/skills/capture-context/SKILL.md` — from
+  `skill/capture-context/SKILL.md` (HYK-96 Scope C), a `/capture-context`
+  skill that scans the session for durable goals/intent/hard-constraint
+  facts, proposes a delta against the current `PROJECT-CONTEXT.md`, and
+  writes it only after human edit/approval. Installed for **both**
+  profiles. For `team-local`, `.claude/skills/capture-context/` is also
+  added to the profile's `.gitignore` block (see below) — the skill is
+  harness tooling and must not become tracked team-repo state. See
+  `docs/enforcement-v1.md` ("D6 — project-context injection", "Scope C")
+  for the full mechanism.
 - A `.gitignore` append — from `gitignore.append.template`, which one
   block a profile receives.
 - `hooks/commit-msg`, `hooks/pre-commit`, and
@@ -123,8 +133,9 @@ Both profiles (profile-agnostic core):
   checklist.** There is no server-side gate to add.
 - The `gitignore.append.template`'s `team-local` block ignores the entire
   local harness toolchain — `.harness/`, `verify.sh`, `hooks/commit-msg`,
-  `hooks/pre-commit`, `scripts/check/` — on top of the relay directory, so
-  none of it ever becomes a tracked change in the shared repo.
+  `hooks/pre-commit`, `scripts/check/`, `.claude/skills/capture-context/` —
+  on top of the relay directory, so none of it ever becomes a tracked
+  change in the shared repo.
 
 ### Claude Code hooks are not wired up by `install.mjs`
 
@@ -200,6 +211,9 @@ Contents:
 - `phase-handoff.template.md`: phase-boundary handoff for session rotation
 - `status.template.md`: short "where am I" status board
 - `skill/SKILL.md`: draft skill instructions for a future `harness-init` skill
+- `skill/capture-context/SKILL.md`: `/capture-context` capture-assist skill
+  template, installed to `.claude/skills/capture-context/SKILL.md` in both
+  profiles (HYK-96 Scope C)
 
 ## Opt-In Rule
 

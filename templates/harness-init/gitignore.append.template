@@ -15,10 +15,14 @@
 # @profile:team-local
 # The entire local harness toolchain is ignored on top of the relay
 # directory — this account's personal process tooling must not be forced
-# onto a shared team repo (HYK-92).
+# onto a shared team repo (HYK-92). Only the capture-context path is
+# ignored here (not all of .claude/skills/), since a team may keep its own,
+# unrelated skills under that directory that this profile has no business
+# hiding (HYK-96 Scope C).
 .harness/
 verify.sh
 hooks/commit-msg
 hooks/pre-commit
 scripts/check/
+.claude/skills/capture-context/
 # @end

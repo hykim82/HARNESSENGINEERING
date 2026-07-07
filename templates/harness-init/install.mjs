@@ -286,6 +286,12 @@ function main() {
   writeTemplateFile(path.join(TEMPLATES_DIR, "phase-handoff.template.md"), path.join(targetRepoPath, ".harness", "PHASE-HANDOFF.md"), map, { dryRun });
   writeTemplateFile(path.join(TEMPLATES_DIR, "project-context.template.md"), path.join(targetRepoPath, ".harness", "PROJECT-CONTEXT.md"), map, { dryRun });
   writeTemplateFile(path.join(TEMPLATES_DIR, "verify.sh.template"), path.join(targetRepoPath, "verify.sh"), map, { dryRun, executable: true });
+  writeTemplateFile(
+    path.join(TEMPLATES_DIR, "skill", "capture-context", "SKILL.md"),
+    path.join(targetRepoPath, ".claude", "skills", "capture-context", "SKILL.md"),
+    map,
+    { dryRun },
+  );
   appendGitignoreBlock(params.profile, targetRepoPath, { dryRun });
   if (params.profile === "solo-full") {
     // team-local: AGENTS.md (or an equivalent project-instruction file) is
