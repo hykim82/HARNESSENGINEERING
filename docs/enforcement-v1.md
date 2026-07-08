@@ -859,6 +859,54 @@ at all, and D6 v1 didn't catch it. Scope A closes that gap:
   open follow-up work. Scope D (splitting the card's freeform background
   from its enforced constraints section) is covered separately below.
 
+**Addendum (HYK-97) — the gate had a real gap, found by actual use, not
+theory.** The example above (`<GITHUB_REPO>`) is exactly the kind of token
+`isUsableCard`'s `/<[A-Z][A-Z0-9_]*>/` regex was built to catch, and
+`install.mjs` *does* substitute it at install time — so it was never the
+placeholder actually left behind in practice. The template's **other**
+example, `<this project's own hard constraint>`, is lowercase and was never
+substituted (it's the slot a human is supposed to fill in), and the regex
+does not match it at all: the pattern requires the *entire* bracket body to
+be `[A-Z][A-Z0-9_]*`, and "this project's..." fails at its second
+character. A real `team-local` install onto TEAM10 (HYK-85's first
+non-self-referential validation) hit this directly: the freshly-installed,
+completely unedited stub card passed `isUsableCard` and the
+`UserPromptSubmit` gate cleanly — the exact "unfilled card treated as real
+content" failure Scope A exists to prevent, slipping through Scope A's own
+regex.
+
+Two fixes were possible: widen the regex to catch any `<...>` bracket, or
+change the template so every fill-in slot is already `<UPPER_SNAKE>`-shaped.
+**Widening the regex was rejected** — a real, already-filled-in card
+legitimately contains bracket syntax that is not a placeholder (this
+harness's own TEAM10 card has `` `docker compose exec web npm exec firebase
+-- <login|init|deploy>` ``, describing real CLI subcommand choices, not an
+unedited stub); a blanket `<...>` match would false-positive on that and
+block a genuinely complete card. HYK-97's fix is **template-only**:
+`project-context.template.md`'s fill-in slots (the one-line purpose, the
+next hard constraint, the goals/intent/context body) are now
+`<REPLACE_ME_PURPOSE_LINE>`, `<REPLACE_ME_HARD_CONSTRAINT_1>`, and
+`<REPLACE_ME_GOALS_INTENT_CONTEXT>` — plain `<UPPER_SNAKE>` tokens the
+existing regex already catches, chosen with a `REPLACE_ME_` prefix that
+cannot collide with `install.mjs`'s own substitution tokens
+(`<PROFILE>`, `<REPO_PATH>`, `<CONTROL_ROOM_PATH>`, `<GITHUB_REPO>`,
+`<BOT_ACCOUNT>`, `<VERIFY_CMD>`). The explanatory prose that used to live
+*inside* the placeholder brackets (e.g. "Short, imperative, non-negotiable
+rules only...") moved to plain guidance text or an HTML comment next to the
+token, outside the angle brackets, so nothing is lost — it just no longer
+sits somewhere the gate has to reason about. `context-inject.mjs` itself —
+`isUsableCard`, `PLACEHOLDER_RE`, everything — is **unchanged**; this is a
+template-shape fix confirmed by `context-inject.test.mjs` gaining three new
+cases built from the *actual* template file on disk (not a hand-copied
+string), one of which is exactly the false-positive check above.
+
+**Residual limit, unchanged by this fix:** this remains a form check, not a
+content check. A human can delete a `<REPLACE_ME_...>` token and type
+nothing meaningful in its place (an empty-ish bullet, a placeholder word
+that isn't itself bracketed) and the gate has no way to know the content is
+still hollow — Scope A was never designed to judge quality, only "is there
+still a template slot sitting here unedited."
+
 ### Scope D (HYK-96) — card structure: constraints vs. context
 
 Putting a project's full background, goals, and evolving narrative into
