@@ -1198,3 +1198,180 @@ instruction).
   entry rather than deleted, so the record shows the claim was raised
   honestly first and then closed with real evidence, not asserted from the
   start.
+
+## STATUS↔Linear sync — Tier 2 (linear-sync.mjs, HYK-93)
+
+### Problem restated
+
+`STATUS.md` §6 ("열린 이슈") lists issues believed still open, by convention
+only — nothing checked that against Linear's actual state. This drifted in
+practice: on 2026-07-07 the Orchestrator kept nagging the human to transition
+an issue to Done that Linear already showed as Done, because §6 hadn't been
+updated. The fix reduces to one crisp invariant: the set of issues §6 marks
+open must be a subset of Linear's actual non-Done, non-canceled issue set. The
+reverse gap — an issue open in Linear but missing from §6 entirely — is
+checked too.
+
+### D4, revisited
+
+This is the same defect the enforcement table above (D4) already named and
+marked "design only." Its tier ceiling was set then and holds now: Linear is
+a server this harness does not control, so there is no local anchor that can
+make this check unbypassable the way D-CI's gitleaks/branch-protection gate
+is. Tier 2 — a script an agent is expected to run, wired to a `Stop` hook,
+same honesty class as `status-fresh.mjs` and `context-inject.mjs` — is the
+ceiling, not a stepping stone to something stronger available locally.
+
+### Rule
+
+Given STATUS.md's §6 block and a live query of Linear's issues for this
+project:
+
+- **`staleInStatus`** — an issue §6 lists as open, but Linear's
+  `WorkflowState.type` for it is `completed` or `canceled`. This is the core
+  drift the 2026-07-07 incident exhibited.
+- **`missingInStatus`** — an issue Linear shows as not `completed`/`canceled`,
+  with no corresponding entry in §6 at all (the reverse gap).
+
+Either non-empty set is reported as a drift; the CLI exits `2` and names each
+offending issue with its §6 state (or Linear state, for the missing case) so
+the caller knows exactly what to fix. Every genuinely open issue that
+correctly appears open on both sides — the common case — produces no output
+beyond a one-line `ok`, exit `0`.
+
+### Fail-open semantics
+
+Every failure mode this check can hit *before* it has a real diff to report
+is treated as "cannot judge, so don't block":
+
+- No `LINEAR_API_KEY` in `process.env` and no readable `.env.local` (or a
+  `.env.local` with no `LINEAR_API_KEY=` line) in it — warn, exit `0`.
+- STATUS file not found at the resolved path — warn, exit `0`.
+- Any network or Linear API error (non-2xx response, GraphQL `errors`) —
+  warn, exit `0`, with the underlying error message but never the token.
+
+This mirrors `status-fresh.mjs`'s own philosophy: a Stop hook that hard-blocks
+a session merely because the machine is offline, or a token hasn't been
+provisioned yet, would make the harness *less* usable, not more correct.
+**Exit `2` is reserved exclusively for a confirmed diff** — an actual query
+against Linear that came back and disagreed with §6. No failure mode short of
+that produces anything stronger than a warning.
+
+### Token handling
+
+The Linear API key is never something this script's own output can leak:
+`loadLinearApiKey` returns the key value to the caller for use as an HTTP
+header, but every log line the CLI prints — the fail-open warnings, the ok
+message, the per-issue drift lines — names only issue ids and Linear state
+strings, never the key. `.env.local` itself (which also holds unrelated
+Supabase/Resend secrets, not just `LINEAR_API_KEY`) was, until this task,
+untracked only via a local `.git/info/exclude` entry — a per-clone guard that
+does not travel with the repository and would not protect a fresh clone.
+`.gitignore` now carries `.env.local` directly, which is the actual,
+version-controlled guard.
+
+### Implementation
+
+- `scripts/check/linear-sync.mjs` follows the same shape as the other
+  checks in this document: two pure, exported, network-free functions —
+  `parseStatusOpenIssues(statusText) -> [{ id, state }]` (regex-extracts
+  `- **HYK-<n>** ... — *<state>*` lines from the §6 block only, stopping at
+  the next `###` heading, and skipping the parenthetical Done-rollup line
+  since it doesn't match the `- **HYK-<n>**` shape at all) and
+  `diffSync(statusIssues, linearIssues) -> { staleInStatus, missingInStatus }`
+  — plus `loadLinearApiKey(root, env = process.env)`, also exported and pure
+  with respect to its `env` parameter, for the fail-open token-loading path.
+  Everything that touches the network or the filesystem (`fetchLinearIssues`,
+  the CLI's `main()`) is not exported and is exercised only by the live
+  verification runs recorded below, not by the automated test suite.
+- The state comparison keys off Linear's `WorkflowState.type` enum
+  (`completed`/`canceled` vs. everything else), not the human-readable
+  `name` — the same "compare the structured field, not the display string"
+  principle `status-fresh.mjs` applies to mtimes over hand-typed timestamps.
+- CLI: `node linear-sync.mjs [--status <path>]`. Default `--status` resolves
+  straight to the control room's real path
+  (`D:\문서관리\하네스-관제실\STATUS.md`), unlike `status-fresh.mjs`'s
+  in-repo default that this project has to override every time — this
+  script's default is already correct for live use here, and `--status` is
+  chiefly a test/verification override.
+- `scripts/check/linear-sync.test.mjs` (`node:test`, 9 cases): §6 parsing
+  against a fixture built from a real trimmed slice of this repo's own
+  `STATUS.md` (including a priority-annotated state,
+  `*Todo, **High***`, and the parenthetical Done-rollup line, both confirmed
+  handled correctly); `staleInStatus` detection for both `completed` and
+  `canceled` Linear state types; `missingInStatus` detection; a fully
+  matched case producing zero drift; and four cases covering
+  `loadLinearApiKey`'s fail-open path (no env, no file), the env-var path,
+  reading from `.env.local`, and a `.env.local` present but missing the key
+  — none of which ever assert on or print a real token value.
+- Stop hook wiring (not installed by this task, same convention as
+  `status-fresh.mjs`/`clear-safe-check.mjs` — human, one-time, per-clone):
+
+  ```json
+  {
+    "hooks": {
+      "Stop": [
+        {
+          "hooks": [
+            {
+              "type": "command",
+              "command": "node /absolute/path/to/scripts/check/linear-sync.mjs"
+            }
+          ]
+        }
+      ]
+    }
+  }
+  ```
+
+  This can sit in the same `Stop` array as `status-fresh.mjs`'s and
+  `clear-safe-check.mjs`'s entries.
+
+### Live verification (this task)
+
+- Full regression: all 6 pre-existing check suites (97 cases total) plus the
+  new 9-case `linear-sync.test.mjs` — 106 cases, all passing.
+- Live sync against the real control room `STATUS.md` and real Linear data:
+  `node scripts/check/linear-sync.mjs --status "D:\문서관리\하네스-관제실\STATUS.md"`
+  → `linear-sync ok: 9 open issue(s) in STATUS §6 match Linear.`, exit `0`
+  (the Orchestrator had already hand-reconciled §6 against Linear before this
+  task started, so a clean result was the expected outcome, not a given).
+- Live drift injection: a temporary copy of the real STATUS file had a fake
+  open entry added for HYK-97 (already Done in Linear) — running against
+  that copy correctly reported `staleInStatus: HYK-97 ... Linear state is
+  'Done' ...` and exited `2`; the temporary file was deleted immediately
+  after. The real control room file was never modified.
+- Fail-open: run from a directory outside this repository with
+  `LINEAR_API_KEY` unset from the environment and no `.env.local` present —
+  correctly warned and exited `0`.
+
+### Known limitations (honesty notes)
+
+- **Tier 2 ceiling, not a gap to close.** Unlike D-CI's gitleaks/branch
+  protection, there is no external anchor available: Linear's servers are
+  outside this harness's control, so nothing here can force this check to
+  run the way `enforce.yml` forces the commit-msg gate. This is the D4 tier
+  ceiling stated in the defect table above, not an oversight.
+- **Claude-only trigger, same as `status-fresh.mjs`.** The intended `Stop`
+  hook only ever sees Claude Code's own turns; a Codex REVIEW/VERIFY session
+  ending triggers no equivalent check.
+- **Per-clone, removable.** Same local trust boundary as every other check
+  in this document: an agent or operator with shell access can skip running
+  it, remove the `Stop` hook wiring, or hand-edit `STATUS.md` to match
+  whatever Linear currently says without the underlying work having actually
+  happened.
+- **Token management is a real, ongoing burden.** The check depends on a
+  live `LINEAR_API_KEY` being provisioned per environment (`.env.local` or
+  the shell environment) and on `.gitignore` continuing to exclude it — a
+  burden this design accepts deliberately (fail-open on a missing token)
+  rather than making token provisioning a hard blocker.
+- **Snapshot at `Stop`-hook time only.** Like `status-fresh.mjs`, this
+  reflects the state of both files/API at the moment a turn ends, not a
+  continuously-enforced invariant — a drift introduced and then fixed within
+  the same turn, or one that appears between checks, is invisible to it.
+- **No pagination.** `fetchLinearIssues` requests the first 250 issues for
+  the configured team (or, if `LINEAR_TEAM_ID` is unset, the first 250
+  issues visible to the token, filtered client-side to `HYK-<n>`
+  identifiers) and does not follow `pageInfo.hasNextPage`. This project is
+  far from that ceiling today; a project that grows past 250 issues would
+  need this extended before the check could be trusted at that scale.
