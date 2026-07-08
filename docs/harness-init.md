@@ -72,6 +72,16 @@ plain string substitution — no template engine):
 `team-local`; `install.mjs` requires them only when `<PROFILE>` is
 `solo-full`.
 
+**Control room: local git, no remote (HYK-104).** The `<CONTROL_ROOM_PATH>`
+folder itself should be a local-only git repository — history for free
+recovery from a bad edit, but never pushed anywhere, since it holds
+operator-specific context (and, in practice, has held secrets) that has no
+business leaving the machine. The Orchestrator commits there at phase
+boundaries (each `PHASE-HANDOFF.md` update is a natural commit point), not
+on some separate schedule. Honest limit: local git is history, not an
+anchor — an agent or operator with shell access can still delete the `.git`
+directory itself, so this does not substitute for a real backup.
+
 ### What each profile installs
 
 Both profiles (profile-agnostic core):
@@ -560,40 +570,33 @@ They do not mean the repository is broken.
 
 ## Installation Procedure
 
-1. Read the target repository `AGENTS.md` if it exists.
-2. Determine the Linear project name from `Linear-Project:` or repository name.
-3. Ask before creating a Linear project if it does not exist.
-4. Show the files that would be created or appended.
-5. Ask for explicit approval to apply the harness.
-6. Append `AGENTS.append.md` content only when the target project does not
-   already define equivalent harness rules.
-7. Copy templates only when they do not overwrite existing project files.
-8. Record what was installed in Linear.
-9. Leave loop profile uninstalled unless the user separately requests
-   `$loop-init` or explicit loop installation.
+**Superseded by `install.mjs` (v2, HYK-92, corrected HYK-107).** This
+section originally described a nine-step manual procedure predating the
+installer; it has been replaced by a single CLI invocation. Current
+procedure = "Profiles (v2, HYK-92)" > "`install.mjs` usage" above: resolve
+the profile and parameters, run `install.mjs` (`--dry-run` first to preview),
+review the generated summary, then follow the printed checklist (`solo-full`)
+or confirm the `team-local` credential-boundary output. Approval before
+applying, and recording the result in Linear, still apply — only the
+*mechanism* changed, from manual copying to the installer.
 
 ## Default Target Files
 
-Suggested target layout:
+**Superseded by "What each profile installs" (under "Profiles (v2,
+HYK-92)" above), corrected HYK-107.** That section is the current source of
+truth for what a `solo-full` or `team-local` install actually writes
+(`.harness/STATUS.md`, `.harness/PHASE-HANDOFF.md`,
+`.harness/PROJECT-CONTEXT.md`, `.harness/gc-task.template.md`, `verify.sh`,
+`observe.sh`, `.claude/skills/capture-context/SKILL.md`, plus hook/check
+scripts) — none of it under `docs/`. This section originally suggested a v1
+layout (`docs/task-contract.md` and siblings) that `install.mjs` has never
+produced; kept here only as a historical note, not a target layout to
+follow.
 
-```text
-AGENTS.md
-docs/task-contract.md
-docs/harness-records.md
-docs/harness-progress.md
-docs/harness-metrics.md
-docs/non-loop-evidence.md
-docs/model-routing.md
-```
-
-These files are suggestions, not mandatory global paths. A target repository may
-choose different paths if the Task Contract records them.
-
-Packet templates (`handoff-packet`, `question-packet`) and role prompts are not
-copied by default. Roles reference them from the source package
+Packet templates (`handoff-packet`, `question-packet`) and role prompts are
+still not copied by default — roles reference them from the source package
 `templates/harness-init/`, or copy them into the target only on explicit
-request. This list is the single source of truth for default installation;
-`templates/harness-init/README.md` and `skill/SKILL.md` defer to it.
+request.
 
 ## Loop Profile Boundary
 

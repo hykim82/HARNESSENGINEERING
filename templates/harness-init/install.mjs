@@ -210,15 +210,41 @@ function appendGitignoreBlock(profile, targetRepoPath, { dryRun }) {
     .join("\n");
   const gitignorePath = path.join(targetRepoPath, ".gitignore");
   const existing = existsSync(gitignorePath) ? readFileSync(gitignorePath, "utf8") : "";
+  const marker = `# harness-init (${profile})`;
+
   if (existing.includes(block.trim())) {
     skipped.push(gitignorePath);
     console.warn(`skip (block already present): ${gitignorePath}`);
     return;
   }
+
+  // HYK-98: the check above only catches an exact, current-template match.
+  // If this profile's marker is already present, some earlier install ran
+  // here before -- re-appending would duplicate lines a prior (possibly
+  // older-template) run already added. Never auto-upgrade/rewrite what's
+  // there (that risks clobbering a hand-edit); skip and print exactly which
+  // current-template lines are missing so a human can merge them by hand.
+  if (existing.includes(marker)) {
+    skipped.push(gitignorePath);
+    const existingLines = new Set(existing.split(/\r?\n/).map((l) => l.trim()));
+    const missingLines = block.split("\n").filter((line) => !existingLines.has(line.trim()));
+    if (missingLines.length === 0) {
+      console.warn(
+        `skip (marker '${marker}' already present, current-template lines already covered): ${gitignorePath}`,
+      );
+    } else {
+      console.warn(
+        `skip (marker '${marker}' already present, from an older template version -- not auto-upgrading): ${gitignorePath}\n` +
+          `Missing lines from the current template -- add these by hand if still wanted:\n${missingLines.map((l) => `  ${l}`).join("\n")}`,
+      );
+    }
+    return;
+  }
+
   if (!dryRun) {
     ensureParentDir(gitignorePath);
     const sep = existing && !existing.endsWith("\n") ? "\n" : "";
-    appendFileSync(gitignorePath, `${sep}\n# harness-init (${profile})\n${block}\n`, "utf8");
+    appendFileSync(gitignorePath, `${sep}\n${marker}\n${block}\n`, "utf8");
   }
   installed.push(gitignorePath);
   console.log(`${dryRun ? "[dry-run] would append to" : "appended to"}: ${gitignorePath}`);

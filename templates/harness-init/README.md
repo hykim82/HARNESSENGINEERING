@@ -32,14 +32,25 @@ the harness.
   (carries a `Profile:` field, v2/HYK-92)
 - `status.template.md`: short "where am I" status board (carries a
   `Profile:` field, v2/HYK-92)
+- `project-context.template.md`: hard-constraints + goals/intent card
+  injected into every session start (HYK-94/96/97); installed to
+  `.harness/PROJECT-CONTEXT.md`
 - `verify.sh.template`: one-line `exec <VERIFY_CMD>` wrapper (v2, HYK-92)
+- `observe.sh.template`: boot-and-check layer — boots the app, polls until
+  ready, runs `check_http` route checks (HYK-102); installed to
+  `observe.sh`, distinct from `verify.sh`'s build layer
+- `gc-task.template.md`: droppable CODER task for a periodic entropy-GC scan
+  (find-only, never fixes) across five fixed categories (HYK-103)
 - `gitignore.append.template`: profile-specific `.gitignore` append block,
   `solo-full` vs `team-local` (v2, HYK-92)
 - `install.mjs`: Node installer — reads a profile + 5 parameters, copies the
   matching template/script set into a target repo with placeholder
   substitution, never overwrites an existing file (v2, HYK-92); see
   `docs/harness-init.md` ("Profiles (v2, HYK-92)") for usage
-- `skill/SKILL.md`: draft skill instructions
+- `skill/SKILL.md`: draft skill instructions for a future `harness-init` skill
+- `skill/capture-context/SKILL.md`: `/capture-context` capture-assist skill,
+  installed to `.claude/skills/capture-context/SKILL.md` in both profiles
+  (HYK-96 Scope C)
 
 ## Rules
 
