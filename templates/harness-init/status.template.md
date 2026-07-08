@@ -75,13 +75,13 @@ Read these once; do not re-derive them after a `/clear`.
 
 ## Profile-specific rules
 
-- **If `<PROFILE>` = `solo-full`:** landing on `<REPO_PATH>`'s protected
+- **Under the `solo-full` profile:** landing on `<REPO_PATH>`'s protected
   branch is `branch -> push (as <BOT_ACCOUNT>) -> open PR -> enforce CI
   green -> human approval -> merge`. Direct pushes to the protected branch
   are rejected server-side; do not attempt one as a shortcut. Verification
   runs `<VERIFY_CMD>` locally before a PR is opened, and the same checks
   re-run in CI as the external anchor.
-- **If `<PROFILE>` = `team-local`:** this account has no branch-protection
+- **Under the `team-local` profile:** this account has no branch-protection
   or CI authority over `<GITHUB_REPO>` (team-owned, shared with other
   contributors) — do not add or attempt server-side gates. Enforcement here
   is local only: the installed git hooks and `<VERIFY_CMD>` run before a
