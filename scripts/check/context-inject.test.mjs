@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, writeFileSync, rmSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { execFileSync } from "node:child_process";
@@ -253,4 +253,64 @@ test("(v) user-prompt-submit on a two-section card with a filled-in HARD CONSTRA
     assert.equal(status, 0);
     assert.equal(stdout.trim(), "");
   });
+});
+
+// --- HYK-97: template placeholder gap (a freshly-installed stub card was
+// silently passing isUsableCard because the template's own fill-in slots
+// used lowercase descriptive prose in brackets, e.g. "<this project's own
+// hard constraint>", which PLACEHOLDER_RE's `<[A-Z][A-Z0-9_]*>` never
+// matched -- install.mjs already substitutes the real `<UPPER_SNAKE>`
+// tokens like <GITHUB_REPO>, so the only thing left unedited in a fresh
+// install was exactly the placeholder shape this regex is blind to. The
+// fix is template-only (uppercase `<REPLACE_ME_...>` tokens); the regex
+// itself is intentionally unchanged -- widening it would false-positive on
+// a real card that legitimately contains an `<a|b|c>`-style literal (see
+// case (y) below, a real shape from this harness's own TEAM10 card).
+//
+// These tests read the actual template file rather than a hand-copied
+// string, on purpose: if the template's placeholder shape ever regresses
+// back to something the gate can't see, these tests break along with it
+// instead of quietly testing a stale copy.
+const TEMPLATE_PATH = fileURLToPath(new URL("../../templates/harness-init/project-context.template.md", import.meta.url));
+
+function freshInstallCard() {
+  // Mirrors install.mjs's substitute(): only the install-time placeholder
+  // tokens are replaced; REPLACE_ME_* is left exactly as shipped, since
+  // that's what a card looks like the moment install.mjs finishes and
+  // before any human has touched it.
+  const raw = readFileSync(TEMPLATE_PATH, "utf8");
+  const map = {
+    "<PROFILE>": "team-local",
+    "<REPO_PATH>": "C:/Users/Administrator/Documents/TEAM10",
+    "<GITHUB_REPO>": "AL06-Class/AL06TEAM10",
+  };
+  let text = raw;
+  for (const [token, value] of Object.entries(map)) {
+    text = text.split(token).join(value);
+  }
+  return text;
+}
+
+test("(w) HYK-97: a freshly-installed stub card (real template, install-time tokens substituted) is blocked", () => {
+  const result = isUsableCard(freshInstallCard());
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /REPLACE_ME_HARD_CONSTRAINT_1/);
+});
+
+test("(x) HYK-97: filling in the stub's REPLACE_ME_HARD_CONSTRAINT_1 makes the card pass", () => {
+  const filled = freshInstallCard().replace(
+    "<REPLACE_ME_HARD_CONSTRAINT_1>",
+    "never run a Firebase deploy without a human's explicit go-ahead",
+  );
+  const result = isUsableCard(filled);
+  assert.equal(result.ok, true);
+});
+
+test("(z) HYK-97 regression: a real filled-in card using a literal <a|b|c>-style bracket does not false-positive", () => {
+  const text =
+    "## HARD CONSTRAINTS\n\n" +
+    "- Firebase/deploy commands run inside the container: `docker compose exec web npm exec firebase -- <login|init|deploy>`\n" +
+    "- never commit .harness/ to the shared team repo\n";
+  const result = isUsableCard(text);
+  assert.equal(result.ok, true);
 });
