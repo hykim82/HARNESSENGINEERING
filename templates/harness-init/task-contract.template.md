@@ -21,6 +21,12 @@ task_contract:
   completion_conditions:
     - "FIXED_CONDITION"
 
+  # Observability standard (HYK-102): for a task that builds or changes a
+  # screen/feature, (1) run the machine check (./observe.sh, or a
+  # task-specified command) and report its real cmd + exit code, (2) report
+  # anything the machine cannot confirm (rendering, interaction, etc.)
+  # honestly in the final report's "limitations" section -- never claim
+  # "verified" for something only a human eye could actually confirm.
   verification:
     command: "COMMAND_OR_NONE"
     source_of_truth:
