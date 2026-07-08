@@ -200,3 +200,56 @@ test("(p) ready_for_review alone (no verdict: approved) is not a pass, regardles
     assert.equal(result.ok, false);
   });
 });
+
+test("(q) subject multi-tag + all have for: lines + approved + role -> ok", () => {
+  withFixtureDir((dir) => {
+    const reviewPath = join(dir, "review.md");
+    writeFileSync(
+      reviewPath,
+      "for: HYK-98\nfor: HYK-99\nverdict: approved\nrole: REVIEW-CODEX\n",
+      "utf8",
+    );
+    const result = checkReviewGate({
+      message: "fix(init): hygiene batch (HYK-98, HYK-99)",
+      reviewPath,
+    });
+    assert.equal(result.ok, true);
+  });
+});
+
+test("(r) subject multi-tag + one for: missing -> blocked, reason names missing id", () => {
+  withFixtureDir((dir) => {
+    const reviewPath = join(dir, "review.md");
+    writeFileSync(reviewPath, "for: HYK-98\nverdict: approved\nrole: REVIEW-CODEX\n", "utf8");
+    const result = checkReviewGate({
+      message: "fix(init): hygiene batch (HYK-98, HYK-99)",
+      reviewPath,
+    });
+    assert.equal(result.ok, false);
+    assert.match(result.reason, /HYK-99/);
+  });
+});
+
+test("(s) subject repeats same tag twice -> deduped, single for: line suffices -> ok", () => {
+  withFixtureDir((dir) => {
+    const reviewPath = join(dir, "review.md");
+    writeFileSync(reviewPath, "for: HYK-99\nverdict: approved\nrole: REVIEW-CODEX\n", "utf8");
+    const result = checkReviewGate({
+      message: "fix: HYK-99 twice HYK-99",
+      reviewPath,
+    });
+    assert.equal(result.ok, true);
+  });
+});
+
+test("(t) subject has one tag, body has a different tag -> body tag not checked (subject-only semantics preserved)", () => {
+  withFixtureDir((dir) => {
+    const reviewPath = join(dir, "review.md");
+    writeFileSync(reviewPath, "for: HYK-999\nverdict: approved\nrole: REVIEW-CODEX\n", "utf8");
+    const result = checkReviewGate({
+      message: "feat: add thing (HYK-999)\n\nAlso touches HYK-123 in passing.\n",
+      reviewPath,
+    });
+    assert.equal(result.ok, true);
+  });
+});

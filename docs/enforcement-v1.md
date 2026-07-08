@@ -48,8 +48,15 @@ and D5 are recorded here as committed enforcement design, not yet built.
 
 Given a commit message and a review-evidence file:
 
-1. If the message carries no `HYK-<digits>` tag, the commit is not issue work
-   and passes unconditionally.
+1. If the message's **subject line** (first line) carries no `HYK-<digits>`
+   tag, the commit is not issue work and passes unconditionally. A tag
+   appearing only in the body (not the subject) does not count — this keeps a
+   commit's issue scope tied to the human-visible subject, not incidental
+   mentions in the body prose. When the subject carries **more than one**
+   distinct `HYK-<digits>` tag (a batch commit, e.g. `fix: hygiene batch
+   (HYK-98, HYK-99)`), duplicates are deduplicated and **every** distinct tag
+   is checked independently against the evidence file in step 3 — one tag's
+   evidence does not cover another's.
 2. Else, if the commit message's trailer block — the last paragraph, after
    stripping any code fences (` ``` `) — contains a line whose first
    non-whitespace text is `skip-review: <reason>` (case-insensitive) with a
@@ -63,8 +70,10 @@ Given a commit message and a review-evidence file:
    review-evidence check in step 3.
 3. Else, the review-evidence file (default `.harness/review.md`, resolved
    from the repository root) must exist and satisfy all three of (v2,
-   HYK-81):
-   - a `for: <id>` line matching the message's issue id;
+   HYK-81; multi-tag behavior below is v3, HYK-108):
+   - a `for: <id>` line matching **each** distinct issue id found in the
+     subject (see step 1) — for a single-tag commit this is one line, for a
+     batch commit it is one `for:` line per tag;
    - an approval verdict line `verdict: approved`. A bare `ready_for_review`
      declaration **no longer counts on its own** — that string is what a
      role writes about its *own* work (e.g. Coder's `coder.md`), so accepting
@@ -75,10 +84,24 @@ Given a commit message and a review-evidence file:
      the Orchestrator approving its own work), is treated as
      self-certification and blocked.
 
-   All three must hold for the commit to pass. Otherwise it is blocked, and
-   the reason names which piece is missing (`for:`, `verdict: approved`, or
-   the independent-reviewer marker) so a blocked commit's stderr says exactly
-   what evidence is absent.
+   The `verdict: approved` and `role: REVIEW-*` checks are file-level,
+   checked once regardless of how many tags are in the subject — a batch
+   review is a single approval covering the whole batch, not one approval
+   per issue. The `for:` check is per-tag: **all** three conditions must hold
+   for the commit to pass. Otherwise it is blocked, and the reason names
+   which piece is missing — for the `for:` check, it names **every** tag
+   still missing evidence, not just the first, so a blocked batch commit's
+   stderr says exactly which issue ids still need a `for:` line.
+
+### Batch review convention
+
+A batch task's `review.md` (one review covering multiple issues, e.g. a
+hygiene sweep across several Linear tickets) must carry a separate `for: <id>`
+line for each issue it covers, in addition to a single `verdict: approved` and
+`role: REVIEW-*` line covering the whole batch. A batch id alone (e.g. `for:
+HYGIENE-1-coder-1`) does not satisfy the gate for any of the underlying
+issue ids — the commit-msg hook matches subject tags against `for:` lines
+literally, so each real issue id needs its own line.
 
 ### Known limitation (v2, honesty note)
 
@@ -110,7 +133,7 @@ substrate and is left for a future revision.
   independent-reviewer `role: REVIEW...` marker as three separate gates, each
   returning its own `reason` string when it fails.
 - `scripts/check/review-gate.test.mjs` is a fixture-based test suite (node's
-  built-in test runner), currently 16 cases, covering: no HYK tag; a tagged
+  built-in test runner), currently 20 cases, covering: no HYK tag; a tagged
   commit with no review evidence; a tagged commit with full independent
   review evidence (`for:` + `verdict: approved` + `role: REVIEW-*`); the
   skip-review trailer with a reason and with an empty reason; a
@@ -118,10 +141,16 @@ substrate and is left for a future revision.
   trailer paragraph), or inside a code fence — each confirmed to fall
   through to the evidence check rather than being treated as a skip
   directive; a HYK tag present only in body prose (not the subject line);
-  and the three self-certification cases that must still be blocked —
-  approved with no reviewer marker, approved with a non-`REVIEW-*` role, and
-  a bare `ready_for_review` with no `verdict: approved`. Fixtures live under
-  a temp directory created per test; no real repository state is touched.
+  the three self-certification cases that must still be blocked — approved
+  with no reviewer marker, approved with a non-`REVIEW-*` role, and a bare
+  `ready_for_review` with no `verdict: approved`; and four multi-tag cases
+  (v3, HYK-108) — a subject with multiple distinct tags all satisfied passes,
+  a subject with multiple tags where one lacks a `for:` line is blocked with
+  that id named in the reason, a repeated tag in the subject is deduplicated
+  so one `for:` line suffices, and a tag appearing only in the body (with a
+  different tag in the subject) is confirmed not to be checked. Fixtures
+  live under a temp directory created per test; no real repository state is
+  touched.
 - `hooks/commit-msg` is a thin wrapper (`#!/usr/bin/env sh`) that resolves
   the repository root itself before calling the script:
 
