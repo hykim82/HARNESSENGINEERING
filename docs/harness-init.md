@@ -93,6 +93,10 @@ Both profiles (profile-agnostic core):
 - `verify.sh` — from `verify.sh.template`, a one-line
   `exec sh -c '<VERIFY_CMD>'` wrapper that runs the whole (possibly
   `&&`-chained) command through a shell and propagates its real exit code.
+- `observe.sh` — from `observe.sh.template` (HYK-102), the boot-and-check
+  layer described in "Observability layer" below. Unlike `verify.sh`, its
+  `REPLACE_ME_*` values are not filled in by `install.mjs` — see that
+  section for why.
 - `.claude/skills/capture-context/SKILL.md` — from
   `skill/capture-context/SKILL.md` (HYK-96 Scope C), a `/capture-context`
   skill that scans the session for durable goals/intent/hard-constraint
@@ -232,6 +236,92 @@ All hook wiring is documented with exact `.claude/settings.local.json` JSON
 snippets in `docs/enforcement-v1.md` ("STATUS freshness — Tier 2", "D6 —
 project-context injection", "Scope B") for manual reference, even though
 `install.mjs` now writes the equivalent block itself.
+
+### Observability layer (observe.sh, HYK-102)
+
+**Why:** of the harness's own eight principles, "let the agent read the app"
+was the weakest in practice — `verify.sh` only ever answers "does it build /
+pass its check suite," never "does the running app actually respond,"
+leaving that to manual human QA, exactly the anti-pattern the principle
+warns against. TEAM10's coder-4 task proved a cheap version of this out by
+hand: boot the dev server, curl four routes for HTTP 200, and honestly
+report what could not be mechanically confirmed (client-side rendering).
+`observe.sh.template` turns that one-off into a portable standard. Scope is
+capped deliberately at curl/HTTP-level checks — a headless-browser render
+check is a real gap this does not close, and is left for a future issue,
+not silently implied.
+
+**Two layers, not one:** `verify.sh` = build/test layer (a single command,
+already-parameterized via `<VERIFY_CMD>`). `observe.sh` = boot-and-respond
+layer (boot the app, poll until ready, hit a handful of HTTP routes, report
+pass/fail). They answer different questions and are meant to be run
+separately, not merged into one script.
+
+**Filling in `REPLACE_ME_*` — a human/agent step, not `install.mjs`'s:**
+unlike `<VERIFY_CMD>` and the other five angle-bracket tokens (known at
+install time, from CLI flags), `observe.sh`'s three values are project
+runtime specifics no installer call can know in advance, so they ship as
+plain `<UPPER_SNAKE>`-shaped `REPLACE_ME_*` strings (same convention as
+`project-context.template.md`, HYK-97) instead of being substituted:
+
+| Token | Meaning | Example |
+| --- | --- | --- |
+| `REPLACE_ME_BASE_URL` | the app's local URL once booted | `http://localhost:5173` |
+| `REPLACE_ME_BOOT_CMD` | the command that starts it | `npm run dev` |
+| `REPLACE_ME_CHECKS` | a marker comment; replace with real `check_http` calls | `check_http "/" 200` |
+
+**Guarded, not silently inert.** `observe.sh` refuses to run at all — exit
+`1`, before ever attempting to boot anything — while `BASE_URL` or
+`BOOT_CMD` still starts with `REPLACE_ME_`, and separately refuses to report
+a pass while the `REPLACE_ME_CHECKS` block has not been replaced with at
+least one real `check_http` call (`CHECKS_RAN` stays `0`). A freshly
+installed, never-filled-in `observe.sh` cannot be run and mistaken for a
+passing check — it fails loudly and names exactly which placeholder is
+still unedited.
+
+**Mechanics:** boots `BOOT_CMD` in the background (`sh -c "$BOOT_CMD" &`),
+polls `BASE_URL` with `curl` once a second up to `READY_TIMEOUT_SECONDS`
+(default `30`, overridable via that env var) before giving up, then runs
+whatever `check_http <path> <expected_status> [<must_contain>]` calls the
+project added — status-code comparison always, an optional plain-substring
+body check when a third argument is given. A `trap ... EXIT INT TERM`
+cleanup kills the booted process (`kill "$BOOT_PID"`) on every exit path,
+success or failure.
+
+**Honest limits, printed every single run regardless of outcome** (not just
+on failure): HTTP status/body-substring checks are not a rendering
+guarantee — an HTTP 200 says the server responded, nothing about whether a
+client-side framework actually painted correctly. `observe.sh` prints this
+as a fixed `NOTE:` line before every exit, and the standard this task adds
+to `task-contract.template.md`'s `verification:` block requires the same
+honesty in task reports: what the script confirmed goes in the verification
+evidence, what it could not (rendering, interaction, visual correctness)
+goes in the report's "limitations" section — never claimed as "verified" on
+the script's strength alone.
+
+**Known limits (honesty notes):**
+
+- **Curl/HTTP-level only, by design.** No headless browser, no DOM
+  assertions, no client-side JS execution — this was an explicit scope cap
+  for this task, not an oversight. A project that needs render-level
+  confirmation needs a separate, heavier mechanism layered on top.
+- **Single-PID cleanup, not a process-group kill.** `cleanup()` calls
+  `kill "$BOOT_PID"` on the direct child of the `sh -c "$BOOT_CMD" &`
+  backgrounding — for a `BOOT_CMD` that itself spawns further child
+  processes (e.g. a wrapper script forking the real server), those
+  grandchildren are not guaranteed to be reaped. Verified fine for a direct
+  single-process boot command; a project with a multi-process dev server
+  should confirm cleanup behavior for its own `BOOT_CMD` and strengthen this
+  if needed.
+- **Not wired into `verify.sh` or CI.** `observe.sh` is a separate, manually
+  invoked script — nothing currently calls it automatically as part of
+  `verify.sh` or `enforce.yml`. Whether/how to chain the two layers together
+  is left open.
+- **Same local trust boundary as everything else in this document.** Like
+  `verify.sh`, nothing stops an agent or operator from not running it, or
+  from editing `REPLACE_ME_CHECKS` to a trivially-passing check that doesn't
+  actually exercise anything meaningful — the guard only catches "unedited
+  template," not "edited badly."
 
 ### Credential boundary (HYK-100)
 
