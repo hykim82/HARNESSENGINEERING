@@ -2,6 +2,17 @@
 # Engine-agnostic local secret scan (Claude, Codex, or a manual `git commit`
 # all go through git's native pre-commit hook, unlike Claude Code's own
 # PreToolUse hooks which only see Claude's own tool calls).
+#
+# HYK-101 note: hooks/commit-msg needed a git-worktree fallback because it
+# depends on the untracked harness check script directory (see
+# docs/harness-init.md, "Git hooks and worktrees") that a linked worktree
+# never has checked out. This hook has no such dependency -- `gitleaks`/
+# `gitleaks.exe` is resolved from PATH (an installed binary, not a
+# repo-relative file), and `$root` below is only used as `cd`'s target,
+# which is valid for a linked worktree exactly the same as for the main one
+# (each worktree is a fully functional working tree with its own index).
+# So there is nothing here for the same worktree-portability fix to apply
+# to -- confirmed by inspection, not left unmodified by oversight.
 root=$(git rev-parse --show-toplevel) || exit 1
 
 if command -v gitleaks >/dev/null 2>&1; then
