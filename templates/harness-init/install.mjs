@@ -27,7 +27,7 @@
 // given (CLI wins on conflicting keys).
 
 import { readFileSync, writeFileSync, existsSync, statSync, mkdirSync, appendFileSync, chmodSync } from "node:fs";
-import { execSync } from "node:child_process";
+import { execSync, execFileSync } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -411,6 +411,118 @@ function installGitHooksIntoDotGit(targetRepoPath, { dryRun }) {
   }
 }
 
+// HYK-100: a real near-miss on a machine with multiple github.com
+// credentials -- a team-local push attempted under the harness bot's
+// identity instead of the operator's own account (blocked only because the
+// bot lacked write access; had it had access, the bot's identity would have
+// leaked into a shared team repo's history). The fix that was applied by
+// hand, `git config --local credential.helper "!gh auth git-credential"`,
+// pins this one clone's push identity to whatever account `gh` is logged in
+// as, regardless of which credential a global/manager-stored entry would
+// otherwise have raced to supply. This function mechanizes that for every
+// team-local install.
+const CREDENTIAL_HELPER_KEY = "credential.helper";
+const CREDENTIAL_HELPER_VALUE = "!gh auth git-credential";
+
+function commandSucceeds(cmd, args) {
+  try {
+    execFileSync(cmd, args, { stdio: "ignore" });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function gitConfigLocalGet(targetRepoPath, key) {
+  try {
+    return execFileSync("git", ["-C", targetRepoPath, "config", "--local", "--get", key], { encoding: "utf8" }).trim();
+  } catch {
+    // Non-zero exit from `git config --get` means "not set at this scope"
+    // (or, much less likely, a transient git error) -- either way, treated
+    // as "nothing to preserve," matching this function's only two real
+    // outcomes (skip because something's already there, or set because
+    // nothing is).
+    return null;
+  }
+}
+
+function originRemoteUrl(targetRepoPath) {
+  try {
+    return execFileSync("git", ["-C", targetRepoPath, "remote", "get-url", "origin"], { encoding: "utf8" }).trim();
+  } catch {
+    return null;
+  }
+}
+
+// SSH remotes (`git@host:...` or `ssh://...`) never consult a credential
+// helper at all -- setting one would be inert, not wrong, but skipping is
+// more honest than claiming to have "pinned" something that plays no role
+// in how that remote authenticates.
+function isSshRemoteUrl(url) {
+  return !!url && /^(git@|ssh:\/\/)/i.test(url);
+}
+
+function installCredentialBoundary(targetRepoPath, { dryRun }) {
+  const gitDir = path.join(targetRepoPath, ".git");
+  let isGitDir = false;
+  try {
+    isGitDir = existsSync(gitDir) && statSync(gitDir).isDirectory();
+  } catch {
+    isGitDir = false;
+  }
+  if (!isGitDir) {
+    console.warn(
+      `skip (credential.helper): '${targetRepoPath}' is not a git repository yet -- manual setup once it is: ` +
+        `git -C <repo> config --local ${CREDENTIAL_HELPER_KEY} "${CREDENTIAL_HELPER_VALUE}"`,
+    );
+    return;
+  }
+
+  try {
+    const origin = originRemoteUrl(targetRepoPath);
+    if (isSshRemoteUrl(origin)) {
+      console.log(
+        `credential.helper: origin ('${origin}') is an SSH remote -- credential helpers are not consulted for SSH pushes, nothing to pin.`,
+      );
+      return;
+    }
+
+    const existing = gitConfigLocalGet(targetRepoPath, CREDENTIAL_HELPER_KEY);
+    if (existing) {
+      console.warn(
+        `skip (credential.helper already set to '${existing}' at repo-local scope -- not touched, same never-overwrite convention as every other file this installer writes). ` +
+          `If this clone's pushes should go out under a specific account, consider: git -C <repo> config --local ${CREDENTIAL_HELPER_KEY} "${CREDENTIAL_HELPER_VALUE}"`,
+      );
+      return;
+    }
+
+    if (!commandSucceeds("gh", ["--version"])) {
+      console.warn(
+        `skip (credential.helper): 'gh' CLI not found on PATH -- not setting it automatically (pinning to a helper that can't authenticate would break every push, worse than leaving the ambiguity). ` +
+          `Once gh is installed and logged in as the intended account: git -C <repo> config --local ${CREDENTIAL_HELPER_KEY} "${CREDENTIAL_HELPER_VALUE}"`,
+      );
+      return;
+    }
+
+    if (dryRun) {
+      console.log(
+        `[dry-run] would set credential.helper: git -C ${targetRepoPath} config --local ${CREDENTIAL_HELPER_KEY} "${CREDENTIAL_HELPER_VALUE}" (pins push identity to the current \`gh\` login account)`,
+      );
+      return;
+    }
+
+    execFileSync("git", ["-C", targetRepoPath, "config", "--local", CREDENTIAL_HELPER_KEY, CREDENTIAL_HELPER_VALUE]);
+    console.log(
+      `push identity pinned: credential.helper -> "${CREDENTIAL_HELPER_VALUE}" (this clone's pushes now authenticate as whichever account \`gh auth status\` currently reports)`,
+    );
+  } catch (err) {
+    // Fail-open: this is a safety nicety on top of the install, not the
+    // install itself -- an unexpected git/gh error here must never abort
+    // the rest of install.mjs.
+    console.warn(`skip (credential.helper): unexpected error (${err.message}) -- not touched, install continues.`);
+  }
+}
+
 function soloFullChecklist(params) {
   return `# solo-full GitHub setup checklist (do once, in the GitHub web UI)
 
@@ -434,6 +546,15 @@ Repo: ${params.githubRepo}
       \`cp hooks/commit-msg hooks/pre-commit .git/hooks/ && chmod +x .git/hooks/commit-msg .git/hooks/pre-commit\`.
 - [ ] Install gitleaks locally for fast pre-commit feedback (optional; CI is
       authoritative regardless): https://github.com/gitleaks/gitleaks#installing
+- [ ] Credential boundary (HYK-100): confirm this clone's push identity is
+      what it should be — bot PAT if this is meant to push as
+      \`${params.botAccount}\`, this account's own credentials otherwise.
+      Check: \`git config --local credential.helper\` plus the actual
+      account name in a real push's log/prompt. Not set automatically here —
+      unlike team-local, solo-full has no single "always pin to gh login"
+      answer (a bot-push flow legitimately wants the bot's PAT, not
+      \`gh\`'s logged-in account), so which credential is correct is a human
+      call, not something this installer can decide on its own.
 `;
 }
 
@@ -501,6 +622,15 @@ function main() {
   // installSettingsLocal above for the exact conditions and merge rules.
   installGitHooksIntoDotGit(targetRepoPath, { dryRun });
   installSettingsLocal(params, targetRepoPath, { dryRun });
+
+  if (params.profile === "team-local") {
+    // HYK-100: pin this clone's push identity so it can't silently race
+    // against a bot credential meant for a different repo. solo-full gets
+    // a checklist item instead (soloFullChecklist below) -- see that
+    // function and installCredentialBoundary's own comment for why the
+    // two profiles are handled asymmetrically.
+    installCredentialBoundary(targetRepoPath, { dryRun });
+  }
 
   if (params.profile === "solo-full") {
     // Server-side anchor: CI workflow + gitleaks ruleset. Never automated

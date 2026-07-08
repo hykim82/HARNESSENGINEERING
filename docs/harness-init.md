@@ -233,6 +233,75 @@ snippets in `docs/enforcement-v1.md` ("STATUS freshness — Tier 2", "D6 —
 project-context injection", "Scope B") for manual reference, even though
 `install.mjs` now writes the equivalent block itself.
 
+### Credential boundary (HYK-100)
+
+**Why:** during the first real TEAM10 dogfood, a product-branch push was
+attempted under the harness bot's identity (`codexlocal101-rgb`) instead of
+the operator's own GitHub account, and was rejected only because the bot
+lacked write access to that repo — a near-miss, not a caught bug. The root
+cause: the machine has more than one `github.com` credential registered,
+and which one git's credential machinery hands over for a given push is not
+deterministic on its own. The manual fix applied at the time was
+`git config --local credential.helper "!gh auth git-credential"`, which
+pins *this one clone* to authenticate as whatever account `gh` is currently
+logged in as, sidestepping the ambiguity entirely. `install.mjs` now
+mechanizes that fix for `team-local`.
+
+**`team-local` — set automatically, with two "don't touch it" fallbacks and
+one "can't safely do it" fallback:**
+
+1. `<target>/.git` doesn't exist yet → skip + warn (manual setup once it's a
+   real repo), same convention as the `.git/hooks/` install above.
+2. `origin`'s remote URL is SSH (`git@...` or `ssh://...`) → skip
+   (informational, not a warning) — SSH pushes never consult a credential
+   helper at all, so setting one would be inert.
+3. `git config --local credential.helper` is already set to something →
+   **not touched.** Same never-overwrite convention as every other file
+   this installer writes; skip + warn + a snippet showing the command to
+   run by hand if the existing value turns out to be wrong for this clone.
+4. `gh` is not on `PATH` (checked via `gh --version`) → **not set.**
+   Pinning to a helper that can't actually authenticate would break every
+   push outright, which is worse than leaving the original ambiguity in
+   place; skip + warn + a snippet to run once `gh` is installed and logged
+   in as the intended account.
+5. Otherwise → `git -C <target> config --local credential.helper "!gh auth
+   git-credential"`, repo-local scope only (never touches global config).
+
+Any unexpected error during this step (a transient git failure, etc.) is
+caught and treated the same as case 3/4 — warn and continue, never abort
+the rest of the install. This is a safety nicety layered on top of the
+install, not a step the rest of the install depends on.
+
+**`solo-full` — checklist item only, not automated.** `install.mjs` adds one
+line to the GitHub setup checklist (`soloFullChecklist`) asking the human to
+confirm the clone's push identity matches intent, instead of setting
+anything. Reason for the asymmetry: `team-local`'s answer is always "pin to
+whatever `gh` is logged in as" (the operator's own account, since a
+team-local clone never pushes as the bot). `solo-full` has no single correct
+answer — a bot-push flow (this repository's own model: branch → push as the
+bot → PR → human merge) *legitimately wants* the bot's PAT, not the
+operator's personal `gh` login, so automatically pinning either one could
+just as easily be wrong as right. Which credential is correct there is a
+human call this installer isn't positioned to make.
+
+**Known limits (honesty notes):**
+
+- **Not an anchor, a default.** `credential.helper` is itself a local git
+  config value — an agent or operator can change or remove it just as
+  easily as this installer set it. This closes an *accidental*
+  cross-identity push (the ambiguity that caused the actual near-miss), not
+  a deliberate one; it sits in the same local-trust-boundary family as
+  every other check in this document.
+- **Follows `gh`'s login, not a fixed account.** If someone runs
+  `gh auth login` as a different account later in that same clone, pushes
+  silently follow the new login — this pins "whichever account `gh`
+  currently reports," not one specific identity for all time.
+- **HTTP(S) remotes assumed; SSH is detected and skipped.** Credential
+  helpers only apply to HTTP(S) git remotes. `install.mjs` checks `origin`'s
+  URL scheme and skips (not warns) when it's SSH, rather than setting an
+  inert value — a deliberate judgment call for this task, recorded here so
+  a future reader knows it was checked, not overlooked.
+
 ### `install.mjs` usage
 
 ```sh
