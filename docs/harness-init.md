@@ -302,6 +302,69 @@ human call this installer isn't positioned to make.
   inert value — a deliberate judgment call for this task, recorded here so
   a future reader knows it was checked, not overlooked.
 
+### Git hooks and worktrees (HYK-101)
+
+**Symptom (hit twice for real, on TEAM10 coder sessions):** `team-local`'s
+`scripts/check/` is untracked (gitignored) by design — it's this account's
+personal tooling, not shared team-repo state. A `git worktree add` checkout
+only ever gets *tracked* files, so a linked worktree never has
+`scripts/check/` at all. Before this fix, `hooks/commit-msg` unconditionally
+built its script path from `git rev-parse --show-toplevel` (the *current*
+worktree's own root), so every commit attempted from inside a worktree
+crashed with `MODULE_NOT_FOUND` — not a review-gate rejection, a hard crash
+that blocked the commit for a reason with nothing to do with commit-message
+format. The workaround at the time was manually re-copying
+`scripts/check/` into every new worktree, which is exactly the kind of
+"only works if a human remembers" gap this harness exists to close.
+
+**Resolution order, now built into `hooks/commit-msg`:**
+
+1. Try `<current-worktree-root>/scripts/check/review-gate.mjs` (unchanged,
+   original behavior — this is what a non-worktree clone, or a worktree
+   that happens to have the file, already hits).
+2. If that's missing, resolve `git rev-parse --git-common-dir` — this
+   always points at the *shared* `.git` directory regardless of which
+   worktree the hook is running in (relative `.git` from the main worktree
+   itself, an absolute path from a linked one) — normalize it to absolute
+   and strip the trailing `/.git` to recover the main clone's root, then
+   retry the script path there.
+3. If still missing (main clone doesn't have it installed either, or some
+   other layout entirely), **fail open**: print a one-line warning
+   naming this section and exit `0` rather than crashing. A missing check
+   script is a setup gap, not a commit-message format violation, and this
+   hook's job is to enforce format — it should not additionally require its
+   own dependency to exist. This mirrors `hooks/pre-commit`'s existing
+   fail-open posture when `gitleaks` itself isn't installed.
+
+`hooks/pre-commit` was checked for the same class of bug and does **not**
+need the equivalent fix: it resolves `gitleaks`/`gitleaks.exe` from `PATH`
+(an installed binary, not a repo-relative file) and only uses
+`$root` as `cd`'s target, which is a valid, fully-functional directory in a
+linked worktree exactly as it is in the main one. This was confirmed by
+inspection (`grep scripts/check hooks/pre-commit` finds nothing) and by a
+live worktree commit through the unmodified hook, not left alone by
+oversight.
+
+**Nothing to change in `install.mjs`:** both hook files are copied from
+this repository's live `hooks/` source at install time (`copyRawFile`, see
+above) rather than from a frozen template copy — so this fix ships to every
+future install automatically, with no installer-side change required.
+Confirmed directly: `install.mjs`'s copy calls read
+`path.join(REPO_ROOT, "hooks", "commit-msg")` verbatim.
+
+**Known limit (honesty note):** the fail-open branch means a worktree
+whose main clone is *also* missing `scripts/check/` will skip the
+commit-message check silently rather than blocking — the commit goes
+through with no review-gate enforcement at all. This was a deliberate
+choice: a crash is strictly worse than a skipped local check, since the
+authoritative gate for anything that matters is still `enforce.yml`
+server-side (same "local hooks are fast feedback, CI is authoritative"
+principle already documented for `hooks/pre-commit`'s gitleaks fallback).
+It does mean a worktree can silently lose local review-gate enforcement in
+a way that produces no visible failure — only the printed warning — so it
+is worth actually reading hook output once after setting up a new
+worktree, not something this fix makes airtight.
+
 ### `install.mjs` usage
 
 ```sh
