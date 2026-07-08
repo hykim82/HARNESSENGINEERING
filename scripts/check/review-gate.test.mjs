@@ -253,3 +253,72 @@ test("(t) subject has one tag, body has a different tag -> body tag not checked 
     assert.equal(result.ok, true);
   });
 });
+
+test("(u) abbreviated enumeration '(HYK-98, 99)' in subject -> blocked, reason proposes full ids", () => {
+  withFixtureDir((dir) => {
+    const reviewPath = join(dir, "review.md");
+    writeFileSync(
+      reviewPath,
+      "for: HYK-98\nfor: HYK-99\nverdict: approved\nrole: REVIEW-CODEX\n",
+      "utf8",
+    );
+    const result = checkReviewGate({
+      message: "fix(init): hygiene batch 1 (HYK-98, 99)",
+      reviewPath,
+    });
+    assert.equal(result.ok, false);
+    assert.match(result.reason, /HYK-99/);
+  });
+});
+
+test("(v) abbreviated enumeration with no spaces 'HYK-98,99,106' -> blocked", () => {
+  withFixtureDir((dir) => {
+    const reviewPath = join(dir, "review.md");
+    const result = checkReviewGate({
+      message: "fix(init): hygiene batch 1 (HYK-98,99,106)",
+      reviewPath,
+    });
+    assert.equal(result.ok, false);
+    assert.match(result.reason, /abbreviated issue list/);
+  });
+});
+
+test("(w) 'HYK-98, 2x faster' is not an abbreviated enumeration -> falls through to normal evidence path", () => {
+  withFixtureDir((dir) => {
+    const reviewPath = join(dir, "review.md");
+    writeFileSync(reviewPath, "for: HYK-98\nverdict: approved\nrole: REVIEW-CODEX\n", "utf8");
+    const result = checkReviewGate({
+      message: "perf: HYK-98, 2x faster",
+      reviewPath,
+    });
+    assert.equal(result.ok, true);
+  });
+});
+
+test("(x) abbreviated enumeration + skip-review trailer -> still blocked (format check precedes skip-review)", () => {
+  withFixtureDir((dir) => {
+    const reviewPath = join(dir, "review.md");
+    const result = checkReviewGate({
+      message: "fix(init): hygiene batch 1 (HYK-98, 99)\n\nskip-review: prod outage, approved out-of-band\n",
+      reviewPath,
+    });
+    assert.equal(result.ok, false);
+    assert.match(result.reason, /abbreviated issue list/);
+  });
+});
+
+test("(y) fully-written multi-tag subject (HYK-108 style) still passes -> regression", () => {
+  withFixtureDir((dir) => {
+    const reviewPath = join(dir, "review.md");
+    writeFileSync(
+      reviewPath,
+      "for: HYK-98\nfor: HYK-99\nfor: HYK-106\nverdict: approved\nrole: REVIEW-CODEX\n",
+      "utf8",
+    );
+    const result = checkReviewGate({
+      message: "fix(init): hygiene batch (HYK-98, HYK-99, HYK-106)",
+      reviewPath,
+    });
+    assert.equal(result.ok, true);
+  });
+});

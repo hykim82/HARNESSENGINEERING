@@ -3,6 +3,9 @@ import { join } from "node:path";
 import { execSync } from "node:child_process";
 
 const HYK_TAG_RE_GLOBAL = /HYK-\d+/g;
+// A standalone digit token (not part of a longer word like "2x" or "3rd") chained
+// by a comma onto a preceding HYK-<digits> tag is an abbreviated enumeration.
+const ABBREVIATED_ENUMERATION_RE = /HYK-\d+(?:\s*,\s*\d+(?![A-Za-z0-9]))+/g;
 
 function repoRoot() {
   try {
@@ -24,8 +27,29 @@ function extractSkipReview(message) {
   return m ? m[1].trim() : null; // null = not a skip directive
 }
 
+function findAbbreviatedEnumerations(subject) {
+  const groups = [];
+  for (const match of subject.matchAll(ABBREVIATED_ENUMERATION_RE)) {
+    const text = match[0];
+    const leadId = text.match(/^HYK-\d+/)[0];
+    const bareIds = [...text.matchAll(/,\s*(\d+)(?![A-Za-z0-9])/g)].map((m) => `HYK-${m[1]}`);
+    groups.push([leadId, ...bareIds]);
+  }
+  return groups;
+}
+
 export function checkReviewGate({ message, reviewPath = join(repoRoot(), ".harness", "review.md") }) {
   const subject = message.split(/\r?\n/, 1)[0] ?? "";
+
+  const abbreviatedGroups = findAbbreviatedEnumerations(subject);
+  if (abbreviatedGroups.length > 0) {
+    const suggestion = abbreviatedGroups.map((ids) => ids.join(", ")).join("; ");
+    return {
+      ok: false,
+      reason: `abbreviated issue list in subject; write each id fully: ${suggestion}`,
+    };
+  }
+
   const tagMatches = subject.match(HYK_TAG_RE_GLOBAL);
   if (!tagMatches) {
     return { ok: true, reason: "no HYK-<id> tag in message; not issue work" };

@@ -48,6 +48,24 @@ and D5 are recorded here as committed enforcement design, not yet built.
 
 Given a commit message and a review-evidence file:
 
+0. First, before any other step (including the skip-review escape hatch in
+   step 2 below): if the subject line contains an **abbreviated issue
+   enumeration** — a `HYK-<digits>` tag followed by one or more comma-chained
+   bare numbers with no `HYK-` prefix (e.g. `(HYK-98, 99, 106)` or
+   `HYK-98,99,106` with no spaces) — the commit is blocked unconditionally,
+   with a reason that proposes the fully-written form (e.g. `HYK-98, HYK-99,
+   HYK-106`). This is a v4 (HYK-109) addition: abbreviated lists are **not
+   parsed and expanded** (doing so silently would guess at ids from bare
+   numbers, which is ambiguous — a bare number could be a PR number, a line
+   count, or unrelated prose), they are mechanically rejected so a human or
+   agent rewrites the subject with each id spelled out. A bare number is only
+   treated as part of an abbreviated enumeration when it is a **standalone
+   digit token** — immediately followed by a letter or digit makes it not an
+   enumeration member (`HYK-98, 2x faster` and `HYK-98, 3rd attempt` pass
+   through untouched, since `2x` and `3rd` are not bare numbers). This check
+   only looks at the subject; an abbreviated list that appears only in the
+   commit body is not detected (same subject-only scope as step 1 below) —
+   an honest limitation, not a claim of full coverage.
 1. If the message's **subject line** (first line) carries no `HYK-<digits>`
    tag, the commit is not issue work and passes unconditionally. A tag
    appearing only in the body (not the subject) does not count — this keeps a
@@ -101,7 +119,13 @@ line for each issue it covers, in addition to a single `verdict: approved` and
 `role: REVIEW-*` line covering the whole batch. A batch id alone (e.g. `for:
 HYGIENE-1-coder-1`) does not satisfy the gate for any of the underlying
 issue ids — the commit-msg hook matches subject tags against `for:` lines
-literally, so each real issue id needs its own line.
+literally, so each real issue id needs its own line. Writing the batch's
+issue list as a shorthand enumeration (`HYK-98, 99, 106`) instead of fully
+writing each id (`HYK-98, HYK-99, HYK-106`) is **mechanically rejected** by
+step 0 of the rule above (v4, HYK-109) — the judgment rule for what counts as
+an abbreviated member is: a comma-separated bare number is part of the
+enumeration only when it is a standalone digit token (not immediately
+followed by a letter or digit, so `2x`/`3rd` are not caught).
 
 ### Known limitation (v2, honesty note)
 
@@ -133,7 +157,7 @@ substrate and is left for a future revision.
   independent-reviewer `role: REVIEW...` marker as three separate gates, each
   returning its own `reason` string when it fails.
 - `scripts/check/review-gate.test.mjs` is a fixture-based test suite (node's
-  built-in test runner), currently 20 cases, covering: no HYK tag; a tagged
+  built-in test runner), currently 25 cases, covering: no HYK tag; a tagged
   commit with no review evidence; a tagged commit with full independent
   review evidence (`for:` + `verdict: approved` + `role: REVIEW-*`); the
   skip-review trailer with a reason and with an empty reason; a
@@ -143,13 +167,21 @@ substrate and is left for a future revision.
   directive; a HYK tag present only in body prose (not the subject line);
   the three self-certification cases that must still be blocked — approved
   with no reviewer marker, approved with a non-`REVIEW-*` role, and a bare
-  `ready_for_review` with no `verdict: approved`; and four multi-tag cases
+  `ready_for_review` with no `verdict: approved`; four multi-tag cases
   (v3, HYK-108) — a subject with multiple distinct tags all satisfied passes,
   a subject with multiple tags where one lacks a `for:` line is blocked with
   that id named in the reason, a repeated tag in the subject is deduplicated
   so one `for:` line suffices, and a tag appearing only in the body (with a
-  different tag in the subject) is confirmed not to be checked. Fixtures
-  live under a temp directory created per test; no real repository state is
+  different tag in the subject) is confirmed not to be checked; and five
+  abbreviated-enumeration cases (v4, HYK-109) — a spaced abbreviation
+  (`HYK-98, 99`) is blocked with the full ids proposed in the reason, a
+  no-space abbreviation (`HYK-98,99,106`) is blocked, a non-enumeration
+  comma phrase (`HYK-98, 2x faster`) falls through to the normal evidence
+  path unblocked by the abbreviation check, an abbreviation combined with a
+  `skip-review:` trailer is still blocked (proving the format check runs
+  before the skip-review check), and a fully-written multi-tag subject
+  (the HYK-108 style) still passes as a regression check. Fixtures live
+  under a temp directory created per test; no real repository state is
   touched.
 - `hooks/commit-msg` is a thin wrapper (`#!/usr/bin/env sh`) that resolves
   the repository root itself before calling the script:
