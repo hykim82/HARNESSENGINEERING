@@ -2,7 +2,7 @@ import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { execSync } from "node:child_process";
 
-const HYK_TAG_RE = /HYK-\d+/;
+const HYK_TAG_RE_GLOBAL = /HYK-\d+/g;
 
 function repoRoot() {
   try {
@@ -26,11 +26,11 @@ function extractSkipReview(message) {
 
 export function checkReviewGate({ message, reviewPath = join(repoRoot(), ".harness", "review.md") }) {
   const subject = message.split(/\r?\n/, 1)[0] ?? "";
-  const tagMatch = subject.match(HYK_TAG_RE);
-  if (!tagMatch) {
+  const tagMatches = subject.match(HYK_TAG_RE_GLOBAL);
+  if (!tagMatches) {
     return { ok: true, reason: "no HYK-<id> tag in message; not issue work" };
   }
-  const issueId = tagMatch[0];
+  const issueIds = [...new Set(tagMatches)];
 
   const skipReason = extractSkipReview(message);
   if (skipReason !== null) {
@@ -44,25 +44,27 @@ export function checkReviewGate({ message, reviewPath = join(repoRoot(), ".harne
     return { ok: false, reason: `review file not found: ${reviewPath}` };
   }
   const content = readFileSync(reviewPath, "utf8");
-  const hasFor = new RegExp(`for:\\s*${issueId}\\b`).test(content);
-  if (!hasFor) {
+
+  const missingIds = issueIds.filter((issueId) => !new RegExp(`for:\\s*${issueId}\\b`).test(content));
+  if (missingIds.length > 0) {
     return {
       ok: false,
-      reason: `missing review evidence for ${issueId} in ${reviewPath} (need "for: ${issueId}" + approved verdict)`,
+      reason: `missing review evidence for ${missingIds.join(", ")} in ${reviewPath} (need "for: <id>" + approved verdict for each)`,
     };
   }
+
   const hasApproved = /verdict:\s*approved/i.test(content);
   if (!hasApproved) {
-    return { ok: false, reason: `review not approved for ${issueId} (need verdict: approved)` };
+    return { ok: false, reason: `review not approved for ${issueIds.join(", ")} (need verdict: approved)` };
   }
   const hasIndependentReviewer = /role:\s*REVIEW/i.test(content);
   if (!hasIndependentReviewer) {
     return {
       ok: false,
-      reason: `self-certification blocked: review evidence for ${issueId} lacks an independent reviewer (need role: REVIEW-*)`,
+      reason: `self-certification blocked: review evidence for ${issueIds.join(", ")} lacks an independent reviewer (need role: REVIEW-*)`,
     };
   }
-  return { ok: true, reason: `independent review evidence found for ${issueId}` };
+  return { ok: true, reason: `independent review evidence found for ${issueIds.join(", ")}` };
 }
 
 const invokedDirectly = process.argv[1] && process.argv[1].replace(/\\/g, "/").endsWith("scripts/check/review-gate.mjs");
