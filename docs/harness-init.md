@@ -97,6 +97,9 @@ Both profiles (profile-agnostic core):
   layer described in "Observability layer" below. Unlike `verify.sh`, its
   `REPLACE_ME_*` values are not filled in by `install.mjs` — see that
   section for why.
+- `.harness/gc-task.template.md` — from `gc-task.template.md` (HYK-103), a
+  droppable CODER task for a periodic "entropy GC" scan — described in
+  "Entropy GC" below.
 - `.claude/skills/capture-context/SKILL.md` — from
   `skill/capture-context/SKILL.md` (HYK-96 Scope C), a `/capture-context`
   skill that scans the session for durable goals/intent/hard-constraint
@@ -322,6 +325,22 @@ the script's strength alone.
   from editing `REPLACE_ME_CHECKS` to a trivially-passing check that doesn't
   actually exercise anything meaningful — the guard only catches "unedited
   template," not "edited badly."
+
+### Entropy GC (gc-task.template.md, HYK-103)
+
+Every entropy bug this harness has actually caught so far — a duplicate
+`.gitignore` append block (HYK-98), a template placeholder corrupted by
+naive substitution (HYK-99) — was found by accident during unrelated work,
+never by a standing process, which is exactly the weakness principle 8
+names. `gc-task.template.md` is a droppable CODER task standardizing that
+scan: a recommended weekly, human-triggered cycle across five fixed
+categories (doc↔code mismatch, dead files, duplicate/SoT-violating blocks,
+deprecated references, TODO/FIXME rot), writing findings only to
+`.harness/gc-report.md` — **it never fixes what it finds**; fixing is a
+separate, later, human-approved cycle. Known limit: scan coverage depends on
+the scanning model's own judgment and recall, not a mechanically-guaranteed
+enumeration — a clean report means "nothing found this pass," not "provably
+nothing to find."
 
 ### Credential boundary (HYK-100)
 

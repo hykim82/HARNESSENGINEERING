@@ -577,6 +577,7 @@ function main() {
   writeTemplateFile(path.join(TEMPLATES_DIR, "project-context.template.md"), path.join(targetRepoPath, ".harness", "PROJECT-CONTEXT.md"), map, { dryRun });
   writeTemplateFile(path.join(TEMPLATES_DIR, "verify.sh.template"), path.join(targetRepoPath, "verify.sh"), map, { dryRun, executable: true });
   writeTemplateFile(path.join(TEMPLATES_DIR, "observe.sh.template"), path.join(targetRepoPath, "observe.sh"), map, { dryRun, executable: true });
+  writeTemplateFile(path.join(TEMPLATES_DIR, "gc-task.template.md"), path.join(targetRepoPath, ".harness", "gc-task.template.md"), map, { dryRun });
   writeTemplateFile(
     path.join(TEMPLATES_DIR, "skill", "capture-context", "SKILL.md"),
     path.join(targetRepoPath, ".claude", "skills", "capture-context", "SKILL.md"),
