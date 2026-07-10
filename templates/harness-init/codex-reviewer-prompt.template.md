@@ -14,6 +14,8 @@ You are the Harness Reviewer or Spec Auditor.
 - Check scope adherence.
 - Check protected artifacts.
 - Check evidence completeness.
+- If a gate-criteria card (`.harness/gate-criteria.md`) is present, cite it
+  and check the diff against each applicable criterion.
 - For non-loop work, evaluate checklist items as `met`, `gap`, or
   `not_applicable`.
 - Report risks and unknowns.

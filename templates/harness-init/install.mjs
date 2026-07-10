@@ -310,6 +310,17 @@ function buildHooksBlock(params) {
         hooks: [
           { type: "command", command: `node "$CLAUDE_PROJECT_DIR/scripts/check/status-fresh.mjs" --status "${statusPath}"` },
           { type: "command", command: `node "$CLAUDE_PROJECT_DIR/scripts/check/clear-safe-check.mjs" --status "${statusPath}"` },
+          // solo-full only: team-local has no control room to check against
+          // (see checkControlRoomFresh's own vacuous-ok path for the
+          // absent-path case this guards even if that ever drifted).
+          ...(params.profile === "solo-full"
+            ? [
+                {
+                  type: "command",
+                  command: `node "$CLAUDE_PROJECT_DIR/scripts/check/controlroom-fresh.mjs" --control-room "${toPosixPath(params.controlRoomPath)}"`,
+                },
+              ]
+            : []),
         ],
       },
     ],
@@ -604,6 +615,7 @@ function main() {
   writeTemplateFile(path.join(TEMPLATES_DIR, "verify.sh.template"), path.join(targetRepoPath, "verify.sh"), map, { dryRun, executable: true });
   writeTemplateFile(path.join(TEMPLATES_DIR, "observe.sh.template"), path.join(targetRepoPath, "observe.sh"), map, { dryRun, executable: true });
   writeTemplateFile(path.join(TEMPLATES_DIR, "gc-task.template.md"), path.join(targetRepoPath, ".harness", "gc-task.template.md"), map, { dryRun });
+  writeTemplateFile(path.join(TEMPLATES_DIR, "gate-criteria.template.md"), path.join(targetRepoPath, ".harness", "gate-criteria.md"), map, { dryRun });
   writeTemplateFile(
     path.join(TEMPLATES_DIR, "skill", "capture-context", "SKILL.md"),
     path.join(targetRepoPath, ".claude", "skills", "capture-context", "SKILL.md"),
@@ -640,6 +652,8 @@ function main() {
     "status-fresh.test.mjs",
     "clear-safe-check.mjs",
     "clear-safe-check.test.mjs",
+    "controlroom-fresh.mjs",
+    "controlroom-fresh.test.mjs",
   ]) {
     copyRawFile(path.join(REPO_ROOT, "scripts", "check", name), path.join(targetRepoPath, "scripts", "check", name), { dryRun, executable: false });
   }

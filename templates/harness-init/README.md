@@ -41,6 +41,9 @@ the harness.
   `observe.sh`, distinct from `verify.sh`'s build layer
 - `gc-task.template.md`: droppable CODER task for a periodic entropy-GC scan
   (find-only, never fixes) across five fixed categories (HYK-103)
+- `gate-criteria.template.md`: empty gate-criteria card scaffold a project
+  accumulates its own gate rules into over time; installed to
+  `.harness/gate-criteria.md` in both profiles (HYK-114)
 - `gitignore.append.template`: profile-specific `.gitignore` append block,
   `solo-full` vs `team-local` (v2, HYK-92)
 - `install.mjs`: Node installer — reads a profile + 5 parameters, copies the
