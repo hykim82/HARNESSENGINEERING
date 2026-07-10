@@ -51,22 +51,37 @@ Read these once; do not re-derive them after a `/clear`.
    `.harness/<role>-task.md` in the target repository, including the target
    repo path, exact commands, prohibitions, and required output format. Do
    not hand a role pasted text instead of a task file.
-3. **Trigger word = "go".** The human types `go` in a role's terminal; that
-   role reads `.harness/<role>-task.md` and executes it.
+3. **Trigger word = "go", with the task id.** The human types
+   `go <task_id>` (not bare `go`) -- `<task_id>` is the header value at the
+   top of `.harness/<role>-task.md`. That role reads the task file and
+   executes it. Including the id lets the role notice a stale or mismatched
+   task file instead of silently re-running whatever happens to be sitting
+   there (a real incident this rule closes, coder-11).
 4. **Result = file + DONE line.** The role writes its result to
    `.harness/<role>.md` and ends with exactly
    `>>> DONE: <role> @ <YYYY-MM-DD HH:MM>` (get the timestamp from a real
    command; do not guess it).
-5. **Self-report, same turn.** The role that just finished updates its own
-   row on this board — the moment it writes its result file, in the same
-   turn, before anything else. The Orchestrator does not write a worker's
-   row for it; the Orchestrator only updates its own row and the
-   decision/state sections. The human still relays completion ("<role>
-   done"), not board content — the human never pastes file contents in.
-   (If this board lives outside the repository root, a role-boundary guard
-   scoped to the repo does not restrict this write — see
-   `docs/enforcement-v1.md`'s role-guard section.)
-6. **Target repository and role definitions.** State explicitly which
+5. **Self-report, twice, one per event.** The role that just received "go"
+   updates its own row on this board immediately, before starting work, to
+   something like `working: <task_id>`. The role that just finished updates
+   its own row again — the moment it writes its result file, in the same
+   turn, before anything else — to something like `reporting to
+   orchestrator`. The Orchestrator does not write a worker's row for either
+   event; it only updates its own row and the decision/state sections. The
+   human still relays completion ("<role> done"), not board content — the
+   human never pastes file contents in. (If this board lives outside the
+   repository root, a role-boundary guard scoped to the repo does not
+   restrict this write — see `docs/enforcement-v1.md`'s role-guard
+   section.) Skipping the first of these two reports is what lets a board
+   still showing `IDLE` be misread as "nothing is happening" when a role is
+   actually mid-task.
+6. **No retry loops on infrastructure errors.** If a tool or infrastructure
+   error repeats at the same point two or three times, regardless of cause,
+   stop immediately instead of retrying again — report it in a
+   `question_packet` and wait for the Orchestrator to confirm how to
+   proceed. Blind retries burn time and tokens without fixing a failure the
+   role does not control.
+7. **Target repository and role definitions.** State explicitly which
    repository each kind of work belongs to when a project spans more than
    one (do not assume a single repo). Roles: CODER = implementation or
    writing (write access within declared scope), VERIFY = runs the

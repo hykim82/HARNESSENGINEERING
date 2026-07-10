@@ -1436,3 +1436,170 @@ version-controlled guard.
   identifiers) and does not follow `pageInfo.hasNextPage`. This project is
   far from that ceiling today; a project that grows past 250 issues would
   need this extended before the check could be trusted at that scale.
+
+## Control room hygiene — Tier 2 (controlroom-fresh.mjs, HYK-115)
+
+### Problem restated
+
+The control room (`STATUS.md` + `PHASE-HANDOFF.md`, living outside the
+target repository — see `status.template.md`'s "Two repos" framing and this
+repository's own `D:\문서관리\하네스-관제실\`) is Orchestrator-maintained by
+convention only, the same gap D1/Tier-1 already named for the operating
+procedure in general. Two concrete failure modes were observed in practice:
+a cycle's changes sitting uncommitted in the control room repo for many
+hours (no anchor forcing a commit the way `review-gate.mjs` forces one in
+the target repo), and `PHASE-HANDOFF.md` going stale relative to `STATUS.md`
+— a fresh Orchestrator session boots off a handoff document describing a
+phase that has since moved on. Both are invisible to every check already in
+this document, since all of them scope to the target repository, not the
+control room.
+
+### Rule
+
+Given a control room path (a directory outside the target repository):
+
+- If the path is absent, not a directory, or not a git repository at all —
+  **vacuously ok, no warning**. Most installs (`team-local`) have no control
+  room; treating "there isn't one" as a defect would nag on every one of
+  them, and a `solo-full` install that hasn't set one up yet is not this
+  check's business to flag.
+- **Check ①, dirty-cycle detection**: if `git status --porcelain` in the
+  control room is non-empty (uncommitted changes) *and* the last commit
+  there is older than `DEFAULT_DIRTY_THRESHOLD_MS` (3h) — warn: looks like a
+  cycle's changes were never committed.
+- **Check ②, handoff staleness**: if both `STATUS.md` and
+  `PHASE-HANDOFF.md` exist in the control room and `|STATUS.md mtime −
+  PHASE-HANDOFF.md mtime|` exceeds `DEFAULT_HANDOFF_THRESHOLD_MS` (12h) —
+  warn: the handoff may no longer describe the current phase.
+- Either warning is reported; **no failure mode here is ever an exit `2`
+  hard block** — see "Fail-open severity" below.
+
+### Fail-open severity, matching `linear-sync.mjs`'s convention
+
+Every condition this check cannot judge with confidence is treated as
+"nothing to report," mirroring `linear-sync.mjs`'s own fail-open philosophy
+(no API key → skip; STATUS file missing → skip; network error → skip): an
+absent control room, or a control room that is not a git repository,
+resolves to `ok: true` with no warning at all, never a false alarm. Either
+`STATUS.md` or `PHASE-HANDOFF.md` being missing works the same way, but only
+for check ② (handoff staleness) — that comparison is simply skipped when it
+cannot be made. **Check ① (dirty-cycle detection) is independent of both
+files and keeps running regardless**: a control room with neither file
+present can still produce a dirty-cycle warning if its working tree is
+dirty and the last commit is older than the threshold. Missing
+STATUS/PHASE-HANDOFF silences check ②, not the whole function. When a
+warning *is* produced,
+though, the severity mirrors `status-fresh.mjs`/`clear-safe-check.mjs`
+instead of `linear-sync.mjs`'s harder `exit 2`: the CLI exits `1` (a
+non-blocking `Stop`-hook reminder that surfaces in the transcript without
+stopping anything) and never `2` (reserved for hard gates like
+`role-guard.mjs`/D2's `commit-msg` hook). This check exists to remind, not
+to block — an Orchestrator working across a real incident should not be
+locked out of ending its turn because the control room happens to look
+dirty at that moment.
+
+### Implementation
+
+- `scripts/check/controlroom-fresh.mjs` follows the same shape as every
+  other check in this document: a pure exported function
+  `checkControlRoomFresh({ controlRoomPath, now, dirtyThresholdMs,
+  handoffThresholdMs, isGitRepoFn, gitStatusFn, lastCommitTimeFn, statusPath,
+  handoffPath }) -> { ok, warnings, reason }`, plus a CLI entry point
+  (`node controlroom-fresh.mjs --control-room <path>`, or the
+  `HARNESS_CONTROL_ROOM_PATH` env var). `isGitRepoFn`/`gitStatusFn`/
+  `lastCommitTimeFn`/`now` are injection points for testability without a
+  real git repository or real elapsed time, the same rationale as
+  `status-fresh.mjs`'s `headTime` parameter.
+- Thresholds are exported constants (`DEFAULT_DIRTY_THRESHOLD_MS`,
+  `DEFAULT_HANDOFF_THRESHOLD_MS`), not inline literals, for the same reason
+  `status-fresh.mjs` exports `DEFAULT_GRACE_MS`: one place to tune, and a
+  test suite that pins the exact value instead of a magic number.
+- `scripts/check/controlroom-fresh.test.mjs` (`node:test`, 8 cases): a dirty
+  tree with a stale last commit (warns); a dirty tree with an
+  unresolvable/null last commit time — an unborn repository or a failed
+  `git log` call — (no warning, ok, matching the fail-open posture rather
+  than treating the missing timestamp as "very old"); a dirty tree with a
+  recent commit (ok); a clean tree regardless of commit age (ok); a
+  STATUS/PHASE-HANDOFF mtime gap beyond threshold (warns); a control room
+  path that is absent or not a git repo (vacuously ok); no `controlRoomPath`
+  given at all (vacuously ok); and a mtime gap inside the threshold (ok, not
+  a false positive). All git interaction is injected rather than shelled
+  out to a real repository, so no fixture ever touches real git state.
+- `templates/harness-init/install.mjs` copies `controlroom-fresh.mjs`/
+  `.test.mjs` alongside the other check scripts for **both** profiles (the
+  script itself is harmless to have installed even where it will never
+  fire), but only wires the `Stop` hook command for the `solo-full` profile
+  — `buildHooksBlock` appends a `controlroom-fresh.mjs --control-room
+  "<posix control room path>"` entry to the `Stop` array only when
+  `params.profile === "solo-full"`; `team-local` has no control room path to
+  pass, so no entry is added there.
+
+### Live smoke (this task, read-only)
+
+`node scripts/check/controlroom-fresh.mjs --control-room
+"D:/문서관리/하네스-관제실"` was run directly against the real control room —
+read-only, no write access taken (this task's own prohibition). See the
+CODER result (`.harness/coder.md`, HYK-116-batch-coder-1) for the exact
+exit code and warning text observed at run time; that observation is a
+point-in-time reading of a live board, not something this document should
+freeze as if it were permanent.
+
+### Known limitations (honesty notes)
+
+- **Tier 2 ceiling, not a gap to close — same class as `linear-sync.mjs`
+  (D4).** The control room lives outside every repository this harness's
+  local hooks can anchor to; there is no server-side authority (no CI, no
+  branch protection) that could ever run over a `D:\...` path the way
+  `enforce.yml` runs over `master`. This is a soft local reminder, full
+  stop — it can never be promoted past Tier 2 without a genuinely different
+  substrate (an external watcher process, out of scope here).
+- **The Orchestrator can ignore a warning outright.** A `Stop`-hook exit `1`
+  surfaces in the transcript but blocks nothing; an agent that decides the
+  warning is noise can simply continue. The warning still lands in the
+  conversation the human sees, though, which is the actual guarantee this
+  mechanism makes — visibility, not enforcement.
+- **Threshold values are initial guesses, not tuned.** `3h` (dirty-cycle)
+  and `12h` (handoff gap) were chosen as plausible starting points, not
+  derived from measured cycle cadence. HYK-116's own instruction calls for
+  a one-week observation window before treating either number as settled;
+  expect both to move.
+- **Check ① structurally false-positives on this harness's own normal
+  operation.** This relay treats the control room as a live dashboard:
+  every worker self-report (`STATUS.md` §1 row) is a plain `Edit`, not
+  followed by a commit, so the control room repo routinely sits dirty for
+  hours between deliberate commits even when nothing is actually wrong.
+  Once the last commit crosses the `3h` threshold, check ① keeps warning on
+  every subsequent `Stop` regardless of how normal the cycle is — this was
+  observed directly during this task's own live smoke (a REVIEW worker's
+  ordinary go-time self-report left the control room dirty, and the very
+  next invocation of this check fired the dirty-cycle warning). This is the
+  concrete reason the `3h`/`12h` thresholds need the one-week observation
+  window above, and also a reason the check's underlying premise
+  ("dirty == suspicious") may need revisiting rather than just its numbers
+  — a live dashboard that is *supposed* to go uncommitted between cycles is
+  a different shape of system than the "did someone forget to commit"
+  failure this check was designed to catch.
+- **Unresolvable commit time is treated as fail-open, not worst-case.** If
+  the working tree is dirty but `lastCommitTimeFn` cannot resolve a last
+  commit at all (an unborn repository with no commits yet, or a `git log`
+  invocation that fails for any reason) — check ① emits **no warning**,
+  matching the rest of this check's "confidence required to warn" posture
+  (the same posture as the absent-control-room path returning vacuous `ok`,
+  and `linear-sync.mjs`'s own fail-open philosophy). It does not assume the
+  missing timestamp means "very old" and warn regardless; an unresolvable
+  signal is treated the same as no signal.
+- **mtime is a form heuristic, not a content check.** Like
+  `status-fresh.mjs`'s own design note, comparing file mtimes says nothing
+  about whether `PHASE-HANDOFF.md`'s *content* still describes the current
+  phase — a handoff edited five minutes ago to say something already
+  wrong passes this check cleanly. It can only ever catch the "nobody
+  touched this in a very long time" shape of staleness, not a fresh-but-
+  incorrect one.
+- **Claude-only trigger, same family as every other `Stop`-hook check
+  here.** The intended `Stop` hook only ever fires on Claude Code's own
+  turns; a Codex REVIEW/VERIFY session ending triggers no equivalent check.
+- **Live activation is a human, one-time step, same convention as every
+  other `Stop`/`PreToolUse` hook in this document.** This task's own scope
+  explicitly excludes wiring this repository's real
+  `.claude/settings.local.json` — see the CODER task's "라이브 활성화는 CODER
+  스코프 아님" note and the coder result's explicit call-out.
