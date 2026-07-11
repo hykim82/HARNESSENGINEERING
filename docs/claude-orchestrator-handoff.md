@@ -138,6 +138,53 @@ Codex Reviewer must not:
 - make final Human acceptance decisions
 - approve work outside the Task Contract
 
+## PM Role (HYK-121)
+
+A fifth role, **PM** (planning-only), sits upstream of the Orchestrator. Its
+lane is the control room, never a repository and never Linear directly — see
+`docs/enforcement-v1.md`'s "E — PM lane enforcement" section for the
+mechanical guards (`pm-guard.mjs`, `packet-gate.mjs`, role-guard's E4/E2ⓑ).
+The canonical design is the control room's `PM\PM-에이전트-설계.md` §4
+(flows) and §7 (enforcement); this section only summarizes the parts that
+change Orchestrator behavior.
+
+- **Orchestrator must not consume an unsigned packet.** Before treating any
+  PM-produced delegation packet as authorization to act, run
+  `node scripts/check/packet-gate.mjs <packet-path>` — exit `0` means the
+  packet carries a valid human signature (`승인: OK <이름> YYYY-MM-DD HH:MM`);
+  a non-zero exit means it is unsigned or malformed and must not be consumed.
+  This is a manual, one-command check the Orchestrator itself is expected to
+  run (same "agent-invoked, not a hook" shape as the relay handshake check),
+  not something enforced automatically at this step — but any task the
+  Orchestrator subsequently drops that quotes the packet is *also* gated
+  mechanically by role-guard's E2ⓑ (below).
+- **A packet-derived task header must carry a `packet:` line** pointing at
+  the absolute path of the signed packet. `scripts/check/role-guard.mjs`
+  checks this line on every `*-task.md` write (regardless of location) and
+  blocks the drop outright if the referenced packet is missing its
+  signature — so forgetting the `packet:` line itself isn't caught (an
+  honesty-noted gap), but including it wrong or pointing at an unsigned
+  packet is.
+- **Mode B (ORCH-initiated PM delegation)** — the Orchestrator is the only
+  channel that delegates *to* PM (a new-value planning request always comes
+  from the human, never from the Orchestrator). Three DoD-bounded request
+  types only:
+  - **B1 역질문** — a packet/PRD gap or contradiction needs redefining by PM.
+  - **B2 진단·개선안** — a harness system incident (relay misfire, hook never
+    fired, stale state) or a recurring project problem (same root cause
+    rejected repeatedly, a regression) needs root-causing plus an improvement
+    proposal.
+  - **B3 시스템 검증** — a system-wide health check (convention-vs-enforcement
+    alignment, doc drift, gate coverage), at a phase/GC boundary or on direct
+    human instruction.
+  Any resulting improvement graded **[실행필요]** (requires a code/convention
+  change) must go through a delegation packet with a human signature — the
+  Orchestrator must not turn a PM report directly into a task itself; doing
+  so would close the ORCH→PM→ORCH loop without the human gate the packet
+  flow exists to preserve. Full detail (triggers, anti-triggers, output
+  contract, model routing): control room `PM\PM-에이전트-설계.md` §4 (flow
+  F3).
+
 ## Claude-to-Codex Handoff
 
 Before asking Codex to verify or review, Claude should provide:

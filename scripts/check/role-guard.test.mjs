@@ -1,8 +1,22 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { checkRoleWrite } from "./role-guard.mjs";
 
 const repoRoot = "/repo";
+
+function withPacket(content, fn) {
+  const dir = mkdtempSync(join(tmpdir(), "role-guard-test-"));
+  const p = join(dir, "packet.md").replace(/\\/g, "/");
+  writeFileSync(p, content, "utf8");
+  try {
+    fn(p);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
 
 test("(1) ORCH may drop a task file", () => {
   const result = checkRoleWrite({ role: "ORCH", filePath: ".harness/coder-task.md", repoRoot });
@@ -168,6 +182,120 @@ test("(28) Windows-drive path on a genuinely different drive stays outside the r
     role: "ORCH",
     filePath: "D:/other/place/file.md",
     repoRoot: winRoot,
+  });
+  assert.equal(result.ok, true);
+});
+
+// --- E4: PM full write-deny inside the repo ---
+
+test("(29) PM may not write a task file inside the repo", () => {
+  const result = checkRoleWrite({ role: "PM", filePath: ".harness/coder-task.md", repoRoot });
+  assert.equal(result.ok, false);
+});
+
+test("(30) PM may not write a plain source file inside the repo", () => {
+  const result = checkRoleWrite({ role: "PM", filePath: "scripts/check/foo.mjs", repoRoot });
+  assert.equal(result.ok, false);
+});
+
+// --- E2ⓑ: packet: directive gate on any *-task.md write ---
+
+test("(31) *-task.md write quoting a signed packet passes through to normal role logic", () => {
+  withPacket("승인: OK 한용 2026-07-11 17:00\n", (packetPath) => {
+    const result = checkRoleWrite({
+      role: "ORCH",
+      filePath: ".harness/coder-task.md",
+      repoRoot,
+      toolInput: { content: `task_id: X\npacket: ${packetPath}\n` },
+    });
+    assert.equal(result.ok, true);
+  });
+});
+
+test("(32) *-task.md write quoting an unsigned packet is denied outright", () => {
+  withPacket("승인: ☐\n", (packetPath) => {
+    const result = checkRoleWrite({
+      role: "ORCH",
+      filePath: ".harness/coder-task.md",
+      repoRoot,
+      toolInput: { content: `task_id: X\npacket: ${packetPath}\n` },
+    });
+    assert.equal(result.ok, false);
+    assert.match(result.reason, /unsigned\/invalid packet/);
+  });
+});
+
+test("(33) *-task.md write quoting a missing packet file is denied", () => {
+  const result = checkRoleWrite({
+    role: "ORCH",
+    filePath: ".harness/coder-task.md",
+    repoRoot,
+    toolInput: { content: "task_id: X\npacket: /does/not/exist.md\n" },
+  });
+  assert.equal(result.ok, false);
+});
+
+test("(34) *-task.md write with no packet: line falls through to normal role logic unaffected", () => {
+  const result = checkRoleWrite({
+    role: "ORCH",
+    filePath: ".harness/coder-task.md",
+    repoRoot,
+    toolInput: { content: "task_id: X\nno packet line here\n" },
+  });
+  assert.equal(result.ok, true);
+});
+
+test("(35) *-task.md write with a parenthesized packet-ish value (narrative, not a path) is not gated", () => {
+  const result = checkRoleWrite({
+    role: "ORCH",
+    filePath: ".harness/coder-task.md",
+    repoRoot,
+    toolInput: { content: "task_id: X\npacket: (없음 — 사람이 직접 발주)\n" },
+  });
+  assert.equal(result.ok, true);
+});
+
+test("(36) *-task.md write with a relative packet: path is rejected (absolute-only)", () => {
+  const result = checkRoleWrite({
+    role: "ORCH",
+    filePath: ".harness/coder-task.md",
+    repoRoot,
+    toolInput: { content: "task_id: X\npacket: relative/packet.md\n" },
+  });
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /absolute path/);
+});
+
+test("(37) packet: gate applies via new_string too (Edit tool), not just content (Write)", () => {
+  withPacket("승인: ☐\n", (packetPath) => {
+    const result = checkRoleWrite({
+      role: "ORCH",
+      filePath: ".harness/coder-task.md",
+      repoRoot,
+      toolInput: { new_string: `task_id: X\npacket: ${packetPath}\n` },
+    });
+    assert.equal(result.ok, false);
+  });
+});
+
+test("(38) packet: gate applies to a task file outside this repo's root (e.g. control room PM\\relay\\)", () => {
+  withPacket("승인: ☐\n", (packetPath) => {
+    const result = checkRoleWrite({
+      role: "ORCH",
+      filePath: "D:/문서관리/하네스-관제실/PM/relay/pm-task.md",
+      repoRoot,
+      toolInput: { content: `task_id: X\npacket: ${packetPath}\n` },
+    });
+    assert.equal(result.ok, false);
+  });
+});
+
+test("(39) a write that is not a *-task.md file is never packet-gated even with a packet: line", () => {
+  const result = checkRoleWrite({
+    role: "CODER",
+    filePath: "scripts/check/foo.mjs",
+    repoRoot,
+    toolInput: { content: "packet: /does/not/exist.md\n" },
   });
   assert.equal(result.ok, true);
 });

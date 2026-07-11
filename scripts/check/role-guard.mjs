@@ -1,10 +1,13 @@
 import { readFileSync } from "node:fs";
 import { execSync } from "node:child_process";
-import { posix as posixPath } from "node:path";
+import { normalizeToRepoRelative } from "./path-normalize.mjs";
+import { checkPacketGate } from "./packet-gate.mjs";
 
-const KNOWN_ROLES = ["ORCH", "CODER", "REVIEW", "VERIFY"];
+const KNOWN_ROLES = ["ORCH", "CODER", "REVIEW", "VERIFY", "PM"];
 const WRITE_TOOLS = new Set(["Edit", "Write", "MultiEdit", "NotebookEdit"]);
 const TASK_FILE_RE = /^\.harness\/[^/]+-task\.md$/i;
+const TASK_FILENAME_RE = /-task\.md$/i;
+const PACKET_LINE_RE = /^packet:\s*(\S+)/m;
 
 function repoRoot() {
   try {
@@ -14,51 +17,60 @@ function repoRoot() {
   }
 }
 
-// Maps WSL (`/mnt/c/...`) and Git-Bash (`/c/...`) drive-relative forms to
-// Windows drive-letter form (`C:/...`) so a path can be compared against a
-// repo root reported in either scheme. Without this, the *same* file seen
-// through a different shell's path convention could be misjudged as outside
-// the repo root and slip past the guard entirely.
-function toDriveStyle(p) {
-  let m = p.match(/^\/mnt\/([a-zA-Z])\/(.*)$/);
-  if (m) return `${m[1].toUpperCase()}:/${m[2]}`;
-  m = p.match(/^\/([a-zA-Z])\/(.*)$/);
-  if (m) return `${m[1].toUpperCase()}:/${m[2]}`;
-  return p;
+// E2ⓑ: any `<...>-task.md` write (regardless of location — in-repo
+// `.harness/`, another repo's `.harness/`, or the control room's
+// `PM\relay\`) whose content quotes a `packet:` line must point at a
+// packet that has been human-signed (packet-gate). A parenthesized value
+// (e.g. `(없음 — ...)`) is a narrative aside, not a path reference, and is
+// skipped rather than treated as a missing/unsigned packet.
+function checkPacketDirective({ filePath, toolInput }) {
+  const normalizedSlashes = filePath.replace(/\\/g, "/");
+  const basename = normalizedSlashes.split("/").pop() ?? "";
+  if (!TASK_FILENAME_RE.test(basename)) {
+    return null;
+  }
+
+  const content = toolInput?.content ?? toolInput?.new_string;
+  if (typeof content !== "string") {
+    return null;
+  }
+
+  const match = content.match(PACKET_LINE_RE);
+  if (!match) {
+    return null;
+  }
+
+  const packetPath = match[1];
+  if (packetPath.startsWith("(")) {
+    return null;
+  }
+
+  const isAbsolute = /^[a-zA-Z]:[\\/]/.test(packetPath) || packetPath.startsWith("/");
+  if (!isAbsolute) {
+    return {
+      ok: false,
+      reason: `role-guard: packet: '${packetPath}' must be an absolute path (relative packet references are rejected)`,
+    };
+  }
+
+  const gateResult = checkPacketGate({ packetPath });
+  if (!gateResult.ok) {
+    return {
+      ok: false,
+      reason: `role-guard: task drop blocked — unsigned/invalid packet '${packetPath}': ${gateResult.reason}`,
+    };
+  }
+  return null;
 }
 
-// Normalizes the tool-reported path and the repo root onto the same scheme
-// (backslashes -> forward slashes, WSL/Git-Bash drive forms -> `C:/...`),
-// resolves `.`/`..` segments (so `.harness/foo/../review.md` collapses to
-// `.harness/review.md` before matching, not after), then expresses the
-// result relative to the repo root. A relative input path is assumed already
-// relative to the repo root (PreToolUse hands back whatever the tool call
-// used, which in this harness is always a cwd-relative or repo-relative
-// path, never a foreign cwd). Anything that resolves outside the repo root
-// is out of scope for this guard by design (e.g. the control room under
-// D:\ is ORCH's to edit freely).
-function normalizeToRepoRelative(filePath, root) {
-  const fp = toDriveStyle(filePath.replace(/\\/g, "/"));
-  const rootNorm = toDriveStyle(root.replace(/\\/g, "/").replace(/\/$/, ""));
-  const isAbsolute = /^[a-zA-Z]:\//.test(fp) || fp.startsWith("/");
-
-  const absoluteFp = isAbsolute ? fp : `${rootNorm}/${fp}`;
-  const resolved = posixPath.normalize(absoluteFp);
-
-  const resolvedLower = resolved.toLowerCase();
-  const rootLower = rootNorm.toLowerCase();
-  if (resolvedLower === rootLower) {
-    return { relative: "", insideRepo: true };
-  }
-  if (resolvedLower.startsWith(`${rootLower}/`)) {
-    return { relative: resolved.slice(rootNorm.length + 1), insideRepo: true };
-  }
-  return { relative: null, insideRepo: false };
-}
-
-export function checkRoleWrite({ role, filePath, repoRoot: root }) {
+export function checkRoleWrite({ role, filePath, repoRoot: root, toolInput }) {
   if (typeof filePath !== "string" || filePath.length === 0) {
     return { ok: false, reason: "role-guard: no file path provided" };
+  }
+
+  const packetCheck = checkPacketDirective({ filePath, toolInput });
+  if (packetCheck) {
+    return packetCheck;
   }
 
   const { relative, insideRepo } = normalizeToRepoRelative(filePath, root);
@@ -77,6 +89,13 @@ export function checkRoleWrite({ role, filePath, repoRoot: root }) {
   const isTaskFile = TASK_FILE_RE.test(relative);
   const isReviewFile = relative.toLowerCase() === ".harness/review.md";
   const isVerifyFile = relative.toLowerCase() === ".harness/verify.md";
+
+  if (role === "PM") {
+    return {
+      ok: false,
+      reason: "role-guard: PM may not write inside the repo; PM lane = control room",
+    };
+  }
 
   if (role === "ORCH") {
     if (isTaskFile) {
@@ -140,7 +159,7 @@ if (invokedDirectly) {
     process.exit(0);
   }
 
-  const result = checkRoleWrite({ role: process.env.HARNESS_ROLE, filePath, repoRoot: repoRoot() });
+  const result = checkRoleWrite({ role: process.env.HARNESS_ROLE, filePath, repoRoot: repoRoot(), toolInput });
   if (result.warn) {
     console.error(result.reason);
   }
