@@ -654,6 +654,12 @@ function main() {
     "clear-safe-check.test.mjs",
     "controlroom-fresh.mjs",
     "controlroom-fresh.test.mjs",
+    "path-normalize.mjs",
+    "path-normalize.test.mjs",
+    "pm-guard.mjs",
+    "pm-guard.test.mjs",
+    "packet-gate.mjs",
+    "packet-gate.test.mjs",
   ]) {
     copyRawFile(path.join(REPO_ROOT, "scripts", "check", name), path.join(targetRepoPath, "scripts", "check", name), { dryRun, executable: false });
   }
