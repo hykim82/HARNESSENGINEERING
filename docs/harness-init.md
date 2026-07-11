@@ -123,14 +123,24 @@ Both profiles (profile-agnostic core):
 - A `.gitignore` append — from `gitignore.append.template`, which one
   block a profile receives.
 - `hooks/commit-msg`, `hooks/pre-commit`, and
-  `scripts/check/{review-gate,relay-handshake,role-guard,context-inject,status-fresh,clear-safe-check}.{mjs,test.mjs}` —
+  `scripts/check/{review-gate,relay-handshake,role-guard,context-inject,status-fresh,clear-safe-check,controlroom-fresh,path-normalize,pm-guard,packet-gate}.{mjs,test.mjs}`
+  (all ten names copy both their `.mjs` and `.test.mjs` file) —
   copied **directly from this repository's live files**, not a frozen
   template copy, so an install always ships whatever this repo's
   enforcement layer currently is (the exact drift this v2 exists to avoid).
   `status-fresh.{mjs,test.mjs}` was missing from this list before HYK-95 —
   a copy-list gap, now fixed. `clear-safe-check.mjs` (HYK-96 Scope B) is a
   soft, non-blocking `/clear` reconciliation reminder — see "Claude Code
-  hooks: now pre-wired by `install.mjs`" below.
+  hooks: now pre-wired by `install.mjs`" below. `controlroom-fresh.{mjs,test.mjs}`
+  (HYK-116) was likewise already being copied by `install.mjs`'s real source
+  array but missing from this list — a second copy-list-vs-doc drift found
+  and fixed in the same pass as the HYK-121 additions below (source array is
+  the ground truth; this doc had gone stale, not the installer). `path-normalize.mjs`,
+  `pm-guard.mjs`, and `packet-gate.mjs` (HYK-121) are the PM-lane enforcement
+  scripts — see `docs/enforcement-v1.md` ("E — PM lane enforcement") for
+  what they do; PM-lane *templates* (boot block, packet, task) are, by
+  contrast, deliberately **not** copied by `install.mjs` — see "PM lane
+  (HYK-121)" below.
 - **`<target>/.git/hooks/commit-msg` and `<target>/.git/hooks/pre-commit`**
   (HYK-95) — a *real*, per-clone install of the two git hooks above, on top
   of the tracked copy under `hooks/`. Only runs when `<target>/.git` exists
@@ -249,6 +259,46 @@ All hook wiring is documented with exact `.claude/settings.local.json` JSON
 snippets in `docs/enforcement-v1.md` ("STATUS freshness — Tier 2", "D6 —
 project-context injection", "Scope B") for manual reference, even though
 `install.mjs` now writes the equivalent block itself.
+
+### PM lane (HYK-121)
+
+HYK-122's PM dogfood run found the biggest portability gap in the harness as
+shipped: `install.mjs` scaffolded a four-role harness (Orchestrator, Coder,
+Verifier, Reviewer) with **no PM lane at all**, even though this repository
+itself had already added a fifth role upstream of the Orchestrator. This
+section closes that gap in two parts — one automated, one deliberately not.
+
+**Automated — copied for both profiles, alongside the other check
+scripts:** `scripts/check/{path-normalize,pm-guard,packet-gate}.{mjs,test.mjs}`
+(see the copy list above). These are pure enforcement scripts — `pm-guard.mjs`
+is a `PreToolUse` hook that regulates a `HARNESS_ROLE=PM` session's writes,
+`packet-gate.mjs` checks a delegation packet's approval signature, and
+`path-normalize.mjs` is the shared path-normalization helper both `pm-guard.mjs`
+and `role-guard.mjs` use. Full spec: `docs/enforcement-v1.md` ("E — PM lane
+enforcement"). Note what this copy step does **not** do: it does not wire
+`pm-guard.mjs` into any `.claude/settings.local.json` — unlike `role-guard.mjs`,
+which `buildHooksBlock` wires into the *target repo's* settings automatically,
+`pm-guard.mjs` belongs in the **control room's** settings (a different,
+outside-the-repo location `install.mjs` has no path to and does not touch —
+same "installer never writes outside the target repo" boundary the control
+room always sat behind). Wiring it is a human, one-time step per
+`docs/enforcement-v1.md`'s control-room installation snippet.
+
+**Deliberately not automated — three PM-lane templates, package contents
+only:** `pm-boot.template.md`, `pm-packet.template.md`, `pm-task.template.md`
+(placeholder convention: `<UPPER_SNAKE>` tokens and prose fill-in slots per
+existing convention — no hardcoded paths or project names, generalized from
+this repository's own live control-room originals). `install.mjs` does not
+copy or substitute these into anywhere — same reasoning as the packet/
+question-packet templates already noted under "Default Target Files" below:
+a PM lane's actual home is the operator's control room, a location outside
+every repo and therefore outside what an installer scoped to `<target
+repo>` can safely reach. A human (or the Orchestrator, on the human's
+behalf) copies these three files into the control room's PM folder by hand
+and fills in the placeholders once, the same one-time step already required
+for `.claude/settings.local.json`'s control-room hook wiring above. See
+`docs/multi-agent-v1.md`'s `### PM` role section for the role boundary these
+templates implement.
 
 ### Observability layer (observe.sh, HYK-102)
 
@@ -542,6 +592,10 @@ Contents:
 - `skill/capture-context/SKILL.md`: `/capture-context` capture-assist skill
   template, installed to `.claude/skills/capture-context/SKILL.md` in both
   profiles (HYK-96 Scope C)
+- `pm-boot.template.md`, `pm-packet.template.md`, `pm-task.template.md`:
+  PM-lane boot block, delegation-packet, and Mode-B task skeletons
+  (HYK-121) — package contents only, not copied by `install.mjs`; see "PM
+  lane (HYK-121)" above
 
 ## Opt-In Rule
 
