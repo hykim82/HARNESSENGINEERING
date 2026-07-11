@@ -1763,3 +1763,262 @@ repo's), since that is where PM sessions actually run:
   with shell access could edit or remove the PreToolUse entry, and nothing
   here detects that tampering. Mitigated the same way role-guard already is
   — human installation and ownership convention, not a stronger guarantee.
+
+## F — go-time worker status (worker-status-onstart.mjs, HYK-110)
+
+### Problem restated
+
+The relay's worker-status flow is `IDLE →(task dropped) waiting for "go"
+→(go) 🔨 작업중 (in progress) →(done) ORCH 완료 보고 →(consumed) IDLE`. Of
+these four transitions, only the *completion* one had any mechanical
+detector at all — `relay-handshake.mjs` and `status-fresh.mjs` both check
+after the fact whether a worker's result echoes and postdates its task.
+The **go-time** transition (a worker starting real work) had no detector
+whatsoever: it depended purely on the worker remembering to hand-edit its
+own STATUS §1 row immediately after typing "go," a convention with no
+backstop. A real incident (`coder-11`) showed the failure mode directly: a
+worker skipped that self-report, and the stale-looking row was misread as
+"task not yet started" when the worker was, in fact, well into it.
+
+### Design: do it, don't gate it
+
+Every other check in this document is a **gate** — it inspects state someone
+else produced and passes/blocks. `worker-status-onstart.mjs` is instead a
+**doer**: on the `UserPromptSubmit` event, if the prompt is a go-command, it
+writes the STATUS §1 row itself, mechanically, before the worker's actual
+task-reading turn even begins. This removes the convention rather than
+enforcing it — there is no "worker forgot" failure mode left to catch,
+because the worker no longer performs this step at all.
+
+### Rule
+
+Given the `UserPromptSubmit` hook's JSON payload (read from stdin, its
+`prompt` field is the user's submitted text) and three environment
+variables (`HARNESS_ROLE`, `HARNESS_STATUS_PATH`, and — PM only —
+`HARNESS_PM_RELAY_DIR`):
+
+1. If `prompt` does not match `/^\s*go\b/i` (a go-command, e.g. `go` or `go
+   HYK-110-coder-1`; a `\b` word boundary means `gogo` does **not** match),
+   the hook is a no-op — `exit 0`, no file touched at all. This check runs
+   first, before any environment/file access, so a normal conversational
+   turn costs nothing.
+2. If `HARNESS_ROLE` is not one of `CODER`, `REVIEW`, `VERIFY`, `PM`
+   (`REGULATED_ROLES`), no-op — `exit 0`. This excludes `ORCH` (which never
+   has a go-time transition of its own) and any unset/unrecognized role,
+   mirroring role-guard's own role gate.
+3. Resolve the dropped task file: for `CODER`/`REVIEW`/`VERIFY`,
+   `<repoRoot>/.harness/<role-lowercase>-task.md`; for `PM`,
+   `<HARNESS_PM_RELAY_DIR>/pm-task.md` — and if `HARNESS_PM_RELAY_DIR` is
+   unset, no-op (the control-room PM relay path is never hardcoded into
+   this script, same injection-over-literal-path posture as
+   `relay-handshake.mjs`'s own `--harness-dir` parameter).
+4. Extract `task_id:` from the task file (`/^task_id:\s*(\S+)/im`, same
+   pattern `relay-handshake.mjs` uses). Missing file, unreadable file, or a
+   file with no `task_id:` header — **fail open**: a stderr warning,
+   `exit 0`, nothing written. This hook must never block a worker's actual
+   turn just because it couldn't perform its own convenience update.
+5. If `HARNESS_STATUS_PATH` is unset, fail open the same way (never a
+   hardcoded control-room path).
+6. Build the status label: `🔨 작업중: <task_id>` for `CODER`/`REVIEW`/
+   `VERIFY`, `📝 기획중: <task_id>` for `PM` (matching the PM boot block's
+   own Mode-B go-time phrasing, not a new fourth label invented here).
+7. Replace **exactly one** STATUS §1 table row — the row whose first
+   pipe-delimited cell is this role (`/^\|\s*<role>\s*\|[^|]*\|[^|]*\|[^\S\r\n]*$/m`)
+   — with `| <role> | <label> | <now> |`, where `<now>` is the local
+   clock's current time formatted `YYYY-MM-DD HH:MM` (this harness's
+   existing "read the machine's local clock directly" convention, not a
+   timezone-string parse). The pipe-bounded match means a role name that
+   happens to appear inside another row's free-text cell can never be
+   mistaken for that row — every other row, and every other section of the
+   file, is left byte-for-byte untouched. If no row matches the role at
+   all, fail open (warn + `exit 0`, no partial write).
+8. On any file-write failure, fail open the same way.
+
+### Implementation
+
+- `scripts/check/worker-status-onstart.mjs` splits cleanly into pure logic
+  and I/O, more so than most other checks in this document: `isGoPrompt`,
+  `extractTaskId`, `buildStatusLabel`, `findSection1Bounds`, and
+  `applyStatusUpdate` are each a small pure function, and
+  `computeUpdate({ prompt, role, taskContent, statusText, nowStr })`
+  composes them into one decision (`{action: "noop"|"warn"|"write", ...}`)
+  **without touching a filesystem at all** — every test in
+  `worker-status-onstart.test.mjs` exercises this composed function
+  directly, no temp-directory fixtures needed (unlike
+  `relay-handshake.test.mjs`/`status-fresh.test.mjs`, which do need
+  fixtures because their pure functions still take file paths). The CLI
+  block at the bottom is a thin wrapper: read stdin, resolve the two/three
+  env vars, read the two files, call `computeUpdate`, write the result.
+- **Row replacement is scoped to STATUS §1's own body, not the whole
+  file.** `findSection1Bounds(statusText)` first locates the character
+  range between the "1)"-numbered heading line (matched immediately after
+  the leading `#`s and whitespace, e.g. `### 1) 다음 행동 (...)` — anchored
+  so a differently-numbered heading like `### 10) 고정 방향` can never be
+  mistaken for it) and the next heading line of any level, or end of file.
+  `applyStatusUpdate` then searches for the role's pipe-delimited row
+  **only within that range**, before ever touching anything else. Every
+  other row, every other heading's section, and everything outside §1
+  entirely is structurally unreachable by the replacement regex, not
+  merely unlikely to match it.
+- `scripts/check/worker-status-onstart.test.mjs` (`node:test`, 28 cases):
+  go-prompt matching (bare `go`, `go <id>`, leading whitespace, `gogo`
+  rejected, `완료` rejected, non-string prompt rejected); `task_id`
+  extraction (present, missing, non-string content); label building for
+  both the default and PM phrasing; row replacement (exact-row match with
+  every other row and every other file section confirmed untouched by
+  literal-string assertion, PM phrasing, no-match case, and a pipe-count
+  assertion confirming the replaced row keeps the original 3-cell format);
+  the composed `computeUpdate` end-to-end for both the noop paths (non-go
+  prompt, unregulated role, unset role), the warn/fail-open paths (missing
+  `task_id`, null task content simulating a missing file, no matching
+  STATUS row), and the full write path for both `CODER` and `PM`; plus five
+  round-2 cases and three round-3 cases (below).
+
+**Round 2 fix (independent review reproduced a real bug):** the first cut
+of `applyStatusUpdate` searched the **entire file** for a role's row shape,
+not just §1. When §1 had no row for a role but a different section (free
+text under §5/§6, or a review-fixture's own data) happened to contain a
+same-shaped `| ROLE | ... | ... |` line, that unrelated line got
+mis-replaced instead of the function correctly reporting "no §1 row found."
+An independent review reproduced this directly with a minimal fixture (a
+`## A` section carrying only a `REVIEW` row under `### 1)`, a `## B`
+section carrying a look-alike `CODER` row) and confirmed the mis-replace
+plus a `ok:true` result — a full contradiction of both the code's own
+"every other row and file section left untouched" comment and this
+document's own claim of the same. The fix adds `findSection1Bounds` (above)
+so the row search is bounded to §1's own body before it ever runs;
+`worker-status-onstart.test.mjs` gained five cases pinning this: the exact
+reproduction (no §1 row, look-alike row in §B — now `ok:false`, and no
+`updatedText` is produced at all, so there is nothing a caller could
+accidentally write back); the same look-alike row coexisting with a real §1
+row for that role (only §1's row is replaced, §B's row stays byte-for-byte,
+confirmed by literal-string match); a file with no `"1)"`-style heading at
+all (`ok:false`, fail-open); and two direct tests of `findSection1Bounds`
+itself (no heading → `null`; bounds stop at the next heading regardless of
+its level or number).
+
+**Round 3 fix (independent review reproduced a second real bug):** round 2
+correctly bounded the row *search* to §1's own body, but the row regex
+itself still ended in a bare `\s*` before its final `$` — and `\s*` matches
+newlines too. For an internal row (more §1 content follows it inside
+`sectionBody`), greedy backtracking always stopped at the first `$`-valid
+position, which is naturally right before that row's own single line
+terminator, so this never showed up in round-2's own tests. But whichever
+row happens to be **last** inside §1's body is a different case:
+`findSection1Bounds` truncates `sectionBody` exactly at the next heading's
+start, so that last row's trailing newline(s) are the literal end of the
+search string — `\s*` could then consume all of them via the end-of-string
+form of `$`, with no internal `\n` left to force an earlier stop. The
+splice dropped every newline between that row and the next heading,
+gluing them directly together (`| NOW |### 2) ...`). An independent review
+reproduced this with a minimal fixture (a `CODER` row immediately followed
+by a bare `### 2)` heading) and separately flagged that this is exactly the
+real STATUS.md's own shape — `VERIFY` is §1's last row there. The fix
+restricts the trailing whitespace class to non-newline characters
+(`[^\S\r\n]*` in place of the trailing `\s*`), so the newline is never a
+candidate for that quantifier to consume in the first place, regardless of
+where the row sits or how many blank lines follow it.
+`worker-status-onstart.test.mjs` gained three cases: the exact reproduction
+(line count and heading structure both confirmed preserved via a literal
+regex asserting the row and heading are *not* glued); a fixture shaped
+exactly like the real STATUS.md (`CODER`/`REVIEW`/`VERIFY` rows, `VERIFY`
+last) replacing `VERIFY` and confirming every row plus the following
+section header survive intact; and an edge case where the last §1 row is
+also the literal end of the whole file (no trailing newline at all),
+confirming the replacement still lands safely. A live smoke against a real
+control-room STATUS.md copy (never the original — see the constraint
+below) replacing its actual last-row `VERIFY` entry confirmed the same:
+the diff was exactly the one row, and the file's total line count was
+unchanged before and after.
+
+With round 3, the Rule section's "every other row, and every other section
+of the file, is left byte-for-byte untouched" claim (and the *newline*
+between a replaced row and whatever follows it) is now actually true for
+every row position within §1, not merely the internal-row cases round 2's
+own test suite happened to exercise.
+
+### Live smoke (this task, temp STATUS copy only — the real control-room
+STATUS.md was never touched)
+
+Three scenarios, run against a real dropped task file (`.harness/
+coder-task.md`, this very task's own file, `task_id: HYK-110-coder-1`) but a
+throwaway copy of STATUS.md's table under the session scratchpad:
+
+```
+① echo '{"prompt":"go HYK-110-coder-1"}' | HARNESS_ROLE=CODER HARNESS_STATUS_PATH=<tmp>/STATUS.md node scripts/check/worker-status-onstart.mjs
+   -> exit 0; tmp STATUS's CODER row becomes: | CODER | 🔨 작업중: HYK-110-coder-1 | 2026-07-11 21:14 |
+
+② echo '{"prompt":"go HYK-110-coder-1"}' | HARNESS_ROLE=ORCH HARNESS_STATUS_PATH=<tmp>/STATUS.md node scripts/check/worker-status-onstart.mjs
+   -> exit 0; tmp STATUS unchanged (diff empty)
+
+③ echo '{"prompt":"이거 왜 안돼?"}' | HARNESS_ROLE=CODER HARNESS_STATUS_PATH=<tmp>/STATUS.md node scripts/check/worker-status-onstart.mjs
+   -> exit 0; tmp STATUS unchanged (diff empty)
+```
+
+All three reproduced exactly as expected; see `.harness/coder.md`
+(HYK-110-coder-1) for the raw run log.
+
+### Installation (human, one-time per session-launch config — not done by
+this task)
+
+Same convention as every other locally-installed hook in this document: the
+script is version-controlled here, but wiring it into a live worker
+session's `settings.json`/`settings.local.json` is a human, per-install
+step, and the three environment variables it reads (`HARNESS_ROLE`,
+`HARNESS_STATUS_PATH`, and for PM sessions `HARNESS_PM_RELAY_DIR`) are set
+from the boot line, the same place `HARNESS_ROLE` is already set today for
+`role-guard.mjs`.
+
+ⓐ Worker (CODER/REVIEW/VERIFY) separated-plan config,
+`C:\Users\Administrator\.claude-team\settings.json`:
+
+```json
+{ "hooks": { "UserPromptSubmit": [ { "hooks": [ { "type": "command",
+  "command": "node \"C:/Users/Administrator/Documents/HARNESSENGINEERING/scripts/check/worker-status-onstart.mjs\"" } ] } ] } }
+```
+
+ⓑ Control room, `D:\문서관리\하네스-관제실\.claude\settings.local.json`
+(PM session — appended alongside the existing `pm-guard.mjs` `PreToolUse`
+entry from §E, not replacing it):
+
+```json
+{ "hooks": {
+    "PreToolUse": [ { "matcher": "Edit|Write|MultiEdit|NotebookEdit|mcp__linear-server__.*",
+      "hooks": [ { "type": "command", "command": "node \"C:/Users/Administrator/Documents/HARNESSENGINEERING/scripts/check/pm-guard.mjs\"" } ] } ],
+    "UserPromptSubmit": [ { "hooks": [ { "type": "command",
+      "command": "node \"C:/Users/Administrator/Documents/HARNESSENGINEERING/scripts/check/worker-status-onstart.mjs\"" } ] } ] } }
+```
+
+### Known limitations (honesty notes)
+
+- **STATUS lives outside every repo — Tier 2 ceiling, not a gap to close.**
+  Same class as `linear-sync.mjs` (D4) and `controlroom-fresh.mjs`: there is
+  no server-side authority (no CI, no branch protection) that could ever
+  run over a `D:\...` control-room path, so this can never be more than a
+  local convenience mechanism, by the nature of where STATUS.md lives, not
+  by an oversight in this implementation.
+- **Codex workers (REVIEW/VERIFY) have no coverage at all, structurally.**
+  `UserPromptSubmit` is a Claude Code hook type — it has no equivalent in a
+  Codex session. When `REVIEW`/`VERIFY` run on Codex (this harness's normal
+  routing, per `docs/model-orchestration.md`), their go-time STATUS update
+  still depends entirely on the worker's own self-report convention, with
+  zero mechanical backstop. This is not a partial gap this script narrows —
+  it is a full miss for two of the four regulated roles' most common
+  engine. The mitigation is the same one already recorded for role-guard
+  and status-fresh's own Claude-only honesty notes: convention plus
+  whatever the next full-scope review catches, nothing stronger.
+- **An already-running session that predates the hook's installation is not
+  retroactively covered.** The hook fires on `UserPromptSubmit` events
+  going forward from whenever it was wired into that session's settings —
+  a worker session already open when the hook is installed will not have
+  it applied until its process restarts (same class of limitation
+  `docs/harness-init.md`'s `install.mjs` section already notes for
+  `role-guard.mjs`: "restart Claude Code once and confirm the hooks
+  actually fire").
+- **Same local trust boundary as every other hook in this document.** An
+  agent or operator with shell access can edit or remove the
+  `UserPromptSubmit` entry from `settings.json`/`settings.local.json`, or
+  unset `HARNESS_ROLE`/`HARNESS_STATUS_PATH`, and nothing here detects
+  that. This is a convenience mechanism removing a forgetting failure mode,
+  not a security boundary — it sits in the same family as role-guard's and
+  pm-guard's own "same environment as the agent it watches" limitation.

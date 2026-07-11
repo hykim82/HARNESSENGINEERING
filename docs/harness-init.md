@@ -123,8 +123,8 @@ Both profiles (profile-agnostic core):
 - A `.gitignore` append — from `gitignore.append.template`, which one
   block a profile receives.
 - `hooks/commit-msg`, `hooks/pre-commit`, and
-  `scripts/check/{review-gate,relay-handshake,role-guard,context-inject,status-fresh,clear-safe-check,controlroom-fresh,path-normalize,pm-guard,packet-gate}.{mjs,test.mjs}`
-  (all ten names copy both their `.mjs` and `.test.mjs` file) —
+  `scripts/check/{review-gate,relay-handshake,role-guard,context-inject,status-fresh,clear-safe-check,controlroom-fresh,path-normalize,pm-guard,packet-gate,worker-status-onstart}.{mjs,test.mjs}`
+  (all eleven names copy both their `.mjs` and `.test.mjs` file) —
   copied **directly from this repository's live files**, not a frozen
   template copy, so an install always ships whatever this repo's
   enforcement layer currently is (the exact drift this v2 exists to avoid).

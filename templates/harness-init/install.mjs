@@ -660,6 +660,8 @@ function main() {
     "pm-guard.test.mjs",
     "packet-gate.mjs",
     "packet-gate.test.mjs",
+    "worker-status-onstart.mjs",
+    "worker-status-onstart.test.mjs",
   ]) {
     copyRawFile(path.join(REPO_ROOT, "scripts", "check", name), path.join(targetRepoPath, "scripts", "check", name), { dryRun, executable: false });
   }
