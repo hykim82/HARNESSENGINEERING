@@ -1603,3 +1603,163 @@ freeze as if it were permanent.
   explicitly excludes wiring this repository's real
   `.claude/settings.local.json` — see the CODER task's "라이브 활성화는 CODER
   스코프 아님" note and the coder result's explicit call-out.
+
+## E — PM lane enforcement (pm-guard + packet-gate + role-guard E4/E2ⓑ, HYK-121)
+
+### Problem restated
+
+HYK-121 introduces a fifth role, **PM** (planning-only), whose lane is the
+control room (`D:\문서관리\하네스-관제실\`), never this repository and never
+Linear directly. Its output is a **delegation packet** that the Orchestrator
+only consumes once a human has signed the packet's `승인:` (approval) line —
+without a mechanical check, nothing stops a PM session from writing into the
+repo by accident, calling a Linear write tool directly, or an unsigned packet
+being silently treated as if approved. This section is three enforcement
+points implementing PM-에이전트-설계.md §7 (E1, E2/E2ⓑ, E4).
+
+### E1 — `pm-guard.mjs`
+
+A PreToolUse hook, same contract shape as `role-guard.mjs`: reads the hook's
+JSON payload from stdin, `exit 0` to allow, `exit 2` + reason on stderr to
+block.
+
+- No-op (`exit 0`) unless `HARNESS_ROLE === "PM"` — this guard regulates only
+  PM sessions; every other role is role-guard's concern.
+- Blocks any call to a Linear write MCP tool matching
+  `mcp__linear-server__(save_|create_|delete_)` outright — PM proposes via a
+  packet, it does not commit to Linear itself.
+- For a write-family tool (`Edit`/`Write`/`MultiEdit`/`NotebookEdit`) with a
+  file path, the path is normalized (`path-normalize.mjs`'s
+  `normalizeAbsolute` — the same backslash/WSL (`/mnt/c/...`)/Git-Bash
+  (`/c/...`) handling `role-guard.mjs` uses, extracted to a shared module so
+  the two guards can't silently diverge on path handling; pinned equal by
+  `role-guard.test.mjs`'s existing WSL/Git-Bash/backslash cases plus
+  `pm-guard.test.mjs`'s own (11)-(13)) and allow-listed against exactly two
+  things: under the control room root (`D:/문서관리/하네스-관제실`), or a path
+  containing `AppData/Local/Temp/claude/` (this harness's scratchpad
+  convention). Everything else is denied.
+- A missing/malformed PreToolUse payload fails open (`exit 0` with a stderr
+  warning), matching `role-guard.mjs`'s own posture.
+
+### E2 — `packet-gate.mjs`
+
+`export function checkPacketGate({ packetPath }) -> { ok, reason }` parses
+the packet file's `승인:` line and accepts exactly one signed form (per
+`PM\템플릿\위임패킷-템플릿.md`): `승인: OK <이름> YYYY-MM-DD HH:MM`. Every other
+case is a distinct rejection reason: the unsigned placeholder (`승인: ☐`), a
+malformed signature (e.g. missing the time component), no `승인:` line at
+all, or the file not existing. CLI: `node packet-gate.mjs <packet-path>` —
+exit `0`/`1` with the reason on stdout/stderr.
+
+### E2ⓑ — role-guard packet directive gate
+
+`role-guard.mjs`'s `checkRoleWrite` now runs a packet check **before** its
+existing "outside the repo root is unregulated" early return, because a
+packet-sourced task drop can land anywhere a `*-task.md` file can be written —
+this repo's `.harness/`, another repo's `.harness/` (e.g. a TEAM10 drop), or
+the control room's `PM\relay\`. The check:
+
+1. Only fires when the write target's **basename** matches `*-task.md`
+   (location-independent — not scoped to `.harness/`).
+2. Reads the write's content from `tool_input.content ?? tool_input.new_string`
+   (covers `Write` and `Edit`; `MultiEdit`'s per-edit array is out of scope,
+   by spec).
+3. Looks for a `/^packet:\s*(\S+)/m` line. No line → not gated, falls through
+   to normal role logic unaffected.
+4. A value starting with `(` (e.g. `(없음 — 사람이 PM 설계 3승인으로 직접
+   발주)`) is a narrative aside, not a path reference, and is skipped — this
+   is what keeps a task file's own descriptive header (like this task's own
+   `coder-task.md`) from being misread as a dangling packet reference.
+5. A non-absolute `packet:` value is rejected outright (`packet: 경로는
+   절대경로` — relative packet references are never trusted).
+6. Otherwise `checkPacketGate({ packetPath })` runs; an unsigned/invalid
+   packet blocks the task drop itself (`exit 2`), before the task ever
+   reaches a worker.
+
+### E4 — role-guard `KNOWN_ROLES` gains `PM`
+
+`KNOWN_ROLES` now includes `"PM"`. Once a write is confirmed inside the repo
+root, `role === "PM"` is an unconditional deny — reason: "PM may not write
+inside the repo; PM lane = control room." This is deliberately a second,
+independent line of defense: if a PM session is ever opened with the wrong
+cwd (inside this repo instead of the control room), pm-guard's control-room
+allow-list would already deny it, but E4 catches the same mistake from
+role-guard's side too, the same "defense-in-depth, not substitutes for each
+other" posture as every other guard pair in this document.
+
+### Implementation
+
+- `scripts/check/path-normalize.mjs` (new): `toDriveStyle`, `normalizeAbsolute`,
+  `normalizeToRepoRelative` — extracted verbatim from `role-guard.mjs`'s
+  original private helpers so `pm-guard.mjs` can reuse the identical
+  WSL/Git-Bash/backslash normalization without a second, potentially
+  drifting implementation. `role-guard.mjs` now imports from this module;
+  its own 28-case test suite passing unchanged after the extraction is the
+  regression check that the refactor didn't alter behavior.
+- `scripts/check/pm-guard.mjs` (new), `scripts/check/packet-gate.mjs` (new),
+  `scripts/check/role-guard.mjs` (extended) — each with a `.test.mjs`
+  (`pm-guard.test.mjs` 15 cases, `packet-gate.test.mjs` 9 cases,
+  `role-guard.test.mjs` grown from 28 to 39 cases covering E4 and E2ⓑ).
+
+### Live smoke (this task, manual reproduction of 3 PreToolUse payloads)
+
+```
+echo '{"tool_name":"Write","tool_input":{"file_path":"C:/Users/Administrator/Documents/HARNESSENGINEERING/.harness/coder-task.md","content":"x"}}' | HARNESS_ROLE=PM node scripts/check/pm-guard.mjs
+# -> exit 2: "pm-guard: PM may not write '...' — allow-list = control room (...) + scratchpad only"
+
+echo '{"tool_name":"Edit","tool_input":{"file_path":"D:/문서관리/하네스-관제실/STATUS.md","new_string":"x"}}' | HARNESS_ROLE=PM node scripts/check/pm-guard.mjs
+# -> exit 0
+
+echo '{"tool_name":"Write","tool_input":{"file_path":".harness/coder-task.md","content":"task_id: X\npacket: <unsigned packet path>\n"}}' | HARNESS_ROLE=ORCH node scripts/check/role-guard.mjs
+# -> exit 2: "role-guard: task drop blocked — unsigned/invalid packet '...': packet-gate: packet not yet approved (승인: ☐) in ..."
+```
+
+All three reproduced exactly as expected; see `.harness/coder.md`
+(HYK-121-coder-1) for the raw run log.
+
+### Control room installation (human, one-time — not done by this task)
+
+Same convention as every other locally-installed hook in this document
+(role-guard, status-fresh, controlroom-fresh): the script is version-controlled
+here, but wiring it into a live session's `settings.local.json` is a human,
+per-install step, done once in the **control room's own** settings (not this
+repo's), since that is where PM sessions actually run:
+
+`D:\문서관리\하네스-관제실\.claude\settings.local.json`:
+
+```json
+{ "hooks": { "PreToolUse": [ { "matcher": "Edit|Write|MultiEdit|NotebookEdit|mcp__linear-server__.*",
+  "hooks": [ { "type": "command", "command": "node \"C:/Users/Administrator/Documents/HARNESSENGINEERING/scripts/check/pm-guard.mjs\"" } ] } ] } }
+```
+
+### Known limitations (honesty notes)
+
+- **Claude-only, same family as role-guard/status-fresh/controlroom-fresh.**
+  `pm-guard.mjs` and E4 are both Claude Code `PreToolUse` hooks — they only
+  ever see Claude's own tool calls. §6's model routing already documents the
+  consequence directly: a PM session run on **codex sol** (the recommended
+  engine for B2/B3 diagnostic work) has no pm-guard/E4 coverage at all. The
+  mitigation is structural, not a patch to this guard: **packet-gate (E2)
+  runs on the ORCH side of the handoff**, so the human-signature requirement
+  holds regardless of which engine produced the packet — the E2 gate does
+  not care who PM was.
+- **A missing `packet:` line is not detectable.** E2ⓑ only fires when the
+  task file's content actually contains a `packet:` line — if whoever drops
+  a packet-derived task simply forgets to write that line, nothing here
+  notices the omission; the task drop proceeds ungated. The mitigation is
+  the same convention-level one PM-에이전트-설계.md §7 names: a full-scope
+  review card item asking "출처 packet 확인" (packet provenance confirmed).
+- **Signature forgery is possible in principle.** `승인: OK <이름> <시각>` is a
+  plain-text pattern match, not a cryptographic signature — anyone with
+  shell/filesystem access to the packet file (the same OS user running the
+  agent) can type that line by hand without a human having actually signed
+  off. This is the same residual class already recorded for HYK-89
+  (isolated-runner enforcement, deferred) and for D2's `role: REVIEW-*`
+  marker above: the real anchor is the human reading the packet and typing
+  the signature themselves, plus the control room's own git history as an
+  audit trail — not something a local hook can make airtight.
+- **`settings.local.json` itself is a local, operator-owned file.** Same
+  trust boundary as role-guard's own settings wiring: an agent or operator
+  with shell access could edit or remove the PreToolUse entry, and nothing
+  here detects that tampering. Mitigated the same way role-guard already is
+  — human installation and ownership convention, not a stronger guarantee.

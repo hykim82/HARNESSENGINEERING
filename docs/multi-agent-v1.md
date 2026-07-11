@@ -200,6 +200,46 @@ Must not be bypassed for:
 - policy changes that affect future projects
 - operations requiring explicit approval
 
+### PM
+
+Owns pre-repo planning: problem definition, PRD, and delegation packets.
+Lane = the control room (`D:\문서관리\하네스-관제실\PM\`) — never a repository,
+never Linear directly. Full design: control room `PM\PM-에이전트-설계.md`.
+Mechanical enforcement: `docs/enforcement-v1.md` §E (`pm-guard.mjs`,
+`packet-gate.mjs`, role-guard E4/E2ⓑ).
+
+Responsibilities:
+
+- turn a human-originated planning request (Mode A) into a PRD or lightweight
+  plan plus a **delegation packet** carrying an unsigned (`승인: ☐`) approval
+  line — the packet, not direct repo/Linear action, is PM's only way to move
+  work downstream
+- respond to Orchestrator-initiated requests (Mode B) only within three
+  DoD-bounded types: B1 역질문 (redefine a packet/PRD gap), B2 진단·개선안
+  (root-cause a harness/project problem, propose a fix), B3 시스템 검증
+  (system-wide health check)
+- grade every improvement recommendation — [즉시] (non-destructive, ORCH may
+  act on it directly), [실행필요] (a code/convention change — must go through
+  a delegation packet + human signature), or [관찰] (record only)
+- never originate a new-value planning task on its own initiative — that
+  channel (Mode A) is human-only; PM only ever responds
+
+Allowed changes:
+
+- control-room files under its own lane (`PM\...`)
+- scratchpad files
+
+Must not:
+
+- write inside any repository — blocked mechanically by `pm-guard.mjs`'s
+  allow-list and, as a second line of defense, role-guard's E4
+- call a Linear write tool (`save_*`/`create_*`/`delete_*`) — blocked
+  mechanically by `pm-guard.mjs`
+- treat its own report as authorization to act — an `[실행필요]` item is a
+  proposal until a human signs the delegation packet (`승인: OK <이름>
+  YYYY-MM-DD HH:MM`), checked by `packet-gate.mjs` before the Orchestrator
+  consumes it
+
 ## Role Assignment Record
 
 The Orchestrator should record role assignment in Linear before delegating.
@@ -372,6 +412,7 @@ task is reclassified.
 | Reviewer | read | no | no | no | review note | comment only |
 | Spec Auditor | read | no | no | no | spec review note | comment only |
 | Human | decide | approve when required | approve when required | no | final acceptance | Done |
+| PM | read/write own PRDs (control room only) | no | no | no | delegation packet (control room only) | no |
 
 Exceptions must be written into the Task Contract before the role acts.
 

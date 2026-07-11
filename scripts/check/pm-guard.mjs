@@ -1,0 +1,82 @@
+import { readFileSync } from "node:fs";
+import { normalizeAbsolute } from "./path-normalize.mjs";
+
+const WRITE_TOOLS = new Set(["Edit", "Write", "MultiEdit", "NotebookEdit"]);
+const LINEAR_WRITE_TOOL_RE = /^mcp__linear-server__(save_|create_|delete_)/;
+
+// Fixed control-room root (PM's lane, outside every repo). Not configurable
+// per-invocation: pm-guard is installed once, in the control room's own
+// settings.local.json, and always regulates against this one root.
+const CONTROL_ROOM_ROOT = "D:/문서관리/하네스-관제실";
+const SCRATCHPAD_MARKER = "appdata/local/temp/claude/";
+
+function isControlRoomPath(normalized) {
+  const lower = normalized.toLowerCase();
+  const rootLower = CONTROL_ROOM_ROOT.toLowerCase();
+  return lower === rootLower || lower.startsWith(`${rootLower}/`);
+}
+
+function isScratchpadPath(normalized) {
+  return normalized.toLowerCase().includes(SCRATCHPAD_MARKER);
+}
+
+// PM-only PreToolUse guard: outside a PM session this is a no-op (other
+// roles are role-guard's concern). Inside a PM session, writes are
+// allow-listed to the control room + scratchpad, and Linear's write MCP
+// tools are blocked outright — PM proposes, it does not commit.
+export function checkPmGuard({ role, toolName, filePath }) {
+  if (role !== "PM") {
+    return { ok: true, reason: "pm-guard: not a PM session; not regulated" };
+  }
+
+  if (typeof toolName === "string" && LINEAR_WRITE_TOOL_RE.test(toolName)) {
+    return { ok: false, reason: `pm-guard: PM may not call Linear write tool '${toolName}' (packet + human sign-off only)` };
+  }
+
+  if (!WRITE_TOOLS.has(toolName)) {
+    return { ok: true, reason: `pm-guard: '${toolName}' is not a regulated write tool` };
+  }
+
+  if (typeof filePath !== "string" || filePath.length === 0) {
+    return { ok: true, reason: "pm-guard: no file path provided" };
+  }
+
+  const normalized = normalizeAbsolute(filePath);
+  if (isControlRoomPath(normalized) || isScratchpadPath(normalized)) {
+    return { ok: true, reason: `pm-guard: PM write allowed for '${filePath}'` };
+  }
+
+  return {
+    ok: false,
+    reason: `pm-guard: PM may not write '${filePath}' — allow-list = control room (${CONTROL_ROOM_ROOT}) + scratchpad only`,
+  };
+}
+
+const invokedDirectly = process.argv[1] && process.argv[1].replace(/\\/g, "/").endsWith("scripts/check/pm-guard.mjs");
+if (invokedDirectly) {
+  let raw = "";
+  try {
+    raw = readFileSync(0, "utf8");
+  } catch {
+    raw = "";
+  }
+
+  let hookInput;
+  try {
+    hookInput = JSON.parse(raw);
+  } catch {
+    console.error("pm-guard: no/malformed PreToolUse payload; allowing");
+    process.exit(0);
+  }
+
+  const toolName = hookInput.tool_name;
+  const toolInput = hookInput.tool_input || {};
+  const filePath = toolInput.file_path || toolInput.notebook_path;
+
+  const result = checkPmGuard({ role: process.env.HARNESS_ROLE, toolName, filePath });
+  if (result.ok) {
+    process.exit(0);
+  }
+  console.error(result.reason);
+  process.exit(2);
+}
