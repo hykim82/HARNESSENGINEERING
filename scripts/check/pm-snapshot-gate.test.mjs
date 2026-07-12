@@ -221,3 +221,51 @@ test("(20) CLI: --task + --result, mismatched snapshot_id -> non-zero exit", () 
 test("(21) CLI: no --task -> non-zero exit (usage error)", () => {
   assert.throws(() => execFileSync("node", [SCRIPT_PATH], { encoding: "utf8" }));
 });
+
+test("(22) G5: a guidance comment prefixed 'pm-snapshot-gate(...)' before the real envelope does not shadow it -> ok (review-6 repro)", () => {
+  const text = b2TaskWith(
+    "<!-- pm-snapshot-gate(G5)가 파싱하는 스냅샷 증거 봉투 안내 -->\n" + FULL_SNAPSHOT_BLOCK,
+  );
+  const result = checkPmSnapshotEnvelope(text);
+  assert.equal(result.ok, true);
+  assert.match(result.reason, /envelope complete/);
+});
+
+test("(23) G5: only the guidance-comment prefix present, no real envelope -> ok:false (not falsely satisfied by the guidance text)", () => {
+  const text = b2TaskWith("<!-- pm-snapshot-gate(G5)가 파싱하는 스냅샷 증거 봉투 안내 -->");
+  const result = checkPmSnapshotEnvelope(text);
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /no pm-snapshot envelope block/);
+});
+
+test("(24) parsePmType: ignores a 'type: B2/B3' phrase that appears inside an HTML comment (review-7 repro)", () => {
+  const text = "<!-- 안내: type: B2/B3는 필수, B1은 면제 -->\ntask_id: X\n";
+  assert.equal(parsePmType(text), null);
+});
+
+test("(25) parsePmType: the real pm-task template's raw guidance comment no longer false-matches", () => {
+  const text =
+    "```\ntask_id: X\ndropped_at: Y\ntype: <REPLACE_ME — B1 역질문 | B2 진단·개선안 | B3 시스템검증 중 하나>\n```\n" +
+    "<!-- PM 스냅샷 봉투 안내(G5·B2/B3 필수): 아래 실제 봉투는 pm-snapshot-gate가 파싱한다.\n" +
+    "     type: B2/B3는 필수, B1은 면제, `linear_evidence: none`을 태스크에 명시하면 B2/B3여도 면제.\n" +
+    "     captured_at은 `YYYY-MM-DD HH:MM KST` 형식 그대로(초 금지). issue 행은 이슈당 최소 1줄. -->\n";
+  assert.equal(parsePmType(text), null);
+});
+
+test("(26) parsePmType: a real type header outside any comment still parses normally (no over-stripping)", () => {
+  assert.equal(parsePmType("type: B2 진단·개선안\n"), "B2");
+  assert.equal(parsePmType("<!-- unrelated comment -->\ntype: B3 시스템검증\n"), "B3");
+});
+
+test("(27) parsePmType: coder-4's header variants still work after comment-stripping (TYPE:/leading ws/space-before-colon/lowercase)", () => {
+  assert.equal(parsePmType("TYPE: B1 질문\n"), "B1");
+  assert.equal(parsePmType("  type: B1 질문\n"), "B1");
+  assert.equal(parsePmType("type : B1 질문\n"), "B1");
+  assert.equal(parsePmType("type: b1 질문\n"), "B1");
+});
+
+test("(28) checkPmSnapshotEnvelope: unchanged behavior after parsePmType's comment-stripping -- a real snapshot envelope inside a comment is still found", () => {
+  const result = checkPmSnapshotEnvelope(b2TaskWith(FULL_SNAPSHOT_BLOCK));
+  assert.equal(result.ok, true);
+  assert.match(result.reason, /envelope complete/);
+});

@@ -14,15 +14,31 @@ import { readFileSync } from "node:fs";
 // reproduced (coder-3 rejection).
 const TYPE_RE = /^\s*type\s*:\s*(b[123])\b/im;
 const LINEAR_EVIDENCE_NONE_RE = /^linear_evidence:\s*none\s*$/m;
-const SNAPSHOT_BLOCK_RE = /<!--\s*pm-snapshot([\s\S]*?)-->/i;
+// Negative lookahead after `pm-snapshot` guards against matching a
+// same-prefixed marker name (e.g. this file's own guidance comment
+// `<!-- pm-snapshot-gate(G5)... -->` in the PM task template) before the
+// real envelope -- the real block's `pm-snapshot` is always followed by
+// whitespace/newline, never `-` or a word character (review-6 repro).
+const SNAPSHOT_BLOCK_RE = /<!--\s*pm-snapshot(?![-\w])([\s\S]*?)-->/i;
 const CAPTURED_AT_RE = /^\d{4}-\d{2}-\d{2}\s\d{2}:\d{2}\sKST$/;
 const ISSUE_LINE_RE = /^issue\s+\S+:\s*state=/m;
 const SNAPSHOT_ID_LINE_RE = /^snapshot_id:\s*(.*?)\s*$/m;
 
 // Extracts the PM task type (B1/B2/B3) from a task file's `type:` header.
 // Returns null when no such header exists (caller must not guess).
+//
+// HTML comments are stripped before matching -- the `type:` header is a
+// real document field (same tier as task_id/dropped_at), not prose inside a
+// guidance comment, but any guidance comment that happens to *mention* a
+// `type: B2/B3` phrase (e.g. explaining when the snapshot envelope is
+// required) would otherwise false-match here regardless of how that
+// comment's wording is phrased -- fixing the parser once, rather than
+// re-chasing every future comment-wording variant, is the point (review-7).
+// This stripping is local to parsePmType only -- checkPmSnapshotEnvelope's
+// SNAPSHOT_BLOCK_RE must keep scanning comments as-is, since the real
+// snapshot envelope itself *lives* inside an HTML comment.
 export function parsePmType(taskText) {
-  const text = taskText ?? "";
+  const text = (taskText ?? "").replace(/<!--[\s\S]*?-->/g, "");
   const match = text.match(TYPE_RE);
   return match ? match[1].toUpperCase() : null;
 }

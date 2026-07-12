@@ -8,9 +8,23 @@
 ```
 task_id: <Linear이슈>-pm-N        ← 이슈가 없으면 ORCH가 먼저 생성(진단도 추적 대상)
 dropped_at: YYYY-MM-DD HH:MM KST
-type: B1 역질문 | B2 진단·개선안 | B3 시스템검증
+type: <REPLACE_ME — B1 역질문 | B2 진단·개선안 | B3 시스템검증 중 하나>
 track: <이 프로젝트의 트랙/영역 이름>
 관련: Linear <이슈> · 패킷 <packet_id, 있으면> · 사이클 <관련 task_id들>
+```
+
+<!-- PM 스냅샷 봉투 안내(G5·B2/B3 필수): 아래 실제 봉투는 pm-snapshot-gate가 파싱한다.
+     type: B2/B3는 필수, B1은 면제, `linear_evidence: none`을 태스크에 명시하면 B2/B3여도 면제.
+     captured_at은 `YYYY-MM-DD HH:MM KST` 형식 그대로(초 금지). issue 행은 이슈당 최소 1줄. -->
+```
+<!-- pm-snapshot
+snapshot_id: SNAP-YYYYMMDD-HHMM
+captured_at: YYYY-MM-DD HH:MM KST
+issue_ids: HYK-N, HYK-M
+issue HYK-N: state=Todo; excerpt="REPLACE_ME 발췌"
+omitted_fields: none
+unknown: none
+-->
 ```
 
 ## 증상 / 질문 — 관측된 사실만 (ORCH의 추정은 반드시 "가설:" 접두로 구분)
