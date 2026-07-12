@@ -1174,6 +1174,56 @@ With those limits acknowledged, the actual mechanism:
   event) or its own separate entry — either way, both checks read the same
   board and both are non-blocking (`status-fresh.mjs` also warns rather
   than hard-blocks on `Stop`).
+- **Cycle/phase boundary receipt (HYK-128 addition).** A 🟢 `/clear`-safe
+  declaration that passes the attestation check above is now also required
+  to carry a **cycle-receipt** block — a second machine-parsed marker,
+  co-located with the attest marker in the same `/clear 안전` section:
+
+  ```
+  <!-- cycle-receipt:
+    boundary: cycle | phase
+    task_id: <this cycle's task_id>
+    result_ref: <commit SHA / artifact path / DONE>
+    issue_ids: <related Linear issue(s)>
+    sync_result: ok | drift | 판정불가
+    status_updated: yes | no
+    phase_update_needed: yes | no
+    open_set_sync: ok | drift | 판정불가   # required only when boundary=phase
+  -->
+  ```
+
+  `checkClearSafe` runs this in addition to the existing attest check (both
+  must pass for `ok: true`): for **every** boundary, the six fields
+  `task_id`/`result_ref`/`issue_ids`/`sync_result`/`status_updated`/
+  `phase_update_needed` must all be present and non-empty, or the check fails
+  and names exactly which field(s) are missing (G3). For `boundary: phase`
+  specifically, `open_set_sync` must additionally be present and not the
+  literal `판정불가` sentinel — missing or `판정불가` fails with a
+  "사람 확인 필요" (human confirmation needed) reason rather than a silent
+  pass (G4). This exists to close a fresh-but-wrong drift the HYK-128
+  diagnosis found concretely: PHASE-HANDOFF had stayed stale on HYK-110's
+  actual state across a cycle boundary because nothing checked that a
+  cycle's result, STATUS update, and phase-update-needed flag were closed
+  out together.
+  - **Honesty note, same shape as the attest check above — and narrower than
+    an earlier draft of this note claimed:** this only verifies the six
+    required fields are *present and non-empty* (plus, for `boundary:
+    phase`, that `open_set_sync` specifically isn't empty or the literal
+    `판정불가` sentinel). It does **not** validate that any field's value is
+    well-formed or drawn from a known set — a receipt with `boundary:
+    nonsense`, `sync_result: nonsense`, or any other garbage string in a
+    required field still passes, as long as the field is non-empty. It
+    certainly does not verify that any field's value is *true* (that
+    `result_ref` really names this cycle's actual result, that `sync_result`
+    reflects a real `linear-sync` run that was actually executed, etc.) —
+    presence-only, not shape-valid, not fact-checked. Same Tier 2 soft
+    ceiling as everything else in this subsection: `exit 1` only, never
+    `exit 2`, and any internal parsing trouble fails open (`ok: true`)
+    exactly like the pre-existing attest check.
+  - `parseCycleReceipt(statusText) -> { field: value } | null` is exported
+    from `clear-safe-check.mjs` alongside `checkClearSafe`, following the
+    same pure text-in/struct-out shape as every other check in this
+    document.
 
 ### v1 scope: deliberately minimal
 
@@ -1289,16 +1339,32 @@ Given STATUS.md's §6 block and a live query of Linear's issues for this
 project:
 
 - **`staleInStatus`** — an issue §6 lists as open, but Linear's
-  `WorkflowState.type` for it is `completed` or `canceled`. This is the core
-  drift the 2026-07-07 incident exhibited.
-- **`missingInStatus`** — an issue Linear shows as not `completed`/`canceled`,
-  with no corresponding entry in §6 at all (the reverse gap).
+  `WorkflowState.type` for it is `completed`, `canceled`, or `duplicate`. This
+  is the core drift the 2026-07-07 incident exhibited. (`duplicate` was added
+  in the HYK-128 round below — team HYK's "Duplicate" state is a closed state
+  too, just not `completed`/`canceled`; without it, an issue §6 still lists
+  open but Linear marked Duplicate would silently miss this check.)
+- **`missingInStatus`** — an issue Linear shows as not
+  `completed`/`canceled`/`duplicate`, with no corresponding entry in §6 at all
+  (the reverse gap).
+- **`stateDrift`** (added in the HYK-128 round) — an issue open on *both*
+  sides (§6 and Linear agree it's not done) but disagreeing on *which* open
+  state it's in — e.g. §6 says "Todo" while Linear says "In Progress". This is
+  judged by **`stateName` text comparison, not `WorkflowState.type`**: team
+  HYK's "In Progress" (`type: started`) and "In Review" (`type: backlog`) have
+  *different* types, so type comparison alone cannot distinguish them. §6's
+  free-text state is normalized to one of a fixed canonical set (`Todo`, `In
+  Progress`, `In Review`, `Backlog`, `Done`, `Canceled`, `Duplicate`) via
+  case-insensitive prefix match before comparison; when normalization fails
+  (unrecognized text), the pair is skipped entirely rather than guessed at —
+  this check would rather miss a drift than manufacture a false positive out
+  of text it can't parse.
 
-Either non-empty set is reported as a drift; the CLI exits `2` and names each
-offending issue with its §6 state (or Linear state, for the missing case) so
-the caller knows exactly what to fix. Every genuinely open issue that
-correctly appears open on both sides — the common case — produces no output
-beyond a one-line `ok`, exit `0`.
+Any non-empty set among the three is reported as a drift; the CLI exits `2`
+and names each offending issue with its §6 state (or Linear state, for the
+missing case) so the caller knows exactly what to fix. Every genuinely open
+issue that correctly appears open (and in the same state) on both sides — the
+common case — produces no output beyond a one-line `ok`, exit `0`.
 
 ### Fail-open semantics
 
@@ -1339,9 +1405,11 @@ version-controlled guard.
   `- **HYK-<n>** ... — *<state>*` lines from the §6 block only, stopping at
   the next `###` heading, and skipping the parenthetical Done-rollup line
   since it doesn't match the `- **HYK-<n>**` shape at all) and
-  `diffSync(statusIssues, linearIssues) -> { staleInStatus, missingInStatus }`
-  — plus `loadLinearApiKey(root, env = process.env)`, also exported and pure
-  with respect to its `env` parameter, for the fail-open token-loading path.
+  `diffSync(statusIssues, linearIssues) -> { staleInStatus, missingInStatus,
+  stateDrift }` — plus `normalizeStatusState(text) -> <canonical name> | null`
+  (the HYK-128 addition backing `stateDrift`'s prefix-match normalization) and
+  `loadLinearApiKey(root, env = process.env)`, also exported and pure with
+  respect to its `env` parameter, for the fail-open token-loading path.
   Everything that touches the network or the filesystem (`fetchLinearIssues`,
   the CLI's `main()`) is not exported and is exercised only by the live
   verification runs recorded below, not by the automated test suite.
@@ -1355,16 +1423,22 @@ version-controlled guard.
   in-repo default that this project has to override every time — this
   script's default is already correct for live use here, and `--status` is
   chiefly a test/verification override.
-- `scripts/check/linear-sync.test.mjs` (`node:test`, 9 cases): §6 parsing
-  against a fixture built from a real trimmed slice of this repo's own
-  `STATUS.md` (including a priority-annotated state,
-  `*Todo, **High***`, and the parenthetical Done-rollup line, both confirmed
-  handled correctly); `staleInStatus` detection for both `completed` and
-  `canceled` Linear state types; `missingInStatus` detection; a fully
-  matched case producing zero drift; and four cases covering
+- `scripts/check/linear-sync.test.mjs` (`node:test`, 20 cases as of the
+  HYK-128 round, up from the original 9): §6 parsing against a fixture built
+  from a real trimmed slice of this repo's own `STATUS.md` (including a
+  priority-annotated state, `*Todo, **High***`, and the parenthetical
+  Done-rollup line, both confirmed handled correctly); `staleInStatus`
+  detection for `completed`, `canceled`, and `duplicate` Linear state types;
+  `missingInStatus` detection (including the `duplicate` case); a fully
+  matched case producing zero drift; four cases covering
   `loadLinearApiKey`'s fail-open path (no env, no file), the env-var path,
   reading from `.env.local`, and a `.env.local` present but missing the key
-  — none of which ever assert on or print a real token value.
+  (none of which ever assert on or print a real token value); and the
+  HYK-128 additions — `normalizeStatusState` case-insensitivity/prefix
+  matching/collision-avoidance/unrecognized-text-returns-null, plus
+  `stateDrift` firing on mismatched open states, staying silent on matched
+  states, staying silent when normalization fails, and staying silent when
+  the Linear side is already closed.
 - Stop hook wiring (not installed by this task, same convention as
   `status-fresh.mjs`/`clear-safe-check.mjs` — human, one-time, per-clone):
 
@@ -1390,8 +1464,10 @@ version-controlled guard.
 
 ### Live verification (this task)
 
-- Full regression: all 6 pre-existing check suites (97 cases total) plus the
-  new 9-case `linear-sync.test.mjs` — 106 cases, all passing.
+- Full regression (as originally run): all 6 pre-existing check suites (97
+  cases total) plus the new 9-case `linear-sync.test.mjs` — 106 cases, all
+  passing. (The suite has grown since — see "Known limitations" for the
+  current count as of the HYK-128 round.)
 - Live sync against the real control room `STATUS.md` and real Linear data:
   `node scripts/check/linear-sync.mjs --status "D:\문서관리\하네스-관제실\STATUS.md"`
   → `linear-sync ok: 9 open issue(s) in STATUS §6 match Linear.`, exit `0`
@@ -1430,12 +1506,128 @@ version-controlled guard.
   reflects the state of both files/API at the moment a turn ends, not a
   continuously-enforced invariant — a drift introduced and then fixed within
   the same turn, or one that appears between checks, is invisible to it.
+- **`stateDrift` is a text comparison, nothing deeper (HYK-128 addition).**
+  It only tells you §6's normalized state string doesn't match Linear's
+  `stateName` string; it does not know *which* side is wrong, does not
+  validate that either side's state transition was legitimate, and does not
+  attempt any judgment about §6's surrounding natural-language description
+  (a state name can match while the prose around it is stale or misleading —
+  that whole-paragraph truth judgment is out of scope, same as always). It
+  is still Tier 2, still fail-open on any API/network error exactly like
+  `staleInStatus`/`missingInStatus`, and still exits `2` only on a confirmed
+  diff.
+- **Test suite count, current as of the HYK-128 round: 20 cases in
+  `linear-sync.test.mjs`**, part of a repo-wide `scripts/check/*.test.mjs`
+  total of 257 (up from the 106 recorded above at this section's original
+  writing) — the increase reflects this round's `stateDrift`/`duplicate`
+  additions plus the unrelated `clear-safe-check.mjs` (cycle-receipt) and new
+  `pm-snapshot-gate.mjs` checks documented elsewhere in this file, not scope
+  creep in this check specifically.
 - **No pagination.** `fetchLinearIssues` requests the first 250 issues for
   the configured team (or, if `LINEAR_TEAM_ID` is unset, the first 250
   issues visible to the token, filtered client-side to `HYK-<n>`
   identifiers) and does not follow `pageInfo.hasNextPage`. This project is
   far from that ceiling today; a project that grows past 250 issues would
   need this extended before the check could be trusted at that scale.
+
+## PM snapshot evidence envelope — Tier 2 (pm-snapshot-gate.mjs, HYK-128)
+
+### Problem restated
+
+PM (the codex-driven PM lane) has no direct read access to Linear by design —
+the only input it ever sees about issue state is whatever excerpt ORCH pastes
+into the PM task file. Before this check, that excerpt was free text (e.g.
+"관련 이슈 상태(ORCH 발췌, 2026-07-12 기준): HYK-104 ..."): no capture
+timestamp, no snapshot identity, no declared "what I didn't check". If ORCH's
+excerpt were stale or simply wrong, PM had no independent way to notice — the
+diagnosis this task's packet is built from (HYK-128 F3) named this gap
+explicitly.
+
+### Rule
+
+- **G5 — envelope required for B2/B3 tasks.** A PM task file's `type:` header
+  (B1 역질문 / B2 진단·개선안 / B3 시스템검증) determines whether a structured
+  snapshot envelope is required at all: **B1** (pure Q&A, no Linear-dependent
+  judgment) or a task carrying an explicit `linear_evidence: none`
+  opt-out are exempt outright — there's nothing to check. **B2/B3** must
+  carry an HTML-comment `pm-snapshot` block:
+
+  ```
+  <!-- pm-snapshot
+  snapshot_id: SNAP-20260712-2114
+  captured_at: 2026-07-12 21:14 KST
+  issue_ids: HYK-128, HYK-125
+  issue HYK-128: state=Todo; excerpt="ORCH 릴레이 충실도 ..."
+  issue HYK-125: state=Todo; excerpt="sol-PM 기계 규율 ..."
+  omitted_fields: none
+  unknown: none
+  -->
+  ```
+
+  All of `snapshot_id`, `captured_at`, `issue_ids`, at least one
+  `issue <ID>: state=...` line, `omitted_fields`, and `unknown` must be
+  present and non-empty; a missing field fails the check with that field
+  named explicitly, never a generic "envelope invalid." **`captured_at` is
+  the one field with actual format validation** — it must match `YYYY-MM-DD
+  HH:MM KST` exactly (no seconds, `KST` required), and a non-empty but
+  wrongly-shaped value (e.g. seconds included) fails with an
+  invalid-format reason distinct from "missing." Every other field
+  (`snapshot_id`, `issue_ids`, `omitted_fields`, `unknown`, and the content
+  after `state=` on an issue line) is checked for **presence only** — a
+  non-empty but nonsensical value (`snapshot_id: ?`, `issue_ids:
+  not-an-id`, an issue line with an empty state) still passes. This gate
+  does not validate that any of these values are well-formed identifiers,
+  real issue ids, or known states — only that PM filled something in.
+- **G6 — echo check.** The PM task's `snapshot_id` must reappear verbatim in
+  PM's result file (`pm.md`). This is a **literal string-identity check
+  only** — it confirms PM read and echoed back the same envelope ORCH sent,
+  nothing about whether PM's actual output correctly reflects that
+  snapshot's content. Mismatch reports both the expected and actual id side
+  by side; a task with no `snapshot_id` at all (a B1 task, or an
+  opted-out B2/B3) skips the echo check as vacuously satisfied.
+
+### Honesty note (Tier 2, same ceiling as everything else in this document)
+
+This gate verifies the envelope's **presence and shape**, and the echoed
+id's **literal string identity** — nothing more. It cannot and does not
+verify that any excerpted issue state is actually current or correct against
+live Linear (PM has no independent channel to check that itself, and this
+check has no network access either); a well-formed envelope carrying a wrong
+excerpt still passes. It is deliberately isolated from `relay-handshake.mjs`
+— PM's structured-evidence requirement and the Claude coder/review relay's
+own go/handshake mechanics are unrelated concerns, and this task explicitly
+kept them that way (`relay-handshake.mjs`/`.test.mjs` untouched by this
+check's introduction — verified via `git diff --name-only` at each round of
+this work).
+
+### Implementation
+
+- `scripts/check/pm-snapshot-gate.mjs` follows the same shape as
+  `packet-gate.mjs`: pure exported functions plus a CLI, `exit 0`/`1` only
+  (no `exit 2`) — `parsePmType(taskText) -> 'B1'|'B2'|'B3'|null` (extracted
+  case-insensitively and whitespace-tolerantly: leading indentation before
+  `type`, `TYPE`/`Type` casing, a space before the colon, and a lowercase
+  value like `b1` are all normalized to the canonical uppercase form —
+  hardened in a follow-up round after an independent review reproduced four
+  header variants the original stricter regex rejected),
+  `checkPmSnapshotEnvelope(taskText) -> { ok, reason }` (G5), and
+  `checkPmSnapshotEcho(taskText, resultText) -> { ok, reason }` (G6). CLI:
+  `node pm-snapshot-gate.mjs --task <path> [--result <path>]` — envelope
+  check alone with just `--task`, envelope-then-echo when `--result` is also
+  given.
+- `scripts/check/pm-snapshot-gate.test.mjs` (`node:test`, 30 cases): type
+  parsing including the four header-variant regression cases and the
+  lowercase-normalization return value; G5 skip paths (B1, explicit
+  `linear_evidence: none`); G5 against a complete envelope; G5 failing on a
+  missing envelope block entirely, on a B3 task, and on each of the six
+  required fields missing individually (named per-field, not generically);
+  two `captured_at` format-rejection cases (seconds included, `KST` suffix
+  missing); G6 matching/missing/mismatched/skip-when-no-id cases; and five
+  CLI-level `execFileSync` cases covering both exit-0 and non-zero paths.
+- Wiring: this check has no `Stop`-hook entry of its own — unlike
+  `relay-handshake.mjs`, it is invoked directly by ORCH at PM task
+  drop/consume time (per the approved design for this task), not through the
+  Claude-only hook mechanism the rest of this document relies on.
 
 ## Control room hygiene — Tier 2 (controlroom-fresh.mjs, HYK-115)
 

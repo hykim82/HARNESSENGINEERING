@@ -8,7 +8,27 @@ import { execSync } from "node:child_process";
 const DEFAULT_STATUS_PATH = "D:\\문서관리\\하네스-관제실\\STATUS.md";
 
 // Linear WorkflowState.type values that mean "not actually open" for this check's purposes.
-const DONE_TYPES = new Set(["completed", "canceled"]);
+// "duplicate" (e.g. team HYK's "Duplicate" state) is a closed state too, just not
+// "completed"/"canceled" -- without it here, an issue §6 still lists open but Linear
+// marked Duplicate would silently miss staleInStatus.
+const DONE_TYPES = new Set(["completed", "canceled", "duplicate"]);
+
+// Canonical open/closed state names this repo's Linear team (HYK) actually uses.
+// Order doesn't matter for prefix matching here: "In Progress" and "In Review"
+// diverge right after "In ", so neither can prefix-match the other's text.
+const CANONICAL_STATES = ["In Progress", "In Review", "Todo", "Backlog", "Done", "Canceled", "Duplicate"];
+
+// Normalizes a §6-extracted state string (e.g. "Todo(루프 상설)") to one of
+// CANONICAL_STATES by case-insensitive prefix match. Returns null when nothing
+// matches -- callers must treat null as "can't judge", never as a drift.
+export function normalizeStatusState(text) {
+  if (typeof text !== "string") return null;
+  const lower = text.trim().toLowerCase();
+  for (const name of CANONICAL_STATES) {
+    if (lower.startsWith(name.toLowerCase())) return name;
+  }
+  return null;
+}
 
 function repoRoot() {
   try {
@@ -47,6 +67,12 @@ export function parseStatusOpenIssues(statusText) {
 // staleInStatus: §6 says open, Linear says done/canceled -- the core drift this
 //   issue exists to catch (the stale-nag incident, 2026-07-07).
 // missingInStatus: Linear says open, §6 has no entry for it at all (reverse gap).
+// stateDrift: both sides say the issue is open but disagree on *which* open state
+// it's in (e.g. §6="Todo" vs Linear="In Progress"). Judged by stateName text
+// comparison, not stateType -- team HYK's "In Progress" (started) and "In Review"
+// (backlog) have different types, so type comparison can't tell them apart. This
+// is a Tier2 (advisory, fail-open on API/network error -- see loadLinearApiKey)
+// check: it never blocks on its own, it only flags for a human to reconcile.
 export function diffSync(statusIssues, linearIssues) {
   const linearById = new Map(linearIssues.map((i) => [i.id, i]));
   const statusIds = new Set(statusIssues.map((i) => i.id));
@@ -66,7 +92,18 @@ export function diffSync(statusIssues, linearIssues) {
     }
   }
 
-  return { staleInStatus, missingInStatus };
+  const stateDrift = [];
+  for (const s of statusIssues) {
+    const li = linearById.get(s.id);
+    if (!li || DONE_TYPES.has(li.stateType)) continue;
+    const normalized = normalizeStatusState(s.state);
+    if (normalized === null) continue; // can't judge -- never a false positive
+    if (normalized.toLowerCase() !== (li.stateName ?? "").toLowerCase()) {
+      stateDrift.push({ id: s.id, statusState: normalized, linearState: li.stateName });
+    }
+  }
+
+  return { staleInStatus, missingInStatus, stateDrift };
 }
 
 function readEnvLocalValue(root, key) {
@@ -167,9 +204,9 @@ async function main() {
     return;
   }
 
-  const { staleInStatus, missingInStatus } = diffSync(statusIssues, linearIssues);
+  const { staleInStatus, missingInStatus, stateDrift } = diffSync(statusIssues, linearIssues);
 
-  if (staleInStatus.length === 0 && missingInStatus.length === 0) {
+  if (staleInStatus.length === 0 && missingInStatus.length === 0 && stateDrift.length === 0) {
     console.log(`linear-sync ok: ${statusIssues.length} open issue(s) in STATUS §6 match Linear.`);
     process.exit(0);
     return;
@@ -185,6 +222,12 @@ async function main() {
   for (const m of missingInStatus) {
     console.error(
       `  missingInStatus: ${m.id} is open in Linear ('${m.linearState}') but has no entry in STATUS §6`,
+    );
+  }
+  for (const d of stateDrift) {
+    console.error(
+      `  stateDrift: ${d.id} open in both but STATUS §6 says '${d.statusState}' while Linear is ` +
+        `'${d.linearState}' -- §6 state needs updating`,
     );
   }
   process.exit(2);
