@@ -18,6 +18,94 @@ function repoRoot() {
 // round-trip correctly instead of being cut at its first space.
 const ATTEST_RE = /<!--\s*clear-safe-attest:\s*reconciled=(.*?)\s+delta=(.*?)\s*-->/i;
 
+// Boundary receipt block, e.g.:
+//   <!-- cycle-receipt:
+//     boundary: cycle
+//     task_id: HYK-128-coder-1
+//     result_ref: a333083
+//     issue_ids: HYK-128
+//     sync_result: ok
+//     status_updated: yes
+//     phase_update_needed: no
+//   -->
+// Serialization choice: HTML comment (not a fenced block) to match this
+// checker's existing `clear-safe-attest` marker convention -- one comment
+// syntax for every machine-parsed STATUS.md marker, and it stays invisible
+// in a rendered markdown preview the same way the attest line already does.
+const CYCLE_RECEIPT_RE = /<!--\s*cycle-receipt:([\s\S]*?)-->/i;
+const CYCLE_RECEIPT_FIELD_RE = /^\s*([a-zA-Z_]+)\s*:\s*(.*?)\s*$/;
+
+// Required for every receipt regardless of boundary (G3). `boundary` itself
+// and `open_set_sync` are intentionally excluded here -- `open_set_sync` is
+// only required when boundary=phase (G4), checked separately below.
+const CYCLE_RECEIPT_REQUIRED_FIELDS = [
+  "task_id",
+  "result_ref",
+  "issue_ids",
+  "sync_result",
+  "status_updated",
+  "phase_update_needed",
+];
+
+// Pure function: parses the cycle-receipt HTML-comment block into a flat
+// { field: value } object. Returns null when no such block exists at all --
+// callers must not confuse "block absent" with "block present but empty",
+// though both currently fail the same way (missing required fields).
+export function parseCycleReceipt(statusText) {
+  const text = statusText ?? "";
+  const match = text.match(CYCLE_RECEIPT_RE);
+  if (!match) return null;
+  const fields = {};
+  for (const line of match[1].split(/\r?\n/)) {
+    const fieldMatch = line.match(CYCLE_RECEIPT_FIELD_RE);
+    if (fieldMatch) fields[fieldMatch[1]] = fieldMatch[2];
+  }
+  return fields;
+}
+
+// G3/G4: honesty note -- this only checks that the receipt's fields are
+// *present and non-empty* (and, for phase boundaries, that open_set_sync
+// isn't the unresolved '판정불가' sentinel). It cannot and does not verify
+// that any field's *value* is actually true (e.g. that result_ref really
+// names this cycle's result, or that sync_result reflects a real linear-sync
+// run) -- same Tier2 soft/fail-open scope as the rest of this checker (see
+// docs/enforcement-v1.md, "Scope B").
+function checkCycleReceipt(statusText) {
+  const receipt = parseCycleReceipt(statusText);
+  if (!receipt) {
+    return {
+      ok: false,
+      reason:
+        "🟢 /clear-safe declared without a cycle-receipt block (missing cycle-receipt marker) -- " +
+        "fill in the boundary receipt (task_id/result_ref/issue_ids/sync_result/status_updated/" +
+        "phase_update_needed) before relying on this declaration",
+    };
+  }
+
+  const missing = CYCLE_RECEIPT_REQUIRED_FIELDS.filter((field) => !receipt[field] || receipt[field].trim() === "");
+  if (missing.length) {
+    return {
+      ok: false,
+      reason: `🟢 /clear-safe declared but cycle-receipt is missing required field(s): ${missing.join(", ")} -- fill in the boundary receipt before relying on this declaration`,
+    };
+  }
+
+  const boundary = (receipt.boundary ?? "").trim().toLowerCase();
+  if (boundary === "phase") {
+    const openSetSync = (receipt.open_set_sync ?? "").trim();
+    if (!openSetSync || openSetSync === "판정불가") {
+      return {
+        ok: false,
+        reason:
+          "🟢 /clear-safe declared for a phase boundary but cycle-receipt's open_set_sync is missing or " +
+          "'판정불가' -- 사람 확인 필요 before relying on this declaration",
+      };
+    }
+  }
+
+  return { ok: true, reason: `cycle-receipt present (task_id=${receipt.task_id}, boundary=${boundary || "cycle"})` };
+}
+
 // Escape hatch for a board that doesn't phrase its human-facing declaration
 // with a 🟢 emoji next to the literal text "/clear" (this harness's own
 // convention -- see STATUS.md's "/clear 안전" section) but still wants to
@@ -78,7 +166,13 @@ export function checkClearSafe(statusText) {
       };
     }
 
-    return { ok: true, reason: `clear-safe attestation present (reconciled=${reconciled})` };
+    const receiptResult = checkCycleReceipt(text);
+    if (!receiptResult.ok) return receiptResult;
+
+    return {
+      ok: true,
+      reason: `clear-safe attestation present (reconciled=${reconciled}); ${receiptResult.reason}`,
+    };
   } catch (err) {
     // Fail-open: any parsing trouble is uncertain, not a confirmed-missing
     // attestation -- this check is a soft reminder, not a hard gate, so it
