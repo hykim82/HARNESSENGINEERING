@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { parseStatusOpenIssues, diffSync, loadLinearApiKey } from "./linear-sync.mjs";
+import { parseStatusOpenIssues, diffSync, loadLinearApiKey, normalizeStatusState } from "./linear-sync.mjs";
 
 function withFixtureDir(fn) {
   const dir = mkdtempSync(join(tmpdir(), "linear-sync-test-"));
@@ -120,4 +120,88 @@ test("(5d) loadLinearApiKey: .env.local exists but has no LINEAR_API_KEY line ->
     const result = loadLinearApiKey(dir, {});
     assert.equal(result, null);
   });
+});
+
+test("(6) normalizeStatusState: known names normalize case-insensitively", () => {
+  assert.equal(normalizeStatusState("Todo"), "Todo");
+  assert.equal(normalizeStatusState("in review"), "In Review");
+  assert.equal(normalizeStatusState("IN PROGRESS"), "In Progress");
+});
+
+test("(6b) normalizeStatusState: trailing annotation on §6 text still normalizes (prefix match)", () => {
+  assert.equal(normalizeStatusState("Todo(루프 상설)"), "Todo");
+});
+
+test("(6c) normalizeStatusState: In Progress and In Review don't collide (diverge right after 'In ')", () => {
+  assert.equal(normalizeStatusState("In Progress"), "In Progress");
+  assert.equal(normalizeStatusState("In Review"), "In Review");
+});
+
+test("(6d) normalizeStatusState: unrecognized text -> null (judged unable, never guessed)", () => {
+  assert.equal(normalizeStatusState("Blocked"), null);
+  assert.equal(normalizeStatusState(""), null);
+});
+
+test("(7) diffSync: stateDrift fires when §6=Todo but Linear=In Progress (both open)", () => {
+  const statusIssues = [{ id: "HYK-93", state: "Todo" }];
+  const linearIssues = [{ id: "HYK-93", stateName: "In Progress", stateType: "started" }];
+  const { stateDrift, staleInStatus, missingInStatus } = diffSync(statusIssues, linearIssues);
+  assert.equal(stateDrift.length, 1);
+  assert.deepEqual(stateDrift[0], { id: "HYK-93", statusState: "Todo", linearState: "In Progress" });
+  assert.equal(staleInStatus.length, 0);
+  assert.equal(missingInStatus.length, 0);
+});
+
+test("(7b) diffSync: stateDrift fires when §6=In Progress but Linear=In Review (different type, same 'open')", () => {
+  const statusIssues = [{ id: "HYK-128", state: "In Progress" }];
+  const linearIssues = [{ id: "HYK-128", stateName: "In Review", stateType: "backlog" }];
+  const { stateDrift } = diffSync(statusIssues, linearIssues);
+  assert.equal(stateDrift.length, 1);
+  assert.deepEqual(stateDrift[0], { id: "HYK-128", statusState: "In Progress", linearState: "In Review" });
+});
+
+test("(7c) diffSync: matching open states on both sides -> no stateDrift", () => {
+  const statusIssues = [
+    { id: "HYK-85", state: "In Progress" },
+    { id: "HYK-93", state: "Todo" },
+  ];
+  const linearIssues = [
+    { id: "HYK-85", stateName: "In Progress", stateType: "started" },
+    { id: "HYK-93", stateName: "Todo", stateType: "unstarted" },
+  ];
+  const { stateDrift } = diffSync(statusIssues, linearIssues);
+  assert.equal(stateDrift.length, 0);
+});
+
+test("(7d) diffSync: unnormalizable §6 state never produces a false-positive stateDrift", () => {
+  const statusIssues = [{ id: "HYK-99", state: "Blocked" }];
+  const linearIssues = [{ id: "HYK-99", stateName: "In Progress", stateType: "started" }];
+  const { stateDrift } = diffSync(statusIssues, linearIssues);
+  assert.equal(stateDrift.length, 0);
+});
+
+test("(7e) diffSync: closed Linear side (e.g. Done) never produces stateDrift, even if §6 text differs", () => {
+  const statusIssues = [{ id: "HYK-97", state: "Todo" }];
+  const linearIssues = [{ id: "HYK-97", stateName: "Done", stateType: "completed" }];
+  const { stateDrift, staleInStatus } = diffSync(statusIssues, linearIssues);
+  assert.equal(stateDrift.length, 0);
+  assert.equal(staleInStatus.length, 1); // this pair is staleInStatus's job, not stateDrift's
+});
+
+test("(8) diffSync: Linear 'Duplicate' (type duplicate) counts as closed -- staleInStatus fires, not stateDrift", () => {
+  const statusIssues = [{ id: "HYK-68", state: "In Progress" }];
+  const linearIssues = [{ id: "HYK-68", stateName: "Duplicate", stateType: "duplicate" }];
+  const { staleInStatus, stateDrift, missingInStatus } = diffSync(statusIssues, linearIssues);
+  assert.equal(staleInStatus.length, 1);
+  assert.equal(staleInStatus[0].id, "HYK-68");
+  assert.equal(staleInStatus[0].linearState, "Duplicate");
+  assert.equal(stateDrift.length, 0);
+  assert.equal(missingInStatus.length, 0);
+});
+
+test("(8b) diffSync: Linear 'Duplicate' open issue absent from §6 counts as closed -- no missingInStatus", () => {
+  const statusIssues = [];
+  const linearIssues = [{ id: "HYK-68", stateName: "Duplicate", stateType: "duplicate" }];
+  const { missingInStatus } = diffSync(statusIssues, linearIssues);
+  assert.equal(missingInStatus.length, 0);
 });
