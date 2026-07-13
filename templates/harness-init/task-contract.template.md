@@ -61,6 +61,12 @@ task_contract:
     linear_unavailable: "report immediately and record locally if work continues"
     notion_unavailable: "report immediately and keep Linear or repository note"
     docs_only_no_checks: "do not treat SKIP 0 as PASS"
+    # HYK-112: a real incident lost 30 minutes and ~20K tokens to a worker
+    # retrying the same failing push 10+ times against a down infra
+    # dependency instead of stopping. This applies to every role reading
+    # this contract (Coder, Verifier, Reviewer) -- one shared entry here
+    # instead of duplicating the line into each role's own prompt template.
+    infra_error_repeat: "same command or access failing with the same error 2-3 times in a row: stop immediately regardless of cause, report what is done + exactly where it is stuck (command, error, attempt count) via question_packet, and wait for Orchestrator confirmation before any further retry. A retry after a real fix is progress (fine); repeating the identical attempt is a loop (stop)."
 
   roles:
     orchestrator: "CONTRACT_AND_PROFILE_OWNER"
