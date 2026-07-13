@@ -309,6 +309,21 @@
       "invocation_note": "Never installed as its own hook -- imported and called directly by role-guard.mjs's checkPacketDirective when a *-task.md write quotes a 'packet:' line. Wiring for this entry means 'role-guard.mjs still imports and calls it' (source_reference_check), not a settings file."
     },
     {
+      "id": "reject-streak",
+      "substrate": "orch-direct",
+      "script": "scripts/check/reject-streak.mjs",
+      "test": "scripts/check/reject-streak.test.mjs",
+      "install_targets": [],
+      "expected_bad": "an issue's reject-streak ledger (.harness/reject-streak.json) is >=2 and the next dropped .harness/coder-task.md carries no complete escalation envelope (원인 분류 + ORCH 조치>=1) -> gate exit 2",
+      "expected_good": "streak<2, or streak>=2 with a complete envelope, or the issue/ledger has no entry yet (streak 0 baseline) -> gate exit 0; record always exits 0 (UNJUDGABLE+fail-open on a malformed review.md or corrupted ledger, never overwrites on uncertainty)",
+      "failure_exit": 2,
+      "uncertain_exit": 0,
+      "owner": "ORCH",
+      "claude_only": false,
+      "self_registration_note": "HYK-133 사이클1 자기 등재, same convention as selfcheck-freshness's own entry above -- this checker audits its own manifest presence the same way it audits every other check.",
+      "invocation_note": "Not hook-installed -- ORCH calls `record` directly when consuming a review result (before the relay slot's review.md gets overwritten next round) and `gate` directly before dropping the next coder-task.md. Same 'ALIVE via script+test' posture as relay-handshake/pm-snapshot-gate."
+    },
+    {
       "id": "ci-enforce",
       "substrate": "ci",
       "script": ".github/workflows/enforce.yml",
