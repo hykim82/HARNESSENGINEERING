@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { execSync } from "node:child_process";
 import { join } from "node:path";
+import { readStopHookPayload, resolveStopBlock } from "./stop-blocking.mjs";
 
 function repoRoot() {
   try {
@@ -203,14 +204,27 @@ if (invokedDirectly) {
   }
 
   const result = checkClearSafe(text);
+
+  // HYK-131: ORCH-only blocking promotion. A confirmed failure (result.ok
+  // === false) now hard-blocks (exit 2) *only* on an ORCH turn's first Stop
+  // in this cycle; every other role, and any stop_hook_active re-invocation,
+  // passes through at exit 0 -- see stop-blocking.mjs for the shared
+  // rationale, and docs/enforcement-v1.md's honesty notes for what this
+  // still cannot do (Claude-only, Stop-time-only, Tier 2, removable).
+  const decision = resolveStopBlock({
+    role: process.env.HARNESS_ROLE,
+    hookPayloadResult: readStopHookPayload(),
+    ok: result.ok,
+    checkId: "clear-safe-check",
+    reasonCode: "clear_safe_incomplete",
+    repairHint: result.reason,
+  });
+
   if (result.ok) {
     console.log(result.reason);
-    process.exit(0);
   } else {
-    // Soft reminder only: exit 1, never exit 2. A Stop hook surfaces exit 1
-    // as a non-blocking warning; this check must never be wired as a hard
-    // gate (see docs/enforcement-v1.md, "Scope B" honesty notes).
     console.error(result.reason);
-    process.exit(1);
+    if (decision.reason) console.error(decision.reason);
   }
+  process.exit(decision.exit);
 }

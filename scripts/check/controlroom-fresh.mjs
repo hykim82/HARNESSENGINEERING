@@ -1,6 +1,7 @@
 import { existsSync, statSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
+import { readStopHookPayload, resolveStopBlock } from "./stop-blocking.mjs";
 
 // Single declaration for the "milliseconds per hour" conversion -- every
 // threshold and every human-readable "Xh" label in this file derives from
@@ -130,15 +131,27 @@ if (invokedDirectly) {
   }
 
   const result = checkControlRoomFresh({ controlRoomPath });
+
+  // HYK-131: ORCH-only blocking promotion, same adapter/rationale as
+  // clear-safe-check.mjs. A confirmed warning (result.ok === false) now
+  // hard-blocks (exit 2) only on an ORCH turn's first Stop this cycle;
+  // every other role and any stop_hook_active re-invocation passes through
+  // at exit 0. See stop-blocking.mjs and docs/enforcement-v1.md's honesty
+  // notes for what this still cannot do.
+  const decision = resolveStopBlock({
+    role: process.env.HARNESS_ROLE,
+    hookPayloadResult: readStopHookPayload(),
+    ok: result.ok,
+    checkId: "controlroom-fresh",
+    reasonCode: "controlroom_stale",
+    repairHint: result.reason,
+  });
+
   if (result.ok) {
     console.log(result.reason);
-    process.exit(0);
   } else {
-    // Fail-open severity, same convention as status-fresh.mjs /
-    // clear-safe-check.mjs: exit 1 is a non-blocking Stop-hook reminder,
-    // never exit 2 (reserved for role-guard/D2's hard gates). This check
-    // never blocks anything -- it only ever nudges.
     console.error(result.reason);
-    process.exit(1);
+    if (decision.reason) console.error(decision.reason);
   }
+  process.exit(decision.exit);
 }

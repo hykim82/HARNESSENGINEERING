@@ -106,6 +106,17 @@ export function diffSync(statusIssues, linearIssues) {
   return { staleInStatus, missingInStatus, stateDrift };
 }
 
+// Maps a diffSync result to this check's CLI exit code -- pulled out as a
+// pure function (HYK-131) so the drift-vs-clean contract is unit-testable
+// without a live Linear API call: clean is exit 0, any confirmed drift is
+// exit 1 (advisory), never exit 2 -- the fail-open paths (missing key,
+// missing STATUS file, network error) exit 0 directly before this is ever
+// reached and are untouched by this function.
+export function resolveSyncExitCode({ staleInStatus, missingInStatus, stateDrift }) {
+  const clean = staleInStatus.length === 0 && missingInStatus.length === 0 && stateDrift.length === 0;
+  return clean ? 0 : 1;
+}
+
 function readEnvLocalValue(root, key) {
   const envLocalPath = join(root, ".env.local");
   if (!existsSync(envLocalPath)) return null;
@@ -206,7 +217,7 @@ async function main() {
 
   const { staleInStatus, missingInStatus, stateDrift } = diffSync(statusIssues, linearIssues);
 
-  if (staleInStatus.length === 0 && missingInStatus.length === 0 && stateDrift.length === 0) {
+  if (resolveSyncExitCode({ staleInStatus, missingInStatus, stateDrift }) === 0) {
     console.log(`linear-sync ok: ${statusIssues.length} open issue(s) in STATUS §6 match Linear.`);
     process.exit(0);
     return;
@@ -230,7 +241,15 @@ async function main() {
         `'${d.linearState}' -- §6 state needs updating`,
     );
   }
-  process.exit(2);
+  // HYK-131: advisory normalization. A confirmed drift is a signal for a
+  // human/ORCH to reconcile against live Linear, not something ORCH can
+  // always self-repair (the drift may mean STATUS is wrong, or it may mean
+  // Linear is) -- exit 1, never exit 2, matching status-fresh.mjs/
+  // clear-safe-check.mjs/controlroom-fresh.mjs's own non-blocking severity.
+  // This corrects a contract drift: this file previously exited 2 here while
+  // docs/enforcement-v1.md and this harness's own advisory classification
+  // already documented it as Tier 2/advisory.
+  process.exit(resolveSyncExitCode({ staleInStatus, missingInStatus, stateDrift }));
 }
 
 const invokedDirectly = process.argv[1] && process.argv[1].replace(/\\/g, "/").endsWith("scripts/check/linear-sync.mjs");

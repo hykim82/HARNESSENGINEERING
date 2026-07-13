@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { parseStatusOpenIssues, diffSync, loadLinearApiKey, normalizeStatusState } from "./linear-sync.mjs";
+import { parseStatusOpenIssues, diffSync, loadLinearApiKey, normalizeStatusState, resolveSyncExitCode } from "./linear-sync.mjs";
 
 function withFixtureDir(fn) {
   const dir = mkdtempSync(join(tmpdir(), "linear-sync-test-"));
@@ -204,4 +204,47 @@ test("(8b) diffSync: Linear 'Duplicate' open issue absent from §6 counts as clo
   const linearIssues = [{ id: "HYK-68", stateName: "Duplicate", stateType: "duplicate" }];
   const { missingInStatus } = diffSync(statusIssues, linearIssues);
   assert.equal(missingInStatus.length, 0);
+});
+
+// --- HYK-131: advisory exit-code normalization (G4) ---
+// This check's CLI never exits 2, even on a confirmed drift -- exit 2 is
+// reserved for the ORCH-only blocking checks (clear-safe-check.mjs,
+// controlroom-fresh.mjs). The fail-open paths (missing key/STATUS
+// file/network error) are untouched by this function -- they exit 0 directly
+// in main() before diffSync is ever called.
+
+test("(9) resolveSyncExitCode: no drift of any kind -> 0", () => {
+  assert.equal(resolveSyncExitCode({ staleInStatus: [], missingInStatus: [], stateDrift: [] }), 0);
+});
+
+test("(9b) resolveSyncExitCode: staleInStatus present -> 1, never 2", () => {
+  assert.equal(
+    resolveSyncExitCode({ staleInStatus: [{ id: "HYK-97" }], missingInStatus: [], stateDrift: [] }),
+    1,
+  );
+});
+
+test("(9c) resolveSyncExitCode: missingInStatus present -> 1, never 2", () => {
+  assert.equal(
+    resolveSyncExitCode({ staleInStatus: [], missingInStatus: [{ id: "HYK-102" }], stateDrift: [] }),
+    1,
+  );
+});
+
+test("(9d) resolveSyncExitCode: stateDrift present -> 1, never 2", () => {
+  assert.equal(
+    resolveSyncExitCode({ staleInStatus: [], missingInStatus: [], stateDrift: [{ id: "HYK-93" }] }),
+    1,
+  );
+});
+
+test("(9e) resolveSyncExitCode: all three present at once -> still 1, not accumulated to a higher code", () => {
+  assert.equal(
+    resolveSyncExitCode({
+      staleInStatus: [{ id: "HYK-97" }],
+      missingInStatus: [{ id: "HYK-102" }],
+      stateDrift: [{ id: "HYK-93" }],
+    }),
+    1,
+  );
 });
