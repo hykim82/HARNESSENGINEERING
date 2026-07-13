@@ -1,0 +1,310 @@
+{
+  "schema_version": 1,
+  "note": "Canonical enforcement-layer manifest (HYK-129). One entry per check/hook/gate/install target named in docs/enforcement-v1.md and the HYK-129/131 design report §1.2. Read by selfcheck-inventory.mjs; never hand-edit install_targets without also updating the real settings files they describe, or the checker will report DRIFT/NOT_INSTALLED against a manifest that no longer matches production.",
+  "checks": [
+    {
+      "id": "review-gate",
+      "substrate": "git",
+      "script": "scripts/check/review-gate.mjs",
+      "test": "scripts/check/review-gate.test.mjs",
+      "install_targets": [
+        {
+          "location": "repo-git-hook",
+          "kind": "git-hook",
+          "versioned_path": "hooks/commit-msg",
+          "installed_path": ".git/hooks/commit-msg",
+          "required": true
+        }
+      ],
+      "expected_bad": "HYK-tagged commit with no matching '.harness/review.md' evidence (missing for:<id>, missing verdict:approved, or reviewer is not role:REVIEW-*) -> commit rejected",
+      "expected_good": "HYK-tagged commit with 'for: <id>' + 'verdict: approved' + 'role: REVIEW-*' evidence -> commit allowed",
+      "failure_exit": 1,
+      "uncertain_exit": null,
+      "owner": "ORCH",
+      "claude_only": false
+    },
+    {
+      "id": "pre-commit-gitleaks",
+      "substrate": "git",
+      "script": "hooks/pre-commit",
+      "test": null,
+      "install_targets": [
+        {
+          "location": "repo-git-hook",
+          "kind": "git-hook",
+          "versioned_path": "hooks/pre-commit",
+          "installed_path": ".git/hooks/pre-commit",
+          "required": true
+        }
+      ],
+      "expected_bad": "staged content containing a secret pattern gitleaks recognizes -> commit rejected locally, before CI",
+      "expected_good": "staged content with no secret pattern -> commit allowed",
+      "failure_exit": 1,
+      "uncertain_exit": null,
+      "owner": "human (local tool install required)",
+      "claude_only": false,
+      "known_drift_note": "As of the HYK-131 round this hook is NOT installed in .git/hooks (versioned copy exists, installed copy does not) -- a known, not-yet-resolved drift this task's own scope explicitly leaves undecided (사람 확인 필요: 의도적 미설치 vs 단순 드리프트)."
+    },
+    {
+      "id": "role-guard",
+      "substrate": "claude-pretooluse",
+      "script": "scripts/check/role-guard.mjs",
+      "test": "scripts/check/role-guard.test.mjs",
+      "install_targets": [
+        {
+          "location": "repo-settings",
+          "kind": "claude-settings",
+          "path": "REPO/.claude/settings.local.json",
+          "hook_event": "PreToolUse",
+          "matcher": "Edit|Write|MultiEdit|NotebookEdit",
+          "required": true
+        }
+      ],
+      "expected_bad": "CODER writes .harness/review.md (or any role writing outside its own lane) -> exit 2, reason on stderr",
+      "expected_good": "CODER writes a file in its own lane -> exit 0",
+      "failure_exit": 2,
+      "uncertain_exit": 0,
+      "owner": "ORCH",
+      "claude_only": true
+    },
+    {
+      "id": "pm-guard",
+      "substrate": "claude-pretooluse",
+      "script": "scripts/check/pm-guard.mjs",
+      "test": "scripts/check/pm-guard.test.mjs",
+      "install_targets": [
+        {
+          "location": "control-room-settings",
+          "kind": "claude-settings",
+          "path": "CONTROL_ROOM/.claude/settings.local.json",
+          "hook_event": "PreToolUse",
+          "matcher": "Edit|Write|MultiEdit|NotebookEdit|mcp__linear-server__.*",
+          "required": true
+        }
+      ],
+      "expected_bad": "HARNESS_ROLE=PM writes inside the repo or a non-control-room path -> exit 2",
+      "expected_good": "HARNESS_ROLE=PM writes inside the control room / scratchpad -> exit 0",
+      "failure_exit": 2,
+      "uncertain_exit": 0,
+      "owner": "ORCH",
+      "claude_only": true
+    },
+    {
+      "id": "status-fresh",
+      "substrate": "claude-stop",
+      "script": "scripts/check/status-fresh.mjs",
+      "test": "scripts/check/status-fresh.test.mjs",
+      "install_targets": [
+        {
+          "location": "repo-settings",
+          "kind": "claude-settings",
+          "path": "REPO/.claude/settings.local.json",
+          "hook_event": "Stop",
+          "matcher": null,
+          "required": true
+        }
+      ],
+      "expected_bad": "a .harness/*-task.md|coder.md|review.md|verify.md work file is newer than STATUS.md by more than the grace window -> exit 1 (advisory)",
+      "expected_good": "STATUS.md is at least as fresh as the newest work file (within grace) -> exit 0",
+      "failure_exit": 1,
+      "uncertain_exit": 0,
+      "owner": "ORCH",
+      "claude_only": true,
+      "advisory_note": "Deliberately NOT promoted to ORCH-only blocking in the HYK-131 round -- see docs/enforcement-v1.md's 'Stop hook blocking self-consumption' section for why."
+    },
+    {
+      "id": "clear-safe-check",
+      "substrate": "claude-stop",
+      "script": "scripts/check/clear-safe-check.mjs",
+      "test": "scripts/check/clear-safe-check.test.mjs",
+      "install_targets": [
+        {
+          "location": "repo-settings",
+          "kind": "claude-settings",
+          "path": "REPO/.claude/settings.local.json",
+          "hook_event": "Stop",
+          "matcher": null,
+          "required": true
+        }
+      ],
+      "expected_bad": "a 🟢 /clear declaration with a missing/incomplete clear-safe-attest or cycle-receipt -> HARNESS_ROLE=ORCH first attempt: exit 2; every other role or stop_hook_active re-invocation: exit 0",
+      "expected_good": "no green declaration, or a complete attestation+receipt -> exit 0",
+      "failure_exit": 2,
+      "uncertain_exit": 0,
+      "owner": "ORCH",
+      "claude_only": true,
+      "post_hyk131_note": "ORCH-only blocking via stop-blocking.mjs's resolveStopBlock (role gate + stop_hook_active recursion guard + unreadable-payload UNJUDGABLE)."
+    },
+    {
+      "id": "linear-sync",
+      "substrate": "claude-stop",
+      "script": "scripts/check/linear-sync.mjs",
+      "test": "scripts/check/linear-sync.test.mjs",
+      "install_targets": [
+        {
+          "location": "repo-settings",
+          "kind": "claude-settings",
+          "path": "REPO/.claude/settings.local.json",
+          "hook_event": "Stop",
+          "matcher": null,
+          "required": true
+        }
+      ],
+      "expected_bad": "STATUS §6 open-issue state disagrees with a live Linear query (staleInStatus/missingInStatus/stateDrift) -> exit 1 (advisory)",
+      "expected_good": "STATUS §6 matches Linear, or LINEAR_API_KEY/STATUS file/network is unavailable (fail-open) -> exit 0",
+      "failure_exit": 1,
+      "uncertain_exit": 0,
+      "owner": "ORCH",
+      "claude_only": true,
+      "post_hyk131_note": "Normalized from exit 2 to exit 1 in the HYK-131 round -- was never promoted to ORCH-only blocking (see docs/enforcement-v1.md)."
+    },
+    {
+      "id": "controlroom-fresh",
+      "substrate": "claude-stop",
+      "script": "scripts/check/controlroom-fresh.mjs",
+      "test": "scripts/check/controlroom-fresh.test.mjs",
+      "install_targets": [
+        {
+          "location": "repo-settings",
+          "kind": "claude-settings",
+          "path": "REPO/.claude/settings.local.json",
+          "hook_event": "Stop",
+          "matcher": null,
+          "required": true
+        }
+      ],
+      "expected_bad": "control room dirty-cycle (uncommitted + stale last commit) or STATUS/PHASE-HANDOFF mtime gap over threshold -> HARNESS_ROLE=ORCH first attempt: exit 2; every other role or stop_hook_active re-invocation: exit 0",
+      "expected_good": "control room absent/not-a-repo (vacuously ok), or clean/fresh -> exit 0",
+      "failure_exit": 2,
+      "uncertain_exit": 0,
+      "owner": "ORCH",
+      "claude_only": true,
+      "post_hyk131_note": "ORCH-only blocking via stop-blocking.mjs, same adapter as clear-safe-check."
+    },
+    {
+      "id": "context-inject",
+      "substrate": "claude-lifecycle",
+      "script": "scripts/check/context-inject.mjs",
+      "test": "scripts/check/context-inject.test.mjs",
+      "install_targets": [
+        {
+          "location": "repo-settings",
+          "kind": "claude-settings",
+          "path": "REPO/.claude/settings.local.json",
+          "hook_event": "SessionStart",
+          "matcher": "startup|resume|clear|compact",
+          "required": true
+        },
+        {
+          "location": "repo-settings",
+          "kind": "claude-settings",
+          "path": "REPO/.claude/settings.local.json",
+          "hook_event": "UserPromptSubmit",
+          "matcher": null,
+          "required": true
+        }
+      ],
+      "expected_bad": "user-prompt-submit mode with PROJECT-CONTEXT.md absent, or present but its HARD CONSTRAINTS section empty/placeholder -> exit 2, decision:block",
+      "expected_good": "session-start mode always exit 0 (injects context, cannot block); user-prompt-submit mode with a usable card -> exit 0",
+      "failure_exit": 2,
+      "uncertain_exit": 0,
+      "owner": "ORCH",
+      "claude_only": true,
+      "mode_note": "Two hook_event install targets share one script; session-start never blocks (Claude Code ignores non-zero exit for that hook type), only user-prompt-submit's exit 2 is enforced."
+    },
+    {
+      "id": "worker-status-onstart",
+      "substrate": "claude-userpromptsubmit",
+      "script": "scripts/check/worker-status-onstart.mjs",
+      "test": "scripts/check/worker-status-onstart.test.mjs",
+      "install_targets": [
+        {
+          "location": "control-room-settings",
+          "kind": "claude-settings",
+          "path": "CONTROL_ROOM/.claude/settings.local.json",
+          "hook_event": "UserPromptSubmit",
+          "matcher": null,
+          "required": true
+        },
+        {
+          "location": "coder-user-settings",
+          "kind": "claude-settings",
+          "path": "USER_HOME/.claude-team/settings.json",
+          "hook_event": "UserPromptSubmit",
+          "matcher": null,
+          "required": true
+        }
+      ],
+      "expected_bad": "n/a -- this is a doer (writes a STATUS §1 row on a 'go <task_id>' prompt), not a bad/good gate; a 'go' prompt with a resolvable task_id/role/STATUS row updates exactly that one row",
+      "expected_good": "a non-'go' prompt, or a 'go' prompt with an unresolvable role/task_id/STATUS row, leaves STATUS untouched (fail-open, exit 0 always)",
+      "failure_exit": null,
+      "uncertain_exit": 0,
+      "owner": "ORCH",
+      "claude_only": true
+    },
+    {
+      "id": "relay-handshake",
+      "substrate": "orch-direct",
+      "script": "scripts/check/relay-handshake.mjs",
+      "test": "scripts/check/relay-handshake.test.mjs",
+      "install_targets": [],
+      "expected_bad": "<role>.md's task_id doesn't match <role>-task.md's, or its DONE timestamp predates the task's dropped_at -> exit 1",
+      "expected_good": "task_id matches and DONE postdates dropped_at -> exit 0",
+      "failure_exit": 1,
+      "uncertain_exit": null,
+      "owner": "ORCH",
+      "claude_only": false,
+      "invocation_note": "Not hook-installed anywhere -- ORCH calls this directly (`node relay-handshake.mjs <role>`) at consume time. install_targets is empty by design; ALIVE here means 'script+test exist and pass', not 'wired into a hook'."
+    },
+    {
+      "id": "pm-snapshot-gate",
+      "substrate": "orch-direct",
+      "script": "scripts/check/pm-snapshot-gate.mjs",
+      "test": "scripts/check/pm-snapshot-gate.test.mjs",
+      "install_targets": [],
+      "expected_bad": "a B2/B3 PM task missing the pm-snapshot envelope or a required field (G5), or pm.md's snapshot_id doesn't echo the task's (G6) -> exit 1",
+      "expected_good": "B1/opted-out task (envelope not required), or a complete envelope + matching echo -> exit 0",
+      "failure_exit": 1,
+      "uncertain_exit": null,
+      "owner": "ORCH",
+      "claude_only": false,
+      "invocation_note": "Not hook-installed -- ORCH calls this directly at PM task drop/consume time. Same 'ALIVE via script+test' posture as relay-handshake."
+    },
+    {
+      "id": "packet-gate",
+      "substrate": "orch-indirect",
+      "script": "scripts/check/packet-gate.mjs",
+      "test": "scripts/check/packet-gate.test.mjs",
+      "install_targets": [],
+      "source_reference_check": { "file": "scripts/check/role-guard.mjs", "pattern": "packet-gate.mjs" },
+      "expected_bad": "an unsigned packet (승인: ☐) or malformed signature line -> exit 1 standalone / role-guard.mjs surfaces it as part of its own exit 2 when ORCH drops a task file quoting that packet",
+      "expected_good": "a signed packet (승인: OK <name> <timestamp>) -> exit 0",
+      "failure_exit": 1,
+      "uncertain_exit": null,
+      "owner": "ORCH",
+      "claude_only": false,
+      "invocation_note": "Never installed as its own hook -- imported and called directly by role-guard.mjs's checkPacketDirective when a *-task.md write quotes a 'packet:' line. Wiring for this entry means 'role-guard.mjs still imports and calls it' (source_reference_check), not a settings file."
+    },
+    {
+      "id": "ci-enforce",
+      "substrate": "ci",
+      "script": ".github/workflows/enforce.yml",
+      "test": null,
+      "install_targets": [
+        {
+          "location": "ci-workflow",
+          "kind": "ci-workflow",
+          "path": ".github/workflows/enforce.yml",
+          "required": true
+        }
+      ],
+      "expected_bad": "a PR whose commit-msg/relay-handshake/role-guard/status-fresh/context-inject/clear-safe-check test suite fails, or a gitleaks/POSIX-syntax finding -> job fails, PR blocked from merge",
+      "expected_good": "all listed suites pass, gitleaks clean, hooks/commit-msg + hooks/pre-commit pass `sh -n` -> job green",
+      "failure_exit": 1,
+      "uncertain_exit": null,
+      "owner": "human (approves PR merge after green)",
+      "claude_only": false,
+      "known_drift_note": "As of the HYK-131 round enforce.yml runs only 6 of this repo's scripts/check/*.test.mjs suites (review-gate, relay-handshake, role-guard, status-fresh, context-inject, clear-safe-check) -- controlroom-fresh, linear-sync, packet-gate, path-normalize, pm-guard, pm-snapshot-gate, worker-status-onstart, and stop-blocking are not wired into CI. This is a known, not-yet-resolved drift; this task's scope is to detect it (selfcheck-inventory.mjs's CI coverage check), not fix it (HYK-129 사이클3)."
+    }
+  ]
+}

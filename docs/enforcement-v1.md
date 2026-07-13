@@ -1980,6 +1980,196 @@ was observed twice in a single day before this task was written.
 - **`status-fresh.mjs` deliberately not promoted in this round.** See the
   table above — this is an open item for a future cycle, not an omission.
 
+## Enforcement-layer self-check (selfcheck.mjs, HYK-129 사이클 2)
+
+### Problem restated
+
+Every check documented above is only as real as its installation: a script
+can exist, pass its own unit tests, and still be silently unwired from the
+settings file that was supposed to invoke it (a hand-edited
+`.claude/settings.local.json`, a rename that broke a `command` string, a
+fresh clone that never ran `install.mjs`). Nothing in this document, before
+this task, ever verified the *installed* state against a single source of
+truth — each check's own docs section describes intent, not a live audit.
+HYK-129 exists to close that gap: a periodic, mechanical run that confirms
+what's actually wired, actually fires, and actually behaves as documented,
+rather than trusting the prose above to still be accurate.
+
+### Rule
+
+- **One manifest, `scripts/check/enforcement-inventory.json`.** Every
+  check/hook/gate/install-target this document describes has exactly one
+  entry: `id`, `substrate`, `script`, `test`, `install_targets` (placeholder
+  paths — `REPO/...`, `CONTROL_ROOM/...`, `USER_HOME/...` — never a
+  machine-specific absolute path), `expected_bad`/`expected_good`,
+  `failure_exit`/`uncertain_exit`, `owner`, `claude_only`. Native git hooks
+  and CI additionally carry `known_drift_note` where a drift is already
+  known and deliberately left unresolved by this task's own scope (§ below).
+- **Five judgment values, fixed.** `ALIVE` / `SILENT_BROKEN` / `DRIFT` /
+  `UNJUDGABLE` / `NOT_INSTALLED` — never a sixth value, never a boolean.
+  `SILENT_BROKEN` means the check is wired but its own script (or, for a
+  source-referenced check, its caller) no longer exists/references it;
+  `DRIFT` means wired but disagreeing with the manifest in some other way
+  (hash mismatch, matcher mismatch, a CI suite the workflow doesn't run);
+  `NOT_INSTALLED` means a required install target is simply absent;
+  `UNJUDGABLE` means this runner cannot tell either way (settings unreadable,
+  or — for every `claude_only` entry — no fresh canary receipt).
+- **A Claude-only check is never ALIVE from static wiring alone (G9).**
+  Confirming a hook *entry* exists in a settings file proves intent to wire
+  it, not that Claude Code ever actually invoked it. `role-guard`, `pm-guard`,
+  `status-fresh`, `clear-safe-check`, `linear-sync`, `controlroom-fresh`,
+  `context-inject`, and `worker-status-onstart` all require a fresh (≤8 day)
+  canary receipt (`<canaryDir>/<id>.json`, fields `check_id`/`checked_at`/
+  `bad_exit`/`good_exit`) to reach `ALIVE`; missing/stale/mismatched →
+  `UNJUDGABLE`. This runner does not itself produce that receipt — see
+  "Known limitations" below.
+- **Temp-fixture smoke, zero real-repo writes (G8).** `selfcheck-smoke.mjs`
+  exercises the CLI-runnable checks (`clear-safe-check`, `controlroom-fresh`,
+  `status-fresh`, `relay-handshake`, `pm-snapshot-gate`) against real,
+  OS-temp-only fixtures, and the two that can't be driven through their real
+  CLI without a fixture-path override or a live network call
+  (`review-gate`, `linear-sync`) via their exported pure functions instead —
+  still real check logic, just invoked in-process. Every run snapshots
+  `git status --short` before and after; the report's receipts section
+  records whether that diff was zero.
+- **Detection only, not repair.** This task's scope is explicitly to *find*
+  drift, not fix it — the three drifts already known before this task began
+  (pre-commit/gitleaks not installed in `.git/hooks`, CI running only 6 of
+  this repo's `scripts/check/*.test.mjs` suites, and — resolved mid-cycle by
+  HYK-131 — `linear-sync`'s exit-code contract) are left exactly as found;
+  `selfcheck.mjs`'s job is to surface them in every run's report, not to
+  silently fix or silently stop reporting them.
+
+### Implementation
+
+- `scripts/check/enforcement-inventory.json` — 14 entries (§1.2 of the
+  HYK-129/131 design report, verbatim): `review-gate`, `pre-commit-gitleaks`,
+  `role-guard`, `pm-guard`, `status-fresh`, `clear-safe-check`,
+  `linear-sync`, `controlroom-fresh`, `context-inject`,
+  `worker-status-onstart`, `relay-handshake`, `pm-snapshot-gate`,
+  `packet-gate`, `ci-enforce`.
+- `scripts/check/selfcheck-inventory.mjs` — pure functions:
+  `parseHookCommands`/`extractCheckScriptId` (settings JSON in, hook
+  commands out — only `matcher`/`command` are ever read, never any other
+  settings field, so no secret/env value can leak through this path);
+  `findInstalledTarget`/`findExtraInvocations` (G6 missing/extra);
+  `checkNativeGitHook` (G7, sha256 comparison, `core.hooksPath`-aware
+  caller); `checkCanaryReceipt` (G9); `checkSourceReference` (packet-gate's
+  indirect wiring — verified by grepping `role-guard.mjs`'s own source for
+  the import, not a settings file); `checkCiCoverage` (every
+  `scripts/check/*.test.mjs` basename discovered on disk, not just the ones
+  named in the manifest, must appear in `enforce.yml`'s text);
+  `combineStatuses` (worst-first severity pick); `judgeEntry`/`runInventory`
+  (per-entry and whole-manifest orchestration, every filesystem/settings
+  read an injectable parameter with a real default — same convention as
+  `status-fresh.mjs`/`controlroom-fresh.mjs`).
+- `scripts/check/selfcheck-smoke.mjs` — one `smoke<Check>()` function per
+  CLI-runnable check, each self-contained (creates and tears down its own
+  `mkdtempSync` fixture, including a real temporary `git init` repo for
+  `controlroom-fresh`), returning `[{ id, variant: 'bad'|'good', expectedExit,
+  actualExit, pass, evidence }]`; `captureGitStatus`/`runSmokeSuite` wrap all
+  seven checks' cases together with a before/after `git status --short` diff
+  (G8).
+- `scripts/check/selfcheck-report.mjs` — `buildReport(...)` renders the
+  design report §7 skeleton verbatim (`run_id`/`task_id`/`captured_at`/repo
+  HEAD/runtime versions/`next_due`, 5-state summary, inventory table, smoke
+  table, drift table, limitations, receipts) as pure markdown text from
+  in-memory data only (G10) — no file I/O inside the builder itself;
+  `writeReport` is the one function that touches disk.
+- `scripts/check/selfcheck.mjs` — the single entry point (`inventory →
+  smoke → report`, no model call, one command): resolves the real repo
+  root/control room/user home, loads the four real Claude settings files
+  (repo, control room, `~/.claude-team`, `~/.claude`) it can find, runs
+  inventory + smoke, and writes `.harness/selfcheck-report.md` (overridable
+  via `--output`). `buildLimitations`/`buildReceipts` assemble the report's
+  honesty sections from the run's own actual UNJUDGABLE entries and failed
+  smoke cases, not a static boilerplate list — a run with different results
+  produces a different limitations section.
+- Each module ships its own `.test.mjs` (S3), case count deliberately not
+  pinned here — `node --test scripts/check/<name>.test.mjs` is the one
+  source of truth for how many cases each file currently has, and a fixed
+  number in prose goes stale the moment a future round adds or removes a
+  case (this exact staleness was caught live during this task: a prior
+  version of this note said "37 cases" for `selfcheck-inventory.test.mjs`
+  right after a different round had already brought it to 42):
+  `selfcheck-inventory.test.mjs` (entirely synthetic fixtures — G6/G7/G9's
+  own required coverage), `selfcheck-smoke.test.mjs` (real subprocess/
+  pure-function execution against this repo's actual scripts, ending with a
+  full `runSmokeSuite` real-repo run asserting `zeroDiff === true`),
+  `selfcheck-report.test.mjs` (schema test over `REPORT_SECTIONS`),
+  `selfcheck.test.mjs` (two of its cases run the real, full
+  `inventory → smoke → report` pipeline against this repo's own manifest.
+  Neither asserts a *specific* live status for any entry — a round of this
+  task originally asserted `pre-commit-gitleaks → NOT_INSTALLED` and
+  `ci-enforce → DRIFT` literally, and that assertion broke the same day a
+  human installed the `pre-commit` hook mid-cycle (live state changed out
+  from under a test that had pinned one point-in-time reading as if it were
+  permanent). The corrected version asserts only what must always hold
+  regardless of live state: every entry resolves to one of the 5 fixed
+  status values with non-empty evidence, and the `pre-commit-gitleaks`/
+  `ci-enforce` entries are present in the results at all — never which
+  status they currently carry).
+
+### Live run (this task, read-only against the real repo)
+
+`node scripts/check/selfcheck.mjs` was run for real against this repository
+(not a fixture) — see the CODER result (`.harness/coder.md`,
+HYK-129-coder-1) for the exact summary counts and the generated
+`.harness/selfcheck-report.md` for the full report. No write ever touched
+anything but that one output file; `git status --short` before/after the
+smoke suite's portion of that run was identical (G8).
+
+### Known limitations (honesty notes)
+
+- **This runner cannot itself produce a canary receipt.** `checkCanaryReceipt`
+  reads one if given a directory; nothing in this task's scope makes one —
+  that requires an actual isolated Claude Code session hitting a real Stop/
+  PreToolUse/UserPromptSubmit event and recording the observed exit codes,
+  which only a Claude-driven ORCH turn (not this Codex-runnable script) can
+  do. Every `claude_only` entry is `UNJUDGABLE` on a run with no
+  `--canary-dir`, by design, not by omission.
+- **Local, removable, same trust boundary as every check in this document.**
+  An operator or agent with shell access can edit
+  `enforcement-inventory.json` to match whatever is currently installed
+  (making every entry trivially `ALIVE`), remove a hook from
+  `.claude/settings.local.json`, or simply never run `selfcheck.mjs` at all.
+  Nothing here is cryptographically enforced or externally anchored — this
+  is a Tier 2 mechanism through and through, same ceiling as `linear-sync.mjs`/
+  `controlroom-fresh.mjs`.
+- **Does not run itself (bootstrap limitation).** There is no scheduler
+  invoking `selfcheck.mjs` on a cadence; it depends entirely on a human
+  weekly trigger (paired with HYK-123's own Sunday-boundary loop, per the
+  design report's §6) or an ORCH boot-time reminder once the last successful
+  run crosses 8 days. A skipped week is recorded as `MISSED_TRIGGER`
+  wherever the weekly runner (HYK-129 사이클 3+) logs it — this task does not
+  build that scheduler, only the tool the scheduler is meant to invoke.
+- **`review-gate`/`linear-sync` smoke bypasses their real CLI.** See "Rule"
+  above — this is a deliberate, documented substitution (pure-function
+  in-process call instead of a subprocess), not a silent gap; a future task
+  could close it by adding a fixture-path override to `review-gate.mjs`'s
+  CLI or a `fetch`-mockable seam to `linear-sync.mjs`'s, but this task does
+  not do either.
+- **Inventory status is a live reading, not a fact frozen into this
+  document — see `.harness/selfcheck-report.md` for the current one.** At
+  this task's first baseline run (2026-07-13), `pre-commit-gitleaks` read
+  `NOT_INSTALLED` and `ci-enforce` read `DRIFT` (workflow missing several of
+  this repo's `scripts/check/*.test.mjs` suites); both were carried-forward
+  drifts, not new findings (documented in the HYK-129/131 design report's
+  own diagnosis). `pre-commit-gitleaks` then flipped to `ALIVE` the same day
+  when a human installed the hook mid-cycle — direct, immediate evidence
+  that a specific status literal in prose goes stale the moment live state
+  changes, which is exactly why the test suite documented above stopped
+  asserting one. This task's scope was always the detector, not the fix
+  (`ci-enforce`'s CI-coverage gap is left for HYK-129 사이클 3); a literal
+  suite count (e.g. "6/14") is deliberately not repeated here because the
+  set of `scripts/check/*.test.mjs` files — and therefore the denominator —
+  grows with every task that adds one, including this one.
+- **Claude-only, Stop/PreToolUse/UserPromptSubmit-event-scoped, same as
+  every check this manifest describes.** A Codex-driven PM/REVIEW/VERIFY
+  session triggers none of the hook events this inventory checks for at
+  all — this selfcheck tool itself is engine-agnostic (runs fine under
+  Codex), but what it *measures* (whether Claude's hooks fired) is not.
+
 ## E — PM lane enforcement (pm-guard + packet-gate + role-guard E4/E2ⓑ, HYK-121)
 
 ### Problem restated
