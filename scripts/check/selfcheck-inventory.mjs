@@ -212,19 +212,259 @@ export function checkSourceReference({ file, pattern, readFileFn = (p) => readFi
   return { status: "ALIVE", reason: `'${file}' still references '${pattern}'` };
 }
 
+// CI's whole-directory test step is `node --test scripts/check/*.test.mjs`
+// (enforce.yml) -- a single glob that, when Ubuntu Bash runs it, expands to
+// every current and future scripts/check/*.test.mjs on disk. HYK-129 사이클3
+// replaced enforce.yml's old per-file fixed step list with exactly this,
+// because a fixed list goes stale the moment a new check is added (the same
+// staleness class the doc's own former "37 cases" literal had). Recognizing
+// the glob here means this checker never again misjudges a glob-based
+// workflow as "missing" every individual file's literal basename substring.
+//
+// The judgment contract is exactly one question: *would Ubuntu Bash, running
+// this run command, actually execute the whole suite?* That is a Bash
+// tokenization question, not a substring question -- and three prior review
+// rounds (5, 6, 7) died trying to answer it by bolting ever more conditions
+// onto a single regex. Each rejection was really a place where regex boundary
+// tricks and real Bash word-splitting disagreed:
+//   - review-5: a *partial* wildcard (`scripts/check/*check.test.mjs`,
+//     `scripts/check/selfcheck*.test.mjs`) covers only a subset, never the
+//     whole directory -- must not count.
+//   - review-6: a trailing continuation (`scripts/check/*.test.mjs.bak`) is a
+//     different pattern matching zero real test files -- must not count; and
+//     an accidental prefix (`xscripts/check/...`) must not count either.
+//   - review-7: quotes around the glob (`"scripts/check/*.test.mjs"`) SUPPRESS
+//     expansion in Bash -- the command then looks for one literal file named
+//     `*.test.mjs`, runs zero tests, and must NOT count (was a false ALIVE);
+//     while a shell control operator immediately after the glob
+//     (`scripts/check/*.test.mjs&&echo done`, no space) still terminates the
+//     word, so the glob DOES expand and the suite DOES run -- it must count
+//     (was a false DRIFT).
+// Instead of a fourth regex patch, this round tokenizes the text the way Bash
+// does and asks whether any word is *exactly* the whole-directory glob with
+// its `*` unquoted. Every case above then falls out of that one rule rather
+// than needing its own lookahead/lookbehind. (Verified against a real `sh`
+// subprocess by tests 28l/28m/28n below.)
+//
+// LIMITATION (documented, per the harness rule "새 강제 기능엔 한계를 정직히"):
+// this tokenizer treats a backslash as a path separator -- so a Windows-authored
+// `scripts\check\*.test.mjs` still counts (test 28f) -- NOT as Bash's escape
+// character. enforce.yml runs on ubuntu-latest where paths use `/`, so this
+// only affects hypothetical backslash-in-YAML authoring, never the real CI
+// command. It also does not model `$(...)`/backtick command substitution,
+// brace expansion, or variable expansion inside the glob token -- none of
+// which appear in a plain `node --test <glob>` step.
+
+// The one canonical word that means "run the whole check directory."
+const WHOLE_CHECK_DIR_GLOB = "scripts/check/*.test.mjs";
+
+// Characters that terminate a Bash word whether or not surrounded by blanks:
+// whitespace plus the shell metacharacters that begin a control operator or
+// redirection (`&&`/`||`/`;;` all terminate on their first char, so matching
+// single chars suffices). This is why `*.test.mjs&&echo` still yields a
+// complete, expandable glob word (review-7 case 2).
+const WORD_TERMINATORS = new Set([" ", "\t", "\r", "\n", ";", "&", "|", "<", ">", "(", ")", "`"]);
+
+// Splits `text` into Bash-style words. For each word we record its literal
+// text (quotes removed) and whether a `*` in it was UNQUOTED -- only an
+// unquoted `*` triggers pathname expansion; a `*` inside single or double
+// quotes is a literal filename character (review-7 case 1). Backslash is
+// normalized to `/` up front and treated as a path separator, not a Bash
+// escape (see LIMITATION above). A `#` that begins a word (at start of input
+// or right after an unquoted word terminator) starts a shell comment that
+// runs to end of line and is dropped -- so a commented-out glob *inside* a
+// run: block (`# node --test scripts/check/*.test.mjs`) is not counted, just
+// as Bash would not execute it (review-8 defect 1). A `#` mid-word (`a#b`)
+// stays literal, matching Bash.
+function bashWords(text) {
+  const s = text.replace(/\\/g, "/");
+  const words = [];
+  let i = 0;
+  const n = s.length;
+  while (i < n) {
+    if (WORD_TERMINATORS.has(s[i])) {
+      i++;
+      continue;
+    }
+    if (s[i] === "#") {
+      // shell comment at a word boundary -> skip to end of line
+      while (i < n && s[i] !== "\n") i++;
+      continue;
+    }
+    let literal = "";
+    let starUnquoted = false;
+    while (i < n && !WORD_TERMINATORS.has(s[i])) {
+      const ch = s[i];
+      if (ch === "'" || ch === '"') {
+        const quote = ch;
+        i++;
+        while (i < n && s[i] !== quote) {
+          literal += s[i];
+          i++;
+        }
+        if (i < n) i++; // consume closing quote (unterminated -> just stop at end)
+      } else {
+        if (ch === "*") starUnquoted = true;
+        literal += ch;
+        i++;
+      }
+    }
+    words.push({ literal, starUnquoted });
+  }
+  return words;
+}
+
+// True iff `text` contains a Bash word that is exactly the whole-check-dir
+// glob with its `*` unquoted -- i.e. Ubuntu Bash running this command would
+// actually expand it and hand every scripts/check/*.test.mjs file to node.
+// A quoted glob, a partial wildcard, a `.bak` continuation, a prefixed path,
+// or an other-directory glob all fail one of these two conditions.
+export function coversViaCheckDirGlob(text) {
+  return bashWords(text).some((w) => w.literal === WHOLE_CHECK_DIR_GLOB && w.starUnquoted);
+}
+
+// Decodes a YAML flow scalar (the text after `run:` on one line) into the
+// exact string the runner hands to the shell. YAML quoting is a SEPARATE
+// layer from shell quoting: the runner removes YAML quotes before bash ever
+// sees the value, so it must be undone HERE -- before bashWords applies the
+// shell-quoting rules -- or the two layers get conflated. Three forms:
+//   plain    node --test x      -> verbatim (any quotes are literal shell
+//                                   quotes, left for bashWords to interpret)
+//   single   'a ''b'' c'        -> outer quotes removed, '' -> ' (the only
+//                                   escape a YAML single-quoted scalar has)
+//   double   "a \"b\" c"        -> outer quotes removed, backslash escapes
+//                                   resolved
+// review-9 defect 2: coder-9 stripped only the OUTER quotes and left interior
+// `''` in place, so `run: 'node --test ''scripts/check/*.test.mjs'''` -- a
+// glob that is SHELL-single-quoted after YAML decoding and therefore expands
+// to nothing -- was mis-tokenized as an unquoted glob and wrongly judged
+// ALIVE. Proper `''`->`'` decoding turns it back into `node --test
+// 'scripts/check/*.test.mjs'`, which bashWords correctly sees as quoted.
+//
+// Bias-to-DRIFT rule: a value that OPENS with a quote but is not a
+// well-formed quoted scalar (unbalanced, or trailing junk after the closing
+// quote) is AMBIGUOUS. Rather than guess, decodeYamlScalar returns "" so the
+// step contributes no coverage. For a coverage gate a false DRIFT
+// (over-flagging -> a human looks) is safe, whereas a false ALIVE silently
+// certifies an untested suite -- so when unsure we flag, never wave through.
+export function decodeYamlScalar(raw) {
+  const v = raw.trim();
+  if (v[0] === "'") return decodeQuotedScalar(v, "'");
+  if (v[0] === '"') return decodeQuotedScalar(v, '"');
+  return v;
+}
+
+function decodeQuotedScalar(v, q) {
+  const DOUBLE_ESCAPES = { n: "\n", t: "\t", r: "\r", "0": "\0", "\\": "\\", '"': '"' };
+  let out = "";
+  let i = 1;
+  const n = v.length;
+  while (i < n) {
+    const ch = v[i];
+    if (q === "'" && ch === "'") {
+      if (v[i + 1] === "'") {
+        out += "'"; // '' -> literal '
+        i += 2;
+        continue;
+      }
+      // closing quote: well-formed only if nothing but whitespace follows
+      return v.slice(i + 1).trim() === "" ? out : "";
+    }
+    if (q === '"' && ch === "\\") {
+      const next = v[i + 1];
+      out += next === undefined ? "" : next in DOUBLE_ESCAPES ? DOUBLE_ESCAPES[next] : next;
+      i += 2;
+      continue;
+    }
+    if (q === '"' && ch === '"') {
+      return v.slice(i + 1).trim() === "" ? out : "";
+    }
+    out += ch;
+    i += 1;
+  }
+  return ""; // reached end with no closing quote -> unbalanced -> ambiguous -> DRIFT
+}
+
+// Extracts the shell text of every `run:` step from a GitHub Actions workflow
+// -- the ONLY part CI actually executes. Everything else (a step `name:`, any
+// other mapping key, a YAML comment line) is excluded, so a glob or filename
+// mentioned there can never be mistaken for real coverage. review-8 defect 1:
+// the real enforce.yml carries the glob in BOTH its step name and its run:,
+// and coder-8's whole-file scan therefore couldn't tell a healthy workflow
+// from a future one whose run: had drifted to a single file.
+//
+// Handles the two run: forms GitHub Actions allows:
+//   run: <inline command>        (optionally the whole command YAML-quoted)
+//   run: |                        (block scalar; `>` folded and chomping
+//     <line>                       indicators |-, |+, >- ... also accepted)
+//     <line>
+// No full YAML parser: a line-scanner keyed on the `run:` mapping key covers a
+// steps list, and it ships with its own tests (inline, quoted inline, block
+// scalar, indentation variants, multi-step, name/comment exclusion). Shell
+// (#) comments inside a run block are left in the raw text here and dropped at
+// tokenization time by bashWords, so a commented-out glob is not counted.
+export function extractRunText(workflowText) {
+  const lines = workflowText.split("\n");
+  const runChunks = [];
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].replace(/\r$/, "");
+    const m = /^(\s*)(?:-\s+)?run:(.*)$/.exec(line);
+    if (!m) continue;
+    const keyIndent = m[1].length;
+    const rest = m[2].trim();
+    const isBlockScalar = /^[|>][+-]?\d*\s*(?:#.*)?$/.test(rest);
+    if (isBlockScalar) {
+      const blockLines = [];
+      let j = i + 1;
+      for (; j < lines.length; j++) {
+        const raw = lines[j].replace(/\r$/, "");
+        if (raw.trim() === "") {
+          blockLines.push("");
+          continue;
+        }
+        const indent = raw.length - raw.trimStart().length;
+        if (indent <= keyIndent) break; // dedented back to a sibling key -> block ended
+        blockLines.push(raw);
+      }
+      const indents = blockLines.filter((l) => l.trim() !== "").map((l) => l.length - l.trimStart().length);
+      const minIndent = indents.length ? Math.min(...indents) : 0;
+      runChunks.push(blockLines.map((l) => l.slice(minIndent)).join("\n"));
+      i = j - 1;
+    } else {
+      runChunks.push(decodeYamlScalar(rest));
+    }
+  }
+  return runChunks.join("\n");
+}
+
 // CI coverage: every scripts/check/*.test.mjs basename that actually exists
 // on disk (discovered dynamically, not hardcoded, so a brand-new check's
-// test file is caught even before anyone updates the manifest) must appear
-// somewhere in the workflow's text.
+// test file is caught even before anyone updates the manifest) must be run by
+// CI -- either by a whole-directory glob in a run: step, or referenced
+// literally in one. Only the run: steps count (extractRunText); text in a step
+// name: or a comment executes nothing and is ignored (review-8 defect 1).
 export function checkCiCoverage({ workflowText, testFiles }) {
-  const missing = testFiles.filter((f) => !workflowText.includes(f));
+  const runText = extractRunText(workflowText);
+  const words = bashWords(runText);
+  if (words.some((w) => w.literal === WHOLE_CHECK_DIR_GLOB && w.starUnquoted)) {
+    return {
+      status: "ALIVE",
+      missing: [],
+      reason: `CI runs scripts/check/*.test.mjs via a directory glob in a run: step -- covers all ${testFiles.length} discovered suite(s), including future ones`,
+    };
+  }
+  // Literal per-file fallback, matched against the run: steps' effective token
+  // text (quotes removed, shell comments dropped by bashWords) -- never the
+  // whole YAML, so a basename appearing only in a name:/comment can't credit.
+  const effective = words.map((w) => w.literal).join("\n");
+  const missing = testFiles.filter((f) => !effective.includes(f));
   if (missing.length === 0) {
-    return { status: "ALIVE", missing: [], reason: `all ${testFiles.length} check test suite(s) referenced in CI` };
+    return { status: "ALIVE", missing: [], reason: `all ${testFiles.length} check test suite(s) referenced in CI run: steps` };
   }
   return {
     status: "DRIFT",
     missing,
-    reason: `${missing.length}/${testFiles.length} check test suite(s) not wired into CI: ${missing.join(", ")}`,
+    reason: `${missing.length}/${testFiles.length} check test suite(s) not wired into CI run: steps: ${missing.join(", ")}`,
   };
 }
 
