@@ -213,6 +213,29 @@
       "mode_note": "Two hook_event install targets share one script; session-start never blocks (Claude Code ignores non-zero exit for that hook type), only user-prompt-submit's exit 2 is enforced."
     },
     {
+      "id": "selfcheck-freshness",
+      "substrate": "claude-lifecycle",
+      "script": "scripts/check/selfcheck-freshness.mjs",
+      "test": "scripts/check/selfcheck-freshness.test.mjs",
+      "install_targets": [
+        {
+          "location": "repo-settings",
+          "kind": "claude-settings",
+          "path": "REPO/.claude/settings.local.json",
+          "hook_event": "SessionStart",
+          "matcher": "startup|resume|clear|compact",
+          "required": true
+        }
+      ],
+      "expected_bad": "n/a -- purely advisory (never a bad/good gate); a missing/stale (>8d) or malformed .harness/selfcheck-report.md captured_at produces a SessionStart additionalContext warning",
+      "expected_good": "a fresh (<=8d) selfcheck report -- plain stdout line, no additionalContext payload",
+      "failure_exit": null,
+      "uncertain_exit": 0,
+      "owner": "ORCH",
+      "claude_only": true,
+      "self_registration_note": "This entry is this check's own manifest self-registration (HYK-129 사이클3, PM 보고서 §6) -- the selfcheck tool now audits its own SessionStart wiring the same way it audits every other check, closing (partially) the 'who checks the checker' bootstrap gap. Live wiring of the settings.local.json line itself is a human/ORCH one-time step, same convention as every other hook in this document -- NOT done by this task (see docs/enforcement-v1.md's honesty note); until wired, this entry legitimately reads NOT_INSTALLED."
+    },
+    {
       "id": "worker-status-onstart",
       "substrate": "claude-userpromptsubmit",
       "script": "scripts/check/worker-status-onstart.mjs",

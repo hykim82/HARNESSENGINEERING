@@ -24,23 +24,8 @@ jobs:
         with:
           node-version: 20
 
-      - name: review-gate tests
-        run: node scripts/check/review-gate.test.mjs
-
-      - name: relay-handshake tests
-        run: node scripts/check/relay-handshake.test.mjs
-
-      - name: role-guard tests
-        run: node scripts/check/role-guard.test.mjs
-
-      - name: status-fresh tests
-        run: node scripts/check/status-fresh.test.mjs
-
-      - name: context-inject tests
-        run: node scripts/check/context-inject.test.mjs
-
-      - name: clear-safe-check tests
-        run: node scripts/check/clear-safe-check.test.mjs
+      - name: check test suites (all scripts/check/*.test.mjs)
+        run: node --test scripts/check/*.test.mjs
 
       - name: hooks POSIX syntax check
         run: |

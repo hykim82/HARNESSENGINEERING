@@ -2119,6 +2119,49 @@ HYK-129-coder-1) for the exact summary counts and the generated
 anything but that one output file; `git status --short` before/after the
 smoke suite's portion of that run was identical (G8).
 
+### 사이클 3 — CI 전수화(G5) + 8일 신선도 경고 (selfcheck-freshness.mjs)
+
+- **G5, `ci-enforce`'s DRIFT resolved by construction, not by updating a
+  list.** `enforce.yml`'s per-file fixed steps (`review-gate tests`,
+  `relay-handshake tests`, ...) are replaced with a single glob step,
+  `node --test scripts/check/*.test.mjs` — every current and future
+  `scripts/check/*.test.mjs` file runs in CI without anyone editing this
+  workflow again. `checkCiCoverage` (`selfcheck-inventory.mjs`) was updated
+  to recognize this glob shape (`scripts/check/*` + `.test.mjs`, any
+  directory-scoped glob) as covering every discovered test file, rather
+  than searching for each file's literal basename substring in the workflow
+  text (which would have misjudged a glob-based workflow as missing
+  everything). A glob scoped to a *different* directory does not count —
+  verified by a dedicated synthetic case.
+- **`selfcheck-freshness.mjs` — the selfcheck tool auditing its own
+  bootstrap gap (PM 보고서 §6 [실행필요]).** A pure `checkSelfcheckFreshness`
+  function reads `.harness/selfcheck-report.md`'s `captured_at` field and
+  reports `fresh: false` (with a specific cause — absent, malformed, or
+  older than 8 days) or `fresh: true`. The CLI is a `SessionStart` hook:
+  when not fresh, it emits a `hookSpecificOutput.additionalContext` warning
+  (the same JSON shape `context-inject.mjs`'s session-start mode uses) so
+  the warning actually reaches a fresh session's visible context, not just
+  its own stdout; when fresh, it logs a plain one-line confirmation. It
+  **never blocks** (`process.exit(0)` unconditionally) — a stale self-audit
+  is a reminder to re-run `selfcheck.mjs`, not a reason to stop a session
+  from starting.
+- **Self-registration.** `enforcement-inventory.json` now carries a
+  `selfcheck-freshness` entry pointing at its own intended `SessionStart`
+  install target — the selfcheck tool audits its own wiring the same way it
+  audits every other check's, partially closing the "who checks the
+  checker" gap this document's earlier round left open.
+- **Weekly operating protocol (PM 보고서 §6 [즉시] 결정, verbatim).** A
+  single human line, "주간 점검," on the same Sunday boundary HYK-123
+  already uses, triggers ORCH to run **HYK-123 then HYK-129** back to back;
+  each keeps its own `task_id`, result, failure state, and next-due date —
+  the two reports are never merged into one. If HYK-129's run comes back
+  red, the implementing relay for that week's other work does not open
+  until the enforcement layer itself is repaired first. A skipped week is
+  logged as `MISSED_TRIGGER`, never retroactively marked as a success —
+  there is no Task Scheduler or other automatic trigger; the human's one
+  line and ORCH's own distribution/receipt-collection are the entire
+  mechanism.
+
 ### Known limitations (honesty notes)
 
 - **This runner cannot itself produce a canary receipt.** `checkCanaryReceipt`
@@ -2159,16 +2202,36 @@ smoke suite's portion of that run was identical (G8).
   when a human installed the hook mid-cycle — direct, immediate evidence
   that a specific status literal in prose goes stale the moment live state
   changes, which is exactly why the test suite documented above stopped
-  asserting one. This task's scope was always the detector, not the fix
-  (`ci-enforce`'s CI-coverage gap is left for HYK-129 사이클 3); a literal
-  suite count (e.g. "6/14") is deliberately not repeated here because the
-  set of `scripts/check/*.test.mjs` files — and therefore the denominator —
-  grows with every task that adds one, including this one.
+  asserting one. `ci-enforce`'s CI-coverage gap itself was closed in
+  사이클 3 (the glob step above) — this document deliberately does not
+  repeat a literal suite count (e.g. "6/14" or any other N/M) anywhere,
+  because the set of `scripts/check/*.test.mjs` files, and therefore any
+  such fraction, grows with every task that adds one, including this one;
+  `node --test scripts/check/*.test.mjs`'s own output is the only number
+  that can't go stale in prose.
 - **Claude-only, Stop/PreToolUse/UserPromptSubmit-event-scoped, same as
   every check this manifest describes.** A Codex-driven PM/REVIEW/VERIFY
   session triggers none of the hook events this inventory checks for at
   all — this selfcheck tool itself is engine-agnostic (runs fine under
   Codex), but what it *measures* (whether Claude's hooks fired) is not.
+- **`selfcheck-freshness.mjs`'s own `SessionStart` wiring is NOT live as of
+  this task.** Writing to this repository's real `.claude/settings.local.json`
+  was attempted and explicitly declined by this session's own permission
+  classifier, on the same "self-modifying live hook settings is a human,
+  one-time, per-clone step" convention this document has stated for every
+  other hook since D6/`status-fresh.mjs` — the classifier enforced that
+  convention even when a signed task packet asked for the change, which is
+  the intended behavior of that guardrail, not a bug. The manifest's
+  `selfcheck-freshness` entry therefore honestly reads `NOT_INSTALLED` until
+  a human adds the one line documented in this task's CODER result
+  (`.harness/coder.md`, HYK-129-coder-5) to `.claude/settings.local.json`'s
+  `SessionStart` array.
+- **`selfcheck-freshness.mjs` checks a timestamp field, not the report's
+  content.** Like `status-fresh.mjs`'s own mtime-based design note, a fresh
+  `captured_at` says only that `selfcheck.mjs` ran recently — it says
+  nothing about whether that run's findings were acted on, or whether the
+  report itself was hand-edited to look fresher than it is (same local
+  trust boundary as everything else in this section).
 
 ## E — PM lane enforcement (pm-guard + packet-gate + role-guard E4/E2ⓑ, HYK-121)
 
