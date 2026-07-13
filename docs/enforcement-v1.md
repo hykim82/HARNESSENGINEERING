@@ -1128,12 +1128,15 @@ With those limits acknowledged, the actual mechanism:
   Any parsing trouble fails open (`ok: true`) — consistent with every other
   check in this harness treating "uncertain" as "not confirmed unsafe."
   The CLI (`--status <path>`, or `HARNESS_STATUS_PATH`, same convention as
-  `status-fresh.mjs`) exits `0` on `ok`, and **`1`, never `2`,** on a
-  confirmed-missing attestation — deliberately the same soft, non-blocking
-  severity as `status-fresh.mjs`'s own `Stop`-hook contract, not the
-  hard-block `exit 2` used by `role-guard.mjs`/D2's `commit-msg` gate. This
-  keeps the checker inside the "structurally cannot be a hard gate" limit
-  stated above, rather than pretending otherwise.
+  `status-fresh.mjs`) exits `0` on `ok`, and **on a confirmed-missing
+  attestation, `2` on an `HARNESS_ROLE=ORCH` turn's first Stop this cycle,
+  else `0`** (superseded by HYK-131 — see "Stop hook blocking self-
+  consumption" below; this was originally `1`, never `2`, matching
+  `status-fresh.mjs`'s soft severity, and still is for every non-ORCH role
+  and for a `stop_hook_active` re-invocation). This keeps the checker inside
+  the "structurally cannot be a hard gate for non-ORCH roles" limit stated
+  above, rather than pretending otherwise, while giving the one role that
+  actually owns `STATUS.md` (ORCH) a real self-repair loop.
 - **Relationship to A/C/D.** A (form gate) and D (card structure) are what
   make a *filled* `PROJECT-CONTEXT.md` mechanically distinguishable from a
   stub; C (`/capture-context`) is the hand that actually does the
@@ -1217,9 +1220,12 @@ With those limits acknowledged, the actual mechanism:
     `result_ref` really names this cycle's actual result, that `sync_result`
     reflects a real `linear-sync` run that was actually executed, etc.) —
     presence-only, not shape-valid, not fact-checked. Same Tier 2 soft
-    ceiling as everything else in this subsection: `exit 1` only, never
-    `exit 2`, and any internal parsing trouble fails open (`ok: true`)
-    exactly like the pre-existing attest check.
+    ceiling as everything else in this subsection — and same HYK-131
+    ORCH-only promotion as the attest check above (`exit 2` only on an
+    `HARNESS_ROLE=ORCH` turn's first Stop; `exit 0` for every other role and
+    for `stop_hook_active` re-invocations) — and any internal parsing
+    trouble still fails open (`ok: true`) exactly like the pre-existing
+    attest check.
   - `parseCycleReceipt(statusText) -> { field: value } | null` is exported
     from `clear-safe-check.mjs` alongside `checkClearSafe`, following the
     same pure text-in/struct-out shape as every other check in this
@@ -1514,8 +1520,18 @@ version-controlled guard.
   (a state name can match while the prose around it is stale or misleading —
   that whole-paragraph truth judgment is out of scope, same as always). It
   is still Tier 2, still fail-open on any API/network error exactly like
-  `staleInStatus`/`missingInStatus`, and still exits `2` only on a confirmed
-  diff.
+  `staleInStatus`/`missingInStatus`, and — **normalized by HYK-131** — now
+  exits `1` (advisory), never `2`, on any confirmed diff (`staleInStatus`,
+  `missingInStatus`, or `stateDrift`). This corrects a contract drift this
+  file previously had: the code exited `2` here while this check was already
+  classified Tier 2/advisory everywhere else in this document (no external
+  anchor can force a Linear-side correction, so a hard block was never
+  actually earned). `resolveSyncExitCode({ staleInStatus, missingInStatus,
+  stateDrift }) -> 0 | 1` is exported from `linear-sync.mjs` specifically so
+  this exit contract is unit-testable without a live Linear API call. Unlike
+  `clear-safe-check.mjs`/`controlroom-fresh.mjs` below, this check was **not**
+  promoted to ORCH-only blocking — see "Stop hook blocking self-consumption"
+  below for why (Linear-side corrections may need a human, not just ORCH).
 - **Test suite count, current as of the HYK-128 round: 20 cases in
   `linear-sync.test.mjs`**, part of a repo-wide `scripts/check/*.test.mjs`
   total of 257 (up from the 106 recorded above at this section's original
@@ -1663,8 +1679,10 @@ Given a control room path (a directory outside the target repository):
   `PHASE-HANDOFF.md` exist in the control room and `|STATUS.md mtime −
   PHASE-HANDOFF.md mtime|` exceeds `DEFAULT_HANDOFF_THRESHOLD_MS` (12h) —
   warn: the handoff may no longer describe the current phase.
-- Either warning is reported; **no failure mode here is ever an exit `2`
-  hard block** — see "Fail-open severity" below.
+- Either warning is reported; **only an `HARNESS_ROLE=ORCH` turn's first
+  Stop this cycle can escalate a confirmed warning to exit `2`** — see
+  "Fail-open severity" below and "Stop hook blocking self-consumption"
+  (HYK-131) further down for the full ORCH-only/recursion-guard contract.
 
 ### Fail-open severity, matching `linear-sync.mjs`'s convention
 
@@ -1680,15 +1698,15 @@ files and keeps running regardless**: a control room with neither file
 present can still produce a dirty-cycle warning if its working tree is
 dirty and the last commit is older than the threshold. Missing
 STATUS/PHASE-HANDOFF silences check ②, not the whole function. When a
-warning *is* produced,
-though, the severity mirrors `status-fresh.mjs`/`clear-safe-check.mjs`
-instead of `linear-sync.mjs`'s harder `exit 2`: the CLI exits `1` (a
-non-blocking `Stop`-hook reminder that surfaces in the transcript without
-stopping anything) and never `2` (reserved for hard gates like
-`role-guard.mjs`/D2's `commit-msg` hook). This check exists to remind, not
-to block — an Orchestrator working across a real incident should not be
-locked out of ending its turn because the control room happens to look
-dirty at that moment.
+warning *is* produced, the severity **(superseded by HYK-131 — originally
+always `exit 1`, mirroring `status-fresh.mjs`/`clear-safe-check.mjs`)** now
+escalates to `exit 2` only on an `HARNESS_ROLE=ORCH` turn's first Stop this
+cycle, and is `exit 0` for every non-ORCH role and for a `stop_hook_active`
+re-invocation — see the new section below for the shared adapter this and
+`clear-safe-check.mjs` both defer to. This check still exists to remind
+ORCH specifically (the role that actually owns the control room), not to
+block any other role's turn — a REVIEW/VERIFY/CODER/PM session, or a Codex
+session this hook never even sees, is never affected by this check at all.
 
 ### Implementation
 
@@ -1795,6 +1813,172 @@ freeze as if it were permanent.
   explicitly excludes wiring this repository's real
   `.claude/settings.local.json` — see the CODER task's "라이브 활성화는 CODER
   스코프 아님" note and the coder result's explicit call-out.
+
+## Stop hook blocking self-consumption (stop-blocking.mjs, HYK-131)
+
+### Problem restated
+
+Every `Stop`-hook check documented above (`status-fresh.mjs`,
+`clear-safe-check.mjs`, `linear-sync.mjs`, `controlroom-fresh.mjs`) was
+originally advisory-only: a confirmed failure surfaces as `exit 1`, which
+Claude Code's `Stop` hook shows in the transcript but never actually
+enforces. In practice this produced a "human = message bus" anti-pattern —
+the warning lands only on the human's screen, and nothing makes the agent
+that is actually responsible for the drift (ORCH, for `STATUS.md`/control-room
+hygiene specifically) look at it or self-repair before ending its turn. This
+was observed twice in a single day before this task was written.
+
+### Rule
+
+- **Role gate.** Blocking only ever applies when `HARNESS_ROLE === "ORCH"`.
+  Every other role (`PM`/`CODER`/`REVIEW`/`VERIFY`) and an unset/unrecognized
+  role pass through at `exit 0` unconditionally, with only an optional
+  stderr diagnostic — never a block, and, for the two checks promoted below,
+  no longer even the old advisory `exit 1`. `STATUS.md`/control-room hygiene
+  is ORCH's to own; nagging every other role's turn about it was never this
+  check's real audience.
+- **Recursion guard.** Claude Code's `Stop` hook payload sets
+  `stop_hook_active: true` on the re-invocation that follows a prior Stop
+  hook's own block within the same turn. A promoted checker reads this from
+  stdin (`readStopHookPayload`) and, if true, does **not** re-block — this is
+  a one-shot self-repair opportunity, not an infinite retry loop.
+- **Payload readability is itself a G3 judgment (review-1 fix).** Whether the
+  Stop hook's own stdin payload is missing, empty, non-JSON, or JSON that
+  doesn't parse to an object is *uncertain*, not a confirmed "no recursion":
+  `readStopHookPayload` returns `{ ok, payload }` preserving that distinction
+  instead of collapsing every failure into `{}`, and `resolveStopBlock`
+  treats `ok: false` as `UNJUDGABLE` (`exit 0`, `reason_code:
+  stop_payload_unreadable`) — never blocking on an assumption about a
+  payload it couldn't actually read. An independent review caught an earlier
+  version of this adapter doing exactly that (malformed/empty stdin silently
+  became `{}`, which then read as a valid non-recursive payload and reached
+  `exit 2`); a real, well-formed `{}` payload (successfully parsed, simply
+  empty) is unaffected and still eligible for blocking.
+- **Fail-open unchanged.** The role gate and recursion guard sit **after**
+  each checker's own pure function has already decided `ok`/`fail`; they
+  never change what counts as a confirmed failure vs. an uncertain one. Every
+  file-missing/parse-error/git-error/network-error case each checker already
+  treated as fail-open (`ok: true`) is completely untouched by this adapter —
+  G3's "`UNJUDGABLE` → `exit 0`" guarantee was true before HYK-131 and remains
+  true after it, for the same reason (the pure check functions, not this
+  adapter, are what decide that).
+- **Reason format.** A confirmed block's stderr line carries four fields:
+  `check_id`, `reason_code`, `repair_hint` (what ORCH should fix, one line —
+  the checker's own human-readable reason, not re-summarized), and
+  `attempt=1/1` (there is exactly one self-repair attempt per confirmed
+  failure; the recursion guard is what makes this true rather than aspirational).
+
+### Which checks were promoted, normalized, or left alone
+
+| Check | Disposition | Why |
+|---|---|---|
+| `clear-safe-check.mjs` | **Promoted to ORCH-only blocking** | Receipt/attestation fields are ORCH's own to fill in — immediately self-repairable, and the confirmed-failure vs. fail-open split was already clean before this task. |
+| `controlroom-fresh.mjs` | **Promoted to ORCH-only blocking** | Dirty-cycle/handoff-staleness is ORCH's own control room to commit/refresh — same self-repair shape as clear-safe. |
+| `linear-sync.mjs` | **Normalized to advisory (`exit 1`, not blocking)** | A confirmed drift may mean `STATUS.md` is wrong, or it may mean Linear itself needs a human correction — not something ORCH can always self-repair alone, and this check depends on a live network call to a service outside this harness's control. This also **fixed a pre-existing contract drift**: the code exited `2` on a confirmed diff while every other reference to this check in this document already classified it Tier 2/advisory. |
+| `status-fresh.mjs` | **Left unchanged (still advisory, `exit 1`)** | Staleness here can originate from a different worker or a human edit, not only from ORCH's own turn, and this task has no live evidence yet that ORCH-only blocking wouldn't misfire on that ambiguity. Revisit after the HYK-129 observation loop this task's design explicitly deferred to. |
+
+### Implementation
+
+- `scripts/check/stop-blocking.mjs` is the single shared adapter (not
+  duplicated per checker, per this harness's own "one declaration" C.7
+  convention): `isBlockingRole(role)`, `isRecursiveStop(hookPayload)`,
+  `readStopHookPayload(fd) -> { ok, payload }` (stdin JSON parse; `ok: false`
+  on missing/empty/malformed/non-object input — payload always `{}` in that
+  case, but callers must check `ok` rather than trust the payload blindly),
+  `formatBlockReason({ checkId, reasonCode, repairHint, attempt,
+  maxAttempts })`, and the single decision point `resolveStopBlock({ role,
+  hookPayloadResult, ok, checkId, reasonCode, repairHint }) -> { exit, reason
+  }` that every promoted checker's CLI calls once it already has its own
+  `{ ok, reason }` verdict.
+- `clear-safe-check.mjs` and `controlroom-fresh.mjs`'s CLI blocks each call
+  `resolveStopBlock` after computing their existing `checkClearSafe`/
+  `checkControlRoomFresh` result, passing that result's `reason` through
+  unmodified as `repairHint` — the checker's own explanation of what's wrong
+  doubles as ORCH's repair instruction, nothing is re-derived.
+- `linear-sync.mjs` gained `resolveSyncExitCode({ staleInStatus,
+  missingInStatus, stateDrift }) -> 0 | 1`, a pure function extracted from
+  the CLI's own inline exit-code logic so the drift-vs-clean contract is
+  unit-testable without a live Linear API call; the fail-open paths (missing
+  key, missing STATUS file, network error) are untouched and still exit `0`
+  directly, before `resolveSyncExitCode` is ever reached.
+- `scripts/check/stop-blocking.test.mjs` (`node:test`): role-gate matrix
+  (ORCH vs. every other role/unset), recursion-guard behavior, the 4-field
+  reason format, the full `resolveStopBlock` decision table (ok, role-gated,
+  recursion-guarded, payload-unreadable, confirmed-block), and
+  `readStopHookPayload` exercised against real file descriptors (`openSync`
+  on a temp file, not a fake stdin) covering: valid payload, valid empty
+  `{}` (the anchor — must stay `ok: true`, distinct from unreadable), malformed
+  JSON, empty content, non-object JSON (array, `null`), and an already-closed
+  fd.
+- `clear-safe-check.test.mjs`/`controlroom-fresh.test.mjs` each gained
+  CLI-level (`execFileSync`/`spawnSync` against the real script) cases
+  covering: `HARNESS_ROLE=ORCH` + confirmed failure → `exit 2` with all four
+  reason fields present; `HARNESS_ROLE=ORCH` + `ok` → `exit 0`; every
+  non-ORCH role (including unset) + confirmed failure → `exit 0`;
+  `HARNESS_ROLE=ORCH` + confirmed failure + `stop_hook_active: true` →
+  `exit 0`, not re-blocked; an uncertain/fail-open input (missing STATUS
+  file, absent control-room path) → `exit 0` regardless of role; and — the
+  review-1 regression set — `HARNESS_ROLE=ORCH` + confirmed failure +
+  malformed/non-JSON stdin → `exit 0` (`reason_code=stop_payload_unreadable`),
+  same + empty stdin → `exit 0`, and same + a valid `{}` stdin → `exit 2`
+  (the anchor confirming the fix didn't regress the original blocking path).
+  `controlroom-fresh.test.mjs`'s CLI fixtures use a real temporary git
+  repository (`git init`/`commit`, then an mtime bump) rather than the
+  injected `git*Fn` functions the rest of that file's unit tests use, so the
+  CLI's own default git-shelling path is exercised end-to-end — no write
+  ever touches this repo or the real control room (G8's "OS temp only"
+  posture).
+- `linear-sync.test.mjs` gained unit tests for `resolveSyncExitCode` directly
+  (clean → `0`; any of `staleInStatus`/`missingInStatus`/`stateDrift`
+  individually or combined → `1`, never `2`) — a live-network CLI exec test
+  was deliberately not added here, since exercising the real drift path would
+  require either a live Linear API call or mocking global `fetch`, neither of
+  which this task's scope covers.
+
+### Known limitations (honesty notes)
+
+- **Claude-only, same as every check this adapter sits behind.** The `Stop`
+  hook is a Claude Code mechanism; a Codex-driven PM/REVIEW/VERIFY session
+  ending triggers no equivalent event at all, so this adapter's role gate
+  never even gets a chance to run for those sessions through this path —
+  they are unaffected for an entirely separate reason than "role gate said
+  no."
+- **Stop-hook-time only, not continuously enforced.** Exactly like every
+  other checker in this document, this only judges the state of
+  `STATUS.md`/the control room at the moment a Stop hook fires. A drift that
+  appears and is fixed within the same turn, or between Stop invocations, is
+  invisible to it.
+- **Tier 2 ceiling, not a gap this task closes.** Promoting a check to
+  `exit 2` changes its *severity for ORCH*, not its *substrate*: there is
+  still no external anchor (no CI, no branch protection) that can force this
+  hook to run at all. An operator or agent with shell access can remove the
+  `Stop` hook wiring from `.claude/settings.local.json`, unset
+  `HARNESS_ROLE`, or edit `stop-blocking.mjs` itself, and nothing here
+  detects any of that — the same trust boundary as role-guard's own honesty
+  note.
+- **One self-repair attempt, not a guarantee of repair.** The recursion
+  guard prevents an infinite block loop, but it does not verify ORCH actually
+  fixed anything on the re-invocation — a `stop_hook_active: true` turn
+  passes through at `exit 0` regardless of whether the underlying condition
+  is still broken. A second, still-unresolved failure is silently allowed
+  through rather than surfaced again; this is a deliberate trade (favor
+  forward progress over an unbounded block loop), not an oversight, but it
+  does mean a persistently-broken ORCH turn can end without the human ever
+  seeing a second reminder in that same turn.
+- **Live Claude Stop-hook canary not run by this task.** This cycle's scope
+  (per the approved design, gate ID `G12`) covers the adapter, the two
+  promotions, the advisory normalization, and unit/CLI-process-level tests
+  only — an actual Claude Code session hitting a real confirmed failure and
+  observing the model receive and act on the `exit 2` feedback (the "bad →
+  1 self-repair attempt → good" live loop) is explicitly deferred to an
+  ORCH-run isolated canary in a later cycle, per the approved design's own
+  ordering (§4/§5 of the design doc this task cites). Until that canary runs
+  and its receipt is recorded, this adapter's live behavior is verified only
+  at the CLI-process level (a real `node` child process with a real stdin
+  payload and env var), not through an actual Claude Code `Stop` hook
+  invocation.
+- **`status-fresh.mjs` deliberately not promoted in this round.** See the
+  table above — this is an open item for a future cycle, not an omission.
 
 ## E — PM lane enforcement (pm-guard + packet-gate + role-guard E4/E2ⓑ, HYK-121)
 

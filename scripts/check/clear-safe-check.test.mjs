@@ -1,6 +1,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { fileURLToPath } from "node:url";
 import { checkClearSafe, parseCycleReceipt } from "./clear-safe-check.mjs";
+
+const SCRIPT_PATH = fileURLToPath(new URL("./clear-safe-check.mjs", import.meta.url));
 
 const FULL_CYCLE_RECEIPT = [
   "<!-- cycle-receipt:",
@@ -162,4 +169,98 @@ test("(n) G4: boundary=phase + open_set_sync=판정불가 -> ok:false, '사람 �
   const result = checkClearSafe(text);
   assert.equal(result.ok, false);
   assert.match(result.reason, /사람 확인 필요/);
+});
+
+// --- HYK-131: CLI-level ORCH-only blocking promotion (G1/G2/G3) ---
+
+function withFixtureDir(fn) {
+  const dir = mkdtempSync(join(tmpdir(), "clear-safe-check-cli-test-"));
+  try {
+    return fn(dir);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+// Runs the real CLI over a temp STATUS.md, injecting HARNESS_ROLE (env) and
+// a Stop-hook-shaped stdin payload -- the same two inputs resolveStopBlock's
+// role gate / recursion guard / payload-readability check read in
+// production. `stdin`, when given, overrides the derived stop_hook_active
+// JSON entirely -- used to feed malformed/empty payloads (review-1 repro).
+function runCli(statusText, { role, stopHookActive = false, stdin } = {}) {
+  return withFixtureDir((dir) => {
+    const statusPath = join(dir, "STATUS.md");
+    writeFileSync(statusPath, statusText, "utf8");
+    const env = { ...process.env };
+    delete env.HARNESS_ROLE;
+    if (role !== undefined) env.HARNESS_ROLE = role;
+    const input = stdin !== undefined ? stdin : JSON.stringify({ stop_hook_active: stopHookActive });
+    // spawnSync (not execFileSync) so stderr is captured regardless of exit
+    // code -- a pass-through (exit 0) case still writes a diagnostic to
+    // stderr, which execFileSync's throw-on-nonzero-only model would drop.
+    const res = spawnSync("node", [SCRIPT_PATH, "--status", statusPath], { encoding: "utf8", env, input });
+    return { status: res.status, stdout: res.stdout ?? "", stderr: res.stderr ?? "" };
+  });
+}
+
+const BAD_STATUS = greenWithAttest(null); // missing cycle-receipt block -> confirmed failure
+const GOOD_STATUS = greenWithAttest(FULL_CYCLE_RECEIPT); // complete -> ok
+
+test("(o) CLI: role=ORCH + confirmed failure + first attempt -> exit 2 with 4-field reason", () => {
+  const result = runCli(BAD_STATUS, { role: "ORCH" });
+  assert.equal(result.status, 2);
+  assert.match(result.stderr, /reason_code=clear_safe_incomplete/);
+  assert.match(result.stderr, /repair_hint=/);
+  assert.match(result.stderr, /attempt=1\/1/);
+});
+
+test("(p) CLI: role=ORCH + ok -> exit 0", () => {
+  const result = runCli(GOOD_STATUS, { role: "ORCH" });
+  assert.equal(result.status, 0);
+});
+
+for (const role of ["PM", "CODER", "REVIEW", "VERIFY", undefined]) {
+  test(`(q-${role ?? "unset"}) CLI: role=${role ?? "unset"} + confirmed failure -> exit 0 (blocking is ORCH-only)`, () => {
+    const result = runCli(BAD_STATUS, { role });
+    assert.equal(result.status, 0);
+  });
+}
+
+test("(r) CLI: role=ORCH + confirmed failure + stop_hook_active -> exit 0, not re-blocked", () => {
+  const result = runCli(BAD_STATUS, { role: "ORCH", stopHookActive: true });
+  assert.equal(result.status, 0);
+  assert.match(result.stderr, /stop_hook_active/);
+});
+
+// --- review-1 rejected fix: malformed/empty stdin must never reach blocking
+// severity (G3) -- these three cases are the exact review-1 regression set.
+
+test("(r2) CLI: role=ORCH + confirmed failure + malformed/non-JSON stdin -> exit 0, UNJUDGABLE (review-1 repro: previously exit 2)", () => {
+  const result = runCli(BAD_STATUS, { role: "ORCH", stdin: "not-json" });
+  assert.equal(result.status, 0);
+  assert.match(result.stderr, /reason_code=stop_payload_unreadable/);
+});
+
+test("(r3) CLI: role=ORCH + confirmed failure + empty stdin -> exit 0, UNJUDGABLE (review-1 repro: previously exit 2)", () => {
+  const result = runCli(BAD_STATUS, { role: "ORCH", stdin: "" });
+  assert.equal(result.status, 0);
+  assert.match(result.stderr, /reason_code=stop_payload_unreadable/);
+});
+
+test("(r4) CLI: role=ORCH + confirmed failure + valid '{}' stdin -> exit 2 (anchor: existing behavior must not regress)", () => {
+  const result = runCli(BAD_STATUS, { role: "ORCH", stdin: "{}" });
+  assert.equal(result.status, 2);
+  assert.match(result.stderr, /reason_code=clear_safe_incomplete/);
+});
+
+test("(s) CLI: role=ORCH + unreadable STATUS file (uncertain) -> exit 0 (UNJUDGABLE, never blocks)", () => {
+  const env = { ...process.env, HARNESS_ROLE: "ORCH" };
+  const missingPath = join(tmpdir(), "clear-safe-check-does-not-exist-" + Date.now(), "STATUS.md");
+  const res = spawnSync("node", [SCRIPT_PATH, "--status", missingPath], {
+    encoding: "utf8",
+    env,
+    input: "{}",
+  });
+  assert.equal(res.status, 0);
+  assert.match(res.stdout, /fail-open/);
 });
