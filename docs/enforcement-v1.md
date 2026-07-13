@@ -2651,3 +2651,183 @@ entry from §E, not replacing it):
   that. This is a convenience mechanism removing a forgetting failure mode,
   not a security boundary — it sits in the same family as role-guard's and
   pm-guard's own "same environment as the agent it watches" limitation.
+
+## G — reject-streak escalation gate (reject-streak.mjs, HYK-133)
+
+### Problem restated
+
+HYK-129 사이클3 hit the same spot rejected six times in a row. The moves that
+actually helped mid-cycle — escalating to a stronger model around the third
+consecutive reject, pulling in outside research around the fifth — were real
+and effective, but existed purely as ORCH's own unrecorded, in-the-moment
+judgment calls. Nothing wrote them down, nothing forced them to happen at a
+consistent point, and — the concrete mechanical gap this closes — nothing
+*could* have forced them, because the fact "this issue has now been rejected
+N times in a row" had nowhere durable to live: `.harness/review.md` is a
+single relay slot, overwritten every round, so the streak evaporated the
+moment the next round's review landed. This mechanizes today's convention
+("관례 → 강제층", the same move D2 already made for review evidence, D3 for
+task-id staleness).
+
+### Two subcommands, one ledger
+
+`scripts/check/reject-streak.mjs` follows the same shape as every other
+check in this document — pure exported functions plus a thin CLI — but,
+like `pm-snapshot-gate.mjs`, is `orch-direct` substrate: nothing hooks it
+automatically, ORCH calls it itself at two points in the relay loop.
+
+- **`record`** (`node reject-streak.mjs record --review <path> [--ledger
+  <path>]`) — run when ORCH consumes a review result, *before* that round's
+  `.harness/review.md` gets overwritten by the next round. Parses `for:`
+  (falling back to `task_id:` if `for:` is absent — both carry the same
+  leading `HYK-<n>` issue prefix) and `verdict: approved|rejected` out of
+  the review text, derives the issue id, and updates
+  `.harness/reject-streak.json`: a `rejected` verdict increments that
+  issue's streak, an `approved` verdict resets it to 0. Every outcome is
+  appended to that issue's `history` array regardless of verdict, so the
+  ladder has the full sequence to point at later, not just the current
+  count. An issue with no ledger entry yet starts at streak 0 — this is the
+  same baseline `gate` uses, so a first-ever rejection reads as streak 1,
+  not an error.
+- **`gate`** (`node reject-streak.mjs gate [<coder-task-path>] [--ledger
+  <path>]`, default task path `.harness/coder-task.md`) — run before
+  dropping the next task file for an issue. Looks up that issue's current
+  streak; if `< 2`, passes unconditionally (`exit 0`). If `>= 2`, the task
+  file must carry a complete **escalation envelope** (below) or the drop is
+  refused (`exit 2`, reason on stderr, same exit-code contract as D2/role-guard).
+
+### Escalation envelope — machine-parseable template
+
+Lives inside an HTML comment, same convention as `pm-snapshot-gate.mjs`'s
+`<!-- pm-snapshot ... -->` block (invisible in rendered markdown, easy to
+copy-paste into a task file verbatim). Unlike a placeholder-form template,
+this block is a **real, immediately-passing example** — copy it verbatim
+into a task file and `gate` accepts it as-is (review-1, HYK-133-coder-1,
+caught a first draft of this section that used `<...>` placeholder syntax
+inside the block itself; a literal copy-paste of a placeholder obviously
+never matches any of the allowed labels below, so the doc's own worked
+example failed the gate it was documenting — this is the fixed version,
+with a doc-code contract regression test, `reject-streak.test.mjs`, that
+extracts exactly this fenced block and feeds it to `gate` so that drift
+between this prose and the real parser is caught mechanically instead of by
+the next reviewer noticing by hand):
+
+```
+<!-- reject-streak-envelope
+원인 분류: 모델 한계
+ORCH 조치:
+- 모델 변경: sonnet -> opus로 승격, 다음 라운드부터 적용
+-->
+```
+
+Swap in the real cause/action for the situation at hand — the two fields'
+**allowed value sets**, not the example's specific wording, are what `gate`
+actually checks:
+
+- `원인 분류:` must be exactly one of **스펙 오류(ORCH)** | **모델 한계** |
+  **환경 차이** | **설계 결함** (exact match or a label-prefix match, so
+  `스펙 오류(ORCH)`'s own parenthetical doesn't need byte-identical
+  reproduction).
+- `ORCH 조치:` must be followed by at least one `- <분류>: <내용>` bullet
+  whose `<분류>` is one of **리서치(출처 포함)** | **모델 변경** |
+  **재설계 지시** | **디스코프 제안** | **PM B2 자문 회부** (again, exact or
+  prefix match — a bullet like `- 리서치(출처 포함): <url>` matches the
+  `리서치` label). Multiple bullets are allowed; only one needs to match for
+  the envelope to be complete.
+
+A block missing entirely, missing either field, or carrying a cause/action
+label outside these two sets (including a literal, un-substituted
+`<placeholder>` token) is rejected with a reason naming exactly which piece
+is missing or invalid.
+
+### Escalation ladder
+
+Today's ad-hoc HYK-129 사이클3 pattern, written down as the ladder this gate
+partially enforces:
+
+| Streak | Requirement | Enforced by this gate? |
+| --- | --- | --- |
+| 2 consecutive rejects | Escalation envelope (cause + >=1 ORCH action) required on the next drop | **Yes** — `exit 2` if missing |
+| 3 consecutive rejects | Model escalation recommended/considered | No — convention only |
+| 4+ consecutive rejects | Discope or PM B2 advisory candidate | No — convention only |
+
+Only the streak-2 envelope requirement is mechanically gated. The 3-streak
+and 4-streak rungs stay recorded here as the documented convention (per this
+task's own scope decision — see honesty note below) but nothing currently
+blocks a drop for failing to follow them; they rely on ORCH reading its own
+streak (`.harness/reject-streak.json`) and choosing to act, the same
+convention-only status every check in this document starts from before a
+later revision mechanizes it further.
+
+### Honesty note (S4)
+
+This gate checks the envelope's **presence and shape only** — that a
+recognized cause label and at least one recognized action label exist — never
+whether the stated cause is the actually-correct diagnosis, whether the
+research a `리서치` action claims has a real source, or whether the chosen
+action is a good idea. Same scope limit `pm-snapshot-gate.mjs` already
+documents for its own envelope: it is a "no unstrategized re-drop" check,
+not an automated research or model-selection device. Both `record` and
+`gate` are **ORCH self-invoked** (`orch-direct` substrate, no hook wires
+either one) — this is Tier 2 by the same definition every other
+orch-direct check in this document uses (relay-handshake, pm-snapshot-gate):
+if ORCH forgets to run `record` after consuming a review, that round's
+verdict never reaches the ledger and the streak undercounts; if ORCH forgets
+to run `gate` before dropping a task, a same-spot re-drop with no envelope
+simply isn't stopped. Nothing here is an agent-external anchor — it is a
+convention with a mechanical shape-check bolted on, same trust boundary as
+every other locally-invoked script in this document.
+
+### Uncertain-state handling (fail-open, per R3)
+
+A missing ledger file is a real, judgable state (every issue starts at
+streak 0) — `gate` never creates or writes the ledger, only `record` does.
+A ledger file that exists but fails to parse as JSON, or parses but lacks a
+well-formed `issues` object, is **UNJUDGABLE**: both `record` and `gate`
+print a reason containing the literal string `UNJUDGABLE`, leave the file
+untouched, and exit `0` — the same fail-open posture every other check in
+this document uses for a parse/read failure it cannot resolve (D2's missing
+review file is the one deliberate fail-*closed* exception; this gate is not
+that case). A malformed `review.md` (no `for:`/`task_id:` line, no
+recognized `verdict:` value) hits the same UNJUDGABLE-and-skip path in
+`record`, rather than crashing or silently recording a guessed entry — a
+hidden block is exactly what R3 rules out.
+
+### Implementation
+
+- `scripts/check/reject-streak.mjs`: pure functions `parseReviewOutcome`,
+  `applyOutcome`, `computeRecord`, `loadLedger`/`writeLedger`,
+  `checkEnvelope`, `checkGate`, plus the `record`/`gate` CLI dispatch —
+  same text-in/struct-out shape as every other module in this document,
+  fully unit-testable without a real filesystem for the pure half, fixture
+  temp-dirs for the loader/CLI half (`review-gate.test.mjs`'s
+  `withFixtureDir` pattern).
+- `scripts/check/reject-streak.test.mjs` (`node:test`, 53 cases): outcome
+  parsing (`for:`/`task_id:` fallback, missing fields, verdict
+  normalization); ledger transitions (increment, reset, independent
+  per-issue counters, history accumulation); ledger loading (missing file,
+  valid JSON, invalid JSON, missing `issues` key, write/reload round-trip);
+  envelope parsing (complete, absent, cause-only, actions-only, invalid
+  cause, invalid action label, all four causes individually, all five
+  action labels individually, parenthetical label form, multi-bullet with
+  one match); the full R1–R3 known-bad/good matrix from
+  게이트-기준.md §HYK-133 (ⓐ streak 2 no envelope → block, ⓑ cause-only and
+  actions-only → block, ⓒ complete envelope → pass, ⓓ streak 1 no
+  intervention → pass, ⓔ approved-reset then re-drop → pass, ⓕ corrupted
+  ledger → UNJUDGABLE); and CLI end-to-end coverage including the
+  relay-slot-overwrite simulation (two `record` calls against a review file
+  rewritten in between, proving the ledger survives what `review.md` alone
+  does not) and a full record→record→gate-blocked→gate-passed reproduction
+  of the ⓐ scenario.
+- Self-registered in `scripts/check/enforcement-inventory.json` as
+  `reject-streak` (`orch-direct` substrate, `install_targets: []`, same
+  "ALIVE via script+test existence" posture as `relay-handshake`/
+  `pm-snapshot-gate`) — `selfcheck-inventory.mjs` picks it up without any
+  code change, confirmed by a live `node scripts/check/selfcheck-inventory.mjs`
+  run showing `reject-streak` as `ALIVE` alongside the pre-existing entries,
+  zero regression to any other entry's judgment.
+- `.github/workflows/enforce.yml`'s `node --test scripts/check/*.test.mjs`
+  directory glob (HYK-129 사이클3) picks up `reject-streak.test.mjs`
+  automatically — no CI file edit needed, confirmed by
+  `selfcheck-inventory.mjs`'s own `ci-enforce` judgment reporting 20
+  discovered suites (up from 19) after this file was added.
