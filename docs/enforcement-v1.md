@@ -2372,6 +2372,40 @@ repo's), since that is where PM sessions actually run:
   runs on the ORCH side of the handoff**, so the human-signature requirement
   holds regardless of which engine produced the packet — the E2 gate does
   not care who PM was.
+- **codex's own sandbox does not itself block a sol-PM session's repo
+  writes — measured, not assumed.** A 2026-07-13 real-world probe (HYK-125,
+  see the control room's `PM\산출물\하네스\2026-07-13-샌드박스실측\보고서.md`
+  and the signed `PKT-20260713-sol-pm-sandbox-boundary`) had a sol-PM session
+  attempt `apply_patch` against a path **outside** its declared
+  `writable_roots` (a gitignored repo canary file, not the PM-output/relay
+  paths that config section names) — the write **succeeded**. This
+  contradicts the assumption that "codex's sandbox mechanically enforces
+  `writable_roots`" would have been a second, engine-side backstop to the
+  two guards above; it is not. The exact cause is unmeasured and this
+  document does not claim one (a `sandbox_workspace_write` config value not
+  actually applied to that session, permission composition, or a
+  tool-specific boundary all remain open) — what is measured is only the
+  outcome: a repo write outside the declared root went through. Concretely,
+  and each limb below stated separately rather than bundled, because the
+  two guards above cover genuinely different, narrower ground than "sol-PM
+  repo writes are blocked" would suggest (pm-1 보고서 §7):
+  - **`pm-guard` is Claude-only** — it is a Claude Code `PreToolUse` hook (see
+    the first bullet above), so a **sol** (codex) PM session has no
+    `pm-guard` coverage at all, not reduced coverage — the guard simply never
+    runs in that engine.
+  - **`packet-gate` only governs the packet-derived handoff, not a direct
+    repo write.** It checks a signed `승인:` line on a *packet file* before a
+    packet-sourced `*-task.md` drop is accepted (E2/E2ⓑ above); it has no
+    hook into, and does not inspect or block, a PM session's own direct
+    `apply_patch`/`Write`/`Edit` calls against this repo.
+  - **Therefore sol-PM's direct-repo-write prohibition is, as of this
+    writing, convention only — no mechanical anchor enforces it.** Neither
+    guard actually stops the write this probe demonstrated; "not `codex
+    sandboxing`" (the corrected framing above) is not replaced by "pm-guard
+    and packet-gate instead" for this specific failure mode — both of those
+    are real mechanisms for the different things they actually check, but
+    neither is a backstop for a sol-PM session's direct repo write, and this
+    document should not imply otherwise.
 - **A missing `packet:` line is not detectable.** E2ⓑ only fires when the
   task file's content actually contains a `packet:` line — if whoever drops
   a packet-derived task simply forgets to write that line, nothing here
