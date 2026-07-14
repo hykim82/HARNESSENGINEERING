@@ -2865,3 +2865,59 @@ hidden block is exactly what R3 rules out.
   automatically — no CI file edit needed, confirmed by
   `selfcheck-inventory.mjs`'s own `ci-enforce` judgment reporting 20
   discovered suites (up from 19) after this file was added.
+
+## D — report-style-guard (PreToolUse hook, HYK-143)
+
+### Problem restated
+
+A human-facing "report tone" style guide (control-room
+`orchestrator-report-style.md`) was introduced. That guide is for how ORCH
+reports to the human — it must not leak into worker *work documents* (task
+files, templates, memory), where a report skeleton would derail the machine
+relay. `scripts/check/report-style-guard.mjs` is a `PreToolUse` guard, same
+substrate as `role-guard`, that blocks a Write/Edit carrying report-tone
+signatures into a watched work-document path.
+
+### Rule
+
+- Watched paths only (all other writes pass untouched): repo
+  `.harness/<role>-task.md`, `templates/**`, control-room `PM/relay/*-task.md`,
+  and any path containing `/memory/`. Path normalization reuses
+  `path-normalize.mjs`.
+- Signature A (guide copied): a markdown **heading** whose text contains the
+  guide's title `기술 답변 톤` or its slug `orchestrator-report-style`.
+- Signature B (report skeleton): the tokens `결론`, `진단`, and `정직 한계`
+  **all** present as structural items (heading / numbered / bold), not as bare
+  prose. Any two of three, or prose use of the words, passes.
+- Confirmed match → exit 2 (block, naming the signature and line). Non-watched
+  path or non-write tool → exit 0. Malformed/absent hook payload or non-string
+  content → exit 0 (UNJUDGABLE, fail-open — HYK-129 G3 house convention).
+
+### Known limitation (honesty note)
+
+- **Claude-only, and only once wired.** Like `role-guard`, this is a Claude
+  Code `PreToolUse` hook: it does not see codex-worker edits or manual file
+  edits, and it has **no effect at all until wired** into
+  `.claude/settings.local.json`. Per the HYK-143 task, that wiring is
+  deferred to a post-merge ORCH self-config under human approval (HYK-115
+  precedent); until then the guard is "ALIVE via script+test" in the manifest
+  but enforces nothing.
+- **Signature-based, so variant phrasings evade it.** It keys on the guide's
+  exact title/slug heading and the exact three skeleton tokens. A paraphrased
+  tone leak, a translated heading, or a differently-named skeleton is not
+  detected. It is a tripwire for the obvious copy/paste, not a semantic judge.
+- **Deliberate §2A honesty adjustment.** The task contract phrased signature A
+  as "the `기술 답변 톤` heading **or** the `orchestrator-report-style`
+  string." A literal "slug string anywhere" match is unusable: the HYK-143
+  task file itself quotes the bare slug in its §2A spec text and cites the
+  `orchestrator-report-style.md` filename, and that same task file is listed
+  as known-good (must pass). So the slug is matched only in **heading** form —
+  a filename citation or a prose/backtick mention (a reference, not a tone
+  leak) passes, while a document titled with the guide's slug is caught. Real
+  guide copies also carry the `기술 답변 톤` title heading, which A catches
+  independently.
+- Self-registered in `scripts/check/enforcement-inventory.json` as
+  `report-style-guard` (`claude-hook` substrate, `install_targets: []` until
+  wiring, `claude_only: true`), same "ALIVE via script+test existence" posture
+  as `role-guard`. The `enforce.yml` directory glob picks up
+  `report-style-guard.test.mjs` with no CI edit.
