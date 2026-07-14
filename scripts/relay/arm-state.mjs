@@ -699,41 +699,52 @@ const OUTCOME_DISARM_CAUSE = {
   rejected: DISARM_CAUSE.ERROR,
 };
 
-export function start(store, opts) {
+// coder-1 (HYK-139 G3): CLAIMED->RUNNING 전이까지의 순수 검증·마커획득·TOCTOU 재확인을
+// spawnFn 호출과 분리한다. spawnFn은 여기서 절대 호출하지 않는다 -- startTx가 이 결과를
+// **디스크에 저장한 후에만** spawn을 호출해 I2("선저장 후 정확 1회")를 만족시킨다
+// (review-6 ①/R6-1: 이전엔 pure start()가 spawn까지 동기 수행한 뒤에야 caller가 저장했다 --
+// 저장 실패 시에도 실제 spawn은 이미 발생해 있었다). start()는 direct-call(테스트 등, 디스크
+// 저장 없이 순수 함수로만 쓰는 경우)을 위해 이 결과에 이어 spawn까지 동기 수행한다.
+function beginRunning(store, opts) {
   const dn = normalizeDeps(opts);
-  if (!dn.ok) return { ok: false, spawned: false, persist_required: false, reason: `arm-state: ${dn.reason}`, store };
+  if (!dn.ok) return { ready: false, ok: false, persist_required: false, reason: `arm-state: ${dn.reason}`, store };
   const deps = dn.deps;
   const dir = deps.dir;
   const o = isPlainObject(opts) ? opts : {};
   const { task_id, attempt_id, at } = o;
 
   const dec = decodeStore(store);
-  if (!dec.ok) return buildCorruptResult(store, at, dec.reason, { spawned: false });
+  if (!dec.ok) return { ready: false, ...buildCorruptResult(store, at, dec.reason, { spawned: false }) };
   const canon = dec.canon;
 
   const bound = verifyClaimBinding(canon.persistable, { dir, task_id, attempt_id }, opts);
   if (!bound.ok) {
-    if (bound.corrupt) return { ok: false, spawned: false, persist_required: true, reason: bound.reason, store: disarmFrom(canon.persistable, at, DISARM_CAUSE.STATE_CORRUPT) };
-    if (bound.mismatch) return { ok: false, spawned: false, persist_required: true, reason: bound.reason, store: disarmFrom(canon.persistable, at, DISARM_CAUSE.ID_MISMATCH) };
-    return { ok: false, spawned: false, persist_required: false, reason: bound.reason, store: canon.persistable };
+    if (bound.corrupt) return { ready: false, ok: false, persist_required: true, reason: bound.reason, store: disarmFrom(canon.persistable, at, DISARM_CAUSE.STATE_CORRUPT) };
+    if (bound.mismatch) return { ready: false, ok: false, persist_required: true, reason: bound.reason, store: disarmFrom(canon.persistable, at, DISARM_CAUSE.ID_MISMATCH) };
+    return { ready: false, ok: false, persist_required: false, reason: bound.reason, store: canon.persistable };
   }
 
   if (!canTransition(canon.state, STATE.RUNNING)) {
-    return { ok: false, spawned: false, persist_required: false, reason: `arm-state: illegal transition ${canon.state} -> RUNNING`, store: canon.persistable };
+    return { ready: false, ok: false, persist_required: false, reason: `arm-state: illegal transition ${canon.state} -> RUNNING`, store: canon.persistable };
   }
 
   const sm = acquireStartMarker(dir, { arm_id: canon.grant.arm_id, task_id, attempt_id, at }, { writeFn: deps.writeFn });
-  if (!sm.won) return { ok: false, spawned: false, persist_required: false, reason: sm.reason, store: canon.persistable };
+  if (!sm.won) return { ready: false, ok: false, persist_required: false, reason: sm.reason, store: canon.persistable };
 
   // TOCTOU: spawn 직전 재검증(I3). marker 삭제/변조 시 spawn 0·disarm.
   const reverify = verifyClaimBinding(canon.persistable, { dir, task_id, attempt_id }, opts);
   if (!reverify.ok) {
     const cause = reverify.corrupt ? DISARM_CAUSE.STATE_CORRUPT : DISARM_CAUSE.ID_MISMATCH;
-    return { ok: false, spawned: false, persist_required: true, reason: `arm-state: TOCTOU -- claim marker changed before spawn (${reverify.reason})`, store: disarmFrom(canon.persistable, at, cause) };
+    return { ready: false, ok: false, persist_required: true, reason: `arm-state: TOCTOU -- claim marker changed before spawn (${reverify.reason})`, store: disarmFrom(canon.persistable, at, cause) };
   }
 
   const running = { ...canon.persistable, state: STATE.RUNNING, updated_at: at ?? null, receipts: [...canon.persistable.receipts, { at: at ?? null, event: "running", task_id, attempt_id }] };
+  return { ready: true, persist_required: true, store: running };
+}
 
+// spawnFn 호출 + throw 시 startup_failure disarm 구성(저장은 caller 책임 -- start()는 즉시
+// 반환값에 담고, startTx는 별도 원자 저장을 한 번 더 수행한다).
+function runSpawn(running, deps, { task_id, attempt_id, at, dir }) {
   try {
     deps.spawnFn({ task_id, attempt_id });
   } catch (err) {
@@ -745,8 +756,18 @@ export function start(store, opts) {
     }
     return { ok: false, spawned: false, persist_required: true, reason: `arm-state: spawnFn threw -- startup_failure (${errText(err)})`, store: finalStore };
   }
-
   return { ok: true, spawned: true, persist_required: true, store: running };
+}
+
+export function start(store, opts) {
+  const begun = beginRunning(store, opts);
+  if (!begun.ready) return { ok: begun.ok === true, spawned: false, persist_required: begun.persist_required, reason: begun.reason, store: begun.store };
+  const dn = normalizeDeps(opts); // already validated by beginRunning
+  const deps = dn.deps;
+  const dir = deps.dir;
+  const o = isPlainObject(opts) ? opts : {};
+  const { task_id, attempt_id, at } = o;
+  return runSpawn(begun.store, deps, { task_id, attempt_id, at, dir });
 }
 
 export function finishAttempt(store, opts) {
@@ -1119,12 +1140,33 @@ export function startTx(dir, arm_id, sel, opts) {
     if (loaded.store.grant.arm_id !== arm_id) {
       return { ok: false, spawned: false, reason: `arm-state: path binding mismatch -- store at arm '${arm_id}' carries grant.arm_id '${loaded.store.grant.arm_id}'` };
     }
-    const result = start(loaded.store, { ...(isPlainObject(opts) ? opts : {}), ...s, dir });
-    if (result.persist_required || result.ok) {
-      const saved = saveStoreAtomic(storePath, result.store, deps);
-      if (!saved.ok) return { ok: false, spawned: false, reason: `arm-state: fail-closed -- ${saved.reason}` };
+    // R6-1 (review-6 ①, HYK-139 §계약1/2): beginRunning()은 spawnFn을 호출하지 않는다 --
+    // RUNNING 전이+running receipt를 여기서 먼저 원자 저장하고, 그 저장이 성공한 "후에만"
+    // spawn을 호출한다. 저장 실패 시 spawnFn은 호출조차 되지 않는다(위장 성공 0).
+    const txOpts = { ...(isPlainObject(opts) ? opts : {}), ...s, dir };
+    const begun = beginRunning(loaded.store, txOpts);
+    if (!begun.ready) {
+      if (begun.persist_required) {
+        const saved = saveStoreAtomic(storePath, begun.store, deps);
+        if (!saved.ok) return { ok: false, spawned: false, reason: `arm-state: fail-closed -- ${saved.reason}` };
+      }
+      return { ok: begun.ok === true, spawned: false, reason: begun.reason, store: begun.store };
     }
-    return result;
+    const runningSaved = saveStoreAtomic(storePath, begun.store, deps);
+    if (!runningSaved.ok) {
+      return { ok: false, spawned: false, reason: `arm-state: fail-closed -- ${runningSaved.reason} (RUNNING not persisted, spawn not attempted)` };
+    }
+    // crash-window honesty (HYK-139 §계약3, 리서치 §3-2): 위 저장 성공과 아래 spawnFn 호출
+    // 사이 crash 창이 원리상 존재한다 -- 그때 디스크는 RUNNING인데 실제 spawn은 0(orphan
+    // RUNNING). 이 orphan의 복구(heartbeat/timeout 재클레임 등)는 그룹4(restart/복구) 소유 --
+    // 여기서는 창의 존재만 정직 표기하고 복구 로직은 구현하지 않는다(표면 밖).
+    const spawnResult = runSpawn(begun.store, deps, { task_id: s.task_id, attempt_id: s.attempt_id, at: s.at, dir });
+    if (spawnResult.persist_required && !spawnResult.ok) {
+      // spawn threw -> persist the startup_failure disarm as a second atomic save.
+      const failSaved = saveStoreAtomic(storePath, spawnResult.store, deps);
+      if (!failSaved.ok) return { ok: false, spawned: false, reason: `arm-state: fail-closed -- ${failSaved.reason}`, store: spawnResult.store };
+    }
+    return spawnResult;
   };
   let result;
   try {

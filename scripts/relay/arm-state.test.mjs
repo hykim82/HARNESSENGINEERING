@@ -1913,6 +1913,75 @@ test("R6-6-fc: release failure is surfaced fail-closed via the deps seam, and cl
   }
 });
 
+// ===========================================================================
+// HYK-139 그룹3 (review-6 ① = R6-1): 저장 후 spawn 결속.
+// ===========================================================================
+
+// R6-1 (review-6 ①, HYK-139 §계약1/2): startTx는 RUNNING 전이+running receipt를 원자
+// 저장한 "후에만" spawnFn을 호출해야 한다. 이 저장이 실패하면 spawnFn은 절대 호출되지
+// 않아야 한다(위장 성공 0) -- 수리 전에는 pure start()가 spawn까지 동기 수행한 뒤에야
+// caller가 저장을 시도했으므로, 저장이 실패해도 실제 spawn은 이미 발생해 있었다(phantom
+// spawn: 디스크는 CLAIMED로 남는데 실제 프로세스는 이미 떠 있는 상태).
+test("R6-1: startTx persists RUNNING before calling spawnFn -- a failing store save means spawnFn is never called", () => {
+  const dir = freshDir();
+  try {
+    const arm_id = "arm-save-before-spawn";
+    seedArmStore(dir, arm_id, { taskIds: ["task-0"], maxTotal: 1, maxPerLane: 1 });
+    const task = { task_id: "task-0", lane: "coder", cycle_id: "cycle-1", attempt_id: "att", content_hash: "h", at: "t" };
+    const claimed = mod.claimTx(dir, arm_id, task, { nowFn: NOW_OK });
+    assert.equal(claimed.ok, true, "claim must succeed before we can test start");
+
+    let spawnCalls = 0;
+    const failRunningWrite = (p, c) => {
+      if (String(p).includes(".store.json")) throw new Error("simulated disk full on RUNNING save");
+      return writeFileSync(p, c, "utf8");
+    };
+    const s = mod.startTx(dir, arm_id, { task_id: "task-0", attempt_id: "att", at: "t2" }, {
+      nowFn: NOW_OK,
+      writeFileFn: failRunningWrite,
+      spawnFn: () => { spawnCalls++; },
+    });
+    assert.equal(s.ok, false);
+    assert.equal(s.spawned, false);
+    assert.match(s.reason, /fail-closed/);
+    assert.equal(spawnCalls, 0, "spawnFn must never be called when the RUNNING save fails");
+
+    // disk must still show the pre-start CLAIMED state (no phantom RUNNING, no phantom spawn).
+    const disk = loadStore(mod.armStorePath(dir, arm_id));
+    assert.equal(disk.ok, true);
+    assert.equal(disk.store.state, STATE.CLAIMED, "disk must remain CLAIMED -- the failed RUNNING save must not be silently accepted");
+  } finally {
+    cleanup(dir);
+  }
+});
+
+// R6-1b: the success path -- spawnFn is called only after the RUNNING save actually lands
+// on disk, and the disk shows RUNNING (with the running receipt) at the moment of spawn.
+test("R6-1b: startTx success path -- RUNNING is on disk strictly before spawnFn observes it", () => {
+  const dir = freshDir();
+  try {
+    const arm_id = "arm-save-before-spawn-ok";
+    seedArmStore(dir, arm_id, { taskIds: ["task-0"], maxTotal: 1, maxPerLane: 1 });
+    const task = { task_id: "task-0", lane: "coder", cycle_id: "cycle-1", attempt_id: "att", content_hash: "h", at: "t" };
+    const claimed = mod.claimTx(dir, arm_id, task, { nowFn: NOW_OK });
+    assert.equal(claimed.ok, true);
+
+    let diskStateDuringSpawn = null;
+    const s = mod.startTx(dir, arm_id, { task_id: "task-0", attempt_id: "att", at: "t2" }, {
+      nowFn: NOW_OK,
+      spawnFn: () => {
+        // by the time spawnFn runs, the RUNNING transition must already be on disk.
+        diskStateDuringSpawn = loadStore(mod.armStorePath(dir, arm_id)).store.state;
+      },
+    });
+    assert.equal(s.ok, true);
+    assert.equal(s.spawned, true);
+    assert.equal(diskStateDuringSpawn, STATE.RUNNING, "RUNNING must be persisted before spawnFn runs, not after");
+  } finally {
+    cleanup(dir);
+  }
+});
+
 // ---------------------------------------------------------------------------
 // 입력 경계(①) 전수: 모든 export된 함수가 malformed 입력에 대해 throw 없이 fail-closed
 // 거부하는지. FUNCTION_CONTRACTS는 export를 순회해 대조하므로, 새 함수를 export하면서
