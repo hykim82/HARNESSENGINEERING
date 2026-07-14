@@ -1982,6 +1982,137 @@ test("R6-1b: startTx success path -- RUNNING is on disk strictly before spawnFn 
   }
 });
 
+// ===========================================================================
+// HYK-140 그룹4 사이클4A (review-6 ② 재적용): 모든 terminal 경로가 disk round-trip으로
+// 실제 영수증을 남기는지. finishAttempt/cancel/checkExpiry는 claimTx/startTx와 달리
+// Tx 래퍼가 없어 호출자가 commit()을 잊으면 반환 store만 DISARMED이고 디스크는 무영수증인
+// phantom disarm(그룹3 phantom spawn과 대칭)이 가능했다 -- finishAttemptTx/cancelTx/
+// checkExpiryTx 신설로 이 그룹의 표면(§계약1/2)을 닫는다.
+// ===========================================================================
+
+function seededClaimedArm(dir, arm_id, { outcomeReady } = {}) {
+  const task = { task_id: "task-0", lane: "coder", cycle_id: "cycle-1", attempt_id: "att", content_hash: "h", at: "t" };
+  seedArmStore(dir, arm_id, { taskIds: ["task-0"], maxTotal: 5, maxPerLane: 5 });
+  const claimed = mod.claimTx(dir, arm_id, task, { nowFn: NOW_OK });
+  assert.equal(claimed.ok, true, "setup: claim must succeed");
+  if (!outcomeReady) return;
+  const started = mod.startTx(dir, arm_id, { task_id: "task-0", attempt_id: "att", at: "t2" }, { nowFn: NOW_OK, spawnFn: () => {} });
+  assert.equal(started.ok, true, "setup: start must succeed");
+}
+
+for (const outcome of ["done", "question", "error", "rejected", "cli_abnormal_exit", "startup_failure"]) {
+  test(`R6-7 (finishAttemptTx round-trip): outcome '${outcome}' persists DISARMED + receipt to disk`, () => {
+    const dir = freshDir();
+    try {
+      const arm_id = `arm-finish-${outcome}`;
+      seededClaimedArm(dir, arm_id, { outcomeReady: true });
+      const r = mod.finishAttemptTx(dir, arm_id, { task_id: "task-0", attempt_id: "att", at: "t3", outcome }, { nowFn: NOW_OK });
+      assert.equal(r.ok, true, `finishAttemptTx('${outcome}') must succeed: ${r.reason}`);
+      const disk = loadStore(mod.armStorePath(dir, arm_id));
+      assert.equal(disk.ok, true);
+      assert.equal(disk.store.state, STATE.DISARMED, `disk must show DISARMED for outcome '${outcome}' -- no phantom disarm`);
+      assert.equal(disk.store.receipts.at(-1).event, "disarmed", "disarm receipt must be the last persisted receipt");
+      assert.ok(disk.store.receipts.some((rec) => rec.event === outcome), `an '${outcome}' receipt must be on disk`);
+    } finally {
+      cleanup(dir);
+    }
+  });
+}
+
+test("R6-7b (cancelTx round-trip): cancel persists DISARMED + cancelled receipt to disk", () => {
+  const dir = freshDir();
+  try {
+    const arm_id = "arm-cancel";
+    seededClaimedArm(dir, arm_id, { outcomeReady: false }); // cancel from CLAIMED (no start needed)
+    const r = mod.cancelTx(dir, arm_id, { at: "t2", reason: "human cancel" });
+    assert.equal(r.ok, true, `cancelTx must succeed: ${r.reason}`);
+    const disk = loadStore(mod.armStorePath(dir, arm_id));
+    assert.equal(disk.ok, true);
+    assert.equal(disk.store.state, STATE.DISARMED, "disk must show DISARMED after cancel -- no phantom disarm");
+    assert.equal(disk.store.disarm_cause, DISARM_CAUSE.CANCELLED);
+    assert.equal(disk.store.receipts.at(-1).event, "cancelled");
+  } finally {
+    cleanup(dir);
+  }
+});
+
+test("R6-7c (checkExpiryTx round-trip): expiry check persists DISARMED + expired cause to disk", () => {
+  const dir = freshDir();
+  try {
+    const arm_id = "arm-expiry";
+    seededClaimedArm(dir, arm_id, { outcomeReady: false });
+    // seedArmStore() grants expire at FUTURE_ISO (2026-07-14T12:00Z); NOW_EXPIRED (07:00Z) is
+    // relative to the *default* makeGrant() expiry (06:00Z) used elsewhere, not FUTURE_ISO --
+    // use a clock strictly after FUTURE_ISO so this arm is actually expired.
+    const NOW_PAST_FUTURE_ISO = () => Date.parse("2026-07-15T00:00:00.000Z");
+    const r = mod.checkExpiryTx(dir, arm_id, NOW_PAST_FUTURE_ISO, "t2");
+    assert.equal(r.ok, true, `checkExpiryTx must succeed: ${r.reason}`);
+    assert.equal(r.expired, true);
+    const disk = loadStore(mod.armStorePath(dir, arm_id));
+    assert.equal(disk.ok, true);
+    assert.equal(disk.store.state, STATE.DISARMED, "disk must show DISARMED after expiry -- no phantom disarm");
+    assert.equal(disk.store.disarm_cause, DISARM_CAUSE.EXPIRED);
+  } finally {
+    cleanup(dir);
+  }
+});
+
+test("R6-7d (checkExpiryTx round-trip): not-yet-expired arm is left untouched on disk (no spurious save)", () => {
+  const dir = freshDir();
+  try {
+    const arm_id = "arm-not-expired";
+    seededClaimedArm(dir, arm_id, { outcomeReady: false });
+    const before = loadStore(mod.armStorePath(dir, arm_id));
+    const r = mod.checkExpiryTx(dir, arm_id, NOW_OK, "t2");
+    assert.equal(r.ok, true);
+    assert.equal(r.expired, false);
+    const after = loadStore(mod.armStorePath(dir, arm_id));
+    assert.deepEqual(after.store, before.store, "a non-expired check must not mutate the on-disk store");
+  } finally {
+    cleanup(dir);
+  }
+});
+
+// R6-7f (전이표 계약3): an illegal transition (finishAttempt on a CLAIMED arm that never
+// RUNNING'd) must be refused on BOTH the return value and the disk -- no partial accept.
+test("R6-7f: finishAttemptTx refuses an illegal transition on both return and disk", () => {
+  const dir = freshDir();
+  try {
+    const arm_id = "arm-illegal-transition";
+    seededClaimedArm(dir, arm_id, { outcomeReady: false }); // CLAIMED, never started
+    const before = loadStore(mod.armStorePath(dir, arm_id));
+    const r = mod.finishAttemptTx(dir, arm_id, { task_id: "task-0", attempt_id: "att", at: "t3", outcome: "done" }, { nowFn: NOW_OK });
+    assert.equal(r.ok, false, "CLAIMED -> DONE is not in ALLOWED_TRANSITIONS (must go through RUNNING first)");
+    const after = loadStore(mod.armStorePath(dir, arm_id));
+    assert.deepEqual(after.store, before.store, "an illegal transition must not mutate the on-disk store either");
+  } finally {
+    cleanup(dir);
+  }
+});
+
+// R6-7e (phantom-disarm regression, mirrors R6-1's save-before-spawn proof for the
+// terminal side): a failing store save during finishAttemptTx must NOT report success --
+// disk stays CLAIMED/RUNNING, not silently accepted as DISARMED.
+test("R6-7e: finishAttemptTx is fail-closed when the disk save fails -- no phantom disarm", () => {
+  const dir = freshDir();
+  try {
+    const arm_id = "arm-finish-save-fail";
+    seededClaimedArm(dir, arm_id, { outcomeReady: true });
+    const failWrite = (p, c) => {
+      if (String(p).includes(".store.json")) throw new Error("simulated disk full on finishAttempt save");
+      return writeFileSync(p, c, "utf8");
+    };
+    const r = mod.finishAttemptTx(dir, arm_id, { task_id: "task-0", attempt_id: "att", at: "t3", outcome: "done" }, { nowFn: NOW_OK, writeFileFn: failWrite });
+    assert.equal(r.ok, false);
+    assert.match(r.reason, /fail-closed/);
+    const disk = loadStore(mod.armStorePath(dir, arm_id));
+    assert.equal(disk.ok, true);
+    assert.equal(disk.store.state, STATE.RUNNING, "disk must remain RUNNING -- a failed save must not be silently accepted as DISARMED");
+  } finally {
+    cleanup(dir);
+  }
+});
+
 // ---------------------------------------------------------------------------
 // 입력 경계(①) 전수: 모든 export된 함수가 malformed 입력에 대해 throw 없이 fail-closed
 // 거부하는지. FUNCTION_CONTRACTS는 export를 순회해 대조하므로, 새 함수를 export하면서
@@ -2079,6 +2210,18 @@ test("input-boundary: every exported function is covered by a malformed-input co
       startTx: () => {
         assert.equal(mod.startTx(dir, undefined, {}).ok, false);
         assert.equal(mod.startTx(dir, "arm-nostore", { task_id: "x", attempt_id: "y" }).ok, false);
+      },
+      finishAttemptTx: () => {
+        assert.equal(mod.finishAttemptTx(dir, undefined, {}).ok, false);
+        assert.equal(mod.finishAttemptTx(dir, "arm-nostore", { task_id: "x", attempt_id: "y", outcome: "done" }).ok, false);
+      },
+      cancelTx: () => {
+        assert.equal(mod.cancelTx(dir, undefined, {}).ok, false);
+        assert.equal(mod.cancelTx(dir, "arm-nostore", { at: "t" }).ok, false);
+      },
+      checkExpiryTx: () => {
+        assert.equal(mod.checkExpiryTx(dir, undefined, NOW_OK, "t").ok, false);
+        assert.equal(mod.checkExpiryTx(dir, "arm-nostore", NOW_OK, "t").ok, false);
       },
       armStorePath: () => {
         assert.equal(mod.armStorePath(null, null), null);

@@ -1177,3 +1177,150 @@ export function startTx(dir, arm_id, sel, opts) {
   }
   return annotateRelease(result, releaseArmMutex(mtx, deps));
 }
+
+// coder-1 (HYK-140 G4A, review-6 ② 재적용): claimTx/startTx는 arm mutex + 최신 디스크
+// store 아래에서 pure 함수를 호출하고 persist_required||ok일 때 반드시 saveStoreAtomic으로
+// 저장한다. finishAttempt/cancel/checkExpiry에는 이 보장이 없었다 -- 호출자가 직접
+// commit()/saveStoreAtomic을 잊지 않고 불러야만 disarm이 디스크에 남았고, 잊으면 반환
+// store만 DISARMED이고 디스크엔 무영수증인 **phantom disarm**(그룹3 phantom spawn과 대칭)이
+// 가능했다. 아래 세 Tx는 claimTx/startTx와 동일한 패턴(mutex+최신 로드+corrupt/경로 결속
+// 재확인+저장 후에만 결과 확정)으로 모든 terminal 경로에 review-6 ②를 재적용한다.
+
+// finishAttemptTx: RUNNING -> DONE/QUESTION_PAUSED/ERROR_PAUSED -> DISARMED 전이를
+// arm mutex + 최신 디스크 store로 직렬화하고, disarm 결과를 실제로 저장한다.
+export function finishAttemptTx(dir, arm_id, sel, opts) {
+  const dn = normalizeDeps({ ...(isPlainObject(opts) ? opts : {}), dir });
+  if (!dn.ok) return { ok: false, reason: `arm-state: ${dn.reason}` };
+  const deps = dn.deps;
+  if (!isNonEmptyString(arm_id)) return { ok: false, reason: "arm-state: arm_id must be a non-empty string" };
+  const storePath = armStorePathFn(dir, arm_id);
+  if (storePath === null) return { ok: false, reason: "arm-state: invalid dir/arm_id" };
+  const s = isPlainObject(sel) ? sel : {};
+
+  const mtx = acquireArmMutex(dir, arm_id, deps);
+  if (!mtx.ok) return { ok: false, reason: mtx.reason, paused: mtx.paused === true };
+  const underLock = () => {
+    const loaded = loadStore(storePath, { readFileFn: deps.readFileFn, existsFn: deps.existsFn });
+    if (!loaded.ok) {
+      // R6-2 (mirror of claimTx/startTx): checked persist of the corrupt-load disarm.
+      const corrupt = buildCorruptResult(loaded.raw, s.at, loaded.reason ?? "store corrupt");
+      if (corrupt.persist_required) {
+        const saved = saveStoreAtomic(storePath, corrupt.store, deps);
+        if (!saved.ok) {
+          return { ok: false, persist_required: true, reason: `arm-state: fail-closed -- corrupt-load disarm could not be persisted (${saved.reason}); on-disk store remains corrupt`, store: corrupt.store };
+        }
+      }
+      return corrupt;
+    }
+    if (!loaded.existed) return { ok: false, reason: "arm-state: no store on disk for this arm" };
+    // R6-3 (path binding), mirror of claimTx/startTx.
+    if (loaded.store.grant.arm_id !== arm_id) {
+      return { ok: false, reason: `arm-state: path binding mismatch -- store at arm '${arm_id}' carries grant.arm_id '${loaded.store.grant.arm_id}'` };
+    }
+    const result = finishAttempt(loaded.store, { ...(isPlainObject(opts) ? opts : {}), ...s, dir });
+    // R6-7 (review-6 ② 재적용): terminal 결과가 disarm(ok:true 또는 persist_required)이면
+    // 반드시 디스크에 저장 -- phantom disarm(반환만 DISARMED, 디스크 무영수증) 원천 차단.
+    if (result.persist_required || result.ok) {
+      const saved = saveStoreAtomic(storePath, result.store, deps);
+      if (!saved.ok) return { ok: false, reason: `arm-state: fail-closed -- ${saved.reason}` };
+    }
+    return result;
+  };
+  let result;
+  try {
+    result = underLock();
+  } catch (e) {
+    const rel = releaseArmMutex(mtx, deps);
+    return annotateRelease({ ok: false, reason: `arm-state: transaction body threw (${errText(e)})` }, rel);
+  }
+  return annotateRelease(result, releaseArmMutex(mtx, deps));
+}
+
+// cancelTx: 사람 취소를 arm mutex + 최신 디스크 store로 직렬화하고 실제 저장을 보장한다.
+export function cancelTx(dir, arm_id, opts) {
+  const dn = normalizeDeps({ ...(isPlainObject(opts) ? opts : {}), dir });
+  if (!dn.ok) return { ok: false, reason: `arm-state: ${dn.reason}` };
+  const deps = dn.deps;
+  if (!isNonEmptyString(arm_id)) return { ok: false, reason: "arm-state: arm_id must be a non-empty string" };
+  const storePath = armStorePathFn(dir, arm_id);
+  if (storePath === null) return { ok: false, reason: "arm-state: invalid dir/arm_id" };
+  const o = isPlainObject(opts) ? opts : {};
+
+  const mtx = acquireArmMutex(dir, arm_id, deps);
+  if (!mtx.ok) return { ok: false, reason: mtx.reason, paused: mtx.paused === true };
+  const underLock = () => {
+    const loaded = loadStore(storePath, { readFileFn: deps.readFileFn, existsFn: deps.existsFn });
+    if (!loaded.ok) {
+      const corrupt = buildCorruptResult(loaded.raw, o.at, loaded.reason ?? "store corrupt");
+      if (corrupt.persist_required) {
+        const saved = saveStoreAtomic(storePath, corrupt.store, deps);
+        if (!saved.ok) {
+          return { ok: false, persist_required: true, reason: `arm-state: fail-closed -- corrupt-load disarm could not be persisted (${saved.reason}); on-disk store remains corrupt`, store: corrupt.store };
+        }
+      }
+      return corrupt;
+    }
+    if (!loaded.existed) return { ok: false, reason: "arm-state: no store on disk for this arm" };
+    if (loaded.store.grant.arm_id !== arm_id) {
+      return { ok: false, reason: `arm-state: path binding mismatch -- store at arm '${arm_id}' carries grant.arm_id '${loaded.store.grant.arm_id}'` };
+    }
+    const result = cancel(loaded.store, o);
+    if (result.persist_required || result.ok) {
+      const saved = saveStoreAtomic(storePath, result.store, deps);
+      if (!saved.ok) return { ok: false, reason: `arm-state: fail-closed -- ${saved.reason}` };
+    }
+    return result;
+  };
+  let result;
+  try {
+    result = underLock();
+  } catch (e) {
+    const rel = releaseArmMutex(mtx, deps);
+    return annotateRelease({ ok: false, reason: `arm-state: transaction body threw (${errText(e)})` }, rel);
+  }
+  return annotateRelease(result, releaseArmMutex(mtx, deps));
+}
+
+// checkExpiryTx: 만료 검사·disarm을 arm mutex + 최신 디스크 store로 직렬화하고 실제 저장을 보장한다.
+export function checkExpiryTx(dir, arm_id, nowFn, at, opts) {
+  const dn = normalizeDeps({ ...(isPlainObject(opts) ? opts : {}), dir });
+  if (!dn.ok) return { ok: false, expired: false, reason: `arm-state: ${dn.reason}` };
+  const deps = dn.deps;
+  if (!isNonEmptyString(arm_id)) return { ok: false, expired: false, reason: "arm-state: arm_id must be a non-empty string" };
+  const storePath = armStorePathFn(dir, arm_id);
+  if (storePath === null) return { ok: false, expired: false, reason: "arm-state: invalid dir/arm_id" };
+
+  const mtx = acquireArmMutex(dir, arm_id, deps);
+  if (!mtx.ok) return { ok: false, expired: false, reason: mtx.reason, paused: mtx.paused === true };
+  const underLock = () => {
+    const loaded = loadStore(storePath, { readFileFn: deps.readFileFn, existsFn: deps.existsFn });
+    if (!loaded.ok) {
+      const corrupt = buildCorruptResult(loaded.raw, at, loaded.reason ?? "store corrupt", { expired: false });
+      if (corrupt.persist_required) {
+        const saved = saveStoreAtomic(storePath, corrupt.store, deps);
+        if (!saved.ok) {
+          return { ok: false, expired: false, persist_required: true, reason: `arm-state: fail-closed -- corrupt-load disarm could not be persisted (${saved.reason}); on-disk store remains corrupt`, store: corrupt.store };
+        }
+      }
+      return corrupt;
+    }
+    if (!loaded.existed) return { ok: false, expired: false, reason: "arm-state: no store on disk for this arm" };
+    if (loaded.store.grant.arm_id !== arm_id) {
+      return { ok: false, expired: false, reason: `arm-state: path binding mismatch -- store at arm '${arm_id}' carries grant.arm_id '${loaded.store.grant.arm_id}'` };
+    }
+    const result = checkExpiry(loaded.store, nowFn, at);
+    if (result.persist_required || result.ok) {
+      const saved = saveStoreAtomic(storePath, result.store, deps);
+      if (!saved.ok) return { ok: false, expired: false, reason: `arm-state: fail-closed -- ${saved.reason}` };
+    }
+    return result;
+  };
+  let result;
+  try {
+    result = underLock();
+  } catch (e) {
+    const rel = releaseArmMutex(mtx, deps);
+    return annotateRelease({ ok: false, expired: false, reason: `arm-state: transaction body threw (${errText(e)})` }, rel);
+  }
+  return annotateRelease(result, releaseArmMutex(mtx, deps));
+}
