@@ -581,9 +581,14 @@ Contents:
 - `harness-progress.template.md`: long-running progress template
 - `harness-metrics.template.md`: evaluation metric template
 - `model-routing.template.md`: model and engine routing template
-- `claude-orchestrator-prompt.template.md`: Claude Code Orchestrator startup prompt
-- `codex-verifier-prompt.template.md`: Codex Verifier startup prompt
-- `codex-reviewer-prompt.template.md`: Codex Reviewer startup prompt
+- `claude-orchestrator-prompt.template.md`: Claude Code Orchestrator startup
+  prompt — package contents only, not copied by `install.mjs`; pasted
+  directly into the terminal boot line (same posture as the PM-lane
+  templates below)
+- `codex-verifier-prompt.template.md`: Codex Verifier startup prompt —
+  package contents only, not copied by `install.mjs`
+- `codex-reviewer-prompt.template.md`: Codex Reviewer startup prompt —
+  package contents only, not copied by `install.mjs`
 - `handoff-packet.template.md`: Claude-to-Codex handoff format
 - `question-packet.template.md`: role-to-Orchestrator question format
 - `phase-handoff.template.md`: phase-boundary handoff for session rotation
