@@ -114,6 +114,11 @@ function deepFreeze(o) {
 
 // ---- 의존 함수 bag 정규화 (I3/I4, review-5 #3) ----
 // 진입 시 1회. 부재(undefined)면 기본값, 존재하되 함수가 아니면(null 등) 거부.
+// honesty (coder-2 §계약6-A, 선행리서치 D:\문서관리\하네스-관제실\PM\산출물\하네스\2026-07-14-hyk138-선행사례\리서치.md):
+// 이 `wx`(O_EXCL) 배타 쓰기의 원자성은 **로컬 파일시스템 전제**다. NFS·클라우드 동기화 폴더
+// (OneDrive 등)에서는 O_EXCL 원자성이 보장되지 않는다(proper-lockfile이 이 이유로 전 파일시스템에서
+// 원자인 mkdir 전략을 쓰는 근거). 우리 배치는 로컬 고정 디스크라 현재 무해 — 원격/동기화 폴더로
+// 이전 시 재검토 필요.
 function defaultExclusiveWrite(path, content) {
   writeFileSync(path, content, { flag: "wx" });
 }
@@ -857,6 +862,10 @@ export function recoverIncompleteClaim(store, opts) {
 }
 
 // ---- 영속화 ----
+// honesty (coder-2 §계약6-B): write(tmp)->rename은 이름공간 원자성만 준다 -- fsync 호출이
+// 없어 **전원단절급 크래시 내구성은 미보장**(디스크 반영 전 전원 끊기면 rename 이전 상태로
+// 되돌아갈 수 있음). 프로세스 크래시(kill -9 등, 파일시스템 자체는 살아있는 경우)까지는
+// rename의 이름공간 원자성으로 보장. fsync 추가는 이번 그룹 표면 밖 — 필요성 판단은 리뷰어 몫.
 export function saveStoreAtomic(path, store, opts) {
   const o = isPlainObject(opts) ? opts : {};
   const writeFileFn = typeof o.writeFileFn === "function" ? o.writeFileFn : writeFileSync;

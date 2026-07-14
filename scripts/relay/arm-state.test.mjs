@@ -175,7 +175,7 @@ ${BARRIER_WAIT_SRC}
   try {
     const mod = await import(workerData.modulePath);
     barrierWait(workerData.barrierBuffer, workerData.barrierCount);
-    const result = mod.claim(workerData.store, workerData.task, { dir: workerData.dir });
+    const result = mod.claim(workerData.store, workerData.task, { dir: workerData.dir, nowFn: () => workerData.nowMs });
     parentPort.postMessage({ ok: result.ok, spawnAllowed: result.spawnAllowed, reason: result.reason });
   } catch (err) {
     parentPort.postMessage({ ok: false, reason: 'worker error: ' + err.message });
@@ -198,8 +198,13 @@ ${BARRIER_WAIT_SRC}
 })();
 `;
 
-function claimInWorker(dir, store, task, barrierBuffer) {
-  return runInWorker(CLAIM_WORKER_SRC, { modulePath: ARM_STATE_MODULE_URL, dir, store, task, barrierBuffer, barrierCount: 2 });
+// G4-3 fix (frozen decidability restore, coder-2 §0): CLAIM_WORKER_SRC used the
+// real wall clock (no nowFn), so this test raced against makeGrant()'s fixed
+// expires_at (2026-07-14T06:00:00.000Z) -- a time bomb that flips the test to
+// permanently red once real time passes that instant. Same nowFn-injection
+// pattern as TX_WORKER_SRC (line ~221) to pin the worker's clock to NOW_OK().
+function claimInWorker(dir, store, task, barrierBuffer, nowMs = NOW_OK()) {
+  return runInWorker(CLAIM_WORKER_SRC, { modulePath: ARM_STATE_MODULE_URL, dir, store, task, barrierBuffer, barrierCount: 2, nowMs });
 }
 
 function startInWorker(dir, store, { task_id, attempt_id, at }, barrierBuffer) {
@@ -233,6 +238,29 @@ ${BARRIER_WAIT_SRC}
 
 function txWorker(dir, arm_id, task, nowMs, barrierBuffer, barrierCount, spawnBuffer) {
   return runInWorker(TX_WORKER_SRC, { modulePath: ARM_STATE_MODULE_URL, dir, arm_id, task, nowMs, barrierBuffer, barrierCount, spawnBuffer });
+}
+
+// coder-2 (계약 검증): claim-only oracle -- same barrier-synced race as TX_WORKER_SRC but
+// calls ONLY claimTx (never startTx), so admission/budget invariants are proven for the
+// claim action in isolation from start/spawn semantics.
+const CLAIM_ONLY_TX_WORKER_SRC = `
+const { parentPort, workerData } = require('node:worker_threads');
+${BARRIER_WAIT_SRC}
+(async () => {
+  try {
+    const mod = await import(workerData.modulePath);
+    barrierWait(workerData.barrierBuffer, workerData.barrierCount);
+    const opts = { nowFn: () => workerData.nowMs };
+    const c = mod.claimTx(workerData.dir, workerData.arm_id, workerData.task, opts);
+    parentPort.postMessage({ claimOk: c.ok === true, spawnAllowed: c.spawnAllowed === true });
+  } catch (err) {
+    parentPort.postMessage({ workerThrew: (err && typeof err.message === "string") ? err.message : String(err) });
+  }
+})();
+`;
+
+function claimOnlyTxWorker(dir, arm_id, task, nowMs, barrierBuffer, barrierCount) {
+  return runInWorker(CLAIM_ONLY_TX_WORKER_SRC, { modulePath: ARM_STATE_MODULE_URL, dir, arm_id, task, nowMs, barrierBuffer, barrierCount });
 }
 
 const FUTURE_ISO = "2026-07-14T12:00:00.000Z";
@@ -1504,6 +1532,88 @@ test("C6-PROP: arm-transaction invariants across N/K/L combos (real Workers, sha
   // record seed / case count / wall time for reproducibility (PM §2.3 / 관찰 항목).
   const ms = Date.now() - startedAt;
   console.log(`[C6-PROP] seed=${seed} cases=${casesRun} combos=${JSON.stringify(combos)} wall_ms=${ms}`);
+  assert.equal(casesRun, combos.length);
+});
+
+// coder-2 (계약 검증, 패킷 §4 그룹2): C6-RED-A/C6-PROP를 claim-only oracle로 재실행.
+// TX_WORKER_SRC/txWorker는 claimTx 성공 시 startTx까지 이어서 부른다(spawn 포함) --
+// 아래는 claimTx만 호출해 admission/예산 불변식을 start/spawn 의미론과 분리해 증명한다.
+// 오라클: admitted<=cap · persisted attempts=admitted · uncaught throw 0.
+// (C6-RED-E/F는 이미 claim()을 직접 호출하는 순수 함수 테스트라 claim-only이다 -- 변경 불필요.)
+test("C6-RED-A-CLAIM-ONLY: two DIFFERENT tasks racing one arm (max_starts_total=1), claimTx only -- exactly one admitted", async () => {
+  const dir = freshDir();
+  try {
+    const arm_id = "arm-race-claim-only";
+    seedArmStore(dir, arm_id, { taskIds: ["task-a", "task-b"], maxTotal: 1, maxPerLane: 1 });
+    const barrierBuffer = new SharedArrayBuffer(4);
+    const mkT = (id) => ({ task_id: id, lane: "coder", cycle_id: "cycle-1", attempt_id: `att-${id}`, content_hash: `h-${id}`, at: "t" });
+    const [a, b] = await Promise.all([
+      claimOnlyTxWorker(dir, arm_id, mkT("task-a"), TX_NOW_MS, barrierBuffer, 2),
+      claimOnlyTxWorker(dir, arm_id, mkT("task-b"), TX_NOW_MS, barrierBuffer, 2),
+    ]);
+    assert.ok(!a.workerThrew, `worker A threw: ${a.workerThrew}`);
+    assert.ok(!b.workerThrew, `worker B threw: ${b.workerThrew}`);
+    const admitted = [a, b].filter((r) => r.spawnAllowed).length;
+    assert.equal(admitted, 1, `arm cap=1 must admit exactly one claim, got ${admitted} (${JSON.stringify([a, b])})`);
+    const disk = loadStore(mod.armStorePath(dir, arm_id));
+    assert.equal(disk.ok, true);
+    assert.equal(disk.store.attempts_total, admitted, "persisted attempts_total must equal admitted claims");
+  } finally {
+    cleanup(dir);
+  }
+});
+
+test("C6-PROP-CLAIM: claim-only oracle across N/K/L combos (claimTx only, no startTx)", async () => {
+  const seed = 138138;
+  const rng = mulberry32(seed);
+  const startedAt = Date.now();
+  const curated = [
+    { N: 2, K: 1, L: 1 },
+    { N: 4, K: 2, L: 5 },
+    { N: 4, K: 5, L: 2 },
+    { N: 8, K: 3, L: 3 },
+    { N: 5, K: 0, L: 5 },
+    { N: 6, K: 6, L: 0 },
+  ];
+  const combos = [...curated];
+  for (let i = 0; i < 3; i++) {
+    const N = 2 + Math.floor(rng() * 7);
+    const K = Math.floor(rng() * (N + 1));
+    const L = Math.floor(rng() * (N + 1));
+    combos.push({ N, K, L });
+  }
+  let casesRun = 0;
+  for (const { N, K, L } of combos) {
+    const dir = freshDir();
+    try {
+      const arm_id = `arm-prop-claim-${N}-${K}-${L}-${casesRun}`;
+      const taskIds = Array.from({ length: N }, (_, i) => `task-${i}`);
+      seedArmStore(dir, arm_id, { taskIds, maxTotal: K, maxPerLane: L });
+      const barrierBuffer = new SharedArrayBuffer(4);
+      const workers = taskIds.map((id) =>
+        claimOnlyTxWorker(dir, arm_id, { task_id: id, lane: "coder", cycle_id: "cycle-1", attempt_id: `att-${id}`, content_hash: `h-${id}`, at: "t" }, TX_NOW_MS, barrierBuffer, N),
+      );
+      const results = await Promise.all(workers);
+      // oracle: uncaught throw 0.
+      for (const r of results) assert.ok(!r.workerThrew, `N=${N} K=${K} L=${L}: worker threw ${r.workerThrew}`);
+      const expectedAdmitted = K >= 1 && L >= 1 ? 1 : 0; // single-track + budget gate
+      const admitted = results.filter((r) => r.spawnAllowed).length;
+      // oracle: admitted <= cap (single-track bound of 1, and never exceeds budget gate).
+      assert.ok(admitted <= 1, `N=${N} K=${K} L=${L}: ${admitted} admitted (>1)`);
+      assert.equal(admitted, expectedAdmitted, `N=${N} K=${K} L=${L}: admitted ${admitted} != expected ${expectedAdmitted}`);
+      // oracle: persisted attempts == admitted (and thus <= cap).
+      const disk = loadStore(mod.armStorePath(dir, arm_id));
+      assert.equal(disk.ok, true, `N=${N} K=${K} L=${L}: disk store must reload`);
+      assert.equal(disk.store.attempts_total, admitted, `N=${N} K=${K} L=${L}: persisted attempts_total`);
+      assert.equal(disk.store.attempts_per_lane.coder ?? 0, admitted, `N=${N} K=${K} L=${L}: persisted lane counter`);
+      assert.ok(disk.store.attempts_total <= K, `N=${N} K=${K} L=${L}: attempts_total ${disk.store.attempts_total} > cap ${K}`);
+      casesRun++;
+    } finally {
+      cleanup(dir);
+    }
+  }
+  const ms = Date.now() - startedAt;
+  console.log(`[C6-PROP-CLAIM] seed=${seed} cases=${casesRun} combos=${JSON.stringify(combos)} wall_ms=${ms}`);
   assert.equal(casesRun, combos.length);
 });
 
