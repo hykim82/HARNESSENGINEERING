@@ -300,7 +300,7 @@ Given a `role` (e.g. `coder`) and a harness directory (default
 6. If the two ids differ, blocked: `handshake mismatch: task dropped '<taskId>' but result echoes '<resultId>' (stale or wrong task)`.
 7. Staleness is **fail-closed**: timing evidence is required, not optional.
    - If the task file has no `dropped_at:` header, blocked: `task file missing dropped_at header (required for staleness check)`.
-   - If `dropped_at:` does not parse as a KST timestamp (`YYYY-MM-DD HH:MM KST`), blocked: `task dropped_at not parseable: '<raw>' (need YYYY-MM-DD HH:MM KST)`.
+   - If `dropped_at:` does not parse as a KST timestamp (`YYYY-MM-DD HH:MM(:SS)? KST`), blocked: `task dropped_at not parseable: '<raw>' (need YYYY-MM-DD HH:MM KST)`.
    - If the result file has no `>>> DONE: ... @ <time>` line, blocked: `result missing ">>> DONE: ... @ <time KST>" line (required)`.
    - If that DONE timestamp does not parse, blocked: `result DONE timestamp not parseable: '<raw>'`.
    - If both parse and the DONE time is earlier than the drop time, blocked: `stale result: DONE (<doneAt>) predates task drop (<droppedAt>)`.
@@ -337,21 +337,29 @@ Orchestrator's own goodwill — left for a future revision.
   `node relay-handshake.mjs <role> [harnessDir]` exits `0` when `ok` and
   exits `1` with `reason` on stderr otherwise.
 - `parseKstTimestamp(str)` strips a trailing ` KST`, requires the remainder
-  to match `YYYY-MM-DD HH:MM` (space or `T` separator), and constructs a
-  `Date` with an explicit `+09:00` offset; anything that doesn't match that
-  shape returns `null` rather than throwing (it never crashes the caller).
-  The caller is what changed in this revision: `null` from either timestamp
-  now means "reject", not "skip the check" — see Rule step 7.
+  to match `YYYY-MM-DD HH:MM` with an optional `:SS` (space or `T`
+  separator), and constructs a `Date` with an explicit `+09:00` offset;
+  anything that doesn't match that shape returns `null` rather than throwing
+  (it never crashes the caller). Both `dropped_at:` and the `>>> DONE: ... @`
+  timestamp accept either form independently and identically — a task
+  dropped with seconds and a result reported without them (or vice versa)
+  still passes the staleness check on its merits. The caller is what changed
+  in an earlier revision: `null` from either timestamp now means "reject",
+  not "skip the check" — see Rule step 7.
 - `scripts/check/relay-handshake.test.mjs` is a fixture-based test suite
   (node's built-in test runner, `withFixtureDir` pattern from
-  `review-gate.test.mjs`), 11 cases: id match with DONE after the drop
+  `review-gate.test.mjs`), 15 cases: id match with DONE after the drop
   (passes); id mismatch; missing task_id echo; missing task_id header;
   missing result file; missing task file; a DONE timestamp that predates
-  `dropped_at` (stale, blocked); and the four fail-closed timing-evidence
+  `dropped_at` (stale, blocked); the four fail-closed timing-evidence
   cases — a matching id with no DONE line at all, a task with no
   `dropped_at:` header, an unparseable `dropped_at:`, and an unparseable DONE
-  timestamp (all four blocked). Fixtures live under a temp directory per
-  test; no real `.harness/` state is touched.
+  timestamp (all four blocked); and four `HH:MM(:SS)?` contract cases frozen
+  in HYK-142 6A — `dropped_at` with seconds (ok), DONE with seconds (ok),
+  both with seconds where the seconds themselves decide staleness (blocked,
+  1s apart), and a malformed single-digit seconds value (still rejected).
+  Fixtures live under a temp directory per test; no real `.harness/` state is
+  touched.
 
 ## Not over-engineered / solo-operable
 

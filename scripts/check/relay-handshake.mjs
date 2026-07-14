@@ -17,9 +17,9 @@ function repoRoot() {
 function parseKstTimestamp(str) {
   if (typeof str !== "string") return null;
   const cleaned = str.trim().replace(/\s*KST\s*$/i, "");
-  const match = cleaned.match(/^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2})$/);
+  const match = cleaned.match(/^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}(?::\d{2})?)$/);
   if (!match) return null;
-  const date = new Date(`${match[1]}T${match[2]}:00+09:00`);
+  const date = new Date(`${match[1]}T${match[2]}+09:00`);
   return Number.isNaN(date.getTime()) ? null : date;
 }
 

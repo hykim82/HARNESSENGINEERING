@@ -128,3 +128,46 @@ test("(k) id matches but DONE timestamp is not parseable -> blocked (fail-closed
     assert.match(result.reason, /DONE timestamp not parseable/);
   });
 });
+
+// --- HYK-142 6A: DONE parser `HH:MM(:SS)?` contract frozen --
+// dropped_at/DONE timestamps observed in real STATUS/task files sometimes
+// carry seconds (e.g. hooks that stamp `HH:MM:SS`) and sometimes don't --
+// both forms must parse identically; anything else must still fail-closed.
+
+test("(l) frozen: dropped_at with HH:MM:SS form -> ok", () => {
+  withFixtureDir((dir) => {
+    writeTask(dir, "coder", "task_id: HYK-1\ndropped_at: 2026-07-05 06:00:15 KST\n");
+    writeResult(dir, "coder", "task_id: HYK-1\n\n>>> DONE: CODER @ 2026-07-05 06:10 KST\n");
+    const result = checkRelayHandshake({ role: "coder", harnessDir: dir });
+    assert.equal(result.ok, true);
+  });
+});
+
+test("(m) frozen: DONE with HH:MM:SS form -> ok", () => {
+  withFixtureDir((dir) => {
+    writeTask(dir, "coder", "task_id: HYK-1\ndropped_at: 2026-07-05 06:00 KST\n");
+    writeResult(dir, "coder", "task_id: HYK-1\n\n>>> DONE: CODER @ 2026-07-05 06:10:45 KST\n");
+    const result = checkRelayHandshake({ role: "coder", harnessDir: dir });
+    assert.equal(result.ok, true);
+  });
+});
+
+test("(n) frozen: both dropped_at and DONE carry HH:MM:SS -> ok, and seconds are honored for staleness ordering", () => {
+  withFixtureDir((dir) => {
+    writeTask(dir, "coder", "task_id: HYK-1\ndropped_at: 2026-07-05 06:10:30 KST\n");
+    writeResult(dir, "coder", "task_id: HYK-1\n\n>>> DONE: CODER @ 2026-07-05 06:10:29 KST\n");
+    const result = checkRelayHandshake({ role: "coder", harnessDir: dir });
+    assert.equal(result.ok, false);
+    assert.match(result.reason, /stale result/);
+  });
+});
+
+test("(o) frozen: malformed seconds (single digit) still rejected", () => {
+  withFixtureDir((dir) => {
+    writeTask(dir, "coder", "task_id: HYK-1\ndropped_at: 2026-07-05 06:00:5 KST\n");
+    writeResult(dir, "coder", "task_id: HYK-1\n\n>>> DONE: CODER @ 2026-07-05 06:10 KST\n");
+    const result = checkRelayHandshake({ role: "coder", harnessDir: dir });
+    assert.equal(result.ok, false);
+    assert.match(result.reason, /dropped_at not parseable/);
+  });
+});
