@@ -24,8 +24,8 @@ jobs:
         with:
           node-version: 20
 
-      - name: check test suites (all scripts/check/*.test.mjs)
-        run: node --test scripts/check/*.test.mjs
+      - name: check test suites (scripts/check + scripts/relay *.test.mjs)
+        run: node --test scripts/check/*.test.mjs scripts/relay/*.test.mjs
 
       - name: hooks POSIX syntax check
         run: |
