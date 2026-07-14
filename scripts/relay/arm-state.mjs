@@ -815,6 +815,75 @@ export function finishAttempt(store, opts) {
   return { ok: true, persist_required: true, store: final };
 }
 
+// ---- question answer correlation (HYK-140 4B, 리서치 §2-2: Correlation Identifier +
+// idempotency "이미 소비됨"). 3중 키(task_id+attempt_id+question_id) 전부 일치해야
+// correlate되고, 일치한 답은 1회만 소비된다(재적용 거부). attempt_id가 키에 포함되므로
+// 이전 attempt의 답(stale)은 구조적으로 매칭되는 "question" receipt가 없어 거부된다.
+// 계약2(리서치 §2-2): 상관 성공해도 이 함수는 상태를 바꾸지 않는다(여전히 DISARMED) --
+// 재개는 새 arm에서만, 이 함수는 "답이 도착·상관됐다"는 사실만 receipt로 남긴다.
+function questionAnswerInputProblems(answer) {
+  if (!isPlainObject(answer)) return ["answer is not a plain object"];
+  const p = [];
+  for (const f of ["task_id", "attempt_id", "question_id"]) {
+    if (!Object.hasOwn(answer, f) || !isNonEmptyString(answer[f])) p.push(`answer.${f} must be an own non-empty string`);
+  }
+  return p;
+}
+
+// receipts를 뒤에서부터 순회(최신 우선), own-property 값만 비교(I3 -- .find/.some 대신
+// 인덱스 루프로 iterator/getter 신뢰 안 함).
+function findReceiptMatch(receipts, event, task_id, attempt_id, question_id) {
+  if (!Array.isArray(receipts)) return null;
+  for (let i = receipts.length - 1; i >= 0; i--) {
+    const r = receipts[i];
+    if (!isPlainObject(r)) continue;
+    if (r.event !== event || r.task_id !== task_id || r.attempt_id !== attempt_id) continue;
+    if (event === "question_answered") {
+      if (r.question_id === question_id) return r;
+    } else if (isPlainObject(r.detail) && r.detail.question_id === question_id) {
+      return r;
+    }
+  }
+  return null;
+}
+
+export function correlateQuestionAnswer(store, answer, opts) {
+  const o = isPlainObject(opts) ? opts : {};
+  const { at } = o;
+  const dec = decodeStore(store);
+  if (!dec.ok) return buildCorruptResult(store, at, dec.reason, { consumed: false });
+  const canon = dec.canon;
+
+  const ap = questionAnswerInputProblems(answer);
+  if (ap.length) return { ok: false, persist_required: false, consumed: false, reason: `arm-state: correlateQuestionAnswer input rejected -- ${ap.join("; ")}`, store: canon.persistable };
+
+  const { task_id, attempt_id, question_id } = answer;
+
+  // review-2 (HYK-140-coder-3 국소 수리): disarm_cause=QUESTION만으로는 불충분하다 --
+  // decodeStore는 state/disarm_cause 조합을 semantic corruption으로 거부하지 않으므로
+  // (그룹1 소유, 수정 금지) 위조된 ARMED store에 question cause+일치 receipt만 붙이면
+  // 계약3-ⓓ(상관 성공 후에도 DISARMED 유지)를 어기고 답이 소비될 수 있었다(review-2 직접
+  // 재현: ARMED+question cause -> ok:true·consumed:true·state:ARMED). state===DISARMED를
+  // 소비층(correlate)에서 직접 요구해 이 공격 경로를 닫는다 -- decoder 보강은 표면 밖(관찰).
+  if (canon.persistable.state !== STATE.DISARMED || canon.persistable.disarm_cause !== DISARM_CAUSE.QUESTION) {
+    return { ok: false, persist_required: false, consumed: false, reason: "arm-state: correlateQuestionAnswer refused -- arm is not in a QUESTION disarm state", store: canon.persistable };
+  }
+
+  if (findReceiptMatch(canon.persistable.receipts, "question_answered", task_id, attempt_id, question_id)) {
+    return { ok: false, persist_required: false, consumed: false, reason: "arm-state: correlateQuestionAnswer refused -- answer already consumed (one-time correlation)", store: canon.persistable };
+  }
+
+  if (!findReceiptMatch(canon.persistable.receipts, "question", task_id, attempt_id, question_id)) {
+    return { ok: false, persist_required: false, consumed: false, reason: "arm-state: correlateQuestionAnswer refused -- no matching question receipt for task_id/attempt_id/question_id (stale or unknown answer)", store: canon.persistable };
+  }
+
+  const next = {
+    ...canon.persistable,
+    receipts: [...canon.persistable.receipts, { at: at ?? null, event: "question_answered", task_id, attempt_id, question_id }],
+  };
+  return { ok: true, persist_required: true, consumed: true, reason: null, store: next };
+}
+
 export function cancel(store, opts) {
   const dn = normalizeDeps(opts);
   if (!dn.ok) return { ok: false, persist_required: false, reason: `arm-state: ${dn.reason}`, store };
@@ -1321,6 +1390,101 @@ export function checkExpiryTx(dir, arm_id, nowFn, at, opts) {
   } catch (e) {
     const rel = releaseArmMutex(mtx, deps);
     return annotateRelease({ ok: false, expired: false, reason: `arm-state: transaction body threw (${errText(e)})` }, rel);
+  }
+  return annotateRelease(result, releaseArmMutex(mtx, deps));
+}
+
+// recoverIncompleteClaimTx (HYK-140 4B): 그룹1 이래 recoverIncompleteClaim은 pure 함수로만
+// 존재했고(4A 이전 어떤 그룹도 arm mutex+최신 디스크 reload로 직렬화하지 않음) -- 종결 Tx
+// 3종과 동일하게 phantom disarm(반환만 DISARMED, 디스크 무영수증) 가능성이 있는 세 번째
+// 후보였다(리서치 §2-4). finishAttemptTx/cancelTx/checkExpiryTx와 동일한 패턴(mutex+최신
+// 로드+경로 결속 재확인+저장 후에만 결과 확정)으로 그 공백을 닫는다.
+export function recoverIncompleteClaimTx(dir, arm_id, sel, opts) {
+  const dn = normalizeDeps({ ...(isPlainObject(opts) ? opts : {}), dir });
+  if (!dn.ok) return { ok: false, reason: `arm-state: ${dn.reason}` };
+  const deps = dn.deps;
+  if (!isNonEmptyString(arm_id)) return { ok: false, reason: "arm-state: arm_id must be a non-empty string" };
+  const storePath = armStorePathFn(dir, arm_id);
+  if (storePath === null) return { ok: false, reason: "arm-state: invalid dir/arm_id" };
+  const s = isPlainObject(sel) ? sel : {};
+
+  const mtx = acquireArmMutex(dir, arm_id, deps);
+  if (!mtx.ok) return { ok: false, reason: mtx.reason, paused: mtx.paused === true };
+  const underLock = () => {
+    const loaded = loadStore(storePath, { readFileFn: deps.readFileFn, existsFn: deps.existsFn });
+    if (!loaded.ok) {
+      const corrupt = buildCorruptResult(loaded.raw, s.at, loaded.reason ?? "store corrupt");
+      if (corrupt.persist_required) {
+        const saved = saveStoreAtomic(storePath, corrupt.store, deps);
+        if (!saved.ok) {
+          return { ok: false, persist_required: true, reason: `arm-state: fail-closed -- corrupt-load disarm could not be persisted (${saved.reason}); on-disk store remains corrupt`, store: corrupt.store };
+        }
+      }
+      return corrupt;
+    }
+    if (!loaded.existed) return { ok: false, reason: "arm-state: no store on disk for this arm" };
+    if (loaded.store.grant.arm_id !== arm_id) {
+      return { ok: false, reason: `arm-state: path binding mismatch -- store at arm '${arm_id}' carries grant.arm_id '${loaded.store.grant.arm_id}'` };
+    }
+    const result = recoverIncompleteClaim(loaded.store, { ...(isPlainObject(opts) ? opts : {}), ...s, dir });
+    if (result.persist_required || result.ok) {
+      const saved = saveStoreAtomic(storePath, result.store, deps);
+      if (!saved.ok) return { ok: false, reason: `arm-state: fail-closed -- ${saved.reason}` };
+    }
+    return result;
+  };
+  let result;
+  try {
+    result = underLock();
+  } catch (e) {
+    const rel = releaseArmMutex(mtx, deps);
+    return annotateRelease({ ok: false, reason: `arm-state: transaction body threw (${errText(e)})` }, rel);
+  }
+  return annotateRelease(result, releaseArmMutex(mtx, deps));
+}
+
+// correlateQuestionAnswerTx (HYK-140 4B): question 상관·1회 소비를 arm mutex + 최신 디스크
+// store로 직렬화하고 실제 저장을 보장한다(계약4 -- 새 전이도 반드시 디스크 receipt).
+export function correlateQuestionAnswerTx(dir, arm_id, answer, opts) {
+  const dn = normalizeDeps({ ...(isPlainObject(opts) ? opts : {}), dir });
+  if (!dn.ok) return { ok: false, consumed: false, reason: `arm-state: ${dn.reason}` };
+  const deps = dn.deps;
+  if (!isNonEmptyString(arm_id)) return { ok: false, consumed: false, reason: "arm-state: arm_id must be a non-empty string" };
+  const storePath = armStorePathFn(dir, arm_id);
+  if (storePath === null) return { ok: false, consumed: false, reason: "arm-state: invalid dir/arm_id" };
+  const o = isPlainObject(opts) ? opts : {};
+
+  const mtx = acquireArmMutex(dir, arm_id, deps);
+  if (!mtx.ok) return { ok: false, consumed: false, reason: mtx.reason, paused: mtx.paused === true };
+  const underLock = () => {
+    const loaded = loadStore(storePath, { readFileFn: deps.readFileFn, existsFn: deps.existsFn });
+    if (!loaded.ok) {
+      const corrupt = buildCorruptResult(loaded.raw, o.at, loaded.reason ?? "store corrupt", { consumed: false });
+      if (corrupt.persist_required) {
+        const saved = saveStoreAtomic(storePath, corrupt.store, deps);
+        if (!saved.ok) {
+          return { ok: false, consumed: false, persist_required: true, reason: `arm-state: fail-closed -- corrupt-load disarm could not be persisted (${saved.reason}); on-disk store remains corrupt`, store: corrupt.store };
+        }
+      }
+      return corrupt;
+    }
+    if (!loaded.existed) return { ok: false, consumed: false, reason: "arm-state: no store on disk for this arm" };
+    if (loaded.store.grant.arm_id !== arm_id) {
+      return { ok: false, consumed: false, reason: `arm-state: path binding mismatch -- store at arm '${arm_id}' carries grant.arm_id '${loaded.store.grant.arm_id}'` };
+    }
+    const result = correlateQuestionAnswer(loaded.store, answer, { at: o.at });
+    if (result.persist_required || result.ok) {
+      const saved = saveStoreAtomic(storePath, result.store, deps);
+      if (!saved.ok) return { ok: false, consumed: false, reason: `arm-state: fail-closed -- ${saved.reason}` };
+    }
+    return result;
+  };
+  let result;
+  try {
+    result = underLock();
+  } catch (e) {
+    const rel = releaseArmMutex(mtx, deps);
+    return annotateRelease({ ok: false, consumed: false, reason: `arm-state: transaction body threw (${errText(e)})` }, rel);
   }
   return annotateRelease(result, releaseArmMutex(mtx, deps));
 }

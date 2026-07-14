@@ -1286,6 +1286,196 @@ test("G9-7: recover records needs_human_ack and preserves an existing result fil
   }
 });
 
+// ---------------------------------------------------------------------------
+// G10: question 상관 = task_id+attempt_id+question_id 3중 키 + 1회 소비
+// (HYK-140 4B, 리서치 §2-2 Correlation Identifier + idempotency)
+// ---------------------------------------------------------------------------
+
+function questionPausedArm(dir, arm_id, { question_id = "q1" } = {}) {
+  const task = { task_id: "task-0", lane: "coder", cycle_id: "cycle-1", attempt_id: "att-1", content_hash: "h", at: "t" };
+  seedArmStore(dir, arm_id, { taskIds: ["task-0"], maxTotal: 5, maxPerLane: 5 });
+  const claimed = mod.claimTx(dir, arm_id, task, { nowFn: NOW_OK });
+  assert.equal(claimed.ok, true, "setup: claim must succeed");
+  const started = mod.startTx(dir, arm_id, { task_id: "task-0", attempt_id: "att-1", at: "t2" }, { nowFn: NOW_OK, spawnFn: () => {} });
+  assert.equal(started.ok, true, "setup: start must succeed");
+  const finished = mod.finishAttemptTx(dir, arm_id, { task_id: "task-0", attempt_id: "att-1", at: "t3", outcome: "question", detail: { question_id } }, { nowFn: NOW_OK });
+  assert.equal(finished.ok, true, "setup: finishAttemptTx(question) must succeed");
+  return { task_id: "task-0", attempt_id: "att-1" };
+}
+
+test("G10-1: matching 3-key answer correlates exactly once (disk round-trip)", () => {
+  const dir = freshDir();
+  try {
+    const arm_id = "arm-q1";
+    const { task_id, attempt_id } = questionPausedArm(dir, arm_id, { question_id: "q1" });
+    const r = mod.correlateQuestionAnswerTx(dir, arm_id, { task_id, attempt_id, question_id: "q1" }, { at: "t4" });
+    assert.equal(r.ok, true, `correlateQuestionAnswerTx must succeed: ${r.reason}`);
+    assert.equal(r.consumed, true);
+    const disk = loadStore(mod.armStorePath(dir, arm_id));
+    assert.equal(disk.ok, true);
+    assert.equal(disk.store.receipts.at(-1).event, "question_answered", "answered receipt must be the last persisted receipt");
+    assert.equal(disk.store.state, STATE.DISARMED, "correlating an answer must not revive the arm -- resume needs a new arm");
+
+    const replay = mod.correlateQuestionAnswerTx(dir, arm_id, { task_id, attempt_id, question_id: "q1" }, { at: "t5" });
+    assert.equal(replay.ok, false, "the same answer must not be consumable twice");
+    assert.match(replay.reason, /already consumed/);
+  } finally {
+    cleanup(dir);
+  }
+});
+
+// generative sweep: correlation succeeds iff task_id, attempt_id AND question_id all
+// exactly match the recorded question receipt -- any single-field deviation (stale
+// attempt, wrong question, wrong task) must be refused. attempt_id is part of the key,
+// so an answer addressed to a *previous* attempt is structurally unmatchable (리서치 §2-2).
+test("G10-2 (property): correlation requires exact 3-key match; any single mismatch is refused (stale-answer)", () => {
+  const dir = freshDir();
+  try {
+    const arm_id = "arm-q2";
+    const { task_id, attempt_id } = questionPausedArm(dir, arm_id, { question_id: "q1" });
+    const variants = [
+      { label: "wrong task_id", answer: { task_id: "task-other", attempt_id, question_id: "q1" } },
+      { label: "stale attempt_id (previous attempt)", answer: { task_id, attempt_id: "att-0", question_id: "q1" } },
+      { label: "wrong question_id", answer: { task_id, attempt_id, question_id: "q-stale" } },
+      { label: "missing question_id", answer: { task_id, attempt_id } },
+    ];
+    for (const { label, answer } of variants) {
+      const before = loadStore(mod.armStorePath(dir, arm_id));
+      const r = mod.correlateQuestionAnswerTx(dir, arm_id, answer, { at: "tX" });
+      assert.equal(r.ok, false, `${label} must be refused`);
+      const after = loadStore(mod.armStorePath(dir, arm_id));
+      assert.deepEqual(after.store, before.store, `${label} must not mutate the on-disk store`);
+    }
+    // the genuinely matching answer still correlates after all the stale attempts above.
+    const good = mod.correlateQuestionAnswerTx(dir, arm_id, { task_id, attempt_id, question_id: "q1" }, { at: "tY" });
+    assert.equal(good.ok, true, `genuine answer must still correlate: ${good.reason}`);
+  } finally {
+    cleanup(dir);
+  }
+});
+
+// review-2 (HYK-140-coder-3, RED->GREEN): a forged store that carries an ARMED state
+// but a QUESTION disarm_cause + matching question receipt (decodeStore does not treat
+// this combination as semantic corruption -- that decoder is group-1-owned and out of
+// this surface) must NOT correlate. Before the fix this returned {ok:true, consumed:true,
+// state:"ARMED"} -- a direct violation of contract 3-d (successful correlation must
+// leave the arm DISARMED). Regression pins state===DISARMED as a hard requirement in
+// the consuming layer (correlateQuestionAnswer), independent of disarm_cause.
+test("G10-4 (review-2 regression): ARMED state + QUESTION disarm_cause forgery is refused, no consumption", () => {
+  const grant = makeGrant();
+  const created = createArmStore(grant, { at: "t0" });
+  assert.equal(created.ok, true);
+  const forged = {
+    ...created.store,
+    disarm_cause: DISARM_CAUSE.QUESTION,
+    receipts: [{ at: "t1", event: "question", task_id: "task-0", attempt_id: "att-1", detail: { question_id: "q1" } }],
+  };
+  const r = mod.correlateQuestionAnswer(forged, { task_id: "task-0", attempt_id: "att-1", question_id: "q1" }, { at: "t2" });
+  assert.equal(r.ok, false, "ARMED state must refuse correlation even when disarm_cause says QUESTION");
+  assert.equal(r.consumed, false);
+  assert.equal(r.store.state, STATE.ARMED, "forged store must not be mutated by a refused correlation");
+});
+
+// Tx-level mirror: the same forgery reaching correlateQuestionAnswerTx must leave the
+// on-disk store byte-identical (no ARMED+answered receipt ever persisted).
+test("G10-5 (review-2 regression, Tx/disk): ARMED+QUESTION forgery reaching the Tx path leaves disk unchanged", () => {
+  const dir = freshDir();
+  const arm_id = "arm-forged-armed-question";
+  try {
+    const grant = makeGrant({ arm_id });
+    const created = createArmStore(grant, { at: "t0" });
+    assert.equal(created.ok, true);
+    const forged = {
+      ...created.store,
+      disarm_cause: DISARM_CAUSE.QUESTION,
+      receipts: [{ at: "t1", event: "question", task_id: "task-0", attempt_id: "att-1", detail: { question_id: "q1" } }],
+    };
+    const path = mod.armStorePath(dir, arm_id);
+    writeFileSync(path, JSON.stringify(forged, null, 2) + "\n", "utf8");
+    const before = readFileSync(path, "utf8");
+
+    const r = mod.correlateQuestionAnswerTx(dir, arm_id, { task_id: "task-0", attempt_id: "att-1", question_id: "q1" }, { at: "t2" });
+    assert.equal(r.ok, false);
+    assert.equal(r.consumed, false);
+
+    const after = readFileSync(path, "utf8");
+    assert.equal(after, before, "a refused forged-ARMED correlation must not touch the on-disk store");
+  } finally {
+    cleanup(dir);
+  }
+});
+
+test("G10-3: correlation is refused when the arm is not in a QUESTION disarm state", () => {
+  const dir = freshDir();
+  try {
+    const arm_id = "arm-q3";
+    const task = { task_id: "task-0", lane: "coder", cycle_id: "cycle-1", attempt_id: "att-1", content_hash: "h", at: "t" };
+    seedArmStore(dir, arm_id, { taskIds: ["task-0"], maxTotal: 5, maxPerLane: 5 });
+    mod.claimTx(dir, arm_id, task, { nowFn: NOW_OK });
+    mod.startTx(dir, arm_id, { task_id: "task-0", attempt_id: "att-1", at: "t2" }, { nowFn: NOW_OK, spawnFn: () => {} });
+    mod.finishAttemptTx(dir, arm_id, { task_id: "task-0", attempt_id: "att-1", at: "t3", outcome: "done" }, { nowFn: NOW_OK });
+    const r = mod.correlateQuestionAnswerTx(dir, arm_id, { task_id: "task-0", attempt_id: "att-1", question_id: "q1" }, { at: "t4" });
+    assert.equal(r.ok, false);
+    assert.match(r.reason, /not in a QUESTION disarm state/);
+  } finally {
+    cleanup(dir);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// G9-Tx: recoverIncompleteClaimTx -- arm mutex + 최신 디스크 store로 직렬화된 재시작
+// 복구(phantom-disarm 3번째 후보, 리서치 §2-4). pure recoverIncompleteClaim의 계약
+// (spawn 0·needs_human_ack true·해시 보존)이 Tx 경로에서도 그대로 디스크에 남아야 한다.
+// ---------------------------------------------------------------------------
+
+test("G9-Tx-1: recoverIncompleteClaimTx persists PAUSED/needs_human_ack to disk, no spawn", () => {
+  const dir = freshDir();
+  try {
+    const arm_id = "arm-recover-tx";
+    const task = { task_id: "task-0", lane: "coder", cycle_id: "cycle-1", attempt_id: "att-1", content_hash: "h", at: "t" };
+    seedArmStore(dir, arm_id, { taskIds: ["task-0"], maxTotal: 5, maxPerLane: 5 });
+    mod.claimTx(dir, arm_id, task, { nowFn: NOW_OK });
+    mod.startTx(dir, arm_id, { task_id: "task-0", attempt_id: "att-1", at: "t2" }, { nowFn: NOW_OK, spawnFn: () => {} });
+
+    const spawnLogFn = counter();
+    const r = mod.recoverIncompleteClaimTx(dir, arm_id, { task_id: "task-0", attempt_id: "att-1", at: "t3" }, { nowFn: NOW_OK, spawnLogFn });
+    assert.equal(r.ok, true, `recoverIncompleteClaimTx must succeed: ${r.reason}`);
+    assert.equal(spawnLogFn.count(), 1, "recovery must log the no-op, never spawn");
+
+    const disk = loadStore(mod.armStorePath(dir, arm_id));
+    assert.equal(disk.ok, true);
+    assert.equal(disk.store.state, STATE.DISARMED, "disk must show DISARMED -- no phantom disarm");
+    assert.equal(disk.store.disarm_cause, DISARM_CAUSE.INCOMPLETE_CLAIM_RESTART);
+    assert.equal(disk.store.needs_human_ack, true);
+  } finally {
+    cleanup(dir);
+  }
+});
+
+test("G9-Tx-2: recoverIncompleteClaimTx is fail-closed when the disk save fails -- no phantom disarm", () => {
+  const dir = freshDir();
+  try {
+    const arm_id = "arm-recover-tx-fail";
+    const task = { task_id: "task-0", lane: "coder", cycle_id: "cycle-1", attempt_id: "att-1", content_hash: "h", at: "t" };
+    seedArmStore(dir, arm_id, { taskIds: ["task-0"], maxTotal: 5, maxPerLane: 5 });
+    mod.claimTx(dir, arm_id, task, { nowFn: NOW_OK });
+    mod.startTx(dir, arm_id, { task_id: "task-0", attempt_id: "att-1", at: "t2" }, { nowFn: NOW_OK, spawnFn: () => {} });
+
+    const failWrite = (p, c) => {
+      if (String(p).includes(".store.json")) throw new Error("simulated disk full on recover save");
+      return writeFileSync(p, c, "utf8");
+    };
+    const r = mod.recoverIncompleteClaimTx(dir, arm_id, { task_id: "task-0", attempt_id: "att-1", at: "t3" }, { nowFn: NOW_OK, writeFileFn: failWrite });
+    assert.equal(r.ok, false);
+    assert.match(r.reason, /fail-closed/);
+    const disk = loadStore(mod.armStorePath(dir, arm_id));
+    assert.equal(disk.ok, true);
+    assert.equal(disk.store.state, STATE.RUNNING, "disk must remain RUNNING -- a failed save must not be silently accepted as recovered");
+  } finally {
+    cleanup(dir);
+  }
+});
+
 // ===========================================================================
 // C6 구조 전환 (PM 수렴진단 pm-3): review-5 6계열 frozen regression + arm 트랜잭션
 // property. 기대값은 reviewer-owned이며 이후 라운드에서 변경·삭제 금지.
@@ -2222,6 +2412,19 @@ test("input-boundary: every exported function is covered by a malformed-input co
       checkExpiryTx: () => {
         assert.equal(mod.checkExpiryTx(dir, undefined, NOW_OK, "t").ok, false);
         assert.equal(mod.checkExpiryTx(dir, "arm-nostore", NOW_OK, "t").ok, false);
+      },
+      recoverIncompleteClaimTx: () => {
+        assert.equal(mod.recoverIncompleteClaimTx(dir, undefined, {}).ok, false);
+        assert.equal(mod.recoverIncompleteClaimTx(dir, "arm-nostore", { task_id: "x", attempt_id: "y" }).ok, false);
+      },
+      correlateQuestionAnswer: () => {
+        assert.equal(mod.correlateQuestionAnswer(undefined, {}).ok, false);
+        assert.equal(mod.correlateQuestionAnswer(null, null).ok, false);
+        assert.equal(mod.correlateQuestionAnswer(validStore, {}).ok, false);
+      },
+      correlateQuestionAnswerTx: () => {
+        assert.equal(mod.correlateQuestionAnswerTx(dir, undefined, {}).ok, false);
+        assert.equal(mod.correlateQuestionAnswerTx(dir, "arm-nostore", { task_id: "x", attempt_id: "y", question_id: "q" }).ok, false);
       },
       armStorePath: () => {
         assert.equal(mod.armStorePath(null, null), null);
