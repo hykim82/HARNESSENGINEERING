@@ -73,12 +73,37 @@ test("PASS: only 2 of the 3 skeleton tokens present", () => {
 test("PASS: a gate-card citation", () => {
   assert.equal(status("게이트: RG1·RG2·RG8 준수. 한계: Tier2.\n").status, "PASS");
 });
-test("PASS: this very HYK-143 task file (cites orchestrator-report-style.md as a filename)", () => {
-  // known-good §5: the task file references the style guide's *filename* in prose/backticks
-  // and even quotes the slug in the §2A spec text -- neither is a leak, so it must pass.
-  const taskContent = readFileSync(join(ROOT, ".harness", "coder-task.md"), "utf8");
-  const r = status(taskContent);
-  assert.equal(r.status, "PASS", `this task file must be known-good, got: ${r.reason}`);
+test("PASS: a HYK-143-style task file (cites the guide slug/filename + prose skeleton words) is known-good", () => {
+  // known-good §5: an HYK-143-family task file references the style guide's *filename* in
+  // prose/backticks and even quotes the bare slug in its §2A spec text, AND uses the words
+  // 결론/진단/한계 in prose -- none of that is a leak, so it must pass.
+  //
+  // HYK-143-coder-3 (CI fix): this used to `readFileSync` the live `.harness/coder-task.md`,
+  // but `.harness/` is gitignored, so a clean CI checkout hit ENOENT (run 29305800475).
+  // The fixture below inlines the exact adversarial known-good properties of that task file
+  // (bare-slug backtick, `.md` filename citation, prose skeleton tokens, and a non-guide
+  // heading) so the test is environment-independent -- no real file read.
+  const taskFileFixture = [
+    "task_id: HYK-143-coder-1",
+    "게이트: 상시 S1·S3·S4(honesty note)",
+    "",
+    "# HYK-143 coder-1 — report-style-guard: 보고 형식의 작업 문서 유입 기계 차단",
+    "",
+    "## 배경",
+    "사람 대상 보고 톤 지침(관제실 `orchestrator-report-style.md`)이 도입됨. 이 보고 형식이",
+    "워커 태스크 파일로 새어 들어가는 것을 기계로 차단하라는 지시.",
+    "",
+    "## 계약",
+    "2. 차단 시그니처: A. 지침 자체 복사(`기술 답변 톤` 헤딩 또는 `orchestrator-report-style` 문자열),",
+    "   B. 5단 보고 골격 세트(`결론`·`진단`·`정직 한계`가 모두 구조 항목일 때만).",
+    "   ('한계'·'결론' 단어의 일반 산문 사용은 통과 — known-good로 증명.) 결론적으로 진단 결과 양호.",
+    "",
+    "## 상시",
+    "이번 한계는 Tier2. push·PR·커밋 금지.",
+    "",
+  ].join("\n");
+  const r = status(taskFileFixture);
+  assert.equal(r.status, "PASS", `an HYK-143-style task file must be known-good, got: ${r.reason}`);
 });
 test("PASS: a task merely naming orchestrator-report-style.md (filename citation) is not a copy", () => {
   assert.equal(status("배경: 관제실 `orchestrator-report-style.md` 지침 도입됨. 결론 단어는 여기 산문.\n").status, "PASS");
