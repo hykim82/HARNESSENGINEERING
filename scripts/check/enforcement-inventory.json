@@ -299,7 +299,10 @@
       "script": "scripts/check/packet-gate.mjs",
       "test": "scripts/check/packet-gate.test.mjs",
       "install_targets": [],
-      "source_reference_check": { "file": "scripts/check/role-guard.mjs", "pattern": "packet-gate.mjs" },
+      "source_reference_check": {
+        "file": "scripts/check/role-guard.mjs",
+        "pattern": "packet-gate.mjs"
+      },
       "expected_bad": "an unsigned packet (승인: ☐) or malformed signature line -> exit 1 standalone / role-guard.mjs surfaces it as part of its own exit 2 when ORCH drops a task file quoting that packet",
       "expected_good": "a signed packet (승인: OK <name> <timestamp>) -> exit 0",
       "failure_exit": 1,
@@ -337,6 +340,29 @@
       "claude_only": true,
       "self_registration_note": "HYK-143 사이클1 자기 등재, same convention as reject-streak/selfcheck-freshness above -- this checker audits its own manifest presence the same way it audits every other check.",
       "invocation_note": "PreToolUse hook (Write/Edit matcher), same substrate as role-guard. install_targets is [] until wiring: per HYK-143 task the .claude/settings.local.json edit is deferred to a post-merge ORCH self-config under human approval (HYK-115 precedent). Until wired the guard is ALIVE-via-script+test but has no enforcement effect (documented limitation in docs/enforcement-v1.md)."
+    },
+    {
+      "id": "quality-check",
+      "substrate": "git",
+      "script": "scripts/check/quality-check.mjs",
+      "test": "scripts/check/quality-check.test.mjs",
+      "install_targets": [
+        {
+          "location": "repo-git-hook",
+          "kind": "git-hook",
+          "versioned_path": "hooks/pre-commit",
+          "installed_path": ".git/hooks/pre-commit",
+          "required": true
+        }
+      ],
+      "expected_bad": "a file in the changed set (mode: staged = git diff --cached; mode: ci = injected base SHA...HEAD) has an ESLint Tier0/1/2 violation or fails `prettier --check` -> non-zero exit, chained into hooks/pre-commit after gitleaks (not replacing it) so the commit is blocked; the same gate mirrored in .github/workflows/enforce.yml blocks the PR/push even if --no-verify skipped the local hook",
+      "expected_good": "changed set is empty, or every changed .mjs/.js/.json/.md file is clean -> exit 0; files untouched by the change are never inspected -- the intended amnesty for this repo's pre-existing baseline (HYK-148 coder-2 measurement: 41 lint errors, 78/113 unformatted files)",
+      "failure_exit": 1,
+      "uncertain_exit": null,
+      "owner": "ORCH",
+      "claude_only": false,
+      "self_registration_note": "HYK-148 coder-3 self-registration, same convention as reject-streak/selfcheck-freshness/report-style-guard above.",
+      "ci_mirror_note": "This manifest's judgeEntry has no install_target 'kind' for a plain CI run: step (only the single ci-enforce entry gets that special-cased checkCiCoverage treatment) -- so only this entry's git-hook chain is wiring-checked here. What IS automatically covered: quality-check.test.mjs is picked up by ci-enforce's dynamic whole-directory glob check like every other scripts/check/*.test.mjs file. The quality:check run: step's own presence/correctness in enforce.yml is confirmed only by this cycle's manual smoke test (coder-3 receipt), not by an automated selfcheck category -- an honest gap, not silently claimed as covered."
     },
     {
       "id": "ci-enforce",

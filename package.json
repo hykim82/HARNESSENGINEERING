@@ -1,0 +1,13 @@
+{
+  "name": "harnessengineering",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "quality:check": "node scripts/check/quality-check.mjs"
+  },
+  "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "eslint": "10.7.0",
+    "prettier": "3.9.5"
+  }
+}
