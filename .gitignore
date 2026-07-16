@@ -3,3 +3,4 @@
 .env.local
 img/
 .claude/settings.local.json.bak-freshness
+node_modules/
