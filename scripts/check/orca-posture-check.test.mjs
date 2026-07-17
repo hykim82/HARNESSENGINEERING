@@ -399,17 +399,97 @@ test("(32) loadFingerprints: schema mismatch (no fingerprints array) -> malforme
   assert.deepEqual(r.fingerprints, []);
 });
 
-test("(33) loadFingerprints: drops malformed individual entries", () => {
+test("(33) loadFingerprints: one invalid entry fails the WHOLE file closed (no partial acceptance)", () => {
+  const path = "/harness/secret-fingerprints.json";
+  const goodSha = sha256Hex("synthetic-ok-value");
+  const r = loadFingerprints(path, {
+    existsFn: existsOnly([path]),
+    readFileFn: () =>
+      JSON.stringify({
+        fingerprints: [
+          { id: "ok", length: 18, sha256: goodSha },
+          { id: "bad" }, // missing length/sha256 entirely
+        ],
+      }),
+  });
+  assert.equal(r.malformed, true);
+  assert.deepEqual(r.fingerprints, []);
+});
+
+test("(36) loadFingerprints: review-2's exact negative control ({length:-1, sha256:'not-a-sha256'}) -> malformed, not a silent false OK", () => {
   const path = "/harness/secret-fingerprints.json";
   const r = loadFingerprints(path, {
     existsFn: existsOnly([path]),
     readFileFn: () =>
       JSON.stringify({
-        fingerprints: [{ id: "ok", length: 5, sha256: "abc" }, { id: "bad" }],
+        fingerprints: [{ id: "bot_pat", length: -1, sha256: "not-a-sha256" }],
       }),
   });
-  assert.equal(r.fingerprints.length, 1);
-  assert.equal(r.fingerprints[0].id, "ok");
+  assert.equal(r.malformed, true);
+  assert.deepEqual(r.fingerprints, []);
+});
+
+test("(37) loadFingerprints + checkTerminalHistorySecretScan end-to-end: corrupted fingerprint file -> UNJUDGABLE, never OK", () => {
+  const path = "/harness/secret-fingerprints.json";
+  const histDir = "/appdata/orca/terminal-history";
+  const existsFn = (p) => p === path || p === histDir;
+  const { fingerprints, malformed } = loadFingerprints(path, {
+    existsFn,
+    readFileFn: () =>
+      JSON.stringify({
+        fingerprints: [{ id: "bot_pat", length: -1, sha256: "not-a-sha256" }],
+      }),
+  });
+  assert.equal(malformed, true);
+  const scan = checkTerminalHistorySecretScan({
+    dir: histDir,
+    fingerprints,
+    existsFn,
+    readdirFn: () => ["session1.log"],
+    readFileFn: () =>
+      "any content at all, including 'not-a-sha256'-looking text",
+  });
+  assert.equal(scan.status, "UNJUDGABLE");
+});
+
+test("(38) loadFingerprints: multiple fully-valid entries all pass unchanged", () => {
+  const path = "/harness/secret-fingerprints.json";
+  const shaA = sha256Hex("synthetic-a");
+  const shaB = sha256Hex("synthetic-b");
+  const r = loadFingerprints(path, {
+    existsFn: existsOnly([path]),
+    readFileFn: () =>
+      JSON.stringify({
+        fingerprints: [
+          { id: "a", length: 11, sha256: shaA },
+          { id: "b", length: 11, sha256: shaB },
+        ],
+      }),
+  });
+  assert.equal(r.malformed, undefined);
+  assert.equal(r.fingerprints.length, 2);
+});
+
+test("(39) loadFingerprints: length 0 and non-integer length are both rejected (whole file malformed)", () => {
+  const path = "/harness/secret-fingerprints.json";
+  const goodSha = sha256Hex("synthetic-ok-value");
+  const zeroLen = loadFingerprints(path, {
+    existsFn: existsOnly([path]),
+    readFileFn: () =>
+      JSON.stringify({
+        fingerprints: [{ id: "x", length: 0, sha256: goodSha }],
+      }),
+  });
+  assert.equal(zeroLen.malformed, true);
+
+  const fractionalLen = loadFingerprints(path, {
+    existsFn: existsOnly([path]),
+    readFileFn: () =>
+      JSON.stringify({
+        fingerprints: [{ id: "x", length: 4.5, sha256: goodSha }],
+      }),
+  });
+  assert.equal(fractionalLen.malformed, true);
 });
 
 // ---- runFingerprintInit — the ONLY function allowed to read a real secret ---

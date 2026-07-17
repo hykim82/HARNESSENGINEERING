@@ -223,6 +223,26 @@ export function checkTerminalHistorySecretScan({
 // `fingerprint-init` 서브커맨드로 미리 생성해 둔 지문 전용 파일만 읽는다.
 // 그 파일에는 {id,length,sha256}만 있고 원문은 없다. `.harness/`는 이미
 // repo `.gitignore`(`.harness/`)로 커밋 경로에서 배제된다.
+//
+// review-2 R3 수리: 개별 항목 하나라도 스키마를 어기면(음수/0/비정수
+// length, 64자리 hex가 아닌 sha256) 그 항목만 조용히 걸러내지 않고 파일
+// 전체를 malformed 처리한다 -- 부분 수용은 손상된 지문 파일을 "정상"으로
+// 오인시켜 terminal-history-secret-scan이 거짓 OK를 낼 수 있다(REVIEW
+// negative control 실측: {length:-1, sha256:'not-a-sha256'} 혼재 시 이전
+// 구현은 그 항목만 버리고 나머지로 스캔을 "정상 동작"시켜 OK를 반환했다).
+const SHA256_HEX_RE = /^[a-f0-9]{64}$/i;
+
+function isValidFingerprintEntry(f) {
+  return (
+    f &&
+    typeof f.length === "number" &&
+    Number.isSafeInteger(f.length) &&
+    f.length > 0 &&
+    typeof f.sha256 === "string" &&
+    SHA256_HEX_RE.test(f.sha256)
+  );
+}
+
 export function loadFingerprints(
   fingerprintsPath,
   { existsFn = existsSync, readFileFn = (p) => readFileSync(p, "utf8") } = {},
@@ -240,10 +260,10 @@ export function loadFingerprints(
   if (!list) {
     return { fingerprints: [], present: true, malformed: true };
   }
-  const valid = list.filter(
-    (f) => f && typeof f.length === "number" && typeof f.sha256 === "string",
-  );
-  return { fingerprints: valid, present: true };
+  if (list.some((f) => !isValidFingerprintEntry(f))) {
+    return { fingerprints: [], present: true, malformed: true };
+  }
+  return { fingerprints: list, present: true };
 }
 
 // 실제 시크릿 원문을 읽는 이 모듈의 유일한 함수 -- 기본 체크 경로(위 3개
