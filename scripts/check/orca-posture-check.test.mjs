@@ -9,6 +9,8 @@ import {
   checkAutomationsPresent,
   checkTerminalHistorySecretScan,
   runOrcaPostureCheck,
+  loadFingerprints,
+  runFingerprintInit,
 } from "./orca-posture-check.mjs";
 
 const WS_PATH = "/home/.orca/linear-workspaces.json";
@@ -258,13 +260,15 @@ test("(24) terminal-history-secret-scan: readdir throws -> UNJUDGABLE", () => {
   assert.equal(r.status, "UNJUDGABLE");
 });
 
-// ---- runOrcaPostureCheck (조립점) ------------------------------------------
+// ---- runOrcaPostureCheck (조립점) — fingerprints는 항상 이미 로드된 배열로
+// 주입된다. review-1 R1 수리: 이 함수는 어떤 real secret path도 받지 않고,
+// 실제 파일시스템을 읽는 경로가 구조적으로 없다. ------------------------------
 
 test("(25) runOrcaPostureCheck returns all 3 ids, all-absent posture is all OK", () => {
   const results = runOrcaPostureCheck({
     orcaHome: "/home/.orca",
     appDataOrca: "/appdata/orca",
-    botPatPath: "/home/.bot_pat",
+    fingerprints: [],
     existsFn: existsOnly([]),
   });
   assert.deepEqual(
@@ -274,16 +278,15 @@ test("(25) runOrcaPostureCheck returns all 3 ids, all-absent posture is all OK",
   assert.ok(results.every((r) => r.status === "OK"));
 });
 
-test("(26) runOrcaPostureCheck end-to-end: .bot_pat leaked into terminal-history -> FAIL, secret never echoed", () => {
+test("(26) runOrcaPostureCheck end-to-end: leaked fingerprint found in terminal-history -> FAIL, secret never echoed", () => {
   const secret = "REAL-LOOKING-SYNTHETIC-PAT-VALUE";
+  const fp = secretFingerprint(secret);
   const orcaHome = join("/home", ".orca");
   const appDataOrca = join("/appdata", "orca");
   const histDir = join(appDataOrca, "terminal-history");
-  const botPatPath = join("/home", ".bot_pat");
-  const existsFn = existsOnly([histDir, botPatPath]);
+  const existsFn = existsOnly([histDir]);
   const readdirFn = (p) => (p === histDir ? ["session1.log"] : []);
   const readFileFn = (p) => {
-    if (p === botPatPath) return secret;
     if (p === join(histDir, "session1.log")) return `$ echo ${secret}\n`;
     throw new Error(`unexpected read: ${p}`);
   };
@@ -291,7 +294,7 @@ test("(26) runOrcaPostureCheck end-to-end: .bot_pat leaked into terminal-history
   const results = runOrcaPostureCheck({
     orcaHome,
     appDataOrca,
-    botPatPath,
+    fingerprints: [fp],
     existsFn,
     readFileFn,
     readdirFn,
@@ -302,16 +305,15 @@ test("(26) runOrcaPostureCheck end-to-end: .bot_pat leaked into terminal-history
   assert.equal(JSON.stringify(results).includes(secret), false);
 });
 
-test("(27) runOrcaPostureCheck end-to-end: .bot_pat present but no leak -> OK, injected fs fully isolates from the real filesystem", () => {
+test("(27) runOrcaPostureCheck end-to-end: fingerprint present but no leak -> OK, injected fs fully isolates from the real filesystem", () => {
   const secret = "REAL-LOOKING-SYNTHETIC-PAT-VALUE";
+  const fp = secretFingerprint(secret);
   const orcaHome = join("/home", ".orca");
   const appDataOrca = join("/appdata", "orca");
   const histDir = join(appDataOrca, "terminal-history");
-  const botPatPath = join("/home", ".bot_pat");
-  const existsFn = existsOnly([histDir, botPatPath]);
+  const existsFn = existsOnly([histDir]);
   const readdirFn = (p) => (p === histDir ? ["session1.log"] : []);
   const readFileFn = (p) => {
-    if (p === botPatPath) return secret;
     if (p === join(histDir, "session1.log"))
       return "$ git status\nnothing to commit\n";
     throw new Error(`unexpected read: ${p}`);
@@ -320,7 +322,7 @@ test("(27) runOrcaPostureCheck end-to-end: .bot_pat present but no leak -> OK, i
   const results = runOrcaPostureCheck({
     orcaHome,
     appDataOrca,
-    botPatPath,
+    fingerprints: [fp],
     existsFn,
     readFileFn,
     readdirFn,
@@ -328,4 +330,127 @@ test("(27) runOrcaPostureCheck end-to-end: .bot_pat present but no leak -> OK, i
 
   const scan = results.find((r) => r.id === "terminal-history-secret-scan");
   assert.equal(scan.status, "OK");
+});
+
+test("(28) runOrcaPostureCheck never receives/touches a real secret path -- fingerprints-only contract", () => {
+  // No botPatPath-shaped param exists on the function anymore; passing one
+  // is simply ignored (not a supported option) -- existsFn below throws only
+  // if ever called with that exact path, proving the default check path has
+  // no real-secret parameter it could read from at all.
+  const botPatPath = "/home/.bot_pat";
+  const results = runOrcaPostureCheck({
+    orcaHome: "/home/.orca",
+    appDataOrca: "/appdata/orca",
+    botPatPath, // dead param -- must be a no-op
+    fingerprints: [],
+    existsFn: (p) => {
+      if (p === botPatPath)
+        throw new Error(
+          "existsFn must never be called with the real secret path",
+        );
+      return false;
+    },
+  });
+  assert.ok(Array.isArray(results));
+});
+
+// ---- loadFingerprints --------------------------------------------------------
+
+test("(29) loadFingerprints: file absent -> present:false, empty list", () => {
+  const r = loadFingerprints("/harness/secret-fingerprints.json", {
+    existsFn: existsOnly([]),
+  });
+  assert.deepEqual(r, { fingerprints: [], present: false });
+});
+
+test("(30) loadFingerprints: valid file -> parsed fingerprints, never the raw value", () => {
+  const fp = secretFingerprint("synthetic-value-xyz");
+  const path = "/harness/secret-fingerprints.json";
+  const r = loadFingerprints(path, {
+    existsFn: existsOnly([path]),
+    readFileFn: () =>
+      JSON.stringify({
+        fingerprints: [{ id: "bot_pat", length: fp.length, sha256: fp.sha256 }],
+      }),
+  });
+  assert.equal(r.present, true);
+  assert.equal(r.fingerprints.length, 1);
+  assert.equal(r.fingerprints[0].sha256, fp.sha256);
+});
+
+test("(31) loadFingerprints: malformed JSON -> present:true, malformed:true, empty list", () => {
+  const path = "/harness/secret-fingerprints.json";
+  const r = loadFingerprints(path, {
+    existsFn: existsOnly([path]),
+    readFileFn: () => "{not json",
+  });
+  assert.equal(r.present, true);
+  assert.equal(r.malformed, true);
+  assert.deepEqual(r.fingerprints, []);
+});
+
+test("(32) loadFingerprints: schema mismatch (no fingerprints array) -> malformed, empty list", () => {
+  const path = "/harness/secret-fingerprints.json";
+  const r = loadFingerprints(path, {
+    existsFn: existsOnly([path]),
+    readFileFn: () => JSON.stringify({ other: 1 }),
+  });
+  assert.equal(r.malformed, true);
+  assert.deepEqual(r.fingerprints, []);
+});
+
+test("(33) loadFingerprints: drops malformed individual entries", () => {
+  const path = "/harness/secret-fingerprints.json";
+  const r = loadFingerprints(path, {
+    existsFn: existsOnly([path]),
+    readFileFn: () =>
+      JSON.stringify({
+        fingerprints: [{ id: "ok", length: 5, sha256: "abc" }, { id: "bad" }],
+      }),
+  });
+  assert.equal(r.fingerprints.length, 1);
+  assert.equal(r.fingerprints[0].id, "ok");
+});
+
+// ---- runFingerprintInit — the ONLY function allowed to read a real secret ---
+
+test("(34) runFingerprintInit: writes {id,length,sha256} only, never the raw value, for existing sources", () => {
+  const secret = "REAL-LOOKING-SYNTHETIC-PAT-VALUE";
+  const srcPath = "/home/.bot_pat";
+  const outPath = "/harness/secret-fingerprints.json";
+  let written = null;
+  const result = runFingerprintInit({
+    sources: [{ id: "bot_pat", path: srcPath }],
+    outPath,
+    existsFn: existsOnly([srcPath]),
+    readFileFn: () => secret,
+    writeFileFn: (p, content) => {
+      written = { path: p, content };
+    },
+  });
+  assert.equal(result.count, 1);
+  assert.equal(result.outPath, outPath);
+  assert.equal(written.path, outPath);
+  assert.equal(written.content.includes(secret), false);
+  const parsed = JSON.parse(written.content);
+  assert.equal(parsed.fingerprints[0].id, "bot_pat");
+  assert.equal(parsed.fingerprints[0].sha256, sha256Hex(secret));
+});
+
+test("(35) runFingerprintInit: absent source is skipped, not an error, no read attempted for it", () => {
+  const outPath = "/harness/secret-fingerprints.json";
+  let written = null;
+  const result = runFingerprintInit({
+    sources: [{ id: "bot_pat", path: "/home/.bot_pat" }],
+    outPath,
+    existsFn: existsOnly([]),
+    readFileFn: () => {
+      throw new Error("must not read a source that does not exist");
+    },
+    writeFileFn: (p, content) => {
+      written = { path: p, content };
+    },
+  });
+  assert.equal(result.count, 0);
+  assert.deepEqual(JSON.parse(written.content).fingerprints, []);
 });

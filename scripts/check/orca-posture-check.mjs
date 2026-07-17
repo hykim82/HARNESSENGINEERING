@@ -1,7 +1,8 @@
-import { readFileSync, existsSync, readdirSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, readdirSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { execSync } from "node:child_process";
 
 // HYK-155-coder-2: M0.5 전면 봉인 패킷(REV1)은 사람 결정으로 미서명 보류됐다
 // -- 이 모듈은 그 대신 사람이 채택한 "가벼운 보강 2종"의 ②다. 예방 게이트가
@@ -183,7 +184,7 @@ export function checkTerminalHistorySecretScan({
     return {
       status: "UNJUDGABLE",
       reason:
-        "비교할 시크릿 지문이 없음(.bot_pat 등 부재) -- 스캔 스킵, 판정 불가",
+        "비교할 시크릿 지문이 없음 -- 지문 파일 미생성(init 필요: `node scripts/check/orca-posture-check.mjs fingerprint-init`), 스캔 스킵, 판정 불가",
     };
   }
   let files;
@@ -217,28 +218,78 @@ export function checkTerminalHistorySecretScan({
   };
 }
 
+// ---- 지문 파일 (review-1 R1 수리) --------------------------------------------
+// 기본 체크 경로는 실제 시크릿을 절대 열지 않는다 -- 대신 사람이 별도
+// `fingerprint-init` 서브커맨드로 미리 생성해 둔 지문 전용 파일만 읽는다.
+// 그 파일에는 {id,length,sha256}만 있고 원문은 없다. `.harness/`는 이미
+// repo `.gitignore`(`.harness/`)로 커밋 경로에서 배제된다.
+export function loadFingerprints(
+  fingerprintsPath,
+  { existsFn = existsSync, readFileFn = (p) => readFileSync(p, "utf8") } = {},
+) {
+  if (!existsFn(fingerprintsPath)) {
+    return { fingerprints: [], present: false };
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(readFileFn(fingerprintsPath));
+  } catch {
+    return { fingerprints: [], present: true, malformed: true };
+  }
+  const list = Array.isArray(parsed?.fingerprints) ? parsed.fingerprints : null;
+  if (!list) {
+    return { fingerprints: [], present: true, malformed: true };
+  }
+  const valid = list.filter(
+    (f) => f && typeof f.length === "number" && typeof f.sha256 === "string",
+  );
+  return { fingerprints: valid, present: true };
+}
+
+// 실제 시크릿 원문을 읽는 이 모듈의 유일한 함수 -- 기본 체크 경로(위 3개
+// checkXxx + runOrcaPostureCheck)에서는 절대 호출되지 않고, CLI의
+// `fingerprint-init` 서브커맨드에서만 호출된다. 반환값·로그 어디에도 원문·
+// 해시를 담지 않는다(호출부가 개수/경로만 출력).
+export function runFingerprintInit({
+  sources,
+  outPath,
+  existsFn = existsSync,
+  readFileFn = (p) => readFileSync(p, "utf8"),
+  writeFileFn = (p, c) => writeFileSync(p, c, "utf8"),
+}) {
+  const fingerprints = [];
+  for (const src of sources) {
+    if (!existsFn(src.path)) continue;
+    const raw = readFileFn(src.path).trim();
+    const fp = secretFingerprint(raw);
+    if (fp)
+      fingerprints.push({ id: src.id, length: fp.length, sha256: fp.sha256 });
+  }
+  writeFileFn(
+    outPath,
+    JSON.stringify(
+      { generated_note: "sha256 지문만 -- 원문 없음", fingerprints },
+      null,
+      2,
+    ),
+  );
+  return { count: fingerprints.length, outPath };
+}
+
 // 3종을 한 번에 돌려 결과 배열을 만든다 -- CLI와 테스트가 공유하는 조립점.
-// existsFn/readFileFn/readdirFn은 botPatPath 읽기뿐 아니라 아래 3개 개별
-// 체크 전부에 그대로 전달된다 -- 테스트가 주입한 가짜 fs가 일부만 적용되고
-// 나머지가 조용히 실제 파일시스템으로 새는 사고를 구조적으로 막는다.
+// fingerprints는 이미 로드된 지문 배열이어야 한다(이 함수는 시크릿 파일을
+// 열지 않는다 -- 그건 runFingerprintInit만의 몫). existsFn/readFileFn/
+// readdirFn은 아래 3개 개별 체크 전부에 그대로 전달된다 -- 테스트가 주입한
+// 가짜 fs가 일부만 적용되고 나머지가 조용히 실제 파일시스템으로 새는 사고를
+// 구조적으로 막는다.
 export function runOrcaPostureCheck({
   orcaHome,
   appDataOrca,
-  botPatPath,
+  fingerprints = [],
   existsFn = existsSync,
   readFileFn = (p) => readFileSync(p, "utf8"),
   readdirFn = readdirSync,
 }) {
-  let fingerprints = [];
-  if (existsFn(botPatPath)) {
-    try {
-      const raw = readFileFn(botPatPath).trim();
-      const fp = secretFingerprint(raw);
-      if (fp) fingerprints = [fp];
-    } catch {
-      fingerprints = [];
-    }
-  }
   return [
     {
       id: "linear-reconnect",
@@ -271,6 +322,16 @@ export function runOrcaPostureCheck({
   ];
 }
 
+function repoRoot() {
+  try {
+    return execSync("git rev-parse --show-toplevel", {
+      encoding: "utf8",
+    }).trim();
+  } catch {
+    return process.cwd();
+  }
+}
+
 const invokedDirectly =
   process.argv[1] &&
   process.argv[1]
@@ -283,9 +344,37 @@ if (invokedDirectly) {
     "orca",
   );
   const orcaHome = join(home, ".orca");
-  const botPatPath = join(home, ".bot_pat");
+  const fingerprintsPath = join(
+    repoRoot(),
+    ".harness",
+    "secret-fingerprints.json",
+  );
+  const subcommand = process.argv[2];
 
-  const results = runOrcaPostureCheck({ orcaHome, appDataOrca, botPatPath });
+  // fingerprint-init: the ONLY path in this CLI that ever opens a real
+  // secret file. Prints a count + the output path, never a value or hash.
+  if (subcommand === "fingerprint-init") {
+    const sources = [{ id: "bot_pat", path: join(home, ".bot_pat") }];
+    const result = runFingerprintInit({ sources, outPath: fingerprintsPath });
+    console.log(
+      `fingerprint-init: ${result.count}개 지문 생성 -> ${result.outPath}`,
+    );
+    process.exit(0);
+  }
+
+  const { fingerprints, present, malformed } =
+    loadFingerprints(fingerprintsPath);
+  if (!present) {
+    console.log(
+      `orca-posture-check: 지문 파일 없음(${fingerprintsPath}) -- terminal-history-secret-scan은 UNJUDGABLE로 진행. init: node scripts/check/orca-posture-check.mjs fingerprint-init`,
+    );
+  } else if (malformed) {
+    console.log(
+      `orca-posture-check: 지문 파일 손상/스키마 불일치(${fingerprintsPath}) -- 재생성 필요`,
+    );
+  }
+
+  const results = runOrcaPostureCheck({ orcaHome, appDataOrca, fingerprints });
 
   console.log(
     "orca-posture-check: 탐지 전용(advisory) -- 예방 아님 · Orca 로컬 파일 레이아웃 의존(업데이트 시 드리프트 가능) · CI 미러 불가(로컬 파일 검사)",
