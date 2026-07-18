@@ -44,27 +44,66 @@ export const REASON = Object.freeze({
   COMPLETE: "COMPLETE",
 });
 
-// ---- G2: 패킷 §4-2 허용 4종만(task-create 1회 · dispatch --inject 1회 ·
-// coordinator check --wait/list/show · worker pane의 worker_done/heartbeat/escalation은
-// check --wait의 *응답*으로만 관찰되고 러너가 직접 호출하는 명령이 아니다). 그 외 문자열
+// ---- G2 (review-3 수리): 패킷 §4-2 허용 3종만, **exact argv shape**로. review-3가
+// 직접 재현한 결함 -- 이전 버전은 prefix 비교라 고정 토큰 뒤에 임의 인자를 덧붙여도
+// (`--agent attacker`/`--run-hooks`/`--linear`) 통과했다. 이제 고정 토큰은 위치까지
+// 정확히 일치해야 하고(순서 변경·삽입 불가), 길이도 정확히 일치해야 하며(초과 인자
+// 거부), 값 슬롯(task_id·spec·terminalHandle·timeout)은 타입만 검증한다 -- 그 외
 // 조합(terminal send, dispatch --agent/--setup/--run-hooks, orchestration run,
 // automations, linear 등)은 이 러너의 코드 경로에 없고, 이 가드가 방어적으로도 거부한다.
-export const ORCA_ALLOWED_COMMANDS = Object.freeze([
-  ["orchestration", "task-create"],
-  ["orchestration", "dispatch", "--inject"],
-  ["orchestration", "check", "--wait"],
+const ORCA_COMMAND_SHAPES = Object.freeze([
+  {
+    name: "task-create",
+    length: 6,
+    fixed: {
+      0: "orchestration",
+      1: "task-create",
+      2: "--task-id",
+      4: "--spec",
+    },
+    values: [3, 5],
+  },
+  {
+    name: "dispatch",
+    length: 7,
+    fixed: {
+      0: "orchestration",
+      1: "dispatch",
+      2: "--inject",
+      3: "--target",
+      5: "--task-id",
+    },
+    values: [4, 6],
+  },
+  {
+    name: "check-wait",
+    length: 7,
+    fixed: {
+      0: "orchestration",
+      1: "check",
+      2: "--wait",
+      3: "--task-id",
+      5: "--timeout",
+    },
+    values: [4, 6],
+  },
 ]);
+
+function matchesShape(cmd, shape) {
+  if (cmd.length !== shape.length) return false;
+  for (const idx of Object.keys(shape.fixed)) {
+    if (cmd[Number(idx)] !== shape.fixed[idx]) return false;
+  }
+  return shape.values.every((idx) => isNonEmptyString(cmd[idx]));
+}
 
 export function assertAllowedOrcaCommand(argv) {
   const cmd = Array.isArray(argv) ? argv : [];
-  const matches = ORCA_ALLOWED_COMMANDS.some(
-    (allowed) =>
-      allowed.length <= cmd.length && allowed.every((tok, i) => cmd[i] === tok),
-  );
+  const matches = ORCA_COMMAND_SHAPES.some((shape) => matchesShape(cmd, shape));
   if (!matches) {
     return {
       ok: false,
-      reason: `orca-spike-runner: ${REASON.ORCA_COMMAND_NOT_ALLOWED} -- ${JSON.stringify(cmd)} is not one of the whitelisted §4-2 command shapes`,
+      reason: `orca-spike-runner: ${REASON.ORCA_COMMAND_NOT_ALLOWED} -- ${JSON.stringify(cmd)} does not exactly match any whitelisted §4-2 command shape`,
     };
   }
   return { ok: true };
@@ -106,7 +145,11 @@ export function buildCheckWaitCommand(task_id, timeoutS) {
 }
 
 // 화이트리스트 통과 + execFn 호출 + 예외/비-ok 응답을 지정된 reason으로 통일.
-function runGuardedStep(argv, opts, failReason, receipts, stepName) {
+// export됨(review-3 수리): 이 함수가 실제 호출점에서 쓰는 유일한 execFn 진입로다.
+// 배선 반사실 테스트가 이 함수를 *직접* 불러 forbidden argv에도 execFn이 호출되지
+// 않음을 확인한다 -- assertAllowedOrcaCommand 함수 자체만 단위 테스트하는 것으로는
+// "호출점이 그 결과를 실제로 소비하는지"가 증명되지 않는다는 review-3의 지적을 닫는다.
+export function runGuardedStep(argv, opts, failReason, receipts, stepName) {
   const guard = assertAllowedOrcaCommand(argv);
   if (!guard.ok) return { ok: false, reason: guard.reason };
   let response;

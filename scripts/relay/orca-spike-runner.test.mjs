@@ -13,6 +13,7 @@ import { createArmStore, armStorePath, hashContent } from "./arm-state.mjs";
 import {
   runSpikeAttempt,
   assertAllowedOrcaCommand,
+  runGuardedStep,
   buildTaskCreateCommand,
   buildDispatchCommand,
   buildCheckWaitCommand,
@@ -233,6 +234,102 @@ test("(3d) G2: dispatch without --inject is rejected (not just any 'dispatch' to
     "x",
   ]);
   assert.equal(r.ok, false);
+});
+
+// review-3의 정확한 3개 반례를 known-bad로 박제 -- 이전 prefix 비교는 이 3개를
+// 전부 {ok:true}로 통과시켰다(고정 토큰 뒤 임의 인자 추가). exact-shape는 각각을
+// 거부해야 한다.
+test("(3e) G2 review-3 repro #1: dispatch --inject with an extra --agent arg is rejected", () => {
+  const r = assertAllowedOrcaCommand([
+    "orchestration",
+    "dispatch",
+    "--inject",
+    "--agent",
+    "attacker",
+  ]);
+  assert.equal(r.ok, false);
+  assert.match(r.reason, new RegExp(REASON.ORCA_COMMAND_NOT_ALLOWED));
+});
+test("(3f) G2 review-3 repro #2: task-create with an extra --run-hooks arg is rejected", () => {
+  const r = assertAllowedOrcaCommand([
+    "orchestration",
+    "task-create",
+    "--run-hooks",
+  ]);
+  assert.equal(r.ok, false);
+});
+test("(3g) G2 review-3 repro #3: check --wait with an extra --linear arg is rejected", () => {
+  const r = assertAllowedOrcaCommand([
+    "orchestration",
+    "check",
+    "--wait",
+    "--linear",
+  ]);
+  assert.equal(r.ok, false);
+});
+test("(3h) G2 known-good (paired with 3e-3g): the exact builder-produced shapes still pass", () => {
+  assert.equal(
+    assertAllowedOrcaCommand(
+      buildDispatchCommand("SPIKE-SYN-1", EXPECTED_TARGET),
+    ).ok,
+    true,
+  );
+  assert.equal(
+    assertAllowedOrcaCommand(
+      buildTaskCreateCommand("go SPIKE-SYN-1", "SPIKE-SYN-1"),
+    ).ok,
+    true,
+  );
+  assert.equal(
+    assertAllowedOrcaCommand(buildCheckWaitCommand("SPIKE-SYN-1", 60)).ok,
+    true,
+  );
+});
+
+// 배선 반사실(review-3 요구사항): assertAllowedOrcaCommand 함수 자체가 아니라
+// runGuardedStep -- 실제 호출점이 쓰는 바로 그 함수 -- 을 직접 불러, forbidden
+// argv에도 execFn이 호출되지 않음을 증명한다. 이 테스트가 없던 이전 버전은
+// "호출점의 `const guard = assertAllowedOrcaCommand(argv)`를 `{ok:true}`로 교체"하는
+// mutation에도 16/16 GREEN이었다(review-3 실측). 이 테스트는 그 정확한 mutation을
+// 재현하면 RED가 되어야 한다 -- 자가 실증은 coder.md에 기록.
+test("(3i) wiring counterfactual: runGuardedStep refuses a forbidden argv BEFORE calling execFn", () => {
+  const calls = [];
+  const execFn = (argv) => {
+    calls.push(argv);
+    return { ok: true };
+  };
+  const receipts = [];
+  const result = runGuardedStep(
+    ["orchestration", "dispatch", "--inject", "--agent", "attacker"],
+    { execFn, nowFn: () => "T" },
+    REASON.DISPATCH_FAILED,
+    receipts,
+    "dispatch",
+  );
+  assert.equal(result.ok, false);
+  assert.match(result.reason, new RegExp(REASON.ORCA_COMMAND_NOT_ALLOWED));
+  assert.equal(
+    calls.length,
+    0,
+    "execFn must never be called for a forbidden argv",
+  );
+});
+test("(3j) wiring counterfactual (paired good): runGuardedStep calls execFn for an allowed argv", () => {
+  const calls = [];
+  const execFn = (argv) => {
+    calls.push(argv);
+    return { ok: true };
+  };
+  const receipts = [];
+  const result = runGuardedStep(
+    buildDispatchCommand("SPIKE-SYN-1", EXPECTED_TARGET),
+    { execFn, nowFn: () => "T" },
+    REASON.DISPATCH_FAILED,
+    receipts,
+    "dispatch",
+  );
+  assert.equal(result.ok, true);
+  assert.equal(calls.length, 1);
 });
 
 test("(4) G6/G8 known-bad: worker_done reported but handshake fails -> HANDSHAKE_FAILED, not success", () => {
