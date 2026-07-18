@@ -1,7 +1,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, writeFileSync, rmSync, readFileSync, existsSync } from "node:fs";
+import {
+  mkdtempSync,
+  writeFileSync,
+  rmSync,
+  readFileSync,
+  existsSync,
+} from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -13,12 +19,17 @@ import {
   writeLedger,
   checkEnvelope,
   checkGate,
+  checkDiagnosticEnvelope,
+  checkDiagnosticGate,
+  HARD_STOP_STREAK,
   formatNowLocal,
   ALLOWED_CAUSES,
   ALLOWED_ACTIONS,
 } from "./reject-streak.mjs";
 
-const SCRIPT_PATH = fileURLToPath(new URL("./reject-streak.mjs", import.meta.url));
+const SCRIPT_PATH = fileURLToPath(
+  new URL("./reject-streak.mjs", import.meta.url),
+);
 
 function withFixtureDir(fn) {
   const dir = mkdtempSync(join(tmpdir(), "reject-streak-test-"));
@@ -31,10 +42,17 @@ function withFixtureDir(fn) {
 
 function runCli(args, opts = {}) {
   try {
-    const stdout = execFileSync("node", [SCRIPT_PATH, ...args], { encoding: "utf8", ...opts });
+    const stdout = execFileSync("node", [SCRIPT_PATH, ...args], {
+      encoding: "utf8",
+      ...opts,
+    });
     return { status: 0, stdout };
   } catch (err) {
-    return { status: err.status, stdout: err.stdout ?? "", stderr: err.stderr ?? "" };
+    return {
+      status: err.status,
+      stdout: err.stdout ?? "",
+      stderr: err.stderr ?? "",
+    };
   }
 }
 
@@ -46,18 +64,41 @@ const COMPLETE_ENVELOPE = [
   "-->",
 ].join("\n");
 
+const COMPLETE_DIAGNOSTIC_ENVELOPE = [
+  "<!-- reject-streak-envelope",
+  "원인 분류: 모델 한계",
+  "재현 증거 포인터: review-3.md L12-L40 (동일 mutation 3회 재현)",
+  "ORCH 조치:",
+  "- 모델 변경: sonnet -> opus 승격",
+  "-->",
+].join("\n");
+
 // ---------------------------------------------------------------------------
 // parseReviewOutcome
 // ---------------------------------------------------------------------------
 
 test("(1) parseReviewOutcome: 'for:' line rejected -> issue id derived", () => {
-  const result = parseReviewOutcome("for: HYK-133-coder-2\ntask_id: HYK-133-review-2\nverdict: rejected\n");
-  assert.deepEqual(result, { ok: true, taskId: "HYK-133-coder-2", issueId: "HYK-133", verdict: "rejected" });
+  const result = parseReviewOutcome(
+    "for: HYK-133-coder-2\ntask_id: HYK-133-review-2\nverdict: rejected\n",
+  );
+  assert.deepEqual(result, {
+    ok: true,
+    taskId: "HYK-133-coder-2",
+    issueId: "HYK-133",
+    verdict: "rejected",
+  });
 });
 
 test("(2) parseReviewOutcome: 'for:' absent -> falls back to 'task_id:'", () => {
-  const result = parseReviewOutcome("task_id: HYK-133-review-2\nverdict: approved\n");
-  assert.deepEqual(result, { ok: true, taskId: "HYK-133-review-2", issueId: "HYK-133", verdict: "approved" });
+  const result = parseReviewOutcome(
+    "task_id: HYK-133-review-2\nverdict: approved\n",
+  );
+  assert.deepEqual(result, {
+    ok: true,
+    taskId: "HYK-133-review-2",
+    issueId: "HYK-133",
+    verdict: "approved",
+  });
 });
 
 test("(3) parseReviewOutcome: neither 'for:' nor 'task_id:' -> ok:false", () => {
@@ -76,7 +117,9 @@ test("(5) parseReviewOutcome: missing verdict line -> ok:false", () => {
 });
 
 test("(6) parseReviewOutcome: verdict is case-insensitive, normalized lowercase", () => {
-  const result = parseReviewOutcome("for: HYK-133-coder-2\nverdict: APPROVED\n");
+  const result = parseReviewOutcome(
+    "for: HYK-133-coder-2\nverdict: APPROVED\n",
+  );
   assert.equal(result.ok, true);
   assert.equal(result.verdict, "approved");
 });
@@ -91,46 +134,104 @@ test("(7) parseReviewOutcome: verdict value outside approved/rejected -> ok:fals
 // ---------------------------------------------------------------------------
 
 test("(8) applyOutcome: rejected on empty ledger -> streak=1", () => {
-  const ledger = applyOutcome({ schema_version: 1, issues: {} }, { issueId: "HYK-133", taskId: "HYK-133-coder-1", verdict: "rejected", at: "t1" });
+  const ledger = applyOutcome(
+    { schema_version: 1, issues: {} },
+    {
+      issueId: "HYK-133",
+      taskId: "HYK-133-coder-1",
+      verdict: "rejected",
+      at: "t1",
+    },
+  );
   assert.equal(ledger.issues["HYK-133"].streak, 1);
-  assert.deepEqual(ledger.issues["HYK-133"].history, [{ task_id: "HYK-133-coder-1", verdict: "rejected", at: "t1" }]);
+  assert.deepEqual(ledger.issues["HYK-133"].history, [
+    { task_id: "HYK-133-coder-1", verdict: "rejected", at: "t1" },
+  ]);
 });
 
 test("(9) applyOutcome: two consecutive rejected -> streak=2, history length 2", () => {
   let ledger = { schema_version: 1, issues: {} };
-  ledger = applyOutcome(ledger, { issueId: "HYK-133", taskId: "HYK-133-coder-1", verdict: "rejected", at: "t1" });
-  ledger = applyOutcome(ledger, { issueId: "HYK-133", taskId: "HYK-133-coder-2", verdict: "rejected", at: "t2" });
+  ledger = applyOutcome(ledger, {
+    issueId: "HYK-133",
+    taskId: "HYK-133-coder-1",
+    verdict: "rejected",
+    at: "t1",
+  });
+  ledger = applyOutcome(ledger, {
+    issueId: "HYK-133",
+    taskId: "HYK-133-coder-2",
+    verdict: "rejected",
+    at: "t2",
+  });
   assert.equal(ledger.issues["HYK-133"].streak, 2);
   assert.equal(ledger.issues["HYK-133"].history.length, 2);
 });
 
 test("(10) applyOutcome: approved resets streak to 0 but keeps history", () => {
   let ledger = { schema_version: 1, issues: {} };
-  ledger = applyOutcome(ledger, { issueId: "HYK-133", taskId: "HYK-133-coder-1", verdict: "rejected", at: "t1" });
-  ledger = applyOutcome(ledger, { issueId: "HYK-133", taskId: "HYK-133-coder-2", verdict: "rejected", at: "t2" });
-  ledger = applyOutcome(ledger, { issueId: "HYK-133", taskId: "HYK-133-coder-3", verdict: "approved", at: "t3" });
+  ledger = applyOutcome(ledger, {
+    issueId: "HYK-133",
+    taskId: "HYK-133-coder-1",
+    verdict: "rejected",
+    at: "t1",
+  });
+  ledger = applyOutcome(ledger, {
+    issueId: "HYK-133",
+    taskId: "HYK-133-coder-2",
+    verdict: "rejected",
+    at: "t2",
+  });
+  ledger = applyOutcome(ledger, {
+    issueId: "HYK-133",
+    taskId: "HYK-133-coder-3",
+    verdict: "approved",
+    at: "t3",
+  });
   assert.equal(ledger.issues["HYK-133"].streak, 0);
   assert.equal(ledger.issues["HYK-133"].history.length, 3);
 });
 
 test("(11) applyOutcome: two issues tracked independently", () => {
   let ledger = { schema_version: 1, issues: {} };
-  ledger = applyOutcome(ledger, { issueId: "HYK-129", taskId: "HYK-129-coder-1", verdict: "rejected", at: "t1" });
-  ledger = applyOutcome(ledger, { issueId: "HYK-133", taskId: "HYK-133-coder-1", verdict: "rejected", at: "t2" });
-  ledger = applyOutcome(ledger, { issueId: "HYK-129", taskId: "HYK-129-coder-2", verdict: "rejected", at: "t3" });
+  ledger = applyOutcome(ledger, {
+    issueId: "HYK-129",
+    taskId: "HYK-129-coder-1",
+    verdict: "rejected",
+    at: "t1",
+  });
+  ledger = applyOutcome(ledger, {
+    issueId: "HYK-133",
+    taskId: "HYK-133-coder-1",
+    verdict: "rejected",
+    at: "t2",
+  });
+  ledger = applyOutcome(ledger, {
+    issueId: "HYK-129",
+    taskId: "HYK-129-coder-2",
+    verdict: "rejected",
+    at: "t3",
+  });
   assert.equal(ledger.issues["HYK-129"].streak, 2);
   assert.equal(ledger.issues["HYK-133"].streak, 1);
 });
 
 test("(12) computeRecord: composes parse + apply, returns resulting streak", () => {
-  const result = computeRecord({ reviewText: "for: HYK-133-coder-1\nverdict: rejected\n", ledger: { schema_version: 1, issues: {} }, at: "t1" });
+  const result = computeRecord({
+    reviewText: "for: HYK-133-coder-1\nverdict: rejected\n",
+    ledger: { schema_version: 1, issues: {} },
+    at: "t1",
+  });
   assert.equal(result.ok, true);
   assert.equal(result.issueId, "HYK-133");
   assert.equal(result.streak, 1);
 });
 
 test("(13) computeRecord: malformed review text -> ok:false, no ledger mutation attempted", () => {
-  const result = computeRecord({ reviewText: "nothing useful here\n", ledger: { schema_version: 1, issues: {} }, at: "t1" });
+  const result = computeRecord({
+    reviewText: "nothing useful here\n",
+    ledger: { schema_version: 1, issues: {} },
+    at: "t1",
+  });
   assert.equal(result.ok, false);
 });
 
@@ -150,7 +251,14 @@ test("(14) loadLedger: missing file -> ok:true, existed:false, empty issues (str
 test("(15) loadLedger: valid JSON -> ok:true, existed:true", () => {
   withFixtureDir((dir) => {
     const p = join(dir, "reject-streak.json");
-    writeFileSync(p, JSON.stringify({ schema_version: 1, issues: { "HYK-1": { streak: 3, history: [] } } }), "utf8");
+    writeFileSync(
+      p,
+      JSON.stringify({
+        schema_version: 1,
+        issues: { "HYK-1": { streak: 3, history: [] } },
+      }),
+      "utf8",
+    );
     const result = loadLedger(p);
     assert.equal(result.ok, true);
     assert.equal(result.ledger.issues["HYK-1"].streak, 3);
@@ -179,7 +287,15 @@ test("(17) loadLedger: valid JSON but missing 'issues' object -> ok:false (UNJUD
 test("(18) writeLedger + loadLedger round-trip", () => {
   withFixtureDir((dir) => {
     const p = join(dir, "reject-streak.json");
-    const ledger = { schema_version: 1, issues: { "HYK-9": { streak: 1, history: [{ task_id: "HYK-9-coder-1", verdict: "rejected", at: "t" }] } } };
+    const ledger = {
+      schema_version: 1,
+      issues: {
+        "HYK-9": {
+          streak: 1,
+          history: [{ task_id: "HYK-9-coder-1", verdict: "rejected", at: "t" }],
+        },
+      },
+    };
     writeLedger(p, ledger);
     const reloaded = loadLedger(p);
     assert.equal(reloaded.ok, true);
@@ -202,58 +318,117 @@ test("(20) checkEnvelope: no envelope block at all -> ok:false", () => {
 });
 
 test("(21) checkEnvelope: cause only, no ORCH 조치 header -> ok:false (ⓑ)", () => {
-  const text = ["<!-- reject-streak-envelope", "원인 분류: 모델 한계", "-->"].join("\n");
+  const text = [
+    "<!-- reject-streak-envelope",
+    "원인 분류: 모델 한계",
+    "-->",
+  ].join("\n");
   const result = checkEnvelope(text);
   assert.equal(result.ok, false);
   assert.match(result.reason, /ORCH 조치/);
 });
 
 test("(22) checkEnvelope: ORCH 조치 only, no cause -> ok:false (ⓑ)", () => {
-  const text = ["<!-- reject-streak-envelope", "ORCH 조치:", "- 모델 변경: opus로", "-->"].join("\n");
+  const text = [
+    "<!-- reject-streak-envelope",
+    "ORCH 조치:",
+    "- 모델 변경: opus로",
+    "-->",
+  ].join("\n");
   const result = checkEnvelope(text);
   assert.equal(result.ok, false);
   assert.match(result.reason, /원인 분류/);
 });
 
 test("(23) checkEnvelope: cause value not in allowed set -> ok:false", () => {
-  const text = ["<!-- reject-streak-envelope", "원인 분류: 그냥 운이 나빴음", "ORCH 조치:", "- 모델 변경: x", "-->"].join("\n");
+  const text = [
+    "<!-- reject-streak-envelope",
+    "원인 분류: 그냥 운이 나빴음",
+    "ORCH 조치:",
+    "- 모델 변경: x",
+    "-->",
+  ].join("\n");
   const result = checkEnvelope(text);
   assert.equal(result.ok, false);
 });
 
 test("(24) checkEnvelope: ORCH 조치 header present but zero bullets -> ok:false", () => {
-  const text = ["<!-- reject-streak-envelope", "원인 분류: 설계 결함", "ORCH 조치:", "", "-->"].join("\n");
+  const text = [
+    "<!-- reject-streak-envelope",
+    "원인 분류: 설계 결함",
+    "ORCH 조치:",
+    "",
+    "-->",
+  ].join("\n");
   const result = checkEnvelope(text);
   assert.equal(result.ok, false);
 });
 
 test("(25) checkEnvelope: ORCH 조치 bullet with unrecognized label -> ok:false", () => {
-  const text = ["<!-- reject-streak-envelope", "원인 분류: 설계 결함", "ORCH 조치:", "- 그냥 다시 시도: x", "-->"].join("\n");
+  const text = [
+    "<!-- reject-streak-envelope",
+    "원인 분류: 설계 결함",
+    "ORCH 조치:",
+    "- 그냥 다시 시도: x",
+    "-->",
+  ].join("\n");
   const result = checkEnvelope(text);
   assert.equal(result.ok, false);
 });
 
 test("(26) checkEnvelope: all four allowed causes accepted", () => {
   for (const cause of ALLOWED_CAUSES) {
-    const text = ["<!-- reject-streak-envelope", `원인 분류: ${cause}`, "ORCH 조치:", "- 재설계 지시: x", "-->"].join("\n");
-    assert.equal(checkEnvelope(text).ok, true, `cause '${cause}' should be accepted`);
+    const text = [
+      "<!-- reject-streak-envelope",
+      `원인 분류: ${cause}`,
+      "ORCH 조치:",
+      "- 재설계 지시: x",
+      "-->",
+    ].join("\n");
+    assert.equal(
+      checkEnvelope(text).ok,
+      true,
+      `cause '${cause}' should be accepted`,
+    );
   }
 });
 
 test("(27) checkEnvelope: all five allowed action labels accepted individually", () => {
   for (const action of ALLOWED_ACTIONS) {
-    const text = ["<!-- reject-streak-envelope", "원인 분류: 모델 한계", "ORCH 조치:", `- ${action}: x`, "-->"].join("\n");
-    assert.equal(checkEnvelope(text).ok, true, `action '${action}' should be accepted`);
+    const text = [
+      "<!-- reject-streak-envelope",
+      "원인 분류: 모델 한계",
+      "ORCH 조치:",
+      `- ${action}: x`,
+      "-->",
+    ].join("\n");
+    assert.equal(
+      checkEnvelope(text).ok,
+      true,
+      `action '${action}' should be accepted`,
+    );
   }
 });
 
 test("(28) checkEnvelope: 리서치(출처 포함) label form (parenthetical) still accepted (format-only per S4)", () => {
-  const text = ["<!-- reject-streak-envelope", "원인 분류: 모델 한계", "ORCH 조치:", "- 리서치(출처 포함): https://example.com 참고", "-->"].join("\n");
+  const text = [
+    "<!-- reject-streak-envelope",
+    "원인 분류: 모델 한계",
+    "ORCH 조치:",
+    "- 리서치(출처 포함): https://example.com 참고",
+    "-->",
+  ].join("\n");
   assert.equal(checkEnvelope(text).ok, true);
 });
 
 test("(28b) checkEnvelope: CRLF-terminated envelope block still parses (Windows-authored doc/task file, review-1 root-cause repro)", () => {
-  const text = ["<!-- reject-streak-envelope", "원인 분류: 모델 한계", "ORCH 조치:", "- 모델 변경: x", "-->"].join("\r\n");
+  const text = [
+    "<!-- reject-streak-envelope",
+    "원인 분류: 모델 한계",
+    "ORCH 조치:",
+    "- 모델 변경: x",
+    "-->",
+  ].join("\r\n");
   const result = checkEnvelope(text);
   assert.equal(result.ok, true, result.reason);
 });
@@ -275,40 +450,60 @@ test("(29) checkEnvelope: multiple ORCH 조치 bullets, only one needs to match"
 // ---------------------------------------------------------------------------
 
 test("(30) ⓓ checkGate: streak=1 (no envelope) -> PASS", () => {
-  const ledger = { schema_version: 1, issues: { "HYK-133": { streak: 1, history: [] } } };
+  const ledger = {
+    schema_version: 1,
+    issues: { "HYK-133": { streak: 1, history: [] } },
+  };
   const result = checkGate({ taskText: "task_id: HYK-133-coder-2\n", ledger });
   assert.equal(result.status, "PASS");
 });
 
 test("(31) ⓐ checkGate: streak=2, no envelope -> BLOCK", () => {
-  const ledger = { schema_version: 1, issues: { "HYK-133": { streak: 2, history: [] } } };
+  const ledger = {
+    schema_version: 1,
+    issues: { "HYK-133": { streak: 2, history: [] } },
+  };
   const result = checkGate({ taskText: "task_id: HYK-133-coder-3\n", ledger });
   assert.equal(result.status, "BLOCK");
 });
 
 test("(32) ⓑ checkGate: streak=2, envelope with cause only -> BLOCK", () => {
-  const ledger = { schema_version: 1, issues: { "HYK-133": { streak: 2, history: [] } } };
-  const text = "task_id: HYK-133-coder-3\n<!-- reject-streak-envelope\n원인 분류: 모델 한계\n-->";
+  const ledger = {
+    schema_version: 1,
+    issues: { "HYK-133": { streak: 2, history: [] } },
+  };
+  const text =
+    "task_id: HYK-133-coder-3\n<!-- reject-streak-envelope\n원인 분류: 모델 한계\n-->";
   const result = checkGate({ taskText: text, ledger });
   assert.equal(result.status, "BLOCK");
 });
 
 test("(32b) ⓑ checkGate: streak=2, envelope with ORCH 조치 only -> BLOCK", () => {
-  const ledger = { schema_version: 1, issues: { "HYK-133": { streak: 2, history: [] } } };
-  const text = "task_id: HYK-133-coder-3\n<!-- reject-streak-envelope\nORCH 조치:\n- 모델 변경: x\n-->";
+  const ledger = {
+    schema_version: 1,
+    issues: { "HYK-133": { streak: 2, history: [] } },
+  };
+  const text =
+    "task_id: HYK-133-coder-3\n<!-- reject-streak-envelope\nORCH 조치:\n- 모델 변경: x\n-->";
   const result = checkGate({ taskText: text, ledger });
   assert.equal(result.status, "BLOCK");
 });
 
 test("(33) ⓒ checkGate: streak=2, complete envelope -> PASS", () => {
-  const ledger = { schema_version: 1, issues: { "HYK-133": { streak: 2, history: [] } } };
+  const ledger = {
+    schema_version: 1,
+    issues: { "HYK-133": { streak: 2, history: [] } },
+  };
   const text = `task_id: HYK-133-coder-3\n${COMPLETE_ENVELOPE}\n`;
   const result = checkGate({ taskText: text, ledger });
   assert.equal(result.status, "PASS");
 });
 
 test("(34) ⓔ checkGate: streak=0 (post-reset) -> PASS without envelope", () => {
-  const ledger = { schema_version: 1, issues: { "HYK-133": { streak: 0, history: [] } } };
+  const ledger = {
+    schema_version: 1,
+    issues: { "HYK-133": { streak: 0, history: [] } },
+  };
   const result = checkGate({ taskText: "task_id: HYK-133-coder-4\n", ledger });
   assert.equal(result.status, "PASS");
 });
@@ -320,14 +515,20 @@ test("(35) checkGate: issue absent from ledger entirely -> treated as streak 0 -
 });
 
 test("(36) checkGate: streak=4 (deep ladder) still governed by the same envelope rule -> PASS with complete envelope", () => {
-  const ledger = { schema_version: 1, issues: { "HYK-133": { streak: 4, history: [] } } };
+  const ledger = {
+    schema_version: 1,
+    issues: { "HYK-133": { streak: 4, history: [] } },
+  };
   const text = `task_id: HYK-133-coder-5\n${COMPLETE_ENVELOPE}\n`;
   const result = checkGate({ taskText: text, ledger });
   assert.equal(result.status, "PASS");
 });
 
 test("(37) checkGate: task file with no task_id header -> UNJUDGABLE, fail-open", () => {
-  const ledger = { schema_version: 1, issues: { "HYK-133": { streak: 5, history: [] } } };
+  const ledger = {
+    schema_version: 1,
+    issues: { "HYK-133": { streak: 5, history: [] } },
+  };
   const result = checkGate({ taskText: "no header here\n", ledger });
   assert.equal(result.status, "UNJUDGABLE");
   assert.equal(result.ok, true);
@@ -356,8 +557,18 @@ test("(40) CLI record: rejected review -> ledger written with streak=1", () => {
   withFixtureDir((dir) => {
     const reviewPath = join(dir, "review.md");
     const ledgerPath = join(dir, "reject-streak.json");
-    writeFileSync(reviewPath, "for: HYK-133-coder-1\nverdict: rejected\n", "utf8");
-    const { status, stdout } = runCli(["record", "--review", reviewPath, "--ledger", ledgerPath]);
+    writeFileSync(
+      reviewPath,
+      "for: HYK-133-coder-1\nverdict: rejected\n",
+      "utf8",
+    );
+    const { status, stdout } = runCli([
+      "record",
+      "--review",
+      reviewPath,
+      "--ledger",
+      ledgerPath,
+    ]);
     assert.equal(status, 0);
     assert.match(stdout, /streak=1/);
     const ledger = JSON.parse(readFileSync(ledgerPath, "utf8"));
@@ -370,12 +581,26 @@ test("(41) CLI record: ledger survives across two separate invocations (relay-sl
     const reviewPath = join(dir, "review.md");
     const ledgerPath = join(dir, "reject-streak.json");
 
-    writeFileSync(reviewPath, "for: HYK-133-coder-1\nverdict: rejected\n", "utf8");
+    writeFileSync(
+      reviewPath,
+      "for: HYK-133-coder-1\nverdict: rejected\n",
+      "utf8",
+    );
     runCli(["record", "--review", reviewPath, "--ledger", ledgerPath]);
 
     // Simulate the relay slot being overwritten by the next round's review.
-    writeFileSync(reviewPath, "for: HYK-133-coder-2\nverdict: rejected\n", "utf8");
-    const { status, stdout } = runCli(["record", "--review", reviewPath, "--ledger", ledgerPath]);
+    writeFileSync(
+      reviewPath,
+      "for: HYK-133-coder-2\nverdict: rejected\n",
+      "utf8",
+    );
+    const { status, stdout } = runCli([
+      "record",
+      "--review",
+      reviewPath,
+      "--ledger",
+      ledgerPath,
+    ]);
 
     assert.equal(status, 0);
     assert.match(stdout, /streak=2/);
@@ -389,7 +614,13 @@ test("(42) CLI record: review file missing -> UNJUDGABLE, exit 0, no ledger file
   withFixtureDir((dir) => {
     const reviewPath = join(dir, "review.md");
     const ledgerPath = join(dir, "reject-streak.json");
-    const { status, stdout } = runCli(["record", "--review", reviewPath, "--ledger", ledgerPath]);
+    const { status, stdout } = runCli([
+      "record",
+      "--review",
+      reviewPath,
+      "--ledger",
+      ledgerPath,
+    ]);
     assert.equal(status, 0);
     assert.match(stdout, /UNJUDGABLE/);
     assert.equal(existsSync(ledgerPath), false);
@@ -401,9 +632,22 @@ test("(43) CLI record: malformed review content -> UNJUDGABLE, exit 0, ledger un
     const reviewPath = join(dir, "review.md");
     const ledgerPath = join(dir, "reject-streak.json");
     writeFileSync(reviewPath, "no useful fields\n", "utf8");
-    writeFileSync(ledgerPath, JSON.stringify({ schema_version: 1, issues: { "HYK-1": { streak: 9, history: [] } } }), "utf8");
+    writeFileSync(
+      ledgerPath,
+      JSON.stringify({
+        schema_version: 1,
+        issues: { "HYK-1": { streak: 9, history: [] } },
+      }),
+      "utf8",
+    );
     const before = readFileSync(ledgerPath, "utf8");
-    const { status, stdout } = runCli(["record", "--review", reviewPath, "--ledger", ledgerPath]);
+    const { status, stdout } = runCli([
+      "record",
+      "--review",
+      reviewPath,
+      "--ledger",
+      ledgerPath,
+    ]);
     assert.equal(status, 0);
     assert.match(stdout, /UNJUDGABLE/);
     assert.equal(readFileSync(ledgerPath, "utf8"), before);
@@ -415,8 +659,20 @@ test("(44) CLI gate: ⓐ streak=2, no envelope -> exit 2", () => {
     const taskPath = join(dir, "coder-task.md");
     const ledgerPath = join(dir, "reject-streak.json");
     writeFileSync(taskPath, "task_id: HYK-133-coder-3\n", "utf8");
-    writeFileSync(ledgerPath, JSON.stringify({ schema_version: 1, issues: { "HYK-133": { streak: 2, history: [] } } }), "utf8");
-    const { status, stderr } = runCli(["gate", taskPath, "--ledger", ledgerPath]);
+    writeFileSync(
+      ledgerPath,
+      JSON.stringify({
+        schema_version: 1,
+        issues: { "HYK-133": { streak: 2, history: [] } },
+      }),
+      "utf8",
+    );
+    const { status, stderr } = runCli([
+      "gate",
+      taskPath,
+      "--ledger",
+      ledgerPath,
+    ]);
     assert.equal(status, 2);
     assert.match(stderr, /reject-streak gate/);
   });
@@ -426,8 +682,19 @@ test("(45) CLI gate: ⓒ streak=2, complete envelope -> exit 0", () => {
   withFixtureDir((dir) => {
     const taskPath = join(dir, "coder-task.md");
     const ledgerPath = join(dir, "reject-streak.json");
-    writeFileSync(taskPath, `task_id: HYK-133-coder-3\n${COMPLETE_ENVELOPE}\n`, "utf8");
-    writeFileSync(ledgerPath, JSON.stringify({ schema_version: 1, issues: { "HYK-133": { streak: 2, history: [] } } }), "utf8");
+    writeFileSync(
+      taskPath,
+      `task_id: HYK-133-coder-3\n${COMPLETE_ENVELOPE}\n`,
+      "utf8",
+    );
+    writeFileSync(
+      ledgerPath,
+      JSON.stringify({
+        schema_version: 1,
+        issues: { "HYK-133": { streak: 2, history: [] } },
+      }),
+      "utf8",
+    );
     const { status } = runCli(["gate", taskPath, "--ledger", ledgerPath]);
     assert.equal(status, 0);
   });
@@ -438,7 +705,14 @@ test("(46) CLI gate: ⓓ streak=1, no envelope -> exit 0", () => {
     const taskPath = join(dir, "coder-task.md");
     const ledgerPath = join(dir, "reject-streak.json");
     writeFileSync(taskPath, "task_id: HYK-133-coder-2\n", "utf8");
-    writeFileSync(ledgerPath, JSON.stringify({ schema_version: 1, issues: { "HYK-133": { streak: 1, history: [] } } }), "utf8");
+    writeFileSync(
+      ledgerPath,
+      JSON.stringify({
+        schema_version: 1,
+        issues: { "HYK-133": { streak: 1, history: [] } },
+      }),
+      "utf8",
+    );
     const { status } = runCli(["gate", taskPath, "--ledger", ledgerPath]);
     assert.equal(status, 0);
   });
@@ -450,11 +724,23 @@ test("(47) CLI gate: ⓔ approved reset then re-drop with no envelope -> exit 0"
     const taskPath = join(dir, "coder-task.md");
     const ledgerPath = join(dir, "reject-streak.json");
 
-    writeFileSync(reviewPath, "for: HYK-133-coder-1\nverdict: rejected\n", "utf8");
+    writeFileSync(
+      reviewPath,
+      "for: HYK-133-coder-1\nverdict: rejected\n",
+      "utf8",
+    );
     runCli(["record", "--review", reviewPath, "--ledger", ledgerPath]);
-    writeFileSync(reviewPath, "for: HYK-133-coder-2\nverdict: rejected\n", "utf8");
+    writeFileSync(
+      reviewPath,
+      "for: HYK-133-coder-2\nverdict: rejected\n",
+      "utf8",
+    );
     runCli(["record", "--review", reviewPath, "--ledger", ledgerPath]);
-    writeFileSync(reviewPath, "for: HYK-133-coder-3\nverdict: approved\n", "utf8");
+    writeFileSync(
+      reviewPath,
+      "for: HYK-133-coder-3\nverdict: approved\n",
+      "utf8",
+    );
     runCli(["record", "--review", reviewPath, "--ledger", ledgerPath]);
 
     writeFileSync(taskPath, "task_id: HYK-133-coder-4\n", "utf8");
@@ -469,7 +755,12 @@ test("(48) CLI gate: ⓕ ledger file corrupted -> UNJUDGABLE, exit 0 (fail-open,
     const ledgerPath = join(dir, "reject-streak.json");
     writeFileSync(taskPath, "task_id: HYK-133-coder-3\n", "utf8");
     writeFileSync(ledgerPath, "{ broken", "utf8");
-    const { status, stdout } = runCli(["gate", taskPath, "--ledger", ledgerPath]);
+    const { status, stdout } = runCli([
+      "gate",
+      taskPath,
+      "--ledger",
+      ledgerPath,
+    ]);
     assert.equal(status, 0);
     assert.match(stdout, /UNJUDGABLE/);
   });
@@ -482,7 +773,11 @@ test("(49) CLI gate: no ledger file at all -> streak 0 baseline -> exit 0", () =
     writeFileSync(taskPath, "task_id: HYK-133-coder-1\n", "utf8");
     const { status } = runCli(["gate", taskPath, "--ledger", ledgerPath]);
     assert.equal(status, 0);
-    assert.equal(existsSync(ledgerPath), false, "gate must never create/write the ledger");
+    assert.equal(
+      existsSync(ledgerPath),
+      false,
+      "gate must never create/write the ledger",
+    );
   });
 });
 
@@ -508,10 +803,17 @@ test("(51) CLI: no subcommand -> usage, exit 1", () => {
 // ---------------------------------------------------------------------------
 
 function extractEnvelopeTemplateFromDocs() {
-  const docPath = fileURLToPath(new URL("../../docs/enforcement-v1.md", import.meta.url));
+  const docPath = fileURLToPath(
+    new URL("../../docs/enforcement-v1.md", import.meta.url),
+  );
   const text = readFileSync(docPath, "utf8");
-  const m = text.match(/```\r?\n(<!--\s*reject-streak-envelope[\s\S]*?-->)\r?\n```/);
-  if (!m) throw new Error("could not find a fenced reject-streak-envelope template block in docs/enforcement-v1.md");
+  const m = text.match(
+    /```\r?\n(<!--\s*reject-streak-envelope[\s\S]*?-->)\r?\n```/,
+  );
+  if (!m)
+    throw new Error(
+      "could not find a fenced reject-streak-envelope template block in docs/enforcement-v1.md",
+    );
   return m[1];
 }
 
@@ -523,8 +825,14 @@ test("(53) doc-code contract: enforcement-v1.md §G envelope template passes che
 
 test("(54) doc-code contract: the doc's template also clears the full gate at streak>=2 with no edits", () => {
   const block = extractEnvelopeTemplateFromDocs();
-  const ledger = { schema_version: 1, issues: { "HYK-1": { streak: 3, history: [] } } };
-  const result = checkGate({ taskText: `task_id: HYK-1-coder-9\n${block}\n`, ledger });
+  const ledger = {
+    schema_version: 1,
+    issues: { "HYK-1": { streak: 3, history: [] } },
+  };
+  const result = checkGate({
+    taskText: `task_id: HYK-1-coder-9\n${block}\n`,
+    ledger,
+  });
   assert.equal(result.status, "PASS", result.reason);
 });
 
@@ -546,17 +854,252 @@ test("(52) end-to-end: record 2 rejects then gate without envelope blocks the re
     const taskPath = join(dir, "coder-task.md");
     const ledgerPath = join(dir, "reject-streak.json");
 
-    writeFileSync(reviewPath, "for: HYK-133-coder-1\ntask_id: HYK-133-review-1\nrole: REVIEW-CODEX\nverdict: rejected\n", "utf8");
+    writeFileSync(
+      reviewPath,
+      "for: HYK-133-coder-1\ntask_id: HYK-133-review-1\nrole: REVIEW-CODEX\nverdict: rejected\n",
+      "utf8",
+    );
     runCli(["record", "--review", reviewPath, "--ledger", ledgerPath]);
-    writeFileSync(reviewPath, "for: HYK-133-coder-2\ntask_id: HYK-133-review-2\nrole: REVIEW-CODEX\nverdict: rejected\n", "utf8");
+    writeFileSync(
+      reviewPath,
+      "for: HYK-133-coder-2\ntask_id: HYK-133-review-2\nrole: REVIEW-CODEX\nverdict: rejected\n",
+      "utf8",
+    );
     runCli(["record", "--review", reviewPath, "--ledger", ledgerPath]);
 
-    writeFileSync(taskPath, "task_id: HYK-133-coder-3\ndropped_at: 2026-07-13 18:00 KST\n\nno envelope in this drop\n", "utf8");
+    writeFileSync(
+      taskPath,
+      "task_id: HYK-133-coder-3\ndropped_at: 2026-07-13 18:00 KST\n\nno envelope in this drop\n",
+      "utf8",
+    );
     const blocked = runCli(["gate", taskPath, "--ledger", ledgerPath]);
     assert.equal(blocked.status, 2);
 
-    writeFileSync(taskPath, `task_id: HYK-133-coder-3\ndropped_at: 2026-07-13 18:05 KST\n\n${COMPLETE_ENVELOPE}\n`, "utf8");
+    writeFileSync(
+      taskPath,
+      `task_id: HYK-133-coder-3\ndropped_at: 2026-07-13 18:05 KST\n\n${COMPLETE_ENVELOPE}\n`,
+      "utf8",
+    );
     const passed = runCli(["gate", taskPath, "--ledger", ledgerPath]);
     assert.equal(passed.status, 0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// HYK-158: hard-stop diagnostic envelope (checkDiagnosticEnvelope/checkDiagnosticGate)
+// ---------------------------------------------------------------------------
+
+test("(56) HARD_STOP_STREAK is fixed at 4 (ladder step 4, promoted from convention)", () => {
+  assert.equal(HARD_STOP_STREAK, 4);
+});
+
+test("(57) checkDiagnosticEnvelope: complete envelope (cause+evidence pointer+action) -> ok:true", () => {
+  const result = checkDiagnosticEnvelope(
+    `# task\n\n${COMPLETE_DIAGNOSTIC_ENVELOPE}\n`,
+  );
+  assert.equal(result.ok, true, result.reason);
+});
+
+test("(58) known-bad: no envelope at all -> DIAGNOSTIC_REQUIRED", () => {
+  const result = checkDiagnosticEnvelope("# task\n\nno envelope here.\n");
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /^DIAGNOSTIC_REQUIRED/);
+});
+
+test("(59) known-bad: envelope present but missing the new 재현 증거 포인터 field (HYK-133 envelope reused as-is) -> DIAGNOSTIC_FIELD_MISSING", () => {
+  const result = checkDiagnosticEnvelope(`# task\n\n${COMPLETE_ENVELOPE}\n`);
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /^DIAGNOSTIC_FIELD_MISSING/);
+  assert.match(result.reason, /재현 증거 포인터/);
+});
+
+test("(60) paired good: same envelope, only 재현 증거 포인터 field added -> passes", () => {
+  const bad = checkDiagnosticEnvelope(`# task\n\n${COMPLETE_ENVELOPE}\n`);
+  assert.equal(bad.ok, false);
+  const good = checkDiagnosticEnvelope(
+    `# task\n\n${COMPLETE_DIAGNOSTIC_ENVELOPE}\n`,
+  );
+  assert.equal(good.ok, true, good.reason);
+});
+
+test("(61) known-bad: envelope missing 원인 분류 (evidence+action present) -> DIAGNOSTIC_FIELD_MISSING names 원인 분류", () => {
+  const text = [
+    "<!-- reject-streak-envelope",
+    "재현 증거 포인터: review-3.md L12",
+    "ORCH 조치:",
+    "- 리서치: 사전 사례 조사",
+    "-->",
+  ].join("\n");
+  const result = checkDiagnosticEnvelope(text);
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /원인 분류/);
+});
+
+test("(62) known-bad: envelope missing ORCH 조치 header -> DIAGNOSTIC_FIELD_MISSING names ORCH 조치", () => {
+  const text = [
+    "<!-- reject-streak-envelope",
+    "원인 분류: 환경 차이",
+    "재현 증거 포인터: review-3.md L12",
+    "-->",
+  ].join("\n");
+  const result = checkDiagnosticEnvelope(text);
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /ORCH 조치/);
+});
+
+test("(63) checkDiagnosticGate: streak=3 (<HARD_STOP_STREAK) -> PASS even with no envelope at all", () => {
+  const ledger = {
+    schema_version: 1,
+    issues: { "HYK-158": { streak: 3, history: [] } },
+  };
+  const result = checkDiagnosticGate({
+    taskText: "task_id: HYK-158-coder-4\n",
+    ledger,
+  });
+  assert.equal(result.status, "PASS", result.reason);
+});
+
+test("(64) known-bad: checkDiagnosticGate streak=4 (hard-stop), no envelope -> BLOCK with DIAGNOSTIC_REQUIRED", () => {
+  const ledger = {
+    schema_version: 1,
+    issues: { "HYK-158": { streak: 4, history: [] } },
+  };
+  const result = checkDiagnosticGate({
+    taskText: "task_id: HYK-158-coder-5\n",
+    ledger,
+  });
+  assert.equal(result.status, "BLOCK");
+  assert.match(result.reason, /DIAGNOSTIC_REQUIRED/);
+});
+
+test("(65) known-bad: checkDiagnosticGate streak=4, envelope missing evidence pointer -> BLOCK with DIAGNOSTIC_FIELD_MISSING", () => {
+  const ledger = {
+    schema_version: 1,
+    issues: { "HYK-158": { streak: 4, history: [] } },
+  };
+  const result = checkDiagnosticGate({
+    taskText: `task_id: HYK-158-coder-5\n${COMPLETE_ENVELOPE}\n`,
+    ledger,
+  });
+  assert.equal(result.status, "BLOCK");
+  assert.match(result.reason, /DIAGNOSTIC_FIELD_MISSING/);
+});
+
+test("(66) paired good: same ledger+task, evidence pointer field alone added -> PASS", () => {
+  const ledger = {
+    schema_version: 1,
+    issues: { "HYK-158": { streak: 4, history: [] } },
+  };
+  const bad = checkDiagnosticGate({
+    taskText: `task_id: HYK-158-coder-5\n${COMPLETE_ENVELOPE}\n`,
+    ledger,
+  });
+  assert.equal(bad.status, "BLOCK");
+  const good = checkDiagnosticGate({
+    taskText: `task_id: HYK-158-coder-5\n${COMPLETE_DIAGNOSTIC_ENVELOPE}\n`,
+    ledger,
+  });
+  assert.equal(good.status, "PASS", good.reason);
+});
+
+test("(67) streak beyond hard-stop (e.g. 6) still requires the diagnostic envelope", () => {
+  const ledger = {
+    schema_version: 1,
+    issues: { "HYK-158": { streak: 6, history: [] } },
+  };
+  const result = checkDiagnosticGate({
+    taskText: "task_id: HYK-158-coder-7\n",
+    ledger,
+  });
+  assert.equal(result.status, "BLOCK");
+  assert.match(result.reason, /DIAGNOSTIC_REQUIRED/);
+});
+
+test("(68) UNJUDGABLE: task file has no task_id header -> fail-open, never claims diagnosis complete", () => {
+  const ledger = {
+    schema_version: 1,
+    issues: { "HYK-158": { streak: 5, history: [] } },
+  };
+  const result = checkDiagnosticGate({
+    taskText: "no task_id header here\n",
+    ledger,
+  });
+  assert.equal(result.status, "UNJUDGABLE");
+  assert.equal(result.ok, true);
+});
+
+test("(69) ordinary checkGate (streak>=2) envelope is untouched/unbroken by the new diagnostic gate existing alongside it", () => {
+  const ledger = {
+    schema_version: 1,
+    issues: { "HYK-133": { streak: 2, history: [] } },
+  };
+  const result = checkGate({
+    taskText: `task_id: HYK-133-coder-9\n${COMPLETE_ENVELOPE}\n`,
+    ledger,
+  });
+  assert.equal(result.status, "PASS", result.reason);
+});
+
+test("(70) CLI diagnostic-gate: end-to-end hard-stop scenario blocks then passes (single-variable fix)", () => {
+  withFixtureDir((dir) => {
+    const taskPath = join(dir, "coder-task.md");
+    const ledgerPath = join(dir, "reject-streak.json");
+    const ledger = {
+      schema_version: 1,
+      issues: { "HYK-158": { streak: 4, history: [] } },
+    };
+    writeFileSync(ledgerPath, JSON.stringify(ledger, null, 2), "utf8");
+
+    writeFileSync(
+      taskPath,
+      "task_id: HYK-158-coder-5\ndropped_at: 2026-07-18 16:00 KST\n\nno envelope in this drop\n",
+      "utf8",
+    );
+    const blocked = runCli([
+      "diagnostic-gate",
+      taskPath,
+      "--ledger",
+      ledgerPath,
+    ]);
+    assert.equal(blocked.status, 2);
+    assert.match(blocked.stderr, /DIAGNOSTIC_REQUIRED/);
+
+    writeFileSync(
+      taskPath,
+      `task_id: HYK-158-coder-5\ndropped_at: 2026-07-18 16:05 KST\n\n${COMPLETE_DIAGNOSTIC_ENVELOPE}\n`,
+      "utf8",
+    );
+    const passed = runCli([
+      "diagnostic-gate",
+      taskPath,
+      "--ledger",
+      ledgerPath,
+    ]);
+    assert.equal(passed.status, 0);
+
+    // forbidden side effect check: diagnostic-gate must never write the ledger
+    const ledgerAfter = JSON.parse(readFileSync(ledgerPath, "utf8"));
+    assert.deepEqual(
+      ledgerAfter,
+      ledger,
+      "diagnostic-gate must never mutate the ledger",
+    );
+  });
+});
+
+test("(71) CLI diagnostic-gate: corrupted ledger -> UNJUDGABLE, exit 0 (fail-open per existing contract)", () => {
+  withFixtureDir((dir) => {
+    const taskPath = join(dir, "coder-task.md");
+    const ledgerPath = join(dir, "reject-streak.json");
+    writeFileSync(taskPath, "task_id: HYK-158-coder-9\n", "utf8");
+    writeFileSync(ledgerPath, "{not valid json", "utf8");
+    const { status, stdout } = runCli([
+      "diagnostic-gate",
+      taskPath,
+      "--ledger",
+      ledgerPath,
+    ]);
+    assert.equal(status, 0);
+    assert.match(stdout, /UNJUDGABLE/);
   });
 });

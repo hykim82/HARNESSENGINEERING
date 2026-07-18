@@ -31,13 +31,13 @@ Reasons:
 
 Source: HYK-80 design comment (2026-07-03, human-approved).
 
-| Defect | Problem | Enforcement mechanism | Status |
-| --- | --- | --- | --- |
-| D1 | Boot reads state but not procedure, so a post-`/clear` session re-derives (and misremembers) the rules. | Boot-line pointer to `docs/claude-orchestrator-handoff.md` in the prompt template, `harness-init.md`, and `phase-handoff.template.md`. | Done (HYK-79) |
-| D2 | Orchestrator can skip the contract's required independent review and self-certify. | `commit-msg` git hook (`hooks/commit-msg` → `scripts/check/review-gate.mjs`): an issue-tagged commit is blocked unless `.harness/review.md` carries matching `for: <id>` + `verdict: approved` + an independent-reviewer `role: REVIEW-*` marker, or the message carries an audited `skip-review: <reason>` trailer line. | Implemented this issue (v2, HYK-81), see below |
-| D3 | Relay has no task identity or acknowledgment, so a stale `<role>-task.md` can run under an ambiguous "go". | `<role>-task.md` carries `task_id:` + `dropped_at:` headers; `<role>.md` must echo the same `task_id:` and end with `>>> DONE: ... @ <time KST>`; `scripts/check/relay-handshake.mjs` diffs the two and rejects a mismatched id or a DONE timestamp that predates the drop. | Implemented this issue (HYK-82), see below |
-| D4 | `STATUS.md` drifts from the real Linear issue state and poisons the next boot. | Script diffs Linear against `STATUS.md`; run at boot and at commit time (needs network access, so it is orchestrator-invoked rather than a local-only hook). | Design only in this issue |
-| D5 | The Task Contract can silently contradict a governing document (e.g. role split in `multi-agent-v1.md`). | Contract-vs-governing-document contradiction flag, to be promoted from a checklist item to a lint check. | Design only in this issue |
+| Defect | Problem                                                                                                    | Enforcement mechanism                                                                                                                                                                                                                                                                                                     | Status                                         |
+| ------ | ---------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------- |
+| D1     | Boot reads state but not procedure, so a post-`/clear` session re-derives (and misremembers) the rules.    | Boot-line pointer to `docs/claude-orchestrator-handoff.md` in the prompt template, `harness-init.md`, and `phase-handoff.template.md`.                                                                                                                                                                                    | Done (HYK-79)                                  |
+| D2     | Orchestrator can skip the contract's required independent review and self-certify.                         | `commit-msg` git hook (`hooks/commit-msg` → `scripts/check/review-gate.mjs`): an issue-tagged commit is blocked unless `.harness/review.md` carries matching `for: <id>` + `verdict: approved` + an independent-reviewer `role: REVIEW-*` marker, or the message carries an audited `skip-review: <reason>` trailer line. | Implemented this issue (v2, HYK-81), see below |
+| D3     | Relay has no task identity or acknowledgment, so a stale `<role>-task.md` can run under an ambiguous "go". | `<role>-task.md` carries `task_id:` + `dropped_at:` headers; `<role>.md` must echo the same `task_id:` and end with `>>> DONE: ... @ <time KST>`; `scripts/check/relay-handshake.mjs` diffs the two and rejects a mismatched id or a DONE timestamp that predates the drop.                                               | Implemented this issue (HYK-82), see below     |
+| D4     | `STATUS.md` drifts from the real Linear issue state and poisons the next boot.                             | Script diffs Linear against `STATUS.md`; run at boot and at commit time (needs network access, so it is orchestrator-invoked rather than a local-only hook).                                                                                                                                                              | Design only in this issue                      |
+| D5     | The Task Contract can silently contradict a governing document (e.g. role split in `multi-agent-v1.md`).   | Contract-vs-governing-document contradiction flag, to be promoted from a checklist item to a lint check.                                                                                                                                                                                                                  | Design only in this issue                      |
 
 D1 is already live. D2 (HYK-81) and D3 (HYK-82) are real implementations. D4
 and D5 are recorded here as committed enforcement design, not yet built.
@@ -54,7 +54,7 @@ Given a commit message and a review-evidence file:
    bare numbers with no `HYK-` prefix (e.g. `(HYK-98, 99, 106)` or
    `HYK-98,99,106` with no spaces) — the commit is blocked unconditionally,
    with a reason that proposes the fully-written form (e.g. `HYK-98, HYK-99,
-   HYK-106`). This is a v4 (HYK-109) addition: abbreviated lists are **not
+HYK-106`). This is a v4 (HYK-109) addition: abbreviated lists are **not
    parsed and expanded** (doing so silently would guess at ids from bare
    numbers, which is ambiguous — a bare number could be a PR number, a line
    count, or unrelated prose), they are mechanically rejected so a human or
@@ -72,7 +72,7 @@ Given a commit message and a review-evidence file:
    commit's issue scope tied to the human-visible subject, not incidental
    mentions in the body prose. When the subject carries **more than one**
    distinct `HYK-<digits>` tag (a batch commit, e.g. `fix: hygiene batch
-   (HYK-98, HYK-99)`), duplicates are deduplicated and **every** distinct tag
+(HYK-98, HYK-99)`), duplicates are deduplicated and **every** distinct tag
    is checked independently against the evidence file in step 3 — one tag's
    evidence does not cover another's.
 2. Else, if the commit message's trailer block — the last paragraph, after
@@ -94,7 +94,7 @@ Given a commit message and a review-evidence file:
      batch commit it is one `for:` line per tag;
    - an approval verdict line `verdict: approved`. A bare `ready_for_review`
      declaration **no longer counts on its own** — that string is what a
-     role writes about its *own* work (e.g. Coder's `coder.md`), so accepting
+     role writes about its _own_ work (e.g. Coder's `coder.md`), so accepting
      it let a role self-certify;
    - an independent-reviewer marker `role: REVIEW...` (case-insensitive,
      e.g. `role: REVIEW-CODEX`). Without it, an approval with no reviewer
@@ -147,10 +147,10 @@ substrate and is left for a future revision.
 - `scripts/check/review-gate.mjs` exports the pure function
   `checkReviewGate({ message, reviewPath }) -> { ok, reason }` implementing
   the rule above, plus a CLI entry point: `node review-gate.mjs
-  <commit-msg-file>` exits `0` when `ok` and exits `1` with `reason` on
+<commit-msg-file>` exits `0` when `ok` and exits `1` with `reason` on
   stderr otherwise. When `reviewPath` is not supplied, the default resolves
   to `.harness/review.md` under the **repository root** (`git rev-parse
-  --show-toplevel`, falling back to `process.cwd()` outside a git repo), not
+--show-toplevel`, falling back to `process.cwd()` outside a git repo), not
   the process's current working directory — this keeps the check correct
   regardless of where the calling hook happens to run from. The evidence
   check (rule step 3) tests `for:`, `verdict: approved`, and the
@@ -229,7 +229,7 @@ substrate and is left for a future revision.
   stderr and exit `1`, instead of a silent/confusing 127.
 
   Finding `node.exe` is necessary but not sufficient under WSL. `git rev-parse
-  --show-toplevel` there returns a POSIX path (`/mnt/c/...`), and handing that
+--show-toplevel` there returns a POSIX path (`/mnt/c/...`), and handing that
   to Windows' `node.exe` fails: Windows node reads `/mnt/c/...` as
   `C:\mnt\c\...` and throws `MODULE_NOT_FOUND` for the script — so even a
   no-tag commit that should pass would fail with exit `1` for the wrong
@@ -281,7 +281,7 @@ automatically since it never copies the file's contents.
 
 Relay v2 uses a single `<role>-task.md` slot plus an ambiguous human "go".
 The original bug: the Orchestrator overwrites the slot with a new task, but a
-stale "go" already in flight runs the *old* task — nothing mechanically
+stale "go" already in flight runs the _old_ task — nothing mechanically
 checks "which task is this go for" or "did the worker actually pick up the
 task the Orchestrator intended." Until now, only the Orchestrator's own eyes
 compared `task_id:`/`for:` by convention, which is exactly the kind of
@@ -304,11 +304,11 @@ Given a `role` (e.g. `coder`) and a harness directory (default
    - If the result file has no `>>> DONE: ... @ <time>` line, blocked: `result missing ">>> DONE: ... @ <time KST>" line (required)`.
    - If that DONE timestamp does not parse, blocked: `result DONE timestamp not parseable: '<raw>'`.
    - If both parse and the DONE time is earlier than the drop time, blocked: `stale result: DONE (<doneAt>) predates task drop (<droppedAt>)`.
-   Missing or unparseable timing evidence is a rejection, not a skip — a
-   revision of this rule briefly let missing/unparseable timestamps skip the
-   staleness check and pass on id match alone; that was fail-*open* (a stale
-   same-id result with no or garbled timing evidence slipped through) and has
-   been replaced by the fail-closed version above.
+     Missing or unparseable timing evidence is a rejection, not a skip — a
+     revision of this rule briefly let missing/unparseable timestamps skip the
+     staleness check and pass on id match alone; that was fail-_open_ (a stale
+     same-id result with no or garbled timing evidence slipped through) and has
+     been replaced by the fail-closed version above.
 8. Otherwise, ok: `relay handshake ok for <taskId>`.
 
 ### Known limitation (honesty note)
@@ -370,7 +370,7 @@ satisfy by hand: write `for: HYK-80`, `verdict: approved`, and `role:
 REVIEW-CODEX` (or another `REVIEW-*` role) into `.harness/review.md` once an
 independent review has actually happened, or add a `skip-review: <reason>`
 trailer line at the end of the commit message when review genuinely does not
-apply. Nothing here requires a second person to *operate* the mechanics, but
+apply. Nothing here requires a second person to _operate_ the mechanics, but
 the `role: REVIEW-*` marker only means something if whoever writes it is
 telling the truth about a review having happened — see "Known limitation"
 above. What this design actually guarantees is narrower: skipping review, or
@@ -380,7 +380,7 @@ identified.
 
 ## D-CI external anchor — server-side enforcement (HYK-87 / B1)
 
-Everything above (D2 commit-msg gate, D3 handshake) runs *locally* and depends
+Everything above (D2 commit-msg gate, D3 handshake) runs _locally_ and depends
 on agent cooperation — an agent can `--no-verify`, edit the hook, or skip the
 handshake. The external anchor moves the authority off the agent's machine:
 
@@ -432,13 +432,13 @@ path a write-family tool is about to touch, resolved relative to the repo
 root — paths outside the repo root are never regulated (e.g. the control
 room under `D:\...` stays freely editable by ORCH):
 
-| Role | Allowed to write (inside repo root) | Everything else |
-| --- | --- | --- |
-| `ORCH` | `.harness/<anything>-task.md` (dropping a task) | denied |
-| `CODER` | anything, **except** `.harness/review.md`, `.harness/verify.md`, `.harness/*-task.md` | denied |
-| `REVIEW` | `.harness/review.md` only | denied |
-| `VERIFY` | `.harness/verify.md` only | denied |
-| unset / unrecognized | everything (unrestricted) | — but a warning is emitted so a silently-inactive guard is visible |
+| Role                 | Allowed to write (inside repo root)                                                   | Everything else                                                    |
+| -------------------- | ------------------------------------------------------------------------------------- | ------------------------------------------------------------------ |
+| `ORCH`               | `.harness/<anything>-task.md` (dropping a task)                                       | denied                                                             |
+| `CODER`              | anything, **except** `.harness/review.md`, `.harness/verify.md`, `.harness/*-task.md` | denied                                                             |
+| `REVIEW`             | `.harness/review.md` only                                                             | denied                                                             |
+| `VERIFY`             | `.harness/verify.md` only                                                             | denied                                                             |
+| unset / unrecognized | everything (unrestricted)                                                             | — but a warning is emitted so a silently-inactive guard is visible |
 
 ### Implementation
 
@@ -534,7 +534,7 @@ locally, in the moment, before it ever reaches a commit.
 
 This repo already has GitHub's native **Secret Scanning + Push Protection**
 (①) live on the public repo — free, and it blocks a push containing a
-recognized *provider* credential pattern (AWS, Stripe, GitHub tokens, and
+recognized _provider_ credential pattern (AWS, Stripe, GitHub tokens, and
 similar well-known shapes) before it ever lands. Its gap: **generic
 high-entropy secrets, custom formats, and full-history/PR-diff scanning with
 a configurable ruleset are GitHub Advanced Security features**, which are not
@@ -545,7 +545,7 @@ enabled here (paid). ② closes that gap for free with
   `master` and every `pull_request` is scanned; a finding fails the job and
   blocks the merge (branch protection already requires `enforce` green).
 - **`hooks/pre-commit` (local, git-native, fast feedback):** every `git
-  commit`, by anyone or anything invoking git directly — Claude via a shell
+commit`, by anyone or anything invoking git directly — Claude via a shell
   tool call, Codex, or a human at the terminal — runs through this hook
   first, unlike Claude Code's own `PreToolUse` hooks (see the role-guard
   section above), which only ever see Claude's own tool calls and are blind
@@ -557,7 +557,7 @@ enabled here (paid). ② closes that gap for free with
 CI installs a specific, checksum-verified gitleaks release rather than a
 floating tag or a third-party Action, per an explicit human decision (Option
 A over Option B, `gitleaks/gitleaks-action`, recorded against HYK-90 — the
-choice to add *any* externally-sourced binary that executes in CI is a
+choice to add _any_ externally-sourced binary that executes in CI is a
 supply-chain decision this harness treats as requiring a human sign-off
 naming the specific dependency, not something an agent decides unilaterally
 mid-task):
@@ -601,17 +601,17 @@ extends (does not replace) gitleaks' own default ruleset — every pattern
 listed [here](https://github.com/gitleaks/gitleaks/blob/master/config/gitleaks.toml)
 (AWS/GCP/Stripe/GitHub/generic-api-key/private-key-block/etc., each with its
 own entropy threshold) applies unmodified. Two narrow allowlist entries exist
-on top of that, each scoped to one exact file *and* one exact literal
+on top of that, each scoped to one exact file _and_ one exact literal
 substring (never a directory or blanket path exemption):
 
-| File | Exempted literal | Why it's not a secret |
-| --- | --- | --- |
-| `scripts/check/review-gate.test.mjs` | `[skip-review: ...] token` | Test fixture prose describing the skip-review trailer format, not a credential |
-| `templates/harness-init/phase-handoff.template.md` | `(save tokens)` | Refers to LLM context-window tokens, not a credential |
+| File                                               | Exempted literal           | Why it's not a secret                                                          |
+| -------------------------------------------------- | -------------------------- | ------------------------------------------------------------------------------ |
+| `scripts/check/review-gate.test.mjs`               | `[skip-review: ...] token` | Test fixture prose describing the skip-review trailer format, not a credential |
+| `templates/harness-init/phase-handoff.template.md` | `(save tokens)`            | Refers to LLM context-window tokens, not a credential                          |
 
 Both were added preemptively per the source task's own examples, not because
 a real gitleaks run flagged them — verified directly: running gitleaks
-against this repo's full history with *only* `useDefault = true` (no
+against this repo's full history with _only_ `useDefault = true` (no
 allowlist at all) already comes back clean (`no leaks found`), because
 neither string is quoted-and-assignment-shaped the way gitleaks' `generic-api-key`
 rule requires (a `key/token/secret/password`-adjacent word alone, with no
@@ -645,10 +645,10 @@ HYK-83: probe `gitleaks` then `gitleaks.exe` (Windows binary reachable from
 WSL/Git-Bash) in that order; if neither is found, **fail open** — print a
 three-line stderr explanation and `exit 0` rather than blocking every commit
 on every machine that hasn't installed gitleaks yet. This is a deliberate
-asymmetry with `hooks/commit-msg`'s D2 gate, which fails *closed* (blocks)
+asymmetry with `hooks/commit-msg`'s D2 gate, which fails _closed_ (blocks)
 when its own dependency (the review-evidence file) is missing: D2's evidence
 file is something this harness's own workflow produces, so its absence is
-itself meaningful, while a missing *third-party scanner binary* just means
+itself meaningful, while a missing _third-party scanner binary_ just means
 "not installed yet," and CI is the authority regardless. When gitleaks is
 found, `gitleaks protect --staged --redact` scans exactly the staged diff (not
 the whole tree or history — that's what `detect` does, reserved for CI), and
@@ -682,7 +682,7 @@ fast feedback, not as the security boundary.
 **Codex vs. Claude coverage, restated:** the `role-guard` PreToolUse hook
 above only fires on Claude Code's own tool calls (`Edit`/`Write`/`MultiEdit`/
 `NotebookEdit`) and has no visibility into Codex or a manual terminal
-`git commit`. `hooks/pre-commit`, being a native git hook, fires on *any*
+`git commit`. `hooks/pre-commit`, being a native git hook, fires on _any_
 `git commit` regardless of what produced it — this is what makes ② the
 Codex-covering half of the two mechanisms, where role-guard is a
 Claude-specific guardrail.
@@ -692,7 +692,7 @@ Claude-specific guardrail.
 ### Relationship to Tier 1
 
 The human-facing status board (`STATUS.md`) has, until now, been kept
-current purely by convention (Tier 1): every role is *supposed* to update
+current purely by convention (Tier 1): every role is _supposed_ to update
 its row when it finishes, but nothing checked that it actually happened. A
 skipped self-report leaves the board pointing at stale state, which then
 poisons whatever reads it next — the human, or a fresh Orchestrator session
@@ -714,7 +714,7 @@ read, not for this check to parse. Freshness is judged by comparing file
   `HEAD` commit's timestamp (`git log -1 --format=%cI`).
 - If `newestWork` is later than `statusMtime` by more than a grace window,
   the board is stale: exit `1` with a reason naming which file (or `HEAD
-  commit`) is newer and by how much.
+commit`) is newer and by how much.
 
 This was a deliberate choice over parsing the human-typed timestamp
 string, for two reasons: parsing a hand-typed `YYYY-MM-DD HH:MM KST` string
@@ -726,7 +726,7 @@ this harness worried the sandbox clock ran ~9h behind real time; a direct
 comparison of PowerShell/Git-Bash/WSL/`git commit` timestamps on
 2026-07-07 found all four agree with real KST, so that specific fear did not
 reproduce — but the mtime design does not need that finding to hold. Even a
-sandbox clock that *is* skewed relative to real time still orders two files
+sandbox clock that _is_ skewed relative to real time still orders two files
 written by the same clock correctly relative to each other, which is all
 this check needs.
 
@@ -735,7 +735,7 @@ this check needs.
 A worker's normal, correct behavior — write its result file, then
 self-report its own `STATUS.md` row in the same turn (see the status
 template's rule 5) — produces two writes a few hundred milliseconds to a
-few seconds apart, with `STATUS.md` written *second* and therefore normally
+few seconds apart, with `STATUS.md` written _second_ and therefore normally
 newer. A grace window absorbs that ordering plus coarse mtime resolution on
 some filesystems (up to ~1s on FAT-family volumes) without either masking
 real staleness or false-alarming on a normal self-report.
@@ -758,8 +758,8 @@ the initial "fresh" state and the re-check.
 - `scripts/check/status-fresh.mjs` follows the same shape as
   `relay-handshake.mjs`/`role-guard.mjs`: a pure exported function
   `checkStatusFresh({ statusPath, harnessDir, graceMs, headTime }) -> {
-  ok, reason }` plus a CLI entry point (`node status-fresh.mjs [--status
-  <path>] [--harness-dir <path>]`, or the `HARNESS_STATUS_PATH` /
+ok, reason }` plus a CLI entry point (`node status-fresh.mjs [--status
+<path>] [--harness-dir <path>]`, or the `HARNESS_STATUS_PATH` /
   `HARNESS_DIR` env vars). `headTime` is an explicit injection point — pass
   a `Date` or `null` to bypass the real `git log` call — which is what makes
   `status-fresh.test.mjs` able to exercise the HEAD-comparison branch
@@ -767,7 +767,7 @@ the initial "fresh" state and the re-check.
 - **Path override, required in this repository.** The default `statusPath`
   (`<repoRoot>/.harness/STATUS.md`) assumes the harness-init default layout
   where the board lives inside the target repo. HARNESSENGINEERING's own
-  board lives *outside* the repo, at `D:\문서관리\하네스-관제실\STATUS.md`
+  board lives _outside_ the repo, at `D:\문서관리\하네스-관제실\STATUS.md`
   (see "Harness control room" in project memory) — so any live invocation
   here must pass `--status "D:\문서관리\하네스-관제실\STATUS.md"` (or set
   `HARNESS_STATUS_PATH`) explicitly; the default path resolves to a file
@@ -831,6 +831,7 @@ the initial "fresh" state and the re-check.
   UX (hard block vs. warning) depends on how Claude Code's `Stop` hook
   contract handles a failing command, which is outside this document's
   scope to define.
+
 - Same trust boundary as every other local check in this document: an
   agent or operator with shell access can remove the Stop hook wiring, or
   simply never install it, and nothing here detects that. This sits in the
@@ -840,16 +841,16 @@ the initial "fresh" state and the re-check.
 
 ### Relationship to D1
 
-D1 ("boot reads state but not procedure") was closed for the *operating
-procedure* by a boot-line pointer to
+D1 ("boot reads state but not procedure") was closed for the _operating
+procedure_ by a boot-line pointer to
 `docs/claude-orchestrator-handoff.md`. What it never covered is
-*project-specific* context — the hard constraints unique to one target repo
+_project-specific_ context — the hard constraints unique to one target repo
 (the running example throughout this harness: TEAM10, where committing
 harness tooling to the shared team repo would be a real incident, not a
 style violation). Until now that knowledge lived in two soft places: a
 human pasting a boot line, or an agent choosing to read the control room
 unprompted. Both depend on someone remembering, every single time,
-including after every `/clear`. D6 moves the *hard constraints* subset of
+including after every `/clear`. D6 moves the _hard constraints_ subset of
 that knowledge out of memory and into a file a hook reads mechanically.
 
 ### What gets injected
@@ -873,12 +874,12 @@ it into every session's context automatically.
   give.
 - **`UserPromptSubmit`** (fires before every prompt, including the first
   one after `/clear`) — **gate only, does not re-inject**. If the context
-  file exists *and its card is usable* (see "Scope A" below), it passes
+  file exists _and its card is usable_ (see "Scope A" below), it passes
   silently (`exit 0`, no output) — this hook does not repeat the injection
   on every turn, which would waste tokens for no benefit once
   `SessionStart` has already done it once per session. It blocks — `exit 2`
   plus a `{"decision":"block","reason":"..."}` JSON payload — under two
-  *confirmed* conditions: the file is absent, or the file was read
+  _confirmed_ conditions: the file is absent, or the file was read
   successfully and its card is confirmed unusable (empty or unedited
   placeholder). Anything less certain (a read error on a file that does
   exist, an unexpected exception) is **not** treated as confirmed-unusable
@@ -918,7 +919,7 @@ at all, and D6 v1 didn't catch it. Scope A closes that gap:
   missing one (never injects placeholder text as if it were a real
   constraint), still `exit 0` (this hook type still cannot block).
 - **Fail-open boundary, restated for Scope A:** blocking requires the file
-  to have been read and its content *confirmed* unusable. A file that
+  to have been read and its content _confirmed_ unusable. A file that
   exists but can't be read (permission error, race condition) is treated as
   uncertain, not confirmed-unusable, and passes through — the same
   fail-open principle D6 v1 already applied to unexpected exceptions, now
@@ -931,11 +932,11 @@ at all, and D6 v1 didn't catch it. Scope A closes that gap:
 **Addendum (HYK-97) — the gate had a real gap, found by actual use, not
 theory.** The example above (`<GITHUB_REPO>`) is exactly the kind of token
 `isUsableCard`'s `/<[A-Z][A-Z0-9_]*>/` regex was built to catch, and
-`install.mjs` *does* substitute it at install time — so it was never the
+`install.mjs` _does_ substitute it at install time — so it was never the
 placeholder actually left behind in practice. The template's **other**
 example, `<this project's own hard constraint>`, is lowercase and was never
 substituted (it's the slot a human is supposed to fill in), and the regex
-does not match it at all: the pattern requires the *entire* bracket body to
+does not match it at all: the pattern requires the _entire_ bracket body to
 be `[A-Z][A-Z0-9_]*`, and "this project's..." fails at its second
 character. A real `team-local` install onto TEAM10 (HYK-85's first
 non-self-referential validation) hit this directly: the freshly-installed,
@@ -960,13 +961,13 @@ existing regex already catches, chosen with a `REPLACE_ME_` prefix that
 cannot collide with `install.mjs`'s own substitution tokens
 (`<PROFILE>`, `<REPO_PATH>`, `<CONTROL_ROOM_PATH>`, `<GITHUB_REPO>`,
 `<BOT_ACCOUNT>`, `<VERIFY_CMD>`). The explanatory prose that used to live
-*inside* the placeholder brackets (e.g. "Short, imperative, non-negotiable
+_inside_ the placeholder brackets (e.g. "Short, imperative, non-negotiable
 rules only...") moved to plain guidance text or an HTML comment next to the
 token, outside the angle brackets, so nothing is lost — it just no longer
 sits somewhere the gate has to reason about. `context-inject.mjs` itself —
 `isUsableCard`, `PLACEHOLDER_RE`, everything — is **unchanged**; this is a
 template-shape fix confirmed by `context-inject.test.mjs` gaining three new
-cases built from the *actual* template file on disk (not a hand-copied
+cases built from the _actual_ template file on disk (not a hand-copied
 string), one of which is exactly the false-positive check above.
 
 **Residual limit, unchanged by this fix:** this remains a form check, not a
@@ -987,11 +988,11 @@ enforcement logic, only a structural convention plus tests that pin it
 down:
 
 - `project-context.template.md` now has **two headings**: `## HARD
-  CONSTRAINTS` (short, imperative, non-negotiable — the only thing that
+CONSTRAINTS` (short, imperative, non-negotiable — the only thing that
   gets injected) followed by `## 목표·의도·맥락` (Goals / Intent / Context —
   freeform, storage-only, never injected, as long as useful).
 - This split costs nothing to enforce because `extractHardConstraints`
-  (Scope A/D6) already stops at the *next* `##` heading — putting a second
+  (Scope A/D6) already stops at the _next_ `##` heading — putting a second
   section after `HARD CONSTRAINTS` was already excluded from injection by
   the extraction logic that existed before this task. Scope D is a
   documentation-and-template change confirmed by test, not a new code path:
@@ -1007,14 +1008,14 @@ down:
   gets carried into every session).
 - Forward-looking intent, not built in this scope: a future `/clear`-time
   re-orientation step (Scope B) is expected to append deltas to `## 목표·
-  의도·맥락` over time, making it the project's running memory rather than a
+의도·맥락` over time, making it the project's running memory rather than a
   one-time background paragraph written once at install time.
 
 ### Scope C (HYK-96) — `/capture-context` capture-assist skill
 
-D6/Scope A close the *injection* half of the capture problem — a session
+D6/Scope A close the _injection_ half of the capture problem — a session
 cannot proceed with a missing or stub `PROJECT-CONTEXT.md`. What they never
-address is the *other* half: making a human or agent actually write the
+address is the _other_ half: making a human or agent actually write the
 card's content in the first place. Nothing mechanical enforces that a real
 goal, intent, or hard constraint that came up mid-conversation ever makes it
 into the file — that has always depended on someone remembering to go edit
@@ -1072,20 +1073,20 @@ cannot be closed mechanically), it lowers the friction of doing it right:
 
 - **Cannot verify completeness or quality mechanically.** "Did this capture
   everything that mattered" is a judgment call the skill cannot make on its
-  own — it surfaces only what the model *noticed* as durable during the
+  own — it surfaces only what the model _noticed_ as durable during the
   scan; the human's edit/approval step is the only actual quality gate.
 - **Does not see through prior compaction.** If the conversation was already
   summarized before the skill ran, whatever the summary dropped is gone from
   the skill's view too — there is no way to recover it retroactively.
 - **Not a hard gate, and not Scope B.** The skill only runs on explicit
   invocation (`/capture-context`); it does not intercept `/clear` and blocks
-  nothing by itself. A `/clear`-time re-orientation *checkpoint* is separate
+  nothing by itself. A `/clear`-time re-orientation _checkpoint_ is separate
   work, built below as Scope B.
 - **Same local trust boundary as every other mechanism in this document.**
   Nothing stops an agent or operator from skipping the skill, or from
   writing a delta that looks plausible but doesn't actually reflect the
-  conversation. The self-check step only proves the resulting card's *form*
-  passes `isUsableCard` — it says nothing about whether its *content* is
+  conversation. The self-check step only proves the resulting card's _form_
+  passes `isUsableCard` — it says nothing about whether its _content_ is
   honest.
 
 ### Scope B (HYK-96) — `/clear-safe` reconciliation checkpoint
@@ -1094,7 +1095,7 @@ cannot be closed mechanically), it lowers the friction of doing it right:
 subsection:**
 
 - **There is no hook that can intercept `/clear` conversationally.**
-  `SessionStart`'s `clear|compact` matcher fires *after* `/clear`, in the
+  `SessionStart`'s `clear|compact` matcher fires _after_ `/clear`, in the
   brand-new session — by then the old context is already gone, far too late
   to capture anything from it. Scope B is therefore **structurally
   incapable of being a hard gate** on `/clear` itself; it can only ever be a
@@ -1104,7 +1105,7 @@ subsection:**
   no signal to react to.
 - **What the machine part actually verifies is form, not content** — the
   same altitude as Scope A's card gate: it can confirm a reconciliation
-  *attestation* was filled in, never that the reconciliation was done well
+  _attestation_ was filled in, never that the reconciliation was done well
   or even done at all in good faith.
 
 With those limits acknowledged, the actual mechanism:
@@ -1123,6 +1124,7 @@ With those limits acknowledged, the actual mechanism:
   (nothing needed reconciling this session) — never left blank. The
   human-facing 🟢 prose declaration is unchanged and still coexists with
   this marker; the marker is the machine-readable half of the same claim.
+
 - **Soft checker, `Stop` hook.** `scripts/check/clear-safe-check.mjs`
   exports a pure function `checkClearSafe(statusText) -> { ok, reason }`
   following the same text-in/struct-out shape as
@@ -1146,7 +1148,7 @@ With those limits acknowledged, the actual mechanism:
   above, rather than pretending otherwise, while giving the one role that
   actually owns `STATUS.md` (ORCH) a real self-repair loop.
 - **Relationship to A/C/D.** A (form gate) and D (card structure) are what
-  make a *filled* `PROJECT-CONTEXT.md` mechanically distinguishable from a
+  make a _filled_ `PROJECT-CONTEXT.md` mechanically distinguishable from a
   stub; C (`/capture-context`) is the hand that actually does the
   reconciling and produces the delta. B is the last piece: the protocol
   and reminder that ties a 🟢 `/clear`-safe declaration to that
@@ -1185,6 +1187,7 @@ With those limits acknowledged, the actual mechanism:
   event) or its own separate entry — either way, both checks read the same
   board and both are non-blocking (`status-fresh.mjs` also warns rather
   than hard-blocks on `Stop`).
+
 - **Cycle/phase boundary receipt (HYK-128 addition).** A 🟢 `/clear`-safe
   declaration that passes the attestation check above is now also required
   to carry a **cycle-receipt** block — a second machine-parsed marker,
@@ -1218,13 +1221,13 @@ With those limits acknowledged, the actual mechanism:
   out together.
   - **Honesty note, same shape as the attest check above — and narrower than
     an earlier draft of this note claimed:** this only verifies the six
-    required fields are *present and non-empty* (plus, for `boundary:
-    phase`, that `open_set_sync` specifically isn't empty or the literal
+    required fields are _present and non-empty_ (plus, for `boundary:
+phase`, that `open_set_sync` specifically isn't empty or the literal
     `판정불가` sentinel). It does **not** validate that any field's value is
     well-formed or drawn from a known set — a receipt with `boundary:
-    nonsense`, `sync_result: nonsense`, or any other garbage string in a
+nonsense`, `sync_result: nonsense`, or any other garbage string in a
     required field still passes, as long as the field is non-empty. It
-    certainly does not verify that any field's value is *true* (that
+    certainly does not verify that any field's value is _true_ (that
     `result_ref` really names this cycle's actual result, that `sync_result`
     reflects a real `linear-sync` run that was actually executed, etc.) —
     presence-only, not shape-valid, not fact-checked. Same Tier 2 soft
@@ -1262,7 +1265,7 @@ instruction).
   and hook-payload handling live only in the CLI block, so the extraction
   logic is testable without touching a filesystem or a hook contract) plus
   a CLI entry point: `node context-inject.mjs --mode
-  <session-start|user-prompt-submit> [--context <path>]`, path also
+<session-start|user-prompt-submit> [--context <path>]`, path also
   overridable via `HARNESS_CONTEXT_PATH`. Default context path is
   `<repoRoot>/.harness/PROJECT-CONTEXT.md`, same root-resolution pattern as
   every other check here.
@@ -1276,7 +1279,7 @@ instruction).
 - `scripts/check/context-inject.test.mjs` (`node:test`, 12 cases): 6 cover
   `extractHardConstraints` directly (extraction, stopping at the next `##`
   heading, missing heading, blank section, case/whitespace-insensitive
-  heading match, and a heading with extra trailing words correctly *not*
+  heading match, and a heading with extra trailing words correctly _not_
   matching the exact-title requirement); 6 cover the CLI via
   `execFileSync` against a real child process (`session-start` with a
   populated file, with a missing file, and with a file missing the
@@ -1296,7 +1299,7 @@ instruction).
   gitleaks/branch-protection checks, context injection has no external
   anchor to move to — a `SessionStart`/`UserPromptSubmit` hook is
   inherently a property of the client running the session. This is not a
-  gap to close later; it is what this mechanism *is*.
+  gap to close later; it is what this mechanism _is_.
 - **Same local trust boundary as role-guard and status-fresh.** An agent or
   operator with shell access can remove the hook wiring from
   `.claude/settings.local.json`, or delete `PROJECT-CONTEXT.md` and route
@@ -1361,14 +1364,14 @@ project:
 - **`missingInStatus`** — an issue Linear shows as not
   `completed`/`canceled`/`duplicate`, with no corresponding entry in §6 at all
   (the reverse gap).
-- **`stateDrift`** (added in the HYK-128 round) — an issue open on *both*
-  sides (§6 and Linear agree it's not done) but disagreeing on *which* open
+- **`stateDrift`** (added in the HYK-128 round) — an issue open on _both_
+  sides (§6 and Linear agree it's not done) but disagreeing on _which_ open
   state it's in — e.g. §6 says "Todo" while Linear says "In Progress". This is
   judged by **`stateName` text comparison, not `WorkflowState.type`**: team
   HYK's "In Progress" (`type: started`) and "In Review" (`type: backlog`) have
-  *different* types, so type comparison alone cannot distinguish them. §6's
+  _different_ types, so type comparison alone cannot distinguish them. §6's
   free-text state is normalized to one of a fixed canonical set (`Todo`, `In
-  Progress`, `In Review`, `Backlog`, `Done`, `Canceled`, `Duplicate`) via
+Progress`, `In Review`, `Backlog`, `Done`, `Canceled`, `Duplicate`) via
   case-insensitive prefix match before comparison; when normalization fails
   (unrecognized text), the pair is skipped entirely rather than guessed at —
   this check would rather miss a drift than manufacture a false positive out
@@ -1382,7 +1385,7 @@ common case — produces no output beyond a one-line `ok`, exit `0`.
 
 ### Fail-open semantics
 
-Every failure mode this check can hit *before* it has a real diff to report
+Every failure mode this check can hit _before_ it has a real diff to report
 is treated as "cannot judge, so don't block":
 
 - No `LINEAR_API_KEY` in `process.env` and no readable `.env.local` (or a
@@ -1393,7 +1396,7 @@ is treated as "cannot judge, so don't block":
 
 This mirrors `status-fresh.mjs`'s own philosophy: a Stop hook that hard-blocks
 a session merely because the machine is offline, or a token hasn't been
-provisioned yet, would make the harness *less* usable, not more correct.
+provisioned yet, would make the harness _less_ usable, not more correct.
 **Exit `2` is reserved exclusively for a confirmed diff** — an actual query
 against Linear that came back and disagreed with §6. No failure mode short of
 that produces anything stronger than a warning.
@@ -1420,7 +1423,7 @@ version-controlled guard.
   the next `###` heading, and skipping the parenthetical Done-rollup line
   since it doesn't match the `- **HYK-<n>**` shape at all) and
   `diffSync(statusIssues, linearIssues) -> { staleInStatus, missingInStatus,
-  stateDrift }` — plus `normalizeStatusState(text) -> <canonical name> | null`
+stateDrift }` — plus `normalizeStatusState(text) -> <canonical name> | null`
   (the HYK-128 addition backing `stateDrift`'s prefix-match normalization) and
   `loadLinearApiKey(root, env = process.env)`, also exported and pure with
   respect to its `env` parameter, for the fail-open token-loading path.
@@ -1490,7 +1493,7 @@ version-controlled guard.
 - Live drift injection: a temporary copy of the real STATUS file had a fake
   open entry added for HYK-97 (already Done in Linear) — running against
   that copy correctly reported `staleInStatus: HYK-97 ... Linear state is
-  'Done' ...` and exited `2`; the temporary file was deleted immediately
+'Done' ...` and exited `2`; the temporary file was deleted immediately
   after. The real control room file was never modified.
 - Fail-open: run from a directory outside this repository with
   `LINEAR_API_KEY` unset from the environment and no `.env.local` present —
@@ -1522,7 +1525,7 @@ version-controlled guard.
   the same turn, or one that appears between checks, is invisible to it.
 - **`stateDrift` is a text comparison, nothing deeper (HYK-128 addition).**
   It only tells you §6's normalized state string doesn't match Linear's
-  `stateName` string; it does not know *which* side is wrong, does not
+  `stateName` string; it does not know _which_ side is wrong, does not
   validate that either side's state transition was legitimate, and does not
   attempt any judgment about §6's surrounding natural-language description
   (a state name can match while the prose around it is stale or misleading —
@@ -1535,7 +1538,7 @@ version-controlled guard.
   classified Tier 2/advisory everywhere else in this document (no external
   anchor can force a Linear-side correction, so a hard block was never
   actually earned). `resolveSyncExitCode({ staleInStatus, missingInStatus,
-  stateDrift }) -> 0 | 1` is exported from `linear-sync.mjs` specifically so
+stateDrift }) -> 0 | 1` is exported from `linear-sync.mjs` specifically so
   this exit contract is unit-testable without a live Linear API call. Unlike
   `clear-safe-check.mjs`/`controlroom-fresh.mjs` below, this check was **not**
   promoted to ORCH-only blocking — see "Stop hook blocking self-consumption"
@@ -1593,15 +1596,16 @@ explicitly.
   present and non-empty; a missing field fails the check with that field
   named explicitly, never a generic "envelope invalid." **`captured_at` is
   the one field with actual format validation** — it must match `YYYY-MM-DD
-  HH:MM KST` exactly (no seconds, `KST` required), and a non-empty but
+HH:MM KST` exactly (no seconds, `KST` required), and a non-empty but
   wrongly-shaped value (e.g. seconds included) fails with an
   invalid-format reason distinct from "missing." Every other field
   (`snapshot_id`, `issue_ids`, `omitted_fields`, `unknown`, and the content
   after `state=` on an issue line) is checked for **presence only** — a
   non-empty but nonsensical value (`snapshot_id: ?`, `issue_ids:
-  not-an-id`, an issue line with an empty state) still passes. This gate
+not-an-id`, an issue line with an empty state) still passes. This gate
   does not validate that any of these values are well-formed identifiers,
   real issue ids, or known states — only that PM filled something in.
+
 - **G6 — echo check.** The PM task's `snapshot_id` must reappear verbatim in
   PM's result file (`pm.md`). This is a **literal string-identity check
   only** — it confirms PM read and echoed back the same envelope ORCH sent,
@@ -1680,12 +1684,12 @@ Given a control room path (a directory outside the target repository):
   them, and a `solo-full` install that hasn't set one up yet is not this
   check's business to flag.
 - **Check ①, dirty-cycle detection**: if `git status --porcelain` in the
-  control room is non-empty (uncommitted changes) *and* the last commit
+  control room is non-empty (uncommitted changes) _and_ the last commit
   there is older than `DEFAULT_DIRTY_THRESHOLD_MS` (3h) — warn: looks like a
   cycle's changes were never committed.
 - **Check ②, handoff staleness**: if both `STATUS.md` and
   `PHASE-HANDOFF.md` exist in the control room and `|STATUS.md mtime −
-  PHASE-HANDOFF.md mtime|` exceeds `DEFAULT_HANDOFF_THRESHOLD_MS` (12h) —
+PHASE-HANDOFF.md mtime|` exceeds `DEFAULT_HANDOFF_THRESHOLD_MS` (12h) —
   warn: the handoff may no longer describe the current phase.
 - Either warning is reported; **only an `HARNESS_ROLE=ORCH` turn's first
   Stop this cycle can escalate a confirmed warning to exit `2`** — see
@@ -1706,7 +1710,7 @@ files and keeps running regardless**: a control room with neither file
 present can still produce a dirty-cycle warning if its working tree is
 dirty and the last commit is older than the threshold. Missing
 STATUS/PHASE-HANDOFF silences check ②, not the whole function. When a
-warning *is* produced, the severity **(superseded by HYK-131 — originally
+warning _is_ produced, the severity **(superseded by HYK-131 — originally
 always `exit 1`, mirroring `status-fresh.mjs`/`clear-safe-check.mjs`)** now
 escalates to `exit 2` only on an `HARNESS_ROLE=ORCH` turn's first Stop this
 cycle, and is `exit 0` for every non-ORCH role and for a `stop_hook_active`
@@ -1721,8 +1725,8 @@ session this hook never even sees, is never affected by this check at all.
 - `scripts/check/controlroom-fresh.mjs` follows the same shape as every
   other check in this document: a pure exported function
   `checkControlRoomFresh({ controlRoomPath, now, dirtyThresholdMs,
-  handoffThresholdMs, isGitRepoFn, gitStatusFn, lastCommitTimeFn, statusPath,
-  handoffPath }) -> { ok, warnings, reason }`, plus a CLI entry point
+handoffThresholdMs, isGitRepoFn, gitStatusFn, lastCommitTimeFn, statusPath,
+handoffPath }) -> { ok, warnings, reason }`, plus a CLI entry point
   (`node controlroom-fresh.mjs --control-room <path>`, or the
   `HARNESS_CONTROL_ROOM_PATH` env var). `isGitRepoFn`/`gitStatusFn`/
   `lastCommitTimeFn`/`now` are injection points for testability without a
@@ -1748,7 +1752,7 @@ session this hook never even sees, is never affected by this check at all.
   script itself is harmless to have installed even where it will never
   fire), but only wires the `Stop` hook command for the `solo-full` profile
   — `buildHooksBlock` appends a `controlroom-fresh.mjs --control-room
-  "<posix control room path>"` entry to the `Stop` array only when
+"<posix control room path>"` entry to the `Stop` array only when
   `params.profile === "solo-full"`; `team-local` has no control room path to
   pass, so no entry is added there.
 
@@ -1794,7 +1798,7 @@ freeze as if it were permanent.
   concrete reason the `3h`/`12h` thresholds need the one-week observation
   window above, and also a reason the check's underlying premise
   ("dirty == suspicious") may need revisiting rather than just its numbers
-  — a live dashboard that is *supposed* to go uncommitted between cycles is
+  — a live dashboard that is _supposed_ to go uncommitted between cycles is
   a different shape of system than the "did someone forget to commit"
   failure this check was designed to catch.
 - **Unresolvable commit time is treated as fail-open, not worst-case.** If
@@ -1808,7 +1812,7 @@ freeze as if it were permanent.
   signal is treated the same as no signal.
 - **mtime is a form heuristic, not a content check.** Like
   `status-fresh.mjs`'s own design note, comparing file mtimes says nothing
-  about whether `PHASE-HANDOFF.md`'s *content* still describes the current
+  about whether `PHASE-HANDOFF.md`'s _content_ still describes the current
   phase — a handoff edited five minutes ago to say something already
   wrong passes this check cleanly. It can only ever catch the "nobody
   touched this in a very long time" shape of staleness, not a fresh-but-
@@ -1852,11 +1856,11 @@ was observed twice in a single day before this task was written.
   a one-shot self-repair opportunity, not an infinite retry loop.
 - **Payload readability is itself a G3 judgment (review-1 fix).** Whether the
   Stop hook's own stdin payload is missing, empty, non-JSON, or JSON that
-  doesn't parse to an object is *uncertain*, not a confirmed "no recursion":
+  doesn't parse to an object is _uncertain_, not a confirmed "no recursion":
   `readStopHookPayload` returns `{ ok, payload }` preserving that distinction
   instead of collapsing every failure into `{}`, and `resolveStopBlock`
   treats `ok: false` as `UNJUDGABLE` (`exit 0`, `reason_code:
-  stop_payload_unreadable`) — never blocking on an assumption about a
+stop_payload_unreadable`) — never blocking on an assumption about a
   payload it couldn't actually read. An independent review caught an earlier
   version of this adapter doing exactly that (malformed/empty stdin silently
   became `{}`, which then read as a valid non-recursive payload and reached
@@ -1878,12 +1882,12 @@ was observed twice in a single day before this task was written.
 
 ### Which checks were promoted, normalized, or left alone
 
-| Check | Disposition | Why |
-|---|---|---|
-| `clear-safe-check.mjs` | **Promoted to ORCH-only blocking** | Receipt/attestation fields are ORCH's own to fill in — immediately self-repairable, and the confirmed-failure vs. fail-open split was already clean before this task. |
-| `controlroom-fresh.mjs` | **Promoted to ORCH-only blocking** | Dirty-cycle/handoff-staleness is ORCH's own control room to commit/refresh — same self-repair shape as clear-safe. |
-| `linear-sync.mjs` | **Normalized to advisory (`exit 1`, not blocking)** | A confirmed drift may mean `STATUS.md` is wrong, or it may mean Linear itself needs a human correction — not something ORCH can always self-repair alone, and this check depends on a live network call to a service outside this harness's control. This also **fixed a pre-existing contract drift**: the code exited `2` on a confirmed diff while every other reference to this check in this document already classified it Tier 2/advisory. |
-| `status-fresh.mjs` | **Left unchanged (still advisory, `exit 1`)** | Staleness here can originate from a different worker or a human edit, not only from ORCH's own turn, and this task has no live evidence yet that ORCH-only blocking wouldn't misfire on that ambiguity. Revisit after the HYK-129 observation loop this task's design explicitly deferred to. |
+| Check                   | Disposition                                         | Why                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| ----------------------- | --------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `clear-safe-check.mjs`  | **Promoted to ORCH-only blocking**                  | Receipt/attestation fields are ORCH's own to fill in — immediately self-repairable, and the confirmed-failure vs. fail-open split was already clean before this task.                                                                                                                                                                                                                                                                             |
+| `controlroom-fresh.mjs` | **Promoted to ORCH-only blocking**                  | Dirty-cycle/handoff-staleness is ORCH's own control room to commit/refresh — same self-repair shape as clear-safe.                                                                                                                                                                                                                                                                                                                                |
+| `linear-sync.mjs`       | **Normalized to advisory (`exit 1`, not blocking)** | A confirmed drift may mean `STATUS.md` is wrong, or it may mean Linear itself needs a human correction — not something ORCH can always self-repair alone, and this check depends on a live network call to a service outside this harness's control. This also **fixed a pre-existing contract drift**: the code exited `2` on a confirmed diff while every other reference to this check in this document already classified it Tier 2/advisory. |
+| `status-fresh.mjs`      | **Left unchanged (still advisory, `exit 1`)**       | Staleness here can originate from a different worker or a human edit, not only from ORCH's own turn, and this task has no live evidence yet that ORCH-only blocking wouldn't misfire on that ambiguity. Revisit after the HYK-129 observation loop this task's design explicitly deferred to.                                                                                                                                                     |
 
 ### Implementation
 
@@ -1894,9 +1898,9 @@ was observed twice in a single day before this task was written.
   on missing/empty/malformed/non-object input — payload always `{}` in that
   case, but callers must check `ok` rather than trust the payload blindly),
   `formatBlockReason({ checkId, reasonCode, repairHint, attempt,
-  maxAttempts })`, and the single decision point `resolveStopBlock({ role,
-  hookPayloadResult, ok, checkId, reasonCode, repairHint }) -> { exit, reason
-  }` that every promoted checker's CLI calls once it already has its own
+maxAttempts })`, and the single decision point `resolveStopBlock({ role,
+hookPayloadResult, ok, checkId, reasonCode, repairHint }) -> { exit, reason
+}` that every promoted checker's CLI calls once it already has its own
   `{ ok, reason }` verdict.
 - `clear-safe-check.mjs` and `controlroom-fresh.mjs`'s CLI blocks each call
   `resolveStopBlock` after computing their existing `checkClearSafe`/
@@ -1904,7 +1908,7 @@ was observed twice in a single day before this task was written.
   unmodified as `repairHint` — the checker's own explanation of what's wrong
   doubles as ORCH's repair instruction, nothing is re-derived.
 - `linear-sync.mjs` gained `resolveSyncExitCode({ staleInStatus,
-  missingInStatus, stateDrift }) -> 0 | 1`, a pure function extracted from
+missingInStatus, stateDrift }) -> 0 | 1`, a pure function extracted from
   the CLI's own inline exit-code logic so the drift-vs-clean contract is
   unit-testable without a live Linear API call; the fail-open paths (missing
   key, missing STATUS file, network error) are untouched and still exit `0`
@@ -1957,7 +1961,7 @@ was observed twice in a single day before this task was written.
   appears and is fixed within the same turn, or between Stop invocations, is
   invisible to it.
 - **Tier 2 ceiling, not a gap this task closes.** Promoting a check to
-  `exit 2` changes its *severity for ORCH*, not its *substrate*: there is
+  `exit 2` changes its _severity for ORCH_, not its _substrate_: there is
   still no external anchor (no CI, no branch protection) that can force this
   hook to run at all. An operator or agent with shell access can remove the
   `Stop` hook wiring from `.claude/settings.local.json`, unset
@@ -1997,7 +2001,7 @@ can exist, pass its own unit tests, and still be silently unwired from the
 settings file that was supposed to invoke it (a hand-edited
 `.claude/settings.local.json`, a rename that broke a `command` string, a
 fresh clone that never ran `install.mjs`). Nothing in this document, before
-this task, ever verified the *installed* state against a single source of
+this task, ever verified the _installed_ state against a single source of
 truth — each check's own docs section describes intent, not a live audit.
 HYK-129 exists to close that gap: a periodic, mechanical run that confirms
 what's actually wired, actually fires, and actually behaves as documented,
@@ -2023,7 +2027,7 @@ rather than trusting the prose above to still be accurate.
   `UNJUDGABLE` means this runner cannot tell either way (settings unreadable,
   or — for every `claude_only` entry — no fresh canary receipt).
 - **A Claude-only check is never ALIVE from static wiring alone (G9).**
-  Confirming a hook *entry* exists in a settings file proves intent to wire
+  Confirming a hook _entry_ exists in a settings file proves intent to wire
   it, not that Claude Code ever actually invoked it. `role-guard`, `pm-guard`,
   `status-fresh`, `clear-safe-check`, `linear-sync`, `controlroom-fresh`,
   `context-inject`, and `worker-status-onstart` all require a fresh (≤8 day)
@@ -2040,7 +2044,7 @@ rather than trusting the prose above to still be accurate.
   still real check logic, just invoked in-process. Every run snapshots
   `git status --short` before and after; the report's receipts section
   records whether that diff was zero.
-- **Detection only, not repair.** This task's scope is explicitly to *find*
+- **Detection only, not repair.** This task's scope is explicitly to _find_
   drift, not fix it — the three drifts already known before this task began
   (pre-commit/gitleaks not installed in `.git/hooks`, CI running only 6 of
   this repo's `scripts/check/*.test.mjs` suites, and — resolved mid-cycle by
@@ -2075,7 +2079,7 @@ rather than trusting the prose above to still be accurate.
   CLI-runnable check, each self-contained (creates and tears down its own
   `mkdtempSync` fixture, including a real temporary `git init` repo for
   `controlroom-fresh`), returning `[{ id, variant: 'bad'|'good', expectedExit,
-  actualExit, pass, evidence }]`; `captureGitStatus`/`runSmokeSuite` wrap all
+actualExit, pass, evidence }]`; `captureGitStatus`/`runSmokeSuite` wrap all
   seven checks' cases together with a before/after `git status --short` diff
   (G8).
 - `scripts/check/selfcheck-report.mjs` — `buildReport(...)` renders the
@@ -2085,7 +2089,7 @@ rather than trusting the prose above to still be accurate.
   in-memory data only (G10) — no file I/O inside the builder itself;
   `writeReport` is the one function that touches disk.
 - `scripts/check/selfcheck.mjs` — the single entry point (`inventory →
-  smoke → report`, no model call, one command): resolves the real repo
+smoke → report`, no model call, one command): resolves the real repo
   root/control room/user home, loads the four real Claude settings files
   (repo, control room, `~/.claude-team`, `~/.claude`) it can find, runs
   inventory + smoke, and writes `.harness/selfcheck-report.md` (overridable
@@ -2107,7 +2111,7 @@ rather than trusting the prose above to still be accurate.
   `selfcheck-report.test.mjs` (schema test over `REPORT_SECTIONS`),
   `selfcheck.test.mjs` (two of its cases run the real, full
   `inventory → smoke → report` pipeline against this repo's own manifest.
-  Neither asserts a *specific* live status for any entry — a round of this
+  Neither asserts a _specific_ live status for any entry — a round of this
   task originally asserted `pre-commit-gitleaks → NOT_INSTALLED` and
   `ci-enforce → DRIFT` literally, and that assertion broke the same day a
   human installed the `pre-commit` hook mid-cycle (live state changed out
@@ -2139,7 +2143,7 @@ smoke suite's portion of that run was identical (G8).
   directory-scoped glob) as covering every discovered test file, rather
   than searching for each file's literal basename substring in the workflow
   text (which would have misjudged a glob-based workflow as missing
-  everything). A glob scoped to a *different* directory does not count —
+  everything). A glob scoped to a _different_ directory does not count —
   verified by a dedicated synthetic case.
 - **`selfcheck-freshness.mjs` — the selfcheck tool auditing its own
   bootstrap gap (PM 보고서 §6 [실행필요]).** A pure `checkSelfcheckFreshness`
@@ -2221,7 +2225,7 @@ smoke suite's portion of that run was identical (G8).
   every check this manifest describes.** A Codex-driven PM/REVIEW/VERIFY
   session triggers none of the hook events this inventory checks for at
   all — this selfcheck tool itself is engine-agnostic (runs fine under
-  Codex), but what it *measures* (whether Claude's hooks fired) is not.
+  Codex), but what it _measures_ (whether Claude's hooks fired) is not.
 - **`selfcheck-freshness.mjs`'s own `SessionStart` wiring is NOT live as of
   this task.** Writing to this repository's real `.claude/settings.local.json`
   was attempted and explicitly declined by this session's own permission
@@ -2304,11 +2308,11 @@ the control room's `PM\relay\`. The check:
 3. Looks for a `/^packet:\s*(\S+)/m` line. No line → not gated, falls through
    to normal role logic unaffected.
 4. A value starting with `(` (e.g. `(없음 — 사람이 PM 설계 3승인으로 직접
-   발주)`) is a narrative aside, not a path reference, and is skipped — this
+발주)`) is a narrative aside, not a path reference, and is skipped — this
    is what keeps a task file's own descriptive header (like this task's own
    `coder-task.md`) from being misread as a dangling packet reference.
 5. A non-absolute `packet:` value is rejected outright (`packet: 경로는
-   절대경로` — relative packet references are never trusted).
+절대경로` — relative packet references are never trusted).
 6. Otherwise `checkPacketGate({ packetPath })` runs; an unsigned/invalid
    packet blocks the task drop itself (`exit 2`), before the task ever
    reaches a worker.
@@ -2365,8 +2369,21 @@ repo's), since that is where PM sessions actually run:
 `D:\문서관리\하네스-관제실\.claude\settings.local.json`:
 
 ```json
-{ "hooks": { "PreToolUse": [ { "matcher": "Edit|Write|MultiEdit|NotebookEdit|mcp__linear-server__.*",
-  "hooks": [ { "type": "command", "command": "node \"C:/Users/Administrator/Documents/HARNESSENGINEERING/scripts/check/pm-guard.mjs\"" } ] } ] } }
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit|NotebookEdit|mcp__linear-server__.*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"C:/Users/Administrator/Documents/HARNESSENGINEERING/scripts/check/pm-guard.mjs\""
+          }
+        ]
+      }
+    ]
+  }
+}
 ```
 
 ### Known limitations (honesty notes)
@@ -2402,14 +2419,14 @@ repo's), since that is where PM sessions actually run:
     `pm-guard` coverage at all, not reduced coverage — the guard simply never
     runs in that engine.
   - **`packet-gate` only governs the packet-derived handoff, not a direct
-    repo write.** It checks a signed `승인:` line on a *packet file* before a
+    repo write.** It checks a signed `승인:` line on a _packet file_ before a
     packet-sourced `*-task.md` drop is accepted (E2/E2ⓑ above); it has no
     hook into, and does not inspect or block, a PM session's own direct
     `apply_patch`/`Write`/`Edit` calls against this repo.
   - **Therefore sol-PM's direct-repo-write prohibition is, as of this
     writing, convention only — no mechanical anchor enforces it.** Neither
     guard actually stops the write this probe demonstrated; "not `codex
-    sandboxing`" (the corrected framing above) is not replaced by "pm-guard
+sandboxing`" (the corrected framing above) is not replaced by "pm-guard
     and packet-gate instead" for this specific failure mode — both of those
     are real mechanisms for the different things they actually check, but
     neither is a backstop for a sol-PM session's direct repo write, and this
@@ -2441,7 +2458,7 @@ repo's), since that is where PM sessions actually run:
 
 The relay's worker-status flow is `IDLE →(task dropped) waiting for "go"
 →(go) 🔨 작업중 (in progress) →(done) ORCH 완료 보고 →(consumed) IDLE`. Of
-these four transitions, only the *completion* one had any mechanical
+these four transitions, only the _completion_ one had any mechanical
 detector at all — `relay-handshake.mjs` and `status-fresh.mjs` both check
 after the fact whether a worker's result echoes and postdates its task.
 The **go-time** transition (a worker starting real work) had no detector
@@ -2469,7 +2486,7 @@ variables (`HARNESS_ROLE`, `HARNESS_STATUS_PATH`, and — PM only —
 `HARNESS_PM_RELAY_DIR`):
 
 1. If `prompt` does not match `/^\s*go\b/i` (a go-command, e.g. `go` or `go
-   HYK-110-coder-1`; a `\b` word boundary means `gogo` does **not** match),
+HYK-110-coder-1`; a `\b` word boundary means `gogo` does **not** match),
    the hook is a no-op — `exit 0`, no file touched at all. This check runs
    first, before any environment/file access, so a normal conversational
    turn costs nothing.
@@ -2569,7 +2586,7 @@ itself (no heading → `null`; bounds stop at the next heading regardless of
 its level or number).
 
 **Round 3 fix (independent review reproduced a second real bug):** round 2
-correctly bounded the row *search* to §1's own body, but the row regex
+correctly bounded the row _search_ to §1's own body, but the row regex
 itself still ended in a bare `\s*` before its final `$` — and `\s*` matches
 newlines too. For an internal row (more §1 content follows it inside
 `sectionBody`), greedy backtracking always stopped at the first `$`-valid
@@ -2591,7 +2608,7 @@ candidate for that quantifier to consume in the first place, regardless of
 where the row sits or how many blank lines follow it.
 `worker-status-onstart.test.mjs` gained three cases: the exact reproduction
 (line count and heading structure both confirmed preserved via a literal
-regex asserting the row and heading are *not* glued); a fixture shaped
+regex asserting the row and heading are _not_ glued); a fixture shaped
 exactly like the real STATUS.md (`CODER`/`REVIEW`/`VERIFY` rows, `VERIFY`
 last) replacing `VERIFY` and confirming every row plus the following
 section header survive intact; and an edge case where the last §1 row is
@@ -2603,12 +2620,13 @@ the diff was exactly the one row, and the file's total line count was
 unchanged before and after.
 
 With round 3, the Rule section's "every other row, and every other section
-of the file, is left byte-for-byte untouched" claim (and the *newline*
+of the file, is left byte-for-byte untouched" claim (and the _newline_
 between a replaced row and whatever follows it) is now actually true for
 every row position within §1, not merely the internal-row cases round 2's
 own test suite happened to exercise.
 
 ### Live smoke (this task, temp STATUS copy only — the real control-room
+
 STATUS.md was never touched)
 
 Three scenarios, run against a real dropped task file (`.harness/
@@ -2630,6 +2648,7 @@ All three reproduced exactly as expected; see `.harness/coder.md`
 (HYK-110-coder-1) for the raw run log.
 
 ### Installation (human, one-time per session-launch config — not done by
+
 this task)
 
 Same convention as every other locally-installed hook in this document: the
@@ -2644,8 +2663,20 @@ from the boot line, the same place `HARNESS_ROLE` is already set today for
 `C:\Users\Administrator\.claude-team\settings.json`:
 
 ```json
-{ "hooks": { "UserPromptSubmit": [ { "hooks": [ { "type": "command",
-  "command": "node \"C:/Users/Administrator/Documents/HARNESSENGINEERING/scripts/check/worker-status-onstart.mjs\"" } ] } ] } }
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"C:/Users/Administrator/Documents/HARNESSENGINEERING/scripts/check/worker-status-onstart.mjs\""
+          }
+        ]
+      }
+    ]
+  }
+}
 ```
 
 ⓑ Control room, `D:\문서관리\하네스-관제실\.claude\settings.local.json`
@@ -2653,11 +2684,31 @@ from the boot line, the same place `HARNESS_ROLE` is already set today for
 entry from §E, not replacing it):
 
 ```json
-{ "hooks": {
-    "PreToolUse": [ { "matcher": "Edit|Write|MultiEdit|NotebookEdit|mcp__linear-server__.*",
-      "hooks": [ { "type": "command", "command": "node \"C:/Users/Administrator/Documents/HARNESSENGINEERING/scripts/check/pm-guard.mjs\"" } ] } ],
-    "UserPromptSubmit": [ { "hooks": [ { "type": "command",
-      "command": "node \"C:/Users/Administrator/Documents/HARNESSENGINEERING/scripts/check/worker-status-onstart.mjs\"" } ] } ] } }
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit|NotebookEdit|mcp__linear-server__.*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"C:/Users/Administrator/Documents/HARNESSENGINEERING/scripts/check/pm-guard.mjs\""
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"C:/Users/Administrator/Documents/HARNESSENGINEERING/scripts/check/worker-status-onstart.mjs\""
+          }
+        ]
+      }
+    ]
+  }
+}
 ```
 
 ### Known limitations (honesty notes)
@@ -2704,7 +2755,7 @@ consecutive reject, pulling in outside research around the fifth — were real
 and effective, but existed purely as ORCH's own unrecorded, in-the-moment
 judgment calls. Nothing wrote them down, nothing forced them to happen at a
 consistent point, and — the concrete mechanical gap this closes — nothing
-*could* have forced them, because the fact "this issue has now been rejected
+_could_ have forced them, because the fact "this issue has now been rejected
 N times in a row" had nowhere durable to live: `.harness/review.md` is a
 single relay slot, overwritten every round, so the streak evaporated the
 moment the next round's review landed. This mechanizes today's convention
@@ -2719,7 +2770,7 @@ like `pm-snapshot-gate.mjs`, is `orch-direct` substrate: nothing hooks it
 automatically, ORCH calls it itself at two points in the relay loop.
 
 - **`record`** (`node reject-streak.mjs record --review <path> [--ledger
-  <path>]`) — run when ORCH consumes a review result, *before* that round's
+<path>]`) — run when ORCH consumes a review result, _before_ that round's
   `.harness/review.md` gets overwritten by the next round. Parses `for:`
   (falling back to `task_id:` if `for:` is absent — both carry the same
   leading `HYK-<n>` issue prefix) and `verdict: approved|rejected` out of
@@ -2732,7 +2783,7 @@ automatically, ORCH calls it itself at two points in the relay loop.
   same baseline `gate` uses, so a first-ever rejection reads as streak 1,
   not an error.
 - **`gate`** (`node reject-streak.mjs gate [<coder-task-path>] [--ledger
-  <path>]`, default task path `.harness/coder-task.md`) — run before
+<path>]`, default task path `.harness/coder-task.md`) — run before
   dropping the next task file for an issue. Looks up that issue's current
   streak; if `< 2`, passes unconditionally (`exit 0`). If `>= 2`, the task
   file must carry a complete **escalation envelope** (below) or the drop is
@@ -2787,11 +2838,11 @@ is missing or invalid.
 Today's ad-hoc HYK-129 사이클3 pattern, written down as the ladder this gate
 partially enforces:
 
-| Streak | Requirement | Enforced by this gate? |
-| --- | --- | --- |
-| 2 consecutive rejects | Escalation envelope (cause + >=1 ORCH action) required on the next drop | **Yes** — `exit 2` if missing |
-| 3 consecutive rejects | Model escalation recommended/considered | No — convention only |
-| 4+ consecutive rejects | Discope or PM B2 advisory candidate | No — convention only |
+| Streak                 | Requirement                                                             | Enforced by this gate?        |
+| ---------------------- | ----------------------------------------------------------------------- | ----------------------------- |
+| 2 consecutive rejects  | Escalation envelope (cause + >=1 ORCH action) required on the next drop | **Yes** — `exit 2` if missing |
+| 3 consecutive rejects  | Model escalation recommended/considered                                 | No — convention only          |
+| 4+ consecutive rejects | Discope or PM B2 advisory candidate                                     | No — convention only          |
 
 Only the streak-2 envelope requirement is mechanically gated. The 3-streak
 and 4-streak rungs stay recorded here as the documented convention (per this
@@ -2829,7 +2880,7 @@ well-formed `issues` object, is **UNJUDGABLE**: both `record` and `gate`
 print a reason containing the literal string `UNJUDGABLE`, leave the file
 untouched, and exit `0` — the same fail-open posture every other check in
 this document uses for a parse/read failure it cannot resolve (D2's missing
-review file is the one deliberate fail-*closed* exception; this gate is not
+review file is the one deliberate fail-_closed_ exception; this gate is not
 that case). A malformed `review.md` (no `for:`/`task_id:` line, no
 recognized `verdict:` value) hits the same UNJUDGABLE-and-skip path in
 `record`, rather than crashing or silently recording a guessed entry — a
@@ -2880,7 +2931,7 @@ hidden block is exactly what R3 rules out.
 
 A human-facing "report tone" style guide (control-room
 `orchestrator-report-style.md`) was introduced. That guide is for how ORCH
-reports to the human — it must not leak into worker *work documents* (task
+reports to the human — it must not leak into worker _work documents_ (task
 files, templates, memory), where a report skeleton would derail the machine
 relay. `scripts/check/report-style-guard.mjs` is a `PreToolUse` guard, same
 substrate as `role-guard`, that blocks a Write/Edit carrying report-tone
@@ -2903,13 +2954,12 @@ signatures into a watched work-document path.
 
 ### Known limitation (honesty note)
 
-- **Claude-only, and only once wired.** Like `role-guard`, this is a Claude
-  Code `PreToolUse` hook: it does not see codex-worker edits or manual file
-  edits, and it has **no effect at all until wired** into
-  `.claude/settings.local.json`. Per the HYK-143 task, that wiring is
-  deferred to a post-merge ORCH self-config under human approval (HYK-115
-  precedent); until then the guard is "ALIVE via script+test" in the manifest
-  but enforces nothing.
+- **Claude-only.** Like `role-guard`, this is a Claude Code `PreToolUse` hook:
+  it does not see codex-worker edits or manual file edits. It was wired into
+  `.claude/settings.local.json` post-HYK-143 under human approval
+  (HYK-115 precedent); the manifest's `install_targets` entry went stale
+  (left `[]`) after that wiring landed, a drift independently confirmed by
+  verify-2 (07-18) and closed by HYK-160 라이더ⓐ.
 - **Signature-based, so variant phrasings evade it.** It keys on the guide's
   exact title/slug heading and the exact three skeleton tokens. A paraphrased
   tone leak, a translated heading, or a differently-named skeleton is not
@@ -2925,7 +2975,125 @@ signatures into a watched work-document path.
   guide copies also carry the `기술 답변 톤` title heading, which A catches
   independently.
 - Self-registered in `scripts/check/enforcement-inventory.json` as
-  `report-style-guard` (`claude-hook` substrate, `install_targets: []` until
-  wiring, `claude_only: true`), same "ALIVE via script+test existence" posture
-  as `role-guard`. The `enforce.yml` directory glob picks up
-  `report-style-guard.test.mjs` with no CI edit.
+  `report-style-guard` (`claude-hook` substrate, `install_targets` now
+  reflects the real `repo-settings`/`PreToolUse` wiring, `claude_only: true`).
+  The `enforce.yml` directory glob picks up `report-style-guard.test.mjs`
+  with no CI edit.
+
+## H — B0 사전 설계비평 형식·존재·순서 게이트 (b0-gate.mjs, HYK-159/HYK-160)
+
+### Problem restated
+
+`relay-terminal-setup.md` §2.15's B0 loop (HYK-130) started as a pure
+Tier2 convention: ORCH self-judges whether a design drop is "non-trivial"
+enough to need a PM critique, and if so, exchanges a request/response/
+consumption trio of blocks with PM before ever dropping the CODER task.
+The 07-18 weekly loop (HYK-123-pm-2) collected a week of real drops and
+found a 90% omission rate against that self-judgment — the convention
+existed on paper but almost never actually ran. That crossed this repo's
+own promotion bar (게이트-기준.md, "누락≥2 또는 ≥20%" 또는 "누락-반려
+연결"), so §2.15 was mechanized: `scripts/check/b0-gate.mjs` checks a
+target drop's classification marker and its three exchange blocks'
+existence/order, the same "format and existence only, never content
+quality" scope every other gate in this document keeps.
+
+### Exact command
+
+`node scripts/check/b0-gate.mjs --drop <pm-task 경로> --response <pm.md 경로> --consumption <로컬 소비 미러 경로>`
+
+Run by ORCH directly (`orch-direct` substrate, same posture as
+`reject-streak.mjs`/`pm-snapshot-gate.mjs` — no hook wires this
+automatically) **before** dropping the CODER task, only when the B0
+사전 자가판정 (5문항, §2.15) has classified the drop as **target**. A
+드롭 classified **non-target** needs only its one-line `B0: 비대상
+(사유: ...)` marker — `--response`/`--consumption` are omitted entirely
+and the gate passes on the 사유 field's presence alone (never on its
+soundness).
+
+### Exit codes and reasons
+
+`exit 2` = **coder-task 드롭 금지** (reason printed to stderr, one of):
+
+- `B0_CLASSIFICATION_REQUIRED` — the drop has neither a `## B0 사전 비평
+요청` block nor a `B0: 비대상 (사유: ...)` marker, or the 비대상 marker's
+  사유 field is empty.
+- `B0_EVIDENCE_REQUIRED` — a target drop is missing one of the three
+  blocks (request/response/consumption), or a block is present but
+  missing its `b0_id` or `결론` field.
+- `B0_ID_MISMATCH` — the response or consumption block's `b0_id` doesn't
+  match the request block's.
+- `B0_CONSUMPTION_EVIDENCE_REQUIRED` — the consumption block is missing
+  its `linear_comment:` field, or the field's value doesn't match either
+  accepted format below.
+
+`exit 0` = pass; only then does ORCH drop `coder-task.md`.
+
+### `linear_comment:` format (2 accepted forms)
+
+Either a full Linear web URL (`https://linear.app/...`) or the short
+form `comment:<id>`. Format only — the gate never fetches Linear, so it
+cannot and does not verify the comment actually exists or says what the
+local mirror claims.
+
+### Audit-trail precedence and mirror sync responsibility
+
+**Linear 이슈 댓글이 여전히 정본**(§2.15 교환 형식 불변) — the local
+`<!-- b0-consumption ... -->` mirror this gate reads is not a second
+source of truth, it's ORCH's echo of the same consumption conclusion
+already posted to Linear, written **immediately after** that comment, at
+관제실 `PM\산출물\<트랙>\<주제 폴더>\b0-<b0_id>.md` (or the cycle's own
+output file). **Sync responsibility = ORCH.** If the mirror and the
+Linear comment ever disagree, the Linear comment wins.
+
+### Honesty note (S4, Tier2)
+
+Same shape/limits `pm-snapshot-gate.mjs` and `reject-streak.mjs` already
+document for themselves: this gate checks presence, ordering, and
+`linear_comment` format only — never whether the PM critique itself was
+any good, whether ORCH's adoption decision was correct, or whether a
+비대상 self-judgment was honest. `record`/`gate`-equivalent invocation is
+**ORCH self-executed** (`orch-direct`, no hook) — if ORCH skips running
+it before a drop, nothing stops that drop; `selfcheck-inventory.mjs`
+audits the check's existence, not whether ORCH actually called it that
+cycle. This is the identical trust boundary `reject-streak.mjs`'s own
+honesty note already states for the same reason.
+
+### Implementation
+
+- `scripts/check/b0-gate.mjs`: pure functions `classifyB0`,
+  `checkB0Contract` (dispatching to internal `checkResponseBlock`/
+  `checkConsumptionBlock`/`checkTargetContract` helpers), plus a thin
+  `--drop`/`--response`/`--consumption` CLI — same text-in/struct-out
+  shape as every other module in this document.
+- `scripts/check/b0-gate.test.mjs` (`node:test`, 27 cases): classification
+  (target/non-target/neither); the full known-bad/paired-good matrix for
+  all four reason constants above, each isolated to a single changed
+  variable; three CLI end-to-end cases (complete exchange, 비대상
+  shortcut, missing marker); the `linear_comment` known-bad (missing/
+  malformed) and paired-good (URL form, `comment:<id>` short form) pairs
+  (HYK-160-coder-2, review-1 결함 2); and three drop-time integration
+  cases (HYK-160-coder-3, review-2 조건 3) exercising the exact command
+  above against a realistic `pm-task.md`/`pm.md`/local-mirror layout:
+  gate not invoked (nothing blocks an incomplete exchange sitting on
+  disk — the honest limit stated above), gate invoked on an incomplete
+  exchange (`exit 2`), gate invoked on a complete one (`exit 0`).
+- `b0-gate.test.mjs` also carries a **doc-code contract test**
+  (`docCodeContract` describe block, same convention as `reject-streak.
+test.mjs`'s enforcement-v1.md extraction test) that reads this very
+  section's fenced command line and reason-constant list out of
+  `docs/enforcement-v1.md` and asserts them against `b0-gate.mjs`'s real
+  exported reason strings and CLI flag names — a future edit to either
+  side that drifts from the other fails the suite instead of waiting for
+  a reviewer to notice by hand.
+- **Not yet self-registered in `scripts/check/enforcement-inventory.json`**
+  (honesty note, HYK-160-coder-3 scope: this round's diff was declared as
+  `docs/enforcement-v1.md` + test files only) -- `b0-gate` should get the
+  same `orch-direct`/`install_targets: []` manifest entry `reject-streak`/
+  `pm-snapshot-gate` already carry, the same "ALIVE via script+test
+  existence" posture, but that edit belongs to a follow-up round (or
+  라이더ⓐ-style registration pass), not this one. Until registered, a
+  `selfcheck-inventory.mjs` run correctly does **not** report a `b0-gate`
+  row at all (it only judges entries the manifest lists).
+- `.github/workflows/enforce.yml`'s `node --test scripts/check/*.test.mjs`
+  directory glob picks up `b0-gate.test.mjs` automatically — no CI file
+  edit needed.

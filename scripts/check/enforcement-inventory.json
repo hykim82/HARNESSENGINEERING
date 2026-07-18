@@ -331,7 +331,16 @@
       "substrate": "claude-hook",
       "script": "scripts/check/report-style-guard.mjs",
       "test": "scripts/check/report-style-guard.test.mjs",
-      "install_targets": [],
+      "install_targets": [
+        {
+          "location": "repo-settings",
+          "kind": "claude-settings",
+          "path": "REPO/.claude/settings.local.json",
+          "hook_event": "PreToolUse",
+          "matcher": "Edit|Write|MultiEdit|NotebookEdit",
+          "required": true
+        }
+      ],
       "expected_bad": "a Write/Edit to a watched work-document path (repo .harness/<role>-task.md, templates/**, control-room PM/relay/*-task.md, or any /memory/ path) whose content carries a report-tone signature -- signature A: a markdown heading copying the style guide's title '기술 답변 톤' or slug 'orchestrator-report-style'; signature B: the 5-part report skeleton set '결론'+'진단'+'정직 한계' all present as heading/numbered/bold structural items -> PreToolUse hook exit 2 (block)",
       "expected_good": "a watched-path write with no report-tone signature -> exit 0; a non-watched path or non-write tool -> exit 0 (not checked); prose use of 한계/결론/진단, a gate-card citation, or a mere 'orchestrator-report-style.md' filename reference -> exit 0 (known-good); malformed/absent hook payload or non-string content -> exit 0 (UNJUDGABLE, fail-open)",
       "failure_exit": 2,
@@ -339,7 +348,7 @@
       "owner": "ORCH",
       "claude_only": true,
       "self_registration_note": "HYK-143 사이클1 자기 등재, same convention as reject-streak/selfcheck-freshness above -- this checker audits its own manifest presence the same way it audits every other check.",
-      "invocation_note": "PreToolUse hook (Write/Edit matcher), same substrate as role-guard. install_targets is [] until wiring: per HYK-143 task the .claude/settings.local.json edit is deferred to a post-merge ORCH self-config under human approval (HYK-115 precedent). Until wired the guard is ALIVE-via-script+test but has no enforcement effect (documented limitation in docs/enforcement-v1.md)."
+      "invocation_note": "PreToolUse hook (Write/Edit matcher), same substrate as role-guard. HYK-160 라이더ⓐ (07-18): install_targets was left [] after the HYK-143 round even though the .claude/settings.local.json PreToolUse wiring was actually completed (verify-2, 07-18 독립 확인) -- this entry now reflects the real wiring, closing that ledger/reality drift."
     },
     {
       "id": "quality-check",

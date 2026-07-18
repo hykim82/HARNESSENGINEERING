@@ -6,16 +6,36 @@ import { join } from "node:path";
 // The five judgment values this whole module ever returns for a check's
 // wiring state (design report §2, "판정 5값 고정") -- listed worst-first so
 // combineStatuses below can pick the most severe one deterministically.
-export const STATUS_SEVERITY = ["NOT_INSTALLED", "SILENT_BROKEN", "DRIFT", "UNJUDGABLE", "ALIVE"];
+export const STATUS_SEVERITY = [
+  "NOT_INSTALLED",
+  "SILENT_BROKEN",
+  "DRIFT",
+  "UNJUDGABLE",
+  "ALIVE",
+];
 
 const HOOK_EVENTS = ["PreToolUse", "Stop", "SessionStart", "UserPromptSubmit"];
 
 function repoRoot() {
   try {
-    return execSync("git rev-parse --show-toplevel", { encoding: "utf8" }).trim();
+    return execSync("git rev-parse --show-toplevel", {
+      encoding: "utf8",
+    }).trim();
   } catch {
     return process.cwd();
   }
+}
+
+// One hook-event entry's { matcher, hooks: [...] } shape -> the command
+// rows it contributes. Extracted from parseHookCommands (HYK-160
+// quality-check: keeps parseHookCommands' own complexity under the repo's
+// ESLint ceiling; pure refactor, same rows produced either way).
+function commandsFromHookEntry(hookEvent, entry) {
+  const matcher = typeof entry?.matcher === "string" ? entry.matcher : null;
+  const innerHooks = Array.isArray(entry?.hooks) ? entry.hooks : [];
+  return innerHooks
+    .filter((h) => typeof h?.command === "string")
+    .map((h) => ({ hookEvent, matcher, command: h.command }));
 }
 
 // Extracts only { hookEvent, matcher, command } from a Claude settings JSON
@@ -32,13 +52,7 @@ export function parseHookCommands(settingsJson) {
     const entries = hooks[hookEvent];
     if (!Array.isArray(entries)) continue;
     for (const entry of entries) {
-      const matcher = typeof entry?.matcher === "string" ? entry.matcher : null;
-      const innerHooks = Array.isArray(entry?.hooks) ? entry.hooks : [];
-      for (const h of innerHooks) {
-        if (typeof h?.command === "string") {
-          out.push({ hookEvent, matcher, command: h.command });
-        }
-      }
+      out.push(...commandsFromHookEntry(hookEvent, entry));
     }
   }
   return out;
@@ -60,12 +74,18 @@ export function extractCheckScriptId(command) {
 // Whether a manifest install_target (id + hookEvent + optional matcher) is
 // actually present among a settings file's parsed hook commands.
 export function findInstalledTarget(hookCommands, { id, hookEvent, matcher }) {
-  const candidates = hookCommands.filter((h) => h.hookEvent === hookEvent && extractCheckScriptId(h.command) === id);
+  const candidates = hookCommands.filter(
+    (h) => h.hookEvent === hookEvent && extractCheckScriptId(h.command) === id,
+  );
   if (candidates.length === 0) return { installed: false };
   if (matcher) {
     const exact = candidates.find((h) => h.matcher === matcher);
     if (!exact) {
-      return { installed: true, matcherMismatch: true, actualMatchers: candidates.map((h) => h.matcher) };
+      return {
+        installed: true,
+        matcherMismatch: true,
+        actualMatchers: candidates.map((h) => h.matcher),
+      };
     }
   }
   return { installed: true, matcherMismatch: false };
@@ -100,7 +120,10 @@ export function checkNativeGitHook({
   existsFn = existsSync,
 }) {
   if (!existsFn(versionedPath)) {
-    return { status: "UNJUDGABLE", reason: `versioned hook '${versionedPath}' not found in repo -- cannot compare` };
+    return {
+      status: "UNJUDGABLE",
+      reason: `versioned hook '${versionedPath}' not found in repo -- cannot compare`,
+    };
   }
   if (!existsFn(installedPath)) {
     return {
@@ -116,7 +139,10 @@ export function checkNativeGitHook({
       reason: `installed hook '${installedPath}' differs from versioned '${versionedPath}' (sha256 mismatch)`,
     };
   }
-  return { status: "ALIVE", reason: `installed hook '${installedPath}' matches versioned copy (sha256 match)` };
+  return {
+    status: "ALIVE",
+    reason: `installed hook '${installedPath}' matches versioned copy (sha256 match)`,
+  };
 }
 
 // 8 days: matches the HYK-129 design's own bootstrap-warning window (a
@@ -155,12 +181,20 @@ export function checkCanaryReceipt({
   try {
     receipt = JSON.parse(readFileFn(receiptPath));
   } catch (err) {
-    return { status: "UNJUDGABLE", reason: `canary receipt '${receiptPath}' is not valid JSON (${err.message})` };
+    return {
+      status: "UNJUDGABLE",
+      reason: `canary receipt '${receiptPath}' is not valid JSON (${err.message})`,
+    };
   }
   const required = ["check_id", "checked_at", "bad_exit", "good_exit"];
-  const missing = required.filter((f) => receipt[f] === undefined || receipt[f] === null || receipt[f] === "");
+  const missing = required.filter(
+    (f) => receipt[f] === undefined || receipt[f] === null || receipt[f] === "",
+  );
   if (missing.length) {
-    return { status: "UNJUDGABLE", reason: `canary receipt '${receiptPath}' missing field(s): ${missing.join(", ")}` };
+    return {
+      status: "UNJUDGABLE",
+      reason: `canary receipt '${receiptPath}' missing field(s): ${missing.join(", ")}`,
+    };
   }
   if (receipt.check_id !== id) {
     return {
@@ -170,7 +204,10 @@ export function checkCanaryReceipt({
   }
   const checkedAt = new Date(receipt.checked_at);
   if (Number.isNaN(checkedAt.getTime())) {
-    return { status: "UNJUDGABLE", reason: `canary receipt '${receiptPath}' has an unparseable checked_at ('${receipt.checked_at}')` };
+    return {
+      status: "UNJUDGABLE",
+      reason: `canary receipt '${receiptPath}' has an unparseable checked_at ('${receipt.checked_at}')`,
+    };
   }
   const ageMs = now - checkedAt.getTime();
   if (ageMs > maxAgeMs) {
@@ -201,13 +238,24 @@ export function resolvePlaceholderPath(pathTemplate, roots) {
 // imported and called by another script's source (packet-gate.mjs, called
 // from role-guard.mjs) -- "wiring" here means "the caller's source still
 // references it," checked by a plain substring search over that file.
-export function checkSourceReference({ file, pattern, readFileFn = (p) => readFileSync(p, "utf8"), existsFn = existsSync }) {
+export function checkSourceReference({
+  file,
+  pattern,
+  readFileFn = (p) => readFileSync(p, "utf8"),
+  existsFn = existsSync,
+}) {
   if (!existsFn(file)) {
-    return { status: "UNJUDGABLE", reason: `referencing file '${file}' not found -- cannot confirm it still calls this check` };
+    return {
+      status: "UNJUDGABLE",
+      reason: `referencing file '${file}' not found -- cannot confirm it still calls this check`,
+    };
   }
   const text = readFileFn(file);
   if (!text.includes(pattern)) {
-    return { status: "SILENT_BROKEN", reason: `'${file}' no longer references '${pattern}' -- caller may have stopped invoking this check` };
+    return {
+      status: "SILENT_BROKEN",
+      reason: `'${file}' no longer references '${pattern}' -- caller may have stopped invoking this check`,
+    };
   }
   return { status: "ALIVE", reason: `'${file}' still references '${pattern}'` };
 }
@@ -263,7 +311,20 @@ const WHOLE_CHECK_DIR_GLOB = "scripts/check/*.test.mjs";
 // redirection (`&&`/`||`/`;;` all terminate on their first char, so matching
 // single chars suffices). This is why `*.test.mjs&&echo` still yields a
 // complete, expandable glob word (review-7 case 2).
-const WORD_TERMINATORS = new Set([" ", "\t", "\r", "\n", ";", "&", "|", "<", ">", "(", ")", "`"]);
+const WORD_TERMINATORS = new Set([
+  " ",
+  "\t",
+  "\r",
+  "\n",
+  ";",
+  "&",
+  "|",
+  "<",
+  ">",
+  "(",
+  ")",
+  "`",
+]);
 
 // Splits `text` into Bash-style words. For each word we record its literal
 // text (quotes removed) and whether a `*` in it was UNQUOTED -- only an
@@ -276,6 +337,36 @@ const WORD_TERMINATORS = new Set([" ", "\t", "\r", "\n", ";", "&", "|", "<", ">"
 // run: block (`# node --test scripts/check/*.test.mjs`) is not counted, just
 // as Bash would not execute it (review-8 defect 1). A `#` mid-word (`a#b`)
 // stays literal, matching Bash.
+// Consumes one Bash word starting at `s[i]` (already known not to be a
+// terminator/comment start) and returns its literal text, whether it
+// contained an unquoted `*`, and the index just past it. Mechanically
+// extracted from bashWords' inner while-loop (HYK-160 quality-check: keeps
+// bashWords' own complexity under the repo's ESLint ceiling) -- identical
+// character-by-character behavior, not a rewrite.
+function consumeWord(s, startIndex) {
+  const n = s.length;
+  let i = startIndex;
+  let literal = "";
+  let starUnquoted = false;
+  while (i < n && !WORD_TERMINATORS.has(s[i])) {
+    const ch = s[i];
+    if (ch === "'" || ch === '"') {
+      const quote = ch;
+      i++;
+      while (i < n && s[i] !== quote) {
+        literal += s[i];
+        i++;
+      }
+      if (i < n) i++; // consume closing quote (unterminated -> just stop at end)
+    } else {
+      if (ch === "*") starUnquoted = true;
+      literal += ch;
+      i++;
+    }
+  }
+  return { literal, starUnquoted, nextIndex: i };
+}
+
 function bashWords(text) {
   const s = text.replace(/\\/g, "/");
   const words = [];
@@ -291,25 +382,9 @@ function bashWords(text) {
       while (i < n && s[i] !== "\n") i++;
       continue;
     }
-    let literal = "";
-    let starUnquoted = false;
-    while (i < n && !WORD_TERMINATORS.has(s[i])) {
-      const ch = s[i];
-      if (ch === "'" || ch === '"') {
-        const quote = ch;
-        i++;
-        while (i < n && s[i] !== quote) {
-          literal += s[i];
-          i++;
-        }
-        if (i < n) i++; // consume closing quote (unterminated -> just stop at end)
-      } else {
-        if (ch === "*") starUnquoted = true;
-        literal += ch;
-        i++;
-      }
-    }
+    const { literal, starUnquoted, nextIndex } = consumeWord(s, i);
     words.push({ literal, starUnquoted });
+    i = nextIndex;
   }
   return words;
 }
@@ -320,7 +395,9 @@ function bashWords(text) {
 // A quoted glob, a partial wildcard, a `.bak` continuation, a prefixed path,
 // or an other-directory glob all fail one of these two conditions.
 export function coversViaCheckDirGlob(text) {
-  return bashWords(text).some((w) => w.literal === WHOLE_CHECK_DIR_GLOB && w.starUnquoted);
+  return bashWords(text).some(
+    (w) => w.literal === WHOLE_CHECK_DIR_GLOB && w.starUnquoted,
+  );
 }
 
 // Decodes a YAML flow scalar (the text after `run:` on one line) into the
@@ -354,14 +431,25 @@ export function decodeYamlScalar(raw) {
   return v;
 }
 
-function decodeQuotedScalar(v, q) {
-  const DOUBLE_ESCAPES = { n: "\n", t: "\t", r: "\r", "0": "\0", "\\": "\\", '"': '"' };
+const DOUBLE_ESCAPES = {
+  n: "\n",
+  t: "\t",
+  r: "\r",
+  0: "\0",
+  "\\": "\\",
+  '"': '"',
+};
+
+// Single-quoted YAML scalar decoding (`'a ''b'' c'` -> `a 'b' c`, the only
+// escape a YAML single-quoted scalar has). Split out of decodeQuotedScalar
+// (HYK-160 quality-check: keeps each half's own complexity under the
+// repo's ESLint ceiling) -- identical rules, just one quote style at a time.
+function decodeSingleQuotedScalar(v) {
   let out = "";
   let i = 1;
   const n = v.length;
   while (i < n) {
-    const ch = v[i];
-    if (q === "'" && ch === "'") {
+    if (v[i] === "'") {
       if (v[i + 1] === "'") {
         out += "'"; // '' -> literal '
         i += 2;
@@ -370,19 +458,42 @@ function decodeQuotedScalar(v, q) {
       // closing quote: well-formed only if nothing but whitespace follows
       return v.slice(i + 1).trim() === "" ? out : "";
     }
-    if (q === '"' && ch === "\\") {
+    out += v[i];
+    i += 1;
+  }
+  return ""; // reached end with no closing quote -> unbalanced -> ambiguous -> DRIFT
+}
+
+// Double-quoted YAML scalar decoding (backslash escapes resolved). Split
+// out of decodeQuotedScalar for the same reason as decodeSingleQuotedScalar.
+function decodeDoubleQuotedScalar(v) {
+  let out = "";
+  let i = 1;
+  const n = v.length;
+  while (i < n) {
+    const ch = v[i];
+    if (ch === "\\") {
       const next = v[i + 1];
-      out += next === undefined ? "" : next in DOUBLE_ESCAPES ? DOUBLE_ESCAPES[next] : next;
+      out +=
+        next === undefined
+          ? ""
+          : next in DOUBLE_ESCAPES
+            ? DOUBLE_ESCAPES[next]
+            : next;
       i += 2;
       continue;
     }
-    if (q === '"' && ch === '"') {
+    if (ch === '"') {
       return v.slice(i + 1).trim() === "" ? out : "";
     }
     out += ch;
     i += 1;
   }
   return ""; // reached end with no closing quote -> unbalanced -> ambiguous -> DRIFT
+}
+
+function decodeQuotedScalar(v, q) {
+  return q === "'" ? decodeSingleQuotedScalar(v) : decodeDoubleQuotedScalar(v);
 }
 
 // Extracts the shell text of every `run:` step from a GitHub Actions workflow
@@ -426,7 +537,9 @@ export function extractRunText(workflowText) {
         if (indent <= keyIndent) break; // dedented back to a sibling key -> block ended
         blockLines.push(raw);
       }
-      const indents = blockLines.filter((l) => l.trim() !== "").map((l) => l.length - l.trimStart().length);
+      const indents = blockLines
+        .filter((l) => l.trim() !== "")
+        .map((l) => l.length - l.trimStart().length);
       const minIndent = indents.length ? Math.min(...indents) : 0;
       runChunks.push(blockLines.map((l) => l.slice(minIndent)).join("\n"));
       i = j - 1;
@@ -459,7 +572,11 @@ export function checkCiCoverage({ workflowText, testFiles }) {
   const effective = words.map((w) => w.literal).join("\n");
   const missing = testFiles.filter((f) => !effective.includes(f));
   if (missing.length === 0) {
-    return { status: "ALIVE", missing: [], reason: `all ${testFiles.length} check test suite(s) referenced in CI run: steps` };
+    return {
+      status: "ALIVE",
+      missing: [],
+      reason: `all ${testFiles.length} check test suite(s) referenced in CI run: steps`,
+    };
   }
   return {
     status: "DRIFT",
@@ -480,11 +597,126 @@ export function combineStatuses(statuses) {
 // Judges a single manifest entry against injected file/settings state --
 // every filesystem/settings read is a parameter with a real-world default,
 // the same injection-point convention as status-fresh.mjs/controlroom-fresh.mjs.
+// One claude-settings install_target's wiring check (judgeEntry step 3's
+// per-target branch, extracted so the caller's loop body stays a single
+// dispatch instead of a nested condition -- HYK-160 quality-check: keeps
+// judgeEntry's own complexity/line-count under the repo's ESLint ceiling,
+// no behavior change).
+function judgeClaudeSettingsTarget(entry, target, settingsByLocation) {
+  const settings = settingsByLocation[target.location];
+  if (settings === undefined) {
+    return {
+      status: "UNJUDGABLE",
+      reason: `no settings loaded for location '${target.location}' -- cannot judge wiring`,
+    };
+  }
+  const hookCommands = parseHookCommands(settings);
+  const result = findInstalledTarget(hookCommands, {
+    id: entry.id,
+    hookEvent: target.hook_event,
+    matcher: target.matcher,
+  });
+  if (!result.installed) {
+    return {
+      status: target.required ? "NOT_INSTALLED" : "UNJUDGABLE",
+      reason: `'${entry.id}' not found in ${target.location}'s ${target.hook_event} hooks`,
+    };
+  }
+  if (result.matcherMismatch) {
+    return {
+      status: "DRIFT",
+      reason: `'${entry.id}' installed in ${target.location}'s ${target.hook_event} but matcher differs (expected '${target.matcher}', found ${JSON.stringify(result.actualMatchers)})`,
+    };
+  }
+  return {
+    status: "ALIVE",
+    reason: `'${entry.id}' wired in ${target.location}'s ${target.hook_event}`,
+  };
+}
+
+// judgeEntry step 3: wiring, dispatched by install_target kind (or a
+// source-reference / CI-coverage special case for entries with no
+// settings-based wiring). Extracted from judgeEntry itself for the same
+// quality-check reason as judgeClaudeSettingsTarget above -- pure
+// refactor, same statuses/evidence this block always produced.
+function judgeWiring(
+  entry,
+  { root, settingsByLocation, readFileFn, existsFn, testFiles, scriptPath },
+) {
+  const statuses = [];
+  const evidence = [];
+
+  if (entry.id === "ci-enforce") {
+    if (existsFn(scriptPath) && testFiles) {
+      const ci = checkCiCoverage({
+        workflowText: readFileFn(scriptPath),
+        testFiles,
+      });
+      statuses.push(ci.status);
+      evidence.push(ci.reason);
+    } else if (existsFn(scriptPath)) {
+      statuses.push("UNJUDGABLE");
+      evidence.push(
+        "no discovered test file list given -- cannot judge CI coverage",
+      );
+    }
+    return { statuses, evidence };
+  }
+
+  if (entry.source_reference_check) {
+    const src = checkSourceReference({
+      file: join(root, entry.source_reference_check.file),
+      pattern: entry.source_reference_check.pattern,
+      readFileFn,
+      existsFn,
+    });
+    statuses.push(src.status);
+    evidence.push(src.reason);
+    return { statuses, evidence };
+  }
+
+  if (
+    Array.isArray(entry.install_targets) &&
+    entry.install_targets.length > 0
+  ) {
+    for (const target of entry.install_targets) {
+      if (target.kind === "git-hook") {
+        const git = checkNativeGitHook({
+          versionedPath: join(root, target.versioned_path),
+          installedPath: join(root, target.installed_path),
+          readFileFn,
+          existsFn,
+        });
+        statuses.push(git.status);
+        evidence.push(git.reason);
+      } else if (target.kind === "claude-settings") {
+        const judged = judgeClaudeSettingsTarget(
+          entry,
+          target,
+          settingsByLocation,
+        );
+        statuses.push(judged.status);
+        evidence.push(judged.reason);
+      }
+    }
+    return { statuses, evidence };
+  }
+
+  // install_targets === [] and no source_reference_check (relay-handshake,
+  // pm-snapshot-gate): nothing to check beyond script/test existence, but a
+  // report row must still say *why* this is ALIVE rather than leaving
+  // evidence empty (review-1 caught an earlier round leaving these two
+  // entries' evidence blank in the actual generated report).
+  evidence.push(
+    `'${entry.id}' is not hook-installed (ORCH invokes it directly) -- judged from script/test existence alone`,
+  );
+  return { statuses, evidence };
+}
+
 export function judgeEntry(
   entry,
   {
     repoRoot: root,
-    roots = {},
     settingsByLocation = {},
     canaryDir,
     now = Date.now(),
@@ -510,76 +742,23 @@ export function judgeEntry(
     const testPath = join(root, entry.test);
     if (!existsFn(testPath)) {
       statuses.push("DRIFT");
-      evidence.push(`test '${entry.test}' not found at '${testPath}' (S3 violation)`);
+      evidence.push(
+        `test '${entry.test}' not found at '${testPath}' (S3 violation)`,
+      );
     }
   }
 
-  // 3. Wiring, dispatched by install_target kind (or a source-reference /
-  // CI-coverage special case for entries with no settings-based wiring).
-  if (entry.id === "ci-enforce") {
-    if (existsFn(scriptPath) && testFiles) {
-      const workflowText = readFileFn(scriptPath);
-      const ci = checkCiCoverage({ workflowText, testFiles });
-      statuses.push(ci.status);
-      evidence.push(ci.reason);
-    } else if (existsFn(scriptPath)) {
-      statuses.push("UNJUDGABLE");
-      evidence.push("no discovered test file list given -- cannot judge CI coverage");
-    }
-  } else if (entry.source_reference_check) {
-    const src = checkSourceReference({
-      file: join(root, entry.source_reference_check.file),
-      pattern: entry.source_reference_check.pattern,
-      readFileFn,
-      existsFn,
-    });
-    statuses.push(src.status);
-    evidence.push(src.reason);
-  } else if (Array.isArray(entry.install_targets) && entry.install_targets.length > 0) {
-    for (const target of entry.install_targets) {
-      if (target.kind === "git-hook") {
-        const git = checkNativeGitHook({
-          versionedPath: join(root, target.versioned_path),
-          installedPath: join(root, target.installed_path),
-          readFileFn,
-          existsFn,
-        });
-        statuses.push(git.status);
-        evidence.push(git.reason);
-      } else if (target.kind === "claude-settings") {
-        const settings = settingsByLocation[target.location];
-        if (settings === undefined) {
-          statuses.push("UNJUDGABLE");
-          evidence.push(`no settings loaded for location '${target.location}' -- cannot judge wiring`);
-          continue;
-        }
-        const hookCommands = parseHookCommands(settings);
-        const result = findInstalledTarget(hookCommands, {
-          id: entry.id,
-          hookEvent: target.hook_event,
-          matcher: target.matcher,
-        });
-        if (!result.installed) {
-          statuses.push(target.required ? "NOT_INSTALLED" : "UNJUDGABLE");
-          evidence.push(`'${entry.id}' not found in ${target.location}'s ${target.hook_event} hooks`);
-        } else if (result.matcherMismatch) {
-          statuses.push("DRIFT");
-          evidence.push(
-            `'${entry.id}' installed in ${target.location}'s ${target.hook_event} but matcher differs (expected '${target.matcher}', found ${JSON.stringify(result.actualMatchers)})`,
-          );
-        } else {
-          evidence.push(`'${entry.id}' wired in ${target.location}'s ${target.hook_event}`);
-        }
-      }
-    }
-  } else {
-    // install_targets === [] and no source_reference_check (relay-handshake,
-    // pm-snapshot-gate): nothing to check beyond script/test existence above,
-    // but a report row must still say *why* this is ALIVE rather than
-    // leaving evidence empty (review-1 caught an earlier round leaving these
-    // two entries' evidence blank in the actual generated report).
-    evidence.push(`'${entry.id}' is not hook-installed (ORCH invokes it directly) -- judged from script/test existence alone`);
-  }
+  // 3. Wiring (see judgeWiring above).
+  const wiring = judgeWiring(entry, {
+    root,
+    settingsByLocation,
+    readFileFn,
+    existsFn,
+    testFiles,
+    scriptPath,
+  });
+  statuses.push(...wiring.statuses);
+  evidence.push(...wiring.evidence);
 
   // 4. Claude-only checks additionally require a fresh canary receipt (G9),
   // but only once wiring itself hasn't already confirmed a worse problem --
@@ -611,7 +790,8 @@ export function expectedIdsForLocation(manifest, location) {
   const ids = new Set();
   for (const entry of manifest.checks) {
     for (const target of entry.install_targets ?? []) {
-      if (target.kind === "claude-settings" && target.location === location) ids.add(entry.id);
+      if (target.kind === "claude-settings" && target.location === location)
+        ids.add(entry.id);
     }
   }
   return [...ids];
@@ -632,7 +812,13 @@ export function findExtraResults(manifest, settingsByLocation) {
     const hookCommands = parseHookCommands(settings);
     const expectedIds = expectedIdsForLocation(manifest, location);
     for (const extraId of findExtraInvocations(hookCommands, expectedIds)) {
-      const hookEvents = [...new Set(hookCommands.filter((h) => extractCheckScriptId(h.command) === extraId).map((h) => h.hookEvent))];
+      const hookEvents = [
+        ...new Set(
+          hookCommands
+            .filter((h) => extractCheckScriptId(h.command) === extraId)
+            .map((h) => h.hookEvent),
+        ),
+      ];
       results.push({
         id: `extra:${location}:${extraId}`,
         status: "DRIFT",
@@ -643,6 +829,42 @@ export function findExtraResults(manifest, settingsByLocation) {
     }
   }
   return results;
+}
+
+// HYK-160 라이더ⓐ: a dedicated, fixed-reason wrapper around
+// findExtraResults for the exact drift this task fixed (report-style-guard
+// wired in settings.local.json but registered with `install_targets: []`,
+// independently confirmed by verify-2 07-18). findExtraResults already
+// detects the underlying condition generically (any settings-wired hook
+// command absent from the manifest's expected ids at that location) with a
+// free-text DRIFT reason; this function gives that same condition a single
+// fixed reason string, ENFORCEMENT_INVENTORY_MISSING, so a known-bad fixture
+// can assert on it directly (Tier0 "정확한 원인 고정") instead of matching
+// prose that could reword under a future edit.
+//
+// Honesty (S4, design §3.4): registering an id here only proves the
+// manifest and settings agree it exists -- it is never proof the guard
+// behaves correctly. Content/behavior correctness is each guard's own
+// known-bad/good test matter, not this function's.
+export function checkEnforcementInventoryRegistration({
+  manifest,
+  settingsByLocation,
+}) {
+  const extras = findExtraResults(manifest, settingsByLocation);
+  if (extras.length === 0) {
+    return {
+      status: "PASS",
+      ok: true,
+      reason:
+        "enforcement-inventory: every wired hook command has a matching manifest install_targets entry",
+    };
+  }
+  const ids = extras.map((e) => e.id.replace(/^extra:/, "")).join(", ");
+  return {
+    status: "BLOCK",
+    ok: false,
+    reason: `ENFORCEMENT_INVENTORY_MISSING: wired hook command(s) with no manifest install_targets entry -- ${ids}`,
+  };
 }
 
 export function runInventory({
@@ -657,45 +879,79 @@ export function runInventory({
   testFiles,
 }) {
   const results = manifest.checks.map((entry) =>
-    judgeEntry(entry, { repoRoot: root, roots, settingsByLocation, canaryDir, now, existsFn, readFileFn, testFiles }),
+    judgeEntry(entry, {
+      repoRoot: root,
+      roots,
+      settingsByLocation,
+      canaryDir,
+      now,
+      existsFn,
+      readFileFn,
+      testFiles,
+    }),
   );
   results.push(...findExtraResults(manifest, settingsByLocation));
-  const summary = { ALIVE: 0, SILENT_BROKEN: 0, DRIFT: 0, UNJUDGABLE: 0, NOT_INSTALLED: 0 };
+  const summary = {
+    ALIVE: 0,
+    SILENT_BROKEN: 0,
+    DRIFT: 0,
+    UNJUDGABLE: 0,
+    NOT_INSTALLED: 0,
+  };
   for (const r of results) summary[r.status]++;
   return { results, summary };
 }
 
-const invokedDirectly = process.argv[1] && process.argv[1].replace(/\\/g, "/").endsWith("scripts/check/selfcheck-inventory.mjs");
+const invokedDirectly =
+  process.argv[1] &&
+  process.argv[1]
+    .replace(/\\/g, "/")
+    .endsWith("scripts/check/selfcheck-inventory.mjs");
 if (invokedDirectly) {
   const args = process.argv.slice(2);
   let manifestPath;
   let canaryDir = process.env.HARNESS_CANARY_DIR;
-  let controlRoomPath = process.env.HARNESS_CONTROL_ROOM_PATH || "D:/문서관리/하네스-관제실";
+  let controlRoomPath =
+    process.env.HARNESS_CONTROL_ROOM_PATH || "D:/문서관리/하네스-관제실";
   for (let i = 0; i < args.length; i++) {
     if (args[i] === "--manifest") manifestPath = args[++i];
     else if (args[i] === "--canary-dir") canaryDir = args[++i];
     else if (args[i] === "--control-room") controlRoomPath = args[++i];
   }
   const root = repoRoot();
-  manifestPath = manifestPath || join(root, "scripts", "check", "enforcement-inventory.json");
+  manifestPath =
+    manifestPath ||
+    join(root, "scripts", "check", "enforcement-inventory.json");
 
   let manifest;
   try {
     manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
   } catch (err) {
-    console.error(`selfcheck-inventory: could not read/parse manifest '${manifestPath}' (${err.message})`);
+    console.error(
+      `selfcheck-inventory: could not read/parse manifest '${manifestPath}' (${err.message})`,
+    );
     process.exit(1);
   }
 
-  const roots = { REPO: root, CONTROL_ROOM: controlRoomPath, USER_HOME: process.env.USERPROFILE || process.env.HOME };
+  const roots = {
+    REPO: root,
+    CONTROL_ROOM: controlRoomPath,
+    USER_HOME: process.env.USERPROFILE || process.env.HOME,
+  };
   const settingsByLocation = {};
   for (const entry of manifest.checks) {
     for (const target of entry.install_targets ?? []) {
-      if (target.kind !== "claude-settings" || settingsByLocation[target.location] !== undefined) continue;
+      if (
+        target.kind !== "claude-settings" ||
+        settingsByLocation[target.location] !== undefined
+      )
+        continue;
       const resolved = resolvePlaceholderPath(target.path, roots);
       if (resolved && existsSync(resolved)) {
         try {
-          settingsByLocation[target.location] = JSON.parse(readFileSync(resolved, "utf8"));
+          settingsByLocation[target.location] = JSON.parse(
+            readFileSync(resolved, "utf8"),
+          );
         } catch {
           settingsByLocation[target.location] = null;
         }
@@ -704,7 +960,14 @@ if (invokedDirectly) {
   }
 
   const testFiles = discoverCheckTestFiles(join(root, "scripts", "check"));
-  const { results, summary } = runInventory({ manifest, repoRoot: root, roots, settingsByLocation, canaryDir, testFiles });
+  const { results, summary } = runInventory({
+    manifest,
+    repoRoot: root,
+    roots,
+    settingsByLocation,
+    canaryDir,
+    testFiles,
+  });
 
   console.log(`selfcheck-inventory: ${JSON.stringify(summary)}`);
   for (const r of results) {
