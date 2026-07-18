@@ -1700,22 +1700,152 @@ test("(46) forbidden side effect: checkEnforcementInventoryRegistration never mu
   assert.equal(JSON.stringify(settingsByLocation), settingsBefore);
 });
 
-test("(47) real-repo regression guard: the actual enforcement-inventory.json + the actual repo .claude/settings.local.json agree (report-style-guard drift closed, HYK-160 라이더ⓐ)", () => {
-  const repoRoot = fileURLToPath(new URL("../..", import.meta.url));
+// HYK-160-coder-8 (PR #37 enforce CI fail): `.claude/settings.local.json` is
+// git-untracked by design (C2-0/HYK-160-coder-4 confirmed this directly --
+// a fresh worktree/CI checkout never has it). Local runs on this machine DO
+// have the real file, so this test's job is a live-wiring regression guard
+// there; on a CI runner (or any other checkout without it) there is no live
+// wiring to audit at all -- that gap is covered by the local weekly
+// selfcheck loop instead (게이트-기준.md 주간 루프), not by this suite.
+//
+// The skip decision itself is a pure function (`resolveRealRepoGuard47`) so
+// its three states -- absent (skip, exact reason), present+drifted (still
+// FAIL, never swallowed), present+matching (PASS) -- can each be pinned by
+// a test without relying on node:test's own skip semantics to prove the
+// point. A path can be injected so the "absent" state is exercised
+// deterministically, never by moving/deleting the real file.
+const CI_MISSING_SETTINGS_SKIP_REASON =
+  "live wiring file '.claude/settings.local.json' is local-only (git-untracked) -- CI has no live wiring to audit here; local weekly selfcheck covers this gap";
+
+export function resolveRealRepoGuard47({
+  repoRoot,
+  settingsPathOverride,
+  existsFn = existsSync,
+  readFileFn = (p) => readFileSync(p, "utf8"),
+}) {
+  const settingsPath =
+    settingsPathOverride ?? join(repoRoot, ".claude", "settings.local.json");
+  if (!existsFn(settingsPath)) {
+    return { outcome: "skip", reason: CI_MISSING_SETTINGS_SKIP_REASON };
+  }
   const manifest = JSON.parse(
-    readFileSync(
+    readFileFn(
       join(repoRoot, "scripts", "check", "enforcement-inventory.json"),
-      "utf8",
     ),
   );
-  const settings = JSON.parse(
-    readFileSync(join(repoRoot, ".claude", "settings.local.json"), "utf8"),
-  );
+  const settings = JSON.parse(readFileFn(settingsPath));
   const result = checkEnforcementInventoryRegistration({
     manifest,
     settingsByLocation: { "repo-settings": settings },
   });
-  assert.equal(result.status, "PASS", result.reason);
+  return {
+    outcome: result.status === "PASS" ? "pass" : "fail",
+    reason: result.reason,
+  };
+}
+
+test("(47) real-repo regression guard: the actual enforcement-inventory.json + the actual repo .claude/settings.local.json agree (report-style-guard drift closed, HYK-160 라이더ⓐ)", (t) => {
+  const repoRoot = fileURLToPath(new URL("../..", import.meta.url));
+  const result = resolveRealRepoGuard47({ repoRoot });
+  if (result.outcome === "skip") {
+    t.skip(result.reason);
+    return;
+  }
+  assert.equal(result.outcome, "pass", result.reason);
+});
+
+test("(47b) skip-decision counterfactual: settings path missing (injected) -> deterministic skip with the exact reason, never a crash", () => {
+  const repoRoot = fileURLToPath(new URL("../..", import.meta.url));
+  const result = resolveRealRepoGuard47({
+    repoRoot,
+    settingsPathOverride: join(
+      repoRoot,
+      "does-not-exist",
+      "settings.local.json",
+    ),
+  });
+  assert.equal(result.outcome, "skip");
+  assert.equal(result.reason, CI_MISSING_SETTINGS_SKIP_REASON);
+});
+
+test("(47c) skip-decision counterfactual: settings path present in a synthetic fixture but drifted -> FAIL, skip never swallows a real failure", () => {
+  withFixtureDir((dir) => {
+    const checkDir = join(dir, "scripts", "check");
+    mkdirSync(checkDir, { recursive: true });
+    writeFileSync(
+      join(checkDir, "enforcement-inventory.json"),
+      JSON.stringify({ schema_version: 1, checks: [] }),
+      "utf8",
+    );
+    const claudeDir = join(dir, ".claude");
+    mkdirSync(claudeDir, { recursive: true });
+    writeFileSync(
+      join(claudeDir, "settings.local.json"),
+      JSON.stringify({
+        hooks: {
+          PreToolUse: [
+            {
+              matcher: "Edit",
+              hooks: [{ command: "node scripts/check/some-guard.mjs" }],
+            },
+          ],
+        },
+      }),
+      "utf8",
+    );
+    const result = resolveRealRepoGuard47({ repoRoot: dir });
+    assert.equal(result.outcome, "fail");
+    assert.match(result.reason, /^ENFORCEMENT_INVENTORY_MISSING/);
+  });
+});
+
+test("(47d) skip-decision counterfactual: settings path present in a synthetic fixture and matching -> PASS", () => {
+  withFixtureDir((dir) => {
+    const checkDir = join(dir, "scripts", "check");
+    mkdirSync(checkDir, { recursive: true });
+    writeFileSync(
+      join(checkDir, "enforcement-inventory.json"),
+      JSON.stringify({
+        schema_version: 1,
+        checks: [
+          {
+            id: "some-guard",
+            script: "scripts/check/some-guard.mjs",
+            test: null,
+            install_targets: [
+              {
+                location: "repo-settings",
+                kind: "claude-settings",
+                path: "REPO/.claude/settings.local.json",
+                hook_event: "PreToolUse",
+                matcher: "Edit",
+                required: true,
+              },
+            ],
+          },
+        ],
+      }),
+      "utf8",
+    );
+    const claudeDir = join(dir, ".claude");
+    mkdirSync(claudeDir, { recursive: true });
+    writeFileSync(
+      join(claudeDir, "settings.local.json"),
+      JSON.stringify({
+        hooks: {
+          PreToolUse: [
+            {
+              matcher: "Edit",
+              hooks: [{ command: "node scripts/check/some-guard.mjs" }],
+            },
+          ],
+        },
+      }),
+      "utf8",
+    );
+    const result = resolveRealRepoGuard47({ repoRoot: dir });
+    assert.equal(result.outcome, "pass", result.reason);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -1957,28 +2087,130 @@ test("(57) paired good: role-guard's command restored into the same loaded setti
   assert.equal(good.status, "PASS", good.reason);
 });
 
-test("(58) real-repo regression guard: EXPECTED_INJECTED_HOOKS all appear in the actual repo settings.local.json + user-level settings.json (both real files, additive check against live wiring)", () => {
-  const repoRoot = fileURLToPath(new URL("../..", import.meta.url));
-  const repoSettings = JSON.parse(
-    readFileSync(join(repoRoot, ".claude", "settings.local.json"), "utf8"),
-  );
-  const userSettingsPath = join(
-    process.env.USERPROFILE || process.env.HOME,
-    ".claude-team",
-    "settings.json",
-  );
+// HYK-160-coder-8 (PR #37 enforce CI fail): same git-untracked-local-file
+// gap as test 47 above -- `.claude/settings.local.json` is absent on a CI
+// runner by design (C2-0 confirmed this directly), so there is no live
+// repo-settings wiring to check against at all there. The user-level
+// `~/.claude-team/settings.json` path already degrades gracefully (treated
+// as empty hooks when absent, same as before this fix) -- only the repo
+// settings file needed the same skip-if-absent treatment test 47 got.
+const CI_MISSING_REPO_SETTINGS_SKIP_REASON =
+  "live wiring file '.claude/settings.local.json' is local-only (git-untracked) -- CI has no repo-settings wiring to audit here; local weekly selfcheck covers this gap";
+
+export function resolveRealRepoGuard58({
+  repoRoot,
+  repoSettingsPathOverride,
+  userSettingsPathOverride,
+  existsFn = existsSync,
+  readFileFn = (p) => readFileSync(p, "utf8"),
+}) {
+  const repoSettingsPath =
+    repoSettingsPathOverride ??
+    join(repoRoot, ".claude", "settings.local.json");
+  if (!existsFn(repoSettingsPath)) {
+    return { outcome: "skip", reason: CI_MISSING_REPO_SETTINGS_SKIP_REASON };
+  }
+  const repoSettings = JSON.parse(readFileFn(repoSettingsPath));
+
+  const userSettingsPath =
+    userSettingsPathOverride ??
+    join(
+      process.env.USERPROFILE || process.env.HOME,
+      ".claude-team",
+      "settings.json",
+    );
   let userSettings = { hooks: {} };
-  if (existsSync(userSettingsPath)) {
+  if (existsFn(userSettingsPath)) {
     try {
-      userSettings = JSON.parse(readFileSync(userSettingsPath, "utf8"));
+      userSettings = JSON.parse(readFileFn(userSettingsPath));
     } catch {
       userSettings = { hooks: {} };
     }
   }
+
   const hookCommands = [
     ...parseHookCommands(repoSettings),
     ...parseHookCommands(userSettings),
   ];
   const result = checkHookSetAdditive({ hookCommands });
-  assert.equal(result.status, "PASS", result.reason);
+  return {
+    outcome: result.status === "PASS" ? "pass" : "fail",
+    reason: result.reason,
+  };
+}
+
+test("(58) real-repo regression guard: EXPECTED_INJECTED_HOOKS all appear in the actual repo settings.local.json + user-level settings.json (both real files, additive check against live wiring)", (t) => {
+  const repoRoot = fileURLToPath(new URL("../..", import.meta.url));
+  const result = resolveRealRepoGuard58({ repoRoot });
+  if (result.outcome === "skip") {
+    t.skip(result.reason);
+    return;
+  }
+  assert.equal(result.outcome, "pass", result.reason);
+});
+
+test("(58b) skip-decision counterfactual: repo settings path missing (injected) -> deterministic skip with the exact reason, never a crash", () => {
+  const repoRoot = fileURLToPath(new URL("../..", import.meta.url));
+  const result = resolveRealRepoGuard58({
+    repoRoot,
+    repoSettingsPathOverride: join(
+      repoRoot,
+      "does-not-exist",
+      "settings.local.json",
+    ),
+  });
+  assert.equal(result.outcome, "skip");
+  assert.equal(result.reason, CI_MISSING_REPO_SETTINGS_SKIP_REASON);
+});
+
+test("(58c) skip-decision counterfactual: repo settings present in a synthetic fixture but missing one expected hook -> FAIL, skip never swallows a real drift", () => {
+  withFixtureDir((dir) => {
+    const claudeDir = join(dir, ".claude");
+    mkdirSync(claudeDir, { recursive: true });
+    const commands = [
+      {
+        hookEvent: "PreToolUse",
+        command: "node scripts/check/report-style-guard.mjs",
+      }, // role-guard missing
+      { hookEvent: "Stop", command: "node scripts/check/status-fresh.mjs" },
+      { hookEvent: "Stop", command: "node scripts/check/clear-safe-check.mjs" },
+      { hookEvent: "Stop", command: "node scripts/check/linear-sync.mjs" },
+      {
+        hookEvent: "Stop",
+        command: "node scripts/check/controlroom-fresh.mjs",
+      },
+      {
+        hookEvent: "SessionStart",
+        command: "node scripts/check/context-inject.mjs --mode session-start",
+      },
+      {
+        hookEvent: "SessionStart",
+        command: "node scripts/check/selfcheck-freshness.mjs",
+      },
+      {
+        hookEvent: "UserPromptSubmit",
+        command:
+          "node scripts/check/context-inject.mjs --mode user-prompt-submit",
+      },
+    ];
+    writeFileSync(
+      join(claudeDir, "settings.local.json"),
+      JSON.stringify({
+        hooks: commands.reduce((acc, c) => {
+          (acc[c.hookEvent] ??= []).push({
+            matcher: null,
+            hooks: [{ command: c.command }],
+          });
+          return acc;
+        }, {}),
+      }),
+      "utf8",
+    );
+    const result = resolveRealRepoGuard58({
+      repoRoot: dir,
+      userSettingsPathOverride: join(dir, "no-user-settings.json"),
+    });
+    assert.equal(result.outcome, "fail");
+    assert.match(result.reason, /^HOOK_SET_DRIFT/);
+  });
 });
