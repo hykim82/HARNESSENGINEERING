@@ -1,5 +1,10 @@
 import { readFileSync } from "node:fs";
-import { loadStore, armStorePath, isExpired, hashContent } from "./arm-state.mjs";
+import {
+  loadStore,
+  armStorePath,
+  isExpired,
+  hashContent,
+} from "./arm-state.mjs";
 import { checkPacketGate } from "../check/packet-gate.mjs";
 import { extractTaskId } from "../check/worker-status-onstart.mjs";
 
@@ -66,6 +71,160 @@ function deny(reason, detail) {
 //   expected: { target, role } -- 고정 구성값(문자열 결속만, 실 Orca 조회 금지)
 //   nowMs                      -- 만료 판정 시각(테스트 결정성)
 // }
+function loadArmStoreForPreDispatch(inp, opts) {
+  if (!isNonEmptyString(inp.armDir) || !isNonEmptyString(inp.arm_id)) {
+    return deny(
+      REASON.STORE_UNAVAILABLE,
+      "orca-predispatch: armDir/arm_id must be non-empty strings",
+    );
+  }
+  const storePath = armStorePath(inp.armDir, inp.arm_id);
+  let loaded;
+  try {
+    loaded = loadStore(storePath, opts);
+  } catch (err) {
+    return deny(
+      REASON.STORE_UNAVAILABLE,
+      `orca-predispatch: loadStore threw (${errText(err)})`,
+    );
+  }
+  if (!loaded.ok) return deny(REASON.STORE_UNAVAILABLE, loaded.reason);
+  if (!loaded.existed || !isPlainObject(loaded.store)) {
+    return deny(
+      REASON.STORE_UNAVAILABLE,
+      `orca-predispatch: no arm store at '${storePath}'`,
+    );
+  }
+  const grant = isPlainObject(loaded.store.grant) ? loaded.store.grant : null;
+  if (!grant) {
+    return deny(
+      REASON.STORE_UNAVAILABLE,
+      "orca-predispatch: arm store has no grant",
+    );
+  }
+  return { ok: true, store: loaded.store, grant };
+}
+
+// G1-b: 자격 4필드(human_approval_ref·arm_id·cycle_id·task_id) 각각 구분된 reason.
+function checkQualificationFields(req, inp, grant) {
+  if (
+    !isNonEmptyString(req.human_approval_ref) ||
+    req.human_approval_ref !== grant.human_approval_ref
+  ) {
+    return deny(
+      REASON.APPROVAL_REF_MISMATCH,
+      `orca-predispatch: request human_approval_ref ${JSON.stringify(req.human_approval_ref)} != grant ${JSON.stringify(grant.human_approval_ref)}`,
+    );
+  }
+  if (
+    !isNonEmptyString(req.arm_id) ||
+    req.arm_id !== inp.arm_id ||
+    req.arm_id !== grant.arm_id
+  ) {
+    return deny(
+      REASON.ARM_ID_MISMATCH,
+      `orca-predispatch: request arm_id ${JSON.stringify(req.arm_id)} does not match target arm '${inp.arm_id}' / grant arm_id ${JSON.stringify(grant.arm_id)}`,
+    );
+  }
+  if (!isNonEmptyString(req.cycle_id) || req.cycle_id !== grant.cycle_id) {
+    return deny(
+      REASON.CYCLE_ID_MISMATCH,
+      `orca-predispatch: request cycle_id ${JSON.stringify(req.cycle_id)} != grant ${JSON.stringify(grant.cycle_id)}`,
+    );
+  }
+  const allowedTaskIds = Array.isArray(grant.allowed_task_ids)
+    ? grant.allowed_task_ids
+    : [];
+  if (!isNonEmptyString(req.task_id) || !allowedTaskIds.includes(req.task_id)) {
+    return deny(
+      REASON.TASK_ID_MISMATCH,
+      `orca-predispatch: request task_id ${JSON.stringify(req.task_id)} not in grant.allowed_task_ids`,
+    );
+  }
+  return null;
+}
+
+// 만료(기존 isExpired 재사용) + 예산(claim 판정과 동일한 부등호 -- arm-state 재구현 금지, 판독만).
+function checkExpiryAndBudget(store, grant, nowMs) {
+  if (isExpired(grant, nowMs)) {
+    return deny(
+      REASON.EXPIRED,
+      `orca-predispatch: grant expired_at=${grant.expires_at} now=${nowMs}`,
+    );
+  }
+  const attemptsTotal = Number.isSafeInteger(store.attempts_total)
+    ? store.attempts_total
+    : Number.POSITIVE_INFINITY;
+  const maxStartsTotal = Number.isSafeInteger(grant.max_starts_total)
+    ? grant.max_starts_total
+    : 0;
+  if (attemptsTotal >= maxStartsTotal) {
+    return deny(
+      REASON.BUDGET_EXHAUSTED,
+      `orca-predispatch: attempts_total=${attemptsTotal} >= max_starts_total=${maxStartsTotal}`,
+    );
+  }
+  return null;
+}
+
+// G3: task 내용 해시 결속 -- request.content_hash가 task 파일 실제 내용과 일치해야 한다.
+function checkContentHash(req, taskFilePath, opts) {
+  if (!isNonEmptyString(taskFilePath)) {
+    if (!isNonEmptyString(req.content_hash)) {
+      return deny(
+        REASON.CONTENT_HASH_MISMATCH,
+        "orca-predispatch: request.content_hash is required (no taskFilePath given to derive it)",
+      );
+    }
+    return null;
+  }
+  const specCheck = verifySpec(`go ${req.task_id}`, taskFilePath, opts);
+  if (!specCheck.ok) {
+    return deny(REASON.TASK_ID_MISMATCH, specCheck.reason);
+  }
+  if (
+    !isNonEmptyString(req.content_hash) ||
+    req.content_hash !== specCheck.content_hash
+  ) {
+    return deny(
+      REASON.CONTENT_HASH_MISMATCH,
+      `orca-predispatch: request content_hash ${JSON.stringify(req.content_hash)} != computed ${specCheck.content_hash}`,
+    );
+  }
+  return null;
+}
+
+// G4: 대상 terminal 고정(문자열 결속만 -- 실 Orca 조회 금지).
+function checkTarget(req, exp) {
+  if (!isNonEmptyString(exp.target)) {
+    return deny(
+      REASON.TARGET_UNSPECIFIED,
+      "orca-predispatch: expected.target is not configured",
+    );
+  }
+  if (!isNonEmptyString(req.target) || req.target !== exp.target) {
+    return deny(
+      REASON.TARGET_MISMATCH,
+      `orca-predispatch: request target ${JSON.stringify(req.target)} != expected ${JSON.stringify(exp.target)}`,
+    );
+  }
+  return null;
+}
+
+function checkRole(req, exp) {
+  if (
+    !isNonEmptyString(exp.role) ||
+    !isNonEmptyString(req.role) ||
+    req.role !== exp.role
+  ) {
+    return deny(
+      REASON.ROLE_UNDETERMINED,
+      `orca-predispatch: request role ${JSON.stringify(req.role)} does not match expected ${JSON.stringify(exp.role)}`,
+    );
+  }
+  return null;
+}
+
 export function checkPreDispatch(input, opts) {
   const inp = isPlainObject(input) ? input : {};
   const req = isPlainObject(inp.request) ? inp.request : {};
@@ -77,78 +236,19 @@ export function checkPreDispatch(input, opts) {
     return deny(REASON.PACKET_UNSIGNED, packetResult.reason);
   }
 
-  // arm store 로드(기존 arm-state loadStore/armStorePath 재사용).
-  if (!isNonEmptyString(inp.armDir) || !isNonEmptyString(inp.arm_id)) {
-    return deny(REASON.STORE_UNAVAILABLE, "orca-predispatch: armDir/arm_id must be non-empty strings");
-  }
-  const storePath = armStorePath(inp.armDir, inp.arm_id);
-  let loaded;
-  try {
-    loaded = loadStore(storePath, opts);
-  } catch (err) {
-    return deny(REASON.STORE_UNAVAILABLE, `orca-predispatch: loadStore threw (${errText(err)})`);
-  }
-  if (!loaded.ok) return deny(REASON.STORE_UNAVAILABLE, loaded.reason);
-  if (!loaded.existed || !isPlainObject(loaded.store)) {
-    return deny(REASON.STORE_UNAVAILABLE, `orca-predispatch: no arm store at '${storePath}'`);
-  }
-  const store = loaded.store;
-  const grant = isPlainObject(store.grant) ? store.grant : null;
-  if (!grant) return deny(REASON.STORE_UNAVAILABLE, "orca-predispatch: arm store has no grant");
+  const loaded = loadArmStoreForPreDispatch(inp, opts);
+  if (!loaded.ok) return loaded;
+  const { store, grant } = loaded;
 
-  // G1-b: 자격 4필드(human_approval_ref·arm_id·cycle_id·task_id) 각각 구분된 reason.
-  if (!isNonEmptyString(req.human_approval_ref) || req.human_approval_ref !== grant.human_approval_ref) {
-    return deny(REASON.APPROVAL_REF_MISMATCH, `orca-predispatch: request human_approval_ref ${JSON.stringify(req.human_approval_ref)} != grant ${JSON.stringify(grant.human_approval_ref)}`);
-  }
-  if (!isNonEmptyString(req.arm_id) || req.arm_id !== inp.arm_id || req.arm_id !== grant.arm_id) {
-    return deny(REASON.ARM_ID_MISMATCH, `orca-predispatch: request arm_id ${JSON.stringify(req.arm_id)} does not match target arm '${inp.arm_id}' / grant arm_id ${JSON.stringify(grant.arm_id)}`);
-  }
-  if (!isNonEmptyString(req.cycle_id) || req.cycle_id !== grant.cycle_id) {
-    return deny(REASON.CYCLE_ID_MISMATCH, `orca-predispatch: request cycle_id ${JSON.stringify(req.cycle_id)} != grant ${JSON.stringify(grant.cycle_id)}`);
-  }
-  const allowedTaskIds = Array.isArray(grant.allowed_task_ids) ? grant.allowed_task_ids : [];
-  if (!isNonEmptyString(req.task_id) || !allowedTaskIds.includes(req.task_id)) {
-    return deny(REASON.TASK_ID_MISMATCH, `orca-predispatch: request task_id ${JSON.stringify(req.task_id)} not in grant.allowed_task_ids`);
-  }
-
-  // 만료(기존 isExpired 재사용).
   const nowMs = Number.isSafeInteger(inp.nowMs) ? inp.nowMs : Date.now();
-  if (isExpired(grant, nowMs)) {
-    return deny(REASON.EXPIRED, `orca-predispatch: grant expired_at=${grant.expires_at} now=${nowMs}`);
-  }
 
-  // 예산(claim 판정과 동일한 부등호 -- arm-state 재구현 금지, 여기서는 판독만).
-  const attemptsTotal = Number.isSafeInteger(store.attempts_total) ? store.attempts_total : Number.POSITIVE_INFINITY;
-  const maxStartsTotal = Number.isSafeInteger(grant.max_starts_total) ? grant.max_starts_total : 0;
-  if (attemptsTotal >= maxStartsTotal) {
-    return deny(REASON.BUDGET_EXHAUSTED, `orca-predispatch: attempts_total=${attemptsTotal} >= max_starts_total=${maxStartsTotal}`);
-  }
-
-  // G3: task 내용 해시 결속 -- request.content_hash가 task 파일 실제 내용과 일치해야 한다.
-  if (isNonEmptyString(inp.taskFilePath)) {
-    const specCheck = verifySpec(`go ${req.task_id}`, inp.taskFilePath, opts);
-    if (!specCheck.ok) {
-      return deny(REASON.TASK_ID_MISMATCH, specCheck.reason);
-    }
-    if (!isNonEmptyString(req.content_hash) || req.content_hash !== specCheck.content_hash) {
-      return deny(REASON.CONTENT_HASH_MISMATCH, `orca-predispatch: request content_hash ${JSON.stringify(req.content_hash)} != computed ${specCheck.content_hash}`);
-    }
-  } else if (!isNonEmptyString(req.content_hash)) {
-    return deny(REASON.CONTENT_HASH_MISMATCH, "orca-predispatch: request.content_hash is required (no taskFilePath given to derive it)");
-  }
-
-  // G4: 대상 terminal 고정(문자열 결속만 -- 실 Orca 조회 금지).
-  if (!isNonEmptyString(exp.target)) {
-    return deny(REASON.TARGET_UNSPECIFIED, "orca-predispatch: expected.target is not configured");
-  }
-  if (!isNonEmptyString(req.target) || req.target !== exp.target) {
-    return deny(REASON.TARGET_MISMATCH, `orca-predispatch: request target ${JSON.stringify(req.target)} != expected ${JSON.stringify(exp.target)}`);
-  }
-
-  // 역할 판정.
-  if (!isNonEmptyString(exp.role) || !isNonEmptyString(req.role) || req.role !== exp.role) {
-    return deny(REASON.ROLE_UNDETERMINED, `orca-predispatch: request role ${JSON.stringify(req.role)} does not match expected ${JSON.stringify(exp.role)}`);
-  }
+  const denied =
+    checkQualificationFields(req, inp, grant) ??
+    checkExpiryAndBudget(store, grant, nowMs) ??
+    checkContentHash(req, inp.taskFilePath, opts) ??
+    checkTarget(req, exp) ??
+    checkRole(req, exp);
+  if (denied) return denied;
 
   return { ok: true, allow: true, reason: REASON.ALLOW, detail: null };
 }
@@ -157,58 +257,104 @@ export function checkPreDispatch(input, opts) {
 // 정확히 `go <task_id>` 한 줄(트레일링 공백·개행 0).
 export function buildSpec(task_id) {
   if (!isNonEmptyString(task_id) || /\s/.test(task_id)) {
-    return { ok: false, reason: "orca-predispatch: buildSpec refused -- task_id must be a non-empty string with no whitespace" };
+    return {
+      ok: false,
+      reason:
+        "orca-predispatch: buildSpec refused -- task_id must be a non-empty string with no whitespace",
+    };
   }
   return { ok: true, spec: `go ${task_id}` };
 }
 
 const SPEC_LINE_RE = /^go (\S+)$/;
 
+// 형식만: 정확히 한 줄 `go <task_id>`(트레일링 공백·개행 0). taskFilePath는 손대지 않는다.
+function checkSpecFormat(spec) {
+  if (typeof spec !== "string") {
+    return {
+      ok: false,
+      reason: "orca-predispatch: SPEC_FORMAT_INVALID -- spec must be a string",
+    };
+  }
+  if (spec !== spec.trim() || spec.includes("\n")) {
+    return {
+      ok: false,
+      reason: `orca-predispatch: SPEC_FORMAT_INVALID -- spec has leading/trailing whitespace or multiple lines: ${JSON.stringify(spec)}`,
+    };
+  }
+  const m = spec.match(SPEC_LINE_RE);
+  if (!m) {
+    return {
+      ok: false,
+      reason: `orca-predispatch: SPEC_FORMAT_INVALID -- spec is not exactly 'go <task_id>': ${JSON.stringify(spec)}`,
+    };
+  }
+  return { ok: true, specTaskId: m[1] };
+}
+
 // spec 형식 + task 파일 top task_id 일치 + (옵션) 내용 해시 스냅샷 일치.
 // 기존 go-task-id-gate.mjs의 checkGoTaskId와 계약 일치(불일치 발견 시 이 판정기
 // 호출부가 question_packet으로 정지 -- 여기서는 재구현하지 않고 동일 extractTaskId를 재사용).
 export function verifySpec(spec, taskFilePath, opts) {
   const o = isPlainObject(opts) ? opts : {};
-  const readFileFn = typeof o.readFileFn === "function" ? o.readFileFn : (p) => readFileSync(p, "utf8");
+  const readFileFn =
+    typeof o.readFileFn === "function"
+      ? o.readFileFn
+      : (p) => readFileSync(p, "utf8");
 
-  if (typeof spec !== "string") {
-    return { ok: false, reason: "orca-predispatch: SPEC_FORMAT_INVALID -- spec must be a string" };
-  }
-  if (spec !== spec.trim() || spec.includes("\n")) {
-    return { ok: false, reason: `orca-predispatch: SPEC_FORMAT_INVALID -- spec has leading/trailing whitespace or multiple lines: ${JSON.stringify(spec)}` };
-  }
-  const m = spec.match(SPEC_LINE_RE);
-  if (!m) {
-    return { ok: false, reason: `orca-predispatch: SPEC_FORMAT_INVALID -- spec is not exactly 'go <task_id>': ${JSON.stringify(spec)}` };
-  }
-  const specTaskId = m[1];
+  const formatCheck = checkSpecFormat(spec);
+  if (!formatCheck.ok) return formatCheck;
+  const specTaskId = formatCheck.specTaskId;
 
   if (!isNonEmptyString(taskFilePath)) {
-    return { ok: false, reason: "orca-predispatch: SPEC_FORMAT_INVALID -- taskFilePath is required" };
+    return {
+      ok: false,
+      reason:
+        "orca-predispatch: SPEC_FORMAT_INVALID -- taskFilePath is required",
+    };
   }
   let content;
   try {
     content = readFileFn(taskFilePath);
   } catch (err) {
-    return { ok: false, reason: `orca-predispatch: SPEC_TASK_ID_MISMATCH -- cannot read task file '${taskFilePath}' (${errText(err)})` };
+    return {
+      ok: false,
+      reason: `orca-predispatch: SPEC_TASK_ID_MISMATCH -- cannot read task file '${taskFilePath}' (${errText(err)})`,
+    };
   }
   const fileTaskId = extractTaskId(content);
   if (!fileTaskId) {
-    return { ok: false, reason: `orca-predispatch: SPEC_TASK_ID_MISMATCH -- task file '${taskFilePath}' has no task_id header` };
+    return {
+      ok: false,
+      reason: `orca-predispatch: SPEC_TASK_ID_MISMATCH -- task file '${taskFilePath}' has no task_id header`,
+    };
   }
   if (fileTaskId !== specTaskId) {
-    return { ok: false, reason: `orca-predispatch: SPEC_TASK_ID_MISMATCH -- spec task_id '${specTaskId}' != task file task_id '${fileTaskId}'` };
+    return {
+      ok: false,
+      reason: `orca-predispatch: SPEC_TASK_ID_MISMATCH -- spec task_id '${specTaskId}' != task file task_id '${fileTaskId}'`,
+    };
   }
 
   const content_hash = hashContent(content);
-  if (isNonEmptyString(o.expectedContentHash) && o.expectedContentHash !== content_hash) {
-    return { ok: false, reason: `orca-predispatch: SPEC_CONTENT_HASH_MISMATCH -- expected ${o.expectedContentHash} != computed ${content_hash}` };
+  if (
+    isNonEmptyString(o.expectedContentHash) &&
+    o.expectedContentHash !== content_hash
+  ) {
+    return {
+      ok: false,
+      reason: `orca-predispatch: SPEC_CONTENT_HASH_MISMATCH -- expected ${o.expectedContentHash} != computed ${content_hash}`,
+    };
   }
   return { ok: true, task_id: specTaskId, content_hash };
 }
 
 // ---- CLI (Orca 호출 없음 -- 판정 결과 출력만) ----
-const invokedDirectly = process.argv[1] && process.argv[1].replace(/\\/g, "/").endsWith("scripts/relay/orca-predispatch.mjs");
+const invokedDirectly =
+  process.argv[1] &&
+  process.argv[1]
+    .replace(/\\/g, "/")
+    .endsWith("scripts/relay/orca-predispatch.mjs");
 if (invokedDirectly) {
   let raw;
   try {
@@ -220,7 +366,9 @@ if (invokedDirectly) {
   try {
     payload = JSON.parse(raw);
   } catch (err) {
-    console.error(`orca-predispatch: stdin is not valid JSON (${errText(err)})`);
+    console.error(
+      `orca-predispatch: stdin is not valid JSON (${errText(err)})`,
+    );
     process.exit(1);
   }
   const result = checkPreDispatch(payload);

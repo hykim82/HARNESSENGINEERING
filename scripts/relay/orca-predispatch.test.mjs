@@ -7,9 +7,16 @@ import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
 import { createArmStore, armStorePath, hashContent } from "./arm-state.mjs";
-import { checkPreDispatch, buildSpec, verifySpec, REASON } from "./orca-predispatch.mjs";
+import {
+  checkPreDispatch,
+  buildSpec,
+  verifySpec,
+  REASON,
+} from "./orca-predispatch.mjs";
 
-const SCRIPT_PATH = fileURLToPath(new URL("./orca-predispatch.mjs", import.meta.url));
+const SCRIPT_PATH = fileURLToPath(
+  new URL("./orca-predispatch.mjs", import.meta.url),
+);
 
 const GRANT = Object.freeze({
   arm_id: "arm-hyk162-1",
@@ -36,11 +43,25 @@ function fileSha256(path) {
 }
 
 // 합성 fixture: 서명 패킷 + arm store(attempts_total override 가능) + task 파일.
-function withFixture({ grant = GRANT, attemptsTotal = 0, taskContent = TASK_CONTENT, signed = true } = {}, fn) {
+function withFixture(
+  {
+    grant = GRANT,
+    attemptsTotal = 0,
+    taskContent = TASK_CONTENT,
+    signed = true,
+  } = {},
+  fn,
+) {
   const dir = mkdtempSync(join(tmpdir(), "orca-predispatch-test-"));
   try {
     const packetPath = join(dir, "packet.md");
-    writeFileSync(packetPath, signed ? "packet_id: PKT-1\n승인: OK 한용 2026-07-19 00:30\n" : "packet_id: PKT-1\n승인: ☐\n", "utf8");
+    writeFileSync(
+      packetPath,
+      signed
+        ? "packet_id: PKT-1\n승인: OK 한용 2026-07-19 00:30\n"
+        : "packet_id: PKT-1\n승인: ☐\n",
+      "utf8",
+    );
 
     const created = createArmStore(grant, { at: grant.issued_at });
     assert.equal(created.ok, true);
@@ -78,7 +99,11 @@ function baseInput(fx, overrides = {}) {
     taskFilePath: fx.taskFilePath,
     nowMs: IN_WINDOW_NOW,
     request: goodRequest(overrides.request),
-    expected: { target: EXPECTED_TARGET, role: EXPECTED_ROLE, ...overrides.expected },
+    expected: {
+      target: EXPECTED_TARGET,
+      role: EXPECTED_ROLE,
+      ...overrides.expected,
+    },
     ...overrides.top,
   };
 }
@@ -90,7 +115,11 @@ test("(0) known-good baseline: all fields matching -> ALLOW, store untouched", (
     assert.equal(result.ok, true);
     assert.equal(result.allow, true);
     assert.equal(result.reason, REASON.ALLOW);
-    assert.equal(fileSha256(fx.storePath), before, "checkPreDispatch must not mutate the arm store");
+    assert.equal(
+      fileSha256(fx.storePath),
+      before,
+      "checkPreDispatch must not mutate the arm store",
+    );
   });
 });
 
@@ -107,7 +136,11 @@ test("(1) PACKET_UNSIGNED: packet not signed -> deny, store untouched", () => {
 test("(2) G1 known-bad: human_approval_ref reversed -> APPROVAL_REF_MISMATCH", () => {
   withFixture({}, (fx) => {
     const before = fileSha256(fx.storePath);
-    const result = checkPreDispatch(baseInput(fx, { request: { human_approval_ref: "다른사람 2026-07-19 00:30" } }));
+    const result = checkPreDispatch(
+      baseInput(fx, {
+        request: { human_approval_ref: "다른사람 2026-07-19 00:30" },
+      }),
+    );
     assert.equal(result.ok, false);
     assert.equal(result.reason, REASON.APPROVAL_REF_MISMATCH);
     assert.equal(fileSha256(fx.storePath), before);
@@ -123,7 +156,9 @@ test("(2b) G1 known-good: human_approval_ref matching (paired) -> ALLOW", () => 
 test("(3) G1 known-bad: arm_id reversed -> ARM_ID_MISMATCH", () => {
   withFixture({}, (fx) => {
     const before = fileSha256(fx.storePath);
-    const result = checkPreDispatch(baseInput(fx, { request: { arm_id: "arm-other" } }));
+    const result = checkPreDispatch(
+      baseInput(fx, { request: { arm_id: "arm-other" } }),
+    );
     assert.equal(result.ok, false);
     assert.equal(result.reason, REASON.ARM_ID_MISMATCH);
     assert.equal(fileSha256(fx.storePath), before);
@@ -138,7 +173,9 @@ test("(3b) G1 known-good: arm_id matching (paired) -> ALLOW", () => {
 test("(4) G1 known-bad: cycle_id reversed -> CYCLE_ID_MISMATCH", () => {
   withFixture({}, (fx) => {
     const before = fileSha256(fx.storePath);
-    const result = checkPreDispatch(baseInput(fx, { request: { cycle_id: "cycle-other" } }));
+    const result = checkPreDispatch(
+      baseInput(fx, { request: { cycle_id: "cycle-other" } }),
+    );
     assert.equal(result.ok, false);
     assert.equal(result.reason, REASON.CYCLE_ID_MISMATCH);
     assert.equal(fileSha256(fx.storePath), before);
@@ -153,7 +190,9 @@ test("(4b) G1 known-good: cycle_id matching (paired) -> ALLOW", () => {
 test("(5) G1 known-bad: task_id not in allowed_task_ids -> TASK_ID_MISMATCH", () => {
   withFixture({}, (fx) => {
     const before = fileSha256(fx.storePath);
-    const result = checkPreDispatch(baseInput(fx, { request: { task_id: "HYK-000-coder-9" } }));
+    const result = checkPreDispatch(
+      baseInput(fx, { request: { task_id: "HYK-000-coder-9" } }),
+    );
     assert.equal(result.ok, false);
     assert.equal(result.reason, REASON.TASK_ID_MISMATCH);
     assert.equal(fileSha256(fx.storePath), before);
@@ -167,7 +206,9 @@ test("(5b) G1 known-good: task_id in allowed_task_ids (paired) -> ALLOW", () => 
 
 test("(6) EXPIRED: nowMs past expires_at -> EXPIRED", () => {
   withFixture({}, (fx) => {
-    const result = checkPreDispatch(baseInput(fx, { top: { nowMs: Date.parse("2026-07-20T00:00:01.000Z") } }));
+    const result = checkPreDispatch(
+      baseInput(fx, { top: { nowMs: Date.parse("2026-07-20T00:00:01.000Z") } }),
+    );
     assert.equal(result.ok, false);
     assert.equal(result.reason, REASON.EXPIRED);
   });
@@ -184,7 +225,9 @@ test("(7) BUDGET_EXHAUSTED: attempts_total already at max -> BUDGET_EXHAUSTED", 
 test("(8) G3 known-bad: content_hash reversed (tampered) -> CONTENT_HASH_MISMATCH", () => {
   withFixture({}, (fx) => {
     const before = fileSha256(fx.storePath);
-    const result = checkPreDispatch(baseInput(fx, { request: { content_hash: "0".repeat(64) } }));
+    const result = checkPreDispatch(
+      baseInput(fx, { request: { content_hash: "0".repeat(64) } }),
+    );
     assert.equal(result.ok, false);
     assert.equal(result.reason, REASON.CONTENT_HASH_MISMATCH);
     assert.equal(fileSha256(fx.storePath), before);
@@ -197,17 +240,22 @@ test("(8b) G3 known-good: content_hash matching actual task file content (paired
 });
 
 test("(9) G3 known-bad: task file's own task_id no longer matches request -> TASK_ID_MISMATCH (spec cross-check)", () => {
-  withFixture({ taskContent: "task_id: HYK-DIFFERENT-1\nswapped body\n" }, (fx) => {
-    const result = checkPreDispatch(baseInput(fx));
-    assert.equal(result.ok, false);
-    assert.equal(result.reason, REASON.TASK_ID_MISMATCH);
-  });
+  withFixture(
+    { taskContent: "task_id: HYK-DIFFERENT-1\nswapped body\n" },
+    (fx) => {
+      const result = checkPreDispatch(baseInput(fx));
+      assert.equal(result.ok, false);
+      assert.equal(result.reason, REASON.TASK_ID_MISMATCH);
+    },
+  );
 });
 
 test("(10) G4 known-bad: expected.target unset -> TARGET_UNSPECIFIED", () => {
   withFixture({}, (fx) => {
     const before = fileSha256(fx.storePath);
-    const result = checkPreDispatch(baseInput(fx, { expected: { target: undefined } }));
+    const result = checkPreDispatch(
+      baseInput(fx, { expected: { target: undefined } }),
+    );
     assert.equal(result.ok, false);
     assert.equal(result.reason, REASON.TARGET_UNSPECIFIED);
     assert.equal(fileSha256(fx.storePath), before);
@@ -217,7 +265,9 @@ test("(10) G4 known-bad: expected.target unset -> TARGET_UNSPECIFIED", () => {
 test("(11) G4 known-bad: request.target reversed to a different terminal -> TARGET_MISMATCH", () => {
   withFixture({}, (fx) => {
     const before = fileSha256(fx.storePath);
-    const result = checkPreDispatch(baseInput(fx, { request: { target: "worktree-pane-9" } }));
+    const result = checkPreDispatch(
+      baseInput(fx, { request: { target: "worktree-pane-9" } }),
+    );
     assert.equal(result.ok, false);
     assert.equal(result.reason, REASON.TARGET_MISMATCH);
     assert.equal(fileSha256(fx.storePath), before);
@@ -231,7 +281,9 @@ test("(11b) G4 known-good: request.target fixed to the configured CODER terminal
 
 test("(12) ROLE_UNDETERMINED: request.role missing -> ROLE_UNDETERMINED", () => {
   withFixture({}, (fx) => {
-    const result = checkPreDispatch(baseInput(fx, { request: { role: undefined } }));
+    const result = checkPreDispatch(
+      baseInput(fx, { request: { role: undefined } }),
+    );
     assert.equal(result.ok, false);
     assert.equal(result.reason, REASON.ROLE_UNDETERMINED);
   });
@@ -239,7 +291,9 @@ test("(12) ROLE_UNDETERMINED: request.role missing -> ROLE_UNDETERMINED", () => 
 
 test("(13) ROLE_UNDETERMINED: request.role mismatched (e.g. REVIEW instead of CODER) -> ROLE_UNDETERMINED", () => {
   withFixture({}, (fx) => {
-    const result = checkPreDispatch(baseInput(fx, { request: { role: "REVIEW" } }));
+    const result = checkPreDispatch(
+      baseInput(fx, { request: { role: "REVIEW" } }),
+    );
     assert.equal(result.ok, false);
     assert.equal(result.reason, REASON.ROLE_UNDETERMINED);
   });
@@ -247,7 +301,9 @@ test("(13) ROLE_UNDETERMINED: request.role mismatched (e.g. REVIEW instead of CO
 
 test("(14) STORE_UNAVAILABLE: no arm store on disk for the given arm_id", () => {
   withFixture({}, (fx) => {
-    const result = checkPreDispatch(baseInput(fx, { top: { arm_id: "arm-never-armed" } }));
+    const result = checkPreDispatch(
+      baseInput(fx, { top: { arm_id: "arm-never-armed" } }),
+    );
     assert.equal(result.ok, false);
     assert.equal(result.reason, REASON.STORE_UNAVAILABLE);
   });
@@ -289,7 +345,9 @@ test("(19) verifySpec known-bad: spec task_id != task file task_id -> SPEC_TASK_
 });
 test("(20) verifySpec known-bad: expectedContentHash mismatch -> SPEC_CONTENT_HASH_MISMATCH", () => {
   withFixture({}, (fx) => {
-    const r = verifySpec("go HYK-999-coder-1", fx.taskFilePath, { expectedContentHash: "0".repeat(64) });
+    const r = verifySpec("go HYK-999-coder-1", fx.taskFilePath, {
+      expectedContentHash: "0".repeat(64),
+    });
     assert.equal(r.ok, false);
     assert.match(r.reason, /SPEC_CONTENT_HASH_MISMATCH/);
   });
@@ -299,7 +357,10 @@ test("(20) verifySpec known-bad: expectedContentHash mismatch -> SPEC_CONTENT_HA
 test("(21) CLI exits 0 and prints allow:true for a known-good payload", () => {
   withFixture({}, (fx) => {
     const input = baseInput(fx);
-    const out = execFileSync("node", [SCRIPT_PATH], { input: JSON.stringify(input), encoding: "utf8" });
+    const out = execFileSync("node", [SCRIPT_PATH], {
+      input: JSON.stringify(input),
+      encoding: "utf8",
+    });
     const parsed = JSON.parse(out);
     assert.equal(parsed.allow, true);
   });
@@ -307,6 +368,11 @@ test("(21) CLI exits 0 and prints allow:true for a known-good payload", () => {
 test("(22) CLI exits non-zero for a known-bad payload (packet unsigned)", () => {
   withFixture({ signed: false }, (fx) => {
     const input = baseInput(fx);
-    assert.throws(() => execFileSync("node", [SCRIPT_PATH], { input: JSON.stringify(input), encoding: "utf8" }));
+    assert.throws(() =>
+      execFileSync("node", [SCRIPT_PATH], {
+        input: JSON.stringify(input),
+        encoding: "utf8",
+      }),
+    );
   });
 });
