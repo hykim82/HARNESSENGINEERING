@@ -331,7 +331,16 @@
       "substrate": "claude-hook",
       "script": "scripts/check/report-style-guard.mjs",
       "test": "scripts/check/report-style-guard.test.mjs",
-      "install_targets": [],
+      "install_targets": [
+        {
+          "location": "repo-settings",
+          "kind": "claude-settings",
+          "path": "REPO/.claude/settings.local.json",
+          "hook_event": "PreToolUse",
+          "matcher": "Edit|Write|MultiEdit|NotebookEdit",
+          "required": true
+        }
+      ],
       "expected_bad": "a Write/Edit to a watched work-document path (repo .harness/<role>-task.md, templates/**, control-room PM/relay/*-task.md, or any /memory/ path) whose content carries a report-tone signature -- signature A: a markdown heading copying the style guide's title '기술 답변 톤' or slug 'orchestrator-report-style'; signature B: the 5-part report skeleton set '결론'+'진단'+'정직 한계' all present as heading/numbered/bold structural items -> PreToolUse hook exit 2 (block)",
       "expected_good": "a watched-path write with no report-tone signature -> exit 0; a non-watched path or non-write tool -> exit 0 (not checked); prose use of 한계/결론/진단, a gate-card citation, or a mere 'orchestrator-report-style.md' filename reference -> exit 0 (known-good); malformed/absent hook payload or non-string content -> exit 0 (UNJUDGABLE, fail-open)",
       "failure_exit": 2,
@@ -339,7 +348,7 @@
       "owner": "ORCH",
       "claude_only": true,
       "self_registration_note": "HYK-143 사이클1 자기 등재, same convention as reject-streak/selfcheck-freshness above -- this checker audits its own manifest presence the same way it audits every other check.",
-      "invocation_note": "PreToolUse hook (Write/Edit matcher), same substrate as role-guard. install_targets is [] until wiring: per HYK-143 task the .claude/settings.local.json edit is deferred to a post-merge ORCH self-config under human approval (HYK-115 precedent). Until wired the guard is ALIVE-via-script+test but has no enforcement effect (documented limitation in docs/enforcement-v1.md)."
+      "invocation_note": "PreToolUse hook (Write/Edit matcher), same substrate as role-guard. HYK-160 라이더ⓐ (07-18): install_targets was left [] after the HYK-143 round even though the .claude/settings.local.json PreToolUse wiring was actually completed (verify-2, 07-18 독립 확인) -- this entry now reflects the real wiring, closing that ledger/reality drift."
     },
     {
       "id": "quality-check",
@@ -408,6 +417,51 @@
       "claude_only": false,
       "self_registration_note": "HYK-155-coder-2 self-registration (가벼운 보강 2종 ②), same module as orca-linear-reconnect/orca-automations-present.",
       "invocation_note": "Not hook-installed -- see orca-linear-reconnect's invocation_note. No known secret fingerprint available (e.g. `.bot_pat` absent) -> UNJUDGABLE, never a false OK."
+    },
+    {
+      "id": "b0-gate",
+      "substrate": "orch-direct",
+      "script": "scripts/check/b0-gate.mjs",
+      "test": "scripts/check/b0-gate.test.mjs",
+      "install_targets": [],
+      "expected_bad": "a B0-target design drop with no classification marker, a missing/mismatched request-response-consumption block, or a consumption record missing/malformed linear_comment -> gate exit 2 (B0_CLASSIFICATION_REQUIRED | B0_EVIDENCE_REQUIRED | B0_ID_MISMATCH | B0_CONSUMPTION_EVIDENCE_REQUIRED)",
+      "expected_good": "a 비대상 drop with a non-empty 사유, or a target drop with all three blocks sharing one b0_id and a well-formed linear_comment pointer -> gate exit 0",
+      "failure_exit": 2,
+      "uncertain_exit": null,
+      "owner": "ORCH",
+      "claude_only": false,
+      "self_registration_note": "HYK-160-coder-5 라이더ⓑ self-registration -- closes the HYK-160-coder-3 deferral (declared out of that round's diff scope, docs/enforcement-v1.md §H flagged it as a follow-up at the time).",
+      "invocation_note": "Not hook-installed -- ORCH calls this directly before a B0-target design drop, same 'ALIVE via script+test' posture as reject-streak/pm-snapshot-gate. docs/enforcement-v1.md §H is the operational doc (exact command, reason list, linear_comment format, sync responsibility)."
+    },
+    {
+      "id": "research-receipt",
+      "substrate": "orch-direct",
+      "script": "scripts/check/research-receipt.mjs",
+      "test": "scripts/check/research-receipt.test.mjs",
+      "install_targets": [],
+      "expected_bad": "a confirmed streak>=2 issue with no WebSearch/WebFetch receipt logged since its last reject -> gate exit 2 (RESEARCH_RECEIPT_REQUIRED); a B0 target request block missing its '선행 사례:' field -> gate exit 2 (PRIOR_ART_FIELD_REQUIRED, separate fixture)",
+      "expected_good": "streak<2, or a receipt logged after the last reject, and (if a B0 request block exists) a non-empty 선행 사례 field -> gate exit 0",
+      "failure_exit": 2,
+      "uncertain_exit": null,
+      "owner": "ORCH",
+      "claude_only": false,
+      "self_registration_note": "HYK-160-coder-5 self-registration (HYK-144), same convention as reject-streak/b0-gate above.",
+      "invocation_note": "The `gate` subcommand is orch-direct (ORCH calls it before dropping the next coder-task.md, same posture as reject-streak). The companion `record` subcommand is a PostToolUse(WebSearch|WebFetch) hook -- Tier2, install_targets intentionally [] until a follow-up round wires it into settings.local.json (installation is a separate step per this batch's own constraint); until wired it is 'ALIVE via script+test' only, recording nothing in a live session."
+    },
+    {
+      "id": "go-task-id-gate",
+      "substrate": "claude-hook",
+      "script": "scripts/check/go-task-id-gate.mjs",
+      "test": "scripts/check/go-task-id-gate.test.mjs",
+      "install_targets": [],
+      "expected_bad": "a 'go' prompt with no task_id token -> exit 2 (TASK_ID_REQUIRED); a 'go <id>' prompt whose id doesn't match the dropped task file's task_id header -> exit 2 (TASK_ID_MISMATCH)",
+      "expected_good": "a non-'go' prompt, an unregulated role, or 'go <id>' matching the task file's task_id -> exit 0; a missing/unreadable task file is UNJUDGABLE+fail-open, never a block",
+      "failure_exit": 2,
+      "uncertain_exit": 0,
+      "owner": "ORCH",
+      "claude_only": true,
+      "self_registration_note": "HYK-160-coder-5 self-registration (HYK-151), same convention as report-style-guard above.",
+      "invocation_note": "PreToolUse-adjacent UserPromptSubmit hook (blocks before the model processes the prompt, C2-0 confirmed both exit-2 and JSON decision:block work -- this adopts exit-2 as the simpler single-failure-surface form). install_targets intentionally [] until a follow-up round wires it into settings.local.json (installation is a separate step per this batch's own constraint, same as research-receipt's record hook). The companion generator (`--generate <task-path>`, part B) is a plain CLI ORCH runs to produce the exact 'go <task_id>' line, fail-closed on a missing/unreadable task file -- not hook-installed at all, same 'ALIVE via script+test' posture as sign.sh's packet-gate companion."
     },
     {
       "id": "ci-enforce",

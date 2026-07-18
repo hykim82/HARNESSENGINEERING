@@ -14,6 +14,72 @@ import { join } from "node:path";
 export const GO_RE = /^\s*go\b/i;
 export const REGULATED_ROLES = ["CODER", "REVIEW", "VERIFY", "PM"];
 
+// HYK-152 하드닝: the coder-3/coder-6 incident (관제실 §6 HYK-152) was an env
+// leak, not a missing check -- HARNESS_STATUS_PATH pointed at a stale
+// control-room path left over from a prior session, and nothing here ever
+// asked "does this STATUS file actually belong to the repo I'm running in?"
+// This marker is the STATUS file's own declaration of which repo root it's
+// for -- an HTML comment (same invisible-in-rendered-markdown convention as
+// reject-streak.mjs's envelope / pm-snapshot-gate.mjs's block), so ORCH adds
+// one line to each track's STATUS.md once and every future go-write is
+// checked against it, instead of trusting whatever path an env var happens
+// to hold.
+export const TRACK_ROOT_MARKER_RE =
+  /<!--\s*harness-track-root\s*:\s*(.+?)\s*-->/i;
+
+// Path comparison must be OS/case/trailing-slash agnostic (Windows paths
+// mixing `\` and `/`, a trailing slash either side) -- this is a "same
+// directory or not" check, not a byte-identity check.
+function normalizeTrackRoot(p) {
+  return String(p).trim().replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+}
+
+// G8's track-consistency check: does the STATUS file this hook is about to
+// write to actually declare itself as belonging to `repoRoot` (the repo
+// this session is running in)? Two failure reasons, both "무쓰기" (never
+// write) but kept distinct so a reader can tell "the STATUS was for a
+// different track" from "I couldn't tell which track this STATUS is for at
+// all" -- honesty: a missing/malformed marker is UNJUDGABLE, never silently
+// treated as a match (that would recreate exactly the HYK-152 gap this
+// hardening closes).
+//
+// `repoRoot` omitted (undefined) skips this check entirely -- a pure-function
+// backward-compat affordance for a caller that predates this hardening. The
+// real CLI entrypoint below always supplies it; this is not a loophole in
+// production, only in this function's own signature.
+export function checkTrackMatch({ statusText, repoRoot }) {
+  if (repoRoot === undefined) {
+    return { status: "SKIP" };
+  }
+  if (typeof repoRoot !== "string" || repoRoot.trim() === "") {
+    return {
+      status: "UNJUDGABLE",
+      reason:
+        "STATUS_TARGET_UNJUDGABLE -- worker-status-onstart: task repo root could not be resolved",
+    };
+  }
+  const markerMatch =
+    typeof statusText === "string"
+      ? statusText.match(TRACK_ROOT_MARKER_RE)
+      : null;
+  if (!markerMatch) {
+    return {
+      status: "UNJUDGABLE",
+      reason:
+        "STATUS_TARGET_UNJUDGABLE -- worker-status-onstart: STATUS file has no '<!-- harness-track-root: ... -->' marker, cannot verify this STATUS belongs to the current repo track",
+    };
+  }
+  const declaredRoot = normalizeTrackRoot(markerMatch[1]);
+  const actualRoot = normalizeTrackRoot(repoRoot);
+  if (declaredRoot !== actualRoot) {
+    return {
+      status: "MISMATCH",
+      reason: `STATUS_TRACK_MISMATCH -- worker-status-onstart: STATUS declares track root '${markerMatch[1].trim()}' but current repo root is '${repoRoot}'`,
+    };
+  }
+  return { status: "OK" };
+}
+
 export function isGoPrompt(prompt) {
   return typeof prompt === "string" && GO_RE.test(prompt);
 }
@@ -53,7 +119,9 @@ export function findSection1Bounds(statusText) {
   const bodyStart = headingMatch.index + headingMatch[0].length;
   const rest = statusText.slice(bodyStart);
   const nextHeadingMatch = ANY_HEADING_RE.exec(rest);
-  const bodyEnd = nextHeadingMatch ? bodyStart + nextHeadingMatch.index : statusText.length;
+  const bodyEnd = nextHeadingMatch
+    ? bodyStart + nextHeadingMatch.index
+    : statusText.length;
   return { bodyStart, bodyEnd };
 }
 
@@ -75,11 +143,18 @@ export function findSection1Bounds(statusText) {
 // within the located range, never a rewrite).
 export function applyStatusUpdate({ statusText, role, label, nowStr }) {
   if (typeof statusText !== "string") {
-    return { ok: false, reason: "worker-status-onstart: STATUS content is not a string" };
+    return {
+      ok: false,
+      reason: "worker-status-onstart: STATUS content is not a string",
+    };
   }
   const bounds = findSection1Bounds(statusText);
   if (!bounds) {
-    return { ok: false, reason: "worker-status-onstart: no STATUS §1 heading found (expected a heading line like '### 1) ...')" };
+    return {
+      ok: false,
+      reason:
+        "worker-status-onstart: no STATUS §1 heading found (expected a heading line like '### 1) ...')",
+    };
   }
   const sectionBody = statusText.slice(bounds.bodyStart, bounds.bodyEnd);
   // Trailing whitespace before `$` is deliberately horizontal-only
@@ -100,14 +175,23 @@ export function applyStatusUpdate({ statusText, role, label, nowStr }) {
   // this asymmetry between "last row in §1" and every other row cannot
   // recur regardless of how many blank lines separate the row from the
   // next heading.
-  const rowRe = new RegExp(String.raw`^\|\s*${role}\s*\|[^|]*\|[^|]*\|[^\S\r\n]*$`, "m");
+  const rowRe = new RegExp(
+    String.raw`^\|\s*${role}\s*\|[^|]*\|[^|]*\|[^\S\r\n]*$`,
+    "m",
+  );
   const match = rowRe.exec(sectionBody);
   if (!match) {
-    return { ok: false, reason: `worker-status-onstart: no STATUS §1 row found for role '${role}'` };
+    return {
+      ok: false,
+      reason: `worker-status-onstart: no STATUS §1 row found for role '${role}'`,
+    };
   }
   const absoluteIndex = bounds.bodyStart + match.index;
   const newLine = `| ${role} | ${label} | ${nowStr} |`;
-  const updatedText = statusText.slice(0, absoluteIndex) + newLine + statusText.slice(absoluteIndex + match[0].length);
+  const updatedText =
+    statusText.slice(0, absoluteIndex) +
+    newLine +
+    statusText.slice(absoluteIndex + match[0].length);
   return { ok: true, updatedText };
 }
 
@@ -116,16 +200,33 @@ export function applyStatusUpdate({ statusText, role, label, nowStr }) {
 // what should happen -- without touching a filesystem. This is what makes
 // the whole go-time decision testable without any temp-directory fixtures;
 // only the CLI wrapper below does real I/O.
-export function computeUpdate({ prompt, role, taskContent, statusText, nowStr }) {
+export function computeUpdate({
+  prompt,
+  role,
+  taskContent,
+  statusText,
+  nowStr,
+  repoRoot,
+}) {
   if (!isGoPrompt(prompt)) {
     return { action: "noop", reason: "not a go-prompt" };
   }
   if (!REGULATED_ROLES.includes(role)) {
-    return { action: "noop", reason: `role '${role ?? ""}' is not regulated by this hook` };
+    return {
+      action: "noop",
+      reason: `role '${role ?? ""}' is not regulated by this hook`,
+    };
   }
   const taskId = extractTaskId(taskContent);
   if (!taskId) {
-    return { action: "warn", reason: "task file missing/unreadable, or no task_id header in it" };
+    return {
+      action: "warn",
+      reason: "task file missing/unreadable, or no task_id header in it",
+    };
+  }
+  const track = checkTrackMatch({ statusText, repoRoot });
+  if (track.status === "UNJUDGABLE" || track.status === "MISMATCH") {
+    return { action: "warn", reason: track.reason };
   }
   const label = buildStatusLabel(role, taskId);
   const result = applyStatusUpdate({ statusText, role, label, nowStr });
@@ -137,7 +238,9 @@ export function computeUpdate({ prompt, role, taskContent, statusText, nowStr })
 
 function repoRoot() {
   try {
-    return execSync("git rev-parse --show-toplevel", { encoding: "utf8" }).trim();
+    return execSync("git rev-parse --show-toplevel", {
+      encoding: "utf8",
+    }).trim();
   } catch {
     return process.cwd();
   }
@@ -156,9 +259,12 @@ function formatNow(date) {
 }
 
 const invokedDirectly =
-  process.argv[1] && process.argv[1].replace(/\\/g, "/").endsWith("scripts/check/worker-status-onstart.mjs");
+  process.argv[1] &&
+  process.argv[1]
+    .replace(/\\/g, "/")
+    .endsWith("scripts/check/worker-status-onstart.mjs");
 if (invokedDirectly) {
-  let raw = "";
+  let raw;
   try {
     raw = readFileSync(0, "utf8");
   } catch {
@@ -185,29 +291,37 @@ if (invokedDirectly) {
     process.exit(0);
   }
 
+  const root = repoRoot();
+
   let taskPath;
   if (role === "PM") {
     const relayDir = process.env.HARNESS_PM_RELAY_DIR;
     if (!relayDir) {
-      console.error("worker-status-onstart: PM role but HARNESS_PM_RELAY_DIR is not set -- skipping (no hardcoded control-room path).");
+      console.error(
+        "worker-status-onstart: PM role but HARNESS_PM_RELAY_DIR is not set -- skipping (no hardcoded control-room path).",
+      );
       process.exit(0);
     }
     taskPath = join(relayDir, "pm-task.md");
   } else {
-    taskPath = join(repoRoot(), ".harness", `${role.toLowerCase()}-task.md`);
+    taskPath = join(root, ".harness", `${role.toLowerCase()}-task.md`);
   }
 
   let taskContent = null;
   try {
     taskContent = readFileSync(taskPath, "utf8");
   } catch (err) {
-    console.error(`worker-status-onstart: could not read task file '${taskPath}' (${err.message}) -- fail-open, skipping.`);
+    console.error(
+      `worker-status-onstart: could not read task file '${taskPath}' (${err.message}) -- fail-open, skipping.`,
+    );
     process.exit(0);
   }
 
   const statusPath = process.env.HARNESS_STATUS_PATH;
   if (!statusPath) {
-    console.error("worker-status-onstart: HARNESS_STATUS_PATH is not set -- skipping (no hardcoded STATUS path).");
+    console.error(
+      "worker-status-onstart: HARNESS_STATUS_PATH is not set -- skipping (no hardcoded STATUS path).",
+    );
     process.exit(0);
   }
 
@@ -215,21 +329,34 @@ if (invokedDirectly) {
   try {
     statusText = readFileSync(statusPath, "utf8");
   } catch (err) {
-    console.error(`worker-status-onstart: could not read STATUS file '${statusPath}' (${err.message}) -- fail-open, skipping.`);
+    console.error(
+      `worker-status-onstart: could not read STATUS file '${statusPath}' (${err.message}) -- fail-open, skipping.`,
+    );
     process.exit(0);
   }
 
-  const decision = computeUpdate({ prompt, role, taskContent, statusText, nowStr: formatNow(new Date()) });
+  const decision = computeUpdate({
+    prompt,
+    role,
+    taskContent,
+    statusText,
+    nowStr: formatNow(new Date()),
+    repoRoot: root,
+  });
 
   if (decision.action !== "write") {
-    console.error(`worker-status-onstart: ${decision.reason} -- fail-open, skipping.`);
+    console.error(
+      `worker-status-onstart: ${decision.reason} -- fail-open, skipping.`,
+    );
     process.exit(0);
   }
 
   try {
     writeFileSync(statusPath, decision.updatedText, "utf8");
   } catch (err) {
-    console.error(`worker-status-onstart: could not write STATUS file '${statusPath}' (${err.message}) -- fail-open.`);
+    console.error(
+      `worker-status-onstart: could not write STATUS file '${statusPath}' (${err.message}) -- fail-open.`,
+    );
     process.exit(0);
   }
 

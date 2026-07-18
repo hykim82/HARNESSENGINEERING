@@ -1,6 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, rmSync, mkdirSync } from "node:fs";
+import {
+  mkdtempSync,
+  writeFileSync,
+  rmSync,
+  mkdirSync,
+  existsSync,
+} from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { execFileSync } from "node:child_process";
@@ -25,7 +31,13 @@ import {
   discoverCheckTestFiles,
   expectedIdsForLocation,
   findExtraResults,
+  checkEnforcementInventoryRegistration,
+  checkHookSetAdditive,
+  checkHookWiringRegistered,
+  EXPECTED_INJECTED_HOOKS,
 } from "./selfcheck-inventory.mjs";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 
 // --- POSIX shell discovery (HYK-129 coder-9/10, review-8/9 defect 2/1) ------
 // History: coder-8 hardcoded `sh`; coder-9 added a `-c exit 0` probe with a
@@ -52,7 +64,10 @@ function whereResults(names) {
   const found = [];
   for (const name of names) {
     try {
-      const out = execFileSync("where", [name], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+      const out = execFileSync("where", [name], {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+      });
       for (const l of out.split(/\r?\n/)) if (l.trim()) found.push(l.trim());
     } catch {
       /* `where` missing or no match -> ignore */
@@ -74,15 +89,25 @@ const GIT_FOR_WINDOWS_SHELLS = [
 // rather than merely existing. This is exactly what WSL bash fails.
 function functionalShellProbe(cmd) {
   const dir = mkdtempSync(join(tmpdir(), "shell-probe-"));
-  let ok = false;
+  let ok;
   try {
     mkdirSync(join(dir, "scripts", "check"), { recursive: true });
-    for (const f of ["a.test.mjs", "b.test.mjs"]) writeFileSync(join(dir, "scripts", "check", f), "//\n", "utf8");
+    for (const f of ["a.test.mjs", "b.test.mjs"])
+      writeFileSync(join(dir, "scripts", "check", f), "//\n", "utf8");
     // (1) the glob must expand POSIX-style to both fixture files in argv
     const script = `set -- scripts/check/*.test.mjs\nfor a in "$@"; do echo "ARG:$a"; done`;
-    const out = execFileSync(cmd, ["-c", script], { cwd: dir, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
-    const argv = out.split("\n").filter((l) => l.startsWith("ARG:")).map((l) => l.slice(4));
-    ok = ["a.test.mjs", "b.test.mjs"].every((f) => argv.some((a) => a.endsWith(f)));
+    const out = execFileSync(cmd, ["-c", script], {
+      cwd: dir,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    const argv = out
+      .split("\n")
+      .filter((l) => l.startsWith("ARG:"))
+      .map((l) => l.slice(4));
+    ok = ["a.test.mjs", "b.test.mjs"].every((f) =>
+      argv.some((a) => a.endsWith(f)),
+    );
   } catch {
     ok = false; // missing binary, non-shell, or glob machinery threw
   }
@@ -97,7 +122,12 @@ function functionalShellProbe(cmd) {
 }
 
 function findPosixShell({ probe = functionalShellProbe, candidates } = {}) {
-  const list = candidates ?? ["sh", ...GIT_FOR_WINDOWS_SHELLS, "bash", ...whereResults(["sh", "bash"])];
+  const list = candidates ?? [
+    "sh",
+    ...GIT_FOR_WINDOWS_SHELLS,
+    "bash",
+    ...whereResults(["sh", "bash"]),
+  ];
   for (const cand of list) {
     if (probe(cand)) return cand;
   }
@@ -119,7 +149,10 @@ const SHELL_SKIP = POSIX_SHELL
 function bashArgvFor(cwd, runFragment) {
   // runFragment == exactly what follows `node --test ` in the workflow line.
   const script = `set -- ${runFragment}\nfor a in "$@"; do echo "ARG:$a"; done`;
-  const out = execFileSync(POSIX_SHELL, ["-c", script], { cwd, encoding: "utf8" });
+  const out = execFileSync(POSIX_SHELL, ["-c", script], {
+    cwd,
+    encoding: "utf8",
+  });
   return out
     .split("\n")
     .filter((l) => l.startsWith("ARG:"))
@@ -147,14 +180,38 @@ test("(1) parseHookCommands: extracts hookEvent/matcher/command, ignores every o
     permissions: { allow: ["Bash(rm -rf /)"] },
     env: { SECRET: "should-never-appear" },
     hooks: {
-      PreToolUse: [{ matcher: "Edit|Write", hooks: [{ type: "command", command: 'node "scripts/check/role-guard.mjs"' }] }],
-      Stop: [{ hooks: [{ type: "command", command: "node scripts/check/status-fresh.mjs --status x" }] }],
+      PreToolUse: [
+        {
+          matcher: "Edit|Write",
+          hooks: [
+            { type: "command", command: 'node "scripts/check/role-guard.mjs"' },
+          ],
+        },
+      ],
+      Stop: [
+        {
+          hooks: [
+            {
+              type: "command",
+              command: "node scripts/check/status-fresh.mjs --status x",
+            },
+          ],
+        },
+      ],
     },
   };
   const result = parseHookCommands(settings);
   assert.deepEqual(result, [
-    { hookEvent: "PreToolUse", matcher: "Edit|Write", command: 'node "scripts/check/role-guard.mjs"' },
-    { hookEvent: "Stop", matcher: null, command: "node scripts/check/status-fresh.mjs --status x" },
+    {
+      hookEvent: "PreToolUse",
+      matcher: "Edit|Write",
+      command: 'node "scripts/check/role-guard.mjs"',
+    },
+    {
+      hookEvent: "Stop",
+      matcher: null,
+      command: "node scripts/check/status-fresh.mjs --status x",
+    },
   ]);
 });
 
@@ -166,12 +223,25 @@ test("(2) parseHookCommands: missing/malformed hooks object -> []", () => {
 });
 
 test("(3) extractCheckScriptId: extracts id from forward- or back-slash command", () => {
-  assert.equal(extractCheckScriptId('node "$CLAUDE_PROJECT_DIR/scripts/check/role-guard.mjs"'), "role-guard");
-  assert.equal(extractCheckScriptId("node C:\\repo\\scripts\\check\\controlroom-fresh.mjs --x"), "controlroom-fresh");
+  assert.equal(
+    extractCheckScriptId(
+      'node "$CLAUDE_PROJECT_DIR/scripts/check/role-guard.mjs"',
+    ),
+    "role-guard",
+  );
+  assert.equal(
+    extractCheckScriptId(
+      "node C:\\repo\\scripts\\check\\controlroom-fresh.mjs --x",
+    ),
+    "controlroom-fresh",
+  );
 });
 
 test("(4) extractCheckScriptId: non-check command (e.g. notification balloon) -> null", () => {
-  assert.equal(extractCheckScriptId("Add-Type -AssemblyName System.Windows.Forms"), null);
+  assert.equal(
+    extractCheckScriptId("Add-Type -AssemblyName System.Windows.Forms"),
+    null,
+  );
   assert.equal(extractCheckScriptId(null), null);
   assert.equal(extractCheckScriptId(undefined), null);
 });
@@ -179,35 +249,73 @@ test("(4) extractCheckScriptId: non-check command (e.g. notification balloon) ->
 // --- findInstalledTarget / findExtraInvocations (G6) ---
 
 test("(5) findInstalledTarget: installed with matching matcher -> installed:true", () => {
-  const hookCommands = [{ hookEvent: "PreToolUse", matcher: "Edit|Write", command: "node scripts/check/role-guard.mjs" }];
-  const result = findInstalledTarget(hookCommands, { id: "role-guard", hookEvent: "PreToolUse", matcher: "Edit|Write" });
+  const hookCommands = [
+    {
+      hookEvent: "PreToolUse",
+      matcher: "Edit|Write",
+      command: "node scripts/check/role-guard.mjs",
+    },
+  ];
+  const result = findInstalledTarget(hookCommands, {
+    id: "role-guard",
+    hookEvent: "PreToolUse",
+    matcher: "Edit|Write",
+  });
   assert.equal(result.installed, true);
   assert.equal(result.matcherMismatch, false);
 });
 
 test("(6) findInstalledTarget: missing entirely -> installed:false (G6 'missing')", () => {
-  const result = findInstalledTarget([], { id: "role-guard", hookEvent: "PreToolUse", matcher: "Edit|Write" });
+  const result = findInstalledTarget([], {
+    id: "role-guard",
+    hookEvent: "PreToolUse",
+    matcher: "Edit|Write",
+  });
   assert.equal(result.installed, false);
 });
 
 test("(7) findInstalledTarget: installed but matcher differs -> matcherMismatch:true", () => {
-  const hookCommands = [{ hookEvent: "PreToolUse", matcher: "Edit", command: "node scripts/check/role-guard.mjs" }];
-  const result = findInstalledTarget(hookCommands, { id: "role-guard", hookEvent: "PreToolUse", matcher: "Edit|Write" });
+  const hookCommands = [
+    {
+      hookEvent: "PreToolUse",
+      matcher: "Edit",
+      command: "node scripts/check/role-guard.mjs",
+    },
+  ];
+  const result = findInstalledTarget(hookCommands, {
+    id: "role-guard",
+    hookEvent: "PreToolUse",
+    matcher: "Edit|Write",
+  });
   assert.equal(result.installed, true);
   assert.equal(result.matcherMismatch, true);
 });
 
 test("(8) findExtraInvocations: a hook command referencing an id not in expectedIds -> flagged extra (G6 'extra')", () => {
   const hookCommands = [
-    { hookEvent: "Stop", matcher: null, command: "node scripts/check/status-fresh.mjs" },
-    { hookEvent: "Stop", matcher: null, command: "node scripts/check/mystery-check.mjs" },
+    {
+      hookEvent: "Stop",
+      matcher: null,
+      command: "node scripts/check/status-fresh.mjs",
+    },
+    {
+      hookEvent: "Stop",
+      matcher: null,
+      command: "node scripts/check/mystery-check.mjs",
+    },
   ];
   const extras = findExtraInvocations(hookCommands, ["status-fresh"]);
   assert.deepEqual(extras, ["mystery-check"]);
 });
 
 test("(9) findExtraInvocations: nothing unexpected -> []", () => {
-  const hookCommands = [{ hookEvent: "Stop", matcher: null, command: "node scripts/check/status-fresh.mjs" }];
+  const hookCommands = [
+    {
+      hookEvent: "Stop",
+      matcher: null,
+      command: "node scripts/check/status-fresh.mjs",
+    },
+  ];
   assert.deepEqual(findExtraInvocations(hookCommands, ["status-fresh"]), []);
 });
 
@@ -228,7 +336,10 @@ test("(11) checkNativeGitHook: installed copy missing -> NOT_INSTALLED (G7 'bad'
   withFixtureDir((dir) => {
     const versionedPath = join(dir, "hooks-pre-commit");
     writeFileSync(versionedPath, "#!/bin/sh\ngitleaks detect\n", "utf8");
-    const result = checkNativeGitHook({ versionedPath, installedPath: join(dir, "does-not-exist") });
+    const result = checkNativeGitHook({
+      versionedPath,
+      installedPath: join(dir, "does-not-exist"),
+    });
     assert.equal(result.status, "NOT_INSTALLED");
   });
 });
@@ -246,7 +357,10 @@ test("(12) checkNativeGitHook: installed differs from versioned (hash mismatch) 
 
 test("(13) checkNativeGitHook: versioned copy itself missing -> UNJUDGABLE", () => {
   withFixtureDir((dir) => {
-    const result = checkNativeGitHook({ versionedPath: join(dir, "nope"), installedPath: join(dir, "also-nope") });
+    const result = checkNativeGitHook({
+      versionedPath: join(dir, "nope"),
+      installedPath: join(dir, "also-nope"),
+    });
     assert.equal(result.status, "UNJUDGABLE");
   });
 });
@@ -259,13 +373,19 @@ test("(14) sha256Hex: deterministic, differs for different content", () => {
 // --- checkCanaryReceipt (G9) ---
 
 test("(15) checkCanaryReceipt: no canaryDir given -> UNJUDGABLE", () => {
-  const result = checkCanaryReceipt({ id: "clear-safe-check", canaryDir: undefined });
+  const result = checkCanaryReceipt({
+    id: "clear-safe-check",
+    canaryDir: undefined,
+  });
   assert.equal(result.status, "UNJUDGABLE");
 });
 
 test("(16) checkCanaryReceipt: receipt file missing -> UNJUDGABLE (G9 'missing receipt fixture')", () => {
   withFixtureDir((dir) => {
-    const result = checkCanaryReceipt({ id: "clear-safe-check", canaryDir: dir });
+    const result = checkCanaryReceipt({
+      id: "clear-safe-check",
+      canaryDir: dir,
+    });
     assert.equal(result.status, "UNJUDGABLE");
   });
 });
@@ -275,18 +395,37 @@ test("(17) checkCanaryReceipt: fresh, complete, matching receipt -> ALIVE", () =
     const now = new Date("2026-07-13T00:00:00+09:00").getTime();
     writeFileSync(
       join(dir, "clear-safe-check.json"),
-      JSON.stringify({ check_id: "clear-safe-check", checked_at: "2026-07-12T23:00:00+09:00", bad_exit: 2, good_exit: 0 }),
+      JSON.stringify({
+        check_id: "clear-safe-check",
+        checked_at: "2026-07-12T23:00:00+09:00",
+        bad_exit: 2,
+        good_exit: 0,
+      }),
       "utf8",
     );
-    const result = checkCanaryReceipt({ id: "clear-safe-check", canaryDir: dir, now });
+    const result = checkCanaryReceipt({
+      id: "clear-safe-check",
+      canaryDir: dir,
+      now,
+    });
     assert.equal(result.status, "ALIVE");
   });
 });
 
 test("(18) checkCanaryReceipt: missing required field -> UNJUDGABLE", () => {
   withFixtureDir((dir) => {
-    writeFileSync(join(dir, "clear-safe-check.json"), JSON.stringify({ check_id: "clear-safe-check", checked_at: "2026-07-12T23:00:00+09:00" }), "utf8");
-    const result = checkCanaryReceipt({ id: "clear-safe-check", canaryDir: dir });
+    writeFileSync(
+      join(dir, "clear-safe-check.json"),
+      JSON.stringify({
+        check_id: "clear-safe-check",
+        checked_at: "2026-07-12T23:00:00+09:00",
+      }),
+      "utf8",
+    );
+    const result = checkCanaryReceipt({
+      id: "clear-safe-check",
+      canaryDir: dir,
+    });
     assert.equal(result.status, "UNJUDGABLE");
   });
 });
@@ -295,10 +434,18 @@ test("(19) checkCanaryReceipt: check_id mismatch -> UNJUDGABLE", () => {
   withFixtureDir((dir) => {
     writeFileSync(
       join(dir, "clear-safe-check.json"),
-      JSON.stringify({ check_id: "controlroom-fresh", checked_at: "2026-07-12T23:00:00+09:00", bad_exit: 2, good_exit: 0 }),
+      JSON.stringify({
+        check_id: "controlroom-fresh",
+        checked_at: "2026-07-12T23:00:00+09:00",
+        bad_exit: 2,
+        good_exit: 0,
+      }),
       "utf8",
     );
-    const result = checkCanaryReceipt({ id: "clear-safe-check", canaryDir: dir });
+    const result = checkCanaryReceipt({
+      id: "clear-safe-check",
+      canaryDir: dir,
+    });
     assert.equal(result.status, "UNJUDGABLE");
   });
 });
@@ -306,9 +453,24 @@ test("(19) checkCanaryReceipt: check_id mismatch -> UNJUDGABLE", () => {
 test("(20) checkCanaryReceipt: stale (older than maxAgeMs) -> UNJUDGABLE", () => {
   withFixtureDir((dir) => {
     const now = new Date("2026-07-13T00:00:00Z").getTime();
-    const old = new Date(now - (DEFAULT_CANARY_MAX_AGE_MS + 3600000)).toISOString();
-    writeFileSync(join(dir, "clear-safe-check.json"), JSON.stringify({ check_id: "clear-safe-check", checked_at: old, bad_exit: 2, good_exit: 0 }), "utf8");
-    const result = checkCanaryReceipt({ id: "clear-safe-check", canaryDir: dir, now });
+    const old = new Date(
+      now - (DEFAULT_CANARY_MAX_AGE_MS + 3600000),
+    ).toISOString();
+    writeFileSync(
+      join(dir, "clear-safe-check.json"),
+      JSON.stringify({
+        check_id: "clear-safe-check",
+        checked_at: old,
+        bad_exit: 2,
+        good_exit: 0,
+      }),
+      "utf8",
+    );
+    const result = checkCanaryReceipt({
+      id: "clear-safe-check",
+      canaryDir: dir,
+      now,
+    });
     assert.equal(result.status, "UNJUDGABLE");
   });
 });
@@ -316,7 +478,10 @@ test("(20) checkCanaryReceipt: stale (older than maxAgeMs) -> UNJUDGABLE", () =>
 test("(21) checkCanaryReceipt: malformed JSON -> UNJUDGABLE, never throws", () => {
   withFixtureDir((dir) => {
     writeFileSync(join(dir, "clear-safe-check.json"), "not-json", "utf8");
-    const result = checkCanaryReceipt({ id: "clear-safe-check", canaryDir: dir });
+    const result = checkCanaryReceipt({
+      id: "clear-safe-check",
+      canaryDir: dir,
+    });
     assert.equal(result.status, "UNJUDGABLE");
   });
 });
@@ -324,10 +489,23 @@ test("(21) checkCanaryReceipt: malformed JSON -> UNJUDGABLE, never throws", () =
 // --- resolvePlaceholderPath ---
 
 test("(22) resolvePlaceholderPath: resolves REPO/CONTROL_ROOM/USER_HOME placeholders", () => {
-  const roots = { REPO: "/repo", CONTROL_ROOM: "/control", USER_HOME: "/home/x" };
-  assert.equal(resolvePlaceholderPath("REPO/.claude/settings.local.json", roots), join("/repo", ".claude/settings.local.json"));
-  assert.equal(resolvePlaceholderPath("CONTROL_ROOM/.claude/settings.local.json", roots), join("/control", ".claude/settings.local.json"));
-  assert.equal(resolvePlaceholderPath("USER_HOME/.claude-team/settings.json", roots), join("/home/x", ".claude-team/settings.json"));
+  const roots = {
+    REPO: "/repo",
+    CONTROL_ROOM: "/control",
+    USER_HOME: "/home/x",
+  };
+  assert.equal(
+    resolvePlaceholderPath("REPO/.claude/settings.local.json", roots),
+    join("/repo", ".claude/settings.local.json"),
+  );
+  assert.equal(
+    resolvePlaceholderPath("CONTROL_ROOM/.claude/settings.local.json", roots),
+    join("/control", ".claude/settings.local.json"),
+  );
+  assert.equal(
+    resolvePlaceholderPath("USER_HOME/.claude-team/settings.json", roots),
+    join("/home/x", ".claude-team/settings.json"),
+  );
 });
 
 test("(23) resolvePlaceholderPath: unknown placeholder or missing root -> null", () => {
@@ -340,7 +518,11 @@ test("(23) resolvePlaceholderPath: unknown placeholder or missing root -> null",
 test("(24) checkSourceReference: caller file still contains the pattern -> ALIVE", () => {
   withFixtureDir((dir) => {
     const file = join(dir, "role-guard.mjs");
-    writeFileSync(file, 'import { checkPacketGate } from "./packet-gate.mjs";\n', "utf8");
+    writeFileSync(
+      file,
+      'import { checkPacketGate } from "./packet-gate.mjs";\n',
+      "utf8",
+    );
     const result = checkSourceReference({ file, pattern: "packet-gate.mjs" });
     assert.equal(result.status, "ALIVE");
   });
@@ -357,7 +539,10 @@ test("(25) checkSourceReference: pattern no longer present -> SILENT_BROKEN", ()
 
 test("(26) checkSourceReference: caller file missing entirely -> UNJUDGABLE", () => {
   withFixtureDir((dir) => {
-    const result = checkSourceReference({ file: join(dir, "does-not-exist.mjs"), pattern: "packet-gate.mjs" });
+    const result = checkSourceReference({
+      file: join(dir, "does-not-exist.mjs"),
+      pattern: "packet-gate.mjs",
+    });
     assert.equal(result.status, "UNJUDGABLE");
   });
 });
@@ -366,7 +551,8 @@ test("(26) checkSourceReference: caller file missing entirely -> UNJUDGABLE", ()
 
 test("(27) checkCiCoverage: all test files referenced -> ALIVE", () => {
   const result = checkCiCoverage({
-    workflowText: "run: node scripts/check/a.test.mjs\nrun: node scripts/check/b.test.mjs\n",
+    workflowText:
+      "run: node scripts/check/a.test.mjs\nrun: node scripts/check/b.test.mjs\n",
     testFiles: ["a.test.mjs", "b.test.mjs"],
   });
   assert.equal(result.status, "ALIVE");
@@ -384,8 +570,13 @@ test("(28) checkCiCoverage: some test files missing from workflow -> DRIFT, name
 
 test("(28b) checkCiCoverage: a glob step (scripts/check/*.test.mjs) covers every discovered file, including ones never named literally -> ALIVE (HYK-129 사이클3)", () => {
   const result = checkCiCoverage({
-    workflowText: "      - name: check test suites (all scripts/check/*.test.mjs)\n        run: node --test scripts/check/*.test.mjs\n",
-    testFiles: ["a.test.mjs", "b.test.mjs", "brand-new-never-named-anywhere.test.mjs"],
+    workflowText:
+      "      - name: check test suites (all scripts/check/*.test.mjs)\n        run: node --test scripts/check/*.test.mjs\n",
+    testFiles: [
+      "a.test.mjs",
+      "b.test.mjs",
+      "brand-new-never-named-anywhere.test.mjs",
+    ],
   });
   assert.equal(result.status, "ALIVE");
   assert.deepEqual(result.missing, []);
@@ -502,12 +693,19 @@ test("(28l) checkCiCoverage: glob immediately followed by '&&' (no space) -> ALI
 });
 
 test("(28l2) checkCiCoverage: glob immediately followed by ';' or '|' (no space) -> ALIVE (both are word-terminating control operators)", () => {
-  for (const frag of ["scripts/check/*.test.mjs;echo done", "scripts/check/*.test.mjs|cat"]) {
+  for (const frag of [
+    "scripts/check/*.test.mjs;echo done",
+    "scripts/check/*.test.mjs|cat",
+  ]) {
     const result = checkCiCoverage({
       workflowText: `run: node --test ${frag}\n`,
       testFiles: ["a.test.mjs", "b.test.mjs"],
     });
-    assert.equal(result.status, "ALIVE", `fragment '${frag}' should be full coverage`);
+    assert.equal(
+      result.status,
+      "ALIVE",
+      `fragment '${frag}' should be full coverage`,
+    );
   }
 });
 
@@ -546,19 +744,46 @@ test("(28p) checkCiCoverage: a case-mismatched path 'scripts/Check/*.test.mjs' d
 // --- coversViaCheckDirGlob: direct unit coverage of the tokenizer contract ---
 
 test("(28q) coversViaCheckDirGlob: bare glob true; quoted/partial/prefixed/other-dir false", () => {
-  assert.equal(coversViaCheckDirGlob("node --test scripts/check/*.test.mjs"), true);
-  assert.equal(coversViaCheckDirGlob("node --test scripts/check/*.test.mjs&&x"), true);
-  assert.equal(coversViaCheckDirGlob('node --test "scripts/check/*.test.mjs"'), false);
-  assert.equal(coversViaCheckDirGlob("node --test 'scripts/check/*.test.mjs'"), false);
-  assert.equal(coversViaCheckDirGlob("node --test scripts/check/*check.test.mjs"), false);
-  assert.equal(coversViaCheckDirGlob("node --test scripts/check/*.test.mjs.bak"), false);
-  assert.equal(coversViaCheckDirGlob("node --test xscripts/check/*.test.mjs"), false);
-  assert.equal(coversViaCheckDirGlob("node --test scripts/other/*.test.mjs"), false);
+  assert.equal(
+    coversViaCheckDirGlob("node --test scripts/check/*.test.mjs"),
+    true,
+  );
+  assert.equal(
+    coversViaCheckDirGlob("node --test scripts/check/*.test.mjs&&x"),
+    true,
+  );
+  assert.equal(
+    coversViaCheckDirGlob('node --test "scripts/check/*.test.mjs"'),
+    false,
+  );
+  assert.equal(
+    coversViaCheckDirGlob("node --test 'scripts/check/*.test.mjs'"),
+    false,
+  );
+  assert.equal(
+    coversViaCheckDirGlob("node --test scripts/check/*check.test.mjs"),
+    false,
+  );
+  assert.equal(
+    coversViaCheckDirGlob("node --test scripts/check/*.test.mjs.bak"),
+    false,
+  );
+  assert.equal(
+    coversViaCheckDirGlob("node --test xscripts/check/*.test.mjs"),
+    false,
+  );
+  assert.equal(
+    coversViaCheckDirGlob("node --test scripts/other/*.test.mjs"),
+    false,
+  );
 });
 
 test("(28r) coversViaCheckDirGlob: a quoted directory prefix with the '*' left UNQUOTED still expands in Bash -> true (matches real shell)", () => {
   // Bash: `"scripts/check/"*.test.mjs` -> prefix quoted, `*` unquoted -> expands.
-  assert.equal(coversViaCheckDirGlob('node --test "scripts/check/"*.test.mjs'), true);
+  assert.equal(
+    coversViaCheckDirGlob('node --test "scripts/check/"*.test.mjs'),
+    true,
+  );
 });
 
 // --- REAL-BASH ORACLE (review-7 requirement 4): the checker's ALIVE/not-ALIVE
@@ -572,7 +797,8 @@ test(
     withFixtureDir((dir) => {
       mkdirSync(join(dir, "scripts", "check"), { recursive: true });
       const expected = ["a.test.mjs", "b.test.mjs"];
-      for (const f of expected) writeFileSync(join(dir, "scripts", "check", f), "// stub\n", "utf8");
+      for (const f of expected)
+        writeFileSync(join(dir, "scripts", "check", f), "// stub\n", "utf8");
 
       const fragments = [
         "scripts/check/*.test.mjs", // unquoted -> expands
@@ -603,12 +829,20 @@ test(
     withFixtureDir((dir) => {
       mkdirSync(join(dir, "scripts", "check"), { recursive: true });
       const expected = ["a.test.mjs", "b.test.mjs"];
-      for (const f of expected) writeFileSync(join(dir, "scripts", "check", f), "// stub\n", "utf8");
+      for (const f of expected)
+        writeFileSync(join(dir, "scripts", "check", f), "// stub\n", "utf8");
 
       const frag = "'scripts/check/*.test.mjs'";
       const realRuns = bashSuiteRuns(dir, frag, expected);
-      assert.equal(realRuns, false, "sanity: sh must NOT expand a single-quoted glob");
-      const verdict = checkCiCoverage({ workflowText: `run: node --test ${frag}\n`, testFiles: expected });
+      assert.equal(
+        realRuns,
+        false,
+        "sanity: sh must NOT expand a single-quoted glob",
+      );
+      const verdict = checkCiCoverage({
+        workflowText: `run: node --test ${frag}\n`,
+        testFiles: expected,
+      });
       assert.equal(verdict.status, "DRIFT");
     });
   },
@@ -625,13 +859,19 @@ test("(28u) findPosixShell: returns the first candidate the probe accepts, and s
     probed.push(c);
     return c === "/opt/git/usr/bin/bash";
   };
-  const found = findPosixShell({ probe, candidates: ["sh", "bash", "/opt/git/usr/bin/bash", "never-reached"] });
+  const found = findPosixShell({
+    probe,
+    candidates: ["sh", "bash", "/opt/git/usr/bin/bash", "never-reached"],
+  });
   assert.equal(found, "/opt/git/usr/bin/bash");
   assert.deepEqual(probed, ["sh", "bash", "/opt/git/usr/bin/bash"]);
 });
 
 test("(28v) findPosixShell: no candidate works -> null (this is the honest-skip path, not a crash)", () => {
-  const found = findPosixShell({ probe: () => false, candidates: ["sh", "bash", "C:\\Program Files\\Git\\usr\\bin\\sh.exe"] });
+  const found = findPosixShell({
+    probe: () => false,
+    candidates: ["sh", "bash", "C:\\Program Files\\Git\\usr\\bin\\sh.exe"],
+  });
   assert.equal(found, null);
 });
 
@@ -640,7 +880,9 @@ test("(28w) oracle shell diagnostic: records which shell the real-Bash oracle us
   // the honest skip. This just surfaces the resolved path in the output so a
   // reviewer can confirm the oracle actually executed rather than silently
   // skipping (the exact gap review-8 found in coder-8).
-  console.log(`[oracle-shell] findPosixShell -> ${POSIX_SHELL ?? "NONE (28s/28t honestly skipped)"}`);
+  console.log(
+    `[oracle-shell] findPosixShell -> ${POSIX_SHELL ?? "NONE (28s/28t honestly skipped)"}`,
+  );
   if (POSIX_SHELL !== null) assert.equal(typeof POSIX_SHELL, "string");
 });
 
@@ -659,16 +901,32 @@ test("(28w2) findPosixShell: a WSL-like candidate that fails the functional prob
     return c === gitBash; // only real Git bash passes the functional check
   };
   const found = findPosixShell({ probe, candidates: [wsl, gitBash, "unused"] });
-  assert.equal(found, gitBash, "WSL bash must not be selected once it fails the functional probe");
-  assert.deepEqual(probed, [wsl, gitBash], "probed the bad one, rejected it, accepted the good one, stopped");
+  assert.equal(
+    found,
+    gitBash,
+    "WSL bash must not be selected once it fails the functional probe",
+  );
+  assert.deepEqual(
+    probed,
+    [wsl, gitBash],
+    "probed the bad one, rejected it, accepted the good one, stopped",
+  );
 });
 
 test(
   "(28w3) functionalShellProbe: accepts a real POSIX shell (glob expands + cwd releases cleanly) and rejects a missing/non-shell binary",
   { skip: SHELL_SKIP },
   () => {
-    assert.equal(functionalShellProbe(POSIX_SHELL), true, "the resolved shell must pass its own functional probe");
-    assert.equal(functionalShellProbe("definitely-not-a-real-shell-binary-xyz"), false, "a missing binary must be rejected, not throw");
+    assert.equal(
+      functionalShellProbe(POSIX_SHELL),
+      true,
+      "the resolved shell must pass its own functional probe",
+    );
+    assert.equal(
+      functionalShellProbe("definitely-not-a-real-shell-binary-xyz"),
+      false,
+      "a missing binary must be rejected, not throw",
+    );
   },
 );
 
@@ -676,12 +934,21 @@ test(
 // they may count as coverage. name:, other keys, and YAML comments are out. ---
 
 test("(28x) extractRunText: an inline scalar yields just the command", () => {
-  assert.equal(extractRunText("        run: node --test scripts/check/*.test.mjs\n"), "node --test scripts/check/*.test.mjs");
+  assert.equal(
+    extractRunText("        run: node --test scripts/check/*.test.mjs\n"),
+    "node --test scripts/check/*.test.mjs",
+  );
 });
 
 test("(28y) extractRunText: a whole-command YAML quote is stripped (YAML quotes are not shell quotes)", () => {
-  assert.equal(extractRunText('        run: "node --test scripts/check/*.test.mjs"\n'), "node --test scripts/check/*.test.mjs");
-  assert.equal(extractRunText("        run: 'node --test scripts/check/*.test.mjs'\n"), "node --test scripts/check/*.test.mjs");
+  assert.equal(
+    extractRunText('        run: "node --test scripts/check/*.test.mjs"\n'),
+    "node --test scripts/check/*.test.mjs",
+  );
+  assert.equal(
+    extractRunText("        run: 'node --test scripts/check/*.test.mjs'\n"),
+    "node --test scripts/check/*.test.mjs",
+  );
 });
 
 test("(28z) extractRunText: a '|' block scalar is captured and dedented; a following sibling step ends the block", () => {
@@ -696,11 +963,26 @@ test("(28z) extractRunText: a '|' block scalar is captured and dedented; a follo
     "",
   ].join("\n");
   const out = extractRunText(yaml);
-  assert.ok(out.includes("sh -n hooks/commit-msg"), "block body line 1 present");
-  assert.ok(out.includes("sh -n hooks/pre-commit"), "block body line 2 present");
-  assert.ok(out.includes("echo hi"), "the sibling step's inline run is also captured");
-  assert.ok(!/(^|\n) {2,}sh -n/.test(out), "block body must be dedented (no leading indent survives)");
-  assert.ok(!out.includes("hooks POSIX syntax check"), "step name: must NOT leak into run text");
+  assert.ok(
+    out.includes("sh -n hooks/commit-msg"),
+    "block body line 1 present",
+  );
+  assert.ok(
+    out.includes("sh -n hooks/pre-commit"),
+    "block body line 2 present",
+  );
+  assert.ok(
+    out.includes("echo hi"),
+    "the sibling step's inline run is also captured",
+  );
+  assert.ok(
+    !/(^|\n) {2,}sh -n/.test(out),
+    "block body must be dedented (no leading indent survives)",
+  );
+  assert.ok(
+    !out.includes("hooks POSIX syntax check"),
+    "step name: must NOT leak into run text",
+  );
 });
 
 test("(28aa) extractRunText: name: and YAML-comment lines are excluded; only run: survives", () => {
@@ -713,11 +995,16 @@ test("(28aa) extractRunText: name: and YAML-comment lines are excluded; only run
 });
 
 test("(28ab) extractRunText: multiple run: steps are all captured, newline-joined", () => {
-  assert.equal(extractRunText("        run: echo one\n        run: echo two\n"), "echo one\necho two");
+  assert.equal(
+    extractRunText("        run: echo one\n        run: echo two\n"),
+    "echo one\necho two",
+  );
 });
 
 test("(28ac) extractRunText: the '- run:' form (no separate name key) is captured, block dedented", () => {
-  const yaml = ["      - run: |", "          echo a", "          echo b"].join("\n");
+  const yaml = ["      - run: |", "          echo a", "          echo b"].join(
+    "\n",
+  );
   const out = extractRunText(yaml);
   assert.ok(out.includes("echo a") && out.includes("echo b"));
 });
@@ -727,18 +1014,30 @@ test("(28ac) extractRunText: the '- run:' form (no separate name key) is capture
 
 test("(28ac2) decodeYamlScalar: plain scalar is verbatim; any quotes in it are literal shell quotes", () => {
   assert.equal(decodeYamlScalar('node --test "x"'), 'node --test "x"');
-  assert.equal(decodeYamlScalar("  node --test scripts/check/*.test.mjs  "), "node --test scripts/check/*.test.mjs");
+  assert.equal(
+    decodeYamlScalar("  node --test scripts/check/*.test.mjs  "),
+    "node --test scripts/check/*.test.mjs",
+  );
 });
 
 test("(28ac3) decodeYamlScalar: single-quoted scalar removes outer quotes and decodes '' -> ' (the review-9 case)", () => {
   // YAML `'node --test ''scripts/check/*.test.mjs'''` -> the shell string
   // `node --test 'scripts/check/*.test.mjs'` (glob single-quoted at shell level).
-  assert.equal(decodeYamlScalar("'node --test ''scripts/check/*.test.mjs'''"), "node --test 'scripts/check/*.test.mjs'");
-  assert.equal(decodeYamlScalar("'plain single quoted'"), "plain single quoted");
+  assert.equal(
+    decodeYamlScalar("'node --test ''scripts/check/*.test.mjs'''"),
+    "node --test 'scripts/check/*.test.mjs'",
+  );
+  assert.equal(
+    decodeYamlScalar("'plain single quoted'"),
+    "plain single quoted",
+  );
 });
 
 test("(28ac4) decodeYamlScalar: double-quoted scalar removes outer quotes and resolves backslash escapes", () => {
-  assert.equal(decodeYamlScalar('"node --test scripts/check/*.test.mjs"'), "node --test scripts/check/*.test.mjs");
+  assert.equal(
+    decodeYamlScalar('"node --test scripts/check/*.test.mjs"'),
+    "node --test scripts/check/*.test.mjs",
+  );
   assert.equal(decodeYamlScalar('"say \\"hi\\""'), 'say "hi"');
 });
 
@@ -749,15 +1048,22 @@ test("(28ac5) decodeYamlScalar: an ambiguous/unbalanced quoted scalar -> '' (bia
 });
 
 test("(28ac6) checkCiCoverage: review-9 repro -- YAML single-quoted glob `run: 'node --test ''scripts/check/*.test.mjs'''` -> DRIFT (after YAML decode the glob is shell-single-quoted and expands to nothing)", () => {
-  const workflowText = "        run: 'node --test ''scripts/check/*.test.mjs'''\n";
-  const result = checkCiCoverage({ workflowText, testFiles: ["a.test.mjs", "b.test.mjs"] });
+  const workflowText =
+    "        run: 'node --test ''scripts/check/*.test.mjs'''\n";
+  const result = checkCiCoverage({
+    workflowText,
+    testFiles: ["a.test.mjs", "b.test.mjs"],
+  });
   assert.equal(result.status, "DRIFT");
   assert.deepEqual(result.missing, ["a.test.mjs", "b.test.mjs"]);
 });
 
 test("(28ac7) checkCiCoverage: a whole-command YAML single-quote wrapper (no inner '') -> ALIVE (YAML quotes are not shell quotes, glob expands unquoted)", () => {
   const workflowText = "        run: 'node --test scripts/check/*.test.mjs'\n";
-  const result = checkCiCoverage({ workflowText, testFiles: ["a.test.mjs", "b.test.mjs"] });
+  const result = checkCiCoverage({
+    workflowText,
+    testFiles: ["a.test.mjs", "b.test.mjs"],
+  });
   assert.equal(result.status, "ALIVE");
 });
 
@@ -769,7 +1075,10 @@ test("(28ad) checkCiCoverage: whole-dir glob in a step name: but run: runs one f
     "        run: node --test scripts/check/a.test.mjs",
     "",
   ].join("\n");
-  const result = checkCiCoverage({ workflowText, testFiles: ["a.test.mjs", "b.test.mjs"] });
+  const result = checkCiCoverage({
+    workflowText,
+    testFiles: ["a.test.mjs", "b.test.mjs"],
+  });
   assert.equal(result.status, "DRIFT");
   assert.deepEqual(result.missing, ["b.test.mjs"]);
 });
@@ -781,7 +1090,10 @@ test("(28ae) checkCiCoverage: whole-dir glob only in a YAML comment, run: runs o
     "        run: node --test scripts/check/a.test.mjs",
     "",
   ].join("\n");
-  const result = checkCiCoverage({ workflowText, testFiles: ["a.test.mjs", "b.test.mjs"] });
+  const result = checkCiCoverage({
+    workflowText,
+    testFiles: ["a.test.mjs", "b.test.mjs"],
+  });
   assert.equal(result.status, "DRIFT");
   assert.deepEqual(result.missing, ["b.test.mjs"]);
 });
@@ -792,7 +1104,10 @@ test("(28af) checkCiCoverage: the REAL enforce.yml shape (glob in BOTH name: and
     "        run: node --test scripts/check/*.test.mjs",
     "",
   ].join("\n");
-  const result = checkCiCoverage({ workflowText, testFiles: ["a.test.mjs", "b.test.mjs", "brand-new.test.mjs"] });
+  const result = checkCiCoverage({
+    workflowText,
+    testFiles: ["a.test.mjs", "b.test.mjs", "brand-new.test.mjs"],
+  });
   assert.equal(result.status, "ALIVE");
   assert.deepEqual(result.missing, []);
 });
@@ -804,7 +1119,10 @@ test("(28ag) checkCiCoverage: a commented-out glob INSIDE a run: block is not co
     "          node --test scripts/check/a.test.mjs",
     "",
   ].join("\n");
-  const result = checkCiCoverage({ workflowText, testFiles: ["a.test.mjs", "b.test.mjs"] });
+  const result = checkCiCoverage({
+    workflowText,
+    testFiles: ["a.test.mjs", "b.test.mjs"],
+  });
   assert.equal(result.status, "DRIFT");
   assert.deepEqual(result.missing, ["b.test.mjs"]);
 });
@@ -831,19 +1149,43 @@ function withRepoFixture(fn) {
 
 test("(30) judgeEntry: claude-settings target installed + matching + no claude_only requirement -> ALIVE", () => {
   withRepoFixture((repoDir) => {
-    writeFileSync(join(repoDir, "scripts", "check", "role-guard.mjs"), "// stub\n", "utf8");
-    writeFileSync(join(repoDir, "scripts", "check", "role-guard.test.mjs"), "// stub\n", "utf8");
+    writeFileSync(
+      join(repoDir, "scripts", "check", "role-guard.mjs"),
+      "// stub\n",
+      "utf8",
+    );
+    writeFileSync(
+      join(repoDir, "scripts", "check", "role-guard.test.mjs"),
+      "// stub\n",
+      "utf8",
+    );
     const entry = {
       id: "role-guard",
       script: "scripts/check/role-guard.mjs",
       test: "scripts/check/role-guard.test.mjs",
       claude_only: false,
       install_targets: [
-        { location: "repo-settings", kind: "claude-settings", path: "REPO/.claude/settings.local.json", hook_event: "PreToolUse", matcher: "Edit|Write", required: true },
+        {
+          location: "repo-settings",
+          kind: "claude-settings",
+          path: "REPO/.claude/settings.local.json",
+          hook_event: "PreToolUse",
+          matcher: "Edit|Write",
+          required: true,
+        },
       ],
     };
     const settingsByLocation = {
-      "repo-settings": { hooks: { PreToolUse: [{ matcher: "Edit|Write", hooks: [{ command: "node scripts/check/role-guard.mjs" }] }] } },
+      "repo-settings": {
+        hooks: {
+          PreToolUse: [
+            {
+              matcher: "Edit|Write",
+              hooks: [{ command: "node scripts/check/role-guard.mjs" }],
+            },
+          ],
+        },
+      },
     };
     const result = judgeEntry(entry, { repoRoot: repoDir, settingsByLocation });
     assert.equal(result.status, "ALIVE");
@@ -852,25 +1194,49 @@ test("(30) judgeEntry: claude-settings target installed + matching + no claude_o
 
 test("(31) judgeEntry: required claude-settings target missing -> NOT_INSTALLED (G6)", () => {
   withRepoFixture((repoDir) => {
-    writeFileSync(join(repoDir, "scripts", "check", "role-guard.mjs"), "// stub\n", "utf8");
-    writeFileSync(join(repoDir, "scripts", "check", "role-guard.test.mjs"), "// stub\n", "utf8");
+    writeFileSync(
+      join(repoDir, "scripts", "check", "role-guard.mjs"),
+      "// stub\n",
+      "utf8",
+    );
+    writeFileSync(
+      join(repoDir, "scripts", "check", "role-guard.test.mjs"),
+      "// stub\n",
+      "utf8",
+    );
     const entry = {
       id: "role-guard",
       script: "scripts/check/role-guard.mjs",
       test: "scripts/check/role-guard.test.mjs",
       claude_only: false,
       install_targets: [
-        { location: "repo-settings", kind: "claude-settings", path: "REPO/.claude/settings.local.json", hook_event: "PreToolUse", matcher: "Edit|Write", required: true },
+        {
+          location: "repo-settings",
+          kind: "claude-settings",
+          path: "REPO/.claude/settings.local.json",
+          hook_event: "PreToolUse",
+          matcher: "Edit|Write",
+          required: true,
+        },
       ],
     };
-    const result = judgeEntry(entry, { repoRoot: repoDir, settingsByLocation: { "repo-settings": { hooks: {} } } });
+    const result = judgeEntry(entry, {
+      repoRoot: repoDir,
+      settingsByLocation: { "repo-settings": { hooks: {} } },
+    });
     assert.equal(result.status, "NOT_INSTALLED");
   });
 });
 
 test("(32) judgeEntry: script referenced by manifest doesn't exist -> SILENT_BROKEN (dead path, G6)", () => {
   withRepoFixture((repoDir) => {
-    const entry = { id: "ghost-check", script: "scripts/check/ghost-check.mjs", test: null, claude_only: false, install_targets: [] };
+    const entry = {
+      id: "ghost-check",
+      script: "scripts/check/ghost-check.mjs",
+      test: null,
+      claude_only: false,
+      install_targets: [],
+    };
     const result = judgeEntry(entry, { repoRoot: repoDir });
     assert.equal(result.status, "SILENT_BROKEN");
   });
@@ -878,34 +1244,72 @@ test("(32) judgeEntry: script referenced by manifest doesn't exist -> SILENT_BRO
 
 test("(33) judgeEntry: claude_only + fully wired but no canary receipt -> UNJUDGABLE (G9)", () => {
   withRepoFixture((repoDir) => {
-    writeFileSync(join(repoDir, "scripts", "check", "clear-safe-check.mjs"), "// stub\n", "utf8");
-    writeFileSync(join(repoDir, "scripts", "check", "clear-safe-check.test.mjs"), "// stub\n", "utf8");
+    writeFileSync(
+      join(repoDir, "scripts", "check", "clear-safe-check.mjs"),
+      "// stub\n",
+      "utf8",
+    );
+    writeFileSync(
+      join(repoDir, "scripts", "check", "clear-safe-check.test.mjs"),
+      "// stub\n",
+      "utf8",
+    );
     const entry = {
       id: "clear-safe-check",
       script: "scripts/check/clear-safe-check.mjs",
       test: "scripts/check/clear-safe-check.test.mjs",
       claude_only: true,
       install_targets: [
-        { location: "repo-settings", kind: "claude-settings", path: "REPO/.claude/settings.local.json", hook_event: "Stop", matcher: null, required: true },
+        {
+          location: "repo-settings",
+          kind: "claude-settings",
+          path: "REPO/.claude/settings.local.json",
+          hook_event: "Stop",
+          matcher: null,
+          required: true,
+        },
       ],
     };
     const settingsByLocation = {
-      "repo-settings": { hooks: { Stop: [{ hooks: [{ command: "node scripts/check/clear-safe-check.mjs" }] }] } },
+      "repo-settings": {
+        hooks: {
+          Stop: [
+            { hooks: [{ command: "node scripts/check/clear-safe-check.mjs" }] },
+          ],
+        },
+      },
     };
-    const result = judgeEntry(entry, { repoRoot: repoDir, settingsByLocation, canaryDir: undefined });
+    const result = judgeEntry(entry, {
+      repoRoot: repoDir,
+      settingsByLocation,
+      canaryDir: undefined,
+    });
     assert.equal(result.status, "UNJUDGABLE");
   });
 });
 
 test("(34) judgeEntry: claude_only + wired + fresh canary receipt -> ALIVE", () => {
   withRepoFixture((repoDir) => {
-    writeFileSync(join(repoDir, "scripts", "check", "clear-safe-check.mjs"), "// stub\n", "utf8");
-    writeFileSync(join(repoDir, "scripts", "check", "clear-safe-check.test.mjs"), "// stub\n", "utf8");
+    writeFileSync(
+      join(repoDir, "scripts", "check", "clear-safe-check.mjs"),
+      "// stub\n",
+      "utf8",
+    );
+    writeFileSync(
+      join(repoDir, "scripts", "check", "clear-safe-check.test.mjs"),
+      "// stub\n",
+      "utf8",
+    );
     withFixtureDir((canaryDir) => {
       const now = new Date("2026-07-13T00:00:00Z").getTime();
       writeFileSync(
         join(canaryDir, "clear-safe-check.json"),
-        JSON.stringify({ check_id: "clear-safe-check", checked_at: new Date(now - 3600000).toISOString(), bad_exit: 2, good_exit: 0 }),
+        JSON.stringify({
+          check_id: "clear-safe-check",
+          checked_at: new Date(now - 3600000).toISOString(),
+          bad_exit: 2,
+          good_exit: 0,
+        }),
         "utf8",
       );
       const entry = {
@@ -914,13 +1318,33 @@ test("(34) judgeEntry: claude_only + wired + fresh canary receipt -> ALIVE", () 
         test: "scripts/check/clear-safe-check.test.mjs",
         claude_only: true,
         install_targets: [
-          { location: "repo-settings", kind: "claude-settings", path: "REPO/.claude/settings.local.json", hook_event: "Stop", matcher: null, required: true },
+          {
+            location: "repo-settings",
+            kind: "claude-settings",
+            path: "REPO/.claude/settings.local.json",
+            hook_event: "Stop",
+            matcher: null,
+            required: true,
+          },
         ],
       };
       const settingsByLocation = {
-        "repo-settings": { hooks: { Stop: [{ hooks: [{ command: "node scripts/check/clear-safe-check.mjs" }] }] } },
+        "repo-settings": {
+          hooks: {
+            Stop: [
+              {
+                hooks: [{ command: "node scripts/check/clear-safe-check.mjs" }],
+              },
+            ],
+          },
+        },
       };
-      const result = judgeEntry(entry, { repoRoot: repoDir, settingsByLocation, canaryDir, now });
+      const result = judgeEntry(entry, {
+        repoRoot: repoDir,
+        settingsByLocation,
+        canaryDir,
+        now,
+      });
       assert.equal(result.status, "ALIVE");
     });
   });
@@ -928,9 +1352,23 @@ test("(34) judgeEntry: claude_only + wired + fresh canary receipt -> ALIVE", () 
 
 test("(35) judgeEntry: install_targets=[] and no source_reference_check (orch-direct) -> ALIVE from script+test existence alone", () => {
   withRepoFixture((repoDir) => {
-    writeFileSync(join(repoDir, "scripts", "check", "relay-handshake.mjs"), "// stub\n", "utf8");
-    writeFileSync(join(repoDir, "scripts", "check", "relay-handshake.test.mjs"), "// stub\n", "utf8");
-    const entry = { id: "relay-handshake", script: "scripts/check/relay-handshake.mjs", test: "scripts/check/relay-handshake.test.mjs", claude_only: false, install_targets: [] };
+    writeFileSync(
+      join(repoDir, "scripts", "check", "relay-handshake.mjs"),
+      "// stub\n",
+      "utf8",
+    );
+    writeFileSync(
+      join(repoDir, "scripts", "check", "relay-handshake.test.mjs"),
+      "// stub\n",
+      "utf8",
+    );
+    const entry = {
+      id: "relay-handshake",
+      script: "scripts/check/relay-handshake.mjs",
+      test: "scripts/check/relay-handshake.test.mjs",
+      claude_only: false,
+      install_targets: [],
+    };
     const result = judgeEntry(entry, { repoRoot: repoDir });
     assert.equal(result.status, "ALIVE");
   });
@@ -938,12 +1376,32 @@ test("(35) judgeEntry: install_targets=[] and no source_reference_check (orch-di
 
 test("(36) runInventory: aggregates a manifest's worth of entries into a 5-state summary", () => {
   withRepoFixture((repoDir) => {
-    writeFileSync(join(repoDir, "scripts", "check", "a.mjs"), "// stub\n", "utf8");
-    writeFileSync(join(repoDir, "scripts", "check", "a.test.mjs"), "// stub\n", "utf8");
+    writeFileSync(
+      join(repoDir, "scripts", "check", "a.mjs"),
+      "// stub\n",
+      "utf8",
+    );
+    writeFileSync(
+      join(repoDir, "scripts", "check", "a.test.mjs"),
+      "// stub\n",
+      "utf8",
+    );
     const manifest = {
       checks: [
-        { id: "a", script: "scripts/check/a.mjs", test: "scripts/check/a.test.mjs", claude_only: false, install_targets: [] },
-        { id: "ghost", script: "scripts/check/ghost.mjs", test: null, claude_only: false, install_targets: [] },
+        {
+          id: "a",
+          script: "scripts/check/a.mjs",
+          test: "scripts/check/a.test.mjs",
+          claude_only: false,
+          install_targets: [],
+        },
+        {
+          id: "ghost",
+          script: "scripts/check/ghost.mjs",
+          test: null,
+          claude_only: false,
+          install_targets: [],
+        },
       ],
     };
     const { results, summary } = runInventory({ manifest, repoRoot: repoDir });
@@ -957,7 +1415,10 @@ test("(36) runInventory: aggregates a manifest's worth of entries into a 5-state
 
 test("(37) discoverCheckTestFiles: lists only *.test.mjs basenames, sorted", () => {
   const fakeReaddir = () => ["b.test.mjs", "a.test.mjs", "a.mjs", "README.md"];
-  assert.deepEqual(discoverCheckTestFiles("/any/path", fakeReaddir), ["a.test.mjs", "b.test.mjs"]);
+  assert.deepEqual(discoverCheckTestFiles("/any/path", fakeReaddir), [
+    "a.test.mjs",
+    "b.test.mjs",
+  ]);
 });
 
 // --- review-1 rejected fix: G6 "extra" detection must actually be wired
@@ -973,23 +1434,46 @@ test("(38) expectedIdsForLocation: collects every entry's id whose install_targe
           { location: "repo-settings", kind: "claude-settings" },
         ],
       },
-      { id: "pm-guard", install_targets: [{ location: "control-room-settings", kind: "claude-settings" }] },
+      {
+        id: "pm-guard",
+        install_targets: [
+          { location: "control-room-settings", kind: "claude-settings" },
+        ],
+      },
     ],
   };
-  assert.deepEqual(expectedIdsForLocation(manifest, "repo-settings"), ["context-inject"]);
-  assert.deepEqual(expectedIdsForLocation(manifest, "control-room-settings"), ["pm-guard"]);
+  assert.deepEqual(expectedIdsForLocation(manifest, "repo-settings"), [
+    "context-inject",
+  ]);
+  assert.deepEqual(expectedIdsForLocation(manifest, "control-room-settings"), [
+    "pm-guard",
+  ]);
   assert.deepEqual(expectedIdsForLocation(manifest, "nowhere"), []);
 });
 
 test("(39) findExtraResults: a settings file with an unregistered hook command -> one DRIFT result naming it (G6 'extra', review-1 repro)", () => {
   const manifest = {
-    checks: [{ id: "role-guard", install_targets: [{ location: "repo-settings", kind: "claude-settings" }] }],
+    checks: [
+      {
+        id: "role-guard",
+        install_targets: [
+          { location: "repo-settings", kind: "claude-settings" },
+        ],
+      },
+    ],
   };
   const settingsByLocation = {
     "repo-settings": {
       hooks: {
-        PreToolUse: [{ matcher: "Edit|Write", hooks: [{ command: "node scripts/check/role-guard.mjs" }] }],
-        Stop: [{ hooks: [{ command: "node scripts/check/mystery-check.mjs" }] }],
+        PreToolUse: [
+          {
+            matcher: "Edit|Write",
+            hooks: [{ command: "node scripts/check/role-guard.mjs" }],
+          },
+        ],
+        Stop: [
+          { hooks: [{ command: "node scripts/check/mystery-check.mjs" }] },
+        ],
       },
     },
   };
@@ -1003,23 +1487,53 @@ test("(39) findExtraResults: a settings file with an unregistered hook command -
 
 test("(40) findExtraResults: nothing unexpected anywhere -> []", () => {
   const manifest = {
-    checks: [{ id: "role-guard", install_targets: [{ location: "repo-settings", kind: "claude-settings" }] }],
+    checks: [
+      {
+        id: "role-guard",
+        install_targets: [
+          { location: "repo-settings", kind: "claude-settings" },
+        ],
+      },
+    ],
   };
   const settingsByLocation = {
-    "repo-settings": { hooks: { PreToolUse: [{ matcher: "Edit|Write", hooks: [{ command: "node scripts/check/role-guard.mjs" }] }] } },
+    "repo-settings": {
+      hooks: {
+        PreToolUse: [
+          {
+            matcher: "Edit|Write",
+            hooks: [{ command: "node scripts/check/role-guard.mjs" }],
+          },
+        ],
+      },
+    },
   };
   assert.deepEqual(findExtraResults(manifest, settingsByLocation), []);
 });
 
 test("(41) findExtraResults: unresolved/null settings for a location -> skipped, never throws", () => {
   const manifest = { checks: [] };
-  assert.deepEqual(findExtraResults(manifest, { "repo-settings": null, "other-settings": undefined }), []);
+  assert.deepEqual(
+    findExtraResults(manifest, {
+      "repo-settings": null,
+      "other-settings": undefined,
+    }),
+    [],
+  );
 });
 
 test("(42) runInventory: end-to-end -- role-guard wired normally + an unregistered mystery-check hook in the SAME settings file -> the extra is surfaced in runInventory's own results/summary (review-1's exact reproduction, not just the isolated helper)", () => {
   withRepoFixture((repoDir) => {
-    writeFileSync(join(repoDir, "scripts", "check", "role-guard.mjs"), "// stub\n", "utf8");
-    writeFileSync(join(repoDir, "scripts", "check", "role-guard.test.mjs"), "// stub\n", "utf8");
+    writeFileSync(
+      join(repoDir, "scripts", "check", "role-guard.mjs"),
+      "// stub\n",
+      "utf8",
+    );
+    writeFileSync(
+      join(repoDir, "scripts", "check", "role-guard.test.mjs"),
+      "// stub\n",
+      "utf8",
+    );
     const manifest = {
       checks: [
         {
@@ -1028,7 +1542,14 @@ test("(42) runInventory: end-to-end -- role-guard wired normally + an unregister
           test: "scripts/check/role-guard.test.mjs",
           claude_only: false,
           install_targets: [
-            { location: "repo-settings", kind: "claude-settings", path: "REPO/.claude/settings.local.json", hook_event: "PreToolUse", matcher: "Edit|Write", required: true },
+            {
+              location: "repo-settings",
+              kind: "claude-settings",
+              path: "REPO/.claude/settings.local.json",
+              hook_event: "PreToolUse",
+              matcher: "Edit|Write",
+              required: true,
+            },
           ],
         },
       ],
@@ -1036,16 +1557,660 @@ test("(42) runInventory: end-to-end -- role-guard wired normally + an unregister
     const settingsByLocation = {
       "repo-settings": {
         hooks: {
-          PreToolUse: [{ matcher: "Edit|Write", hooks: [{ command: "node scripts/check/role-guard.mjs" }] }],
-          Stop: [{ hooks: [{ command: "node scripts/check/mystery-check.mjs" }] }],
+          PreToolUse: [
+            {
+              matcher: "Edit|Write",
+              hooks: [{ command: "node scripts/check/role-guard.mjs" }],
+            },
+          ],
+          Stop: [
+            { hooks: [{ command: "node scripts/check/mystery-check.mjs" }] },
+          ],
         },
       },
     };
-    const { results, summary } = runInventory({ manifest, repoRoot: repoDir, settingsByLocation });
+    const { results, summary } = runInventory({
+      manifest,
+      repoRoot: repoDir,
+      settingsByLocation,
+    });
     assert.equal(results.find((r) => r.id === "role-guard").status, "ALIVE");
     const extra = results.find((r) => r.id.startsWith("extra:"));
-    assert.ok(extra, "runInventory must surface the extra hook, not just findExtraResults in isolation");
+    assert.ok(
+      extra,
+      "runInventory must surface the extra hook, not just findExtraResults in isolation",
+    );
     assert.equal(extra.status, "DRIFT");
-    assert.equal(summary.DRIFT, 1, "extra must be counted in the 5-state summary");
+    assert.equal(
+      summary.DRIFT,
+      1,
+      "extra must be counted in the 5-state summary",
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// HYK-160 라이더ⓐ: checkEnforcementInventoryRegistration (ENFORCEMENT_INVENTORY_MISSING)
+// ---------------------------------------------------------------------------
+
+function ledgerManifestWithNoTargets(id) {
+  return {
+    schema_version: 1,
+    checks: [
+      {
+        id,
+        script: `scripts/check/${id}.mjs`,
+        test: null,
+        install_targets: [],
+      },
+    ],
+  };
+}
+
+test("(43) known-bad: a hook wired in settings but registered with install_targets:[] -> ENFORCEMENT_INVENTORY_MISSING (synthetic fixture, fail-closed)", () => {
+  const manifest = ledgerManifestWithNoTargets("some-guard");
+  const settingsByLocation = {
+    "repo-settings": {
+      hooks: {
+        PreToolUse: [
+          {
+            matcher: "Edit|Write",
+            hooks: [{ command: "node scripts/check/some-guard.mjs" }],
+          },
+        ],
+      },
+    },
+  };
+  const result = checkEnforcementInventoryRegistration({
+    manifest,
+    settingsByLocation,
+  });
+  assert.equal(result.status, "BLOCK");
+  assert.match(result.reason, /^ENFORCEMENT_INVENTORY_MISSING/);
+  assert.match(result.reason, /some-guard/);
+});
+
+test("(44) paired good: same fixture, install_targets entry restored to match the real wiring -> PASS", () => {
+  const manifest = {
+    schema_version: 1,
+    checks: [
+      {
+        id: "some-guard",
+        script: "scripts/check/some-guard.mjs",
+        test: null,
+        install_targets: [
+          {
+            location: "repo-settings",
+            kind: "claude-settings",
+            path: "REPO/.claude/settings.local.json",
+            hook_event: "PreToolUse",
+            matcher: "Edit|Write",
+            required: true,
+          },
+        ],
+      },
+    ],
+  };
+  const settingsByLocation = {
+    "repo-settings": {
+      hooks: {
+        PreToolUse: [
+          {
+            matcher: "Edit|Write",
+            hooks: [{ command: "node scripts/check/some-guard.mjs" }],
+          },
+        ],
+      },
+    },
+  };
+  const result = checkEnforcementInventoryRegistration({
+    manifest,
+    settingsByLocation,
+  });
+  assert.equal(result.status, "PASS", result.reason);
+});
+
+test("(45) known-bad: no wired hooks at all beyond what's registered -> PASS (nothing to flag, not falsely BLOCK)", () => {
+  const manifest = ledgerManifestWithNoTargets("some-guard");
+  const result = checkEnforcementInventoryRegistration({
+    manifest,
+    settingsByLocation: {},
+  });
+  assert.equal(result.status, "PASS", result.reason);
+});
+
+test("(46) forbidden side effect: checkEnforcementInventoryRegistration never mutates the manifest or settings objects passed in", () => {
+  const manifest = ledgerManifestWithNoTargets("some-guard");
+  const settingsByLocation = {
+    "repo-settings": {
+      hooks: {
+        PreToolUse: [
+          {
+            matcher: "Edit|Write",
+            hooks: [{ command: "node scripts/check/some-guard.mjs" }],
+          },
+        ],
+      },
+    },
+  };
+  const manifestBefore = JSON.stringify(manifest);
+  const settingsBefore = JSON.stringify(settingsByLocation);
+  checkEnforcementInventoryRegistration({ manifest, settingsByLocation });
+  assert.equal(JSON.stringify(manifest), manifestBefore);
+  assert.equal(JSON.stringify(settingsByLocation), settingsBefore);
+});
+
+// HYK-160-coder-8 (PR #37 enforce CI fail): `.claude/settings.local.json` is
+// git-untracked by design (C2-0/HYK-160-coder-4 confirmed this directly --
+// a fresh worktree/CI checkout never has it). Local runs on this machine DO
+// have the real file, so this test's job is a live-wiring regression guard
+// there; on a CI runner (or any other checkout without it) there is no live
+// wiring to audit at all -- that gap is covered by the local weekly
+// selfcheck loop instead (게이트-기준.md 주간 루프), not by this suite.
+//
+// The skip decision itself is a pure function (`resolveRealRepoGuard47`) so
+// its three states -- absent (skip, exact reason), present+drifted (still
+// FAIL, never swallowed), present+matching (PASS) -- can each be pinned by
+// a test without relying on node:test's own skip semantics to prove the
+// point. A path can be injected so the "absent" state is exercised
+// deterministically, never by moving/deleting the real file.
+const CI_MISSING_SETTINGS_SKIP_REASON =
+  "live wiring file '.claude/settings.local.json' is local-only (git-untracked) -- CI has no live wiring to audit here; local weekly selfcheck covers this gap";
+
+export function resolveRealRepoGuard47({
+  repoRoot,
+  settingsPathOverride,
+  existsFn = existsSync,
+  readFileFn = (p) => readFileSync(p, "utf8"),
+}) {
+  const settingsPath =
+    settingsPathOverride ?? join(repoRoot, ".claude", "settings.local.json");
+  if (!existsFn(settingsPath)) {
+    return { outcome: "skip", reason: CI_MISSING_SETTINGS_SKIP_REASON };
+  }
+  const manifest = JSON.parse(
+    readFileFn(
+      join(repoRoot, "scripts", "check", "enforcement-inventory.json"),
+    ),
+  );
+  const settings = JSON.parse(readFileFn(settingsPath));
+  const result = checkEnforcementInventoryRegistration({
+    manifest,
+    settingsByLocation: { "repo-settings": settings },
+  });
+  return {
+    outcome: result.status === "PASS" ? "pass" : "fail",
+    reason: result.reason,
+  };
+}
+
+test("(47) real-repo regression guard: the actual enforcement-inventory.json + the actual repo .claude/settings.local.json agree (report-style-guard drift closed, HYK-160 라이더ⓐ)", (t) => {
+  const repoRoot = fileURLToPath(new URL("../..", import.meta.url));
+  const result = resolveRealRepoGuard47({ repoRoot });
+  if (result.outcome === "skip") {
+    t.skip(result.reason);
+    return;
+  }
+  assert.equal(result.outcome, "pass", result.reason);
+});
+
+test("(47b) skip-decision counterfactual: settings path missing (injected) -> deterministic skip with the exact reason, never a crash", () => {
+  const repoRoot = fileURLToPath(new URL("../..", import.meta.url));
+  const result = resolveRealRepoGuard47({
+    repoRoot,
+    settingsPathOverride: join(
+      repoRoot,
+      "does-not-exist",
+      "settings.local.json",
+    ),
+  });
+  assert.equal(result.outcome, "skip");
+  assert.equal(result.reason, CI_MISSING_SETTINGS_SKIP_REASON);
+});
+
+test("(47c) skip-decision counterfactual: settings path present in a synthetic fixture but drifted -> FAIL, skip never swallows a real failure", () => {
+  withFixtureDir((dir) => {
+    const checkDir = join(dir, "scripts", "check");
+    mkdirSync(checkDir, { recursive: true });
+    writeFileSync(
+      join(checkDir, "enforcement-inventory.json"),
+      JSON.stringify({ schema_version: 1, checks: [] }),
+      "utf8",
+    );
+    const claudeDir = join(dir, ".claude");
+    mkdirSync(claudeDir, { recursive: true });
+    writeFileSync(
+      join(claudeDir, "settings.local.json"),
+      JSON.stringify({
+        hooks: {
+          PreToolUse: [
+            {
+              matcher: "Edit",
+              hooks: [{ command: "node scripts/check/some-guard.mjs" }],
+            },
+          ],
+        },
+      }),
+      "utf8",
+    );
+    const result = resolveRealRepoGuard47({ repoRoot: dir });
+    assert.equal(result.outcome, "fail");
+    assert.match(result.reason, /^ENFORCEMENT_INVENTORY_MISSING/);
+  });
+});
+
+test("(47d) skip-decision counterfactual: settings path present in a synthetic fixture and matching -> PASS", () => {
+  withFixtureDir((dir) => {
+    const checkDir = join(dir, "scripts", "check");
+    mkdirSync(checkDir, { recursive: true });
+    writeFileSync(
+      join(checkDir, "enforcement-inventory.json"),
+      JSON.stringify({
+        schema_version: 1,
+        checks: [
+          {
+            id: "some-guard",
+            script: "scripts/check/some-guard.mjs",
+            test: null,
+            install_targets: [
+              {
+                location: "repo-settings",
+                kind: "claude-settings",
+                path: "REPO/.claude/settings.local.json",
+                hook_event: "PreToolUse",
+                matcher: "Edit",
+                required: true,
+              },
+            ],
+          },
+        ],
+      }),
+      "utf8",
+    );
+    const claudeDir = join(dir, ".claude");
+    mkdirSync(claudeDir, { recursive: true });
+    writeFileSync(
+      join(claudeDir, "settings.local.json"),
+      JSON.stringify({
+        hooks: {
+          PreToolUse: [
+            {
+              matcher: "Edit",
+              hooks: [{ command: "node scripts/check/some-guard.mjs" }],
+            },
+          ],
+        },
+      }),
+      "utf8",
+    );
+    const result = resolveRealRepoGuard47({ repoRoot: dir });
+    assert.equal(result.outcome, "pass", result.reason);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// HYK-160 라이더ⓑ: checkHookSetAdditive (HOOK_SET_DRIFT) / checkHookWiringRegistered (HOOK_WIRING_MISSING)
+// ---------------------------------------------------------------------------
+
+function allExpectedHooksWired() {
+  // Synthesizes exactly the 10 expected hook-command instances into two
+  // "settings" shapes (repo + user-level) -- the union real Orca-injected
+  // settings would produce.
+  return [
+    { hookEvent: "PreToolUse", command: "node scripts/check/role-guard.mjs" },
+    {
+      hookEvent: "PreToolUse",
+      command: "node scripts/check/report-style-guard.mjs",
+    },
+    { hookEvent: "Stop", command: "node scripts/check/status-fresh.mjs" },
+    { hookEvent: "Stop", command: "node scripts/check/clear-safe-check.mjs" },
+    { hookEvent: "Stop", command: "node scripts/check/linear-sync.mjs" },
+    { hookEvent: "Stop", command: "node scripts/check/controlroom-fresh.mjs" },
+    {
+      hookEvent: "SessionStart",
+      command: "node scripts/check/context-inject.mjs --mode session-start",
+    },
+    {
+      hookEvent: "SessionStart",
+      command: "node scripts/check/selfcheck-freshness.mjs",
+    },
+    {
+      hookEvent: "UserPromptSubmit",
+      command:
+        "node scripts/check/context-inject.mjs --mode user-prompt-submit",
+    },
+    {
+      hookEvent: "UserPromptSubmit",
+      command: "node scripts/check/worker-status-onstart.mjs",
+    },
+  ];
+}
+
+test("(48) EXPECTED_INJECTED_HOOKS is fixed at exactly 10 entries", () => {
+  assert.equal(EXPECTED_INJECTED_HOOKS.length, 10);
+});
+
+test("(49) checkHookSetAdditive: all 10 expected hooks present -> PASS", () => {
+  const result = checkHookSetAdditive({
+    hookCommands: allExpectedHooksWired(),
+  });
+  assert.equal(result.status, "PASS", result.reason);
+});
+
+test("(50) known-bad: one expected hook deleted (role-guard removed) -> HOOK_SET_DRIFT naming it", () => {
+  const commands = allExpectedHooksWired().filter(
+    (h) => !h.command.includes("role-guard"),
+  );
+  const result = checkHookSetAdditive({ hookCommands: commands });
+  assert.equal(result.status, "BLOCK");
+  assert.match(result.reason, /^HOOK_SET_DRIFT/);
+  assert.match(result.reason, /role-guard@PreToolUse/);
+});
+
+test("(51) known-bad: an expected hook replaced with a different script at the same hookEvent -> still HOOK_SET_DRIFT (same as deletion)", () => {
+  const commands = allExpectedHooksWired().map((h) =>
+    h.command.includes("linear-sync")
+      ? { ...h, command: "node scripts/check/mystery.mjs" }
+      : h,
+  );
+  const result = checkHookSetAdditive({ hookCommands: commands });
+  assert.equal(result.status, "BLOCK");
+  assert.match(result.reason, /linear-sync@Stop/);
+});
+
+test("(52) paired good: deleted hook restored (single-variable fix) -> PASS", () => {
+  const bad = checkHookSetAdditive({
+    hookCommands: allExpectedHooksWired().filter(
+      (h) => !h.command.includes("controlroom-fresh"),
+    ),
+  });
+  assert.equal(bad.status, "BLOCK");
+  const good = checkHookSetAdditive({ hookCommands: allExpectedHooksWired() });
+  assert.equal(good.status, "PASS", good.reason);
+});
+
+test("(53) additive-only: an EXTRA hook beyond the expected 10 does not trigger HOOK_SET_DRIFT (that's ENFORCEMENT_INVENTORY_MISSING's concern, not this one)", () => {
+  const commands = [
+    ...allExpectedHooksWired(),
+    {
+      hookEvent: "PreToolUse",
+      command: "node scripts/check/some-new-guard.mjs",
+    },
+  ];
+  const result = checkHookSetAdditive({ hookCommands: commands });
+  assert.equal(result.status, "PASS", result.reason);
+});
+
+test("(54) C2-0 confirmed shape: a fresh worktree (settings entirely absent) -> HOOK_SET_DRIFT naming all 10 -- 'settings existing' and 'hooks alive' are never conflated into one state (G11)", () => {
+  const result = checkHookSetAdditive({ hookCommands: [] });
+  assert.equal(result.status, "BLOCK");
+  assert.match(result.reason, /^HOOK_SET_DRIFT/);
+  for (const exp of EXPECTED_INJECTED_HOOKS) {
+    assert.match(result.reason, new RegExp(`${exp.id}@${exp.hookEvent}`));
+  }
+});
+
+// checkHookWiringRegistered
+
+// Uses a real, existing script (role-guard.mjs) as the fixture's id/script
+// so judgeEntry's step-1 script-existence check never contributes noise
+// (SILENT_BROKEN) unrelated to what this test is isolating: wiring only.
+function wiringManifest(installTargets) {
+  return {
+    schema_version: 1,
+    checks: [
+      {
+        id: "role-guard",
+        script: "scripts/check/role-guard.mjs",
+        test: "scripts/check/role-guard.test.mjs",
+        install_targets: installTargets,
+      },
+    ],
+  };
+}
+
+test("(55) checkHookWiringRegistered: registered entry actually wired -> PASS", () => {
+  const manifest = wiringManifest([
+    {
+      location: "repo-settings",
+      kind: "claude-settings",
+      path: "REPO/.claude/settings.local.json",
+      hook_event: "PreToolUse",
+      matcher: "Edit",
+      required: true,
+    },
+  ]);
+  const settingsByLocation = {
+    "repo-settings": {
+      hooks: {
+        PreToolUse: [
+          {
+            matcher: "Edit",
+            hooks: [{ command: "node scripts/check/role-guard.mjs" }],
+          },
+        ],
+      },
+    },
+  };
+  const result = checkHookWiringRegistered({
+    manifest,
+    repoRoot: fileURLToPath(new URL("../..", import.meta.url)),
+    settingsByLocation,
+  });
+  assert.equal(result.status, "PASS", result.reason);
+});
+
+test("(56) known-bad: settings ARE loaded for the location but this hook isn't among its commands (broken wiring, not 'never loaded') -> HOOK_WIRING_MISSING naming it", () => {
+  const manifest = wiringManifest([
+    {
+      location: "repo-settings",
+      kind: "claude-settings",
+      path: "REPO/.claude/settings.local.json",
+      hook_event: "PreToolUse",
+      matcher: "Edit",
+      required: true,
+    },
+  ]);
+  // settings loaded successfully, but role-guard's command is absent --
+  // this is NOT_INSTALLED (a real judgment), distinct from settingsByLocation
+  // being empty entirely (which judgeEntry treats as UNJUDGABLE, "cannot
+  // judge," not "definitely not installed" -- a different honest state).
+  const settingsByLocation = {
+    "repo-settings": {
+      hooks: {
+        PreToolUse: [
+          {
+            matcher: "Edit",
+            hooks: [{ command: "node scripts/check/report-style-guard.mjs" }],
+          },
+        ],
+      },
+    },
+  };
+  const result = checkHookWiringRegistered({
+    manifest,
+    repoRoot: fileURLToPath(new URL("../..", import.meta.url)),
+    settingsByLocation,
+  });
+  assert.equal(result.status, "BLOCK");
+  assert.match(result.reason, /^HOOK_WIRING_MISSING/);
+  assert.match(result.reason, /role-guard/);
+});
+
+test("(57) paired good: role-guard's command restored into the same loaded settings (single-variable fix) -> PASS", () => {
+  const manifest = wiringManifest([
+    {
+      location: "repo-settings",
+      kind: "claude-settings",
+      path: "REPO/.claude/settings.local.json",
+      hook_event: "PreToolUse",
+      matcher: "Edit",
+      required: true,
+    },
+  ]);
+  const root = fileURLToPath(new URL("../..", import.meta.url));
+  const badSettings = {
+    "repo-settings": {
+      hooks: {
+        PreToolUse: [
+          {
+            matcher: "Edit",
+            hooks: [{ command: "node scripts/check/report-style-guard.mjs" }],
+          },
+        ],
+      },
+    },
+  };
+  const bad = checkHookWiringRegistered({
+    manifest,
+    repoRoot: root,
+    settingsByLocation: badSettings,
+  });
+  assert.equal(bad.status, "BLOCK");
+  const goodSettings = {
+    "repo-settings": {
+      hooks: {
+        PreToolUse: [
+          {
+            matcher: "Edit",
+            hooks: [{ command: "node scripts/check/role-guard.mjs" }],
+          },
+        ],
+      },
+    },
+  };
+  const good = checkHookWiringRegistered({
+    manifest,
+    repoRoot: root,
+    settingsByLocation: goodSettings,
+  });
+  assert.equal(good.status, "PASS", good.reason);
+});
+
+// HYK-160-coder-8 (PR #37 enforce CI fail): same git-untracked-local-file
+// gap as test 47 above -- `.claude/settings.local.json` is absent on a CI
+// runner by design (C2-0 confirmed this directly), so there is no live
+// repo-settings wiring to check against at all there. The user-level
+// `~/.claude-team/settings.json` path already degrades gracefully (treated
+// as empty hooks when absent, same as before this fix) -- only the repo
+// settings file needed the same skip-if-absent treatment test 47 got.
+const CI_MISSING_REPO_SETTINGS_SKIP_REASON =
+  "live wiring file '.claude/settings.local.json' is local-only (git-untracked) -- CI has no repo-settings wiring to audit here; local weekly selfcheck covers this gap";
+
+export function resolveRealRepoGuard58({
+  repoRoot,
+  repoSettingsPathOverride,
+  userSettingsPathOverride,
+  existsFn = existsSync,
+  readFileFn = (p) => readFileSync(p, "utf8"),
+}) {
+  const repoSettingsPath =
+    repoSettingsPathOverride ??
+    join(repoRoot, ".claude", "settings.local.json");
+  if (!existsFn(repoSettingsPath)) {
+    return { outcome: "skip", reason: CI_MISSING_REPO_SETTINGS_SKIP_REASON };
+  }
+  const repoSettings = JSON.parse(readFileFn(repoSettingsPath));
+
+  const userSettingsPath =
+    userSettingsPathOverride ??
+    join(
+      process.env.USERPROFILE || process.env.HOME,
+      ".claude-team",
+      "settings.json",
+    );
+  let userSettings = { hooks: {} };
+  if (existsFn(userSettingsPath)) {
+    try {
+      userSettings = JSON.parse(readFileFn(userSettingsPath));
+    } catch {
+      userSettings = { hooks: {} };
+    }
+  }
+
+  const hookCommands = [
+    ...parseHookCommands(repoSettings),
+    ...parseHookCommands(userSettings),
+  ];
+  const result = checkHookSetAdditive({ hookCommands });
+  return {
+    outcome: result.status === "PASS" ? "pass" : "fail",
+    reason: result.reason,
+  };
+}
+
+test("(58) real-repo regression guard: EXPECTED_INJECTED_HOOKS all appear in the actual repo settings.local.json + user-level settings.json (both real files, additive check against live wiring)", (t) => {
+  const repoRoot = fileURLToPath(new URL("../..", import.meta.url));
+  const result = resolveRealRepoGuard58({ repoRoot });
+  if (result.outcome === "skip") {
+    t.skip(result.reason);
+    return;
+  }
+  assert.equal(result.outcome, "pass", result.reason);
+});
+
+test("(58b) skip-decision counterfactual: repo settings path missing (injected) -> deterministic skip with the exact reason, never a crash", () => {
+  const repoRoot = fileURLToPath(new URL("../..", import.meta.url));
+  const result = resolveRealRepoGuard58({
+    repoRoot,
+    repoSettingsPathOverride: join(
+      repoRoot,
+      "does-not-exist",
+      "settings.local.json",
+    ),
+  });
+  assert.equal(result.outcome, "skip");
+  assert.equal(result.reason, CI_MISSING_REPO_SETTINGS_SKIP_REASON);
+});
+
+test("(58c) skip-decision counterfactual: repo settings present in a synthetic fixture but missing one expected hook -> FAIL, skip never swallows a real drift", () => {
+  withFixtureDir((dir) => {
+    const claudeDir = join(dir, ".claude");
+    mkdirSync(claudeDir, { recursive: true });
+    const commands = [
+      {
+        hookEvent: "PreToolUse",
+        command: "node scripts/check/report-style-guard.mjs",
+      }, // role-guard missing
+      { hookEvent: "Stop", command: "node scripts/check/status-fresh.mjs" },
+      { hookEvent: "Stop", command: "node scripts/check/clear-safe-check.mjs" },
+      { hookEvent: "Stop", command: "node scripts/check/linear-sync.mjs" },
+      {
+        hookEvent: "Stop",
+        command: "node scripts/check/controlroom-fresh.mjs",
+      },
+      {
+        hookEvent: "SessionStart",
+        command: "node scripts/check/context-inject.mjs --mode session-start",
+      },
+      {
+        hookEvent: "SessionStart",
+        command: "node scripts/check/selfcheck-freshness.mjs",
+      },
+      {
+        hookEvent: "UserPromptSubmit",
+        command:
+          "node scripts/check/context-inject.mjs --mode user-prompt-submit",
+      },
+    ];
+    writeFileSync(
+      join(claudeDir, "settings.local.json"),
+      JSON.stringify({
+        hooks: commands.reduce((acc, c) => {
+          (acc[c.hookEvent] ??= []).push({
+            matcher: null,
+            hooks: [{ command: c.command }],
+          });
+          return acc;
+        }, {}),
+      }),
+      "utf8",
+    );
+    const result = resolveRealRepoGuard58({
+      repoRoot: dir,
+      userSettingsPathOverride: join(dir, "no-user-settings.json"),
+    });
+    assert.equal(result.outcome, "fail");
+    assert.match(result.reason, /^HOOK_SET_DRIFT/);
   });
 });
