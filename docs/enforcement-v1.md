@@ -2711,6 +2711,54 @@ entry from §E, not replacing it):
 }
 ```
 
+### HYK-152 하드닝: track-consistency 배선 순서 계약 (2026-07-18, HYK-160-coder-6)
+
+`checkTrackMatch` (`worker-status-onstart.mjs`) requires each STATUS file to
+carry its own `<!-- harness-track-root: <repo-root-path> -->` marker,
+compared against the running session's self-derived `repoRoot()` before any
+§1 row write proceeds — a mismatch or missing marker is `STATUS_TRACK_MISMATCH`
+/ `STATUS_TARGET_UNJUDGABLE`, both "무쓰기" (never write). This closes the
+관제실 §6 HYK-152 incident (an env leak pointed a TEAM10 session's
+`HARNESS_STATUS_PATH` at the harness control-room STATUS.md).
+
+**This is a breaking change if deployed out of order.** Every real STATUS.md
+in production today has no such marker. If the hardened
+`worker-status-onstart.mjs` is wired into a live session's settings before
+every STATUS file it could ever target already carries a correct marker,
+every real `go`-time write silently stops (`STATUS_TARGET_UNJUDGABLE`) —
+the exact same class of "convention removed, nothing replaces it in the
+gap" risk this document's own Design section warns about, just triggered by
+a missing precondition instead of a code bug.
+
+**Mandatory deployment order (a contract, not just a post-hoc honesty
+note):**
+
+1. **Marker installation, ORCH-only.** ORCH installs one
+   `<!-- harness-track-root: <that track's actual repo root> -->` line into
+   **every** STATUS.md this hook could ever be pointed at (harness
+   control-room STATUS.md, TEAM10's STATUS.md, and any future track's).
+   CODER's own role-guard lane forbids writing to control-room or
+   other-track files at all — this step can never be a CODER task, by the
+   same role-boundary this whole document enforces elsewhere (§D).
+2. **Verification.** For each STATUS file, ORCH runs `checkTrackMatch`
+   (or the equivalent CLI invocation) against that track's real `repoRoot()`
+   and confirms `status: "OK"` — never assumes the marker text is correct
+   just because a line was pasted in.
+3. **Only then, code/hook deployment.** The hardened
+   `worker-status-onstart.mjs` (and any settings.json/settings.local.json
+   wiring change to it) is deployed only after every target STATUS file has
+   passed step 2. Deploying the code before every marker is installed and
+   verified is exactly the breaking scenario above — **explicitly
+   prohibited** by this contract, not merely "not yet done."
+
+Synthetic wiring-order contract test (`worker-status-onstart.test.mjs`,
+OS-temp/synthetic STATUS fixtures only — no real control-room STATUS.md is
+ever probed, per S7): a markerless STATUS + the hardened hook reproduces the
+regression shape directly (write blocked, `STATUS_TARGET_UNJUDGABLE`); the
+same STATUS with the marker installed (step 1) and matching `repoRoot()`
+(step 2 passing) writes normally — pairing "skip the order" against "follow
+the order" so the contract is pinned by a test, not only by this prose.
+
 ### Known limitations (honesty notes)
 
 - **STATUS lives outside every repo — Tier 2 ceiling, not a gap to close.**

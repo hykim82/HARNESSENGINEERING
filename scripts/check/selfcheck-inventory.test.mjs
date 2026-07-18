@@ -1,6 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, rmSync, mkdirSync } from "node:fs";
+import {
+  mkdtempSync,
+  writeFileSync,
+  rmSync,
+  mkdirSync,
+  existsSync,
+} from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { execFileSync } from "node:child_process";
@@ -26,6 +32,9 @@ import {
   expectedIdsForLocation,
   findExtraResults,
   checkEnforcementInventoryRegistration,
+  checkHookSetAdditive,
+  checkHookWiringRegistered,
+  EXPECTED_INJECTED_HOOKS,
 } from "./selfcheck-inventory.mjs";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -1706,5 +1715,270 @@ test("(47) real-repo regression guard: the actual enforcement-inventory.json + t
     manifest,
     settingsByLocation: { "repo-settings": settings },
   });
+  assert.equal(result.status, "PASS", result.reason);
+});
+
+// ---------------------------------------------------------------------------
+// HYK-160 라이더ⓑ: checkHookSetAdditive (HOOK_SET_DRIFT) / checkHookWiringRegistered (HOOK_WIRING_MISSING)
+// ---------------------------------------------------------------------------
+
+function allExpectedHooksWired() {
+  // Synthesizes exactly the 10 expected hook-command instances into two
+  // "settings" shapes (repo + user-level) -- the union real Orca-injected
+  // settings would produce.
+  return [
+    { hookEvent: "PreToolUse", command: "node scripts/check/role-guard.mjs" },
+    {
+      hookEvent: "PreToolUse",
+      command: "node scripts/check/report-style-guard.mjs",
+    },
+    { hookEvent: "Stop", command: "node scripts/check/status-fresh.mjs" },
+    { hookEvent: "Stop", command: "node scripts/check/clear-safe-check.mjs" },
+    { hookEvent: "Stop", command: "node scripts/check/linear-sync.mjs" },
+    { hookEvent: "Stop", command: "node scripts/check/controlroom-fresh.mjs" },
+    {
+      hookEvent: "SessionStart",
+      command: "node scripts/check/context-inject.mjs --mode session-start",
+    },
+    {
+      hookEvent: "SessionStart",
+      command: "node scripts/check/selfcheck-freshness.mjs",
+    },
+    {
+      hookEvent: "UserPromptSubmit",
+      command:
+        "node scripts/check/context-inject.mjs --mode user-prompt-submit",
+    },
+    {
+      hookEvent: "UserPromptSubmit",
+      command: "node scripts/check/worker-status-onstart.mjs",
+    },
+  ];
+}
+
+test("(48) EXPECTED_INJECTED_HOOKS is fixed at exactly 10 entries", () => {
+  assert.equal(EXPECTED_INJECTED_HOOKS.length, 10);
+});
+
+test("(49) checkHookSetAdditive: all 10 expected hooks present -> PASS", () => {
+  const result = checkHookSetAdditive({
+    hookCommands: allExpectedHooksWired(),
+  });
+  assert.equal(result.status, "PASS", result.reason);
+});
+
+test("(50) known-bad: one expected hook deleted (role-guard removed) -> HOOK_SET_DRIFT naming it", () => {
+  const commands = allExpectedHooksWired().filter(
+    (h) => !h.command.includes("role-guard"),
+  );
+  const result = checkHookSetAdditive({ hookCommands: commands });
+  assert.equal(result.status, "BLOCK");
+  assert.match(result.reason, /^HOOK_SET_DRIFT/);
+  assert.match(result.reason, /role-guard@PreToolUse/);
+});
+
+test("(51) known-bad: an expected hook replaced with a different script at the same hookEvent -> still HOOK_SET_DRIFT (same as deletion)", () => {
+  const commands = allExpectedHooksWired().map((h) =>
+    h.command.includes("linear-sync")
+      ? { ...h, command: "node scripts/check/mystery.mjs" }
+      : h,
+  );
+  const result = checkHookSetAdditive({ hookCommands: commands });
+  assert.equal(result.status, "BLOCK");
+  assert.match(result.reason, /linear-sync@Stop/);
+});
+
+test("(52) paired good: deleted hook restored (single-variable fix) -> PASS", () => {
+  const bad = checkHookSetAdditive({
+    hookCommands: allExpectedHooksWired().filter(
+      (h) => !h.command.includes("controlroom-fresh"),
+    ),
+  });
+  assert.equal(bad.status, "BLOCK");
+  const good = checkHookSetAdditive({ hookCommands: allExpectedHooksWired() });
+  assert.equal(good.status, "PASS", good.reason);
+});
+
+test("(53) additive-only: an EXTRA hook beyond the expected 10 does not trigger HOOK_SET_DRIFT (that's ENFORCEMENT_INVENTORY_MISSING's concern, not this one)", () => {
+  const commands = [
+    ...allExpectedHooksWired(),
+    {
+      hookEvent: "PreToolUse",
+      command: "node scripts/check/some-new-guard.mjs",
+    },
+  ];
+  const result = checkHookSetAdditive({ hookCommands: commands });
+  assert.equal(result.status, "PASS", result.reason);
+});
+
+test("(54) C2-0 confirmed shape: a fresh worktree (settings entirely absent) -> HOOK_SET_DRIFT naming all 10 -- 'settings existing' and 'hooks alive' are never conflated into one state (G11)", () => {
+  const result = checkHookSetAdditive({ hookCommands: [] });
+  assert.equal(result.status, "BLOCK");
+  assert.match(result.reason, /^HOOK_SET_DRIFT/);
+  for (const exp of EXPECTED_INJECTED_HOOKS) {
+    assert.match(result.reason, new RegExp(`${exp.id}@${exp.hookEvent}`));
+  }
+});
+
+// checkHookWiringRegistered
+
+// Uses a real, existing script (role-guard.mjs) as the fixture's id/script
+// so judgeEntry's step-1 script-existence check never contributes noise
+// (SILENT_BROKEN) unrelated to what this test is isolating: wiring only.
+function wiringManifest(installTargets) {
+  return {
+    schema_version: 1,
+    checks: [
+      {
+        id: "role-guard",
+        script: "scripts/check/role-guard.mjs",
+        test: "scripts/check/role-guard.test.mjs",
+        install_targets: installTargets,
+      },
+    ],
+  };
+}
+
+test("(55) checkHookWiringRegistered: registered entry actually wired -> PASS", () => {
+  const manifest = wiringManifest([
+    {
+      location: "repo-settings",
+      kind: "claude-settings",
+      path: "REPO/.claude/settings.local.json",
+      hook_event: "PreToolUse",
+      matcher: "Edit",
+      required: true,
+    },
+  ]);
+  const settingsByLocation = {
+    "repo-settings": {
+      hooks: {
+        PreToolUse: [
+          {
+            matcher: "Edit",
+            hooks: [{ command: "node scripts/check/role-guard.mjs" }],
+          },
+        ],
+      },
+    },
+  };
+  const result = checkHookWiringRegistered({
+    manifest,
+    repoRoot: fileURLToPath(new URL("../..", import.meta.url)),
+    settingsByLocation,
+  });
+  assert.equal(result.status, "PASS", result.reason);
+});
+
+test("(56) known-bad: settings ARE loaded for the location but this hook isn't among its commands (broken wiring, not 'never loaded') -> HOOK_WIRING_MISSING naming it", () => {
+  const manifest = wiringManifest([
+    {
+      location: "repo-settings",
+      kind: "claude-settings",
+      path: "REPO/.claude/settings.local.json",
+      hook_event: "PreToolUse",
+      matcher: "Edit",
+      required: true,
+    },
+  ]);
+  // settings loaded successfully, but role-guard's command is absent --
+  // this is NOT_INSTALLED (a real judgment), distinct from settingsByLocation
+  // being empty entirely (which judgeEntry treats as UNJUDGABLE, "cannot
+  // judge," not "definitely not installed" -- a different honest state).
+  const settingsByLocation = {
+    "repo-settings": {
+      hooks: {
+        PreToolUse: [
+          {
+            matcher: "Edit",
+            hooks: [{ command: "node scripts/check/report-style-guard.mjs" }],
+          },
+        ],
+      },
+    },
+  };
+  const result = checkHookWiringRegistered({
+    manifest,
+    repoRoot: fileURLToPath(new URL("../..", import.meta.url)),
+    settingsByLocation,
+  });
+  assert.equal(result.status, "BLOCK");
+  assert.match(result.reason, /^HOOK_WIRING_MISSING/);
+  assert.match(result.reason, /role-guard/);
+});
+
+test("(57) paired good: role-guard's command restored into the same loaded settings (single-variable fix) -> PASS", () => {
+  const manifest = wiringManifest([
+    {
+      location: "repo-settings",
+      kind: "claude-settings",
+      path: "REPO/.claude/settings.local.json",
+      hook_event: "PreToolUse",
+      matcher: "Edit",
+      required: true,
+    },
+  ]);
+  const root = fileURLToPath(new URL("../..", import.meta.url));
+  const badSettings = {
+    "repo-settings": {
+      hooks: {
+        PreToolUse: [
+          {
+            matcher: "Edit",
+            hooks: [{ command: "node scripts/check/report-style-guard.mjs" }],
+          },
+        ],
+      },
+    },
+  };
+  const bad = checkHookWiringRegistered({
+    manifest,
+    repoRoot: root,
+    settingsByLocation: badSettings,
+  });
+  assert.equal(bad.status, "BLOCK");
+  const goodSettings = {
+    "repo-settings": {
+      hooks: {
+        PreToolUse: [
+          {
+            matcher: "Edit",
+            hooks: [{ command: "node scripts/check/role-guard.mjs" }],
+          },
+        ],
+      },
+    },
+  };
+  const good = checkHookWiringRegistered({
+    manifest,
+    repoRoot: root,
+    settingsByLocation: goodSettings,
+  });
+  assert.equal(good.status, "PASS", good.reason);
+});
+
+test("(58) real-repo regression guard: EXPECTED_INJECTED_HOOKS all appear in the actual repo settings.local.json + user-level settings.json (both real files, additive check against live wiring)", () => {
+  const repoRoot = fileURLToPath(new URL("../..", import.meta.url));
+  const repoSettings = JSON.parse(
+    readFileSync(join(repoRoot, ".claude", "settings.local.json"), "utf8"),
+  );
+  const userSettingsPath = join(
+    process.env.USERPROFILE || process.env.HOME,
+    ".claude-team",
+    "settings.json",
+  );
+  let userSettings = { hooks: {} };
+  if (existsSync(userSettingsPath)) {
+    try {
+      userSettings = JSON.parse(readFileSync(userSettingsPath, "utf8"));
+    } catch {
+      userSettings = { hooks: {} };
+    }
+  }
+  const hookCommands = [
+    ...parseHookCommands(repoSettings),
+    ...parseHookCommands(userSettings),
+  ];
+  const result = checkHookSetAdditive({ hookCommands });
   assert.equal(result.status, "PASS", result.reason);
 });

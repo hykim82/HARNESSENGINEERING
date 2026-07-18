@@ -867,6 +867,106 @@ export function checkEnforcementInventoryRegistration({
   };
 }
 
+// HYK-160 라이더ⓑ: the 10 hook-command instances Orca's per-session settings
+// injection is expected to carry additively (design report §3.8, sourced
+// from 이식계획-v1.md R3's "Orca 주입 훅 10종") -- 8 repo-settings instances
+// (role-guard/report-style-guard PreToolUse; status-fresh/clear-safe-check/
+// linear-sync/controlroom-fresh Stop; context-inject/selfcheck-freshness
+// SessionStart) + context-inject's second UserPromptSubmit instance + the
+// user-level worker-status-onstart UserPromptSubmit instance = 10. This is a
+// snapshot baseline, not a law of nature -- if this batch's own new hooks
+// (research-receipt/go-task-id-gate) get installed in a later round, this
+// list legitimately grows and must be updated alongside that installation
+// (honesty: this function detects shrinkage against ITS OWN list, it does
+// not independently know what "should" be wired at any future point).
+export const EXPECTED_INJECTED_HOOKS = [
+  { id: "role-guard", hookEvent: "PreToolUse" },
+  { id: "report-style-guard", hookEvent: "PreToolUse" },
+  { id: "status-fresh", hookEvent: "Stop" },
+  { id: "clear-safe-check", hookEvent: "Stop" },
+  { id: "linear-sync", hookEvent: "Stop" },
+  { id: "controlroom-fresh", hookEvent: "Stop" },
+  { id: "context-inject", hookEvent: "SessionStart" },
+  { id: "selfcheck-freshness", hookEvent: "SessionStart" },
+  { id: "context-inject", hookEvent: "UserPromptSubmit" },
+  { id: "worker-status-onstart", hookEvent: "UserPromptSubmit" },
+];
+
+// G9 (라이더ⓑ, additive half): a fixed-reason check that a previously-wired
+// hook was never silently deleted or swapped for something else -- distinct
+// from checkHookWiringRegistered below because the *cause* differs (someone/
+// something removed a live hook entry) and so does the fix (restore the
+// entry), matching design §1's "원인·조치가 다르므로 별도 reason" mandate.
+// Additive-only: an extra hook beyond this list is not this check's concern
+// (findExtraResults/ENFORCEMENT_INVENTORY_MISSING already covers that).
+export function checkHookSetAdditive({
+  expectedHooks = EXPECTED_INJECTED_HOOKS,
+  hookCommands,
+}) {
+  const commands = Array.isArray(hookCommands) ? hookCommands : [];
+  const missing = expectedHooks.filter(
+    (exp) =>
+      !commands.some(
+        (h) =>
+          h.hookEvent === exp.hookEvent &&
+          extractCheckScriptId(h.command) === exp.id,
+      ),
+  );
+  if (missing.length > 0) {
+    const names = missing.map((m) => `${m.id}@${m.hookEvent}`).join(", ");
+    return {
+      status: "BLOCK",
+      ok: false,
+      reason: `HOOK_SET_DRIFT -- expected hook(s) no longer wired: ${names}`,
+    };
+  }
+  return {
+    status: "PASS",
+    ok: true,
+    reason: `hook-set-additive: all ${expectedHooks.length} expected hooks still additively present`,
+  };
+}
+
+// G9 (라이더ⓑ, wiring half): a fixed-reason wrapper over runInventory's own
+// NOT_INSTALLED judgment -- an entry the manifest *does* register but whose
+// settings/path is broken (deleted matcher, wrong hook_event, missing
+// installed git hook copy, ...). Same "wrap an existing primitive with a
+// fixed reason" pattern as checkEnforcementInventoryRegistration above.
+export function checkHookWiringRegistered({
+  manifest,
+  repoRoot: root,
+  roots = {},
+  settingsByLocation = {},
+  canaryDir,
+  now = Date.now(),
+  testFiles,
+}) {
+  const { results } = runInventory({
+    manifest,
+    repoRoot: root,
+    roots,
+    settingsByLocation,
+    canaryDir,
+    now,
+    testFiles,
+  });
+  const notInstalled = results.filter((r) => r.status === "NOT_INSTALLED");
+  if (notInstalled.length > 0) {
+    const ids = notInstalled.map((r) => r.id).join(", ");
+    return {
+      status: "BLOCK",
+      ok: false,
+      reason: `HOOK_WIRING_MISSING -- registered check(s) with broken settings/path wiring: ${ids}`,
+    };
+  }
+  return {
+    status: "PASS",
+    ok: true,
+    reason:
+      "hook-wiring-registered: every manifest-registered check with install_targets is actually wired",
+  };
+}
+
 export function runInventory({
   manifest,
   repoRoot: root,
