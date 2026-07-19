@@ -44,48 +44,60 @@ export const REASON = Object.freeze({
   COMPLETE: "COMPLETE",
 });
 
-// ---- G2 (review-3 수리): 패킷 §4-2 허용 3종만, **exact argv shape**로. review-3가
-// 직접 재현한 결함 -- 이전 버전은 prefix 비교라 고정 토큰 뒤에 임의 인자를 덧붙여도
-// (`--agent attacker`/`--run-hooks`/`--linear`) 통과했다. 이제 고정 토큰은 위치까지
-// 정확히 일치해야 하고(순서 변경·삽입 불가), 길이도 정확히 일치해야 하며(초과 인자
-// 거부), 값 슬롯(task_id·spec·terminalHandle·timeout)은 타입만 검증한다 -- 그 외
-// 조합(terminal send, dispatch --agent/--setup/--run-hooks, orchestration run,
-// automations, linear 등)은 이 러너의 코드 경로에 없고, 이 가드가 방어적으로도 거부한다.
+// ---- G2 (review-3 수리, 사이클 2에서 실제 Orca CLI 문법으로 재정의): 패킷 §4-2
+// 허용 3종만, **exact argv shape**로. review-3가 직접 재현한 결함 -- 이전 버전은
+// prefix 비교라 고정 토큰 뒤에 임의 인자를 덧붙여도(`--agent attacker`/`--run-hooks`/
+// `--linear`) 통과했다. 이제 고정 토큰은 위치까지 정확히 일치해야 하고(순서 변경·삽입
+// 불가), 길이도 정확히 일치해야 하며(초과 인자 거부), 값 슬롯은 타입만 검증한다.
+//
+// 사이클 2 정정(ORCH 실측, `orca ... --help` + task-create 1회 read-only 프로브):
+// 구 3형(`--task-id`/`--target`/`--timeout`)은 실제 Orca CLI에 존재하지 않는
+// 플래그였다 -- 사이클 1 화이트리스트는 실제 CLI로 한 번도 검증되지 않은 채 승인됐다.
+// 아래가 실제 문법이다. task-create는 `--task-id`를 받지 않는다(runtime이 id를
+// 생성). dispatch는 `--task <runtime task id>`/`--to <handle>`. check는 task id로
+// 거르지 못하고 `--terminal <coordinator handle>`/`--types`로 coordinator 인박스를
+// 거른다. 그 외 조합(terminal send, dispatch --agent/--setup/--run-hooks,
+// orchestration run, automations, linear 등)은 이 러너의 코드 경로에 없고, 이
+// 가드가 방어적으로도 거부한다.
 const ORCA_COMMAND_SHAPES = Object.freeze([
   {
     name: "task-create",
-    length: 6,
+    length: 5,
     fixed: {
       0: "orchestration",
       1: "task-create",
-      2: "--task-id",
-      4: "--spec",
+      2: "--spec",
+      4: "--json",
+    },
+    values: [3],
+  },
+  {
+    name: "dispatch",
+    length: 8,
+    fixed: {
+      0: "orchestration",
+      1: "dispatch",
+      2: "--task",
+      4: "--to",
+      6: "--inject",
+      7: "--json",
     },
     values: [3, 5],
   },
   {
-    name: "dispatch",
-    length: 7,
-    fixed: {
-      0: "orchestration",
-      1: "dispatch",
-      2: "--inject",
-      3: "--target",
-      5: "--task-id",
-    },
-    values: [4, 6],
-  },
-  {
     name: "check-wait",
-    length: 7,
+    length: 10,
     fixed: {
       0: "orchestration",
       1: "check",
-      2: "--wait",
-      3: "--task-id",
-      5: "--timeout",
+      2: "--terminal",
+      4: "--types",
+      5: "worker_done,escalation",
+      6: "--wait",
+      7: "--timeout-ms",
+      9: "--json",
     },
-    values: [4, 6],
+    values: [3, 8],
   },
 ]);
 
@@ -117,31 +129,52 @@ function pushReceipt(receipts, entry, nowFn) {
   receipts.push({ at: nowFn(), ...entry });
 }
 
-// ---- 명령 빌더(순수, 인자 3~4개만 -- 동적 문자열 조합 없음) ----
-export function buildTaskCreateCommand(spec, task_id) {
-  return ["orchestration", "task-create", "--task-id", task_id, "--spec", spec];
+// ---- 명령 빌더(순수, 동적 문자열 조합 없음) ----
+// task-create는 하네스 task_id를 받지 않는다 -- runtime이 id를 생성한다(G-a).
+// spec 문자열(= `go <하네스 task_id>`, buildSpec 재사용)만 넘긴다.
+export function buildTaskCreateCommand(spec) {
+  return ["orchestration", "task-create", "--spec", spec, "--json"];
 }
-export function buildDispatchCommand(task_id, terminalHandle) {
+// runtimeTaskId = task-create 응답에서 파싱한 id(parseRuntimeTaskId). 하네스
+// task_id와 별개 -- 절대 우리가 만든 하네스 task_id를 여기 넣지 않는다.
+export function buildDispatchCommand(runtimeTaskId, terminalHandle) {
   return [
     "orchestration",
     "dispatch",
-    "--inject",
-    "--target",
+    "--task",
+    runtimeTaskId,
+    "--to",
     terminalHandle,
-    "--task-id",
-    task_id,
+    "--inject",
+    "--json",
   ];
 }
-export function buildCheckWaitCommand(task_id, timeoutS) {
+// check는 task id로 못 거른다(실제 CLI에 그런 옵션 없음) -- coordinatorHandle=이
+// 스파이크를 실행 중인 coordinator 자신의 터미널 핸들(dispatch --to의 worker
+// terminalHandle과는 별개 값)의 인박스를 worker_done/escalation 타입으로만 거른다.
+export function buildCheckWaitCommand(coordinatorHandle, timeoutMs) {
   return [
     "orchestration",
     "check",
+    "--terminal",
+    coordinatorHandle,
+    "--types",
+    "worker_done,escalation",
     "--wait",
-    "--task-id",
-    task_id,
-    "--timeout",
-    String(timeoutS),
+    "--timeout-ms",
+    String(timeoutMs),
+    "--json",
   ];
+}
+
+// G-a: task-create 응답에서 runtime task id 파싱(방어적) -- ORCH 실측 형태:
+// 최상위 ok:true, result.task.id(예 task_80fa0dcac6c7), result.task.status="ready".
+// 형태 불일치·id 비어있음은 전부 실패로 취급(추측 채움 금지).
+export function parseRuntimeTaskId(response) {
+  if (!isPlainObject(response) || response.ok !== true) return null;
+  const task = isPlainObject(response.result) ? response.result.task : null;
+  const id = isPlainObject(task) ? task.id : null;
+  return isNonEmptyString(id) ? id : null;
 }
 
 // 화이트리스트 통과 + execFn 호출 + 예외/비-ok 응답을 지정된 reason으로 통일.
@@ -182,6 +215,17 @@ export function runGuardedStep(argv, opts, failReason, receipts, stepName) {
 
 // check --wait 응답의 outcome을 fail-closed로 분류. worker_done은 여기서는 *운반
 // 영수증*일 뿐이다 -- 완료 권위는 이어지는 checkRelayHandshake만이 준다(G6/G8).
+//
+// honesty (G-b 미구현 -- question_packet 필요, coder.md 참조): 패킷/태스크가 요구한
+// worker_done payload의 taskId/dispatchId 결속(이 스파이크가 만든 runtime id·발급한
+// dispatch id와 일치하는지 확인해 "떠도는 완료 신호"를 거부)은 여기 구현되지 않았다.
+// 이유: dispatch 응답과 check --wait --json 응답의 실제 메시지 봉투 형태(payload가
+// 어디에 어떤 키로 오는지)가 이 사이클에 한 번도 실측되지 않았다(task-create만
+// ORCH가 read-only 프로브로 실측함) -- 추측으로 채우면 "검증된 계약"이라는 이 러너의
+// honesty 전제를 어긴다. 실행은 여전히 fail-closed(outcome 미인식은 거부)이지만,
+// 이 결속이 빠진 채로는 동일 coordinator 인박스에 온 *다른* worker_done을 이 스파이크
+// 완료로 오인할 잔여 위험이 남는다 -- 완료 **권위**는 handshake뿐이라 그 위험은
+// handshake가 흡수하지만(G6/G8 불변), 구조 갭 G-b 자체는 이번 사이클에서 정지됨.
 function classifyCheckOutcome(response) {
   const outcome = isPlainObject(response) ? response.outcome : undefined;
   if (outcome === "worker_done") return { ok: true };
@@ -229,7 +273,7 @@ function runOrcaStages(inp, deps, receipts) {
     return stop(REASON.TASK_CREATE_FAILED, specResult.reason, receipts);
 
   const created = runGuardedStep(
-    buildTaskCreateCommand(specResult.spec, inp.task_id),
+    buildTaskCreateCommand(specResult.spec),
     deps,
     REASON.TASK_CREATE_FAILED,
     receipts,
@@ -238,8 +282,19 @@ function runOrcaStages(inp, deps, receipts) {
   if (!created.ok)
     return stop(REASON.TASK_CREATE_FAILED, created.reason, receipts);
 
+  // G-a: 하네스 task_id와 별개인 runtime task id를 응답에서 캡처 -- 이게 없으면
+  // dispatch를 나를 대상이 없다(구 버전은 이 자리에 하네스 task_id를 잘못 넣었다).
+  const runtimeTaskId = parseRuntimeTaskId(created.response);
+  if (!runtimeTaskId) {
+    return stop(
+      REASON.TASK_CREATE_FAILED,
+      "orca-spike-runner: TASK_CREATE_FAILED -- response.result.task.id missing/empty (runtime id required to dispatch, G-a)",
+      receipts,
+    );
+  }
+
   const dispatched = runGuardedStep(
-    buildDispatchCommand(inp.task_id, inp.terminalHandle),
+    buildDispatchCommand(runtimeTaskId, inp.terminalHandle),
     deps,
     REASON.DISPATCH_FAILED,
     receipts,
@@ -249,7 +304,7 @@ function runOrcaStages(inp, deps, receipts) {
     return stop(REASON.DISPATCH_FAILED, dispatched.reason, receipts);
 
   const checked = runGuardedStep(
-    buildCheckWaitCommand(inp.task_id, inp.timeoutS),
+    buildCheckWaitCommand(inp.coordinatorHandle, inp.timeoutMs),
     deps,
     REASON.CHECK_UNKNOWN_OUTCOME,
     receipts,
@@ -289,7 +344,12 @@ function runHandshakeStage(inp, receipts, nowFn) {
 // ---- 스파이크 1회 시도 (fail-closed, 자동 재시도 0) ----
 // input: {
 //   predispatch: checkPreDispatch(input, opts)에 그대로 넘길 payload
-//   task_id, terminalHandle, timeoutS
+//   task_id            -- 하네스 task_id(스파이크 spec `go <task_id>`용, runtime id 아님)
+//   terminalHandle     -- dispatch --to 대상(작업을 받는 worker 터미널)
+//   coordinatorHandle  -- check --terminal 대상(이 스파이크를 실행 중인 coordinator 자신의
+//                         인박스 -- terminalHandle과 별개 값. 사이클 1엔 없던 신규 필드)
+//   timeoutMs          -- check --timeout-ms에 그대로 감(사이클 1의 timeoutS 초 단위 폐기 --
+//                         실제 CLI 플래그가 ms 단위라 단위 착각 방지 위해 필드명 자체를 바꿈)
 //   handshake: { role, harnessDir } -- checkRelayHandshake({role, harnessDir})에 그대로 전달
 // }
 // opts: { execFn, nowFn }
