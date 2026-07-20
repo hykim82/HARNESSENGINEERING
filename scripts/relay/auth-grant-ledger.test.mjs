@@ -97,8 +97,20 @@ test("claimJtiTx: sequential second claim of the same (key_id,jti,grant_digest) 
 test("claimJtiTx: a different jti under the same key_id is an independent claim (not globally exhausted)", () => {
   const dir = freshDir();
   try {
-    const first = claimJtiTx({ ledgerDir: dir, keyId: KEY_ID, jti: "jti-a", grantDigest: GRANT_DIGEST, at: "t1" });
-    const second = claimJtiTx({ ledgerDir: dir, keyId: KEY_ID, jti: "jti-b", grantDigest: GRANT_DIGEST, at: "t2" });
+    const first = claimJtiTx({
+      ledgerDir: dir,
+      keyId: KEY_ID,
+      jti: "jti-a",
+      grantDigest: GRANT_DIGEST,
+      at: "t1",
+    });
+    const second = claimJtiTx({
+      ledgerDir: dir,
+      keyId: KEY_ID,
+      jti: "jti-b",
+      grantDigest: GRANT_DIGEST,
+      at: "t2",
+    });
     assert.equal(first.ok, true);
     assert.equal(second.ok, true);
   } finally {
@@ -121,7 +133,13 @@ test("claimJtiTx: grant 'copied' into a different arm context still hits the sam
     const claimFromContext = (ctx, at) =>
       // armContextX는 claimJtiTx에 전혀 전달되지 않는다 -- ledgerDir만 고정
       // 신뢰 config에서 온다는 설계를 시그니처 수준에서 증명한다.
-      claimJtiTx({ ledgerDir, keyId: KEY_ID, jti: JTI, grantDigest: GRANT_DIGEST, at });
+      claimJtiTx({
+        ledgerDir,
+        keyId: KEY_ID,
+        jti: JTI,
+        grantDigest: GRANT_DIGEST,
+        at,
+      });
     const first = claimFromContext(armContextA, "t1");
     const second = claimFromContext(armContextB, "t2");
     assert.equal(first.ok, true);
@@ -136,7 +154,13 @@ test("claimJtiTx: grant 'copied' into a different arm context still hits the sam
 
 test("claimJtiTx: ledgerDir missing/empty -> fail-closed reject", () => {
   for (const bad of [undefined, null, ""]) {
-    const result = claimJtiTx({ ledgerDir: bad, keyId: KEY_ID, jti: JTI, grantDigest: GRANT_DIGEST, at: "t1" });
+    const result = claimJtiTx({
+      ledgerDir: bad,
+      keyId: KEY_ID,
+      jti: JTI,
+      grantDigest: GRANT_DIGEST,
+      at: "t1",
+    });
     assert.equal(result.ok, false);
     assert.equal(result.claimed, false);
   }
@@ -144,7 +168,13 @@ test("claimJtiTx: ledgerDir missing/empty -> fail-closed reject", () => {
 
 test("claimJtiTx: keyId/jti/grantDigest missing -> fail-closed reject (never throws)", () => {
   for (const field of ["keyId", "jti", "grantDigest"]) {
-    const input = { ledgerDir: freshDir(), keyId: KEY_ID, jti: JTI, grantDigest: GRANT_DIGEST, at: "t1" };
+    const input = {
+      ledgerDir: freshDir(),
+      keyId: KEY_ID,
+      jti: JTI,
+      grantDigest: GRANT_DIGEST,
+      at: "t1",
+    };
     delete input[field];
     assert.doesNotThrow(() => {
       const result = claimJtiTx(input);
@@ -159,8 +189,18 @@ test("claimJtiTx: existsFn throwing surfaces as a fail-closed error, does not cr
   const dir = freshDir();
   try {
     const result = claimJtiTx(
-      { ledgerDir: dir, keyId: KEY_ID, jti: JTI, grantDigest: GRANT_DIGEST, at: "t1" },
-      { existsFn: () => { throw new Error("injected existsFn failure"); } },
+      {
+        ledgerDir: dir,
+        keyId: KEY_ID,
+        jti: JTI,
+        grantDigest: GRANT_DIGEST,
+        at: "t1",
+      },
+      {
+        existsFn: () => {
+          throw new Error("injected existsFn failure");
+        },
+      },
     );
     assert.equal(result.ok, false);
     assert.equal(result.claimed, false);
@@ -175,7 +215,8 @@ test("claimJtiTx: existsFn throwing surfaces as a fail-closed error, does not cr
 // G4-3의 전례를 그대로 재사용 -- claimInWorker 패턴 승계, JS 단일스레드 스케줄링
 // 우연이 아니라 실제 node:fs O_EXCL 경합으로 판가름나게 한다).
 // ---------------------------------------------------------------------------
-const LEDGER_MODULE_URL = new URL("./auth-grant-ledger.mjs", import.meta.url).href;
+const LEDGER_MODULE_URL = new URL("./auth-grant-ledger.mjs", import.meta.url)
+  .href;
 
 const BARRIER_WAIT_SRC = `
 function barrierWait(sab, total) {
@@ -242,13 +283,35 @@ test("claimJtiTx: real barrier-synchronized concurrent claim race (two worker th
   try {
     const barrierBuffer = new SharedArrayBuffer(4);
     const [a, b] = await Promise.all([
-      claimInWorker(dir, KEY_ID, "jti-race", GRANT_DIGEST, "t-race", barrierBuffer),
-      claimInWorker(dir, KEY_ID, "jti-race", GRANT_DIGEST, "t-race", barrierBuffer),
+      claimInWorker(
+        dir,
+        KEY_ID,
+        "jti-race",
+        GRANT_DIGEST,
+        "t-race",
+        barrierBuffer,
+      ),
+      claimInWorker(
+        dir,
+        KEY_ID,
+        "jti-race",
+        GRANT_DIGEST,
+        "t-race",
+        barrierBuffer,
+      ),
     ]);
     const wins = [a, b].filter((r) => r.claimed);
     const losers = [a, b].filter((r) => r.duplicate);
-    assert.equal(wins.length, 1, `expected exactly one winner, got ${JSON.stringify([a, b])}`);
-    assert.equal(losers.length, 1, `expected exactly one duplicate loser, got ${JSON.stringify([a, b])}`);
+    assert.equal(
+      wins.length,
+      1,
+      `expected exactly one winner, got ${JSON.stringify([a, b])}`,
+    );
+    assert.equal(
+      losers.length,
+      1,
+      `expected exactly one duplicate loser, got ${JSON.stringify([a, b])}`,
+    );
   } finally {
     cleanup(dir);
   }

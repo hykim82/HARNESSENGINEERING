@@ -53,7 +53,10 @@ function checkInputShape(signedTarget, expectedWorktree, observed) {
     );
   }
   if (!isPlainObject(observed)) {
-    return deny(LIVENESS_REASON.INPUT_INVALID, "observed must be a plain object");
+    return deny(
+      LIVENESS_REASON.INPUT_INVALID,
+      "observed must be a plain object",
+    );
   }
   return null;
 }
@@ -99,7 +102,10 @@ function checkAliveness(observed) {
 }
 
 function checkHandle(observed, signedTarget) {
-  if (!isNonEmptyString(observed.handle) || observed.handle !== signedTarget.handle) {
+  if (
+    !isNonEmptyString(observed.handle) ||
+    observed.handle !== signedTarget.handle
+  ) {
     return deny(
       LIVENESS_REASON.HANDLE_MISMATCH,
       `signed handle=${JSON.stringify(signedTarget.handle)}, observed=${JSON.stringify(observed.handle)}`,
@@ -122,7 +128,10 @@ function checkFingerprint(observed, signedTarget) {
 }
 
 function checkWorktree(observed, expectedWorktree) {
-  if (!isNonEmptyString(observed.worktree) || observed.worktree !== expectedWorktree) {
+  if (
+    !isNonEmptyString(observed.worktree) ||
+    observed.worktree !== expectedWorktree
+  ) {
     return deny(
       LIVENESS_REASON.WORKTREE_MISMATCH,
       `expected worktree=${JSON.stringify(expectedWorktree)}, observed=${JSON.stringify(observed.worktree)}`,
@@ -154,7 +163,11 @@ export function judgeLiveness(input) {
   // "observed 자체가 잘못된 타입"인 경우도 항상 통과해 버려 INPUT_INVALID가
   // 죽은 코드가 된다(관측시각 체크가 대신 잡아 SNAPSHOT_TIMESTAMP_INVALID를
   // 반환하는 오분류로 이어짐).
-  const shapeDenied = checkInputShape(signedTarget, inp.expectedWorktree, inp.observed);
+  const shapeDenied = checkInputShape(
+    signedTarget,
+    inp.expectedWorktree,
+    inp.observed,
+  );
   if (shapeDenied) return shapeDenied;
   const observed = inp.observed;
 

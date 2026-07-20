@@ -2,7 +2,10 @@ import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { createHash, createPrivateKey, createPublicKey } from "node:crypto";
 import { join } from "node:path";
 import { canonicalizeGrant } from "./auth-grant-canonical.mjs";
-import { sign as ed25519Sign, verify as ed25519Verify } from "./auth-grant-ed25519.mjs";
+import {
+  sign as ed25519Sign,
+  verify as ed25519Verify,
+} from "./auth-grant-ed25519.mjs";
 
 // HYK-163 사이클 2 (pm-2 §3.5): 봉인 세리모니 -- 사람이 `!`로 1회 실행해 canonical
 // grant에 실제 Ed25519 서명을 얹는 유일한 지점. **이 파일만 개인키를 읽는다**
@@ -59,10 +62,14 @@ function normalizeDeps(deps) {
   const d = isPlainObject(deps) ? deps : {};
   return {
     readFileFn:
-      typeof d.readFileFn === "function" ? d.readFileFn : (p) => readFileSync(p, "utf8"),
-    writeFileFn: typeof d.writeFileFn === "function" ? d.writeFileFn : writeFileSync,
+      typeof d.readFileFn === "function"
+        ? d.readFileFn
+        : (p) => readFileSync(p, "utf8"),
+    writeFileFn:
+      typeof d.writeFileFn === "function" ? d.writeFileFn : writeFileSync,
     existsFn: typeof d.existsFn === "function" ? d.existsFn : existsSync,
-    nowFn: typeof d.nowFn === "function" ? d.nowFn : () => new Date().toISOString(),
+    nowFn:
+      typeof d.nowFn === "function" ? d.nowFn : () => new Date().toISOString(),
     readlineFn:
       typeof d.readlineFn === "function"
         ? d.readlineFn
@@ -106,7 +113,11 @@ function buildSummary(canonicalFields, canonicalHash, expectedPhrase) {
 }
 
 function deriveConfirmationPhrase(fields) {
-  if (!isNonEmptyString(fields.arm_id) || !isNonEmptyString(fields.task_id) || !isNonEmptyString(fields.jti)) {
+  if (
+    !isNonEmptyString(fields.arm_id) ||
+    !isNonEmptyString(fields.task_id) ||
+    !isNonEmptyString(fields.jti)
+  ) {
     return null;
   }
   return `SEAL ${fields.arm_id} ${fields.task_id} ${fields.jti}`;
@@ -115,7 +126,9 @@ function deriveConfirmationPhrase(fields) {
 async function confirmHuman(canonicalFields, canonicalHash, deps) {
   const expectedPhrase = deriveConfirmationPhrase(canonicalFields);
   if (!expectedPhrase) {
-    return fail("could not derive human confirmation phrase from arm_id/task_id/jti");
+    return fail(
+      "could not derive human confirmation phrase from arm_id/task_id/jti",
+    );
   }
   const summary = buildSummary(canonicalFields, canonicalHash, expectedPhrase);
   const typed = await deps.readlineFn(summary);
@@ -127,23 +140,33 @@ async function confirmHuman(canonicalFields, canonicalHash, deps) {
   return { ok: true, expectedPhrase };
 }
 
-function loadAndCheckPrivateKey(privateKeyPath, expectedPinnedKeyFingerprint, deps) {
+function loadAndCheckPrivateKey(
+  privateKeyPath,
+  expectedPinnedKeyFingerprint,
+  deps,
+) {
   if (!isNonEmptyString(expectedPinnedKeyFingerprint)) {
     // pm-2 §3.5: 앵커 누락은 항상 DENY(workspace/로컬 파일이 스스로 신뢰 앵커가
     // 되는 TOFU를 원천 차단). 개인키를 읽기 **전에** 이 검사를 먼저 한다.
-    return fail("expectedPinnedKeyFingerprint is required (no TOFU on a local key file)");
+    return fail(
+      "expectedPinnedKeyFingerprint is required (no TOFU on a local key file)",
+    );
   }
   let privateKeyPem;
   try {
     privateKeyPem = deps.readFileFn(privateKeyPath);
   } catch (err) {
-    return fail(`cannot read private key at '${privateKeyPath}' (${errText(err)})`);
+    return fail(
+      `cannot read private key at '${privateKeyPath}' (${errText(err)})`,
+    );
   }
   let derived;
   try {
     derived = derivePublicKeyPem(privateKeyPem);
   } catch (err) {
-    return fail(`private key at '${privateKeyPath}' is not a usable Ed25519 key (${errText(err)})`);
+    return fail(
+      `private key at '${privateKeyPath}' is not a usable Ed25519 key (${errText(err)})`,
+    );
   }
   const actualFingerprint = sha256Hex(derived.publicKeyPem);
   if (actualFingerprint !== expectedPinnedKeyFingerprint) {
@@ -151,7 +174,11 @@ function loadAndCheckPrivateKey(privateKeyPath, expectedPinnedKeyFingerprint, de
       `private key's derived public key fingerprint ${actualFingerprint} does not match expectedPinnedKeyFingerprint ${expectedPinnedKeyFingerprint} -- refusing to sign with the wrong local key`,
     );
   }
-  return { ok: true, privateKey: derived.privateKey, publicKeyPem: derived.publicKeyPem };
+  return {
+    ok: true,
+    privateKey: derived.privateKey,
+    publicKeyPem: derived.publicKeyPem,
+  };
 }
 
 function writeSealedEnvelope(envelopePath, envelope, deps) {
@@ -167,10 +194,14 @@ function writeSealedEnvelope(envelopePath, envelope, deps) {
   try {
     reread = deps.readFileFn(envelopePath);
   } catch (err) {
-    return fail(`could not re-read sealed envelope after write (${errText(err)})`);
+    return fail(
+      `could not re-read sealed envelope after write (${errText(err)})`,
+    );
   }
   if (reread !== content) {
-    return fail("sealed envelope re-read mismatch after write -- refusing to report ARMED");
+    return fail(
+      "sealed envelope re-read mismatch after write -- refusing to report ARMED",
+    );
   }
   return { ok: true };
 }
@@ -193,19 +224,30 @@ export async function sealAuthGrant(opts) {
   const deps = normalizeDeps(o.deps);
 
   if (!isNonEmptyString(o.keyId)) return fail("keyId is required");
-  if (!isNonEmptyString(o.privateKeyPath)) return fail("privateKeyPath is required");
+  if (!isNonEmptyString(o.privateKeyPath))
+    return fail("privateKeyPath is required");
   if (!isNonEmptyString(o.outDir)) return fail("outDir is required");
 
   const canon = canonicalizeGrant(o.fields);
-  if (!canon.ok) return fail(`candidate grant fields invalid -- ${canon.reason}`);
+  if (!canon.ok)
+    return fail(`candidate grant fields invalid -- ${canon.reason}`);
   const canonicalHash = sha256Hex(canon.canonicalJson);
 
-  const keyCheck = loadAndCheckPrivateKey(o.privateKeyPath, o.expectedPinnedKeyFingerprint, deps);
+  const keyCheck = loadAndCheckPrivateKey(
+    o.privateKeyPath,
+    o.expectedPinnedKeyFingerprint,
+    deps,
+  );
   if (!keyCheck.ok) return keyCheck;
 
-  const envelopePath = join(o.outDir, `signed-grant-${canon.fields.arm_id}-${canon.fields.jti}.json`);
+  const envelopePath = join(
+    o.outDir,
+    `signed-grant-${canon.fields.arm_id}-${canon.fields.jti}.json`,
+  );
   if (deps.existsFn(envelopePath)) {
-    return fail(`refusing to overwrite existing sealed envelope '${envelopePath}' -- same arm_id/jti already sealed`);
+    return fail(
+      `refusing to overwrite existing sealed envelope '${envelopePath}' -- same arm_id/jti already sealed`,
+    );
   }
 
   const confirmed = await confirmHuman(canon.fields, canonicalHash, deps);
@@ -214,9 +256,15 @@ export async function sealAuthGrant(opts) {
   // 서명 직전 마지막 자기검증: 지금 만들 서명이 그 자리에서 바로 검증되는지
   // (개인키/공개키 페어가 실제로 대응하는지 다시 한번 실증 -- 부분 산출 방지).
   const signature = ed25519Sign(canon.canonicalBytes, keyCheck.privateKey);
-  const selfVerified = ed25519Verify(canon.canonicalBytes, signature, keyCheck.publicKeyPem);
+  const selfVerified = ed25519Verify(
+    canon.canonicalBytes,
+    signature,
+    keyCheck.publicKeyPem,
+  );
   if (!selfVerified) {
-    return fail("freshly-produced signature failed self-verification -- refusing to seal (no partial success)");
+    return fail(
+      "freshly-produced signature failed self-verification -- refusing to seal (no partial success)",
+    );
   }
 
   const envelope = {
@@ -237,20 +285,46 @@ export async function sealAuthGrant(opts) {
 // 존재하지만 이 사이클의 테스트/완료 절차는 이 경로를 실행하지 않는다.)
 const invokedDirectly =
   process.argv[1] &&
-  process.argv[1].replace(/\\/g, "/").endsWith("scripts/relay/auth-grant-seal.mjs");
+  process.argv[1]
+    .replace(/\\/g, "/")
+    .endsWith("scripts/relay/auth-grant-seal.mjs");
 if (invokedDirectly) {
-  const [fieldsPath, keyId, privateKeyPath, expectedPinnedKeyFingerprint, outDir] = process.argv.slice(2);
-  if (!fieldsPath || !keyId || !privateKeyPath || !expectedPinnedKeyFingerprint || !outDir) {
+  const [
+    fieldsPath,
+    keyId,
+    privateKeyPath,
+    expectedPinnedKeyFingerprint,
+    outDir,
+  ] = process.argv.slice(2);
+  if (
+    !fieldsPath ||
+    !keyId ||
+    !privateKeyPath ||
+    !expectedPinnedKeyFingerprint ||
+    !outDir
+  ) {
     console.error(
       "usage: node auth-grant-seal.mjs <fields.json> <keyId> <privateKeyPath> <expectedPinnedKeyFingerprint> <outDir>",
     );
     process.exit(1);
   }
   const fields = JSON.parse(readFileSync(fieldsPath, "utf8"));
-  const result = await sealAuthGrant({ fields, keyId, privateKeyPath, expectedPinnedKeyFingerprint, outDir });
+  const result = await sealAuthGrant({
+    fields,
+    keyId,
+    privateKeyPath,
+    expectedPinnedKeyFingerprint,
+    outDir,
+  });
   if (result.ok) {
     // 개인키·raw signature bytes는 절대 출력하지 않는다 -- 경로/해시만.
-    console.log(JSON.stringify({ ok: true, envelopePath: result.envelopePath, canonicalHash: result.canonicalHash }));
+    console.log(
+      JSON.stringify({
+        ok: true,
+        envelopePath: result.envelopePath,
+        canonicalHash: result.canonicalHash,
+      }),
+    );
     process.exit(0);
   }
   console.error(result.reason);

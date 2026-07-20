@@ -67,7 +67,9 @@ export const RUN_REASON = Object.freeze({
 });
 
 function grantDigestOf(fields) {
-  return createHash("sha256").update(canonicalStringify(fields), "utf8").digest("hex");
+  return createHash("sha256")
+    .update(canonicalStringify(fields), "utf8")
+    .digest("hex");
 }
 
 // gate + liveness + spec 3종을 한 번에 재확인하는 헬퍼 -- 1차·2차 재대조가
@@ -83,7 +85,13 @@ function preflight(inp, nowMs, observed, gateOpts, specDeps) {
     },
     gateOpts,
   );
-  if (!gateResult.ok) return { ok: false, stage: "gate", reason: gateResult.reason, detail: gateResult.detail };
+  if (!gateResult.ok)
+    return {
+      ok: false,
+      stage: "gate",
+      reason: gateResult.reason,
+      detail: gateResult.detail,
+    };
   const fields = gateResult.fields;
 
   const expected = isPlainObject(inp.expected) ? inp.expected : {};
@@ -95,7 +103,12 @@ function preflight(inp, nowMs, observed, gateOpts, specDeps) {
     maxSnapshotAgeMs: inp.liveness?.maxSnapshotAgeMs,
   });
   if (!livenessResult.ok) {
-    return { ok: false, stage: "liveness", reason: livenessResult.reason, detail: livenessResult.detail };
+    return {
+      ok: false,
+      stage: "liveness",
+      reason: livenessResult.reason,
+      detail: livenessResult.detail,
+    };
   }
 
   const specResult = verifySpec(inp.spec, inp.taskFilePath, {
@@ -103,7 +116,12 @@ function preflight(inp, nowMs, observed, gateOpts, specDeps) {
     expectedContentHash: inp.expectedContentHash,
   });
   if (!specResult.ok) {
-    return { ok: false, stage: "spec", reason: "SPEC_INVALID", detail: specResult.reason };
+    return {
+      ok: false,
+      stage: "spec",
+      reason: "SPEC_INVALID",
+      detail: specResult.reason,
+    };
   }
   if (specResult.task_id !== fields.task_id) {
     return {
@@ -125,15 +143,35 @@ function runReasonForStage(stage) {
 
 function safeCancelTx(armDir, armId, at, reason, armDeps) {
   try {
-    return cancelTx(armDir, armId, { at, reason, ...(isPlainObject(armDeps) ? armDeps : {}) });
+    return cancelTx(armDir, armId, {
+      at,
+      reason,
+      ...(isPlainObject(armDeps) ? armDeps : {}),
+    });
   } catch (err) {
-    return { ok: false, reason: `auth-dispatch-runner: cancelTx threw (${errText(err)})` };
+    return {
+      ok: false,
+      reason: `auth-dispatch-runner: cancelTx threw (${errText(err)})`,
+    };
   }
 }
 
 function terminalDeny(armDir, armId, reason, detail, at, armDeps) {
-  const armTerminal = safeCancelTx(armDir, armId, at, `${reason}: ${detail ?? ""}`, armDeps);
-  return { ok: false, dispatched: false, adapterCalled: false, reason, detail: detail ?? null, armTerminal };
+  const armTerminal = safeCancelTx(
+    armDir,
+    armId,
+    at,
+    `${reason}: ${detail ?? ""}`,
+    armDeps,
+  );
+  return {
+    ok: false,
+    dispatched: false,
+    adapterCalled: false,
+    reason,
+    detail: detail ?? null,
+    armTerminal,
+  };
 }
 
 function checkTrustedConfig(inp) {
@@ -142,6 +180,25 @@ function checkTrustedConfig(inp) {
     if (!isNonEmptyString(inp[name])) {
       return `'${name}' must be a non-empty string`;
     }
+  }
+  return null;
+}
+
+// runAuthDispatch 진입부의 두 구조적 전제(trusted config·adapter 형태)를 한
+// 헬퍼로 묶어 오케스트레이션 함수의 분기 수를 낮춘다.
+function checkRunnerPreconditions(inp) {
+  const configProblem = checkTrustedConfig(inp);
+  if (configProblem) {
+    return { reason: RUN_REASON.INPUT_INVALID, detail: configProblem };
+  }
+  if (
+    !isPlainObject(inp.adapter) ||
+    typeof inp.adapter.dispatch !== "function"
+  ) {
+    return {
+      reason: RUN_REASON.ADAPTER_INVALID,
+      detail: "adapter.dispatch must be a function",
+    };
   }
   return null;
 }
@@ -171,106 +228,109 @@ function buildSpawnFn(adapter, spec, outcome) {
   };
 }
 
-// runAuthDispatch(input, opts)
-//   input: { grantRaw, signature, pinnedPublicKeyPath, expected, nowMs, nowMs2,
-//            liveness:{observed, observed2, maxSnapshotAgeMs}, spec, taskFilePath,
-//            expectedContentHash, armDir, armId, cycleId, lane, attemptId,
-//            ledgerDir, adapter:{dispatch(spec)->{ok,...}}, at }
-//   opts:  { gatePinDeps, ledgerDeps, armDeps, specDeps }
-export function runAuthDispatch(input, opts) {
-  const inp = isPlainObject(input) ? input : {};
-  const o = isPlainObject(opts) ? opts : {};
-  const at = isNonEmptyString(inp.at) ? inp.at : null;
-  const { armDir, armId, cycleId, lane, ledgerDir, adapter } = inp;
+// 이하 4개 헬퍼는 runAuthDispatch의 각 단계를 하나씩 맡는다(오케스트레이션
+// 함수 자체의 길이/복잡도를 낮추기 위한 분리일 뿐, 순서·계약은 그대로다).
+// 각 헬퍼는 실패 시 `{ denied: <최종 반환값> }`을, 통과 시 단계별 산출물을 담은
+// 일반 객체를 반환한다.
 
-  const configProblem = checkTrustedConfig(inp);
-  if (configProblem) {
-    return terminalDeny(armDir, armId, RUN_REASON.INPUT_INVALID, configProblem, at, o.armDeps);
-  }
-  if (!isPlainObject(adapter) || typeof adapter.dispatch !== "function") {
-    return terminalDeny(
-      armDir,
-      armId,
-      RUN_REASON.ADAPTER_INVALID,
-      "adapter.dispatch must be a function",
-      at,
-      o.armDeps,
-    );
-  }
-
-  const gateOpts = { pinDeps: o.gatePinDeps };
-  const pass1 = preflight(inp, inp.nowMs, inp.liveness?.observed, gateOpts, o.specDeps);
-  if (!pass1.ok) {
-    return terminalDeny(armDir, armId, runReasonForStage(pass1.stage), pass1.detail ?? pass1.reason, at, o.armDeps);
-  }
-  const { fields } = pass1;
-
+function claimJtiOrDeny(inp, o, fields, at) {
   const grantDigest = grantDigestOf(fields);
   const keyId = isPlainObject(inp.grantRaw) ? inp.grantRaw.key_id : undefined;
   const jti = fields.jti;
-  const attemptId = isNonEmptyString(inp.attemptId) ? inp.attemptId : jti;
-
-  const ledgerResult = claimJtiTx({ ledgerDir, keyId, jti, grantDigest, at }, o.ledgerDeps);
+  const ledgerResult = claimJtiTx(
+    { ledgerDir: inp.ledgerDir, keyId, jti, grantDigest, at },
+    o.ledgerDeps,
+  );
   if (!ledgerResult.ok) {
-    const reason = ledgerResult.duplicate ? RUN_REASON.JTI_ALREADY_CLAIMED : RUN_REASON.JTI_CLAIM_FAILED;
-    return terminalDeny(armDir, armId, reason, ledgerResult.reason, at, o.armDeps);
+    const reason = ledgerResult.duplicate
+      ? RUN_REASON.JTI_ALREADY_CLAIMED
+      : RUN_REASON.JTI_CLAIM_FAILED;
+    return {
+      denied: terminalDeny(
+        inp.armDir,
+        inp.armId,
+        reason,
+        ledgerResult.reason,
+        at,
+        o.armDeps,
+      ),
+    };
   }
+  return { jti };
+}
 
+function claimArmOrDeny(inp, o, fields, attemptId, contentHash, at) {
   const armClaim = claimTx(
-    armDir,
-    armId,
+    inp.armDir,
+    inp.armId,
     {
       task_id: fields.task_id,
-      cycle_id: cycleId,
-      lane,
+      cycle_id: inp.cycleId,
+      lane: inp.lane,
       attempt_id: attemptId,
-      content_hash: pass1.specResult.content_hash,
+      content_hash: contentHash,
       at,
     },
     o.armDeps,
   );
   if (!armClaim.ok || armClaim.spawnAllowed !== true) {
     // jti는 이미 소비됨 -- 환불 없음(pm-2 §3.4). arm 쪽만 별도로 terminal disarm.
-    const armTerminal = safeCancelTx(armDir, armId, at, `${RUN_REASON.ARM_CLAIM_FAILED}: ${armClaim.reason}`, o.armDeps);
+    const armTerminal = safeCancelTx(
+      inp.armDir,
+      inp.armId,
+      at,
+      `${RUN_REASON.ARM_CLAIM_FAILED}: ${armClaim.reason}`,
+      o.armDeps,
+    );
     return {
-      ok: false,
-      dispatched: false,
-      adapterCalled: false,
-      reason: RUN_REASON.ARM_CLAIM_FAILED,
-      detail: armClaim.reason,
-      jtiConsumed: true,
-      armTerminal,
+      denied: {
+        ok: false,
+        dispatched: false,
+        adapterCalled: false,
+        reason: RUN_REASON.ARM_CLAIM_FAILED,
+        detail: armClaim.reason,
+        jtiConsumed: true,
+        armTerminal,
+      },
     };
   }
+  return {};
+}
 
-  // 2차 재대조(dispatch 직전) -- claim 뒤 실패해도 jti는 돌려주지 않는다.
+// 2차 재대조(dispatch 직전) -- claim 뒤 실패해도 jti는 돌려주지 않는다.
+function recheckOrDeny(inp, o, gateOpts, at) {
   const nowMs2 = Number.isSafeInteger(inp.nowMs2) ? inp.nowMs2 : inp.nowMs;
   const observed2 = inp.liveness?.observed2 ?? inp.liveness?.observed;
   const pass2 = preflight(inp, nowMs2, observed2, gateOpts, o.specDeps);
   if (!pass2.ok) {
     const armTerminal = safeCancelTx(
-      armDir,
-      armId,
+      inp.armDir,
+      inp.armId,
       at,
       `${RUN_REASON.PREFLIGHT_RECHECK_FAILED}: ${pass2.detail ?? pass2.reason}`,
       o.armDeps,
     );
     return {
-      ok: false,
-      dispatched: false,
-      adapterCalled: false,
-      reason: RUN_REASON.PREFLIGHT_RECHECK_FAILED,
-      detail: pass2.detail ?? pass2.reason,
-      jtiConsumed: true,
-      armTerminal,
+      denied: {
+        ok: false,
+        dispatched: false,
+        adapterCalled: false,
+        reason: RUN_REASON.PREFLIGHT_RECHECK_FAILED,
+        detail: pass2.detail ?? pass2.reason,
+        jtiConsumed: true,
+        armTerminal,
+      },
     };
   }
+  return {};
+}
 
+function startAndFinish(inp, o, fields, attemptId, at) {
   const dispatchOutcome = { called: false };
-  const spawnFn = buildSpawnFn(adapter, inp.spec, dispatchOutcome);
+  const spawnFn = buildSpawnFn(inp.adapter, inp.spec, dispatchOutcome);
   const startResult = startTx(
-    armDir,
-    armId,
+    inp.armDir,
+    inp.armId,
     { task_id: fields.task_id, attempt_id: attemptId, at },
     { ...(isPlainObject(o.armDeps) ? o.armDeps : {}), spawnFn },
   );
@@ -291,8 +351,8 @@ export function runAuthDispatch(input, opts) {
   }
 
   const finishResult = finishAttemptTx(
-    armDir,
-    armId,
+    inp.armDir,
+    inp.armId,
     {
       task_id: fields.task_id,
       attempt_id: attemptId,
@@ -312,6 +372,72 @@ export function runAuthDispatch(input, opts) {
     jtiConsumed: true,
     finishResult,
   };
+}
+
+// runAuthDispatch(input, opts)
+//   input: { grantRaw, signature, pinnedPublicKeyPath, expected, nowMs, nowMs2,
+//            liveness:{observed, observed2, maxSnapshotAgeMs}, spec, taskFilePath,
+//            expectedContentHash, armDir, armId, cycleId, lane, attemptId,
+//            ledgerDir, adapter:{dispatch(spec)->{ok,...}}, at }
+//   opts:  { gatePinDeps, ledgerDeps, armDeps, specDeps }
+export function runAuthDispatch(input, opts) {
+  const inp = isPlainObject(input) ? input : {};
+  const o = isPlainObject(opts) ? opts : {};
+  const at = isNonEmptyString(inp.at) ? inp.at : null;
+  const { armDir, armId } = inp;
+
+  const precondition = checkRunnerPreconditions(inp);
+  if (precondition) {
+    return terminalDeny(
+      armDir,
+      armId,
+      precondition.reason,
+      precondition.detail,
+      at,
+      o.armDeps,
+    );
+  }
+
+  const gateOpts = { pinDeps: o.gatePinDeps };
+  const pass1 = preflight(
+    inp,
+    inp.nowMs,
+    inp.liveness?.observed,
+    gateOpts,
+    o.specDeps,
+  );
+  if (!pass1.ok) {
+    return terminalDeny(
+      armDir,
+      armId,
+      runReasonForStage(pass1.stage),
+      pass1.detail ?? pass1.reason,
+      at,
+      o.armDeps,
+    );
+  }
+  const { fields } = pass1;
+  const attemptId = isNonEmptyString(inp.attemptId)
+    ? inp.attemptId
+    : fields.jti;
+
+  const ledgerStage = claimJtiOrDeny(inp, o, fields, at);
+  if (ledgerStage.denied) return ledgerStage.denied;
+
+  const armStage = claimArmOrDeny(
+    inp,
+    o,
+    fields,
+    attemptId,
+    pass1.specResult.content_hash,
+    at,
+  );
+  if (armStage.denied) return armStage.denied;
+
+  const recheckStage = recheckOrDeny(inp, o, gateOpts, at);
+  if (recheckStage.denied) return recheckStage.denied;
+
+  return startAndFinish(inp, o, fields, attemptId, at);
 }
 
 // crash 복구(C2-7): arm-state의 기존 no-respawn 의미론을 그대로 위임한다(재구현
