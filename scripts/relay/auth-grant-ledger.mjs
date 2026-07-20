@@ -1,0 +1,214 @@
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { join } from "node:path";
+import {
+  acquireArmMutex,
+  releaseArmMutex,
+  saveStoreAtomic,
+} from "./arm-state.mjs";
+
+// HYK-163 사이클 2 (C2-2/G5): signed jti 권위 원장 -- 재사용 범위는 pm-2 §3.4가
+// 자른 그대로다.
+//   재사용(arm-state.mjs에서 그대로 가져다 씀, 재구현 0): 배타 mutex 획득/해제
+//   (`acquireArmMutex`/`releaseArmMutex`, wx 마커 + O_EXCL 경합), tmp->rename
+//   원자 저장(`saveStoreAtomic`). 이 파일은 그 두 원자성 프리미티브 위에 새
+//   권위 키 스킴만 얹는다.
+//   새로 필요한 계약: 권위 소비키는 task_id가 아니라 `key_id+jti+grant_digest`
+//   composite다. 이 원장의 디렉터리(`ledgerDir`)는 **호출자가 trusted config로
+//   고정**해야 한다(grant 필드에서 유도 금지) -- 그래야 같은 grant를 복사해
+//   다른 "arm dir"에 넣어도(권위 원장 경로 자체가 grant 필드와 무관하므로)
+//   같은 composite key가 같은 고정 root의 같은 파일을 가리켜 두 번째 소비가
+//   막힌다.
+
+function isPlainObject(v) {
+  return v !== null && typeof v === "object" && !Array.isArray(v);
+}
+function isNonEmptyString(v) {
+  return typeof v === "string" && v.length > 0;
+}
+function errText(err) {
+  try {
+    if (err && typeof err === "object") {
+      const m = err.message;
+      if (typeof m === "string") return m;
+    }
+    return String(err);
+  } catch {
+    return "unknown error (message accessor threw)";
+  }
+}
+
+// 권위 소비키: key_id+jti+grant_digest를 하나의 식별자로 해시한다. 세 값 중
+// 하나만 달라도 다른 레코드가 된다(예: 같은 jti라도 다른 grant_digest면 다른
+// 서명 grant이므로 별개 취급 -- "같은 jti 문자열"이 아니라 "이 서명 grant가
+// 주장하는 이 jti"가 진짜 유일성 단위다).
+//
+// coder-3 (review-2 前 ORCH 적발분 봉합): 원래 NUL 바이트 구분자였다 --
+// 필드 내용으로는 위조 불가하다는 점은 맞지만, 파일에 실 NUL 바이트가 박히면
+// git이 **파일 전체**를 binary로 분류해(1~2바이트 때문에 이 파일의 모든 향후
+// 변경이 line diff 없이 "Bin N -> M bytes"로만 보임 -- 리뷰 가시성 실손실)
+// 이득보다 비용이 크다고 판단해 교체한다. `JSON.stringify([...])`는 배열
+// 원소마다 따옴표·이스케이프를 넣어 구분하므로 "ab"+"cd" 대 "a"+"bcd" 같은
+// concat 충돌이 원천적으로 불가능하다(각 원소가 유효 JSON 문자열 리터럴로
+// 인코딩되어 경계가 이스케이프로 보존됨) -- NUL과 동등한 위조 불가 속성을
+// 유지하면서 파일을 텍스트로 남긴다.
+export function ledgerRecordId(keyId, jti, grantDigest) {
+  if (
+    !isNonEmptyString(keyId) ||
+    !isNonEmptyString(jti) ||
+    !isNonEmptyString(grantDigest)
+  ) {
+    throw new TypeError(
+      "auth-grant-ledger: keyId/jti/grantDigest must be non-empty strings",
+    );
+  }
+  return createHash("sha256")
+    .update(JSON.stringify([keyId, jti, grantDigest]), "utf8")
+    .digest("hex");
+}
+
+function ledgerRecordPath(ledgerDir, recordId) {
+  return join(ledgerDir, `jti-${recordId}.ledger.json`);
+}
+
+function defaultMutexWrite(path, content) {
+  writeFileSync(path, content, { flag: "wx" });
+}
+
+function normalizeDeps(deps) {
+  const d = isPlainObject(deps) ? deps : {};
+  return {
+    existsFn: typeof d.existsFn === "function" ? d.existsFn : existsSync,
+    readFileFn:
+      typeof d.readFileFn === "function"
+        ? d.readFileFn
+        : (p) => readFileSync(p, "utf8"),
+    writeFn: typeof d.writeFn === "function" ? d.writeFn : defaultMutexWrite,
+  };
+}
+
+function underMutex(
+  ledgerDir,
+  recordId,
+  recordPath,
+  keyId,
+  jti,
+  grantDigest,
+  at,
+  deps,
+  saveDeps,
+) {
+  let exists;
+  try {
+    exists = deps.existsFn(recordPath);
+  } catch (err) {
+    return {
+      ok: false,
+      claimed: false,
+      reason: `auth-grant-ledger: existsFn threw (${errText(err)})`,
+    };
+  }
+  if (exists) {
+    let existingRecord = null;
+    try {
+      existingRecord = JSON.parse(deps.readFileFn(recordPath));
+    } catch {
+      // 감사 보조 정보일 뿐 -- 읽기 실패해도 duplicate 판정(아래)은 그대로 유지.
+    }
+    return {
+      ok: false,
+      claimed: false,
+      duplicate: true,
+      reason: `auth-grant-ledger: jti already consumed (record ${recordId})`,
+      record: existingRecord,
+    };
+  }
+  const record = {
+    schema_version: 1,
+    key_id: keyId,
+    jti,
+    grant_digest: grantDigest,
+    claimed_at: at ?? null,
+  };
+  const saved = saveStoreAtomic(recordPath, record, saveDeps);
+  if (!saved.ok) {
+    return {
+      ok: false,
+      claimed: false,
+      reason: `auth-grant-ledger: fail-closed -- ${saved.reason}`,
+    };
+  }
+  return { ok: true, claimed: true, record, path: recordPath };
+}
+
+// claimJtiTx({ ledgerDir, keyId, jti, grantDigest, at }, opts) -> exactly-once
+// claim. ledgerDir은 호출자(runner)의 trusted config에서만 온다 -- grant나
+// 다른 unverified 입력에서 유도하지 않는다(호출자 책임, 이 함수는 문자열
+// 그대로를 mutex/파일 경로로 쓴다). opts는 saveStoreAtomic에 그대로 전달(테스트
+// writeFileFn/renameFn 주입), opts.existsFn/readFileFn/writeFn은 mutex+존재검사용.
+export function claimJtiTx(input, opts) {
+  const inp = isPlainObject(input) ? input : {};
+  const { ledgerDir, keyId, jti, grantDigest, at } = inp;
+  if (!isNonEmptyString(ledgerDir)) {
+    return {
+      ok: false,
+      claimed: false,
+      reason: "auth-grant-ledger: ledgerDir must be a non-empty string",
+    };
+  }
+  const deps = normalizeDeps(opts);
+
+  let recordId;
+  try {
+    recordId = ledgerRecordId(keyId, jti, grantDigest);
+  } catch (err) {
+    return {
+      ok: false,
+      claimed: false,
+      reason: `auth-grant-ledger: ${errText(err)}`,
+    };
+  }
+  const recordPath = ledgerRecordPath(ledgerDir, recordId);
+
+  const mtx = acquireArmMutex(ledgerDir, recordId, deps);
+  if (!mtx.ok) {
+    return {
+      ok: false,
+      claimed: false,
+      reason: mtx.reason,
+      paused: mtx.paused === true,
+    };
+  }
+
+  let result;
+  try {
+    result = underMutex(
+      ledgerDir,
+      recordId,
+      recordPath,
+      keyId,
+      jti,
+      grantDigest,
+      at,
+      deps,
+      opts,
+    );
+  } catch (err) {
+    const rel = releaseArmMutex(mtx, deps);
+    return {
+      ok: false,
+      claimed: false,
+      reason: `auth-grant-ledger: transaction body threw (${errText(err)})`,
+      mutex_release_failed: rel.released === false,
+    };
+  }
+  const rel = releaseArmMutex(mtx, deps);
+  if (rel.released === false) {
+    return {
+      ...result,
+      mutex_release_failed: true,
+      mutex_release_reason: rel.reason,
+    };
+  }
+  return result;
+}
