@@ -68,6 +68,22 @@ function deny(reason, detail) {
   return { ok: false, reason, detail: detail ?? null };
 }
 
+// S1: authorization 결속 이후의 실패는 그 시점까지 관측된 데이터(원형 orca
+// 응답 dumps, 도달한 receipts, output_root, attemptId)를 실어 나른다 --
+// 결속 이전(argv 파싱·authorization/grant/packet 로드)의 deny()는 output_root
+// 자체를 모르므로 그대로 둔다(T5).
+function observedDeny(reason, detail, observed = {}) {
+  return {
+    ok: false,
+    reason,
+    detail: detail ?? null,
+    outputRoot: observed.outputRoot,
+    attemptId: observed.attemptId,
+    dumps: observed.dumps ?? [],
+    receipts: observed.receipts ?? [],
+  };
+}
+
 // ---- M2: CLI 자격 입력은 authorization 경로 하나뿐 ----
 // `--authorization <path>` 이외의 어떤 플래그도(--target/--arm-id/--human-
 // approval-ref/--coordinator/--output-dir 등) 받지 않는다 -- 발견되면 즉시
@@ -518,14 +534,20 @@ export function runLive(argv, opts = {}) {
   const bound = loadAndBindAuthorization(parsedArgv.authorizationPath, deps);
   if (!bound.ok) return bound;
   const { authorization, grant } = bound;
+  const attemptId = `${grant.arm_id}--live-attempt`;
 
   const preflight = checkPreflightExpiry(grant, deps);
-  if (preflight.failed) return preflight.failed;
+  if (preflight.failed) {
+    return observedDeny(preflight.failed.reason, preflight.failed.detail, {
+      outputRoot: grant.output_root,
+      attemptId,
+    });
+  }
 
   const ctx = {
     armDir: authorization.arm_store_dir,
     armId: grant.arm_id,
-    attemptId: `${grant.arm_id}--live-attempt`,
+    attemptId,
     grant,
     authorization,
     txDeps: buildTxDeps(deps),
@@ -548,19 +570,38 @@ export function runLive(argv, opts = {}) {
   }
 
   if (state.failure) {
-    return deny(state.failure.reason, state.failure.detail);
+    return observedDeny(state.failure.reason, state.failure.detail, {
+      outputRoot: grant.output_root,
+      attemptId,
+      dumps: rawExecFn.dumps,
+    });
   }
   if (!result.ok) {
-    return deny(
+    return observedDeny(
       REASON.ATTEMPT_FAILED,
       `${result.reason}${result.detail ? ` -- ${result.detail}` : ""}`,
+      {
+        outputRoot: grant.output_root,
+        attemptId,
+        dumps: rawExecFn.dumps,
+        receipts: result.receipts,
+      },
     );
   }
 
   // M7/M8 (honesty, verifyFreshHandshake 참고): 성공 선언 전 handshake 재확인.
   const freshHandshake = verifyFreshHandshake(grant);
   if (!freshHandshake.ok) {
-    return deny(REASON.HANDSHAKE_RECHECK_FAILED, freshHandshake.reason);
+    return observedDeny(
+      REASON.HANDSHAKE_RECHECK_FAILED,
+      freshHandshake.reason,
+      {
+        outputRoot: grant.output_root,
+        attemptId,
+        dumps: rawExecFn.dumps,
+        receipts: result.receipts,
+      },
+    );
   }
 
   return {
@@ -577,7 +618,7 @@ export function runLive(argv, opts = {}) {
 // ---- M9: authorization에서 파생된 output root 아래 receipts/raw dump를 새
 // 파일로만 남긴다(임의 --output-dir 없음 -- 오직 grant.output_root뿐).
 export function writeLiveOutputs(result, deps = {}) {
-  if (!result || !result.ok || !isNonEmptyString(result.outputRoot)) return;
+  if (!result || !isNonEmptyString(result.outputRoot)) return;
   const writeFileFn =
     typeof deps.writeFileFn === "function" ? deps.writeFileFn : writeFileSync;
   writeNewFileOnly(
@@ -590,6 +631,17 @@ export function writeLiveOutputs(result, deps = {}) {
     JSON.stringify(result.dumps ?? [], null, 2),
     writeFileFn,
   );
+  if (!result.ok) {
+    writeNewFileOnly(
+      join(result.outputRoot, `spike-live-failure-${result.attemptId}.json`),
+      JSON.stringify(
+        { ok: false, reason: result.reason, detail: result.detail ?? null },
+        null,
+        2,
+      ),
+      writeFileFn,
+    );
+  }
 }
 
 // ---- 실 orca execFn 어댑터 (변경 없음 -- M1~M10과 무관, 운반 계층) ----
@@ -717,6 +769,12 @@ if (invokedDirectly) {
   }
   const result = runLive(process.argv);
   writeLiveOutputs(result);
-  console.log(JSON.stringify({ ok: result.ok, reason: result.reason }));
+  console.log(
+    JSON.stringify({
+      ok: result.ok,
+      reason: result.reason,
+      detail: result.detail ?? null,
+    }),
+  );
   process.exit(result.ok ? 0 : 1);
 }
