@@ -635,6 +635,13 @@ test("(T4) known-bad: fresh handshake recheck fails though the attempt itself su
       dumped.map((d) => d.cmd),
       ["task-create", "dispatch", "check"],
     );
+    // raw orca response content (not just cmd/order) must survive to disk --
+    // this is the actual post-mortem evidence (07-20's ATTEMPT_FAILED had none).
+    assert.equal(dumped[0].parsed.result.task.id, "task_abc123");
+    assert.equal(dumped[1].parsed.ok, true);
+    assert.deepEqual(dumped[2].parsed.result.messages, [
+      { type: "worker_done" },
+    ]);
 
     const receipts = JSON.parse(readFileSync(receiptsPath, "utf8"));
     assert.deepEqual(
