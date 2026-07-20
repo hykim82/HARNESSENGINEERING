@@ -4,13 +4,15 @@ import { readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { checkPreDispatch } from "./orca-predispatch.mjs";
 import {
-  buildSyntheticFixture,
   createLiveExecFn,
   mapCheckResponse,
   writeRawDump,
   shouldRunLive,
-  DEFAULT_TASK_ID,
 } from "./orca-spike-live.mjs";
+import {
+  buildSyntheticFixture,
+  DEFAULT_TASK_ID,
+} from "./orca-spike-fixtures.mjs";
 
 const GOOD_OPTS = Object.freeze({
   human_approval_ref: "한용 2026-07-19 10:54",

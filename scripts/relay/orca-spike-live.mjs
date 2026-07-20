@@ -1,20 +1,31 @@
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync, writeFileSync, existsSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { join } from "node:path";
-import { createArmStore, armStorePath, hashContent } from "./arm-state.mjs";
-import { runSpikeAttempt, writeReceiptLedger } from "./orca-spike-runner.mjs";
+import {
+  claimTx,
+  startTx,
+  finishAttemptTx,
+  checkExpiryTx,
+} from "./arm-state.mjs";
+import { runSpikeAttempt } from "./orca-spike-runner.mjs";
+import { checkRelayHandshake } from "../check/relay-handshake.mjs";
 
-// HYK-162 사이클2 (coder-7, PKT-20260719-HYK162-ORCA-HYBRID-SPIKE §4): 러너
-// (orca-spike-runner.mjs, review-6 approved)를 실제 orca 바이너리에 잇는 라이브
-// 드라이버. **이 파일이 실 orca를 부르는 유일한 경로는 CLI 진입(맨 아래)뿐이고,
-// 그마저 명시적 `--live` 플래그 없이는 아무 것도 하지 않는다** -- 이 커밋 자체는
-// 발사가 아니다(review-7 S7 선행 필요, 이 태스크에서 실 orca 호출 0).
+// HYK-162 coder-8 (review-7 rejected 325df95의 수리, 보고서-pm2.md §4.4
+// M1~M10이 계약): 라이브 발사 경로 자격 결속 재구현.
 //
-// 어댑터가 하는 일은 딱 두 가지뿐이다: (1) orca stdout을 JSON으로 파싱해 그대로
-// 돌려주기(task-create/dispatch), (2) check 응답만 러너가 기대하는 outcome 어휘로
-// 변환하기. 그 외 판단(화이트리스트·predispatch·완료 권위)은 전부 러너·predispatch
-// 소유 -- 여기서 재구현하지 않는다.
+// review-7이 잡은 결함: 이전 `runLive`는 개별 CLI 플래그(--human-approval-ref,
+// --arm-id, --cycle-id, --target 등)로 자기 자신이 packet/arm/task를 합성하고
+// (`buildSyntheticFixture`), request와 expected(채점 기준)를 같은 CLI 값에서
+// 조립했다 -- "발사 자격의 자기대조". 이 파일은 그 두 값의 근원을 완전히
+// 분리한다: 라이브가 받는 유일한 자격 입력은 `arm-seal.mjs`가 만든 sealed
+// authorization 파일 하나의 경로뿐이고(M2), request/expected는 오직 그
+// authorization에서 파생된 canonical grant 봉투에서만 파생된다(M4). CLI
+// 개별 플래그로 이 값들을 재정의할 방법은 없다.
+//
+// **이 파일이 실 orca를 부르는 유일한 경로는 CLI 진입(맨 아래)뿐이고, 그마저
+// 명시적 `--live` 플래그 없이는 아무 것도 하지 않는다** -- 이 커밋 자체는
+// 발사가 아니다(review-8 선행 필요, 이 태스크에서 실 orca 호출 0).
 
 function isPlainObject(v) {
   return v !== null && typeof v === "object" && !Array.isArray(v);
@@ -33,171 +44,555 @@ function errText(err) {
     return "unknown error (message accessor threw)";
   }
 }
+function sha256(text) {
+  return createHash("sha256").update(text, "utf8").digest("hex");
+}
 
-export const DEFAULT_TASK_ID = "SPIKE-LIVE-1";
+export const REASON = Object.freeze({
+  CLI_SHAPE_INVALID: "CLI_SHAPE_INVALID",
+  AUTHORIZATION_UNREADABLE: "AUTHORIZATION_UNREADABLE",
+  GRANT_UNREADABLE: "GRANT_UNREADABLE",
+  GRANT_AUTHORIZATION_MISMATCH: "GRANT_AUTHORIZATION_MISMATCH",
+  GRANT_FINGERPRINT_CORRUPT: "GRANT_FINGERPRINT_CORRUPT",
+  PACKET_MISMATCH: "PACKET_MISMATCH",
+  EXPIRED: "EXPIRED",
+  CLAIM_REFUSED: "CLAIM_REFUSED",
+  START_REFUSED: "START_REFUSED",
+  DISPATCH_RECHECK_FAILED: "DISPATCH_RECHECK_FAILED",
+  ATTEMPT_FAILED: "ATTEMPT_FAILED",
+  HANDSHAKE_RECHECK_FAILED: "HANDSHAKE_RECHECK_FAILED",
+  COMPLETE: "COMPLETE",
+});
 
-// ---- ① 합성 입력 구성 (실 .harness·실 arm 원장 절대 안 건드림 -- 전부 임시 디렉토리) ----
-// opts: {
-//   human_approval_ref, arm_id, cycle_id  -- grant/request 양쪽에 동일 주입
-//   issued_at, expires_at                 -- ISO 문자열(발사 시각 + 여유, 호출자가 계산해 넘김)
-//   target                                -- dispatch --to 받을 worker 터미널 handle
-//   role                                  -- 기본 "CODER"
-//   nowMs                                 -- predispatch 판정 시각(만료 재현용)
-// }
-// deps(테스트 주입용, 생략 시 실제 fs): { mkdtempFn, mkdirFn, writeFileFn }
-const REQUIRED_FIXTURE_FIELDS = [
-  "human_approval_ref",
-  "arm_id",
-  "cycle_id",
-  "issued_at",
-  "expires_at",
-  "target",
-];
+function deny(reason, detail) {
+  return { ok: false, reason, detail: detail ?? null };
+}
 
-function missingFixtureField(o) {
-  for (const f of REQUIRED_FIXTURE_FIELDS) {
-    if (!isNonEmptyString(o[f])) return f;
+// ---- M2: CLI 자격 입력은 authorization 경로 하나뿐 ----
+// `--authorization <path>` 이외의 어떤 플래그도(--target/--arm-id/--human-
+// approval-ref/--coordinator/--output-dir 등) 받지 않는다 -- 발견되면 즉시
+// 거부한다(개별 자격 오버라이드 채널 원천 봉쇄).
+export function parseLiveArgv(argv) {
+  const a = Array.isArray(argv) ? argv : [];
+  const idx = a.indexOf("--authorization");
+  if (idx < 0 || idx + 1 >= a.length) {
+    return deny(
+      REASON.CLI_SHAPE_INVALID,
+      "orca-spike-live: --authorization <path> is required (the only permitted credential input, M2)",
+    );
+  }
+  const allowed = new Set(["--live", "--authorization", a[idx + 1]]);
+  for (const tok of a) {
+    if (tok.startsWith("--") && !allowed.has(tok)) {
+      return deny(
+        REASON.CLI_SHAPE_INVALID,
+        `orca-spike-live: unrecognized flag '${tok}' -- individual credential flags are forbidden (M2); only --authorization <path> is accepted`,
+      );
+    }
+  }
+  return { ok: true, authorizationPath: a[idx + 1] };
+}
+
+function defaultDeps(overrides = {}) {
+  return {
+    readFileFn:
+      typeof overrides.readFileFn === "function"
+        ? overrides.readFileFn
+        : (p) => readFileSync(p, "utf8"),
+    writeFileFn:
+      typeof overrides.writeFileFn === "function"
+        ? overrides.writeFileFn
+        : writeFileSync,
+    existsFn:
+      typeof overrides.existsFn === "function"
+        ? overrides.existsFn
+        : existsSync,
+    renameFn:
+      typeof overrides.renameFn === "function" ? overrides.renameFn : undefined,
+    writeFn:
+      typeof overrides.writeFn === "function" ? overrides.writeFn : undefined,
+    readFn:
+      typeof overrides.readFn === "function" ? overrides.readFn : undefined,
+    nowFn:
+      typeof overrides.nowFn === "function"
+        ? overrides.nowFn
+        : () => new Date().toISOString(),
+    spawnSyncFn:
+      typeof overrides.spawnSyncFn === "function"
+        ? overrides.spawnSyncFn
+        : spawnSync,
+  };
+}
+
+function readJsonFile(path, deps, unreadableReason, invalidReason) {
+  let raw;
+  try {
+    raw = deps.readFileFn(path);
+  } catch (err) {
+    return {
+      ok: false,
+      reason: deny(unreadableReason, `${path}: ${errText(err)}`),
+    };
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err) {
+    return {
+      ok: false,
+      reason: deny(invalidReason, `${path}: ${errText(err)}`),
+    };
+  }
+  if (!isPlainObject(parsed)) {
+    return {
+      ok: false,
+      reason: deny(invalidReason, `${path}: not a JSON object`),
+    };
+  }
+  return { ok: true, raw, parsed };
+}
+
+// M4: authorization(불변, 유일한 CLI 자격 입력)이 grant 파일의 정확한
+// SHA-256(grant_sha256)을 sealing 시점에 증언해뒀다 -- grant는 authorization
+// **이후에** 생성될 수 없으므로(순서상 grant가 먼저 쓰이고 authorization이
+// grant_sha256을 담아 나중에 봉인된다), 이 대조가 "sealing 이후 누군가 grant
+// 파일만 따로 수정했는가"를 잡는 유일한 방어선이다. request/expected를 전부
+// grant에서 파생시켜도(자기대조처럼 보일 수 있으나) grant 자체가 authorization
+// 이 증언한 해시와 다르면 request/expected가 무엇이든 여기서 이미 거부된다.
+function verifyGrantBinding(authorization, grant, grantRaw) {
+  const grantHash = sha256(grantRaw);
+  if (grantHash !== authorization.grant_sha256) {
+    return deny(
+      REASON.GRANT_AUTHORIZATION_MISMATCH,
+      `orca-spike-live: grant envelope SHA-256 ${grantHash} != authorization's sealed grant_sha256 ${authorization.grant_sha256} -- grant tampered after sealing`,
+    );
+  }
+  if (grant.addendum_sha256 !== authorization.addendum_sha256) {
+    return deny(
+      REASON.GRANT_AUTHORIZATION_MISMATCH,
+      "orca-spike-live: grant.addendum_sha256 != authorization.addendum_sha256 -- grant/authorization sealed from different addenda",
+    );
+  }
+  // target fingerprint 자기정합성(구성요소로 재계산 -- grant 파일 통째 변조는
+  // 위 grant_sha256 재계산으로 이미 잡히지만, 이 재계산은 grant 생성 로직
+  // 자체의 정합성도 별도로 증명한다).
+  const recomputedFingerprint = sha256(
+    [
+      authorization.target_terminal_handle,
+      authorization.target_snapshot_sha256,
+      authorization.target_repo_or_cwd,
+      authorization.target_worktree_identity,
+    ].join("|"),
+  );
+  if (
+    grant.target_fingerprint !== recomputedFingerprint ||
+    authorization.target_fingerprint !== recomputedFingerprint
+  ) {
+    return deny(
+      REASON.GRANT_FINGERPRINT_CORRUPT,
+      "orca-spike-live: target_fingerprint does not match its own recorded components",
+    );
+  }
+  return { ok: true };
+}
+
+// M3: packet id/hash를 다시 대조 -- 실행 시점에 packet 파일이 sealing 이후
+// 바뀌었거나 다른 signed packet으로 교체됐으면 거부한다(단일 SHA-256 대조가
+// 서명자/시각을 포함한 내용 전체를 커버한다 -- 한 글자 변경도 잡는다).
+function verifyPacketBinding(authorization, deps) {
+  let packetContent;
+  try {
+    packetContent = deps.readFileFn(authorization.packet_path);
+  } catch (err) {
+    return deny(
+      REASON.PACKET_MISMATCH,
+      `orca-spike-live: cannot read packet '${authorization.packet_path}' (${errText(err)})`,
+    );
+  }
+  const actualPacketHash = sha256(packetContent).toUpperCase();
+  if (actualPacketHash !== String(authorization.packet_sha256).toUpperCase()) {
+    return deny(
+      REASON.PACKET_MISMATCH,
+      `orca-spike-live: packet SHA-256 at launch time (${actualPacketHash}) != authorization's sealed hash (${authorization.packet_sha256}) -- different/tampered packet`,
+    );
+  }
+  return { ok: true };
+}
+
+// ---- M3/M4: authorization + grant 봉투 읽기·결속 대조(오케스트레이션만) ----
+function loadAndBindAuthorization(authorizationPath, deps) {
+  const authRead = readJsonFile(
+    authorizationPath,
+    deps,
+    REASON.AUTHORIZATION_UNREADABLE,
+    REASON.AUTHORIZATION_UNREADABLE,
+  );
+  if (!authRead.ok) return authRead.reason;
+  const authorization = authRead.parsed;
+  if (!isNonEmptyString(authorization.grant_path)) {
+    return deny(
+      REASON.AUTHORIZATION_UNREADABLE,
+      "orca-spike-live: authorization missing grant_path",
+    );
+  }
+
+  const grantRead = readJsonFile(
+    authorization.grant_path,
+    deps,
+    REASON.GRANT_UNREADABLE,
+    REASON.GRANT_UNREADABLE,
+  );
+  if (!grantRead.ok) return grantRead.reason;
+  const grant = grantRead.parsed;
+
+  const bindingCheck = verifyGrantBinding(authorization, grant, grantRead.raw);
+  if (!bindingCheck.ok) return bindingCheck;
+
+  const packetCheck = verifyPacketBinding(authorization, deps);
+  if (!packetCheck.ok) return packetCheck;
+
+  return {
+    ok: true,
+    authorization,
+    grant,
+    authorizationHash: sha256(authRead.raw),
+    grantRaw: grantRead.raw,
+  };
+}
+
+function taskDescriptor(grant, attemptId, atIso) {
+  return {
+    task_id: grant.task_id,
+    cycle_id: grant.cycle_id,
+    lane: grant.role,
+    attempt_id: attemptId,
+    content_hash: grant.task_hash,
+    at: atIso,
+  };
+}
+
+// ---- M9: create-new-only 출력 ----
+function writeNewFileOnly(path, content, writeFileFn) {
+  writeFileFn(path, content, { flag: "wx" });
+}
+
+// ---- M5: 첫 execFn 호출(=task-create 직전)에서만 원자 claim+start ----
+// 기존 arm-state claim/start 트랜잭션을 재사용한다(새 경합 로직 자작 금지).
+// spawnFn은 no-op(실제 orca 호출은 execFn 체인이 한다 -- arm-state의
+// spawnFn 훅으로 이중 호출하지 않는다). null 반환 = 계속 진행, 객체 반환 =
+// 그 사유로 즉시 중단(첫 real orca 호출 전이므로 task-create 자체가 0회).
+function performClaimAndStart(ctx) {
+  const { armDir, armId, attemptId, grant, txDeps, deps } = ctx;
+  const atIso = deps.nowFn();
+  const claimResult = claimTx(
+    armDir,
+    armId,
+    taskDescriptor(grant, attemptId, atIso),
+    txDeps,
+  );
+  if (!claimResult.ok || claimResult.spawnAllowed !== true) {
+    return { reason: REASON.CLAIM_REFUSED, detail: claimResult.reason };
+  }
+  const startResult = startTx(
+    armDir,
+    armId,
+    { task_id: grant.task_id, attempt_id: attemptId, at: atIso },
+    { ...txDeps, spawnFn: () => {} },
+  );
+  if (!startResult.ok || startResult.spawned !== true) {
+    return { reason: REASON.START_REFUSED, detail: startResult.reason };
   }
   return null;
 }
 
-function resolveFixtureDeps(deps) {
-  return {
-    mkdtempFn:
-      typeof deps.mkdtempFn === "function" ? deps.mkdtempFn : mkdtempSync,
-    mkdirFn: typeof deps.mkdirFn === "function" ? deps.mkdirFn : mkdirSync,
-    writeFileFn:
-      typeof deps.writeFileFn === "function" ? deps.writeFileFn : writeFileSync,
-  };
-}
-
-// arm store 생성 + 디스크 기록까지 한 단계로 묶는다(buildSyntheticFixture 라인수 절감용
-// 분리 -- 의미상 독립 책임이기도 하다: grant 구성은 여기, 조립은 호출부).
-function writeSyntheticArmStore(dir, o, writeFileFn) {
-  const grant = {
-    arm_id: o.arm_id,
-    cycle_id: o.cycle_id,
-    human_approval_ref: o.human_approval_ref,
-    issued_at: o.issued_at,
-    expires_at: o.expires_at,
-    allowed_lanes: ["CODER"],
-    allowed_task_ids: [DEFAULT_TASK_ID],
-    max_starts_total: 1,
-    max_starts_per_lane: 1,
-    max_rejections: 3,
-    publish_allowed: false,
-    question_policy: "pause",
-    error_policy: "pause",
-  };
-  const created = createArmStore(grant, { at: o.issued_at });
-  if (!created.ok) {
-    return {
-      ok: false,
-      reason: `orca-spike-live: createArmStore refused -- ${created.reason}`,
-    };
-  }
-  const storePath = armStorePath(dir, o.arm_id);
-  writeFileFn(storePath, JSON.stringify(created.store), "utf8");
-  return { ok: true, storePath };
-}
-
-export function buildSyntheticFixture(opts, deps = {}) {
-  const o = isPlainObject(opts) ? opts : {};
-  const { mkdtempFn, mkdirFn, writeFileFn } = resolveFixtureDeps(deps);
-
-  const missing = missingFixtureField(o);
-  if (missing) {
-    return {
-      ok: false,
-      reason: `orca-spike-live: buildSyntheticFixture requires non-empty string opts.${missing}`,
-    };
-  }
-  const role = isNonEmptyString(o.role) ? o.role : "CODER";
-  const nowMs = Number.isSafeInteger(o.nowMs)
-    ? o.nowMs
-    : Date.parse(o.issued_at);
-
-  const dir = mkdtempFn(join(tmpdir(), "orca-spike-live-"));
-
-  const packetPath = join(dir, "packet.md");
-  writeFileFn(
-    packetPath,
-    `packet_id: PKT-LIVE-1\n승인: OK ${o.human_approval_ref}\n`,
-    "utf8",
+function disarmMidFlight(ctx, detailReason) {
+  const { armDir, armId, grant, attemptId, deps, txDeps } = ctx;
+  finishAttemptTx(
+    armDir,
+    armId,
+    {
+      task_id: grant.task_id,
+      attempt_id: attemptId,
+      at: deps.nowFn(),
+      outcome: "error",
+      detail: { reason: detailReason },
+    },
+    txDeps,
   );
+}
 
-  const armResult = writeSyntheticArmStore(dir, o, writeFileFn);
-  if (!armResult.ok) return armResult;
+// ---- M6: task-create 뒤, dispatch 직전 재검사(만료 + grant/task 파일 불변성 --
+// target fingerprint/task hash는 grant 파일에 들어있으므로 grant 파일 전체
+// 재해시 비교가 그 값들의 변경도 함께 잡는다). null 반환 = dispatch 진행 허용.
+function performDispatchRecheck(ctx) {
+  const { armDir, armId, grant, deps, txDeps, boundGrantRaw } = ctx;
+  const expiryRecheck = checkExpiryTx(
+    armDir,
+    armId,
+    txDeps.nowFn,
+    deps.nowFn(),
+    txDeps,
+  );
+  if (!expiryRecheck.ok || expiryRecheck.expired) {
+    return {
+      reason: REASON.DISPATCH_RECHECK_FAILED,
+      detail: `expired before dispatch (${expiryRecheck.reason ?? "expired"})`,
+    };
+  }
+  let freshGrantRaw;
+  try {
+    freshGrantRaw = deps.readFileFn(ctx.authorization.grant_path);
+  } catch {
+    freshGrantRaw = null;
+  }
+  if (freshGrantRaw !== boundGrantRaw) {
+    disarmMidFlight(ctx, "grant envelope changed mid-flight");
+    return {
+      reason: REASON.DISPATCH_RECHECK_FAILED,
+      detail: "grant envelope changed between task-create and dispatch",
+    };
+  }
+  let freshTaskContent;
+  try {
+    freshTaskContent = deps.readFileFn(grant.task_file_path);
+  } catch {
+    freshTaskContent = null;
+  }
+  if (
+    freshTaskContent === null ||
+    sha256(freshTaskContent) !== grant.task_hash
+  ) {
+    disarmMidFlight(ctx, "task content changed mid-flight");
+    return {
+      reason: REASON.DISPATCH_RECHECK_FAILED,
+      detail: "task content changed between task-create and dispatch",
+    };
+  }
+  return null;
+}
 
-  const taskContent = buildSyntheticTaskContent(o.issued_at);
-  const taskFilePath = join(dir, "spike-live-task.md");
-  writeFileFn(taskFilePath, taskContent, "utf8");
-  const content_hash = hashContent(taskContent);
+// ---- M10: claim/start가 실제로 성공했던 시도만 finishAttemptTx로 종결
+// (RUNNING -> terminal -> DISARMED). predispatch 단계에서 이미 거부된 경우
+// (claim 시도조차 없었던 경우)는 store가 ARMED 그대로다 -- arm-state 스스로의
+// claim() 로직이 다음 시도에서도 동일 검증을 반복한다.
+function concludeAttempt(ctx, result) {
+  const { armDir, armId, grant, attemptId, deps, txDeps } = ctx;
+  const outcome = result.ok
+    ? "done"
+    : result.reason === "CHECK_ESCALATION"
+      ? "question"
+      : "error";
+  finishAttemptTx(
+    armDir,
+    armId,
+    {
+      task_id: grant.task_id,
+      attempt_id: attemptId,
+      at: deps.nowFn(),
+      outcome,
+      detail: { reason: result.reason },
+    },
+    txDeps,
+  );
+}
 
-  const harnessDir = join(dir, "harness");
-  mkdirFn(harnessDir, { recursive: true });
+// ---- M7/M8 (honesty, 정직 한계): worker_done payload의 taskId/dispatchId
+// 실제 키 위치는 라이브 미실측이다(orca-spike-runner.mjs의 G-b 주석과 동일
+// 근거 -- task-create 응답만 ORCH가 read-only로 실측했고, dispatch 응답/
+// check --wait 메시지 envelope의 taskId/dispatchId 필드 위치는 확인되지
+// 않았다). 이 함수는 그 미확인 필드를 추측으로 매핑하지 않는다. 대신 완료
+// 권위는 오직 checkRelayHandshake(파일 결속, 확인된 계약)에만 있고, 여기서는
+// runSpikeAttempt가 이미 ok:true를 반환한 뒤에도 handshake를 다시 한 번
+// 재확인한다 -- 미확인 스키마 경로는 성공 선언 없이 PAUSED로 수렴해야 한다는
+// 인수 조건을 지킨다.
+function verifyFreshHandshake(grant) {
+  return checkRelayHandshake({
+    role: grant.role,
+    harnessDir: grant.harness_dir,
+  });
+}
 
-  const request = {
-    human_approval_ref: o.human_approval_ref,
-    arm_id: o.arm_id,
-    cycle_id: o.cycle_id,
-    task_id: DEFAULT_TASK_ID,
-    content_hash,
-    target: o.target,
-    role,
+// ---- 라이브 1회 시도 ----
+// opts.deps: 테스트 주입용(readFileFn/writeFileFn/existsFn/renameFn/writeFn/
+// readFn/nowFn/spawnSyncFn). 생략 시 실제 fs/시계/spawnSync.
+function buildTxDeps(deps) {
+  return {
+    readFileFn: deps.readFileFn,
+    writeFileFn: deps.writeFileFn,
+    existsFn: deps.existsFn,
+    renameFn: deps.renameFn,
+    writeFn: deps.writeFn,
+    readFn: deps.readFn,
+    // arm-state's safeNow requires a safe-integer ms clock -- derive it from
+    // the injected ISO nowFn so tests can control expiry deterministically
+    // (M6/A7: nowFn returning increasing timestamps across calls).
+    nowFn: () => Date.parse(deps.nowFn()),
   };
+}
+
+function checkPreflightExpiry(grant, deps) {
+  const preNowMs = Date.parse(deps.nowFn());
+  if (
+    !Number.isSafeInteger(preNowMs) ||
+    preNowMs > Date.parse(grant.expires_at)
+  ) {
+    return {
+      failed: deny(
+        REASON.EXPIRED,
+        `orca-spike-live: authorization already expired at pre-flight (expires_at=${grant.expires_at})`,
+      ),
+    };
+  }
+  return { preNowMs };
+}
+
+// M5/M6 gate wrapped around the raw orca execFn: claim+start happens lazily
+// on the very first call (task-create, before any real spawn); the dispatch
+// recheck happens on the call whose argv names "dispatch". `state` carries
+// the claimed/failure flags back out to the caller (closures can't return
+// two things at once without an object).
+function makeWrappedExecFn(ctx, rawExecFn, state) {
+  return function wrappedExecFn(commandArgv) {
+    if (!state.claimed) {
+      state.claimed = true;
+      const failure = performClaimAndStart(ctx);
+      if (failure) {
+        state.failure = failure;
+        return {
+          ok: false,
+          reason: `orca-spike-live: ${failure.reason} -- ${failure.detail}`,
+        };
+      }
+    } else if (Array.isArray(commandArgv) && commandArgv[1] === "dispatch") {
+      const failure = performDispatchRecheck(ctx);
+      if (failure) {
+        state.failure = failure;
+        return {
+          ok: false,
+          reason: `orca-spike-live: ${failure.reason} -- ${failure.detail}`,
+        };
+      }
+    }
+    return rawExecFn(commandArgv);
+  };
+}
+
+function buildAttemptInput(ctx, preNowMs) {
+  const { armDir, armId, authorization, grant } = ctx;
+  const request = {
+    human_approval_ref: grant.human_approval_ref,
+    arm_id: grant.arm_id,
+    cycle_id: grant.cycle_id,
+    task_id: grant.task_id,
+    content_hash: grant.task_hash,
+    target: grant.target_handle,
+    role: grant.role,
+  };
+  return {
+    predispatch: {
+      armDir,
+      arm_id: armId,
+      packetPath: authorization.packet_path,
+      taskFilePath: grant.task_file_path,
+      nowMs: preNowMs,
+      request,
+      // M4: expected는 CLI가 아니라 오직 grant에서만 파생된다 -- request와
+      // 같은 근원(grant)에서 나오지만, 그 근원 자체가 authorization_hash로
+      // 결속된 불변 봉투이므로 임의 호출자가 둘 다 조작할 수 없다.
+      expected: { target: grant.target_handle, role: grant.role },
+    },
+    task_id: grant.task_id,
+    terminalHandle: grant.target_handle,
+    coordinatorHandle: grant.coordinator_handle,
+    timeoutMs: grant.timeout_ms,
+    handshake: { role: grant.role, harnessDir: grant.harness_dir },
+  };
+}
+
+export function runLive(argv, opts = {}) {
+  const deps = defaultDeps(opts.deps);
+
+  const parsedArgv = parseLiveArgv(argv);
+  if (!parsedArgv.ok) return parsedArgv;
+
+  const bound = loadAndBindAuthorization(parsedArgv.authorizationPath, deps);
+  if (!bound.ok) return bound;
+  const { authorization, grant } = bound;
+
+  const preflight = checkPreflightExpiry(grant, deps);
+  if (preflight.failed) return preflight.failed;
+
+  const ctx = {
+    armDir: authorization.arm_store_dir,
+    armId: grant.arm_id,
+    attemptId: `${grant.arm_id}--live-attempt`,
+    grant,
+    authorization,
+    txDeps: buildTxDeps(deps),
+    deps,
+    boundGrantRaw: bound.grantRaw,
+  };
+
+  const state = { claimed: false, failure: null };
+  const rawExecFn = createLiveExecFn({ spawnSyncFn: deps.spawnSyncFn });
+  const wrappedExecFn = makeWrappedExecFn(ctx, rawExecFn, state);
+
+  const result = runSpikeAttempt(buildAttemptInput(ctx, preflight.preNowMs), {
+    execFn: wrappedExecFn,
+    nowFn: deps.nowFn,
+  });
+
+  // M10: claim/start가 실제로 성공했던 시도만 종결(concludeAttempt 참고).
+  if (state.claimed && state.failure === null) {
+    concludeAttempt(ctx, result);
+  }
+
+  if (state.failure) {
+    return deny(state.failure.reason, state.failure.detail);
+  }
+  if (!result.ok) {
+    return deny(
+      REASON.ATTEMPT_FAILED,
+      `${result.reason}${result.detail ? ` -- ${result.detail}` : ""}`,
+    );
+  }
+
+  // M7/M8 (honesty, verifyFreshHandshake 참고): 성공 선언 전 handshake 재확인.
+  const freshHandshake = verifyFreshHandshake(grant);
+  if (!freshHandshake.ok) {
+    return deny(REASON.HANDSHAKE_RECHECK_FAILED, freshHandshake.reason);
+  }
 
   return {
     ok: true,
-    dir,
-    packetPath,
-    storePath: armResult.storePath,
-    taskFilePath,
-    harnessDir,
-    task_id: DEFAULT_TASK_ID,
-    predispatch: {
-      packetPath,
-      armDir: dir,
-      arm_id: o.arm_id,
-      taskFilePath,
-      nowMs,
-      request,
-      expected: { target: o.target, role },
-    },
+    reason: REASON.COMPLETE,
+    receipts: result.receipts,
+    dumps: rawExecFn.dumps,
+    outputRoot: grant.output_root,
+    armId: ctx.armId,
+    attemptId: ctx.attemptId,
   };
 }
 
-// 합성 워커 지시(패킷 §5: 시크릿·작업전문·개인정보 금지) -- 자족적: 워커가 이 문서
-// 하나만으로 정확히 3가지만 하도록 지시한다. taskId/dispatchId는 이 시점(task-create
-// 이전)엔 존재하지 않으므로, worker_done 전송 시 그 값을 채우는 건 Orca의 주입
-// preamble이 이미 하는 일에 맡긴다(이 문서는 그 값을 강제로 지어내지 않는다).
-function buildSyntheticTaskContent(issuedAtIso) {
-  const droppedAtKst = isoToKstLabel(issuedAtIso);
-  return [
-    `task_id: ${DEFAULT_TASK_ID}`,
-    `dropped_at: ${droppedAtKst}`,
-    "",
-    "Orca 라이브 스파이크 합성 지시 (HYK-162 사이클2, 관찰 전용 -- 이 문서 하나로 자족).",
-    "당신은 다음 세 가지만 정확히 수행하고, 그 외 어떤 행동도 하지 않는다:",
-    "1. 이 작업 디렉토리의 `spike-live-result.md` 파일에 정확히 한 줄을 기록한다:",
-    "   `>>> DONE: spike @ <실제 완료 시각, YYYY-MM-DD HH:MM KST>`",
-    "2. Orca 주입 preamble이 안내하는 방식으로 worker_done을 정확히 1회 전송한다",
-    "   (preamble이 제공하는 taskId/dispatchId를 그대로 사용 -- 임의로 지어내지 않는다).",
-    "3. 그 외의 파일 읽기·쓰기·명령 실행·질문·에스컬레이션·시크릿/개인정보/작업전문",
-    "   포함은 전부 금지.",
-    "",
-  ].join("\n");
+// ---- M9: authorization에서 파생된 output root 아래 receipts/raw dump를 새
+// 파일로만 남긴다(임의 --output-dir 없음 -- 오직 grant.output_root뿐).
+export function writeLiveOutputs(result, deps = {}) {
+  if (!result || !result.ok || !isNonEmptyString(result.outputRoot)) return;
+  const writeFileFn =
+    typeof deps.writeFileFn === "function" ? deps.writeFileFn : writeFileSync;
+  writeNewFileOnly(
+    join(result.outputRoot, `spike-live-receipts-${result.attemptId}.json`),
+    JSON.stringify(result.receipts ?? [], null, 2),
+    writeFileFn,
+  );
+  writeNewFileOnly(
+    join(result.outputRoot, `spike-live-raw-dump-${result.attemptId}.json`),
+    JSON.stringify(result.dumps ?? [], null, 2),
+    writeFileFn,
+  );
 }
 
-function isoToKstLabel(iso) {
-  const ms = Date.parse(iso);
-  if (Number.isNaN(ms)) return iso;
-  const kst = new Date(ms + 9 * 60 * 60 * 1000);
-  const pad = (n) => String(n).padStart(2, "0");
-  return `${kst.getUTCFullYear()}-${pad(kst.getUTCMonth() + 1)}-${pad(kst.getUTCDate())} ${pad(kst.getUTCHours())}:${pad(kst.getUTCMinutes())} KST`;
-}
-
-// ---- ② 실 orca execFn 어댑터 ----
+// ---- 실 orca execFn 어댑터 (변경 없음 -- M1~M10과 무관, 운반 계층) ----
 // check --wait --json의 실제 응답 형태(관찰, dry-run): { ok, result: { messages: [...],
 // count } } -- 러너의 classifyCheckOutcome은 {outcome} 어휘(worker_done/escalation/timeout)를
 // 기대하므로 여기서만 변환한다. task-create/dispatch는 원형(parsed JSON) 그대로 반환 --
@@ -205,8 +600,11 @@ function isoToKstLabel(iso) {
 //
 // honesty: message.type 위치는 dry-run 관찰(`--type worker_done`으로 전송하므로 응답도
 // 대칭적으로 `message.type`일 것이라는 추정)일 뿐, 실제 라이브 1회 실행에서 확정되지
-// 않았다. 라이브 최초 실행 후 이 가정이 틀렸다면 이 함수만 국소 수리하면 된다(러너·
-// predispatch는 무관).
+// 않았다. 이 추정이 틀렸다면 outcome은 미인식 타입으로 수렴해 timeout으로 분류되고
+// (아래 fail-closed), 그 경우 완료는 오직 handshake 재확인 실패로 PAUSED에 머문다 --
+// worker_done의 taskId/dispatchId 정확한 위치(M7/M8이 참조하는 "실측 전 매핑 금지"
+// 대상)도 이 함수가 확정하지 않는다. 라이브 최초 실행 후 이 가정이 틀렸다면 이
+// 함수만 국소 수리하면 된다(러너·predispatch는 무관).
 export function mapCheckResponse(parsed) {
   if (!isPlainObject(parsed) || parsed.ok !== true) {
     return {
@@ -234,8 +632,6 @@ export function mapCheckResponse(parsed) {
   return { ok: true, outcome, raw: parsed };
 }
 
-// raw spawnSync 결과를 안전 필드로 정규화(claude-adapter.mjs의 raw.error 판별 전례
-// 동형 -- error가 있고 signal·status가 둘 다 null이면 프로세스가 아예 못 뜬 것).
 function normalizeSpawnResult(raw) {
   const isObj = isPlainObject(raw);
   return {
@@ -249,8 +645,6 @@ function normalizeSpawnResult(raw) {
   };
 }
 
-// stdout을 JSON으로 파싱(spawnError가 이미 있으면 시도조차 하지 않음 -- 프로세스가
-// 못 뜬 경우 stdout은 애초에 의미 없는 빈 문자열이다).
 function parseStdoutJson(stdout, spawnError) {
   if (spawnError) return { parsed: null, parseError: null };
   try {
@@ -260,9 +654,6 @@ function parseStdoutJson(stdout, spawnError) {
   }
 }
 
-// spawnSyncFn 주입(claude-adapter.mjs 전례와 동형 -- shell:false, encoding:utf8, 명시 인자만).
-// dumps: task-create/dispatch/check 각 단계의 실제 stdout/stderr/parsed 원형을 **매핑
-// 성공 여부와 무관하게 항상** 기록한다(G-b 관찰 정본).
 export function createLiveExecFn({ spawnSyncFn = spawnSync } = {}) {
   const dumps = [];
   function execFn(argv) {
@@ -300,63 +691,16 @@ export function createLiveExecFn({ spawnSyncFn = spawnSync } = {}) {
   return execFn;
 }
 
-// ---- ③ 원형 응답 덤프 저장(사람 판독용) ----
-export function writeRawDump(path, dumps) {
-  writeFileSync(path, JSON.stringify(dumps, null, 2), "utf8");
+// ---- 원형 응답 덤프 저장(사람 판독용, M9: 새 파일로만) ----
+export function writeRawDump(path, dumps, deps = {}) {
+  const writeFileFn =
+    typeof deps.writeFileFn === "function" ? deps.writeFileFn : writeFileSync;
+  writeNewFileOnly(path, JSON.stringify(dumps, null, 2), writeFileFn);
 }
 
 // ---- CLI (실 orca 호출은 여기뿐 -- --live 플래그 없으면 아무 것도 안 함) ----
-// 오발사 방지: invokedDirectly가 참이어도 shouldRunLive(argv)가 거짓이면 즉시 종료.
 export function shouldRunLive(argv) {
   return Array.isArray(argv) && argv.includes("--live");
-}
-
-function flagValue(argv, name) {
-  const idx = argv.indexOf(name);
-  return idx >= 0 && idx + 1 < argv.length ? argv[idx + 1] : undefined;
-}
-
-// 이번 사이클엔 절대 호출되지 않는다(테스트는 이 함수를 부르지 않고, CLI 진입은
-// invokedDirectly && --live 둘 다 참이어야 도달 -- 이 실행에선 --live를 주지 않았다).
-// review-7 승인 후 별도 발사 런북에서 `--live`와 함께 실행될 때만 실 orca를 부른다.
-export function runLive(argv) {
-  const nowIso = new Date().toISOString();
-  const fixture = buildSyntheticFixture({
-    human_approval_ref: flagValue(argv, "--human-approval-ref"),
-    arm_id: flagValue(argv, "--arm-id"),
-    cycle_id: flagValue(argv, "--cycle-id"),
-    issued_at: nowIso,
-    expires_at: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
-    target: flagValue(argv, "--target"),
-    role: "CODER",
-  });
-  if (!fixture.ok) {
-    console.error(fixture.reason);
-    return 1;
-  }
-
-  const execFn = createLiveExecFn();
-  const result = runSpikeAttempt(
-    {
-      predispatch: fixture.predispatch,
-      task_id: fixture.task_id,
-      terminalHandle: flagValue(argv, "--target"),
-      coordinatorHandle: flagValue(argv, "--coordinator"),
-      timeoutMs: Number(flagValue(argv, "--timeout-ms") ?? "60000"),
-      handshake: { role: "spike-live", harnessDir: fixture.harnessDir },
-    },
-    { execFn, nowFn: () => new Date().toISOString() },
-  );
-
-  const outDir = flagValue(argv, "--output-dir") ?? fixture.dir;
-  writeReceiptLedger(
-    join(outDir, "spike-live-receipts.json"),
-    result.receipts ?? [],
-  );
-  writeRawDump(join(outDir, "spike-live-raw-dump.json"), execFn.dumps);
-
-  console.log(JSON.stringify({ ok: result.ok, reason: result.reason, outDir }));
-  return result.ok ? 0 : 1;
 }
 
 const invokedDirectly =
@@ -367,9 +711,12 @@ const invokedDirectly =
 if (invokedDirectly) {
   if (!shouldRunLive(process.argv)) {
     console.error(
-      "orca-spike-live: --live 플래그 없이는 실행하지 않는다(오발사 방지). 실제 발사는 review-7(S7) 승인 + ORCH·사람 참관 하에서만, 이 사이클엔 호출되지 않는다.",
+      "orca-spike-live: --live 플래그 없이는 실행하지 않는다(오발사 방지). 실제 발사는 review-8 승인 + arm-seal 실행 + 사람 참관 하에서만, 이 커밋엔 호출되지 않는다.",
     );
     process.exit(1);
   }
-  process.exit(runLive(process.argv));
+  const result = runLive(process.argv);
+  writeLiveOutputs(result);
+  console.log(JSON.stringify({ ok: result.ok, reason: result.reason }));
+  process.exit(result.ok ? 0 : 1);
 }
