@@ -52,6 +52,7 @@ export const REASON = Object.freeze({
   PIN_UNAVAILABLE: "PIN_UNAVAILABLE",
   KEY_UNKNOWN: "KEY_UNKNOWN",
   KEY_REVOKED: "KEY_REVOKED",
+  PINNED_FINGERPRINT_REQUIRED: "PINNED_FINGERPRINT_REQUIRED",
   PIN_MISMATCH: "PIN_MISMATCH",
   SIGNATURE_MISSING: "SIGNATURE_MISSING",
   SIGNATURE_INVALID: "SIGNATURE_INVALID",
@@ -59,6 +60,7 @@ export const REASON = Object.freeze({
   ARM_ID_MISMATCH: "ARM_ID_MISMATCH",
   CYCLE_ID_MISMATCH: "CYCLE_ID_MISMATCH",
   TARGET_MISMATCH: "TARGET_MISMATCH",
+  AGENT_INSTANCE_MISMATCH: "AGENT_INSTANCE_MISMATCH",
   AUDIENCE_MISMATCH: "AUDIENCE_MISMATCH",
   CHANNEL_MISMATCH: "CHANNEL_MISMATCH",
   EXPIRED: "EXPIRED",
@@ -129,10 +131,19 @@ function checkKey(grantRaw, expected, pinnedPublicKeyPath, pinDeps) {
       ),
     };
   }
-  if (
-    isNonEmptyString(expected.pinned_key_fingerprint) &&
-    expected.pinned_key_fingerprint !== key.fingerprint
-  ) {
+  // 사이클2 (pm-2 §3.5): 외부 expected.pinned_key_fingerprint는 **필수 입력**이다.
+  // 누락을 허용하면 workspace의 `.harness/` 공개 manifest 자체가 신뢰 앵커처럼
+  // 오인될 수 있다(TOFU 재도입) -- anchor 미제공은 항상 DENY, PIN_MISMATCH와
+  // distinct reason(누락 vs 불일치는 서로 다른 사고다).
+  if (!isNonEmptyString(expected.pinned_key_fingerprint)) {
+    return {
+      denied: deny(
+        REASON.PINNED_FINGERPRINT_REQUIRED,
+        "expected.pinned_key_fingerprint is required (workspace manifest alone is never a trust anchor)",
+      ),
+    };
+  }
+  if (expected.pinned_key_fingerprint !== key.fingerprint) {
     return {
       denied: deny(
         REASON.PIN_MISMATCH,
@@ -222,6 +233,19 @@ function checkTargetBinding(fields, expected) {
     return deny(
       REASON.TARGET_MISMATCH,
       `expected target ${JSON.stringify(et)}, grant has {handle:${JSON.stringify(fields.target.handle)}, fingerprint:${JSON.stringify(fields.target.fingerprint)}}`,
+    );
+  }
+  // 사이클2 (C2-1/G2): 사이클1은 agent_instance를 canonical 결속(서명)만 했고
+  // expected와의 실대조는 하지 않았다 -- 여기서 그 결속 확장을 닫는다(변경/누락
+  // 전건 DENY). 이 대조 자체는 "지금 살아있는가"(liveness)를 증명하지 않는다
+  // -- 그건 auth-grant-liveness.mjs 몫이다.
+  if (
+    !isNonEmptyString(et.agent_instance) ||
+    fields.target.agent_instance !== et.agent_instance
+  ) {
+    return deny(
+      REASON.AGENT_INSTANCE_MISMATCH,
+      `expected target.agent_instance=${JSON.stringify(et.agent_instance)}, grant has ${JSON.stringify(fields.target.agent_instance)}`,
     );
   }
   return null;
@@ -314,5 +338,8 @@ export function verifyAuthGrant(input, opts) {
     })();
   if (denied) return denied;
 
-  return { ok: true, reason: REASON.ALLOW, detail: null };
+  // fields를 ALLOW 결과에 실어 보낸다(사이클2 발신 runner가 jti/task_id 등을
+  // 재-canonicalize 없이 재사용하도록 -- 결정적 순수 함수라 재계산해도 동일한
+  // 값이지만, 이중 호출을 피해 단일 진실 소스를 유지한다).
+  return { ok: true, reason: REASON.ALLOW, detail: null, fields };
 }

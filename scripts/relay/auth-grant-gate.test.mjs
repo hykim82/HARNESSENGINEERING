@@ -56,6 +56,14 @@ const GOOD_FIELDS = Object.freeze({
 });
 
 const IN_WINDOW_NOW = Date.parse("2026-07-20T12:00:00.000Z");
+
+// 사이클2 (pm-2 §3.5): expected.pinned_key_fingerprint가 필수화됐으므로, 대부분의
+// 테스트가 공유하는 "good" key는 모듈 로드 시점(=테스트 시점)에 한 번 생성하는
+// 임시 키쌍으로 고정한다(M1 -- 실 배포키 아님). 이 지문을 EXPECTED에 실어
+// goodFixture()가 만드는 pin manifest와 항상 정합시킨다.
+const GOOD_SIGNER = generateKeyPairSync("ed25519");
+const GOOD_SIGNER_FINGERPRINT = sha256(pem(GOOD_SIGNER.publicKey, "public"));
+
 const EXPECTED = Object.freeze({
   schema_version: 1,
   policy_version: 1,
@@ -65,9 +73,11 @@ const EXPECTED = Object.freeze({
   target: Object.freeze({
     handle: GOOD_FIELDS.target.handle,
     fingerprint: GOOD_FIELDS.target.fingerprint,
+    agent_instance: GOOD_FIELDS.target.agent_instance,
   }),
   audience: GOOD_FIELDS.audience,
   channel: GOOD_FIELDS.channel,
+  pinned_key_fingerprint: GOOD_SIGNER_FINGERPRINT,
 });
 
 function writePin(dir, entries) {
@@ -90,19 +100,19 @@ function signedEnvelope(fields, signerPrivateKey, keyId) {
   };
 }
 
-// 표준 known-good fixture: signer 키쌍 하나, pin에 그 키만 active로 등록.
+// 표준 known-good fixture: 공유 GOOD_SIGNER를 pin에 유일 active 키로 등록해
+// EXPECTED.pinned_key_fingerprint와 항상 정합하는 상태를 만든다.
 function goodFixture(dir, fieldOverrides = {}) {
-  const signer = generateKeyPairSync("ed25519");
   const pinPath = writePin(dir, [
     {
       key_id: "k-good",
-      public_key_pem: pem(signer.publicKey, "public"),
+      public_key_pem: pem(GOOD_SIGNER.publicKey, "public"),
       status: "active",
     },
   ]);
   const fields = { ...GOOD_FIELDS, ...fieldOverrides };
-  const env = signedEnvelope(fields, signer.privateKey, "k-good");
-  return { pinPath, signer, ...env };
+  const env = signedEnvelope(fields, GOOD_SIGNER.privateKey, "k-good");
+  return { pinPath, signer: GOOD_SIGNER, ...env };
 }
 
 test("verifyAuthGrant: known-good grant -> ALLOW", () => {
@@ -136,7 +146,13 @@ test("verifyAuthGrant: signature made with a different (wrong) key -> DENY SIGNA
     const result = verifyAuthGrant({
       ...env,
       pinnedPublicKeyPath: pinPath,
-      expected: EXPECTED,
+      // pin manifest에 실제 등록된 키(genuineSigner)의 지문을 앵커로 써야
+      // PINNED_FINGERPRINT 단계를 통과하고 서명 검증까지 도달한다 -- 이 테스트의
+      // 목적은 신호 자체(SIGNATURE_INVALID)이지 앵커 불일치가 아니다.
+      expected: {
+        ...EXPECTED,
+        pinned_key_fingerprint: sha256(pem(genuineSigner.publicKey, "public")),
+      },
       nowMs: IN_WINDOW_NOW,
     });
     assert.equal(result.ok, false);
@@ -293,9 +309,29 @@ test("verifyAuthGrant: expected task_id/arm_id/cycle_id/target/audience/channel 
           target: {
             handle: "other-terminal",
             fingerprint: EXPECTED.target.fingerprint,
+            agent_instance: EXPECTED.target.agent_instance,
           },
         },
         REASON.TARGET_MISMATCH,
+      ],
+      [
+        {
+          target: {
+            handle: EXPECTED.target.handle,
+            fingerprint: EXPECTED.target.fingerprint,
+            agent_instance: "other-agent-instance",
+          },
+        },
+        REASON.AGENT_INSTANCE_MISMATCH,
+      ],
+      [
+        {
+          target: {
+            handle: EXPECTED.target.handle,
+            fingerprint: EXPECTED.target.fingerprint,
+          },
+        },
+        REASON.AGENT_INSTANCE_MISMATCH,
       ],
       [{ audience: "OTHER" }, REASON.AUDIENCE_MISMATCH],
       [{ channel: "other-channel" }, REASON.CHANNEL_MISMATCH],
@@ -411,15 +447,14 @@ const FIELD_MUTATIONS = [
 for (const [label, mutate, expectedReason] of FIELD_MUTATIONS) {
   test(`verifyAuthGrant: canonical field '${label}' tampered post-signing -> DENY ${expectedReason}`, () => {
     withTempDir((dir) => {
-      const signer = generateKeyPairSync("ed25519");
       const pinPath = writePin(dir, [
         {
           key_id: "k-good",
-          public_key_pem: pem(signer.publicKey, "public"),
+          public_key_pem: pem(GOOD_SIGNER.publicKey, "public"),
           status: "active",
         },
       ]);
-      const env = signedEnvelope(GOOD_FIELDS, signer.privateKey, "k-good");
+      const env = signedEnvelope(GOOD_FIELDS, GOOD_SIGNER.privateKey, "k-good");
       const tamperedGrantRaw = mutate(env.grantRaw);
       const result = verifyAuthGrant({
         grantRaw: tamperedGrantRaw,
@@ -433,6 +468,38 @@ for (const [label, mutate, expectedReason] of FIELD_MUTATIONS) {
     });
   });
 }
+
+test("verifyAuthGrant: expected.pinned_key_fingerprint missing -> DENY PINNED_FINGERPRINT_REQUIRED (no TOFU on workspace manifest)", () => {
+  withTempDir((dir) => {
+    const { grantRaw, signature, pinPath } = goodFixture(dir);
+    const { pinned_key_fingerprint, ...expectedWithoutAnchor } = EXPECTED;
+    void pinned_key_fingerprint;
+    const result = verifyAuthGrant({
+      grantRaw,
+      signature,
+      pinnedPublicKeyPath: pinPath,
+      expected: expectedWithoutAnchor,
+      nowMs: IN_WINDOW_NOW,
+    });
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, REASON.PINNED_FINGERPRINT_REQUIRED);
+  });
+});
+
+test("verifyAuthGrant: expected.pinned_key_fingerprint empty string -> DENY PINNED_FINGERPRINT_REQUIRED", () => {
+  withTempDir((dir) => {
+    const { grantRaw, signature, pinPath } = goodFixture(dir);
+    const result = verifyAuthGrant({
+      grantRaw,
+      signature,
+      pinnedPublicKeyPath: pinPath,
+      expected: { ...EXPECTED, pinned_key_fingerprint: "" },
+      nowMs: IN_WINDOW_NOW,
+    });
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, REASON.PINNED_FINGERPRINT_REQUIRED);
+  });
+});
 
 test("verifyAuthGrant: grantRaw.key_id missing -> DENY KEY_ID_MISSING", () => {
   withTempDir((dir) => {
