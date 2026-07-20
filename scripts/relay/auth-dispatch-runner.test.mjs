@@ -284,14 +284,20 @@ test("runAuthDispatch: invalid signature (G8 negative control) -> GATE_DENIED, a
   });
 });
 
-test("runAuthDispatch: single side-effect seam -- source calls adapter.dispatch exactly once (outside comments)", () => {
+test("runAuthDispatch: single side-effect seam -- source calls adapter.dispatch exactly once (outside comments, LF and CRLF alike)", () => {
   const src = readFileSync(
     new URL("./auth-dispatch-runner.mjs", import.meta.url),
     "utf8",
   );
-  // 주석 안의 언급(설계 설명)은 실제 호출부가 아니므로 //-라인 주석을 제거한 뒤
-  // 코드 본문에서만 호출 지점 개수를 센다.
-  const codeOnly = src
+  // review-2 반려분 수리(coder-4): git checkout이 CRLF로 변환하면(이 repo의
+  // .gitattributes 기본 동작) 각 split 라인이 `\r`로 끝난다. `/\/\/.*$/`는
+  // `.`가 라인종료문자(\r 포함)를 매칭하지 않으므로 그 `$`가 trailing `\r`
+  // 뒤(진짜 문자열 끝)에서만 성립해 매치 자체가 실패 -- 주석이 안 지워진 채
+  // 남아 CRLF 체크아웃(=CI)에서만 위양성 카운트 2가 나왔다(LF 작업트리에선
+  // 은폐됨). `\r\n`을 먼저 `\n`으로 정규화해 line-ending에 완전히 무관하게
+  // 만든다 -- G8 단일 seam 자체의 검증 강도는 그대로, 위양성만 제거.
+  const normalized = src.replace(/\r\n/g, "\n");
+  const codeOnly = normalized
     .split("\n")
     .map((line) => line.replace(/\/\/.*$/, ""))
     .join("\n");
@@ -300,6 +306,44 @@ test("runAuthDispatch: single side-effect seam -- source calls adapter.dispatch 
     matches.length,
     1,
     "exactly one call site to adapter.dispatch() proves there is no separate raw-dispatch bypass seam",
+  );
+});
+
+// [line-ending 반사실] 같은 소스를 CRLF로 강제 변환해도 여전히 정확히 1이어야
+// 한다 -- 위 정규화가 실제로 CRLF를 처리하는지 이 테스트 파일 자체의 로컬
+// checkout 상태와 무관하게 직접 실증한다(review-2가 요구한 "CRLF에서도 견고"
+// 를 워킹트리 line-ending에 의존하지 않고 자체 재현).
+test("runAuthDispatch: single side-effect seam count is line-ending-agnostic (explicit CRLF injection reproduces review-2's failure mode)", () => {
+  const src = readFileSync(
+    new URL("./auth-dispatch-runner.mjs", import.meta.url),
+    "utf8",
+  );
+  const forcedCrlf = src.replace(/\r\n/g, "\n").replace(/\n/g, "\r\n");
+  const normalized = forcedCrlf.replace(/\r\n/g, "\n");
+  const codeOnly = normalized
+    .split("\n")
+    .map((line) => line.replace(/\/\/.*$/, ""))
+    .join("\n");
+  const matches = codeOnly.match(/adapter\.dispatch\(/g) ?? [];
+  assert.equal(
+    matches.length,
+    1,
+    "forced-CRLF source must still count exactly one call site after normalization",
+  );
+
+  // mutation-kill anchor: 정규화를 빼면(review-2가 실제로 만난 결함 그대로)
+  // 이 강제-CRLF 입력에서 카운트가 2로 오염됨을 직접 재현해, "정규화가 실제로
+  // 이 결함을 죽인다"는 근거를 테스트 자체에 남긴다.
+  const withoutNormalization = forcedCrlf
+    .split("\n")
+    .map((line) => line.replace(/\/\/.*$/, ""))
+    .join("\n");
+  const unnormalizedMatches =
+    withoutNormalization.match(/adapter\.dispatch\(/g) ?? [];
+  assert.equal(
+    unnormalizedMatches.length,
+    2,
+    "sanity check: without \\r\\n normalization, forced-CRLF reproduces review-2's exact failure (count=2)",
   );
 });
 
