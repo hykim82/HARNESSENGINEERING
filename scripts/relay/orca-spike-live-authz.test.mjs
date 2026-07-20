@@ -468,6 +468,46 @@ test("(T2) known-bad: dispatch fails -> dumps preserve both task-create and disp
     assert.equal(result.dumps.length, 2);
     assert.equal(result.dumps[0].cmd, "task-create");
     assert.equal(result.dumps[1].cmd, "dispatch");
+
+    writeLiveOutputs(result);
+    const rawDumpPath = join(
+      fx.dir,
+      `spike-live-raw-dump-${result.attemptId}.json`,
+    );
+    const receiptsPath = join(
+      fx.dir,
+      `spike-live-receipts-${result.attemptId}.json`,
+    );
+    const failurePath = join(
+      fx.dir,
+      `spike-live-failure-${result.attemptId}.json`,
+    );
+    assert.equal(existsSync(rawDumpPath), true);
+    assert.equal(existsSync(receiptsPath), true);
+    assert.equal(existsSync(failurePath), true);
+
+    const dumped = JSON.parse(readFileSync(rawDumpPath, "utf8"));
+    assert.equal(dumped.length, 2);
+    assert.deepEqual(
+      dumped.map((d) => d.cmd),
+      ["task-create", "dispatch"],
+    );
+    assert.equal(dumped[0].parsed.result.task.id, "task_abc123");
+    assert.equal(dumped[1].parsed.ok, false);
+    assert.equal(dumped[1].parsed.reason, "terminal handle gone");
+
+    const receipts = JSON.parse(readFileSync(receiptsPath, "utf8"));
+    assert.deepEqual(
+      receipts.map((r) => r.step),
+      ["predispatch", "task-create", "dispatch"],
+    );
+    assert.equal(receipts[2].response.reason, "terminal handle gone");
+
+    const failureEnvelope = JSON.parse(readFileSync(failurePath, "utf8"));
+    assert.equal(failureEnvelope.ok, false);
+    assert.equal(failureEnvelope.reason, "ATTEMPT_FAILED");
+    assert.match(failureEnvelope.detail, /DISPATCH_FAILED/);
+    assert.match(failureEnvelope.detail, /terminal handle gone/);
   } finally {
     cleanup(fx);
   }
@@ -500,6 +540,45 @@ test("(T3) known-bad: check times out (07-20 ATTEMPT_FAILED 재현형) -> all 3 
     // the failed step is identifiable purely from the dumps -- the last dump's
     // parsed response carries the empty-messages timeout, not a thrown/opaque error.
     assert.deepEqual(result.dumps[2].parsed.result.messages, []);
+
+    writeLiveOutputs(result);
+    const rawDumpPath = join(
+      fx.dir,
+      `spike-live-raw-dump-${result.attemptId}.json`,
+    );
+    const receiptsPath = join(
+      fx.dir,
+      `spike-live-receipts-${result.attemptId}.json`,
+    );
+    const failurePath = join(
+      fx.dir,
+      `spike-live-failure-${result.attemptId}.json`,
+    );
+    assert.equal(existsSync(rawDumpPath), true);
+    assert.equal(existsSync(receiptsPath), true);
+    assert.equal(existsSync(failurePath), true);
+
+    // step order + raw content must be recoverable from disk alone (07-20
+    // ATTEMPT_FAILED postmortem could not tell which of task-create/dispatch/
+    // check failed -- this is the exact evidence that was missing).
+    const dumped = JSON.parse(readFileSync(rawDumpPath, "utf8"));
+    assert.equal(dumped.length, 3);
+    assert.deepEqual(
+      dumped.map((d) => d.cmd),
+      ["task-create", "dispatch", "check"],
+    );
+    assert.deepEqual(dumped[2].parsed.result.messages, []);
+
+    const receipts = JSON.parse(readFileSync(receiptsPath, "utf8"));
+    assert.deepEqual(
+      receipts.map((r) => r.step),
+      ["predispatch", "task-create", "dispatch", "check-wait"],
+    );
+
+    const failureEnvelope = JSON.parse(readFileSync(failurePath, "utf8"));
+    assert.equal(failureEnvelope.ok, false);
+    assert.equal(failureEnvelope.reason, "ATTEMPT_FAILED");
+    assert.match(failureEnvelope.detail, /CHECK_TIMEOUT/);
   } finally {
     cleanup(fx);
   }
@@ -532,6 +611,45 @@ test("(T4) known-bad: fresh handshake recheck fails though the attempt itself su
     assert.equal(result.dumps.length, 3);
     assert.ok(Array.isArray(result.receipts) && result.receipts.length > 0);
     assert.ok(result.receipts.some((r) => r.step === "handshake"));
+
+    writeLiveOutputs(result);
+    const rawDumpPath = join(
+      fx.dir,
+      `spike-live-raw-dump-${result.attemptId}.json`,
+    );
+    const receiptsPath = join(
+      fx.dir,
+      `spike-live-receipts-${result.attemptId}.json`,
+    );
+    const failurePath = join(
+      fx.dir,
+      `spike-live-failure-${result.attemptId}.json`,
+    );
+    assert.equal(existsSync(rawDumpPath), true);
+    assert.equal(existsSync(receiptsPath), true);
+    assert.equal(existsSync(failurePath), true);
+
+    const dumped = JSON.parse(readFileSync(rawDumpPath, "utf8"));
+    assert.equal(dumped.length, 3);
+    assert.deepEqual(
+      dumped.map((d) => d.cmd),
+      ["task-create", "dispatch", "check"],
+    );
+
+    const receipts = JSON.parse(readFileSync(receiptsPath, "utf8"));
+    assert.deepEqual(
+      receipts.map((r) => r.step),
+      ["predispatch", "task-create", "dispatch", "check-wait", "handshake"],
+    );
+    // the attempt's own (internal) handshake check passed -- receipts records
+    // ok:true for that stage even though runLive's fresh recheck (outside
+    // runSpikeAttempt, disk-based) later fails once the result file is gone.
+    assert.equal(receipts[4].ok, true);
+
+    const failureEnvelope = JSON.parse(readFileSync(failurePath, "utf8"));
+    assert.equal(failureEnvelope.ok, false);
+    assert.equal(failureEnvelope.reason, "HANDSHAKE_RECHECK_FAILED");
+    assert.match(failureEnvelope.detail, /result file not found/i);
   } finally {
     cleanup(fx);
   }
