@@ -14,6 +14,15 @@ import { canonicalStringify } from "./auth-grant-canonical.mjs";
 // 해시가 바뀌고, grant의 authorization_sha256과 더 이상 일치하지 않아
 // pull-admission.mjs가 AUTHORIZATION_HASH_MISMATCH로 deny한다 -- "authorization
 // 불변 필드 불일치면 claim 0"의 실제 메커니즘.
+//
+// HYK-165 사이클2 REVIEW-A 반려 수리(coder-3): §3.2 표의 "worker config/
+// launch profile hash"는 **서로 다른 두 해시**다 -- `launch_profile_sha256`
+// (어느 worker 실행 프로필로 기동할지)과 `worker_config_sha256`(worker CLI가
+// 실제로 읽을 config 파일 내용)은 별개 결속 대상인데, 사이클1/2 구현은
+// launch_profile_sha256만 있고 config는 빠져 있었다(REVIEW-A rejected 근거).
+// worker_config_sha256을 canonical schema에 추가해 authorization 해시에
+// 결속하고(위 메커니즘 그대로), pull-admission.mjs의 expected 대조 목록에도
+// 추가한다 -- "config를 바꿔치기해도 admission이 못 잡는다"는 구멍을 닫는다.
 
 function isPlainObject(v) {
   return v !== null && typeof v === "object" && !Array.isArray(v);
@@ -38,6 +47,7 @@ export const AUTHORIZATION_FIELD_NAMES = Object.freeze([
   "cwd",
   "worktree",
   "launch_profile_sha256",
+  "worker_config_sha256",
   "person_approval_ref",
   "publish_allowed",
   "retry_allowed",
@@ -90,6 +100,12 @@ function collectLaunchProblems(fields) {
       "'launch_profile_sha256' must be a 64-hex-char sha256 string",
     );
   }
+  if (
+    !isNonEmptyString(fields.worker_config_sha256) ||
+    !SHA256_HEX_RE.test(fields.worker_config_sha256)
+  ) {
+    problems.push("'worker_config_sha256' must be a 64-hex-char sha256 string");
+  }
   if (!isNonEmptyString(fields.person_approval_ref)) {
     problems.push("'person_approval_ref' must be a non-empty string");
   }
@@ -139,6 +155,7 @@ function buildCanonicalFields(fields) {
     cwd: fields.cwd,
     worktree: fields.worktree,
     launch_profile_sha256: fields.launch_profile_sha256.toLowerCase(),
+    worker_config_sha256: fields.worker_config_sha256.toLowerCase(),
     person_approval_ref: fields.person_approval_ref,
     publish_allowed: fields.publish_allowed,
     retry_allowed: fields.retry_allowed,

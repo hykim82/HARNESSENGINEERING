@@ -20,6 +20,7 @@ const GOOD_FIELDS = Object.freeze({
   cwd: "C:\\fake\\repo",
   worktree: "C:\\fake\\repo",
   launch_profile_sha256: sha256("synthetic-launch-profile"),
+  worker_config_sha256: sha256("synthetic-worker-config"),
   person_approval_ref: "PKT-TEST-1:승인:OK:2026-07-21",
   publish_allowed: false,
   retry_allowed: false,
@@ -41,6 +42,7 @@ test("canonicalizeAuthorization: field order in the input does not change the ha
     publish_allowed: GOOD_FIELDS.publish_allowed,
     person_approval_ref: GOOD_FIELDS.person_approval_ref,
     launch_profile_sha256: GOOD_FIELDS.launch_profile_sha256,
+    worker_config_sha256: GOOD_FIELDS.worker_config_sha256,
     worktree: GOOD_FIELDS.worktree,
     cwd: GOOD_FIELDS.cwd,
     lane: GOOD_FIELDS.lane,
@@ -83,6 +85,19 @@ test("canonicalizeAuthorization: rejects malformed launch_profile_sha256", () =>
   assert.match(result.reason, /launch_profile_sha256/);
 });
 
+// HYK-165 사이클2 REVIEW-A 반려 수리(coder-3): worker_config_sha256은
+// launch_profile_sha256과 별개 필드다 -- 이 테스트가 죽이는 변이: 두 필드를
+// 실수로 같은 값 취급하거나(alias) config 검증을 아예 빠뜨리면 여기서 통과해
+// 버려 실패한다.
+test("canonicalizeAuthorization: rejects malformed worker_config_sha256", () => {
+  const result = canonicalizeAuthorization({
+    ...GOOD_FIELDS,
+    worker_config_sha256: "not-a-hash",
+  });
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /worker_config_sha256/);
+});
+
 // 불변경계 고정값 -- publish/retry는 정확히 boolean false, on_question/
 // on_error는 정확히 "pause"만 통과한다. truthy-but-not-exact 값(1, "false",
 // "no" 등)도 전부 거부해야 한다(느슨한 강제변환으로 새는 회귀 방지).
@@ -123,6 +138,7 @@ const FIELD_MUTATIONS = [
   ["cwd", "C:\\other\\cwd"],
   ["worktree", "C:\\other\\worktree"],
   ["launch_profile_sha256", sha256("mutated-launch-profile")],
+  ["worker_config_sha256", sha256("mutated-worker-config")],
   ["person_approval_ref", "PKT-OTHER"],
 ];
 for (const [field, value] of FIELD_MUTATIONS) {
@@ -148,6 +164,7 @@ for (const field of [
   "cwd",
   "worktree",
   "launch_profile_sha256",
+  "worker_config_sha256",
   "person_approval_ref",
   "publish_allowed",
   "retry_allowed",

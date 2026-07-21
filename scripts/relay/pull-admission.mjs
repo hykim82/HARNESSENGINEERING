@@ -27,6 +27,13 @@ import { loadPinnedPublicKeys, findKeyById } from "./auth-grant-pin.mjs";
 //      signed-grant의 canonical 필드와 정확히 일치해야 한다(replay-into-
 //      wrong-context 방지, auth-grant-gate.mjs의 expected 결속과 동일 원리를
 //      "다른 bundle 파일" 축으로 확장).
+//
+// HYK-165 사이클2 REVIEW-A 반려 수리(coder-3): (c)의 expected 대조 목록에
+// worker_config_sha256이 빠져 있었고, packet_sha256은 형식(64-hex)만 보고
+// expected와 전혀 대조하지 않았다(공격자가 worker config/packet을 바꿔치기해도
+// 못 잡는 실제 구멍). checkAuthorizationContext()의 expected 결속 목록에
+// worker_config_sha256을 추가하고, checkFieldBindings()에 packet_sha256
+// expected 대조를 추가해 닫았다 -- 기존 계약 완화 0, 결속만 추가.
 
 function isPlainObject(v) {
   return v !== null && typeof v === "object" && !Array.isArray(v);
@@ -71,6 +78,7 @@ export const REASON = Object.freeze({
   LAUNCH_PROFILE_MISMATCH: "LAUNCH_PROFILE_MISMATCH",
   AUDIENCE_MISMATCH: "AUDIENCE_MISMATCH",
   CHANNEL_MISMATCH: "CHANNEL_MISMATCH",
+  PACKET_HASH_MISMATCH: "PACKET_HASH_MISMATCH",
   ISSUED_AT_FUTURE: "ISSUED_AT_FUTURE",
   EXPIRED: "EXPIRED",
   AUTHORIZATION_INVALID: "AUTHORIZATION_INVALID",
@@ -267,52 +275,67 @@ function checkTargetBinding(fields, expected) {
   return null;
 }
 
-function checkFieldBindings(fields, expected) {
-  if (
-    !isNonEmptyString(expected.task_id) ||
-    fields.task_id !== expected.task_id
-  ) {
+// 단일 필드 exact-match 결속 헬퍼(coder-3 국소 리팩터): checkFieldBindings가
+// 반복하던 "isNonEmptyString(expected) && fields===expected 아니면 deny"
+// 패턴 하나를 함수로 뽑아, 아래 checkFieldBindings는 이 파일 머리 주석이
+// 이미 선언한 `checkA(...) ?? checkB(...) ?? ...` 체이닝 스타일로 조합만
+// 한다(quality-check 함수당 복잡도 상한 준수 -- 판정 내용은 그대로).
+function checkExpectedStringMatch(actual, expectedValue, reason, label) {
+  if (!isNonEmptyString(expectedValue) || actual !== expectedValue) {
     return deny(
-      REASON.TASK_ID_MISMATCH,
-      `expected task_id=${JSON.stringify(expected.task_id)}, grant has ${JSON.stringify(fields.task_id)}`,
-    );
-  }
-  if (!isNonEmptyString(expected.arm_id) || fields.arm_id !== expected.arm_id) {
-    return deny(
-      REASON.ARM_ID_MISMATCH,
-      `expected arm_id=${JSON.stringify(expected.arm_id)}, grant has ${JSON.stringify(fields.arm_id)}`,
-    );
-  }
-  if (
-    !isNonEmptyString(expected.cycle_id) ||
-    fields.cycle_id !== expected.cycle_id
-  ) {
-    return deny(
-      REASON.CYCLE_ID_MISMATCH,
-      `expected cycle_id=${JSON.stringify(expected.cycle_id)}, grant has ${JSON.stringify(fields.cycle_id)}`,
-    );
-  }
-  const targetDenied = checkTargetBinding(fields, expected);
-  if (targetDenied) return targetDenied;
-  if (
-    !isNonEmptyString(expected.audience) ||
-    fields.audience !== expected.audience
-  ) {
-    return deny(
-      REASON.AUDIENCE_MISMATCH,
-      `expected audience=${JSON.stringify(expected.audience)}, grant has ${JSON.stringify(fields.audience)}`,
-    );
-  }
-  if (
-    !isNonEmptyString(expected.channel) ||
-    fields.channel !== expected.channel
-  ) {
-    return deny(
-      REASON.CHANNEL_MISMATCH,
-      `expected channel=${JSON.stringify(expected.channel)}, grant has ${JSON.stringify(fields.channel)}`,
+      reason,
+      `expected ${label}=${JSON.stringify(expectedValue)}, grant has ${JSON.stringify(actual)}`,
     );
   }
   return null;
+}
+
+// HYK-165 사이클2 REVIEW-A 반려 수리(coder-3): packet_sha256 결속을
+// 추가했다 -- pull-grant-canonical.mjs는 packet_sha256을 형식(64-hex)만
+// 검증하고 expected와 대조하지 않았다. auth-grant-gate.mjs의 expected 결속
+// 원리를 여기도 적용해, 서명된 grant가 trusted config가 기대하는 정확히 그
+// packet을 가리키는지 확인한다.
+function checkFieldBindings(fields, expected) {
+  return (
+    checkExpectedStringMatch(
+      fields.task_id,
+      expected.task_id,
+      REASON.TASK_ID_MISMATCH,
+      "task_id",
+    ) ??
+    checkExpectedStringMatch(
+      fields.arm_id,
+      expected.arm_id,
+      REASON.ARM_ID_MISMATCH,
+      "arm_id",
+    ) ??
+    checkExpectedStringMatch(
+      fields.cycle_id,
+      expected.cycle_id,
+      REASON.CYCLE_ID_MISMATCH,
+      "cycle_id",
+    ) ??
+    checkTargetBinding(fields, expected) ??
+    checkExpectedStringMatch(
+      fields.audience,
+      expected.audience,
+      REASON.AUDIENCE_MISMATCH,
+      "audience",
+    ) ??
+    checkExpectedStringMatch(
+      fields.channel,
+      expected.channel,
+      REASON.CHANNEL_MISMATCH,
+      "channel",
+    ) ??
+    checkExpectedStringMatch(
+      fields.packet_sha256,
+      expected.packet_sha256,
+      REASON.PACKET_HASH_MISMATCH,
+      "packet_sha256",
+    ) ??
+    null
+  );
 }
 
 // freshness: issued_at <= now <= expires_at. TTL<=30분은 이미 canonical
@@ -374,6 +397,7 @@ function checkAuthorizationContext(authFields, fields, expected) {
     "lane",
     "cwd",
     "worktree",
+    "worker_config_sha256",
   ]) {
     if (!isNonEmptyString(et[f]) || authFields[f] !== et[f]) {
       return deny(

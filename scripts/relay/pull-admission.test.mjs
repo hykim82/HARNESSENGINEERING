@@ -47,6 +47,7 @@ const JTI = "jti-test-1";
 
 const TASK_HEADER_SHA256 = sha256("synthetic-task-file-content");
 const LAUNCH_PROFILE_SHA256 = sha256("synthetic-launch-profile");
+const WORKER_CONFIG_SHA256 = sha256("synthetic-worker-config");
 
 const AUTHORIZATION_FIELDS = Object.freeze({
   schema_version: 1,
@@ -60,6 +61,7 @@ const AUTHORIZATION_FIELDS = Object.freeze({
   cwd: "C:\\fake\\repo",
   worktree: "C:\\fake\\repo",
   launch_profile_sha256: LAUNCH_PROFILE_SHA256,
+  worker_config_sha256: WORKER_CONFIG_SHA256,
   person_approval_ref: "PKT-TEST-1:승인:OK:2026-07-21",
   publish_allowed: false,
   retry_allowed: false,
@@ -124,6 +126,8 @@ const EXPECTED = Object.freeze({
   lane: AUTHORIZATION_FIELDS.lane,
   cwd: AUTHORIZATION_FIELDS.cwd,
   worktree: AUTHORIZATION_FIELDS.worktree,
+  worker_config_sha256: AUTHORIZATION_FIELDS.worker_config_sha256,
+  packet_sha256: GRANT_FIELDS.packet_sha256,
 });
 
 function writePin(dir, entries) {
@@ -400,6 +404,14 @@ const BUNDLE_MUTATIONS = [
     { authFields: { worktree: "C:\\other\\worktree" } },
     "AUTHORIZATION_HASH_MISMATCH",
   ],
+  // HYK-165 사이클2 REVIEW-A 반려 수리(coder-3): worker_config_sha256 결속의
+  // 1차 방어선 -- 이 필드가 authorization canonical schema에 없으면(반려
+  // 재발) 이 mutation이 해시를 안 바꿔 여기서 통과해 버려 실패한다.
+  [
+    "authorization worker_config_sha256",
+    { authFields: { worker_config_sha256: sha256("mutated-worker-config") } },
+    "AUTHORIZATION_HASH_MISMATCH",
+  ],
 ];
 for (const [label, override, expectedReasonName] of BUNDLE_MUTATIONS) {
   test(`judgePullAdmission: ${label} mutated -> DENY ${expectedReasonName}`, () => {
@@ -441,6 +453,90 @@ test("judgePullAdmission: authorization internally-consistent but task path diff
     const result = judgePullAdmission(baseInput(dir, pinPath));
     assert.equal(result.ok, false);
     assert.equal(result.reason, REASON.AUTHORIZATION_CONTEXT_MISMATCH);
+  });
+});
+
+// HYK-165 사이클2 REVIEW-A 반려 수리(coder-3): config의 2차 방어선 -- 위
+// resolved_task_path 테스트와 동형으로, worker_config_sha256도 authorization
+// 파일 안에서는 내부 정합(재서명)하지만 supervisor의 trusted expected와
+// 다르면 여전히 걸려야 한다. 이 테스트가 죽이는 변이: checkAuthorizationContext()
+// expected 대조 목록에 worker_config_sha256을 빠뜨리면(반려 재발) 여기서
+// ALLOW가 나와 버려 실패한다.
+test("judgePullAdmission: authorization internally-consistent but worker_config_sha256 differs from expected -> DENY AUTHORIZATION_CONTEXT_MISMATCH", () => {
+  withTempDir((dir) => {
+    const mutatedAuth = {
+      ...AUTHORIZATION_FIELDS,
+      worker_config_sha256: sha256("attacker-worker-config"),
+    };
+    const authCanon = canonicalizeAuthorization(mutatedAuth);
+    assert.equal(authCanon.ok, true);
+    const grantFields = {
+      ...GRANT_FIELDS,
+      authorization_sha256: authCanon.sha256,
+    };
+    const pinPath = writePin(dir, [
+      {
+        key_id: "k-good",
+        public_key_pem: pem(GOOD_SIGNER.publicKey, "public"),
+        status: "active",
+      },
+    ]);
+    const env = grantEnvelope(grantFields, GOOD_SIGNER.privateKey, "k-good");
+    writeJson(join(dir, `signed-grant-${ARM_ID}-${JTI}.json`), env);
+    writeJson(join(dir, `authorization-${ARM_ID}.json`), mutatedAuth);
+    writeJson(join(dir, `arm-${ARM_ID}.json`), ARM_STATE_FIELDS);
+    const result = judgePullAdmission(baseInput(dir, pinPath));
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, REASON.AUTHORIZATION_CONTEXT_MISMATCH);
+  });
+});
+
+// ---- packet_sha256 expected 대조 negative matrix (반려 사유 2) ----
+// (a) grant값 mutation -- 새 값으로 유효하게 재서명됐지만 expected(고정
+// trusted config)와 다르면 DENY. "expected 어느 경로로든 DENY"의 grant축.
+test("judgePullAdmission: grant packet_sha256 signed with a value that differs from expected -> DENY PACKET_HASH_MISMATCH", () => {
+  withTempDir((dir) => {
+    const { pinPath } = writeBundle(dir, {
+      grantFields: { packet_sha256: sha256("mutated-packet") },
+    });
+    const result = judgePullAdmission(baseInput(dir, pinPath));
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, REASON.PACKET_HASH_MISMATCH);
+  });
+});
+
+// (b) 서명 후 raw 파일만 변조(재서명 없음) -- "signature 경로로든 DENY"의
+// 실증. 기존 "signature tampered" 테스트(task_id 변조)와 동일 패턴을
+// packet_sha256 축으로 재현.
+test("judgePullAdmission: grant packet_sha256 tampered post-signing (no resign) -> DENY SIGNATURE_INVALID", () => {
+  withTempDir((dir) => {
+    const { pinPath } = writeBundle(dir);
+    const grantPath = join(dir, `signed-grant-${ARM_ID}-${JTI}.json`);
+    const env = JSON.parse(readFileSync(grantPath, "utf8"));
+    env.grantRaw.packet_sha256 = sha256("post-signing-tamper");
+    writeJson(grantPath, env);
+    const result = judgePullAdmission(baseInput(dir, pinPath));
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, REASON.SIGNATURE_INVALID);
+  });
+});
+
+// ---- channel per-변수 증인 보강(반려 사유 3) ----
+// 기존 "expected task_id/arm_id/.../channel mismatch" 테스트는 expected쪽
+// channel을 바꾸는 경우만 커버한다(CHANNEL_MISMATCH). 여기서는 grant쪽
+// channel을 서명 후 직접 변조(재서명 없음)해 signature 경로로도 claim 0이
+// 됨을 별도로 실증한다 -- "grant channel 변조(→ signature fail 경로라도
+// claim 0)와 기존 expected-channel DENY 둘 다 유지·명시" 요구사항.
+test("judgePullAdmission: grant channel tampered post-signing (no resign) -> DENY SIGNATURE_INVALID", () => {
+  withTempDir((dir) => {
+    const { pinPath } = writeBundle(dir);
+    const grantPath = join(dir, `signed-grant-${ARM_ID}-${JTI}.json`);
+    const env = JSON.parse(readFileSync(grantPath, "utf8"));
+    env.grantRaw.channel = "attacker-channel";
+    writeJson(grantPath, env);
+    const result = judgePullAdmission(baseInput(dir, pinPath));
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, REASON.SIGNATURE_INVALID);
   });
 });
 
@@ -554,6 +650,10 @@ test("judgePullAdmission: expected task_id/arm_id/cycle_id/audience/channel mism
       [{ cycle_id: "cycle-other" }, REASON.CYCLE_ID_MISMATCH],
       [{ audience: "OTHER" }, REASON.AUDIENCE_MISMATCH],
       [{ channel: "other-channel" }, REASON.CHANNEL_MISMATCH],
+      // HYK-165 사이클2 REVIEW-A 반려 수리(coder-3): packet_sha256 expected축
+      // -- grant는 그대로, expected만 바뀐 경우도 PACKET_HASH_MISMATCH여야
+      // 한다("expected≠grant mutation" 요구사항).
+      [{ packet_sha256: sha256("other-packet") }, REASON.PACKET_HASH_MISMATCH],
     ];
     for (const [override, expectedReason] of cases) {
       const result = judgePullAdmission(

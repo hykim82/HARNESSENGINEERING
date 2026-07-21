@@ -62,6 +62,7 @@ const ISSUED_AT = "2026-07-21T00:00:00.000Z";
 const EXPIRES_AT = "2026-07-21T00:20:00.000Z";
 const IN_WINDOW_NOW = Date.parse("2026-07-21T00:10:00.000Z");
 const LAUNCH_PROFILE_SHA256 = sha256("synthetic-pull-sup-launch-profile");
+const WORKER_CONFIG_SHA256 = sha256("synthetic-pull-sup-worker-config");
 const TASK_FILE_CONTENT = `task_id: ${TASK_ID}\nsome pull-supervisor synthetic task body\n`;
 
 function writePin(dir, entries) {
@@ -99,6 +100,7 @@ function buildAuthFields(dir, armId, taskFilePath, taskSha256, overrides) {
     cwd: dir,
     worktree: dir,
     launch_profile_sha256: LAUNCH_PROFILE_SHA256,
+    worker_config_sha256: WORKER_CONFIG_SHA256,
     person_approval_ref: "PKT-TEST-PULL-SUP-1:승인:OK:2026-07-21",
     publish_allowed: false,
     retry_allowed: false,
@@ -215,6 +217,8 @@ function buildExpectedAndScope(dir, armId, taskFilePath, grantFields) {
     lane: LANE,
     cwd: dir,
     worktree: dir,
+    worker_config_sha256: WORKER_CONFIG_SHA256,
+    packet_sha256: grantFields.packet_sha256,
   };
   const expectedTask = {
     task_id: TASK_ID,
