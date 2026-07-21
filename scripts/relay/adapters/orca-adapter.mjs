@@ -80,6 +80,7 @@ export const LOCATION_REASON = Object.freeze({
   MAIN_REPO_FORBIDDEN: "MAIN_REPO_FORBIDDEN",
   CONTROL_ROOM_FORBIDDEN: "CONTROL_ROOM_FORBIDDEN",
   OUTSIDE_WORKSPACES: "OUTSIDE_WORKSPACES",
+  WORKSPACES_ROOT_NOT_A_WORKTREE: "WORKSPACES_ROOT_NOT_A_WORKTREE",
   ALLOW: "ALLOW",
 });
 
@@ -139,7 +140,143 @@ export function resolveSeatLocation({ role, requestedPath } = {}) {
       `resolveSeatLocation: '${normalized}' is outside the workspaces root (${WORKSPACES_ROOT})`,
     );
   }
+  // review-2 (coder-4): the workspaces root itself is the parent folder, not
+  // a worktree -- a seat opened directly there is not tied to any issue
+  // checkout at all (B15's actual shape: a seat with no real worktree under
+  // it is invisible to Orca's own bookkeeping).
+  if (lower === workspacesLower) {
+    return denyLocation(
+      LOCATION_REASON.WORKSPACES_ROOT_NOT_A_WORKTREE,
+      `resolveSeatLocation: '${normalized}' is the workspaces root itself, not a worktree -- a specific issue/verification subfolder is required`,
+    );
+  }
   return { ok: true, reason: LOCATION_REASON.ALLOW, path: normalized };
+}
+
+// ---- HYK-169-coder-4 (review-2 반려 결함 수리): Orca 관리 워크트리 확인 ----
+// 반려 사유: 위치 정책은 경로 "문자열"만 검사해 `git worktree add`로 만든
+// Orca 미등록 폴더도 조건만 맞으면 통과시켰다(B15 -- Orca가 모르는
+// 워크트리에 붙은 좌석은 Orca UI에서 안 보이는 유령 터미널이 된다). 좌석을
+// 열기 전에 `worktree list`로 대상 경로가 실제 등록돼 있는지 대조한다.
+export const WORKTREE_REASON = Object.freeze({
+  LIST_QUERY_FAILED: "WORKTREE_LIST_QUERY_FAILED",
+  NOT_ORCA_MANAGED: "WORKTREE_NOT_ORCA_MANAGED",
+  CREATE_FAILED: "WORKTREE_CREATE_FAILED",
+});
+
+export function buildWorktreeListCommand() {
+  return ["worktree", "list", "--json"];
+}
+export function buildWorktreeCreateCommand(worktreePath) {
+  return [
+    "worktree",
+    "create",
+    "--path",
+    worktreePath,
+    "--setup",
+    "skip",
+    "--json",
+  ];
+}
+
+function denyWorktree(reason, detail) {
+  return { ok: false, reason, detail };
+}
+
+// 응답 파싱만 분리(테스트 용이성 -- parseRuntimeTaskId 전례와 동형).
+export function parseWorktreeList(response) {
+  if (!isPlainObject(response) || response.ok !== true) return null;
+  const list = Array.isArray(response.result?.worktrees)
+    ? response.result.worktrees
+    : null;
+  return list;
+}
+
+function queryWorktreeList(opts) {
+  if (typeof opts.execFn !== "function") {
+    return denyWorktree(
+      WORKTREE_REASON.LIST_QUERY_FAILED,
+      "checkWorktreeManaged: opts.execFn is required to query worktree list",
+    );
+  }
+  let response;
+  try {
+    response = opts.execFn(buildWorktreeListCommand());
+  } catch (err) {
+    return denyWorktree(
+      WORKTREE_REASON.LIST_QUERY_FAILED,
+      `checkWorktreeManaged: worktree list query threw (${errText(err)})`,
+    );
+  }
+  const list = parseWorktreeList(response);
+  if (!list) {
+    return denyWorktree(
+      WORKTREE_REASON.LIST_QUERY_FAILED,
+      "checkWorktreeManaged: worktree list response missing/invalid result.worktrees",
+    );
+  }
+  return { ok: true, list };
+}
+
+// 정규화(normalizeAbsolute 재사용, coder-2와 동일 원칙 -- 대소문자·슬래시·
+// `..` 우회를 여기서도 다시 겪지 않는다) 후 등록 목록과 대조.
+function isPathManaged(list, requestedPath) {
+  const target = normalizeAbsolute(requestedPath).toLowerCase();
+  return list.some(
+    (entry) =>
+      isPlainObject(entry) &&
+      isNonEmptyString(entry.path) &&
+      normalizeAbsolute(entry.path).toLowerCase() === target,
+  );
+}
+
+function createManagedWorktree(requestedPath, opts) {
+  let response;
+  try {
+    response = opts.execFn(buildWorktreeCreateCommand(requestedPath));
+  } catch (err) {
+    return denyWorktree(
+      WORKTREE_REASON.CREATE_FAILED,
+      `checkWorktreeManaged: worktree create threw (${errText(err)})`,
+    );
+  }
+  if (!isPlainObject(response) || response.ok !== true) {
+    const detail =
+      isPlainObject(response) && isNonEmptyString(response.reason)
+        ? response.reason
+        : "response.ok !== true";
+    return denyWorktree(
+      WORKTREE_REASON.CREATE_FAILED,
+      `checkWorktreeManaged: worktree create failed -- ${detail}`,
+    );
+  }
+  const createdPath =
+    isPlainObject(response.result) && isNonEmptyString(response.result.path)
+      ? response.result.path
+      : requestedPath;
+  return { ok: true, managed: true, created: true, path: createdPath };
+}
+
+// 순수 조합 함수 -- ctx: { requestedPath, allowCreate? }, opts: { execFn }.
+// **기본값은 보수적**(coder-3에서 확립된 원칙 그대로): allowCreate 생략은
+// false로 취급 -- 등록 확인 없이 생성까지 자동으로 허용하면 이번 반려와
+// 같은 구멍(미등록 폴더가 조건만 맞으면 통과)이 다시 남는다.
+export function checkWorktreeManaged(
+  { requestedPath, allowCreate = false } = {},
+  opts = {},
+) {
+  const listResult = queryWorktreeList(opts);
+  if (!listResult.ok) return listResult;
+  if (isPathManaged(listResult.list, requestedPath)) {
+    return { ok: true, managed: true, created: false, path: requestedPath };
+  }
+  if (!allowCreate) {
+    return denyWorktree(
+      WORKTREE_REASON.NOT_ORCA_MANAGED,
+      `checkWorktreeManaged: '${requestedPath}' is not a registered Orca worktree and allowCreate was not set`,
+    );
+  }
+  return createManagedWorktree(requestedPath, opts);
 }
 
 // ---- 미검증 가정: 좌석 생성/제출/비차단 조회/종료 argv (실 orca 미호출) ----
@@ -357,9 +494,30 @@ export function ensureSeat(ctx, opts = {}) {
         "orca-adapter: ensureSeat -- opts.execFn is required to create a new seat",
     };
   }
+
+  // review-2 (coder-4): 새 좌석 경로에서만 Orca 관리 워크트리 여부를
+  // 확인한다(reuse 경로는 위에서 이미 execFn 없이 반환됨 -- 기존 시험
+  // 계약 "reuse는 execFn 호출 0회" 무변경). 등록 확인 실패/미등록/생성
+  // 거부 시 A3/A5 복사·좌석 생성 호출은 전혀 일어나지 않는다.
+  // review-2 (coder-4): 새 좌석 경로에서만 Orca 관리 워크트리 여부를
+  // 확인한다(reuse 경로는 위에서 이미 execFn 없이 반환됨 -- 기존 시험
+  // 계약 "reuse는 execFn 호출 0회" 무변경). 등록 확인 실패/미등록/생성
+  // 거부 시 A3/A5 복사·좌석 생성 호출은 전혀 일어나지 않는다.
+  const managed = checkWorktreeManaged(
+    { requestedPath: c.worktreePath, allowCreate: opts.allowCreate === true },
+    opts,
+  );
+  if (!managed.ok) {
+    return {
+      ok: false,
+      reason: managed.detail,
+      worktreeReason: managed.reason,
+    };
+  }
+
   return createNewSeat(
     c.role,
-    c.worktreePath,
+    managed.path,
     c.mainRepoDir,
     opts,
     defaultFsDeps(opts),

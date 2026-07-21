@@ -12,6 +12,11 @@ import {
   buildNonBlockingCheckCommand,
   buildDispatchCleanupCommand,
   buildWorktreeRemoveCommand,
+  buildWorktreeListCommand,
+  buildWorktreeCreateCommand,
+  checkWorktreeManaged,
+  parseWorktreeList,
+  WORKTREE_REASON,
   resolveSeatLocation,
   LOCATION_REASON,
   WORKSPACES_ROOT,
@@ -36,7 +41,11 @@ function fakeExecFn(responses) {
   const calls = [];
   function fn(argv) {
     calls.push(argv);
-    const key = argv[0] === "orchestration" ? argv[1] : argv[0];
+    // "orchestration"/"worktree" both have a real subcommand as argv[1]
+    // (list vs create need distinct stubs) -- "terminal" stays keyed on
+    // argv[0] since its own subcommand (send/create/close) never overlaps.
+    const key =
+      argv[0] === "orchestration" || argv[0] === "worktree" ? argv[1] : argv[0];
     const entry = responses[key];
     if (typeof entry === "function") return entry(argv, calls.length);
     if (entry === undefined) {
@@ -48,6 +57,15 @@ function fakeExecFn(responses) {
   }
   fn.calls = calls;
   return fn;
+}
+
+// coder-4: ensureSeat now queries `worktree list` before creating a new
+// seat -- every existing ensureSeat fixture that reaches seat creation
+// needs a "list" stub reporting the target path as already managed
+// (preserves each test's original intent: it's testing settings copy /
+// seat-response parsing, not worktree registration).
+function managedWorktreeStub(path = VALID_WORKTREE) {
+  return { ok: true, result: { worktrees: [{ path }] } };
 }
 
 // ---------------------------------------------------------------------------
@@ -83,6 +101,7 @@ test("ensureSeat: A3 settings.local.json copied from mainRepoDir when missing at
   const exists = new Set(["/main/.claude/settings.local.json"]);
   const copied = [];
   const execFn = fakeExecFn({
+    list: managedWorktreeStub(),
     terminal: {
       ok: true,
       result: { handle: "term_new", paneKey: "pane:leaf" },
@@ -110,6 +129,7 @@ test("ensureSeat: A3 copy skipped when destination already has settings.local.js
   ]);
   const copied = [];
   const execFn = fakeExecFn({
+    list: managedWorktreeStub(),
     terminal: { ok: true, result: { handle: "term_new" } },
   });
   const r = ensureSeat(
@@ -130,6 +150,7 @@ test("ensureSeat: A5 node_modules copied from mainRepoDir when missing at destin
   const exists = new Set(["/main/node_modules"]);
   const copiedDirs = [];
   const execFn = fakeExecFn({
+    list: managedWorktreeStub(),
     terminal: { ok: true, result: { handle: "term_new" } },
   });
   const r = ensureSeat(
@@ -148,6 +169,7 @@ test("ensureSeat: A5 node_modules copied from mainRepoDir when missing at destin
 
 test("ensureSeat: new seat creation reads handle/paneKey from response.result, both engines", () => {
   const execFn = fakeExecFn({
+    list: managedWorktreeStub(),
     terminal: { ok: true, result: { handle: "term_abc", paneKey: "tab:leaf" } },
   });
   const r = ensureSeat(
@@ -162,6 +184,7 @@ test("ensureSeat: new seat creation reads handle/paneKey from response.result, b
 
 test("ensureSeat: seat creation failure (response.ok:false) is surfaced, not swallowed", () => {
   const execFn = fakeExecFn({
+    list: managedWorktreeStub(),
     terminal: { ok: false, reason: "Setup decision required" },
   });
   const r = ensureSeat(
@@ -173,7 +196,10 @@ test("ensureSeat: seat creation failure (response.ok:false) is surfaced, not swa
 });
 
 test("ensureSeat: seat creation with missing handle in response is a failure (not undefined handle)", () => {
-  const execFn = fakeExecFn({ terminal: { ok: true, result: {} } });
+  const execFn = fakeExecFn({
+    list: managedWorktreeStub(),
+    terminal: { ok: true, result: {} },
+  });
   const r = ensureSeat(
     { role: "CODER", worktreePath: VALID_WORKTREE },
     { execFn, existsFn: () => true },
@@ -748,4 +774,220 @@ test("ensureSeat: location policy applies even to the existingSeatHandle reuse p
   assert.equal(r.ok, false);
   assert.equal(r.locationReason, LOCATION_REASON.MAIN_REPO_FORBIDDEN);
   assert.equal(execFn.calls.length, 0);
+});
+
+// ---------------------------------------------------------------------------
+// HYK-169-coder-4 (review-2 반려 결함 수리): 위치 정책의 절반(경로 문자열)만
+// 검사하고 "이 폴더가 실제 Orca 관리 워크트리인가"는 확인하지 않던 결함.
+// 실제 사고=B15(Orca가 모르는 워크트리에 붙은 좌석 = UI에서 안 보이는
+// 유령 터미널). "거부를 증명하는 것이 1순위"(태스크 지시).
+// ---------------------------------------------------------------------------
+
+function terminalCallCount(execFn) {
+  return execFn.calls.filter((argv) => argv[0] === "terminal").length;
+}
+function worktreeCreateCallCount(execFn) {
+  return execFn.calls.filter(
+    (argv) => argv[0] === "worktree" && argv[1] === "create",
+  ).length;
+}
+
+// 1. 워크트리 최상위 루트 자체 -> 거부, 사유 코드 구분, fake 호출 0건.
+test("resolveSeatLocation: BLOCK -- the workspaces root itself is not a worktree (WORKSPACES_ROOT_NOT_A_WORKTREE)", () => {
+  const r = resolveSeatLocation({
+    role: "REVIEW",
+    requestedPath: WORKSPACES_ROOT,
+  });
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, LOCATION_REASON.WORKSPACES_ROOT_NOT_A_WORKTREE);
+});
+
+test("ensureSeat: rejects the workspaces root itself with zero execFn calls (review-2 exact repro)", () => {
+  const execFn = fakeExecFn({});
+  const r = ensureSeat(
+    { role: "REVIEW", worktreePath: WORKSPACES_ROOT },
+    { execFn },
+  );
+  assert.equal(r.ok, false);
+  assert.equal(
+    r.locationReason,
+    LOCATION_REASON.WORKSPACES_ROOT_NOT_A_WORKTREE,
+  );
+  assert.equal(execFn.calls.length, 0); // not even a worktree-list query
+});
+
+// checkWorktreeManaged unit tests (pure port, no ensureSeat wiring).
+test("checkWorktreeManaged: PASS -- a path present in the managed list is reported managed, created:false", () => {
+  const execFn = fakeExecFn({ list: managedWorktreeStub(VALID_WORKTREE) });
+  const r = checkWorktreeManaged({ requestedPath: VALID_WORKTREE }, { execFn });
+  assert.equal(r.ok, true);
+  assert.equal(r.managed, true);
+  assert.equal(r.created, false);
+  assert.equal(worktreeCreateCallCount(execFn), 0);
+});
+
+test("checkWorktreeManaged: PASS -- managed-list match is normalized (case/backslash-insensitive, coder-2 normalizeAbsolute reuse)", () => {
+  const execFn = fakeExecFn({
+    list: managedWorktreeStub(
+      VALID_WORKTREE.toUpperCase().replace(/\//g, "\\"),
+    ),
+  });
+  const r = checkWorktreeManaged({ requestedPath: VALID_WORKTREE }, { execFn });
+  assert.equal(r.ok, true);
+  assert.equal(r.managed, true);
+});
+
+// 2. 관리 목록에 없는 경로 + allowCreate 미지정 -> 거부, 좌석 생성 호출 0건.
+test("checkWorktreeManaged: BLOCK -- an unregistered path with allowCreate omitted is rejected (NOT_ORCA_MANAGED), no create call", () => {
+  const execFn = fakeExecFn({
+    list: managedWorktreeStub("C:/some/other/worktree"),
+  });
+  const r = checkWorktreeManaged({ requestedPath: VALID_WORKTREE }, { execFn });
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, WORKTREE_REASON.NOT_ORCA_MANAGED);
+  assert.equal(worktreeCreateCallCount(execFn), 0);
+});
+
+test("ensureSeat: rejects an unregistered worktree with allowCreate omitted -- zero seat-creation calls (review-2 repro)", () => {
+  const execFn = fakeExecFn({
+    list: managedWorktreeStub("C:/some/other/worktree"),
+  });
+  const r = ensureSeat(
+    { role: "REVIEW", worktreePath: VALID_WORKTREE },
+    { execFn },
+  );
+  assert.equal(r.ok, false);
+  assert.equal(r.worktreeReason, WORKTREE_REASON.NOT_ORCA_MANAGED);
+  assert.equal(terminalCallCount(execFn), 0); // no seat-creation call
+  assert.equal(worktreeCreateCallCount(execFn), 0);
+});
+
+// 3. 관리 목록에 없는 경로 + allowCreate:true -> worktree create argv 정확히
+// 구성되고, 그 결과 경로로 좌석 생성까지 이어진다.
+test("buildWorktreeCreateCommand: exact argv shape (--path, --setup skip)", () => {
+  const argv = buildWorktreeCreateCommand(VALID_WORKTREE);
+  assert.deepEqual(argv.slice(0, 2), ["worktree", "create"]);
+  assert.ok(argv.includes("--path"));
+  assert.ok(argv.includes(VALID_WORKTREE));
+  assert.ok(argv.includes("--setup"));
+  assert.ok(argv.includes("skip"));
+});
+
+test("checkWorktreeManaged: allowCreate:true on an unregistered path calls worktree create and returns managed:true, created:true", () => {
+  const execFn = fakeExecFn({
+    list: managedWorktreeStub("C:/some/other/worktree"),
+    create: { ok: true, result: { path: VALID_WORKTREE } },
+  });
+  const r = checkWorktreeManaged(
+    { requestedPath: VALID_WORKTREE, allowCreate: true },
+    { execFn },
+  );
+  assert.equal(r.ok, true);
+  assert.equal(r.managed, true);
+  assert.equal(r.created, true);
+  assert.equal(r.path, VALID_WORKTREE);
+  assert.equal(worktreeCreateCallCount(execFn), 1);
+  assert.deepEqual(execFn.calls[1], buildWorktreeCreateCommand(VALID_WORKTREE));
+});
+
+test("ensureSeat: allowCreate:true on an unregistered path creates the worktree then proceeds to seat creation (review-2 §2a)", () => {
+  const execFn = fakeExecFn({
+    list: managedWorktreeStub("C:/some/other/worktree"),
+    create: { ok: true, result: { path: VALID_WORKTREE } },
+    terminal: { ok: true, result: { handle: "term_new" } },
+  });
+  const r = ensureSeat(
+    { role: "REVIEW", worktreePath: VALID_WORKTREE },
+    { execFn, allowCreate: true },
+  );
+  assert.equal(r.ok, true);
+  assert.equal(r.seatHandle, "term_new");
+  assert.equal(worktreeCreateCallCount(execFn), 1);
+  assert.equal(terminalCallCount(execFn), 1);
+});
+
+test("checkWorktreeManaged: worktree create failure is surfaced as CREATE_FAILED", () => {
+  const execFn = fakeExecFn({
+    list: managedWorktreeStub("C:/some/other/worktree"),
+    create: { ok: false, reason: "disk full" },
+  });
+  const r = checkWorktreeManaged(
+    { requestedPath: VALID_WORKTREE, allowCreate: true },
+    { execFn },
+  );
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, WORKTREE_REASON.CREATE_FAILED);
+  assert.match(r.detail, /disk full/);
+});
+
+// 4. 관리 목록에 있는 경로 -> worktree create 호출 0건, 좌석만 생성(재사용).
+test("ensureSeat: a path already in the managed list skips worktree create entirely", () => {
+  const execFn = fakeExecFn({
+    list: managedWorktreeStub(VALID_WORKTREE),
+    terminal: { ok: true, result: { handle: "term_new" } },
+  });
+  const r = ensureSeat(
+    { role: "CODER", worktreePath: VALID_WORKTREE },
+    { execFn },
+  );
+  assert.equal(r.ok, true);
+  assert.equal(worktreeCreateCallCount(execFn), 0);
+  assert.equal(terminalCallCount(execFn), 1);
+});
+
+// 5. 관리 목록 조회 자체가 실패 -> 보수적 실패, 좌석 생성 호출 0건.
+test("checkWorktreeManaged: BLOCK -- execFn throwing on the list query is a conservative failure (LIST_QUERY_FAILED)", () => {
+  const execFn = () => {
+    throw new Error("orca down");
+  };
+  const r = checkWorktreeManaged({ requestedPath: VALID_WORKTREE }, { execFn });
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, WORKTREE_REASON.LIST_QUERY_FAILED);
+});
+
+test("checkWorktreeManaged: BLOCK -- a malformed list response (no result.worktrees) is a conservative failure", () => {
+  const execFn = fakeExecFn({ list: { ok: true, result: {} } });
+  const r = checkWorktreeManaged({ requestedPath: VALID_WORKTREE }, { execFn });
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, WORKTREE_REASON.LIST_QUERY_FAILED);
+});
+
+test("ensureSeat: a failing worktree-list query is a conservative failure, zero seat-creation calls", () => {
+  const execFn = fakeExecFn({
+    list: { ok: false, reason: "orca unreachable" },
+  });
+  const r = ensureSeat(
+    { role: "CODER", worktreePath: VALID_WORKTREE },
+    { execFn },
+  );
+  assert.equal(r.ok, false);
+  assert.equal(r.worktreeReason, WORKTREE_REASON.LIST_QUERY_FAILED);
+  assert.equal(terminalCallCount(execFn), 0);
+});
+
+// allowCreate 기본값 -- 보수적(생략 시 false 취급, coder-3 원칙 재확인).
+test("checkWorktreeManaged: allowCreate omitted on an unregistered path defaults to rejection (conservative default)", () => {
+  const execFn = fakeExecFn({
+    list: managedWorktreeStub("C:/some/other/worktree"),
+  });
+  const r = checkWorktreeManaged({ requestedPath: VALID_WORKTREE }, { execFn });
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, WORKTREE_REASON.NOT_ORCA_MANAGED);
+});
+
+test("parseWorktreeList: pure parser -- extracts result.worktrees, null on any malformed shape", () => {
+  assert.deepEqual(
+    parseWorktreeList({ ok: true, result: { worktrees: [{ path: "/a" }] } }),
+    [{ path: "/a" }],
+  );
+  assert.equal(
+    parseWorktreeList({ ok: false, result: { worktrees: [] } }),
+    null,
+  );
+  assert.equal(parseWorktreeList({ ok: true, result: {} }), null);
+  assert.equal(parseWorktreeList(null), null);
+});
+
+test("buildWorktreeListCommand: exact argv shape", () => {
+  assert.deepEqual(buildWorktreeListCommand(), ["worktree", "list", "--json"]);
 });
