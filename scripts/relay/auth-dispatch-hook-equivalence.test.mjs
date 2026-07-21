@@ -198,6 +198,22 @@ function readArmState(dir) {
   return JSON.parse(readFileSync(armStorePath(dir, ARM_ID), "utf8"));
 }
 
+// HYK-166-coder-2 (자매 시한폭탄 수리, coder-1의 auth-dispatch-runner.test.mjs
+// `callAuthDispatch` 패턴 그대로 재사용): 이 파일의 모든 runAuthDispatch(...)
+// 호출도 opts(2번째 인자)를 한 번도 넘기지 않았다 -- env.nowMs는 gate 판정에
+// 들어가지만 arm-state.claimTx의 만료 판정은 opts.armDeps.nowFn을 못 받아
+// 기본값(실 Date.now())으로 떨어진다. 이 파일의 expires_at은
+// "2026-07-21T23:59"(오늘)이라 오늘 밤 넘어가면 사후 만료로 깨진다. 이
+// 헬퍼가 모든 호출을 한 지점으로 모아 env.nowMs를 매 호출 시점에 다시 읽는
+// 클로저로 armDeps.nowFn을 주입한다(날짜를 미루는 미봉책이 아니라 실
+// 벽시계를 아예 참조하지 않게 만드는 근본 수리).
+function callAuthDispatch(env, opts = {}) {
+  return runAuthDispatch(env, {
+    armDeps: { nowFn: () => env.nowMs },
+    ...opts,
+  });
+}
+
 // ---- hook 상태 3종 fixture ----
 // present: 관측값(HIT/MISS류)을 반환하나 판정에 쓰이지 않아야 한다(그렇다는
 // 사실은 접근해도 count가 늘 뿐 결과에 영향이 없다는 걸로 실증).
@@ -253,7 +269,7 @@ function summarize(result, env, dir) {
 // 실제로 접근됐는지(count)까지 함께 검사한다.
 function runWithHook(env, kind) {
   const hookFx = makeHookFixture(kind);
-  const result = runAuthDispatch({
+  const result = callAuthDispatch({
     ...env,
     hookObservation: hookFx.hookObservation,
   });
@@ -394,7 +410,7 @@ test("G7/observation receipt: attaching a full receipt with hook_result flipped 
         positive_control: true,
         hook_result: hookResult,
       };
-      const result = runAuthDispatch({ ...env, observationReceipt: receipt });
+      const result = callAuthDispatch({ ...env, observationReceipt: receipt });
       return summarize(result, env, dir);
     });
   }
