@@ -32,17 +32,29 @@ function repoRoot() {
 //   체크아웃되어도 repo 내부 파일은 항상 repo 라벨로 분류되어야 하기 때문(HYK-164).
 // - repo 내부가 아닐 때만, control-room `PM/relay/*-task.md` 드롭(레포 밖) · 메모리
 //   디렉터리(`/memory/`, 레포 밖)를 정규화된 절대경로 문자열로 폴백 검사한다.
+function classifyRepoRelative(relative) {
+  if (/^\.harness\/[^/]+-task\.md$/i.test(relative)) return "harness-task";
+  if (/^templates\//i.test(relative)) return "templates";
+  return null;
+}
+
 export function classifyWatchedPath(filePath, root) {
   if (typeof filePath !== "string" || filePath.length === 0) return null;
 
-  const { relative, insideRepo } = normalizeToRepoRelative(filePath, root);
+  // HYK-164-coder-2: normalizeToRepoRelative() unconditionally does
+  // root.replace(...) -- a missing/non-string root throws there instead of
+  // classifying. root is optional here (callers may not know the repo root),
+  // so skip the repo-relative attempt entirely and fall through to the
+  // absolute-path fallback below rather than touching that shared helper.
+  const hasRoot = typeof root === "string" && root.length > 0;
+  const { relative, insideRepo } = hasRoot
+    ? normalizeToRepoRelative(filePath, root)
+    : { relative: null, insideRepo: false };
   if (insideRepo && typeof relative === "string") {
-    if (/^\.harness\/[^/]+-task\.md$/i.test(relative)) return "harness-task";
-    if (/^templates\//i.test(relative)) return "templates";
-    return null;
+    return classifyRepoRelative(relative);
   }
 
-  const abs = normalizeAbsolute(filePath, root);
+  const abs = normalizeAbsolute(filePath, hasRoot ? root : undefined);
   const absLower = abs.toLowerCase();
   const basename = abs.split("/").pop() ?? "";
 

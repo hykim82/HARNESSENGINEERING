@@ -120,6 +120,58 @@ test("HYK-164 Windows path variants: backslashes and mixed case (PM/Relay) still
 });
 
 // ---------------------------------------------------------------------------
+// HYK-164-coder-2 (review-1 반려 수리): root(두 번째 인자) 미지정/이상값 호출에서도
+// repo-relative 판정을 시도하지 않고 절대경로 폴백으로 안전하게 내려가야 한다 -- 예외 0.
+// ---------------------------------------------------------------------------
+test("HYK-164-coder-2 regression: root omitted -- external pm/relay task path still classifies as pm-relay-task, no throw", () => {
+  assert.doesNotThrow(() => {
+    const r = classifyWatchedPath(
+      "D:/문서관리/하네스-관제실/PM/relay/coder-task.md",
+      undefined,
+    );
+    assert.equal(r, "pm-relay-task");
+  });
+});
+test("HYK-164-coder-2 regression: root omitted -- external memory path still classifies as memory, no throw", () => {
+  assert.doesNotThrow(() => {
+    const r = classifyWatchedPath(
+      "C:/Users/x/.claude-team/projects/p/memory/note.md",
+      undefined,
+    );
+    assert.equal(r, "memory");
+  });
+});
+test("HYK-164-coder-2 regression: root omitted -- non-watched path is still null, no throw", () => {
+  assert.doesNotThrow(() => {
+    const r = classifyWatchedPath(`${ROOT}/scripts/check/foo.mjs`, undefined);
+    assert.equal(r, null);
+  });
+});
+test("HYK-164-coder-2 regression: checkReportStyle with root omitted does not throw and returns a normal status", () => {
+  const r = checkReportStyle({
+    toolName: "Write",
+    filePath: "D:/문서관리/하네스-관제실/PM/relay/coder-task.md",
+    toolInput: { content: "ordinary task content" },
+  });
+  assert.equal(r.status, "PASS");
+  assert.equal(r.ok, true);
+});
+test("HYK-164-coder-2 regression: root as empty string / null / number is handled without throw (defined fallback, not fail-open)", () => {
+  for (const badRoot of ["", null, 0, 42]) {
+    assert.doesNotThrow(
+      () => {
+        const r = classifyWatchedPath(
+          "D:/문서관리/하네스-관제실/PM/relay/coder-task.md",
+          badRoot,
+        );
+        assert.equal(r, "pm-relay-task");
+      },
+      `root=${JSON.stringify(badRoot)} must not throw`,
+    );
+  }
+});
+
+// ---------------------------------------------------------------------------
 // known-bad: 5단 보고 골격 세트 (signature B)
 // ---------------------------------------------------------------------------
 test("BLOCK: 5-part report skeleton set as headings", () => {
