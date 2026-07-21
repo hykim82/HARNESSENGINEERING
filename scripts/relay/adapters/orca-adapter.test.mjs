@@ -227,7 +227,7 @@ test("deliverTask: codex engine (REVIEW) requires an explicit submit call after 
   });
   const r = deliverTask(
     { taskId: "HYK-169-coder-1", role: "REVIEW", seatHandle: "term_x" },
-    { execFn },
+    { execFn, confirmPastedFn: () => true },
   );
   assert.equal(r.ok, true);
   assert.equal(r.submitted, "explicit");
@@ -254,6 +254,7 @@ test("deliverTask: B11 -- confirmPastedFn is invoked before the submit call for 
       execFn,
       confirmPastedFn: () => {
         confirmedBeforeSubmit = true;
+        return true;
       },
     },
   );
@@ -273,7 +274,7 @@ test("deliverTask: submit retry -- fails once then succeeds on the 1 allowed ret
   });
   const r = deliverTask(
     { taskId: "HYK-169-coder-1", role: "REVIEW", seatHandle: "term_x" },
-    { execFn },
+    { execFn, confirmPastedFn: () => true },
   );
   assert.equal(r.ok, true);
   assert.equal(r.retries, 1);
@@ -291,10 +292,104 @@ test("deliverTask: submit retry cap -- default maxRetries=1 means at most 2 atte
   });
   const r = deliverTask(
     { taskId: "HYK-169-coder-1", role: "REVIEW", seatHandle: "term_x" },
-    { execFn },
+    { execFn, confirmPastedFn: () => true },
   );
   assert.equal(r.ok, false);
   assert.equal(submitCalls, 2); // 1 initial + 1 retry, never more
+});
+
+// ---------------------------------------------------------------------------
+// HYK-169-coder-3 (review-1 반려 결함 수리): confirmPastedFn의 반환값이
+// 실제로 제출을 막는지 -- "호출됐는지"만 보던 헛시험(vacuous, review-1
+// 지적)의 재발 방지. 모든 시험이 fake execFn의 호출 목록으로 `terminal`
+// 계열(제출) 호출이 정확히 0건임을 인자까지 확인한다.
+// ---------------------------------------------------------------------------
+function noTerminalCalls(execFn) {
+  return execFn.calls.every((argv) => argv[0] !== "terminal");
+}
+
+// 1. confirmPastedFn: () => false -> ok:false, 사유 코드 일치, submit 0건.
+test("deliverTask: PASTE_UNCONFIRMED -- confirmPastedFn returning false refuses submit with zero 'terminal send' calls", () => {
+  const execFn = fakeExecFn({
+    ...taskCreateDispatchStubs(),
+    terminal: { ok: true },
+  });
+  const r = deliverTask(
+    { taskId: "HYK-169-coder-1", role: "REVIEW", seatHandle: "term_x" },
+    { execFn, confirmPastedFn: () => false },
+  );
+  assert.equal(r.ok, false);
+  assert.match(r.reason, /PASTE_UNCONFIRMED/);
+  assert.equal(execFn.calls.length, 2); // task-create, dispatch only
+  assert.equal(noTerminalCalls(execFn), true);
+});
+
+// 2. confirmPastedFn: () => true -> 정상 제출 1회 (이미 위 B3/B11/retry 시험들이 커버).
+test("deliverTask: PASTE_UNCONFIRMED -- confirmPastedFn returning true allows exactly one submit call", () => {
+  const execFn = fakeExecFn({
+    ...taskCreateDispatchStubs(),
+    terminal: { ok: true },
+  });
+  const r = deliverTask(
+    { taskId: "HYK-169-coder-1", role: "REVIEW", seatHandle: "term_x" },
+    { execFn, confirmPastedFn: () => true },
+  );
+  assert.equal(r.ok, true);
+  assert.equal(execFn.calls.filter((argv) => argv[0] === "terminal").length, 1);
+});
+
+// 3. confirmPastedFn이 throw -> 실패 처리, submit 0건(붙여넣기 여부를 모르는
+// 예외 상황에서 Enter를 보내는 것보다 안전 실패가 항상 낫다).
+test("deliverTask: PASTE_UNCONFIRMED -- confirmPastedFn throwing is treated as unconfirmed, zero submit calls", () => {
+  const execFn = fakeExecFn({
+    ...taskCreateDispatchStubs(),
+    terminal: { ok: true },
+  });
+  const r = deliverTask(
+    { taskId: "HYK-169-coder-1", role: "REVIEW", seatHandle: "term_x" },
+    {
+      execFn,
+      confirmPastedFn: () => {
+        throw new Error("paste-check crashed");
+      },
+    },
+  );
+  assert.equal(r.ok, false);
+  assert.match(r.reason, /PASTE_UNCONFIRMED/);
+  assert.equal(noTerminalCalls(execFn), true);
+});
+
+// 4. confirmPastedFn 미주입 -> 보수적 기본값(false 취급)이 시험으로 고정.
+test("deliverTask: PASTE_UNCONFIRMED -- omitting confirmPastedFn defaults to unconfirmed (conservative default), zero submit calls", () => {
+  const execFn = fakeExecFn({
+    ...taskCreateDispatchStubs(),
+    terminal: { ok: true },
+  });
+  const r = deliverTask(
+    { taskId: "HYK-169-coder-1", role: "REVIEW", seatHandle: "term_x" },
+    { execFn },
+  );
+  assert.equal(r.ok, false);
+  assert.match(r.reason, /PASTE_UNCONFIRMED/);
+  assert.equal(execFn.calls.length, 2); // task-create, dispatch -- no submit
+  assert.equal(noTerminalCalls(execFn), true);
+});
+
+// non-strict truthy return (e.g. a non-boolean truthy value) must NOT count
+// as confirmed -- only strict `true` does (defensive against accidental
+// truthy returns like an object or a non-empty string).
+test("deliverTask: PASTE_UNCONFIRMED -- a truthy-but-not-true return value does not confirm (strict boolean check)", () => {
+  const execFn = fakeExecFn({
+    ...taskCreateDispatchStubs(),
+    terminal: { ok: true },
+  });
+  const r = deliverTask(
+    { taskId: "HYK-169-coder-1", role: "REVIEW", seatHandle: "term_x" },
+    { execFn, confirmPastedFn: () => "yes" },
+  );
+  assert.equal(r.ok, false);
+  assert.match(r.reason, /PASTE_UNCONFIRMED/);
+  assert.equal(noTerminalCalls(execFn), true);
 });
 
 test("deliverTask: task-create failure short-circuits before dispatch/submit", () => {

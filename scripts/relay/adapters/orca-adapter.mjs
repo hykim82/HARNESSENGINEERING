@@ -46,6 +46,7 @@ export const REASON = Object.freeze({
   SEAT_CREATE_FAILED: "SEAT_CREATE_FAILED",
   TASK_CREATE_FAILED: "TASK_CREATE_FAILED",
   DISPATCH_FAILED: "DISPATCH_FAILED",
+  PASTE_UNCONFIRMED: "PASTE_UNCONFIRMED",
   SUBMIT_FAILED: "SUBMIT_FAILED",
   TEARDOWN_FAILED: "TEARDOWN_FAILED",
   COMPLETE: "COMPLETE",
@@ -408,14 +409,41 @@ function createAndDispatch(c, opts) {
   return { ok: true, runtimeTaskId };
 }
 
-// B3/B11: codex 좌석만 붙여넣기 확인 후 제출(Enter) -- 실패 시 최대 1회
-// 재시도(비타협 제약: 자동 무한 재시도 금지).
-function submitWithRetry(seatHandle, runtimeTaskId, opts) {
-  const confirmPastedFn =
+// HYK-169-coder-3 (review-1 반려 결함 수리): confirmPastedFn의 **반환값을
+// 판정에 쓴다** -- 이전엔 호출만 하고 결과를 버려서 거짓 반환도 제출을
+// 막지 못했다(관찰 원장 B11의 실제 사고: 붙여넣기 미완료 상태에서 Enter가
+// 나가 빈 프롬프트/잘린 지시가 실행됨). `true`(엄격 동일 비교, truthy 비
+// boolean 오반환 방지)만 확인으로 인정한다. 훅이 throw해도 미확인으로
+// 처리(제출 없이 안전하게 실패) -- 붙여넣기 여부를 모르는 예외 상황에서
+// Enter를 보내는 것보다 항상 낫다.
+//
+// 기본값(미주입)은 **보수적으로 false** -- "확인됨"을 기본으로 두면 이번
+// 결함과 같은 구멍이 그대로 남는다(태스크 지시). 즉 codex 좌석 배달은
+// confirmPastedFn을 실제로 주입한 호출자만 제출까지 도달한다.
+function confirmPaste(opts) {
+  const fn =
     typeof opts.confirmPastedFn === "function"
       ? opts.confirmPastedFn
-      : () => true;
-  confirmPastedFn();
+      : () => false;
+  try {
+    return fn() === true;
+  } catch {
+    return false;
+  }
+}
+
+// B3/B11: codex 좌석만 붙여넣기 확인 후 제출(Enter) -- 실패 시 최대 1회
+// 재시도(비타협 제약: 자동 무한 재시도 금지). 붙여넣기 미확인이면 제출
+// 호출 0회로 즉시 실패(재시도 상한과 무관 -- 애초에 제출 루프에 진입하지
+// 않는다).
+function submitWithRetry(seatHandle, runtimeTaskId, opts) {
+  if (!confirmPaste(opts)) {
+    return {
+      ok: false,
+      reason: `orca-adapter: ${REASON.PASTE_UNCONFIRMED} -- confirmPastedFn did not confirm the paste; submit refused (0 terminal send calls)`,
+      runtimeTaskId,
+    };
+  }
 
   const maxRetries = Number.isSafeInteger(opts.maxRetries)
     ? opts.maxRetries
@@ -443,7 +471,8 @@ function submitWithRetry(seatHandle, runtimeTaskId, opts) {
 // ---- 포트 2: 배달(deliver) ----
 // ctx: { taskId, seatHandle, coordinatorHandle, role }
 // opts: { execFn, confirmPastedFn?, maxRetries? } -- confirmPastedFn: B11 시차 확인
-// (붙여넣기 완료를 확인한 뒤 제출) 훅, 기본은 항상 true(즉시 제출).
+// (붙여넣기 완료를 확인한 뒤 제출) 훅. codex(REVIEW) 배달에서만 쓰이며,
+// **미주입 시 기본은 미확인(false) -- 제출 거부**(coder-3, 보수적 기본값).
 export function deliverTask(ctx, opts = {}) {
   const c = isPlainObject(ctx) ? ctx : {};
   const invalid = validateDeliverInput(c, opts);
