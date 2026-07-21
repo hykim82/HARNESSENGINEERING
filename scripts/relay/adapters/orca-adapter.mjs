@@ -153,30 +153,29 @@ export function resolveSeatLocation({ role, requestedPath } = {}) {
   return { ok: true, reason: LOCATION_REASON.ALLOW, path: normalized };
 }
 
-// ---- HYK-169-coder-4 (review-2 반려 결함 수리): Orca 관리 워크트리 확인 ----
-// 반려 사유: 위치 정책은 경로 "문자열"만 검사해 `git worktree add`로 만든
-// Orca 미등록 폴더도 조건만 맞으면 통과시켰다(B15 -- Orca가 모르는
+// ---- HYK-169-coder-4/5 (review-2/review-3 반려 결함 수리): Orca 관리
+// 워크트리 확인 ----
+// review-2 반려 사유: 위치 정책은 경로 "문자열"만 검사해 `git worktree add`로
+// 만든 Orca 미등록 폴더도 조건만 맞으면 통과시켰다(B15 -- Orca가 모르는
 // 워크트리에 붙은 좌석은 Orca UI에서 안 보이는 유령 터미널이 된다). 좌석을
 // 열기 전에 `worktree list`로 대상 경로가 실제 등록돼 있는지 대조한다.
+//
+// coder-5 (review-3 반려, 사람 결정 2026-07-22): coder-4가 만든
+// `buildWorktreeCreateCommand`(`--path` 옵션)는 **실제 CLI에 없는 옵션을
+// 지어낸 것**이었다(실 CLI는 `--name` 기반) -- "실 orca 호출 0" 제약
+// 아래서는 argv를 검증할 방법이 없어 추측이 틀렸다. **생성 기능은 v1
+// 범위에서 제거한다** -- 워크트리 생성은 당분간 ORCH가 손으로 하고, 실물
+// CLI 검증 후 별도 이슈(후속, ORCH가 신설)로 되돌아온다. 이 어댑터는
+// "관리 워크트리인지 확인하고, 아니면 거부"까지만 한다(`allowCreate` 옵션·
+// `buildWorktreeCreateCommand`·생성 분기 전부 삭제 -- 조용한 삭제 방지를
+// 위해 이 주석에 사유를 남긴다).
 export const WORKTREE_REASON = Object.freeze({
   LIST_QUERY_FAILED: "WORKTREE_LIST_QUERY_FAILED",
   NOT_ORCA_MANAGED: "WORKTREE_NOT_ORCA_MANAGED",
-  CREATE_FAILED: "WORKTREE_CREATE_FAILED",
 });
 
 export function buildWorktreeListCommand() {
   return ["worktree", "list", "--json"];
-}
-export function buildWorktreeCreateCommand(worktreePath) {
-  return [
-    "worktree",
-    "create",
-    "--path",
-    worktreePath,
-    "--setup",
-    "skip",
-    "--json",
-  ];
 }
 
 function denyWorktree(reason, detail) {
@@ -218,65 +217,47 @@ function queryWorktreeList(opts) {
   return { ok: true, list };
 }
 
+// coder-5 (review-3 반려 결함 수리): 드라이브 루트("C:/")는 그대로 두고,
+// 그 밖의 모든 경로는 후행 `/`(정규화 후 백슬래시는 이미 슬래시로 바뀌어
+// 있다)를 제거해 canonical 형태로 맞춘다. 이게 없으면 등록 목록의 경로가
+// 후행 슬래시 유무만 다를 때(예: orca가 `.../wt/`로 보고하고 요청은
+// `.../wt`) 실제로 등록된 워크트리를 잘못 거부한다(review-3 실제 재현).
+function stripTrailingSeparator(normalized) {
+  if (/^[a-zA-Z]:\/$/.test(normalized)) return normalized;
+  return normalized.replace(/\/+$/, "");
+}
+
 // 정규화(normalizeAbsolute 재사용, coder-2와 동일 원칙 -- 대소문자·슬래시·
-// `..` 우회를 여기서도 다시 겪지 않는다) 후 등록 목록과 대조.
+// `..` 우회를 여기서도 다시 겪지 않는다) + 후행 구분자 제거 후 등록 목록과
+// 대조.
+function canonicalizeForComparison(rawPath) {
+  return stripTrailingSeparator(normalizeAbsolute(rawPath).toLowerCase());
+}
+
 function isPathManaged(list, requestedPath) {
-  const target = normalizeAbsolute(requestedPath).toLowerCase();
+  const target = canonicalizeForComparison(requestedPath);
   return list.some(
     (entry) =>
       isPlainObject(entry) &&
       isNonEmptyString(entry.path) &&
-      normalizeAbsolute(entry.path).toLowerCase() === target,
+      canonicalizeForComparison(entry.path) === target,
   );
 }
 
-function createManagedWorktree(requestedPath, opts) {
-  let response;
-  try {
-    response = opts.execFn(buildWorktreeCreateCommand(requestedPath));
-  } catch (err) {
-    return denyWorktree(
-      WORKTREE_REASON.CREATE_FAILED,
-      `checkWorktreeManaged: worktree create threw (${errText(err)})`,
-    );
-  }
-  if (!isPlainObject(response) || response.ok !== true) {
-    const detail =
-      isPlainObject(response) && isNonEmptyString(response.reason)
-        ? response.reason
-        : "response.ok !== true";
-    return denyWorktree(
-      WORKTREE_REASON.CREATE_FAILED,
-      `checkWorktreeManaged: worktree create failed -- ${detail}`,
-    );
-  }
-  const createdPath =
-    isPlainObject(response.result) && isNonEmptyString(response.result.path)
-      ? response.result.path
-      : requestedPath;
-  return { ok: true, managed: true, created: true, path: createdPath };
-}
-
-// 순수 조합 함수 -- ctx: { requestedPath, allowCreate? }, opts: { execFn }.
-// **기본값은 보수적**(coder-3에서 확립된 원칙 그대로): allowCreate 생략은
-// false로 취급 -- 등록 확인 없이 생성까지 자동으로 허용하면 이번 반려와
-// 같은 구멍(미등록 폴더가 조건만 맞으면 통과)이 다시 남는다.
-export function checkWorktreeManaged(
-  { requestedPath, allowCreate = false } = {},
-  opts = {},
-) {
+// 순수 조합 함수 -- ctx: { requestedPath }, opts: { execFn }. 미등록 경로는
+// **항상 거부**(coder-5: 생성 기능 v1 제거, 위 헤더 주석 참조) -- 호출자가
+// 어떤 옵션을 넘겨도(예: 이전 `allowCreate`와 같은 이름의 인자) 무시되고
+// 거부된다(생성 유도가 불가능함을 시험으로 고정).
+export function checkWorktreeManaged({ requestedPath } = {}, opts = {}) {
   const listResult = queryWorktreeList(opts);
   if (!listResult.ok) return listResult;
   if (isPathManaged(listResult.list, requestedPath)) {
-    return { ok: true, managed: true, created: false, path: requestedPath };
+    return { ok: true, managed: true, path: requestedPath };
   }
-  if (!allowCreate) {
-    return denyWorktree(
-      WORKTREE_REASON.NOT_ORCA_MANAGED,
-      `checkWorktreeManaged: '${requestedPath}' is not a registered Orca worktree and allowCreate was not set`,
-    );
-  }
-  return createManagedWorktree(requestedPath, opts);
+  return denyWorktree(
+    WORKTREE_REASON.NOT_ORCA_MANAGED,
+    `checkWorktreeManaged: '${requestedPath}' is not a registered Orca worktree -- worktree creation is out of scope for v1 (ORCH creates it manually; see follow-up issue)`,
+  );
 }
 
 // ---- 미검증 가정: 좌석 생성/제출/비차단 조회/종료 argv (실 orca 미호출) ----
@@ -497,16 +478,11 @@ export function ensureSeat(ctx, opts = {}) {
 
   // review-2 (coder-4): 새 좌석 경로에서만 Orca 관리 워크트리 여부를
   // 확인한다(reuse 경로는 위에서 이미 execFn 없이 반환됨 -- 기존 시험
-  // 계약 "reuse는 execFn 호출 0회" 무변경). 등록 확인 실패/미등록/생성
-  // 거부 시 A3/A5 복사·좌석 생성 호출은 전혀 일어나지 않는다.
-  // review-2 (coder-4): 새 좌석 경로에서만 Orca 관리 워크트리 여부를
-  // 확인한다(reuse 경로는 위에서 이미 execFn 없이 반환됨 -- 기존 시험
-  // 계약 "reuse는 execFn 호출 0회" 무변경). 등록 확인 실패/미등록/생성
-  // 거부 시 A3/A5 복사·좌석 생성 호출은 전혀 일어나지 않는다.
-  const managed = checkWorktreeManaged(
-    { requestedPath: c.worktreePath, allowCreate: opts.allowCreate === true },
-    opts,
-  );
+  // 계약 "reuse는 execFn 호출 0회" 무변경). 등록 확인 실패/미등록 시
+  // A3/A5 복사·좌석 생성 호출은 전혀 일어나지 않는다. coder-5: 생성 유도
+  // 옵션은 없다 -- 호출자가 무엇을 넘겨도 checkWorktreeManaged는 그 값을
+  // 읽지 않는다(위 헤더 주석, 생성 기능 v1 제거).
+  const managed = checkWorktreeManaged({ requestedPath: c.worktreePath }, opts);
   if (!managed.ok) {
     return {
       ok: false,

@@ -13,7 +13,6 @@ import {
   buildDispatchCleanupCommand,
   buildWorktreeRemoveCommand,
   buildWorktreeListCommand,
-  buildWorktreeCreateCommand,
   checkWorktreeManaged,
   parseWorktreeList,
   WORKTREE_REASON,
@@ -817,12 +816,11 @@ test("ensureSeat: rejects the workspaces root itself with zero execFn calls (rev
 });
 
 // checkWorktreeManaged unit tests (pure port, no ensureSeat wiring).
-test("checkWorktreeManaged: PASS -- a path present in the managed list is reported managed, created:false", () => {
+test("checkWorktreeManaged: PASS -- a path present in the managed list is reported managed", () => {
   const execFn = fakeExecFn({ list: managedWorktreeStub(VALID_WORKTREE) });
   const r = checkWorktreeManaged({ requestedPath: VALID_WORKTREE }, { execFn });
   assert.equal(r.ok, true);
   assert.equal(r.managed, true);
-  assert.equal(r.created, false);
   assert.equal(worktreeCreateCallCount(execFn), 0);
 });
 
@@ -837,8 +835,8 @@ test("checkWorktreeManaged: PASS -- managed-list match is normalized (case/backs
   assert.equal(r.managed, true);
 });
 
-// 2. 관리 목록에 없는 경로 + allowCreate 미지정 -> 거부, 좌석 생성 호출 0건.
-test("checkWorktreeManaged: BLOCK -- an unregistered path with allowCreate omitted is rejected (NOT_ORCA_MANAGED), no create call", () => {
+// 2. 관리 목록에 없는 경로 -> 항상 거부, 좌석 생성 호출 0건.
+test("checkWorktreeManaged: BLOCK -- an unregistered path is rejected (NOT_ORCA_MANAGED), no create call", () => {
   const execFn = fakeExecFn({
     list: managedWorktreeStub("C:/some/other/worktree"),
   });
@@ -848,7 +846,7 @@ test("checkWorktreeManaged: BLOCK -- an unregistered path with allowCreate omitt
   assert.equal(worktreeCreateCallCount(execFn), 0);
 });
 
-test("ensureSeat: rejects an unregistered worktree with allowCreate omitted -- zero seat-creation calls (review-2 repro)", () => {
+test("ensureSeat: rejects an unregistered worktree -- zero seat-creation calls (review-2 repro)", () => {
   const execFn = fakeExecFn({
     list: managedWorktreeStub("C:/some/other/worktree"),
   });
@@ -862,62 +860,44 @@ test("ensureSeat: rejects an unregistered worktree with allowCreate omitted -- z
   assert.equal(worktreeCreateCallCount(execFn), 0);
 });
 
-// 3. 관리 목록에 없는 경로 + allowCreate:true -> worktree create argv 정확히
-// 구성되고, 그 결과 경로로 좌석 생성까지 이어진다.
-test("buildWorktreeCreateCommand: exact argv shape (--path, --setup skip)", () => {
-  const argv = buildWorktreeCreateCommand(VALID_WORKTREE);
-  assert.deepEqual(argv.slice(0, 2), ["worktree", "create"]);
-  assert.ok(argv.includes("--path"));
-  assert.ok(argv.includes(VALID_WORKTREE));
-  assert.ok(argv.includes("--setup"));
-  assert.ok(argv.includes("skip"));
-});
-
-test("checkWorktreeManaged: allowCreate:true on an unregistered path calls worktree create and returns managed:true, created:true", () => {
+// coder-5 (review-3 반려, 사람 결정 2026-07-22): 생성 기능 v1 제거 --
+// buildWorktreeCreateCommand는 더 이상 존재하지 않는다(실제 CLI는 --name
+// 기반이고 실물 검증 전까지 argv를 만들지 않는다). 아래 3개 시험은 coder-4가
+// 만든 "allowCreate:true로 생성까지 이어진다"는 known-good 시험을 **삭제
+// 대신 "옵션을 넘겨도 무시되고 거부된다"는 known-bad로 전환**한 것이다
+// (태스크 지시 §7 -- 무의미해진 시험을 조용히 지우지 않는다).
+test("checkWorktreeManaged: passing an 'allowCreate'-named field is silently ignored -- still rejected, never calls worktree create (creation removed in v1)", () => {
   const execFn = fakeExecFn({
     list: managedWorktreeStub("C:/some/other/worktree"),
-    create: { ok: true, result: { path: VALID_WORKTREE } },
-  });
-  const r = checkWorktreeManaged(
-    { requestedPath: VALID_WORKTREE, allowCreate: true },
-    { execFn },
-  );
-  assert.equal(r.ok, true);
-  assert.equal(r.managed, true);
-  assert.equal(r.created, true);
-  assert.equal(r.path, VALID_WORKTREE);
-  assert.equal(worktreeCreateCallCount(execFn), 1);
-  assert.deepEqual(execFn.calls[1], buildWorktreeCreateCommand(VALID_WORKTREE));
-});
-
-test("ensureSeat: allowCreate:true on an unregistered path creates the worktree then proceeds to seat creation (review-2 §2a)", () => {
-  const execFn = fakeExecFn({
-    list: managedWorktreeStub("C:/some/other/worktree"),
-    create: { ok: true, result: { path: VALID_WORKTREE } },
-    terminal: { ok: true, result: { handle: "term_new" } },
-  });
-  const r = ensureSeat(
-    { role: "REVIEW", worktreePath: VALID_WORKTREE },
-    { execFn, allowCreate: true },
-  );
-  assert.equal(r.ok, true);
-  assert.equal(r.seatHandle, "term_new");
-  assert.equal(worktreeCreateCallCount(execFn), 1);
-  assert.equal(terminalCallCount(execFn), 1);
-});
-
-test("checkWorktreeManaged: worktree create failure is surfaced as CREATE_FAILED", () => {
-  const execFn = fakeExecFn({
-    list: managedWorktreeStub("C:/some/other/worktree"),
-    create: { ok: false, reason: "disk full" },
+    create: { ok: true, result: { path: VALID_WORKTREE } }, // stubbed but must never fire
   });
   const r = checkWorktreeManaged(
     { requestedPath: VALID_WORKTREE, allowCreate: true },
     { execFn },
   );
   assert.equal(r.ok, false);
-  assert.equal(r.reason, WORKTREE_REASON.CREATE_FAILED);
-  assert.match(r.detail, /disk full/);
+  assert.equal(r.reason, WORKTREE_REASON.NOT_ORCA_MANAGED);
+  assert.equal(worktreeCreateCallCount(execFn), 0);
+});
+
+test("ensureSeat: passing opts.allowCreate:true on an unregistered path is ignored -- still rejected, zero seat-creation calls (creation removed in v1)", () => {
+  const execFn = fakeExecFn({
+    list: managedWorktreeStub("C:/some/other/worktree"),
+    create: { ok: true, result: { path: VALID_WORKTREE } }, // stubbed but must never fire
+    terminal: { ok: true, result: { handle: "term_new" } }, // stubbed but must never fire
+  });
+  const r = ensureSeat(
+    { role: "REVIEW", worktreePath: VALID_WORKTREE },
+    { execFn, allowCreate: true },
+  );
+  assert.equal(r.ok, false);
+  assert.equal(r.worktreeReason, WORKTREE_REASON.NOT_ORCA_MANAGED);
+  assert.equal(worktreeCreateCallCount(execFn), 0);
+  assert.equal(terminalCallCount(execFn), 0);
+});
+
+test("WORKTREE_REASON no longer has a CREATE_FAILED entry (creation removed in v1)", () => {
+  assert.equal("CREATE_FAILED" in WORKTREE_REASON, false);
 });
 
 // 4. 관리 목록에 있는 경로 -> worktree create 호출 0건, 좌석만 생성(재사용).
@@ -965,14 +945,68 @@ test("ensureSeat: a failing worktree-list query is a conservative failure, zero 
   assert.equal(terminalCallCount(execFn), 0);
 });
 
-// allowCreate 기본값 -- 보수적(생략 시 false 취급, coder-3 원칙 재확인).
-test("checkWorktreeManaged: allowCreate omitted on an unregistered path defaults to rejection (conservative default)", () => {
+// coder-5: no creation option exists at all anymore -- an unregistered path
+// is unconditionally rejected with no way to opt into creation (conservative
+// by construction, not by a default value -- coder-3 principle carried
+// forward at the API-surface level).
+test("checkWorktreeManaged: an unregistered path is unconditionally rejected -- there is no option to opt into creation", () => {
   const execFn = fakeExecFn({
     list: managedWorktreeStub("C:/some/other/worktree"),
   });
   const r = checkWorktreeManaged({ requestedPath: VALID_WORKTREE }, { execFn });
   assert.equal(r.ok, false);
   assert.equal(r.reason, WORKTREE_REASON.NOT_ORCA_MANAGED);
+});
+
+// ---------------------------------------------------------------------------
+// HYK-169-coder-5 (review-3 반려 결함 수리): 등록 목록 대조가 후행 구분자
+// (`/`, `\`)에서 실패해 실제 등록된 워크트리를 잘못 거부하던 결함.
+// ---------------------------------------------------------------------------
+
+// 1. 후행 `/`, 후행 `\`, 후행 없음 -- 셋 다 같은 등록 경로로 통과.
+test("checkWorktreeManaged: trailing '/' on the registered entry does not break the match", () => {
+  const execFn = fakeExecFn({
+    list: managedWorktreeStub(`${VALID_WORKTREE}/`),
+  });
+  const r = checkWorktreeManaged({ requestedPath: VALID_WORKTREE }, { execFn });
+  assert.equal(r.ok, true);
+  assert.equal(r.managed, true);
+});
+
+test("checkWorktreeManaged: trailing '\\' on the registered entry does not break the match", () => {
+  const execFn = fakeExecFn({
+    list: managedWorktreeStub(`${VALID_WORKTREE.replace(/\//g, "\\")}\\`),
+  });
+  const r = checkWorktreeManaged({ requestedPath: VALID_WORKTREE }, { execFn });
+  assert.equal(r.ok, true);
+  assert.equal(r.managed, true);
+});
+
+test("checkWorktreeManaged: trailing separator on the *requested* path (not just the registered entry) also matches", () => {
+  const execFn = fakeExecFn({ list: managedWorktreeStub(VALID_WORKTREE) });
+  const r = checkWorktreeManaged(
+    { requestedPath: `${VALID_WORKTREE}/` },
+    { execFn },
+  );
+  assert.equal(r.ok, true);
+  assert.equal(r.managed, true);
+});
+
+// 2. 드라이브 루트(C:\)는 후행 제거로 망가지지 않는지(경계 케이스).
+test("checkWorktreeManaged: a drive root ('C:/') registered entry is not mangled by trailing-separator stripping", () => {
+  const execFn = fakeExecFn({ list: managedWorktreeStub("C:\\") });
+  const r = checkWorktreeManaged({ requestedPath: "C:/" }, { execFn });
+  assert.equal(r.ok, true);
+  assert.equal(r.managed, true);
+});
+
+// 3. 대소문자·역슬래시·`..` 조합 + 후행 구분자 동시 변형도 통과.
+test("checkWorktreeManaged: combined case/backslash/'..'/trailing-separator variance still matches (all coder-2/coder-5 normalization together)", () => {
+  const execFn = fakeExecFn({ list: managedWorktreeStub(VALID_WORKTREE) });
+  const weird = `${WORKSPACES_ROOT.toUpperCase().replace(/\//g, "\\")}\\..\\${WORKSPACES_ROOT.split("/").pop().toUpperCase()}\\HARNESSENGINEERING\\hyk-test-fixture\\`;
+  const r = checkWorktreeManaged({ requestedPath: weird }, { execFn });
+  assert.equal(r.ok, true);
+  assert.equal(r.managed, true);
 });
 
 test("parseWorktreeList: pure parser -- extracts result.worktrees, null on any malformed shape", () => {
