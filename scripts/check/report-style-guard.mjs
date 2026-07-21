@@ -1,6 +1,9 @@
 import { readFileSync } from "node:fs";
 import { execSync } from "node:child_process";
-import { normalizeAbsolute, normalizeToRepoRelative } from "./path-normalize.mjs";
+import {
+  normalizeAbsolute,
+  normalizeToRepoRelative,
+} from "./path-normalize.mjs";
 
 // HYK-143: 사람 대상 "보고 톤 지침"(관제실 orchestrator-report-style.md)이 워커 태스크
 // 파일·템플릿·메모리 같은 작업 문서로 새어 들어가는 것을 기계로 차단하는 PreToolUse 가드.
@@ -15,30 +18,37 @@ const TASK_FILENAME_RE = /-task\.md$/i;
 
 function repoRoot() {
   try {
-    return execSync("git rev-parse --show-toplevel", { encoding: "utf8" }).trim();
+    return execSync("git rev-parse --show-toplevel", {
+      encoding: "utf8",
+    }).trim();
   } catch {
     return process.cwd();
   }
 }
 
 // 감시 대상 경로인지 판정하고, 맞으면 어떤 부류인지 라벨을 돌려준다(비대상=null).
-// - control-room `PM/relay/*-task.md` 드롭(레포 밖) · 메모리 디렉터리(`/memory/`, 레포 밖)는
-//   정규화된 절대경로 문자열로 검사한다.
-// - repo `.harness/<role>-task.md` · `templates/**`는 repo-relative로 검사한다.
+// - repo `.harness/<role>-task.md` · `templates/**`는 repo-relative로 먼저 검사한다
+//   (insideRepo 우선). repo나 그 워크트리가 우연히 `.../PM/relay/...` 같은 경로 아래에
+//   체크아웃되어도 repo 내부 파일은 항상 repo 라벨로 분류되어야 하기 때문(HYK-164).
+// - repo 내부가 아닐 때만, control-room `PM/relay/*-task.md` 드롭(레포 밖) · 메모리
+//   디렉터리(`/memory/`, 레포 밖)를 정규화된 절대경로 문자열로 폴백 검사한다.
 export function classifyWatchedPath(filePath, root) {
   if (typeof filePath !== "string" || filePath.length === 0) return null;
-  const abs = normalizeAbsolute(filePath, root);
-  const absLower = abs.toLowerCase();
-  const basename = abs.split("/").pop() ?? "";
-
-  if (/\/pm\/relay\//i.test(abs) && TASK_FILENAME_RE.test(basename)) return "pm-relay-task";
-  if (absLower.includes("/memory/")) return "memory";
 
   const { relative, insideRepo } = normalizeToRepoRelative(filePath, root);
   if (insideRepo && typeof relative === "string") {
     if (/^\.harness\/[^/]+-task\.md$/i.test(relative)) return "harness-task";
     if (/^templates\//i.test(relative)) return "templates";
+    return null;
   }
+
+  const abs = normalizeAbsolute(filePath, root);
+  const absLower = abs.toLowerCase();
+  const basename = abs.split("/").pop() ?? "";
+
+  if (/\/pm\/relay\//i.test(abs) && TASK_FILENAME_RE.test(basename))
+    return "pm-relay-task";
+  if (absLower.includes("/memory/")) return "memory";
   return null;
 }
 
@@ -52,12 +62,18 @@ export function classifyWatchedPath(filePath, root) {
 // 인용(prose/backtick)은 지침을 "가리키는" 참조일 뿐 톤 유입이 아니고, 실제 지침 복사는
 // 그 헤딩을 함께 가져오므로, 헤딩 형태를 유입의 결정 신호로 삼는다. 이 정직화는
 // docs/enforcement-v1.md 한계 절에 명기한다.
-const STYLE_HEADING_RE = /^[ \t]{0,3}#{1,6}[ \t]+.*(?:기술[ \t]*답변[ \t]*톤|orchestrator-report-style)/i;
+const STYLE_HEADING_RE =
+  /^[ \t]{0,3}#{1,6}[ \t]+.*(?:기술[ \t]*답변[ \t]*톤|orchestrator-report-style)/i;
 export function matchSignatureA(content) {
   const lines = content.split(/\r?\n/);
   for (let i = 0; i < lines.length; i++) {
     if (STYLE_HEADING_RE.test(lines[i])) {
-      return { matched: true, signature: "A", line: i + 1, detail: `report-style-guide heading copied at line ${i + 1}: ${lines[i].trim()}` };
+      return {
+        matched: true,
+        signature: "A",
+        line: i + 1,
+        detail: `report-style-guide heading copied at line ${i + 1}: ${lines[i].trim()}`,
+      };
     }
   }
   return { matched: false };
@@ -73,7 +89,10 @@ function structuralItemRe(token) {
   // line start -> optional heading (#..) and/or bold (**) and/or number (N. / N)) lead -> token.
   // NOTE: `\b` is wrong here -- Korean syllables are not \w, so a `token\b` never matches.
   // Use a negative-lookahead hangul boundary so "결론" matches but "결론적으로" (prose) does not.
-  return new RegExp(`^[ \\t]{0,3}(?:#{1,6}[ \\t]+)?(?:\\*\\*[ \\t]*)?(?:\\d+[.)][ \\t]+)?${t}(?![가-힣])`, "m");
+  return new RegExp(
+    `^[ \\t]{0,3}(?:#{1,6}[ \\t]+)?(?:\\*\\*[ \\t]*)?(?:\\d+[.)][ \\t]+)?${t}(?![가-힣])`,
+    "m",
+  );
 }
 export function matchSignatureB(content) {
   const found = {};
@@ -82,7 +101,10 @@ export function matchSignatureB(content) {
     const lines = content.split(/\r?\n/);
     for (let i = 0; i < lines.length; i++) {
       // require the token to be structurally led (heading/number/bold), not bare prose.
-      if (re.test(lines[i]) && /^[ \t]{0,3}(#{1,6}[ \t]|\*\*|\d+[.)][ \t])/.test(lines[i])) {
+      if (
+        re.test(lines[i]) &&
+        /^[ \t]{0,3}(#{1,6}[ \t]|\*\*|\d+[.)][ \t])/.test(lines[i])
+      ) {
         found[token] = i + 1;
         break;
       }
@@ -90,43 +112,102 @@ export function matchSignatureB(content) {
   }
   const present = REPORT_SKELETON_TOKENS.filter((t) => found[t] !== undefined);
   if (present.length === REPORT_SKELETON_TOKENS.length) {
-    return { matched: true, signature: "B", detail: `5-part report skeleton set present as structural items: ${present.map((t) => `${t}@L${found[t]}`).join(", ")}` };
+    return {
+      matched: true,
+      signature: "B",
+      detail: `5-part report skeleton set present as structural items: ${present.map((t) => `${t}@L${found[t]}`).join(", ")}`,
+    };
   }
   return { matched: false };
 }
 
-// 순수 판정. status: SKIP(비대상/비Write) · UNJUDGABLE(입력 불확실, fail-open) ·
-// BLOCK(확정 매치) · PASS(대상이나 매치 없음).
-export function checkReportStyle({ toolName, filePath, toolInput, repoRoot: root } = {}) {
+// checkReportStyle의 SKIP/UNJUDGABLE 사전 판정만 분리(복잡도 분산 -- 판정 자체는 불변).
+function precheck({ toolName, filePath, toolInput, root }) {
   if (!WRITE_TOOLS.has(toolName)) {
-    return { status: "SKIP", ok: true, reason: `report-style-guard: tool '${toolName ?? ""}' is not a write; not checked` };
+    return {
+      done: {
+        status: "SKIP",
+        ok: true,
+        reason: `report-style-guard: tool '${toolName ?? ""}' is not a write; not checked`,
+      },
+    };
   }
   if (typeof filePath !== "string" || filePath.length === 0) {
-    return { status: "UNJUDGABLE", ok: true, reason: "report-style-guard: UNJUDGABLE -- no file path (fail-open)" };
+    return {
+      done: {
+        status: "UNJUDGABLE",
+        ok: true,
+        reason: "report-style-guard: UNJUDGABLE -- no file path (fail-open)",
+      },
+    };
   }
   const watched = classifyWatchedPath(filePath, root);
   if (!watched) {
-    return { status: "SKIP", ok: true, reason: `report-style-guard: '${filePath}' is not a watched work-document path; not checked` };
+    return {
+      done: {
+        status: "SKIP",
+        ok: true,
+        reason: `report-style-guard: '${filePath}' is not a watched work-document path; not checked`,
+      },
+    };
   }
   const content = toolInput?.content ?? toolInput?.new_string;
   if (typeof content !== "string") {
-    return { status: "UNJUDGABLE", ok: true, reason: `report-style-guard: UNJUDGABLE -- watched path (${watched}) but no string content on tool_input (fail-open)` };
+    return {
+      done: {
+        status: "UNJUDGABLE",
+        ok: true,
+        reason: `report-style-guard: UNJUDGABLE -- watched path (${watched}) but no string content on tool_input (fail-open)`,
+      },
+    };
   }
+  return { watched, content };
+}
+
+// 순수 판정. status: SKIP(비대상/비Write) · UNJUDGABLE(입력 불확실, fail-open) ·
+// BLOCK(확정 매치) · PASS(대상이나 매치 없음).
+export function checkReportStyle({
+  toolName,
+  filePath,
+  toolInput,
+  repoRoot: root,
+} = {}) {
+  const pre = precheck({ toolName, filePath, toolInput, root });
+  if (pre.done) return pre.done;
+  const { watched, content } = pre;
 
   const a = matchSignatureA(content);
   if (a.matched) {
-    return { status: "BLOCK", ok: false, signature: "A", reason: `report-style-guard: BLOCK -- report-tone style guide leaking into ${watched} path '${filePath}' (signature A: ${a.detail})` };
+    return {
+      status: "BLOCK",
+      ok: false,
+      signature: "A",
+      reason: `report-style-guard: BLOCK -- report-tone style guide leaking into ${watched} path '${filePath}' (signature A: ${a.detail})`,
+    };
   }
   const b = matchSignatureB(content);
   if (b.matched) {
-    return { status: "BLOCK", ok: false, signature: "B", reason: `report-style-guard: BLOCK -- report skeleton leaking into ${watched} path '${filePath}' (signature B: ${b.detail})` };
+    return {
+      status: "BLOCK",
+      ok: false,
+      signature: "B",
+      reason: `report-style-guard: BLOCK -- report skeleton leaking into ${watched} path '${filePath}' (signature B: ${b.detail})`,
+    };
   }
-  return { status: "PASS", ok: true, reason: `report-style-guard: PASS -- ${watched} path '${filePath}' carries no report-style signature` };
+  return {
+    status: "PASS",
+    ok: true,
+    reason: `report-style-guard: PASS -- ${watched} path '${filePath}' carries no report-style signature`,
+  };
 }
 
-const invokedDirectly = process.argv[1] && process.argv[1].replace(/\\/g, "/").endsWith("scripts/check/report-style-guard.mjs");
+const invokedDirectly =
+  process.argv[1] &&
+  process.argv[1]
+    .replace(/\\/g, "/")
+    .endsWith("scripts/check/report-style-guard.mjs");
 if (invokedDirectly) {
-  let raw = "";
+  let raw;
   try {
     raw = readFileSync(0, "utf8");
   } catch {
@@ -141,7 +222,12 @@ if (invokedDirectly) {
   }
   const toolInput = hookInput.tool_input || {};
   const filePath = toolInput.file_path || toolInput.notebook_path;
-  const result = checkReportStyle({ toolName: hookInput.tool_name, filePath, toolInput, repoRoot: repoRoot() });
+  const result = checkReportStyle({
+    toolName: hookInput.tool_name,
+    filePath,
+    toolInput,
+    repoRoot: repoRoot(),
+  });
   if (result.status === "BLOCK") {
     console.error(result.reason);
     process.exit(2);
