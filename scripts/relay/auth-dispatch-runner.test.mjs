@@ -230,13 +230,33 @@ function readArmState(dir) {
   return JSON.parse(readFileSync(armStorePath(dir, ARM_ID), "utf8"));
 }
 
+// HYK-166-coder-1 (시한폭탄 수리): runAuthDispatch(input, opts)의 opts(2번째
+// 인자)는 이 파일의 모든 호출부에서 한 번도 전달되지 않았다 -- 그래서
+// claimTx/arm-state의 만료 판정이 opts.armDeps.nowFn을 못 받고 기본값(실
+// Date.now())으로 떨어졌다. env.nowMs(gate 판정)는 이미 fixture가 고정한
+// 시각을 쓰는데, arm-state 쪽만 실 벽시계를 봐서 날짜가 지나면(2026-07-20
+// 이후) 하드코딩 expires_at을 실제로 넘겨버려 사후 만료 fail이 났다(9건).
+// 이 헬퍼가 모든 호출을 한 지점으로 모아 armDeps.nowFn을 **env.nowMs를 매
+// 호출 시점에 다시 읽는 클로저**로 주입한다 -- env.nowMs를 나중에 mutate하는
+// 테스트(예: "expired grant")도 gate와 arm-state가 항상 같은 시점을 보게
+// 된다(값을 한 번 복사해두는 게 아니라 참조를 유지 -- 일관성이 구조적으로
+// 보장됨). 날짜를 미래로 미루는 미봉책이 아니라, 애초에 실 벽시계를 전혀
+// 참조하지 않게 만드는 근본 수리(HYK-165 coder-2의 pull-supervisor.test.mjs
+// armDeps.nowFn 패턴과 동일).
+function callAuthDispatch(env, opts = {}) {
+  return runAuthDispatch(env, {
+    armDeps: { nowFn: () => env.nowMs },
+    ...opts,
+  });
+}
+
 // ---------------------------------------------------------------------------
 // known-good end-to-end
 // ---------------------------------------------------------------------------
 test("runAuthDispatch: known-good flow -> DISPATCHED, adapter called exactly once, terminal DISARMED", () => {
   withTempDir((dir) => {
     const env = buildEnv(dir);
-    const result = runAuthDispatch(env);
+    const result = callAuthDispatch(env);
     assert.equal(result.ok, true);
     assert.equal(result.dispatched, true);
     assert.equal(result.adapterCalled, true);
@@ -252,11 +272,11 @@ test("runAuthDispatch: known-good flow -> DISPATCHED, adapter called exactly onc
 test("runAuthDispatch: replaying the SAME signed grant (same jti) a second time -> JTI_ALREADY_CLAIMED, adapter NOT called again", () => {
   withTempDir((dir) => {
     const env = buildEnv(dir);
-    const first = runAuthDispatch(env);
+    const first = callAuthDispatch(env);
     assert.equal(first.ok, true);
     assert.equal(env.adapter.calls.length, 1);
 
-    const second = runAuthDispatch(env);
+    const second = callAuthDispatch(env);
     assert.equal(second.ok, false);
     assert.equal(second.reason, RUN_REASON.JTI_ALREADY_CLAIMED);
     assert.equal(second.adapterCalled, false);
@@ -275,7 +295,7 @@ test("runAuthDispatch: invalid signature (G8 negative control) -> GATE_DENIED, a
   withTempDir((dir) => {
     const env = buildEnv(dir);
     const tampered = { ...env, signature: "not-a-valid-signature-at-all" };
-    const result = runAuthDispatch(tampered);
+    const result = callAuthDispatch(tampered);
     assert.equal(result.ok, false);
     assert.equal(result.reason, RUN_REASON.GATE_DENIED);
     assert.equal(result.adapterCalled, false);
@@ -354,7 +374,7 @@ test("runAuthDispatch: liveness=false -> LIVENESS_DENIED, adapter not called, ar
   withTempDir((dir) => {
     const env = buildEnv(dir);
     env.liveness.observed = { ...env.liveness.observed, liveness: false };
-    const result = runAuthDispatch(env);
+    const result = callAuthDispatch(env);
     assert.equal(result.ok, false);
     assert.equal(result.reason, RUN_REASON.LIVENESS_DENIED);
     assert.equal(result.adapterCalled, false);
@@ -370,7 +390,7 @@ test("runAuthDispatch: agent_instance changed between signed target and observed
       ...env.liveness.observed,
       agent_instance: "different-agent",
     };
-    const result = runAuthDispatch(env);
+    const result = callAuthDispatch(env);
     assert.equal(result.ok, false);
     assert.equal(result.reason, RUN_REASON.LIVENESS_DENIED);
     assert.equal(env.adapter.calls.length, 0);
@@ -395,7 +415,7 @@ for (const [label, spec] of BAD_SPECS) {
     withTempDir((dir) => {
       const env = buildEnv(dir);
       env.spec = spec;
-      const result = runAuthDispatch(env);
+      const result = callAuthDispatch(env);
       assert.equal(result.ok, false, label);
       assert.equal(result.reason, RUN_REASON.SPEC_INVALID, label);
       assert.equal(env.adapter.calls.length, 0, label);
@@ -414,7 +434,7 @@ test("runAuthDispatch: valid count = 1 -- among independent single-shot attempts
     withTempDir((dir) => {
       const env = buildEnv(dir);
       env.spec = spec;
-      return runAuthDispatch(env).ok === true;
+      return callAuthDispatch(env).ok === true;
     }),
   );
   const successCount = outcomes.filter(Boolean).length;
@@ -436,14 +456,14 @@ test("runAuthDispatch: valid count = 1 -- among independent single-shot attempts
 test("runAuthDispatch: adapter rejects (ok:false) -> START_FAILED via arm-state's own startup_failure disarm, terminal DISARMED", () => {
   withTempDir((dir) => {
     const env = buildEnv(dir, { adapterBehavior: "reject" });
-    const result = runAuthDispatch(env);
+    const result = callAuthDispatch(env);
     assert.equal(result.ok, false);
     assert.equal(result.reason, RUN_REASON.START_FAILED);
     assert.equal(result.adapterCalled, true);
     assert.equal(env.adapter.calls.length, 1);
     assert.equal(readArmState(dir).state, "DISARMED");
     // no auto-retry: replaying the same grant must not call the adapter again.
-    const retry = runAuthDispatch(env);
+    const retry = callAuthDispatch(env);
     assert.equal(retry.ok, false);
     assert.equal(
       env.adapter.calls.length,
@@ -456,7 +476,7 @@ test("runAuthDispatch: adapter rejects (ok:false) -> START_FAILED via arm-state'
 test("runAuthDispatch: adapter throws -> START_FAILED via arm-state's own startup_failure disarm, terminal DISARMED", () => {
   withTempDir((dir) => {
     const env = buildEnv(dir, { adapterBehavior: "throw" });
-    const result = runAuthDispatch(env);
+    const result = callAuthDispatch(env);
     assert.equal(result.ok, false);
     assert.equal(result.reason, RUN_REASON.START_FAILED);
     assert.equal(env.adapter.calls.length, 1);
@@ -468,7 +488,7 @@ test("runAuthDispatch: expired grant -> GATE_DENIED, terminal DISARMED, no dispa
   withTempDir((dir) => {
     const env = buildEnv(dir);
     env.nowMs = Date.parse(GOOD_FIELDS.expires_at) + 1;
-    const result = runAuthDispatch(env);
+    const result = callAuthDispatch(env);
     assert.equal(result.ok, false);
     assert.equal(result.reason, RUN_REASON.GATE_DENIED);
     assert.equal(env.adapter.calls.length, 0);
@@ -484,14 +504,19 @@ test("runAuthDispatch/recoverAuthDispatch: claim-then-crash recovers to DISARMED
     const env = buildEnv(dir);
     // 러너를 거치지 않고 직접 claimTx만 호출해 "claim 후 crash"를 재현한다
     // (startTx는 절대 호출하지 않음 -- 프로세스가 여기서 죽었다고 가정).
-    const armClaim = claimTx(dir, ARM_ID, {
-      task_id: TASK_ID,
-      cycle_id: CYCLE_ID,
-      lane: LANE,
-      attempt_id: "attempt-crash-1",
-      content_hash: sha256("body"),
-      at: "t1",
-    });
+    const armClaim = claimTx(
+      dir,
+      ARM_ID,
+      {
+        task_id: TASK_ID,
+        cycle_id: CYCLE_ID,
+        lane: LANE,
+        attempt_id: "attempt-crash-1",
+        content_hash: sha256("body"),
+        at: "t1",
+      },
+      { nowFn: () => env.nowMs },
+    );
     assert.equal(armClaim.ok, true);
     writeFileSync(
       armStorePath(dir, ARM_ID),
@@ -515,7 +540,7 @@ test("runAuthDispatch/recoverAuthDispatch: claim-then-crash recovers to DISARMED
     );
 
     // 재실행 시도(같은 grant, 즉 같은 jti)는 여전히 실패해야 한다 -- consumed 유지.
-    const retry = runAuthDispatch(env);
+    const retry = callAuthDispatch(env);
     assert.equal(retry.ok, false);
     assert.equal(
       env.adapter.calls.length,
@@ -527,15 +552,20 @@ test("runAuthDispatch/recoverAuthDispatch: claim-then-crash recovers to DISARMED
 
 test("runAuthDispatch/recoverAuthDispatch: RUNNING-then-crash recovers to DISARMED with no respawn (spawnFn never called during recovery)", () => {
   withTempDir((dir) => {
-    buildEnv(dir); // ARMED arm store만 필요 -- 반환값은 이 테스트에서 쓰지 않는다.
-    const armClaim = claimTx(dir, ARM_ID, {
-      task_id: TASK_ID,
-      cycle_id: CYCLE_ID,
-      lane: LANE,
-      attempt_id: "attempt-crash-2",
-      content_hash: sha256("body"),
-      at: "t1",
-    });
+    buildEnv(dir); // ARMED arm store만 필요 -- 반환값은 이 테스트에서 쓰지 않는다(buildEnv는 항상 nowMs=IN_WINDOW_NOW로 arm을 만든다).
+    const armClaim = claimTx(
+      dir,
+      ARM_ID,
+      {
+        task_id: TASK_ID,
+        cycle_id: CYCLE_ID,
+        lane: LANE,
+        attempt_id: "attempt-crash-2",
+        content_hash: sha256("body"),
+        at: "t1",
+      },
+      { nowFn: () => IN_WINDOW_NOW },
+    );
     assert.equal(armClaim.ok, true);
     writeFileSync(
       armStorePath(dir, ARM_ID),
@@ -585,7 +615,7 @@ test("runAuthDispatch/recoverAuthDispatch: RUNNING-then-crash recovers to DISARM
 test("runAuthDispatch: dispatched spec (fake TUI payload) contains no grant/signature/private-key material", () => {
   withTempDir((dir) => {
     const env = buildEnv(dir);
-    const result = runAuthDispatch(env);
+    const result = callAuthDispatch(env);
     assert.equal(result.ok, true);
     const payload = env.adapter.calls[0];
     assert.equal(payload, `go ${TASK_ID}`);
@@ -602,7 +632,7 @@ test("runAuthDispatch: dispatched spec (fake TUI payload) contains no grant/sign
 test("runAuthDispatch: finishResult receipt does not embed the raw signature string", () => {
   withTempDir((dir) => {
     const env = buildEnv(dir);
-    const result = runAuthDispatch(env);
+    const result = callAuthDispatch(env);
     assert.equal(result.ok, true);
     const serialized = JSON.stringify(result.finishResult);
     assert.equal(serialized.includes(env.signature), false);
