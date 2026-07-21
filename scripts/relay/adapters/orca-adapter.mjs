@@ -8,6 +8,7 @@ import {
   assertAllowedOrcaCommand,
 } from "../orca-spike-runner.mjs";
 import { buildSpec } from "../orca-predispatch.mjs";
+import { normalizeAbsolute } from "../../check/path-normalize.mjs";
 
 // HYK-169-coder-1: 어댑터 B v1 -- `orca` CLI를 실제로 부르는(spawn) 코드는
 // **이 파일에만** 있다(G9). 코어(relay-core.mjs)·CLI(run-step.mjs)는 이 파일이
@@ -68,6 +69,78 @@ function needsExplicitSubmit(role) {
   return ENGINE_BY_ROLE[role] === "codex";
 }
 
+// ---- HYK-169-coder-2: 좌석 위치 정책 (relay-terminal-setup.md §6, 2026-07-22
+// 사람 확정) -- 어댑터가 강제한다(문서 규약이 아니라 코드). 근거=HYK-164
+// 사고(REVIEW가 관제실 PM/relay 아래에 검증 워크트리를 만들어 경로 판정이
+// 깨짐)+HYK-168 첫 실전(REVIEW가 메인 repo에서 실행 = ORCH와 같은 폴더).
+export const LOCATION_REASON = Object.freeze({
+  ROLE_UNKNOWN: "ROLE_UNKNOWN",
+  PATH_REQUIRED: "PATH_REQUIRED",
+  MAIN_REPO_FORBIDDEN: "MAIN_REPO_FORBIDDEN",
+  CONTROL_ROOM_FORBIDDEN: "CONTROL_ROOM_FORBIDDEN",
+  OUTSIDE_WORKSPACES: "OUTSIDE_WORKSPACES",
+  ALLOW: "ALLOW",
+});
+
+export const WORKSPACES_ROOT = "C:/Users/Administrator/orca/workspaces";
+export const MAIN_REPO_PATH =
+  "C:/Users/Administrator/Documents/HARNESSENGINEERING";
+export const CONTROL_ROOM_PATH = "D:/문서관리/하네스-관제실";
+
+function denyLocation(reason, detail) {
+  return { ok: false, reason, detail };
+}
+
+// 대소문자·슬래시 방향·후행 슬래시·`..` 포함까지 정규화한 뒤 비교한다
+// (path-normalize.mjs의 normalizeAbsolute 재사용 -- 재구현 금지, HYK-164가
+// 이미 겪은 "체크아웃 위치 민감성" 계열 버그를 또 만들지 않는다). 단순
+// startsWith 문자열 비교였다면
+// `...\orca\workspaces\..\..\Documents\HARNESSENGINEERING`처럼 접두어만
+// 맞추고 실제로는 금지 구역을 가리키는 경로가 통과해버린다 -- normalize가
+// `..` 세그먼트를 먼저 해소하므로 이 우회가 불가능하다.
+//
+// ctx: { role, requestedPath } -- 순수 판정, 파일시스템·orca 호출 없음
+// (테스트 용이성을 위해 ensureSeat에서 분리).
+export function resolveSeatLocation({ role, requestedPath } = {}) {
+  if (!isNonEmptyString(role) || !ENGINE_BY_ROLE[role]) {
+    return denyLocation(
+      LOCATION_REASON.ROLE_UNKNOWN,
+      `resolveSeatLocation: unknown role ${JSON.stringify(role)}`,
+    );
+  }
+  if (!isNonEmptyString(requestedPath)) {
+    return denyLocation(
+      LOCATION_REASON.PATH_REQUIRED,
+      "resolveSeatLocation: requestedPath is required",
+    );
+  }
+  const normalized = normalizeAbsolute(requestedPath);
+  const lower = normalized.toLowerCase();
+  const mainRepoLower = MAIN_REPO_PATH.toLowerCase();
+  const controlRoomLower = CONTROL_ROOM_PATH.toLowerCase();
+  const workspacesLower = WORKSPACES_ROOT.toLowerCase();
+
+  if (lower === controlRoomLower || lower.startsWith(`${controlRoomLower}/`)) {
+    return denyLocation(
+      LOCATION_REASON.CONTROL_ROOM_FORBIDDEN,
+      `resolveSeatLocation: '${normalized}' is under the control room (${CONTROL_ROOM_PATH}) -- forbidden for all workers`,
+    );
+  }
+  if (lower === mainRepoLower || lower.startsWith(`${mainRepoLower}/`)) {
+    return denyLocation(
+      LOCATION_REASON.MAIN_REPO_FORBIDDEN,
+      `resolveSeatLocation: '${normalized}' is the main repo (${MAIN_REPO_PATH}) -- ORCH-only, workers forbidden`,
+    );
+  }
+  if (!(lower === workspacesLower || lower.startsWith(`${workspacesLower}/`))) {
+    return denyLocation(
+      LOCATION_REASON.OUTSIDE_WORKSPACES,
+      `resolveSeatLocation: '${normalized}' is outside the workspaces root (${WORKSPACES_ROOT})`,
+    );
+  }
+  return { ok: true, reason: LOCATION_REASON.ALLOW, path: normalized };
+}
+
 // ---- 미검증 가정: 좌석 생성/제출/비차단 조회/종료 argv (실 orca 미호출) ----
 // task-create/dispatch/check --wait와 달리 이 4개 명령은 ORCH가 read-only로
 // 실측한 적이 없다. 실물과 형태가 다르면 이 4개 함수만 고치면 된다.
@@ -107,6 +180,13 @@ export function buildDispatchCleanupCommand(seatHandle) {
     seatHandle,
     "--json",
   ];
+}
+// 정리 규칙(relay-terminal-setup.md §6): 이슈 종료 시 워크트리도 제거한다.
+// 이건 orca 명령이 아니라 git 명령이다(§4-2 화이트리스트/guardedExec 대상
+// 아님) -- teardownSeat은 이 argv를 구성만 하고 실행하지 않는다(비타협
+// 제약: 실 실행 0, 이번 태스크 스코프는 명령 구성까지).
+export function buildWorktreeRemoveCommand(worktreePath) {
+  return ["worktree", "remove", "--force", worktreePath];
 }
 
 // 화이트리스트 통과 + execFn 호출을 한곳에 묶는다(orca-spike-runner.runGuardedStep
@@ -244,6 +324,21 @@ export function ensureSeat(ctx, opts = {}) {
   const c = isPlainObject(ctx) ? ctx : {};
   const invalid = validateEnsureSeatInput(c.role, c.worktreePath);
   if (invalid) return { ok: false, reason: invalid };
+
+  // 좌석 위치 정책(relay-terminal-setup.md §6) -- fs/execFn 호출 이전에
+  // 판정한다. 재사용(existingSeatHandle) 경로도 이 판정을 통과해야 한다
+  // (방어 종심 -- 이미 만들어진 좌석이라도 금지 구역을 가리키면 거부).
+  const location = resolveSeatLocation({
+    role: c.role,
+    requestedPath: c.worktreePath,
+  });
+  if (!location.ok) {
+    return {
+      ok: false,
+      reason: location.detail,
+      locationReason: location.reason,
+    };
+  }
 
   // 재사용: 호출자가 이미 확인된 handle을 넘기면 새 좌석을 만들지 않는다.
   if (isNonEmptyString(opts.existingSeatHandle)) {
@@ -431,7 +526,17 @@ export function teardownSeat(ctx, opts = {}) {
   } catch (err) {
     cleanup = { ok: false, reason: errText(err) };
   }
-  return { ok: closed.ok, reason: closed.ok ? null : closed.reason, cleanup };
+  // 워크트리 제거: 명령 구성까지만(실행 0 -- git 명령이라 opts.execFn/orca
+  // 화이트리스트 대상이 아니고, 이 태스크는 실 실행을 어디서도 하지 않는다).
+  const worktreeRemoveCommand = isNonEmptyString(c.worktreePath)
+    ? buildWorktreeRemoveCommand(c.worktreePath)
+    : null;
+  return {
+    ok: closed.ok,
+    reason: closed.ok ? null : closed.reason,
+    cleanup,
+    worktreeRemoveCommand,
+  };
 }
 
 // ---- 실 orca execFn (이 파일이 `orca` 문자열로 실제 프로세스를 spawn하는

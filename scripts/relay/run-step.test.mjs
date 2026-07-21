@@ -4,11 +4,17 @@ import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseRunStepArgs, runStepCli } from "./run-step.mjs";
+import { WORKSPACES_ROOT } from "./adapters/orca-adapter.mjs";
 
-// HYK-169-coder-1: run-step.mjs is written but never executed in this task
+// HYK-169-coder-1/2: run-step.mjs is written but never executed in this task
 // (비타협 제약: 실 orca 호출 0) -- these tests only exercise the pure argv
 // parser and the wiring path with an injected fake execFn, never the real
 // default createOrcaExecFn (which would spawn a real "orca" process).
+
+// coder-2: ensureSeat now enforces the seat location policy, so the one test
+// below that goes through the real ensureSeat (not just the argv parser)
+// needs a worktree path that actually passes it.
+const VALID_WORKTREE = `${WORKSPACES_ROOT}/HARNESSENGINEERING/hyk-run-step-fixture`;
 
 test("parseRunStepArgs: happy path parses role/worktree/task-id", () => {
   const r = parseRunStepArgs([
@@ -61,7 +67,7 @@ test("runStepCli: with an injected fake execFn (never the real default), wires t
         "--role",
         "CODER",
         "--worktree",
-        "/wt",
+        VALID_WORKTREE,
         "--task-id",
         "HYK-x",
         "--harness-dir",

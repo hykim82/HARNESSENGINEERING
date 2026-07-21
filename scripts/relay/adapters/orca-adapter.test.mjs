@@ -11,13 +11,26 @@ import {
   buildSeatCloseCommand,
   buildNonBlockingCheckCommand,
   buildDispatchCleanupCommand,
+  buildWorktreeRemoveCommand,
+  resolveSeatLocation,
+  LOCATION_REASON,
+  WORKSPACES_ROOT,
+  MAIN_REPO_PATH,
+  CONTROL_ROOM_PATH,
   ENGINE_BY_ROLE,
 } from "./orca-adapter.mjs";
 
-// HYK-169-coder-1: 어댑터 단위 테스트 -- 전부 execFn/fs fake 주입, 실 orca
+// HYK-169-coder-1/2: 어댑터 단위 테스트 -- 전부 execFn/fs fake 주입, 실 orca
 // 호출 0(비타협 제약). G10(fake 어댑터만으로 코어 전 경로 검증)은
 // relay-core.test.mjs가 이 어댑터 자체를 fake로 대체해 별도로 증명한다;
 // 여기서는 이 어댑터의 포트 각각(성공/실패/재시도/env 미사용)을 검증한다.
+
+// coder-2: ensureSeat이 이제 좌석 위치 정책(relay-terminal-setup.md §6)을
+// 강제하므로, 위치 자체를 검증하지 않는 기존 ensureSeat 시험(설정/노드모듈
+// 복사, 좌석 생성 응답 파싱 등)은 정책을 통과하는 실제 workspaces 경로를
+// 써야 한다 -- 그래야 "이 시험이 검증하려는 것"과 "위치 정책"이 서로
+// 간섭하지 않는다.
+const VALID_WORKTREE = `${WORKSPACES_ROOT}/HARNESSENGINEERING/hyk-test-fixture`;
 
 function fakeExecFn(responses) {
   const calls = [];
@@ -43,7 +56,7 @@ function fakeExecFn(responses) {
 test("ensureSeat: reuse -- existingSeatHandle skips execFn entirely, no new seat created", () => {
   const execFn = fakeExecFn({});
   const r = ensureSeat(
-    { role: "CODER", worktreePath: "/wt" },
+    { role: "CODER", worktreePath: VALID_WORKTREE },
     { existingSeatHandle: "term_reused", execFn },
   );
   assert.equal(r.ok, true);
@@ -76,7 +89,7 @@ test("ensureSeat: A3 settings.local.json copied from mainRepoDir when missing at
     },
   });
   const r = ensureSeat(
-    { role: "CODER", worktreePath: "/wt", mainRepoDir: "/main" },
+    { role: "CODER", worktreePath: VALID_WORKTREE, mainRepoDir: "/main" },
     {
       execFn,
       existsFn: (p) => exists.has(p.replace(/\\/g, "/")),
@@ -93,14 +106,14 @@ test("ensureSeat: A3 settings.local.json copied from mainRepoDir when missing at
 test("ensureSeat: A3 copy skipped when destination already has settings.local.json (idempotent)", () => {
   const exists = new Set([
     "/main/.claude/settings.local.json",
-    "/wt/.claude/settings.local.json",
+    `${VALID_WORKTREE}/.claude/settings.local.json`,
   ]);
   const copied = [];
   const execFn = fakeExecFn({
     terminal: { ok: true, result: { handle: "term_new" } },
   });
   const r = ensureSeat(
-    { role: "CODER", worktreePath: "/wt", mainRepoDir: "/main" },
+    { role: "CODER", worktreePath: VALID_WORKTREE, mainRepoDir: "/main" },
     {
       execFn,
       existsFn: (p) => exists.has(p.replace(/\\/g, "/")),
@@ -120,7 +133,7 @@ test("ensureSeat: A5 node_modules copied from mainRepoDir when missing at destin
     terminal: { ok: true, result: { handle: "term_new" } },
   });
   const r = ensureSeat(
-    { role: "CODER", worktreePath: "/wt", mainRepoDir: "/main" },
+    { role: "CODER", worktreePath: VALID_WORKTREE, mainRepoDir: "/main" },
     {
       execFn,
       existsFn: (p) => exists.has(p.replace(/\\/g, "/")),
@@ -138,7 +151,7 @@ test("ensureSeat: new seat creation reads handle/paneKey from response.result, b
     terminal: { ok: true, result: { handle: "term_abc", paneKey: "tab:leaf" } },
   });
   const r = ensureSeat(
-    { role: "REVIEW", worktreePath: "/wt" },
+    { role: "REVIEW", worktreePath: VALID_WORKTREE },
     { execFn, existsFn: () => true },
   );
   assert.equal(r.ok, true);
@@ -152,7 +165,7 @@ test("ensureSeat: seat creation failure (response.ok:false) is surfaced, not swa
     terminal: { ok: false, reason: "Setup decision required" },
   });
   const r = ensureSeat(
-    { role: "CODER", worktreePath: "/wt" },
+    { role: "CODER", worktreePath: VALID_WORKTREE },
     { execFn, existsFn: () => true },
   );
   assert.equal(r.ok, false);
@@ -162,7 +175,7 @@ test("ensureSeat: seat creation failure (response.ok:false) is surfaced, not swa
 test("ensureSeat: seat creation with missing handle in response is a failure (not undefined handle)", () => {
   const execFn = fakeExecFn({ terminal: { ok: true, result: {} } });
   const r = ensureSeat(
-    { role: "CODER", worktreePath: "/wt" },
+    { role: "CODER", worktreePath: VALID_WORKTREE },
     { execFn, existsFn: () => true },
   );
   assert.equal(r.ok, false);
@@ -409,6 +422,35 @@ test("teardownSeat: missing seatHandle is rejected", () => {
   assert.match(r.reason, /seatHandle/);
 });
 
+// coder-2: 정리 규칙(relay-terminal-setup.md §6) -- 워크트리 제거 명령을
+// 구성만 하고 실행하지 않는다(비타협 제약).
+test("teardownSeat: builds a worktree-remove command (construction only, not executed) when worktreePath is given", () => {
+  const execFn = fakeExecFn({
+    terminal: { ok: true },
+    "dispatch-cleanup": { ok: true },
+  });
+  const r = teardownSeat(
+    { seatHandle: "term_x", worktreePath: VALID_WORKTREE },
+    { execFn },
+  );
+  assert.equal(r.ok, true);
+  assert.deepEqual(
+    r.worktreeRemoveCommand,
+    buildWorktreeRemoveCommand(VALID_WORKTREE),
+  );
+  // never executed -- execFn was only called for terminal close + dispatch-cleanup (2 calls)
+  assert.equal(execFn.calls.length, 2);
+});
+
+test("teardownSeat: worktreeRemoveCommand is null when no worktreePath is given (backward compatible)", () => {
+  const execFn = fakeExecFn({
+    terminal: { ok: true },
+    "dispatch-cleanup": { ok: true },
+  });
+  const r = teardownSeat({ seatHandle: "term_x" }, { execFn });
+  assert.equal(r.worktreeRemoveCommand, null);
+});
+
 // ---------------------------------------------------------------------------
 // command builders -- pure shape checks (no execution)
 // ---------------------------------------------------------------------------
@@ -440,4 +482,175 @@ test("ENGINE_BY_ROLE: CODER/VERIFY are claude, REVIEW is codex (B9 single config
   assert.equal(ENGINE_BY_ROLE.CODER, "claude");
   assert.equal(ENGINE_BY_ROLE.VERIFY, "claude");
   assert.equal(ENGINE_BY_ROLE.REVIEW, "codex");
+});
+
+// ---------------------------------------------------------------------------
+// HYK-169-coder-2: 좌석 위치 정책 (resolveSeatLocation) -- relay-terminal-
+// setup.md §6. 순수 판정, fs/orca 호출 없음. "거부를 증명하는 것이 핵심"
+// (태스크 지시) -- known-bad가 다수, known-good은 최소.
+// ---------------------------------------------------------------------------
+
+// 1. 관제실 하위 경로 -> 거부, reason 구분됨.
+test("resolveSeatLocation: BLOCK -- control-room subpath is rejected with CONTROL_ROOM_FORBIDDEN", () => {
+  const r = resolveSeatLocation({
+    role: "REVIEW",
+    requestedPath: `${CONTROL_ROOM_PATH}\\PM\\relay\\wt`,
+  });
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, LOCATION_REASON.CONTROL_ROOM_FORBIDDEN);
+});
+
+test("resolveSeatLocation: BLOCK -- the control room root itself (no subpath) is rejected", () => {
+  const r = resolveSeatLocation({
+    role: "CODER",
+    requestedPath: CONTROL_ROOM_PATH,
+  });
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, LOCATION_REASON.CONTROL_ROOM_FORBIDDEN);
+});
+
+// 2. 메인 repo 경로 -> 워커 좌석으로는 거부.
+test("resolveSeatLocation: BLOCK -- main repo path is rejected for a worker seat with MAIN_REPO_FORBIDDEN", () => {
+  const r = resolveSeatLocation({
+    role: "CODER",
+    requestedPath: MAIN_REPO_PATH,
+  });
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, LOCATION_REASON.MAIN_REPO_FORBIDDEN);
+});
+
+test("resolveSeatLocation: BLOCK -- a subpath under the main repo is also rejected", () => {
+  const r = resolveSeatLocation({
+    role: "REVIEW",
+    requestedPath: `${MAIN_REPO_PATH}/scripts`,
+  });
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, LOCATION_REASON.MAIN_REPO_FORBIDDEN);
+});
+
+// 3. workspaces 밖 임의 경로 -> 거부.
+test("resolveSeatLocation: BLOCK -- an arbitrary path outside workspaces is rejected with OUTSIDE_WORKSPACES", () => {
+  const r = resolveSeatLocation({
+    role: "CODER",
+    requestedPath: "C:\\temp\\wt",
+  });
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, LOCATION_REASON.OUTSIDE_WORKSPACES);
+});
+
+// 4. 정규화 우회 시도 -- 단순 접두어 비교라면 통과해버리는 케이스.
+test("resolveSeatLocation: BLOCK -- '..' traversal that resolves back into the main repo is rejected (not fooled by prefix match)", () => {
+  const r = resolveSeatLocation({
+    role: "CODER",
+    requestedPath: `${WORKSPACES_ROOT}\\..\\..\\Documents\\HARNESSENGINEERING`,
+  });
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, LOCATION_REASON.MAIN_REPO_FORBIDDEN);
+});
+
+test("resolveSeatLocation: BLOCK -- mixed case + backslash + trailing slash variants of forbidden paths are still caught (normalization)", () => {
+  const r1 = resolveSeatLocation({
+    role: "CODER",
+    requestedPath: "c:\\users\\administrator\\documents\\harnessengineering\\",
+  });
+  assert.equal(r1.ok, false);
+  assert.equal(r1.reason, LOCATION_REASON.MAIN_REPO_FORBIDDEN);
+
+  const r2 = resolveSeatLocation({
+    role: "REVIEW",
+    requestedPath: "D:/문서관리/하네스-관제실/PM/relay/",
+  });
+  assert.equal(r2.ok, false);
+  assert.equal(r2.reason, LOCATION_REASON.CONTROL_ROOM_FORBIDDEN);
+});
+
+// 5. 정상 경로(CODER 이슈 워크트리 / REVIEW 검증 워크트리) -> 통과.
+test("resolveSeatLocation: PASS -- a CODER issue worktree under workspaces is allowed", () => {
+  const r = resolveSeatLocation({
+    role: "CODER",
+    requestedPath: `${WORKSPACES_ROOT}/HARNESSENGINEERING/hyk169-adapter`,
+  });
+  assert.equal(r.ok, true);
+  assert.equal(r.reason, LOCATION_REASON.ALLOW);
+});
+
+test("resolveSeatLocation: PASS -- a REVIEW verification worktree under workspaces is allowed", () => {
+  const r = resolveSeatLocation({
+    role: "REVIEW",
+    requestedPath: `${WORKSPACES_ROOT}\\HARNESSENGINEERING\\review-verify-hyk169`,
+  });
+  assert.equal(r.ok, true);
+  assert.equal(r.reason, LOCATION_REASON.ALLOW);
+});
+
+test("resolveSeatLocation: role unknown / path missing produce distinct reasons", () => {
+  assert.equal(
+    resolveSeatLocation({ role: "NOT_A_ROLE", requestedPath: VALID_WORKTREE })
+      .reason,
+    LOCATION_REASON.ROLE_UNKNOWN,
+  );
+  assert.equal(
+    resolveSeatLocation({ role: "CODER", requestedPath: "" }).reason,
+    LOCATION_REASON.PATH_REQUIRED,
+  );
+});
+
+// 6. ensureSeat이 거부 시 좌석 생성 호출 0회.
+test("ensureSeat: rejects a control-room worktree path with zero execFn calls", () => {
+  const execFn = fakeExecFn({});
+  const r = ensureSeat(
+    { role: "REVIEW", worktreePath: `${CONTROL_ROOM_PATH}\\PM\\relay\\wt` },
+    { execFn },
+  );
+  assert.equal(r.ok, false);
+  assert.equal(r.locationReason, LOCATION_REASON.CONTROL_ROOM_FORBIDDEN);
+  assert.equal(execFn.calls.length, 0);
+});
+
+test("ensureSeat: rejects the main repo path with zero execFn calls", () => {
+  const execFn = fakeExecFn({});
+  const r = ensureSeat(
+    { role: "CODER", worktreePath: MAIN_REPO_PATH },
+    { execFn },
+  );
+  assert.equal(r.ok, false);
+  assert.equal(r.locationReason, LOCATION_REASON.MAIN_REPO_FORBIDDEN);
+  assert.equal(execFn.calls.length, 0);
+});
+
+test("ensureSeat: rejects a path outside workspaces with zero execFn calls", () => {
+  const execFn = fakeExecFn({});
+  const r = ensureSeat(
+    { role: "CODER", worktreePath: "C:\\temp\\wt" },
+    { execFn },
+  );
+  assert.equal(r.ok, false);
+  assert.equal(r.locationReason, LOCATION_REASON.OUTSIDE_WORKSPACES);
+  assert.equal(execFn.calls.length, 0);
+});
+
+test("ensureSeat: rejects a normalization-bypass traversal path with zero execFn calls", () => {
+  const execFn = fakeExecFn({});
+  const r = ensureSeat(
+    {
+      role: "CODER",
+      worktreePath: `${WORKSPACES_ROOT}\\..\\..\\Documents\\HARNESSENGINEERING`,
+    },
+    { execFn },
+  );
+  assert.equal(r.ok, false);
+  assert.equal(r.locationReason, LOCATION_REASON.MAIN_REPO_FORBIDDEN);
+  assert.equal(execFn.calls.length, 0);
+});
+
+// existingSeatHandle 재사용 경로도 위치 정책을 통과해야 한다(방어 종심).
+test("ensureSeat: location policy applies even to the existingSeatHandle reuse path", () => {
+  const execFn = fakeExecFn({});
+  const r = ensureSeat(
+    { role: "CODER", worktreePath: MAIN_REPO_PATH },
+    { execFn, existingSeatHandle: "term_reused" },
+  );
+  assert.equal(r.ok, false);
+  assert.equal(r.locationReason, LOCATION_REASON.MAIN_REPO_FORBIDDEN);
+  assert.equal(execFn.calls.length, 0);
 });
