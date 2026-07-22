@@ -261,6 +261,32 @@ test("G10: missing adapter.ensureSeat is a config-shape failure, not a crash", (
   }
 });
 
+// HYK-170 사이클2 A-2: 코어가 deliverTask에 넘기는 ctx에 seatHandle이 없다
+// -- worktreePath만 있다(어댑터가 그 자리에서 A-1로 스스로 해석한다).
+test("A2: relay-core -- the ctx handed to adapter.deliverTask carries worktreePath, never seatHandle", () => {
+  const harnessDir = makeHarnessDir();
+  try {
+    dropTaskFile(harnessDir, "coder");
+    let capturedCtx = null;
+    const adapter = fakeAdapter({
+      deliverTask: (ctx) => {
+        capturedCtx = ctx;
+        return { ok: true };
+      },
+    });
+    relayStep(
+      { role: "CODER", worktreePath: "/wt", taskId: "HYK-x", harnessDir },
+      adapter,
+      {},
+    );
+    assert.ok(capturedCtx);
+    assert.equal("seatHandle" in capturedCtx, false);
+    assert.equal(capturedCtx.worktreePath, "/wt");
+  } finally {
+    rmSync(harnessDir, { recursive: true, force: true });
+  }
+});
+
 test("G10: missing adapter.deliverTask after a successful seat is a config-shape failure, not a crash", () => {
   const harnessDir = makeHarnessDir();
   try {

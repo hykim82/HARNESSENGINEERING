@@ -79,7 +79,11 @@ function runSeatStage(adapter, inp, opts) {
   return seat.ok ? { ok: true, seat } : fail(STAGE.SEAT, seat.reason);
 }
 
-function runDeliverStage(adapter, inp, seat, opts) {
+// HYK-170 사이클2 A-2: 좌석 handle을 코어가 운반하지 않는다 -- seat 인자
+// 자체를 받지 않는다(어댑터의 ensureSeat 출력 봉투에도 이제 seatHandle이
+// 없다). deliverTask는 {role, worktreePath}만으로 스스로 handle을
+// 재해석한다(A-1).
+function runDeliverStage(adapter, inp, opts) {
   if (typeof adapter.deliverTask !== "function") {
     return fail(STAGE.DELIVER, "relay-core: adapter.deliverTask is required");
   }
@@ -87,7 +91,7 @@ function runDeliverStage(adapter, inp, seat, opts) {
     {
       taskId: inp.taskId,
       role: inp.role,
-      seatHandle: seat.seatHandle,
+      worktreePath: inp.worktreePath,
       coordinatorHandle: inp.coordinatorHandle,
     },
     opts,
@@ -128,7 +132,7 @@ export function relayStep(input, adapter, opts = {}) {
     );
   }
 
-  const deliverStage = runDeliverStage(a, inp, seatStage.seat, opts);
+  const deliverStage = runDeliverStage(a, inp, opts);
   if (!deliverStage.ok) return deliverStage;
 
   const handshake = checkExistingHandshake(inp.role, harnessDir);
