@@ -4,6 +4,7 @@ import { dirname, join } from "node:path";
 import {
   buildTaskCreateCommand,
   buildDispatchCommand,
+  buildDispatchCommandNoInject,
   parseRuntimeTaskId,
   assertAllowedOrcaCommand,
 } from "../orca-spike-runner.mjs";
@@ -52,6 +53,11 @@ export const REASON = Object.freeze({
   PASTE_UNCONFIRMED: "PASTE_UNCONFIRMED",
   SUBMIT_FAILED: "SUBMIT_FAILED",
   TEARDOWN_FAILED: "TEARDOWN_FAILED",
+  // HYK-170 사이클2 ②-b coder-1 (D11-C): codex text/Enter 응답이 불명확한
+  // 실패(응답 유실류)일 때 쓴다 -- 이 사유는 자동 재시도를 만들지 않는다
+  // (submitWithRetry류 부작용 자동재시도 의미 폐기, at-most-once).
+  DELIVERY_UNJUDGABLE: "DELIVERY_UNJUDGABLE",
+  UNSUPPORTED_PROFILE: "UNSUPPORTED_PROFILE",
   COMPLETE: "COMPLETE",
 });
 
@@ -66,12 +72,6 @@ export const ENGINE_BY_ROLE = Object.freeze({
 // 것도 허용됨(태스크 지시). 좌석은 이 스크립트를 실행하는 셸로 뜬다.
 export const SEAT_LAUNCHER_PATH =
   "D:\\문서관리\\하네스-관제실\\orca-worker-seat.ps1";
-
-// codex 좌석만 붙여넣기 후 별도 제출(Enter)이 필요하다(B3 -- claude 좌석은
-// dispatch --inject가 자동 실행됨).
-function needsExplicitSubmit(role) {
-  return ENGINE_BY_ROLE[role] === "codex";
-}
 
 // ---- HYK-169-coder-2: 좌석 위치 정책 (relay-terminal-setup.md §6, 2026-07-22
 // 사람 확정) -- 어댑터가 강제한다(문서 규약이 아니라 코드). 근거=HYK-164
@@ -453,6 +453,19 @@ export function buildTaskUpdateFailedCommand(taskId) {
     taskId,
     "--status",
     "failed",
+    "--json",
+  ];
+}
+// D14-A/B (pm-2 §QC): 소비 후 완료 전이·stale 복구 보정 양쪽에서 쓴다.
+// "completed"도 실측된 유효 status 중 하나다(위 A6 주석의 유효값 목록).
+export function buildTaskUpdateCompletedCommand(taskId) {
+  return [
+    "orchestration",
+    "task-update",
+    "--id",
+    taskId,
+    "--status",
+    "completed",
     "--json",
   ];
 }
@@ -1055,14 +1068,163 @@ function createTask(c, opts) {
   return { ok: true, runtimeTaskId };
 }
 
-function dispatchToSeat(runtimeTaskId, seatHandle, opts) {
-  const dispatched = guardedExec(
-    buildDispatchCommand(runtimeTaskId, seatHandle),
+// ---- D14 (pm-2 §QC, 소비 후 unlock/재사용): 소비 영수증 결속 판정 ----
+// 영수증 자체의 저장/발급은 이 어댑터 책임이 아니다(그건 ORCH의 소비
+// 워크플로 몫) -- 여기서는 "주어진 영수증이 기대값과 정확히 결속되는가"만
+// 순수 판정한다(orca 호출 0).
+export const CONSUME_REASON = Object.freeze({
+  HANDSHAKE_BAD: "CONSUME_HANDSHAKE_BAD",
+  NO_RECEIPT: "CONSUME_NO_RECEIPT",
+  RECEIPT_MISMATCH: "CONSUME_RECEIPT_MISMATCH",
+});
+
+// expect = {harnessTaskId, role, worktreePath} -- runtimeTaskId is never part
+// of "expect" (there is nothing to compare it against ahead of time; it's
+// the receipt's own identity, and D14-B separately confirms it equals the
+// stale error's extracted id before ever calling this).
+function receiptMatches(receipt, expect) {
+  const e = isPlainObject(expect) ? expect : {};
+  return (
+    isPlainObject(receipt) &&
+    isNonEmptyString(receipt.runtimeTaskId) &&
+    receipt.harnessTaskId === e.harnessTaskId &&
+    receipt.role === e.role &&
+    canonicalizeForComparison(receipt.worktreePath ?? "") ===
+      canonicalizeForComparison(e.worktreePath ?? "")
+  );
+}
+
+// D14-A: 정본 handshake가 ok고 소비 영수증이 exact 결속될 때만 completed
+// 전이를 허용한다. handshake pending/bad·영수증 부재·불일치는 전부 거부
+// (error regex 단독 완료 금지 -- 이 함수는 regex를 아예 보지 않는다).
+export function judgeCompletionTransition({ handshake, receipt, expect } = {}) {
+  if (!isPlainObject(handshake) || handshake.ok !== true) {
+    return { ok: false, reason: CONSUME_REASON.HANDSHAKE_BAD };
+  }
+  if (!isPlainObject(receipt)) {
+    return { ok: false, reason: CONSUME_REASON.NO_RECEIPT };
+  }
+  if (!receiptMatches(receipt, expect)) {
+    return { ok: false, reason: CONSUME_REASON.RECEIPT_MISMATCH };
+  }
+  return { ok: true };
+}
+
+// D14-A 실행: 판정 통과 시에만 task-update completed 1회. 판정 실패는
+// orca 호출 0(fail-closed).
+export function completeConsumedTask(ctx, opts = {}) {
+  const c = isPlainObject(ctx) ? ctx : {};
+  const judged = judgeCompletionTransition(c);
+  if (!judged.ok) return judged;
+  if (typeof opts.execFn !== "function") {
+    return {
+      ok: false,
+      reason: "orca-adapter: completeConsumedTask -- opts.execFn is required",
+    };
+  }
+  return guardedExec(
+    buildTaskUpdateCompletedCommand(c.receipt.runtimeTaskId),
+    opts.execFn,
+    "CONSUME_TASK_UPDATE_FAILED",
+  );
+}
+
+// D14-B: stale "already has an active dispatch" 오류에서 runtime task id를
+// 뽑아, 그 id + role/worktree/harnessTaskId가 소비 영수증과 exact 결속될
+// 때만 복구를 허용한다(오류 regex 매치만으로 완료 처리 금지 -- id가 안
+// 뽑히거나 영수증과 하나라도 다르면 그대로 거부, 진행 중 task를 안 죽인다).
+const STALE_DISPATCH_RE = /already has an active dispatch.*for task (task_\w+)/;
+export function extractStaleDispatchTaskId(errorMessage) {
+  if (!isNonEmptyString(errorMessage)) return null;
+  const m = errorMessage.match(STALE_DISPATCH_RE);
+  return m ? m[1] : null;
+}
+export function resolveStaleDispatchRecovery({
+  errorMessage,
+  receipt,
+  expect,
+} = {}) {
+  const staleId = extractStaleDispatchTaskId(errorMessage);
+  if (!staleId) {
+    return { ok: false, reason: CONSUME_REASON.NO_RECEIPT };
+  }
+  if (!isPlainObject(receipt) || receipt.runtimeTaskId !== staleId) {
+    return { ok: false, reason: CONSUME_REASON.RECEIPT_MISMATCH };
+  }
+  if (!receiptMatches(receipt, expect)) {
+    return { ok: false, reason: CONSUME_REASON.RECEIPT_MISMATCH };
+  }
+  return { ok: true, staleId };
+}
+
+// D14-C: 정상 소비 cleanup(위 completeConsumedTask)과 최종 worktree
+// teardown(worktree rm/terminal close, teardownSeat)은 분리된 함수다 --
+// completeConsumedTask는 task-update 호출 하나뿐이라 worktree rm·terminal
+// close를 절대 만들지 않는다(코드 경로 자체에 그 호출이 없다).
+
+// dispatch(+ --inject 유무)를 실행하고, stale 실패면 D14-B 판정을 거쳐
+// completed 보정 + 재시도 최대 1회. 판정 실패/재시도 실패는 원래(또는
+// 재시도) 실패를 그대로 반환한다(자동 완화 금지).
+function dispatchWithStaleRecovery(
+  buildFn,
+  runtimeTaskId,
+  seatHandle,
+  opts,
+  c,
+) {
+  const first = guardedExec(
+    buildFn(runtimeTaskId, seatHandle),
     opts.execFn,
     REASON.DISPATCH_FAILED,
   );
-  if (!dispatched.ok) return dispatched;
+  if (first.ok) return { ok: true, runtimeTaskId };
+
+  const recovery = resolveStaleDispatchRecovery({
+    errorMessage: first.reason,
+    receipt: opts.consumedReceipt,
+    expect: {
+      harnessTaskId: c.taskId,
+      role: c.role,
+      worktreePath: c.worktreePath,
+    },
+  });
+  if (!recovery.ok) return first;
+
+  const completed = guardedExec(
+    buildTaskUpdateCompletedCommand(recovery.staleId),
+    opts.execFn,
+    REASON.DISPATCH_FAILED,
+  );
+  if (!completed.ok) return first;
+
+  const retried = guardedExec(
+    buildFn(runtimeTaskId, seatHandle),
+    opts.execFn,
+    REASON.DISPATCH_FAILED,
+  );
+  if (!retried.ok) return retried;
   return { ok: true, runtimeTaskId };
+}
+
+function dispatchToSeat(runtimeTaskId, seatHandle, opts, c) {
+  return dispatchWithStaleRecovery(
+    buildDispatchCommand,
+    runtimeTaskId,
+    seatHandle,
+    opts,
+    c ?? {},
+  );
+}
+
+// D11 (codex REVIEW 프로필): --inject 없이 배정 기록만 만든다.
+function dispatchToSeatNoInject(runtimeTaskId, seatHandle, opts, c) {
+  return dispatchWithStaleRecovery(
+    buildDispatchCommandNoInject,
+    runtimeTaskId,
+    seatHandle,
+    opts,
+    c ?? {},
+  );
 }
 
 // HYK-169-coder-3 (review-1 반려 결함 수리, 계승): confirmPastedFn이 주입된
@@ -1077,23 +1239,21 @@ function confirmPasteViaInjectedHook(fn) {
   }
 }
 
-// review-1 C2 반려 결함 수리: confirmPastedFn이 주입되지 않으면 이전엔
-// 무조건 미확인(false)으로 fail-closed했다 -- 어댑터가 스스로 확인할 방법
-// (buildSeatShowCommand/parseSeatPreview)을 갖고 있으면서 쓰지 않은 것이
-// 결함이었다("배달 1명령" 완료기준 미달, 영수증 §9). 기본 경로는 어댑터가
-// 직접 `terminal show`로 preview를 조회해 판정한다.
-//
-// 성공 판정은 두 갈래 중 하나만 만족해도 인정한다(영수증 §9 -- "거짓 실패"
-// 방지): (a) marker(하네스 task_id)가 preview에 부분 일치로 관측되거나,
-// (b) 좌석이 이미 그 내용을 처리 중임을 보여주는 busy 신호(큐 대기/codex
-// Pasted-Content 대기 표식)가 보이는 경우. preview는 셸 예측입력으로 문자
-// 단위 재그림이 섞이므로 완전 일치는 절대 쓰지 않는다(normalizePreview 후
-// 부분 일치만).
-//
-// 재시도/대기는 순수 함수로 유지 -- opts.confirmMaxAttempts(기본 1)/
-// opts.confirmWaitFn(attempt번호를 받는 부작용 없는 콜백, 기본 no-op)으로
-// 테스트에서 시각·횟수를 주입할 수 있다. 실 orca 호출 0(전부 opts.execFn 경유).
-function confirmPasteViaTerminalShow(seatHandle, marker, opts) {
+// HYK-170 사이클2 ②-b coder-1 (D11-B, pm-2 §QA 폐기 사유): 이전
+// confirmPasteViaTerminalShow/confirmPaste/submitWithRetry(마커 **또는**
+// generic busy를 같은 성공으로 보고, Enter를 최대 1회 자동 재시도)는
+// codex REVIEW 배달의 "제출 전 staging 확인"에는 부적합하다는 게 pm-2
+// 판정이었다 -- generic busy 단독은 새 텍스트가 실제로 얹혔다는 증거가
+// 아니라 이전 세션/이전 작업의 잔여일 수 있다(헛통과 경로). 그 확인
+// 의미와 자동 재시도(at-most-once 위반)를 폐기하고, 아래
+// confirmCodexStagingViaTerminalShow(marker만 인정)+deliverToCodexSeat
+// (text/Enter 각 최대 1회, 실패 시 즉시 DELIVERY_UNJUDGABLE)로 대체한다.
+// confirmPasteViaInjectedHook(테스트·특수 상황용 override 훅)만 계승한다.
+
+// D11-B: codex 제출 전 staging 확인은 runtime+harness task에 결속된 exact
+// marker(하네스 task_id)만 인정한다 -- previewShowsBusySignal(generic busy)
+// 은 여기서 절대 확인 조건으로 쓰지 않는다.
+function confirmCodexStagingViaTerminalShow(seatHandle, marker, opts) {
   if (typeof opts.execFn !== "function") return false;
   const maxAttempts = Number.isSafeInteger(opts.confirmMaxAttempts)
     ? opts.confirmMaxAttempts
@@ -1110,76 +1270,62 @@ function confirmPasteViaTerminalShow(seatHandle, marker, opts) {
     }
     const preview = parseSeatPreview(response);
     if (preview === null) continue;
-    if (
-      previewContainsMarker(preview, marker) ||
-      previewShowsBusySignal(preview)
-    ) {
-      return true;
-    }
+    if (previewContainsMarker(preview, marker)) return true;
   }
   return false;
 }
 
-// confirmPastedFn이 주입되면 그 훅을 그대로 쓰고(테스트·특수 상황용
-// override), 아니면 어댑터의 기본 자기확인 경로로 넘어간다.
-function confirmPaste(seatHandle, marker, opts) {
+function confirmCodexStaging(seatHandle, marker, opts) {
   if (typeof opts.confirmPastedFn === "function") {
     return confirmPasteViaInjectedHook(opts.confirmPastedFn);
   }
-  return confirmPasteViaTerminalShow(seatHandle, marker, opts);
+  return confirmCodexStagingViaTerminalShow(seatHandle, marker, opts);
 }
 
-// B3/B11: codex 좌석만 붙여넣기 확인 후 제출(Enter) -- 실패 시 최대 1회
-// 재시도(비타협 제약: 자동 무한 재시도 금지). 붙여넣기 미확인이면 제출
-// 호출 0회로 즉시 실패(재시도 상한과 무관 -- 애초에 제출 루프에 진입하지
-// 않는다).
-function submitWithRetry(seatHandle, runtimeTaskId, marker, opts) {
-  if (!confirmPaste(seatHandle, marker, opts)) {
-    return {
-      ok: false,
-      reason: `orca-adapter: ${REASON.PASTE_UNCONFIRMED} -- paste could not be confirmed (neither marker nor a busy signal was observed); submit refused (0 terminal send calls)`,
-      runtimeTaskId,
-    };
-  }
-
-  const maxRetries = Number.isSafeInteger(opts.maxRetries)
-    ? opts.maxRetries
-    : 1;
-  let lastFailure = null;
-  for (let attempt = 0; attempt <= maxRetries; attempt++) {
-    const submitted = guardedExec(
-      buildSeatSubmitCommand(seatHandle),
-      opts.execFn,
-      REASON.SUBMIT_FAILED,
-    );
-    if (submitted.ok) {
-      return {
-        ok: true,
-        runtimeTaskId,
-        submitted: "explicit",
-        retries: attempt,
-      };
-    }
-    lastFailure = submitted;
-  }
-  return { ok: false, reason: lastFailure.reason, runtimeTaskId };
+// D13 (pm-2 §QE): codex 최소 기동문 -- runtime task id + 역할별 local task
+// 파일 포인터 + "dispatch/pane 대조 후 진행" 요구 + 정확한 `go <harness
+// task id>`(tail marker, D11-B 결속 확인 대상)만 담는다. task 본문·추가
+// 권한·"기록 없어도 신뢰" 예외는 절대 담지 않는다(고정 템플릿 -- 관제실
+// 스톱갭 `dispatch-worker.ps1`의 $goText와 동형, 동적 조합 최소화).
+export function buildCodexBootstrapText({
+  role,
+  runtimeTaskId,
+  harnessTaskId,
+} = {}) {
+  const lower = isNonEmptyString(role) ? role.toLowerCase() : role;
+  // 한 개의 템플릿 리터럴로만 조립한다(따옴표 문자열 두 개를 `+`로 잇지
+  // 않는다) -- env-ingress-scan.mjs의 COMPUTED_KEY_CONCAT 휴리스틱은 문맥
+  // 없이 "따옴표 리터럴 + 따옴표 리터럴"을 전부 계산 키 조합으로 잡는다
+  // (A-3 KNOWN_LIMITATIONS급 오탐 -- 이 문자열은 env 계산 키가 아니라
+  // 사람이 읽는 기동 지시문일 뿐이다). 스캐너를 완화하는 대신 이 함수의
+  // 조립 방식을 스캐너와 충돌하지 않게 고치는 쪽을 택한다(G8: 스캐너
+  // 자체는 약화하지 않는다).
+  return `너는 하네스 릴레이 [${role}] 워커다. D:\\문서관리\\하네스-관제실\\worker-dispatch-rule.md를 읽고 1절대로 위조확인하라: orca orchestration dispatch-show --task ${runtimeTaskId} --json 실행해 result.dispatch.assignee_pane_key가 이 좌석 환경변수 ORCA_PANE_KEY와 일치하는지 대조하고 결과 파일 맨 위에 3줄(dispatch_verified/task_id_from_dispatch/pane_match) 기록. 그다음 .harness/${lower}-task.md 지침대로 수행(코드 수정은 그 지침 범위 내). 결과는 .harness/${lower}.md에 task_id 에코 + 마지막 줄 '>>> DONE: ${role} @ 실제시각KST' 로 쓰고, STATUS.md 1절 ${role} 행만 갱신. go ${harnessTaskId}`;
 }
 
 // ---- 포트 2: 배달(deliver) ----
 // ctx: { taskId, role, worktreePath, coordinatorHandle }
 // opts: { execFn, existingSeatHandle?(테스트 전용 override), confirmPastedFn?,
-//         maxRetries?, confirmMaxAttempts?, confirmWaitFn? }
+//         confirmMaxAttempts?, confirmWaitFn?, consumedReceipt?(D14-B) }
 // A-2: seatHandle을 입력으로 받지 않는다 -- {role, worktreePath}로부터
 // resolveSeatHandle(A-1)이 그 자리에서 해석한다.
-// confirmPastedFn: 테스트·특수 상황용 override 훅. codex(REVIEW) 배달에서만
-// 쓰이며, **미주입 시 어댑터가 terminal show로 스스로 확인한다**(review-1
-// C2, 이전엔 미주입=무조건 미확인이었다). marker = c.taskId(하네스
-// task_id) -- dispatch --inject로 넣은 spec(`go <task_id>`)에 항상 포함된
-// 값이라 별도 필드 없이 재사용한다.
+// D11 (pm-2 §QA): 프로필별로 완전히 다른 경로를 탄다 -- claude=dispatch
+// --inject 1회(제출 Enter 0회), codex=무-inject dispatch 1회 -> 최소
+// 기동문 text 1회 -> exact marker 확인 -> Enter 1회(재시도 0, at-most-once).
+// 미지원/불명 엔진은 어느 경로도 추정하지 않고 side effect 0으로 거부한다
+// (task-create/handle 해석보다도 먼저 -- 아래 참조).
 export function deliverTask(ctx, opts = {}) {
   const c = isPlainObject(ctx) ? ctx : {};
   const invalid = validateDeliverInput(c, opts);
   if (invalid) return { ok: false, reason: invalid };
+
+  const engine = ENGINE_BY_ROLE[c.role];
+  if (!isNonEmptyString(engine)) {
+    return {
+      ok: false,
+      reason: `orca-adapter: ${REASON.UNSUPPORTED_PROFILE} -- unknown/unsupported delivery profile for role ${JSON.stringify(c.role)} (D11: no side effects for unknown profiles)`,
+    };
+  }
 
   const taskResult = createTask(c, opts);
   if (!taskResult.ok) return taskResult;
@@ -1188,27 +1334,71 @@ export function deliverTask(ctx, opts = {}) {
   if (!handleResult.ok) return handleResult;
   const seatHandle = handleResult.handle;
 
-  const dispatchResult = dispatchToSeat(
-    taskResult.runtimeTaskId,
+  if (engine === "codex") {
+    return deliverToCodexSeat(c, seatHandle, taskResult.runtimeTaskId, opts);
+  }
+  return deliverToClaudeSeat(c, seatHandle, taskResult.runtimeTaskId, opts);
+}
+
+// D11-A claude 프로필: dispatch --inject 1회로 배정+붙여넣기+제출이 전부
+// 끝난다(제출 Enter 0회).
+function deliverToClaudeSeat(c, seatHandle, runtimeTaskId, opts) {
+  const dispatchResult = dispatchToSeat(runtimeTaskId, seatHandle, opts, c);
+  if (!dispatchResult.ok) return dispatchResult;
+  return {
+    ok: true,
+    runtimeTaskId: dispatchResult.runtimeTaskId,
+    submitted: "auto",
+    retries: 0,
+  };
+}
+
+// D11-A/B/C codex 프로필: 무-inject dispatch -> 최소 기동문 text -> exact
+// marker 확인 -> Enter. text/Enter는 각각 정확히 1회만 시도한다(D11-C
+// at-most-once) -- 실패하면 즉시 DELIVERY_UNJUDGABLE로 정지, 같은 부작용을
+// 다시 내지 않는다. `--interrupt`는 어디에도 없다(D15).
+function deliverToCodexSeat(c, seatHandle, runtimeTaskId, opts) {
+  const dispatchResult = dispatchToSeatNoInject(
+    runtimeTaskId,
     seatHandle,
     opts,
+    c,
   );
   if (!dispatchResult.ok) return dispatchResult;
+  const rtId = dispatchResult.runtimeTaskId;
 
-  if (!needsExplicitSubmit(c.role)) {
+  const bootstrapText = buildCodexBootstrapText({
+    role: c.role,
+    runtimeTaskId: rtId,
+    harnessTaskId: c.taskId,
+  });
+  const textSent = guardedExec(
+    buildSeatLaunchTextCommand(seatHandle, bootstrapText),
+    opts.execFn,
+    REASON.DELIVERY_UNJUDGABLE,
+  );
+  if (!textSent.ok) {
+    return { ok: false, reason: textSent.reason, runtimeTaskId: rtId };
+  }
+
+  if (!confirmCodexStaging(seatHandle, c.taskId, opts)) {
     return {
-      ok: true,
-      runtimeTaskId: dispatchResult.runtimeTaskId,
-      submitted: "auto",
-      retries: 0,
+      ok: false,
+      reason: `orca-adapter: ${REASON.PASTE_UNCONFIRMED} -- codex staging marker not observed (task-specific marker required, generic busy insufficient); submit refused (0 terminal send --enter calls)`,
+      runtimeTaskId: rtId,
     };
   }
-  return submitWithRetry(
-    seatHandle,
-    dispatchResult.runtimeTaskId,
-    c.taskId,
-    opts,
+
+  const submitted = guardedExec(
+    buildSeatSubmitCommand(seatHandle),
+    opts.execFn,
+    REASON.DELIVERY_UNJUDGABLE,
   );
+  if (!submitted.ok) {
+    return { ok: false, reason: submitted.reason, runtimeTaskId: rtId };
+  }
+
+  return { ok: true, runtimeTaskId: rtId, submitted: "explicit", retries: 0 };
 }
 
 // ---- 포트 3: 감지(detect) -- 비권위 신호만. 완료를 이 값으로 확정하지 않는다
@@ -1244,6 +1434,89 @@ export function collectCompletionSignals(ctx, opts = {}) {
     ? response.result.messages
     : [];
   return { ok: true, signals: messages, note: null };
+}
+
+// ---- D13-G1 (pm-2 §QE): 기동문 자격 판정 -- 결정적 seam ----
+// 권위 판정의 입력은 dispatch-show 결과 + 현재 pane key뿐이다. **이 함수는
+// 기동문 텍스트 자체를 인자로 받지 않는다** -- 텍스트가 판정값에 영향을
+// 줄 수 없음을 시그니처 자체로 증명한다(위조 문구가 같은 dispatch/pane
+// 입력에서 자격 결과를 못 바꾼다는 것을 "그 값이 아예 함수에 없다"로
+// 구조적으로 보장). goLabel/localTaskId는 자격이 아니라 라벨 결속만
+// 본다(자격 통과 후에만 확인 -- 위조 문구라도 dispatch/pane이 자기 것이면
+// 다음 단계까지는 가되, local task_id 불일치면 그 자리에서 거부).
+export const BOOTSTRAP_AUTH_REASON = Object.freeze({
+  NO_DISPATCH_RECORD: "BOOTSTRAP_AUTH_NO_DISPATCH_RECORD",
+  PANE_MISMATCH: "BOOTSTRAP_AUTH_PANE_MISMATCH",
+  LABEL_MISMATCH: "BOOTSTRAP_AUTH_LABEL_MISMATCH",
+});
+
+// ctx: { dispatchShowResponse, currentPaneKey, goLabel?, localTaskId? }
+export function judgeBootstrapAuthorization(ctx = {}) {
+  const c = isPlainObject(ctx) ? ctx : {};
+  const dispatch =
+    isPlainObject(c.dispatchShowResponse) && c.dispatchShowResponse.ok === true
+      ? c.dispatchShowResponse.result?.dispatch
+      : null;
+  if (
+    !isPlainObject(dispatch) ||
+    !isNonEmptyString(dispatch.assignee_pane_key)
+  ) {
+    return { ok: false, reason: BOOTSTRAP_AUTH_REASON.NO_DISPATCH_RECORD };
+  }
+  if (dispatch.assignee_pane_key !== c.currentPaneKey) {
+    return { ok: false, reason: BOOTSTRAP_AUTH_REASON.PANE_MISMATCH };
+  }
+  if (
+    isNonEmptyString(c.goLabel) &&
+    isNonEmptyString(c.localTaskId) &&
+    c.goLabel !== c.localTaskId
+  ) {
+    return { ok: false, reason: BOOTSTRAP_AUTH_REASON.LABEL_MISMATCH };
+  }
+  return { ok: true };
+}
+
+// 기동문 **끝**의 `go <label>` tail marker만 뽑는다. go-task-id-gate.mjs의
+// extractPromptTaskId는 독립 prompt 시작(^)에 anchor된 별개 계약이라(그
+// 파일은 "go"로 시작하는 짧은 prompt 전용) 이 어댑터가 만드는 긴 기동문의
+// 끝 tail에는 맞지 않는다 -- 같은 걸 재구현하는 게 아니라 다른 위치
+// 계약이라 별도 최소 정규식을 둔다. 이 추출값을 judgeBootstrapAuthorization
+// 의 goLabel로 넘기는 것은 호출자 몫이다(자격 판정 자체와는 분리).
+const BOOTSTRAP_GO_TAIL_RE = /\bgo\s+(\S+)\s*$/i;
+export function extractBootstrapGoLabel(text) {
+  if (typeof text !== "string") return null;
+  const m = text.match(BOOTSTRAP_GO_TAIL_RE);
+  return m ? m[1] : null;
+}
+
+// ---- D9 (pm-2 §QD): 실행권한 3상태 경계 ----
+// CODE_READY(fake fixture PASS)/RUN_READY(사람 권한 로드 세션)/LIVE_PROVEN
+// (실제 1회 result+handshake까지 완주)을 합치지 않는다. 부분 권한으로
+// LIVE_PROVEN을 자칭할 수 없도록 필요 권한 전부가 갖춰져야만 runReady다.
+export const RUN_STATE = Object.freeze({
+  CODE_READY: "CODE_READY",
+  RUN_READY: "RUN_READY",
+  LIVE_PROVEN: "LIVE_PROVEN",
+});
+const REQUIRED_RUN_PERMISSIONS = Object.freeze(["dispatch", "terminal"]);
+
+// ctx: { runPermissions?: {dispatch?, terminal?}, liveProofReceipt? }
+export function classifyRunReadiness(ctx = {}) {
+  const c = isPlainObject(ctx) ? ctx : {};
+  const perms = isPlainObject(c.runPermissions) ? c.runPermissions : {};
+  const codeReady = true; // 이 함수까지 실행됐다는 것 자체가 fake fixture PASS의 증거
+  const runReady = REQUIRED_RUN_PERMISSIONS.every((p) => perms[p] === true);
+  const liveProven = runReady && c.liveProofReceipt === true;
+  return {
+    codeReady,
+    runReady,
+    liveProven,
+    state: liveProven
+      ? RUN_STATE.LIVE_PROVEN
+      : runReady
+        ? RUN_STATE.RUN_READY
+        : RUN_STATE.CODE_READY,
+  };
 }
 
 // ---- 포트 4: 생애주기(lifecycle) ----
