@@ -84,6 +84,26 @@ const ORCA_COMMAND_SHAPES = Object.freeze([
     },
     values: [3, 5],
   },
+  // HYK-170 사이클2 ②-b coder-1 (D11, pm-2 §QA): codex(REVIEW=codex/terra
+  // 좌석 프로필 한정) 배달은 --inject가 입력을 깨뜨려(OSC escape 누출)
+  // 무-inject dispatch로 배정 기록만 만든다 -- 관제실 스톱갭
+  // `dispatch-worker.ps1`의 `Invoke-Dispatch -inject:$false` 경로가 이미
+  // 라이브로 검증한 형태 그대로다(추측 argv 아님). 이전엔 이 정확한 7-원소
+  // 형태가 known-bad(사이클2 (3d))로 거부됐다 -- 지금은 D11이 이 profile을
+  // 정당화하므로 화이트리스트에 **추가**한다(기존 inject 형태를 느슨하게
+  // 만든 것이 아니라 별도 exact shape 신설, 위치·길이 그대로 강제).
+  {
+    name: "dispatch-no-inject",
+    length: 7,
+    fixed: {
+      0: "orchestration",
+      1: "dispatch",
+      2: "--task",
+      4: "--to",
+      6: "--json",
+    },
+    values: [3, 5],
+  },
   {
     name: "check-wait",
     length: 10,
@@ -146,6 +166,20 @@ export function buildDispatchCommand(runtimeTaskId, terminalHandle) {
     "--to",
     terminalHandle,
     "--inject",
+    "--json",
+  ];
+}
+// D11 (codex REVIEW 프로필 전용, dispatch-worker.ps1 실측 그대로): --inject
+// 없이 배정 기록만 만든다. text-send/Enter는 별도 명령(buildSeatLaunchTextCommand/
+// buildSeatSubmitCommand, orca-adapter.mjs)으로 이어진다.
+export function buildDispatchCommandNoInject(runtimeTaskId, terminalHandle) {
+  return [
+    "orchestration",
+    "dispatch",
+    "--task",
+    runtimeTaskId,
+    "--to",
+    terminalHandle,
     "--json",
   ];
 }

@@ -16,6 +16,7 @@ import {
   runGuardedStep,
   buildTaskCreateCommand,
   buildDispatchCommand,
+  buildDispatchCommandNoInject,
   buildCheckWaitCommand,
   parseRuntimeTaskId,
   writeReceiptLedger,
@@ -247,8 +248,14 @@ test("(3c) G2: task-create and check --wait shapes are allowed too", () => {
     true,
   );
 });
-test("(3d) G2: dispatch without --inject is rejected (not just any 'dispatch' token)", () => {
-  const r = assertAllowedOrcaCommand([
+// HYK-170 사이클2 ②-b coder-1 (D11): 이 정확한 무-inject 7-원소 shape는
+// 이전엔 known-bad였으나, codex(REVIEW=codex/terra) 배달 프로필이 이
+// 형태를 정당한 배정-기록-전용 dispatch로 요구한다(dispatch-worker.ps1
+// 실측 그대로) -- 화이트리스트에 별도 exact shape로 추가됐으므로 이제
+// 통과해야 한다. buildDispatchCommandNoInject의 builder 산출물과 정확히
+// 일치함도 함께 확인(추측 조립 아님).
+test("(3d) G2 D11: dispatch without --inject (exact 7-element shape) is now allowed -- codex profile's dedicated dispatch-no-inject shape", () => {
+  const argv = [
     "orchestration",
     "dispatch",
     "--task",
@@ -256,8 +263,41 @@ test("(3d) G2: dispatch without --inject is rejected (not just any 'dispatch' to
     "--to",
     EXPECTED_TARGET,
     "--json",
+  ];
+  assert.deepEqual(
+    argv,
+    buildDispatchCommandNoInject(RUNTIME_TASK_ID, EXPECTED_TARGET),
+  );
+  const r = assertAllowedOrcaCommand(argv);
+  assert.equal(r.ok, true);
+});
+
+// D11 회귀: 무-inject shape도 위치/길이가 정확해야 한다 -- 임의 인자 추가나
+// --inject를 다시 붙인 8-원소 변형과 혼동해 통과시키면 안 된다.
+test("(3d-2) G2 D11: dispatch-no-inject with an extra trailing arg is still rejected (exact length enforced)", () => {
+  const r = assertAllowedOrcaCommand([
+    ...buildDispatchCommandNoInject(RUNTIME_TASK_ID, EXPECTED_TARGET),
+    "--agent",
   ]);
   assert.equal(r.ok, false);
+});
+
+test("(3d-3) G2 D11: dispatch-no-inject shape does not accidentally also match with --inject re-added (still exactly 2 distinct shapes)", () => {
+  const withInject = [
+    "orchestration",
+    "dispatch",
+    "--task",
+    RUNTIME_TASK_ID,
+    "--to",
+    EXPECTED_TARGET,
+    "--inject",
+    "--json",
+  ];
+  assert.deepEqual(
+    withInject,
+    buildDispatchCommand(RUNTIME_TASK_ID, EXPECTED_TARGET),
+  );
+  assert.equal(assertAllowedOrcaCommand(withInject).ok, true);
 });
 
 // review-3의 정확한 3개 반례를 known-bad로 박제 -- 이전 prefix 비교는 이 3개를
