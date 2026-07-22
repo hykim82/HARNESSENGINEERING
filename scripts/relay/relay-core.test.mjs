@@ -1,6 +1,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync, mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import {
+  readFileSync,
+  mkdtempSync,
+  writeFileSync,
+  rmSync,
+  mkdirSync,
+  existsSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { relayStep, STAGE, STATUS } from "./relay-core.mjs";
@@ -29,6 +36,24 @@ function fakeAdapter(overrides = {}) {
 
 function makeHarnessDir() {
   return mkdtempSync(join(tmpdir(), "hyk169-relay-core-"));
+}
+
+// HYK-170 사이클2 ②-a coder-1 (D8): mainRepoDir 역할의 별도 임시 디렉터리 --
+// harnessDir(대상 워크트리 쪽)와 물리적으로 분리된 원본 위치를 흉내낸다.
+function makeMainRepoDir() {
+  return mkdtempSync(join(tmpdir(), "hyk170-relay-core-main-"));
+}
+
+// D8 반사실: 원본(source) 빌더는 dropTaskFile과 **의도적으로 별개**다 --
+// 같은 함수로 원본과 기대값을 둘 다 만들면 자기대조 헛통과가 된다(pm-2
+// §S2Δ "같은 fixture builder로 원본/기대 생성 금지").
+function writeSourceTaskFile(mainRepoDir, rolePrefix, body) {
+  mkdirSync(join(mainRepoDir, ".harness"), { recursive: true });
+  writeFileSync(
+    join(mainRepoDir, ".harness", `${rolePrefix}-task.md`),
+    body,
+    "utf8",
+  );
 }
 
 function dropTaskFile(
@@ -132,9 +157,14 @@ test("G10: delivered-pending -- deliver succeeds but the worker hasn't produced 
   }
 });
 
-test("G10: adapter.ensureSeat failure stops before any task-file/deliver check", () => {
+// HYK-170 사이클2 ②-a coder-1 (D8): task-file 배치·재검증이 이제 seat
+// 단계보다 먼저 실행되므로(pm-2 §S2Δ -- "seat launch/delivery가 진행되게
+// 한다"), 이 시험은 seat 실패가 STAGE.SEAT로 표면화되는 것을 확인하려면
+// task-file 단계를 먼저 통과시켜야 한다(파일을 미리 드롭).
+test("G10: adapter.ensureSeat failure stops before any deliver check (task file already placed)", () => {
   const harnessDir = makeHarnessDir();
   try {
+    dropTaskFile(harnessDir, "coder");
     let deliverCalled = false;
     const adapter = fakeAdapter({
       ensureSeat: () => ({ ok: false, reason: "seat create failed" }),
@@ -245,9 +275,10 @@ test("G10: role prefix is lowercased consistently with checkRelayHandshake's <ro
   }
 });
 
-test("G10: missing adapter.ensureSeat is a config-shape failure, not a crash", () => {
+test("G10: missing adapter.ensureSeat is a config-shape failure, not a crash (task file already placed)", () => {
   const harnessDir = makeHarnessDir();
   try {
+    dropTaskFile(harnessDir, "coder");
     const r = relayStep(
       { role: "CODER", worktreePath: "/wt", taskId: "HYK-x", harnessDir },
       {},
@@ -342,6 +373,226 @@ test("G10: missing adapter.deliverTask after a successful seat is a config-shape
     assert.equal(r.ok, false);
     assert.equal(r.stage, STAGE.DELIVER);
     assert.match(r.reason, /deliverTask/);
+  } finally {
+    rmSync(harnessDir, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// D8 (HYK-170 사이클2 ②-a coder-1, pm-2 §S2Δ): task_id+내용 결속 배치·재검증.
+// "목적 파일 존재"만 확인하던 이전 검사를 대체한다 -- mainRepoDir가 주어지면
+// 원본 task_id 결속 확인 -> 대상 워크트리로 복사 -> 복사본 재검증까지 코드가
+// 직접 확인한 뒤에만 seat/deliver로 진행한다.
+// ---------------------------------------------------------------------------
+test("D8: mainRepoDir given -- source task file is placed into the worktree harnessDir byte-for-byte, and seat runs only after that", () => {
+  const harnessDir = makeHarnessDir();
+  const mainRepoDir = makeMainRepoDir();
+  try {
+    writeSourceTaskFile(
+      mainRepoDir,
+      "coder",
+      "task_id: HYK-170-coder-1\ndropped_at: 2026-07-23 04:55 KST\n\nbody text here\n",
+    );
+    let seatCalled = false;
+    const adapter = fakeAdapter({
+      ensureSeat: () => {
+        seatCalled = true;
+        return { ok: true, seatHandle: "term_fake" };
+      },
+    });
+    relayStep(
+      {
+        role: "CODER",
+        worktreePath: "/wt",
+        taskId: "HYK-170-coder-1",
+        harnessDir,
+        mainRepoDir,
+      },
+      adapter,
+      {},
+    );
+    assert.equal(seatCalled, true);
+    assert.equal(
+      readFileSync(join(harnessDir, "coder-task.md"), "utf8"),
+      readFileSync(join(mainRepoDir, ".harness", "coder-task.md"), "utf8"),
+    );
+  } finally {
+    rmSync(harnessDir, { recursive: true, force: true });
+    rmSync(mainRepoDir, { recursive: true, force: true });
+  }
+});
+
+test("D8: source missing -- TASK_FILE stage fails, seat never runs (side effect 0)", () => {
+  const harnessDir = makeHarnessDir();
+  const mainRepoDir = makeMainRepoDir(); // .harness never created -- no source at all
+  try {
+    let seatCalled = false;
+    const adapter = fakeAdapter({
+      ensureSeat: () => {
+        seatCalled = true;
+        return { ok: true };
+      },
+    });
+    const r = relayStep(
+      {
+        role: "CODER",
+        worktreePath: "/wt",
+        taskId: "HYK-170-coder-1",
+        harnessDir,
+        mainRepoDir,
+      },
+      adapter,
+      {},
+    );
+    assert.equal(r.ok, false);
+    assert.equal(r.stage, STAGE.TASK_FILE);
+    assert.equal(seatCalled, false);
+  } finally {
+    rmSync(harnessDir, { recursive: true, force: true });
+    rmSync(mainRepoDir, { recursive: true, force: true });
+  }
+});
+
+test("D8: source task_id mismatch (stale/wrong file) -- TASK_FILE stage fails, no copy attempted, seat never runs", () => {
+  const harnessDir = makeHarnessDir();
+  const mainRepoDir = makeMainRepoDir();
+  try {
+    writeSourceTaskFile(
+      mainRepoDir,
+      "coder",
+      "task_id: HYK-OTHER-1\ndropped_at: 2026-07-23 04:55 KST\n\nbody\n",
+    );
+    let seatCalled = false;
+    const adapter = fakeAdapter({
+      ensureSeat: () => {
+        seatCalled = true;
+        return { ok: true };
+      },
+    });
+    const r = relayStep(
+      {
+        role: "CODER",
+        worktreePath: "/wt",
+        taskId: "HYK-170-coder-1",
+        harnessDir,
+        mainRepoDir,
+      },
+      adapter,
+      {},
+    );
+    assert.equal(r.ok, false);
+    assert.equal(r.stage, STAGE.TASK_FILE);
+    assert.match(r.reason, /task_id mismatch/);
+    assert.equal(seatCalled, false);
+    assert.equal(existsSync(join(harnessDir, "coder-task.md")), false);
+  } finally {
+    rmSync(harnessDir, { recursive: true, force: true });
+    rmSync(mainRepoDir, { recursive: true, force: true });
+  }
+});
+
+// mutation-kill: "복사 후 존재만 확인"(sourceContent를 신뢰하고 destContent를
+// 다시 읽지 않는 구현)으로 되돌리면 이 시험은 RED여야 한다 -- copyFileFn을
+// 오염시켜 destContent가 실제로 sourceContent와 달라지게 만든다.
+test("D8: mutation-kill -- a corrupted copy (copyFileFn writes different bytes than the source) is caught by re-reading the destination, not by trusting the in-memory source content", () => {
+  const harnessDir = makeHarnessDir();
+  const mainRepoDir = makeMainRepoDir();
+  try {
+    writeSourceTaskFile(
+      mainRepoDir,
+      "coder",
+      "task_id: HYK-170-coder-1\ndropped_at: 2026-07-23 04:55 KST\n\noriginal body\n",
+    );
+    let seatCalled = false;
+    const adapter = fakeAdapter({
+      ensureSeat: () => {
+        seatCalled = true;
+        return { ok: true };
+      },
+    });
+    const r = relayStep(
+      {
+        role: "CODER",
+        worktreePath: "/wt",
+        taskId: "HYK-170-coder-1",
+        harnessDir,
+        mainRepoDir,
+      },
+      adapter,
+      {
+        copyFileFn: (_src, dst) =>
+          writeFileSync(dst, "task_id: HYK-170-coder-1\n\ncorrupted\n", "utf8"),
+      },
+    );
+    assert.equal(r.ok, false);
+    assert.equal(r.stage, STAGE.TASK_FILE);
+    assert.match(r.reason, /content mismatch/);
+    assert.equal(seatCalled, false);
+  } finally {
+    rmSync(harnessDir, { recursive: true, force: true });
+    rmSync(mainRepoDir, { recursive: true, force: true });
+  }
+});
+
+// mutation-kill: destination task_id가 복사 과정에서 뒤바뀌었는데도(예:
+// 다른 task의 잔여 파일이 남아 있다가 부분적으로만 덮어써진 경우) content
+// 비교만으로 못 잡는 변형까지 task_id 재검증이 잡는지 확인한다.
+test("D8: mutation-kill -- destination task_id no longer matches expected after copy is caught, not just 'destination file exists'", () => {
+  const harnessDir = makeHarnessDir();
+  const mainRepoDir = makeMainRepoDir();
+  try {
+    writeSourceTaskFile(
+      mainRepoDir,
+      "coder",
+      "task_id: HYK-170-coder-1\ndropped_at: 2026-07-23 04:55 KST\n\nbody\n",
+    );
+    let seatCalled = false;
+    const adapter = fakeAdapter({
+      ensureSeat: () => {
+        seatCalled = true;
+        return { ok: true };
+      },
+    });
+    const r = relayStep(
+      {
+        role: "CODER",
+        worktreePath: "/wt",
+        taskId: "HYK-170-coder-1",
+        harnessDir,
+        mainRepoDir,
+      },
+      adapter,
+      {
+        copyFileFn: (src, dst) => {
+          const content = readFileSync(src, "utf8");
+          writeFileSync(
+            dst,
+            content.replace("HYK-170-coder-1", "HYK-170-coder-9"),
+            "utf8",
+          );
+        },
+      },
+    );
+    assert.equal(r.ok, false);
+    assert.equal(r.stage, STAGE.TASK_FILE);
+    assert.equal(seatCalled, false);
+  } finally {
+    rmSync(harnessDir, { recursive: true, force: true });
+    rmSync(mainRepoDir, { recursive: true, force: true });
+  }
+});
+
+test("D8: without mainRepoDir, legacy existence-only check still applies (backward compat with pre-D8 manual placement)", () => {
+  const harnessDir = makeHarnessDir();
+  try {
+    dropTaskFile(harnessDir, "coder");
+    const r = relayStep(
+      { role: "CODER", worktreePath: "/wt", taskId: "HYK-x", harnessDir },
+      fakeAdapter(),
+      {},
+    );
+    assert.equal(r.ok, true);
+    assert.equal(r.status, STATUS.DELIVERED_PENDING);
   } finally {
     rmSync(harnessDir, { recursive: true, force: true });
   }

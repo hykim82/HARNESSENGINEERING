@@ -381,6 +381,11 @@ function buildSeatLauncherCommand(role, worktreePath) {
 }
 // A1(실측 §8-1): --shell/--setup 둘 다 존재하지 않는 옵션이었다. 실물은
 // `terminal create --worktree <selector> --command "<cmd>" [--title <t>] --json`.
+// HYK-170 사이클2 ②-a coder-1 (D12): 이 빌더는 더 이상 createNewSeat에서
+// 호출되지 않는다 -- ⓑ(새 좌석 생성 뒤 기본 탭을 close)가 pm-2에서
+// 반려됐기 때문이다(D9 close 권한 변수 + D3 `--tab` 함정 + 불필요 side
+// effect, 아래 createNewSeat 주석 참조). argv shape 자체는 실측값이라
+// 버리지 않고 순수 빌더+단위시험만 남긴다(조용한 삭제 방지, G8).
 export function buildSeatCreateCommand(role, worktreePath) {
   return [
     "terminal",
@@ -397,6 +402,22 @@ export function buildSeatCreateCommand(role, worktreePath) {
 // A2(실측 §8-2): --handle 옵션은 없다 -- 실물은 --terminal.
 export function buildSeatSubmitCommand(seatHandle) {
   return ["terminal", "send", "--terminal", seatHandle, "--enter", "--json"];
+}
+// HYK-170 사이클2 ②-a coder-1 (D12): 새 워크트리의 기본 shell 탭에 런처
+// 명령을 붙여넣는 용도 -- buildSeatSubmitCommand(A2, --enter만)의 argv
+// shape를 그대로 확장해 --text를 추가한 것이다. **정직 한계**: `--text`
+// 옵션 자체는 이번 2단 라이브 프로브 범위 밖이라 실측되지 않았다 -- fake
+// execFn PASS 대상이며 라이브 검증 전에는 UNVERIFIED다(pm-2 §QB).
+export function buildSeatLaunchTextCommand(seatHandle, commandText) {
+  return [
+    "terminal",
+    "send",
+    "--terminal",
+    seatHandle,
+    "--text",
+    commandText,
+    "--json",
+  ];
 }
 // A4(실측 §8-4): 옵션명은 유일하게 정확했다. 단 기본 --unread는 메시지를
 // 읽음 처리하므로(다른 소비자 것을 태워버림), 비권위 감지 폴링에는 --peek을
@@ -765,50 +786,57 @@ function validateEnsureSeatInput(role, worktreePath, create) {
   return null;
 }
 
-// A1/A3/A5 소진 + 좌석 생성 실 호출 -- ensureSeat의 "새 좌석" 경로만 분리
-// (복잡도 분산, 판정 자체는 불변).
+// HYK-170 사이클2 ②-a coder-1 (D12, pm-2 §QB 채택안 ⓐ): "새 좌석"이라는
+// 이름과 달리 이 경로는 더 이상 `terminal create`를 호출하지 않는다 --
+// 새 workspace의 기본 shell 탭이 정확히 1개일 때 그 탭에서 사람 소유
+// 런처를 text+Enter로 기동한다. 후보 판정은 A-1(resolveSeatHandle)을 그대로
+// 재사용한다 -- 0개/2개+ 실패에서도 이 함수 자신은 어떤 side effect
+// 호출도 만들지 않는다(resolveSeatHandle 자체의 순수-조합 계약). marker를
+// 후보 선택 근거로 쓰지 않는다는 계약도 그대로 승계된다.
+//
+// ⓑ(새 좌석 생성 뒤 여분 탭 close)는 pm-2에서 반려됐다 -- D9(`terminal
+// close` 권한 변수)·D3(`--tab` 함정) 위에 불필요한 생성/삭제 side effect가
+// 겹치고, teardown-매사이클과 결합하면 워크트리 오삭제 위험이 커진다(사유
+// 보존, G8).
+//
+// 정직 한계: 기본 shell 탭에서 런처가 올바른 role/engine/env로 장기 실행된
+// 라이브 표본은 0건이다 -- 이 경로는 fake execFn PASS 대상이지 라이브
+// 준비 완료 주장이 아니다(UNVERIFIED, 실패해도 ⓑ로 자동 강등하지 않는다).
 function createNewSeat(role, worktreePath, mainRepoDir, opts, fs, steps) {
   ensureSettingsCopied(mainRepoDir, worktreePath, fs, steps);
   ensureNodeModulesCopied(mainRepoDir, worktreePath, fs, steps);
 
-  // A1: worktree create 시 --setup skip이 필요하다는 관측은 여기서는 좌석
-  // 생성 argv에 반영한다(worktree 자체 생성은 이 포트의 책임 밖 -- 호출자가
-  // 이미 만든 워크트리 경로를 넘긴다는 계약).
-  const created = guardedExec(
-    buildSeatCreateCommand(role, worktreePath),
+  const resolved = resolveSeatHandle({ role, worktreePath }, opts);
+  if (!resolved.ok) {
+    return {
+      ok: false,
+      reason: `orca-adapter: ${REASON.SEAT_CREATE_FAILED} -- ${resolved.reason}`,
+      seatHandleReason: resolved.seatHandleReason,
+    };
+  }
+
+  const launched = guardedExec(
+    buildSeatLaunchTextCommand(
+      resolved.handle,
+      buildSeatLauncherCommand(role, worktreePath),
+    ),
     opts.execFn,
     REASON.SEAT_CREATE_FAILED,
   );
-  if (!created.ok) return { ok: false, reason: created.reason };
+  if (!launched.ok) return { ok: false, reason: launched.reason };
 
-  const result =
-    isPlainObject(created.response) && isPlainObject(created.response.result)
-      ? created.response.result
-      : {};
-  // 실측 응답은 result.terminal.{handle,paneKey,surface,tabId}에 있다(2단
-  // §2) -- 일부 fixture는 result에 직접 담기도 하므로 양쪽 다 허용한다.
-  const terminal = isPlainObject(result.terminal) ? result.terminal : result;
-  if (!isNonEmptyString(terminal.handle)) {
-    return {
-      ok: false,
-      reason:
-        "orca-adapter: SEAT_CREATE_FAILED -- response.result.terminal.handle missing/empty",
-    };
-  }
-  // surface:"visible"이 아니면 UI가 못 받아 백그라운드 폴백으로 새어나간
-  // "유령 터미널"이다(2단 §2 실측) -- fail-closed.
-  if (terminal.surface !== "visible") {
-    return {
-      ok: false,
-      reason: `orca-adapter: SEAT_CREATE_FAILED -- response surface is not 'visible' (got ${JSON.stringify(terminal.surface)}), UI did not adopt the seat`,
-    };
-  }
-  steps.push("seat-created");
+  const submitted = guardedExec(
+    buildSeatSubmitCommand(resolved.handle),
+    opts.execFn,
+    REASON.SEAT_CREATE_FAILED,
+  );
+  if (!submitted.ok) return { ok: false, reason: submitted.reason };
+
+  steps.push("seat-launched-in-default-tab");
   return {
     ok: true,
-    seatHandle: terminal.handle,
-    paneKey: terminal.paneKey ?? null,
-    created: true,
+    seatHandle: resolved.handle,
+    created: false,
     stepsPerformed: steps,
   };
 }
