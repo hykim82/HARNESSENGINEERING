@@ -89,26 +89,29 @@ function classifyHandshakeStatus(handshake) {
   return STATUS.DELIVERED_UNJUDGABLE;
 }
 
-// HYK-170 사이클2 ②-a coder-1 (D8, pm-2 §S2Δ): "목적 파일 존재만 확인"하던
-// 이전 검사(단순 existsFn)를 내용보존 배치+재검증으로 교체한다. mainRepoDir가
-// 주어지면 그 경로의 원본을 읽어 task_id가 기대값과 결속되는지 먼저 확인한
-// 뒤에만 대상 워크트리로 복사하고, 복사본을 다시 읽어 원본과 바이트 단위로
-// 같은지 + task_id가 여전히 기대값과 일치하는지 재검증한다. 어느 단계든
-// 실패하면 그 이후 단계(복사·이후 seat/deliver)는 진행되지 않는다(side
-// effect 0). mainRepoDir가 없으면(호출자가 파일을 이미 손으로 배치한
-// 레거시/수동 경로) 기존처럼 존재 여부만 확인한다 -- 이 폴백은 D8이 새로
-// 요구하는 계약이 아니라 하위 호환이다.
+// HYK-170 사이클2 ②-a coder-1/coder-2 (D8, pm-2 §S2Δ): "목적 파일 존재만
+// 확인"하던 이전 검사(단순 existsFn)를 내용보존 배치+재검증으로 교체한다.
+// mainRepoDir가 주어지면 그 경로의 원본을 읽어 task_id가 기대값과 결속되는지
+// 먼저 확인한 뒤에만 대상 워크트리로 복사하고, 복사본을 다시 읽어 원본과
+// 바이트 단위로 같은지 + task_id가 여전히 기대값과 일치하는지 재검증한다.
+// 어느 단계든 실패하면 그 이후 단계(복사·이후 seat/deliver)는 진행되지
+// 않는다(side effect 0).
+//
+// coder-2 (review-3 실결함 1 수리): mainRepoDir가 없을 때 "존재만 확인하고
+// 통과"하던 호환 경로를 제거했다 -- 그 경로는 잘못된 task_id·오염된 본문이
+// 이미 destPath에 있어도 그대로 seat/deliver로 진행시켰다(내용결속 검사가
+// 전혀 없었다). 원본 위치를 특정할 수 없으면(mainRepoDir 미제공) 바이트
+// 단위 재검증 자체가 불가능하므로 fail-closed로 정지한다 -- "존재-only
+// 통과" 대체 경로는 두지 않는다(암묵적 완화 금지, coder-5/coder-1 원칙
+// 계승).
 function placeAndVerifyTaskFile(inp, harnessDir, rolePrefix, fs) {
   const destPath = join(harnessDir, `${rolePrefix}-task.md`);
 
   if (!isNonEmptyString(inp.mainRepoDir)) {
-    if (!fs.existsFn(destPath)) {
-      return fail(
-        STAGE.TASK_FILE,
-        `relay-core: task file not dropped: ${destPath}`,
-      );
-    }
-    return { ok: true };
+    return fail(
+      STAGE.TASK_FILE,
+      `relay-core: task file source cannot be determined (mainRepoDir not provided) -- refusing an unverifiable existence-only pass: ${destPath}`,
+    );
   }
 
   const sourcePath = join(inp.mainRepoDir, ".harness", `${rolePrefix}-task.md`);

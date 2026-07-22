@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseRunStepArgs, runStepCli } from "./run-step.mjs";
@@ -49,11 +49,16 @@ test("parseRunStepArgs: '--flag=value' shape is rejected (space-separated only, 
   assert.match(r.reason, /unsupported/);
 });
 
+// coder-2 (review-3 결함1 수리 후속): relay-core의 D8 배치가 이제 항상
+// mainRepoDir을 요구하므로(존재-only 폴백 제거), 이 CLI 배선 시험도
+// --main-repo-dir와 그 안의 원본(.harness/coder-task.md)을 함께 준비한다.
 test("runStepCli: with an injected fake execFn (never the real default), wires through to relayStep and never spawns a real process", async () => {
   const harnessDir = mkdtempSync(join(tmpdir(), "hyk169-run-step-"));
+  const mainRepoDir = mkdtempSync(join(tmpdir(), "hyk170-run-step-main-"));
   try {
+    mkdirSync(join(mainRepoDir, ".harness"), { recursive: true });
     writeFileSync(
-      join(harnessDir, "coder-task.md"),
+      join(mainRepoDir, ".harness", "coder-task.md"),
       "task_id: HYK-x\ndropped_at: 2026-07-22 07:05 KST\n\nbody\n",
       "utf8",
     );
@@ -72,6 +77,8 @@ test("runStepCli: with an injected fake execFn (never the real default), wires t
         "HYK-x",
         "--harness-dir",
         harnessDir,
+        "--main-repo-dir",
+        mainRepoDir,
       ],
       { execFn: fakeExecFn, existingSeatHandle: "term_fake" },
     );
@@ -81,6 +88,7 @@ test("runStepCli: with an injected fake execFn (never the real default), wires t
     assert.equal(execFnCalled, true);
   } finally {
     rmSync(harnessDir, { recursive: true, force: true });
+    rmSync(mainRepoDir, { recursive: true, force: true });
   }
 });
 

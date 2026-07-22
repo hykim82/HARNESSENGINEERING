@@ -821,6 +821,42 @@ test("ensureSeat: D12 -- launcher text send failure (response.ok:false) is surfa
   assert.match(r.reason, /Setup decision required/);
 });
 
+// HYK-170 사이클2 ②-a coder-2 (review-3 실결함2 수리, pm-2 §S6 postcondition):
+// 런처 기동(text+Enter) 전엔 후보가 정확히 1개였지만, 기동 뒤 재조회하면
+// 2개로 늘어난 fake -- 기동 자체는 (실제로) 한 번씩 나가지만, 사후
+// postcondition 재검증이 이를 잡아 ensureSeat 전체를 실패로 되돌려야 한다
+// (그 결과 relay-core의 seat 단계가 실패해 deliver는 0회 호출된다).
+test("ensureSeat: D12/S6 coder-2 (review-3 결함2 수리) -- candidates go 1 -> 2 between the pre-launch and post-launch terminal-list queries -- launch still fires once each, but the postcondition recheck fails ensureSeat", () => {
+  let terminalListCalls = 0;
+  const execFn = fakeExecFn({
+    list: managedWorktreeStub(),
+    "terminal-list": () => {
+      terminalListCalls++;
+      return terminalListCalls === 1
+        ? terminalListStub([terminalEntry({ handle: "term_default" })])
+        : terminalListStub([
+            terminalEntry({ handle: "term_default" }),
+            terminalEntry({ handle: "term_new" }),
+          ]);
+    },
+    send: { ok: true },
+  });
+  const r = ensureSeat(
+    { role: "CODER", worktreePath: VALID_WORKTREE },
+    { execFn, existsFn: () => true },
+  );
+  assert.equal(r.ok, false);
+  assert.equal(r.seatHandleReason, SEAT_HANDLE_REASON.AMBIGUOUS);
+  const sendCalls = execFn.calls.filter(
+    (a) => a[0] === "terminal" && a[1] === "send",
+  );
+  assert.equal(sendCalls.length, 2); // launcher text + Enter did fire once each
+  const listCalls = execFn.calls.filter(
+    (a) => a[0] === "terminal" && a[1] === "list",
+  );
+  assert.equal(listCalls.length, 2); // pre-launch resolve + post-launch reverify
+});
+
 // ---------------------------------------------------------------------------
 // ensureSeat -- §B creation path wiring (worktreePath omitted, create given)
 // ---------------------------------------------------------------------------
@@ -2038,8 +2074,9 @@ test("ensureSeat: a path already in the managed list skips worktree create entir
   );
   assert.equal(r.ok, true);
   assert.equal(worktreeCreateCallCount(execFn), 0);
-  // D12: terminal-list (A-1 resolution) + send-text + send-enter = 3, no terminal create.
-  assert.equal(terminalCallCount(execFn), 3);
+  // D12: terminal-list (A-1 resolution) + send-text + send-enter + terminal-list
+  // (S6 post-launch reverify, coder-2) = 4, no terminal create.
+  assert.equal(terminalCallCount(execFn), 4);
   const createCalls = execFn.calls.filter(
     (a) => a[0] === "terminal" && a[1] === "create",
   );

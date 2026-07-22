@@ -56,6 +56,24 @@ function writeSourceTaskFile(mainRepoDir, rolePrefix, body) {
   );
 }
 
+// coder-2 (review-3 결함1 수리): mainRepoDir가 이제 모든 경로에 필요하다
+// (존재-only 폴백 제거) -- G10 파이프라인 시험은 D8 자기대조 반사실의
+// 대상이 아니므로(그건 위 D8 전용 시험만 해당), dropTaskFile과 같은
+// 포맷으로 마련해도 무방하다. 반환된 mainRepoDir는 호출자가 harnessDir와
+// 함께 정리해야 한다.
+function makeTaskFileSource(
+  rolePrefix,
+  { taskId = "HYK-x", droppedAt = "2026-07-22 07:05" } = {},
+) {
+  const mainRepoDir = makeMainRepoDir();
+  writeSourceTaskFile(
+    mainRepoDir,
+    rolePrefix,
+    `task_id: ${taskId}\ndropped_at: ${droppedAt} KST\n\nbody\n`,
+  );
+  return mainRepoDir;
+}
+
 function dropTaskFile(
   harnessDir,
   rolePrefix,
@@ -116,8 +134,8 @@ test("G10: already-done short-circuit -- handshake already ok on entry skips sea
 
 test("G10: full success path -- seat ok, task file present, deliver ok, handshake completes after delivery -> already-done", () => {
   const harnessDir = makeHarnessDir();
+  const mainRepoDir = makeTaskFileSource("coder");
   try {
-    dropTaskFile(harnessDir, "coder");
     const adapter = fakeAdapter({
       deliverTask: () => {
         // simulate the worker finishing synchronously with the delivery call
@@ -126,7 +144,13 @@ test("G10: full success path -- seat ok, task file present, deliver ok, handshak
       },
     });
     const r = relayStep(
-      { role: "CODER", worktreePath: "/wt", taskId: "HYK-x", harnessDir },
+      {
+        role: "CODER",
+        worktreePath: "/wt",
+        taskId: "HYK-x",
+        harnessDir,
+        mainRepoDir,
+      },
       adapter,
       {},
     );
@@ -135,16 +159,23 @@ test("G10: full success path -- seat ok, task file present, deliver ok, handshak
     assert.equal(r.handshake.ok, true);
   } finally {
     rmSync(harnessDir, { recursive: true, force: true });
+    rmSync(mainRepoDir, { recursive: true, force: true });
   }
 });
 
 test("G10: delivered-pending -- deliver succeeds but the worker hasn't produced a result file yet", () => {
   const harnessDir = makeHarnessDir();
+  const mainRepoDir = makeTaskFileSource("coder");
   try {
-    dropTaskFile(harnessDir, "coder");
     const adapter = fakeAdapter();
     const r = relayStep(
-      { role: "CODER", worktreePath: "/wt", taskId: "HYK-x", harnessDir },
+      {
+        role: "CODER",
+        worktreePath: "/wt",
+        taskId: "HYK-x",
+        harnessDir,
+        mainRepoDir,
+      },
       adapter,
       {},
     );
@@ -154,6 +185,7 @@ test("G10: delivered-pending -- deliver succeeds but the worker hasn't produced 
     assert.match(r.handshake.reason, /result file not found/);
   } finally {
     rmSync(harnessDir, { recursive: true, force: true });
+    rmSync(mainRepoDir, { recursive: true, force: true });
   }
 });
 
@@ -163,8 +195,8 @@ test("G10: delivered-pending -- deliver succeeds but the worker hasn't produced 
 // task-file 단계를 먼저 통과시켜야 한다(파일을 미리 드롭).
 test("G10: adapter.ensureSeat failure stops before any deliver check (task file already placed)", () => {
   const harnessDir = makeHarnessDir();
+  const mainRepoDir = makeTaskFileSource("coder");
   try {
-    dropTaskFile(harnessDir, "coder");
     let deliverCalled = false;
     const adapter = fakeAdapter({
       ensureSeat: () => ({ ok: false, reason: "seat create failed" }),
@@ -174,7 +206,13 @@ test("G10: adapter.ensureSeat failure stops before any deliver check (task file 
       },
     });
     const r = relayStep(
-      { role: "CODER", worktreePath: "/wt", taskId: "HYK-x", harnessDir },
+      {
+        role: "CODER",
+        worktreePath: "/wt",
+        taskId: "HYK-x",
+        harnessDir,
+        mainRepoDir,
+      },
       adapter,
       {},
     );
@@ -183,6 +221,7 @@ test("G10: adapter.ensureSeat failure stops before any deliver check (task file 
     assert.equal(deliverCalled, false);
   } finally {
     rmSync(harnessDir, { recursive: true, force: true });
+    rmSync(mainRepoDir, { recursive: true, force: true });
   }
 });
 
@@ -211,8 +250,8 @@ test("G10: task file not dropped stops before deliver is called (real fs, file g
 
 test("G10: deliverTask failure is surfaced as a deliver-stage failure", () => {
   const harnessDir = makeHarnessDir();
+  const mainRepoDir = makeTaskFileSource("coder");
   try {
-    dropTaskFile(harnessDir, "coder");
     const adapter = fakeAdapter({
       deliverTask: () => ({
         ok: false,
@@ -220,7 +259,13 @@ test("G10: deliverTask failure is surfaced as a deliver-stage failure", () => {
       }),
     });
     const r = relayStep(
-      { role: "CODER", worktreePath: "/wt", taskId: "HYK-x", harnessDir },
+      {
+        role: "CODER",
+        worktreePath: "/wt",
+        taskId: "HYK-x",
+        harnessDir,
+        mainRepoDir,
+      },
       adapter,
       {},
     );
@@ -229,25 +274,36 @@ test("G10: deliverTask failure is surfaced as a deliver-stage failure", () => {
     assert.match(r.reason, /dispatch failed/);
   } finally {
     rmSync(harnessDir, { recursive: true, force: true });
+    rmSync(mainRepoDir, { recursive: true, force: true });
   }
 });
 
 test("G10: dropped_at missing (config error) classifies as delivered-config-error, not pending", () => {
   const harnessDir = makeHarnessDir();
+  const mainRepoDir = makeMainRepoDir();
   try {
     // Both files must exist and echo matching task_id -- checkRelayHandshake
     // only reaches the dropped_at check after the result-file-exists and
     // task_id-echo checks pass, so a missing result file would (correctly)
     // classify as pending first, masking the config error this test targets.
-    writeFileSync(
-      join(harnessDir, "coder-task.md"),
+    // Written as the *source* (mainRepoDir) so D8's placement copies it
+    // verbatim into harnessDir -- placeAndVerifyTaskFile itself only checks
+    // task_id, not dropped_at (that belongs to checkRelayHandshake, later).
+    writeSourceTaskFile(
+      mainRepoDir,
+      "coder",
       "task_id: HYK-x\n\nno dropped_at header\n",
-      "utf8",
     );
     dropResultFile(harnessDir, "coder");
     const adapter = fakeAdapter();
     const r = relayStep(
-      { role: "CODER", worktreePath: "/wt", taskId: "HYK-x", harnessDir },
+      {
+        role: "CODER",
+        worktreePath: "/wt",
+        taskId: "HYK-x",
+        harnessDir,
+        mainRepoDir,
+      },
       adapter,
       {},
     );
@@ -255,16 +311,23 @@ test("G10: dropped_at missing (config error) classifies as delivered-config-erro
     assert.equal(r.status, STATUS.DELIVERED_CONFIG_ERROR);
   } finally {
     rmSync(harnessDir, { recursive: true, force: true });
+    rmSync(mainRepoDir, { recursive: true, force: true });
   }
 });
 
 test("G10: role prefix is lowercased consistently with checkRelayHandshake's <role>-task.md convention (REVIEW)", () => {
   const harnessDir = makeHarnessDir();
+  const mainRepoDir = makeTaskFileSource("review");
   try {
-    dropTaskFile(harnessDir, "review");
     const adapter = fakeAdapter();
     const r = relayStep(
-      { role: "REVIEW", worktreePath: "/wt", taskId: "HYK-x", harnessDir },
+      {
+        role: "REVIEW",
+        worktreePath: "/wt",
+        taskId: "HYK-x",
+        harnessDir,
+        mainRepoDir,
+      },
       adapter,
       {},
     );
@@ -272,15 +335,22 @@ test("G10: role prefix is lowercased consistently with checkRelayHandshake's <ro
     assert.equal(r.status, STATUS.DELIVERED_PENDING);
   } finally {
     rmSync(harnessDir, { recursive: true, force: true });
+    rmSync(mainRepoDir, { recursive: true, force: true });
   }
 });
 
 test("G10: missing adapter.ensureSeat is a config-shape failure, not a crash (task file already placed)", () => {
   const harnessDir = makeHarnessDir();
+  const mainRepoDir = makeTaskFileSource("coder");
   try {
-    dropTaskFile(harnessDir, "coder");
     const r = relayStep(
-      { role: "CODER", worktreePath: "/wt", taskId: "HYK-x", harnessDir },
+      {
+        role: "CODER",
+        worktreePath: "/wt",
+        taskId: "HYK-x",
+        harnessDir,
+        mainRepoDir,
+      },
       {},
       {},
     );
@@ -289,6 +359,7 @@ test("G10: missing adapter.ensureSeat is a config-shape failure, not a crash (ta
     assert.match(r.reason, /ensureSeat/);
   } finally {
     rmSync(harnessDir, { recursive: true, force: true });
+    rmSync(mainRepoDir, { recursive: true, force: true });
   }
 });
 
@@ -296,8 +367,8 @@ test("G10: missing adapter.ensureSeat is a config-shape failure, not a crash (ta
 // -- worktreePath만 있다(어댑터가 그 자리에서 A-1로 스스로 해석한다).
 test("A2: relay-core -- the ctx handed to adapter.deliverTask carries worktreePath, never seatHandle", () => {
   const harnessDir = makeHarnessDir();
+  const mainRepoDir = makeTaskFileSource("coder");
   try {
-    dropTaskFile(harnessDir, "coder");
     let capturedCtx = null;
     const adapter = fakeAdapter({
       deliverTask: (ctx) => {
@@ -306,7 +377,13 @@ test("A2: relay-core -- the ctx handed to adapter.deliverTask carries worktreePa
       },
     });
     relayStep(
-      { role: "CODER", worktreePath: "/wt", taskId: "HYK-x", harnessDir },
+      {
+        role: "CODER",
+        worktreePath: "/wt",
+        taskId: "HYK-x",
+        harnessDir,
+        mainRepoDir,
+      },
       adapter,
       {},
     );
@@ -315,6 +392,7 @@ test("A2: relay-core -- the ctx handed to adapter.deliverTask carries worktreePa
     assert.equal(capturedCtx.worktreePath, "/wt");
   } finally {
     rmSync(harnessDir, { recursive: true, force: true });
+    rmSync(mainRepoDir, { recursive: true, force: true });
   }
 });
 
@@ -339,13 +417,19 @@ function containsHandleLeak(value, needle) {
 
 test("A2 (coder-2): relayStep's public return never leaks seatHandle even when adapter.ensureSeat is non-conforming (does not strip it itself)", () => {
   const harnessDir = makeHarnessDir();
+  const mainRepoDir = makeTaskFileSource("coder");
   try {
-    dropTaskFile(harnessDir, "coder");
     const nonConformingAdapter = fakeAdapter({
       ensureSeat: () => ({ ok: true, seatHandle: "term_probe", created: true }),
     });
     const r = relayStep(
-      { role: "CODER", worktreePath: "/wt", taskId: "HYK-x", harnessDir },
+      {
+        role: "CODER",
+        worktreePath: "/wt",
+        taskId: "HYK-x",
+        harnessDir,
+        mainRepoDir,
+      },
       nonConformingAdapter,
       {},
     );
@@ -357,16 +441,23 @@ test("A2 (coder-2): relayStep's public return never leaks seatHandle even when a
     );
   } finally {
     rmSync(harnessDir, { recursive: true, force: true });
+    rmSync(mainRepoDir, { recursive: true, force: true });
   }
 });
 
 test("G10: missing adapter.deliverTask after a successful seat is a config-shape failure, not a crash", () => {
   const harnessDir = makeHarnessDir();
+  const mainRepoDir = makeTaskFileSource("coder");
   try {
-    dropTaskFile(harnessDir, "coder");
     const adapter = { ensureSeat: () => ({ ok: true, seatHandle: "term_x" }) };
     const r = relayStep(
-      { role: "CODER", worktreePath: "/wt", taskId: "HYK-x", harnessDir },
+      {
+        role: "CODER",
+        worktreePath: "/wt",
+        taskId: "HYK-x",
+        harnessDir,
+        mainRepoDir,
+      },
       adapter,
       {},
     );
@@ -375,6 +466,7 @@ test("G10: missing adapter.deliverTask after a successful seat is a config-shape
     assert.match(r.reason, /deliverTask/);
   } finally {
     rmSync(harnessDir, { recursive: true, force: true });
+    rmSync(mainRepoDir, { recursive: true, force: true });
   }
 });
 
@@ -582,17 +674,48 @@ test("D8: mutation-kill -- destination task_id no longer matches expected after 
   }
 });
 
-test("D8: without mainRepoDir, legacy existence-only check still applies (backward compat with pre-D8 manual placement)", () => {
+// HYK-170 사이클2 ②-a coder-2 (review-3 실결함1 수리): 이전엔 mainRepoDir
+// 미제공 시 "존재만 확인하고 통과"하는 호환 경로가 있어, destPath에 이미
+// 잘못된 task_id·오염된 본문이 있어도(review-3의 정확한 재현) 그대로
+// seat/deliver로 진행시켰다. 이제는 원본을 특정할 수 없으면(=바이트 단위
+// 재검증이 애초에 불가능하면) 무조건 fail-closed다 -- destPath에 뭐가
+//있든 상관없다.
+test("D8 coder-2 (review-3 결함1 수리): mainRepoDir not provided -- fail-closed even though the destination already has a wrong task_id + corrupted body (existence-only compatibility path removed)", () => {
   const harnessDir = makeHarnessDir();
   try {
-    dropTaskFile(harnessDir, "coder");
+    // exact review-3 repro: a stale/wrong file already sitting at the
+    // destination, no mainRepoDir to verify it against.
+    writeFileSync(
+      join(harnessDir, "coder-task.md"),
+      "task_id: HYK-WRONG\ndropped_at: 2026-07-22 07:05 KST\n\ncorrupted body\n",
+      "utf8",
+    );
+    let seatCalled = false;
+    let deliverCalled = false;
+    const adapter = fakeAdapter({
+      ensureSeat: () => {
+        seatCalled = true;
+        return { ok: true };
+      },
+      deliverTask: () => {
+        deliverCalled = true;
+        return { ok: true };
+      },
+    });
     const r = relayStep(
-      { role: "CODER", worktreePath: "/wt", taskId: "HYK-x", harnessDir },
-      fakeAdapter(),
+      {
+        role: "CODER",
+        worktreePath: "/wt",
+        taskId: "HYK-170-coder-2",
+        harnessDir,
+      },
+      adapter,
       {},
     );
-    assert.equal(r.ok, true);
-    assert.equal(r.status, STATUS.DELIVERED_PENDING);
+    assert.equal(r.ok, false);
+    assert.equal(r.stage, STAGE.TASK_FILE);
+    assert.equal(seatCalled, false);
+    assert.equal(deliverCalled, false);
   } finally {
     rmSync(harnessDir, { recursive: true, force: true });
   }

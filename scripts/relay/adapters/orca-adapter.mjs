@@ -832,10 +832,27 @@ function createNewSeat(role, worktreePath, mainRepoDir, opts, fs, steps) {
   );
   if (!submitted.ok) return { ok: false, reason: submitted.reason };
 
+  // HYK-170 사이클2 ②-a coder-2 (review-3 실결함 2 수리, pm-2 §S6 postcondition):
+  // 런처 기동(text+Enter) 뒤 그 경로 후보가 여전히 정확히 1개인지 다시
+  // 확인한다 -- 기동 전 확인만으로는 기동 자체가 후보 수를 바꾸는(또는
+  // 경쟁 상태로 다른 좌석이 그 사이 나타나는) 경우를 못 잡는다.
+  // resolveSeatHandle(A-1)의 0/1/2+ 계약을 그대로 재사용한다(재구현 금지) --
+  // 재조회가 0/2+/고아로 판정하면 이 함수는 실패를 반환하고, 그 결과
+  // ensureSeat -> relayStep의 seat 단계가 실패해 deliver는 절대 호출되지
+  // 않는다(배달 0).
+  const reverified = resolveSeatHandle({ role, worktreePath }, opts);
+  if (!reverified.ok) {
+    return {
+      ok: false,
+      reason: `orca-adapter: ${REASON.SEAT_CREATE_FAILED} -- post-launch reverify failed: ${reverified.reason}`,
+      seatHandleReason: reverified.seatHandleReason,
+    };
+  }
+
   steps.push("seat-launched-in-default-tab");
   return {
     ok: true,
-    seatHandle: resolved.handle,
+    seatHandle: reverified.handle,
     created: false,
     stepsPerformed: steps,
   };
