@@ -1,5 +1,5 @@
-import { existsSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, readFileSync, mkdirSync, copyFileSync } from "node:fs";
+import { join, dirname } from "node:path";
 import { checkRelayHandshake } from "../check/relay-handshake.mjs";
 import { classifyWatchFailure } from "./watch-result.mjs";
 
@@ -19,6 +19,15 @@ function isPlainObject(v) {
 }
 function isNonEmptyString(v) {
   return typeof v === "string" && v.length > 0;
+}
+
+// HYK-170 사이클2 ②-a coder-1 (D8, pm-2 §S2Δ): task_id 헤더 추출 -- same
+// pattern as check/relay-handshake.mjs / check/reject-streak.mjs (재구현이
+// 아니라 각 파일이 독립적으로 이미 들고 있는 관용구를 여기서도 반복한다).
+const TASK_ID_RE = /^task_id:\s*(\S+)/im;
+function extractTaskId(content) {
+  const m = typeof content === "string" ? content.match(TASK_ID_RE) : null;
+  return m ? m[1] : null;
 }
 
 export const STAGE = Object.freeze({
@@ -80,6 +89,73 @@ function classifyHandshakeStatus(handshake) {
   return STATUS.DELIVERED_UNJUDGABLE;
 }
 
+// HYK-170 사이클2 ②-a coder-1/coder-2 (D8, pm-2 §S2Δ): "목적 파일 존재만
+// 확인"하던 이전 검사(단순 existsFn)를 내용보존 배치+재검증으로 교체한다.
+// mainRepoDir가 주어지면 그 경로의 원본을 읽어 task_id가 기대값과 결속되는지
+// 먼저 확인한 뒤에만 대상 워크트리로 복사하고, 복사본을 다시 읽어 원본과
+// 바이트 단위로 같은지 + task_id가 여전히 기대값과 일치하는지 재검증한다.
+// 어느 단계든 실패하면 그 이후 단계(복사·이후 seat/deliver)는 진행되지
+// 않는다(side effect 0).
+//
+// coder-2 (review-3 실결함 1 수리): mainRepoDir가 없을 때 "존재만 확인하고
+// 통과"하던 호환 경로를 제거했다 -- 그 경로는 잘못된 task_id·오염된 본문이
+// 이미 destPath에 있어도 그대로 seat/deliver로 진행시켰다(내용결속 검사가
+// 전혀 없었다). 원본 위치를 특정할 수 없으면(mainRepoDir 미제공) 바이트
+// 단위 재검증 자체가 불가능하므로 fail-closed로 정지한다 -- "존재-only
+// 통과" 대체 경로는 두지 않는다(암묵적 완화 금지, coder-5/coder-1 원칙
+// 계승).
+function placeAndVerifyTaskFile(inp, harnessDir, rolePrefix, fs) {
+  const destPath = join(harnessDir, `${rolePrefix}-task.md`);
+
+  if (!isNonEmptyString(inp.mainRepoDir)) {
+    return fail(
+      STAGE.TASK_FILE,
+      `relay-core: task file source cannot be determined (mainRepoDir not provided) -- refusing an unverifiable existence-only pass: ${destPath}`,
+    );
+  }
+
+  const sourcePath = join(inp.mainRepoDir, ".harness", `${rolePrefix}-task.md`);
+  if (!fs.existsFn(sourcePath)) {
+    return fail(
+      STAGE.TASK_FILE,
+      `relay-core: task file source missing: ${sourcePath}`,
+    );
+  }
+  const sourceContent = fs.readFileFn(sourcePath, "utf8");
+  const sourceTaskId = extractTaskId(sourceContent);
+  if (!sourceTaskId || sourceTaskId !== inp.taskId) {
+    return fail(
+      STAGE.TASK_FILE,
+      `relay-core: task file source task_id mismatch (expected '${inp.taskId}', source has '${sourceTaskId ?? "none"}'): ${sourcePath}`,
+    );
+  }
+
+  fs.mkdirFn(dirname(destPath), { recursive: true });
+  fs.copyFileFn(sourcePath, destPath);
+
+  if (!fs.existsFn(destPath)) {
+    return fail(
+      STAGE.TASK_FILE,
+      `relay-core: task file placement failed (destination missing after copy): ${destPath}`,
+    );
+  }
+  const destContent = fs.readFileFn(destPath, "utf8");
+  if (destContent !== sourceContent) {
+    return fail(
+      STAGE.TASK_FILE,
+      `relay-core: task file placement verify failed (content mismatch after copy): ${destPath}`,
+    );
+  }
+  const destTaskId = extractTaskId(destContent);
+  if (!destTaskId || destTaskId !== inp.taskId) {
+    return fail(
+      STAGE.TASK_FILE,
+      `relay-core: task file placement verify failed (task_id mismatch after copy, expected '${inp.taskId}', got '${destTaskId ?? "none"}'): ${destPath}`,
+    );
+  }
+  return { ok: true };
+}
+
 function runSeatStage(adapter, inp, opts) {
   if (typeof adapter.ensureSeat !== "function") {
     return fail(STAGE.SEAT, "relay-core: adapter.ensureSeat is required");
@@ -124,8 +200,14 @@ function runDeliverStage(adapter, inp, opts) {
 export function relayStep(input, adapter, opts = {}) {
   const inp = isPlainObject(input) ? input : {};
   const a = isPlainObject(adapter) ? adapter : {};
-  const existsFn =
-    typeof opts.existsFn === "function" ? opts.existsFn : existsSync;
+  const fsDeps = {
+    existsFn: typeof opts.existsFn === "function" ? opts.existsFn : existsSync,
+    readFileFn:
+      typeof opts.readFileFn === "function" ? opts.readFileFn : readFileSync,
+    mkdirFn: typeof opts.mkdirFn === "function" ? opts.mkdirFn : mkdirSync,
+    copyFileFn:
+      typeof opts.copyFileFn === "function" ? opts.copyFileFn : copyFileSync,
+  };
   const harnessDir = resolveHarnessDir(inp);
 
   // 멱등 단락: 이전 시도가 이미 handshake까지 완주했다면 재배달하지 않는다.
@@ -134,19 +216,19 @@ export function relayStep(input, adapter, opts = {}) {
     return { ok: true, status: STATUS.ALREADY_DONE, handshake: existing };
   }
 
+  // D8(pm-2 §S2Δ): task_id+내용 결속 배치·재검증이 끝난 뒤에만 seat/deliver로
+  // 진행한다 -- 좌석 준비보다 먼저 실행한다(원본 배치 실패는 애초에 어떤
+  // seat/deliver 호출도 만들지 않아야 한다).
+  const taskFileStage = placeAndVerifyTaskFile(
+    inp,
+    harnessDir,
+    roleToFilePrefix(inp.role),
+    fsDeps,
+  );
+  if (!taskFileStage.ok) return taskFileStage;
+
   const seatStage = runSeatStage(a, inp, opts);
   if (!seatStage.ok) return seatStage;
-
-  const taskFilePath = join(
-    harnessDir,
-    `${roleToFilePrefix(inp.role)}-task.md`,
-  );
-  if (!existsFn(taskFilePath)) {
-    return fail(
-      STAGE.TASK_FILE,
-      `relay-core: task file not dropped: ${taskFilePath}`,
-    );
-  }
 
   const deliverStage = runDeliverStage(a, inp, opts);
   if (!deliverStage.ok) return deliverStage;

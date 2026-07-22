@@ -69,21 +69,6 @@ const FIXTURE_WORKTREE_CREATE_RESPONSE = {
   },
 };
 
-const FIXTURE_TERMINAL_CREATE_RESPONSE = {
-  ok: true,
-  result: {
-    terminal: {
-      handle: "term_45d41401-0000-0000-0000-000000000000",
-      tabId: "11111111-2222-3333-4444-555555555555",
-      paneKey: "11111111-2222-3333-4444-555555555555:leaf1",
-      ptyId: "repoId::path@@short",
-      worktreeId: "repoId::path",
-      title: "HYK170-PROBE",
-      surface: "visible",
-    },
-  },
-};
-
 const FIXTURE_TAB_NOT_FOUND_RESPONSE = {
   ok: false,
   error: { code: "runtime_error", message: "tab_not_found" },
@@ -668,7 +653,10 @@ test("ensureSeat: A3 settings.local.json copied from mainRepoDir when missing at
   const copied = [];
   const execFn = fakeExecFn({
     list: managedWorktreeStub(),
-    create: FIXTURE_TERMINAL_CREATE_RESPONSE,
+    "terminal-list": terminalListStub([
+      terminalEntry({ handle: "term_default" }),
+    ]),
+    send: { ok: true },
   });
   const r = ensureSeat(
     { role: "CODER", worktreePath: VALID_WORKTREE, mainRepoDir: "/main" },
@@ -693,7 +681,10 @@ test("ensureSeat: A3 copy skipped when destination already has settings.local.js
   const copied = [];
   const execFn = fakeExecFn({
     list: managedWorktreeStub(),
-    create: FIXTURE_TERMINAL_CREATE_RESPONSE,
+    "terminal-list": terminalListStub([
+      terminalEntry({ handle: "term_default" }),
+    ]),
+    send: { ok: true },
   });
   const r = ensureSeat(
     { role: "CODER", worktreePath: VALID_WORKTREE, mainRepoDir: "/main" },
@@ -714,7 +705,10 @@ test("ensureSeat: A5 node_modules copied from mainRepoDir when missing at destin
   const copiedDirs = [];
   const execFn = fakeExecFn({
     list: managedWorktreeStub(),
-    create: FIXTURE_TERMINAL_CREATE_RESPONSE,
+    "terminal-list": terminalListStub([
+      terminalEntry({ handle: "term_default" }),
+    ]),
+    send: { ok: true },
   });
   const r = ensureSeat(
     { role: "CODER", worktreePath: VALID_WORKTREE, mainRepoDir: "/main" },
@@ -730,30 +724,94 @@ test("ensureSeat: A5 node_modules copied from mainRepoDir when missing at destin
   assert.equal(copiedDirs.length, 1);
 });
 
-test("ensureSeat: new seat creation reads handle/paneKey from the fixture response.result.terminal, both engines", () => {
+// HYK-170 사이클2 ②-a coder-1 (D12): ⓐ 채택 -- 새 워크트리의 기본 shell
+// 탭이 정확히 1개일 때 그 탭에서 런처를 text+Enter로 기동한다.
+// terminal-create는 0회, close도 0회다(pm-2 §QB S5 반사실).
+test("ensureSeat: D12 new seat launch -- resolves the single default-tab candidate via resolveSeatHandle, sends launcher text once + Enter once, zero terminal-create/close calls", () => {
   const execFn = fakeExecFn({
     list: managedWorktreeStub(),
-    create: FIXTURE_TERMINAL_CREATE_RESPONSE,
+    "terminal-list": terminalListStub([
+      terminalEntry({ handle: "term_default" }),
+    ]),
+    send: { ok: true },
   });
   const r = ensureSeat(
     { role: "REVIEW", worktreePath: VALID_WORKTREE },
     { execFn, existsFn: () => true },
   );
   assert.equal(r.ok, true);
-  // A-2: seatHandle is never part of ensureSeat's public output envelope --
-  // only paneKey (a distinct, non-routing informational field) survives.
+  // A-2: seatHandle is never part of ensureSeat's public output envelope.
   assert.equal("seatHandle" in r, false);
-  assert.equal(
-    r.paneKey,
-    FIXTURE_TERMINAL_CREATE_RESPONSE.result.terminal.paneKey,
+  assert.equal(r.created, false);
+  const createCalls = execFn.calls.filter(
+    (a) => a[0] === "terminal" && a[1] === "create",
   );
-  assert.equal(r.created, true);
+  assert.equal(createCalls.length, 0);
+  const closeCalls = execFn.calls.filter(
+    (a) => a[0] === "terminal" && a[1] === "close",
+  );
+  assert.equal(closeCalls.length, 0);
+  const sendCalls = execFn.calls.filter(
+    (a) => a[0] === "terminal" && a[1] === "send",
+  );
+  assert.equal(sendCalls.length, 2); // launcher text once, Enter once
+  assert.equal(sendCalls[0].includes("--text"), true);
+  assert.equal(sendCalls[1].includes("--enter"), true);
 });
 
-test("ensureSeat: seat creation failure (response.ok:false) is surfaced, not swallowed", () => {
+test("ensureSeat: D12 -- zero default-tab candidates is a failure (SEAT_HANDLE_NOT_FOUND), zero terminal-send calls", () => {
   const execFn = fakeExecFn({
     list: managedWorktreeStub(),
-    create: { ok: false, reason: "Setup decision required" },
+    "terminal-list": terminalListStub([]),
+  });
+  const r = ensureSeat(
+    { role: "CODER", worktreePath: VALID_WORKTREE },
+    { execFn, existsFn: () => true },
+  );
+  assert.equal(r.ok, false);
+  assert.equal(r.seatHandleReason, SEAT_HANDLE_REASON.NOT_FOUND);
+  const sendCalls = execFn.calls.filter(
+    (a) => a[0] === "terminal" && a[1] === "send",
+  );
+  assert.equal(sendCalls.length, 0);
+});
+
+// pm-2 §QB S5: 후보가 2개 이상이면 정지한다 -- 순서를 뒤집거나 preview에
+// agent marker를 넣어도(resolveSeatHandle이 marker를 근거로 쓰지 않는다는
+// 계약, A-1) 계속 AMBIGUOUS다. 이 시험 자체는 그 계약을 resolveSeatHandle
+// 쪽에서 이미 변이 죽이기로 고정했으므로(order-reversal 시험), 여기서는
+// ensureSeat 통합 지점에서 side effect가 0인지만 재확인한다.
+test("ensureSeat: D12 -- two default-tab candidates (AMBIGUOUS) refuses to guess, zero terminal-send/create calls", () => {
+  const execFn = fakeExecFn({
+    list: managedWorktreeStub(),
+    "terminal-list": terminalListStub([
+      terminalEntry({ handle: "term_a" }),
+      terminalEntry({ handle: "term_b" }),
+    ]),
+  });
+  const r = ensureSeat(
+    { role: "CODER", worktreePath: VALID_WORKTREE },
+    { execFn, existsFn: () => true },
+  );
+  assert.equal(r.ok, false);
+  assert.equal(r.seatHandleReason, SEAT_HANDLE_REASON.AMBIGUOUS);
+  const sendCalls = execFn.calls.filter(
+    (a) => a[0] === "terminal" && a[1] === "send",
+  );
+  assert.equal(sendCalls.length, 0);
+  const createCalls = execFn.calls.filter(
+    (a) => a[0] === "terminal" && a[1] === "create",
+  );
+  assert.equal(createCalls.length, 0);
+});
+
+test("ensureSeat: D12 -- launcher text send failure (response.ok:false) is surfaced, not swallowed", () => {
+  const execFn = fakeExecFn({
+    list: managedWorktreeStub(),
+    "terminal-list": terminalListStub([
+      terminalEntry({ handle: "term_default" }),
+    ]),
+    send: { ok: false, reason: "Setup decision required" },
   });
   const r = ensureSeat(
     { role: "CODER", worktreePath: VALID_WORKTREE },
@@ -763,53 +821,54 @@ test("ensureSeat: seat creation failure (response.ok:false) is surfaced, not swa
   assert.match(r.reason, /Setup decision required/);
 });
 
-test("ensureSeat: seat creation with missing handle in response is a failure (not undefined handle)", () => {
+// HYK-170 사이클2 ②-a coder-2 (review-3 실결함2 수리, pm-2 §S6 postcondition):
+// 런처 기동(text+Enter) 전엔 후보가 정확히 1개였지만, 기동 뒤 재조회하면
+// 2개로 늘어난 fake -- 기동 자체는 (실제로) 한 번씩 나가지만, 사후
+// postcondition 재검증이 이를 잡아 ensureSeat 전체를 실패로 되돌려야 한다
+// (그 결과 relay-core의 seat 단계가 실패해 deliver는 0회 호출된다).
+test("ensureSeat: D12/S6 coder-2 (review-3 결함2 수리) -- candidates go 1 -> 2 between the pre-launch and post-launch terminal-list queries -- launch still fires once each, but the postcondition recheck fails ensureSeat", () => {
+  let terminalListCalls = 0;
   const execFn = fakeExecFn({
     list: managedWorktreeStub(),
-    create: { ok: true, result: { terminal: {} } },
-  });
-  const r = ensureSeat(
-    { role: "CODER", worktreePath: VALID_WORKTREE },
-    { execFn, existsFn: () => true },
-  );
-  assert.equal(r.ok, false);
-  assert.match(r.reason, /handle missing\/empty/);
-});
-
-// surface !== "visible" -- fail-closed (2단 §2 실측: UI 미채택 = 유령 터미널)
-test("ensureSeat: seat creation response with surface !== 'visible' is a failure (ghost-terminal guard, mutation-kill)", () => {
-  const execFn = fakeExecFn({
-    list: managedWorktreeStub(),
-    create: {
-      ok: true,
-      result: {
-        terminal: {
-          ...FIXTURE_TERMINAL_CREATE_RESPONSE.result.terminal,
-          surface: "background",
-        },
-      },
+    "terminal-list": () => {
+      terminalListCalls++;
+      return terminalListCalls === 1
+        ? terminalListStub([terminalEntry({ handle: "term_default" })])
+        : terminalListStub([
+            terminalEntry({ handle: "term_default" }),
+            terminalEntry({ handle: "term_new" }),
+          ]);
     },
+    send: { ok: true },
   });
   const r = ensureSeat(
     { role: "CODER", worktreePath: VALID_WORKTREE },
     { execFn, existsFn: () => true },
   );
   assert.equal(r.ok, false);
-  assert.match(r.reason, /surface/);
+  assert.equal(r.seatHandleReason, SEAT_HANDLE_REASON.AMBIGUOUS);
+  const sendCalls = execFn.calls.filter(
+    (a) => a[0] === "terminal" && a[1] === "send",
+  );
+  assert.equal(sendCalls.length, 2); // launcher text + Enter did fire once each
+  const listCalls = execFn.calls.filter(
+    (a) => a[0] === "terminal" && a[1] === "list",
+  );
+  assert.equal(listCalls.length, 2); // pre-launch resolve + post-launch reverify
 });
 
 // ---------------------------------------------------------------------------
 // ensureSeat -- §B creation path wiring (worktreePath omitted, create given)
 // ---------------------------------------------------------------------------
-test("ensureSeat: creation path -- no worktreePath, valid create{} builds the worktree then the seat, using the response path throughout", () => {
+test("ensureSeat: creation path -- no worktreePath, valid create{} builds the worktree then launches the seat in its default tab, using the response path throughout (D12)", () => {
+  const probePath = `${WORKSPACES_ROOT}/HARNESSENGINEERING/hyk170-probe`;
   const execFn = fakeExecFn({
-    create: (argv) =>
-      argv[0] === "worktree"
-        ? FIXTURE_WORKTREE_CREATE_RESPONSE
-        : FIXTURE_TERMINAL_CREATE_RESPONSE,
-    list: managedWorktreeStub(
-      `${WORKSPACES_ROOT}/HARNESSENGINEERING/hyk170-probe`,
-    ),
+    create: FIXTURE_WORKTREE_CREATE_RESPONSE, // only worktree create hits this key now (D12: no terminal create)
+    list: managedWorktreeStub(probePath),
+    "terminal-list": terminalListStub([
+      terminalEntry({ handle: "term_default", worktreePath: probePath }),
+    ]),
+    send: { ok: true },
   });
   const r = ensureSeat(
     {
@@ -821,12 +880,16 @@ test("ensureSeat: creation path -- no worktreePath, valid create{} builds the wo
   assert.equal(r.ok, true);
   assert.equal("seatHandle" in r, false);
   assert.equal(r.stepsPerformed.includes("worktree-created"), true);
-  assert.equal(r.stepsPerformed.includes("seat-created"), true);
-  // worktree create -> worktree list (managed check) -> terminal create
+  assert.equal(r.stepsPerformed.includes("seat-launched-in-default-tab"), true);
+  // worktree create -> worktree list (managed check) -> terminal list (A-1) -> terminal send x2
   const worktreeCreateCalls = execFn.calls.filter(
     (a) => a[0] === "worktree" && a[1] === "create",
   );
   assert.equal(worktreeCreateCalls.length, 1);
+  const terminalCreateCalls = execFn.calls.filter(
+    (a) => a[0] === "terminal" && a[1] === "create",
+  );
+  assert.equal(terminalCreateCalls.length, 0);
 });
 
 test("ensureSeat: creation path -- location rejection after create returns failure with rollback recorded in steps, no seat created", () => {
@@ -856,7 +919,10 @@ test("ensureSeat: creation path -- location rejection after create returns failu
 test("ensureSeat: creation path is not entered when worktreePath is given, even if create is also present (worktreePath wins, no implicit switch)", () => {
   const execFn = fakeExecFn({
     list: managedWorktreeStub(VALID_WORKTREE),
-    create: FIXTURE_TERMINAL_CREATE_RESPONSE,
+    "terminal-list": terminalListStub([
+      terminalEntry({ handle: "term_default" }),
+    ]),
+    send: { ok: true },
   });
   const r = ensureSeat(
     {
@@ -1997,7 +2063,10 @@ test("ensureSeat: given an existing (non-create) worktreePath that is unregister
 test("ensureSeat: a path already in the managed list skips worktree create entirely", () => {
   const execFn = fakeExecFn({
     list: managedWorktreeStub(VALID_WORKTREE),
-    create: FIXTURE_TERMINAL_CREATE_RESPONSE,
+    "terminal-list": terminalListStub([
+      terminalEntry({ handle: "term_default" }),
+    ]),
+    send: { ok: true },
   });
   const r = ensureSeat(
     { role: "CODER", worktreePath: VALID_WORKTREE },
@@ -2005,7 +2074,13 @@ test("ensureSeat: a path already in the managed list skips worktree create entir
   );
   assert.equal(r.ok, true);
   assert.equal(worktreeCreateCallCount(execFn), 0);
-  assert.equal(terminalCallCount(execFn), 1);
+  // D12: terminal-list (A-1 resolution) + send-text + send-enter + terminal-list
+  // (S6 post-launch reverify, coder-2) = 4, no terminal create.
+  assert.equal(terminalCallCount(execFn), 4);
+  const createCalls = execFn.calls.filter(
+    (a) => a[0] === "terminal" && a[1] === "create",
+  );
+  assert.equal(createCalls.length, 0);
 });
 
 test("checkWorktreeManaged: BLOCK -- execFn throwing on the list query is a conservative failure (LIST_QUERY_FAILED)", () => {
