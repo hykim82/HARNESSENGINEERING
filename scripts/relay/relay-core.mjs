@@ -39,6 +39,22 @@ function fail(stage, reason) {
   return { ok: false, stage, reason };
 }
 
+// HYK-170 사이클2 coder-2 (review-1 실결함 수리): 코어는 특정 어댑터가
+// A-2(공개 봉투에서 seatHandle 제거)를 지키는지에 기대지 않는다 -- 이
+// 코어 자신의 공개 반환 봉투에서 handle류 필드를 얕은 깊이로 스스로
+// 제거한다(REVIEW가 비협조 fake ensureSeat로 실측: strip 안 하면 그대로
+// 샌다). 이 봉투(seat/delivery)에 중첩 객체를 담을 계약이 없으므로 얕은
+// 제거로 충분하다 -- 재귀는 이 봉투 shape에 대한 과잉설계다.
+function stripHandleLikeFields(obj) {
+  if (!isPlainObject(obj)) return obj;
+  const result = {};
+  for (const [key, value] of Object.entries(obj)) {
+    if (/handle/i.test(key)) continue;
+    result[key] = value;
+  }
+  return result;
+}
+
 function roleToFilePrefix(role) {
   return isNonEmptyString(role) ? role.toLowerCase() : role;
 }
@@ -79,7 +95,11 @@ function runSeatStage(adapter, inp, opts) {
   return seat.ok ? { ok: true, seat } : fail(STAGE.SEAT, seat.reason);
 }
 
-function runDeliverStage(adapter, inp, seat, opts) {
+// HYK-170 사이클2 A-2: 좌석 handle을 코어가 운반하지 않는다 -- seat 인자
+// 자체를 받지 않는다(어댑터의 ensureSeat 출력 봉투에도 이제 seatHandle이
+// 없다). deliverTask는 {role, worktreePath}만으로 스스로 handle을
+// 재해석한다(A-1).
+function runDeliverStage(adapter, inp, opts) {
   if (typeof adapter.deliverTask !== "function") {
     return fail(STAGE.DELIVER, "relay-core: adapter.deliverTask is required");
   }
@@ -87,7 +107,7 @@ function runDeliverStage(adapter, inp, seat, opts) {
     {
       taskId: inp.taskId,
       role: inp.role,
-      seatHandle: seat.seatHandle,
+      worktreePath: inp.worktreePath,
       coordinatorHandle: inp.coordinatorHandle,
     },
     opts,
@@ -128,15 +148,15 @@ export function relayStep(input, adapter, opts = {}) {
     );
   }
 
-  const deliverStage = runDeliverStage(a, inp, seatStage.seat, opts);
+  const deliverStage = runDeliverStage(a, inp, opts);
   if (!deliverStage.ok) return deliverStage;
 
   const handshake = checkExistingHandshake(inp.role, harnessDir);
   return {
     ok: true,
     status: classifyHandshakeStatus(handshake),
-    seat: seatStage.seat,
-    delivery: deliverStage.delivery,
+    seat: stripHandleLikeFields(seatStage.seat),
+    delivery: stripHandleLikeFields(deliverStage.delivery),
     handshake,
   };
 }

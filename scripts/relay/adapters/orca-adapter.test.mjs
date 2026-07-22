@@ -32,7 +32,12 @@ import {
   MAIN_REPO_PATH,
   CONTROL_ROOM_PATH,
   ENGINE_BY_ROLE,
+  resolveSeatHandle,
+  buildTerminalListCommand,
+  parseTerminalList,
+  SEAT_HANDLE_REASON,
 } from "./orca-adapter.mjs";
+import { scanEnvHandleIngress } from "./env-ingress-scan.mjs";
 
 // HYK-170 coder-1: 어댑터 단위 테스트 -- 전부 execFn/fs fake 주입, 실 orca
 // 호출 0(비타협 제약). fixture는 관제실 산출물
@@ -98,12 +103,17 @@ function fakeExecFn(responses) {
     // "orchestration"/"worktree" both have a real subcommand as argv[1]
     // (list vs create/rm, check vs task-update need distinct stubs) --
     // "terminal" is keyed on argv[1] too (create/send/close/show never overlap).
+    // HYK-170 사이클2: `terminal list` and `worktree list` both have argv[1]
+    // === "list" -- give terminal-list its own key so a single test can stub
+    // both the worktree-managed check and the seat-handle resolution.
     const key =
-      argv[0] === "orchestration" ||
-      argv[0] === "worktree" ||
-      argv[0] === "terminal"
-        ? argv[1]
-        : argv[0];
+      argv[0] === "terminal" && argv[1] === "list"
+        ? "terminal-list"
+        : argv[0] === "orchestration" ||
+            argv[0] === "worktree" ||
+            argv[0] === "terminal"
+          ? argv[1]
+          : argv[0];
     const entry = responses[key];
     if (typeof entry === "function") return entry(argv, calls.length);
     if (entry === undefined) {
@@ -119,6 +129,12 @@ function fakeExecFn(responses) {
 
 function managedWorktreeStub(path = VALID_WORKTREE) {
   return { ok: true, result: { worktrees: [{ path }] } };
+}
+
+// HYK-170 사이클2 (A-1): `terminal list` 응답 fixture 빌더 -- 실측 shape
+// (2단 §2)을 그대로 쓴다. entries는 {handle, worktreePath, ...} 배열.
+function terminalListStub(entries) {
+  return { ok: true, result: { terminals: entries } };
 }
 
 // ---------------------------------------------------------------------------
@@ -594,9 +610,11 @@ test("ensureSeat: reuse -- existingSeatHandle skips execFn entirely, no new seat
     { existingSeatHandle: "term_reused", execFn },
   );
   assert.equal(r.ok, true);
-  assert.equal(r.seatHandle, "term_reused");
   assert.equal(r.created, false);
   assert.equal(execFn.calls.length, 0);
+  // A-2: public output envelope never carries seatHandle -- deliverTask/
+  // teardownSeat re-resolve it themselves from {role, worktreePath} (A-1).
+  assert.equal("seatHandle" in r, false);
 });
 
 // D wiring into ensureSeat reuse -- mutation-kill: treating an orphan seat as
@@ -623,7 +641,7 @@ test("ensureSeat: reuse -- a seat with a real worktreePath is accepted (not orph
     },
   );
   assert.equal(r.ok, true);
-  assert.equal(r.seatHandle, "term_ok");
+  assert.equal("seatHandle" in r, false);
 });
 
 test("ensureSeat: unknown role is rejected before any execFn call", () => {
@@ -722,10 +740,9 @@ test("ensureSeat: new seat creation reads handle/paneKey from the fixture respon
     { execFn, existsFn: () => true },
   );
   assert.equal(r.ok, true);
-  assert.equal(
-    r.seatHandle,
-    FIXTURE_TERMINAL_CREATE_RESPONSE.result.terminal.handle,
-  );
+  // A-2: seatHandle is never part of ensureSeat's public output envelope --
+  // only paneKey (a distinct, non-routing informational field) survives.
+  assert.equal("seatHandle" in r, false);
   assert.equal(
     r.paneKey,
     FIXTURE_TERMINAL_CREATE_RESPONSE.result.terminal.paneKey,
@@ -802,10 +819,7 @@ test("ensureSeat: creation path -- no worktreePath, valid create{} builds the wo
     { execFn, existsFn: () => true },
   );
   assert.equal(r.ok, true);
-  assert.equal(
-    r.seatHandle,
-    FIXTURE_TERMINAL_CREATE_RESPONSE.result.terminal.handle,
-  );
+  assert.equal("seatHandle" in r, false);
   assert.equal(r.stepsPerformed.includes("worktree-created"), true);
   assert.equal(r.stepsPerformed.includes("seat-created"), true);
   // worktree create -> worktree list (managed check) -> terminal create
@@ -860,16 +874,388 @@ test("ensureSeat: creation path is not entered when worktreePath is given, even 
 });
 
 // ---------------------------------------------------------------------------
-// B2: env(ORCA_TERMINAL_HANDLE)를 읽지 않는다 -- 소스 자체를 정적 검사.
+// A-3: env handle ingress 정적 검사 -- 기존 B2는 문자열 포함 여부만 보는
+// 헛시험이었다(주석에 "ORCA_TERMINAL_HANDLE"을 사유로 적기만 해도 오탐,
+// `process["env"]`/구조분해/계산 키/helper 경유/재수출은 전혀 못 잡았다).
+// 이제는 실행 가능한 코드만 스캔하는 scanEnvHandleIngress(env-ingress-scan.mjs)
+// 로 실 트리 위반이 0건인지 확인한다 -- 스캔 대상 파일 목록을 명시해
+// "스캔 범위가 빈 집합이라 항상 통과"하는 회피를 막는다.
 // ---------------------------------------------------------------------------
-test("B2: orca-adapter.mjs source never reads ORCA_TERMINAL_HANDLE from env (handle must come from pane-key lookups only)", () => {
+const ENV_INGRESS_SCAN_TARGETS = [
+  new URL("./orca-adapter.mjs", import.meta.url),
+  new URL("../relay-core.mjs", import.meta.url),
+  new URL("../run-step.mjs", import.meta.url),
+];
+
+test("A3: real tree -- zero executable env-handle-ingress violations across the adapter/core/run-step boundary files", () => {
+  assert.equal(
+    ENV_INGRESS_SCAN_TARGETS.length > 0,
+    true,
+    "scan target list must not be empty (an empty scan scope would vacuously pass)",
+  );
+  for (const url of ENV_INGRESS_SCAN_TARGETS) {
+    const src = readFileSync(url, "utf8");
+    const violations = scanEnvHandleIngress(src);
+    assert.deepEqual(
+      violations,
+      [],
+      `${url.pathname}: expected zero env-handle-ingress violations, got ${JSON.stringify(violations)}`,
+    );
+  }
+});
+
+test("A3: real tree -- orca-adapter.mjs's own G8/A-1 reason comments mention ORCA_TERMINAL_HANDLE-style strings, proving the scan is comment-aware, not a blind substring ban", () => {
   const src = readFileSync(
     new URL("./orca-adapter.mjs", import.meta.url),
     "utf8",
   );
-  assert.equal(src.includes("ORCA_TERMINAL_HANDLE"), false);
-  assert.equal(src.includes("process.env"), false);
+  assert.equal(/existingSeatHandle/.test(src), true);
+  assert.deepEqual(scanEnvHandleIngress(src), []);
 });
+
+// ---------------------------------------------------------------------------
+// A-1: resolveSeatHandle -- E1(한 워크트리에 좌석이 여럿)/E2(worktreeId로
+// 매칭하면 죽은 좌석이 되살아난다)/E3(title 복원 불가) 근거. 정확히 1개일
+// 때만 통과, 0개/2개+는 거부(자동 선택 금지) -- 순서·lastOutputAt으로
+// 고르지 않는다는 것을 변이 죽이기로 직접 확인한다.
+// ---------------------------------------------------------------------------
+function terminalEntry(overrides = {}) {
+  return {
+    handle: "term_a",
+    worktreePath: VALID_WORKTREE,
+    tabId: "11111111-2222-3333-4444-555555555555",
+    title: "CODER",
+    connected: true,
+    writable: true,
+    lastOutputAt: "2026-07-22T00:00:00.000Z",
+    ...overrides,
+  };
+}
+
+test("resolveSeatHandle: exactly one candidate matching worktreePath -- ok:true with that handle", () => {
+  const execFn = fakeExecFn({
+    list: managedWorktreeStub(VALID_WORKTREE),
+    "terminal-list": terminalListStub([terminalEntry({ handle: "term_only" })]),
+  });
+  const r = resolveSeatHandle(
+    { role: "CODER", worktreePath: VALID_WORKTREE },
+    { execFn },
+  );
+  assert.equal(r.ok, true);
+  assert.equal(r.handle, "term_only");
+});
+
+test("resolveSeatHandle: zero candidates -- NOT_FOUND, no worktreeId used to guess", () => {
+  const execFn = fakeExecFn({
+    list: managedWorktreeStub(VALID_WORKTREE),
+    "terminal-list": terminalListStub([
+      terminalEntry({
+        handle: "term_elsewhere",
+        worktreePath: "C:/some/other/wt",
+      }),
+    ]),
+  });
+  const r = resolveSeatHandle(
+    { role: "CODER", worktreePath: VALID_WORKTREE },
+    { execFn },
+  );
+  assert.equal(r.ok, false);
+  assert.equal(r.seatHandleReason, SEAT_HANDLE_REASON.NOT_FOUND);
+});
+
+test("resolveSeatHandle: two candidates for the same worktreePath -- AMBIGUOUS, refuses to guess (E1)", () => {
+  const execFn = fakeExecFn({
+    list: managedWorktreeStub(VALID_WORKTREE),
+    "terminal-list": terminalListStub([
+      terminalEntry({ handle: "term_a" }),
+      terminalEntry({ handle: "term_b" }),
+    ]),
+  });
+  const r = resolveSeatHandle(
+    { role: "CODER", worktreePath: VALID_WORKTREE },
+    { execFn },
+  );
+  assert.equal(r.ok, false);
+  assert.equal(r.seatHandleReason, SEAT_HANDLE_REASON.AMBIGUOUS);
+});
+
+// 변이 죽이기: "첫 후보를 반환"으로 바꾸면 이 시험이 RED여야 한다 -- 후보
+// 순서를 뒤집어도(그리고 lastOutputAt을 최신으로 바꿔도) 여전히 AMBIGUOUS로
+// 거부되는지 확인한다(자동 선택 금지).
+test("resolveSeatHandle: order reversal + a more-recent lastOutputAt on either candidate does not change the AMBIGUOUS verdict (mutation-kill)", () => {
+  const candidatesA = [
+    terminalEntry({
+      handle: "term_a",
+      lastOutputAt: "2026-07-22T00:00:00.000Z",
+    }),
+    terminalEntry({
+      handle: "term_b",
+      lastOutputAt: "2026-07-22T05:00:00.000Z",
+    }),
+  ];
+  const candidatesB = [candidatesA[1], candidatesA[0]]; // reversed order
+  for (const candidates of [candidatesA, candidatesB]) {
+    const execFn = fakeExecFn({
+      list: managedWorktreeStub(VALID_WORKTREE),
+      "terminal-list": terminalListStub(candidates),
+    });
+    const r = resolveSeatHandle(
+      { role: "CODER", worktreePath: VALID_WORKTREE },
+      { execFn },
+    );
+    assert.equal(r.ok, false);
+    assert.equal(r.seatHandleReason, SEAT_HANDLE_REASON.AMBIGUOUS);
+  }
+});
+
+test("resolveSeatHandle: an orphan candidate (worktreePath:'') is excluded even if some other field would otherwise match (D wiring)", () => {
+  const execFn = fakeExecFn({
+    list: managedWorktreeStub(VALID_WORKTREE),
+    "terminal-list": terminalListStub([
+      terminalEntry({ handle: "term_orphan", worktreePath: "" }),
+      terminalEntry({ handle: "term_real", worktreePath: VALID_WORKTREE }),
+    ]),
+  });
+  const r = resolveSeatHandle(
+    { role: "CODER", worktreePath: VALID_WORKTREE },
+    { execFn },
+  );
+  assert.equal(r.ok, true);
+  assert.equal(r.handle, "term_real"); // the orphan is filtered out, not counted toward AMBIGUOUS
+});
+
+test("resolveSeatHandle: worktreeId is never consulted -- two entries sharing the same worktreeId but different (non-matching) worktreePath do not create a false match (E2)", () => {
+  const execFn = fakeExecFn({
+    list: managedWorktreeStub(VALID_WORKTREE),
+    "terminal-list": terminalListStub([
+      terminalEntry({
+        handle: "term_stale",
+        worktreePath: "", // removed worktree -- E2: worktreeId still points at the old path
+        worktreeId: "repoId::" + VALID_WORKTREE,
+      }),
+    ]),
+  });
+  const r = resolveSeatHandle(
+    { role: "CODER", worktreePath: VALID_WORKTREE },
+    { execFn },
+  );
+  assert.equal(r.ok, false);
+  assert.equal(r.seatHandleReason, SEAT_HANDLE_REASON.NOT_FOUND);
+});
+
+test("resolveSeatHandle: bad location is rejected before any terminal-list query (0 execFn calls)", () => {
+  const execFn = fakeExecFn({});
+  const r = resolveSeatHandle(
+    { role: "CODER", worktreePath: MAIN_REPO_PATH },
+    { execFn },
+  );
+  assert.equal(r.ok, false);
+  assert.equal(r.locationReason, LOCATION_REASON.MAIN_REPO_FORBIDDEN);
+  assert.equal(execFn.calls.length, 0);
+});
+
+test("resolveSeatHandle: an unmanaged (not Orca-registered) worktree is rejected before any terminal-list query", () => {
+  const execFn = fakeExecFn({ list: managedWorktreeStub("C:/some/other/wt") });
+  const r = resolveSeatHandle(
+    { role: "CODER", worktreePath: VALID_WORKTREE },
+    { execFn },
+  );
+  assert.equal(r.ok, false);
+  assert.equal(r.worktreeReason, WORKTREE_REASON.NOT_ORCA_MANAGED);
+  assert.equal(
+    execFn.calls.some((a) => a[0] === "terminal" && a[1] === "list"),
+    false,
+  );
+});
+
+test("buildTerminalListCommand: exact argv shape", () => {
+  assert.deepEqual(buildTerminalListCommand(), ["terminal", "list", "--json"]);
+});
+
+test("parseTerminalList: pure parser -- extracts result.terminals, null on any malformed shape", () => {
+  assert.deepEqual(
+    parseTerminalList({ ok: true, result: { terminals: [{ handle: "x" }] } }),
+    [{ handle: "x" }],
+  );
+  assert.equal(
+    parseTerminalList({ ok: false, result: { terminals: [] } }),
+    null,
+  );
+  assert.equal(parseTerminalList({ ok: true, result: {} }), null);
+  assert.equal(parseTerminalList(null), null);
+});
+
+// ---------------------------------------------------------------------------
+// A-1 wired into deliverTask/teardownSeat for real (no existingSeatHandle
+// override) -- proves the production path actually resolves via
+// {role, worktreePath}, not just that the override exists.
+// ---------------------------------------------------------------------------
+test("deliverTask: real resolution path (no override) -- dispatch --to targets the handle resolved from the terminal-list fixture", () => {
+  const execFn = fakeExecFn({
+    ...taskCreateDispatchStubs(),
+    list: managedWorktreeStub(VALID_WORKTREE),
+    "terminal-list": terminalListStub([
+      terminalEntry({ handle: "term_resolved" }),
+    ]),
+  });
+  const r = deliverTask(
+    { taskId: "HYK-170-coder-1", role: "CODER", worktreePath: VALID_WORKTREE },
+    { execFn },
+  );
+  assert.equal(r.ok, true);
+  const dispatchCall = execFn.calls.find(
+    (a) => a[0] === "orchestration" && a[1] === "dispatch",
+  );
+  const toIdx = dispatchCall.indexOf("--to");
+  assert.equal(dispatchCall[toIdx + 1], "term_resolved");
+});
+
+// A-4: stale env poisoning -- setting ORCA_TERMINAL_HANDLE (and other
+// plausible env names) to synthetic stale values must NOT change the
+// resolved/dispatched target; only the terminal-list fixture controls it.
+test("A4: stale ORCA_TERMINAL_HANDLE env values never influence the resolved dispatch target", () => {
+  const staleNames = ["ORCA_TERMINAL_HANDLE", "SEAT_HANDLE", "TERM_HANDLE"];
+  const previous = {};
+  for (const name of staleNames) {
+    previous[name] = process.env[name];
+    process.env[name] = `term_stale_${name}`;
+  }
+  try {
+    const execFn = fakeExecFn({
+      ...taskCreateDispatchStubs(),
+      list: managedWorktreeStub(VALID_WORKTREE),
+      "terminal-list": terminalListStub([
+        terminalEntry({ handle: "term_real" }),
+      ]),
+    });
+    const r = deliverTask(
+      {
+        taskId: "HYK-170-coder-1",
+        role: "CODER",
+        worktreePath: VALID_WORKTREE,
+      },
+      { execFn },
+    );
+    assert.equal(r.ok, true);
+    const dispatchCall = execFn.calls.find(
+      (a) => a[0] === "orchestration" && a[1] === "dispatch",
+    );
+    const toIdx = dispatchCall.indexOf("--to");
+    assert.equal(dispatchCall[toIdx + 1], "term_real");
+    assert.notEqual(dispatchCall[toIdx + 1], "term_stale_ORCA_TERMINAL_HANDLE");
+
+    // Now change *only* the fixture's handle -- the target must follow it,
+    // proving the fixture (not any env value) is what actually drives
+    // selection.
+    const execFn2 = fakeExecFn({
+      ...taskCreateDispatchStubs(),
+      list: managedWorktreeStub(VALID_WORKTREE),
+      "terminal-list": terminalListStub([
+        terminalEntry({ handle: "term_changed" }),
+      ]),
+    });
+    deliverTask(
+      {
+        taskId: "HYK-170-coder-1",
+        role: "CODER",
+        worktreePath: VALID_WORKTREE,
+      },
+      { execFn: execFn2 },
+    );
+    const dispatchCall2 = execFn2.calls.find(
+      (a) => a[0] === "orchestration" && a[1] === "dispatch",
+    );
+    assert.equal(
+      dispatchCall2[dispatchCall2.indexOf("--to") + 1],
+      "term_changed",
+    );
+  } finally {
+    for (const name of staleNames) {
+      if (previous[name] === undefined) delete process.env[name];
+      else process.env[name] = previous[name];
+    }
+  }
+});
+
+// A-5: NOT_FOUND/AMBIGUOUS must produce zero Orca side-effect calls beyond
+// the resolution queries themselves (no dispatch/send/close/rm/task-update).
+test("A5: deliverTask -- NOT_FOUND seat resolution still runs task-create (order choice, see createTask/dispatchToSeat split) but issues zero dispatch/submit calls", () => {
+  const execFn = fakeExecFn({
+    ...taskCreateDispatchStubs(),
+    list: managedWorktreeStub(VALID_WORKTREE),
+    "terminal-list": terminalListStub([]), // zero candidates
+  });
+  const r = deliverTask(
+    { taskId: "HYK-170-coder-1", role: "CODER", worktreePath: VALID_WORKTREE },
+    { execFn },
+  );
+  assert.equal(r.ok, false);
+  assert.equal(r.seatHandleReason, SEAT_HANDLE_REASON.NOT_FOUND);
+  assert.equal(
+    execFn.calls.some((a) => a[0] === "orchestration" && a[1] === "dispatch"),
+    false,
+  );
+  assert.equal(noTerminalSendOrCloseCalls(execFn), true);
+});
+
+test("A5: deliverTask -- AMBIGUOUS seat resolution issues zero dispatch/submit calls", () => {
+  const execFn = fakeExecFn({
+    ...taskCreateDispatchStubs(),
+    list: managedWorktreeStub(VALID_WORKTREE),
+    "terminal-list": terminalListStub([
+      terminalEntry({ handle: "term_a" }),
+      terminalEntry({ handle: "term_b" }),
+    ]),
+  });
+  const r = deliverTask(
+    { taskId: "HYK-170-coder-1", role: "CODER", worktreePath: VALID_WORKTREE },
+    { execFn },
+  );
+  assert.equal(r.ok, false);
+  assert.equal(r.seatHandleReason, SEAT_HANDLE_REASON.AMBIGUOUS);
+  assert.equal(
+    execFn.calls.some((a) => a[0] === "orchestration" && a[1] === "dispatch"),
+    false,
+  );
+});
+
+test("A5: teardownSeat -- NOT_FOUND seat resolution issues zero close/rm/task-update calls", () => {
+  const execFn = fakeExecFn({
+    list: managedWorktreeStub(VALID_WORKTREE),
+    "terminal-list": terminalListStub([]),
+  });
+  const r = teardownSeat(
+    { role: "CODER", worktreePath: VALID_WORKTREE, taskId: "task_rt1" },
+    { execFn },
+  );
+  assert.equal(r.ok, false);
+  assert.equal(r.seatHandleReason, SEAT_HANDLE_REASON.NOT_FOUND);
+  assert.equal(execFn.calls.length, 2); // worktree list + terminal list only
+});
+
+test("A5: teardownSeat -- AMBIGUOUS seat resolution issues zero close/rm/task-update calls", () => {
+  const execFn = fakeExecFn({
+    list: managedWorktreeStub(VALID_WORKTREE),
+    "terminal-list": terminalListStub([
+      terminalEntry({ handle: "term_a" }),
+      terminalEntry({ handle: "term_b" }),
+    ]),
+  });
+  const r = teardownSeat(
+    { role: "CODER", worktreePath: VALID_WORKTREE, taskId: "task_rt1" },
+    { execFn },
+  );
+  assert.equal(r.ok, false);
+  assert.equal(r.seatHandleReason, SEAT_HANDLE_REASON.AMBIGUOUS);
+  assert.equal(execFn.calls.length, 2); // worktree list + terminal list only
+});
+
+function noTerminalSendOrCloseCalls(execFn) {
+  return execFn.calls.every(
+    (argv) =>
+      !(argv[0] === "terminal" && (argv[1] === "send" || argv[1] === "close")),
+  );
+}
 
 // ---------------------------------------------------------------------------
 // deliverTask
@@ -888,8 +1274,8 @@ function taskCreateDispatchStubs(overrides = {}) {
 test("deliverTask: claude engine (CODER) needs no explicit submit -- auto, retries 0, single dispatch call", () => {
   const execFn = fakeExecFn(taskCreateDispatchStubs());
   const r = deliverTask(
-    { taskId: "HYK-169-coder-1", role: "CODER", seatHandle: "term_x" },
-    { execFn },
+    { taskId: "HYK-169-coder-1", role: "CODER", worktreePath: VALID_WORKTREE },
+    { execFn, existingSeatHandle: "term_x" },
   );
   assert.equal(r.ok, true);
   assert.equal(r.submitted, "auto");
@@ -903,8 +1289,8 @@ test("deliverTask: codex engine (REVIEW) requires an explicit submit call after 
     send: { ok: true },
   });
   const r = deliverTask(
-    { taskId: "HYK-169-coder-1", role: "REVIEW", seatHandle: "term_x" },
-    { execFn, confirmPastedFn: () => true },
+    { taskId: "HYK-169-coder-1", role: "REVIEW", worktreePath: VALID_WORKTREE },
+    { execFn, existingSeatHandle: "term_x", confirmPastedFn: () => true },
   );
   assert.equal(r.ok, true);
   assert.equal(r.submitted, "explicit");
@@ -926,9 +1312,10 @@ test("deliverTask: B11 -- confirmPastedFn is invoked before the submit call for 
     },
   });
   const r = deliverTask(
-    { taskId: "HYK-169-coder-1", role: "REVIEW", seatHandle: "term_x" },
+    { taskId: "HYK-169-coder-1", role: "REVIEW", worktreePath: VALID_WORKTREE },
     {
       execFn,
+      existingSeatHandle: "term_x",
       confirmPastedFn: () => {
         confirmedBeforeSubmit = true;
         return true;
@@ -950,8 +1337,8 @@ test("deliverTask: submit retry -- fails once then succeeds on the 1 allowed ret
     },
   });
   const r = deliverTask(
-    { taskId: "HYK-169-coder-1", role: "REVIEW", seatHandle: "term_x" },
-    { execFn, confirmPastedFn: () => true },
+    { taskId: "HYK-169-coder-1", role: "REVIEW", worktreePath: VALID_WORKTREE },
+    { execFn, existingSeatHandle: "term_x", confirmPastedFn: () => true },
   );
   assert.equal(r.ok, true);
   assert.equal(r.retries, 1);
@@ -968,8 +1355,8 @@ test("deliverTask: submit retry cap -- default maxRetries=1 means at most 2 atte
     },
   });
   const r = deliverTask(
-    { taskId: "HYK-169-coder-1", role: "REVIEW", seatHandle: "term_x" },
-    { execFn, confirmPastedFn: () => true },
+    { taskId: "HYK-169-coder-1", role: "REVIEW", worktreePath: VALID_WORKTREE },
+    { execFn, existingSeatHandle: "term_x", confirmPastedFn: () => true },
   );
   assert.equal(r.ok, false);
   assert.equal(submitCalls, 2); // 1 initial + 1 retry, never more
@@ -990,8 +1377,8 @@ test("deliverTask: PASTE_UNCONFIRMED -- confirmPastedFn returning false refuses 
     send: { ok: true },
   });
   const r = deliverTask(
-    { taskId: "HYK-169-coder-1", role: "REVIEW", seatHandle: "term_x" },
-    { execFn, confirmPastedFn: () => false },
+    { taskId: "HYK-169-coder-1", role: "REVIEW", worktreePath: VALID_WORKTREE },
+    { execFn, existingSeatHandle: "term_x", confirmPastedFn: () => false },
   );
   assert.equal(r.ok, false);
   assert.match(r.reason, /PASTE_UNCONFIRMED/);
@@ -1005,8 +1392,8 @@ test("deliverTask: PASTE_UNCONFIRMED -- confirmPastedFn returning true allows ex
     send: { ok: true },
   });
   const r = deliverTask(
-    { taskId: "HYK-169-coder-1", role: "REVIEW", seatHandle: "term_x" },
-    { execFn, confirmPastedFn: () => true },
+    { taskId: "HYK-169-coder-1", role: "REVIEW", worktreePath: VALID_WORKTREE },
+    { execFn, existingSeatHandle: "term_x", confirmPastedFn: () => true },
   );
   assert.equal(r.ok, true);
   assert.equal(execFn.calls.filter((argv) => argv[0] === "terminal").length, 1);
@@ -1018,9 +1405,10 @@ test("deliverTask: PASTE_UNCONFIRMED -- confirmPastedFn throwing is treated as u
     send: { ok: true },
   });
   const r = deliverTask(
-    { taskId: "HYK-169-coder-1", role: "REVIEW", seatHandle: "term_x" },
+    { taskId: "HYK-169-coder-1", role: "REVIEW", worktreePath: VALID_WORKTREE },
     {
       execFn,
+      existingSeatHandle: "term_x",
       confirmPastedFn: () => {
         throw new Error("paste-check crashed");
       },
@@ -1044,8 +1432,8 @@ test("deliverTask: C2 default confirm path -- omitting confirmPastedFn calls ter
     },
   });
   const r = deliverTask(
-    { taskId: "HYK-169-coder-1", role: "REVIEW", seatHandle: "term_x" },
-    { execFn },
+    { taskId: "HYK-169-coder-1", role: "REVIEW", worktreePath: VALID_WORKTREE },
+    { execFn, existingSeatHandle: "term_x" },
   );
   assert.equal(r.ok, false);
   assert.match(r.reason, /PASTE_UNCONFIRMED/);
@@ -1067,8 +1455,8 @@ test("deliverTask: C2 default confirm path -- marker (taskId) alone in the previ
     },
   });
   const r = deliverTask(
-    { taskId: "HYK-169-coder-1", role: "REVIEW", seatHandle: "term_x" },
-    { execFn },
+    { taskId: "HYK-169-coder-1", role: "REVIEW", worktreePath: VALID_WORKTREE },
+    { execFn, existingSeatHandle: "term_x" },
   );
   assert.equal(r.ok, true);
   const submitCalls = execFn.calls.filter(
@@ -1091,8 +1479,8 @@ test("deliverTask: C2 default confirm path -- exact real-world redraw-mangled pr
     },
   });
   const r = deliverTask(
-    { taskId: marker, role: "REVIEW", seatHandle: "term_x" },
-    { execFn },
+    { taskId: marker, role: "REVIEW", worktreePath: VALID_WORKTREE },
+    { execFn, existingSeatHandle: "term_x" },
   );
   assert.equal(r.ok, true);
   assert.notEqual(FIXTURE_PREVIEW_REDRAW, marker); // proves it's not exact-match luck
@@ -1112,8 +1500,8 @@ test("deliverTask: C2 default confirm path -- a busy signal alone (no marker) al
     },
   });
   const r = deliverTask(
-    { taskId: "HYK-169-coder-1", role: "REVIEW", seatHandle: "term_x" },
-    { execFn },
+    { taskId: "HYK-169-coder-1", role: "REVIEW", worktreePath: VALID_WORKTREE },
+    { execFn, existingSeatHandle: "term_x" },
   );
   assert.equal(r.ok, true);
 });
@@ -1128,8 +1516,8 @@ test("deliverTask: C2 default confirm path -- codex '[Pasted Content NNNN chars]
     },
   });
   const r = deliverTask(
-    { taskId: "HYK-169-coder-1", role: "REVIEW", seatHandle: "term_x" },
-    { execFn },
+    { taskId: "HYK-169-coder-1", role: "REVIEW", worktreePath: VALID_WORKTREE },
+    { execFn, existingSeatHandle: "term_x" },
   );
   assert.equal(r.ok, true);
 });
@@ -1150,8 +1538,8 @@ test("deliverTask: PASTE_UNCONFIRMED -- a truthy-but-not-true return value does 
     send: { ok: true },
   });
   const r = deliverTask(
-    { taskId: "HYK-169-coder-1", role: "REVIEW", seatHandle: "term_x" },
-    { execFn, confirmPastedFn: () => "yes" },
+    { taskId: "HYK-169-coder-1", role: "REVIEW", worktreePath: VALID_WORKTREE },
+    { execFn, existingSeatHandle: "term_x", confirmPastedFn: () => "yes" },
   );
   assert.equal(r.ok, false);
   assert.match(r.reason, /PASTE_UNCONFIRMED/);
@@ -1163,8 +1551,8 @@ test("deliverTask: task-create failure short-circuits before dispatch/submit", (
     "task-create": { ok: false, reason: "predispatch denied" },
   });
   const r = deliverTask(
-    { taskId: "HYK-169-coder-1", role: "CODER", seatHandle: "term_x" },
-    { execFn },
+    { taskId: "HYK-169-coder-1", role: "CODER", worktreePath: VALID_WORKTREE },
+    { execFn, existingSeatHandle: "term_x" },
   );
   assert.equal(r.ok, false);
   assert.match(r.reason, /predispatch denied/);
@@ -1178,8 +1566,8 @@ test("deliverTask: dispatch failure short-circuits before submit", () => {
     }),
   });
   const r = deliverTask(
-    { taskId: "HYK-169-coder-1", role: "REVIEW", seatHandle: "term_x" },
-    { execFn },
+    { taskId: "HYK-169-coder-1", role: "REVIEW", worktreePath: VALID_WORKTREE },
+    { execFn, existingSeatHandle: "term_x" },
   );
   assert.equal(r.ok, false);
   assert.match(r.reason, /no such seat/);
@@ -1189,20 +1577,33 @@ test("deliverTask: dispatch failure short-circuits before submit", () => {
 test("deliverTask: invalid task_id (whitespace) is rejected before any execFn call (buildSpec reuse)", () => {
   const execFn = fakeExecFn({});
   const r = deliverTask(
-    { taskId: "bad id", role: "CODER", seatHandle: "term_x" },
-    { execFn },
+    { taskId: "bad id", role: "CODER", worktreePath: VALID_WORKTREE },
+    { execFn, existingSeatHandle: "term_x" },
   );
   assert.equal(r.ok, false);
   assert.equal(execFn.calls.length, 0);
 });
 
-test("deliverTask: missing seatHandle is rejected", () => {
+// A-2: deliverTask no longer takes seatHandle as input at all -- worktreePath
+// is the only routing input (existingSeatHandle is a test-only override).
+test("deliverTask: missing worktreePath (and no existingSeatHandle override) is rejected before any execFn call", () => {
+  const execFn = fakeExecFn({});
   const r = deliverTask(
     { taskId: "HYK-169-coder-1", role: "CODER" },
-    { execFn: fakeExecFn({}) },
+    { execFn },
   );
   assert.equal(r.ok, false);
-  assert.match(r.reason, /seatHandle/);
+  assert.match(r.reason, /worktreePath/);
+  assert.equal(execFn.calls.length, 0);
+});
+
+test("deliverTask: existingSeatHandle override alone (no worktreePath) is sufficient to pass validation", () => {
+  const execFn = fakeExecFn(taskCreateDispatchStubs());
+  const r = deliverTask(
+    { taskId: "HYK-169-coder-1", role: "CODER" },
+    { execFn, existingSeatHandle: "term_x" },
+  );
+  assert.equal(r.ok, true);
 });
 
 // ---------------------------------------------------------------------------
@@ -1214,7 +1615,7 @@ test("collectCompletionSignals: returns messages array on a well-formed ok respo
   });
   const r = collectCompletionSignals(
     { coordinatorHandle: "term_coord" },
-    { execFn },
+    { execFn, existingSeatHandle: "term_x" },
   );
   assert.equal(r.ok, true);
   assert.equal(r.signals.length, 1);
@@ -1227,7 +1628,7 @@ test("collectCompletionSignals: execFn throwing does not throw up -- returns ok:
   };
   const r = collectCompletionSignals(
     { coordinatorHandle: "term_coord" },
-    { execFn },
+    { execFn, existingSeatHandle: "term_x" },
   );
   assert.equal(r.ok, true);
   assert.deepEqual(r.signals, []);
@@ -1246,7 +1647,7 @@ test("collectCompletionSignals: never used as completion authority -- signature 
   });
   const r = collectCompletionSignals(
     { coordinatorHandle: "term_coord" },
-    { execFn },
+    { execFn, existingSeatHandle: "term_x" },
   );
   assert.equal("done" in r, false);
   assert.equal("complete" in r, false);
@@ -1263,8 +1664,8 @@ test("teardownSeat: closes seat, removes the worktree for real, and runs best-ef
     "task-update": { ok: true },
   });
   const r = teardownSeat(
-    { seatHandle: "term_x", worktreePath: VALID_WORKTREE, taskId: "task_rt1" },
-    { execFn },
+    { worktreePath: VALID_WORKTREE, taskId: "task_rt1" },
+    { execFn, existingSeatHandle: "term_x" },
   );
   assert.equal(r.ok, true);
   assert.equal(r.cleanup.ok, true);
@@ -1286,8 +1687,8 @@ test("teardownSeat: a tab_not_found close failure is absorbed as already-closed,
     rm: FIXTURE_WORKTREE_RM_RESPONSE,
   });
   const r = teardownSeat(
-    { seatHandle: "term_x", worktreePath: VALID_WORKTREE },
-    { execFn },
+    { worktreePath: VALID_WORKTREE },
+    { execFn, existingSeatHandle: "term_x" },
   );
   assert.equal(r.ok, true);
 });
@@ -1298,8 +1699,8 @@ test("teardownSeat: a real (non-tab_not_found) close failure is reported, worktr
     rm: FIXTURE_WORKTREE_RM_RESPONSE,
   });
   const r = teardownSeat(
-    { seatHandle: "term_x", worktreePath: VALID_WORKTREE },
-    { execFn },
+    { worktreePath: VALID_WORKTREE },
+    { execFn, existingSeatHandle: "term_x" },
   );
   assert.equal(r.ok, false);
   assert.match(r.reason, /some other failure/);
@@ -1307,15 +1708,17 @@ test("teardownSeat: a real (non-tab_not_found) close failure is reported, worktr
   assert.ok(rmCall);
 });
 
-test("teardownSeat: missing seatHandle is rejected", () => {
+// A-2: teardownSeat no longer takes seatHandle as input -- worktreePath (or
+// the test-only existingSeatHandle override) is the routing input.
+test("teardownSeat: missing worktreePath (and no existingSeatHandle override) is rejected", () => {
   const r = teardownSeat({}, { execFn: fakeExecFn({}) });
   assert.equal(r.ok, false);
-  assert.match(r.reason, /seatHandle/);
+  assert.match(r.reason, /worktreePath/);
 });
 
-test("teardownSeat: worktreeRemove is null and rm is never called when no worktreePath is given", () => {
+test("teardownSeat: worktreeRemove is null and rm is never called when the ctx has no worktreePath (existingSeatHandle override closes the seat only)", () => {
   const execFn = fakeExecFn({ close: { ok: true } });
-  const r = teardownSeat({ seatHandle: "term_x" }, { execFn });
+  const r = teardownSeat({}, { execFn, existingSeatHandle: "term_x" });
   assert.equal(r.ok, true);
   assert.equal(r.worktreeRemove, null);
   assert.equal(execFn.calls.length, 1); // close only
@@ -1323,7 +1726,10 @@ test("teardownSeat: worktreeRemove is null and rm is never called when no worktr
 
 test("teardownSeat: cleanup is null and task-update is never called when no taskId is given", () => {
   const execFn = fakeExecFn({ close: { ok: true } });
-  const r = teardownSeat({ seatHandle: "term_x" }, { execFn });
+  const r = teardownSeat(
+    { worktreePath: VALID_WORKTREE },
+    { execFn, existingSeatHandle: "term_x" },
+  );
   assert.equal(r.cleanup, null);
 });
 
@@ -1333,8 +1739,8 @@ test("teardownSeat: worktree rm failure makes the overall result fail even if cl
     rm: { ok: false, reason: "orca down" },
   });
   const r = teardownSeat(
-    { seatHandle: "term_x", worktreePath: VALID_WORKTREE },
-    { execFn },
+    { worktreePath: VALID_WORKTREE },
+    { execFn, existingSeatHandle: "term_x" },
   );
   assert.equal(r.ok, false);
   assert.match(r.reason, /orca down/);

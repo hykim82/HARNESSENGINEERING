@@ -261,6 +261,74 @@ test("G10: missing adapter.ensureSeat is a config-shape failure, not a crash", (
   }
 });
 
+// HYK-170 사이클2 A-2: 코어가 deliverTask에 넘기는 ctx에 seatHandle이 없다
+// -- worktreePath만 있다(어댑터가 그 자리에서 A-1로 스스로 해석한다).
+test("A2: relay-core -- the ctx handed to adapter.deliverTask carries worktreePath, never seatHandle", () => {
+  const harnessDir = makeHarnessDir();
+  try {
+    dropTaskFile(harnessDir, "coder");
+    let capturedCtx = null;
+    const adapter = fakeAdapter({
+      deliverTask: (ctx) => {
+        capturedCtx = ctx;
+        return { ok: true };
+      },
+    });
+    relayStep(
+      { role: "CODER", worktreePath: "/wt", taskId: "HYK-x", harnessDir },
+      adapter,
+      {},
+    );
+    assert.ok(capturedCtx);
+    assert.equal("seatHandle" in capturedCtx, false);
+    assert.equal(capturedCtx.worktreePath, "/wt");
+  } finally {
+    rmSync(harnessDir, { recursive: true, force: true });
+  }
+});
+
+// HYK-170 사이클2 coder-2 (review-1 실결함 수리): 코어는 어댑터가 A-2를
+// 지키는지에 기대지 않고 자기 공개 반환 봉투에서 handle류 필드를 스스로
+// 제거해야 한다. 이 시험은 **비협조(non-conforming) fake ensureSeat**
+// (seatHandle을 strip하지 않고 그대로 반환)를 주입해도 relayStep의 공개
+// 반환 전체에 seatHandle/handle류 값이 없는지 재귀적으로 확인한다 --
+// REVIEW가 review-1에서 실측한 바로 그 반사실을 시험으로 고정한다.
+function containsHandleLeak(value, needle) {
+  if (value == null) return false;
+  if (typeof value === "string") return value === needle;
+  if (Array.isArray(value))
+    return value.some((v) => containsHandleLeak(v, needle));
+  if (typeof value === "object") {
+    return Object.entries(value).some(
+      ([key, v]) => /handle/i.test(key) || containsHandleLeak(v, needle),
+    );
+  }
+  return false;
+}
+
+test("A2 (coder-2): relayStep's public return never leaks seatHandle even when adapter.ensureSeat is non-conforming (does not strip it itself)", () => {
+  const harnessDir = makeHarnessDir();
+  try {
+    dropTaskFile(harnessDir, "coder");
+    const nonConformingAdapter = fakeAdapter({
+      ensureSeat: () => ({ ok: true, seatHandle: "term_probe", created: true }),
+    });
+    const r = relayStep(
+      { role: "CODER", worktreePath: "/wt", taskId: "HYK-x", harnessDir },
+      nonConformingAdapter,
+      {},
+    );
+    assert.equal(r.ok, true);
+    assert.equal(
+      containsHandleLeak(r, "term_probe"),
+      false,
+      "relayStep's public return must not leak seatHandle/handle-like fields regardless of adapter conformance",
+    );
+  } finally {
+    rmSync(harnessDir, { recursive: true, force: true });
+  }
+});
+
 test("G10: missing adapter.deliverTask after a successful seat is a config-shape failure, not a crash", () => {
   const harnessDir = makeHarnessDir();
   try {

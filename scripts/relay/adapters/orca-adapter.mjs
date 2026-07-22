@@ -273,6 +273,105 @@ export function checkWorktreeManaged({ requestedPath } = {}, opts = {}) {
   );
 }
 
+// ---- HYK-170 사이클2 coder-1 (A-1): 좌석 handle 해석 -- E1/E2/E3 근거
+// (ORCH 실측, 이 파일 상단 헤더 주석 참조). handle을 기억·운반하지 않고,
+// 매번 {role, worktreePath}로부터 `terminal list`를 조회해 그 자리에서
+// 새로 해석한다("handle 회전 면역 좌석 참조"). worktreeId는 절대 쓰지
+// 않는다(E2 -- 제거된 워크트리의 죽은 좌석이 worktreeId엔 남아 되살아난다).
+// 후보는 worktreePath 정규화 일치(canonicalizeForComparison 재사용, coder-2/5
+// 원칙 계승) + 고아 아님(isOrphanSeat 재사용)만으로 추린다.
+// lastOutputAt/title/connected/writable/배열 순서로 자동 선택하지 않는다
+// (정확히 1개일 때만 통과, 0개/2개+는 거부) -- E1(한 워크트리에 좌석이
+// 여럿 붙는 게 통상 형태)이 그 이유다.
+export const SEAT_HANDLE_REASON = Object.freeze({
+  NOT_FOUND: "SEAT_HANDLE_NOT_FOUND",
+  AMBIGUOUS: "SEAT_HANDLE_AMBIGUOUS",
+  LIST_QUERY_FAILED: "SEAT_HANDLE_LIST_QUERY_FAILED",
+});
+
+export function buildTerminalListCommand() {
+  return ["terminal", "list", "--json"];
+}
+
+// 응답 파싱만 분리(parseWorktreeList와 동형).
+export function parseTerminalList(response) {
+  if (!isPlainObject(response) || response.ok !== true) return null;
+  const list = Array.isArray(response.result?.terminals)
+    ? response.result.terminals
+    : null;
+  return list;
+}
+
+function denySeatHandle(seatHandleReason, detail) {
+  return { ok: false, seatHandleReason, reason: detail };
+}
+
+// ctx: { role, worktreePath }. opts: { execFn }. 순수 조합 -- execFn 호출은
+// terminal list 조회 1건뿐, 부작용(dispatch/send/close 등) 호출은 이
+// 함수에서 절대 일어나지 않는다(A5 인수조건: 0개/2개+ 실패에서도 그렇다,
+// 애초에 이 함수가 그런 호출을 만들지 않으므로).
+export function resolveSeatHandle({ role, worktreePath } = {}, opts = {}) {
+  const location = resolveSeatLocation({ role, requestedPath: worktreePath });
+  if (!location.ok) {
+    return {
+      ok: false,
+      reason: location.detail,
+      locationReason: location.reason,
+    };
+  }
+  const managed = checkWorktreeManaged({ requestedPath: worktreePath }, opts);
+  if (!managed.ok) {
+    return {
+      ok: false,
+      reason: managed.detail,
+      worktreeReason: managed.reason,
+    };
+  }
+  if (typeof opts.execFn !== "function") {
+    return denySeatHandle(
+      SEAT_HANDLE_REASON.LIST_QUERY_FAILED,
+      "orca-adapter: resolveSeatHandle -- opts.execFn is required to query terminal list",
+    );
+  }
+  let response;
+  try {
+    response = opts.execFn(buildTerminalListCommand());
+  } catch (err) {
+    return denySeatHandle(
+      SEAT_HANDLE_REASON.LIST_QUERY_FAILED,
+      `orca-adapter: resolveSeatHandle -- terminal list query threw (${errText(err)})`,
+    );
+  }
+  const list = parseTerminalList(response);
+  if (!list) {
+    return denySeatHandle(
+      SEAT_HANDLE_REASON.LIST_QUERY_FAILED,
+      "orca-adapter: resolveSeatHandle -- terminal list response missing/invalid result.terminals",
+    );
+  }
+  const target = canonicalizeForComparison(worktreePath);
+  const candidates = list.filter(
+    (entry) =>
+      isPlainObject(entry) &&
+      isNonEmptyString(entry.handle) &&
+      !isOrphanSeat({ worktreePath: entry.worktreePath }) &&
+      canonicalizeForComparison(entry.worktreePath) === target,
+  );
+  if (candidates.length === 0) {
+    return denySeatHandle(
+      SEAT_HANDLE_REASON.NOT_FOUND,
+      `orca-adapter: resolveSeatHandle -- no seat found for worktreePath '${worktreePath}'`,
+    );
+  }
+  if (candidates.length > 1) {
+    return denySeatHandle(
+      SEAT_HANDLE_REASON.AMBIGUOUS,
+      `orca-adapter: resolveSeatHandle -- ${candidates.length} seats found for worktreePath '${worktreePath}', refusing to guess (E1)`,
+    );
+  }
+  return { ok: true, handle: candidates[0].handle };
+}
+
 // ---- HYK-170 coder-1: 실측 argv (2단 라이브 프로브, 영수증 §8 대조표
 // 그대로) -- v1(HYK-169)이 "미검증 가정"으로 남긴 6개 함수를 전부 실물과
 // 대조해 고쳤다. 각 함수 옆 주석의 "실측"은 위 두 영수증 파일의 근거를
@@ -781,6 +880,19 @@ function ensureSeatViaCreate(c, opts) {
   );
 }
 
+// A-2 (HYK-170 사이클2): ensureSeat의 공개 출력 봉투에는 seatHandle이 없다
+// -- 내부 헬퍼(tryReuseExistingSeat/createNewSeat)는 여전히 handle을
+// 만들어내지만(좌석을 실제로 만들거나 재사용하려면 그 순간엔 필요하다),
+// 그 값을 코어로 반환하거나 다른 포트로 운반하지 않는다. deliverTask/
+// teardownSeat은 나중에 {role, worktreePath}로 resolveSeatHandle을 통해
+// 스스로 다시 조회한다(A-1) -- 이 함수가 만든 handle을 기억해두지 않는다.
+function stripSeatHandle(result) {
+  if (!isPlainObject(result) || !("seatHandle" in result)) return result;
+  const rest = { ...result };
+  delete rest.seatHandle;
+  return rest;
+}
+
 // ctx: { role, worktreePath?, create?: {name, repoId, baseBranch?}, mainRepoDir? }
 // opts: { execFn, existsFn?, mkdirFn?, copyFileFn?, copyDirFn?, existingSeatHandle?,
 //         existingSeatWorktreePath? }
@@ -795,7 +907,7 @@ export function ensureSeat(ctx, opts = {}) {
   if (locationRejection) return locationRejection;
 
   const reused = tryReuseExistingSeat(opts);
-  if (reused) return reused;
+  if (reused) return stripSeatHandle(reused);
 
   if (typeof opts.execFn !== "function") {
     return {
@@ -806,7 +918,7 @@ export function ensureSeat(ctx, opts = {}) {
   }
 
   if (!isNonEmptyString(c.worktreePath)) {
-    return ensureSeatViaCreate(c, opts);
+    return stripSeatHandle(ensureSeatViaCreate(c, opts));
   }
 
   // review-2 (coder-4): 재사용/기존 경로에서는 Orca 관리 워크트리 여부를
@@ -822,29 +934,59 @@ export function ensureSeat(ctx, opts = {}) {
     };
   }
 
-  return createNewSeat(
-    c.role,
-    managed.path,
-    c.mainRepoDir,
-    opts,
-    defaultFsDeps(opts),
-    [],
+  return stripSeatHandle(
+    createNewSeat(
+      c.role,
+      managed.path,
+      c.mainRepoDir,
+      opts,
+      defaultFsDeps(opts),
+      [],
+    ),
   );
 }
 
+// A-2: deliverTask는 더 이상 seatHandle을 입력으로 받지 않는다 -- worktreePath
+// (+role)만 받고, 실제 handle은 이 포트 내부에서 A-1(resolveSeatHandle)로
+// 그 자리에서 해석한다. opts.existingSeatHandle은 테스트 전용 override
+// 경로로만 남긴다(ensureSeat의 기존 existingSeatHandle 전례와 동형) --
+// production 호출부(relay-core.mjs)는 이 옵션을 넘기지 않는다.
 function validateDeliverInput(c, opts) {
   if (typeof opts.execFn !== "function") {
     return "orca-adapter: deliverTask -- opts.execFn is required";
   }
-  if (!isNonEmptyString(c.seatHandle)) {
-    return "orca-adapter: deliverTask -- seatHandle is required";
+  if (
+    !isNonEmptyString(opts.existingSeatHandle) &&
+    !isNonEmptyString(c.worktreePath)
+  ) {
+    return "orca-adapter: deliverTask -- worktreePath is required";
   }
   return null;
 }
 
-// task-create -> dispatch (§4-2 검증된 argv 재사용). runtimeTaskId까지 확보
-// 못하면 그 사유를 그대로 반환한다.
-function createAndDispatch(c, opts) {
+function resolveHandleForPort(c, opts, callerLabel) {
+  if (isNonEmptyString(opts.existingSeatHandle)) {
+    return { ok: true, handle: opts.existingSeatHandle };
+  }
+  const resolved = resolveSeatHandle(
+    { role: c.role, worktreePath: c.worktreePath },
+    opts,
+  );
+  if (!resolved.ok) {
+    return {
+      ok: false,
+      reason: `orca-adapter: ${callerLabel} -- ${resolved.reason}`,
+      seatHandleReason: resolved.seatHandleReason,
+    };
+  }
+  return { ok: true, handle: resolved.handle };
+}
+
+// task-create만(§4-2 검증된 argv 재사용). runtimeTaskId까지 확보 못하면 그
+// 사유를 그대로 반환한다. HYK-170 사이클2: 좌석 handle 해석보다 먼저
+// 실행한다 -- task-create가 실패하는 시나리오에서 불필요한 terminal-list
+// 조회를 하지 않기 위함(순서 자체가 계약은 아니다, 부작용 최소화일 뿐).
+function createTask(c, opts) {
   const specResult = buildSpec(c.taskId);
   if (!specResult.ok) {
     return {
@@ -865,8 +1007,12 @@ function createAndDispatch(c, opts) {
       reason: `orca-adapter: ${REASON.TASK_CREATE_FAILED} -- response.result.task.id missing/empty`,
     };
   }
+  return { ok: true, runtimeTaskId };
+}
+
+function dispatchToSeat(runtimeTaskId, seatHandle, opts) {
   const dispatched = guardedExec(
-    buildDispatchCommand(runtimeTaskId, c.seatHandle),
+    buildDispatchCommand(runtimeTaskId, seatHandle),
     opts.execFn,
     REASON.DISPATCH_FAILED,
   );
@@ -975,8 +1121,11 @@ function submitWithRetry(seatHandle, runtimeTaskId, marker, opts) {
 }
 
 // ---- 포트 2: 배달(deliver) ----
-// ctx: { taskId, seatHandle, coordinatorHandle, role }
-// opts: { execFn, confirmPastedFn?, maxRetries?, confirmMaxAttempts?, confirmWaitFn? }
+// ctx: { taskId, role, worktreePath, coordinatorHandle }
+// opts: { execFn, existingSeatHandle?(테스트 전용 override), confirmPastedFn?,
+//         maxRetries?, confirmMaxAttempts?, confirmWaitFn? }
+// A-2: seatHandle을 입력으로 받지 않는다 -- {role, worktreePath}로부터
+// resolveSeatHandle(A-1)이 그 자리에서 해석한다.
 // confirmPastedFn: 테스트·특수 상황용 override 훅. codex(REVIEW) 배달에서만
 // 쓰이며, **미주입 시 어댑터가 terminal show로 스스로 확인한다**(review-1
 // C2, 이전엔 미주입=무조건 미확인이었다). marker = c.taskId(하네스
@@ -987,7 +1136,18 @@ export function deliverTask(ctx, opts = {}) {
   const invalid = validateDeliverInput(c, opts);
   if (invalid) return { ok: false, reason: invalid };
 
-  const dispatchResult = createAndDispatch(c, opts);
+  const taskResult = createTask(c, opts);
+  if (!taskResult.ok) return taskResult;
+
+  const handleResult = resolveHandleForPort(c, opts, REASON.DISPATCH_FAILED);
+  if (!handleResult.ok) return handleResult;
+  const seatHandle = handleResult.handle;
+
+  const dispatchResult = dispatchToSeat(
+    taskResult.runtimeTaskId,
+    seatHandle,
+    opts,
+  );
   if (!dispatchResult.ok) return dispatchResult;
 
   if (!needsExplicitSubmit(c.role)) {
@@ -999,7 +1159,7 @@ export function deliverTask(ctx, opts = {}) {
     };
   }
   return submitWithRetry(
-    c.seatHandle,
+    seatHandle,
     dispatchResult.runtimeTaskId,
     c.taskId,
     opts,
@@ -1054,12 +1214,19 @@ function isTabNotFoundFailure(guardedResult) {
   );
 }
 
+// A-2: teardownSeat도 seatHandle을 입력으로 받지 않는다 -- {role,
+// worktreePath}(또는 테스트 전용 opts.existingSeatHandle override)만 받고,
+// 닫을 handle은 A-1로 그 자리에서 해석한다(워크트리를 지우기 전이라 여전히
+// Orca 관리 목록에 남아 있으므로 resolveSeatHandle이 통과한다).
 function validateTeardownInput(c, opts) {
   if (typeof opts.execFn !== "function") {
     return "orca-adapter: teardownSeat -- opts.execFn is required";
   }
-  if (!isNonEmptyString(c.seatHandle)) {
-    return "orca-adapter: teardownSeat -- seatHandle is required";
+  if (
+    !isNonEmptyString(opts.existingSeatHandle) &&
+    !isNonEmptyString(c.worktreePath)
+  ) {
+    return "orca-adapter: teardownSeat -- worktreePath is required";
   }
   return null;
 }
@@ -1089,14 +1256,17 @@ function cleanupFailedTask(taskId, execFn) {
   }
 }
 
-// ctx: { seatHandle, worktreePath?, taskId? }
+// ctx: { role, worktreePath, taskId? }
 export function teardownSeat(ctx, opts = {}) {
   const c = isPlainObject(ctx) ? ctx : {};
   const invalid = validateTeardownInput(c, opts);
   if (invalid) return { ok: false, reason: invalid };
 
+  const handleResult = resolveHandleForPort(c, opts, REASON.TEARDOWN_FAILED);
+  if (!handleResult.ok) return handleResult;
+
   const closed = guardedExec(
-    buildSeatCloseCommand(c.seatHandle),
+    buildSeatCloseCommand(handleResult.handle),
     opts.execFn,
     REASON.TEARDOWN_FAILED,
   );
