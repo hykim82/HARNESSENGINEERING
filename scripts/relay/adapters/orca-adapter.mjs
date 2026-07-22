@@ -19,10 +19,13 @@ import { normalizeAbsolute } from "../../check/path-normalize.mjs";
 //
 // 검증 수준 (정직 요구): task-create/dispatch/check --wait의 argv 형태는
 // orca-spike-runner.mjs가 ORCH의 실측(read-only 프로브 + `--help`)으로 이미
-// 검증한 값이라 그대로 import해 재사용한다(재구현 금지). 반면 아래 표시된
-// "미검증 가정" 블록(좌석 생성·제출·비차단 조회·좌석 종료)은 이번 태스크가
-// 실 orca 호출 0으로 진행되어 실측되지 않았다 -- 형태가 실물과 다르면 그
-// 호출 지점만 국소 수리하면 된다(포트 계약·재시도 정책·G9 경계는 무관).
+// 검증한 값이라 그대로 import해 재사용한다(재구현 금지). HYK-170 coder-1
+// (2026-07-22): v1이 "미검증 가정"으로 남겼던 좌석 생성·제출·비차단 조회·
+// 좌석 종료·워크트리 생성/제거 6개 함수는 ORCH의 실 CLI 프로브(`--help` +
+// 사람 승인 하 합성 워크트리 1회 프로브, 관제실 산출물
+// `2026-07-22-hyk170-어댑터Bv2/`)로 전부 실측 근거를 확보했다 -- 추측 argv
+// 0. `--agent` 경로(`result.agentTerminalHandle`)만 이번 프로브 범위 밖이라
+// 여전히 미실측이며 구현되지 않았다(정직 경계).
 
 function isPlainObject(v) {
   return v !== null && typeof v === "object" && !Array.isArray(v);
@@ -169,9 +172,19 @@ export function resolveSeatLocation({ role, requestedPath } = {}) {
 // "관리 워크트리인지 확인하고, 아니면 거부"까지만 한다(`allowCreate` 옵션·
 // `buildWorktreeCreateCommand`·생성 분기 전부 삭제 -- 조용한 삭제 방지를
 // 위해 이 주석에 사유를 남긴다).
+// HYK-170 coder-1 (§B): 생성 기능 복원 -- v1이 제거했던 CREATE_FAILED류를
+// 다시 추가한다(실측 근거로 조용히 되살리는 것이 아니라 이 주석에 사유를
+// 남긴다). 생성 후 위치/등록 검증 중 하나라도 실패하면 만든 워크트리를
+// 남기지 않고 되돌린다(fail-closed, createManagedWorktree의 rollback()).
+// 되돌리기 자체의 성패는 `steps`에 문자열로 기록한다(정직 요구: 삼켜서
+// "성공"처럼 보이게 하지 않는다) -- worktreeReason 자체는 원래 실패 사유
+// (CREATE_LOCATION_REJECTED/CREATE_NOT_MANAGED_AFTER_CREATE)를 유지한다.
 export const WORKTREE_REASON = Object.freeze({
   LIST_QUERY_FAILED: "WORKTREE_LIST_QUERY_FAILED",
   NOT_ORCA_MANAGED: "WORKTREE_NOT_ORCA_MANAGED",
+  CREATE_FAILED: "WORKTREE_CREATE_FAILED",
+  CREATE_LOCATION_REJECTED: "WORKTREE_CREATE_LOCATION_REJECTED",
+  CREATE_NOT_MANAGED_AFTER_CREATE: "WORKTREE_CREATE_NOT_MANAGED_AFTER_CREATE",
 });
 
 export function buildWorktreeListCommand() {
@@ -256,27 +269,39 @@ export function checkWorktreeManaged({ requestedPath } = {}, opts = {}) {
   }
   return denyWorktree(
     WORKTREE_REASON.NOT_ORCA_MANAGED,
-    `checkWorktreeManaged: '${requestedPath}' is not a registered Orca worktree -- worktree creation is out of scope for v1 (ORCH creates it manually; see follow-up issue)`,
+    `checkWorktreeManaged: '${requestedPath}' is not a registered Orca worktree -- this port only checks registration, it does not create (see createManagedWorktree for the HYK-170 §B creation path)`,
   );
 }
 
-// ---- 미검증 가정: 좌석 생성/제출/비차단 조회/종료 argv (실 orca 미호출) ----
-// task-create/dispatch/check --wait와 달리 이 4개 명령은 ORCH가 read-only로
-// 실측한 적이 없다. 실물과 형태가 다르면 이 4개 함수만 고치면 된다.
+// ---- HYK-170 coder-1: 실측 argv (2단 라이브 프로브, 영수증 §8 대조표
+// 그대로) -- v1(HYK-169)이 "미검증 가정"으로 남긴 6개 함수를 전부 실물과
+// 대조해 고쳤다. 각 함수 옆 주석의 "실측"은 위 두 영수증 파일의 근거를
+// 가리킨다(추측 0).
+function buildSeatLauncherCommand(role, worktreePath) {
+  return `pwsh -NoExit -File "${SEAT_LAUNCHER_PATH}" -Role ${role} -Worktree "${worktreePath}"`;
+}
+// A1(실측 §8-1): --shell/--setup 둘 다 존재하지 않는 옵션이었다. 실물은
+// `terminal create --worktree <selector> --command "<cmd>" [--title <t>] --json`.
 export function buildSeatCreateCommand(role, worktreePath) {
   return [
     "terminal",
     "create",
-    "--shell",
-    `pwsh -NoExit -File "${SEAT_LAUNCHER_PATH}" -Role ${role} -Worktree "${worktreePath}"`,
-    "--setup",
-    "skip",
+    "--worktree",
+    `path:${worktreePath}`,
+    "--command",
+    buildSeatLauncherCommand(role, worktreePath),
+    "--title",
+    role,
     "--json",
   ];
 }
+// A2(실측 §8-2): --handle 옵션은 없다 -- 실물은 --terminal.
 export function buildSeatSubmitCommand(seatHandle) {
-  return ["terminal", "send", "--handle", seatHandle, "--enter", "--json"];
+  return ["terminal", "send", "--terminal", seatHandle, "--enter", "--json"];
 }
+// A4(실측 §8-4): 옵션명은 유일하게 정확했다. 단 기본 --unread는 메시지를
+// 읽음 처리하므로(다른 소비자 것을 태워버림), 비권위 감지 폴링에는 --peek을
+// 추가한다(1단-help.md §5).
 export function buildNonBlockingCheckCommand(coordinatorHandle) {
   return [
     "orchestration",
@@ -285,42 +310,276 @@ export function buildNonBlockingCheckCommand(coordinatorHandle) {
     coordinatorHandle,
     "--types",
     "worker_done,escalation",
+    "--peek",
     "--json",
   ];
 }
+// A3(실측 §8-3): --handle 없음 -- 실물은 --terminal. **--tab을 붙이면
+// 안 된다** -- UI 미채택 pane에서 tab_not_found(exit 1)로 실패한다(실측
+// 2단 §4). teardownSeat이 이 실패를 "이미 닫힘"으로 흡수한다.
 export function buildSeatCloseCommand(seatHandle) {
-  return ["terminal", "close", "--handle", seatHandle, "--json"];
+  return ["terminal", "close", "--terminal", seatHandle, "--json"];
 }
-export function buildDispatchCleanupCommand(seatHandle) {
+// A6(실측 §8-6): `orchestration dispatch-cleanup` 서브커맨드 자체가 없다
+// (`orchestration --help` 실측). 대체 = task-update로 실패 상태 마킹.
+// 유효 status = pending/ready/dispatched/completed/failed/blocked. 인자도
+// --assignee(handle)이 아니라 **task id**로 바뀐다 -- 호출부(teardownSeat)
+// 시그니처를 seatHandle 기반에서 taskId 기반으로 함께 고쳤다.
+export function buildTaskUpdateFailedCommand(taskId) {
   return [
     "orchestration",
-    "dispatch-cleanup",
-    "--assignee",
-    seatHandle,
+    "task-update",
+    "--id",
+    taskId,
+    "--status",
+    "failed",
     "--json",
   ];
 }
-// 정리 규칙(relay-terminal-setup.md §6): 이슈 종료 시 워크트리도 제거한다.
-// 이건 orca 명령이 아니라 git 명령이다(§4-2 화이트리스트/guardedExec 대상
-// 아님) -- teardownSeat은 이 argv를 구성만 하고 실행하지 않는다(비타협
-// 제약: 실 실행 0, 이번 태스크 스코프는 명령 구성까지).
+// A5(실측 §8-5): git 명령으로 구성해뒀던 것을 폐기 -- Orca
+// `worktree rm --worktree path:<p> --force --json` 한 방이 폴더+git등록+
+// 브랜치+탭을 전부 제거한다(2단 §4/§6 실측). 실행은 guardedExec을 통해
+// 실제로 나간다(구성만 하고 실행 0이던 v1과 다름 -- 이 명령은 orca 명령이라
+// git처럼 실행을 미룰 이유가 없다).
 export function buildWorktreeRemoveCommand(worktreePath) {
-  return ["worktree", "remove", "--force", worktreePath];
+  return [
+    "worktree",
+    "rm",
+    "--worktree",
+    `path:${worktreePath}`,
+    "--force",
+    "--json",
+  ];
+}
+
+// ---- B: 워크트리 생성 복원 (2단 §1 실측, v1에서 제거됐던 기능) ----
+// 비타협: 경로를 요청에 넣지 않는다(--path 옵션 부재, 실측 1단 §1). 이름만
+// 주고 응답의 result.worktree.path/branch를 읽는다(추측 조립 금지).
+// coder-2 (review-1 C1 반려 결함 수리): baseBranch가 없으면(undefined/null/
+// 빈 문자열 전부) --base-branch 플래그 자체를 argv에서 생략한다 -- 이전엔
+// 항상 붙였고, 미제공 시 undefined가 문자열 "undefined"가 아니라 그대로
+// JS 값(null/undefined)으로 배열에 들어가 CLI에 깨진 인자가 전달됐다(실측
+// §1: 생략 시 repo 기본 base 사용, 이게 정답이다).
+export function buildWorktreeCreateCommand({ name, repoId, baseBranch } = {}) {
+  const argv = [
+    "worktree",
+    "create",
+    "--name",
+    name,
+    "--repo",
+    `id:${repoId}`,
+    "--setup",
+    "skip",
+    "--no-parent",
+  ];
+  if (isNonEmptyString(baseBranch)) {
+    argv.push("--base-branch", baseBranch);
+  }
+  argv.push("--json");
+  return argv;
+}
+// 응답 파싱만 분리(parseWorktreeList/parseRuntimeTaskId 전례와 동형).
+// 브랜치명은 런타임이 <github-user>/ 접두를 붙이므로(2단 §1 실측) 반드시
+// 이 함수로 응답에서 읽어야 한다 -- 요청 name으로 조립하면 안 된다.
+export function parseWorktreeCreateResponse(response) {
+  if (!isPlainObject(response) || response.ok !== true) return null;
+  const wt = isPlainObject(response.result) ? response.result.worktree : null;
+  if (
+    !isPlainObject(wt) ||
+    !isNonEmptyString(wt.path) ||
+    !isNonEmptyString(wt.branch)
+  ) {
+    return null;
+  }
+  const warnings = Array.isArray(response.result.warnings)
+    ? response.result.warnings
+    : [];
+  return { path: wt.path, branch: wt.branch, warnings };
+}
+
+// review-1 C1 반려 결함 수리: parseWorktreeCreateResponse는 path와 branch
+// 둘 다 요구하지만, 롤백 대상 경로 판정은 branch 없이 path만 있어도 가능해야
+// 한다(branch가 비어 있어도 워크트리는 이미 디스크에 만들어져 있다 -- 실측
+// 재현: `branch:''`인데도 worktree create 응답은 ok:true). 응답-only 원칙은
+// 유지(요청 name으로 경로를 만들지 않는다).
+function extractCreatedWorktreePath(response) {
+  if (!isPlainObject(response) || response.ok !== true) return null;
+  const wt = isPlainObject(response.result) ? response.result.worktree : null;
+  const path = isPlainObject(wt) ? wt.path : null;
+  return isNonEmptyString(path) ? path : null;
+}
+
+// B 순서(태스크 지시 그대로): 생성 -> 응답 경로로 resolveSeatLocation ->
+// checkWorktreeManaged. review-1 C1: `worktree create`가 ok:true를 반환한
+// 순간부터는 이후 어느 단계에서 실패하든(응답 파싱 실패 포함) 되돌린다 --
+// 이전엔 응답 파싱 실패 시 롤백을 건너뛰어 실제로 만들어진 워크트리가
+// 누출됐다(재현: branch:'' 응답에서 rm 호출 0건). 롤백 대상은 항상 응답
+// 경로(extractCreatedWorktreePath)이지 요청 name이 아니다(변이 죽이기 요구).
+// 경로조차 없으면 롤백을 시도하지 않고 그 사실 자체를 steps에 남긴다(조용히
+// 삼키지 않는다) -- 롤백 실패도 원래 실패 사유를 덮지 않고 steps에 별도로
+// 남긴다.
+export function createManagedWorktree(
+  { role, name, repoId, baseBranch } = {},
+  opts = {},
+) {
+  const steps = [];
+  if (typeof opts.execFn !== "function") {
+    return {
+      ok: false,
+      reason: "orca-adapter: createManagedWorktree -- opts.execFn is required",
+      worktreeReason: WORKTREE_REASON.CREATE_FAILED,
+      steps,
+    };
+  }
+  const created = guardedExec(
+    buildWorktreeCreateCommand({ name, repoId, baseBranch }),
+    opts.execFn,
+    "WORKTREE_CREATE_FAILED",
+  );
+  if (!created.ok) {
+    return {
+      ok: false,
+      reason: created.reason,
+      worktreeReason: WORKTREE_REASON.CREATE_FAILED,
+      steps,
+    };
+  }
+
+  // created.ok === true 이후의 모든 실패 경로는 이 함수로 되돌린다.
+  function rollback(failReason, worktreeReason, extra = {}) {
+    const createdPath = extractCreatedWorktreePath(created.response);
+    if (!createdPath) {
+      steps.push(
+        "worktree-rollback-not-possible:no-path-in-response (manual cleanup may be required)",
+      );
+      return { ok: false, reason: failReason, worktreeReason, steps, ...extra };
+    }
+    const removal = guardedExec(
+      buildWorktreeRemoveCommand(createdPath),
+      opts.execFn,
+      "WORKTREE_ROLLBACK_FAILED",
+    );
+    steps.push(
+      removal.ok
+        ? "worktree-rollback-ok"
+        : `worktree-rollback-failed:${removal.reason}`,
+    );
+    return { ok: false, reason: failReason, worktreeReason, steps, ...extra };
+  }
+
+  const parsed = parseWorktreeCreateResponse(created.response);
+  if (!parsed) {
+    return rollback(
+      "orca-adapter: WORKTREE_CREATE_FAILED -- response.result.worktree.{path,branch} missing/empty",
+      WORKTREE_REASON.CREATE_FAILED,
+    );
+  }
+  if (parsed.warnings.length > 0) {
+    steps.push(`worktree-create-warnings:${JSON.stringify(parsed.warnings)}`);
+  }
+  steps.push("worktree-created");
+
+  const location = resolveSeatLocation({ role, requestedPath: parsed.path });
+  if (!location.ok) {
+    return rollback(location.detail, WORKTREE_REASON.CREATE_LOCATION_REJECTED, {
+      locationReason: location.reason,
+    });
+  }
+
+  const managed = checkWorktreeManaged({ requestedPath: parsed.path }, opts);
+  if (!managed.ok) {
+    return rollback(
+      managed.detail,
+      WORKTREE_REASON.CREATE_NOT_MANAGED_AFTER_CREATE,
+    );
+  }
+
+  return {
+    ok: true,
+    path: parsed.path,
+    branch: parsed.branch,
+    warnings: parsed.warnings,
+    steps,
+  };
+}
+
+// ---- D: 좌석 생사 판정 (2단 §5 실측) ----
+// 제거된 워크트리에 붙어 있던 좌석은 connected:true/writable:true인 채로
+// terminal list에 남는다 -- 단 worktreePath가 빈 문자열이다. 생사는
+// connected/writable이 아니라 worktreePath 비어있음으로만 판정한다.
+// 정직 경계: 이건 터미널 칸(pane) 수준 신호다. HYK-163 2A가 UNVERIFIED로
+// 남긴 에이전트 인스턴스 수준 liveness는 이걸로 닫히지 않는다.
+export function isOrphanSeat({ worktreePath } = {}) {
+  return worktreePath === "";
+}
+// 부수 판별식(2단 §7 실측): UI 미채택 좌석("유령 터미널")의 tabId는
+// `pty:`로 시작한다(UI 채택 탭은 순수 uuid).
+export function isGhostTab(tabId) {
+  return typeof tabId === "string" && tabId.startsWith("pty:");
+}
+
+// ---- C: 배달 도착 확인 (2단 §3 실측) ----
+// preview는 원문이 아니다 -- 셸 예측입력으로 문자 단위 재그림이 섞인다.
+// 완전 일치 단언은 금지, 정규화(공백 붕괴) 후 마커 부분 일치만 확인한다.
+export function buildSeatShowCommand(seatHandle) {
+  return ["terminal", "show", "--terminal", seatHandle, "--json"];
+}
+export function parseSeatPreview(response) {
+  if (!isPlainObject(response) || response.ok !== true) return null;
+  const preview = response.result?.terminal?.preview;
+  return typeof preview === "string" ? preview : null;
+}
+export function normalizePreview(text) {
+  return typeof text === "string" ? text.replace(/\s+/g, " ").trim() : "";
+}
+export function previewContainsMarker(preview, marker) {
+  if (!isNonEmptyString(marker)) return false;
+  return normalizePreview(preview).includes(marker);
+}
+
+// review-1 C2: 배달 도착의 "거짓 실패" 방지(영수증 §9) -- 마커가 아직 안
+// 보여도 좌석이 이미 붙여넣은 내용을 처리 중(codex의 `[Pasted Content`
+// 대기 표식)이거나 여러 입력이 큐에 쌓인 상태(`Press up to edit queued
+// messages`)라면 붙여넣기 자체는 성공한 것이다 -- 이 경우도 확인으로
+// 인정한다.
+const BUSY_SIGNALS = Object.freeze([
+  "Press up to edit queued messages",
+  "[Pasted Content",
+]);
+export function previewShowsBusySignal(preview) {
+  const normalized = normalizePreview(preview);
+  return BUSY_SIGNALS.some((signal) => normalized.includes(signal));
+}
+
+// 실측 오류 shape(2단 §4): {ok:false, error:{code, message}} -- 기존
+// response.reason 우선 확인 뒤, 없으면 error.message도 본다(tab_not_found
+// 판별에 필요). guardedExec에서 분리(복잡도 분산).
+function extractFailureDetail(response) {
+  if (!isPlainObject(response)) return "response.ok !== true";
+  if (isNonEmptyString(response.reason)) return response.reason;
+  if (
+    isPlainObject(response.error) &&
+    isNonEmptyString(response.error.message)
+  ) {
+    return response.error.message;
+  }
+  return "response.ok !== true";
+}
+
+// task-create/dispatch만 §4-2 화이트리스트를 강제한다(그 외 4종은 이
+// 어댑터 자신이 유일한 발신처라 guard를 강제하지 않는다). guardedExec에서
+// 분리(복잡도 분산).
+function shouldEnforceWhitelist(argv) {
+  return (
+    Array.isArray(argv) && (argv[1] === "task-create" || argv[1] === "dispatch")
+  );
 }
 
 // 화이트리스트 통과 + execFn 호출을 한곳에 묶는다(orca-spike-runner.runGuardedStep
 // 전례와 동형 -- 이 어댑터 자체 receipts는 호출자가 필요 시 감싼다).
 function guardedExec(argv, execFn, failReason) {
   const guard = assertAllowedOrcaCommand(argv);
-  // 미검증 명령(seat/submit/check/close)은 §4-2 화이트리스트 밖이라 guard가
-  // 항상 실패한다 -- 그 4종은 이 어댑터 자신이 유일한 발신처이므로 여기서는
-  // guard를 강제하지 않고 execFn 실패만 관찰한다. task-create/dispatch만
-  // guard를 통과시켜 §4-2 계약을 지킨다.
-  if (
-    Array.isArray(argv) &&
-    (argv[1] === "task-create" || argv[1] === "dispatch") &&
-    !guard.ok
-  ) {
+  if (shouldEnforceWhitelist(argv) && !guard.ok) {
     return { ok: false, reason: guard.reason };
   }
   let response;
@@ -333,13 +592,9 @@ function guardedExec(argv, execFn, failReason) {
     };
   }
   if (!isPlainObject(response) || response.ok !== true) {
-    const detail =
-      isPlainObject(response) && isNonEmptyString(response.reason)
-        ? response.reason
-        : "response.ok !== true";
     return {
       ok: false,
-      reason: `orca-adapter: ${failReason} -- ${detail}`,
+      reason: `orca-adapter: ${failReason} -- ${extractFailureDetail(response)}`,
       response,
     };
   }
@@ -387,12 +642,26 @@ function ensureNodeModulesCopied(mainRepoDir, worktreePath, fs, steps) {
   steps.push("node_modules-copied");
 }
 
-function validateEnsureSeatInput(role, worktreePath) {
+function isValidCreateSpec(create) {
+  return (
+    isPlainObject(create) &&
+    isNonEmptyString(create.name) &&
+    isNonEmptyString(create.repoId)
+  );
+}
+
+// HYK-170 coder-1 (§B): worktreePath(기존 관리 워크트리 재사용)와
+// create(신규 생성 -- name/repoId 필수, baseBranch 선택)는 상호 배타적
+// 입력 경로다. 정확히 하나만 필요하다 -- 생성은 명시적으로 opt-in해야
+// 하고(암묵적 생성 금지, coder-5 원칙 계승), 아무것도 없으면 실패.
+function validateEnsureSeatInput(role, worktreePath, create) {
   if (!isNonEmptyString(role) || !ENGINE_BY_ROLE[role]) {
     return `orca-adapter: ensureSeat -- unknown role ${JSON.stringify(role)}`;
   }
-  if (!isNonEmptyString(worktreePath)) {
-    return "orca-adapter: ensureSeat -- worktreePath is required";
+  const hasPath = isNonEmptyString(worktreePath);
+  const hasCreate = isValidCreateSpec(create);
+  if (!hasPath && !hasCreate) {
+    return "orca-adapter: ensureSeat -- worktreePath or a valid create{name,repoId} is required";
   }
   return null;
 }
@@ -417,57 +686,117 @@ function createNewSeat(role, worktreePath, mainRepoDir, opts, fs, steps) {
     isPlainObject(created.response) && isPlainObject(created.response.result)
       ? created.response.result
       : {};
-  if (!isNonEmptyString(result.handle)) {
+  // 실측 응답은 result.terminal.{handle,paneKey,surface,tabId}에 있다(2단
+  // §2) -- 일부 fixture는 result에 직접 담기도 하므로 양쪽 다 허용한다.
+  const terminal = isPlainObject(result.terminal) ? result.terminal : result;
+  if (!isNonEmptyString(terminal.handle)) {
     return {
       ok: false,
       reason:
-        "orca-adapter: SEAT_CREATE_FAILED -- response.result.handle missing/empty",
+        "orca-adapter: SEAT_CREATE_FAILED -- response.result.terminal.handle missing/empty",
+    };
+  }
+  // surface:"visible"이 아니면 UI가 못 받아 백그라운드 폴백으로 새어나간
+  // "유령 터미널"이다(2단 §2 실측) -- fail-closed.
+  if (terminal.surface !== "visible") {
+    return {
+      ok: false,
+      reason: `orca-adapter: SEAT_CREATE_FAILED -- response surface is not 'visible' (got ${JSON.stringify(terminal.surface)}), UI did not adopt the seat`,
     };
   }
   steps.push("seat-created");
   return {
     ok: true,
-    seatHandle: result.handle,
-    paneKey: result.paneKey ?? null,
+    seatHandle: terminal.handle,
+    paneKey: terminal.paneKey ?? null,
     created: true,
     stepsPerformed: steps,
   };
 }
 
 // ---- 포트 1: 실행자리(seat) ----
-// ctx: { role, worktreePath, mainRepoDir? }
-// opts: { execFn, existsFn?, mkdirFn?, copyFileFn?, copyDirFn?, existingSeatHandle? }
+// 좌석 위치 정책(relay-terminal-setup.md §6) -- 재사용/기존 경로 전용. 생성
+// 경로(§B)는 경로가 응답에서만 나오므로 createManagedWorktree 내부에서 같은
+// 판정을 응답 경로에 대해 수행한다(요청 시점엔 대상 경로 자체가 없다).
+// ensureSeat에서 분리(복잡도 분산).
+function checkExistingSeatLocation(role, worktreePath) {
+  if (!isNonEmptyString(worktreePath)) return null;
+  const location = resolveSeatLocation({ role, requestedPath: worktreePath });
+  if (location.ok) return null;
+  return {
+    ok: false,
+    reason: location.detail,
+    locationReason: location.reason,
+  };
+}
+
+// D: worktreePath가 빈 문자열인 좌석은 "고아 좌석"이다(connected/writable만
+// 으로 생사를 판단하지 않는다, 2단 §5 실측) -- 호출자가 조회해 넘긴 값을
+// 순수 판정만 한다(execFn을 부르지 않는다). ensureSeat에서 분리.
+function tryReuseExistingSeat(opts) {
+  if (!isNonEmptyString(opts.existingSeatHandle)) return null;
+  if (isOrphanSeat({ worktreePath: opts.existingSeatWorktreePath })) {
+    return {
+      ok: false,
+      reason: `orca-adapter: ensureSeat -- existingSeatHandle '${opts.existingSeatHandle}' is an orphan seat (worktreePath is empty, HYK-170 §D)`,
+    };
+  }
+  return {
+    ok: true,
+    seatHandle: opts.existingSeatHandle,
+    created: false,
+    stepsPerformed: [],
+  };
+}
+
+// §B: worktreePath가 없고 create가 주어졌으면 새 워크트리부터 만든다(생성
+// -> 위치/등록 검증 -> 실패 시 되돌림은 createManagedWorktree 몫). ensureSeat
+// 에서 분리(복잡도 분산).
+function ensureSeatViaCreate(c, opts) {
+  const createResult = createManagedWorktree(
+    {
+      role: c.role,
+      name: c.create.name,
+      repoId: c.create.repoId,
+      baseBranch: c.create.baseBranch,
+    },
+    opts,
+  );
+  if (!createResult.ok) {
+    return {
+      ok: false,
+      reason: createResult.reason,
+      worktreeReason: createResult.worktreeReason,
+      locationReason: createResult.locationReason,
+      stepsPerformed: createResult.steps,
+    };
+  }
+  return createNewSeat(
+    c.role,
+    createResult.path,
+    c.mainRepoDir,
+    opts,
+    defaultFsDeps(opts),
+    [...createResult.steps],
+  );
+}
+
+// ctx: { role, worktreePath?, create?: {name, repoId, baseBranch?}, mainRepoDir? }
+// opts: { execFn, existsFn?, mkdirFn?, copyFileFn?, copyDirFn?, existingSeatHandle?,
+//         existingSeatWorktreePath? }
 // B2: 좌석 handle은 env에서 읽지 않는다 -- existingSeatHandle은 호출자가
 // pane key 조회로 이미 확인한 값만 넘기고, 이 함수는 env를 전혀 참조하지 않는다.
 export function ensureSeat(ctx, opts = {}) {
   const c = isPlainObject(ctx) ? ctx : {};
-  const invalid = validateEnsureSeatInput(c.role, c.worktreePath);
+  const invalid = validateEnsureSeatInput(c.role, c.worktreePath, c.create);
   if (invalid) return { ok: false, reason: invalid };
 
-  // 좌석 위치 정책(relay-terminal-setup.md §6) -- fs/execFn 호출 이전에
-  // 판정한다. 재사용(existingSeatHandle) 경로도 이 판정을 통과해야 한다
-  // (방어 종심 -- 이미 만들어진 좌석이라도 금지 구역을 가리키면 거부).
-  const location = resolveSeatLocation({
-    role: c.role,
-    requestedPath: c.worktreePath,
-  });
-  if (!location.ok) {
-    return {
-      ok: false,
-      reason: location.detail,
-      locationReason: location.reason,
-    };
-  }
+  const locationRejection = checkExistingSeatLocation(c.role, c.worktreePath);
+  if (locationRejection) return locationRejection;
 
-  // 재사용: 호출자가 이미 확인된 handle을 넘기면 새 좌석을 만들지 않는다.
-  if (isNonEmptyString(opts.existingSeatHandle)) {
-    return {
-      ok: true,
-      seatHandle: opts.existingSeatHandle,
-      created: false,
-      stepsPerformed: [],
-    };
-  }
+  const reused = tryReuseExistingSeat(opts);
+  if (reused) return reused;
+
   if (typeof opts.execFn !== "function") {
     return {
       ok: false,
@@ -476,12 +805,14 @@ export function ensureSeat(ctx, opts = {}) {
     };
   }
 
-  // review-2 (coder-4): 새 좌석 경로에서만 Orca 관리 워크트리 여부를
-  // 확인한다(reuse 경로는 위에서 이미 execFn 없이 반환됨 -- 기존 시험
-  // 계약 "reuse는 execFn 호출 0회" 무변경). 등록 확인 실패/미등록 시
-  // A3/A5 복사·좌석 생성 호출은 전혀 일어나지 않는다. coder-5: 생성 유도
-  // 옵션은 없다 -- 호출자가 무엇을 넘겨도 checkWorktreeManaged는 그 값을
-  // 읽지 않는다(위 헤더 주석, 생성 기능 v1 제거).
+  if (!isNonEmptyString(c.worktreePath)) {
+    return ensureSeatViaCreate(c, opts);
+  }
+
+  // review-2 (coder-4): 재사용/기존 경로에서는 Orca 관리 워크트리 여부를
+  // 확인한다. 등록 확인 실패/미등록 시 A3/A5 복사·좌석 생성 호출은 전혀
+  // 일어나지 않는다 -- 이 경로에서 미등록이면 (설계상 §B로 자동 전환하지
+  // 않고) 그대로 거부한다(암묵적 생성 금지, coder-5 원칙 계승).
   const managed = checkWorktreeManaged({ requestedPath: c.worktreePath }, opts);
   if (!managed.ok) {
     return {
@@ -543,22 +874,11 @@ function createAndDispatch(c, opts) {
   return { ok: true, runtimeTaskId };
 }
 
-// HYK-169-coder-3 (review-1 반려 결함 수리): confirmPastedFn의 **반환값을
-// 판정에 쓴다** -- 이전엔 호출만 하고 결과를 버려서 거짓 반환도 제출을
-// 막지 못했다(관찰 원장 B11의 실제 사고: 붙여넣기 미완료 상태에서 Enter가
-// 나가 빈 프롬프트/잘린 지시가 실행됨). `true`(엄격 동일 비교, truthy 비
-// boolean 오반환 방지)만 확인으로 인정한다. 훅이 throw해도 미확인으로
-// 처리(제출 없이 안전하게 실패) -- 붙여넣기 여부를 모르는 예외 상황에서
-// Enter를 보내는 것보다 항상 낫다.
-//
-// 기본값(미주입)은 **보수적으로 false** -- "확인됨"을 기본으로 두면 이번
-// 결함과 같은 구멍이 그대로 남는다(태스크 지시). 즉 codex 좌석 배달은
-// confirmPastedFn을 실제로 주입한 호출자만 제출까지 도달한다.
-function confirmPaste(opts) {
-  const fn =
-    typeof opts.confirmPastedFn === "function"
-      ? opts.confirmPastedFn
-      : () => false;
+// HYK-169-coder-3 (review-1 반려 결함 수리, 계승): confirmPastedFn이 주입된
+// 경우 그 **반환값을 판정에 쓴다** -- 호출만 하고 결과를 버리지 않는다.
+// `true`(엄격 동일 비교, truthy 비 boolean 오반환 방지)만 확인으로 인정한다.
+// 훅이 throw해도 미확인으로 처리(제출 없이 안전하게 실패).
+function confirmPasteViaInjectedHook(fn) {
   try {
     return fn() === true;
   } catch {
@@ -566,15 +886,67 @@ function confirmPaste(opts) {
   }
 }
 
+// review-1 C2 반려 결함 수리: confirmPastedFn이 주입되지 않으면 이전엔
+// 무조건 미확인(false)으로 fail-closed했다 -- 어댑터가 스스로 확인할 방법
+// (buildSeatShowCommand/parseSeatPreview)을 갖고 있으면서 쓰지 않은 것이
+// 결함이었다("배달 1명령" 완료기준 미달, 영수증 §9). 기본 경로는 어댑터가
+// 직접 `terminal show`로 preview를 조회해 판정한다.
+//
+// 성공 판정은 두 갈래 중 하나만 만족해도 인정한다(영수증 §9 -- "거짓 실패"
+// 방지): (a) marker(하네스 task_id)가 preview에 부분 일치로 관측되거나,
+// (b) 좌석이 이미 그 내용을 처리 중임을 보여주는 busy 신호(큐 대기/codex
+// Pasted-Content 대기 표식)가 보이는 경우. preview는 셸 예측입력으로 문자
+// 단위 재그림이 섞이므로 완전 일치는 절대 쓰지 않는다(normalizePreview 후
+// 부분 일치만).
+//
+// 재시도/대기는 순수 함수로 유지 -- opts.confirmMaxAttempts(기본 1)/
+// opts.confirmWaitFn(attempt번호를 받는 부작용 없는 콜백, 기본 no-op)으로
+// 테스트에서 시각·횟수를 주입할 수 있다. 실 orca 호출 0(전부 opts.execFn 경유).
+function confirmPasteViaTerminalShow(seatHandle, marker, opts) {
+  if (typeof opts.execFn !== "function") return false;
+  const maxAttempts = Number.isSafeInteger(opts.confirmMaxAttempts)
+    ? opts.confirmMaxAttempts
+    : 1;
+  const waitFn =
+    typeof opts.confirmWaitFn === "function" ? opts.confirmWaitFn : () => {};
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    if (attempt > 0) waitFn(attempt);
+    let response;
+    try {
+      response = opts.execFn(buildSeatShowCommand(seatHandle));
+    } catch {
+      continue;
+    }
+    const preview = parseSeatPreview(response);
+    if (preview === null) continue;
+    if (
+      previewContainsMarker(preview, marker) ||
+      previewShowsBusySignal(preview)
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// confirmPastedFn이 주입되면 그 훅을 그대로 쓰고(테스트·특수 상황용
+// override), 아니면 어댑터의 기본 자기확인 경로로 넘어간다.
+function confirmPaste(seatHandle, marker, opts) {
+  if (typeof opts.confirmPastedFn === "function") {
+    return confirmPasteViaInjectedHook(opts.confirmPastedFn);
+  }
+  return confirmPasteViaTerminalShow(seatHandle, marker, opts);
+}
+
 // B3/B11: codex 좌석만 붙여넣기 확인 후 제출(Enter) -- 실패 시 최대 1회
 // 재시도(비타협 제약: 자동 무한 재시도 금지). 붙여넣기 미확인이면 제출
 // 호출 0회로 즉시 실패(재시도 상한과 무관 -- 애초에 제출 루프에 진입하지
 // 않는다).
-function submitWithRetry(seatHandle, runtimeTaskId, opts) {
-  if (!confirmPaste(opts)) {
+function submitWithRetry(seatHandle, runtimeTaskId, marker, opts) {
+  if (!confirmPaste(seatHandle, marker, opts)) {
     return {
       ok: false,
-      reason: `orca-adapter: ${REASON.PASTE_UNCONFIRMED} -- confirmPastedFn did not confirm the paste; submit refused (0 terminal send calls)`,
+      reason: `orca-adapter: ${REASON.PASTE_UNCONFIRMED} -- paste could not be confirmed (neither marker nor a busy signal was observed); submit refused (0 terminal send calls)`,
       runtimeTaskId,
     };
   }
@@ -604,9 +976,12 @@ function submitWithRetry(seatHandle, runtimeTaskId, opts) {
 
 // ---- 포트 2: 배달(deliver) ----
 // ctx: { taskId, seatHandle, coordinatorHandle, role }
-// opts: { execFn, confirmPastedFn?, maxRetries? } -- confirmPastedFn: B11 시차 확인
-// (붙여넣기 완료를 확인한 뒤 제출) 훅. codex(REVIEW) 배달에서만 쓰이며,
-// **미주입 시 기본은 미확인(false) -- 제출 거부**(coder-3, 보수적 기본값).
+// opts: { execFn, confirmPastedFn?, maxRetries?, confirmMaxAttempts?, confirmWaitFn? }
+// confirmPastedFn: 테스트·특수 상황용 override 훅. codex(REVIEW) 배달에서만
+// 쓰이며, **미주입 시 어댑터가 terminal show로 스스로 확인한다**(review-1
+// C2, 이전엔 미주입=무조건 미확인이었다). marker = c.taskId(하네스
+// task_id) -- dispatch --inject로 넣은 spec(`go <task_id>`)에 항상 포함된
+// 값이라 별도 필드 없이 재사용한다.
 export function deliverTask(ctx, opts = {}) {
   const c = isPlainObject(ctx) ? ctx : {};
   const invalid = validateDeliverInput(c, opts);
@@ -623,7 +998,12 @@ export function deliverTask(ctx, opts = {}) {
       retries: 0,
     };
   }
-  return submitWithRetry(c.seatHandle, dispatchResult.runtimeTaskId, opts);
+  return submitWithRetry(
+    c.seatHandle,
+    dispatchResult.runtimeTaskId,
+    c.taskId,
+    opts,
+  );
 }
 
 // ---- 포트 3: 감지(detect) -- 비권위 신호만. 완료를 이 값으로 확정하지 않는다
@@ -662,43 +1042,79 @@ export function collectCompletionSignals(ctx, opts = {}) {
 }
 
 // ---- 포트 4: 생애주기(lifecycle) ----
-export function teardownSeat(ctx, opts = {}) {
-  const c = isPlainObject(ctx) ? ctx : {};
+// tab_not_found(실측 2단 §4 오류 shape: {ok:false, error:{code:"runtime_error",
+// message:"tab_not_found"}})는 "이미 닫힌 탭"을 의미한다 -- teardown 실패로
+// 취급하지 않는다(§A3 주석 참조, --tab을 안 붙여야 이 경로에서 애초에 덜
+// 발생하지만 close가 먼저 불려 이미 닫혔을 가능성은 여전히 있다).
+function isTabNotFoundFailure(guardedResult) {
+  return (
+    !guardedResult.ok &&
+    isNonEmptyString(guardedResult.reason) &&
+    guardedResult.reason.includes("tab_not_found")
+  );
+}
+
+function validateTeardownInput(c, opts) {
   if (typeof opts.execFn !== "function") {
-    return {
-      ok: false,
-      reason: "orca-adapter: teardownSeat -- opts.execFn is required",
-    };
+    return "orca-adapter: teardownSeat -- opts.execFn is required";
   }
   if (!isNonEmptyString(c.seatHandle)) {
-    return {
-      ok: false,
-      reason: "orca-adapter: teardownSeat -- seatHandle is required",
-    };
+    return "orca-adapter: teardownSeat -- seatHandle is required";
   }
+  return null;
+}
+
+// A5(실측 2단 §4/§6): worktree rm --force가 폴더+git등록+브랜치+탭을 일괄
+// 제거한다 -- 실제로 실행한다(구성만 하던 v1과 다름). worktreePath가 없으면
+// 생략(호출자가 워크트리 없는 좌석을 닫는 경우). teardownSeat에서 분리
+// (복잡도 분산).
+function removeSeatWorktree(worktreePath, execFn) {
+  if (!isNonEmptyString(worktreePath)) return null;
+  return guardedExec(
+    buildWorktreeRemoveCommand(worktreePath),
+    execFn,
+    REASON.TEARDOWN_FAILED,
+  );
+}
+
+// A6: 잔여 dispatch가 다음 배달을 막은 전례(태스크 지시) -- best-effort
+// 정리, 종료 자체의 성패와 분리해 보고한다. taskId가 없으면(호출자가
+// dispatch를 낸 적 없는 좌석) 생략. teardownSeat에서 분리(복잡도 분산).
+function cleanupFailedTask(taskId, execFn) {
+  if (!isNonEmptyString(taskId)) return null;
+  try {
+    return execFn(buildTaskUpdateFailedCommand(taskId));
+  } catch (err) {
+    return { ok: false, reason: errText(err) };
+  }
+}
+
+// ctx: { seatHandle, worktreePath?, taskId? }
+export function teardownSeat(ctx, opts = {}) {
+  const c = isPlainObject(ctx) ? ctx : {};
+  const invalid = validateTeardownInput(c, opts);
+  if (invalid) return { ok: false, reason: invalid };
+
   const closed = guardedExec(
     buildSeatCloseCommand(c.seatHandle),
     opts.execFn,
     REASON.TEARDOWN_FAILED,
   );
-  // 닫힌 좌석에 물린 잔여 dispatch가 다음 배달을 막은 전례(태스크 지시) --
-  // best-effort 정리, 종료 자체의 성패와 분리해 보고한다.
-  let cleanup;
-  try {
-    cleanup = opts.execFn(buildDispatchCleanupCommand(c.seatHandle));
-  } catch (err) {
-    cleanup = { ok: false, reason: errText(err) };
-  }
-  // 워크트리 제거: 명령 구성까지만(실행 0 -- git 명령이라 opts.execFn/orca
-  // 화이트리스트 대상이 아니고, 이 태스크는 실 실행을 어디서도 하지 않는다).
-  const worktreeRemoveCommand = isNonEmptyString(c.worktreePath)
-    ? buildWorktreeRemoveCommand(c.worktreePath)
-    : null;
+  const closeOk = closed.ok || isTabNotFoundFailure(closed);
+
+  const worktreeRemove = removeSeatWorktree(c.worktreePath, opts.execFn);
+  const cleanup = cleanupFailedTask(c.taskId, opts.execFn);
+
+  const worktreeOk = worktreeRemove === null || worktreeRemove.ok;
   return {
-    ok: closed.ok,
-    reason: closed.ok ? null : closed.reason,
+    ok: closeOk && worktreeOk,
+    reason: !closeOk
+      ? closed.reason
+      : !worktreeOk
+        ? worktreeRemove.reason
+        : null,
     cleanup,
-    worktreeRemoveCommand,
+    worktreeRemove,
   };
 }
 

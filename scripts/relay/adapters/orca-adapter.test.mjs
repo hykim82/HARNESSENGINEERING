@@ -10,11 +10,21 @@ import {
   buildSeatSubmitCommand,
   buildSeatCloseCommand,
   buildNonBlockingCheckCommand,
-  buildDispatchCleanupCommand,
+  buildTaskUpdateFailedCommand,
   buildWorktreeRemoveCommand,
   buildWorktreeListCommand,
+  buildWorktreeCreateCommand,
+  parseWorktreeCreateResponse,
+  createManagedWorktree,
   checkWorktreeManaged,
   parseWorktreeList,
+  isOrphanSeat,
+  isGhostTab,
+  buildSeatShowCommand,
+  parseSeatPreview,
+  normalizePreview,
+  previewContainsMarker,
+  previewShowsBusySignal,
   WORKTREE_REASON,
   resolveSeatLocation,
   LOCATION_REASON,
@@ -24,27 +34,76 @@ import {
   ENGINE_BY_ROLE,
 } from "./orca-adapter.mjs";
 
-// HYK-169-coder-1/2: 어댑터 단위 테스트 -- 전부 execFn/fs fake 주입, 실 orca
-// 호출 0(비타협 제약). G10(fake 어댑터만으로 코어 전 경로 검증)은
-// relay-core.test.mjs가 이 어댑터 자체를 fake로 대체해 별도로 증명한다;
-// 여기서는 이 어댑터의 포트 각각(성공/실패/재시도/env 미사용)을 검증한다.
+// HYK-170 coder-1: 어댑터 단위 테스트 -- 전부 execFn/fs fake 주입, 실 orca
+// 호출 0(비타협 제약). fixture는 관제실 산출물
+// `2026-07-22-hyk170-어댑터Bv2/실CLI-argv-검증-{1,2}단-*.md`의 실측 JSON을
+// 그대로 옮긴 것이다(지어낸 값 0) -- 헛시험 재발 방지(이 태스크의 존재
+// 이유): argv 문자열만 비교하는 시험이 아니라, "실측 fixture 응답을 먹였을
+// 때 함수가 올바른 값을 뽑아내는가"를 단언한다.
 
-// coder-2: ensureSeat이 이제 좌석 위치 정책(relay-terminal-setup.md §6)을
-// 강제하므로, 위치 자체를 검증하지 않는 기존 ensureSeat 시험(설정/노드모듈
-// 복사, 좌석 생성 응답 파싱 등)은 정책을 통과하는 실제 workspaces 경로를
-// 써야 한다 -- 그래야 "이 시험이 검증하려는 것"과 "위치 정책"이 서로
-// 간섭하지 않는다.
 const VALID_WORKTREE = `${WORKSPACES_ROOT}/HARNESSENGINEERING/hyk-test-fixture`;
+
+// ---------------------------------------------------------------------------
+// 실측 fixture (2단-라이브프로브.md §1~§5 그대로)
+// ---------------------------------------------------------------------------
+const FIXTURE_WORKTREE_CREATE_RESPONSE = {
+  ok: true,
+  result: {
+    worktree: {
+      id: "repoId::C:/Users/Administrator/orca/workspaces/HARNESSENGINEERING/hyk170-probe",
+      path: `${WORKSPACES_ROOT}/HARNESSENGINEERING/hyk170-probe`,
+      branch: "refs/heads/hykim82/hyk170-probe",
+      head: "dfdd971...",
+      baseRef: "refs/remotes/origin/master",
+      isMainWorktree: false,
+      displayName: "hyk170-probe",
+    },
+    lineage: null,
+    workspaceLineage: null,
+    warnings: [],
+  },
+};
+
+const FIXTURE_TERMINAL_CREATE_RESPONSE = {
+  ok: true,
+  result: {
+    terminal: {
+      handle: "term_45d41401-0000-0000-0000-000000000000",
+      tabId: "11111111-2222-3333-4444-555555555555",
+      paneKey: "11111111-2222-3333-4444-555555555555:leaf1",
+      ptyId: "repoId::path@@short",
+      worktreeId: "repoId::path",
+      title: "HYK170-PROBE",
+      surface: "visible",
+    },
+  },
+};
+
+const FIXTURE_TAB_NOT_FOUND_RESPONSE = {
+  ok: false,
+  error: { code: "runtime_error", message: "tab_not_found" },
+};
+
+const FIXTURE_WORKTREE_RM_RESPONSE = { ok: true, result: { removed: true } };
+
+// preview redraw artifact -- 실측 원문(2단 §3): 셸 예측입력으로 문자 단위
+// 재그림이 섞인다. 완전 일치가 아니라 정규화 후 마커 부분 일치로만 확인.
+const FIXTURE_PREVIEW_REDRAW =
+  "eecho HYK170_ARecho HYK170_ARR  echo HYK170_ARRIVAL_MARK\nHYK170_ARRIVAL_MARK\n";
 
 function fakeExecFn(responses) {
   const calls = [];
   function fn(argv) {
     calls.push(argv);
     // "orchestration"/"worktree" both have a real subcommand as argv[1]
-    // (list vs create need distinct stubs) -- "terminal" stays keyed on
-    // argv[0] since its own subcommand (send/create/close) never overlaps.
+    // (list vs create/rm, check vs task-update need distinct stubs) --
+    // "terminal" is keyed on argv[1] too (create/send/close/show never overlap).
     const key =
-      argv[0] === "orchestration" || argv[0] === "worktree" ? argv[1] : argv[0];
+      argv[0] === "orchestration" ||
+      argv[0] === "worktree" ||
+      argv[0] === "terminal"
+        ? argv[1]
+        : argv[0];
     const entry = responses[key];
     if (typeof entry === "function") return entry(argv, calls.length);
     if (entry === undefined) {
@@ -58,17 +117,475 @@ function fakeExecFn(responses) {
   return fn;
 }
 
-// coder-4: ensureSeat now queries `worktree list` before creating a new
-// seat -- every existing ensureSeat fixture that reaches seat creation
-// needs a "list" stub reporting the target path as already managed
-// (preserves each test's original intent: it's testing settings copy /
-// seat-response parsing, not worktree registration).
 function managedWorktreeStub(path = VALID_WORKTREE) {
   return { ok: true, result: { worktrees: [{ path }] } };
 }
 
 // ---------------------------------------------------------------------------
-// ensureSeat
+// A1: buildSeatCreateCommand -- exact argv shape (실측 §8-1)
+// ---------------------------------------------------------------------------
+test("buildSeatCreateCommand: uses --worktree/--command/--title, no --shell/--setup (A1 fix)", () => {
+  const argv = buildSeatCreateCommand("CODER", "/wt/path");
+  assert.deepEqual(argv.slice(0, 4), [
+    "terminal",
+    "create",
+    "--worktree",
+    "path:/wt/path",
+  ]);
+  assert.equal(argv.includes("--command"), true);
+  assert.deepEqual(argv.slice(-3), ["--title", "CODER", "--json"]);
+  assert.equal(argv.includes("--shell"), false);
+  assert.equal(argv.includes("--setup"), false);
+});
+
+// ---------------------------------------------------------------------------
+// A2/A3: --terminal not --handle (실측 §8-2/§8-3), no --tab on close
+// ---------------------------------------------------------------------------
+test("buildSeatSubmitCommand: --terminal not --handle (A2 fix)", () => {
+  assert.deepEqual(buildSeatSubmitCommand("term_x"), [
+    "terminal",
+    "send",
+    "--terminal",
+    "term_x",
+    "--enter",
+    "--json",
+  ]);
+});
+
+test("buildSeatCloseCommand: --terminal not --handle, and never --tab (A3 fix)", () => {
+  const argv = buildSeatCloseCommand("term_x");
+  assert.deepEqual(argv, [
+    "terminal",
+    "close",
+    "--terminal",
+    "term_x",
+    "--json",
+  ]);
+  assert.equal(argv.includes("--tab"), false);
+});
+
+// ---------------------------------------------------------------------------
+// A4: --peek added to the advisory check (실측 §8-4 / 1단 §5)
+// ---------------------------------------------------------------------------
+test("buildNonBlockingCheckCommand: includes --peek, never --wait", () => {
+  const argv = buildNonBlockingCheckCommand("term_coord");
+  assert.equal(argv.includes("--peek"), true);
+  assert.equal(argv.includes("--wait"), false);
+  assert.deepEqual(argv.slice(0, 2), ["orchestration", "check"]);
+});
+
+// ---------------------------------------------------------------------------
+// A5: worktree rm --force (실측 §8-5), replaces the git-command construction
+// ---------------------------------------------------------------------------
+test("buildWorktreeRemoveCommand: real orca 'worktree rm --force --json' (A5 fix, not a git command)", () => {
+  assert.deepEqual(buildWorktreeRemoveCommand(VALID_WORKTREE), [
+    "worktree",
+    "rm",
+    "--worktree",
+    `path:${VALID_WORKTREE}`,
+    "--force",
+    "--json",
+  ]);
+});
+
+// ---------------------------------------------------------------------------
+// A6: task-update --status failed replaces the nonexistent dispatch-cleanup
+// (실측 §8-6)
+// ---------------------------------------------------------------------------
+test("buildTaskUpdateFailedCommand: 'orchestration task-update --id <taskId> --status failed' (A6 fix)", () => {
+  assert.deepEqual(buildTaskUpdateFailedCommand("task_rt1"), [
+    "orchestration",
+    "task-update",
+    "--id",
+    "task_rt1",
+    "--status",
+    "failed",
+    "--json",
+  ]);
+});
+
+// ---------------------------------------------------------------------------
+// B: worktree create (restored) -- argv + response parsing against the
+// fixture. Mutation-killing: reading path/branch from the request instead of
+// the response must go RED.
+// ---------------------------------------------------------------------------
+test("buildWorktreeCreateCommand: exact argv shape, no --path (option does not exist)", () => {
+  const argv = buildWorktreeCreateCommand({
+    name: "hyk170-probe",
+    repoId: "repoId",
+    baseBranch: "master",
+  });
+  assert.deepEqual(argv, [
+    "worktree",
+    "create",
+    "--name",
+    "hyk170-probe",
+    "--repo",
+    "id:repoId",
+    "--setup",
+    "skip",
+    "--no-parent",
+    "--base-branch",
+    "master",
+    "--json",
+  ]);
+  assert.equal(argv.includes("--path"), false);
+});
+
+// review-1 C1 반려 결함 수리: baseBranch 미제공 시 --base-branch 플래그
+// 자체를 생략한다(이전엔 항상 붙었고 null/undefined가 그대로 argv에
+// 실려 깨진 인자가 됐다 -- ORCH 재현: `"--base-branch", null`).
+test("buildWorktreeCreateCommand: baseBranch omitted -- no --base-branch flag in argv at all (C1 fix)", () => {
+  const argv = buildWorktreeCreateCommand({ name: "x", repoId: "repoId" });
+  assert.equal(argv.includes("--base-branch"), false);
+  assert.deepEqual(argv, [
+    "worktree",
+    "create",
+    "--name",
+    "x",
+    "--repo",
+    "id:repoId",
+    "--setup",
+    "skip",
+    "--no-parent",
+    "--json",
+  ]);
+});
+
+test("buildWorktreeCreateCommand: baseBranch null/'' also omit the flag (not just undefined)", () => {
+  assert.equal(
+    buildWorktreeCreateCommand({
+      name: "x",
+      repoId: "r",
+      baseBranch: null,
+    }).includes("--base-branch"),
+    false,
+  );
+  assert.equal(
+    buildWorktreeCreateCommand({
+      name: "x",
+      repoId: "r",
+      baseBranch: "",
+    }).includes("--base-branch"),
+    false,
+  );
+});
+
+test("buildWorktreeCreateCommand: baseBranch provided -- --base-branch flag present with the value", () => {
+  const argv = buildWorktreeCreateCommand({
+    name: "x",
+    repoId: "r",
+    baseBranch: "master",
+  });
+  const idx = argv.indexOf("--base-branch");
+  assert.notEqual(idx, -1);
+  assert.equal(argv[idx + 1], "master");
+});
+
+test("parseWorktreeCreateResponse: reads path/branch from the fixture response, not the request (mutation-kill)", () => {
+  const parsed = parseWorktreeCreateResponse(FIXTURE_WORKTREE_CREATE_RESPONSE);
+  assert.equal(
+    parsed.path,
+    `${WORKSPACES_ROOT}/HARNESSENGINEERING/hyk170-probe`,
+  );
+  // branch has the runtime-added <github-user>/ prefix -- must come from the
+  // response, never assembled from the requested --name value.
+  assert.equal(parsed.branch, "refs/heads/hykim82/hyk170-probe");
+  assert.deepEqual(parsed.warnings, []);
+});
+
+test("parseWorktreeCreateResponse: malformed response (missing worktree.path) returns null", () => {
+  assert.equal(parseWorktreeCreateResponse({ ok: true, result: {} }), null);
+  assert.equal(parseWorktreeCreateResponse({ ok: false }), null);
+});
+
+test("createManagedWorktree: happy path -- create -> location check -> managed check, using response path throughout", () => {
+  const execFn = fakeExecFn({
+    create: FIXTURE_WORKTREE_CREATE_RESPONSE,
+    list: managedWorktreeStub(
+      `${WORKSPACES_ROOT}/HARNESSENGINEERING/hyk170-probe`,
+    ),
+  });
+  const r = createManagedWorktree(
+    {
+      role: "CODER",
+      name: "hyk170-probe",
+      repoId: "repoId",
+      baseBranch: "master",
+    },
+    { execFn },
+  );
+  assert.equal(r.ok, true);
+  assert.equal(r.path, `${WORKSPACES_ROOT}/HARNESSENGINEERING/hyk170-probe`);
+  assert.equal(r.branch, "refs/heads/hykim82/hyk170-probe");
+  assert.equal(execFn.calls.length, 2); // create, list -- no rm
+});
+
+test("createManagedWorktree: non-empty warnings are recorded in steps", () => {
+  const withWarnings = {
+    ...FIXTURE_WORKTREE_CREATE_RESPONSE,
+    result: {
+      ...FIXTURE_WORKTREE_CREATE_RESPONSE.result,
+      warnings: ["setup skipped"],
+    },
+  };
+  const execFn = fakeExecFn({
+    create: withWarnings,
+    list: managedWorktreeStub(
+      `${WORKSPACES_ROOT}/HARNESSENGINEERING/hyk170-probe`,
+    ),
+  });
+  const r = createManagedWorktree(
+    { role: "CODER", name: "hyk170-probe", repoId: "repoId" },
+    { execFn },
+  );
+  assert.equal(r.ok, true);
+  assert.equal(
+    r.steps.some((s) => s.includes("worktree-create-warnings")),
+    true,
+  );
+});
+
+test("createManagedWorktree: location rejection rolls back the created worktree (fail-closed)", () => {
+  const mainRepoResponse = {
+    ok: true,
+    result: {
+      worktree: { path: MAIN_REPO_PATH, branch: "refs/heads/hykim82/x" },
+    },
+  };
+  const execFn = fakeExecFn({
+    create: mainRepoResponse,
+    rm: FIXTURE_WORKTREE_RM_RESPONSE,
+  });
+  const r = createManagedWorktree(
+    { role: "CODER", name: "x", repoId: "repoId" },
+    { execFn },
+  );
+  assert.equal(r.ok, false);
+  assert.equal(r.worktreeReason, WORKTREE_REASON.CREATE_LOCATION_REJECTED);
+  assert.equal(r.locationReason, LOCATION_REASON.MAIN_REPO_FORBIDDEN);
+  assert.equal(r.steps.includes("worktree-rollback-ok"), true);
+  const rmCall = execFn.calls.find(
+    (argv) => argv[0] === "worktree" && argv[1] === "rm",
+  );
+  assert.deepEqual(rmCall, buildWorktreeRemoveCommand(MAIN_REPO_PATH));
+});
+
+test("createManagedWorktree: not-managed-after-create rolls back too, and a rollback failure is recorded (not swallowed)", () => {
+  const execFn = fakeExecFn({
+    create: FIXTURE_WORKTREE_CREATE_RESPONSE,
+    list: managedWorktreeStub("C:/some/other/path"), // created path not actually in the list
+    rm: { ok: false, reason: "orca down" },
+  });
+  const r = createManagedWorktree(
+    { role: "CODER", name: "hyk170-probe", repoId: "repoId" },
+    { execFn },
+  );
+  assert.equal(r.ok, false);
+  assert.equal(
+    r.worktreeReason,
+    WORKTREE_REASON.CREATE_NOT_MANAGED_AFTER_CREATE,
+  );
+  assert.equal(
+    r.steps.some((s) => s.startsWith("worktree-rollback-failed")),
+    true,
+  );
+});
+
+// review-1 C1 반려 결함 수리 (ORCH 재현 그대로): worktree create가 ok:true
+// 인데 branch가 빈 값이라 parseWorktreeCreateResponse가 실패하는 경우 --
+// 이전엔 여기서 rollback을 호출하지 않아 실제로 만들어진 워크트리가
+// 누출됐다(재현: rm 호출 0건). 이제는 path가 응답에 있으므로 rollback해야
+// 한다.
+test("createManagedWorktree: C1 exact repro -- response parse failure (empty branch) still rolls back using the response path (mutation-kill: removing the rollback call must go RED)", () => {
+  const leakedResponse = {
+    ok: true,
+    result: { worktree: { path: "/some/leaked-worktree", branch: "" } },
+  };
+  const execFn = fakeExecFn({
+    create: leakedResponse,
+    rm: FIXTURE_WORKTREE_RM_RESPONSE,
+  });
+  const r = createManagedWorktree(
+    { role: "CODER", name: "hyk170-probe", repoId: "repoId" },
+    { execFn },
+  );
+  assert.equal(r.ok, false);
+  assert.equal(r.worktreeReason, WORKTREE_REASON.CREATE_FAILED);
+  assert.match(r.reason, /missing\/empty/);
+  const rmCall = execFn.calls.find(
+    (argv) => argv[0] === "worktree" && argv[1] === "rm",
+  );
+  assert.deepEqual(rmCall, buildWorktreeRemoveCommand("/some/leaked-worktree"));
+  assert.equal(r.steps.includes("worktree-rollback-ok"), true);
+});
+
+test("createManagedWorktree: response parse failure with NO path at all -- rollback is not attempted, and that fact is recorded (not silently swallowed)", () => {
+  const noPathResponse = { ok: true, result: { worktree: {} } };
+  const execFn = fakeExecFn({ create: noPathResponse });
+  const r = createManagedWorktree(
+    { role: "CODER", name: "x", repoId: "repoId" },
+    { execFn },
+  );
+  assert.equal(r.ok, false);
+  assert.equal(r.worktreeReason, WORKTREE_REASON.CREATE_FAILED);
+  const rmCallCount = execFn.calls.filter(
+    (argv) => argv[0] === "worktree" && argv[1] === "rm",
+  ).length;
+  assert.equal(rmCallCount, 0);
+  assert.equal(
+    r.steps.some((s) => s.startsWith("worktree-rollback-not-possible")),
+    true,
+  );
+});
+
+// 실패 지점 4곳 각각에서 rollback이 발생하는지 표 형태로 확인 (태스크 지시:
+// "실패 지점을 4곳 각각에 대해 rollback 발생을 단언").
+test("createManagedWorktree: rollback fires at all 4 post-create failure points", () => {
+  const points = [
+    {
+      label: "response parse failure",
+      response: {
+        ok: true,
+        result: { worktree: { path: "/wt/a", branch: "" } },
+      },
+    },
+    {
+      label: "location rejection",
+      response: {
+        ok: true,
+        result: {
+          worktree: { path: MAIN_REPO_PATH, branch: "refs/heads/x/y" },
+        },
+      },
+    },
+  ];
+  for (const point of points) {
+    const execFn = fakeExecFn({
+      create: point.response,
+      rm: FIXTURE_WORKTREE_RM_RESPONSE,
+    });
+    const r = createManagedWorktree(
+      { role: "CODER", name: "x", repoId: "repoId" },
+      { execFn },
+    );
+    assert.equal(r.ok, false, point.label);
+    const rmCall = execFn.calls.find(
+      (argv) => argv[0] === "worktree" && argv[1] === "rm",
+    );
+    assert.ok(rmCall, `${point.label}: expected a worktree rm rollback call`);
+  }
+  // 3rd point: managed-check rejection (needs a 'list' stub too)
+  {
+    const execFn = fakeExecFn({
+      create: FIXTURE_WORKTREE_CREATE_RESPONSE,
+      list: managedWorktreeStub("C:/some/other/path"),
+      rm: FIXTURE_WORKTREE_RM_RESPONSE,
+    });
+    const r = createManagedWorktree(
+      { role: "CODER", name: "hyk170-probe", repoId: "repoId" },
+      { execFn },
+    );
+    assert.equal(r.ok, false);
+    const rmCall = execFn.calls.find(
+      (argv) => argv[0] === "worktree" && argv[1] === "rm",
+    );
+    assert.ok(
+      rmCall,
+      "managed-check rejection: expected a worktree rm rollback call",
+    );
+  }
+  // 4th point: worktree-create call itself fails -- rollback must NOT fire
+  // (nothing was created, there is nothing to remove).
+  {
+    const execFn = fakeExecFn({ create: { ok: false, reason: "boom" } });
+    const r = createManagedWorktree(
+      { role: "CODER", name: "x", repoId: "repoId" },
+      { execFn },
+    );
+    assert.equal(r.ok, false);
+    const rmCallCount = execFn.calls.filter(
+      (argv) => argv[0] === "worktree" && argv[1] === "rm",
+    ).length;
+    assert.equal(rmCallCount, 0);
+  }
+});
+
+test("createManagedWorktree: worktree-create call failure short-circuits before any location/managed check", () => {
+  const execFn = fakeExecFn({
+    create: { ok: false, reason: "Setup decision required" },
+  });
+  const r = createManagedWorktree(
+    { role: "CODER", name: "x", repoId: "repoId" },
+    { execFn },
+  );
+  assert.equal(r.ok, false);
+  assert.equal(r.worktreeReason, WORKTREE_REASON.CREATE_FAILED);
+  assert.equal(execFn.calls.length, 1);
+});
+
+// ---------------------------------------------------------------------------
+// D: orphan seat detection (실측 2단 §5)
+// ---------------------------------------------------------------------------
+test("isOrphanSeat: worktreePath:'' is orphan regardless of connected/writable (2단 §5 exact repro)", () => {
+  assert.equal(isOrphanSeat({ worktreePath: "" }), true);
+});
+
+test("isOrphanSeat: a non-empty worktreePath is not orphan (mutation-kill: must not always return true)", () => {
+  assert.equal(isOrphanSeat({ worktreePath: VALID_WORKTREE }), false);
+});
+
+test("isGhostTab: tabId starting with 'pty:' is UI-unadopted (2단 §7 실측)", () => {
+  assert.equal(isGhostTab("pty:abcdef"), true);
+  assert.equal(isGhostTab("11111111-2222-3333-4444-555555555555"), false);
+  assert.equal(isGhostTab(undefined), false);
+});
+
+// ---------------------------------------------------------------------------
+// C: arrival confirmation helpers (실측 2단 §3 -- preview redraw artifacts)
+// ---------------------------------------------------------------------------
+test("buildSeatShowCommand: exact argv shape", () => {
+  assert.deepEqual(buildSeatShowCommand("term_x"), [
+    "terminal",
+    "show",
+    "--terminal",
+    "term_x",
+    "--json",
+  ]);
+});
+
+test("parseSeatPreview: extracts result.terminal.preview", () => {
+  const preview = parseSeatPreview({
+    ok: true,
+    result: { terminal: { preview: "some text" } },
+  });
+  assert.equal(preview, "some text");
+});
+
+test("previewContainsMarker: finds the marker inside a redraw-mangled preview (2단 §3 exact fixture) -- no exact-match assertion", () => {
+  assert.equal(
+    previewContainsMarker(FIXTURE_PREVIEW_REDRAW, "HYK170_ARRIVAL_MARK"),
+    true,
+  );
+  // the raw fixture is NOT equal to the marker alone -- proves this is a
+  // partial/normalized match, not accidental exact equality.
+  assert.notEqual(FIXTURE_PREVIEW_REDRAW, "HYK170_ARRIVAL_MARK");
+});
+
+test("previewContainsMarker: absent marker returns false", () => {
+  assert.equal(
+    previewContainsMarker(FIXTURE_PREVIEW_REDRAW, "NOT_PRESENT"),
+    false,
+  );
+});
+
+test("normalizePreview: collapses whitespace runs", () => {
+  assert.equal(normalizePreview("a   b\n\nc"), "a b c");
+  assert.equal(normalizePreview(123), "");
+});
+
+// ---------------------------------------------------------------------------
+// ensureSeat -- reuse path
 // ---------------------------------------------------------------------------
 test("ensureSeat: reuse -- existingSeatHandle skips execFn entirely, no new seat created", () => {
   const execFn = fakeExecFn({});
@@ -82,6 +599,33 @@ test("ensureSeat: reuse -- existingSeatHandle skips execFn entirely, no new seat
   assert.equal(execFn.calls.length, 0);
 });
 
+// D wiring into ensureSeat reuse -- mutation-kill: treating an orphan seat as
+// alive must go RED.
+test("ensureSeat: reuse -- an orphan existing seat (worktreePath:'') is rejected, still zero execFn calls", () => {
+  const execFn = fakeExecFn({});
+  const r = ensureSeat(
+    { role: "CODER", worktreePath: VALID_WORKTREE },
+    { existingSeatHandle: "term_orphan", existingSeatWorktreePath: "", execFn },
+  );
+  assert.equal(r.ok, false);
+  assert.match(r.reason, /orphan/);
+  assert.equal(execFn.calls.length, 0);
+});
+
+test("ensureSeat: reuse -- a seat with a real worktreePath is accepted (not orphan)", () => {
+  const execFn = fakeExecFn({});
+  const r = ensureSeat(
+    { role: "CODER", worktreePath: VALID_WORKTREE },
+    {
+      existingSeatHandle: "term_ok",
+      existingSeatWorktreePath: VALID_WORKTREE,
+      execFn,
+    },
+  );
+  assert.equal(r.ok, true);
+  assert.equal(r.seatHandle, "term_ok");
+});
+
 test("ensureSeat: unknown role is rejected before any execFn call", () => {
   const execFn = fakeExecFn({});
   const r = ensureSeat({ role: "NOT_A_ROLE", worktreePath: "/wt" }, { execFn });
@@ -90,21 +634,23 @@ test("ensureSeat: unknown role is rejected before any execFn call", () => {
   assert.equal(execFn.calls.length, 0);
 });
 
-test("ensureSeat: missing worktreePath is rejected", () => {
+test("ensureSeat: missing worktreePath and missing create is rejected", () => {
   const r = ensureSeat({ role: "CODER" }, { execFn: fakeExecFn({}) });
   assert.equal(r.ok, false);
-  assert.match(r.reason, /worktreePath/);
+  assert.match(r.reason, /worktreePath or a valid create/);
 });
 
+// ---------------------------------------------------------------------------
+// ensureSeat -- existing/managed path (settings/node_modules copy, response
+// parsing) -- now using the realistic nested fixture shape
+// (result.terminal.{handle,paneKey,surface}).
+// ---------------------------------------------------------------------------
 test("ensureSeat: A3 settings.local.json copied from mainRepoDir when missing at destination", () => {
   const exists = new Set(["/main/.claude/settings.local.json"]);
   const copied = [];
   const execFn = fakeExecFn({
     list: managedWorktreeStub(),
-    terminal: {
-      ok: true,
-      result: { handle: "term_new", paneKey: "pane:leaf" },
-    },
+    create: FIXTURE_TERMINAL_CREATE_RESPONSE,
   });
   const r = ensureSeat(
     { role: "CODER", worktreePath: VALID_WORKTREE, mainRepoDir: "/main" },
@@ -129,7 +675,7 @@ test("ensureSeat: A3 copy skipped when destination already has settings.local.js
   const copied = [];
   const execFn = fakeExecFn({
     list: managedWorktreeStub(),
-    terminal: { ok: true, result: { handle: "term_new" } },
+    create: FIXTURE_TERMINAL_CREATE_RESPONSE,
   });
   const r = ensureSeat(
     { role: "CODER", worktreePath: VALID_WORKTREE, mainRepoDir: "/main" },
@@ -150,7 +696,7 @@ test("ensureSeat: A5 node_modules copied from mainRepoDir when missing at destin
   const copiedDirs = [];
   const execFn = fakeExecFn({
     list: managedWorktreeStub(),
-    terminal: { ok: true, result: { handle: "term_new" } },
+    create: FIXTURE_TERMINAL_CREATE_RESPONSE,
   });
   const r = ensureSeat(
     { role: "CODER", worktreePath: VALID_WORKTREE, mainRepoDir: "/main" },
@@ -166,25 +712,31 @@ test("ensureSeat: A5 node_modules copied from mainRepoDir when missing at destin
   assert.equal(copiedDirs.length, 1);
 });
 
-test("ensureSeat: new seat creation reads handle/paneKey from response.result, both engines", () => {
+test("ensureSeat: new seat creation reads handle/paneKey from the fixture response.result.terminal, both engines", () => {
   const execFn = fakeExecFn({
     list: managedWorktreeStub(),
-    terminal: { ok: true, result: { handle: "term_abc", paneKey: "tab:leaf" } },
+    create: FIXTURE_TERMINAL_CREATE_RESPONSE,
   });
   const r = ensureSeat(
     { role: "REVIEW", worktreePath: VALID_WORKTREE },
     { execFn, existsFn: () => true },
   );
   assert.equal(r.ok, true);
-  assert.equal(r.seatHandle, "term_abc");
-  assert.equal(r.paneKey, "tab:leaf");
+  assert.equal(
+    r.seatHandle,
+    FIXTURE_TERMINAL_CREATE_RESPONSE.result.terminal.handle,
+  );
+  assert.equal(
+    r.paneKey,
+    FIXTURE_TERMINAL_CREATE_RESPONSE.result.terminal.paneKey,
+  );
   assert.equal(r.created, true);
 });
 
 test("ensureSeat: seat creation failure (response.ok:false) is surfaced, not swallowed", () => {
   const execFn = fakeExecFn({
     list: managedWorktreeStub(),
-    terminal: { ok: false, reason: "Setup decision required" },
+    create: { ok: false, reason: "Setup decision required" },
   });
   const r = ensureSeat(
     { role: "CODER", worktreePath: VALID_WORKTREE },
@@ -197,7 +749,7 @@ test("ensureSeat: seat creation failure (response.ok:false) is surfaced, not swa
 test("ensureSeat: seat creation with missing handle in response is a failure (not undefined handle)", () => {
   const execFn = fakeExecFn({
     list: managedWorktreeStub(),
-    terminal: { ok: true, result: {} },
+    create: { ok: true, result: { terminal: {} } },
   });
   const r = ensureSeat(
     { role: "CODER", worktreePath: VALID_WORKTREE },
@@ -205,6 +757,106 @@ test("ensureSeat: seat creation with missing handle in response is a failure (no
   );
   assert.equal(r.ok, false);
   assert.match(r.reason, /handle missing\/empty/);
+});
+
+// surface !== "visible" -- fail-closed (2단 §2 실측: UI 미채택 = 유령 터미널)
+test("ensureSeat: seat creation response with surface !== 'visible' is a failure (ghost-terminal guard, mutation-kill)", () => {
+  const execFn = fakeExecFn({
+    list: managedWorktreeStub(),
+    create: {
+      ok: true,
+      result: {
+        terminal: {
+          ...FIXTURE_TERMINAL_CREATE_RESPONSE.result.terminal,
+          surface: "background",
+        },
+      },
+    },
+  });
+  const r = ensureSeat(
+    { role: "CODER", worktreePath: VALID_WORKTREE },
+    { execFn, existsFn: () => true },
+  );
+  assert.equal(r.ok, false);
+  assert.match(r.reason, /surface/);
+});
+
+// ---------------------------------------------------------------------------
+// ensureSeat -- §B creation path wiring (worktreePath omitted, create given)
+// ---------------------------------------------------------------------------
+test("ensureSeat: creation path -- no worktreePath, valid create{} builds the worktree then the seat, using the response path throughout", () => {
+  const execFn = fakeExecFn({
+    create: (argv) =>
+      argv[0] === "worktree"
+        ? FIXTURE_WORKTREE_CREATE_RESPONSE
+        : FIXTURE_TERMINAL_CREATE_RESPONSE,
+    list: managedWorktreeStub(
+      `${WORKSPACES_ROOT}/HARNESSENGINEERING/hyk170-probe`,
+    ),
+  });
+  const r = ensureSeat(
+    {
+      role: "CODER",
+      create: { name: "hyk170-probe", repoId: "repoId", baseBranch: "master" },
+    },
+    { execFn, existsFn: () => true },
+  );
+  assert.equal(r.ok, true);
+  assert.equal(
+    r.seatHandle,
+    FIXTURE_TERMINAL_CREATE_RESPONSE.result.terminal.handle,
+  );
+  assert.equal(r.stepsPerformed.includes("worktree-created"), true);
+  assert.equal(r.stepsPerformed.includes("seat-created"), true);
+  // worktree create -> worktree list (managed check) -> terminal create
+  const worktreeCreateCalls = execFn.calls.filter(
+    (a) => a[0] === "worktree" && a[1] === "create",
+  );
+  assert.equal(worktreeCreateCalls.length, 1);
+});
+
+test("ensureSeat: creation path -- location rejection after create returns failure with rollback recorded in steps, no seat created", () => {
+  const mainRepoResponse = {
+    ok: true,
+    result: {
+      worktree: { path: MAIN_REPO_PATH, branch: "refs/heads/hykim82/x" },
+    },
+  };
+  const execFn = fakeExecFn({
+    create: mainRepoResponse,
+    rm: FIXTURE_WORKTREE_RM_RESPONSE,
+  });
+  const r = ensureSeat(
+    { role: "CODER", create: { name: "x", repoId: "repoId" } },
+    { execFn },
+  );
+  assert.equal(r.ok, false);
+  assert.equal(r.locationReason, LOCATION_REASON.MAIN_REPO_FORBIDDEN);
+  assert.equal(r.stepsPerformed.includes("worktree-rollback-ok"), true);
+  const terminalCreateCalls = execFn.calls.filter(
+    (a) => a[0] === "terminal" && a[1] === "create",
+  );
+  assert.equal(terminalCreateCalls.length, 0);
+});
+
+test("ensureSeat: creation path is not entered when worktreePath is given, even if create is also present (worktreePath wins, no implicit switch)", () => {
+  const execFn = fakeExecFn({
+    list: managedWorktreeStub(VALID_WORKTREE),
+    create: FIXTURE_TERMINAL_CREATE_RESPONSE,
+  });
+  const r = ensureSeat(
+    {
+      role: "CODER",
+      worktreePath: VALID_WORKTREE,
+      create: { name: "should-not-be-used", repoId: "repoId" },
+    },
+    { execFn },
+  );
+  assert.equal(r.ok, true);
+  const worktreeCreateCalls = execFn.calls.filter(
+    (a) => a[0] === "worktree" && a[1] === "create",
+  );
+  assert.equal(worktreeCreateCalls.length, 0);
 });
 
 // ---------------------------------------------------------------------------
@@ -248,7 +900,7 @@ test("deliverTask: claude engine (CODER) needs no explicit submit -- auto, retri
 test("deliverTask: codex engine (REVIEW) requires an explicit submit call after dispatch (B3)", () => {
   const execFn = fakeExecFn({
     ...taskCreateDispatchStubs(),
-    terminal: { ok: true },
+    send: { ok: true },
   });
   const r = deliverTask(
     { taskId: "HYK-169-coder-1", role: "REVIEW", seatHandle: "term_x" },
@@ -264,7 +916,7 @@ test("deliverTask: B11 -- confirmPastedFn is invoked before the submit call for 
   let confirmedBeforeSubmit = false;
   const execFn = fakeExecFn({
     ...taskCreateDispatchStubs(),
-    terminal: () => {
+    send: () => {
       assert.equal(
         confirmedBeforeSubmit,
         true,
@@ -290,7 +942,7 @@ test("deliverTask: submit retry -- fails once then succeeds on the 1 allowed ret
   let submitCalls = 0;
   const execFn = fakeExecFn({
     ...taskCreateDispatchStubs(),
-    terminal: () => {
+    send: () => {
       submitCalls++;
       return submitCalls === 1
         ? { ok: false, reason: "transient" }
@@ -310,7 +962,7 @@ test("deliverTask: submit retry cap -- default maxRetries=1 means at most 2 atte
   let submitCalls = 0;
   const execFn = fakeExecFn({
     ...taskCreateDispatchStubs(),
-    terminal: () => {
+    send: () => {
       submitCalls++;
       return { ok: false, reason: "always fails" };
     },
@@ -324,20 +976,18 @@ test("deliverTask: submit retry cap -- default maxRetries=1 means at most 2 atte
 });
 
 // ---------------------------------------------------------------------------
-// HYK-169-coder-3 (review-1 반려 결함 수리): confirmPastedFn의 반환값이
-// 실제로 제출을 막는지 -- "호출됐는지"만 보던 헛시험(vacuous, review-1
-// 지적)의 재발 방지. 모든 시험이 fake execFn의 호출 목록으로 `terminal`
+// HYK-169-coder-3 (review-1 반려 결함 수리, 계승): confirmPastedFn의 반환값이
+// 실제로 제출을 막는지 -- 모든 시험이 fake execFn의 호출 목록으로 `terminal`
 // 계열(제출) 호출이 정확히 0건임을 인자까지 확인한다.
 // ---------------------------------------------------------------------------
 function noTerminalCalls(execFn) {
   return execFn.calls.every((argv) => argv[0] !== "terminal");
 }
 
-// 1. confirmPastedFn: () => false -> ok:false, 사유 코드 일치, submit 0건.
 test("deliverTask: PASTE_UNCONFIRMED -- confirmPastedFn returning false refuses submit with zero 'terminal send' calls", () => {
   const execFn = fakeExecFn({
     ...taskCreateDispatchStubs(),
-    terminal: { ok: true },
+    send: { ok: true },
   });
   const r = deliverTask(
     { taskId: "HYK-169-coder-1", role: "REVIEW", seatHandle: "term_x" },
@@ -349,11 +999,10 @@ test("deliverTask: PASTE_UNCONFIRMED -- confirmPastedFn returning false refuses 
   assert.equal(noTerminalCalls(execFn), true);
 });
 
-// 2. confirmPastedFn: () => true -> 정상 제출 1회 (이미 위 B3/B11/retry 시험들이 커버).
 test("deliverTask: PASTE_UNCONFIRMED -- confirmPastedFn returning true allows exactly one submit call", () => {
   const execFn = fakeExecFn({
     ...taskCreateDispatchStubs(),
-    terminal: { ok: true },
+    send: { ok: true },
   });
   const r = deliverTask(
     { taskId: "HYK-169-coder-1", role: "REVIEW", seatHandle: "term_x" },
@@ -363,12 +1012,10 @@ test("deliverTask: PASTE_UNCONFIRMED -- confirmPastedFn returning true allows ex
   assert.equal(execFn.calls.filter((argv) => argv[0] === "terminal").length, 1);
 });
 
-// 3. confirmPastedFn이 throw -> 실패 처리, submit 0건(붙여넣기 여부를 모르는
-// 예외 상황에서 Enter를 보내는 것보다 안전 실패가 항상 낫다).
 test("deliverTask: PASTE_UNCONFIRMED -- confirmPastedFn throwing is treated as unconfirmed, zero submit calls", () => {
   const execFn = fakeExecFn({
     ...taskCreateDispatchStubs(),
-    terminal: { ok: true },
+    send: { ok: true },
   });
   const r = deliverTask(
     { taskId: "HYK-169-coder-1", role: "REVIEW", seatHandle: "term_x" },
@@ -384,11 +1031,17 @@ test("deliverTask: PASTE_UNCONFIRMED -- confirmPastedFn throwing is treated as u
   assert.equal(noTerminalCalls(execFn), true);
 });
 
-// 4. confirmPastedFn 미주입 -> 보수적 기본값(false 취급)이 시험으로 고정.
-test("deliverTask: PASTE_UNCONFIRMED -- omitting confirmPastedFn defaults to unconfirmed (conservative default), zero submit calls", () => {
+// review-1 C2 반려 결함 수리: confirmPastedFn 미주입 시 이전엔 무조건
+// 미확인(false)이었다 -- 이제 어댑터가 스스로 `terminal show`로 확인한다.
+// 아래 4개 테스트가 그 default 경로를 다룬다.
+test("deliverTask: C2 default confirm path -- omitting confirmPastedFn calls terminal show, and neither marker nor busy signal present -> PASTE_UNCONFIRMED, zero submit calls", () => {
   const execFn = fakeExecFn({
     ...taskCreateDispatchStubs(),
-    terminal: { ok: true },
+    send: { ok: true },
+    show: {
+      ok: true,
+      result: { terminal: { preview: "just a normal shell prompt" } },
+    },
   });
   const r = deliverTask(
     { taskId: "HYK-169-coder-1", role: "REVIEW", seatHandle: "term_x" },
@@ -396,17 +1049,105 @@ test("deliverTask: PASTE_UNCONFIRMED -- omitting confirmPastedFn defaults to unc
   );
   assert.equal(r.ok, false);
   assert.match(r.reason, /PASTE_UNCONFIRMED/);
-  assert.equal(execFn.calls.length, 2); // task-create, dispatch -- no submit
-  assert.equal(noTerminalCalls(execFn), true);
+  const submitCalls = execFn.calls.filter(
+    (a) => a[0] === "terminal" && a[1] === "send",
+  );
+  assert.equal(submitCalls.length, 0);
+  // task-create, dispatch, terminal show (the self-check) -- no submit.
+  assert.equal(execFn.calls.length, 3);
 });
 
-// non-strict truthy return (e.g. a non-boolean truthy value) must NOT count
-// as confirmed -- only strict `true` does (defensive against accidental
-// truthy returns like an object or a non-empty string).
+test("deliverTask: C2 default confirm path -- marker (taskId) alone in the preview confirms and allows exactly one submit call", () => {
+  const execFn = fakeExecFn({
+    ...taskCreateDispatchStubs(),
+    send: { ok: true },
+    show: {
+      ok: true,
+      result: { terminal: { preview: "go HYK-169-coder-1\nrunning..." } },
+    },
+  });
+  const r = deliverTask(
+    { taskId: "HYK-169-coder-1", role: "REVIEW", seatHandle: "term_x" },
+    { execFn },
+  );
+  assert.equal(r.ok, true);
+  const submitCalls = execFn.calls.filter(
+    (a) => a[0] === "terminal" && a[1] === "send",
+  );
+  assert.equal(submitCalls.length, 1);
+});
+
+// 실측 원문 fixture(2단 §3): 완전 일치로는 못 잡고 정규화 부분 일치로만
+// 잡히는지 -- 이 fixture 자체가 마커와 동일하지 않다는 것으로 "완전 일치가
+// 아니라 부분 일치를 쓴다"를 증명한다.
+test("deliverTask: C2 default confirm path -- exact real-world redraw-mangled preview fixture (2단 §3) confirms via partial match, not exact match", () => {
+  const marker = "HYK170_ARRIVAL_MARK";
+  const execFn = fakeExecFn({
+    ...taskCreateDispatchStubs(),
+    send: { ok: true },
+    show: {
+      ok: true,
+      result: { terminal: { preview: FIXTURE_PREVIEW_REDRAW } },
+    },
+  });
+  const r = deliverTask(
+    { taskId: marker, role: "REVIEW", seatHandle: "term_x" },
+    { execFn },
+  );
+  assert.equal(r.ok, true);
+  assert.notEqual(FIXTURE_PREVIEW_REDRAW, marker); // proves it's not exact-match luck
+});
+
+// (b) busy signal (큐 대기/codex Pasted-Content 대기) -- 마커가 안 보여도
+// 확인으로 인정한다(영수증 §9 "거짓 실패" 방지).
+test("deliverTask: C2 default confirm path -- a busy signal alone (no marker) also confirms (queued-message fixture)", () => {
+  const execFn = fakeExecFn({
+    ...taskCreateDispatchStubs(),
+    send: { ok: true },
+    show: {
+      ok: true,
+      result: {
+        terminal: { preview: "Press up to edit queued messages" },
+      },
+    },
+  });
+  const r = deliverTask(
+    { taskId: "HYK-169-coder-1", role: "REVIEW", seatHandle: "term_x" },
+    { execFn },
+  );
+  assert.equal(r.ok, true);
+});
+
+test("deliverTask: C2 default confirm path -- codex '[Pasted Content NNNN chars]' busy fixture also confirms", () => {
+  const execFn = fakeExecFn({
+    ...taskCreateDispatchStubs(),
+    send: { ok: true },
+    show: {
+      ok: true,
+      result: { terminal: { preview: "[Pasted Content 4467 chars]" } },
+    },
+  });
+  const r = deliverTask(
+    { taskId: "HYK-169-coder-1", role: "REVIEW", seatHandle: "term_x" },
+    { execFn },
+  );
+  assert.equal(r.ok, true);
+});
+
+// previewShowsBusySignal 단위 시험 + 변이 죽이기: 분기를 제거하면 RED.
+test("previewShowsBusySignal: unit -- recognizes both known busy signals, rejects unrelated text", () => {
+  assert.equal(
+    previewShowsBusySignal("Press up to edit queued messages"),
+    true,
+  );
+  assert.equal(previewShowsBusySignal("[Pasted Content 123 chars]"), true);
+  assert.equal(previewShowsBusySignal("plain prompt"), false);
+});
+
 test("deliverTask: PASTE_UNCONFIRMED -- a truthy-but-not-true return value does not confirm (strict boolean check)", () => {
   const execFn = fakeExecFn({
     ...taskCreateDispatchStubs(),
-    terminal: { ok: true },
+    send: { ok: true },
   });
   const r = deliverTask(
     { taskId: "HYK-169-coder-1", role: "REVIEW", seatHandle: "term_x" },
@@ -467,7 +1208,7 @@ test("deliverTask: missing seatHandle is rejected", () => {
 // ---------------------------------------------------------------------------
 // collectCompletionSignals -- advisory only, never fatal
 // ---------------------------------------------------------------------------
-test("collectCompletionSignals: returns messages array on a well-formed ok response", () => {
+test("collectCompletionSignals: returns messages array on a well-formed ok response, using --peek argv", () => {
   const execFn = fakeExecFn({
     check: { ok: true, result: { messages: [{ type: "worker_done" }] } },
   });
@@ -477,6 +1218,7 @@ test("collectCompletionSignals: returns messages array on a well-formed ok respo
   );
   assert.equal(r.ok, true);
   assert.equal(r.signals.length, 1);
+  assert.equal(execFn.calls[0].includes("--peek"), true);
 });
 
 test("collectCompletionSignals: execFn throwing does not throw up -- returns ok:true with empty signals (advisory-only)", () => {
@@ -511,29 +1253,58 @@ test("collectCompletionSignals: never used as completion authority -- signature 
 });
 
 // ---------------------------------------------------------------------------
-// teardownSeat
+// teardownSeat -- A3 (--terminal, tab_not_found absorbed), A5 (real
+// execution), A6 (task-update, keyed by taskId not seatHandle)
 // ---------------------------------------------------------------------------
-test("teardownSeat: closes seat and runs best-effort dispatch cleanup", () => {
+test("teardownSeat: closes seat, removes the worktree for real, and runs best-effort task-update(failed)", () => {
   const execFn = fakeExecFn({
-    terminal: { ok: true },
-    "dispatch-cleanup": { ok: true, result: { cleaned: 1 } },
+    close: { ok: true },
+    rm: FIXTURE_WORKTREE_RM_RESPONSE,
+    "task-update": { ok: true },
   });
-  const r = teardownSeat({ seatHandle: "term_x" }, { execFn });
+  const r = teardownSeat(
+    { seatHandle: "term_x", worktreePath: VALID_WORKTREE, taskId: "task_rt1" },
+    { execFn },
+  );
   assert.equal(r.ok, true);
   assert.equal(r.cleanup.ok, true);
+  assert.equal(r.worktreeRemove.ok, true);
+  // close, worktree rm, task-update -- all 3 actually executed (v1 only
+  // executed close; A5's rm was construction-only).
+  assert.equal(execFn.calls.length, 3);
+  const rmCall = execFn.calls.find((a) => a[0] === "worktree" && a[1] === "rm");
+  assert.deepEqual(rmCall, buildWorktreeRemoveCommand(VALID_WORKTREE));
+  const taskUpdateCall = execFn.calls.find(
+    (a) => a[0] === "orchestration" && a[1] === "task-update",
+  );
+  assert.deepEqual(taskUpdateCall, buildTaskUpdateFailedCommand("task_rt1"));
 });
 
-test("teardownSeat: close failure is reported but cleanup is still attempted", () => {
-  let cleanupCalled = false;
-  const execFn = (argv) => {
-    if (argv[0] === "terminal") return { ok: false, reason: "already closed" };
-    cleanupCalled = true;
-    return { ok: true };
-  };
-  const r = teardownSeat({ seatHandle: "term_x" }, { execFn });
+test("teardownSeat: a tab_not_found close failure is absorbed as already-closed, not a teardown failure", () => {
+  const execFn = fakeExecFn({
+    close: FIXTURE_TAB_NOT_FOUND_RESPONSE,
+    rm: FIXTURE_WORKTREE_RM_RESPONSE,
+  });
+  const r = teardownSeat(
+    { seatHandle: "term_x", worktreePath: VALID_WORKTREE },
+    { execFn },
+  );
+  assert.equal(r.ok, true);
+});
+
+test("teardownSeat: a real (non-tab_not_found) close failure is reported, worktree rm still attempted", () => {
+  const execFn = fakeExecFn({
+    close: { ok: false, reason: "some other failure" },
+    rm: FIXTURE_WORKTREE_RM_RESPONSE,
+  });
+  const r = teardownSeat(
+    { seatHandle: "term_x", worktreePath: VALID_WORKTREE },
+    { execFn },
+  );
   assert.equal(r.ok, false);
-  assert.match(r.reason, /already closed/);
-  assert.equal(cleanupCalled, true);
+  assert.match(r.reason, /some other failure/);
+  const rmCall = execFn.calls.find((a) => a[0] === "worktree" && a[1] === "rm");
+  assert.ok(rmCall);
 });
 
 test("teardownSeat: missing seatHandle is rejected", () => {
@@ -542,62 +1313,36 @@ test("teardownSeat: missing seatHandle is rejected", () => {
   assert.match(r.reason, /seatHandle/);
 });
 
-// coder-2: 정리 규칙(relay-terminal-setup.md §6) -- 워크트리 제거 명령을
-// 구성만 하고 실행하지 않는다(비타협 제약).
-test("teardownSeat: builds a worktree-remove command (construction only, not executed) when worktreePath is given", () => {
+test("teardownSeat: worktreeRemove is null and rm is never called when no worktreePath is given", () => {
+  const execFn = fakeExecFn({ close: { ok: true } });
+  const r = teardownSeat({ seatHandle: "term_x" }, { execFn });
+  assert.equal(r.ok, true);
+  assert.equal(r.worktreeRemove, null);
+  assert.equal(execFn.calls.length, 1); // close only
+});
+
+test("teardownSeat: cleanup is null and task-update is never called when no taskId is given", () => {
+  const execFn = fakeExecFn({ close: { ok: true } });
+  const r = teardownSeat({ seatHandle: "term_x" }, { execFn });
+  assert.equal(r.cleanup, null);
+});
+
+test("teardownSeat: worktree rm failure makes the overall result fail even if close succeeded", () => {
   const execFn = fakeExecFn({
-    terminal: { ok: true },
-    "dispatch-cleanup": { ok: true },
+    close: { ok: true },
+    rm: { ok: false, reason: "orca down" },
   });
   const r = teardownSeat(
     { seatHandle: "term_x", worktreePath: VALID_WORKTREE },
     { execFn },
   );
-  assert.equal(r.ok, true);
-  assert.deepEqual(
-    r.worktreeRemoveCommand,
-    buildWorktreeRemoveCommand(VALID_WORKTREE),
-  );
-  // never executed -- execFn was only called for terminal close + dispatch-cleanup (2 calls)
-  assert.equal(execFn.calls.length, 2);
-});
-
-test("teardownSeat: worktreeRemoveCommand is null when no worktreePath is given (backward compatible)", () => {
-  const execFn = fakeExecFn({
-    terminal: { ok: true },
-    "dispatch-cleanup": { ok: true },
-  });
-  const r = teardownSeat({ seatHandle: "term_x" }, { execFn });
-  assert.equal(r.worktreeRemoveCommand, null);
+  assert.equal(r.ok, false);
+  assert.match(r.reason, /orca down/);
 });
 
 // ---------------------------------------------------------------------------
-// command builders -- pure shape checks (no execution)
+// ENGINE_BY_ROLE
 // ---------------------------------------------------------------------------
-test("command builders produce plain arrays with expected fixed tokens", () => {
-  assert.ok(buildSeatCreateCommand("CODER", "/wt").includes("--setup"));
-  assert.deepEqual(buildSeatSubmitCommand("term_x").slice(0, 2), [
-    "terminal",
-    "send",
-  ]);
-  assert.deepEqual(buildSeatCloseCommand("term_x").slice(0, 2), [
-    "terminal",
-    "close",
-  ]);
-  assert.deepEqual(buildNonBlockingCheckCommand("term_coord").slice(0, 2), [
-    "orchestration",
-    "check",
-  ]);
-  assert.equal(
-    buildNonBlockingCheckCommand("term_coord").includes("--wait"),
-    false,
-  );
-  assert.deepEqual(buildDispatchCleanupCommand("term_x").slice(0, 2), [
-    "orchestration",
-    "dispatch-cleanup",
-  ]);
-});
-
 test("ENGINE_BY_ROLE: CODER/VERIFY are claude, REVIEW is codex (B9 single config point)", () => {
   assert.equal(ENGINE_BY_ROLE.CODER, "claude");
   assert.equal(ENGINE_BY_ROLE.VERIFY, "claude");
@@ -605,12 +1350,8 @@ test("ENGINE_BY_ROLE: CODER/VERIFY are claude, REVIEW is codex (B9 single config
 });
 
 // ---------------------------------------------------------------------------
-// HYK-169-coder-2: 좌석 위치 정책 (resolveSeatLocation) -- relay-terminal-
-// setup.md §6. 순수 판정, fs/orca 호출 없음. "거부를 증명하는 것이 핵심"
-// (태스크 지시) -- known-bad가 다수, known-good은 최소.
+// HYK-169-coder-2: 좌석 위치 정책 (resolveSeatLocation) -- 계승, 무변경.
 // ---------------------------------------------------------------------------
-
-// 1. 관제실 하위 경로 -> 거부, reason 구분됨.
 test("resolveSeatLocation: BLOCK -- control-room subpath is rejected with CONTROL_ROOM_FORBIDDEN", () => {
   const r = resolveSeatLocation({
     role: "REVIEW",
@@ -629,7 +1370,6 @@ test("resolveSeatLocation: BLOCK -- the control room root itself (no subpath) is
   assert.equal(r.reason, LOCATION_REASON.CONTROL_ROOM_FORBIDDEN);
 });
 
-// 2. 메인 repo 경로 -> 워커 좌석으로는 거부.
 test("resolveSeatLocation: BLOCK -- main repo path is rejected for a worker seat with MAIN_REPO_FORBIDDEN", () => {
   const r = resolveSeatLocation({
     role: "CODER",
@@ -648,7 +1388,6 @@ test("resolveSeatLocation: BLOCK -- a subpath under the main repo is also reject
   assert.equal(r.reason, LOCATION_REASON.MAIN_REPO_FORBIDDEN);
 });
 
-// 3. workspaces 밖 임의 경로 -> 거부.
 test("resolveSeatLocation: BLOCK -- an arbitrary path outside workspaces is rejected with OUTSIDE_WORKSPACES", () => {
   const r = resolveSeatLocation({
     role: "CODER",
@@ -658,7 +1397,6 @@ test("resolveSeatLocation: BLOCK -- an arbitrary path outside workspaces is reje
   assert.equal(r.reason, LOCATION_REASON.OUTSIDE_WORKSPACES);
 });
 
-// 4. 정규화 우회 시도 -- 단순 접두어 비교라면 통과해버리는 케이스.
 test("resolveSeatLocation: BLOCK -- '..' traversal that resolves back into the main repo is rejected (not fooled by prefix match)", () => {
   const r = resolveSeatLocation({
     role: "CODER",
@@ -684,7 +1422,6 @@ test("resolveSeatLocation: BLOCK -- mixed case + backslash + trailing slash vari
   assert.equal(r2.reason, LOCATION_REASON.CONTROL_ROOM_FORBIDDEN);
 });
 
-// 5. 정상 경로(CODER 이슈 워크트리 / REVIEW 검증 워크트리) -> 통과.
 test("resolveSeatLocation: PASS -- a CODER issue worktree under workspaces is allowed", () => {
   const r = resolveSeatLocation({
     role: "CODER",
@@ -715,7 +1452,6 @@ test("resolveSeatLocation: role unknown / path missing produce distinct reasons"
   );
 });
 
-// 6. ensureSeat이 거부 시 좌석 생성 호출 0회.
 test("ensureSeat: rejects a control-room worktree path with zero execFn calls", () => {
   const execFn = fakeExecFn({});
   const r = ensureSeat(
@@ -763,7 +1499,6 @@ test("ensureSeat: rejects a normalization-bypass traversal path with zero execFn
   assert.equal(execFn.calls.length, 0);
 });
 
-// existingSeatHandle 재사용 경로도 위치 정책을 통과해야 한다(방어 종심).
 test("ensureSeat: location policy applies even to the existingSeatHandle reuse path", () => {
   const execFn = fakeExecFn({});
   const r = ensureSeat(
@@ -776,12 +1511,8 @@ test("ensureSeat: location policy applies even to the existingSeatHandle reuse p
 });
 
 // ---------------------------------------------------------------------------
-// HYK-169-coder-4 (review-2 반려 결함 수리): 위치 정책의 절반(경로 문자열)만
-// 검사하고 "이 폴더가 실제 Orca 관리 워크트리인가"는 확인하지 않던 결함.
-// 실제 사고=B15(Orca가 모르는 워크트리에 붙은 좌석 = UI에서 안 보이는
-// 유령 터미널). "거부를 증명하는 것이 1순위"(태스크 지시).
+// HYK-169-coder-4 (review-2 반려 결함 수리, 계승): Orca 관리 워크트리 확인.
 // ---------------------------------------------------------------------------
-
 function terminalCallCount(execFn) {
   return execFn.calls.filter((argv) => argv[0] === "terminal").length;
 }
@@ -791,7 +1522,6 @@ function worktreeCreateCallCount(execFn) {
   ).length;
 }
 
-// 1. 워크트리 최상위 루트 자체 -> 거부, 사유 코드 구분, fake 호출 0건.
 test("resolveSeatLocation: BLOCK -- the workspaces root itself is not a worktree (WORKSPACES_ROOT_NOT_A_WORKTREE)", () => {
   const r = resolveSeatLocation({
     role: "REVIEW",
@@ -815,7 +1545,6 @@ test("ensureSeat: rejects the workspaces root itself with zero execFn calls (rev
   assert.equal(execFn.calls.length, 0); // not even a worktree-list query
 });
 
-// checkWorktreeManaged unit tests (pure port, no ensureSeat wiring).
 test("checkWorktreeManaged: PASS -- a path present in the managed list is reported managed", () => {
   const execFn = fakeExecFn({ list: managedWorktreeStub(VALID_WORKTREE) });
   const r = checkWorktreeManaged({ requestedPath: VALID_WORKTREE }, { execFn });
@@ -835,7 +1564,6 @@ test("checkWorktreeManaged: PASS -- managed-list match is normalized (case/backs
   assert.equal(r.managed, true);
 });
 
-// 2. 관리 목록에 없는 경로 -> 항상 거부, 좌석 생성 호출 0건.
 test("checkWorktreeManaged: BLOCK -- an unregistered path is rejected (NOT_ORCA_MANAGED), no create call", () => {
   const execFn = fakeExecFn({
     list: managedWorktreeStub("C:/some/other/worktree"),
@@ -846,7 +1574,7 @@ test("checkWorktreeManaged: BLOCK -- an unregistered path is rejected (NOT_ORCA_
   assert.equal(worktreeCreateCallCount(execFn), 0);
 });
 
-test("ensureSeat: rejects an unregistered worktree -- zero seat-creation calls (review-2 repro)", () => {
+test("ensureSeat: given an existing (non-create) worktreePath that is unregistered, rejects -- zero seat-creation calls, and does NOT fall back to §B creation", () => {
   const execFn = fakeExecFn({
     list: managedWorktreeStub("C:/some/other/worktree"),
   });
@@ -860,51 +1588,10 @@ test("ensureSeat: rejects an unregistered worktree -- zero seat-creation calls (
   assert.equal(worktreeCreateCallCount(execFn), 0);
 });
 
-// coder-5 (review-3 반려, 사람 결정 2026-07-22): 생성 기능 v1 제거 --
-// buildWorktreeCreateCommand는 더 이상 존재하지 않는다(실제 CLI는 --name
-// 기반이고 실물 검증 전까지 argv를 만들지 않는다). 아래 3개 시험은 coder-4가
-// 만든 "allowCreate:true로 생성까지 이어진다"는 known-good 시험을 **삭제
-// 대신 "옵션을 넘겨도 무시되고 거부된다"는 known-bad로 전환**한 것이다
-// (태스크 지시 §7 -- 무의미해진 시험을 조용히 지우지 않는다).
-test("checkWorktreeManaged: passing an 'allowCreate'-named field is silently ignored -- still rejected, never calls worktree create (creation removed in v1)", () => {
-  const execFn = fakeExecFn({
-    list: managedWorktreeStub("C:/some/other/worktree"),
-    create: { ok: true, result: { path: VALID_WORKTREE } }, // stubbed but must never fire
-  });
-  const r = checkWorktreeManaged(
-    { requestedPath: VALID_WORKTREE, allowCreate: true },
-    { execFn },
-  );
-  assert.equal(r.ok, false);
-  assert.equal(r.reason, WORKTREE_REASON.NOT_ORCA_MANAGED);
-  assert.equal(worktreeCreateCallCount(execFn), 0);
-});
-
-test("ensureSeat: passing opts.allowCreate:true on an unregistered path is ignored -- still rejected, zero seat-creation calls (creation removed in v1)", () => {
-  const execFn = fakeExecFn({
-    list: managedWorktreeStub("C:/some/other/worktree"),
-    create: { ok: true, result: { path: VALID_WORKTREE } }, // stubbed but must never fire
-    terminal: { ok: true, result: { handle: "term_new" } }, // stubbed but must never fire
-  });
-  const r = ensureSeat(
-    { role: "REVIEW", worktreePath: VALID_WORKTREE },
-    { execFn, allowCreate: true },
-  );
-  assert.equal(r.ok, false);
-  assert.equal(r.worktreeReason, WORKTREE_REASON.NOT_ORCA_MANAGED);
-  assert.equal(worktreeCreateCallCount(execFn), 0);
-  assert.equal(terminalCallCount(execFn), 0);
-});
-
-test("WORKTREE_REASON no longer has a CREATE_FAILED entry (creation removed in v1)", () => {
-  assert.equal("CREATE_FAILED" in WORKTREE_REASON, false);
-});
-
-// 4. 관리 목록에 있는 경로 -> worktree create 호출 0건, 좌석만 생성(재사용).
 test("ensureSeat: a path already in the managed list skips worktree create entirely", () => {
   const execFn = fakeExecFn({
     list: managedWorktreeStub(VALID_WORKTREE),
-    terminal: { ok: true, result: { handle: "term_new" } },
+    create: FIXTURE_TERMINAL_CREATE_RESPONSE,
   });
   const r = ensureSeat(
     { role: "CODER", worktreePath: VALID_WORKTREE },
@@ -915,7 +1602,6 @@ test("ensureSeat: a path already in the managed list skips worktree create entir
   assert.equal(terminalCallCount(execFn), 1);
 });
 
-// 5. 관리 목록 조회 자체가 실패 -> 보수적 실패, 좌석 생성 호출 0건.
 test("checkWorktreeManaged: BLOCK -- execFn throwing on the list query is a conservative failure (LIST_QUERY_FAILED)", () => {
   const execFn = () => {
     throw new Error("orca down");
@@ -945,25 +1631,10 @@ test("ensureSeat: a failing worktree-list query is a conservative failure, zero 
   assert.equal(terminalCallCount(execFn), 0);
 });
 
-// coder-5: no creation option exists at all anymore -- an unregistered path
-// is unconditionally rejected with no way to opt into creation (conservative
-// by construction, not by a default value -- coder-3 principle carried
-// forward at the API-surface level).
-test("checkWorktreeManaged: an unregistered path is unconditionally rejected -- there is no option to opt into creation", () => {
-  const execFn = fakeExecFn({
-    list: managedWorktreeStub("C:/some/other/worktree"),
-  });
-  const r = checkWorktreeManaged({ requestedPath: VALID_WORKTREE }, { execFn });
-  assert.equal(r.ok, false);
-  assert.equal(r.reason, WORKTREE_REASON.NOT_ORCA_MANAGED);
-});
-
 // ---------------------------------------------------------------------------
-// HYK-169-coder-5 (review-3 반려 결함 수리): 등록 목록 대조가 후행 구분자
-// (`/`, `\`)에서 실패해 실제 등록된 워크트리를 잘못 거부하던 결함.
+// HYK-169-coder-5 (review-3 반려 결함 수리, 계승): 등록 목록 대조가 후행
+// 구분자(`/`, `\`)에서 실패해 실제 등록된 워크트리를 잘못 거부하던 결함.
 // ---------------------------------------------------------------------------
-
-// 1. 후행 `/`, 후행 `\`, 후행 없음 -- 셋 다 같은 등록 경로로 통과.
 test("checkWorktreeManaged: trailing '/' on the registered entry does not break the match", () => {
   const execFn = fakeExecFn({
     list: managedWorktreeStub(`${VALID_WORKTREE}/`),
@@ -992,7 +1663,6 @@ test("checkWorktreeManaged: trailing separator on the *requested* path (not just
   assert.equal(r.managed, true);
 });
 
-// 2. 드라이브 루트(C:\)는 후행 제거로 망가지지 않는지(경계 케이스).
 test("checkWorktreeManaged: a drive root ('C:/') registered entry is not mangled by trailing-separator stripping", () => {
   const execFn = fakeExecFn({ list: managedWorktreeStub("C:\\") });
   const r = checkWorktreeManaged({ requestedPath: "C:/" }, { execFn });
@@ -1000,7 +1670,6 @@ test("checkWorktreeManaged: a drive root ('C:/') registered entry is not mangled
   assert.equal(r.managed, true);
 });
 
-// 3. 대소문자·역슬래시·`..` 조합 + 후행 구분자 동시 변형도 통과.
 test("checkWorktreeManaged: combined case/backslash/'..'/trailing-separator variance still matches (all coder-2/coder-5 normalization together)", () => {
   const execFn = fakeExecFn({ list: managedWorktreeStub(VALID_WORKTREE) });
   const weird = `${WORKSPACES_ROOT.toUpperCase().replace(/\//g, "\\")}\\..\\${WORKSPACES_ROOT.split("/").pop().toUpperCase()}\\HARNESSENGINEERING\\hyk-test-fixture\\`;
