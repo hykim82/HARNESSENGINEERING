@@ -24,6 +24,7 @@ import {
   parseSeatPreview,
   normalizePreview,
   previewContainsMarker,
+  previewShowsBusySignal,
   WORKTREE_REASON,
   resolveSeatLocation,
   LOCATION_REASON,
@@ -231,6 +232,56 @@ test("buildWorktreeCreateCommand: exact argv shape, no --path (option does not e
   assert.equal(argv.includes("--path"), false);
 });
 
+// review-1 C1 반려 결함 수리: baseBranch 미제공 시 --base-branch 플래그
+// 자체를 생략한다(이전엔 항상 붙었고 null/undefined가 그대로 argv에
+// 실려 깨진 인자가 됐다 -- ORCH 재현: `"--base-branch", null`).
+test("buildWorktreeCreateCommand: baseBranch omitted -- no --base-branch flag in argv at all (C1 fix)", () => {
+  const argv = buildWorktreeCreateCommand({ name: "x", repoId: "repoId" });
+  assert.equal(argv.includes("--base-branch"), false);
+  assert.deepEqual(argv, [
+    "worktree",
+    "create",
+    "--name",
+    "x",
+    "--repo",
+    "id:repoId",
+    "--setup",
+    "skip",
+    "--no-parent",
+    "--json",
+  ]);
+});
+
+test("buildWorktreeCreateCommand: baseBranch null/'' also omit the flag (not just undefined)", () => {
+  assert.equal(
+    buildWorktreeCreateCommand({
+      name: "x",
+      repoId: "r",
+      baseBranch: null,
+    }).includes("--base-branch"),
+    false,
+  );
+  assert.equal(
+    buildWorktreeCreateCommand({
+      name: "x",
+      repoId: "r",
+      baseBranch: "",
+    }).includes("--base-branch"),
+    false,
+  );
+});
+
+test("buildWorktreeCreateCommand: baseBranch provided -- --base-branch flag present with the value", () => {
+  const argv = buildWorktreeCreateCommand({
+    name: "x",
+    repoId: "r",
+    baseBranch: "master",
+  });
+  const idx = argv.indexOf("--base-branch");
+  assert.notEqual(idx, -1);
+  assert.equal(argv[idx + 1], "master");
+});
+
 test("parseWorktreeCreateResponse: reads path/branch from the fixture response, not the request (mutation-kill)", () => {
   const parsed = parseWorktreeCreateResponse(FIXTURE_WORKTREE_CREATE_RESPONSE);
   assert.equal(
@@ -339,6 +390,125 @@ test("createManagedWorktree: not-managed-after-create rolls back too, and a roll
     r.steps.some((s) => s.startsWith("worktree-rollback-failed")),
     true,
   );
+});
+
+// review-1 C1 반려 결함 수리 (ORCH 재현 그대로): worktree create가 ok:true
+// 인데 branch가 빈 값이라 parseWorktreeCreateResponse가 실패하는 경우 --
+// 이전엔 여기서 rollback을 호출하지 않아 실제로 만들어진 워크트리가
+// 누출됐다(재현: rm 호출 0건). 이제는 path가 응답에 있으므로 rollback해야
+// 한다.
+test("createManagedWorktree: C1 exact repro -- response parse failure (empty branch) still rolls back using the response path (mutation-kill: removing the rollback call must go RED)", () => {
+  const leakedResponse = {
+    ok: true,
+    result: { worktree: { path: "/some/leaked-worktree", branch: "" } },
+  };
+  const execFn = fakeExecFn({
+    create: leakedResponse,
+    rm: FIXTURE_WORKTREE_RM_RESPONSE,
+  });
+  const r = createManagedWorktree(
+    { role: "CODER", name: "hyk170-probe", repoId: "repoId" },
+    { execFn },
+  );
+  assert.equal(r.ok, false);
+  assert.equal(r.worktreeReason, WORKTREE_REASON.CREATE_FAILED);
+  assert.match(r.reason, /missing\/empty/);
+  const rmCall = execFn.calls.find(
+    (argv) => argv[0] === "worktree" && argv[1] === "rm",
+  );
+  assert.deepEqual(rmCall, buildWorktreeRemoveCommand("/some/leaked-worktree"));
+  assert.equal(r.steps.includes("worktree-rollback-ok"), true);
+});
+
+test("createManagedWorktree: response parse failure with NO path at all -- rollback is not attempted, and that fact is recorded (not silently swallowed)", () => {
+  const noPathResponse = { ok: true, result: { worktree: {} } };
+  const execFn = fakeExecFn({ create: noPathResponse });
+  const r = createManagedWorktree(
+    { role: "CODER", name: "x", repoId: "repoId" },
+    { execFn },
+  );
+  assert.equal(r.ok, false);
+  assert.equal(r.worktreeReason, WORKTREE_REASON.CREATE_FAILED);
+  const rmCallCount = execFn.calls.filter(
+    (argv) => argv[0] === "worktree" && argv[1] === "rm",
+  ).length;
+  assert.equal(rmCallCount, 0);
+  assert.equal(
+    r.steps.some((s) => s.startsWith("worktree-rollback-not-possible")),
+    true,
+  );
+});
+
+// 실패 지점 4곳 각각에서 rollback이 발생하는지 표 형태로 확인 (태스크 지시:
+// "실패 지점을 4곳 각각에 대해 rollback 발생을 단언").
+test("createManagedWorktree: rollback fires at all 4 post-create failure points", () => {
+  const points = [
+    {
+      label: "response parse failure",
+      response: {
+        ok: true,
+        result: { worktree: { path: "/wt/a", branch: "" } },
+      },
+    },
+    {
+      label: "location rejection",
+      response: {
+        ok: true,
+        result: {
+          worktree: { path: MAIN_REPO_PATH, branch: "refs/heads/x/y" },
+        },
+      },
+    },
+  ];
+  for (const point of points) {
+    const execFn = fakeExecFn({
+      create: point.response,
+      rm: FIXTURE_WORKTREE_RM_RESPONSE,
+    });
+    const r = createManagedWorktree(
+      { role: "CODER", name: "x", repoId: "repoId" },
+      { execFn },
+    );
+    assert.equal(r.ok, false, point.label);
+    const rmCall = execFn.calls.find(
+      (argv) => argv[0] === "worktree" && argv[1] === "rm",
+    );
+    assert.ok(rmCall, `${point.label}: expected a worktree rm rollback call`);
+  }
+  // 3rd point: managed-check rejection (needs a 'list' stub too)
+  {
+    const execFn = fakeExecFn({
+      create: FIXTURE_WORKTREE_CREATE_RESPONSE,
+      list: managedWorktreeStub("C:/some/other/path"),
+      rm: FIXTURE_WORKTREE_RM_RESPONSE,
+    });
+    const r = createManagedWorktree(
+      { role: "CODER", name: "hyk170-probe", repoId: "repoId" },
+      { execFn },
+    );
+    assert.equal(r.ok, false);
+    const rmCall = execFn.calls.find(
+      (argv) => argv[0] === "worktree" && argv[1] === "rm",
+    );
+    assert.ok(
+      rmCall,
+      "managed-check rejection: expected a worktree rm rollback call",
+    );
+  }
+  // 4th point: worktree-create call itself fails -- rollback must NOT fire
+  // (nothing was created, there is nothing to remove).
+  {
+    const execFn = fakeExecFn({ create: { ok: false, reason: "boom" } });
+    const r = createManagedWorktree(
+      { role: "CODER", name: "x", repoId: "repoId" },
+      { execFn },
+    );
+    assert.equal(r.ok, false);
+    const rmCallCount = execFn.calls.filter(
+      (argv) => argv[0] === "worktree" && argv[1] === "rm",
+    ).length;
+    assert.equal(rmCallCount, 0);
+  }
 });
 
 test("createManagedWorktree: worktree-create call failure short-circuits before any location/managed check", () => {
@@ -861,10 +1031,17 @@ test("deliverTask: PASTE_UNCONFIRMED -- confirmPastedFn throwing is treated as u
   assert.equal(noTerminalCalls(execFn), true);
 });
 
-test("deliverTask: PASTE_UNCONFIRMED -- omitting confirmPastedFn defaults to unconfirmed (conservative default), zero submit calls", () => {
+// review-1 C2 반려 결함 수리: confirmPastedFn 미주입 시 이전엔 무조건
+// 미확인(false)이었다 -- 이제 어댑터가 스스로 `terminal show`로 확인한다.
+// 아래 4개 테스트가 그 default 경로를 다룬다.
+test("deliverTask: C2 default confirm path -- omitting confirmPastedFn calls terminal show, and neither marker nor busy signal present -> PASTE_UNCONFIRMED, zero submit calls", () => {
   const execFn = fakeExecFn({
     ...taskCreateDispatchStubs(),
     send: { ok: true },
+    show: {
+      ok: true,
+      result: { terminal: { preview: "just a normal shell prompt" } },
+    },
   });
   const r = deliverTask(
     { taskId: "HYK-169-coder-1", role: "REVIEW", seatHandle: "term_x" },
@@ -872,8 +1049,99 @@ test("deliverTask: PASTE_UNCONFIRMED -- omitting confirmPastedFn defaults to unc
   );
   assert.equal(r.ok, false);
   assert.match(r.reason, /PASTE_UNCONFIRMED/);
-  assert.equal(execFn.calls.length, 2); // task-create, dispatch -- no submit
-  assert.equal(noTerminalCalls(execFn), true);
+  const submitCalls = execFn.calls.filter(
+    (a) => a[0] === "terminal" && a[1] === "send",
+  );
+  assert.equal(submitCalls.length, 0);
+  // task-create, dispatch, terminal show (the self-check) -- no submit.
+  assert.equal(execFn.calls.length, 3);
+});
+
+test("deliverTask: C2 default confirm path -- marker (taskId) alone in the preview confirms and allows exactly one submit call", () => {
+  const execFn = fakeExecFn({
+    ...taskCreateDispatchStubs(),
+    send: { ok: true },
+    show: {
+      ok: true,
+      result: { terminal: { preview: "go HYK-169-coder-1\nrunning..." } },
+    },
+  });
+  const r = deliverTask(
+    { taskId: "HYK-169-coder-1", role: "REVIEW", seatHandle: "term_x" },
+    { execFn },
+  );
+  assert.equal(r.ok, true);
+  const submitCalls = execFn.calls.filter(
+    (a) => a[0] === "terminal" && a[1] === "send",
+  );
+  assert.equal(submitCalls.length, 1);
+});
+
+// 실측 원문 fixture(2단 §3): 완전 일치로는 못 잡고 정규화 부분 일치로만
+// 잡히는지 -- 이 fixture 자체가 마커와 동일하지 않다는 것으로 "완전 일치가
+// 아니라 부분 일치를 쓴다"를 증명한다.
+test("deliverTask: C2 default confirm path -- exact real-world redraw-mangled preview fixture (2단 §3) confirms via partial match, not exact match", () => {
+  const marker = "HYK170_ARRIVAL_MARK";
+  const execFn = fakeExecFn({
+    ...taskCreateDispatchStubs(),
+    send: { ok: true },
+    show: {
+      ok: true,
+      result: { terminal: { preview: FIXTURE_PREVIEW_REDRAW } },
+    },
+  });
+  const r = deliverTask(
+    { taskId: marker, role: "REVIEW", seatHandle: "term_x" },
+    { execFn },
+  );
+  assert.equal(r.ok, true);
+  assert.notEqual(FIXTURE_PREVIEW_REDRAW, marker); // proves it's not exact-match luck
+});
+
+// (b) busy signal (큐 대기/codex Pasted-Content 대기) -- 마커가 안 보여도
+// 확인으로 인정한다(영수증 §9 "거짓 실패" 방지).
+test("deliverTask: C2 default confirm path -- a busy signal alone (no marker) also confirms (queued-message fixture)", () => {
+  const execFn = fakeExecFn({
+    ...taskCreateDispatchStubs(),
+    send: { ok: true },
+    show: {
+      ok: true,
+      result: {
+        terminal: { preview: "Press up to edit queued messages" },
+      },
+    },
+  });
+  const r = deliverTask(
+    { taskId: "HYK-169-coder-1", role: "REVIEW", seatHandle: "term_x" },
+    { execFn },
+  );
+  assert.equal(r.ok, true);
+});
+
+test("deliverTask: C2 default confirm path -- codex '[Pasted Content NNNN chars]' busy fixture also confirms", () => {
+  const execFn = fakeExecFn({
+    ...taskCreateDispatchStubs(),
+    send: { ok: true },
+    show: {
+      ok: true,
+      result: { terminal: { preview: "[Pasted Content 4467 chars]" } },
+    },
+  });
+  const r = deliverTask(
+    { taskId: "HYK-169-coder-1", role: "REVIEW", seatHandle: "term_x" },
+    { execFn },
+  );
+  assert.equal(r.ok, true);
+});
+
+// previewShowsBusySignal 단위 시험 + 변이 죽이기: 분기를 제거하면 RED.
+test("previewShowsBusySignal: unit -- recognizes both known busy signals, rejects unrelated text", () => {
+  assert.equal(
+    previewShowsBusySignal("Press up to edit queued messages"),
+    true,
+  );
+  assert.equal(previewShowsBusySignal("[Pasted Content 123 chars]"), true);
+  assert.equal(previewShowsBusySignal("plain prompt"), false);
 });
 
 test("deliverTask: PASTE_UNCONFIRMED -- a truthy-but-not-true return value does not confirm (strict boolean check)", () => {

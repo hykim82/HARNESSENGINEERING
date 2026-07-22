@@ -355,8 +355,13 @@ export function buildWorktreeRemoveCommand(worktreePath) {
 // ---- B: 워크트리 생성 복원 (2단 §1 실측, v1에서 제거됐던 기능) ----
 // 비타협: 경로를 요청에 넣지 않는다(--path 옵션 부재, 실측 1단 §1). 이름만
 // 주고 응답의 result.worktree.path/branch를 읽는다(추측 조립 금지).
+// coder-2 (review-1 C1 반려 결함 수리): baseBranch가 없으면(undefined/null/
+// 빈 문자열 전부) --base-branch 플래그 자체를 argv에서 생략한다 -- 이전엔
+// 항상 붙였고, 미제공 시 undefined가 문자열 "undefined"가 아니라 그대로
+// JS 값(null/undefined)으로 배열에 들어가 CLI에 깨진 인자가 전달됐다(실측
+// §1: 생략 시 repo 기본 base 사용, 이게 정답이다).
 export function buildWorktreeCreateCommand({ name, repoId, baseBranch } = {}) {
-  return [
+  const argv = [
     "worktree",
     "create",
     "--name",
@@ -366,10 +371,12 @@ export function buildWorktreeCreateCommand({ name, repoId, baseBranch } = {}) {
     "--setup",
     "skip",
     "--no-parent",
-    "--base-branch",
-    baseBranch,
-    "--json",
   ];
+  if (isNonEmptyString(baseBranch)) {
+    argv.push("--base-branch", baseBranch);
+  }
+  argv.push("--json");
+  return argv;
 }
 // 응답 파싱만 분리(parseWorktreeList/parseRuntimeTaskId 전례와 동형).
 // 브랜치명은 런타임이 <github-user>/ 접두를 붙이므로(2단 §1 실측) 반드시
@@ -390,11 +397,27 @@ export function parseWorktreeCreateResponse(response) {
   return { path: wt.path, branch: wt.branch, warnings };
 }
 
+// review-1 C1 반려 결함 수리: parseWorktreeCreateResponse는 path와 branch
+// 둘 다 요구하지만, 롤백 대상 경로 판정은 branch 없이 path만 있어도 가능해야
+// 한다(branch가 비어 있어도 워크트리는 이미 디스크에 만들어져 있다 -- 실측
+// 재현: `branch:''`인데도 worktree create 응답은 ok:true). 응답-only 원칙은
+// 유지(요청 name으로 경로를 만들지 않는다).
+function extractCreatedWorktreePath(response) {
+  if (!isPlainObject(response) || response.ok !== true) return null;
+  const wt = isPlainObject(response.result) ? response.result.worktree : null;
+  const path = isPlainObject(wt) ? wt.path : null;
+  return isNonEmptyString(path) ? path : null;
+}
+
 // B 순서(태스크 지시 그대로): 생성 -> 응답 경로로 resolveSeatLocation ->
-// checkWorktreeManaged. 하나라도 실패하면 만든 워크트리를 fail-closed로
-// 되돌린다(A5 buildWorktreeRemoveCommand, 되돌리기 실패는 steps에 기록).
-// 경로/브랜치 둘 다 **요청이 아니라 응답에서만** 읽는다(변이 죽이기 요구
-// -- 요청 name으로 조립하면 이 함수를 우회할 수 없다).
+// checkWorktreeManaged. review-1 C1: `worktree create`가 ok:true를 반환한
+// 순간부터는 이후 어느 단계에서 실패하든(응답 파싱 실패 포함) 되돌린다 --
+// 이전엔 응답 파싱 실패 시 롤백을 건너뛰어 실제로 만들어진 워크트리가
+// 누출됐다(재현: branch:'' 응답에서 rm 호출 0건). 롤백 대상은 항상 응답
+// 경로(extractCreatedWorktreePath)이지 요청 name이 아니다(변이 죽이기 요구).
+// 경로조차 없으면 롤백을 시도하지 않고 그 사실 자체를 steps에 남긴다(조용히
+// 삼키지 않는다) -- 롤백 실패도 원래 실패 사유를 덮지 않고 steps에 별도로
+// 남긴다.
 export function createManagedWorktree(
   { role, name, repoId, baseBranch } = {},
   opts = {},
@@ -421,24 +444,18 @@ export function createManagedWorktree(
       steps,
     };
   }
-  const parsed = parseWorktreeCreateResponse(created.response);
-  if (!parsed) {
-    return {
-      ok: false,
-      reason:
-        "orca-adapter: WORKTREE_CREATE_FAILED -- response.result.worktree.{path,branch} missing/empty",
-      worktreeReason: WORKTREE_REASON.CREATE_FAILED,
-      steps,
-    };
-  }
-  if (parsed.warnings.length > 0) {
-    steps.push(`worktree-create-warnings:${JSON.stringify(parsed.warnings)}`);
-  }
-  steps.push("worktree-created");
 
+  // created.ok === true 이후의 모든 실패 경로는 이 함수로 되돌린다.
   function rollback(failReason, worktreeReason, extra = {}) {
+    const createdPath = extractCreatedWorktreePath(created.response);
+    if (!createdPath) {
+      steps.push(
+        "worktree-rollback-not-possible:no-path-in-response (manual cleanup may be required)",
+      );
+      return { ok: false, reason: failReason, worktreeReason, steps, ...extra };
+    }
     const removal = guardedExec(
-      buildWorktreeRemoveCommand(parsed.path),
+      buildWorktreeRemoveCommand(createdPath),
       opts.execFn,
       "WORKTREE_ROLLBACK_FAILED",
     );
@@ -449,6 +466,18 @@ export function createManagedWorktree(
     );
     return { ok: false, reason: failReason, worktreeReason, steps, ...extra };
   }
+
+  const parsed = parseWorktreeCreateResponse(created.response);
+  if (!parsed) {
+    return rollback(
+      "orca-adapter: WORKTREE_CREATE_FAILED -- response.result.worktree.{path,branch} missing/empty",
+      WORKTREE_REASON.CREATE_FAILED,
+    );
+  }
+  if (parsed.warnings.length > 0) {
+    steps.push(`worktree-create-warnings:${JSON.stringify(parsed.warnings)}`);
+  }
+  steps.push("worktree-created");
 
   const location = resolveSeatLocation({ role, requestedPath: parsed.path });
   if (!location.ok) {
@@ -506,6 +535,20 @@ export function normalizePreview(text) {
 export function previewContainsMarker(preview, marker) {
   if (!isNonEmptyString(marker)) return false;
   return normalizePreview(preview).includes(marker);
+}
+
+// review-1 C2: 배달 도착의 "거짓 실패" 방지(영수증 §9) -- 마커가 아직 안
+// 보여도 좌석이 이미 붙여넣은 내용을 처리 중(codex의 `[Pasted Content`
+// 대기 표식)이거나 여러 입력이 큐에 쌓인 상태(`Press up to edit queued
+// messages`)라면 붙여넣기 자체는 성공한 것이다 -- 이 경우도 확인으로
+// 인정한다.
+const BUSY_SIGNALS = Object.freeze([
+  "Press up to edit queued messages",
+  "[Pasted Content",
+]);
+export function previewShowsBusySignal(preview) {
+  const normalized = normalizePreview(preview);
+  return BUSY_SIGNALS.some((signal) => normalized.includes(signal));
 }
 
 // 실측 오류 shape(2단 §4): {ok:false, error:{code, message}} -- 기존
@@ -831,22 +874,11 @@ function createAndDispatch(c, opts) {
   return { ok: true, runtimeTaskId };
 }
 
-// HYK-169-coder-3 (review-1 반려 결함 수리): confirmPastedFn의 **반환값을
-// 판정에 쓴다** -- 이전엔 호출만 하고 결과를 버려서 거짓 반환도 제출을
-// 막지 못했다(관찰 원장 B11의 실제 사고: 붙여넣기 미완료 상태에서 Enter가
-// 나가 빈 프롬프트/잘린 지시가 실행됨). `true`(엄격 동일 비교, truthy 비
-// boolean 오반환 방지)만 확인으로 인정한다. 훅이 throw해도 미확인으로
-// 처리(제출 없이 안전하게 실패) -- 붙여넣기 여부를 모르는 예외 상황에서
-// Enter를 보내는 것보다 항상 낫다.
-//
-// 기본값(미주입)은 **보수적으로 false** -- "확인됨"을 기본으로 두면 이번
-// 결함과 같은 구멍이 그대로 남는다(태스크 지시). 즉 codex 좌석 배달은
-// confirmPastedFn을 실제로 주입한 호출자만 제출까지 도달한다.
-function confirmPaste(opts) {
-  const fn =
-    typeof opts.confirmPastedFn === "function"
-      ? opts.confirmPastedFn
-      : () => false;
+// HYK-169-coder-3 (review-1 반려 결함 수리, 계승): confirmPastedFn이 주입된
+// 경우 그 **반환값을 판정에 쓴다** -- 호출만 하고 결과를 버리지 않는다.
+// `true`(엄격 동일 비교, truthy 비 boolean 오반환 방지)만 확인으로 인정한다.
+// 훅이 throw해도 미확인으로 처리(제출 없이 안전하게 실패).
+function confirmPasteViaInjectedHook(fn) {
   try {
     return fn() === true;
   } catch {
@@ -854,15 +886,67 @@ function confirmPaste(opts) {
   }
 }
 
+// review-1 C2 반려 결함 수리: confirmPastedFn이 주입되지 않으면 이전엔
+// 무조건 미확인(false)으로 fail-closed했다 -- 어댑터가 스스로 확인할 방법
+// (buildSeatShowCommand/parseSeatPreview)을 갖고 있으면서 쓰지 않은 것이
+// 결함이었다("배달 1명령" 완료기준 미달, 영수증 §9). 기본 경로는 어댑터가
+// 직접 `terminal show`로 preview를 조회해 판정한다.
+//
+// 성공 판정은 두 갈래 중 하나만 만족해도 인정한다(영수증 §9 -- "거짓 실패"
+// 방지): (a) marker(하네스 task_id)가 preview에 부분 일치로 관측되거나,
+// (b) 좌석이 이미 그 내용을 처리 중임을 보여주는 busy 신호(큐 대기/codex
+// Pasted-Content 대기 표식)가 보이는 경우. preview는 셸 예측입력으로 문자
+// 단위 재그림이 섞이므로 완전 일치는 절대 쓰지 않는다(normalizePreview 후
+// 부분 일치만).
+//
+// 재시도/대기는 순수 함수로 유지 -- opts.confirmMaxAttempts(기본 1)/
+// opts.confirmWaitFn(attempt번호를 받는 부작용 없는 콜백, 기본 no-op)으로
+// 테스트에서 시각·횟수를 주입할 수 있다. 실 orca 호출 0(전부 opts.execFn 경유).
+function confirmPasteViaTerminalShow(seatHandle, marker, opts) {
+  if (typeof opts.execFn !== "function") return false;
+  const maxAttempts = Number.isSafeInteger(opts.confirmMaxAttempts)
+    ? opts.confirmMaxAttempts
+    : 1;
+  const waitFn =
+    typeof opts.confirmWaitFn === "function" ? opts.confirmWaitFn : () => {};
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    if (attempt > 0) waitFn(attempt);
+    let response;
+    try {
+      response = opts.execFn(buildSeatShowCommand(seatHandle));
+    } catch {
+      continue;
+    }
+    const preview = parseSeatPreview(response);
+    if (preview === null) continue;
+    if (
+      previewContainsMarker(preview, marker) ||
+      previewShowsBusySignal(preview)
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// confirmPastedFn이 주입되면 그 훅을 그대로 쓰고(테스트·특수 상황용
+// override), 아니면 어댑터의 기본 자기확인 경로로 넘어간다.
+function confirmPaste(seatHandle, marker, opts) {
+  if (typeof opts.confirmPastedFn === "function") {
+    return confirmPasteViaInjectedHook(opts.confirmPastedFn);
+  }
+  return confirmPasteViaTerminalShow(seatHandle, marker, opts);
+}
+
 // B3/B11: codex 좌석만 붙여넣기 확인 후 제출(Enter) -- 실패 시 최대 1회
 // 재시도(비타협 제약: 자동 무한 재시도 금지). 붙여넣기 미확인이면 제출
 // 호출 0회로 즉시 실패(재시도 상한과 무관 -- 애초에 제출 루프에 진입하지
 // 않는다).
-function submitWithRetry(seatHandle, runtimeTaskId, opts) {
-  if (!confirmPaste(opts)) {
+function submitWithRetry(seatHandle, runtimeTaskId, marker, opts) {
+  if (!confirmPaste(seatHandle, marker, opts)) {
     return {
       ok: false,
-      reason: `orca-adapter: ${REASON.PASTE_UNCONFIRMED} -- confirmPastedFn did not confirm the paste; submit refused (0 terminal send calls)`,
+      reason: `orca-adapter: ${REASON.PASTE_UNCONFIRMED} -- paste could not be confirmed (neither marker nor a busy signal was observed); submit refused (0 terminal send calls)`,
       runtimeTaskId,
     };
   }
@@ -892,9 +976,12 @@ function submitWithRetry(seatHandle, runtimeTaskId, opts) {
 
 // ---- 포트 2: 배달(deliver) ----
 // ctx: { taskId, seatHandle, coordinatorHandle, role }
-// opts: { execFn, confirmPastedFn?, maxRetries? } -- confirmPastedFn: B11 시차 확인
-// (붙여넣기 완료를 확인한 뒤 제출) 훅. codex(REVIEW) 배달에서만 쓰이며,
-// **미주입 시 기본은 미확인(false) -- 제출 거부**(coder-3, 보수적 기본값).
+// opts: { execFn, confirmPastedFn?, maxRetries?, confirmMaxAttempts?, confirmWaitFn? }
+// confirmPastedFn: 테스트·특수 상황용 override 훅. codex(REVIEW) 배달에서만
+// 쓰이며, **미주입 시 어댑터가 terminal show로 스스로 확인한다**(review-1
+// C2, 이전엔 미주입=무조건 미확인이었다). marker = c.taskId(하네스
+// task_id) -- dispatch --inject로 넣은 spec(`go <task_id>`)에 항상 포함된
+// 값이라 별도 필드 없이 재사용한다.
 export function deliverTask(ctx, opts = {}) {
   const c = isPlainObject(ctx) ? ctx : {};
   const invalid = validateDeliverInput(c, opts);
@@ -911,7 +998,12 @@ export function deliverTask(ctx, opts = {}) {
       retries: 0,
     };
   }
-  return submitWithRetry(c.seatHandle, dispatchResult.runtimeTaskId, opts);
+  return submitWithRetry(
+    c.seatHandle,
+    dispatchResult.runtimeTaskId,
+    c.taskId,
+    opts,
+  );
 }
 
 // ---- 포트 3: 감지(detect) -- 비권위 신호만. 완료를 이 값으로 확정하지 않는다
