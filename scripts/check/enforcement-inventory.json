@@ -43,7 +43,7 @@
       "uncertain_exit": null,
       "owner": "human (local tool install required)",
       "claude_only": false,
-      "known_drift_note": "As of the HYK-131 round this hook is NOT installed in .git/hooks (versioned copy exists, installed copy does not) -- a known, not-yet-resolved drift this task's own scope explicitly leaves undecided (사람 확인 필요: 의도적 미설치 vs 단순 드리프트)."
+      "known_drift_note": "resolved -- as of the HYK-175 round this hook is installed in .git/hooks (installed hook sha256-matches the versioned copy at hooks/pre-commit); the HYK-131-era 'NOT installed' drift no longer applies."
     },
     {
       "id": "role-guard",
@@ -438,7 +438,16 @@
       "substrate": "orch-direct",
       "script": "scripts/check/research-receipt.mjs",
       "test": "scripts/check/research-receipt.test.mjs",
-      "install_targets": [],
+      "install_targets": [
+        {
+          "location": "repo-settings",
+          "kind": "claude-settings",
+          "path": "REPO/.claude/settings.local.json",
+          "hook_event": "PostToolUse",
+          "matcher": "WebSearch|WebFetch",
+          "required": true
+        }
+      ],
       "expected_bad": "a confirmed streak>=2 issue with no WebSearch/WebFetch receipt logged since its last reject -> gate exit 2 (RESEARCH_RECEIPT_REQUIRED); a B0 target request block missing its '선행 사례:' field -> gate exit 2 (PRIOR_ART_FIELD_REQUIRED, separate fixture)",
       "expected_good": "streak<2, or a receipt logged after the last reject, and (if a B0 request block exists) a non-empty 선행 사례 field -> gate exit 0",
       "failure_exit": 2,
@@ -446,14 +455,31 @@
       "owner": "ORCH",
       "claude_only": false,
       "self_registration_note": "HYK-160-coder-5 self-registration (HYK-144), same convention as reject-streak/b0-gate above.",
-      "invocation_note": "The `gate` subcommand is orch-direct (ORCH calls it before dropping the next coder-task.md, same posture as reject-streak). The companion `record` subcommand is a PostToolUse(WebSearch|WebFetch) hook -- Tier2, install_targets intentionally [] until a follow-up round wires it into settings.local.json (installation is a separate step per this batch's own constraint); until wired it is 'ALIVE via script+test' only, recording nothing in a live session."
+      "invocation_note": "The `gate` subcommand is orch-direct (ORCH calls it before dropping the next coder-task.md, same posture as reject-streak). The companion `record` subcommand is a PostToolUse(WebSearch|WebFetch) hook -- Tier2. HYK-175 라운드 (2026-07-23): installation was actually completed (repo-settings PostToolUse) even though install_targets was left [] after the HYK-160 round -- this entry now reflects the real wiring, closing that ledger/reality drift."
     },
     {
       "id": "go-task-id-gate",
       "substrate": "claude-hook",
       "script": "scripts/check/go-task-id-gate.mjs",
       "test": "scripts/check/go-task-id-gate.test.mjs",
-      "install_targets": [],
+      "install_targets": [
+        {
+          "location": "control-room-settings",
+          "kind": "claude-settings",
+          "path": "CONTROL_ROOM/.claude/settings.local.json",
+          "hook_event": "UserPromptSubmit",
+          "matcher": null,
+          "required": true
+        },
+        {
+          "location": "coder-user-settings",
+          "kind": "claude-settings",
+          "path": "USER_HOME/.claude-team/settings.json",
+          "hook_event": "UserPromptSubmit",
+          "matcher": null,
+          "required": true
+        }
+      ],
       "expected_bad": "a 'go' prompt with no task_id token -> exit 2 (TASK_ID_REQUIRED); a 'go <id>' prompt whose id doesn't match the dropped task file's task_id header -> exit 2 (TASK_ID_MISMATCH)",
       "expected_good": "a non-'go' prompt, an unregulated role, or 'go <id>' matching the task file's task_id -> exit 0; a missing/unreadable task file is UNJUDGABLE+fail-open, never a block",
       "failure_exit": 2,
@@ -461,7 +487,7 @@
       "owner": "ORCH",
       "claude_only": true,
       "self_registration_note": "HYK-160-coder-5 self-registration (HYK-151), same convention as report-style-guard above.",
-      "invocation_note": "PreToolUse-adjacent UserPromptSubmit hook (blocks before the model processes the prompt, C2-0 confirmed both exit-2 and JSON decision:block work -- this adopts exit-2 as the simpler single-failure-surface form). install_targets intentionally [] until a follow-up round wires it into settings.local.json (installation is a separate step per this batch's own constraint, same as research-receipt's record hook). The companion generator (`--generate <task-path>`, part B) is a plain CLI ORCH runs to produce the exact 'go <task_id>' line, fail-closed on a missing/unreadable task file -- not hook-installed at all, same 'ALIVE via script+test' posture as sign.sh's packet-gate companion."
+      "invocation_note": "PreToolUse-adjacent UserPromptSubmit hook (blocks before the model processes the prompt, C2-0 confirmed both exit-2 and JSON decision:block work -- this adopts exit-2 as the simpler single-failure-surface form). HYK-175 라운드 (2026-07-23): installation was actually completed (control-room-settings + coder-user-settings, same 2-target UserPromptSubmit shape as worker-status-onstart above) even though install_targets was left [] after the HYK-160 round -- this entry now reflects the real wiring, closing that ledger/reality drift. The companion generator (`--generate <task-path>`, part B) is a plain CLI ORCH runs to produce the exact 'go <task_id>' line, fail-closed on a missing/unreadable task file -- not hook-installed at all, same 'ALIVE via script+test' posture as sign.sh's packet-gate companion."
     },
     {
       "id": "ci-enforce",
@@ -482,7 +508,7 @@
       "uncertain_exit": null,
       "owner": "human (approves PR merge after green)",
       "claude_only": false,
-      "known_drift_note": "As of the HYK-131 round enforce.yml runs only 6 of this repo's scripts/check/*.test.mjs suites (review-gate, relay-handshake, role-guard, status-fresh, context-inject, clear-safe-check) -- controlroom-fresh, linear-sync, packet-gate, path-normalize, pm-guard, pm-snapshot-gate, worker-status-onstart, and stop-blocking are not wired into CI. This is a known, not-yet-resolved drift; this task's scope is to detect it (selfcheck-inventory.mjs's CI coverage check), not fix it (HYK-129 사이클3)."
+      "known_drift_note": "resolved -- CI now runs the whole scripts/check/*.test.mjs directory glob (27 suites), replacing the HYK-131-era fixed 6-suite list; the 'not wired into CI' drift no longer applies."
     }
   ]
 }
