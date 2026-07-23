@@ -46,6 +46,12 @@ const PENDING_REASON_PATTERNS = [
   /^result file not found/,
   /^handshake mismatch/,
   /^result missing ">>> DONE/,
+  // HYK-172 결함5: task_id 에코 이전 "쓰는 중" 결과파일은 진짜로 망가진
+  // 것이 아니라 DONE 라인 누락과 대칭인 미완결 substate다 -- config나
+  // unjudgable이 아니라 pending으로 폴링을 유지해야 한다. (정직 한계:
+  // 이는 재분류일 뿐, "쓰는 중 vs 진짜로 망가진 파일"을 mtime/size/lock
+  // 같은 시간축 신호로 구별하지 않는다 -- 그 견고화는 HYK-136 계열 후속.)
+  /^result missing task_id echo/,
   /^stale result/,
 ];
 

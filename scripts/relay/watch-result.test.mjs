@@ -206,13 +206,20 @@ test("(8) classifyWatchFailure: known PENDING reasons classified pending", () =>
     classifyWatchFailure("stale result: DONE (...) predates task drop (...)"),
     "pending",
   );
-});
-
-test("(9) classifyWatchFailure: unrecognized/non-string reason -> unjudgable (fail-open, not guessed)", () => {
+  // HYK-172 결함5: task_id 에코 이전 "쓰는 중" 결과파일은 ">>> DONE 없음"
+  // (위 케이스)과 대칭인 미완결 substate -- pending으로 폴링 유지되어야
+  // unjudgable(exit 5)로 감시가 조기 종료되지 않는다.
   assert.equal(
     classifyWatchFailure(
       "result missing task_id echo (need a `task_id: <id>` line)",
     ),
+    "pending",
+  );
+});
+
+test("(9) classifyWatchFailure: unrecognized/non-string reason -> unjudgable (fail-open, not guessed)", () => {
+  assert.equal(
+    classifyWatchFailure("unexpected handshake parser shape"),
     "unjudgable",
   );
   assert.equal(classifyWatchFailure(undefined), "unjudgable");
