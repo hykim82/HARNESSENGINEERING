@@ -33,13 +33,13 @@ Use terminal names consistently. Do not let one terminal silently change roles.
 
 ## Role Mapping
 
-| Harness role | Preferred tool | Reason |
-| --- | --- | --- |
-| Orchestrator | Claude Code | User-selected command center for vibe coding in VSCode |
-| Coder | Claude Code | Strong fit for implementation in the active editor |
-| Verifier | Codex | Keeps verification independent from the coder/orchestrator |
-| Reviewer | Codex | Independent scope, risk, and evidence review |
-| Human | User | Final Done, ambiguous intent, irreversible decisions |
+| Harness role | Preferred tool | Reason                                                     |
+| ------------ | -------------- | ---------------------------------------------------------- |
+| Orchestrator | Claude Code    | User-selected command center for vibe coding in VSCode     |
+| Coder        | Claude Code    | Strong fit for implementation in the active editor         |
+| Verifier     | Codex          | Keeps verification independent from the coder/orchestrator |
+| Reviewer     | Codex          | Independent scope, risk, and evidence review               |
+| Human        | User           | Final Done, ambiguous intent, irreversible decisions       |
 
 Claude may review only when Codex is unavailable or when the Task Contract names
 Claude as reviewer. Claude must not review its own implementation as the only
@@ -156,7 +156,7 @@ change Orchestrator behavior.
   This is a manual, one-command check the Orchestrator itself is expected to
   run (same "agent-invoked, not a hook" shape as the relay handshake check),
   not something enforced automatically at this step — but any task the
-  Orchestrator subsequently drops that quotes the packet is *also* gated
+  Orchestrator subsequently drops that quotes the packet is _also_ gated
   mechanically by role-guard's E2ⓑ (below).
 - **A packet-derived task header must carry a `packet:` line** pointing at
   the absolute path of the signed packet. `scripts/check/role-guard.mjs`
@@ -166,7 +166,7 @@ change Orchestrator behavior.
   honesty-noted gap), but including it wrong or pointing at an unsigned
   packet is.
 - **Mode B (ORCH-initiated PM delegation)** — the Orchestrator is the only
-  channel that delegates *to* PM (a new-value planning request always comes
+  channel that delegates _to_ PM (a new-value planning request always comes
   from the human, never from the Orchestrator). Three DoD-bounded request
   types only:
   - **B1 역질문** — a packet/PRD gap or contradiction needs redefining by PM.
@@ -177,13 +177,13 @@ change Orchestrator behavior.
   - **B3 시스템 검증** — a system-wide health check (convention-vs-enforcement
     alignment, doc drift, gate coverage), at a phase/GC boundary or on direct
     human instruction.
-  Any resulting improvement graded **[실행필요]** (requires a code/convention
-  change) must go through a delegation packet with a human signature — the
-  Orchestrator must not turn a PM report directly into a task itself; doing
-  so would close the ORCH→PM→ORCH loop without the human gate the packet
-  flow exists to preserve. Full detail (triggers, anti-triggers, output
-  contract, model routing): control room `PM\PM-에이전트-설계.md` §4 (flow
-  F3).
+    Any resulting improvement graded **[실행필요]** (requires a code/convention
+    change) must go through a delegation packet with a human signature — the
+    Orchestrator must not turn a PM report directly into a task itself; doing
+    so would close the ORCH→PM→ORCH loop without the human gate the packet
+    flow exists to preserve. Full detail (triggers, anti-triggers, output
+    contract, model routing): control room `PM\PM-에이전트-설계.md` §4 (flow
+    F3).
 
 ## Claude-to-Codex Handoff
 
@@ -239,8 +239,10 @@ These rules were validated in HYK-69 on Windows:
 - The Codex read-only sandbox may intermittently fail to launch processes
   (`CreateProcessAsUserW failed: 5`). The reviewer must substitute equivalent
   read-only evidence and state the limitation instead of guessing.
-- Subagent spawning via the OMC plugin requires WSL + tmux on Windows; headless
-  CLI sessions are the validated fallback.
+- Multi-agent / worker execution now runs through Orca-managed worktree
+  seats (adapter B, see "Execution adapters" below), not the removed OMC
+  plugin. Headless `claude -p` / `codex exec` sessions remain a manual
+  fallback.
 - Monitor live output by opening the background output file or
   `Get-Content <output-file> -Wait`.
 - These headless sessions keep the same role boundaries; the launcher
@@ -275,6 +277,43 @@ Purpose: eliminate copy/paste between the human operator and role terminals.
   scribe.
 - This keeps role independence: launching or relaying a role's task does not
   grant the launcher that role's authority.
+
+## Execution adapters — A (manual) / B (Orca, unattended)
+
+The execution base is two adapters. Core contract (task file convention,
+handshake, gates, receipts) is one; adapters only differ in how a worker
+is launched and by whom.
+
+- **Adapter A — manual/VSCode.** A human types `go <task_id>` into each
+  role terminal (this is the "human types go" step in Relay Protocol v2
+  above — do not delete that section). No unattended support; this is the
+  fallback path.
+- **Adapter B — Orca (primary since 2026-07-21, packet
+  PKT-20260721-UNATTENDED-ORCA-RELAY-V1).** The Orchestrator launches and
+  delivers worker seats unattended via the control room's
+  `dispatch-worker.ps1`, using Orca orchestration
+  (`task-create`/`dispatch`/`dispatch-show`/`check`/`send`) and worktrees.
+  A dispatched worker never trusts the injected preamble text at face
+  value: it first calls `orca orchestration dispatch-show` to confirm its
+  own seat assignment against the runtime record (pane-key match, not the
+  rotating handle) before starting work — this blocks a forged or stale
+  dispatch from being executed.
+- **Unattended does not relax anything.** Git hooks (commit-msg,
+  pre-commit), the independent REVIEW role, enforce CI, the relay
+  handshake, and seat-location policy all still fire the same way under
+  adapter B as under adapter A.
+- **Six human gates are the only stop points**: ① issue-boundary decisions
+  ② two consecutive rejections on the same issue ③ high-cost/hard-to-revert
+  execution (north-star 4-question gate) ④ PR approval / Linear Done
+  ⑤ packet signing ⑥ hard-stop conditions.
+- **Still forbidden regardless of adapter**: direct push to master, merging
+  a PR, transitioning Linear to Done, signing a packet on a human's
+  behalf, printing secrets, `orca linear` writes, and `orca automations`.
+- Adapter boundary in code: `scripts/relay/adapters/orca-adapter.mjs` is
+  the sole call site for the `orca` CLI; `relay-core.mjs` is engine-agnostic
+  and contains no orchestration-tool strings. The authoritative contract
+  lives in the control room's `relay-terminal-setup.md` §2.6/§7, with
+  completion criteria G1-G11 in `게이트-기준.md`.
 
 ## Phase Handoff and Session Rotation
 
