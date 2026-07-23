@@ -14,7 +14,13 @@ export const STATUS_SEVERITY = [
   "ALIVE",
 ];
 
-const HOOK_EVENTS = ["PreToolUse", "Stop", "SessionStart", "UserPromptSubmit"];
+const HOOK_EVENTS = [
+  "PreToolUse",
+  "PostToolUse",
+  "Stop",
+  "SessionStart",
+  "UserPromptSubmit",
+];
 
 function repoRoot() {
   try {

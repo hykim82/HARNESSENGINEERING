@@ -2214,3 +2214,204 @@ test("(58c) skip-decision counterfactual: repo settings present in a synthetic f
     assert.match(result.reason, /^HOOK_SET_DRIFT/);
   });
 });
+
+// --- HYK-175 (F-01/F-02): manifest drift repairs -- go-task-id-gate's two
+// UserPromptSubmit wirings, research-receipt's PostToolUse wiring, and the
+// PostToolUse blind spot in HOOK_EVENTS itself. Each test is mutation-backed:
+// undoing the corresponding manifest.mjs fix flips it back to RED. ---
+
+test("(59) parseHookCommands: extracts a PostToolUse hook command (F-02 (1) -- reverting HOOK_EVENTS to drop PostToolUse makes this return [] again)", () => {
+  const settings = {
+    hooks: {
+      PostToolUse: [
+        {
+          matcher: "WebSearch|WebFetch",
+          hooks: [
+            {
+              type: "command",
+              command: "node scripts/check/research-receipt.mjs record",
+            },
+          ],
+        },
+      ],
+    },
+  };
+  const result = parseHookCommands(settings);
+  assert.deepEqual(result, [
+    {
+      hookEvent: "PostToolUse",
+      matcher: "WebSearch|WebFetch",
+      command: "node scripts/check/research-receipt.mjs record",
+    },
+  ]);
+});
+
+test("(60) findExtraResults: go-task-id-gate registered with control-room + coder-user UserPromptSubmit install_targets -> no extra:* DRIFT for either location (F-01)", () => {
+  const manifest = {
+    checks: [
+      {
+        id: "go-task-id-gate",
+        install_targets: [
+          { location: "control-room-settings", kind: "claude-settings" },
+          { location: "coder-user-settings", kind: "claude-settings" },
+        ],
+      },
+    ],
+  };
+  const settingsByLocation = {
+    "control-room-settings": {
+      hooks: {
+        UserPromptSubmit: [
+          {
+            hooks: [{ command: "node scripts/check/go-task-id-gate.mjs" }],
+          },
+        ],
+      },
+    },
+    "coder-user-settings": {
+      hooks: {
+        UserPromptSubmit: [
+          {
+            hooks: [{ command: "node scripts/check/go-task-id-gate.mjs" }],
+          },
+        ],
+      },
+    },
+  };
+  const extras = findExtraResults(manifest, settingsByLocation);
+  assert.deepEqual(extras, []);
+});
+
+test("(61) findExtraResults: counterfactual -- with go-task-id-gate's install_targets emptied (pre-HYK-175 state), the same two wirings ARE flagged extra:* DRIFT", () => {
+  const manifest = {
+    checks: [{ id: "go-task-id-gate", install_targets: [] }],
+  };
+  const settingsByLocation = {
+    "control-room-settings": {
+      hooks: {
+        UserPromptSubmit: [
+          {
+            hooks: [{ command: "node scripts/check/go-task-id-gate.mjs" }],
+          },
+        ],
+      },
+    },
+    "coder-user-settings": {
+      hooks: {
+        UserPromptSubmit: [
+          {
+            hooks: [{ command: "node scripts/check/go-task-id-gate.mjs" }],
+          },
+        ],
+      },
+    },
+  };
+  const extras = findExtraResults(manifest, settingsByLocation);
+  assert.deepEqual(
+    extras.map((r) => r.id).sort(),
+    [
+      "extra:coder-user-settings:go-task-id-gate",
+      "extra:control-room-settings:go-task-id-gate",
+    ].sort(),
+  );
+});
+
+test("(62) judgeEntry: research-receipt with its repo-settings PostToolUse install_target wired -> ALIVE (F-02 (2), the shape now in enforcement-inventory.json)", () => {
+  withRepoFixture((repoDir) => {
+    writeFileSync(
+      join(repoDir, "scripts", "check", "research-receipt.mjs"),
+      "// stub\n",
+      "utf8",
+    );
+    writeFileSync(
+      join(repoDir, "scripts", "check", "research-receipt.test.mjs"),
+      "// stub\n",
+      "utf8",
+    );
+    const entry = {
+      id: "research-receipt",
+      script: "scripts/check/research-receipt.mjs",
+      test: "scripts/check/research-receipt.test.mjs",
+      claude_only: false,
+      install_targets: [
+        {
+          location: "repo-settings",
+          kind: "claude-settings",
+          path: "REPO/.claude/settings.local.json",
+          hook_event: "PostToolUse",
+          matcher: "WebSearch|WebFetch",
+          required: true,
+        },
+      ],
+    };
+    const settingsByLocation = {
+      "repo-settings": {
+        hooks: {
+          PostToolUse: [
+            {
+              matcher: "WebSearch|WebFetch",
+              hooks: [
+                {
+                  command: "node scripts/check/research-receipt.mjs record",
+                },
+              ],
+            },
+          ],
+        },
+      },
+    };
+    const result = judgeEntry(entry, { repoRoot: repoDir, settingsByLocation });
+    assert.equal(result.status, "ALIVE");
+  });
+});
+
+test("(63) judgeEntry: counterfactual -- research-receipt's install_target removed (pre-HYK-175 state) reverts to 'ALIVE via script+test existence alone' (not wiring-confirmed), and the PostToolUse hook now reads as an unregistered extra", () => {
+  withRepoFixture((repoDir) => {
+    writeFileSync(
+      join(repoDir, "scripts", "check", "research-receipt.mjs"),
+      "// stub\n",
+      "utf8",
+    );
+    writeFileSync(
+      join(repoDir, "scripts", "check", "research-receipt.test.mjs"),
+      "// stub\n",
+      "utf8",
+    );
+    const entry = {
+      id: "research-receipt",
+      script: "scripts/check/research-receipt.mjs",
+      test: "scripts/check/research-receipt.test.mjs",
+      claude_only: false,
+      install_targets: [],
+    };
+    const result = judgeEntry(entry, { repoRoot: repoDir });
+    assert.equal(result.status, "ALIVE");
+    assert.match(
+      result.evidence.join(" "),
+      /judged from script\/test existence alone/,
+    );
+
+    const manifest = { checks: [entry] };
+    const settingsByLocation = {
+      "repo-settings": {
+        hooks: {
+          PostToolUse: [
+            {
+              matcher: "WebSearch|WebFetch",
+              hooks: [
+                {
+                  command: "node scripts/check/research-receipt.mjs record",
+                },
+              ],
+            },
+          ],
+        },
+      },
+    };
+    const extras = findExtraResults(manifest, settingsByLocation);
+    assert.deepEqual(
+      extras.map((r) => r.id),
+      ["extra:repo-settings:research-receipt"],
+    );
+  });
+});
