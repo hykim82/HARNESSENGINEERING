@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "note": "Canonical enforcement-layer manifest (HYK-129). One entry per check/hook/gate/install target named in docs/enforcement-v1.md and the HYK-129/131 design report §1.2. Read by selfcheck-inventory.mjs; never hand-edit install_targets without also updating the real settings files they describe, or the checker will report DRIFT/NOT_INSTALLED against a manifest that no longer matches production.",
   "checks": [
     {
@@ -65,7 +65,20 @@
       "failure_exit": 2,
       "uncertain_exit": 0,
       "owner": "ORCH",
-      "claude_only": true
+      "claude_only": true,
+      "portability": {
+        "classification": "REDEFINED",
+        "completion_disposition": "REDEFINED_TARGET",
+        "approval_status": "N/A",
+        "human_approval_ref": null,
+        "applicable_engines": ["claude"],
+        "non_applicable_verdict": "N/A",
+        "counts_toward_baseline": true,
+        "counts_toward_engine_neutral_pass": true,
+        "honesty_note": "role-guard currently expresses a Claude-specific mechanism (hook substrate: claude-pretooluse) but the underlying intent (see expected_bad/expected_good above) is expected to be re-expressible under an engine-neutral form in a later cycle -- this cycle only classifies and counts it, it does not redefine or re-implement it (see task boundary §0).",
+        "migration_trigger": "cycle >=1 redefinition design (per-check) required before any legacy_hook_state transition away from PRIMARY_CLAUDE",
+        "legacy_hook_state": "PRIMARY_CLAUDE"
+      }
     },
     {
       "id": "pm-guard",
@@ -87,7 +100,20 @@
       "failure_exit": 2,
       "uncertain_exit": 0,
       "owner": "ORCH",
-      "claude_only": true
+      "claude_only": true,
+      "portability": {
+        "classification": "REDEFINED",
+        "completion_disposition": "REDEFINED_TARGET",
+        "approval_status": "N/A",
+        "human_approval_ref": null,
+        "applicable_engines": ["claude"],
+        "non_applicable_verdict": "N/A",
+        "counts_toward_baseline": true,
+        "counts_toward_engine_neutral_pass": true,
+        "honesty_note": "pm-guard currently expresses a Claude-specific mechanism (hook substrate: claude-pretooluse) but the underlying intent (see expected_bad/expected_good above) is expected to be re-expressible under an engine-neutral form in a later cycle -- this cycle only classifies and counts it, it does not redefine or re-implement it (see task boundary §0).",
+        "migration_trigger": "cycle >=1 redefinition design (per-check) required before any legacy_hook_state transition away from PRIMARY_CLAUDE",
+        "legacy_hook_state": "PRIMARY_CLAUDE"
+      }
     },
     {
       "id": "status-fresh",
@@ -110,7 +136,20 @@
       "uncertain_exit": 0,
       "owner": "ORCH",
       "claude_only": true,
-      "advisory_note": "Deliberately NOT promoted to ORCH-only blocking in the HYK-131 round -- see docs/enforcement-v1.md's 'Stop hook blocking self-consumption' section for why."
+      "advisory_note": "Deliberately NOT promoted to ORCH-only blocking in the HYK-131 round -- see docs/enforcement-v1.md's 'Stop hook blocking self-consumption' section for why.",
+      "portability": {
+        "classification": "DIRECT_A_B_PORTABLE",
+        "completion_disposition": "ENGINE_NEUTRAL_PASS_TARGET",
+        "approval_status": "N/A",
+        "human_approval_ref": null,
+        "applicable_engines": ["claude"],
+        "non_applicable_verdict": "N/A",
+        "counts_toward_baseline": true,
+        "counts_toward_engine_neutral_pass": true,
+        "honesty_note": "status-fresh judges a substrate-independent condition (A vs B, bad vs good) that any engine capable of gating on file/state content could reproduce -- Claude is today's only implementation, not the concept's ceiling.",
+        "migration_trigger": "cycle >=1 promotion bundle for this check id (canary/hook_disabled_A_B/fake_adapter/manual_A/independent_review evidence) required before any legacy_hook_state transition away from PRIMARY_CLAUDE",
+        "legacy_hook_state": "PRIMARY_CLAUDE"
+      }
     },
     {
       "id": "clear-safe-check",
@@ -133,7 +172,20 @@
       "uncertain_exit": 0,
       "owner": "ORCH",
       "claude_only": true,
-      "post_hyk131_note": "ORCH-only blocking via stop-blocking.mjs's resolveStopBlock (role gate + stop_hook_active recursion guard + unreadable-payload UNJUDGABLE)."
+      "post_hyk131_note": "ORCH-only blocking via stop-blocking.mjs's resolveStopBlock (role gate + stop_hook_active recursion guard + unreadable-payload UNJUDGABLE).",
+      "portability": {
+        "classification": "ENGINE_SPECIFIC_AUXILIARY",
+        "completion_disposition": "HUMAN_APPROVED_EXCLUSION",
+        "approval_status": "APPROVED",
+        "human_approval_ref": "PKT-20260723-HYK167-R1-REANCHOR / 승인: OK 한용 2026-07-24 16:00",
+        "applicable_engines": ["claude"],
+        "non_applicable_verdict": "N/A",
+        "counts_toward_baseline": true,
+        "counts_toward_engine_neutral_pass": false,
+        "honesty_note": "clear-safe-check is Claude /clear-lifecycle specific (H2, B0 §2/§5) -- a non-Claude engine has no equivalent lifecycle event to gate, so this is a human-approved engine-specific exclusion, not an engine-neutral PASS. Counting it toward engine_neutral_pass would misrepresent a genuinely inapplicable check as portable.",
+        "migration_trigger": "no migration expected -- this check stays engine-specific unless a future engine adopts an equivalent lifecycle boundary event",
+        "legacy_hook_state": "PRIMARY_CLAUDE"
+      }
     },
     {
       "id": "linear-sync",
@@ -156,7 +208,20 @@
       "uncertain_exit": 0,
       "owner": "ORCH",
       "claude_only": true,
-      "post_hyk131_note": "Normalized from exit 2 to exit 1 in the HYK-131 round -- was never promoted to ORCH-only blocking (see docs/enforcement-v1.md)."
+      "post_hyk131_note": "Normalized from exit 2 to exit 1 in the HYK-131 round -- was never promoted to ORCH-only blocking (see docs/enforcement-v1.md).",
+      "portability": {
+        "classification": "DIRECT_A_B_PORTABLE",
+        "completion_disposition": "ENGINE_NEUTRAL_PASS_TARGET",
+        "approval_status": "N/A",
+        "human_approval_ref": null,
+        "applicable_engines": ["claude"],
+        "non_applicable_verdict": "N/A",
+        "counts_toward_baseline": true,
+        "counts_toward_engine_neutral_pass": true,
+        "honesty_note": "linear-sync judges a substrate-independent condition (A vs B, bad vs good) that any engine capable of gating on file/state content could reproduce -- Claude is today's only implementation, not the concept's ceiling.",
+        "migration_trigger": "cycle >=1 promotion bundle for this check id (canary/hook_disabled_A_B/fake_adapter/manual_A/independent_review evidence) required before any legacy_hook_state transition away from PRIMARY_CLAUDE",
+        "legacy_hook_state": "PRIMARY_CLAUDE"
+      }
     },
     {
       "id": "controlroom-fresh",
@@ -179,7 +244,20 @@
       "uncertain_exit": 0,
       "owner": "ORCH",
       "claude_only": true,
-      "post_hyk131_note": "ORCH-only blocking via stop-blocking.mjs, same adapter as clear-safe-check."
+      "post_hyk131_note": "ORCH-only blocking via stop-blocking.mjs, same adapter as clear-safe-check.",
+      "portability": {
+        "classification": "DIRECT_A_B_PORTABLE",
+        "completion_disposition": "ENGINE_NEUTRAL_PASS_TARGET",
+        "approval_status": "N/A",
+        "human_approval_ref": null,
+        "applicable_engines": ["claude"],
+        "non_applicable_verdict": "N/A",
+        "counts_toward_baseline": true,
+        "counts_toward_engine_neutral_pass": true,
+        "honesty_note": "controlroom-fresh judges a substrate-independent condition (A vs B, bad vs good) that any engine capable of gating on file/state content could reproduce -- Claude is today's only implementation, not the concept's ceiling.",
+        "migration_trigger": "cycle >=1 promotion bundle for this check id (canary/hook_disabled_A_B/fake_adapter/manual_A/independent_review evidence) required before any legacy_hook_state transition away from PRIMARY_CLAUDE",
+        "legacy_hook_state": "PRIMARY_CLAUDE"
+      }
     },
     {
       "id": "context-inject",
@@ -210,7 +288,20 @@
       "uncertain_exit": 0,
       "owner": "ORCH",
       "claude_only": true,
-      "mode_note": "Two hook_event install targets share one script; session-start never blocks (Claude Code ignores non-zero exit for that hook type), only user-prompt-submit's exit 2 is enforced."
+      "mode_note": "Two hook_event install targets share one script; session-start never blocks (Claude Code ignores non-zero exit for that hook type), only user-prompt-submit's exit 2 is enforced.",
+      "portability": {
+        "classification": "REDEFINED",
+        "completion_disposition": "REDEFINED_TARGET",
+        "approval_status": "N/A",
+        "human_approval_ref": null,
+        "applicable_engines": ["claude"],
+        "non_applicable_verdict": "N/A",
+        "counts_toward_baseline": true,
+        "counts_toward_engine_neutral_pass": true,
+        "honesty_note": "context-inject currently expresses a Claude-specific mechanism (hook substrate: claude-lifecycle) but the underlying intent (see expected_bad/expected_good above) is expected to be re-expressible under an engine-neutral form in a later cycle -- this cycle only classifies and counts it, it does not redefine or re-implement it (see task boundary §0).",
+        "migration_trigger": "cycle >=1 redefinition design (per-check) required before any legacy_hook_state transition away from PRIMARY_CLAUDE",
+        "legacy_hook_state": "PRIMARY_CLAUDE"
+      }
     },
     {
       "id": "selfcheck-freshness",
@@ -233,7 +324,20 @@
       "uncertain_exit": 0,
       "owner": "ORCH",
       "claude_only": true,
-      "self_registration_note": "This entry is this check's own manifest self-registration (HYK-129 사이클3, PM 보고서 §6) -- the selfcheck tool now audits its own SessionStart wiring the same way it audits every other check, closing (partially) the 'who checks the checker' bootstrap gap. Live wiring of the settings.local.json line itself is a human/ORCH one-time step, same convention as every other hook in this document -- NOT done by this task (see docs/enforcement-v1.md's honesty note); until wired, this entry legitimately reads NOT_INSTALLED."
+      "self_registration_note": "This entry is this check's own manifest self-registration (HYK-129 사이클3, PM 보고서 §6) -- the selfcheck tool now audits its own SessionStart wiring the same way it audits every other check, closing (partially) the 'who checks the checker' bootstrap gap. Live wiring of the settings.local.json line itself is a human/ORCH one-time step, same convention as every other hook in this document -- NOT done by this task (see docs/enforcement-v1.md's honesty note); until wired, this entry legitimately reads NOT_INSTALLED.",
+      "portability": {
+        "classification": "DIRECT_A_B_PORTABLE",
+        "completion_disposition": "ENGINE_NEUTRAL_PASS_TARGET",
+        "approval_status": "N/A",
+        "human_approval_ref": null,
+        "applicable_engines": ["claude"],
+        "non_applicable_verdict": "N/A",
+        "counts_toward_baseline": true,
+        "counts_toward_engine_neutral_pass": true,
+        "honesty_note": "selfcheck-freshness judges a substrate-independent condition (A vs B, bad vs good) that any engine capable of gating on file/state content could reproduce -- Claude is today's only implementation, not the concept's ceiling.",
+        "migration_trigger": "cycle >=1 promotion bundle for this check id (canary/hook_disabled_A_B/fake_adapter/manual_A/independent_review evidence) required before any legacy_hook_state transition away from PRIMARY_CLAUDE",
+        "legacy_hook_state": "PRIMARY_CLAUDE"
+      }
     },
     {
       "id": "worker-status-onstart",
@@ -263,7 +367,20 @@
       "failure_exit": null,
       "uncertain_exit": 0,
       "owner": "ORCH",
-      "claude_only": true
+      "claude_only": true,
+      "portability": {
+        "classification": "DIRECT_A_B_PORTABLE",
+        "completion_disposition": "ENGINE_NEUTRAL_PASS_TARGET",
+        "approval_status": "N/A",
+        "human_approval_ref": null,
+        "applicable_engines": ["claude"],
+        "non_applicable_verdict": "N/A",
+        "counts_toward_baseline": true,
+        "counts_toward_engine_neutral_pass": true,
+        "honesty_note": "worker-status-onstart judges a substrate-independent condition (A vs B, bad vs good) that any engine capable of gating on file/state content could reproduce -- Claude is today's only implementation, not the concept's ceiling.",
+        "migration_trigger": "cycle >=1 promotion bundle for this check id (canary/hook_disabled_A_B/fake_adapter/manual_A/independent_review evidence) required before any legacy_hook_state transition away from PRIMARY_CLAUDE",
+        "legacy_hook_state": "PRIMARY_CLAUDE"
+      }
     },
     {
       "id": "relay-handshake",
@@ -348,7 +465,20 @@
       "owner": "ORCH",
       "claude_only": true,
       "self_registration_note": "HYK-143 사이클1 자기 등재, same convention as reject-streak/selfcheck-freshness above -- this checker audits its own manifest presence the same way it audits every other check.",
-      "invocation_note": "PreToolUse hook (Write/Edit matcher), same substrate as role-guard. HYK-160 라이더ⓐ (07-18): install_targets was left [] after the HYK-143 round even though the .claude/settings.local.json PreToolUse wiring was actually completed (verify-2, 07-18 독립 확인) -- this entry now reflects the real wiring, closing that ledger/reality drift."
+      "invocation_note": "PreToolUse hook (Write/Edit matcher), same substrate as role-guard. HYK-160 라이더ⓐ (07-18): install_targets was left [] after the HYK-143 round even though the .claude/settings.local.json PreToolUse wiring was actually completed (verify-2, 07-18 독립 확인) -- this entry now reflects the real wiring, closing that ledger/reality drift.",
+      "portability": {
+        "classification": "REDEFINED",
+        "completion_disposition": "REDEFINED_TARGET",
+        "approval_status": "N/A",
+        "human_approval_ref": null,
+        "applicable_engines": ["claude"],
+        "non_applicable_verdict": "N/A",
+        "counts_toward_baseline": true,
+        "counts_toward_engine_neutral_pass": true,
+        "honesty_note": "report-style-guard currently expresses a Claude-specific mechanism (hook substrate: claude-hook) but the underlying intent (see expected_bad/expected_good above) is expected to be re-expressible under an engine-neutral form in a later cycle -- this cycle only classifies and counts it, it does not redefine or re-implement it (see task boundary §0).",
+        "migration_trigger": "cycle >=1 redefinition design (per-check) required before any legacy_hook_state transition away from PRIMARY_CLAUDE",
+        "legacy_hook_state": "PRIMARY_CLAUDE"
+      }
     },
     {
       "id": "quality-check",
@@ -487,7 +617,20 @@
       "owner": "ORCH",
       "claude_only": true,
       "self_registration_note": "HYK-160-coder-5 self-registration (HYK-151), same convention as report-style-guard above.",
-      "invocation_note": "PreToolUse-adjacent UserPromptSubmit hook (blocks before the model processes the prompt, C2-0 confirmed both exit-2 and JSON decision:block work -- this adopts exit-2 as the simpler single-failure-surface form). HYK-175 라운드 (2026-07-23): installation was actually completed (control-room-settings + coder-user-settings, same 2-target UserPromptSubmit shape as worker-status-onstart above) even though install_targets was left [] after the HYK-160 round -- this entry now reflects the real wiring, closing that ledger/reality drift. The companion generator (`--generate <task-path>`, part B) is a plain CLI ORCH runs to produce the exact 'go <task_id>' line, fail-closed on a missing/unreadable task file -- not hook-installed at all, same 'ALIVE via script+test' posture as sign.sh's packet-gate companion."
+      "invocation_note": "PreToolUse-adjacent UserPromptSubmit hook (blocks before the model processes the prompt, C2-0 confirmed both exit-2 and JSON decision:block work -- this adopts exit-2 as the simpler single-failure-surface form). HYK-175 라운드 (2026-07-23): installation was actually completed (control-room-settings + coder-user-settings, same 2-target UserPromptSubmit shape as worker-status-onstart above) even though install_targets was left [] after the HYK-160 round -- this entry now reflects the real wiring, closing that ledger/reality drift. The companion generator (`--generate <task-path>`, part B) is a plain CLI ORCH runs to produce the exact 'go <task_id>' line, fail-closed on a missing/unreadable task file -- not hook-installed at all, same 'ALIVE via script+test' posture as sign.sh's packet-gate companion.",
+      "portability": {
+        "classification": "DIRECT_A_B_PORTABLE",
+        "completion_disposition": "ENGINE_NEUTRAL_PASS_TARGET",
+        "approval_status": "N/A",
+        "human_approval_ref": null,
+        "applicable_engines": ["claude"],
+        "non_applicable_verdict": "N/A",
+        "counts_toward_baseline": true,
+        "counts_toward_engine_neutral_pass": true,
+        "honesty_note": "go-task-id-gate judges a substrate-independent condition (A vs B, bad vs good) that any engine capable of gating on file/state content could reproduce -- Claude is today's only implementation, not the concept's ceiling.",
+        "migration_trigger": "cycle >=1 promotion bundle for this check id (canary/hook_disabled_A_B/fake_adapter/manual_A/independent_review evidence) required before any legacy_hook_state transition away from PRIMARY_CLAUDE",
+        "legacy_hook_state": "PRIMARY_CLAUDE"
+      }
     },
     {
       "id": "ci-enforce",
