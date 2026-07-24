@@ -41,6 +41,12 @@ const CONFIG_REASON_PATTERNS = [
   /^task file missing task_id header/,
   /^task file missing dropped_at header/,
   /^task dropped_at not parseable/,
+  // HYK-180 사이클1: a `task_id:` token that exists but isn't a standalone
+  // line at column 0 is a structural violation of the result file, not a
+  // worker-still-writing state -- no amount of polling fixes it, so it must
+  // classify as config (terminal), never fold into pending's silent
+  // infinite-poll bucket the way the anchored-miss case briefly did.
+  /^result task_id echo not at line start/,
 ];
 const PENDING_REASON_PATTERNS = [
   /^result file not found/,

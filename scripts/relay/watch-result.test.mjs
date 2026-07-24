@@ -501,6 +501,53 @@ test("(26) checkFn THROWING (not a clean ok:false reason) still keeps polling, u
   assert.equal(sleepCallCount(), 3);
 });
 
+// --- HYK-180 사이클1: mid-line task_id echo classifies config (terminal),
+// never pending (would otherwise poll forever on a structural violation
+// that no amount of waiting fixes) -------------------------------------
+
+test("(28) classifyWatchFailure: mid-line task_id echo reason classified config, not pending", () => {
+  assert.equal(
+    classifyWatchFailure(
+      "result task_id echo not at line start (must be a standalone `task_id: <id>` line at column 0, found mid-line)",
+    ),
+    "config",
+  );
+});
+
+test("(29) known-bad: mid-line task_id echo -> immediate WATCH_CONFIG_INVALID, zero sleeps, never ticks (사이클0 실사고: 이 사유가 pending으로 새면 무한폴링)", async () => {
+  const { nowFn, sleepFn, sleepCallCount } = fakeClock(60);
+  const checkFn = checkSequence([
+    {
+      ok: false,
+      reason:
+        "result task_id echo not at line start (must be a standalone `task_id: <id>` line at column 0, found mid-line)",
+    },
+  ]);
+  const result = await watchResult({
+    role: "review",
+    intervalS: 60,
+    maxWaitS: 240,
+    checkFn,
+    sleepFn,
+    nowFn,
+  });
+  assert.equal(result.status, "config");
+  assert.match(
+    result.reason,
+    /^WATCH_CONFIG_INVALID: result task_id echo not at line start/,
+  );
+  assert.equal(sleepCallCount(), 0);
+  assert.equal(result.elapsedS, 0);
+});
+
+test("(30) mutation counterfactual: this new reason must NOT be classified pending (reverting the CONFIG_REASON_PATTERNS entry would make this RED)", () => {
+  const classification = classifyWatchFailure(
+    "result task_id echo not at line start (must be a standalone `task_id: <id>` line at column 0, found mid-line)",
+  );
+  assert.notEqual(classification, "pending");
+  assert.equal(classification, "config");
+});
+
 test("(27) EXIT_UNJUDGABLE is distinct from EXIT_DONE(0)/EXIT_TICK(3)/EXIT_CONFIG_INVALID(4)", () => {
   assert.equal(EXIT_UNJUDGABLE, 5);
   assert.notEqual(EXIT_UNJUDGABLE, EXIT_DONE);
