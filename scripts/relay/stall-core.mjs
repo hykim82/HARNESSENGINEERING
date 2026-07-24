@@ -21,7 +21,7 @@ export const REASON = Object.freeze({
   HANDSHAKE_DONE: "handshake-done",
   PROCESS_NOT_ALIVE: "process-not-alive",
   MULTI_SIGNAL_PROGRESS: "multi-signal-progress",
-  SINGLE_SIGNAL_AMBIGUOUS: "single-signal-ambiguous",
+  INSUFFICIENT_SIGNALS: "insufficient-signals",
   LEASE_VIOLATED_NO_CORROBORATION: "lease-violated-no-corroboration",
   MISSING_REQUIRED_FIELDS: "missing-required-fields",
 });
@@ -87,9 +87,15 @@ function makeFingerprint(seatId, reason) {
   return `${seatId}:${reason}`;
 }
 
-// false activity 방어(PM §3/§6): 세 독립 신호 중 몇 개가 함께 "진전"을
-// 가리키는지 센다. 하나만 움직이면(예: 로그만 반복) 진전으로 인정하지
-// 않는다 -- 그건 classifyProgress가 UNKNOWN으로 접는다.
+// false activity 방어(PM §3/§6, REVIEW HYK-171-cycle2a-review-1 결함 a):
+// mtime touch와 terminal output 변화는 **둘 다 같은 부류의 얕은 활동
+// 신호**다 -- 로그만 반복 찍으며 파일을 touch하는 hung 워커가 정확히
+// 이 두 신호를 동시에 만든다(PM §3 "noisy-hung"). 그래서 이 둘을 서로
+// 독립적인 증거로 이중계산하지 않는다: mtimeFresh/outputFresh는
+// `shallowActivity` 한 버킷으로 합치고, pushSeen(워커가 능동적으로 낸
+// push 신호 -- 얕은 activity와 질이 다르다)만 별도 버킷으로 센다.
+// count는 이 두 버킷 중 참인 것의 개수(0~2)다 -- "신호 3개 중 몇 개"가
+// 아니라 "질적으로 구분되는 증거 버킷 중 몇 개"를 센다.
 function countProgressSignals(snapshot, maxNoProgressS, freshOutputAgeS) {
   const mtimeFresh = snapshot.mtimeAgeS < maxNoProgressS;
   const outputFresh =
@@ -97,11 +103,13 @@ function countProgressSignals(snapshot, maxNoProgressS, freshOutputAgeS) {
     isPositiveFiniteNumber(snapshot.lastOutputAgeS) &&
     snapshot.lastOutputAgeS < freshOutputAgeS;
   const pushSeen = snapshot.pushSeen === true;
+  const shallowActivity = mtimeFresh || outputFresh;
   return {
     mtimeFresh,
     outputFresh,
+    shallowActivity,
     pushSeen,
-    count: [mtimeFresh, outputFresh, pushSeen].filter(Boolean).length,
+    count: [shallowActivity, pushSeen].filter(Boolean).length,
   };
 }
 
@@ -181,26 +189,31 @@ export function classifySeat({ snapshot, prevState, config } = {}) {
     };
   }
 
-  if (count === 1) {
-    // false activity 방어: 단일 noisy 신호만으로는 HEALTHY도
-    // SUSPECTED_STALL도 아니다 -- 애매하면 UNKNOWN.
-    const reason = REASON.SINGLE_SIGNAL_AMBIGUOUS;
+  // count === 0: shallowActivity는 count에 포함된 버킷이고
+  // shallowActivity===false는 mtimeFresh===false를 함의하므로(둘 다
+  // false여야 shallowActivity가 false), count===0이면 mtimeFresh는
+  // 반드시 false, 즉 lease는 반드시 위반 상태다. 그 외(count>0인데
+  // min에는 못 미치는 모든 경우, REVIEW HYK-171-cycle2a-review-1 결함
+  // b: `count === 1` 하드코딩은 min>2일 때 "0 < count < min"인 나머지
+  // 경우를 잘못 count===0 stall 분기로 흘렸다)는 min 상대적으로
+  // UNKNOWN이다 -- 신호가 아예 없는 것과 부족하지만 있는 것을 같은
+  // stall로 취급하지 않는다.
+  if (count === 0) {
+    const reason = REASON.LEASE_VIOLATED_NO_CORROBORATION;
     return {
-      state: SEAT_STATE.UNKNOWN,
+      state: SEAT_STATE.SUSPECTED_STALL,
       reason,
       fingerprint: makeFingerprint(seatId, reason),
       actions: [],
     };
   }
 
-  // count === 0: mtimeFresh는 count에 포함된 신호이므로 count===0이면
-  // mtimeFresh는 반드시 false, 즉 leaseViolated는 반드시 true다(둘은
-  // 서로 배타적 짝). "count===0인데 lease도 안 넘었다"는 조합은 있을 수
-  // 없으므로 여기서 분기하지 않는다 -- 도달 불가능한 가지를 만들지
-  // 않는다.
-  const reason = REASON.LEASE_VIOLATED_NO_CORROBORATION;
+  // 0 < count < minProgressSignals: false activity 방어 -- 증거
+  // 버킷이 min에 못 미치면 HEALTHY로 인정하지 않되, 신호가 전혀 없는
+  // 것도 아니므로 SUSPECTED_STALL 대신 UNKNOWN(애매)으로 접는다.
+  const reason = REASON.INSUFFICIENT_SIGNALS;
   return {
-    state: SEAT_STATE.SUSPECTED_STALL,
+    state: SEAT_STATE.UNKNOWN,
     reason,
     fingerprint: makeFingerprint(seatId, reason),
     actions: [],

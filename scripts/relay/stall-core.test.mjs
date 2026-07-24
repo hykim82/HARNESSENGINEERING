@@ -67,7 +67,7 @@ test("noisy-hung: lastOutputChanged=true지만 mtime/handshake 정체 -> UNKNOWN
   });
   assert.equal(result.state, SEAT_STATE.UNKNOWN);
   assert.notEqual(result.state, SEAT_STATE.HEALTHY);
-  assert.equal(result.reason, REASON.SINGLE_SIGNAL_AMBIGUOUS);
+  assert.equal(result.reason, REASON.INSUFFICIENT_SIGNALS);
   assert.deepEqual(result.actions, []);
 });
 
@@ -139,7 +139,7 @@ test("count=1(mtimeFresh만), lease 미위반 -> 단일신호라 UNKNOWN(HEALTHY
     config: {},
   });
   assert.equal(result.state, SEAT_STATE.UNKNOWN);
-  assert.equal(result.reason, REASON.SINGLE_SIGNAL_AMBIGUOUS);
+  assert.equal(result.reason, REASON.INSUFFICIENT_SIGNALS);
 });
 
 test("count=0, lease 위반: 진전 신호 전무 + 임계 초과 -> SUSPECTED_STALL", () => {
@@ -159,6 +159,65 @@ test("count=0, lease 위반: 진전 신호 전무 + 임계 초과 -> SUSPECTED_S
   });
   assert.equal(result.state, SEAT_STATE.SUSPECTED_STALL);
   assert.equal(result.reason, REASON.LEASE_VIOLATED_NO_CORROBORATION);
+});
+
+// ---------------------------------------------------------------------------
+// REVIEW HYK-171-cycle2a-review-1 결함 재작업 (streak 1) -- 이 두 테스트는
+// 수정 전 커밋(4b1a77d)에서 RED였다(직접 재현·원복 완료, .harness/coder.md
+// 참조).
+// ---------------------------------------------------------------------------
+
+test("결함(a) 재현: mtime touch + terminal output 변화 둘 다 신선해도(pushSeen 없이) HEALTHY 아님", () => {
+  // 수정 전: mtimeFresh와 outputFresh를 독립 신호로 이중계산해 count=2가
+  // 되어 minProgressSignals(기본 2)를 채우고 HEALTHY(multi-signal-progress)로
+  // 오분류했다. 이 둘은 "로그만 내뱉으며 파일을 touch하는 hung"이 정확히
+  // 만드는 조합(PM §3 noisy-hung)이므로 실제로는 진전 증거가 아니다.
+  const result = classifySeat({
+    snapshot: {
+      seatId: "CODER",
+      handshake: "pending", // 진전 없음(handshake 정체)
+      mtimeAgeS: 5, // 신선(mtime touch)
+      lastOutputAgeS: 5, // 신선(terminal output 변화)
+      lastOutputChanged: true,
+      processAlive: true,
+      pushSeen: false, // 능동적 push 신호는 없음
+      lease: { maxNoProgressS: 1800 },
+    },
+    prevState: null,
+    config: {},
+  });
+  assert.notEqual(result.state, SEAT_STATE.HEALTHY);
+  assert.equal(result.state, SEAT_STATE.UNKNOWN);
+  assert.equal(result.reason, REASON.INSUFFICIENT_SIGNALS);
+  assert.deepEqual(result.actions, []);
+});
+
+test("결함(b) 재현: minProgressSignals=3, count=2(shallowActivity+pushSeen) -> UNKNOWN(SUSPECTED_STALL 아님)", () => {
+  // 수정 전(3개 독립신호 모델): mtimeFresh=true, outputFresh=false,
+  // pushSeen=true인 이 스냅샷은 정확히 count===2였다 -- count===1
+  // 하드코딩 분기 때문에 count=2는 count===1도
+  // count>=minProgressSignals(3)도 아니어서 "그 외(count===0 stall)"
+  // 분기로 잘못 떨어져 SUSPECTED_STALL이 나왔다(REVIEW가 지목한 정확한
+  // 경로). lease는 아직 유효하고 신호가 전무한 것도 아니므로 이는
+  // 과탐이다.
+  const result = classifySeat({
+    snapshot: {
+      seatId: "CODER",
+      handshake: "pending",
+      mtimeAgeS: 5, // shallowActivity 버킷 신선(mtime만)
+      lastOutputAgeS: 5000,
+      lastOutputChanged: false, // outputFresh는 거짓 -- 이중계산 아님
+      processAlive: true,
+      pushSeen: true, // pushSeen 버킷 참 -- count=2
+      lease: { maxNoProgressS: 1800 },
+    },
+    prevState: null,
+    config: { minProgressSignals: 3 },
+  });
+  assert.notEqual(result.state, SEAT_STATE.SUSPECTED_STALL);
+  assert.equal(result.state, SEAT_STATE.UNKNOWN);
+  assert.equal(result.reason, REASON.INSUFFICIENT_SIGNALS);
+  assert.deepEqual(result.actions, []);
 });
 
 // ---------------------------------------------------------------------------
