@@ -115,6 +115,14 @@ test("(5) known-bad: profile REQUIRED anchor count is 0 (all anchors downgraded 
 // binding mutations (HG5) -- each must FAIL
 // ---------------------------------------------------------------------------
 
+test("(5b) known-bad: envelope.role swapped to a different role than profile.role -> FAIL ROLE_MISMATCH (review-1 repro: a CODER envelope with role forced to REVIEW must not pass under the CODER profile)", () => {
+  const profile = profileFor("CODER");
+  const envelope = goodEnvelope(profile, { role: "REVIEW" });
+  const result = validateEnvelope(envelope, profile);
+  assert.equal(result.status, "FAIL");
+  assert.equal(result.code, "ROLE_MISMATCH");
+});
+
 test("(6) known-bad: profile_id mismatch -> FAIL PROFILE_ID_MISMATCH", () => {
   const profile = profileFor("CODER");
   const envelope = goodEnvelope(profile, { profile_id: "profile-coder-v99" });

@@ -48,6 +48,8 @@ export const LEDGER_REASON_CODES = [
   "PROMOTION_BUNDLE_EVIDENCE_REQUIRED",
   "TOMBSTONE_REQUIRED",
   "LEDGER_HEADER_MISSING",
+  "ENTRIES_NOT_ARRAY",
+  "CYCLE0_HEADER_MISMATCH",
 ];
 
 function nonEmptyString(v) {
@@ -127,7 +129,26 @@ export function validateMigrationLedger(ledger) {
   if (!nonEmptyString(ledger.header)) {
     return fail("LEDGER_HEADER_MISSING", "ledger.header is required");
   }
-  const entries = Array.isArray(ledger.entries) ? ledger.entries : [];
+  // review-1 repro: entries must be an actual array -- a forged non-array
+  // value (e.g. an object masquerading as a single "entry") must never be
+  // silently treated as "no entries" and waved through.
+  if (!Array.isArray(ledger.entries)) {
+    return fail(
+      "ENTRIES_NOT_ARRAY",
+      `ledger.entries must be an array (got ${typeof ledger.entries})`,
+    );
+  }
+  const entries = ledger.entries;
+  // review-1 repro: an empty-entries ledger can only legitimately be the
+  // real cycle-0 initial state (§4.2) -- forcing its header to the fixed
+  // constant stops a forged/renamed header from passing as "no transitions
+  // yet" once nothing else about the shape distinguishes it.
+  if (entries.length === 0 && ledger.header !== CYCLE0_LEDGER_HEADER) {
+    return fail(
+      "CYCLE0_HEADER_MISMATCH",
+      `an empty-entries ledger must carry the exact cycle-0 header '${CYCLE0_LEDGER_HEADER}' (got '${ledger.header}')`,
+    );
+  }
   for (const entry of entries) {
     const result = validateMigrationEntry(entry);
     if (result.status === "FAIL") return result;

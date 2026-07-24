@@ -1,5 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { join, dirname } from "node:path";
 import {
   validateMigrationEntry,
   validateMigrationLedger,
@@ -7,6 +10,11 @@ import {
   CYCLE0_LEDGER_HEADER,
 } from "./migration-ledger.schema.mjs";
 import { computePortabilityAccounting } from "./portability-accounting.mjs";
+
+const SCRIPT_PATH = fileURLToPath(
+  new URL("./migration-ledger.schema.mjs", import.meta.url),
+);
+const CHECK_DIR = dirname(SCRIPT_PATH);
 
 function goodDownagradeEntry(overrides = {}) {
   return {
@@ -96,6 +104,32 @@ test("(6) validateMigrationLedger: missing header -> FAIL LEDGER_HEADER_MISSING"
   const result = validateMigrationLedger({ entries: [] });
   assert.equal(result.status, "FAIL");
   assert.equal(result.code, "LEDGER_HEADER_MISSING");
+});
+
+test("(6b) review-1 repro: forged header on an empty-entries ledger -> FAIL CYCLE0_HEADER_MISMATCH", () => {
+  const result = validateMigrationLedger({
+    header: "forged cycle-zero header",
+    entries: [],
+  });
+  assert.equal(result.status, "FAIL");
+  assert.equal(result.code, "CYCLE0_HEADER_MISMATCH");
+});
+
+test("(6c) review-1 repro: entries is a non-array object -> FAIL ENTRIES_NOT_ARRAY", () => {
+  const result = validateMigrationLedger({
+    header: CYCLE0_LEDGER_HEADER,
+    entries: { forged: true },
+  });
+  assert.equal(result.status, "FAIL");
+  assert.equal(result.code, "ENTRIES_NOT_ARRAY");
+});
+
+test("(6d) regression: the real scripts/check/migration-ledger.json loads and validates PASS", () => {
+  const realLedger = JSON.parse(
+    readFileSync(join(CHECK_DIR, "migration-ledger.json"), "utf8"),
+  );
+  const result = validateMigrationLedger(realLedger);
+  assert.equal(result.status, "PASS", result.reason);
 });
 
 // ---------------------------------------------------------------------------

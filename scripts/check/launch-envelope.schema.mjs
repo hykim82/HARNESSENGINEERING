@@ -23,6 +23,7 @@ export const ENVELOPE_REASON_CODES = [
   "FIELD_MISSING",
   "FIELD_TYPE_INVALID",
   "MODE_INVALID",
+  "ROLE_MISMATCH",
   "PROFILE_ID_MISMATCH",
   "MODE_NOT_ALLOWED_FOR_PROFILE",
   "ANCHOR_COUNT_MISMATCH",
@@ -136,6 +137,16 @@ function checkModeAndProfile(envelope, profile) {
     return fail(
       "MODE_INVALID",
       `envelope.mode '${envelope.mode}' is not one of ${JSON.stringify(LAUNCH_MODES)}`,
+    );
+  }
+  // HG5 role binding: an envelope declaring a role different from the
+  // profile it's paired with must never validate -- e.g. a CODER-shaped
+  // envelope swapped to role='REVIEW' must not silently pass under the
+  // CODER profile's anchors/allowed_modes.
+  if (envelope.role !== profile.role) {
+    return fail(
+      "ROLE_MISMATCH",
+      `envelope.role '${envelope.role}' does not match profile.role '${profile.role}'`,
     );
   }
   if (envelope.profile_id !== profile.profile_id) {
