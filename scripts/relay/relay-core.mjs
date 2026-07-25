@@ -2,6 +2,10 @@ import { existsSync, readFileSync, mkdirSync, copyFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { checkRelayHandshake } from "../check/relay-handshake.mjs";
 import { classifyWatchFailure } from "./watch-result.mjs";
+import {
+  judgeSeatReadiness,
+  SEAT_READINESS_STATUS,
+} from "./seat-readiness.mjs";
 
 // HYK-169-coder-1: 엔진 무관 코어 -- 어댑터 객체를 주입받아 한 스텝을
 // 진행한다: 좌석 확보 -> 태스크 파일 드롭 확인 -> 배달 -> 핸드셰이크 파일
@@ -32,6 +36,7 @@ function extractTaskId(content) {
 
 export const STAGE = Object.freeze({
   SEAT: "seat",
+  READINESS: "readiness",
   TASK_FILE: "task-file",
   DELIVER: "deliver",
   HANDSHAKE: "handshake",
@@ -42,6 +47,19 @@ export const STATUS = Object.freeze({
   DELIVERED_PENDING: "delivered-pending",
   DELIVERED_CONFIG_ERROR: "delivered-config-error",
   DELIVERED_UNJUDGABLE: "delivered-unjudgable",
+});
+
+// HYK-171-cycle4a2-1: readiness 게이트 stage 전용 실패 사유 -- 코어(§2
+// judgeSeatReadiness)가 이미 내는 NOT_READY/AMBIGUOUS/UNOBSERVABLE 3종은
+// 그대로 재사용하고(재선언 금지, import한 SEAT_READINESS_STATUS 값을 직접
+// 쓴다), bounded poll이 deadline까지 "starting"에서 벗어나지 못했을 때만
+// 이 stage가 새로 내는 NOT_READY_TIMEOUT 하나만 여기 추가한다(coder-task.md
+// §4 "타임아웃=NOT_READY_TIMEOUT, 관측결과와 구별").
+export const READINESS_STATUS = Object.freeze({
+  NOT_READY: SEAT_READINESS_STATUS.NOT_READY,
+  AMBIGUOUS: SEAT_READINESS_STATUS.AMBIGUOUS,
+  UNOBSERVABLE: SEAT_READINESS_STATUS.UNOBSERVABLE,
+  NOT_READY_TIMEOUT: "NOT_READY_TIMEOUT",
 });
 
 function fail(stage, reason) {
@@ -175,6 +193,124 @@ function runSeatStage(adapter, inp, opts) {
 // 자체를 받지 않는다(어댑터의 ensureSeat 출력 봉투에도 이제 seatHandle이
 // 없다). deliverTask는 {role, worktreePath}만으로 스스로 handle을
 // 재해석한다(A-1).
+// seat-candidate-adapter.mjs의 CANDIDATE_STATE.STARTING과 동일 값(그 파일이
+// 원본 선언 -- 순환 import 방지 위해 seat-readiness.mjs의 IDLE_OR_READY
+// 관행을 그대로 계승해 문자열 리터럴로만 비교한다).
+const STARTING_CANDIDATE_STATE = "starting";
+
+function hasStartingCandidate(candidates) {
+  return (
+    Array.isArray(candidates) &&
+    candidates.some(
+      (c) => isPlainObject(c) && c.state === STARTING_CANDIDATE_STATE,
+    )
+  );
+}
+
+function readinessFail(status, reason) {
+  return { ok: false, stage: STAGE.READINESS, readinessStatus: status, reason };
+}
+
+// adapter.observeSeatCandidates 존재는 호출자(runReadinessStage)가 먼저
+// 확인한다 -- 이 헬퍼는 호출 자체(+ throw 방어)만 맡는다.
+function observeCandidates(adapter, inp, opts) {
+  try {
+    return adapter.observeSeatCandidates(
+      { worktreePath: inp.worktreePath },
+      opts,
+    );
+  } catch {
+    return null;
+  }
+}
+
+// bounded poll (coder-task.md §2 "starting이면 deadline까지 재관측"): 판정이
+// NOT_READY이면서 그 원인이 "starting" 후보 존재일 때만 재시도한다 --
+// AMBIGUOUS/UNOBSERVABLE나 starting 아닌 NOT_READY(빈 pool/전부 shell 등)는
+// 폴링해도 바뀌지 않으므로 즉시 확정한다(무한 재시도 금지, §6 비범위).
+// opts.readinessMaxAttempts(기본 1 -- 폴링 없음)/opts.readinessWaitFn(기본
+// no-op)로 설정 가능하다(완료기준 "bounded poll 값은 설정가능").
+function pollForReadiness(adapter, inp, opts) {
+  const maxAttempts =
+    Number.isSafeInteger(opts.readinessMaxAttempts) &&
+    opts.readinessMaxAttempts > 0
+      ? opts.readinessMaxAttempts
+      : 1;
+  const waitFn =
+    typeof opts.readinessWaitFn === "function"
+      ? opts.readinessWaitFn
+      : () => {};
+
+  let candidates = null;
+  let judged = null;
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    if (attempt > 0) waitFn(attempt);
+    candidates = observeCandidates(adapter, inp, opts);
+    judged = judgeSeatReadiness({ candidates });
+    if (judged.status !== SEAT_READINESS_STATUS.NOT_READY) {
+      return { candidates, judged, timedOut: false };
+    }
+    if (!hasStartingCandidate(candidates)) {
+      return { candidates, judged, timedOut: false };
+    }
+  }
+  return { candidates, judged, timedOut: true };
+}
+
+// ensureSeat(seat 뒤)·deliverTask(진짜 sink 앞) 사이에 삽입되는 readiness
+// 게이트(coder-task.md §1). READY가 아니면 이 stage 자체가 fail을 반환해
+// relayStep이 deliverStage를 절대 호출하지 않는다(§3 fail-closed, 종류별
+// 호출 0 -- task-create/dispatch/text/Enter 전부 deliverTask 내부에 있으므로
+// deliverTask 자체를 안 부르면 자동으로 0이다).
+//
+// TOCTOU 재조회(PM Q2, §2): READY 판정은 짧은수명 스냅샷이다 -- deliverTask
+// 직전(=이 stage의 마지막 단계)에 후보를 1회 더 관측해 handle/판정이 그대로
+// 일치할 때만 통과시킨다. 바뀌었으면 새 판정 결과로 fail-closed 반환한다
+// (전역 lock 신설 금지, §2 "과설계 금지").
+function runReadinessStage(adapter, inp, opts) {
+  if (typeof adapter.observeSeatCandidates !== "function") {
+    return readinessFail(
+      undefined,
+      "relay-core: adapter.observeSeatCandidates is required",
+    );
+  }
+
+  const first = pollForReadiness(adapter, inp, opts);
+  if (first.judged.status !== SEAT_READINESS_STATUS.READY) {
+    const status = first.timedOut
+      ? READINESS_STATUS.NOT_READY_TIMEOUT
+      : first.judged.status;
+    return readinessFail(status, first.judged.reason);
+  }
+
+  const reobserved = observeCandidates(adapter, inp, opts);
+  const rejudged = judgeSeatReadiness({ candidates: reobserved });
+  if (
+    rejudged.status !== SEAT_READINESS_STATUS.READY ||
+    rejudged.selectedHandle !== first.judged.selectedHandle
+  ) {
+    return readinessFail(
+      rejudged.status,
+      `relay-core: readiness TOCTOU recheck changed just before delivery (was READY, now ${rejudged.status}) -- previous READY snapshot discarded, fail-closed`,
+    );
+  }
+
+  return { ok: true };
+}
+
+// relayStep에서 분리(quality-check complexity 상한 준수) -- opts 주입 fs
+// 함수 4종 해석만 맡는 순수 조립.
+function resolveFsDeps(opts) {
+  return {
+    existsFn: typeof opts.existsFn === "function" ? opts.existsFn : existsSync,
+    readFileFn:
+      typeof opts.readFileFn === "function" ? opts.readFileFn : readFileSync,
+    mkdirFn: typeof opts.mkdirFn === "function" ? opts.mkdirFn : mkdirSync,
+    copyFileFn:
+      typeof opts.copyFileFn === "function" ? opts.copyFileFn : copyFileSync,
+  };
+}
+
 function runDeliverStage(adapter, inp, opts) {
   if (typeof adapter.deliverTask !== "function") {
     return fail(STAGE.DELIVER, "relay-core: adapter.deliverTask is required");
@@ -200,14 +336,7 @@ function runDeliverStage(adapter, inp, opts) {
 export function relayStep(input, adapter, opts = {}) {
   const inp = isPlainObject(input) ? input : {};
   const a = isPlainObject(adapter) ? adapter : {};
-  const fsDeps = {
-    existsFn: typeof opts.existsFn === "function" ? opts.existsFn : existsSync,
-    readFileFn:
-      typeof opts.readFileFn === "function" ? opts.readFileFn : readFileSync,
-    mkdirFn: typeof opts.mkdirFn === "function" ? opts.mkdirFn : mkdirSync,
-    copyFileFn:
-      typeof opts.copyFileFn === "function" ? opts.copyFileFn : copyFileSync,
-  };
+  const fsDeps = resolveFsDeps(opts);
   const harnessDir = resolveHarnessDir(inp);
 
   // 멱등 단락: 이전 시도가 이미 handshake까지 완주했다면 재배달하지 않는다.
@@ -229,6 +358,12 @@ export function relayStep(input, adapter, opts = {}) {
 
   const seatStage = runSeatStage(a, inp, opts);
   if (!seatStage.ok) return seatStage;
+
+  // HYK-171-cycle4a2-1: readiness 게이트 -- seat 확보 뒤·deliverTask(진짜
+  // sink) 앞. READY가 아니면 여기서 반환하고 deliverStage는 절대 호출되지
+  // 않는다(coder-task.md §1/§3).
+  const readinessStage = runReadinessStage(a, inp, opts);
+  if (!readinessStage.ok) return readinessStage;
 
   const deliverStage = runDeliverStage(a, inp, opts);
   if (!deliverStage.ok) return deliverStage;

@@ -63,8 +63,31 @@ test("runStepCli: with an injected fake execFn (never the real default), wires t
       "utf8",
     );
     let execFnCalled = false;
-    const fakeExecFn = () => {
+    // HYK-171-cycle4a2-1: ORCA_ADAPTER now also carries observeSeatCandidates
+    // (the readiness gate, wired between seat and deliver) -- it queries
+    // `terminal list`/`terminal show` before deliverTask's `task-create`, so
+    // this fake must answer those two shapes too, plus supply a classify
+    // capability (opt-in only, never auto-applied) so the one observed
+    // candidate normalizes to a dispatchable idle-or-ready pool of exactly 1.
+    const fakeExecFn = (argv) => {
       execFnCalled = true;
+      if (argv[0] === "terminal" && argv[1] === "list") {
+        return {
+          ok: true,
+          result: {
+            terminals: [
+              {
+                handle: "term_fake",
+                worktreePath: VALID_WORKTREE,
+                tabId: "tab-1",
+              },
+            ],
+          },
+        };
+      }
+      if (argv[0] === "terminal" && argv[1] === "show") {
+        return { ok: true, result: { terminal: { preview: "IDLE" } } };
+      }
       return { ok: true, result: { task: { id: "task_fake" } } };
     };
     const r = await runStepCli(
@@ -80,11 +103,16 @@ test("runStepCli: with an injected fake execFn (never the real default), wires t
         "--main-repo-dir",
         mainRepoDir,
       ],
-      { execFn: fakeExecFn, existingSeatHandle: "term_fake" },
+      {
+        execFn: fakeExecFn,
+        existingSeatHandle: "term_fake",
+        capabilities: { classify: (tail) => (tail === "IDLE" ? "idle" : null) },
+      },
     );
     assert.equal(r.ok, true);
     // ensureSeat reused an existing handle (no execFn call needed there);
-    // deliverTask's task-create call is what exercises the fake execFn.
+    // the readiness gate's terminal list/show + deliverTask's task-create
+    // call are what exercise the fake execFn.
     assert.equal(execFnCalled, true);
   } finally {
     rmSync(harnessDir, { recursive: true, force: true });

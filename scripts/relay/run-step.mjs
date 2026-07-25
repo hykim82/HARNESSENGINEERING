@@ -6,6 +6,7 @@ import {
   teardownSeat,
   createOrcaExecFn,
 } from "./adapters/orca-adapter.mjs";
+import { observeSeatCandidates } from "./adapters/seat-candidate-adapter.mjs";
 
 // HYK-169-coder-1: CLI 진입점 -- `node scripts/relay/run-step.mjs --role CODER
 // --worktree <path> --task-id <id>` 한 명령으로 좌석 준비+배달까지 끝낸다.
@@ -18,6 +19,7 @@ function isNonEmptyString(v) {
 
 const ORCA_ADAPTER = Object.freeze({
   ensureSeat,
+  observeSeatCandidates,
   deliverTask,
   collectCompletionSignals,
   teardownSeat,

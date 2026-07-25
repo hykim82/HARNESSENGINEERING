@@ -5,6 +5,7 @@ import {
   normalizeSeatCandidate,
   normalizeSeatCandidates,
   collectSeatCandidates,
+  observeSeatCandidates,
   createReferenceSeatCandidateDetector,
   CANDIDATE_STATE,
 } from "./seat-candidate-adapter.mjs";
@@ -243,6 +244,29 @@ test("collectSeatCandidates: terminal list 실패 -> null(raw 관측 실패, 판
   const execFn = () => ({ ok: false });
   const out = collectSeatCandidates({ worktreePath: "C:/wt/x" }, { execFn });
   assert.equal(out, null);
+});
+
+// HYK-171-cycle4a2-1: relay-core.mjs의 readiness 게이트가 기대하는 포트
+// 이름(observeSeatCandidates)이 collectSeatCandidates와 동일 결과를 낸다는
+// 것만 확인한다(재구현이 아니라 이름 별칭임을 시험으로 고정).
+test("observeSeatCandidates: collectSeatCandidates와 동일 인자에 동일 결과(이름만 다른 별칭, 재구현 아님)", () => {
+  const execFn = (argv) => {
+    if (argv[0] === "terminal" && argv[1] === "list") {
+      return terminalListResponse([
+        { handle: "h-good", worktreePath: "C:/wt/x", tabId: "abc-2" },
+      ]);
+    }
+    if (argv[0] === "terminal" && argv[1] === "show") {
+      return seatShowResponse("Sonnet 5 [CODER]\n? for shortcuts");
+    }
+    throw new Error(`unexpected argv ${JSON.stringify(argv)}`);
+  };
+  const ctx = { worktreePath: "C:/wt/x" };
+  const opts = { execFn, capabilities: createReferenceSeatCandidateDetector() };
+  assert.deepEqual(
+    observeSeatCandidates(ctx, opts),
+    collectSeatCandidates(ctx, opts),
+  );
 });
 
 test("collectSeatCandidates: terminal show가 실패한 후보는 개별적으로 unknown/observable:false", () => {
