@@ -219,34 +219,57 @@ for (const field of [
 // admission ALLOW 증거·stable-intent 단일승자 claim 없이는 절대 진입하지
 // 않는다. 이 그룹은 REVIEW가 grant-issuer.mjs:436/461/468을 직접 두 번
 // 호출해 grant 2개를 만들었던 그 재현을 그대로 테스트로 옮긴 것이다. ----
+// P2-2 재배치(admission이 claim보다 먼저 실행)로, claim 단계만 겨냥하는
+// 아래 두 테스트는 admission ALLOW 증거를 먼저 갖춰야 claim 단계 사유를
+// 실제로 관측할 수 있다(admission 없이 부르면 이제 ADMISSION_DENIED가
+// 먼저 나온다 -- 그건 P2-2 자체가 검증하는 새 순서다).
 test("issueSubGrant: missing stableIntentId -> DENY INTENT_CLAIM_REQUIRED, 0 issued (P1-1)", () => {
-  const consumptionDir = freshDir();
-  const outDir = freshDir();
-  try {
-    const result = issueSubGrant(
-      baseRequest({ consumptionDir, outDir, stableIntentId: undefined }),
-    );
-    assert.equal(result.ok, false);
-    assert.equal(result.reason, REASON.INTENT_CLAIM_REQUIRED);
-    assert.equal(countSubGrantFiles(outDir), 0);
-  } finally {
-    cleanup(consumptionDir);
-    cleanup(outDir);
-  }
+  withTempDir((bundleDir) => {
+    const consumptionDir = freshDir();
+    const outDir = freshDir();
+    try {
+      const { pinPath } = writePullAdmissionBundle(bundleDir);
+      const result = issueSubGrant(
+        baseRequest({
+          consumptionDir,
+          outDir,
+          stableIntentId: undefined,
+          pullAdmission: pullAdmissionInput(bundleDir, pinPath),
+          gates: makeAllowGates(),
+        }),
+      );
+      assert.equal(result.ok, false);
+      assert.equal(result.reason, REASON.INTENT_CLAIM_REQUIRED);
+      assert.equal(countSubGrantFiles(outDir), 0);
+    } finally {
+      cleanup(consumptionDir);
+      cleanup(outDir);
+    }
+  });
 });
 
 test("issueSubGrant: missing intentDir -> DENY INTENT_CLAIM_DENIED (claim cannot be attempted without a trusted intentDir), 0 issued (P1-1)", () => {
-  const consumptionDir = freshDir();
-  const outDir = freshDir();
-  try {
-    const result = issueSubGrant(baseRequest({ consumptionDir, outDir }));
-    assert.equal(result.ok, false);
-    assert.equal(result.reason, REASON.INTENT_CLAIM_DENIED);
-    assert.equal(countSubGrantFiles(outDir), 0);
-  } finally {
-    cleanup(consumptionDir);
-    cleanup(outDir);
-  }
+  withTempDir((bundleDir) => {
+    const consumptionDir = freshDir();
+    const outDir = freshDir();
+    try {
+      const { pinPath } = writePullAdmissionBundle(bundleDir);
+      const result = issueSubGrant(
+        baseRequest({
+          consumptionDir,
+          outDir,
+          pullAdmission: pullAdmissionInput(bundleDir, pinPath),
+          gates: makeAllowGates(),
+        }),
+      );
+      assert.equal(result.ok, false);
+      assert.equal(result.reason, REASON.INTENT_CLAIM_DENIED);
+      assert.equal(countSubGrantFiles(outDir), 0);
+    } finally {
+      cleanup(consumptionDir);
+      cleanup(outDir);
+    }
+  });
 });
 
 test("issueSubGrant: missing pullAdmission/gates -> DENY ADMISSION_DENIED (admission is not optional even once the intent is won), 0 issued (P1-1)", () => {

@@ -602,16 +602,20 @@ function pauseIntentBestEffort(inp, opts, reason) {
 // judgeAdmission/claimIntentTx/consumeDelegationTx에도 그대로 전달(mutex/
 // save/pin I/O 주입 -- 키가 겹치지 않아 하나의 opts로 모두 결선된다).
 //
-// 순서(비타협): ① delegation 형식 검증 ② 서명범위 대조(§6 mutation #8) ③
-// stable-intent 단일승자 claim(§ P1-1 -- 진 후보는 여기서 즉시 멈춘다) ④
-// admission 6게이트 ALLOW(§ P1-1) ⑤ delegation 원자 소비(1회, §6 mutation
-// #2/#10) ⑥ 소비 성공 시에만 sub-grant 파일 발급(§6 mutation #6: ⑤에서
-// 죽으면 ⑥은 절대 실행되지 않는다 -- 이 함수엔 재시도 루프가 없으므로
-// "crash 뒤 자동 재실행"은 구조적으로 불가능하다. ⑤/⑥에서의 실패는 intent를
-// PAUSED로 남긴다 -- 사람이 resumeHumanRef로 명시 재개하기 전까지 같은
-// stableIntentId로는 두 번 다시 발급을 시도할 수 없다).
+// 순서(비타협, § P2-2 재배치): ① delegation 형식 검증 ② 서명범위 대조(§6
+// mutation #8) ③ admission 6게이트 ALLOW(부작용 없는 순수 판정이므로 claim
+// 앞에 둔다 -- 거부되면 claim 자체가 아예 만들어지지 않아, 잘못되거나
+// 일시적인 admission 입력 한 번으로 stable intent가 영구 CLAIMED로 고정돼
+// 사람도 복구할 수 없는 상태가 구조적으로 불가능해진다) ④ stable-intent
+// 단일승자 claim(§ P1-1 -- 진 후보는 여기서 즉시 멈춘다. admission을 통과한
+// 후보끼리만 경합하지만 단일승자 판정 자체는 그대로다) ⑤ delegation 원자
+// 소비(1회, §6 mutation #2/#10) ⑥ 소비 성공 시에만 sub-grant 파일 발급(§6
+// mutation #6: ⑤에서 죽으면 ⑥은 절대 실행되지 않는다 -- 이 함수엔 재시도
+// 루프가 없으므로 "crash 뒤 자동 재실행"은 구조적으로 불가능하다. ⑤/⑥에서의
+// 실패는 intent를 PAUSED로 남긴다 -- 사람이 resumeHumanRef로 명시 재개하기
+// 전까지 같은 stableIntentId로는 두 번 다시 발급을 시도할 수 없다).
 // quality-check.mjs complexity/length 래칫 준수를 위해 issueSubGrant를
-// 세 단계(① 형식+scope ② intent+admission ③ 소비+발급)로 오케스트레이션만
+// 세 단계(① 형식+scope ② admission+intent ③ 소비+발급)로 오케스트레이션만
 // 분리한다 -- 판정 순서·내용은 그대로다(위 헤더 주석의 비타협 순서 참고).
 function checkDelegationFormatAndScope(inp, nowMs) {
   const { delegation, taskHash, role, startBudgetRequested, outDir } = inp;
@@ -705,9 +709,10 @@ export function issueSubGrant(input, opts) {
   const formatOrScopeDenied = checkDelegationFormatAndScope(inp, nowMs);
   if (formatOrScopeDenied) return formatOrScopeDenied;
 
-  const intentResolved = resolveIntentWin(inp, opts);
-  if (!intentResolved.ok) return intentResolved.deny;
-
+  // P2-2 (review-2 반려, 비타협): admission은 부작용 없는 순수 판정이므로
+  // stable-intent claim보다 먼저 검사한다 -- 거부되면 애초에 claim을 만들지
+  // 않아, 잘못되거나 일시적인 admission 입력 한 번으로 stable intent가
+  // CLAIMED로 영구 고정돼 사람도 복구할 수 없는 상태가 구조적으로 불가능해진다.
   const admission = judgeAdmission(
     { pullAdmission: inp.pullAdmission, gates: inp.gates },
     opts,
@@ -718,6 +723,9 @@ export function issueSubGrant(input, opts) {
       admission_detail: admission.detail,
     });
   }
+
+  const intentResolved = resolveIntentWin(inp, opts);
+  if (!intentResolved.ok) return intentResolved.deny;
 
   return consumeAndIssueEnvelope(inp, opts);
 }

@@ -359,6 +359,88 @@ test("end-to-end: PRODUCTION issueSubGrant with hard-stop/new-issue/streak2 gate
   }
 });
 
+// ---- P2-2 반사실 (review-2 정확 재현, 재배치 검증): admission이 stable-intent
+// claim보다 먼저 검사되므로, admission-deny는 claim 레코드를 디스크에 전혀
+// 남기지 않는다(= CLAIMED로 영구 고정되는 stuck intent가 구조적으로
+// 불가능). 이어서 같은 stableIntentId로 유효한 admission을 주고 재호출하면
+// 정상 claim·발급 1에 도달한다(사람 개입도 필요 없다 --애초에 claim이
+// 없었으니 resumeHumanRef 문도 필요 없다). judgeAdmission을 resolveIntentWin
+// 뒤로 되돌리는 재배치 mutation 단독으로 이 테스트는 RED여야 한다(claim 파일이
+// 생기고, 두 번째 호출이 INTENT_CLAIM_DENIED로 막힌다). ----
+test("end-to-end: PRODUCTION issueSubGrant with admission-deny (hard-stop + malformed pullAdmission) -> DENY, 0 issued, AND no intent claim record on disk; a later valid-admission retry on the SAME stableIntentId reaches 1 (P2-2, exact review repro)", () => {
+  const intentDir = freshDir();
+  const consumptionDir = freshDir();
+  const outDir = freshDir();
+  try {
+    const stableIntentId = computeStableIntentId(makeStableIntentFields());
+    const claimPath = join(intentDir, `intent-${stableIntentId}.claim.json`);
+
+    const denied = issueSubGrant({
+      delegation: makeFakeDelegation(),
+      taskHash: DELEGATION_TASK_HASH,
+      role: "CODER",
+      startBudgetRequested: 1,
+      stableIntentId,
+      intentDir,
+      pullAdmission: {},
+      gates: {
+        hardStop: true,
+        newIssueBoundary: true,
+        consecutiveRejections: 2,
+      },
+      consumptionDir,
+      outDir,
+      nowMs: DELEGATION_IN_WINDOW_NOW,
+      at: "t1",
+    });
+    assert.equal(denied.ok, false);
+    assert.equal(denied.reason, REASON.ADMISSION_DENIED);
+    assert.equal(countSubGrantFiles(outDir), 0);
+    assert.equal(
+      readdirSync(intentDir).length,
+      0,
+      "admission-deny must not create ANY intent claim record -- claim happens after admission now",
+    );
+    assert.throws(
+      () => readFileSync(claimPath, "utf8"),
+      /ENOENT/,
+      "no claim file must exist for this stableIntentId after an admission-deny",
+    );
+
+    withTempDir((bundleDir) => {
+      const { pullAdmission, gates } = pipelineFixture(bundleDir);
+      const recovered = issueSubGrant({
+        delegation: makeFakeDelegation(),
+        taskHash: DELEGATION_TASK_HASH,
+        role: "CODER",
+        startBudgetRequested: 1,
+        stableIntentId,
+        intentDir,
+        pullAdmission,
+        gates,
+        consumptionDir,
+        outDir,
+        nowMs: DELEGATION_IN_WINDOW_NOW,
+        at: "t2",
+      });
+      assert.equal(recovered.ok, true, JSON.stringify(recovered));
+      assert.equal(
+        countSubGrantFiles(outDir),
+        1,
+        "a later valid-admission call on the same stableIntentId must reach 1 -- no human resume needed, since no claim was ever stuck",
+      );
+      assert.equal(
+        readIntentStatus(intentDir, stableIntentId),
+        INTENT_STATUS.ISSUED,
+      );
+    });
+  } finally {
+    cleanup(intentDir);
+    cleanup(consumptionDir);
+    cleanup(outDir);
+  }
+});
+
 // ---- §6 mutation #9: 사람 개인키가 supervisor/worker/env/prompt 경로에
 // 존재 -> 검출·거부. 정적(grep) + 런타임(poisoned delegation 필드가 산출물
 // 로 새지 않는지) 둘 다. ----
