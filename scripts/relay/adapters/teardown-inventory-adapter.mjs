@@ -60,19 +60,27 @@ export function buildGitWorktreeListCommand() {
 export function buildGitStatusCommand() {
   return ["status", "--porcelain"];
 }
-// HYK-171 사이클4b-1 재작업(streak 1, §P1-1 (A)): 시스템 전체 미완료
-// dispatch를 관측하기 위한 두 명령. `dispatch-show`의 argv shape는
-// seat-signal-adapter.mjs가 이미 실측해 쓰는 것과 동일하지만, 이 파일에서
-// 직접 import하지 않는다 -- seat-signal-adapter.mjs가 orca-adapter.mjs를
-// import하고 orca-adapter.mjs는 이 파일을 import하므로, 여기서 다시
-// seat-signal-adapter.mjs를 끌어오면 3파일 순환 의존(A->B->C->A)이 생긴다.
-// 순환을 피하려고 최소 계약(argv 2줄 + 파서)만 이 파일 안에 병렬로 둔다.
-export function buildTaskListDispatchedCommand() {
-  return ["orchestration", "task-list", "--status", "dispatched", "--json"];
-}
-export function buildDispatchShowCommand(taskId) {
-  return ["orchestration", "dispatch-show", "--task", taskId, "--json"];
-}
+// HYK-171 사이클4b-1 재작업3(사람 게이트 결정, coder-task.md §0/§1): 이전
+// (스트릭1)에 있던 `buildTaskListDispatchedCommand`/`buildDispatchShowCommand`
+// /`collectDispatchActivePaneKeys`/`fetchDispatchPaneKey`/`DISPATCH_FETCH_FAILED`
+// /`buildPaneKey`/`resolveSelfPaneKey`를 전부 삭제했다 -- ORCH 직접 실측
+// (읽기 전용 `orca terminal list --json` 라이브 조회):
+//   1. terminal-list 항목에는 `paneKey` 필드가 없다. 실 필드는 정확히
+//      12개(`branch, connected, handle, lastOutputAt, leafId, preview,
+//      ptyId, tabId, title, worktreeId, worktreePath, writable`) -- pane
+//      key는 `terminal create` 응답에서 생성 시점에 한 번만 나온다.
+//   2. `${tabId}:${leafId}`는 pane key가 아니다. REVIEW 좌석 실측: tabId==
+//      leafId=="pty:e841ec57-...::.../hyk171-cycle4b1-review@@027e1972"
+//      (UUID가 아니라 pty 문자열, 게다가 둘이 동일값) -- 알려진
+//      ORCA_PANE_KEY와 일치하는 terminal-list 항목이 **0개**였다. 이전
+//      코더 좌석에서 우연히 맞았던 것은 UI가 채택한 탭이 우연히 UUID
+//      tabId/leafId를 가진 표본 하나였을 뿐 일반화되지 않는다(REVIEW
+//      review-2 P1-1b).
+// 즉 "배정(dispatch)↔좌석(pane)" 상관은 현재 읽기 API로 증명 불가능한
+// 기제였다 -- 모르는 것을 아는 척 판정하는 코드를 지우는 것이 이번
+// 수리다(§2-B가 그 자리를 대신한다: 증명 불가 사실을 명시적 전제조건으로
+// 표현). 관측 경로 어디에서도 `orchestration task-list`/`dispatch-show`
+// argv를 만들지 않는다(테스트가 argv 부재를 전수 검사한다).
 
 // ---- orca 등록(3층 중 orca) ----
 function observeOrcaLayer(targetCanonical, opts) {
@@ -140,137 +148,45 @@ function observeDirLayer(worktreePath, opts) {
   return { status: exists ? "present" : "absent", ok: true };
 }
 
-// ---- 활성참조 (HYK-171 사이클4b-1 재작업, streak 1, REVIEW review-1 P1-1
-// 수리) ----
-// REVIEW 실측: 실 `orca terminal list --json`에는 `activeDispatch` 필드가
-// 존재하지 않는다(33개 좌석 전부 부재). 그 필드에 의존한 이전 설계는 실
-// 입력에서 늘 `observable:true, count:0`으로 접혀 fail-open이었다.
+// ---- 활성참조 (HYK-171 사이클4b-1 재작업3, 사람 게이트 결정, coder-task.md
+// §2-A) ----
+// **증명 가능한 것만 판정 근거로 쓴다**: `connected`(terminal-list가 실제
+// 주는 필드) + `handle` 소유권 증거(`opts.existingSeatHandle === entry.handle`
+// 문자열 일치)뿐이다. `tabId`/`leafId`/`ptyId`/`title`/`preview`/`writable`
+// 는 판정 근거로 쓰지 않는다(추측 분류 금지, REVIEW review-2 §3 명시 --
+// 이 필드들은 관측되긴 하지만 자기-좌석 여부를 증명하지 못한다).
 //
-// 새 설계는 이 파일의 헤더 주석이 요구하는 (A)+(B)+(C) 조합이다:
-//
-// (A) 권위 관측: `orchestration task-list --status dispatched`로 미완료
-//     dispatch 태스크 id 목록을 얻고, 각각 `orchestration dispatch-show
-//     --task <id>`로 그 dispatch의 `assignee_pane_key`를 얻는다. 이 저장소가
-//     이미 쓰는 pane key 관용구(`buildPaneKey`, `<tabId>:<leafId>` -- 실측:
-//     ORCA_PANE_KEY 환경변수 값이 이 형식과 바이트 단위로 일치함을 이 태스크
-//     수행 중 라이브 조회로 재확인했다)로 좌석의 pane key를 계산해 대조한다.
-//     대상 워크트리에 붙은 좌석의 pane key가 이 활성-dispatch pane key
-//     집합에 있으면 무조건 ACTIVE_REFERENCE(대상 좌석 자신이어도 -- 자기
-//     자신에게 아직 안 끝난 dispatch가 물려 있다면 그 자체가 위험 신호다).
-// (B) 보수적 보강: 대상 워크트리의 `connected:true` 좌석 중, 호출자가
-//     `opts.existingSeatHandle`로 **명시한** 좌석(소유권 증거)이 **아닌**
-//     좌석은 전부 활성참조로 센다. 증거가 아예 없으면(existingSeatHandle
-//     미제공) 어떤 좌석도 자기 자신이라고 추측하지 않는다 -- 대상 워크트리에
-//     연결된 좌석이 하나라도 있으면 그것도 활성참조로 센다(§P1-1 (B) 문구
-//     그대로: "증명되지 않으면 활성참조로 센다").
-// (C) fail-closed: terminal-list/task-list/dispatch-show 중 하나라도 실패·
-//     malformed면 `observable:false`(빈 카운트로 접지 않는다).
-function buildPaneKey(tabId, leafId) {
-  return isNonEmptyString(tabId) && isNonEmptyString(leafId)
-    ? `${tabId}:${leafId}`
-    : null;
-}
-
-// existingSeatHandle(호출자가 명시한 대상 좌석 식별자)을 terminal list에서
-// 찾아 그 pane key를 낸다. 증거가 없거나(handle 미제공) 그 handle이 목록에
-// 없으면 null(=자기 자신을 추측하지 않는다, (B) 원칙).
-function resolveSelfPaneKey(list, existingSeatHandle) {
-  if (!isNonEmptyString(existingSeatHandle)) return null;
-  const match = list.find(
-    (entry) => isPlainObject(entry) && entry.handle === existingSeatHandle,
-  );
-  return match ? buildPaneKey(match.tabId, match.leafId) : null;
-}
-
-// 실패 감지(FAIL 마커)만 반환하는 헬퍼 -- 호출자가 이 값이면 즉시
-// fail-closed한다. 복잡도 분산(collectDispatchActivePaneKeys에서 분리).
-const DISPATCH_FETCH_FAILED = Symbol("dispatch-fetch-failed");
-
-// 태스크 id 하나의 dispatch-show를 조회해 pane key(있으면) 또는 null(정당한
-// "아직 없음")을 낸다. 조회 자체가 실패/malformed면 DISPATCH_FETCH_FAILED.
-function fetchDispatchPaneKey(execFn, taskId) {
-  let dispatchResponse;
-  try {
-    dispatchResponse = execFn(buildDispatchShowCommand(taskId));
-  } catch {
-    return DISPATCH_FETCH_FAILED;
-  }
-  if (!isPlainObject(dispatchResponse) || dispatchResponse.ok !== true) {
-    return DISPATCH_FETCH_FAILED;
-  }
-  const paneKey = dispatchResponse.result?.dispatch?.assignee_pane_key;
-  return isNonEmptyString(paneKey) ? paneKey : null;
-}
-
-// (A): 시스템 전체 미완료 dispatch의 pane key 집합. 하나라도 관측 실패하면
-// ok:false(파괴적으로 빈 집합으로 접지 않는다 -- 호출자가 UNOBSERVABLE로
-// fail-closed한다). 복잡도 분산: 태스크별 조회는 fetchDispatchPaneKey로
-// 분리했다.
-function collectDispatchActivePaneKeys(execFn) {
-  let response;
-  try {
-    response = execFn(buildTaskListDispatchedCommand());
-  } catch {
-    return { ok: false, paneKeys: null };
-  }
-  if (!isPlainObject(response) || response.ok !== true) {
-    return { ok: false, paneKeys: null };
-  }
-  const tasks = Array.isArray(response.result?.tasks)
-    ? response.result.tasks
-    : null;
-  if (!tasks) return { ok: false, paneKeys: null };
-
-  const paneKeys = new Set();
-  for (const task of tasks) {
-    if (!isPlainObject(task) || !isNonEmptyString(task.id)) {
-      return { ok: false, paneKeys: null };
-    }
-    const paneKey = fetchDispatchPaneKey(execFn, task.id);
-    if (paneKey === DISPATCH_FETCH_FAILED) return { ok: false, paneKeys: null };
-    if (paneKey !== null) paneKeys.add(paneKey);
-  }
-  return { ok: true, paneKeys };
-}
-
-// 읽기 전용 `terminal list --json` 조회만 분리(복잡도 분산).
-function queryTerminalList(execFn) {
-  let response;
-  try {
-    response = execFn(buildOrcaTerminalListCommand());
-  } catch {
-    return null;
-  }
-  if (!isPlainObject(response) || response.ok !== true) return null;
-  return Array.isArray(response.result?.terminals)
-    ? response.result.terminals
-    : null;
-}
-
-// entry가 활성참조인지 판정(§P1-1 (A)+(B) 결합) -- observeActiveReferences
-// 에서 분리(복잡도 분산).
-function isActiveReferenceEntry(entry, selfPaneKey, dispatchPaneKeys) {
-  const paneKey = buildPaneKey(entry.tabId, entry.leafId);
-  const viaDispatch = paneKey !== null && dispatchPaneKeys.has(paneKey);
-  const viaConnectedNotSelf =
-    entry.connected === true &&
-    (selfPaneKey === null || paneKey !== selfPaneKey);
-  return { active: viaDispatch || viaConnectedNotSelf, paneKey };
+// 소유권 증거(existingSeatHandle)가 없으면 어떤 좌석도 자기 자신으로
+// 추정하지 않는다 -- 대상 워크트리의 `connected:true` 좌석이 하나라도
+// 있으면 ACTIVE_REFERENCE다. "배정(dispatch)이 활성인지"는 이 함수가
+// 전혀 판정하지 않는다 -- 그 축은 증명 불가라 teardown-core.mjs의
+// `dispatchCorrelationProven` 명시적 전제조건으로만 표현한다(§2-B, 이
+// 파일 헤더의 삭제 사유 참조).
+function isActiveReferenceEntry(entry, existingSeatHandle) {
+  if (entry.connected !== true) return false;
+  const isSelf =
+    isNonEmptyString(existingSeatHandle) && entry.handle === existingSeatHandle;
+  return !isSelf;
 }
 
 function observeActiveReferences(targetCanonical, opts) {
   if (typeof opts.execFn !== "function") {
     return { count: 0, tokens: [], observable: false };
   }
-  const list = queryTerminalList(opts.execFn);
-  if (!list) return { count: 0, tokens: [], observable: false };
-
-  const dispatchResult = collectDispatchActivePaneKeys(opts.execFn);
-  if (!dispatchResult.ok) {
+  let response;
+  try {
+    response = opts.execFn(buildOrcaTerminalListCommand());
+  } catch {
     return { count: 0, tokens: [], observable: false };
   }
+  if (!isPlainObject(response) || response.ok !== true) {
+    return { count: 0, tokens: [], observable: false };
+  }
+  const list = Array.isArray(response.result?.terminals)
+    ? response.result.terminals
+    : null;
+  if (!list) return { count: 0, tokens: [], observable: false };
 
-  const selfPaneKey = resolveSelfPaneKey(list, opts.existingSeatHandle);
   const worktreeEntries = list.filter(
     (entry) =>
       isPlainObject(entry) &&
@@ -279,17 +195,10 @@ function observeActiveReferences(targetCanonical, opts) {
       canonicalizePath(entry.worktreePath) === targetCanonical,
   );
 
-  const activeByPaneKey = new Map();
-  for (const entry of worktreeEntries) {
-    const { active, paneKey } = isActiveReferenceEntry(
-      entry,
-      selfPaneKey,
-      dispatchResult.paneKeys,
-    );
-    if (active) activeByPaneKey.set(paneKey ?? entry.handle, entry);
-  }
+  const active = worktreeEntries.filter((entry) =>
+    isActiveReferenceEntry(entry, opts.existingSeatHandle),
+  );
 
-  const active = [...activeByPaneKey.values()];
   return {
     count: active.length,
     tokens: active.map((entry) => hashToken(entry.handle)),
@@ -337,9 +246,9 @@ function observeWorkingTree(opts) {
 
 // ctx: { worktreePath, repoId? }
 // opts: { execFn?, gitFn?, existsFn?, existingSeatHandle? } -- 전부 읽기
-// 전용 주입(fake, 실 프로세스 호출 0). existingSeatHandle은 §P1-1 (B)의
-// 소유권 증거(대상 좌석 자신의 handle) -- 미제공 시 어떤 좌석도 자기
-// 자신이라고 추측하지 않는다.
+// 전용 주입(fake, 실 프로세스 호출 0). existingSeatHandle은 §2-A의 소유권
+// 증거(대상 좌석 자신의 handle, 문자열 일치로만 판정) -- 미제공 시 어떤
+// 좌석도 자기 자신이라고 추측하지 않는다.
 export function observeTeardownInventory(ctx, opts = {}) {
   const c = isPlainObject(ctx) ? ctx : {};
   const worktreePath = isNonEmptyString(c.worktreePath) ? c.worktreePath : "";

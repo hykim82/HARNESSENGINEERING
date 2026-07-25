@@ -12,6 +12,15 @@ import { TEARDOWN_SCHEMA_VERSION } from "../teardown-core.mjs";
 
 // HYK-171 사이클4b-1 -- teardown-inventory-adapter.mjs 단위시험. 전부 fake
 // execFn/gitFn/existsFn 주입(실 orca/git 프로세스 호출 0, 파괴 argv 0).
+//
+// HYK-171 사이클4b-1 재작업3(사람 게이트 결정, coder-task.md §0/§1): 이전
+// (스트릭2)에 있던 `task-list`/`dispatch-show` 관측 관련 시험(P1-1
+// required#2/#2b, "(A) a dispatch-confirmed pane key ...")을 전부
+// 삭제했다 -- ORCH 실측으로 그 상관 기제 자체가 증명 불가임이 확인돼
+// 프로덕션 코드에서 통째로 제거됐고(teardown-inventory-adapter.mjs 헤더
+// 주석 참조), 그 코드를 시험하던 테스트도 함께 소멸한다(조용한 삭제
+// 방지를 위해 이 주석에 사유를 남긴다). 활성참조 시험은 이제 connected+
+// handle 소유권 증거만 다룬다.
 
 const WT =
   "C:/Users/Administrator/orca/workspaces/HARNESSENGINEERING/hyk-test-fixture";
@@ -30,18 +39,6 @@ function gitWorktreeListOutput(paths) {
     paths.map((p) => `worktree ${p}`).join("\n") + (paths.length ? "\n" : "")
   );
 }
-// HYK-171 사이클4b-1 재작업(streak 1, REVIEW review-1 P1-1): task-list/
-// dispatch-show 응답 fixture -- 이 태스크 수행 중 라이브 읽기 조회로 실측한
-// 그대로의 shape(`result.tasks[].id`, `result.dispatch.assignee_pane_key`).
-function taskListDispatchedResponse(tasks) {
-  return { ok: true, result: { tasks } };
-}
-function dispatchShowResponse(assigneePaneKey) {
-  return {
-    ok: true,
-    result: { dispatch: { assignee_pane_key: assigneePaneKey ?? null } },
-  };
-}
 const SELF_ENTRY = {
   handle: "term_self",
   worktreePath: WT,
@@ -55,9 +52,6 @@ function fullyPresentOpts(overrides = {}) {
     execFn: (argv) => {
       if (argv[0] === "worktree") return orcaWorktreeListResponse([WT]);
       if (argv[0] === "terminal") return orcaTerminalListResponse([]);
-      if (argv[0] === "orchestration" && argv[1] === "task-list") {
-        return taskListDispatchedResponse([]);
-      }
       throw new Error(`unexpected execFn argv ${JSON.stringify(argv)}`);
     },
     gitFn: (argv) => {
@@ -119,12 +113,10 @@ test("observeTeardownInventory: missing gitFn/existsFn -- those layers/sources a
   assert.equal(inv.layers.git, "unobservable");
   assert.equal(inv.layers.dir, "unobservable");
   assert.equal(inv.workingTree.observable, false);
-  // the sole execFn stub above returns a terminal-list-shaped response for
-  // any non-"worktree" argv (including the new task-list query), so
-  // task-list parsing also fails here -- activeReferences degrades too.
+  assert.equal(inv.activeReferences.observable, true); // execFn still answers terminal-list
   assert.deepEqual(
     inv.observationQuality.degraded.sort(),
-    ["activeReferences", "dir", "git", "workingTree"].sort(),
+    ["dir", "git", "workingTree"].sort(),
   );
 });
 
@@ -150,22 +142,15 @@ test("observeTeardownInventory: gitFn returning a non-string is treated as unobs
   assert.equal(inv.workingTree.observable, false);
 });
 
-// HYK-171 사이클4b-1 재작업(streak 1, REVIEW review-1 P1-1 필수 테스트 #1):
+// HYK-171 사이클4b-1 재작업3(사람 게이트 결정, coder-task.md §3 required#3):
 // 실 CLI가 실제로 주는 필드만 쓴 입력(같은 워크트리 connected:true 좌석
-// 1개, dispatch 정보 없음, 소유권 증거도 없음) -- 현행(수리 전) 코드는
-// 이 fixture를 `observable:true, count:0`으로 접어 `allowSink:true`까지
-// 냈다(REVIEW 재현). 수리 후에는 증거 없는 connected 좌석을 활성참조로
-// 세야 한다(§P1-1 (B)).
-test("P1-1 required#1: realistic single connected seat, no dispatch info, NO ownership evidence -- counted as an active reference (was fail-open before the fix)", () => {
+// 1개, 소유권 증거 없음) -- 증거 없는 connected 좌석은 활성참조로 세야
+// 한다(§2-A).
+test("required#3: realistic single connected seat, NO ownership evidence -- counted as an active reference", () => {
   const opts = fullyPresentOpts({
     execFn: (argv) => {
       if (argv[0] === "worktree") return orcaWorktreeListResponse([WT]);
-      if (argv[0] === "terminal") {
-        return orcaTerminalListResponse([SELF_ENTRY]);
-      }
-      if (argv[0] === "orchestration" && argv[1] === "task-list") {
-        return taskListDispatchedResponse([]);
-      }
+      if (argv[0] === "terminal") return orcaTerminalListResponse([SELF_ENTRY]);
       throw new Error("unexpected");
     },
     // existingSeatHandle intentionally omitted -- no ownership evidence.
@@ -178,16 +163,11 @@ test("P1-1 required#1: realistic single connected seat, no dispatch info, NO own
   assert.equal(JSON.stringify(inv).includes("term_self"), false);
 });
 
-// P1-1 필수 테스트 #2: task-list/dispatch-show 조회 실패 -> observable:false
-// (fail-closed) -- "필드가 없으니 참조 0"으로 접지 않는다.
-test("P1-1 required#2: task-list query failure -- activeReferences.observable false (fail-closed, not folded to 0)", () => {
+test("observeTeardownInventory: terminal-list query failure -- activeReferences.observable false (fail-closed, not folded to 0)", () => {
   const opts = fullyPresentOpts({
     execFn: (argv) => {
       if (argv[0] === "worktree") return orcaWorktreeListResponse([WT]);
-      if (argv[0] === "terminal") return orcaTerminalListResponse([SELF_ENTRY]);
-      if (argv[0] === "orchestration" && argv[1] === "task-list") {
-        return { ok: false, reason: "orca down" };
-      }
+      if (argv[0] === "terminal") return { ok: false, reason: "orca down" };
       throw new Error("unexpected");
     },
     existingSeatHandle: SELF_ENTRY.handle,
@@ -196,35 +176,13 @@ test("P1-1 required#2: task-list query failure -- activeReferences.observable fa
   assert.equal(inv.activeReferences.observable, false);
 });
 
-test("P1-1 required#2b: dispatch-show query failure for a dispatched task -- activeReferences.observable false (fail-closed)", () => {
+// 소유권 증거(existingSeatHandle)로 대상 좌석 자신만 존재 -- 그 좌석은
+// 활성참조로 세지 않는다(paired-good 전제).
+test("required#3b: single connected seat WITH ownership evidence (existingSeatHandle matches it) -- not counted as an active reference", () => {
   const opts = fullyPresentOpts({
     execFn: (argv) => {
       if (argv[0] === "worktree") return orcaWorktreeListResponse([WT]);
       if (argv[0] === "terminal") return orcaTerminalListResponse([SELF_ENTRY]);
-      if (argv[0] === "orchestration" && argv[1] === "task-list") {
-        return taskListDispatchedResponse([{ id: "task_x" }]);
-      }
-      if (argv[0] === "orchestration" && argv[1] === "dispatch-show") {
-        return { ok: false, reason: "not found" };
-      }
-      throw new Error("unexpected");
-    },
-    existingSeatHandle: SELF_ENTRY.handle,
-  });
-  const inv = observeTeardownInventory({ worktreePath: WT }, opts);
-  assert.equal(inv.activeReferences.observable, false);
-});
-
-// P1-1 필수 테스트 #3: 소유권 증거(existingSeatHandle)로 대상 좌석 자신만
-// 존재 -- 그 좌석은 활성참조로 세지 않는다(paired-good 전제).
-test("P1-1 required#3: single connected seat WITH ownership evidence (existingSeatHandle matches it) -- not counted as an active reference", () => {
-  const opts = fullyPresentOpts({
-    execFn: (argv) => {
-      if (argv[0] === "worktree") return orcaWorktreeListResponse([WT]);
-      if (argv[0] === "terminal") return orcaTerminalListResponse([SELF_ENTRY]);
-      if (argv[0] === "orchestration" && argv[1] === "task-list") {
-        return taskListDispatchedResponse([]);
-      }
       throw new Error("unexpected");
     },
     existingSeatHandle: SELF_ENTRY.handle,
@@ -248,9 +206,6 @@ test("observeTeardownInventory: a second connected seat (not proven to be self) 
       if (argv[0] === "terminal") {
         return orcaTerminalListResponse([SELF_ENTRY, other]);
       }
-      if (argv[0] === "orchestration" && argv[1] === "task-list") {
-        return taskListDispatchedResponse([]);
-      }
       throw new Error("unexpected");
     },
     existingSeatHandle: SELF_ENTRY.handle,
@@ -260,26 +215,32 @@ test("observeTeardownInventory: a second connected seat (not proven to be self) 
   assert.equal(JSON.stringify(inv).includes("term_other"), false);
 });
 
-test("observeTeardownInventory: (A) a dispatch-confirmed pane key on the target worktree counts as an active reference even for the self-excluded seat", () => {
-  const selfPaneKey = `${SELF_ENTRY.tabId}:${SELF_ENTRY.leafId}`;
+// required#2 (coder-task.md §3): pty 문자열형 tabId/leafId(실측값 형태,
+// 둘이 동일값)를 가진 실형식 좌석이라도 handle 불일치면 활성참조로 센다
+// -- tabId/leafId는 판정에 전혀 관여하지 않는다는 것을 고정한다(pane key
+// 조립이 되살아나면 이 시험이 깨진다).
+test("required#2: pty-string tabId/leafId (identical values) never influence the verdict -- only handle identity matters", () => {
+  const ptyString =
+    "pty:e841ec57-d1b5-4be0-a44b-2023793e7d33::C:/some/worktree@@027e1972";
+  const self = { ...SELF_ENTRY, tabId: ptyString, leafId: ptyString };
+  const other = {
+    handle: "term_other",
+    worktreePath: WT,
+    tabId: ptyString,
+    leafId: ptyString,
+    connected: true,
+  };
   const opts = fullyPresentOpts({
     execFn: (argv) => {
       if (argv[0] === "worktree") return orcaWorktreeListResponse([WT]);
-      if (argv[0] === "terminal") return orcaTerminalListResponse([SELF_ENTRY]);
-      if (argv[0] === "orchestration" && argv[1] === "task-list") {
-        return taskListDispatchedResponse([{ id: "task_x" }]);
-      }
-      if (argv[0] === "orchestration" && argv[1] === "dispatch-show") {
-        return dispatchShowResponse(selfPaneKey);
-      }
+      if (argv[0] === "terminal")
+        return orcaTerminalListResponse([self, other]);
       throw new Error("unexpected");
     },
-    existingSeatHandle: SELF_ENTRY.handle,
+    existingSeatHandle: self.handle,
   });
   const inv = observeTeardownInventory({ worktreePath: WT }, opts);
-  // self-exclusion(B) alone would have made this 0 -- (A)'s dispatch record
-  // overrides it: this seat still has an unfinished dispatch attached.
-  assert.equal(inv.activeReferences.count, 1);
+  assert.equal(inv.activeReferences.count, 1); // "other" only, despite identical tabId/leafId
 });
 
 test("observeTeardownInventory: workingTree flags -- dirty/untracked/unmerged parsed from git status --porcelain lines", () => {
@@ -331,9 +292,6 @@ test("observeTeardownInventory: never leaks a raw terminal handle or worktree pa
           },
         ]);
       }
-      if (argv[0] === "orchestration" && argv[1] === "task-list") {
-        return taskListDispatchedResponse([]);
-      }
       throw new Error("unexpected");
     },
   });
@@ -375,4 +333,30 @@ test("build*Command helpers -- all read-only 'list'/'status' verbs, never rm/clo
     assert.equal(argv.includes("close"), false);
     assert.equal(argv.includes("create"), false);
   }
+});
+
+// required#1 (coder-task.md §3): argv 부재 단언 -- observeTeardownInventory
+// 는 어떤 입력에서도 `orchestration task-list`/`dispatch-show` argv를
+// 만들지 않는다(그 명령을 만드는 코드 자체가 삭제됐다). fullyPresentOpts의
+// execFn은 "worktree"/"terminal" 이외의 argv[0]에 대해 즉시 throw하므로,
+// 이 시험이 통과한다는 것 자체가 이미 그 부재를 증명하지만, 명시적으로도
+// 한 번 더 고정한다(호출 목록 전수 검사).
+test("required#1: observeTeardownInventory never issues orchestration task-list/dispatch-show argv", () => {
+  const calls = [];
+  const opts = fullyPresentOpts({
+    execFn: (argv) => {
+      calls.push(argv);
+      if (argv[0] === "worktree") return orcaWorktreeListResponse([WT]);
+      if (argv[0] === "terminal") return orcaTerminalListResponse([SELF_ENTRY]);
+      throw new Error(`unexpected execFn argv ${JSON.stringify(argv)}`);
+    },
+    existingSeatHandle: SELF_ENTRY.handle,
+  });
+  observeTeardownInventory({ worktreePath: WT }, opts);
+  const forbidden = calls.filter(
+    (a) =>
+      a[0] === "orchestration" &&
+      (a[1] === "task-list" || a[1] === "dispatch-show"),
+  );
+  assert.deepEqual(forbidden, []);
 });

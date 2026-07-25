@@ -22,7 +22,6 @@ import {
   terminalListStub,
   terminalEntry,
   gitWorktreeListOutput,
-  taskListDispatchedStub,
   eligibleTeardownCtx,
   staticEligibleOpts,
   togglingEligibleOpts,
@@ -91,7 +90,6 @@ test("mutation #3: git present / orca absent / dir present -- SPLIT_STATE, sink 
   const execFn = fakeExecFn({
     list: { ok: true, result: { worktrees: [] } }, // orca: absent
     "terminal-list": terminalListStub([terminalEntry()]),
-    "task-list": taskListDispatchedStub([]),
   });
   const gitFn = fakeGitFn({
     worktree: gitWorktreeListOutput([VALID_WORKTREE]), // git: present
@@ -116,10 +114,11 @@ test("mutation #3: git present / orca absent / dir present -- SPLIT_STATE, sink 
 // ---------------------------------------------------------------------------
 // #4 -- 활성참조 guard
 // ---------------------------------------------------------------------------
-// HYK-171 사이클4b-1 재작업(streak 1, REVIEW review-1 P1-1): 실 CLI에
-// `activeDispatch` 필드가 없으므로(실측), 이 시험은 "대상 좌석 자신(소유권
-// 증거로 제외됨) + 그 옆에 진짜로 연결된 *다른* 좌석 하나"로 활성참조를
-// 만든다 -- 이게 실제로 관측 가능한 유일한 신호(connected 다중 좌석)다.
+// HYK-171 사이클4b-1 재작업3(사람 게이트 결정): 활성참조는 이제 connected+
+// handle 소유권 증거만 본다(pane key/tab/leaf 추정 전부 삭제). 이 시험은
+// "대상 좌석 자신(소유권 증거로 제외됨) + 그 옆에 진짜로 연결된 *다른*
+// 좌석 하나"로 활성참조를 만든다 -- 이게 실제로 관측 가능한 유일한 신호
+// (connected 다중 좌석, handle 불일치)다.
 test("mutation #4: a second connected seat on the same worktree (not proven to be self) -- ACTIVE_REFERENCE, sink 0, the blocking reference's token is in evidence", () => {
   const self = terminalEntry();
   const other = terminalEntry({
@@ -199,7 +198,6 @@ test("mutation #6c: requireDurableEvidence policy + no corroborating orca worktr
     // no `id` field on the entry -- observeOrcaLayer must yield worktreeId:null
     list: { ok: true, result: { worktrees: [{ path: VALID_WORKTREE }] } },
     "terminal-list": terminalListStub([terminalEntry()]),
-    "task-list": taskListDispatchedStub([]),
   });
   const gitFn = fakeGitFn({
     worktree: gitWorktreeListOutput([VALID_WORKTREE]),
@@ -207,7 +205,11 @@ test("mutation #6c: requireDurableEvidence policy + no corroborating orca worktr
   });
   const existsFn = () => true;
   const ctx = eligibleTeardownCtx({
-    policy: { protectedTargets: [], requireDurableEvidence: true },
+    policy: {
+      protectedTargets: [],
+      dispatchCorrelationProven: true,
+      requireDurableEvidence: true,
+    },
   });
   const r = teardownSeat(ctx, {
     execFn,
@@ -330,7 +332,6 @@ test("mutation #11: rm reports ok:true but post-observe is split (git absent / o
   const execFn = fakeExecFn({
     list: managedWorktreeStub([VALID_WORKTREE]), // orca layer: stays present after rm
     "terminal-list": terminalListStub([terminalEntry()]),
-    "task-list": taskListDispatchedStub([]),
     close: { ok: true },
     rm: () => {
       state.removed = true;
@@ -362,6 +363,105 @@ test("mutation #11: rm reports ok:true but post-observe is split (git absent / o
     ),
     false,
   );
+});
+
+// ---------------------------------------------------------------------------
+// HYK-171 사이클4b-1 재작업3(사람 게이트 결정, coder-task.md §3) -- 신규
+// 필수 시험 4종
+// ---------------------------------------------------------------------------
+
+// required#1: argv 부재 단언 -- 관측·판정·teardown 전 경로 어디에서도
+// `orchestration task-list`/`dispatch-show` argv가 생성되지 않는다(호출
+// 목록 전수 검사). paired-good 성공 경로(가장 많은 execFn 호출이 나오는
+// 경로)로 구동해 그 전수를 검사한다 -- pane key 조립이 되살아나면 이
+// 두 명령 중 하나가 다시 나타난다.
+test("required#1: no orchestration task-list/dispatch-show argv anywhere in the full successful teardown path", () => {
+  const opts = togglingEligibleOpts();
+  teardownSeat(eligibleTeardownCtx(), opts);
+  const forbidden = opts.execFn.calls.filter(
+    (a) =>
+      a[0] === "orchestration" &&
+      (a[1] === "task-list" || a[1] === "dispatch-show"),
+  );
+  assert.deepEqual(forbidden, []);
+});
+
+// required#2: pane key 조립 부재 -- pty 문자열형 tabId/leafId(실측값 형태:
+// `pty:<worktreeId>@@<hash>`, 둘이 동일값)를 가진 실형식 좌석이라도 handle
+// 불일치면 활성참조로 세야 한다(= pane key 추측이 되살아나면 이 시험이
+// RED가 된다 -- 예전 코드였다면 tabId/leafId를 조합해 무언가 다른 판단을
+// 시도했을 것이다. 지금은 그 필드 자체를 아예 보지 않는다).
+test("required#2: pty-string tabId/leafId (identical values, REVIEW review-2 P1-1b's exact shape) never influence the verdict -- handle mismatch alone still counts as an active reference", () => {
+  const ptyString =
+    "pty:e841ec57-d1b5-4be0-a44b-2023793e7d33::C:/some/worktree@@027e1972";
+  const self = terminalEntry({
+    handle: "term_self",
+    tabId: ptyString,
+    leafId: ptyString,
+  });
+  const other = terminalEntry({
+    handle: "term_other",
+    tabId: ptyString,
+    leafId: ptyString,
+  });
+  const opts = staticEligibleOpts({
+    terminalEntries: [self, other],
+    existingSeatHandle: self.handle,
+  });
+  const r = teardownSeat(eligibleTeardownCtx(), opts);
+  assert.equal(r.judged.eligibility, ELIGIBILITY.ACTIVE_REFERENCE);
+  assert.equal(r.before.activeReferences.count, 1); // only "other", "self" excluded by handle
+  assert.equal(noDestructiveCalls(opts.execFn), true);
+});
+
+// required#3: 소유권 증거 없음 -- 유일한 connected 좌석도 활성참조(기존
+// P1-1 required#1과 동형, teardownSeat 레벨에서 재확인).
+test("required#3: no ownership evidence (existingSeatHandle omitted) -- the sole connected seat on the worktree still counts as an active reference", () => {
+  // `null` (not `undefined`) forces "no evidence" -- staticEligibleOpts's
+  // default parameter only kicks in for `undefined`, so an explicit `null`
+  // is required to actually suppress the default self-match.
+  const opts = staticEligibleOpts({ existingSeatHandle: null });
+  const r = teardownSeat(eligibleTeardownCtx(), opts);
+  assert.equal(r.judged.eligibility, ELIGIBILITY.ACTIVE_REFERENCE);
+  assert.equal(r.before.activeReferences.count, 1);
+  assert.equal(noDestructiveCalls(opts.execFn), true);
+});
+
+// required#4: 역량 전제조건(dispatchCorrelationProven) strict === true.
+// armed strict와 동형 -- 생략/false/문자열 "true"/숫자 1 전부 차단.
+for (const [label, value] of [
+  ["omitted", undefined],
+  ["false", false],
+  ["string 'true'", "true"],
+  ["number 1", 1],
+]) {
+  test(`required#4 (dispatchCorrelationProven ${label}): blocked -- EVIDENCE_NOT_DURABLE / DISPATCH_CORRELATION_UNPROVEN / zero destructive argv`, () => {
+    const opts = staticEligibleOpts();
+    const policy = { protectedTargets: [] };
+    if (value !== undefined) policy.dispatchCorrelationProven = value;
+    const ctx = eligibleTeardownCtx({ policy });
+    const r = teardownSeat(ctx, opts);
+    assert.equal(r.ok, false);
+    assert.equal(r.judged.eligibility, ELIGIBILITY.EVIDENCE_NOT_DURABLE);
+    assert.equal(
+      r.judged.reason,
+      TEARDOWN_REASON.DISPATCH_CORRELATION_UNPROVEN,
+    );
+    assert.equal(noDestructiveCalls(opts.execFn), true);
+  });
+}
+
+test("required#4b: dispatchCorrelationProven === true passes that guard (does not by itself force allowSink true -- other axes still apply)", () => {
+  const opts = staticEligibleOpts();
+  const ctx = eligibleTeardownCtx({
+    policy: { protectedTargets: [], dispatchCorrelationProven: true },
+  });
+  const r = teardownSeat(ctx, opts);
+  assert.notEqual(
+    r.judged.reason,
+    TEARDOWN_REASON.DISPATCH_CORRELATION_UNPROVEN,
+  );
+  assert.equal(r.judged.allowSink, true);
 });
 
 // ---------------------------------------------------------------------------

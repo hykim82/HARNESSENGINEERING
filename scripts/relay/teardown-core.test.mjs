@@ -12,6 +12,12 @@ import {
 
 // HYK-171 사이클4b-1 -- teardown-core.mjs 단위시험. 순수 함수라 fake
 // execFn/gitFn/existsFn조차 필요 없다(입력 봉투를 직접 손으로 만든다).
+//
+// HYK-171 사이클4b-1 재작업3(사람 게이트 결정, coder-task.md §2-B): 대부분의
+// 시험은 정책에 `dispatchCorrelationProven: true`를 명시해야 한다 -- 이
+// 값이 없으면(프로덕션 기본) 그 자체로 항상 차단되므로, "다른 축을
+// 독립적으로 시험"하려는 baseline들이 전부 이 새 축에서 먼저 막힌다.
+// 전용 시험(맨 아래 §dispatchCorrelationProven)만 이 값을 일부러 뺀다.
 
 function baseInventory(overrides = {}) {
   return {
@@ -44,7 +50,7 @@ function baseInventory(overrides = {}) {
 test("judgeTeardown: fully consistent-present + eligible -- allowSink true", () => {
   const r = judgeTeardown({
     inventory: baseInventory(),
-    policy: { protectedTargets: [] },
+    policy: { protectedTargets: [], dispatchCorrelationProven: true },
   });
   assert.equal(r.observation, OBSERVATION.CONSISTENT_PRESENT);
   assert.equal(r.eligibility, ELIGIBILITY.ELIGIBLE);
@@ -69,7 +75,10 @@ test("judgeTeardown: active reference (count>0) blocks even with all layers pres
   const inv = baseInventory({
     activeReferences: { count: 1, tokens: ["tok-1"], observable: true },
   });
-  const r = judgeTeardown({ inventory: inv, policy: { protectedTargets: [] } });
+  const r = judgeTeardown({
+    inventory: inv,
+    policy: { protectedTargets: [], dispatchCorrelationProven: true },
+  });
   assert.equal(r.eligibility, ELIGIBILITY.ACTIVE_REFERENCE);
   assert.equal(r.allowSink, false);
   assert.deepEqual(r.evidence.activeReferenceTokens, ["tok-1"]);
@@ -84,7 +93,10 @@ test("judgeTeardown: dirty working tree blocks with DIRTY_WORKING_TREE reason", 
       observable: true,
     },
   });
-  const r = judgeTeardown({ inventory: inv, policy: { protectedTargets: [] } });
+  const r = judgeTeardown({
+    inventory: inv,
+    policy: { protectedTargets: [], dispatchCorrelationProven: true },
+  });
   assert.equal(r.eligibility, ELIGIBILITY.DIRTY_OR_UNMERGED);
   assert.equal(r.reason, REASON.DIRTY_WORKING_TREE);
   assert.equal(r.allowSink, false);
@@ -99,7 +111,10 @@ test("judgeTeardown: unmerged working tree blocks with a distinct UNMERGED_WORKI
       observable: true,
     },
   });
-  const r = judgeTeardown({ inventory: inv, policy: { protectedTargets: [] } });
+  const r = judgeTeardown({
+    inventory: inv,
+    policy: { protectedTargets: [], dispatchCorrelationProven: true },
+  });
   assert.equal(r.eligibility, ELIGIBILITY.DIRTY_OR_UNMERGED);
   assert.equal(r.reason, REASON.UNMERGED_WORKING_TREE);
   assert.equal(r.allowSink, false);
@@ -109,7 +124,10 @@ test("judgeTeardown: split state (git present, orca absent, dir present) -- SPLI
   const inv = baseInventory({
     layers: { git: "present", orca: "absent", dir: "present" },
   });
-  const r = judgeTeardown({ inventory: inv, policy: { protectedTargets: [] } });
+  const r = judgeTeardown({
+    inventory: inv,
+    policy: { protectedTargets: [], dispatchCorrelationProven: true },
+  });
   assert.equal(r.observation, OBSERVATION.SPLIT_STATE);
   assert.equal(r.allowSink, false);
   assert.equal(r.reason, REASON.SPLIT_STATE);
@@ -119,7 +137,10 @@ test("judgeTeardown: one unobservable layer -- UNOBSERVABLE regardless of the ot
   const inv = baseInventory({
     layers: { git: "unobservable", orca: "present", dir: "present" },
   });
-  const r = judgeTeardown({ inventory: inv, policy: { protectedTargets: [] } });
+  const r = judgeTeardown({
+    inventory: inv,
+    policy: { protectedTargets: [], dispatchCorrelationProven: true },
+  });
   assert.equal(r.observation, OBSERVATION.UNOBSERVABLE);
   assert.equal(r.allowSink, false);
 });
@@ -128,7 +149,10 @@ test("judgeTeardown: activeReferences.observable:false is treated as UNOBSERVABL
   const inv = baseInventory({
     activeReferences: { count: 0, tokens: [], observable: false },
   });
-  const r = judgeTeardown({ inventory: inv, policy: { protectedTargets: [] } });
+  const r = judgeTeardown({
+    inventory: inv,
+    policy: { protectedTargets: [], dispatchCorrelationProven: true },
+  });
   assert.equal(r.observation, OBSERVATION.UNOBSERVABLE);
   assert.equal(r.allowSink, false);
 });
@@ -142,7 +166,10 @@ test("judgeTeardown: workingTree.observable:false is treated as UNOBSERVABLE", (
       observable: false,
     },
   });
-  const r = judgeTeardown({ inventory: inv, policy: { protectedTargets: [] } });
+  const r = judgeTeardown({
+    inventory: inv,
+    policy: { protectedTargets: [], dispatchCorrelationProven: true },
+  });
   assert.equal(r.observation, OBSERVATION.UNOBSERVABLE);
   assert.equal(r.allowSink, false);
 });
@@ -151,7 +178,10 @@ test("judgeTeardown: consistent-absent (already gone) is not treated as success 
   const inv = baseInventory({
     layers: { git: "absent", orca: "absent", dir: "absent" },
   });
-  const r = judgeTeardown({ inventory: inv, policy: { protectedTargets: [] } });
+  const r = judgeTeardown({
+    inventory: inv,
+    policy: { protectedTargets: [], dispatchCorrelationProven: true },
+  });
   assert.equal(r.observation, OBSERVATION.CONSISTENT_ABSENT);
   assert.equal(r.execution, EXECUTION.NOT_ATTEMPTED);
   assert.equal(r.allowSink, false);
@@ -200,7 +230,10 @@ test("judgeTeardown: fail-closed on schema version mismatch", () => {
 test("judgeTeardown: fail-closed when target.worktreeId key is entirely absent (not just null)", () => {
   const inv = baseInventory();
   delete inv.target.worktreeId;
-  const r = judgeTeardown({ inventory: inv, policy: { protectedTargets: [] } });
+  const r = judgeTeardown({
+    inventory: inv,
+    policy: { protectedTargets: [], dispatchCorrelationProven: true },
+  });
   assert.equal(r.observation, OBSERVATION.UNOBSERVABLE);
   assert.equal(r.allowSink, false);
   assert.equal(r.reason, REASON.SCHEMA_INVALID);
@@ -214,7 +247,10 @@ test("judgeTeardown: fail-closed when target.worktreeId has a non-string, non-nu
       repoId: null,
     },
   });
-  const r = judgeTeardown({ inventory: inv, policy: { protectedTargets: [] } });
+  const r = judgeTeardown({
+    inventory: inv,
+    policy: { protectedTargets: [], dispatchCorrelationProven: true },
+  });
   assert.equal(r.allowSink, false);
   assert.equal(r.reason, REASON.SCHEMA_INVALID);
 });
@@ -222,7 +258,10 @@ test("judgeTeardown: fail-closed when target.worktreeId has a non-string, non-nu
 test("judgeTeardown: fail-closed when target.repoId key is entirely absent", () => {
   const inv = baseInventory();
   delete inv.target.repoId;
-  const r = judgeTeardown({ inventory: inv, policy: { protectedTargets: [] } });
+  const r = judgeTeardown({
+    inventory: inv,
+    policy: { protectedTargets: [], dispatchCorrelationProven: true },
+  });
   assert.equal(r.allowSink, false);
   assert.equal(r.reason, REASON.SCHEMA_INVALID);
 });
@@ -235,7 +274,10 @@ test("judgeTeardown: fail-closed when target.repoId has a non-string, non-null t
       repoId: { nested: true },
     },
   });
-  const r = judgeTeardown({ inventory: inv, policy: { protectedTargets: [] } });
+  const r = judgeTeardown({
+    inventory: inv,
+    policy: { protectedTargets: [], dispatchCorrelationProven: true },
+  });
   assert.equal(r.allowSink, false);
   assert.equal(r.reason, REASON.SCHEMA_INVALID);
 });
@@ -247,7 +289,10 @@ test("judgeTeardown: explicit null on both target.worktreeId and target.repoId i
   const inv = baseInventory({
     target: { canonicalPathDigest: "digest-a", worktreeId: null, repoId: null },
   });
-  const r = judgeTeardown({ inventory: inv, policy: { protectedTargets: [] } });
+  const r = judgeTeardown({
+    inventory: inv,
+    policy: { protectedTargets: [], dispatchCorrelationProven: true },
+  });
   assert.equal(r.allowSink, true);
 });
 
@@ -288,7 +333,11 @@ test("judgeTeardown: expectedWorktreeId matching the observed id is not blocked 
   });
   const r = judgeTeardown({
     inventory: inv,
-    policy: { protectedTargets: [], expectedWorktreeId: "wt-1" },
+    policy: {
+      protectedTargets: [],
+      dispatchCorrelationProven: true,
+      expectedWorktreeId: "wt-1",
+    },
   });
   assert.equal(r.allowSink, true);
 });
@@ -299,10 +348,15 @@ test("judgeTeardown: requireDurableEvidence:true blocks a null worktreeId even w
   });
   const r = judgeTeardown({
     inventory: inv,
-    policy: { protectedTargets: [], requireDurableEvidence: true },
+    policy: {
+      protectedTargets: [],
+      dispatchCorrelationProven: true,
+      requireDurableEvidence: true,
+    },
   });
   assert.equal(r.observation, OBSERVATION.CONSISTENT_PRESENT);
   assert.equal(r.eligibility, ELIGIBILITY.EVIDENCE_NOT_DURABLE);
+  assert.equal(r.reason, REASON.EVIDENCE_NOT_DURABLE);
   assert.equal(r.allowSink, false);
 });
 
@@ -310,7 +364,11 @@ test("judgeTeardown: requireDurableEvidence:true with a non-null worktreeId pass
   const inv = baseInventory();
   const r = judgeTeardown({
     inventory: inv,
-    policy: { protectedTargets: [], requireDurableEvidence: true },
+    policy: {
+      protectedTargets: [],
+      dispatchCorrelationProven: true,
+      requireDurableEvidence: true,
+    },
   });
   assert.equal(r.allowSink, true);
 });
@@ -325,10 +383,49 @@ test("judgeTeardown: protectedTargets exact match only -- a digest that merely s
   });
   const r = judgeTeardown({
     inventory: inv,
-    policy: { protectedTargets: ["abc123"] },
+    policy: { protectedTargets: ["abc123"], dispatchCorrelationProven: true },
   });
   assert.notEqual(r.eligibility, ELIGIBILITY.PROTECTED);
   assert.equal(r.allowSink, true);
+});
+
+// ---- dispatchCorrelationProven (HYK-171 사이클4b-1 재작업3, 사람 게이트
+// 결정, coder-task.md §2-B) -- 배정(dispatch)↔좌석 상관은 증명 불가라
+// 명시적 전제조건으로만 표현한다. armed strict와 동형: `=== true`만 통과.
+for (const [label, value] of [
+  ["omitted", undefined],
+  ["false", false],
+  ["string 'true'", "true"],
+  ["number 1", 1],
+]) {
+  test(`judgeTeardown: dispatchCorrelationProven ${label} -- blocked with DISPATCH_CORRELATION_UNPROVEN, allowSink false`, () => {
+    const inv = baseInventory();
+    const policy = { protectedTargets: [] };
+    if (value !== undefined) policy.dispatchCorrelationProven = value;
+    const r = judgeTeardown({ inventory: inv, policy });
+    assert.equal(r.eligibility, ELIGIBILITY.EVIDENCE_NOT_DURABLE);
+    assert.equal(r.reason, REASON.DISPATCH_CORRELATION_UNPROVEN);
+    assert.equal(r.allowSink, false);
+  });
+}
+
+test("judgeTeardown: dispatchCorrelationProven:true (strict boolean) passes that guard", () => {
+  const inv = baseInventory();
+  const r = judgeTeardown({
+    inventory: inv,
+    policy: { protectedTargets: [], dispatchCorrelationProven: true },
+  });
+  assert.notEqual(r.reason, REASON.DISPATCH_CORRELATION_UNPROVEN);
+  assert.equal(r.allowSink, true);
+});
+
+test("judgeTeardown: PROTECTED still wins over dispatchCorrelationProven being unproven", () => {
+  const inv = baseInventory();
+  const r = judgeTeardown({
+    inventory: inv,
+    policy: { protectedTargets: [inv.target.canonicalPathDigest] },
+  });
+  assert.equal(r.eligibility, ELIGIBILITY.PROTECTED);
 });
 
 // ---- judgePostConditions ----

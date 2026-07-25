@@ -43,6 +43,7 @@ export const REASON = Object.freeze({
   UNMERGED_WORKING_TREE: "TEARDOWN_UNMERGED_WORKING_TREE",
   EVIDENCE_NOT_DURABLE: "TEARDOWN_EVIDENCE_NOT_DURABLE",
   TARGET_IDENTITY_MISMATCH: "TEARDOWN_TARGET_IDENTITY_MISMATCH",
+  DISPATCH_CORRELATION_UNPROVEN: "TEARDOWN_DISPATCH_CORRELATION_UNPROVEN",
   UNOBSERVABLE_LAYER: "TEARDOWN_UNOBSERVABLE_LAYER",
   SPLIT_STATE: "TEARDOWN_SPLIT_STATE",
   CONSISTENT_ABSENT: "TEARDOWN_CONSISTENT_ABSENT",
@@ -185,6 +186,33 @@ function checkTargetIdentity(inventory, policy) {
   };
 }
 
+// HYK-171 사이클4b-1 재작업3(사람 게이트 결정, coder-task.md §2-B): 배정
+// (dispatch)이 이 좌석에서 여전히 활성인지는 **현재 읽기 API로 관측할 수
+// 없다**(§0 실측: pane key 상관 자체가 증명 불가). 그 사실을 가짜 관측이나
+// 상시-UNOBSERVABLE 상수로 숨기지 않고, "증명됐다고 호출자가 명시적으로
+// 선언하지 않는 한 차단"하는 전제조건으로 정직하게 표현한다.
+//
+// **기본값이 없다**(policy.dispatchCorrelationProven 미제공 = 차단) --
+// armed strict(`=== true`)와 동형으로 truthy 관용(문자열 "true"/1)도
+// 전부 거부한다. 이 사이클의 프로덕션 호출자는 아무도 이 값을 true로
+// 주지 않는다 -- paired-good 테스트만 합성 역량 선언으로 명시한다.
+// **4b-2가 권위 있는 배정↔좌석 상관 수단을 만들기 전까지 이 전제조건을
+// 절대 완화하지 않는다**(주석 자체가 그 다짐이다 -- 이 줄을 지우거나
+// 조건을 truthy로 바꾸는 변경은 이 사이클의 판단을 뒤집는 것이다).
+function checkDispatchCorrelationProven(inventory, policy) {
+  if (policy.dispatchCorrelationProven === true) return null;
+  return {
+    eligibility: ELIGIBILITY.EVIDENCE_NOT_DURABLE,
+    reason: REASON.DISPATCH_CORRELATION_UNPROVEN,
+    evidence: buildEvidence(inventory, REASON.DISPATCH_CORRELATION_UNPROVEN, {
+      note:
+        "배정(dispatch)이 이 좌석에서 활성인지는 현재 읽기 API로 증명 " +
+        "불가능하다(pane key 상관 없음, coder-task.md §0 실측) -- " +
+        "dispatchCorrelationProven이 명시적으로 true가 아니면 차단한다.",
+    }),
+  };
+}
+
 function classifyEligibility(inventory, policy) {
   if (isProtectedTarget(inventory, policy)) {
     return {
@@ -197,6 +225,11 @@ function classifyEligibility(inventory, policy) {
   }
   const identityMismatch = checkTargetIdentity(inventory, policy);
   if (identityMismatch) return identityMismatch;
+  const dispatchCorrelationBlocked = checkDispatchCorrelationProven(
+    inventory,
+    policy,
+  );
+  if (dispatchCorrelationBlocked) return dispatchCorrelationBlocked;
   if (
     inventory.activeReferences.observable !== true ||
     inventory.activeReferences.count > 0
@@ -265,7 +298,8 @@ function classifyEligibility(inventory, policy) {
 }
 
 // judgeTeardown({ inventory, policy }) -- policy: { protectedTargets: string[],
-// requireDurableEvidence?: boolean }. 순수 판정, 부작용 0.
+// requireDurableEvidence?: boolean, expectedWorktreeId?: string,
+// dispatchCorrelationProven?: boolean }. 순수 판정, 부작용 0.
 export function judgeTeardown({ inventory, policy } = {}) {
   const p = isPlainObject(policy) ? policy : {};
   if (!isValidInventoryShape(inventory)) {

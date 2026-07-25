@@ -60,10 +60,11 @@ export function managedWorktreeStub(paths = [VALID_WORKTREE]) {
 export function terminalListStub(entries) {
   return { ok: true, result: { terminals: entries } };
 }
-// HYK-171 사이클4b-1 재작업(streak 1): `activeDispatch` 필드 삭제(실
-// `orca terminal list --json`에 존재하지 않는다, REVIEW review-1 P1-1
-// 실측). `leafId` 추가(tabId와 함께 pane key `${tabId}:${leafId}`를
-// 구성한다 -- 이 태스크 수행 중 라이브 조회로 실측 확인).
+// HYK-171 사이클4b-1 재작업3(사람 게이트 결정): `tabId`/`leafId`는 이제
+// 어떤 판정에도 쓰이지 않는다(pane key 조립 삭제, coder-task.md §0/§1) --
+// 그래도 필드 자체는 실 CLI가 실제로 주는 값이라 fixture에 남겨둔다(테스트
+// #2가 pty 문자열형 tabId/leafId를 가진 좌석에서도 handle 불일치만으로
+// 올바르게 판정되는지 확인한다).
 export function terminalEntry(overrides = {}) {
   return {
     handle: "term_4b1",
@@ -82,43 +83,33 @@ export function gitWorktreeListOutput(paths) {
     paths.map((p) => `worktree ${p}`).join("\n") + (paths.length ? "\n" : "")
   );
 }
-// task-list --status dispatched 응답 fixture -- 기본값(빈 목록)은 "지금
-// 시스템 전체에 미완료 dispatch가 없다"는 가장 흔한 baseline이다.
-export function taskListDispatchedStub(tasks = []) {
-  return { ok: true, result: { tasks } };
-}
-export function dispatchShowStub(assigneePaneKey) {
-  return {
-    ok: true,
-    result: {
-      dispatch: {
-        assignee_pane_key: assigneePaneKey ?? null,
-      },
-    },
-  };
-}
 
-// 3층 전부 present + 활성참조 0 + working tree clean + policy가 빈 보호목록
-// 인 최소 기준선(파괴가 허용되는 상태). 각 mutation 시험은 이 기준선에서
-// 정확히 한 축만 어긋나게 만든다.
+// 3층 전부 present + 활성참조 0 + working tree clean + policy가 빈
+// 보호목록인 최소 기준선(파괴가 허용되는 상태). 각 mutation 시험은 이
+// 기준선에서 정확히 한 축만 어긋나게 만든다.
+//
+// HYK-171 사이클4b-1 재작업3(사람 게이트 결정, coder-task.md §2-B):
+// `dispatchCorrelationProven:true`를 기준선 policy에 기본 포함한다 --
+// 이 값이 없으면(프로덕션 기본) 모든 teardown이 이 새 전제조건에서
+// 막히므로, "다른 축을 독립적으로 시험"하려는 기존 mutation들이 전부
+// 이 축에서 먼저 막혀버린다. 이 값을 일부러 빼거나 다른 값을 주는 시험은
+// 각자 override한다(required test #4가 그렇게 한다).
 export function eligibleTeardownCtx(overrides = {}) {
   return {
     role: "CODER",
     worktreePath: VALID_WORKTREE,
     taskId: "task_4b1",
     armed: true,
-    policy: { protectedTargets: [] },
+    policy: { protectedTargets: [], dispatchCorrelationProven: true },
     ...overrides,
   };
 }
 
-// HYK-171 사이클4b-1 재작업(streak 1, §P1-1): 활성참조가 이제 (A) 미완료
-// dispatch(task-list+dispatch-show) 관측과 (B) 소유권 증거(existingSeatHandle)
-// 둘 다에 결속되므로, "기준선"은 그 둘도 함께 정의해야 한다 -- 기본값은
-// "시스템에 미완료 dispatch 0개"(task-list 빈 배열) + "대상 워크트리의
-// 유일한 좌석이 곧 대상 좌석 자신"(existingSeatHandle = terminalEntries[0]
-// 의 handle, 소유권 증거 제공)이다. 좌석이 여럿이거나 증거를 일부러 빼는
-// 시험은 각자 override한다.
+// HYK-171 사이클4b-1 재작업3: 활성참조는 이제 (§2-A) connected + handle
+// 소유권 증거(existingSeatHandle)만 본다 -- task-list/dispatch-show 관측이
+// 삭제됐으므로 그 stub도 함께 뺐다. 기준선은 "대상 워크트리의 유일한
+// 좌석이 곧 대상 좌석 자신"(existingSeatHandle = terminalEntries[0]의
+// handle, 소유권 증거 제공)이다.
 
 // list/terminal-list/gitFn/existsFn을 상태 토글 없이 고정(파괴 argv가
 // 절대 나가지 않아야 하는 mutation 시험용 -- rm까지 도달하지 않으므로
@@ -133,7 +124,6 @@ export function staticEligibleOpts({
   const execFn = fakeExecFn({
     list: managedWorktreeStub([worktreePath]),
     "terminal-list": terminalListStub(terminalEntries),
-    "task-list": taskListDispatchedStub([]),
     ...execStubs,
   });
   const gitFn = fakeGitFn({
@@ -161,7 +151,6 @@ export function togglingEligibleOpts({
         ? { ok: true, result: { worktrees: [] } }
         : managedWorktreeStub([worktreePath]),
     "terminal-list": terminalListStub(terminalEntries),
-    "task-list": taskListDispatchedStub([]),
     close: closeResponse,
     rm:
       rmResponse ??

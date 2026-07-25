@@ -174,10 +174,10 @@ function fakeExistsFn(map) {
 // 별로 이 기준선에서 정확히 한 항목만 어긋나게 만들어 각 guard를 독립적으로
 // 시험한다(hyk171-cycle4b1-mutation.test.mjs).
 //
-// HYK-171 사이클4b-1 재작업(streak 1, REVIEW review-1 P1-1): 활성참조가
-// 이제 task-list(미완료 dispatch)+소유권 증거(existingSeatHandle)에 결속된다
-// -- 기본값은 "미완료 dispatch 0개" + "유일한 좌석이 곧 대상 좌석 자신"
-// (existingSeatHandle = terminalEntries[0]의 handle)이다.
+// HYK-171 사이클4b-1 재작업3(사람 게이트 결정): 활성참조는 이제 connected+
+// handle 소유권 증거(existingSeatHandle)만 본다(pane key/task-list 삭제) --
+// 기본값은 "유일한 좌석이 곧 대상 좌석 자신"(existingSeatHandle =
+// terminalEntries[0]의 handle)이다.
 function eligibleInventoryOpts({
   worktreePath = VALID_WORKTREE,
   extraExecStubs = {},
@@ -188,7 +188,6 @@ function eligibleInventoryOpts({
   const execFn = fakeExecFn({
     list: managedWorktreeStub(worktreePath),
     "terminal-list": terminalListStub(terminalEntries),
-    "task-list": { ok: true, result: { tasks: [] } },
     ...extraExecStubs,
   });
   const gitFn = fakeGitFn({
@@ -1372,7 +1371,6 @@ test("A5: teardownSeat -- NOT_FOUND seat resolution issues zero close/rm/task-up
   const execFn = fakeExecFn({
     list: managedWorktreeStub(VALID_WORKTREE),
     "terminal-list": terminalListStub([]),
-    "task-list": { ok: true, result: { tasks: [] } },
   });
   const r = teardownSeat(
     {
@@ -1380,18 +1378,17 @@ test("A5: teardownSeat -- NOT_FOUND seat resolution issues zero close/rm/task-up
       worktreePath: VALID_WORKTREE,
       taskId: "task_rt1",
       armed: true,
-      policy: { protectedTargets: [] },
+      policy: { protectedTargets: [], dispatchCorrelationProven: true },
     },
     { execFn, gitFn, existsFn },
   );
   assert.equal(r.ok, false);
   assert.equal(r.phase, TEARDOWN_PHASE.RESOLVE);
   assert.equal(r.seatHandleReason, SEAT_HANDLE_REASON.NOT_FOUND);
-  // 5 read-only calls: inventory pre-observation (worktree list + terminal
-  // list for activeReferences + task-list for the dispatch-active check) +
-  // resolveSeatHandle (checkWorktreeManaged's worktree list + its own
-  // terminal list) -- zero close/rm/task-update.
-  assert.equal(execFn.calls.length, 5);
+  // 4 read-only calls: inventory pre-observation (worktree list + terminal
+  // list for activeReferences) + resolveSeatHandle (checkWorktreeManaged's
+  // worktree list + its own terminal list) -- zero close/rm/task-update.
+  assert.equal(execFn.calls.length, 4);
   assert.equal(
     execFn.calls.every(
       (a) =>
@@ -1425,7 +1422,6 @@ test("A5: teardownSeat -- AMBIGUOUS seat resolution issues zero close/rm/task-up
             terminalEntry({ handle: "term_b" }),
           ]);
     },
-    "task-list": { ok: true, result: { tasks: [] } },
   });
   const r = teardownSeat(
     {
@@ -1433,18 +1429,17 @@ test("A5: teardownSeat -- AMBIGUOUS seat resolution issues zero close/rm/task-up
       worktreePath: VALID_WORKTREE,
       taskId: "task_rt1",
       armed: true,
-      policy: { protectedTargets: [] },
+      policy: { protectedTargets: [], dispatchCorrelationProven: true },
     },
     { execFn, gitFn, existsFn },
   );
   assert.equal(r.ok, false);
   assert.equal(r.phase, TEARDOWN_PHASE.RESOLVE);
   assert.equal(r.seatHandleReason, SEAT_HANDLE_REASON.AMBIGUOUS);
-  // 5 read-only calls: inventory pre-observation (worktree list + terminal
-  // list for activeReferences + task-list for the dispatch-active check) +
-  // resolveSeatHandle (checkWorktreeManaged's worktree list + its own
-  // terminal list) -- zero close/rm/task-update.
-  assert.equal(execFn.calls.length, 5);
+  // 4 read-only calls: inventory pre-observation (worktree list + terminal
+  // list for activeReferences) + resolveSeatHandle (checkWorktreeManaged's
+  // worktree list + its own terminal list) -- zero close/rm/task-update.
+  assert.equal(execFn.calls.length, 4);
   assert.equal(
     execFn.calls.every(
       (a) =>
@@ -2348,13 +2343,16 @@ test("collectCompletionSignals: never used as completion authority -- signature 
 //    시도한다" 시험은 새 계약과 정반대라 뒤집었다.
 // ---------------------------------------------------------------------------
 
+// HYK-171 사이클4b-1 재작업3(사람 게이트 결정): policy.dispatchCorrelationProven
+// 를 기준선에 기본 포함한다 -- 미제공 시 모든 teardown이 새 전제조건(§2-B)
+// 에서 막히므로, 이 baseline을 쓰는 시험들은 명시적으로 opt-in한다.
 function teardownArmedCtx(overrides = {}) {
   return {
     role: "CODER",
     worktreePath: VALID_WORKTREE,
     taskId: "task_rt1",
     armed: true,
-    policy: { protectedTargets: [] },
+    policy: { protectedTargets: [], dispatchCorrelationProven: true },
     ...overrides,
   };
 }
@@ -2410,7 +2408,6 @@ test("teardownSeat: paired-good -- armed + eligible + post-observe all-absent --
         ? { ok: true, result: { worktrees: [] } }
         : managedWorktreeStub(VALID_WORKTREE),
     "terminal-list": terminalListStub([terminalEntry({ handle: "term_x" })]),
-    "task-list": { ok: true, result: { tasks: [] } },
     close: { ok: true },
     rm: () => {
       state.removed = true;
@@ -2474,7 +2471,6 @@ test("teardownSeat: cleanup is null and task-update is never called when no task
         ? { ok: true, result: { worktrees: [] } }
         : managedWorktreeStub(VALID_WORKTREE),
     "terminal-list": terminalListStub([terminalEntry({ handle: "term_x" })]),
-    "task-list": { ok: true, result: { tasks: [] } },
     close: { ok: true },
     rm: () => {
       state.removed = true;
@@ -2511,7 +2507,6 @@ test("teardownSeat: opts.force=true adds --force to the (still single) rm call",
         ? { ok: true, result: { worktrees: [] } }
         : managedWorktreeStub(VALID_WORKTREE),
     "terminal-list": terminalListStub([terminalEntry({ handle: "term_x" })]),
-    "task-list": { ok: true, result: { tasks: [] } },
     close: { ok: true },
     rm: () => {
       state.removed = true;
@@ -2549,7 +2544,6 @@ test("teardownSeat: tab_not_found close failure is absorbed -- rm still attempte
         ? { ok: true, result: { worktrees: [] } }
         : managedWorktreeStub(VALID_WORKTREE),
     "terminal-list": terminalListStub([terminalEntry({ handle: "term_x" })]),
-    "task-list": { ok: true, result: { tasks: [] } },
     close: FIXTURE_TAB_NOT_FOUND_RESPONSE,
     rm: () => {
       state.removed = true;
@@ -2581,7 +2575,6 @@ test("teardownSeat: a real (non-tab_not_found) close failure -- phase CLOSE, rm/
   const execFn = fakeExecFn({
     list: managedWorktreeStub(VALID_WORKTREE),
     "terminal-list": terminalListStub([terminalEntry({ handle: "term_x" })]),
-    "task-list": { ok: true, result: { tasks: [] } },
     close: { ok: false, reason: "some other failure" },
   });
   const r = teardownSeat(teardownArmedCtx(), {
@@ -2610,7 +2603,6 @@ test("teardownSeat: rm failure -- phase REMOVE, before/after snapshots preserved
   const execFn = fakeExecFn({
     list: managedWorktreeStub(VALID_WORKTREE),
     "terminal-list": terminalListStub([terminalEntry({ handle: "term_x" })]),
-    "task-list": { ok: true, result: { tasks: [] } },
     close: { ok: true },
     rm: { ok: false, reason: "orca down" },
   });
@@ -2642,7 +2634,6 @@ test("teardownSeat: rm reports ok:true but post-observe is a split state (git ab
   const execFn = fakeExecFn({
     list: managedWorktreeStub(VALID_WORKTREE), // orca layer stays "present" even after rm ok:true
     "terminal-list": terminalListStub([terminalEntry({ handle: "term_x" })]),
-    "task-list": { ok: true, result: { tasks: [] } },
     close: { ok: true },
     rm: () => {
       state.removed = true;
