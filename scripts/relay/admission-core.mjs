@@ -105,11 +105,18 @@ function checkNewIssueBoundary(gates) {
   return null;
 }
 
+// P1-2 (review-1 반려): consecutiveRejections는 명시적 non-negative safe
+// integer여야 한다 -- 문자열("2")·음수·누락은 "2 미만이니 통과"가 아니라
+// fail-closed MALFORMED_INPUT이다(그 값 자체를 신뢰할 수 없다는 뜻이지,
+// "반려 0회"라는 뜻이 아니다).
 function checkRejectStreak(gates) {
-  if (
-    isSafeCount(gates.consecutiveRejections) &&
-    gates.consecutiveRejections >= 2
-  ) {
+  if (!isSafeCount(gates.consecutiveRejections)) {
+    return deny(
+      REASON.MALFORMED_INPUT,
+      `gates.consecutiveRejections must be a non-negative safe integer, got ${JSON.stringify(gates.consecutiveRejections)}`,
+    );
+  }
+  if (gates.consecutiveRejections >= 2) {
     return deny(
       REASON.REJECT_STREAK,
       `consecutiveRejections=${gates.consecutiveRejections} >= 2`,

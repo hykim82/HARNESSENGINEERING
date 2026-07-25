@@ -15,6 +15,10 @@ import {
   makeFakeDelegation,
   DELEGATION_TASK_HASH,
   DELEGATION_IN_WINDOW_NOW,
+  withTempDir,
+  writePullAdmissionBundle,
+  pullAdmissionInput,
+  makeAllowGates,
 } from "./hyk171-cycle3a-fixtures.mjs";
 
 function freshDir() {
@@ -26,6 +30,11 @@ function cleanup(dir) {
 function countSubGrantFiles(dir) {
   return readdirSync(dir).filter((f) => f.startsWith("sub-grant-")).length;
 }
+let stableIntentSeq = 0;
+function nextStableIntentId() {
+  stableIntentSeq += 1;
+  return `stable-intent-fixture-${stableIntentSeq}`;
+}
 
 function baseRequest(overrides = {}) {
   return {
@@ -33,27 +42,53 @@ function baseRequest(overrides = {}) {
     taskHash: DELEGATION_TASK_HASH,
     role: "CODER",
     startBudgetRequested: 1,
-    stableIntentId: "stable-intent-fixture-1",
+    stableIntentId: nextStableIntentId(),
     nowMs: DELEGATION_IN_WINDOW_NOW,
     at: "t1",
     ...overrides,
   };
 }
 
+// P1-1 (review-1 반려): 이 파일의 delegation-scope 테스트(taskHash/role/
+// budget/expiry/schema)는 issueSubGrant의 ①형식검증 ②scope 체크 단계에서
+// 걸리므로 pullAdmission/gates/intentDir 없이도 여전히 유효하다(그 체크는
+// admission/claim보다 먼저 실행된다). 하지만 "실제로 발급까지 가야 하는"
+// 테스트(paired-good/store write 실패류)는 admission ALLOW + intent claim이
+// 반드시 필요하다 -- 이 헬퍼가 그 fixture 세트를 한 번에 만든다.
+function withFullPipelineRequest(overrides, fn) {
+  return withTempDir((bundleDir) => {
+    const intentDir = freshDir();
+    try {
+      const { pinPath } = writePullAdmissionBundle(bundleDir);
+      const request = baseRequest({
+        intentDir,
+        pullAdmission: pullAdmissionInput(bundleDir, pinPath),
+        gates: makeAllowGates(),
+        ...overrides,
+      });
+      return fn(request);
+    } finally {
+      cleanup(intentDir);
+    }
+  });
+}
+
 // ---- paired-good: 완전히 유효한 delegation·범위·요청 -> 정확히 1개 발급 ----
-test("issueSubGrant: fully valid delegation + in-scope request -> exactly 1 issued (paired-good)", () => {
+test("issueSubGrant: fully valid delegation + in-scope request + admission ALLOW + intent claim -> exactly 1 issued (paired-good)", () => {
   const consumptionDir = freshDir();
   const outDir = freshDir();
   try {
-    const result = issueSubGrant(baseRequest({ consumptionDir, outDir }));
-    assert.equal(result.ok, true, JSON.stringify(result));
-    assert.equal(result.issued, true);
-    assert.equal(result.reason, REASON.ISSUED);
-    assert.equal(countSubGrantFiles(outDir), 1);
-    const onDisk = JSON.parse(readFileSync(result.envelopePath, "utf8"));
-    assert.equal(onDisk.task_hash, DELEGATION_TASK_HASH);
-    assert.equal(onDisk.signature, null);
-    assert.match(onDisk.signature_note, /fake\/test delegation/);
+    withFullPipelineRequest({ consumptionDir, outDir }, (request) => {
+      const result = issueSubGrant(request);
+      assert.equal(result.ok, true, JSON.stringify(result));
+      assert.equal(result.issued, true);
+      assert.equal(result.reason, REASON.ISSUED);
+      assert.equal(countSubGrantFiles(outDir), 1);
+      const onDisk = JSON.parse(readFileSync(result.envelopePath, "utf8"));
+      assert.equal(onDisk.task_hash, DELEGATION_TASK_HASH);
+      assert.equal(onDisk.signature, null);
+      assert.match(onDisk.signature_note, /fake\/test delegation/);
+    });
   } finally {
     cleanup(consumptionDir);
     cleanup(outDir);
@@ -180,18 +215,19 @@ for (const field of [
   });
 }
 
-// ---- §6 mutation #10 b: store write 실패 -> 확정 발급 0, fail-closed ----
-test("issueSubGrant: consumption store write failure -> DENY, 0 issued (fail-closed)", () => {
+// ---- P1-1 (review-1 반려 핵심 결함, 직접 재현): 프로덕션 발급 진입점은
+// admission ALLOW 증거·stable-intent 단일승자 claim 없이는 절대 진입하지
+// 않는다. 이 그룹은 REVIEW가 grant-issuer.mjs:436/461/468을 직접 두 번
+// 호출해 grant 2개를 만들었던 그 재현을 그대로 테스트로 옮긴 것이다. ----
+test("issueSubGrant: missing stableIntentId -> DENY INTENT_CLAIM_REQUIRED, 0 issued (P1-1)", () => {
   const consumptionDir = freshDir();
   const outDir = freshDir();
   try {
-    const result = issueSubGrant(baseRequest({ consumptionDir, outDir }), {
-      writeFileFn: () => {
-        throw new Error("injected consumption store failure");
-      },
-    });
+    const result = issueSubGrant(
+      baseRequest({ consumptionDir, outDir, stableIntentId: undefined }),
+    );
     assert.equal(result.ok, false);
-    assert.equal(result.reason, REASON.DELEGATION_CONSUME_FAILED);
+    assert.equal(result.reason, REASON.INTENT_CLAIM_REQUIRED);
     assert.equal(countSubGrantFiles(outDir), 0);
   } finally {
     cleanup(consumptionDir);
@@ -199,49 +235,202 @@ test("issueSubGrant: consumption store write failure -> DENY, 0 issued (fail-clo
   }
 });
 
-// ---- §6 mutation #10 c: envelope write 실패(발급 파일 쓰기 실패) -> 0 issued,
-// 하지만 delegation은 이미 소비된 채로 남는다(사람이 판단해야 하는
-// degraded 상태 -- 이 시나리오가 바로 mutation #6 "intent claim 뒤·grant
-// 발급 前 crash"의 grant-issuer 층위 등가물이다: 재시도해도 같은
-// task_hash로는 다시 발급될 수 없다, 즉 "자동 재시도로 새 grant가 몰래
-// 튀어나옴" 0). ----
-test("issueSubGrant: envelope write failure after delegation consumed -> 0 issued this attempt, AND delegation is now consumed so a retry cannot silently double-consume (mutation #6 equivalent)", () => {
+test("issueSubGrant: missing intentDir -> DENY INTENT_CLAIM_DENIED (claim cannot be attempted without a trusted intentDir), 0 issued (P1-1)", () => {
   const consumptionDir = freshDir();
   const outDir = freshDir();
   try {
-    const failing = issueSubGrant(baseRequest({ consumptionDir, outDir }), {
-      writeFileFn: (path, content, opts) => {
-        // consumeDelegationTx의 saveStoreAtomic(consumptionDir 내부 경로)은
-        // 그대로 성공시키고, sub-grant envelope(outDir 내부 경로) 쓰기만
-        // 실패시킨다 -- "intent/delegation claim은 커밋됐지만 grant
-        // 발급까지는 못 갔다"는 crash 시점을 정확히 재현한다.
-        if (path.includes(outDir)) {
-          throw new Error("injected envelope write failure");
-        }
-        writeFileSync(path, content, opts);
-      },
-    });
-    assert.equal(failing.ok, false);
-    assert.equal(failing.reason, REASON.ENVELOPE_WRITE_FAILED);
-    assert.equal(
-      countSubGrantFiles(outDir),
-      0,
-      "0 issued on the failed attempt",
-    );
+    const result = issueSubGrant(baseRequest({ consumptionDir, outDir }));
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, REASON.INTENT_CLAIM_DENIED);
+    assert.equal(countSubGrantFiles(outDir), 0);
+  } finally {
+    cleanup(consumptionDir);
+    cleanup(outDir);
+  }
+});
 
-    // 자동 재시도 0: issueSubGrant 자신은 재시도 루프가 없다(정적으로도
-    // 확인됨 -- grant-issuer.mjs grep). "사람이 다시 부른다"를 흉내내
-    // 정상 deps로 재호출해도, delegation은 이미 consumeDelegationTx에서
-    // 소비된 채라 두 번째 발급 자체가 거부된다(같은 delegation_id+task_hash
-    // 로는 정확히 0~1개만 나온다는 계약 유지).
-    const retried = issueSubGrant(baseRequest({ consumptionDir, outDir }));
-    assert.equal(retried.ok, false);
-    assert.equal(retried.reason, REASON.DELEGATION_ALREADY_CONSUMED);
-    assert.equal(
-      countSubGrantFiles(outDir),
-      0,
-      "retry must not silently issue a grant after a crash",
+test("issueSubGrant: missing pullAdmission/gates -> DENY ADMISSION_DENIED (admission is not optional even once the intent is won), 0 issued (P1-1)", () => {
+  const consumptionDir = freshDir();
+  const outDir = freshDir();
+  const intentDir = freshDir();
+  try {
+    const result = issueSubGrant(
+      baseRequest({ consumptionDir, outDir, intentDir }),
     );
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, REASON.ADMISSION_DENIED);
+    assert.equal(countSubGrantFiles(outDir), 0);
+  } finally {
+    cleanup(consumptionDir);
+    cleanup(outDir);
+    cleanup(intentDir);
+  }
+});
+
+test("issueSubGrant: deny-gates (hardStop/newIssueBoundary/consecutiveRejections=2) block direct issuance EVEN WITH a malformed pullAdmission passed alongside -> DENY ADMISSION_DENIED, 0 issued (P1-1, exact review repro)", () => {
+  const consumptionDir = freshDir();
+  const outDir = freshDir();
+  const intentDir = freshDir();
+  try {
+    const result = issueSubGrant(
+      baseRequest({
+        consumptionDir,
+        outDir,
+        intentDir,
+        pullAdmission: {},
+        gates: {
+          hardStop: true,
+          newIssueBoundary: true,
+          consecutiveRejections: 2,
+        },
+      }),
+    );
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, REASON.ADMISSION_DENIED);
+    assert.equal(countSubGrantFiles(outDir), 0);
+  } finally {
+    cleanup(consumptionDir);
+    cleanup(outDir);
+    cleanup(intentDir);
+  }
+});
+
+test("issueSubGrant: SAME stableIntentId, two direct calls with DIFFERENT delegation_id -> total issued = 1 (P1-1, exact review repro of the rejected defect)", () => {
+  const consumptionDir = freshDir();
+  const outDir = freshDir();
+  try {
+    withFullPipelineRequest({ consumptionDir, outDir }, (request) => {
+      const first = issueSubGrant({
+        ...request,
+        delegation: makeFakeDelegation({
+          delegation_id: "review-delegation-a",
+        }),
+      });
+      const second = issueSubGrant({
+        ...request,
+        delegation: makeFakeDelegation({
+          delegation_id: "review-delegation-b",
+        }),
+      });
+      assert.equal(first.ok, true, JSON.stringify(first));
+      assert.equal(second.ok, false, JSON.stringify(second));
+      assert.equal(second.reason, REASON.INTENT_CLAIM_DENIED);
+      assert.equal(
+        countSubGrantFiles(outDir),
+        1,
+        "on-disk sub-grant file count must be exactly 1, not 2",
+      );
+    });
+  } finally {
+    cleanup(consumptionDir);
+    cleanup(outDir);
+  }
+});
+
+// ---- P1-3 (review-1 반려): 손상된 소비 레코드가 하나라도 있으면 그
+// consumptionDir(store) 전체에서 다른 delegation_id 발급도 막는다. ----
+test("issueSubGrant: a corrupted consumption record for a DIFFERENT delegation_id in the same store blocks issuance too (store-wide degraded, P1-3)", () => {
+  const consumptionDir = freshDir();
+  const outDir = freshDir();
+  try {
+    withFullPipelineRequest({ consumptionDir, outDir }, (request) => {
+      writeFileSync(
+        join(consumptionDir, "delegation-consume-corrupted.json"),
+        "{not-json",
+        "utf8",
+      );
+      const result = issueSubGrant(request);
+      assert.equal(result.ok, false);
+      assert.equal(result.reason, REASON.CONSUMPTION_STORE_DEGRADED);
+      assert.equal(countSubGrantFiles(outDir), 0);
+    });
+  } finally {
+    cleanup(consumptionDir);
+    cleanup(outDir);
+  }
+});
+
+// ---- §6 mutation #10 b: store write 실패 -> 확정 발급 0, fail-closed ----
+test("issueSubGrant: consumption store write failure -> DENY, 0 issued (fail-closed)", () => {
+  const consumptionDir = freshDir();
+  const outDir = freshDir();
+  try {
+    withFullPipelineRequest({ consumptionDir, outDir }, (request) => {
+      const result = issueSubGrant(request, {
+        writeFileFn: (path, content, opts) => {
+          if (path.includes(consumptionDir)) {
+            throw new Error("injected consumption store failure");
+          }
+          writeFileSync(path, content, opts);
+        },
+      });
+      assert.equal(result.ok, false);
+      assert.equal(result.reason, REASON.DELEGATION_CONSUME_FAILED);
+      assert.equal(countSubGrantFiles(outDir), 0);
+    });
+  } finally {
+    cleanup(consumptionDir);
+    cleanup(outDir);
+  }
+});
+
+// ---- §6 mutation #10 c / P2-1: envelope write 실패(발급 파일 쓰기 실패)
+// -> 0 issued, delegation은 이미 소비된 채로 남고 intent는 PAUSED가 된다
+// (사람이 판단해야 하는 degraded 상태). 정상 재호출(resumeHumanRef 없음)은
+// claim 단계에서 막히고(우회 불가, P1-1), resumeHumanRef로 명시 재개해도
+// delegation은 이미 소비된 채라 여전히 0 issued로 끝난다(honesty 한계:
+// 같은 task_hash로는 다시 발급될 수 없다). ----
+test("issueSubGrant: envelope write failure after delegation consumed -> 0 issued this attempt, intent PAUSED, and NEITHER a plain retry NOR a human-resumed retry can double-issue (mutation #6 equivalent)", () => {
+  const consumptionDir = freshDir();
+  const outDir = freshDir();
+  try {
+    withFullPipelineRequest({ consumptionDir, outDir }, (request) => {
+      const failing = issueSubGrant(request, {
+        writeFileFn: (path, content, opts) => {
+          // consumeDelegationTx의 saveStoreAtomic(consumptionDir 내부 경로)과
+          // intent claim 기록(intentDir 내부 경로)은 그대로 성공시키고,
+          // sub-grant envelope(outDir 내부 경로) 쓰기만 실패시킨다 --
+          // "claim·delegation 소비는 커밋됐지만 grant 발급까지는 못 갔다"는
+          // crash 시점을 정확히 재현한다.
+          if (path.includes(outDir)) {
+            throw new Error("injected envelope write failure");
+          }
+          writeFileSync(path, content, opts);
+        },
+      });
+      assert.equal(failing.ok, false);
+      assert.equal(failing.reason, REASON.ENVELOPE_WRITE_FAILED);
+      assert.equal(
+        countSubGrantFiles(outDir),
+        0,
+        "0 issued on the failed attempt",
+      );
+
+      // 자동 재시도 0 + 우회 0(P1-1): 정상 deps로 같은 stableIntentId를
+      // 재호출해도(resumeHumanRef 없음) claim 단계에서 duplicate로 막힌다 --
+      // PAUSED에서도 정상 발급 API는 claim을 우회하지 못한다.
+      const plainRetry = issueSubGrant({ ...request });
+      assert.equal(plainRetry.ok, false);
+      assert.equal(plainRetry.reason, REASON.INTENT_CLAIM_DENIED);
+      assert.equal(countSubGrantFiles(outDir), 0, "plain retry must not issue");
+
+      // 사람이 명시적으로 재개해도(resumeHumanRef) delegation은 이미
+      // consumeDelegationTx에서 소비된 채라 두 번째 발급 자체가 거부된다
+      // (같은 delegation_id+task_hash로는 정확히 0~1개만 나온다는 계약
+      // 유지 -- resume은 claim을 되살릴 뿐 소비된 delegation을 되살리지
+      // 않는다).
+      const resumedRetry = issueSubGrant({
+        ...request,
+        resumeHumanRef: "human-ack-ref-1",
+      });
+      assert.equal(resumedRetry.ok, false);
+      assert.equal(resumedRetry.reason, REASON.DELEGATION_ALREADY_CONSUMED);
+      assert.equal(
+        countSubGrantFiles(outDir),
+        0,
+        "resumed retry must not silently issue a grant after a crash",
+      );
+    });
   } finally {
     cleanup(consumptionDir);
     cleanup(outDir);

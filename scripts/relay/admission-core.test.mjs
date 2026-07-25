@@ -68,6 +68,37 @@ test("judgeAdmission: consecutiveRejections=3 (streak beyond 2) -> still DENY RE
   });
 });
 
+// ---- P1-2 (review-1 반려): consecutiveRejections가 비정수/음수/누락이면
+// "2 미만이니 통과"가 아니라 fail-closed MALFORMED_INPUT이어야 한다 --
+// 이전엔 isSafeCount(...)&&>=2 조건만 보느라 이런 값이 조용히 ALLOW로
+// 샜다(review-1 직접 재현: consecutiveRejections:"2" -> ALLOW). ----
+for (const bad of ["2", -1, null, 1.5, Number.POSITIVE_INFINITY]) {
+  test(`judgeAdmission: consecutiveRejections=${JSON.stringify(bad)} (non-safe-integer) -> DENY MALFORMED_INPUT, never ALLOW (mutation P1-2)`, () => {
+    withTempDir((dir) => {
+      const { pinPath } = writePullAdmissionBundle(dir);
+      const result = judgeAdmission(
+        goodInput(dir, pinPath, { consecutiveRejections: bad }),
+      );
+      assert.equal(result.ok, false);
+      assert.equal(result.reason, REASON.MALFORMED_INPUT);
+    });
+  });
+}
+
+test("judgeAdmission: consecutiveRejections missing entirely (undefined) -> DENY MALFORMED_INPUT, never ALLOW (mutation P1-2)", () => {
+  withTempDir((dir) => {
+    const { pinPath } = writePullAdmissionBundle(dir);
+    const gates = makeAllowGates();
+    delete gates.consecutiveRejections;
+    const result = judgeAdmission({
+      pullAdmission: pullAdmissionInput(dir, pinPath),
+      gates,
+    });
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, REASON.MALFORMED_INPUT);
+  });
+});
+
 test("judgeAdmission: missing north-star approval receipt -> DENY NO_NORTH_STAR_APPROVAL (mutation #7 c)", () => {
   withTempDir((dir) => {
     const { pinPath } = writePullAdmissionBundle(dir);

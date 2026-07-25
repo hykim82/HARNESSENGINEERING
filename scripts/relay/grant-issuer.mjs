@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, readdirSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 import {
@@ -6,6 +6,13 @@ import {
   releaseArmMutex,
   saveStoreAtomic,
 } from "./arm-state.mjs";
+import { judgeAdmission } from "./admission-core.mjs";
+import {
+  claimIntentTx,
+  markIntentIssued,
+  markIntentPaused,
+  resumeIntentAfterHumanAck,
+} from "./stable-intent.mjs";
 
 // HYK-171 사이클3A (PM 보고서 §4/§10.5): bounded human delegation의 원자
 // 소비 + 그 범위 내 정확 task hash 1개에 대한 하위 sub-grant 발급.
@@ -65,7 +72,14 @@ export const REASON = Object.freeze({
   DELEGATION_BUDGET_EXCEEDED: "DELEGATION_BUDGET_EXCEEDED",
   DELEGATION_ALREADY_CONSUMED: "DELEGATION_ALREADY_CONSUMED",
   DELEGATION_CONSUME_FAILED: "DELEGATION_CONSUME_FAILED",
+  CONSUMPTION_STORE_DEGRADED: "CONSUMPTION_STORE_DEGRADED",
   ENVELOPE_WRITE_FAILED: "ENVELOPE_WRITE_FAILED",
+  // P1-1 (review-1 반려): 프로덕션 발급 진입점(issueSubGrant)이 stable-intent
+  // 단일승자 claim과 admission 6게이트를 스스로 강제하며 내는 거부 사유.
+  ADMISSION_DENIED: "ADMISSION_DENIED",
+  INTENT_CLAIM_REQUIRED: "INTENT_CLAIM_REQUIRED",
+  INTENT_CLAIM_DENIED: "INTENT_CLAIM_DENIED",
+  INTENT_RESUME_DENIED: "INTENT_RESUME_DENIED",
   ISSUED: "ISSUED",
 });
 
@@ -243,7 +257,90 @@ function normalizeConsumeDeps(deps) {
         ? d.readFileFn
         : (p) => readFileSync(p, "utf8"),
     writeFn: typeof d.writeFn === "function" ? d.writeFn : defaultMutexWrite,
+    readdirFn: typeof d.readdirFn === "function" ? d.readdirFn : readdirSync,
   };
+}
+
+// P1-3 (review-1 반려): 소비 store 안의 레코드 하나가 손상돼도(JSON 파싱
+// 실패·schema 불일치) 그 delegation_id+task_hash 키만 의심하는 게 아니라
+// **store(디렉터리) 전체**를 degraded로 본다. 이유: consumptionRecordId는
+// delegationId+taskHash의 해시라서, 손상된 레코드의 실제 delegation_id를
+// 우리는 신뢰할 수 없다 -- 그 손상이 다른 (delegationId, taskHash) 조합의
+// 유일성 보장을 몰래 깨고 있지 않다는 걸 개별 파일 존재 검사만으로는
+// 증명할 수 없다. 그래서 소비 시도마다 store 전체를 훑어 손상 레코드가
+// 하나라도 있으면 그 store 전체에서 발급 0(사람이 손상을 정리할 때까지).
+function isValidConsumptionRecord(v) {
+  return (
+    isPlainObject(v) &&
+    v.schema_version === 1 &&
+    isNonEmptyString(v.delegation_id) &&
+    isNonEmptyString(v.task_hash) &&
+    isNonEmptyString(v.role)
+  );
+}
+
+function checkConsumptionStoreIntegrity(consumptionDir, deps) {
+  let entries;
+  try {
+    entries = deps.readdirFn(consumptionDir);
+  } catch (err) {
+    return {
+      ok: false,
+      reason: `grant-issuer: fail-closed -- could not list consumption store '${consumptionDir}' (${errText(err)})`,
+    };
+  }
+  if (!Array.isArray(entries)) {
+    return {
+      ok: false,
+      reason:
+        "grant-issuer: fail-closed -- consumption store listing is not an array",
+    };
+  }
+  for (let i = 0; i < entries.length; i++) {
+    const name = entries[i];
+    if (
+      typeof name !== "string" ||
+      !name.startsWith("delegation-consume-") ||
+      !name.endsWith(".json")
+    ) {
+      continue;
+    }
+    const recordCheck = readConsumptionRecordForIntegrity(
+      join(consumptionDir, name),
+      name,
+      deps,
+    );
+    if (!recordCheck.ok) return recordCheck;
+  }
+  return { ok: true };
+}
+
+function readConsumptionRecordForIntegrity(path, name, deps) {
+  let raw;
+  try {
+    raw = deps.readFileFn(path);
+  } catch (err) {
+    return {
+      ok: false,
+      reason: `grant-issuer: fail-closed -- consumption record '${name}' unreadable (${errText(err)})`,
+    };
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err) {
+    return {
+      ok: false,
+      reason: `grant-issuer: fail-closed -- consumption record '${name}' is not valid JSON (${errText(err)})`,
+    };
+  }
+  if (!isValidConsumptionRecord(parsed)) {
+    return {
+      ok: false,
+      reason: `grant-issuer: fail-closed -- consumption record '${name}' fails schema validation`,
+    };
+  }
+  return { ok: true };
 }
 
 function underConsumeMutex(
@@ -312,6 +409,15 @@ export function consumeDelegationTx(input, opts) {
     };
   }
   const deps = normalizeConsumeDeps(opts);
+  const integrity = checkConsumptionStoreIntegrity(consumptionDir, deps);
+  if (!integrity.ok) {
+    return {
+      ok: false,
+      claimed: false,
+      degraded: true,
+      reason: integrity.reason,
+    };
+  }
   const recordId = consumptionRecordId(delegationId, taskHash);
   const recordPath = consumptionRecordPath(consumptionDir, recordId);
 
@@ -423,30 +529,92 @@ function writeSubGrantEnvelope(envelopePath, envelope, deps) {
   return { ok: true };
 }
 
+// P1-1 (review-1 반려, 비타협): 이 함수는 delegation 소비뿐 아니라
+// stable-intent 단일승자 claim과 admission 6게이트를 **스스로** 강제한다
+// -- 별도 오케스트레이션 helper가 이 둘을 먼저 조립해줘야 안전한 게
+// 아니라, 이 진입점 하나를 직접 불러도 우회가 불가능해야 한다(REVIEW가
+// 직접 재현한 결함: delegation_id만 바꿔 이 함수를 두 번 부르면 grant가
+// 2개 나왔다 -- 이제는 같은 stableIntentId면 두 번째 호출이 claim 단계에서
+// 막힌다).
+//
+// resumeHumanRef가 있으면(§ P2-1) claimIntentTx를 다시 부르지 않는다 --
+// claim은 exactly-once라 재claim은 구조적으로 duplicate가 나기 때문에,
+// PAUSED에서 벗어나는 유일한 문은 stable-intent.mjs의
+// resumeIntentAfterHumanAck다(사람이 명시적으로 supply하는 참조 문자열
+// 없이는 이 분기 자체에 들어올 수 없다).
+function resolveIntentWin(inp, opts) {
+  const { intentDir, stableIntentId, winner, resumeHumanRef, at } = inp;
+  if (!isNonEmptyString(stableIntentId)) {
+    return {
+      ok: false,
+      deny: deny(
+        REASON.INTENT_CLAIM_REQUIRED,
+        "stableIntentId is required to issue a sub-grant",
+      ),
+    };
+  }
+  if (isNonEmptyString(resumeHumanRef)) {
+    const resumed = resumeIntentAfterHumanAck(
+      { intentDir, stableIntentId, humanResumeRef: resumeHumanRef, at },
+      opts,
+    );
+    if (!resumed.ok) {
+      return {
+        ok: false,
+        deny: deny(REASON.INTENT_RESUME_DENIED, resumed.reason),
+      };
+    }
+    return { ok: true };
+  }
+  const claim = claimIntentTx(
+    { intentDir, stableIntentId, winner: winner ?? null, at },
+    opts,
+  );
+  if (!claim.ok || claim.claimed !== true) {
+    return { ok: false, deny: deny(REASON.INTENT_CLAIM_DENIED, claim.reason) };
+  }
+  return { ok: true };
+}
+
+// crash/degraded 발생 시 intent를 PAUSED로 남긴다(best-effort 감사 표식 --
+// 이게 실패해도 이 호출이 이미 fail-closed로 deny하고 있다는 사실 자체는
+// 바뀌지 않는다, 그래서 반환값을 호출자에 강제하지 않는다).
+function pauseIntentBestEffort(inp, opts, reason) {
+  try {
+    markIntentPaused(
+      {
+        intentDir: inp.intentDir,
+        stableIntentId: inp.stableIntentId,
+        at: inp.at,
+        reason,
+      },
+      opts,
+    );
+  } catch {
+    // 감사 표식일 뿐 -- 여기서 던지면 진짜 deny 사유를 가릴 수 있어 삼킨다.
+  }
+}
+
 // issueSubGrant({ delegation, taskHash, role, startBudgetRequested,
-//   stableIntentId, consumptionDir, outDir, nowMs, at }, opts)
+//   stableIntentId, intentDir, winner, resumeHumanRef, pullAdmission, gates,
+//   consumptionDir, outDir, nowMs, at }, opts)
 // opts.writeFileFn/readFileFn -- 파일 I/O 주입(테스트 전용). opts는
-// consumeDelegationTx에도 그대로 전달(mutex/save I/O 주입).
+// judgeAdmission/claimIntentTx/consumeDelegationTx에도 그대로 전달(mutex/
+// save/pin I/O 주입 -- 키가 겹치지 않아 하나의 opts로 모두 결선된다).
 //
 // 순서(비타협): ① delegation 형식 검증 ② 서명범위 대조(§6 mutation #8) ③
-// delegation 원자 소비(1회, §6 mutation #2/#10) ④ 소비 성공 시에만
-// sub-grant 파일 발급(§6 mutation #6: ③에서 죽으면 ④는 절대 실행되지
-// 않는다 -- 이 함수엔 재시도 루프가 없으므로 "crash 뒤 자동 재실행"은
-// 구조적으로 불가능하다).
-export function issueSubGrant(input, opts) {
-  const inp = isPlainObject(input) ? input : {};
-  const {
-    delegation,
-    taskHash,
-    role,
-    startBudgetRequested,
-    stableIntentId,
-    consumptionDir,
-    outDir,
-    at,
-  } = inp;
-  const nowMs = Number.isSafeInteger(inp.nowMs) ? inp.nowMs : Date.now();
-
+// stable-intent 단일승자 claim(§ P1-1 -- 진 후보는 여기서 즉시 멈춘다) ④
+// admission 6게이트 ALLOW(§ P1-1) ⑤ delegation 원자 소비(1회, §6 mutation
+// #2/#10) ⑥ 소비 성공 시에만 sub-grant 파일 발급(§6 mutation #6: ⑤에서
+// 죽으면 ⑥은 절대 실행되지 않는다 -- 이 함수엔 재시도 루프가 없으므로
+// "crash 뒤 자동 재실행"은 구조적으로 불가능하다. ⑤/⑥에서의 실패는 intent를
+// PAUSED로 남긴다 -- 사람이 resumeHumanRef로 명시 재개하기 전까지 같은
+// stableIntentId로는 두 번 다시 발급을 시도할 수 없다).
+// quality-check.mjs complexity/length 래칫 준수를 위해 issueSubGrant를
+// 세 단계(① 형식+scope ② intent+admission ③ 소비+발급)로 오케스트레이션만
+// 분리한다 -- 판정 순서·내용은 그대로다(위 헤더 주석의 비타협 순서 참고).
+function checkDelegationFormatAndScope(inp, nowMs) {
+  const { delegation, taskHash, role, startBudgetRequested, outDir } = inp;
   const problems = validateDelegation(delegation);
   if (problems.length > 0) {
     return deny(
@@ -457,14 +625,24 @@ export function issueSubGrant(input, opts) {
   if (!isNonEmptyString(outDir)) {
     return deny(REASON.DELEGATION_INVALID, "outDir must be a non-empty string");
   }
-
-  const scopeDenied = checkDelegationScope(
+  return checkDelegationScope(
     delegation,
     { taskHash, role, startBudgetRequested },
     nowMs,
   );
-  if (scopeDenied) return scopeDenied;
+}
 
+function consumeAndIssueEnvelope(inp, opts) {
+  const {
+    delegation,
+    taskHash,
+    role,
+    stableIntentId,
+    intentDir,
+    consumptionDir,
+    outDir,
+    at,
+  } = inp;
   const consumed = consumeDelegationTx(
     {
       consumptionDir,
@@ -476,10 +654,15 @@ export function issueSubGrant(input, opts) {
     opts,
   );
   if (!consumed.ok || consumed.claimed !== true) {
+    if (consumed.duplicate !== true) {
+      pauseIntentBestEffort(inp, opts, consumed.reason);
+    }
     return deny(
-      consumed.duplicate
-        ? REASON.DELEGATION_ALREADY_CONSUMED
-        : REASON.DELEGATION_CONSUME_FAILED,
+      consumed.degraded
+        ? REASON.CONSUMPTION_STORE_DEGRADED
+        : consumed.duplicate
+          ? REASON.DELEGATION_ALREADY_CONSUMED
+          : REASON.DELEGATION_CONSUME_FAILED,
       consumed.reason,
     );
   }
@@ -495,10 +678,17 @@ export function issueSubGrant(input, opts) {
     outDir,
     `sub-grant-${delegation.delegation_id}-${taskHash}.json`,
   );
-  const deps = normalizeWriteDeps(opts);
-  const written = writeSubGrantEnvelope(envelopePath, envelope, deps);
-  if (!written.ok) return written;
+  const written = writeSubGrantEnvelope(
+    envelopePath,
+    envelope,
+    normalizeWriteDeps(opts),
+  );
+  if (!written.ok) {
+    pauseIntentBestEffort(inp, opts, written.detail ?? written.reason);
+    return written;
+  }
 
+  markIntentIssued({ intentDir, stableIntentId, at }, opts);
   return {
     ok: true,
     issued: true,
@@ -506,4 +696,28 @@ export function issueSubGrant(input, opts) {
     envelope,
     envelopePath,
   };
+}
+
+export function issueSubGrant(input, opts) {
+  const inp = isPlainObject(input) ? input : {};
+  const nowMs = Number.isSafeInteger(inp.nowMs) ? inp.nowMs : Date.now();
+
+  const formatOrScopeDenied = checkDelegationFormatAndScope(inp, nowMs);
+  if (formatOrScopeDenied) return formatOrScopeDenied;
+
+  const intentResolved = resolveIntentWin(inp, opts);
+  if (!intentResolved.ok) return intentResolved.deny;
+
+  const admission = judgeAdmission(
+    { pullAdmission: inp.pullAdmission, gates: inp.gates },
+    opts,
+  );
+  if (!admission.ok) {
+    return deny(REASON.ADMISSION_DENIED, {
+      admission_reason: admission.reason,
+      admission_detail: admission.detail,
+    });
+  }
+
+  return consumeAndIssueEnvelope(inp, opts);
 }

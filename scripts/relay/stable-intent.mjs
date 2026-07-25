@@ -116,6 +116,18 @@ function intentRecordPath(intentDir, stableIntentId) {
   return join(intentDir, `intent-${stableIntentId}.claim.json`);
 }
 
+// P2-1 (review-1 반려): claim 레코드는 lifecycle 상태를 갖는다 -- claim
+// 자체는 CLAIMED로 시작하고, grant-issuer.mjs가 실제 발급 성공/실패에 따라
+// ISSUED/PAUSED로 전이시킨다(아래 updateIntentStatusTx). PAUSED는 "claim은
+// 커밋됐지만 grant는 아직 발급되지 않았고, 원인 불명 실패가 있었다"는
+// durable 표식이다 -- 사람이 확인하기 전엔 아무 것도 이 상태를 자동으로
+// 되돌리지 않는다(resumeIntentAfterHumanAck만이 유일한 출구).
+export const INTENT_STATUS = Object.freeze({
+  CLAIMED: "CLAIMED",
+  ISSUED: "ISSUED",
+  PAUSED: "PAUSED",
+});
+
 function defaultMutexWrite(path, content) {
   writeFileSync(path, content, { flag: "wx" });
 }
@@ -163,6 +175,7 @@ function underMutex(recordPath, stableIntentId, winner, at, deps, saveDeps) {
     stable_intent_id: stableIntentId,
     winner: winner ?? null,
     claimed_at: at ?? null,
+    status: INTENT_STATUS.CLAIMED,
   };
   const saved = saveStoreAtomic(recordPath, record, saveDeps);
   if (!saved.ok) {
@@ -233,4 +246,159 @@ export function claimIntentTx(input, opts) {
     };
   }
   return result;
+}
+
+// ---- P2-1 lifecycle 전이 (claim 뒤·발급 前 crash를 durable하게 남기기) ----
+function loadIntentRecord(recordPath, deps) {
+  let exists;
+  try {
+    exists = deps.existsFn(recordPath);
+  } catch (err) {
+    return {
+      ok: false,
+      reason: `stable-intent: existsFn threw while loading record (${errText(err)})`,
+    };
+  }
+  if (!exists) {
+    return {
+      ok: false,
+      reason: `stable-intent: no claim record at '${recordPath}'`,
+    };
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(deps.readFileFn(recordPath));
+  } catch (err) {
+    return {
+      ok: false,
+      reason: `stable-intent: claim record unreadable/corrupt (${errText(err)})`,
+    };
+  }
+  if (!isPlainObject(parsed)) {
+    return {
+      ok: false,
+      reason: "stable-intent: claim record is not a JSON object",
+    };
+  }
+  return { ok: true, record: parsed };
+}
+
+// updateIntentStatusTx: 같은 per-intent mutex 아래에서 read-modify-write로
+// status를 전이한다. 현재 status가 expectedFrom과 정확히 일치할 때만
+// 전이한다(그 외엔 fail-closed 거부) -- 그래서 임의 상태에서 임의 상태로
+// 몰래 건너뛸 수 없다(예: PAUSED를 거치지 않고 CLAIMED->ISSUED를 두 번
+// 반복하는 것도 여기서 막힌다).
+function updateIntentStatusTx(input, expectedFrom, toStatus, extra, opts) {
+  const inp = isPlainObject(input) ? input : {};
+  const { intentDir, stableIntentId, at } = inp;
+  if (!isNonEmptyString(intentDir) || !isNonEmptyString(stableIntentId)) {
+    return {
+      ok: false,
+      reason:
+        "stable-intent: intentDir/stableIntentId must be non-empty strings",
+    };
+  }
+  const deps = normalizeDeps(opts);
+  const recordPath = intentRecordPath(intentDir, stableIntentId);
+
+  const mtx = acquireArmMutex(intentDir, stableIntentId, deps);
+  if (!mtx.ok) {
+    return { ok: false, reason: mtx.reason, paused: mtx.paused === true };
+  }
+
+  let result;
+  try {
+    const loaded = loadIntentRecord(recordPath, deps);
+    if (!loaded.ok) {
+      result = { ok: false, reason: loaded.reason };
+    } else if (loaded.record.status !== expectedFrom) {
+      result = {
+        ok: false,
+        reason: `stable-intent: cannot move ${stableIntentId} from '${loaded.record.status}' to '${toStatus}' (expected '${expectedFrom}')`,
+      };
+    } else {
+      const next = {
+        ...loaded.record,
+        ...extra,
+        status: toStatus,
+        updated_at: at ?? null,
+      };
+      const saved = saveStoreAtomic(recordPath, next, opts);
+      result = saved.ok
+        ? { ok: true, record: next, path: recordPath }
+        : {
+            ok: false,
+            reason: `stable-intent: fail-closed -- ${saved.reason}`,
+          };
+    }
+  } catch (err) {
+    const rel = releaseArmMutex(mtx, deps);
+    return {
+      ok: false,
+      reason: `stable-intent: status transition threw (${errText(err)})`,
+      mutex_release_failed: rel.released === false,
+    };
+  }
+  const rel = releaseArmMutex(mtx, deps);
+  if (rel.released === false) {
+    return {
+      ...result,
+      mutex_release_failed: true,
+      mutex_release_reason: rel.reason,
+    };
+  }
+  return result;
+}
+
+// markIntentIssued({ intentDir, stableIntentId, at }, opts): 실제 grant가
+// 발급된 뒤에만 호출(grant-issuer.mjs). CLAIMED -> ISSUED만 허용.
+export function markIntentIssued(input, opts) {
+  return updateIntentStatusTx(
+    input,
+    INTENT_STATUS.CLAIMED,
+    INTENT_STATUS.ISSUED,
+    {},
+    opts,
+  );
+}
+
+// markIntentPaused({ intentDir, stableIntentId, at, reason }, opts): claim
+// 커밋 뒤·발급 전 실패(crash/store 손상 등)에서 grant-issuer.mjs가 호출.
+// CLAIMED -> PAUSED만 허용 -- 이미 ISSUED/PAUSED인 레코드는 건드리지 않는다
+// (best-effort 감사 표식이지 발급 자체의 fail-closed 판정을 대신하지
+// 않는다).
+export function markIntentPaused(input, opts) {
+  const { reason } = isPlainObject(input) ? input : {};
+  return updateIntentStatusTx(
+    input,
+    INTENT_STATUS.CLAIMED,
+    INTENT_STATUS.PAUSED,
+    { pause_reason: reason ?? null, needs_human_ack: true },
+    opts,
+  );
+}
+
+// resumeIntentAfterHumanAck({ intentDir, stableIntentId, humanResumeRef, at },
+// opts): PAUSED 상태에서 나가는 유일한 문. humanResumeRef가 명시적
+// non-empty 문자열이어야 하고(사람이 감사용으로 남기는 참조 -- 자동/타이머
+// 생성 금지), 현재 status가 정확히 PAUSED일 때만 CLAIMED로 되돌린다. 이
+// 함수를 거치지 않고는(즉 정상 issueSubGrant 재호출만으로는) 어떤 경로도
+// PAUSED에서 벗어날 수 없다 -- claimIntentTx는 레코드가 이미 존재하면
+// status와 무관하게 duplicate로 거부하기 때문이다.
+export function resumeIntentAfterHumanAck(input, opts) {
+  const { humanResumeRef } = isPlainObject(input) ? input : {};
+  if (!isNonEmptyString(humanResumeRef)) {
+    return {
+      ok: false,
+      reason:
+        "stable-intent: resumeIntentAfterHumanAck requires a non-empty humanResumeRef",
+    };
+  }
+  return updateIntentStatusTx(
+    input,
+    INTENT_STATUS.PAUSED,
+    INTENT_STATUS.CLAIMED,
+    { human_resume_ref: humanResumeRef, resumed_at: input?.at ?? null },
+    opts,
+  );
 }
