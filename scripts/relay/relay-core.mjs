@@ -330,8 +330,12 @@ function runDeliverStage(adapter, inp, opts) {
 }
 
 // input: { role, worktreePath, taskId, harnessDir?, mainRepoDir?, coordinatorHandle? }
-// adapter: ensureSeat/deliverTask/collectCompletionSignals/teardownSeat 4종
-// (실 어댑터 구현 또는 G10용 fake).
+// adapter: ensureSeat/deliverTask/collectCompletionSignals 3종
+// (실 어댑터 구현 또는 G10용 fake). teardownSeat은 이 함수가 호출하지
+// 않는다(HYK-171 사이클4b-2a §2-D: production 결선 0 -- teardown은 아직
+// 사람 승인 실험이 걸린 별도 단위이고, relayStep의 정상 경로에 조용히
+// 엮이지 않는다는 것을 이 주석과 relay-core.test.mjs의 회귀 테스트가
+// 함께 고정한다).
 // opts: adapter 포트에 그대로 전달되는 실행 옵션(execFn 등) + existsFn(테스트용).
 export function relayStep(input, adapter, opts = {}) {
   const inp = isPlainObject(input) ? input : {};

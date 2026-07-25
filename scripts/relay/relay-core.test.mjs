@@ -187,6 +187,40 @@ test("G10: full success path -- seat ok, task file present, deliver ok, handshak
   }
 });
 
+test("HYK-171 사이클4b-2a §2-D: relayStep never calls adapter.teardownSeat -- production 결선 0 회귀 고정 (teardownSeat 호출 시 즉시 throw하는 fake로 감시)", () => {
+  const harnessDir = makeHarnessDir();
+  const mainRepoDir = makeTaskFileSource("coder");
+  try {
+    const adapter = fakeAdapter({
+      deliverTask: () => {
+        dropResultFile(harnessDir, "coder");
+        return { ok: true, runtimeTaskId: "task_fake" };
+      },
+      teardownSeat: () => {
+        throw new Error(
+          "relayStep must never call adapter.teardownSeat (production 결선 0)",
+        );
+      },
+    });
+    const r = relayStep(
+      {
+        role: "CODER",
+        worktreePath: "/wt",
+        taskId: "HYK-x",
+        harnessDir,
+        mainRepoDir,
+      },
+      adapter,
+      {},
+    );
+    assert.equal(r.ok, true);
+    assert.equal(r.status, STATUS.ALREADY_DONE);
+  } finally {
+    rmSync(harnessDir, { recursive: true, force: true });
+    rmSync(mainRepoDir, { recursive: true, force: true });
+  }
+});
+
 test("G10: delivered-pending -- deliver succeeds but the worker hasn't produced a result file yet", () => {
   const harnessDir = makeHarnessDir();
   const mainRepoDir = makeTaskFileSource("coder");
