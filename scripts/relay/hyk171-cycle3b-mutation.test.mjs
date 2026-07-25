@@ -4,6 +4,7 @@ import { mkdtempSync, rmSync, readFileSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { acceptLaunch, REASON as LAUNCH_REASON } from "./launch-seam.mjs";
+import { runningReceiptPath } from "./running-receipt.mjs";
 import { checkRelayHandshake } from "../check/relay-handshake.mjs";
 import { scanRepoForOrcaExecCalls } from "../check/orca-cli-boundary.mjs";
 import { issueSubGrant } from "./grant-issuer.mjs";
@@ -384,12 +385,25 @@ test("known-bad #6: launch-seam.mjs never imports the orca adapter, AND the real
 // 존재만으로 "완료"라고 스스로 판정하는 코드를 추가한다면(재발명, 비범위
 // 위반), 아래 assert(handshake.ok, false)가 RED로 뒤집힌다(completion 판정
 // 수가 RUNNING receipt 수(1)와 같아져 버림 -- 이 둘은 반드시 달라야 한다).
+//
+// P2-1 수리(REVIEW review-1 반려, cycle3b-2): 위 count-divergence
+// assertion만으로는 receipt 레코드의 **내용**을 전혀 보지 않아서, 프로덕션
+// running-receipt.mjs의 `event: "launch_acceptance"`를
+// `event: "worker_completion"`으로 바꿔 receipt 자신이 완료를 참칭해도
+// 이 테스트는 여전히 PASS했다(vacuous -- REVIEW가 직접 재현). 아래
+// 블록은 acceptLaunch/acceptRunningReceipt가 실제로 디스크에 쓴 receipt
+// JSON을 (테스트 helper가 아니라 프로덕션 `runningReceiptPath`로) 직접
+// 읽어 event 필드 자체를 고정한다 -- `event`가 정확히 `"launch_acceptance"`
+// 이어야 하고, completion을 주장하는 값(`worker_completion`/`completed`/
+// `done` 계열, 대소문자 무관)이면 안 된다. 이 두 assert 중 하나라도 없으면
+// running-receipt.mjs:136의 `event` 리터럴을 `"worker_completion"`으로
+// 바꿔도 테스트 스위트 전체가 green으로 남는다(REVIEW 반려 사유 그대로).
 test("known-bad #7: RUNNING receipt count (1) must NOT equal completion judgement count (0) -- launch-seam never fabricates completion", () => {
   const intentDir = freshDir();
   const receiptDir = freshDir();
   const harnessDir = freshDir();
   try {
-    const { envelope } = setupIssuedIntent(intentDir);
+    const { stableIntentId, envelope } = setupIssuedIntent(intentDir);
     const sink = makeSinkSpy();
     const result = acceptLaunch({
       subGrantEnvelope: envelope,
@@ -401,6 +415,32 @@ test("known-bad #7: RUNNING receipt count (1) must NOT equal completion judgemen
     assert.equal(result.ok, true);
     const runningReceiptCount = countRunningReceipts(receiptDir);
     assert.equal(runningReceiptCount, 1);
+
+    // P2-1: read back the actual on-disk receipt written by the production
+    // path (runningReceiptPath is the same helper acceptRunningReceipt uses
+    // internally to compute the path -- this is not a parallel test-only
+    // path, it is the production file).
+    const onDiskReceipt = JSON.parse(
+      readFileSync(runningReceiptPath(receiptDir, stableIntentId), "utf8"),
+    );
+    assert.equal(
+      onDiskReceipt.event,
+      "launch_acceptance",
+      "RUNNING receipt's event field must be exactly 'launch_acceptance' -- it must not be free to drift toward a completion-sounding value",
+    );
+    assert.equal(
+      /complet(e|ed|ion)|done/i.test(String(onDiskReceipt.event)),
+      false,
+      "RUNNING receipt event must not claim completion (no worker_completion/completed/done-shaped value)",
+    );
+    assert.equal(
+      Object.hasOwn(onDiskReceipt, "worker_completion") ||
+        Object.hasOwn(onDiskReceipt, "completed") ||
+        onDiskReceipt.status === "completed" ||
+        onDiskReceipt.status === "done",
+      false,
+      "RUNNING receipt record must carry no completion-claiming field/status",
+    );
 
     const handshake = checkRelayHandshake({ role: "CODER", harnessDir });
     const completionCount = handshake.ok ? 1 : 0;
