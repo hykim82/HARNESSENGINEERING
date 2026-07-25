@@ -10,6 +10,12 @@ import {
 } from "../orca-spike-runner.mjs";
 import { buildSpec } from "../orca-predispatch.mjs";
 import { normalizeAbsolute } from "../../check/path-normalize.mjs";
+import {
+  judgeTeardown,
+  judgePostConditions,
+  EXECUTION as TEARDOWN_EXECUTION,
+} from "../teardown-core.mjs";
+import { observeTeardownInventory } from "./teardown-inventory-adapter.mjs";
 
 // HYK-169-coder-1: 어댑터 B v1 -- `orca` CLI를 실제로 부르는(spawn) 코드는
 // **이 파일에만** 있다(G9). 코어(relay-core.mjs)·CLI(run-step.mjs)는 이 파일이
@@ -1520,6 +1526,26 @@ export function classifyRunReadiness(ctx = {}) {
 }
 
 // ---- 포트 4: 생애주기(lifecycle) ----
+// HYK-171 사이클4b-1 (coder-task.md §2-C) -- 기존 동작 변경: teardownSeat은
+// 더 이상 무조건 close -> rm -> task-update로 진행하지 않는다. 순서 =
+// 관측(before) -> judgeTeardown 판정 -> (armed && allowSink)일 때만
+// close -> rm -> 사후 재관측 -> judgePostConditions -> SUCCEEDED일 때만
+// task-update. 이 사이클은 armed=true 승격 경로를 만들지 않는다(호출자가
+// ctx.armed를 명시 true로 넘겨도 production 결선 어디에도 그런 호출자가
+// 없다 -- createRealLaunchSink는 armed를 전혀 취급하지 않고, launch-seam.mjs
+// 는 armed=true 강제 하에서도 이 sink 자체를 절대 호출하지 않는다).
+export const TEARDOWN_PHASE = Object.freeze({
+  GATE: "GATE",
+  RESOLVE: "RESOLVE",
+  CLOSE: "CLOSE",
+  REMOVE: "REMOVE",
+  DONE: "DONE",
+});
+
+export const TEARDOWN_GATE_REASON = Object.freeze({
+  NOT_ARMED: "TEARDOWN_NOT_ARMED",
+});
+
 // tab_not_found(실측 2단 §4 오류 shape: {ok:false, error:{code:"runtime_error",
 // message:"tab_not_found"}})는 "이미 닫힌 탭"을 의미한다 -- teardown 실패로
 // 취급하지 않는다(§A3 주석 참조, --tab을 안 붙여야 이 경로에서 애초에 덜
@@ -1532,34 +1558,40 @@ function isTabNotFoundFailure(guardedResult) {
   );
 }
 
-// A-2: teardownSeat도 seatHandle을 입력으로 받지 않는다 -- {role,
-// worktreePath}(또는 테스트 전용 opts.existingSeatHandle override)만 받고,
-// 닫을 handle은 A-1로 그 자리에서 해석한다(워크트리를 지우기 전이라 여전히
-// Orca 관리 목록에 남아 있으므로 resolveSeatHandle이 통과한다).
+// worktreePath는 이제 언제나 필수다(§2-C 재설계: 모든 파괴 판정이 3층
+// 증거 관측에 결속되므로, 관측 대상 경로가 없는 teardown 요청은 애초에
+// 판정 불능이다 -- 이전(A-2)엔 existingSeatHandle만으로 close-only 경로를
+// 허용했지만, 그 경로는 이 사이클의 증거-게이트 모델과 양립하지 않는다).
 function validateTeardownInput(c, opts) {
   if (typeof opts.execFn !== "function") {
     return "orca-adapter: teardownSeat -- opts.execFn is required";
   }
-  if (
-    !isNonEmptyString(opts.existingSeatHandle) &&
-    !isNonEmptyString(c.worktreePath)
-  ) {
-    return "orca-adapter: teardownSeat -- worktreePath is required";
+  if (!isNonEmptyString(c.worktreePath)) {
+    return "orca-adapter: teardownSeat -- worktreePath is required (HYK-171 4b-1: teardown eligibility is always evidence-gated by worktree inventory)";
   }
   return null;
 }
 
-// A5(실측 2단 §4/§6): worktree rm --force가 폴더+git등록+브랜치+탭을 일괄
-// 제거한다 -- 실제로 실행한다(구성만 하던 v1과 다름). worktreePath가 없으면
-// 생략(호출자가 워크트리 없는 좌석을 닫는 경우). teardownSeat에서 분리
-// (복잡도 분산).
-function removeSeatWorktree(worktreePath, execFn) {
-  if (!isNonEmptyString(worktreePath)) return null;
-  return guardedExec(
-    buildWorktreeRemoveCommand(worktreePath),
-    execFn,
-    REASON.TEARDOWN_FAILED,
+// §2-A: 읽기 전용 관측(파괴 argv 0). opts.gitFn/opts.existsFn이 없으면
+// 해당 소스는 관측 어댑터 안에서 unobservable로 접지고(빈값으로 접지
+// 않음), judgeTeardown이 fail-closed로 막는다.
+function observeInventoryForTeardown(c, opts) {
+  return observeTeardownInventory(
+    { worktreePath: c.worktreePath, repoId: c.repoId },
+    { execFn: opts.execFn, gitFn: opts.gitFn, existsFn: opts.existsFn },
   );
+}
+
+// §2-C 비타협 #4: rm argv에서 --force 기본 제거. force는 opts.force===true
+// 일 때만 붙는다(비-force 실패 뒤 force 자동 재호출 0 -- 이 함수도, 호출부
+// 도 fallback을 만들지 않는다). buildWorktreeRemoveCommand(기존, A5/rollback
+// 전용)와는 별도 빌더다 -- 그 함수의 기본 --force 계약을 이 새 계약으로
+// 조용히 바꾸면 createManagedWorktree의 rollback(비범위)까지 깨진다.
+export function buildTeardownWorktreeRemoveCommand(worktreePath, opts = {}) {
+  const argv = ["worktree", "rm", "--worktree", `path:${worktreePath}`];
+  if (opts.force === true) argv.push("--force");
+  argv.push("--json");
+  return argv;
 }
 
 // A6: 잔여 dispatch가 다음 배달을 막은 전례(태스크 지시) -- best-effort
@@ -1574,14 +1606,21 @@ function cleanupFailedTask(taskId, execFn) {
   }
 }
 
-// ctx: { role, worktreePath, taskId? }
-export function teardownSeat(ctx, opts = {}) {
-  const c = isPlainObject(ctx) ? ctx : {};
-  const invalid = validateTeardownInput(c, opts);
-  if (invalid) return { ok: false, reason: invalid };
-
+// §2-C 순서 3/4/5: close -> (armed 경로에서만) rm 최대 1회 -> 사후 재관측.
+// teardownSeat에서 분리(복잡도 분산 -- 관측/판정/실행을 각각 별 함수로).
+function executeArmedTeardown(c, opts, before, judged) {
   const handleResult = resolveHandleForPort(c, opts, REASON.TEARDOWN_FAILED);
-  if (!handleResult.ok) return handleResult;
+  if (!handleResult.ok) {
+    return {
+      ok: false,
+      phase: TEARDOWN_PHASE.RESOLVE,
+      armed: true,
+      judged,
+      before,
+      reason: handleResult.reason,
+      seatHandleReason: handleResult.seatHandleReason ?? null,
+    };
+  }
 
   const closed = guardedExec(
     buildSeatCloseCommand(handleResult.handle),
@@ -1589,21 +1628,89 @@ export function teardownSeat(ctx, opts = {}) {
     REASON.TEARDOWN_FAILED,
   );
   const closeOk = closed.ok || isTabNotFoundFailure(closed);
+  if (!closeOk) {
+    return {
+      ok: false,
+      phase: TEARDOWN_PHASE.CLOSE,
+      armed: true,
+      judged,
+      before,
+      reason: closed.reason,
+    };
+  }
 
-  const worktreeRemove = removeSeatWorktree(c.worktreePath, opts.execFn);
-  const cleanup = cleanupFailedTask(c.taskId, opts.execFn);
+  const removed = guardedExec(
+    buildTeardownWorktreeRemoveCommand(c.worktreePath, {
+      force: opts.force === true,
+    }),
+    opts.execFn,
+    REASON.TEARDOWN_FAILED,
+  );
+  if (!removed.ok) {
+    return {
+      ok: false,
+      phase: TEARDOWN_PHASE.REMOVE,
+      armed: true,
+      judged,
+      before,
+      after: observeInventoryForTeardown(c, opts),
+      reason: removed.reason,
+    };
+  }
 
-  const worktreeOk = worktreeRemove === null || worktreeRemove.ok;
+  const after = observeInventoryForTeardown(c, opts);
+  const execution = judgePostConditions({ before, after, cliOk: removed.ok });
+  if (execution !== TEARDOWN_EXECUTION.SUCCEEDED) {
+    return {
+      ok: false,
+      phase: TEARDOWN_PHASE.REMOVE,
+      armed: true,
+      judged,
+      before,
+      after,
+      execution,
+      reason: "TEARDOWN_POST_CONDITIONS_NOT_SUCCEEDED",
+    };
+  }
+
   return {
-    ok: closeOk && worktreeOk,
-    reason: !closeOk
-      ? closed.reason
-      : !worktreeOk
-        ? worktreeRemove.reason
-        : null,
-    cleanup,
-    worktreeRemove,
+    ok: true,
+    phase: TEARDOWN_PHASE.DONE,
+    armed: true,
+    judged,
+    before,
+    after,
+    execution,
+    cleanup: cleanupFailedTask(c.taskId, opts.execFn),
   };
+}
+
+// ctx: { role, worktreePath, taskId?, armed?, policy?, repoId? }
+// opts: { execFn, gitFn?, existsFn?, existingSeatHandle?, force? }
+export function teardownSeat(ctx, opts = {}) {
+  const c = isPlainObject(ctx) ? ctx : {};
+  const invalid = validateTeardownInput(c, opts);
+  if (invalid) return { ok: false, reason: invalid };
+
+  const before = observeInventoryForTeardown(c, opts);
+  const judged = judgeTeardown({ inventory: before, policy: c.policy });
+  const armed = c.armed === true;
+
+  // §2-C 비타협 #1/#2: armed!==true 또는 allowSink!==true면 여기서 정지한다
+  // -- close/rm/task-update 어느 것도 호출되지 않는다(위 관측 2건, orca
+  // worktree/terminal list 조회는 읽기라 허용된다).
+  if (!armed || !judged.allowSink) {
+    return {
+      ok: false,
+      phase: TEARDOWN_PHASE.GATE,
+      armed,
+      judged,
+      before,
+      reason: !armed ? TEARDOWN_GATE_REASON.NOT_ARMED : judged.reason,
+    };
+  }
+
+  return executeArmedTeardown(c, opts, before, judged);
 }
 
 // ---- 실 orca execFn (이 파일이 `orca` 문자열로 실제 프로세스를 spawn하는
