@@ -1,6 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { judgeSeatReadiness, SEAT_READINESS_STATUS } from "./seat-readiness.mjs";
+import {
+  judgeSeatReadiness,
+  SEAT_READINESS_STATUS,
+} from "./seat-readiness.mjs";
 
 // HYK-171-cycle4a1-1 §5 mutation 원장 -- 각 테스트는 정규화 후보 관측
 // 배열 -> 판정 결과(status·selectedHandle 둘 다)를 정확히 센다. 이
@@ -74,7 +77,9 @@ test("mutation-4: 살아있는 idle agent 2개 -> AMBIGUOUS, selectedHandle unde
 // (fail-open이면 RED -- 즉 아래는 절대 READY/NOT_READY로 떨어지면 안 된다).
 test("mutation-5a: candidate.observable=false(예: detector 미주입) -> UNOBSERVABLE", () => {
   const result = judgeSeatReadiness({
-    candidates: [candidate({ handle: "u1", state: "unknown", observable: false })],
+    candidates: [
+      candidate({ handle: "u1", state: "unknown", observable: false }),
+    ],
   });
   assert.equal(result.status, SEAT_READINESS_STATUS.UNOBSERVABLE);
   assert.equal(result.selectedHandle, undefined);
@@ -97,7 +102,9 @@ test("mutation-5c: 다른 후보가 정상 idle이어도 1개라도 unknown이�
 // 6. 유일한 정상 idle agent -> READY + 선택 handle 정확.
 test("mutation-6: 유일한 정상 idle agent -> READY + 정확한 handle", () => {
   const result = judgeSeatReadiness({
-    candidates: [candidate({ handle: "only-1", state: "idle-or-ready", occupied: false })],
+    candidates: [
+      candidate({ handle: "only-1", state: "idle-or-ready", occupied: false }),
+    ],
   });
   assert.equal(result.status, SEAT_READINESS_STATUS.READY);
   assert.equal(result.selectedHandle, "only-1");
@@ -117,7 +124,9 @@ test("mutation-7: TUI 아닌 plain shell(state=shell) -> NOT_READY", () => {
 // 아님("agent alive=dispatchable" mutation RED).
 test("mutation-8: idle-or-ready지만 occupied:true(이미 일함) -> READY 아님(NOT_READY)", () => {
   const result = judgeSeatReadiness({
-    candidates: [candidate({ handle: "busy-1", state: "idle-or-ready", occupied: true })],
+    candidates: [
+      candidate({ handle: "busy-1", state: "idle-or-ready", occupied: true }),
+    ],
   });
   assert.notEqual(result.status, SEAT_READINESS_STATUS.READY);
   assert.equal(result.status, SEAT_READINESS_STATUS.NOT_READY);
@@ -155,7 +164,12 @@ test("mutation-10: 정상 idle 1 + 죽은셸 1 -> READY, 죽은 handle은 선택
 test("paired-good: 유일 idle agent, capability 정상 -> READY·정확 handle", () => {
   const result = judgeSeatReadiness({
     candidates: [
-      candidate({ handle: "seat-x", state: "idle-or-ready", occupied: false, observable: true }),
+      candidate({
+        handle: "seat-x",
+        state: "idle-or-ready",
+        occupied: false,
+        observable: true,
+      }),
     ],
   });
   assert.equal(result.status, SEAT_READINESS_STATUS.READY);
