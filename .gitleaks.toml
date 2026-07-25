@@ -21,3 +21,8 @@ regexes = ['''\[skip-review: ?[^\]]*\] token''']
 description = "phase-handoff template: prose parenthetical '(save tokens)' referring to LLM context-window tokens, not a credential"
 paths = ['''templates/harness-init/phase-handoff\.template\.md''']
 regexes = ['''\(save tokens\)''']
+
+[[allowlists]]
+description = "HYK-171 cycle4b-2b-1 seat-identity fixtures: literal placeholder value for the paneKey provenance field (a seat correlation identifier, not a credential) -- the field name 'paneKey' plus a quoted hyphenated string trips the generic-api-key entropy heuristic"
+paths = ['''scripts/relay/hyk171-cycle4b2b1-fixtures\.mjs''']
+regexes = ['''paneval-cycle4b2b1''']
