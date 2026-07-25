@@ -21,14 +21,15 @@ import {
   registryWith,
 } from "./hyk171-cycle4b2b1-fixtures.mjs";
 
-// HYK-171 사이클4b-2b-1 (coder-task.md §3, 재작업1 §2) -- 좌석 신원
-// substrate mutation 원장. 총 12건(원래 9건 + REVIEW review-1이 요구한
-// 신규 3건: #10/#11/#12), 전부 프로덕션 진입점(judgeSeatOwnership/
-// normalizeSeatRecord/recordSeatCreation)을 직접 구동한다(helper 조립
-// 금지). "실제 RED 재현" 절차(프로덕션 파일을 실제로 변조 -> 이 스위트
-// 재실행 -> RED 확인 -> `git diff --exit-code`로 원복 증명)는 결과
-// 보고서(.harness/coder.md)에 별도 기록한다 -- 이 파일 자체는 각 위협
-// 시나리오에 대한 "정답(green)" 계약만 담는다(git diff로 재현 가능).
+// HYK-171 사이클4b-2b-1 (coder-task.md §3, 재작업1 §2, 재작업2 §3) -- 좌석
+// 신원 substrate mutation 원장. 총 13건(원래 9건 + REVIEW review-1이 요구한
+// #10/#11/#12 + review-2가 요구한 #13), 전부 프로덕션 진입점
+// (judgeSeatOwnership/normalizeSeatRecord/recordSeatCreation)을 직접
+// 구동한다(helper 조립 금지). "실제 RED 재현" 절차(프로덕션 파일을 실제로
+// 변조 -> 이 스위트 재실행 -> RED 확인 -> `git diff --exit-code`로 원복
+// 증명)는 결과 보고서(.harness/coder.md)에 별도 기록한다 -- 이 파일 자체는
+// 각 위협 시나리오에 대한 "정답(green)" 계약만 담는다(git diff로 재현
+// 가능).
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -283,6 +284,48 @@ test("mutation #12: a single plain object shaped like a terminal-list row (has p
     observed: { ptyId: "pty-scavenged-single", worktreeId: "wt-cycle4b2b1" },
   });
   assert.notEqual(verdict.verdict, OWNERSHIP.OWNED);
+});
+
+// ---------------------------------------------------------------------------
+// #13 (신규, review-2 P1) -- 마커 검사를 다시 "키 존재만"(hasOwnProperty)
+// 으로 되돌리면, `{...terminalListRow, paneKey: undefined}`(어댑터가
+// terminal-list 항목에서 `paneKey: t.paneKey`로 필드를 뽑아 조립하는 현실적
+// mapping 경로의 정확한 모양 -- 값은 undefined지만 키는 살아남는다)이
+// 통과해 등록되고 OWNED가 나온다. 정상 구현에서는 paneKey가 non-empty
+// string이 아니므로 전 필드 null로 접혀 NOT_OWNED/SEAT_NOT_IN_REGISTRY다.
+// ---------------------------------------------------------------------------
+test("mutation #13 (review-2 P1): {...terminalListRow, paneKey: undefined} (the exact realistic adapter-mapping shape) -- rejected wholesale, never registered, never resolves to OWNED", () => {
+  const terminalListRow = {
+    ptyId: "pty-mapped-from-list",
+    worktreeId: "wt-cycle4b2b1",
+    capturedAt: "later",
+  };
+  const forged = { ...terminalListRow, paneKey: undefined };
+  assert.equal(Object.prototype.hasOwnProperty.call(forged, "paneKey"), true);
+
+  const record = normalizeSeatRecord(forged);
+  assert.equal(record.ptyId, null);
+  assert.equal(record.worktreeId, null);
+  assert.equal(record.capturedAt, null);
+
+  const { registry } = recordSeatCreation(createEmptyRegistry(), forged);
+  assert.equal(registry.seats.length, 1);
+  assert.equal(registry.seats[0].ptyId, null);
+  assert.equal(
+    registry.seats.some((r) => r.ptyId === "pty-mapped-from-list"),
+    false,
+  );
+
+  const verdict = judgeSeatOwnership({
+    registry,
+    observed: {
+      ptyId: "pty-mapped-from-list",
+      worktreeId: "wt-cycle4b2b1",
+    },
+  });
+  assert.notEqual(verdict.verdict, OWNERSHIP.OWNED);
+  assert.equal(verdict.verdict, OWNERSHIP.NOT_OWNED);
+  assert.equal(verdict.reason, REASON.SEAT_NOT_IN_REGISTRY);
 });
 
 // ---------------------------------------------------------------------------

@@ -40,12 +40,12 @@ test("normalizeSeatRecord: full authoritative response -- all fields preserved",
   assert.equal(record.schemaVersion, SCHEMA_VERSION);
 });
 
-test("normalizeSeatRecord: missing fields recorded as null (not fabricated) -- the paneKey provenance marker key must still be present, even with an empty value", () => {
-  const record = normalizeSeatRecord({ ptyId: "pty-2", paneKey: undefined });
+test("normalizeSeatRecord: missing fields recorded as null (not fabricated) -- paneKey itself must be a non-empty string to count as the provenance marker", () => {
+  const record = normalizeSeatRecord({ ptyId: "pty-2", paneKey: "seatMarker" });
   assert.equal(record.ptyId, "pty-2");
   assert.equal(record.worktreeId, null);
   assert.equal(record.capturedAt, null);
-  assert.equal(record.paneKey, null);
+  assert.equal(record.paneKey, "seatMarker");
 });
 
 test("normalizeSeatRecord: non-object input (array/null/undefined) -- every field null", () => {
@@ -68,15 +68,35 @@ test("normalizeSeatRecord: REVIEW review-1 P1-2 -- a plain object with real ptyI
   assert.equal(record.capturedAt, null);
 });
 
-test("normalizeSeatRecord: paneKey key present with an explicit null value still counts as the creation-provenance marker (source enforcement is presence-of-key, not truthiness-of-value)", () => {
+// REVIEW review-2 P1 (반전, 2026-07-26): 이 시험은 원래 "paneKey 키 존재 +
+// null 값도 마커로 인정됐다"를 고정하고 있었다 -- 그게 정확히 review-2가
+// 반례로 든 우회로였다(어댑터가 `paneKey: t.paneKey`로 필드를 뽑으면
+// t.paneKey가 undefined/null인 채로 키만 남는 현실적 오사용 경로). 이제는
+// 반대로 고정한다: paneKey가 non-empty string이 아니면(키만 있고 값이
+// null/undefined든, 키 자체가 없든) 마커 실패 -- 전 필드 null.
+test("normalizeSeatRecord: REVIEW review-2 P1 -- paneKey key present but with null value does NOT count as the creation-provenance marker anymore -- rejected wholesale", () => {
   const record = normalizeSeatRecord({
     ptyId: "pty-3",
     worktreeId: "wt-3",
     paneKey: null,
   });
-  assert.equal(record.ptyId, "pty-3");
-  assert.equal(record.worktreeId, "wt-3");
+  assert.equal(record.ptyId, null);
+  assert.equal(record.worktreeId, null);
   assert.equal(record.paneKey, null);
+});
+
+test("normalizeSeatRecord: REVIEW review-2 P1 -- paneKey key present but with undefined value (the exact adapter-mapping shape: {ptyId: t.ptyId, worktreeId: t.worktreeId, paneKey: t.paneKey} where t.paneKey is undefined) does NOT count as the marker -- rejected wholesale, never registered as an owned identity", () => {
+  const terminalListRow = {
+    ptyId: "pty-scavenged-mapped",
+    worktreeId: "wt-cycle4b2b1",
+    capturedAt: "later",
+  };
+  const forged = { ...terminalListRow, paneKey: terminalListRow.paneKey };
+  assert.equal(Object.prototype.hasOwnProperty.call(forged, "paneKey"), true);
+  const record = normalizeSeatRecord(forged);
+  assert.equal(record.ptyId, null);
+  assert.equal(record.worktreeId, null);
+  assert.equal(record.capturedAt, null);
 });
 
 test("recordSeatCreation: appends without mutating input registry", () => {
