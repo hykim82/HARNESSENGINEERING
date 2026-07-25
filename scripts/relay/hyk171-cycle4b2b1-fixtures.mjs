@@ -7,7 +7,7 @@ export function fullRecord(overrides = {}) {
   return {
     ptyId: "pty-cycle4b2b1",
     worktreeId: "wt-cycle4b2b1",
-    paneKey: "paneval-cycle4b2b1",
+    paneKey: "seatMain",
     capturedAt: "2026-07-26T03:07:00Z",
     // 진단용(판정 근거 아님) -- handle은 생성 시점 값으로 기록된다.
     handle: "term_created_at_seat_stand_up",
@@ -19,7 +19,7 @@ export function ownedObservation(overrides = {}) {
   return {
     ptyId: "pty-cycle4b2b1",
     worktreeId: "wt-cycle4b2b1",
-    paneKey: "paneval-cycle4b2b1",
+    paneKey: "seatMain",
     ...overrides,
   };
 }

@@ -6,7 +6,9 @@ import { dirname, join } from "node:path";
 import {
   OWNERSHIP,
   REASON,
+  DEFAULT_MIN_CORROBORATION,
   judgeSeatOwnership,
+  resolveMinCorroboration,
 } from "./seat-identity-core.mjs";
 import {
   normalizeSeatRecord,
@@ -19,13 +21,14 @@ import {
   registryWith,
 } from "./hyk171-cycle4b2b1-fixtures.mjs";
 
-// HYK-171 사이클4b-2b-1 (coder-task.md §3) -- 좌석 신원 substrate mutation
-// 원장. 최소 9건, 전부 프로덕션 진입점(judgeSeatOwnership/normalizeSeatRecord/
-// recordSeatCreation)을 직접 구동한다(helper 조립 금지). "최소 9건 실제
-// RED 재현" 절차(프로덕션 파일을 실제로 변조 -> 이 스위트 재실행 -> RED
-// 확인 -> 원복)는 결과 보고서(.harness/coder.md)에 별도 기록한다 -- 이
-// 파일 자체는 각 위협 시나리오에 대한 "정답(green)" 계약만 담는다(git
-// diff로 재현 가능).
+// HYK-171 사이클4b-2b-1 (coder-task.md §3, 재작업1 §2) -- 좌석 신원
+// substrate mutation 원장. 총 12건(원래 9건 + REVIEW review-1이 요구한
+// 신규 3건: #10/#11/#12), 전부 프로덕션 진입점(judgeSeatOwnership/
+// normalizeSeatRecord/recordSeatCreation)을 직접 구동한다(helper 조립
+// 금지). "실제 RED 재현" 절차(프로덕션 파일을 실제로 변조 -> 이 스위트
+// 재실행 -> RED 확인 -> `git diff --exit-code`로 원복 증명)는 결과
+// 보고서(.harness/coder.md)에 별도 기록한다 -- 이 파일 자체는 각 위협
+// 시나리오에 대한 "정답(green)" 계약만 담는다(git diff로 재현 가능).
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -96,6 +99,12 @@ test("mutation #4: registry record has worktreeId: null (incomplete provenance) 
 // #5 -- minCorroboration 검사가 제거되면 축 1개짜리 단독 일치가 OWNED가
 // 되어버린다. 정답 구현은 ptyId 축 하나만 일치(worktreeId를 관측이 아예
 // 밝히지 않은 경우)로는 OWNED를 내주지 않는다.
+//
+// 정직 기록(재작업1, P1-1 적용 후): 이 시나리오는 이제 두 안전장치(별도
+// worktreeId 필수조건 + corroboration 하한)가 겹쳐서 막는다 -- 재현 시
+// 하한 검사만 제거해서는 RED가 안 나고(worktreeId 필수조건이 여전히
+// 막는다), 두 검사를 모두 제거해야 RED가 재현된다(재현 로그 참조, mutation
+// #11이 worktreeId 필수조건만 단독 제거하는 경우를 별도로 담당한다).
 // ---------------------------------------------------------------------------
 test("mutation #5: only the ptyId axis corroborates (observation omits worktreeId) -- SEAT_CORROBORATION_INSUFFICIENT, never OWNED on a single axis", () => {
   const registry = registryWith([fullRecord()]);
@@ -114,7 +123,7 @@ test("mutation #5: only the ptyId axis corroborates (observation omits worktreeI
 test("mutation #6: two independently-observed candidates both resolve OWNED -- SEAT_AMBIGUOUS_CANDIDATES, no silent pick of candidate[0]", () => {
   const registry = registryWith([
     fullRecord(),
-    fullRecord({ ptyId: "pty-cycle4b2b1-second", paneKey: "paneval-second" }),
+    fullRecord({ ptyId: "pty-cycle4b2b1-second", paneKey: "seatSecond" }),
   ]);
   const r = judgeSeatOwnership({
     registry,
@@ -122,7 +131,7 @@ test("mutation #6: two independently-observed candidates both resolve OWNED -- S
       ownedObservation(),
       ownedObservation({
         ptyId: "pty-cycle4b2b1-second",
-        paneKey: "paneval-second",
+        paneKey: "seatSecond",
       }),
     ],
   });
@@ -134,14 +143,15 @@ test("mutation #6: two independently-observed candidates both resolve OWNED -- S
 // ---------------------------------------------------------------------------
 // #7 -- 대장에 같은 ptyId 중복/충돌이 있어도 통과시키면 안 된다.
 // ---------------------------------------------------------------------------
-test("mutation #7: registry has two records sharing the same ptyId (registry itself corrupted) -- SEAT_REGISTRY_CONFLICT, never OWNED", () => {
+test("mutation #7: registry has two records sharing the same ptyId (registry itself corrupted) -- SEAT_REGISTRY_CONFLICT, never OWNED, corroboration 0 (P2-1: the contract field itself, not just verdict/reason)", () => {
   const registry = registryWith([
     fullRecord(),
-    fullRecord({ paneKey: "paneval-different" }),
+    fullRecord({ paneKey: "seatDifferent" }),
   ]);
   const r = judgeSeatOwnership({ registry, observed: ownedObservation() });
   assert.equal(r.verdict, OWNERSHIP.AMBIGUOUS);
   assert.equal(r.reason, REASON.SEAT_REGISTRY_CONFLICT);
+  assert.equal(r.corroboration, 0);
 });
 
 // ---------------------------------------------------------------------------
@@ -197,6 +207,82 @@ test("mutation #9 (S6): seat-identity-core.mjs source has zero occurrences of ve
     false,
     "found standalone 'pane' literal (paneKey identifier is fine, bare 'pane' is not)",
   );
+});
+
+// ---------------------------------------------------------------------------
+// #10 (신규, P1-1) -- policy.minCorroboration의 하한 2 강제를 제거.
+//
+// 정직 기록: judgeSeatOwnership을 통한 end-to-end 시나리오로는 이 mutation을
+// 단독으로 RED 재현할 수 없다 -- 별도 worktreeId 필수조건(mutation #11이
+// 지키는 그 조건)이 이미 항상 먼저 걸려서, 그 조건을 통과한 경로에서
+// corroboration은 항상 최소 2(ptyId축+worktreeId축)이기 때문이다(둘은
+// 의도적 다중 방어이지 서로 대체 관계가 아니다 -- seat-identity-core.mjs의
+// resolveMinCorroboration 주석 참조). 그래서 이 mutation은
+// resolveMinCorroboration의 clamp 계약을 직접 단위 시험한다 -- 그 함수의
+// 하한 로직 자체를 제거하면(RED 재현 로그 참조) 아래 assertion들이 깨진다.
+// ---------------------------------------------------------------------------
+test("mutation #10: resolveMinCorroboration clamps below-floor/invalid values up to DEFAULT_MIN_CORROBORATION(2); only integers >= 2 are honored verbatim", () => {
+  for (const badValue of [1, 0, -5, 1.5, "2", null, undefined, NaN]) {
+    assert.equal(
+      resolveMinCorroboration(badValue),
+      DEFAULT_MIN_CORROBORATION,
+      `resolveMinCorroboration(${String(badValue)}) should clamp to the default floor`,
+    );
+  }
+  assert.equal(resolveMinCorroboration(2), 2);
+  assert.equal(resolveMinCorroboration(3), 3);
+  assert.equal(resolveMinCorroboration(10), 10);
+});
+
+// ---------------------------------------------------------------------------
+// #11 (신규, P1-1) -- observed worktreeId 필수조건을 제거(corroboration
+// 총점만으로 판정)하면, worktreeId를 밝히지 않고도 ptyId+paneKey 두 축만
+// 우연히 맞아 corroboration이 minCorroboration(2)을 채워 OWNED가 나온다.
+// 이 필수조건은 corroboration 계산과 독립적이어야 한다.
+// ---------------------------------------------------------------------------
+test("mutation #11: observed omits worktreeId entirely but ptyId+paneKey alone would satisfy corroboration>=2 -- the independent worktreeId-confirmed gate still blocks OWNED", () => {
+  const registry = registryWith([fullRecord()]);
+  const r = judgeSeatOwnership({
+    registry,
+    observed: { ptyId: "pty-cycle4b2b1", paneKey: "seatMain" },
+  });
+  assert.equal(r.verdict, OWNERSHIP.UNPROVEN);
+  assert.equal(r.reason, REASON.SEAT_CORROBORATION_INSUFFICIENT);
+  assert.equal(r.corroboration, 2);
+});
+
+// ---------------------------------------------------------------------------
+// #12 (신규, P1-2) -- 출처 강제(생성 응답만 통과)를 제거하면 terminal-list
+// 행 형태의 단일 plain object(배열이 아님)도 그대로 등록되고 만다.
+// ---------------------------------------------------------------------------
+test("mutation #12: a single plain object shaped like a terminal-list row (has ptyId/worktreeId/capturedAt but NO paneKey key) passed straight to recordSeatCreation -- rejected wholesale (all-null record), never registered as a usable identity", () => {
+  const terminalListRow = {
+    ptyId: "pty-scavenged-single",
+    worktreeId: "wt-cycle4b2b1",
+    capturedAt: "later",
+  };
+  const record = normalizeSeatRecord(terminalListRow);
+  assert.equal(record.ptyId, null);
+  assert.equal(record.worktreeId, null);
+
+  const { registry } = recordSeatCreation(
+    createEmptyRegistry(),
+    terminalListRow,
+  );
+  assert.equal(registry.seats.length, 1);
+  assert.equal(registry.seats[0].ptyId, null);
+  assert.equal(
+    registry.seats.some((r) => r.ptyId === "pty-scavenged-single"),
+    false,
+  );
+
+  // the scavenged ptyId must also fail to resolve to OWNED via the identity
+  // core even if someone tried to observe it against this polluted registry.
+  const verdict = judgeSeatOwnership({
+    registry,
+    observed: { ptyId: "pty-scavenged-single", worktreeId: "wt-cycle4b2b1" },
+  });
+  assert.notEqual(verdict.verdict, OWNERSHIP.OWNED);
 });
 
 // ---------------------------------------------------------------------------

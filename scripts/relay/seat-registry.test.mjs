@@ -16,7 +16,7 @@ const FULL_RESPONSE = {
   handle: "term_abc",
   tabId: "tab-1",
   leafId: "leaf-1",
-  paneKey: "paneval-1",
+  paneKey: "seatResp",
   worktreeId: "wt-1",
   worktreePath: "C:/wt/1",
   role: "CODER",
@@ -40,8 +40,8 @@ test("normalizeSeatRecord: full authoritative response -- all fields preserved",
   assert.equal(record.schemaVersion, SCHEMA_VERSION);
 });
 
-test("normalizeSeatRecord: missing fields recorded as null (not fabricated)", () => {
-  const record = normalizeSeatRecord({ ptyId: "pty-2" });
+test("normalizeSeatRecord: missing fields recorded as null (not fabricated) -- the paneKey provenance marker key must still be present, even with an empty value", () => {
+  const record = normalizeSeatRecord({ ptyId: "pty-2", paneKey: undefined });
   assert.equal(record.ptyId, "pty-2");
   assert.equal(record.worktreeId, null);
   assert.equal(record.capturedAt, null);
@@ -54,6 +54,29 @@ test("normalizeSeatRecord: non-object input (array/null/undefined) -- every fiel
     assert.equal(record.ptyId, null);
     assert.equal(record.worktreeId, null);
   }
+});
+
+test("normalizeSeatRecord: REVIEW review-1 P1-2 -- a plain object with real ptyId/worktreeId/capturedAt but NO paneKey key at all (terminal-list row shape) is rejected wholesale, not just missing paneKey", () => {
+  const terminalListRow = {
+    ptyId: "pty-scavenged",
+    worktreeId: "wt-cycle4b2b1",
+    capturedAt: "later",
+  };
+  const record = normalizeSeatRecord(terminalListRow);
+  assert.equal(record.ptyId, null);
+  assert.equal(record.worktreeId, null);
+  assert.equal(record.capturedAt, null);
+});
+
+test("normalizeSeatRecord: paneKey key present with an explicit null value still counts as the creation-provenance marker (source enforcement is presence-of-key, not truthiness-of-value)", () => {
+  const record = normalizeSeatRecord({
+    ptyId: "pty-3",
+    worktreeId: "wt-3",
+    paneKey: null,
+  });
+  assert.equal(record.ptyId, "pty-3");
+  assert.equal(record.worktreeId, "wt-3");
+  assert.equal(record.paneKey, null);
 });
 
 test("recordSeatCreation: appends without mutating input registry", () => {

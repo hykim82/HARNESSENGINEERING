@@ -5,6 +5,7 @@ import {
   REASON,
   DEFAULT_MIN_CORROBORATION,
   judgeSeatOwnership,
+  resolveMinCorroboration,
 } from "./seat-identity-core.mjs";
 
 function registryWith(records) {
@@ -14,7 +15,7 @@ function registryWith(records) {
 const FULL_RECORD = {
   ptyId: "pty-1",
   worktreeId: "wt-1",
-  paneKey: "paneval-1",
+  paneKey: "seatOne",
   capturedAt: "2026-07-26T03:00:00Z",
 };
 
@@ -22,7 +23,7 @@ test("OWNED: ptyId + worktreeId + paneKey all corroborate", () => {
   const registry = registryWith([FULL_RECORD]);
   const r = judgeSeatOwnership({
     registry,
-    observed: { ptyId: "pty-1", worktreeId: "wt-1", paneKey: "paneval-1" },
+    observed: { ptyId: "pty-1", worktreeId: "wt-1", paneKey: "seatOne" },
   });
   assert.equal(r.verdict, OWNERSHIP.OWNED);
   assert.equal(r.reason, REASON.SEAT_OWNED);
@@ -178,4 +179,63 @@ test("missing observed candidate entirely -> NOT_OWNED, never throws", () => {
 
 test("DEFAULT_MIN_CORROBORATION is 2 (sanity, not dead export)", () => {
   assert.equal(DEFAULT_MIN_CORROBORATION, 2);
+});
+
+test("resolveMinCorroboration: clamps invalid/below-floor values to the default, honors valid integers >= 2 verbatim", () => {
+  for (const badValue of [1, 0, -5, 1.5, "2", null, undefined, NaN]) {
+    assert.equal(resolveMinCorroboration(badValue), DEFAULT_MIN_CORROBORATION);
+  }
+  assert.equal(resolveMinCorroboration(2), 2);
+  assert.equal(resolveMinCorroboration(3), 3);
+});
+
+// REVIEW review-1 P1-1 regression coverage --------------------------------
+
+test("REVIEW P1-1: policy.minCorroboration below the floor (1) cannot be used to admit a ptyId-only match -- still UNPROVEN, not OWNED", () => {
+  const registry = registryWith([FULL_RECORD]);
+  const r = judgeSeatOwnership({
+    registry,
+    observed: { ptyId: "pty-1" },
+    policy: { minCorroboration: 1 },
+  });
+  assert.equal(r.verdict, OWNERSHIP.UNPROVEN);
+  assert.equal(r.reason, REASON.SEAT_CORROBORATION_INSUFFICIENT);
+  assert.equal(r.corroboration, 1);
+});
+
+for (const badValue of [0, -1, 1.5, "2", null, NaN, undefined]) {
+  test(`REVIEW P1-1: policy.minCorroboration=${String(badValue)} (invalid/below floor) falls back to the default of 2, not accepted verbatim`, () => {
+    const registry = registryWith([FULL_RECORD]);
+    const r = judgeSeatOwnership({
+      registry,
+      observed: { ptyId: "pty-1" },
+      policy: { minCorroboration: badValue },
+    });
+    assert.equal(r.verdict, OWNERSHIP.UNPROVEN);
+    assert.equal(r.reason, REASON.SEAT_CORROBORATION_INSUFFICIENT);
+  });
+}
+
+test("REVIEW P1-1: policy.minCorroboration=3 (stricter, allowed) is honored", () => {
+  const registry = registryWith([FULL_RECORD]);
+  const r = judgeSeatOwnership({
+    registry,
+    observed: { ptyId: "pty-1", worktreeId: "wt-1", paneKey: "seatOne" },
+    policy: { minCorroboration: 3 },
+  });
+  assert.equal(r.verdict, OWNERSHIP.OWNED);
+});
+
+test("REVIEW P1-1: observed worktreeId absent is a mandatory-condition failure even when ptyId+paneKey alone would otherwise reach minCorroboration=2 (worktreeId confirmation is independent of the corroboration tally)", () => {
+  const registry = registryWith([FULL_RECORD]);
+  const r = judgeSeatOwnership({
+    registry,
+    // no worktreeId at all -- only ptyId + paneKey supplied.
+    observed: { ptyId: "pty-1", paneKey: "seatOne" },
+  });
+  assert.equal(r.verdict, OWNERSHIP.UNPROVEN);
+  assert.equal(r.reason, REASON.SEAT_CORROBORATION_INSUFFICIENT);
+  // corroboration tally itself would be 2 (ptyId + paneKey) -- the mandatory
+  // worktreeId-confirmed gate must still block OWNED regardless of that tally.
+  assert.equal(r.corroboration, 2);
 });

@@ -40,12 +40,31 @@ export function createEmptyRegistry() {
   return { schemaVersion: SCHEMA_VERSION, seats: [] };
 }
 
+// REVIEW review-1 P1-2 (재확인, 2026-07-26): "생성 응답 객체 하나"라는
+// 시그니처 모양만으로는 출처를 구분하지 못한다 -- terminal-list 행 하나를
+// 그대로 넘겨도(예: `{ptyId, worktreeId, capturedAt}`) plain object라서
+// 그냥 통과했다. 그래서 생성 경로에만 존재하는 구조적 표지를 요구한다:
+// 2026-07-26 ORCH 실측(영수증 부록 F3)상 `terminal create`(--focus 없음)
+// 응답에는 `paneKey` 키가 있고, `terminal list` 행에는 그 키 자체가 없다.
+// `hasOwnProperty`로 "키가 존재하는가"만 보고(값이 무엇이든) 판정한다 --
+// `--focus`를 준 create 응답처럼 `paneKey` 키 자체가 없는 경로는 의도적으로
+// **등록 불가**로 접는다(그 경로는 좌석 진짜 신원을 이 대장에 남길 수
+// 없다는 뜻이고, 그게 fail-closed로 옳다 -- 있는 척 채우지 않는다).
+function hasCreationProvenanceMarker(src) {
+  return (
+    isPlainObject(src) && Object.prototype.hasOwnProperty.call(src, "paneKey")
+  );
+}
+
 // creationResponse: 좌석 생성 CLI 응답(권위 응답) 그 자체에서 뽑아낸 필드만
-// 받는다 -- 조회를 하지 않는 순수 함수(사후 수집 금지를 시그니처 층위에서
-// 강제: 이 함수는 "생성 응답 하나"만 받게 생겼고, 목록/배열을 넘겨도
-// isPlainObject 검사에서 걸려 전 필드가 null로 접힌다).
+// 받는다 -- 조회를 하지 않는 순수 함수. 구조적 표지(paneKey 키 존재)가
+// 없으면 출처를 신뢰할 수 없으므로 모든 필드가 null로 접힌다(배열이든
+// 단일 plain object든 동일하게 거부된다 -- 사후 수집 금지를 시그니처
+// 모양이 아니라 이 표지로 강제한다).
 export function normalizeSeatRecord(creationResponse = {}) {
-  const src = isPlainObject(creationResponse) ? creationResponse : {};
+  const src = hasCreationProvenanceMarker(creationResponse)
+    ? creationResponse
+    : {};
   const record = { schemaVersion: SCHEMA_VERSION };
   for (const field of RECORD_FIELDS) {
     const v = src[field];
