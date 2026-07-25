@@ -1575,10 +1575,18 @@ function validateTeardownInput(c, opts) {
 // §2-A: 읽기 전용 관측(파괴 argv 0). opts.gitFn/opts.existsFn이 없으면
 // 해당 소스는 관측 어댑터 안에서 unobservable로 접지고(빈값으로 접지
 // 않음), judgeTeardown이 fail-closed로 막는다.
+// HYK-171 사이클4b-1 재작업(streak 1, REVIEW review-1 P1-1): opts.
+// existingSeatHandle(있으면)을 관측 단계로도 전달한다 -- 활성참조 판정의
+// 자기-좌석 소유권 증거(teardown-inventory-adapter.mjs §P1-1 (B))로 쓰인다.
 function observeInventoryForTeardown(c, opts) {
   return observeTeardownInventory(
     { worktreePath: c.worktreePath, repoId: c.repoId },
-    { execFn: opts.execFn, gitFn: opts.gitFn, existsFn: opts.existsFn },
+    {
+      execFn: opts.execFn,
+      gitFn: opts.gitFn,
+      existsFn: opts.existsFn,
+      existingSeatHandle: opts.existingSeatHandle,
+    },
   );
 }
 

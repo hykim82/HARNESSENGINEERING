@@ -61,8 +61,28 @@ function isLayerValue(v) {
   return LAYER_VALUES.includes(v);
 }
 
+// HYK-171 사이클4b-1 재작업(streak 1, REVIEW review-1 P1-2 수리): `target`
+// 봉투는 `canonicalPathDigest`만이 아니라 `worktreeId`·`repoId` 두 키도
+// **항상 존재**해야 한다(키 부재 자체가 결손). 값은 non-empty string 또는
+// 명시적 `null`만 허용한다(정책 결정, 근거: teardown-inventory-adapter.mjs
+// 가 관측 실패/부재 시 이 두 필드에 넣는 값이 정확히 `null`이다 -- 그
+// `null`은 "모른다"는 정직한 신호로 **허용값**이지, observable:false로
+// 격상시킬 사유가 아니다. 하지만 키 자체가 없거나 숫자·객체 등 엉뚱한
+// 타입이면 그 봉투는 이 코어의 계약을 지키지 않는 것이므로 스키마
+// 위반으로 fail-closed 한다). REVIEW 실측: 이 검사가 없으면 두 필드를
+// 완전히 뺀 입력도 `allowSink:true`까지 통과했다.
+function isValidNullableIdField(target, key) {
+  if (!(key in target)) return false;
+  const v = target[key];
+  return v === null || isNonEmptyString(v);
+}
 function isValidTarget(target) {
-  return isPlainObject(target) && isNonEmptyString(target.canonicalPathDigest);
+  return (
+    isPlainObject(target) &&
+    isNonEmptyString(target.canonicalPathDigest) &&
+    isValidNullableIdField(target, "worktreeId") &&
+    isValidNullableIdField(target, "repoId")
+  );
 }
 function isValidLayers(layers) {
   return (

@@ -60,15 +60,19 @@ export function managedWorktreeStub(paths = [VALID_WORKTREE]) {
 export function terminalListStub(entries) {
   return { ok: true, result: { terminals: entries } };
 }
+// HYK-171 사이클4b-1 재작업(streak 1): `activeDispatch` 필드 삭제(실
+// `orca terminal list --json`에 존재하지 않는다, REVIEW review-1 P1-1
+// 실측). `leafId` 추가(tabId와 함께 pane key `${tabId}:${leafId}`를
+// 구성한다 -- 이 태스크 수행 중 라이브 조회로 실측 확인).
 export function terminalEntry(overrides = {}) {
   return {
     handle: "term_4b1",
     worktreePath: VALID_WORKTREE,
     tabId: "11111111-2222-3333-4444-555555555555",
+    leafId: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
     title: "CODER",
     connected: true,
     writable: true,
-    activeDispatch: false,
     lastOutputAt: "2026-07-25T00:00:00.000Z",
     ...overrides,
   };
@@ -77,6 +81,21 @@ export function gitWorktreeListOutput(paths) {
   return (
     paths.map((p) => `worktree ${p}`).join("\n") + (paths.length ? "\n" : "")
   );
+}
+// task-list --status dispatched 응답 fixture -- 기본값(빈 목록)은 "지금
+// 시스템 전체에 미완료 dispatch가 없다"는 가장 흔한 baseline이다.
+export function taskListDispatchedStub(tasks = []) {
+  return { ok: true, result: { tasks } };
+}
+export function dispatchShowStub(assigneePaneKey) {
+  return {
+    ok: true,
+    result: {
+      dispatch: {
+        assignee_pane_key: assigneePaneKey ?? null,
+      },
+    },
+  };
 }
 
 // 3층 전부 present + 활성참조 0 + working tree clean + policy가 빈 보호목록
@@ -93,6 +112,14 @@ export function eligibleTeardownCtx(overrides = {}) {
   };
 }
 
+// HYK-171 사이클4b-1 재작업(streak 1, §P1-1): 활성참조가 이제 (A) 미완료
+// dispatch(task-list+dispatch-show) 관측과 (B) 소유권 증거(existingSeatHandle)
+// 둘 다에 결속되므로, "기준선"은 그 둘도 함께 정의해야 한다 -- 기본값은
+// "시스템에 미완료 dispatch 0개"(task-list 빈 배열) + "대상 워크트리의
+// 유일한 좌석이 곧 대상 좌석 자신"(existingSeatHandle = terminalEntries[0]
+// 의 handle, 소유권 증거 제공)이다. 좌석이 여럿이거나 증거를 일부러 빼는
+// 시험은 각자 override한다.
+
 // list/terminal-list/gitFn/existsFn을 상태 토글 없이 고정(파괴 argv가
 // 절대 나가지 않아야 하는 mutation 시험용 -- rm까지 도달하지 않으므로
 // after-observe 토글이 필요 없다).
@@ -101,10 +128,12 @@ export function staticEligibleOpts({
   execStubs = {},
   terminalEntries = [terminalEntry()],
   gitStatusOutput = "",
+  existingSeatHandle = terminalEntries[0]?.handle,
 } = {}) {
   const execFn = fakeExecFn({
     list: managedWorktreeStub([worktreePath]),
     "terminal-list": terminalListStub(terminalEntries),
+    "task-list": taskListDispatchedStub([]),
     ...execStubs,
   });
   const gitFn = fakeGitFn({
@@ -112,7 +141,7 @@ export function staticEligibleOpts({
     status: gitStatusOutput,
   });
   const existsFn = () => true;
-  return { execFn, gitFn, existsFn };
+  return { execFn, gitFn, existsFn, existingSeatHandle };
 }
 
 // paired-good(양성 통제)에 쓰는 "rm이 실제로 대상을 지운 뒤 3층이 전부
@@ -123,6 +152,7 @@ export function togglingEligibleOpts({
   closeResponse = { ok: true },
   rmResponse,
   taskUpdateResponse = { ok: true },
+  existingSeatHandle = terminalEntries[0]?.handle,
 } = {}) {
   const state = { removed: false };
   const execFn = fakeExecFn({
@@ -131,6 +161,7 @@ export function togglingEligibleOpts({
         ? { ok: true, result: { worktrees: [] } }
         : managedWorktreeStub([worktreePath]),
     "terminal-list": terminalListStub(terminalEntries),
+    "task-list": taskListDispatchedStub([]),
     close: closeResponse,
     rm:
       rmResponse ??
@@ -146,7 +177,7 @@ export function togglingEligibleOpts({
     status: "",
   });
   const existsFn = (p) => p === worktreePath && !state.removed;
-  return { execFn, gitFn, existsFn, state };
+  return { execFn, gitFn, existsFn, existingSeatHandle, state };
 }
 
 export function protectedPolicyFor(worktreePath) {

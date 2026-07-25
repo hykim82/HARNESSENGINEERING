@@ -173,17 +173,22 @@ function fakeExistsFn(map) {
 // "armed=true로 넘기면 곧장 파괴가 허용되는" 최소 상태를 만든다. mutation
 // 별로 이 기준선에서 정확히 한 항목만 어긋나게 만들어 각 guard를 독립적으로
 // 시험한다(hyk171-cycle4b1-mutation.test.mjs).
+//
+// HYK-171 사이클4b-1 재작업(streak 1, REVIEW review-1 P1-1): 활성참조가
+// 이제 task-list(미완료 dispatch)+소유권 증거(existingSeatHandle)에 결속된다
+// -- 기본값은 "미완료 dispatch 0개" + "유일한 좌석이 곧 대상 좌석 자신"
+// (existingSeatHandle = terminalEntries[0]의 handle)이다.
 function eligibleInventoryOpts({
   worktreePath = VALID_WORKTREE,
   extraExecStubs = {},
-  terminalEntries = [
-    terminalEntry({ handle: "term_x", activeDispatch: false }),
-  ],
+  terminalEntries = [terminalEntry({ handle: "term_x" })],
   gitStatusOutput = "",
+  existingSeatHandle = terminalEntries[0]?.handle,
 } = {}) {
   const execFn = fakeExecFn({
     list: managedWorktreeStub(worktreePath),
     "terminal-list": terminalListStub(terminalEntries),
+    "task-list": { ok: true, result: { tasks: [] } },
     ...extraExecStubs,
   });
   const gitFn = fakeGitFn({
@@ -191,7 +196,7 @@ function eligibleInventoryOpts({
     status: gitStatusOutput,
   });
   const existsFn = fakeExistsFn(true);
-  return { execFn, gitFn, existsFn };
+  return { execFn, gitFn, existsFn, existingSeatHandle };
 }
 
 // ---------------------------------------------------------------------------
@@ -1062,6 +1067,7 @@ function terminalEntry(overrides = {}) {
     handle: "term_a",
     worktreePath: VALID_WORKTREE,
     tabId: "11111111-2222-3333-4444-555555555555",
+    leafId: "99999999-8888-7777-6666-555555555555",
     title: "CODER",
     connected: true,
     writable: true,
@@ -1366,6 +1372,7 @@ test("A5: teardownSeat -- NOT_FOUND seat resolution issues zero close/rm/task-up
   const execFn = fakeExecFn({
     list: managedWorktreeStub(VALID_WORKTREE),
     "terminal-list": terminalListStub([]),
+    "task-list": { ok: true, result: { tasks: [] } },
   });
   const r = teardownSeat(
     {
@@ -1380,10 +1387,11 @@ test("A5: teardownSeat -- NOT_FOUND seat resolution issues zero close/rm/task-up
   assert.equal(r.ok, false);
   assert.equal(r.phase, TEARDOWN_PHASE.RESOLVE);
   assert.equal(r.seatHandleReason, SEAT_HANDLE_REASON.NOT_FOUND);
-  // 4 read-only calls: inventory pre-observation (worktree list + terminal
-  // list for activeReferences) + resolveSeatHandle (checkWorktreeManaged's
-  // worktree list + its own terminal list) -- zero close/rm/task-update.
-  assert.equal(execFn.calls.length, 4);
+  // 5 read-only calls: inventory pre-observation (worktree list + terminal
+  // list for activeReferences + task-list for the dispatch-active check) +
+  // resolveSeatHandle (checkWorktreeManaged's worktree list + its own
+  // terminal list) -- zero close/rm/task-update.
+  assert.equal(execFn.calls.length, 5);
   assert.equal(
     execFn.calls.every(
       (a) =>
@@ -1397,12 +1405,27 @@ test("A5: teardownSeat -- NOT_FOUND seat resolution issues zero close/rm/task-up
 
 test("A5: teardownSeat -- AMBIGUOUS seat resolution issues zero close/rm/task-update calls", () => {
   const { gitFn, existsFn } = eligibleInventoryOpts();
+  // Two independent live `terminal list` queries happen in this flow
+  // (inventory's activeReferences observation, then resolveSeatHandle's own
+  // candidate query) -- this fixture deliberately returns a different
+  // snapshot for each (TOCTOU-safe by design elsewhere in this codebase,
+  // e.g. D12's post-launch reverify). The AMBIGUOUS pair only needs to be
+  // visible to the *second* (resolve-time) query -- the first (inventory)
+  // query stays empty so the eligibility gate isn't blocked by an unrelated
+  // active-reference concern this test isn't about.
+  let terminalListCalls = 0;
   const execFn = fakeExecFn({
     list: managedWorktreeStub(VALID_WORKTREE),
-    "terminal-list": terminalListStub([
-      terminalEntry({ handle: "term_a", activeDispatch: false }),
-      terminalEntry({ handle: "term_b", activeDispatch: false }),
-    ]),
+    "terminal-list": () => {
+      terminalListCalls += 1;
+      return terminalListCalls === 1
+        ? terminalListStub([])
+        : terminalListStub([
+            terminalEntry({ handle: "term_a" }),
+            terminalEntry({ handle: "term_b" }),
+          ]);
+    },
+    "task-list": { ok: true, result: { tasks: [] } },
   });
   const r = teardownSeat(
     {
@@ -1417,10 +1440,11 @@ test("A5: teardownSeat -- AMBIGUOUS seat resolution issues zero close/rm/task-up
   assert.equal(r.ok, false);
   assert.equal(r.phase, TEARDOWN_PHASE.RESOLVE);
   assert.equal(r.seatHandleReason, SEAT_HANDLE_REASON.AMBIGUOUS);
-  // 4 read-only calls: inventory pre-observation (worktree list + terminal
-  // list for activeReferences) + resolveSeatHandle (checkWorktreeManaged's
-  // worktree list + its own terminal list) -- zero close/rm/task-update.
-  assert.equal(execFn.calls.length, 4);
+  // 5 read-only calls: inventory pre-observation (worktree list + terminal
+  // list for activeReferences + task-list for the dispatch-active check) +
+  // resolveSeatHandle (checkWorktreeManaged's worktree list + its own
+  // terminal list) -- zero close/rm/task-update.
+  assert.equal(execFn.calls.length, 5);
   assert.equal(
     execFn.calls.every(
       (a) =>
@@ -2385,9 +2409,8 @@ test("teardownSeat: paired-good -- armed + eligible + post-observe all-absent --
       state.removed
         ? { ok: true, result: { worktrees: [] } }
         : managedWorktreeStub(VALID_WORKTREE),
-    "terminal-list": terminalListStub([
-      terminalEntry({ handle: "term_x", activeDispatch: false }),
-    ]),
+    "terminal-list": terminalListStub([terminalEntry({ handle: "term_x" })]),
+    "task-list": { ok: true, result: { tasks: [] } },
     close: { ok: true },
     rm: () => {
       state.removed = true;
@@ -2402,7 +2425,12 @@ test("teardownSeat: paired-good -- armed + eligible + post-observe all-absent --
   });
   const existsFn = (p) => p === VALID_WORKTREE && !state.removed;
 
-  const r = teardownSeat(teardownArmedCtx(), { execFn, gitFn, existsFn });
+  const r = teardownSeat(teardownArmedCtx(), {
+    execFn,
+    gitFn,
+    existsFn,
+    existingSeatHandle: "term_x",
+  });
 
   assert.equal(r.ok, true);
   assert.equal(r.phase, TEARDOWN_PHASE.DONE);
@@ -2445,9 +2473,8 @@ test("teardownSeat: cleanup is null and task-update is never called when no task
       state.removed
         ? { ok: true, result: { worktrees: [] } }
         : managedWorktreeStub(VALID_WORKTREE),
-    "terminal-list": terminalListStub([
-      terminalEntry({ handle: "term_x", activeDispatch: false }),
-    ]),
+    "terminal-list": terminalListStub([terminalEntry({ handle: "term_x" })]),
+    "task-list": { ok: true, result: { tasks: [] } },
     close: { ok: true },
     rm: () => {
       state.removed = true;
@@ -2464,6 +2491,7 @@ test("teardownSeat: cleanup is null and task-update is never called when no task
     execFn,
     gitFn,
     existsFn,
+    existingSeatHandle: "term_x",
   });
   assert.equal(r.ok, true);
   assert.equal(r.cleanup, null);
@@ -2482,9 +2510,8 @@ test("teardownSeat: opts.force=true adds --force to the (still single) rm call",
       state.removed
         ? { ok: true, result: { worktrees: [] } }
         : managedWorktreeStub(VALID_WORKTREE),
-    "terminal-list": terminalListStub([
-      terminalEntry({ handle: "term_x", activeDispatch: false }),
-    ]),
+    "terminal-list": terminalListStub([terminalEntry({ handle: "term_x" })]),
+    "task-list": { ok: true, result: { tasks: [] } },
     close: { ok: true },
     rm: () => {
       state.removed = true;
@@ -2504,6 +2531,7 @@ test("teardownSeat: opts.force=true adds --force to the (still single) rm call",
     gitFn,
     existsFn,
     force: true,
+    existingSeatHandle: "term_x",
   });
   assert.equal(r.ok, true);
   const rmCalls = execFn.calls.filter(
@@ -2520,9 +2548,8 @@ test("teardownSeat: tab_not_found close failure is absorbed -- rm still attempte
       state.removed
         ? { ok: true, result: { worktrees: [] } }
         : managedWorktreeStub(VALID_WORKTREE),
-    "terminal-list": terminalListStub([
-      terminalEntry({ handle: "term_x", activeDispatch: false }),
-    ]),
+    "terminal-list": terminalListStub([terminalEntry({ handle: "term_x" })]),
+    "task-list": { ok: true, result: { tasks: [] } },
     close: FIXTURE_TAB_NOT_FOUND_RESPONSE,
     rm: () => {
       state.removed = true;
@@ -2540,6 +2567,7 @@ test("teardownSeat: tab_not_found close failure is absorbed -- rm still attempte
     execFn,
     gitFn: dynamicGitFn,
     existsFn: dynamicExistsFn,
+    existingSeatHandle: "term_x",
   });
   assert.equal(r.ok, true);
   assert.equal(
@@ -2552,12 +2580,16 @@ test("teardownSeat: a real (non-tab_not_found) close failure -- phase CLOSE, rm/
   const { gitFn, existsFn } = eligibleInventoryOpts();
   const execFn = fakeExecFn({
     list: managedWorktreeStub(VALID_WORKTREE),
-    "terminal-list": terminalListStub([
-      terminalEntry({ handle: "term_x", activeDispatch: false }),
-    ]),
+    "terminal-list": terminalListStub([terminalEntry({ handle: "term_x" })]),
+    "task-list": { ok: true, result: { tasks: [] } },
     close: { ok: false, reason: "some other failure" },
   });
-  const r = teardownSeat(teardownArmedCtx(), { execFn, gitFn, existsFn });
+  const r = teardownSeat(teardownArmedCtx(), {
+    execFn,
+    gitFn,
+    existsFn,
+    existingSeatHandle: "term_x",
+  });
   assert.equal(r.ok, false);
   assert.equal(r.phase, TEARDOWN_PHASE.CLOSE);
   assert.match(r.reason, /some other failure/);
@@ -2577,13 +2609,17 @@ test("teardownSeat: rm failure -- phase REMOVE, before/after snapshots preserved
   const { gitFn, existsFn } = eligibleInventoryOpts();
   const execFn = fakeExecFn({
     list: managedWorktreeStub(VALID_WORKTREE),
-    "terminal-list": terminalListStub([
-      terminalEntry({ handle: "term_x", activeDispatch: false }),
-    ]),
+    "terminal-list": terminalListStub([terminalEntry({ handle: "term_x" })]),
+    "task-list": { ok: true, result: { tasks: [] } },
     close: { ok: true },
     rm: { ok: false, reason: "orca down" },
   });
-  const r = teardownSeat(teardownArmedCtx(), { execFn, gitFn, existsFn });
+  const r = teardownSeat(teardownArmedCtx(), {
+    execFn,
+    gitFn,
+    existsFn,
+    existingSeatHandle: "term_x",
+  });
   assert.equal(r.ok, false);
   assert.equal(r.phase, TEARDOWN_PHASE.REMOVE);
   assert.match(r.reason, /orca down/);
@@ -2605,9 +2641,8 @@ test("teardownSeat: rm reports ok:true but post-observe is a split state (git ab
   const state = { removed: false };
   const execFn = fakeExecFn({
     list: managedWorktreeStub(VALID_WORKTREE), // orca layer stays "present" even after rm ok:true
-    "terminal-list": terminalListStub([
-      terminalEntry({ handle: "term_x", activeDispatch: false }),
-    ]),
+    "terminal-list": terminalListStub([terminalEntry({ handle: "term_x" })]),
+    "task-list": { ok: true, result: { tasks: [] } },
     close: { ok: true },
     rm: () => {
       state.removed = true;
@@ -2620,7 +2655,12 @@ test("teardownSeat: rm reports ok:true but post-observe is a split state (git ab
     status: "",
   });
   const existsFn = () => true; // dir layer stays "present" even after rm ok:true
-  const r = teardownSeat(teardownArmedCtx(), { execFn, gitFn, existsFn });
+  const r = teardownSeat(teardownArmedCtx(), {
+    execFn,
+    gitFn,
+    existsFn,
+    existingSeatHandle: "term_x",
+  });
   assert.equal(r.ok, false);
   assert.equal(r.phase, TEARDOWN_PHASE.REMOVE);
   assert.equal(r.execution, TEARDOWN_EXECUTION.FAILED_SPLIT);

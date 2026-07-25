@@ -22,6 +22,7 @@ import {
   terminalListStub,
   terminalEntry,
   gitWorktreeListOutput,
+  taskListDispatchedStub,
   eligibleTeardownCtx,
   staticEligibleOpts,
   togglingEligibleOpts,
@@ -90,13 +91,19 @@ test("mutation #3: git present / orca absent / dir present -- SPLIT_STATE, sink 
   const execFn = fakeExecFn({
     list: { ok: true, result: { worktrees: [] } }, // orca: absent
     "terminal-list": terminalListStub([terminalEntry()]),
+    "task-list": taskListDispatchedStub([]),
   });
   const gitFn = fakeGitFn({
     worktree: gitWorktreeListOutput([VALID_WORKTREE]), // git: present
     status: "",
   });
   const existsFn = () => true; // dir: present
-  const r = teardownSeat(eligibleTeardownCtx(), { execFn, gitFn, existsFn });
+  const r = teardownSeat(eligibleTeardownCtx(), {
+    execFn,
+    gitFn,
+    existsFn,
+    existingSeatHandle: "term_4b1",
+  });
 
   assert.equal(r.ok, false);
   assert.equal(r.judged.observation, OBSERVATION.SPLIT_STATE);
@@ -109,11 +116,20 @@ test("mutation #3: git present / orca absent / dir present -- SPLIT_STATE, sink 
 // ---------------------------------------------------------------------------
 // #4 -- 활성참조 guard
 // ---------------------------------------------------------------------------
-test("mutation #4: an active-dispatch seat on the same worktree -- ACTIVE_REFERENCE, sink 0, the blocking reference's token is in evidence", () => {
+// HYK-171 사이클4b-1 재작업(streak 1, REVIEW review-1 P1-1): 실 CLI에
+// `activeDispatch` 필드가 없으므로(실측), 이 시험은 "대상 좌석 자신(소유권
+// 증거로 제외됨) + 그 옆에 진짜로 연결된 *다른* 좌석 하나"로 활성참조를
+// 만든다 -- 이게 실제로 관측 가능한 유일한 신호(connected 다중 좌석)다.
+test("mutation #4: a second connected seat on the same worktree (not proven to be self) -- ACTIVE_REFERENCE, sink 0, the blocking reference's token is in evidence", () => {
+  const self = terminalEntry();
+  const other = terminalEntry({
+    handle: "term_busy",
+    tabId: "other-tab-uuid",
+    leafId: "other-leaf-uuid",
+  });
   const opts = staticEligibleOpts({
-    terminalEntries: [
-      terminalEntry({ handle: "term_busy", activeDispatch: true }),
-    ],
+    terminalEntries: [self, other],
+    existingSeatHandle: self.handle,
   });
   const r = teardownSeat(eligibleTeardownCtx(), opts);
 
@@ -183,6 +199,7 @@ test("mutation #6c: requireDurableEvidence policy + no corroborating orca worktr
     // no `id` field on the entry -- observeOrcaLayer must yield worktreeId:null
     list: { ok: true, result: { worktrees: [{ path: VALID_WORKTREE }] } },
     "terminal-list": terminalListStub([terminalEntry()]),
+    "task-list": taskListDispatchedStub([]),
   });
   const gitFn = fakeGitFn({
     worktree: gitWorktreeListOutput([VALID_WORKTREE]),
@@ -192,7 +209,12 @@ test("mutation #6c: requireDurableEvidence policy + no corroborating orca worktr
   const ctx = eligibleTeardownCtx({
     policy: { protectedTargets: [], requireDurableEvidence: true },
   });
-  const r = teardownSeat(ctx, { execFn, gitFn, existsFn });
+  const r = teardownSeat(ctx, {
+    execFn,
+    gitFn,
+    existsFn,
+    existingSeatHandle: "term_4b1",
+  });
   assert.equal(r.ok, false);
   assert.equal(r.judged.observation, OBSERVATION.CONSISTENT_PRESENT);
   assert.equal(r.judged.eligibility, ELIGIBILITY.EVIDENCE_NOT_DURABLE);
@@ -308,6 +330,7 @@ test("mutation #11: rm reports ok:true but post-observe is split (git absent / o
   const execFn = fakeExecFn({
     list: managedWorktreeStub([VALID_WORKTREE]), // orca layer: stays present after rm
     "terminal-list": terminalListStub([terminalEntry()]),
+    "task-list": taskListDispatchedStub([]),
     close: { ok: true },
     rm: () => {
       state.removed = true;
@@ -320,7 +343,12 @@ test("mutation #11: rm reports ok:true but post-observe is split (git absent / o
     status: "",
   });
   const existsFn = () => true; // dir layer: stays present after rm
-  const r = teardownSeat(eligibleTeardownCtx(), { execFn, gitFn, existsFn });
+  const r = teardownSeat(eligibleTeardownCtx(), {
+    execFn,
+    gitFn,
+    existsFn,
+    existingSeatHandle: "term_4b1",
+  });
 
   assert.equal(r.ok, false);
   assert.equal(r.phase, TEARDOWN_PHASE.REMOVE);

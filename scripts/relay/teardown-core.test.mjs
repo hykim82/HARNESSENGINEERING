@@ -192,6 +192,65 @@ test("judgeTeardown: fail-closed on schema version mismatch", () => {
   assert.equal(r.reason, REASON.SCHEMA_INVALID);
 });
 
+// HYK-171 사이클4b-1 재작업(streak 1, REVIEW review-1 P1-2 필수 mutation):
+// target.worktreeId/repoId는 키 자체가 반드시 존재해야 하고, 값은 non-empty
+// string 또는 명시적 null만 허용한다. 키 부재·잘못된 타입 각각 UNOBSERVABLE
+// + allowSink:false여야 한다(수리 전에는 canonicalPathDigest만 검사해 이
+// 시험들이 RED였다 -- REVIEW가 실제로 재현한 결함).
+test("judgeTeardown: fail-closed when target.worktreeId key is entirely absent (not just null)", () => {
+  const inv = baseInventory();
+  delete inv.target.worktreeId;
+  const r = judgeTeardown({ inventory: inv, policy: { protectedTargets: [] } });
+  assert.equal(r.observation, OBSERVATION.UNOBSERVABLE);
+  assert.equal(r.allowSink, false);
+  assert.equal(r.reason, REASON.SCHEMA_INVALID);
+});
+
+test("judgeTeardown: fail-closed when target.worktreeId has a non-string, non-null type (e.g. a number)", () => {
+  const inv = baseInventory({
+    target: {
+      canonicalPathDigest: "digest-a",
+      worktreeId: 12345,
+      repoId: null,
+    },
+  });
+  const r = judgeTeardown({ inventory: inv, policy: { protectedTargets: [] } });
+  assert.equal(r.allowSink, false);
+  assert.equal(r.reason, REASON.SCHEMA_INVALID);
+});
+
+test("judgeTeardown: fail-closed when target.repoId key is entirely absent", () => {
+  const inv = baseInventory();
+  delete inv.target.repoId;
+  const r = judgeTeardown({ inventory: inv, policy: { protectedTargets: [] } });
+  assert.equal(r.allowSink, false);
+  assert.equal(r.reason, REASON.SCHEMA_INVALID);
+});
+
+test("judgeTeardown: fail-closed when target.repoId has a non-string, non-null type (e.g. an object)", () => {
+  const inv = baseInventory({
+    target: {
+      canonicalPathDigest: "digest-a",
+      worktreeId: "wt-1",
+      repoId: { nested: true },
+    },
+  });
+  const r = judgeTeardown({ inventory: inv, policy: { protectedTargets: [] } });
+  assert.equal(r.allowSink, false);
+  assert.equal(r.reason, REASON.SCHEMA_INVALID);
+});
+
+// paired-good for the P1-2 fix: explicit null on both id fields (the
+// adapter's honest "don't know" signal) is still allowed -- the fix only
+// closes key-absence/wrong-type, not the null value itself.
+test("judgeTeardown: explicit null on both target.worktreeId and target.repoId is still a valid (allowed) envelope", () => {
+  const inv = baseInventory({
+    target: { canonicalPathDigest: "digest-a", worktreeId: null, repoId: null },
+  });
+  const r = judgeTeardown({ inventory: inv, policy: { protectedTargets: [] } });
+  assert.equal(r.allowSink, true);
+});
+
 test("judgeTeardown: fail-closed when a layer value is not one of present/absent/unobservable", () => {
   const inv = baseInventory({
     layers: { git: "PRESENT", orca: "present", dir: "present" },
