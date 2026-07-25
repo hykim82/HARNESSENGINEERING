@@ -224,14 +224,9 @@ test("mutation-4 anti-vacuity(P1-1): adapter->classifySeat->store 실결선 -- g
 // runObserverTick: fs/execFn 전부 fake 주입 -- dispatch/teardown/task write 0
 // ---------------------------------------------------------------------------
 
-// writeExclusiveFn은 실 `fs.writeFileSync(path, data, {flag:'wx'})`의 계약을
-// 흉내낸다 -- 이미 존재하는 키에 대한 두 번째 호출은 반드시 던진다. Set
-// 멤버십 확인+추가가 이 fake 안에서 단일 동기 호출로 일어나므로, 실제
-// OS의 O_EXCL 원자성과 동형인 배타 보장을 테스트에서도 재현한다.
 function makeFsFake(initialText = null) {
   let diskText = initialText;
   let pending = null;
-  const locks = new Set();
   return {
     fs: {
       existsFn: () => diskText !== null,
@@ -241,17 +236,6 @@ function makeFsFake(initialText = null) {
       },
       renameFn: () => {
         diskText = pending;
-      },
-      writeExclusiveFn: (path) => {
-        if (locks.has(path)) {
-          const err = new Error(`EEXIST: '${path}' already exists`);
-          err.code = "EEXIST";
-          throw err;
-        }
-        locks.add(path);
-      },
-      unlinkFn: (path) => {
-        locks.delete(path);
       },
     },
     getText: () => diskText,
@@ -428,11 +412,19 @@ test("P1-2: runObserverTick -- writeFn 실패 시 ok:false, notifyFn 호출 0, e
   assert.deepEqual(result.delivered, []);
 });
 
-// mutation 10: 두 인스턴스가 동시에 같은 관측으로 emit을 시도하면 정확히
-// 하나의 알림만 전달된다.
-test("mutation-10: 두 runObserverTick 인스턴스 경쟁 -- 전달되는 알림은 1개", async () => {
+// HYK-171-cycle2b-3 재범위(사람 게이트 결정 B): 수용기준1을 "같은 durable
+// state 보는 2인스턴스여도 알림 정확히 1개"에서 "단일 인스턴스 내 dedup +
+// 동시 인스턴스는 bounded 중복(dispatch/실행 부작용 0)"으로 낮췄다(잠금
+// 제거 사유는 observer-store.mjs의 claimForDelivery 위 주석·coder.md
+// 참조). 이 통합시험은 그 새 계약을 runObserverTick 배선 레벨에서 확인한다
+// -- "정확히 1개"를 더 이상 강제하지 않되(락 없이는 보장 불가), 전달
+// 횟수가 유계(0~2, 인스턴스 수 이하)이고 dispatch/teardown/task-write류
+// 호출이 전혀 없음을 확인한다.
+test("수용기준1-⑵(runObserverTick 배선): 두 인스턴스 경쟁 -- 전달은 유계(0~2), dispatch/실행 부작용은 0", async () => {
   const { fs } = makeFsFake();
+  const calls = [];
   const execFn = (argv) => {
+    calls.push(argv);
     if (argv[1] === "dispatch-show")
       return {
         ok: true,
@@ -490,7 +482,20 @@ test("mutation-10: 두 runObserverTick 인스턴스 경쟁 -- 전달되는 알�
   ]);
   assert.ok(resA.ok);
   assert.ok(resB.ok);
-  assert.equal(deliveredA.length + deliveredB.length, 1);
+  const totalDelivered = deliveredA.length + deliveredB.length;
+  // 유계(bounded): 인스턴스가 2개이므로 전달도 최대 2개(무한정 쌓이지
+  // 않는다). "정확히 1개"는 더 이상 강제하지 않는다(락 제거로 인한
+  // 의도적 완화, 사람 게이트 결정 B).
+  assert.ok(
+    totalDelivered >= 0 && totalDelivered <= 2,
+    `전달 횟수는 유계여야 한다(0~2), 실제=${totalDelivered}`,
+  );
+  // 관측기 계약의 핵심: 중복이 나든 안 나든 dispatch/teardown/task-write
+  // 류 호출은 정확히 0건이다(이 안전성이 잠금을 빼도 되는 근거).
+  const FORBIDDEN = /^(dispatch$|task-create$|task-update$|close$)/;
+  for (const argv of calls) {
+    assert.ok(!argv.some((t) => typeof t === "string" && FORBIDDEN.test(t)));
+  }
 });
 
 // ---------------------------------------------------------------------------

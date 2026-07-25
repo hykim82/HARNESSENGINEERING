@@ -24,9 +24,6 @@ import {
   markDelivered,
   recordAck,
   incarnationKeyOf,
-  deliveryLockPath,
-  acquireDeliveryLock,
-  releaseDeliveryLock,
 } from "./observer-store.mjs";
 
 export const OBSERVER_STATE = Object.freeze({
@@ -107,8 +104,7 @@ export function reduceTick({
 //   seatSelector, expectedIncarnation, lease, capabilities, maxClockJumpS,
 //   storePath, sampleGeneration, prevState, config }
 // opts: { execFn, statFn, nowFn, checkHandshakeFn, prevObservation,
-//   fs: {existsFn, readFn, writeFn, renameFn, writeExclusiveFn, unlinkFn},
-//   notifyFn }
+//   fs: {existsFn, readFn, writeFn, renameFn}, notifyFn }
 //
 // notifyFn(item) -> boolean(delivered) | Promise<boolean>. undelivered 항목은
 // store에 남아 다음 호출에서 다시 시도된다(idempotent 재시도 허용, worker
@@ -117,12 +113,19 @@ export function reduceTick({
 // notifyFn -> markDelivered의 한 항목 처리를 담당. 반환값은 다음 항목이
 // CAS 기준으로 삼을 최신 {state, text}와, 실제 전달됐다면 그 item.
 //
-// P1-3 재작업(REVIEW 결함 3 수리): claimForDelivery+saveStoreCAS만으로는
-// 배타를 보장 못한다(check-then-act TOCTOU, REVIEW의 interleaving probe가
-// 실제 재현). notifyFn에 도달하는 전체 구간을 원자적 락파일
-// (acquireDeliveryLock, O_EXCL)로 감싼다 -- 락을 못 딴 인스턴스는 store를
-// 아예 읽지도 않고 이번 tick에서 이 항목을 건너뛴다. 락은 finally에서
-// 항상 해제(성공/실패/예외 무관)해 무한 잠김을 만들지 않는다.
+// HYK-171-cycle2b-3 재범위(사람 게이트 결정 B): 사이클2b-2가 여기 넣었던
+// O_EXCL 파일잠금(acquireDeliveryLock 등)을 제거했다 -- crash 시 잠금이
+// 영구히 남아 durable outbox 배달이 무한정 멈추는 결함을 REVIEW review-2가
+// 재현했고, 진짜 crash-safe 배타배달(원자 claim·단일 leader·잠금
+// 생명주기)은 cycle3 몫으로 명시적으로 미룬다(PM 사이클2 비평 §5, 자세한
+// 사유는 observer-store.mjs의 claimForDelivery 위 주석 참조). 지금은
+// `claimForDelivery`(state 기반 pending->claimed 전이)+`saveStoreCAS`
+// (CAS)만으로 **단일 인스턴스/leader 안에서의 재emit·재전달 억제**를
+// 보장한다. 동시에 도는 인스턴스 2개가 서로의 claim을 못 보고 각자
+// notifyFn까지 가는 것(bounded 중복)은 의도적으로 허용한다 -- 이 관측기는
+// dispatch/teardown/worker input/task 상태 write를 전혀 하지 않으므로
+// (observer-only 경계), 그 중복의 최악 효과는 advisory 알림 중복 전달일
+// 뿐 이중 실행이 아니다.
 async function deliverOne({
   item,
   storePath,
@@ -132,68 +135,49 @@ async function deliverOne({
   notifyFn,
   nowForDeliveryMs,
 }) {
-  const lockPath = deliveryLockPath(storePath, item.fingerprint);
-  const lock = acquireDeliveryLock(lockPath, fsOpts);
-  if (!lock.ok) {
-    // 다른 인스턴스가 이미 이 항목을 배타적으로 처리 중(또는 방금 처리
-    // 했음) -- 이번 tick은 store를 읽지도 않고 그냥 넘어간다.
+  const claim = claimForDelivery(currentState, {
+    seatId: item.seatId,
+    fingerprint: item.fingerprint,
+    claimedAtMs: nowForDeliveryMs,
+  });
+  if (!claim.ok) {
     return { state: currentState, text: currentText, delivered: null };
   }
-  try {
-    // mutation 10: 락을 딴 뒤에도 'pending'->'claimed' 전이를 이어서 확인
-    // 한다(이중 방어 -- 락은 동시성 배타를, 이 단계는 "이미 이전 tick에서
-    // delivered/claimed된 항목을 다시 건드리지 않음"을 보장한다).
-    const claim = claimForDelivery(currentState, {
-      seatId: item.seatId,
-      fingerprint: item.fingerprint,
-      claimedAtMs: nowForDeliveryMs,
-    });
-    if (!claim.ok) {
-      return { state: currentState, text: currentText, delivered: null };
-    }
-    const claimSaved = saveStoreCAS(
-      storePath,
-      claim.state,
-      currentText,
-      fsOpts,
-    );
-    if (!claimSaved.ok) {
-      return { state: currentState, text: currentText, delivered: null };
-    }
+  const claimSaved = saveStoreCAS(storePath, claim.state, currentText, fsOpts);
+  if (!claimSaved.ok) {
+    return { state: currentState, text: currentText, delivered: null };
+  }
 
-    let ok;
-    try {
-      ok = await notifyFn(item);
-    } catch {
-      ok = false;
-    }
-    const marked = markDelivered(claim.state, {
-      seatId: item.seatId,
-      fingerprint: item.fingerprint,
-      attemptAtMs: nowForDeliveryMs,
-      delivered: ok === true,
-    });
-    if (!marked.ok) {
-      return {
-        state: claim.state,
-        text: claimSaved.rawText,
-        delivered: ok === true ? item : null,
-      };
-    }
-    const finalSaved = saveStoreCAS(
-      storePath,
-      marked.state,
-      claimSaved.rawText,
-      fsOpts,
-    );
+  let ok;
+  try {
+    ok = await notifyFn(item);
+  } catch {
+    ok = false;
+  }
+  const marked = markDelivered(claim.state, {
+    seatId: item.seatId,
+    fingerprint: item.fingerprint,
+    attemptAtMs: nowForDeliveryMs,
+    delivered: ok === true,
+  });
+  if (!marked.ok) {
     return {
-      state: finalSaved.ok ? marked.state : claim.state,
-      text: finalSaved.ok ? finalSaved.rawText : claimSaved.rawText,
+      state: claim.state,
+      text: claimSaved.rawText,
       delivered: ok === true ? item : null,
     };
-  } finally {
-    releaseDeliveryLock(lockPath, fsOpts);
   }
+  const finalSaved = saveStoreCAS(
+    storePath,
+    marked.state,
+    claimSaved.rawText,
+    fsOpts,
+  );
+  return {
+    state: finalSaved.ok ? marked.state : claim.state,
+    text: finalSaved.ok ? finalSaved.rawText : claimSaved.rawText,
+    delivered: ok === true ? item : null,
+  };
 }
 
 async function runDeliveryPass({

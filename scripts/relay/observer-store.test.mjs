@@ -14,9 +14,6 @@ import {
   loadStore,
   saveStoreCAS,
   STORE_SCHEMA_VERSION,
-  deliveryLockPath,
-  acquireDeliveryLock,
-  releaseDeliveryLock,
 } from "./observer-store.mjs";
 
 const INC_A = { taskId: "t1", dispatchId: "d1", seatPaneKey: "p1" };
@@ -572,54 +569,92 @@ test("mutation-9d(P1-2): renameFn이 던지면 saveStoreCAS는 ok:false -- tmp w
 });
 
 // ---------------------------------------------------------------------------
-// P1-3 재작업(REVIEW hyk171-cycle2b-review-1 결함 3 수리): claimForDelivery+
-// saveStoreCAS만으로는 두 인스턴스 배타를 보장 못한다(check-then-act
-// TOCTOU -- REVIEW의 interleaving probe가 claimA=true·claimB=true·
-// savedA=true·savedB=true를 실제 재현했다). acquireDeliveryLock(O_EXCL 기반
-// 원자적 파일 생성)이 이 배타를 대신 보장하는지 직접, 스케줄링에 기대지
-// 않고 확정적으로 시험한다 -- Promise.all의 우연한 실행순서에 기대는 게
-// 아니라, 같은 lockPath에 대한 두 번째 시도가 "항상" 실패함을 직접 호출로
-// 검증한다.
+// HYK-171-cycle2b-3 재범위(사람 게이트 결정 B): O_EXCL 파일잠금(사이클2b-2
+// 가 P1-3에서 넣은 acquireDeliveryLock류)을 제거했다 -- crash 시 잠금이
+// 영구히 남아 durable outbox 배달이 무한정 멈추는 결함을 REVIEW review-2가
+// 재현했기 때문이다. 진짜 crash-safe 배타배달(원자 claim·단일 leader·잠금
+// 생명주기)은 cycle3로 미룬다(PM 사이클2 비평 §5: "observer 둘이 떠도
+// 최악이 advisory 중복이면 distributed leader 전체를 먼저 구현할 필요
+// 없다"). 재작성된 수용기준 1은 다음 두 가지만 요구한다:
+// ⑴ 단일 인스턴스/leader 안에서는 claimForDelivery+shouldEmit(2A)만으로
+//    재emit·재전달이 억제된다(잠금 없이도 순수 상태 전이로 충분).
+// ⑵ 동시 인스턴스 2개가 서로의 claim을 못 보고 각자 notifyFn까지 가도
+//    (bounded 중복), dispatch/teardown/worker-input/task 상태 write는
+//    정확히 0건이다 -- 이 store/observer 코드베이스에 애초에 그런 호출이
+//    존재하지 않으므로, 중복의 효과는 advisory 알림 중복 전달에 그치고
+//    이중 실행으로 번지지 않는다(관측기 계약).
 // ---------------------------------------------------------------------------
-test("P1-3(acquireDeliveryLock): 같은 lockPath 두 번째 시도는 항상 실패 -- 첫 시도가 놓은 뒤에만 재시도 가능(무한 잠김 아님)", () => {
-  const locks = new Set();
-  const fsOpts = {
-    writeExclusiveFn: (path) => {
-      if (locks.has(path)) {
-        const err = new Error(`EEXIST: '${path}' already exists`);
-        err.code = "EEXIST";
-        throw err;
-      }
-      locks.add(path);
-    },
-    unlinkFn: (path) => {
-      locks.delete(path);
-    },
-  };
-  const lockPath = deliveryLockPath("/store.json", "CODER:some-reason");
 
-  const first = acquireDeliveryLock(lockPath, fsOpts);
-  assert.equal(first.ok, true);
+test("수용기준1-⑴: 단일 인스턴스 -- 같은 fingerprint를 claim한 뒤 재claim 시도는 실패(재전달 억제)", () => {
+  const first = applyObservation(createEmptyStore(), {
+    seatId: "CODER",
+    incarnation: INC_A,
+    classifyResult: stallResult(),
+    sampleGeneration: 1,
+    persist: { observedAtMs: 1000 },
+  });
+  const claimed = claimForDelivery(first.state, {
+    seatId: "CODER",
+    fingerprint: first.boundFingerprint,
+    claimedAtMs: 1500,
+  });
+  assert.equal(claimed.ok, true);
 
-  // 두 번째 "인스턴스"가 첫 인스턴스의 write와 release 사이 아무 시점에
-  // 시도해도(REVIEW의 재진입 시나리오와 동형) 반드시 실패해야 한다 --
-  // 이 실패는 store의 read-compare 결과와 무관하게 파일시스템 자체의
-  // O_EXCL 보장에서 나온다(store 상태를 전혀 참조하지 않는다).
-  const second = acquireDeliveryLock(lockPath, fsOpts);
-  assert.equal(second.ok, false);
-  assert.match(second.reason, /already locked/);
-
-  const released = releaseDeliveryLock(lockPath, fsOpts);
-  assert.equal(released.ok, true);
-
-  // 해제 후에는 재시도가 가능해야 한다 -- 전달 실패/크래시가 영구 잠김이
-  // 되면 안 된다(claimForDelivery의 pending 복귀 원칙과 동형).
-  const third = acquireDeliveryLock(lockPath, fsOpts);
-  assert.equal(third.ok, true);
+  // 같은 인스턴스(또는 순차적으로 뒤이은 어떤 호출이든)가 다시 claim을
+  // 시도하면 -- 이미 'claimed'이므로 실패한다. 잠금 파일 없이 state 전이
+  // 값만으로 이 재진입 방지가 성립함을 확인한다.
+  const reclaimed = claimForDelivery(claimed.state, {
+    seatId: "CODER",
+    fingerprint: first.boundFingerprint,
+    claimedAtMs: 1600,
+  });
+  assert.equal(reclaimed.ok, false);
+  assert.equal(reclaimed.reason, "already-claimed-or-delivered");
 });
 
-test("P1-3(deliveryLockPath): fingerprint가 달라지면 lockPath도 달라진다(서로 다른 알림이 서로를 잠그지 않음)", () => {
-  const a = deliveryLockPath("/store.json", "CODER:reason-a");
-  const b = deliveryLockPath("/store.json", "REVIEW:reason-b");
-  assert.notEqual(a, b);
+test("수용기준1-⑵: 동시 인스턴스 2개가 같은 관측을 각자 emit -- 각자 자기 advisory 1개(중복은 advisory 수준에 국한, dispatch/실행 호출 0)", () => {
+  // 두 인스턴스가 서로의 claim을 보지 못하는 최악의 경우를 그대로
+  // 시뮬레이션한다: 둘 다 emptyStore에서 독립적으로 시작해 각자
+  // applyObservation을 호출한다(락이 없으므로 서로 조율하지 않는다).
+  const instanceAResult = applyObservation(createEmptyStore(), {
+    seatId: "CODER",
+    incarnation: INC_A,
+    classifyResult: stallResult(),
+    sampleGeneration: 1,
+    persist: { observedAtMs: 1000 },
+  });
+  const instanceBResult = applyObservation(createEmptyStore(), {
+    seatId: "CODER",
+    incarnation: INC_A,
+    classifyResult: stallResult(),
+    sampleGeneration: 1,
+    persist: { observedAtMs: 1000 },
+  });
+
+  // 관측기 계약의 핵심 단언: 이 함수들의 반환값 자체에 dispatch/teardown/
+  // task-write류 필드나 부작용이 전혀 없다(순수 상태 변환 -- applyObservation
+  // 의 시그니처와 stall-core.classifySeat의 actions:[] 계약 재확인).
+  assert.equal(instanceAResult.emitted, true);
+  assert.equal(instanceBResult.emitted, true);
+  assert.deepEqual(Object.keys(instanceAResult), [
+    "state",
+    "emitted",
+    "boundFingerprint",
+  ]);
+  assert.deepEqual(Object.keys(instanceBResult), [
+    "state",
+    "emitted",
+    "boundFingerprint",
+  ]);
+
+  // 각 인스턴스는 자기 advisory 정확히 1개만 갖는다(중복이 무한정 쌓이지
+  // 않는다 -- "bounded" 중복이 실제로 유계임을 확인).
+  assert.equal(
+    Object.keys(instanceAResult.state.seats.CODER.advisories).length,
+    1,
+  );
+  assert.equal(
+    Object.keys(instanceBResult.state.seats.CODER.advisories).length,
+    1,
+  );
 });
