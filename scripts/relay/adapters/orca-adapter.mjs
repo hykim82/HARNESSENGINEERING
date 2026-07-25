@@ -1632,3 +1632,36 @@ export function createOrcaExecFn({ spawnSyncFn = spawnSync } = {}) {
     }
   };
 }
+
+// HYK-171 사이클3B (coder-task.md §2): launch-seam.mjs가 뒤에 두는 "실
+// 워커를 띄우는" 얇은 실 sink -- ensureSeat/deliverTask(이 파일이 이미
+// 내보내는 포트, buildSeatCreateCommand/buildSeatLaunchTextCommand 등을
+// 그 안에서 그대로 쓴다)를 createOrcaExecFn(위, 이 파일에서만 `orca`를
+// literal spawn하는 지점)로 조합할 뿐이다 -- 새 spawn 호출을 추가하지
+// 않는다(G9 재확인: 이 함수도 스스로 spawnSync를 부르지 않고
+// createOrcaExecFn이 만든 execFn만 통과시킨다).
+//
+// 비타협(coder-task.md §2/§5): 이 함수는 **어디에도 기본값으로 결선되지
+// 않는다** -- launch-seam.mjs/grant-issuer.mjs 어느 쪽도 이걸 import하지
+// 않고, sink 파라미터의 default도 아니다. 오직 호출자가 명시적으로
+// import해서 acceptLaunch(..., { sink: createRealLaunchSink(...) })처럼
+// 직접 넘겨야만 도달한다 -- 그리고 launch-seam.mjs는 armed=false가 강제인
+// 이 사이클에서 그 sink 자체를 절대 호출하지 않는다(§4 6검 전부 통과해야
+// 호출되고, 그 6검 중 하나는 이 사이클에서 상시 실패하는 armed===true
+// 요구다).
+export function createRealLaunchSink({
+  role,
+  worktreePath,
+  taskId,
+  coordinatorHandle,
+  execFn = createOrcaExecFn(),
+} = {}) {
+  return function launchSink() {
+    const seat = ensureSeat({ role, worktreePath }, { execFn });
+    if (!seat.ok) return seat;
+    return deliverTask(
+      { role, worktreePath, taskId, coordinatorHandle },
+      { execFn },
+    );
+  };
+}

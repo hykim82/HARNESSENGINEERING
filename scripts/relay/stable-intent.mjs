@@ -122,10 +122,16 @@ function intentRecordPath(intentDir, stableIntentId) {
 // 커밋됐지만 grant는 아직 발급되지 않았고, 원인 불명 실패가 있었다"는
 // durable 표식이다 -- 사람이 확인하기 전엔 아무 것도 이 상태를 자동으로
 // 되돌리지 않는다(resumeIntentAfterHumanAck만이 유일한 출구).
+// HYK-171 사이클3B (§1/§3): RUNNING은 "launch acceptance"(기동 수락) --
+// launch-seam.mjs가 ISSUED -> RUNNING으로만 전이시킨다(armed 값과 무관하게
+// 이 전이 자체는 일어난다, 3B coder-task.md §1/§3). RUNNING은 "실 발사
+// 됨"도 "완료"도 아니다 -- 완료 판정은 여전히 scripts/check/relay-
+// handshake.mjs가 정본이고, 이 상태기계는 그 권위를 흉내내지 않는다.
 export const INTENT_STATUS = Object.freeze({
   CLAIMED: "CLAIMED",
   ISSUED: "ISSUED",
   PAUSED: "PAUSED",
+  RUNNING: "RUNNING",
 });
 
 function defaultMutexWrite(path, content) {
@@ -374,6 +380,24 @@ export function markIntentPaused(input, opts) {
     INTENT_STATUS.CLAIMED,
     INTENT_STATUS.PAUSED,
     { pause_reason: reason ?? null, needs_human_ack: true },
+    opts,
+  );
+}
+
+// markIntentRunning({ intentDir, stableIntentId, at }, opts): HYK-171
+// 사이클3B -- launch-seam.mjs가 launch acceptance(RUNNING receipt)를 성공
+// 기록한 뒤(또는 그 직전, 구현 선택은 launch-seam.mjs 몫)에 호출한다.
+// ISSUED -> RUNNING만 허용(updateIntentStatusTx 재사용 -- 새 잠금/원자저장
+// 없음, markIntentIssued와 동일 패턴). 이미 RUNNING/PAUSED/CLAIMED인 레코드에
+// 대한 재호출은 expectedFrom 불일치로 거부된다 -- 그래서 같은
+// stableIntentId에 대해 이 전이가 두 번 성공하는 일은 구조적으로 없다
+// (동시 supervisor exact-count의 근거 중 하나, coder-task.md §6 mutation #4).
+export function markIntentRunning(input, opts) {
+  return updateIntentStatusTx(
+    input,
+    INTENT_STATUS.ISSUED,
+    INTENT_STATUS.RUNNING,
+    {},
     opts,
   );
 }
