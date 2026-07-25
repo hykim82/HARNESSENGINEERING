@@ -229,6 +229,17 @@ export function collectSeatCandidates(ctx = {}, opts = {}) {
   );
 }
 
+// HYK-171-cycle4a2-1: relay-core.mjs의 readiness 게이트 stage가 기대하는
+// 포트 이름(observeSeatCandidates)으로 collectSeatCandidates를 그대로
+// 내보낸다 -- 재구현이 아니라 이름 별칭(관측+정규화는 이미
+// collectSeatCandidates가 한다, §2 "재사용 재구현 금지"). relay-core는 이
+// 함수를 adapter.observeSeatCandidates로 호출한다(파일 자신은 orca 문자열을
+// 갖지 않는다, G9는 이 파일에는 적용되지 않음 -- adapters/ 아래는 raw
+// vendor 신호를 다루는 경계 안이다).
+export function observeSeatCandidates(ctx = {}, opts = {}) {
+  return collectSeatCandidates(ctx, opts);
+}
+
 // ---- reference detector (opt-in only, UNVERIFIED -- 위 파일 헤더 참조) ----
 //
 // PM이 적시한 마커(coder-task.md §2): claude=Sonnet/[CODER]/[REVIEW]/
