@@ -284,14 +284,14 @@ test("mutation #8b: rm failure -- exactly one rm attempt, no automatic --force f
 // ---------------------------------------------------------------------------
 // #9 -- close 실패 뒤 rm 계속 저항
 // ---------------------------------------------------------------------------
-test("mutation #9: close failure -- rm and task-update are never called, phase CLOSE, original error preserved", () => {
+test("mutation #9: close failure -- rm and task-update are never called, phase CLOSE, original error preserved (HYK-171 4b-2a: reason is now a fixed code, original message moved to closeErrorMessage)", () => {
   const opts = staticEligibleOpts({
     execStubs: { close: { ok: false, reason: "close-broke" } },
   });
   const r = teardownSeat(eligibleTeardownCtx(), opts);
   assert.equal(r.ok, false);
   assert.equal(r.phase, TEARDOWN_PHASE.CLOSE);
-  assert.match(r.reason, /close-broke/);
+  assert.match(r.closeErrorMessage, /close-broke/);
   assert.equal(
     opts.execFn.calls.some((a) => a[0] === "worktree" && a[1] === "rm"),
     false,

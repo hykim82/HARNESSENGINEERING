@@ -50,10 +50,15 @@ import {
   RUN_STATE,
   TEARDOWN_PHASE,
   TEARDOWN_GATE_REASON,
+  TEARDOWN_CLOSE_REASON,
   buildTeardownWorktreeRemoveCommand,
 } from "./orca-adapter.mjs";
 import { scanEnvHandleIngress } from "./env-ingress-scan.mjs";
-import { EXECUTION as TEARDOWN_EXECUTION } from "../teardown-core.mjs";
+import {
+  EXECUTION as TEARDOWN_EXECUTION,
+  ELIGIBILITY as TEARDOWN_ELIGIBILITY,
+  REASON as TEARDOWN_CORE_REASON,
+} from "../teardown-core.mjs";
 
 // HYK-170 coder-1: 어댑터 단위 테스트 -- 전부 execFn/fs fake 주입, 실 orca
 // 호출 0(비타협 제약). fixture는 관제실 산출물
@@ -91,6 +96,16 @@ const FIXTURE_TAB_NOT_FOUND_RESPONSE = {
 };
 
 const FIXTURE_WORKTREE_RM_RESPONSE = { ok: true, result: { removed: true } };
+
+// HYK-171 사이클4b-2a §2-B: 2026-07-26 라이브 실측 raw 응답 형태. close가
+// ok:true를 반환해도 ptyKilled:true는 거짓일 수 있다(프로세스가 실제로는
+// 살아있음) -- 이 fixture로 "ptyKilled 필드는 성공 근거가 아니다"를
+// 고정한다. 실 형식과 다른 fixture로 시험하면 헛시험이므로 반드시 이
+// 형태(handle/tabId/ptyKilled)를 유지한다.
+const FIXTURE_CLOSE_PTYKILLED_RESPONSE = {
+  ok: true,
+  result: { close: { handle: "term_x", tabId: "tab_1", ptyKilled: true } },
+};
 
 // preview redraw artifact -- 실측 원문(2단 §3): 셸 예측입력으로 문자 단위
 // 재그림이 섞인다. 완전 일치가 아니라 정규화 후 마커 부분 일치로만 확인.
@@ -2384,6 +2399,32 @@ test("teardownSeat: armed omitted (default) -- zero close/rm/task-update calls, 
   );
 });
 
+test("teardownSeat: production-like call (no existingSeatHandle override) blocks a sole connected seat as ACTIVE_REFERENCE, zero destructive argv -- this is fail-closed by design, not a permanent lock (HYK-171 4b-2a §2-C: existingSeatHandle 정확 일치를 주면 count 0이 되는 것과 모순되지 않는다 -- production 결선이 그 override를 아직 주지 않을 뿐)", () => {
+  const { execFn, gitFn, existsFn } = eligibleInventoryOpts();
+  // 의도적으로 existingSeatHandle을 넘기지 않는다 -- 실 호출 경로
+  // (orca-adapter.mjs:1575-1590 관측 vs 1619-1631 handle resolve)와
+  // 동형: 소유권 증거가 없으면 어떤 좌석도 자기 자신으로 추정하지 않는다.
+  const r = teardownSeat(teardownArmedCtx(), { execFn, gitFn, existsFn });
+
+  assert.equal(r.ok, false);
+  assert.equal(r.phase, TEARDOWN_PHASE.GATE);
+  assert.equal(r.judged.allowSink, false);
+  assert.equal(r.judged.eligibility, TEARDOWN_ELIGIBILITY.ACTIVE_REFERENCE);
+  assert.equal(r.judged.reason, TEARDOWN_CORE_REASON.ACTIVE_REFERENCE);
+  assert.equal(r.judged.evidence.activeReferenceCount, 1);
+  assert.equal(noTerminalSendOrCloseCalls(execFn), true);
+  assert.equal(
+    execFn.calls.some((a) => a[0] === "worktree" && a[1] === "rm"),
+    false,
+  );
+  assert.equal(
+    execFn.calls.some(
+      (a) => a[0] === "orchestration" && a[1] === "task-update",
+    ),
+    false,
+  );
+});
+
 test("teardownSeat: armed=true but dirty working tree -- allowSink false, zero destructive calls", () => {
   const { execFn, gitFn, existsFn } = eligibleInventoryOpts({
     gitStatusOutput: " M some-file.txt\n",
@@ -2463,6 +2504,40 @@ test("teardownSeat: paired-good -- armed + eligible + post-observe all-absent --
   assert.deepEqual(taskUpdateCall, buildTaskUpdateFailedCommand("task_rt1"));
 });
 
+test("teardownSeat: close response's ptyKilled:true is never read as success evidence -- post-observation still present means NOT SUCCEEDED (HYK-171 4b-2a §2-B: 실측상 ptyKilled가 거짓일 수 있다 -- 회귀 봉인)", () => {
+  const execFn = fakeExecFn({
+    // rm 뒤에도 3층이 계속 present -- close가 ptyKilled:true를 보고해도
+    // 실제로는 아무것도 지워지지 않은 시나리오(고아 PTY로 rm이 조용히
+    // 실패하는 실측 패턴).
+    list: managedWorktreeStub(VALID_WORKTREE),
+    "terminal-list": terminalListStub([terminalEntry({ handle: "term_x" })]),
+    close: FIXTURE_CLOSE_PTYKILLED_RESPONSE,
+    rm: FIXTURE_WORKTREE_RM_RESPONSE,
+    "task-update": { ok: true },
+  });
+  const gitFn = fakeGitFn({
+    worktree: () => gitWorktreeListOutput([VALID_WORKTREE]),
+    status: "",
+  });
+  const existsFn = (p) => p === VALID_WORKTREE;
+
+  const r = teardownSeat(teardownArmedCtx(), {
+    execFn,
+    gitFn,
+    existsFn,
+    existingSeatHandle: "term_x",
+  });
+
+  assert.equal(r.ok, false);
+  assert.equal(r.execution, TEARDOWN_EXECUTION.FAILED_UNCHANGED);
+  assert.equal(
+    execFn.calls.some(
+      (a) => a[0] === "orchestration" && a[1] === "task-update",
+    ),
+    false,
+  );
+});
+
 test("teardownSeat: cleanup is null and task-update is never called when no taskId is given (even on a successful teardown)", () => {
   const state = { removed: false };
   const execFn = fakeExecFn({
@@ -2536,41 +2611,37 @@ test("teardownSeat: opts.force=true adds --force to the (still single) rm call",
   assert.equal(rmCalls[0].includes("--force"), true);
 });
 
-test("teardownSeat: tab_not_found close failure is absorbed -- rm still attempted", () => {
-  const state = { removed: false };
+test("teardownSeat: tab_not_found close failure is NOT absorbed -- stops as unconfirmed-cause failure, rm/task-update argv 0 (HYK-171 4b-2a §2-A: reverses the prior absorption contract)", () => {
+  const { gitFn, existsFn } = eligibleInventoryOpts();
   const execFn = fakeExecFn({
-    list: () =>
-      state.removed
-        ? { ok: true, result: { worktrees: [] } }
-        : managedWorktreeStub(VALID_WORKTREE),
+    list: managedWorktreeStub(VALID_WORKTREE),
     "terminal-list": terminalListStub([terminalEntry({ handle: "term_x" })]),
     close: FIXTURE_TAB_NOT_FOUND_RESPONSE,
-    rm: () => {
-      state.removed = true;
-      return FIXTURE_WORKTREE_RM_RESPONSE;
-    },
-    "task-update": { ok: true },
   });
-  const dynamicGitFn = fakeGitFn({
-    worktree: () =>
-      state.removed ? "" : gitWorktreeListOutput([VALID_WORKTREE]),
-    status: "",
-  });
-  const dynamicExistsFn = (p) => p === VALID_WORKTREE && !state.removed;
   const r = teardownSeat(teardownArmedCtx(), {
     execFn,
-    gitFn: dynamicGitFn,
-    existsFn: dynamicExistsFn,
+    gitFn,
+    existsFn,
     existingSeatHandle: "term_x",
   });
-  assert.equal(r.ok, true);
+  assert.equal(r.ok, false);
+  assert.equal(r.phase, TEARDOWN_PHASE.CLOSE);
+  assert.equal(r.reason, TEARDOWN_CLOSE_REASON.TAB_NOT_FOUND);
+  assert.equal(r.closeErrorCode, "runtime_error");
+  assert.equal(r.closeErrorMessage, "tab_not_found");
   assert.equal(
     execFn.calls.some((a) => a[0] === "worktree" && a[1] === "rm"),
-    true,
+    false,
+  );
+  assert.equal(
+    execFn.calls.some(
+      (a) => a[0] === "orchestration" && a[1] === "task-update",
+    ),
+    false,
   );
 });
 
-test("teardownSeat: a real (non-tab_not_found) close failure -- phase CLOSE, rm/task-update never called", () => {
+test("teardownSeat: a real (non-tab_not_found) close failure -- phase CLOSE, rm/task-update never called, reason code distinguishes from tab_not_found", () => {
   const { gitFn, existsFn } = eligibleInventoryOpts();
   const execFn = fakeExecFn({
     list: managedWorktreeStub(VALID_WORKTREE),
@@ -2585,7 +2656,9 @@ test("teardownSeat: a real (non-tab_not_found) close failure -- phase CLOSE, rm/
   });
   assert.equal(r.ok, false);
   assert.equal(r.phase, TEARDOWN_PHASE.CLOSE);
-  assert.match(r.reason, /some other failure/);
+  assert.equal(r.reason, TEARDOWN_CLOSE_REASON.CLOSE_FAILED);
+  assert.notEqual(r.reason, TEARDOWN_CLOSE_REASON.TAB_NOT_FOUND);
+  assert.match(r.closeErrorMessage, /some other failure/);
   assert.equal(
     execFn.calls.some((a) => a[0] === "worktree" && a[1] === "rm"),
     false,

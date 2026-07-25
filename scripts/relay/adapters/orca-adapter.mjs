@@ -1546,16 +1546,52 @@ export const TEARDOWN_GATE_REASON = Object.freeze({
   NOT_ARMED: "TEARDOWN_NOT_ARMED",
 });
 
+// HYK-171 사이클4b-2a §2-A: close 실패의 두 reason code. 어느 쪽이든
+// "원인 미확정 실패"로 정지한다 -- tab_not_found는 "PTY 고아 확정"이
+// 아니다(그 관측은 --tab 경로 한정이고 프로덕션 builder는 --tab을 쓰지
+// 않는다, PM 오류 적발 3). 구별은 오직 진단 가능성(reason code)을 위한
+// 것이고, tab_not_found 쪽을 성공으로 흡수하는 근거가 아니다.
+export const TEARDOWN_CLOSE_REASON = Object.freeze({
+  TAB_NOT_FOUND: "TEARDOWN_CLOSE_TAB_NOT_FOUND",
+  CLOSE_FAILED: "TEARDOWN_CLOSE_FAILED",
+});
+
 // tab_not_found(실측 2단 §4 오류 shape: {ok:false, error:{code:"runtime_error",
-// message:"tab_not_found"}})는 "이미 닫힌 탭"을 의미한다 -- teardown 실패로
-// 취급하지 않는다(§A3 주석 참조, --tab을 안 붙여야 이 경로에서 애초에 덜
-// 발생하지만 close가 먼저 불려 이미 닫혔을 가능성은 여전히 있다).
+// message:"tab_not_found"}})는 분류 전용이다. HYK-171 사이클4b-2a: 이
+// 함수의 반환값을 "성공"으로 흡수하지 않는다 -- close가 ok:true가 아니면
+// 원인이 무엇이든 원인 미확정 실패로 즉시 정지한다(rm·task-update argv 0).
+// 이 함수는 오직 reason code를 TAB_NOT_FOUND vs CLOSE_FAILED로 구별하는
+// 데만 쓰인다(진단 가능성 -- PM mutation #1 요구).
 function isTabNotFoundFailure(guardedResult) {
   return (
     !guardedResult.ok &&
     isNonEmptyString(guardedResult.reason) &&
     guardedResult.reason.includes("tab_not_found")
   );
+}
+
+// close 실패를 원인 미확정 실패로 분류만 한다(성공 흡수 금지). raw로
+// 정규화된 에러 코드(response.error.code/message)를 결과에 보존해
+// 진단 가능성을 유지한다.
+function classifyCloseFailure(guardedResult) {
+  const rawError =
+    isPlainObject(guardedResult.response) &&
+    isPlainObject(guardedResult.response.error)
+      ? guardedResult.response.error
+      : null;
+  return {
+    reason: isTabNotFoundFailure(guardedResult)
+      ? TEARDOWN_CLOSE_REASON.TAB_NOT_FOUND
+      : TEARDOWN_CLOSE_REASON.CLOSE_FAILED,
+    rawErrorCode:
+      rawError && isNonEmptyString(rawError.code) ? rawError.code : null,
+    rawErrorMessage:
+      rawError && isNonEmptyString(rawError.message)
+        ? rawError.message
+        : isNonEmptyString(guardedResult.reason)
+          ? guardedResult.reason
+          : null,
+  };
 }
 
 // worktreePath는 이제 언제나 필수다(§2-C 재설계: 모든 파괴 판정이 3층
@@ -1635,15 +1671,21 @@ function executeArmedTeardown(c, opts, before, judged) {
     opts.execFn,
     REASON.TEARDOWN_FAILED,
   );
-  const closeOk = closed.ok || isTabNotFoundFailure(closed);
-  if (!closeOk) {
+  // HYK-171 사이클4b-2a §2-A: close 응답이 ok:true가 아니면(tab_not_found
+  // 포함) 원인 미확정 실패로 즉시 정지한다 -- rm·task-update argv 0.
+  // tab_not_found를 "이미 닫힘"으로 흡수해 rm으로 진행하던 이전 계약을
+  // 뒤집는다(그 흡수가 PTY 고아를 삭제 성공으로 오분류시켰다).
+  if (!closed.ok) {
+    const classified = classifyCloseFailure(closed);
     return {
       ok: false,
       phase: TEARDOWN_PHASE.CLOSE,
       armed: true,
       judged,
       before,
-      reason: closed.reason,
+      reason: classified.reason,
+      closeErrorCode: classified.rawErrorCode,
+      closeErrorMessage: classified.rawErrorMessage,
     };
   }
 
