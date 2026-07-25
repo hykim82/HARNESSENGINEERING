@@ -48,8 +48,12 @@ import {
   CONSUME_REASON,
   classifyRunReadiness,
   RUN_STATE,
+  TEARDOWN_PHASE,
+  TEARDOWN_GATE_REASON,
+  buildTeardownWorktreeRemoveCommand,
 } from "./orca-adapter.mjs";
 import { scanEnvHandleIngress } from "./env-ingress-scan.mjs";
+import { EXECUTION as TEARDOWN_EXECUTION } from "../teardown-core.mjs";
 
 // HYK-170 coder-1: 어댑터 단위 테스트 -- 전부 execFn/fs fake 주입, 실 orca
 // 호출 0(비타협 제약). fixture는 관제실 산출물
@@ -132,6 +136,66 @@ function managedWorktreeStub(path = VALID_WORKTREE) {
 // (2단 §2)을 그대로 쓴다. entries는 {handle, worktreePath, ...} 배열.
 function terminalListStub(entries) {
   return { ok: true, result: { terminals: entries } };
+}
+
+// ---------------------------------------------------------------------------
+// HYK-171 사이클4b-1: teardownSeat이 이제 3층 증거(teardown-inventory-adapter)
+// 로 게이트되므로, gitFn/existsFn fake도 필요하다. execFn과 동형(호출 기록
+// + 키별 stub, 함수 stub은 상태 토글용).
+// ---------------------------------------------------------------------------
+function fakeGitFn(responses) {
+  const calls = [];
+  function fn(argv) {
+    calls.push(argv);
+    const key = argv[0];
+    const entry = responses[key];
+    if (typeof entry === "function") return entry(argv, calls.length);
+    if (entry === undefined) {
+      throw new Error(
+        `fakeGitFn: no stub for '${key}' (argv=${JSON.stringify(argv)})`,
+      );
+    }
+    return entry;
+  }
+  fn.calls = calls;
+  return fn;
+}
+function gitWorktreeListOutput(paths) {
+  return (
+    paths.map((p) => `worktree ${p}`).join("\n") + (paths.length ? "\n" : "")
+  );
+}
+function fakeExistsFn(map) {
+  return (p) => (typeof map === "function" ? map(p) : (map ?? false));
+}
+
+// 3층(git/orca/dir) 전부 present + 활성참조 0 + working tree clean인
+// "armed=true로 넘기면 곧장 파괴가 허용되는" 최소 상태를 만든다. mutation
+// 별로 이 기준선에서 정확히 한 항목만 어긋나게 만들어 각 guard를 독립적으로
+// 시험한다(hyk171-cycle4b1-mutation.test.mjs).
+//
+// HYK-171 사이클4b-1 재작업3(사람 게이트 결정): 활성참조는 이제 connected+
+// handle 소유권 증거(existingSeatHandle)만 본다(pane key/task-list 삭제) --
+// 기본값은 "유일한 좌석이 곧 대상 좌석 자신"(existingSeatHandle =
+// terminalEntries[0]의 handle)이다.
+function eligibleInventoryOpts({
+  worktreePath = VALID_WORKTREE,
+  extraExecStubs = {},
+  terminalEntries = [terminalEntry({ handle: "term_x" })],
+  gitStatusOutput = "",
+  existingSeatHandle = terminalEntries[0]?.handle,
+} = {}) {
+  const execFn = fakeExecFn({
+    list: managedWorktreeStub(worktreePath),
+    "terminal-list": terminalListStub(terminalEntries),
+    ...extraExecStubs,
+  });
+  const gitFn = fakeGitFn({
+    worktree: gitWorktreeListOutput([worktreePath]),
+    status: gitStatusOutput,
+  });
+  const existsFn = fakeExistsFn(true);
+  return { execFn, gitFn, existsFn, existingSeatHandle };
 }
 
 // ---------------------------------------------------------------------------
@@ -1002,6 +1066,7 @@ function terminalEntry(overrides = {}) {
     handle: "term_a",
     worktreePath: VALID_WORKTREE,
     tabId: "11111111-2222-3333-4444-555555555555",
+    leafId: "99999999-8888-7777-6666-555555555555",
     title: "CODER",
     connected: true,
     writable: true,
@@ -1297,35 +1362,93 @@ test("A5: deliverTask -- AMBIGUOUS seat resolution issues zero dispatch/submit c
   );
 });
 
+// HYK-171 사이클4b-1: teardownSeat이 이제 armed+allowSink 게이트를 먼저
+// 통과해야만 handle 해석(A-1)에 도달한다 -- 아래 두 시험은 그 게이트를
+// eligibleInventoryOpts로 통과시킨 뒤에도 NOT_FOUND/AMBIGUOUS는 여전히
+// 파괴 argv 0을 낸다는 것을 확인한다(phase는 RESOLVE로 구분된다).
 test("A5: teardownSeat -- NOT_FOUND seat resolution issues zero close/rm/task-update calls", () => {
+  const { gitFn, existsFn } = eligibleInventoryOpts();
   const execFn = fakeExecFn({
     list: managedWorktreeStub(VALID_WORKTREE),
     "terminal-list": terminalListStub([]),
   });
   const r = teardownSeat(
-    { role: "CODER", worktreePath: VALID_WORKTREE, taskId: "task_rt1" },
-    { execFn },
+    {
+      role: "CODER",
+      worktreePath: VALID_WORKTREE,
+      taskId: "task_rt1",
+      armed: true,
+      policy: { protectedTargets: [], dispatchCorrelationProven: true },
+    },
+    { execFn, gitFn, existsFn },
   );
   assert.equal(r.ok, false);
+  assert.equal(r.phase, TEARDOWN_PHASE.RESOLVE);
   assert.equal(r.seatHandleReason, SEAT_HANDLE_REASON.NOT_FOUND);
-  assert.equal(execFn.calls.length, 2); // worktree list + terminal list only
+  // 4 read-only calls: inventory pre-observation (worktree list + terminal
+  // list for activeReferences) + resolveSeatHandle (checkWorktreeManaged's
+  // worktree list + its own terminal list) -- zero close/rm/task-update.
+  assert.equal(execFn.calls.length, 4);
+  assert.equal(
+    execFn.calls.every(
+      (a) =>
+        !(a[0] === "terminal" && a[1] === "close") &&
+        !(a[0] === "worktree" && a[1] === "rm") &&
+        !(a[0] === "orchestration" && a[1] === "task-update"),
+    ),
+    true,
+  );
 });
 
 test("A5: teardownSeat -- AMBIGUOUS seat resolution issues zero close/rm/task-update calls", () => {
+  const { gitFn, existsFn } = eligibleInventoryOpts();
+  // Two independent live `terminal list` queries happen in this flow
+  // (inventory's activeReferences observation, then resolveSeatHandle's own
+  // candidate query) -- this fixture deliberately returns a different
+  // snapshot for each (TOCTOU-safe by design elsewhere in this codebase,
+  // e.g. D12's post-launch reverify). The AMBIGUOUS pair only needs to be
+  // visible to the *second* (resolve-time) query -- the first (inventory)
+  // query stays empty so the eligibility gate isn't blocked by an unrelated
+  // active-reference concern this test isn't about.
+  let terminalListCalls = 0;
   const execFn = fakeExecFn({
     list: managedWorktreeStub(VALID_WORKTREE),
-    "terminal-list": terminalListStub([
-      terminalEntry({ handle: "term_a" }),
-      terminalEntry({ handle: "term_b" }),
-    ]),
+    "terminal-list": () => {
+      terminalListCalls += 1;
+      return terminalListCalls === 1
+        ? terminalListStub([])
+        : terminalListStub([
+            terminalEntry({ handle: "term_a" }),
+            terminalEntry({ handle: "term_b" }),
+          ]);
+    },
   });
   const r = teardownSeat(
-    { role: "CODER", worktreePath: VALID_WORKTREE, taskId: "task_rt1" },
-    { execFn },
+    {
+      role: "CODER",
+      worktreePath: VALID_WORKTREE,
+      taskId: "task_rt1",
+      armed: true,
+      policy: { protectedTargets: [], dispatchCorrelationProven: true },
+    },
+    { execFn, gitFn, existsFn },
   );
   assert.equal(r.ok, false);
+  assert.equal(r.phase, TEARDOWN_PHASE.RESOLVE);
   assert.equal(r.seatHandleReason, SEAT_HANDLE_REASON.AMBIGUOUS);
-  assert.equal(execFn.calls.length, 2); // worktree list + terminal list only
+  // 4 read-only calls: inventory pre-observation (worktree list + terminal
+  // list for activeReferences) + resolveSeatHandle (checkWorktreeManaged's
+  // worktree list + its own terminal list) -- zero close/rm/task-update.
+  assert.equal(execFn.calls.length, 4);
+  assert.equal(
+    execFn.calls.every(
+      (a) =>
+        !(a[0] === "terminal" && a[1] === "close") &&
+        !(a[0] === "worktree" && a[1] === "rm") &&
+        !(a[0] === "orchestration" && a[1] === "task-update"),
+    ),
+    true,
+  );
 });
 
 function noTerminalSendOrCloseCalls(execFn) {
@@ -2196,96 +2319,360 @@ test("collectCompletionSignals: never used as completion authority -- signature 
 });
 
 // ---------------------------------------------------------------------------
-// teardownSeat -- A3 (--terminal, tab_not_found absorbed), A5 (real
-// execution), A6 (task-update, keyed by taskId not seatHandle)
+// teardownSeat -- HYK-171 사이클4b-1 (coder-task.md §2-C) 재작성.
+//
+// **바뀐 것과 이유** (조용한 삭제 금지, PR 본문에도 열거):
+// 1. teardownSeat은 더 이상 무조건 close->rm->task-update를 실행하지
+//    않는다 -- armed(===true strict)와 judgeTeardown().allowSink를 먼저
+//    통과해야 어떤 파괴 argv도 나간다(§2-C #1/#2). 이전 happy-path 시험은
+//    ctx.armed도 policy도 없이 곧장 3회 호출을 기대했는데, 그 계약 자체가
+//    이 사이클의 비타협 제약(§1-3: armed=true 기본값 금지)과 모순이라
+//    폐기했다.
+// 2. worktreePath는 이제 항상 필수다 -- existingSeatHandle만으로 열리던
+//    "close-only, 워크트리 없음" 경로는 3층 증거 판정(teardownSeat 전체가
+//    inventory에 결속)과 양립하지 않아 제거했다("worktreeRemove is null"
+//    시험 폐기).
+// 3. rm argv에서 `--force` 기본이 빠졌다(§2-C #4) -- 새 빌더
+//    buildTeardownWorktreeRemoveCommand는 opts.force===true일 때만 붙인다.
+//    기존 buildWorktreeRemoveCommand(항상 --force)는 createManagedWorktree
+//    rollback 전용으로 그대로 남아 있다(비범위, 손대지 않음).
+// 4. rm 성공 응답(cliOk)만으로 task-update를 실행하지 않는다 -- 사후
+//    재관측 + judgePostConditions가 SUCCEEDED일 때만 실행한다(§2-C #6).
+// 5. close 실패/rm 실패 각각 별도 phase(CLOSE/REMOVE)로 보고하고, 그 다음
+//    단계 호출은 0건이다(§2-C #3/#5) -- 기존 "close 실패해도 rm은 계속
+//    시도한다" 시험은 새 계약과 정반대라 뒤집었다.
 // ---------------------------------------------------------------------------
-test("teardownSeat: closes seat, removes the worktree for real, and runs best-effort task-update(failed)", () => {
+
+// HYK-171 사이클4b-1 재작업3(사람 게이트 결정): policy.dispatchCorrelationProven
+// 를 기준선에 기본 포함한다 -- 미제공 시 모든 teardown이 새 전제조건(§2-B)
+// 에서 막히므로, 이 baseline을 쓰는 시험들은 명시적으로 opt-in한다.
+function teardownArmedCtx(overrides = {}) {
+  return {
+    role: "CODER",
+    worktreePath: VALID_WORKTREE,
+    taskId: "task_rt1",
+    armed: true,
+    policy: { protectedTargets: [], dispatchCorrelationProven: true },
+    ...overrides,
+  };
+}
+
+test("teardownSeat: armed omitted (default) -- zero close/rm/task-update calls, phase GATE, reason NOT_ARMED", () => {
+  const { gitFn, existsFn } = eligibleInventoryOpts();
   const execFn = fakeExecFn({
-    close: { ok: true },
-    rm: FIXTURE_WORKTREE_RM_RESPONSE,
-    "task-update": { ok: true },
+    list: managedWorktreeStub(VALID_WORKTREE),
+    "terminal-list": terminalListStub([]),
   });
   const r = teardownSeat(
     { worktreePath: VALID_WORKTREE, taskId: "task_rt1" },
-    { execFn, existingSeatHandle: "term_x" },
+    { execFn, gitFn, existsFn },
   );
+  assert.equal(r.ok, false);
+  assert.equal(r.phase, TEARDOWN_PHASE.GATE);
+  assert.equal(r.armed, false);
+  assert.equal(r.reason, TEARDOWN_GATE_REASON.NOT_ARMED);
+  assert.equal(noTerminalSendOrCloseCalls(execFn), true);
+  assert.equal(
+    execFn.calls.some((a) => a[0] === "worktree" && a[1] === "rm"),
+    false,
+  );
+  assert.equal(
+    execFn.calls.some(
+      (a) => a[0] === "orchestration" && a[1] === "task-update",
+    ),
+    false,
+  );
+});
+
+test("teardownSeat: armed=true but dirty working tree -- allowSink false, zero destructive calls", () => {
+  const { execFn, gitFn, existsFn } = eligibleInventoryOpts({
+    gitStatusOutput: " M some-file.txt\n",
+  });
+  const r = teardownSeat(teardownArmedCtx(), { execFn, gitFn, existsFn });
+  assert.equal(r.ok, false);
+  assert.equal(r.phase, TEARDOWN_PHASE.GATE);
+  assert.equal(r.armed, true);
+  assert.equal(r.judged.allowSink, false);
+  assert.equal(noTerminalSendOrCloseCalls(execFn), true);
+  assert.equal(
+    execFn.calls.some((a) => a[0] === "worktree" && a[1] === "rm"),
+    false,
+  );
+});
+
+test("teardownSeat: paired-good -- armed + eligible + post-observe all-absent -- close, rm(non-force), task-update exactly once each, in order", () => {
+  const state = { removed: false };
+  const execFn = fakeExecFn({
+    list: () =>
+      state.removed
+        ? { ok: true, result: { worktrees: [] } }
+        : managedWorktreeStub(VALID_WORKTREE),
+    "terminal-list": terminalListStub([terminalEntry({ handle: "term_x" })]),
+    close: { ok: true },
+    rm: () => {
+      state.removed = true;
+      return FIXTURE_WORKTREE_RM_RESPONSE;
+    },
+    "task-update": { ok: true },
+  });
+  const gitFn = fakeGitFn({
+    worktree: () =>
+      state.removed ? "" : gitWorktreeListOutput([VALID_WORKTREE]),
+    status: "",
+  });
+  const existsFn = (p) => p === VALID_WORKTREE && !state.removed;
+
+  const r = teardownSeat(teardownArmedCtx(), {
+    execFn,
+    gitFn,
+    existsFn,
+    existingSeatHandle: "term_x",
+  });
+
   assert.equal(r.ok, true);
+  assert.equal(r.phase, TEARDOWN_PHASE.DONE);
+  assert.equal(r.execution, TEARDOWN_EXECUTION.SUCCEEDED);
   assert.equal(r.cleanup.ok, true);
-  assert.equal(r.worktreeRemove.ok, true);
-  // close, worktree rm, task-update -- all 3 actually executed (v1 only
-  // executed close; A5's rm was construction-only).
-  assert.equal(execFn.calls.length, 3);
-  const rmCall = execFn.calls.find((a) => a[0] === "worktree" && a[1] === "rm");
-  assert.deepEqual(rmCall, buildWorktreeRemoveCommand(VALID_WORKTREE));
-  const taskUpdateCall = execFn.calls.find(
+  assert.equal("seatHandle" in r, false); // raw handle never leaks (A-2 principle carried over)
+
+  const closeIdx = execFn.calls.findIndex(
+    (a) => a[0] === "terminal" && a[1] === "close",
+  );
+  const rmIdx = execFn.calls.findIndex(
+    (a) => a[0] === "worktree" && a[1] === "rm",
+  );
+  const taskUpdateIdx = execFn.calls.findIndex(
     (a) => a[0] === "orchestration" && a[1] === "task-update",
   );
+  assert.ok(closeIdx >= 0 && rmIdx > closeIdx && taskUpdateIdx > rmIdx);
+  assert.equal(
+    execFn.calls.filter((a) => a[0] === "terminal" && a[1] === "close").length,
+    1,
+  );
+  assert.equal(
+    execFn.calls.filter((a) => a[0] === "worktree" && a[1] === "rm").length,
+    1,
+  );
+  const rmCall = execFn.calls[rmIdx];
+  assert.deepEqual(
+    rmCall,
+    buildTeardownWorktreeRemoveCommand(VALID_WORKTREE, {}),
+  );
+  assert.equal(rmCall.includes("--force"), false);
+  const taskUpdateCall = execFn.calls[taskUpdateIdx];
   assert.deepEqual(taskUpdateCall, buildTaskUpdateFailedCommand("task_rt1"));
 });
 
-test("teardownSeat: a tab_not_found close failure is absorbed as already-closed, not a teardown failure", () => {
+test("teardownSeat: cleanup is null and task-update is never called when no taskId is given (even on a successful teardown)", () => {
+  const state = { removed: false };
   const execFn = fakeExecFn({
-    close: FIXTURE_TAB_NOT_FOUND_RESPONSE,
-    rm: FIXTURE_WORKTREE_RM_RESPONSE,
+    list: () =>
+      state.removed
+        ? { ok: true, result: { worktrees: [] } }
+        : managedWorktreeStub(VALID_WORKTREE),
+    "terminal-list": terminalListStub([terminalEntry({ handle: "term_x" })]),
+    close: { ok: true },
+    rm: () => {
+      state.removed = true;
+      return FIXTURE_WORKTREE_RM_RESPONSE;
+    },
   });
-  const r = teardownSeat(
-    { worktreePath: VALID_WORKTREE },
-    { execFn, existingSeatHandle: "term_x" },
-  );
-  assert.equal(r.ok, true);
-});
-
-test("teardownSeat: a real (non-tab_not_found) close failure is reported, worktree rm still attempted", () => {
-  const execFn = fakeExecFn({
-    close: { ok: false, reason: "some other failure" },
-    rm: FIXTURE_WORKTREE_RM_RESPONSE,
+  const gitFn = fakeGitFn({
+    worktree: () =>
+      state.removed ? "" : gitWorktreeListOutput([VALID_WORKTREE]),
+    status: "",
   });
-  const r = teardownSeat(
-    { worktreePath: VALID_WORKTREE },
-    { execFn, existingSeatHandle: "term_x" },
-  );
-  assert.equal(r.ok, false);
-  assert.match(r.reason, /some other failure/);
-  const rmCall = execFn.calls.find((a) => a[0] === "worktree" && a[1] === "rm");
-  assert.ok(rmCall);
-});
-
-// A-2: teardownSeat no longer takes seatHandle as input -- worktreePath (or
-// the test-only existingSeatHandle override) is the routing input.
-test("teardownSeat: missing worktreePath (and no existingSeatHandle override) is rejected", () => {
-  const r = teardownSeat({}, { execFn: fakeExecFn({}) });
-  assert.equal(r.ok, false);
-  assert.match(r.reason, /worktreePath/);
-});
-
-test("teardownSeat: worktreeRemove is null and rm is never called when the ctx has no worktreePath (existingSeatHandle override closes the seat only)", () => {
-  const execFn = fakeExecFn({ close: { ok: true } });
-  const r = teardownSeat({}, { execFn, existingSeatHandle: "term_x" });
+  const existsFn = (p) => p === VALID_WORKTREE && !state.removed;
+  const r = teardownSeat(teardownArmedCtx({ taskId: undefined }), {
+    execFn,
+    gitFn,
+    existsFn,
+    existingSeatHandle: "term_x",
+  });
   assert.equal(r.ok, true);
-  assert.equal(r.worktreeRemove, null);
-  assert.equal(execFn.calls.length, 1); // close only
-});
-
-test("teardownSeat: cleanup is null and task-update is never called when no taskId is given", () => {
-  const execFn = fakeExecFn({ close: { ok: true } });
-  const r = teardownSeat(
-    { worktreePath: VALID_WORKTREE },
-    { execFn, existingSeatHandle: "term_x" },
-  );
   assert.equal(r.cleanup, null);
+  assert.equal(
+    execFn.calls.some(
+      (a) => a[0] === "orchestration" && a[1] === "task-update",
+    ),
+    false,
+  );
 });
 
-test("teardownSeat: worktree rm failure makes the overall result fail even if close succeeded", () => {
+test("teardownSeat: opts.force=true adds --force to the (still single) rm call", () => {
+  const state = { removed: false };
   const execFn = fakeExecFn({
+    list: () =>
+      state.removed
+        ? { ok: true, result: { worktrees: [] } }
+        : managedWorktreeStub(VALID_WORKTREE),
+    "terminal-list": terminalListStub([terminalEntry({ handle: "term_x" })]),
+    close: { ok: true },
+    rm: () => {
+      state.removed = true;
+      return FIXTURE_WORKTREE_RM_RESPONSE;
+    },
+    "task-update": { ok: true },
+  });
+  const gitFn = fakeGitFn({
+    worktree: () =>
+      state.removed ? "" : gitWorktreeListOutput([VALID_WORKTREE]),
+    status: "",
+  });
+  const existsFn = (p) => p === VALID_WORKTREE && !state.removed;
+
+  const r = teardownSeat(teardownArmedCtx(), {
+    execFn,
+    gitFn,
+    existsFn,
+    force: true,
+    existingSeatHandle: "term_x",
+  });
+  assert.equal(r.ok, true);
+  const rmCalls = execFn.calls.filter(
+    (a) => a[0] === "worktree" && a[1] === "rm",
+  );
+  assert.equal(rmCalls.length, 1);
+  assert.equal(rmCalls[0].includes("--force"), true);
+});
+
+test("teardownSeat: tab_not_found close failure is absorbed -- rm still attempted", () => {
+  const state = { removed: false };
+  const execFn = fakeExecFn({
+    list: () =>
+      state.removed
+        ? { ok: true, result: { worktrees: [] } }
+        : managedWorktreeStub(VALID_WORKTREE),
+    "terminal-list": terminalListStub([terminalEntry({ handle: "term_x" })]),
+    close: FIXTURE_TAB_NOT_FOUND_RESPONSE,
+    rm: () => {
+      state.removed = true;
+      return FIXTURE_WORKTREE_RM_RESPONSE;
+    },
+    "task-update": { ok: true },
+  });
+  const dynamicGitFn = fakeGitFn({
+    worktree: () =>
+      state.removed ? "" : gitWorktreeListOutput([VALID_WORKTREE]),
+    status: "",
+  });
+  const dynamicExistsFn = (p) => p === VALID_WORKTREE && !state.removed;
+  const r = teardownSeat(teardownArmedCtx(), {
+    execFn,
+    gitFn: dynamicGitFn,
+    existsFn: dynamicExistsFn,
+    existingSeatHandle: "term_x",
+  });
+  assert.equal(r.ok, true);
+  assert.equal(
+    execFn.calls.some((a) => a[0] === "worktree" && a[1] === "rm"),
+    true,
+  );
+});
+
+test("teardownSeat: a real (non-tab_not_found) close failure -- phase CLOSE, rm/task-update never called", () => {
+  const { gitFn, existsFn } = eligibleInventoryOpts();
+  const execFn = fakeExecFn({
+    list: managedWorktreeStub(VALID_WORKTREE),
+    "terminal-list": terminalListStub([terminalEntry({ handle: "term_x" })]),
+    close: { ok: false, reason: "some other failure" },
+  });
+  const r = teardownSeat(teardownArmedCtx(), {
+    execFn,
+    gitFn,
+    existsFn,
+    existingSeatHandle: "term_x",
+  });
+  assert.equal(r.ok, false);
+  assert.equal(r.phase, TEARDOWN_PHASE.CLOSE);
+  assert.match(r.reason, /some other failure/);
+  assert.equal(
+    execFn.calls.some((a) => a[0] === "worktree" && a[1] === "rm"),
+    false,
+  );
+  assert.equal(
+    execFn.calls.some(
+      (a) => a[0] === "orchestration" && a[1] === "task-update",
+    ),
+    false,
+  );
+});
+
+test("teardownSeat: rm failure -- phase REMOVE, before/after snapshots preserved, task-update never called", () => {
+  const { gitFn, existsFn } = eligibleInventoryOpts();
+  const execFn = fakeExecFn({
+    list: managedWorktreeStub(VALID_WORKTREE),
+    "terminal-list": terminalListStub([terminalEntry({ handle: "term_x" })]),
     close: { ok: true },
     rm: { ok: false, reason: "orca down" },
   });
-  const r = teardownSeat(
-    { worktreePath: VALID_WORKTREE },
-    { execFn, existingSeatHandle: "term_x" },
-  );
+  const r = teardownSeat(teardownArmedCtx(), {
+    execFn,
+    gitFn,
+    existsFn,
+    existingSeatHandle: "term_x",
+  });
   assert.equal(r.ok, false);
+  assert.equal(r.phase, TEARDOWN_PHASE.REMOVE);
   assert.match(r.reason, /orca down/);
+  assert.ok(r.before);
+  assert.ok(r.after);
+  assert.equal(
+    execFn.calls.filter((a) => a[0] === "worktree" && a[1] === "rm").length,
+    1,
+  ); // rm called at most once -- no force-fallback retry
+  assert.equal(
+    execFn.calls.some(
+      (a) => a[0] === "orchestration" && a[1] === "task-update",
+    ),
+    false,
+  );
+});
+
+test("teardownSeat: rm reports ok:true but post-observe is a split state (git absent, orca/dir still present) -- FAILED_SPLIT, task-update never called (cliOk alone is not success)", () => {
+  const state = { removed: false };
+  const execFn = fakeExecFn({
+    list: managedWorktreeStub(VALID_WORKTREE), // orca layer stays "present" even after rm ok:true
+    "terminal-list": terminalListStub([terminalEntry({ handle: "term_x" })]),
+    close: { ok: true },
+    rm: () => {
+      state.removed = true;
+      return FIXTURE_WORKTREE_RM_RESPONSE; // ok:true
+    },
+  });
+  const gitFn = fakeGitFn({
+    worktree: () =>
+      state.removed ? "" : gitWorktreeListOutput([VALID_WORKTREE]),
+    status: "",
+  });
+  const existsFn = () => true; // dir layer stays "present" even after rm ok:true
+  const r = teardownSeat(teardownArmedCtx(), {
+    execFn,
+    gitFn,
+    existsFn,
+    existingSeatHandle: "term_x",
+  });
+  assert.equal(r.ok, false);
+  assert.equal(r.phase, TEARDOWN_PHASE.REMOVE);
+  assert.equal(r.execution, TEARDOWN_EXECUTION.FAILED_SPLIT);
+  assert.equal(r.after.layers.git, "absent");
+  assert.equal(r.after.layers.orca, "present");
+  assert.equal(r.after.layers.dir, "present");
+  assert.equal(
+    execFn.calls.some(
+      (a) => a[0] === "orchestration" && a[1] === "task-update",
+    ),
+    false,
+  );
+});
+
+// worktreePath is now always required (§2-C redesign: every judgment is
+// evidence-gated by worktree inventory, so there is no meaningful
+// "existingSeatHandle only" teardown target anymore).
+test("teardownSeat: missing worktreePath is rejected", () => {
+  const r = teardownSeat({ armed: true }, { execFn: fakeExecFn({}) });
+  assert.equal(r.ok, false);
+  assert.match(r.reason, /worktreePath/);
 });
 
 // ---------------------------------------------------------------------------
