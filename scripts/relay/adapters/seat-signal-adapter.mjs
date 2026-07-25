@@ -17,6 +17,7 @@
 // opts.execFn 기본값으로 재사용한다. 실측 명령 빌더(terminal show/list)도
 // orca-adapter.mjs의 것을 재사용(재구현 금지, coder-task.md §재사용).
 
+import { createHash } from "node:crypto";
 import { checkRelayHandshake } from "../../check/relay-handshake.mjs";
 import {
   buildSeatShowCommand,
@@ -200,6 +201,33 @@ function detectIncarnationMismatch(expected, parsedDispatch) {
     return true;
   }
   return false;
+}
+
+// P1-4 재작업(REVIEW hyk171-cycle2b-review-1 결함 4 수리): S6 계약상
+// pane key(raw orca 문자열)는 이 어댑터 파일 안에만 머물러야 한다
+// (파일 상단 헤더 주석). 그런데 이 어댑터가 낸 `quality.incarnation`을
+// stall-observer.mjs가 그대로 durable store(observer-store.mjs)로 넘겨
+// `incarnationKey` 직렬화 문자열에 raw pane key가 그대로 박혔다(REVIEW의
+// S6_RAW_PANE_PROBE 재현). detectIncarnationMismatch(위)는 내부 비교용이라
+// 원시 pane key를 계속 써도 되지만(파일 밖으로 안 나간다), 밖으로 나가는
+// `quality.incarnation` 필드는 pane key를 비가역 해시 토큰으로 바꾼다 --
+// taskId/dispatchId는 Orca 자신의 태스크/dispatch 식별자라 이미 다른
+// 곳(예: 로그·STATUS)에도 노출되는 값이라 그대로 두되(별도 유출 우려
+// 없음), pane key만 대상이다.
+export function tokenizeIncarnation(expected) {
+  if (!isPlainObject(expected)) return null;
+  const seatPaneKey =
+    typeof expected.seatPaneKey === "string"
+      ? createHash("sha256")
+          .update(expected.seatPaneKey)
+          .digest("hex")
+          .slice(0, 32)
+      : undefined;
+  return {
+    taskId: expected.taskId,
+    dispatchId: expected.dispatchId,
+    seatPaneKey,
+  };
 }
 
 // false-activity 방어(cycle2a 재사용 원칙 계승): terminal preview의 "변화"는
@@ -423,9 +451,7 @@ export function normalizeSeatObservation(raw = {}) {
     schemaVersion: SCHEMA_VERSION,
     adapterFresh: { collectedAtMs: now },
     sourceFailureDomain,
-    incarnation: isPlainObject(r.expectedIncarnation)
-      ? r.expectedIncarnation
-      : null,
+    incarnation: tokenizeIncarnation(r.expectedIncarnation),
     observable,
     degradedReasons,
     capabilityStatus,

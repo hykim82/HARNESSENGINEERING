@@ -7,6 +7,7 @@ import {
   parseDispatchShow,
   buildPushPeekCommand,
   parsePushPeek,
+  tokenizeIncarnation,
   SOURCE_FAILURE_DOMAIN,
   CAPABILITY_STATUS,
 } from "./seat-signal-adapter.mjs";
@@ -320,6 +321,52 @@ test("현재 incarnation과 일치하는 push는 정상 반영", () => {
     ],
   });
   assert.equal(snapshot.pushSeen, true);
+});
+
+// ---------------------------------------------------------------------------
+// P1-4 재작업(REVIEW hyk171-cycle2b-review-1 결함 4 수리): tokenizeIncarnation
+// -- pane key는 어댑터 경계에서 비가역 해시로 바뀌어야 store로 나간다.
+// ---------------------------------------------------------------------------
+
+test("tokenizeIncarnation: seatPaneKey는 해시로 바뀌고, taskId/dispatchId는 그대로 통과한다", () => {
+  const raw = {
+    taskId: "t1",
+    dispatchId: "d1",
+    seatPaneKey: "S6_RAW_PANE_PROBE",
+  };
+  const token = tokenizeIncarnation(raw);
+  assert.equal(token.taskId, "t1");
+  assert.equal(token.dispatchId, "d1");
+  assert.notEqual(token.seatPaneKey, "S6_RAW_PANE_PROBE");
+  assert.equal(typeof token.seatPaneKey, "string");
+  assert.ok(token.seatPaneKey.length > 0);
+});
+
+test("tokenizeIncarnation: 같은 pane key -> 같은 토큰(결정적), 다른 pane key -> 다른 토큰", () => {
+  const a = tokenizeIncarnation({ seatPaneKey: "pane-a" });
+  const b = tokenizeIncarnation({ seatPaneKey: "pane-a" });
+  const c = tokenizeIncarnation({ seatPaneKey: "pane-b" });
+  assert.equal(a.seatPaneKey, b.seatPaneKey);
+  assert.notEqual(a.seatPaneKey, c.seatPaneKey);
+});
+
+test("tokenizeIncarnation: 입력이 객체가 아니면 null", () => {
+  assert.equal(tokenizeIncarnation(null), null);
+  assert.equal(tokenizeIncarnation("not-an-object"), null);
+});
+
+test("normalizeSeatObservation: quality.incarnation은 tokenizeIncarnation을 거친 값이다(raw pane key 유출 없음)", () => {
+  const { quality } = normalizeSeatObservation({
+    now: 100,
+    seatId: "CODER",
+    expectedIncarnation: {
+      taskId: "t1",
+      dispatchId: "d1",
+      seatPaneKey: "S6_RAW_PANE_PROBE",
+    },
+  });
+  assert.notEqual(quality.incarnation.seatPaneKey, "S6_RAW_PANE_PROBE");
+  assert.equal(quality.incarnation.taskId, "t1");
 });
 
 // ---------------------------------------------------------------------------

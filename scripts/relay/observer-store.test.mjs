@@ -14,6 +14,9 @@ import {
   loadStore,
   saveStoreCAS,
   STORE_SCHEMA_VERSION,
+  deliveryLockPath,
+  acquireDeliveryLock,
+  releaseDeliveryLock,
 } from "./observer-store.mjs";
 
 const INC_A = { taskId: "t1", dispatchId: "d1", seatPaneKey: "p1" };
@@ -501,4 +504,122 @@ test("saveStoreCAS: 충돌 없을 때 정상 저장", () => {
   );
   assert.equal(saved.ok, true);
   assert.equal(JSON.parse(diskText).seats.CODER.advisories !== undefined, true);
+});
+
+// ---------------------------------------------------------------------------
+// P1-2 재작업(REVIEW hyk171-cycle2b-review-1 결함 2 수리): mutation-9의
+// write-failure anti-vacuity가 없었다 -- saveStoreCAS의 writeFn/renameFn
+// catch 경로(observer-store.mjs:361-365 근방)를 실제로 던지는 fixture가
+// 0개였고, 그 catch를 "성공"으로 변조해도 31개 테스트가 GREEN이었다(REVIEW
+// 재현 확인). writeFn과 renameFn 각각을 실제로 던지게 하는 시험을 추가한다.
+// ---------------------------------------------------------------------------
+test("mutation-9c(P1-2): writeFn이 던지면 saveStoreCAS는 ok:false -- 디스크는 손대지 않은 채 남는다", () => {
+  let diskText = null;
+  const fsFake = {
+    existsFn: () => diskText !== null,
+    readFn: () => diskText,
+    writeFn: () => {
+      throw new Error("ENOSPC: no space left on device (simulated)");
+    },
+    renameFn: () => {
+      throw new Error(
+        "renameFn must not be reached when writeFn already threw",
+      );
+    },
+  };
+  const applied = applyObservation(createEmptyStore(), {
+    seatId: "CODER",
+    incarnation: INC_A,
+    classifyResult: stallResult(),
+    sampleGeneration: 1,
+    persist: { observedAtMs: 1000 },
+  });
+  const saved = saveStoreCAS("/store.json", applied.state, null, fsFake);
+  assert.equal(saved.ok, false);
+  assert.match(saved.reason, /write threw/);
+  assert.equal(diskText, null, "쓰기 실패 시 디스크 상태는 그대로여야 한다");
+});
+
+test("mutation-9d(P1-2): renameFn이 던지면 saveStoreCAS는 ok:false -- tmp write는 됐어도 최종 커밋(rename)이 안 됐으므로 실제 store 파일은 안 바뀐 것으로 취급된다", () => {
+  let diskText = null;
+  let tmpWritten = null;
+  const fsFake = {
+    existsFn: () => diskText !== null,
+    readFn: () => diskText,
+    writeFn: (path, text) => {
+      tmpWritten = text;
+    },
+    renameFn: () => {
+      throw new Error("EPERM: rename failed (simulated)");
+    },
+  };
+  const applied = applyObservation(createEmptyStore(), {
+    seatId: "CODER",
+    incarnation: INC_A,
+    classifyResult: stallResult(),
+    sampleGeneration: 1,
+    persist: { observedAtMs: 1000 },
+  });
+  const saved = saveStoreCAS("/store.json", applied.state, null, fsFake);
+  assert.equal(saved.ok, false);
+  assert.match(saved.reason, /write threw/);
+  assert.notEqual(tmpWritten, null, "tmp write 자체는 시도됐어야 한다");
+  assert.equal(
+    diskText,
+    null,
+    "rename 실패 시 실제 store 파일(path) 쪽은 갱신되지 않아야 한다(atomic commit 실패)",
+  );
+});
+
+// ---------------------------------------------------------------------------
+// P1-3 재작업(REVIEW hyk171-cycle2b-review-1 결함 3 수리): claimForDelivery+
+// saveStoreCAS만으로는 두 인스턴스 배타를 보장 못한다(check-then-act
+// TOCTOU -- REVIEW의 interleaving probe가 claimA=true·claimB=true·
+// savedA=true·savedB=true를 실제 재현했다). acquireDeliveryLock(O_EXCL 기반
+// 원자적 파일 생성)이 이 배타를 대신 보장하는지 직접, 스케줄링에 기대지
+// 않고 확정적으로 시험한다 -- Promise.all의 우연한 실행순서에 기대는 게
+// 아니라, 같은 lockPath에 대한 두 번째 시도가 "항상" 실패함을 직접 호출로
+// 검증한다.
+// ---------------------------------------------------------------------------
+test("P1-3(acquireDeliveryLock): 같은 lockPath 두 번째 시도는 항상 실패 -- 첫 시도가 놓은 뒤에만 재시도 가능(무한 잠김 아님)", () => {
+  const locks = new Set();
+  const fsOpts = {
+    writeExclusiveFn: (path) => {
+      if (locks.has(path)) {
+        const err = new Error(`EEXIST: '${path}' already exists`);
+        err.code = "EEXIST";
+        throw err;
+      }
+      locks.add(path);
+    },
+    unlinkFn: (path) => {
+      locks.delete(path);
+    },
+  };
+  const lockPath = deliveryLockPath("/store.json", "CODER:some-reason");
+
+  const first = acquireDeliveryLock(lockPath, fsOpts);
+  assert.equal(first.ok, true);
+
+  // 두 번째 "인스턴스"가 첫 인스턴스의 write와 release 사이 아무 시점에
+  // 시도해도(REVIEW의 재진입 시나리오와 동형) 반드시 실패해야 한다 --
+  // 이 실패는 store의 read-compare 결과와 무관하게 파일시스템 자체의
+  // O_EXCL 보장에서 나온다(store 상태를 전혀 참조하지 않는다).
+  const second = acquireDeliveryLock(lockPath, fsOpts);
+  assert.equal(second.ok, false);
+  assert.match(second.reason, /already locked/);
+
+  const released = releaseDeliveryLock(lockPath, fsOpts);
+  assert.equal(released.ok, true);
+
+  // 해제 후에는 재시도가 가능해야 한다 -- 전달 실패/크래시가 영구 잠김이
+  // 되면 안 된다(claimForDelivery의 pending 복귀 원칙과 동형).
+  const third = acquireDeliveryLock(lockPath, fsOpts);
+  assert.equal(third.ok, true);
+});
+
+test("P1-3(deliveryLockPath): fingerprint가 달라지면 lockPath도 달라진다(서로 다른 알림이 서로를 잠그지 않음)", () => {
+  const a = deliveryLockPath("/store.json", "CODER:reason-a");
+  const b = deliveryLockPath("/store.json", "REVIEW:reason-b");
+  assert.notEqual(a, b);
 });

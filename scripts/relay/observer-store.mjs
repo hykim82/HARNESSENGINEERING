@@ -10,6 +10,7 @@
 // 순수 상태 변환(applyObservation류) + fs 조회/쓰기 주입(loadStore/saveStore)만
 // 있다.
 
+import { createHash } from "node:crypto";
 import { shouldEmit } from "./stall-core.mjs";
 
 export const STORE_SCHEMA_VERSION = 1;
@@ -231,6 +232,72 @@ export function claimForDelivery(
       },
     },
   };
+}
+
+// P1-3 재작업(REVIEW hyk171-cycle2b-review-1 결함 3 수리): `claimForDelivery`
+// +`saveStoreCAS`만으로는 배타를 보장 못한다 -- 둘 다 "읽고(check) 나중에
+// 쓴다(act)"는 두 단계 사이에 다른 인스턴스가 끼어들 틈(TOCTOU)이 있다.
+// 두 인스턴스가 같은 pending advisory를 각자 읽어 각자 claim해도, 서로의
+// rename이 그 사이에 끼면 둘 다 CAS 비교에 통과해버릴 수 있다(REVIEW의
+// interleaving probe가 claimA=true·claimB=true·savedA=true·savedB=true로
+// 실제 재현). 그래서 notifyFn 호출 전에 **원자적 파일 생성**(O_EXCL, 'wx'
+// 플래그)으로 배타권을 딴다 -- 파일 생성 자체는 파일시스템이 보장하는
+// 단일 syscall이라 "먼저 만든 쪽만 성공"에 TOCTOU 틈이 없다(같은 이름의
+// 파일을 두 프로세스가 'wx'로 동시에 열려 하면 정확히 하나만 성공하고
+// 나머지는 EEXIST로 실패 -- 이건 OS/파일시스템의 원자성 보장이지 이
+// 코드가 흉내내는 것이 아니다). 락은 배달 시도 후(성공/실패 무관) 해제해
+// 다음 tick의 재시도를 막지 않는다(전달 실패=무한 잠김 방지, claimForDelivery
+// 의 pending 복귀 원칙과 동형).
+//
+// fingerprint는 임의 문자열(taskId/dispatchId 등 포함)이라 파일명으로
+// 안전하지 않을 수 있어 sha256 해시로 정규화한다.
+export function deliveryLockPath(storePath, fingerprint) {
+  const hash = createHash("sha256")
+    .update(String(fingerprint))
+    .digest("hex")
+    .slice(0, 32);
+  return `${storePath}.lock-${hash}`;
+}
+
+// opts: { writeExclusiveFn } -- writeExclusiveFn(path, content)는 flag 'wx'
+// (또는 O_CREAT|O_EXCL) 의미로 파일이 이미 있으면 던져야 한다(실 구현은
+// node:fs의 `writeFileSync(path, content, { flag: "wx" })`가 이 계약을
+// 그대로 만족한다 -- 이 함수는 그 자체를 감싸지 않고 opts로 주입만 받는다,
+// 이 파일의 나머지 함수들과 동일한 fs 주입 원칙).
+export function acquireDeliveryLock(lockPath, opts = {}) {
+  if (typeof opts.writeExclusiveFn !== "function") {
+    return {
+      ok: false,
+      reason: "acquireDeliveryLock: opts.writeExclusiveFn required",
+    };
+  }
+  try {
+    opts.writeExclusiveFn(lockPath, String(Date.now()));
+    return { ok: true };
+  } catch (err) {
+    return {
+      ok: false,
+      reason: `acquireDeliveryLock: already locked (${err?.code ?? err?.message ?? "exists"})`,
+    };
+  }
+}
+
+// opts: { unlinkFn }. 락 해제 실패(이미 지워졌거나 접근 불가)는 치명적이지
+// 않다 -- 다음 acquire가 여전히 실패하면 그저 그 tick의 재시도가 미뤄질
+// 뿐, 이중 전달로 이어지지는 않는다(배타는 acquire 쪽이 보장).
+export function releaseDeliveryLock(lockPath, opts = {}) {
+  if (typeof opts.unlinkFn !== "function") {
+    return { ok: false, reason: "releaseDeliveryLock: opts.unlinkFn required" };
+  }
+  try {
+    opts.unlinkFn(lockPath);
+    return { ok: true };
+  } catch (err) {
+    return {
+      ok: false,
+      reason: `releaseDeliveryLock: unlink failed (${err?.code ?? err?.message ?? "unknown"})`,
+    };
+  }
 }
 
 // 전달 시도 기록(멱등 -- 여러 번 불러도 같은 fingerprint 레코드를 갱신할

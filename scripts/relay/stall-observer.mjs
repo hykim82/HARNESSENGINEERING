@@ -24,6 +24,9 @@ import {
   markDelivered,
   recordAck,
   incarnationKeyOf,
+  deliveryLockPath,
+  acquireDeliveryLock,
+  releaseDeliveryLock,
 } from "./observer-store.mjs";
 
 export const OBSERVER_STATE = Object.freeze({
@@ -104,7 +107,8 @@ export function reduceTick({
 //   seatSelector, expectedIncarnation, lease, capabilities, maxClockJumpS,
 //   storePath, sampleGeneration, prevState, config }
 // opts: { execFn, statFn, nowFn, checkHandshakeFn, prevObservation,
-//   fs: {existsFn, readFn, writeFn, renameFn}, notifyFn }
+//   fs: {existsFn, readFn, writeFn, renameFn, writeExclusiveFn, unlinkFn},
+//   notifyFn }
 //
 // notifyFn(item) -> boolean(delivered) | Promise<boolean>. undelivered 항목은
 // store에 남아 다음 호출에서 다시 시도된다(idempotent 재시도 허용, worker
@@ -112,6 +116,13 @@ export function reduceTick({
 // runObserverTick에서 분리(quality-check 복잡도 상한 준수) -- claim ->
 // notifyFn -> markDelivered의 한 항목 처리를 담당. 반환값은 다음 항목이
 // CAS 기준으로 삼을 최신 {state, text}와, 실제 전달됐다면 그 item.
+//
+// P1-3 재작업(REVIEW 결함 3 수리): claimForDelivery+saveStoreCAS만으로는
+// 배타를 보장 못한다(check-then-act TOCTOU, REVIEW의 interleaving probe가
+// 실제 재현). notifyFn에 도달하는 전체 구간을 원자적 락파일
+// (acquireDeliveryLock, O_EXCL)로 감싼다 -- 락을 못 딴 인스턴스는 store를
+// 아예 읽지도 않고 이번 tick에서 이 항목을 건너뛴다. 락은 finally에서
+// 항상 해제(성공/실패/예외 무관)해 무한 잠김을 만들지 않는다.
 async function deliverOne({
   item,
   storePath,
@@ -121,52 +132,68 @@ async function deliverOne({
   notifyFn,
   nowForDeliveryMs,
 }) {
-  // mutation 10: notifyFn을 부르기 전에 반드시 'pending'->'claimed' 배타
-  // 전이를 CAS로 시도한다. 다른 인스턴스가 같은 tick에서 이미 이 항목을
-  // claim했다면(또는 이미 delivered) 이 인스턴스는 그냥 건너뛴다 -- 같은
-  // episode에 대해 notifyFn이 두 번 불리지 않는다.
-  const claim = claimForDelivery(currentState, {
-    seatId: item.seatId,
-    fingerprint: item.fingerprint,
-    claimedAtMs: nowForDeliveryMs,
-  });
-  if (!claim.ok)
-    return { state: currentState, text: currentText, delivered: null };
-  const claimSaved = saveStoreCAS(storePath, claim.state, currentText, fsOpts);
-  if (!claimSaved.ok) {
+  const lockPath = deliveryLockPath(storePath, item.fingerprint);
+  const lock = acquireDeliveryLock(lockPath, fsOpts);
+  if (!lock.ok) {
+    // 다른 인스턴스가 이미 이 항목을 배타적으로 처리 중(또는 방금 처리
+    // 했음) -- 이번 tick은 store를 읽지도 않고 그냥 넘어간다.
     return { state: currentState, text: currentText, delivered: null };
   }
-
-  let ok;
   try {
-    ok = await notifyFn(item);
-  } catch {
-    ok = false;
-  }
-  const marked = markDelivered(claim.state, {
-    seatId: item.seatId,
-    fingerprint: item.fingerprint,
-    attemptAtMs: nowForDeliveryMs,
-    delivered: ok === true,
-  });
-  if (!marked.ok) {
+    // mutation 10: 락을 딴 뒤에도 'pending'->'claimed' 전이를 이어서 확인
+    // 한다(이중 방어 -- 락은 동시성 배타를, 이 단계는 "이미 이전 tick에서
+    // delivered/claimed된 항목을 다시 건드리지 않음"을 보장한다).
+    const claim = claimForDelivery(currentState, {
+      seatId: item.seatId,
+      fingerprint: item.fingerprint,
+      claimedAtMs: nowForDeliveryMs,
+    });
+    if (!claim.ok) {
+      return { state: currentState, text: currentText, delivered: null };
+    }
+    const claimSaved = saveStoreCAS(
+      storePath,
+      claim.state,
+      currentText,
+      fsOpts,
+    );
+    if (!claimSaved.ok) {
+      return { state: currentState, text: currentText, delivered: null };
+    }
+
+    let ok;
+    try {
+      ok = await notifyFn(item);
+    } catch {
+      ok = false;
+    }
+    const marked = markDelivered(claim.state, {
+      seatId: item.seatId,
+      fingerprint: item.fingerprint,
+      attemptAtMs: nowForDeliveryMs,
+      delivered: ok === true,
+    });
+    if (!marked.ok) {
+      return {
+        state: claim.state,
+        text: claimSaved.rawText,
+        delivered: ok === true ? item : null,
+      };
+    }
+    const finalSaved = saveStoreCAS(
+      storePath,
+      marked.state,
+      claimSaved.rawText,
+      fsOpts,
+    );
     return {
-      state: claim.state,
-      text: claimSaved.rawText,
+      state: finalSaved.ok ? marked.state : claim.state,
+      text: finalSaved.ok ? finalSaved.rawText : claimSaved.rawText,
       delivered: ok === true ? item : null,
     };
+  } finally {
+    releaseDeliveryLock(lockPath, fsOpts);
   }
-  const finalSaved = saveStoreCAS(
-    storePath,
-    marked.state,
-    claimSaved.rawText,
-    fsOpts,
-  );
-  return {
-    state: finalSaved.ok ? marked.state : claim.state,
-    text: finalSaved.ok ? finalSaved.rawText : claimSaved.rawText,
-    delivered: ok === true ? item : null,
-  };
 }
 
 async function runDeliveryPass({
@@ -199,22 +226,13 @@ async function runDeliveryPass({
   return delivered;
 }
 
-export async function runObserverTick(ctx = {}, opts = {}) {
-  const c = isPlainObject(ctx) ? ctx : {};
-  const fsOpts = isPlainObject(opts.fs) ? opts.fs : {};
-
-  const loaded = loadStore(c.storePath, fsOpts);
-  if (!loaded.ok) {
-    // mutation 9: store 자체가 손상/스키마 불일치면 이번 tick은 어떤
-    // 확정 판정도 만들지 않는다 -- fail-closed로 그대로 보고한다.
-    return {
-      ok: false,
-      reason: loaded.reason,
-      kind: OBSERVER_STATE.ADAPTER_DEGRADED,
-      delivered: [],
-    };
-  }
-
+// runObserverTick에서 분리(quality-check 복잡도 상한 준수) -- 관측 수집 +
+// reduceTick 호출을 담당. P1-4 재작업(REVIEW 결함 4 수리): store로 넘기는
+// incarnation은 반드시 어댑터가 이미 토큰화한 observation.quality.incarnation
+// 을 써야 한다 -- ctx.expectedIncarnation(호출자가 준 원본, raw pane key
+// 포함)을 여기서 직접 쓰면 어댑터 경계를 우회해 raw 문자열이 그대로
+// durable store로 샌다(REVIEW의 S6_RAW_PANE_PROBE 재현 지점).
+function collectAndReduce(c, opts, loaded) {
   const observation = collectSeatObservation(
     {
       seatId: c.seatId,
@@ -238,15 +256,34 @@ export async function runObserverTick(ctx = {}, opts = {}) {
     },
   );
 
-  const tick = reduceTick({
+  return reduceTick({
     state: loaded.state,
     seatId: c.seatId,
-    incarnation: c.expectedIncarnation,
+    incarnation: observation.quality?.incarnation,
     observation,
     prevState: c.prevState,
     config: c.config,
     sampleGeneration: c.sampleGeneration,
   });
+}
+
+export async function runObserverTick(ctx = {}, opts = {}) {
+  const c = isPlainObject(ctx) ? ctx : {};
+  const fsOpts = isPlainObject(opts.fs) ? opts.fs : {};
+
+  const loaded = loadStore(c.storePath, fsOpts);
+  if (!loaded.ok) {
+    // mutation 9: store 자체가 손상/스키마 불일치면 이번 tick은 어떤
+    // 확정 판정도 만들지 않는다 -- fail-closed로 그대로 보고한다.
+    return {
+      ok: false,
+      reason: loaded.reason,
+      kind: OBSERVER_STATE.ADAPTER_DEGRADED,
+      delivered: [],
+    };
+  }
+
+  const tick = collectAndReduce(c, opts, loaded);
 
   const saved = saveStoreCAS(
     c.storePath,
