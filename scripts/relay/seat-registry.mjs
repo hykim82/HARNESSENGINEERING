@@ -107,6 +107,169 @@ export function findByPtyId(registry, ptyId) {
   );
 }
 
+// HYK-171 사이클4b-2b-4 (coder-task.md §1-B) -- 배정(dispatch) 결속 기록.
+//
+// PM 4상태 전이(coder-task.md §1-B, ORCH-소비결론.md §3-2 그대로 구현):
+//   1) 빈 배정 레코드 -> 새 runtime task/dispatch 결속 허용 (BOUND)
+//   2) 같은 task/dispatch 재수신 -> 멱등 no-op (IDEMPOTENT_NOOP, 레코드/버전 불변)
+//   3) 다른 task/dispatch + 이전 배정이 active 또는 상태 불명 -> INCARNATION_CONFLICT, 무기록
+//   4) 다른 task/dispatch + 이전 종료 증명 + 권위 조회가 이전 두 ID와 exact
+//      일치 + CAS 버전 일치 -> NEW_GENERATION(새 세대로 갱신)
+//
+// 대상 지정은 pane key로 하지 않는다(PM 지적4/coder-task.md §1-B 비타협) --
+// worktreePath로 "이미 고정된 안정 레코드"를 정확히 1개 선택한 뒤에야
+// assignee_pane_key를 그 레코드의 저장된 paneKey와 **대조값**으로만 쓴다.
+// 0건/2건+/불일치는 전부 무기록 fail-closed(PM 지적3 반례 -- 사람이 직접 연
+// 탭이나 다른 좌석을 잘못 갱신하지 않는다).
+//
+// 이 함수도 recordSeatCreation과 같은 순수 상태 변환이다 -- orca/fs 호출은
+// 호출자(orca-adapter.mjs의 기록 seam) 몫이다.
+export const SEAT_DISPATCH_REASON = Object.freeze({
+  NO_TARGET: "SEAT_DISPATCH_NO_TARGET",
+  AMBIGUOUS_TARGET: "SEAT_DISPATCH_AMBIGUOUS_TARGET",
+  PANE_KEY_MISMATCH: "SEAT_DISPATCH_PANE_KEY_MISMATCH",
+  INCARNATION_CONFLICT: "SEAT_DISPATCH_INCARNATION_CONFLICT",
+  PRIOR_GENERATION_UNVERIFIED: "SEAT_DISPATCH_PRIOR_GENERATION_UNVERIFIED",
+  CAS_VERSION_MISMATCH: "SEAT_DISPATCH_CAS_VERSION_MISMATCH",
+});
+
+export const SEAT_DISPATCH_TRANSITION = Object.freeze({
+  BOUND: "BOUND",
+  IDEMPOTENT_NOOP: "IDEMPOTENT_NOOP",
+  NEW_GENERATION: "NEW_GENERATION",
+});
+
+function denySeatDispatch(reason) {
+  return { ok: false, reason };
+}
+
+// worktreePath로 정확히 1개인 안정 레코드를 찾는다(pane key는 여기 관여하지
+// 않는다 -- PM 지적4). 양쪽 다 non-empty string이어야 매치 대상이 된다(둘
+// 다 null인 레코드끼리 우연히 매치되는 것을 막는다).
+function selectStableTarget(seats, worktreePath) {
+  if (!isNonEmptyString(worktreePath)) return [];
+  return seats.filter(
+    (r) => isPlainObject(r) && r.worktreePath === worktreePath,
+  );
+}
+
+function replaceRecord(base, target, nextRecord) {
+  return {
+    schemaVersion: SCHEMA_VERSION,
+    seats: base.seats.map((r) => (r === target ? nextRecord : r)),
+  };
+}
+
+function buildDispatchSubRecord(c, version) {
+  return {
+    harnessTaskId: isNonEmptyString(c.harnessTaskId) ? c.harnessTaskId : null,
+    runtimeTaskId: c.runtimeTaskId,
+    dispatchId: c.dispatchId,
+    status: "active",
+    version,
+  };
+}
+
+function bindResult(transition, base, target, nextRecord) {
+  return {
+    ok: true,
+    transition,
+    registry: replaceRecord(base, target, nextRecord),
+    record: nextRecord,
+  };
+}
+
+// 상태2/3/4(기존 배정이 있는 경우)만 분리 -- recordSeatDispatch의 복잡도를
+// 낮춘다(대상 선정/pane key 대조는 호출자가 이미 끝냈다).
+function transitionExistingDispatch(base, target, existing, c, opts) {
+  // 상태2: 같은 task/dispatch 재수신 -> 멱등 no-op(레코드/버전 불변, 새
+  // 객체를 만들지 않고 입력 registry를 그대로 반환한다 -- "1회 효과를 넘지
+  // 않는다"를 참조 동일성으로도 증명한다).
+  if (
+    existing.runtimeTaskId === c.runtimeTaskId &&
+    existing.dispatchId === c.dispatchId
+  ) {
+    return {
+      ok: true,
+      transition: SEAT_DISPATCH_TRANSITION.IDEMPOTENT_NOOP,
+      registry: base,
+      record: target,
+    };
+  }
+
+  // 다른 task/dispatch. 이전 배정이 active 또는 상태 불명이면(completed가
+  // 아니면) 정상 재배정 왕복(어제 ORCH 5회 연속 재배정 실측)을 위해서라도
+  // 무조건 거부가 아니라 "이전 종료가 증명되지 않았다"는 이유로 거부한다 --
+  // 상태3.
+  if (existing.status !== "completed") {
+    return denySeatDispatch(SEAT_DISPATCH_REASON.INCARNATION_CONFLICT);
+  }
+
+  // 상태4: 이전 종료 증명(status==="completed") + 권위 조회가 이전 두 ID와
+  // exact 일치(호출자가 별도로 확인해 opts.priorGenerationAuthorityMatch로
+  // 넘긴다 -- 이 함수는 orca를 조회하지 않는다) + CAS 버전 일치.
+  if (opts.priorGenerationAuthorityMatch !== true) {
+    return denySeatDispatch(SEAT_DISPATCH_REASON.PRIOR_GENERATION_UNVERIFIED);
+  }
+  if (opts.expectedVersion !== existing.version) {
+    return denySeatDispatch(SEAT_DISPATCH_REASON.CAS_VERSION_MISMATCH);
+  }
+
+  const nextRecord = {
+    ...target,
+    dispatch: buildDispatchSubRecord(c, existing.version + 1),
+  };
+  return bindResult(
+    SEAT_DISPATCH_TRANSITION.NEW_GENERATION,
+    base,
+    target,
+    nextRecord,
+  );
+}
+
+// 대상 선정(0/2+ fail-closed) + pane key 대조를 한곳에 묶는다(복잡도 분산
+// -- PM 지적4: pane key는 lookup이 아니라 이미 고른 target에 대한 대조값).
+function selectVerifiedTarget(seats, c) {
+  const candidates = selectStableTarget(seats, c.worktreePath);
+  if (candidates.length === 0) {
+    return denySeatDispatch(SEAT_DISPATCH_REASON.NO_TARGET);
+  }
+  if (candidates.length > 1) {
+    return denySeatDispatch(SEAT_DISPATCH_REASON.AMBIGUOUS_TARGET);
+  }
+  const target = candidates[0];
+  if (
+    !isNonEmptyString(c.assigneePaneKey) ||
+    !isNonEmptyString(target.paneKey) ||
+    c.assigneePaneKey !== target.paneKey
+  ) {
+    return denySeatDispatch(SEAT_DISPATCH_REASON.PANE_KEY_MISMATCH);
+  }
+  return { ok: true, target };
+}
+
+// ctx: { worktreePath, assigneePaneKey, harnessTaskId, runtimeTaskId, dispatchId }
+// opts: { priorGenerationAuthorityMatch?: boolean, expectedVersion?: number }
+export function recordSeatDispatch(registry, ctx = {}, opts = {}) {
+  const base = isPlainObject(registry) ? registry : createEmptyRegistry();
+  const seats = Array.isArray(base.seats) ? base.seats : [];
+  const c = isPlainObject(ctx) ? ctx : {};
+
+  const selected = selectVerifiedTarget(seats, c);
+  if (!selected.ok) return selected;
+  const target = selected.target;
+
+  const existing = isPlainObject(target.dispatch) ? target.dispatch : null;
+
+  // 상태1: 빈 배정 레코드 -> 결속 허용.
+  if (existing === null) {
+    const nextRecord = { ...target, dispatch: buildDispatchSubRecord(c, 1) };
+    return bindResult(SEAT_DISPATCH_TRANSITION.BOUND, base, target, nextRecord);
+  }
+
+  return transitionExistingDispatch(base, target, existing, c, opts);
+}
+
 // ---- fs 결속(observer-store.mjs parseStoreText/loadStore 전례 계승) ----
 // 손상(JSON.parse 실패)·스키마 불일치는 항상 ok:false -- 이 경우 호출자는
 // 이번 tick에서 어떤 등록도 진행하지 않는다(fail-closed). 파일 부재는

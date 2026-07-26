@@ -1,5 +1,13 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, copyFileSync, cpSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  copyFileSync,
+  cpSync,
+  readFileSync,
+  writeFileSync,
+  renameSync,
+} from "node:fs";
 import { dirname, join } from "node:path";
 import {
   buildTaskCreateCommand,
@@ -16,6 +24,15 @@ import {
   EXECUTION as TEARDOWN_EXECUTION,
 } from "../teardown-core.mjs";
 import { observeTeardownInventory } from "./teardown-inventory-adapter.mjs";
+import {
+  loadRegistry,
+  saveRegistry,
+  recordSeatDispatch,
+} from "../seat-registry.mjs";
+import {
+  normalizeDispatchRawUnion,
+  judgeInjectedProfile,
+} from "./dispatch-correlation-adapter.mjs";
 
 // HYK-169-coder-1: 어댑터 B v1 -- `orca` CLI를 실제로 부르는(spawn) 코드는
 // **이 파일에만** 있다(G9). 코어(relay-core.mjs)·CLI(run-step.mjs)는 이 파일이
@@ -1168,6 +1185,45 @@ export function resolveStaleDispatchRecovery({
 // completeConsumedTask는 task-update 호출 하나뿐이라 worktree rm·terminal
 // close를 절대 만들지 않는다(코드 경로 자체에 그 호출이 없다).
 
+// ---- HYK-171 사이클4b-2b-4 §1-A: raw dispatch 응답 보존 + 기록 seam ----
+//
+// 4b-2b-3까지는 `if (first.ok) return { ok: true, runtimeTaskId };` /
+// `if (!retried.ok) return retried; return { ok: true, runtimeTaskId };`가
+// 첫 성공·재시도 성공 raw 응답을 둘 다 버렸다(ORCH-소비결론.md §1-2 실코드
+// 대조). 이번 사이클은 그 응답을 버리지 않고 기대 runtime task와 결속해
+// opts.recordDispatchReceipt(주입형 기록 seam)로 넘긴다.
+//
+// ⚠️ 배달 성공은 기록 성공에 종속되지 않는다(PM M12) -- dispatch는 이미
+// 일어난 side effect이므로, 기록 호출이 없거나 throw하거나 ok:false를
+// 반환해도 이 함수의 반환값(ok:true)은 바뀌지 않는다. 기록 결과는
+// `recordResult` 필드로만 진단용 첨부된다. 반대로 dispatch 자체가
+// 실패하는 두 경로(first 실패 + stale 복구 미해당/재시도 실패)에서는
+// recordDispatchReceipt가 아예 호출되지 않는다 -- 대장은 불변이다.
+function buildDispatchReceiptContext(rawResponse, phase, c, runtimeTaskId) {
+  return {
+    rawResponse,
+    phase, // "first" | "stale-retry"
+    expect: {
+      harnessTaskId: isNonEmptyString(c.taskId) ? c.taskId : null,
+      runtimeTaskId,
+      role: c.role ?? null,
+      worktreePath: c.worktreePath ?? null,
+    },
+  };
+}
+
+function safeRecordDispatchReceipt(opts, receiptCtx) {
+  if (typeof opts.recordDispatchReceipt !== "function") return null;
+  try {
+    return opts.recordDispatchReceipt(receiptCtx);
+  } catch (err) {
+    return {
+      ok: false,
+      reason: `orca-adapter: recordDispatchReceipt threw (${errText(err)})`,
+    };
+  }
+}
+
 // dispatch(+ --inject 유무)를 실행하고, stale 실패면 D14-B 판정을 거쳐
 // completed 보정 + 재시도 최대 1회. 판정 실패/재시도 실패는 원래(또는
 // 재시도) 실패를 그대로 반환한다(자동 완화 금지).
@@ -1183,7 +1239,13 @@ function dispatchWithStaleRecovery(
     opts.execFn,
     REASON.DISPATCH_FAILED,
   );
-  if (first.ok) return { ok: true, runtimeTaskId };
+  if (first.ok) {
+    const recordResult = safeRecordDispatchReceipt(
+      opts,
+      buildDispatchReceiptContext(first.response, "first", c, runtimeTaskId),
+    );
+    return { ok: true, runtimeTaskId, recordResult };
+  }
 
   const recovery = resolveStaleDispatchRecovery({
     errorMessage: first.reason,
@@ -1209,7 +1271,17 @@ function dispatchWithStaleRecovery(
     REASON.DISPATCH_FAILED,
   );
   if (!retried.ok) return retried;
-  return { ok: true, runtimeTaskId };
+
+  const recordResult = safeRecordDispatchReceipt(
+    opts,
+    buildDispatchReceiptContext(
+      retried.response,
+      "stale-retry",
+      c,
+      runtimeTaskId,
+    ),
+  );
+  return { ok: true, runtimeTaskId, recordResult };
 }
 
 function dispatchToSeat(runtimeTaskId, seatHandle, opts, c) {
@@ -1356,6 +1428,7 @@ function deliverToClaudeSeat(c, seatHandle, runtimeTaskId, opts) {
     runtimeTaskId: dispatchResult.runtimeTaskId,
     submitted: "auto",
     retries: 0,
+    recordResult: dispatchResult.recordResult,
   };
 }
 
@@ -1404,7 +1477,13 @@ function deliverToCodexSeat(c, seatHandle, runtimeTaskId, opts) {
     return { ok: false, reason: submitted.reason, runtimeTaskId: rtId };
   }
 
-  return { ok: true, runtimeTaskId: rtId, submitted: "explicit", retries: 0 };
+  return {
+    ok: true,
+    runtimeTaskId: rtId,
+    submitted: "explicit",
+    retries: 0,
+    recordResult: dispatchResult.recordResult,
+  };
 }
 
 // ---- 포트 3: 감지(detect) -- 비권위 신호만. 완료를 이 값으로 확정하지 않는다
@@ -1806,19 +1885,121 @@ export function createOrcaExecFn({ spawnSyncFn = spawnSync } = {}) {
 // 이 사이클에서 그 sink 자체를 절대 호출하지 않는다(§4 6검 전부 통과해야
 // 호출되고, 그 6검 중 하나는 이 사이클에서 상시 실패하는 armed===true
 // 요구다).
+// ---- HYK-171 사이클4b-2b-4 §1-A/1-D: 기록 seam 조립 ----
+//
+// dispatchWithStaleRecovery가 넘기는 raw 응답을 seat-registry.mjs의
+// recordSeatDispatch가 받는 정규화 입력으로 바꾸고, 대장 파일에 원자
+// 저장한다(saveRegistry의 tmp+rename). 이 함수 자체는 orca를 호출하지
+// 않는다(execFn 없음) -- fs I/O만 한다.
+//
+// ⚠️ 정직 한계(coder-task.md §0): 이 recorder가 targetSelector로 쓰는
+// worktreePath는 정상 동작하려면 대장에 그 worktreePath를 가진 안정
+// 레코드가 이미 있어야 하는데, `createNewSeat`(위 D12 주석)가 더 이상
+// `terminal create`를 호출하지 않으므로 프로덕션에서 그런 레코드가 생길
+// 생산자가 없다 -- 즉 이 recorder는 프로덕션에서 항상 0-match(NO_TARGET,
+// fail-closed)로 접힐 것이다. 이는 버그가 아니라 §0/§4가 사람 결정으로
+// 남긴 "생성 영수증 부재"의 정직한 반영이다.
+export function createDispatchReceiptRecorder({ registryPath, fs = {} } = {}) {
+  const existsFn = typeof fs.existsFn === "function" ? fs.existsFn : existsSync;
+  const readFn =
+    typeof fs.readFn === "function"
+      ? fs.readFn
+      : (p) => readFileSync(p, "utf8");
+  const writeFn =
+    typeof fs.writeFn === "function"
+      ? fs.writeFn
+      : (p, text) => writeFileSync(p, text);
+  const renameFn = typeof fs.renameFn === "function" ? fs.renameFn : renameSync;
+
+  return function recordDispatchReceipt({ rawResponse, expect } = {}) {
+    const envelope = normalizeDispatchRawUnion(rawResponse);
+    if (!envelope.ok) {
+      return {
+        ok: false,
+        reason: `orca-adapter: recordDispatchReceipt -- ${envelope.reasonCode}`,
+      };
+    }
+    // M4: 응답의 runtime task id가 우리가 기대한 대상과 다르면(예: fake
+    // execFn이 엉뚱한 배정 응답을 돌려준 경우) 무기록으로 접는다 -- 다른
+    // task의 배정을 우리 것으로 잘못 결속하지 않는다.
+    const e = isPlainObject(expect) ? expect : {};
+    if (envelope.runtimeTaskId !== e.runtimeTaskId) {
+      return {
+        ok: false,
+        reason:
+          "orca-adapter: recordDispatchReceipt -- response runtimeTaskId does not match the expected dispatch target",
+      };
+    }
+
+    const engine = ENGINE_BY_ROLE[e.role];
+    const injectedProfile = judgeInjectedProfile({
+      engine,
+      shape: envelope.shape,
+      injected: envelope.injected,
+    });
+
+    const loaded = loadRegistry(registryPath, { existsFn, readFn });
+    if (!loaded.ok) {
+      return {
+        ok: false,
+        reason: `orca-adapter: recordDispatchReceipt -- ${loaded.reason}`,
+        injectedProfile,
+      };
+    }
+
+    const recorded = recordSeatDispatch(loaded.registry, {
+      worktreePath: e.worktreePath,
+      assigneePaneKey: envelope.assigneePaneKey,
+      harnessTaskId: e.harnessTaskId,
+      runtimeTaskId: envelope.runtimeTaskId,
+      dispatchId: envelope.dispatchId,
+    });
+    if (!recorded.ok) {
+      return {
+        ok: false,
+        reason: `orca-adapter: recordDispatchReceipt -- ${recorded.reason}`,
+        injectedProfile,
+      };
+    }
+
+    const saved = saveRegistry(registryPath, recorded.registry, {
+      writeFn,
+      renameFn,
+    });
+    if (!saved.ok) {
+      return {
+        ok: false,
+        reason: `orca-adapter: recordDispatchReceipt -- ${saved.reason}`,
+        injectedProfile,
+      };
+    }
+    return { ok: true, transition: recorded.transition, injectedProfile };
+  };
+}
+
+// registryPath가 주어질 때만 기록 seam을 결선한다 -- 생략하면(현재 이
+// 함수의 유일한 실 호출부인 launch-seam.mjs 어디서도 registryPath를 넘기지
+// 않는다) opts.recordDispatchReceipt가 undefined로 남아
+// dispatchWithStaleRecovery가 기록을 아예 시도하지 않는다(안전 기본값 --
+// 새 결선 0 원칙과 충돌하지 않는다, §0 정직 표기 그대로 UNPROVEN 유지).
 export function createRealLaunchSink({
   role,
   worktreePath,
   taskId,
   coordinatorHandle,
   execFn = createOrcaExecFn(),
+  registryPath,
+  registryFs,
 } = {}) {
+  const recordDispatchReceipt = isNonEmptyString(registryPath)
+    ? createDispatchReceiptRecorder({ registryPath, fs: registryFs })
+    : undefined;
   return function launchSink() {
     const seat = ensureSeat({ role, worktreePath }, { execFn });
     if (!seat.ok) return seat;
     return deliverTask(
       { role, worktreePath, taskId, coordinatorHandle },
-      { execFn },
+      { execFn, recordDispatchReceipt },
     );
   };
 }
