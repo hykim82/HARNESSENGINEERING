@@ -92,6 +92,153 @@ export function normalizeDispatchShow(rawResponse) {
 }
 
 // ---------------------------------------------------------------------------
+// 2-A2 (HYK-171 사이클4b-2b-4, coder-task.md §1-D) -- dispatch/dispatch-show
+// raw shape union.
+//
+// `orca orchestration dispatch --json` -> result.{dispatch(11키), injected(boolean)}
+// `orca orchestration dispatch-show --json` -> result.{dispatch(11키)}(injected 없음)
+//
+// 두 형태를 하나의 느슨한 검사로 뭉개지 않는다(PM 지적7) -- result의 정확한
+// 키집합으로 먼저 형태를 판정한 뒤, 그 형태에서만 유효한 필드를 읽는다.
+// ---------------------------------------------------------------------------
+export const DISPATCH_SHAPE = Object.freeze({
+  DISPATCH: "dispatch",
+  DISPATCH_SHOW: "dispatch-show",
+});
+
+export const DISPATCH_ENVELOPE_REASON = Object.freeze({
+  NOT_OK: "NOT_OK",
+  UNKNOWN_SHAPE: "UNKNOWN_SHAPE",
+  NO_DISPATCH: "NO_DISPATCH",
+  FIELDS_INCOMPLETE: "FIELDS_INCOMPLETE",
+  VALID: "VALID",
+});
+
+// result의 정확한 키집합만으로 형태를 판정한다(느슨한 "키가 있으면" 검사
+// 금지 -- 4b-2b-3 schema-4의 exact-key-set 원칙을 그대로 승계).
+function detectDispatchEnvelopeShape(result) {
+  if (!isPlainObject(result)) return null;
+  const keys = Object.keys(result).sort();
+  if (keys.length === 2 && keys[0] === "dispatch" && keys[1] === "injected") {
+    return DISPATCH_SHAPE.DISPATCH;
+  }
+  if (keys.length === 1 && keys[0] === "dispatch") {
+    return DISPATCH_SHAPE.DISPATCH_SHOW;
+  }
+  return null;
+}
+
+// normalizeDispatchShow와 달리 두 형태(dispatch/dispatch-show) 모두 받고,
+// 어느 형태인지(`shape`)와 `injected`(dispatch 형태에서만 boolean, 그 외
+// null)를 함께 낸다. 이 함수는 raw dispatch/dispatch-show 응답이라면 어느
+// 쪽이든 통과시켜야 하는 "기록 seam"(orca-adapter.mjs dispatchWithStaleRecovery)
+// 용이다 -- normalizeDispatchShow는 dispatch-show 전용 기존 계약을 그대로
+// 유지한다(호환 파괴 금지).
+export function normalizeDispatchRawUnion(rawResponse) {
+  const raw = isPlainObject(rawResponse) ? rawResponse : {};
+  if (raw.ok !== true) {
+    return { ok: false, reasonCode: DISPATCH_ENVELOPE_REASON.NOT_OK };
+  }
+
+  const shape = detectDispatchEnvelopeShape(raw.result);
+  if (!shape) {
+    return { ok: false, reasonCode: DISPATCH_ENVELOPE_REASON.UNKNOWN_SHAPE };
+  }
+
+  const dispatch = raw.result.dispatch;
+  if (dispatch === null) {
+    return {
+      ok: false,
+      shape,
+      reasonCode: DISPATCH_ENVELOPE_REASON.NO_DISPATCH,
+    };
+  }
+  if (!isPlainObject(dispatch)) {
+    return {
+      ok: false,
+      shape,
+      reasonCode: DISPATCH_ENVELOPE_REASON.UNKNOWN_SHAPE,
+    };
+  }
+
+  const runtimeTaskId = dispatch.task_id;
+  const dispatchId = dispatch.id;
+  const assigneePaneKey = dispatch.assignee_pane_key;
+  if (
+    !isNonEmptyString(runtimeTaskId) ||
+    !isNonEmptyString(dispatchId) ||
+    !isNonEmptyString(assigneePaneKey)
+  ) {
+    return {
+      ok: false,
+      shape,
+      reasonCode: DISPATCH_ENVELOPE_REASON.FIELDS_INCOMPLETE,
+    };
+  }
+
+  return {
+    ok: true,
+    shape,
+    runtimeTaskId,
+    dispatchId,
+    assigneePaneKey,
+    // dispatch-show 형태에는 애초에 이 필드가 없다 -- true/false로
+    // 지어내지 않고 null로 정직하게 남긴다(§2-A 필드 없음=null 원칙 계승).
+    // dispatch 형태에서도 result.injected가 boolean이 아니면(결손·다른
+    // 타입) 지어내지 않고 null로 접는다.
+    injected:
+      shape === DISPATCH_SHAPE.DISPATCH &&
+      typeof raw.result.injected === "boolean"
+        ? raw.result.injected
+        : null,
+    reasonCode: DISPATCH_ENVELOPE_REASON.VALID,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// 2-A3 -- 프로필별 `injected` 의미 분리(PM M11).
+//
+// claude 경로는 buildDispatchCommand로 항상 `--inject`를 붙인다 -- 그래서
+// `injected:false`는 "배정됨"과 "본문 주입됨"이 갈렸다는 비정상 신호다.
+// codex 경로는 buildDispatchCommandNoInject로 `--inject`를 아예 안 붙인다 --
+// 그래서 `injected:false`가 정상이다. 두 false를 같은 성공으로 취급하면
+// PM M11이 지적한 혼동이 그대로 재현된다.
+//
+// engine은 orca-adapter.mjs의 ENGINE_BY_ROLE이 정본이다 -- 이 파일이
+// orca-adapter.mjs를 import해 순환 의존을 만들지 않도록, 호출자가 이미
+// 해석한 engine 문자열("claude"/"codex")을 받는다.
+// ---------------------------------------------------------------------------
+export const INJECTED_PROFILE_REASON = Object.freeze({
+  NOT_APPLICABLE: "NOT_APPLICABLE",
+  CLAUDE_INJECT_MISSING: "CLAUDE_INJECT_MISSING",
+  UNSUPPORTED_ENGINE: "UNSUPPORTED_ENGINE",
+  OK: "OK",
+});
+
+export function judgeInjectedProfile({ engine, shape, injected } = {}) {
+  // dispatch-show 형태에는 injected 자체가 없다 -- 판정 대상이 아니다.
+  if (shape !== DISPATCH_SHAPE.DISPATCH) {
+    return { ok: true, reasonCode: INJECTED_PROFILE_REASON.NOT_APPLICABLE };
+  }
+  if (engine === "claude") {
+    if (injected !== true) {
+      return {
+        ok: false,
+        reasonCode: INJECTED_PROFILE_REASON.CLAUDE_INJECT_MISSING,
+      };
+    }
+    return { ok: true, reasonCode: INJECTED_PROFILE_REASON.OK };
+  }
+  if (engine === "codex") {
+    // codex는 injected:false가 정상이다(PM M11 핵심) -- false를 실패로
+    // 취급하지 않는다. injected:true 쪽은 이 사이클 범위 밖(추정 금지,
+    // 판단 보류만 하고 실패로 만들지 않는다).
+    return { ok: true, reasonCode: INJECTED_PROFILE_REASON.OK };
+  }
+  return { ok: false, reasonCode: INJECTED_PROFILE_REASON.UNSUPPORTED_ENGINE };
+}
+
+// ---------------------------------------------------------------------------
 // 2-B. normalizeSeatCreation(rawResponse)
 // -> seat-registry.mjs의 normalizeSeatRecord/recordSeatCreation이 받아들이는
 //    "생성 응답" 모양(출처 표지 = paneKey가 non-empty string). 실패 시
