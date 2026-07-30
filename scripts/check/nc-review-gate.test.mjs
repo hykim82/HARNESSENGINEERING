@@ -31,6 +31,21 @@ const preStatus = execFileSync("git", ["status", "--porcelain"], {
   cwd: ROOT,
   encoding: "utf8",
 });
+// Hotfix 2R (2026-07-30, ORCH requirement correction -- this was ORCH's own
+// mistake, not a coder error): requiring `git diff HEAD --stat` to be
+// EMPTY always fails while there is uncommitted, in-progress work on
+// tracked files -- it doesn't test "this suite left the repo clean," it
+// tests "there is nothing checked out that isn't committed yet," which is
+// a different and much stronger claim. NC-1's original round happened to
+// pass only because every changed file was untracked-new (empty diff
+// against HEAD is a coincidence of that specific situation, not something
+// this assertion actually verifies). What this suite can honestly promise
+// is INVARIANCE: whatever diff existed before this suite ran still exists,
+// byte-for-byte, after it ran. Captured here, compared in after() below.
+const preDiffStat = execFileSync("git", ["diff", "HEAD", "--stat"], {
+  cwd: ROOT,
+  encoding: "utf8",
+});
 
 function withFixtureDir(fn) {
   const dir = mkdtempSync(join(tmpdir(), "nc-review-gate-"));
@@ -343,13 +358,13 @@ after(() => {
     preStatus,
     "nc-review-gate.test.mjs must leave the real worktree exactly as it found it",
   );
-  const diffStat = execFileSync("git", ["diff", "HEAD", "--stat"], {
+  const postDiffStat = execFileSync("git", ["diff", "HEAD", "--stat"], {
     cwd: ROOT,
     encoding: "utf8",
   });
   assert.equal(
-    diffStat.trim(),
-    "",
-    "nc-review-gate.test.mjs must not leave any tracked-file diff against HEAD",
+    postDiffStat,
+    preDiffStat,
+    "nc-review-gate.test.mjs changed the tracked-file diff state -- the suite must leave whatever diff existed before it ran untouched, not force it to empty",
   );
 });

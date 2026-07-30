@@ -34,8 +34,9 @@ import {
   mkdtempSync,
   writeFileSync,
   rmSync,
+  realpathSync,
 } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { execFileSync } from "node:child_process";
 import { checkNativeGitHook } from "./selfcheck-inventory.mjs";
@@ -45,15 +46,42 @@ function repoRoot() {
     encoding: "utf8",
   }).trim();
 }
-function commonDir() {
+function commonDir(cwd) {
   return execFileSync("git", ["rev-parse", "--git-common-dir"], {
-    cwd: repoRoot(),
+    cwd,
     encoding: "utf8",
   }).trim();
 }
 
-const ROOT = repoRoot();
-const COMMON_DIR = commonDir();
+// Hotfix (2026-07-30, regression found post-merge in the MAIN repo checkout,
+// never in this linked worktree): `git rev-parse --git-common-dir` returns
+// a RELATIVE path (".git") when run from the main checkout, but an ABSOLUTE
+// path when run from a linked worktree -- both refer to the exact same
+// directory. The pre-hotfix code took that raw value and later compared it
+// against ROOT (always absolute, from --show-toplevel) with `!==` as bare
+// strings: "." !== "C:/.../HARNESSENGINEERING" is true even though they are
+// the same folder, so the main repo checkout was wrongly judged to have
+// "two different real checkouts" and the environment-conditional
+// corroboration test asserted two identical results must differ -- which
+// they don't, so it failed. `join(".git", "..")` also only resolves
+// correctly if the CURRENT PROCESS's cwd happens to equal ROOT (true when
+// `node --test` is invoked from the repo root, accidentally, not
+// guaranteed) -- an environment-dependent coincidence, not something this
+// file should rely on. Fix: resolve every git-common-dir/repo-root value to
+// an absolute path ONCE, right after reading it, explicit about which base
+// directory a relative result is relative to (the `cwd` the git command
+// itself ran with, not process.cwd() -- those can differ). realpathSync is
+// then applied on top: Windows drive-letter case and 8.3/symlink aliasing
+// can make two paths that are byte-different but filesystem-identical, and
+// a bare string `!==` would still misjudge those as "different checkouts."
+// realpathSync requires the path to exist, which .git-common-dir and the
+// repo root both always do.
+function absoluteRealPath(cwd, rawPath) {
+  return realpathSync(resolve(cwd, rawPath));
+}
+
+const ROOT = absoluteRealPath(process.cwd(), repoRoot());
+const COMMON_DIR = absoluteRealPath(ROOT, commonDir(ROOT));
 const HOOKS_DIR = join(COMMON_DIR, "hooks");
 const COMMIT_MSG_HOOK = join(HOOKS_DIR, "commit-msg"); // installed copy (may not exist -- see INSTALLED_HOOKS_PRESENT)
 const PRE_COMMIT_HOOK = join(HOOKS_DIR, "pre-commit"); // installed copy (may not exist -- see INSTALLED_HOOKS_PRESENT)
@@ -78,9 +106,25 @@ const NOT_INSTALLED_SKIP_REASON =
 // this file (or a change to checkNativeGitHook that starts writing) fail
 // loudly instead of silently leaving drift in the real worktree.
 // CI 성립 근거: `git status --porcelain`/`git diff HEAD --stat`는 어떤
-// 체크아웃에서도 항상 실행 가능하고, 이 스위트는 읽기 전용이라 항상 빈
-// 결과를 내야 한다 -- 체크아웃 개수·설치 상태와 무관.
+// 체크아웃에서도 항상 실행 가능하다 -- 체크아웃 개수·설치 상태와 무관.
 const preStatus = execFileSync("git", ["status", "--porcelain"], {
+  cwd: ROOT,
+  encoding: "utf8",
+});
+// Hotfix 2R (2026-07-30, ORCH requirement correction -- this was ORCH's own
+// mistake, not a coder error): requiring `git diff HEAD --stat` to be
+// EMPTY always fails while there is uncommitted, in-progress work on
+// tracked files -- it doesn't test "this suite left the repo clean," it
+// tests "there is nothing checked out that isn't committed yet," which is
+// a different and much stronger claim. NC-1's original round happened to
+// pass only because every changed file was untracked-new (empty diff
+// against HEAD is a coincidence of that specific situation, not something
+// this assertion actually verifies) -- the very hotfix that touches this
+// tracked file is what exposed it (ORCH measured L1/L2/L3 all fail 4).
+// What this suite can honestly promise is INVARIANCE: whatever diff
+// existed before this suite ran still exists, byte-for-byte, after it ran.
+// Captured here, compared in after() below.
+const preDiffStat = execFileSync("git", ["diff", "HEAD", "--stat"], {
   cwd: ROOT,
   encoding: "utf8",
 });
@@ -416,9 +460,22 @@ test("NC-1 install/defect: the checkNativeGitHook comparison mechanism is checko
 // directory that is NOT this worktree's own root, and (b) the installed
 // hook file itself actually exists at COMMON_DIR -- i.e. two genuinely
 // different checkouts AND a real installed copy to compare against.
+//
+// Hotfix: `join(COMMON_DIR, "..")` is pure string math and, since COMMON_DIR
+// is now already absolute+realpath'd (see absoluteRealPath above), this
+// candidate is already an absolute path -- but it is run through
+// absoluteRealPath once more (guarded by existsSync, since a bare parent
+// directory always exists once its child hooks/commit-msg does) purely so
+// EVERY value that ever gets compared with `!==` against ROOT in this file
+// went through the exact same normalization step. This is what actually
+// fixes the regression: in the main repo checkout, this now resolves to the
+// same real path as ROOT, so `MAIN_ROOT !== ROOT` correctly comes out
+// false (same checkout, not "two different real checkouts") instead of the
+// pre-hotfix "." !== "C:/.../HARNESSENGINEERING" string mismatch.
 const MAIN_ROOT = (() => {
   const candidate = join(COMMON_DIR, "..");
-  return existsSync(join(candidate, "hooks", "commit-msg")) ? candidate : null;
+  if (!existsSync(join(candidate, "hooks", "commit-msg"))) return null;
+  return absoluteRealPath(candidate, ".");
 })();
 const TWO_REAL_CHECKOUTS_AVAILABLE =
   MAIN_ROOT !== null && MAIN_ROOT !== ROOT && INSTALLED_HOOKS_PRESENT;
@@ -461,13 +518,13 @@ after(() => {
     preStatus,
     "nc-githook-install.test.mjs must leave the real worktree exactly as it found it",
   );
-  const diffStat = execFileSync("git", ["diff", "HEAD", "--stat"], {
+  const postDiffStat = execFileSync("git", ["diff", "HEAD", "--stat"], {
     cwd: ROOT,
     encoding: "utf8",
   });
   assert.equal(
-    diffStat.trim(),
-    "",
-    "nc-githook-install.test.mjs must not leave any tracked-file diff against HEAD",
+    postDiffStat,
+    preDiffStat,
+    "nc-githook-install.test.mjs changed the tracked-file diff state -- the suite must leave whatever diff existed before it ran untouched, not force it to empty",
   );
 });
