@@ -14,8 +14,15 @@
 // synthetic repo pretends to be the real repo's history or hooks).
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, rmSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import {
+  mkdtempSync,
+  mkdirSync,
+  writeFileSync,
+  rmSync,
+  readFileSync,
+  realpathSync,
+} from "node:fs";
+import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { execFileSync } from "node:child_process";
 
@@ -24,8 +31,51 @@ function repoRoot() {
     encoding: "utf8",
   }).trim();
 }
-const ROOT = repoRoot();
+
+// Hotfix 3R (2026-07-30, REVIEW P1 -- one un-normalized site left over from
+// the 1R sweep, which only touched nc-githook-install.test.mjs and missed
+// this file's own git-common-dir use at what was then line 203). Same
+// pattern-level defect as 1R: `git rev-parse --git-common-dir` can return a
+// RELATIVE path, and that value is only meaningful relative to the `cwd`
+// the git command itself was invoked with -- never relative to
+// process.cwd() at some later point when the value is consumed by
+// join()/readFileSync(). ORCH reproduced this concretely: invoking the git
+// command with cwd=ROOT returns ".git", but with cwd=ROOT/scripts returns
+// "../.git" -- both relative, both correct FOR THAT cwd, but wrong the
+// instant they're joined as if they were already absolute. The old code at
+// nc-gitleaks.test.mjs:203-207 did exactly that: `join(commonDir, "hooks",
+// "pre-commit")` on the raw ".git"/"../.git" value, which only happened to
+// resolve correctly when node's own process.cwd() coincidentally matched
+// the cwd the git call used -- not guaranteed, and ORCH's repro (running
+// from a subdirectory) broke it: the installed hook genuinely exists, but
+// the environment-conditional corroboration test skipped anyway (a silent
+// missed measurement, exactly the failure mode this whole track exists to
+// catch). Fix: resolve the raw value against the SAME cwd the git call
+// used, once, right where it's read -- exactly the same
+// absoluteRealPath(cwd, rawPath) = realpathSync(resolve(cwd, rawPath))
+// pattern nc-githook-install.test.mjs already uses, kept identical here on
+// purpose so the same defect pattern is closed the same way everywhere.
+function absoluteRealPath(cwd, rawPath) {
+  return realpathSync(resolve(cwd, rawPath));
+}
+
+const ROOT = absoluteRealPath(process.cwd(), repoRoot());
 const preStatus = execFileSync("git", ["status", "--porcelain"], {
+  cwd: ROOT,
+  encoding: "utf8",
+});
+// Hotfix 2R (2026-07-30, ORCH requirement correction -- this was ORCH's own
+// mistake, not a coder error): requiring `git diff HEAD --stat` to be
+// EMPTY always fails while there is uncommitted, in-progress work on
+// tracked files -- it doesn't test "this suite left the repo clean," it
+// tests "there is nothing checked out that isn't committed yet," which is
+// a different and much stronger claim. NC-1's original round happened to
+// pass only because every changed file was untracked-new (empty diff
+// against HEAD is a coincidence of that specific situation, not something
+// this assertion actually verifies). What this suite can honestly promise
+// is INVARIANCE: whatever diff existed before this suite ran still exists,
+// byte-for-byte, after it ran. Captured here, compared in after() below.
+const preDiffStat = execFileSync("git", ["diff", "HEAD", "--stat"], {
   cwd: ROOT,
   encoding: "utf8",
 });
@@ -183,13 +233,13 @@ test("NC-1 gitleaks/gap: 'gitleaks not installed' fail-open branch -- verified b
 // just corroborates that the specific text this gap cares about survives
 // whatever drift exists). Skips cleanly when no installed hook is present
 // (CI, or a fresh single-checkout clone).
-function installedPreCommitPath() {
+function installedPreCommitPath(cwd = ROOT) {
   try {
     const commonDir = execFileSync("git", ["rev-parse", "--git-common-dir"], {
-      cwd: ROOT,
+      cwd,
       encoding: "utf8",
     }).trim();
-    return join(commonDir, "hooks", "pre-commit");
+    return join(absoluteRealPath(cwd, commonDir), "hooks", "pre-commit");
   } catch {
     return null;
   }
@@ -225,6 +275,56 @@ test(
     assert.match(installedText, /fail-open by design/i);
   },
 );
+
+// Regression guard (3R, required by REVIEW's P1): a synthetic repo with a
+// subdirectory reproduces ORCH's exact repro (cwd=repo root -> ".git",
+// cwd=repo root/scripts -> "../.git" -- both relative, different strings,
+// same real directory) without depending on this actual repo's own layout.
+// If `installedPreCommitPath()`'s normalization is ever removed or broken
+// again, this goes RED: the two cwds would resolve to different paths.
+test("NC-1 gitleaks/defect: git-common-dir resolution must be cwd-invariant once normalized -- regression guard for the 3R fix (installedPreCommitPath resolved from the repo root vs. a subdirectory must agree)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "nc-gitleaks-cwd-invariance-"));
+  try {
+    git(dir, ["init", "-q"]);
+    git(dir, ["config", "user.email", "a@a"]);
+    git(dir, ["config", "user.name", "a"]);
+    writeFileSync(join(dir, "base.mjs"), "export const base = 1;\n", "utf8");
+    git(dir, ["add", "-A"]);
+    git(dir, ["commit", "-q", "-m", "base"]);
+    mkdirSync(join(dir, "scripts"));
+
+    // Sanity: confirm this synthetic repo actually reproduces the raw,
+    // differently-relative git-common-dir values ORCH measured (otherwise
+    // this "regression guard" would trivially pass for the wrong reason).
+    const rawFromRoot = execFileSync("git", ["rev-parse", "--git-common-dir"], {
+      cwd: dir,
+      encoding: "utf8",
+    }).trim();
+    const rawFromSubdir = execFileSync(
+      "git",
+      ["rev-parse", "--git-common-dir"],
+      { cwd: join(dir, "scripts"), encoding: "utf8" },
+    ).trim();
+    assert.notEqual(
+      rawFromRoot,
+      rawFromSubdir,
+      "fixture setup check: the raw (un-normalized) git-common-dir strings must actually differ by cwd depth, or this test isn't reproducing the 3R bug condition",
+    );
+
+    // The actual regression guard: once resolved through
+    // installedPreCommitPath (which now normalizes via absoluteRealPath),
+    // both cwds must agree on the exact same real path.
+    const pathFromRoot = installedPreCommitPath(dir);
+    const pathFromSubdir = installedPreCommitPath(join(dir, "scripts"));
+    assert.equal(
+      pathFromSubdir,
+      pathFromRoot,
+      "installedPreCommitPath() must resolve to the identical path regardless of which cwd git was invoked with -- this is the exact 3R regression (a subdirectory cwd silently resolved to a nonexistent path and caused a false skip)",
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 test(
   "NC-1 gitleaks/gap: local `--staged` scope misses a secret that exists only in prior history (CI's `--source .` scope catches it) -> KNOWN GAP",
@@ -283,13 +383,13 @@ after(() => {
     preStatus,
     "nc-gitleaks.test.mjs must leave the real worktree exactly as it found it",
   );
-  const diffStat = execFileSync("git", ["diff", "HEAD", "--stat"], {
+  const postDiffStat = execFileSync("git", ["diff", "HEAD", "--stat"], {
     cwd: ROOT,
     encoding: "utf8",
   });
   assert.equal(
-    diffStat.trim(),
-    "",
-    "nc-gitleaks.test.mjs must not leave any tracked-file diff against HEAD",
+    postDiffStat,
+    preDiffStat,
+    "nc-gitleaks.test.mjs changed the tracked-file diff state -- the suite must leave whatever diff existed before it ran untouched, not force it to empty",
   );
 });
