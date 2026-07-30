@@ -149,11 +149,19 @@ function notApprovedPort() {
   };
 }
 
+function measuredProtectedBranchPort(protectedBranchName = "main") {
+  return {
+    async measure() {
+      return { ok: true, protectedBranchName };
+    },
+  };
+}
+
 function depsFor(dir, approval, overrides = {}) {
   return {
     repoRoot: dir,
     manifestPath: "queue.json",
-    protectedBranchName: "main",
+    protectedBranch: measuredProtectedBranchPort(),
     previousApproved: null,
     git: createGitRunner(dir),
     approval,
@@ -427,7 +435,7 @@ test("schema conformance: collected observation matches queue-manifest-core.test
 test("argument defense: missing repoRoot -> ok:false/INVALID_ARGUMENTS, no throw", async () => {
   const result = await collectQueueObservation({
     manifestPath: "queue.json",
-    protectedBranchName: "main",
+    protectedBranch: measuredProtectedBranchPort(),
     previousApproved: null,
     git: createGitRunner("."),
     approval: approvedPort(),
@@ -440,7 +448,7 @@ test("argument defense: repoRoot wrong type (number) -> ok:false/INVALID_ARGUMEN
   const result = await collectQueueObservation({
     repoRoot: 42,
     manifestPath: "queue.json",
-    protectedBranchName: "main",
+    protectedBranch: measuredProtectedBranchPort(),
     previousApproved: null,
     git: createGitRunner("."),
     approval: approvedPort(),
@@ -453,7 +461,7 @@ test("argument defense: git port missing -> ok:false/INVALID_ARGUMENTS", async (
   const result = await collectQueueObservation({
     repoRoot: ".",
     manifestPath: "queue.json",
-    protectedBranchName: "main",
+    protectedBranch: measuredProtectedBranchPort(),
     previousApproved: null,
     approval: approvedPort(),
   });
@@ -465,7 +473,7 @@ test("argument defense: approval port missing -> ok:false/INVALID_ARGUMENTS", as
   const result = await collectQueueObservation({
     repoRoot: ".",
     manifestPath: "queue.json",
-    protectedBranchName: "main",
+    protectedBranch: measuredProtectedBranchPort(),
     previousApproved: null,
     git: createGitRunner("."),
   });
@@ -477,13 +485,88 @@ test("argument defense: previousApproved wrong type (string) -> ok:false/INVALID
   const result = await collectQueueObservation({
     repoRoot: ".",
     manifestPath: "queue.json",
-    protectedBranchName: "main",
+    protectedBranch: measuredProtectedBranchPort(),
     previousApproved: "nope",
     git: createGitRunner("."),
     approval: approvedPort(),
   });
   assert.equal(result.ok, false);
   assert.equal(result.reason, COLLECTION_FAILURE_REASON.INVALID_ARGUMENTS);
+});
+
+test("argument defense: protectedBranch port missing -> ok:false/INVALID_ARGUMENTS", async () => {
+  const result = await collectQueueObservation({
+    repoRoot: ".",
+    manifestPath: "queue.json",
+    previousApproved: null,
+    git: createGitRunner("."),
+    approval: approvedPort(),
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, COLLECTION_FAILURE_REASON.INVALID_ARGUMENTS);
+});
+
+test("argument defense: protectedBranch is a bare string (old call shape) -> ok:false/INVALID_ARGUMENTS", async () => {
+  const result = await collectQueueObservation({
+    repoRoot: ".",
+    manifestPath: "queue.json",
+    protectedBranch: "main",
+    previousApproved: null,
+    git: createGitRunner("."),
+    approval: approvedPort(),
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, COLLECTION_FAILURE_REASON.INVALID_ARGUMENTS);
+});
+
+test("MEASURED: protectedBranch.measure() fails -> collection failure PROTECTED_BRANCH_UNMEASURED", async () => {
+  await withTempRepo(buildNormalRepo, async (dir) => {
+    const result = await collectQueueObservation(
+      depsFor(dir, approvedPort(), {
+        protectedBranch: {
+          async measure() {
+            return { ok: false, reason: "PROTECTED_BRANCH_UNCONFIRMED" };
+          },
+        },
+      }),
+    );
+    assert.equal(result.ok, false);
+    assert.equal(
+      result.reason,
+      COLLECTION_FAILURE_REASON.PROTECTED_BRANCH_UNMEASURED,
+    );
+  });
+});
+
+test("MEASURED: protectedBranch.measure() throws -> collection failure PROTECTED_BRANCH_UNMEASURED, no throw leaks", async () => {
+  await withTempRepo(buildNormalRepo, async (dir) => {
+    const result = await collectQueueObservation(
+      depsFor(dir, approvedPort(), {
+        protectedBranch: {
+          async measure() {
+            throw new Error("network exploded");
+          },
+        },
+      }),
+    );
+    assert.equal(result.ok, false);
+    assert.equal(
+      result.reason,
+      COLLECTION_FAILURE_REASON.PROTECTED_BRANCH_UNMEASURED,
+    );
+  });
+});
+
+test("MEASURED: protectedBranch.measure() resolves to the git-measured branch name (not a caller-supplied string)", async () => {
+  await withTempRepo(buildNormalRepo, async (dir) => {
+    const result = await collectQueueObservation(
+      depsFor(dir, approvedPort(), {
+        protectedBranch: measuredProtectedBranchPort("main"),
+      }),
+    );
+    assert.equal(result.ok, true);
+    assert.equal(result.observation.repo.protected_branch_name, "main");
+  });
 });
 
 test("argument defense: entirely undefined args -> ok:false/INVALID_ARGUMENTS, no throw", async () => {
