@@ -1,0 +1,5 @@
+{
+  "schema_version": "approver-allowlist/v1",
+  "repo": "hykim82/HARNESSENGINEERING",
+  "approvers": [{ "login": "hykim82", "id": 286230306 }]
+}

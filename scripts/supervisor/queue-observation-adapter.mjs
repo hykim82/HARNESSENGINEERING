@@ -4,18 +4,21 @@
 // I/O가 0이라 observation이 진짜 git 저장소에서 왔는지 증명하지 않는다.
 // 이 파일이 그 증거를 실제로 재서 코어에 넘기는 어댑터다.
 //
-// 이 계약이 보장하지 않는 것 (§4 정직 한계):
-// 1. `repo.protected_branch_name`은 측정값이 아니라 호출자가 넘긴 인자
-//    그대로다. 실제 GitHub 브랜치 보호 설정은 이 어댑터가 조회하지 않는다
-//    (그럴 네트워크 접근 자체가 이번 사이클 범위 밖이다).
-// 2. `manifest_commit.human_approved`의 권위 있는 공급원이 아직 없다.
-//    이번 사이클은 `approval` 포트의 인터페이스만 두고, 이 파일이 export하는
-//    유일한 구현체(`createUnavailableApprovalPort`)는 항상 `UNDECIDABLE`을
-//    반환한다 -- 즉 이 어댑터로는 실전에서 항상 수집 실패(차단)로 끝난다.
-//    실제 GitHub PR 승인 조회는 사이클 2b의 몫이다.
+// 이 계약이 보장하지 않는 것 (§4 정직 한계, 사이클2b 기준 갱신):
+// 1. `repo.protected_branch_name`은 사이클2b부터 **측정값**이다. 호출자가
+//    문자열을 넘기는 경로는 없다 -- 필수 포트 `protectedBranch: {measure()}`
+//    가 그것을 실제로 잰다(실 구현: approval-authority-adapter.mjs의
+//    `measureProtectedBranch`, GitHub REST `GET /repos/{full}/branches/
+//    {default}`의 `protected`/`commit.sha`). `measure()`가 실패하면 이
+//    어댑터도 실패한다(`PROTECTED_BRANCH_UNMEASURED`).
+// 2. `manifest_commit.human_approved`의 권위 있는 공급원 -- 사이클2b에서
+//    실구현(`approval-authority-adapter.mjs`의 `createGitHubApprovalPort`,
+//    GitHub REST 무인증 조회)이 생겼다. 이 파일이 export하는
+//    `createUnavailableApprovalPort`는 삭제하지 않고 유지한다 -- 명시적
+//    실패 포트로서 테스트·오프라인 경로에 필요하다.
 // 3. 표본 수와 조건 -- 이 파일 자체는 표본을 만들지 않는다(전부
 //    queue-observation-adapter.test.mjs에 있다). git 표본은 임시 저장소에서
-//    측정한 MEASURED, 승인 포트 표본은 손으로 만든 SYNTHETIC이다.
+//    측정한 MEASURED, 승인/보호브랜치 포트 표본은 손으로 만든 SYNTHETIC이다.
 //
 // 비타협(coder-task.md §2):
 // - `repoRoot`에 기본값 없음 -- 인자 누락은 실패 반환이다(process.cwd() 낙하 금지).
@@ -45,6 +48,7 @@ export const COLLECTION_FAILURE_REASON = Object.freeze({
   MANIFEST_FILE_NOT_TRACKED: "MANIFEST_FILE_NOT_TRACKED",
   MANIFEST_JSON_PARSE_FAILED: "MANIFEST_JSON_PARSE_FAILED",
   APPROVAL_UNDECIDABLE: "APPROVAL_UNDECIDABLE",
+  PROTECTED_BRANCH_UNMEASURED: "PROTECTED_BRANCH_UNMEASURED",
 });
 
 function isNonEmptyString(v) {
@@ -87,7 +91,7 @@ function validateArgs(args) {
   const {
     repoRoot,
     manifestPath,
-    protectedBranchName,
+    protectedBranch,
     previousApproved,
     git,
     approval,
@@ -104,10 +108,10 @@ function validateArgs(args) {
       "manifestPath missing/invalid",
     );
   }
-  if (!isNonEmptyString(protectedBranchName)) {
+  if (!isPlainObject(protectedBranch) || !isFunction(protectedBranch.measure)) {
     return failure(
       COLLECTION_FAILURE_REASON.INVALID_ARGUMENTS,
-      "protectedBranchName missing/invalid",
+      "protectedBranch port missing/invalid",
     );
   }
   if (previousApproved !== null && !isPlainObject(previousApproved)) {
@@ -208,7 +212,32 @@ async function runGit(git, args) {
   return ok({ stdout: result.stdout });
 }
 
-async function collectRepoSection({ protectedBranchName, git }) {
+// protectedBranch.measure() 결과를 흡수한다 -- throw/malformed/ok:false를
+// 전부 하나의 실패 사유(PROTECTED_BRANCH_UNMEASURED)로 접는다.
+async function measureProtectedBranchName(protectedBranch) {
+  let measured;
+  try {
+    measured = await protectedBranch.measure();
+  } catch (err) {
+    return failure(
+      COLLECTION_FAILURE_REASON.PROTECTED_BRANCH_UNMEASURED,
+      err && err.message ? err.message : String(err),
+    );
+  }
+  if (
+    !isPlainObject(measured) ||
+    measured.ok !== true ||
+    !isNonEmptyString(measured.protectedBranchName)
+  ) {
+    return failure(
+      COLLECTION_FAILURE_REASON.PROTECTED_BRANCH_UNMEASURED,
+      isPlainObject(measured) ? measured.reason : "malformed measure() result",
+    );
+  }
+  return ok({ protectedBranchName: measured.protectedBranchName });
+}
+
+async function collectRepoSection({ protectedBranch, git }) {
   const headCommit = await runGit(git, ["rev-parse", "HEAD"]);
   if (!headCommit.ok) return headCommit;
   const headBranch = await runGit(git, ["rev-parse", "--abbrev-ref", "HEAD"]);
@@ -219,6 +248,9 @@ async function collectRepoSection({ protectedBranchName, git }) {
   if (!gitDir.ok) return gitDir;
   const gitCommonDir = await runGit(git, ["rev-parse", "--git-common-dir"]);
   if (!gitCommonDir.ok) return gitCommonDir;
+  const protectedBranchResult =
+    await measureProtectedBranchName(protectedBranch);
+  if (!protectedBranchResult.ok) return protectedBranchResult;
 
   const resolvedGitDir = path.resolve(toText(gitDir.stdout));
   const resolvedCommonDir = path.resolve(toText(gitCommonDir.stdout));
@@ -227,7 +259,7 @@ async function collectRepoSection({ protectedBranchName, git }) {
     repo: {
       head_commit: toText(headCommit.stdout),
       head_branch_name: toText(headBranch.stdout),
-      protected_branch_name: protectedBranchName,
+      protected_branch_name: protectedBranchResult.protectedBranchName,
       is_dirty: toText(status.stdout).length > 0,
       is_alternate_checkout: resolvedGitDir !== resolvedCommonDir,
     },
@@ -360,13 +392,13 @@ export async function collectQueueObservation(args) {
   const {
     repoRoot,
     manifestPath,
-    protectedBranchName,
+    protectedBranch,
     previousApproved,
     git,
     approval,
   } = args;
 
-  const repoSection = await collectRepoSection({ protectedBranchName, git });
+  const repoSection = await collectRepoSection({ protectedBranch, git });
   if (!repoSection.ok) return repoSection;
 
   const manifestCommitSection = await collectManifestCommitSection({
