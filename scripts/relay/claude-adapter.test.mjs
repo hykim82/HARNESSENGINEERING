@@ -11,7 +11,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync as realSpawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { basename } from "node:path";
 import * as mod from "./claude-adapter.mjs";
 import {
   createArmStore,
@@ -352,9 +351,16 @@ function canarySpawnSync() {
 //   - sign.sh / bot-push-pr.sh: args 중 하나의 basename이 정확히 일치(인자로 전달돼도 검출)
 // 경로 조각의 난수는 이 축들 중 어디에도 걸리지 않는다(그 자체가 basename 전체가 되지
 // 않는 한 -- 즉 우연 일치가 아니라 실제로 그 이름의 파일/토큰일 때만 잡힌다).
+//
+// HYK-183 hotfix: node:path의 basename()은 호스트 OS 규칙을 따른다 -- Windows에서는
+// '\'도 구분자로 인식해 'C:\tools\gh.exe' -> 'gh.exe'로 자르지만, 리눅스(CI)에서는
+// '\'가 구분자가 아니라서 통째로 남아 오검출(미탐지)이 발생한다(PR #76 CI 실패 원인).
+// 판정 함수가 어느 OS에서 도는지에 따라 검출력이 달라지면 안 되므로, 호스트 OS와
+// 무관하게 '/'와 '\' 둘 다 구분자로 취급해 마지막 구간을 직접 추출한다.
 export function execBasename(value) {
   if (typeof value !== "string" || value.length === 0) return "";
-  let b = basename(value).toLowerCase();
+  const segments = value.split(/[\\/]+/);
+  let b = (segments[segments.length - 1] || "").toLowerCase();
   if (b.endsWith(".exe")) b = b.slice(0, -4);
   return b;
 }
@@ -455,26 +461,57 @@ test("HYK-183 regression: a spawn call whose args contain a temp-dir path with a
   }
 });
 
+// HYK-183 hotfix: 위 회귀 시험은 E2E 경로라 호스트 OS의 실제 경로 구분자에 의존한다
+// (Windows에서 돌리면 mkdtemp 결과가 항상 '\' 구분자를 쓴다). 판정이 호스트와 무관해야
+// 한다는 요구를 직접 단언하기 위해, POSIX 표기와 Windows 표기 양쪽에 동일한 난수 오염
+// 문자열을 수동으로 박아 isForbiddenSpawnCall을 유닛 수준에서 직접 호출한다.
+test("HYK-183 regression (host-independent): a benign 'gh'/'push' path substring is NOT flagged in either POSIX or Windows path form", () => {
+  const posixEntry = {
+    command: process.execPath,
+    args: ["/tmp/u7nghj-push-suffix/fake-done.mjs"],
+  };
+  const windowsEntry = {
+    command: process.execPath,
+    args: [
+      "C:\\Users\\x\\AppData\\Local\\Temp\\u7nghj-push-suffix\\fake-done.mjs",
+    ],
+  };
+  assert.equal(
+    isForbiddenSpawnCall(posixEntry),
+    false,
+    `a benign POSIX-form path substring must never be treated as a forbidden gate action: ${posixEntry.args[0]}`,
+  );
+  assert.equal(
+    isForbiddenSpawnCall(windowsEntry),
+    false,
+    `a benign Windows-form path substring must never be treated as a forbidden gate action: ${windowsEntry.args[0]}`,
+  );
+});
+
 // HYK-183 §2 함정 회귀 (조건3 -- 4행 전부): 판정 축을 좁히면 canary가 무력화된다.
 // 아래 4개는 §2 표의 각 행에 대응하는 "진짜 사람 게이트 호출" 주입 -- 반드시 잡혀야 한다.
+// HYK-183 hotfix (PR #76 CI 실패 수리): 아래 4개 시험은 POSIX 표기와 Windows 표기
+// 둘 다에 대해 참이어야 하고, 두 표기가 "같은 판정 결과"를 내는지도 직접 단언한다
+// (호스트 OS에 따라 검출력이 달라지면 안 된다 -- 그것이 이번 CI 실패의 근본 원인이었다).
 test("HYK-183 gate-detection [1/4]: gh CLI invocation (command basename 'gh') is flagged", () => {
   assert.equal(
     isForbiddenSpawnCall({ command: "gh", args: ["pr", "create"] }),
     true,
   );
+  const posix = isForbiddenSpawnCall({
+    command: "/usr/local/bin/gh",
+    args: ["pr", "merge"],
+  });
+  const windows = isForbiddenSpawnCall({
+    command: "C:\\tools\\gh.exe",
+    args: ["pr", "create"],
+  });
+  assert.equal(posix, true);
+  assert.equal(windows, true);
   assert.equal(
-    isForbiddenSpawnCall({
-      command: "/usr/local/bin/gh",
-      args: ["pr", "merge"],
-    }),
-    true,
-  );
-  assert.equal(
-    isForbiddenSpawnCall({
-      command: "C:\\tools\\gh.exe",
-      args: ["pr", "create"],
-    }),
-    true,
+    posix,
+    windows,
+    "POSIX and Windows path forms for the same 'gh' invocation must be judged identically regardless of host OS",
   );
 });
 
@@ -483,9 +520,20 @@ test("HYK-183 gate-detection [2/4]: git push (command basename 'git' + args toke
     isForbiddenSpawnCall({ command: "git", args: ["push", "origin", "main"] }),
     true,
   );
+  const posix = isForbiddenSpawnCall({
+    command: "/usr/bin/git",
+    args: ["push"],
+  });
+  const windows = isForbiddenSpawnCall({
+    command: "C:\\Program Files\\Git\\git.exe",
+    args: ["push"],
+  });
+  assert.equal(posix, true);
+  assert.equal(windows, true);
   assert.equal(
-    isForbiddenSpawnCall({ command: "/usr/bin/git", args: ["push"] }),
-    true,
+    posix,
+    windows,
+    "POSIX and Windows path forms for the same 'git push' invocation must be judged identically regardless of host OS",
   );
   // argv[0]만 보는 무력화된 판정이라면 여기서 놓친다 -- 우리 판정은 args 토큰도 본다.
   assert.equal(
@@ -496,33 +544,38 @@ test("HYK-183 gate-detection [2/4]: git push (command basename 'git' + args toke
 });
 
 test("HYK-183 gate-detection [3/4]: sign.sh passed as an argument (e.g. 'bash /path/sign.sh') is flagged by argument basename", () => {
+  const posix = isForbiddenSpawnCall({
+    command: "bash",
+    args: ["/repo/scripts/sign.sh", "--cycle", "1"],
+  });
+  const windows = isForbiddenSpawnCall({
+    command: "sh",
+    args: ["C:\\repo\\sign.sh"],
+  });
+  assert.equal(posix, true);
+  assert.equal(windows, true);
   assert.equal(
-    isForbiddenSpawnCall({
-      command: "bash",
-      args: ["/repo/scripts/sign.sh", "--cycle", "1"],
-    }),
-    true,
-  );
-  assert.equal(
-    isForbiddenSpawnCall({ command: "sh", args: ["C:\\repo\\sign.sh"] }),
-    true,
+    posix,
+    windows,
+    "POSIX and Windows path forms for the same 'sign.sh' argument must be judged identically regardless of host OS",
   );
 });
 
 test("HYK-183 gate-detection [4/4]: bot-push-pr.sh passed as an argument is flagged by argument basename", () => {
+  const posix = isForbiddenSpawnCall({
+    command: "bash",
+    args: ["/repo/scripts/bot-push-pr.sh"],
+  });
+  const windows = isForbiddenSpawnCall({
+    command: "sh",
+    args: ["C:\\repo\\bot-push-pr.sh", "--arm", "x"],
+  });
+  assert.equal(posix, true);
+  assert.equal(windows, true);
   assert.equal(
-    isForbiddenSpawnCall({
-      command: "bash",
-      args: ["/repo/scripts/bot-push-pr.sh"],
-    }),
-    true,
-  );
-  assert.equal(
-    isForbiddenSpawnCall({
-      command: "sh",
-      args: ["C:\\repo\\bot-push-pr.sh", "--arm", "x"],
-    }),
-    true,
+    posix,
+    windows,
+    "POSIX and Windows path forms for the same 'bot-push-pr.sh' argument must be judged identically regardless of host OS",
   );
 });
 
