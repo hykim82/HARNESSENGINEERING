@@ -1,6 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync, readFileSync } from "node:fs";
+import {
+  mkdtempSync,
+  rmSync,
+  writeFileSync,
+  readFileSync,
+  mkdirSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync as realSpawnSync } from "node:child_process";
@@ -336,6 +342,42 @@ function canarySpawnSync() {
   return fn;
 }
 
+// HYK-183 flaky-canary 수리: G10 런타임 canary가 "부분문자열 포함"(joined.includes(bad))으로
+// 판정하면, spawn 인자에 들어가는 mkdtemp 임시 경로의 난수 접미사가 우연히 "gh"·"push" 같은
+// 조각을 포함할 때(실측: "...u7nghj") 무관한 정상 호출을 오탐한다 -- 이 파일:255-262(구)가
+// 그 결함이었다. 판정을 토큰/실행파일명 단위 정확 일치로 바꾼다:
+//   - gh CLI: command의 basename이 정확히 "gh"(.exe 제외)
+//   - git push: command basename이 정확히 "git" 이고, args 중 하나가 정확히 "push" 토큰
+//   - sign.sh / bot-push-pr.sh: args 중 하나의 basename이 정확히 일치(인자로 전달돼도 검출)
+// 경로 조각의 난수는 이 축들 중 어디에도 걸리지 않는다(그 자체가 basename 전체가 되지
+// 않는 한 -- 즉 우연 일치가 아니라 실제로 그 이름의 파일/토큰일 때만 잡힌다).
+//
+// HYK-183 hotfix: node:path의 basename()은 호스트 OS 규칙을 따른다 -- Windows에서는
+// '\'도 구분자로 인식해 'C:\tools\gh.exe' -> 'gh.exe'로 자르지만, 리눅스(CI)에서는
+// '\'가 구분자가 아니라서 통째로 남아 오검출(미탐지)이 발생한다(PR #76 CI 실패 원인).
+// 판정 함수가 어느 OS에서 도는지에 따라 검출력이 달라지면 안 되므로, 호스트 OS와
+// 무관하게 '/'와 '\' 둘 다 구분자로 취급해 마지막 구간을 직접 추출한다.
+export function execBasename(value) {
+  if (typeof value !== "string" || value.length === 0) return "";
+  const segments = value.split(/[\\/]+/);
+  let b = (segments[segments.length - 1] || "").toLowerCase();
+  if (b.endsWith(".exe")) b = b.slice(0, -4);
+  return b;
+}
+
+export function isForbiddenSpawnCall(entry) {
+  const commandBase = execBasename(entry && entry.command);
+  const args = entry && Array.isArray(entry.args) ? entry.args : [];
+  if (commandBase === "gh") return true;
+  if (commandBase === "git" && args.some((a) => a === "push")) return true;
+  for (const a of args) {
+    const argBase = execBasename(typeof a === "string" ? a : "");
+    if (argBase === "sign.sh") return true;
+    if (argBase === "bot-push-pr.sh") return true;
+  }
+  return false;
+}
+
 test("SYNTH-E2E-1: full arm lifecycle with a real fake-engine process -- done outcome, exactly one process spawned, no gate commands observed", () => {
   const dir = freshDir();
   const arm_id = "arm-e2e-done";
@@ -366,20 +408,175 @@ test("SYNTH-E2E-1: full arm lifecycle with a real fake-engine process -- done ou
       1,
       "the real engine process must be spawned exactly once (G7)",
     );
-    const forbidden = ["push", "gh", "sign.sh", "bot-push-pr"];
     for (const entry of spawnSyncFn.log) {
-      const joined = `${entry.command} ${entry.args.join(" ")}`.toLowerCase();
-      for (const bad of forbidden) {
-        assert.equal(
-          joined.includes(bad),
-          false,
-          `runtime-observed spawn call must not reference '${bad}' (G10 runtime canary): ${joined}`,
-        );
-      }
+      assert.equal(
+        isForbiddenSpawnCall(entry),
+        false,
+        `runtime-observed spawn call must not match a forbidden gate action (G10 runtime canary): ${entry.command} ${entry.args.join(" ")}`,
+      );
     }
   } finally {
     cleanup(dir);
   }
+});
+
+// HYK-183 회귀 (조건2 GREEN): 위 SYNTH-E2E-1과 완전히 동일한 절차(mkdtemp 임시 폴더
+// 안에 fake-done.mjs를 두고 baseArgs:[script]로 spawn)이지만, 여기서는 그 임시 폴더
+// 이름의 난수 접미사에 "gh"·"push" 조각이 우연히 들어가도 오탐하지 않아야 함을
+// 직접 검증한다(재현 절차 동일 유지 -- §완료조건2). mkdtempSync는 접미사를 강제할 수
+// 없으므로, 실측 사고(REVIEW 관찰 "...u7nghj")와 동형으로 폴더명 자체에 그 조각을
+// 박아 넣는다.
+test("HYK-183 regression: a spawn call whose args contain a temp-dir path with an incidental 'gh'/'push' substring is NOT flagged (no false RED)", () => {
+  const dir = freshDir();
+  const arm_id = "arm-e2e-flaky-canary-regression";
+  try {
+    seedArm(dir, arm_id);
+    // 실측 재현: mkdtemp 접미사에 해당하는 위치에 "gh"와 "push" 조각을 강제로 심는다.
+    const poisonedSubdir = join(dir, "u7nghj-push-suffix");
+    mkdirSync(poisonedSubdir, { recursive: true });
+    const script = writeFakeScript(poisonedSubdir, "fake-done.mjs", FAKE_DONE);
+    const spawnSyncFn = canarySpawnSync();
+    const adapterFn = mod.createClaudeAdapterFn({
+      command: process.execPath,
+      baseArgs: [script],
+      spawnSyncFn,
+    });
+    const task = makeE2ETask(dir);
+
+    const r = runSupervisedAttempt(dir, arm_id, makeScope(dir), task, {
+      nowFn: NOW_OK,
+      adapterFn,
+    });
+    assert.equal(r.outcome, "done");
+    assert.equal(spawnSyncFn.log.length, 1);
+    for (const entry of spawnSyncFn.log) {
+      assert.equal(
+        isForbiddenSpawnCall(entry),
+        false,
+        `a benign path substring must never be treated as a forbidden gate action: ${entry.command} ${entry.args.join(" ")}`,
+      );
+    }
+  } finally {
+    cleanup(dir);
+  }
+});
+
+// HYK-183 hotfix: 위 회귀 시험은 E2E 경로라 호스트 OS의 실제 경로 구분자에 의존한다
+// (Windows에서 돌리면 mkdtemp 결과가 항상 '\' 구분자를 쓴다). 판정이 호스트와 무관해야
+// 한다는 요구를 직접 단언하기 위해, POSIX 표기와 Windows 표기 양쪽에 동일한 난수 오염
+// 문자열을 수동으로 박아 isForbiddenSpawnCall을 유닛 수준에서 직접 호출한다.
+test("HYK-183 regression (host-independent): a benign 'gh'/'push' path substring is NOT flagged in either POSIX or Windows path form", () => {
+  const posixEntry = {
+    command: process.execPath,
+    args: ["/tmp/u7nghj-push-suffix/fake-done.mjs"],
+  };
+  const windowsEntry = {
+    command: process.execPath,
+    args: [
+      "C:\\Users\\x\\AppData\\Local\\Temp\\u7nghj-push-suffix\\fake-done.mjs",
+    ],
+  };
+  assert.equal(
+    isForbiddenSpawnCall(posixEntry),
+    false,
+    `a benign POSIX-form path substring must never be treated as a forbidden gate action: ${posixEntry.args[0]}`,
+  );
+  assert.equal(
+    isForbiddenSpawnCall(windowsEntry),
+    false,
+    `a benign Windows-form path substring must never be treated as a forbidden gate action: ${windowsEntry.args[0]}`,
+  );
+});
+
+// HYK-183 §2 함정 회귀 (조건3 -- 4행 전부): 판정 축을 좁히면 canary가 무력화된다.
+// 아래 4개는 §2 표의 각 행에 대응하는 "진짜 사람 게이트 호출" 주입 -- 반드시 잡혀야 한다.
+// HYK-183 hotfix (PR #76 CI 실패 수리): 아래 4개 시험은 POSIX 표기와 Windows 표기
+// 둘 다에 대해 참이어야 하고, 두 표기가 "같은 판정 결과"를 내는지도 직접 단언한다
+// (호스트 OS에 따라 검출력이 달라지면 안 된다 -- 그것이 이번 CI 실패의 근본 원인이었다).
+test("HYK-183 gate-detection [1/4]: gh CLI invocation (command basename 'gh') is flagged", () => {
+  assert.equal(
+    isForbiddenSpawnCall({ command: "gh", args: ["pr", "create"] }),
+    true,
+  );
+  const posix = isForbiddenSpawnCall({
+    command: "/usr/local/bin/gh",
+    args: ["pr", "merge"],
+  });
+  const windows = isForbiddenSpawnCall({
+    command: "C:\\tools\\gh.exe",
+    args: ["pr", "create"],
+  });
+  assert.equal(posix, true);
+  assert.equal(windows, true);
+  assert.equal(
+    posix,
+    windows,
+    "POSIX and Windows path forms for the same 'gh' invocation must be judged identically regardless of host OS",
+  );
+});
+
+test("HYK-183 gate-detection [2/4]: git push (command basename 'git' + args token 'push') is flagged -- argv[0] alone would miss this (the exact trap in §2)", () => {
+  assert.equal(
+    isForbiddenSpawnCall({ command: "git", args: ["push", "origin", "main"] }),
+    true,
+  );
+  const posix = isForbiddenSpawnCall({
+    command: "/usr/bin/git",
+    args: ["push"],
+  });
+  const windows = isForbiddenSpawnCall({
+    command: "C:\\Program Files\\Git\\git.exe",
+    args: ["push"],
+  });
+  assert.equal(posix, true);
+  assert.equal(windows, true);
+  assert.equal(
+    posix,
+    windows,
+    "POSIX and Windows path forms for the same 'git push' invocation must be judged identically regardless of host OS",
+  );
+  // argv[0]만 보는 무력화된 판정이라면 여기서 놓친다 -- 우리 판정은 args 토큰도 본다.
+  assert.equal(
+    isForbiddenSpawnCall({ command: "git", args: ["status"] }),
+    false,
+    "sanity: git without a push token must not be flagged",
+  );
+});
+
+test("HYK-183 gate-detection [3/4]: sign.sh passed as an argument (e.g. 'bash /path/sign.sh') is flagged by argument basename", () => {
+  const posix = isForbiddenSpawnCall({
+    command: "bash",
+    args: ["/repo/scripts/sign.sh", "--cycle", "1"],
+  });
+  const windows = isForbiddenSpawnCall({
+    command: "sh",
+    args: ["C:\\repo\\sign.sh"],
+  });
+  assert.equal(posix, true);
+  assert.equal(windows, true);
+  assert.equal(
+    posix,
+    windows,
+    "POSIX and Windows path forms for the same 'sign.sh' argument must be judged identically regardless of host OS",
+  );
+});
+
+test("HYK-183 gate-detection [4/4]: bot-push-pr.sh passed as an argument is flagged by argument basename", () => {
+  const posix = isForbiddenSpawnCall({
+    command: "bash",
+    args: ["/repo/scripts/bot-push-pr.sh"],
+  });
+  const windows = isForbiddenSpawnCall({
+    command: "sh",
+    args: ["C:\\repo\\bot-push-pr.sh", "--arm", "x"],
+  });
+  assert.equal(posix, true);
+  assert.equal(windows, true);
+  assert.equal(
+    posix,
+    windows,
+    "POSIX and Windows path forms for the same 'bot-push-pr.sh' argument must be judged identically regardless of host OS",
+  );
 });
 
 test("SYNTH-E2E-2: question outcome -- disarmed immediately, no auto-resume, exactly one spawn", () => {
