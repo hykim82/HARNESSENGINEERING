@@ -1,0 +1,283 @@
+// NC-2 negative-control: relay-handshake (worker-completion freshness gate).
+//
+// Every case calls checkRelayHandshake({role, harnessDir}) directly with a
+// synthetic `harnessDir` (mkdtemp fixture) -- the real .harness/ directory
+// of this or any other worktree is never read or written (design §2-1/§2-2:
+// harnessDir is an injectable argument at relay-handshake.mjs:61-64, so no
+// source copy is needed to attack this device).
+//
+// Classification key: BLOCKED = attack was actually stopped (asserted here
+// as ok:false). KNOWN GAP = the attack goes through and this is an
+// already-recorded, not-yet-implemented limitation (asserted here as
+// current behavior -- closing the gap turns this test RED and forces a doc
+// update). See docs/enforcement-known-gaps.md for the authoritative table.
+import { test, after } from "node:test";
+import assert from "node:assert/strict";
+import { mkdtempSync, writeFileSync, rmSync, mkdirSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { execFileSync } from "node:child_process";
+import { checkRelayHandshake } from "./relay-handshake.mjs";
+
+function repoRoot() {
+  return execFileSync("git", ["rev-parse", "--show-toplevel"], {
+    encoding: "utf8",
+  }).trim();
+}
+
+const ROOT = repoRoot();
+const preStatus = execFileSync("git", ["status", "--porcelain"], {
+  cwd: ROOT,
+  encoding: "utf8",
+});
+const preDiffStat = execFileSync("git", ["diff", "HEAD", "--stat"], {
+  cwd: ROOT,
+  encoding: "utf8",
+});
+
+function withHarnessDir(fn) {
+  const dir = mkdtempSync(join(tmpdir(), "nc-relay-handshake-"));
+  try {
+    fn(dir);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+function writeTask(dir, role, body) {
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, `${role}-task.md`), body, "utf8");
+}
+function writeResult(dir, role, body) {
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, `${role}.md`), body, "utf8");
+}
+
+const TASK_OK = "task_id: HYK-9001-x\ndropped_at: 2026-07-31 10:00 KST\n";
+
+// --- proven defense: stale DONE (predates the drop) -> BLOCKED ---
+test("NC-2 relay-handshake/attack: DONE timestamp predates dropped_at (stale result) -> BLOCKED", () => {
+  withHarnessDir((dir) => {
+    writeTask(dir, "coder", TASK_OK);
+    writeResult(
+      dir,
+      "coder",
+      "task_id: HYK-9001-x\n>>> DONE: stale replay @ 2026-07-31 09:59 KST\n",
+    );
+    const result = checkRelayHandshake({ role: "coder", harnessDir: dir });
+    assert.equal(
+      result.ok,
+      false,
+      "a DONE that predates the drop must be blocked",
+    );
+    assert.match(result.reason, /stale/);
+  });
+});
+
+// --- KNOWN GAP: DONE timestamp in the far future -> passes, no upper bound ---
+test("NC-2 relay-handshake/gap: DONE timestamp 10 years in the future -> passes (no upper-bound check) -> KNOWN GAP", () => {
+  withHarnessDir((dir) => {
+    writeTask(dir, "coder", TASK_OK);
+    writeResult(
+      dir,
+      "coder",
+      "task_id: HYK-9001-x\n>>> DONE: future replay @ 2036-07-31 10:05 KST\n",
+    );
+    const result = checkRelayHandshake({ role: "coder", harnessDir: dir });
+    assert.equal(
+      result.ok,
+      true,
+      "current behavior: only a lower bound (droppedAt) is enforced; an arbitrarily-future DONE passes",
+    );
+  });
+});
+
+// --- direction of task_id parsing: which occurrence wins when two are present ---
+test("NC-2 relay-handshake/measurement: result file with TWO 'task_id:' lines (old round kept, new appended) -> the FIRST occurrence is read", () => {
+  withHarnessDir((dir) => {
+    writeTask(dir, "coder", TASK_OK);
+    // Old round's task_id kept at top, current round's appended below --
+    // simulates a result file that preserved a prior round's block instead
+    // of being fully replaced.
+    writeResult(
+      dir,
+      "coder",
+      "task_id: HYK-0000-stale-round\n>>> DONE: old round @ 2026-07-30 09:00 KST\n\ntask_id: HYK-9001-x\n>>> DONE: new round @ 2026-07-31 10:05 KST\n",
+    );
+    const result = checkRelayHandshake({ role: "coder", harnessDir: dir });
+    assert.equal(
+      result.ok,
+      false,
+      "checkRelayHandshake reads the FIRST task_id: line (non-global .match), so a stale round kept at the top wins and causes a handshake mismatch against the current task",
+    );
+    assert.match(result.reason, /handshake mismatch/);
+  });
+});
+
+// --- direction of DONE parsing: LAST occurrence wins (opposite of task_id) ---
+test("NC-2 relay-handshake/measurement: result file with TWO '>>> DONE:' lines (old one appears AFTER the new one) -> the LAST occurrence is read -- parser direction is opposite of the task_id parser above", () => {
+  withHarnessDir((dir) => {
+    writeTask(dir, "coder", TASK_OK);
+    // Current round's real DONE comes first; a stale/leftover DONE line
+    // (e.g. from a botched re-work convention) is appended after it.
+    writeResult(
+      dir,
+      "coder",
+      "task_id: HYK-9001-x\n>>> DONE: current round @ 2026-07-31 10:05 KST\n\n(과거 기록 · 최종 완료 줄 아님) leftover text\n>>> DONE: stale leftover @ 2026-07-25 09:00 KST\n",
+    );
+    const result = checkRelayHandshake({ role: "coder", harnessDir: dir });
+    // DONE_RE uses matchAll + [...][length-1] -- the LAST match wins, so the
+    // stale leftover DONE (predating the drop) is what gets compared, and
+    // the handshake is blocked as stale even though the real, current DONE
+    // line is present earlier in the same file.
+    assert.equal(
+      result.ok,
+      false,
+      "the LAST '>>> DONE:' line is read; a stale leftover DONE appended after the real one causes a false stale-block",
+    );
+    assert.match(result.reason, /stale/);
+    // This is exactly why §2-10's operating rule (newest round always on
+    // top, exactly one '>>> DONE:' survives, old ones de-labelled to
+    // '(과거 기록 ...) DONE:') exists: task_id is read FIRST-match while
+    // DONE is read LAST-match -- the two parsers disagree on direction, so
+    // "just append the new round" is unsafe for either field alone.
+  });
+});
+
+// --- task file fields not at column 0 (bulleted / backticked) -> rejected, not silently accepted ---
+test("NC-2 relay-handshake/attack: task file's task_id is not a standalone column-0 line (bulleted) -> BLOCKED (anchor rejects, does not silently pass a wrong id)", () => {
+  withHarnessDir((dir) => {
+    writeTask(
+      dir,
+      "coder",
+      "- task_id: HYK-9001-x\n- dropped_at: 2026-07-31 10:00 KST\n",
+    );
+    writeResult(
+      dir,
+      "coder",
+      "task_id: HYK-9001-x\n>>> DONE: x @ 2026-07-31 10:05 KST\n",
+    );
+    const result = checkRelayHandshake({ role: "coder", harnessDir: dir });
+    assert.equal(
+      result.ok,
+      false,
+      "a bulleted task_id line must not satisfy the anchored header check",
+    );
+    assert.match(result.reason, /task file missing task_id header/);
+  });
+});
+
+test("NC-2 relay-handshake/attack: task file's task_id wrapped in backticks (`task_id: X`) -> BLOCKED", () => {
+  withHarnessDir((dir) => {
+    writeTask(
+      dir,
+      "coder",
+      "`task_id: HYK-9001-x`\ndropped_at: 2026-07-31 10:00 KST\n",
+    );
+    writeResult(
+      dir,
+      "coder",
+      "task_id: HYK-9001-x\n>>> DONE: x @ 2026-07-31 10:05 KST\n",
+    );
+    const result = checkRelayHandshake({ role: "coder", harnessDir: dir });
+    assert.equal(
+      result.ok,
+      false,
+      "a backtick-wrapped task_id line must not satisfy the anchored header check",
+    );
+    assert.match(result.reason, /task file missing task_id header/);
+  });
+});
+
+// --- absence cases: no exception leakage ---
+test("NC-2 relay-handshake/attack: task file absent -> ok:false with a reason string, no exception", () => {
+  withHarnessDir((dir) => {
+    writeResult(
+      dir,
+      "coder",
+      "task_id: HYK-9001-x\n>>> DONE: x @ 2026-07-31 10:05 KST\n",
+    );
+    const result = checkRelayHandshake({ role: "coder", harnessDir: dir });
+    assert.equal(result.ok, false);
+    assert.match(result.reason, /task file not found/);
+  });
+});
+
+test("NC-2 relay-handshake/attack: result file absent (worker not done) -> ok:false with a reason string, no exception", () => {
+  withHarnessDir((dir) => {
+    writeTask(dir, "coder", TASK_OK);
+    const result = checkRelayHandshake({ role: "coder", harnessDir: dir });
+    assert.equal(result.ok, false);
+    assert.match(result.reason, /result file not found/);
+  });
+});
+
+// --- labeled DONE line ("DONE(3R):") -> detection failure reproduced ---
+test("NC-2 relay-handshake/gap: '>>> DONE(3R): ...' (labeled DONE) is NOT recognized as a DONE line -- reproduces the 2026-07-30 11-minute non-detection incident -> KNOWN GAP", () => {
+  withHarnessDir((dir) => {
+    writeTask(dir, "coder", TASK_OK);
+    writeResult(
+      dir,
+      "coder",
+      "task_id: HYK-9001-x\n>>> DONE(3R): finished but labeled @ 2026-07-31 10:05 KST\n",
+    );
+    const result = checkRelayHandshake({ role: "coder", harnessDir: dir });
+    // DONE_RE requires the literal token "DONE:" immediately after ">>> ";
+    // any label inserted between "DONE" and ":" (e.g. "(3R)") breaks the
+    // match entirely, so a worker that actually finished is reported as
+    // "result missing DONE line" -- a false negative, not a false accept.
+    // Prior record: STATUS.md §7 인수인계 큐 documents this exact incident
+    // (11-minute non-detection of a labeled DONE line, 2026-07-30/31).
+    assert.equal(
+      result.ok,
+      false,
+      "current behavior: a labeled DONE line is invisible to DONE_RE and the handshake reports the result as missing entirely",
+    );
+    assert.match(result.reason, /missing.*DONE/);
+  });
+});
+
+// --- no mtime cross-check against the self-reported timestamp ---
+test("NC-2 relay-handshake/gap: self-reported DONE time is never cross-checked against the result file's own mtime -> KNOWN GAP", () => {
+  withHarnessDir((dir) => {
+    writeTask(dir, "coder", TASK_OK);
+    // The file is written (and thus has a real, current mtime) but its
+    // *content* claims a DONE time far in the past relative to that mtime.
+    // checkRelayHandshake only ever compares droppedAt vs the self-reported
+    // DONE string -- it never calls statSync on the result file, so this
+    // mismatch is invisible to it. Confirmed by direct source inspection
+    // (scripts/check/relay-handshake.mjs has no fs.stat call anywhere).
+    writeResult(
+      dir,
+      "coder",
+      "task_id: HYK-9001-x\n>>> DONE: backdated but freshly written @ 2026-07-31 10:05 KST\n",
+    );
+    const result = checkRelayHandshake({ role: "coder", harnessDir: dir });
+    assert.equal(
+      result.ok,
+      true,
+      "current behavior: only the self-reported DONE string is trusted; no mtime cross-check exists",
+    );
+  });
+});
+
+after(() => {
+  const postStatus = execFileSync("git", ["status", "--porcelain"], {
+    cwd: ROOT,
+    encoding: "utf8",
+  });
+  assert.equal(
+    postStatus,
+    preStatus,
+    "nc-relay-handshake.test.mjs must leave the real worktree exactly as it found it (before/after invariance, not empty)",
+  );
+  const postDiffStat = execFileSync("git", ["diff", "HEAD", "--stat"], {
+    cwd: ROOT,
+    encoding: "utf8",
+  });
+  assert.equal(
+    postDiffStat,
+    preDiffStat,
+    "nc-relay-handshake.test.mjs changed the tracked-file diff state -- must leave whatever diff existed before it ran untouched",
+  );
+});
