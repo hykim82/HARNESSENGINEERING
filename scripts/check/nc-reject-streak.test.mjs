@@ -74,18 +74,22 @@ test("NC-2 reject-streak/defect: verdict written as '**rejected**' (bold) is not
 });
 
 // ---------------------------------------------------------------------
-// 2) two verdict lines in one file -> which wins? (VERDICT_LINE_RE has no
-//    'g' flag, so .match returns the FIRST match)
+// 2) two verdict lines in one file -> HYK-183 fix: fail-closed, not
+//    "first wins" (VERDICT_LINE_RE_G now counts occurrences; >=2 is
+//    UNJUDGABLE, never silently recorded).
 // ---------------------------------------------------------------------
-test("NC-2 reject-streak/defect: two 'verdict:' lines (rejected then approved) -> the FIRST is read -- an approval appended after a rejection is silently ignored, reproducing the mixed-record incident -> NEW DEFECT confirmed reproducible", () => {
+test("NC-2 reject-streak/fixed(HYK-183): two 'verdict:' lines (rejected then approved) -> UNJUDGABLE, NOT recorded -- fail-closed instead of silently reading the first (was: mixed-record incident) -> CLOSED", () => {
   const reviewText =
     "for: HYK-9001-x\nverdict: rejected\nnotes: first pass\n\n(REVISED) for: HYK-9001-x\nverdict: approved\nnotes: fixed on second look\n";
   const outcome = parseReviewOutcome(reviewText);
-  assert.equal(outcome.ok, true);
   assert.equal(
-    outcome.verdict,
-    "rejected",
-    "VERDICT_LINE_RE has no 'g' flag; .match() returns only the FIRST 'verdict:' occurrence, so a later approval in the same file is invisible to the ledger -- an approval can be recorded as a rejection",
+    outcome.ok,
+    false,
+    "HYK-183 fix: 2+ 'verdict:' lines must never resolve to a single silently-chosen verdict",
+  );
+  assert.match(
+    outcome.reason,
+    /판정 줄이 2개라 어느 것이 최종인지 결정할 수 없다/,
   );
   const record = computeRecord({
     reviewText,
@@ -93,41 +97,36 @@ test("NC-2 reject-streak/defect: two 'verdict:' lines (rejected then approved) -
     at: "2026-07-31 10:00 KST",
   });
   assert.equal(
-    record.streak,
-    1,
-    "the (wrong) rejected verdict increments the streak despite the file also containing an approval",
+    record.ok,
+    false,
+    "an ambiguous verdict must never mutate the ledger, in either direction",
   );
 });
 
 // ---------------------------------------------------------------------
 // 3) 'for:'/'task_id:' vs 'verdict:' can point at DIFFERENT rounds --
-//    the real defect is not "first wins" per se, it's that the two fields
-//    are read independently and can disagree.
+//    HYK-183 fix: the ambiguous verdict count alone is enough to refuse
+//    the record, regardless of what 'for:' resolves to.
 // ---------------------------------------------------------------------
-test("NC-2 reject-streak/defect: 'for:' (round A) and 'verdict:' (round A's own first line) resolve together, but appending a round-B block after round A means the RECORDED verdict and the round the reviewer meant to record can diverge -> asymmetry confirmed", () => {
+test("NC-2 reject-streak/fixed(HYK-183): 'for:' (round A) and two 'verdict:' lines (round A rejected, round B approved) -> UNJUDGABLE -- the ambiguous verdict count blocks the record before any single round's verdict is trusted -> CLOSED", () => {
   // Round A rejected; round B (a later, distinct review pass for the same
-  // file) approved. Both 'for:' lines say the same issue id, but the
-  // *verdict* that gets recorded is round A's (first match) even when a
-  // human skimming the file would read round B (the latest content) as the
-  // operative verdict. This is the same "two fields, two different
-  // directions of truth" shape confirmed for relay-handshake in
-  // nc-relay-handshake.test.mjs (task_id: first-match, DONE: last-match) --
-  // here it's a single field (verdict:) whose *only* extraction direction
-  // (first-match) can disagree with what a human reader would call "the
-  // current round's outcome."
+  // file) approved. Both 'for:' lines say the same issue id, but with two
+  // 'verdict:' lines present the fixed parser refuses to pick either one
+  // rather than silently trusting round A's (the old first-match
+  // behavior). This is the same "two fields, two different directions of
+  // truth" shape that motivated the relay-handshake fix in
+  // nc-relay-handshake.test.mjs (task_id: was first-match, DONE: was
+  // last-match) -- both tools now fail-closed on ambiguity instead of
+  // picking a direction.
   const reviewText =
     "for: HYK-9001-x\nverdict: rejected\n\nfor: HYK-9001-x\nverdict: approved\n";
   const outcome = parseReviewOutcome(reviewText);
   assert.equal(
-    outcome.taskId,
-    "HYK-9001-x",
-    "'for:' also resolves to the FIRST occurrence",
+    outcome.ok,
+    false,
+    "the ambiguity (here: two 'for:' lines, checked before verdict resolution) must block the record even though both 'for:' lines happen to agree on the same issue id",
   );
-  assert.equal(
-    outcome.verdict,
-    "rejected",
-    "both 'for:' and 'verdict:' resolve first-match here, but they are two INDEPENDENT regex scans over the same text -- nothing enforces they come from the same block, so a file where a later block's 'for:' differs from an earlier block's 'verdict:' (or vice versa) can silently mix rounds",
-  );
+  assert.match(outcome.reason, /어느 것이 최종인지 결정할 수 없다/);
 });
 
 // ---------------------------------------------------------------------
