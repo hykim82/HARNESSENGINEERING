@@ -2,6 +2,11 @@ import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { execSync } from "node:child_process";
 
+// HYK-183: 결과 파일에 이 표지가 2개 이상이면 어느 것이 최종인지 결정할 수
+// 없으므로 조용히 하나를 고르지 않고 판정 불가로 멈춘다(2026-07-31 거짓
+// 기록 사고). 과거 `/verdict:\s*approved/i.test(content)`는 존재 검사라
+// 최신 판정이 rejected여도 옛 approved 줄이 남아 있으면 통과시켰다.
+const VERDICT_LINE_RE_G = /^verdict:\s*(approved|rejected)\s*$/gim;
 const HYK_TAG_RE_GLOBAL = /HYK-\d+/g;
 // A standalone digit token (not part of a longer word like "2x" or "3rd") chained
 // by a comma onto a preceding HYK-<digits> tag is an abbreviated enumeration.
@@ -9,7 +14,9 @@ const ABBREVIATED_ENUMERATION_RE = /HYK-\d+(?:\s*,\s*\d+(?![A-Za-z0-9]))+/g;
 
 function repoRoot() {
   try {
-    return execSync("git rev-parse --show-toplevel", { encoding: "utf8" }).trim();
+    return execSync("git rev-parse --show-toplevel", {
+      encoding: "utf8",
+    }).trim();
   } catch {
     return process.cwd();
   }
@@ -27,23 +34,49 @@ function extractSkipReview(message) {
   return m ? m[1].trim() : null; // null = not a skip directive
 }
 
+// Extracted from checkReviewGate (quality-check: keep checkReviewGate's own
+// complexity under the repo's ESLint ceiling, same reason reject-streak.mjs
+// extracts its own helpers) -- HYK-183: counts anchored `verdict:` lines and
+// resolves whether the review is approved, or reports ambiguity when there
+// is more than one.
+function resolveVerdict(content) {
+  const normalizedContent = content.replace(/\r\n/g, "\n");
+  const verdictMatches = [...normalizedContent.matchAll(VERDICT_LINE_RE_G)];
+  if (verdictMatches.length > 1) {
+    return { ambiguous: true, count: verdictMatches.length };
+  }
+  return {
+    ambiguous: false,
+    approved:
+      verdictMatches.length === 1 &&
+      verdictMatches[0][1].toLowerCase() === "approved",
+  };
+}
+
 function findAbbreviatedEnumerations(subject) {
   const groups = [];
   for (const match of subject.matchAll(ABBREVIATED_ENUMERATION_RE)) {
     const text = match[0];
     const leadId = text.match(/^HYK-\d+/)[0];
-    const bareIds = [...text.matchAll(/,\s*(\d+)(?![A-Za-z0-9])/g)].map((m) => `HYK-${m[1]}`);
+    const bareIds = [...text.matchAll(/,\s*(\d+)(?![A-Za-z0-9])/g)].map(
+      (m) => `HYK-${m[1]}`,
+    );
     groups.push([leadId, ...bareIds]);
   }
   return groups;
 }
 
-export function checkReviewGate({ message, reviewPath = join(repoRoot(), ".harness", "review.md") }) {
+export function checkReviewGate({
+  message,
+  reviewPath = join(repoRoot(), ".harness", "review.md"),
+}) {
   const subject = message.split(/\r?\n/, 1)[0] ?? "";
 
   const abbreviatedGroups = findAbbreviatedEnumerations(subject);
   if (abbreviatedGroups.length > 0) {
-    const suggestion = abbreviatedGroups.map((ids) => ids.join(", ")).join("; ");
+    const suggestion = abbreviatedGroups
+      .map((ids) => ids.join(", "))
+      .join("; ");
     return {
       ok: false,
       reason: `abbreviated issue list in subject; write each id fully: ${suggestion}`,
@@ -69,7 +102,9 @@ export function checkReviewGate({ message, reviewPath = join(repoRoot(), ".harne
   }
   const content = readFileSync(reviewPath, "utf8");
 
-  const missingIds = issueIds.filter((issueId) => !new RegExp(`for:\\s*${issueId}\\b`).test(content));
+  const missingIds = issueIds.filter(
+    (issueId) => !new RegExp(`for:\\s*${issueId}\\b`).test(content),
+  );
   if (missingIds.length > 0) {
     return {
       ok: false,
@@ -77,9 +112,18 @@ export function checkReviewGate({ message, reviewPath = join(repoRoot(), ".harne
     };
   }
 
-  const hasApproved = /verdict:\s*approved/i.test(content);
-  if (!hasApproved) {
-    return { ok: false, reason: `review not approved for ${issueIds.join(", ")} (need verdict: approved)` };
+  const verdict = resolveVerdict(content);
+  if (verdict.ambiguous) {
+    return {
+      ok: false,
+      reason: `review verdict ambiguous for ${issueIds.join(", ")}: ${verdict.count}개 'verdict:' 줄이 있어 어느 것이 최종인지 결정할 수 없다 (${reviewPath})`,
+    };
+  }
+  if (!verdict.approved) {
+    return {
+      ok: false,
+      reason: `review not approved for ${issueIds.join(", ")} (need verdict: approved)`,
+    };
   }
   const hasIndependentReviewer = /role:\s*REVIEW/i.test(content);
   if (!hasIndependentReviewer) {
@@ -88,10 +132,15 @@ export function checkReviewGate({ message, reviewPath = join(repoRoot(), ".harne
       reason: `self-certification blocked: review evidence for ${issueIds.join(", ")} lacks an independent reviewer (need role: REVIEW-*)`,
     };
   }
-  return { ok: true, reason: `independent review evidence found for ${issueIds.join(", ")}` };
+  return {
+    ok: true,
+    reason: `independent review evidence found for ${issueIds.join(", ")}`,
+  };
 }
 
-const invokedDirectly = process.argv[1] && process.argv[1].replace(/\\/g, "/").endsWith("scripts/check/review-gate.mjs");
+const invokedDirectly =
+  process.argv[1] &&
+  process.argv[1].replace(/\\/g, "/").endsWith("scripts/check/review-gate.mjs");
 if (invokedDirectly) {
   const commitMsgFile = process.argv[2];
   if (!commitMsgFile) {

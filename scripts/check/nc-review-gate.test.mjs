@@ -261,6 +261,27 @@ const REVIEW_GATE_SRC = execFileSync(
   },
 );
 
+// HYK-183 (§10 2R fix, ORCH ruling): mutation #1/#4 below target the
+// `resolveVerdict` function's exact shape. `REVIEW_GATE_SRC` is deliberately
+// read from the committed `HEAD` snapshot, not the working tree (see the
+// comment above -- this avoids the same CRLF/uncommitted-state pollution
+// `git show` already protects against elsewhere in this file). Until the
+// HYK-183 fix itself is committed, `HEAD` still holds the pre-fix source, so
+// a mutation regex written for the post-fix shape correctly fails to match
+// there -- that is not a real defect, but without this guard it reads as a
+// permanent false RED in the pre-commit window and, worse, would become
+// indistinguishable from a genuine regression. Gated the same way
+// nc-githook-install.test.mjs gates its installed-hook measurements on
+// `INSTALLED_HOOKS_PRESENT`: skip cleanly with an explicit reason when the
+// precondition (fix present in HEAD) is false, run for real once it is true
+// -- so the mutation is guaranteed to actually execute post-commit, not
+// silently vanish.
+const RESOLVE_VERDICT_COMMITTED = /function resolveVerdict\(content\) \{/.test(
+  REVIEW_GATE_SRC,
+);
+const RESOLVE_VERDICT_NOT_COMMITTED_SKIP_REASON =
+  "review-gate.mjs의 HYK-183 resolveVerdict 수리가 아직 커밋되지 않아 git HEAD 추적본(이 시험이 `git show HEAD:`로 읽는 스냅샷)에는 옛 구조만 있다 -- 커밋 후 자동으로 실행된다(no-op 아님, RESOLVE_VERDICT_COMMITTED가 그때 true가 되어 이 skip이 해제됨)";
+
 async function importMutatedCopy(mutate) {
   const dir = mkdtempSync(join(tmpdir(), "nc-review-gate-mutant-"));
   const mutated = mutate(REVIEW_GATE_SRC);
@@ -274,30 +295,101 @@ async function importMutatedCopy(mutate) {
   }
 }
 
-test("NC-1 mutation/review-gate #1: removing the 'verdict: approved' check -> RED (approval requirement is load-bearing)", async () => {
-  const mutant = await importMutatedCopy((src) =>
-    src.replace(
-      /const hasApproved = \/verdict:\\s\*approved\/i\.test\(content\);\n\s*if \(!hasApproved\) \{[\s\S]*?\n\s*\}\n/,
-      "const hasApproved = true;\n",
-    ),
-  );
-  const dir = mkdtempSync(join(tmpdir(), "nc-review-gate-mutant-fixture-"));
-  try {
+test(
+  "NC-1 mutation/review-gate #1: removing the 'verdict: approved' check -> RED (approval requirement is load-bearing)",
+  {
+    skip:
+      !RESOLVE_VERDICT_COMMITTED && RESOLVE_VERDICT_NOT_COMMITTED_SKIP_REASON,
+  },
+  async () => {
+    const mutant = await importMutatedCopy((src) =>
+      src.replace(
+        /function resolveVerdict\(content\) \{[\s\S]*?\n\}\n/,
+        "function resolveVerdict() {\n  return { ambiguous: false, approved: true };\n}\n",
+      ),
+    );
+    const dir = mkdtempSync(join(tmpdir(), "nc-review-gate-mutant-fixture-"));
+    try {
+      const reviewPath = join(dir, "review.md");
+      writeFileSync(reviewPath, "for: HYK-9001\nrole: REVIEW-CODEX\n", "utf8");
+      const result = mutant.checkReviewGate({
+        message: "feat: x (HYK-9001)",
+        reviewPath,
+      });
+      assert.equal(
+        result.ok,
+        true,
+        "mutant must pass what the real gate blocks (RED signal for the mutation)",
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  },
+);
+
+// HYK-183 (2R fix): review-gate.mjs:80 used to be an EXISTENCE check
+// (`/verdict:\s*approved/i.test(content)`) -- if the review file carried an
+// old 'verdict: approved' line followed by a newer 'verdict: rejected' line
+// (a same-slot re-review), the gate passed even though the FINAL verdict was
+// a rejection. Fixed to count anchored `verdict:` lines and fail-closed
+// (BLOCK) when there is more than one, mirroring today's reject-streak.mjs /
+// relay-handshake.mjs fix for the identical "which mark is final" ambiguity.
+test("NC-1 review-gate/attack(HYK-183): review file has an older 'verdict: approved' line followed by a newer 'verdict: rejected' line -> BLOCKED (ambiguous verdict, fail-closed)", () => {
+  withFixtureDir((dir) => {
     const reviewPath = join(dir, "review.md");
-    writeFileSync(reviewPath, "for: HYK-9001\nrole: REVIEW-CODEX\n", "utf8");
-    const result = mutant.checkReviewGate({
+    writeFileSync(
+      reviewPath,
+      "for: HYK-9001\nverdict: approved\nrole: REVIEW-CODEX\n\n(re-review)\nfor: HYK-9001\nverdict: rejected\nrole: REVIEW-CODEX\n",
+      "utf8",
+    );
+    const result = checkReviewGate({
       message: "feat: x (HYK-9001)",
       reviewPath,
     });
     assert.equal(
       result.ok,
-      true,
-      "mutant must pass what the real gate blocks (RED signal for the mutation)",
+      false,
+      "a stale 'approved' line must not paper over the final 'rejected' verdict",
     );
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
+    assert.match(result.reason, /verdict ambiguous/);
+  });
 });
+
+test(
+  "NC-1 mutation/review-gate #4 (HYK-183 regression guard): reverting the fixed counting check back to the old existence-only regex -> RED (counting is load-bearing)",
+  {
+    skip:
+      !RESOLVE_VERDICT_COMMITTED && RESOLVE_VERDICT_NOT_COMMITTED_SKIP_REASON,
+  },
+  async () => {
+    const mutant = await importMutatedCopy((src) =>
+      src.replace(
+        /function resolveVerdict\(content\) \{[\s\S]*?\n\}\n/,
+        "function resolveVerdict(content) {\n  return { ambiguous: false, approved: /verdict:\\s*approved/i.test(content) };\n}\n",
+      ),
+    );
+    const dir = mkdtempSync(join(tmpdir(), "nc-review-gate-mutant-fixture-"));
+    try {
+      const reviewPath = join(dir, "review.md");
+      writeFileSync(
+        reviewPath,
+        "for: HYK-9001\nverdict: approved\nrole: REVIEW-CODEX\n\n(re-review)\nfor: HYK-9001\nverdict: rejected\nrole: REVIEW-CODEX\n",
+        "utf8",
+      );
+      const result = mutant.checkReviewGate({
+        message: "feat: x (HYK-9001)",
+        reviewPath,
+      });
+      assert.equal(
+        result.ok,
+        true,
+        "the old existence-only mutant must pass a file whose final verdict is rejected (RED signal for the mutation; proves the HYK-183 fix is load-bearing)",
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  },
+);
 
 test("NC-1 mutation/review-gate #2: removing the 'role: REVIEW*' self-certification check -> RED", async () => {
   const mutant = await importMutatedCopy((src) =>
