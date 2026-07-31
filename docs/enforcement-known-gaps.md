@@ -1,13 +1,28 @@
-# Enforcement known-gaps table (NC-1 + NC-2)
+# Enforcement known-gaps table (NC-1 + NC-2 + NC-3)
 
 **정직 한계**: 이 표에 없는 장치는 검사되지 않았다는 뜻이며, 표의 완전성은
 `scripts/check/enforcement-inventory.json`(손으로 유지되는 매니페스트)에
 의존한다. 이 표는 현재 NC-1 범위(`review-gate` · `quality-check` ·
 `pre-commit-gitleaks` + 설치·발동 확인, #1~#10) **와** NC-2 범위(릴레이·레인
 4장치 — `relay-handshake` · `reject-streak` · `role-guard` ·
-`go-task-id-gate`, #11~#24)를 다룬다. **NC-3(경계·환경 계열 —
-`ci-enforce` · `orca-automations-present`)는 아직 별도 사이클로 남아 있고,
-이 표에 없다.** NC-2 행은 #11부터 이어 붙인다.
+`go-task-id-gate`, #11~#24) **와** NC-3 범위(경계·환경 2장치 —
+`ci-enforce` · `orca-automations-present`, #25~#29)를 다룬다. NC-2 행은
+#11부터, NC-3 행은 #25부터 이어 붙인다.
+
+**★NC-3로 v1 의존 강제 장치 9개 전수가 negative-control로 덮였다**(NC-1
+3+설치·발동 + NC-2 4 + NC-3 2 = 9/9). 다만 이 "전수"에는 **완전성 한계가
+있다**: (1) 이 9개의 목록 자체가 `scripts/check/enforcement-inventory.json`
+이라는 **손으로 유지되는 매니페스트**에서 나온 것이라, 매니페스트에
+등록되지 않은 강제 장치가 있다면 애초에 이 트랙의 시야 밖이다. (2)
+`ci-enforce`·`orca-automations-present` 둘 다 **저장소 밖 표면**(GitHub
+저장소 설정·branch protection·실제 `%APPDATA%\orca\orchestration.db`)에
+걸쳐 있어, 이 트랙이 실제로 시험할 수 있는 것은 **저장소 안의 텍스트
+계약**(추적된 워크플로 파일 · 순수 함수 export)뿐이고 저장소 밖 실체(실제
+GitHub 저장소 설정 자체·실제 Orca 설치 상태)는 읽기 전용 관측 1회
+(§4-3) 또는 아예 손대지 않음(§2 비타협 #2)으로 남는다. (3) `orca-automations-present`는
+**Orca 벤더의 로컬 파일 레이아웃**(SQLite 스키마·인코딩)에 의존하며, Orca
+업데이트로 그 레이아웃이 바뀌면 이 장치의 판정 정확도도 드리프트할 수
+있다 — 이 트랙은 오늘 시점의 동작만 고정한다.
 
 이 표는 저장소 안(신규 파일)이므로 **PR 없이는 지워지지 않는다**. 근거·재현
 방법 열은 재현 가능한 테스트를 가리키며, 그 테스트가 지워지거나 assert가
@@ -154,6 +169,59 @@ measurement (environment-conditional): the INSTALLED pre-commit copy
 | 23  | `role-guard`                               | 측정(무해 확인)                                                                        | URL-인코딩 경로 세그먼트(`revi%65w.md`)는 **디코딩되지 않고 문자열 그대로 비교**된다 — `review.md` 규칙을 우회해 진짜 `review.md`를 쓰는 통로가 아니라, 단지 다른 이름의 파일이 되어 일반 CODER 쓰기 규칙으로 통과할 뿐이다(진짜 우회 아님, 확인만 필요했던 항목).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        | `scripts/check/nc-role-guard.test.mjs` — `"NC-2 role-guard/measurement: URL-encoded path ('.harness/revi%65w.md') is NOT percent-decoded ..."`                                                                                                                                                                                                                                                                                         | `checkRoleWrite({role:"CODER", filePath:".../.harness/revi%65w.md", ...})` → `{ok:true}`(review.md 규칙 미매치, 일반 쓰기로 통과 — review.md 자체를 쓴 것은 아님)                                                                                                                                        | 기계(테스트 assert)                                                                                  | 2026-07-31                                                          |
 | 24  | `go-task-id-gate`                          | KNOWN GAP                                                                              | `taskContent`가 `null`이거나(읽기 실패) `task_id:` 헤더가 없으면 `UNJUDGABLE`+fail-open으로 프롬프트를 통과시킨다 — 소스 주석에 명시된 설계된 fail-open("I can't verify" is never itself a block).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        | `scripts/check/nc-go-task-id-gate.test.mjs` — `"NC-2 go-task-id-gate/gap: taskContent is null ..."` + `"... taskContent has no task_id header ..."`                                                                                                                                                                                                                                                                                    | `checkGoTaskId({prompt:"go HYK-...", taskContent:null})` → `{status:"UNJUDGABLE", ok:true}`                                                                                                                                                                                                              | 기계(테스트 assert) + 사람(소스 주석이 의도 명시)                                                    | 2026-07-31                                                          |
 
+## NC-3 (2026-07-31) — `ci-enforce` §4-3 "AI가 스스로 끌 수 없다" 분류 검증
+
+**"AI가 스스로 끌 수 없다"는 부정 존재 주장이라 증명 불가**(task §4-3
+점 3). 대신 **끌 수 있는 표면을 유한 목록으로 열거**하고 각각 필요 권한 ·
+현재 AI 실행 환경의 보유 여부 · 판정을 표로 고정한다(코드로도 고정 —
+`scripts/check/nc-ci-enforce.test.mjs`의 `TURNOFF_SURFACES`). **UNDECIDABLE
+항목은 그대로 남긴다**(좋게 접지 않는다).
+
+수동 1회 관측(2026-07-31, 무인증 GET, 이 세션에서 직접 수행 — 재현 방법은
+`.harness/coder.md` §검증 참조):
+
+```
+GET https://api.github.com/repos/hykim82/HARNESSENGINEERING/branches/master
+-> HTTP 200
+   "protected": true
+   "protection": { "enabled": true,
+     "required_status_checks": { "enforcement_level": "everyone",
+       "contexts": ["enforce"],
+       "checks": [{ "context": "enforce", "app_id": 15368 }] } }
+
+GET https://api.github.com/repos/hykim82/HARNESSENGINEERING/branches/master/protection
+-> HTTP 401 Unauthorized
+```
+
+**한계 명시**: `protected=true`와 `required_status_checks.contexts=["enforce"]`까지만
+무인증으로 읽었고, 상세 보호 설정(예: bypass-actor 목록·admin 강제 적용
+플래그)은 `.../protection` 엔드포인트가 401을 내 **읽지 못했다**.
+
+| 표면                                        | 필요 권한                                          | 현재 AI 환경 보유 여부      | 판정                                                                                                           |
+| ------------------------------------------- | -------------------------------------------------- | --------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| (a) 워크플로 파일(`enforce.yml`) 자체 편집  | write + PR 병합(브랜치 보호, 필수 체크 `enforce`)  | 아니오(병합 승인 권한 없음) | **REQUIRES_PR** — 직접 push는 브랜치 보호로 막히고, PR도 같은 `enforce` 체크를 통과해야 병합된다               |
+| (b) 저장소 설정·룰셋 변경                   | repo admin                                         | 아니오                      | **REQUIRES_ADMIN**                                                                                             |
+| (c) Actions 기능 비활성화                   | repo admin                                         | 아니오                      | **REQUIRES_ADMIN**                                                                                             |
+| (d) 필수 체크 목록 변경(`enforce` 제거)     | repo admin(브랜치 보호 설정)                       | 아니오                      | **REQUIRES_ADMIN**                                                                                             |
+| (e) fork·다른 브랜치 경로                   | 불명(무인증으로 관측 불가한 조직/룰셋 설정에 의존) | 불명                        | **UNDECIDABLE** — bypass-actor 목록·보호 적용 범위를 401 때문에 못 읽어 확정 불가                              |
+| (f) `.github/workflows` 밖의 대체 실행 경로 | 불명                                               | 불명                        | **UNDECIDABLE** — 이 저장소 체크아웃 안에서 조직/CI 전체의 대체 경로 부재를 증명할 방법이 없다(부정 존재 주장) |
+
+**범위 한정 주장**(부정 존재 주장 대신): _"알려진 표면 6개 중 3개(b·c·d)가
+repo admin 권한을 요구하며 현재 AI 환경엔 그 자격이 없다(2026-07-31 관측
+기준). 1개(a)는 PR 병합 경로를 강제하는 브랜치 보호로 확인됐다. 2개(e·f)는
+무인증 401 한계로 UNDECIDABLE로 남는다."_ — 코드 고정:
+`scripts/check/nc-ci-enforce.test.mjs`의 `"NC-3 ci-enforce/off-surfaces: ..."` 3건.
+
+## NC-3 (2026-07-31) — 경계·환경 2장치 gap 표
+
+| #   | 장치                       | 분류            | 무엇이 뚫리는가(한 줄)                                                                                                                                                                                                                                                                                                                                         | 재현 방법                                                                                                                                                                                             | 근거(실측 출력 요지)                                                                                                                                                                          | 판정 주체                                                                             | 등재일     |
+| --- | -------------------------- | --------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------- | ---------- |
+| 25  | `orca-automations-present` | KNOWN GAP       | `enforcement-inventory.json`의 이 장치 항목이 **훅 미설치**임을 스스로 명시한다(`invocation_note`: _"Not hook-installed"_) — VERIFY 주간 루프(또는 사람)가 `node scripts/check/orca-posture-check.mjs`를 직접 실행하지 않으면 이 장치는 **아예 돌지 않는다**. 설치·발동 축의 gap.                                                                              | `scripts/check/nc-orca-automations.test.mjs` — `"NC-3 orca-automations/gap: enforcement-inventory.json documents this device as 'Not hook-installed' ..."`                                            | `enforcement-inventory.json`의 `orca-automations-present` 항목 `install_targets: []` · `invocation_note`에 "Not hook-installed" 문자열 존재(읽기 전용 확인)                                   | 기계(테스트 assert) + 사람(매니페스트 자신의 사전 기록)                               | 2026-07-31 |
+| 26  | `orca-automations-present` | KNOWN GAP       | 합성 db 바이트열에 `automations` 마커가 **UTF-16LE로 저장**돼 있으면 바이트 스캔이 놓친다 — 기본 경로(`Buffer`→latin1)와 `runOrcaPostureCheck`가 실제로 쓰는 경로(utf8-디코딩된 문자열)**둘 다** 실측으로 놓침을 확인(서로 다른 메커니즘, 같은 결과). 모듈 자신의 주석(orca-posture-check.mjs:127-133)이 이미 "완전한 바이너리 안전 스캔이 아니다"를 인정한다. | `scripts/check/nc-orca-automations.test.mjs` — `"NC-3 orca-automations/gap: marker stored as UTF-16LE bytes ..."` + `"NC-3 orca-automations/measurement: runOrcaPostureCheck's WIRED readFileFn ..."` | `checkAutomationsPresent({dbPath, existsFn:()=>true, readFileFn:()=>Buffer.from("xx automations yy","utf16le")})` → `{status:"UNJUDGABLE"}`(마커 못 찾음, 거짓 OK는 아님) — 두 경로 모두 동일 | 기계(테스트 assert) + 사람(모듈 주석 127-133행 사전 기록)                             | 2026-07-31 |
+| 27  | `orca-automations-present` | KNOWN GAP(측정) | 마커 대소문자 변형(`Automations`)도 `.includes()`가 놓친다 — `enforcement-inventory.json`의 `invocation_note`가 이미 이 장치를 *"Coarse byte-scan(no SQLite parser dependency, per task constraint)"*로 명시해 정밀 매칭(정규화·대소문자 무시)을 하지 않는다는 설계를 인정하고 있다. 이번 시험은 그 일반 인정을 구체 사례로 새로 측정한 것.                    | `scripts/check/nc-orca-automations.test.mjs` — `"NC-3 orca-automations/gap: marker case variant 'Automations' ..."`                                                                                   | `checkAutomationsPresent(... readFileFn:()=>Buffer.from("garbage ... Automations ... garbage"))` → `{status:"UNJUDGABLE"}`(놓침, 그러나 거짓 OK 아님 — 안전 하한 유지)                        | 기계(테스트 assert) + 사람(`enforcement-inventory.json` "Coarse byte-scan" 사전 기록) | 2026-07-31 |
+| 28  | `ci-enforce`               | UNDECIDABLE     | (e) fork·다른 브랜치 경로로 `enforce` 필수 체크를 우회할 수 있는지 — 무인증 REST가 상세 보호 설정(bypass-actor 목록 등)에서 401을 내 **확정할 수도 부정할 수도 없다**. 좋게도 나쁘게도 접지 않고 UNDECIDABLE로 남긴다.                                                                                                                                         | 없음(수행하지 않음 — §2 비타협 #1: 실제 우회 가능성 판단이 필요하면 실행하지 말고 ORCH에 올리라는 지시에 따라 시도하지 않음)                                                                          | `GET .../branches/master/protection` → `401 Unauthorized`(위 §4-3 관측)                                                                                                                       | 사람(판단 보류 — 근거 부족)                                                           | 2026-07-31 |
+| 29  | `ci-enforce`               | UNDECIDABLE     | (f) `.github/workflows` 밖의 대체 실행 경로 존재 여부 — 이 저장소 체크아웃 안에서 조직/CI 전체의 대체 경로 **부재를 증명할 방법이 없다**(부정 존재 주장). 좋게도 나쁘게도 접지 않고 UNDECIDABLE로 남긴다.                                                                                                                                                      | 없음(수행하지 않음 — 동일 사유)                                                                                                                                                                       | 없음(관측 불가 영역)                                                                                                                                                                          | 사람(판단 보류 — 근거 부족)                                                           | 2026-07-31 |
+
 ## BLOCKED(proven) 목록 — 참고용 요약
 
 아래는 이 사이클에서 실제로 뚫으려다 **막힌** 것으로 확인된 방어선이다(§5
@@ -169,6 +237,8 @@ measurement (environment-conditional): the INSTALLED pre-commit copy
 - **(NC-2)** `reject-streak`: streak≥2에서 envelope 완전 부재 차단 / envelope는 있으나 `원인 분류`가 허용 목록 밖일 때 차단 / 형식이 올바른 envelope는 정상 통과(양성 확인) / 손상된 JSON·배열 형태 원장은 UNJUDGABLE로 fail-closed(빈 원장으로 오인하지 않음) — 이 중 3개 방어선(envelope 부재 차단·streak≥2 문턱값·`ALLOWED_CAUSES` 검사)은 사본-뮤테이션으로 제거 시 RED 실측(`nc2-mutation-ledger.md` #1~#3).
 - **(NC-2)** `role-guard`: ORCH/CODER/REVIEW/PM 4역할의 쓰기 경계(허용 레인 1건 + 차단 9건) 직접 공격으로 확인 / `..` 상대경로·대소문자·슬래시-백슬래시 혼용 3종 경로-표기 변형이 정규화를 뚫지 못함을 확인 / `filePath`가 `null`·객체·빈 문자열이어도 예외 없이 차단.
 - **(NC-2)** `go-task-id-gate`: `go <불일치 task_id>` 차단 / bare `go` 차단 / 대소문자 변형(`GO`, `Go`)도 인식돼 불일치 시 차단 / id에 접두·접미가 붙은 형태(`...-extra`, `x-...`)가 **정확 일치 비교**라 부분일치로 통과하지 못함(사전 우려와 달리 부분일치 취약점 없음, proven) / `prompt`가 문자열이 아니어도 예외 없이 통과 판정.
+- **(NC-3)** `ci-enforce`: `on:` 트리거 2종(`pull_request`+`push:branches:[master]`) 존재 / 테스트 glob 4개 전부 포함 / `continue-on-error` 부재 / step-level `if:` 스킵 부재 / gitleaks 버전+SHA256 핀+`sha256sum -c` 검증 / `fetch-depth: 0` / `quality-check --mode ci --base-sha` 결선 / `hooks/commit-msg`·`hooks/pre-commit` `sh -n` 둘 다 — 8개 계약 전부 추적본 텍스트 직접 확인, 이 중 4개(continue-on-error 부재·테스트 glob 전체·gitleaks 핀·`sha256sum -c` 검증)는 사본-뮤테이션으로 제거/변조 시 RED 실측(`nc3-mutation-ledger.md` ci-enforce #1~#4). 브랜치 보호 자체도 무인증 관측으로 `protected=true`+필수 체크 `enforce` 확인(§4-3).
+- **(NC-3)** `orca-automations-present`: `dbPath` 부재 → `OK` / 마커 존재 → `WARN` / 마커 없음(db 존재) → `UNJUDGABLE`(거짓 OK 금지, 핵심 계약) / `readFileFn` throw → `UNJUDGABLE`+예외 미누출 / `runOrcaPostureCheck`가 실제로 `checkAutomationsPresent`를 호출함(죽은 코드 아님) — 직접 공격으로 차단·정상판정 확인, 이 중 2개 방어선("마커없음→UNJUDGABLE" 분기·"db부재→OK" 분기)은 사본-뮤테이션으로 반대로 바꿀 시 RED 실측(`nc3-mutation-ledger.md` orca-automations #1~#2).
 
 ## #10 — `pre-commit-gitleaks` 차단 실적(live) — 2026-07-30
 
