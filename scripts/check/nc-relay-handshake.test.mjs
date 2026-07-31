@@ -92,8 +92,9 @@ test("NC-2 relay-handshake/gap: DONE timestamp 10 years in the future -> passes 
   });
 });
 
-// --- direction of task_id parsing: which occurrence wins when two are present ---
-test("NC-2 relay-handshake/measurement: result file with TWO 'task_id:' lines (old round kept, new appended) -> the FIRST occurrence is read", () => {
+// --- HYK-183 fix: ambiguous task_id (2+ occurrences) is now fail-closed,
+//     not "first wins" ---
+test("NC-2 relay-handshake/fixed(HYK-183): result file with TWO 'task_id:' lines (old round kept, new appended) -> ok:false with an explicit ambiguity reason, NOT a silently-resolved 'handshake mismatch' -> CLOSED", () => {
   withHarnessDir((dir) => {
     writeTask(dir, "coder", TASK_OK);
     // Old round's task_id kept at top, current round's appended below --
@@ -108,14 +109,17 @@ test("NC-2 relay-handshake/measurement: result file with TWO 'task_id:' lines (o
     assert.equal(
       result.ok,
       false,
-      "checkRelayHandshake reads the FIRST task_id: line (non-global .match), so a stale round kept at the top wins and causes a handshake mismatch against the current task",
+      "HYK-183 fix: 2+ standalone task_id: lines must block with an ambiguity reason instead of silently reading either the first or the current one",
     );
-    assert.match(result.reason, /handshake mismatch/);
+    assert.match(result.reason, /2 standalone 'task_id:' lines/);
+    assert.match(result.reason, /어느 것이 최종인지 결정할 수 없다/);
+    assert.doesNotMatch(result.reason, /handshake mismatch/);
   });
 });
 
-// --- direction of DONE parsing: LAST occurrence wins (opposite of task_id) ---
-test("NC-2 relay-handshake/measurement: result file with TWO '>>> DONE:' lines (old one appears AFTER the new one) -> the LAST occurrence is read -- parser direction is opposite of the task_id parser above", () => {
+// --- HYK-183 fix: ambiguous DONE (2+ occurrences) is now fail-closed,
+//     not "last wins" (previously the opposite direction from task_id) ---
+test("NC-2 relay-handshake/fixed(HYK-183): result file with TWO '>>> DONE:' lines (old one appears AFTER the new one) -> ok:false with an explicit ambiguity reason, NOT a silently-resolved stale-block -> CLOSED", () => {
   withHarnessDir((dir) => {
     writeTask(dir, "coder", TASK_OK);
     // Current round's real DONE comes first; a stale/leftover DONE line
@@ -126,21 +130,19 @@ test("NC-2 relay-handshake/measurement: result file with TWO '>>> DONE:' lines (
       "task_id: HYK-9001-x\n>>> DONE: current round @ 2026-07-31 10:05 KST\n\n(과거 기록 · 최종 완료 줄 아님) leftover text\n>>> DONE: stale leftover @ 2026-07-25 09:00 KST\n",
     );
     const result = checkRelayHandshake({ role: "coder", harnessDir: dir });
-    // DONE_RE uses matchAll + [...][length-1] -- the LAST match wins, so the
-    // stale leftover DONE (predating the drop) is what gets compared, and
-    // the handshake is blocked as stale even though the real, current DONE
-    // line is present earlier in the same file.
     assert.equal(
       result.ok,
       false,
-      "the LAST '>>> DONE:' line is read; a stale leftover DONE appended after the real one causes a false stale-block",
+      "HYK-183 fix: 2+ '>>> DONE:' lines must block with an ambiguity reason instead of silently trusting the last one",
     );
-    assert.match(result.reason, /stale/);
-    // This is exactly why §2-10's operating rule (newest round always on
-    // top, exactly one '>>> DONE:' survives, old ones de-labelled to
-    // '(과거 기록 ...) DONE:') exists: task_id is read FIRST-match while
-    // DONE is read LAST-match -- the two parsers disagree on direction, so
-    // "just append the new round" is unsafe for either field alone.
+    assert.match(result.reason, /2 '>>> DONE:' lines/);
+    assert.match(result.reason, /어느 것이 최종인지 결정할 수 없다/);
+    assert.doesNotMatch(result.reason, /stale result:/);
+    // §2-10's operating rule (newest round always on top, exactly one
+    // '>>> DONE:' survives, old ones de-labelled to '(과거 기록 ...) DONE:')
+    // is still the correct operating discipline -- this fix only changes
+    // what happens when that discipline is violated: loud refusal instead
+    // of a silently-resolved (and possibly wrong) verdict.
   });
 });
 

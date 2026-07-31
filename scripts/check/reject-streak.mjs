@@ -15,9 +15,15 @@ import { execSync } from "node:child_process";
 // file carries an escalation envelope (cause + at least one ORCH action).
 
 const ISSUE_ID_RE = /^(HYK-\d+)/;
-const FOR_LINE_RE = /^for:\s*(\S+)/m;
+// HYK-183: 결과 파일에 이 표지가 2개 이상이면 어느 것이 최종인지 결정할 수
+// 없으므로 조용히 하나를 고르지 않고 판정 불가로 멈춘다(2026-07-31 거짓
+// 기록 사고). `for:`/`verdict:`는 항상 개수부터 세야 하므로 global 버전만
+// 남긴다; `task_id:`는 checkGate/checkDiagnosticGate가 단일 매치로도 쓰므로
+// non-global과 global 버전을 함께 둔다.
+const FOR_LINE_RE_G = /^for:\s*(\S+)/gm;
 const TASK_ID_LINE_RE = /^task_id:\s*(\S+)/im;
-const VERDICT_LINE_RE = /^verdict:\s*(approved|rejected)\s*$/im;
+const TASK_ID_LINE_RE_G = /^task_id:\s*(\S+)/gim;
+const VERDICT_LINE_RE_G = /^verdict:\s*(approved|rejected)\s*$/gim;
 
 // The envelope lives inside an HTML comment, same convention as
 // pm-snapshot-gate.mjs's `<!-- pm-snapshot ... -->` block -- a form ORCH can
@@ -106,13 +112,26 @@ function normalizeNewlines(text) {
 // never a crash.
 export function parseReviewOutcome(reviewText) {
   const text = normalizeNewlines(reviewText);
-  const forMatch = text.match(FOR_LINE_RE);
-  const taskIdMatch = text.match(TASK_ID_LINE_RE);
-  const rawTaskId = forMatch
-    ? forMatch[1]
-    : taskIdMatch
-      ? taskIdMatch[1]
-      : null;
+  const forMatches = [...text.matchAll(FOR_LINE_RE_G)];
+  const taskIdMatches = [...text.matchAll(TASK_ID_LINE_RE_G)];
+
+  let rawTaskId = null;
+  if (forMatches.length > 1) {
+    return {
+      ok: false,
+      reason: `reject-streak record: UNJUDGABLE -- 'for:' 줄이 ${forMatches.length}개라 어느 것이 최종인지 결정할 수 없다`,
+    };
+  }
+  if (forMatches.length === 1) {
+    rawTaskId = forMatches[0][1];
+  } else if (taskIdMatches.length > 1) {
+    return {
+      ok: false,
+      reason: `reject-streak record: UNJUDGABLE -- 'task_id:' 줄이 ${taskIdMatches.length}개라 어느 것이 최종인지 결정할 수 없다`,
+    };
+  } else if (taskIdMatches.length === 1) {
+    rawTaskId = taskIdMatches[0][1];
+  }
   if (!rawTaskId) {
     return {
       ok: false,
@@ -127,8 +146,14 @@ export function parseReviewOutcome(reviewText) {
       reason: `reject-streak record: task id '${rawTaskId}' does not start with HYK-<digits> -- cannot derive issue id`,
     };
   }
-  const verdictMatch = text.match(VERDICT_LINE_RE);
-  if (!verdictMatch) {
+  const verdictMatches = [...text.matchAll(VERDICT_LINE_RE_G)];
+  if (verdictMatches.length > 1) {
+    return {
+      ok: false,
+      reason: `reject-streak record: UNJUDGABLE -- 판정 줄이 ${verdictMatches.length}개라 어느 것이 최종인지 결정할 수 없다`,
+    };
+  }
+  if (verdictMatches.length === 0) {
     return {
       ok: false,
       reason:
@@ -139,7 +164,7 @@ export function parseReviewOutcome(reviewText) {
     ok: true,
     taskId: rawTaskId,
     issueId,
-    verdict: verdictMatch[1].toLowerCase(),
+    verdict: verdictMatches[0][1].toLowerCase(),
   };
 }
 
