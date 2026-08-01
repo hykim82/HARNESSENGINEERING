@@ -257,6 +257,21 @@ node --check·eslint·prettier·quality-check·pre-commit 훅 5개 검사 전부
 | 40  | `executor-core` | KNOWN GAP | **"계획이 옳다"는 증명하지 않는다** — 이 코어가 증명하는 것은 "잘못된 큐(START_BLOCKED)에서는 계획이 나오지 않는다"뿐이다. `queueEvaluation`이 진짜 `evaluateQueueManifest(observation)`의 반환값인지, 그 `observation`이 실제 git/GitHub에서 왔는지는 이 코어의 신뢰 경계 밖(호출자 책임)이다.                                                                                                                      | `scripts/supervisor/executor-core.mjs` 헤더 주석 1번째 문단 + `queueEvaluation`을 재구성(재판정)하지 않고 형태만 검사·소비함을 소스 직접 확인.                                                                                       |
 | 41  | `executor-core` | KNOWN GAP | **queueEvaluation 자체의 위조에 대해 이 코어가 잡을 수 있는 것은 형태적 일관성뿐이다** — `verdict`/`reason`/`entries`의 상호 일관성(예: `START_ALLOWED`인데 `reason!=="OK"`)은 `INVALID_ARGUMENTS`로 막지만, 내적으로 일관된 위조 값(예: 가짜 `START_ALLOWED`+`reason:"OK"`+조작된 entries)은 막지 못한다 — 그건 SV-3/SV-4 판정 자체(queue-manifest-core.mjs)의 신뢰 경계이지 이 골격이 새로 방어하는 표면이 아니다. | `executor-core.test.mjs`의 `isTrustworthyQueueEvaluation` 관련 fail-closed 시험군 + mutation #1(내적으로 일관되지 않은 위조만 잡음을 RED로 확인) — 완전히 일관된 위조는 이 시험 스위트의 시야 밖(범위 밖, queue-manifest-core의 몫). |
 
+## HYK-183 A-3 (2026-08-02) — `budget-core` 신설 gap 표
+
+무인화 A(실행부 골격)의 세 번째 조각. `judgeBudget({observation, now})`은
+SV-6("한도 오류 시 `WAIT_BUDGET` 전환, `UNAVAILABLE`을 «충분함»으로 해석
+0")을 판정하되, 한도를 스스로 측정하지 않는다(부작용 0, 주입 감시로
+확인 -- `.harness/coder.md` §검증 참조). 이 골격 자신이 아직 막지 못하는
+것을 아래에 적는다.
+
+| #   | 장치          | 분류      | 무엇이 뚫리는가(한 줄)                                                                                                                                                                                                                                                           | 근거                                                                                                                                 |
+| --- | ------------- | --------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| 47  | `budget-core` | KNOWN GAP | **한도를 측정하지 않는다** — `observation`은 호출자가 주입한 값을 그대로 신뢰하며, 이 코어는 그 값이 실제 Claude 계정 한도를 정확히 반영하는지 검증할 수단이 없다(API 호출·프로세스 실행·파일 읽기 0). 위조되거나 낡은 관측이 들어오면 이 코어는 그대로 판정한다.                | `scripts/supervisor/budget-core.mjs` 헤더 주석 + I/O 0 부작용 시험(fs/child_process/fetch spy) 직접 확인.                            |
+| 48  | `budget-core` | KNOWN GAP | **권위 있는 잔량 표면 부재는 이 조각이 해결하지 않는다** — 2026-07-28 확정대로 "선제 잔량 감시는 권위 표면 부재로 불가"이며, 이 코어는 그 부재를 "모르면 대기"로 번역할 뿐 표면 자체를 만들지 않는다. `observation`을 누가 어떻게 수집해 이 함수에 넘길지는 이 조각 밖의 문제다. | coder-task.md §1(2026-07-28 확정 인용) + `budget-core.mjs` 헤더 주석 2번째 문단.                                                     |
+| 49  | `budget-core` | KNOWN GAP | **대기 시간·재시도 정책이 없다** — `WAIT_BUDGET`을 받은 뒤 얼마나 기다릴지, 언제 재시도할지는 이 코어가 정하지 않는다(coder-task.md §2-3, 한용이 아직 정하지 않은 정책 영역이라 이 조각이 임의로 정하지 않았다).                                                                 | `budget-core.mjs` 헤더 주석 3번째 문단 + 소스에 시간 지연·재시도 관련 로직이 전혀 없음을 직접 확인(grep 0건).                        |
+| 50  | `budget-core` | KNOWN GAP | **실제 한도 소진 상황에서의 라이브 검증이 0이다** — `budget-core.test.mjs`의 모든 픽스처는 손으로 조립한 SYNTHETIC `observation` 리터럴이며, 실제 Claude 계정이 한도에 도달했을 때 나오는 관측의 실제 형태·타이밍과 이 시험이 가정한 형태가 일치하는지는 검증되지 않았다.        | `budget-core.test.mjs` 파일 머리 "이 계약이 보장하지 않는 것" 1번 항목 직접 확인 — 실제 운영 관측 수집은 이 시험의 범위 밖으로 명시. |
+
 아래는 이 사이클에서 실제로 뚫으려다 **막힌** 것으로 확인된 방어선이다(§5
 정의: 공격을 실제로 막았고, 방어선 제거 시 RED가 실측됨). 표로 만들지 않는
 이유는 이 문서의 목적이 "뚫린 것"의 앵커이기 때문이며, BLOCKED 항목은
