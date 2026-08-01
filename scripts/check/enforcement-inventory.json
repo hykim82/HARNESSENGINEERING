@@ -633,6 +633,29 @@
       }
     },
     {
+      "id": "nul-byte-guard",
+      "substrate": "git",
+      "script": "scripts/check/nul-byte-guard.mjs",
+      "test": "scripts/check/nul-byte-guard.test.mjs",
+      "install_targets": [
+        {
+          "location": "repo-git-hook",
+          "kind": "git-hook",
+          "versioned_path": "hooks/pre-commit",
+          "installed_path": ".git/hooks/pre-commit",
+          "required": true
+        }
+      ],
+      "expected_bad": "a file in the changed set (mode: staged = git diff --cached; mode: ci = injected base SHA...HEAD), whose extension is in the allowlist (.mjs/.js/.cjs/.json/.md/.yml/.yaml/.sh/.txt/.html/.css or an extensionless hooks/<name> file), contains one or more raw 0x00 bytes -> non-zero exit, chained into hooks/pre-commit after gitleaks+quality-check (not replacing them) so the commit is blocked; the same gate mirrored in .github/workflows/enforce.yml blocks the PR/push even if --no-verify skipped the local hook",
+      "expected_good": "changed set is empty, or every changed in-scope file has zero raw NUL bytes -> exit 0; files outside the extension allowlist are never inspected, and files untouched by the change are never inspected (same amnesty posture as quality-check)",
+      "failure_exit": 1,
+      "uncertain_exit": null,
+      "owner": "ORCH",
+      "claude_only": false,
+      "self_registration_note": "HYK-183-nul-guard-1 self-registration, same convention as quality-check/reject-streak/selfcheck-freshness above. Motivated by an HYK-183 NC-3 incident: a source file with 5 raw NUL bytes made git diff --numstat report it as binary, hiding a 328-line PR diff from human review, while eslint/prettier/node-parsing/quality-check all passed.",
+      "ci_mirror_note": "Same posture as quality-check's ci_mirror_note: only this entry's git-hook chain is wiring-checked here; the enforce.yml run: step's own presence/correctness is confirmed by this cycle's manual smoke test (coder receipt: local hook path + CI-equivalent command both re-run against the same reproduction and both exit 1), not by an automated selfcheck category."
+    },
+    {
       "id": "ci-enforce",
       "substrate": "ci",
       "script": ".github/workflows/enforce.yml",

@@ -47,6 +47,9 @@ jobs:
       - name: quality:check -- changed-files lint+format gate (HYK-148, mirrors local pre-commit)
         run: node scripts/check/quality-check.mjs --mode ci --base-sha "${{ steps.quality_base.outputs.sha }}"
 
+      - name: nul-byte-guard -- changed-files raw NUL byte scan (HYK-183, mirrors local pre-commit)
+        run: node scripts/check/nul-byte-guard.mjs --mode ci --base-sha "${{ steps.quality_base.outputs.sha }}"
+
       - name: Install gitleaks (pinned, checksum-verified)
         run: |
           set -e
