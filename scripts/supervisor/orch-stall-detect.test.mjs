@@ -18,10 +18,12 @@ import {
   parseArgs,
   collectObservationForPledge,
   collectObservation,
+  collectPledgeDerivationEvidence,
   runOrchStallDetect,
   EXIT_CODE_BY_VERDICT,
 } from "./orch-stall-detect.mjs";
 import { ARTIFACT_KIND, ORCH_PROGRESS_VERDICT } from "./orch-progress-core.mjs";
+import { PLEDGE_SOURCE } from "./pledge-derive-core.mjs";
 
 function repoRoot() {
   return execFileSync("git", ["rev-parse", "--show-toplevel"], {
@@ -50,6 +52,26 @@ function withTempDir(prefix, fn) {
 
 function git(cwd, args) {
   return execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
+}
+
+// ★재작업 2R(coder-task.md §11 P1) -- "저장소가 아님"은 이제 진짜 수집
+// 실패(UNDECIDABLE)로 판정된다(§11 ㄹ). 그래서 runOrchStallDetect/
+// collectPledgeDerivationEvidence를 부르는 시험은 `--repo-root`가
+// **최소한의 유효한 git 저장소**(커밋 1개, upstream 없음 -- upstream
+// 없음은 그 자체로 정상, §11 ㄷ)여야 "정상" 경로를 시험할 수 있다.
+function initPlainGitRepo(dir) {
+  git(dir, ["init", "--quiet", "-b", "main"]);
+  git(dir, [
+    "-c",
+    "user.email=t@t",
+    "-c",
+    "user.name=t",
+    "commit",
+    "--allow-empty",
+    "-m",
+    "base",
+    "--quiet",
+  ]);
 }
 
 function initSyntheticRepo(dir) {
@@ -291,8 +313,18 @@ test("runOrchStallDetect: PROGRESSING/STALLED/WAITING_HUMAN_GATE/UNDECIDABLE eac
   assert.equal(codes.size, 4, "all 4 verdicts must map to distinct exit codes");
 });
 
-test("runOrchStallDetect: synthetic PROGRESSING pledges file -> exit 0", () => {
+// `--repo-root <dir>`을 모든 호출에 붙여 gap#61 증거 수집(.harness
+// 스캔·git 조회)이 실제 워크트리가 아니라 합성 `dir`만 보게 격리한다
+// (coder-task.md §9 비타협 #5). ★재작업 2R(§11 P1): `dir`은 이제 **최소
+// 유효 git 저장소**여야 한다 -- "저장소가 아님"은 더 이상 조용히 빈
+// 배열로 접히지 않고 §11 (ㄹ) 수집 실패(`UNDECIDABLE`)로 판정되기
+// 때문이다(아래 "collection-failure fail-closed" 절 참조). 이 시험들이
+// 검증하려는 것은 판정 파이프라인(관측→판정)이지 git 저장소 여부
+// 자체가 아니므로, `initPlainGitRepo(dir)`로 그 축을 정상 쪽에
+// 고정한다.
+test("runOrchStallDetect: synthetic PROGRESSING pledges file -> exit 0 (--repo-root isolates from the real worktree)", () => {
   withTempDir("orch-stall-run-", (dir) => {
+    initPlainGitRepo(dir);
     const pledgesPath = join(dir, "pledges.json");
     fs.writeFileSync(
       pledgesPath,
@@ -317,6 +349,8 @@ test("runOrchStallDetect: synthetic PROGRESSING pledges file -> exit 0", () => {
       pledgesPath,
       "--now",
       "2026-08-01T10:00:05+09:00",
+      "--repo-root",
+      dir,
     ]);
     assert.equal(result.verdict, ORCH_PROGRESS_VERDICT.PROGRESSING);
     assert.equal(exitCode, 0);
@@ -325,6 +359,7 @@ test("runOrchStallDetect: synthetic PROGRESSING pledges file -> exit 0", () => {
 
 test("runOrchStallDetect: synthetic STALLED pledges file (artifact never appeared, past default threshold) -> non-zero exit, distinct from UNDECIDABLE's code", () => {
   withTempDir("orch-stall-run-", (dir) => {
+    initPlainGitRepo(dir);
     const pledgesPath = join(dir, "pledges.json");
     fs.writeFileSync(
       pledgesPath,
@@ -351,6 +386,8 @@ test("runOrchStallDetect: synthetic STALLED pledges file (artifact never appeare
       "2026-08-01T11:00:00+09:00",
       "--threshold-s",
       "60",
+      "--repo-root",
+      dir,
     ]);
     assert.equal(result.verdict, ORCH_PROGRESS_VERDICT.STALLED);
     assert.notEqual(exitCode, 0);
@@ -361,7 +398,7 @@ test("runOrchStallDetect: synthetic STALLED pledges file (artifact never appeare
   });
 });
 
-test("runOrchStallDetect: unreadable pledges file -> UNDECIDABLE exit code, no throw", () => {
+test("runOrchStallDetect: unreadable pledges file (path given but not readable) -> UNDECIDABLE exit code, no throw", () => {
   assert.doesNotThrow(() => {
     const { result, exitCode } = runOrchStallDetect([
       "--pledges",
@@ -375,12 +412,392 @@ test("runOrchStallDetect: unreadable pledges file -> UNDECIDABLE exit code, no t
   });
 });
 
-test("runOrchStallDetect: missing --pledges -> UNDECIDABLE exit code (usage error), no throw", () => {
-  assert.doesNotThrow(() => {
-    const { exitCode } = runOrchStallDetect([]);
+// gap#61 (★이 사이클의 실질 성과): --pledges 생략은 더 이상 사용법
+// 오류가 아니다 -- "안 줬다"(정당, 유도만으로 진행)와 "줬는데 못
+// 읽었다"(오류, 위 시험)를 구별한다. ★재작업 2R(§11 ㄱ): 증거 수집
+// 자체는 **정상**이었지만(유효 git 저장소·`.harness` 없음) 유도할 흔적이
+// 진짜로 0개인 경우 -- 유도 약속도 0개라 PROGRESSING/NO_PLEDGES_RECORDED로
+// 닫힌다(orch-progress-core.mjs §(e)와 동일한 한계 -- "검사할 약속이
+// 없다"는 뜻이며 "진짜 진행 중"이 아니다). "저장소가 아님"(§11 ㄹ, 수집
+// 실패)과 이 "정상적으로 없음"(§11 ㄱ)을 혼동하지 않도록 `initPlainGitRepo`로
+// 이 시험을 유효한 저장소 축에 고정한다 -- "저장소 아님" 쪽은 아래
+// §(ㄱ)~(ㄹ) 판별 시험이 별도로 검증한다.
+test("runOrchStallDetect: missing --pledges + no derivable evidence in an EMPTY BUT VALID git repo-root -> PROGRESSING/NO_PLEDGES_RECORDED, exit 0 (not a usage error, and not a collection failure)", () => {
+  withTempDir("orch-stall-empty-", (dir) => {
+    initPlainGitRepo(dir);
+    assert.doesNotThrow(() => {
+      const { result, exitCode } = runOrchStallDetect([
+        "--repo-root",
+        dir,
+        "--now",
+        "2026-08-01T10:00:00+09:00",
+      ]);
+      assert.equal(result.verdict, ORCH_PROGRESS_VERDICT.PROGRESSING);
+      assert.equal(result.reasonCode, "NO_PLEDGES_RECORDED");
+      assert.equal(exitCode, 0);
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// gap#61 (h): 진입점에서 «유도»가 실제로 쓰인다 -- 약속 파일이 아예 없어도
+// 저장소 흔적(드롭된 태스크 파일 + 미도착 결과, 그리고 원격에 없는 로컬
+// 커밋)만으로 STALLED 판정이 나온다는 것을 직접 확인한다.
+// ---------------------------------------------------------------------------
+test("runOrchStallDetect: NO --pledges flag at all, derived-only TASK_FILE_DROPPED_AFTER pledge from a synthetic .harness/*-task.md -> STALLED (derivation alone drives the verdict)", () => {
+  withTempDir("orch-stall-derive-", (dir) => {
+    initPlainGitRepo(dir);
+    fs.mkdirSync(join(dir, ".harness"));
+    fs.writeFileSync(
+      join(dir, ".harness", "coder-task.md"),
+      "task_id: HYK-TEST-1\ndropped_at: 2026-08-01 10:00 KST\n\n본문\n",
+      "utf8",
+    );
+    // 대응 결과 파일이 이미 나왔다(mtime = 파일 쓰기 시각) -- "소비"
+    // 약속이 유도될 조건.
+    fs.writeFileSync(join(dir, ".harness", "coder.md"), "결과\n", "utf8");
+    const resultMtimeMs = fs.statSync(
+      join(dir, ".harness", "coder.md"),
+    ).mtimeMs;
+    const now = resultMtimeMs + 700_000; // 기본 임계(600s)를 넘김, 다음 태스크 드롭 없음.
+    const { result, exitCode } = runOrchStallDetect([
+      "--repo-root",
+      dir,
+      "--now",
+      new Date(now).toISOString(),
+    ]);
+    assert.equal(result.verdict, ORCH_PROGRESS_VERDICT.STALLED);
+    assert.notEqual(exitCode, 0);
     assert.equal(
-      exitCode,
-      EXIT_CODE_BY_VERDICT[ORCH_PROGRESS_VERDICT.UNDECIDABLE],
+      result.pledgeSources["derived:consume:HYK-TEST-1"],
+      PLEDGE_SOURCE.DERIVED,
+      "the winning pledge must be tagged DERIVED in the output (source is visible in the result, §3-e)",
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// gap#61 유도/선언 병합 -- pledgeId가 같으면 유도가 선언을 이긴다(선언이
+// 유도를 조용히 덮어써 상태를 바꾸지 못한다, §3-e).
+// ---------------------------------------------------------------------------
+test("runOrchStallDetect: a DECLARED pledge sharing the same pledgeId as a DERIVED one cannot silently flip the verdict -- derived wins", () => {
+  withTempDir("orch-stall-merge-", (dir) => {
+    initPlainGitRepo(dir);
+    fs.mkdirSync(join(dir, ".harness"));
+    fs.writeFileSync(
+      join(dir, ".harness", "coder-task.md"),
+      "task_id: HYK-TEST-2\ndropped_at: 2026-08-01 10:00 KST\n\n본문\n",
+      "utf8",
+    );
+    fs.writeFileSync(join(dir, ".harness", "coder.md"), "결과\n", "utf8");
+    const resultMtimeMs = fs.statSync(
+      join(dir, ".harness", "coder.md"),
+    ).mtimeMs;
+    const now = resultMtimeMs + 700_000;
+    // 선언된 약속이 같은 pledgeId로 "이미 해소됨(RESOLVED)"이라 주장한다
+    // -- 유도된 판정(OPEN, 여전히 STALLED)을 지우려는 시도.
+    const pledgesPath = join(dir, "pledges.json");
+    fs.writeFileSync(
+      pledgesPath,
+      JSON.stringify({
+        pledges: [
+          {
+            pledgeId: "derived:consume:HYK-TEST-2",
+            content: "선언: 이미 끝났다고 주장",
+            expectedArtifact: {
+              kind: ARTIFACT_KIND.FILE_EXISTS_AFTER,
+              path: "irrelevant.md",
+            },
+            recordedAt: "2026-08-01T09:00:00+09:00",
+            resolution: { status: "RESOLVED" },
+          },
+        ],
+      }),
+      "utf8",
+    );
+    const { result } = runOrchStallDetect([
+      "--pledges",
+      pledgesPath,
+      "--repo-root",
+      dir,
+      "--now",
+      new Date(now).toISOString(),
+    ]);
+    assert.equal(
+      result.verdict,
+      ORCH_PROGRESS_VERDICT.STALLED,
+      "a declared RESOLVED claim must not silently override the derived OPEN/overdue pledge sharing its id",
+    );
+    assert.equal(
+      result.pledgeSources["derived:consume:HYK-TEST-2"],
+      PLEDGE_SOURCE.DERIVED,
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ★재작업 1R(coder-task.md §10 항목 2) -- 배달했으나 결과가 아직 안 온
+// 태스크가 이제 RESULT_FILE_APPEARS_AFTER로 유도된다. "오탐이 늘지
+// 않는지" 확인 -- 임계 판정 자체는 orch-progress-core.mjs 몫이고 이
+// 조각은 약속만 만든다는 분담을 end-to-end로 보여준다(임계 이내 →
+// PROGRESSING / 임계 초과 → STALLED, 둘 다 같은 evidence 형태에서).
+// ---------------------------------------------------------------------------
+test("runOrchStallDetect: NO --pledges, task dropped but result NOT yet produced, WITHIN default threshold -> PROGRESSING (no false stall for a task that's still legitimately running)", () => {
+  withTempDir("orch-stall-await-", (dir) => {
+    initPlainGitRepo(dir);
+    fs.mkdirSync(join(dir, ".harness"));
+    const droppedAt = "2026-08-03T18:40:00+09:00";
+    fs.writeFileSync(
+      join(dir, ".harness", "coder-task.md"),
+      "task_id: HYK-AWAIT-1\ndropped_at: 2026-08-03 18:40 KST\n\n본문\n",
+      "utf8",
+    );
+    // 결과 파일(.harness/coder.md)을 만들지 않는다 -- 아직 작업 중.
+    const now = Date.parse(droppedAt) + 60_000; // 1분 경과, 기본 임계(600s) 이내.
+    const { result, exitCode } = runOrchStallDetect([
+      "--repo-root",
+      dir,
+      "--now",
+      new Date(now).toISOString(),
+    ]);
+    assert.equal(result.verdict, ORCH_PROGRESS_VERDICT.PROGRESSING);
+    assert.equal(exitCode, 0);
+    assert.equal(
+      result.pledgeSources["derived:await-result:HYK-AWAIT-1"],
+      PLEDGE_SOURCE.DERIVED,
+    );
+  });
+});
+
+test("runOrchStallDetect: NO --pledges, task dropped but result NOT yet produced, PAST default threshold -> STALLED via the derived RESULT_FILE_APPEARS_AFTER pledge (this is the exact gap#61 1R fix -- real stall #3, 83min)", () => {
+  withTempDir("orch-stall-await-", (dir) => {
+    initPlainGitRepo(dir);
+    fs.mkdirSync(join(dir, ".harness"));
+    const droppedAt = "2026-08-03T18:40:00+09:00";
+    fs.writeFileSync(
+      join(dir, ".harness", "review-task.md"),
+      "task_id: HYK-AWAIT-2\ndropped_at: 2026-08-03 18:40 KST\n\n본문\n",
+      "utf8",
+    );
+    // 결과 파일(.harness/review.md)이 끝내 오지 않는다 -- 83분 건 재현.
+    const now = Date.parse(droppedAt) + 700_000; // 기본 임계(600s) 초과.
+    const { result, exitCode } = runOrchStallDetect([
+      "--repo-root",
+      dir,
+      "--now",
+      new Date(now).toISOString(),
+    ]);
+    assert.equal(result.verdict, ORCH_PROGRESS_VERDICT.STALLED);
+    assert.notEqual(exitCode, 0);
+    assert.equal(
+      result.pledgeSources["derived:await-result:HYK-AWAIT-2"],
+      PLEDGE_SOURCE.DERIVED,
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// collectPledgeDerivationEvidence -- 진입점의 evidence 수집(합성 저장소
+// 전용, coder-task.md §6-1 실측 표 그대로).
+// ---------------------------------------------------------------------------
+// ★재작업 2R(§11 P1): "no .harness dir, not a git repo"는 더 이상
+// "정상적으로 비어있음" 하나로 뭉뚱그려지지 않는다 -- ".harness 없음"은
+// 정상(§11 ㄱ의 연장)이지만 "git 저장소 아님"은 수집 실패(§11 ㄹ)다.
+// 아래 두 시험이 그 둘을 각각 고정한다.
+test("collectPledgeDerivationEvidence: no .harness dir but a VALID git repo -> {droppedTaskFiles: [], localVsRemote: [], collectionFailures: []} (legitimately empty, no throw, no collection failure) [§11 ㄱ]", () => {
+  withTempDir("orch-stall-evidence-", (dir) => {
+    initPlainGitRepo(dir);
+    assert.doesNotThrow(() => {
+      const evidence = collectPledgeDerivationEvidence(dir);
+      assert.deepEqual(evidence, {
+        droppedTaskFiles: [],
+        localVsRemote: [],
+        collectionFailures: [],
+      });
+    });
+  });
+});
+
+test("collectPledgeDerivationEvidence: repo-root is NOT a git repository at all -> collectionFailures includes 'localVsRemote' (real collection failure, not silently empty) [§11 ㄹ]", () => {
+  withTempDir("orch-stall-evidence-", (dir) => {
+    assert.doesNotThrow(() => {
+      const evidence = collectPledgeDerivationEvidence(dir);
+      assert.deepEqual(evidence.droppedTaskFiles, []);
+      assert.deepEqual(evidence.localVsRemote, []);
+      assert.deepEqual(evidence.collectionFailures, ["localVsRemote"]);
+    });
+  });
+});
+
+test("collectPledgeDerivationEvidence: dropped task file with a produced result file -> one droppedTaskFiles item with resultFile.exists:true", () => {
+  withTempDir("orch-stall-evidence-", (dir) => {
+    initPlainGitRepo(dir);
+    fs.mkdirSync(join(dir, ".harness"));
+    fs.writeFileSync(
+      join(dir, ".harness", "review-task.md"),
+      "task_id: HYK-EV-1\ndropped_at: 2026-08-01 10:00 KST\n\n본문\n",
+      "utf8",
+    );
+    fs.writeFileSync(join(dir, ".harness", "review.md"), "결과\n", "utf8");
+    const evidence = collectPledgeDerivationEvidence(dir);
+    assert.equal(evidence.droppedTaskFiles.length, 1);
+    const item = evidence.droppedTaskFiles[0];
+    assert.equal(item.path, ".harness/review-task.md");
+    assert.equal(item.taskId, "HYK-EV-1");
+    assert.equal(item.droppedAtMs, Date.parse("2026-08-01T10:00:00+09:00"));
+    assert.equal(item.resultFile.path, ".harness/review.md");
+    assert.equal(item.resultFile.exists, true);
+    assert.equal(typeof item.resultFile.mtimeMs, "number");
+  });
+});
+
+test("collectPledgeDerivationEvidence: dropped task file with NO corresponding result file yet -> resultFile.path present, exists:false, mtimeMs:null", () => {
+  withTempDir("orch-stall-evidence-", (dir) => {
+    initPlainGitRepo(dir);
+    fs.mkdirSync(join(dir, ".harness"));
+    fs.writeFileSync(
+      join(dir, ".harness", "review-task.md"),
+      "task_id: HYK-EV-2\ndropped_at: 2026-08-01 10:00 KST\n\n본문\n",
+      "utf8",
+    );
+    const evidence = collectPledgeDerivationEvidence(dir);
+    assert.deepEqual(evidence.droppedTaskFiles[0].resultFile, {
+      path: ".harness/review.md",
+      exists: false,
+      mtimeMs: null,
+    });
+  });
+});
+
+test("collectPledgeDerivationEvidence: task file with no dropped_at header at all -> NOT included as evidence (0 items, not a malformed entry)", () => {
+  withTempDir("orch-stall-evidence-", (dir) => {
+    initPlainGitRepo(dir);
+    fs.mkdirSync(join(dir, ".harness"));
+    fs.writeFileSync(
+      join(dir, ".harness", "review-task.md"),
+      "본문만 있음, 헤더 없음\n",
+      "utf8",
+    );
+    const evidence = collectPledgeDerivationEvidence(dir);
+    assert.deepEqual(evidence.droppedTaskFiles, []);
+  });
+});
+
+test("collectPledgeDerivationEvidence: local commit ahead of its upstream -> one localVsRemote item with contains:false (synthetic git repo, local objects only)", () => {
+  withTempDir("orch-stall-evidence-git-", (dir) => {
+    git(dir, ["init", "--quiet", "-b", "main"]);
+    git(dir, [
+      "-c",
+      "user.email=t@t",
+      "-c",
+      "user.name=t",
+      "commit",
+      "--allow-empty",
+      "-m",
+      "base",
+      "--quiet",
+    ]);
+    const remoteDir = tmpDir("orch-stall-evidence-remote-");
+    try {
+      git(remoteDir, ["init", "--quiet", "--bare"]);
+      git(dir, ["remote", "add", "origin", remoteDir]);
+      git(dir, ["push", "-q", "-u", "origin", "main"]);
+      git(dir, [
+        "-c",
+        "user.email=t@t",
+        "-c",
+        "user.name=t",
+        "commit",
+        "--allow-empty",
+        "-m",
+        "ahead",
+        "--quiet",
+      ]);
+      const headSha = git(dir, ["rev-parse", "HEAD"]);
+      const evidence = collectPledgeDerivationEvidence(dir);
+      assert.equal(evidence.localVsRemote.length, 1);
+      const item = evidence.localVsRemote[0];
+      assert.equal(item.commitSha, headSha);
+      assert.equal(item.remoteRef, "origin/main");
+      assert.equal(item.contains, false);
+      assert.equal(typeof item.commitTimeMs, "number");
+    } finally {
+      fs.rmSync(remoteDir, { recursive: true, force: true });
+    }
+  });
+});
+
+test("collectPledgeDerivationEvidence: no upstream configured for the current branch -> localVsRemote: [], collectionFailures: [] (nothing to check, NOT a collection failure) [§11 ㄷ]", () => {
+  withTempDir("orch-stall-evidence-git-", (dir) => {
+    git(dir, ["init", "--quiet", "-b", "main"]);
+    git(dir, [
+      "-c",
+      "user.email=t@t",
+      "-c",
+      "user.name=t",
+      "commit",
+      "--allow-empty",
+      "-m",
+      "base",
+      "--quiet",
+    ]);
+    const evidence = collectPledgeDerivationEvidence(dir);
+    assert.deepEqual(evidence.localVsRemote, []);
+    assert.deepEqual(evidence.collectionFailures, []);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// (h) gap#61 실행 확인 -- `node`로 이 파일을 직접(서브프로세스) 실행해,
+// `--pledges` 없이도(약속 파일 자체가 아예 없어도) 유도만으로 STALLED
+// 판정과 그 종료 코드가 나온다는 것을 출력·종료 코드로 직접 확인한다
+// (coder-task.md §3-h "node로 직접 실행한 출력과 종료 코드로").
+// ---------------------------------------------------------------------------
+test("node subprocess: `node orch-stall-detect.mjs --repo-root <synthetic> --json` with NO --pledges flag at all -> STALLED exit code + JSON verdict from derivation alone", () => {
+  withTempDir("orch-stall-cli-", (dir) => {
+    initPlainGitRepo(dir);
+    fs.mkdirSync(join(dir, ".harness"));
+    fs.writeFileSync(
+      join(dir, ".harness", "coder-task.md"),
+      "task_id: HYK-CLI-1\ndropped_at: 2026-08-01 10:00 KST\n\n본문\n",
+      "utf8",
+    );
+    fs.writeFileSync(join(dir, ".harness", "coder.md"), "결과\n", "utf8");
+    const resultMtimeMs = fs.statSync(
+      join(dir, ".harness", "coder.md"),
+    ).mtimeMs;
+    const now = resultMtimeMs + 700_000;
+    const entrypoint = join(
+      ROOT,
+      "scripts",
+      "supervisor",
+      "orch-stall-detect.mjs",
+    );
+    let stdout, status;
+    try {
+      stdout = execFileSync(
+        "node",
+        [
+          entrypoint,
+          "--repo-root",
+          dir,
+          "--now",
+          new Date(now).toISOString(),
+          "--json",
+        ],
+        { encoding: "utf8" },
+      );
+      status = 0;
+    } catch (err) {
+      stdout = err.stdout;
+      status = err.status;
+    }
+    assert.equal(status, EXIT_CODE_BY_VERDICT[ORCH_PROGRESS_VERDICT.STALLED]);
+    const parsed = JSON.parse(stdout);
+    assert.equal(parsed.verdict, ORCH_PROGRESS_VERDICT.STALLED);
+    assert.equal(
+      parsed.pledgeSources["derived:consume:HYK-CLI-1"],
+      PLEDGE_SOURCE.DERIVED,
     );
   });
 });
