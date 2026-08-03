@@ -1,5 +1,12 @@
 {
   "schema_version": "queue-manifest/v1",
   "queue_epoch": 0,
-  "entries": []
+  "entries": [
+    {
+      "issue_id": "HYK-189",
+      "ordinal": 1,
+      "approved_merge_commit": "3f03c7f0c0b31608b7dd69ef67eb9c597625dc3e",
+      "enabled": true
+    }
+  ]
 }
