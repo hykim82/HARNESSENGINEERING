@@ -40,8 +40,20 @@
 //
 // 어휘 신규 도입 선언: `ACCOUNT_MODE`·`SCHEDULE_PLAN_REASON` 둘 다 이
 // 파일이 새로 만든다.
-
+//
+// ★플랫폼 독립 선언(재작업 2R, coder-task.md §11 -- 리눅스 CI가 실제로
+// 이 차이를 드러냄): 이 조각은 **Windows 작업 스케줄러(`schtasks`) 전용**
+// 이며, `repoRoot`/`nodePath`/`watchDir`는 항상 Windows 경로다(예:
+// `C:\Users\...`). `node:path`의 "네이티브"(호스트 OS에 따라 자동으로
+// posix/win32가 바뀌는) `isAbsolute`/`join`을 쓰면 **리눅스에서 실행될
+// 때 그 판정이 달라진다**(`path.isAbsolute("C:\\Users\\x")`가 리눅스
+// 에서는 posix 규칙으로 `false`가 되어 유효한 Windows 경로를 거부한다
+// -- 실측: `node -e` 직접 확인, 이 파일의 시험 파일에도 고정 단언으로
+// 남긴다). 그래서 이 코어는 **항상 `path.win32`만** 쓴다 -- `path.win32`
+// 는 정적으로 Windows 규칙을 구현하며 호스트 OS를 보지 않으므로, 이
+// 코어는 **어느 플랫폼에서 시험하든 같은 결과**를 낸다.
 import path from "node:path";
+const winPath = path.win32;
 
 export const ACCOUNT_MODE = Object.freeze({
   // "사용자가 로그온했을 때만 실행" -- schtasks `/IT` + `/RU <user>`,
@@ -85,13 +97,13 @@ function fail(reasonCode) {
 }
 
 function validatePaths({ repoRoot, nodePath, watchDir, runAsUser }) {
-  if (!isNonEmptyString(repoRoot) || !path.isAbsolute(repoRoot)) {
+  if (!isNonEmptyString(repoRoot) || !winPath.isAbsolute(repoRoot)) {
     return SCHEDULE_PLAN_REASON.REPO_ROOT_INVALID;
   }
-  if (!isNonEmptyString(nodePath) || !path.isAbsolute(nodePath)) {
+  if (!isNonEmptyString(nodePath) || !winPath.isAbsolute(nodePath)) {
     return SCHEDULE_PLAN_REASON.NODE_PATH_INVALID;
   }
-  if (!isNonEmptyString(watchDir) || !path.isAbsolute(watchDir)) {
+  if (!isNonEmptyString(watchDir) || !winPath.isAbsolute(watchDir)) {
     return SCHEDULE_PLAN_REASON.WATCH_DIR_INVALID;
   }
   if (!isNonEmptyString(runAsUser)) {
@@ -207,14 +219,14 @@ export function buildSchedulePlan(args) {
   const expires = validateExpiresAt(expiresAt, now);
   if (expires.code) return fail(expires.code);
 
-  const runnerPath = path.join(
+  const runnerPath = winPath.join(
     repoRoot,
     "scripts",
     "supervisor",
     "watch-run.mjs",
   );
-  const logPath = path.join(watchDir, "watch.log");
-  const aliveRecordPath = path.join(watchDir, "last-run.json");
+  const logPath = winPath.join(watchDir, "watch.log");
+  const aliveRecordPath = winPath.join(watchDir, "last-run.json");
   const expiresAtDate = toSchtasksDate(expires.ms);
   const commandLine = buildCommandLine(
     nodePath,

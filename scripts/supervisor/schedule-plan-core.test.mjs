@@ -11,7 +11,7 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import child_process from "node:child_process";
-import { join } from "node:path";
+import { join, posix as posixPath, win32 as win32Path } from "node:path";
 import { tmpdir } from "node:os";
 import {
   buildSchedulePlan,
@@ -118,6 +118,53 @@ test("static: schedule-plan-core.mjs's only import is node:path (no other I/O su
     ...SRC_TEXT.matchAll(/^import[\s\S]*?from\s+["'](.+)["'];?\s*$/gm),
   ].map((m) => m[1]);
   assert.deepEqual(imports, ["node:path"]);
+});
+
+// ---------------------------------------------------------------------------
+// ★재작업 2R(coder-task.md §11) -- 리눅스 CI가 실제로 이 차이를 드러냄:
+// `path.isAbsolute`/`path.join`(호스트 OS에 따라 posix/win32가 바뀌는
+// "네이티브" 구현)을 쓰면 이 코어가 리눅스에서 실행될 때 Windows 경로를
+// 거부한다. 정적 검사(네이티브 호출 0)와 동적 검사(win32 고정 동작이
+// posix와 실제로 다름을 이 머신에서 직접 증명) 둘 다로 재발을 막는다.
+// ---------------------------------------------------------------------------
+test("static: schedule-plan-core.mjs calls only path.win32.* for path ops -- zero native path.isAbsolute(/path.join( calls (regression guard for the linux-CI failure)", () => {
+  const codeOnly = SRC_TEXT.split("\n")
+    .filter((line) => !line.trim().startsWith("//"))
+    .join("\n");
+  const bareIsAbsolute = [...codeOnly.matchAll(/[^.]path\.isAbsolute\(/g)];
+  const bareJoin = [...codeOnly.matchAll(/[^.]path\.join\(/g)];
+  assert.deepEqual(
+    bareIsAbsolute,
+    [],
+    "must call winPath.isAbsolute (path.win32), not the host-dependent native path.isAbsolute",
+  );
+  assert.deepEqual(
+    bareJoin,
+    [],
+    "must call winPath.join (path.win32), not the host-dependent native path.join",
+  );
+});
+
+test("platform independence proof: path.posix would reject a Windows repoRoot that path.win32 (this module's choice) accepts -- this is exactly the bug the linux CI run hit (1/1)", () => {
+  const winStylePath = "C:\\Users\\hykim\\repo";
+  assert.equal(
+    posixPath.isAbsolute(winStylePath),
+    false,
+    "path.posix treats this as relative -- the native `path` module resolves to path.posix on linux, which is why the CI run's validatePaths rejected every Windows-style fixture",
+  );
+  assert.equal(
+    win32Path.isAbsolute(winStylePath),
+    true,
+    "path.win32 always applies Windows rules regardless of host OS -- this is what schedule-plan-core.mjs now uses exclusively",
+  );
+  const result = buildSchedulePlan(
+    validArgs({ repoRoot: winStylePath, watchDir: "D:\\watch" }),
+  );
+  assert.equal(
+    result.ok,
+    true,
+    "buildSchedulePlan must accept this Windows path on any host (this assertion runs identically on Windows and Linux since path.win32 is host-independent)",
+  );
 });
 
 // ---------------------------------------------------------------------------
