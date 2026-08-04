@@ -79,12 +79,16 @@ export default [
     // through scripts/relay/adapters/orca-adapter.mjs's read-only
     // collectSeatLivenessObservation -- the same file G9
     // (orca-cli-boundary.mjs) already treats as the sole exec-call site.
-    // This is a narrow, explicit exception for exactly these two files
-    // (production entry point + its own wiring test), not a reopening of
+    // This is a narrow, explicit exception for exactly these files
+    // (production entry point + its wiring tests), not a reopening of
     // the general relay -> non-relay dependency direction.
+    // HYK-185-seat-idle-1: seat-idle-wire.test.mjs is the same shape one
+    // more time -- it exercises the same production entry point for the
+    // new idle axis, through the same read-only adapter call.
     files: [
       "scripts/supervisor/orch-stall-detect.mjs",
       "scripts/supervisor/seat-liveness-wire.test.mjs",
+      "scripts/supervisor/seat-idle-wire.test.mjs",
     ],
     rules: {
       "no-restricted-imports": "off",
