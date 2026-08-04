@@ -24,6 +24,7 @@ import {
 } from "./orch-stall-detect.mjs";
 import { ARTIFACT_KIND, ORCH_PROGRESS_VERDICT } from "./orch-progress-core.mjs";
 import { PLEDGE_SOURCE } from "./pledge-derive-core.mjs";
+import { scanRepoForOrcaExecCalls } from "../check/orca-cli-boundary.mjs";
 
 function repoRoot() {
   return execFileSync("git", ["rev-parse", "--show-toplevel"], {
@@ -882,8 +883,26 @@ const SRC_TEXT = fs.readFileSync(
   "utf8",
 );
 
-test("static: orch-stall-detect.mjs never spawns 'orca' or builds a command string toward it", () => {
-  assert.equal(/\borca\b/i.test(SRC_TEXT.replace(/\/\/.*$/gm, "")), false);
+// HYK-185 seat-wire (coder-task.md §2-1): 갱신 -- 이 파일은 이제
+// 좌석 무응답 관측을 위해 orca-adapter.mjs를 import한다(읽기 전용
+// `terminal list`/`terminal show`만, orca-cli-boundary.mjs가 강제하는
+// "orca를 literal spawn하는 코드는 adapter 안에만" 경계는 그대로다).
+// "orca를 아예 언급하지 않는다"는 예전 불변식은 더 이상 이 파일의
+// 계약이 아니다 -- 대신 "이 파일 자신은 'orca'를 spawn하지 않는다"
+// (orca-cli-boundary.mjs의 EXEC_CALL_RE와 동일 패턴)로 좁힌다.
+test("static: orch-stall-detect.mjs never itself spawns 'orca' (only imports the read-only adapter port)", () => {
+  const codeOnly = SRC_TEXT.replace(/\/\/.*$/gm, "");
+  const EXEC_CALL_RE =
+    /\b(?:spawnSync|spawn|execFileSync|execFile|execSync|exec)\s*\(\s*["'`]orca["'`]/;
+  assert.equal(EXEC_CALL_RE.test(codeOnly), false);
+});
+
+test("static: orca-cli-boundary.mjs's own scan still passes with orch-stall-detect.mjs importing the adapter (real-tree regression guard)", () => {
+  const violations = scanRepoForOrcaExecCalls(ROOT);
+  assert.equal(
+    violations.includes("scripts/supervisor/orch-stall-detect.mjs"),
+    false,
+  );
 });
 
 test("static: orch-stall-detect.mjs never fetches over the network (no fetch/git fetch/git pull)", () => {
@@ -893,7 +912,12 @@ test("static: orch-stall-detect.mjs never fetches over the network (no fetch/git
   assert.equal(/["']pull["']/.test(codeOnly), false);
 });
 
-test("static: nothing else in the repo imports orch-stall-detect.mjs yet (h -- can be called is not the same as is being called)", () => {
+// HYK-185 seat-wire: seat-liveness-wire.test.mjs now legitimately imports
+// orch-stall-detect.mjs too (it exercises the same production entry point
+// from a different angle -- the seat-liveness wiring). It is excluded
+// below on the same "own .test.mjs" basis as orch-stall-detect.test.mjs
+// itself; no production (non-test) file imports this module.
+test("static: no PRODUCTION code imports orch-stall-detect.mjs yet (h -- can be called is not the same as is being called; only its own .test.mjs files do)", () => {
   let grepOut;
   try {
     grepOut = execFileSync(
@@ -925,7 +949,8 @@ test("static: nothing else in the repo imports orch-stall-detect.mjs yet (h -- c
     .filter(
       (f) =>
         !f.endsWith("orch-stall-detect.mjs") &&
-        !f.endsWith("orch-stall-detect.test.mjs"),
+        !f.endsWith("orch-stall-detect.test.mjs") &&
+        !f.endsWith("seat-liveness-wire.test.mjs"),
     );
   assert.deepEqual(
     importers,

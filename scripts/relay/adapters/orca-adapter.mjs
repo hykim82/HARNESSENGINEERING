@@ -395,6 +395,152 @@ export function resolveSeatHandle({ role, worktreePath } = {}, opts = {}) {
   return { ok: true, handle: candidates[0].handle };
 }
 
+// ---- HYK-185 seat-wire: 좌석 무응답(liveness) 관측 (coder-task.md §2-1) ----
+// resolveSeatHandle(A-1)과 "같은 형태" -- terminal list 조회로 worktreePath
+// 정규화 일치 후보를 추리고, 0개/2개+는 거부한다(자동 선택 금지, A-1과
+// 동일 원칙). 정확히 1개일 때만 buildSeatShowCommand(기존 C절, 이미
+// C1/D 판정이 재사용 중)로 `terminal show`를 한 번 더 불러
+// `result.terminal.lastOutputAt`을 얻는다 -- 이 필드는 seat-proof-
+// contract-v1.mjs의 TERMINAL_SHOW_RAW_FIELD_TYPES.lastOutputAt(실측:
+// number, epoch ms)로 이미 계약이 잠겨 있다(dispatch-start-core.mjs가
+// 같은 계약을 쓴다).
+//
+// 호출은 `terminal list`/`terminal show` 읽기 전용 2건뿐이다 --
+// dispatch·send·close·stop·worktree 계열 호출은 0(coder-task.md §2-1
+// 비타협, resolveSeatLocation/checkWorktreeManaged 같은 좌석 생애주기
+// 게이트는 의도적으로 재사용하지 않는다 -- 이 함수는 좌석을 만들거나
+// 지우지 않고 오직 이미 존재하는 좌석 하나를 읽을 뿐이다).
+//
+// ★"좌석 0개"(seatCount:0)와 "조회 실패"(ok:false)는 서로 다른 반환
+// 형태다 -- 호출부(orch-stall-detect.mjs)가 이 둘을 섞어 판정 불가와
+// 정상 침묵을 혼동하지 않게 한다(coder-task.md §2-2/§3-c 비타협).
+export const SEAT_LIVENESS_OBSERVATION_REASON = Object.freeze({
+  INPUT_INVALID: "SEAT_LIVENESS_OBSERVATION_INPUT_INVALID",
+  LIST_QUERY_FAILED: "SEAT_LIVENESS_OBSERVATION_LIST_QUERY_FAILED",
+  SHOW_QUERY_FAILED: "SEAT_LIVENESS_OBSERVATION_SHOW_QUERY_FAILED",
+  AMBIGUOUS: "SEAT_LIVENESS_OBSERVATION_AMBIGUOUS",
+  MALFORMED: "SEAT_LIVENESS_OBSERVATION_MALFORMED",
+});
+
+function denySeatLivenessObservation(observationReason, detail) {
+  return { ok: false, observationReason, reason: detail };
+}
+
+function validateSeatLivenessObservationInput(worktreePath, now, opts) {
+  if (!isNonEmptyString(worktreePath)) {
+    return denySeatLivenessObservation(
+      SEAT_LIVENESS_OBSERVATION_REASON.INPUT_INVALID,
+      "orca-adapter: collectSeatLivenessObservation -- worktreePath is required",
+    );
+  }
+  if (typeof now !== "number" || !Number.isFinite(now)) {
+    return denySeatLivenessObservation(
+      SEAT_LIVENESS_OBSERVATION_REASON.INPUT_INVALID,
+      "orca-adapter: collectSeatLivenessObservation -- now (epoch ms) is required",
+    );
+  }
+  if (typeof opts.execFn !== "function") {
+    return denySeatLivenessObservation(
+      SEAT_LIVENESS_OBSERVATION_REASON.LIST_QUERY_FAILED,
+      "orca-adapter: collectSeatLivenessObservation -- opts.execFn is required to query terminal list",
+    );
+  }
+  return null;
+}
+
+// terminal list 조회 -> worktreePath 정규화 일치 후보 추리기 (resolveSeatHandle,
+// A-1과 같은 형태) -- 0개는 {ok:true, seatCount:0}(정상), 2개+는 AMBIGUOUS로
+// 거부(자동 선택 금지), 조회 자체 실패는 LIST_QUERY_FAILED. collectSeatLivenessObservation
+// 에서 분리(복잡도 분산).
+function resolveSeatLivenessCandidate(worktreePath, opts) {
+  let listResponse;
+  try {
+    listResponse = opts.execFn(buildTerminalListCommand());
+  } catch (err) {
+    return denySeatLivenessObservation(
+      SEAT_LIVENESS_OBSERVATION_REASON.LIST_QUERY_FAILED,
+      `orca-adapter: collectSeatLivenessObservation -- terminal list query threw (${errText(err)})`,
+    );
+  }
+  const list = parseTerminalList(listResponse);
+  if (!list) {
+    return denySeatLivenessObservation(
+      SEAT_LIVENESS_OBSERVATION_REASON.LIST_QUERY_FAILED,
+      "orca-adapter: collectSeatLivenessObservation -- terminal list response missing/invalid result.terminals",
+    );
+  }
+  const target = canonicalizeForComparison(worktreePath);
+  const candidates = list.filter(
+    (entry) =>
+      isPlainObject(entry) &&
+      isNonEmptyString(entry.handle) &&
+      !isOrphanSeat({ worktreePath: entry.worktreePath }) &&
+      canonicalizeForComparison(entry.worktreePath) === target,
+  );
+  if (candidates.length === 0) {
+    // 정상 -- 이 worktree에 좌석이 없다(조회 실패가 아니다).
+    return { ok: true, seatCount: 0 };
+  }
+  if (candidates.length > 1) {
+    return denySeatLivenessObservation(
+      SEAT_LIVENESS_OBSERVATION_REASON.AMBIGUOUS,
+      `orca-adapter: collectSeatLivenessObservation -- ${candidates.length} seats found for worktreePath '${worktreePath}', refusing to guess (A-1 원칙 계승)`,
+    );
+  }
+  return { ok: true, seatCount: 1, handle: candidates[0].handle };
+}
+
+// terminal show 조회 -> lastOutputAt(계약: number, epoch ms) + title(reasonHint
+// 후보) 추출. collectSeatLivenessObservation에서 분리(복잡도 분산).
+function fetchSeatLivenessShow(handle, now, opts) {
+  let showResponse;
+  try {
+    showResponse = opts.execFn(buildSeatShowCommand(handle));
+  } catch (err) {
+    return denySeatLivenessObservation(
+      SEAT_LIVENESS_OBSERVATION_REASON.SHOW_QUERY_FAILED,
+      `orca-adapter: collectSeatLivenessObservation -- terminal show query threw (${errText(err)})`,
+    );
+  }
+  if (!isPlainObject(showResponse) || showResponse.ok !== true) {
+    return denySeatLivenessObservation(
+      SEAT_LIVENESS_OBSERVATION_REASON.SHOW_QUERY_FAILED,
+      `orca-adapter: collectSeatLivenessObservation -- ${extractFailureDetail(showResponse)}`,
+    );
+  }
+  const terminal = isPlainObject(showResponse.result)
+    ? showResponse.result.terminal
+    : null;
+  const lastOutputAt = isPlainObject(terminal) ? terminal.lastOutputAt : null;
+  if (typeof lastOutputAt !== "number" || !Number.isFinite(lastOutputAt)) {
+    return denySeatLivenessObservation(
+      SEAT_LIVENESS_OBSERVATION_REASON.MALFORMED,
+      "orca-adapter: collectSeatLivenessObservation -- result.terminal.lastOutputAt missing/non-numeric",
+    );
+  }
+  const title =
+    isPlainObject(terminal) && typeof terminal.title === "string"
+      ? terminal.title
+      : null;
+  return {
+    ok: true,
+    seatCount: 1,
+    handle,
+    observation: { observedAtMs: now, lastOutputAt, reasonHint: title },
+  };
+}
+
+// ctx: { worktreePath, now(epoch ms) } -- opts: { execFn }. 순수 조합 --
+// execFn 호출은 최대 2건(list + show), 부작용 호출은 0(A-1 계약 계승).
+export function collectSeatLivenessObservation(ctx = {}, opts = {}) {
+  const { worktreePath, now } = isPlainObject(ctx) ? ctx : {};
+  const invalid = validateSeatLivenessObservationInput(worktreePath, now, opts);
+  if (invalid) return invalid;
+  const resolved = resolveSeatLivenessCandidate(worktreePath, opts);
+  if (!resolved.ok || resolved.seatCount === 0) return resolved;
+  return fetchSeatLivenessShow(resolved.handle, now, opts);
+}
+
 // ---- HYK-170 coder-1: 실측 argv (2단 라이브 프로브, 영수증 §8 대조표
 // 그대로) -- v1(HYK-169)이 "미검증 가정"으로 남긴 6개 함수를 전부 실물과
 // 대조해 고쳤다. 각 함수 옆 주석의 "실측"은 위 두 영수증 파일의 근거를

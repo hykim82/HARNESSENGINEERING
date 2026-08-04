@@ -24,6 +24,12 @@
 //    로그아웃 상태에서는 감시가 없다(schedule-plan-core.mjs가 등록
 //    계획에 강제하는 실행 계정 방식, 이 러너 자신은 계정 방식을 모른다).
 //
+// HYK-185 seat-wire 갱신: orch-stall-detect.mjs가 이제 `seatLiveness`
+// 필드를 채우면(seat-liveness-core.mjs의 judgeSeatLiveness 실호출 결과)
+// 이 러너는 그 `status`/`verdict`를 로그 줄에 그대로 옮겨 적을 뿐이다
+// (`seat_status=`/`seat_verdict=`, buildLogLine 참조) -- v1은 로그만(§2-3
+// 비타협 그대로), 이 값으로 재시도·알림 분기를 만들지 않는다.
+//
 // 로그 상한(coder-task.md §5-C "로그 상한/회전"): 파일을 **줄 수 기준**
 // 으로 캡핑한다 -- 매 실행마다 기존 로그를 읽어 줄 배열로 쪼개고, 새
 // 줄을 추가한 뒤 `MAX_LOG_LINES`(아래)를 넘으면 앞에서부터 잘라낸다.
@@ -48,18 +54,43 @@ function defaultExec(cmd, args, opts) {
   return execFileSync(cmd, args, { encoding: "utf8", ...opts });
 }
 
+function isPlainObject(v) {
+  return v !== null && typeof v === "object" && !Array.isArray(v);
+}
+
 // orch-stall-detect.mjs의 stdout(JSON 한 줄)을 파싱한다. 파싱 실패는
 // "판정 불가"이지 예외가 아니다(§5-A와 같은 원칙 재사용).
+//
+// HYK-185 seat-wire: `result.seatLiveness`(orch-stall-detect.mjs가 이제
+// 실제로 채우는 필드, judgeSeatLivenessForRepo 참조)도 함께 뽑아 로그
+// 줄에 싣는다 -- v1은 로그만(§2-3), 이 값이 있어도 판정·재시도 분기는
+// 만들지 않는다.
 function parseDetectorStdout(stdout) {
   try {
     const parsed = JSON.parse(String(stdout).trim());
+    const seatLiveness = isPlainObject(parsed.seatLiveness)
+      ? parsed.seatLiveness
+      : null;
     return {
       verdict: typeof parsed.verdict === "string" ? parsed.verdict : null,
       reasonCode:
         typeof parsed.reasonCode === "string" ? parsed.reasonCode : null,
+      seatLivenessStatus:
+        seatLiveness && typeof seatLiveness.status === "string"
+          ? seatLiveness.status
+          : null,
+      seatLivenessVerdict:
+        seatLiveness && typeof seatLiveness.verdict === "string"
+          ? seatLiveness.verdict
+          : null,
     };
   } catch {
-    return { verdict: null, reasonCode: null };
+    return {
+      verdict: null,
+      reasonCode: null,
+      seatLivenessStatus: null,
+      seatLivenessVerdict: null,
+    };
   }
 }
 
@@ -102,7 +133,9 @@ export function buildLogLine({ nowIso, detectorResult }) {
   }
   const verdict = detectorResult.verdict ?? "UNKNOWN";
   const reason = detectorResult.reasonCode ?? "NONE";
-  return `${nowIso} exit=${detectorResult.exitCode} verdict=${verdict} reason=${reason}`;
+  const seatStatus = detectorResult.seatLivenessStatus ?? "NONE";
+  const seatVerdict = detectorResult.seatLivenessVerdict ?? "NONE";
+  return `${nowIso} exit=${detectorResult.exitCode} verdict=${verdict} reason=${reason} seat_status=${seatStatus} seat_verdict=${seatVerdict}`;
 }
 
 function appendLogWithRotation({ readFn, writeFn, logPath, line, maxLines }) {

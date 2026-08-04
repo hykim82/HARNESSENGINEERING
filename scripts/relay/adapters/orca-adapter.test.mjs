@@ -52,6 +52,8 @@ import {
   TEARDOWN_GATE_REASON,
   TEARDOWN_CLOSE_REASON,
   buildTeardownWorktreeRemoveCommand,
+  collectSeatLivenessObservation,
+  SEAT_LIVENESS_OBSERVATION_REASON,
 } from "./orca-adapter.mjs";
 import { scanEnvHandleIngress } from "./env-ingress-scan.mjs";
 import {
@@ -1228,6 +1230,157 @@ test("resolveSeatHandle: an unmanaged (not Orca-registered) worktree is rejected
 
 test("buildTerminalListCommand: exact argv shape", () => {
   assert.deepEqual(buildTerminalListCommand(), ["terminal", "list", "--json"]);
+});
+
+// ---------------------------------------------------------------------------
+// HYK-185 seat-wire (coder-task.md §2-1): collectSeatLivenessObservation --
+// resolveSeatHandle(A-1)과 같은 형태(terminal list, 0/1/2+) + terminal
+// show(lastOutputAt, 계약 잠금 seat-proof-contract-v1.mjs)로 1건 관측.
+// ---------------------------------------------------------------------------
+function terminalShowStub(overrides = {}) {
+  return {
+    ok: true,
+    result: {
+      terminal: {
+        lastOutputAt: 1_700_000_000_000,
+        title: "CODER",
+        ...overrides,
+      },
+    },
+  };
+}
+
+test("collectSeatLivenessObservation: exactly one candidate -- ok:true, seatCount:1, lastOutputAt from terminal show (number)", () => {
+  const execFn = fakeExecFn({
+    "terminal-list": terminalListStub([terminalEntry({ handle: "term_only" })]),
+    show: terminalShowStub({ lastOutputAt: 1_700_000_005_000, title: "CODER" }),
+  });
+  const r = collectSeatLivenessObservation(
+    { worktreePath: VALID_WORKTREE, now: 1_700_000_010_000 },
+    { execFn },
+  );
+  assert.equal(r.ok, true);
+  assert.equal(r.seatCount, 1);
+  assert.equal(r.handle, "term_only");
+  assert.deepEqual(r.observation, {
+    observedAtMs: 1_700_000_010_000,
+    lastOutputAt: 1_700_000_005_000,
+    reasonHint: "CODER",
+  });
+});
+
+test("collectSeatLivenessObservation: zero candidates -- ok:true, seatCount:0 (normal, NOT a collection failure)", () => {
+  const execFn = fakeExecFn({
+    "terminal-list": terminalListStub([
+      terminalEntry({
+        handle: "term_elsewhere",
+        worktreePath: "C:/some/other/wt",
+      }),
+    ]),
+  });
+  const r = collectSeatLivenessObservation(
+    { worktreePath: VALID_WORKTREE, now: 1_700_000_010_000 },
+    { execFn },
+  );
+  assert.equal(r.ok, true);
+  assert.equal(r.seatCount, 0);
+  assert.equal("observation" in r, false);
+});
+
+test("collectSeatLivenessObservation: two candidates -- ok:false, AMBIGUOUS (A-1 principle reused, refuses to guess)", () => {
+  const execFn = fakeExecFn({
+    "terminal-list": terminalListStub([
+      terminalEntry({ handle: "term_a" }),
+      terminalEntry({ handle: "term_b" }),
+    ]),
+  });
+  const r = collectSeatLivenessObservation(
+    { worktreePath: VALID_WORKTREE, now: 1_700_000_010_000 },
+    { execFn },
+  );
+  assert.equal(r.ok, false);
+  assert.equal(r.observationReason, SEAT_LIVENESS_OBSERVATION_REASON.AMBIGUOUS);
+});
+
+test("collectSeatLivenessObservation: terminal-list query throws -- ok:false, LIST_QUERY_FAILED (collection failure, not folded to seatCount:0)", () => {
+  const execFn = () => {
+    throw new Error("boom: orca not reachable");
+  };
+  const r = collectSeatLivenessObservation(
+    { worktreePath: VALID_WORKTREE, now: 1_700_000_010_000 },
+    { execFn },
+  );
+  assert.equal(r.ok, false);
+  assert.equal(
+    r.observationReason,
+    SEAT_LIVENESS_OBSERVATION_REASON.LIST_QUERY_FAILED,
+  );
+});
+
+test("collectSeatLivenessObservation: terminal show query fails after a clean single-candidate list -- ok:false, SHOW_QUERY_FAILED", () => {
+  const execFn = fakeExecFn({
+    "terminal-list": terminalListStub([terminalEntry({ handle: "term_only" })]),
+    show: { ok: false, reason: "tab_not_found" },
+  });
+  const r = collectSeatLivenessObservation(
+    { worktreePath: VALID_WORKTREE, now: 1_700_000_010_000 },
+    { execFn },
+  );
+  assert.equal(r.ok, false);
+  assert.equal(
+    r.observationReason,
+    SEAT_LIVENESS_OBSERVATION_REASON.SHOW_QUERY_FAILED,
+  );
+});
+
+test("collectSeatLivenessObservation: terminal show returns a non-numeric lastOutputAt -- ok:false, MALFORMED (does not fabricate a timestamp)", () => {
+  const execFn = fakeExecFn({
+    "terminal-list": terminalListStub([terminalEntry({ handle: "term_only" })]),
+    show: terminalShowStub({ lastOutputAt: "2026-07-22T00:00:00.000Z" }),
+  });
+  const r = collectSeatLivenessObservation(
+    { worktreePath: VALID_WORKTREE, now: 1_700_000_010_000 },
+    { execFn },
+  );
+  assert.equal(r.ok, false);
+  assert.equal(r.observationReason, SEAT_LIVENESS_OBSERVATION_REASON.MALFORMED);
+});
+
+test("collectSeatLivenessObservation: orphan candidate (worktreePath:'') is excluded, same as resolveSeatHandle (D wiring reused)", () => {
+  const execFn = fakeExecFn({
+    "terminal-list": terminalListStub([
+      terminalEntry({ handle: "term_orphan", worktreePath: "" }),
+      terminalEntry({ handle: "term_real", worktreePath: VALID_WORKTREE }),
+    ]),
+    show: terminalShowStub(),
+  });
+  const r = collectSeatLivenessObservation(
+    { worktreePath: VALID_WORKTREE, now: 1_700_000_010_000 },
+    { execFn },
+  );
+  assert.equal(r.ok, true);
+  assert.equal(r.seatCount, 1);
+  assert.equal(r.handle, "term_real");
+});
+
+test("collectSeatLivenessObservation: worktreePath/now missing -- INPUT_INVALID, zero execFn calls (fail before any I/O)", () => {
+  const execFn = fakeExecFn({});
+  const r1 = collectSeatLivenessObservation({ now: 1 }, { execFn });
+  assert.equal(r1.ok, false);
+  assert.equal(
+    r1.observationReason,
+    SEAT_LIVENESS_OBSERVATION_REASON.INPUT_INVALID,
+  );
+  const r2 = collectSeatLivenessObservation(
+    { worktreePath: VALID_WORKTREE },
+    { execFn },
+  );
+  assert.equal(r2.ok, false);
+  assert.equal(
+    r2.observationReason,
+    SEAT_LIVENESS_OBSERVATION_REASON.INPUT_INVALID,
+  );
+  assert.equal(execFn.calls.length, 0);
 });
 
 test("parseTerminalList: pure parser -- extracts result.terminals, null on any malformed shape", () => {

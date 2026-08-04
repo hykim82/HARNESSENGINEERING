@@ -45,14 +45,43 @@
 //    supervisor v2 결선 등)은 별도 승인 대상이며 이번 사이클에 없다. 이
 //    파일을 import하거나 실행하는 코드는 이 파일 자신의 `.test.mjs`
 //    외에 저장소에 없다(실측: grep).
-// 5. `orca`를 호출하지 않는다 -- 명령 문자열 조립도 하지 않는다.
-//    화면 문자열·컨텍스트 %를 판정 근거로 쓰지 않는다.
+// 5. ★★(HYK-185 seat-wire로 갱신, coder-task.md §2-1) 이 파일 **자신은**
+//    `orca`를 spawn하지 않는다(G9 정적 검사, `node
+//    scripts/check/orca-cli-boundary.mjs`가 강제) -- 명령 문자열도 이
+//    파일이 조립하지 않는다. 단 **좌석 무응답(liveness) 관측만은**
+//    `scripts/relay/adapters/orca-adapter.mjs`의 읽기 전용
+//    `collectSeatLivenessObservation`(terminal list/show만, dispatch·
+//    send·close·stop·worktree 호출 0)을 통해 **간접적으로** `orca`를
+//    부른다. 무진행(pledge/observation) 축은 여전히 화면 문자열·
+//    컨텍스트 %를 판정 근거로 쓰지 않는다(변경 없음).
 //
-// 부작용 0(coder-task.md §5-C): 아무것도 고치지 않고 아무 데도 보내지
-// 않는다 -- 읽기 전용(약속 파일 읽기 + `git rev-parse`/`git
-// merge-base --is-ancestor`만 실행, 둘 다 로컬 조회이며 상태를 바꾸지
-// 않는다). 관측 수집은 저장소 안 파일 시스템 + git만 쓴다 -- `orca`·
-// Claude 훅·에이전트 API·네트워크(`git fetch` 포함) 호출 0.
+// 부작용 0(coder-task.md §5-C, HYK-185 seat-wire §2-1로 갱신): 저장소
+// 상태는 아무것도 고치지 않고 아무 데도 보내지 않는다 -- 읽기 전용(약속
+// 파일 읽기 + `git rev-parse`/`git merge-base --is-ancestor`만 실행, 둘
+// 다 로컬 조회이며 상태를 바꾸지 않는다 + 좌석 무응답 관측의 `terminal
+// list`/`terminal show`도 읽기 전용 조회다). Claude 훅·네트워크(`git
+// fetch` 포함) 호출은 여전히 0.
+//
+// ---- HYK-185 seat-wire (coder-task.md §1) -- 좌석 무응답 판정 결선 ----
+// 예약 감시(`watch-run.mjs`)가 이 파일을 부르는 경로에서
+// `seat-liveness-core.mjs`(gap#76, 판정만 있고 부르는 곳이 0이던 코어)의
+// `judgeSeatLiveness`가 실제로 호출되게 한다. 대상 = 이 저장소
+// (`--repo-root`) 자신의 워크트리에 붙은 좌석 -- 아직 결과 파일이 없는
+// (`.harness/*-task.md`가 있고 대응 `.md`가 아직 없는) "활성 배달"이 있을
+// 때만 판정한다(§2-2 아래 `selectActiveDispatch`).
+//
+// ★관측 수집 실패를 "무응답"으로 접지 않는다(§2-2 비타협, gap#61에서
+// 검토자가 잡아낸 형태와 동일 -- 수집 실패가 빈 값으로 접혀 조용히 통과로
+// 새는 것을 반복하지 않는다): `collectSeatLivenessObservation`이
+// `ok:false`(조회 자체 실패)면 `SEAT_LIVENESS_COLLECTION_FAILED`로
+// 표면화하고 `judgeSeatLiveness`를 아예 부르지 않는다 -- `seatCount:0`
+// (좌석이 그냥 없음, 정상)과는 반환 형태부터 다르다(아래
+// `judgeSeatLivenessForRepo`의 4상태 `SEAT_LIVENESS_WIRE_STATUS` 참조).
+//
+// v1은 로그만 남긴다(§2-3) -- 이 조각은 `watch-run.mjs`의 로그 한 줄에
+// 실릴 필드만 만들 뿐, `orch-progress`의 `EXIT_CODE_BY_VERDICT`(종료
+// 코드)에는 관여하지 않는다(종료 코드가 다른 자동 조치의 트리거가 되는
+// 것을 피하기 위해 의도적으로 분리 -- 알림 0 비타협).
 //
 // Node 20 호환(coder-task.md §2-11) -- ESM 표준 API만 사용.
 import { readFileSync, existsSync, statSync, readdirSync } from "node:fs";
@@ -64,6 +93,11 @@ import {
   ORCH_PROGRESS_VERDICT,
 } from "./orch-progress-core.mjs";
 import { derivePledges, PLEDGE_SOURCE } from "./pledge-derive-core.mjs";
+import { judgeSeatLiveness } from "./seat-liveness-core.mjs";
+import {
+  collectSeatLivenessObservation,
+  createOrcaExecFn,
+} from "../relay/adapters/orca-adapter.mjs";
 
 // 정지 의심과 판정 불가를 같은 코드로 접지 않는다(coder-task.md §5-C
 // 비타협). WAITING_HUMAN_GATE는 "정지 의심"이 아니라 정당한 대기이므로
@@ -431,6 +465,88 @@ function mergeDeclaredAndDerivedPledges(declared, derived) {
   return [...byId.values(), ...passthrough];
 }
 
+// ---- HYK-185 seat-wire: 좌석 무응답 판정 결선 ----
+export const SEAT_LIVENESS_WIRE_STATUS = Object.freeze({
+  // 이 저장소에 아직 결과 파일이 없는 "활성 배달"이 없다 -- 판정 대상
+  // 자체가 없다(정상, 판정 불가 아님).
+  NOT_APPLICABLE: "SEAT_LIVENESS_NOT_APPLICABLE",
+  // 관측 조회는 성공했지만 이 워크트리에 붙은 좌석이 0개다(정상).
+  NO_SEAT: "SEAT_LIVENESS_NO_SEAT",
+  // 관측을 모아 judgeSeatLiveness를 실제로 불렀고 verdict가 나왔다.
+  JUDGED: "SEAT_LIVENESS_JUDGED",
+  // ★관측 수집 자체가 실패했다 -- "무응답"으로 접지 않고 여기서 멈춘다
+  // (§2-2 비타협, gap#61 재발 방지와 동일 원칙).
+  COLLECTION_FAILED: "SEAT_LIVENESS_COLLECTION_FAILED",
+});
+
+// droppedTaskFiles(collectPledgeDerivationEvidence가 이미 모은 배열,
+// collectDroppedTaskFileEvidence 참조)에서 "아직 결과 파일이 없는" 항목
+// 중 가장 최근에 드롭된 것 하나를 고른다. 여러 role의 task 파일이 동시에
+// 있어도(coder-task.md -> review-task.md 순서 등) 이 저장소에는 실제로는
+// 하나의 좌석만 붙어 있으므로, 가장 최근 활성 배달 하나만 판정 대상으로
+// 삼는다. 없으면 null(NOT_APPLICABLE).
+export function selectActiveDispatch(droppedTaskFiles) {
+  const active = (Array.isArray(droppedTaskFiles) ? droppedTaskFiles : [])
+    .filter(
+      (item) =>
+        item &&
+        typeof item.droppedAtMs === "number" &&
+        Number.isFinite(item.droppedAtMs) &&
+        item.resultFile &&
+        item.resultFile.exists === false,
+    )
+    .sort((a, b) => b.droppedAtMs - a.droppedAtMs);
+  return active.length > 0 ? active[0] : null;
+}
+
+// 어댑터의 관측(collectSeatLivenessObservation)을 모아
+// seat-liveness-core.mjs의 judgeSeatLiveness를 실제로 부른다(HYK-185
+// seat-wire의 실질 결선). opts.execFn을 넘기지 않으면 orca-adapter.mjs의
+// createOrcaExecFn()(실 spawn)이 기본값이다 -- 예약 감시가 이 함수를
+// 거쳐 부르면 실제로 `orca terminal list`/`terminal show`가 나간다.
+export function judgeSeatLivenessForRepo(
+  { repoRoot, droppedTaskFiles, now },
+  opts = {},
+) {
+  const active = selectActiveDispatch(droppedTaskFiles);
+  if (!active) {
+    return { status: SEAT_LIVENESS_WIRE_STATUS.NOT_APPLICABLE };
+  }
+  const dispatch = {
+    dispatchId: active.path,
+    dispatchedAtMs: active.droppedAtMs,
+  };
+  const execFn =
+    typeof opts.execFn === "function" ? opts.execFn : createOrcaExecFn();
+  const observed = collectSeatLivenessObservation(
+    { worktreePath: repoRoot, now },
+    { execFn },
+  );
+  if (!observed.ok) {
+    return {
+      status: SEAT_LIVENESS_WIRE_STATUS.COLLECTION_FAILED,
+      observationReason: observed.observationReason,
+      reason: observed.reason,
+      dispatch,
+    };
+  }
+  if (observed.seatCount === 0) {
+    return { status: SEAT_LIVENESS_WIRE_STATUS.NO_SEAT, dispatch };
+  }
+  const judged = judgeSeatLiveness({
+    dispatch,
+    observation: observed.observation,
+    now,
+  });
+  return {
+    status: SEAT_LIVENESS_WIRE_STATUS.JUDGED,
+    verdict: judged.verdict,
+    reasonCode: judged.reasonCode,
+    details: judged.details,
+    dispatch,
+  };
+}
+
 // runOrchStallDetect(argv) -> {result, exitCode} -- CLI 몸통을 순수 함수에
 // 가깝게 뽑아 시험이 process.exit 없이 호출할 수 있게 한다. I/O(파일
 // 읽기·git 실행)는 그대로 하되, 프로세스 종료·stdout 출력은 하지 않는다.
@@ -438,7 +554,7 @@ function mergeDeclaredAndDerivedPledges(declared, derived) {
 // gap#61(coder-task.md §5-B): `--pledges` 생략 시 선언된 약속은 빈
 // 배열(정당한 상태, 오류 아님) -- 유도된 약속만으로도 판정이 나온다.
 // `--pledges`를 줬는데 못 읽으면 여전히 오류(구별, 헤더 주석 참조).
-export function runOrchStallDetect(argv) {
+export function runOrchStallDetect(argv, opts = {}) {
   const cli = parseArgs(argv);
   let declaredPledges = [];
   if (cli.pledgesPath) {
@@ -502,6 +618,13 @@ export function runOrchStallDetect(argv) {
     now,
     thresholdSeconds: cli.thresholdSeconds,
   });
+  // HYK-185 seat-wire: 좌석 무응답 판정을 실제로 부른다(§1 결선 그 자체).
+  // v1은 로그만(§2-3) -- 이 결과는 exitCode에 관여하지 않는다(위 헤더
+  // 주석 참조).
+  const seatLiveness = judgeSeatLivenessForRepo(
+    { repoRoot, droppedTaskFiles: evidence.droppedTaskFiles, now },
+    opts,
+  );
   return {
     result: {
       ...result,
@@ -511,6 +634,7 @@ export function runOrchStallDetect(argv) {
           .map((p) => [p.pledgeId, p.source ?? PLEDGE_SOURCE.DECLARED]),
       ),
       derivationNotes: derivation.notes,
+      seatLiveness,
     },
     exitCode: EXIT_CODE_BY_VERDICT[result.verdict] ?? 3,
     cli,
