@@ -1,6 +1,7 @@
 import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { execSync } from "node:child_process";
+import { recordRejectStreakFromResultText } from "./reject-streak.mjs";
 
 // HYK-183: 결과 파일에 이 표지가 2개 이상이면 어느 것이 최종인지 결정할 수
 // 없으므로 조용히 하나를 고르지 않고 판정 불가로 멈춘다(2026-07-31 거짓
@@ -27,6 +28,31 @@ function repoRoot() {
     }).trim();
   } catch {
     return process.cwd();
+  }
+}
+
+// HYK-183 §2 R2: the reject-streak ledger must live in ONE place -- the
+// main repo -- no matter which worktree relay-handshake.mjs happens to run
+// from (a per-worktree ledger silently reads streak=0 forever, per
+// reject-streak.mjs's own module header on the 2026-07-26 실측). Mirrors
+// hooks/commit-msg's own worktree -> main-clone resolution idiom rather
+// than inventing a new one: resolve this cwd's own toplevel, then ask git
+// for `--git-common-dir` (absolute when cwd is a linked worktree, relative
+// "`.git`" when cwd already IS the main worktree) and strip the trailing
+// "/.git" to land back on the main clone's root.
+function mainRepoRoot() {
+  const root = repoRoot();
+  try {
+    const commonDir = execSync("git rev-parse --git-common-dir", {
+      encoding: "utf8",
+      cwd: root,
+    }).trim();
+    const absCommonDir = /^([A-Za-z]:[\\/]|\/)/.test(commonDir)
+      ? commonDir
+      : join(root, commonDir);
+    return absCommonDir.replace(/[\\/]\.git$/, "");
+  } catch {
+    return root;
   }
 }
 
@@ -77,6 +103,25 @@ function resolveResultDoneMatch(resultContent) {
     ok: false,
     reason: 'result missing ">>> DONE: ... @ <time KST>" line (required)',
   };
+}
+
+// Extracted from checkRelayHandshake (keeps its complexity under the
+// repo's ESLint ceiling) -- surfaces recordRejectStreakFromResultText's
+// outcome via console.log/console.error rather than swallowing it (§2-1
+// R4). Never touched by tests that assert on checkRelayHandshake's return
+// value; this is purely the side-effect wiring described at its call site.
+function autoRecordRejectStreak({ role, resultContent }) {
+  const autoRecord = recordRejectStreakFromResultText({
+    role,
+    resultText: resultContent,
+    ledgerPath: join(mainRepoRoot(), ".harness", "reject-streak.json"),
+  });
+  if (!autoRecord.attempted) return;
+  if (autoRecord.ok) {
+    console.log(autoRecord.reason);
+  } else {
+    console.error(autoRecord.reason);
+  }
 }
 
 function parseKstTimestamp(str) {
@@ -164,6 +209,21 @@ export function checkRelayHandshake({
       reason: `stale result: DONE (${doneMatch[1].trim()}) predates task drop (${droppedMatch[1].trim()})`,
     };
   }
+
+  // HYK-183 §2: the moment this function confirms a REVIEW-family result
+  // file is COMPLETE (every prior check above already passed) is the one
+  // moment the reject-streak ledger should be updated -- record's whole
+  // job (reject-streak.mjs) is "did the LATEST, non-stale round on this
+  // issue get rejected or approved", and everything above this line is
+  // exactly the staleness/ambiguity resolution that answers that. Wired
+  // here (inside the shared decision function, not only the CLI block) so
+  // every caller -- the CLI AND in-process callers like relay-core.mjs --
+  // gets it; §1's original gap was that NOTHING called `record` anywhere.
+  // Never mutates this function's own return value or the CLI's exit code
+  // (§2-1 R5) -- purely a side effect layered on top of an already-decided
+  // PASS. Failure/duplicate/skip are never swallowed (§2-1 R4) --
+  // autoRecordRejectStreak surfaces every branch via console.log/error.
+  autoRecordRejectStreak({ role, resultContent });
 
   return { ok: true, reason: `relay handshake ok for ${taskId}` };
 }

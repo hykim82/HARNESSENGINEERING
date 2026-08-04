@@ -479,12 +479,29 @@ const RELAY_HANDSHAKE_SRC = execFileSync(
   { encoding: "utf8" },
 );
 
+// HYK-183: relay-handshake.mjs now imports "./reject-streak.mjs" (the
+// auto-record wiring), so a mutant written ALONE into a fresh scripts/check
+// dir fails to even load (MODULE_NOT_FOUND) -- these M1-M3 mutations exist
+// to probe relay-handshake.mjs's own CLI arg-parsing/exit-code contract,
+// not reject-streak.mjs, so the real (unmutated) sibling module is copied
+// alongside every mutant to keep the relative import resolvable.
+const REJECT_STREAK_SRC = execFileSync(
+  "git",
+  ["show", "HEAD:scripts/check/reject-streak.mjs"],
+  { encoding: "utf8" },
+);
+
 function writeMutantCli(mutatedSrc) {
   const rootDir = mkdtempSync(join(tmpdir(), "relay-handshake-mutant-"));
   const scriptsCheckDir = join(rootDir, "scripts", "check");
   mkdirSync(scriptsCheckDir, { recursive: true });
   const mutantPath = join(scriptsCheckDir, "relay-handshake.mjs");
   writeFileSync(mutantPath, mutatedSrc, "utf8");
+  writeFileSync(
+    join(scriptsCheckDir, "reject-streak.mjs"),
+    REJECT_STREAK_SRC,
+    "utf8",
+  );
   return { rootDir, mutantPath };
 }
 

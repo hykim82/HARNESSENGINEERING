@@ -236,6 +236,89 @@ test("(13) computeRecord: malformed review text -> ok:false, no ledger mutation 
 });
 
 // ---------------------------------------------------------------------------
+// HYK-183 §2-1 R3: computeRecord idempotency -- the identification criterion
+// is "same task_id + same verdict as the issue's LAST recorded history
+// entry". These are functional unit tests of that criterion in isolation
+// (the auto-wiring's own mkdtemp-worktree tests live in
+// reject-streak-auto-record.test.mjs); no CLI process needed here.
+// ---------------------------------------------------------------------------
+
+test("(13b) computeRecord: identical (task_id, verdict) recorded twice in a row -> second call is a no-op duplicate, streak/history unchanged", () => {
+  const first = computeRecord({
+    reviewText: "for: HYK-183-review-1\nverdict: rejected\n",
+    ledger: { schema_version: 1, issues: {} },
+    at: "t1",
+  });
+  assert.equal(first.ok, true);
+  assert.equal(first.duplicate, false);
+  assert.equal(first.streak, 1);
+
+  const second = computeRecord({
+    reviewText: "for: HYK-183-review-1\nverdict: rejected\n",
+    ledger: first.ledger,
+    at: "t2",
+  });
+  assert.equal(second.ok, true);
+  assert.equal(
+    second.duplicate,
+    true,
+    "same task_id+verdict as the last entry must be recognized as a duplicate",
+  );
+  assert.equal(second.streak, 1, "streak must not double-count the repeat");
+  assert.equal(
+    second.ledger.issues["HYK-183"].history.length,
+    1,
+    "history must not gain a second entry for the repeat",
+  );
+});
+
+test("(13c) computeRecord: same review text recorded THREE times -> streak stays 1 across all repeats, not 2 or 3", () => {
+  let ledger = { schema_version: 1, issues: {} };
+  const reviewText = "for: HYK-183-review-1\nverdict: rejected\n";
+  for (let i = 0; i < 3; i++) {
+    const result = computeRecord({ reviewText, ledger, at: `t${i}` });
+    assert.equal(result.ok, true);
+    assert.equal(result.streak, 1, `call #${i + 1} must keep streak at 1`);
+    ledger = result.ledger;
+  }
+  assert.equal(ledger.issues["HYK-183"].history.length, 1);
+});
+
+test("(13d) computeRecord: a genuinely NEW round (different task_id, same verdict) is never mistaken for a duplicate -- two real consecutive rejects still count as streak=2", () => {
+  const first = computeRecord({
+    reviewText: "for: HYK-183-review-1\nverdict: rejected\n",
+    ledger: { schema_version: 1, issues: {} },
+    at: "t1",
+  });
+  const second = computeRecord({
+    reviewText: "for: HYK-183-review-2\nverdict: rejected\n",
+    ledger: first.ledger,
+    at: "t2",
+  });
+  assert.equal(second.duplicate, false);
+  assert.equal(second.streak, 2);
+  assert.equal(second.ledger.issues["HYK-183"].history.length, 2);
+});
+
+test("(13e) computeRecord: duplicate call preserves the ORIGINAL (unmutated) ledger reference in its result", () => {
+  const first = computeRecord({
+    reviewText: "for: HYK-183-review-1\nverdict: rejected\n",
+    ledger: { schema_version: 1, issues: {} },
+    at: "t1",
+  });
+  const second = computeRecord({
+    reviewText: "for: HYK-183-review-1\nverdict: rejected\n",
+    ledger: first.ledger,
+    at: "t2",
+  });
+  assert.equal(
+    second.ledger,
+    first.ledger,
+    "a duplicate must return the SAME ledger object, not a fresh copy that only looks equal (proves writeLedger would be a true no-op if called)",
+  );
+});
+
+// ---------------------------------------------------------------------------
 // loadLedger / writeLedger
 // ---------------------------------------------------------------------------
 
@@ -607,6 +690,52 @@ test("(41) CLI record: ledger survives across two separate invocations (relay-sl
     const ledger = JSON.parse(readFileSync(ledgerPath, "utf8"));
     assert.equal(ledger.issues["HYK-133"].streak, 2);
     assert.equal(ledger.issues["HYK-133"].history.length, 2);
+  });
+});
+
+test("(41b) CLI record: same review.md re-run twice (identical content, e.g. re-invoked auto-wiring) -> second run reports DUPLICATE, streak/history unchanged on disk", () => {
+  withFixtureDir((dir) => {
+    const reviewPath = join(dir, "review.md");
+    const ledgerPath = join(dir, "reject-streak.json");
+
+    writeFileSync(
+      reviewPath,
+      "for: HYK-133-coder-1\nverdict: rejected\n",
+      "utf8",
+    );
+    const first = runCli([
+      "record",
+      "--review",
+      reviewPath,
+      "--ledger",
+      ledgerPath,
+    ]);
+    assert.equal(first.status, 0);
+    assert.match(first.stdout, /streak=1/);
+    const afterFirst = readFileSync(ledgerPath, "utf8");
+
+    const second = runCli([
+      "record",
+      "--review",
+      reviewPath,
+      "--ledger",
+      ledgerPath,
+    ]);
+    assert.equal(second.status, 0);
+    assert.match(
+      second.stdout,
+      /DUPLICATE/,
+      "a repeat record of the exact same round must be visibly reported as a duplicate, not silently re-recorded",
+    );
+    const afterSecond = readFileSync(ledgerPath, "utf8");
+    assert.equal(
+      afterSecond,
+      afterFirst,
+      "the ledger FILE on disk must be byte-identical after the duplicate call (writeLedger must not even be invoked)",
+    );
+    const ledger = JSON.parse(afterSecond);
+    assert.equal(ledger.issues["HYK-133"].streak, 1);
+    assert.equal(ledger.issues["HYK-133"].history.length, 1);
   });
 });
 
