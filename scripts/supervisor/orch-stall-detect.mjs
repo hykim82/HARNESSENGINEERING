@@ -93,7 +93,10 @@ import {
   ORCH_PROGRESS_VERDICT,
 } from "./orch-progress-core.mjs";
 import { derivePledges, PLEDGE_SOURCE } from "./pledge-derive-core.mjs";
-import { judgeSeatLiveness } from "./seat-liveness-core.mjs";
+import {
+  judgeSeatLiveness,
+  SEAT_LIVENESS_VERDICT,
+} from "./seat-liveness-core.mjs";
 import {
   collectSeatLivenessObservation,
   createOrcaExecFn,
@@ -247,11 +250,18 @@ function computeTaskIdMismatch(repoRoot, taskFileRelPath, taskFileTaskId) {
 // `ENOENT`(`.harness`가 아직 없음)는 정상(§11 ㄱ의 연장 -- harness를 아직
 // 한 번도 안 쓴 저장소), 그 밖(`ENOTDIR`·`EACCES` 등 실제 읽기 실패)만
 // `failed:true`(§11 ㄴ).
-function collectDroppedTaskFileEvidence(repoRoot) {
+// HYK-185 seat-scan: opts.readdirFn 주입 가능(시험 전용) -- 기본은 실
+// readdirSync. §3-c-③ "개별 워크트리 .harness 읽기 실패"를 결정적으로
+// 재현하려면 실제 OS 권한 오류를 흉내내기 어려우므로, 이 지점 하나에
+// 주입 지점을 둔다(다른 호출자, collectPledgeDerivationEvidence는 opts
+// 없이 불러 기존 동작을 그대로 유지한다).
+export function collectDroppedTaskFileEvidence(repoRoot, opts = {}) {
+  const readdirFn =
+    typeof opts.readdirFn === "function" ? opts.readdirFn : readdirSync;
   const harnessDir = path.join(repoRoot, ".harness");
   let names;
   try {
-    names = readdirSync(harnessDir).filter((n) => n.endsWith("-task.md"));
+    names = readdirFn(harnessDir).filter((n) => n.endsWith("-task.md"));
   } catch (err) {
     if (err && err.code === "ENOENT") return { items: [], failed: false };
     return { items: [], failed: true };
@@ -547,6 +557,155 @@ export function judgeSeatLivenessForRepo(
   };
 }
 
+// ---- HYK-185 seat-scan (coder-task.md §1-§2) -- 워크트리 열거 ----
+// gap#77의 구조적 한계: 위 judgeSeatLivenessForRepo는 주어진 --repo-root
+// 하나의 `.harness`만 본다. 그런데 워커 태스크는 메인이 아니라 「워크트리」에
+// 떨어지므로(coder-task.md §1 실측: 메인 `.harness`의 `*-task.md` 0개),
+// 이 결선은 구조적으로 계속 NOT_APPLICABLE만 낸다. 이 블록은 그 저장소에
+// 등록된 워크트리 전부를 열거해 각각 판정한다.
+//
+// ★스캔 범위 선언(§2-4 요구, 문서에도 동일하게 적는다):
+// - 스캔 대상 = `git worktree list --porcelain`이 돌려주는 것뿐이다
+//   -- 이 저장소(git이 아는 저장소 하나)에 **등록된** 워크트리 전부(메인
+//   포함).
+// - 스캔 대상이 아닌 것 = ①`git worktree add`로 등록된 적이 없는 폴더
+//   (예: 단순 clone) ②다른 저장소의 워크트리 ③`git worktree remove`
+//   없이 디스크에서만 지워졌지만 좌석(터미널)만 살아있는 경우(git이
+//   "prunable"로만 표시하고 여전히 목록에 올릴 수도, 이미 빠졌을 수도
+//   있다 -- 이 결선은 git의 판단을 그대로 신뢰하고 별도 검증을 하지
+//   않는다) ④이 함수를 호출하는 프로세스가 애초에 다른 `--repo-root`를
+//   준 경우 그 값 밖의 모든 저장소.
+export const SEAT_LIVENESS_SCAN_FAILURE = Object.freeze({
+  WORKTREE_LIST_FAILED: "SEAT_LIVENESS_SCAN_WORKTREE_LIST_FAILED",
+  HARNESS_READ_FAILED: "SEAT_LIVENESS_SCAN_HARNESS_READ_FAILED",
+});
+
+function parseWorktreeListPorcelain(stdout) {
+  const paths = [];
+  for (const line of String(stdout).split(/\r?\n/)) {
+    const m = line.match(/^worktree\s+(.+)$/);
+    if (m) paths.push(m[1].trim());
+  }
+  return paths;
+}
+
+function defaultGitWorktreeListExec(repoRoot) {
+  return execFileSync("git", ["worktree", "list", "--porcelain"], {
+    cwd: repoRoot,
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "ignore"],
+  });
+}
+
+// opts.gitWorktreeListExecFn 주입 가능(시험 전용, 열거 실패를 결정적으로
+// 재현) -- 기본은 실 `git worktree list --porcelain`(진입점이 이미 쓰는
+// execFileSync("git", ...) 층 재사용, §2-1 근거).
+export function collectGitWorktrees(repoRoot, opts = {}) {
+  const exec =
+    typeof opts.gitWorktreeListExecFn === "function"
+      ? opts.gitWorktreeListExecFn
+      : defaultGitWorktreeListExec;
+  try {
+    return { ok: true, worktrees: parseWorktreeListPorcelain(exec(repoRoot)) };
+  } catch (err) {
+    return {
+      ok: false,
+      reason: SEAT_LIVENESS_SCAN_FAILURE.WORKTREE_LIST_FAILED,
+      detail: err && err.message ? err.message : String(err),
+    };
+  }
+}
+
+// "가장 나쁜 상태"를 고르는 순위(§2-2) -- 숫자가 클수록 나쁘다. 수집
+// 실패(②③)는 "무응답"보다는 낮지만 정상(①④)보다는 항상 높다 -- 판정
+// 불가를 조용함으로 접지 않는다(§2-3 비타협)는 원칙을 순위에도 그대로
+// 반영한다.
+export const SEAT_LIVENESS_SCAN_SEVERITY = Object.freeze({
+  NORMAL: 0, // ① NOT_APPLICABLE/NO_SEAT ④ JUDGED+RESPONSIVE
+  UNDECIDABLE: 1, // JUDGED이지만 verdict가 UNDECIDABLE(관측 형식 문제 등)
+  COLLECTION_FAILURE: 2, // ② 워크트리 열거 실패 ③ .harness 읽기 실패 · 좌석 조회 실패
+  SUSPECTED_UNRESPONSIVE: 3, // 가장 나쁨 -- 무응답 의심
+});
+
+function severityOf(entry) {
+  if (
+    entry.status === SEAT_LIVENESS_SCAN_FAILURE.WORKTREE_LIST_FAILED ||
+    entry.status === SEAT_LIVENESS_SCAN_FAILURE.HARNESS_READ_FAILED ||
+    entry.status === SEAT_LIVENESS_WIRE_STATUS.COLLECTION_FAILED
+  ) {
+    return SEAT_LIVENESS_SCAN_SEVERITY.COLLECTION_FAILURE;
+  }
+  if (entry.status === SEAT_LIVENESS_WIRE_STATUS.JUDGED) {
+    if (entry.verdict === SEAT_LIVENESS_VERDICT.SUSPECTED_UNRESPONSIVE) {
+      return SEAT_LIVENESS_SCAN_SEVERITY.SUSPECTED_UNRESPONSIVE;
+    }
+    if (entry.verdict === SEAT_LIVENESS_VERDICT.UNDECIDABLE) {
+      return SEAT_LIVENESS_SCAN_SEVERITY.UNDECIDABLE;
+    }
+  }
+  return SEAT_LIVENESS_SCAN_SEVERITY.NORMAL;
+}
+
+// 워크트리 하나를 판정한다 -- ★수집 실패(.harness 읽기 실패)를 "조용함"
+// (NOT_APPLICABLE)으로 접지 않고 별도 상태로 표면화한다(§2-3 확장).
+function judgeSeatLivenessForWorktree(worktreePath, now, opts) {
+  const evidence = collectDroppedTaskFileEvidence(worktreePath, {
+    readdirFn: opts.harnessReaddirFn,
+  });
+  if (evidence.failed) {
+    return {
+      worktreePath,
+      status: SEAT_LIVENESS_SCAN_FAILURE.HARNESS_READ_FAILED,
+    };
+  }
+  const judged = judgeSeatLivenessForRepo(
+    { repoRoot: worktreePath, droppedTaskFiles: evidence.items, now },
+    opts,
+  );
+  return { worktreePath, ...judged };
+}
+
+// judgeSeatLivenessAcrossWorktrees({repoRoot, now}, opts) -- HYK-185
+// seat-scan 결선 그 자체(§1-§2). `repoRoot`가 속한 저장소에 등록된
+// 워크트리 전부를 열거하고(collectGitWorktrees) 각각 개별 판정한 뒤
+// (judgeSeatLivenessForWorktree), 가장 나쁜 항목을 대표값으로 상위에
+// 싣고(seat_status/seat_verdict 하위호환) 전체 목록·건수도 함께 낸다
+// (§2-2 "여러 건을 각각 판정하고 전부 표면화"). 여러 워크트리가 동시에
+// 같은 최악 등급이어도(예: 두 좌석이 동시에 무응답 의심) worstCount로
+// 건수를 알 수 있다 -- 대표 status/verdict 하나만으로는 이 정보가
+// 사라지므로 로그 줄(watch-run.mjs)이 worstCount도 함께 싣는다.
+export function judgeSeatLivenessAcrossWorktrees({ repoRoot, now }, opts = {}) {
+  const list = collectGitWorktrees(repoRoot, opts);
+  if (!list.ok) {
+    return {
+      status: list.reason,
+      detail: list.detail,
+      worktrees: [],
+      totalWorktrees: 0,
+      worstCount: 1,
+    };
+  }
+  const worktrees = list.worktrees.map((wt) =>
+    judgeSeatLivenessForWorktree(wt, now, opts),
+  );
+  const worstSeverity = worktrees.reduce(
+    (acc, w) => Math.max(acc, severityOf(w)),
+    SEAT_LIVENESS_SCAN_SEVERITY.NORMAL,
+  );
+  const worstEntries = worktrees.filter((w) => severityOf(w) === worstSeverity);
+  const worst = worstEntries[0] ?? null;
+  return {
+    status: worst ? worst.status : SEAT_LIVENESS_WIRE_STATUS.NOT_APPLICABLE,
+    verdict: worst ? worst.verdict : undefined,
+    reasonCode: worst ? worst.reasonCode : undefined,
+    details: worst ? worst.details : undefined,
+    worktreePath: worst ? worst.worktreePath : undefined,
+    worktrees,
+    totalWorktrees: worktrees.length,
+    worstCount: worstEntries.length,
+  };
+}
+
 // runOrchStallDetect(argv) -> {result, exitCode} -- CLI 몸통을 순수 함수에
 // 가깝게 뽑아 시험이 process.exit 없이 호출할 수 있게 한다. I/O(파일
 // 읽기·git 실행)는 그대로 하되, 프로세스 종료·stdout 출력은 하지 않는다.
@@ -618,11 +777,12 @@ export function runOrchStallDetect(argv, opts = {}) {
     now,
     thresholdSeconds: cli.thresholdSeconds,
   });
-  // HYK-185 seat-wire: 좌석 무응답 판정을 실제로 부른다(§1 결선 그 자체).
-  // v1은 로그만(§2-3) -- 이 결과는 exitCode에 관여하지 않는다(위 헤더
-  // 주석 참조).
-  const seatLiveness = judgeSeatLivenessForRepo(
-    { repoRoot, droppedTaskFiles: evidence.droppedTaskFiles, now },
+  // HYK-185 seat-scan: 좌석 무응답 판정을 이 저장소의 워크트리 전부에
+  // 걸쳐 부른다(§1-§2 결선 그 자체 -- gap#77까지는 --repo-root 하나의
+  // `.harness`만 봤다). v1은 로그만(§2-3) -- 이 결과는 exitCode에
+  // 관여하지 않는다(위 헤더 주석 참조).
+  const seatLiveness = judgeSeatLivenessAcrossWorktrees(
+    { repoRoot, now },
     opts,
   );
   return {

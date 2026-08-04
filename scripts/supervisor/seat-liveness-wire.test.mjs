@@ -32,12 +32,15 @@ import { execFileSync } from "node:child_process";
 import {
   selectActiveDispatch,
   judgeSeatLivenessForRepo,
+  judgeSeatLivenessAcrossWorktrees,
   runOrchStallDetect,
   SEAT_LIVENESS_WIRE_STATUS,
+  SEAT_LIVENESS_SCAN_FAILURE,
 } from "./orch-stall-detect.mjs";
 import {
   SEAT_LIVENESS_VERDICT,
   SEAT_LIVENESS_REASON,
+  DEFAULT_MAX_NO_OUTPUT_SECONDS,
 } from "./seat-liveness-core.mjs";
 import { SEAT_LIVENESS_OBSERVATION_REASON } from "../relay/adapters/orca-adapter.mjs";
 
@@ -71,6 +74,32 @@ function withTempDir(prefix, fn) {
 }
 function git(cwd, args) {
   return execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
+}
+// HYK-185 seat-scan: `git worktree list`가 돌려주는 경로는 mkdtemp가 준
+// 경로와 글자 그대로 같지 않을 수 있다(Windows 8.3 단축 경로 vs git이
+// 해석하는 실경로 등, 실측). fake terminal의 worktreePath는 이 경로와
+// 일치해야 어댑터의 canonicalizeForComparison이 후보를 찾으므로, "그
+// 워크트리 자신"을 가리키는 경로는 항상 이 함수로 구한다(dir을 직접
+// 문자열 변환해 쓰지 않는다).
+function listWorktreePaths(dir) {
+  const out = execFileSync("git", ["worktree", "list", "--porcelain"], {
+    cwd: dir,
+    encoding: "utf8",
+  });
+  return [...out.matchAll(/^worktree\s+(.+)$/gm)].map((m) => m[1].trim());
+}
+function gitWorktreeSelfPath(dir) {
+  return listWorktreePaths(dir)[0];
+}
+// HYK-185 seat-scan (§4-1 "실제 워크트리를 새로 만들지 마라"): 이 시험은
+// 저장소 밖 mkdtemp 임시 디렉터리 안에 진짜 워크트리 쌍(메인+링크드)을
+// 만든다 -- 이 저장소 자체의 워크트리는 건드리지 않는다.
+function addLinkedWorktree(mainDir) {
+  const linkedDir = tmpDir("hyk185-linked-");
+  rmSync(linkedDir, { recursive: true, force: true });
+  const branch = `wt-${process.pid}-${Date.now()}`;
+  git(mainDir, ["worktree", "add", "-b", branch, linkedDir]);
+  return linkedDir;
 }
 function initPlainGitRepo(dir) {
   git(dir, ["init", "--quiet", "-b", "main"]);
@@ -298,7 +327,7 @@ test("(a) runOrchStallDetect end-to-end: an active .harness/coder-task.md + a ma
     const now = Date.parse("2026-08-04T11:30:00+09:00"); // 배달 7분 후, 정상.
     const execFn = fakeOrcaExecFn({
       terminals: [
-        { handle: "term_e2e", worktreePath: dir.replace(/\\/g, "/") },
+        { handle: "term_e2e", worktreePath: gitWorktreeSelfPath(dir) },
       ],
       showsByHandle: {
         term_e2e: {
@@ -373,6 +402,165 @@ test("static: judgeSeatLivenessForRepo defaults opts.execFn to createOrcaExecFn(
 });
 
 // ---------------------------------------------------------------------------
+// HYK-185 seat-scan (coder-task.md §1-§2, §3-a) -- 이 조각의 존재 이유:
+// judgeSeatLivenessAcrossWorktrees가 --repo-root 하나의 .harness만 보던
+// gap#77의 구조적 한계를 실제로 넘는지 증명한다. 메인에는 활성 배달이
+// 없고, «워크트리»(git worktree add로 만든 진짜 링크드 워크트리)에만
+// 활성 배달 + 무응답 좌석이 있는 형태로 구성한다 -- gap#77 코드라면
+// 메인만 보고 NOT_APPLICABLE로 끝났을 것이다.
+// ---------------------------------------------------------------------------
+test("(a)★ 존재 이유: 메인이 아니라 «링크드 워크트리»의 무응답이 잡힌다(오늘의 28분 갇힘과 동형) -- gap#77 코드는 메인만 봐서 여기서 NOT_APPLICABLE로 끝났을 것", () => {
+  withTempDir("hyk185-scan-main-", (mainDir) => {
+    initPlainGitRepo(mainDir);
+    const linkedDir = addLinkedWorktree(mainDir);
+    try {
+      writeTaskFile(linkedDir, {
+        taskId: "HYK-185-seat-scan-1",
+        droppedAt: "2026-08-04 11:23",
+      });
+      const frozenOutputAt = Date.parse("2026-08-04T11:36:00+09:00");
+      const discoveredAt = Date.parse("2026-08-04T12:04:00+09:00");
+      const [mainPath, linkedPath] = listWorktreePaths(mainDir);
+      assert.notEqual(
+        linkedPath,
+        mainPath,
+        "링크드 워크트리는 메인과 다른 경로여야 한다",
+      );
+      const execFn = fakeOrcaExecFn({
+        terminals: [{ handle: "term_stuck", worktreePath: linkedPath }],
+        showsByHandle: {
+          term_stuck: {
+            ok: true,
+            result: {
+              terminal: { lastOutputAt: frozenOutputAt, title: "CODER" },
+            },
+          },
+        },
+      });
+      const r = judgeSeatLivenessAcrossWorktrees(
+        { repoRoot: mainDir, now: discoveredAt },
+        { execFn },
+      );
+      assert.equal(r.status, SEAT_LIVENESS_WIRE_STATUS.JUDGED);
+      assert.equal(r.verdict, SEAT_LIVENESS_VERDICT.SUSPECTED_UNRESPONSIVE);
+      assert.equal(r.worktreePath, linkedPath);
+      const crossingMs = frozenOutputAt + DEFAULT_MAX_NO_OUTPUT_SECONDS * 1000;
+      assert.ok(
+        crossingMs < discoveredAt,
+        "임계 초과 시각이 사람이 발견한 12:04보다 이르다",
+      );
+    } finally {
+      rmSync(linkedDir, { recursive: true, force: true });
+    }
+  });
+});
+
+test("(b) 재사용(새 표본 만들지 않음): 정상 15분 침묵이 judgeSeatLivenessAcrossWorktrees(다중 워크트리 스캔 경로)에서도 오탐 0", () => {
+  withTempDir("hyk185-scan-normal-", (dir) => {
+    initPlainGitRepo(dir);
+    writeTaskFile(dir, {
+      taskId: "HYK-185-normal",
+      droppedAt: "2026-08-04 09:00",
+    });
+    const [selfPath] = listWorktreePaths(dir);
+    const lastOutputAt = Date.parse("2026-08-04T09:10:00+09:00");
+    const now = Date.parse("2026-08-04T09:25:00+09:00"); // +15min, 정상 침묵 표본 재사용.
+    const execFn = fakeOrcaExecFn({
+      terminals: [{ handle: "term_y", worktreePath: selfPath }],
+      showsByHandle: {
+        term_y: {
+          ok: true,
+          result: { terminal: { lastOutputAt, title: "REVIEW" } },
+        },
+      },
+    });
+    const r = judgeSeatLivenessAcrossWorktrees(
+      { repoRoot: dir, now },
+      { execFn },
+    );
+    assert.equal(r.verdict, SEAT_LIVENESS_VERDICT.RESPONSIVE);
+    assert.notEqual(r.verdict, SEAT_LIVENESS_VERDICT.SUSPECTED_UNRESPONSIVE);
+  });
+});
+
+test("(c)-② judgeSeatLivenessAcrossWorktrees: git worktree list 자체가 실패 -> WORKTREE_LIST_FAILED(판정 불가), NOT_APPLICABLE로 접히지 않는다", () => {
+  const r = judgeSeatLivenessAcrossWorktrees(
+    { repoRoot: "C:/wt", now: 1000 },
+    {
+      gitWorktreeListExecFn: () => {
+        throw new Error("git not found");
+      },
+    },
+  );
+  assert.equal(r.status, SEAT_LIVENESS_SCAN_FAILURE.WORKTREE_LIST_FAILED);
+  assert.notEqual(r.status, SEAT_LIVENESS_WIRE_STATUS.NOT_APPLICABLE);
+});
+
+test("(c)-③ judgeSeatLivenessAcrossWorktrees: 개별 워크트리 .harness 읽기 실패 -> HARNESS_READ_FAILED(판정 불가), 좌석 조회조차 시도하지 않는다", () => {
+  const r = judgeSeatLivenessAcrossWorktrees(
+    { repoRoot: "C:/wt", now: 1000 },
+    {
+      gitWorktreeListExecFn: () => "worktree C:/wt\n",
+      harnessReaddirFn: () => {
+        const err = new Error("permission denied");
+        err.code = "EACCES";
+        throw err;
+      },
+      execFn: () => {
+        throw new Error("must not be called -- .harness read already failed");
+      },
+    },
+  );
+  assert.equal(r.status, SEAT_LIVENESS_SCAN_FAILURE.HARNESS_READ_FAILED);
+  assert.notEqual(r.status, SEAT_LIVENESS_WIRE_STATUS.NOT_APPLICABLE);
+});
+
+test("§2-2 여러 건 동시 무응답: 두 워크트리가 동시에 SUSPECTED_UNRESPONSIVE -> worstCount=2, totalWorktrees=2 (건수가 사라지지 않는다)", () => {
+  withTempDir("hyk185-scan-multi-", (mainDir) => {
+    initPlainGitRepo(mainDir);
+    writeTaskFile(mainDir, {
+      taskId: "HYK-185-multi-a",
+      droppedAt: "2026-08-04 11:00",
+    });
+    const linkedDir = addLinkedWorktree(mainDir);
+    try {
+      writeTaskFile(linkedDir, {
+        taskId: "HYK-185-multi-b",
+        droppedAt: "2026-08-04 11:05",
+      });
+      const [mainPath, linkedPath] = listWorktreePaths(mainDir);
+      const now = Date.parse("2026-08-04T12:00:00+09:00");
+      const stale = Date.parse("2026-08-04T11:00:00+09:00");
+      const execFn = fakeOrcaExecFn({
+        terminals: [
+          { handle: "term_a", worktreePath: mainPath },
+          { handle: "term_b", worktreePath: linkedPath },
+        ],
+        showsByHandle: {
+          term_a: {
+            ok: true,
+            result: { terminal: { lastOutputAt: stale, title: "CODER" } },
+          },
+          term_b: {
+            ok: true,
+            result: { terminal: { lastOutputAt: stale, title: "REVIEW" } },
+          },
+        },
+      });
+      const r = judgeSeatLivenessAcrossWorktrees(
+        { repoRoot: mainDir, now },
+        { execFn },
+      );
+      assert.equal(r.verdict, SEAT_LIVENESS_VERDICT.SUSPECTED_UNRESPONSIVE);
+      assert.equal(r.worstCount, 2);
+      assert.equal(r.totalWorktrees, 2);
+    } finally {
+      rmSync(linkedDir, { recursive: true, force: true });
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
 // 필수 mutation 3종(coder-task.md §3-f) -- 매 실행마다 사본으로 RED를
 // 자동 확인한다. 디스크의 현재 orch-stall-detect.mjs를 sibling temp
 // 파일로 복사해 상대 import(./orch-progress-core.mjs 등)가 그대로
@@ -410,7 +598,7 @@ test("NC mutation/seat-wire #1 (필수): 결선 제거(코어를 부르지 않�
     (src) =>
       applyMutation(
         src,
-        "  const seatLiveness = judgeSeatLivenessForRepo(\n    { repoRoot, droppedTaskFiles: evidence.droppedTaskFiles, now },\n    opts,\n  );",
+        "  const seatLiveness = judgeSeatLivenessAcrossWorktrees(\n    { repoRoot, now },\n    opts,\n  );",
         "  const seatLiveness = { status: SEAT_LIVENESS_WIRE_STATUS.NOT_APPLICABLE };",
       ),
     "1",
@@ -423,7 +611,7 @@ test("NC mutation/seat-wire #1 (필수): 결선 제거(코어를 부르지 않�
     });
     const now = Date.parse("2026-08-04T12:04:00+09:00"); // 실제 사고 발견 시각.
     const execFn = fakeOrcaExecFn({
-      terminals: [{ handle: "term_x", worktreePath: dir.replace(/\\/g, "/") }],
+      terminals: [{ handle: "term_x", worktreePath: gitWorktreeSelfPath(dir) }],
       showsByHandle: {
         term_x: {
           ok: true,
@@ -502,6 +690,157 @@ test("NC mutation/seat-wire #3 (필수): 어댑터 경유를 우회해 진입점
     true,
     "mutant that bypasses the adapter and spawns 'orca' directly must be caught by the same static pattern orca-cli-boundary.mjs enforces (RED signal; proves the boundary test is load-bearing, not vacuously green)",
   );
+});
+
+// ---------------------------------------------------------------------------
+// HYK-185 seat-scan 필수 mutation 3종(coder-task.md §3-f, gap#77의
+// mutation #1-#3과는 다른 결함 표면 -- ①워크트리 스캔 자체 제거
+// ②열거 실패를 조용함으로 흡수 ③좌석-워크트리 대응 무시).
+// ---------------------------------------------------------------------------
+test("NC mutation/seat-scan #1 (필수): 워크트리 스캔 제거(메인만 보게 되돌림) -> RED (링크드 워크트리의 무응답 좌석을 놓친다)", async () => {
+  const mutant = await importMutatedSibling(
+    (src) =>
+      applyMutation(
+        src,
+        "  const worktrees = list.worktrees.map((wt) =>\n    judgeSeatLivenessForWorktree(wt, now, opts),\n  );",
+        "  const worktrees = [judgeSeatLivenessForWorktree(repoRoot, now, opts)];",
+      ),
+    "scan-1",
+  );
+  await withTempDir("hyk185-mutant-scan1-", async (mainDir) => {
+    initPlainGitRepo(mainDir);
+    const linkedDir = addLinkedWorktree(mainDir);
+    try {
+      writeTaskFile(linkedDir, {
+        taskId: "HYK-185-seat-scan-1",
+        droppedAt: "2026-08-04 11:23",
+      });
+      const [, linkedPath] = listWorktreePaths(mainDir);
+      const now = Date.parse("2026-08-04T12:04:00+09:00");
+      const execFn = fakeOrcaExecFn({
+        terminals: [{ handle: "term_stuck", worktreePath: linkedPath }],
+        showsByHandle: {
+          term_stuck: {
+            ok: true,
+            result: {
+              terminal: {
+                lastOutputAt: Date.parse("2026-08-04T11:36:00+09:00"),
+                title: "CODER",
+              },
+            },
+          },
+        },
+      });
+      const r = mutant.judgeSeatLivenessAcrossWorktrees(
+        { repoRoot: mainDir, now },
+        { execFn },
+      );
+      assert.equal(
+        r.status,
+        SEAT_LIVENESS_WIRE_STATUS.NOT_APPLICABLE,
+        "mutant must miss the linked worktree's stall entirely (RED signal; proves the worktree-scan call is load-bearing, not just repoRoot's own .harness)",
+      );
+    } finally {
+      rmSync(linkedDir, { recursive: true, force: true });
+    }
+  });
+});
+
+test("NC mutation/seat-scan #2 (필수): 워크트리 열거 실패를 «조용함»(NOT_APPLICABLE)으로 접기 -> RED (열거 실패가 정상 무배달과 구별되지 않는다)", async () => {
+  const mutant = await importMutatedSibling(
+    (src) =>
+      applyMutation(
+        src,
+        `  if (!list.ok) {
+    return {
+      status: list.reason,
+      detail: list.detail,
+      worktrees: [],
+      totalWorktrees: 0,
+      worstCount: 1,
+    };
+  }`,
+        `  if (!list.ok) {
+    return {
+      status: SEAT_LIVENESS_WIRE_STATUS.NOT_APPLICABLE,
+      worktrees: [],
+      totalWorktrees: 0,
+      worstCount: 0,
+    };
+  }`,
+      ),
+    "scan-2",
+  );
+  const r = mutant.judgeSeatLivenessAcrossWorktrees(
+    { repoRoot: "C:/wt", now: 1000 },
+    {
+      gitWorktreeListExecFn: () => {
+        throw new Error("git not found");
+      },
+    },
+  );
+  assert.equal(
+    r.status,
+    "SEAT_LIVENESS_NOT_APPLICABLE",
+    "mutant must misreport a real enumeration failure as 'nothing to judge, normal' (RED signal; proves the WORKTREE_LIST_FAILED branch is load-bearing)",
+  );
+});
+
+test("NC mutation/seat-scan #3 (필수): 좌석-워크트리 대응 무시(엉뚱한 좌석으로 판정) -> RED (링크드 워크트리를 항상 존재하지 않는 경로로 조회해 매번 NO_SEAT)", async () => {
+  const mutant = await importMutatedSibling(
+    (src) =>
+      applyMutation(
+        src,
+        "  const judged = judgeSeatLivenessForRepo(\n    { repoRoot: worktreePath, droppedTaskFiles: evidence.items, now },\n    opts,\n  );",
+        '  const judged = judgeSeatLivenessForRepo(\n    { repoRoot: "C:/hyk185-seat-scan-mutant-wrong-worktree", droppedTaskFiles: evidence.items, now },\n    opts,\n  );',
+      ),
+    "scan-3",
+  );
+  await withTempDir("hyk185-mutant-scan3-", async (mainDir) => {
+    initPlainGitRepo(mainDir);
+    const linkedDir = addLinkedWorktree(mainDir);
+    try {
+      writeTaskFile(linkedDir, {
+        taskId: "HYK-185-seat-scan-1",
+        droppedAt: "2026-08-04 11:23",
+      });
+      const [, linkedPath] = listWorktreePaths(mainDir);
+      const now = Date.parse("2026-08-04T12:04:00+09:00");
+      const execFn = fakeOrcaExecFn({
+        terminals: [{ handle: "term_stuck", worktreePath: linkedPath }],
+        showsByHandle: {
+          term_stuck: {
+            ok: true,
+            result: {
+              terminal: {
+                lastOutputAt: Date.parse("2026-08-04T11:36:00+09:00"),
+                title: "CODER",
+              },
+            },
+          },
+        },
+      });
+      const r = mutant.judgeSeatLivenessAcrossWorktrees(
+        { repoRoot: mainDir, now },
+        { execFn },
+      );
+      const linkedEntry = r.worktrees.find(
+        (w) => w.worktreePath === linkedPath,
+      );
+      assert.equal(
+        linkedEntry.status,
+        "SEAT_LIVENESS_NO_SEAT",
+        "mutant must fail to match the seat to its actual worktree, misjudging a real stall as 'no seat, normal' for that worktree's own entry (RED signal; proves the worktreePath-as-repoRoot correspondence is load-bearing)",
+      );
+      assert.notEqual(
+        r.verdict,
+        SEAT_LIVENESS_VERDICT.SUSPECTED_UNRESPONSIVE,
+        "the aggregate must never surface the real stall either",
+      );
+    } finally {
+      rmSync(linkedDir, { recursive: true, force: true });
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------
