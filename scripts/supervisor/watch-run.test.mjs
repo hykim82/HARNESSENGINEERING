@@ -186,6 +186,41 @@ test("buildLogLine: runner failure and detector result produce distinguishable s
 });
 
 // ---------------------------------------------------------------------------
+// HYK-185-seat-idle-1 (coder-task.md §2-1-3) -- 새 «유휴 방치 좌석» 필드가
+// 기존 seat_* 필드와 구별되는 이름(`idle_*`)으로 로그 줄에 실린다.
+// ---------------------------------------------------------------------------
+test("HYK-185-seat-idle-1: seatIdle fields from detector stdout are logged with distinct idle_* names (1/1)", () => {
+  const watchDir = tmpWatchDir();
+  try {
+    const result = runWatchOnce({
+      repoRoot: ROOT,
+      watchDir,
+      now: NOW_MS,
+      execFn: () =>
+        JSON.stringify({
+          verdict: "PROGRESSING",
+          reasonCode: "OK",
+          seatLiveness: { status: "SEAT_LIVENESS_NOT_APPLICABLE" },
+          seatIdle: {
+            status: "SEAT_IDLE_JUDGED",
+            verdict: "SUSPECTED_ABANDONED",
+            worstCount: 1,
+            totalWorktrees: 2,
+          },
+        }),
+    });
+    const logText = fs.readFileSync(result.logPath, "utf8");
+    assert.match(
+      logText,
+      /idle_status=SEAT_IDLE_JUDGED idle_verdict=SUSPECTED_ABANDONED idle_worst_count=1 idle_worktrees=2/,
+    );
+    assert.match(logText, /seat_status=SEAT_LIVENESS_NOT_APPLICABLE/);
+  } finally {
+    fs.rmSync(watchDir, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
 // 원상복구 단언(coder-task.md §2 비타협 #6·#7) -- mkdtemp만 썼다.
 // ---------------------------------------------------------------------------
 after(() => {

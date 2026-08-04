@@ -89,17 +89,41 @@ function extractSeatLivenessFields(seatLiveness) {
   };
 }
 
+// HYK-185-seat-idle-1 (coder-task.md §2-1-3) -- «유휴 방치 좌석» 축의
+// 필드도 로그 줄에 옮겨 적는다. seatLiveness와 이름이 구별되도록
+// `seatIdle*` 접두를 쓴다(§2-1-1 "구별되는 이름" 비타협).
+function extractSeatIdleFields(seatIdle) {
+  return {
+    seatIdleStatus:
+      seatIdle && typeof seatIdle.status === "string" ? seatIdle.status : null,
+    seatIdleVerdict:
+      seatIdle && typeof seatIdle.verdict === "string"
+        ? seatIdle.verdict
+        : null,
+    seatIdleWorstCount:
+      seatIdle && typeof seatIdle.worstCount === "number"
+        ? seatIdle.worstCount
+        : null,
+    seatIdleTotalWorktrees:
+      seatIdle && typeof seatIdle.totalWorktrees === "number"
+        ? seatIdle.totalWorktrees
+        : null,
+  };
+}
+
 function parseDetectorStdout(stdout) {
   try {
     const parsed = JSON.parse(String(stdout).trim());
     const seatLiveness = isPlainObject(parsed.seatLiveness)
       ? parsed.seatLiveness
       : null;
+    const seatIdle = isPlainObject(parsed.seatIdle) ? parsed.seatIdle : null;
     return {
       verdict: typeof parsed.verdict === "string" ? parsed.verdict : null,
       reasonCode:
         typeof parsed.reasonCode === "string" ? parsed.reasonCode : null,
       ...extractSeatLivenessFields(seatLiveness),
+      ...extractSeatIdleFields(seatIdle),
     };
   } catch {
     return {
@@ -109,6 +133,10 @@ function parseDetectorStdout(stdout) {
       seatLivenessVerdict: null,
       seatLivenessWorstCount: null,
       seatLivenessTotalWorktrees: null,
+      seatIdleStatus: null,
+      seatIdleVerdict: null,
+      seatIdleWorstCount: null,
+      seatIdleTotalWorktrees: null,
     };
   }
 }
@@ -156,7 +184,11 @@ export function buildLogLine({ nowIso, detectorResult }) {
   const seatVerdict = detectorResult.seatLivenessVerdict ?? "NONE";
   const seatWorstCount = detectorResult.seatLivenessWorstCount ?? "NONE";
   const seatWorktrees = detectorResult.seatLivenessTotalWorktrees ?? "NONE";
-  return `${nowIso} exit=${detectorResult.exitCode} verdict=${verdict} reason=${reason} seat_status=${seatStatus} seat_verdict=${seatVerdict} seat_worst_count=${seatWorstCount} seat_worktrees=${seatWorktrees}`;
+  const idleStatus = detectorResult.seatIdleStatus ?? "NONE";
+  const idleVerdict = detectorResult.seatIdleVerdict ?? "NONE";
+  const idleWorstCount = detectorResult.seatIdleWorstCount ?? "NONE";
+  const idleWorktrees = detectorResult.seatIdleTotalWorktrees ?? "NONE";
+  return `${nowIso} exit=${detectorResult.exitCode} verdict=${verdict} reason=${reason} seat_status=${seatStatus} seat_verdict=${seatVerdict} seat_worst_count=${seatWorstCount} seat_worktrees=${seatWorktrees} idle_status=${idleStatus} idle_verdict=${idleVerdict} idle_worst_count=${idleWorstCount} idle_worktrees=${idleWorktrees}`;
 }
 
 function appendLogWithRotation({ readFn, writeFn, logPath, line, maxLines }) {

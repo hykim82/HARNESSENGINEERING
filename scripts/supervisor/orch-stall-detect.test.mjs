@@ -917,6 +917,9 @@ test("static: orch-stall-detect.mjs never fetches over the network (no fetch/git
 // from a different angle -- the seat-liveness wiring). It is excluded
 // below on the same "own .test.mjs" basis as orch-stall-detect.test.mjs
 // itself; no production (non-test) file imports this module.
+// HYK-185-seat-idle-1: seat-idle-wire.test.mjs is the same shape one more
+// time -- it exercises the same production entry point for the new idle
+// axis. Excluded on the identical "own .test.mjs" basis.
 test("static: no PRODUCTION code imports orch-stall-detect.mjs yet (h -- can be called is not the same as is being called; only its own .test.mjs files do)", () => {
   let grepOut;
   try {
@@ -950,7 +953,8 @@ test("static: no PRODUCTION code imports orch-stall-detect.mjs yet (h -- can be 
       (f) =>
         !f.endsWith("orch-stall-detect.mjs") &&
         !f.endsWith("orch-stall-detect.test.mjs") &&
-        !f.endsWith("seat-liveness-wire.test.mjs"),
+        !f.endsWith("seat-liveness-wire.test.mjs") &&
+        !f.endsWith("seat-idle-wire.test.mjs"),
     );
   assert.deepEqual(
     importers,
