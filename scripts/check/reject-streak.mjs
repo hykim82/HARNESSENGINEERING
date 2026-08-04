@@ -189,9 +189,39 @@ export function applyOutcome(ledger, { issueId, taskId, verdict, at }) {
 // needs. Never throws; a malformed review text is reported as `ok: false`
 // so the CLI can treat it as UNJUDGABLE (fail-open) rather than corrupting
 // the ledger with a guessed entry.
+//
+// HYK-183 §2-1 R3 (idempotency): identifies a repeat call by comparing
+// against the issue's LAST recorded history entry only -- same task_id +
+// same verdict as the most recent entry means this exact round was already
+// recorded (a retried/re-invoked caller, e.g. relay-handshake.mjs's
+// auto-wiring being called again on the same already-confirmed result
+// file), so the streak must not double-count it. This never conflates two
+// real, distinct rounds: each round's result file echoes its OWN task_id
+// (e.g. "HYK-133-review-2" vs "...-review-3"), so a genuine second
+// rejection always differs from the last entry even when both share the
+// same verdict.
 export function computeRecord({ reviewText, ledger, at }) {
   const outcome = parseReviewOutcome(reviewText);
   if (!outcome.ok) return { ok: false, reason: outcome.reason };
+
+  const existing = ledger?.issues?.[outcome.issueId];
+  const lastEntry = existing?.history?.[existing.history.length - 1];
+  const isDuplicate =
+    !!lastEntry &&
+    lastEntry.task_id === outcome.taskId &&
+    lastEntry.verdict === outcome.verdict;
+  if (isDuplicate) {
+    return {
+      ok: true,
+      duplicate: true,
+      ledger,
+      issueId: outcome.issueId,
+      taskId: outcome.taskId,
+      verdict: outcome.verdict,
+      streak: existing.streak,
+    };
+  }
+
   const nextLedger = applyOutcome(ledger, {
     issueId: outcome.issueId,
     taskId: outcome.taskId,
@@ -200,6 +230,7 @@ export function computeRecord({ reviewText, ledger, at }) {
   });
   return {
     ok: true,
+    duplicate: false,
     ledger: nextLedger,
     issueId: outcome.issueId,
     taskId: outcome.taskId,
@@ -265,6 +296,75 @@ export function loadLedger(
 
 export function writeLedger(ledgerPath, ledger, writeFileFn = writeFileSync) {
   writeFileFn(ledgerPath, JSON.stringify(ledger, null, 2) + "\n", "utf8");
+}
+
+const REVIEW_ROLE_RE = /^review/i;
+
+// HYK-183 §2: true iff `role` (relay-handshake.mjs's file-prefix role, e.g.
+// "review"/"review2"/"coder"/"verify") belongs to the REVIEW family whose
+// result file can carry a `verdict: approved|rejected` line. A CODER
+// handshake has no verdict to record; `.harness/verify.md` (VERIFY role) is
+// never scanned for a verdict line by review-gate.mjs/reject-streak.mjs
+// either -- only "review"-prefixed roles are in scope here.
+export function isReviewFamilyRole(role) {
+  return typeof role === "string" && REVIEW_ROLE_RE.test(role);
+}
+
+// HYK-183 §2: composes loadLedger + computeRecord + writeLedger into the
+// one call relay-handshake.mjs's auto-wiring needs at the exact moment it
+// confirms a REVIEW-family result file is complete. Idempotency is
+// computeRecord's job (see its own header); this function's job is failure
+// VISIBILITY (§2-1 R4) -- every branch returns a human-readable `reason`,
+// never a silent no-op, so a caller that logs it (relay-handshake.mjs's
+// CLI and in-process callers alike) surfaces a read/parse/write failure
+// instead of folding it into "ledger just wasn't touched, nobody noticed."
+export function recordRejectStreakFromResultText({
+  role,
+  resultText,
+  ledgerPath,
+  at,
+}) {
+  if (!isReviewFamilyRole(role)) {
+    return {
+      attempted: false,
+      ok: true,
+      reason: `reject-streak auto-record: role '${role}' is not REVIEW-family -- skipped (no verdict to record)`,
+    };
+  }
+
+  const loaded = loadLedger(ledgerPath);
+  if (!loaded.ok) {
+    return { attempted: true, ok: false, reason: loaded.reason };
+  }
+
+  const computed = computeRecord({
+    reviewText: resultText,
+    ledger: loaded.ledger,
+    at: at || formatNowLocal(),
+  });
+  if (!computed.ok) {
+    return {
+      attempted: true,
+      ok: false,
+      reason: `reject-streak auto-record: UNJUDGABLE -- ${computed.reason} (fail-open, ledger untouched)`,
+    };
+  }
+  if (computed.duplicate) {
+    return {
+      attempted: true,
+      ok: true,
+      duplicate: true,
+      reason: `reject-streak auto-record: DUPLICATE -- ${computed.issueId} <- ${computed.taskId} verdict=${computed.verdict} already last-recorded (streak=${computed.streak} unchanged), ledger not rewritten`,
+    };
+  }
+
+  writeLedger(ledgerPath, computed.ledger);
+  return {
+    attempted: true,
+    ok: true,
+    duplicate: false,
+    reason: `reject-streak auto-record: ${computed.issueId} <- ${computed.taskId} verdict=${computed.verdict} -> streak=${computed.streak}`,
+  };
 }
 
 // Extracts the ORCH-action bullet lines from the envelope body's "ORCH
@@ -566,6 +666,13 @@ if (invokedDirectly) {
     if (!result.ok) {
       console.log(
         `reject-streak record: UNJUDGABLE -- ${result.reason} (fail-open, ledger untouched)`,
+      );
+      process.exit(0);
+    }
+
+    if (result.duplicate) {
+      console.log(
+        `reject-streak record: DUPLICATE -- ${result.issueId} <- ${result.taskId} verdict=${result.verdict} already last-recorded (streak=${result.streak} unchanged), ledger not rewritten`,
       );
       process.exit(0);
     }
