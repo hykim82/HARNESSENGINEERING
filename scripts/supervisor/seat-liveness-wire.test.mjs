@@ -561,11 +561,20 @@ test("§2-2 여러 건 동시 무응답: 두 워크트리가 동시에 SUSPECTED
 });
 
 // ---------------------------------------------------------------------------
-// 필수 mutation 3종(coder-task.md §3-f) -- 매 실행마다 사본으로 RED를
-// 자동 확인한다. 디스크의 현재 orch-stall-detect.mjs를 sibling temp
-// 파일로 복사해 상대 import(./orch-progress-core.mjs 등)가 그대로
-// 풀리게 한다(정직 요구: git HEAD가 아니라 현재 실제 소스를 대상으로
-// 한다 -- 이유는 파일 상단 주석 참조).
+// 필수 mutation 6종(coder-task.md §3-f) -- 매 실행마다 사본으로 RED를
+// 자동 확인한다. 디스크의 현재 orch-stall-detect.mjs를 읽어 상대 import
+// (`./orch-progress-core.mjs` 등)를 그 실제 파일의 **절대 `file://`
+// 경로**로 치환한 뒤, **저장소 밖 `mkdtemp`**에 쓴다(정직 요구: git HEAD가
+// 아니라 현재 실제 소스를 대상으로 한다 -- 이유는 파일 상단 주석 참조).
+//
+// HYK-185 2R(coder-task.md §R2) -- 이전 형태는 변이체를 `THIS_DIR`(=
+// `scripts/supervisor/`, 실제 저장소 안)에 썼다. `finally`로 지우긴
+// 했지만, node 시험 러너가 여러 파일을 병렬로 돌리는 동안 그 찰나를
+// `watch-freshness-core.test.mjs`의 "워크트리가 그대로인가" 가드가
+// 실제로 붙잡았다(CI 간헐 실패, 로컬 5축은 타이밍상 못 봤을 뿐). 가드
+// 자체는 제 역할을 한 것이므로 약화시키지 않고, 변이체를 애초에
+// 저장소 밖으로 옮겨 이 충돌의 뿌리를 없앤다 -- 상대 import는 형제
+// 위치가 아니어도 절대 경로 치환으로 그대로 풀린다(동작은 동일).
 // ---------------------------------------------------------------------------
 const LIVE_SRC_PATH = join(THIS_DIR, "orch-stall-detect.mjs");
 const LIVE_SRC = readFileSync(LIVE_SRC_PATH, "utf8");
@@ -580,16 +589,31 @@ function applyMutation(src, find, replacement) {
   return src.replace(find, replacement);
 }
 
-async function importMutatedSibling(mutate, label) {
-  const mutantPath = join(
-    THIS_DIR,
-    `orch-stall-detect.mutant-${label}-${process.pid}-${Date.now()}.mjs`,
+// 상대 import(`from "./x.mjs"`/`from "../x/y.mjs"`)를 baseDir 기준
+// 절대 `file://` 경로로 치환한다 -- 변이체가 저장소 밖 mkdtemp에 있어도
+// 형제 모듈(같은 실제 파일)을 그대로 가리키게 한다.
+function rewriteRelativeImportsToAbsolute(src, baseDir) {
+  return src.replace(
+    /from\s+(["'])(\.\.?\/[^"']+)\1/g,
+    (whole, quote, relPath) => {
+      const absPath = join(baseDir, relPath).replace(/\\/g, "/");
+      return `from ${quote}file://${absPath}${quote}`;
+    },
   );
-  writeFileSync(mutantPath, mutate(LIVE_SRC), "utf8");
+}
+
+async function importMutatedSibling(mutate, label) {
+  const rewritten = rewriteRelativeImportsToAbsolute(
+    mutate(LIVE_SRC),
+    THIS_DIR,
+  );
+  const mutantDir = mkdtempSync(join(tmpdir(), `hyk185-mutant-${label}-`));
+  const mutantPath = join(mutantDir, "orch-stall-detect.mutant.mjs");
+  writeFileSync(mutantPath, rewritten, "utf8");
   try {
     return await import(`file://${mutantPath.replace(/\\/g, "/")}`);
   } finally {
-    rmSync(mutantPath, { force: true });
+    rmSync(mutantDir, { recursive: true, force: true });
   }
 }
 
