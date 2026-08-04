@@ -74,6 +74,23 @@ export default [
     },
   },
   {
+    // HYK-185 seat-wire (coder-task.md §2-1, explicit design requirement):
+    // orch-stall-detect.mjs (scripts/supervisor/) must read seat liveness
+    // through scripts/relay/adapters/orca-adapter.mjs's read-only
+    // collectSeatLivenessObservation -- the same file G9
+    // (orca-cli-boundary.mjs) already treats as the sole exec-call site.
+    // This is a narrow, explicit exception for exactly these two files
+    // (production entry point + its own wiring test), not a reopening of
+    // the general relay -> non-relay dependency direction.
+    files: [
+      "scripts/supervisor/orch-stall-detect.mjs",
+      "scripts/supervisor/seat-liveness-wire.test.mjs",
+    ],
+    rules: {
+      "no-restricted-imports": "off",
+    },
+  },
+  {
     // ESLint's own flat-config loader requires this file to be a default
     // export -- the one tool-mandated exception the Tier1 design doc calls
     // for ("도구가 default export를 요구하는 파일은 경로가 명시된 최소
