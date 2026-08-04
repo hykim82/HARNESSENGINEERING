@@ -163,6 +163,32 @@ function collectRemoteContains(repoRoot, commitSha, remoteRef) {
   }
 }
 
+// HYK-185-residue-rule-2(coder-task.md §R P1-1, §2-2-ㄴ) -- "짝 어긋남":
+// 태스크 파일의 `task_id`와, 같은 디렉터리의 대응 결과 파일(`<role>-task.md`
+// -> `<role>.md` 명명 관례)이 echo하는 `task_id`가 서로 다르면 잔재
+// 신호다. **판단 불가는 항상 false(신호 없음)로 접는다** -- 관례를 벗어난
+// 파일명·결과 파일 부재·어느 한쪽 task_id 헤더 결손은 이 축이 "모른다"는
+// 뜻이며, 잔재를 지어내지 않는다(나이 축은 이 함수와 무관하게 derive
+// 코어에서 별도로 여전히 작동한다). ★2R부터 이 값은 **증거(evidence)**로
+// pledge-derive-core.mjs에 넘어간다 -- 1R에서는 관측(observation) 층에
+// 잘못 놓아 판정 코어(orch-progress-core.mjs)가 사람 게이트 의미론을
+// 우회하는 문제가 있었다(REVIEW P1-1 반려, coder-task.md §R 참조).
+function computeTaskIdMismatch(repoRoot, taskFileRelPath, taskFileTaskId) {
+  if (!taskFileTaskId) return false;
+  const resultRelPath = taskFileRelPath.replace(/-task\.md$/, ".md");
+  if (resultRelPath === taskFileRelPath) return false; // 명명 관례 밖 -- 판단 불가.
+  try {
+    const resultFull = resolveRepoPath(repoRoot, resultRelPath);
+    if (!existsSync(resultFull)) return false;
+    const resultText = readFileSync(resultFull, "utf8");
+    const resultIdMatch = resultText.match(TASK_ID_RE);
+    if (!resultIdMatch) return false;
+    return taskFileTaskId !== resultIdMatch[1];
+  } catch {
+    return false;
+  }
+}
+
 // gap#61(coder-task.md §5-B, §6 실측) -- pledge-derive-core.mjs가 소비할
 // evidence를 저장소 파일 시스템 + git에서 모은다. 이 함수 자신은
 // derivePledges와 달리 I/O를 한다(진입점의 몫, coder-task.md §5-B 그대로
@@ -174,7 +200,9 @@ function collectRemoteContains(repoRoot, commitSha, remoteRef) {
 //   `dropped_at` 헤더(collectTaskFileDropped와 동일 정규식 재사용) +
 //   대응 결과 파일(`<role>-task.md` -> `<role>.md`, 같은 디렉터리)의
 //   **경로**·존재/mtime(★재작업 1R -- 경로는 결과가 아직 없을 때
-//   `RESULT_FILE_APPEARS_AFTER` 약속의 `expectedArtifact.path`로 쓰인다).
+//   `RESULT_FILE_APPEARS_AFTER` 약속의 `expectedArtifact.path`로 쓰인다)
+//   **· taskIdMismatch**(★HYK-185-residue-rule-2 신규 -- 결과 파일이 있을
+//   때만 의미가 있다, 위 `computeTaskIdMismatch` 참조).
 // - 로컬 커밋 vs 원격: 현재 브랜치의 HEAD 커밋 vs 그 브랜치의 upstream(
 //   `@{u}`) -- upstream이 설정돼 있지 않으면(아직 한 번도 push할 원격을
 //   추적한 적 없는 브랜치) 이 계열은 수집 대상이 없다(결손이 아니라
@@ -211,9 +239,10 @@ function collectDroppedTaskFileEvidence(repoRoot) {
     const resultName = name.replace(/-task\.md$/, ".md");
     const resultPath = `.harness/${resultName}`;
     const resultFile = collectFileMtime(repoRoot, resultPath);
+    const taskId = taskIdMatch ? taskIdMatch[1] : null;
     items.push({
       path: relPath,
-      taskId: taskIdMatch ? taskIdMatch[1] : null,
+      taskId,
       droppedAtMs: Number.isNaN(droppedAtMs) ? null : droppedAtMs,
       resultFile:
         resultFile.collected === true
@@ -223,6 +252,7 @@ function collectDroppedTaskFileEvidence(repoRoot) {
               mtimeMs: resultFile.mtimeMs,
             }
           : { path: resultPath, exists: false, mtimeMs: null },
+      taskIdMismatch: computeTaskIdMismatch(repoRoot, relPath, taskId),
     });
   }
   return { items, failed: false };
