@@ -65,6 +65,30 @@ function isPlainObject(v) {
 // 실제로 채우는 필드, judgeSeatLivenessForRepo 참조)도 함께 뽑아 로그
 // 줄에 싣는다 -- v1은 로그만(§2-3), 이 값이 있어도 판정·재시도 분기는
 // 만들지 않는다.
+// HYK-185 seat-scan: 여러 워크트리가 동시에 최악 등급일 수 있다(§2-2) --
+// status/verdict 하나만으로는 그 건수가 사라지므로 함께 뽑는다.
+// parseDetectorStdout에서 분리(복잡도 분산).
+function extractSeatLivenessFields(seatLiveness) {
+  return {
+    seatLivenessStatus:
+      seatLiveness && typeof seatLiveness.status === "string"
+        ? seatLiveness.status
+        : null,
+    seatLivenessVerdict:
+      seatLiveness && typeof seatLiveness.verdict === "string"
+        ? seatLiveness.verdict
+        : null,
+    seatLivenessWorstCount:
+      seatLiveness && typeof seatLiveness.worstCount === "number"
+        ? seatLiveness.worstCount
+        : null,
+    seatLivenessTotalWorktrees:
+      seatLiveness && typeof seatLiveness.totalWorktrees === "number"
+        ? seatLiveness.totalWorktrees
+        : null,
+  };
+}
+
 function parseDetectorStdout(stdout) {
   try {
     const parsed = JSON.parse(String(stdout).trim());
@@ -75,14 +99,7 @@ function parseDetectorStdout(stdout) {
       verdict: typeof parsed.verdict === "string" ? parsed.verdict : null,
       reasonCode:
         typeof parsed.reasonCode === "string" ? parsed.reasonCode : null,
-      seatLivenessStatus:
-        seatLiveness && typeof seatLiveness.status === "string"
-          ? seatLiveness.status
-          : null,
-      seatLivenessVerdict:
-        seatLiveness && typeof seatLiveness.verdict === "string"
-          ? seatLiveness.verdict
-          : null,
+      ...extractSeatLivenessFields(seatLiveness),
     };
   } catch {
     return {
@@ -90,6 +107,8 @@ function parseDetectorStdout(stdout) {
       reasonCode: null,
       seatLivenessStatus: null,
       seatLivenessVerdict: null,
+      seatLivenessWorstCount: null,
+      seatLivenessTotalWorktrees: null,
     };
   }
 }
@@ -135,7 +154,9 @@ export function buildLogLine({ nowIso, detectorResult }) {
   const reason = detectorResult.reasonCode ?? "NONE";
   const seatStatus = detectorResult.seatLivenessStatus ?? "NONE";
   const seatVerdict = detectorResult.seatLivenessVerdict ?? "NONE";
-  return `${nowIso} exit=${detectorResult.exitCode} verdict=${verdict} reason=${reason} seat_status=${seatStatus} seat_verdict=${seatVerdict}`;
+  const seatWorstCount = detectorResult.seatLivenessWorstCount ?? "NONE";
+  const seatWorktrees = detectorResult.seatLivenessTotalWorktrees ?? "NONE";
+  return `${nowIso} exit=${detectorResult.exitCode} verdict=${verdict} reason=${reason} seat_status=${seatStatus} seat_verdict=${seatVerdict} seat_worst_count=${seatWorstCount} seat_worktrees=${seatWorktrees}`;
 }
 
 function appendLogWithRotation({ readFn, writeFn, logPath, line, maxLines }) {
