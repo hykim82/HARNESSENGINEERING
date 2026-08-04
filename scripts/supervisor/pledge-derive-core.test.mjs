@@ -17,10 +17,13 @@ import {
   PLEDGE_SOURCE,
   PLEDGE_DERIVE_REASON,
   PLEDGE_DERIVE_NOTE_REASON,
+  DEFAULT_RESIDUE_THRESHOLD_SECONDS,
 } from "./pledge-derive-core.mjs";
 import {
   ARTIFACT_KIND,
   PLEDGE_RESOLUTION_STATUS,
+  judgeOrchProgress,
+  ORCH_PROGRESS_VERDICT,
 } from "./orch-progress-core.mjs";
 
 function repoRoot() {
@@ -479,6 +482,217 @@ test("(f) false-derivation count is 0 across 2 already-resolved/unresolvable loc
 });
 
 // ---------------------------------------------------------------------------
+// HYK-185-residue-rule-2(coder-task.md §3-a/b/c, §R P1-1 반려 수리) --
+// «잔재 의심» 규칙. 1R은 이 판정을 orch-progress-core.mjs(판정층)에 넣어
+// REVIEW가 반려했다(사람 게이트 의미론 우회). 2R은 이 파일(유도층)로
+// 옮겼다 -- 잔재로 판단되면 소비 약속을 **아예 유도하지 않고** notes로만
+// 남긴다.
+// ---------------------------------------------------------------------------
+
+// (a) 합성 잔재 fixture 1 -- 나이 축. 1단계에서 실제로 지운 잔재와 같은
+// 형태(끝난 사이클의 소비 약속이 재드롭 없이 오래 방치됨, 실측 사례 =
+// HYK-129-selfcheck-2026-07-30 · QUEUE01-REVIEW-1, coder-task.md §1)를
+// 본떴다.
+test("(a) synthetic residue #1 (age > 72h default threshold, modeled on the real HYK-129-selfcheck-2026-07-30 residue shape): NOT derived (pledges empty) -- surfaced only via a RESIDUE_SUSPECTED_NOT_DERIVED note, not a fabricated pledge", () => {
+  const recordedAtMs = Date.parse("2026-07-30T11:26:00+09:00");
+  const now = recordedAtMs + 100 * 3600 * 1000; // 100시간, 72시간 임계 초과
+  const result = derivePledges({
+    evidence: {
+      droppedTaskFiles: [
+        droppedTaskFileItem({
+          taskId: "HYK-129-selfcheck-2026-07-30",
+          path: ".harness/verify-task.md",
+          resultFile: {
+            path: ".harness/verify.md",
+            exists: true,
+            mtimeMs: recordedAtMs,
+          },
+          taskIdMismatch: false,
+        }),
+      ],
+    },
+    now,
+  });
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.pledges, []);
+  assert.equal(result.notes.length, 1);
+  assert.equal(
+    result.notes[0].reasonCode,
+    PLEDGE_DERIVE_NOTE_REASON.RESIDUE_SUSPECTED_NOT_DERIVED,
+  );
+});
+
+// (a) 합성 잔재 fixture 2 -- 짝 어긋남 축. §1 실측 그대로: 태스크 파일의
+// task_id(HYK-167-cycle0-1)와 결과 파일이 echo하는 task_id(HYK-166-coder-2)가
+// 다르다. 나이는 임계 밖(2시간, 72시간 미만)이라 나이 축만으로는 잔재로
+// 안 걸린다 -- 짝 어긋남 신호가 단독으로 잔재를 유발함을 고정한다.
+test("(a) synthetic residue #2 (pair mismatch, exact real shape from coder-task.md §1: coder-task.md task_id=HYK-167-cycle0-1 vs coder.md task_id=HYK-166-coder-2, age only 2h < 72h threshold): NOT derived via taskIdMismatch alone (without age)", () => {
+  const recordedAtMs = Date.parse("2026-08-01T10:00:00+09:00");
+  const now = recordedAtMs + 2 * 3600 * 1000; // 2시간(72시간엔 한참 못 미침)
+  const result = derivePledges({
+    evidence: {
+      droppedTaskFiles: [
+        droppedTaskFileItem({
+          taskId: "HYK-167-cycle0-1",
+          path: ".harness/coder-task.md",
+          resultFile: {
+            path: ".harness/coder.md",
+            exists: true,
+            mtimeMs: recordedAtMs,
+          },
+          taskIdMismatch: true,
+        }),
+      ],
+    },
+    now,
+  });
+  assert.deepEqual(result.pledges, []);
+  assert.equal(
+    result.notes[0].reasonCode,
+    PLEDGE_DERIVE_NOTE_REASON.RESIDUE_SUSPECTED_NOT_DERIVED,
+  );
+});
+
+// (a) ★1R 반려 P1-1의 직접 수리 -- 잔재는 derivePledges 단계에서 이미
+// 걸러지므로, 그 산출물을 그대로 judgeOrchProgress(판정층)에 넘겨도
+// STALLED·WAITING_HUMAN_GATE 둘 다 0건이어야 한다(사람 게이트 의미론을
+// 우회하지 않는다 -- 새 verdict를 만들지 않았다는 것의 직접 증거).
+test("(a) end-to-end: a residue-suppressed derivation, fed into judgeOrchProgress, yields ZERO STALLED and ZERO WAITING_HUMAN_GATE verdicts (the pledge was never derived, so the judge never sees it -- proves P1-1 is fixed, not just relocated)", () => {
+  const recordedAtMs = Date.parse("2026-07-30T11:26:00+09:00");
+  const now = recordedAtMs + 100 * 3600 * 1000;
+  const derivation = derivePledges({
+    evidence: {
+      droppedTaskFiles: [
+        droppedTaskFileItem({
+          taskId: "HYK-129-selfcheck-2026-07-30",
+          path: ".harness/verify-task.md",
+          resultFile: {
+            path: ".harness/verify.md",
+            exists: true,
+            mtimeMs: recordedAtMs,
+          },
+          taskIdMismatch: false,
+        }),
+      ],
+    },
+    now,
+  });
+  assert.equal(derivation.pledges.length, 0);
+  const judged = judgeOrchProgress({
+    pledges: derivation.pledges,
+    observation: {},
+    now,
+  });
+  assert.equal(judged.verdict, ORCH_PROGRESS_VERDICT.PROGRESSING);
+  assert.equal(
+    judged.details.perPledge.filter(
+      (p) => p.verdict === ORCH_PROGRESS_VERDICT.STALLED,
+    ).length,
+    0,
+  );
+  assert.equal(
+    judged.details.perPledge.filter(
+      (p) => p.verdict === ORCH_PROGRESS_VERDICT.WAITING_HUMAN_GATE,
+    ).length,
+    0,
+  );
+});
+
+// (b) ★안전핀 -- 이 유도층에서도 §6 실제 정지 4건 중 최장(#1, 10시간
+// 48분)과 같은 형태(나이 임계 안쪽·짝 어긋남 없음)는 잔재로 오분류되지
+// 않고 정상적으로 유도돼야 한다(orch-progress-core.test.mjs의 4건
+// fixture는 이 파일과 무관하게 그대로 재사용되며 이 파일은 손대지
+// 않는다 -- 이 test는 그와 별개로 "유도층 자체"의 안전핀이다).
+test("(b) SAFETY PIN (derivation layer) -- an evidence item shaped like real stall #1 (10h48m old, no pair mismatch) is still normally derived, NOT suppressed as residue", () => {
+  const recordedAtMs = Date.parse("2026-08-01T23:06:44+09:00");
+  const now = recordedAtMs + (10 * 3600 + 48 * 60) * 1000; // 10h48m < 72h
+  const result = derivePledges({
+    evidence: {
+      droppedTaskFiles: [
+        droppedTaskFileItem({
+          taskId: "HYK-000-stall1",
+          path: ".harness/coder-task.md",
+          resultFile: {
+            path: ".harness/coder.md",
+            exists: true,
+            mtimeMs: recordedAtMs,
+          },
+          taskIdMismatch: false,
+        }),
+      ],
+    },
+    now,
+  });
+  assert.equal(result.pledges.length, 1);
+  assert.equal(result.pledges[0].pledgeId, "derived:consume:HYK-000-stall1");
+  assert.deepEqual(result.notes, []);
+});
+
+// (c) 임계 경계 양방향 -- 정확히 72시간(경계 자체는 아직 잔재 아님, 엄격
+// `>`) vs 72시간+1초(잔재).
+test("(c) residue age threshold boundary is bidirectional: exactly at 72h -> still derived (not residue), 72h+1s -> NOT derived (residue) (strict >, boundary itself doesn't flip)", () => {
+  const recordedAtMs = Date.parse("2026-08-01T00:00:00+09:00");
+  const thresholdMs = DEFAULT_RESIDUE_THRESHOLD_SECONDS * 1000;
+
+  const buildEvidence = () => ({
+    droppedTaskFiles: [
+      droppedTaskFileItem({
+        taskId: "HYK-000-boundary",
+        path: ".harness/x-task.md",
+        resultFile: {
+          path: ".harness/x.md",
+          exists: true,
+          mtimeMs: recordedAtMs,
+        },
+        taskIdMismatch: false,
+      }),
+    ],
+  });
+
+  const atThreshold = derivePledges({
+    evidence: buildEvidence(),
+    now: recordedAtMs + thresholdMs,
+  });
+  assert.equal(
+    atThreshold.pledges.length,
+    1,
+    "exactly at 72h must NOT be residue yet",
+  );
+  assert.deepEqual(atThreshold.notes, []);
+
+  const pastThreshold = derivePledges({
+    evidence: buildEvidence(),
+    now: recordedAtMs + thresholdMs + 1000,
+  });
+  assert.equal(
+    pastThreshold.pledges.length,
+    0,
+    "1s past 72h must flip to residue",
+  );
+  assert.equal(
+    pastThreshold.notes[0].reasonCode,
+    PLEDGE_DERIVE_NOTE_REASON.RESIDUE_SUSPECTED_NOT_DERIVED,
+  );
+});
+
+// residueThresholdSeconds도 기존 thresholdSeconds류 인자와 같은 규약을
+// 따른다(생략 시 기본값 · 인자로 조정 가능 · 양수 아니면 ok:false).
+test("residueThresholdSeconds: invalid value (0, negative, non-number) -> ok:false, reasonCode RESIDUE_THRESHOLD_INVALID (3/3)", () => {
+  for (const bad of [0, -1, "nope"]) {
+    const result = derivePledges({
+      evidence: {},
+      now: NOW_MS,
+      residueThresholdSeconds: bad,
+    });
+    assert.equal(result.ok, false);
+    assert.equal(
+      result.reasonCode,
+      PLEDGE_DERIVE_REASON.RESIDUE_THRESHOLD_INVALID,
+    );
+  }
+});
+
+// ---------------------------------------------------------------------------
 // (g) 판별력 자동화 -- copy-and-mutate 층(orch-progress-core.test.mjs
 // 선례 재사용). 신규 파일이라 아직 HEAD에 없으면 명시적 사유로 skip한다.
 // ---------------------------------------------------------------------------
@@ -496,6 +710,20 @@ const SRC_COMMITTED = CORE_SRC !== null;
 const NOT_COMMITTED_SKIP_REASON =
   "pledge-derive-core.mjs가 신규 파일이라 아직 커밋되지 않아 git HEAD 추적본에 없다 -- 커밋 후 이 mutation은 자동으로 실행된다(no-op 아님, SRC_COMMITTED가 그때 true가 되어 이 skip이 해제됨).";
 
+// HYK-185-residue-rule-2 -- `SRC_COMMITTED`만으로는 부족하다: 이 파일은
+// 이전 사이클(gap#61)부터 이미 HEAD에 있었으므로(신규 파일이 아님) 위
+// 플래그는 true이지만, 이번 라운드가 새로 추가한 `isResidueSuspected`
+// 함수 자체는 아직 커밋 전이라 HEAD 스냅샷에 없을 수 있다 -- 그 상태에서
+// mutation을 돌리면 `.replace()`가 매치를 못 찾고 no-op으로 통과해 옛
+// 코드를 그대로 시험하는 조용한 오검증이 된다(1R에서 orch-progress-
+// core.test.mjs가 실제로 겪은 정확히 그 문제, `.harness/coder.md` §(d)
+// 참조). 그래서 이 3개는 HEAD 스냅샷에 실제로 그 함수가 있는지까지
+// 확인해 별도로 skip한다.
+const SRC_HAS_RESIDUE_RULE =
+  SRC_COMMITTED && CORE_SRC.includes("function isResidueSuspected(");
+const RESIDUE_RULE_NOT_COMMITTED_SKIP_REASON =
+  "isResidueSuspected가 아직 HEAD 추적본에 없다(이번 라운드가 새로 추가했지만 아직 커밋 전) -- SRC_COMMITTED만 보면 pledge-derive-core.mjs 파일 자체는 이전 사이클부터 HEAD에 있어 true로 나오지만, 그 스냅샷에는 이번에 추가한 잔재 규칙 코드가 없어 mutation의 `.replace()`가 매치 대상을 못 찾고 조용히 no-op으로 새어나간다 -- 그래서 SRC_COMMITTED 대신 이 전용 플래그로 막는다. 커밋 후 자동 실행된다(수동 확인은 별도로 `.harness/coder.md`에 임시 클론+커밋 결과를 기록했다).";
+
 async function importMutatedCopy(mutate) {
   const dir = fs.mkdtempSync(join(tmpdir(), "nc-pledge-derive-core-mutant-"));
   const mutated = mutate(CORE_SRC);
@@ -512,12 +740,17 @@ async function importMutatedCopy(mutate) {
 
 test(
   "NC mutation/pledge-derive-core #1 (필수): 결과 파일 존재 확인(분기 선택) 제거 -> RED (결과가 아직 없는데도 소비 약속으로 강제 오판, null mtime에서 날짜 조작)",
-  { skip: !SRC_COMMITTED && NOT_COMMITTED_SKIP_REASON },
+  // HYK-185-residue-rule-2 -- 이 mutation의 exact-match 대상 문자열은
+  // deriveFromDroppedTaskFile/deriveConsumePledge의 시그니처(2R이
+  // residueThresholdMs 인자를 추가)에 의존한다. SRC_COMMITTED만 보면
+  // 이 파일 자체는 이전 사이클부터 HEAD에 있어 통과하지만, 그 스냅샷은
+  // 아직 옛 시그니처라 새 문자열이 매치되지 않는다 -- 전용 가드로 막는다.
+  { skip: !SRC_HAS_RESIDUE_RULE && RESIDUE_RULE_NOT_COMMITTED_SKIP_REASON },
   async () => {
     const mutant = await importMutatedCopy((src) =>
       src.replace(
-        "  if (item.resultFile.exists === true) {\n    deriveConsumePledge(item, now, pledges, notes);\n    return;\n  }\n  deriveAwaitResultPledge(item, now, pledges, notes);\n",
-        "  deriveConsumePledge(item, now, pledges, notes);\n",
+        "  if (item.resultFile.exists === true) {\n    deriveConsumePledge(item, now, pledges, notes, residueThresholdMs);\n    return;\n  }\n  deriveAwaitResultPledge(item, now, pledges, notes);\n",
+        "  deriveConsumePledge(item, now, pledges, notes, residueThresholdMs);\n",
       ),
     );
     const result = mutant.derivePledges({
@@ -536,6 +769,12 @@ test(
         ],
       },
       now: NOW_MS,
+      // HYK-185-residue-rule-2 -- `mtimeMs:null`이 여기서 `now - 0`(거대한
+      // 절대 epoch 값)로 산술 강제돼 잔재 나이 축이 우연히 걸릴 수 있다
+      // (이 mutant는 원래 exists-검사를 지운 것이지 잔재 축을 지운 게
+      // 아니다 -- 두 축이 섞이지 않도록 잔재 임계를 사실상 무한대로 둬
+      // 이 test가 원래 노리는 것(exists 분기 선택)만 격리해 확인한다).
+      residueThresholdSeconds: Number.MAX_SAFE_INTEGER,
     });
     assert.equal(
       result.pledges.length,
@@ -557,12 +796,13 @@ test(
 
 test(
   "NC mutation/pledge-derive-core #5 (필수·재작업 1R 신규): 결과-미도착 대기 약속 유도 분기 제거 -> RED (배달했으나 결과 안 옴이 다시 «약속 없음»으로 후퇴)",
-  { skip: !SRC_COMMITTED && NOT_COMMITTED_SKIP_REASON },
+  // HYK-185-residue-rule-2 -- #1과 같은 이유(위 주석 참조)로 전용 가드.
+  { skip: !SRC_HAS_RESIDUE_RULE && RESIDUE_RULE_NOT_COMMITTED_SKIP_REASON },
   async () => {
     const mutant = await importMutatedCopy((src) =>
       src.replace(
-        "  if (item.resultFile.exists === true) {\n    deriveConsumePledge(item, now, pledges, notes);\n    return;\n  }\n  deriveAwaitResultPledge(item, now, pledges, notes);\n",
-        "  if (item.resultFile.exists === true) {\n    deriveConsumePledge(item, now, pledges, notes);\n  }\n",
+        "  if (item.resultFile.exists === true) {\n    deriveConsumePledge(item, now, pledges, notes, residueThresholdMs);\n    return;\n  }\n  deriveAwaitResultPledge(item, now, pledges, notes);\n",
+        "  if (item.resultFile.exists === true) {\n    deriveConsumePledge(item, now, pledges, notes, residueThresholdMs);\n  }\n",
       ),
     );
     const result = mutant.derivePledges({
@@ -696,6 +936,163 @@ test(
       result.ok,
       true,
       "mutant must let a real collection failure leak into ok:true (RED signal; proves the collection-failure fail-closed guard is load-bearing -- this is the exact bug REVIEW P1 caught)",
+    );
+  },
+);
+
+// HYK-185-residue-rule-2(coder-task.md §3-d, 필수 mutation 3종, §R
+// "③은 이제 «잔재를 그냥 약속으로 유도해 버리기»(=수리 이전으로 되돌림)")
+// -- 아래 3개는 각각 §2-2의 두 축(나이·짝 어긋남)과 "잔재를 유도하지
+// 않는다"는 비타협 자체를 하나씩 무력화한다.
+
+test(
+  "NC mutation/pledge-derive-core #7 (필수·HYK-185-residue-rule-2): 나이 기준(ㄱ) 제거 -> RED (100시간 방치된 잔재가 여전히 소비 약속으로 유도됨, 잔재로 안 걸러짐)",
+  { skip: !SRC_HAS_RESIDUE_RULE && RESIDUE_RULE_NOT_COMMITTED_SKIP_REASON },
+  async () => {
+    const mutant = await importMutatedCopy((src) =>
+      src.replace(
+        "function isResidueSuspected(item, now, recordedAtMs, residueThresholdMs) {\n  const isAged = now - recordedAtMs > residueThresholdMs;\n  const isPairMismatch = item.taskIdMismatch === true;\n  return isAged || isPairMismatch;\n}",
+        "function isResidueSuspected(item, now, recordedAtMs, residueThresholdMs) {\n  const isPairMismatch = item.taskIdMismatch === true;\n  return isPairMismatch;\n}",
+      ),
+    );
+    const recordedAtMs = Date.parse("2026-07-30T11:26:00+09:00");
+    const now = recordedAtMs + 100 * 3600 * 1000; // 100시간, 72시간 임계 초과
+    const result = mutant.derivePledges({
+      evidence: {
+        droppedTaskFiles: [
+          {
+            path: ".harness/verify-task.md",
+            taskId: "HYK-129-selfcheck-2026-07-30",
+            droppedAtMs: recordedAtMs - 3600_000,
+            resultFile: {
+              path: ".harness/verify.md",
+              exists: true,
+              mtimeMs: recordedAtMs,
+            },
+            taskIdMismatch: false,
+          },
+        ],
+      },
+      now,
+    });
+    assert.equal(
+      result.pledges.length,
+      1,
+      "mutant must fabricate a consume pledge for a 100h-old (>>72h threshold) item (RED signal; proves the age axis alone is load-bearing)",
+    );
+  },
+);
+
+test(
+  "NC mutation/pledge-derive-core #8 (필수·HYK-185-residue-rule-2): 짝 어긋남 기준(ㄴ) 제거 -> RED (task_id 에코 불일치가 있어도 소비 약속으로 유도됨)",
+  { skip: !SRC_HAS_RESIDUE_RULE && RESIDUE_RULE_NOT_COMMITTED_SKIP_REASON },
+  async () => {
+    const mutant = await importMutatedCopy((src) =>
+      src.replace(
+        "function isResidueSuspected(item, now, recordedAtMs, residueThresholdMs) {\n  const isAged = now - recordedAtMs > residueThresholdMs;\n  const isPairMismatch = item.taskIdMismatch === true;\n  return isAged || isPairMismatch;\n}",
+        "function isResidueSuspected(item, now, recordedAtMs, residueThresholdMs) {\n  const isAged = now - recordedAtMs > residueThresholdMs;\n  return isAged;\n}",
+      ),
+    );
+    const recordedAtMs = Date.parse("2026-08-01T10:00:00+09:00");
+    const now = recordedAtMs + 2 * 3600 * 1000; // 2시간, 72시간 임계 미달
+    const result = mutant.derivePledges({
+      evidence: {
+        droppedTaskFiles: [
+          {
+            path: ".harness/coder-task.md",
+            taskId: "HYK-167-cycle0-1",
+            droppedAtMs: recordedAtMs - 3600_000,
+            resultFile: {
+              path: ".harness/coder.md",
+              exists: true,
+              mtimeMs: recordedAtMs,
+            },
+            taskIdMismatch: true,
+          },
+        ],
+      },
+      now,
+    });
+    assert.equal(
+      result.pledges.length,
+      1,
+      "mutant must fabricate a consume pledge for a taskId-mismatched pair (age < 72h threshold) (RED signal; proves the pair-mismatch axis alone is load-bearing)",
+    );
+  },
+);
+
+// ★1R 반려 P1-1의 직접 재검증 -- 잔재 억제 자체를 통째로 지우면
+// «수리 이전»으로 되돌아가 STALLED가 재발해야 한다(=이 mutation이
+// «되돌림»과 동치임을 증명).
+test(
+  "NC mutation/pledge-derive-core #9 (필수·HYK-185-residue-rule-2): 잔재 억제 분기 전체 제거 -> RED (=수리 이전으로 되돌림, 잔재가 그냥 소비 약속으로 유도되고 판정층에서 STALLED가 재발)",
+  { skip: !SRC_HAS_RESIDUE_RULE && RESIDUE_RULE_NOT_COMMITTED_SKIP_REASON },
+  async () => {
+    const mutant = await importMutatedCopy((src) =>
+      src.replace(
+        "  if (isResidueSuspected(item, now, recordedAtMs, residueThresholdMs)) {\n    notes.push(\n      note(PLEDGE_DERIVE_NOTE_REASON.RESIDUE_SUSPECTED_NOT_DERIVED, item),\n    );\n    return;\n  }\n",
+        "",
+      ),
+    );
+    const recordedAtMs = Date.parse("2026-07-30T11:26:00+09:00");
+    const now = recordedAtMs + 100 * 3600 * 1000;
+    const result = mutant.derivePledges({
+      evidence: {
+        droppedTaskFiles: [
+          {
+            path: ".harness/verify-task.md",
+            taskId: "HYK-129-selfcheck-2026-07-30",
+            droppedAtMs: recordedAtMs - 3600_000,
+            resultFile: {
+              path: ".harness/verify.md",
+              exists: true,
+              mtimeMs: recordedAtMs,
+            },
+            taskIdMismatch: false,
+          },
+        ],
+      },
+      now,
+    });
+    assert.equal(
+      result.pledges.length,
+      1,
+      "mutant must fabricate a consume pledge from residue evidence (RED signal; proves the residue-suppression branch itself is load-bearing -- removing it is exactly the pre-fix STALLED-forever regression, coder-task.md §R)",
+    );
+    // 판정층에 넘기면 실제로 STALLED가 재발함을 함께 확인(이 mutation이
+    // "수리 이전"과 동치라는 것의 종단 증거).
+    const judged = judgeOrchProgress({
+      pledges: mutant.derivePledges({
+        evidence: {
+          droppedTaskFiles: [
+            {
+              path: ".harness/verify-task.md",
+              taskId: "HYK-129-selfcheck-2026-07-30",
+              droppedAtMs: recordedAtMs - 3600_000,
+              resultFile: {
+                path: ".harness/verify.md",
+                exists: true,
+                mtimeMs: recordedAtMs,
+              },
+              taskIdMismatch: false,
+            },
+          ],
+        },
+        now,
+      }).pledges,
+      observation: {
+        "derived:consume:HYK-129-selfcheck-2026-07-30": {
+          collected: true,
+          taskFileExists: false,
+          droppedAtMs: null,
+        },
+      },
+      now,
+    });
+    assert.equal(
+      judged.verdict,
+      ORCH_PROGRESS_VERDICT.STALLED,
+      "the fabricated pledge must re-trigger STALLED once judged (RED signal; confirms this mutation is equivalent to reverting the fix, not merely a local no-op)",
     );
   },
 );

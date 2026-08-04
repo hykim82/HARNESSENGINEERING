@@ -651,6 +651,77 @@ test("collectPledgeDerivationEvidence: dropped task file with a produced result 
   });
 });
 
+// HYK-185-residue-rule-2(coder-task.md §R P1-1, §2-2-ㄴ) -- taskIdMismatch
+// evidence. §1 실측 그대로: coder-task.md의 task_id(HYK-167-cycle0-1)와
+// coder.md의 task_id(HYK-166-coder-2)가 다르다. ★2R부터 이 값은
+// pledge-derive-core.mjs가 소비할 evidence 계층에 있다(1R은 관측 계층에
+// 잘못 놓았다 -- REVIEW P1-1 반려, coder-task.md §R 참조).
+test("collectPledgeDerivationEvidence: taskIdMismatch=true on the evidence item when task file and result file echo different task_id (exact real shape from coder-task.md §1: HYK-167-cycle0-1 vs HYK-166-coder-2)", () => {
+  withTempDir("orch-stall-evidence-", (dir) => {
+    initPlainGitRepo(dir);
+    fs.mkdirSync(join(dir, ".harness"));
+    fs.writeFileSync(
+      join(dir, ".harness", "coder-task.md"),
+      "task_id: HYK-167-cycle0-1\ndropped_at: 2026-08-01 10:00 KST\n\n본문\n",
+      "utf8",
+    );
+    fs.writeFileSync(
+      join(dir, ".harness", "coder.md"),
+      "task_id: HYK-166-coder-2\n\n본문\n",
+      "utf8",
+    );
+    const evidence = collectPledgeDerivationEvidence(dir);
+    assert.equal(evidence.droppedTaskFiles.length, 1);
+    assert.equal(evidence.droppedTaskFiles[0].taskIdMismatch, true);
+  });
+});
+
+test("collectPledgeDerivationEvidence: taskIdMismatch=false on the evidence item when task file and result file echo the same task_id (matched pair, not residue)", () => {
+  withTempDir("orch-stall-evidence-", (dir) => {
+    initPlainGitRepo(dir);
+    fs.mkdirSync(join(dir, ".harness"));
+    fs.writeFileSync(
+      join(dir, ".harness", "coder-task.md"),
+      "task_id: HYK-167-cycle0-1\ndropped_at: 2026-08-01 10:00 KST\n\n본문\n",
+      "utf8",
+    );
+    fs.writeFileSync(
+      join(dir, ".harness", "coder.md"),
+      "task_id: HYK-167-cycle0-1\n\n본문\n",
+      "utf8",
+    );
+    const evidence = collectPledgeDerivationEvidence(dir);
+    assert.equal(evidence.droppedTaskFiles[0].taskIdMismatch, false);
+  });
+});
+
+test("collectPledgeDerivationEvidence: taskIdMismatch=false (undecidable -> safe default) when the result file doesn't exist yet (2/2: result absent, result has no task_id header)", () => {
+  const cases = [
+    { resultFile: null },
+    { resultFile: "본문만 있음, task_id 헤더 없음\n" },
+  ];
+  for (const c of cases) {
+    withTempDir("orch-stall-evidence-", (dir) => {
+      initPlainGitRepo(dir);
+      fs.mkdirSync(join(dir, ".harness"));
+      fs.writeFileSync(
+        join(dir, ".harness", "coder-task.md"),
+        "task_id: HYK-167-cycle0-1\ndropped_at: 2026-08-01 10:00 KST\n\n본문\n",
+        "utf8",
+      );
+      if (c.resultFile !== null) {
+        fs.writeFileSync(
+          join(dir, ".harness", "coder.md"),
+          c.resultFile,
+          "utf8",
+        );
+      }
+      const evidence = collectPledgeDerivationEvidence(dir);
+      assert.equal(evidence.droppedTaskFiles[0].taskIdMismatch, false);
+    });
+  }
+});
+
 test("collectPledgeDerivationEvidence: dropped task file with NO corresponding result file yet -> resultFile.path present, exists:false, mtimeMs:null", () => {
   withTempDir("orch-stall-evidence-", (dir) => {
     initPlainGitRepo(dir);

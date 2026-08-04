@@ -29,6 +29,35 @@
 //   `orca` 호출 0 · 화면 문자열·컨텍스트 % 판정 0(orch-progress-core.mjs
 //   §범위 조정과 동일).
 //
+// HYK-185-residue-rule-2(coder-task.md §R P1-1, §2 — 1R REVIEW 반려 수리) --
+// «잔재»(끝난 사이클의 로컬 흔적)를 «진짜 무진행»과 형식으로 가르는 규칙.
+// ★1R은 이 판정을 orch-progress-core.mjs(판정층)에 넣어 새 verdict
+// (`WAITING_HUMAN_GATE`)를 반환했는데, 이는 그 코어의 구조적 보장
+// ("사유 없는 «대기 중»은 표현 자체가 불가능하다", `judgeResolutionShortcut`
+// 참조)을 **우회**하는 결함이었다(REVIEW P1-1 반려, ORCH 실측 확인). 2R은
+// 그 판정을 **여기(유도층)로 옮겼다** — 판정층은 원래 4상태 설계를 그대로
+// 유지한 채 손대지 않는다.
+// 이 조각이 증명한다 / 증명하지 않는다:
+// - **증명한다**: (ㄱ) `recordedAt`(=결과 파일 mtime)이 72시간(기본,
+//   인자로 조정 가능)보다 오래됐거나 (ㄴ) 진입점이 짝 어긋남(태스크
+//   파일과 결과 파일이 서로 다른 `task_id`를 echo, `evidence.
+//   droppedTaskFiles[].taskIdMismatch`)을 신호하면, 그 소비 약속을
+//   **아예 유도하지 않는다** — `pledges`에 추가하지 않고 대신 `notes`에
+//   `RESIDUE_SUSPECTED_NOT_DERIVED` 사유로 남긴다. 판정층(orch-progress-
+//   core.mjs)은 애초에 이 약속을 보지 못하므로 `STALLED`도
+//   `WAITING_HUMAN_GATE`도 반환할 수 없다(0건) — "조용히 사라짐"이
+//   아니라 `notes`를 통해 출력에 그대로 드러난다.
+// - **증명하지 않는다**: (1) 이것은 **탐지**이지 **자동 정리**가 아니다 --
+//   `notes`에 남을 뿐, 결과 파일을 지우거나 옮기지 않는다. (2) **`consume`
+//   계열에만 적용**된다 — `await-result`(결과 대기)·`publish`(발행)
+//   계열의 잔재·오탐 형태는 이 조각 밖이며 예전 방식 그대로 판정된다. (3)
+//   짝 어긋남(ㄴ) 판단은 결과 파일 경로가 `<role>-task.md` -> `<role>.md`
+//   명명 관례를 따를 때만 성립한다 — 관례를 벗어난 파일명 쌍은 이 신호를
+//   낼 수 없고, 그 경우 나이(ㄱ) 축에만 의존한다. (4) 나이·짝 어긋남
+//   둘 다 없는데도 실제로는 잔재인 경우(예: 청소 도구가 실수로 결과
+//   파일에 최신 task_id를 덮어써 짝이 우연히 맞아버린 경우)를 이 규칙은
+//   볼 수 없다 — "전부 덮인다"고 말하지 않는다.
+//
 // 비타협(coder-task.md §2, §9):
 // - I/O 0 -- fs·child_process·네트워크·`orca` 호출 0. 증거 수집(fs 읽기·
 //   git 실행)은 진입점(orch-stall-detect.mjs)의 몫이며 이 파일은 그
@@ -87,6 +116,9 @@
 //   `{ commitSha, commitTimeMs, remoteRef, contains }`
 //   (`contains`는 `git merge-base --is-ancestor`의 결과: true/false/
 //   수집 실패 시 null -- 진입점이 git으로 수집).
+// - `evidence.droppedTaskFiles[].taskIdMismatch`(선택, boolean,
+//   HYK-185-residue-rule-2 신규) -- 진입점이 계산해 넣는다(§2-2-ㄴ). 결손
+//   시 `false`(신호 없음)로 취급 -- 형식위반이 아니다.
 // - `evidence.collectionFailures` = 문자열 배열(생략 가능, ★재작업 2R) --
 //   위 두 계열 중 수집 자체가 실패한 계열의 이름("droppedTaskFiles"/
 //   "localVsRemote"). 비어있지 않으면 이 함수는 그 즉시 `ok:false`를
@@ -109,8 +141,19 @@ export const PLEDGE_DERIVE_REASON = Object.freeze({
   // ★재작업 2R(§11 P1) -- "확인 못 함"을 "약속 없음"과 다른 값으로 낸다.
   COLLECTION_FAILURES_INVALID: "COLLECTION_FAILURES_INVALID",
   COLLECTION_FAILED: "COLLECTION_FAILED",
+  // HYK-185-residue-rule-2 -- 기존 thresholdSeconds 규약과 동일(§2-3
+  // "임계는 인자로 받는다").
+  RESIDUE_THRESHOLD_INVALID: "RESIDUE_THRESHOLD_INVALID",
   DERIVED: "DERIVED",
 });
+
+// HYK-185-residue-rule-2(coder-task.md §2-3 "임계는 인자로 받는다 · 기본값
+// 72시간") -- 근거: HYK-185 §6 실제 정지 4건 중 최장(10시간 48분)조차 이
+// 임계의 약 15%다(§3-b가 이를 명시적 반례로 요구한다). 72시간을 고른
+// 것은 "진짜 무진행"과 "청소되지 않은 옛 사이클 잔재"를 가르는 여유를
+// 크게 두기 위함이다 -- 사람이 하루이틀 자리를 비워도 즉시 오분류하지
+// 않게.
+export const DEFAULT_RESIDUE_THRESHOLD_SECONDS = 72 * 3600;
 
 // notes[].reasonCode -- "증거 없음"(ENTRY_MALFORMED류)과 "약속 없음"(그
 // 밖)을 서로 다른 코드로 구별한다(§3-c, §5-A 비타협).
@@ -128,6 +171,11 @@ export const PLEDGE_DERIVE_NOTE_REASON = Object.freeze({
     "COMMIT_ALREADY_CONTAINED_NO_DERIVATION_NEEDED",
   COMMIT_CONTAINMENT_UNRESOLVED: "COMMIT_CONTAINMENT_UNRESOLVED",
   COMMIT_RECORDED_AT_IN_FUTURE: "COMMIT_RECORDED_AT_IN_FUTURE",
+  // HYK-185-residue-rule-2(coder-task.md §R P1-1) -- 잔재 의심(나이 초과
+  // 또는 짝 어긋남)이면 소비 약속을 유도하지 않고 이 사유로 남긴다.
+  // "약속이 없다" 계열(다른 이유로 유도 조건 미충족)과 같은 성격이지만,
+  // 사람이 왜 이 약속이 없는지 바로 알 수 있도록 전용 코드를 쓴다.
+  RESIDUE_SUSPECTED_NOT_DERIVED: "RESIDUE_SUSPECTED_NOT_DERIVED",
 });
 
 function isPlainObject(v) {
@@ -141,6 +189,9 @@ function isFiniteNumber(v) {
 }
 function isBoolean(v) {
   return typeof v === "boolean";
+}
+function isPositiveFiniteNumber(v) {
+  return isFiniteNumber(v) && v > 0;
 }
 
 function note(reasonCode, ref) {
@@ -159,12 +210,30 @@ function isValidDroppedTaskFileEntry(item) {
   return rf.exists ? isFiniteNumber(rf.mtimeMs) : rf.mtimeMs === null;
 }
 
+// HYK-185-residue-rule-2(coder-task.md §2-2, §R P1-1) -- 둘 중 하나라도
+// 참이면 잔재 의심: ㄱ. 나이(경과 시간이 임계 초과, 엄격 `>`) ㄴ. 짝
+// 어긋남(`item.taskIdMismatch === true`, 진입점이 채운 선택 필드 --
+// 결손·비true 값은 안전하게 "신호 없음"으로 취급).
+function isResidueSuspected(item, now, recordedAtMs, residueThresholdMs) {
+  const isAged = now - recordedAtMs > residueThresholdMs;
+  const isPairMismatch = item.taskIdMismatch === true;
+  return isAged || isPairMismatch;
+}
+
 // 결과가 이미 나온 태스크 파일 -> "소비"(다음 태스크 드롭) 약속 유도.
-function deriveConsumePledge(item, now, pledges, notes) {
+// ★2R(coder-task.md §R P1-1) -- 잔재 의심이면 이 지점에서 유도를
+// 멈춘다(판정층에 새 verdict를 만들지 않는다 -- `notes`로만 보인다).
+function deriveConsumePledge(item, now, pledges, notes, residueThresholdMs) {
   const recordedAtMs = item.resultFile.mtimeMs;
   if (recordedAtMs > now) {
     notes.push(
       note(PLEDGE_DERIVE_NOTE_REASON.TASK_FILE_RECORDED_AT_IN_FUTURE, item),
+    );
+    return;
+  }
+  if (isResidueSuspected(item, now, recordedAtMs, residueThresholdMs)) {
+    notes.push(
+      note(PLEDGE_DERIVE_NOTE_REASON.RESIDUE_SUSPECTED_NOT_DERIVED, item),
     );
     return;
   }
@@ -215,13 +284,19 @@ function deriveAwaitResultPledge(item, now, pledges, notes) {
 // 결과가 이미 나왔으면 소비 약속, 아직이면 대기 약속 -- 어느 쪽이든
 // "없는 약속을 지어내는" 것이 아니라 evidence에 이미 있는 사실(드롭
 // 시각·결과 파일 상태)에서 파생된다.
-function deriveFromDroppedTaskFile(item, now, pledges, notes) {
+function deriveFromDroppedTaskFile(
+  item,
+  now,
+  pledges,
+  notes,
+  residueThresholdMs,
+) {
   if (!isValidDroppedTaskFileEntry(item)) {
     notes.push(note(PLEDGE_DERIVE_NOTE_REASON.TASK_FILE_ENTRY_MALFORMED, item));
     return;
   }
   if (item.resultFile.exists === true) {
-    deriveConsumePledge(item, now, pledges, notes);
+    deriveConsumePledge(item, now, pledges, notes, residueThresholdMs);
     return;
   }
   deriveAwaitResultPledge(item, now, pledges, notes);
@@ -298,7 +373,49 @@ function checkCollectionFailures(evidence) {
   return null;
 }
 
-// derivePledges({evidence, now}) -> {ok, pledges, reasonCode, notes}
+// HYK-185-residue-rule-3(coder-task.md §R3, 저장소 정본 품질 게이트
+// `quality-check`(eslint `complexity`, 최대 12) 수리 -- 순수 리팩터링,
+// 동작 변화 0) -- `derivePledges`가 `evidence.droppedTaskFiles`/
+// `evidence.localVsRemote` 두 계열에 대해 완전히 같은 모양의 분기(카테고리
+// 결손은 정상 · 배열이 아니면 형식위반 노트 · 배열이면 각 항목을 개별
+// 파생 함수로 처리)를 반복하던 것을 이 헬퍼로 뽑아낸다 -- `orch-progress-
+// core.mjs`의 `judgeResolutionShortcut`·`relay-handshake.mjs`의
+// `resolveResultTaskId`가 같은 이유(복잡도 상한)로 분리된 이 저장소의
+// 선례를 그대로 따른다. `deriveItem`은 `now`/`pledges`/`notes`(그리고
+// 필요하면 `residueThresholdMs`)를 이미 캡처한 클로저이므로, 이 헬퍼는
+// 항목 하나가 무엇을 의미하는지 몰라도 된다(카테고리 형태 판단과 개별
+// 파생을 분리).
+function deriveCategory(categoryItems, malformedReasonCode, notes, deriveItem) {
+  if (categoryItems === undefined) {
+    // 카테고리 자체가 없음 -- 정당한 빈 상태, 형식위반 아님.
+    return;
+  }
+  if (!Array.isArray(categoryItems)) {
+    notes.push(note(malformedReasonCode, categoryItems));
+    return;
+  }
+  for (const item of categoryItems) {
+    deriveItem(item);
+  }
+}
+
+// HYK-185-residue-rule-3 -- `residueThresholdSeconds` 하나를 검증+정규화
+// 하는 결정 단위를 `derivePledges` 밖으로 뽑는다(위와 같은 이유, 같은
+// 선례). 순수 함수 -- 인자만 쓰고 I/O 0, 추출 전과 완전히 같은 값을
+// 같은 조건에서 반환한다(동작 변화 없음).
+function resolveResidueThresholdMs(residueThresholdSeconds) {
+  const effectiveResidueThresholdSeconds =
+    residueThresholdSeconds === undefined
+      ? DEFAULT_RESIDUE_THRESHOLD_SECONDS
+      : residueThresholdSeconds;
+  if (!isPositiveFiniteNumber(effectiveResidueThresholdSeconds)) {
+    return { ok: false };
+  }
+  return { ok: true, ms: effectiveResidueThresholdSeconds * 1000 };
+}
+
+// derivePledges({evidence, now, residueThresholdSeconds?})
+//   -> {ok, pledges, reasonCode, notes}
 //
 // - `evidence.droppedTaskFiles`/`evidence.localVsRemote` 둘 다 생략 가능
 //   (그 흔적 계열이 저장소에 아예 없는 정당한 상태 -- 결손이 아니다).
@@ -306,14 +423,22 @@ function checkCollectionFailures(evidence) {
 //   빈 것으로 취급한다(다른 카테고리는 계속 처리 -- 한 카테고리의 형식
 //   위반이 다른 카테고리까지 막지 않는다).
 // - `now` = 판정 시각(ms epoch, 인자로만 받는다).
+// - `residueThresholdSeconds`(HYK-185-residue-rule-2 신규) = 생략 시
+//   `DEFAULT_RESIDUE_THRESHOLD_SECONDS`. `consume` 계열에만 적용되는
+//   "잔재 의심" 나이 임계다(§2-3 "임계는 인자로 받는다").
 export function derivePledges(args) {
   if (!isPlainObject(args))
     return invalidArgs(PLEDGE_DERIVE_REASON.INVALID_ARGUMENTS);
-  const { evidence, now } = args;
+  const { evidence, now, residueThresholdSeconds } = args;
   if (!isFiniteNumber(now))
     return invalidArgs(PLEDGE_DERIVE_REASON.NOW_INVALID);
   if (!isPlainObject(evidence))
     return invalidArgs(PLEDGE_DERIVE_REASON.EVIDENCE_INVALID);
+  const residueThreshold = resolveResidueThresholdMs(residueThresholdSeconds);
+  if (!residueThreshold.ok) {
+    return invalidArgs(PLEDGE_DERIVE_REASON.RESIDUE_THRESHOLD_INVALID);
+  }
+  const residueThresholdMs = residueThreshold.ms;
 
   const collectionFailure = checkCollectionFailures(evidence);
   if (collectionFailure) return collectionFailure;
@@ -321,35 +446,20 @@ export function derivePledges(args) {
   const pledges = [];
   const notes = [];
 
-  if (evidence.droppedTaskFiles === undefined) {
-    // 카테고리 자체가 없음 -- 정당한 빈 상태, 형식위반 아님.
-  } else if (!Array.isArray(evidence.droppedTaskFiles)) {
-    notes.push(
-      note(
-        PLEDGE_DERIVE_NOTE_REASON.DROPPED_TASK_FILES_CATEGORY_MALFORMED,
-        evidence.droppedTaskFiles,
-      ),
-    );
-  } else {
-    for (const item of evidence.droppedTaskFiles) {
-      deriveFromDroppedTaskFile(item, now, pledges, notes);
-    }
-  }
+  deriveCategory(
+    evidence.droppedTaskFiles,
+    PLEDGE_DERIVE_NOTE_REASON.DROPPED_TASK_FILES_CATEGORY_MALFORMED,
+    notes,
+    (item) =>
+      deriveFromDroppedTaskFile(item, now, pledges, notes, residueThresholdMs),
+  );
 
-  if (evidence.localVsRemote === undefined) {
-    // 카테고리 자체가 없음 -- 정당한 빈 상태, 형식위반 아님.
-  } else if (!Array.isArray(evidence.localVsRemote)) {
-    notes.push(
-      note(
-        PLEDGE_DERIVE_NOTE_REASON.LOCAL_VS_REMOTE_CATEGORY_MALFORMED,
-        evidence.localVsRemote,
-      ),
-    );
-  } else {
-    for (const item of evidence.localVsRemote) {
-      deriveFromLocalVsRemote(item, now, pledges, notes);
-    }
-  }
+  deriveCategory(
+    evidence.localVsRemote,
+    PLEDGE_DERIVE_NOTE_REASON.LOCAL_VS_REMOTE_CATEGORY_MALFORMED,
+    notes,
+    (item) => deriveFromLocalVsRemote(item, now, pledges, notes),
+  );
 
   return { ok: true, pledges, reasonCode: PLEDGE_DERIVE_REASON.DERIVED, notes };
 }
