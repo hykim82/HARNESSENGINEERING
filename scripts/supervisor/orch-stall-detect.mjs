@@ -97,6 +97,7 @@ import {
   judgeSeatLiveness,
   SEAT_LIVENESS_VERDICT,
 } from "./seat-liveness-core.mjs";
+import { judgeSeatIdle, SEAT_IDLE_VERDICT } from "./seat-idle-core.mjs";
 import {
   collectSeatLivenessObservation,
   createOrcaExecFn,
@@ -706,6 +707,179 @@ export function judgeSeatLivenessAcrossWorktrees({ repoRoot, now }, opts = {}) {
   };
 }
 
+// ---- HYK-185-seat-idle-1 (coder-task.md §2) -- «배달이 없는데 오래
+// 남아 있는 좌석»(유휴 방치) 판정 결선 ----
+//
+// seat-liveness 축(위)은 «활성 배달이 있는» 좌석의 무응답을 본다. 이
+// 축은 정반대 -- «활성 배달이 없는» 좌석이 오래 방치됐는지를 본다(§2-3
+// (b) "두 축이 같은 좌석을 두 번 세지 않음"). selectActiveDispatch가
+// non-null(활성 배달 있음)이면 이 축은 NOT_APPLICABLE이다 -- 그건
+// seat-liveness 축의 몫이다.
+//
+// ★관측 수집은 seat-liveness 축과 동일한 어댑터 함수
+// (`collectSeatLivenessObservation`)를 그대로 재사용한다(§2-1-2 비타협
+// "새 orca 호출을 추가하지 마라") -- 이 함수는 활성 배달 여부와 무관하게
+// "이 워크트리에 붙은 좌석의 lastOutputAt"만 묻는다. 두 축이 동시에
+// execFn을 부르는 일은 없다: 활성 배달이 있으면 seat-liveness 축만
+// 호출하고(이 축은 NOT_APPLICABLE로 즉시 반환, execFn 호출 0), 활성
+// 배달이 없으면 이 축만 호출한다(seat-liveness 축이 이미 NOT_APPLICABLE
+// 로 execFn 호출 0인 것과 대칭).
+export const SEAT_IDLE_WIRE_STATUS = Object.freeze({
+  // 활성 배달이 있다 -- 이 좌석은 seat-liveness 축의 대상이지 이 축의
+  // 대상이 아니다(정상, 판정 불가 아님).
+  NOT_APPLICABLE: "SEAT_IDLE_NOT_APPLICABLE",
+  // 관측 조회는 성공했지만 이 워크트리에 붙은 좌석이 0개다(정상).
+  NO_SEAT: "SEAT_IDLE_NO_SEAT",
+  // 관측을 모아 judgeSeatIdle을 실제로 불렀고 verdict가 나왔다.
+  JUDGED: "SEAT_IDLE_JUDGED",
+  // ★관측 수집 자체가 실패했다 -- "정상 방치 없음"으로 접지 않고 여기서
+  // 멈춘다(§2-3 (a) 비타협, seat-liveness 축의 COLLECTION_FAILED와 동일
+  // 원칙).
+  COLLECTION_FAILED: "SEAT_IDLE_COLLECTION_FAILED",
+});
+
+// judgeSeatIdleForRepo({repoRoot, droppedTaskFiles, now}, opts) -- 단일
+// 저장소(워크트리) 하나에 대해 이 축을 판정한다. seat-liveness 축의
+// judgeSeatLivenessForRepo와 대칭 구조이나 활성 배달 유무 분기가
+// 반대다.
+export function judgeSeatIdleForRepo(
+  { repoRoot, droppedTaskFiles, now },
+  opts = {},
+) {
+  const active = selectActiveDispatch(droppedTaskFiles);
+  if (active) {
+    return { status: SEAT_IDLE_WIRE_STATUS.NOT_APPLICABLE };
+  }
+  const execFn =
+    typeof opts.execFn === "function" ? opts.execFn : createOrcaExecFn();
+  const observed = collectSeatLivenessObservation(
+    { worktreePath: repoRoot, now },
+    { execFn },
+  );
+  if (!observed.ok) {
+    return {
+      status: SEAT_IDLE_WIRE_STATUS.COLLECTION_FAILED,
+      observationReason: observed.observationReason,
+      reason: observed.reason,
+    };
+  }
+  if (observed.seatCount === 0) {
+    return { status: SEAT_IDLE_WIRE_STATUS.NO_SEAT };
+  }
+  const judged = judgeSeatIdle({ observation: observed.observation, now });
+  return {
+    status: SEAT_IDLE_WIRE_STATUS.JUDGED,
+    verdict: judged.verdict,
+    reasonCode: judged.reasonCode,
+    details: judged.details,
+  };
+}
+
+// HYK-185-seat-idle-1 §2-1-2 "gap#78 이 만든 워크트리 열거 결과를
+// 재사용하라" -- 새 워크트리 열거 로직을 만들지 않고, gap#78이 이미
+// export한 `collectGitWorktrees`/`collectDroppedTaskFileEvidence`를 그대로
+// 다시 호출한다(둘 다 이미 존재하던 함수, 재구현 0). seat-liveness 축의
+// 스캔 루프(judgeSeatLivenessAcrossWorktrees)는 이 조각이 손대지 않는다
+// (§2-3 (e) 회귀 0 -- 기존 축은 이 함수가 존재하기 전과 동일한 코드
+// 경로로 그대로 실행된다).
+export const SEAT_IDLE_SCAN_FAILURE = Object.freeze({
+  WORKTREE_LIST_FAILED: "SEAT_IDLE_SCAN_WORKTREE_LIST_FAILED",
+  HARNESS_READ_FAILED: "SEAT_IDLE_SCAN_HARNESS_READ_FAILED",
+});
+
+export const SEAT_IDLE_SCAN_SEVERITY = Object.freeze({
+  NORMAL: 0, // NOT_APPLICABLE/NO_SEAT/JUDGED+IDLE_OK.
+  UNDECIDABLE: 1, // JUDGED이지만 verdict가 UNDECIDABLE.
+  COLLECTION_FAILURE: 2, // 워크트리 열거 실패 · .harness 읽기 실패 · 좌석 조회 실패.
+  SUSPECTED_ABANDONED: 3, // 가장 나쁨.
+});
+
+function idleSeverityOf(entry) {
+  if (
+    entry.status === SEAT_IDLE_SCAN_FAILURE.WORKTREE_LIST_FAILED ||
+    entry.status === SEAT_IDLE_SCAN_FAILURE.HARNESS_READ_FAILED ||
+    entry.status === SEAT_IDLE_WIRE_STATUS.COLLECTION_FAILED
+  ) {
+    return SEAT_IDLE_SCAN_SEVERITY.COLLECTION_FAILURE;
+  }
+  if (entry.status === SEAT_IDLE_WIRE_STATUS.JUDGED) {
+    if (entry.verdict === SEAT_IDLE_VERDICT.SUSPECTED_ABANDONED) {
+      return SEAT_IDLE_SCAN_SEVERITY.SUSPECTED_ABANDONED;
+    }
+    if (entry.verdict === SEAT_IDLE_VERDICT.UNDECIDABLE) {
+      return SEAT_IDLE_SCAN_SEVERITY.UNDECIDABLE;
+    }
+  }
+  return SEAT_IDLE_SCAN_SEVERITY.NORMAL;
+}
+
+function judgeSeatIdleForWorktree(worktreePath, now, opts) {
+  const evidence = collectDroppedTaskFileEvidence(worktreePath, {
+    readdirFn: opts.harnessReaddirFn,
+  });
+  if (evidence.failed) {
+    return {
+      worktreePath,
+      status: SEAT_IDLE_SCAN_FAILURE.HARNESS_READ_FAILED,
+    };
+  }
+  const judged = judgeSeatIdleForRepo(
+    { repoRoot: worktreePath, droppedTaskFiles: evidence.items, now },
+    opts,
+  );
+  return { worktreePath, ...judged };
+}
+
+// judgeSeatIdleAcrossWorktrees({repoRoot, now}, opts) -- seat-liveness
+// 축의 judgeSeatLivenessAcrossWorktrees와 대칭(워크트리 전부 열거 후
+// 각각 개별 판정, 가장 나쁜 항목을 대표값으로 상위에 싣고 전체 목록·
+// 건수도 함께 낸다).
+export function judgeSeatIdleAcrossWorktrees({ repoRoot, now }, opts = {}) {
+  const list = collectGitWorktrees(repoRoot, opts);
+  if (!list.ok) {
+    return {
+      status: SEAT_IDLE_SCAN_FAILURE.WORKTREE_LIST_FAILED,
+      detail: list.detail,
+      worktrees: [],
+      totalWorktrees: 0,
+      worstCount: 1,
+    };
+  }
+  const worktrees = list.worktrees.map((wt) =>
+    judgeSeatIdleForWorktree(wt, now, opts),
+  );
+  const worstSeverity = worktrees.reduce(
+    (acc, w) => Math.max(acc, idleSeverityOf(w)),
+    SEAT_IDLE_SCAN_SEVERITY.NORMAL,
+  );
+  const worstEntries = worktrees.filter(
+    (w) => idleSeverityOf(w) === worstSeverity,
+  );
+  const worst = worstEntries[0] ?? null;
+  return {
+    status: worst ? worst.status : SEAT_IDLE_WIRE_STATUS.NOT_APPLICABLE,
+    verdict: worst ? worst.verdict : undefined,
+    reasonCode: worst ? worst.reasonCode : undefined,
+    details: worst ? worst.details : undefined,
+    worktreePath: worst ? worst.worktreePath : undefined,
+    worktrees,
+    totalWorktrees: worktrees.length,
+    worstCount: worstEntries.length,
+  };
+}
+
+// HYK-185-seat-idle-1: 두 좌석 축(무응답/유휴 방치)을 함께 계산한다 --
+// runOrchStallDetect에서 분리(max-lines-per-function, 복잡도 분산). 둘 다
+// v1은 로그만(§2-3 (c)) -- exitCode에 관여하지 않는다.
+function computeSeatAxes(repoRoot, now, opts) {
+  const seatLiveness = judgeSeatLivenessAcrossWorktrees(
+    { repoRoot, now },
+    opts,
+  );
+  const seatIdle = judgeSeatIdleAcrossWorktrees({ repoRoot, now }, opts);
+  return { seatLiveness, seatIdle };
+}
+
 // runOrchStallDetect(argv) -> {result, exitCode} -- CLI 몸통을 순수 함수에
 // 가깝게 뽑아 시험이 process.exit 없이 호출할 수 있게 한다. I/O(파일
 // 읽기·git 실행)는 그대로 하되, 프로세스 종료·stdout 출력은 하지 않는다.
@@ -777,14 +951,9 @@ export function runOrchStallDetect(argv, opts = {}) {
     now,
     thresholdSeconds: cli.thresholdSeconds,
   });
-  // HYK-185 seat-scan: 좌석 무응답 판정을 이 저장소의 워크트리 전부에
-  // 걸쳐 부른다(§1-§2 결선 그 자체 -- gap#77까지는 --repo-root 하나의
-  // `.harness`만 봤다). v1은 로그만(§2-3) -- 이 결과는 exitCode에
-  // 관여하지 않는다(위 헤더 주석 참조).
-  const seatLiveness = judgeSeatLivenessAcrossWorktrees(
-    { repoRoot, now },
-    opts,
-  );
+  // HYK-185 seat-scan/HYK-185-seat-idle-1: 좌석 무응답·유휴 방치 판정을
+  // 이 저장소의 워크트리 전부에 걸쳐 부른다(computeSeatAxes 참조).
+  const { seatLiveness, seatIdle } = computeSeatAxes(repoRoot, now, opts);
   return {
     result: {
       ...result,
@@ -795,6 +964,7 @@ export function runOrchStallDetect(argv, opts = {}) {
       ),
       derivationNotes: derivation.notes,
       seatLiveness,
+      seatIdle,
     },
     exitCode: EXIT_CODE_BY_VERDICT[result.verdict] ?? 3,
     cli,
