@@ -86,6 +86,7 @@ test("(1) parseReviewOutcome: 'for:' line rejected -> issue id derived", () => {
     taskId: "HYK-133-coder-2",
     issueId: "HYK-133",
     verdict: "rejected",
+    doneAt: null,
   });
 });
 
@@ -98,7 +99,34 @@ test("(2) parseReviewOutcome: 'for:' absent -> falls back to 'task_id:'", () => 
     taskId: "HYK-133-review-2",
     issueId: "HYK-133",
     verdict: "approved",
+    doneAt: null,
   });
+});
+
+// ---------------------------------------------------------------------------
+// HYK-183-ledger-fix (축 A): parseReviewOutcome's DONE-line extraction
+// ---------------------------------------------------------------------------
+
+test("(1b) parseReviewOutcome: single '>>> DONE: ... @ <time>' line -> doneAt extracted", () => {
+  const result = parseReviewOutcome(
+    "for: HYK-133\nverdict: rejected\n\n>>> DONE: REVIEW-CODEX @ 2026-08-05 09:34 KST\n",
+  );
+  assert.equal(result.ok, true);
+  assert.equal(result.doneAt, "2026-08-05 09:34 KST");
+});
+
+test("(1c) parseReviewOutcome: no DONE line -> doneAt is null (falls back, not blocked)", () => {
+  const result = parseReviewOutcome("for: HYK-133\nverdict: rejected\n");
+  assert.equal(result.ok, true);
+  assert.equal(result.doneAt, null);
+});
+
+test("(1d) parseReviewOutcome: two DONE lines (ambiguous) -> doneAt is null, not a silently-chosen one", () => {
+  const result = parseReviewOutcome(
+    "for: HYK-133\nverdict: rejected\n\n>>> DONE: A @ 2026-08-05 09:00 KST\n>>> DONE: B @ 2026-08-05 09:10 KST\n",
+  );
+  assert.equal(result.ok, true);
+  assert.equal(result.doneAt, null);
 });
 
 test("(3) parseReviewOutcome: neither 'for:' nor 'task_id:' -> ok:false", () => {
@@ -298,6 +326,144 @@ test("(13d) computeRecord: a genuinely NEW round (different task_id, same verdic
   assert.equal(second.duplicate, false);
   assert.equal(second.streak, 2);
   assert.equal(second.ledger.issues["HYK-183"].history.length, 2);
+});
+
+// ---------------------------------------------------------------------------
+// HYK-183-ledger-fix §3(a)/REVIEW 2R P2-1: 실물 재현 -- 문자열로 사건을
+// 재구성하는 대신, **보존된 원장 표본 파일을 실제로 읽어** 그 안에 실제로
+// 남아 있는 기록 2건(HYK-186·HYK-183의 2026-08-05 09:34 반려)과 누락 3건
+// (그 뒤로도 streak가 1에 머무는 것으로 드러나는, 승인이 기록되지 않은
+// 사실)을 시험 입력의 시작 상태로 삼는다. 파일이 없으면 이 시험은 (skip이
+// 아니라) 실패해야 한다 -- 이 표본이 이 조각의 근거이므로, `readFileSync`를
+// 어떤 존재-검사로도 감싸지 않는다: 파일이 없으면 여기서 그대로 던져
+// 시험이 RED로 떨어진다. ⚠️ 이 파일은 읽기 전용으로만 다룬다(절대 쓰지
+// 않는다) -- `computeRecord`/`applyOutcome`은 순수 함수라 입력 ledger
+// 객체를 변형하지 않으므로 이 시험도 원본 JS 객체를 건드리지 않지만,
+// 애초에 파일 자체에 대한 쓰기 연산이 이 시험에는 없다.
+//
+// HYK-183-ledger-fix 5R (PR #105 리눅스 CI ENOENT, 원인 확정 = ORCH·통역
+// 계약 오류): 이 표본은 원래 저장소 밖 하네스-관제실 아카이브의 로컬
+// Windows 드라이브 경로(파일명 `2026-08-05-원장-결함표본-reject-streak.json`)를
+// 가리켰다 -- 리눅스 CI에는 그 경로 자체가 존재할 수 없으므로 매번
+// ENOENT였다. 표본을 이 저장소 안 `reject-streak-defect-sample.json`으로
+// 그대로(내용 무변경, SHA-256 대조로 바이트 동일 확인) 복사해 두고 그
+// fixture를 읽도록 바꿨다 -- 출처: 위 하네스-관제실 아카이브, 채취 시각:
+// 2026-08-05(ORCH가 사고 당시 원장 스냅샷을 보존한 시점). 이제 저장소
+// 상대경로만 참조하므로 OS 무관하게 존재한다.
+// ---------------------------------------------------------------------------
+
+const ARCHIVED_LEDGER_DEFECT_SAMPLE_PATH = fileURLToPath(
+  new URL("./reject-streak-defect-sample.json", import.meta.url),
+);
+
+test("(13f) HYK-183-ledger-fix §3(a) 실물 재현: 보존된 원장 결함표본을 실제로 읽어, 기록 2건(HYK-186·HYK-183 09:34 반려)이 누락 3건(streak가 1에 머무는 것으로 실측)을 낳은 그 상태에서 이어지는 라운드가 올바르게 처리됨을 증명한다", () => {
+  // 존재-검사 없이 그대로 읽는다 -- 파일 부재는 skip이 아니라 실패다.
+  const archivedRaw = readFileSync(ARCHIVED_LEDGER_DEFECT_SAMPLE_PATH, "utf8");
+  const archivedLedger = JSON.parse(archivedRaw);
+
+  // 표본 자체가 문서(§1 축 A/B)가 적은 그대로인지 먼저 실측 확인한다.
+  const hyk186 = archivedLedger.issues["HYK-186"];
+  const hyk183 = archivedLedger.issues["HYK-183"];
+  assert.ok(hyk186, "표본에 HYK-186 항목이 있어야 한다");
+  assert.ok(hyk183, "표본에 HYK-183 항목이 있어야 한다");
+  const hyk186Last = hyk186.history[hyk186.history.length - 1];
+  const hyk183Last = hyk183.history[hyk183.history.length - 1];
+  assert.equal(hyk186Last.verdict, "rejected");
+  assert.equal(hyk186Last.at, "2026-08-05 09:34 KST");
+  assert.equal(hyk183Last.verdict, "rejected");
+  assert.equal(hyk183Last.at, "2026-08-05 09:34 KST");
+  assert.equal(
+    hyk186.streak,
+    1,
+    "누락 3건의 실측 흔적: 반려 뒤 승인이 원장에 기록되지 않아 streak가 여전히 1이다",
+  );
+
+  // 축 A: 표본을 그대로 시작 상태로 삼아, HYK-186에 대한 "다른"(같은 bare
+  // task_id, 다른 done_at) 반려 라운드가 이어져도 duplicate로 눌리지 않아야
+  // 한다 -- 수리 전 코드(done_at 없이 task_id+verdict만 비교)로는 표본의
+  // 09:34 반려와 이 새 반려가 동일 키로 충돌해 duplicate:true·streak:1로
+  // 눌렸다(`hyk183-ledger-fix-mutation.test.mjs`의 축A 변이 시험이 이
+  // 수리 전 동작을 RED로 별도 고정한다).
+  const nextReject =
+    "for: HYK-186\ntask_id: HYK-186\nverdict: rejected\nrole: REVIEW-CODEX\n\n>>> DONE: REVIEW-CODEX @ 2026-08-05 11:02 KST\n";
+  const afterReject = computeRecord({
+    reviewText: nextReject,
+    ledger: archivedLedger,
+    at: "t1",
+  });
+  assert.equal(
+    afterReject.duplicate,
+    false,
+    "표본의 09:34 반려와 다른 done_at을 가진 새 반려는 재확인이 아니라 진짜 새 라운드다",
+  );
+  assert.equal(
+    afterReject.streak,
+    2,
+    "게이트 2의 근거인 연속 반려 카운트가 눌리지 않아야 한다",
+  );
+
+  // 축 B(원장 전이 자체): 같은 표본을 시작 상태로, "누락됐던 승인"이
+  // 뒤늦게라도 들어오면 streak가 정상적으로 0으로 되돌아간다 -- 실제
+  // commit-msg 훅 결선을 통한 E2E는 review-gate-auto-record.test.mjs (b)가
+  // 별도로 증명한다; 여기서는 표본을 시작 상태로 한 원장 전이 자체를
+  // 고정한다.
+  const lateApproval =
+    "for: HYK-186\ntask_id: HYK-186\nverdict: approved\nrole: REVIEW-CODEX\n\n>>> DONE: REVIEW-CODEX @ 2026-08-05 13:00 KST\n";
+  const afterApproval = computeRecord({
+    reviewText: lateApproval,
+    ledger: archivedLedger,
+    at: "t2",
+  });
+  assert.equal(
+    afterApproval.streak,
+    0,
+    "뒤늦게라도 기록된 승인은 streak를 0으로 되돌려야 한다",
+  );
+
+  // 순수성 확인: 두 "what-if" 분기가 서로 다른 시작 객체를 공유했으므로,
+  // 원본 archivedLedger 자체(및 그 배열/객체)가 변형되지 않았는지 확인한다.
+  assert.equal(
+    archivedLedger.issues["HYK-186"].streak,
+    1,
+    "computeRecord는 순수 함수여야 한다 -- 입력 ledger를 제자리에서 바꾸면 안 된다",
+  );
+});
+
+test("(13g) HYK-183-ledger-fix 축A: 같은 파일을 다시 확인하는 진짜 재시도(done_at 동일)는 여전히 1회만 기록된다 -- 축A 수리가 멱등성 자체를 없애지 않았음을 고정", () => {
+  const reviewText =
+    "for: HYK-186\ntask_id: HYK-186\nverdict: rejected\nrole: REVIEW-CODEX\n\n>>> DONE: REVIEW-CODEX @ 2026-08-05 09:34 KST\n";
+  const first = computeRecord({
+    reviewText,
+    ledger: { schema_version: 1, issues: {} },
+    at: "t1",
+  });
+  const retry = computeRecord({
+    reviewText,
+    ledger: first.ledger,
+    at: "t2",
+  });
+  assert.equal(retry.duplicate, true);
+  assert.equal(retry.streak, 1);
+  assert.equal(retry.ledger.issues["HYK-186"].history.length, 1);
+});
+
+test("(13h) HYK-183-ledger-fix 축A: done_at이 양쪽 다 없을 때는(레거시/구형 결과 파일) 예전 동작(task_id+verdict만 비교)으로 되돌아간다", () => {
+  const reviewText = "for: HYK-186\ntask_id: HYK-186\nverdict: rejected\n";
+  const first = computeRecord({
+    reviewText,
+    ledger: { schema_version: 1, issues: {} },
+    at: "t1",
+  });
+  const retry = computeRecord({
+    reviewText,
+    ledger: first.ledger,
+    at: "t2",
+  });
+  assert.equal(
+    retry.duplicate,
+    true,
+    "DONE 줄이 없는 입력에 대해서도 재시도 억제(멱등성)는 계속 동작해야 한다",
+  );
 });
 
 test("(13e) computeRecord: duplicate call preserves the ORIGINAL (unmutated) ledger reference in its result", () => {
