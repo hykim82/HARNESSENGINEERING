@@ -320,7 +320,7 @@ test("§R2 (b)★ e2e: 결과 파일에 표지 3줄(REVIEW 위조 검증 규칙�
     });
     const { result } = runOrchStallDetect(
       ["--repo-root", dir, "--now", new Date(now).toISOString(), "--json"],
-      { execFn },
+      { execFn, ...fakeDispatchStartStore() },
     );
     assert.notEqual(
       result.dispatchStart.status,
@@ -392,7 +392,7 @@ test("§R2 (d)★ e2e: 이전 라운드의 낡은 DONE 줄(다른 task_id) -- �
     });
     const { result } = runOrchStallDetect(
       ["--repo-root", dir, "--now", new Date(now).toISOString(), "--json"],
-      { execFn },
+      { execFn, ...fakeDispatchStartStore() },
     );
     assert.notEqual(
       result.dispatchStart.status,
@@ -643,7 +643,7 @@ test("(d) runOrchStallDetect end-to-end: 새 dispatchStart 축을 추가해도 �
     });
     const { result } = runOrchStallDetect(
       ["--repo-root", dir, "--now", new Date(now).toISOString(), "--json"],
-      { execFn },
+      { execFn, ...fakeDispatchStartStore() },
     );
     assert.equal(result.seatLiveness.status, "SEAT_LIVENESS_JUDGED");
     assert.equal(result.seatIdle.status, "SEAT_IDLE_NOT_APPLICABLE");
@@ -954,7 +954,7 @@ test("NC mutation/start-wire #5 (필수, §R2): «결과 파일 존재만으로 
     });
     const { result } = mutant.runOrchStallDetect(
       ["--repo-root", dir, "--now", new Date(now).toISOString(), "--json"],
-      { execFn },
+      { execFn, ...fakeDispatchStartStore() },
     );
     assert.equal(
       result.dispatchStart.status,
