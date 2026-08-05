@@ -111,6 +111,31 @@ function extractSeatIdleFields(seatIdle) {
   };
 }
 
+// HYK-185-startcheck-wire (coder-task.md §2-1) -- «배달 후 시작됐는가»
+// 축(orch-stall-detect.mjs의 dispatchStart, judgeDispatchStart 실호출
+// 결과)도 로그 줄에 옮겨 적는다. 기존 두 축(`seat_*`/`idle_*`)과 구별되게
+// `start_*` 접두를 쓴다(§2-1-1 "구별되는 이름" 비타협).
+function extractDispatchStartFields(dispatchStart) {
+  return {
+    startStatus:
+      dispatchStart && typeof dispatchStart.status === "string"
+        ? dispatchStart.status
+        : null,
+    startVerdict:
+      dispatchStart && typeof dispatchStart.verdict === "string"
+        ? dispatchStart.verdict
+        : null,
+    startWorstCount:
+      dispatchStart && typeof dispatchStart.worstCount === "number"
+        ? dispatchStart.worstCount
+        : null,
+    startTotalWorktrees:
+      dispatchStart && typeof dispatchStart.totalWorktrees === "number"
+        ? dispatchStart.totalWorktrees
+        : null,
+  };
+}
+
 function parseDetectorStdout(stdout) {
   try {
     const parsed = JSON.parse(String(stdout).trim());
@@ -118,12 +143,16 @@ function parseDetectorStdout(stdout) {
       ? parsed.seatLiveness
       : null;
     const seatIdle = isPlainObject(parsed.seatIdle) ? parsed.seatIdle : null;
+    const dispatchStart = isPlainObject(parsed.dispatchStart)
+      ? parsed.dispatchStart
+      : null;
     return {
       verdict: typeof parsed.verdict === "string" ? parsed.verdict : null,
       reasonCode:
         typeof parsed.reasonCode === "string" ? parsed.reasonCode : null,
       ...extractSeatLivenessFields(seatLiveness),
       ...extractSeatIdleFields(seatIdle),
+      ...extractDispatchStartFields(dispatchStart),
     };
   } catch {
     return {
@@ -137,6 +166,10 @@ function parseDetectorStdout(stdout) {
       seatIdleVerdict: null,
       seatIdleWorstCount: null,
       seatIdleTotalWorktrees: null,
+      startStatus: null,
+      startVerdict: null,
+      startWorstCount: null,
+      startTotalWorktrees: null,
     };
   }
 }
@@ -174,21 +207,45 @@ function runDetector({ execFn, nodePath, detectorPath, repoRoot }) {
   }
 }
 
+// HYK-185-startcheck-wire: buildLogLine에서 분리(complexity 상한 준수) --
+// 세 축(seat_*/idle_*/start_*)이 전부 같은 4필드 shape이므로 접두사만
+// 바꿔 재사용한다.
+function axisLogSegment(
+  prefix,
+  { status, verdict, worstCount, totalWorktrees },
+) {
+  const s = status ?? "NONE";
+  const v = verdict ?? "NONE";
+  const w = worstCount ?? "NONE";
+  const t = totalWorktrees ?? "NONE";
+  return `${prefix}_status=${s} ${prefix}_verdict=${v} ${prefix}_worst_count=${w} ${prefix}_worktrees=${t}`;
+}
+
 export function buildLogLine({ nowIso, detectorResult }) {
   if (detectorResult.runnerFailure) {
     return `${nowIso} RUNNER_FAILURE message=${detectorResult.message}`;
   }
   const verdict = detectorResult.verdict ?? "UNKNOWN";
   const reason = detectorResult.reasonCode ?? "NONE";
-  const seatStatus = detectorResult.seatLivenessStatus ?? "NONE";
-  const seatVerdict = detectorResult.seatLivenessVerdict ?? "NONE";
-  const seatWorstCount = detectorResult.seatLivenessWorstCount ?? "NONE";
-  const seatWorktrees = detectorResult.seatLivenessTotalWorktrees ?? "NONE";
-  const idleStatus = detectorResult.seatIdleStatus ?? "NONE";
-  const idleVerdict = detectorResult.seatIdleVerdict ?? "NONE";
-  const idleWorstCount = detectorResult.seatIdleWorstCount ?? "NONE";
-  const idleWorktrees = detectorResult.seatIdleTotalWorktrees ?? "NONE";
-  return `${nowIso} exit=${detectorResult.exitCode} verdict=${verdict} reason=${reason} seat_status=${seatStatus} seat_verdict=${seatVerdict} seat_worst_count=${seatWorstCount} seat_worktrees=${seatWorktrees} idle_status=${idleStatus} idle_verdict=${idleVerdict} idle_worst_count=${idleWorstCount} idle_worktrees=${idleWorktrees}`;
+  const seatSegment = axisLogSegment("seat", {
+    status: detectorResult.seatLivenessStatus,
+    verdict: detectorResult.seatLivenessVerdict,
+    worstCount: detectorResult.seatLivenessWorstCount,
+    totalWorktrees: detectorResult.seatLivenessTotalWorktrees,
+  });
+  const idleSegment = axisLogSegment("idle", {
+    status: detectorResult.seatIdleStatus,
+    verdict: detectorResult.seatIdleVerdict,
+    worstCount: detectorResult.seatIdleWorstCount,
+    totalWorktrees: detectorResult.seatIdleTotalWorktrees,
+  });
+  const startSegment = axisLogSegment("start", {
+    status: detectorResult.startStatus,
+    verdict: detectorResult.startVerdict,
+    worstCount: detectorResult.startWorstCount,
+    totalWorktrees: detectorResult.startTotalWorktrees,
+  });
+  return `${nowIso} exit=${detectorResult.exitCode} verdict=${verdict} reason=${reason} ${seatSegment} ${idleSegment} ${startSegment}`;
 }
 
 function appendLogWithRotation({ readFn, writeFn, logPath, line, maxLines }) {
