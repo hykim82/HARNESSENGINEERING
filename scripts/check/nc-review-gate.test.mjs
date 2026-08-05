@@ -261,6 +261,30 @@ const REVIEW_GATE_SRC = execFileSync(
   },
 );
 
+// HYK-183 3R (linux CI RED, PR #105): review-gate.mjs imports two siblings
+// ("./reject-streak.mjs" and "./relay-handshake.mjs"), so a mutant written
+// ALONE into a fresh mkdtemp dir fails to even load (MODULE_NOT_FOUND) --
+// same shape as the fix already applied to relay-handshake.test.mjs's
+// writeMutantCli. These mutations exist to probe review-gate.mjs's own
+// contract, not its siblings', so the real (unmutated) sibling sources are
+// copied alongside every mutant to keep the relative imports resolvable.
+const REJECT_STREAK_SRC = execFileSync(
+  "git",
+  ["show", "HEAD:scripts/check/reject-streak.mjs"],
+  {
+    cwd: ROOT,
+    encoding: "utf8",
+  },
+);
+const RELAY_HANDSHAKE_SRC = execFileSync(
+  "git",
+  ["show", "HEAD:scripts/check/relay-handshake.mjs"],
+  {
+    cwd: ROOT,
+    encoding: "utf8",
+  },
+);
+
 // HYK-183 (§10 2R fix, ORCH ruling): mutation #1/#4 below target the
 // `resolveVerdict` function's exact shape. `REVIEW_GATE_SRC` is deliberately
 // read from the committed `HEAD` snapshot, not the working tree (see the
@@ -287,6 +311,8 @@ async function importMutatedCopy(mutate) {
   const mutated = mutate(REVIEW_GATE_SRC);
   const filePath = join(dir, "review-gate.mutant.mjs");
   writeFileSync(filePath, mutated, "utf8");
+  writeFileSync(join(dir, "reject-streak.mjs"), REJECT_STREAK_SRC, "utf8");
+  writeFileSync(join(dir, "relay-handshake.mjs"), RELAY_HANDSHAKE_SRC, "utf8");
   try {
     const mod = await import(`file://${filePath.replace(/\\/g, "/")}`);
     return mod;
