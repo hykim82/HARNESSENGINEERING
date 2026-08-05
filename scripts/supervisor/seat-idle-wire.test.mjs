@@ -141,6 +141,25 @@ function fakeOrcaExecFn({ terminals = [], showsByHandle = {} } = {}) {
     throw new Error(`fakeOrcaExecFn: unexpected argv ${JSON.stringify(argv)}`);
   };
 }
+// HYK-185-startcheck-wire 5R(coder-task.md §R5, A안) -- runOrchStallDetect는
+// 호출자 의도와 무관하게 dispatchStart 축도 함께 계산한다(orch-stall-detect.mjs
+// judgeDispatchStartForRepo). 이 파일은 seat-idle만 보려는 의도지만, 아래
+// e2e 표본 중 "활성 배달 + 실 경로 일치 좌석"이 성립하는 것들은
+// dispatchStart도 JUDGED까지 가므로, store를 주입하지 않으면 실 관제실
+// 기본 경로(DEFAULT_DISPATCH_START_STORE_PATH)에 쓴다 -- dispatch-start-wire.test.mjs의
+// fakeDispatchStartStore()와 동형(§S11-1 -- 실 fs 대신 in-memory로 흉내).
+function fakeDispatchStartStore(initialText = null) {
+  let stored = initialText;
+  return {
+    dispatchStartExistsFn: () => stored !== null,
+    dispatchStartReadFn: () => stored,
+    dispatchStartWriteFn: (_p, text) => {
+      stored = text;
+    },
+    dispatchStartMkdirFn: () => {},
+  };
+}
+
 function throwingExecFn() {
   return () => {
     throw new Error("boom: orca unreachable");
@@ -318,7 +337,7 @@ test("(b)★ runOrchStallDetect e2e: active dispatch -> seatLiveness is JUDGED a
     });
     const { result } = runOrchStallDetect(
       ["--repo-root", dir, "--now", new Date(now).toISOString(), "--json"],
-      { execFn },
+      { execFn, ...fakeDispatchStartStore() },
     );
     assert.equal(result.seatLiveness.status, "SEAT_LIVENESS_JUDGED");
     assert.equal(result.seatIdle.status, SEAT_IDLE_WIRE_STATUS.NOT_APPLICABLE);
@@ -373,7 +392,7 @@ test("(b)★ runOrchStallDetect e2e: dispatch already completed (result file exi
     });
     const { result } = runOrchStallDetect(
       ["--repo-root", dir, "--now", new Date(now).toISOString(), "--json"],
-      { execFn },
+      { execFn, ...fakeDispatchStartStore() },
     );
     assert.equal(result.seatLiveness.status, "SEAT_LIVENESS_NOT_APPLICABLE");
     assert.equal(result.seatIdle.status, SEAT_IDLE_WIRE_STATUS.JUDGED);

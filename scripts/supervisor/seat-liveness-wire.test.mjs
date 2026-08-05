@@ -147,6 +147,25 @@ function throwingExecFn() {
   };
 }
 
+// HYK-185-startcheck-wire 5R(coder-task.md §R5, A안) -- runOrchStallDetect는
+// 호출자 의도와 무관하게 dispatchStart 축도 함께 계산한다(orch-stall-detect.mjs
+// judgeDispatchStartForRepo). 이 파일은 seat-liveness만 보려는 의도지만,
+// 아래 두 e2e 표본은 "활성 배달 + 실 경로 일치 좌석"이 우연히 성립해
+// dispatchStart도 JUDGED까지 가므로, store를 주입하지 않으면 실 관제실
+// 기본 경로(DEFAULT_DISPATCH_START_STORE_PATH)에 쓴다 -- dispatch-start-wire.test.mjs의
+// fakeDispatchStartStore()와 동형(§S11-1 -- 실 fs 대신 in-memory로 흉내).
+function fakeDispatchStartStore(initialText = null) {
+  let stored = initialText;
+  return {
+    dispatchStartExistsFn: () => stored !== null,
+    dispatchStartReadFn: () => stored,
+    dispatchStartWriteFn: (_p, text) => {
+      stored = text;
+    },
+    dispatchStartMkdirFn: () => {},
+  };
+}
+
 // ---------------------------------------------------------------------------
 // selectActiveDispatch -- droppedTaskFiles에서 "결과 파일이 아직 없는" 가장
 // 최근 항목 하나만 고른다.
@@ -343,7 +362,7 @@ test("(a) runOrchStallDetect end-to-end: an active .harness/coder-task.md + a ma
     });
     const { result } = runOrchStallDetect(
       ["--repo-root", dir, "--now", new Date(now).toISOString(), "--json"],
-      { execFn },
+      { execFn, ...fakeDispatchStartStore() },
     );
     assert.ok(result.seatLiveness, "result.seatLiveness must be present");
     assert.equal(
@@ -650,7 +669,7 @@ test("NC mutation/seat-wire #1 (필수): 결선 제거(코어를 부르지 않�
     });
     const { result } = mutant.runOrchStallDetect(
       ["--repo-root", dir, "--now", new Date(now).toISOString(), "--json"],
-      { execFn },
+      { execFn, ...fakeDispatchStartStore() },
     );
     assert.equal(
       result.seatLiveness.status,

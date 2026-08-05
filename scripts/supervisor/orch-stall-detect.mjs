@@ -84,7 +84,14 @@
 // 것을 피하기 위해 의도적으로 분리 -- 알림 0 비타협).
 //
 // Node 20 호환(coder-task.md §2-11) -- ESM 표준 API만 사용.
-import { readFileSync, existsSync, statSync, readdirSync } from "node:fs";
+import {
+  readFileSync,
+  existsSync,
+  statSync,
+  readdirSync,
+  writeFileSync,
+  mkdirSync,
+} from "node:fs";
 import { execFileSync } from "node:child_process";
 import path from "node:path";
 import {
@@ -99,8 +106,13 @@ import {
 } from "./seat-liveness-core.mjs";
 import { judgeSeatIdle, SEAT_IDLE_VERDICT } from "./seat-idle-core.mjs";
 import {
+  judgeDispatchStart,
+  DISPATCH_START_VERDICT,
+} from "./dispatch-start-core.mjs";
+import {
   collectSeatLivenessObservation,
   createOrcaExecFn,
+  CONTROL_ROOM_PATH,
 } from "../relay/adapters/orca-adapter.mjs";
 
 // 정지 의심과 판정 불가를 같은 코드로 접지 않는다(coder-task.md §5-C
@@ -116,6 +128,16 @@ export const EXIT_CODE_BY_VERDICT = Object.freeze({
 const DROPPED_AT_RE =
   /^dropped_at:\s*(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}) KST\s*$/im;
 const TASK_ID_RE = /^task_id:\s*(\S.*?)\s*$/im;
+// HYK-185-startcheck-wire 2R(coder-task.md §R2, REVIEW P1 반려 수리) --
+// 완료의 정본은 결과 파일의 **존재**가 아니라 그 안의 칼럼-0 `>>> DONE:`
+// 줄이다(relay-handshake.mjs의 DONE_RE와 동일 관례를 이 파일 규모에 맞게
+// 재사용 -- scripts/check/**는 무접촉 범위라 그 파일을 import하지 않고
+// 같은 칼럼-0 패턴만 이 파일 안에서 독립적으로 재현한다). REVIEW가 실물
+// 릴레이로 잡은 것: REVIEW 좌석은 시작 직후 결과 파일에 표지 3줄
+// (dispatch_verified 등)을 먼저 쓰고 본문·DONE 줄은 나중에 쓴다 -- 그
+// 순간의 "결과 파일 존재"만 보면 아직 진행 중인 배달을 이미 끝난 것으로
+// 오판해 dispatch-start 축이 구조적으로 항상 NOT_APPLICABLE이 된다.
+const RESULT_DONE_RE = /^>>>\s*DONE:/im;
 
 export function parseArgs(argv) {
   const parsed = {
@@ -158,6 +180,36 @@ function collectFileMtime(repoRoot, relPath) {
     return { collected: true, exists: true, mtimeMs: st.mtimeMs };
   } catch {
     return { collected: false };
+  }
+}
+
+// HYK-185-startcheck-wire 2R(coder-task.md §R2) -- 결과 파일이 "이번
+// 배달"을 실제로 끝냈는지 읽는다. ★칼럼-0 `>>> DONE:` 줄 존재만으로는
+// 부족하다 -- 이 워크트리 자신에서 실측한 조건: CODER가 재작업 라운드
+// 도중이면 결과 파일에는 **이전 라운드의 DONE 줄이 이미 남아 있다**
+// (같은 파일을 이어 쓰는 관례, coder-task.md §5). 그 낡은 DONE 줄만
+// 보고 "끝났다"고 판정하면 지금 라운드가 진행 중인데도 다시
+// NOT_APPLICABLE로 새어버린다(§R2가 닫으려는 바로 그 결함의 변종).
+// 그래서 결과 파일 자신의 `task_id:` 표지가 **이번 배달의 taskId와
+// 같을 때만** DONE 줄을 이번 배달의 완료로 인정한다.
+// 파일이 없으면(아직 결과 자체가 없음) `null`(해당 없음 -- resultFile.
+// exists === false 조건이 이미 이 경우를 잡는다). 읽기 자체가 실패하면
+// (권한 등) **완료로 단정하지 않는다**(fail-closed -- §2-5 비타협과
+// 동일 원칙) -- `false`로 안전하게 처리한다(놓치는 것보다 과대검출이 낫다).
+function collectResultFileCompletion(repoRoot, resultRelPath, taskId) {
+  try {
+    const full = resolveRepoPath(repoRoot, resultRelPath);
+    if (!existsSync(full)) return null;
+    const text = readFileSync(full, "utf8");
+    const resultTaskIdMatch = text.match(TASK_ID_RE);
+    const resultTaskId = resultTaskIdMatch ? resultTaskIdMatch[1] : null;
+    const sameTaskId =
+      typeof taskId === "string" &&
+      taskId.length > 0 &&
+      resultTaskId === taskId;
+    return sameTaskId && RESULT_DONE_RE.test(text);
+  } catch {
+    return false;
   }
 }
 
@@ -256,6 +308,49 @@ function computeTaskIdMismatch(repoRoot, taskFileRelPath, taskFileTaskId) {
 // 재현하려면 실제 OS 권한 오류를 흉내내기 어려우므로, 이 지점 하나에
 // 주입 지점을 둔다(다른 호출자, collectPledgeDerivationEvidence는 opts
 // 없이 불러 기존 동작을 그대로 유지한다).
+// 드롭된 태스크 파일 하나로부터 evidence item을 만든다(collectDroppedTaskFileEvidence
+// 에서 분리 -- max-lines-per-function/complexity 상한 준수, HYK-185-startcheck-wire
+// 2R이 resultFileDone 필드를 추가하며 분기 수가 늘어난 것뿐 로직은 그대로다).
+// dropped_at 헤더가 없으면(드롭됨 흔적 자체가 없음) `null`을 돌려 호출부가
+// 건너뛰게 한다.
+function buildDroppedTaskFileItem(repoRoot, harnessDir, name, text) {
+  const droppedMatch = text.match(DROPPED_AT_RE);
+  if (!droppedMatch) return null;
+  const relPath = `.harness/${name}`;
+  const iso = `${droppedMatch[1]}-${droppedMatch[2]}-${droppedMatch[3]}T${droppedMatch[4]}:${droppedMatch[5]}:00+09:00`;
+  const droppedAtMs = Date.parse(iso);
+  const taskIdMatch = text.match(TASK_ID_RE);
+  const resultName = name.replace(/-task\.md$/, ".md");
+  const resultPath = `.harness/${resultName}`;
+  const resultFile = collectFileMtime(repoRoot, resultPath);
+  const taskId = taskIdMatch ? taskIdMatch[1] : null;
+  const resultFileExists =
+    resultFile.collected === true ? resultFile.exists : false;
+  return {
+    path: relPath,
+    taskId,
+    droppedAtMs: Number.isNaN(droppedAtMs) ? null : droppedAtMs,
+    resultFile:
+      resultFile.collected === true
+        ? {
+            path: resultPath,
+            exists: resultFile.exists,
+            mtimeMs: resultFile.mtimeMs,
+          }
+        : { path: resultPath, exists: false, mtimeMs: null },
+    // HYK-185-startcheck-wire 2R: 결과 파일이 없으면 "완료 여부" 자체가
+    // 해당 없음(null) -- 있을 때만 실제로 그 안에 DONE 줄이 있는지 읽는다.
+    // ⚠️seat-liveness/seat-idle 축은 이 필드를 읽지 않는다(selectActiveDispatch
+    // 는 여전히 resultFile.exists만 본다, 아래 selectActiveDispatchForStart
+    // 헤더 주석 참조) -- 이 필드 추가 자체는 기존 두 축의 판정을 바꾸지
+    // 않는다(회귀 0).
+    resultFileDone: resultFileExists
+      ? collectResultFileCompletion(repoRoot, resultPath, taskId)
+      : null,
+    taskIdMismatch: computeTaskIdMismatch(repoRoot, relPath, taskId),
+  };
+}
+
 export function collectDroppedTaskFileEvidence(repoRoot, opts = {}) {
   const readdirFn =
     typeof opts.readdirFn === "function" ? opts.readdirFn : readdirSync;
@@ -269,36 +364,14 @@ export function collectDroppedTaskFileEvidence(repoRoot, opts = {}) {
   }
   const items = [];
   for (const name of names) {
-    const relPath = `.harness/${name}`;
     let text;
     try {
       text = readFileSync(path.join(harnessDir, name), "utf8");
     } catch {
       continue;
     }
-    const droppedMatch = text.match(DROPPED_AT_RE);
-    if (!droppedMatch) continue; // dropped_at 헤더가 아예 없음 -- "드롭됨" 흔적 자체가 없다.
-    const iso = `${droppedMatch[1]}-${droppedMatch[2]}-${droppedMatch[3]}T${droppedMatch[4]}:${droppedMatch[5]}:00+09:00`;
-    const droppedAtMs = Date.parse(iso);
-    const taskIdMatch = text.match(TASK_ID_RE);
-    const resultName = name.replace(/-task\.md$/, ".md");
-    const resultPath = `.harness/${resultName}`;
-    const resultFile = collectFileMtime(repoRoot, resultPath);
-    const taskId = taskIdMatch ? taskIdMatch[1] : null;
-    items.push({
-      path: relPath,
-      taskId,
-      droppedAtMs: Number.isNaN(droppedAtMs) ? null : droppedAtMs,
-      resultFile:
-        resultFile.collected === true
-          ? {
-              path: resultPath,
-              exists: resultFile.exists,
-              mtimeMs: resultFile.mtimeMs,
-            }
-          : { path: resultPath, exists: false, mtimeMs: null },
-      taskIdMismatch: computeTaskIdMismatch(repoRoot, relPath, taskId),
-    });
+    const item = buildDroppedTaskFileItem(repoRoot, harnessDir, name, text);
+    if (item) items.push(item);
   }
   return { items, failed: false };
 }
@@ -506,6 +579,44 @@ export function selectActiveDispatch(droppedTaskFiles) {
         item.resultFile &&
         item.resultFile.exists === false,
     )
+    .sort((a, b) => b.droppedAtMs - a.droppedAtMs);
+  return active.length > 0 ? active[0] : null;
+}
+
+// HYK-185-startcheck-wire 2R(coder-task.md §R2, REVIEW P1 반려 수리) --
+// dispatch-start 축 전용 "활성 배달" 판정. `selectActiveDispatch`(위)와
+// 의도적으로 분리한다 -- seat-liveness/seat-idle 두 축은 이 라운드에서
+// **손대지 않는다**(회귀 0 요구, §R2-1). 실물 릴레이 실측(REVIEW): REVIEW
+// 좌석은 시작 직후 결과 파일에 표지 3줄부터 먼저 쓰고 본문·`>>> DONE:`
+// 줄은 나중에 쓴다 -- `resultFile.exists === true`만으로 "끝났다"고 보면
+// 그 표지-먼저-쓰기 구간에서 dispatch-start 축이 구조적으로 항상
+// NOT_APPLICABLE이 된다(오늘 REVIEW가 재현). 완료의 정본은 결과 파일의
+// 존재가 아니라 그 안의 `>>> DONE:` 줄이므로, 이 축은 **결과 파일이
+// 있어도 DONE 줄이 아직 없으면 여전히 활성**으로 본다.
+// ★2R 안에서 재발견(이 워크트리 자신을 대상으로 실물 재확인하다 실측):
+// DONE 줄 존재만 보면 부족하다 -- 결과 파일은 **이전 라운드**의 DONE
+// 줄을 그대로 지닌 채 다음 라운드가 이어 쓰는 관례라(coder-task.md §5),
+// 그 낡은 DONE 줄만 보고 "끝났다"고 하면 지금 라운드가 진행 중인데도
+// 다시 NOT_APPLICABLE로 샌다. 그래서 `resultFileDone`(collectResultFileCompletion
+// 참조)은 그 결과 파일 자신의 `task_id:` 표지가 **이번 배달의 taskId와
+// 일치할 때만** true다 -- 다른 라운드의 낡은 DONE 줄은 이번 배달의
+// 완료로 인정되지 않는다.
+export function selectActiveDispatchForStart(droppedTaskFiles) {
+  const active = (Array.isArray(droppedTaskFiles) ? droppedTaskFiles : [])
+    .filter((item) => {
+      if (
+        !item ||
+        typeof item.droppedAtMs !== "number" ||
+        !Number.isFinite(item.droppedAtMs) ||
+        !item.resultFile
+      ) {
+        return false;
+      }
+      if (item.resultFile.exists === false) return true;
+      // 결과 파일은 있다 -- "이번 배달"의 DONE 줄이 있어야만 진짜로 끝난
+      // 것이다(resultFileDone은 task_id 일치까지 확인된 값, 위 주석 참조).
+      return item.resultFileDone !== true;
+    })
     .sort((a, b) => b.droppedAtMs - a.droppedAtMs);
   return active.length > 0 ? active[0] : null;
 }
@@ -871,13 +982,334 @@ export function judgeSeatIdleAcrossWorktrees({ repoRoot, now }, opts = {}) {
 // HYK-185-seat-idle-1: 두 좌석 축(무응답/유휴 방치)을 함께 계산한다 --
 // runOrchStallDetect에서 분리(max-lines-per-function, 복잡도 분산). 둘 다
 // v1은 로그만(§2-3 (c)) -- exitCode에 관여하지 않는다.
+// HYK-185-startcheck-wire: dispatchStart 축(«배달 후 시작됐는가»)도 같은
+// 함수에서 함께 계산한다(runOrchStallDetect의 max-lines-per-function 상한
+// 준수를 위해 여기로 옮긴 것뿐 -- 세 축 모두 v1은 로그만, exitCode에는
+// 관여하지 않는다).
 function computeSeatAxes(repoRoot, now, opts) {
   const seatLiveness = judgeSeatLivenessAcrossWorktrees(
     { repoRoot, now },
     opts,
   );
   const seatIdle = judgeSeatIdleAcrossWorktrees({ repoRoot, now }, opts);
-  return { seatLiveness, seatIdle };
+  const dispatchStart = judgeDispatchStartAcrossWorktrees(
+    { repoRoot, now },
+    opts,
+  );
+  return { seatLiveness, seatIdle, dispatchStart };
+}
+
+// ---- HYK-185-startcheck-wire (coder-task.md §1-§2) -- «배달 직후
+// 시작됐는가»(dispatch-start-core.mjs, judgeDispatchStart) 판정 결선 ----
+//
+// 배경(coder-task.md §1): 이 코어는 이미 있었다(gap#74) -- 그런데 ORCH 실측
+// 으로 이걸 import하는 프로덕션 파일이 0개였다(자기 시험 1건뿐). 이 블록이
+// 그 결선이다. ★코어(judgeDispatchStart) 자체는 한 글자도 바꾸지 않는다
+// (coder-task.md §2 비타협 #2) -- 여기서 하는 일은 오직 코어가 요구하는
+// 입력(`dispatch`·`observations[]`·`now`)을 모아 넣는 것뿐이다.
+//
+// 필드 이름은 기존 두 축(`seat_*`/`idle_*`)과 구별되도록 `start_*`를 쓴다
+// (watch-run.mjs buildLogLine 참조, coder-task.md §2-1 "구별되는 필드
+// 이름" 비타협).
+//
+// ★새 orca 호출 0(coder-task.md §2-3): 관측은 seatLiveness 축과 똑같은
+// `collectSeatLivenessObservation`(terminal list/show만)을 그대로 재사용
+// 한다 -- 이 축을 위한 새 `terminal`/`orchestration` 호출은 추가하지
+// 않는다.
+//
+// ★구조적 필요악(코어 자신의 헤더 주석, dispatch-start-core.mjs 참조):
+// judgeDispatchStart는 "서로 다른 두 관측 사이의 lastOutputAt 전진"만
+// 본다 -- 배달 직후 붙여넣기 메아리 한 번(관측 1건)만으로는 판정이
+// 성립하지 않는다(코어 자신이 UNDECIDABLE로 닫는다). 예약 감시는 15분
+// 주기로 반복 호출되므로(gap#61 실측), 매 실행마다 관측 1건을 저장소
+// **밖**의 고정 위치(`DEFAULT_DISPATCH_START_STORE_PATH`, 관제실 --
+// 어느 git 저장소에도 속하지 않는다, §3-f "저장소 오염 0"과 충돌 없음)에
+// 누적해 다음 실행이 두 번째 점으로 쓸 수 있게 한다. 이 파일의 다른 모든
+// 함수는 여전히 읽기 전용이다 -- 이 축만의 예외이며, 그 이유를 이 주석에
+// 명시적으로 남긴다(조용한 계약 위반 방지).
+//
+// ★수집 실패를 조용함으로 접지 않는다(coder-task.md §2-5, gap#61/#75/#77
+// 3사이클 연속 핵심과 동일 원칙): store 읽기/쓰기 실패는 `STORE_FAILED`로
+// 표면화하고, 그 실행에서는 judgeDispatchStart를 아예 부르지 않는다 --
+// 이번 한 번의 관측만으로 지어낸 판정을 내지 않는다.
+export const DISPATCH_START_WIRE_STATUS = Object.freeze({
+  // 이 워크트리에 아직 결과 파일이 없는 "활성 배달"이 없다 -- 판정 대상
+  // 자체가 없다(정상, 판정 불가 아님).
+  NOT_APPLICABLE: "DISPATCH_START_NOT_APPLICABLE",
+  // 관측 조회는 성공했지만 이 워크트리에 붙은 좌석이 0개다(정상).
+  NO_SEAT: "DISPATCH_START_NO_SEAT",
+  // 관측을 모아 judgeDispatchStart를 실제로 불렀고 verdict가 나왔다.
+  JUDGED: "DISPATCH_START_JUDGED",
+  // 좌석 관측 수집 자체가 실패했다 -- "시작 안 됨"으로 접지 않는다.
+  COLLECTION_FAILED: "DISPATCH_START_COLLECTION_FAILED",
+  // 관측 히스토리 store 읽기/쓰기가 실패했다 -- 이번 실행의 관측 1건만
+  // 으로는 진행 여부를 판정할 근거가 없으므로 판정을 아예 보류한다.
+  STORE_FAILED: "DISPATCH_START_STORE_FAILED",
+});
+
+export const DISPATCH_START_SCAN_FAILURE = Object.freeze({
+  WORKTREE_LIST_FAILED: "DISPATCH_START_SCAN_WORKTREE_LIST_FAILED",
+  HARNESS_READ_FAILED: "DISPATCH_START_SCAN_HARNESS_READ_FAILED",
+});
+
+// 하네스-관제실은 어느 워크트리의 git 저장소도 아니다(orca-adapter.mjs
+// CONTROL_ROOM_PATH 재사용) -- 이 경로에 쓰는 것은 §3-f "저장소 오염 0"과
+// 무관하다.
+export const DEFAULT_DISPATCH_START_STORE_PATH = `${CONTROL_ROOM_PATH}/watch/dispatch-start-observations.json`;
+// 워크트리당 관측을 무한정 쌓지 않는다 -- 판정에 필요한 것은 "전진했는가"
+// 뿐이므로 최근 몇 개만 있으면 충분하다(오래된 표본을 굳이 지키지 않는다).
+export const MAX_STORED_DISPATCH_START_OBSERVATIONS = 5;
+
+// opts.dispatchStartExistsFn/dispatchStartReadFn 주입 가능(시험 전용,
+// 실 관제실 경로를 건드리지 않고 검증) -- 기본은 실 fs. 파일 부재는 손상이
+// 아니라 "첫 실행"이므로 빈 store로 정상 취급한다(observer-store.mjs
+// loadStore와 동일 원칙, 재구현이 아니라 같은 관례를 이 파일 규모에 맞게
+// 재사용).
+function loadDispatchStartStore(storePath, opts) {
+  const existsFn =
+    typeof opts.dispatchStartExistsFn === "function"
+      ? opts.dispatchStartExistsFn
+      : existsSync;
+  const readFn =
+    typeof opts.dispatchStartReadFn === "function"
+      ? opts.dispatchStartReadFn
+      : (p) => readFileSync(p, "utf8");
+  try {
+    if (!existsFn(storePath)) return { ok: true, store: {} };
+    const parsed = JSON.parse(readFn(storePath));
+    if (
+      parsed === null ||
+      typeof parsed !== "object" ||
+      Array.isArray(parsed)
+    ) {
+      return {
+        ok: false,
+        reason: "dispatch-start store: corrupt (not a plain object)",
+      };
+    }
+    return { ok: true, store: parsed };
+  } catch (err) {
+    return {
+      ok: false,
+      reason: `dispatch-start store: read/parse failed (${err && err.message ? err.message : String(err)})`,
+    };
+  }
+}
+
+// opts.dispatchStartMkdirFn/dispatchStartWriteFn 주입 가능(시험 전용).
+function saveDispatchStartStore(storePath, store, opts) {
+  const mkdirFn =
+    typeof opts.dispatchStartMkdirFn === "function"
+      ? opts.dispatchStartMkdirFn
+      : (p) => mkdirSync(p, { recursive: true });
+  const writeFn =
+    typeof opts.dispatchStartWriteFn === "function"
+      ? opts.dispatchStartWriteFn
+      : (p, text) => writeFileSync(p, text, "utf8");
+  try {
+    mkdirFn(path.dirname(storePath));
+    writeFn(storePath, JSON.stringify(store));
+    return { ok: true };
+  } catch (err) {
+    return {
+      ok: false,
+      reason: `dispatch-start store: write failed (${err && err.message ? err.message : String(err)})`,
+    };
+  }
+}
+
+// 같은 배달(dispatchId 동일)이면 저장된 관측 뒤에 이번 관측을 이어붙이고,
+// 배달이 바뀌었으면(새 태스크가 드롭됨) 히스토리를 새로 시작한다 -- 지난
+// 배달의 관측이 이번 배달의 "전진" 판정에 섞이지 않게 한다.
+function nextObservationsForDispatch(prevEntry, dispatch, observation) {
+  const sameDispatch =
+    prevEntry && prevEntry.dispatchId === dispatch.dispatchId;
+  const prevObservations =
+    sameDispatch && Array.isArray(prevEntry.observations)
+      ? prevEntry.observations
+      : [];
+  const combined = [...prevObservations, observation];
+  return combined.length > MAX_STORED_DISPATCH_START_OBSERVATIONS
+    ? combined.slice(combined.length - MAX_STORED_DISPATCH_START_OBSERVATIONS)
+    : combined;
+}
+
+// judgeDispatchStartForRepo({repoRoot, droppedTaskFiles, now}, opts) --
+// judgeSeatLivenessForRepo/judgeSeatIdleForRepo와 같은 형태(이미 수집된
+// droppedTaskFiles를 받는다, 이 함수 자신은 .harness를 읽지 않는다) -- 이
+// 축 하나(단일 워크트리)에 대해 dispatch-start-core.mjs의 judgeDispatchStart
+// 를 실제로 부른다.
+export function judgeDispatchStartForRepo(
+  { repoRoot, droppedTaskFiles, now },
+  opts = {},
+) {
+  // HYK-185-startcheck-wire 2R: 이 축만 selectActiveDispatchForStart를
+  // 쓴다(위 함수 헤더 주석 참조) -- seat-liveness/seat-idle 두 축은
+  // 여전히 selectActiveDispatch(파일 존재만 본다)를 그대로 쓴다.
+  const active = selectActiveDispatchForStart(droppedTaskFiles);
+  if (!active) {
+    return { status: DISPATCH_START_WIRE_STATUS.NOT_APPLICABLE };
+  }
+  const dispatch = {
+    dispatchId: active.path,
+    dispatchedAtMs: active.droppedAtMs,
+  };
+  const execFn =
+    typeof opts.execFn === "function" ? opts.execFn : createOrcaExecFn();
+  const observed = collectSeatLivenessObservation(
+    { worktreePath: repoRoot, now },
+    { execFn },
+  );
+  if (!observed.ok) {
+    return {
+      status: DISPATCH_START_WIRE_STATUS.COLLECTION_FAILED,
+      observationReason: observed.observationReason,
+      reason: observed.reason,
+      dispatch,
+    };
+  }
+  if (observed.seatCount === 0) {
+    return { status: DISPATCH_START_WIRE_STATUS.NO_SEAT, dispatch };
+  }
+  const storePath =
+    opts.dispatchStartStorePath ?? DEFAULT_DISPATCH_START_STORE_PATH;
+  const loaded = loadDispatchStartStore(storePath, opts);
+  if (!loaded.ok) {
+    return {
+      status: DISPATCH_START_WIRE_STATUS.STORE_FAILED,
+      reason: loaded.reason,
+      dispatch,
+    };
+  }
+  const currentObservation = {
+    observedAtMs: now,
+    lastOutputAt: observed.observation.lastOutputAt,
+  };
+  const nextObservations = nextObservationsForDispatch(
+    loaded.store[repoRoot],
+    dispatch,
+    currentObservation,
+  );
+  const saved = saveDispatchStartStore(
+    storePath,
+    {
+      ...loaded.store,
+      [repoRoot]: {
+        dispatchId: dispatch.dispatchId,
+        observations: nextObservations,
+      },
+    },
+    opts,
+  );
+  if (!saved.ok) {
+    return {
+      status: DISPATCH_START_WIRE_STATUS.STORE_FAILED,
+      reason: saved.reason,
+      dispatch,
+    };
+  }
+  const judged = judgeDispatchStart({
+    dispatch,
+    observations: nextObservations,
+    now,
+  });
+  return {
+    status: DISPATCH_START_WIRE_STATUS.JUDGED,
+    verdict: judged.verdict,
+    reasonCode: judged.reasonCode,
+    details: judged.details,
+    dispatch,
+  };
+}
+
+// 워크트리 하나를 판정한다(judgeSeatLivenessForWorktree/
+// judgeSeatIdleForWorktree와 대칭 구조) -- .harness 읽기 실패는 여기서
+// 별도 상태로 표면화하고, judgeDispatchStartForRepo는 그 뒤(읽기가 이미
+// 성공한 뒤)만 부른다.
+function judgeDispatchStartForWorktree(worktreePath, now, opts) {
+  const evidence = collectDroppedTaskFileEvidence(worktreePath, {
+    readdirFn: opts.harnessReaddirFn,
+  });
+  if (evidence.failed) {
+    return {
+      worktreePath,
+      status: DISPATCH_START_SCAN_FAILURE.HARNESS_READ_FAILED,
+    };
+  }
+  const judged = judgeDispatchStartForRepo(
+    { repoRoot: worktreePath, droppedTaskFiles: evidence.items, now },
+    opts,
+  );
+  return { worktreePath, ...judged };
+}
+
+export const DISPATCH_START_SCAN_SEVERITY = Object.freeze({
+  NORMAL: 0, // NOT_APPLICABLE/NO_SEAT/JUDGED+STARTED/JUDGED+UNDECIDABLE 미만 대기.
+  UNDECIDABLE: 1, // JUDGED이지만 verdict가 UNDECIDABLE.
+  COLLECTION_FAILURE: 2, // 워크트리 열거·harness 읽기·좌석 조회·store I/O 실패.
+  SUSPECTED_NOT_STARTED: 3, // 가장 나쁨.
+});
+
+function dispatchStartSeverityOf(entry) {
+  if (
+    entry.status === DISPATCH_START_SCAN_FAILURE.WORKTREE_LIST_FAILED ||
+    entry.status === DISPATCH_START_SCAN_FAILURE.HARNESS_READ_FAILED ||
+    entry.status === DISPATCH_START_WIRE_STATUS.COLLECTION_FAILED ||
+    entry.status === DISPATCH_START_WIRE_STATUS.STORE_FAILED
+  ) {
+    return DISPATCH_START_SCAN_SEVERITY.COLLECTION_FAILURE;
+  }
+  if (entry.status === DISPATCH_START_WIRE_STATUS.JUDGED) {
+    if (entry.verdict === DISPATCH_START_VERDICT.NOT_STARTED) {
+      return DISPATCH_START_SCAN_SEVERITY.SUSPECTED_NOT_STARTED;
+    }
+    if (entry.verdict === DISPATCH_START_VERDICT.UNDECIDABLE) {
+      return DISPATCH_START_SCAN_SEVERITY.UNDECIDABLE;
+    }
+  }
+  return DISPATCH_START_SCAN_SEVERITY.NORMAL;
+}
+
+// judgeDispatchStartAcrossWorktrees({repoRoot, now}, opts) -- seat-liveness/
+// seat-idle 축과 대칭(워크트리 전부 열거 후 각각 개별 판정, 가장 나쁜
+// 항목을 대표값으로 상위에 싣고 전체 목록·건수도 함께 낸다). 새 워크트리
+// 열거 로직을 만들지 않고 gap#78의 `collectGitWorktrees`를 그대로
+// 재사용한다(coder-task.md §2-1-2).
+export function judgeDispatchStartAcrossWorktrees(
+  { repoRoot, now },
+  opts = {},
+) {
+  const list = collectGitWorktrees(repoRoot, opts);
+  if (!list.ok) {
+    return {
+      status: DISPATCH_START_SCAN_FAILURE.WORKTREE_LIST_FAILED,
+      detail: list.detail,
+      worktrees: [],
+      totalWorktrees: 0,
+      worstCount: 1,
+    };
+  }
+  const worktrees = list.worktrees.map((wt) =>
+    judgeDispatchStartForWorktree(wt, now, opts),
+  );
+  const worstSeverity = worktrees.reduce(
+    (acc, w) => Math.max(acc, dispatchStartSeverityOf(w)),
+    DISPATCH_START_SCAN_SEVERITY.NORMAL,
+  );
+  const worstEntries = worktrees.filter(
+    (w) => dispatchStartSeverityOf(w) === worstSeverity,
+  );
+  const worst = worstEntries[0] ?? null;
+  return {
+    status: worst ? worst.status : DISPATCH_START_WIRE_STATUS.NOT_APPLICABLE,
+    verdict: worst ? worst.verdict : undefined,
+    reasonCode: worst ? worst.reasonCode : undefined,
+    details: worst ? worst.details : undefined,
+    worktreePath: worst ? worst.worktreePath : undefined,
+    worktrees,
+    totalWorktrees: worktrees.length,
+    worstCount: worstEntries.length,
+  };
 }
 
 // runOrchStallDetect(argv) -> {result, exitCode} -- CLI 몸통을 순수 함수에
@@ -887,13 +1319,16 @@ function computeSeatAxes(repoRoot, now, opts) {
 // gap#61(coder-task.md §5-B): `--pledges` 생략 시 선언된 약속은 빈
 // 배열(정당한 상태, 오류 아님) -- 유도된 약속만으로도 판정이 나온다.
 // `--pledges`를 줬는데 못 읽으면 여전히 오류(구별, 헤더 주석 참조).
-export function runOrchStallDetect(argv, opts = {}) {
-  const cli = parseArgs(argv);
-  let declaredPledges = [];
-  if (cli.pledgesPath) {
-    const loaded = readPledges(cli.pledgesPath);
-    if (!loaded.ok) {
-      return {
+// runOrchStallDetect에서 분리(max-lines-per-function 상한 준수). `ok:false`
+// 는 `--pledges`를 줬는데 못 읽은 경우뿐이다(gap#61 -- "생략"과 "줬는데
+// 못 읽음"을 구별, 헤더 주석 참조).
+function resolveDeclaredPledges(cli) {
+  if (!cli.pledgesPath) return { ok: true, pledges: [] };
+  const loaded = readPledges(cli.pledgesPath);
+  if (!loaded.ok) {
+    return {
+      ok: false,
+      failure: {
         result: {
           ok: false,
           verdict: ORCH_PROGRESS_VERDICT.UNDECIDABLE,
@@ -901,11 +1336,17 @@ export function runOrchStallDetect(argv, opts = {}) {
           details: null,
         },
         exitCode: 3,
-        cli,
-      };
-    }
-    declaredPledges = loaded.pledges;
+      },
+    };
   }
+  return { ok: true, pledges: loaded.pledges };
+}
+
+export function runOrchStallDetect(argv, opts = {}) {
+  const cli = parseArgs(argv);
+  const declaredResult = resolveDeclaredPledges(cli);
+  if (!declaredResult.ok) return { ...declaredResult.failure, cli };
+  const declaredPledges = declaredResult.pledges;
   const repoRoot = cli.repoRoot ?? resolveRepoRoot();
   const now = cli.nowIso ? Date.parse(cli.nowIso) : Date.now();
   if (Number.isNaN(now)) {
@@ -951,9 +1392,14 @@ export function runOrchStallDetect(argv, opts = {}) {
     now,
     thresholdSeconds: cli.thresholdSeconds,
   });
-  // HYK-185 seat-scan/HYK-185-seat-idle-1: 좌석 무응답·유휴 방치 판정을
-  // 이 저장소의 워크트리 전부에 걸쳐 부른다(computeSeatAxes 참조).
-  const { seatLiveness, seatIdle } = computeSeatAxes(repoRoot, now, opts);
+  // HYK-185 seat-scan/HYK-185-seat-idle-1/HYK-185-startcheck-wire: 좌석
+  // 무응답·유휴 방치·«배달 후 시작됐는가» 판정을 이 저장소의 워크트리
+  // 전부에 걸쳐 부른다(computeSeatAxes 참조).
+  const { seatLiveness, seatIdle, dispatchStart } = computeSeatAxes(
+    repoRoot,
+    now,
+    opts,
+  );
   return {
     result: {
       ...result,
@@ -965,6 +1411,7 @@ export function runOrchStallDetect(argv, opts = {}) {
       derivationNotes: derivation.notes,
       seatLiveness,
       seatIdle,
+      dispatchStart,
     },
     exitCode: EXIT_CODE_BY_VERDICT[result.verdict] ?? 3,
     cli,
