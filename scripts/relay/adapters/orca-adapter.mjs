@@ -50,6 +50,32 @@ import {
 // `2026-07-22-hyk170-어댑터Bv2/`)로 전부 실측 근거를 확보했다 -- 추측 argv
 // 0. `--agent` 경로(`result.agentTerminalHandle`)만 이번 프로브 범위 밖이라
 // 여전히 미실측이며 구현되지 않았다(정직 경계).
+//
+// HYK-185-seat-multi (coder-task.md, 한용 확정 "안 1"): 좌석이 2개 이상인
+// 워크트리(CODER+REVIEW 동거는 표준 구성이지 예외가 아니다)가
+// resolveSeatLivenessCandidate 하나를 세 감시 축(seatLiveness/seatIdle/
+// dispatchStart)이 공유해 동시에 눈머는 사고를 고쳤다 -- 관측층만
+// 넓혔다(collectSeatObservationsForWorktree, 아래): 이 함수는 후보가
+// 2개 이상이어도 거부하지 않고 전부 돌려준다. 판정 축의 재배선은
+// "방치(seatIdle)" 축까지만 이번 사이클에서 했다(orch-stall-detect.mjs
+// judgeSeatIdleForRepo 참조) -- "배달과 결부된" 두 축(seatLiveness/
+// dispatchStart)의 신원 해석 전환("그 배달이 간 좌석은 어디인가")은
+// `.harness/coder.md`의 QUESTION 절에 적힌 이유로 이번 사이클에서
+// 멈췄다: Orca 배정 기록(`dispatch-show`)의 `assignee_pane_key`로
+// 좌석을 교차 확인하려면 그 배정의 실행시각 task id(`task_...`, harness
+// 라벨과 다른 이름공간)를 알아야 하는데, 그 id는 현재 `.harness/*-task.md`
+// 어디에도 기록되지 않는다(기록하면 "새 강제 표면"이 되어 비타협을
+// 어긴다) -- 이 두 축은 이번 사이클 이후에도 여전히 resolveSeatLivenessCandidate
+// (2개 이상이면 AMBIGUOUS로 실패)를 그대로 쓴다.
+//
+// ⚠️벤더 형식 의존(코더-task.md "pane key 형식 의존"): `assignee_pane_key`
+// (dispatch-show)는 `${tabId}:${leafId}`(terminal show, paneKeyFromShow)와
+// 문자 완전 일치하는 것으로 ORCH가 2회 관측했다(dispatch-bound-seat-
+// proof.mjs §1) -- 이건 **벤더 형식이며 우리 보증이 아니다**. 이 파일
+// 자신은 아직 그 대조를 하지 않지만(위 문단), 그 형식 단언은 이미
+// terminal-show-adapter.test.mjs("paneKeyFromShow: `${tabId}:${leafId}`")
+// 가 고정하고 있다 -- 이 파일이 향후 그 대조를 실제로 구현할 때
+// 재사용해야 하는 계약이지 새로 지어낼 것이 아니다.
 
 function isPlainObject(v) {
   return v !== null && typeof v === "object" && !Array.isArray(v);
@@ -539,6 +565,81 @@ export function collectSeatLivenessObservation(ctx = {}, opts = {}) {
   const resolved = resolveSeatLivenessCandidate(worktreePath, opts);
   if (!resolved.ok || resolved.seatCount === 0) return resolved;
   return fetchSeatLivenessShow(resolved.handle, now, opts);
+}
+
+// ---- HYK-185-seat-multi (coder-task.md §2 «안 1» step1): 관측층 확장 --
+// 워크트리에 좌석이 2개 이상이어도 거부하지 않고 전부 돌려준다.
+//
+// ★이 함수는 resolveSeatLivenessCandidate/collectSeatLivenessObservation
+// (위, A-1 계승)을 대체하지 않는다 -- 그 함수들은 그대로 남아 그대로
+// 쓰인다(비타협: "좌석이 둘일 때 추측하지 않고 실패로 드러내는 것은
+// 옳은 동작", coder-task.md §2 비타협1). «이 워크트리의 좌석은 정확히
+// 하나인가»라는 질문이 실제로 필요한 호출자(배달과 결부된 축 --
+// seatLiveness/dispatchStart)는 여전히 그 함수를 쓰고, 2개 이상이면
+// 여전히 AMBIGUOUS로 실패한다(코더-task.md §3-c 전수 스캔 표와 보고서의
+// QUESTION 참조 -- 그 두 축의 신원 해석 전환은 이번 사이클에서 보류됐다).
+//
+// 이 함수는 그 질문 자체가 필요 없는 호출자(방치/유휴 축, seatIdle)를
+// 위한 것이다 -- «고르지 않는다»(coder-task.md §2 "안 1" 진단: "작업자가
+// 둘이면 그 폴더의 좌석은 원래 하나가 아니다"). 후보 필터 조건은
+// resolveSeatLivenessCandidate와 완전히 동일하다(고아 제외 +
+// canonicalizeForComparison 일치) -- 다른 것은 "2개 이상이면 거부"가
+// "2개 이상이면 전부 돌려준다"로 바뀐 것뿐이다.
+//
+// 좌석 하나의 `terminal show` 실패(SHOW_QUERY_FAILED/MALFORMED)는 그
+// 좌석 항목 하나만 `{ok:false, ...}`로 표시하고 나머지 좌석의 관측을
+// 막지 않는다 -- 좌석 하나의 실패가 축 전체를 눈멀게 하던 이번 사고의
+// 근본 형태(coder-task.md §1)를 관측층에서부터 반복하지 않는다.
+// `terminal list` 조회 자체의 실패(LIST_QUERY_FAILED)는 여전히 전체
+// 실패다(개별 좌석을 추릴 근거 자체가 없으므로).
+export function collectSeatObservationsForWorktree(ctx = {}, opts = {}) {
+  const { worktreePath, now } = isPlainObject(ctx) ? ctx : {};
+  const invalid = validateSeatLivenessObservationInput(worktreePath, now, opts);
+  if (invalid) return invalid;
+  let listResponse;
+  try {
+    listResponse = opts.execFn(buildTerminalListCommand());
+  } catch (err) {
+    return denySeatLivenessObservation(
+      SEAT_LIVENESS_OBSERVATION_REASON.LIST_QUERY_FAILED,
+      `orca-adapter: collectSeatObservationsForWorktree -- terminal list query threw (${errText(err)})`,
+    );
+  }
+  const list = parseTerminalList(listResponse);
+  if (!list) {
+    return denySeatLivenessObservation(
+      SEAT_LIVENESS_OBSERVATION_REASON.LIST_QUERY_FAILED,
+      "orca-adapter: collectSeatObservationsForWorktree -- terminal list response missing/invalid result.terminals",
+    );
+  }
+  const target = canonicalizeForComparison(worktreePath);
+  const candidates = list.filter(
+    (entry) =>
+      isPlainObject(entry) &&
+      isNonEmptyString(entry.handle) &&
+      !isOrphanSeat({ worktreePath: entry.worktreePath }) &&
+      canonicalizeForComparison(entry.worktreePath) === target,
+  );
+  if (candidates.length === 0) {
+    return { ok: true, seatCount: 0, seats: [] };
+  }
+  const seats = candidates.map((candidate) => {
+    const shown = fetchSeatLivenessShow(candidate.handle, now, opts);
+    if (!shown.ok) {
+      return {
+        handle: candidate.handle,
+        ok: false,
+        observationReason: shown.observationReason,
+        reason: shown.reason,
+      };
+    }
+    return {
+      handle: candidate.handle,
+      ok: true,
+      observation: shown.observation,
+    };
+  });
+  return { ok: true, seatCount: seats.length, seats };
 }
 
 // ---- HYK-170 coder-1: 실측 argv (2단 라이브 프로브, 영수증 §8 대조표

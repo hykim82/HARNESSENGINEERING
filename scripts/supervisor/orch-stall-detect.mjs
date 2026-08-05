@@ -111,6 +111,7 @@ import {
 } from "./dispatch-start-core.mjs";
 import {
   collectSeatLivenessObservation,
+  collectSeatObservationsForWorktree,
   createOrcaExecFn,
   CONTROL_ROOM_PATH,
 } from "../relay/adapters/orca-adapter.mjs";
@@ -849,6 +850,81 @@ export const SEAT_IDLE_WIRE_STATUS = Object.freeze({
   COLLECTION_FAILED: "SEAT_IDLE_COLLECTION_FAILED",
 });
 
+// HYK-185-seat-multi (coder-task.md §2 «안 1» step2, 방치 축): 워크트리에
+// 좌석이 둘 이상이면 «고르지 않고» 좌석마다 독립적으로 판정한 뒤 가장
+// 나쁜 것을 대표로 삼는다 -- judgeSeatIdleAcrossWorktrees(아래)가 이미
+// 쓰는 "worst wins" 원칙을 워크트리 내부 좌석 수준에도 그대로 적용한다.
+// 좌석 하나의 관측(`terminal show`) 실패는 그 좌석 하나만
+// SEAT_COLLECTION_FAILED로 접고 나머지 좌석의 판정을 막지 않는다 --
+// 예전(resolveSeatLivenessCandidate 공유)처럼 좌석 하나의 사정이 축
+// 전체를 눈멀게 하지 않는다(gap#83/coder-task.md §1이 고치려는 결함).
+const SEAT_IDLE_PER_SEAT_SEVERITY = Object.freeze({
+  IDLE_OK: 0,
+  UNDECIDABLE: 1,
+  SEAT_COLLECTION_FAILED: 2,
+  SUSPECTED_ABANDONED: 3,
+});
+
+function severityOfSeatIdleEntry(entry) {
+  if (!entry.ok) return SEAT_IDLE_PER_SEAT_SEVERITY.SEAT_COLLECTION_FAILED;
+  if (entry.verdict === SEAT_IDLE_VERDICT.SUSPECTED_ABANDONED) {
+    return SEAT_IDLE_PER_SEAT_SEVERITY.SUSPECTED_ABANDONED;
+  }
+  if (entry.verdict === SEAT_IDLE_VERDICT.UNDECIDABLE) {
+    return SEAT_IDLE_PER_SEAT_SEVERITY.UNDECIDABLE;
+  }
+  return SEAT_IDLE_PER_SEAT_SEVERITY.IDLE_OK;
+}
+
+// seats: collectSeatObservationsForWorktree(orca-adapter.mjs)가 돌려주는
+// [{handle, ok, observation?, observationReason?, reason?}] 배열(seatCount
+// >= 1일 때만 호출된다). 각 좌석을 독립적으로 judgeSeatIdle에 넣고, 가장
+// 나쁜 항목의 상태를 이 워크트리의 대표 판정으로 삼는다 -- `seats`
+// (개별 좌석 판정 전부)도 함께 실어 대표값 하나만으로는 사라지는 정보를
+// 보존한다(judgeSeatIdleAcrossWorktrees의 worktrees 배열과 동일 원칙).
+function judgeSeatIdleAcrossSeats(seats, now) {
+  const perSeat = seats.map((s) => {
+    if (!s.ok) {
+      return {
+        handle: s.handle,
+        ok: false,
+        observationReason: s.observationReason,
+        reason: s.reason,
+      };
+    }
+    const judged = judgeSeatIdle({ observation: s.observation, now });
+    return {
+      handle: s.handle,
+      ok: true,
+      verdict: judged.verdict,
+      reasonCode: judged.reasonCode,
+      details: judged.details,
+    };
+  });
+  const worstSeverity = perSeat.reduce(
+    (acc, e) => Math.max(acc, severityOfSeatIdleEntry(e)),
+    SEAT_IDLE_PER_SEAT_SEVERITY.IDLE_OK,
+  );
+  const worst = perSeat.find(
+    (e) => severityOfSeatIdleEntry(e) === worstSeverity,
+  );
+  if (!worst.ok) {
+    return {
+      status: SEAT_IDLE_WIRE_STATUS.COLLECTION_FAILED,
+      observationReason: worst.observationReason,
+      reason: worst.reason,
+      seats: perSeat,
+    };
+  }
+  return {
+    status: SEAT_IDLE_WIRE_STATUS.JUDGED,
+    verdict: worst.verdict,
+    reasonCode: worst.reasonCode,
+    details: worst.details,
+    seats: perSeat,
+  };
+}
+
 // judgeSeatIdleForRepo({repoRoot, droppedTaskFiles, now}, opts) -- 단일
 // 저장소(워크트리) 하나에 대해 이 축을 판정한다. seat-liveness 축의
 // judgeSeatLivenessForRepo와 대칭 구조이나 활성 배달 유무 분기가
@@ -863,7 +939,7 @@ export function judgeSeatIdleForRepo(
   }
   const execFn =
     typeof opts.execFn === "function" ? opts.execFn : createOrcaExecFn();
-  const observed = collectSeatLivenessObservation(
+  const observed = collectSeatObservationsForWorktree(
     { worktreePath: repoRoot, now },
     { execFn },
   );
@@ -877,13 +953,7 @@ export function judgeSeatIdleForRepo(
   if (observed.seatCount === 0) {
     return { status: SEAT_IDLE_WIRE_STATUS.NO_SEAT };
   }
-  const judged = judgeSeatIdle({ observation: observed.observation, now });
-  return {
-    status: SEAT_IDLE_WIRE_STATUS.JUDGED,
-    verdict: judged.verdict,
-    reasonCode: judged.reasonCode,
-    details: judged.details,
-  };
+  return judgeSeatIdleAcrossSeats(observed.seats, now);
 }
 
 // HYK-185-seat-idle-1 §2-1-2 "gap#78 이 만든 워크트리 열거 결과를
