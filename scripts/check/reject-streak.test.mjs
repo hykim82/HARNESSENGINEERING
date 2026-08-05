@@ -340,10 +340,21 @@ test("(13d) computeRecord: a genuinely NEW round (different task_id, same verdic
 // 않는다) -- `computeRecord`/`applyOutcome`은 순수 함수라 입력 ledger
 // 객체를 변형하지 않으므로 이 시험도 원본 JS 객체를 건드리지 않지만,
 // 애초에 파일 자체에 대한 쓰기 연산이 이 시험에는 없다.
+//
+// HYK-183-ledger-fix 5R (PR #105 리눅스 CI ENOENT, 원인 확정 = ORCH·통역
+// 계약 오류): 이 표본은 원래 저장소 밖 하네스-관제실 아카이브의 로컬
+// Windows 드라이브 경로(파일명 `2026-08-05-원장-결함표본-reject-streak.json`)를
+// 가리켰다 -- 리눅스 CI에는 그 경로 자체가 존재할 수 없으므로 매번
+// ENOENT였다. 표본을 이 저장소 안 `reject-streak-defect-sample.json`으로
+// 그대로(내용 무변경, SHA-256 대조로 바이트 동일 확인) 복사해 두고 그
+// fixture를 읽도록 바꿨다 -- 출처: 위 하네스-관제실 아카이브, 채취 시각:
+// 2026-08-05(ORCH가 사고 당시 원장 스냅샷을 보존한 시점). 이제 저장소
+// 상대경로만 참조하므로 OS 무관하게 존재한다.
 // ---------------------------------------------------------------------------
 
-const ARCHIVED_LEDGER_DEFECT_SAMPLE_PATH =
-  "D:\\문서관리\\하네스-관제실\\아카이브\\2026-08-05-원장-결함표본-reject-streak.json";
+const ARCHIVED_LEDGER_DEFECT_SAMPLE_PATH = fileURLToPath(
+  new URL("./reject-streak-defect-sample.json", import.meta.url),
+);
 
 test("(13f) HYK-183-ledger-fix §3(a) 실물 재현: 보존된 원장 결함표본을 실제로 읽어, 기록 2건(HYK-186·HYK-183 09:34 반려)이 누락 3건(streak가 1에 머무는 것으로 실측)을 낳은 그 상태에서 이어지는 라운드가 올바르게 처리됨을 증명한다", () => {
   // 존재-검사 없이 그대로 읽는다 -- 파일 부재는 skip이 아니라 실패다.
