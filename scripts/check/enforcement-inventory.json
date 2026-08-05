@@ -675,6 +675,20 @@
       "owner": "human (approves PR merge after green)",
       "claude_only": false,
       "known_drift_note": "resolved -- CI now runs the whole scripts/check/*.test.mjs directory glob (27 suites), replacing the HYK-131-era fixed 6-suite list; the 'not wired into CI' drift no longer applies."
+    },
+    {
+      "id": "skip-review-usage",
+      "substrate": "manual",
+      "script": "scripts/check/skip-review-usage.mjs",
+      "test": "scripts/check/skip-review-usage.test.mjs",
+      "install_targets": [],
+      "expected_bad": "n/a -- this is an OBSERVER, not a gate. It never blocks a commit, PR, or CI run; it only enumerates commits whose message carries a real `skip-review:` trailer (the audited escape hatch review-gate.mjs allows per docs/enforcement-v1.md D2 Rule 2) so the reason strings that hatch is supposed to leave in git history are actually counted and readable somewhere, instead of sitting unaudited. The only failure mode this script itself has is being UNABLE to measure (not a git repo, git log error) -- that returns {ok:false, error} distinct from a genuine zero count, never folded into 'no usage found.'",
+      "expected_good": "n/a -- run manually or from CI as a reporting step (`node scripts/check/skip-review-usage.mjs [--json] [--ref <ref>] [--repo <path>]`); exits 0 whether the count is 0 or N (never fails the build on nonzero usage), exits 1 only when the measurement itself could not be taken",
+      "failure_exit": null,
+      "uncertain_exit": null,
+      "owner": "ORCH",
+      "claude_only": false,
+      "self_registration_note": "HYK-183-skipreview-count-1 self-registration, same convention as quality-check/nul-byte-guard above. This check is intentionally classified as a reporting/observability tool, not an enforcement gate -- review-gate.mjs's skip-review trailer logic and threshold were explicitly out of scope for this track (task instruction: count usage, do not add a new block)."
     }
   ]
 }
