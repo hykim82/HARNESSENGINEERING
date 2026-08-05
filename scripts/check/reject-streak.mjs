@@ -24,6 +24,19 @@ const FOR_LINE_RE_G = /^for:\s*(\S+)/gm;
 const TASK_ID_LINE_RE = /^task_id:\s*(\S+)/im;
 const TASK_ID_LINE_RE_G = /^task_id:\s*(\S+)/gim;
 const VERDICT_LINE_RE_G = /^verdict:\s*(approved|rejected)\s*$/gim;
+// HYK-183-ledger-fix (축 A): 결과 파일의 `>>> DONE: ... @ <시각>` 줄에서
+// 그 라운드가 실제로 끝난 시각을 뽑는다. `for:`/`task_id:`는 ORCH가 같은
+// 이슈의 여러 실제 라운드에 걸쳐 바로 그 이슈 id를 그대로(라운드 구분자
+// 없이) 반복해 쓰는 실측 관행이 있어(2026-08-05 원장 표본: `HYK-183`,
+// `HYK-186`이 서로 다른 시각의 서로 다른 라운드에 매번 동일 문자열로
+// 반복 기록됨) 그 값만으로는 "같은 라운드를 다시 확인한 것"과 "다른
+// 라운드가 우연히 같은 문자열을 썼다"를 구분할 수 없다. DONE 시각은
+// 라운드마다 실제로 다른 실시각이므로(동일 파일을 재확인하는 진짜
+// 재시도만 완전히 같다) 그 구분을 기계적으로 대신한다. DONE 줄이
+// 0개·2개 이상(모호)이면 doneAt=null로 물러나 기존(taskId+verdict만
+// 보는) 판정으로 fail back한다 -- 새 신호가 없다고 판정 자체가 막히지
+// 않는다.
+const DONE_LINE_RE_G = /^>>>\s*DONE:.*@\s*(.+?)\s*$/gim;
 
 // The envelope lives inside an HTML comment, same convention as
 // pm-snapshot-gate.mjs's `<!-- pm-snapshot ... -->` block -- a form ORCH can
@@ -160,11 +173,19 @@ export function parseReviewOutcome(reviewText) {
         "reject-streak record: no 'verdict: approved' or 'verdict: rejected' line found",
     };
   }
+  // 축 A: DONE 시각은 부가 식별자일 뿐이다 -- 0개(누락)·2개 이상(모호) 다
+  // 똑같이 doneAt=null로 물러난다. 여러 개 중 하나를 조용히 고르지
+  // 않는다(§0-B 표지 정직성과 같은 원칙); null이면 isDuplicate 판정이
+  // task_id+verdict만 보던 예전 동작으로 그대로 되돌아갈 뿐, 판정 자체가
+  // 막히지는 않는다.
+  const doneMatches = [...text.matchAll(DONE_LINE_RE_G)];
+  const doneAt = doneMatches.length === 1 ? doneMatches[0][1] : null;
   return {
     ok: true,
     taskId: rawTaskId,
     issueId,
     verdict: verdictMatches[0][1].toLowerCase(),
+    doneAt,
   };
 }
 
@@ -174,13 +195,18 @@ export function parseReviewOutcome(reviewText) {
 // agree on what "no history yet" means. Every outcome is appended to that
 // issue's history regardless of verdict -- the ladder needs the full
 // sequence, not just the current streak, to explain itself later.
-export function applyOutcome(ledger, { issueId, taskId, verdict, at }) {
+export function applyOutcome(ledger, { issueId, taskId, verdict, at, doneAt }) {
   const issues = { ...(ledger?.issues ?? {}) };
   const prev = issues[issueId] ?? { streak: 0, history: [] };
   const streak = verdict === "rejected" ? (prev.streak ?? 0) + 1 : 0;
+  const entry = { task_id: taskId, verdict, at };
+  // `doneAt` is an opt-in identifier (callers that never derive it, e.g.
+  // direct unit tests of this function, keep producing the original
+  // 3-field history shape) -- only computeRecord's caller passes it.
+  if (doneAt !== undefined) entry.done_at = doneAt;
   issues[issueId] = {
     streak,
-    history: [...(prev.history ?? []), { task_id: taskId, verdict, at }],
+    history: [...(prev.history ?? []), entry],
   };
   return { schema_version: ledger?.schema_version ?? 1, issues };
 }
@@ -190,16 +216,24 @@ export function applyOutcome(ledger, { issueId, taskId, verdict, at }) {
 // so the CLI can treat it as UNJUDGABLE (fail-open) rather than corrupting
 // the ledger with a guessed entry.
 //
-// HYK-183 §2-1 R3 (idempotency): identifies a repeat call by comparing
-// against the issue's LAST recorded history entry only -- same task_id +
-// same verdict as the most recent entry means this exact round was already
-// recorded (a retried/re-invoked caller, e.g. relay-handshake.mjs's
-// auto-wiring being called again on the same already-confirmed result
-// file), so the streak must not double-count it. This never conflates two
-// real, distinct rounds: each round's result file echoes its OWN task_id
-// (e.g. "HYK-133-review-2" vs "...-review-3"), so a genuine second
-// rejection always differs from the last entry even when both share the
-// same verdict.
+// HYK-183 §2-1 R3 (idempotency), 축 A 갱신(HYK-183-ledger-fix): identifies a
+// repeat call by comparing against the issue's LAST recorded history entry.
+// Originally this compared task_id+verdict alone on the assumption that
+// "each round's result file echoes its OWN task_id" -- that assumption does
+// NOT hold in production: the 2026-08-05 원장 표본 shows ORCH repeatedly
+// writing the bare issue id (no round suffix) into both `for:`/`task_id:`
+// across genuinely distinct rounds of the SAME issue (e.g. `HYK-186`
+// rejected twice on the same day, both rounds echoing literally `HYK-186`).
+// Under the old task_id+verdict-only key, the second real rejection was
+// indistinguishable from a retried call on the first, so the gate silently
+// swallowed it (§1 축 A: "게이트가 안 걸린다"). `done_at` (each round's own
+// `>>> DONE: ... @ <time>` line, present on every valid result file) is
+// added as a THIRD component precisely because it is the one thing that
+// reliably differs between two genuinely different rounds while staying
+// identical for a true retry of the same already-confirmed file. `doneAt`
+// missing/ambiguous on either side falls back to the original two-field
+// comparison (no new false negatives introduced when the new signal isn't
+// available) -- see parseReviewOutcome's own DONE-line handling.
 export function computeRecord({ reviewText, ledger, at }) {
   const outcome = parseReviewOutcome(reviewText);
   if (!outcome.ok) return { ok: false, reason: outcome.reason };
@@ -209,7 +243,8 @@ export function computeRecord({ reviewText, ledger, at }) {
   const isDuplicate =
     !!lastEntry &&
     lastEntry.task_id === outcome.taskId &&
-    lastEntry.verdict === outcome.verdict;
+    lastEntry.verdict === outcome.verdict &&
+    (lastEntry.done_at ?? null) === (outcome.doneAt ?? null);
   if (isDuplicate) {
     return {
       ok: true,
@@ -227,6 +262,7 @@ export function computeRecord({ reviewText, ledger, at }) {
     taskId: outcome.taskId,
     verdict: outcome.verdict,
     at,
+    doneAt: outcome.doneAt,
   });
   return {
     ok: true,
