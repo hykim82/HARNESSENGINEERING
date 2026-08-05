@@ -427,37 +427,24 @@ test("role scoping: a CODER handshake (no verdict possible) never touches the le
 // ---------------------------------------------------------------------------
 // (f) 판별력 자동화: 사본 mutation으로 3가지 비타협 요구가 각각 RED가
 // 되는지 확인한다. 대상은 이번 사이클에서 새로 추가한 코드이므로,
-// nc-review-gate.test.mjs의 HYK-183 §10 2R 선례(coder-task.md가 지목한
-// 정본)를 그대로 따라 `git show HEAD:`로 커밋된 스냅샷을 읽고, 아직
-// 커밋 전이면 스스로 skip 사유를 밝히고 건너뛴다(커밋 후 자동 해제 --
-// no-op이 아니라 이 세션의 커밋 한 번으로 실제 실행된다).
+// skip-review-usage.test.mjs의 HYK-183 3R 선례(coder-task.md §R4가 지목한
+// 정본)를 그대로 따라 `git show HEAD:`가 아니라 «작업 트리의 실제 파일»을
+// readFileSync로 읽는다 -- HEAD 기준으로는 아직 커밋 전인 변경이 영원히
+// skip 처리되며(REVIEW P2가 지목한 정확히 그 갭: 제출 시점 검증이 실제로는
+// 한 번도 안 돈다), 작업 트리를 읽으면 지금 커밋하려는 그대로를 매번
+// 검증하므로 skip이 0으로 고정된다. 변이체는 여전히 저장소 밖 mkdtemp에만
+// 쓴다 -- 실제 scripts/check/{reject-streak,relay-handshake}.mjs는 쓰기용
+// 으로 열리지 않는다.
 // ---------------------------------------------------------------------------
 
-function readCommittedSrc(relPath) {
-  try {
-    return execFileSync("git", ["show", `HEAD:${relPath}`], {
-      cwd: ROOT,
-      encoding: "utf8",
-    });
-  } catch {
-    return null;
-  }
-}
-
-const REJECT_STREAK_SRC_HEAD = readCommittedSrc(
-  "scripts/check/reject-streak.mjs",
+const REJECT_STREAK_SRC_HEAD = readFileSync(
+  join(ROOT, "scripts", "check", "reject-streak.mjs"),
+  "utf8",
 );
-const RELAY_HANDSHAKE_SRC_HEAD = readCommittedSrc(
-  "scripts/check/relay-handshake.mjs",
+const RELAY_HANDSHAKE_SRC_HEAD = readFileSync(
+  join(ROOT, "scripts", "check", "relay-handshake.mjs"),
+  "utf8",
 );
-
-const HYK183_COMMITTED =
-  !!REJECT_STREAK_SRC_HEAD &&
-  REJECT_STREAK_SRC_HEAD.includes("export function isReviewFamilyRole") &&
-  !!RELAY_HANDSHAKE_SRC_HEAD &&
-  RELAY_HANDSHAKE_SRC_HEAD.includes("function mainRepoRoot()");
-const NOT_COMMITTED_SKIP_REASON =
-  "HYK-183 reject-streak 자동 결선(isReviewFamilyRole/mainRepoRoot)이 아직 git HEAD 추적본에 없다 -- 이 세션의 커밋 후 자동으로 실행된다(no-op 아님)";
 
 function assertExactlyOneMatch(src, target, label) {
   const count = src.split(target).length - 1;
@@ -476,164 +463,144 @@ function writeMutantPair(rootDir, { relaySrc, streakSrc }) {
   return join(scriptsCheckDir, "relay-handshake.mjs");
 }
 
-test(
-  "(f) mutation #1 (필수): computeRecord's idempotency dedupe removed -> a re-confirmed identical handshake DOUBLE-COUNTS the streak -> RED",
-  { skip: !HYK183_COMMITTED && NOT_COMMITTED_SKIP_REASON },
-  () => {
-    const target =
-      "  const existing = ledger?.issues?.[outcome.issueId];\n  const lastEntry = existing?.history?.[existing.history.length - 1];\n  const isDuplicate =\n    !!lastEntry &&\n    lastEntry.task_id === outcome.taskId &&\n    lastEntry.verdict === outcome.verdict;\n  if (isDuplicate) {\n    return {\n      ok: true,\n      duplicate: true,\n      ledger,\n      issueId: outcome.issueId,\n      taskId: outcome.taskId,\n      verdict: outcome.verdict,\n      streak: existing.streak,\n    };\n  }\n\n";
-    assertExactlyOneMatch(
-      REJECT_STREAK_SRC_HEAD,
-      target,
-      "computeRecord dedupe block",
-    );
-    const mutatedStreak = REJECT_STREAK_SRC_HEAD.replace(target, "");
+test("(f) mutation #1 (필수): computeRecord's idempotency dedupe removed -> a re-confirmed identical handshake DOUBLE-COUNTS the streak -> RED", () => {
+  const target =
+    "  const existing = ledger?.issues?.[outcome.issueId];\n  const lastEntry = existing?.history?.[existing.history.length - 1];\n  const isDuplicate =\n    !!lastEntry &&\n    lastEntry.task_id === outcome.taskId &&\n    lastEntry.verdict === outcome.verdict &&\n    (lastEntry.done_at ?? null) === (outcome.doneAt ?? null);\n  if (isDuplicate) {\n    return {\n      ok: true,\n      duplicate: true,\n      ledger,\n      issueId: outcome.issueId,\n      taskId: outcome.taskId,\n      verdict: outcome.verdict,\n      streak: existing.streak,\n    };\n  }\n\n";
+  assertExactlyOneMatch(
+    REJECT_STREAK_SRC_HEAD,
+    target,
+    "computeRecord dedupe block",
+  );
+  const mutatedStreak = REJECT_STREAK_SRC_HEAD.replace(target, "");
 
-    withTempDir("hyk183-mutant-", (rootDir) => {
-      const mutantRelay = writeMutantPair(rootDir, {
-        relaySrc: RELAY_HANDSHAKE_SRC_HEAD,
-        streakSrc: mutatedStreak,
-      });
-      withTempDir("hyk183-main-", (mainDir) => {
-        initPlainGitRepo(mainDir);
-        const linkedDir = addLinkedWorktree(mainDir);
-        try {
-          const harnessDir = join(linkedDir, ".harness");
-          writeReviewFixture(harnessDir, {
-            taskId: "HYK-9600-review-1",
-            verdict: "rejected",
-            droppedAt: "2026-08-04 21:00",
-            doneAt: "2026-08-04 21:10",
-          });
-          for (let i = 0; i < 2; i++) {
-            const r = runRelayHandshakeCli(
-              mutantRelay,
-              ["review", harnessDir],
-              {
-                cwd: linkedDir,
-              },
-            );
-            assert.equal(r.exit, 0);
-          }
-          const ledger = readMainLedger(mainDir);
-          assert.equal(
-            ledger.issues["HYK-9600"].streak,
-            2,
-            "mutant must double-count the identical re-confirmation (RED signal; real code keeps this at 1)",
-          );
-        } finally {
-          rmSync(linkedDir, { recursive: true, force: true });
-        }
-      });
+  withTempDir("hyk183-mutant-", (rootDir) => {
+    const mutantRelay = writeMutantPair(rootDir, {
+      relaySrc: RELAY_HANDSHAKE_SRC_HEAD,
+      streakSrc: mutatedStreak,
     });
-  },
-);
-
-test(
-  "(f) mutation #2 (필수): isReviewFamilyRole always returns false -> a REVIEW-family rejected round is never recorded at all -> RED",
-  { skip: !HYK183_COMMITTED && NOT_COMMITTED_SKIP_REASON },
-  () => {
-    const target =
-      'export function isReviewFamilyRole(role) {\n  return typeof role === "string" && REVIEW_ROLE_RE.test(role);\n}';
-    assertExactlyOneMatch(
-      REJECT_STREAK_SRC_HEAD,
-      target,
-      "isReviewFamilyRole body",
-    );
-    const mutatedStreak = REJECT_STREAK_SRC_HEAD.replace(
-      target,
-      "export function isReviewFamilyRole(_role) {\n  return false;\n}",
-    );
-
-    withTempDir("hyk183-mutant-", (rootDir) => {
-      const mutantRelay = writeMutantPair(rootDir, {
-        relaySrc: RELAY_HANDSHAKE_SRC_HEAD,
-        streakSrc: mutatedStreak,
-      });
-      withTempDir("hyk183-main-", (mainDir) => {
-        initPlainGitRepo(mainDir);
-        const linkedDir = addLinkedWorktree(mainDir);
-        try {
-          const harnessDir = join(linkedDir, ".harness");
-          writeReviewFixture(harnessDir, {
-            taskId: "HYK-9601-review-1",
-            verdict: "rejected",
-            droppedAt: "2026-08-04 21:00",
-            doneAt: "2026-08-04 21:10",
-          });
-          const r = runRelayHandshakeCli(mutantRelay, ["review", harnessDir], {
-            cwd: linkedDir,
-          });
-          assert.equal(
-            r.exit,
-            0,
-            "handshake confirmation itself must be unaffected",
-          );
-          assert.equal(
-            readMainLedger(mainDir),
-            null,
-            "mutant must never even attempt to record a REVIEW verdict (RED signal; real code creates the ledger here)",
-          );
-        } finally {
-          rmSync(linkedDir, { recursive: true, force: true });
-        }
-      });
-    });
-  },
-);
-
-test(
-  "(f) mutation #3 (필수): mainRepoRoot's --git-common-dir resolution reverted to plain repoRoot() -> the ledger lands in the WORKTREE-LOCAL .harness instead of the main repo's -> RED",
-  { skip: !HYK183_COMMITTED && NOT_COMMITTED_SKIP_REASON },
-  () => {
-    const target =
-      'function mainRepoRoot() {\n  const root = repoRoot();\n  try {\n    const commonDir = execSync("git rev-parse --git-common-dir", {\n      encoding: "utf8",\n      cwd: root,\n    }).trim();\n    const absCommonDir = /^([A-Za-z]:[\\\\/]|\\/)/.test(commonDir)\n      ? commonDir\n      : join(root, commonDir);\n    return absCommonDir.replace(/[\\\\/]\\.git$/, "");\n  } catch {\n    return root;\n  }\n}';
-    assertExactlyOneMatch(
-      RELAY_HANDSHAKE_SRC_HEAD,
-      target,
-      "mainRepoRoot body",
-    );
-    const mutatedRelay = RELAY_HANDSHAKE_SRC_HEAD.replace(
-      target,
-      "function mainRepoRoot() {\n  return repoRoot();\n}",
-    );
-
-    withTempDir("hyk183-mutant-", (rootDir) => {
-      const mutantRelay = writeMutantPair(rootDir, {
-        relaySrc: mutatedRelay,
-        streakSrc: REJECT_STREAK_SRC_HEAD,
-      });
-      withTempDir("hyk183-main-", (mainDir) => {
-        initPlainGitRepo(mainDir);
-        const linkedDir = addLinkedWorktree(mainDir);
-        try {
-          const harnessDir = join(linkedDir, ".harness");
-          writeReviewFixture(harnessDir, {
-            taskId: "HYK-9602-review-1",
-            verdict: "rejected",
-            droppedAt: "2026-08-04 21:00",
-            doneAt: "2026-08-04 21:10",
-          });
+    withTempDir("hyk183-main-", (mainDir) => {
+      initPlainGitRepo(mainDir);
+      const linkedDir = addLinkedWorktree(mainDir);
+      try {
+        const harnessDir = join(linkedDir, ".harness");
+        writeReviewFixture(harnessDir, {
+          taskId: "HYK-9600-review-1",
+          verdict: "rejected",
+          droppedAt: "2026-08-04 21:00",
+          doneAt: "2026-08-04 21:10",
+        });
+        for (let i = 0; i < 2; i++) {
           const r = runRelayHandshakeCli(mutantRelay, ["review", harnessDir], {
             cwd: linkedDir,
           });
           assert.equal(r.exit, 0);
-          assert.equal(
-            readMainLedger(mainDir),
-            null,
-            "mutant must NOT write the main repo's ledger (RED signal)",
-          );
-          assert.ok(
-            existsSync(join(harnessDir, "reject-streak.json")),
-            "mutant instead writes a per-worktree ledger -- exactly the 2026-07-26 실측 gap this task exists to close",
-          );
-        } finally {
-          rmSync(linkedDir, { recursive: true, force: true });
         }
-      });
+        const ledger = readMainLedger(mainDir);
+        assert.equal(
+          ledger.issues["HYK-9600"].streak,
+          2,
+          "mutant must double-count the identical re-confirmation (RED signal; real code keeps this at 1)",
+        );
+      } finally {
+        rmSync(linkedDir, { recursive: true, force: true });
+      }
     });
-  },
-);
+  });
+});
+
+test("(f) mutation #2 (필수): isReviewFamilyRole always returns false -> a REVIEW-family rejected round is never recorded at all -> RED", () => {
+  const target =
+    'export function isReviewFamilyRole(role) {\n  return typeof role === "string" && REVIEW_ROLE_RE.test(role);\n}';
+  assertExactlyOneMatch(
+    REJECT_STREAK_SRC_HEAD,
+    target,
+    "isReviewFamilyRole body",
+  );
+  const mutatedStreak = REJECT_STREAK_SRC_HEAD.replace(
+    target,
+    "export function isReviewFamilyRole(_role) {\n  return false;\n}",
+  );
+
+  withTempDir("hyk183-mutant-", (rootDir) => {
+    const mutantRelay = writeMutantPair(rootDir, {
+      relaySrc: RELAY_HANDSHAKE_SRC_HEAD,
+      streakSrc: mutatedStreak,
+    });
+    withTempDir("hyk183-main-", (mainDir) => {
+      initPlainGitRepo(mainDir);
+      const linkedDir = addLinkedWorktree(mainDir);
+      try {
+        const harnessDir = join(linkedDir, ".harness");
+        writeReviewFixture(harnessDir, {
+          taskId: "HYK-9601-review-1",
+          verdict: "rejected",
+          droppedAt: "2026-08-04 21:00",
+          doneAt: "2026-08-04 21:10",
+        });
+        const r = runRelayHandshakeCli(mutantRelay, ["review", harnessDir], {
+          cwd: linkedDir,
+        });
+        assert.equal(
+          r.exit,
+          0,
+          "handshake confirmation itself must be unaffected",
+        );
+        assert.equal(
+          readMainLedger(mainDir),
+          null,
+          "mutant must never even attempt to record a REVIEW verdict (RED signal; real code creates the ledger here)",
+        );
+      } finally {
+        rmSync(linkedDir, { recursive: true, force: true });
+      }
+    });
+  });
+});
+
+test("(f) mutation #3 (필수): mainRepoRoot's --git-common-dir resolution reverted to plain repoRoot() -> the ledger lands in the WORKTREE-LOCAL .harness instead of the main repo's -> RED", () => {
+  const target =
+    'export function mainRepoRoot() {\n  const root = repoRoot();\n  try {\n    const commonDir = execSync("git rev-parse --git-common-dir", {\n      encoding: "utf8",\n      cwd: root,\n    }).trim();\n    const absCommonDir = /^([A-Za-z]:[\\\\/]|\\/)/.test(commonDir)\n      ? commonDir\n      : join(root, commonDir);\n    return absCommonDir.replace(/[\\\\/]\\.git$/, "");\n  } catch {\n    return root;\n  }\n}';
+  assertExactlyOneMatch(RELAY_HANDSHAKE_SRC_HEAD, target, "mainRepoRoot body");
+  const mutatedRelay = RELAY_HANDSHAKE_SRC_HEAD.replace(
+    target,
+    "export function mainRepoRoot() {\n  return repoRoot();\n}",
+  );
+
+  withTempDir("hyk183-mutant-", (rootDir) => {
+    const mutantRelay = writeMutantPair(rootDir, {
+      relaySrc: mutatedRelay,
+      streakSrc: REJECT_STREAK_SRC_HEAD,
+    });
+    withTempDir("hyk183-main-", (mainDir) => {
+      initPlainGitRepo(mainDir);
+      const linkedDir = addLinkedWorktree(mainDir);
+      try {
+        const harnessDir = join(linkedDir, ".harness");
+        writeReviewFixture(harnessDir, {
+          taskId: "HYK-9602-review-1",
+          verdict: "rejected",
+          droppedAt: "2026-08-04 21:00",
+          doneAt: "2026-08-04 21:10",
+        });
+        const r = runRelayHandshakeCli(mutantRelay, ["review", harnessDir], {
+          cwd: linkedDir,
+        });
+        assert.equal(r.exit, 0);
+        assert.equal(
+          readMainLedger(mainDir),
+          null,
+          "mutant must NOT write the main repo's ledger (RED signal)",
+        );
+        assert.ok(
+          existsSync(join(harnessDir, "reject-streak.json")),
+          "mutant instead writes a per-worktree ledger -- exactly the 2026-07-26 실측 gap this task exists to close",
+        );
+      } finally {
+        rmSync(linkedDir, { recursive: true, force: true });
+      }
+    });
+  });
+});
 
 after(() => {
   const postStatus = execFileSync("git", ["status", "--porcelain"], {

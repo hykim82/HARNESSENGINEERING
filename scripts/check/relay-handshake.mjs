@@ -40,7 +40,11 @@ function repoRoot() {
 // for `--git-common-dir` (absolute when cwd is a linked worktree, relative
 // "`.git`" when cwd already IS the main worktree) and strip the trailing
 // "/.git" to land back on the main clone's root.
-function mainRepoRoot() {
+// HYK-183-ledger-fix (축 B): exported so review-gate.mjs (the commit-msg
+// hook's script) can resolve the SAME centralized ledger location when it
+// records an approval -- see that module's own header for why the approval
+// path needs this at all.
+export function mainRepoRoot() {
   const root = repoRoot();
   try {
     const commonDir = execSync("git rev-parse --git-common-dir", {
