@@ -1,0 +1,39 @@
+{
+  "_provenance": "HYK-185-seat-multi (coder-task.md acceptance (a)/(b)) -- in-repo fixture derived from the real read-only samples ORCH captured around the 2026-08-05 21:36 KST scheduled run: .harness/증거/terminal-list-raw.json (seat list, paired 'now' from .harness/증거/orch-stall-detect-raw.json's 'now':1785938127298) and .harness/증거/watch.log.snapshot (the same period's ticks show all three axes collection-failing on this exact worktree, e.g. 2026-08-05T12:36:02.051Z UTC: seat_status=SEAT_LIVENESS_COLLECTION_FAILED idle_status=SEAT_IDLE_COLLECTION_FAILED start_status=DISPATCH_START_COLLECTION_FAILED). Those two evidence files are gitignored (.harness/증거/) so a test reading them breaks CI -- this fixture is the in-repo, trimmed substitute (readFileSync(new URL(..., import.meta.url))). Fields kept: exactly what collectSeatObservationsForWorktree/collectSeatLivenessObservation read (handle/worktreePath/tabId/leafId/lastOutputAt/title) -- preview text (screen redraw noise, not judgment input) is dropped. title is copied byte-for-byte from terminal-list-raw.json's 'title' field for the same handle (REVIEW P2-1, 2026-08-06: an earlier version of this fixture had paraphrased three titles -- 'ORCH'/'CODER gap83'/'REVIEW gap83' -- instead of copying them; that was wrong because title is a real observation input (collectSeatLivenessObservation's reasonHint reads it), not decorative, so this fixture must not paraphrase it. Fixed to the exact raw values: '⠂ Harness orchestrator handoff protocol' / '✳ Add two documentation gaps to enforcement file' / '관리자: hyk185-gap83-3'). nowIso is the literal ISO form of orch-stall-detect-raw.json's captured 'now' (1785938127298ms), not a rounded 21:36:00 -- using the exact paired value keeps lastOutputAt <= observedAtMs true for every seat, matching the real snapshot instead of inventing a synthetic 'now' that would misorder it.",
+  "nowIso": "2026-08-05T13:55:27.298Z",
+  "ambiguousWorktreePath": "C:/Users/Administrator/orca/workspaces/HARNESSENGINEERING/hyk185-gap83-3",
+  "terminals": [
+    {
+      "handle": "term_b8890ab1-f2df-4ce9-bc84-f76fc1de26ed",
+      "worktreePath": "C:/Users/Administrator/Documents/HARNESSENGINEERING",
+      "tabId": "2fb60765-a748-4ff8-8999-dcb45bec3cf0",
+      "leafId": "b5325a37-3e61-471b-8014-28168dd6d6a2",
+      "title": "⠂ Harness orchestrator handoff protocol",
+      "lastOutputAt": 1785938127026
+    },
+    {
+      "handle": "term_3321e179-357c-4de9-b9f9-f72e38d2d8fc",
+      "worktreePath": "C:/Users/Administrator/orca/workspaces/HARNESSENGINEERING/hyk185-gap83-3",
+      "tabId": "b7011967-041a-45e4-843c-0cf8e2ccd418",
+      "leafId": "ecdf87c2-a552-4370-9ecf-98d455404f0a",
+      "title": "✳ Add two documentation gaps to enforcement file",
+      "lastOutputAt": 1785937449427
+    },
+    {
+      "handle": "term_859f3fea-1f94-4d2b-9f96-a02d21b7ae14",
+      "worktreePath": "C:/Users/Administrator/orca/workspaces/HARNESSENGINEERING/hyk185-gap83-3",
+      "tabId": "922c554b-453f-46fc-aa29-b1bfd880b318",
+      "leafId": "64a59f5b-3ee7-4fb1-b505-11f365080a4b",
+      "title": "관리자: hyk185-gap83-3",
+      "lastOutputAt": 1785933475199
+    },
+    {
+      "handle": "term_0b7bc225-6b5f-408f-b421-6b62e2afd0e9",
+      "worktreePath": "C:/Users/Administrator/orca/workspaces/HARNESSENGINEERING/pm-lane",
+      "tabId": "pty:e841ec57-d1b5-4be0-a44b-2023793e7d33::C:/Users/Administrator/orca/workspaces/HARNESSENGINEERING/pm-lane@@c43df763",
+      "leafId": "pty:e841ec57-d1b5-4be0-a44b-2023793e7d33::C:/Users/Administrator/orca/workspaces/HARNESSENGINEERING/pm-lane@@c43df763",
+      "title": "pm-lane",
+      "lastOutputAt": 1785923193692
+    }
+  ]
+}

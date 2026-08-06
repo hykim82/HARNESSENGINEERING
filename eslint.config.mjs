@@ -87,11 +87,17 @@ export default [
     // new idle axis, through the same read-only adapter call.
     // HYK-185-startcheck-wire: dispatch-start-wire.test.mjs is the same
     // shape again for the new dispatch-start axis.
+    // HYK-185-seat-multi: hyk185-seat-multi-repro.test.mjs is the same
+    // shape once more -- it directly calls the read-only
+    // collectSeatLivenessObservation/collectSeatObservationsForWorktree
+    // ports on the real 2026-08-05 21:36 KST sample to show the
+    // before/after difference (coder-task.md acceptance (a)).
     files: [
       "scripts/supervisor/orch-stall-detect.mjs",
       "scripts/supervisor/seat-liveness-wire.test.mjs",
       "scripts/supervisor/seat-idle-wire.test.mjs",
       "scripts/supervisor/dispatch-start-wire.test.mjs",
+      "scripts/supervisor/hyk185-seat-multi-repro.test.mjs",
     ],
     rules: {
       "no-restricted-imports": "off",

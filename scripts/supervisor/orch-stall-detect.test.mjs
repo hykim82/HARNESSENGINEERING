@@ -925,6 +925,12 @@ test("static: orch-stall-detect.mjs never fetches over the network (no fetch/git
 // .test.mjs" basis (watch-run.mjs itself still only ever spawns this file
 // as a subprocess -- it never `import`s it, so this test's actual claim,
 // "no production ES-module import exists," remains true after this wiring).
+// HYK-185-seat-multi: hyk185-seat-multi-repro.test.mjs is the same shape
+// once more -- it imports judgeSeatIdleForRepo/judgeSeatLivenessForRepo/
+// judgeDispatchStartForRepo directly to show the real 2026-08-05 21:36 KST
+// sample's before/after difference (coder-task.md acceptance (a)). It is
+// itself a `.test.mjs`, so it is excluded on the identical basis as the
+// three files above.
 test("static: no PRODUCTION code imports orch-stall-detect.mjs yet (h -- can be called is not the same as is being called; only its own .test.mjs files do)", () => {
   let grepOut;
   try {
@@ -960,7 +966,8 @@ test("static: no PRODUCTION code imports orch-stall-detect.mjs yet (h -- can be 
         !f.endsWith("orch-stall-detect.test.mjs") &&
         !f.endsWith("seat-liveness-wire.test.mjs") &&
         !f.endsWith("seat-idle-wire.test.mjs") &&
-        !f.endsWith("dispatch-start-wire.test.mjs"),
+        !f.endsWith("dispatch-start-wire.test.mjs") &&
+        !f.endsWith("hyk185-seat-multi-repro.test.mjs"),
     );
   assert.deepEqual(
     importers,
