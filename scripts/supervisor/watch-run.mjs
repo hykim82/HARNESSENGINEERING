@@ -45,8 +45,15 @@
 // Node 20 호환(ESM 표준 API만 사용).
 
 import { execFileSync } from "node:child_process";
-import { readFileSync, writeFileSync, renameSync, mkdirSync } from "node:fs";
+import {
+  readFileSync,
+  writeFileSync,
+  renameSync,
+  mkdirSync,
+  existsSync,
+} from "node:fs";
 import path from "node:path";
+import { runReachOnce, DEFAULT_NOTIFY_DIR } from "./reach-report.mjs";
 
 export const MAX_LOG_LINES = 5000;
 
@@ -314,6 +321,51 @@ function writeAliveRecordAtomic({
   renameFn(tmpPath, aliveRecordPath);
 }
 
+// HYK-191-reach-1 -- watch.log/last-run.json을 다 쓴 다음, "사람에게
+// 도달시키는" 축(reach-report.mjs)을 감싸서 부른다(§2-3과 동일 "감싸고
+// 고치지 않는다" 원칙 재사용 -- reach-report.mjs 자신은 이 파일이 새로
+// 만든 것이지만, 4축 판정 로직에는 손대지 않는다). ★notifyDir이 없으면
+// (호출자가 명시적으로 주지 않으면) 이 단계는 아예 실행되지 않는다 --
+// 기존 호출자(기존 시험 포함)는 아무 것도 바뀌지 않는다(회귀 0). reach
+// 단계 자신의 실패(예: 받는함 경로 쓰기 실패)는 이 러너의 계약(로그
+// 한 줄 + 생존 기록)을 절대 깨서는 안 되므로 여기서 삼킨다 -- v1은
+// 로그만(§2-3 비타협)이라는 기존 원칙과 동일하게, reach 실패도 감시
+// 자체를 멈추지 않는다.
+function runReachStep({
+  notifyDir,
+  watchDir,
+  now,
+  readFn,
+  writeFn,
+  mkdirFn,
+  existsFn,
+  logPath,
+}) {
+  // ★"notRun"(이 단계가 아예 실행 안 됨) vs runReachOnce가 돌려주는
+  // `skipped`(파싱 못한 로그 줄 수, 숫자)는 다른 이름공간이다 -- 이름
+  // 충돌로 실행 여부 판정이 새는 것을 막는다.
+  if (!notifyDir) return { notRun: true };
+  try {
+    return runReachOnce({
+      watchLogPath: logPath,
+      reportOutPath: path.join(watchDir, "morning-report.md"),
+      statePath: path.join(watchDir, "reach-notify-state.json"),
+      notifyDir,
+      now,
+      readFn,
+      writeFn,
+      mkdirFn,
+      existsFn,
+    });
+  } catch (err) {
+    return {
+      notRun: false,
+      failed: true,
+      message: err && err.message ? err.message : String(err),
+    };
+  }
+}
+
 // runWatchOnce(...) -- 한 번의 실행 사이클. 모든 I/O는 주입 가능(시험이
 // 실제 fs/child_process를 건드리지 않고 스파이로 검증할 수 있게).
 export function runWatchOnce({
@@ -333,6 +385,8 @@ export function runWatchOnce({
   writeFn = writeFileSync,
   renameFn = renameSync,
   mkdirFn = mkdirSync,
+  existsFn = existsSync,
+  notifyDir = null,
 }) {
   mkdirFn(watchDir, { recursive: true });
   const detectorResult = runDetector({
@@ -358,7 +412,17 @@ export function runWatchOnce({
     aliveRecordPath,
     record: { recordedAtMs: now, ...detectorResult },
   });
-  return { logPath, aliveRecordPath, line, detectorResult };
+  const reachResult = runReachStep({
+    notifyDir,
+    watchDir,
+    now,
+    readFn,
+    writeFn,
+    mkdirFn,
+    existsFn,
+    logPath,
+  });
+  return { logPath, aliveRecordPath, line, detectorResult, reachResult };
 }
 
 const invokedDirectly =
@@ -370,14 +434,21 @@ if (invokedDirectly) {
   const argv = process.argv.slice(2);
   let repoRoot = null;
   let watchDir = null;
+  // HYK-191-reach-1: `--notify-dir`를 생략하면 실 통역 받는함(§CLI 기본값,
+  // reach-report.mjs와 동일한 재량 -- 직접 실행할 때만 적용되는 기본값)을
+  // 쓴다. `--no-reach`를 주면 reach 단계 자체를 끈다(기존 운영 결선을
+  // 그대로 유지하고 싶을 때의 탈출구).
+  let notifyDir = DEFAULT_NOTIFY_DIR;
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === "--repo-root") repoRoot = argv[++i];
     else if (argv[i] === "--watch-dir") watchDir = argv[++i];
+    else if (argv[i] === "--notify-dir") notifyDir = argv[++i];
+    else if (argv[i] === "--no-reach") notifyDir = null;
   }
   if (!repoRoot || !watchDir) {
     console.error("usage: watch-run.mjs --repo-root <path> --watch-dir <path>");
     process.exit(1);
   }
-  const result = runWatchOnce({ repoRoot, watchDir });
+  const result = runWatchOnce({ repoRoot, watchDir, notifyDir });
   process.exit(result.detectorResult.runnerFailure ? 1 : 0);
 }
