@@ -1,0 +1,28 @@
+{
+  "_provenance": "HYK-185-unconsumed-1 (coder-task.md §3) -- in-repo fixture derived from ORCH's real read-only capture at .harness/증거/unconsumed-raw-0806.json (capture method: os.path.getmtime on the live .harness files of each worktree, captured 2026-08-06 15:09:27 KST; that raw file is gitignored under .harness/증거/ so a test reading it directly breaks CI -- this fixture is the in-repo, byte-preserved substitute for the two mtime values actually used). series_1344 excerpts exactly the two mtimes needed (hyk185-claim-test coder.md / review-task.md) from that raw file's 'mtimes' object -- nothing else from that object is copied. series_1411's consumingCommitAtIso is NOT copied from the raw capture (the raw capture has no git data) -- it is recomputed from the real repository with `git show -s --format=%cI 2bffdcd`, run 2026-08-06 by this task's author; the task file's own §3 table had hand-written this as the approximate '14:0x', which this fixture deliberately does not reuse (Standing-A/Standing-B, docs/task-contract.md -- a verifiable number must be recomputed from source, not hand-copied). series_0131_unreconstructable documents honestly that the third real incident cannot be reproduced from files (the raw capture's own _honesty field says so) -- it is listed so a reader sees why only two of three real incidents have test coverage, not fabricated. synthetic_fast_consumption is explicitly synthetic (marked _synthetic:true) and is not a capture of any real event -- it exists only to exercise the no-false-positive (fast, normal consumption) path.",
+  "series_1344": {
+    "worktree": "hyk185-claim-test",
+    "resultFile": "coder.md",
+    "resultFileUpdatedAtIso": "2026-08-06T13:19:21+09:00",
+    "consumingTaskFile": "review-task.md",
+    "consumingTaskFileDroppedAtIso": "2026-08-06T13:50:02+09:00"
+  },
+  "series_1411": {
+    "worktree": "hyk185-claim-test",
+    "resultFile": "review.md",
+    "resultFileUpdatedAtIso": "2026-08-06T13:54:38+09:00",
+    "consumingCommitSha": "2bffdcd2e15a3774fea83ee2def995c87e2a44b2",
+    "consumingCommitAtIso": "2026-08-06T14:13:05+09:00"
+  },
+  "series_0131_unreconstructable": {
+    "worktree": "hyk185-seat-multi",
+    "resultFile": "coder.md",
+    "note": "이후 라운드가 이 결과 파일을 덮어써 현재 mtime이 11:56:58이다(원 사고 시각이 아니다) -- 파일로 재구성 불가. 시험 표본으로 쓰지 않는다(합성으로 지어내지 않는다, coder-task.md §3)."
+  },
+  "synthetic_fast_consumption": {
+    "_synthetic": true,
+    "note": "이것은 합성이며 그날 실물이 아니다 -- 오탐 0(정상적으로 곧 소비된 구간에서는 발화하지 않는다)을 시험하려고 만든 입력.",
+    "resultFileUpdatedAtIso": "2026-08-06T09:00:00+09:00",
+    "consumingTaskFileDroppedAtIso": "2026-08-06T09:03:00+09:00"
+  }
+}
