@@ -110,6 +110,12 @@ import {
   DISPATCH_START_VERDICT,
 } from "./dispatch-start-core.mjs";
 import {
+  judgeUnconsumed,
+  UNCONSUMED_VERDICT,
+  UNCONSUMED_SIGNAL_KIND,
+} from "./unconsumed-core.mjs";
+import { judgeHeaderTimeProjection } from "./header-time-projection-core.mjs";
+import {
   collectSeatLivenessObservation,
   collectSeatObservationsForWorktree,
   createOrcaExecFn,
@@ -314,6 +320,18 @@ function computeTaskIdMismatch(repoRoot, taskFileRelPath, taskFileTaskId) {
 // 2R이 resultFileDone 필드를 추가하며 분기 수가 늘어난 것뿐 로직은 그대로다).
 // dropped_at 헤더가 없으면(드롭됨 흔적 자체가 없음) `null`을 돌려 호출부가
 // 건너뛰게 한다.
+// HYK-185-unconsumed-2 §R2 P1-1 -- `droppedAtMs`(위)는 여전히 헤더에서만
+// 온다(다른 세 축이 이미 이 필드를 "배달 시각"으로 신뢰해 시험까지
+// 고정돼 있으므로, 그 의미를 이 라운드에서 바꾸면 회귀가 난다). 이
+// 함수는 그 옆에 **`taskFileMtimeMs`**(그 task 파일 자신의 실제 fs
+// mtime)도 함께 모은다.
+// ★HYK-185-unconsumed-3 §R3-1 갱신: 소비("unconsumed") 판정은 이제 이
+// 함수가 만드는 `droppedAtMs`를 **전혀 보지 않는다** -- 소비 판정은
+// 별도의 `collectUnconsumedCandidates`(아래, 헤더 유무와 무관하게 모든
+// `*-task.md`를 본다)가 전담한다. 이 함수(및 `droppedAtMs`)는 이제
+// ①seat-liveness/seat-idle/dispatch-start 세 축의 "배달 시각" ②
+// header-time-projection-core.mjs를 쓰는 `scanHeaderTimeProjection`(아래,
+// 헤더-실물 어긋남 탐지 -- 소비와 무관한 별개 신호)만을 위해 남아 있다.
 function buildDroppedTaskFileItem(repoRoot, harnessDir, name, text) {
   const droppedMatch = text.match(DROPPED_AT_RE);
   if (!droppedMatch) return null;
@@ -324,6 +342,7 @@ function buildDroppedTaskFileItem(repoRoot, harnessDir, name, text) {
   const resultName = name.replace(/-task\.md$/, ".md");
   const resultPath = `.harness/${resultName}`;
   const resultFile = collectFileMtime(repoRoot, resultPath);
+  const selfFile = collectFileMtime(repoRoot, relPath);
   const taskId = taskIdMatch ? taskIdMatch[1] : null;
   const resultFileExists =
     resultFile.collected === true ? resultFile.exists : false;
@@ -331,6 +350,14 @@ function buildDroppedTaskFileItem(repoRoot, harnessDir, name, text) {
     path: relPath,
     taskId,
     droppedAtMs: Number.isNaN(droppedAtMs) ? null : droppedAtMs,
+    // 이 task 파일 "자신"의 실제 fs mtime(헤더가 아니라 실물) --
+    // `scanHeaderTimeProjection`(아래)이 이 값을 헤더값과 대조한다. 읽기
+    // 자체가 실패했거나 파일이 이미 없어졌으면 null(대조 불가 ->
+    // judgeHeaderTimeProjection이 UNDECIDABLE로 닫는다).
+    taskFileMtimeMs:
+      selfFile.collected === true && selfFile.exists === true
+        ? selfFile.mtimeMs
+        : null,
     resultFile:
       resultFile.collected === true
         ? {
@@ -363,13 +390,23 @@ export function collectDroppedTaskFileEvidence(repoRoot, opts = {}) {
     if (err && err.code === "ENOENT") return { items: [], failed: false };
     return { items: [], failed: true };
   }
+  // ★HYK-185-unconsumed-2 §R2 P1-2(REVIEW 반려 수리) -- 개별 파일
+  // readFileSync 실패(예: 이름은 `*-task.md`인데 실제로는 디렉터리라
+  // EISDIR)를 예전에는 `continue`로 조용히 건너뛰었다. 그러면 근거가
+  // "빈 목록 + failed:false"가 되어 호출부(judge*ForWorktree 전부)가
+  // "정상, 판정 대상 없음"으로 오판한다(§2-3 "판정 불가를 정상으로 접지
+  // 마라"와 정면 충돌). 디렉터리 열거 실패(위 catch)와 동일하게
+  // `failed:true`로 즉시 표면화한다 -- 이 함수를 부르는 네 축
+  // (seat-liveness/seat-idle/dispatch-start/unconsumed) 전부가 이미
+  // `evidence.failed`를 `*_HARNESS_READ_FAILED`로 옮겨 적으므로, 이
+  // 한 지점을 고치면 네 축 모두에서 일관되게 수리된다.
   const items = [];
   for (const name of names) {
     let text;
     try {
       text = readFileSync(path.join(harnessDir, name), "utf8");
     } catch {
-      continue;
+      return { items: [], failed: true };
     }
     const item = buildDroppedTaskFileItem(repoRoot, harnessDir, name, text);
     if (item) items.push(item);
@@ -1382,6 +1419,417 @@ export function judgeDispatchStartAcrossWorktrees(
   };
 }
 
+// ---- HYK-185-unconsumed-1 (coder-task.md §1-§2) -- «워커 결과가 갱신됐는데
+// 총괄이 소비하지 않았다» 판정 결선 ----
+//
+// unconsumed-core.mjs(judgeUnconsumed)는 순수 판정만 한다 -- 이 블록은
+// 그 코어가 요구하는 입력(`resultFile.updatedAtMs`·`signals[]`·`now`)을
+// 저장소 파일 시스템 + git에서 모은다. ★새 orca 호출 0 -- 이 축은 seat-
+// liveness/seat-idle/dispatch-start 세 축과 달리 좌석(터미널) 관측을 전혀
+// 쓰지 않는다(coder-task.md §2 요구 그대로: 입력은 «결과 파일 갱신 시각·
+// 그 뒤 소비 흔적·지금 시각» 뿐, 좌석 응답과 무관).
+//
+// 대상 선정: 이 워크트리에 이미 존재하는 결과 파일(`resultFile.exists ===
+// true`) 중 mtime이 가장 최근인 것 하나를 판정 대상으로 삼는다(여러 role의
+// 결과 파일이 동시에 있어도 "가장 최근에 나온 산출물이 소비됐는가"만
+// 본다 -- 오래된 결과 파일은 이미 다음 라운드로 넘어갔을 것이므로 이
+// 축의 관심사가 아니다).
+export const UNCONSUMED_WIRE_STATUS = Object.freeze({
+  // 이 워크트리에 아직 존재하는 결과 파일이 하나도 없다 -- 판정 대상
+  // 자체가 없다(정상, 판정 불가 아님).
+  NOT_APPLICABLE: "UNCONSUMED_NOT_APPLICABLE",
+  // 대상 결과 파일을 찾았고 judgeUnconsumed를 실제로 불렀고 verdict가
+  // 나왔다.
+  JUDGED: "UNCONSUMED_JUDGED",
+  // ★최신 커밋 시각 조회(git log)가 실패했다 -- "소비 없음"으로 접지
+  // 않고 여기서 멈춘다(§2-3 (a)/(§5-A) 비타협, 다른 세 축의
+  // COLLECTION_FAILED와 동일 원칙 -- 관측 실패를 사실로 단정하지 않는다).
+  COLLECTION_FAILED: "UNCONSUMED_COLLECTION_FAILED",
+  // ★HYK-185-unconsumed-3 §R3-1(A) -- task 파일이 있는데(이름은 안다)
+  // 그 실제 fs mtime을 못 구했다(stat 실패 등). 헤더가 판정에서 완전히
+  // 빠진 지금은 이것이 그 파일에 대해 유일하게 가진 근거이므로, 조용히
+  // 버리지 않고(=신호 0건으로 새지 않고) 판정 전체를 여기서 닫는다.
+  TASK_FILE_MTIME_UNAVAILABLE: "UNCONSUMED_TASK_FILE_MTIME_UNAVAILABLE",
+});
+
+export const UNCONSUMED_SCAN_FAILURE = Object.freeze({
+  WORKTREE_LIST_FAILED: "UNCONSUMED_SCAN_WORKTREE_LIST_FAILED",
+  HARNESS_READ_FAILED: "UNCONSUMED_SCAN_HARNESS_READ_FAILED",
+});
+
+// taskFileCandidates(collectUnconsumedCandidates가 이미 모은 배열)에서
+// "이미 존재하는" 결과 파일 중 mtime이 가장 최근인 항목 하나를 고른다.
+// 없으면 null(NOT_APPLICABLE).
+export function selectMostRecentConsumableResult(taskFileCandidates) {
+  const candidates = (
+    Array.isArray(taskFileCandidates) ? taskFileCandidates : []
+  )
+    .filter(
+      (item) =>
+        item &&
+        item.resultFile &&
+        item.resultFile.exists === true &&
+        typeof item.resultFile.mtimeMs === "number" &&
+        Number.isFinite(item.resultFile.mtimeMs),
+    )
+    .sort((a, b) => b.resultFile.mtimeMs - a.resultFile.mtimeMs);
+  return candidates.length > 0 ? candidates[0] : null;
+}
+
+// `git log -1 --format=%cI HEAD` -- 로컬 git 객체만 본다(`git fetch` 없음,
+// collectRemoteContains와 동일 원칙). opts.commitTimeExecFn 주입 가능
+// (시험 전용, collectGitWorktrees의 gitWorktreeListExecFn과 동일 형태) --
+// 기본은 실 git 호출.
+function defaultCommitTimeExec(repoRoot) {
+  return execFileSync("git", ["log", "-1", "--format=%cI", "HEAD"], {
+    cwd: repoRoot,
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "ignore"],
+  });
+}
+
+function collectLatestCommitTimeMs(repoRoot, opts = {}) {
+  const exec =
+    typeof opts.commitTimeExecFn === "function"
+      ? opts.commitTimeExecFn
+      : defaultCommitTimeExec;
+  try {
+    const stdout = exec(repoRoot).trim();
+    const t = Date.parse(stdout);
+    if (Number.isNaN(t)) return { ok: false };
+    return { ok: true, commitTimeMs: t };
+  } catch {
+    return { ok: false };
+  }
+}
+
+// ---- HYK-185-unconsumed-3 §R3-1(A) -- 소비 판정 전용 task 파일 후보
+// 수집(헤더 완전 배제) ----
+//
+// 기존 `collectDroppedTaskFileEvidence`(다른 세 축·아래 §R3-1(B)
+// `scanHeaderTimeProjection`이 여전히 쓴다)는 `dropped_at` 헤더가 없는
+// task 파일을 통째로 건너뛴다 -- 그 세 축은 헤더를 "배달 시각"으로
+// 신뢰해야 하므로 옳은 동작이고, 이번 라운드에서 손대지 않는다(회귀 0).
+// 그런데 소비 판정은 이제 헤더를 전혀 보지 않으므로(§R3-1(A) 비타협),
+// 헤더가 없다는 이유로 후보 자체가 사라지면 안 된다(REVIEW 3R P1-4) --
+// 그래서 이 축 전용으로 **헤더 유무와 무관하게** `.harness/*-task.md`
+// 이름 전부와 그 실제 fs mtime만 모으는 별도의 가벼운 수집을 둔다(파일
+// 내용을 읽을 필요가 없다 -- 헤더를 안 보므로 `readFileSync` 자체가
+// 없다, 파일 이름과 `statSync`만).
+// ★HYK-185-unconsumed-4 §R4-1/§R4-2(REVIEW 반려 수리) -- task 파일과
+// 결과 파일 양쪽에 **같은** 신뢰성 검사를 적용하는 공용 헬퍼. R3에서는
+// 이 검사가 task 파일 쪽에만 붙어 있었다(자체 발견 반례) -- 결과 파일은
+// `collectFileMtime`에 그대로 맡겨, 결과 파일이 디렉터리일 때(REVIEW
+// 4R D2 반례: `.harness/coder.md`를 디렉터리로) 그 디렉터리 mtime을
+// 진짜 결과로 착각해 확정적 `SUSPECTED_UNCONSUMED`를 냈다(한용 명시
+// "없는 사고를 확정적으로 고발하는 방향은 그대로 두지 마라").
+//
+// 네 상태를 구별한다(§R4-2 "관측 실패 ≠ 파일 없음"도 여기서 함께
+// 잡는다 -- 예전에는 `collectFileMtime`의 `{collected:false}`(stat 자체
+// 실패)와 `{collected:true, exists:false}`(정말 없음)이 둘 다
+// `{exists:false, mtimeMs:null}`로 뭉개져 구별되지 않았다):
+// - 파일이 없다 -> `{collected:true, exists:false}`(정상 -- 아직 그
+//   결과가 없을 뿐, 판정 불가 아니다).
+// - `existsSync`는 통과했는데 `statSync`가 던졌다(권한 등) ->
+//   `{collected:false}`(신뢰 불가 -- "없다"로 뭉개지 않는다).
+// - 있고 stat도 됐지만 디렉터리다 -> `{collected:true, exists:true,
+//   isDirectory:true}`(신뢰 불가 -- mtime을 읽지 않는다).
+// - 있고 stat도 됐고 일반 파일이다 -> `{collected:true, exists:true,
+//   isDirectory:false, mtimeMs}`.
+//
+// ★정직 기재(§R4-2, 한용 명시 "재현했으면 고정, 못 했으면 그 사실을
+// 적어라"): "existsSync는 통과, statSync만 던진다"는 상태를 실제 OS
+// 메커니즘(예약 장치 이름·긴 경로)으로 이 Windows 환경에서 시도했으나
+// **재현하지 못했다**(`.harness/coder.md` §R4-2에 시도 내역을 그대로
+// 적었다). 그래서 opts.existsFn/opts.statFn을 주입 가능하게 열어
+// 이 코드 경로 자체는 결정적으로 시험한다(실 OS 결함 재현이 아니라
+// 코드 경로 시험이라는 것을 시험 이름에도 명시한다) -- 수리는 재현
+// 여부와 무관하게 적용했다(한용 명시 "재현 없이도 할 수 있다면 해도
+// 된다").
+function statForUnconsumed(repoRoot, relPath, opts = {}) {
+  const existsFn =
+    typeof opts.existsFn === "function" ? opts.existsFn : existsSync;
+  const statFn = typeof opts.statFn === "function" ? opts.statFn : statSync;
+  const full = resolveRepoPath(repoRoot, relPath);
+  if (!existsFn(full)) return { collected: true, exists: false };
+  let st;
+  try {
+    st = statFn(full);
+  } catch {
+    return { collected: false };
+  }
+  if (st.isDirectory()) {
+    return { collected: true, exists: true, isDirectory: true };
+  }
+  return {
+    collected: true,
+    exists: true,
+    isDirectory: false,
+    mtimeMs: st.mtimeMs,
+  };
+}
+
+function buildUnconsumedCandidateItem(repoRoot, name, opts = {}) {
+  const relPath = `.harness/${name}`;
+  const selfInfo = statForUnconsumed(repoRoot, relPath, opts);
+  if (!selfInfo.collected) return null; // stat 실패 -- 신뢰 불가(§R4-2).
+  if (!selfInfo.exists) return null; // readdir엔 있었는데 방금 사라짐(레이스) -- 신뢰 불가.
+  if (selfInfo.isDirectory) return null; // 디렉터리 위장(기존 자체 발견 반례, 회귀 0).
+  const resultName = name.replace(/-task\.md$/, ".md");
+  const resultPath = `.harness/${resultName}`;
+  const resultInfo = statForUnconsumed(repoRoot, resultPath, opts);
+  if (!resultInfo.collected) return null; // §R4-2: stat 실패를 "없음"으로 뭉개지 않는다.
+  if (resultInfo.exists && resultInfo.isDirectory) return null; // §R4-1: 결과 파일 디렉터리 위장.
+  return {
+    path: relPath,
+    taskFileMtimeMs: selfInfo.mtimeMs,
+    resultFile: resultInfo.exists
+      ? { path: resultPath, exists: true, mtimeMs: resultInfo.mtimeMs }
+      : { path: resultPath, exists: false, mtimeMs: null },
+  };
+}
+
+// opts.readdirFn 주입 가능(시험 전용, collectDroppedTaskFileEvidence와
+// 동일 형태) -- 기본은 실 readdirSync. 개별 항목의 신뢰성 실패(§R3-1(A)
+// 비타협 "조용히 버리지 마라", §R4-1/§R4-2로 결과 파일까지 확장)는
+// P1-2와 동일 원칙으로 즉시 `{items: [], failed: true}`로 닫는다 --
+// 부분 목록으로 새지 않는다.
+export function collectUnconsumedCandidates(repoRoot, opts = {}) {
+  const readdirFn =
+    typeof opts.readdirFn === "function" ? opts.readdirFn : readdirSync;
+  const harnessDir = path.join(repoRoot, ".harness");
+  let names;
+  try {
+    names = readdirFn(harnessDir).filter((n) => n.endsWith("-task.md"));
+  } catch (err) {
+    if (err && err.code === "ENOENT") return { items: [], failed: false };
+    return { items: [], failed: true };
+  }
+  const items = [];
+  for (const name of names) {
+    const item = buildUnconsumedCandidateItem(repoRoot, name, opts);
+    if (!item) return { items: [], failed: true };
+    items.push(item);
+  }
+  return { items, failed: false };
+}
+
+// unconsumed-core.mjs가 인정하는 두 신호를 저장소 흔적에서 만든다(코어
+// 헤더 주석 "«소비 흔적»의 정의" 참조). ★대상 자신의 task 파일뿐 아니라
+// 이 워크트리의 taskFileCandidates 전부를 본다 -- 오늘 실측 13:44 계열
+// 표본은 coder.md(대상)가 아니라 review-task.md(다음 role)가 다음 라운드를
+// 드롭한 형태였다.
+//
+// ★HYK-185-unconsumed-3 §R3-1(A): `TASK_FILE_DROPPED_AFTER` 신호는 이제
+// `item.taskFileMtimeMs`(그 task 파일의 실제 mtime) **하나로만** 정해진다
+// -- 헤더(`droppedAtMs`)는 이 함수가 아예 읽지 않는다(애초에
+// `collectUnconsumedCandidates`가 만드는 항목에는 그 필드가 없다).
+// `taskFileMtimeMs`를 못 구한 항목(수집 단계에서 이미 실패로 닫혔어야
+// 하지만, 방어적으로 이 함수도 형식을 재확인한다)은 조용히 건너뛰지
+// 않고 `{ok:false}`로 함수 전체를 닫는다.
+function buildUnconsumedSignals(taskFileCandidates, targetMtimeMs, commitInfo) {
+  const signals = [];
+  for (const item of Array.isArray(taskFileCandidates)
+    ? taskFileCandidates
+    : []) {
+    if (!item) continue;
+    if (
+      typeof item.taskFileMtimeMs !== "number" ||
+      !Number.isFinite(item.taskFileMtimeMs)
+    ) {
+      return { ok: false, unavailablePath: item.path };
+    }
+    if (item.taskFileMtimeMs > targetMtimeMs) {
+      signals.push({
+        kind: UNCONSUMED_SIGNAL_KIND.TASK_FILE_DROPPED_AFTER,
+        atMs: item.taskFileMtimeMs,
+      });
+    }
+  }
+  if (
+    commitInfo.ok &&
+    typeof commitInfo.commitTimeMs === "number" &&
+    commitInfo.commitTimeMs > targetMtimeMs
+  ) {
+    signals.push({
+      kind: UNCONSUMED_SIGNAL_KIND.NEW_COMMIT_AFTER,
+      atMs: commitInfo.commitTimeMs,
+    });
+  }
+  return { ok: true, signals };
+}
+
+// judgeUnconsumedForRepo({repoRoot, taskFileCandidates, now}, opts) -- 단일
+// 저장소(워크트리) 하나에 대해 이 축을 판정한다(다른 세 축의
+// judge*ForRepo와 대칭 구조 -- 이미 수집된 taskFileCandidates를 받고, 이
+// 함수 자신은 .harness를 읽지 않는다).
+export function judgeUnconsumedForRepo(
+  { repoRoot, taskFileCandidates, now },
+  opts = {},
+) {
+  const target = selectMostRecentConsumableResult(taskFileCandidates);
+  if (!target) {
+    return { status: UNCONSUMED_WIRE_STATUS.NOT_APPLICABLE };
+  }
+  const resultFileInfo = {
+    path: target.resultFile.path,
+    mtimeMs: target.resultFile.mtimeMs,
+  };
+  const commitInfo = collectLatestCommitTimeMs(repoRoot, opts);
+  if (!commitInfo.ok) {
+    return {
+      status: UNCONSUMED_WIRE_STATUS.COLLECTION_FAILED,
+      reason: "unconsumed: git log failed",
+      resultFile: resultFileInfo,
+    };
+  }
+  const signalsResult = buildUnconsumedSignals(
+    taskFileCandidates,
+    resultFileInfo.mtimeMs,
+    commitInfo,
+  );
+  if (!signalsResult.ok) {
+    return {
+      status: UNCONSUMED_WIRE_STATUS.TASK_FILE_MTIME_UNAVAILABLE,
+      reason: `unconsumed: could not determine the real mtime of a task file (${signalsResult.unavailablePath})`,
+      resultFile: resultFileInfo,
+    };
+  }
+  const judged = judgeUnconsumed({
+    resultFile: { updatedAtMs: resultFileInfo.mtimeMs },
+    signals: signalsResult.signals,
+    now,
+  });
+  return {
+    status: UNCONSUMED_WIRE_STATUS.JUDGED,
+    verdict: judged.verdict,
+    reasonCode: judged.reasonCode,
+    details: judged.details,
+    resultFile: resultFileInfo,
+  };
+}
+
+function judgeUnconsumedForWorktree(worktreePath, now, opts) {
+  // ★HYK-185-unconsumed-4 §R4-2: existsFn/statFn도 함께 넘긴다 -- 안
+  // 그러면 시험이 주입한 stat 결함이 이 축의 실제 결선 경로까지 닿지
+  // 않는다(readdirFn만 넘기던 R3 코드가 이 자리에 있었다).
+  const evidence = collectUnconsumedCandidates(worktreePath, {
+    readdirFn: opts.harnessReaddirFn,
+    existsFn: opts.existsFn,
+    statFn: opts.statFn,
+  });
+  if (evidence.failed) {
+    return {
+      worktreePath,
+      status: UNCONSUMED_SCAN_FAILURE.HARNESS_READ_FAILED,
+    };
+  }
+  const judged = judgeUnconsumedForRepo(
+    { repoRoot: worktreePath, taskFileCandidates: evidence.items, now },
+    opts,
+  );
+  return { worktreePath, ...judged };
+}
+
+export const UNCONSUMED_SCAN_SEVERITY = Object.freeze({
+  NORMAL: 0, // NOT_APPLICABLE/JUDGED+CONSUMED/JUDGED+UNDECIDABLE 미만 대기.
+  UNDECIDABLE: 1, // JUDGED이지만 verdict가 UNDECIDABLE.
+  COLLECTION_FAILURE: 2, // 워크트리 열거·harness 읽기·git log 실패.
+  SUSPECTED_UNCONSUMED: 3, // 가장 나쁨.
+});
+
+function unconsumedSeverityOf(entry) {
+  if (
+    entry.status === UNCONSUMED_SCAN_FAILURE.WORKTREE_LIST_FAILED ||
+    entry.status === UNCONSUMED_SCAN_FAILURE.HARNESS_READ_FAILED ||
+    entry.status === UNCONSUMED_WIRE_STATUS.COLLECTION_FAILED ||
+    entry.status === UNCONSUMED_WIRE_STATUS.TASK_FILE_MTIME_UNAVAILABLE
+  ) {
+    return UNCONSUMED_SCAN_SEVERITY.COLLECTION_FAILURE;
+  }
+  if (entry.status === UNCONSUMED_WIRE_STATUS.JUDGED) {
+    if (entry.verdict === UNCONSUMED_VERDICT.SUSPECTED_UNCONSUMED) {
+      return UNCONSUMED_SCAN_SEVERITY.SUSPECTED_UNCONSUMED;
+    }
+    if (entry.verdict === UNCONSUMED_VERDICT.UNDECIDABLE) {
+      return UNCONSUMED_SCAN_SEVERITY.UNDECIDABLE;
+    }
+  }
+  return UNCONSUMED_SCAN_SEVERITY.NORMAL;
+}
+
+// judgeUnconsumedAcrossWorktrees({repoRoot, now}, opts) -- 다른 세 축과
+// 대칭(워크트리 전부 열거 후 각각 개별 판정, 가장 나쁜 항목을 대표값으로
+// 상위에 싣고 전체 목록·건수도 함께 낸다). 새 워크트리 열거 로직을 만들지
+// 않고 gap#78의 `collectGitWorktrees`를 그대로 재사용한다.
+export function judgeUnconsumedAcrossWorktrees({ repoRoot, now }, opts = {}) {
+  const list = collectGitWorktrees(repoRoot, opts);
+  if (!list.ok) {
+    return {
+      status: UNCONSUMED_SCAN_FAILURE.WORKTREE_LIST_FAILED,
+      detail: list.detail,
+      worktrees: [],
+      totalWorktrees: 0,
+      worstCount: 1,
+    };
+  }
+  const worktrees = list.worktrees.map((wt) =>
+    judgeUnconsumedForWorktree(wt, now, opts),
+  );
+  const worstSeverity = worktrees.reduce(
+    (acc, w) => Math.max(acc, unconsumedSeverityOf(w)),
+    UNCONSUMED_SCAN_SEVERITY.NORMAL,
+  );
+  const worstEntries = worktrees.filter(
+    (w) => unconsumedSeverityOf(w) === worstSeverity,
+  );
+  const worst = worstEntries[0] ?? null;
+  return {
+    status: worst ? worst.status : UNCONSUMED_WIRE_STATUS.NOT_APPLICABLE,
+    verdict: worst ? worst.verdict : undefined,
+    reasonCode: worst ? worst.reasonCode : undefined,
+    details: worst ? worst.details : undefined,
+    worktreePath: worst ? worst.worktreePath : undefined,
+    worktrees,
+    totalWorktrees: worktrees.length,
+    worstCount: worstEntries.length,
+  };
+}
+
+// ---- HYK-185-unconsumed-3 §R3-1(B) -- 헤더-실물 시각 어긋남(위조/오기)
+// 탐지, 소비 판정과 완전히 분리 ----
+//
+// ⛔이 함수는 `judgeUnconsumedForRepo`/`buildUnconsumedSignals`/
+// `judgeUnconsumedAcrossWorktrees` 어디에서도 호출되지 않는다 -- 소비
+// 판정에 어떤 경로로도 기여하지 않는다(한용 명시). 헤더가 있는 task
+// 파일만 대조 대상이 될 수 있으므로(헤더가 없으면 대조할 것이 없다,
+// gap 등재 참조) 헤더를 여전히 담는 `collectDroppedTaskFileEvidence`를
+// 그대로 재사용한다 -- 이 재사용은 다른 세 축의 동작을 하나도 바꾸지
+// 않는다(그 함수 자신은 이 라운드에 손대지 않았다).
+export function scanHeaderTimeProjection(repoRoot, opts = {}) {
+  const evidence = collectDroppedTaskFileEvidence(repoRoot, {
+    readdirFn: opts.harnessReaddirFn,
+  });
+  if (evidence.failed) {
+    return { ok: false, reason: "HARNESS_READ_FAILED", items: [] };
+  }
+  const items = evidence.items
+    .filter(
+      (item) =>
+        item &&
+        typeof item.droppedAtMs === "number" &&
+        Number.isFinite(item.droppedAtMs),
+    )
+    .map((item) => {
+      const judged = judgeHeaderTimeProjection({
+        headerFloorMs: item.droppedAtMs,
+        taskFileMtimeMs: item.taskFileMtimeMs,
+      });
+      return { path: item.path, ...judged };
+    });
+  return { ok: true, items };
+}
+
 // runOrchStallDetect(argv) -> {result, exitCode} -- CLI 몸통을 순수 함수에
 // 가깝게 뽑아 시험이 process.exit 없이 호출할 수 있게 한다. I/O(파일
 // 읽기·git 실행)는 그대로 하되, 프로세스 종료·stdout 출력은 하지 않는다.
@@ -1470,6 +1918,10 @@ export function runOrchStallDetect(argv, opts = {}) {
     now,
     opts,
   );
+  // HYK-185-unconsumed-1: «워커 결과가 갱신됐는데 소비되지 않았다» 판정도
+  // 같은 워크트리 전부에 걸쳐 부른다. ★이 축은 좌석 관측이 아니라 파일/
+  // git 관측만 쓰므로 computeSeatAxes(좌석 축 전용) 밖에 별도로 둔다.
+  const unconsumed = judgeUnconsumedAcrossWorktrees({ repoRoot, now }, opts);
   return {
     result: {
       ...result,
@@ -1482,6 +1934,7 @@ export function runOrchStallDetect(argv, opts = {}) {
       seatLiveness,
       seatIdle,
       dispatchStart,
+      unconsumed,
     },
     exitCode: EXIT_CODE_BY_VERDICT[result.verdict] ?? 3,
     cli,

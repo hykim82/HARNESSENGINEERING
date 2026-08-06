@@ -931,6 +931,10 @@ test("static: orch-stall-detect.mjs never fetches over the network (no fetch/git
 // sample's before/after difference (coder-task.md acceptance (a)). It is
 // itself a `.test.mjs`, so it is excluded on the identical basis as the
 // three files above.
+// HYK-185-unconsumed-1: unconsumed-wire.test.mjs is the same shape once
+// more -- it exercises the same production entry point for the new
+// "unconsumed" axis (judgeUnconsumedForRepo/judgeUnconsumedAcrossWorktrees).
+// Excluded on the identical "own .test.mjs" basis.
 test("static: no PRODUCTION code imports orch-stall-detect.mjs yet (h -- can be called is not the same as is being called; only its own .test.mjs files do)", () => {
   let grepOut;
   try {
@@ -967,7 +971,8 @@ test("static: no PRODUCTION code imports orch-stall-detect.mjs yet (h -- can be 
         !f.endsWith("seat-liveness-wire.test.mjs") &&
         !f.endsWith("seat-idle-wire.test.mjs") &&
         !f.endsWith("dispatch-start-wire.test.mjs") &&
-        !f.endsWith("hyk185-seat-multi-repro.test.mjs"),
+        !f.endsWith("hyk185-seat-multi-repro.test.mjs") &&
+        !f.endsWith("unconsumed-wire.test.mjs"),
     );
   assert.deepEqual(
     importers,

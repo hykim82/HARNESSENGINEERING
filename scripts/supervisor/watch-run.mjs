@@ -136,6 +136,31 @@ function extractDispatchStartFields(dispatchStart) {
   };
 }
 
+// HYK-185-unconsumed-1 (coder-task.md §2-3) -- «워커 결과가 소비됐는가»
+// 축의 필드도 로그 줄에 옮겨 적는다. 기존 세 축(`seat_*`/`idle_*`/
+// `start_*`)과 구별되게 `unconsumed_*` 접두를 쓴다(§2-1-1과 동일 "구별되는
+// 이름" 원칙).
+function extractUnconsumedFields(unconsumed) {
+  return {
+    unconsumedStatus:
+      unconsumed && typeof unconsumed.status === "string"
+        ? unconsumed.status
+        : null,
+    unconsumedVerdict:
+      unconsumed && typeof unconsumed.verdict === "string"
+        ? unconsumed.verdict
+        : null,
+    unconsumedWorstCount:
+      unconsumed && typeof unconsumed.worstCount === "number"
+        ? unconsumed.worstCount
+        : null,
+    unconsumedTotalWorktrees:
+      unconsumed && typeof unconsumed.totalWorktrees === "number"
+        ? unconsumed.totalWorktrees
+        : null,
+  };
+}
+
 function parseDetectorStdout(stdout) {
   try {
     const parsed = JSON.parse(String(stdout).trim());
@@ -146,6 +171,9 @@ function parseDetectorStdout(stdout) {
     const dispatchStart = isPlainObject(parsed.dispatchStart)
       ? parsed.dispatchStart
       : null;
+    const unconsumed = isPlainObject(parsed.unconsumed)
+      ? parsed.unconsumed
+      : null;
     return {
       verdict: typeof parsed.verdict === "string" ? parsed.verdict : null,
       reasonCode:
@@ -153,6 +181,7 @@ function parseDetectorStdout(stdout) {
       ...extractSeatLivenessFields(seatLiveness),
       ...extractSeatIdleFields(seatIdle),
       ...extractDispatchStartFields(dispatchStart),
+      ...extractUnconsumedFields(unconsumed),
     };
   } catch {
     return {
@@ -170,6 +199,10 @@ function parseDetectorStdout(stdout) {
       startVerdict: null,
       startWorstCount: null,
       startTotalWorktrees: null,
+      unconsumedStatus: null,
+      unconsumedVerdict: null,
+      unconsumedWorstCount: null,
+      unconsumedTotalWorktrees: null,
     };
   }
 }
@@ -245,7 +278,13 @@ export function buildLogLine({ nowIso, detectorResult }) {
     worstCount: detectorResult.startWorstCount,
     totalWorktrees: detectorResult.startTotalWorktrees,
   });
-  return `${nowIso} exit=${detectorResult.exitCode} verdict=${verdict} reason=${reason} ${seatSegment} ${idleSegment} ${startSegment}`;
+  const unconsumedSegment = axisLogSegment("unconsumed", {
+    status: detectorResult.unconsumedStatus,
+    verdict: detectorResult.unconsumedVerdict,
+    worstCount: detectorResult.unconsumedWorstCount,
+    totalWorktrees: detectorResult.unconsumedTotalWorktrees,
+  });
+  return `${nowIso} exit=${detectorResult.exitCode} verdict=${verdict} reason=${reason} ${seatSegment} ${idleSegment} ${startSegment} ${unconsumedSegment}`;
 }
 
 function appendLogWithRotation({ readFn, writeFn, logPath, line, maxLines }) {

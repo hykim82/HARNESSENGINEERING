@@ -303,6 +303,15 @@ remains the authority that each role reads before acting.
 - accepts visual/product/document quality when no command can judge it
 - moves Linear issues to Done
 
+**Engine independence:** role requirements and gates in this contract (e.g.
+"coder," "reviewer") must be satisfiable by role, not by a specific engine or
+model — a role check must pass the same way no matter which engine currently
+fills that role, and this contract's own wording must not name one. A dated,
+explicitly time-boxed record of which engine actually filled a role during a
+specific window (see `docs/enforcement-known-gaps.md`) is not an exemption
+from this — it states a past fact, not a standing requirement, and must not
+be read as one.
+
 ## Standing Acceptance Criteria
 
 These two criteria apply to every task regardless of profile. They exist
@@ -336,7 +345,25 @@ recompute them from the source data and compare. When a value cannot be
 recomputed (e.g., a wall-clock measurement), state the time and method of
 measurement and label it explicitly as a point-in-time value.
 
-**Limitation:** these two criteria are a documented commitment, not a
+### Standing-C: a reviewer injects counter-examples, not just reruns the verification command
+
+Rerunning `verification.command` proves the check still runs; it does not
+prove the check catches a specific false claim. Before accepting a claim of
+the form "X is rejected/blocked/guaranteed" (Standing-A), a reviewer must
+construct at least one input designed to defeat that claim and observe
+whether the artifact actually catches it — not only rerun the stated
+command. This is Standing-A's counterpart on the review side: Standing-A
+requires the artifact carry a test; this requires the reviewer to
+independently try to break it. 2026-08-06: four rejections in one review
+cycle were each found this way — the artifact's own claim looked fine on
+inspection and only failed once a reviewer fed it a constructed
+counter-example. When the reviewer role happens to run on the same
+underlying engine as the role that produced the artifact, shared blind
+spots can make a claim look defeat-tested when it is not — this requirement
+matters more, not less, in that case, independent of which engines are
+involved (see the engine-independence note under Role Boundaries).
+
+**Limitation:** these three criteria are a documented commitment, not a
 mechanical enforcement. Whether they are followed is checked by humans and
 reviewers, not by a script.
 

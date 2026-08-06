@@ -258,6 +258,63 @@ test("HYK-185-startcheck-wire: dispatchStart fields from detector stdout are log
 });
 
 // ---------------------------------------------------------------------------
+// HYK-185-unconsumed-1 (coder-task.md §2-3, §3-c): unconsumed 축도 로그
+// 줄에 옮겨 적힌다 -- 기존 세 축(seat_*/idle_*/start_*)과 구별되는
+// unconsumed_* 접두.
+// ---------------------------------------------------------------------------
+test("HYK-185-unconsumed-1: unconsumed fields from detector stdout are logged with distinct unconsumed_* names (1/1)", () => {
+  const watchDir = tmpWatchDir();
+  try {
+    const result = runWatchOnce({
+      repoRoot: ROOT,
+      watchDir,
+      now: NOW_MS,
+      execFn: () =>
+        JSON.stringify({
+          verdict: "PROGRESSING",
+          reasonCode: "OK",
+          seatLiveness: { status: "SEAT_LIVENESS_NOT_APPLICABLE" },
+          seatIdle: { status: "SEAT_IDLE_NOT_APPLICABLE" },
+          dispatchStart: { status: "DISPATCH_START_NOT_APPLICABLE" },
+          unconsumed: {
+            status: "UNCONSUMED_JUDGED",
+            verdict: "SUSPECTED_UNCONSUMED",
+            worstCount: 1,
+            totalWorktrees: 2,
+          },
+        }),
+    });
+    const logText = fs.readFileSync(result.logPath, "utf8");
+    assert.match(
+      logText,
+      /unconsumed_status=UNCONSUMED_JUDGED unconsumed_verdict=SUSPECTED_UNCONSUMED unconsumed_worst_count=1 unconsumed_worktrees=2/,
+    );
+    assert.match(logText, /seat_status=SEAT_LIVENESS_NOT_APPLICABLE/);
+    assert.match(logText, /idle_status=SEAT_IDLE_NOT_APPLICABLE/);
+    assert.match(logText, /start_status=DISPATCH_START_NOT_APPLICABLE/);
+  } finally {
+    fs.rmSync(watchDir, { recursive: true, force: true });
+  }
+});
+
+test("HYK-185-unconsumed-1: missing unconsumed field in detector stdout logs unconsumed_status=NONE (regression guard: old detector payloads without this axis still parse) (1/1)", () => {
+  const watchDir = tmpWatchDir();
+  try {
+    const result = runWatchOnce({
+      repoRoot: ROOT,
+      watchDir,
+      now: NOW_MS,
+      execFn: () =>
+        JSON.stringify({ verdict: "PROGRESSING", reasonCode: "OK" }),
+    });
+    const logText = fs.readFileSync(result.logPath, "utf8");
+    assert.match(logText, /unconsumed_status=NONE/);
+  } finally {
+    fs.rmSync(watchDir, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
 // 원상복구 단언(coder-task.md §2 비타협 #6·#7) -- mkdtemp만 썼다.
 // ---------------------------------------------------------------------------
 after(() => {
