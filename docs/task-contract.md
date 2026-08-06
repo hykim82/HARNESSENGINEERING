@@ -303,6 +303,54 @@ remains the authority that each role reads before acting.
 - accepts visual/product/document quality when no command can judge it
 - moves Linear issues to Done
 
+## Standing Acceptance Criteria
+
+These two criteria apply to every task regardless of profile. They exist
+because an artifact's claim about itself can be false even when it compiles
+and all tests pass — a checker that only looks at form, not at whether the
+claim is true, will not catch it. Two incidents on the same day motivated
+this section:
+
+- 2026-08-06, correlation-parser header: the header claimed that consecutive
+  `..` and leading/trailing `/` in a branch name are rejected automatically.
+  They were not — a reviewer injected `(branch ..)`, `(branch /main)`, and
+  `(branch main/)` and all three were selected through to the end. No test
+  covered the claim.
+- 2026-08-06, fixture provenance: a fixture's `_provenance` field stated
+  "346 total / 345 excluded." The measured values were 352 / 351.
+
+### Standing-A: every claim needs a test that turns red when the claim is false
+
+If a produced artifact's header, comment, or report asserts that something
+"is rejected," "is blocked," "is guaranteed," or "is always" true, there must
+be a test that fails when an input breaking that claim is supplied. If no
+such test exists, do one of two things: add the test, or remove the claim.
+Leaving an untested claim in place is the worst option, because a reader will
+treat it as fact.
+
+### Standing-B: verifiable numbers in descriptive text are asserted by a test that recomputes them from source
+
+Counts, byte sizes, hashes, and similar values written into a fixture's
+`_provenance` field or into a report must not be hand-typed; a test must
+recompute them from the source data and compare. When a value cannot be
+recomputed (e.g., a wall-clock measurement), state the time and method of
+measurement and label it explicitly as a point-in-time value.
+
+**Limitation:** these two criteria are a documented commitment, not a
+mechanical enforcement. Whether they are followed is checked by humans and
+reviewers, not by a script.
+
+**Machine-check candidates (not implemented in this pass):** (a) a marker
+convention next to each claim (e.g., naming the covering test inline) that a
+checker could grep for and cross-reference against the test suite; (b) the
+alternative of extracting claims from natural language without such a
+marker carries real risk of false positives (flagging hedged or rhetorical
+language as a claim) and false negatives (missing claims phrased unusually),
+so a marker convention is the safer starting point; (c) running such a check
+in CI is hard today because the task files that state most of these claims
+(the `.harness/*-task.md` files referenced by this contract) live outside
+the repository and are not visible to CI.
+
 ## Example: Loop Task
 
 ```yaml
