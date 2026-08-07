@@ -153,6 +153,146 @@ test("§4-4: judgment itself fails (versioned hooks/ dir absent) -> UNDECIDABLE,
 });
 
 // ---------------------------------------------------------------------------
+// Review round 3 (HYK-200-preflight-3): P1-A (empty comparison silently
+// reads as IN_SYNC), P1-B (UNDECIDABLE report prints "reason: unknown" and
+// drops any coexisting DRIFT), P2-C (evaluateSeatPreflight throws instead of
+// returning a verdict). All synthetic (mkdtemp git repos), real repo never
+// touched.
+// ---------------------------------------------------------------------------
+
+test("P1-A: versioned hooks/ exists but contains ZERO files -> UNDECIDABLE (never the empty-evidence IN_SYNC), exit != 0, reason is human-readable", () => {
+  withTempDir((dir) => {
+    initSyntheticRepo(dir);
+    writeFileSync(join(dir, "README.md"), "x");
+    git(dir, "add README.md");
+    git(dir, 'commit -q -m "init"');
+    // hooks/ exists (unlike §4-4) but is empty -- git does not track empty
+    // directories, so a .gitkeep-style placeholder is needed for the
+    // directory itself to survive a real checkout; irrelevant here since
+    // this repo is read directly from the working tree, not cloned.
+    mkdirSync(join(dir, "hooks"), { recursive: true });
+    const result = evaluateSeatPreflight({ cwd: dir });
+    assert.equal(
+      result.verdict,
+      "UNDECIDABLE",
+      "0 comparison targets must never read as IN_SYNC -- that claims a match with zero evidence",
+    );
+    assert.equal(result.canLaunch, false);
+    assert.notEqual(result.exitCode, 0);
+    const report = formatReport(result);
+    assert.ok(
+      !report.includes(FIX_COMMAND),
+      "UNDECIDABLE (no known drift) must not print the DRIFT fix command",
+    );
+    assert.doesNotMatch(
+      report,
+      /reason: unknown/,
+      "the empty-hooks/ reason must be explained, not the bare word 'unknown'",
+    );
+  });
+});
+
+test("P1-A: versioned hooks/ contains only a subdirectory, zero files -> UNDECIDABLE, exit != 0 (buildEntries only lists files, so this is the same empty-evidence hole as a bare-empty hooks/)", () => {
+  withTempDir((dir) => {
+    initSyntheticRepo(dir);
+    writeFileSync(join(dir, "README.md"), "x");
+    git(dir, "add README.md");
+    git(dir, 'commit -q -m "init"');
+    mkdirSync(join(dir, "hooks", "subdir"), { recursive: true });
+    writeFileSync(join(dir, "hooks", "subdir", "not-a-hook"), "x");
+    const result = evaluateSeatPreflight({ cwd: dir });
+    assert.equal(result.verdict, "UNDECIDABLE");
+    assert.notEqual(result.exitCode, 0);
+  });
+});
+
+test("P1-B: an UNDECIDABLE verdict caused by a PER-FILE read failure (no top-level `reason`) still prints a human-readable line, AND a coexisting DRIFT entry from the same run is not dropped", () => {
+  withTempDir((dir) => {
+    initSyntheticRepo(dir);
+    writeFileSync(join(dir, "README.md"), "x");
+    git(dir, "add README.md");
+    git(dir, 'commit -q -m "init"');
+    const hooksDir = join(dir, "hooks");
+    mkdirSync(hooksDir, { recursive: true });
+    writeFileSync(join(hooksDir, "commit-msg"), "versioned commit-msg");
+    writeFileSync(join(hooksDir, "pre-commit"), "versioned pre-commit");
+    git(dir, "add hooks/commit-msg hooks/pre-commit");
+    git(dir, 'commit -q -m "add hooks"');
+    const commonDir = git(dir, "rev-parse --git-common-dir");
+    const installedHooksDir = join(dir, commonDir, "hooks");
+    mkdirSync(installedHooksDir, { recursive: true });
+    // commit-msg: a real content DRIFT.
+    writeFileSync(join(installedHooksDir, "commit-msg"), "different content");
+    // pre-commit: installed as a DIRECTORY, not a file -- readFileSync on it
+    // throws EISDIR, which buildEntries' readSide catches into
+    // {readable:false, reason: err.message} with NO top-level `reason` set
+    // anywhere on the runHookSyncCheck result (that field only exists for
+    // the two early-return cases, never per-file judgments) -- reproduces
+    // review's exact repro (installed pre-commit made a directory).
+    mkdirSync(join(installedHooksDir, "pre-commit"), { recursive: true });
+
+    const result = evaluateSeatPreflight({ cwd: dir });
+    assert.equal(result.verdict, "UNDECIDABLE");
+    assert.equal(
+      result.reason,
+      undefined,
+      "sanity: no top-level reason set for this per-file-failure shape",
+    );
+    const report = formatReport(result);
+    assert.doesNotMatch(
+      report,
+      /reason: unknown/,
+      "must not fall back to the bare word 'unknown' when results carries real per-file reasons",
+    );
+    assert.match(
+      report,
+      /pre-commit/,
+      "the UNDECIDABLE entry's own name must appear",
+    );
+    assert.match(
+      report,
+      /commit-msg/,
+      "the coexisting DRIFT entry must not vanish behind the worse UNDECIDABLE verdict",
+    );
+    assert.match(report, /DRIFT/);
+    assert.match(report, /UNDECIDABLE/);
+  });
+});
+
+test("P2-C: evaluateSeatPreflight never throws -- a cwd that is not a git repo folds into a verdict, not an unhandled exception", () => {
+  withTempDir((dir) => {
+    // Deliberately NOT a git repo -- no `git init` here. runHookSyncCheck's
+    // repoRoot() shells out to `git rev-parse --show-toplevel`, which
+    // throws outside any repository.
+    assert.doesNotThrow(() => {
+      const result = evaluateSeatPreflight({ cwd: dir });
+      assert.equal(result.verdict, "UNDECIDABLE");
+      assert.equal(result.canLaunch, false);
+      assert.notEqual(result.exitCode, 0);
+      const report = formatReport(result);
+      assert.doesNotMatch(
+        report,
+        /reason: unknown/,
+        "the caught exception's own message must appear, not a bare 'unknown'",
+      );
+    });
+  });
+});
+
+test("P2-C CLI: a non-git cwd exits non-zero with a readable BLOCK message, not a raw stack dump", () => {
+  withTempDir((dir) => {
+    const r = spawnSync("node", [SCRIPT_PATH], { cwd: dir, encoding: "utf8" });
+    assert.notEqual(r.status, 0);
+    assert.match(r.stdout, /seat-preflight: BLOCK/);
+    assert.doesNotMatch(
+      r.stdout,
+      /at file:|at Object\.|at async /,
+      "a stack-trace-shaped line means the exception escaped as an unhandled throw instead of a verdict",
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
 // §4-5: called from a linked worktree, still resolves the MAIN repo's
 // installed .git/hooks (never <worktree>/.git/hooks -- .git there is a
 // FILE, not a directory). Exercised through evaluateSeatPreflight AND, right
