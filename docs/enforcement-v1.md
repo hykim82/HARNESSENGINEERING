@@ -3255,12 +3255,24 @@ same statement in machine-registered form.
   (calls the reused `runHookSyncCheck`, folds in the admission decision),
   `formatReport(result)` (the human-readable text above), plus a thin CLI
   entrypoint.
-- `scripts/check/seat-preflight.test.mjs` (`node:test`, 13 cases): the
-  `admissionFor` mapping in isolation; behavioral proof injected via a real
-  throwaway synthetic git repo for all four judgment outcomes (IN_SYNC,
-  content DRIFT, missing-file DRIFT, UNDECIDABLE) plus a linked-worktree
-  case, each exercised both through the exported function and through the
-  actual CLI spawned as a child process (`node scripts/check/
+- `scripts/check/seat-preflight.test.mjs` (`node:test`) — case count
+  deliberately not pinned here (this exact repo already caught itself
+  going stale on a hand-written test count once before: "a prior version
+  of this note said '37 cases' for `selfcheck-inventory.test.mjs` right
+  after a different round had already brought it to 42", under "Enforcement-
+  layer self-check (selfcheck.mjs, HYK-129 사이클 2)" above; `node --test
+scripts/check/
+seat-preflight.test.mjs` is the one source of truth for the current
+  count). What it covers: the `admissionFor` mapping in isolation;
+  behavioral proof injected via a real throwaway synthetic git repo for
+  every judgment outcome (IN_SYNC; content DRIFT; missing-file DRIFT; the
+  zero-comparison-targets fold to UNDECIDABLE, HYK-200 3R; a per-file
+  judgment failure with no top-level `reason` whose UNDECIDABLE report
+  still names the failing file and does not drop a coexisting DRIFT
+  entry, HYK-200 3R; a caught exception from the reused device folding to
+  UNDECIDABLE instead of propagating, HYK-200 3R) plus a linked-worktree
+  case, each exercised both through the exported functions and through
+  the actual CLI spawned as a child process (`node scripts/check/
 seat-preflight.mjs`); and an HYK-199-precedent regression test proving
   this test file's own pass/fail does not depend on which directory
   `node --test` was invoked from.

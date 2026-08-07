@@ -284,8 +284,19 @@ test("P2-C CLI: a non-git cwd exits non-zero with a readable BLOCK message, not 
     const r = spawnSync("node", [SCRIPT_PATH], { cwd: dir, encoding: "utf8" });
     assert.notEqual(r.status, 0);
     assert.match(r.stdout, /seat-preflight: BLOCK/);
+    // Review round 3 (M3, HYK-200-preflight-review-2): this assertion used
+    // to check `r.stdout` for a stack-trace-shaped line -- but an unhandled
+    // exception's stack is written by Node to STDERR, never stdout, so that
+    // check could never fail for the reason its own message claimed (the
+    // reviewer proved it with a mutation that restored a raw stack dump to
+    // the real output stream and left this test green). The sibling
+    // `assert.match(r.stdout, /seat-preflight: BLOCK/)` above was still
+    // catching real regressions (confirmed by the reviewer's M5: removing
+    // the production try/catch turns THIS test's stderr-facing assertion,
+    // and only that one, red) -- the fix is checking the stream Node
+    // actually uses.
     assert.doesNotMatch(
-      r.stdout,
+      r.stderr,
       /at file:|at Object\.|at async /,
       "a stack-trace-shaped line means the exception escaped as an unhandled throw instead of a verdict",
     );
