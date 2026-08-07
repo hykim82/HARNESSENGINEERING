@@ -189,6 +189,40 @@ test("buildEntries: versioned directory missing -> error surfaced, never silentl
   });
 });
 
+// HYK-196 2R P1 regression (independent review found this outside the
+// task's own listed test cases): two files differing ONLY in one invalid
+// UTF-8 trailing byte decode to the SAME string (Node silently substitutes
+// U+FFFD for an unrepresentable byte), so a UTF-8-decoding readFileFn hashes
+// them equal and reports IN_SYNC for content that is not byte-identical.
+// buildEntries' real (non-injected) readFileFn must read raw bytes, so this
+// must report DRIFT.
+test("buildEntries + judgeHookSync (real readFileFn): files differing only in one invalid-UTF-8 trailing byte -> DRIFT, never IN_SYNC", () => {
+  withTempDir((dir) => {
+    const versionedDir = join(dir, "hooks");
+    const installedDir = join(dir, "installed");
+    mkdirSync(versionedDir, { recursive: true });
+    mkdirSync(installedDir, { recursive: true });
+    const versionedBytes = Buffer.from([0x23, 0x21, 0x0a, 0xff]); // "#!\n" + invalid 0xFF
+    const installedBytes = Buffer.from([0x23, 0x21, 0x0a, 0xfe]); // "#!\n" + invalid 0xFE
+    // Sanity precondition for the bug this guards against: both decode to
+    // the identical replacement-character string under UTF-8.
+    assert.equal(
+      versionedBytes.toString("utf8"),
+      installedBytes.toString("utf8"),
+    );
+    writeFileSync(join(versionedDir, "pre-commit"), versionedBytes);
+    writeFileSync(join(installedDir, "pre-commit"), installedBytes);
+
+    const built = buildEntries({ versionedDir, installedDir });
+    const judged = judgeHookSync(built.entries);
+    assert.equal(judged.verdict, "DRIFT");
+    assert.notEqual(
+      judged.mismatches[0].versionedSha256,
+      judged.mismatches[0].installedSha256,
+    );
+  });
+});
+
 // ---------------------------------------------------------------------------
 // resolveInstalledDir: option / core.hooksPath / git-common-dir(worktree)
 // ---------------------------------------------------------------------------
@@ -330,6 +364,36 @@ test("runHookSyncCheck: --install is idempotent -- a second run changes nothing 
       readFileSync(join(installedDir, "pre-commit"), "utf8"),
       before,
     );
+  });
+});
+
+// HYK-196 2R P2b fix (review C5): a write/mkdir failure inside --install
+// used to propagate as an unhandled exception instead of the documented
+// "always a {verdict, mismatches, ...} JSON" contract. Forces a REAL
+// filesystem failure (no fs mocking) by making the installed hook's parent
+// directory path collide with an existing plain FILE, so mkdirSync's
+// recursive create hits ENOTDIR.
+test("runHookSyncCheck: --install write failure (blocked installedDir) -> UNDECIDABLE JSON, never an uncaught throw", () => {
+  withTempDir((dir) => {
+    const versionedDir = join(dir, "hooks");
+    mkdirSync(versionedDir, { recursive: true });
+    writeFileSync(join(versionedDir, "pre-commit"), "new body");
+    const blockerFile = join(dir, "blocker");
+    writeFileSync(blockerFile, "i am a file, not a directory");
+    const installedDir = join(blockerFile, "sub"); // parent is a FILE -> mkdirSync ENOTDIR
+
+    let result;
+    assert.doesNotThrow(() => {
+      result = runHookSyncCheck({
+        versionedDirOption: versionedDir,
+        installedDirOption: installedDir,
+        install: true,
+        root: dir,
+      });
+    });
+    assert.equal(result.verdict, "UNDECIDABLE");
+    assert.deepEqual(result.mismatches, []);
+    assert.ok(result.reason);
   });
 });
 

@@ -27,6 +27,11 @@ export const VERDICT_SEVERITY = ["UNDECIDABLE", "DRIFT", "IN_SYNC"];
 //   { present: false }                         -- file does not exist
 //   { present: true, readable: false, reason }  -- exists but could not be read
 //   { present: true, readable: true, content }  -- read successfully
+// The core itself is type-agnostic about `content` (it only ever passes it
+// through sha256Hex) -- it is the I/O layer's job (buildEntries below) to
+// make sure `content` is always raw bytes, never a UTF-8-decoded string
+// (see the CONTRACT note on buildEntries' `readFileFn` default for why that
+// distinction is load-bearing, not cosmetic).
 // versioned is only ever `present: false` in a defensive sense (the caller
 // only builds entries for names it just listed from the versioned dir), but
 // the shape is still checked so a raced deletion fails closed, not silently.
@@ -172,6 +177,22 @@ function readSide(path, existsFn, readFileFn) {
   }
 }
 
+// ★★CONTRACT (HYK-196 2R, P1 fix): `readFileFn` MUST hand back raw bytes
+// (a Buffer -- `readFileSync(p)` with no encoding), never a decoded string.
+// `sha256Hex` (imported above) ignores its "utf8" encoding argument when
+// given a Buffer (Node's Hash.update only consults inputEncoding for string
+// data), so a Buffer flows through it byte-for-byte. A string, by contrast,
+// has ALREADY been through UTF-8 decoding -- an invalid byte sequence (e.g.
+// a lone 0x80-0xBF or 0xF5-0xFF byte) silently collapses to U+FFFD, so two
+// files differing only in one invalid trailing byte can decode to the
+// *same* string and therefore hash equal, reporting IN_SYNC for content
+// that is not byte-identical (the exact defect an independent review found
+// outside this task's own listed test cases -- see
+// hook-sync-check.test.mjs's "P1 regression" test and
+// docs/enforcement-known-gaps.md gap#91). Any caller injecting a custom
+// `readFileFn` (e.g. a test) must preserve this raw-bytes contract or the
+// same hole reopens.
+//
 // Every file (not directory) directly under `versionedDir` is in scope --
 // all of them, not just pre-commit (task spec §3 "정본 hooks/ 에 있는 모든
 // 파일이 대상이다"). Installed-side-only extras (e.g. *.sample) are never
@@ -180,7 +201,7 @@ export function buildEntries({
   versionedDir,
   installedDir,
   existsFn = existsSync,
-  readFileFn = (p) => readFileSync(p, "utf8"),
+  readFileFn = (p) => readFileSync(p),
   readdirFn = readdirSync,
   statFn = statSync,
 }) {
@@ -214,12 +235,26 @@ export function buildEntries({
 // path (creating installedDir if needed), best-effort preserving the exec
 // permission bit. LIMITATION: chmod has no effect on Windows filesystems --
 // documented here rather than silently pretending it always works.
+//
+// P2b fix (HYK-196 2R, review C5): a write/mkdir failure (permission denied,
+// disk full, read-only installedDir, ...) here used to propagate as an
+// unhandled exception, crashing the whole CLI instead of the documented
+// "always a {verdict, mismatches, ...} JSON" contract. It is now caught and
+// surfaced as `{ error }` so the caller can report it the same honest way
+// every other unreadable/unresolvable condition in this device is reported:
+// UNDECIDABLE, exit 1, still valid JSON -- never a silent 0, never a crash.
 function installDrifted(entries, { statFn }) {
   for (const entry of entries) {
     const judged = judgeHookFile(entry);
     if (judged.status !== "DRIFT") continue;
-    mkdirSync(join(entry.installedPath, ".."), { recursive: true });
-    writeFileSync(entry.installedPath, entry.versioned.content);
+    try {
+      mkdirSync(join(entry.installedPath, ".."), { recursive: true });
+      writeFileSync(entry.installedPath, entry.versioned.content);
+    } catch (err) {
+      return {
+        error: `failed to install '${entry.name}' to '${entry.installedPath}': ${err.message}`,
+      };
+    }
     try {
       const mode = statFn(entry.versionedPath).mode;
       chmodSync(entry.installedPath, mode);
@@ -227,6 +262,7 @@ function installDrifted(entries, { statFn }) {
       // best-effort only -- exec bit has no meaning on Windows filesystems.
     }
   }
+  return {};
 }
 
 function printText(judged, { resolvedInstalledDir, source }) {
@@ -263,7 +299,15 @@ function installAndReverify({
   readdirFn,
   statFn,
 }) {
-  installDrifted(entries, { statFn });
+  const installResult = installDrifted(entries, { statFn });
+  if (installResult.error) {
+    return {
+      verdict: "UNDECIDABLE",
+      mismatches: [],
+      results: [],
+      reason: installResult.error,
+    };
+  }
   const reread = buildEntries({
     versionedDir,
     installedDir,
@@ -288,7 +332,7 @@ function installAndReverify({
 // branch under the `complexity` rule); no behavior change.
 function normalizeFsPorts({
   existsFn = existsSync,
-  readFileFn = (p) => readFileSync(p, "utf8"),
+  readFileFn = (p) => readFileSync(p),
   readdirFn = readdirSync,
   statFn = statSync,
 } = {}) {
