@@ -477,19 +477,45 @@ const MAIN_ROOT = (() => {
   if (!existsSync(join(candidate, "hooks", "commit-msg"))) return null;
   return absoluteRealPath(candidate, ".");
 })();
+// 2026-08-08 (HYK-200 2R): ORCH normalized the INSTALLED commit-msg hook
+// (CRLF -> LF, with 한용's approval) to match this repo's own tracked
+// versioned copy, which as a side effect made the tracked `hooks/commit-msg`
+// in every real checkout on this machine -- main repo AND every linked
+// worktree, including this one -- byte-identical. That equality is now the
+// CORRECT, intended state (closing exactly the kind of drift gap#91 exists
+// to describe), so a checkout pair whose tracked copies already match is not
+// a case where "compares differently depending on which checkout" can be
+// demonstrated -- asserting a divergence that no longer exists would be
+// enforcing a stale fact, not a real regression guard. The fully synthetic
+// proof above (fabricated CRLF/LF fixtures, never real files) remains the
+// load-bearing demonstration that the mechanism CAN diverge; this
+// corroborating measurement only adds value when real files still happen to
+// diverge, so it now skips whenever they don't.
+const MAIN_COMMIT_MSG = MAIN_ROOT
+  ? join(MAIN_ROOT, "hooks", "commit-msg")
+  : null;
+const CHECKOUTS_DIVERGE =
+  MAIN_COMMIT_MSG !== null &&
+  !readFileSync(TRACKED_COMMIT_MSG).equals(readFileSync(MAIN_COMMIT_MSG));
 const TWO_REAL_CHECKOUTS_AVAILABLE =
-  MAIN_ROOT !== null && MAIN_ROOT !== ROOT && INSTALLED_HOOKS_PRESENT;
+  MAIN_ROOT !== null &&
+  MAIN_ROOT !== ROOT &&
+  INSTALLED_HOOKS_PRESENT &&
+  CHECKOUTS_DIVERGE;
 
 test(
   "NC-1 install/measurement (additional, environment-conditional): the same location-dependent mechanism reproduces against this machine's two REAL checkouts -- corroborates, does not replace, the synthetic proof above",
   {
     skip:
       !TWO_REAL_CHECKOUTS_AVAILABLE &&
-      "requires a second real checkout (MAIN_ROOT !== this worktree's ROOT) AND an installed hook to actually exist -- both false in a CI checkout or a bare single-checkout clone, so this corroborating measurement is skipped rather than asserting anything there",
+      "requires a second real checkout (MAIN_ROOT !== this worktree's ROOT), an installed hook to actually exist, AND the two checkouts' tracked hooks/commit-msg to actually diverge -- all three are false in a CI checkout or a bare single-checkout clone, and the third is now false on any machine where the installed hook has been normalized (HYK-200 2R) so the checkouts agree -- this corroborating measurement is skipped rather than asserting a divergence that no longer exists",
   },
   () => {
     // CI 성립 근거: 가드가 CI(단일 체크아웃·설치 훅 없음)에서 항상 거짓이
-    // 되므로 이 시험은 CI에서 아무것도 단언하지 않고 항상 skip된다.
+    // 되므로 이 시험은 CI에서 아무것도 단언하지 않고 항상 skip된다. 이
+    // 저장소가 정규화된 이후에는 실제 두 체크아웃이 일치할 때도(CHECKOUTS_
+    // DIVERGE=false) 같은 이유로 skip된다 -- 어느 경우든 CI/정상화된
+    // 로컬 환경에서 이 시험이 실행되어 실패하는 경로는 없다.
     const fromNc1 = checkNativeGitHook({
       versionedPath: TRACKED_COMMIT_MSG,
       installedPath: COMMIT_MSG_HOOK,
