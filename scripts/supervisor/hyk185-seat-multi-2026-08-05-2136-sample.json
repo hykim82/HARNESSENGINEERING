@@ -1,7 +1,30 @@
 {
   "_provenance": "HYK-185-seat-multi (coder-task.md acceptance (a)/(b)) -- in-repo fixture derived from the real read-only samples ORCH captured around the 2026-08-05 21:36 KST scheduled run: .harness/증거/terminal-list-raw.json (seat list, paired 'now' from .harness/증거/orch-stall-detect-raw.json's 'now':1785938127298) and .harness/증거/watch.log.snapshot (the same period's ticks show all three axes collection-failing on this exact worktree, e.g. 2026-08-05T12:36:02.051Z UTC: seat_status=SEAT_LIVENESS_COLLECTION_FAILED idle_status=SEAT_IDLE_COLLECTION_FAILED start_status=DISPATCH_START_COLLECTION_FAILED). Those two evidence files are gitignored (.harness/증거/) so a test reading them breaks CI -- this fixture is the in-repo, trimmed substitute (readFileSync(new URL(..., import.meta.url))). Fields kept: exactly what collectSeatObservationsForWorktree/collectSeatLivenessObservation read (handle/worktreePath/tabId/leafId/lastOutputAt/title) -- preview text (screen redraw noise, not judgment input) is dropped. title is copied byte-for-byte from terminal-list-raw.json's 'title' field for the same handle (REVIEW P2-1, 2026-08-06: an earlier version of this fixture had paraphrased three titles -- 'ORCH'/'CODER gap83'/'REVIEW gap83' -- instead of copying them; that was wrong because title is a real observation input (collectSeatLivenessObservation's reasonHint reads it), not decorative, so this fixture must not paraphrase it. Fixed to the exact raw values: '⠂ Harness orchestrator handoff protocol' / '✳ Add two documentation gaps to enforcement file' / '관리자: hyk185-gap83-3'). nowIso is the literal ISO form of orch-stall-detect-raw.json's captured 'now' (1785938127298ms), not a rounded 21:36:00 -- using the exact paired value keeps lastOutputAt <= observedAtMs true for every seat, matching the real snapshot instead of inventing a synthetic 'now' that would misorder it.",
+  "_provenanceDeliveredSeat": "HYK-185-seat-corr (coder-task.md acceptance (a)) -- additive fields (harnessLabel/taskListTasks/dispatchShowByTaskId) NOT part of the original 2026-08-05 21:36 KST raw capture (that capture only had terminal-list-raw.json/orch-stall-detect-raw.json -- no task-list/dispatch-show query was taken that night). These are newly authored to exercise the seatLiveness/dispatchStart correlation path, but the SHAPE is not invented. UPDATED 2026-08-06 (HYK-185-seat-corr-2, REVIEW P1 fix): the previous version of taskListTasks[0].spec used a 'go <label>\\nrole: <role>\\n...\\nworktree: <path>' shape sourced from dispatch-role-match-core.test.mjs's realSpecText() -- that was YESTERDAY's measured format and, per REVIEW's independent re-measurement (feeding this very worktree's real dispatch task_657777c22e40 through resolveDeliveredSeat), it no longer matches what ORCH's task-list actually emits today (ORCH self-admitted changing the spec format between yesterday and today). The spec text here is now conformed to TODAY's real measured shape instead ('role: <role>\\nharness_label: <label>\\nworktree: <path> (branch <name>)\\ntask_file: ...\\n요지: ...', taken from .harness/증거/task-list-raw-0806.json's own entry for task_657777c22e40 -- see the byte-exact excerpt in scripts/relay/adapters/hyk185-seat-corr-2026-08-06-real-dispatch-sample.json for the literal source). dispatchShowByTaskId's 11 fields still follow rawDispatchShowP2() in scripts/relay/hyk171-cycle4b2c-fixtures.mjs (ORCH-measured, unchanged this round). assignee_pane_key is deliberately set to the CODER seat's own tabId:leafId (term_3321e179...) from the terminals array above, so the correlation resolves to exactly that one seat out of the two sharing this worktree -- the exact ambiguity this cycle's fix closes.",
+  "harnessLabel": "HYK-185-gap83-3",
   "nowIso": "2026-08-05T13:55:27.298Z",
   "ambiguousWorktreePath": "C:/Users/Administrator/orca/workspaces/HARNESSENGINEERING/hyk185-gap83-3",
+  "taskListTasks": [
+    {
+      "id": "task_hyk185gap833seatcorr01",
+      "spec": "role: CODER\nharness_label: HYK-185-gap83-3\nworktree: C:\\Users\\Administrator\\orca\\workspaces\\HARNESSENGINEERING\\hyk185-gap83-3\ntask_file: .harness/coder-task.md\n요지: (합성 -- HYK-185-seat-multi-1 라운드 재현용, 실제 배달 아님)."
+    }
+  ],
+  "dispatchShowByTaskId": {
+    "task_hyk185gap833seatcorr01": {
+      "id": "dispatch_hyk185gap833seatcorr01",
+      "task_id": "task_hyk185gap833seatcorr01",
+      "assignee_handle": "term_3321e179-357c-4de9-b9f9-f72e38d2d8fc",
+      "assignee_pane_key": "b7011967-041a-45e4-843c-0cf8e2ccd418:ecdf87c2-a552-4370-9ecf-98d455404f0a",
+      "status": "dispatched",
+      "failure_count": 0,
+      "last_failure": null,
+      "dispatched_at": "2026-08-05T12:30:00.000Z",
+      "completed_at": null,
+      "created_at": "2026-08-05T12:29:00.000Z",
+      "last_heartbeat_at": null
+    }
+  },
   "terminals": [
     {
       "handle": "term_b8890ab1-f2df-4ce9-bc84-f76fc1de26ed",

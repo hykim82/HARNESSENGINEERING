@@ -32,6 +32,7 @@ import {
 import {
   normalizeDispatchRawUnion,
   judgeInjectedProfile,
+  normalizeDispatchShow,
 } from "./dispatch-correlation-adapter.mjs";
 
 // HYK-169-coder-1: 어댑터 B v1 -- `orca` CLI를 실제로 부르는(spawn) 코드는
@@ -57,25 +58,38 @@ import {
 // dispatchStart)이 공유해 동시에 눈머는 사고를 고쳤다 -- 관측층만
 // 넓혔다(collectSeatObservationsForWorktree, 아래): 이 함수는 후보가
 // 2개 이상이어도 거부하지 않고 전부 돌려준다. 판정 축의 재배선은
-// "방치(seatIdle)" 축까지만 이번 사이클에서 했다(orch-stall-detect.mjs
-// judgeSeatIdleForRepo 참조) -- "배달과 결부된" 두 축(seatLiveness/
-// dispatchStart)의 신원 해석 전환("그 배달이 간 좌석은 어디인가")은
-// `.harness/coder.md`의 QUESTION 절에 적힌 이유로 이번 사이클에서
-// 멈췄다: Orca 배정 기록(`dispatch-show`)의 `assignee_pane_key`로
-// 좌석을 교차 확인하려면 그 배정의 실행시각 task id(`task_...`, harness
-// 라벨과 다른 이름공간)를 알아야 하는데, 그 id는 현재 `.harness/*-task.md`
-// 어디에도 기록되지 않는다(기록하면 "새 강제 표면"이 되어 비타협을
-// 어긴다) -- 이 두 축은 이번 사이클 이후에도 여전히 resolveSeatLivenessCandidate
-// (2개 이상이면 AMBIGUOUS로 실패)를 그대로 쓴다.
+// "방치(seatIdle)" 축까지만 그 사이클에서 했다(orch-stall-detect.mjs
+// judgeSeatIdleForRepo 참조).
+//
+// HYK-185-seat-corr(coder-task.md §2, 검토자 실측 경로로 재개): "배달과
+// 결부된" 두 축(seatLiveness/dispatchStart)의 신원 해석("그 배달이 간
+// 좌석은 어디인가")은 위 QUESTION이 막았던 "실행시각 task id를 어디서도
+// 모른다"는 전제 자체가 틀렸다는 검토자의 실측(task-list --json의
+// `spec` 필드가 하네스 라벨과 워크트리 경로를 **함께** 담고 있다, ORCH
+// 라이브 조회로 재확인)으로 다시 열렸다. 새 저장 상태를 신설하지 않고
+// (비타협 그대로) 기존 런타임 조회 3단만 이어붙인다(resolveDeliveredSeat,
+// 아래): ①`task-list --status dispatched`에서 라벨+워크트리 경로가 spec에
+// 함께 있는 후보를 정확히 하나로 좁히고, ②그 후보의 `dispatch-show`로
+// `assignee_pane_key`를 얻고, ③그 열쇠를 이 워크트리의 살아 있는 좌석
+// 목록과 대조해 정확히 하나가 맞을 때만 지목한다. 후보가 0개/2개+ 이거나
+// 대조가 죽은 좌석만 가리키면(ORCH 실측: 표본 6/6이 죽은 좌석) 여전히
+// 실패로 드러낸다 -- resolveSeatLivenessCandidate 자체는 손대지 않았고
+// (여전히 2개 이상이면 AMBIGUOUS), orch-stall-detect.mjs가 그 AMBIGUOUS
+// 실패 하나에 한해서만 이 대조를 시도하는 재시도 경로로 얹는다(다른
+// 실패 사유는 "좌석이 여럿이라 못 골랐다"는 문제가 아니므로 재시도하지
+// 않는다 -- 회귀 방지).
 //
 // ⚠️벤더 형식 의존(코더-task.md "pane key 형식 의존"): `assignee_pane_key`
 // (dispatch-show)는 `${tabId}:${leafId}`(terminal show, paneKeyFromShow)와
 // 문자 완전 일치하는 것으로 ORCH가 2회 관측했다(dispatch-bound-seat-
-// proof.mjs §1) -- 이건 **벤더 형식이며 우리 보증이 아니다**. 이 파일
-// 자신은 아직 그 대조를 하지 않지만(위 문단), 그 형식 단언은 이미
-// terminal-show-adapter.test.mjs("paneKeyFromShow: `${tabId}:${leafId}`")
-// 가 고정하고 있다 -- 이 파일이 향후 그 대조를 실제로 구현할 때
-// 재사용해야 하는 계약이지 새로 지어낼 것이 아니다.
+// proof.mjs §1) -- 이건 **벤더 형식이며 우리 보증이 아니다**. 그 형식
+// 단언은 terminal-show-adapter.test.mjs("정상 경로: ... paneKeyFromShow를
+// 그대로 반환한다", `paneKeyFromShow === \`${tabId}:${leafId}\``)가 이미
+// 고정하고 있고, resolveDeliveredSeat(아래)의 대조도 정확히 같은 형식을
+// 쓴다 -- 이 파일 자신의 별도 단언은
+// orca-adapter.test.mjs("resolveDeliveredSeat: live seat pane key is
+// `${tabId}:${leafId}` -- breaks red if the vendor format changes")가
+// 진다(docs/enforcement-known-gaps.md gap#85).
 
 function isPlainObject(v) {
   return v !== null && typeof v === "object" && !Array.isArray(v);
@@ -518,7 +532,10 @@ function resolveSeatLivenessCandidate(worktreePath, opts) {
 
 // terminal show 조회 -> lastOutputAt(계약: number, epoch ms) + title(reasonHint
 // 후보) 추출. collectSeatLivenessObservation에서 분리(복잡도 분산).
-function fetchSeatLivenessShow(handle, now, opts) {
+// HYK-185-seat-corr: resolveDeliveredSeat로 해석한 handle을 관측(lastOutputAt)
+// 으로 이어붙이는 재시도 경로(orch-stall-detect.mjs)도 이 함수를 그대로
+// 재사용한다 -- export한다(동작 변경 없음, 가시성만 넓힘).
+export function fetchSeatLivenessShow(handle, now, opts) {
   let showResponse;
   try {
     showResponse = opts.execFn(buildSeatShowCommand(handle));
@@ -640,6 +657,409 @@ export function collectSeatObservationsForWorktree(ctx = {}, opts = {}) {
     };
   });
   return { ok: true, seatCount: seats.length, seats };
+}
+
+// ---- HYK-185-seat-corr (coder-task.md §2, 검토자 실측 경로): "그 배달이
+// 간 좌석" 식별 -- 읽기 전용 조회 3단만 이어붙인다(새 저장 상태 0):
+//   ①`task-list --status dispatched` -> 하네스 라벨 + 워크트리 경로가
+//     spec에 함께 있는 후보를 정확히 하나로 좁힌다.
+//   ②그 후보의 `dispatch-show` -> `assignee_pane_key`를 얻는다.
+//   ③그 열쇠를 이 워크트리의 살아 있는 좌석 목록(terminal show,
+//     `${tabId}:${leafId}`)과 대조해 정확히 하나가 맞을 때만 지목한다.
+// 대조가 성립하지 않으면(후보 0/2개+ · 배정 응답 결손 · 죽은 좌석만
+// 일치) 절대 고르지 않고 실패를 드러낸다(비타협).
+//
+// argv 두 개(buildTaskListDispatchedCommand/buildDispatchShowCommand)는
+// HYK-171 사이클4b-1(재작업3)에서 "증명 불가"로 판단해 지웠던 것과 동일
+// 실측 shape(teardown-inventory-adapter.mjs 그 커밋의 §2-C 헤더 주석 --
+// `["orchestration","task-list","--status","dispatched","--json"]` /
+// `["orchestration","dispatch-show","--task",taskId,"--json"]`)를 그대로
+// 되쓴다 -- argv 자체는 그때도 실측이었다(틀린 것은 "기록만 있으면
+// 좌석이다"라는 상관 결론이었지, argv가 아니었다). 그 결론이 왜 틀렸는지는
+// 위 §2-B 문단 참조 -- 이번 함수는 "기록이 있다"만으로 지목하지 않고
+// ③ 살아있는 좌석 대조가 성립할 때만 지목한다(그 사고를 반복하지 않는다).
+export const DELIVERED_SEAT_REASON = Object.freeze({
+  INPUT_INVALID: "DELIVERED_SEAT_INPUT_INVALID",
+  TASK_LIST_QUERY_FAILED: "DELIVERED_SEAT_TASK_LIST_QUERY_FAILED",
+  NO_CANDIDATE_TASK: "DELIVERED_SEAT_NO_CANDIDATE_TASK",
+  AMBIGUOUS_CANDIDATE_TASK: "DELIVERED_SEAT_AMBIGUOUS_CANDIDATE_TASK",
+  DISPATCH_SHOW_QUERY_FAILED: "DELIVERED_SEAT_DISPATCH_SHOW_QUERY_FAILED",
+  DISPATCH_SHOW_INVALID: "DELIVERED_SEAT_DISPATCH_SHOW_INVALID",
+  LIVE_SEAT_LIST_QUERY_FAILED: "DELIVERED_SEAT_LIVE_SEAT_LIST_QUERY_FAILED",
+  // 후보 0(죽은 좌석만 일치하거나 애초에 일치 자체가 없음)와 후보 2개+를
+  // 하나로 접지 않는다 -- 합격기준 (d)가 세 상관 실패 경로를 각각
+  // 요구한다.
+  NO_LIVE_SEAT_MATCH: "DELIVERED_SEAT_NO_LIVE_SEAT_MATCH",
+  AMBIGUOUS_LIVE_SEAT_MATCH: "DELIVERED_SEAT_AMBIGUOUS_LIVE_SEAT_MATCH",
+});
+
+export function buildTaskListDispatchedCommand() {
+  return ["orchestration", "task-list", "--status", "dispatched", "--json"];
+}
+export function buildDispatchShowCommand(taskId) {
+  return ["orchestration", "dispatch-show", "--task", taskId, "--json"];
+}
+
+function denyDeliveredSeat(reasonCode, detail) {
+  return { ok: false, reasonCode, reason: detail };
+}
+
+// HYK-185-seat-corr-2 (REVIEW P1 수리, 2026-08-06): 어제 실측한 "go <라벨>"
+// 줄 형태는 오늘 재실측하니 이미 폐기돼 있었다 -- ORCH 자신이 "두 형식
+// 다 내가 쓴 것이고 어제와 오늘 사이에 형식을 바꿨다"고 자인했다(§R2
+// 반려 사유). 그래서 이 함수의 정본은 문서/과거 실측이 아니라 **오늘
+// 다시 뽑은 raw**(`.harness/증거/task-list-raw-0806.json`, 이 배달 자신의
+// 항목 `task_id:"task_657777c22e40"` 그대로)다:
+//   "role: CODER\nharness_label: HYK-185-seat-corr-1\nworktree: C:\...\hyk185-seat-multi (branch hyk185-seat-corr)\ntask_file: .harness/coder-task.md\n요지: ..."
+// 라벨은 "go <라벨>" 줄이 아니라 **`harness_label: <라벨>` 줄**(정확
+// 일치, 부분 문자열/대소문자 완화 없음 -- 추측 금지)에 있다.
+//
+// HYK-185-seat-corr-4 (한용 «(가)» 확정, 2026-08-06 -- ★이 이슈의 마지막
+// 라운드): `worktree:` 줄은 **"벗겨 내고 비교"(strip-then-compare) 방식을
+// 완전히 버렸다.** 그 방식은 3라운드 연속 같은 계열의 구멍(REVIEW가 매번
+// 새 반례로 뚫음 -- corr-2는 어제 형식 자체가 틀림, corr-3은 꼬리 앞
+// 공백을 0개 이상 허용해 접두어-충돌 경로가 같은 문자열로 축약됨)을
+// 냈다 -- 헐거운 정규식으로 "그럴듯한 조각을 어딘가에서 찾아 잘라내는"
+// 접근 자체가 매번 새로 뚫릴 여지를 남긴다. 이제는 `worktree:` 줄
+// **전체**를 **정확히 두 문법 중 하나로만** 인정한다(그 외는 전부
+// 거부, 아래 WORKTREE_LINE_WITH_BRANCH_TAIL/WORKTREE_LINE_BARE_PATH 참조):
+//   ① `worktree: <경로>`
+//   ② `worktree: <경로> (branch <이름>)`
+// 두 정규식 다 `^`/`$`로 **줄 전체**를 앵커링한다 -- 문자열 중간
+// 어딘가의 우연한 부분 일치는 애초에 통과할 수 없다. 리터럴 구분자는
+// **정확히 ASCII 스페이스 1개(U+0020)만** 쓴다(`\s`를 쓰지 않는다 --
+// JS 정규식의 `\s`는 U+00A0/U+2028/U+2029/BOM 등 다수의 유니코드
+// 공백류까지 포함해 너무 넓다. 리터럴 `" "` 하나만 쓰면 탭·유니코드
+// 공백 변형이 전부 자동으로 문법 밖이 된다).
+//
+// <이름>(브랜치명) — **두 겹으로 제한한다** (HYK-192-seat-corr-5,
+// 2026-08-07: 4R이 반려된 자리가 정확히 여기다 — 아래 "문자 집합만으로는
+// 부족한 이유" 참조):
+//
+// **겹1(문자 집합)**: git이 실제로 허용하는 문자의 보수적 부분집합만
+// 받는다: 영문 대소문자·숫자·`.`·`_`·`-`·`/`
+// (`BRANCH_NAME_CHARS = [A-Za-z0-9._/-]+`, 1개 이상 필수 -- 빈 이름
+// 불허). 이 집합은 화이트리스트(포함될 것만 나열)라 **집합에 안 적힌
+// 문자는 무엇이든 정규식 구조 자체가 자동으로 배제**한다(개별 문자마다
+// 별도 로직이 있는 게 아니다) -- 공백·탭·유니코드 공백 문자(NBSP 등)
+// 그리고 git이 실제로 금지하는 특수문자(`~^:?*[\`)가 여기 해당한다.
+// ⚠️**시험 범위 정직 고지**: 이 메커니즘 자체(대표 사례로 `~`·탭·NBSP·
+// 공백만인 이름)는 시험으로 직접 확인했지만, `^`·`:`·`?`·`*`·`[`·`\`
+// 여섯 문자 하나하나를 각각 시험하지는 않았다 -- 같은 화이트리스트
+// 정규식이 배제하는 것이 코드 구조로 자명하기 때문이다(전칭 주장 아님,
+// §4 대조표 참조).
+//
+// ★**문자 집합만으로는 부족한 이유(4R이 실제로 반려된 지점, 역사
+// 설명 -- 지금의 주장이 아니라 왜 겹2가 생겼는지의 배경이다)**: `.`와
+// `/`는 둘 다 이 집합 "안"에 있다 — 그런데 git refname 규칙은 이 두
+// 문자를 특정 **배치**로 쓰면 여전히 금지한다(연속 `..`, 선행/후행
+// `/`, 연속 `//`, `.lock`으로 끝나는 구성요소 등). 4R 헤더는 "이것도
+// 집합 밖이라 자동 거부된다"고 적었지만 **실제로는 집합 안에 있어
+// 통과했다** — 주장과 구현이 어긋난 채 반려됐다(REVIEW 반례:
+// `..`/`/main`/`main/`/`main..old` 넷 다 4R 코드에서는 실제로
+// 통과했다). 그래서 **겹2**를 별도 함수로 추가했다(5R). ★**그 겹2조차
+// 처음엔 불완전했다** -- 5R은 검토자가 지정한 4개만 막았는데, **다른
+// 엔진** 독립 검토가 5R이 지정하지 않은 반례 2개(`feature//x`·
+// `release.lock`)를 스스로 만들어 뚫었다(6R, 아래 겹2 정의부 주석
+// 참조) ⇒ **지정 반례만으로는 이 문법의 완전함을 보증할 수 없다는
+// 것이 실측으로 두 번(4R→5R, 5R→6R) 증명됐다.**
+//
+// **겹2(구조 검사, `isValidBranchNameGrammar`, 정의는 아래
+// BRANCH_NAME_CHARS 선언 바로 다음)**: 겹1을 통과한 이름 문자열에
+// 대해, git refname이 실제로 금지하는 배치 중 **지금까지 실측으로
+// 확인된 6개**(연속 `..`·선행 `/`·후행 `/`·연속 `//`·`.lock`으로
+// 끝나는 구성요소, 그리고 그 6개를 막는 5규칙)만 검사한다.
+// ⛔**git-check-ref-format의 전체 규칙을 구현하지 않는다**(예: `.`로
+// 시작하는 구성요소, 전체 이름이 `.`로 끝나는 것, 제어문자 등 --
+// 범위 폭발 금지, 한용 명시). `@{`는 별도 규칙 없이도 겹1(문자
+// 집합)이 `{`/`}`를 이미 배제해 막힌다. 이 좁은 범위 밖의 배치는
+// 여전히 통과할 수 있다(정직 고지, 아래 §4/§6 대조표 참조 -- 6R에서
+// 자체 탐색으로 추가 발견한 홀(선행 `.` 구성요소·후행 `.` 전체이름)도
+// **의도적으로 고치지 않고** 거기 적어 둔다). 이것도 **"벗겨서
+// 비교"가 아니다** — 이미 앵커 정규식으로 정확히 분리해 낸 캡처
+// 그룹 하나를 검사할 뿐, 문자열 어딘가를 찾아 잘라내지 않는다.
+//
+// **넓히지 않는다는 원칙은 그대로**(한용 지시, 4R에서 이미 확정):
+// 겹1/겹2 어느 쪽에도 안 맞는 진짜 브랜치명이 미래에 나타나도 이
+// 함수는 "못 고른다"로 떨어질 뿐이고, 그게 이 상관이 가져야 할 옳은
+// 실패 방향이다(관대한 확장 금지 -- 필요해지면 그때 다시 실측하고
+// 문법을 명시적으로 넓힌다).
+//
+// ★정직 고지(한용 지시, gap#90에도 동일 문구를 남긴다): 남은 반례들은
+// 전부 **합성**이다 -- Orca가 실제로 만드는 꼬리는 진짜 git 브랜치명
+// 이라 이 문법 밖으로 벗어날 실무 위험은 낮다. **다만 그 가정에 기대지
+// 않는 쪽으로 고쳤다** -- "이 프로젝트에서 그건 일어날 수 없다"는 가정이
+// 이 파일 안에서만도 이미 여러 번(§R2/§R3/§R4) 깨졌기 때문이다.
+const BRANCH_NAME_CHARS = "[A-Za-z0-9._/-]+";
+const WORKTREE_LINE_WITH_BRANCH_TAIL = new RegExp(
+  `^worktree: (.+) \\(branch (${BRANCH_NAME_CHARS})\\)$`,
+);
+const WORKTREE_LINE_BARE_PATH = /^worktree: (.+)$/;
+
+// 겹2 -- 문자 집합(겹1)을 이미 통과한 이름에 대해서만 부른다. 5규칙
+// (아래 함수 본문): 연속 `..`(4R/5R) · 선행 `/`(5R) · 후행 `/`(5R) ·
+// **연속 `//`(6R, 신규)** · **`.lock`으로 끝나는 구성요소(6R, 신규)**.
+//
+// 6R에서 추가한 2규칙의 구체 사유:
+// - **연속 슬래시(`//`) 금지** -- `name.includes("//")`.
+// - **`.lock`으로 끝나는 구성요소 금지** -- `/`로 나눈 각 구성요소
+//   중 하나라도 `.lock`으로 끝나면 거부(`endsWith(".lock")`가 아니라
+//   `.split('/').some(...)`인 이유: git은 **중간** 구성요소도 막는다
+//   -- 직접 실측: `git check-ref-format --branch "a/b.lock/c"` →
+//   exit 128. 반대로 `a.lockx`/`a/b.lockx/c`(접미사가 ".lock"이
+//   아니라 "lockx")는 git이 통과시킨다(exit 0) -- "포함"이 아니라
+//   "그 구성요소 전체가 정확히 `.lock`으로 끝나는가"가 규칙이다.
+export function isValidBranchNameGrammar(name) {
+  if (name.includes("..")) return false;
+  if (name.startsWith("/")) return false;
+  if (name.endsWith("/")) return false;
+  if (name.includes("//")) return false;
+  if (name.split("/").some((component) => component.endsWith(".lock"))) {
+    return false;
+  }
+  return true;
+}
+
+// `worktree:` 줄 원문 하나를 위 두 문법 중 하나로만 파싱한다 -- 어느
+// 쪽에도 안 맞으면 null(관대한 추측 0, 호출부가 이를 "후보 아님"으로
+// 접는다). ①(꼬리 있음)을 **먼저** 시도한다 -- ②(꼬리 없음, `.+`가
+// 줄 전체를 삼킨다)가 ①의 상위집합이라 순서가 중요하다: 꼬리가 실제로
+// 있는데 ②를 먼저 매치시키면 "(branch ...)" 문자열째로 path에 섞여
+// worktreePath와 항상 불일치하게 된다(안전한 실패이긴 하지만 문법
+// 의도와 다르다 -- ①을 먼저 시도해 정확히 분리한다). ①이 겹1(문자
+// 집합)엔 맞아도 겹2(구조)에서 거부되면(예: 이름이 `main..old`) 이
+// 함수는 ①을 쓰지 않고 ②로 넘어간다 -- 그 결과 path에 "(branch
+// main..old)"가 그대로 섞여 실제 경로와 항상 불일치하게 된다(다른
+// 4R 거부 사례들과 동일한 fail-closed 패턴).
+export function parseWorktreeSpecLine(rawLine) {
+  if (typeof rawLine !== "string") return null;
+  const withTail = WORKTREE_LINE_WITH_BRANCH_TAIL.exec(rawLine);
+  if (withTail && isValidBranchNameGrammar(withTail[2])) {
+    return { path: withTail[1], branchName: withTail[2] };
+  }
+  const barePath = WORKTREE_LINE_BARE_PATH.exec(rawLine);
+  if (barePath) return { path: barePath[1], branchName: null };
+  return null;
+}
+
+function specMatchesDeliveryTarget(specText, harnessLabel, worktreePath) {
+  if (typeof specText !== "string") return false;
+  const lines = specText.split(/\r?\n/);
+  const labelLine = lines.find((line) => /^harness_label:\s*\S/.test(line));
+  if (!labelLine) return false;
+  const specLabel = labelLine.replace(/^harness_label:\s*/, "").trim();
+  if (specLabel !== harnessLabel) return false;
+  const worktreeLine = lines.find((line) => line.startsWith("worktree:"));
+  if (!worktreeLine) return false;
+  const parsed = parseWorktreeSpecLine(worktreeLine);
+  if (!parsed) return false;
+  return (
+    canonicalizeForComparison(parsed.path) ===
+    canonicalizeForComparison(worktreePath)
+  );
+}
+
+// §2 step①: task-list --status dispatched에서 라벨+워크트리 경로가 spec에
+// 함께 있는 후보를 정확히 하나로 좁힌다. 0개/2개+는 고르지 않고 실패.
+function resolveCandidateDispatchTask({ harnessLabel, worktreePath }, opts) {
+  let response;
+  try {
+    response = opts.execFn(buildTaskListDispatchedCommand());
+  } catch (err) {
+    return denyDeliveredSeat(
+      DELIVERED_SEAT_REASON.TASK_LIST_QUERY_FAILED,
+      `orca-adapter: resolveDeliveredSeat -- task-list query threw (${errText(err)})`,
+    );
+  }
+  if (!isPlainObject(response) || response.ok !== true) {
+    return denyDeliveredSeat(
+      DELIVERED_SEAT_REASON.TASK_LIST_QUERY_FAILED,
+      `orca-adapter: resolveDeliveredSeat -- ${extractFailureDetail(response)}`,
+    );
+  }
+  const tasks = Array.isArray(response.result?.tasks)
+    ? response.result.tasks
+    : null;
+  if (!tasks) {
+    return denyDeliveredSeat(
+      DELIVERED_SEAT_REASON.TASK_LIST_QUERY_FAILED,
+      "orca-adapter: resolveDeliveredSeat -- task-list response missing/invalid result.tasks",
+    );
+  }
+  const candidates = tasks.filter(
+    (t) =>
+      isPlainObject(t) &&
+      isNonEmptyString(t.id) &&
+      specMatchesDeliveryTarget(t.spec, harnessLabel, worktreePath),
+  );
+  if (candidates.length === 0) {
+    return denyDeliveredSeat(
+      DELIVERED_SEAT_REASON.NO_CANDIDATE_TASK,
+      `orca-adapter: resolveDeliveredSeat -- no dispatched task-list entry's spec matches label '${harnessLabel}' + worktree '${worktreePath}'`,
+    );
+  }
+  if (candidates.length > 1) {
+    return denyDeliveredSeat(
+      DELIVERED_SEAT_REASON.AMBIGUOUS_CANDIDATE_TASK,
+      `orca-adapter: resolveDeliveredSeat -- ${candidates.length} dispatched task-list entries match label '${harnessLabel}' + worktree '${worktreePath}', refusing to guess`,
+    );
+  }
+  return { ok: true, runtimeTaskId: candidates[0].id };
+}
+
+// §2 step②: dispatch-show(runtimeTaskId) -> assignee_pane_key.
+// normalizeDispatchShow(dispatch-correlation-adapter.mjs, 재사용 -- 재구현
+// 금지)로 파싱한다.
+function resolveAssigneePaneKey(runtimeTaskId, opts) {
+  let response;
+  try {
+    response = opts.execFn(buildDispatchShowCommand(runtimeTaskId));
+  } catch (err) {
+    return denyDeliveredSeat(
+      DELIVERED_SEAT_REASON.DISPATCH_SHOW_QUERY_FAILED,
+      `orca-adapter: resolveDeliveredSeat -- dispatch-show query threw (${errText(err)})`,
+    );
+  }
+  const normalized = normalizeDispatchShow(response);
+  if (!normalized.ok) {
+    return denyDeliveredSeat(
+      DELIVERED_SEAT_REASON.DISPATCH_SHOW_INVALID,
+      `orca-adapter: resolveDeliveredSeat -- dispatch-show normalize failed (reasonCode=${normalized.reasonCode})`,
+    );
+  }
+  return { ok: true, assigneePaneKey: normalized.assigneePaneKey };
+}
+
+// §2 step③: 이 워크트리의 살아 있는 좌석(terminal list, 고아 제외 +
+// worktreePath 정규화 일치 -- resolveSeatLivenessCandidate와 동일 후보
+// 필터) 각각의 terminal show에서 `${tabId}:${leafId}`(paneKeyFromShow,
+// terminal-show-adapter.mjs와 동일 형식 -- 벤더 형식, 우리 보증 아님,
+// 아래 orca-adapter.test.mjs 형식 단언 참조)를 계산해 assigneePaneKey와
+// 대조한다. 정확히 하나만 일치할 때만 지목 -- 0개(죽은 좌석만 일치하는
+// 경우 포함)/2개+는 고르지 않는다(ORCH 실측: dispatched 표본 6/6이 죽은
+// 좌석을 가리켰다 -- "기록이 있으니 이 좌석"이라고 넘겨짚지 않는다).
+// terminal list 조회 -> 이 워크트리의 살아있는 좌석 후보(고아 제외 +
+// worktreePath 정규화 일치 -- resolveSeatLivenessCandidate와 동일 필터).
+// resolveLiveSeatByPaneKey에서 분리(복잡도 분산).
+function resolveLiveSeatCandidatesForCorrelation(worktreePath, opts) {
+  let listResponse;
+  try {
+    listResponse = opts.execFn(buildTerminalListCommand());
+  } catch (err) {
+    return denyDeliveredSeat(
+      DELIVERED_SEAT_REASON.LIVE_SEAT_LIST_QUERY_FAILED,
+      `orca-adapter: resolveDeliveredSeat -- terminal list query threw (${errText(err)})`,
+    );
+  }
+  const list = parseTerminalList(listResponse);
+  if (!list) {
+    return denyDeliveredSeat(
+      DELIVERED_SEAT_REASON.LIVE_SEAT_LIST_QUERY_FAILED,
+      "orca-adapter: resolveDeliveredSeat -- terminal list response missing/invalid result.terminals",
+    );
+  }
+  const target = canonicalizeForComparison(worktreePath);
+  const candidates = list.filter(
+    (entry) =>
+      isPlainObject(entry) &&
+      isNonEmptyString(entry.handle) &&
+      !isOrphanSeat({ worktreePath: entry.worktreePath }) &&
+      canonicalizeForComparison(entry.worktreePath) === target,
+  );
+  return { ok: true, candidates };
+}
+
+// terminal show(candidate.handle) -> `${tabId}:${leafId}`(벤더 형식,
+// terminal-show-adapter.mjs와 동일). 조회 자체 실패는 null이 아니라
+// {ok:false}를 그대로 전파(resolveLiveSeatByPaneKey가 즉시 실패로
+// 끝낸다) -- show 응답이 ok:true가 아니거나 필드가 없으면(죽은/형식오류
+// 좌석) 그냥 "이 후보는 일치 안 함"으로만 접는다(전체 실패로 만들지
+// 않는다 -- 다른 후보가 여전히 유효할 수 있다).
+function fetchPaneKeyFromShow(candidateHandle, opts) {
+  let showResponse;
+  try {
+    showResponse = opts.execFn(buildSeatShowCommand(candidateHandle));
+  } catch (err) {
+    return denyDeliveredSeat(
+      DELIVERED_SEAT_REASON.LIVE_SEAT_LIST_QUERY_FAILED,
+      `orca-adapter: resolveDeliveredSeat -- terminal show query threw (${errText(err)})`,
+    );
+  }
+  if (!isPlainObject(showResponse) || showResponse.ok !== true) {
+    return { ok: true, paneKeyFromShow: null };
+  }
+  const terminal = isPlainObject(showResponse.result)
+    ? showResponse.result.terminal
+    : null;
+  const tabId = isPlainObject(terminal) ? terminal.tabId : null;
+  const leafId = isPlainObject(terminal) ? terminal.leafId : null;
+  if (!isNonEmptyString(tabId) || !isNonEmptyString(leafId)) {
+    return { ok: true, paneKeyFromShow: null };
+  }
+  return { ok: true, paneKeyFromShow: `${tabId}:${leafId}` };
+}
+
+function resolveLiveSeatByPaneKey({ worktreePath, assigneePaneKey }, opts) {
+  const resolved = resolveLiveSeatCandidatesForCorrelation(worktreePath, opts);
+  if (!resolved.ok) return resolved;
+  const matches = [];
+  for (const candidate of resolved.candidates) {
+    const shown = fetchPaneKeyFromShow(candidate.handle, opts);
+    if (!shown.ok) return shown;
+    if (shown.paneKeyFromShow === assigneePaneKey) {
+      matches.push({ handle: candidate.handle });
+    }
+  }
+  if (matches.length === 0) {
+    return denyDeliveredSeat(
+      DELIVERED_SEAT_REASON.NO_LIVE_SEAT_MATCH,
+      `orca-adapter: resolveDeliveredSeat -- assignee_pane_key matches no live seat in worktree '${worktreePath}' (dead seat or rotated -- refusing to guess)`,
+    );
+  }
+  if (matches.length > 1) {
+    return denyDeliveredSeat(
+      DELIVERED_SEAT_REASON.AMBIGUOUS_LIVE_SEAT_MATCH,
+      `orca-adapter: resolveDeliveredSeat -- ${matches.length} live seats share the same pane key, refusing to guess`,
+    );
+  }
+  return { ok: true, handle: matches[0].handle };
+}
+
+// ctx: { harnessLabel, worktreePath } -- opts: { execFn }. 순수 조합(§2
+// step①②③ 순서 그대로). execFn 호출은 task-list 1 + dispatch-show 1 +
+// terminal-list 1 + 이 워크트리의 살아있는 좌석 수만큼의 terminal-show --
+// 전부 읽기 전용, dispatch/send/close/worktree 계열 호출 0.
+export function resolveDeliveredSeat(ctx = {}, opts = {}) {
+  const { harnessLabel, worktreePath } = isPlainObject(ctx) ? ctx : {};
+  if (!isNonEmptyString(harnessLabel) || !isNonEmptyString(worktreePath)) {
+    return denyDeliveredSeat(
+      DELIVERED_SEAT_REASON.INPUT_INVALID,
+      "orca-adapter: resolveDeliveredSeat -- harnessLabel and worktreePath are required",
+    );
+  }
+  if (typeof opts.execFn !== "function") {
+    return denyDeliveredSeat(
+      DELIVERED_SEAT_REASON.TASK_LIST_QUERY_FAILED,
+      "orca-adapter: resolveDeliveredSeat -- opts.execFn is required",
+    );
+  }
+  const candidate = resolveCandidateDispatchTask(
+    { harnessLabel, worktreePath },
+    opts,
+  );
+  if (!candidate.ok) return candidate;
+  const paneKeyResult = resolveAssigneePaneKey(candidate.runtimeTaskId, opts);
+  if (!paneKeyResult.ok) return paneKeyResult;
+  const seatResult = resolveLiveSeatByPaneKey(
+    { worktreePath, assigneePaneKey: paneKeyResult.assigneePaneKey },
+    opts,
+  );
+  if (!seatResult.ok) return seatResult;
+  return {
+    ok: true,
+    handle: seatResult.handle,
+    runtimeTaskId: candidate.runtimeTaskId,
+  };
 }
 
 // ---- HYK-170 coder-1: 실측 argv (2단 라이브 프로브, 영수증 §8 대조표

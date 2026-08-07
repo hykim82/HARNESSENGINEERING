@@ -120,6 +120,9 @@ import {
   collectSeatObservationsForWorktree,
   createOrcaExecFn,
   CONTROL_ROOM_PATH,
+  SEAT_LIVENESS_OBSERVATION_REASON,
+  resolveDeliveredSeat,
+  fetchSeatLivenessShow,
 } from "../relay/adapters/orca-adapter.mjs";
 
 // 정지 의심과 판정 불가를 같은 코드로 접지 않는다(coder-task.md §5-C
@@ -659,6 +662,58 @@ export function selectActiveDispatchForStart(droppedTaskFiles) {
   return active.length > 0 ? active[0] : null;
 }
 
+// HYK-185-seat-corr(coder-task.md §2): seatLiveness/dispatchStart 두 축이
+// 공유하던 좁은 관측(collectSeatLivenessObservation -- 좌석 2개+면
+// AMBIGUOUS)이 그 이유로만 실패했을 때 한해, "그 배달이 간 좌석"을
+// 실측 읽기전용 조회 3단(resolveDeliveredSeat, orca-adapter.mjs)으로
+// 재시도한다. AMBIGUOUS가 아닌 다른 실패(LIST_QUERY_FAILED/
+// SHOW_QUERY_FAILED/MALFORMED/INPUT_INVALID)나 harnessLabel 자체가 없으면
+// 재시도하지 않는다 -- "좌석이 여럿이라 못 골랐다"는 문제가 아닌 실패까지
+// 이 경로로 새로 흡수하면 그 실패들의 기존 동작(회귀 0 요구)이 바뀐다.
+// 재시도도 대조가 성립하지 않으면(후보 0/2개+ · 죽은 좌석만 일치) 여전히
+// COLLECTION_FAILED로 실패를 드러낸다(비타협: 못 고르면 못 고른다고
+// 말한다) -- 이 함수는 재시도를 "시도했다는 사실"만 `correlation`
+// 필드(부가 정보, 기존 필드 이름/모양은 그대로)에 얹는다.
+function resolveObservationWithDeliveredSeatFallback(
+  { worktreePath, harnessLabel, now, execFn },
+  primaryObserved,
+) {
+  const canRetry =
+    !primaryObserved.ok &&
+    primaryObserved.observationReason ===
+      SEAT_LIVENESS_OBSERVATION_REASON.AMBIGUOUS &&
+    typeof harnessLabel === "string" &&
+    harnessLabel.length > 0;
+  if (!canRetry) {
+    return { observed: primaryObserved, correlation: null };
+  }
+  const resolved = resolveDeliveredSeat(
+    { harnessLabel, worktreePath },
+    { execFn },
+  );
+  if (!resolved.ok) {
+    return {
+      observed: primaryObserved,
+      correlation: {
+        attempted: true,
+        ok: false,
+        reasonCode: resolved.reasonCode,
+        reason: resolved.reason,
+      },
+    };
+  }
+  const show = fetchSeatLivenessShow(resolved.handle, now, { execFn });
+  return {
+    observed: show,
+    correlation: {
+      attempted: true,
+      ok: true,
+      handle: resolved.handle,
+      runtimeTaskId: resolved.runtimeTaskId,
+    },
+  };
+}
+
 // 어댑터의 관측(collectSeatLivenessObservation)을 모아
 // seat-liveness-core.mjs의 judgeSeatLiveness를 실제로 부른다(HYK-185
 // seat-wire의 실질 결선). opts.execFn을 넘기지 않으면 orca-adapter.mjs의
@@ -678,9 +733,13 @@ export function judgeSeatLivenessForRepo(
   };
   const execFn =
     typeof opts.execFn === "function" ? opts.execFn : createOrcaExecFn();
-  const observed = collectSeatLivenessObservation(
+  const primaryObserved = collectSeatLivenessObservation(
     { worktreePath: repoRoot, now },
     { execFn },
+  );
+  const { observed, correlation } = resolveObservationWithDeliveredSeatFallback(
+    { worktreePath: repoRoot, harnessLabel: active.taskId, now, execFn },
+    primaryObserved,
   );
   if (!observed.ok) {
     return {
@@ -688,6 +747,7 @@ export function judgeSeatLivenessForRepo(
       observationReason: observed.observationReason,
       reason: observed.reason,
       dispatch,
+      ...(correlation ? { correlation } : {}),
     };
   }
   if (observed.seatCount === 0) {
@@ -704,6 +764,7 @@ export function judgeSeatLivenessForRepo(
     reasonCode: judged.reasonCode,
     details: judged.details,
     dispatch,
+    ...(correlation ? { correlation } : {}),
   };
 }
 
@@ -1246,38 +1307,14 @@ function nextObservationsForDispatch(prevEntry, dispatch, observation) {
 // droppedTaskFiles를 받는다, 이 함수 자신은 .harness를 읽지 않는다) -- 이
 // 축 하나(단일 워크트리)에 대해 dispatch-start-core.mjs의 judgeDispatchStart
 // 를 실제로 부른다.
-export function judgeDispatchStartForRepo(
-  { repoRoot, droppedTaskFiles, now },
-  opts = {},
+// store 적재 -> 관측 이어붙이기 -> store 저장 -> judgeDispatchStart 호출까지
+// (§3-e max-lines-per-function 상한 준수를 위해 judgeDispatchStartForRepo에서
+// 분리 -- 로직은 그대로, 자리만 옮겼다). correlation은 부가 정보로 그대로
+// 실어 나른다(있을 때만).
+function persistAndJudgeDispatchStart(
+  { repoRoot, dispatch, observation, now, correlation },
+  opts,
 ) {
-  // HYK-185-startcheck-wire 2R: 이 축만 selectActiveDispatchForStart를
-  // 쓴다(위 함수 헤더 주석 참조) -- seat-liveness/seat-idle 두 축은
-  // 여전히 selectActiveDispatch(파일 존재만 본다)를 그대로 쓴다.
-  const active = selectActiveDispatchForStart(droppedTaskFiles);
-  if (!active) {
-    return { status: DISPATCH_START_WIRE_STATUS.NOT_APPLICABLE };
-  }
-  const dispatch = {
-    dispatchId: active.path,
-    dispatchedAtMs: active.droppedAtMs,
-  };
-  const execFn =
-    typeof opts.execFn === "function" ? opts.execFn : createOrcaExecFn();
-  const observed = collectSeatLivenessObservation(
-    { worktreePath: repoRoot, now },
-    { execFn },
-  );
-  if (!observed.ok) {
-    return {
-      status: DISPATCH_START_WIRE_STATUS.COLLECTION_FAILED,
-      observationReason: observed.observationReason,
-      reason: observed.reason,
-      dispatch,
-    };
-  }
-  if (observed.seatCount === 0) {
-    return { status: DISPATCH_START_WIRE_STATUS.NO_SEAT, dispatch };
-  }
   const storePath =
     opts.dispatchStartStorePath ?? DEFAULT_DISPATCH_START_STORE_PATH;
   const loaded = loadDispatchStartStore(storePath, opts);
@@ -1290,7 +1327,7 @@ export function judgeDispatchStartForRepo(
   }
   const currentObservation = {
     observedAtMs: now,
-    lastOutputAt: observed.observation.lastOutputAt,
+    lastOutputAt: observation.lastOutputAt,
   };
   const nextObservations = nextObservationsForDispatch(
     loaded.store[repoRoot],
@@ -1326,7 +1363,51 @@ export function judgeDispatchStartForRepo(
     reasonCode: judged.reasonCode,
     details: judged.details,
     dispatch,
+    ...(correlation ? { correlation } : {}),
   };
+}
+
+export function judgeDispatchStartForRepo(
+  { repoRoot, droppedTaskFiles, now },
+  opts = {},
+) {
+  // HYK-185-startcheck-wire 2R: 이 축만 selectActiveDispatchForStart를
+  // 쓴다(위 함수 헤더 주석 참조) -- seat-liveness/seat-idle 두 축은
+  // 여전히 selectActiveDispatch(파일 존재만 본다)를 그대로 쓴다.
+  const active = selectActiveDispatchForStart(droppedTaskFiles);
+  if (!active) {
+    return { status: DISPATCH_START_WIRE_STATUS.NOT_APPLICABLE };
+  }
+  const dispatch = {
+    dispatchId: active.path,
+    dispatchedAtMs: active.droppedAtMs,
+  };
+  const execFn =
+    typeof opts.execFn === "function" ? opts.execFn : createOrcaExecFn();
+  const primaryObserved = collectSeatLivenessObservation(
+    { worktreePath: repoRoot, now },
+    { execFn },
+  );
+  const { observed, correlation } = resolveObservationWithDeliveredSeatFallback(
+    { worktreePath: repoRoot, harnessLabel: active.taskId, now, execFn },
+    primaryObserved,
+  );
+  if (!observed.ok) {
+    return {
+      status: DISPATCH_START_WIRE_STATUS.COLLECTION_FAILED,
+      observationReason: observed.observationReason,
+      reason: observed.reason,
+      dispatch,
+      ...(correlation ? { correlation } : {}),
+    };
+  }
+  if (observed.seatCount === 0) {
+    return { status: DISPATCH_START_WIRE_STATUS.NO_SEAT, dispatch };
+  }
+  return persistAndJudgeDispatchStart(
+    { repoRoot, dispatch, observation: observed.observation, now, correlation },
+    opts,
+  );
 }
 
 // 워크트리 하나를 판정한다(judgeSeatLivenessForWorktree/

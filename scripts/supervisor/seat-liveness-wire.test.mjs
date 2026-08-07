@@ -690,6 +690,7 @@ test("NC mutation/seat-wire #2 (필수): 수집 실패를 «조용함»(NO_SEAT)
       observationReason: observed.observationReason,
       reason: observed.reason,
       dispatch,
+      ...(correlation ? { correlation } : {}),
     };
   }`,
         `  if (!observed.ok) {
