@@ -3172,3 +3172,101 @@ test.mjs`'s enforcement-v1.md extraction test) that reads this very
 - `.github/workflows/enforce.yml`'s `node --test scripts/check/*.test.mjs`
   directory glob picks up `b0-gate.test.mjs` automatically — no CI file
   edit needed.
+
+## I — seat launch admission (seat-preflight.mjs, HYK-200)
+
+### Problem restated
+
+gap#91 (`hook-sync-check.mjs`, HYK-196): a worker's _installed_ git hook can
+silently drift behind the _versioned_ `hooks/` mirror, and nothing stopped a
+seat from launching on top of that drift — the incident that motivated
+HYK-196 was caught only because a weekly `selfcheck` sweep happened to
+notice, and that sweep is advisory (exit 0 either way), not a gate. HYK-196
+built the comparison device; this track's job was narrower: give that device
+a shape a seat launcher can actually call _before_ a seat starts, and make
+that shape fail-closed.
+
+### What this device is (and is not)
+
+`scripts/check/seat-preflight.mjs` adds **no new comparison logic**. It
+imports and calls `runHookSyncCheck` from the already-registered
+`hook-sync-check.mjs` (HYK-196) and does exactly two things with its
+verdict: turns it into a short human-readable message, and turns it into an
+exit code a launcher can branch on.
+
+### Exact command
+
+```
+node scripts/check/seat-preflight.mjs
+```
+
+No flags. It reads the current working directory as the seat's own
+worktree — the launcher is expected to run it _from_ the worktree it is
+about to start a seat in, the same way `hook-sync-check.mjs` itself already
+resolves a linked worktree's installed hooks through `git-common-dir`
+(never `<worktree>/.git/hooks`, which cannot exist — `.git` there is a
+file, not a directory).
+
+### Exit codes (fail-closed — 시안 §2-1, "설계 = 차단. 관측·경고가 아니다")
+
+| exit | verdict     | 좌석 기동 | 화면에 뜨는 것                                                                           |
+| ---- | ----------- | --------- | ---------------------------------------------------------------------------------------- |
+| 0    | IN_SYNC     | 가능      | `seat-preflight: PASS -- ...`                                                            |
+| 2    | DRIFT       | **금지**  | 어긋난 파일 이름 + `고치는 명령: node scripts/check/hook-sync-check.mjs --install`       |
+| 1    | UNDECIDABLE | **금지**  | 판정 실패 사유 (고치는 명령 없음 — 알려진 드리프트가 아니라 판정 자체가 실패한 것이므로) |
+
+Neither non-zero branch is ever allowed to collapse to 0 — a path-resolution
+failure or an unreadable file blocks the seat exactly like a confirmed
+drift does, just with a different, honestly-labeled reason.
+
+### What a person does when a seat fails to start on this
+
+1. Read the printed message — it names the drifted file(s), or says the
+   judgment itself could not be made and why.
+2. If DRIFT: run the printed line, `node scripts/check/hook-sync-check.mjs
+--install`, then retry launching the seat.
+3. If UNDECIDABLE: there is no drift to install over — the reason line says
+   what failed to resolve (e.g. a missing `hooks/` directory, a
+   `git-common-dir` lookup failure). Fix the underlying condition, then
+   retry.
+4. There is no escape hatch here by design (coder-task.md §2-3): no
+   "skip this once" flag exists, and none should be added — that would
+   reopen exactly the drift class HYK-196/gap#91 exist to close.
+
+### Honesty note — what is NOT true yet
+
+This CLI is callable and fail-closed today (verified end-to-end by real
+spawned child-process tests in `seat-preflight.test.mjs`, not just
+in-process function calls), but **the control-room seat launcher does not
+call it yet**. That launcher is out of scope for this track by hard
+boundary (coder-task.md §1: "너는 관제실 파일을 절대 건드리지 마라") — ORCH
+prepares the exact line the launcher needs, and 한용 attaches it by hand.
+Until that attachment happens, this device only protects a seat launch if a
+human or ORCH remembers to run it first — the same limitation
+`hook-sync-check.mjs` itself carries today. See
+`docs/enforcement-known-gaps.md` gap#91 for the tracked remainder and
+`scripts/check/enforcement-inventory.json`'s `seat-preflight` entry for the
+same statement in machine-registered form.
+
+### Implementation
+
+- `scripts/check/seat-preflight.mjs`: `admissionFor(verdict)` (pure
+  verdict → `{canLaunch, exitCode}` mapping), `evaluateSeatPreflight({cwd})`
+  (calls the reused `runHookSyncCheck`, folds in the admission decision),
+  `formatReport(result)` (the human-readable text above), plus a thin CLI
+  entrypoint.
+- `scripts/check/seat-preflight.test.mjs` (`node:test`, 13 cases): the
+  `admissionFor` mapping in isolation; behavioral proof injected via a real
+  throwaway synthetic git repo for all four judgment outcomes (IN_SYNC,
+  content DRIFT, missing-file DRIFT, UNDECIDABLE) plus a linked-worktree
+  case, each exercised both through the exported function and through the
+  actual CLI spawned as a child process (`node scripts/check/
+seat-preflight.mjs`); and an HYK-199-precedent regression test proving
+  this test file's own pass/fail does not depend on which directory
+  `node --test` was invoked from.
+- Registered in `scripts/check/enforcement-inventory.json` as
+  `seat-preflight` (`substrate: "manual"`, same convention as
+  `hook-sync-check`/`skip-review-usage` above).
+- `.github/workflows/enforce.yml`'s `node --test scripts/check/*.test.mjs`
+  directory glob picks up `seat-preflight.test.mjs` automatically — no CI
+  file edit needed.
