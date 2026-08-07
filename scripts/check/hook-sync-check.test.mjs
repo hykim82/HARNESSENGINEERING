@@ -549,9 +549,32 @@ test("sanity: real hooks/ and .git/hooks/ are never written by this test file", 
 // two more children, forever. The env var makes the child's own copy of
 // this test a no-op (skipped) instead of spawning further -- bounded to
 // exactly one level of nesting.
+//
+// HYK-199 2R fix: `node --test`'s DEFAULT reporter is not guaranteed across
+// environments -- PR #116's raw CI log confirms CI's Node (v20, Ubuntu)
+// defaults to the "tap" reporter (summary lines are TAP comments: "# tests
+// N" / "# pass N" / "# fail N" -- confirmed verbatim in that log: `# pass
+// 25` / `# fail 0`), while this dev machine's Node (v26, Windows) defaults
+// to "spec" (summary lines start with "ℹ ") -- confirmed here to be
+// unconditional (not TTY-gated): `process.stdout.isTTY` is `undefined` in
+// both a plain shell and a piped-through-`cat` invocation, yet the reporter
+// stays "spec" either way. Whether that's a Node-version difference, a
+// platform difference, or something else was NOT isolated further (only one
+// Node version was available to test against locally) -- what matters is
+// that no reporter default is safe to assume. The 1R version of this test
+// only recognized the "ℹ " form, so in CI parseTestSummary silently found
+// nothing and this test correctly (by its own fail-closed design) reported
+// "could not parse" -- but that made a CORRECT fix look like a broken test.
+// Fix: force `--test-reporter=tap` explicitly on both spawned children so
+// the summary format is deterministic everywhere, instead of trying to
+// recognize whatever a given environment's default happens to be.
+// CI 성립 근거: `--test-reporter=tap` is passed explicitly on the argv here,
+// not inferred from environment, so this holds identically whether the
+// parent process itself is running under CI's tap reporter or a
+// human terminal's spec reporter -- the CHILD's reporter is always fixed.
 function parseTestSummary(output) {
-  const pass = output.match(/ℹ pass (\d+)/);
-  const fail = output.match(/ℹ fail (\d+)/);
+  const pass = output.match(/^# pass (\d+)/m);
+  const fail = output.match(/^# fail (\d+)/m);
   return {
     pass: pass ? Number(pass[1]) : null,
     fail: fail ? Number(fail[1]) : null,
@@ -579,14 +602,18 @@ test("regression: this test file passes identically whether invoked from the rep
     if (key.startsWith("NODE_TEST_")) delete env[key];
   }
 
-  const fromRoot = spawnSync("node", ["--test", testFileAbs], {
-    cwd: REPO_ROOT,
-    encoding: "utf8",
-    env,
-  });
+  const fromRoot = spawnSync(
+    "node",
+    ["--test", "--test-reporter=tap", testFileAbs],
+    { cwd: REPO_ROOT, encoding: "utf8", env },
+  );
   const fromScripts = spawnSync(
     "node",
-    ["--test", join("..", "scripts", "check", "hook-sync-check.test.mjs")],
+    [
+      "--test",
+      "--test-reporter=tap",
+      join("..", "scripts", "check", "hook-sync-check.test.mjs"),
+    ],
     { cwd: join(REPO_ROOT, "scripts"), encoding: "utf8", env },
   );
 
