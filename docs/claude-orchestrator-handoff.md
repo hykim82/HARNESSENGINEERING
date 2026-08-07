@@ -302,10 +302,11 @@ is launched and by whom.
   pre-commit), the independent REVIEW role, enforce CI, the relay
   handshake, and seat-location policy all still fire the same way under
   adapter B as under adapter A.
-- **Six human gates are the only stop points**: ① issue-boundary decisions
-  ② two consecutive rejections on the same issue ③ high-cost/hard-to-revert
-  execution (north-star 4-question gate) ④ PR approval / Linear Done
-  ⑤ packet signing ⑥ hard-stop conditions.
+- **Seven human gates are the only stop points** (authoritative list:
+  `북극성-좌표.md` §1-C ㄱ): ① next-task selection ② two consecutive
+  rejections on the same issue ③ high-cost/hard-to-revert execution
+  (north-star 4-question gate) ④ PR approval/merge / Linear Done ⑤ packet
+  signing ⑥ hard-stop conditions ⑦ human reply to an escalation.
 - **Still forbidden regardless of adapter**: direct push to master, merging
   a PR, transitioning Linear to Done, signing a packet on a human's
   behalf, printing secrets, `orca linear` writes, and `orca automations`.

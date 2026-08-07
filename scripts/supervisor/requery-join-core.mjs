@@ -276,9 +276,10 @@ function hasWellFormedShape(terminal, dispatch) {
 }
 
 // §2-B와 같은 표 형태(dispatch-bound-seat-proof.mjs의
-// buildMismatchChecks/findMismatchReason 선례) -- 판정 다섯 개를 표로
-// 선언해 이 파일 자체의 분기 복잡도를 낮춘다. 순서가 판정 우선순위다(첫
-// 실패가 그대로 결과 사유가 된다). 어떤 비교도 생략·완화하지 않는다.
+// buildMismatchChecks/findMismatchReason 선례 -- 그 파일의 판정 개수는
+// 이 파일과 다르니 혼동하지 말 것) -- 이 파일은 판정 6개를 표로 선언해
+// 분기 복잡도를 낮춘다. 순서가 판정 우선순위다(첫 실패가 그대로 결과
+// 사유가 된다). 어떤 비교도 생략·완화하지 않는다.
 function buildStructuralFailureChecks(
   terminal,
   dispatch,
