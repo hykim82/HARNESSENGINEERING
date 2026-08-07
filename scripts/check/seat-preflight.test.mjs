@@ -291,10 +291,21 @@ test("P2-C CLI: a non-git cwd exits non-zero with a readable BLOCK message, not 
     // reviewer proved it with a mutation that restored a raw stack dump to
     // the real output stream and left this test green). The sibling
     // `assert.match(r.stdout, /seat-preflight: BLOCK/)` above was still
-    // catching real regressions (confirmed by the reviewer's M5: removing
-    // the production try/catch turns THIS test's stderr-facing assertion,
-    // and only that one, red) -- the fix is checking the stream Node
-    // actually uses.
+    // catching real regressions -- confirmed by the reviewer's M5 (removing
+    // the production try/catch entirely): RED was 3 tests (`P2-C:
+    // evaluateSeatPreflight never throws ...`, THIS test, and the
+    // HYK-199-precedent regression test that spawns this file as a child),
+    // not just this one, and what actually broke inside THIS test at that
+    // time was the `stdout` BLOCK match right above -- at M5's moment the
+    // stack-trace assertion still read `r.stdout` (pre-fix), so it could
+    // not have been "this test's stderr-facing assertion" catching
+    // anything; that phrasing was corrected after
+    // HYK-200-preflight-review-3 §1-B re-ran M5 and found the original
+    // wording here inaccurate on both counts (RED count and which
+    // assertion fired). The fix below (checking `r.stderr`, not
+    // `r.stdout`) is what makes a stack-trace-shaped-output mutation (M3
+    // above) fail for its own stated reason, independently of this
+    // sibling.
     assert.doesNotMatch(
       r.stderr,
       /at file:|at Object\.|at async /,

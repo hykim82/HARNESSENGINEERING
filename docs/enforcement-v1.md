@@ -3264,18 +3264,33 @@ same statement in machine-registered form.
 scripts/check/
 seat-preflight.test.mjs` is the one source of truth for the current
   count). What it covers: the `admissionFor` mapping in isolation;
-  behavioral proof injected via a real throwaway synthetic git repo for
-  every judgment outcome (IN_SYNC; content DRIFT; missing-file DRIFT; the
-  zero-comparison-targets fold to UNDECIDABLE, HYK-200 3R; a per-file
-  judgment failure with no top-level `reason` whose UNDECIDABLE report
-  still names the failing file and does not drop a coexisting DRIFT
-  entry, HYK-200 3R; a caught exception from the reused device folding to
-  UNDECIDABLE instead of propagating, HYK-200 3R) plus a linked-worktree
-  case, each exercised both through the exported functions and through
-  the actual CLI spawned as a child process (`node scripts/check/
-seat-preflight.mjs`); and an HYK-199-precedent regression test proving
-  this test file's own pass/fail does not depend on which directory
-  `node --test` was invoked from.
+  behavioral proof injected via a real throwaway synthetic git repo,
+  through the exported functions (`evaluateSeatPreflight`/`formatReport`),
+  for every judgment outcome (IN_SYNC; content DRIFT; missing-file DRIFT;
+  a versioned-`hooks/`-absent UNDECIDABLE, a distinct `ENOENT` path from
+  the one below; the zero-comparison-targets fold to UNDECIDABLE,
+  HYK-200 3R; a per-file judgment failure with no top-level `reason`
+  whose UNDECIDABLE report still names the failing file and does not
+  drop a coexisting DRIFT entry, HYK-200 3R; a caught exception from the
+  reused device folding to UNDECIDABLE instead of propagating,
+  HYK-200 3R) plus a linked-worktree case; and an HYK-199-precedent
+  regression test proving this test file's own pass/fail does not depend
+  on which directory `node --test` was invoked from. Separately, the
+  production CLI entrypoint itself is proven end-to-end by real
+  spawned-child-process tests (`spawnSync("node", [...])` against the
+  actual script, not the exported functions) — deliberately not
+  enumerated here which specific judgment outcomes those cases cover:
+  4R's "each ... exercised both through the exported functions and
+  through the actual CLI" claimed CLI coverage for every outcome above
+  and was false for three of them (HYK-200-preflight-review-3 §1-A), the
+  second staleness incident in this same note (after the "13 cases"
+  count) — an itemized coverage-mode mapping carries the identical
+  staleness risk as a hand-written count (it silently drifts the moment
+  a future round adds an outcome, or moves one between coverage modes,
+  without updating this sentence) and this note already treats that risk
+  class as something to stop writing down, not merely correct once more;
+  `node --test scripts/check/seat-preflight.test.mjs` remains the one
+  source of truth for which cases spawn the CLI and which don't.
 - Registered in `scripts/check/enforcement-inventory.json` as
   `seat-preflight` (`substrate: "manual"`, same convention as
   `hook-sync-check`/`skip-review-usage` above).
