@@ -8,9 +8,10 @@ import {
   existsSync,
   readFileSync,
 } from "node:fs";
-import { execSync } from "node:child_process";
+import { execSync, spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   judgeHookFile,
   judgeHookSync,
@@ -18,6 +19,31 @@ import {
   buildEntries,
   runHookSyncCheck,
 } from "./hook-sync-check.mjs";
+
+// HYK-199: this test file's own location is a fixed structural fact
+// (scripts/check/hook-sync-check.test.mjs, always two directories below the
+// repo root, in the main checkout AND in every linked worktree -- worktree
+// checkouts preserve the same tracked directory layout). Deriving the repo
+// root from `import.meta.url` this way is a deliberate choice over the two
+// alternatives considered:
+//   - `process.cwd()` is exactly the bug this task fixes: it makes the
+//     test's pass/fail depend on which directory `node --test` was invoked
+//     from, not on the code under test.
+//   - `git rev-parse --show-toplevel` (used elsewhere in this file for the
+//     PRODUCT code's own path resolution, where shelling out to git is the
+//     right call because the installed-hooks location genuinely depends on
+//     git state) would work too, but adds a subprocess + a hard runtime
+//     dependency on `git` being on PATH for a fact that never actually
+//     varies -- this file's position in the tree is fixed at authoring
+//     time, so a git query buys nothing here.
+//   - The `nc-githook-install.test.mjs` precedent (conditional `skip` when
+//     the environment doesn't support what's being tested) does NOT apply:
+//     that CI-portability case skips for a genuine environmental limitation
+//     it cannot fix. Here the failure is fully deterministic and 100% fixable
+//     -- skipping would hide a real bug instead of accommodating a real
+//     constraint, and it would violate this task's own §1 requirement that
+//     both cwds produce "동일한 결과" (skip in one cwd is not "identical").
+const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
 // Every fixture below lives under a fresh mkdtemp directory and is removed
 // in a `finally` -- the real repo's hooks/ and .git/hooks/ are never read or
@@ -466,7 +492,7 @@ test("CLI: exit code 0 for IN_SYNC, 2 for DRIFT, 1 for UNDECIDABLE (--json)", ()
     writeFileSync(join(versionedDir, "pre-commit"), "same");
     writeFileSync(join(installedDir, "pre-commit"), "same");
     const scriptPath = join(
-      process.cwd(),
+      REPO_ROOT,
       "scripts",
       "check",
       "hook-sync-check.mjs",
@@ -507,7 +533,110 @@ test("CLI: exit code 0 for IN_SYNC, 2 for DRIFT, 1 for UNDECIDABLE (--json)", ()
 });
 
 test("sanity: real hooks/ and .git/hooks/ are never written by this test file", () => {
-  assert.ok(existsSync(join(process.cwd(), "hooks", "pre-commit")));
+  assert.ok(existsSync(join(REPO_ROOT, "hooks", "pre-commit")));
   // No assertion writes to those paths anywhere above -- this test exists
   // only as a reviewable marker that the constraint was honored throughout.
+});
+
+// HYK-199 regression guard: a future change re-introducing a
+// process.cwd()-dependent path anywhere in this file must turn this RED --
+// actually spawns `node --test` on this very file from two different
+// working directories and requires identical pass/fail results, rather than
+// just commenting "don't do this" (a comment is not a defense, task §3-3).
+//
+// Recursion guard: without HOOK_SYNC_TEST_CHILD, spawning `node --test` on
+// this file would run THIS test again inside the child, which would spawn
+// two more children, forever. The env var makes the child's own copy of
+// this test a no-op (skipped) instead of spawning further -- bounded to
+// exactly one level of nesting.
+//
+// HYK-199 2R fix: `node --test`'s DEFAULT reporter is not guaranteed across
+// environments -- PR #116's raw CI log confirms CI's Node (v20, Ubuntu)
+// defaults to the "tap" reporter (summary lines are TAP comments: "# tests
+// N" / "# pass N" / "# fail N" -- confirmed verbatim in that log: `# pass
+// 25` / `# fail 0`), while this dev machine's Node (v26, Windows) defaults
+// to "spec" (summary lines start with "ℹ ") -- confirmed here to be
+// unconditional (not TTY-gated): `process.stdout.isTTY` is `undefined` in
+// both a plain shell and a piped-through-`cat` invocation, yet the reporter
+// stays "spec" either way. Whether that's a Node-version difference, a
+// platform difference, or something else was NOT isolated further (only one
+// Node version was available to test against locally) -- what matters is
+// that no reporter default is safe to assume. The 1R version of this test
+// only recognized the "ℹ " form, so in CI parseTestSummary silently found
+// nothing and this test correctly (by its own fail-closed design) reported
+// "could not parse" -- but that made a CORRECT fix look like a broken test.
+// Fix: force `--test-reporter=tap` explicitly on both spawned children so
+// the summary format is deterministic everywhere, instead of trying to
+// recognize whatever a given environment's default happens to be.
+// CI 성립 근거: `--test-reporter=tap` is passed explicitly on the argv here,
+// not inferred from environment, so this holds identically whether the
+// parent process itself is running under CI's tap reporter or a
+// human terminal's spec reporter -- the CHILD's reporter is always fixed.
+function parseTestSummary(output) {
+  const pass = output.match(/^# pass (\d+)/m);
+  const fail = output.match(/^# fail (\d+)/m);
+  return {
+    pass: pass ? Number(pass[1]) : null,
+    fail: fail ? Number(fail[1]) : null,
+  };
+}
+
+test("regression: this test file passes identically whether invoked from the repo root or from scripts/ (no process.cwd() dependency, HYK-199)", (t) => {
+  if (process.env.HOOK_SYNC_TEST_CHILD === "1") {
+    t.skip("child invocation -- avoids spawning further children");
+    return;
+  }
+  const testFileAbs = join(
+    REPO_ROOT,
+    "scripts",
+    "check",
+    "hook-sync-check.test.mjs",
+  );
+  // Node's own test runner sets NODE_TEST_CONTEXT/NODE_TEST_WORKER_ID in this
+  // (parent) process's env -- inheriting them into the spawned child makes
+  // node's runner detect "recursive node --test" and silently skip running
+  // any files at all (empty output, not a real pass), so they're stripped
+  // before the child ever sees this env.
+  const env = { ...process.env, HOOK_SYNC_TEST_CHILD: "1" };
+  for (const key of Object.keys(env)) {
+    if (key.startsWith("NODE_TEST_")) delete env[key];
+  }
+
+  const fromRoot = spawnSync(
+    "node",
+    ["--test", "--test-reporter=tap", testFileAbs],
+    { cwd: REPO_ROOT, encoding: "utf8", env },
+  );
+  const fromScripts = spawnSync(
+    "node",
+    [
+      "--test",
+      "--test-reporter=tap",
+      join("..", "scripts", "check", "hook-sync-check.test.mjs"),
+    ],
+    { cwd: join(REPO_ROOT, "scripts"), encoding: "utf8", env },
+  );
+
+  const rootSummary = parseTestSummary(fromRoot.stdout + fromRoot.stderr);
+  const scriptsSummary = parseTestSummary(
+    fromScripts.stdout + fromScripts.stderr,
+  );
+
+  assert.ok(
+    rootSummary.pass !== null && rootSummary.fail !== null,
+    `could not parse test summary from root-cwd run:\n${fromRoot.stdout}\n${fromRoot.stderr}`,
+  );
+  assert.ok(
+    scriptsSummary.pass !== null && scriptsSummary.fail !== null,
+    `could not parse test summary from scripts-cwd run:\n${fromScripts.stdout}\n${fromScripts.stderr}`,
+  );
+  assert.equal(fromRoot.status, 0, "root-cwd run must exit 0");
+  assert.equal(fromScripts.status, 0, "scripts-cwd run must exit 0");
+  assert.equal(rootSummary.fail, 0);
+  assert.equal(scriptsSummary.fail, 0);
+  assert.equal(
+    rootSummary.pass,
+    scriptsSummary.pass,
+    "both cwds must report the same number of passing tests",
+  );
 });
