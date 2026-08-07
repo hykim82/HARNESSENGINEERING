@@ -59,14 +59,14 @@ profiles, each backed by a real instance:
 Five placeholder tokens, filled in at install time (`install.mjs` does
 plain string substitution — no template engine):
 
-| Token | Meaning | solo-full example | team-local example |
-| --- | --- | --- | --- |
-| `<PROFILE>` | which profile was installed | `solo-full` | `team-local` |
-| `<REPO_PATH>` | absolute path to the target repo | `C:\...\HARNESSENGINEERING` | `C:\...\TEAM10` |
-| `<CONTROL_ROOM_PATH>` | path to the operator's control room (outside the repo) | `D:\문서관리\하네스-관제실` | *(omit — team-local has no control room)* |
-| `<GITHUB_REPO>` | `owner/repo` | `hykim82/HARNESSENGINEERING` | `AL06-Class/AL06TEAM10` |
-| `<BOT_ACCOUNT>` | Write-only bot collaborator | `codexlocal101-rgb` | *(omit — team-local pushes directly, no bot)* |
-| `<VERIFY_CMD>` | the one command verify.sh runs | `node scripts/check/review-gate.test.mjs && ...` | `npm run build` |
+| Token                 | Meaning                                                | solo-full example                                | team-local example                            |
+| --------------------- | ------------------------------------------------------ | ------------------------------------------------ | --------------------------------------------- |
+| `<PROFILE>`           | which profile was installed                            | `solo-full`                                      | `team-local`                                  |
+| `<REPO_PATH>`         | absolute path to the target repo                       | `C:\...\HARNESSENGINEERING`                      | `C:\...\TEAM10`                               |
+| `<CONTROL_ROOM_PATH>` | path to the operator's control room (outside the repo) | `D:\문서관리\하네스-관제실`                      | _(omit — team-local has no control room)_     |
+| `<GITHUB_REPO>`       | `owner/repo`                                           | `hykim82/HARNESSENGINEERING`                     | `AL06-Class/AL06TEAM10`                       |
+| `<BOT_ACCOUNT>`       | Write-only bot collaborator                            | `codexlocal101-rgb`                              | _(omit — team-local pushes directly, no bot)_ |
+| `<VERIFY_CMD>`        | the one command verify.sh runs                         | `node scripts/check/review-gate.test.mjs && ...` | `npm run build`                               |
 
 `<CONTROL_ROOM_PATH>` and `<BOT_ACCOUNT>` are optional and may be blank for
 `team-local`; `install.mjs` requires them only when `<PROFILE>` is
@@ -138,17 +138,24 @@ Both profiles (profile-agnostic core):
   the ground truth; this doc had gone stale, not the installer). `path-normalize.mjs`,
   `pm-guard.mjs`, and `packet-gate.mjs` (HYK-121) are the PM-lane enforcement
   scripts — see `docs/enforcement-v1.md` ("E — PM lane enforcement") for
-  what they do; PM-lane *templates* (boot block, packet, task) are, by
+  what they do; PM-lane _templates_ (boot block, packet, task) are, by
   contrast, deliberately **not** copied by `install.mjs` — see "PM lane
   (HYK-121)" below.
 - **`<target>/.git/hooks/commit-msg` and `<target>/.git/hooks/pre-commit`**
-  (HYK-95) — a *real*, per-clone install of the two git hooks above, on top
+  (HYK-95) — a _real_, per-clone install of the two git hooks above, on top
   of the tracked copy under `hooks/`. Only runs when `<target>/.git` exists
   as a directory (a fresh, not-yet-`git init`'d target gets a warning
   instead, no crash); never overwrites an existing installed hook
   (skip + warn, same convention as every other file this installer writes).
   A target with no `.git/` at all still gets the tracked `hooks/` copy, for
-  a later manual install.
+  a later manual install. **That later install (HYK-196):** prefer
+  `node scripts/check/hook-sync-check.mjs --install` over hand-copying —
+  it re-syncs every file under `hooks/`, resolves the correct installed
+  location even from a linked worktree, and is idempotent; a stale manual
+  `cp`/`ln` a human forgets to re-run after a hook change is exactly the
+  drift class that motivated this device (see
+  `docs/enforcement-known-gaps.md` gap#91 for what it still doesn't close —
+  it is not yet invoked automatically at seat boot).
 - **`<target>/.claude/settings.local.json`** (HYK-95) — generated or merged
   with the same `hooks` block this repository's own live file carries
   (`PreToolUse` role-guard, `Stop` status-fresh + clear-safe-check,
@@ -197,7 +204,7 @@ installer now generates or merges that file directly:
 - `scripts/check/clear-safe-check.mjs` as a second `Stop` hook command
   (HYK-96 Scope B) — soft, non-blocking (`exit 1`, never `exit 2`); it
   cannot be a hard gate even in principle, since Claude Code has no hook
-  that fires *before* `/clear` clears context, only ones that fire after,
+  that fires _before_ `/clear` clears context, only ones that fire after,
   in the new session, too late to capture anything.
 - `scripts/check/context-inject.mjs` as a `SessionStart` hook (inject) and
   a `UserPromptSubmit` hook (block if the project context card is missing
@@ -219,7 +226,7 @@ placeholders.
 always parse, modify, and `JSON.stringify(obj, null, 2)`):
 
 1. No `.claude/settings.local.json` yet → create it with just `{ "hooks":
-   {...} }`.
+{...} }`.
 2. File exists, no top-level `hooks` key (e.g. only `permissions`) →
    existing keys preserved, `hooks` added.
 3. File exists and already has a `hooks` key → **not touched.**
@@ -229,22 +236,22 @@ always parse, modify, and `JSON.stringify(obj, null, 2)`):
 4. File exists but isn't valid JSON → same as (3): not touched, warning +
    snippet fallback.
 
-`--dry-run` never writes; it prints what it *would* create or merge (create
+`--dry-run` never writes; it prints what it _would_ create or merge (create
 and merge-success paths also print the same snippet, so a preview is
 possible without writing).
 
 **Self-modification boundary, restated (why this is safe to automate now):**
 elsewhere in this document, writing to `.claude/settings.local.json` is
-treated as a human action, because *a currently running session*
+treated as a human action, because _a currently running session_
 self-modifying its own live settings mid-task is out of scope for an agent
 to do to itself. `install.mjs` targets a **different, not-yet-started**
 target repository, so that specific rationale for a human-only step does
 not apply here — this is scaffolding a new project, not editing an active
-session's own control surface. What is *still* a required human step
+session's own control surface. What is _still_ a required human step
 regardless: reviewing the generated file, restarting Claude Code once so
 the new hooks actually load, and confirming they fire. **Never run this
 installer against `HARNESSENGINEERING`'s own `.claude/` directory** — that
-*is* self-modification of an active repo's live settings, exactly the case
+_is_ self-modification of an active repo's live settings, exactly the case
 the boundary exists to exclude.
 
 **Git hooks, restated:** `<target>/.git/hooks/{commit-msg,pre-commit}` are
@@ -277,7 +284,7 @@ is a `PreToolUse` hook that regulates a `HARNESS_ROLE=PM` session's writes,
 and `role-guard.mjs` use. Full spec: `docs/enforcement-v1.md` ("E — PM lane
 enforcement"). Note what this copy step does **not** do: it does not wire
 `pm-guard.mjs` into any `.claude/settings.local.json` — unlike `role-guard.mjs`,
-which `buildHooksBlock` wires into the *target repo's* settings automatically,
+which `buildHooksBlock` wires into the _target repo's_ settings automatically,
 `pm-guard.mjs` belongs in the **control room's** settings (a different,
 outside-the-repo location `install.mjs` has no path to and does not touch —
 same "installer never writes outside the target repo" boundary the control
@@ -327,11 +334,11 @@ runtime specifics no installer call can know in advance, so they ship as
 plain `<UPPER_SNAKE>`-shaped `REPLACE_ME_*` strings (same convention as
 `project-context.template.md`, HYK-97) instead of being substituted:
 
-| Token | Meaning | Example |
-| --- | --- | --- |
-| `REPLACE_ME_BASE_URL` | the app's local URL once booted | `http://localhost:5173` |
-| `REPLACE_ME_BOOT_CMD` | the command that starts it | `npm run dev` |
-| `REPLACE_ME_CHECKS` | a marker comment; replace with real `check_http` calls | `check_http "/" 200` |
+| Token                 | Meaning                                                | Example                 |
+| --------------------- | ------------------------------------------------------ | ----------------------- |
+| `REPLACE_ME_BASE_URL` | the app's local URL once booted                        | `http://localhost:5173` |
+| `REPLACE_ME_BOOT_CMD` | the command that starts it                             | `npm run dev`           |
+| `REPLACE_ME_CHECKS`   | a marker comment; replace with real `check_http` calls | `check_http "/" 200`    |
 
 **Guarded, not silently inert.** `observe.sh` refuses to run at all — exit
 `1`, before ever attempting to boot anything — while `BASE_URL` or
@@ -412,7 +419,7 @@ cause: the machine has more than one `github.com` credential registered,
 and which one git's credential machinery hands over for a given push is not
 deterministic on its own. The manual fix applied at the time was
 `git config --local credential.helper "!gh auth git-credential"`, which
-pins *this one clone* to authenticate as whatever account `gh` is currently
+pins _this one clone_ to authenticate as whatever account `gh` is currently
 logged in as, sidestepping the ambiguity entirely. `install.mjs` now
 mechanizes that fix for `team-local`.
 
@@ -434,7 +441,7 @@ one "can't safely do it" fallback:**
    place; skip + warn + a snippet to run once `gh` is installed and logged
    in as the intended account.
 5. Otherwise → `git -C <target> config --local credential.helper "!gh auth
-   git-credential"`, repo-local scope only (never touches global config).
+git-credential"`, repo-local scope only (never touches global config).
 
 Any unexpected error during this step (a transient git failure, etc.) is
 caught and treated the same as case 3/4 — warn and continue, never abort
@@ -448,7 +455,7 @@ anything. Reason for the asymmetry: `team-local`'s answer is always "pin to
 whatever `gh` is logged in as" (the operator's own account, since a
 team-local clone never pushes as the bot). `solo-full` has no single correct
 answer — a bot-push flow (this repository's own model: branch → push as the
-bot → PR → human merge) *legitimately wants* the bot's PAT, not the
+bot → PR → human merge) _legitimately wants_ the bot's PAT, not the
 operator's personal `gh` login, so automatically pinning either one could
 just as easily be wrong as right. Which credential is correct there is a
 human call this installer isn't positioned to make.
@@ -457,7 +464,7 @@ human call this installer isn't positioned to make.
 
 - **Not an anchor, a default.** `credential.helper` is itself a local git
   config value — an agent or operator can change or remove it just as
-  easily as this installer set it. This closes an *accidental*
+  easily as this installer set it. This closes an _accidental_
   cross-identity push (the ambiguity that caused the actual near-miss), not
   a deliberate one; it sits in the same local-trust-boundary family as
   every other check in this document.
@@ -476,9 +483,9 @@ human call this installer isn't positioned to make.
 **Symptom (hit twice for real, on TEAM10 coder sessions):** `team-local`'s
 `scripts/check/` is untracked (gitignored) by design — it's this account's
 personal tooling, not shared team-repo state. A `git worktree add` checkout
-only ever gets *tracked* files, so a linked worktree never has
+only ever gets _tracked_ files, so a linked worktree never has
 `scripts/check/` at all. Before this fix, `hooks/commit-msg` unconditionally
-built its script path from `git rev-parse --show-toplevel` (the *current*
+built its script path from `git rev-parse --show-toplevel` (the _current_
 worktree's own root), so every commit attempted from inside a worktree
 crashed with `MODULE_NOT_FOUND` — not a review-gate rejection, a hard crash
 that blocked the commit for a reason with nothing to do with commit-message
@@ -492,7 +499,7 @@ format. The workaround at the time was manually re-copying
    original behavior — this is what a non-worktree clone, or a worktree
    that happens to have the file, already hits).
 2. If that's missing, resolve `git rev-parse --git-common-dir` — this
-   always points at the *shared* `.git` directory regardless of which
+   always points at the _shared_ `.git` directory regardless of which
    worktree the hook is running in (relative `.git` from the main worktree
    itself, an absolute path from a linked one) — normalize it to absolute
    and strip the trailing `/.git` to recover the main clone's root, then
@@ -522,7 +529,7 @@ Confirmed directly: `install.mjs`'s copy calls read
 `path.join(REPO_ROOT, "hooks", "commit-msg")` verbatim.
 
 **Known limit (honesty note):** the fail-open branch means a worktree
-whose main clone is *also* missing `scripts/check/` will skip the
+whose main clone is _also_ missing `scripts/check/` will skip the
 commit-message check silently rather than blocking — the commit goes
 through with no review-gate enforcement at all. This was a deliberate
 choice: a crash is strictly worse than a skipped local check, since the
@@ -637,7 +644,7 @@ the profile and parameters, run `install.mjs` (`--dry-run` first to preview),
 review the generated summary, then follow the printed checklist (`solo-full`)
 or confirm the `team-local` credential-boundary output. Approval before
 applying, and recording the result in Linear, still apply — only the
-*mechanism* changed, from manual copying to the installer.
+_mechanism_ changed, from manual copying to the installer.
 
 ## Default Target Files
 
