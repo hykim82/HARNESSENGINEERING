@@ -175,15 +175,49 @@ test("selectActiveDispatch: no items -> null (NOT_APPLICABLE upstream)", () => {
   assert.equal(selectActiveDispatch(undefined), null);
 });
 
-test("selectActiveDispatch: all items already have a result file -> null (nothing active)", () => {
+test("selectActiveDispatch: all items already have a result file AND resultFileDone -> null (nothing active)", () => {
   const items = [
     {
       path: ".harness/coder-task.md",
       droppedAtMs: 1000,
       resultFile: { exists: true },
+      resultFileDone: true,
     },
   ];
   assert.equal(selectActiveDispatch(items), null);
+});
+
+// HYK-201 §4 시험 1/2 「표지만 쓰인 구간」 -- 결과 파일이 존재하지만
+// 이번 배달의 `>>> DONE:` 줄이 아직 없다(resultFileDone !== true). 예전
+// selectActiveDispatch는 resultFile.exists === false만 봐서 이 구간을
+// "활성 배달 없음"으로 오판했다(coder-task.md §1 -- REVIEW의 표지-먼저
+// -쓰기 실측과 동형). 이제는 여전히 활성으로 본다.
+test("selectActiveDispatch: 결과 파일은 있지만 이번 배달의 DONE 줄이 아직 없음(표지만 쓰인 구간) -> still active", () => {
+  const items = [
+    {
+      path: ".harness/coder-task.md",
+      droppedAtMs: 1000,
+      resultFile: { exists: true },
+      resultFileDone: false,
+    },
+  ];
+  assert.equal(selectActiveDispatch(items), items[0]);
+});
+
+// HYK-201 §4 시험 2/2 「낡은 DONE 줄」 -- 결과 파일에 DONE 줄이 있지만
+// collectResultFileCompletion(taskId 대조까지 마친 값)이 그것을 "이전
+// 라운드의 것"으로 판단해 resultFileDone: false를 돌려준 경우. 이번
+// 라운드는 여전히 활성이어야 한다(coder-task.md §5 이어쓰기 관례).
+test("selectActiveDispatch: DONE 줄은 있지만 이전 라운드 것(taskId 불일치, resultFileDone: false) -> still active", () => {
+  const items = [
+    {
+      path: ".harness/coder-task.md",
+      droppedAtMs: 1000,
+      resultFile: { exists: true },
+      resultFileDone: false,
+    },
+  ];
+  assert.equal(selectActiveDispatch(items), items[0]);
 });
 
 test("selectActiveDispatch: exactly one item without a result file -> that item", () => {
@@ -288,6 +322,44 @@ test("(d) real 2026-08-04 ~28min stall, through the wired path -> JUDGED/SUSPECT
       term_x: {
         ok: true,
         result: { terminal: { lastOutputAt: frozenOutputAt, title: "CODER" } },
+      },
+    },
+  });
+  const r = judgeSeatLivenessForRepo(
+    { repoRoot: "C:/wt", droppedTaskFiles: active, now: discoveredAt },
+    { execFn },
+  );
+  assert.equal(r.status, SEAT_LIVENESS_WIRE_STATUS.JUDGED);
+  assert.equal(r.verdict, SEAT_LIVENESS_VERDICT.SUSPECTED_UNRESPONSIVE);
+  assert.equal(r.reasonCode, SEAT_LIVENESS_REASON.NO_OUTPUT_PAST_THRESHOLD);
+});
+
+// HYK-201 §4 「41.5시간 침묵 유형 재현」(선례 = reach-report-core.test.mjs
+// :81·:109) -- 결과 파일이 존재하지만 이번 배달의 DONE 줄이 아직 없는
+// (표지만 쓰인) 좌석이 41.5시간 무응답이다. 이 축의 수리 전에는
+// selectActiveDispatch가 resultFile.exists === true만 보고 "활성 배달
+// 없음"으로 오판해 NOT_APPLICABLE로 샜다(§1 근거) -- 수리 후에는 이
+// 시나리오가 실제로 JUDGED/SUSPECTED_UNRESPONSIVE까지 발화해야 한다.
+test("(d)★ HYK-201 41.5h 무응답 + «표지만 쓰인 구간»(resultFile.exists === true, resultFileDone === false), through the wired path -> JUDGED/SUSPECTED_UNRESPONSIVE (수리 전에는 NOT_APPLICABLE로 샜다)", () => {
+  const dispatchedAtMs = Date.parse("2026-08-04T20:06:00.000Z"); // 05:06 KST
+  const frozenOutputAt = dispatchedAtMs;
+  const discoveredAt = dispatchedAtMs + 41.5 * 60 * 60 * 1000; // +41.5h.
+  const active = [
+    {
+      path: ".harness/coder-task.md",
+      droppedAtMs: dispatchedAtMs,
+      resultFile: { exists: true },
+      resultFileDone: false,
+    },
+  ];
+  const execFn = fakeOrcaExecFn({
+    terminals: [{ handle: "term_silent", worktreePath: "C:/wt" }],
+    showsByHandle: {
+      term_silent: {
+        ok: true,
+        result: {
+          terminal: { lastOutputAt: frozenOutputAt, title: "CODER" },
+        },
       },
     },
   });
@@ -885,6 +957,154 @@ test("NC mutation/seat-scan #3 (필수): 좌석-워크트리 대응 무시(엉�
       rmSync(linkedDir, { recursive: true, force: true });
     }
   });
+});
+
+// ---------------------------------------------------------------------------
+// HYK-201 §4 필수 mutation 3종 -- isDispatchStillActive(HYK-201 신규
+// 공유 판정)을 표적으로 삼는다.
+// ---------------------------------------------------------------------------
+test("NC mutation/HYK-201 #1 (필수 ⓐ): 새 조건을 옛 조건(resultFile.exists === false 만)으로 되돌림 -> RED (표지만 쓰인 구간을 다시 NOT_APPLICABLE로 놓친다)", async () => {
+  const mutant = await importMutatedSibling(
+    (src) =>
+      applyMutation(
+        src,
+        `  if (item.resultFile.exists === false) return true;
+  // 결과 파일은 있다 -- "이번 배달"의 DONE 줄이 있어야만 진짜로 끝난
+  // 것이다(resultFileDone은 task_id 일치까지 확인된 값, 위 주석 참조).
+  return item.resultFileDone !== true;`,
+        `  if (item.resultFile.exists === false) return true;
+  return false;`,
+      ),
+    "201-1",
+  );
+  const dispatchedAtMs = Date.parse("2026-08-04T20:06:00.000Z");
+  const now = dispatchedAtMs + 41.5 * 60 * 60 * 1000;
+  const active = [
+    {
+      path: ".harness/coder-task.md",
+      droppedAtMs: dispatchedAtMs,
+      resultFile: { exists: true },
+      resultFileDone: false,
+    },
+  ];
+  const execFn = fakeOrcaExecFn({
+    terminals: [{ handle: "term_silent", worktreePath: "C:/wt" }],
+    showsByHandle: {
+      term_silent: {
+        ok: true,
+        result: { terminal: { lastOutputAt: dispatchedAtMs, title: "CODER" } },
+      },
+    },
+  });
+  const r = mutant.judgeSeatLivenessForRepo(
+    { repoRoot: "C:/wt", droppedTaskFiles: active, now },
+    { execFn },
+  );
+  assert.equal(
+    r.status,
+    "SEAT_LIVENESS_NOT_APPLICABLE",
+    "mutant must miss the still-writing (cover-only) 41.5h stall again (RED signal; proves the resultFileDone check is load-bearing)",
+  );
+});
+
+test("NC mutation/HYK-201 #2 (필수 ⓑ): collectResultFileCompletion의 taskId 일치를 «아무 DONE 줄이나 인정»으로 약화 -> RED (낡은 DONE 줄이 이번 배달을 끝난 것으로 오판한다)", async () => {
+  const mutant = await importMutatedSibling(
+    (src) =>
+      applyMutation(
+        src,
+        `    const sameTaskId =
+      typeof taskId === "string" &&
+      taskId.length > 0 &&
+      resultTaskId === taskId;
+    return sameTaskId && RESULT_DONE_RE.test(text);`,
+        `    const sameTaskId =
+      typeof taskId === "string" &&
+      taskId.length > 0 &&
+      resultTaskId === taskId;
+    return RESULT_DONE_RE.test(text);`,
+      ),
+    "201-2",
+  );
+  await withTempDir("hyk201-mutant2-", async (dir) => {
+    initPlainGitRepo(dir);
+    // 이번 배달의 task_id는 HYK-201-stale-2, dropped_at은 41.5h 전이다.
+    writeTaskFile(dir, {
+      taskId: "HYK-201-stale-2",
+      droppedAt: "2026-08-04 05:06",
+    });
+    // 결과 파일에는 **이전 라운드**(다른 task_id)의 표지 + DONE 줄이
+    // 남아 있다(coder-task.md §5 이어쓰기 관례와 동형).
+    mkdirSync(join(dir, ".harness"), { recursive: true });
+    writeFileSync(
+      join(dir, ".harness", "coder.md"),
+      "task_id: HYK-201-stale-2-PREVIOUS-ROUND\nverdict: question\n>>> DONE: HYK-201-stale-2-PREVIOUS-ROUND @ 2026-08-03 09:00 KST\n",
+      "utf8",
+    );
+    const now = Date.parse("2026-08-05T22:36:00+09:00"); // dropped_at + 41.5h.
+    const execFn = fakeOrcaExecFn({
+      terminals: [
+        { handle: "term_stale", worktreePath: gitWorktreeSelfPath(dir) },
+      ],
+      showsByHandle: {
+        term_stale: {
+          ok: true,
+          result: {
+            terminal: {
+              lastOutputAt: Date.parse("2026-08-04T05:06:00+09:00"),
+              title: "CODER",
+            },
+          },
+        },
+      },
+    });
+    const { result } = mutant.runOrchStallDetect(
+      ["--repo-root", dir, "--now", new Date(now).toISOString(), "--json"],
+      { execFn, ...fakeDispatchStartStore() },
+    );
+    assert.equal(
+      result.seatLiveness.status,
+      "SEAT_LIVENESS_NOT_APPLICABLE",
+      "mutant must accept the previous round's stale DONE line as proof this round is finished (RED signal; proves the taskId-match check inside collectResultFileCompletion is load-bearing)",
+    );
+  });
+});
+
+test("NC mutation/HYK-201 #3 (목록 밖 자유 변조): selectActiveDispatch의 정렬 방향을 뒤집음(가장 오래된 배달이 이김) -> RED (여러 활성 배달 중 엉뚱한(낡은) 것을 대표로 고른다)", async () => {
+  const mutant = await importMutatedSibling(
+    (src) =>
+      applyMutation(
+        src,
+        `export function selectActiveDispatch(droppedTaskFiles) {
+  const active = (Array.isArray(droppedTaskFiles) ? droppedTaskFiles : [])
+    .filter(isDispatchStillActive)
+    .sort((a, b) => b.droppedAtMs - a.droppedAtMs);
+  return active.length > 0 ? active[0] : null;
+}`,
+        `export function selectActiveDispatch(droppedTaskFiles) {
+  const active = (Array.isArray(droppedTaskFiles) ? droppedTaskFiles : [])
+    .filter(isDispatchStillActive)
+    .sort((a, b) => a.droppedAtMs - b.droppedAtMs);
+  return active.length > 0 ? active[0] : null;
+}`,
+      ),
+    "201-3",
+  );
+  const older = {
+    path: ".harness/coder-task.md",
+    droppedAtMs: 1000,
+    resultFile: { exists: false },
+  };
+  const newer = {
+    path: ".harness/review-task.md",
+    droppedAtMs: 5000,
+    resultFile: { exists: false },
+  };
+  const picked = mutant.selectActiveDispatch([older, newer]);
+  assert.notEqual(
+    picked,
+    newer,
+    "mutant must pick the stale older dispatch instead of the real most-recent one (RED signal; proves the sort direction is load-bearing)",
+  );
 });
 
 // ---------------------------------------------------------------------------

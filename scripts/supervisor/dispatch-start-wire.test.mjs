@@ -291,7 +291,7 @@ test("§R2 (a)★ 낡은 DONE 줄(이전 라운드 잔재): resultFileDone은 ta
   assert.equal(selectActiveDispatchForStart(items), items[0]);
 });
 
-test("§R2 (b)★ e2e: 결과 파일에 표지 3줄(REVIEW 위조 검증 규칙과 동형)만 있고 DONE 줄이 없으면, dispatchStart 축은 NOT_APPLICABLE로 새지 않는다(seatLiveness는 여전히 옛 규약대로 NOT_APPLICABLE -- 회귀 0)", () => {
+test("§R2 (b)★ e2e: 결과 파일에 표지 3줄(REVIEW 위조 검증 규칙과 동형)만 있고 DONE 줄이 없으면, dispatchStart·seatLiveness 두 축 모두 여전히 활성으로 본다(HYK-201부터 seatLiveness도 같은 정의를 공유한다 -- coder-task.md §2)", () => {
   withTempDir("hyk185-start-r2-inflight-", (dir) => {
     initPlainGitRepo(dir);
     writeTaskFile(dir, {
@@ -327,12 +327,13 @@ test("§R2 (b)★ e2e: 결과 파일에 표지 3줄(REVIEW 위조 검증 규칙�
       DISPATCH_START_WIRE_STATUS.NOT_APPLICABLE,
       "결과 파일이 있어도(표지 3줄뿐) DONE 줄이 없으면 dispatch-start 축은 여전히 판정 대상이어야 한다(§R2 핵심)",
     );
-    // seat-liveness 축은 이 라운드에서 손대지 않았다(회귀 0) -- 결과
-    // 파일이 존재하기만 하면 여전히 옛 규약대로 NOT_APPLICABLE이다.
-    assert.equal(
+    // HYK-201부터 seat-liveness 축도 같은 정의(resultFileDone)를 쓴다 --
+    // 결과 파일이 있어도(표지 3줄뿐) DONE 줄이 없으면 이 축도 여전히
+    // 판정 대상이다(§1-§2, PR #113이 미룬 결함을 이 라운드가 갚는다).
+    assert.notEqual(
       result.seatLiveness.status,
       "SEAT_LIVENESS_NOT_APPLICABLE",
-      "seat-liveness 축은 여전히 resultFile.exists만 보는 옛 규약이어야 한다(회귀 0)",
+      "seat-liveness 축도 표지만 쓰인 구간에서 여전히 활성으로 판정해야 한다(HYK-201)",
     );
   });
 });
@@ -925,8 +926,8 @@ test("NC mutation/start-wire #5 (필수, §R2): «결과 파일 존재만으로 
     (src) =>
       applyMutation(
         src,
-        "      return item.resultFileDone !== true;",
-        "      return false;",
+        "  return item.resultFileDone !== true;",
+        "  return false;",
       ),
     "5",
   );
