@@ -4,11 +4,16 @@
 // reach-report.mjs가 한다) -- watch-freshness-core.mjs/orch-progress-
 // core.mjs와 같은 "코어는 순수, 수집/출력은 wire" 원칙을 재사용한다.
 //
-// ★새 감지 축 금지(coder-task.md §3): 이 파일은 seat-liveness/seat-idle/
-// dispatch-start/unconsumed 네 축이 이미 내놓은 verdict/status 문자열을
-// "열려 있는 이상인가"로 분류할 뿐, 그 네 축의 판정 로직 자체를 재구현하지
-// 않는다 -- watch.log 한 줄(buildLogLine, watch-run.mjs)의 문자열 형식만
-// 파싱한다.
+// ★새 감지 축 금지(coder-task.md §3, HYK-191): 이 파일은 seat-liveness/
+// seat-idle/dispatch-start/unconsumed 네 축이 이미 내놓은 verdict/status
+// 문자열을 "열려 있는 이상인가"로 분류할 뿐, 그 네 축의 판정 로직 자체를
+// 재구현하지 않는다 -- watch.log 한 줄(buildLogLine, watch-run.mjs)의
+// 문자열 형식만 파싱한다. ★HYK-198-capwire-2(한용 20:12 확정 «가»)로
+// 이 원칙에 **딱 한 항목**의 예외가 생겼다: `cap` 축(watch-run.mjs의
+// `cap_*` 필드, HYK-198-capwire-1이 이미 관측만 하고 있던 것)을 이
+// AXES에 편입한다 -- 이것도 "새 감지 축"이 아니라 watch-run.mjs가 이미
+// 내놓은 `cap_status`/`cap_verdict` 문자열을 그대로 분류할 뿐이다(같은
+// 원칙의 다섯 번째 적용). 이 예외 밖의 새 축 추가는 여전히 금지다.
 //
 // 왜 "지금 열려 있는 이상"이 사람이 직접 읽는 값 위에 있어야 하는가
 // (coder-task.md §4, 실측): 2026-08-05 05:06 ~ 08-06 22:36 KST 사이
@@ -68,6 +73,48 @@ export const AXES = Object.freeze([
       "UNCONSUMED_COLLECTION_FAILED",
       "UNCONSUMED_SCAN_WORKTREE_LIST_FAILED",
       "UNCONSUMED_SCAN_HARNESS_READ_FAILED",
+    ]),
+  }),
+  // HYK-198-capwire-2 §2 -- watch-run.mjs의 cap_* 필드(HYK-198-capwire-1이
+  // 관측만 하던 것)를 편입. ★모양이 다르다(위 네 축은 status/verdict/
+  // worstCount/worktrees, cap은 status/verdict/value/source): worstCount/
+  // worktrees는 "몇 개 워크트리가 나쁜가"라는 개수 개념인데 cap에는
+  // 대응 개념이 없다(값 파일은 저장소당 1개). 억지로 끼워 맞추지 않고
+  // ★cap 전용 취급을 택했다 -- buildAxesFromFields(아래)는 이미
+  // axis.prefix 기반으로 완전히 제네릭이라 코드 변경 없이 그대로
+  // 동작하고(존재하지 않는 cap_worst_count/cap_worktrees는 그냥
+  // null이 된다), 그 두 필드는 computeOpenAnomalies/computeRecentSummary
+  // 어느 쪽도 읽지 않으므로(실측: 아래 두 함수 확인) null이어도 해가
+  // 없다 -- value/source를 억지로 그 틀에 밀어 넣는 별도 코드를 새로
+  // 짜지 않았다("필요한 만큼만").
+  //
+  // ★이상(anomaly) 기준: **값을 읽지 못한 상태**(status가 OK가 아님 --
+  // 파일 부재·손상 JSON·schema 불일치·코어가 거부함)만 이상이다. 값
+  // 자체(0이든 9든)는 이상이 아니다 -- 한용이 정한 값이고 이 저장소는
+  // 그 값을 "옳다"고 판단할 근거가 없다(그 값이 이상한지는 사람 몫).
+  // ORCH 소견을 그대로 채택했다 -- 그 순간 "판정 자체가 불가능하다"는
+  // 점에서 다른 네 축의 COLLECTION_FAILED류와 같은 급의 신호이기
+  // 때문이다. `badVerdicts`는 비워 둔다 -- cap_verdict는 정상일 때
+  // 항상 "DECIDED"이고(judgeConcurrency는 ok:true면 언제나 DECIDED만
+  // 낸다, concurrency-core.mjs 확인) 그 자체는 이상이 아니다.
+  //
+  // ★cap_verdict="DECIDED"가 사람에게 "판정한 것처럼" 오인되는 문제
+  // (검토자 지적, §2-4): status가 "OK"인 한 badStatuses에 없으므로
+  // isAxisAnomalous가 항상 false다 -- 즉 cap이 정상일 때는
+  // "열려 있는 이상" 목록에 **아예 나타나지 않는다**(다른 정상 축과
+  // 동일). formatMorningReport의 "지난 24시간 요약"도 verdict 문자열
+  // 자체는 찍지 않고 표본/이상 건수만 찍는다. 결론: "DECIDED"라는
+  // 문자열은 사람이 보는 아침 보고 어디에도 나타나지 않는다(구조적으로
+  // 보장 -- 별도 문구 은폐 코드를 추가하지 않았다, 아래 시험으로 고정).
+  Object.freeze({
+    key: "cap",
+    prefix: "cap",
+    label: "동시 실행 상한 읽기 실패",
+    badVerdicts: Object.freeze([]),
+    badStatuses: Object.freeze([
+      "CAP_READ_FAILED",
+      "CAP_STEP_FAILURE",
+      "CORE_REJECTED",
     ]),
   }),
 ]);
@@ -251,7 +298,7 @@ export function formatMorningReport({
   lines.push("## 지금 열려 있는 이상");
   if (openAnomalies.length === 0) {
     lines.push(
-      "없음 -- 열려 있는 이상이 없습니다(4축 전부 정상 또는 관측 대상 없음).",
+      "없음 -- 열려 있는 이상이 없습니다(5축 전부 정상 또는 관측 대상 없음).",
     );
   } else {
     for (const a of openAnomalies) {

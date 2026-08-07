@@ -12,25 +12,52 @@ import {
   formatMorningReport,
 } from "./reach-report-core.mjs";
 
-function line({
-  ts,
-  verdict = "PROGRESSING",
-  reason = "OK",
-  seatVerdict = "NONE",
-  seatStatus = "SEAT_LIVENESS_NOT_APPLICABLE",
-  idleVerdict = "NONE",
-  idleStatus = "SEAT_IDLE_NOT_APPLICABLE",
-  startVerdict = "NONE",
-  startStatus = "DISPATCH_START_NOT_APPLICABLE",
-  unconsumedVerdict = "NONE",
-  unconsumedStatus = "UNCONSUMED_NOT_APPLICABLE",
-}) {
+// eslint max-complexity(12) 상한 준수(HYK-198-capwire-2) -- 각 destructured
+// 기본값(AssignmentPattern)이 그 자체로 분기 1개로 잡히므로(ESLint
+// complexity.js 실측, watch-run.mjs의 동일 수리 참조), 기본값을 파라미터
+// 목록이 아니라 상수 객체 하나로 옮겨 스프레드로 병합한다.
+const LINE_DEFAULTS = {
+  verdict: "PROGRESSING",
+  reason: "OK",
+  seatVerdict: "NONE",
+  seatStatus: "SEAT_LIVENESS_NOT_APPLICABLE",
+  idleVerdict: "NONE",
+  idleStatus: "SEAT_IDLE_NOT_APPLICABLE",
+  startVerdict: "NONE",
+  startStatus: "DISPATCH_START_NOT_APPLICABLE",
+  unconsumedVerdict: "NONE",
+  unconsumedStatus: "UNCONSUMED_NOT_APPLICABLE",
+  capStatus: "OK",
+  capVerdict: "DECIDED",
+  capValue: "2",
+  capSource: "/x/concurrency-cap.json",
+};
+
+function line(overrides) {
+  const {
+    ts,
+    verdict,
+    reason,
+    seatVerdict,
+    seatStatus,
+    idleVerdict,
+    idleStatus,
+    startVerdict,
+    startStatus,
+    unconsumedVerdict,
+    unconsumedStatus,
+    capStatus,
+    capVerdict,
+    capValue,
+    capSource,
+  } = { ...LINE_DEFAULTS, ...overrides };
   return (
     `${ts} exit=0 verdict=${verdict} reason=${reason} ` +
     `seat_status=${seatStatus} seat_verdict=${seatVerdict} seat_worst_count=NONE seat_worktrees=4 ` +
     `idle_status=${idleStatus} idle_verdict=${idleVerdict} idle_worst_count=NONE idle_worktrees=4 ` +
     `start_status=${startStatus} start_verdict=${startVerdict} start_worst_count=NONE start_worktrees=4 ` +
-    `unconsumed_status=${unconsumedStatus} unconsumed_verdict=${unconsumedVerdict} unconsumed_worst_count=NONE unconsumed_worktrees=4`
+    `unconsumed_status=${unconsumedStatus} unconsumed_verdict=${unconsumedVerdict} unconsumed_worst_count=NONE unconsumed_worktrees=4 ` +
+    `cap_status=${capStatus} cap_verdict=${capVerdict} cap_value=${capValue} cap_source=${capSource}`
   );
 }
 
@@ -188,7 +215,7 @@ test("computeRecentSummary counts anomalous samples within the window, distinct 
   );
 });
 
-test("all 4 axes are independently tracked (one axis bad does not mask another) (1/1)", () => {
+test("all 5 axes are independently tracked (one axis bad does not mask another) (1/1)", () => {
   const t0 = Date.parse("2026-08-05T00:00:00.000Z");
   const entries = parseWatchLog(
     line({
@@ -201,6 +228,8 @@ test("all 4 axes are independently tracked (one axis bad does not mask another) 
       startVerdict: "NOT_STARTED",
       unconsumedStatus: "UNCONSUMED_JUDGED",
       unconsumedVerdict: "SUSPECTED_UNCONSUMED",
+      capStatus: "CAP_READ_FAILED",
+      capVerdict: "FILE_UNREADABLE",
     }),
   ).entries;
   const open = computeOpenAnomalies(entries, t0);
