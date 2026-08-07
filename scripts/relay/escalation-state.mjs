@@ -254,11 +254,15 @@ export function reduceCoordinatorState({ scope, events } = {}) {
 // (C) QD -- 2단 승격 + dedupe
 // ---------------------------------------------------------------------------
 
-// 사람 게이트 6개(이슈경계·reject 2연속·되돌리기 비용 큰 실행·PR/Done·패킷
-// 서명·하드스톱)는 이 모듈 안에서 자동 resolve하지 않는다 -- 이 함수는
-// 그 6개에 해당하는 NEEDS_INPUT을 wake로만 승격하고, resolve 호출은 아예
+// 사람 게이트 일곱 개(작업 선택·연속 반려 판정·북극성/큰 실행 승인·PR
+// 승인/병합 / Linear Done·패킷 서명·하드스톱·상신 답변, 북극성-좌표.md
+// §1-C ㄱ)는 이 모듈 안에서 자동 resolve하지 않는다 -- 이 함수는 그 일곱
+// 개에 해당하는 NEEDS_INPUT을 wake로만 승격하고, resolve 호출은 아예
 // 만들지 않는다(그 호출 자체가 이 모듈 밖 어댑터의 몫이며, 여기 없다는
 // 사실 자체가 R2의 capability 경계다).
+// ★목록 구분자 `·`가 게이트 3·4 정본 이름 자신에 포함된 `·`와 충돌하지
+// 않도록, 그 두 항목 내부에서만 `·`를 `/`로 바꿔 적었다(정본 이름 자체는
+// 바꾸지 않음 -- 표기 방식만).
 export const HUMAN_WAKE_STATES = Object.freeze(
   new Set([
     COORD_STATE.SILENT_STALL,
@@ -267,7 +271,7 @@ export const HUMAN_WAKE_STATES = Object.freeze(
   ]),
 );
 
-// isHumanGateNeedsInput: NEEDS_INPUT 자체는 상태만으로 사람게이트 6개
+// isHumanGateNeedsInput: NEEDS_INPUT 자체는 상태만으로 사람게이트 일곱 개
 // 해당 여부를 알 수 없다(그건 gate/escalation의 reason 분류 몫) -- 호출측이
 // 그 판정을 payload로 넘긴다. 이 함수는 순수하게 두 입력(state, 사람게이트
 // 해당 여부)을 wake 여부로 접는다.
