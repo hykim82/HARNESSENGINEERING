@@ -54,6 +54,8 @@ import {
 } from "node:fs";
 import path from "node:path";
 import { runReachOnce, DEFAULT_NOTIFY_DIR } from "./reach-report.mjs";
+import { readConcurrencyCap } from "./concurrency-cap-adapter.mjs";
+import { judgeConcurrency } from "./concurrency-core.mjs";
 
 export const MAX_LOG_LINES = 5000;
 
@@ -261,7 +263,107 @@ function axisLogSegment(
   return `${prefix}_status=${s} ${prefix}_verdict=${v} ${prefix}_worst_count=${w} ${prefix}_worktrees=${t}`;
 }
 
-export function buildLogLine({ nowIso, detectorResult }) {
+// HYK-198-capwire-1 (coder-task.md §3) -- 값 파일(concurrency-cap.json,
+// `readConcurrencyCap` 경유)과 판정 코어(`judgeConcurrency`)를 잇는 관측
+// 전용 단계. §5 범위 밖(admission-core/HYK-195 미결) 때문에 이 감시기는
+// "지금 몇 건이 진행 중인지" 담는 실행 장부를 아직 갖고 있지 않다
+// (concurrency-core.mjs 헤더가 이미 선언: "실행 상태 장부의 위치·형식은
+// 미정"). 그래서 `requested`/`inFlight` 기본값은 **감시기가 실제로 아는
+// 것 = 0개**(지어낸 숫자가 아니라 이 관측 지점이 후보/진행중 항목을 하나도
+// 들고 있지 않다는 구조적으로 참인 사실)로 고정한다 -- `policy.maxConcurrent`
+// 도 이 라운드에서 별도로 관측된 값이 없으므로 방금 읽은 전역 상한 자체를
+// 그대로 쓴다(코어가 이미 `min(policy.maxConcurrent, globalCap)`로 다시
+// clamp하므로 이중으로 지어낸 제약을 얹지 않는다).
+// `requested`/`inFlight`/`maxConcurrent`는 시험이 "값을 바꿔 넣으면 판정이
+// 따라 움직이는가"(coder-task.md §4)를 코어 호출 지점에서 직접 증명할 수
+// 있도록 주입 가능하게 열어 둔다 -- 운영 호출부(`runWatchOnce`)는 위 이유로
+// 기본값(빈 배열)만 쓴다.
+export function runCapObservationStep({
+  capPath,
+  readFn,
+  requested = [],
+  inFlight = [],
+  maxConcurrent,
+}) {
+  const capResult = readConcurrencyCap({ capPath, readFn });
+  if (!capResult.ok) {
+    return {
+      status: "CAP_READ_FAILED",
+      verdict: capResult.reason,
+      value: null,
+      source: capPath,
+    };
+  }
+  // HYK-198-capwire-2 §3(검토자 7번째 mutation) -- 이 기본값(`?? capResult.cap`)은
+  // `decisions`로는 **원천적으로 관측 불가능**하다: 기본값이 항상
+  // `capResult.cap`(=`globalCap`)과 같으므로 `effectiveCap =
+  // min(policy.maxConcurrent, globalCap)`는 기본값이 무엇이든(999로
+  // 바꿔도) `globalCap`으로 수렴한다 -- 이 clamp는 언제나 항등이다.
+  // 그래서 실제로 어떤 값이 `judgeConcurrency`에 들어갔는지를
+  // `appliedMaxConcurrent`로 직접 노출한다(값 추종 결과가 아니라 인자
+  // 자체를 시험이 단언할 수 있게). 로그(`capLogSegment`)에는 싣지
+  // 않는다 -- 프로덕션에서는 `value`(=cap)와 항상 같아 중복·소음이다.
+  const appliedMaxConcurrent = maxConcurrent ?? capResult.cap;
+  const judged = judgeConcurrency({
+    requested,
+    inFlight,
+    policy: { maxConcurrent: appliedMaxConcurrent },
+    globalCap: capResult.cap,
+  });
+  return {
+    status: judged.ok ? "OK" : "CORE_REJECTED",
+    verdict: judged.reasonCode,
+    value: capResult.cap,
+    source: capPath,
+    decisions: judged.decisions,
+    appliedMaxConcurrent,
+  };
+}
+
+// buildLogLine에서 분리(axisLogSegment와 같은 4필드 shape 관례 재사용,
+// coder-task.md §1 "기존 axisLogSegment 관례를 따르고").
+function capLogSegment(capResult) {
+  const s = capResult.status ?? "NONE";
+  const v = capResult.verdict ?? "NONE";
+  const val = capResult.value ?? "NONE";
+  const src = capResult.source ?? "NONE";
+  return `cap_status=${s} cap_verdict=${v} cap_value=${val} cap_source=${src}`;
+}
+
+// runWatchOnce에서 분리(§6 eslint max-complexity 상한 준수) -- §5-4 계약
+// 보존: 이 단계 자신의 실패(예: readFn이 예상외로 던짐)가 감시기 전체를
+// 죽이면 안 된다. readConcurrencyCap/judgeConcurrency는 둘 다 throw로
+// 판정을 대신하지 않는 fail-closed 계약이라 이 catch는 정상 경로에서는
+// 도달하지 않지만, 방어적으로 감싼다(runDetector/runReachStep과 동일 원칙).
+// 기본 capPath 계산도 별도 함수로 뺀다(§6 eslint max-complexity 상한 준수
+// -- default parameter/`??`는 그 자체로 AssignmentPattern/LogicalExpression
+// 분기로 잡혀 runWatchOnce의 복잡도에 더해진다, ESLint complexity.js 실측).
+function resolveCapPath(repoRoot, capPath) {
+  return (
+    capPath ??
+    path.join(repoRoot, "scripts", "supervisor", "concurrency-cap.json")
+  );
+}
+
+function computeCapResult({ repoRoot, capPath, capReadFn }) {
+  const resolvedCapPath = resolveCapPath(repoRoot, capPath);
+  try {
+    return runCapObservationStep({
+      capPath: resolvedCapPath,
+      readFn: capReadFn,
+    });
+  } catch (err) {
+    return {
+      status: "CAP_STEP_FAILURE",
+      verdict: "UNDECIDABLE",
+      value: null,
+      source: resolvedCapPath,
+      message: err && err.message ? err.message : String(err),
+    };
+  }
+}
+
+export function buildLogLine({ nowIso, detectorResult, capResult }) {
   if (detectorResult.runnerFailure) {
     return `${nowIso} RUNNER_FAILURE message=${detectorResult.message}`;
   }
@@ -291,7 +393,8 @@ export function buildLogLine({ nowIso, detectorResult }) {
     worstCount: detectorResult.unconsumedWorstCount,
     totalWorktrees: detectorResult.unconsumedTotalWorktrees,
   });
-  return `${nowIso} exit=${detectorResult.exitCode} verdict=${verdict} reason=${reason} ${seatSegment} ${idleSegment} ${startSegment} ${unconsumedSegment}`;
+  const capSegment = capLogSegment(capResult ?? {});
+  return `${nowIso} exit=${detectorResult.exitCode} verdict=${verdict} reason=${reason} ${seatSegment} ${idleSegment} ${startSegment} ${unconsumedSegment} ${capSegment}`;
 }
 
 function appendLogWithRotation({ readFn, writeFn, logPath, line, maxLines }) {
@@ -387,6 +490,8 @@ export function runWatchOnce({
   mkdirFn = mkdirSync,
   existsFn = existsSync,
   notifyDir = null,
+  capPath,
+  capReadFn,
 }) {
   mkdirFn(watchDir, { recursive: true });
   const detectorResult = runDetector({
@@ -395,10 +500,11 @@ export function runWatchOnce({
     detectorPath,
     repoRoot,
   });
+  const capResult = computeCapResult({ repoRoot, capPath, capReadFn });
   const nowIso = new Date(now).toISOString();
   const logPath = path.join(watchDir, "watch.log");
   const aliveRecordPath = path.join(watchDir, "last-run.json");
-  const line = buildLogLine({ nowIso, detectorResult });
+  const line = buildLogLine({ nowIso, detectorResult, capResult });
   appendLogWithRotation({
     readFn,
     writeFn,
@@ -422,7 +528,14 @@ export function runWatchOnce({
     existsFn,
     logPath,
   });
-  return { logPath, aliveRecordPath, line, detectorResult, reachResult };
+  return {
+    logPath,
+    aliveRecordPath,
+    line,
+    detectorResult,
+    reachResult,
+    capResult,
+  };
 }
 
 const invokedDirectly =
