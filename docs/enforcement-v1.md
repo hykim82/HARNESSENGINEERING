@@ -252,8 +252,26 @@ substrate and is left for a future revision.
 
 ### Installing the hook
 
-Git does not read hooks from a version-controlled path automatically. Install
-by copying or symlinking the versioned file into `.git/hooks/`:
+Git does not read hooks from a version-controlled path automatically.
+**Preferred (HYK-196):** use `hook-sync-check.mjs --install`, which resolves
+the correct installed-hooks location itself (`core.hooksPath` if set,
+otherwise the `git rev-parse --git-common-dir`-based path — correct even
+from inside a linked worktree, unlike a hardcoded `.git/hooks/`), copies
+every file under `hooks/` that differs, and self-verifies before exiting 0:
+
+```sh
+node scripts/check/hook-sync-check.mjs --install
+```
+
+Re-run it any time to re-sync after a hook change (idempotent — a clean
+match makes no changes and exits 0); `--json` gives a machine-readable
+`{verdict, mismatches, ...}` for scripting. **Known limit (honest, per
+docs/enforcement-known-gaps.md gap#91): this is not yet called automatically
+at seat boot** — running it is still a manual (or ORCH-run) step until that
+lands, so a stale installed hook can still go unnoticed if nobody runs it.
+
+**Fallback (manual copy/symlink, kept for a fresh clone with no Node
+available yet or any other reason the CLI above can't run):**
 
 ```sh
 # copy (simplest, needs re-copying after hook changes)
@@ -271,9 +289,10 @@ location, both the copy and the symlink install methods work correctly.
 
 If you installed the hook via `cp` before the node-runner-search change
 above landed, `.git/hooks/commit-msg` is a stale copy and must be
-re-copied (`cp hooks/commit-msg .git/hooks/commit-msg`) to pick up the
-`node`/`node.exe` fallback; a symlink install picks up the change
-automatically since it never copies the file's contents.
+re-copied (`cp hooks/commit-msg .git/hooks/commit-msg`, or re-run
+`hook-sync-check.mjs --install`) to pick up the `node`/`node.exe` fallback;
+a symlink install picks up the change automatically since it never copies
+the file's contents.
 
 ## D3 relay handshake — detailed spec
 
@@ -656,6 +675,14 @@ the whole tree or history — that's what `detect` does, reserved for CI), and
 commit with the finding printed (redacted) to the terminal.
 
 ### Installing the hook (per-clone, same pattern as `commit-msg`)
+
+**Preferred (HYK-196):** `node scripts/check/hook-sync-check.mjs --install`
+installs/re-syncs every file under `hooks/` (not just this one) in a single
+command — see "Installing the hook" under D2 above for the full rationale
+(`core.hooksPath`/worktree-correct resolution, idempotent, still not called
+automatically at seat boot).
+
+**Fallback (manual copy/symlink):**
 
 ```sh
 cp hooks/pre-commit .git/hooks/pre-commit

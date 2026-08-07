@@ -35,6 +35,12 @@ jobs:
           sh -n hooks/commit-msg
           sh -n hooks/pre-commit
 
+      - name: hook-sync-check smoke -- device runs in CI (HYK-196; does NOT check any developer PC's installed hook -- CI's checkout has none to compare against)
+        run: |
+          tmp_hooks=$(mktemp -d)
+          node scripts/check/hook-sync-check.mjs --versioned-dir hooks --installed-dir "$tmp_hooks" --install --json
+          node scripts/check/hook-sync-check.mjs --versioned-dir hooks --installed-dir "$tmp_hooks" --json
+
       - name: Resolve quality:check base SHA (HYK-148)
         id: quality_base
         run: |

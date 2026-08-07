@@ -689,6 +689,21 @@
       "owner": "ORCH",
       "claude_only": false,
       "self_registration_note": "HYK-183-skipreview-count-1 self-registration, same convention as quality-check/nul-byte-guard above. This check is intentionally classified as a reporting/observability tool, not an enforcement gate -- review-gate.mjs's skip-review trailer logic and threshold were explicitly out of scope for this track (task instruction: count usage, do not add a new block)."
+    },
+    {
+      "id": "hook-sync-check",
+      "substrate": "manual",
+      "script": "scripts/check/hook-sync-check.mjs",
+      "test": "scripts/check/hook-sync-check.test.mjs",
+      "install_targets": [],
+      "expected_bad": "the installed git hook (core.hooksPath, or the git-common-dir-resolved .git/hooks in a linked worktree) differs in content from the versioned hooks/<name>, or is missing entirely, for any file under hooks/ (not just pre-commit) -> verdict DRIFT, exit 2, `mismatches` lists the file name/kind/both sha256",
+      "expected_good": "every file under hooks/ is byte-identical to its installed counterpart -> verdict IN_SYNC, exit 0; a path-resolution or read failure (versioned dir missing, git-common-dir lookup failing) never reports exit 0 -- it reports UNDECIDABLE, exit 1",
+      "failure_exit": 2,
+      "uncertain_exit": 1,
+      "owner": "ORCH",
+      "claude_only": false,
+      "self_registration_note": "HYK-196-hooksync-1 self-registration, same convention as skip-review-usage/b0-gate above. Motivated by the 2026-08-07 real incident: a worker's installed `.git/hooks/pre-commit` was a 07-16 (74-line) copy while the versioned `hooks/pre-commit` had moved to 08-01 (102 lines, adds the nul-byte-guard stage) -- the drift went unnoticed until selfcheck's advisory sweep happened to catch it, and selfcheck's own comparison is exit-0 advisory, never a gate.",
+      "invocation_note": "Not hook-installed and NOT yet called by anything automated -- honesty per task spec §1: today this is a CLI a human/ORCH can run by hand (`node scripts/check/hook-sync-check.mjs [--install] [--json]`), plus a CI smoke step in `.github/workflows/enforce.yml` that only proves the device runs correctly against a synthetic --install target (CI checkouts have no real installed hook to compare against, so it cannot check any developer's actual machine). The real fix this device is meant to feed -- a seat-boot-time forced install+compare -- is HYK-183's still-undelivered execution layer; until that lands, a stale local hook (like the one that motivated this task) is caught only if a human or ORCH remembers to run this by hand. See docs/enforcement-known-gaps.md for the registered gap."
     }
   ]
 }
