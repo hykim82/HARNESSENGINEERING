@@ -1,0 +1,44 @@
+{
+  "_provenance": "HYK-185-seat-corr-2 (REVIEW P1 수리, coder-task.md §R2 합격기준 (a)/(c)) -- 2026-08-06 실측 raw에서 발췌한 in-repo fixture. 정본 3파일(개수는 §R3 REVIEW P2-2 지적으로 2026-08-06 재실측한 실측값 -- node로 JSON.parse 후 배열 길이를 직접 세었다, 이전 버전은 346/345로 적었던 것이 실측과 달라 정정): .harness/증거/task-list-raw-0806.json(318,533 bytes, result.tasks.length===352건 -- 이 워크트리와 무관한 351건은 뺐다, taskListTasks에는 이 배달 자신 task_657777c22e40 항목 1건만 남겼고 그 항목에서도 resolveDeliveredSeat의 파서가 실제로 읽는 id/spec 두 필드만 바이트 그대로 남겼다 -- parent_id/created_by_terminal_handle/task_title/display_name/status/deps/result/created_at/completed_at/assignee_handle/dispatch_id는 파서가 안 읽어서 뺐다) / .harness/증거/dispatch-show-raw-0806.json(659 bytes -- result.dispatch 전체를 바이트 그대로 옮겼다, 필드를 더 빼지 않았다) / .harness/증거/terminal-list-raw-0806.json(9,182 bytes, result.terminals.length===5건 -- 이 워크트리(hyk185-seat-multi) 소속 2개 좌석(term_3d3812a5=CODER 자신·term_1b90482b=REVIEW)만 남겼고 handle/worktreePath/tabId/leafId/title/lastOutputAt만 바이트 그대로 옮겼다 -- ptyId/worktreeId/branch/connected/writable/preview는 resolveDeliveredSeat도 collectSeatLivenessObservation도 읽지 않아서 뺐다). spec의 'harness_label:'/'worktree: ... (branch ...)' 형태가 이번 P1의 정본이다 -- 어제 형태('go <라벨>')는 이미 폐기됐다(ORCH 자인). 이 fixture 자체가 '오늘 이 배달로 상관이 실제로 성공한다'는 직접 증거다(assignee_pane_key가 terminals 중 term_3d3812a5 하나의 tabId:leafId와 정확히 일치). HYK-185-seat-corr-3(§R3, REVIEW P2-2): worktree 줄 꼬리 정규화(stripWorktreeSpecBranchTail)를 '공백 1개 이상 + 비어 있지 않은 이름'만 벗기도록 좁혔다 -- 공백 없는 접두어-충돌 경로가 이 fixture의 realPath와 같은 것으로 오인되지 않는다(반례는 orca-adapter-delivered-seat.test.mjs에 직접 고정, 이 fixture 자체는 무변경).",
+  "harnessLabel": "HYK-185-seat-corr-1",
+  "worktreePath": "C:/Users/Administrator/orca/workspaces/HARNESSENGINEERING/hyk185-seat-multi",
+  "taskListTasks": [
+    {
+      "id": "task_657777c22e40",
+      "spec": "role: CODER\nharness_label: HYK-185-seat-corr-1\nworktree: C:\\Users\\Administrator\\orca\\workspaces\\HARNESSENGINEERING\\hyk185-seat-multi (branch hyk185-seat-corr)\ntask_file: .harness/coder-task.md\n요지: seatLiveness/dispatchStart 두 축을 그 배달이 간 좌석 기준으로 판정. task-list 라벨.경로 -> dispatch-show 좌석열쇠 -> 좌석목록 대조. 상관 실패는 실패로 드러낸다. gap 에 벤더 형식 의존 1행. 새 기록 계약 금지. 커밋 0."
+    }
+  ],
+  "dispatchShowByTaskId": {
+    "task_657777c22e40": {
+      "id": "ctx_891862206f6f",
+      "task_id": "task_657777c22e40",
+      "assignee_handle": "term_3d3812a5-2031-4df0-9b4d-7865d7ddad2d",
+      "assignee_pane_key": "83228d0e-f9b1-4827-9010-6543b65fb082:5d199db2-bbd8-4e2d-90ca-4fb5d5a2bfa6",
+      "status": "dispatched",
+      "failure_count": 0,
+      "last_failure": null,
+      "dispatched_at": "2026-08-06 00:46:22",
+      "completed_at": null,
+      "created_at": "2026-08-06 00:46:22",
+      "last_heartbeat_at": null
+    }
+  },
+  "terminals": [
+    {
+      "handle": "term_3d3812a5-2031-4df0-9b4d-7865d7ddad2d",
+      "worktreePath": "C:/Users/Administrator/orca/workspaces/HARNESSENGINEERING/hyk185-seat-multi",
+      "tabId": "83228d0e-f9b1-4827-9010-6543b65fb082",
+      "leafId": "5d199db2-bbd8-4e2d-90ca-4fb5d5a2bfa6",
+      "title": "⠐ 워크트리 좌석 질문을 축별 질문으로 리팩토링",
+      "lastOutputAt": 1785979413846
+    },
+    {
+      "handle": "term_1b90482b-e101-40a7-933f-6b3445f78774",
+      "worktreePath": "C:/Users/Administrator/orca/workspaces/HARNESSENGINEERING/hyk185-seat-multi",
+      "tabId": "a7a6b009-12c5-4a18-9263-6e7f1ae74fef",
+      "leafId": "de2b7967-6957-45da-9853-586a75c87760",
+      "title": "관리자: hyk185-seat-multi",
+      "lastOutputAt": 1785978472895
+    }
+  ]
+}
