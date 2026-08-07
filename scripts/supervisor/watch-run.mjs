@@ -294,10 +294,20 @@ export function runCapObservationStep({
       source: capPath,
     };
   }
+  // HYK-198-capwire-2 §3(검토자 7번째 mutation) -- 이 기본값(`?? capResult.cap`)은
+  // `decisions`로는 **원천적으로 관측 불가능**하다: 기본값이 항상
+  // `capResult.cap`(=`globalCap`)과 같으므로 `effectiveCap =
+  // min(policy.maxConcurrent, globalCap)`는 기본값이 무엇이든(999로
+  // 바꿔도) `globalCap`으로 수렴한다 -- 이 clamp는 언제나 항등이다.
+  // 그래서 실제로 어떤 값이 `judgeConcurrency`에 들어갔는지를
+  // `appliedMaxConcurrent`로 직접 노출한다(값 추종 결과가 아니라 인자
+  // 자체를 시험이 단언할 수 있게). 로그(`capLogSegment`)에는 싣지
+  // 않는다 -- 프로덕션에서는 `value`(=cap)와 항상 같아 중복·소음이다.
+  const appliedMaxConcurrent = maxConcurrent ?? capResult.cap;
   const judged = judgeConcurrency({
     requested,
     inFlight,
-    policy: { maxConcurrent: maxConcurrent ?? capResult.cap },
+    policy: { maxConcurrent: appliedMaxConcurrent },
     globalCap: capResult.cap,
   });
   return {
@@ -306,6 +316,7 @@ export function runCapObservationStep({
     value: capResult.cap,
     source: capPath,
     decisions: judged.decisions,
+    appliedMaxConcurrent,
   };
 }
 

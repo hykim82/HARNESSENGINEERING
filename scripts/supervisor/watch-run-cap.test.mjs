@@ -141,6 +141,36 @@ test("runCapObservationStep: inFlight already occupying slots reduces available 
 });
 
 // ---------------------------------------------------------------------------
+// HYK-198-capwire-2 §3(검토자 7번째 mutation 발견, 목록 밖) -- 이 호출부가
+// `maxConcurrent`를 생략했을 때 실제로 주입하는 기본값(`?? capResult.cap`)
+// 자체를 봉인한다. `decisions`로는 이 기본값을 관측할 수 없다(기본값이
+// 항상 `globalCap`과 같아 clamp가 항등이라 999로 바꿔도 decisions가
+// 똑같이 나온다 -- 위 값-추종 시험 5건이 전부 `maxConcurrent`를 명시
+// 주입해 이 분기를 우회했던 이유가 이것이다). 그래서 실제로 주입된 값
+// 자체(`appliedMaxConcurrent`)를 직접 단언한다.
+// ---------------------------------------------------------------------------
+test("runCapObservationStep: maxConcurrent omitted -> the value actually applied to judgeConcurrency equals the cap just read (seals HYK-198-capwire-2 §3 gap) (1/1)", () => {
+  const dir = tmpDir();
+  try {
+    const capPath = writeCap(
+      dir,
+      JSON.stringify({
+        schema_version: "concurrency-cap/v1",
+        global_hard_cap: 3,
+      }),
+    );
+    const result = runCapObservationStep({ capPath });
+    assert.equal(
+      result.appliedMaxConcurrent,
+      3,
+      "must equal the cap just read from the file, not any other default",
+    );
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
 // fail-closed: 값 파일 부재·손상·schema 불일치 -> 어떤 숫자로도 판정하지
 // 않는다(judgeConcurrency 자체를 부르지 않고 어댑터 실패 사유를 그대로
 // 표면화).
