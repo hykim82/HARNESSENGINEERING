@@ -345,6 +345,175 @@ test("droppedTaskFiles: malformed entry (missing taskId) -> no pledge fabricated
   );
 });
 
+// ---------------------------------------------------------------------------
+// HYK-203 guard/site3 -- isValidDroppedTaskFileEntry(:201)의
+// `isFiniteNumber(item.droppedAtMs)` 검사(coder-task.md §1 표 #3).
+//
+// ★§2 판정 -- 생산자·소비자가 site1/site2(둘 다 orch-stall-detect.mjs
+// 안에서 자기 자신이 만든 evidence를 자기 자신이 검사)와 다르다: 여기
+// 소비자는 이 파일(pledge-derive-core.mjs, "순수 코어") 자신이고, 생산자는
+// 별도 파일(orch-stall-detect.mjs)의 `collectPledgeDerivationEvidence`다.
+// 오늘의 유일한 프로덕션 호출자(`runOrchStallDetect`)는 그 생산자가 만든
+// evidence만 넘기므로(:1962-1963 실측, 다른 프로덕션 호출자 0 -- grep
+// 재확인), droppedAtMs는 오늘도 null 아니면 유한수만 온다(site1/2와 같은
+// 근거: buildDroppedTaskFileItem:355가 NaN을 null로 접고 Date.parse는
+// Infinity를 만들 수 없다). 그런데도 (나)로 판정하는 이유가 site1/2와
+// 다르다 -- 이 코어는 "evidence 자체가 완전히 재구조화(타 소스에서 조립)
+// 되어도 형식 위반을 형식 위반으로 계속 접는다"는, 파일 경계를 넘는
+// 계약이다(주석 §"evidence 형태" 참조 -- 이 코어는 자신의 유일한 실제
+// 호출자를 신뢰하지 않고 매 인자를 구조적으로 재검증한다). isFiniteNumber는
+// typeof+Number.isFinite를 한 표현식으로 합쳐 놓아 site1/2처럼 "형제 절"로
+// 쪼개 시험할 지점이 없다 -- 이 함수 하나가 전체 여섯 값을 막는다.
+// ---------------------------------------------------------------------------
+for (const [label, badValue] of [
+  ["null", null],
+  ["string", "2026-01-01"],
+  ["NaN", NaN],
+  ["+Infinity", Infinity],
+  ["-Infinity", -Infinity],
+]) {
+  test(`HYK-203 guard/site3: droppedAtMs=${label} -> no pledge fabricated, noted as TASK_FILE_ENTRY_MALFORMED (isFiniteNumber(item.droppedAtMs) blocks it)`, () => {
+    const result = derivePledges({
+      evidence: {
+        droppedTaskFiles: [droppedTaskFileItem({ droppedAtMs: badValue })],
+      },
+      now: NOW_MS,
+    });
+    assert.deepEqual(result.pledges, []);
+    assert.equal(
+      result.notes[0].reasonCode,
+      PLEDGE_DERIVE_NOTE_REASON.TASK_FILE_ENTRY_MALFORMED,
+    );
+  });
+}
+
+test("HYK-203 guard/site3: an ordinary finite number droppedAtMs -> derives normally (control: the guard does not over-block valid input)", () => {
+  const result = derivePledges({
+    evidence: { droppedTaskFiles: [droppedTaskFileItem()] },
+    now: NOW_MS,
+  });
+  assert.equal(result.pledges.length, 1);
+  assert.deepEqual(result.notes, []);
+});
+
+// ★★필수(coder-task.md §4) -- isValidDroppedTaskFileEntry의 droppedAtMs
+// 검사 줄을 지운 상태에서 위 여섯-값 계약이 RED가 되는 것을 고정한다.
+// site1(typeof 절 단독)과 달리 여기서는 함수 하나(isFiniteNumber 호출)가
+// 통째로 없어지므로, 가드가 없으면 "형식 위반"으로 거부되지 않고
+// `deriveAwaitResultPledge`(resultFile.exists:false 분기, recordedAt이
+// `item.droppedAtMs`를 직접 쓴다)까지 흘러 들어간다 -- 그 안의
+// `new Date(NaN).toISOString()`은 **예외를 던진다**(직접 실측, 아래
+// assert.throws가 그대로 재현). site1의 "관측된 차이 0"과 정반대로,
+// 여기서는 가드 제거가 순수 코어 전체를 **크래시**시킨다(§"throw로
+// 판정을 대신하지 않는다"는 이 코어가 스스로 지키지 못하게 되는
+// 지점 -- 이 가드가 바로 그 실패를 막는 마지막 벽이다).
+test("NC mutation/HYK-203 site3 (필수 -- 가드 제거): isValidDroppedTaskFileEntry에서 droppedAtMs 검사를 지움 -> RED (NaN droppedAtMs 항목이 '형식 위반'으로 거부되지 않고 deriveAwaitResultPledge까지 흘러가 new Date(NaN).toISOString()에서 예외로 크래시한다)", async () => {
+  const mutant = await importMutatedCopy((src) =>
+    src.replace("  if (!isFiniteNumber(item.droppedAtMs)) return false;\n", ""),
+  );
+  assert.throws(
+    () =>
+      mutant.derivePledges({
+        evidence: {
+          droppedTaskFiles: [
+            droppedTaskFileItem({
+              droppedAtMs: NaN,
+              resultFile: {
+                path: ".harness/coder.md",
+                exists: false,
+                mtimeMs: null,
+              },
+            }),
+          ],
+        },
+        now: NOW_MS,
+      }),
+    /Invalid time value/,
+    "mutant must let the structurally invalid (NaN droppedAtMs) entry reach deriveAwaitResultPledge, which crashes on new Date(NaN).toISOString() (RED signal; proves isFiniteNumber(item.droppedAtMs) is load-bearing -- with the guard, this core NEVER throws, per its own fail-closed-not-throw contract)",
+  );
+});
+
+// 추가 변조 #1(목록 안 -- §1 표의 +Infinity 행을 정확히 재현하는 «그럴듯한
+// 실수», HYK-202 #2와 동형): `isFiniteNumber`의 `Number.isFinite`를 하한만
+// 있는 부등식(`x > -Infinity`)으로 약화 -- droppedAtMs=+Infinity가
+// 구조적으로는 "유효"해진다. ★그런데도 관측 가능한 차이가 0이다: 그
+// 값은 `deriveAwaitResultPledge`의 `recordedAtMs > now` 미래-검사에
+// 그대로 걸린다(어떤 유한 `now`에 대해서도 `+Infinity > now`는 항상
+// 참이다) -- 이 코어가 "미래 시각"과 "+Infinity 시각"을 같은 노트
+// (TASK_FILE_RECORDED_AT_IN_FUTURE)로 우연히 이중 방어하고 있다는
+// 뜻이다. §4의 "아무 시험도 안 깨지는 변조를 찾으면 그것을 보고하라 --
+// 최대 산출이다"에 해당하는 site3의 두 번째 실측(첫 번째는 site1
+// 전체가 no-op).
+test("NC mutation/HYK-203 site3 추가#1 (목록 안 -- +Infinity만 새는 상한 누락, HYK-202 #2와 동형) -> 관측된 차이 0, no-op 실측: isFiniteNumber를 'x > -Infinity'로 약화해도 +Infinity droppedAtMs는 여전히 미래-검사(recordedAtMs > now)에 걸려 약속이 안 지어진다", async () => {
+  const mutant = await importMutatedCopy((src) =>
+    src.replace(
+      '  return typeof v === "number" && Number.isFinite(v);\n',
+      '  return typeof v === "number" && v > -Infinity;\n',
+    ),
+  );
+  const result = mutant.derivePledges({
+    evidence: {
+      droppedTaskFiles: [
+        droppedTaskFileItem({
+          droppedAtMs: Infinity,
+          resultFile: {
+            path: ".harness/coder.md",
+            exists: false,
+            mtimeMs: null,
+          },
+        }),
+      ],
+    },
+    now: NOW_MS,
+  });
+  assert.deepEqual(
+    result.pledges,
+    [],
+    "no observed difference: +Infinity droppedAtMs still produces no pledge even with the upper-bound check weakened (the downstream future-check independently blocks it)",
+  );
+  assert.equal(
+    result.notes[0].reasonCode,
+    PLEDGE_DERIVE_NOTE_REASON.TASK_FILE_RECORDED_AT_IN_FUTURE,
+    "blocked by the future-check note, not by TASK_FILE_ENTRY_MALFORMED -- the structural guard itself no longer catches it, but a second, independent guard does",
+  );
+});
+
+// 추가 변조 #2(★목록 밖 -- 자유 변조, HYK-202 #3과 동형 발상이지만 site3
+// 고유의 결과를 낸다): `isFiniteNumber`를 하한 없는 형태
+// (`x === x && x < Infinity`, 음의 무한대 누락)로 약화 -- droppedAtMs=
+// -Infinity가 구조적으로 "유효"해진다. 이번엔 추가#1과 달리 미래-검사도
+// 못 막는다(`-Infinity > now`는 항상 거짓이므로 미래로 오인되지 않는다)
+// -- 그래서 그대로 `new Date(-Infinity).toISOString()`까지 흘러가
+// 크래시한다(위 필수 RED와 같은 실패 형태, 다른 값·다른 변조로 재현).
+test("NC mutation/HYK-203 site3 추가#2 (★목록 밖 -- 자유 변조, 하한 무한대 누락) -> RED: isFiniteNumber를 'x === x && x < Infinity'로 약화하면 -Infinity droppedAtMs가 미래-검사도 통과해(-Infinity > now는 항상 거짓) new Date(-Infinity).toISOString()에서 크래시한다", async () => {
+  const mutant = await importMutatedCopy((src) =>
+    src.replace(
+      '  return typeof v === "number" && Number.isFinite(v);\n',
+      '  return typeof v === "number" && v === v && v < Infinity;\n',
+    ),
+  );
+  assert.throws(
+    () =>
+      mutant.derivePledges({
+        evidence: {
+          droppedTaskFiles: [
+            droppedTaskFileItem({
+              droppedAtMs: -Infinity,
+              resultFile: {
+                path: ".harness/coder.md",
+                exists: false,
+                mtimeMs: null,
+              },
+            }),
+          ],
+        },
+        now: NOW_MS,
+      }),
+    /Invalid time value/,
+    "mutant must let -Infinity slip past BOTH the structural guard and the future-check (RED signal; proves the guard's lower-bound coverage is independently load-bearing, distinct from the upper-bound mutation above)",
+  );
+});
+
 test("droppedTaskFiles: malformed entry (resultFile.path missing) -> no pledge fabricated, noted as ENTRY_MALFORMED (path is required so an await-result pledge always has a target)", () => {
   const result = derivePledges({
     evidence: {
