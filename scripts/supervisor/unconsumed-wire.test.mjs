@@ -485,6 +485,103 @@ test("scanHeaderTimeProjection: .harness 읽기 실패 -> ok:false(판정 불가
 });
 
 // ---------------------------------------------------------------------------
+// HYK-203 guard/site2 -- scanHeaderTimeProjection(:1889)의 자체
+// `typeof item.droppedAtMs === "number" && Number.isFinite(item.droppedAtMs)`
+// 필터(coder-task.md §1 표 #2).
+//
+// ★도달 가능성 실측(§2 판정): 이 필터가 실제로 받는 항목은 오직
+// `collectDroppedTaskFileEvidence` -> `buildDroppedTaskFileItem`(orch-
+// stall-detect.mjs:338)이 만든다. 그 함수는 `Number.isNaN(droppedAtMs)`인
+// 경우를 이미 `null`로 접어서 내보내고(:355), `Date.parse`는 애초에
+// `Infinity`나 문자열을 만들 수 없다 -- 그래서 이 필터가 실제로 볼 수
+// 있는 "나쁜" 값은 `null` 하나뿐이다(NaN·+Infinity·-Infinity·문자열은
+// 이 API를 통해서는 주입할 지점 자체가 없다 -- 정직 한계로 아래에
+// 명시한다). `null`은 `DROPPED_AT_RE`(연·월·일·시·분을 각각 `\d{4}`/
+// `\d{2}`만 검사하고 달력 유효성은 검사하지 않는다)를 통과하는 헤더에
+// 불가능한 달력 값(예: `9999-99-99 99:99`)을 적는 사람 실수로 실제로
+// 재현된다 -- 아래 첫 시험이 그 경로를 그대로 재현한다.
+// (나) 판정: `judgeHeaderTimeProjection`(header-time-projection-core.mjs:87)
+// 자신도 `isFiniteNumber(headerFloorMs)`를 이미 검사해 `UNDECIDABLE`로
+// 접으므로, 이 필터를 통째로 지워도 잘못된 verdict(NORMAL/PROJECTED_FUTURE)
+// 가 나오지는 않는다 -- 관측 가능한 유일한 차이는 "그 항목이 `items`
+// 배열에서 아예 빠지느냐(현재) vs UNDECIDABLE 항목으로 남느냐(가드
+// 없을 때)"뿐이다(이중 방어).
+// ---------------------------------------------------------------------------
+test("HYK-203 guard/site2: 달력상 불가능하지만 DROPPED_AT_RE는 통과하는 헤더('9999-99-99 99:99') -> Date.parse가 NaN을 내고 buildDroppedTaskFileItem이 그 즉시 null로 접어(orch-stall-detect.mjs:355), 이 필터의 typeof 절에 걸려 items에서 통째로 빠진다 (1/1)", () => {
+  withTempDir("hyk203-site2-malformed-", (dir) => {
+    initPlainGitRepo(dir);
+    writeTaskFile(dir, {
+      taskId: "HYK-203-site2-malformed",
+      droppedAt: "9999-99-99 99:99",
+      mtimeIso: "2026-08-06T13:00:00+09:00",
+    });
+    const r = scanHeaderTimeProjection(dir);
+    assert.equal(r.ok, true);
+    assert.deepEqual(
+      r.items,
+      [],
+      "a null droppedAtMs (from an uncalendar-able but regex-matching header) must be excluded, not surfaced as a judged item",
+    );
+  });
+});
+
+test("HYK-203 guard/site2: 정상 헤더(정상 수 droppedAtMs) -> items에 정확히 1건, 대조군(가드가 유효값을 과잉 차단하지 않는다) (1/1)", () => {
+  withTempDir("hyk203-site2-normal-", (dir) => {
+    initPlainGitRepo(dir);
+    writeTaskFile(dir, {
+      taskId: "HYK-203-site2-normal",
+      droppedAt: "2026-08-06 13:00",
+      mtimeIso: "2026-08-06T13:05:00+09:00",
+    });
+    const r = scanHeaderTimeProjection(dir);
+    assert.equal(r.items.length, 1);
+  });
+});
+
+// ★★필수(coder-task.md §4) -- 필터 전체(typeof + Number.isFinite 둘 다)를
+// 지운 상태에서 위 "null은 빠진다" 계약이 RED가 되는 것을 고정한다.
+// 가드가 없으면 null-droppedAtMs 항목이 `.map`까지 흘러 들어가
+// `judgeHeaderTimeProjection`을 실제로 호출하고, 그 코어는 UNDECIDABLE로
+// (안전하게) 접지만 그 항목을 `items` 배열에는 **남긴다** -- "아예 빠진다"
+// 는 이 필터 하나만의 계약이었다는 것을 이 RED가 증명한다.
+test("NC mutation/HYK-203 site2 (필수 -- 필터 전체 제거): scanHeaderTimeProjection의 typeof+Number.isFinite 필터를 통째로 지움 -> RED (null droppedAtMs 항목이 items에서 빠지지 않고 UNDECIDABLE 판정 항목으로 남는다)", async () => {
+  const mutant = await importMutatedSibling(
+    (src) =>
+      applyMutation(
+        src,
+        `    .filter(
+      (item) =>
+        item &&
+        typeof item.droppedAtMs === "number" &&
+        Number.isFinite(item.droppedAtMs),
+    )
+`,
+        "",
+      ),
+    "203-site2-filter-removed",
+  );
+  await withTempDir("hyk203-site2-mutant-", async (dir) => {
+    initPlainGitRepo(dir);
+    writeTaskFile(dir, {
+      taskId: "HYK-203-site2-mutant",
+      droppedAt: "9999-99-99 99:99",
+      mtimeIso: "2026-08-06T13:00:00+09:00",
+    });
+    const r = mutant.scanHeaderTimeProjection(dir);
+    assert.equal(
+      r.items.length,
+      1,
+      "mutant must leak the null-droppedAtMs item into items instead of excluding it (RED signal; proves the filter -- not just the downstream core's own guard -- is what keeps it out of the array)",
+    );
+    assert.equal(
+      r.items[0].verdict,
+      HEADER_TIME_PROJECTION_VERDICT.UNDECIDABLE,
+      "the leaked item is judged UNDECIDABLE by the downstream core's own isFiniteNumber guard (double defense -- it does not misjudge NORMAL/PROJECTED_FUTURE)",
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
 // (3c) ★«분리»를 깨는 시험(§R3-2 필수, 이게 없으면 "분리했다"는 근거 없는
 // 주장이다) -- 같은 task/결과 파일 배치에서 헤더 텍스트만 "정상"/"미래
 // 주장"으로 바꾸고, 두 경우 모두 소비 판정 결과가 완전히 동일함을
