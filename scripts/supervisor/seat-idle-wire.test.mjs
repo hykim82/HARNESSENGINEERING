@@ -112,8 +112,10 @@ function writeTaskFile(dir, { taskId, droppedAt }) {
   );
 }
 function writeCompletedTaskFile(dir, { taskId, droppedAt }) {
-  // 결과 파일이 이미 있는 "완료된" 배달 -- selectActiveDispatch가 이걸
-  // 활성으로 고르지 않는다(gap#77의 계약 그대로 재사용).
+  // 결과 파일이 이미 있고 이번 배달의 `>>> DONE:` 줄까지 있는 "진짜로
+  // 완료된" 배달 -- selectActiveDispatch가 이걸 활성으로 고르지 않는다
+  // (HYK-201부터 resultFileDone까지 확인해야 완료로 인정한다, 표지만
+  // 쓰인 구간과 구별하기 위해 DONE 줄을 반드시 함께 쓴다).
   mkdirSync(join(dir, ".harness"), { recursive: true });
   writeFileSync(
     join(dir, ".harness", "coder-task.md"),
@@ -122,7 +124,7 @@ function writeCompletedTaskFile(dir, { taskId, droppedAt }) {
   );
   writeFileSync(
     join(dir, ".harness", "coder.md"),
-    `task_id: ${taskId}\n\n완료\n`,
+    `task_id: ${taskId}\n\n완료\n>>> DONE: ${taskId} @ ${droppedAt} KST\n`,
     "utf8",
   );
 }
@@ -182,6 +184,20 @@ const COMPLETED = [
     path: ".harness/coder-task.md",
     droppedAtMs: Date.parse("2026-08-04T09:00:00+09:00"),
     resultFile: { exists: true },
+    resultFileDone: true,
+  },
+];
+// HYK-201 §2-1 -- 결과 파일은 있지만 이번 배달의 DONE 줄이 아직 없다
+// (표지만 쓰인 구간). 이 좌석은 이제 "활성 배달 있음"으로 재분류되므로
+// seat-idle 축은 이 좌석을 잃는다 -- 이건 회귀가 아니라 원래 seat-idle의
+// 대상이 아니었던 좌석을 seat-liveness 축에 정확히 넘기는 것이다(그
+// 좌석은 여전히 일하는 중이라 "방치"가 아니다, coder.md §2-1 근거 참조).
+const STILL_WRITING = [
+  {
+    path: ".harness/coder-task.md",
+    droppedAtMs: Date.parse("2026-08-04T09:00:00+09:00"),
+    resultFile: { exists: true },
+    resultFileDone: false,
   },
 ];
 
@@ -207,13 +223,33 @@ test("(b) judgeSeatIdleForRepo: no active dispatch (empty task files) -> proceed
   assert.equal(r.status, SEAT_IDLE_WIRE_STATUS.NO_SEAT);
 });
 
-test("(b) judgeSeatIdleForRepo: only a completed dispatch (result file already exists) -> not active, proceeds to judge", () => {
+test("(b) judgeSeatIdleForRepo: only a completed dispatch (result file already exists + resultFileDone: true) -> not active, proceeds to judge", () => {
   const execFn = fakeOrcaExecFn({ terminals: [] });
   const r = judgeSeatIdleForRepo(
     { repoRoot: "C:/wt", droppedTaskFiles: COMPLETED, now: 1_000_000_000_000 },
     { execFn },
   );
   assert.equal(r.status, SEAT_IDLE_WIRE_STATUS.NO_SEAT);
+});
+
+// HYK-201 §2-1 -- 결과 파일은 있지만 이번 배달의 DONE 줄이 아직 없는
+// (표지만 쓰인) 좌석은 이제 seat-idle 축의 대상이 아니다(위 STILL_WRITING
+// 주석 참조) -- seat-liveness 축으로 옮겨간다(옳은 이동, 회귀 아님).
+test("(b) judgeSeatIdleForRepo: 결과 파일은 있지만 DONE 줄이 아직 없음(표지만 쓰인 구간) -> 여전히 활성 배달로 분류되어 NOT_APPLICABLE(이 좌석은 이제 seat-liveness 축의 몫)", () => {
+  const execFn = () => {
+    throw new Error(
+      "must not be called -- an active (still-writing) dispatch belongs to the liveness axis",
+    );
+  };
+  const r = judgeSeatIdleForRepo(
+    {
+      repoRoot: "C:/wt",
+      droppedTaskFiles: STILL_WRITING,
+      now: 1_000_000_000_000,
+    },
+    { execFn },
+  );
+  assert.equal(r.status, SEAT_IDLE_WIRE_STATUS.NOT_APPLICABLE);
 });
 
 test("judgeSeatIdleForRepo: no active dispatch but zero seats found -> NO_SEAT (normal, not a failure)", () => {
