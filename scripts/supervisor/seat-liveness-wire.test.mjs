@@ -31,11 +31,16 @@ import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
 import {
   selectActiveDispatch,
+  selectActiveDispatchForStart,
   judgeSeatLivenessForRepo,
   judgeSeatLivenessAcrossWorktrees,
+  judgeSeatIdleForRepo,
+  judgeDispatchStartForRepo,
   runOrchStallDetect,
   SEAT_LIVENESS_WIRE_STATUS,
   SEAT_LIVENESS_SCAN_FAILURE,
+  SEAT_IDLE_WIRE_STATUS,
+  DISPATCH_START_WIRE_STATUS,
 } from "./orch-stall-detect.mjs";
 import {
   SEAT_LIVENESS_VERDICT,
@@ -1104,6 +1109,257 @@ test("NC mutation/HYK-201 #3 (목록 밖 자유 변조): selectActiveDispatch의
     picked,
     newer,
     "mutant must pick the stale older dispatch instead of the real most-recent one (RED signal; proves the sort direction is load-bearing)",
+  );
+});
+
+// ---------------------------------------------------------------------------
+// HYK-202 guard contract -- isDispatchStillActive(:624)의
+// `Number.isFinite(item.droppedAtMs)` 가드를 시험으로 고정한다.
+//
+// §2 판정((나) -- 지금은 도달 불가, defense in depth): 이 가드가 실제로
+// 막는 값을 만드는 생산자는 `droppedTaskFiles` 배열을 만드는
+// `buildDroppedTaskFileItem`(:338) 하나뿐이다 -- 그 함수는 `Number.isNaN`인
+// 경우를 이미 `null`로 접어서 내보내고(:355), `Date.parse`는 애초에
+// `Infinity`를 만들 수 없다(JS Date 타임스탬프는 항상 유한하거나 NaN).
+// 즉 오늘의 생산 경로는 NaN·Infinity를 이 가드까지 보내지 않는다. 이
+// 계약이 고정하는 것은 "지금 막는다"가 아니라 ***"생산자가 바뀌어도 이
+// 경계는 조용히 열리지 않는다"*** -- 아래 가드-제거 mutation이 그 경계
+// 자체를 표적으로 삼는다.
+//
+// 이 계약이 보장하지 않는 것: `null`·문자열 입력은 이 가드
+// (`Number.isFinite`)가 막는 게 아니라 그 **앞의** `typeof item.droppedAtMs
+// !== "number"` 검사가 막는다(`typeof null === "object"`, `typeof "x" ===
+// "string"`) -- 아래 두 케이스는 이름·주석에 그 사실을 명시해 어느 검사가
+// 무엇을 막는지 뒤섞지 않는다.
+// ---------------------------------------------------------------------------
+function itemWith(droppedAtMs) {
+  return {
+    path: ".harness/coder-task.md",
+    taskId: "HYK-202-guard-1",
+    droppedAtMs,
+    resultFile: { exists: false },
+    resultFileDone: null,
+    taskIdMismatch: false,
+  };
+}
+
+test("HYK-202 guard/selectActiveDispatch: NaN droppedAtMs -> not picked (Number.isFinite(NaN) === false -- the ONLY check that blocks NaN, typeof NaN === 'number' passes the earlier typeof guard)", () => {
+  assert.equal(selectActiveDispatch([itemWith(NaN)]), null);
+});
+
+test("HYK-202 guard/selectActiveDispatch: Infinity droppedAtMs -> not picked (Number.isFinite(Infinity) === false -- the ONLY check that blocks Infinity, typeof Infinity === 'number' passes the earlier typeof guard)", () => {
+  assert.equal(selectActiveDispatch([itemWith(Infinity)]), null);
+});
+
+test("HYK-202 guard/selectActiveDispatch: null droppedAtMs -> not picked (blocked by the EARLIER `typeof !== 'number'` check, not by Number.isFinite -- typeof null === 'object')", () => {
+  assert.equal(selectActiveDispatch([itemWith(null)]), null);
+});
+
+test("HYK-202 guard/selectActiveDispatch: string droppedAtMs -> not picked (blocked by the EARLIER `typeof !== 'number'` check, not by Number.isFinite -- typeof '2026-01-01' === 'string')", () => {
+  assert.equal(selectActiveDispatch([itemWith("2026-01-01")]), null);
+});
+
+test("HYK-202 guard/selectActiveDispatch: an ordinary finite number droppedAtMs -> picked (control: the guard does not over-block valid input)", () => {
+  const item = itemWith(1_754_290_000_000);
+  assert.equal(selectActiveDispatch([item]), item);
+});
+
+test("HYK-202 guard/selectActiveDispatchForStart: shares the identical NaN/Infinity guard (alias of selectActiveDispatch per HYK-201)", () => {
+  assert.equal(selectActiveDispatchForStart([itemWith(NaN)]), null);
+  assert.equal(selectActiveDispatchForStart([itemWith(Infinity)]), null);
+});
+
+// ---------------------------------------------------------------------------
+// 세 축(seat-liveness/seat-idle/dispatch-start) 각각에서 NaN·Infinity가
+// "그 값이 들어오면 어떤 상태가 되는가"를 단언한다(coder-task.md §3-2).
+// 셋 다 selectActiveDispatch(Start)를 공유하므로 가드가 막으면 세 축
+// 모두 "활성 배달 없음"으로 수렴하지만, 그 결과로 도달하는 최종 status는
+// 축마다 다르다(liveness/dispatch-start는 즉시 NOT_APPLICABLE, seat-idle은
+// 반대로 "활성 배달 없음"일 때 관측을 진행한다).
+// ---------------------------------------------------------------------------
+for (const [label, badValue] of [
+  ["NaN", NaN],
+  ["Infinity", Infinity],
+]) {
+  test(`HYK-202 guard/three axes (${label}): seat-liveness -> NOT_APPLICABLE (guard blocks it from being "active", so this axis has nothing to judge)`, () => {
+    const r = judgeSeatLivenessForRepo(
+      {
+        repoRoot: "C:/wt",
+        droppedTaskFiles: [itemWith(badValue)],
+        now: 1_000_000_000_000,
+      },
+      {
+        execFn: () => {
+          throw new Error(
+            "must not be called -- guard should already have excluded this item",
+          );
+        },
+      },
+    );
+    assert.equal(r.status, SEAT_LIVENESS_WIRE_STATUS.NOT_APPLICABLE);
+  });
+
+  test(`HYK-202 guard/three axes (${label}): dispatch-start -> NOT_APPLICABLE (same shared guard, same immediate short-circuit)`, () => {
+    const r = judgeDispatchStartForRepo(
+      {
+        repoRoot: "C:/wt",
+        droppedTaskFiles: [itemWith(badValue)],
+        now: 1_000_000_000_000,
+      },
+      {
+        execFn: () => {
+          throw new Error(
+            "must not be called -- guard should already have excluded this item",
+          );
+        },
+      },
+    );
+    assert.equal(r.status, DISPATCH_START_WIRE_STATUS.NOT_APPLICABLE);
+  });
+
+  test(`HYK-202 guard/three axes (${label}): seat-idle -> proceeds to observe (guard blocks it from being "active", and seat-idle's contract is the mirror: no active dispatch -> this axis IS the one on point; zero real seats here -> NO_SEAT)`, () => {
+    const execFn = fakeOrcaExecFn({ terminals: [] });
+    const r = judgeSeatIdleForRepo(
+      {
+        repoRoot: "C:/wt",
+        droppedTaskFiles: [itemWith(badValue)],
+        now: 1_000_000_000_000,
+      },
+      { execFn },
+    );
+    assert.equal(r.status, SEAT_IDLE_WIRE_STATUS.NO_SEAT);
+  });
+}
+
+// ---------------------------------------------------------------------------
+// ★★필수(coder-task.md §4) -- 가드(`Number.isFinite(item.droppedAtMs)`)를
+// 제거한 사본에서 위 계약이 RED가 되는 것을 고정한다. 세 축 중
+// seat-liveness를 표적으로 삼는다(가드가 없으면 NaN 항목이 "활성"으로
+// 오인되어 NOT_APPLICABLE 대신 실제로 판정(JUDGED)까지 간다).
+// ---------------------------------------------------------------------------
+test("NC mutation/HYK-202 #1 (필수 -- 가드 제거): isDispatchStillActive에서 Number.isFinite 검사를 지움 -> RED (NaN 항목이 '활성'으로 오인되어 seat-liveness가 NOT_APPLICABLE 대신 JUDGED까지 간다)", async () => {
+  const mutant = await importMutatedSibling(
+    (src) =>
+      applyMutation(
+        src,
+        `  if (
+    !item ||
+    typeof item.droppedAtMs !== "number" ||
+    !Number.isFinite(item.droppedAtMs) ||
+    !item.resultFile
+  ) {
+    return false;
+  }`,
+        `  if (
+    !item ||
+    typeof item.droppedAtMs !== "number" ||
+    !item.resultFile
+  ) {
+    return false;
+  }`,
+      ),
+    "202-1",
+  );
+  const execFn = fakeOrcaExecFn({
+    terminals: [{ handle: "term_x", worktreePath: "C:/wt" }],
+    showsByHandle: {
+      term_x: {
+        ok: true,
+        result: { terminal: { lastOutputAt: 999_000_000_000, title: "CODER" } },
+      },
+    },
+  });
+  const r = mutant.judgeSeatLivenessForRepo(
+    {
+      repoRoot: "C:/wt",
+      droppedTaskFiles: [itemWith(NaN)],
+      now: 1_000_000_000_000,
+    },
+    { execFn },
+  );
+  assert.notEqual(
+    r.status,
+    "SEAT_LIVENESS_NOT_APPLICABLE",
+    "mutant must wrongly treat the NaN-droppedAtMs item as an active dispatch and actually judge it (RED signal; proves Number.isFinite is load-bearing)",
+  );
+});
+
+// 추가 변조 #1(목록 안 -- §1 표의 +Infinity 행을 정확히 재현하는 «그럴듯한
+// 실수»): `Number.isFinite`를 하한만 있는 부등식(`x > -Infinity`)으로
+// 바꿔치기 -- NaN·-Infinity·null·문자열은 여전히 막히지만(직접 실측,
+// `null > -Infinity`는 0 > -Infinity로 강제형변환돼 통과하지만 그 앞의
+// `typeof` 검사가 여전히 막는다), **+Infinity만** 새서 통과한다.
+test("NC mutation/HYK-202 #2 (목록 안 -- +Infinity만 새는 상한 누락): Number.isFinite를 'x > -Infinity'(상한 검사 없음)로 바꿔치기 -> RED (+Infinity가 가드를 통과해 활성으로 오인된다)", async () => {
+  const mutant = await importMutatedSibling(
+    (src) =>
+      applyMutation(
+        src,
+        `    !Number.isFinite(item.droppedAtMs) ||`,
+        `    !(item.droppedAtMs > -Infinity) ||`,
+      ),
+    "202-2",
+  );
+  const execFn = fakeOrcaExecFn({
+    terminals: [{ handle: "term_x", worktreePath: "C:/wt" }],
+    showsByHandle: {
+      term_x: {
+        ok: true,
+        result: { terminal: { lastOutputAt: 999_000_000_000, title: "CODER" } },
+      },
+    },
+  });
+  const r = mutant.judgeSeatLivenessForRepo(
+    {
+      repoRoot: "C:/wt",
+      droppedTaskFiles: [itemWith(Infinity)],
+      now: 1_000_000_000_000,
+    },
+    { execFn },
+  );
+  assert.notEqual(
+    r.status,
+    "SEAT_LIVENESS_NOT_APPLICABLE",
+    "mutant must wrongly treat +Infinity as a valid, active droppedAtMs once the upper bound is dropped (RED signal; proves Number.isFinite's upper-bound check is load-bearing, distinct from the lower-bound mutation below)",
+  );
+});
+
+// 추가 변조 #2(★목록 밖 -- 자유 변조): Number.isFinite를 부호 없는
+// 유한성 검사(Number.isFinite(Math.abs(x)))로 바꿔치기 -- 언뜻 동치처럼
+// 보이지만 NaN은 Math.abs(NaN)도 NaN이라 여전히 막히고 Infinity도
+// 마찬가지라, 실제로는 이 변조로 아무 시험도 안 깨질 수 있다. 그래서
+// 대신 "제거"가 아니라 "약화"를 시험한다: `-Infinity`(음의 무한대) 하나만
+// 통과시키는 실수(부호 검사 누락)를 재현한다.
+test("NC mutation/HYK-202 #3 (★목록 밖 -- 자유 변조): Number.isFinite를 'x === x && x < Infinity'(음의 무한대 누락)로 바꿔치기 -> RED (-Infinity가 가드를 통과해 활성으로 오인된다)", async () => {
+  const mutant = await importMutatedSibling(
+    (src) =>
+      applyMutation(
+        src,
+        `    !Number.isFinite(item.droppedAtMs) ||`,
+        `    !(item.droppedAtMs === item.droppedAtMs && item.droppedAtMs < Infinity) ||`,
+      ),
+    "202-3",
+  );
+  const execFn = fakeOrcaExecFn({
+    terminals: [{ handle: "term_x", worktreePath: "C:/wt" }],
+    showsByHandle: {
+      term_x: {
+        ok: true,
+        result: { terminal: { lastOutputAt: 999_000_000_000, title: "CODER" } },
+      },
+    },
+  });
+  const r = mutant.judgeSeatLivenessForRepo(
+    {
+      repoRoot: "C:/wt",
+      droppedTaskFiles: [itemWith(-Infinity)],
+      now: 1_000_000_000_000,
+    },
+    { execFn },
+  );
+  assert.notEqual(
+    r.status,
+    "SEAT_LIVENESS_NOT_APPLICABLE",
+    "mutant must wrongly treat -Infinity as a valid, active droppedAtMs (RED signal; proves the guard covers BOTH signs of Infinity, not just +Infinity)",
   );
 });
 
