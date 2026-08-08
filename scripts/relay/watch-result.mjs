@@ -1,4 +1,7 @@
-import { checkRelayHandshake } from "../check/relay-handshake.mjs";
+import {
+  checkRelayHandshake,
+  RESULT_BLOCK_STATE,
+} from "../check/relay-handshake.mjs";
 
 // Single declarations (C.7): every default and every exit code this module
 // hands out traces back to exactly one of these, never a repeated literal.
@@ -23,6 +26,19 @@ export const EXIT_CONFIG_INVALID = 4;
 // (`watchResult({maxWaitS:1, checkFn:() => ({ok:false,
 // reason:'unexpected handshake parser shape'})})` never terminated).
 export const EXIT_UNJUDGABLE = 5;
+// HYK-173-escalation-2 (REVIEW 반려 (3) 수리): checkRelayHandshake의
+// `result.state`(HYK-173-escalation-1)가 여태 이 저장소의 어떤 생산
+// 소비자에게도 읽히지 않았다 -- 판정 장치는 있는데 아무도 안 읽는 상태
+// (REVIEW 실측: watch-result.mjs/relay-core.mjs/orch-stall-detect.mjs 전부
+// reason 문자열만 보고 state를 무시). 이 라운드는 그 소비자를 정확히
+// 하나만 이 모듈에 결선한다(coder-task.md §2-2 "딱 하나만" -- 범위 폭발
+// 방지, orch-stall-detect.mjs는 다른 트랙 HYK-207 표면이라 손대지 않음).
+// EXIT_DONE(0)/EXIT_TICK(3)/EXIT_CONFIG_INVALID(4)/EXIT_UNJUDGABLE(5)
+// 어느 것과도 겹치지 않는 새 코드 -- "막힘"을 "아직 진행 중"이나 "형태를
+// 모르는 실패"와 같은 코드로 접지 않는다는 이 파일의 기존 원칙을 그대로
+// 확장한다. ⛔자동 재개·자동 조치는 여전히 0 -- 이 모듈은 계속 상태를
+// 보고하고 종료할 뿐이다.
+export const EXIT_BLOCKED = 6;
 
 // checkRelayHandshake's `ok:false` reasons fall into three families this
 // module must never confuse (HYK-136/HYK-160-coder-2 게이트 계약): a CONFIG
@@ -68,6 +84,30 @@ export function classifyWatchFailure(reason) {
   return "unjudgable";
 }
 
+// HYK-173-escalation-2 (§2-2): every non-PENDING state
+// checkRelayHandshake's RESULT_BLOCK_STATE can produce belongs to the
+// "blocked family" this module now reports as its own distinct `blocked`
+// status -- BLOCKED/NEEDS_INPUT (explicit worker signal) as well as
+// MALFORMED_BLOCKED/AMBIGUOUS_BLOCKED (an attempted marker that is broken
+// or ambiguous). All four share the same fail-closed posture: none of them
+// is "still safely pending," so none may fall through to the old
+// reason-string classification's `pending` bucket. `RESULT_BLOCK_STATE.NONE`
+// and the absent-state case (a plain missing-DONE PENDING result carries no
+// `state` field distinct from this set) are deliberately excluded --
+// PENDING keeps going through the existing classifyWatchFailure path
+// unchanged (regression 0 on the pre-existing pending/config/unjudgable
+// split, per relay-handshake.test.mjs (y)/1R's DONE-wins invariant).
+const BLOCKED_FAMILY_STATES = new Set([
+  RESULT_BLOCK_STATE.BLOCKED,
+  RESULT_BLOCK_STATE.NEEDS_INPUT,
+  RESULT_BLOCK_STATE.MALFORMED_BLOCKED,
+  RESULT_BLOCK_STATE.AMBIGUOUS_BLOCKED,
+]);
+
+export function isBlockedFamilyState(state) {
+  return typeof state === "string" && BLOCKED_FAMILY_STATES.has(state);
+}
+
 function defaultSleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -92,6 +132,24 @@ function resolveCheckOutcome(result, elapsedS) {
   }
   if (result.threw) {
     return null;
+  }
+  // HYK-173-escalation-2 (§2-2): checked before the old reason-string
+  // classification -- an explicit BLOCKED/NEEDS_INPUT/MALFORMED_BLOCKED/
+  // AMBIGUOUS_BLOCKED `state` is a stronger, structured signal than the
+  // reason-string patterns below and must not be reduced back down to
+  // whatever bucket its reason text happens to string-match (today that
+  // would be "unjudgable" for BLOCKED/NEEDS_INPUT -- REVIEW's exact
+  // complaint: the state exists but nothing reads it). DONE still wins
+  // unconditionally (the `result.ok` branch above returns first, and
+  // checkRelayHandshake never sets `state` alongside `ok:true`), so this
+  // does not touch the "DONE wins" priority 1R's test (y) already froze.
+  if (isBlockedFamilyState(result.state)) {
+    return {
+      status: "blocked",
+      state: result.state,
+      reason: `WATCH_BLOCKED: ${result.state}: ${result.reason}`,
+      elapsedS,
+    };
   }
   const classification = classifyWatchFailure(result.reason);
   if (classification === "config") {
@@ -248,6 +306,9 @@ if (invokedDirectly) {
   } else if (result.status === "unjudgable") {
     console.error(result.reason);
     process.exit(EXIT_UNJUDGABLE);
+  } else if (result.status === "blocked") {
+    console.error(result.reason);
+    process.exit(EXIT_BLOCKED);
   } else {
     console.log(`TICK: ${result.reason}`);
     process.exit(EXIT_TICK);

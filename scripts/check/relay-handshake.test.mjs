@@ -219,6 +219,11 @@ test("(h) id matches but result has no DONE line -> blocked (fail-closed)", () =
     const result = checkRelayHandshake({ role: "coder", harnessDir: dir });
     assert.equal(result.ok, false);
     assert.match(result.reason, /missing ">>> DONE/);
+    assert.equal(
+      result.state,
+      "PENDING",
+      "genuine no-marker-at-all absence must resolve to the distinct PENDING state, not just ok:false",
+    );
   });
 });
 
@@ -396,6 +401,276 @@ test("(o) frozen: malformed seconds (single digit) still rejected", () => {
     assert.match(result.reason, /dropped_at not parseable/);
   });
 });
+// ---------------------------------------------------------------------------
+// HYK-173-escalation-1 §2: 결과 파일 상태 확장 -- 「막혔다」와 「아직
+// 진행 중(pending)」을 판정기가 서로 다른 값으로 낸다. 4종 합성 결과
+// 파일(정상 DONE / 막힘 상태 / DONE도 막힘도 없음(진짜 pending) / 형식이
+// 깨진 막힘 표기)을 고정한다. 정상 DONE은 위 (a)가 이미 고정하므로
+// (result.state는 그 경로에서 세팅되지 않는다 -- 회귀 0), 여기서는 나머지
+// 3종 + 정상 DONE에 BLOCKED 마커가 섞여도 무시된다는 회귀 보강만 추가한다.
+// ---------------------------------------------------------------------------
+
+test("HYK-173-escalation-1 (s) explicit BLOCKED marker, no DONE line -> state=BLOCKED, distinct from PENDING", () => {
+  withFixtureDir((dir) => {
+    writeTask(
+      dir,
+      "coder",
+      "task_id: HYK-1\ndropped_at: 2026-08-08 21:00 KST\n",
+    );
+    writeResult(
+      dir,
+      "coder",
+      "task_id: HYK-1\n\nreproduce 실패, 재현 조건 불명\n\n>>> BLOCKED: 재현 실패 -- 조건 불명\n",
+    );
+    const result = checkRelayHandshake({ role: "coder", harnessDir: dir });
+    assert.equal(result.ok, false);
+    assert.equal(result.state, "BLOCKED");
+    assert.match(
+      result.reason,
+      /worker reported BLOCKED: 재현 실패 -- 조건 불명/,
+    );
+  });
+});
+
+test("HYK-173-escalation-1 (t) explicit NEEDS_INPUT marker, no DONE line -> state=NEEDS_INPUT, distinct from PENDING and from BLOCKED", () => {
+  withFixtureDir((dir) => {
+    writeTask(
+      dir,
+      "coder",
+      "task_id: HYK-1\ndropped_at: 2026-08-08 21:00 KST\n",
+    );
+    writeResult(
+      dir,
+      "coder",
+      "task_id: HYK-1\n\nQUESTION: 어느 방향으로 갈지 결정 필요\n\n>>> NEEDS_INPUT: 게이트 신호 대기 중\n",
+    );
+    const result = checkRelayHandshake({ role: "coder", harnessDir: dir });
+    assert.equal(result.ok, false);
+    assert.equal(result.state, "NEEDS_INPUT");
+    assert.match(
+      result.reason,
+      /worker reported NEEDS_INPUT: 게이트 신호 대기 중/,
+    );
+  });
+});
+
+test("HYK-173-escalation-1 (u) no DONE and no BLOCKED/NEEDS_INPUT marker -> state=PENDING (genuinely still in progress, not blocked)", () => {
+  withFixtureDir((dir) => {
+    writeTask(
+      dir,
+      "coder",
+      "task_id: HYK-1\ndropped_at: 2026-08-08 21:00 KST\n",
+    );
+    writeResult(dir, "coder", "task_id: HYK-1\n\n작업 중, 아직 보고 없음\n");
+    const result = checkRelayHandshake({ role: "coder", harnessDir: dir });
+    assert.equal(result.ok, false);
+    assert.equal(result.state, "PENDING");
+  });
+});
+
+test("HYK-173-escalation-1 (v) malformed blocked marker (mid-line, not column-0) -> state=MALFORMED_BLOCKED, fail-closed (NOT silently folded into PENDING or accepted as ok)", () => {
+  withFixtureDir((dir) => {
+    writeTask(
+      dir,
+      "coder",
+      "task_id: HYK-1\ndropped_at: 2026-08-08 21:00 KST\n",
+    );
+    writeResult(
+      dir,
+      "coder",
+      "task_id: HYK-1\n\nstatus note: >>> BLOCKED: mid-line, not a standalone marker\n",
+    );
+    const result = checkRelayHandshake({ role: "coder", harnessDir: dir });
+    assert.equal(result.ok, false);
+    assert.equal(result.state, "MALFORMED_BLOCKED");
+    assert.notEqual(
+      result.state,
+      "PENDING",
+      "a malformed blocked marker must not silently fall back to plain pending",
+    );
+  });
+});
+
+test("HYK-173-escalation-1 (w) malformed blocked marker (empty reason after colon) -> state=MALFORMED_BLOCKED, fail-closed", () => {
+  withFixtureDir((dir) => {
+    writeTask(
+      dir,
+      "coder",
+      "task_id: HYK-1\ndropped_at: 2026-08-08 21:00 KST\n",
+    );
+    writeResult(dir, "coder", "task_id: HYK-1\n\n>>> BLOCKED:   \n");
+    const result = checkRelayHandshake({ role: "coder", harnessDir: dir });
+    assert.equal(result.ok, false);
+    assert.equal(result.state, "MALFORMED_BLOCKED");
+  });
+});
+
+test("HYK-173-escalation-1 (x) two BLOCKED lines -> state=AMBIGUOUS_BLOCKED, not silently resolved to either", () => {
+  withFixtureDir((dir) => {
+    writeTask(
+      dir,
+      "coder",
+      "task_id: HYK-1\ndropped_at: 2026-08-08 21:00 KST\n",
+    );
+    writeResult(
+      dir,
+      "coder",
+      "task_id: HYK-1\n\n>>> BLOCKED: first reason\n>>> BLOCKED: second reason\n",
+    );
+    const result = checkRelayHandshake({ role: "coder", harnessDir: dir });
+    assert.equal(result.ok, false);
+    assert.equal(result.state, "AMBIGUOUS_BLOCKED");
+  });
+});
+
+test("HYK-173-escalation-1 (y) regression: a normal DONE result with an incidental '>>> BLOCKED:' string still resolves ok=true (DONE path untouched, blocked check never runs when DONE resolves)", () => {
+  withFixtureDir((dir) => {
+    writeTask(
+      dir,
+      "coder",
+      "task_id: HYK-1\ndropped_at: 2026-07-05 06:00 KST\n",
+    );
+    writeResult(
+      dir,
+      "coder",
+      "task_id: HYK-1\n\nearlier round note: >>> BLOCKED: old, resolved already\n\n>>> DONE: CODER @ 2026-07-05 06:10 KST\n",
+    );
+    const result = checkRelayHandshake({ role: "coder", harnessDir: dir });
+    assert.equal(result.ok, true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// HYK-173-escalation-2 §2-1: REVIEW 반려 (1)/(2)의 4개 반례를 시험으로
+// 못 박는다 -- 화살표 뒤 개행 · 콜론 뒤 개행 · 유효+깨진 공존 · 줄중간
+// 표지. 앞 셋은 1R에는 없던 반례(REVIEW가 mkdtemp로 직접 주입해 잡음),
+// 넷째(줄중간)는 1R의 (v)가 이미 고정했지만 REVIEW 반례 목록에도 있으므로
+// 여기 다시 명시해 이 라운드의 "4개 반례" 완결성을 이 파일 하나로도
+// 확인할 수 있게 한다.
+// ---------------------------------------------------------------------------
+
+test("HYK-173-escalation-2 (z1) REVIEW repro: newline right after '>>>' (before the keyword) -> MALFORMED_BLOCKED, NOT accepted as a valid one-line marker", () => {
+  withFixtureDir((dir) => {
+    writeTask(
+      dir,
+      "coder",
+      "task_id: HYK-1\ndropped_at: 2026-08-08 21:00 KST\n",
+    );
+    writeResult(dir, "coder", "task_id: HYK-1\n\n>>>\nBLOCKED: split\n");
+    const result = checkRelayHandshake({ role: "coder", harnessDir: dir });
+    assert.equal(result.ok, false);
+    assert.equal(result.state, "MALFORMED_BLOCKED");
+    assert.notEqual(
+      result.state,
+      "BLOCKED",
+      "the pre-repair `\\s*` swallowed the newline and wrongly accepted this as a valid single-line marker",
+    );
+  });
+});
+
+test("HYK-173-escalation-2 (z2) REVIEW repro: newline right after the colon (reason on the next line) -> MALFORMED_BLOCKED, NOT accepted as a valid one-line marker", () => {
+  withFixtureDir((dir) => {
+    writeTask(
+      dir,
+      "coder",
+      "task_id: HYK-1\ndropped_at: 2026-08-08 21:00 KST\n",
+    );
+    writeResult(
+      dir,
+      "coder",
+      "task_id: HYK-1\n\n>>> BLOCKED:\nreason on next line\n",
+    );
+    const result = checkRelayHandshake({ role: "coder", harnessDir: dir });
+    assert.equal(result.ok, false);
+    assert.equal(result.state, "MALFORMED_BLOCKED");
+    assert.notEqual(
+      result.state,
+      "BLOCKED",
+      "the pre-repair `\\s*` between the colon and the reason swallowed the newline and wrongly accepted this as valid",
+    );
+  });
+});
+
+test("HYK-173-escalation-2 (z3) REVIEW repro: a well-formed BLOCKED line coexists with a separate malformed (mid-line) one -> MALFORMED_BLOCKED, not silently resolved to the well-formed match", () => {
+  withFixtureDir((dir) => {
+    writeTask(
+      dir,
+      "coder",
+      "task_id: HYK-1\ndropped_at: 2026-08-08 21:00 KST\n",
+    );
+    writeResult(
+      dir,
+      "coder",
+      "task_id: HYK-1\n\n>>> BLOCKED: valid\nstatus: >>> BLOCKED: midline\n",
+    );
+    const result = checkRelayHandshake({ role: "coder", harnessDir: dir });
+    assert.equal(result.ok, false);
+    assert.equal(result.state, "MALFORMED_BLOCKED");
+    assert.notEqual(
+      result.state,
+      "BLOCKED",
+      "the pre-repair code stopped looking for near-misses the moment it found one strict match, so the separate broken line was silently ignored",
+    );
+  });
+});
+
+test("HYK-173-escalation-2 (z4) REVIEW repro: mid-line marker only (no column-0 marker at all) -> MALFORMED_BLOCKED (re-pinned here alongside the other 3 repros; already covered by 1R's (v))", () => {
+  withFixtureDir((dir) => {
+    writeTask(
+      dir,
+      "coder",
+      "task_id: HYK-1\ndropped_at: 2026-08-08 21:00 KST\n",
+    );
+    writeResult(
+      dir,
+      "coder",
+      "task_id: HYK-1\n\nstatus note: >>> BLOCKED: mid-line, not a standalone marker\n",
+    );
+    const result = checkRelayHandshake({ role: "coder", harnessDir: dir });
+    assert.equal(result.ok, false);
+    assert.equal(result.state, "MALFORMED_BLOCKED");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// HYK-173-escalation-2 §2-3: 판단 -- 태스크 지시문이 결과 파일에 그대로
+// 붙어 column-0 `>>> BLOCKED: <reason>` 한 줄이 "우연히" 만들어지는
+// 경우, 이 라운드는 ⓐ를 선택한다 -- 그대로 "막힘"으로 본다(거짓 양성일
+// 수 있지만 fail-loud). 근거: ⓑ(표지를 task_id에 결속)는 표지 계약을
+// 바꾸므로 1R 시험 전체를 함께 고쳐야 하고, streak=1인 이번 라운드에
+// 그 비용까지 얹는 건 위험이 더 크다. 이 저장소가 반복해 온 원칙("판정
+// 불가/애매함은 조용히 접지 말고 드러내라")과도 ⓐ가 더 맞는다 -- 거짓
+// BLOCKED 알림은 성가시지만 안전한 실패(사람이 보고 "이건 아니네" 하고
+// 넘기면 그만)고, 반대로 진짜 막힘을 조용히 pending으로 접는 게 이
+// 이슈가 막으려는 바로 그 사고다. 이 시험은 그 판정을 고정한다 -- 지우면
+// (즉 우연한 삽입을 구별해 무시하도록 바꾸면) RED가 된다.
+// ---------------------------------------------------------------------------
+
+test("HYK-173-escalation-2 (z5) §2-3 판정 ⓐ: task-content가 그대로 결과 파일에 붙어 우연히 column-0 BLOCKED 한 줄이 생겨도 그대로 BLOCKED로 본다(거짓 양성 감수, fail-loud -- task_id 결속 등 우연 구별 방어를 넣지 않기로 한 결정을 고정)", () => {
+  withFixtureDir((dir) => {
+    writeTask(
+      dir,
+      "coder",
+      "task_id: HYK-1\ndropped_at: 2026-08-08 21:00 KST\n",
+    );
+    // 태스크 파일 문구를 그대로 복사-붙여넣기한 것을 흉내: 지시문 안의
+    // 예시 줄이 column-0에 그대로 옮겨졌다.
+    writeResult(
+      dir,
+      "coder",
+      "task_id: HYK-1\n\n(참고용으로 지시 원문을 그대로 붙여둔다)\n>>> BLOCKED: <이유>\n",
+    );
+    const result = checkRelayHandshake({ role: "coder", harnessDir: dir });
+    assert.equal(result.ok, false);
+    assert.equal(
+      result.state,
+      "BLOCKED",
+      "§2-3 ⓐ 결정: 우연한 삽입을 구별하지 않는다 -- 그대로 BLOCKED (fail-loud)",
+    );
+    assert.match(result.reason, /worker reported BLOCKED: <이유>/);
+  });
+});
+
 // ---------------------------------------------------------------------------
 // HYK-189 §완료조건 (a): 인자 없음 -> exit 1, stderr가 usage 문자열과
 // 정확히 일치, 프로세스 실행 실패 0건. 느슨한 "exit !== 0" 단언은
