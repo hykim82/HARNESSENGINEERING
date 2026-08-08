@@ -11,6 +11,17 @@ import { join } from "node:path";
 // 쓰지/지우지 않는다 -- relay-handshake/review-gate/reject-streak 등 그
 // 파일을 읽는 기존 소비자는 이 모듈의 존재를 몰라도 그대로 동작한다.
 // 보존은 항상 "추가"(다른 경로에 사본을 하나 더 남기는 것)일 뿐이다.
+//
+// HYK-204 2R (검토 §C 지적, 확정 한계 -- 아직 안 덮이는 라운드 1건):
+// 이 모듈은 오직 CONFIRMED 라운드만 안다 -- `checkRelayHandshake`가
+// ok:true를 반환한 순간, 또는 `review-gate.mjs`의 커밋 승인 순간에만
+// 호출된다. **핸드셰이크 자체가 실패한 라운드(예: 워커가 `>>> DONE:` 줄을
+// 잘못 쓰거나 `task_id:` 표지가 어긋난 라운드)는 원문이 전혀 남지 않는다**
+// -- archiveRoundEnvelope가 호출되는 지점 자체가 없기 때문이다
+// (envelope-archive.test.mjs의 "wiring: checkRelayHandshake blocked
+// (mismatch) -> no archive is written" 시험이 이 구멍을 직접 증명한다).
+// 이 트랙은 이 구멍을 고치지 않는다 -- 다음 사람이 "라운드가 덮인다"를
+// 과신하지 않도록 기재만 한다.
 
 const ARCHIVE_SUBDIR = "rounds";
 
@@ -23,6 +34,19 @@ function escapeForRegex(str) {
 // -- "동일 파일명 재사용(=덮어쓰기 재발)"을 막는 것이 이 함수의 유일한
 // 계약이므로, 순번을 건너뛰거나 파일이 지워졌더라도 기존 최댓값+1을 써서
 // 절대 과거 순번을 재사용하지 않는다.
+//
+// HYK-204 2R (검토 §C 목록 밖 지적, 확정 한계 -- TOCTOU, 수리 안 함):
+// 이 계산과 archiveRoundEnvelope의 실제 write 사이에 원자성이 없다 --
+// readdirSync(읽기)와 writeFileSync(쓰기) 사이에 다른 프로세스가 끼어들
+// 수 있는 창이 열려 있다. `checkRelayHandshake`의 실제 호출자가 5곳
+// (relay-core.mjs, watch-result.mjs, orca-spike-runner.mjs,
+// orca-spike-live.mjs, seat-signal-adapter.mjs)이라, 같은 role에 대해
+// 이론상 두 프로세스가 거의 동시에 archiveRoundEnvelope를 부르면 둘 다
+// 같은 "다음 번호"를 계산해 하나가 다른 하나를 조용히 덮어쓸 수 있다 --
+// 정확히 이 모듈이 막으려던 그 사고 모양이 여기서만 재발할 수 있다는
+// 뜻이다. 실제 운영에서 그런 동시 호출이 실제로 벌어지는지는 확인하지
+// 못했다(좁은 위험으로만 기재). 수리하려면 파일 잠금/원자적 rename 같은
+// 설계 변경이 필요해 이 트랙 범위 밖으로 남긴다.
 export function nextArchiveFileName(role, existingNames) {
   const pattern = new RegExp(`^${escapeForRegex(role)}-r(\\d+)\\.md$`);
   let maxRound = 0;

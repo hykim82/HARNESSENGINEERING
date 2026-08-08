@@ -192,17 +192,37 @@ function recordApprovalToLedger(reviewPath) {
 // guaranteed to run on every approved commit, so it is also the archive
 // site for the WINNING round's review.md -- otherwise exactly the round
 // that decided the outcome would be the one round never preserved.
+//
+// HYK-204 2R (반려 수리): this function's OWN `readFileSync(reviewPath)` --
+// not `archiveRoundEnvelope`'s internals, which already try/catch -- was
+// the actual hole (REVIEW §A-2, real injection: deleting review.md right
+// after entry produced `EXIT CODE: 1` from hooks/commit-msg, blocking an
+// otherwise-approved commit). The whole function body is wrapped here
+// (not just the read) so any failure on this path -- read or archive --
+// degrades to a logged, visible failure instead of an uncaught throw
+// escaping into the commit-msg hook's exit code. Preservation failing must
+// never mean "commit blocked"; it must mean "commit succeeds, and the
+// failure is on stderr for whoever's watching" (mirrors
+// autoArchiveRoundEnvelope's own try/catch boundary in
+// envelope-archive.mjs -- the CODER/rejected-REVIEW path already had this
+// exact guarantee, this closes the gap on the APPROVED path).
 function archiveApprovedRound(reviewPath) {
-  const reviewText = readFileSync(reviewPath, "utf8");
-  const outcome = archiveRoundEnvelope({
-    role: "review",
-    resultContent: reviewText,
-    harnessDir: dirname(reviewPath),
-  });
-  if (outcome.ok) {
-    console.log(outcome.reason);
-  } else {
-    console.error(outcome.reason);
+  try {
+    const reviewText = readFileSync(reviewPath, "utf8");
+    const outcome = archiveRoundEnvelope({
+      role: "review",
+      resultContent: reviewText,
+      harnessDir: dirname(reviewPath),
+    });
+    if (outcome.ok) {
+      console.log(outcome.reason);
+    } else {
+      console.error(outcome.reason);
+    }
+  } catch (err) {
+    console.error(
+      `envelope-archive: failed to preserve review round (approval re-read failed, commit NOT blocked: ${err.message})`,
+    );
   }
 }
 
