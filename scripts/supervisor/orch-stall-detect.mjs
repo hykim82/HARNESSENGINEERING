@@ -66,9 +66,9 @@
 // 예약 감시(`watch-run.mjs`)가 이 파일을 부르는 경로에서
 // `seat-liveness-core.mjs`(gap#76, 판정만 있고 부르는 곳이 0이던 코어)의
 // `judgeSeatLiveness`가 실제로 호출되게 한다. 대상 = 이 저장소
-// (`--repo-root`) 자신의 워크트리에 붙은 좌석 -- 아직 결과 파일이 없는
-// (`.harness/*-task.md`가 있고 대응 `.md`가 아직 없는) "활성 배달"이 있을
-// 때만 판정한다(§2-2 아래 `selectActiveDispatch`).
+// (`--repo-root`) 자신의 워크트리에 붙은 좌석 -- 이번 배달이 아직 끝나지
+// 않은("활성 배달", HYK-201부터 결과 파일 존재가 아니라 그 배달의 실제
+// 완료 여부를 본다)이 있을 때만 판정한다(§2-2 아래 `selectActiveDispatch`).
 //
 // ★관측 수집 실패를 "무응답"으로 접지 않는다(§2-2 비타협, gap#61에서
 // 검토자가 잡아낸 형태와 동일 -- 수집 실패가 빈 값으로 접혀 조용히 통과로
@@ -371,10 +371,9 @@ function buildDroppedTaskFileItem(repoRoot, harnessDir, name, text) {
         : { path: resultPath, exists: false, mtimeMs: null },
     // HYK-185-startcheck-wire 2R: 결과 파일이 없으면 "완료 여부" 자체가
     // 해당 없음(null) -- 있을 때만 실제로 그 안에 DONE 줄이 있는지 읽는다.
-    // ⚠️seat-liveness/seat-idle 축은 이 필드를 읽지 않는다(selectActiveDispatch
-    // 는 여전히 resultFile.exists만 본다, 아래 selectActiveDispatchForStart
-    // 헤더 주석 참조) -- 이 필드 추가 자체는 기존 두 축의 판정을 바꾸지
-    // 않는다(회귀 0).
+    // HYK-201부터 seat-liveness/seat-idle 두 축도 이 필드를 읽는다
+    // (selectActiveDispatch/isDispatchStillActive 참조, 아래 함수 헤더
+    // 주석) -- 세 축이 같은 "활성 배달" 정의를 공유한다.
     resultFileDone: resultFileExists
       ? collectResultFileCompletion(repoRoot, resultPath, taskId)
       : null,
@@ -604,62 +603,62 @@ export const SEAT_LIVENESS_WIRE_STATUS = Object.freeze({
   COLLECTION_FAILED: "SEAT_LIVENESS_COLLECTION_FAILED",
 });
 
+// HYK-201(coder-task.md §1-§2) -- "활성 배달"의 정본 판정. 예전에는
+// seat-liveness/seat-idle 두 축(`selectActiveDispatch`)과 dispatch-start
+// 축(`selectActiveDispatchForStart`)이 서로 다른 조건을 썼다: 전자는
+// `resultFile.exists === false`(결과 파일이 아직 없음)만 보고, 후자는
+// PR #113(HYK-185-startcheck-wire 2R)에서 이미 고친 실물 기준
+// (`resultFileDone`, collectResultFileCompletion 참조)을 썼다. 그 결함의
+// 자백은 이 파일에 이미 남아 있었다: REVIEW 좌석은 시작 직후 결과 파일에
+// 표지 3줄부터 먼저 쓰고 본문·`>>> DONE:` 줄은 나중에 쓴다 --
+// `resultFile.exists === true`만으로 "끝났다"고 보면 그 표지-먼저-쓰기
+// 구간에서 활성 배달을 놓친다. 게다가 결과 파일은 **이전 라운드**의
+// DONE 줄을 그대로 지닌 채 다음 라운드가 이어 쓰는 관례라(coder-task.md
+// §5), DONE 줄 존재만 봐도 부족하다 -- `resultFileDone`은 그 결과 파일
+// 자신의 `task_id:` 표지가 **이번 배달의 taskId와 일치할 때만** true다.
+// HYK-201: 이 하나의 함수(공유 판정, ⓐ)로 두 계열의 호출자를 모두
+// 수렴시킨다 -- seatLiveness/seatIdle/dispatch-start 세 축이 전용 선택자를
+// 하나씩 두면(ⓑ) 같은 결함이 세 벌로 늘어날 위험이 있고, 세 축은 애초에
+// "이 배달이 아직 끝나지 않았는가"라는 같은 질문을 던진다(§2 근거 상세는
+// coder.md 참조).
+function isDispatchStillActive(item) {
+  if (
+    !item ||
+    typeof item.droppedAtMs !== "number" ||
+    !Number.isFinite(item.droppedAtMs) ||
+    !item.resultFile
+  ) {
+    return false;
+  }
+  if (item.resultFile.exists === false) return true;
+  // 결과 파일은 있다 -- "이번 배달"의 DONE 줄이 있어야만 진짜로 끝난
+  // 것이다(resultFileDone은 task_id 일치까지 확인된 값, 위 주석 참조).
+  return item.resultFileDone !== true;
+}
+
 // droppedTaskFiles(collectPledgeDerivationEvidence가 이미 모은 배열,
-// collectDroppedTaskFileEvidence 참조)에서 "아직 결과 파일이 없는" 항목
-// 중 가장 최근에 드롭된 것 하나를 고른다. 여러 role의 task 파일이 동시에
-// 있어도(coder-task.md -> review-task.md 순서 등) 이 저장소에는 실제로는
-// 하나의 좌석만 붙어 있으므로, 가장 최근 활성 배달 하나만 판정 대상으로
-// 삼는다. 없으면 null(NOT_APPLICABLE).
+// collectDroppedTaskFileEvidence 참조)에서 "아직 끝나지 않은"(위
+// isDispatchStillActive) 항목 중 가장 최근에 드롭된 것 하나를 고른다.
+// 여러 role의 task 파일이 동시에 있어도(coder-task.md -> review-task.md
+// 순서 등) 이 저장소에는 실제로는 하나의 좌석만 붙어 있으므로, 가장
+// 최근 활성 배달 하나만 판정 대상으로 삼는다. 없으면 null(NOT_APPLICABLE).
+// seat-liveness(judgeSeatLivenessForRepo)/seat-idle(judgeSeatIdleForRepo)
+// 두 축이 공유한다 -- "두 축이 같은 좌석을 두 번 세지 않는다"는 설계
+// (:925 주석)가 이 하나의 정의를 공유해야 성립한다.
 export function selectActiveDispatch(droppedTaskFiles) {
   const active = (Array.isArray(droppedTaskFiles) ? droppedTaskFiles : [])
-    .filter(
-      (item) =>
-        item &&
-        typeof item.droppedAtMs === "number" &&
-        Number.isFinite(item.droppedAtMs) &&
-        item.resultFile &&
-        item.resultFile.exists === false,
-    )
+    .filter(isDispatchStillActive)
     .sort((a, b) => b.droppedAtMs - a.droppedAtMs);
   return active.length > 0 ? active[0] : null;
 }
 
-// HYK-185-startcheck-wire 2R(coder-task.md §R2, REVIEW P1 반려 수리) --
-// dispatch-start 축 전용 "활성 배달" 판정. `selectActiveDispatch`(위)와
-// 의도적으로 분리한다 -- seat-liveness/seat-idle 두 축은 이 라운드에서
-// **손대지 않는다**(회귀 0 요구, §R2-1). 실물 릴레이 실측(REVIEW): REVIEW
-// 좌석은 시작 직후 결과 파일에 표지 3줄부터 먼저 쓰고 본문·`>>> DONE:`
-// 줄은 나중에 쓴다 -- `resultFile.exists === true`만으로 "끝났다"고 보면
-// 그 표지-먼저-쓰기 구간에서 dispatch-start 축이 구조적으로 항상
-// NOT_APPLICABLE이 된다(오늘 REVIEW가 재현). 완료의 정본은 결과 파일의
-// 존재가 아니라 그 안의 `>>> DONE:` 줄이므로, 이 축은 **결과 파일이
-// 있어도 DONE 줄이 아직 없으면 여전히 활성**으로 본다.
-// ★2R 안에서 재발견(이 워크트리 자신을 대상으로 실물 재확인하다 실측):
-// DONE 줄 존재만 보면 부족하다 -- 결과 파일은 **이전 라운드**의 DONE
-// 줄을 그대로 지닌 채 다음 라운드가 이어 쓰는 관례라(coder-task.md §5),
-// 그 낡은 DONE 줄만 보고 "끝났다"고 하면 지금 라운드가 진행 중인데도
-// 다시 NOT_APPLICABLE로 샌다. 그래서 `resultFileDone`(collectResultFileCompletion
-// 참조)은 그 결과 파일 자신의 `task_id:` 표지가 **이번 배달의 taskId와
-// 일치할 때만** true다 -- 다른 라운드의 낡은 DONE 줄은 이번 배달의
-// 완료로 인정되지 않는다.
+// dispatch-start 축(judgeDispatchStartForRepo)이 쓰는 이름 -- HYK-201부터
+// `selectActiveDispatch`(위)와 판정 로직이 완전히 같다(isDispatchStillActive
+// 공유). 이름을 분리해 둔 이유는 호출부 각각이 "이 축은 dispatch-start
+// 전용 선택자를 쓴다"는 의도를 코드로 드러내기 위함일 뿐, 판정 자체는
+// 하나다(회귀 0 -- 세 축 모두 이번 배달의 실제 완료 여부를 본다).
 export function selectActiveDispatchForStart(droppedTaskFiles) {
-  const active = (Array.isArray(droppedTaskFiles) ? droppedTaskFiles : [])
-    .filter((item) => {
-      if (
-        !item ||
-        typeof item.droppedAtMs !== "number" ||
-        !Number.isFinite(item.droppedAtMs) ||
-        !item.resultFile
-      ) {
-        return false;
-      }
-      if (item.resultFile.exists === false) return true;
-      // 결과 파일은 있다 -- "이번 배달"의 DONE 줄이 있어야만 진짜로 끝난
-      // 것이다(resultFileDone은 task_id 일치까지 확인된 값, 위 주석 참조).
-      return item.resultFileDone !== true;
-    })
-    .sort((a, b) => b.droppedAtMs - a.droppedAtMs);
-  return active.length > 0 ? active[0] : null;
+  return selectActiveDispatch(droppedTaskFiles);
 }
 
 // HYK-185-seat-corr(coder-task.md §2): seatLiveness/dispatchStart 두 축이
@@ -1371,9 +1370,9 @@ export function judgeDispatchStartForRepo(
   { repoRoot, droppedTaskFiles, now },
   opts = {},
 ) {
-  // HYK-185-startcheck-wire 2R: 이 축만 selectActiveDispatchForStart를
-  // 쓴다(위 함수 헤더 주석 참조) -- seat-liveness/seat-idle 두 축은
-  // 여전히 selectActiveDispatch(파일 존재만 본다)를 그대로 쓴다.
+  // HYK-201부터 selectActiveDispatchForStart는 selectActiveDispatch의
+  // 별칭이다(위 함수 헤더 주석 참조) -- 세 축 모두 같은 "활성 배달"
+  // 정의를 쓴다.
   const active = selectActiveDispatchForStart(droppedTaskFiles);
   if (!active) {
     return { status: DISPATCH_START_WIRE_STATUS.NOT_APPLICABLE };
