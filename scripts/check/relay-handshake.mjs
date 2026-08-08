@@ -26,12 +26,34 @@ const DONE_RE = /^>>>\s*DONE:.*@\s*(.+?)\s*$/gim;
 // 같은 눈으로 찾을 수 있게). 이유 텍스트는 필수(빈 이유는 아래
 // BLOCKED_ANYWHERE_RE 경로로 새서 MALFORMED로 fail-closed된다 -- "형식이
 // 깨졌으면 괜찮다로 접지 않는다" 비타협).
-const BLOCKED_RE = /^>>>\s*(BLOCKED|NEEDS_INPUT):\s*(\S.*?)\s*$/gim;
+// HYK-173-escalation-2 (REVIEW 반려 (1) 수리): 1R은 `\s*`를 세 자리 모두에
+// 썼는데, `\s`는 `\n`을 포함한다 -- `^`/`$`가 column-0·줄-끝을 잡아도 그
+// 사이의 `\s*`가 개행을 통째로 삼켜 «>>>\nBLOCKED: split»이나 «>>>
+// BLOCKED:\nreason on next line» 같은 다중 행 입력이 "한 줄" 계약을 어기고도
+// 정상 매치로 수락됐다(REVIEW 실측 `manual-split-after-arrows`/
+// `manual-split-after-colon`). `>>>`와 키워드 사이, 콜론과 이유 사이의
+// 공백은 개행을 포함하지 않는 `[ \t]*`로 좁힌다 -- 그 결과 콜론 뒤에 바로
+// 개행이 오면 `(\S.*?)`가 그 자리에서 매치할 문자가 없어 이 정규식
+// 자체가 매치하지 않고(아래 BLOCKED_ANYWHERE_RE의 near-miss 경로로 새어
+// MALFORMED_BLOCKED가 된다), `>>>`와 개행 사이도 마찬가지로 막힌다.
+const BLOCKED_RE = /^>>>[ \t]*(BLOCKED|NEEDS_INPUT):[ \t]*(\S.*?)[ \t]*$/gim;
 // 위 엄격한 패턴이 매치하지 못했을 때, "애초에 그런 표지가 없다"(진짜
 // pending)와 "표지를 쓰려고 한 흔적은 있는데 형식이 깨졌다"(예: column 0이
-// 아님·이유 텍스트 없음)를 가르는 near-miss 탐지. TASK_ID_ANYWHERE_RE와
-// 동일한 역할 -- 매치 채택에는 절대 쓰지 않고 진단 구별에만 쓴다.
-const BLOCKED_ANYWHERE_RE = />>>\s*(BLOCKED|NEEDS_INPUT)\b/i;
+// 아님·이유 텍스트 없음·줄이 쪼개짐)를 가르는 near-miss 탐지.
+// TASK_ID_ANYWHERE_RE와 동일한 역할 -- 매치 채택에는 절대 쓰지 않고 진단
+// 구별에만 쓴다. 여기의 `\s*`는 의도적으로 유지한다 -- 바로 이 느슨함이
+// «줄이 쪼개진 표지 흔적»까지 near-miss로 잡아내는 지점이다(엄격 패턴을
+// 좁힌 것과 반대 방향의 요구).
+// HYK-173-escalation-2 (REVIEW 반려 (2) 수리): `g` 플래그를 얹어 "몇 건
+// 있는가"까지 셀 수 있게 한다 -- 엄격 매치가 정확히 1개 있어도 그 「옆에」
+// 별도의 깨진 표지가 더 있으면(예: 유효 `>>> BLOCKED: valid` 한 줄과
+// `status: >>> BLOCKED: midline`이 함께 있는 경우) 조용히 그 1개짜리
+// 유효 매치로 확정하지 않고 MALFORMED_BLOCKED 계열로 승격해야 한다
+// (REVIEW 실측 `manual-valid-plus-malformed`) -- resolveResultBlockedState
+// 아래 참조. `matchAll`은 'g' 플래그가 있어도 원본 정규식의 `lastIndex`를
+// 건드리지 않으므로(내부적으로 복제) 이 상수를 여러 곳에서 반복 호출해도
+// 안전하다.
+const BLOCKED_ANYWHERE_RE = />>>\s*(BLOCKED|NEEDS_INPUT)\b/gi;
 
 function repoRoot() {
   try {
@@ -148,16 +170,31 @@ function resolveResultBlockedState(resultContent) {
       reason: `result has ${matches.length} '>>> BLOCKED:'/'>>> NEEDS_INPUT:' lines -- 어느 것이 최종인지 결정할 수 없다 (ambiguous, cannot resolve)`,
     };
   }
+  // HYK-173-escalation-2 (REVIEW 반려 (2) 수리): the anywhere-count always
+  // includes every well-formed match too (BLOCKED_ANYWHERE_RE's pattern is
+  // a strict superset of BLOCKED_RE's), so `anywhereCount > matches.length`
+  // means there is at least one marker-shaped occurrence beyond the
+  // well-formed one(s) already counted above -- a valid line coexisting
+  // with a broken one, previously swallowed silently into the single valid
+  // match.
+  const anywhereCount = [...resultContent.matchAll(BLOCKED_ANYWHERE_RE)].length;
   if (matches.length === 1) {
+    if (anywhereCount > matches.length) {
+      return {
+        state: RESULT_BLOCK_STATE.MALFORMED_BLOCKED,
+        reason:
+          "result has a well-formed '>>> BLOCKED:'/'>>> NEEDS_INPUT:' line AND at least one additional malformed '>>> BLOCKED:'/'>>> NEEDS_INPUT:'-shaped marker -- a valid+broken mix is not silently resolved to the valid one (fail-closed)",
+      };
+    }
     const kind = matches[0][1].toUpperCase();
     const detail = matches[0][2].trim();
     return { state: kind, detail };
   }
-  if (BLOCKED_ANYWHERE_RE.test(resultContent)) {
+  if (anywhereCount > 0) {
     return {
       state: RESULT_BLOCK_STATE.MALFORMED_BLOCKED,
       reason:
-        "result has a '>>> BLOCKED:'/'>>> NEEDS_INPUT:'-shaped marker that doesn't match the required column-0 '>>> BLOCKED: <reason>' / '>>> NEEDS_INPUT: <reason>' form (fail-closed -- not treated as pending)",
+        "result has a '>>> BLOCKED:'/'>>> NEEDS_INPUT:'-shaped marker that doesn't match the required column-0, single-line '>>> BLOCKED: <reason>' / '>>> NEEDS_INPUT: <reason>' form (fail-closed -- not treated as pending)",
     };
   }
   return { state: RESULT_BLOCK_STATE.NONE };

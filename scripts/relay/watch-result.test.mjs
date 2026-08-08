@@ -8,9 +8,12 @@ import {
   EXIT_TICK,
   EXIT_CONFIG_INVALID,
   EXIT_UNJUDGABLE,
+  EXIT_BLOCKED,
   classifyWatchFailure,
+  isBlockedFamilyState,
   parseWatchArgs,
 } from "./watch-result.mjs";
+import { RESULT_BLOCK_STATE } from "../check/relay-handshake.mjs";
 
 // Fake clock: sleepFn advances a shared counter by intervalS*1000 and
 // resolves immediately (no real timer), nowFn reads that counter -- this
@@ -553,4 +556,179 @@ test("(27) EXIT_UNJUDGABLE is distinct from EXIT_DONE(0)/EXIT_TICK(3)/EXIT_CONFI
   assert.notEqual(EXIT_UNJUDGABLE, EXIT_DONE);
   assert.notEqual(EXIT_UNJUDGABLE, EXIT_TICK);
   assert.notEqual(EXIT_UNJUDGABLE, EXIT_CONFIG_INVALID);
+});
+
+// ---------------------------------------------------------------------------
+// HYK-173-escalation-2 §2-2: 소비자 결선. REVIEW 반려 (3) -- "판정값을
+// 생산 소비자가 별도 상태로 소비하지 않는다"를 닫는다. checkRelayHandshake의
+// `result.state`(BLOCKED/NEEDS_INPUT/MALFORMED_BLOCKED/AMBIGUOUS_BLOCKED)가
+// 실제로 이 모듈의 종료 상태를 바꾸는지, 그리고 그 상태가 pending/
+// unjudgable과 다른 문자열·다른 exit code로 나오는지 고정한다.
+// ---------------------------------------------------------------------------
+
+test("(31) isBlockedFamilyState: BLOCKED/NEEDS_INPUT/MALFORMED_BLOCKED/AMBIGUOUS_BLOCKED are all blocked-family, PENDING/NONE and non-string values are not", () => {
+  assert.equal(isBlockedFamilyState(RESULT_BLOCK_STATE.BLOCKED), true);
+  assert.equal(isBlockedFamilyState(RESULT_BLOCK_STATE.NEEDS_INPUT), true);
+  assert.equal(
+    isBlockedFamilyState(RESULT_BLOCK_STATE.MALFORMED_BLOCKED),
+    true,
+  );
+  assert.equal(
+    isBlockedFamilyState(RESULT_BLOCK_STATE.AMBIGUOUS_BLOCKED),
+    true,
+  );
+  assert.equal(isBlockedFamilyState(RESULT_BLOCK_STATE.NONE), false);
+  assert.equal(isBlockedFamilyState("PENDING"), false);
+  assert.equal(isBlockedFamilyState(undefined), false);
+  assert.equal(isBlockedFamilyState(null), false);
+});
+
+test("(32) BLOCKED state -> status='blocked', distinct WATCH_BLOCKED reason (carries the worker's reason text), immediate (no sleep), never classified pending or unjudgable", async () => {
+  const { nowFn, sleepFn, sleepCallCount } = fakeClock(60);
+  const checkFn = checkSequence([
+    {
+      ok: false,
+      state: "BLOCKED",
+      reason: "worker reported BLOCKED: 재현 실패 -- 조건 불명",
+    },
+  ]);
+  const result = await watchResult({
+    role: "coder",
+    intervalS: 60,
+    maxWaitS: 240,
+    checkFn,
+    sleepFn,
+    nowFn,
+  });
+  assert.equal(result.status, "blocked");
+  assert.equal(result.state, "BLOCKED");
+  assert.match(
+    result.reason,
+    /^WATCH_BLOCKED: BLOCKED: worker reported BLOCKED: 재현 실패 -- 조건 불명/,
+  );
+  assert.equal(sleepCallCount(), 0);
+});
+
+test("(33) NEEDS_INPUT state -> status='blocked' too, but the state field and reason text stay distinguishable from BLOCKED", async () => {
+  const { nowFn, sleepFn, sleepCallCount } = fakeClock(60);
+  const checkFn = checkSequence([
+    {
+      ok: false,
+      state: "NEEDS_INPUT",
+      reason: "worker reported NEEDS_INPUT: 게이트 신호 대기 중",
+    },
+  ]);
+  const result = await watchResult({
+    role: "coder",
+    intervalS: 60,
+    maxWaitS: 240,
+    checkFn,
+    sleepFn,
+    nowFn,
+  });
+  assert.equal(result.status, "blocked");
+  assert.equal(result.state, "NEEDS_INPUT");
+  assert.notEqual(result.reason, "WATCH_BLOCKED: BLOCKED: unrelated");
+  assert.match(result.reason, /^WATCH_BLOCKED: NEEDS_INPUT:/);
+  assert.equal(sleepCallCount(), 0);
+});
+
+async function assertBlockedFamilySurfacesAsBlocked(state) {
+  const { nowFn, sleepFn } = fakeClock(60);
+  const checkFn = checkSequence([
+    { ok: false, state, reason: `synthetic ${state} reason` },
+  ]);
+  const result = await watchResult({
+    role: "coder",
+    intervalS: 60,
+    maxWaitS: 240,
+    checkFn,
+    sleepFn,
+    nowFn,
+  });
+  assert.equal(result.status, "blocked", `state=${state} must be blocked`);
+  assert.notEqual(
+    result.status,
+    "pending",
+    `state=${state} must never be pending`,
+  );
+}
+
+test("(34a) MALFORMED_BLOCKED surfaces as status='blocked' too -- a broken marker attempt is never silently folded back into pending", async () => {
+  await assertBlockedFamilySurfacesAsBlocked("MALFORMED_BLOCKED");
+});
+
+test("(34b) AMBIGUOUS_BLOCKED surfaces as status='blocked' too -- an ambiguous marker attempt is never silently folded back into pending", async () => {
+  await assertBlockedFamilySurfacesAsBlocked("AMBIGUOUS_BLOCKED");
+});
+
+test("(35) a plain PENDING-state result (no marker at all) is completely unaffected by the new consumer wiring -- still classified via the old reason-string path, keeps polling like before", async () => {
+  const { nowFn, sleepFn, sleepCallCount } = fakeClock(60);
+  const checkFn = checkSequence([
+    {
+      ok: false,
+      state: "PENDING",
+      reason: 'result missing ">>> DONE: ... @ <time KST>" line (required)',
+    },
+  ]);
+  const result = await watchResult({
+    role: "coder",
+    intervalS: 60,
+    maxWaitS: 1,
+    checkFn,
+    sleepFn,
+    nowFn,
+  });
+  assert.equal(result.status, "tick");
+  assert.equal(sleepCallCount(), 1);
+});
+
+test("(36) DONE still wins unconditionally even if a stray `state` field is somehow present on an ok:true result (1R's DONE-priority invariant is untouched by this wiring)", async () => {
+  const { nowFn, sleepFn, sleepCallCount } = fakeClock(60);
+  const checkFn = checkSequence([
+    { ok: true, state: "BLOCKED", reason: "relay handshake ok for X" },
+  ]);
+  const result = await watchResult({
+    role: "coder",
+    intervalS: 60,
+    maxWaitS: 240,
+    checkFn,
+    sleepFn,
+    nowFn,
+  });
+  assert.equal(result.status, "done");
+  assert.equal(sleepCallCount(), 0);
+});
+
+test("(37) EXIT_BLOCKED is distinct from EXIT_DONE(0)/EXIT_TICK(3)/EXIT_CONFIG_INVALID(4)/EXIT_UNJUDGABLE(5)", () => {
+  assert.equal(EXIT_BLOCKED, 6);
+  assert.notEqual(EXIT_BLOCKED, EXIT_DONE);
+  assert.notEqual(EXIT_BLOCKED, EXIT_TICK);
+  assert.notEqual(EXIT_BLOCKED, EXIT_CONFIG_INVALID);
+  assert.notEqual(EXIT_BLOCKED, EXIT_UNJUDGABLE);
+});
+
+test("(38) mutation counterfactual: BLOCKED must NOT be classified the same as an unrecognized/unjudgable reason -- proves the state-first check actually changes behavior, not just adds a dead branch", async () => {
+  const { nowFn, sleepFn } = fakeClock(60);
+  const checkFn = checkSequence([
+    {
+      ok: false,
+      state: "BLOCKED",
+      reason: "worker reported BLOCKED: some reason",
+    },
+  ]);
+  const result = await watchResult({
+    role: "coder",
+    intervalS: 60,
+    maxWaitS: 1,
+    checkFn,
+    sleepFn,
+    nowFn,
+  });
+  assert.notEqual(
+    result.status,
+    "unjudgable",
+    "before this round's wiring, an unrecognized reason string (which BLOCKED's is) fell through to unjudgable -- this must now be its own 'blocked' status instead",
+  );
+  assert.equal(result.status, "blocked");
 });
