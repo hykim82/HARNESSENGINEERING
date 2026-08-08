@@ -1364,6 +1364,72 @@ test("NC mutation/HYK-202 #3 (★목록 밖 -- 자유 변조): Number.isFinite�
 });
 
 // ---------------------------------------------------------------------------
+// HYK-203 guard/site1 -- isDispatchStillActive(:624)의 «형제» typeof 검사
+// (coder-task.md §1 표 #1: 같은 `if` 안의 `typeof item.droppedAtMs !== "number"`,
+// HYK-202가 고정한 `Number.isFinite`의 옆 절).
+//
+// 값 주입: 위 HYK-202 guard 블록(itemWith 기반, :1146~1165)이 이미
+// null·문자열·NaN·+Infinity·정상 수 다섯 값으로 `isDispatchStillActive`
+// 전체(두 절이 합쳐진 것)를 고정했다 -- 그 결과는 이 지점에도 그대로
+// 유효하다(같은 함수, 같은 호출, 새로 안 만든다). 여섯 번째 값
+// (-Infinity)만 빠져 있어 아래에서 채운다.
+// ---------------------------------------------------------------------------
+test("HYK-203 guard/site1: -Infinity droppedAtMs -> not picked (Number.isFinite(-Infinity) === false -- completes the six-value matrix for isDispatchStillActive; the other five values are already covered by the HYK-202 guard block above)", () => {
+  assert.equal(selectActiveDispatch([itemWith(-Infinity)]), null);
+});
+
+// ★§2 판정(site1) -- (나)이되 HYK-202의 (나)와 근거가 다르다: "도달 불가"가
+// 아니라 ***이 typeof 절이 논리적으로 죽은 코드***라는 뜻의 (나)다.
+// `Number.isFinite`는 스펙상 인자가 실제 number 타입이 아니면 강제형변환
+// 없이 무조건 false를 반환한다(직접 실측: null·문자열·undefined·true·
+// 배열·객체 전부 `Number.isFinite(x) === false`). 즉
+// `typeof x !== "number" || !Number.isFinite(x)` 는 `!Number.isFinite(x)`
+// 하나와 완전히 동치다 -- typeof 절은 isFinite 절이 이미 막는 집합의
+// 부분집합만 다시 막을 뿐 추가로 막는 값이 하나도 없다. 아래 mutation이
+// 그 사실을 "RED가 하나도 안 뜬다"로 실측 고정한다 -- coder-task.md §4의
+// "아무 시험도 안 깨지는 변조를 찾으면 그것을 보고하라 -- 최대 산출이다"
+// 에 해당하는 이번 라운드의 실제 결과다(§1 표 재확인 -- 표는 이 절을
+// "형제"라 불렀지만, typeof 절 단독은 막아야 할 값을 하나도 새로 막지
+// 않는 죽은 코드다).
+test("NC mutation/HYK-203 site1 (형제 typeof 절 단독 제거 -> 관측된 차이 0, no-op 실측): isDispatchStillActive에서 typeof 검사만 지우고 Number.isFinite는 남김 -> 여섯 값(null/문자열/NaN/+Inf/-Inf/정상 수) 전부 기존과 동일한 결과 (typeof 절이 isFinite에 완전히 포섭되는 죽은 코드임을 증명)", async () => {
+  const mutant = await importMutatedSibling(
+    (src) =>
+      applyMutation(
+        src,
+        `  if (
+    !item ||
+    typeof item.droppedAtMs !== "number" ||
+    !Number.isFinite(item.droppedAtMs) ||
+    !item.resultFile
+  ) {
+    return false;
+  }`,
+        `  if (
+    !item ||
+    !Number.isFinite(item.droppedAtMs) ||
+    !item.resultFile
+  ) {
+    return false;
+  }`,
+      ),
+    "203-site1-typeof-only",
+  );
+  for (const bad of [null, "2026-01-01", NaN, Infinity, -Infinity]) {
+    assert.equal(
+      mutant.selectActiveDispatch([itemWith(bad)]),
+      null,
+      `typeof-only removal must NOT change behavior for ${String(bad)} (Number.isFinite alone already blocks it -- no observed difference)`,
+    );
+  }
+  const item = itemWith(1_754_290_000_000);
+  assert.equal(
+    mutant.selectActiveDispatch([item]),
+    item,
+    "control: ordinary finite number still passes with typeof removed",
+  );
+});
+
+// ---------------------------------------------------------------------------
 // 원상복구 단언(coder-task.md §2 비타협 #5와 동형).
 // ---------------------------------------------------------------------------
 after(() => {
