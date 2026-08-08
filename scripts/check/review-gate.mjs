@@ -103,8 +103,36 @@ export function checkReviewGate({
   if (!existsSync(reviewPath)) {
     return { ok: false, reason: `review file not found: ${reviewPath}` };
   }
-  const content = readFileSync(reviewPath, "utf8");
+  // HYK-205: existsSync passing does not guarantee readFileSync succeeds
+  // (TOCTOU race, EISDIR, permissions) -- this read is the gate's own
+  // judgment of the evidence, not a side-effect record (contrast
+  // recordApprovalToLedger/archiveApprovedRound below, which degrade to a
+  // logged non-block). "gate couldn't read the evidence" is
+  // indistinguishable from "there is no evidence" -- treating it as a pass
+  // would be fail-open, which this repo has repeatedly treated as a defect
+  // (HYK-183's ambiguous-verdict handling took the same stance). So this
+  // blocks, same as the not-found branch just above, but through a
+  // controlled return instead of letting the exception escape uncaught
+  // into hooks/commit-msg's exit code.
+  let content;
+  try {
+    content = readFileSync(reviewPath, "utf8");
+  } catch (err) {
+    return {
+      ok: false,
+      reason: `review file unreadable: ${reviewPath} (${err.message}); the gate cannot verify approval and blocks -- fix or restore the file (e.g. re-run the review step), then retry the commit`,
+    };
+  }
 
+  return evaluateReviewEvidence(content, issueIds, reviewPath);
+}
+
+// Extracted from checkReviewGate (quality-check: keep checkReviewGate's own
+// complexity under the repo's ESLint ceiling, same reason resolveVerdict is
+// extracted above) -- HYK-205: this extraction also made room for
+// checkReviewGate's own read to be guarded (try/catch) without pushing the
+// function back over the ceiling.
+function evaluateReviewEvidence(content, issueIds, reviewPath) {
   const missingIds = issueIds.filter(
     (issueId) => !new RegExp(`for:\\s*${issueId}\\b`).test(content),
   );
@@ -170,7 +198,22 @@ function isGenuineReviewApproval(message, reviewPath) {
 // 판정/멱등성 로직을 재구현하지 않는다(role: "review"만 넘기면 축 A의
 // done_at 포함 중복 판정까지 그대로 적용된다).
 function recordApprovalToLedger(reviewPath) {
-  const reviewText = readFileSync(reviewPath, "utf8");
+  // HYK-205: this re-read (checkReviewGate already read the same file
+  // earlier in the same process) is a RECORD, not a judgment -- the commit
+  // is already approved by the time this runs (isGenuineReviewApproval
+  // gates the call). A TOCTOU race here (file removed/replaced between
+  // checkReviewGate's read and this one) must degrade to "ledger not
+  // updated, visibly logged", never "commit blocked" -- same contract
+  // HYK-204 established for archiveApprovedRound just below.
+  let reviewText;
+  try {
+    reviewText = readFileSync(reviewPath, "utf8");
+  } catch (err) {
+    console.error(
+      `reject-streak: failed to record approval (re-read failed, commit NOT blocked: ${err.message})`,
+    );
+    return;
+  }
   const ledgerPath = join(mainRepoRoot(), ".harness", "reject-streak.json");
   const outcome = recordRejectStreakFromResultText({
     role: "review",
