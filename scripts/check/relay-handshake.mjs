@@ -2,6 +2,7 @@ import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { execSync } from "node:child_process";
 import { recordRejectStreakFromResultText } from "./reject-streak.mjs";
+import { archiveRoundEnvelope } from "./envelope-archive.mjs";
 
 // HYK-183: 결과 파일에 이 표지가 2개 이상이면 어느 것이 최종인지 결정할 수
 // 없으므로 조용히 하나를 고르지 않고 판정 불가로 멈춘다(2026-07-31 거짓
@@ -114,6 +115,18 @@ function resolveResultDoneMatch(resultContent) {
 // outcome via console.log/console.error rather than swallowing it (§2-1
 // R4). Never touched by tests that assert on checkRelayHandshake's return
 // value; this is purely the side-effect wiring described at its call site.
+// HYK-204: mirrors autoRecordRejectStreak's shape -- surfaces
+// archiveRoundEnvelope's outcome via console.log/console.error rather than
+// swallowing it, and never touches this function's own return value.
+function autoArchiveRoundEnvelope({ role, resultContent, harnessDir }) {
+  const outcome = archiveRoundEnvelope({ role, resultContent, harnessDir });
+  if (outcome.ok) {
+    console.log(outcome.reason);
+  } else {
+    console.error(outcome.reason);
+  }
+}
+
 function autoRecordRejectStreak({ role, resultContent }) {
   const autoRecord = recordRejectStreakFromResultText({
     role,
@@ -227,6 +240,14 @@ export function checkRelayHandshake({
   // (§2-1 R5) -- purely a side effect layered on top of an already-decided
   // PASS. Failure/duplicate/skip are never swallowed (§2-1 R4) --
   // autoRecordRejectStreak surfaces every branch via console.log/error.
+  // HYK-204: the moment this function confirms a round's result file is
+  // COMPLETE (every check above already passed) is also the last moment
+  // before ORCH drops the next round's task file and this same
+  // `<role>.md` slot gets overwritten -- the exact loss point the 2026-08-08
+  // 실사례 hit. Archived here (not left to the worker to remember) for the
+  // same reason autoRecordRejectStreak lives here: every caller -- CLI and
+  // in-process alike -- gets it, with no new notification device.
+  autoArchiveRoundEnvelope({ role, resultContent, harnessDir });
   autoRecordRejectStreak({ role, resultContent });
 
   return { ok: true, reason: `relay handshake ok for ${taskId}` };

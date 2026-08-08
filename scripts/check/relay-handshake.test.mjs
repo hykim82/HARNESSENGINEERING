@@ -491,6 +491,15 @@ const REJECT_STREAK_SRC = execFileSync(
   { encoding: "utf8" },
 );
 
+// HYK-204: relay-handshake.mjs now also imports "./envelope-archive.mjs"
+// (round preservation) -- same MODULE_NOT_FOUND risk reject-streak.mjs's
+// comment above already documents, now for a second sibling.
+const ENVELOPE_ARCHIVE_SRC = execFileSync(
+  "git",
+  ["show", "HEAD:scripts/check/envelope-archive.mjs"],
+  { encoding: "utf8" },
+);
+
 function writeMutantCli(mutatedSrc) {
   const rootDir = mkdtempSync(join(tmpdir(), "relay-handshake-mutant-"));
   const scriptsCheckDir = join(rootDir, "scripts", "check");
@@ -500,6 +509,11 @@ function writeMutantCli(mutatedSrc) {
   writeFileSync(
     join(scriptsCheckDir, "reject-streak.mjs"),
     REJECT_STREAK_SRC,
+    "utf8",
+  );
+  writeFileSync(
+    join(scriptsCheckDir, "envelope-archive.mjs"),
+    ENVELOPE_ARCHIVE_SRC,
     "utf8",
   );
   return { rootDir, mutantPath };
