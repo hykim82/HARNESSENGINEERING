@@ -704,6 +704,21 @@
       "claude_only": false,
       "self_registration_note": "HYK-196-hooksync-1 self-registration, same convention as skip-review-usage/b0-gate above. Motivated by the 2026-08-07 real incident: a worker's installed `.git/hooks/pre-commit` was a 07-16 (74-line) copy while the versioned `hooks/pre-commit` had moved to 08-01 (102 lines, adds the nul-byte-guard stage) -- the drift went unnoticed until selfcheck's advisory sweep happened to catch it, and selfcheck's own comparison is exit-0 advisory, never a gate.",
       "invocation_note": "Not hook-installed and NOT yet called by anything automated -- honesty per task spec §1: today this is a CLI a human/ORCH can run by hand (`node scripts/check/hook-sync-check.mjs [--install] [--json]`), plus a CI smoke step in `.github/workflows/enforce.yml` that only proves the device runs correctly against a synthetic --install target (CI checkouts have no real installed hook to compare against, so it cannot check any developer's actual machine). The real fix this device is meant to feed -- a seat-boot-time forced install+compare -- is HYK-183's still-undelivered execution layer; until that lands, a stale local hook (like the one that motivated this task) is caught only if a human or ORCH remembers to run this by hand. See docs/enforcement-known-gaps.md for the registered gap."
+    },
+    {
+      "id": "seat-preflight",
+      "substrate": "manual",
+      "script": "scripts/check/seat-preflight.mjs",
+      "test": "scripts/check/seat-preflight.test.mjs",
+      "install_targets": [],
+      "expected_bad": "installed hooks drift from versioned hooks/ (reuses hook-sync-check.mjs's own judgment, no independent comparison logic) -> verdict DRIFT, exit 2, human-readable output lists the drifted file name(s) plus the exact fix command `node scripts/check/hook-sync-check.mjs --install`; or the judgment itself cannot be made (versioned dir missing, git-common-dir resolution failing) -> verdict UNDECIDABLE, exit 1, no fix command printed (there is no known drift to fix, only a failed judgment)",
+      "expected_good": "installed hooks byte-match versioned hooks/ -> verdict IN_SYNC, exit 0",
+      "failure_exit": 2,
+      "uncertain_exit": 1,
+      "owner": "ORCH",
+      "claude_only": false,
+      "self_registration_note": "HYK-200-preflight-1 self-registration, same convention as hook-sync-check/skip-review-usage above. This device adds no new comparison logic -- it wraps the already-registered hook-sync-check's runHookSyncCheck() and turns its verdict into (a) a human-readable seat-screen message with a copy-pasteable fix line and (b) the fail-closed exit-code contract (0/2/1) a seat launcher can branch on. It exists to close gap#91's last documented step: hook-sync-check being *callable in the shape a seat launcher needs*, at admission time, before a worker seat ever starts.",
+      "invocation_note": "★NOT hook-installed and NOT yet called by the control-room seat launcher -- honesty per coder-task.md §1/§5: this CLI (`node scripts/check/seat-preflight.mjs`, no arguments, reads the current worktree) is callable and fail-closed today (exit 0 only on IN_SYNC, everything else non-zero -- verified by real child-process spawns in seat-preflight.test.mjs, not just in-process calls), but nothing invokes it automatically yet. The seat launcher itself is a control-room file this track is explicitly barred from touching (coder-task.md §1 '너는 관제실 파일을 절대 건드리지 마라'); ORCH prepares the one line the launcher needs and 한용 attaches it by hand. Once that line is attached, and only then, does this become true: a worker seat whose worktree has a drifted/undecidable installed hook fails to start at all (fail-closed by construction, not by convention) -- until that attachment happens, this device only protects a seat if a human or ORCH remembers to run it by hand first, same limitation as hook-sync-check.mjs above. See docs/enforcement-known-gaps.md gap#91 for the tracked remainder."
     }
   ]
 }
