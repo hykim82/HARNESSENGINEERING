@@ -1,8 +1,9 @@
 import { readFileSync, existsSync } from "node:fs";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
 import { execSync } from "node:child_process";
 import { recordRejectStreakFromResultText } from "./reject-streak.mjs";
 import { mainRepoRoot } from "./relay-handshake.mjs";
+import { archiveRoundEnvelope } from "./envelope-archive.mjs";
 
 // HYK-183: 결과 파일에 이 표지가 2개 이상이면 어느 것이 최종인지 결정할 수
 // 없으므로 조용히 하나를 고르지 않고 판정 불가로 멈춘다(2026-07-31 거짓
@@ -184,6 +185,27 @@ function recordApprovalToLedger(reviewPath) {
   }
 }
 
+// HYK-204: an APPROVED review round never triggers relay-handshake's own
+// archive wiring (see recordApprovalToLedger's header just above -- an
+// approval is a terminal state, so nothing ever re-checks that handshake
+// for a "next round"). This commit-msg hook is the one choke point
+// guaranteed to run on every approved commit, so it is also the archive
+// site for the WINNING round's review.md -- otherwise exactly the round
+// that decided the outcome would be the one round never preserved.
+function archiveApprovedRound(reviewPath) {
+  const reviewText = readFileSync(reviewPath, "utf8");
+  const outcome = archiveRoundEnvelope({
+    role: "review",
+    resultContent: reviewText,
+    harnessDir: dirname(reviewPath),
+  });
+  if (outcome.ok) {
+    console.log(outcome.reason);
+  } else {
+    console.error(outcome.reason);
+  }
+}
+
 const invokedDirectly =
   process.argv[1] &&
   process.argv[1].replace(/\\/g, "/").endsWith("scripts/check/review-gate.mjs");
@@ -199,6 +221,7 @@ if (invokedDirectly) {
   if (result.ok) {
     if (isGenuineReviewApproval(message, reviewPath)) {
       recordApprovalToLedger(reviewPath);
+      archiveApprovedRound(reviewPath);
     }
     process.exit(0);
   } else {

@@ -284,6 +284,18 @@ const RELAY_HANDSHAKE_SRC = execFileSync(
     encoding: "utf8",
   },
 );
+// HYK-204: relay-handshake.mjs now also imports "./envelope-archive.mjs"
+// (round preservation) -- same MODULE_NOT_FOUND risk this file's own
+// comment above already documents for reject-streak.mjs, now for a second
+// transitive sibling.
+const ENVELOPE_ARCHIVE_SRC = execFileSync(
+  "git",
+  ["show", "HEAD:scripts/check/envelope-archive.mjs"],
+  {
+    cwd: ROOT,
+    encoding: "utf8",
+  },
+);
 
 // HYK-183 (§10 2R fix, ORCH ruling): mutation #1/#4 below target the
 // `resolveVerdict` function's exact shape. `REVIEW_GATE_SRC` is deliberately
@@ -313,6 +325,11 @@ async function importMutatedCopy(mutate) {
   writeFileSync(filePath, mutated, "utf8");
   writeFileSync(join(dir, "reject-streak.mjs"), REJECT_STREAK_SRC, "utf8");
   writeFileSync(join(dir, "relay-handshake.mjs"), RELAY_HANDSHAKE_SRC, "utf8");
+  writeFileSync(
+    join(dir, "envelope-archive.mjs"),
+    ENVELOPE_ARCHIVE_SRC,
+    "utf8",
+  );
   try {
     const mod = await import(`file://${filePath.replace(/\\/g, "/")}`);
     return mod;

@@ -32,6 +32,12 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const REJECT_STREAK_PATH = join(HERE, "reject-streak.mjs");
 const RELAY_HANDSHAKE_PATH = join(HERE, "relay-handshake.mjs");
 const REVIEW_GATE_PATH = join(HERE, "review-gate.mjs");
+// HYK-204: relay-handshake.mjs and review-gate.mjs both now import
+// "./envelope-archive.mjs" (round preservation) -- the 축B mutation below
+// stages copies of both alongside a mutated review-gate.mjs, so that
+// import must resolve too, or the copy fails to load at all (not a real
+// RED signal, just a missing file).
+const ENVELOPE_ARCHIVE_PATH = join(HERE, "envelope-archive.mjs");
 
 function tmpDir(prefix) {
   return mkdtempSync(join(tmpdir(), prefix));
@@ -170,8 +176,7 @@ test("mutation 축A (필수): isDuplicate's done_at component removed -> two rea
 
 test("mutation 축B (필수): review-gate.mjs's recordApprovalToLedger call removed from the CLI block -> an approved commit passes the gate but the ledger is never written -> RED", () => {
   const src = readFileSync(REVIEW_GATE_PATH, "utf8");
-  const target =
-    "    if (isGenuineReviewApproval(message, reviewPath)) {\n      recordApprovalToLedger(reviewPath);\n    }\n";
+  const target = "      recordApprovalToLedger(reviewPath);\n";
   assertExactlyOneMatch(src, target, "recordApprovalToLedger call site");
   const mutated = src.replace(target, "");
 
@@ -188,6 +193,11 @@ test("mutation 축B (필수): review-gate.mjs's recordApprovalToLedger call remo
     writeFileSync(
       join(scriptsCheckDir, "relay-handshake.mjs"),
       readFileSync(RELAY_HANDSHAKE_PATH, "utf8"),
+      "utf8",
+    );
+    writeFileSync(
+      join(scriptsCheckDir, "envelope-archive.mjs"),
+      readFileSync(ENVELOPE_ARCHIVE_PATH, "utf8"),
       "utf8",
     );
     const mutantReviewGate = join(scriptsCheckDir, "review-gate.mjs");

@@ -445,6 +445,15 @@ const RELAY_HANDSHAKE_SRC_HEAD = readFileSync(
   join(ROOT, "scripts", "check", "relay-handshake.mjs"),
   "utf8",
 );
+// HYK-204: relay-handshake.mjs now imports "./envelope-archive.mjs" (round
+// preservation) -- a mutant copy of relay-handshake.mjs staged without it
+// fails to resolve that import. Unmutated: this suite's mutation targets
+// are all inside reject-streak.mjs/relay-handshake.mjs's own logic, not
+// envelope-archive.mjs.
+const ENVELOPE_ARCHIVE_SRC_HEAD = readFileSync(
+  join(ROOT, "scripts", "check", "envelope-archive.mjs"),
+  "utf8",
+);
 
 function assertExactlyOneMatch(src, target, label) {
   const count = src.split(target).length - 1;
@@ -460,6 +469,11 @@ function writeMutantPair(rootDir, { relaySrc, streakSrc }) {
   mkdirSync(scriptsCheckDir, { recursive: true });
   writeFileSync(join(scriptsCheckDir, "relay-handshake.mjs"), relaySrc, "utf8");
   writeFileSync(join(scriptsCheckDir, "reject-streak.mjs"), streakSrc, "utf8");
+  writeFileSync(
+    join(scriptsCheckDir, "envelope-archive.mjs"),
+    ENVELOPE_ARCHIVE_SRC_HEAD,
+    "utf8",
+  );
   return join(scriptsCheckDir, "relay-handshake.mjs");
 }
 
