@@ -149,6 +149,28 @@ export const AXES = Object.freeze([
     badVerdicts: Object.freeze([...HUMAN_WAKE_STATES, COORD_STATE.NEEDS_INPUT]),
     badStatuses: Object.freeze(["ESCALATION_COLLECTION_FAILED"]),
   }),
+  // HYK-212-postcheck-1 (coder-task.md §2/§4 요건3) -- «배달 직후 재조회
+  // 사후검증» 축. §4 요건3과 동일 이유로 세 번째 예외가 생긴다: 이
+  // AXES는 닫힌 배열이고 여기 등록된 축의 verdict/status만 "열린
+  // 이상"으로 분류돼 받는함(reach-notify-*.md)에 도달한다 -- 등록하지
+  // 않으면 watch.log(postcheck_*)까지만 가고 사람에게 안 간다(1-B가
+  // 금지하는 "로그에만" 실패 형태 그 자체). badVerdicts = RECORD_MISSING
+  // (배달 시점 재조회로 이미 확인된 "레코드 없음", dispatch-postcheck-
+  // core.mjs DISPATCH_POSTCHECK_VERDICT). badStatuses = 이 축 자신의
+  // 조회 실패(§3-3: 이건 RECORD_MISSING과 다른 값이라 badVerdicts에
+  // 넣지 않는다 -- 정직 요구) + watch 시점 수집 실패(영수증 파일
+  // 손상·워크트리 열거 실패).
+  Object.freeze({
+    key: "postcheck",
+    prefix: "postcheck",
+    label: "배달 레코드 미생성",
+    badVerdicts: Object.freeze(["RECORD_MISSING"]),
+    badStatuses: Object.freeze([
+      "DISPATCH_POSTCHECK_QUERY_FAILED",
+      "DISPATCH_POSTCHECK_SCAN_WORKTREE_LIST_FAILED",
+      "DISPATCH_POSTCHECK_SCAN_RECEIPT_READ_FAILED",
+    ]),
+  }),
 ]);
 
 // HYK-191-reach-1 실측 수리: 4축 필드(seat_*/idle_*/start_*/unconsumed_*)가

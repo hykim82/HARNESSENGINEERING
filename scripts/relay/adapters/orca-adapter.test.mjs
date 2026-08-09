@@ -66,6 +66,14 @@ import {
   ELIGIBILITY as TEARDOWN_ELIGIBILITY,
   REASON as TEARDOWN_CORE_REASON,
 } from "../teardown-core.mjs";
+import {
+  rawDispatchShowAssigned,
+  rawDispatchShowUnassigned,
+} from "../hyk171-cycle4b2b3-fixtures.mjs";
+import {
+  DISPATCH_POSTCHECK_VERDICT,
+  DISPATCH_POSTCHECK_STATUS,
+} from "./dispatch-postcheck-core.mjs";
 
 // HYK-170 coder-1: 어댑터 단위 테스트 -- 전부 execFn/fs fake 주입, 실 orca
 // 호출 0(비타협 제약). fixture는 관제실 산출물
@@ -2036,6 +2044,189 @@ test("deliverTask: claude engine (CODER) needs no explicit submit -- auto, retri
   assert.equal(r.submitted, "auto");
   assert.equal(r.retries, 0);
   assert.equal(execFn.calls.length, 2); // task-create, dispatch -- no submit call
+  // HYK-212-postcheck-1: taskCreateDispatchStubs()'s bare dispatch fixture
+  // ({ok:true, result:{id:"ctx_1"}}) doesn't match either raw shape
+  // (dispatch/dispatch-show) -- normalizeDispatchRawUnion returns
+  // injected:undefined, so the postcheck must not fire (no dispatch-show
+  // call, r.postcheck stays null). This pins the existing call-count
+  // assertion above as a live regression guard, not an incidental pass.
+  assert.equal(r.postcheck, null);
+});
+
+// ---------------------------------------------------------------------------
+// HYK-212-postcheck-1 (coder-task.md §1-§5) -- 배달 직후 재조회 사후검증.
+// 실사고 반사실: dispatch가 injected:true를 자기신고했는데 그 직후
+// dispatch-show가 result.dispatch===null(레코드 없음)이면 조용히
+// UNDECIDABLE로 접지 않고 postcheck.verdict를 RECORD_MISSING으로 승격
+// + 워크트리에 영수증을 남긴다(watch-time 축이 읽는 통로).
+// ---------------------------------------------------------------------------
+function fakePostcheckFs(initial = {}) {
+  const files = { ...initial };
+  const writes = [];
+  return {
+    files,
+    writes,
+    fs: {
+      existsFn: (p) => Object.prototype.hasOwnProperty.call(files, p),
+      mkdirFn: () => {},
+      writeFn: (p, text) => {
+        files[p] = text;
+        writes.push({ path: p, text });
+      },
+    },
+  };
+}
+
+function claudeDispatchStubWithInjected(
+  dispatchOverrides = {},
+  injected = true,
+) {
+  const assigned = rawDispatchShowAssigned(dispatchOverrides);
+  return {
+    "task-create": {
+      ok: true,
+      result: { task: { id: "task_rt1", status: "ready" } },
+    },
+    dispatch: {
+      ok: true,
+      result: { dispatch: assigned.result.dispatch, injected },
+    },
+  };
+}
+
+test("deliverTask: claude + injected:true + dispatch-show(record missing) -- postcheck.verdict is RECORD_MISSING, delivery itself still ok:true (side effect already happened), and a receipt is written", () => {
+  const execFn = fakeExecFn({
+    ...claudeDispatchStubWithInjected({ id: "ctxMain", task_id: "task_rt1" }),
+    "dispatch-show": rawDispatchShowUnassigned(),
+  });
+  const { fs, writes } = fakePostcheckFs();
+  const r = deliverTask(
+    {
+      taskId: "HYK-212-postcheck-1",
+      role: "CODER",
+      worktreePath: VALID_WORKTREE,
+    },
+    { execFn, existingSeatHandle: "term_x", postcheckFs: fs },
+  );
+  assert.equal(
+    r.ok,
+    true,
+    "delivery success is not reverted by a failed postcheck",
+  );
+  assert.equal(r.postcheck.status, DISPATCH_POSTCHECK_STATUS.OK);
+  assert.equal(r.postcheck.verdict, DISPATCH_POSTCHECK_VERDICT.RECORD_MISSING);
+  assert.equal(writes.length, 1);
+  const receipt = JSON.parse(writes[0].text);
+  assert.equal(receipt.verdict, DISPATCH_POSTCHECK_VERDICT.RECORD_MISSING);
+  assert.equal(receipt.runtimeTaskId, "task_rt1");
+  assert.equal(receipt.harnessTaskId, "HYK-212-postcheck-1");
+  const dispatchShowCall = execFn.calls.find(
+    (a) => a[0] === "orchestration" && a[1] === "dispatch-show",
+  );
+  assert.deepEqual(dispatchShowCall, [
+    "orchestration",
+    "dispatch-show",
+    "--task",
+    "task_rt1",
+    "--json",
+  ]);
+});
+
+test("deliverTask: claude + injected:true + dispatch-show(record present) -- postcheck.verdict is CONFIRMED (§3-2 zero false positives on normal delivery)", () => {
+  const execFn = fakeExecFn({
+    ...claudeDispatchStubWithInjected({ id: "ctxMain", task_id: "task_rt1" }),
+    "dispatch-show": rawDispatchShowAssigned({
+      id: "ctxMain",
+      task_id: "task_rt1",
+    }),
+  });
+  const { fs, writes } = fakePostcheckFs();
+  const r = deliverTask(
+    {
+      taskId: "HYK-212-postcheck-1",
+      role: "CODER",
+      worktreePath: VALID_WORKTREE,
+    },
+    { execFn, existingSeatHandle: "term_x", postcheckFs: fs },
+  );
+  assert.equal(r.ok, true);
+  assert.equal(r.postcheck.status, DISPATCH_POSTCHECK_STATUS.OK);
+  assert.equal(r.postcheck.verdict, DISPATCH_POSTCHECK_VERDICT.CONFIRMED);
+  const receipt = JSON.parse(writes[0].text);
+  assert.equal(receipt.verdict, DISPATCH_POSTCHECK_VERDICT.CONFIRMED);
+});
+
+test("deliverTask: claude + injected:true + dispatch-show query itself throws -- postcheck.status is QUERY_FAILED, verdict is NOT RECORD_MISSING (§3-3 query failure != record missing)", () => {
+  const execFn = fakeExecFn({
+    ...claudeDispatchStubWithInjected(),
+    "dispatch-show": () => {
+      throw new Error("ECONNRESET");
+    },
+  });
+  const { fs, writes } = fakePostcheckFs();
+  const r = deliverTask(
+    {
+      taskId: "HYK-212-postcheck-1",
+      role: "CODER",
+      worktreePath: VALID_WORKTREE,
+    },
+    { execFn, existingSeatHandle: "term_x", postcheckFs: fs },
+  );
+  assert.equal(r.ok, true);
+  assert.equal(r.postcheck.status, DISPATCH_POSTCHECK_STATUS.QUERY_FAILED);
+  assert.notEqual(
+    r.postcheck.verdict,
+    DISPATCH_POSTCHECK_VERDICT.RECORD_MISSING,
+  );
+  const receipt = JSON.parse(writes[0].text);
+  assert.equal(receipt.status, DISPATCH_POSTCHECK_STATUS.QUERY_FAILED);
+});
+
+test("deliverTask: claude + injected NOT true (missing from response) -- postcheck never runs, zero dispatch-show calls, zero receipt writes (no false alarms on a plain dispatch response)", () => {
+  const execFn = fakeExecFn(taskCreateDispatchStubs());
+  const { fs, writes } = fakePostcheckFs();
+  const r = deliverTask(
+    {
+      taskId: "HYK-212-postcheck-1",
+      role: "CODER",
+      worktreePath: VALID_WORKTREE,
+    },
+    { execFn, existingSeatHandle: "term_x", postcheckFs: fs },
+  );
+  assert.equal(r.ok, true);
+  assert.equal(r.postcheck, null);
+  assert.equal(writes.length, 0);
+  assert.equal(
+    execFn.calls.some(
+      (a) => a[0] === "orchestration" && a[1] === "dispatch-show",
+    ),
+    false,
+  );
+});
+
+test("deliverTask: codex engine (REVIEW) -- postcheck never runs (no --inject, injected is not applicable), zero dispatch-show calls", () => {
+  const execFn = fakeExecFn({
+    ...taskCreateDispatchStubs(),
+    send: { ok: true },
+  });
+  const { fs, writes } = fakePostcheckFs();
+  const r = deliverTask(
+    { taskId: "HYK-169-coder-1", role: "REVIEW", worktreePath: VALID_WORKTREE },
+    {
+      execFn,
+      existingSeatHandle: "term_x",
+      confirmPastedFn: () => true,
+      postcheckFs: fs,
+    },
+  );
+  assert.equal(r.ok, true);
+  assert.equal(
+    execFn.calls.some(
+      (a) => a[0] === "orchestration" && a[1] === "dispatch-show",
+    ),
+    false,
+  );
+  assert.equal(writes.length, 0);
 });
 
 // ---------------------------------------------------------------------------
