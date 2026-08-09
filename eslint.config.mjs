@@ -92,12 +92,28 @@ export default [
     // collectSeatLivenessObservation/collectSeatObservationsForWorktree
     // ports on the real 2026-08-05 21:36 KST sample to show the
     // before/after difference (coder-task.md acceptance (a)).
+    // HYK-173-push-wire (coder-task.md §5-C/§5-D): the same narrow
+    // exception, one more time, for the escalation axis wiring --
+    // orch-stall-detect.mjs calls reduceCoordinatorState/shouldWakeHuman
+    // (scripts/relay/escalation-state.mjs) to judge scoped escalation
+    // messages, and watch-run.mjs calls shouldNotify from the same module
+    // to dedupe reach-notify writes (the dedupe needs a state-file write,
+    // which orch-stall-detect.mjs's own read-only contract forbids --
+    // watch-run.mjs is already the I/O runner, so that's where it lives).
+    // Both are production entry points wiring an already-merged pure
+    // judgment layer, not a reopening of the general relay -> non-relay
+    // dependency direction. escalation-axis-wire.test.mjs exercises the
+    // same production path.
     files: [
       "scripts/supervisor/orch-stall-detect.mjs",
       "scripts/supervisor/seat-liveness-wire.test.mjs",
       "scripts/supervisor/seat-idle-wire.test.mjs",
       "scripts/supervisor/dispatch-start-wire.test.mjs",
       "scripts/supervisor/hyk185-seat-multi-repro.test.mjs",
+      "scripts/supervisor/watch-run.mjs",
+      "scripts/supervisor/escalation-axis-wire.test.mjs",
+      "scripts/supervisor/reach-report-core.mjs",
+      "scripts/supervisor/reach-report-core.test.mjs",
     ],
     rules: {
       "no-restricted-imports": "off",

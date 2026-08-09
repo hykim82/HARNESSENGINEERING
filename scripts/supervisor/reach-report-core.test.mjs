@@ -31,6 +31,8 @@ const LINE_DEFAULTS = {
   capVerdict: "DECIDED",
   capValue: "2",
   capSource: "/x/concurrency-cap.json",
+  escalationStatus: "ESCALATION_OK",
+  escalationVerdict: "NONE",
 };
 
 function line(overrides) {
@@ -50,6 +52,8 @@ function line(overrides) {
     capVerdict,
     capValue,
     capSource,
+    escalationStatus,
+    escalationVerdict,
   } = { ...LINE_DEFAULTS, ...overrides };
   return (
     `${ts} exit=0 verdict=${verdict} reason=${reason} ` +
@@ -57,7 +61,8 @@ function line(overrides) {
     `idle_status=${idleStatus} idle_verdict=${idleVerdict} idle_worst_count=NONE idle_worktrees=4 ` +
     `start_status=${startStatus} start_verdict=${startVerdict} start_worst_count=NONE start_worktrees=4 ` +
     `unconsumed_status=${unconsumedStatus} unconsumed_verdict=${unconsumedVerdict} unconsumed_worst_count=NONE unconsumed_worktrees=4 ` +
-    `cap_status=${capStatus} cap_verdict=${capVerdict} cap_value=${capValue} cap_source=${capSource}`
+    `cap_status=${capStatus} cap_verdict=${capVerdict} cap_value=${capValue} cap_source=${capSource} ` +
+    `escalation_status=${escalationStatus} escalation_verdict=${escalationVerdict} escalation_worst_count=NONE escalation_worktrees=1`
   );
 }
 
@@ -212,6 +217,28 @@ test("(b) no open anomalies -> computeOpenAnomalies returns [] and formatMorning
   assert.ok(report.trim().length > 0, "report body must never be blank");
 });
 
+// HYK-173-push-wire 2R P2-1(coder-task.md §2-2) -- "적힌 수 != 실제 목록"
+// 계열의 여섯 번째 재발을 막는 시험. formatMorningReport의 "없음" 문면이
+// AXES.length를 그대로 실었는지(손으로 박은 숫자가 아닌지)를 직접
+// 확인한다 -- AXES가 나중에 늘어나도(예: 일곱 번째 축 편입) 이 시험은
+// AXES.length를 그대로 읽으므로 계속 통과해야 하고, 반대로 구현이 다시
+// 손으로 박은 리터럴로 되돌아가면(변조) 이 단언이 그 리터럴과 실제
+// AXES.length가 어긋나는 순간 RED가 된다.
+test("HYK-173-push-wire 2R P2-1: the '없음' line's axis count is derived from AXES.length, not a hand-baked literal (1/1)", () => {
+  const entries = parseWatchLog(
+    line({ ts: "2026-08-05T00:00:00.000Z" }),
+  ).entries;
+  const report = formatMorningReport({
+    entries,
+    nowMs: Date.parse("2026-08-05T00:00:00.000Z"),
+  });
+  const expected = `없음 -- 열려 있는 이상이 없습니다(${AXES.length}축 전부 정상 또는 관측 대상 없음).`;
+  assert.ok(
+    report.includes(expected),
+    `expected the machine-derived count (AXES.length=${AXES.length}) in: ${report}`,
+  );
+});
+
 test("empty log (no entries at all) still produces a non-blank report saying so explicitly (1/1)", () => {
   const report = formatMorningReport({ entries: [], nowMs: Date.now() });
   assert.match(report, /없음/);
@@ -241,7 +268,7 @@ test("computeRecentSummary counts anomalous samples within the window, distinct 
   );
 });
 
-test("all 5 axes are independently tracked (one axis bad does not mask another) (1/1)", () => {
+test("all 6 axes are independently tracked (one axis bad does not mask another) (1/1)", () => {
   const t0 = Date.parse("2026-08-05T00:00:00.000Z");
   const entries = parseWatchLog(
     line({
@@ -256,6 +283,8 @@ test("all 5 axes are independently tracked (one axis bad does not mask another) 
       unconsumedVerdict: "SUSPECTED_UNCONSUMED",
       capStatus: "CAP_READ_FAILED",
       capVerdict: "FILE_UNREADABLE",
+      escalationStatus: "ESCALATION_OK",
+      escalationVerdict: "NEEDS_INPUT",
     }),
   ).entries;
   const open = computeOpenAnomalies(entries, t0);

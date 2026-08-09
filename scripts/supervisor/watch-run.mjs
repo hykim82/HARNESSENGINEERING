@@ -6,8 +6,17 @@
 //
 // S11 필수(coder-task.md §5-E, 문구 그대로):
 // 1. **증명한다**: 등록되면 이 감지는 ORCH 세션·에이전트와 무관하게 OS가
-//    부른다 -- 이 파일은 `node`만으로 실행되며 Claude 훅·Orca API 호출이
-//    없다.
+//    부른다 -- 이 파일은 `node`(자식 프로세스 spawn 포함)만으로 실행되며
+//    에이전트 런타임 훅 호출이 없다. ★HYK-173-push-wire 갱신(§5-F "주장-구현
+//    일치" -- 이 갱신 전에도 이미 부정확했다, seatLiveness 축이 이미
+//    간접 orca 호출을 했다): 이 파일 자신은 orca를 spawn하지 않지만, 이
+//    파일이 감싸 부르는 자식 프로세스(orch-stall-detect.mjs)는
+//    seatLiveness/escalation 두 축에서 `orca-adapter.mjs`를 통해
+//    간접적으로 `orca` CLI(터미널 조회·`orchestration check --peek`)를
+//    부른다(G9, `orca-cli-boundary.mjs`가 "orca 문자열 리터럴 spawn은
+//    adapter 안에서만" 강제 -- 이 파일도 그 자식 프로세스도 spawn 호출
+//    자체는 adapter 밖에 없다). "Orca API 호출이 없다"는 더 이상 사실이
+//    아니므로 이 줄을 고쳐 적는다.
 // 2. **증명하지 않는다**: 이 조각만으로는 아무것도 돌지 않는다 -- 실제
 //    등록은 사람 손이며, 등록됐는지 여부는 저장소 밖이라 우리 기계
 //    검사가 볼 수 없다.
@@ -56,6 +65,11 @@ import path from "node:path";
 import { runReachOnce, DEFAULT_NOTIFY_DIR } from "./reach-report.mjs";
 import { readConcurrencyCap } from "./concurrency-cap-adapter.mjs";
 import { judgeConcurrency } from "./concurrency-core.mjs";
+// HYK-173-push-wire (coder-task.md §5-D) -- shouldNotify는 이 러너가
+// 부른다(orch-stall-detect.mjs가 아니다 -- 그 파일은 §2-3 비타협에 따라
+// 부작용 0을 유지해야 하는데 dedupe는 상태 파일 쓰기가 필요하다). 판단
+// 로직(escalation-state.mjs)은 여기서도 재구현하지 않고 그대로 부른다.
+import { shouldNotify } from "../relay/escalation-state.mjs";
 
 export const MAX_LOG_LINES = 5000;
 
@@ -201,6 +215,37 @@ function extractUnconsumedFields(unconsumed) {
   };
 }
 
+// HYK-173-push-wire (coder-task.md §4 요건2) -- escalation 축 필드도
+// 기존 세 축과 동일한 4필드 관례로 옮겨 적는다. `scopes`(dedupeKey/
+// transitionId/wakeHuman 등 원본 배열, orch-stall-detect.mjs
+// judgeEscalationForRepo 참조)는 로그 문자열 필드로 직접 실리지 않고
+// runEscalationDedupeStep(아래)의 입력으로만 쓰인다 -- watch.log 파서
+// (reach-report-core.mjs parseFieldTokens)는 공백으로 분리된 key=value
+// 토큰만 읽으므로 배열을 그 형식에 그대로 실을 수 없다(§4 요건2 "기존
+// 필드·형식·파서는 불변" 비타협과 충돌하지 않기 위한 설계 선택).
+function extractEscalationFields(escalation) {
+  return {
+    escalationStatus:
+      escalation && typeof escalation.status === "string"
+        ? escalation.status
+        : null,
+    escalationVerdict:
+      escalation && typeof escalation.verdict === "string"
+        ? escalation.verdict
+        : null,
+    escalationWorstCount:
+      escalation && typeof escalation.worstCount === "number"
+        ? escalation.worstCount
+        : null,
+    escalationTotalWorktrees:
+      escalation && typeof escalation.totalWorktrees === "number"
+        ? escalation.totalWorktrees
+        : null,
+    escalationScopes:
+      escalation && Array.isArray(escalation.scopes) ? escalation.scopes : [],
+  };
+}
+
 function parseDetectorStdout(stdout) {
   try {
     const parsed = JSON.parse(String(stdout).trim());
@@ -214,6 +259,9 @@ function parseDetectorStdout(stdout) {
     const unconsumed = isPlainObject(parsed.unconsumed)
       ? parsed.unconsumed
       : null;
+    const escalation = isPlainObject(parsed.escalation)
+      ? parsed.escalation
+      : null;
     return {
       verdict: typeof parsed.verdict === "string" ? parsed.verdict : null,
       reasonCode:
@@ -222,6 +270,7 @@ function parseDetectorStdout(stdout) {
       ...extractSeatIdleFields(seatIdle),
       ...extractDispatchStartFields(dispatchStart),
       ...extractUnconsumedFields(unconsumed),
+      ...extractEscalationFields(escalation),
     };
   } catch {
     return {
@@ -245,6 +294,11 @@ function parseDetectorStdout(stdout) {
       unconsumedVerdict: null,
       unconsumedWorstCount: null,
       unconsumedTotalWorktrees: null,
+      escalationStatus: null,
+      escalationVerdict: null,
+      escalationWorstCount: null,
+      escalationTotalWorktrees: null,
+      escalationScopes: [],
     };
   }
 }
@@ -416,6 +470,127 @@ function capLogSegment(capResult) {
   return `cap_status=${s} cap_verdict=${v} cap_value=${val} cap_source=${src}`;
 }
 
+// ---- HYK-173-push-wire (coder-task.md §5-D) -- escalation dedupe ----
+//
+// shouldNotify(escalation-state.mjs)는 priorNotified를 호출자가 공급해야
+// 하는 순수 함수인데, watch-run은 매 회차 새 프로세스라 메모리 집합이
+// 회차를 못 넘는다 -- reach-notify-state.json과 같은 패턴(별도 상태
+// 파일)을 재사용한다. 키 재료는 S1 실측 그대로 dedupeKey(taskId:
+// dispatchId:state) + transitionId(id/sequence) -- shouldNotify 자신이
+// 이 둘을 합쳐 키를 만든다(escalation-state.mjs를 고치지 않는다).
+//
+// computeEscalationNotifications: 순수 함수(시험 용이성) -- scopes(축
+// 원본 배열) + priorNotifiedKeys(Set 또는 배열) -> {newlyNotified,
+// nextKeys}. wakeHuman이 아닌 스코프는 애초에 통지 후보가 아니다(§4
+// 요건3은 "wakeHuman인데 도달 안 됨"만 문제 삼는다 -- wake가 아닌 것을
+// 통지하지 않는 것은 결함이 아니다).
+export function computeEscalationNotifications({ scopes, priorNotifiedKeys }) {
+  const priorSet =
+    priorNotifiedKeys instanceof Set
+      ? priorNotifiedKeys
+      : new Set(Array.isArray(priorNotifiedKeys) ? priorNotifiedKeys : []);
+  const nextKeys = new Set(priorSet);
+  const newlyNotified = [];
+  for (const s of Array.isArray(scopes) ? scopes : []) {
+    if (!s || s.wakeHuman !== true) continue;
+    const { notify, key } = shouldNotify(s.dedupeKey, s.transitionId, priorSet);
+    if (notify && key) {
+      newlyNotified.push(s);
+      nextKeys.add(key);
+    }
+  }
+  return { newlyNotified, nextKeys };
+}
+
+function readEscalationNotifyState(readFn, statePath) {
+  try {
+    const text = readFn(statePath, "utf8");
+    const parsed = JSON.parse(text);
+    return {
+      keys: Array.isArray(parsed?.notifiedKeys) ? parsed.notifiedKeys : [],
+      stateMissing: false,
+    };
+  } catch {
+    // fail-open(§5-D 비타협): 상태 파일이 없거나 못 읽으면 "직전 상태
+    // 없음"으로 접어 전부 재통지 후보로 취급한다 -- fail-closed는 침묵
+    // 쪽 실패라 이 트랙이 잡으려는 실패를 dedupe 층에서 재생산한다.
+    // 단 조용히 접지 않는다: stateMissing=true를 호출자에게 돌려주고,
+    // 호출자(아래 runEscalationDedupeStep)가 로그 상세에 그 사실을
+    // 남긴다.
+    return { keys: [], stateMissing: true };
+  }
+}
+
+// 이 축의 인박스는 저장소당이 아니라 ORCH 세션당 1개이므로 dedupe 상태도
+// watchDir 하나에 저장한다(reach-notify-state.json과 나란히).
+function runEscalationDedupeStep({
+  scopes,
+  watchDir,
+  readFn,
+  writeFn,
+  existsFn,
+  mkdirFn,
+}) {
+  const statePath = path.join(watchDir, "escalation-notify-state.json");
+  const prior = readEscalationNotifyState(readFn, statePath);
+  const { newlyNotified, nextKeys } = computeEscalationNotifications({
+    scopes,
+    priorNotifiedKeys: prior.keys,
+  });
+  try {
+    if (!existsFn(watchDir)) mkdirFn(watchDir, { recursive: true });
+    writeFn(
+      statePath,
+      JSON.stringify({ notifiedKeys: Array.from(nextKeys) }),
+      "utf8",
+    );
+  } catch {
+    // 상태 저장 자체의 실패는 이 러너의 계약(로그 한 줄 + 생존 기록)을
+    // 깨서는 안 된다(§2-3과 동일 원칙, runReachStep과 대칭) -- 저장이
+    // 안 되면 다음 회차에 fail-open으로 다시 전부 재통지될 뿐이다.
+  }
+  return { newlyNotified, stateMissing: prior.stateMissing };
+}
+
+// escalation 축의 사람이 읽는 사유(§4 요건2 "막힌 워커가 있으면 사유가
+// 사람이 읽을 수 있게 실려야 한다", HYK-210 전례와 동일 형식 -- 공백
+// 치환·길이 상한·건수 상한+N_more). wakeHuman 스코프 전부(새 것이든
+// 이미 통지된 것이든)를 보여준다 -- "지금도 열려 있다"는 사실 자체가
+// 사람에게 유용하다(reach-report-core.mjs의 "지금 열려 있는 이상"과
+// 같은 원칙). newlyNotified에 포함된 항목은 NEW: 접두를 붙인다.
+function formatEscalationEntry(scope, isNew) {
+  const taskId = sanitizeFailureToken(scope?.scope?.taskId, "unknown_task");
+  const dispatchId = sanitizeFailureToken(
+    scope?.scope?.dispatchId,
+    "unknown_dispatch",
+  );
+  const reasonRaw = scope?.sampleSubject || scope?.sampleBody;
+  const reason = truncateToken(
+    sanitizeFailureToken(reasonRaw, "reason_unavailable"),
+    MAX_PARTIAL_FAILURE_REASON_CHARS,
+  );
+  const prefix = isNew ? "NEW:" : "";
+  return `${prefix}${taskId}/${dispatchId}:${reason}`;
+}
+
+function escalationDetailSegment({ wakeScopes, newlyNotified, stateMissing }) {
+  if (!Array.isArray(wakeScopes) || wakeScopes.length === 0) return null;
+  const newKeys = new Set(
+    (Array.isArray(newlyNotified) ? newlyNotified : []).map((s) => s.dedupeKey),
+  );
+  const shown = wakeScopes
+    .slice(0, MAX_PARTIAL_FAILURE_ITEMS)
+    .map((s) => formatEscalationEntry(s, newKeys.has(s.dedupeKey)));
+  const omitted = wakeScopes.length - shown.length;
+  const detail =
+    omitted > 0 ? `${shown.join("|")}|+${omitted}_more` : shown.join("|");
+  // §5-D 비타협: 상태 파일 읽기 실패 자체를 조용히 접지 않는다 -- dedupe
+  // 상태가 없어 전부 재통지 후보로 취급됐을 수 있음을 사람이 읽는 상세
+  // 문면에 명시한다.
+  const dedupeNote = stateMissing ? " escalation_dedupe_state=MISSING" : "";
+  return `escalation_open=${wakeScopes.length} escalation_detail=${detail}${dedupeNote}`;
+}
+
 // runWatchOnce에서 분리(§6 eslint max-complexity 상한 준수) -- §5-4 계약
 // 보존: 이 단계 자신의 실패(예: readFn이 예상외로 던짐)가 감시기 전체를
 // 죽이면 안 된다. readConcurrencyCap/judgeConcurrency는 둘 다 throw로
@@ -449,7 +624,12 @@ function computeCapResult({ repoRoot, capPath, capReadFn }) {
   }
 }
 
-export function buildLogLine({ nowIso, detectorResult, capResult }) {
+export function buildLogLine({
+  nowIso,
+  detectorResult,
+  capResult,
+  escalationDedupe,
+}) {
   if (detectorResult.runnerFailure) {
     return `${nowIso} RUNNER_FAILURE message=${detectorResult.message}`;
   }
@@ -488,9 +668,33 @@ export function buildLogLine({ nowIso, detectorResult, capResult }) {
     totalWorktrees: detectorResult.unconsumedTotalWorktrees,
   });
   const capSegment = capLogSegment(capResult ?? {});
+  // HYK-173-push-wire (coder-task.md §4 요건2): escalation 축도 기존
+  // 4필드 관례 그대로(escalation_status/escalation_verdict/
+  // escalation_worst_count/escalation_worktrees) -- 새 축이지만 새
+  // 형식은 만들지 않는다(§5-E, 기존 세 축과 동형). wakeScopes가 있으면
+  // 사람이 읽는 상세(escalation_open/escalation_detail)도 덧붙인다(§4
+  // 요건2 "사유가 사람이 읽을 수 있게").
+  const escalationSegment = axisLogSegment("escalation", {
+    status: detectorResult.escalationStatus,
+    verdict: detectorResult.escalationVerdict,
+    worstCount: detectorResult.escalationWorstCount,
+    totalWorktrees: detectorResult.escalationTotalWorktrees,
+  });
+  const wakeScopes = (detectorResult.escalationScopes ?? []).filter(
+    (s) => s && s.wakeHuman === true,
+  );
+  const escalationDetail = escalationDetailSegment({
+    wakeScopes,
+    newlyNotified: escalationDedupe?.newlyNotified ?? [],
+    stateMissing: escalationDedupe?.stateMissing ?? false,
+  });
   // HYK-210-human-log-1: 실패 세그먼트는 있을 때만 끼운다(filter(Boolean))
   // -- 정상 실행(실패 0건)의 로그 줄 모양은 이 라운드 전과 바이트 단위로
-  // 동일하다(기존 소비자 회귀 0, coder-task.md §2-2).
+  // 동일하다(기존 소비자 회귀 0, coder-task.md §2-2). escalation 세그먼트
+  // 추가도 같은 원칙을 따른다 -- 이 라운드 전 로그 줄(escalation 필드
+  // 없음)과 바이트 단위로 동일하게 남는 것은 detectorResult에
+  // escalation* 필드가 전혀 없을 때뿐이다(§7-7 기존 축 회귀 0 시험이
+  // 이 경우를 직접 고정한다).
   return [
     nowIso,
     `exit=${detectorResult.exitCode}`,
@@ -503,6 +707,8 @@ export function buildLogLine({ nowIso, detectorResult, capResult }) {
     startFailureSegment,
     unconsumedSegment,
     capSegment,
+    escalationSegment,
+    escalationDetail,
   ]
     .filter(Boolean)
     .join(" ");
@@ -612,10 +818,27 @@ export function runWatchOnce({
     repoRoot,
   });
   const capResult = computeCapResult({ repoRoot, capPath, capReadFn });
+  // HYK-173-push-wire (coder-task.md §5-D): dedupe는 로그 줄을 만들기
+  // *전에* 계산한다 -- escalation_detail의 NEW: 표시가 이번 회차 통지
+  // 결과를 반영해야 한다(runReachStep과 달리, dedupe는 로그 줄 자체의
+  // 내용에 영향을 준다).
+  const escalationDedupe = runEscalationDedupeStep({
+    scopes: detectorResult.escalationScopes,
+    watchDir,
+    readFn,
+    writeFn,
+    existsFn,
+    mkdirFn,
+  });
   const nowIso = new Date(now).toISOString();
   const logPath = path.join(watchDir, "watch.log");
   const aliveRecordPath = path.join(watchDir, "last-run.json");
-  const line = buildLogLine({ nowIso, detectorResult, capResult });
+  const line = buildLogLine({
+    nowIso,
+    detectorResult,
+    capResult,
+    escalationDedupe,
+  });
   appendLogWithRotation({
     readFn,
     writeFn,
@@ -646,6 +869,7 @@ export function runWatchOnce({
     detectorResult,
     reachResult,
     capResult,
+    escalationDedupe,
   };
 }
 

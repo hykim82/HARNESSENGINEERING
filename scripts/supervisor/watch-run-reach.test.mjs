@@ -10,6 +10,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { execFileSync } from "node:child_process";
 import { runWatchOnce } from "./watch-run.mjs";
+import { AXES } from "./reach-report-core.mjs";
 
 function repoRoot() {
   return execFileSync("git", ["rev-parse", "--show-toplevel"], {
@@ -139,9 +140,15 @@ test("HYK-198-capwire-2 §2-4: a healthy cap read (verdict=DECIDED) never appear
       "utf8",
     );
     assert.doesNotMatch(reportText, /DECIDED/);
+    // HYK-173-push-wire 2R P2-1 -- 축 개수를 손으로 박지 않는다
+    // (AXES.length에서 유도, coder-task.md §2-2). 이 시험도 그 수를
+    // 손으로 다시 박으면 AXES가 늘 때마다 또 깨지므로, AXES.length를
+    // 그대로 읽어 기대값을 만든다.
     assert.match(
       reportText,
-      /없음 -- 열려 있는 이상이 없습니다\(5축 전부 정상 또는 관측 대상 없음\)/,
+      new RegExp(
+        `없음 -- 열려 있는 이상이 없습니다\\(${AXES.length}축 전부 정상 또는 관측 대상 없음\\)`,
+      ),
     );
   } finally {
     fs.rmSync(watchDir, { recursive: true, force: true });
