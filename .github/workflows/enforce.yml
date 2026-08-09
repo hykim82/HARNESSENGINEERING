@@ -28,7 +28,7 @@ jobs:
         run: npm ci
 
       - name: check test suites (scripts/check + scripts/relay + scripts/relay/adapters + scripts/supervisor *.test.mjs)
-        run: node --test scripts/check/*.test.mjs scripts/relay/*.test.mjs scripts/relay/adapters/*.test.mjs scripts/supervisor/*.test.mjs
+        run: node scripts/check/isolated-suite-runner.mjs
 
       - name: hooks POSIX syntax check
         run: |

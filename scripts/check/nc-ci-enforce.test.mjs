@@ -39,6 +39,20 @@ const ENFORCE_YML = execFileSync(
   { cwd: ROOT, encoding: "utf8" },
 );
 
+// HYK-208 2R: the workflow's test step no longer spells out the 4 globs
+// itself -- it delegates to scripts/check/isolated-suite-runner.mjs's
+// TEST_DIRS (mirrors CI-canonical enforce.yml directory-for-directory).
+// So "does CI still enforce all 4 directories" is now a two-part contract:
+// the workflow must still invoke that exact runner, AND the tracked runner
+// source must still list all 4 directories. Read the TRACKED runner text
+// the same read-only way ENFORCE_YML is read above -- never the
+// working-tree copy.
+const ISOLATED_SUITE_RUNNER = execFileSync(
+  "git",
+  ["show", "HEAD:scripts/check/isolated-suite-runner.mjs"],
+  { cwd: ROOT, encoding: "utf8" },
+);
+
 // ---------------------------------------------------------------------------
 // §4-1 contract detectors -- pure functions of workflow TEXT, reused
 // unchanged against both the real tracked text (must hold) and mkdtemp
@@ -52,14 +66,23 @@ function hasPushMasterTrigger(text) {
     text,
   );
 }
-const REQUIRED_TEST_GLOBS = [
-  "scripts/check/*.test.mjs",
-  "scripts/relay/*.test.mjs",
-  "scripts/relay/adapters/*.test.mjs",
-  "scripts/supervisor/*.test.mjs",
+const REQUIRED_TEST_DIRS = [
+  "scripts/check",
+  "scripts/relay",
+  "scripts/relay/adapters",
+  "scripts/supervisor",
 ];
-function hasFullTestGlob(text) {
-  return REQUIRED_TEST_GLOBS.every((g) => text.includes(g));
+// The exact `run:` line HYK-208's isolated-suite-runner installed at
+// enforce.yml:31. Match the line, not a substring, so swapping back to the
+// raw `node --test ...` glob (removing the isolation this whole track
+// exists for) is itself a contract violation, not just a coverage gap.
+const RUNNER_INVOCATION_RE =
+  /^[ \t]*run:[ \t]*node scripts\/check\/isolated-suite-runner\.mjs[ \t]*$/m;
+function hasRunnerInvocation(workflowText) {
+  return RUNNER_INVOCATION_RE.test(workflowText);
+}
+function hasFullTestDirCoverage(runnerText) {
+  return REQUIRED_TEST_DIRS.every((d) => runnerText.includes(`"${d}"`));
 }
 function hasContinueOnError(text) {
   return /continue-on-error/.test(text);
@@ -106,11 +129,16 @@ test("NC-3 ci-enforce/contract: on: triggers include BOTH pull_request and push:
   );
 });
 
-test("NC-3 ci-enforce/contract: test step glob includes all 4 required directories (scripts/check + scripts/relay + scripts/relay/adapters + scripts/supervisor)", () => {
+test("NC-3 ci-enforce/contract: workflow invokes scripts/check/isolated-suite-runner.mjs, AND that tracked runner covers all 4 required directories (scripts/check + scripts/relay + scripts/relay/adapters + scripts/supervisor)", () => {
   assert.equal(
-    hasFullTestGlob(ENFORCE_YML),
+    hasRunnerInvocation(ENFORCE_YML),
     true,
-    "if this glob narrows, newly-added *.test.mjs files (including this NC track's own) silently stop being enforced by CI",
+    "the test step no longer runs scripts/check/isolated-suite-runner.mjs -- CI would stop isolating the suite this whole track exists for",
+  );
+  assert.equal(
+    hasFullTestDirCoverage(ISOLATED_SUITE_RUNNER),
+    true,
+    "if the runner's TEST_DIRS narrows, newly-added *.test.mjs files (including this NC track's own) silently stop being enforced by CI",
   );
 });
 
@@ -185,10 +213,10 @@ test("NC-3 mutation/ci-enforce #1: injecting 'continue-on-error: true' into a co
   });
 });
 
-test("NC-3 mutation/ci-enforce #2: narrowing the test glob to only scripts/check/*.test.mjs -> RED", () => {
+test("NC-3 mutation/ci-enforce #2a: workflow test step reverted to the raw pre-HYK-208 node --test command (no longer invokes the runner) -> RED", () => {
   const mutated = ENFORCE_YML.replace(
-    "node --test scripts/check/*.test.mjs scripts/relay/*.test.mjs scripts/relay/adapters/*.test.mjs scripts/supervisor/*.test.mjs",
-    "node --test scripts/check/*.test.mjs",
+    "run: node scripts/check/isolated-suite-runner.mjs",
+    "run: node --test scripts/check/*.test.mjs scripts/relay/*.test.mjs scripts/relay/adapters/*.test.mjs scripts/supervisor/*.test.mjs",
   );
   assert.notEqual(
     mutated,
@@ -197,9 +225,28 @@ test("NC-3 mutation/ci-enforce #2: narrowing the test glob to only scripts/check
   );
   withMutantCopy(mutated, (text) => {
     assert.equal(
-      hasFullTestGlob(text),
+      hasRunnerInvocation(text),
       false,
-      "mutant contract detector must go RED (glob narrowed) where the real file covers all 4 directories",
+      "mutant contract detector must go RED (runner no longer invoked) where the real file runs the isolated runner",
+    );
+  });
+});
+
+test("NC-3 mutation/ci-enforce #2b: narrowing the runner's TEST_DIRS to only scripts/check -> RED", () => {
+  const mutated = ISOLATED_SUITE_RUNNER.replace(
+    'export const TEST_DIRS = [\n  "scripts/check",\n  "scripts/relay",\n  "scripts/relay/adapters",\n  "scripts/supervisor",\n];',
+    'export const TEST_DIRS = [\n  "scripts/check",\n];',
+  );
+  assert.notEqual(
+    mutated,
+    ISOLATED_SUITE_RUNNER,
+    "fixture assumption: mutation must actually change the text",
+  );
+  withMutantCopy(mutated, (text) => {
+    assert.equal(
+      hasFullTestDirCoverage(text),
+      false,
+      "mutant contract detector must go RED (TEST_DIRS narrowed) where the real file covers all 4 directories",
     );
   });
 });
