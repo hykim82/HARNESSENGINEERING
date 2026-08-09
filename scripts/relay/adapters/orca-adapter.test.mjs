@@ -54,6 +54,11 @@ import {
   buildTeardownWorktreeRemoveCommand,
   collectSeatLivenessObservation,
   SEAT_LIVENESS_OBSERVATION_REASON,
+  resolveRoleBoundSeatHandle,
+  classifySeatRoleFromRegistry,
+  describeCandidateRoles,
+  KNOWN_SEAT_ROLES,
+  ROLE_BOUND_SEAT_REASON,
 } from "./orca-adapter.mjs";
 import { scanEnvHandleIngress } from "./env-ingress-scan.mjs";
 import {
@@ -1085,11 +1090,44 @@ function terminalEntry(overrides = {}) {
     tabId: "11111111-2222-3333-4444-555555555555",
     leafId: "99999999-8888-7777-6666-555555555555",
     title: "CODER",
+    ptyId: "pty_default",
     connected: true,
     writable: true,
     lastOutputAt: "2026-07-22T00:00:00.000Z",
     ...overrides,
   };
+}
+
+// HYK-211-seat-select-2 (coder-task.md §2, P1-1 수리): 대장(seat-registry)
+// fixture -- resolveRoleBoundSeatHandle이 title 대신 이걸로 role을 조인한다.
+function seatRegistryStub(records) {
+  return { schemaVersion: 1, seats: records };
+}
+function registryRecord({ ptyId, role }) {
+  return {
+    schemaVersion: 1,
+    ptyId,
+    handle: null,
+    tabId: null,
+    leafId: null,
+    paneKey: null,
+    worktreeId: null,
+    worktreePath: null,
+    role,
+    taskId: null,
+    dispatchId: null,
+    capturedAt: null,
+  };
+}
+// registryFs opts -- existsFn/readFn 둘 다 (path)=>value, 실제 fs를 흉내낸다
+// (seat-registry.mjs의 loadRegistry 계약 그대로). registry가 null이면
+// "파일 없음"(정상, 빈 대장)을 흉내낸다.
+function fakeRegistryFs(registry) {
+  if (registry === null) {
+    return { existsFn: () => false, readFn: () => "" };
+  }
+  const text = JSON.stringify(registry);
+  return { existsFn: () => true, readFn: () => text };
 }
 
 test("resolveSeatHandle: exactly one candidate matching worktreePath -- ok:true with that handle", () => {
@@ -1230,6 +1268,354 @@ test("resolveSeatHandle: an unmanaged (not Orca-registered) worktree is rejected
 
 test("buildTerminalListCommand: exact argv shape", () => {
   assert.deepEqual(buildTerminalListCommand(), ["terminal", "list", "--json"]);
+});
+
+// ---------------------------------------------------------------------------
+// HYK-211-seat-select-2 (coder-task.md §4): resolveRoleBoundSeatHandle --
+// role-bound seat selection, 2R anchor = seat-registry (ptyId join), not
+// title. §4 변조 1~6 각각에 대응하는 시험을 명시 표시한다(결과 파일 보고와
+// 대조 가능하도록).
+// ---------------------------------------------------------------------------
+
+const REGISTRY_PATH = "fake/seat-registry.json";
+function resolveRoleBound(role, opts) {
+  return resolveRoleBoundSeatHandle(
+    { role, worktreePath: VALID_WORKTREE },
+    { registryPath: REGISTRY_PATH, ...opts },
+  );
+}
+
+test("classifySeatRoleFromRegistry: exact-one ptyId match with a KNOWN_SEAT_ROLES value resolves that role; 0/2+ matches or an unknown role value are null", () => {
+  const registry = seatRegistryStub([
+    registryRecord({ ptyId: "pty_1", role: "CODER" }),
+    registryRecord({ ptyId: "pty_2", role: "REVIEW" }),
+    registryRecord({ ptyId: "pty_dup", role: "CODER" }),
+    registryRecord({ ptyId: "pty_dup", role: "REVIEW" }),
+    registryRecord({ ptyId: "pty_bad", role: "NOT_A_ROLE" }),
+  ]);
+  assert.equal(classifySeatRoleFromRegistry("pty_1", registry), "CODER");
+  assert.equal(classifySeatRoleFromRegistry("pty_2", registry), "REVIEW");
+  assert.equal(classifySeatRoleFromRegistry("pty_missing", registry), null);
+  assert.equal(classifySeatRoleFromRegistry("pty_dup", registry), null);
+  assert.equal(classifySeatRoleFromRegistry("pty_bad", registry), null);
+  assert.equal(classifySeatRoleFromRegistry("", registry), null);
+  assert.equal(classifySeatRoleFromRegistry(undefined, registry), null);
+});
+
+test("describeCandidateRoles: maps each candidate's handle to its registry-joined role or 'UNDETERMINED'", () => {
+  const registry = seatRegistryStub([
+    registryRecord({ ptyId: "pty_coder", role: "CODER" }),
+  ]);
+  const candidates = [
+    terminalEntry({ handle: "term_coder", ptyId: "pty_coder" }),
+    terminalEntry({ handle: "term_unknown", ptyId: "pty_none" }),
+  ];
+  assert.deepEqual(describeCandidateRoles(candidates, registry), [
+    { handle: "term_coder", role: "CODER" },
+    { handle: "term_unknown", role: "UNDETERMINED" },
+  ]);
+});
+
+// ★★§4 변조1: 대장 조인 제거(역할 확인 없이 통과) → RED 대상. §4 변조5(역할이
+// 결과를 바꿈)도 겸한다: 동석(작업자+검토자) 상태에서 role=CODER 요청 시
+// 올바른 좌석만 뽑힌다(오늘 사고 재현 -- 검토자 좌석이 뽑히면 RED).
+test("resolveRoleBoundSeatHandle: §4-1/§4-5 registry-join repro -- CODER+REVIEW co-located, requesting CODER picks the CODER seat, not REVIEW", () => {
+  const registry = seatRegistryStub([
+    registryRecord({ ptyId: "pty_review", role: "REVIEW" }),
+    registryRecord({ ptyId: "pty_coder", role: "CODER" }),
+  ]);
+  const execFn = fakeExecFn({
+    list: managedWorktreeStub(VALID_WORKTREE),
+    "terminal-list": terminalListStub([
+      terminalEntry({ handle: "term_review", ptyId: "pty_review" }),
+      terminalEntry({ handle: "term_coder", ptyId: "pty_coder" }),
+    ]),
+  });
+  const r = resolveRoleBound("CODER", {
+    execFn,
+    registryFs: fakeRegistryFs(registry),
+  });
+  assert.equal(r.ok, true);
+  assert.equal(r.handle, "term_coder");
+  assert.deepEqual(r.candidateRoles, [
+    { handle: "term_review", role: "REVIEW" },
+    { handle: "term_coder", role: "CODER" },
+  ]);
+});
+
+test("resolveRoleBoundSeatHandle: §4-5 repro, opposite request -- requesting REVIEW picks the REVIEW seat", () => {
+  const registry = seatRegistryStub([
+    registryRecord({ ptyId: "pty_review", role: "REVIEW" }),
+    registryRecord({ ptyId: "pty_coder", role: "CODER" }),
+  ]);
+  const execFn = fakeExecFn({
+    list: managedWorktreeStub(VALID_WORKTREE),
+    "terminal-list": terminalListStub([
+      terminalEntry({ handle: "term_review", ptyId: "pty_review" }),
+      terminalEntry({ handle: "term_coder", ptyId: "pty_coder" }),
+    ]),
+  });
+  const r = resolveRoleBound("REVIEW", {
+    execFn,
+    registryFs: fakeRegistryFs(registry),
+  });
+  assert.equal(r.ok, true);
+  assert.equal(r.handle, "term_review");
+});
+
+// ★★§4 변조2: "미확정 후보가 있어도 유일 승자 선언" 변조 → RED (§3-1 회귀
+// 금지, 1R에서 통과한 방어를 앵커만 바꿔 승계). 여기서는 대장에 전혀 없는
+// (ptyId 미기록) 좌석이 하나 섞여 있어 CODER 매치가 1개뿐이어도 거부돼야
+// 한다.
+test("resolveRoleBoundSeatHandle: §4-2 an unregistered candidate blocks a unique-winner declaration even when exactly one candidate registry-matches the requested role", () => {
+  const registry = seatRegistryStub([
+    registryRecord({ ptyId: "pty_coder", role: "CODER" }),
+  ]);
+  const execFn = fakeExecFn({
+    list: managedWorktreeStub(VALID_WORKTREE),
+    "terminal-list": terminalListStub([
+      terminalEntry({ handle: "term_unknown", ptyId: "pty_unregistered" }),
+      terminalEntry({ handle: "term_coder", ptyId: "pty_coder" }),
+    ]),
+  });
+  const r = resolveRoleBound("CODER", {
+    execFn,
+    registryFs: fakeRegistryFs(registry),
+  });
+  assert.equal(r.ok, false);
+  assert.equal(r.roleBoundSeatReason, ROLE_BOUND_SEAT_REASON.ROLE_UNDETERMINED);
+  assert.equal(r.matchedCount, 1);
+  assert.equal(r.undeterminedCount, 1);
+});
+
+test("resolveRoleBoundSeatHandle: §4-2 an empty registry (nothing recorded yet) leaves every candidate undetermined -- always refuses, never guesses", () => {
+  const execFn = fakeExecFn({
+    list: managedWorktreeStub(VALID_WORKTREE),
+    "terminal-list": terminalListStub([
+      terminalEntry({ handle: "term_only", ptyId: "pty_x" }),
+    ]),
+  });
+  const r = resolveRoleBound("CODER", {
+    execFn,
+    registryFs: fakeRegistryFs(null),
+  });
+  assert.equal(r.ok, false);
+  assert.equal(r.roleBoundSeatReason, ROLE_BOUND_SEAT_REASON.ROLE_UNDETERMINED);
+});
+
+// §4 변조3: fail-loud 제거(0개/2개+ 거부를 지우고 "첫 번째 후보"를 고르게
+// 하는 변조) 대상.
+test("resolveRoleBoundSeatHandle: §4-3 zero candidates registry-match the requested role (others definitively a different known role) -- NOT_FOUND, not a guess", () => {
+  const registry = seatRegistryStub([
+    registryRecord({ ptyId: "pty_review", role: "REVIEW" }),
+  ]);
+  const execFn = fakeExecFn({
+    list: managedWorktreeStub(VALID_WORKTREE),
+    "terminal-list": terminalListStub([
+      terminalEntry({ handle: "term_review", ptyId: "pty_review" }),
+    ]),
+  });
+  const r = resolveRoleBound("CODER", {
+    execFn,
+    registryFs: fakeRegistryFs(registry),
+  });
+  assert.equal(r.ok, false);
+  assert.equal(r.roleBoundSeatReason, ROLE_BOUND_SEAT_REASON.NOT_FOUND);
+});
+
+test("resolveRoleBoundSeatHandle: §4-3 two candidates both registry-match the requested role -- AMBIGUOUS_ROLE_MATCH, not the first one", () => {
+  const registry = seatRegistryStub([
+    registryRecord({ ptyId: "pty_a", role: "CODER" }),
+    registryRecord({ ptyId: "pty_b", role: "CODER" }),
+  ]);
+  const execFn = fakeExecFn({
+    list: managedWorktreeStub(VALID_WORKTREE),
+    "terminal-list": terminalListStub([
+      terminalEntry({ handle: "term_a", ptyId: "pty_a" }),
+      terminalEntry({ handle: "term_b", ptyId: "pty_b" }),
+    ]),
+  });
+  const r = resolveRoleBound("CODER", {
+    execFn,
+    registryFs: fakeRegistryFs(registry),
+  });
+  assert.equal(r.ok, false);
+  assert.equal(
+    r.roleBoundSeatReason,
+    ROLE_BOUND_SEAT_REASON.AMBIGUOUS_ROLE_MATCH,
+  );
+  assert.equal(r.matchedCount, 2);
+});
+
+// §4 변조5b: 역할 대조 제거 시 RED가 되는지 -- 아래 시험은 같은 두 후보에
+// 다른 role을 요청하면 다른 handle을 얻는다는 것을 보여 "역할 대조가 실제로
+// 결과를 바꾼다"를 고정한다(역할 결속 제거 변조는
+// role-bound-seat-select-mutation.test.mjs가 실제 변조로 RED를 고정한다).
+test("resolveRoleBoundSeatHandle: §4-5 role binding actually narrows the result -- same two candidates, different requested role picks different handle", () => {
+  const registry = seatRegistryStub([
+    registryRecord({ ptyId: "pty_review", role: "REVIEW" }),
+    registryRecord({ ptyId: "pty_coder", role: "CODER" }),
+  ]);
+  const entries = [
+    terminalEntry({ handle: "term_review", ptyId: "pty_review" }),
+    terminalEntry({ handle: "term_coder", ptyId: "pty_coder" }),
+  ];
+  const execFnCoder = fakeExecFn({
+    list: managedWorktreeStub(VALID_WORKTREE),
+    "terminal-list": terminalListStub(entries),
+  });
+  const execFnReview = fakeExecFn({
+    list: managedWorktreeStub(VALID_WORKTREE),
+    "terminal-list": terminalListStub(entries),
+  });
+  const rCoder = resolveRoleBound("CODER", {
+    execFn: execFnCoder,
+    registryFs: fakeRegistryFs(registry),
+  });
+  const rReview = resolveRoleBound("REVIEW", {
+    execFn: execFnReview,
+    registryFs: fakeRegistryFs(registry),
+  });
+  assert.equal(rCoder.handle, "term_coder");
+  assert.equal(rReview.handle, "term_review");
+  assert.notEqual(rCoder.handle, rReview.handle);
+});
+
+// §4 변조6: 단좌석 회귀 -- 기존 단좌석 정상 경로(정확히 1개 후보, 요청
+// 역할과 대장 조인이 일치)는 그대로 동작해야 한다.
+test("resolveRoleBoundSeatHandle: §4-6 single-seat regression -- exactly one candidate whose registry-joined role matches the requested role resolves ok", () => {
+  const registry = seatRegistryStub([
+    registryRecord({ ptyId: "pty_only", role: "CODER" }),
+  ]);
+  const execFn = fakeExecFn({
+    list: managedWorktreeStub(VALID_WORKTREE),
+    "terminal-list": terminalListStub([
+      terminalEntry({ handle: "term_only", ptyId: "pty_only" }),
+    ]),
+  });
+  const r = resolveRoleBound("CODER", {
+    execFn,
+    registryFs: fakeRegistryFs(registry),
+  });
+  assert.equal(r.ok, true);
+  assert.equal(r.handle, "term_only");
+});
+
+test("resolveRoleBoundSeatHandle: an orphan candidate (worktreePath:'') is excluded even if it would registry-match the requested role", () => {
+  const registry = seatRegistryStub([
+    registryRecord({ ptyId: "pty_orphan", role: "CODER" }),
+    registryRecord({ ptyId: "pty_real", role: "CODER" }),
+  ]);
+  const execFn = fakeExecFn({
+    list: managedWorktreeStub(VALID_WORKTREE),
+    "terminal-list": terminalListStub([
+      terminalEntry({
+        handle: "term_orphan",
+        ptyId: "pty_orphan",
+        worktreePath: "",
+      }),
+      terminalEntry({ handle: "term_real", ptyId: "pty_real" }),
+    ]),
+  });
+  const r = resolveRoleBound("CODER", {
+    execFn,
+    registryFs: fakeRegistryFs(registry),
+  });
+  assert.equal(r.ok, true);
+  assert.equal(r.handle, "term_real");
+});
+
+test("resolveRoleBoundSeatHandle: bad location is rejected before any terminal-list query (0 execFn calls)", () => {
+  const execFn = fakeExecFn({});
+  const r = resolveRoleBoundSeatHandle(
+    { role: "CODER", worktreePath: MAIN_REPO_PATH },
+    { execFn, registryPath: REGISTRY_PATH },
+  );
+  assert.equal(r.ok, false);
+  assert.equal(r.locationReason, LOCATION_REASON.MAIN_REPO_FORBIDDEN);
+  assert.equal(execFn.calls.length, 0);
+});
+
+test("resolveRoleBoundSeatHandle: an unmanaged (not Orca-registered) worktree is rejected before any terminal-list query", () => {
+  const execFn = fakeExecFn({ list: managedWorktreeStub("C:/some/other/wt") });
+  const r = resolveRoleBound("CODER", { execFn });
+  assert.equal(r.ok, false);
+  assert.equal(r.worktreeReason, WORKTREE_REASON.NOT_ORCA_MANAGED);
+  assert.equal(
+    execFn.calls.some((a) => a[0] === "terminal" && a[1] === "list"),
+    false,
+  );
+});
+
+test("resolveRoleBoundSeatHandle: terminal-list query failure is surfaced distinctly, not silently ignored", () => {
+  const registry = seatRegistryStub([]);
+  const execFn = fakeExecFn({
+    list: managedWorktreeStub(VALID_WORKTREE),
+    "terminal-list": { ok: false, error: { code: "boom", message: "boom" } },
+  });
+  const r = resolveRoleBound("CODER", {
+    execFn,
+    registryFs: fakeRegistryFs(registry),
+  });
+  assert.equal(r.ok, false);
+  assert.equal(r.roleBoundSeatReason, ROLE_BOUND_SEAT_REASON.LIST_QUERY_FAILED);
+});
+
+// HYK-211-seat-select-2 신규: registryPath 자체가 없거나(호출자 실수) 대장
+// 파일이 손상되면 각각 다른 사유 코드로 거부한다(§7 정직 요구 -- "아직
+// 안 이어졌다"를 조용히 삼키지 않는다).
+test("resolveRoleBoundSeatHandle: missing opts.registryPath is rejected before any terminal-list query", () => {
+  const execFn = fakeExecFn({ list: managedWorktreeStub(VALID_WORKTREE) });
+  const r = resolveRoleBoundSeatHandle(
+    { role: "CODER", worktreePath: VALID_WORKTREE },
+    { execFn },
+  );
+  assert.equal(r.ok, false);
+  assert.equal(
+    r.roleBoundSeatReason,
+    ROLE_BOUND_SEAT_REASON.REGISTRY_PATH_REQUIRED,
+  );
+  assert.equal(
+    execFn.calls.some((a) => a[0] === "terminal" && a[1] === "list"),
+    false,
+  );
+});
+
+test("resolveRoleBoundSeatHandle: a corrupt registry file is REGISTRY_LOAD_FAILED, not silently treated as empty", () => {
+  const execFn = fakeExecFn({ list: managedWorktreeStub(VALID_WORKTREE) });
+  const r = resolveRoleBound("CODER", {
+    execFn,
+    registryFs: { existsFn: () => true, readFn: () => "not json{{{" },
+  });
+  assert.equal(r.ok, false);
+  assert.equal(
+    r.roleBoundSeatReason,
+    ROLE_BOUND_SEAT_REASON.REGISTRY_LOAD_FAILED,
+  );
+});
+
+test("resolveRoleBoundSeatHandle: a missing registry file (existsFn:false) is treated as a normal empty registry, not a load failure", () => {
+  const execFn = fakeExecFn({
+    list: managedWorktreeStub(VALID_WORKTREE),
+    "terminal-list": terminalListStub([
+      terminalEntry({ handle: "term_only", ptyId: "pty_x" }),
+    ]),
+  });
+  const r = resolveRoleBound("CODER", {
+    execFn,
+    registryFs: fakeRegistryFs(null),
+  });
+  assert.equal(r.ok, false);
+  assert.equal(r.roleBoundSeatReason, ROLE_BOUND_SEAT_REASON.ROLE_UNDETERMINED);
+});
+
+test("KNOWN_SEAT_ROLES: contains exactly CODER/REVIEW/VERIFY/PM", () => {
+  assert.deepEqual([...KNOWN_SEAT_ROLES].sort(), [
+    "CODER",
+    "PM",
+    "REVIEW",
+    "VERIFY",
+  ]);
 });
 
 // ---------------------------------------------------------------------------
