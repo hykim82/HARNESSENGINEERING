@@ -457,6 +457,17 @@ test("HYK-207-multiseat AFTER (규명 대조, 좌석 2개 중 하나(REVIEW)의 
   assert.equal(r.status, SEAT_LIVENESS_WIRE_STATUS.JUDGED);
   assert.equal(r.correlation.ok, true);
   assert.equal(r.correlation.handle, SYNTH_CODER_SEAT.handle);
+  // HYK-207-multiseat 2R (REVIEW-1 반려 수리, 결선 계층 고정): 성공해도
+  // REVIEW_SEAT의 조회 실패가 correlation.partialFailures로 이 축의
+  // 결과에까지 보존돼야 한다 -- orca-adapter.mjs 안에서만 보존되고 이
+  // 결선(orch-stall-detect.mjs의 resolveObservationWithDeliveredSeatFallback)
+  // 이 옮기지 않으면 여전히 조용히 사라진 것과 같다.
+  assert.ok(Array.isArray(r.correlation.partialFailures));
+  assert.equal(r.correlation.partialFailures.length, 1);
+  assert.equal(
+    r.correlation.partialFailures[0].handle,
+    SYNTH_REVIEW_SEAT.handle,
+  );
 });
 
 test("HYK-207-multiseat AFTER: dispatchStart axis is equally unaffected by the OTHER seat's throwing terminal show", () => {

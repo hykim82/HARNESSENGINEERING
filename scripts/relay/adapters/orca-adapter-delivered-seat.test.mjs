@@ -1136,6 +1136,16 @@ test("resolveDeliveredSeat: HYK-207-multiseat FIX -- one live seat's terminal sh
   );
   assert.equal(r.ok, true);
   assert.equal(r.handle, CODER_SEAT.handle);
+  // HYK-207-multiseat 2R (REVIEW-1 반려 수리): 성공(ok:true)해도 무관한
+  // 다른 후보(REVIEW_SEAT)의 조회 실패는 partialFailures에 보존돼야
+  // 한다 -- 1R은 이 필드 자체가 없어(성공 반환값이 {ok:true, handle}
+  // 뿐이라) "failure-preserved=false"였다(검토자 직접 주입 원문과 동형).
+  const failurePreserved =
+    Array.isArray(r.partialFailures) &&
+    r.partialFailures.some((f) => f.handle === REVIEW_SEAT.handle);
+  assert.equal(failurePreserved, true, "failure-preserved must be true");
+  assert.equal(r.partialFailures.length, 1);
+  assert.match(r.partialFailures[0].reason, /transient orca CLI failure/);
 });
 
 // 대칭 시험: throw하는 쪽이 우리가 "찾는" 좌석(CODER_SEAT) 자신이면 --

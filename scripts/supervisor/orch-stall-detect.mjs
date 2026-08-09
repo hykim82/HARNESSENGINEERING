@@ -709,6 +709,11 @@ function resolveObservationWithDeliveredSeatFallback(
       ok: true,
       handle: resolved.handle,
       runtimeTaskId: resolved.runtimeTaskId,
+      // HYK-207-multiseat 2R: resolveDeliveredSeat가 성공(ok:true)해도
+      // 다른(무관한) live 좌석 후보 하나 이상의 terminal-show 조회가
+      // 실패했을 수 있다 -- 그 사실을 여기서도 조용히 버리지 않고 그대로
+      // 얹는다(orca-adapter.mjs의 partialFailures, 단일 출처 그대로 전달).
+      partialFailures: resolved.partialFailures,
     },
   };
 }
