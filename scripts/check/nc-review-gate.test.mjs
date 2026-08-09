@@ -14,7 +14,7 @@
 // docs/enforcement-known-gaps.md for the authoritative table.
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, writeFileSync, rmSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { execFileSync } from "node:child_process";
@@ -296,6 +296,25 @@ const ENVELOPE_ARCHIVE_SRC = execFileSync(
     encoding: "utf8",
   },
 );
+// HYK-186: relay-handshake.mjs now also imports "./time-authority.mjs" --
+// same transitive-sibling risk as envelope-archive.mjs above. Falls back to
+// the working-tree copy (not `git show HEAD:`) if HEAD doesn't have the file
+// yet (pre-commit window) -- this file is new in this task, so unlike its
+// already-committed siblings there is no HEAD snapshot to read until this
+// round's commit lands.
+function readCommittedOrWorkingTree(relPath) {
+  try {
+    return execFileSync("git", ["show", `HEAD:${relPath}`], {
+      cwd: ROOT,
+      encoding: "utf8",
+    });
+  } catch {
+    return readFileSync(join(ROOT, relPath), "utf8");
+  }
+}
+const TIME_AUTHORITY_SRC = readCommittedOrWorkingTree(
+  "scripts/check/time-authority.mjs",
+);
 
 // HYK-183 (§10 2R fix, ORCH ruling): mutation #1/#4 below target the
 // `resolveVerdict` function's exact shape. `REVIEW_GATE_SRC` is deliberately
@@ -330,6 +349,7 @@ async function importMutatedCopy(mutate) {
     ENVELOPE_ARCHIVE_SRC,
     "utf8",
   );
+  writeFileSync(join(dir, "time-authority.mjs"), TIME_AUTHORITY_SRC, "utf8");
   try {
     const mod = await import(`file://${filePath.replace(/\\/g, "/")}`);
     return mod;

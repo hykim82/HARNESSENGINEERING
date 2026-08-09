@@ -74,8 +74,14 @@ test("NC-2 relay-handshake/attack: DONE timestamp predates dropped_at (stale res
   });
 });
 
-// --- KNOWN GAP: DONE timestamp in the far future -> passes, no upper bound ---
-test("NC-2 relay-handshake/gap: DONE timestamp 10 years in the future -> passes (no upper-bound check) -> KNOWN GAP", () => {
+// --- HYK-186 fix: DONE timestamp in the far future -> BLOCKED (was: passed, no upper bound) ---
+// ★PM 실측(2026-07-31)의 정확한 재현: production checker에
+// `dropped_at=2026-07-31 03:00`/`DONE=2099-01-01 00:00`을 넣으면
+// `{"ok":true,"reason":"relay handshake ok for FUTURE-1"}`이 나왔다(§1). 이
+// 시험은 그 동일한 형태(임의로 먼 미래의 DONE)를 재현하고, 수리 후 이제
+// ok:false + state:'FUTURE_DONE'으로 막히는지 고정한다 -- "GAP"에서
+// "CLOSED"로 승격.
+test("NC-2 relay-handshake/fixed(HYK-186): DONE timestamp 10 years in the future -> BLOCKED (state=FUTURE_DONE) -> CLOSED", () => {
   withHarnessDir((dir) => {
     writeTask(dir, "coder", TASK_OK);
     writeResult(
@@ -86,9 +92,11 @@ test("NC-2 relay-handshake/gap: DONE timestamp 10 years in the future -> passes 
     const result = checkRelayHandshake({ role: "coder", harnessDir: dir });
     assert.equal(
       result.ok,
-      true,
-      "current behavior: only a lower bound (droppedAt) is enforced; an arbitrarily-future DONE passes",
+      false,
+      "HYK-186 fix: an arbitrarily-future DONE must now be rejected by an authority-clock upper bound",
     );
+    assert.equal(result.state, "FUTURE_DONE");
+    assert.match(result.reason, /ahead of authority now/);
   });
 });
 

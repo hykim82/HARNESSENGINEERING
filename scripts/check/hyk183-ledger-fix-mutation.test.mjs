@@ -38,6 +38,8 @@ const REVIEW_GATE_PATH = join(HERE, "review-gate.mjs");
 // import must resolve too, or the copy fails to load at all (not a real
 // RED signal, just a missing file).
 const ENVELOPE_ARCHIVE_PATH = join(HERE, "envelope-archive.mjs");
+// HYK-186: relay-handshake.mjs now also imports "./time-authority.mjs".
+const TIME_AUTHORITY_PATH = join(HERE, "time-authority.mjs");
 
 function tmpDir(prefix) {
   return mkdtempSync(join(tmpdir(), prefix));
@@ -198,6 +200,11 @@ test("mutation 축B (필수): review-gate.mjs's recordApprovalToLedger call remo
     writeFileSync(
       join(scriptsCheckDir, "envelope-archive.mjs"),
       readFileSync(ENVELOPE_ARCHIVE_PATH, "utf8"),
+      "utf8",
+    );
+    writeFileSync(
+      join(scriptsCheckDir, "time-authority.mjs"),
+      readFileSync(TIME_AUTHORITY_PATH, "utf8"),
       "utf8",
     );
     const mutantReviewGate = join(scriptsCheckDir, "review-gate.mjs");

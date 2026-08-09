@@ -1045,3 +1045,164 @@ test("HYK-189 (h) CLI: spawning a nonexistent script path exits 1 too, but must 
     "this exit(1) is Node failing to even load the script, not relay-handshake's own contract logic running",
   );
 });
+
+// ---------------------------------------------------------------------------
+// HYK-186 §2 완료조건4/6: future-skew upper bound -- boundary values + a
+// fixed 0/N normal-control battery. All in-process via the injectable `now`
+// param (production default is Date.now(); the CLI never overrides it -- see
+// hyk186-time-authority-mutation.test.mjs mutation 2 for the CLI-level E2E
+// repro of the ★PM 실측 case).
+// ---------------------------------------------------------------------------
+import { MAX_FUTURE_SKEW_MS } from "./time-authority.mjs";
+
+const FIXED_NOW = Date.parse("2026-08-09T05:00:00Z"); // 2026-08-09 14:00 KST
+
+function isoKst(ms) {
+  const kst = new Date(ms + 9 * 60 * 60 * 1000);
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${kst.getUTCFullYear()}-${pad(kst.getUTCMonth() + 1)}-${pad(kst.getUTCDate())} ${pad(kst.getUTCHours())}:${pad(kst.getUTCMinutes())}:${pad(kst.getUTCSeconds())} KST`;
+}
+
+test("HYK-186 (경계) DONE exactly AT now+skew -> still ok (boundary itself is not a violation)", () => {
+  withFixtureDir((dir) => {
+    writeTask(
+      dir,
+      "coder",
+      "task_id: HYK-1\ndropped_at: 2026-08-05 06:00 KST\n",
+    );
+    writeResult(
+      dir,
+      "coder",
+      `task_id: HYK-1\n\n>>> DONE: CODER @ ${isoKst(FIXED_NOW + MAX_FUTURE_SKEW_MS)}\n`,
+    );
+    const result = checkRelayHandshake({
+      role: "coder",
+      harnessDir: dir,
+      now: FIXED_NOW,
+    });
+    assert.equal(result.ok, true, "exactly at the boundary must pass");
+  });
+});
+
+test("HYK-186 (경계, ★반례) DONE one unit (1 minute, the header's own precision floor) past now+skew -> blocked", () => {
+  withFixtureDir((dir) => {
+    writeTask(
+      dir,
+      "coder",
+      "task_id: HYK-1\ndropped_at: 2026-08-05 06:00 KST\n",
+    );
+    writeResult(
+      dir,
+      "coder",
+      `task_id: HYK-1\n\n>>> DONE: CODER @ ${isoKst(FIXED_NOW + MAX_FUTURE_SKEW_MS + 60_000)}\n`,
+    );
+    const result = checkRelayHandshake({
+      role: "coder",
+      harnessDir: dir,
+      now: FIXED_NOW,
+    });
+    assert.equal(result.ok, false);
+    assert.equal(result.state, "FUTURE_DONE");
+    assert.match(result.reason, /ahead of authority now/);
+  });
+});
+
+test("HYK-186 (경계) dropped_at itself beyond now+skew -> blocked with FUTURE_DROPPED_AT, independent of any result content", () => {
+  withFixtureDir((dir) => {
+    writeTask(
+      dir,
+      "coder",
+      `task_id: HYK-1\ndropped_at: ${isoKst(FIXED_NOW + MAX_FUTURE_SKEW_MS + 60_000).replace(/:\d\d KST/, " KST")}\n`,
+    );
+    writeResult(
+      dir,
+      "coder",
+      "task_id: HYK-1\n\n>>> DONE: CODER @ 2026-08-05 06:10 KST\n",
+    );
+    const result = checkRelayHandshake({
+      role: "coder",
+      harnessDir: dir,
+      now: FIXED_NOW,
+    });
+    assert.equal(result.ok, false);
+    assert.equal(result.state, "FUTURE_DROPPED_AT");
+  });
+});
+
+test("HYK-186 (★PM 실측 in-process repro): dropped_at=2026-07-31 03:00 / DONE=2099-01-01 00:00 -> now ok:false FUTURE_DONE (was ok:true before this fix)", () => {
+  withFixtureDir((dir) => {
+    writeTask(
+      dir,
+      "coder",
+      "task_id: FUTURE-1\ndropped_at: 2026-07-31 03:00 KST\n",
+    );
+    writeResult(
+      dir,
+      "coder",
+      "task_id: FUTURE-1\n\n>>> DONE: CODER @ 2099-01-01 00:00 KST\n",
+    );
+    const result = checkRelayHandshake({
+      role: "coder",
+      harnessDir: dir,
+      now: Date.parse("2026-07-31T03:05:00+09:00"),
+    });
+    assert.equal(result.ok, false);
+    assert.equal(result.state, "FUTURE_DONE");
+  });
+});
+
+// 완료조건6: 정상 대조군 N건, 오탐 0/N. N=6, spanning: far in the past, just
+// past dropped_at, several minutes ago, exactly `now`, and both boundary
+// values already covered above (counted separately as boundary tests, not
+// folded into this N to keep the two categories distinguishable per §8).
+const NORMAL_CONTROL_SAMPLES = [
+  { label: "far in the past", doneOffsetMs: -1000 * 60 * 60 * 24 * 30 },
+  { label: "1 hour ago", doneOffsetMs: -1000 * 60 * 60 },
+  { label: "1 minute ago", doneOffsetMs: -60_000 },
+  { label: "exactly now", doneOffsetMs: 0 },
+  {
+    label: "10 seconds in the future (sub-minute, floors to now's minute)",
+    doneOffsetMs: 10_000,
+  },
+  {
+    label: "1 minute inside the skew allowance",
+    doneOffsetMs: MAX_FUTURE_SKEW_MS - 60_000,
+  },
+];
+
+test(`HYK-186 완료조건6: normal control battery, N=${NORMAL_CONTROL_SAMPLES.length}, 오탐 0/${NORMAL_CONTROL_SAMPLES.length}`, () => {
+  let falsePositives = 0;
+  for (const sample of NORMAL_CONTROL_SAMPLES) {
+    withFixtureDir((dir) => {
+      // dropped_at is always well before every sample's DONE offset (the
+      // most negative sample here is -30 days) so this battery exercises
+      // ONLY the future-skew axis, never the pre-existing stale-result axis.
+      writeTask(
+        dir,
+        "coder",
+        "task_id: HYK-1\ndropped_at: 2026-01-01 00:00 KST\n",
+      );
+      writeResult(
+        dir,
+        "coder",
+        `task_id: HYK-1\n\n>>> DONE: CODER @ ${isoKst(FIXED_NOW + sample.doneOffsetMs)}\n`,
+      );
+      const result = checkRelayHandshake({
+        role: "coder",
+        harnessDir: dir,
+        now: FIXED_NOW,
+      });
+      if (!result.ok) {
+        falsePositives += 1;
+        assert.fail(
+          `false positive on sample '${sample.label}': ${result.reason}`,
+        );
+      }
+    });
+  }
+  assert.equal(
+    falsePositives,
+    0,
+    `오탐 ${falsePositives}/${NORMAL_CONTROL_SAMPLES.length}`,
+  );
+});
