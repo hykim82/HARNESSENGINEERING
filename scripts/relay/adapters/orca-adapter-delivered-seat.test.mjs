@@ -1073,3 +1073,248 @@ test("resolveDeliveredSeat: dispatch-show response missing dispatch record -> DI
   assert.equal(r.reasonCode, DELIVERED_SEAT_REASON.DISPATCH_SHOW_INVALID);
   assert.equal(terminalCalls, 0);
 });
+
+// ---- HYK-207-multiseat: 좌석 하나의 조회 실패가 축 전체를 눈멀게
+// 하지 않는다 -- 규명 원문(수리 전): 2026-08-08 15:21/16:51/18:06 세 번
+// 라이브 재현 당시, 이 워크트리에는 좌석이 2개 이상이었다(coder-task.md
+// §1 실측). 위 fetchPaneKeyFromShow는 수리 전에는 조회 자체 실패(execFn
+// throw -- 실제로는 실 orca CLI가 순간적으로 응답을 못 주거나, 프로세스
+// 기동 자체가 실패했을 때(createOrcaExecFn, orca-adapter.mjs:2516-2537
+// 참조) 벌어진다)를 {ok:false}로 그대로 전파해 resolveLiveSeatByPaneKey가
+// 그 후보에서 즉시 순회를 중단했다 -- 좌석이 정확히 하나뿐이면 그 하나가
+// 곧 우리가 찾는 좌석이라 이 결함이 드러나지 않지만, 좌석이 둘 이상이면
+// "우리가 찾는 좌석과 무관한 다른 후보 하나"의 조회 실패만으로 축
+// 전체가 COLLECTION_FAILED로 떨어진다 -- collectSeatObservationsForWorktree
+// (seatIdle 축)가 이미 피해 간 "좌석 하나의 실패가 축 전체를 눈멀게
+// 하는" 그 형태를, 이 상관 함수(seatLiveness/dispatchStart 축이 쓰는
+// delivered-seat correlation retry)만 되풀이하고 있었다.
+// ★이 시험을 고정한다: 좌석이 둘(CODER_SEAT + REVIEW_SEAT)이고, "우리가
+// 찾는" 좌석이 아닌 쪽(REVIEW_SEAT)의 terminal show가 매번 throw해도,
+// CODER_SEAT의 pane key가 assignee_pane_key와 정확히 일치하면 여전히
+// 지목에 성공한다(고르지 않는 게 아니라, 무관한 후보의 실패에 흔들리지
+// 않고 옳은 후보를 찾아낸다).
+test("resolveDeliveredSeat: HYK-207-multiseat FIX -- one live seat's terminal show throws (transient CLI failure), the OTHER seat still correlates correctly (one seat's failure no longer blinds the whole axis)", () => {
+  const execFn = (argv) => {
+    if (argv[0] === "orchestration" && argv[1] === "task-list") {
+      return handleTaskList([
+        {
+          id: "task_1",
+          spec: realSpec(
+            "CODER",
+            LABEL,
+            "C:\\Users\\Administrator\\orca\\workspaces\\HARNESSENGINEERING\\hyk185-gap83-3",
+          ),
+        },
+      ]);
+    }
+    if (argv[0] === "orchestration" && argv[1] === "dispatch-show") {
+      return handleDispatchShow(argv, {
+        task_1: {
+          id: "dispatch_1",
+          task_id: "task_1",
+          assignee_handle: CODER_SEAT.handle,
+          assignee_pane_key: paneKeyOf(CODER_SEAT),
+          status: "dispatched",
+        },
+      });
+    }
+    if (argv[0] === "terminal" && argv[1] === "list") {
+      return handleTerminalList([CODER_SEAT, REVIEW_SEAT]);
+    }
+    if (argv[0] === "terminal" && argv[1] === "show") {
+      const handle = argv[argv.indexOf("--terminal") + 1];
+      if (handle === REVIEW_SEAT.handle) {
+        throw new Error("transient orca CLI failure for this one candidate");
+      }
+      return handleTerminalShow(argv, [CODER_SEAT, REVIEW_SEAT]);
+    }
+    throw new Error(`unexpected argv ${JSON.stringify(argv)}`);
+  };
+  const r = resolveDeliveredSeat(
+    { harnessLabel: LABEL, worktreePath: WORKTREE },
+    { execFn },
+  );
+  assert.equal(r.ok, true);
+  assert.equal(r.handle, CODER_SEAT.handle);
+});
+
+// 대칭 시험: throw하는 쪽이 우리가 "찾는" 좌석(CODER_SEAT) 자신이면 --
+// 그 좌석의 pane key를 끝내 못 읽었으므로 매치 0개(NO_LIVE_SEAT_MATCH),
+// 여전히 고르지 않고 실패로 드러난다(비타협 유지 -- 못 고르면 못
+// 고른다고 말한다. "조회가 실패한 후보는 통과시켜 준다"는 뜻이 절대
+// 아니다).
+test("resolveDeliveredSeat: HYK-207-multiseat FIX -- if the seat we actually need throws (not some unrelated seat), correlation still fails loud (NO_LIVE_SEAT_MATCH), never silently accepted", () => {
+  const execFn = (argv) => {
+    if (argv[0] === "orchestration" && argv[1] === "task-list") {
+      return handleTaskList([
+        {
+          id: "task_1",
+          spec: realSpec(
+            "CODER",
+            LABEL,
+            "C:\\Users\\Administrator\\orca\\workspaces\\HARNESSENGINEERING\\hyk185-gap83-3",
+          ),
+        },
+      ]);
+    }
+    if (argv[0] === "orchestration" && argv[1] === "dispatch-show") {
+      return handleDispatchShow(argv, {
+        task_1: {
+          id: "dispatch_1",
+          task_id: "task_1",
+          assignee_handle: CODER_SEAT.handle,
+          assignee_pane_key: paneKeyOf(CODER_SEAT),
+          status: "dispatched",
+        },
+      });
+    }
+    if (argv[0] === "terminal" && argv[1] === "list") {
+      return handleTerminalList([CODER_SEAT, REVIEW_SEAT]);
+    }
+    if (argv[0] === "terminal" && argv[1] === "show") {
+      const handle = argv[argv.indexOf("--terminal") + 1];
+      if (handle === CODER_SEAT.handle) {
+        throw new Error("transient orca CLI failure for the seat we need");
+      }
+      return handleTerminalShow(argv, [CODER_SEAT, REVIEW_SEAT]);
+    }
+    throw new Error(`unexpected argv ${JSON.stringify(argv)}`);
+  };
+  const r = resolveDeliveredSeat(
+    { harnessLabel: LABEL, worktreePath: WORKTREE },
+    { execFn },
+  );
+  assert.equal(r.ok, false);
+  assert.equal(r.reasonCode, DELIVERED_SEAT_REASON.NO_LIVE_SEAT_MATCH);
+});
+
+// 세 번째 축: 살아있는 후보 전부의 terminal show가 throw하면(정말
+// "아무것도 못 봤다") -- 이건 "0개 일치"(NO_LIVE_SEAT_MATCH, 죽은 좌석
+// 어휘)가 아니라 조회 자체가 전부 실패했다는 것이 더 정확한 사유이므로
+// LIVE_SEAT_LIST_QUERY_FAILED로 구별해 드러낸다(합격기준 (d) 세 상관
+// 실패 경로를 섞지 않는다는 원칙의 연장).
+test("resolveDeliveredSeat: HYK-207-multiseat FIX -- ALL live seat candidates' terminal show throw -> distinguishable LIVE_SEAT_LIST_QUERY_FAILED (not conflated with dead-seat NO_LIVE_SEAT_MATCH)", () => {
+  const execFn = (argv) => {
+    if (argv[0] === "orchestration" && argv[1] === "task-list") {
+      return handleTaskList([
+        {
+          id: "task_1",
+          spec: realSpec(
+            "CODER",
+            LABEL,
+            "C:\\Users\\Administrator\\orca\\workspaces\\HARNESSENGINEERING\\hyk185-gap83-3",
+          ),
+        },
+      ]);
+    }
+    if (argv[0] === "orchestration" && argv[1] === "dispatch-show") {
+      return handleDispatchShow(argv, {
+        task_1: {
+          id: "dispatch_1",
+          task_id: "task_1",
+          assignee_handle: CODER_SEAT.handle,
+          assignee_pane_key: paneKeyOf(CODER_SEAT),
+          status: "dispatched",
+        },
+      });
+    }
+    if (argv[0] === "terminal" && argv[1] === "list") {
+      return handleTerminalList([CODER_SEAT, REVIEW_SEAT]);
+    }
+    if (argv[0] === "terminal" && argv[1] === "show") {
+      throw new Error("transient orca CLI failure for every candidate");
+    }
+    throw new Error(`unexpected argv ${JSON.stringify(argv)}`);
+  };
+  const r = resolveDeliveredSeat(
+    { harnessLabel: LABEL, worktreePath: WORKTREE },
+    { execFn },
+  );
+  assert.equal(r.ok, false);
+  assert.equal(r.reasonCode, DELIVERED_SEAT_REASON.LIVE_SEAT_LIST_QUERY_FAILED);
+});
+
+// fail-loud 비타협의 직접 고정: 두 live seat가 (드물지만) 같은
+// pane key를 내면 -- resolveLiveSeatByPaneKey는 절대 matches[0]을
+// 그냥 골라 지목하지 않는다(AMBIGUOUS_LIVE_SEAT_MATCH). 이 시험 이전에는
+// 이 분기 자체를 직접 고정한 시험이 없었다(§5 "애매한데 아무거나 고르게"
+// 변조가 조용히 살아남을 수 있는 구멍이었다) -- 이 함수를
+// `return { ok: true, handle: matches[0].handle };`로 바꿔 "아무거나
+// 고르게" 변조하면 이 시험이 RED로 떨어진다(수동 확인, 결과 파일 §5
+// 변조 목록 참조).
+test("resolveDeliveredSeat: fail-loud pin -- TWO live seats sharing the same pane key never silently pick the first one (AMBIGUOUS_LIVE_SEAT_MATCH)", () => {
+  const sharedPaneKey = paneKeyOf(CODER_SEAT);
+  const twinSeat = {
+    handle: "term_twin",
+    worktreePath: WORKTREE,
+    tabId: CODER_SEAT.tabId,
+    leafId: CODER_SEAT.leafId,
+  };
+  const execFn = makeExecFn({
+    tasks: [
+      {
+        id: "task_1",
+        spec: realSpec(
+          "CODER",
+          LABEL,
+          "C:\\Users\\Administrator\\orca\\workspaces\\HARNESSENGINEERING\\hyk185-gap83-3",
+        ),
+      },
+    ],
+    dispatchByTaskId: {
+      task_1: {
+        id: "dispatch_1",
+        task_id: "task_1",
+        assignee_handle: CODER_SEAT.handle,
+        assignee_pane_key: sharedPaneKey,
+        status: "dispatched",
+      },
+    },
+    seats: [CODER_SEAT, twinSeat],
+  });
+  const r = resolveDeliveredSeat(
+    { harnessLabel: LABEL, worktreePath: WORKTREE },
+    { execFn },
+  );
+  assert.equal(r.ok, false);
+  assert.equal(r.reasonCode, DELIVERED_SEAT_REASON.AMBIGUOUS_LIVE_SEAT_MATCH);
+});
+
+// HYK-207-multiseat 목록 밖 1종(§5 요구): ZERO live seats attached to this
+// worktree at all(정상 침묵 -- 조회가 실패한 게 아니라 정말 아무 좌석도
+// 없다)이면 여전히 NO_LIVE_SEAT_MATCH다. 위 fetchPaneKeyFromShow 수리로
+// queryFailures 집계를 새로 들였으므로, "후보가 0개일 때 그 집계 조건
+// (0===0)이 우연히 참이 되어 LIVE_SEAT_LIST_QUERY_FAILED로 잘못 분류되지
+// 않는가"를 직접 고정한다 -- resolveLiveSeatByPaneKey의
+// `resolved.candidates.length > 0` 가드가 바로 이 경계를 지킨다(그
+// 가드를 지우면 이 시험이 RED로 떨어진다, 수동 확인·결과 파일 §5 참조).
+test("resolveDeliveredSeat: HYK-207-multiseat -- ZERO live seats in the worktree at all is NO_LIVE_SEAT_MATCH (normal silence), not misclassified as a query failure by the new queryFailures accounting", () => {
+  const execFn = makeExecFn({
+    tasks: [
+      {
+        id: "task_1",
+        spec: realSpec(
+          "CODER",
+          LABEL,
+          "C:\\Users\\Administrator\\orca\\workspaces\\HARNESSENGINEERING\\hyk185-gap83-3",
+        ),
+      },
+    ],
+    dispatchByTaskId: {
+      task_1: {
+        id: "dispatch_1",
+        task_id: "task_1",
+        assignee_handle: CODER_SEAT.handle,
+        assignee_pane_key: paneKeyOf(CODER_SEAT),
+        status: "dispatched",
+      },
+    },
+    seats: [], // this worktree has no live seats at all right now
+  });
+  const r = resolveDeliveredSeat(
+    { harnessLabel: LABEL, worktreePath: WORKTREE },
+    { execFn },
+  );
+  assert.equal(r.ok, false);
+  assert.equal(r.reasonCode, DELIVERED_SEAT_REASON.NO_LIVE_SEAT_MATCH);
+});

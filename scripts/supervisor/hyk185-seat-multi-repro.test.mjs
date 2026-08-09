@@ -328,3 +328,154 @@ test("multi-seat worst-wins: one seat abandoned + one seat fine -> the worktree'
   assert.equal(r.verdict, SEAT_IDLE_VERDICT.SUSPECTED_ABANDONED);
   assert.equal(r.seats.length, 2);
 });
+
+// ---------------------------------------------------------------------------
+// HYK-207-multiseat: 규명(수리 전) 및 수리 후 대조 -- "재시도가 이미
+// 있는데도 왜 세 번 다 COLLECTION_FAILED로 떨어졌나"의 핵심 발견.
+//
+// 규명 원문: 실 라이브 대조(2026-08-09, 이 워크트리 자신의 실 좌석
+// 2개로 직접 측정 -- collectDroppedTaskFileEvidence + judgeSeatLivenessForRepo
+// 를 execFn 기본값(실 orca spawn)으로 그대로 호출)에서는 재시도가
+// JUDGED까지 정상 도달했다(correlation.ok=true) -- 즉 "좌석이 2개면
+// 항상 실패"가 아니다. 소스를 다시 뜯어보니(orca-adapter.mjs
+// resolveLiveSeatByPaneKey, 수리 전 버전) 진짜 구멍은 후보 "개수"가
+// 아니라 후보 "하나의 조회 실패"였다: fetchPaneKeyFromShow가 execFn
+// throw를 {ok:false}로 그대로 전파하면, resolveLiveSeatByPaneKey는
+// 그 후보에서 즉시 순회를 중단하고 나머지 후보(우리가 실제로 찾는
+// 좌석일 수 있는)를 아예 확인하지 않은 채 LIVE_SEAT_LIST_QUERY_FAILED로
+// 실패한다 -- 그 실패가 위 judgeSeatLivenessForRepo/judgeDispatchStartForRepo
+// 계층까지 그대로 번져 SEAT_LIVENESS_COLLECTION_FAILED/DISPATCH_START_COLLECTION_FAILED
+// 로 표면화된다. 좌석이 하나뿐이면 그 하나가 곧 답이라 이 결함이 드러나지
+// 않지만, 좌석이 둘 이상이면 "우리와 무관한 다른 후보 하나"의 순간적
+// 조회 실패(예: createOrcaExecFn이 감싸는 실 spawnSync가 일시적으로
+// 응답을 못 주는 경우, orca-adapter.mjs:2516-2537)만으로 축 전체가
+// 매번 COLLECTION_FAILED로 떨어질 수 있다 -- 표준 라운드(CODER+REVIEW
+// 동석)는 정확히 이 후보 수(2+)를 상시로 만들어, 이 구멍이 발동할
+// "표면"을 단좌석 경로보다 넓힌다.
+//
+// 수리: orca-adapter.mjs의 fetchPaneKeyFromShow가 이제 조회 자체 실패도
+// (malformed/좌석없음과 동일하게) "이 후보는 일치 안 함"으로만 접고
+// 순회를 계속한다(collectSeatObservationsForWorktree가 seatIdle 축에서
+// 이미 쓰던 "좌석 하나의 실패가 축 전체를 눈멀게 하지 않는다" 원칙을
+// 이 상관 함수에도 적용) -- 아래 두 시험이 그 앞뒤를 같은 합성
+// 시나리오로 직접 대조한다.
+const SYNTH_WORKTREE =
+  "C:/Users/Administrator/orca/workspaces/HARNESSENGINEERING/hyk207-synthetic";
+const SYNTH_LABEL = "HYK-207-synth-1";
+const SYNTH_CODER_SEAT = {
+  handle: "term_synth_coder",
+  worktreePath: SYNTH_WORKTREE,
+  tabId: "11111111-1111-1111-1111-111111111111",
+  leafId: "22222222-2222-2222-2222-222222222222",
+  title: "CODER",
+};
+const SYNTH_REVIEW_SEAT = {
+  handle: "term_synth_review",
+  worktreePath: SYNTH_WORKTREE,
+  tabId: "33333333-3333-3333-3333-333333333333",
+  leafId: "44444444-4444-4444-4444-444444444444",
+  title: "REVIEW",
+};
+const SYNTH_NOW = Date.parse("2026-08-09T15:21:00+09:00"); // 실사고 재발 시각 표기.
+const SYNTH_ACTIVE_DISPATCH = [
+  {
+    path: ".harness/coder-task.md",
+    taskId: SYNTH_LABEL,
+    droppedAtMs: SYNTH_NOW - 5 * 60_000,
+    resultFile: { exists: false },
+  },
+];
+const SYNTH_TASK_LIST_TASKS = [
+  {
+    id: "task_synth_1",
+    spec: `role: CODER\nharness_label: ${SYNTH_LABEL}\nworktree: ${SYNTH_WORKTREE.replace(/\//g, "\\")}\ntask_file: .harness/coder-task.md`,
+  },
+];
+const SYNTH_DISPATCH_SHOW_BY_TASK_ID = {
+  task_synth_1: {
+    id: "dispatch_synth_1",
+    task_id: "task_synth_1",
+    assignee_handle: SYNTH_CODER_SEAT.handle,
+    assignee_pane_key: `${SYNTH_CODER_SEAT.tabId}:${SYNTH_CODER_SEAT.leafId}`,
+    status: "dispatched",
+  },
+};
+
+// terminals 순서 = [REVIEW, CODER]: 조회에 실패하는 후보(REVIEW, 우리가
+// 찾는 좌석이 아니다)를 candidates 순회의 **앞쪽**에 둔다 -- 수리 전
+// 코드가 "첫 실패에서 즉시 중단"하는 형태였다면, CODER가 뒤에 있어도
+// 절대 확인되지 않는다는 것을 이 순서 자체가 증명한다.
+function fakeExecFnWithOneThrowingSeat() {
+  const showsByHandle = {
+    [SYNTH_CODER_SEAT.handle]: {
+      ok: true,
+      result: {
+        terminal: {
+          lastOutputAt: SYNTH_NOW - 60_000,
+          title: SYNTH_CODER_SEAT.title,
+          tabId: SYNTH_CODER_SEAT.tabId,
+          leafId: SYNTH_CODER_SEAT.leafId,
+        },
+      },
+    },
+  };
+  return function execFn(argv) {
+    if (argv[0] === "terminal" && argv[1] === "list") {
+      return terminalListResponse([SYNTH_REVIEW_SEAT, SYNTH_CODER_SEAT]);
+    }
+    if (argv[0] === "terminal" && argv[1] === "show") {
+      const handle = argv[argv.indexOf("--terminal") + 1];
+      if (handle === SYNTH_REVIEW_SEAT.handle) {
+        throw new Error(
+          "synthetic transient orca CLI failure for the OTHER seat (not the one we need)",
+        );
+      }
+      return showsByHandle[handle];
+    }
+    if (argv[0] === "orchestration" && argv[1] === "task-list") {
+      return taskListResponse(SYNTH_TASK_LIST_TASKS);
+    }
+    if (argv[0] === "orchestration" && argv[1] === "dispatch-show") {
+      return dispatchShowResponse(argv, SYNTH_DISPATCH_SHOW_BY_TASK_ID);
+    }
+    throw new Error(
+      `fakeExecFnWithOneThrowingSeat: unexpected argv ${JSON.stringify(argv)}`,
+    );
+  };
+}
+
+test("HYK-207-multiseat AFTER (규명 대조, 좌석 2개 중 하나(REVIEW)의 terminal show가 throw해도) -- seatLiveness axis still reaches JUDGED via delivered-seat correlation, not COLLECTION_FAILED", () => {
+  const r = judgeSeatLivenessForRepo(
+    {
+      repoRoot: SYNTH_WORKTREE,
+      droppedTaskFiles: SYNTH_ACTIVE_DISPATCH,
+      now: SYNTH_NOW,
+    },
+    { execFn: fakeExecFnWithOneThrowingSeat() },
+  );
+  assert.notEqual(r.status, SEAT_LIVENESS_WIRE_STATUS.COLLECTION_FAILED);
+  assert.equal(r.status, SEAT_LIVENESS_WIRE_STATUS.JUDGED);
+  assert.equal(r.correlation.ok, true);
+  assert.equal(r.correlation.handle, SYNTH_CODER_SEAT.handle);
+});
+
+test("HYK-207-multiseat AFTER: dispatchStart axis is equally unaffected by the OTHER seat's throwing terminal show", () => {
+  const r = judgeDispatchStartForRepo(
+    {
+      repoRoot: SYNTH_WORKTREE,
+      droppedTaskFiles: SYNTH_ACTIVE_DISPATCH,
+      now: SYNTH_NOW,
+    },
+    {
+      execFn: fakeExecFnWithOneThrowingSeat(),
+      dispatchStartStorePath: "memory://hyk207-multiseat-repro-test",
+      dispatchStartExistsFn: () => false,
+      dispatchStartReadFn: () => "{}",
+      dispatchStartMkdirFn: () => {},
+      dispatchStartWriteFn: () => {},
+    },
+  );
+  assert.notEqual(r.status, DISPATCH_START_WIRE_STATUS.COLLECTION_FAILED);
+  assert.equal(r.correlation.ok, true);
+  assert.equal(r.correlation.handle, SYNTH_CODER_SEAT.handle);
+});

@@ -970,20 +970,32 @@ function resolveLiveSeatCandidatesForCorrelation(worktreePath, opts) {
 }
 
 // terminal show(candidate.handle) -> `${tabId}:${leafId}`(벤더 형식,
-// terminal-show-adapter.mjs와 동일). 조회 자체 실패는 null이 아니라
-// {ok:false}를 그대로 전파(resolveLiveSeatByPaneKey가 즉시 실패로
-// 끝낸다) -- show 응답이 ok:true가 아니거나 필드가 없으면(죽은/형식오류
-// 좌석) 그냥 "이 후보는 일치 안 함"으로만 접는다(전체 실패로 만들지
-// 않는다 -- 다른 후보가 여전히 유효할 수 있다).
+// terminal-show-adapter.mjs와 동일).
+//
+// HYK-207-multiseat 수리: 예전에는 조회 자체 실패(execFn throw)를
+// {ok:false}로 그대로 전파해 resolveLiveSeatByPaneKey가 그 즉시 후보
+// 순회를 중단하고 전체 상관을 실패로 끝냈다 -- 좌석이 정확히 하나뿐일
+// 때는 그 하나가 곧 답이라 드러나지 않던 결함이, 좌석이 둘 이상이면
+// "우리가 실제로 찾는 좌석과 무관한 다른 후보 하나"의 조회 실패가 축
+// 전체를 COLLECTION_FAILED로 끌고 내려간다 -- collectSeatObservationsForWorktree
+// (위, seatIdle 축)가 이미 피해 간 "좌석 하나의 실패가 축 전체를 눈멀게
+// 하는" 그 형태를 이 상관 함수만 되풀이하고 있었다. 이제 조회 자체
+// 실패도 다른 실패 모드(malformed/좌석 없음)와 동일하게 "이 후보는
+// 일치 안 함"으로만 접는다 -- 다른 후보가 여전히 유효할 수 있으므로
+// 전체를 실패로 만들지 않는다. 그 대신 실패한 후보의 사유는 버리지
+// 않고 모아서 되돌린다(전부 실패해 매치가 0개일 때 "정말 아무것도
+// 못 봤다"와 "봤는데 하나도 안 맞았다"를 구별할 수 있게).
 function fetchPaneKeyFromShow(candidateHandle, opts) {
   let showResponse;
   try {
     showResponse = opts.execFn(buildSeatShowCommand(candidateHandle));
   } catch (err) {
-    return denyDeliveredSeat(
-      DELIVERED_SEAT_REASON.LIVE_SEAT_LIST_QUERY_FAILED,
-      `orca-adapter: resolveDeliveredSeat -- terminal show query threw (${errText(err)})`,
-    );
+    return {
+      ok: true,
+      paneKeyFromShow: null,
+      queryFailed: true,
+      queryFailedReason: `orca-adapter: resolveDeliveredSeat -- terminal show query threw for candidate '${candidateHandle}' (${errText(err)})`,
+    };
   }
   if (!isPlainObject(showResponse) || showResponse.ok !== true) {
     return { ok: true, paneKeyFromShow: null };
@@ -1003,12 +1015,29 @@ function resolveLiveSeatByPaneKey({ worktreePath, assigneePaneKey }, opts) {
   const resolved = resolveLiveSeatCandidatesForCorrelation(worktreePath, opts);
   if (!resolved.ok) return resolved;
   const matches = [];
+  const queryFailures = [];
   for (const candidate of resolved.candidates) {
     const shown = fetchPaneKeyFromShow(candidate.handle, opts);
-    if (!shown.ok) return shown;
+    if (shown.queryFailed) {
+      queryFailures.push({
+        handle: candidate.handle,
+        reason: shown.queryFailedReason,
+      });
+      continue;
+    }
     if (shown.paneKeyFromShow === assigneePaneKey) {
       matches.push({ handle: candidate.handle });
     }
+  }
+  if (
+    matches.length === 0 &&
+    resolved.candidates.length > 0 &&
+    queryFailures.length === resolved.candidates.length
+  ) {
+    return denyDeliveredSeat(
+      DELIVERED_SEAT_REASON.LIVE_SEAT_LIST_QUERY_FAILED,
+      `orca-adapter: resolveDeliveredSeat -- terminal show query failed for all ${queryFailures.length} live seat candidate(s) in worktree '${worktreePath}', refusing to guess`,
+    );
   }
   if (matches.length === 0) {
     return denyDeliveredSeat(
