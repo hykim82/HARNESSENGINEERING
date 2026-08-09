@@ -99,6 +99,68 @@ export function recordSeatCreation(registry, creationResponse) {
   };
 }
 
+// HYK-213-seat-ledger (coder-task.md §2, 두 번째 함정 회피): "판별 불가"를
+// 없애는 유일하게 안전한 길은 추측이 아니라 기록이다. 이 함수는 좌석
+// "생성" 응답이 아니라 "관측"(우리가 만들지 않았지만 이미 존재하는 것을
+// terminal list에서 발견) 시점의 provenance를 기록한다 -- recordSeatCreation
+// 과는 출처 자체가 다르므로 재사용하지 않는다(그 함수의
+// hasCreationProvenanceMarker 게이트는 paneKey가 있는 "생성 응답"만
+// 통과시키도록 의도적으로 설계돼 있다 -- 이 함수를 거기 억지로 태우면 그
+// 게이트의 의미가 깨진다).
+//
+// 멱등: 같은 ptyId가 이미 정확히 1개 기록돼 있으면(role 무관) no-op으로
+// 그 레코드를 그대로 반환한다 -- 재실행(재기동/재시도)이 같은 관측을
+// 중복 기입해 findByPtyId를 "2개+ 매치"로 무너뜨리는 것을 막는다(그러면
+// 이미 확정됐던 "워커 아님"이 다시 undetermined로 퇴행한다 -- 이 역시
+// §2 두 번째 함정의 한 형태다). 이미 2개+로 오염돼 있으면 그 오염을
+// 건드리지 않고 그대로 둔다(추가로 손대 상태를 더 애매하게 만들지
+// 않는다).
+export const NOT_WORKER_SEAT_ROLE = "NOT_WORKER_SEAT";
+
+export function recordNonWorkerSeatObservation(registry, observation = {}) {
+  const base = isPlainObject(registry) ? registry : createEmptyRegistry();
+  const seats = Array.isArray(base.seats) ? base.seats : [];
+  const obs = isPlainObject(observation) ? observation : {};
+  if (!isNonEmptyString(obs.ptyId)) {
+    return {
+      ok: false,
+      reason: "recordNonWorkerSeatObservation: observation.ptyId is required",
+    };
+  }
+  const existing = seats.filter(
+    (r) => isPlainObject(r) && r.ptyId === obs.ptyId,
+  );
+  if (existing.length > 0) {
+    return { ok: true, registry: base, record: existing[0], skipped: true };
+  }
+  const record = {
+    schemaVersion: SCHEMA_VERSION,
+    ptyId: obs.ptyId,
+    handle: isNonEmptyString(obs.handle) ? obs.handle : null,
+    tabId: null,
+    leafId: null,
+    paneKey: null,
+    worktreeId: null,
+    worktreePath: isNonEmptyString(obs.worktreePath) ? obs.worktreePath : null,
+    role: NOT_WORKER_SEAT_ROLE,
+    taskId: null,
+    dispatchId: null,
+    capturedAt: isNonEmptyString(obs.capturedAt) ? obs.capturedAt : null,
+    observationReason: isNonEmptyString(obs.observationReason)
+      ? obs.observationReason
+      : null,
+  };
+  return {
+    ok: true,
+    registry: {
+      schemaVersion: SCHEMA_VERSION,
+      seats: [...seats, record],
+    },
+    record,
+    skipped: false,
+  };
+}
+
 export function findByPtyId(registry, ptyId) {
   const base = isPlainObject(registry) ? registry : createEmptyRegistry();
   if (typeof ptyId !== "string" || ptyId.length === 0) return [];

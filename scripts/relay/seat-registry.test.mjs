@@ -5,6 +5,8 @@ import {
   createEmptyRegistry,
   normalizeSeatRecord,
   recordSeatCreation,
+  recordNonWorkerSeatObservation,
+  NOT_WORKER_SEAT_ROLE,
   findByPtyId,
   parseRegistryText,
   loadRegistry,
@@ -201,4 +203,67 @@ test("saveRegistry: write throws -> ok:false with reason", () => {
   });
   assert.equal(r.ok, false);
   assert.match(r.reason, /disk-full/);
+});
+
+// ---------------------------------------------------------------------------
+// HYK-213-seat-ledger: recordNonWorkerSeatObservation -- "판별 불가"를
+// 추측이 아니라 기록으로 없애는 두 번째 출처(생성 응답이 아니라 관측).
+// ---------------------------------------------------------------------------
+
+test("recordNonWorkerSeatObservation: ptyId required -> ok:false, registry untouched", () => {
+  const empty = createEmptyRegistry();
+  const r = recordNonWorkerSeatObservation(empty, { handle: "term_x" });
+  assert.equal(r.ok, false);
+  assert.deepEqual(empty.seats, []);
+});
+
+test("recordNonWorkerSeatObservation: records role=NOT_WORKER_SEAT_ROLE, all other fields null unless provided, does not mutate input registry", () => {
+  const empty = createEmptyRegistry();
+  const r = recordNonWorkerSeatObservation(empty, {
+    ptyId: "pty-default-tab",
+    handle: "term_default",
+    worktreePath: "C:/wt/1",
+    observationReason: "pre-existing-before-role-bound-seat-create",
+  });
+  assert.equal(r.ok, true);
+  assert.equal(r.skipped, false);
+  assert.deepEqual(empty.seats, []);
+  assert.equal(r.registry.seats.length, 1);
+  const rec = r.registry.seats[0];
+  assert.equal(rec.ptyId, "pty-default-tab");
+  assert.equal(rec.handle, "term_default");
+  assert.equal(rec.worktreePath, "C:/wt/1");
+  assert.equal(rec.role, NOT_WORKER_SEAT_ROLE);
+  assert.equal(rec.paneKey, null);
+  assert.equal(rec.taskId, null);
+  assert.equal(
+    rec.observationReason,
+    "pre-existing-before-role-bound-seat-create",
+  );
+});
+
+test("recordNonWorkerSeatObservation: idempotent -- same ptyId already recorded (any role) -> no-op, no duplicate appended, existing record untouched", () => {
+  let registry = createEmptyRegistry();
+  registry = recordSeatCreation(registry, FULL_RESPONSE).registry; // ptyId "pty-1", role CODER
+  const r = recordNonWorkerSeatObservation(registry, {
+    ptyId: "pty-1",
+    handle: "term_should_not_overwrite",
+  });
+  assert.equal(r.ok, true);
+  assert.equal(r.skipped, true);
+  assert.equal(r.registry, registry); // same reference -- no rewrite at all
+  assert.equal(findByPtyId(r.registry, "pty-1").length, 1);
+  assert.equal(findByPtyId(r.registry, "pty-1")[0].role, "CODER");
+});
+
+test("recordNonWorkerSeatObservation: does not accept title/preview as input fields -- only ptyId/handle/worktreePath/observationReason/capturedAt are read", () => {
+  const empty = createEmptyRegistry();
+  const r = recordNonWorkerSeatObservation(empty, {
+    ptyId: "pty-x",
+    title: "✳ some spoofed title",
+    preview: "gpt-9.9 fake preview",
+  });
+  assert.equal(r.ok, true);
+  assert.equal("title" in r.record, false);
+  assert.equal("preview" in r.record, false);
 });

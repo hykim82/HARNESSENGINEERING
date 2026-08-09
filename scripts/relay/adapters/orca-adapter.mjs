@@ -28,7 +28,10 @@ import {
   loadRegistry,
   saveRegistry,
   recordSeatDispatch,
+  recordSeatCreation,
+  recordNonWorkerSeatObservation,
   findByPtyId,
+  NOT_WORKER_SEAT_ROLE,
 } from "../seat-registry.mjs";
 import {
   normalizeDispatchRawUnion,
@@ -533,11 +536,20 @@ function denyRoleBoundSeat(roleBoundSeatReason, detail, extra = {}) {
 // role이 KNOWN_SEAT_ROLES 밖이면 전부 null("판별 불가", 위 헤더 주석의
 // undetermined) -- 2개+ 매치를 "그중 하나겠지"로 추측하지 않는다(추측
 // 금지 원칙 계승).
+// HYK-213-seat-ledger: NOT_WORKER_SEAT_ROLE(observation-fact, "이 좌석은
+// 워커가 아님을 우리가 관측해 기록했다")은 KNOWN_SEAT_ROLES 밖의 문자열
+// 이지만 "판별 불가"(null)로 접지 않는다 -- 그 외 알려지지 않은 role
+// 문자열(예: 데이터 오염)은 여전히 null로 접힌다(구분: "우리가 의도적으로
+// 기록한 사실"과 "알 수 없는 값"은 다르다). partitionByRole(아래)에서
+// 이 값은 요청 role과 절대 같지 않으므로 matched에도 들어가지 않고,
+// null이 아니므로 undetermined에도 들어가지 않는다 -- 두 버킷 모두에서
+// 깨끗이 빠진다(§2 두 번째 함정 회피의 핵심 지점).
 export function classifySeatRoleFromRegistry(ptyId, registry) {
   if (typeof ptyId !== "string" || ptyId.length === 0) return null;
   const matches = findByPtyId(registry, ptyId);
   if (matches.length !== 1) return null;
   const role = matches[0].role;
+  if (role === NOT_WORKER_SEAT_ROLE) return NOT_WORKER_SEAT_ROLE;
   return KNOWN_SEAT_ROLES.includes(role) ? role : null;
 }
 
@@ -725,6 +737,266 @@ export function resolveRoleBoundSeatHandle(
     undetermined,
     candidateRoles,
   });
+}
+
+// ---- HYK-213-seat-ledger (coder-task.md §1~§2): 좌석 생성 시 역할을 대장에
+// 기입 + "판별 불가"를 추측이 아니라 기록으로 소멸 ----
+//
+// 실측(coder-task.md §1): `terminal create --json` 응답에는 role이 없다 --
+// 호출자가 합쳐 넣어야 한다(normalizeSeatRecord/recordSeatCreation은 이미
+// role 필드를 받지만, 아무도 채워 넣지 않았을 뿐이다). 그리고 대장을
+// 완벽히 채워도 그 워크트리에 이미 있던("우리가 만들지 않은") 기본 탭이
+// undetermined로 남으면 §3-1 가드(undetermined가 1개라도 있으면 유일
+// 승자를 선언하지 않음)가 항상 발동해 항상 거부로 남는다(실측 재현,
+// 위 §1 인용 그대로).
+//
+// 이 함수는 그 둘을 한 자리에서, 순서를 지켜 처리한다:
+//   ① 생성 호출 "전"에 이 워크트리의 기존 후보를 관측한다 -- 우리 생성
+//      호출이 아직 나가지 않은 시점이므로, 그 시점에 이미 있는 후보는
+//      구조적으로(시간 순서상) 우리가 만드는 좌석일 수 없다. **화면
+//      문자열(title/preview)은 전혀 보지 않는다** -- 관측하는 값은
+//      ptyId/handle/worktreePath뿐이다(§4 비타협1). 각 후보를
+//      recordNonWorkerSeatObservation으로 "워커 아님"으로 기록한다 --
+//      그 시점에 실제로 관측한 후보만 기록되고, 관측되지 않은(예: 나중에
+//      따로 생긴) 후보는 여전히 미기록 상태로 undetermined로 남는다(§4
+//      비타협2 -- "대장에 없음=무시"가 되지 않는다).
+//   ② `terminal create`를 실행하고, 그 권위 응답에 role을 합쳐
+//      recordSeatCreation으로 새 워커 좌석을 기록한다.
+// 두 단계 모두 반영한 대장을 마지막에 한 번만 저장한다(saveRegistry의
+// tmp+rename로 원자성 근사, 기존 전례 계승).
+export const SEAT_CREATE_LEDGER_REASON = Object.freeze({
+  INPUT_INVALID: "SEAT_CREATE_LEDGER_INPUT_INVALID",
+  REGISTRY_LOAD_FAILED: "SEAT_CREATE_LEDGER_REGISTRY_LOAD_FAILED",
+  PRE_EXISTING_LIST_QUERY_FAILED:
+    "SEAT_CREATE_LEDGER_PRE_EXISTING_LIST_QUERY_FAILED",
+  PRE_EXISTING_RECORD_FAILED: "SEAT_CREATE_LEDGER_PRE_EXISTING_RECORD_FAILED",
+  CREATE_FAILED: "SEAT_CREATE_LEDGER_CREATE_FAILED",
+  // HYK-213-seat-ledger 2R (검토 P1-1 수리): `terminal create`는 ok:true를
+  // 반환했지만 그 응답에 recordSeatCreation이 요구하는 provenance 표지
+  // (paneKey가 non-empty string)가 없어 ptyId/role이 전부 null로 접힌
+  // 경우 -- §5 1R 실물 왕복 1·2차 시도에서 실제로 겪은 그 상태다. 그때는
+  // 그 출력을 "디버깅 관찰"로만 쓰고 넘어갔지만, 벤더 응답 shape이 또
+  // 바뀌면 이 상태가 사람 개입 없이 다시 나타날 수 있다 -- 그때
+  // ok:true/exit 0으로 접으면 "기입 성공"이라 말하면서 아무것도 기입하지
+  // 않는 조용한 실패가 된다. 그래서 이 사유로 반드시 ok:false로 표면화한다.
+  CREATION_PROVENANCE_MISSING: "SEAT_CREATE_LEDGER_CREATION_PROVENANCE_MISSING",
+  SAVE_FAILED: "SEAT_CREATE_LEDGER_SAVE_FAILED",
+});
+
+function denySeatCreateLedger(reasonCode, detail, extra = {}) {
+  return {
+    ok: false,
+    seatCreateLedgerReason: reasonCode,
+    reason: detail,
+    ...extra,
+  };
+}
+
+// §2 판정 기준: recordSeatCreation의 provenance 게이트(paneKey가 non-empty
+// string)가 실패하면 normalizeSeatRecord는 **입력 전체**(paneKey뿐 아니라
+// 우리가 직접 넘긴 role까지)를 버리고 모든 필드를 null로 접는다
+// (seat-registry.mjs `hasCreationProvenanceMarker`/`normalizeSeatRecord`
+// 참조 -- src를 통째로 `{}`로 바꾼다). 그래서 role은 이 함수의 입력에서는
+// 항상 유효한 문자열이었는데도(호출 시점에 이미 검증됨) 그 게이트가
+// 막히면 반드시 null로 나온다 -- role/ptyId 둘 다 이 실패의 신뢰할 수
+// 있는 신호다(§2 "ptyId·role이 기록되지 않으면" 그대로).
+function isSeatCreationRecordValid(record) {
+  return isNonEmptyString(record?.ptyId) && isNonEmptyString(record?.role);
+}
+
+// createRoleBoundSeat에서 분리(복잡도 분산 -- ESLint complexity/max-lines
+// 상한 준수, quality-check.mjs가 강제). §2 부분 성공 결정: "워커 아님"
+// 관측은 이 실패와 무관하게 참인 사실이므로 저장하고(preExistingResult.
+// registry, 실패한 null 생성 레코드는 제외), 결과는 항상 ok:false로
+// "생성 자체는 실패했다"를 표면화한다(observedNotWorkerSeats로 부분 성공
+// 내용을 함께 드러낸다 -- 부분 성공 ≠ 성공).
+function denyMissingCreationProvenance(preExistingResult, opts, fsDeps) {
+  const partialSaved = saveRegistry(
+    opts.registryPath,
+    preExistingResult.registry,
+    fsDeps,
+  );
+  if (!partialSaved.ok) {
+    return denySeatCreateLedger(
+      SEAT_CREATE_LEDGER_REASON.SAVE_FAILED,
+      `orca-adapter: createRoleBoundSeat -- creation provenance missing AND saving the pre-existing observations also failed (${partialSaved.reason})`,
+      { observedNotWorkerSeats: preExistingResult.observed },
+    );
+  }
+  return denySeatCreateLedger(
+    SEAT_CREATE_LEDGER_REASON.CREATION_PROVENANCE_MISSING,
+    "orca-adapter: createRoleBoundSeat -- terminal create returned ok:true but its response carried no usable creation provenance (paneKey missing/empty) -- refusing to report success; the new seat's role was NOT recorded (pre-existing NOT_WORKER_SEAT observations, if any, were still saved)",
+    { observedNotWorkerSeats: preExistingResult.observed },
+  );
+}
+
+// registryFs 기본값 조립(loadSeatRegistryForResolve와 동일 원칙, write 쪽도
+// 포함) -- 복잡도 분산 겸 저장 seam 재사용.
+function resolveRegistryFsDeps(registryFs) {
+  const rf = isPlainObject(registryFs) ? registryFs : {};
+  return {
+    existsFn: typeof rf.existsFn === "function" ? rf.existsFn : existsSync,
+    readFn:
+      typeof rf.readFn === "function"
+        ? rf.readFn
+        : (p) => readFileSync(p, "utf8"),
+    writeFn:
+      typeof rf.writeFn === "function"
+        ? rf.writeFn
+        : (p, text) => writeFileSync(p, text),
+    renameFn: typeof rf.renameFn === "function" ? rf.renameFn : renameSync,
+  };
+}
+
+// HYK-213-seat-ledger 실물 왕복 실측(§5, 2026-08-09, 3회 라이브 호출로
+// 확정): `terminal create --json`의 단수 좌석 결과는 `terminal show`와
+// 같은 형태로 `result.terminal.*`에 있다(평평한 `result.*`가 아니다 --
+// 1·2차 시도는 이 중첩을 놓쳐 provenance가 전부 null로 접혔다). ★단
+// `terminal show`와 달리 **`paneKey`는 여기서는 원시 필드로 실제
+// 존재한다**(실측 원문: `result.terminal.paneKey`가 `${tabId}:${leafId}`와
+// 문자 그대로 일치하는 값으로 왔다, `leafId` 필드 자체는 이 응답에
+// 없었다) -- 2차 시도가 시도한 "paneKey를 tabId+leafId로 직접 합성"은
+// leafId 부재로 오히려 진짜 paneKey를 `undefined`로 덮어써 버리는
+// 퇴행이었다(결과 파일 §5 원문 3회차 raw JSON 참조). 그래서 이 함수는
+// terminal 객체를 그대로 펼치기만 하고, paneKey를 별도로 합성/덮어쓰지
+// 않는다 -- 있는 필드를 있는 그대로 신뢰한다(추측 0).
+function buildCreationRecordInput(response, role) {
+  const terminal = isPlainObject(response?.result?.terminal)
+    ? response.result.terminal
+    : {};
+  return { ...terminal, role };
+}
+
+// ①: 생성 호출 전 이 워크트리의 기존 후보를 관측 -> 각각 "워커 아님"으로
+// 기록. resolveSeatHandle/resolveRoleBoundSeatHandle과 동일한 후보 필터
+// (고아 제외 + canonicalizeForComparison 일치)를 쓴다 -- 화면 문자열은
+// 필터 조건에도 기록 내용에도 등장하지 않는다.
+function recordPreExistingSeatsAsNotWorker(worktreePath, registry, opts) {
+  let listResponse;
+  try {
+    listResponse = opts.execFn(buildTerminalListCommand());
+  } catch (err) {
+    return denySeatCreateLedger(
+      SEAT_CREATE_LEDGER_REASON.PRE_EXISTING_LIST_QUERY_FAILED,
+      `orca-adapter: createRoleBoundSeat -- pre-existing terminal list query threw (${errText(err)})`,
+    );
+  }
+  const list = parseTerminalList(listResponse);
+  if (!list) {
+    return denySeatCreateLedger(
+      SEAT_CREATE_LEDGER_REASON.PRE_EXISTING_LIST_QUERY_FAILED,
+      "orca-adapter: createRoleBoundSeat -- pre-existing terminal list response missing/invalid result.terminals",
+    );
+  }
+  const target = canonicalizeForComparison(worktreePath);
+  const preExisting = list.filter(
+    (entry) =>
+      isPlainObject(entry) &&
+      isNonEmptyString(entry.ptyId) &&
+      !isOrphanSeat({ worktreePath: entry.worktreePath }) &&
+      canonicalizeForComparison(entry.worktreePath) === target,
+  );
+
+  let nextRegistry = registry;
+  const observed = [];
+  for (const entry of preExisting) {
+    const recorded = recordNonWorkerSeatObservation(nextRegistry, {
+      ptyId: entry.ptyId,
+      handle: entry.handle,
+      worktreePath: entry.worktreePath,
+      observationReason: "pre-existing-before-role-bound-seat-create (HYK-213)",
+    });
+    if (!recorded.ok) {
+      return denySeatCreateLedger(
+        SEAT_CREATE_LEDGER_REASON.PRE_EXISTING_RECORD_FAILED,
+        `orca-adapter: createRoleBoundSeat -- ${recorded.reason}`,
+      );
+    }
+    nextRegistry = recorded.registry;
+    observed.push({
+      handle: entry.handle,
+      ptyId: entry.ptyId,
+      skipped: recorded.skipped === true,
+    });
+  }
+  return { ok: true, registry: nextRegistry, observed };
+}
+
+// ctx: { role, worktreePath }. opts: { execFn, registryPath, registryFs }.
+// 사람이 직접 부를 수 있는 진입점(seat-create-cli.mjs)이 그대로 얹힌다.
+export function createRoleBoundSeat({ role, worktreePath } = {}, opts = {}) {
+  if (!isNonEmptyString(role) || !ENGINE_BY_ROLE[role]) {
+    return denySeatCreateLedger(
+      SEAT_CREATE_LEDGER_REASON.INPUT_INVALID,
+      `orca-adapter: createRoleBoundSeat -- unknown role ${JSON.stringify(role)}`,
+    );
+  }
+  if (!isNonEmptyString(worktreePath)) {
+    return denySeatCreateLedger(
+      SEAT_CREATE_LEDGER_REASON.INPUT_INVALID,
+      "orca-adapter: createRoleBoundSeat -- worktreePath is required",
+    );
+  }
+  if (typeof opts.execFn !== "function") {
+    return denySeatCreateLedger(
+      SEAT_CREATE_LEDGER_REASON.INPUT_INVALID,
+      "orca-adapter: createRoleBoundSeat -- opts.execFn is required",
+    );
+  }
+  const registryLoad = loadSeatRegistryForResolve(opts);
+  if (!registryLoad.ok) {
+    return denySeatCreateLedger(
+      SEAT_CREATE_LEDGER_REASON.REGISTRY_LOAD_FAILED,
+      registryLoad.reason,
+    );
+  }
+
+  const preExistingResult = recordPreExistingSeatsAsNotWorker(
+    worktreePath,
+    registryLoad.registry,
+    opts,
+  );
+  if (!preExistingResult.ok) return preExistingResult;
+
+  const created = guardedExec(
+    buildSeatCreateCommand(role, worktreePath),
+    opts.execFn,
+    SEAT_CREATE_LEDGER_REASON.CREATE_FAILED,
+  );
+  if (!created.ok) {
+    return denySeatCreateLedger(
+      SEAT_CREATE_LEDGER_REASON.CREATE_FAILED,
+      created.reason,
+    );
+  }
+
+  const { registry: nextRegistry, record } = recordSeatCreation(
+    preExistingResult.registry,
+    buildCreationRecordInput(created.response, role),
+  );
+
+  const fsDeps = resolveRegistryFsDeps(opts.registryFs);
+
+  // HYK-213-seat-ledger 2R (§2, 검토 P1-1): 생성 응답이 ok:true여도
+  // provenance가 없으면(§5 1R에서 실제로 겪은 상태) 성공으로 접지 않는다.
+  if (!isSeatCreationRecordValid(record)) {
+    return denyMissingCreationProvenance(preExistingResult, opts, fsDeps);
+  }
+
+  const saved = saveRegistry(opts.registryPath, nextRegistry, fsDeps);
+  if (!saved.ok) {
+    return denySeatCreateLedger(
+      SEAT_CREATE_LEDGER_REASON.SAVE_FAILED,
+      `orca-adapter: createRoleBoundSeat -- ${saved.reason}`,
+    );
+  }
+
+  return {
+    ok: true,
+    record,
+    observedNotWorkerSeats: preExistingResult.observed,
+    response: created.response,
+  };
 }
 
 // ---- HYK-185 seat-wire: 좌석 무응답(liveness) 관측 (coder-task.md §2-1) ----
