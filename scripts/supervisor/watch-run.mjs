@@ -7,7 +7,7 @@
 // S11 필수(coder-task.md §5-E, 문구 그대로):
 // 1. **증명한다**: 등록되면 이 감지는 ORCH 세션·에이전트와 무관하게 OS가
 //    부른다 -- 이 파일은 `node`(자식 프로세스 spawn 포함)만으로 실행되며
-//    Claude 훅 호출이 없다. ★HYK-173-push-wire 갱신(§5-F "주장-구현
+//    에이전트 런타임 훅 호출이 없다. ★HYK-173-push-wire 갱신(§5-F "주장-구현
 //    일치" -- 이 갱신 전에도 이미 부정확했다, seatLiveness 축이 이미
 //    간접 orca 호출을 했다): 이 파일 자신은 orca를 spawn하지 않지만, 이
 //    파일이 감싸 부르는 자식 프로세스(orch-stall-detect.mjs)는

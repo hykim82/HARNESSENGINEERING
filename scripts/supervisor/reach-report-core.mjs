@@ -329,8 +329,13 @@ export function formatMorningReport({
   lines.push("");
   lines.push("## 지금 열려 있는 이상");
   if (openAnomalies.length === 0) {
+    // HYK-173-push-wire 2R P2-1 -- 축 수를 문면에 손으로 박지 않는다
+    // (coder-task.md §2-2 "적힌 수 != 실제 목록", 이 계열 재발 5회째).
+    // AXES.length에서 기계로 유도해 AXES가 늘어나면 이 문면도 그대로
+    // 따라간다(escalation-axis-wire.test.mjs가 이 동기화를 시험으로
+    // 고정한다).
     lines.push(
-      "없음 -- 열려 있는 이상이 없습니다(5축 전부 정상 또는 관측 대상 없음).",
+      `없음 -- 열려 있는 이상이 없습니다(${AXES.length}축 전부 정상 또는 관측 대상 없음).`,
     );
   } else {
     for (const a of openAnomalies) {
