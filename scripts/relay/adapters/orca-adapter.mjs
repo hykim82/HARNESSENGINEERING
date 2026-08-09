@@ -796,6 +796,25 @@ function resolveRegistryFsDeps(registryFs) {
   };
 }
 
+// HYK-213-seat-ledger 실물 왕복 실측(§5, 2026-08-09, 3회 라이브 호출로
+// 확정): `terminal create --json`의 단수 좌석 결과는 `terminal show`와
+// 같은 형태로 `result.terminal.*`에 있다(평평한 `result.*`가 아니다 --
+// 1·2차 시도는 이 중첩을 놓쳐 provenance가 전부 null로 접혔다). ★단
+// `terminal show`와 달리 **`paneKey`는 여기서는 원시 필드로 실제
+// 존재한다**(실측 원문: `result.terminal.paneKey`가 `${tabId}:${leafId}`와
+// 문자 그대로 일치하는 값으로 왔다, `leafId` 필드 자체는 이 응답에
+// 없었다) -- 2차 시도가 시도한 "paneKey를 tabId+leafId로 직접 합성"은
+// leafId 부재로 오히려 진짜 paneKey를 `undefined`로 덮어써 버리는
+// 퇴행이었다(결과 파일 §5 원문 3회차 raw JSON 참조). 그래서 이 함수는
+// terminal 객체를 그대로 펼치기만 하고, paneKey를 별도로 합성/덮어쓰지
+// 않는다 -- 있는 필드를 있는 그대로 신뢰한다(추측 0).
+function buildCreationRecordInput(response, role) {
+  const terminal = isPlainObject(response?.result?.terminal)
+    ? response.result.terminal
+    : {};
+  return { ...terminal, role };
+}
+
 // ①: 생성 호출 전 이 워크트리의 기존 후보를 관측 -> 각각 "워커 아님"으로
 // 기록. resolveSeatHandle/resolveRoleBoundSeatHandle과 동일한 후보 필터
 // (고아 제외 + canonicalizeForComparison 일치)를 쓴다 -- 화면 문자열은
@@ -901,7 +920,7 @@ export function createRoleBoundSeat({ role, worktreePath } = {}, opts = {}) {
 
   const { registry: nextRegistry, record } = recordSeatCreation(
     preExistingResult.registry,
-    { ...created.response?.result, role },
+    buildCreationRecordInput(created.response, role),
   );
 
   const fsDeps = resolveRegistryFsDeps(opts.registryFs);

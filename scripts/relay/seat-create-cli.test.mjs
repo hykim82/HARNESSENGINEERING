@@ -108,13 +108,13 @@ test("runSeatCreateCli: good args reach createRoleBoundSeat via injected execFn 
       return {
         ok: true,
         result: {
-          ptyId: "pty_new",
-          handle: "term_new",
-          tabId: "t1",
-          leafId: "l1",
-          paneKey: "t1:l1",
-          worktreeId: "w1",
-          worktreePath: VALID_WORKTREE,
+          terminal: {
+            ptyId: "pty_new",
+            handle: "term_new",
+            tabId: "t1",
+            paneKey: "t1:l1",
+            worktreeId: "w1",
+          },
         },
       };
     }
@@ -257,13 +257,13 @@ test("direct-entry: real child process, no pre-existing candidates -- CREATED wi
       terminalCreate: {
         ok: true,
         result: {
-          ptyId: "pty_new",
-          handle: "term_new",
-          tabId: "t1",
-          leafId: "l1",
-          paneKey: "t1:l1",
-          worktreeId: "w1",
-          worktreePath: VALID_WORKTREE,
+          terminal: {
+            ptyId: "pty_new",
+            handle: "term_new",
+            tabId: "t1",
+            paneKey: "t1:l1",
+            worktreeId: "w1",
+          },
         },
       },
     });
@@ -317,13 +317,13 @@ test("direct-entry: real child process, a pre-existing default tab -- CREATED pl
       terminalCreate: {
         ok: true,
         result: {
-          ptyId: "pty_new",
-          handle: "term_new",
-          tabId: "t1",
-          leafId: "l1",
-          paneKey: "t1:l1",
-          worktreeId: "w1",
-          worktreePath: VALID_WORKTREE,
+          terminal: {
+            ptyId: "pty_new",
+            handle: "term_new",
+            tabId: "t1",
+            paneKey: "t1:l1",
+            worktreeId: "w1",
+          },
         },
       },
     });

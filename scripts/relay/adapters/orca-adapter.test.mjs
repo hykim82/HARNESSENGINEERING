@@ -3881,16 +3881,23 @@ function fakeWritableRegistryFs(registry) {
   };
 }
 
+// HYK-213-seat-ledger §5 실물 왕복 실측(3회차 raw JSON 그대로): `terminal
+// create --json`의 단수 좌석 결과는 `result.terminal.*`(terminal show와
+// 같은 형태)에 있고, `paneKey`는 (terminal show와 달리) 원시 필드로 실제
+// 존재한다 -- `leafId`는 이 응답에 없다(.harness/coder.md §5 원문 참조).
+// fixture도 그 실측 shape를 그대로 반영한다(leafId 없음, paneKey 있음).
 const CREATE_RESPONSE = {
   ok: true,
   result: {
-    ptyId: "pty_new_coder",
-    handle: "term_new_coder",
-    tabId: "tab_new",
-    leafId: "leaf_new",
-    paneKey: "tab_new:leaf_new",
-    worktreeId: "wt_id",
-    worktreePath: VALID_WORKTREE,
+    terminal: {
+      handle: "term_new_coder",
+      tabId: "tab_new",
+      paneKey: "tab_new:leaf_new",
+      ptyId: "pty_new_coder",
+      worktreeId: "wt_id",
+      title: "CODER",
+      surface: "visible",
+    },
   },
 };
 
@@ -4067,6 +4074,50 @@ test("createRoleBoundSeat: never reads title/preview from the terminal-list cand
   assert.equal(notWorker.role, NOT_WORKER_SEAT_ROLE);
   assert.equal("title" in notWorker, false);
   assert.equal("preview" in notWorker, false);
+});
+
+// HYK-213-seat-ledger §5 실물 왕복 실측 회귀 봉인(3회차 raw JSON 그대로):
+// `terminal create --json` 응답은 (`terminal show`와 같은 형태로)
+// `result.terminal.*`에 있고, 그 안에는 `paneKey`가 원시 필드로 실제
+// 존재한다(leafId는 없다) -- 이 시험은 그 실측 shape를 고정한다: 평평한
+// `result.*`(1차 시도의 구 가정)로 준 응답은 provenance를 만들지 못하고
+// (ptyId/paneKey 둘 다 null), `result.terminal.*` 응답은 이미 있는
+// paneKey를 그대로(합성/덮어쓰기 없이) 정상 기록한다.
+test("createRoleBoundSeat: §5 live-measured response shape -- terminal create's single-seat payload is under result.terminal (like terminal show), and its raw paneKey field is trusted as-is (not re-derived/overwritten)", () => {
+  const fs = fakeWritableRegistryFs({ schemaVersion: 1, seats: [] });
+  const execFn = fakeExecFn({
+    list: managedWorktreeStub(VALID_WORKTREE),
+    "terminal-list": terminalListStub([]),
+    create: CREATE_RESPONSE, // nests under result.terminal, real shape (no leafId, has paneKey)
+  });
+  const r = createRoleBoundSeatFor("CODER", { execFn, registryFs: fs });
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.equal(r.record.ptyId, "pty_new_coder");
+  assert.equal(r.record.paneKey, "tab_new:leaf_new");
+});
+
+test("createRoleBoundSeat: a flat (non-nested) result.* response (the 1st-attempt, live-disproven assumption) fails to produce any provenance -- record is all-null, proving the .terminal-nesting fix is load-bearing", () => {
+  const fs = fakeWritableRegistryFs({ schemaVersion: 1, seats: [] });
+  const flatCreateResponse = {
+    ok: true,
+    result: {
+      ptyId: "pty_new_coder",
+      handle: "term_new_coder",
+      tabId: "tab_new",
+      paneKey: "tab_new:leaf_new",
+      worktreeId: "wt_id",
+    },
+  };
+  const execFn = fakeExecFn({
+    list: managedWorktreeStub(VALID_WORKTREE),
+    "terminal-list": terminalListStub([]),
+    create: flatCreateResponse,
+  });
+  const r = createRoleBoundSeatFor("CODER", { execFn, registryFs: fs });
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.equal(r.record.ptyId, null);
+  assert.equal(r.record.paneKey, null);
+  assert.equal(r.record.role, null);
 });
 
 // ---------------------------------------------------------------------------
