@@ -4096,7 +4096,7 @@ test("createRoleBoundSeat: §5 live-measured response shape -- terminal create's
   assert.equal(r.record.paneKey, "tab_new:leaf_new");
 });
 
-test("createRoleBoundSeat: a flat (non-nested) result.* response (the 1st-attempt, live-disproven assumption) fails to produce any provenance -- record is all-null, proving the .terminal-nesting fix is load-bearing", () => {
+test("createRoleBoundSeat: a flat (non-nested) result.* response (the 1st-attempt, live-disproven assumption) produces no provenance -- fails loudly (2R P1-1), never ok:true with a null record", () => {
   const fs = fakeWritableRegistryFs({ schemaVersion: 1, seats: [] });
   const flatCreateResponse = {
     ok: true,
@@ -4114,10 +4114,87 @@ test("createRoleBoundSeat: a flat (non-nested) result.* response (the 1st-attemp
     create: flatCreateResponse,
   });
   const r = createRoleBoundSeatFor("CODER", { execFn, registryFs: fs });
+  assert.equal(r.ok, false, JSON.stringify(r));
+  assert.equal(
+    r.seatCreateLedgerReason,
+    SEAT_CREATE_LEDGER_REASON.CREATION_PROVENANCE_MISSING,
+  );
+  // No pre-existing candidates this run -> the (unchanged) loaded registry
+  // is still written back, but the null creation record never appears in
+  // it (the write is idempotent, not a lie about what was recorded).
+  assert.equal(fs.writes.length, 1);
+  assert.deepEqual(fs.savedRegistry().seats, []);
+});
+
+// ---------------------------------------------------------------------------
+// HYK-213-seat-ledger 2R (§2/§4-1/§4-2, 검토 P1-1 수리): 생성 provenance
+// 없음 -> 성공 오보 금지 + 부분 성공(관측은 저장, 생성만 실패) 처리.
+// ---------------------------------------------------------------------------
+test("createRoleBoundSeat: 2R -- provenance missing AND a pre-existing candidate observed -- ok:false, but the NOT_WORKER_SEAT_ROLE observation is still saved (partial success is not reported as success)", () => {
+  const fs = fakeWritableRegistryFs({ schemaVersion: 1, seats: [] });
+  const flatCreateResponse = {
+    ok: true,
+    result: { ptyId: "pty_new_coder", paneKey: "tab_new:leaf_new" }, // flat, no .terminal
+  };
+  const execFn = fakeExecFn({
+    list: managedWorktreeStub(VALID_WORKTREE),
+    "terminal-list": terminalListStub([
+      terminalEntry({ handle: "term_default_tab", ptyId: "pty_default_tab" }),
+    ]),
+    create: flatCreateResponse,
+  });
+  const r = createRoleBoundSeatFor("CODER", { execFn, registryFs: fs });
+  assert.equal(r.ok, false, JSON.stringify(r));
+  assert.equal(
+    r.seatCreateLedgerReason,
+    SEAT_CREATE_LEDGER_REASON.CREATION_PROVENANCE_MISSING,
+  );
+  assert.deepEqual(r.observedNotWorkerSeats, [
+    { handle: "term_default_tab", ptyId: "pty_default_tab", skipped: false },
+  ]);
+  const saved = fs.savedRegistry();
+  assert.equal(
+    saved.seats.length,
+    1,
+    "only the observation, no null creation record",
+  );
+  assert.equal(saved.seats[0].ptyId, "pty_default_tab");
+  assert.equal(saved.seats[0].role, NOT_WORKER_SEAT_ROLE);
+  assert.equal(
+    saved.seats.some((s) => s.ptyId === "pty_new_coder"),
+    false,
+    "the failed (all-null) creation record must never be written to the registry",
+  );
+});
+
+test("createRoleBoundSeat: 2R -- provenance missing and saving the partial (pre-existing-only) registry also fails -- SAVE_FAILED, not silently ok:true", () => {
+  const fs = fakeWritableRegistryFs({ schemaVersion: 1, seats: [] });
+  fs.writeFn = () => {
+    throw new Error("disk-full");
+  };
+  const flatCreateResponse = { ok: true, result: { ptyId: "pty_x" } };
+  const execFn = fakeExecFn({
+    list: managedWorktreeStub(VALID_WORKTREE),
+    "terminal-list": terminalListStub([]),
+    create: flatCreateResponse,
+  });
+  const r = createRoleBoundSeatFor("CODER", { execFn, registryFs: fs });
+  assert.equal(r.ok, false, JSON.stringify(r));
+  assert.equal(r.seatCreateLedgerReason, SEAT_CREATE_LEDGER_REASON.SAVE_FAILED);
+  assert.match(r.reason, /disk-full/);
+});
+
+test("createRoleBoundSeat: 2R -- normal (valid-provenance) creation is unaffected -- still ok:true, still exactly one registry write (regression guard)", () => {
+  const fs = fakeWritableRegistryFs({ schemaVersion: 1, seats: [] });
+  const execFn = fakeExecFn({
+    list: managedWorktreeStub(VALID_WORKTREE),
+    "terminal-list": terminalListStub([]),
+    create: CREATE_RESPONSE,
+  });
+  const r = createRoleBoundSeatFor("CODER", { execFn, registryFs: fs });
   assert.equal(r.ok, true, JSON.stringify(r));
-  assert.equal(r.record.ptyId, null);
-  assert.equal(r.record.paneKey, null);
-  assert.equal(r.record.role, null);
+  assert.equal(r.record.role, "CODER");
+  assert.equal(fs.writes.length, 1);
 });
 
 // ---------------------------------------------------------------------------

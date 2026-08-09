@@ -771,11 +771,63 @@ export const SEAT_CREATE_LEDGER_REASON = Object.freeze({
     "SEAT_CREATE_LEDGER_PRE_EXISTING_LIST_QUERY_FAILED",
   PRE_EXISTING_RECORD_FAILED: "SEAT_CREATE_LEDGER_PRE_EXISTING_RECORD_FAILED",
   CREATE_FAILED: "SEAT_CREATE_LEDGER_CREATE_FAILED",
+  // HYK-213-seat-ledger 2R (검토 P1-1 수리): `terminal create`는 ok:true를
+  // 반환했지만 그 응답에 recordSeatCreation이 요구하는 provenance 표지
+  // (paneKey가 non-empty string)가 없어 ptyId/role이 전부 null로 접힌
+  // 경우 -- §5 1R 실물 왕복 1·2차 시도에서 실제로 겪은 그 상태다. 그때는
+  // 그 출력을 "디버깅 관찰"로만 쓰고 넘어갔지만, 벤더 응답 shape이 또
+  // 바뀌면 이 상태가 사람 개입 없이 다시 나타날 수 있다 -- 그때
+  // ok:true/exit 0으로 접으면 "기입 성공"이라 말하면서 아무것도 기입하지
+  // 않는 조용한 실패가 된다. 그래서 이 사유로 반드시 ok:false로 표면화한다.
+  CREATION_PROVENANCE_MISSING: "SEAT_CREATE_LEDGER_CREATION_PROVENANCE_MISSING",
   SAVE_FAILED: "SEAT_CREATE_LEDGER_SAVE_FAILED",
 });
 
-function denySeatCreateLedger(reasonCode, detail) {
-  return { ok: false, seatCreateLedgerReason: reasonCode, reason: detail };
+function denySeatCreateLedger(reasonCode, detail, extra = {}) {
+  return {
+    ok: false,
+    seatCreateLedgerReason: reasonCode,
+    reason: detail,
+    ...extra,
+  };
+}
+
+// §2 판정 기준: recordSeatCreation의 provenance 게이트(paneKey가 non-empty
+// string)가 실패하면 normalizeSeatRecord는 **입력 전체**(paneKey뿐 아니라
+// 우리가 직접 넘긴 role까지)를 버리고 모든 필드를 null로 접는다
+// (seat-registry.mjs `hasCreationProvenanceMarker`/`normalizeSeatRecord`
+// 참조 -- src를 통째로 `{}`로 바꾼다). 그래서 role은 이 함수의 입력에서는
+// 항상 유효한 문자열이었는데도(호출 시점에 이미 검증됨) 그 게이트가
+// 막히면 반드시 null로 나온다 -- role/ptyId 둘 다 이 실패의 신뢰할 수
+// 있는 신호다(§2 "ptyId·role이 기록되지 않으면" 그대로).
+function isSeatCreationRecordValid(record) {
+  return isNonEmptyString(record?.ptyId) && isNonEmptyString(record?.role);
+}
+
+// createRoleBoundSeat에서 분리(복잡도 분산 -- ESLint complexity/max-lines
+// 상한 준수, quality-check.mjs가 강제). §2 부분 성공 결정: "워커 아님"
+// 관측은 이 실패와 무관하게 참인 사실이므로 저장하고(preExistingResult.
+// registry, 실패한 null 생성 레코드는 제외), 결과는 항상 ok:false로
+// "생성 자체는 실패했다"를 표면화한다(observedNotWorkerSeats로 부분 성공
+// 내용을 함께 드러낸다 -- 부분 성공 ≠ 성공).
+function denyMissingCreationProvenance(preExistingResult, opts, fsDeps) {
+  const partialSaved = saveRegistry(
+    opts.registryPath,
+    preExistingResult.registry,
+    fsDeps,
+  );
+  if (!partialSaved.ok) {
+    return denySeatCreateLedger(
+      SEAT_CREATE_LEDGER_REASON.SAVE_FAILED,
+      `orca-adapter: createRoleBoundSeat -- creation provenance missing AND saving the pre-existing observations also failed (${partialSaved.reason})`,
+      { observedNotWorkerSeats: preExistingResult.observed },
+    );
+  }
+  return denySeatCreateLedger(
+    SEAT_CREATE_LEDGER_REASON.CREATION_PROVENANCE_MISSING,
+    "orca-adapter: createRoleBoundSeat -- terminal create returned ok:true but its response carried no usable creation provenance (paneKey missing/empty) -- refusing to report success; the new seat's role was NOT recorded (pre-existing NOT_WORKER_SEAT observations, if any, were still saved)",
+    { observedNotWorkerSeats: preExistingResult.observed },
+  );
 }
 
 // registryFs 기본값 조립(loadSeatRegistryForResolve와 동일 원칙, write 쪽도
@@ -924,6 +976,13 @@ export function createRoleBoundSeat({ role, worktreePath } = {}, opts = {}) {
   );
 
   const fsDeps = resolveRegistryFsDeps(opts.registryFs);
+
+  // HYK-213-seat-ledger 2R (§2, 검토 P1-1): 생성 응답이 ok:true여도
+  // provenance가 없으면(§5 1R에서 실제로 겪은 상태) 성공으로 접지 않는다.
+  if (!isSeatCreationRecordValid(record)) {
+    return denyMissingCreationProvenance(preExistingResult, opts, fsDeps);
+  }
+
   const saved = saveRegistry(opts.registryPath, nextRegistry, fsDeps);
   if (!saved.ok) {
     return denySeatCreateLedger(
