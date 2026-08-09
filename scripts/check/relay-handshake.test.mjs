@@ -775,6 +775,15 @@ const ENVELOPE_ARCHIVE_SRC = execFileSync(
   { encoding: "utf8" },
 );
 
+// HYK-186: relay-handshake.mjs now also imports "./time-authority.mjs" (the
+// future-skew registry) -- same MODULE_NOT_FOUND risk the two siblings above
+// already document, now for a third.
+const TIME_AUTHORITY_SRC = execFileSync(
+  "git",
+  ["show", "HEAD:scripts/check/time-authority.mjs"],
+  { encoding: "utf8" },
+);
+
 function writeMutantCli(mutatedSrc) {
   const rootDir = mkdtempSync(join(tmpdir(), "relay-handshake-mutant-"));
   const scriptsCheckDir = join(rootDir, "scripts", "check");
@@ -789,6 +798,11 @@ function writeMutantCli(mutatedSrc) {
   writeFileSync(
     join(scriptsCheckDir, "envelope-archive.mjs"),
     ENVELOPE_ARCHIVE_SRC,
+    "utf8",
+  );
+  writeFileSync(
+    join(scriptsCheckDir, "time-authority.mjs"),
+    TIME_AUTHORITY_SRC,
     "utf8",
   );
   return { rootDir, mutantPath };
