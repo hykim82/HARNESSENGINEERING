@@ -27,7 +27,7 @@ jobs:
       - name: Install pinned quality tooling (eslint/prettier, HYK-148)
         run: npm ci
 
-      - name: check test suites (scripts/check + scripts/relay + scripts/relay/adapters + scripts/supervisor *.test.mjs, HYK-208 isolated clone)
+      - name: check test suites (scripts/check + scripts/relay + scripts/relay/adapters + scripts/supervisor *.test.mjs)
         run: node scripts/check/isolated-suite-runner.mjs
 
       - name: hooks POSIX syntax check

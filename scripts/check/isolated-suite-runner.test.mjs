@@ -31,13 +31,28 @@ test("collectTestFiles: lists *.test.mjs per dir, sorted, joined with the dir pr
   ]);
 });
 
-test("collectTestFiles: a directory that does not exist in the clone is silently skipped, not thrown", () => {
+test("collectTestFiles: a directory that does not exist in the clone throws (fail-closed), never silently skipped", () => {
   const readdir = () => {
     throw new Error("ENOENT");
   };
-  assert.deepEqual(
-    collectTestFiles("/repo", ["scripts/missing"], { readdir }),
-    [],
+  assert.throws(
+    () => collectTestFiles("/repo", ["scripts/missing"], { readdir }),
+    /required test directory unreadable.*scripts\/missing/,
+  );
+});
+
+test("collectTestFiles: fail-closed applies per directory -- an earlier readable dir's files do not mask a later dir's read failure", () => {
+  const readdir = (path) => {
+    const key = path.replace(/\\/g, "/").replace(/^\/repo\//, "");
+    if (key === "scripts/check") return ["a.test.mjs"];
+    throw new Error("ENOENT");
+  };
+  assert.throws(
+    () =>
+      collectTestFiles("/repo", ["scripts/check", "scripts/missing"], {
+        readdir,
+      }),
+    /scripts\/missing/,
   );
 });
 
@@ -75,6 +90,7 @@ test("runIsolatedSuite: clones from repoRoot (not cwd), runs node --test in the 
     execFile,
     spawn,
     log: (m) => logs.push(m),
+    collectFiles: () => ["scripts/check/a.test.mjs"],
   });
   assert.equal(exitCode, 7);
   const cloneCall = calls.find((c) => c.args[0] === "clone");
@@ -96,10 +112,48 @@ test("runIsolatedSuite: a dirty source repo's uncommitted changes surface in the
   };
   const spawn = () => ({ status: 0 });
   const logs = [];
-  runIsolatedSuite({ execFile, spawn, log: (m) => logs.push(m) });
+  runIsolatedSuite({
+    execFile,
+    spawn,
+    log: (m) => logs.push(m),
+    collectFiles: () => [],
+  });
   assert.ok(
     logs.some((l) =>
       l.includes("NOTE: the source checkout has uncommitted changes"),
     ),
+  );
+});
+
+test("runIsolatedSuite: a fail-closed collectFiles throw propagates out (never swallowed into a green run), and cleanup still runs", () => {
+  const execFile = (cmd, args) => {
+    if (args[0] === "rev-parse" && args[1] === "--show-toplevel")
+      return "/src\n";
+    if (args[0] === "rev-parse" && args[1] === "HEAD") return "deadbeef\n";
+    if (args[0] === "status") return "";
+    if (args[0] === "clone") return "";
+    throw new Error(`unexpected execFile: ${cmd} ${args.join(" ")}`);
+  };
+  let spawnCalled = false;
+  const spawn = () => {
+    spawnCalled = true;
+    return { status: 0 };
+  };
+  assert.throws(
+    () =>
+      runIsolatedSuite({
+        execFile,
+        spawn,
+        log: () => {},
+        collectFiles: () => {
+          throw new Error("required test directory unreadable: scripts/x");
+        },
+      }),
+    /required test directory unreadable/,
+  );
+  assert.equal(
+    spawnCalled,
+    false,
+    "the suite must never run once directory collection has failed closed",
   );
 });

@@ -50,6 +50,12 @@ export const TEST_DIRS = [
   "scripts/supervisor",
 ];
 
+// Fail-closed (HYK-208 2R, review finding): a directory this runner expects
+// to exist in the clone (TEST_DIRS) that can't be read is NOT skipped --
+// skipping would silently run fewer suites than the CI-canonical command
+// and still report green. An unreadable expected directory means the clone
+// is incomplete or the layout changed; either way this must be a loud
+// failure, not a quiet one.
 export function collectTestFiles(
   root,
   dirs = TEST_DIRS,
@@ -60,8 +66,11 @@ export function collectTestFiles(
     let entries;
     try {
       entries = readdir(join(root, dir));
-    } catch {
-      continue;
+    } catch (err) {
+      throw new Error(
+        `isolated-suite-runner: required test directory unreadable in the clone: ${dir} (${err.message}) -- fail-closed, refusing to silently run fewer suites than the CI-canonical command`,
+        { cause: err },
+      );
     }
     for (const name of entries.filter((f) => f.endsWith(".test.mjs")).sort()) {
       files.push(join(dir, name));
@@ -94,6 +103,7 @@ export function runIsolatedSuite({
   execFile = execFileSync,
   spawn = spawnSync,
   log = console.log,
+  collectFiles = collectTestFiles,
 } = {}) {
   const root = sourceRoot ?? repoRootOf(process.cwd(), execFile);
   const sha = execFile("git", ["rev-parse", "HEAD"], {
@@ -109,7 +119,7 @@ export function runIsolatedSuite({
   const cloneDir = mkdtempSync(join(longFormTmpdir(), "hyk208-isolated-"));
   try {
     execFile("git", ["clone", "--quiet", root, cloneDir], { encoding: "utf8" });
-    const files = collectTestFiles(cloneDir);
+    const files = collectFiles(cloneDir);
     log(formatBanner({ sha, dirty }));
     log(
       `[isolated-suite-runner] clone: ${cloneDir} (${files.length} test file(s))`,
