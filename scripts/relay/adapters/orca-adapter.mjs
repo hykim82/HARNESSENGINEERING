@@ -435,6 +435,202 @@ export function resolveSeatHandle({ role, worktreePath } = {}, opts = {}) {
   return { ok: true, handle: candidates[0].handle };
 }
 
+// ---- HYK-211-seat-select (coder-task.md §1/§2): 역할 결속 좌석 선별 ----
+//
+// 사고 원문(coder-task.md §1): 같은 워크트리에 CODER+REVIEW 두 좌석이
+// 동석한 상태에서 관제실 `dispatch-worker.ps1`이 "이 좌석이 진짜
+// 에이전트인가"를 화면 preview 문자열로 추측하는 단계에서 작업자 좌석을
+// "에이전트 아님"으로 잘못 분류했다 -- 그 결과 검토자 좌석 하나만 남아
+// "유일 후보"가 됐고, 이미 있던 fail-loud 가드(0개/2개+ 거부)는 후보가
+// 하나뿐이라 발동할 조건 자체가 사라졌다. 진짜 결함은 "가드가 없다"가
+// 아니라 "가드보다 앞단의 분류가 틀리면 가드가 침묵한다" + "역할을 한
+// 번도 대조하지 않는다"는 것이다.
+//
+// resolveSeatHandle(A-1, 위)은 worktreePath로만 후보를 좁혀 0개/2개+를
+// 거부한다 -- 역할은 전혀 보지 않는다. 이 함수는 그 옆에 "역할까지
+// 결속"하는 새 진입점을 추가한다(resolveSeatHandle 자체는 기존 호출자
+// 회귀 방지를 위해 손대지 않는다, coder-task.md §3-4).
+//
+// ---- 역할 신호의 출처(coder-task.md §3-2, 근거를 대고 고른다) ----
+// 후보: ① `terminal list`/`terminal show`의 `title` 필드 ② 화면 preview
+// 문자열 마커(seat-candidate-adapter.mjs의 CLAUDE_AGENT_MARKERS 등,
+// `[CODER]`/`[REVIEW]`/`[VERIFY]` 포함) ③ `terminal list`가 주는 그 밖의
+// 필드(예: handle 자체는 역할 정보가 없다).
+//
+// **①(title)을 골랐다.** 이유:
+//   - buildSeatCreateCommand(위, A1)가 좌석 생성 시점에 `--title <role>`을
+//     그대로 넘긴다 -- 즉 title은 "화면을 훑어 추측한 값"이 아니라
+//     **우리 자신이 생성 시점에 심어 둔 값**이다. preview 마커(②)는 정확히
+//     이번 사고를 낸 "화면 미리보기 문자열로 에이전트 여부를 추측하는"
+//     그 방식이고, seat-candidate-adapter.mjs 자신도 "PM이 적시한 마커를
+//     그대로 코드화한 것뿐이며 실 vendor UI 대상으로 검증되지 않았다
+//     (UNVERIFIED)"고 이미 정직 고지한 상태다 -- 같은 취약을 역할
+//     선별에도 그대로 옮기지 않는다.
+//   - ②를 버린 또 다른 이유: 그 마커 목록은 "이게 에이전트인가"만 구분할
+//     뿐 CODER/REVIEW/VERIFY를 구분하는 역할 마커(`[CODER]` 등)가 있어도
+//     classifySeatCandidate는 그 구분을 버리고 하나의 "agent" state로
+//     뭉갠다 -- 역할 신호로 쓰려면 그 파일 자체를 다시 설계해야 한다.
+// ⚠️★정직 한계(coder-task.md §3-2 명시 요구, ⛔불안정성을 숨기지 않는다):
+//   title 필드는 그래도 **화면에 보이는 문자열이다**(seat-proof-contract-
+//   v1.mjs TERMINAL_SHOW_RAW_FIELD_TYPES의 명시 주석: "값은 계약이
+//   아니다, 타입만 계약"). 우리가 생성 시점에 심어 두지만, 이후 그 값을
+//   vendor가 그대로 보존한다는 보장은 없다(탭 이름 변경 UI, 벤더 동작
+//   변화 등으로 title이 지워지거나 바뀔 수 있다). 그래서 이 함수는 title을
+//   "믿을 수 없을 수도 있는 값"으로 다루고, 판별 불가(classifySeatRoleFromTitle
+//   -> null)를 절대 "역할 불일치"로 접지 않는다(아래 UNDETERMINED 분기).
+//
+// ---- 선별 규칙(coder-task.md §3-1/§3-3, 비타협) ----
+// worktreePath로 좁힌 후보 전원(orphan 제외, resolveSeatHandle과 동일
+// 필터)의 title을 classifySeatRoleFromTitle로 분류한다:
+//   - 요청 role과 정확히 같음        -> matched
+//   - 다른 KNOWN_SEAT_ROLES 값과 같음 -> (버림, 정직하게 "다른 역할로
+//     확정됨" -- undetermined에 넣지 않는다: 이건 "판별 불가"가 아니라
+//     "판별해 보니 아니었다"이므로 §3-1의 침묵 탈락과는 다른 경우다)
+//   - 그 외(title 없음/미지 문자열)  -> undetermined
+//
+// ★§3-1 비타협 그대로: undetermined가 1개라도 있으면 matched가 정확히
+// 1개여도 "유일 승자"를 선언하지 않는다(ROLE_UNDETERMINED로 거부) --
+// "앞단 분류가 틀리면 가드가 침묵한다"는 이번 사고의 형태를 구조적으로
+// 막는 지점이 정확히 여기다: undetermined 후보가 사실은 진짜 요청받은
+// 역할일 수도 있다는 가능성을 "몰라서 배제"하지 않는다.
+// matched.length===0 && undetermined.length===0 -> NOT_FOUND(정직하게
+// 이 역할의 좌석이 없다). matched.length>=2 -> AMBIGUOUS(자동 선택 0,
+// resolveSeatHandle의 fail-loud 원칙 그대로 계승).
+export const KNOWN_SEAT_ROLES = Object.freeze([
+  "CODER",
+  "REVIEW",
+  "VERIFY",
+  "PM",
+]);
+
+export const ROLE_BOUND_SEAT_REASON = Object.freeze({
+  NOT_FOUND: "ROLE_BOUND_SEAT_NOT_FOUND",
+  AMBIGUOUS_ROLE_MATCH: "ROLE_BOUND_SEAT_AMBIGUOUS_ROLE_MATCH",
+  ROLE_UNDETERMINED: "ROLE_BOUND_SEAT_ROLE_UNDETERMINED",
+  LIST_QUERY_FAILED: "ROLE_BOUND_SEAT_LIST_QUERY_FAILED",
+});
+
+function denyRoleBoundSeat(roleBoundSeatReason, detail, extra = {}) {
+  return { ok: false, roleBoundSeatReason, reason: detail, ...extra };
+}
+
+// 좌석 하나의 title 원문을 역할로 분류한다 -- KNOWN_SEAT_ROLES 중 정확히
+// 하나와 일치할 때만 그 역할, 그 외(타입 아님/빈 문자열/미지 문자열)는
+// null("판별 불가", 위 헤더 주석의 undetermined). 부분 일치/대소문자
+// 완화 없음(추측 금지 -- resolveDeliveredSeat의 harness_label 정확 일치
+// 원칙과 동형).
+export function classifySeatRoleFromTitle(title) {
+  if (typeof title !== "string") return null;
+  return KNOWN_SEAT_ROLES.includes(title) ? title : null;
+}
+
+// worktreePath로 후보를 좁히는 부분만 분리(resolveSeatHandle과 동일 필터
+// -- 고아 제외 + canonicalizeForComparison 일치). 여기서는 terminal list
+// 조회 실패를 role-bound 전용 사유 코드로 접는다.
+function collectRoleBoundCandidates(worktreePath, opts) {
+  let response;
+  try {
+    response = opts.execFn(buildTerminalListCommand());
+  } catch (err) {
+    return denyRoleBoundSeat(
+      ROLE_BOUND_SEAT_REASON.LIST_QUERY_FAILED,
+      `orca-adapter: resolveRoleBoundSeatHandle -- terminal list query threw (${errText(err)})`,
+    );
+  }
+  const list = parseTerminalList(response);
+  if (!list) {
+    return denyRoleBoundSeat(
+      ROLE_BOUND_SEAT_REASON.LIST_QUERY_FAILED,
+      "orca-adapter: resolveRoleBoundSeatHandle -- terminal list response missing/invalid result.terminals",
+    );
+  }
+  const target = canonicalizeForComparison(worktreePath);
+  const candidates = list.filter(
+    (entry) =>
+      isPlainObject(entry) &&
+      isNonEmptyString(entry.handle) &&
+      !isOrphanSeat({ worktreePath: entry.worktreePath }) &&
+      canonicalizeForComparison(entry.worktreePath) === target,
+  );
+  return { ok: true, candidates };
+}
+
+// 후보 배열을 matched(요청 role과 title이 정확히 같음)/undetermined(title로
+// 역할을 판별할 수 없음)로 나눈다. "다른 역할로 확정된" 후보는 어느
+// 목록에도 들어가지 않는다(위 헤더 주석 -- 판별 불가와 판별해서 다름은
+// 다른 경우다).
+function partitionByRole(candidates, role) {
+  const matched = [];
+  const undetermined = [];
+  for (const candidate of candidates) {
+    const classified = classifySeatRoleFromTitle(candidate.title);
+    if (classified === role) matched.push(candidate);
+    else if (classified === null) undetermined.push(candidate);
+  }
+  return { matched, undetermined };
+}
+
+// ctx: { role, worktreePath }. opts: { execFn }. 순수 조합 -- execFn 호출은
+// terminal list 조회 1건뿐, resolveSeatHandle(A-1)과 동일하게 부작용
+// 호출은 0.
+export function resolveRoleBoundSeatHandle(
+  { role, worktreePath } = {},
+  opts = {},
+) {
+  const location = resolveSeatLocation({ role, requestedPath: worktreePath });
+  if (!location.ok) {
+    return {
+      ok: false,
+      reason: location.detail,
+      locationReason: location.reason,
+    };
+  }
+  const managed = checkWorktreeManaged({ requestedPath: worktreePath }, opts);
+  if (!managed.ok) {
+    return {
+      ok: false,
+      reason: managed.detail,
+      worktreeReason: managed.reason,
+    };
+  }
+  if (typeof opts.execFn !== "function") {
+    return denyRoleBoundSeat(
+      ROLE_BOUND_SEAT_REASON.LIST_QUERY_FAILED,
+      "orca-adapter: resolveRoleBoundSeatHandle -- opts.execFn is required to query terminal list",
+    );
+  }
+  const collected = collectRoleBoundCandidates(worktreePath, opts);
+  if (!collected.ok) return collected;
+
+  const { matched, undetermined } = partitionByRole(collected.candidates, role);
+
+  // §3-1 비타협: 판별 불가 후보가 하나라도 있으면 matched가 정확히 1개여도
+  // 유일 승자를 선언하지 않는다 -- 이 순서(undetermined를 matched.length
+  // 분기보다 먼저 본다)가 이번 사고의 형태("앞단 분류가 틀리면 가드가
+  // 침묵한다")를 구조적으로 막는 지점이다.
+  if (undetermined.length > 0) {
+    return denyRoleBoundSeat(
+      ROLE_BOUND_SEAT_REASON.ROLE_UNDETERMINED,
+      `orca-adapter: resolveRoleBoundSeatHandle -- ${undetermined.length} candidate(s) in worktree '${worktreePath}' have an undetermined role (title not one of ${JSON.stringify(KNOWN_SEAT_ROLES)}) -- refusing to declare a unique '${role}' winner while any candidate's role is unknown (handles=${undetermined.map((c) => c.handle).join(",")})`,
+      { matchedCount: matched.length, undeterminedCount: undetermined.length },
+    );
+  }
+  if (matched.length > 1) {
+    return denyRoleBoundSeat(
+      ROLE_BOUND_SEAT_REASON.AMBIGUOUS_ROLE_MATCH,
+      `orca-adapter: resolveRoleBoundSeatHandle -- ${matched.length} seats in worktree '${worktreePath}' are titled '${role}', refusing to guess (handles=${matched.map((c) => c.handle).join(",")})`,
+      { matchedCount: matched.length },
+    );
+  }
+  if (matched.length === 0) {
+    return denyRoleBoundSeat(
+      ROLE_BOUND_SEAT_REASON.NOT_FOUND,
+      `orca-adapter: resolveRoleBoundSeatHandle -- no seat titled '${role}' found for worktreePath '${worktreePath}' (${collected.candidates.length} other candidate(s) present, all definitively a different known role)`,
+    );
+  }
+  return { ok: true, handle: matched[0].handle };
+}
+
 // ---- HYK-185 seat-wire: 좌석 무응답(liveness) 관측 (coder-task.md §2-1) ----
 // resolveSeatHandle(A-1)과 "같은 형태" -- terminal list 조회로 worktreePath
 // 정규화 일치 후보를 추리고, 0개/2개+는 거부한다(자동 선택 금지, A-1과

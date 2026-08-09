@@ -54,6 +54,10 @@ import {
   buildTeardownWorktreeRemoveCommand,
   collectSeatLivenessObservation,
   SEAT_LIVENESS_OBSERVATION_REASON,
+  resolveRoleBoundSeatHandle,
+  classifySeatRoleFromTitle,
+  KNOWN_SEAT_ROLES,
+  ROLE_BOUND_SEAT_REASON,
 } from "./orca-adapter.mjs";
 import { scanEnvHandleIngress } from "./env-ingress-scan.mjs";
 import {
@@ -1230,6 +1234,245 @@ test("resolveSeatHandle: an unmanaged (not Orca-registered) worktree is rejected
 
 test("buildTerminalListCommand: exact argv shape", () => {
   assert.deepEqual(buildTerminalListCommand(), ["terminal", "list", "--json"]);
+});
+
+// ---------------------------------------------------------------------------
+// HYK-211-seat-select (coder-task.md §5): resolveRoleBoundSeatHandle --
+// role-bound seat selection. §5 변조 1/2/3/4/5 각각에 대응하는 시험을 명시
+// 표시한다(결과 파일 보고와 대조 가능하도록).
+// ---------------------------------------------------------------------------
+
+test("classifySeatRoleFromTitle: exact match against KNOWN_SEAT_ROLES only, no case-folding/partial match", () => {
+  assert.equal(classifySeatRoleFromTitle("CODER"), "CODER");
+  assert.equal(classifySeatRoleFromTitle("REVIEW"), "REVIEW");
+  assert.equal(classifySeatRoleFromTitle("coder"), null);
+  assert.equal(classifySeatRoleFromTitle("CODER "), null);
+  assert.equal(classifySeatRoleFromTitle("[CODER]"), null);
+  assert.equal(classifySeatRoleFromTitle(""), null);
+  assert.equal(classifySeatRoleFromTitle(undefined), null);
+  assert.equal(classifySeatRoleFromTitle(42), null);
+});
+
+// ★★§5 변조1: 오늘 사고 재현 -- 동석(작업자+검토자) 상태에서 -Role CODER
+// 요청 시 올바른 좌석(CODER)만 뽑혀야 한다(검토자 좌석이 뽑히면 RED).
+test("resolveRoleBoundSeatHandle: §5-1 today's incident repro -- CODER+REVIEW co-located, requesting CODER picks the CODER seat, not REVIEW", () => {
+  const execFn = fakeExecFn({
+    list: managedWorktreeStub(VALID_WORKTREE),
+    "terminal-list": terminalListStub([
+      terminalEntry({ handle: "term_review", title: "REVIEW" }),
+      terminalEntry({ handle: "term_coder", title: "CODER" }),
+    ]),
+  });
+  const r = resolveRoleBoundSeatHandle(
+    { role: "CODER", worktreePath: VALID_WORKTREE },
+    { execFn },
+  );
+  assert.equal(r.ok, true);
+  assert.equal(r.handle, "term_coder");
+});
+
+test("resolveRoleBoundSeatHandle: §5-1 repro, opposite request -- requesting REVIEW picks the REVIEW seat", () => {
+  const execFn = fakeExecFn({
+    list: managedWorktreeStub(VALID_WORKTREE),
+    "terminal-list": terminalListStub([
+      terminalEntry({ handle: "term_review", title: "REVIEW" }),
+      terminalEntry({ handle: "term_coder", title: "CODER" }),
+    ]),
+  });
+  const r = resolveRoleBoundSeatHandle(
+    { role: "REVIEW", worktreePath: VALID_WORKTREE },
+    { execFn },
+  );
+  assert.equal(r.ok, true);
+  assert.equal(r.handle, "term_review");
+});
+
+// ★★§5 변조2: "거짓 유일 승자" -- 역할 판별 불가 후보를 조용히 탈락시키고
+// 남은 1개를 승자로 만드는 변조는 RED여야 한다(§3-1). 여기서는 REVIEW
+// 좌석의 title이 비어 있어(undetermined) CODER 매치가 1개뿐이어도 거부돼야
+// 한다 -- undetermined 좌석이 사실은 CODER일 가능성을 배제할 수 없다는
+// 뜻이다.
+test("resolveRoleBoundSeatHandle: §5-2 an undetermined-role candidate blocks a unique-winner declaration even when exactly one candidate matches the requested role", () => {
+  const execFn = fakeExecFn({
+    list: managedWorktreeStub(VALID_WORKTREE),
+    "terminal-list": terminalListStub([
+      terminalEntry({ handle: "term_unknown", title: "" }),
+      terminalEntry({ handle: "term_coder", title: "CODER" }),
+    ]),
+  });
+  const r = resolveRoleBoundSeatHandle(
+    { role: "CODER", worktreePath: VALID_WORKTREE },
+    { execFn },
+  );
+  assert.equal(r.ok, false);
+  assert.equal(r.roleBoundSeatReason, ROLE_BOUND_SEAT_REASON.ROLE_UNDETERMINED);
+  assert.equal(r.matchedCount, 1);
+  assert.equal(r.undeterminedCount, 1);
+});
+
+test("resolveRoleBoundSeatHandle: §5-2 an undetermined-role candidate blocks even when zero candidates match the requested role", () => {
+  const execFn = fakeExecFn({
+    list: managedWorktreeStub(VALID_WORKTREE),
+    "terminal-list": terminalListStub([
+      terminalEntry({ handle: "term_unknown", title: "Sonnet 5" }),
+    ]),
+  });
+  const r = resolveRoleBoundSeatHandle(
+    { role: "CODER", worktreePath: VALID_WORKTREE },
+    { execFn },
+  );
+  assert.equal(r.ok, false);
+  assert.equal(r.roleBoundSeatReason, ROLE_BOUND_SEAT_REASON.ROLE_UNDETERMINED);
+});
+
+// §5 변조3: fail-loud 제거(0개/2개+ 거부를 지우고 "첫 번째 후보"를 고르게
+// 하는 변조) 대상 -- 아래 두 시험이 그 계약을 고정한다.
+test("resolveRoleBoundSeatHandle: §5-3 zero candidates titled the requested role (others definitively a different known role) -- NOT_FOUND, not a guess", () => {
+  const execFn = fakeExecFn({
+    list: managedWorktreeStub(VALID_WORKTREE),
+    "terminal-list": terminalListStub([
+      terminalEntry({ handle: "term_review", title: "REVIEW" }),
+    ]),
+  });
+  const r = resolveRoleBoundSeatHandle(
+    { role: "CODER", worktreePath: VALID_WORKTREE },
+    { execFn },
+  );
+  assert.equal(r.ok, false);
+  assert.equal(r.roleBoundSeatReason, ROLE_BOUND_SEAT_REASON.NOT_FOUND);
+});
+
+test("resolveRoleBoundSeatHandle: §5-3 two candidates both titled the requested role -- AMBIGUOUS_ROLE_MATCH, not the first one", () => {
+  const execFn = fakeExecFn({
+    list: managedWorktreeStub(VALID_WORKTREE),
+    "terminal-list": terminalListStub([
+      terminalEntry({ handle: "term_a", title: "CODER" }),
+      terminalEntry({ handle: "term_b", title: "CODER" }),
+    ]),
+  });
+  const r = resolveRoleBoundSeatHandle(
+    { role: "CODER", worktreePath: VALID_WORKTREE },
+    { execFn },
+  );
+  assert.equal(r.ok, false);
+  assert.equal(
+    r.roleBoundSeatReason,
+    ROLE_BOUND_SEAT_REASON.AMBIGUOUS_ROLE_MATCH,
+  );
+  assert.equal(r.matchedCount, 2);
+});
+
+// §5 변조4: 역할 결속 제거(역할 대조를 지워도 통과) 대상 -- 아래 시험은
+// worktreePath만으로는 2개 후보라 애매하지만 title로는 정확히 하나로
+// 갈린다는 것을 보여 "역할 대조가 실제로 결과를 바꾼다"를 고정한다.
+test("resolveRoleBoundSeatHandle: §5-4 role binding actually narrows the result -- same two candidates, different requested role picks different handle", () => {
+  const entries = [
+    terminalEntry({ handle: "term_review", title: "REVIEW" }),
+    terminalEntry({ handle: "term_coder", title: "CODER" }),
+  ];
+  const execFnCoder = fakeExecFn({
+    list: managedWorktreeStub(VALID_WORKTREE),
+    "terminal-list": terminalListStub(entries),
+  });
+  const execFnReview = fakeExecFn({
+    list: managedWorktreeStub(VALID_WORKTREE),
+    "terminal-list": terminalListStub(entries),
+  });
+  const rCoder = resolveRoleBoundSeatHandle(
+    { role: "CODER", worktreePath: VALID_WORKTREE },
+    { execFn: execFnCoder },
+  );
+  const rReview = resolveRoleBoundSeatHandle(
+    { role: "REVIEW", worktreePath: VALID_WORKTREE },
+    { execFn: execFnReview },
+  );
+  assert.equal(rCoder.handle, "term_coder");
+  assert.equal(rReview.handle, "term_review");
+  assert.notEqual(rCoder.handle, rReview.handle);
+});
+
+// §5 변조5: 단좌석 회귀 -- 기존 단좌석 정상 경로(정확히 1개 후보, 요청
+// 역할과 title이 일치)는 그대로 동작해야 한다.
+test("resolveRoleBoundSeatHandle: §5-5 single-seat regression -- exactly one candidate whose title matches the requested role resolves ok", () => {
+  const execFn = fakeExecFn({
+    list: managedWorktreeStub(VALID_WORKTREE),
+    "terminal-list": terminalListStub([
+      terminalEntry({ handle: "term_only", title: "CODER" }),
+    ]),
+  });
+  const r = resolveRoleBoundSeatHandle(
+    { role: "CODER", worktreePath: VALID_WORKTREE },
+    { execFn },
+  );
+  assert.equal(r.ok, true);
+  assert.equal(r.handle, "term_only");
+});
+
+test("resolveRoleBoundSeatHandle: an orphan candidate (worktreePath:'') is excluded even if titled the requested role", () => {
+  const execFn = fakeExecFn({
+    list: managedWorktreeStub(VALID_WORKTREE),
+    "terminal-list": terminalListStub([
+      terminalEntry({
+        handle: "term_orphan",
+        title: "CODER",
+        worktreePath: "",
+      }),
+      terminalEntry({ handle: "term_real", title: "CODER" }),
+    ]),
+  });
+  const r = resolveRoleBoundSeatHandle(
+    { role: "CODER", worktreePath: VALID_WORKTREE },
+    { execFn },
+  );
+  assert.equal(r.ok, true);
+  assert.equal(r.handle, "term_real");
+});
+
+test("resolveRoleBoundSeatHandle: bad location is rejected before any terminal-list query (0 execFn calls)", () => {
+  const execFn = fakeExecFn({});
+  const r = resolveRoleBoundSeatHandle(
+    { role: "CODER", worktreePath: MAIN_REPO_PATH },
+    { execFn },
+  );
+  assert.equal(r.ok, false);
+  assert.equal(r.locationReason, LOCATION_REASON.MAIN_REPO_FORBIDDEN);
+  assert.equal(execFn.calls.length, 0);
+});
+
+test("resolveRoleBoundSeatHandle: an unmanaged (not Orca-registered) worktree is rejected before any terminal-list query", () => {
+  const execFn = fakeExecFn({ list: managedWorktreeStub("C:/some/other/wt") });
+  const r = resolveRoleBoundSeatHandle(
+    { role: "CODER", worktreePath: VALID_WORKTREE },
+    { execFn },
+  );
+  assert.equal(r.ok, false);
+  assert.equal(r.worktreeReason, WORKTREE_REASON.NOT_ORCA_MANAGED);
+  assert.equal(
+    execFn.calls.some((a) => a[0] === "terminal" && a[1] === "list"),
+    false,
+  );
+});
+
+test("resolveRoleBoundSeatHandle: terminal-list query failure is surfaced distinctly, not silently ignored", () => {
+  const execFn = fakeExecFn({
+    list: managedWorktreeStub(VALID_WORKTREE),
+    "terminal-list": { ok: false, error: { code: "boom", message: "boom" } },
+  });
+  const r = resolveRoleBoundSeatHandle(
+    { role: "CODER", worktreePath: VALID_WORKTREE },
+    { execFn },
+  );
+  assert.equal(r.ok, false);
+  assert.equal(r.roleBoundSeatReason, ROLE_BOUND_SEAT_REASON.LIST_QUERY_FAILED);
+});
+
+test("KNOWN_SEAT_ROLES: contains exactly CODER/REVIEW/VERIFY/PM", () => {
+  assert.deepEqual([...KNOWN_SEAT_ROLES].sort(), [
+    "CODER",
+    "PM",
+    "REVIEW",
+    "VERIFY",
+  ]);
 });
 
 // ---------------------------------------------------------------------------
