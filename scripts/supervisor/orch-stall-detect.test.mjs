@@ -977,7 +977,13 @@ test("static: no PRODUCTION code imports orch-stall-detect.mjs yet (h -- can be 
         // shape once more -- it exercises the real production entry point
         // (runOrchStallDetect) for the new escalation axis. Excluded on
         // the identical "own .test.mjs" basis as the files above.
-        !f.endsWith("escalation-axis-wire.test.mjs"),
+        !f.endsWith("escalation-axis-wire.test.mjs") &&
+        // HYK-212-postcheck-1: dispatch-postcheck-wire.test.mjs/dispatch-
+        // postcheck-axis-wire.test.mjs are the same shape once more for
+        // the new dispatch-postcheck axis. Excluded on the identical "own
+        // .test.mjs" basis as the files above.
+        !f.endsWith("dispatch-postcheck-wire.test.mjs") &&
+        !f.endsWith("dispatch-postcheck-axis-wire.test.mjs"),
     );
   assert.deepEqual(
     importers,

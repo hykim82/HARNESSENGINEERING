@@ -35,6 +35,7 @@ import {
   judgeInjectedProfile,
   normalizeDispatchShow,
 } from "./dispatch-correlation-adapter.mjs";
+import { judgeDispatchPostcheck } from "./dispatch-postcheck-core.mjs";
 
 // HYK-169-coder-1: 어댑터 B v1 -- `orca` CLI를 실제로 부르는(spawn) 코드는
 // **이 파일에만** 있다(G9). 코어(relay-core.mjs)·CLI(run-step.mjs)는 이 파일이
@@ -2254,7 +2255,17 @@ function dispatchWithStaleRecovery(
       opts,
       buildDispatchReceiptContext(first.response, "first", c, runtimeTaskId),
     );
-    return { ok: true, runtimeTaskId, recordResult };
+    return {
+      ok: true,
+      runtimeTaskId,
+      recordResult,
+      // HYK-212-postcheck-1: injected(자기신고)를 여기서 한 번만 뽑아
+      // 배달 포트(deliverToClaudeSeat)에 실어 보낸다 -- 재구현 금지,
+      // normalizeDispatchRawUnion 재사용(§2-A2). dispatch-show 형태에는
+      // 이 필드가 없으므로(§2-A2 주석) shape가 다르면 null로 정직하게
+      // 남는다.
+      injected: normalizeDispatchRawUnion(first.response).injected,
+    };
   }
 
   const recovery = resolveStaleDispatchRecovery({
@@ -2291,7 +2302,12 @@ function dispatchWithStaleRecovery(
       runtimeTaskId,
     ),
   );
-  return { ok: true, runtimeTaskId, recordResult };
+  return {
+    ok: true,
+    runtimeTaskId,
+    recordResult,
+    injected: normalizeDispatchRawUnion(retried.response).injected,
+  };
 }
 
 function dispatchToSeat(runtimeTaskId, seatHandle, opts, c) {
@@ -2428,17 +2444,105 @@ export function deliverTask(ctx, opts = {}) {
   return deliverToClaudeSeat(c, seatHandle, taskResult.runtimeTaskId, opts);
 }
 
+// ---- HYK-212-postcheck-1: 배달 직후 재조회 사후검증(§2 ⓐ) ----
+//
+// 실사고(coder-task.md §1): dispatch 도구가 injected:true를 자기신고했는데
+// 그 직후 dispatch-show를 다시 조회하면 result.dispatch === null(레코드
+// 미생성)인 경우가 있었다. ORCH가 사고 당일 손으로 했던 재조회+대조를
+// 여기서 기계로 반복한다 -- 이 시점에만 "이 배달에 실제로 쓰인 orca task
+// id"(runtimeTaskId)와 "injected:true 자기신고" 둘 다 함께 있다(watch
+// 시점 .harness/*-task.md에는 harness 라벨만 있고 orca task id가 없어
+// 재구성 불가 -- ⓐ를 고른 이유, coder.md §7 참조).
+//
+// ★자기신고 한계: "주입이 확인됐다"의 유일한 근거는 배달 도구 자신이
+// 돌려준 injected:true뿐이다 -- 이 값이 거짓으로 자기신고돼도 이 함수는
+// 검증할 수단이 없다(정직 한계, 재구현·재검증 없음).
+//
+// buildDispatchShowCommand/normalizeDispatchShow 재사용(재구현 금지,
+// orca-cli-boundary.mjs G9: 이 파일 밖에서 orca를 spawn하지 않는다).
+function runDispatchPostcheck(runtimeTaskId, opts) {
+  let normalized;
+  try {
+    const response = opts.execFn(buildDispatchShowCommand(runtimeTaskId));
+    normalized = normalizeDispatchShow(response);
+  } catch {
+    // §3-3: 조회 자체의 실패는 "레코드 없음"과 다른 사유로 들어와야
+    // 한다 -- judgeDispatchPostcheck가 QUERY_THREW를 QUERY_FAILED로
+    // 접지, RECORD_MISSING으로 접지 않는다.
+    normalized = { ok: false, reasonCode: "QUERY_THREW" };
+  }
+  return judgeDispatchPostcheck({ injected: true, normalized });
+}
+
+// 감시(orch-stall-detect.mjs)가 orca를 새로 호출하지 않고도 이 판정을
+// 읽을 수 있도록 워크트리에 영수증을 남긴다(§2 설계: 탐지는 ⓐ에서,
+// 사람 도달은 이미 만들어져 있는 AXES 등록형 reach-notify 파이프라인을
+// 재사용한다 -- 그 파이프라인은 watch.log를 거치므로 감시 시점에
+// 다시 읽을 수 있는 durable 흔적이 필요하다). 쓰기 실패는 조용히
+// 삼킨다 -- 배달 자체(이미 일어난 부작용)를 이 부가 기록의 성패로
+// 되돌리지 않는다(createDispatchReceiptRecorder 주석 "배달 성공은 기록
+// 성공에 종속되지 않는다"와 동일 원칙).
+function writeDispatchPostcheckReceipt(
+  { worktreePath, runtimeTaskId, harnessTaskId, postcheck },
+  opts,
+) {
+  const fs = isPlainObject(opts.postcheckFs) ? opts.postcheckFs : {};
+  const existsFn = typeof fs.existsFn === "function" ? fs.existsFn : existsSync;
+  const mkdirFn = typeof fs.mkdirFn === "function" ? fs.mkdirFn : mkdirSync;
+  const writeFn = typeof fs.writeFn === "function" ? fs.writeFn : writeFileSync;
+  const nowFn = typeof opts.nowFn === "function" ? opts.nowFn : Date.now;
+  try {
+    const harnessDir = join(worktreePath, ".harness");
+    if (!existsFn(harnessDir)) mkdirFn(harnessDir, { recursive: true });
+    const receiptPath = join(harnessDir, "dispatch-postcheck.json");
+    const receipt = {
+      runtimeTaskId,
+      harnessTaskId: isNonEmptyString(harnessTaskId) ? harnessTaskId : null,
+      checkedAtMs: nowFn(),
+      status: postcheck.status,
+      verdict: postcheck.verdict,
+      reasonCode: postcheck.reasonCode,
+    };
+    writeFn(receiptPath, JSON.stringify(receipt, null, 2));
+    return { ok: true };
+  } catch (err) {
+    return {
+      ok: false,
+      reason: `orca-adapter: writeDispatchPostcheckReceipt threw (${errText(err)})`,
+    };
+  }
+}
+
 // D11-A claude 프로필: dispatch --inject 1회로 배정+붙여넣기+제출이 전부
 // 끝난다(제출 Enter 0회).
 function deliverToClaudeSeat(c, seatHandle, runtimeTaskId, opts) {
   const dispatchResult = dispatchToSeat(runtimeTaskId, seatHandle, opts, c);
   if (!dispatchResult.ok) return dispatchResult;
+  // HYK-212-postcheck-1: claude만(codex는 --inject를 쓰지 않아 injected가
+  // 판단 대상이 아니다, dispatch-postcheck-core.mjs NOT_APPLICABLE) --
+  // injected:true를 자기신고했을 때만 재조회한다(§3-2 오탐 0: 정상
+  // 배달이면 dispatchResult.injected가 true여도 재조회 결과가 CONFIRMED로
+  // 나와 경보로 이어지지 않는다).
+  let postcheck = null;
+  if (dispatchResult.injected === true) {
+    postcheck = runDispatchPostcheck(runtimeTaskId, opts);
+    writeDispatchPostcheckReceipt(
+      {
+        worktreePath: c.worktreePath,
+        runtimeTaskId,
+        harnessTaskId: c.taskId,
+        postcheck,
+      },
+      opts,
+    );
+  }
   return {
     ok: true,
     runtimeTaskId: dispatchResult.runtimeTaskId,
     submitted: "auto",
     retries: 0,
     recordResult: dispatchResult.recordResult,
+    postcheck,
   };
 }
 

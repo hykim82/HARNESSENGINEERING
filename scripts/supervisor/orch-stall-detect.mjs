@@ -2230,6 +2230,182 @@ export function judgeEscalationForRepo({ now } = {}, opts = {}) {
   };
 }
 
+// ---- HYK-212-postcheck-1 (coder-task.md §2 설계 -- ⓐ+ⓑ 결합) --
+// «배달 직후 재조회 사후검증»의 감시 시점 결선 ----
+//
+// 실제 재조회(dispatch-show)는 배달 시점(orca-adapter.mjs
+// deliverToClaudeSeat, runDispatchPostcheck)에서 이미 끝나 있다 -- 그
+// 시점에만 "이 배달에 쓰인 orca task id"와 "injected:true 자기신고"가
+// 함께 있기 때문이다(watch 시점 .harness/*-task.md에는 harness 라벨만
+// 있고 orca task id가 없어 재구성 불가). 이 축은 그래서 orca를 **다시
+// 부르지 않는다**(이 파일 자신의 §2-3 부작용 0/G9 계약과 합치) --
+// 배달이 워크트리에 남긴 영수증(`.harness/dispatch-postcheck.json`)을
+// 읽기만 한다.
+//
+// 영수증이 RECORD_MISSING을 담고 있다는 것은 배달 시점에 이미 재조회로
+// 확인된 사실이다(자기신고가 아니라 dispatch-show 재조회 결과) --
+// 이 축은 그 사실을 조용히 UNDECIDABLE로 접지 않고 그대로 표면화해
+// AXES(reach-report-core.mjs)에 태운다(§2 요구: 탐지는 배달 시점에서,
+// 사람 도달은 이미 있는 AXES 등록형 파이프라인 재사용).
+export const DISPATCH_POSTCHECK_WIRE_STATUS = Object.freeze({
+  NOT_APPLICABLE: "NOT_APPLICABLE",
+  JUDGED: "JUDGED",
+  // 배달 시점 재조회 자체가 실패(execFn threw/NOT_OK/FIELDS_INCOMPLETE) --
+  // §3-3: 이 상태는 절대 RECORD_MISSING(verdict)으로 접지 않는다.
+  QUERY_FAILED: "DISPATCH_POSTCHECK_QUERY_FAILED",
+});
+
+export const DISPATCH_POSTCHECK_SCAN_FAILURE = Object.freeze({
+  WORKTREE_LIST_FAILED: "DISPATCH_POSTCHECK_SCAN_WORKTREE_LIST_FAILED",
+  RECEIPT_READ_FAILED: "DISPATCH_POSTCHECK_SCAN_RECEIPT_READ_FAILED",
+});
+
+function isPlainObjectLocal(v) {
+  return v !== null && typeof v === "object" && !Array.isArray(v);
+}
+
+// 영수증 파일이 없는 것(ENOENT)은 정상이다(claude 엔진이 injected:true를
+// 자기신고한 배달이 아직 없었다는 뜻) -- 그 외 읽기/파싱 실패는
+// RECEIPT_READ_FAILED로 표면화한다(§2-3 "판정 불가를 조용함으로 접지
+// 않는다"와 같은 원칙, collectDroppedTaskFileEvidence와 대칭).
+function readDispatchPostcheckReceipt(worktreePath, opts) {
+  const readFn =
+    typeof opts.postcheckReadFn === "function"
+      ? opts.postcheckReadFn
+      : readFileSync;
+  const receiptPath = path.join(
+    worktreePath,
+    ".harness",
+    "dispatch-postcheck.json",
+  );
+  let text;
+  try {
+    text = readFn(receiptPath, "utf8");
+  } catch (err) {
+    if (err && err.code === "ENOENT") {
+      return { present: false, failed: false };
+    }
+    return { present: false, failed: true };
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return { present: false, failed: true };
+  }
+  if (!isPlainObjectLocal(parsed) || typeof parsed.status !== "string") {
+    return { present: false, failed: true };
+  }
+  return { present: true, failed: false, receipt: parsed };
+}
+
+function judgeDispatchPostcheckForWorktree(worktreePath, opts) {
+  const evidence = readDispatchPostcheckReceipt(worktreePath, opts);
+  if (evidence.failed) {
+    return {
+      worktreePath,
+      status: DISPATCH_POSTCHECK_SCAN_FAILURE.RECEIPT_READ_FAILED,
+    };
+  }
+  if (!evidence.present) {
+    return {
+      worktreePath,
+      status: DISPATCH_POSTCHECK_WIRE_STATUS.NOT_APPLICABLE,
+    };
+  }
+  const r = evidence.receipt;
+  const runtimeTaskId =
+    typeof r.runtimeTaskId === "string" ? r.runtimeTaskId : null;
+  const harnessTaskId =
+    typeof r.harnessTaskId === "string" ? r.harnessTaskId : null;
+  const reasonCode = typeof r.reasonCode === "string" ? r.reasonCode : null;
+  if (r.status === "QUERY_FAILED") {
+    return {
+      worktreePath,
+      status: DISPATCH_POSTCHECK_WIRE_STATUS.QUERY_FAILED,
+      reasonCode,
+      runtimeTaskId,
+      harnessTaskId,
+    };
+  }
+  return {
+    worktreePath,
+    status: DISPATCH_POSTCHECK_WIRE_STATUS.JUDGED,
+    verdict: typeof r.verdict === "string" ? r.verdict : null,
+    reasonCode,
+    runtimeTaskId,
+    harnessTaskId,
+  };
+}
+
+export const DISPATCH_POSTCHECK_SCAN_SEVERITY = Object.freeze({
+  NORMAL: 0, // NOT_APPLICABLE / JUDGED+CONFIRMED
+  QUERY_FAILURE: 1, // JUDGED이지만 영수증 자체가 QUERY_FAILED(배달 시점 재조회 실패)
+  COLLECTION_FAILURE: 2, // 워크트리 열거 실패 / 영수증 파일 손상
+  RECORD_MISSING: 3, // 가장 나쁨 -- 확인된 경보
+});
+
+function dispatchPostcheckSeverityOf(entry) {
+  if (
+    entry.status === DISPATCH_POSTCHECK_SCAN_FAILURE.WORKTREE_LIST_FAILED ||
+    entry.status === DISPATCH_POSTCHECK_SCAN_FAILURE.RECEIPT_READ_FAILED
+  ) {
+    return DISPATCH_POSTCHECK_SCAN_SEVERITY.COLLECTION_FAILURE;
+  }
+  if (entry.status === DISPATCH_POSTCHECK_WIRE_STATUS.QUERY_FAILED) {
+    return DISPATCH_POSTCHECK_SCAN_SEVERITY.QUERY_FAILURE;
+  }
+  if (
+    entry.status === DISPATCH_POSTCHECK_WIRE_STATUS.JUDGED &&
+    entry.verdict === "RECORD_MISSING"
+  ) {
+    return DISPATCH_POSTCHECK_SCAN_SEVERITY.RECORD_MISSING;
+  }
+  return DISPATCH_POSTCHECK_SCAN_SEVERITY.NORMAL;
+}
+
+// judgeDispatchPostcheckAcrossWorktrees({repoRoot}, opts) -- seat-liveness/
+// dispatch-start 두 축과 대칭 구조(워크트리 전부 열거 -> 각각 개별 판정
+// -> 가장 나쁜 항목을 대표값으로 상위에 싣는다), 단 이 축은 좌석 관측이
+// 아니라 배달이 이미 남긴 영수증 파일만 읽으므로 opts.execFn을 쓰지
+// 않는다(orca 재호출 0).
+export function judgeDispatchPostcheckAcrossWorktrees({ repoRoot }, opts = {}) {
+  const list = collectGitWorktrees(repoRoot, opts);
+  if (!list.ok) {
+    return {
+      status: DISPATCH_POSTCHECK_SCAN_FAILURE.WORKTREE_LIST_FAILED,
+      detail: list.detail,
+      worktrees: [],
+      totalWorktrees: 0,
+      worstCount: 1,
+    };
+  }
+  const worktrees = list.worktrees.map((wt) =>
+    judgeDispatchPostcheckForWorktree(wt, opts),
+  );
+  const worstSeverity = worktrees.reduce(
+    (acc, w) => Math.max(acc, dispatchPostcheckSeverityOf(w)),
+    DISPATCH_POSTCHECK_SCAN_SEVERITY.NORMAL,
+  );
+  const worstEntries = worktrees.filter(
+    (w) => dispatchPostcheckSeverityOf(w) === worstSeverity,
+  );
+  const worst = worstEntries[0] ?? null;
+  return {
+    status: worst
+      ? worst.status
+      : DISPATCH_POSTCHECK_WIRE_STATUS.NOT_APPLICABLE,
+    verdict: worst ? worst.verdict : undefined,
+    reasonCode: worst ? worst.reasonCode : undefined,
+    runtimeTaskId: worst ? worst.runtimeTaskId : undefined,
+    harnessTaskId: worst ? worst.harnessTaskId : undefined,
+    worktreePath: worst ? worst.worktreePath : undefined,
+    worktrees,
+    totalWorktrees: worktrees.length,
+    worstCount: worstEntries.length,
+  };
+}
+
 // runOrchStallDetect(argv) -> {result, exitCode} -- CLI 몸통을 순수 함수에
 // 가깝게 뽑아 시험이 process.exit 없이 호출할 수 있게 한다. I/O(파일
 // 읽기·git 실행)는 그대로 하되, 프로세스 종료·stdout 출력은 하지 않는다.
@@ -2325,6 +2501,10 @@ export function runOrchStallDetect(argv, opts = {}) {
   // HYK-173-push-wire: escalation 축도 같은 진입점에서 실호출된다(§5-E --
   // 이 파일이 축의 조립 자리, watch-run.mjs는 옮겨 적기만 한다).
   const escalation = judgeEscalationForRepo({ repoRoot, now }, opts);
+  // HYK-212-postcheck-1: «배달 직후 재조회 사후검증» 축도 같은 진입점에서
+  // 조립된다 -- orca 재호출 0(영수증 파일만 읽는다), §2-3 부작용 0 계약
+  // 유지.
+  const postcheck = judgeDispatchPostcheckAcrossWorktrees({ repoRoot }, opts);
   return {
     result: {
       ...result,
@@ -2339,6 +2519,7 @@ export function runOrchStallDetect(argv, opts = {}) {
       dispatchStart,
       unconsumed,
       escalation,
+      postcheck,
     },
     exitCode: EXIT_CODE_BY_VERDICT[result.verdict] ?? 3,
     cli,

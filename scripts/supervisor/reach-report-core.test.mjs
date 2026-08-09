@@ -33,6 +33,8 @@ const LINE_DEFAULTS = {
   capSource: "/x/concurrency-cap.json",
   escalationStatus: "ESCALATION_OK",
   escalationVerdict: "NONE",
+  postcheckStatus: "OK",
+  postcheckVerdict: "NONE",
 };
 
 function line(overrides) {
@@ -54,6 +56,8 @@ function line(overrides) {
     capSource,
     escalationStatus,
     escalationVerdict,
+    postcheckStatus,
+    postcheckVerdict,
   } = { ...LINE_DEFAULTS, ...overrides };
   return (
     `${ts} exit=0 verdict=${verdict} reason=${reason} ` +
@@ -62,7 +66,8 @@ function line(overrides) {
     `start_status=${startStatus} start_verdict=${startVerdict} start_worst_count=NONE start_worktrees=4 ` +
     `unconsumed_status=${unconsumedStatus} unconsumed_verdict=${unconsumedVerdict} unconsumed_worst_count=NONE unconsumed_worktrees=4 ` +
     `cap_status=${capStatus} cap_verdict=${capVerdict} cap_value=${capValue} cap_source=${capSource} ` +
-    `escalation_status=${escalationStatus} escalation_verdict=${escalationVerdict} escalation_worst_count=NONE escalation_worktrees=1`
+    `escalation_status=${escalationStatus} escalation_verdict=${escalationVerdict} escalation_worst_count=NONE escalation_worktrees=1 ` +
+    `postcheck_status=${postcheckStatus} postcheck_verdict=${postcheckVerdict} postcheck_worst_count=NONE postcheck_worktrees=1`
   );
 }
 
@@ -268,7 +273,7 @@ test("computeRecentSummary counts anomalous samples within the window, distinct 
   );
 });
 
-test("all 6 axes are independently tracked (one axis bad does not mask another) (1/1)", () => {
+test("all 7 axes are independently tracked (one axis bad does not mask another) (1/1)", () => {
   const t0 = Date.parse("2026-08-05T00:00:00.000Z");
   const entries = parseWatchLog(
     line({
@@ -285,6 +290,8 @@ test("all 6 axes are independently tracked (one axis bad does not mask another) 
       capVerdict: "FILE_UNREADABLE",
       escalationStatus: "ESCALATION_OK",
       escalationVerdict: "NEEDS_INPUT",
+      postcheckStatus: "OK",
+      postcheckVerdict: "RECORD_MISSING",
     }),
   ).entries;
   const open = computeOpenAnomalies(entries, t0);

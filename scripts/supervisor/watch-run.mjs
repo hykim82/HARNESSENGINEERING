@@ -246,6 +246,30 @@ function extractEscalationFields(escalation) {
   };
 }
 
+function pickString(obj, key) {
+  return obj && typeof obj[key] === "string" ? obj[key] : null;
+}
+function pickNumber(obj, key) {
+  return obj && typeof obj[key] === "number" ? obj[key] : null;
+}
+
+// HYK-212-postcheck-1 (coder-task.md §2/§4) -- «배달 직후 재조회
+// 사후검증» 축 필드도 기존 관례(4필드)로 옮겨 적는다. 이 축은 §4 요건2
+// (사유가 사람이 읽을 수 있게)를 만족시키려면 runtimeTaskId/harnessTaskId/
+// worktreePath도 함께 옮겨야 한다(buildLogLine의 postcheckDetailSegment가
+// 이 셋으로 사람이 읽는 상세 줄을 만든다).
+function extractPostcheckFields(postcheck) {
+  return {
+    postcheckStatus: pickString(postcheck, "status"),
+    postcheckVerdict: pickString(postcheck, "verdict"),
+    postcheckWorstCount: pickNumber(postcheck, "worstCount"),
+    postcheckTotalWorktrees: pickNumber(postcheck, "totalWorktrees"),
+    postcheckRuntimeTaskId: pickString(postcheck, "runtimeTaskId"),
+    postcheckHarnessTaskId: pickString(postcheck, "harnessTaskId"),
+    postcheckWorktreePath: pickString(postcheck, "worktreePath"),
+  };
+}
+
 function parseDetectorStdout(stdout) {
   try {
     const parsed = JSON.parse(String(stdout).trim());
@@ -262,6 +286,7 @@ function parseDetectorStdout(stdout) {
     const escalation = isPlainObject(parsed.escalation)
       ? parsed.escalation
       : null;
+    const postcheck = isPlainObject(parsed.postcheck) ? parsed.postcheck : null;
     return {
       verdict: typeof parsed.verdict === "string" ? parsed.verdict : null,
       reasonCode:
@@ -271,6 +296,7 @@ function parseDetectorStdout(stdout) {
       ...extractDispatchStartFields(dispatchStart),
       ...extractUnconsumedFields(unconsumed),
       ...extractEscalationFields(escalation),
+      ...extractPostcheckFields(postcheck),
     };
   } catch {
     return {
@@ -299,6 +325,13 @@ function parseDetectorStdout(stdout) {
       escalationWorstCount: null,
       escalationTotalWorktrees: null,
       escalationScopes: [],
+      postcheckStatus: null,
+      postcheckVerdict: null,
+      postcheckWorstCount: null,
+      postcheckTotalWorktrees: null,
+      postcheckRuntimeTaskId: null,
+      postcheckHarnessTaskId: null,
+      postcheckWorktreePath: null,
     };
   }
 }
@@ -573,6 +606,43 @@ function formatEscalationEntry(scope, isNew) {
   return `${prefix}${taskId}/${dispatchId}:${reason}`;
 }
 
+// HYK-212-postcheck-1 (coder-task.md §4 요건2 "코드값만 찍고 끝내지
+// 마라 -- 어느 태스크·어느 좌석인지 포함") -- RECORD_MISSING일 때만
+// 사람이 읽는 상세를 덧붙인다(정상/판단대상아님/조회실패는 4필드
+// 세그먼트만으로 충분 -- 소음 최소화, HYK-210 escalationDetailSegment와
+// 동일 원칙).
+function postcheckDetailSegment({
+  verdict,
+  runtimeTaskId,
+  harnessTaskId,
+  worktreePath,
+}) {
+  if (verdict !== "RECORD_MISSING") return null;
+  const task = sanitizeFailureToken(harnessTaskId, "unknown_task");
+  const runtime = sanitizeFailureToken(runtimeTaskId, "unknown_runtime_task");
+  const wt = sanitizeFailureToken(worktreePath, "unknown_worktree");
+  return `postcheck_detail=${task}/${runtime}@${wt}`;
+}
+
+// buildLogLine에서 분리(§6 eslint max-lines-per-function 상한 준수 --
+// escalation 세그먼트 조립과 대칭 위치를 이 함수 하나로 옮긴다).
+function buildPostcheckSegments(detectorResult) {
+  return {
+    postcheckSegment: axisLogSegment("postcheck", {
+      status: detectorResult.postcheckStatus,
+      verdict: detectorResult.postcheckVerdict,
+      worstCount: detectorResult.postcheckWorstCount,
+      totalWorktrees: detectorResult.postcheckTotalWorktrees,
+    }),
+    postcheckDetail: postcheckDetailSegment({
+      verdict: detectorResult.postcheckVerdict,
+      runtimeTaskId: detectorResult.postcheckRuntimeTaskId,
+      harnessTaskId: detectorResult.postcheckHarnessTaskId,
+      worktreePath: detectorResult.postcheckWorktreePath,
+    }),
+  };
+}
+
 function escalationDetailSegment({ wakeScopes, newlyNotified, stateMissing }) {
   if (!Array.isArray(wakeScopes) || wakeScopes.length === 0) return null;
   const newKeys = new Set(
@@ -688,13 +758,10 @@ export function buildLogLine({
     newlyNotified: escalationDedupe?.newlyNotified ?? [],
     stateMissing: escalationDedupe?.stateMissing ?? false,
   });
-  // HYK-210-human-log-1: 실패 세그먼트는 있을 때만 끼운다(filter(Boolean))
-  // -- 정상 실행(실패 0건)의 로그 줄 모양은 이 라운드 전과 바이트 단위로
-  // 동일하다(기존 소비자 회귀 0, coder-task.md §2-2). escalation 세그먼트
-  // 추가도 같은 원칙을 따른다 -- 이 라운드 전 로그 줄(escalation 필드
-  // 없음)과 바이트 단위로 동일하게 남는 것은 detectorResult에
-  // escalation* 필드가 전혀 없을 때뿐이다(§7-7 기존 축 회귀 0 시험이
-  // 이 경우를 직접 고정한다).
+  // HYK-212-postcheck-1: 새 축은 언제나 맨 끝에 붙는다(기존 여섯
+  // 세그먼트의 필드·순서·값 불변, §7-7/§6 기존 축 회귀 0).
+  const { postcheckSegment, postcheckDetail } =
+    buildPostcheckSegments(detectorResult);
   return [
     nowIso,
     `exit=${detectorResult.exitCode}`,
@@ -709,6 +776,8 @@ export function buildLogLine({
     capSegment,
     escalationSegment,
     escalationDetail,
+    postcheckSegment,
+    postcheckDetail,
   ]
     .filter(Boolean)
     .join(" ");

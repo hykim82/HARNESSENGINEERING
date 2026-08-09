@@ -104,6 +104,14 @@ export default [
     // judgment layer, not a reopening of the general relay -> non-relay
     // dependency direction. escalation-axis-wire.test.mjs exercises the
     // same production path.
+    // HYK-212-postcheck-1 (coder-task.md §2): the same narrow exception,
+    // one more time, for the dispatch-postcheck axis -- orch-stall-
+    // detect.mjs's judgeDispatchPostcheckAcrossWorktrees reads the
+    // dispatch-postcheck-core.mjs verdict constants that the wire tests
+    // also assert against. dispatch-postcheck-wire.test.mjs/dispatch-
+    // postcheck-axis-wire.test.mjs exercise the same production path
+    // (runOrchStallDetect/runWatchOnce) as their seat-liveness/escalation
+    // predecessors above.
     files: [
       "scripts/supervisor/orch-stall-detect.mjs",
       "scripts/supervisor/seat-liveness-wire.test.mjs",
@@ -114,6 +122,8 @@ export default [
       "scripts/supervisor/escalation-axis-wire.test.mjs",
       "scripts/supervisor/reach-report-core.mjs",
       "scripts/supervisor/reach-report-core.test.mjs",
+      "scripts/supervisor/dispatch-postcheck-wire.test.mjs",
+      "scripts/supervisor/dispatch-postcheck-axis-wire.test.mjs",
     ],
     rules: {
       "no-restricted-imports": "off",
