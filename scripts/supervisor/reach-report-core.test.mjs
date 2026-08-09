@@ -31,6 +31,8 @@ const LINE_DEFAULTS = {
   capVerdict: "DECIDED",
   capValue: "2",
   capSource: "/x/concurrency-cap.json",
+  escalationStatus: "ESCALATION_OK",
+  escalationVerdict: "NONE",
 };
 
 function line(overrides) {
@@ -50,6 +52,8 @@ function line(overrides) {
     capVerdict,
     capValue,
     capSource,
+    escalationStatus,
+    escalationVerdict,
   } = { ...LINE_DEFAULTS, ...overrides };
   return (
     `${ts} exit=0 verdict=${verdict} reason=${reason} ` +
@@ -57,7 +61,8 @@ function line(overrides) {
     `idle_status=${idleStatus} idle_verdict=${idleVerdict} idle_worst_count=NONE idle_worktrees=4 ` +
     `start_status=${startStatus} start_verdict=${startVerdict} start_worst_count=NONE start_worktrees=4 ` +
     `unconsumed_status=${unconsumedStatus} unconsumed_verdict=${unconsumedVerdict} unconsumed_worst_count=NONE unconsumed_worktrees=4 ` +
-    `cap_status=${capStatus} cap_verdict=${capVerdict} cap_value=${capValue} cap_source=${capSource}`
+    `cap_status=${capStatus} cap_verdict=${capVerdict} cap_value=${capValue} cap_source=${capSource} ` +
+    `escalation_status=${escalationStatus} escalation_verdict=${escalationVerdict} escalation_worst_count=NONE escalation_worktrees=1`
   );
 }
 
@@ -241,7 +246,7 @@ test("computeRecentSummary counts anomalous samples within the window, distinct 
   );
 });
 
-test("all 5 axes are independently tracked (one axis bad does not mask another) (1/1)", () => {
+test("all 6 axes are independently tracked (one axis bad does not mask another) (1/1)", () => {
   const t0 = Date.parse("2026-08-05T00:00:00.000Z");
   const entries = parseWatchLog(
     line({
@@ -256,6 +261,8 @@ test("all 5 axes are independently tracked (one axis bad does not mask another) 
       unconsumedVerdict: "SUSPECTED_UNCONSUMED",
       capStatus: "CAP_READ_FAILED",
       capVerdict: "FILE_UNREADABLE",
+      escalationStatus: "ESCALATION_OK",
+      escalationVerdict: "NEEDS_INPUT",
     }),
   ).entries;
   const open = computeOpenAnomalies(entries, t0);

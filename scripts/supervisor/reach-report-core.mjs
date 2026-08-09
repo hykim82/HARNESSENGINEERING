@@ -13,7 +13,19 @@
 // `cap_*` 필드, HYK-198-capwire-1이 이미 관측만 하고 있던 것)을 이
 // AXES에 편입한다 -- 이것도 "새 감지 축"이 아니라 watch-run.mjs가 이미
 // 내놓은 `cap_status`/`cap_verdict` 문자열을 그대로 분류할 뿐이다(같은
-// 원칙의 다섯 번째 적용). 이 예외 밖의 새 축 추가는 여전히 금지다.
+// 원칙의 다섯 번째 적용).
+// ★HYK-173-push-wire(coder-task.md §4 요건3, §5-F "주장-구현 일치")로
+// **두 번째** 예외가 생겼다: `escalation` 축(watch-run.mjs의
+// `escalation_*` 필드, orch-stall-detect.mjs의 judgeEscalationForRepo가
+// escalation-state.mjs의 reduceCoordinatorState/shouldWakeHuman을 실호출해
+// 만든 것)을 AXES에 편입한다. ★이 항목은 cap과 이유가 다르다 -- cap은
+// "이미 관측만 하던 것을 편입"이었지만, escalation은 §4 요건3 자체가
+// 강제한다: `AXES`는 닫힌 배열이고 여기 등록된 축의 verdict/status만
+// "열린 이상"으로 분류돼 받는함(reach-notify-*.md)에 도달한다 -- 로그
+// 필드만 추가하고 여기 등록하지 않으면 "로그에만 적히고 사람이 못 보는
+// 것"(1-B가 금지하는 실패 형태)이 된다. 이 예외 밖의 새 축 추가는
+// 여전히 금지다(escalation-axis-wire.test.mjs가 이 두 예외 밖의 세 번째
+// 항목이 조용히 늘어나지 않음을 고정한다).
 //
 // 왜 "지금 열려 있는 이상"이 사람이 직접 읽는 값 위에 있어야 하는가
 // (coder-task.md §4, 실측): 2026-08-05 05:06 ~ 08-06 22:36 KST 사이
@@ -22,6 +34,11 @@
 // 41시간 침묵한다. 그래서 이 파일은 매번 전체 로그를 다시 훑어 "지금도
 // 여전히 열려 있다면 언제부터인지"를 매번 처음부터 다시 계산한다(전이
 // 통지 1건에 기대지 않는다).
+
+// HYK-173-push-wire (coder-task.md §4 요건3) -- escalation 축의 badVerdicts
+// 재료는 escalation-state.mjs가 정본으로 갖고 있는 상태 이름을 그대로
+// 쓴다(재구현 금지 -- 이 파일이 "wake" 문자열을 새로 만들지 않는다).
+import { COORD_STATE, HUMAN_WAKE_STATES } from "../relay/escalation-state.mjs";
 
 // ---- 축 정의 ----
 // prefix: watch.log 한 줄의 필드 접두사(watch-run.mjs의 axisLogSegment와
@@ -116,6 +133,21 @@ export const AXES = Object.freeze([
       "CAP_STEP_FAILURE",
       "CORE_REJECTED",
     ]),
+  }),
+  // HYK-173-push-wire (coder-task.md §4 요건3) -- escalation 축. 위 헤더
+  // 두 번째 예외 참조. badVerdicts = escalation-state.mjs가 실제로
+  // 산출하는 "wake" 상태 문자열 그대로(HUMAN_WAKE_STATES 셋 + 이 축이
+  // 실제로 내는 NEEDS_INPUT -- orch-stall-detect.mjs judgeEscalationForRepo
+  // 는 escalation 메시지의 reason을 분류하지 않고 전부 사람 게이트7로
+  // 승격하므로[coder-task.md §5-C 4항], 이 축이 내는 NEEDS_INPUT은
+  // 언제나 wake다). badStatuses = 조회/handle 대조 실패(§5-A/§5-B, "조용한
+  // 0건"으로 새지 않도록 표면화한 상태).
+  Object.freeze({
+    key: "escalation",
+    prefix: "escalation",
+    label: "워커 escalation(중단 신호)",
+    badVerdicts: Object.freeze([...HUMAN_WAKE_STATES, COORD_STATE.NEEDS_INPUT]),
+    badStatuses: Object.freeze(["ESCALATION_COLLECTION_FAILED"]),
   }),
 ]);
 

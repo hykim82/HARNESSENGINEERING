@@ -120,10 +120,29 @@ import {
   collectSeatObservationsForWorktree,
   createOrcaExecFn,
   CONTROL_ROOM_PATH,
+  MAIN_REPO_PATH,
   SEAT_LIVENESS_OBSERVATION_REASON,
   resolveDeliveredSeat,
   fetchSeatLivenessShow,
+  buildTerminalListCommand,
+  parseTerminalList,
+  buildNonBlockingCheckCommand,
+  isOrphanSeat,
 } from "../relay/adapters/orca-adapter.mjs";
+import { normalizeAbsolute } from "../check/path-normalize.mjs";
+// HYK-173-push-wire (coder-task.md §5-C) -- 판단층(escalation-state.mjs)을
+// 이 축이 "실제로" 부른다. ⛔이 import는 판정 로직을 재구현하지 않는다는
+// 증거 그 자체다 -- reduceCoordinatorState/shouldWakeHuman은 여기서
+// 실호출되고, shouldNotify(dedupe)는 이 파일이 아니라 watch-run.mjs가
+// 부른다(이 파일은 §2-3 비타협에 따라 "부작용 0(읽기 전용)"을 유지해야
+// 하는데, dedupe는 상태 파일 쓰기가 필요한 부작용이라 이 파일에 두면 그
+// 계약이 깨진다 -- watch-run.mjs는 이미 I/O 러너로 선언돼 있어 그 쪽이
+// 자연스러운 자리다).
+import {
+  reduceCoordinatorState,
+  shouldWakeHuman,
+  COORD_STATE,
+} from "../relay/escalation-state.mjs";
 
 // 정지 의심과 판정 불가를 같은 코드로 접지 않는다(coder-task.md §5-C
 // 비타협). WAITING_HUMAN_GATE는 "정지 의심"이 아니라 정당한 대기이므로
@@ -1915,6 +1934,302 @@ export function scanHeaderTimeProjection(repoRoot, opts = {}) {
   return { ok: true, items };
 }
 
+// ---- HYK-173-push-wire (coder-task.md §5) -- «워커 escalation 인박스
+// 구독» 축 ----
+//
+// §6 사각을 정직하게 박아라(coder-task.md §6, 문구 그대로 코드 헤더에):
+//
+// 이 축이 잡는 것은 **워커가 살아서 통제된 중단 신호를 보낸 경우뿐**이다.
+// ⓐ배달 레코드 미생성(`injected=true`인데 `dispatch-show`가
+// `dispatch:null`) ⓑ침묵 정지·crash·kill ⓒrate-limit는 이 축의 관측
+// 밖이며(`PUSH_UNOBSERVABLE`), ⓐ는 배달 사후검증(별건), ⓑⓒ는
+// pull(HYK-171) 몫이다. 이 조각 병합으로 HYK-173의 요구(«어떤 사유로든
+// 멈추면 반드시 전달»)가 충족됐다고 주장하지 않는다.
+//
+// 그리고(PM 축 7-3·S5): 감시 통지는 «아직 아무도 안 봤다»가 아니라
+// «아직 안 봤을 수 있다»다 -- ORCH 세션이 일반 check로 소비하면 감시의
+// peek에서 사라지고, peek은 처리 여부를 모른다.
+//
+// push 채널은 **어댑터 B(Orca) 전용 보강**이다. 어댑터·엔진 무관 기저는
+// **결과 파일 표지**(BLOCKED/NEEDS_INPUT, `watch-result.mjs`)이며
+// **어댑터 A에서 이 축은 존재하지 않는다.** 이 축의 존재로 «무인 정지
+// 전달이 완결됐다»고 주장하지 않는다.
+//
+// ---- §5-B: handle을 박지 마라 ----
+// coordinatorHandle을 설정 파일·환경변수에 저장하지 않는다. 매 실행
+// `terminal list`를 조회해 "이 저장소의 메인 워크트리(MAIN_REPO_PATH,
+// ORCH 자신이 앉는 자리)"라는 안정 키에서 handle을 새로 해석하고, 그
+// 해석 자체가 "지금 이 순간의 살아 있는 좌석 목록"과의 대조다(목록에
+// 없으면 애초에 후보가 안 나온다 -- 후보 0개/2개+는 실패로 표면화하지,
+// "조용한 count:0"으로 새지 않는다, S3 비타협).
+export const ESCALATION_WIRE_STATUS = Object.freeze({
+  OK: "ESCALATION_OK",
+  COLLECTION_FAILED: "ESCALATION_COLLECTION_FAILED",
+});
+
+function canonicalizeWorktreePath(rawPath) {
+  const normalized = normalizeAbsolute(rawPath).toLowerCase();
+  return /^[a-z]:\/$/.test(normalized)
+    ? normalized
+    : normalized.replace(/\/+$/, "");
+}
+
+// 안정 키 = MAIN_REPO_PATH(ORCH 자신의 워크트리, 코드 상수 -- 저장 상태
+// 아님). 후보 0개/2개+는 거부(resolveSeatHandle A-1과 동일 원칙 재사용,
+// 자동 선택 금지).
+function resolveCoordinatorHandle(opts) {
+  const execFn =
+    typeof opts.execFn === "function" ? opts.execFn : createOrcaExecFn();
+  let response;
+  try {
+    response = execFn(buildTerminalListCommand());
+  } catch (err) {
+    return {
+      ok: false,
+      reason: `orch-stall-detect: coordinator handle resolve -- terminal list query threw (${err && err.message ? err.message : String(err)})`,
+    };
+  }
+  const list = parseTerminalList(response);
+  if (!list) {
+    return {
+      ok: false,
+      reason:
+        "orch-stall-detect: coordinator handle resolve -- terminal list response missing/invalid result.terminals",
+    };
+  }
+  const target = canonicalizeWorktreePath(MAIN_REPO_PATH);
+  const candidates = list.filter(
+    (entry) =>
+      entry &&
+      typeof entry === "object" &&
+      typeof entry.handle === "string" &&
+      entry.handle.length > 0 &&
+      !isOrphanSeat({ worktreePath: entry.worktreePath }) &&
+      canonicalizeWorktreePath(entry.worktreePath) === target,
+  );
+  if (candidates.length !== 1) {
+    return {
+      ok: false,
+      reason: `orch-stall-detect: coordinator handle resolve -- expected exactly 1 seat at MAIN_REPO_PATH, found ${candidates.length} (S3 비타협: 낡은 handle을 '조용한 0건'으로 통과시키지 않는다)`,
+    };
+  }
+  return { ok: true, handle: candidates[0].handle };
+}
+
+// §5-A: collectCompletionSignals(orca-adapter.mjs)의 advisory-only 실패
+// 삼킴 계약(ok:true/signals:[]/note)을 재사용하지 않는다 -- argv 조립
+// (buildNonBlockingCheckCommand)만 재사용하고, 실패는 이 함수 자신이
+// ok:false로 표면화한다.
+function peekEscalationMessages(handle, opts) {
+  const execFn =
+    typeof opts.execFn === "function" ? opts.execFn : createOrcaExecFn();
+  let response;
+  try {
+    response = execFn(buildNonBlockingCheckCommand(handle));
+  } catch (err) {
+    return {
+      ok: false,
+      reason: `orch-stall-detect: escalation peek threw (${err && err.message ? err.message : String(err)})`,
+    };
+  }
+  if (!response || typeof response !== "object" || response.ok !== true) {
+    return {
+      ok: false,
+      reason: "orch-stall-detect: escalation peek did not return ok:true",
+    };
+  }
+  const messages = Array.isArray(response.result?.messages)
+    ? response.result.messages
+    : null;
+  if (!messages) {
+    return {
+      ok: false,
+      reason:
+        "orch-stall-detect: escalation peek response missing/invalid result.messages",
+    };
+  }
+  return { ok: true, messages };
+}
+
+// S1 실측 payload shape: JSON 문자열 {"taskId":…,"dispatchId":…}. 파싱
+// 불가/필드 결손은 그 메시지를 스코프에 못 묶는다는 뜻이라 조용히
+// 건너뛴다(이 조각의 정직 한계 -- payload가 계약을 어기면 그 메시지
+// 하나는 관측 밖이 된다, fabricate하지 않는다).
+function parseEscalationScope(message) {
+  if (!message || typeof message.payload !== "string") return null;
+  let parsed;
+  try {
+    parsed = JSON.parse(message.payload);
+  } catch {
+    return null;
+  }
+  if (
+    !parsed ||
+    typeof parsed !== "object" ||
+    typeof parsed.taskId !== "string" ||
+    typeof parsed.dispatchId !== "string"
+  ) {
+    return null;
+  }
+  return { taskId: parsed.taskId, dispatchId: parsed.dispatchId };
+}
+
+function scopeGroupKey(scope) {
+  return `${scope.taskId} ${scope.dispatchId}`;
+}
+
+// S1 실측 안정 식별자 -- sequence(단조 증가)를 우선하고 없으면 id를
+// 쓴다. dedupe(§5-D, watch-run.mjs가 shouldNotify로 실호출)의 재료가
+// 되는 값이라 여기서 확정해 축 결과에 실어 보낸다.
+function pickTransitionId(messages) {
+  let best = null;
+  for (const m of messages) {
+    if (!m || typeof m !== "object") continue;
+    if (typeof m.sequence === "number") {
+      if (
+        !best ||
+        (typeof best.sequence === "number" && m.sequence > best.sequence)
+      ) {
+        best = m;
+      }
+    } else if (!best) {
+      best = m;
+    }
+  }
+  if (!best) return null;
+  if (typeof best.sequence === "number") return String(best.sequence);
+  if (typeof best.id === "string") return best.id;
+  return null;
+}
+
+// §5-C 승격 기준 1~4(coder-task.md 문구 그대로) 이 함수 하나에 전부
+// 반영: reduceCoordinatorState -> shouldWakeHuman을 "실제로" 부른다.
+// ★4항: 이 감시기는 reason 문자열을 해석해 자동 분류하지 않는다 --
+// escalation 메시지가 요구하는 사람 게이트가 정확히 무엇인지는 이 축이
+// 판단할 수 없으므로(자기 신고 계열 금지), 모든 scoped escalation을
+// «분류 불가 → 게이트7(상신 답변)로 승격»(3항)으로 취급해
+// isHumanGateNeedsInput을 무조건 true로 준다 -- 이는 "미분류는 전부
+// wake로 접는다"(4항, 과소통지보다 과대통지)를 코드로 고정한 것이다.
+function judgeScopeGroup(scope, messages, now) {
+  const reduced = reduceCoordinatorState({
+    scope,
+    events: {
+      orchestrationMessages: messages.map((m) => ({
+        type: "escalation",
+        taskId: scope.taskId,
+        dispatchId: scope.dispatchId,
+        ...(m && typeof m === "object" ? m : {}),
+      })),
+    },
+  });
+  const isHumanGateNeedsInput = true;
+  const wakeHuman = shouldWakeHuman(reduced.state, isHumanGateNeedsInput);
+  const latest = messages[messages.length - 1];
+  return {
+    scope,
+    state: reduced.state,
+    dedupeKey: reduced.dedupeKey,
+    transitionId: pickTransitionId(messages),
+    wakeHuman,
+    // 관측 시각(watch-run.mjs 회차의 now) -- 순수 참고용, 판정에는 쓰지
+    // 않는다(reduceCoordinatorState 입력에 넣지 않음: 그 함수의 events
+    // 계약에 시각 필드가 없다).
+    observedAtMs: typeof now === "number" ? now : null,
+    sampleSubject:
+      latest && typeof latest.subject === "string" ? latest.subject : null,
+    sampleBody: latest && typeof latest.body === "string" ? latest.body : null,
+  };
+}
+
+// 우선순위: HUMAN_WAKE_STATES(SUPERVISOR_FAULT/INCONSISTENT/SILENT_STALL)
+// > NEEDS_INPUT. 이 축이 실제로 만들어내는 wake 상태는 이 조합뿐이다
+// (아래 judgeEscalationForRepo 참조 -- 수집 실패 경로는 항상
+// SUPERVISOR_FAULT, 살아있는 escalation 메시지는 항상 NEEDS_INPUT).
+const STATE_PRIORITY = [
+  COORD_STATE.SUPERVISOR_FAULT,
+  COORD_STATE.INCONSISTENT,
+  COORD_STATE.SILENT_STALL,
+  COORD_STATE.NEEDS_INPUT,
+];
+
+function pickWorstState(wakeScopes) {
+  for (const s of STATE_PRIORITY) {
+    if (wakeScopes.some((w) => w.state === s)) return s;
+  }
+  return wakeScopes.length > 0 ? wakeScopes[0].state : null;
+}
+
+// judgeEscalationForRepo({repoRoot, now}, opts) -- 이 저장소의 coordinator
+// (ORCH 자신) 인박스를 peek해 escalation 메시지를 스코프(taskId/
+// dispatchId)별로 묶고, 각 스코프를 escalation-state.mjs의 판단층에
+// 넘겨 wake 여부를 얻는다. 반환 shape은 기존 4축과 같은 4필드 관례
+// (status/verdict/worstCount/totalWorktrees)를 따르되, worstCount는
+// "가장 나쁜 등급의 워크트리 수"가 아니라 "wake-worthy한 스코프 수"다
+// (이 축에는 워크트리 스캔 개념이 없다 -- 인박스는 저장소당 1개뿐이고
+// 워커별로 여러 개가 아니다. §5 판단: 필드 이름은 axisLogSegment의
+// 기존 관례[prefix_worktrees]를 그대로 재사용하되 의미는 "관측된 스코프
+// 수"로 재정의한다 -- cap 축이 이미 같은 형태의 선례다,
+// reach-report-core.mjs AXES 주석 참조).
+// ★repoRoot를 받지 않는다(호출부 시그니처는 다른 4축과 맞추려고
+// {repoRoot, now}를 그대로 넘기지만, 이 축은 쓰지 않는다) -- coordinator
+// 정체성은 저장소 경로가 아니라 MAIN_REPO_PATH(ORCH 자신이 앉는 고정
+// 자리) 하나로 정해지므로 --repo-root가 무엇이든 같은 인박스를 본다
+// (인박스는 저장소당이 아니라 ORCH 세션당 1개).
+export function judgeEscalationForRepo({ now } = {}, opts = {}) {
+  const handleResult = resolveCoordinatorHandle(opts);
+  if (!handleResult.ok) {
+    const failState = reduceCoordinatorState({
+      scope: {},
+      events: { supervisorFault: true },
+    });
+    return {
+      status: ESCALATION_WIRE_STATUS.COLLECTION_FAILED,
+      verdict: failState.state,
+      reason: handleResult.reason,
+      worstCount: 0,
+      totalWorktrees: 0,
+      scopes: [],
+    };
+  }
+  const peeked = peekEscalationMessages(handleResult.handle, opts);
+  if (!peeked.ok) {
+    const failState = reduceCoordinatorState({
+      scope: {},
+      events: { supervisorFault: true },
+    });
+    return {
+      status: ESCALATION_WIRE_STATUS.COLLECTION_FAILED,
+      verdict: failState.state,
+      reason: peeked.reason,
+      worstCount: 0,
+      totalWorktrees: 0,
+      scopes: [],
+    };
+  }
+  const escalationMsgs = peeked.messages.filter(
+    (m) => m && typeof m === "object" && m.type === "escalation",
+  );
+  const groups = new Map();
+  for (const m of escalationMsgs) {
+    const scope = parseEscalationScope(m);
+    if (!scope) continue;
+    const key = scopeGroupKey(scope);
+    if (!groups.has(key)) groups.set(key, { scope, messages: [] });
+    groups.get(key).messages.push(m);
+  }
+  const scopes = Array.from(groups.values()).map(({ scope, messages }) =>
+    judgeScopeGroup(scope, messages, now),
+  );
+  const wakeScopes = scopes.filter((s) => s.wakeHuman);
+  return {
+    status: ESCALATION_WIRE_STATUS.OK,
+    verdict: wakeScopes.length > 0 ? pickWorstState(wakeScopes) : null,
+    worstCount: wakeScopes.length,
+    totalWorktrees: scopes.length,
+    scopes,
+  };
+}
+
 // runOrchStallDetect(argv) -> {result, exitCode} -- CLI 몸통을 순수 함수에
 // 가깝게 뽑아 시험이 process.exit 없이 호출할 수 있게 한다. I/O(파일
 // 읽기·git 실행)는 그대로 하되, 프로세스 종료·stdout 출력은 하지 않는다.
@@ -2007,6 +2322,9 @@ export function runOrchStallDetect(argv, opts = {}) {
   // 같은 워크트리 전부에 걸쳐 부른다. ★이 축은 좌석 관측이 아니라 파일/
   // git 관측만 쓰므로 computeSeatAxes(좌석 축 전용) 밖에 별도로 둔다.
   const unconsumed = judgeUnconsumedAcrossWorktrees({ repoRoot, now }, opts);
+  // HYK-173-push-wire: escalation 축도 같은 진입점에서 실호출된다(§5-E --
+  // 이 파일이 축의 조립 자리, watch-run.mjs는 옮겨 적기만 한다).
+  const escalation = judgeEscalationForRepo({ repoRoot, now }, opts);
   return {
     result: {
       ...result,
@@ -2020,6 +2338,7 @@ export function runOrchStallDetect(argv, opts = {}) {
       seatIdle,
       dispatchStart,
       unconsumed,
+      escalation,
     },
     exitCode: EXIT_CODE_BY_VERDICT[result.verdict] ?? 3,
     cli,

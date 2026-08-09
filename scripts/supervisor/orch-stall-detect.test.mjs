@@ -972,7 +972,12 @@ test("static: no PRODUCTION code imports orch-stall-detect.mjs yet (h -- can be 
         !f.endsWith("seat-idle-wire.test.mjs") &&
         !f.endsWith("dispatch-start-wire.test.mjs") &&
         !f.endsWith("hyk185-seat-multi-repro.test.mjs") &&
-        !f.endsWith("unconsumed-wire.test.mjs"),
+        !f.endsWith("unconsumed-wire.test.mjs") &&
+        // HYK-173-push-wire: escalation-axis-wire.test.mjs is the same
+        // shape once more -- it exercises the real production entry point
+        // (runOrchStallDetect) for the new escalation axis. Excluded on
+        // the identical "own .test.mjs" basis as the files above.
+        !f.endsWith("escalation-axis-wire.test.mjs"),
     );
   assert.deepEqual(
     importers,
