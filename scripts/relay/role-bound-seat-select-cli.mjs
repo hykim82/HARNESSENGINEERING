@@ -1,10 +1,9 @@
-import { readFileSync } from "node:fs";
 import {
   resolveRoleBoundSeatHandle,
   createOrcaExecFn,
 } from "./adapters/orca-adapter.mjs";
 
-// HYK-211-seat-select coder-1/2 (coder-task.md §4, "1-B 세 요건"): 사람이
+// HYK-211-seat-select coder-1/2/3 (coder-task.md §4, "1-B 세 요건"): 사람이
 // 직접 칠 수 있는 실행 한 줄 -- 동석(CODER+REVIEW 등) 상황에서 "어느
 // 좌석이 어떤 역할로 판별됐는지"를 눈으로 확인하기 위한 진입점이다.
 //
@@ -22,44 +21,41 @@ import {
 // createOrcaExecFn이다 -- 이 파일은 그것을 그대로 가져다 쓸 뿐, 직접
 // spawn하지 않는다(orca-cli-boundary.mjs가 이걸 정적으로 검사한다).
 //
-// ---- HYK-211-seat-select-2 §2-2 P1-2 수리 ----
-// 1R은 direct-entry 블록이 runRoleBoundSeatSelectCli를 부르지 않고
-// parseRoleBoundSeatSelectArgs + resolveRoleBoundSeatHandle을 따로
-// 재호출했다 -- 사람이 실제로 치는 그 경로가 export helper 시험으로
-// 대체 증명되지 않는 헛시험이었다(검토자 반려). 이제 **direct-entry는
-// runRoleBoundSeatSelectCli를 그대로 부른다** -- 경로가 하나뿐이라
-// export 시험이 곧 direct-entry 시험이다. 그 사실 자체를
+// ---- HYK-211-seat-select-2 §2-2 P1-2 수리 (3R에서도 유지) ----
+// direct-entry는 runRoleBoundSeatSelectCli를 그대로 부른다 -- 경로가
+// 하나뿐이라 export 시험이 곧 direct-entry 시험이다.
 // role-bound-seat-select-cli.test.mjs가 **자식 프로세스로 이 파일을
-// 실행**해 stdout/종료코드를 단언함으로써 증명한다(export helper
-// 호출만으로 대체하지 않는다).
+// 실행**해 stdout/종료코드를 단언함으로써 증명한다.
 //
-// ---- 시험 전용 seam(§2-2 요구, ⛔프로덕션 판정 변경 금지) ----
-// `ROLE_BOUND_SEAT_SELECT_FIXTURE` 환경변수가 설정돼 있으면 그 경로의
-// JSON 파일(`{ "worktreeList": <orca 응답>, "terminalList": <orca 응답> }`)
-// 로 조립한 가짜 execFn을 쓴다 -- 이 값이 **없으면**(프로덕션 기본) 전과
-// 완전히 동일하게 `createOrcaExecFn()`(실 `orca` spawn)을 쓴다. 이 env
-// var는 "terminal/worktree list를 실 orca 대신 고정 fixture로 답하게"
-// 하는 것뿐이고, 판정 로직(resolveRoleBoundSeatHandle) 자체는 손대지
-// 않는다 -- registryPath는 **실제 파일 시스템의 실제 JSON 파일**을 그대로
-// 쓴다(별도 fixture seam이 필요 없다).
-function buildFixtureExecFn(fixturePath) {
-  const raw = readFileSync(fixturePath, "utf8");
-  const fixtures = JSON.parse(raw);
-  return function fixtureExecFn(argv) {
-    const key =
-      argv[0] === "worktree" && argv[1] === "list"
-        ? "worktreeList"
-        : argv[0] === "terminal" && argv[1] === "list"
-          ? "terminalList"
-          : null;
-    if (!key || !(key in fixtures)) {
-      throw new Error(
-        `role-bound-seat-select-cli fixture execFn: no stub for argv=${JSON.stringify(argv)}`,
-      );
-    }
-    return fixtures[key];
-  };
-}
+// ---- ★HYK-211-seat-select-3 (§1~§3, 2R P1 반려 수리): 시험용 뒷문 제거 ----
+// 2R은 `ROLE_BOUND_SEAT_SELECT_FIXTURE` 환경변수로 direct-entry가 가짜
+// execFn을 쓰게 하는 seam을 넣었다 -- 검토자 반려: "그 변수가 없으면
+// createOrcaExecFn() 그대로"였지만, **설정하면 실제 좌석 조회를 통째로
+// 갈아치울 수 있는 프로덕션 우회로**였다(NODE_ENV=test 같은 단일 게이트도
+// 없었다) -- "엉뚱한 좌석으로 배달되는 것을 막으려는 코드 안에 그 판단의
+// 입력을 통째로 갈아치울 수 있는 문을 낸" 모순.
+//
+// **한용이 승인한 범위(ⓑ 권장, coder-task.md §3): 통로를 아예 없앤다.**
+// 이 파일은 이제 환경변수를 하나도 읽지 않는다(`process.env` 참조 0 --
+// orca-cli-boundary.mjs 전례처럼 이 사실 자체를 grep으로도 확인 가능하고,
+// role-bound-seat-select-cli.test.mjs의 정적 시험이 그 grep을 고정한다).
+// direct-entry는 **항상** `createOrcaExecFn()`(실 `orca` spawn)을 쓴다 --
+// 조건 분기 자체가 없다.
+//
+// **시험은 프로그램 밖에서 환경을 제어한다**(§3 ⓑ 요구 그대로): 자식
+// 프로세스로 이 파일을 구동하는 시험은 `node --require <preload.cjs>
+// role-bound-seat-select-cli.mjs ...`로 실행하고, 그 preload가
+// `node:child_process`의 `spawnSync`를 이 파일이 로드되기 *전에*
+// monkeypatch한다 -- `createOrcaExecFn`이 호출 시점에 그 patched
+// `spawnSync`를 그대로 쓰게 된다(§0 실측: Windows에서는 PATH 앞에 가짜
+// `orca` 실행 파일/스크립트를 두는 방식이 Node 26의 `spawnSync(...,
+// {shell:false})`에서 `.cmd`/`.bat`를 더 이상 자동 실행하지 않아 동작하지
+// 않음을 직접 확인했다 -- 그래서 PATH-stub이 아니라 `--require` 모듈
+// monkeypatch를 골랐다. Windows(PowerShell, 격리 PATH)·POSIX(Git Bash) 둘
+// 다에서 실측 확인함, 아래 role-bound-seat-select-cli.test.mjs 헤더 주석
+// 참조). 이 방식은 이 파일 자신에 **어떤 조건문도, 어떤 env var 읽기도
+// 요구하지 않는다** -- 시험이 이 파일을 전혀 몰라도 되는 방식으로 환경을
+// 갈아치운다.
 
 function isNonEmptyString(v) {
   return typeof v === "string" && v.length > 0;
@@ -137,6 +133,12 @@ export function formatRoleBoundSeatSelectResult(result) {
   return `REJECTED code=${code} reason=${result.reason}${roles}`;
 }
 
+// opts.execFn/opts.registryFs는 이 함수를 **같은 프로세스 안에서 직접
+// import해 부르는** 호출자(단위 시험, 다른 내부 모듈)를 위한 표준 DI일
+// 뿐이다 -- direct-entry(아래)는 이 인자를 절대 채우지 않는다. 이건 "외부
+// 입력으로 CLI 실행 결과를 바꿀 수 있는 통로"가 아니다: 그 통로를 쓰려면
+// 애초에 이 함수를 JS로 import해서 호출해야 하고, 그건 곧 "이 코드를 직접
+// 호출하는 것"이지 셸에서 뜬 CLI 프로세스를 외부에서 조종하는 게 아니다.
 export function runRoleBoundSeatSelectCli(argv, opts = {}) {
   const parsed = parseRoleBoundSeatSelectArgs(argv);
   if (!parsed.ok) return { ok: false, reason: parsed.reason };
@@ -155,12 +157,7 @@ const invokedDirectly =
     .replace(/\\/g, "/")
     .endsWith("scripts/relay/role-bound-seat-select-cli.mjs");
 if (invokedDirectly) {
-  const args = process.argv.slice(2);
-  const fixturePath = process.env.ROLE_BOUND_SEAT_SELECT_FIXTURE;
-  const cliOpts = isNonEmptyString(fixturePath)
-    ? { execFn: buildFixtureExecFn(fixturePath) }
-    : {};
-  const result = runRoleBoundSeatSelectCli(args, cliOpts);
+  const result = runRoleBoundSeatSelectCli(process.argv.slice(2));
   console.log(formatRoleBoundSeatSelectResult(result));
   process.exit(result.ok ? 0 : 1);
 }
