@@ -67,6 +67,28 @@ function isPlainObject(v) {
   return v !== null && typeof v === "object" && !Array.isArray(v);
 }
 
+// HYK-210-human-log-1 (coder-task.md §1-§2): HYK-207이 seatLiveness/
+// dispatchStart 두 축의 워크트리별 판정에 실어 보내는 `correlation.
+// partialFailures`(orca-adapter.mjs 단일 출처, §5 비타협 -- 여기서는
+// 소비만 하고 생성부는 고치지 않는다)를 한 줄 로그에 옮겨 적기 위해
+// 워크트리 배열 전체에서 모아 평탄화한다. 축 자체가 COLLECTION_FAILED
+// 등으로 `worktrees`가 없거나 형식이 다르면 조용히 빈 배열([])을
+// 낸다 -- 이 축의 실패 자체는 이미 status/verdict로 표면화되므로, 이
+// 부가 정보 추출 실패가 로그 줄 조립 전체를 막아서는 안 된다.
+function collectPartialFailures(axisRaw) {
+  if (!isPlainObject(axisRaw) || !Array.isArray(axisRaw.worktrees)) return [];
+  const collected = [];
+  for (const wt of axisRaw.worktrees) {
+    if (!isPlainObject(wt) || !isPlainObject(wt.correlation)) continue;
+    const failures = wt.correlation.partialFailures;
+    if (!Array.isArray(failures)) continue;
+    for (const f of failures) {
+      if (isPlainObject(f)) collected.push(f);
+    }
+  }
+  return collected;
+}
+
 // orch-stall-detect.mjs의 stdout(JSON 한 줄)을 파싱한다. 파싱 실패는
 // "판정 불가"이지 예외가 아니다(§5-A와 같은 원칙 재사용).
 //
@@ -95,6 +117,10 @@ function extractSeatLivenessFields(seatLiveness) {
       seatLiveness && typeof seatLiveness.totalWorktrees === "number"
         ? seatLiveness.totalWorktrees
         : null,
+    // HYK-210-human-log-1: HYK-207이 correlation.partialFailures로 보존한
+    // 좌석별 실패 사유를 buildLogLine이 로그 줄에 실을 수 있도록 평탄화해
+    // 함께 옮긴다(§1 "마지막 한 조각").
+    seatLivenessPartialFailures: collectPartialFailures(seatLiveness),
   };
 }
 
@@ -142,6 +168,11 @@ function extractDispatchStartFields(dispatchStart) {
       dispatchStart && typeof dispatchStart.totalWorktrees === "number"
         ? dispatchStart.totalWorktrees
         : null,
+    // HYK-210-human-log-1: seatLiveness와 동일 이유 -- dispatchStart 축도
+    // resolveObservationWithDeliveredSeatFallback을 거치므로 같은 모양의
+    // correlation.partialFailures를 가질 수 있다(orch-stall-detect.mjs
+    // judgeDispatchStartForRepo 참조).
+    startPartialFailures: collectPartialFailures(dispatchStart),
   };
 }
 
@@ -200,6 +231,7 @@ function parseDetectorStdout(stdout) {
       seatLivenessVerdict: null,
       seatLivenessWorstCount: null,
       seatLivenessTotalWorktrees: null,
+      seatLivenessPartialFailures: [],
       seatIdleStatus: null,
       seatIdleVerdict: null,
       seatIdleWorstCount: null,
@@ -208,6 +240,7 @@ function parseDetectorStdout(stdout) {
       startVerdict: null,
       startWorstCount: null,
       startTotalWorktrees: null,
+      startPartialFailures: [],
       unconsumedStatus: null,
       unconsumedVerdict: null,
       unconsumedWorstCount: null,
@@ -320,6 +353,59 @@ export function runCapObservationStep({
   };
 }
 
+// HYK-210-human-log-1 (coder-task.md §2) -- 좌석별 실패 사유를 한 줄
+// 로그에 사람이 읽을 수 있는 형태로 싣는다. 원문 사유(orca-adapter.mjs가
+// 만드는 자유 텍스트, 공백·줄바꿈 포함 가능)를 그대로 실으면 ⓐ한 줄
+// 로그의 필드 토큰 파서(reach-report-core.mjs parseFieldTokens, 공백
+// 기준 분리)를 깨고 ⓑ여러 건이면 줄이 폭발한다(§2 비타협). 그래서
+// 공백을 밑줄로 접고, 길이·건수를 상한(MAX_PARTIAL_FAILURE_REASON_CHARS/
+// MAX_PARTIAL_FAILURE_ITEMS)으로 자른다 -- 잘린 나머지는 "+N_more"로
+// 건수만 남긴다(원문을 지어내지 않는다).
+const MAX_PARTIAL_FAILURE_ITEMS = 2;
+const MAX_PARTIAL_FAILURE_REASON_CHARS = 60;
+
+// ★"사람이 읽을 수 있는가"가 계약이다(coder-task.md §2/§4) -- reason이
+// 문자열이 아니면(예: 원시 객체) `String(...)`으로 무심코 이어붙이면
+// "[object Object]"가 찍힌다. typeof 가드로 그 경로 자체를 막고 대신
+// 읽을 수 있는 대체 문구를 낸다.
+function sanitizeFailureToken(raw, fallback) {
+  if (typeof raw !== "string" || raw.trim().length === 0) return fallback;
+  return raw.trim().replace(/\s+/g, "_");
+}
+
+function truncateToken(token, maxLen) {
+  return token.length > maxLen ? `${token.slice(0, maxLen)}...` : token;
+}
+
+function formatPartialFailureEntry(failure) {
+  const handle = sanitizeFailureToken(
+    isPlainObject(failure) ? failure.handle : null,
+    "unknown_handle",
+  );
+  const reason = truncateToken(
+    sanitizeFailureToken(
+      isPlainObject(failure) ? failure.reason : null,
+      "reason_unavailable",
+    ),
+    MAX_PARTIAL_FAILURE_REASON_CHARS,
+  );
+  return `${handle}:${reason}`;
+}
+
+// failures가 비어 있으면(가장 흔한 경우 -- 좌석 조회가 전부 성공) 이
+// 축의 로그 줄에 아무 것도 더하지 않는다(null -- buildLogLine이 걸러
+// 낸다). 기존 정상 로그 줄 형식을 건드리지 않기 위함이다.
+function failureLogSegment(prefix, failures) {
+  if (!Array.isArray(failures) || failures.length === 0) return null;
+  const shown = failures
+    .slice(0, MAX_PARTIAL_FAILURE_ITEMS)
+    .map(formatPartialFailureEntry);
+  const omitted = failures.length - shown.length;
+  const detail =
+    omitted > 0 ? `${shown.join("|")}|+${omitted}_more` : shown.join("|");
+  return `${prefix}_partial_failures=${failures.length} ${prefix}_partial_failure_detail=${detail}`;
+}
+
 // buildLogLine에서 분리(axisLogSegment와 같은 4필드 shape 관례 재사용,
 // coder-task.md §1 "기존 axisLogSegment 관례를 따르고").
 function capLogSegment(capResult) {
@@ -375,6 +461,10 @@ export function buildLogLine({ nowIso, detectorResult, capResult }) {
     worstCount: detectorResult.seatLivenessWorstCount,
     totalWorktrees: detectorResult.seatLivenessTotalWorktrees,
   });
+  const seatFailureSegment = failureLogSegment(
+    "seat",
+    detectorResult.seatLivenessPartialFailures,
+  );
   const idleSegment = axisLogSegment("idle", {
     status: detectorResult.seatIdleStatus,
     verdict: detectorResult.seatIdleVerdict,
@@ -387,6 +477,10 @@ export function buildLogLine({ nowIso, detectorResult, capResult }) {
     worstCount: detectorResult.startWorstCount,
     totalWorktrees: detectorResult.startTotalWorktrees,
   });
+  const startFailureSegment = failureLogSegment(
+    "start",
+    detectorResult.startPartialFailures,
+  );
   const unconsumedSegment = axisLogSegment("unconsumed", {
     status: detectorResult.unconsumedStatus,
     verdict: detectorResult.unconsumedVerdict,
@@ -394,7 +488,24 @@ export function buildLogLine({ nowIso, detectorResult, capResult }) {
     totalWorktrees: detectorResult.unconsumedTotalWorktrees,
   });
   const capSegment = capLogSegment(capResult ?? {});
-  return `${nowIso} exit=${detectorResult.exitCode} verdict=${verdict} reason=${reason} ${seatSegment} ${idleSegment} ${startSegment} ${unconsumedSegment} ${capSegment}`;
+  // HYK-210-human-log-1: 실패 세그먼트는 있을 때만 끼운다(filter(Boolean))
+  // -- 정상 실행(실패 0건)의 로그 줄 모양은 이 라운드 전과 바이트 단위로
+  // 동일하다(기존 소비자 회귀 0, coder-task.md §2-2).
+  return [
+    nowIso,
+    `exit=${detectorResult.exitCode}`,
+    `verdict=${verdict}`,
+    `reason=${reason}`,
+    seatSegment,
+    seatFailureSegment,
+    idleSegment,
+    startSegment,
+    startFailureSegment,
+    unconsumedSegment,
+    capSegment,
+  ]
+    .filter(Boolean)
+    .join(" ");
 }
 
 function appendLogWithRotation({ readFn, writeFn, logPath, line, maxLines }) {

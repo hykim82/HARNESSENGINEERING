@@ -315,6 +315,180 @@ test("HYK-185-unconsumed-1: missing unconsumed field in detector stdout logs unc
 });
 
 // ---------------------------------------------------------------------------
+// HYK-210-human-log-1 (coder-task.md §1-§2) -- HYK-207이 좌석별 조회
+// 실패를 판정 객체(seatLiveness/dispatchStart의 correlation.
+// partialFailures)까지 보존하는데, 그 사유가 사람이 읽는 한 줄 로그에는
+// 아직 안 실린다는 «마지막 한 조각». buildLogLine을 직접 호출해(§3
+// "도달 경로") 합성 detectorResult로 고정한다.
+// ---------------------------------------------------------------------------
+test("HYK-210-human-log-1: buildLogLine renders per-seat partial-failure reasons as a human-readable seat_partial_failure_detail token (direct call, synthetic detectorResult) (1/1)", () => {
+  const okLine = buildLogLine({
+    nowIso: "2026-08-09T12:00:00.000Z",
+    detectorResult: {
+      runnerFailure: false,
+      exitCode: 0,
+      verdict: "PROGRESSING",
+      reasonCode: "OK",
+      seatLivenessStatus: "SEAT_LIVENESS_JUDGED",
+      seatLivenessVerdict: "SUSPECTED_UNRESPONSIVE",
+      seatLivenessWorstCount: 1,
+      seatLivenessTotalWorktrees: 2,
+      seatLivenessPartialFailures: [
+        {
+          handle: "term_review-seat",
+          reason:
+            "orca-adapter: resolveDeliveredSeat -- terminal show query threw for candidate 'term_review-seat' (ETIMEDOUT)",
+        },
+      ],
+    },
+  });
+  assert.match(okLine, /seat_partial_failures=1/);
+  // 사유 원문(공백->밑줄)은 MAX_PARTIAL_FAILURE_REASON_CHARS(60자)에서
+  // "..."로 잘린다(§2 "줄을 폭발시키지 마라") -- 뒤쪽(ETIMEDOUT)은 잘려
+  // 나가지만 앞부분만으로도 사람이 "뭐가 실패했는지" 알아볼 수 있다.
+  assert.match(
+    okLine,
+    /seat_partial_failure_detail=term_review-seat:orca-adapter:_resolveDeliveredSeat_--_terminal_show_query_th\.\.\./,
+  );
+  assert.doesNotMatch(okLine, /\[object Object\]/);
+  assert.equal(okLine.includes("\n"), false, "must stay a single line");
+});
+
+test("HYK-210-human-log-1: buildLogLine caps items shown and marks the remainder with a count, does not explode the line (2 failures -> both items + no '+N_more' since both fit within the cap) (1/1)", () => {
+  const line = buildLogLine({
+    nowIso: "2026-08-09T12:00:00.000Z",
+    detectorResult: {
+      runnerFailure: false,
+      exitCode: 0,
+      verdict: "PROGRESSING",
+      reasonCode: "OK",
+      startStatus: "DISPATCH_START_JUDGED",
+      startVerdict: "NOT_STARTED",
+      startWorstCount: 1,
+      startTotalWorktrees: 2,
+      startPartialFailures: [
+        { handle: "term_a", reason: "one" },
+        { handle: "term_b", reason: "two" },
+        { handle: "term_c", reason: "three" },
+      ],
+    },
+  });
+  assert.match(line, /start_partial_failures=3/);
+  assert.match(
+    line,
+    /start_partial_failure_detail=term_a:one\|term_b:two\|\+1_more/,
+  );
+  // 한 줄 로그다 -- 개행이 섞여 들면 "한 줄"이라는 계약 자체가 깨진다.
+  assert.equal(line.includes("\n"), false);
+});
+
+test("HYK-210-human-log-1: buildLogLine falls back to a readable placeholder (not '[object Object]') when a failure's reason/handle is not a string (malformed input guard) (1/1)", () => {
+  const line = buildLogLine({
+    nowIso: "2026-08-09T12:00:00.000Z",
+    detectorResult: {
+      runnerFailure: false,
+      exitCode: 0,
+      verdict: "PROGRESSING",
+      reasonCode: "OK",
+      seatLivenessPartialFailures: [
+        { handle: { nested: "object" }, reason: { also: "an object" } },
+      ],
+    },
+  });
+  assert.doesNotMatch(line, /\[object Object\]/);
+  assert.match(
+    line,
+    /seat_partial_failure_detail=unknown_handle:reason_unavailable/,
+  );
+});
+
+test("HYK-210-human-log-1: no partial failures -> log line is byte-identical to the pre-HYK-210 format (existing consumer regression guard) (1/1)", () => {
+  const line = buildLogLine({
+    nowIso: "2026-08-09T12:00:00.000Z",
+    detectorResult: {
+      runnerFailure: false,
+      exitCode: 0,
+      verdict: "PROGRESSING",
+      reasonCode: "OK",
+    },
+  });
+  assert.equal(
+    line,
+    "2026-08-09T12:00:00.000Z exit=0 verdict=PROGRESSING reason=OK " +
+      "seat_status=NONE seat_verdict=NONE seat_worst_count=NONE seat_worktrees=NONE " +
+      "idle_status=NONE idle_verdict=NONE idle_worst_count=NONE idle_worktrees=NONE " +
+      "start_status=NONE start_verdict=NONE start_worst_count=NONE start_worktrees=NONE " +
+      "unconsumed_status=NONE unconsumed_verdict=NONE unconsumed_worst_count=NONE unconsumed_worktrees=NONE " +
+      "cap_status=NONE cap_verdict=NONE cap_value=NONE cap_source=NONE",
+  );
+});
+
+// ---------------------------------------------------------------------------
+// 다좌석 상황 합성(coder-task.md §3 "볼 것" ⓐ) -- 실물 orch-stall-detect.mjs
+// 를 부르지 않고 그 stdout 모양(seatLiveness.worktrees[].correlation.
+// partialFailures, 실측 orch-stall-detect.mjs judgeSeatLivenessAcrossWorktrees/
+// resolveObservationWithDeliveredSeatFallback 참조)만 흉내 낸 execFn을 주입해
+// runWatchOnce 전체 결선(파싱 -> buildLogLine -> 파일 append)이 실제로
+// 사유를 로그 줄에 싣는지를 못 박는다. ★이 결선(추출부)을 지우면 RED가
+// 된다 -- §4 변조 ⓐ가 이 시험이다.
+// ---------------------------------------------------------------------------
+test("HYK-210-human-log-1: runWatchOnce with a synthetic multi-seat detector stdout writes the per-seat failure reason into watch.log end-to-end (1/1)", () => {
+  const watchDir = tmpWatchDir();
+  try {
+    const result = runWatchOnce({
+      repoRoot: ROOT,
+      watchDir,
+      now: NOW_MS,
+      execFn: () =>
+        JSON.stringify({
+          verdict: "PROGRESSING",
+          reasonCode: "OK",
+          seatLiveness: {
+            status: "SEAT_LIVENESS_JUDGED",
+            verdict: "RESPONSIVE",
+            worstCount: 0,
+            totalWorktrees: 2,
+            worktrees: [
+              {
+                worktreePath: "/repo/main",
+                status: "SEAT_LIVENESS_JUDGED",
+                verdict: "RESPONSIVE",
+                correlation: {
+                  attempted: true,
+                  ok: true,
+                  handle: "term_matched-seat",
+                  partialFailures: [
+                    {
+                      handle: "term_review-seat",
+                      reason:
+                        "orca-adapter: resolveDeliveredSeat -- terminal show query threw for candidate 'term_review-seat' (transient orca CLI failure)",
+                    },
+                  ],
+                },
+              },
+              {
+                worktreePath: "/repo/hyk210",
+                status: "SEAT_LIVENESS_NOT_APPLICABLE",
+              },
+            ],
+          },
+          seatIdle: { status: "SEAT_IDLE_NOT_APPLICABLE" },
+          dispatchStart: { status: "DISPATCH_START_NOT_APPLICABLE" },
+        }),
+    });
+    const logText = fs.readFileSync(result.logPath, "utf8");
+    assert.match(logText, /seat_partial_failures=1/);
+    assert.match(
+      logText,
+      /seat_partial_failure_detail=term_review-seat:orca-adapter:_resolveDeliveredSeat_--_terminal_show_query_th\.\.\./,
+    );
+    assert.doesNotMatch(logText, /\[object Object\]/);
+  } finally {
+    fs.rmSync(watchDir, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
 // 원상복구 단언(coder-task.md §2 비타협 #6·#7) -- mkdtemp만 썼다.
 // ---------------------------------------------------------------------------
 after(() => {
