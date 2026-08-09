@@ -85,6 +85,32 @@ test("★실측 수리: a pre-seat-wire log line with NO axis segments at all (r
   assert.equal(parsed.axes.idle.verdict, null);
 });
 
+// HYK-210-human-log-1 (coder-task.md §2-2 "기존 로그 소비자 회귀 0"): 이
+// 라운드는 buildLogLine(watch-run.mjs)에 `seat_partial_failures=`/
+// `seat_partial_failure_detail=`(그리고 start_* 대응) 새 토큰을 추가한다.
+// parseFieldTokens는 `key=value` 토큰을 이름 기반으로만 뽑으므로(§2 axis
+// 정의에 없는 새 키는 그냥 버려진다), 기존 4축 파싱이 이 새 토큰의 존재
+// 여부와 무관하게 그대로 성립해야 한다 -- 이 시험이 그것을 고정한다.
+test("HYK-210-human-log-1: parseLogLine ignores new seat_partial_failures*/start_partial_failures* tokens and still round-trips the 4 known axes unchanged (existing log consumer regression guard) (1/1)", () => {
+  const withFailureTokens =
+    line({
+      ts: "2026-08-09T12:00:00.000Z",
+      seatStatus: "SEAT_LIVENESS_JUDGED",
+      seatVerdict: "SUSPECTED_UNRESPONSIVE",
+      startStatus: "DISPATCH_START_JUDGED",
+      startVerdict: "NOT_STARTED",
+    }) +
+    " seat_partial_failures=1 seat_partial_failure_detail=term_abc:terminal_show_query_threw" +
+    " start_partial_failures=1 start_partial_failure_detail=term_abc:terminal_show_query_threw";
+  const parsed = parseLogLine(withFailureTokens);
+  assert.ok(parsed, "must still parse despite unknown trailing tokens");
+  assert.equal(parsed.axes.seat.status, "SEAT_LIVENESS_JUDGED");
+  assert.equal(parsed.axes.seat.verdict, "SUSPECTED_UNRESPONSIVE");
+  assert.equal(parsed.axes.start.status, "DISPATCH_START_JUDGED");
+  assert.equal(parsed.axes.start.verdict, "NOT_STARTED");
+  assert.equal(parsed.axes.idle.status, "SEAT_IDLE_NOT_APPLICABLE");
+});
+
 test("parseLogLine: RUNNER_FAILURE lines and garbage lines are not thrown, just null (2/2)", () => {
   assert.equal(
     parseLogLine("2026-08-05T05:06:00.000Z RUNNER_FAILURE message=boom"),
