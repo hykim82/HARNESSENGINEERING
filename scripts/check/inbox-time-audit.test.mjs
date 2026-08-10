@@ -904,3 +904,244 @@ test("mutation 3 (필수): 고정 기본 경로 결정 로직 제거 -> 기본 �
     rmSync(mutDir, { recursive: true, force: true });
   }
 });
+
+// ---------------------------------------------------------------------------
+// HYK-186 5R §2 -- self-audit contamination bug (4R 신규 결함, 독립 검토
+// 실측): the durable report lives inside inboxDir (3R/4R deliberate, 타당
+// 판정 유지) -- from the SECOND run onward it existed as an ordinary file
+// and got audited as one, its own "## Audit run <ISO>" batch header
+// misread as a claimed time, producing a false MISMATCH written into the
+// very report meant to be trustworthy.
+// ---------------------------------------------------------------------------
+
+test("★재현 (수리 전 실사고와 동일 모양): 같은 inbox에 플래그 없이 두 번 실행해도 2회차에 자기 리포트에 대한 허위 MISMATCH가 나타나지 않는다", () => {
+  withDir((inboxDir) => {
+    writeFileSync(join(inboxDir, "plain.txt"), "no hints\n", "utf8");
+    const first = spawnSync(process.execPath, [CLI_PATH, inboxDir], {
+      encoding: "utf8",
+    });
+    assert.equal(first.status, 0);
+    assert.doesNotMatch(
+      first.stdout,
+      /MISMATCH .*\.inbox-time-audit-report\.md/,
+      "1회차는 리포트가 아직 없으므로 애초에 자기감사가 일어날 수 없다 -- 대조군",
+    );
+
+    const second = spawnSync(process.execPath, [CLI_PATH, inboxDir], {
+      encoding: "utf8",
+    });
+    assert.equal(second.status, 0);
+    assert.doesNotMatch(
+      second.stdout,
+      /MISMATCH .*\.inbox-time-audit-report\.md/,
+      "수리 전 실사고: 2회차부터 자기 리포트가 inbox 항목으로 오인되어 허위 MISMATCH가 발생했다 -- 이제는 발생하지 않아야 한다",
+    );
+    // 진짜 감사 대상(plain.txt)은 계속 정상적으로 판정된다 -- 자기제외가
+    // 과도해서 진짜 항목까지 사라지지 않았음을 함께 확인.
+    assert.match(second.stdout, /plain\.txt/);
+    const reportContent = readFileSync(
+      join(inboxDir, DEFAULT_REPORT_BASENAME),
+      "utf8",
+    );
+    assert.doesNotMatch(
+      reportContent,
+      /MISMATCH .*\.inbox-time-audit-report\.md/,
+      "durable 파일 자체에도 허위 MISMATCH가 남으면 안 된다 -- stdout만이 아니라 기록 자체가 오염되지 않아야 한다",
+    );
+  });
+});
+
+test("제외 규칙 경계1: --report <path>가 마침 inboxDir 안이면 그 경로도 제외된다(경로 일치가 기준, 파일명 패턴이 아님)", () => {
+  withDir((inboxDir) => {
+    writeFileSync(join(inboxDir, "plain.txt"), "no hints\n", "utf8");
+    const customInsidePath = join(inboxDir, "custom-name-report.txt");
+    // 1회차: 리포트 생성.
+    spawnSync(
+      process.execPath,
+      [CLI_PATH, inboxDir, "--report", customInsidePath],
+      { encoding: "utf8" },
+    );
+    // 2회차: 같은 --report 경로로 다시 실행 -- custom-name-report.txt가
+    // 자기 자신을 감사하면 안 된다(파일명이 기본 리포트 이름 패턴과
+    // 전혀 다른데도 경로가 일치하므로 제외되어야 한다는 것이 핵심).
+    const second = spawnSync(
+      process.execPath,
+      [CLI_PATH, inboxDir, "--report", customInsidePath],
+      { encoding: "utf8" },
+    );
+    assert.equal(second.status, 0);
+    assert.doesNotMatch(
+      second.stdout,
+      /MISMATCH .*custom-name-report\.txt/,
+      "파일명이 기본 리포트 이름과 무관해도, 이번 실행이 쓸 정확한 경로와 일치하면 제외되어야 한다",
+    );
+  });
+});
+
+test("제외 규칙 경계2: 환경변수로 준 경로가 inboxDir 안이면 그 경로도 제외된다", () => {
+  withDir((inboxDir) => {
+    writeFileSync(join(inboxDir, "plain.txt"), "no hints\n", "utf8");
+    const envInsidePath = join(inboxDir, "env-report.md");
+    const env = { ...process.env, [REPORT_PATH_ENV_VAR]: envInsidePath };
+    spawnSync(process.execPath, [CLI_PATH, inboxDir], {
+      encoding: "utf8",
+      env,
+    });
+    const second = spawnSync(process.execPath, [CLI_PATH, inboxDir], {
+      encoding: "utf8",
+      env,
+    });
+    assert.equal(second.status, 0);
+    assert.doesNotMatch(second.stdout, /MISMATCH .*env-report\.md/);
+  });
+});
+
+test("제외 규칙 경계3 (★중요): --no-report인 실행은 이전 실행이 남긴 리포트 파일을 평범한 파일로 그대로 감사한다 -- 조용히 숨기지 않는다", () => {
+  withDir((inboxDir) => {
+    writeFileSync(join(inboxDir, "plain.txt"), "no hints\n", "utf8");
+    // 1회차: 기본 활성화로 리포트를 실제로 만들어 둔다.
+    spawnSync(process.execPath, [CLI_PATH, inboxDir], { encoding: "utf8" });
+    assert.equal(existsSync(join(inboxDir, DEFAULT_REPORT_BASENAME)), true);
+    // 2회차: --no-report -- 이 실행은 아무 파일도 쓰지 않으므로 excludePath가
+    // 없다. 남아 있는 .inbox-time-audit-report.md는 "이번 실행이 쓸 파일"이
+    // 아니라 그냥 존재하는 파일이므로 평범하게 감사되어야 한다(그 배치
+    // 헤더의 ISO 시각을 오인해 MISMATCH가 나는 것 자체는 이 시험의
+    // 관심사가 아니다 -- 핵심은 "조용히 빠지지 않는다", 즉 감사 대상
+    // 목록에는 반드시 나타난다는 것).
+    const second = spawnSync(
+      process.execPath,
+      [CLI_PATH, inboxDir, "--no-report"],
+      { encoding: "utf8" },
+    );
+    assert.equal(second.status, 0);
+    assert.match(
+      second.stdout,
+      new RegExp(DEFAULT_REPORT_BASENAME.replace(/\./g, "\\.")),
+      "--no-report 실행에서는 남아있는 리포트 파일도 감사 목록에 나타나야 한다 -- 조용히 제외되면 '실제로 있는 파일을 감사에서 빼는' 별개의 문제가 된다",
+    );
+  });
+});
+
+test("가시성(§2-3): 제외된 사실이 stdout과 durable 리포트 양쪽에 사람이 읽는 문장으로 남는다", () => {
+  withDir((inboxDir) => {
+    writeFileSync(join(inboxDir, "plain.txt"), "no hints\n", "utf8");
+    spawnSync(process.execPath, [CLI_PATH, inboxDir], { encoding: "utf8" });
+    const second = spawnSync(process.execPath, [CLI_PATH, inboxDir], {
+      encoding: "utf8",
+    });
+    assert.match(
+      second.stdout,
+      /자기 리포트 1건 감사 대상에서 제외/,
+      "stdout에 제외 사실이 사람이 읽는 문장으로 보여야 한다",
+    );
+    const reportContent = readFileSync(
+      join(inboxDir, DEFAULT_REPORT_BASENAME),
+      "utf8",
+    );
+    assert.match(
+      reportContent,
+      /자기 리포트 1건 감사 대상에서 제외/,
+      "durable 파일에도 남아야 한다 -- stdout에만 있으면 그 자체가 '로그에만 남는 것' 문제를 반복하는 것",
+    );
+  });
+});
+
+test("auditDirectory (단위): excludePath와 정확히 일치하는 파일만 빠진다, 다른 파일은 영향 없음", () => {
+  withDir((dir) => {
+    const now = new Date();
+    writeFileSync(
+      join(dir, "0303-real.txt"),
+      headerFor(now, now.getHours(), now.getMinutes()),
+      "utf8",
+    );
+    writeFileSync(join(dir, "self-report.md"), "## Audit run fake\n", "utf8");
+    const { entries, excluded } = auditDirectory({
+      dir,
+      excludePath: join(dir, "self-report.md"),
+    });
+    assert.equal(excluded.length, 1);
+    assert.equal(excluded[0], "self-report.md");
+    assert.equal(entries.length, 1);
+    assert.equal(entries[0].basename, "0303-real.txt");
+  });
+});
+
+test("auditDirectory (단위): excludePath가 undefined면 아무것도 제외하지 않는다(기존 동작 100% 보존)", () => {
+  withDir((dir) => {
+    writeFileSync(join(dir, "plain.txt"), "no hints\n", "utf8");
+    const { entries, excluded } = auditDirectory({ dir });
+    assert.equal(excluded.length, 0);
+    assert.equal(entries.length, 1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ★RED 변조 2건 (필수, §2) -- 사본(mkdtemp)에만 변조, 원본 미변경.
+// ---------------------------------------------------------------------------
+
+test("mutation 4 (필수): 제외 로직 제거 -> 2회차에 자기 리포트 허위 MISMATCH가 다시 나타남 -> RED", () => {
+  const src = readFileSync(CLI_PATH, "utf8");
+  const target =
+    "    if (excludeNorm !== null && normalizeForCompare(filePath) === excludeNorm) {\n      excluded.push(basename);\n      continue;\n    }\n";
+  assertExactlyOneMatch(
+    src,
+    target,
+    "excludePath skip branch in auditDirectory",
+  );
+  const mutated = src.replace(target, "");
+
+  const { mutDir, mutantPath } = stageMutant(mutated);
+  try {
+    withDir((inboxDir) => {
+      writeFileSync(join(inboxDir, "plain.txt"), "no hints\n", "utf8");
+      spawnSync(process.execPath, [mutantPath, inboxDir], { encoding: "utf8" });
+      const second = spawnSync(process.execPath, [mutantPath, inboxDir], {
+        encoding: "utf8",
+      });
+      assert.equal(second.status, 0);
+      assert.match(
+        second.stdout,
+        /MISMATCH .*\.inbox-time-audit-report\.md/,
+        "RED: with the exclusion branch removed, the exact pre-fix bug reproduces -- the self-report is audited and flagged as a false MISMATCH again",
+      );
+    });
+  } finally {
+    rmSync(mutDir, { recursive: true, force: true });
+  }
+});
+
+test("mutation 5 (필수, ★반대 방향): 제외 범위를 과도하게 넓힘(모든 .md 제외) -> 진짜 감사 대상(.md 파일)이 사라짐 -> RED", () => {
+  const src = readFileSync(CLI_PATH, "utf8");
+  const target =
+    "    if (excludeNorm !== null && normalizeForCompare(filePath) === excludeNorm) {\n";
+  assertExactlyOneMatch(src, target, "excludePath comparison condition");
+  const mutated = src.replace(target, '    if (basename.endsWith(".md")) {\n');
+
+  const { mutDir, mutantPath } = stageMutant(mutated);
+  try {
+    withDir((inboxDir) => {
+      // 진짜 감사 대상: 우연히 .md 확장자를 가진 실제 받는함 파일.
+      const now = new Date();
+      writeFileSync(
+        join(inboxDir, "0303-real-inbox-item.md"),
+        headerFor(now, now.getHours(), now.getMinutes()),
+        "utf8",
+      );
+      const res = spawnSync(process.execPath, [mutantPath, inboxDir], {
+        encoding: "utf8",
+      });
+      assert.equal(res.status, 0);
+      // The mutant's own exclusion-notice line legitimately mentions the
+      // filename (visibility is preserved) -- the RED signal is that the
+      // file never gets a real verdict line (NORMAL/MISMATCH/UNDECIDABLE)
+      // at all, i.e. it was never actually audited.
+      assert.doesNotMatch(
+        res.stdout,
+        /^(NORMAL|MISMATCH|UNDECIDABLE) 0303-real-inbox-item\.md/m,
+        "RED: with the exclusion widened to 'every .md file', a genuine inbox item sharing the extension never receives an audit verdict at all -- this is the opposite-direction failure a single removal-only mutation (mutation 4) cannot catch",
+      );
+    });
+  } finally {
+    rmSync(mutDir, { recursive: true, force: true });
+  }
+});

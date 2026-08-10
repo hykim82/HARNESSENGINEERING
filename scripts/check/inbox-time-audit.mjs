@@ -176,31 +176,74 @@ export function formatAuditLine(entry) {
   return base + advisory;
 }
 
+// HYK-186 5R §2 -- normalizes a path for exact-match comparison only
+// (backslash/forward-slash only; this is NOT a general path-resolution
+// helper, it never touches the filesystem or resolves `.`/`..`). Used
+// solely to compare `join(dir, basename)` against the run's own resolved
+// report path so a Windows-vs-POSIX separator mismatch between the two
+// call sites can't defeat the exact-path exclusion below.
+function normalizeForCompare(p) {
+  return typeof p === "string" ? p.replace(/\\/g, "/") : p;
+}
+
 // auditDirectory: enumerates files in `dir`, audits each, returns
-// {entries, groups} -- `groups` demonstrates the 동일 분 충돌 policy
-// (groupByFilenameMinute never collapses).
+// {entries, groups, excluded} -- `groups` demonstrates the 동일 분 충돌
+// policy (groupByFilenameMinute never collapses).
+//
+// HYK-186 5R (검토자 실측, 4R 신규 결함): the durable report's fixed
+// default lives INSIDE inboxDir (3R/4R's own deliberate, 검토자가 타당
+// 판정한 choice -- moving it out reopens the 08-05 Linux-CI absolute-path
+// incident, §1). That means from the SECOND run onward, the report file
+// this exact run is about to write to already exists as an ordinary inbox
+// entry -- and gets audited as one, misreading its own "## Audit run
+// <ISO>" batch header as if it were a genuine time-claiming header. A
+// self-referential false MISMATCH then gets appended to the very report
+// meant to be a trustworthy record (검토자 실측: 2회차부터 자기 리포트에
+// 대한 허위 541분 MISMATCH가 durable 기록에 섞였다).
+//
+// ★제외 기준 = "이 실행이 쓸 정확한 경로"(exact path match), 파일명
+// 문자열 패턴이 아니다. 근거(§2-2 요구 그대로):
+// - 파일명 패턴(예: `.inbox-time-audit-report.md`로 시작하는 것 전부, 혹은
+//   모든 `.md`)으로 제외하면 §2 변조2("과도하게 넓힘")가 정확히 잡아내는
+//   실패 모드가 된다 -- 진짜 감사 대상(예: 우연히 같은 이름 패턴을 가진
+//   실제 받는함 파일)까지 조용히 사라진다.
+// - `excludePath`는 호출자(CLI)가 `resolveReportPath`로 이미 계산한 **이번
+//   실행의 실제 목적지**를 그대로 넘긴다 -- 그 값이 기본 경로든,
+//   `--report <path>`로 준 경로든(마침 inboxDir 안이어도), 환경변수 경로든
+//   상관없다: "이번 실행이 그 파일에 쓸 것이다"라는 사실 하나만 본다.
+// - `--no-report`인 실행은 `excludePath`가 애초에 없다(CLI가 `reportPath`
+//   가 null일 때 이 인자를 안 넘긴다) -- 그래서 이전 실행이 남긴 리포트
+//   파일이 inboxDir에 남아 있어도 **평범한 파일로 그대로 감사된다**. 조용히
+//   숨기면 "실제로 있는 파일을 감사에서 빼는" 또 다른 문제가 된다는 §2-2의
+//   경고를 그대로 따른 것 -- 제외는 오직 "이 실행이 지금 쓰려는 그 파일"
+//   하나뿐이다.
 export function auditDirectory({
   dir,
+  excludePath,
   readdirFn = readdirSync,
   readFileFn = (p) => readFileSync(p, "utf8"),
   statFn = statSync,
 }) {
   const names = readdirFn(dir);
-  const entries = names.map((basename) =>
-    auditFile({
-      filePath: join(dir, basename),
-      basename,
-      readFileFn,
-      statFn,
-    }),
-  );
+  const excludeNorm =
+    typeof excludePath === "string" ? normalizeForCompare(excludePath) : null;
+  const excluded = [];
+  const entries = [];
+  for (const basename of names) {
+    const filePath = join(dir, basename);
+    if (excludeNorm !== null && normalizeForCompare(filePath) === excludeNorm) {
+      excluded.push(basename);
+      continue;
+    }
+    entries.push(auditFile({ filePath, basename, readFileFn, statFn }));
+  }
   const groups = groupByFilenameMinute(
     entries.map((e) => ({
       minuteKey: e.basename.match(FILENAME_HHMM_RE)?.[0] ?? e.basename,
       ...e,
     })),
   );
-  return { entries, groups };
+  return { entries, groups, excluded };
 }
 
 // buildAuditReportBatch: pure -- one run's durable text block. Each run gets
@@ -209,9 +252,28 @@ export function auditDirectory({
 // distinguishable batches rather than colliding -- same "never silently
 // collapse" principle groupByFilenameMinute already applies to same-minute
 // inbox files, applied here to same-minute audit RUNS.
-export function buildAuditReportBatch({ entries, runAtMs, dir }) {
+// HYK-186 5R §2-3: the self-exclusion must not be a silent subtraction --
+// a reader of either the terminal output or the durable file itself must
+// be able to see that a file was deliberately left out (and which one,
+// and why), not just notice the entry count is one lower than they
+// expected. Surfaced in BOTH places (stdout via the CLI block below, and
+// here in the durable batch) since the durable file is the one a human
+// reads well after the terminal output is gone -- a note only on stdout
+// would itself become "로그에만 남는 것", the exact defect 3R/4R exist to
+// close for every other piece of this tool's output.
+export function buildAuditReportBatch({
+  entries,
+  runAtMs,
+  dir,
+  excluded = [],
+}) {
   const header = `## Audit run ${new Date(runAtMs).toISOString()} (dir: ${dir})`;
   const lines = entries.map((e) => `- ${formatAuditLine(e)}`);
+  if (excluded.length > 0) {
+    lines.push(
+      `- (자기 리포트 ${excluded.length}건 감사 대상에서 제외: ${excluded.join(", ")} -- 이 실행이 직접 쓰는 durable 리포트 파일이라 자기 자신을 감사하지 않음)`,
+    );
+  }
   const body = lines.length > 0 ? lines.join("\n") : "- (no files found)";
   return `${header}\n${body}\n\n`;
 }
@@ -294,7 +356,7 @@ if (invokedDirectly) {
   const reportPath = resolveReportPath({ dir, noReport, explicitReportPath });
   let result;
   try {
-    result = auditDirectory({ dir });
+    result = auditDirectory({ dir, excludePath: reportPath ?? undefined });
   } catch (err) {
     console.error(`inbox-time-audit: could not read '${dir}': ${err.message}`);
     process.exit(1);
@@ -302,11 +364,17 @@ if (invokedDirectly) {
   for (const entry of result.entries) {
     console.log(formatAuditLine(entry));
   }
+  if (result.excluded.length > 0) {
+    console.log(
+      `(자기 리포트 ${result.excluded.length}건 감사 대상에서 제외: ${result.excluded.join(", ")})`,
+    );
+  }
   if (reportPath) {
     const batchText = buildAuditReportBatch({
       entries: result.entries,
       runAtMs: Date.now(),
       dir,
+      excluded: result.excluded,
     });
     try {
       writeAuditReport({ reportPath, batchText });
