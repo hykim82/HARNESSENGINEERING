@@ -1,7 +1,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, writeFileSync, rmSync, readFileSync } from "node:fs";
+import {
+  mkdtempSync,
+  mkdirSync,
+  writeFileSync,
+  rmSync,
+  readFileSync,
+} from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -521,9 +527,21 @@ test("(14) normal: CRLF-terminated task file (fresh, streak 0) -> ALLOW (precond
   });
 });
 
-test("(15) 2R §3-1 실측 회귀: no --ledger given, invoking CWD is a DIFFERENT directory than the task file -- ledger still resolves next to the task file, not from CWD", () => {
+// HYK-220 2R: rewritten for the git-common-dir-based default resolution
+// (1R/2R §2 근거 B fix) -- the CWD-independence guarantee this test asserts
+// is now provided by git identity, not by "resolve next to the task file"
+// string logic, so both `dir` and the decoy `elsewhereDir` must themselves
+// be real git repos (`resolveRepoRoot` needs an actual repo to identify;
+// a plain non-git tmpdir now fail-closes with REJECT_LEDGER_PATH_UNRESOLVABLE
+// instead of silently degrading to dirname-based lookup -- see test (17)).
+test("(15) 2R: no --ledger given, invoking CWD is a DIFFERENT (also real) git repo than the task file's repo -- ledger still resolves from the task file's OWN repo, not from CWD's repo", () => {
   withFixtureDir((dir) => {
-    const taskPath = join(dir, "coder-task.md");
+    execFileSync("git", ["init", "-q", dir]);
+    execFileSync("git", ["-C", dir, "config", "user.email", "t@t.com"]);
+    execFileSync("git", ["-C", dir, "config", "user.name", "t"]);
+    const harnessDir = join(dir, ".harness");
+    mkdirSync(harnessDir);
+    const taskPath = join(harnessDir, "coder-task.md");
     const envelope = [
       "<!-- reject-streak-envelope",
       "원인 분류: 모델 한계",
@@ -532,13 +550,14 @@ test("(15) 2R §3-1 실측 회귀: no --ledger given, invoking CWD is a DIFFEREN
       "-->",
     ].join("\n");
     writeFileSync(taskPath, `task_id: HYK-9012-cwd-1\n${envelope}\n`, "utf8");
-    // The ledger sibling of the task file says streak=2 WITH an envelope
-    // present -> should ALLOW. A DIFFERENT ledger (elsewhere, at the
-    // invoking CWD) says streak=2 with NO envelope worth of history -- if
-    // the CLI ever again resolves the ledger from CWD instead of from the
-    // task file's own directory, this second ledger would be consulted
-    // instead and the run would REJECT (BLOCK) instead of ALLOW.
-    writeLedger(join(dir, "reject-streak.json"), {
+    // The task file's OWN repo ledger says streak=2 WITH an envelope
+    // present -> should ALLOW. A DIFFERENT ledger, in a DIFFERENT real git
+    // repo (the invoking CWD), says streak=4 (hard-stop, needs a
+    // DIAGNOSTIC envelope this task file doesn't carry) -- if the CLI ever
+    // resolves the ledger from CWD's repo instead of the task file's own
+    // repo, this decoy would be consulted instead and the run would REJECT
+    // (diagnostic-gate BLOCK) instead of ALLOW.
+    writeLedger(join(harnessDir, "reject-streak.json"), {
       schema_version: 1,
       issues: {
         "HYK-9012": {
@@ -552,13 +571,18 @@ test("(15) 2R §3-1 실측 회귀: no --ledger given, invoking CWD is a DIFFEREN
     });
     const elsewhereDir = mkdtempSync(join(tmpdir(), "elsewhere-cwd-"));
     try {
-      // Same issue id, but THIS ledger has streak=4 (hard-stop tier, needs
-      // a DIAGNOSTIC envelope with 재현 증거 포인터) -- the task file above
-      // only carries an ordinary envelope, so if the CLI ever resolves the
-      // ledger from CWD again, this is the ledger it would read and
-      // diagnostic-gate would BLOCK (DIAGNOSTIC_FIELD_MISSING) instead of
-      // the correct ALLOW, turning this assertion RED.
-      writeLedger(join(elsewhereDir, "reject-streak.json"), {
+      execFileSync("git", ["init", "-q", elsewhereDir]);
+      execFileSync("git", [
+        "-C",
+        elsewhereDir,
+        "config",
+        "user.email",
+        "t@t.com",
+      ]);
+      execFileSync("git", ["-C", elsewhereDir, "config", "user.name", "t"]);
+      const elsewhereHarness = join(elsewhereDir, ".harness");
+      mkdirSync(elsewhereHarness);
+      writeLedger(join(elsewhereHarness, "reject-streak.json"), {
         schema_version: 1,
         issues: {
           "HYK-9012": {
@@ -572,9 +596,10 @@ test("(15) 2R §3-1 실측 회귀: no --ledger given, invoking CWD is a DIFFEREN
           },
         },
       });
-      // no --ledger flag at all; cwd is elsewhereDir, nowhere near taskPath
+      // no --ledger flag at all; cwd is elsewhereDir's repo, a DIFFERENT
+      // repo than taskPath's own
       const r = runCli([taskPath], { cwd: elsewhereDir });
-      assert.equal(r.status, 0);
+      assert.equal(r.status, 0, r.stdout + r.stderr);
       assert.match(r.stdout, /ALLOW/);
     } finally {
       rmSync(elsewhereDir, { recursive: true, force: true });
@@ -658,3 +683,250 @@ test("(16) 4R §3 TOCTOU -- ledger mutated to streak=0 in the window between the
 // task-id-missing, task-id-malformed, ledger-missing, ledger-corrupt,
 // file-missing, no-argument = 8 total) are counted separately and never
 // folded into the N=7 false-positive denominator (2R §4 지적2 요구).
+
+// ---------------------------------------------------------------------------
+// HYK-220 2R §2: the six mandatory scenarios the 1R review named by number.
+// All six build REAL git repos/worktrees under tmpdir (never touch this
+// repo's own .git) -- resolveLedgerPath's new default path is git-identity
+// based, so a fixture that wants to exercise it honestly needs a real repo.
+// ---------------------------------------------------------------------------
+
+function initGitRepo(dir) {
+  execFileSync("git", ["init", "-q", dir]);
+  execFileSync("git", ["-C", dir, "config", "user.email", "t@t.com"]);
+  execFileSync("git", ["-C", dir, "config", "user.name", "t"]);
+}
+
+function commitAll(dir, message) {
+  execFileSync("git", ["-C", dir, "add", "-A"]);
+  execFileSync("git", ["-C", dir, "commit", "-q", "-m", message]);
+}
+
+test("(17) §2-1 정상 링크드 워크트리 -- 메인 정본 원장으로 수렴 (streak 0, fresh) -> ALLOW", () => {
+  withFixtureDir((dir) => {
+    const mainDir = join(dir, "main");
+    mkdirSync(mainDir);
+    initGitRepo(mainDir);
+    mkdirSync(join(mainDir, ".harness"));
+    writeFileSync(join(mainDir, "README.md"), "x\n", "utf8");
+    writeLedger(join(mainDir, ".harness", "reject-streak.json"), {
+      schema_version: 1,
+      issues: {},
+    });
+    commitAll(mainDir, "init");
+    const wtDir = join(dir, "wt1");
+    execFileSync("git", [
+      "-C",
+      mainDir,
+      "worktree",
+      "add",
+      "-q",
+      "--detach",
+      wtDir,
+      "HEAD",
+    ]);
+    // wtDir already checked out .harness/ from HEAD (git worktree add
+    // materializes the working tree) -- no mkdir needed.
+    const taskPath = join(wtDir, ".harness", "coder-task.md");
+    writeFileSync(taskPath, "task_id: HYK-9100-fresh-1\nbody\n", "utf8");
+    // wt1 has NO local reject-streak.json at all -- must still ALLOW by
+    // converging on main's ledger.
+    const r = runCli([taskPath]);
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.match(r.stdout, /ALLOW/);
+  });
+});
+
+test("(18) §2-2 ★핵심★ 로컬 원장 streak 리셋 우회가 닫힘 -- 링크드 워크트리에 streak=0 빈 원장을 심어도 정본 streak=2(봉투 없음)를 읽어 REJECT", () => {
+  withFixtureDir((dir) => {
+    const mainDir = join(dir, "main");
+    mkdirSync(mainDir);
+    initGitRepo(mainDir);
+    mkdirSync(join(mainDir, ".harness"));
+    writeFileSync(join(mainDir, "README.md"), "x\n", "utf8");
+    writeLedger(join(mainDir, ".harness", "reject-streak.json"), {
+      schema_version: 1,
+      issues: {
+        "HYK-9101": {
+          streak: 2,
+          history: [
+            { task_id: "HYK-9101-coder-1", verdict: "rejected", at: "a" },
+            { task_id: "HYK-9101-coder-2", verdict: "rejected", at: "b" },
+          ],
+        },
+      },
+    });
+    commitAll(mainDir, "init");
+    const wtDir = join(dir, "wt-bypass-attempt");
+    execFileSync("git", [
+      "-C",
+      mainDir,
+      "worktree",
+      "add",
+      "-q",
+      "--detach",
+      wtDir,
+      "HEAD",
+    ]);
+    // wtDir already checked out .harness/ (with main's real streak=2
+    // ledger) from HEAD -- the writeLedger call below deliberately
+    // OVERWRITES that checked-out copy with a local streak-reset decoy.
+    const taskPath = join(wtDir, ".harness", "coder-task.md");
+    // NO envelope -- if the local, freshly-created ledger below were
+    // honored, streak would read as 0 (no entry) and this would ALLOW.
+    writeFileSync(taskPath, "task_id: HYK-9101-retry-1\nno envelope\n", "utf8");
+    writeLedger(join(wtDir, ".harness", "reject-streak.json"), {
+      schema_version: 1,
+      issues: {},
+    });
+    const r = runCli([taskPath]);
+    assert.equal(
+      r.status,
+      1,
+      "must REJECT using main's real streak=2, not the local streak-0 decoy",
+    );
+    assert.match(r.stderr, /streak=2/);
+    assert.match(r.stderr, /BLOCK\(exit 2\)/);
+  });
+});
+
+test("(19) §2-3 비-git 경로 + 로컬 원장 -- 1R까지는 ALLOW였다(검토 실측), 2R 이후 REJECT(REJECT_LEDGER_PATH_UNRESOLVABLE)", () => {
+  withFixtureDir((dir) => {
+    // deliberately NOT a git repo
+    const taskPath = join(dir, "coder-task.md");
+    writeFileSync(taskPath, "task_id: HYK-9102-nongit-1\nbody\n", "utf8");
+    // a local ledger sitting right next to the task file, streak 0 -- 1R's
+    // dirname(taskPath) default would have read this and ALLOWed.
+    writeLedger(join(dir, "reject-streak.json"), {
+      schema_version: 1,
+      issues: {},
+    });
+    const r = runCli([taskPath]);
+    assert.equal(r.status, 1, r.stdout + r.stderr);
+    assert.match(
+      r.stderr,
+      /REJECT_LEDGER_PATH_UNRESOLVABLE|저장소를 식별하지 못함/,
+    );
+    assert.doesNotMatch(
+      r.stderr,
+      /원장 파일이 존재하지 않음/,
+      "must NOT collapse into the ordinary ledger-missing reason (P1-2)",
+    );
+  });
+});
+
+test("(20) §2-4 P1-1 다른 저장소 taskPath -- --expect-repo-root와 실제 소속 저장소가 다르면 REJECT(REJECT_REPO_MISMATCH)", () => {
+  withFixtureDir((dir) => {
+    const repoA = join(dir, "repo-a");
+    const repoB = join(dir, "repo-b");
+    mkdirSync(repoA);
+    mkdirSync(repoB);
+    initGitRepo(repoA);
+    initGitRepo(repoB);
+    mkdirSync(join(repoA, ".harness"));
+    mkdirSync(join(repoB, ".harness"));
+    writeFileSync(join(repoA, "a.txt"), "x\n", "utf8");
+    writeFileSync(join(repoB, "b.txt"), "x\n", "utf8");
+    writeLedger(join(repoA, ".harness", "reject-streak.json"), {
+      schema_version: 1,
+      issues: {},
+    });
+    commitAll(repoA, "init");
+    commitAll(repoB, "init");
+    const taskPath = join(repoA, ".harness", "coder-task.md");
+    writeFileSync(taskPath, "task_id: HYK-9103-wrongrepo-1\nbody\n", "utf8");
+    // taskPath truly belongs to repoA, but the caller says it expected repoB
+    const r = runCli([taskPath, "--expect-repo-root", repoB]);
+    assert.equal(r.status, 1, r.stdout + r.stderr);
+    assert.match(r.stderr, /REJECT_REPO_MISMATCH|기대 저장소.*다름/);
+  });
+});
+
+test("(21) §2-6 P1-1 후단 -- 명시 --ledger 도 --expect-repo-root 대조를 통과 못 하면 REJECT (이전엔 --ledger가 대조 없이 그대로 우선했다)", () => {
+  withFixtureDir((dir) => {
+    const repoA = join(dir, "repo-a");
+    const repoB = join(dir, "repo-b");
+    mkdirSync(repoA);
+    mkdirSync(repoB);
+    initGitRepo(repoA);
+    initGitRepo(repoB);
+    mkdirSync(join(repoA, ".harness"));
+    writeFileSync(join(repoA, "a.txt"), "x\n", "utf8");
+    writeFileSync(join(repoB, "b.txt"), "x\n", "utf8");
+    commitAll(repoA, "init");
+    commitAll(repoB, "init");
+    const taskPath = join(repoA, ".harness", "coder-task.md");
+    writeFileSync(
+      taskPath,
+      "task_id: HYK-9104-explicitledger-1\nbody\n",
+      "utf8",
+    );
+    // An explicit --ledger that would ALLOW if honored (empty issues, no
+    // rejection history) -- but --expect-repo-root names repoB, which does
+    // NOT match taskPath's real repo (repoA), so this must still REJECT.
+    const explicitLedgerPath = join(dir, "attacker-controlled-ledger.json");
+    writeLedger(explicitLedgerPath, { schema_version: 1, issues: {} });
+    const r = runCli([
+      taskPath,
+      "--ledger",
+      explicitLedgerPath,
+      "--expect-repo-root",
+      repoB,
+    ]);
+    assert.equal(r.status, 1, r.stdout + r.stderr);
+    assert.match(r.stderr, /REJECT_REPO_MISMATCH|기대 저장소.*다름/);
+  });
+});
+
+test("(22) §2-5 bare 경계 -- bare 저장소 기반 링크드 워크트리에서도 원장 경로가 bare 디렉터리 자신 밑으로 올바르게 수렴 (검토 실측: dirname()이 한 단계 더 올라가 틀렸었다)", () => {
+  withFixtureDir((dir) => {
+    const bareDir = join(dir, "repo.git");
+    execFileSync("git", ["init", "-q", "--bare", bareDir]);
+    const seedDir = join(dir, "seed");
+    execFileSync("git", ["clone", "-q", bareDir, seedDir]);
+    execFileSync("git", ["-C", seedDir, "config", "user.email", "t@t.com"]);
+    execFileSync("git", ["-C", seedDir, "config", "user.name", "t"]);
+    writeFileSync(join(seedDir, "a.txt"), "x\n", "utf8");
+    commitAll(seedDir, "init");
+    execFileSync("git", ["-C", seedDir, "push", "-q", "origin", "HEAD:master"]);
+    const wtDir = join(dir, "wt-bare");
+    execFileSync("git", [
+      "-C",
+      bareDir,
+      "worktree",
+      "add",
+      "-q",
+      "--detach",
+      wtDir,
+      "HEAD",
+    ]);
+    mkdirSync(join(wtDir, ".harness"));
+    const taskPath = join(wtDir, ".harness", "coder-task.md");
+    writeFileSync(taskPath, "task_id: HYK-9105-bare-1\nno envelope\n", "utf8");
+    // ★the resolved root for a bare repo is the bare dir ITSELF (no nested
+    // .git) -- if resolveLedgerPath still did plain dirname(--git-common-dir)
+    // here, it would look one level too high (dir/, not dir/repo.git/) and
+    // find no .harness at all there either -- so this ledger placement is
+    // the assertion that the bare-aware root math actually took effect: a
+    // streak=2/no-envelope entry placed at the CORRECT (bare-dir-rooted)
+    // path must be found and must BLOCK. The bare repo dir has no working
+    // tree of its own, so its .harness/ must be created explicitly.
+    mkdirSync(join(bareDir, ".harness"));
+    writeLedger(join(bareDir, ".harness", "reject-streak.json"), {
+      schema_version: 1,
+      issues: {
+        "HYK-9105": {
+          streak: 2,
+          history: [
+            { task_id: "HYK-9105-coder-1", verdict: "rejected", at: "a" },
+            { task_id: "HYK-9105-coder-2", verdict: "rejected", at: "b" },
+          ],
+        },
+      },
+    });
+    const r = runCli([taskPath]);
+    assert.equal(r.status, 1, r.stdout + r.stderr);
+    assert.match(r.stderr, /streak=2/);
+    assert.match(r.stderr, /BLOCK\(exit 2\)/);
+  });
+});

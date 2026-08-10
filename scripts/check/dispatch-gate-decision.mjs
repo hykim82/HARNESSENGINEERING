@@ -18,6 +18,8 @@ import {
   combineGateDecisions,
   checkGatePreconditions,
   checkLedgerEntryShape,
+  checkLedgerPathResolution,
+  DISPATCH_GATE_STATE,
 } from "./dispatch-gate-decision-core.mjs";
 import { loadLedger, writeLedger } from "./reject-streak.mjs";
 
@@ -92,29 +94,131 @@ function parseArgs(argv) {
   const out = { _: [] };
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === "--ledger") out.ledger = argv[++i];
+    else if (argv[i] === "--expect-repo-root") out.expectRepoRoot = argv[++i];
     else out._.push(argv[i]);
   }
   return out;
 }
 
-// 2R §3-1 실측(합성 표적 harness 실행 중 발견): reject-streak.mjs's own
-// default (repoRoot() via `git rev-parse` FROM THE INVOKING PROCESS'S CWD)
-// is wrong for this CLI's real caller shape. dispatch-worker.ps1 does not
-// `cd` into $Worktree before running `& node $gateScript $coderTask` -- its
-// own CWD is whatever directory the operator launched it from, which need
-// not be (and in the synthetic harness run, was NOT) the target worktree.
-// Resolving the ledger from CWD would silently consult a DIFFERENT repo's
-// ledger than the one the task file actually belongs to (caught live: a
-// streak=2 fixture ledger in the test worktree was ignored in favor of this
-// real repo's own .harness/reject-streak.json, which happened to read
-// streak=0 for the fixture's issue id). The task file's OWN path is the one
-// caller-supplied fact that is always anchored to the right worktree --
-// `.harness/coder-task.md` and `.harness/reject-streak.json` are documented
-// siblings (reject-streak.mjs's own default is literally
-// `join(root, ".harness", "reject-streak.json")`) -- so default from
-// dirname(taskPath), never from process CWD.
+function firstNonEmptyErrorText(err) {
+  const text = String(err?.stderr ?? err?.message ?? err ?? "").trim();
+  return text.length > 0 ? text : "(no detail)";
+}
+
+// HYK-220 1R->2R: 1R's dirname(taskPath) default (2R 검토 실측이 고친 CWD
+// 기반보다는 나았다) still ties the ledger to THIS worktree's OWN
+// `.harness/`, so a linked worktree with its own (e.g. freshly-created,
+// streak-reset) local ledger file silently wins over the real, shared
+// history -- that is the 2R 검토 P1 근거 B 우회. This resolves the ledger by
+// asking git itself where the CURRENT repo's shared (`--git-common-dir`)
+// storage lives, which is identical across every worktree of the same
+// repo (main or linked) -- so the ledger converges on one file per repo
+// regardless of which worktree a task was dropped into.
+//
+// P1-3 (bare 경계, 검토 실측): a linked worktree off a BARE repo has
+// `--git-common-dir` return the bare repo's OWN directory (e.g.
+// `.../repo.git`), not a nested `.git` folder -- `dirname()` on that value
+// silently lands one level too high. `--is-bare-repository` (run with
+// `--git-dir` pointed at the resolved common dir, so it asks about THAT
+// repository regardless of the caller's own CWD) distinguishes the two
+// shapes: bare -> the common dir itself is the root; non-bare -> its parent
+// is the root (this repo, HARNESSENGINEERING, is the non-bare shape).
+function resolveRepoRoot(dir) {
+  let commonDir;
+  try {
+    commonDir = execFileSync(
+      "git",
+      ["-C", dir, "rev-parse", "--path-format=absolute", "--git-common-dir"],
+      { encoding: "utf8" },
+    ).trim();
+  } catch (err) {
+    return { root: null, detail: firstNonEmptyErrorText(err) };
+  }
+  let isBare;
+  try {
+    isBare = execFileSync(
+      "git",
+      ["--git-dir", commonDir, "rev-parse", "--is-bare-repository"],
+      { encoding: "utf8" },
+    ).trim();
+  } catch (err) {
+    return { root: null, detail: firstNonEmptyErrorText(err) };
+  }
+  return {
+    root: isBare === "true" ? commonDir : dirname(commonDir),
+    detail: null,
+  };
+}
+
+// Windows paths differ only by drive-letter case / slash direction /
+// trailing slash between two calls that both, in fact, name the same repo
+// root -- normalize before comparing so those never register as a mismatch.
+function normalizeRootForCompare(root) {
+  return root.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+}
+
+// HYK-220 2R: replaces 1R's plain string-returning resolveLedgerPath.
+// Returns `{ path, state: null }` on success (state:null tells the caller
+// "proceed") or `{ path: null, state: <REJECT_*>, reason }` on failure --
+// the caller (runDispatchGateDecision) routes a non-null state straight to
+// checkLedgerPathResolution and NEVER reaches checkGatePreconditions /
+// spawns either gate, same short-circuit shape as the existing
+// taskPath-not-found branch.
+//
+// P1-1 (결속 미증명 + `--ledger` 우회): git succeeding only proves taskPath
+// belongs to SOME repo, not the repo the caller intended. `--expect-repo-root`
+// is an OPTIONAL caller-supplied fact (dispatch-worker.ps1 already knows
+// which worktree it dispatched to); when given, taskPath's OWN resolved
+// repo root must match it OR this rejects -- including when `--ledger` is
+// ALSO given, so an explicit `--ledger` can no longer walk around the
+// membership check by skipping repo resolution entirely (2R 검토 실측: 이전
+// 설계에서 `--ledger`는 대조 없이 그대로 우선했다). When
+// `--expect-repo-root` is NOT given, this check does not run at all -- an
+// additive axis (S11 헤더 ③ 패턴), not a new mandatory requirement on every
+// existing caller/test that never passed it. Symmetric with that: an
+// explicit `--ledger` WITHOUT `--expect-repo-root` fully bypasses git
+// resolution too (zero git calls, byte-identical to 1R/pre-2R behavior) --
+// there is nothing to identify taskPath's repo FOR when no default needs
+// computing and no expected repo was named to compare against. This keeps
+// every existing fixture-based test (plain non-git tmpdirs + explicit
+// `--ledger`) working unchanged; only the NO-`--ledger` default-resolution
+// path and the `--expect-repo-root` membership check touch git at all.
 function resolveLedgerPath(args, taskPath) {
-  return args.ledger || join(dirname(taskPath), "reject-streak.json");
+  if (args.ledger && !args.expectRepoRoot) {
+    return { path: args.ledger, state: null };
+  }
+  const taskRepo = resolveRepoRoot(dirname(taskPath));
+  if (taskRepo.root === null) {
+    return {
+      path: null,
+      state: DISPATCH_GATE_STATE.REJECT_LEDGER_PATH_UNRESOLVABLE,
+      reason: `dispatch-gate-decision precondition: taskPath가 속한 git 저장소를 식별하지 못함(대상 디렉터리: ${dirname(taskPath)}) -> 배달 거부(안전측 기본값 -- 원장 "부재"와는 다른 원인: 원장을 찾을 저장소 자체를 확정 못 했다). 원인: ${taskRepo.detail}. 조치: taskPath가 git 워크트리 안에 있는지, git 실행파일을 호출할 수 있는지 확인하라`,
+    };
+  }
+  if (args.expectRepoRoot) {
+    const expectedRepo = resolveRepoRoot(args.expectRepoRoot);
+    if (expectedRepo.root === null) {
+      return {
+        path: null,
+        state: DISPATCH_GATE_STATE.REJECT_LEDGER_PATH_UNRESOLVABLE,
+        reason: `dispatch-gate-decision precondition: --expect-repo-root(${args.expectRepoRoot})가 속한 git 저장소를 식별하지 못함 -> 배달 거부(안전측 기본값). 원인: ${expectedRepo.detail}. 조치: --expect-repo-root 값이 실제 git 워크트리 경로인지 확인하라`,
+      };
+    }
+    if (
+      normalizeRootForCompare(expectedRepo.root) !==
+      normalizeRootForCompare(taskRepo.root)
+    ) {
+      return {
+        path: null,
+        state: DISPATCH_GATE_STATE.REJECT_REPO_MISMATCH,
+        reason: `dispatch-gate-decision precondition: taskPath가 속한 저장소(${taskRepo.root})가 기대 저장소(--expect-repo-root -> ${expectedRepo.root})와 다름 -> 배달 거부(안전측 기본값 -- --ledger 를 명시로 넘겼어도 이 대조를 건너뛰지 않는다). 조치: 배달 도구가 지금 조작 중인 워크트리 경로를 --expect-repo-root로 넘기는지 확인하라`,
+      };
+    }
+  }
+  return {
+    path: args.ledger || join(taskRepo.root, ".harness", "reject-streak.json"),
+    state: null,
+  };
 }
 
 // 2R/3R §2 (P1-B / confirmative redesign): fail-closed precondition check
@@ -209,7 +313,7 @@ export function runDispatchGateDecision(argv) {
     return {
       allow: false,
       lines: [
-        "dispatch-gate-decision: usage: node dispatch-gate-decision.mjs <task-path> [--ledger <path>]",
+        "dispatch-gate-decision: usage: node dispatch-gate-decision.mjs <task-path> [--ledger <path>] [--expect-repo-root <path>]",
       ],
     };
   }
@@ -229,12 +333,23 @@ export function runDispatchGateDecision(argv) {
       }),
     );
   } else {
-    const ledgerPath = resolveLedgerPath(args, taskPath);
-    const { precondition, loaded } = evaluatePrecondition(taskPath, ledgerPath);
-    if (precondition) {
-      decisions.push(precondition);
+    const ledgerResolution = resolveLedgerPath(args, taskPath);
+    const pathDecision = checkLedgerPathResolution(ledgerResolution);
+    if (pathDecision) {
+      // HYK-220 2R: mirrors the taskPath-not-found branch above -- a
+      // failure to even IDENTIFY the ledger's repo short-circuits before
+      // checkGatePreconditions/either gate subprocess is ever reached.
+      decisions.push(pathDecision);
     } else {
-      decisions.push(...runGatesAgainstSnapshot(taskPath, loaded.ledger));
+      const { precondition, loaded } = evaluatePrecondition(
+        taskPath,
+        ledgerResolution.path,
+      );
+      if (precondition) {
+        decisions.push(precondition);
+      } else {
+        decisions.push(...runGatesAgainstSnapshot(taskPath, loaded.ledger));
+      }
     }
   }
   const combined = combineGateDecisions(decisions);

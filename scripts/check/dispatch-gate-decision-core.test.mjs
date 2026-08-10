@@ -6,6 +6,7 @@ import {
   combineGateDecisions,
   checkGatePreconditions,
   checkLedgerEntryShape,
+  checkLedgerPathResolution,
   DISPATCH_GATE_STATE,
 } from "./dispatch-gate-decision-core.mjs";
 
@@ -389,4 +390,97 @@ test("combine: empty list -> allow=false (never silently allow on no input)", ()
 test("combine: non-array input -> allow=false, does not throw", () => {
   assert.doesNotThrow(() => combineGateDecisions(null));
   assert.equal(combineGateDecisions(undefined).allow, false);
+});
+
+// ---------------------------------------------------------------------------
+// HYK-220 2R P1-1/P1-2 -- checkLedgerPathResolution. Kept as its own pure
+// function (not folded into checkGatePreconditions) precisely so ALL_GOOD
+// and every checkGatePreconditions test above stays byte-for-byte unchanged
+// -- this is an EARLIER, separate axis the caller checks first.
+// ---------------------------------------------------------------------------
+
+test("checkLedgerPathResolution: state=null (git resolution succeeded) -> null (proceed to checkGatePreconditions)", () => {
+  assert.equal(checkLedgerPathResolution({ state: null, path: "/x" }), null);
+});
+
+test("checkLedgerPathResolution: missing/undefined resolution object -> does not throw, treated as proceed (state defaults to null)", () => {
+  assert.doesNotThrow(() => checkLedgerPathResolution());
+  assert.equal(checkLedgerPathResolution(), null);
+  assert.equal(checkLedgerPathResolution({}), null);
+});
+
+test("checkLedgerPathResolution: REJECT_LEDGER_PATH_UNRESOLVABLE (P1-2 -- git identify failure, distinct from ledger-missing)", () => {
+  const r = checkLedgerPathResolution({
+    state: DISPATCH_GATE_STATE.REJECT_LEDGER_PATH_UNRESOLVABLE,
+    reason: "git 저장소를 식별하지 못함(x)",
+  });
+  assert.equal(r.state, DISPATCH_GATE_STATE.REJECT_LEDGER_PATH_UNRESOLVABLE);
+  assert.equal(r.allow, false);
+  assert.match(r.reason, /식별하지 못함/);
+  assert.notEqual(r.state, DISPATCH_GATE_STATE.REJECT_LEDGER_MISSING);
+});
+
+test("checkLedgerPathResolution: REJECT_REPO_MISMATCH (P1-1)", () => {
+  const r = checkLedgerPathResolution({
+    state: DISPATCH_GATE_STATE.REJECT_REPO_MISMATCH,
+    reason: "저장소가 기대와 다름",
+  });
+  assert.equal(r.state, DISPATCH_GATE_STATE.REJECT_REPO_MISMATCH);
+  assert.equal(r.allow, false);
+  assert.match(r.reason, /기대와 다름/);
+});
+
+test("checkLedgerPathResolution: reason missing/blank -> falls back to a non-empty generated reason (never an empty-string decision)", () => {
+  const r1 = checkLedgerPathResolution({
+    state: DISPATCH_GATE_STATE.REJECT_REPO_MISMATCH,
+  });
+  assert.equal(typeof r1.reason, "string");
+  assert.ok(r1.reason.length > 0);
+  const r2 = checkLedgerPathResolution({
+    state: DISPATCH_GATE_STATE.REJECT_REPO_MISMATCH,
+    reason: "   ",
+  });
+  assert.ok(r2.reason.trim().length > 0);
+});
+
+test("checkLedgerPathResolution: closed-set defense -- an unrecognized non-null state value never falls through as ALLOW", () => {
+  const r = checkLedgerPathResolution({ state: "SOMETHING_NOBODY_DEFINED" });
+  assert.notEqual(r, null);
+  assert.equal(r.allow, false);
+  assert.equal(r.state, DISPATCH_GATE_STATE.REJECT_LEDGER_PATH_UNRESOLVABLE);
+});
+
+// P1-2 요구: "적힌 수 ≠ 실제 목록" 재발 방지 -- 상태 개수를 손으로 세지 않고
+// Object.keys()로 기계 유도한다. 이 테스트가 지키는 것은 "DISPATCH_GATE_STATE에
+// 새 상태를 추가하면 이 숫자도 자동으로 따라온다"는 사실 하나뿐이다(특정
+// 숫자를 정답으로 못박지 않는다).
+test("DISPATCH_GATE_STATE: key count and value count always agree (machine-derived, never hand-counted)", () => {
+  const keys = Object.keys(DISPATCH_GATE_STATE);
+  const values = Object.values(DISPATCH_GATE_STATE);
+  assert.equal(keys.length, values.length);
+  assert.equal(
+    new Set(values).size,
+    values.length,
+    "every state value must be unique",
+  );
+  // every key name must equal its own value (the convention every existing
+  // entry in this object already follows) -- catches a copy-paste typo
+  // where a NEW key's value accidentally collides with an EXISTING one.
+  for (const key of keys) {
+    assert.equal(DISPATCH_GATE_STATE[key], key);
+  }
+});
+
+test("DISPATCH_GATE_STATE: HYK-220 2R additions are present and REJECT_LEDGER_MISSING remains distinct from both", () => {
+  const keys = new Set(Object.keys(DISPATCH_GATE_STATE));
+  assert.ok(keys.has("REJECT_LEDGER_PATH_UNRESOLVABLE"));
+  assert.ok(keys.has("REJECT_REPO_MISMATCH"));
+  assert.notEqual(
+    DISPATCH_GATE_STATE.REJECT_LEDGER_PATH_UNRESOLVABLE,
+    DISPATCH_GATE_STATE.REJECT_LEDGER_MISSING,
+  );
+  assert.notEqual(
+    DISPATCH_GATE_STATE.REJECT_REPO_MISMATCH,
+    DISPATCH_GATE_STATE.REJECT_LEDGER_MISSING,
+  );
 });
