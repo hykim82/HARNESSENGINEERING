@@ -5,19 +5,28 @@
 // (§4-2 ①). The one non-zero exit this CLI has is a genuine usage/read
 // error, never a judgment outcome.
 //
-// ★도달 경로(§6-3, HYK-186 3R P1-3 갱신): stdout만으로는 "로그에만 남는
-//것" (독립 검토 실측: durable artifact 0 · watcher 소비 0 · reach-notify 0
-// · 알림 0)이라 완료조건8의 도달 요건 미충족 판정을 받았다. 이 라운드가
-// 추가한 것은 **오래 남는 파일**(`--report <path>`, 기본 append) -- 사람이
-// 나중에 열어 실행 이력을 그대로 읽을 수 있다. 여전히 (B) 성격은 그대로:
-// exit은 항상 0(막지 않음), 릴레이를 멈추지 않음, `AXES`에는 등재하지
-// 않음(아래 이유 그대로 유효 -- 독립 검토가 코드로 성립한다고 인정한
-// 사유라 다시 만들지 않는다). AXES는 watch-run.mjs의 주기적 per-worktree
-// seat-liveness 이상 스트림(seat/idle/start/unconsumed/cap/escalation) 전용
-// -- 이 판정기는 1회성/파일별 감사라 그 틀에 억지로 끼우면 §4-1이 금지한
-// "이름만 다른 (A)"가 되고, (B)를 escalation 트리거로 만들어 §4-2 ①을
-// 어기게 된다(`escalation-axis-wire.test.mjs`가 그 3번째 축 추가를 잠가
-// 뒀다). durable 파일은 그 대신 "사람이 직접 열어 보는" 도달 경로다.
+// ★도달 경로(§6-3, HYK-186 3R P1-3 갱신 · 4R §2 합격 기준 확정): stdout만으로는
+// "로그에만 남는 것"(독립 검토 실측: durable artifact 0 · watcher 소비 0 ·
+// reach-notify 0 · 알림 0)이라 완료조건8의 도달 요건 미충족 판정을 받았다
+// (3R). 3R의 `--report <path>`는 opt-in이라 아무도 플래그를 주지 않으면
+// 운영상 stdout-only와 동일하다는 재반려(2R/3R 연속반려 게이트2)를 받아,
+// 4R이 **기본 활성화**로 승격했다 -- 플래그 없이 돌려도 고정 기본 경로
+// (`DEFAULT_REPORT_BASENAME`, inboxDir 하위)에 항상 남는다. 끄는 방법은
+// 명시적 `--no-report` 하나뿐(암묵적 끄기 없음). 여전히 (B) 성격은 그대로:
+// exit은 항상 0(막지 않음, 리포트 쓰기 실패도 포함), 릴레이를 멈추지 않음,
+// `AXES`에는 등재하지 않음(아래 이유 그대로 유효 -- 독립 검토가 코드로
+// 성립한다고 인정한 사유라 다시 만들지 않는다). AXES는 watch-run.mjs의
+// 주기적 per-worktree seat-liveness 이상 스트림(seat/idle/start/unconsumed/
+// cap/escalation) 전용 -- 이 판정기는 1회성/파일별 감사라 그 틀에 억지로
+// 끼우면 §4-1이 금지한 "이름만 다른 (A)"가 되고, (B)를 escalation
+// 트리거로 만들어 §4-2 ①을 어기게 된다(`escalation-axis-wire.test.mjs`가
+// 그 3번째 축 추가를 잠가 뒀다). durable 파일은 그 대신 "사람이 직접 열어
+// 보는" 도달 경로다.
+//
+// ★정직 한계(HYK-186 4R §3, 한용 확정): 이 라운드가 보장하는 것은 "이
+// 명령을 돌리면 반드시 기록이 남는다"까지다. "누가·언제·어떤 주기로
+// 실제 받는함을 감사하는가"(실제 호출자 결선, ⓑ)는 이 이슈 밖으로 별건
+// 분리됐다 -- 이 CLI를 정기적으로 도는 감사기가 아직 없다.
 
 import {
   readdirSync,
@@ -207,6 +216,40 @@ export function buildAuditReportBatch({ entries, runAtMs, dir }) {
   return `${header}\n${body}\n\n`;
 }
 
+// HYK-186 4R §2 -- 합격 기준(2R 검토자 문장의 검증 가능한 절반, 한용 게이트2
+// «가» 확정): "고정된 기본 경로로 report를 기본 활성화하고, 끄기는 명시적
+// --no-report로만." resolveReportPath는 순수 함수(관측은 호출자가 준다) --
+// 우선순위: (1) --no-report -> null(명시적 끄기만 인정, 암묵적 끄기 금지)
+// (2) --report <path> -> 그 경로(기존 2R/3R 하위호환) (3) 환경변수 override
+// -> 리눅스 CI/다른 배치 위치가 필요할 때 시험/운영이 재정의하는 수단
+// (4) 기본값 -- join(dir, DEFAULT_REPORT_BASENAME). ★기본 경로를
+// inboxDir 자신의 하위로 고른 이유: 이 CLI가 아는 유일한 "고정된" 위치는
+// 호출자가 인자로 준 inboxDir뿐이다 -- 저장소 경로(D:\ 같은 절대경로)를
+//하드코딩하면 정확히 08-05 실사고(리눅스 CI가 D:\ 를 못 읽어 깨짐)를
+// 재현한다. inboxDir 하위는 (a) 항상 존재가 보장된 디렉터리이고 (b) 시험이
+// mkdtemp로 주는 임시 디렉터리에도 자연히 함께 생겨 리눅스에서도 동일하게
+// 동작하며 (c) 감사 대상과 감사 결과가 같은 자리에 남아 "어느 받는함의
+// 기록인지" 사람이 따로 찾을 필요가 없다.
+export const DEFAULT_REPORT_BASENAME = ".inbox-time-audit-report.md";
+export const REPORT_PATH_ENV_VAR = "INBOX_TIME_AUDIT_REPORT_PATH";
+
+export function resolveReportPath({
+  dir,
+  noReport,
+  explicitReportPath,
+  env = process.env,
+}) {
+  if (noReport) return null;
+  if (typeof explicitReportPath === "string" && explicitReportPath.length > 0) {
+    return explicitReportPath;
+  }
+  const envOverride = env?.[REPORT_PATH_ENV_VAR];
+  if (typeof envOverride === "string" && envOverride.length > 0) {
+    return envOverride;
+  }
+  return join(dir, DEFAULT_REPORT_BASENAME);
+}
+
 // writeAuditReport: ★정책 = APPEND, never overwrite/truncate. (B)는 감사
 // 기록이다 -- 이전 실행 결과를 조용히 지우면(overwrite) "언제 무엇을
 // 봤는지"가 사라진다(judgeAuditValidityAfterChange의 INVALIDATED-not-
@@ -235,13 +278,20 @@ if (invokedDirectly) {
   const args = process.argv.slice(2);
   const dir = args[0];
   const reportFlagIdx = args.indexOf("--report");
-  const reportPath = reportFlagIdx >= 0 ? args[reportFlagIdx + 1] : undefined;
-  if (!dir || (reportFlagIdx >= 0 && !reportPath)) {
+  const explicitReportPath =
+    reportFlagIdx >= 0 ? args[reportFlagIdx + 1] : undefined;
+  const noReport = args.includes("--no-report");
+  if (
+    !dir ||
+    (reportFlagIdx >= 0 && !explicitReportPath) ||
+    (noReport && reportFlagIdx >= 0)
+  ) {
     console.error(
-      "usage: node inbox-time-audit.mjs <inboxDir> [--report <reportPath>]",
+      "usage: node inbox-time-audit.mjs <inboxDir> [--report <reportPath> | --no-report]",
     );
     process.exit(1);
   }
+  const reportPath = resolveReportPath({ dir, noReport, explicitReportPath });
   let result;
   try {
     result = auditDirectory({ dir });

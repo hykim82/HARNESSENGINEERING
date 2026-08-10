@@ -263,14 +263,23 @@ test("E2E CLI: --report <path> produces a durable file (mkdtemp-only, no D-drive
   });
 });
 
-test("E2E CLI: without --report, no durable file is created (opt-in, backward compatible with 2R's stdout-only usage)", () => {
+// HYK-186 4R §2: superseded by the default-activation contract -- no flags
+// at all now DOES create a durable report (fixed default path under
+// inboxDir). This test used to assert the opposite (2R/3R's opt-in
+// behavior); see the "기본 활성화" tests below for the new contract, and
+// "--no-report" tests for the only way to suppress it now.
+test("E2E CLI: no flags at all -> durable report is still created (default-activation, HYK-186 4R -- superseded opt-in behavior)", () => {
   withDir((inboxDir) => {
     writeFileSync(join(inboxDir, "plain.txt"), "no time hints\n", "utf8");
     const res = spawnSync(process.execPath, [CLI_PATH, inboxDir], {
       encoding: "utf8",
     });
     assert.equal(res.status, 0);
-    assert.doesNotMatch(res.stdout, /durable report appended/);
+    assert.match(res.stdout, /durable report appended/);
+    assert.equal(
+      existsSync(join(inboxDir, ".inbox-time-audit-report.md")),
+      true,
+    );
   });
 });
 
@@ -516,4 +525,382 @@ test("P2 조건6 (잘못된 HH/MM, 정직 고정용 -- N 표본에 안 셈): '99
       assert.equal(typeof entry.verdict, "string");
     });
   });
+});
+
+// ---------------------------------------------------------------------------
+// HYK-186 4R §2 -- 합격 기준 3요소(기본 활성화 · 고정 기본 경로 · --no-report
+// 명시적 끄기만) + (B) 성격 불변(exit 0 항상, 리포트 쓰기 실패 포함).
+// ---------------------------------------------------------------------------
+import {
+  resolveReportPath,
+  DEFAULT_REPORT_BASENAME,
+  REPORT_PATH_ENV_VAR,
+} from "./inbox-time-audit.mjs";
+
+// --- resolveReportPath (순수 함수) ---
+
+test("resolveReportPath: 플래그 없음 -> 고정 기본 경로 = join(dir, DEFAULT_REPORT_BASENAME)", () => {
+  const result = resolveReportPath({ dir: "/some/inbox", env: {} });
+  assert.equal(result, join("/some/inbox", DEFAULT_REPORT_BASENAME));
+});
+
+test("resolveReportPath: --no-report -> null (명시적 끄기만 인정)", () => {
+  const result = resolveReportPath({
+    dir: "/some/inbox",
+    noReport: true,
+    env: {},
+  });
+  assert.equal(result, null);
+});
+
+test("resolveReportPath: --report <path> -> 그 경로 그대로(기존 하위호환, 기본 경로 무시)", () => {
+  const result = resolveReportPath({
+    dir: "/some/inbox",
+    explicitReportPath: "/custom/report.md",
+    env: {},
+  });
+  assert.equal(result, "/custom/report.md");
+});
+
+test(`resolveReportPath: 환경변수(${REPORT_PATH_ENV_VAR}) override -- 명시 --report도 --no-report도 없을 때만 적용`, () => {
+  const withEnv = resolveReportPath({
+    dir: "/some/inbox",
+    env: { [REPORT_PATH_ENV_VAR]: "/env/report.md" },
+  });
+  assert.equal(withEnv, "/env/report.md");
+  // --report가 있으면 env보다 우선(명시가 더 강함).
+  const explicitWins = resolveReportPath({
+    dir: "/some/inbox",
+    explicitReportPath: "/explicit/report.md",
+    env: { [REPORT_PATH_ENV_VAR]: "/env/report.md" },
+  });
+  assert.equal(explicitWins, "/explicit/report.md");
+  // --no-report가 있으면 env가 있어도 null(명시적 끄기가 최우선).
+  const noReportWins = resolveReportPath({
+    dir: "/some/inbox",
+    noReport: true,
+    env: { [REPORT_PATH_ENV_VAR]: "/env/report.md" },
+  });
+  assert.equal(noReportWins, null);
+});
+
+// --- 요구1: 기본 활성화 -- 플래그 없이 돌린 실제 CLI 출력 ---
+
+test("★요구1 (기본 활성화): 플래그 없이 돌린 실제 CLI 출력 원문 -- 어디에 생겼는지 경로까지 확인", () => {
+  withDir((inboxDir) => {
+    const now = new Date();
+    writeFileSync(
+      join(inboxDir, "0104-sample.txt"),
+      headerFor(now, now.getHours(), now.getMinutes()),
+      "utf8",
+    );
+    const res = spawnSync(process.execPath, [CLI_PATH, inboxDir], {
+      encoding: "utf8",
+    });
+    assert.equal(res.status, 0);
+    const expectedPath = join(inboxDir, DEFAULT_REPORT_BASENAME);
+    assert.match(res.stdout, /0104-sample\.txt/);
+    assert.match(
+      res.stdout,
+      new RegExp(
+        `durable report appended: ${expectedPath.replace(/[\\.]/g, "\\$&")}`,
+      ),
+    );
+    assert.equal(
+      existsSync(expectedPath),
+      true,
+      "the fixed-default report file must actually exist on disk",
+    );
+    const content = readFileSync(expectedPath, "utf8");
+    assert.match(
+      content,
+      /0104-sample\.txt/,
+      "the durable file must contain the same audit line stdout showed",
+    );
+  });
+});
+
+// --- 요구2: 고정 기본 경로 -- 인자/환경으로 덮어쓰기 가능, 리눅스 이식성 ---
+
+test("요구2 (고정 기본 경로 덮어쓰기 -- 인자): --report <path>가 기본 경로를 대신한다", () => {
+  withDir((inboxDir) => {
+    writeFileSync(join(inboxDir, "plain.txt"), "no hints\n", "utf8");
+    withDir((elsewhere) => {
+      const customPath = join(elsewhere, "custom-report.md");
+      const res = spawnSync(
+        process.execPath,
+        [CLI_PATH, inboxDir, "--report", customPath],
+        { encoding: "utf8" },
+      );
+      assert.equal(res.status, 0);
+      assert.equal(existsSync(customPath), true);
+      assert.equal(
+        existsSync(join(inboxDir, DEFAULT_REPORT_BASENAME)),
+        false,
+        "default path must NOT also be written when --report overrides it",
+      );
+    });
+  });
+});
+
+test(`요구2 (고정 기본 경로 덮어쓰기 -- 환경변수): ${REPORT_PATH_ENV_VAR}가 플래그 없이도 기본 경로를 대신한다`, () => {
+  withDir((inboxDir) => {
+    writeFileSync(join(inboxDir, "plain.txt"), "no hints\n", "utf8");
+    withDir((elsewhere) => {
+      const envPath = join(elsewhere, "env-report.md");
+      const res = spawnSync(process.execPath, [CLI_PATH, inboxDir], {
+        encoding: "utf8",
+        env: { ...process.env, [REPORT_PATH_ENV_VAR]: envPath },
+      });
+      assert.equal(res.status, 0);
+      assert.equal(existsSync(envPath), true);
+    });
+  });
+});
+
+test("요구2 (리눅스 이식성): 기본 경로는 dir 인자로부터만 유도되고 D-드라이브(또는 어떤 하드코딩된 절대경로도) 참조하지 않는다 -- mkdtemp 임시 디렉터리 하나로 전부 재현됨", () => {
+  withDir((inboxDir) => {
+    // dir 자체가 이미 mkdtemp 산출물이다 -- 이 시험이 통과한다는 사실 자체가
+    // "기본 경로 결정에 저장소 밖 절대경로가 필요 없다"는 것의 증거다.
+    const now = new Date();
+    writeFileSync(
+      join(inboxDir, "0303-sample.txt"),
+      headerFor(now, now.getHours(), now.getMinutes()),
+      "utf8",
+    );
+    const res = spawnSync(process.execPath, [CLI_PATH, inboxDir], {
+      encoding: "utf8",
+    });
+    assert.equal(res.status, 0);
+    assert.equal(existsSync(join(inboxDir, DEFAULT_REPORT_BASENAME)), true);
+  });
+});
+
+// --- 요구3: --no-report 로만 끄기, 암묵적 끄기 금지 ---
+
+test("★요구3 (--no-report 실제 동작): 플래그를 주면 리포트 파일이 생기지 않는다 -- 실제 CLI 출력 원문 확인", () => {
+  withDir((inboxDir) => {
+    writeFileSync(join(inboxDir, "plain.txt"), "no hints\n", "utf8");
+    const res = spawnSync(
+      process.execPath,
+      [CLI_PATH, inboxDir, "--no-report"],
+      { encoding: "utf8" },
+    );
+    assert.equal(res.status, 0);
+    assert.doesNotMatch(res.stdout, /durable report appended/);
+    assert.equal(
+      existsSync(join(inboxDir, DEFAULT_REPORT_BASENAME)),
+      false,
+      "explicitly disabled -> no default file appears",
+    );
+  });
+});
+
+// --- 요구4: 기존 --report <path> 하위호환 ---
+
+test("요구4 (하위호환): 기존 --report <path> 사용법이 여전히 그대로 동작한다(2R/3R과 동일 동작)", () => {
+  withDir((inboxDir) => {
+    const now = new Date();
+    writeFileSync(
+      join(inboxDir, "0104-sample.txt"),
+      headerFor(now, now.getHours(), now.getMinutes()),
+      "utf8",
+    );
+    withDir((reportDir) => {
+      const reportPath = join(reportDir, "explicit-report.md");
+      const res = spawnSync(
+        process.execPath,
+        [CLI_PATH, inboxDir, "--report", reportPath],
+        { encoding: "utf8" },
+      );
+      assert.equal(res.status, 0);
+      assert.equal(existsSync(reportPath), true);
+      const content = readFileSync(reportPath, "utf8");
+      assert.match(content, /0104-sample\.txt/);
+    });
+  });
+});
+
+// --- 요구5: (B) 성격 불변 -- exit 0, 3가지 경우(정상/MISMATCH-UNDECIDABLE/리포트 쓰기 실패) ---
+
+test("★요구5 ((B) 성격 불변): 정상 판정 케이스 -> exit 0", () => {
+  withDir((inboxDir) => {
+    const now = new Date();
+    writeFileSync(
+      join(inboxDir, "0303-sample.txt"),
+      headerFor(now, now.getHours(), now.getMinutes()),
+      "utf8",
+    );
+    const res = spawnSync(process.execPath, [CLI_PATH, inboxDir], {
+      encoding: "utf8",
+    });
+    assert.equal(res.status, 0, "NORMAL 판정도 exit 0");
+  });
+});
+
+test("★요구5 ((B) 성격 불변): MISMATCH/UNDECIDABLE이 섞여도 -> exit 0", () => {
+  withDir((inboxDir) => {
+    const now = new Date();
+    const claimed = new Date(now.getTime() - 55 * 60 * 1000);
+    writeFileSync(
+      join(inboxDir, "0104-sample.txt"),
+      headerFor(now, claimed.getHours(), claimed.getMinutes()),
+      "utf8",
+    );
+    writeFileSync(join(inboxDir, "nohints.txt"), "no time info\n", "utf8");
+    const res = spawnSync(process.execPath, [CLI_PATH, inboxDir], {
+      encoding: "utf8",
+    });
+    assert.equal(
+      res.status,
+      0,
+      "MISMATCH/UNDECIDABLE이 있어도 exit 0 -- (B)는 절대 차단하지 않는다",
+    );
+    assert.match(res.stdout, /MISMATCH/);
+    assert.match(res.stdout, /UNDECIDABLE/);
+  });
+});
+
+test("★요구5 ((B) 성격 불변): 리포트 쓰기 실패(쓸 수 없는 경로) -> 여전히 exit 0, stderr에만 사유", () => {
+  withDir((inboxDir) => {
+    writeFileSync(join(inboxDir, "plain.txt"), "no hints\n", "utf8");
+    // 존재하지 않는 상위 디렉터리를 가리키는 경로 -- appendFileSync가 ENOENT로 실패한다.
+    const unwritablePath = join(inboxDir, "no-such-parent-dir", "report.md");
+    const res = spawnSync(
+      process.execPath,
+      [CLI_PATH, inboxDir, "--report", unwritablePath],
+      { encoding: "utf8" },
+    );
+    assert.equal(
+      res.status,
+      0,
+      "리포트 쓰기가 실패해도 이 CLI의 exit은 여전히 0 -- (B)는 이 실패조차 차단으로 바꾸지 않는다",
+    );
+    assert.match(res.stderr, /could not append durable report/);
+  });
+});
+
+test("요구5 (append-only 유지): 기본 경로로 두 번 실행해도 덮어쓰지 않고 누적된다", () => {
+  withDir((inboxDir) => {
+    const now = new Date();
+    writeFileSync(
+      join(inboxDir, "0303-sample.txt"),
+      headerFor(now, now.getHours(), now.getMinutes()),
+      "utf8",
+    );
+    spawnSync(process.execPath, [CLI_PATH, inboxDir], { encoding: "utf8" });
+    spawnSync(process.execPath, [CLI_PATH, inboxDir], { encoding: "utf8" });
+    const content = readFileSync(
+      join(inboxDir, DEFAULT_REPORT_BASENAME),
+      "utf8",
+    );
+    const runCount = (content.match(/## Audit run/g) || []).length;
+    assert.equal(
+      runCount,
+      2,
+      "두 번 실행하면 배치 2개가 모두 남아야 한다(덮어쓰기 금지)",
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ★RED 변조 3건 (필수, §2) -- 전부 사본(mkdtemp)에만 변조, 원본 미변경.
+// ---------------------------------------------------------------------------
+function stageMutant(mutatedSrc) {
+  const mutDir = mkdtempSync(join(tmpdir(), "inbox-audit-4r-mut-"));
+  const scriptsCheckDir = join(mutDir, "scripts", "check");
+  mkdirSync(scriptsCheckDir, { recursive: true });
+  const mutantPath = join(scriptsCheckDir, "inbox-time-audit.mjs");
+  writeFileSync(mutantPath, mutatedSrc, "utf8");
+  writeFileSync(
+    join(scriptsCheckDir, "inbox-time-audit-core.mjs"),
+    readFileSync(join(_dirname(CLI_PATH), "inbox-time-audit-core.mjs"), "utf8"),
+    "utf8",
+  );
+  return { mutDir, mutantPath };
+}
+
+test("mutation 1 (필수): 기본 활성화 제거(reportPath 계산을 명시 --report 필요로 되돌림) -> 플래그 없이 돌리면 리포트가 안 생김 -> RED", () => {
+  const src = readFileSync(CLI_PATH, "utf8");
+  const target =
+    "  const reportPath = resolveReportPath({ dir, noReport, explicitReportPath });\n";
+  assertExactlyOneMatch(src, target, "reportPath resolution call site");
+  const mutated = src.replace(
+    target,
+    "  const reportPath = explicitReportPath;\n",
+  );
+
+  const { mutDir, mutantPath } = stageMutant(mutated);
+  try {
+    withDir((inboxDir) => {
+      writeFileSync(join(inboxDir, "plain.txt"), "no hints\n", "utf8");
+      const res = spawnSync(process.execPath, [mutantPath, inboxDir], {
+        encoding: "utf8",
+      });
+      assert.equal(res.status, 0);
+      assert.doesNotMatch(
+        res.stdout,
+        /durable report appended/,
+        "RED: with default-activation reverted, running with no flags produces no durable report again",
+      );
+    });
+  } finally {
+    rmSync(mutDir, { recursive: true, force: true });
+  }
+});
+
+test("mutation 2 (필수): --no-report 무시하도록 변조 -> 끄라고 했는데 여전히 씀 -> RED", () => {
+  const src = readFileSync(CLI_PATH, "utf8");
+  const target = "  if (noReport) return null;\n";
+  assertExactlyOneMatch(
+    src,
+    target,
+    "noReport short-circuit in resolveReportPath",
+  );
+  const mutated = src.replace(target, "");
+
+  const { mutDir, mutantPath } = stageMutant(mutated);
+  try {
+    withDir((inboxDir) => {
+      writeFileSync(join(inboxDir, "plain.txt"), "no hints\n", "utf8");
+      const res = spawnSync(
+        process.execPath,
+        [mutantPath, inboxDir, "--no-report"],
+        { encoding: "utf8" },
+      );
+      assert.equal(res.status, 0);
+      assert.match(
+        res.stdout,
+        /durable report appended/,
+        "RED: with the --no-report short-circuit removed, the flag is silently ignored and a report is written anyway",
+      );
+    });
+  } finally {
+    rmSync(mutDir, { recursive: true, force: true });
+  }
+});
+
+test("mutation 3 (필수): 고정 기본 경로 결정 로직 제거 -> 기본 경로가 안 정해짐(플래그 없이 돌리면 리포트 없음) -> RED", () => {
+  const src = readFileSync(CLI_PATH, "utf8");
+  const target = "  return join(dir, DEFAULT_REPORT_BASENAME);\n";
+  assertExactlyOneMatch(src, target, "default report path fallback line");
+  const mutated = src.replace(target, "  return undefined;\n");
+
+  const { mutDir, mutantPath } = stageMutant(mutated);
+  try {
+    withDir((inboxDir) => {
+      writeFileSync(join(inboxDir, "plain.txt"), "no hints\n", "utf8");
+      const res = spawnSync(process.execPath, [mutantPath, inboxDir], {
+        encoding: "utf8",
+      });
+      assert.equal(res.status, 0);
+      assert.doesNotMatch(
+        res.stdout,
+        /durable report appended/,
+        "RED: with the fixed-default fallback removed, no default path is ever resolved and no report is written even without --no-report",
+      );
+    });
+  } finally {
+    rmSync(mutDir, { recursive: true, force: true });
+  }
 });
