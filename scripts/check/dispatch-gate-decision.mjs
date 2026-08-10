@@ -9,18 +9,45 @@
 // exit-code contract, distinct from the underlying gates' {0,1,2}, so a
 // caller never has to remember two different meanings for "1".
 import { execFileSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   decideFromGateExit,
   combineGateDecisions,
+  checkGatePreconditions,
 } from "./dispatch-gate-decision-core.mjs";
+import { loadLedger } from "./reject-streak.mjs";
 
 const REJECT_STREAK_PATH = join(
   dirname(fileURLToPath(import.meta.url)),
   "reject-streak.mjs",
 );
+
+// 2R §2: the SAME structural facts checkGatePreconditions needs, extracted
+// here (I/O + regex on the task file's own text) so the pure core never has
+// to touch a filesystem. Mirrors reject-streak.mjs's own
+// TASK_ID_LINE_RE/ISSUE_ID_RE *shape* (a task_id header line, an
+// HYK-<digits> prefix) without importing them -- reject-streak.mjs does not
+// export those regexes and 2R §1/§6 forbid editing it to add an export;
+// this is INPUT validation on the task file (a precondition check), not a
+// reimplementation of reject-streak.mjs's own gate/envelope DECISION logic,
+// which stays untouched and unduplicated.
+const TASK_ID_LINE_RE = /^task_id:\s*(\S+)/im;
+const ISSUE_ID_RE = /^HYK-\d+/;
+
+function normalizeNewlines(text) {
+  return (text ?? "").replace(/\r\n/g, "\n");
+}
+
+function extractTaskIdFacts(taskText) {
+  const text = normalizeNewlines(taskText);
+  const match = text.match(TASK_ID_LINE_RE);
+  return {
+    hasTaskIdLine: !!match,
+    taskIdIssueFormatValid: !!match && ISSUE_ID_RE.test(match[1]),
+  };
+}
 
 function runGateSubcommand(sub, taskPath, ledgerArgs) {
   try {
@@ -53,6 +80,26 @@ function parseArgs(argv) {
   return out;
 }
 
+// 2R §3-1 실측(합성 표적 harness 실행 중 발견): reject-streak.mjs's own
+// default (repoRoot() via `git rev-parse` FROM THE INVOKING PROCESS'S CWD)
+// is wrong for this CLI's real caller shape. dispatch-worker.ps1 does not
+// `cd` into $Worktree before running `& node $gateScript $coderTask` -- its
+// own CWD is whatever directory the operator launched it from, which need
+// not be (and in the synthetic harness run, was NOT) the target worktree.
+// Resolving the ledger from CWD would silently consult a DIFFERENT repo's
+// ledger than the one the task file actually belongs to (caught live: a
+// streak=2 fixture ledger in the test worktree was ignored in favor of this
+// real repo's own .harness/reject-streak.json, which happened to read
+// streak=0 for the fixture's issue id). The task file's OWN path is the one
+// caller-supplied fact that is always anchored to the right worktree --
+// `.harness/coder-task.md` and `.harness/reject-streak.json` are documented
+// siblings (reject-streak.mjs's own default is literally
+// `join(root, ".harness", "reject-streak.json")`) -- so default from
+// dirname(taskPath), never from process CWD.
+function resolveLedgerPath(args, taskPath) {
+  return args.ledger || join(dirname(taskPath), "reject-streak.json");
+}
+
 export function runDispatchGateDecision(argv) {
   const args = parseArgs(argv);
   const taskPath = args._[0];
@@ -80,20 +127,42 @@ export function runDispatchGateDecision(argv) {
       }),
     );
   } else {
-    const ledgerArgs = args.ledger ? ["--ledger", args.ledger] : [];
-    const gateResult = runGateSubcommand("gate", taskPath, ledgerArgs);
-    const diagResult = runGateSubcommand(
-      "diagnostic-gate",
-      taskPath,
-      ledgerArgs,
-    );
-    decisions.push(
-      decideFromGateExit({ ...gateResult, label: "reject-streak gate" }),
-      decideFromGateExit({
-        ...diagResult,
-        label: "reject-streak diagnostic-gate",
-      }),
-    );
+    const ledgerPath = resolveLedgerPath(args, taskPath);
+    const ledgerArgs = ["--ledger", ledgerPath];
+
+    // 2R §2 (P1-B): fail-closed precondition check BEFORE spawning either
+    // gate subprocess -- if this fails, the real gates are never called at
+    // all (checkGatePreconditions' reason is the ONLY decision).
+    const taskText = readFileSync(taskPath, "utf8");
+    const { hasTaskIdLine, taskIdIssueFormatValid } =
+      extractTaskIdFacts(taskText);
+    const ledgerExists = existsSync(ledgerPath);
+    const loaded = ledgerExists ? loadLedger(ledgerPath) : null;
+    const precondition = checkGatePreconditions({
+      hasTaskIdLine,
+      taskIdIssueFormatValid,
+      ledgerExists,
+      ledgerLoadOk: loaded?.ok ?? false,
+      ledgerLoadReason: loaded?.reason,
+    });
+
+    if (precondition) {
+      decisions.push(precondition);
+    } else {
+      const gateResult = runGateSubcommand("gate", taskPath, ledgerArgs);
+      const diagResult = runGateSubcommand(
+        "diagnostic-gate",
+        taskPath,
+        ledgerArgs,
+      );
+      decisions.push(
+        decideFromGateExit({ ...gateResult, label: "reject-streak gate" }),
+        decideFromGateExit({
+          ...diagResult,
+          label: "reject-streak diagnostic-gate",
+        }),
+      );
+    }
   }
   const combined = combineGateDecisions(decisions);
 

@@ -4,6 +4,7 @@ import { readFileSync } from "node:fs";
 import {
   decideFromGateExit,
   combineGateDecisions,
+  checkGatePreconditions,
   DISPATCH_GATE_STATE,
 } from "./dispatch-gate-decision-core.mjs";
 
@@ -91,6 +92,82 @@ test("reason is always a non-empty human-readable string, even with no output", 
 test("label defaults to 'dispatch gate' when omitted", () => {
   const r = decideFromGateExit({ exitCode: 0, stdout: "ok", stderr: "" });
   assert.match(r.reason, /^dispatch gate:/);
+});
+
+// ---------------------------------------------------------------------------
+// checkGatePreconditions (2R §2, P1-B) -- fail-closed on unidentifiable
+// input, ahead of ever spawning the sub-gate. All facts here are the same
+// structural shape the CLI extracts (regex match on task_id line,
+// loadLedger()'s own .ok/.existed booleans) -- never a string match on the
+// sub-gate's own stdout/stderr (S8).
+// ---------------------------------------------------------------------------
+
+const ALL_GOOD = {
+  hasTaskIdLine: true,
+  taskIdIssueFormatValid: true,
+  ledgerExists: true,
+  ledgerLoadOk: true,
+};
+
+test("checkGatePreconditions: all facts good -> null (proceed to real gates)", () => {
+  assert.equal(checkGatePreconditions(ALL_GOOD), null);
+});
+
+test("checkGatePreconditions: ⓐ hasTaskIdLine=false -> REJECT_TASK_ID_MISSING, checked before all others", () => {
+  const r = checkGatePreconditions({
+    ...ALL_GOOD,
+    hasTaskIdLine: false,
+    taskIdIssueFormatValid: false,
+    ledgerExists: false,
+    ledgerLoadOk: false,
+  });
+  assert.equal(r.state, DISPATCH_GATE_STATE.REJECT_TASK_ID_MISSING);
+  assert.equal(r.allow, false);
+});
+
+test("checkGatePreconditions: ⓑ taskIdIssueFormatValid=false (line present, bad format) -> REJECT_TASK_ID_MALFORMED", () => {
+  const r = checkGatePreconditions({
+    ...ALL_GOOD,
+    taskIdIssueFormatValid: false,
+  });
+  assert.equal(r.state, DISPATCH_GATE_STATE.REJECT_TASK_ID_MALFORMED);
+  assert.equal(r.allow, false);
+});
+
+test("checkGatePreconditions: ⓒ ledgerExists=false -> REJECT_LEDGER_MISSING", () => {
+  const r = checkGatePreconditions({ ...ALL_GOOD, ledgerExists: false });
+  assert.equal(r.state, DISPATCH_GATE_STATE.REJECT_LEDGER_MISSING);
+  assert.equal(r.allow, false);
+});
+
+test("checkGatePreconditions: ⓓ ledgerLoadOk=false (present but corrupt) -> REJECT_LEDGER_CORRUPT, reason carries ledgerLoadReason", () => {
+  const r = checkGatePreconditions({
+    ...ALL_GOOD,
+    ledgerLoadOk: false,
+    ledgerLoadReason: "ledger 'x.json' is not valid JSON (boom)",
+  });
+  assert.equal(r.state, DISPATCH_GATE_STATE.REJECT_LEDGER_CORRUPT);
+  assert.equal(r.allow, false);
+  assert.match(r.reason, /boom/);
+});
+
+test("checkGatePreconditions: all four rejecting states produce mutually distinct reason strings", () => {
+  const states = [
+    checkGatePreconditions({ ...ALL_GOOD, hasTaskIdLine: false }),
+    checkGatePreconditions({ ...ALL_GOOD, taskIdIssueFormatValid: false }),
+    checkGatePreconditions({ ...ALL_GOOD, ledgerExists: false }),
+    checkGatePreconditions({ ...ALL_GOOD, ledgerLoadOk: false }),
+  ];
+  const uniqueReasons = new Set(states.map((s) => s.reason));
+  assert.equal(uniqueReasons.size, 4);
+  const uniqueStates = new Set(states.map((s) => s.state));
+  assert.equal(uniqueStates.size, 4);
+});
+
+test("checkGatePreconditions: missing/undefined args object -> does not throw, treated as all-bad (fail-closed)", () => {
+  assert.doesNotThrow(() => checkGatePreconditions());
+  const r = checkGatePreconditions();
+  assert.equal(r.allow, false);
 });
 
 // ---------------------------------------------------------------------------
