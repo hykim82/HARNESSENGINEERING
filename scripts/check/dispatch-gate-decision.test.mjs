@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, writeFileSync, rmSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -302,6 +302,28 @@ test("(반례7-b) 3R: 원장 항목의 history가 배열이 아님 -> REJECT_LED
   });
 });
 
+test("(반례8) 4R §2 검토 실측 -- 원장 항목의 streak: 1.5(소수) -> REJECT_LEDGER_ENTRY_MALFORMED, gates never spawned", () => {
+  withFixtureDir((dir) => {
+    const taskPath = join(dir, "coder-task.md");
+    writeFileSync(taskPath, "task_id: HYK-9023-fractional-1\nbody\n", "utf8");
+    const ledgerPath = join(dir, "reject-streak.json");
+    writeFileSync(
+      ledgerPath,
+      JSON.stringify({
+        schema_version: 1,
+        issues: { "HYK-9023": { streak: 1.5, history: [] } },
+      }),
+      "utf8",
+    );
+    const r = runCli([taskPath, "--ledger", ledgerPath]);
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /해석 가능한 형태가 아님/);
+    assert.match(r.stderr, /정수/);
+    assert.doesNotMatch(r.stderr, /reject-streak gate:/);
+    assert.doesNotMatch(r.stderr, /reject-streak diagnostic-gate:/);
+  });
+});
+
 test("(9) P1-B ⓑ task_id present but not HYK-<digits> -> REJECT_TASK_ID_MALFORMED, gates never spawned", () => {
   withFixtureDir((dir) => {
     const taskPath = join(dir, "coder-task.md");
@@ -557,6 +579,75 @@ test("(15) 2R §3-1 실측 회귀: no --ledger given, invoking CWD is a DIFFEREN
     } finally {
       rmSync(elsewhereDir, { recursive: true, force: true });
     }
+  });
+});
+
+test("(16) 4R §3 TOCTOU -- ledger mutated to streak=0 in the window between the precondition read and gate execution -> still REJECTs (snapshot isolates the gates from the live file)", () => {
+  withFixtureDir((dir) => {
+    const taskPath = join(dir, "coder-task.md");
+    writeFileSync(
+      taskPath,
+      "task_id: HYK-9600-toctou-1\nno envelope here\n",
+      "utf8",
+    );
+    const ledgerPath = join(dir, "reject-streak.json");
+    writeLedger(ledgerPath, {
+      schema_version: 1,
+      issues: {
+        "HYK-9600": {
+          streak: 2,
+          history: [
+            { task_id: "HYK-9600-coder-1", verdict: "rejected", at: "a" },
+            { task_id: "HYK-9600-coder-2", verdict: "rejected", at: "b" },
+          ],
+        },
+      },
+    });
+    // Mirrors the reviewer's own NODE_OPTIONS technique: a --require hook
+    // fires at the start of EVERY node process this run launches (this
+    // CLI's own process = invocation #1, then the gate/diagnostic-gate
+    // subprocesses = #2/#3). Invocation #1 is left alone (the CLI must be
+    // allowed to read the real streak=2 ledger first); from invocation #2
+    // onward the hook rewrites the LIVE ledger file (never whatever
+    // snapshot path the CLI decided to pass down) to streak=0 BEFORE that
+    // process's own code runs -- simulating an external actor changing the
+    // ledger in the exact window between confirmation and gate execution.
+    const counterPath = join(dir, "toctou-counter.txt");
+    const mutatorPath = join(dir, "toctou-mutator.cjs");
+    writeFileSync(
+      mutatorPath,
+      [
+        "const fs = require('fs');",
+        `const counterPath = ${JSON.stringify(counterPath)};`,
+        `const liveLedgerPath = ${JSON.stringify(ledgerPath)};`,
+        "let count = 0;",
+        "try { count = Number(fs.readFileSync(counterPath, 'utf8')); } catch {}",
+        "count += 1;",
+        "fs.writeFileSync(counterPath, String(count), 'utf8');",
+        "if (count >= 2) {",
+        "  const ledger = JSON.parse(fs.readFileSync(liveLedgerPath, 'utf8'));",
+        "  ledger.issues['HYK-9600'] = { streak: 0, history: [] };",
+        "  fs.writeFileSync(liveLedgerPath, JSON.stringify(ledger, null, 2), 'utf8');",
+        "}",
+      ].join("\n"),
+      "utf8",
+    );
+    const r = runCli([taskPath, "--ledger", ledgerPath], {
+      env: {
+        ...process.env,
+        NODE_OPTIONS: `--require ${mutatorPath}`,
+      },
+    });
+    assert.equal(
+      r.status,
+      1,
+      "gate must still reject using the CONFIRMED streak=2, not the mid-flight-mutated streak=0",
+    );
+    assert.match(r.stderr, /BLOCK\(exit 2\)|streak=2/);
+    // The live file WAS mutated (proves the attack scenario actually fired,
+    // not that the mutator silently no-op'd).
+    const liveLedgerAfter = JSON.parse(readFileSync(ledgerPath, "utf8"));
+    assert.equal(liveLedgerAfter.issues["HYK-9600"].streak, 0);
   });
 });
 

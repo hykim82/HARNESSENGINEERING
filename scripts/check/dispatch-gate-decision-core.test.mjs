@@ -134,6 +134,27 @@ test("checkLedgerEntryShape: entry.streak is a string, negative, NaN, or Infinit
   }
 });
 
+test("checkLedgerEntryShape: 4R §2 실측 -- entry.streak is a non-integer finite number (e.g. 1.5) -> invalid (2R/3R 형태 검사가 이 값을 놓쳤던 지점)", () => {
+  for (const streak of [1.5, 0.1, 2.999, -0.5]) {
+    const r = checkLedgerEntryShape(
+      { issues: { "HYK-1": { streak, history: [] } } },
+      "HYK-1",
+    );
+    assert.equal(r.valid, false, `expected invalid for streak=${streak}`);
+    assert.match(r.reason, /정수/);
+  }
+});
+
+test("checkLedgerEntryShape: entry.streak is a valid non-negative INTEGER (incl. 0) -> valid", () => {
+  for (const streak of [0, 1, 2, 100]) {
+    const r = checkLedgerEntryShape(
+      { issues: { "HYK-1": { streak, history: [] } } },
+      "HYK-1",
+    );
+    assert.equal(r.valid, true, `expected valid for streak=${streak}`);
+  }
+});
+
 test("checkLedgerEntryShape: entry.history present but not an array -> invalid", () => {
   const r = checkLedgerEntryShape(
     { issues: { "HYK-1": { streak: 2, history: "not-an-array" } } },

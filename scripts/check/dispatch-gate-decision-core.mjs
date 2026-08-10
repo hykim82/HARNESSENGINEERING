@@ -239,6 +239,22 @@ export function checkGatePreconditions({
   return null;
 }
 
+// Extracted from checkLedgerEntryShape (quality-check: keep that function's
+// own complexity under the repo's ESLint ceiling, same reason
+// reject-streak.mjs extracts its own helpers). 4R §2 (검토 실측): streak는
+// "몇 번 연속 반려됐는가"라는 정수 카운트다 -- `reject-streak.mjs`의 유일한
+// 정상 생산 경로(`applyOutcome`)는 항상 `(prev.streak ?? 0) + 1` 형태의
+// 정수 연산만 하므로, 정수가 아닌 streak(예: 1.5)은 정상 생산 경로가 만들
+// 수 없는 값이다 -- 손상/직접 조작의 증거로 취급해 거부한다.
+function isValidStreakValue(streak) {
+  return (
+    typeof streak === "number" &&
+    Number.isFinite(streak) &&
+    Number.isInteger(streak) &&
+    streak >= 0
+  );
+}
+
 // 3R §2/§3 반례 7: reject-streak.mjs의 checkGate/checkDiagnosticGate는
 // `ledger?.issues?.[issueId]?.streak ?? 0`으로 읽는다 -- `??`는 null과
 // undefined만 nullish로 접는다는 JS 자체 의미론이라, streak가 실제로는
@@ -265,10 +281,12 @@ export function checkLedgerEntryShape(ledger, issueId) {
     };
   }
   const { streak, history } = entry;
-  if (typeof streak !== "number" || !Number.isFinite(streak) || streak < 0) {
+  // ⛔개별 값(예: 1.5)을 열거하지 않는다 -- isValidStreakValue라는 형태
+  // 조건 하나로 판단한다(위 헤더 참고).
+  if (!isValidStreakValue(streak)) {
     return {
       valid: false,
-      reason: `이슈 '${issueId}'.streak이 유효한 음이 아닌 유한 수가 아님(${JSON.stringify(streak)})`,
+      reason: `이슈 '${issueId}'.streak이 유효한 음이 아닌 유한 정수가 아님(${JSON.stringify(streak)})`,
     };
   }
   if (history !== undefined && !Array.isArray(history)) {

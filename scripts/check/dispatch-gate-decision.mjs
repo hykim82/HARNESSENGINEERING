@@ -9,8 +9,9 @@
 // exit-code contract, distinct from the underlying gates' {0,1,2}, so a
 // caller never has to remember two different meanings for "1".
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, mkdtempSync, rmSync } from "node:fs";
 import { join, dirname } from "node:path";
+import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import {
   decideFromGateExit,
@@ -18,7 +19,7 @@ import {
   checkGatePreconditions,
   checkLedgerEntryShape,
 } from "./dispatch-gate-decision-core.mjs";
-import { loadLedger } from "./reject-streak.mjs";
+import { loadLedger, writeLedger } from "./reject-streak.mjs";
 
 const REJECT_STREAK_PATH = join(
   dirname(fileURLToPath(import.meta.url)),
@@ -116,6 +117,91 @@ function resolveLedgerPath(args, taskPath) {
   return args.ledger || join(dirname(taskPath), "reject-streak.json");
 }
 
+// 2R/3R §2 (P1-B / confirmative redesign): fail-closed precondition check
+// BEFORE spawning either gate subprocess -- if this fails, the real gates
+// are never called at all (checkGatePreconditions' reason is the ONLY
+// decision). Extracted from runDispatchGateDecision to keep that function
+// under the repo's ESLint complexity/line-count ceiling (quality-check).
+function evaluatePrecondition(taskPath, ledgerPath) {
+  const taskText = readFileSync(taskPath, "utf8");
+  const { taskIdMatchCount, taskIdFormatValid, issueId } =
+    extractTaskIdFacts(taskText);
+  const ledgerExists = existsSync(ledgerPath);
+  const loaded = ledgerExists ? loadLedger(ledgerPath) : null;
+  // 3R 반례 7: only meaningful once ledger loaded AND issueId uniquely
+  // resolved -- if either is false, a higher-priority check in
+  // checkGatePreconditions (task_id/ledger-readability) already rejects
+  // before this fact is ever consulted, so an "invalid" placeholder here is
+  // inert, never itself the deciding reason.
+  const entryShape =
+    loaded?.ok === true && issueId !== null
+      ? checkLedgerEntryShape(loaded.ledger, issueId)
+      : { valid: false, reason: "(전제조건 미충족, 이 확인은 도달하지 않음)" };
+  const precondition = checkGatePreconditions({
+    taskIdMatchCount,
+    taskIdFormatValid,
+    ledgerExists,
+    ledgerLoadOk: loaded?.ok ?? false,
+    ledgerLoadReason: loaded?.reason,
+    ledgerEntryShapeValid: entryShape.valid,
+    ledgerEntryShapeReason: entryShape.reason,
+  });
+  return { precondition, loaded };
+}
+
+// 4R §3 (TOCTOU): checkGatePreconditions already judged `loadedLedger` --
+// the in-memory object from THIS process's single read of ledgerPath. The
+// two gate subcommands below are SEPARATE processes that would otherwise
+// re-read the SAME live ledgerPath themselves; if the file on disk changes
+// in the window between our read and their read (검토 실측: `streak`
+// rewritten to 0 mid-flight via NODE_OPTIONS), the precondition's
+// confirmation and the gates' actual verdict would be judging two
+// DIFFERENT ledger states. Fix (한용 지시 "단일 읽기" 선택): materialize the
+// ALREADY-VALIDATED in-memory ledger to a private, freshly-created
+// snapshot file, and point BOTH gate subcommands at that snapshot instead
+// of the live path -- they still "re-read" (separate processes,
+// unavoidable), but what they read is now the frozen content this process
+// already confirmed, not whatever the live file happens to contain at that
+// moment. This closes the window between confirmation and gate execution;
+// it does NOT (and cannot) close the earlier window between this
+// process's OWN read of the live ledger and a concurrent writer's
+// non-atomic write to that same file -- reject-streak.mjs's writeLedger()
+// uses a plain writeFileSync, not an atomic rename, and this track cannot
+// touch that file (§1/§6). A snapshotDir cleanup failure is logged, never
+// allowed to change the verdict already decided from the (already-
+// executed) gate results.
+function runGatesAgainstSnapshot(taskPath, loadedLedger) {
+  const snapshotDir = mkdtempSync(
+    join(tmpdir(), "dispatch-gate-decision-snapshot-"),
+  );
+  const snapshotLedgerPath = join(snapshotDir, "reject-streak.json");
+  writeLedger(snapshotLedgerPath, loadedLedger);
+  const snapshotLedgerArgs = ["--ledger", snapshotLedgerPath];
+  try {
+    const gateResult = runGateSubcommand("gate", taskPath, snapshotLedgerArgs);
+    const diagResult = runGateSubcommand(
+      "diagnostic-gate",
+      taskPath,
+      snapshotLedgerArgs,
+    );
+    return [
+      decideFromGateExit({ ...gateResult, label: "reject-streak gate" }),
+      decideFromGateExit({
+        ...diagResult,
+        label: "reject-streak diagnostic-gate",
+      }),
+    ];
+  } finally {
+    try {
+      rmSync(snapshotDir, { recursive: true, force: true });
+    } catch (err) {
+      console.error(
+        `dispatch-gate-decision: snapshot cleanup failed (non-fatal, verdict already decided): ${err.message}`,
+      );
+    }
+  }
+}
+
 export function runDispatchGateDecision(argv) {
   const args = parseArgs(argv);
   const taskPath = args._[0];
@@ -144,55 +230,11 @@ export function runDispatchGateDecision(argv) {
     );
   } else {
     const ledgerPath = resolveLedgerPath(args, taskPath);
-    const ledgerArgs = ["--ledger", ledgerPath];
-
-    // 2R/3R §2 (P1-B / confirmative redesign): fail-closed precondition
-    // check BEFORE spawning either gate subprocess -- if this fails, the
-    // real gates are never called at all (checkGatePreconditions' reason is
-    // the ONLY decision).
-    const taskText = readFileSync(taskPath, "utf8");
-    const { taskIdMatchCount, taskIdFormatValid, issueId } =
-      extractTaskIdFacts(taskText);
-    const ledgerExists = existsSync(ledgerPath);
-    const loaded = ledgerExists ? loadLedger(ledgerPath) : null;
-    // 3R 반례 7: only meaningful once ledger loaded AND issueId uniquely
-    // resolved -- if either is false, a higher-priority check in
-    // checkGatePreconditions (task_id/ledger-readability) already rejects
-    // before this fact is ever consulted, so an "invalid" placeholder here
-    // is inert, never itself the deciding reason.
-    const entryShape =
-      loaded?.ok === true && issueId !== null
-        ? checkLedgerEntryShape(loaded.ledger, issueId)
-        : {
-            valid: false,
-            reason: "(전제조건 미충족, 이 확인은 도달하지 않음)",
-          };
-    const precondition = checkGatePreconditions({
-      taskIdMatchCount,
-      taskIdFormatValid,
-      ledgerExists,
-      ledgerLoadOk: loaded?.ok ?? false,
-      ledgerLoadReason: loaded?.reason,
-      ledgerEntryShapeValid: entryShape.valid,
-      ledgerEntryShapeReason: entryShape.reason,
-    });
-
+    const { precondition, loaded } = evaluatePrecondition(taskPath, ledgerPath);
     if (precondition) {
       decisions.push(precondition);
     } else {
-      const gateResult = runGateSubcommand("gate", taskPath, ledgerArgs);
-      const diagResult = runGateSubcommand(
-        "diagnostic-gate",
-        taskPath,
-        ledgerArgs,
-      );
-      decisions.push(
-        decideFromGateExit({ ...gateResult, label: "reject-streak gate" }),
-        decideFromGateExit({
-          ...diagResult,
-          label: "reject-streak diagnostic-gate",
-        }),
-      );
+      decisions.push(...runGatesAgainstSnapshot(taskPath, loaded.ledger));
     }
   }
   const combined = combineGateDecisions(decisions);
