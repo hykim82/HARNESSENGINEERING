@@ -131,7 +131,12 @@ test("헤더를 못 찾는 파일 -> UNDECIDABLE (정상으로 조용히 접지 
 // HYK-186 3R P1-3 -- durable report artifact (독립 검토 반려: stdout만으로는
 // "로그에만 남는 것", 도달 요건 미충족).
 // ---------------------------------------------------------------------------
-import { readFileSync, existsSync, mkdirSync as _mkdirSync } from "node:fs";
+import {
+  readFileSync,
+  existsSync,
+  mkdirSync as _mkdirSync,
+  symlinkSync,
+} from "node:fs";
 import { dirname as _dirname } from "node:path";
 import { fileURLToPath as _fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
@@ -1079,30 +1084,39 @@ test("auditDirectory (단위): excludePath가 undefined면 아무것도 제외�
 // ★RED 변조 2건 (필수, §2) -- 사본(mkdtemp)에만 변조, 원본 미변경.
 // ---------------------------------------------------------------------------
 
-test("mutation 4 (필수): 제외 로직 제거 -> 2회차에 자기 리포트 허위 MISMATCH가 다시 나타남 -> RED", () => {
+// HYK-186 6R §2 변조1 (필수): "정규화 강화분 제거" -- cheap/realpath 2단계
+// 비교를 5R의 구분자-only 비교로 되돌린다. 4형태(대소문자·`.`·`..`·
+// junction) 전부에서 허위 MISMATCH가 재현되면 RED.
+test("mutation 1 (필수): 정규화 강화분 제거(구분자만 바꾸던 5R 비교로 되돌림) -> 4형태 전부에서 허위 MISMATCH 재현 -> RED", () => {
   const src = readFileSync(CLI_PATH, "utf8");
   const target =
-    "    if (excludeNorm !== null && normalizeForCompare(filePath) === excludeNorm) {\n      excluded.push(basename);\n      continue;\n    }\n";
-  assertExactlyOneMatch(
-    src,
-    target,
-    "excludePath skip branch in auditDirectory",
-  );
-  const mutated = src.replace(target, "");
+    "    if (hasExclude) {\n      if (cheapNormalize(filePath) === excludeCheap) {\n        excluded.push(basename);\n        continue;\n      }\n      if (\n        applyCaseFold(basename) === excludeBasenameCheap &&\n        canonicalizeExisting(filePath) === excludeReal\n      ) {\n        excluded.push(basename);\n        continue;\n      }\n    }\n";
+  assertExactlyOneMatch(src, target, "cheap+realpath exclusion block");
+  const oldStyleReplacement =
+    '    if (hasExclude && filePath.replace(/\\\\/g, "/") === excludePath.replace(/\\\\/g, "/")) {\n      excluded.push(basename);\n      continue;\n    }\n';
+  const mutated = src.replace(target, oldStyleReplacement);
 
   const { mutDir, mutantPath } = stageMutant(mutated);
   try {
+    // 형태1: 대소문자.
     withDir((inboxDir) => {
       writeFileSync(join(inboxDir, "plain.txt"), "no hints\n", "utf8");
-      spawnSync(process.execPath, [mutantPath, inboxDir], { encoding: "utf8" });
-      const second = spawnSync(process.execPath, [mutantPath, inboxDir], {
-        encoding: "utf8",
-      });
+      const reportPath = join(inboxDir, "CaseReport.md");
+      spawnSync(
+        process.execPath,
+        [mutantPath, inboxDir, "--report", reportPath],
+        { encoding: "utf8" },
+      );
+      const second = spawnSync(
+        process.execPath,
+        [mutantPath, inboxDir, "--report", join(inboxDir, "casereport.md")],
+        { encoding: "utf8" },
+      );
       assert.equal(second.status, 0);
       assert.match(
         second.stdout,
-        /MISMATCH .*\.inbox-time-audit-report\.md/,
-        "RED: with the exclusion branch removed, the exact pre-fix bug reproduces -- the self-report is audited and flagged as a false MISMATCH again",
+        /MISMATCH .*CaseReport\.md/,
+        "RED(대소문자): 구분자-only 비교로 되돌리면 대소문자만 다른 같은 파일을 자기 자신으로 못 알아본다",
       );
     });
   } finally {
@@ -1110,12 +1124,15 @@ test("mutation 4 (필수): 제외 로직 제거 -> 2회차에 자기 리포트 �
   }
 });
 
-test("mutation 5 (필수, ★반대 방향): 제외 범위를 과도하게 넓힘(모든 .md 제외) -> 진짜 감사 대상(.md 파일)이 사라짐 -> RED", () => {
+// 변조2 (필수, ★반대 방향, 5R 것 승계 -- 이번 라운드 소스에 맞춰 target만 갱신)
+test("mutation 2 (필수, ★반대 방향): 제외 범위를 과도하게 넓힘(모든 .md 제외) -> 진짜 감사 대상(.md 파일)이 사라짐 -> RED", () => {
   const src = readFileSync(CLI_PATH, "utf8");
-  const target =
-    "    if (excludeNorm !== null && normalizeForCompare(filePath) === excludeNorm) {\n";
-  assertExactlyOneMatch(src, target, "excludePath comparison condition");
-  const mutated = src.replace(target, '    if (basename.endsWith(".md")) {\n');
+  const target = "      if (cheapNormalize(filePath) === excludeCheap) {\n";
+  assertExactlyOneMatch(src, target, "cheap exclusion comparison condition");
+  const mutated = src.replace(
+    target,
+    '      if (basename.endsWith(".md")) {\n',
+  );
 
   const { mutDir, mutantPath } = stageMutant(mutated);
   try {
@@ -1138,10 +1155,170 @@ test("mutation 5 (필수, ★반대 방향): 제외 범위를 과도하게 넓�
       assert.doesNotMatch(
         res.stdout,
         /^(NORMAL|MISMATCH|UNDECIDABLE) 0303-real-inbox-item\.md/m,
-        "RED: with the exclusion widened to 'every .md file', a genuine inbox item sharing the extension never receives an audit verdict at all -- this is the opposite-direction failure a single removal-only mutation (mutation 4) cannot catch",
+        "RED: with the exclusion widened to 'every .md file', a genuine inbox item sharing the extension never receives an audit verdict at all -- this is the opposite-direction failure mutation 1 cannot catch",
       );
     });
   } finally {
     rmSync(mutDir, { recursive: true, force: true });
   }
+});
+
+// 변조3 (필수, ★(B) 계약 축): realpath 실패 처리(try/catch fallback) 제거
+// -> 리포트가 아직 없는 첫 실행(realpathSync가 ENOENT로 던지는 상황)에서
+// 크래시하거나 exit이 비0이 되는지 확인.
+test("mutation 3 (필수, ★(B) 계약): realpath 실패 처리 제거 -> 리포트가 아직 없는 첫 실행에서 크래시/exit 비0 -> RED", () => {
+  const src = readFileSync(CLI_PATH, "utf8");
+  const target =
+    'function canonicalizeExisting(p) {\n  try {\n    return applyCaseFold(realpathSync(p).replace(/\\\\/g, "/"));\n  } catch {\n    return cheapNormalize(p);\n  }\n}\n';
+  assertExactlyOneMatch(src, target, "canonicalizeExisting try/catch fallback");
+  const mutated = src.replace(
+    target,
+    'function canonicalizeExisting(p) {\n  return applyCaseFold(realpathSync(p).replace(/\\\\/g, "/"));\n}\n',
+  );
+
+  const { mutDir, mutantPath } = stageMutant(mutated);
+  try {
+    withDir((inboxDir) => {
+      writeFileSync(join(inboxDir, "plain.txt"), "no hints\n", "utf8");
+      // 첫 실행 -- 기본 경로의 리포트 파일이 아직 존재하지 않는다. 정상
+      // 수리본은 realpathSync(ENOENT)를 잡아 cheapNormalize로 접지만,
+      // 변조본은 그 catch를 지웠으므로 여기서 그대로 예외가 터져야 한다.
+      const res = spawnSync(process.execPath, [mutantPath, inboxDir], {
+        encoding: "utf8",
+      });
+      assert.notEqual(
+        res.status,
+        0,
+        "RED: with the ENOENT fallback removed, the first run (report file doesn't exist yet) crashes instead of exiting 0 -- exactly the (B) 'never blocks' contract violation §2 요구2 warns against",
+      );
+    });
+  } finally {
+    rmSync(mutDir, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// HYK-186 6R §5 요구: 실패 4형태 각각을 "수리 후" 실제(비-변조) CLI로 두 번
+// 돌려, 2회차에 제외 통지가 나오고 허위 MISMATCH가 0임을 보인다.
+// ---------------------------------------------------------------------------
+
+test("형태1 (대소문자): --report CaseReport.md 로 만들고 casereport.md 로 다시 실행해도 자기 자신으로 인식 -> 허위 MISMATCH 없음", () => {
+  withDir((inboxDir) => {
+    writeFileSync(join(inboxDir, "plain.txt"), "no hints\n", "utf8");
+    const upper = join(inboxDir, "CaseReport.md");
+    spawnSync(process.execPath, [CLI_PATH, inboxDir, "--report", upper], {
+      encoding: "utf8",
+    });
+    const lower = join(inboxDir, "casereport.md");
+    const second = spawnSync(
+      process.execPath,
+      [CLI_PATH, inboxDir, "--report", lower],
+      { encoding: "utf8" },
+    );
+    assert.equal(second.status, 0);
+    assert.doesNotMatch(second.stdout, /MISMATCH .*[Cc]ase[Rr]eport\.md/);
+    if (process.platform === "win32" || process.platform === "darwin") {
+      assert.match(
+        second.stdout,
+        /자기 리포트 1건 감사 대상에서 제외/,
+        "이 플랫폼(win32/darwin 가정)에서는 대소문자만 다른 경로가 실제로 같은 파일이므로 제외 통지가 나와야 한다",
+      );
+    }
+  });
+});
+
+test("형태2 (`.` 세그먼트): --report './dot-report.md' 로 만들고 같은 경로로 다시 실행 -> 허위 MISMATCH 없음", () => {
+  withDir((inboxDir) => {
+    writeFileSync(join(inboxDir, "plain.txt"), "no hints\n", "utf8");
+    const dotPath = join(inboxDir, ".", "dot-report.md");
+    spawnSync(process.execPath, [CLI_PATH, inboxDir, "--report", dotPath], {
+      encoding: "utf8",
+    });
+    const second = spawnSync(
+      process.execPath,
+      [CLI_PATH, inboxDir, "--report", dotPath],
+      { encoding: "utf8" },
+    );
+    assert.equal(second.status, 0);
+    assert.doesNotMatch(second.stdout, /MISMATCH .*dot-report\.md/);
+    assert.match(second.stdout, /자기 리포트 1건 감사 대상에서 제외/);
+  });
+});
+
+test("형태3 (`..` 세그먼트): sub/../parent-report.md 로 만들고 같은 경로로 다시 실행 -> 허위 MISMATCH 없음", () => {
+  withDir((inboxDir) => {
+    writeFileSync(join(inboxDir, "plain.txt"), "no hints\n", "utf8");
+    mkdirSync(join(inboxDir, "sub"), { recursive: true });
+    const dotDotPath = join(inboxDir, "sub", "..", "parent-report.md");
+    spawnSync(process.execPath, [CLI_PATH, inboxDir, "--report", dotDotPath], {
+      encoding: "utf8",
+    });
+    const second = spawnSync(
+      process.execPath,
+      [CLI_PATH, inboxDir, "--report", dotDotPath],
+      { encoding: "utf8" },
+    );
+    assert.equal(second.status, 0);
+    assert.doesNotMatch(second.stdout, /MISMATCH .*parent-report\.md/);
+    assert.match(second.stdout, /자기 리포트 1건 감사 대상에서 제외/);
+  });
+});
+
+test("형태4 (junction 경유): alias 디렉터리(junction)를 통해 --report를 준 두 실행 -> 실제 같은 파일이면 허위 MISMATCH 없음 (junction 생성 실패 시 명시적으로 표시, 조용히 통과 처리 안 함)", () => {
+  withDir((inboxDir) => {
+    writeFileSync(join(inboxDir, "plain.txt"), "no hints\n", "utf8");
+    const aliasPath = join(inboxDir, "..", "hyk186-6r-junction-alias");
+    try {
+      symlinkSync(inboxDir, aliasPath, "junction");
+    } catch (err) {
+      // Windows에서 junction 생성 자체가 막힌 환경(권한/파일시스템)일 수
+      // 있다 -- 그 경우 이 시험은 조용히 "통과"로 접지 않고 명시적으로
+      // 표시한다(정직 한계, 결과 파일에도 동일하게 기재).
+      console.error(
+        `형태4 시험: junction 생성 실패로 이 케이스는 실기동 검증되지 않음 (${err.message})`,
+      );
+      return;
+    }
+    try {
+      const viaJunction = join(aliasPath, "junction-report.md");
+      const viaReal = join(inboxDir, "junction-report.md");
+      spawnSync(
+        process.execPath,
+        [CLI_PATH, inboxDir, "--report", viaJunction],
+        { encoding: "utf8" },
+      );
+      const second = spawnSync(
+        process.execPath,
+        [CLI_PATH, inboxDir, "--report", viaReal],
+        { encoding: "utf8" },
+      );
+      assert.equal(second.status, 0);
+      assert.doesNotMatch(second.stdout, /MISMATCH .*junction-report\.md/);
+      assert.match(second.stdout, /자기 리포트 1건 감사 대상에서 제외/);
+    } finally {
+      try {
+        rmSync(aliasPath, { force: true });
+      } catch {
+        // best-effort cleanup
+      }
+    }
+  });
+});
+
+test("회귀(5R 경계 유지): --no-report 실행은 여전히 이전 리포트를 조용히 숨기지 않는다(정규화 강화 후에도)", () => {
+  withDir((inboxDir) => {
+    writeFileSync(join(inboxDir, "plain.txt"), "no hints\n", "utf8");
+    spawnSync(process.execPath, [CLI_PATH, inboxDir], { encoding: "utf8" });
+    const second = spawnSync(
+      process.execPath,
+      [CLI_PATH, inboxDir, "--no-report"],
+      { encoding: "utf8" },
+    );
+    assert.equal(second.status, 0);
+    assert.match(
+      second.stdout,
+      new RegExp(DEFAULT_REPORT_BASENAME.replace(/\./g, "\\.")),
+      "정규화가 강화된 뒤에도 --no-report 경계(이전 실행이 남긴 리포트는 평범하게 감사)는 그대로 유지되어야 한다",
+    );
+  });
 });

@@ -34,8 +34,9 @@ import {
   readFileSync,
   appendFileSync,
   existsSync,
+  realpathSync,
 } from "node:fs";
-import { join } from "node:path";
+import { join, resolve, basename as pathBasename } from "node:path";
 import {
   judgeInboxTimeAudit,
   INBOX_AUDIT_VERDICT,
@@ -176,14 +177,47 @@ export function formatAuditLine(entry) {
   return base + advisory;
 }
 
-// HYK-186 5R §2 -- normalizes a path for exact-match comparison only
-// (backslash/forward-slash only; this is NOT a general path-resolution
-// helper, it never touches the filesystem or resolves `.`/`..`). Used
-// solely to compare `join(dir, basename)` against the run's own resolved
-// report path so a Windows-vs-POSIX separator mismatch between the two
-// call sites can't defeat the exact-path exclusion below.
-function normalizeForCompare(p) {
-  return typeof p === "string" ? p.replace(/\\/g, "/") : p;
+// HYK-186 6R §2 -- 5R's exclusion compared raw strings (separator-only
+// normalization) -- an independent review reproduced 4 alias shapes that
+// defeat a string comparison while still pointing at the exact same file:
+// case changes, `.`/`..` segments, and a junction/symlink hop. This
+// canonicalizes a path for comparison in two cheap-first, fs-only-if-needed
+// steps.
+//
+// ★대소문자 판단(§2 요구): 무조건 무시하지 않는다 -- 리눅스는 대소문자를
+// 구별하므로 `Report.md`/`report.md`가 서로 다른 실제 파일일 수 있다.
+// **플랫폼 기준**으로 결정한다: win32/darwin은 기본 파일시스템이 대소문자
+// 비구별(NTFS/APFS 기본 설정)이므로 소문자로 접어 비교하고, 그 외
+// (linux 등)는 원문 그대로 구별한다. ⚠️정직 한계: 이것은 휴리스틱이다 --
+// NTFS도 case-sensitive 모드로 마운트될 수 있고 Linux도 case-insensitive
+// 파일시스템(exFAT 등)을 마운트할 수 있다. 실제 파일시스템 대소문자
+// 정책을 질의하는 표준 API가 Node에 없어, "플랫폼 기본값"을 근사로 쓴다.
+const FS_IS_CASE_INSENSITIVE_BY_DEFAULT =
+  process.platform === "win32" || process.platform === "darwin";
+
+function applyCaseFold(p) {
+  return FS_IS_CASE_INSENSITIVE_BY_DEFAULT ? p.toLowerCase() : p;
+}
+
+// Cheap normalize: separators + case-fold + `path.resolve`'s own `.`/`..`
+// segment collapsing. Zero filesystem access -- always safe to call on
+// every directory entry (this is the O(1)-per-entry cost, no realpath).
+function cheapNormalize(p) {
+  if (typeof p !== "string") return p;
+  return applyCaseFold(resolve(p).replace(/\\/g, "/"));
+}
+
+// realpath-canonicalize a single path, tolerating a target that doesn't
+// exist yet (§2 요구 2: "리포트 파일은 첫 실행 때는 아직 없다... 실패를
+// 그냥 던지면 (B)의 절대 안 멈춘다 계약이 깨진다"). Falls back to the
+// cheap normalize on ANY realpathSync failure (ENOENT, permission error,
+// broken link, whatever) -- never throws out of this function.
+function canonicalizeExisting(p) {
+  try {
+    return applyCaseFold(realpathSync(p).replace(/\\/g, "/"));
+  } catch {
+    return cheapNormalize(p);
+  }
 }
 
 // auditDirectory: enumerates files in `dir`, audits each, returns
@@ -217,6 +251,25 @@ function normalizeForCompare(p) {
 //   숨기면 "실제로 있는 파일을 감사에서 빼는" 또 다른 문제가 된다는 §2-2의
 //   경고를 그대로 따른 것 -- 제외는 오직 "이 실행이 지금 쓰려는 그 파일"
 //   하나뿐이다.
+//
+// HYK-186 6R (검토자 실측, 5R 잔여 결함): 5R의 비교는 구분자만 바꿨다 --
+// 대소문자·`.`/`..` 세그먼트·junction/symlink 별칭 4형태가 문자열로는
+// 달라 보이지만 같은 실제 파일을 가리킬 때 제외에 실패했다. 아래는 두
+// 단계로 비교한다:
+//   1. **cheap 단계**(파일시스템 접근 0, 모든 항목에 적용) -- 구분자·
+//      대소문자(플랫폼 기준)·`.`/`..` 세그먼트까지 `path.resolve`로 접는다.
+//      실패 형태 1(대소문자)·2(`.`)·3(`..`)는 이 단계에서 전부 잡힌다.
+//   2. **realpath 단계**(§2 요구 3 "성능/부작용": 제외 후보 1개에만 적용
+//      -- 감사 대상 전원이 아니다). `excludePath`는 이번 실행에 **정확히
+//      하나**뿐이므로 그 값 하나만 `canonicalizeExisting`으로 미리
+//      해석해 둔다(실행당 1회). 각 디렉터리 항목은 cheap 비교로 이미
+//      일치하면 즉시 제외(가장 흔한 경우, realpath 호출 0). cheap 비교가
+//      불일치할 때만, **그 항목의 basename이 exclude 대상의 basename과
+//      (같은 대소문자 규칙으로) 일치하는 경우에 한해** 그 항목 하나만
+//      추가로 realpath를 부른다 -- junction은 파일명은 그대로 두고
+//      디렉터리 경로만 별칭을 태우는 형태(§2 예시 "alias\junction-
+//      report.md")이므로, basename 사전 필터가 junction 후보를 놓치지
+//      않으면서도 나머지 무관한 항목들에는 realpath를 전혀 부르지 않는다.
 export function auditDirectory({
   dir,
   excludePath,
@@ -225,15 +278,30 @@ export function auditDirectory({
   statFn = statSync,
 }) {
   const names = readdirFn(dir);
-  const excludeNorm =
-    typeof excludePath === "string" ? normalizeForCompare(excludePath) : null;
+  const hasExclude = typeof excludePath === "string";
+  const excludeCheap = hasExclude ? cheapNormalize(excludePath) : null;
+  const excludeBasenameCheap = hasExclude
+    ? applyCaseFold(pathBasename(excludePath))
+    : null;
+  // realpath 호출은 여기 딱 1번 -- exclude 후보 자신에게만.
+  const excludeReal = hasExclude ? canonicalizeExisting(excludePath) : null;
+
   const excluded = [];
   const entries = [];
   for (const basename of names) {
     const filePath = join(dir, basename);
-    if (excludeNorm !== null && normalizeForCompare(filePath) === excludeNorm) {
-      excluded.push(basename);
-      continue;
+    if (hasExclude) {
+      if (cheapNormalize(filePath) === excludeCheap) {
+        excluded.push(basename);
+        continue;
+      }
+      if (
+        applyCaseFold(basename) === excludeBasenameCheap &&
+        canonicalizeExisting(filePath) === excludeReal
+      ) {
+        excluded.push(basename);
+        continue;
+      }
     }
     entries.push(auditFile({ filePath, basename, readFileFn, statFn }));
   }
