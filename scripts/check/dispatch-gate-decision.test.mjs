@@ -202,13 +202,13 @@ test("(7) no task-path argument at all -> usage error, exit 1 (not a silent allo
 });
 
 // ---------------------------------------------------------------------------
-// 2R §2 P1-B: fail-closed precondition check -- reject-streak.mjs itself
-// treats these four inputs as UNJUDGABLE/fail-open (reviewer's live
-// demonstration, .harness/coder.md §P1-B). The gates must NEVER even be
-// spawned for these -- each must produce a DISTINCT reason string (2R §2
-// 요구) and none may be confused with REJECT_BLOCKED/REJECT_OPERATIONAL_ERROR.
+// 1R/2R/3R §2 P1-B: fail-closed precondition check -- reject-streak.mjs
+// itself treats these inputs as UNJUDGABLE/fail-open, or silently folds them
+// (reviewer's live demonstrations across 1R/2R). The gates must NEVER even
+// be spawned for these -- each must produce a DISTINCT reason string and
+// none may be confused with REJECT_BLOCKED/REJECT_OPERATIONAL_ERROR.
 // ---------------------------------------------------------------------------
-test("(8) P1-B ⓐ task_id header entirely absent -> REJECT_TASK_ID_MISSING, gates never spawned", () => {
+test("(8) P1-B task_id header entirely absent -> REJECT_TASK_ID_NOT_UNIQUE, gates never spawned", () => {
   withFixtureDir((dir) => {
     const taskPath = join(dir, "coder-task.md");
     writeFileSync(taskPath, "no task_id line here at all\nbody text\n", "utf8");
@@ -216,7 +216,87 @@ test("(8) P1-B ⓐ task_id header entirely absent -> REJECT_TASK_ID_MISSING, gat
     writeLedger(ledgerPath, { schema_version: 1, issues: {} });
     const r = runCli([taskPath, "--ledger", ledgerPath]);
     assert.equal(r.status, 1);
-    assert.match(r.stderr, /task_id 헤더 없음/);
+    assert.match(r.stderr, /task_id 줄이 정확히 1개가 아님\(실제 0개\)/);
+    assert.doesNotMatch(r.stderr, /reject-streak gate:/);
+    assert.doesNotMatch(r.stderr, /reject-streak diagnostic-gate:/);
+  });
+});
+
+test("(반례6) 3R: task_id 줄이 2개(앞=기록없음/뒤=streak 2) -> REJECT_TASK_ID_NOT_UNIQUE, gates never spawned", () => {
+  withFixtureDir((dir) => {
+    const taskPath = join(dir, "coder-task.md");
+    // Exactly the reviewer's 2R-followup shape: two task_id lines, an
+    // unresolvable one first and a resolvable one second -- reject-streak.mjs's
+    // own non-global regex would use the FIRST match and silently ignore the
+    // second line's real streak.
+    writeFileSync(
+      taskPath,
+      "task_id: HYK-0000-nonexistent-1\ntask_id: HYK-9020-dup-1\nbody\n",
+      "utf8",
+    );
+    const ledgerPath = join(dir, "reject-streak.json");
+    writeLedger(ledgerPath, {
+      schema_version: 1,
+      issues: {
+        "HYK-9020": {
+          streak: 2,
+          history: [
+            { task_id: "HYK-9020-coder-1", verdict: "rejected", at: "a" },
+            { task_id: "HYK-9020-coder-2", verdict: "rejected", at: "b" },
+          ],
+        },
+      },
+    });
+    const r = runCli([taskPath, "--ledger", ledgerPath]);
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /task_id 줄이 정확히 1개가 아님\(실제 2개\)/);
+    assert.doesNotMatch(r.stderr, /reject-streak gate:/);
+    assert.doesNotMatch(r.stderr, /reject-streak diagnostic-gate:/);
+  });
+});
+
+test("(반례7) 3R: 원장 항목의 streak: null -> REJECT_LEDGER_ENTRY_MALFORMED, gates never spawned", () => {
+  withFixtureDir((dir) => {
+    const taskPath = join(dir, "coder-task.md");
+    writeFileSync(taskPath, "task_id: HYK-9021-nullstreak-1\nbody\n", "utf8");
+    const ledgerPath = join(dir, "reject-streak.json");
+    // Written directly (not via writeLedger+applyOutcome, which would never
+    // produce a null streak) -- simulates on-disk corruption of a
+    // previously-valid entry.
+    writeFileSync(
+      ledgerPath,
+      JSON.stringify({
+        schema_version: 1,
+        issues: { "HYK-9021": { streak: null, history: [] } },
+      }),
+      "utf8",
+    );
+    const r = runCli([taskPath, "--ledger", ledgerPath]);
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /해석 가능한 형태가 아님/);
+    assert.doesNotMatch(r.stderr, /reject-streak gate:/);
+    assert.doesNotMatch(r.stderr, /reject-streak diagnostic-gate:/);
+  });
+});
+
+test("(반례7-b) 3R: 원장 항목의 history가 배열이 아님 -> REJECT_LEDGER_ENTRY_MALFORMED, gates never spawned", () => {
+  withFixtureDir((dir) => {
+    const taskPath = join(dir, "coder-task.md");
+    writeFileSync(taskPath, "task_id: HYK-9022-badhistory-1\nbody\n", "utf8");
+    const ledgerPath = join(dir, "reject-streak.json");
+    writeFileSync(
+      ledgerPath,
+      JSON.stringify({
+        schema_version: 1,
+        issues: {
+          "HYK-9022": { streak: 1, history: "not-an-array" },
+        },
+      }),
+      "utf8",
+    );
+    const r = runCli([taskPath, "--ledger", ledgerPath]);
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /해석 가능한 형태가 아님/);
     assert.doesNotMatch(r.stderr, /reject-streak gate:/);
     assert.doesNotMatch(r.stderr, /reject-streak diagnostic-gate:/);
   });
@@ -266,12 +346,18 @@ test("(11) P1-B ⓓ ledger present but corrupt (malformed JSON) -> REJECT_LEDGER
   });
 });
 
-test("P1-B ⓐⓑⓒⓓ each produce a MUTUALLY DISTINCT reason string (2R §2 요구)", () => {
+test("P1-B all six precondition-reject shapes produce MUTUALLY DISTINCT reason strings", () => {
   withFixtureDir((dir) => {
     const ledgerPath = join(dir, "reject-streak.json");
     writeLedger(ledgerPath, { schema_version: 1, issues: {} });
     const missingIdPath = join(dir, "a.md");
     writeFileSync(missingIdPath, "no id\n", "utf8");
+    const dupIdPath = join(dir, "a2.md");
+    writeFileSync(
+      dupIdPath,
+      "task_id: HYK-9030-a\ntask_id: HYK-9030-b\n",
+      "utf8",
+    );
     const malformedIdPath = join(dir, "b.md");
     writeFileSync(malformedIdPath, "task_id: NOT-HYK\n", "utf8");
     const okPath = join(dir, "c.md");
@@ -279,17 +365,42 @@ test("P1-B ⓐⓑⓒⓓ each produce a MUTUALLY DISTINCT reason string (2R §2 �
     const noLedgerPath = join(dir, "missing-ledger.json");
     const corruptLedgerPath = join(dir, "corrupt.json");
     writeFileSync(corruptLedgerPath, "not json", "utf8");
+    const nullStreakOkPath = join(dir, "d.md");
+    writeFileSync(nullStreakOkPath, "task_id: HYK-9031-x-1\n", "utf8");
+    const nullStreakLedgerPath = join(dir, "nullstreak.json");
+    writeFileSync(
+      nullStreakLedgerPath,
+      JSON.stringify({
+        schema_version: 1,
+        issues: { "HYK-9031": { streak: null, history: [] } },
+      }),
+      "utf8",
+    );
 
-    const a = runCli([missingIdPath, "--ledger", ledgerPath]).stderr;
-    const b = runCli([malformedIdPath, "--ledger", ledgerPath]).stderr;
-    const c = runCli([okPath, "--ledger", noLedgerPath]).stderr;
-    const d = runCli([okPath, "--ledger", corruptLedgerPath]).stderr;
-    const reasons = [a, b, c, d];
+    const missing = runCli([missingIdPath, "--ledger", ledgerPath]).stderr;
+    const dup = runCli([dupIdPath, "--ledger", ledgerPath]).stderr;
+    const malformed = runCli([malformedIdPath, "--ledger", ledgerPath]).stderr;
+    const noLedger = runCli([okPath, "--ledger", noLedgerPath]).stderr;
+    const corrupt = runCli([okPath, "--ledger", corruptLedgerPath]).stderr;
+    const badEntry = runCli([
+      nullStreakOkPath,
+      "--ledger",
+      nullStreakLedgerPath,
+    ]).stderr;
+    // missing/dup share the SAME state (REJECT_TASK_ID_NOT_UNIQUE, "not
+    // exactly one") but still produce DIFFERENT first-line text (count 0
+    // vs count 2) -- verified separately below.
+    assert.notEqual(
+      missing.split("\n")[0],
+      dup.split("\n")[0],
+      "missing (count 0) and duplicate (count 2) task_id must not collapse to the same reason text",
+    );
+    const reasons = [missing, dup, malformed, noLedger, corrupt, badEntry];
     const uniqueFirstLines = new Set(reasons.map((r) => r.split("\n")[0]));
     assert.equal(
       uniqueFirstLines.size,
-      4,
-      "each of ⓐⓑⓒⓓ must produce a distinguishable first reason line",
+      6,
+      "each of the six precondition-reject shapes must produce a distinguishable first reason line",
     );
   });
 });

@@ -1,5 +1,15 @@
-// HYK-217-dispatch-gate-1/2R (coder-task.md) -- «배달 도구가 스스로 게이트를
-// 확인하고, 불통과면 배달을 거부한다」의 판단(코어).
+// HYK-217-dispatch-gate-1/2R/3R (coder-task.md) -- «배달 도구가 스스로
+// 게이트를 확인하고, 불통과면 배달을 거부한다」의 판단(코어).
+//
+// ★3R 설계 전환(게이트 2 판정 「가」, 한용 확정 2026-08-10 14:02): 1R/2R의
+// checkGatePreconditions는 "나쁜 입력을 하나씩 찾아 막고, 못 찾으면 통과"
+// (열거식)였다 -- 그 형태가 두 라운드 연속 같은 근본 결함(입력이 애매하면
+// 통과시킨다)의 새 변종을 냈다(1R: task_id 삭제, 2R: task_id 중복/streak
+// null). 3R은 방향을 뒤집는다: 기본값은 거부이고, 아래 checkGatePreconditions
+// 가 정의하는 "확인된 사실 전부"가 명시적으로 성립했을 때만 통과를 허용한다
+// (HYK-212 선례의 닫힌 상태 집합 방식). 새 애매함이 나오면 이제는 "허용
+// 조건을 만족 못 함"으로 자동으로 거부 쪽에 떨어진다 -- 매 라운드 새
+// 예외를 하나씩 추가하는 대신, 애초에 예외가 거부의 기본 상태다.
 //
 // 실사고(1R coder-task.md §0): 연속 반려 진단 게이트가 exit 2(불통과)를
 // 냈는데 배달 도구(관제실 `dispatch-worker.ps1`, CI 없음)가 게이트 검사와
@@ -29,15 +39,23 @@
 // ③**이 검사가 통과해도 여전히 열려 있는 구멍**(정직 한계, "보장하지
 //   않는 것: 없음"으로 도망가지 않는다): (a) `reject-streak.mjs`를 거치지
 //   않는 직접 `orca dispatch --inject` 호출은 이 모듈 자체가 관측조차
-//   못한다(gap#96). (b) 이 모듈이 fail-closed로 막는 전제조건은 "task_id
-//   해석 불가/원장 부재·손상" 네 가지뿐이다 -- `reject-streak.mjs`가
-//   내부적으로 UNJUDGABLE로 접는 다른 입력 형태(예: 이 네 가지 밖의 새로운
-//   파싱 실패 유형)가 미래에 추가되면, 그 새 유형은 이 모듈의 전제조건
-//   검사가 모르는 형태라 다시 열릴 수 있다 -- 이 코어는 `reject-streak.mjs`
-//   내부 파싱 로직과 독립적으로 유지보수되므로 드리프트 위험이 있다.
-//   (c) 원장 파일 부재를 거부로 처리하는 선택(2R §2)은 `reject-streak.mjs`
-//   자신의 계약(원장 없음=streak 0, 정상)보다 엄격하다 -- 그 자체가
-//   전이 비용이다(아래 checkGatePreconditions 헤더 참조).
+//   못한다(gap#96). (b) 3R이 방향을 뒤집었어도(기본 거부 + 확인된 사실만
+//   허용) 확인 대상 "사실 목록" 자체는 여전히 이 코어가 유한하게 나열한
+//   것이다(task_id 유일성/형식 · 원장 가독성 · 원장 항목 형태 · 게이트
+//   명시 PASS) -- `reject-streak.mjs`가 내부적으로 다루는 입력 차원이
+//   미래에 늘어나면(예: 오늘 없는 새 필드가 판정에 관여하게 되면) 이
+//   목록이 그 차원을 모를 수 있다. 다만 방향이 바뀐 덕에 그 경우의
+//   결과는 1R/2R과 다르다 -- "모르는 차원"은 이제 조용히 통과가 아니라
+//   그 차원을 다루는 명시적 확인이 없으므로 **최종 게이트 실행 결과
+//   자체**(exit 0/2/1 그 외)에 의해서만 걸러진다. 즉 이 코어가 놓친
+//   새 차원이 있어도 실제 게이트가 그것 때문에 BLOCK/오류를 낸다면 여전히
+//   거부된다 -- 완전히 열린 구멍이 아니라 "우리 사전 검사가 이유를
+//   설명 못 하는 채로 게이트의 최종 판정에만 의존하게 되는" 축소된 위험이다.
+//   (c) 원장 파일 부재를 거부로 처리하는 선택은 `reject-streak.mjs` 자신의
+//   계약(원장 없음=streak 0, 정상)보다 엄격하다 -- 그 자체가 전이
+//   비용이다(아래 checkGatePreconditions 헤더 참조). ★**절대주장 금지**:
+//   이 방향 전환이 "모든 애매함"을 덮는다고 주장하지 않는다 -- 보장하는
+//   것은 "기본값이 거부 쪽으로 이동했다"는 사실 하나다.
 //
 // §2 실측 계약(1R coder-task.md): `reject-streak.mjs gate|diagnostic-gate`의
 // 종료코드는 세 가지뿐이다 -- 0(통과)/2(차단)/1(운영 오류, 실측된 유일한
@@ -57,15 +75,38 @@
 //   "내용이 나빠서"가 아니라 "판정 자체가 안 됐다"는 것을 사람이 즉시
 //   구분하게 하고, (b) 이유 문자열에 원인(대개 task-path 오배선)과 조치를
 //   함께 실어 오탐이 방치되지 않게 한다 -- 로 완화한다(코드 4-51-4).
+// 3R §2 상태 표 -- 이 집합 밖은 없다(닫힌 집합). 각 상태의 뜻·근거:
+//
+// | 상태 | 뜻 | 무엇이 이 상태로 가는가 | 배달 |
+// |---|---|---|---|
+// | ALLOW | 게이트 서브프로세스 자신이 exit 0으로 명시 통과 | reject-streak.mjs gate/diagnostic-gate가 정확히 exit 0 | 허용 |
+// | REJECT_BLOCKED | 게이트가 명시적으로 내용 문제로 차단 | 정확히 exit 2 | 거부 |
+// | REJECT_OPERATIONAL_ERROR | 게이트를 실행할 순 있었지만 운영 오류 | 정확히 exit 1 | 거부 |
+// | REJECT_UNKNOWN_EXIT | 위 세 값 밖의 모든 것(시그널 종료 포함) | exitCode가 0/1/2 중 어느 것도 아님 | 거부 |
+// | REJECT_TASK_ID_NOT_UNIQUE | 이슈 식별자를 "유일하게" 읽어내지 못함 | task_id 줄이 0개 또는 2개 이상 | 거부 |
+// | REJECT_TASK_ID_MALFORMED | 유일하지만 형식이 무효 | task_id 줄이 정확히 1개이나 HYK-<digits> 아님 | 거부 |
+// | REJECT_LEDGER_MISSING | 원장을 읽을 대상 파일이 없음 | existsSync(ledgerPath) === false | 거부 |
+// | REJECT_LEDGER_CORRUPT | 원장 파일은 있으나 읽기/파싱 실패 | loadLedger().ok === false | 거부 |
+// | REJECT_LEDGER_ENTRY_MALFORMED | 원장은 읽었으나 해당 이슈 항목의 값이 해석 불가 | streak가 유한 음이 아닌 number가 아니거나 history가 배열이 아님(존재할 때) | 거부 |
+//
+// ALLOW는 이 표의 단 하나의 행에서만 나온다 -- 그 행에 도달하려면 위
+// checkGatePreconditions의 다섯 확인(유일성/형식/원장존재/원장읽기/항목형태)이
+// *전부* 통과(반환값 null)해야 하고, 그 다음 실제 게이트 두 개가 각각
+// exit 0을 내야 한다(decideFromGateExit + combineGateDecisions). 그 외
+// 모든 조합은 이 표의 REJECT_* 행 중 하나로 떨어진다 -- "그 외 전부"를
+// 담는 자리가 REJECT_UNKNOWN_EXIT(게이트 실행 결과 축)와
+// checkGatePreconditions 자신의 마지막 실패 검사(전제조건 축) 둘로
+// 이중으로 닫혀 있다.
 export const DISPATCH_GATE_STATE = Object.freeze({
   ALLOW: "ALLOW",
   REJECT_BLOCKED: "REJECT_BLOCKED",
   REJECT_OPERATIONAL_ERROR: "REJECT_OPERATIONAL_ERROR",
   REJECT_UNKNOWN_EXIT: "REJECT_UNKNOWN_EXIT",
-  REJECT_TASK_ID_MISSING: "REJECT_TASK_ID_MISSING",
+  REJECT_TASK_ID_NOT_UNIQUE: "REJECT_TASK_ID_NOT_UNIQUE",
   REJECT_TASK_ID_MALFORMED: "REJECT_TASK_ID_MALFORMED",
   REJECT_LEDGER_MISSING: "REJECT_LEDGER_MISSING",
   REJECT_LEDGER_CORRUPT: "REJECT_LEDGER_CORRUPT",
+  REJECT_LEDGER_ENTRY_MALFORMED: "REJECT_LEDGER_ENTRY_MALFORMED",
 });
 
 function firstNonEmpty(...candidates) {
@@ -112,55 +153,60 @@ export function decideFromGateExit({ exitCode, stdout, stderr, label } = {}) {
   };
 }
 
-// 2R §2 (P1-B): fail-closed precondition check the CLI runs BEFORE ever
-// spawning `reject-streak.mjs gate|diagnostic-gate` -- the sub-gate itself
-// treats an unresolvable task_id or an unreadable ledger as UNJUDGABLE +
-// fail-open (checkGate/checkDiagnosticGate/loadLedger, all left untouched
-// per 2R §1/§6). Deleting the task_id line, or making the id malformed,
-// made the sub-gate shrug and PASS -- exactly the bypass the reviewer
-// demonstrated live (검토 원문, .harness/coder.md §P1-B). Since the sub-gate
-// itself cannot change, this module blocks upstream of it instead, using
-// only STRUCTURAL facts the caller already extracted (a regex match on the
-// task file's OWN task_id line, and reject-streak.mjs's own loadLedger()
-// boolean `.ok`/`.existed` fields) -- never by grepping the sub-gate's
-// human-readable stdout/stderr for a word like "UNJUDGABLE" (2R §2
-// 비타협 2, 상시 기준 S8: 식별 근거는 화면 문자열이 아니라 안정 식별자).
+// 3R §2 -- 확증식(default-reject) precondition check: 이 함수는 이제
+// "나쁜 입력 목록"이 아니라 "허용에 필요한 확인된 사실 목록"으로 읽어야
+// 한다. 다섯 확인이 이 정확한 순서로 실행되고, ANY 하나라도 엄격하게
+// (strict `!==`) 통과하지 못하면 그 즉시 REJECT_* 상태로 거부한다 -- 통과
+// 여부가 애매하거나(값이 boolean이 아니거나, undefined이거나) 예상 밖
+// 타입이면 전부 이 엄격 비교에서 자동으로 실패한다(예: `1`이나 `"true"`는
+// `!== true`라 거부된다) -- 이게 "예상 밖 입력이 기본적으로 거부 쪽으로
+// 떨어진다"는 요구(3R §2-2)를 지키는 방식이다. 마지막 확인까지 전부
+// 통과했을 때만 null을 반환한다(caller가 이제 실제 게이트 두 개를 부를
+// 차례라는 뜻 -- 그 실행 결과 자체도 decideFromGateExit이 exit===0만
+// ALLOW로 매핑하므로 이중으로 안전측이다).
 //
-// Returns null when every precondition passes (caller should proceed to
-// the real gate calls); returns a decision object (same {state, allow,
-// reason} shape as decideFromGateExit) the moment the FIRST precondition
-// fails -- checked in this fixed order so ⓐ/ⓑ/ⓒ/ⓓ never produce the same
-// reason string for different root causes (2R §2 요구: "각각 거부될 때
-// 사람이 읽는 사유가 서로 구별돼야 한다").
+// 다섯 확인:
+// 1. taskIdMatchCount === 1 -- task_id 줄이 "정확히 하나"일 때만 유일하게
+//    읽어냈다고 확증한다(2R 검토 신규 반례 6: 줄이 2개면 reject-streak.mjs
+//    자신의 정규식이 첫 match만 보고 뒤 줄의 streak을 무시한다 -- 그 관용을
+//    고치지 않고, 애초에 "1개가 아니면" 이 사전 게이트가 통과시키지 않는다).
+// 2. taskIdFormatValid === true -- 유일한 그 값이 HYK-<digits> 형식.
+// 3. ledgerExists === true -- 원장 파일이 존재.
+// 4. ledgerLoadOk === true -- reject-streak.mjs 자신의 loadLedger()가
+//    성공(.ok).
+// 5. ledgerEntryShapeValid === true -- 해당 이슈의 원장 항목이 "해석
+//    가능한 형태"(아래 checkLedgerEntryShape 참조 -- 2R 검토 신규 반례 7:
+//    streak가 null이면 reject-streak.mjs의 `?? 0`이 조용히 0으로 접는다 --
+//    그 관용을 고치지 않고, 애초에 streak가 유효 number가 아니면 이
+//    사전 게이트가 통과시키지 않는다).
 //
-// Choosing REJECT_LEDGER_MISSING (not PASS) when the ledger file simply
-// does not exist is STRICTER than reject-streak.mjs's own contract (there,
-// "no ledger yet" == every issue at streak 0, a normal first-run state).
-// This is a deliberate transition cost, not an oversight: a pre-delivery
-// safety gate that cannot read the streak memory at all cannot distinguish
-// "this repo has never had a rejection" from "something deleted the memory
-// that would have required an envelope" -- and the latter is exactly the
-// silent-bypass shape this whole track exists to close. In production this
-// repo's own `.harness/reject-streak.json` already exists (git-tracked
-// history proves at least one prior rejection), so this stricter stance
-// costs nothing here; a brand-new repo with zero rejection history would
-// need to seed an empty ledger once (see .harness/coder.md §3 전이 비용).
+// 6번째 확인(둘 다 게이트 exit 0)은 이 함수 밖, combineGateDecisions에서
+// 이뤄진다 -- checkGatePreconditions는 "게이트를 부를 자격이 있는가"만
+// 확증하고, "게이트가 실제로 뭐라 했는가"는 건드리지 않는다(단일 책임 유지,
+// 2R의 기존 구조 그대로).
+//
+// REJECT_LEDGER_MISSING을 원장 부재에 선택한 이유는 2R 그대로(전이 비용
+// 문서화, 아래 참고). 이 함수 자체는 `reject-streak.mjs`를 고치지 않고
+// import도 하지 않는다(zero-import 코어 계약) -- 모든 입력은 caller가
+// 이미 구조적으로 추출한 값이다(S8: 게이트의 화면 출력 문자열을 여기서
+// 파싱하지 않는다).
 export function checkGatePreconditions({
-  hasTaskIdLine,
-  taskIdIssueFormatValid,
+  taskIdMatchCount,
+  taskIdFormatValid,
   ledgerExists,
   ledgerLoadOk,
   ledgerLoadReason,
+  ledgerEntryShapeValid,
+  ledgerEntryShapeReason,
 } = {}) {
-  if (!hasTaskIdLine) {
+  if (taskIdMatchCount !== 1) {
     return {
-      state: DISPATCH_GATE_STATE.REJECT_TASK_ID_MISSING,
+      state: DISPATCH_GATE_STATE.REJECT_TASK_ID_NOT_UNIQUE,
       allow: false,
-      reason:
-        "dispatch-gate-decision precondition: task_id 헤더 없음 -> 배달 거부(안전측 기본값 -- reject-streak.mjs는 이 경우를 UNJUDGABLE/fail-open으로 접지만 사전 게이트가 그 앞에서 막는다). 조치: task 파일 첫 블록에 'task_id: HYK-<n>...' 줄을 추가하라",
+      reason: `dispatch-gate-decision precondition: task_id 줄이 정확히 1개가 아님(실제 ${JSON.stringify(taskIdMatchCount)}개) -> 배달 거부(안전측 기본값 -- 확증식: 이슈 식별자를 유일하게 읽어내지 못하면 거부한다). 조치: task 파일에 'task_id: HYK-<n>...' 줄이 정확히 하나만 있는지 확인하라`,
     };
   }
-  if (!taskIdIssueFormatValid) {
+  if (taskIdFormatValid !== true) {
     return {
       state: DISPATCH_GATE_STATE.REJECT_TASK_ID_MALFORMED,
       allow: false,
@@ -168,7 +214,7 @@ export function checkGatePreconditions({
         "dispatch-gate-decision precondition: task_id 값이 'HYK-<digits>' 형식으로 해석되지 않음 -> 배달 거부(안전측 기본값). 조치: task_id 값을 'HYK-<숫자>...' 형식으로 고쳐라",
     };
   }
-  if (!ledgerExists) {
+  if (ledgerExists !== true) {
     return {
       state: DISPATCH_GATE_STATE.REJECT_LEDGER_MISSING,
       allow: false,
@@ -176,14 +222,62 @@ export function checkGatePreconditions({
         "dispatch-gate-decision precondition: reject-streak 원장 파일이 존재하지 않음 -> 배달 거부(안전측 기본값 -- reject-streak.mjs 자신은 원장 부재를 streak=0으로 허용하지만 이 사전 게이트는 더 엄격하다: 원장이 사라지면 모든 이슈의 반려 이력 기억도 함께 사라져 envelope 요구가 조용히 무력화될 수 있다). 조치: 원장 경로(--ledger 또는 기본 .harness/reject-streak.json)를 확인하라",
     };
   }
-  if (!ledgerLoadOk) {
+  if (ledgerLoadOk !== true) {
     return {
       state: DISPATCH_GATE_STATE.REJECT_LEDGER_CORRUPT,
       allow: false,
       reason: `dispatch-gate-decision precondition: reject-streak 원장을 읽거나 파싱할 수 없음 -> 배달 거부(안전측 기본값) -- 원인: ${ledgerLoadReason ?? "(no detail)"}. 조치: 원장 파일을 복구하거나 백업에서 되살린 뒤 재시도하라`,
     };
   }
+  if (ledgerEntryShapeValid !== true) {
+    return {
+      state: DISPATCH_GATE_STATE.REJECT_LEDGER_ENTRY_MALFORMED,
+      allow: false,
+      reason: `dispatch-gate-decision precondition: 원장의 해당 이슈 항목이 해석 가능한 형태가 아님 -> 배달 거부(안전측 기본값 -- reject-streak.mjs 자신은 streak이 null이면 '?? 0'으로 조용히 접지만 이 사전 게이트는 그것을 확증 실패로 본다) -- 원인: ${ledgerEntryShapeReason ?? "(no detail)"}. 조치: 원장의 해당 항목을 복구하라`,
+    };
+  }
   return null;
+}
+
+// 3R §2/§3 반례 7: reject-streak.mjs의 checkGate/checkDiagnosticGate는
+// `ledger?.issues?.[issueId]?.streak ?? 0`으로 읽는다 -- `??`는 null과
+// undefined만 nullish로 접는다는 JS 자체 의미론이라, streak가 실제로는
+// (예컨대 파일 손상으로) `null`인데 "streak 0(반려 이력 없음)"으로 조용히
+// 오독된다. 이 순수 함수는 그 오독이 일어나기 전에, 원장에 적힌 값
+// 그대로를 검사해 "해석 가능한 형태"인지 확증한다 -- entry가 아예 없으면
+// (그 이슈가 한 번도 반려된 적 없다는 정상 상태) valid:true, 있는데
+// streak이 유한 음이 아닌 number가 아니면 invalid, history가 존재하는데
+// 배열이 아니어도 invalid(오늘 reject-streak.mjs의 읽기 경로는 history를
+// 안 쓰지만, "해석 가능한 형태"라는 확증 대상에 함께 넣어 방어한다 -- S11
+// 헤더 ③ 참고).
+export function checkLedgerEntryShape(ledger, issueId) {
+  const entry = ledger?.issues?.[issueId];
+  if (entry === undefined) {
+    return {
+      valid: true,
+      reason: `이슈 '${issueId}' 원장 항목 없음(반려 이력 없음, 정상)`,
+    };
+  }
+  if (entry === null || typeof entry !== "object" || Array.isArray(entry)) {
+    return {
+      valid: false,
+      reason: `이슈 '${issueId}' 원장 항목이 일반 객체가 아님(${JSON.stringify(entry)})`,
+    };
+  }
+  const { streak, history } = entry;
+  if (typeof streak !== "number" || !Number.isFinite(streak) || streak < 0) {
+    return {
+      valid: false,
+      reason: `이슈 '${issueId}'.streak이 유효한 음이 아닌 유한 수가 아님(${JSON.stringify(streak)})`,
+    };
+  }
+  if (history !== undefined && !Array.isArray(history)) {
+    return {
+      valid: false,
+      reason: `이슈 '${issueId}'.history가 존재하지만 배열이 아님(${JSON.stringify(history)})`,
+    };
+  }
+  return { valid: true, reason: `streak=${streak} 해석 가능` };
 }
 
 // Combines N independent gate decisions (e.g. `gate` + `diagnostic-gate`,

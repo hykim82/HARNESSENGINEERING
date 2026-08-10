@@ -16,6 +16,7 @@ import {
   decideFromGateExit,
   combineGateDecisions,
   checkGatePreconditions,
+  checkLedgerEntryShape,
 } from "./dispatch-gate-decision-core.mjs";
 import { loadLedger } from "./reject-streak.mjs";
 
@@ -24,17 +25,25 @@ const REJECT_STREAK_PATH = join(
   "reject-streak.mjs",
 );
 
-// 2R §2: the SAME structural facts checkGatePreconditions needs, extracted
-// here (I/O + regex on the task file's own text) so the pure core never has
-// to touch a filesystem. Mirrors reject-streak.mjs's own
+// 2R/3R §2: the SAME structural facts checkGatePreconditions needs,
+// extracted here (I/O + regex on the task file's own text) so the pure core
+// never has to touch a filesystem. Mirrors reject-streak.mjs's own
 // TASK_ID_LINE_RE/ISSUE_ID_RE *shape* (a task_id header line, an
 // HYK-<digits> prefix) without importing them -- reject-streak.mjs does not
-// export those regexes and 2R §1/§6 forbid editing it to add an export;
+// export those regexes and 2R/3R §1/§6 forbid editing it to add an export;
 // this is INPUT validation on the task file (a precondition check), not a
 // reimplementation of reject-streak.mjs's own gate/envelope DECISION logic,
 // which stays untouched and unduplicated.
-const TASK_ID_LINE_RE = /^task_id:\s*(\S+)/im;
-const ISSUE_ID_RE = /^HYK-\d+/;
+//
+// 3R: uses a GLOBAL match (matchAll) instead of 2R's single `.match()` --
+// 2R only asked "is there a task_id line;" 3R's confirmative model requires
+// "is there EXACTLY ONE" (반례 6: reject-streak.mjs's own non-global regex
+// silently uses the FIRST match when there are two, ignoring the second
+// line's streak-relevant content -- this CLI must see the true count to
+// reject that ambiguity instead of inheriting the sub-gate's leniency).
+const TASK_ID_LINE_RE_G = /^task_id:\s*(\S+)/gim;
+const ISSUE_ID_PREFIX_RE = /^HYK-\d+/;
+const ISSUE_ID_CAPTURE_RE = /^(HYK-\d+)/;
 
 function normalizeNewlines(text) {
   return (text ?? "").replace(/\r\n/g, "\n");
@@ -42,10 +51,17 @@ function normalizeNewlines(text) {
 
 function extractTaskIdFacts(taskText) {
   const text = normalizeNewlines(taskText);
-  const match = text.match(TASK_ID_LINE_RE);
+  const matches = [...text.matchAll(TASK_ID_LINE_RE_G)];
+  const taskIdMatchCount = matches.length;
+  const soleValue = taskIdMatchCount === 1 ? matches[0][1] : null;
+  const taskIdFormatValid =
+    soleValue !== null && ISSUE_ID_PREFIX_RE.test(soleValue);
+  const issueIdMatch =
+    soleValue !== null ? soleValue.match(ISSUE_ID_CAPTURE_RE) : null;
   return {
-    hasTaskIdLine: !!match,
-    taskIdIssueFormatValid: !!match && ISSUE_ID_RE.test(match[1]),
+    taskIdMatchCount,
+    taskIdFormatValid,
+    issueId: issueIdMatch ? issueIdMatch[1] : null,
   };
 }
 
@@ -130,20 +146,35 @@ export function runDispatchGateDecision(argv) {
     const ledgerPath = resolveLedgerPath(args, taskPath);
     const ledgerArgs = ["--ledger", ledgerPath];
 
-    // 2R §2 (P1-B): fail-closed precondition check BEFORE spawning either
-    // gate subprocess -- if this fails, the real gates are never called at
-    // all (checkGatePreconditions' reason is the ONLY decision).
+    // 2R/3R §2 (P1-B / confirmative redesign): fail-closed precondition
+    // check BEFORE spawning either gate subprocess -- if this fails, the
+    // real gates are never called at all (checkGatePreconditions' reason is
+    // the ONLY decision).
     const taskText = readFileSync(taskPath, "utf8");
-    const { hasTaskIdLine, taskIdIssueFormatValid } =
+    const { taskIdMatchCount, taskIdFormatValid, issueId } =
       extractTaskIdFacts(taskText);
     const ledgerExists = existsSync(ledgerPath);
     const loaded = ledgerExists ? loadLedger(ledgerPath) : null;
+    // 3R 반례 7: only meaningful once ledger loaded AND issueId uniquely
+    // resolved -- if either is false, a higher-priority check in
+    // checkGatePreconditions (task_id/ledger-readability) already rejects
+    // before this fact is ever consulted, so an "invalid" placeholder here
+    // is inert, never itself the deciding reason.
+    const entryShape =
+      loaded?.ok === true && issueId !== null
+        ? checkLedgerEntryShape(loaded.ledger, issueId)
+        : {
+            valid: false,
+            reason: "(전제조건 미충족, 이 확인은 도달하지 않음)",
+          };
     const precondition = checkGatePreconditions({
-      hasTaskIdLine,
-      taskIdIssueFormatValid,
+      taskIdMatchCount,
+      taskIdFormatValid,
       ledgerExists,
       ledgerLoadOk: loaded?.ok ?? false,
       ledgerLoadReason: loaded?.reason,
+      ledgerEntryShapeValid: entryShape.valid,
+      ledgerEntryShapeReason: entryShape.reason,
     });
 
     if (precondition) {
