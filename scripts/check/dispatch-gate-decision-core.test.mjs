@@ -403,10 +403,29 @@ test("checkLedgerPathResolution: state=null (git resolution succeeded) -> null (
   assert.equal(checkLedgerPathResolution({ state: null, path: "/x" }), null);
 });
 
-test("checkLedgerPathResolution: missing/undefined resolution object -> does not throw, treated as proceed (state defaults to null)", () => {
+// HYK-221 축2: reversed from the pre-existing contract this test used to
+// assert (missing/malformed resolution -> silently treated as "proceed").
+// `resolution?.state ?? null` collapses a genuine success (`{path, state:
+// null}`) and a missing/malformed resolution object onto the same `null` --
+// this function can no longer read both as "proceed." A well-formed success
+// always also carries a non-empty `path`; its absence means "판정 불가," a
+// distinct REJECT_LEDGER_RESOLUTION_UNJUDGABLE state, never a silent ALLOW.
+test("checkLedgerPathResolution: missing/undefined/malformed resolution object -> REJECT_LEDGER_RESOLUTION_UNJUDGABLE, never silently treated as proceed", () => {
   assert.doesNotThrow(() => checkLedgerPathResolution());
-  assert.equal(checkLedgerPathResolution(), null);
-  assert.equal(checkLedgerPathResolution({}), null);
+  for (const malformed of [undefined, null, {}, { state: undefined }]) {
+    const r = checkLedgerPathResolution(malformed);
+    assert.notEqual(
+      r,
+      null,
+      `${JSON.stringify(malformed)} must not resolve to "proceed"`,
+    );
+    assert.equal(r.allow, false);
+    assert.equal(
+      r.state,
+      DISPATCH_GATE_STATE.REJECT_LEDGER_RESOLUTION_UNJUDGABLE,
+    );
+    assert.ok(r.reason.length > 0);
+  }
 });
 
 test("checkLedgerPathResolution: REJECT_LEDGER_PATH_UNRESOLVABLE (P1-2 -- git identify failure, distinct from ledger-missing)", () => {
