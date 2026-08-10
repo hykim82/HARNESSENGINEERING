@@ -26,8 +26,16 @@
 // when --repo-path is not yet known) and merges it under any CLI flags
 // given (CLI wins on conflicting keys).
 
-import { readFileSync, writeFileSync, existsSync, statSync, mkdirSync, appendFileSync, chmodSync } from "node:fs";
-import { execSync, execFileSync } from "node:child_process";
+import {
+  readFileSync,
+  writeFileSync,
+  existsSync,
+  statSync,
+  mkdirSync,
+  appendFileSync,
+  chmodSync,
+} from "node:fs";
+import { execFileSync } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -35,14 +43,6 @@ const TEMPLATES_DIR = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(TEMPLATES_DIR, "..", "..");
 
 const PROFILES = ["solo-full", "team-local"];
-
-function repoRootOf(dir) {
-  try {
-    return execSync("git rev-parse --show-toplevel", { cwd: dir, encoding: "utf8" }).trim();
-  } catch {
-    return dir;
-  }
-}
 
 function parseArgs(argv) {
   const out = {};
@@ -66,7 +66,10 @@ function loadConfigFile(configPath) {
   try {
     return JSON.parse(readFileSync(configPath, "utf8"));
   } catch (err) {
-    throw new Error(`failed to parse config file '${configPath}': ${err.message}`);
+    throw new Error(
+      `failed to parse config file '${configPath}': ${err.message}`,
+      { cause: err },
+    );
   }
 }
 
@@ -106,14 +109,19 @@ function resolveParams(argv) {
 function validateParams(params) {
   const errors = [];
   if (!PROFILES.includes(params.profile)) {
-    errors.push(`--profile must be one of ${PROFILES.join(" | ")} (got: ${params.profile ?? "<missing>"})`);
+    errors.push(
+      `--profile must be one of ${PROFILES.join(" | ")} (got: ${params.profile ?? "<missing>"})`,
+    );
   }
   if (!params.repoPath) errors.push("repoPath is required (--repo-path)");
-  if (!params.githubRepo) errors.push("githubRepo is required (--github-repo, owner/repo form)");
+  if (!params.githubRepo)
+    errors.push("githubRepo is required (--github-repo, owner/repo form)");
   if (!params.verifyCmd) errors.push("verifyCmd is required (--verify-cmd)");
   if (params.profile === "solo-full") {
-    if (!params.controlRoomPath) errors.push("solo-full requires controlRoomPath (--control-room-path)");
-    if (!params.botAccount) errors.push("solo-full requires botAccount (--bot-account)");
+    if (!params.controlRoomPath)
+      errors.push("solo-full requires controlRoomPath (--control-room-path)");
+    if (!params.botAccount)
+      errors.push("solo-full requires botAccount (--bot-account)");
   }
   // team-local: controlRoomPath / botAccount are allowed to be empty or
   // absent — team-local has no control room and no bot collaborator.
@@ -126,9 +134,12 @@ function placeholderMap(params) {
   return {
     "<PROFILE>": params.profile,
     "<REPO_PATH>": params.repoPath,
-    "<CONTROL_ROOM_PATH>": params.controlRoomPath || "(none — team-local has no control room)",
+    "<CONTROL_ROOM_PATH>":
+      params.controlRoomPath || "(none — team-local has no control room)",
     "<GITHUB_REPO>": params.githubRepo,
-    "<BOT_ACCOUNT>": params.botAccount || "(none — team-local pushes directly under this account)",
+    "<BOT_ACCOUNT>":
+      params.botAccount ||
+      "(none — team-local pushes directly under this account)",
     "<VERIFY_CMD>": params.verifyCmd,
   };
 }
@@ -167,7 +178,9 @@ function writeTemplateFile(srcPath, destPath, map, { dryRun, executable }) {
     }
   }
   installed.push(destPath);
-  console.log(`${dryRun ? "[dry-run] would install" : "installed"}: ${destPath}`);
+  console.log(
+    `${dryRun ? "[dry-run] would install" : "installed"}: ${destPath}`,
+  );
 }
 
 function copyRawFile(srcPath, destPath, { dryRun, executable }) {
@@ -192,7 +205,9 @@ function copyRawFile(srcPath, destPath, { dryRun, executable }) {
     }
   }
   installed.push(destPath);
-  console.log(`${dryRun ? "[dry-run] would install" : "installed"}: ${destPath}`);
+  console.log(
+    `${dryRun ? "[dry-run] would install" : "installed"}: ${destPath}`,
+  );
 }
 
 function appendGitignoreBlock(profile, targetRepoPath, { dryRun }) {
@@ -203,13 +218,18 @@ function appendGitignoreBlock(profile, targetRepoPath, { dryRun }) {
   // before, which silently broke a plain \n-only match).
   const re = new RegExp(`# @profile:${profile}\\r?\\n([\\s\\S]*?)# @end`, "m");
   const match = raw.match(re);
-  if (!match) throw new Error(`gitignore.append.template has no block for profile '${profile}'`);
+  if (!match)
+    throw new Error(
+      `gitignore.append.template has no block for profile '${profile}'`,
+    );
   const block = match[1]
     .split(/\r?\n/)
     .filter((line) => !line.trim().startsWith("#") && line.trim() !== "")
     .join("\n");
   const gitignorePath = path.join(targetRepoPath, ".gitignore");
-  const existing = existsSync(gitignorePath) ? readFileSync(gitignorePath, "utf8") : "";
+  const existing = existsSync(gitignorePath)
+    ? readFileSync(gitignorePath, "utf8")
+    : "";
   const marker = `# harness-init (${profile})`;
 
   if (existing.includes(block.trim())) {
@@ -227,7 +247,9 @@ function appendGitignoreBlock(profile, targetRepoPath, { dryRun }) {
   if (existing.includes(marker)) {
     skipped.push(gitignorePath);
     const existingLines = new Set(existing.split(/\r?\n/).map((l) => l.trim()));
-    const missingLines = block.split("\n").filter((line) => !existingLines.has(line.trim()));
+    const missingLines = block
+      .split("\n")
+      .filter((line) => !existingLines.has(line.trim()));
     if (missingLines.length === 0) {
       console.warn(
         `skip (marker '${marker}' already present, current-template lines already covered): ${gitignorePath}`,
@@ -247,12 +269,17 @@ function appendGitignoreBlock(profile, targetRepoPath, { dryRun }) {
     appendFileSync(gitignorePath, `${sep}\n${marker}\n${block}\n`, "utf8");
   }
   installed.push(gitignorePath);
-  console.log(`${dryRun ? "[dry-run] would append to" : "appended to"}: ${gitignorePath}`);
+  console.log(
+    `${dryRun ? "[dry-run] would append to" : "appended to"}: ${gitignorePath}`,
+  );
 }
 
 function appendAgentsFile(targetRepoPath, { dryRun }) {
   const agentsPath = path.join(targetRepoPath, "AGENTS.md");
-  const snippet = readFileSync(path.join(TEMPLATES_DIR, "AGENTS.append.md"), "utf8");
+  const snippet = readFileSync(
+    path.join(TEMPLATES_DIR, "AGENTS.append.md"),
+    "utf8",
+  );
   if (existsSync(agentsPath)) {
     const existing = readFileSync(agentsPath, "utf8");
     if (existing.includes("Harness Operating Rules")) {
@@ -262,12 +289,16 @@ function appendAgentsFile(targetRepoPath, { dryRun }) {
     }
     if (!dryRun) appendFileSync(agentsPath, `\n${snippet}`, "utf8");
     installed.push(agentsPath);
-    console.log(`${dryRun ? "[dry-run] would append to" : "appended to"}: ${agentsPath}`);
+    console.log(
+      `${dryRun ? "[dry-run] would append to" : "appended to"}: ${agentsPath}`,
+    );
     return;
   }
   if (!dryRun) writeFileSync(agentsPath, snippet, "utf8");
   installed.push(agentsPath);
-  console.log(`${dryRun ? "[dry-run] would install" : "installed"}: ${agentsPath}`);
+  console.log(
+    `${dryRun ? "[dry-run] would install" : "installed"}: ${agentsPath}`,
+  );
 }
 
 // Windows-native params.controlRoomPath arrives with backslashes; the live
@@ -292,7 +323,9 @@ function joinPosix(base, file) {
 // placeholder tokens this installer replaces in template files).
 function buildHooksBlock(params) {
   const statusPath =
-    params.profile === "solo-full" ? joinPosix(params.controlRoomPath, "STATUS.md") : "$CLAUDE_PROJECT_DIR/.harness/STATUS.md";
+    params.profile === "solo-full"
+      ? joinPosix(params.controlRoomPath, "STATUS.md")
+      : "$CLAUDE_PROJECT_DIR/.harness/STATUS.md";
   const contextPath =
     params.profile === "solo-full"
       ? joinPosix(params.controlRoomPath, "PROJECT-CONTEXT.md")
@@ -302,14 +335,40 @@ function buildHooksBlock(params) {
     PreToolUse: [
       {
         matcher: "Edit|Write|MultiEdit|NotebookEdit",
-        hooks: [{ type: "command", command: 'node "$CLAUDE_PROJECT_DIR/scripts/check/role-guard.mjs"' }],
+        hooks: [
+          {
+            type: "command",
+            command: 'node "$CLAUDE_PROJECT_DIR/scripts/check/role-guard.mjs"',
+          },
+          // HYK-186 3R P1-1: done-line-write-guard.mjs was documented as
+          // "the second PreToolUse hook" (docs/harness-init.md) but never
+          // actually wired here -- an independent review caught the
+          // mismatch (0 occurrences of "done-line-write-guard" in this file
+          // before this fix). Same matcher as role-guard.mjs (both inspect
+          // Edit/Write/MultiEdit tool_input.file_path); NotebookEdit is
+          // included in the matcher for consistency with role-guard's own
+          // entry even though this guard's own WRITE_TOOLS set doesn't act
+          // on it (matches role-guard's pre-existing matcher shape exactly,
+          // no new behavior invented here).
+          {
+            type: "command",
+            command:
+              'node "$CLAUDE_PROJECT_DIR/scripts/check/done-line-write-guard.mjs"',
+          },
+        ],
       },
     ],
     Stop: [
       {
         hooks: [
-          { type: "command", command: `node "$CLAUDE_PROJECT_DIR/scripts/check/status-fresh.mjs" --status "${statusPath}"` },
-          { type: "command", command: `node "$CLAUDE_PROJECT_DIR/scripts/check/clear-safe-check.mjs" --status "${statusPath}"` },
+          {
+            type: "command",
+            command: `node "$CLAUDE_PROJECT_DIR/scripts/check/status-fresh.mjs" --status "${statusPath}"`,
+          },
+          {
+            type: "command",
+            command: `node "$CLAUDE_PROJECT_DIR/scripts/check/clear-safe-check.mjs" --status "${statusPath}"`,
+          },
           // solo-full only: team-local has no control room to check against
           // (see checkControlRoomFresh's own vacuous-ok path for the
           // absent-path case this guards even if that ever drifted).
@@ -365,7 +424,11 @@ function buildHooksBlock(params) {
 // regex/string surgery on existing JSON, so a merge can never corrupt
 // unrelated keys it didn't intend to touch.
 function installSettingsLocal(params, targetRepoPath, { dryRun }) {
-  const settingsPath = path.join(targetRepoPath, ".claude", "settings.local.json");
+  const settingsPath = path.join(
+    targetRepoPath,
+    ".claude",
+    "settings.local.json",
+  );
   const hooksBlock = buildHooksBlock(params);
   const hooksOnlySnippet = JSON.stringify({ hooks: hooksBlock }, null, 2);
   const restartNote =
@@ -377,7 +440,9 @@ function installSettingsLocal(params, targetRepoPath, { dryRun }) {
       writeFileSync(settingsPath, `${hooksOnlySnippet}\n`, "utf8");
     }
     installed.push(settingsPath);
-    console.log(`${dryRun ? "[dry-run] would create" : "created"}: ${settingsPath}\n${hooksOnlySnippet}\n${restartNote}`);
+    console.log(
+      `${dryRun ? "[dry-run] would create" : "created"}: ${settingsPath}\n${hooksOnlySnippet}\n${restartNote}`,
+    );
     return;
   }
 
@@ -386,7 +451,9 @@ function installSettingsLocal(params, targetRepoPath, { dryRun }) {
     existingRaw = readFileSync(settingsPath, "utf8");
   } catch (err) {
     skipped.push(settingsPath);
-    console.warn(`skip (could not read existing ${settingsPath}: ${err.message}) -- merge this manually:\n${hooksOnlySnippet}`);
+    console.warn(
+      `skip (could not read existing ${settingsPath}: ${err.message}) -- merge this manually:\n${hooksOnlySnippet}`,
+    );
     return;
   }
 
@@ -431,7 +498,7 @@ function installSettingsLocal(params, targetRepoPath, { dryRun }) {
 // later.
 function installGitHooksIntoDotGit(targetRepoPath, { dryRun }) {
   const gitDir = path.join(targetRepoPath, ".git");
-  let isGitDir = false;
+  let isGitDir;
   try {
     isGitDir = existsSync(gitDir) && statSync(gitDir).isDirectory();
   } catch {
@@ -444,7 +511,11 @@ function installGitHooksIntoDotGit(targetRepoPath, { dryRun }) {
     return;
   }
   for (const name of ["commit-msg", "pre-commit"]) {
-    copyRawFile(path.join(REPO_ROOT, "hooks", name), path.join(gitDir, "hooks", name), { dryRun, executable: true });
+    copyRawFile(
+      path.join(REPO_ROOT, "hooks", name),
+      path.join(gitDir, "hooks", name),
+      { dryRun, executable: true },
+    );
   }
 }
 
@@ -472,7 +543,11 @@ function commandSucceeds(cmd, args) {
 
 function gitConfigLocalGet(targetRepoPath, key) {
   try {
-    return execFileSync("git", ["-C", targetRepoPath, "config", "--local", "--get", key], { encoding: "utf8" }).trim();
+    return execFileSync(
+      "git",
+      ["-C", targetRepoPath, "config", "--local", "--get", key],
+      { encoding: "utf8" },
+    ).trim();
   } catch {
     // Non-zero exit from `git config --get` means "not set at this scope"
     // (or, much less likely, a transient git error) -- either way, treated
@@ -485,7 +560,11 @@ function gitConfigLocalGet(targetRepoPath, key) {
 
 function originRemoteUrl(targetRepoPath) {
   try {
-    return execFileSync("git", ["-C", targetRepoPath, "remote", "get-url", "origin"], { encoding: "utf8" }).trim();
+    return execFileSync(
+      "git",
+      ["-C", targetRepoPath, "remote", "get-url", "origin"],
+      { encoding: "utf8" },
+    ).trim();
   } catch {
     return null;
   }
@@ -501,7 +580,7 @@ function isSshRemoteUrl(url) {
 
 function installCredentialBoundary(targetRepoPath, { dryRun }) {
   const gitDir = path.join(targetRepoPath, ".git");
-  let isGitDir = false;
+  let isGitDir;
   try {
     isGitDir = existsSync(gitDir) && statSync(gitDir).isDirectory();
   } catch {
@@ -548,7 +627,14 @@ function installCredentialBoundary(targetRepoPath, { dryRun }) {
       return;
     }
 
-    execFileSync("git", ["-C", targetRepoPath, "config", "--local", CREDENTIAL_HELPER_KEY, CREDENTIAL_HELPER_VALUE]);
+    execFileSync("git", [
+      "-C",
+      targetRepoPath,
+      "config",
+      "--local",
+      CREDENTIAL_HELPER_KEY,
+      CREDENTIAL_HELPER_VALUE,
+    ]);
     console.log(
       `push identity pinned: credential.helper -> "${CREDENTIAL_HELPER_VALUE}" (this clone's pushes now authenticate as whichever account \`gh auth status\` currently reports)`,
     );
@@ -556,7 +642,9 @@ function installCredentialBoundary(targetRepoPath, { dryRun }) {
     // Fail-open: this is a safety nicety on top of the install, not the
     // install itself -- an unexpected git/gh error here must never abort
     // the rest of install.mjs.
-    console.warn(`skip (credential.helper): unexpected error (${err.message}) -- not touched, install continues.`);
+    console.warn(
+      `skip (credential.helper): unexpected error (${err.message}) -- not touched, install continues.`,
+    );
   }
 }
 
@@ -595,57 +683,41 @@ Repo: ${params.githubRepo}
 `;
 }
 
-function main() {
-  const params = resolveParams(process.argv.slice(2));
-  validateParams(params);
-  const map = placeholderMap(params);
-  const dryRun = !!params.dryRun;
-  const targetRepoPath = params.repoPath;
-
-  if (!existsSync(targetRepoPath)) {
-    throw new Error(`repoPath does not exist: ${targetRepoPath}`);
-  }
-
-  console.log(`\nharness-init install — profile=${params.profile} target=${targetRepoPath}${dryRun ? " [DRY RUN]" : ""}\n`);
-
-  // Profile-agnostic core.
-  writeTemplateFile(path.join(TEMPLATES_DIR, "status.template.md"), path.join(targetRepoPath, ".harness", "STATUS.md"), map, { dryRun });
-  writeTemplateFile(path.join(TEMPLATES_DIR, "phase-handoff.template.md"), path.join(targetRepoPath, ".harness", "PHASE-HANDOFF.md"), map, { dryRun });
-  writeTemplateFile(path.join(TEMPLATES_DIR, "project-context.template.md"), path.join(targetRepoPath, ".harness", "PROJECT-CONTEXT.md"), map, { dryRun });
-  writeTemplateFile(path.join(TEMPLATES_DIR, "verify.sh.template"), path.join(targetRepoPath, "verify.sh"), map, { dryRun, executable: true });
-  writeTemplateFile(path.join(TEMPLATES_DIR, "observe.sh.template"), path.join(targetRepoPath, "observe.sh"), map, { dryRun, executable: true });
-  writeTemplateFile(path.join(TEMPLATES_DIR, "gc-task.template.md"), path.join(targetRepoPath, ".harness", "gc-task.template.md"), map, { dryRun });
-  writeTemplateFile(path.join(TEMPLATES_DIR, "gate-criteria.template.md"), path.join(targetRepoPath, ".harness", "gate-criteria.md"), map, { dryRun });
-  writeTemplateFile(
-    path.join(TEMPLATES_DIR, "skill", "capture-context", "SKILL.md"),
-    path.join(targetRepoPath, ".claude", "skills", "capture-context", "SKILL.md"),
-    map,
-    { dryRun },
+// Extracted from main() (quality-check: keeps main()'s own line-count/
+// complexity under the repo's ESLint ceiling) -- copies the local git hooks
+// plus every scripts/check/scripts/relay file that hook wiring depends on.
+// Both profiles get these; they are local-only (no server dependency).
+function installEnforcementScripts(targetRepoPath, { dryRun }) {
+  copyRawFile(
+    path.join(REPO_ROOT, "hooks", "commit-msg"),
+    path.join(targetRepoPath, "hooks", "commit-msg"),
+    { dryRun, executable: true },
   );
-  appendGitignoreBlock(params.profile, targetRepoPath, { dryRun });
-  if (params.profile === "solo-full") {
-    // team-local: AGENTS.md (or an equivalent project-instruction file) is
-    // shared, committed team state — appending personal harness rules to it
-    // would impose this account's tooling on the team repo, exactly what
-    // HYK-92 says not to do. solo-full owns its own repo, so appending
-    // there is fine.
-    appendAgentsFile(targetRepoPath, { dryRun });
-  } else {
-    console.log("team-local profile: skipping AGENTS.md append (shared team file — not this account's to change).");
-  }
-
-  // Local enforcement hooks + check scripts: both profiles get these —
-  // they are local-only (no server dependency) and useful whether or not
-  // a server-side gate exists on top.
-  copyRawFile(path.join(REPO_ROOT, "hooks", "commit-msg"), path.join(targetRepoPath, "hooks", "commit-msg"), { dryRun, executable: true });
-  copyRawFile(path.join(REPO_ROOT, "hooks", "pre-commit"), path.join(targetRepoPath, "hooks", "pre-commit"), { dryRun, executable: true });
+  copyRawFile(
+    path.join(REPO_ROOT, "hooks", "pre-commit"),
+    path.join(targetRepoPath, "hooks", "pre-commit"),
+    { dryRun, executable: true },
+  );
   for (const name of [
     "review-gate.mjs",
     "review-gate.test.mjs",
     "relay-handshake.mjs",
     "relay-handshake.test.mjs",
+    // HYK-186 1R: relay-handshake.mjs imports "./time-authority.mjs" (the
+    // future-skew registry) -- without a copy alongside it, an installed
+    // relay-handshake.mjs fails to even load (MODULE_NOT_FOUND) on a fresh
+    // target repo. Never caught before this round because no installer
+    // test had ever actually run the copied file.
+    "time-authority.mjs",
+    "time-authority.test.mjs",
     "role-guard.mjs",
     "role-guard.test.mjs",
+    // HYK-186 3R P1-1: the PreToolUse entry above now references this file
+    // -- it must be copied or the wired hook command fails on every
+    // Edit/Write/MultiEdit (MODULE_NOT_FOUND, same class of gap as
+    // time-authority.mjs's above).
+    "done-line-write-guard.mjs",
+    "done-line-write-guard.test.mjs",
     "context-inject.mjs",
     "context-inject.test.mjs",
     "status-fresh.mjs",
@@ -663,8 +735,121 @@ function main() {
     "worker-status-onstart.mjs",
     "worker-status-onstart.test.mjs",
   ]) {
-    copyRawFile(path.join(REPO_ROOT, "scripts", "check", name), path.join(targetRepoPath, "scripts", "check", name), { dryRun, executable: false });
+    copyRawFile(
+      path.join(REPO_ROOT, "scripts", "check", name),
+      path.join(targetRepoPath, "scripts", "check", name),
+      { dryRun, executable: false },
+    );
   }
+  // HYK-186 3R P1-1: done-line-write-guard.mjs's whole purpose is to point
+  // a blocked worker at `node scripts/relay/finalize-done.mjs <role>
+  // .harness` -- that target must exist on the installed repo too, or the
+  // guard's own redirect instruction is dead on a fresh install (scripts/
+  // relay/ was never copied by this installer at all before this round).
+  for (const name of ["finalize-done.mjs", "finalize-done.test.mjs"]) {
+    copyRawFile(
+      path.join(REPO_ROOT, "scripts", "relay", name),
+      path.join(targetRepoPath, "scripts", "relay", name),
+      { dryRun, executable: false },
+    );
+  }
+}
+
+// Extracted from main() (quality-check: keeps main()'s own line-count/
+// complexity under the repo's ESLint ceiling) -- the profile-agnostic
+// template writes + gitignore append + AGENTS.md append every install gets.
+function installProfileAgnosticCore(params, targetRepoPath, map, { dryRun }) {
+  writeTemplateFile(
+    path.join(TEMPLATES_DIR, "status.template.md"),
+    path.join(targetRepoPath, ".harness", "STATUS.md"),
+    map,
+    { dryRun },
+  );
+  writeTemplateFile(
+    path.join(TEMPLATES_DIR, "phase-handoff.template.md"),
+    path.join(targetRepoPath, ".harness", "PHASE-HANDOFF.md"),
+    map,
+    { dryRun },
+  );
+  writeTemplateFile(
+    path.join(TEMPLATES_DIR, "project-context.template.md"),
+    path.join(targetRepoPath, ".harness", "PROJECT-CONTEXT.md"),
+    map,
+    { dryRun },
+  );
+  writeTemplateFile(
+    path.join(TEMPLATES_DIR, "verify.sh.template"),
+    path.join(targetRepoPath, "verify.sh"),
+    map,
+    { dryRun, executable: true },
+  );
+  writeTemplateFile(
+    path.join(TEMPLATES_DIR, "observe.sh.template"),
+    path.join(targetRepoPath, "observe.sh"),
+    map,
+    { dryRun, executable: true },
+  );
+  writeTemplateFile(
+    path.join(TEMPLATES_DIR, "gc-task.template.md"),
+    path.join(targetRepoPath, ".harness", "gc-task.template.md"),
+    map,
+    { dryRun },
+  );
+  writeTemplateFile(
+    path.join(TEMPLATES_DIR, "gate-criteria.template.md"),
+    path.join(targetRepoPath, ".harness", "gate-criteria.md"),
+    map,
+    { dryRun },
+  );
+  writeTemplateFile(
+    path.join(TEMPLATES_DIR, "skill", "capture-context", "SKILL.md"),
+    path.join(
+      targetRepoPath,
+      ".claude",
+      "skills",
+      "capture-context",
+      "SKILL.md",
+    ),
+    map,
+    { dryRun },
+  );
+  appendGitignoreBlock(params.profile, targetRepoPath, { dryRun });
+  if (params.profile === "solo-full") {
+    // team-local: AGENTS.md (or an equivalent project-instruction file) is
+    // shared, committed team state — appending personal harness rules to it
+    // would impose this account's tooling on the team repo, exactly what
+    // HYK-92 says not to do. solo-full owns its own repo, so appending
+    // there is fine.
+    appendAgentsFile(targetRepoPath, { dryRun });
+  } else {
+    console.log(
+      "team-local profile: skipping AGENTS.md append (shared team file — not this account's to change).",
+    );
+  }
+}
+
+function main() {
+  const params = resolveParams(process.argv.slice(2));
+  validateParams(params);
+  const map = placeholderMap(params);
+  const dryRun = !!params.dryRun;
+  const targetRepoPath = params.repoPath;
+
+  if (!existsSync(targetRepoPath)) {
+    throw new Error(`repoPath does not exist: ${targetRepoPath}`);
+  }
+
+  console.log(
+    `\nharness-init install — profile=${params.profile} target=${targetRepoPath}${dryRun ? " [DRY RUN]" : ""}\n`,
+  );
+
+  // Profile-agnostic core.
+  installProfileAgnosticCore(params, targetRepoPath, map, { dryRun });
+
+  // Local enforcement hooks + check scripts: both profiles get these —
+  // they are local-only (no server dependency) and useful whether or not
+  // a server-side gate exists on top.
+  installEnforcementScripts(targetRepoPath, { dryRun });
 
   // .git/hooks/ (per-clone, real install) and .claude/settings.local.json
   // (Claude Code hook pre-wiring) -- both profiles, both one-shot
@@ -687,12 +872,23 @@ function main() {
     // past the file copy — branch protection, bot invite, and secret
     // scanning are one-time human steps in the GitHub web UI (checklist
     // below), per this repo's own B1 anchor precedent.
-    copyRawFile(path.join(REPO_ROOT, ".github", "workflows", "enforce.yml"), path.join(targetRepoPath, ".github", "workflows", "enforce.yml"), { dryRun, executable: false });
+    copyRawFile(
+      path.join(REPO_ROOT, ".github", "workflows", "enforce.yml"),
+      path.join(targetRepoPath, ".github", "workflows", "enforce.yml"),
+      { dryRun, executable: false },
+    );
     const gitleaksToml = path.join(REPO_ROOT, ".gitleaks.toml");
     if (existsSync(gitleaksToml)) {
-      copyRawFile(gitleaksToml, path.join(targetRepoPath, ".gitleaks.toml"), { dryRun, executable: false });
+      copyRawFile(gitleaksToml, path.join(targetRepoPath, ".gitleaks.toml"), {
+        dryRun,
+        executable: false,
+      });
     }
-    const checklistPath = path.join(targetRepoPath, ".harness", "github-setup-checklist.md");
+    const checklistPath = path.join(
+      targetRepoPath,
+      ".harness",
+      "github-setup-checklist.md",
+    );
     const checklist = soloFullChecklist(params);
     if (existsSync(checklistPath)) {
       skipped.push(checklistPath);
@@ -703,11 +899,15 @@ function main() {
         writeFileSync(checklistPath, checklist, "utf8");
       }
       installed.push(checklistPath);
-      console.log(`${dryRun ? "[dry-run] would install" : "installed"}: ${checklistPath}`);
+      console.log(
+        `${dryRun ? "[dry-run] would install" : "installed"}: ${checklistPath}`,
+      );
     }
     console.log("\n" + checklist);
   } else {
-    console.log("\nteam-local profile: no server-side setup — skipping GitHub checklist (no branch protection or CI to add on a shared team repo).");
+    console.log(
+      "\nteam-local profile: no server-side setup — skipping GitHub checklist (no branch protection or CI to add on a shared team repo).",
+    );
   }
 
   console.log(`\n--- summary ---`);

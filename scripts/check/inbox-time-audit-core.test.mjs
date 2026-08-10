@@ -287,3 +287,63 @@ test("mutation 4 (필수, ★핵심): 판정을 mtime(lastWriteTimeMs) 단독으
     "RED: mtime-only judging flips the genuinely-normal 0303 sample to a false MISMATCH -- this is exactly the false positive coder-task.md §4-2 ③ forbids",
   );
 });
+
+// ---------------------------------------------------------------------------
+// HYK-186 3R P2 (독립 검토 조건 목록, 원문 그대로 하나씩) -- N을 넓힌다.
+// 각 표본은 [조건 · 기대값 · 근거]를 명시한다. 이 판정기 범위 밖으로 판단해
+// 뺀 조건은 "제외" 표로 별도 정리(맨 끝).
+// ---------------------------------------------------------------------------
+
+// 조건1: 자정 넘김과 날짜 anchor -- CORE 레벨(ms epoch 비교라 날짜 경계
+// 자체는 문제가 안 됨을 보인다; wire 레이어의 날짜 anchor 유도 방식은
+// 별개 -- 아래 "제외" 표 참고).
+test("P2 조건1 (자정 넘김): header 08-05 23:59 / creation 08-06 00:01 (실제로는 2분 차) -> NORMAL, 기대값=NORMAL", () => {
+  const result = judgeInboxTimeAudit({
+    headerTimeMs: kst(2026, 8, 5, 23, 59),
+    creationTimeMs: kst(2026, 8, 6, 0, 1),
+  });
+  assert.equal(result.verdict, INBOX_AUDIT_VERDICT.NORMAL);
+});
+
+// 조건2: KST/호스트 timezone 차이 -- CORE는 절대 epoch ms만 비교하므로
+// "호스트가 어느 시간대인가"는 입력 시각이 이미 올바른 epoch로 해석된
+// 이상 결과에 영향이 없다. Date.parse에 다른 오프셋(+09:00 vs +00:00)을
+// 써도 같은 실제 순간이면 동일하게 판정됨을 보인다.
+test("P2 조건2 (timezone 차이): 같은 실제 순간을 KST(+09:00) 오프셋과 UTC(+00:00) 오프셋으로 각각 표기해도 동일 판정 -> NORMAL, 기대값=NORMAL(epoch ms 비교라 시간대 무관)", () => {
+  const headerKst = Date.parse("2026-08-05T12:00:00+09:00"); // 2026-08-05 03:00 UTC
+  const creationUtc = Date.parse("2026-08-05T03:01:00+00:00"); // same instant +1min
+  const result = judgeInboxTimeAudit({
+    headerTimeMs: headerKst,
+    creationTimeMs: creationUtc,
+  });
+  assert.equal(result.verdict, INBOX_AUDIT_VERDICT.NORMAL);
+});
+
+// 조건3: tolerance 경계와 초 단위 반올림 -- 헤더가 초를 안 적는 관례(분
+// 단위)이므로 실제 creationTime의 초 성분이 얼마든(0~59초) tolerance
+// 안쪽이면 NORMAL이어야 한다.
+test("P2 조건3 (초 단위 반올림): 헤더는 분만(초=0 취급) 적혔는데 creationTime이 59초 -> tolerance(2분) 안쪽 -> NORMAL, 기대값=NORMAL", () => {
+  const result = judgeInboxTimeAudit({
+    headerTimeMs: kst(2026, 8, 5, 1, 4, 0),
+    creationTimeMs: kst(2026, 8, 5, 1, 4, 59),
+  });
+  assert.equal(result.verdict, INBOX_AUDIT_VERDICT.NORMAL);
+});
+
+test("P2 조건3 (경계 재확인, 초 포함): 정확히 tolerance만큼(2분 0초) 차이 -> NORMAL / +1초 -> MISMATCH, 기대값 각각 명시", () => {
+  const headerTimeMs = kst(2026, 8, 5, 1, 4, 0);
+  const atBoundary = judgeInboxTimeAudit({
+    headerTimeMs,
+    creationTimeMs: kst(2026, 8, 5, 1, 6, 0), // +2:00
+  });
+  assert.equal(atBoundary.verdict, INBOX_AUDIT_VERDICT.NORMAL, "기대값=NORMAL");
+  const pastBoundary = judgeInboxTimeAudit({
+    headerTimeMs,
+    creationTimeMs: kst(2026, 8, 5, 1, 6, 1), // +2:01
+  });
+  assert.equal(
+    pastBoundary.verdict,
+    INBOX_AUDIT_VERDICT.MISMATCH,
+    "기대값=MISMATCH",
+  );
+});
