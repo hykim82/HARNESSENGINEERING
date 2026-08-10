@@ -88,15 +88,19 @@
 // | REJECT_LEDGER_MISSING | 원장을 읽을 대상 파일이 없음 | existsSync(ledgerPath) === false | 거부 |
 // | REJECT_LEDGER_CORRUPT | 원장 파일은 있으나 읽기/파싱 실패 | loadLedger().ok === false | 거부 |
 // | REJECT_LEDGER_ENTRY_MALFORMED | 원장은 읽었으나 해당 이슈 항목의 값이 해석 불가 | streak가 유한 음이 아닌 number가 아니거나 history가 배열이 아님(존재할 때) | 거부 |
+// | REJECT_LEDGER_PATH_UNRESOLVABLE | 원장이 어느 저장소 소속인지 자체를 식별 못 함(원장 "부재"와 다른 원인) | taskPath(또는 --expect-repo-root)의 git 저장소 식별(`git rev-parse --git-common-dir`/`--is-bare-repository`) 실패 | 거부 |
+// | REJECT_REPO_MISMATCH | taskPath가 실제로 속한 저장소가 호출자가 기대한 저장소와 다름 | `--expect-repo-root`가 주어졌고 그 저장소 루트가 taskPath의 저장소 루트와 불일치 | 거부 |
 //
-// ALLOW는 이 표의 단 하나의 행에서만 나온다 -- 그 행에 도달하려면 위
-// checkGatePreconditions의 다섯 확인(유일성/형식/원장존재/원장읽기/항목형태)이
-// *전부* 통과(반환값 null)해야 하고, 그 다음 실제 게이트 두 개가 각각
-// exit 0을 내야 한다(decideFromGateExit + combineGateDecisions). 그 외
-// 모든 조합은 이 표의 REJECT_* 행 중 하나로 떨어진다 -- "그 외 전부"를
-// 담는 자리가 REJECT_UNKNOWN_EXIT(게이트 실행 결과 축)와
-// checkGatePreconditions 자신의 마지막 실패 검사(전제조건 축) 둘로
-// 이중으로 닫혀 있다.
+// ALLOW는 이 표의 단 하나의 행에서만 나온다 -- 그 행에 도달하려면 먼저
+// checkLedgerPathResolution(HYK-220 2R 신설 -- 원장이 어느 저장소의 것인지
+// 확정하는 축, checkGatePreconditions 이전 단계)이 통과(반환값 null)하고,
+// 그 다음 checkGatePreconditions의 다섯 확인(유일성/형식/원장존재/원장읽기/
+// 항목형태)이 *전부* 통과(반환값 null)해야 하고, 그 다음 실제 게이트
+// 두 개가 각각 exit 0을 내야 한다(decideFromGateExit + combineGateDecisions).
+// 그 외 모든 조합은 이 표의 REJECT_* 행 중 하나로 떨어진다 -- "그 외 전부"를
+// 담는 자리가 REJECT_UNKNOWN_EXIT(게이트 실행 결과 축),
+// checkLedgerPathResolution 자신의 실패 축, checkGatePreconditions 자신의
+// 마지막 실패 검사(전제조건 축) 셋으로 삼중으로 닫혀 있다.
 export const DISPATCH_GATE_STATE = Object.freeze({
   ALLOW: "ALLOW",
   REJECT_BLOCKED: "REJECT_BLOCKED",
@@ -105,6 +109,8 @@ export const DISPATCH_GATE_STATE = Object.freeze({
   REJECT_TASK_ID_NOT_UNIQUE: "REJECT_TASK_ID_NOT_UNIQUE",
   REJECT_TASK_ID_MALFORMED: "REJECT_TASK_ID_MALFORMED",
   REJECT_LEDGER_MISSING: "REJECT_LEDGER_MISSING",
+  REJECT_LEDGER_PATH_UNRESOLVABLE: "REJECT_LEDGER_PATH_UNRESOLVABLE",
+  REJECT_REPO_MISMATCH: "REJECT_REPO_MISMATCH",
   REJECT_LEDGER_CORRUPT: "REJECT_LEDGER_CORRUPT",
   REJECT_LEDGER_ENTRY_MALFORMED: "REJECT_LEDGER_ENTRY_MALFORMED",
 });
@@ -237,6 +243,56 @@ export function checkGatePreconditions({
     };
   }
   return null;
+}
+
+// HYK-220 2R (P1-1/P1-2): a NEW, EARLIER precondition axis -- "which repo's
+// ledger even IS this" -- kept as its OWN pure function rather than folded
+// into checkGatePreconditions' five-field object, specifically so
+// checkGatePreconditions' existing contract (ALL_GOOD fixture, five strict
+// `=== true` checks) stays byte-for-byte unchanged; this is additive, not a
+// rewrite of the already-reviewed 3R confirmative core (coder-task §1
+// scope: "P1 3건만, 새 축 금지" -- this IS one of the three, not a fourth).
+// Caller contract: `resolution` is whatever dispatch-gate-decision.mjs's
+// resolveLedgerPath() produced -- `{ state: null, path }` on success (this
+// function returns null, meaning "proceed to checkGatePreconditions"), or
+// `{ state: <a REJECT_* string>, reason }` on failure (this function turns
+// that into the same `{state, allow, reason}` shape every other decision in
+// this module produces). P1-2: REJECT_LEDGER_PATH_UNRESOLVABLE (git itself
+// could not identify a repo for taskPath, or for --expect-repo-root) is
+// kept a DISTINCT state from REJECT_LEDGER_MISSING (a repo WAS identified,
+// its .harness/reject-streak.json simply isn't there) -- the reviewer's P1-2
+// finding was exactly that these two, operationally very different causes
+// (git/environment failure vs. an ordinary missing file), were colliding
+// into the same "원장 파일이 존재하지 않음" text. REJECT_REPO_MISMATCH
+// (P1-1) is kept distinct from both -- a repo WAS identified for taskPath,
+// a ledger MAY even exist there, but it is not the repo the caller said it
+// expected (--expect-repo-root), which is a caller-wiring problem, not a
+// filesystem-state problem.
+export function checkLedgerPathResolution(resolution) {
+  const state = resolution?.state ?? null;
+  if (state === null) return null;
+  if (
+    state !== DISPATCH_GATE_STATE.REJECT_LEDGER_PATH_UNRESOLVABLE &&
+    state !== DISPATCH_GATE_STATE.REJECT_REPO_MISMATCH
+  ) {
+    // Closed-set defense (3R §2-2 pattern reused here): an unrecognized
+    // state value from the caller is never silently treated as "proceed" --
+    // it falls to the more general of the two new states rather than being
+    // ignored.
+    return {
+      state: DISPATCH_GATE_STATE.REJECT_LEDGER_PATH_UNRESOLVABLE,
+      allow: false,
+      reason: `dispatch-gate-decision precondition: 원장 경로 판정이 인식되지 않는 상태를 반환함(${JSON.stringify(state)}) -> 배달 거부(안전측 기본값)`,
+    };
+  }
+  return {
+    state,
+    allow: false,
+    reason:
+      typeof resolution?.reason === "string" && resolution.reason.trim()
+        ? resolution.reason
+        : `dispatch-gate-decision precondition: 원장 경로를 확정하지 못함(${state}) -> 배달 거부(안전측 기본값)`,
+  };
 }
 
 // Extracted from checkLedgerEntryShape (quality-check: keep that function's
