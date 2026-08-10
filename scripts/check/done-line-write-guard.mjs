@@ -113,7 +113,7 @@ if (invokedDirectly) {
   try {
     raw = readFileSync(0, "utf8");
   } catch {
-    raw = "";
+    // no stdin -- raw stays ""
   }
 
   let hookInput;

@@ -63,7 +63,11 @@ test("0303-형 반례(합성): 헤더는 실제 CreationTime과 일치하지만,
   withDir((dir) => {
     const now = new Date();
     const path = join(dir, "0303-sample.txt");
-    writeFileSync(path, headerFor(now, now.getHours(), now.getMinutes()), "utf8");
+    writeFileSync(
+      path,
+      headerFor(now, now.getHours(), now.getMinutes()),
+      "utf8",
+    );
     const created = statSync(path); // real birthtime, captured before the move
 
     // 처리됨\ 폴더로 "이동"을 흉내: mtime만 +26분 뒤로 미룬다(atime도 함께
@@ -90,13 +94,25 @@ test("auditDirectory + groupByFilenameMinute: 동일 분(파일명) 파일이 �
     const now = new Date();
     const hh = String(now.getHours()).padStart(2, "0");
     const mm = String(now.getMinutes()).padStart(2, "0");
-    writeFileSync(join(dir, `${hh}${mm}-a.txt`), headerFor(now, now.getHours(), now.getMinutes()), "utf8");
-    writeFileSync(join(dir, `${hh}${mm}-b.txt`), headerFor(now, now.getHours(), now.getMinutes()), "utf8");
+    writeFileSync(
+      join(dir, `${hh}${mm}-a.txt`),
+      headerFor(now, now.getHours(), now.getMinutes()),
+      "utf8",
+    );
+    writeFileSync(
+      join(dir, `${hh}${mm}-b.txt`),
+      headerFor(now, now.getHours(), now.getMinutes()),
+      "utf8",
+    );
 
     const { entries, groups } = auditDirectory({ dir });
     assert.equal(entries.length, 2);
     const key = `${hh}${mm}`;
-    assert.equal(groups.get(key).length, 2, "both same-minute files must survive the group, not be collapsed to one");
+    assert.equal(
+      groups.get(key).length,
+      2,
+      "both same-minute files must survive the group, not be collapsed to one",
+    );
   });
 });
 

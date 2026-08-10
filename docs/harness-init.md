@@ -221,7 +221,7 @@ installer now generates or merges that file directly:
   command alongside role-guard.mjs (HYK-186 2R) — blocks Edit/Write/
   MultiEdit from introducing a hand-written `>>> DONE:` line into a
   `.harness/<role>.md` result file, redirecting the worker to `node
-  scripts/relay/finalize-done.mjs <role> .harness` (machine-clock producer,
+scripts/relay/finalize-done.mjs <role> .harness` (machine-clock producer,
   built HYK-186 1R). Only this repo's own Claude Code write path is
   regulated — `relay-handshake.mjs`'s consumer side still accepts a
   hand-written DONE line unchanged (a codex REVIEW/VERIFY seat, or any

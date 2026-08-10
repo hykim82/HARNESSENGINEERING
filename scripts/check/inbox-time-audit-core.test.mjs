@@ -82,7 +82,9 @@ test("HYK-186 §4 완료조건6: 정상 대조군 N=2 (0303 mtime-지연 표본 
     const result = judgeInboxTimeAudit(sample.args);
     if (result.verdict !== INBOX_AUDIT_VERDICT.NORMAL) {
       falsePositives += 1;
-      assert.fail(`false positive on '${sample.label}': ${result.verdict}/${result.reasonCode}`);
+      assert.fail(
+        `false positive on '${sample.label}': ${result.verdict}/${result.reasonCode}`,
+      );
     }
   }
   assert.equal(falsePositives, 0, `오탐 ${falsePositives}/${samples.length}`);
@@ -122,9 +124,18 @@ test("헤더 시각 결손 -> UNDECIDABLE (예외 없이 항상 {ok,verdict,reas
 });
 
 test("args 자체가 아니면 -> UNDECIDABLE, throw 없음", () => {
-  assert.equal(judgeInboxTimeAudit(null).verdict, INBOX_AUDIT_VERDICT.UNDECIDABLE);
-  assert.equal(judgeInboxTimeAudit(undefined).verdict, INBOX_AUDIT_VERDICT.UNDECIDABLE);
-  assert.equal(judgeInboxTimeAudit("x").verdict, INBOX_AUDIT_VERDICT.UNDECIDABLE);
+  assert.equal(
+    judgeInboxTimeAudit(null).verdict,
+    INBOX_AUDIT_VERDICT.UNDECIDABLE,
+  );
+  assert.equal(
+    judgeInboxTimeAudit(undefined).verdict,
+    INBOX_AUDIT_VERDICT.UNDECIDABLE,
+  );
+  assert.equal(
+    judgeInboxTimeAudit("x").verdict,
+    INBOX_AUDIT_VERDICT.UNDECIDABLE,
+  );
 });
 
 // --- mutation counterfactual: mtime 단독으로 판정하면 0303이 다시 오탐한다 ---
@@ -200,7 +211,12 @@ test("groupByFilenameMinute: 잘못된 입력은 조용히 건너뛴다(throw �
 // ---------------------------------------------------------------------------
 // HYK-186 2R §5 변조3/변조4 (필수) -- inbox-time-audit-core.mjs 자체 변조.
 // ---------------------------------------------------------------------------
-import { readFileSync, writeFileSync as _wfs, mkdtempSync as _mkd, mkdirSync as _mkdir, rmSync as _rm } from "node:fs";
+import {
+  readFileSync,
+  writeFileSync as _wfs,
+  mkdtempSync as _mkd,
+  rmSync as _rm,
+} from "node:fs";
 import { join as _join, dirname as _dirname } from "node:path";
 import { fileURLToPath as _fileURLToPath } from "node:url";
 import { tmpdir as _tmpdir } from "node:os";
@@ -210,7 +226,11 @@ const _CORE_PATH = _join(_HERE, "inbox-time-audit-core.mjs");
 
 function _assertExactlyOneMatch(src, target, label) {
   const count = src.split(target).length - 1;
-  assert.equal(count, 1, `mutation target "${label}" must appear exactly once (found ${count})`);
+  assert.equal(
+    count,
+    1,
+    `mutation target "${label}" must appear exactly once (found ${count})`,
+  );
 }
 
 async function _importMutant(mutatedSrc) {

@@ -161,7 +161,10 @@ export const AUDIT_VALIDITY = Object.freeze({
 
 export function judgeAuditValidityAfterChange(args) {
   if (!isPlainObject(args)) {
-    return { ok: false, reason: "judgeAuditValidityAfterChange: args must be an object" };
+    return {
+      ok: false,
+      reason: "judgeAuditValidityAfterChange: args must be an object",
+    };
   }
   const { auditedAtMs, contentChangedAtMs } = args;
   if (!isFiniteMs(auditedAtMs) || !isFiniteMs(contentChangedAtMs)) {
@@ -174,9 +177,7 @@ export function judgeAuditValidityAfterChange(args) {
   const invalidated = contentChangedAtMs > auditedAtMs;
   return {
     ok: true,
-    validity: invalidated
-      ? AUDIT_VALIDITY.INVALIDATED
-      : AUDIT_VALIDITY.VALID,
+    validity: invalidated ? AUDIT_VALIDITY.INVALIDATED : AUDIT_VALIDITY.VALID,
     reason: invalidated
       ? `content changed at ${contentChangedAtMs} after audit stamp ${auditedAtMs} -- prior audit result is invalidated, re-audit required (not silently re-stamped)`
       : `content unchanged since audit stamp ${auditedAtMs} -- prior audit result still valid`,

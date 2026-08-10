@@ -43,9 +43,17 @@ function runCli(scriptPath, args) {
   const res = spawnSync(process.execPath, [scriptPath, ...args], {
     encoding: "utf8",
   });
-  assert.equal(res.error, undefined, `spawn must succeed: ${res.error?.message}`);
+  assert.equal(
+    res.error,
+    undefined,
+    `spawn must succeed: ${res.error?.message}`,
+  );
   assert.notEqual(res.status, null, "process must not be signal-killed");
-  return { exit: res.status, stdout: res.stdout ?? "", stderr: res.stderr ?? "" };
+  return {
+    exit: res.status,
+    stdout: res.stdout ?? "",
+    stderr: res.stderr ?? "",
+  };
 }
 
 // codex REVIEW seat's own DONE-line convention (role-tagged label, see
@@ -71,7 +79,11 @@ test("codex REVIEW lane, production CLI (relay-handshake.mjs review <dir>): now+
       doneAt: "2099-01-01 00:00 KST",
     });
     const res = runCli(RELAY_HANDSHAKE_CLI, ["review", dir]);
-    assert.notEqual(res.exit, 0, "the codex REVIEW lane's own result file must be blocked by the SAME upper bound as CODER's");
+    assert.notEqual(
+      res.exit,
+      0,
+      "the codex REVIEW lane's own result file must be blocked by the SAME upper bound as CODER's",
+    );
     assert.match(res.stderr, /ahead of authority now/);
   });
 });
@@ -83,7 +95,11 @@ test("codex REVIEW lane, boundary control: DONE well within the past -> passes (
       doneAt: "2026-08-01 00:10 KST",
     });
     const res = runCli(RELAY_HANDSHAKE_CLI, ["review", dir]);
-    assert.equal(res.exit, 0, "a genuinely normal codex REVIEW result must still pass -- optimization is 0/N false positives here too");
+    assert.equal(
+      res.exit,
+      0,
+      "a genuinely normal codex REVIEW result must still pass -- optimization is 0/N false positives here too",
+    );
   });
 });
 

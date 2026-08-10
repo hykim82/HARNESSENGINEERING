@@ -76,7 +76,9 @@ export function auditFile({
       ? stat.birthtimeMs
       : null;
   const lastWriteTimeMs = Number.isFinite(stat.mtimeMs) ? stat.mtimeMs : null;
-  const dayAnchorMs = dayAnchorOfLocalDate(creationTimeMs ?? lastWriteTimeMs ?? Date.now());
+  const dayAnchorMs = dayAnchorOfLocalDate(
+    creationTimeMs ?? lastWriteTimeMs ?? Date.now(),
+  );
 
   const content = readFileFn(filePath);
   const headerTimeMs = extractHeaderTimeMs(content, dayAnchorMs);
@@ -102,7 +104,9 @@ function dayAnchorOfLocalDate(ms) {
 }
 
 function fmt(ms) {
-  return ms === null || ms === undefined ? "(없음)" : new Date(ms).toISOString();
+  return ms === null || ms === undefined
+    ? "(없음)"
+    : new Date(ms).toISOString();
 }
 
 // §6-2 요구: "이 파일의 헤더 시각이 파일명과/실제와 N분 어긋난다 · 근거는
@@ -115,10 +119,12 @@ export function formatAuditLine(entry) {
   }
   const d = entry.details;
   const deltaMin = minutes(d.deltaMs);
-  const lastWriteMin = d.lastWriteDeltaMs === null || d.lastWriteDeltaMs === undefined
-    ? null
-    : minutes(d.lastWriteDeltaMs);
-  const evidenceLabel = d.evidence === "creationTime" ? "실제 CreationTime" : "파일명 시각";
+  const lastWriteMin =
+    d.lastWriteDeltaMs === null || d.lastWriteDeltaMs === undefined
+      ? null
+      : minutes(d.lastWriteDeltaMs);
+  const evidenceLabel =
+    d.evidence === "creationTime" ? "실제 CreationTime" : "파일명 시각";
   const base =
     entry.verdict === INBOX_AUDIT_VERDICT.NORMAL
       ? `NORMAL ${entry.basename}: 본문 헤더 시각이 ${evidenceLabel}와 ${Math.abs(deltaMin)}분 이내로 일치 (근거: ${evidenceLabel})`
@@ -159,7 +165,9 @@ export function auditDirectory({
 
 const invokedDirectly =
   process.argv[1] &&
-  process.argv[1].replace(/\\/g, "/").endsWith("scripts/check/inbox-time-audit.mjs");
+  process.argv[1]
+    .replace(/\\/g, "/")
+    .endsWith("scripts/check/inbox-time-audit.mjs");
 if (invokedDirectly) {
   const dir = process.argv[2];
   if (!dir) {

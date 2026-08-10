@@ -5,7 +5,13 @@ import assert from "node:assert/strict";
 import { spawnSync, execFileSync } from "node:child_process";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { mkdtempSync, writeFileSync, rmSync, readFileSync, mkdirSync } from "node:fs";
+import {
+  mkdtempSync,
+  writeFileSync,
+  rmSync,
+  readFileSync,
+  mkdirSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { checkDoneLineWrite } from "./done-line-write-guard.mjs";
 
@@ -33,9 +39,17 @@ function runCliWithStdin(payload) {
     input: JSON.stringify(payload),
     encoding: "utf8",
   });
-  assert.equal(res.error, undefined, `spawn must succeed: ${res.error?.message}`);
+  assert.equal(
+    res.error,
+    undefined,
+    `spawn must succeed: ${res.error?.message}`,
+  );
   assert.notEqual(res.status, null, "process must not be signal-killed");
-  return { exit: res.status, stdout: res.stdout ?? "", stderr: res.stderr ?? "" };
+  return {
+    exit: res.status,
+    stdout: res.stdout ?? "",
+    stderr: res.stderr ?? "",
+  };
 }
 
 // --- pure function tests ---
@@ -43,7 +57,9 @@ function runCliWithStdin(payload) {
 test("checkDoneLineWrite: Write with a >>> DONE line into .harness/coder.md -> blocked", () => {
   const result = checkDoneLineWrite({
     filePath: `${FAKE_ROOT}/.harness/coder.md`,
-    toolInput: { content: "task_id: X\n\n>>> DONE: CODER @ 2026-08-10 00:00 KST\n" },
+    toolInput: {
+      content: "task_id: X\n\n>>> DONE: CODER @ 2026-08-10 00:00 KST\n",
+    },
     repoRoot: FAKE_ROOT,
   });
   assert.equal(result.ok, false);
@@ -62,7 +78,9 @@ test("checkDoneLineWrite: Write to .harness/coder.md WITHOUT a DONE line -> allo
 test("checkDoneLineWrite: Edit introducing a DONE line via new_string -> blocked", () => {
   const result = checkDoneLineWrite({
     filePath: `${FAKE_ROOT}/.harness/review.md`,
-    toolInput: { new_string: ">>> DONE: REVIEW-CODEX @ 2026-08-10 00:00 KST\n" },
+    toolInput: {
+      new_string: ">>> DONE: REVIEW-CODEX @ 2026-08-10 00:00 KST\n",
+    },
     repoRoot: FAKE_ROOT,
   });
   assert.equal(result.ok, false);
@@ -75,7 +93,10 @@ test("checkDoneLineWrite: MultiEdit with a DONE line in one of several edits -> 
     toolInput: {
       edits: [
         { old_string: "a", new_string: "b" },
-        { old_string: "c", new_string: ">>> DONE: VERIFY @ 2026-08-10 00:00 KST\n" },
+        {
+          old_string: "c",
+          new_string: ">>> DONE: VERIFY @ 2026-08-10 00:00 KST\n",
+        },
       ],
     },
     repoRoot: FAKE_ROOT,
@@ -104,7 +125,9 @@ test("checkDoneLineWrite: unrelated file (source code) -> allowed", () => {
 test("checkDoneLineWrite: mid-line/malformed DONE-shaped text (not column-0) -> allowed (mirrors relay-handshake's own DONE_RE anchoring, not a looser/stricter match)", () => {
   const result = checkDoneLineWrite({
     filePath: `${FAKE_ROOT}/.harness/coder.md`,
-    toolInput: { content: "status: >>> DONE: midline @ 2026-08-10 00:00 KST\n" },
+    toolInput: {
+      content: "status: >>> DONE: midline @ 2026-08-10 00:00 KST\n",
+    },
     repoRoot: FAKE_ROOT,
   });
   assert.equal(result.ok, true);
@@ -152,7 +175,10 @@ test("E2E CLI: same Write tool_name, no DONE line -> exit 0 (allowed)", () => {
 test("E2E CLI: a non-write tool_name (e.g. Bash) is never regulated by this hook -> exit 0 regardless of content", () => {
   const result = runCliWithStdin({
     tool_name: "Bash",
-    tool_input: { command: "echo '>>> DONE: CODER @ 2026-08-10 00:00 KST' >> .harness/coder.md" },
+    tool_input: {
+      command:
+        "echo '>>> DONE: CODER @ 2026-08-10 00:00 KST' >> .harness/coder.md",
+    },
   });
   assert.equal(
     result.exit,
@@ -178,7 +204,11 @@ test("mutation 1 (필수): checkDoneLineWrite's block branch removed -> a hand-w
   const target =
     "  const role = relative.match(RESULT_FILE_RE)[1];\n  return {\n    ok: false,";
   const count = src.split(target).length - 1;
-  assert.equal(count, 1, `mutation target must appear exactly once (found ${count})`);
+  assert.equal(
+    count,
+    1,
+    `mutation target must appear exactly once (found ${count})`,
+  );
   const mutated = src.replace(
     target,
     "  const role = relative.match(RESULT_FILE_RE)[1];\n  return {\n    ok: true, // MUTATED: block removed\n    _unused: role,\n    okOriginal: false,",
