@@ -3,6 +3,14 @@ import { join } from "node:path";
 import { execSync } from "node:child_process";
 import { recordRejectStreakFromResultText } from "./reject-streak.mjs";
 import { archiveRoundEnvelope } from "./envelope-archive.mjs";
+import {
+  TIME_FIELD,
+  TIME_AUTHORITY_STATE,
+  MAX_FUTURE_SKEW_MS,
+  isBeyondFutureSkew,
+} from "./time-authority.mjs";
+
+export { TIME_AUTHORITY_STATE, MAX_FUTURE_SKEW_MS };
 
 // HYK-183: 결과 파일에 이 표지가 2개 이상이면 어느 것이 최종인지 결정할 수
 // 없으므로 조용히 하나를 고르지 않고 판정 불가로 멈춘다(2026-07-31 거짓
@@ -281,9 +289,104 @@ function parseKstTimestamp(str) {
   return Number.isNaN(date.getTime()) ? null : date;
 }
 
+// HYK-186 §2 완료조건2: `now` is the ONLY caller-injectable clock in this
+// function, and it exists purely for test determinism (mirroring
+// pull-admission.mjs's `nowMs` convention) -- the production CLI entry point
+// at the bottom of this file never passes it, so every real invocation uses
+// the machine clock. This is what "production `now`는 caller 자기신고가
+// 아니어야 한다" means in practice: the *candidate* timestamps (dropped_at,
+// DONE) are caller-supplied (they come from files workers/ORCH write), but
+// the *authority clock* they are judged against is not.
+function checkFutureSkew({ candidateDate, rawText, field, now }) {
+  const beyond = isBeyondFutureSkew(candidateDate.getTime(), now, field);
+  if (beyond === false) return null;
+  const skewMs = candidateDate.getTime() - now;
+  const state =
+    field === TIME_FIELD.TASK_DROPPED_AT
+      ? TIME_AUTHORITY_STATE.FUTURE_DROPPED_AT
+      : TIME_AUTHORITY_STATE.FUTURE_DONE;
+  const reason =
+    beyond === null
+      ? `time-authority registry has no row for '${field}' -- fail-closed, treating '${rawText.trim()}' as a future violation`
+      : `'${field}' value '${rawText.trim()}' is ${Math.round(
+          skewMs / 1000,
+        )}s ahead of authority now (${new Date(now).toISOString()}), which exceeds the allowed skew of ${MAX_FUTURE_SKEW_MS}ms`;
+  return { ok: false, state, reason };
+}
+
+// Extracted from checkRelayHandshake (quality-check: keeps its own
+// complexity/line-count under the repo's ESLint ceiling) -- resolves the
+// task file's dropped_at header into a parsed Date, applying the HYK-186
+// future-skew check as part of that resolution (a dropped_at that projects
+// into the future is a config-shape problem, independent of whether a
+// result exists yet at all).
+function resolveDroppedAt(taskContent, now) {
+  const droppedMatch = taskContent.match(DROPPED_AT_RE);
+  if (!droppedMatch) {
+    return {
+      ok: false,
+      reason:
+        "task file missing dropped_at header (required for staleness check)",
+    };
+  }
+  const droppedAt = parseKstTimestamp(droppedMatch[1]);
+  if (!droppedAt) {
+    return {
+      ok: false,
+      reason: `task dropped_at not parseable: '${droppedMatch[1].trim()}' (need YYYY-MM-DD HH:MM KST)`,
+    };
+  }
+  const droppedFuture = checkFutureSkew({
+    candidateDate: droppedAt,
+    rawText: droppedMatch[1],
+    field: TIME_FIELD.TASK_DROPPED_AT,
+    now,
+  });
+  if (droppedFuture) return droppedFuture;
+  return { ok: true, droppedAt, droppedMatch };
+}
+
+// Extracted from checkRelayHandshake (same ESLint-ceiling reason as
+// resolveDroppedAt above) -- resolves the result file's '>>> DONE:' line
+// into a parsed Date, applying the HYK-186 future-skew check as part of
+// that resolution. ★PM 실측 재현 대상: before this fix, a DONE line dated
+// 2099-01-01 passed silently ({"ok":true, reason:"relay handshake ok for
+// FUTURE-1"}) -- checkRelayHandshake had exactly one time comparison
+// (`doneAt < droppedAt`) and zero comparisons against `now`. This function
+// is the fix: reject a DONE timestamp beyond authority-clock skew before it
+// can ever reach the staleness/ok:true path in checkRelayHandshake.
+function resolveDoneAt(resultContent, now) {
+  const resultDone = resolveResultDoneMatch(resultContent);
+  if (!resultDone.ok) {
+    // HYK-173-escalation-1 (§2): only the genuine-absence case (no
+    // '>>> DONE:' line anywhere -- `missing`) is eligible to be
+    // reclassified as an explicit BLOCKED/NEEDS_INPUT state. The
+    // ambiguous-DONE case above keeps its existing reason/behavior
+    // untouched (regression 0 on the `>>> DONE:` path).
+    return resolveResultDoneOutcome(resultContent, resultDone);
+  }
+  const doneMatch = resultDone.match;
+  const doneAt = parseKstTimestamp(doneMatch[1]);
+  if (!doneAt) {
+    return {
+      ok: false,
+      reason: `result DONE timestamp not parseable: '${doneMatch[1].trim()}'`,
+    };
+  }
+  const doneFuture = checkFutureSkew({
+    candidateDate: doneAt,
+    rawText: doneMatch[1],
+    field: TIME_FIELD.RESULT_DONE_AT,
+    now,
+  });
+  if (doneFuture) return doneFuture;
+  return { ok: true, doneAt, doneMatch };
+}
+
 export function checkRelayHandshake({
   role,
   harnessDir = join(repoRoot(), ".harness"),
+  now = Date.now(),
 }) {
   const taskPath = join(harnessDir, `${role}-task.md`);
   const resultPath = join(harnessDir, `${role}.md`);
@@ -320,39 +423,13 @@ export function checkRelayHandshake({
     };
   }
 
-  const droppedMatch = taskContent.match(DROPPED_AT_RE);
-  if (!droppedMatch) {
-    return {
-      ok: false,
-      reason:
-        "task file missing dropped_at header (required for staleness check)",
-    };
-  }
-  const droppedAt = parseKstTimestamp(droppedMatch[1]);
-  if (!droppedAt) {
-    return {
-      ok: false,
-      reason: `task dropped_at not parseable: '${droppedMatch[1].trim()}' (need YYYY-MM-DD HH:MM KST)`,
-    };
-  }
+  const droppedResolved = resolveDroppedAt(taskContent, now);
+  if (!droppedResolved.ok) return droppedResolved;
+  const { droppedAt, droppedMatch } = droppedResolved;
 
-  const resultDone = resolveResultDoneMatch(resultContent);
-  if (!resultDone.ok) {
-    // HYK-173-escalation-1 (§2): only the genuine-absence case (no
-    // '>>> DONE:' line anywhere -- `missing`) is eligible to be
-    // reclassified as an explicit BLOCKED/NEEDS_INPUT state. The
-    // ambiguous-DONE case above keeps its existing reason/behavior
-    // untouched (regression 0 on the `>>> DONE:` path).
-    return resolveResultDoneOutcome(resultContent, resultDone);
-  }
-  const doneMatch = resultDone.match;
-  const doneAt = parseKstTimestamp(doneMatch[1]);
-  if (!doneAt) {
-    return {
-      ok: false,
-      reason: `result DONE timestamp not parseable: '${doneMatch[1].trim()}'`,
-    };
-  }
+  const doneResolved = resolveDoneAt(resultContent, now);
+  if (!doneResolved.ok) return doneResolved;
+  const { doneAt, doneMatch } = doneResolved;
 
   if (doneAt < droppedAt) {
     return {

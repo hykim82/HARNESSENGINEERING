@@ -454,6 +454,12 @@ const ENVELOPE_ARCHIVE_SRC_HEAD = readFileSync(
   join(ROOT, "scripts", "check", "envelope-archive.mjs"),
   "utf8",
 );
+// HYK-186: relay-handshake.mjs now also imports "./time-authority.mjs" --
+// same transitive-sibling risk as envelope-archive.mjs above.
+const TIME_AUTHORITY_SRC_HEAD = readFileSync(
+  join(ROOT, "scripts", "check", "time-authority.mjs"),
+  "utf8",
+);
 
 function assertExactlyOneMatch(src, target, label) {
   const count = src.split(target).length - 1;
@@ -472,6 +478,11 @@ function writeMutantPair(rootDir, { relaySrc, streakSrc }) {
   writeFileSync(
     join(scriptsCheckDir, "envelope-archive.mjs"),
     ENVELOPE_ARCHIVE_SRC_HEAD,
+    "utf8",
+  );
+  writeFileSync(
+    join(scriptsCheckDir, "time-authority.mjs"),
+    TIME_AUTHORITY_SRC_HEAD,
     "utf8",
   );
   return join(scriptsCheckDir, "relay-handshake.mjs");

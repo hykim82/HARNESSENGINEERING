@@ -9,11 +9,19 @@ import {
   EXIT_CONFIG_INVALID,
   EXIT_UNJUDGABLE,
   EXIT_BLOCKED,
+  EXIT_FUTURE_REJECTED,
   classifyWatchFailure,
   isBlockedFamilyState,
+  isFutureRejectedState,
   parseWatchArgs,
 } from "./watch-result.mjs";
 import { RESULT_BLOCK_STATE } from "../check/relay-handshake.mjs";
+import { TIME_AUTHORITY_STATE } from "../check/time-authority.mjs";
+import { mkdtempSync, writeFileSync, rmSync, readdirSync } from "node:fs";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+import { tmpdir } from "node:os";
+import { spawnSync } from "node:child_process";
 
 // Fake clock: sleepFn advances a shared counter by intervalS*1000 and
 // resolves immediately (no real timer), nowFn reads that counter -- this
@@ -731,4 +739,179 @@ test("(38) mutation counterfactual: BLOCKED must NOT be classified the same as a
     "before this round's wiring, an unrecognized reason string (which BLOCKED's is) fell through to unjudgable -- this must now be its own 'blocked' status instead",
   );
   assert.equal(result.status, "blocked");
+});
+
+// ---------------------------------------------------------------------------
+// HYK-186 §2 완료조건4/5 -- future-rejected state wiring + E2E blocked-receipt.
+// ---------------------------------------------------------------------------
+
+test("isFutureRejectedState: FUTURE_DROPPED_AT/FUTURE_DONE are future-rejected; blocked-family/PENDING/non-string are not", () => {
+  assert.equal(
+    isFutureRejectedState(TIME_AUTHORITY_STATE.FUTURE_DROPPED_AT),
+    true,
+  );
+  assert.equal(isFutureRejectedState(TIME_AUTHORITY_STATE.FUTURE_DONE), true);
+  assert.equal(isFutureRejectedState(RESULT_BLOCK_STATE.BLOCKED), false);
+  assert.equal(isFutureRejectedState("PENDING"), false);
+  assert.equal(isFutureRejectedState(undefined), false);
+  assert.equal(isFutureRejectedState(42), false);
+});
+
+test("FUTURE_DONE state -> status='future_rejected', distinct WATCH_FUTURE_REJECTED reason, immediate (no sleep), never classified pending/unjudgable/blocked", async () => {
+  const { nowFn, sleepFn, sleepCallCount } = fakeClock(60);
+  const checkFn = () => ({
+    ok: false,
+    state: TIME_AUTHORITY_STATE.FUTURE_DONE,
+    reason:
+      "'result.>>> DONE' value '2099-01-01 00:00 KST' is 2308348800s ahead of authority now (2026-08-09T05:00:00.000Z), which exceeds the allowed skew of 300000ms",
+  });
+  const result = await watchResult({
+    role: "coder",
+    intervalS: 60,
+    maxWaitS: 240,
+    checkFn,
+    sleepFn,
+    nowFn,
+  });
+  assert.equal(result.status, "future_rejected");
+  assert.equal(result.state, TIME_AUTHORITY_STATE.FUTURE_DONE);
+  assert.match(result.reason, /^WATCH_FUTURE_REJECTED: FUTURE_DONE: /);
+  assert.equal(
+    sleepCallCount(),
+    0,
+    "must exit immediately, no wasted poll cycle",
+  );
+});
+
+test("FUTURE_DROPPED_AT state -> status='future_rejected' too, distinguishable state field", async () => {
+  const checkFn = () => ({
+    ok: false,
+    state: TIME_AUTHORITY_STATE.FUTURE_DROPPED_AT,
+    reason:
+      "'task.dropped_at' value '...' is ...s ahead of authority now (...)",
+  });
+  const result = await watchResult({
+    role: "coder",
+    maxWaitS: 240,
+    checkFn,
+    sleepFn: async () => {},
+    nowFn: () => 0,
+  });
+  assert.equal(result.status, "future_rejected");
+  assert.equal(result.state, TIME_AUTHORITY_STATE.FUTURE_DROPPED_AT);
+});
+
+test("EXIT_FUTURE_REJECTED(7) is distinct from every other exit code this module hands out", () => {
+  const codes = [
+    EXIT_DONE,
+    EXIT_TICK,
+    EXIT_CONFIG_INVALID,
+    EXIT_UNJUDGABLE,
+    EXIT_BLOCKED,
+    EXIT_FUTURE_REJECTED,
+  ];
+  assert.equal(
+    new Set(codes).size,
+    codes.length,
+    "no two exit codes may collide",
+  );
+  assert.equal(EXIT_FUTURE_REJECTED, 7);
+});
+
+test("mutation counterfactual: FUTURE_DONE must NOT be classified the same as an unrelated unjudgable reason -- proves the state-first check actually changes behavior", async () => {
+  const checkFn = () => ({
+    ok: false,
+    state: TIME_AUTHORITY_STATE.FUTURE_DONE,
+    reason: "some future-dated DONE",
+  });
+  const result = await watchResult({
+    role: "coder",
+    maxWaitS: 1,
+    checkFn,
+    sleepFn: async () => {},
+    nowFn: () => 0,
+  });
+  assert.notEqual(result.status, "unjudgable");
+  assert.notEqual(result.status, "blocked");
+  assert.equal(result.status, "future_rejected");
+});
+
+// --- §6 1-B 세 요건 + §2 완료조건5 (차단 실적 receipt, 순수 unit test 아님) ---
+// 실행 한 줄: `node scripts/relay/watch-result.mjs --role coder --harness-dir
+// <dir> --max-wait-s 1`. 보이는 것: stderr에 어느 필드가('result.>>> DONE')
+// 얼마나 미래인지(초 단위 skew)가 사람이 읽는 문장으로 찍힌다. 도달 경로:
+// watch-result가 이 모듈의 유일한 소비자이자 이 스크립트 자신 -- 이 CLI
+// 프로세스의 stderr/exit code가 그 "닿는" 경로다(오케스트레이터가 이
+// exit code를 감시).
+const WATCH_RESULT_CLI = join(
+  dirname(fileURLToPath(import.meta.url)),
+  "watch-result.mjs",
+);
+
+function withHarnessDir(fn) {
+  const dir = mkdtempSync(join(tmpdir(), "watch-result-e2e-"));
+  try {
+    fn(dir);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+test("E2E (§6 1-B + 완료조건5 receipt): real CLI, real fixture, future DONE -> exit 7, human-readable field+skew in stderr, downstream count 0 (no reject-streak/envelope side effects)", () => {
+  withHarnessDir((dir) => {
+    writeFileSync(
+      join(dir, "coder-task.md"),
+      "task_id: HYK-9186-1\ndropped_at: 2026-08-01 00:00 KST\n",
+      "utf8",
+    );
+    writeFileSync(
+      join(dir, "coder.md"),
+      "task_id: HYK-9186-1\n\n>>> DONE: CODER @ 2099-01-01 00:00 KST\n",
+      "utf8",
+    );
+    const res = spawnSync(
+      process.execPath,
+      [
+        WATCH_RESULT_CLI,
+        "--role",
+        "coder",
+        "--harness-dir",
+        dir,
+        "--max-wait-s",
+        "1",
+      ],
+      { encoding: "utf8" },
+    );
+    assert.equal(res.error, undefined);
+
+    // --- receipt (완료조건5: 표본 ID·입력·측정 now·skew·exit/status·이유·downstream count) ---
+    const receipt = {
+      sampleId: "HYK-186-e2e-future-done-1",
+      input: {
+        droppedAt: "2026-08-01 00:00 KST",
+        doneAt: "2099-01-01 00:00 KST",
+      },
+      measuredNow: new Date().toISOString(),
+      exit: res.status,
+      stderr: res.stderr,
+      downstreamFileCount: (() => {
+        // downstream effect surface for this fixture dir: only the two
+        // files this test itself wrote should exist -- no reject-streak
+        // ledger, no envelope-archive rounds dir, nothing else appeared.
+        return readdirSync(dir).length;
+      })(),
+    };
+
+    assert.equal(receipt.exit, 7, "EXIT_FUTURE_REJECTED");
+    assert.match(
+      receipt.stderr,
+      /WATCH_FUTURE_REJECTED: FUTURE_DONE:.*'result\.>>> DONE' value '2099-01-01 00:00 KST' is \d+s ahead of authority now/,
+      "human-readable: names the field AND the measured skew in seconds, not just a bare code",
+    );
+    assert.equal(
+      receipt.downstreamFileCount,
+      2,
+      `downstream effect count must be 0 beyond the two input files this test wrote (found ${receipt.downstreamFileCount} entries in fixture dir) -- no reject-streak ledger or round archive should have been created for a rejected handshake`,
+    );
+  });
 });

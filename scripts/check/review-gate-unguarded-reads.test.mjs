@@ -36,6 +36,11 @@ const REVIEW_GATE_PATH = join(HERE, "review-gate.mjs");
 const RELAY_HANDSHAKE_PATH = join(HERE, "relay-handshake.mjs");
 const REJECT_STREAK_PATH = join(HERE, "reject-streak.mjs");
 const ENVELOPE_ARCHIVE_PATH = join(HERE, "envelope-archive.mjs");
+// HYK-186: relay-handshake.mjs now also imports "./time-authority.mjs" (the
+// future-skew registry) -- same MODULE_NOT_FOUND risk reject-streak.mjs's/
+// envelope-archive.mjs's own copies above already exist to avoid, now for a
+// third sibling.
+const TIME_AUTHORITY_PATH = join(HERE, "time-authority.mjs");
 
 function git(cwd, args) {
   return execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
@@ -87,6 +92,11 @@ function stageRepo(dir, { reviewGateSrc }) {
   writeFileSync(
     join(scriptsCheckDir, "envelope-archive.mjs"),
     readFileSync(ENVELOPE_ARCHIVE_PATH, "utf8"),
+    "utf8",
+  );
+  writeFileSync(
+    join(scriptsCheckDir, "time-authority.mjs"),
+    readFileSync(TIME_AUTHORITY_PATH, "utf8"),
     "utf8",
   );
   return join(scriptsCheckDir, "review-gate.mjs");

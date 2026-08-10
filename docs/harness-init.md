@@ -123,8 +123,12 @@ Both profiles (profile-agnostic core):
 - A `.gitignore` append — from `gitignore.append.template`, which one
   block a profile receives.
 - `hooks/commit-msg`, `hooks/pre-commit`, and
-  `scripts/check/{review-gate,relay-handshake,role-guard,context-inject,status-fresh,clear-safe-check,controlroom-fresh,path-normalize,pm-guard,packet-gate,worker-status-onstart}.{mjs,test.mjs}`
-  (all eleven names copy both their `.mjs` and `.test.mjs` file) —
+  `scripts/check/{review-gate,relay-handshake,role-guard,done-line-write-guard,context-inject,status-fresh,clear-safe-check,controlroom-fresh,path-normalize,pm-guard,packet-gate,worker-status-onstart}.{mjs,test.mjs}`
+  plus `scripts/relay/finalize-done.mjs` (`done-line-write-guard.mjs`'s
+  redirect target) and `scripts/check/time-authority.mjs`
+  (`relay-handshake.mjs`'s registry dependency)
+  (all twelve `scripts/check/*` names copy both their `.mjs` and
+  `.test.mjs` file) —
   copied **directly from this repository's live files**, not a frozen
   template copy, so an install always ships whatever this repo's
   enforcement layer currently is (the exact drift this v2 exists to avoid).
@@ -213,6 +217,29 @@ installer now generates or merges that file directly:
   one was already effectively "pre-wired" in spirit since a fresh install
   has no prior settings file to conflict with, but it is now included in
   the same generated block rather than left undocumented.
+- `scripts/check/done-line-write-guard.mjs` as a second `PreToolUse`
+  command alongside role-guard.mjs (HYK-186 2R design, wired into
+  `buildHooksBlock`/the `scripts/check` + `scripts/relay` copy lists by
+  HYK-186 3R — an independent review caught that 2R had only written this
+  paragraph without actually adding the code) — blocks Edit/Write/
+  MultiEdit from introducing a hand-written `>>> DONE:` line into a
+  `.harness/<role>.md` result file, redirecting the worker to `node
+scripts/relay/finalize-done.mjs <role> .harness` (machine-clock producer,
+  built HYK-186 1R, now also copied by this installer). Only this repo's
+  own Claude Code write path is regulated — `relay-handshake.mjs`'s
+  consumer side still accepts a hand-written DONE line unchanged (a codex
+  REVIEW/VERIFY seat, or any session without this hook installed, still
+  completes normally). ⚠️**Existing-install limitation**: this hook (like
+  every other entry in `buildHooksBlock`) is only added on a _fresh_
+  `.claude/settings.local.json` or one merged from a file with no prior
+  `hooks` key — see `installSettingsLocal`'s merge rule 3 just below. A
+  target that already has a `hooks` key gets none of `buildHooksBlock`
+  auto-applied, this new hook included; the installer prints the whole
+  block (with this hook already in it) as a manual-merge snippet instead,
+  same as it always has for every other hook. See
+  `docs/enforcement-known-gaps.md` gap#95 for the engine-neutral-foundation
+  honesty note and migration plan this hook still needs (Claude-only
+  today, no codex/uninstalled-session equivalent).
 
 **STATUS/PROJECT-CONTEXT path, per profile:** `solo-full` points both hooks
 at `<controlRoomPath>/STATUS.md` and `<controlRoomPath>/PROJECT-CONTEXT.md`

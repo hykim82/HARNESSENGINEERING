@@ -2,6 +2,7 @@ import {
   checkRelayHandshake,
   RESULT_BLOCK_STATE,
 } from "../check/relay-handshake.mjs";
+import { TIME_AUTHORITY_STATE } from "../check/time-authority.mjs";
 
 // Single declarations (C.7): every default and every exit code this module
 // hands out traces back to exactly one of these, never a repeated literal.
@@ -39,6 +40,16 @@ export const EXIT_UNJUDGABLE = 5;
 // 확장한다. ⛔자동 재개·자동 조치는 여전히 0 -- 이 모듈은 계속 상태를
 // 보고하고 종료할 뿐이다.
 export const EXIT_BLOCKED = 6;
+// HYK-186 §2 완료조건4/5: a future-dated dropped_at/DONE timestamp
+// (`TIME_AUTHORITY_STATE.FUTURE_DROPPED_AT`/`FUTURE_DONE`, time-authority.mjs)
+// is its own distinct family -- it must never fall through to `pending`
+// (that would resume infinite polling, exactly the "미래로 -> 무한 대기"
+// half of the §1 실사례 table this task exists to close) nor collapse into
+// the pre-existing `blocked` family above (that family is worker-signaled
+// intent; this one is an authority-clock rejection of a machine-parsed
+// timestamp -- a different failure shape with a different fix: the header
+// is wrong, not "the worker is stuck"). A new, non-overlapping exit code.
+export const EXIT_FUTURE_REJECTED = 7;
 
 // checkRelayHandshake's `ok:false` reasons fall into three families this
 // module must never confuse (HYK-136/HYK-160-coder-2 게이트 계약): a CONFIG
@@ -108,6 +119,23 @@ export function isBlockedFamilyState(state) {
   return typeof state === "string" && BLOCKED_FAMILY_STATES.has(state);
 }
 
+// HYK-186 §5 변조5 대상: the one place a `TIME_AUTHORITY_STATE` value is
+// consulted by any consumer in this repo. Remove this call (or the wiring
+// below that uses it) and a future-dated result stops being reported as
+// `future_rejected`/EXIT_FUTURE_REJECTED and instead falls through to
+// classifyWatchFailure's reason-string patterns -- which do not recognize
+// this module's "'<field>' value ... is ...s ahead of authority now ..."
+// reason text at all, so it lands on the catch-all `unjudgable` bucket
+// (§3 "새 사유를 결선하지 않으면 UNJUDGABLE로만 끝난다").
+const FUTURE_REJECTED_STATES = new Set([
+  TIME_AUTHORITY_STATE.FUTURE_DROPPED_AT,
+  TIME_AUTHORITY_STATE.FUTURE_DONE,
+]);
+
+export function isFutureRejectedState(state) {
+  return typeof state === "string" && FUTURE_REJECTED_STATES.has(state);
+}
+
 function defaultSleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -143,6 +171,19 @@ function resolveCheckOutcome(result, elapsedS) {
   // unconditionally (the `result.ok` branch above returns first, and
   // checkRelayHandshake never sets `state` alongside `ok:true`), so this
   // does not touch the "DONE wins" priority 1R's test (y) already froze.
+  // HYK-186: checked before the blocked-family/reason-string classification
+  // below -- a future-rejected state is a stronger, structured signal (an
+  // authority-clock verdict on a parsed timestamp) than either the worker-
+  // signaled blocked family or the plain reason-string patterns, and must
+  // report its own distinct status/exit rather than being folded into either.
+  if (isFutureRejectedState(result.state)) {
+    return {
+      status: "future_rejected",
+      state: result.state,
+      reason: `WATCH_FUTURE_REJECTED: ${result.state}: ${result.reason}`,
+      elapsedS,
+    };
+  }
   if (isBlockedFamilyState(result.state)) {
     return {
       status: "blocked",
@@ -309,6 +350,9 @@ if (invokedDirectly) {
   } else if (result.status === "blocked") {
     console.error(result.reason);
     process.exit(EXIT_BLOCKED);
+  } else if (result.status === "future_rejected") {
+    console.error(result.reason);
+    process.exit(EXIT_FUTURE_REJECTED);
   } else {
     console.log(`TICK: ${result.reason}`);
     process.exit(EXIT_TICK);
