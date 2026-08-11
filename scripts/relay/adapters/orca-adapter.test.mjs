@@ -1388,6 +1388,73 @@ test("resolveRoleBoundSeatHandle: §4-5 repro, opposite request -- requesting RE
   assert.equal(r.handle, "term_review");
 });
 
+// HYK-214-seat-legacy-1 §0/§4(a) -- ★이 라운드의 가장 중요한 시험★. 어젯밤
+// 실사고 원문 그대로 고정: `-Role CODER` 배달이 codex REVIEW 좌석으로 갔다
+// (§0 원문 "좌석 2개 중 에이전트 마커로 1개 선별 -> ⛔이게 REVIEW(codex)
+// 좌석이었다"). resolveRoleBoundSeatHandle은 그 실패 경로(마커 기반
+// judgeSeatReadiness)와 달리 대장 조인만 본다 -- ENGINE_BY_ROLE(CODER=
+// claude, REVIEW=codex)이 다른 두 좌석이 동석해도 role=CODER 요청이
+// REVIEW(codex) 좌석의 handle을 절대 반환하지 않는다는 것을 명시로 고정
+// (line 1347 테스트와 동형이나, §0 사고를 직접 가리키는 별도 앵커로 둔다).
+test("resolveRoleBoundSeatHandle: HYK-214 §0 incident pin -- claude CODER + codex REVIEW co-located, -Role CODER never returns the codex REVIEW seat's handle", () => {
+  assert.equal(ENGINE_BY_ROLE.CODER, "claude");
+  assert.equal(ENGINE_BY_ROLE.REVIEW, "codex");
+  const registry = seatRegistryStub([
+    registryRecord({ ptyId: "pty_codex_review", role: "REVIEW" }),
+    registryRecord({ ptyId: "pty_claude_coder", role: "CODER" }),
+  ]);
+  const execFn = fakeExecFn({
+    list: managedWorktreeStub(VALID_WORKTREE),
+    "terminal-list": terminalListStub([
+      terminalEntry({ handle: "term_codex_review", ptyId: "pty_codex_review" }),
+      terminalEntry({ handle: "term_claude_coder", ptyId: "pty_claude_coder" }),
+    ]),
+  });
+  const r = resolveRoleBound("CODER", {
+    execFn,
+    registryFs: fakeRegistryFs(registry),
+  });
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.equal(r.handle, "term_claude_coder");
+  assert.notEqual(r.handle, "term_codex_review");
+});
+
+// HYK-214-seat-legacy-1 §4(b) -- "engine과 role은 다른 축" (§3 설계요구):
+// CODER와 VERIFY는 둘 다 claude 엔진이라(ENGINE_BY_ROLE), 엔진만으로는
+// 절대 구별할 수 없다. 대장 조인이 role 문자열 자체를 비교하므로 여전히
+// 서로를 고르지 않는지 -- 지금까지 이 저장소 어디에도 이 조합의 시험이
+// 없었다(연구 확인, CODER+REVIEW만 존재).
+test("resolveRoleBoundSeatHandle: HYK-214 §4(b) same-engine two-role -- claude CODER + claude VERIFY co-located, each role request picks only its own seat", () => {
+  assert.equal(ENGINE_BY_ROLE.CODER, "claude");
+  assert.equal(ENGINE_BY_ROLE.VERIFY, "claude");
+  const registry = seatRegistryStub([
+    registryRecord({ ptyId: "pty_verify", role: "VERIFY" }),
+    registryRecord({ ptyId: "pty_coder", role: "CODER" }),
+  ]);
+  const execFn = fakeExecFn({
+    list: managedWorktreeStub(VALID_WORKTREE),
+    "terminal-list": terminalListStub([
+      terminalEntry({ handle: "term_verify", ptyId: "pty_verify" }),
+      terminalEntry({ handle: "term_coder", ptyId: "pty_coder" }),
+    ]),
+  });
+  const coderResult = resolveRoleBound("CODER", {
+    execFn,
+    registryFs: fakeRegistryFs(registry),
+  });
+  assert.equal(coderResult.ok, true, JSON.stringify(coderResult));
+  assert.equal(coderResult.handle, "term_coder");
+  assert.notEqual(coderResult.handle, "term_verify");
+
+  const verifyResult = resolveRoleBound("VERIFY", {
+    execFn,
+    registryFs: fakeRegistryFs(registry),
+  });
+  assert.equal(verifyResult.ok, true, JSON.stringify(verifyResult));
+  assert.equal(verifyResult.handle, "term_verify");
+  assert.notEqual(verifyResult.handle, "term_coder");
+});
+
 // ★★§4 변조2: "미확정 후보가 있어도 유일 승자 선언" 변조 → RED (§3-1 회귀
 // 금지, 1R에서 통과한 방어를 앵커만 바꿔 승계). 여기서는 대장에 전혀 없는
 // (ptyId 미기록) 좌석이 하나 섞여 있어 CODER 매치가 1개뿐이어도 거부돼야
@@ -3901,9 +3968,9 @@ const CREATE_RESPONSE = {
   },
 };
 
-function createRoleBoundSeatFor(role, opts) {
+function createRoleBoundSeatFor(role, opts, ctxExtra = {}) {
   return createRoleBoundSeat(
-    { role, worktreePath: VALID_WORKTREE },
+    { role, worktreePath: VALID_WORKTREE, ...ctxExtra },
     { registryPath: REGISTRY_PATH, ...opts },
   );
 }
@@ -3938,7 +4005,7 @@ test("createRoleBoundSeat: missing registryPath -> ok:false REGISTRY_LOAD_FAILED
   assert.equal(execFn.calls.length, 0);
 });
 
-test("createRoleBoundSeat: records role into the new seat AND records a pre-existing candidate (the default empty tab) as NOT_WORKER_SEAT_ROLE -- both saved in one registry write", () => {
+test("createRoleBoundSeat: assumeFreshWorktree:true -- records role into the new seat AND records a pre-existing candidate (the default empty tab) as NOT_WORKER_SEAT_ROLE -- both saved in one registry write", () => {
   const fs = fakeWritableRegistryFs({ schemaVersion: 1, seats: [] });
   const execFn = fakeExecFn({
     list: managedWorktreeStub(VALID_WORKTREE),
@@ -3947,7 +4014,11 @@ test("createRoleBoundSeat: records role into the new seat AND records a pre-exis
     ]),
     create: CREATE_RESPONSE,
   });
-  const r = createRoleBoundSeatFor("CODER", { execFn, registryFs: fs });
+  const r = createRoleBoundSeatFor(
+    "CODER",
+    { execFn, registryFs: fs },
+    { assumeFreshWorktree: true },
+  );
   assert.equal(r.ok, true, JSON.stringify(r));
   assert.equal(r.record.ptyId, "pty_new_coder");
   assert.equal(r.record.role, "CODER");
@@ -3970,6 +4041,47 @@ test("createRoleBoundSeat: records role into the new seat AND records a pre-exis
   );
 });
 
+// HYK-214-seat-legacy-1 §1-① / §4(c): the default (no assumeFreshWorktree)
+// path is what every current real caller (seat-create-cli.mjs) actually
+// exercises -- it must NEVER assert NOT_WORKER_SEAT_ROLE for a pre-existing
+// candidate, because in a legacy/mixed worktree that candidate can be a
+// real worker seat created the old way (`orca terminal create` + manual
+// `-Handle`), and this same registry-load-then-write call has no way to
+// tell "our own default empty tab" apart from "someone else's real worker"
+// without reading screen content (forbidden, §4 non-negotiable-1).
+test("createRoleBoundSeat: default (no assumeFreshWorktree) does NOT record a pre-existing candidate as NOT_WORKER_SEAT_ROLE -- only the new seat is written (레거시·혼재 워크트리 오라벨 방지, HYK-214 §1)", () => {
+  const fs = fakeWritableRegistryFs({ schemaVersion: 1, seats: [] });
+  const execFn = fakeExecFn({
+    list: managedWorktreeStub(VALID_WORKTREE),
+    "terminal-list": terminalListStub([
+      // Could be our own leftover default tab, OR a real legacy worker
+      // seat created the old way -- indistinguishable from these signals
+      // alone, so it must not be asserted as NOT_WORKER_SEAT_ROLE.
+      terminalEntry({ handle: "term_legacy_or_default", ptyId: "pty_legacy" }),
+    ]),
+    create: CREATE_RESPONSE,
+  });
+  const r = createRoleBoundSeatFor("CODER", { execFn, registryFs: fs });
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.deepEqual(
+    r.observedNotWorkerSeats,
+    [],
+    "no observation is asserted without an explicit assumeFreshWorktree:true",
+  );
+
+  const saved = fs.savedRegistry();
+  assert.equal(
+    saved.seats.length,
+    1,
+    "only the newly created seat is written -- the pre-existing candidate is left unrecorded (undetermined), not falsely labeled",
+  );
+  assert.equal(saved.seats[0].ptyId, "pty_new_coder");
+  assert.equal(
+    saved.seats.some((s) => s.ptyId === "pty_legacy"),
+    false,
+  );
+});
+
 test("createRoleBoundSeat: the created seat's ptyId is never itself recorded as NOT_WORKER_SEAT_ROLE (pre-existing snapshot is taken strictly before terminal create)", () => {
   const fs = fakeWritableRegistryFs({ schemaVersion: 1, seats: [] });
   const execFn = fakeExecFn({
@@ -3985,7 +4097,7 @@ test("createRoleBoundSeat: the created seat's ptyId is never itself recorded as 
   assert.equal(saved.seats[0].role, "CODER");
 });
 
-test("createRoleBoundSeat: idempotent -- a pre-existing candidate already recorded (any role) in the loaded registry is left untouched, not duplicated", () => {
+test("createRoleBoundSeat: assumeFreshWorktree:true idempotent -- a pre-existing candidate already recorded (any role) in the loaded registry is left untouched, not duplicated", () => {
   const fs = fakeWritableRegistryFs({
     schemaVersion: 1,
     seats: [
@@ -3999,7 +4111,11 @@ test("createRoleBoundSeat: idempotent -- a pre-existing candidate already record
     ]),
     create: CREATE_RESPONSE,
   });
-  const r = createRoleBoundSeatFor("CODER", { execFn, registryFs: fs });
+  const r = createRoleBoundSeatFor(
+    "CODER",
+    { execFn, registryFs: fs },
+    { assumeFreshWorktree: true },
+  );
   assert.equal(r.ok, true);
   assert.deepEqual(r.observedNotWorkerSeats, [
     { handle: "term_default_tab", ptyId: "pty_default_tab", skipped: true },
@@ -4012,7 +4128,7 @@ test("createRoleBoundSeat: idempotent -- a pre-existing candidate already record
   );
 });
 
-test("createRoleBoundSeat: an orphan candidate (worktreePath:'') is never recorded as NOT_WORKER_SEAT_ROLE (same exclusion filter as resolveSeatHandle/resolveRoleBoundSeatHandle)", () => {
+test("createRoleBoundSeat: assumeFreshWorktree:true -- an orphan candidate (worktreePath:'') is never recorded as NOT_WORKER_SEAT_ROLE (same exclusion filter as resolveSeatHandle/resolveRoleBoundSeatHandle)", () => {
   const fs = fakeWritableRegistryFs({ schemaVersion: 1, seats: [] });
   const execFn = fakeExecFn({
     list: managedWorktreeStub(VALID_WORKTREE),
@@ -4025,7 +4141,11 @@ test("createRoleBoundSeat: an orphan candidate (worktreePath:'') is never record
     ]),
     create: CREATE_RESPONSE,
   });
-  const r = createRoleBoundSeatFor("CODER", { execFn, registryFs: fs });
+  const r = createRoleBoundSeatFor(
+    "CODER",
+    { execFn, registryFs: fs },
+    { assumeFreshWorktree: true },
+  );
   assert.equal(r.ok, true);
   assert.deepEqual(r.observedNotWorkerSeats, []);
   const saved = fs.savedRegistry();
@@ -4035,7 +4155,7 @@ test("createRoleBoundSeat: an orphan candidate (worktreePath:'') is never record
   );
 });
 
-test("createRoleBoundSeat: terminal create failure -> ok:false CREATE_FAILED, nothing saved (pre-existing observation is not persisted either -- all-or-nothing write)", () => {
+test("createRoleBoundSeat: assumeFreshWorktree:true -- terminal create failure -> ok:false CREATE_FAILED, nothing saved (pre-existing observation is not persisted either -- all-or-nothing write)", () => {
   const fs = fakeWritableRegistryFs({ schemaVersion: 1, seats: [] });
   const execFn = fakeExecFn({
     list: managedWorktreeStub(VALID_WORKTREE),
@@ -4044,7 +4164,11 @@ test("createRoleBoundSeat: terminal create failure -> ok:false CREATE_FAILED, no
     ]),
     create: { ok: false, reason: "boom" },
   });
-  const r = createRoleBoundSeatFor("CODER", { execFn, registryFs: fs });
+  const r = createRoleBoundSeatFor(
+    "CODER",
+    { execFn, registryFs: fs },
+    { assumeFreshWorktree: true },
+  );
   assert.equal(r.ok, false);
   assert.equal(
     r.seatCreateLedgerReason,
@@ -4053,7 +4177,7 @@ test("createRoleBoundSeat: terminal create failure -> ok:false CREATE_FAILED, no
   assert.equal(fs.writes.length, 0);
 });
 
-test("createRoleBoundSeat: never reads title/preview from the terminal-list candidates it records as NOT_WORKER_SEAT_ROLE (screen-content guessing forbidden, §4-1)", () => {
+test("createRoleBoundSeat: assumeFreshWorktree:true -- never reads title/preview from the terminal-list candidates it records as NOT_WORKER_SEAT_ROLE (screen-content guessing forbidden, §4-1)", () => {
   const fs = fakeWritableRegistryFs({ schemaVersion: 1, seats: [] });
   const execFn = fakeExecFn({
     list: managedWorktreeStub(VALID_WORKTREE),
@@ -4067,7 +4191,11 @@ test("createRoleBoundSeat: never reads title/preview from the terminal-list cand
     ]),
     create: CREATE_RESPONSE,
   });
-  const r = createRoleBoundSeatFor("CODER", { execFn, registryFs: fs });
+  const r = createRoleBoundSeatFor(
+    "CODER",
+    { execFn, registryFs: fs },
+    { assumeFreshWorktree: true },
+  );
   assert.equal(r.ok, true);
   const saved = fs.savedRegistry();
   const notWorker = saved.seats.find((s) => s.ptyId === "pty_default_tab");
@@ -4130,7 +4258,7 @@ test("createRoleBoundSeat: a flat (non-nested) result.* response (the 1st-attemp
 // HYK-213-seat-ledger 2R (§2/§4-1/§4-2, 검토 P1-1 수리): 생성 provenance
 // 없음 -> 성공 오보 금지 + 부분 성공(관측은 저장, 생성만 실패) 처리.
 // ---------------------------------------------------------------------------
-test("createRoleBoundSeat: 2R -- provenance missing AND a pre-existing candidate observed -- ok:false, but the NOT_WORKER_SEAT_ROLE observation is still saved (partial success is not reported as success)", () => {
+test("createRoleBoundSeat: assumeFreshWorktree:true -- 2R -- provenance missing AND a pre-existing candidate observed -- ok:false, but the NOT_WORKER_SEAT_ROLE observation is still saved (partial success is not reported as success)", () => {
   const fs = fakeWritableRegistryFs({ schemaVersion: 1, seats: [] });
   const flatCreateResponse = {
     ok: true,
@@ -4143,7 +4271,11 @@ test("createRoleBoundSeat: 2R -- provenance missing AND a pre-existing candidate
     ]),
     create: flatCreateResponse,
   });
-  const r = createRoleBoundSeatFor("CODER", { execFn, registryFs: fs });
+  const r = createRoleBoundSeatFor(
+    "CODER",
+    { execFn, registryFs: fs },
+    { assumeFreshWorktree: true },
+  );
   assert.equal(r.ok, false, JSON.stringify(r));
   assert.equal(
     r.seatCreateLedgerReason,
@@ -4203,7 +4335,7 @@ test("createRoleBoundSeat: 2R -- normal (valid-provenance) creation is unaffecte
 // from coder-task.md §1 -- a worktree with a real worker seat AND the
 // always-present empty default tab).
 // ---------------------------------------------------------------------------
-test("end-to-end: after createRoleBoundSeat records the CODER seat + the pre-existing default tab as NOT_WORKER_SEAT_ROLE, resolveRoleBoundSeatHandle SELECTS the CODER seat instead of rejecting as ROLE_UNDETERMINED", () => {
+test("end-to-end: assumeFreshWorktree:true -- after createRoleBoundSeat records the CODER seat + the pre-existing default tab as NOT_WORKER_SEAT_ROLE, resolveRoleBoundSeatHandle SELECTS the CODER seat instead of rejecting as ROLE_UNDETERMINED", () => {
   const fs = fakeWritableRegistryFs({ schemaVersion: 1, seats: [] });
   const createExecFn = fakeExecFn({
     list: managedWorktreeStub(VALID_WORKTREE),
@@ -4212,10 +4344,11 @@ test("end-to-end: after createRoleBoundSeat records the CODER seat + the pre-exi
     ]),
     create: CREATE_RESPONSE,
   });
-  const created = createRoleBoundSeatFor("CODER", {
-    execFn: createExecFn,
-    registryFs: fs,
-  });
+  const created = createRoleBoundSeatFor(
+    "CODER",
+    { execFn: createExecFn, registryFs: fs },
+    { assumeFreshWorktree: true },
+  );
   assert.equal(created.ok, true, JSON.stringify(created));
 
   // Now the same worktree, both seats present (default tab + newly created
@@ -4238,4 +4371,60 @@ test("end-to-end: after createRoleBoundSeat records the CODER seat + the pre-exi
     { handle: "term_default_tab", role: "NOT_WORKER_SEAT" },
     { handle: "term_new_coder", role: "CODER" },
   ]);
+});
+
+// HYK-214-seat-legacy-1 §1-①/§4(c) core repro: a *legacy/mixed* worktree
+// already has a real worker seat created the old way (`orca terminal
+// create` + manual `-Handle`, never through createRoleBoundSeat). Later,
+// the (default, no assumeFreshWorktree) tool creates a second seat
+// (VERIFY) in the same worktree. Before this fix, the legacy CODER seat
+// would have been silently stamped NOT_WORKER_SEAT_ROLE at that moment
+// (measured: B트랙 CODER seat REJECTED). After this fix it stays
+// unrecorded, and a later CODER resolve rejects it honestly as
+// ROLE_UNDETERMINED (safe direction, matches issue §1 framing) instead of
+// the false-and-permanent NOT_FOUND-via-mislabel outcome.
+test("end-to-end: 레거시 오라벨 방지 -- default (no assumeFreshWorktree) creation of a second seat does not stamp a legacy real worker as NOT_WORKER_SEAT_ROLE; resolving that worker's role rejects as ROLE_UNDETERMINED, not a silently-wrong NOT_FOUND", () => {
+  const fs = fakeWritableRegistryFs({ schemaVersion: 1, seats: [] });
+  const createExecFn = fakeExecFn({
+    list: managedWorktreeStub(VALID_WORKTREE),
+    "terminal-list": terminalListStub([
+      // The legacy, hand-created CODER worker -- never registered.
+      terminalEntry({ handle: "term_legacy_coder", ptyId: "pty_legacy_coder" }),
+    ]),
+    create: CREATE_RESPONSE, // creates a VERIFY seat (pty_new_coder in the fixture)
+  });
+  const created = createRoleBoundSeatFor("VERIFY", {
+    execFn: createExecFn,
+    registryFs: fs,
+  });
+  assert.equal(created.ok, true, JSON.stringify(created));
+
+  const savedRegistry = fs.savedRegistry();
+  assert.equal(
+    savedRegistry.seats.some((s) => s.ptyId === "pty_legacy_coder"),
+    false,
+    "the legacy worker must remain unrecorded, not stamped NOT_WORKER_SEAT_ROLE",
+  );
+
+  const selectExecFn = fakeExecFn({
+    list: managedWorktreeStub(VALID_WORKTREE),
+    "terminal-list": terminalListStub([
+      terminalEntry({ handle: "term_legacy_coder", ptyId: "pty_legacy_coder" }),
+      terminalEntry({ handle: "term_new_coder", ptyId: "pty_new_coder" }),
+    ]),
+  });
+  const selected = resolveRoleBound("CODER", {
+    execFn: selectExecFn,
+    registryFs: fakeRegistryFs(savedRegistry),
+  });
+  assert.equal(selected.ok, false, JSON.stringify(selected));
+  assert.equal(
+    selected.roleBoundSeatReason,
+    ROLE_BOUND_SEAT_REASON.ROLE_UNDETERMINED,
+  );
+  assert.equal(
+    selected.candidateRoles.find((c) => c.handle === "term_legacy_coder").role,
+    "UNDETERMINED",
+    "honest 'we do not know' -- not a false NOT_WORKER_SEAT claim",
+  );
 });

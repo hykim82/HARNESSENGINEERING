@@ -922,9 +922,41 @@ function recordPreExistingSeatsAsNotWorker(worktreePath, registry, opts) {
   return { ok: true, registry: nextRegistry, observed };
 }
 
-// ctx: { role, worktreePath }. opts: { execFn, registryPath, registryFs }.
-// 사람이 직접 부를 수 있는 진입점(seat-create-cli.mjs)이 그대로 얹힌다.
-export function createRoleBoundSeat({ role, worktreePath } = {}, opts = {}) {
+// ctx: { role, worktreePath, assumeFreshWorktree }. opts: { execFn,
+// registryPath, registryFs }. 사람이 직접 부를 수 있는 진입점
+// (seat-create-cli.mjs)이 그대로 얹힌다.
+//
+// HYK-214-seat-legacy-1 (§1-①, 레거시·혼재 워크트리 오라벨): 생성 호출
+// "전"에 관측된 후보를 NOT_WORKER_SEAT_ROLE로 기록하는 것은 "그 워크트리가
+// 방금 막 생성돼 아직 우리 대장에 아무 좌석도 없다"는 전제에서만 참이다
+// (그 경우 pre-existing = 우리 자신이 만든 기본 빈 탭뿐임을 시간 순서로
+// 구조적으로 보장할 수 있다, 위 ①). 옛 방식(`orca terminal create` +
+// 수동 `-Handle`)으로 이미 실제 워커가 떠 있는 혼재 워크트리에서 같은
+// 함수를 호출하면, 그 실제 워커도 관측 시점엔 "생성 호출 전"이므로 동일
+// 필터에 걸려 NOT_WORKER_SEAT_ROLE로 오기록된다 -- 대장에 영구히 남는
+// 거짓 주장이며(실측: B트랙 CODER 좌석 REJECTED), classifySeatRoleFromRegistry
+// 가 그 값을 "판별 불가"와 구분해 두 버킷 모두에서 빼버리므로(§ 위
+// 주석) 이후 그 실제 워커를 요청하는 모든 resolveRoleBoundSeatHandle
+// 호출이 NOT_FOUND로 조용히 실패한다 -- "판별 불가라 거부"가 아니라
+// "워커 아님이라 확정"이라는 틀린 근거로.
+//
+// 화면 문자열을 보지 않는 한(§4 비타협1) "이 후보가 진짜 레거시 워커인지
+// 우리 기본 빈 탭인지"는 구조적으로 구별 불가능하다 -- 그래서 이 구별을
+// 코드가 추측하지 않고, 호출자가 "나는 이 워크트리를 방금 새로 만들었다"
+// 는 사실을 명시적으로 선언하게 한다(assumeFreshWorktree === true, 기본값
+// false). 선언이 없으면(레거시/기존 워크트리를 향한 모든 호출이 여기
+// 해당 -- 지금 이 저장소에는 이 값을 넘기는 호출자가 없다) pre-existing
+// 관측·기록 자체를 건너뛴다: 진짜 레거시 워커가 있어도 그 좌석은 그대로
+// "미기록"(=이후 조회 시 undetermined)으로 남을 뿐, NOT_WORKER_SEAT_ROLE
+// 로 확정되지 않는다 -- §3-1 가드에 의해 여전히 거부되지만(안전 방향,
+// 이슈 §1 원문 "안전 방향 오류(거부)"), 그 거부 사유가 "판별 불가"라는
+// 정직한 사실이지 "워커 아님"이라는 틀린 확정이 아니다.
+// HYK-214-seat-legacy-5 (§1-1, 순수 추출 -- 조건·순서·반환값 무변경):
+// createRoleBoundSeat의 앞단 입력 검증 3건(complexity 14>12의 주된 원인)
+// 을 그대로 옮겼을 뿐이다. 각 분기의 조건식·에러 코드·문구·순서 전부
+// 동일하고, 반환 지점만 "그 자리에서 return"에서 "여기서 만들어 돌려주고
+// 호출부가 return"으로 바뀐다.
+function validateCreateRoleBoundSeatInput(role, worktreePath, opts) {
   if (!isNonEmptyString(role) || !ENGINE_BY_ROLE[role]) {
     return denySeatCreateLedger(
       SEAT_CREATE_LEDGER_REASON.INPUT_INVALID,
@@ -943,6 +975,15 @@ export function createRoleBoundSeat({ role, worktreePath } = {}, opts = {}) {
       "orca-adapter: createRoleBoundSeat -- opts.execFn is required",
     );
   }
+  return null;
+}
+
+export function createRoleBoundSeat(
+  { role, worktreePath, assumeFreshWorktree = false } = {},
+  opts = {},
+) {
+  const inputError = validateCreateRoleBoundSeatInput(role, worktreePath, opts);
+  if (inputError) return inputError;
   const registryLoad = loadSeatRegistryForResolve(opts);
   if (!registryLoad.ok) {
     return denySeatCreateLedger(
@@ -951,11 +992,14 @@ export function createRoleBoundSeat({ role, worktreePath } = {}, opts = {}) {
     );
   }
 
-  const preExistingResult = recordPreExistingSeatsAsNotWorker(
-    worktreePath,
-    registryLoad.registry,
-    opts,
-  );
+  const preExistingResult =
+    assumeFreshWorktree === true
+      ? recordPreExistingSeatsAsNotWorker(
+          worktreePath,
+          registryLoad.registry,
+          opts,
+        )
+      : { ok: true, registry: registryLoad.registry, observed: [] };
   if (!preExistingResult.ok) return preExistingResult;
 
   const created = guardedExec(

@@ -5,9 +5,26 @@ import {
 
 // HYK-213-seat-ledger (coder-task.md §3/§6, "1-B 세 요건"): 사람이 직접
 // 칠 수 있는 실행 한 줄 -- 좌석을 만들면서 그 자리에서 역할을 대장에
-// 적고, 이미 있던(우리가 만들지 않은) 탭도 "워커 아님"으로 함께 기록한다.
+// 적는다.
+// HYK-214-seat-legacy-1 (§1-①): 이 진입점은 기본적으로 createRoleBoundSeat의
+// assumeFreshWorktree를 넘기지 않는다(기본값 false) -- 레거시·혼재
+// 워크트리에서도 호출될 수 있는 범용 수동 진입점이라, "생성 전 기존
+// 탭 = 워커 아님" 기록을 자동으로 켤 근거가 없다(그 판단은 "방금 새
+// 워크트리를 만들었다"를 구조적으로 아는 호출자만 할 수 있다). 그래서
+// 이미 있던 탭은 기본적으로 이 경로로는 "워커 아님"으로 기록되지 않는다
+// -- 미기록(=이후 조회 시 undetermined)으로 남는다.
+// HYK-214-seat-legacy-2 (§0/§1, REVIEW 1R 반려 수리): 1R은 "구조적으로
+// 아는 호출자가 assumeFreshWorktree:true를 주는 경로"를 하나도 만들지
+// 않아, 새로 만든 워크트리의 표준 경로에서도 leftover 후보가 미기록으로
+// 남아 이후 역할 결속 선별이 항상 ROLE_UNDETERMINED로 실패했다(검토자
+// 지적, 코드 설계 자체는 부정되지 않음). 이번 라운드는 `--fresh-worktree`
+// **명시 플래그**를 추가한다 -- 코드가 "방금 만들어졌는지"를 추측하지
+// 않는다(이 이슈의 비타협 그대로): 플래그를 준 호출자만(예: 워크트리
+// 생성 직후 이어 부르는 스크립트) assumeFreshWorktree:true가 전달되고,
+// 플래그가 없으면(기본값, 지금 이 저장소의 모든 기존 호출) 그대로
+// 레거시-안전 경로(미기록)를 유지한다.
 //
-//   node scripts/relay/seat-create-cli.mjs --role CODER --worktree "<경로>" --registry "<대장 json 경로>"
+//   node scripts/relay/seat-create-cli.mjs --role CODER --worktree "<경로>" --registry "<대장 json 경로>" [--fresh-worktree]
 //
 // 요건2(그때 무엇이 보여야 하는가): 새로 만든 좌석의 기록(handle 없음 --
 // 이 진입점은 handle을 되돌리지 않는다, ptyId/role/paneKey 유무)과, 생성
@@ -37,12 +54,22 @@ const FLAG_TO_FIELD = Object.freeze({
   "--registry": "registryPath",
 });
 
+// HYK-214-seat-legacy-2 §1-①: 값이 아니라 존재 자체가 신호인 boolean
+// 플래그 -- 뒤따르는 argv를 값으로 소비하지 않는다(값 플래그와 다른
+// 처리 경로가 필요한 이유).
+const BOOLEAN_FLAG_TO_FIELD = Object.freeze({
+  "--fresh-worktree": "assumeFreshWorktree",
+});
+
 function classifyFlag(arg) {
   if (arg.startsWith("--") && arg.includes("=")) {
     const flagName = arg.slice(0, arg.indexOf("="));
     return {
       error: `unsupported '${flagName}=value' syntax ('${arg}') -- use '${flagName} value' (space-separated) instead`,
     };
+  }
+  if (BOOLEAN_FLAG_TO_FIELD[arg]) {
+    return { booleanField: BOOLEAN_FLAG_TO_FIELD[arg] };
   }
   if (arg.startsWith("--") && !FLAG_TO_FIELD[arg]) {
     return { error: `unrecognized flag '${arg}'` };
@@ -51,10 +78,14 @@ function classifyFlag(arg) {
 }
 
 export function parseSeatCreateArgs(args) {
-  const parsed = {};
+  const parsed = { assumeFreshWorktree: false };
   for (let i = 0; i < args.length; i++) {
     const classified = classifyFlag(args[i]);
     if (classified.error) return { ok: false, reason: classified.error };
+    if (classified.booleanField) {
+      parsed[classified.booleanField] = true;
+      continue;
+    }
     if (classified.field) parsed[classified.field] = args[++i];
   }
   if (
@@ -65,7 +96,7 @@ export function parseSeatCreateArgs(args) {
     return {
       ok: false,
       reason:
-        "usage: seat-create-cli.mjs --role <CODER|REVIEW|VERIFY|PM> --worktree <path> --registry <seat-registry.json path>",
+        "usage: seat-create-cli.mjs --role <CODER|REVIEW|VERIFY|PM> --worktree <path> --registry <seat-registry.json path> [--fresh-worktree]",
     };
   }
   return { ok: true, ...parsed };
@@ -102,7 +133,11 @@ export function runSeatCreateCli(argv, opts = {}) {
   const execFn =
     typeof opts.execFn === "function" ? opts.execFn : createOrcaExecFn();
   return createRoleBoundSeat(
-    { role: parsed.role, worktreePath: parsed.worktreePath },
+    {
+      role: parsed.role,
+      worktreePath: parsed.worktreePath,
+      assumeFreshWorktree: parsed.assumeFreshWorktree,
+    },
     { execFn, registryPath: parsed.registryPath, registryFs: opts.registryFs },
   );
 }
