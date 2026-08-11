@@ -1,6 +1,7 @@
 import { readFileSync, existsSync } from "node:fs";
-import { join } from "node:path";
-import { execSync } from "node:child_process";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+import { execSync, execFileSync } from "node:child_process";
 import { recordRejectStreakFromResultText } from "./reject-streak.mjs";
 import { archiveRoundEnvelope } from "./envelope-archive.mjs";
 import {
@@ -464,6 +465,58 @@ export function checkRelayHandshake({
   return { ok: true, reason: `relay handshake ok for ${taskId}` };
 }
 
+// HYK-224-2R §3 옵션3 -- CLI-only, best-effort spawn of the neutral
+// admission-completion executor (scripts/check/admission-completion-
+// adapter.mjs). Deliberately NOT a module-level import (see that file's own
+// header for why: an import here reintroduces the exact failure 1R hit --
+// 6 mutation test files' stageTree()/checkFiles isolate relay-handshake.mjs
+// with a small fixed dependency list, and importing a file outside that
+// list breaks module resolution at LOAD time, before any test assertion
+// even runs). A subprocess spawn only fails at CALL time (this function),
+// which the try/catch below absorbs -- so an isolated fixture missing the
+// adapter file degrades to a silent no-op here, never to a load error.
+// Runs ONLY after checkRelayHandshake already returned ok:true (dispatch
+// binding independently verified) -- never changes this CLI's own exit
+// code either way (S11: this is best-effort bookkeeping, not part of the
+// handshake verdict).
+function spawnAdmissionCompletion(taskId) {
+  try {
+    const adapterPath = join(
+      dirname(fileURLToPath(new URL(import.meta.url))),
+      "admission-completion-adapter.mjs",
+    );
+    const out = execFileSync("node", [adapterPath, taskId], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    console.log(out.trim());
+  } catch (err) {
+    // Missing adapter file (isolated test fixture), non-zero exit
+    // (attempted but failed), or any other spawn failure -- all logged,
+    // none fatal to the handshake's own verdict/exit code.
+    //
+    // HYK-224-3R §3 (REVIEW 2R 반려, 판단): a completion-bookkeeping failure
+    // here does NOT flip this CLI's own exit code to nonzero, even though
+    // §3's requirement literally says "네가 판단하라" on that question.
+    // Reasoning: this CLI's exit code is the ROUND's pass/fail signal (did
+    // the worker's task_id binding and staleness checks pass) -- conflating
+    // it with "did an auxiliary capacity-tracking side effect also succeed"
+    // would make every future round's success depend on admission-ledger
+    // infra being reachable, which coder-task §4 keeps deliberately
+    // env-gated/optional. The failure is instead made LOUD through two
+    // durable, independent channels instead: (1) err.stderr now carries the
+    // adapter's own detailed reason (3R fix: the adapter used to print
+    // failures via console.log, so this branch's `err.stderr` was empty --
+    // 검토자 실측 "세부 오류가 비어 있었다"; now console.error, so it's
+    // here), and (2) the adapter durably appends a JSON line to
+    // `${ledgerPath}.completion-failures.jsonl` BEFORE this process ever
+    // sees the failure (coder-task §3: "화면에만 = 도달로 안 침").
+    console.error(
+      `relay-handshake: admission-completion spawn skipped/failed (non-fatal to this handshake's own exit code, HYK-224-3R §3 reasoning above): ${err.stderr ?? err.message}`,
+    );
+  }
+}
+
 const invokedDirectly =
   process.argv[1] &&
   process.argv[1]
@@ -479,6 +532,10 @@ if (invokedDirectly) {
   const result = harnessDirArg
     ? checkRelayHandshake({ role, harnessDir: harnessDirArg })
     : checkRelayHandshake({ role });
+  const okTaskId = result.ok
+    ? (result.reason.match(/relay handshake ok for (\S+)/) ?? [])[1]
+    : undefined;
+  if (okTaskId) spawnAdmissionCompletion(okTaskId);
   if (result.ok) {
     process.exit(0);
   } else {
