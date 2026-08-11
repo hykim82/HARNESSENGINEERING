@@ -19,6 +19,7 @@ const VALID_WORKTREE = `${WORKSPACES_ROOT}/HARNESSENGINEERING/hyk-cli-fixture`;
 const THIS_DIR = dirname(fileURLToPath(import.meta.url));
 const CLI_PATH = join(THIS_DIR, "seat-create-cli.mjs");
 const CLI_SRC = readFileSync(CLI_PATH, "utf8");
+const SELECT_CLI_PATH = join(THIS_DIR, "role-bound-seat-select-cli.mjs");
 
 // HYK-213-seat-ledger (coder-task.md §3/§6 "1-B 세 요건"): 사람이 부를 수
 // 있는 진입점 -- role-bound-seat-select-cli.mjs(HYK-211-seat-select-3)와
@@ -41,7 +42,62 @@ test("parseSeatCreateArgs: requires --role, --worktree, and --registry", () => {
     role: "CODER",
     worktreePath: "/wt",
     registryPath: "/wt/registry.json",
+    assumeFreshWorktree: false,
   });
+});
+
+// HYK-214-seat-legacy-2 §1-①: the flag is presence-only (no value argv
+// consumed) and defaults to false when absent -- the caller (not the code)
+// declares "this worktree was just created", never inferred.
+test("parseSeatCreateArgs: --fresh-worktree is a presence-only boolean flag, defaults to false, does not consume the next argv as a value", () => {
+  const withFlag = parseSeatCreateArgs([
+    "--role",
+    "CODER",
+    "--worktree",
+    "/wt",
+    "--registry",
+    "/wt/registry.json",
+    "--fresh-worktree",
+  ]);
+  assert.equal(withFlag.ok, true, JSON.stringify(withFlag));
+  assert.equal(withFlag.assumeFreshWorktree, true);
+
+  const withoutFlag = parseSeatCreateArgs([
+    "--role",
+    "CODER",
+    "--worktree",
+    "/wt",
+    "--registry",
+    "/wt/registry.json",
+  ]);
+  assert.equal(withoutFlag.assumeFreshWorktree, false);
+
+  // Flag position must not matter, and it must not eat the following flag.
+  const flagFirst = parseSeatCreateArgs([
+    "--fresh-worktree",
+    "--role",
+    "CODER",
+    "--worktree",
+    "/wt",
+    "--registry",
+    "/wt/registry.json",
+  ]);
+  assert.equal(flagFirst.ok, true, JSON.stringify(flagFirst));
+  assert.equal(flagFirst.role, "CODER");
+  assert.equal(flagFirst.assumeFreshWorktree, true);
+});
+
+test("parseSeatCreateArgs: '--fresh-worktree=true' ('=' syntax) is rejected like every other flag, not silently accepted", () => {
+  const r = parseSeatCreateArgs([
+    "--role",
+    "CODER",
+    "--worktree",
+    "/wt",
+    "--registry",
+    "/wt/registry.json",
+    "--fresh-worktree=true",
+  ]);
+  assert.equal(r.ok, false);
 });
 
 test("parseSeatCreateArgs: rejects unrecognized flags and '='-syntax", () => {
@@ -222,10 +278,10 @@ cp.spawnSync = function fakeSpawnSync(cmd, args) {
   return preloadPath;
 }
 
-function runCliChildProcess(args, { preloadPath } = {}) {
+function runCliChildProcess(args, { preloadPath, cliPath = CLI_PATH } = {}) {
   const nodeArgs = preloadPath
-    ? ["--require", preloadPath, CLI_PATH, ...args]
-    : [CLI_PATH, ...args];
+    ? ["--require", preloadPath, cliPath, ...args]
+    : [cliPath, ...args];
   try {
     const stdout = execFileSync(process.execPath, nodeArgs, {
       encoding: "utf8",
@@ -289,7 +345,12 @@ test("direct-entry: real child process, no pre-existing candidates -- CREATED wi
   });
 });
 
-test("direct-entry: real child process, a pre-existing default tab -- CREATED plus notWorkerSeatsRecorded, and the registry ends up with both facts", () => {
+// HYK-214-seat-legacy-1 §1-①: this direct-entry CLI never passes
+// assumeFreshWorktree (it's a general-purpose manual entry point that can
+// be run against a legacy/mixed worktree, not only a brand-new one), so a
+// pre-existing candidate must NOT be recorded as NOT_WORKER_SEAT_ROLE --
+// it stays unrecorded (undetermined) rather than falsely stamped.
+test("direct-entry: real child process, a pre-existing candidate -- CREATED with no notWorkerSeatsRecorded, and the registry ends up with only the new seat (레거시 워크트리 오라벨 방지)", () => {
   withTempDir("hyk213-cli-child-", (dir) => {
     const registryPath = join(dir, "registry.json");
     writeFileSync(
@@ -341,14 +402,159 @@ test("direct-entry: real child process, a pre-existing default tab -- CREATED pl
     assert.equal(result.status, 0, result.stdout);
     assert.equal(
       result.stdout.trim(),
-      "CREATED ptyId=pty_new role=CODER paneKey=present notWorkerSeatsRecorded=[term_default_tab]",
+      "CREATED ptyId=pty_new role=CODER paneKey=present",
     );
     const saved = JSON.parse(readFileSync(registryPath, "utf8"));
-    assert.equal(saved.seats.length, 2);
+    assert.equal(saved.seats.length, 1);
+    assert.equal(saved.seats[0].ptyId, "pty_new");
     assert.equal(
-      saved.seats.find((s) => s.ptyId === "pty_default_tab").role,
-      "NOT_WORKER_SEAT",
+      saved.seats.some((s) => s.ptyId === "pty_default_tab"),
+      false,
+      "the pre-existing candidate must remain unrecorded, not stamped NOT_WORKER_SEAT",
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// HYK-214-seat-legacy-2 §0/§1-① (REVIEW 1R 반려 수리): the new-worktree
+// standard path -- a caller that structurally knows the worktree was just
+// created passes --fresh-worktree, then a subsequent role-bound select must
+// SELECT the new seat (not ROLE_UNDETERMINED). Without the flag, the exact
+// same fixture must reject as ROLE_UNDETERMINED (legacy-safe default) --
+// both ends of the fix, exercised through real child processes end-to-end
+// (seat-create-cli.mjs -> registry.json -> role-bound-seat-select-cli.mjs).
+// ---------------------------------------------------------------------------
+// HYK-214-seat-legacy-5 (§1-2/§1-4, 순수 추출 -- 단언 삭제/병합 0): 아래
+// §1(a)/§1(b) 두 시험의 몸통(둘 다 max-lines-per-function 80 초과)을
+// create/select 두 단계 헬퍼로 옮겼을 뿐이다. 각 단계의 fixture 값·명령
+// argv·단언(assert) 4개(§1(a)/(b) 각 2개씩, 정확히 원문 그대로) 전부
+// 그대로 -- 두 시험의 차이(플래그 유무·기대 stdout·기대 select 결과)만
+// 옵션 인자로 바뀐다.
+function createFreshWorktreeStandardPathSeat(
+  dir,
+  { createFlags, expectedCreateStdout },
+) {
+  const registryPath = join(dir, "registry.json");
+  writeFileSync(
+    registryPath,
+    JSON.stringify({ schemaVersion: 1, seats: [] }),
+    "utf8",
+  );
+  const createPreload = writeFakeOrcaPreload(dir, {
+    worktreeList: {
+      ok: true,
+      result: { worktrees: [{ path: VALID_WORKTREE }] },
+    },
+    terminalList: {
+      ok: true,
+      result: {
+        terminals: [
+          {
+            handle: "term_default_tab",
+            worktreePath: VALID_WORKTREE,
+            ptyId: "pty_default_tab",
+          },
+        ],
+      },
+    },
+    terminalCreate: {
+      ok: true,
+      result: {
+        terminal: {
+          ptyId: "pty_new",
+          handle: "term_new",
+          tabId: "t1",
+          paneKey: "t1:l1",
+          worktreeId: "w1",
+        },
+      },
+    },
+  });
+  const created = runCliChildProcess(
+    [
+      "--role",
+      "CODER",
+      "--worktree",
+      VALID_WORKTREE,
+      "--registry",
+      registryPath,
+      ...createFlags,
+    ],
+    { preloadPath: createPreload },
+  );
+  assert.equal(created.status, 0, created.stdout);
+  assert.equal(created.stdout.trim(), expectedCreateStdout);
+  return registryPath;
+}
+
+function selectFreshWorktreeStandardPathSeat(
+  dir,
+  registryPath,
+  { expectedStatus, expectedPattern },
+) {
+  const selectPreload = writeFakeOrcaPreload(dir, {
+    worktreeList: {
+      ok: true,
+      result: { worktrees: [{ path: VALID_WORKTREE }] },
+    },
+    terminalList: {
+      ok: true,
+      result: {
+        terminals: [
+          {
+            handle: "term_default_tab",
+            worktreePath: VALID_WORKTREE,
+            ptyId: "pty_default_tab",
+          },
+          {
+            handle: "term_new",
+            worktreePath: VALID_WORKTREE,
+            ptyId: "pty_new",
+          },
+        ],
+      },
+    },
+    terminalCreate: { ok: false, reason: "unused in this fixture" },
+  });
+  const selected = runCliChildProcess(
+    [
+      "--role",
+      "CODER",
+      "--worktree",
+      VALID_WORKTREE,
+      "--registry",
+      registryPath,
+    ],
+    { preloadPath: selectPreload, cliPath: SELECT_CLI_PATH },
+  );
+  assert.equal(selected.status, expectedStatus, selected.stdout);
+  assert.match(selected.stdout.trim(), expectedPattern);
+}
+
+test("end-to-end direct-entry: §1(a) --fresh-worktree given -- the new-worktree standard path still ends in SELECTED (not ROLE_UNDETERMINED)", () => {
+  withTempDir("hyk214-cli-child-fresh-", (dir) => {
+    const registryPath = createFreshWorktreeStandardPathSeat(dir, {
+      createFlags: ["--fresh-worktree"],
+      expectedCreateStdout:
+        "CREATED ptyId=pty_new role=CODER paneKey=present notWorkerSeatsRecorded=[term_default_tab]",
+    });
+    selectFreshWorktreeStandardPathSeat(dir, registryPath, {
+      expectedStatus: 0,
+      expectedPattern: /^SELECTED handle=term_new\b/,
+    });
+  });
+});
+
+test("end-to-end direct-entry: §1(b) --fresh-worktree NOT given (default) -- the same fixture ends in ROLE_UNDETERMINED (legacy-safe), not a false SELECTED", () => {
+  withTempDir("hyk214-cli-child-legacy-", (dir) => {
+    const registryPath = createFreshWorktreeStandardPathSeat(dir, {
+      createFlags: [],
+      expectedCreateStdout: "CREATED ptyId=pty_new role=CODER paneKey=present",
+    });
+    selectFreshWorktreeStandardPathSeat(dir, registryPath, {
+      expectedStatus: 1,
+      expectedPattern: /^REJECTED code=ROLE_BOUND_SEAT_ROLE_UNDETERMINED\b/,
+    });
   });
 });
 
