@@ -113,6 +113,7 @@ export const DISPATCH_GATE_STATE = Object.freeze({
   REJECT_REPO_MISMATCH: "REJECT_REPO_MISMATCH",
   REJECT_LEDGER_CORRUPT: "REJECT_LEDGER_CORRUPT",
   REJECT_LEDGER_ENTRY_MALFORMED: "REJECT_LEDGER_ENTRY_MALFORMED",
+  REJECT_LEDGER_RESOLUTION_UNJUDGABLE: "REJECT_LEDGER_RESOLUTION_UNJUDGABLE",
 });
 
 function firstNonEmpty(...candidates) {
@@ -268,9 +269,36 @@ export function checkGatePreconditions({
 // a ledger MAY even exist there, but it is not the repo the caller said it
 // expected (--expect-repo-root), which is a caller-wiring problem, not a
 // filesystem-state problem.
+// HYK-221 축2: `resolution?.state ?? null` used to collapse EVERY nullish
+// shape -- a genuine successful resolution (`{path, state: null}`) AND a
+// missing/malformed resolution object (`undefined`, `null`, `{}`,
+// `{state: undefined}`) -- onto the exact same `null` return, which this
+// function's caller reads as "proceed, all clear." That is indistinguishable
+// from HYK-212's QUERY_FAILED precedent: "판정 불가" was being read as
+// "정상 통과" purely because both happened to produce the same nullish
+// value. A well-formed success from resolveLedgerPath() always ALSO carries
+// a non-empty string `path` (its only two return shapes are
+// `{path: <string>, state: null}` or `{path: null, state: <REJECT_*>}`) --
+// so "state is nullish AND path is a non-empty string" is what actually
+// means "resolved successfully," and a nullish state WITHOUT that path is
+// reclassified as its own distinct reject state rather than silently folded
+// into "proceed."
+function isResolvedSuccessPath(resolution) {
+  return (
+    typeof resolution?.path === "string" && resolution.path.trim().length > 0
+  );
+}
+
 export function checkLedgerPathResolution(resolution) {
   const state = resolution?.state ?? null;
-  if (state === null) return null;
+  if (state === null) {
+    if (isResolvedSuccessPath(resolution)) return null;
+    return {
+      state: DISPATCH_GATE_STATE.REJECT_LEDGER_RESOLUTION_UNJUDGABLE,
+      allow: false,
+      reason: `dispatch-gate-decision precondition: 원장 경로 판정 결과가 없거나 형태가 결손됨(${JSON.stringify(resolution)}) -> 배달 거부(안전측 기본값 -- "정상 통과"와 "판정 불가"를 같은 null로 접지 않는다)`,
+    };
+  }
   if (
     state !== DISPATCH_GATE_STATE.REJECT_LEDGER_PATH_UNRESOLVABLE &&
     state !== DISPATCH_GATE_STATE.REJECT_REPO_MISMATCH

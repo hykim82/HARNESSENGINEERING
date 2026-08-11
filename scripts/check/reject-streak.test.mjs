@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import {
   mkdtempSync,
+  mkdirSync,
   writeFileSync,
   rmSync,
   readFileSync,
@@ -1396,5 +1397,176 @@ test("(71) CLI diagnostic-gate: corrupted ledger -> UNJUDGABLE, exit 0 (fail-ope
     ]);
     assert.equal(status, 0);
     assert.match(stdout, /UNJUDGABLE/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// HYK-221 축3 (★실사고 재현 방지): the CLI's DEFAULT ledger path (no
+// `--ledger` given) used to resolve via plain `repoRoot()`
+// (`git rev-parse --show-toplevel`), which in a LINKED WORKTREE returns that
+// worktree's own root -- a DIFFERENT answer than dispatch-gate-decision.mjs's
+// `resolveRepoRoot` (`--git-common-dir`), which converges on the MAIN repo.
+// A `record` run inside a worktree therefore wrote to a worktree-local
+// ledger the gate would never read (HYK-219 1R: exactly this made a real
+// rejection invisible to the 2-streak gate). Both build REAL git
+// repos/worktrees under a tmpdir (never touch this repo's own .git).
+// ---------------------------------------------------------------------------
+
+function initGitRepo(dir) {
+  execFileSync("git", ["init", "-q", dir]);
+  execFileSync("git", ["-C", dir, "config", "user.email", "t@t.com"]);
+  execFileSync("git", ["-C", dir, "config", "user.name", "t"]);
+}
+
+function commitAll(dir, message) {
+  execFileSync("git", ["-C", dir, "add", "-A"]);
+  execFileSync("git", ["-C", dir, "commit", "-q", "-m", message]);
+}
+
+test("(72) HYK-221 축3 실증 -- 워크트리 안에서 record --review만(--ledger 생략) 실행하면 정본(main) 원장에 쓴다 -- 워크트리 로컬 원장 파일은 생성/변경되지 않는다", () => {
+  withFixtureDir((dir) => {
+    const mainDir = join(dir, "main");
+    initGitRepo(mainDir);
+    writeFileSync(join(mainDir, "README.md"), "x\n", "utf8");
+    // .harness/reject-streak.json is committed so the linked worktree below
+    // checks out its OWN copy of it (the realistic shape of the incident --
+    // a worktree-local file with the SAME name genuinely exists).
+    mkdirSync(join(mainDir, ".harness"));
+    writeLedger(join(mainDir, ".harness", "reject-streak.json"), {
+      schema_version: 1,
+      issues: {},
+    });
+    commitAll(mainDir, "init");
+    const wtDir = join(dir, "wt-axis3");
+    execFileSync("git", [
+      "-C",
+      mainDir,
+      "worktree",
+      "add",
+      "-q",
+      "--detach",
+      wtDir,
+      "HEAD",
+    ]);
+    // Overwrite the worktree's checked-out copy with a distinguishable decoy
+    // value -- a post-hoc read/write to THIS file (rather than main's) is
+    // then unmistakable.
+    const wtLedgerPath = join(wtDir, ".harness", "reject-streak.json");
+    writeLedger(wtLedgerPath, {
+      schema_version: 1,
+      issues: { DECOY: { streak: 99, history: [] } },
+    });
+    const reviewPath = join(wtDir, ".harness", "review.md");
+    writeFileSync(
+      reviewPath,
+      "task_id: HYK-9700-axis3-1\nverdict: rejected\n>>> DONE: REVIEW @ 2026-08-11 09:00 KST\n",
+      "utf8",
+    );
+    const { status, stdout } = runCli(["record", "--review", reviewPath], {
+      cwd: wtDir,
+    });
+    assert.equal(status, 0, stdout);
+
+    const wtLedgerAfter = JSON.parse(readFileSync(wtLedgerPath, "utf8"));
+    assert.deepEqual(
+      wtLedgerAfter.issues,
+      { DECOY: { streak: 99, history: [] } },
+      "worktree-local decoy ledger must be untouched -- record must not have written here",
+    );
+
+    const mainLedgerPath = join(mainDir, ".harness", "reject-streak.json");
+    const mainLedgerAfter = JSON.parse(readFileSync(mainLedgerPath, "utf8"));
+    assert.equal(mainLedgerAfter.issues["HYK-9700"].streak, 1);
+  });
+});
+
+// HYK-221 축3 (양방향): the "gate" side of this incident is a DIFFERENT
+// script -- dispatch-gate-decision.mjs -- not reject-streak.mjs's own
+// `gate` subcommand. Cross-checking record's write against reject-streak.mjs's
+// OWN `gate` subcommand would prove nothing about the real incident: both
+// would use the exact same (possibly still-buggy) `repoRoot()` default, so
+// they'd always agree with each other even under the pre-fix mutation --
+// the actual HYK-219 1R gap was specifically that dispatch-gate-decision.mjs
+// (git-common-dir based) and reject-streak.mjs's CLI default (previously
+// --show-toplevel based) computed two DIFFERENT paths. This test therefore
+// invokes dispatch-gate-decision.mjs as the read side, proving the two
+// independent scripts' default ledger resolutions actually converge.
+const DISPATCH_GATE_DECISION_SCRIPT = fileURLToPath(
+  new URL("./dispatch-gate-decision.mjs", import.meta.url),
+);
+
+function runDispatchGateDecisionCli(args, opts = {}) {
+  try {
+    const stdout = execFileSync(
+      "node",
+      [DISPATCH_GATE_DECISION_SCRIPT, ...args],
+      { encoding: "utf8", ...opts },
+    );
+    return { status: 0, stdout, stderr: "" };
+  } catch (err) {
+    return {
+      status: err.status,
+      stdout: err.stdout ?? "",
+      stderr: err.stderr ?? "",
+    };
+  }
+}
+
+test("(73) HYK-221 축3 양방향 실증 -- record(쓰기, --ledger 생략, reject-streak.mjs)가 워크트리에서 늘린 streak을 dispatch-gate-decision.mjs(읽기, --ledger/--expect-repo-root 생략)도 그대로 읽는다", () => {
+  withFixtureDir((dir) => {
+    const mainDir = join(dir, "main");
+    initGitRepo(mainDir);
+    writeFileSync(join(mainDir, "README.md"), "x\n", "utf8");
+    mkdirSync(join(mainDir, ".harness"));
+    writeLedger(join(mainDir, ".harness", "reject-streak.json"), {
+      schema_version: 1,
+      issues: {},
+    });
+    commitAll(mainDir, "init");
+    const wtDir = join(dir, "wt-axis3-roundtrip");
+    execFileSync("git", [
+      "-C",
+      mainDir,
+      "worktree",
+      "add",
+      "-q",
+      "--detach",
+      wtDir,
+      "HEAD",
+    ]);
+    const reviewPath = join(wtDir, ".harness", "review.md");
+    const taskPath = join(wtDir, ".harness", "coder-task.md");
+    writeFileSync(
+      taskPath,
+      "task_id: HYK-9701-roundtrip-1\nno envelope\n",
+      "utf8",
+    );
+
+    // Two rejections (distinct DONE timestamps so computeRecord's dedup
+    // does not fold them into one) push the issue to streak=2.
+    writeFileSync(
+      reviewPath,
+      "task_id: HYK-9701-roundtrip-1\nverdict: rejected\n>>> DONE: REVIEW @ 2026-08-11 09:00 KST\n",
+      "utf8",
+    );
+    let r = runCli(["record", "--review", reviewPath], { cwd: wtDir });
+    assert.equal(r.status, 0, r.stdout);
+    writeFileSync(
+      reviewPath,
+      "task_id: HYK-9701-roundtrip-1\nverdict: rejected\n>>> DONE: REVIEW @ 2026-08-11 09:05 KST\n",
+      "utf8",
+    );
+    r = runCli(["record", "--review", reviewPath], { cwd: wtDir });
+    assert.equal(r.status, 0, r.stdout);
+
+    // dispatch-gate-decision.mjs, also with NO --ledger/--expect-repo-root,
+    // from the SAME worktree -- must read the streak=2 that reject-streak.mjs's
+    // record (also with no --ledger) just wrote to the MAIN repo's ledger,
+    // and REJECT (no envelope) rather than see streak=0 from some unrelated
+    // file.
+    const gateResult = runDispatchGateDecisionCli([taskPath], { cwd: wtDir });
+    assert.equal(gateResult.status, 1, gateResult.stdout + gateResult.stderr);
+    assert.match(gateResult.stderr, /streak=2/);
+    assert.match(gateResult.stderr, /REJECT/);
   });
 });

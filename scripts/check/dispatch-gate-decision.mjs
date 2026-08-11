@@ -123,13 +123,25 @@ function firstNonEmptyErrorText(err) {
 // repository regardless of the caller's own CWD) distinguishes the two
 // shapes: bare -> the common dir itself is the root; non-bare -> its parent
 // is the root (this repo, HARNESSENGINEERING, is the non-bare shape).
+// HYK-221 축1 (검토 실측): execFileSync's stderr is, by Node's own default,
+// piped to the PARENT process's real stderr in addition to being captured
+// on the thrown error object -- so a git failure here (e.g. "not a git
+// repository") used to leak raw git text onto this CLI's own stderr stream,
+// ahead of and separate from the clean, single-reason-per-line contract the
+// rest of this module promises. `stdio: ["ignore", "pipe", "pipe"]` keeps
+// the capture (still available via `err.stderr` for firstNonEmptyErrorText)
+// while suppressing that inherited passthrough -- this call becomes visible
+// far more often once resolveLedgerPath (below) starts probing taskPath's
+// repo even on the `--ledger`-only path, so a failure here is no longer a
+// rare edge case this leak could stay hidden behind.
 function resolveRepoRoot(dir) {
+  const stdio = ["ignore", "pipe", "pipe"];
   let commonDir;
   try {
     commonDir = execFileSync(
       "git",
       ["-C", dir, "rev-parse", "--path-format=absolute", "--git-common-dir"],
-      { encoding: "utf8" },
+      { encoding: "utf8", stdio },
     ).trim();
   } catch (err) {
     return { root: null, detail: firstNonEmptyErrorText(err) };
@@ -139,7 +151,7 @@ function resolveRepoRoot(dir) {
     isBare = execFileSync(
       "git",
       ["--git-dir", commonDir, "rev-parse", "--is-bare-repository"],
-      { encoding: "utf8" },
+      { encoding: "utf8", stdio },
     ).trim();
   } catch (err) {
     return { root: null, detail: firstNonEmptyErrorText(err) };
@@ -183,8 +195,39 @@ function normalizeRootForCompare(root) {
 // every existing fixture-based test (plain non-git tmpdirs + explicit
 // `--ledger`) working unchanged; only the NO-`--ledger` default-resolution
 // path and the `--expect-repo-root` membership check touch git at all.
+// HYK-221 축1: an explicit `--ledger` WITHOUT `--expect-repo-root` used to
+// return here unconditionally -- zero git calls, zero binding check, the
+// ledger path was trusted as-is no matter which repo it actually belonged
+// to. That is the exact gap this task's §1 축1 names: a caller (or a
+// misconfigured delivery tool) can point `--ledger` at a stale/wrong-repo
+// file and this precondition would happily proceed to ALLOW off of it.
+// Fix, scoped to avoid the HYK-217 gap#97 shape (a blanket new check
+// breaking every existing non-git-tmpdir fixture that never had a real repo
+// to bind against): only run the membership check when taskPath itself CAN
+// be resolved to a real repo. When it cannot (e.g. every existing
+// fixture-based test's plain `mkdtempSync(tmpdir())` directory, which is
+// deliberately not a git repo), there is no "current repo" to compare the
+// ledger against, so behavior is unchanged -- byte-identical to before this
+// fix. In real operation the task file always lives inside a real git
+// worktree, so this check is live exactly where the gap actually mattered.
 function resolveLedgerPath(args, taskPath) {
   if (args.ledger && !args.expectRepoRoot) {
+    const taskRepoForLedger = resolveRepoRoot(dirname(taskPath));
+    if (taskRepoForLedger.root === null) {
+      return { path: args.ledger, state: null };
+    }
+    const ledgerRepo = resolveRepoRoot(dirname(args.ledger));
+    if (
+      ledgerRepo.root === null ||
+      normalizeRootForCompare(ledgerRepo.root) !==
+        normalizeRootForCompare(taskRepoForLedger.root)
+    ) {
+      return {
+        path: null,
+        state: DISPATCH_GATE_STATE.REJECT_REPO_MISMATCH,
+        reason: `dispatch-gate-decision precondition: --ledger(${args.ledger})가 taskPath가 속한 저장소(${taskRepoForLedger.root})에 속하지 않음(${ledgerRepo.root === null ? `원인: ${ledgerRepo.detail}` : `실제: ${ledgerRepo.root}`}) -> 배달 거부(안전측 기본값 -- --expect-repo-root 없이 --ledger 만 주어졌다고 결속을 건너뛰지 않는다). 조치: --ledger가 taskPath와 같은 저장소를 가리키는지, 또는 --expect-repo-root를 함께 넘기는지 확인하라`,
+      };
+    }
     return { path: args.ledger, state: null };
   }
   const taskRepo = resolveRepoRoot(dirname(taskPath));

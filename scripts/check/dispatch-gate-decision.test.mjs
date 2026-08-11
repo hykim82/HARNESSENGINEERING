@@ -930,3 +930,74 @@ test("(22) §2-5 bare 경계 -- bare 저장소 기반 링크드 워크트리에�
     assert.match(r.stderr, /BLOCK\(exit 2\)/);
   });
 });
+
+// ---------------------------------------------------------------------------
+// HYK-221 축1: `--ledger` given WITHOUT `--expect-repo-root` used to bypass
+// git binding entirely (`if (args.ledger && !args.expectRepoRoot) return
+// {path: args.ledger, state: null}`) -- an explicit ledger path was trusted
+// no matter which repo it actually belonged to. Tests (23)/(24) below are
+// the ★positive/negative control★ this task's §5-2 requires: (23) proves
+// the SAME-repo case still ALLOWs (no new false positive), (24) proves the
+// DIFFERENT-repo case -- which used to silently pass through -- now REJECTs.
+// Test (25) is the regression guard for the *other* half of the fix: when
+// taskPath is NOT inside any git repo at all (every one of this file's
+// tests (1)-(14)/P1-B's plain non-git tmpdir fixtures), the membership
+// check must not run at all -- byte-identical to pre-fix behavior, so none
+// of those existing fixtures break (HYK-217 gap#97 shape avoided).
+// ---------------------------------------------------------------------------
+
+test("(23) HYK-221 축1 양성 대조 -- --ledger가 taskPath와 같은 저장소에 있으면(--expect-repo-root 없이도) ALLOW", () => {
+  withFixtureDir((dir) => {
+    const repo = join(dir, "repo");
+    mkdirSync(repo);
+    initGitRepo(repo);
+    mkdirSync(join(repo, ".harness"));
+    writeFileSync(join(repo, "a.txt"), "x\n", "utf8");
+    commitAll(repo, "init");
+    const taskPath = join(repo, ".harness", "coder-task.md");
+    writeFileSync(taskPath, "task_id: HYK-9200-samerepo-1\nbody\n", "utf8");
+    const ledgerPath = join(repo, ".harness", "reject-streak.json");
+    writeLedger(ledgerPath, { schema_version: 1, issues: {} });
+    const r = runCli([taskPath, "--ledger", ledgerPath]);
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.match(r.stdout, /ALLOW/);
+  });
+});
+
+test("(24) HYK-221 축1 -- --ledger가 taskPath와 다른 실제 저장소에 있고 --expect-repo-root가 없으면 REJECT (수리 전: 대조 없이 그대로 통과했다)", () => {
+  withFixtureDir((dir) => {
+    const repoA = join(dir, "repo-a");
+    const repoB = join(dir, "repo-b");
+    mkdirSync(repoA);
+    mkdirSync(repoB);
+    initGitRepo(repoA);
+    initGitRepo(repoB);
+    mkdirSync(join(repoA, ".harness"));
+    mkdirSync(join(repoB, ".harness"));
+    writeFileSync(join(repoA, "a.txt"), "x\n", "utf8");
+    writeFileSync(join(repoB, "b.txt"), "x\n", "utf8");
+    commitAll(repoA, "init");
+    commitAll(repoB, "init");
+    const taskPath = join(repoA, ".harness", "coder-task.md");
+    writeFileSync(taskPath, "task_id: HYK-9201-diffrepo-1\nbody\n", "utf8");
+    // repoB's ledger would ALLOW if honored (empty issues) -- it must not be.
+    const foreignLedgerPath = join(repoB, ".harness", "reject-streak.json");
+    writeLedger(foreignLedgerPath, { schema_version: 1, issues: {} });
+    const r = runCli([taskPath, "--ledger", foreignLedgerPath]);
+    assert.equal(r.status, 1, r.stdout + r.stderr);
+    assert.match(r.stderr, /REJECT_REPO_MISMATCH|속하지 않음/);
+  });
+});
+
+test("(25) HYK-221 축1 회귀 방지 -- taskPath가 어떤 git 저장소에도 속하지 않으면(비-git tmpdir) --ledger 만으로도 그대로 통과(기존 fixture 계약 불변)", () => {
+  withFixtureDir((dir) => {
+    // deliberately NOT a git repo, mirrors tests (1)-(14)/P1-B's own fixture
+    const taskPath = join(dir, "coder-task.md");
+    writeFileSync(taskPath, "task_id: HYK-9202-nongit-1\nbody\n", "utf8");
+    const ledgerPath = join(dir, "reject-streak.json");
+    writeLedger(ledgerPath, { schema_version: 1, issues: {} });
+    const r = runCli([taskPath, "--ledger", ledgerPath]);
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.match(r.stdout, /ALLOW/);
+  });
+});

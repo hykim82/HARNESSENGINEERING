@@ -1,6 +1,6 @@
 import { readFileSync, existsSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
-import { execSync } from "node:child_process";
+import { join, dirname } from "node:path";
+import { execSync, execFileSync } from "node:child_process";
 
 // HYK-133: a same-issue rejected-review streak has no mechanical memory --
 // `.harness/review.md` is a single relay slot overwritten every round, so
@@ -96,6 +96,54 @@ function repoRoot() {
   } catch {
     return process.cwd();
   }
+}
+
+// HYK-221 축3: the CLI's default LEDGER path only -- review.md/coder-task.md
+// defaults stay on repoRoot() (plain --show-toplevel, worktree-local; those
+// files are meant to be per-worktree relay slots). The ledger is different:
+// dispatch-gate-decision.mjs::resolveRepoRoot (the READING side) already
+// resolves the repo via `git rev-parse --git-common-dir` (+ a bare-repo
+// check), which converges every linked worktree of the same repo onto ONE
+// path. This CLI's own default ledger resolution (the WRITING side, used
+// when `record`/`gate`/`diagnostic-gate` are invoked with no `--ledger`) used
+// to call plain repoRoot() instead -- `--show-toplevel` returns the CURRENT
+// worktree's own root, a DIFFERENT answer in a linked worktree. That mismatch
+// is the exact HYK-219 1R incident (§1 축3 of this task): a `record` run
+// inside a worktree wrote to that worktree's own `.harness/reject-streak.json`
+// while the gate kept reading the main repo's file, so the rejection never
+// became visible to the 2-streak gate. Mirroring the read side's exact git
+// invocation here (rather than reusing relay-handshake.mjs's mainRepoRoot(),
+// which would be a circular import -- relay-handshake.mjs already imports
+// FROM this module) closes that gap for every direct CLI invocation.
+function ledgerRepoRoot() {
+  const fallback = repoRoot();
+  let commonDir;
+  try {
+    commonDir = execFileSync(
+      "git",
+      [
+        "-C",
+        fallback,
+        "rev-parse",
+        "--path-format=absolute",
+        "--git-common-dir",
+      ],
+      { encoding: "utf8" },
+    ).trim();
+  } catch {
+    return fallback;
+  }
+  let isBare;
+  try {
+    isBare = execFileSync(
+      "git",
+      ["--git-dir", commonDir, "rev-parse", "--is-bare-repository"],
+      { encoding: "utf8" },
+    ).trim();
+  } catch {
+    return fallback;
+  }
+  return isBare === "true" ? commonDir : dirname(commonDir);
 }
 
 function issueIdFrom(taskIdLike) {
@@ -678,7 +726,7 @@ if (invokedDirectly) {
   if (sub === "record") {
     const reviewPath = args.review || join(root, ".harness", "review.md");
     const ledgerPath =
-      args.ledger || join(root, ".harness", "reject-streak.json");
+      args.ledger || join(ledgerRepoRoot(), ".harness", "reject-streak.json");
 
     if (!existsSync(reviewPath)) {
       console.log(
@@ -723,7 +771,7 @@ if (invokedDirectly) {
   if (sub === "gate") {
     const taskPath = args._[0] || join(root, ".harness", "coder-task.md");
     const ledgerPath =
-      args.ledger || join(root, ".harness", "reject-streak.json");
+      args.ledger || join(ledgerRepoRoot(), ".harness", "reject-streak.json");
 
     if (!existsSync(taskPath)) {
       console.error(`reject-streak gate: task file not found: ${taskPath}`);
@@ -749,7 +797,7 @@ if (invokedDirectly) {
   if (sub === "diagnostic-gate") {
     const taskPath = args._[0] || join(root, ".harness", "coder-task.md");
     const ledgerPath =
-      args.ledger || join(root, ".harness", "reject-streak.json");
+      args.ledger || join(ledgerRepoRoot(), ".harness", "reject-streak.json");
 
     if (!existsSync(taskPath)) {
       console.error(
