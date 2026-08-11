@@ -12,7 +12,7 @@ import {
   writeFileSync,
   rmSync,
 } from "node:fs";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
 import {
   judgeActivationDependency,
@@ -323,42 +323,67 @@ test("(c) 조회 실패: 존재하지 않는 ref -> REJECT_UNJUDGABLE (ALLOW도 
 // ---------------------------------------------------------------------------
 // 오탐 분모(계약, coder-task.md §2) -- dispatch-worker.ps1이 실제로
 // 참조하는 저장소 경로 중 master에 «있는» 것들을 표본으로 써서 전부
-// ALLOW인지 확인한다(1건 일반화 금지: 최소 3개). ★실측: 아래 3개 경로는
-// scripts/check/dispatch-worker.ps1 그렙(§0에서 사람이 실행)으로 찾은
-// 것과 동일한 3개다 -- D:\문서관리\하네스-관제실\dispatch-worker.ps1의
-// line 163/184/210 `Join-Path $Worktree "scripts/..."` 참조. 이 저장소
-// 자신의 origin/master를 대상으로 확인한다(관제실 파일은 무접촉 -- 경로
-// 문자열만 표본으로 쓴다).
-test("오탐 분모: dispatch-worker.ps1이 실제 참조하는 저장소 경로 3개, 전부 origin/master에 있어 ALLOW", () => {
-  const realReferencedPaths = [
-    "scripts/check/dispatch-gate-decision.mjs",
-    "scripts/supervisor/admission-cli.mjs",
-    "scripts/relay/dispatch-receipt-cli.mjs",
-  ];
-  const patchText = realReferencedPaths
-    .map((p) => `$x = Join-Path $Worktree "${p}"`)
-    .join("\n");
-  const r = judgeActivationDependency({
-    patchText,
-    ref: "origin/master",
-    checkRefPathExists: (ref, path) => {
-      execFileSync(
-        "git",
-        ["rev-parse", "--verify", "--quiet", `${ref}^{commit}`],
-        { stdio: ["ignore", "ignore", "pipe"] },
-      );
-      try {
-        execFileSync("git", ["cat-file", "-e", `${ref}:${path}`], {
-          stdio: ["ignore", "ignore", "pipe"],
-        });
-        return true;
-      } catch {
-        return false;
-      }
-    },
+// ALLOW인지 확인한다(1건 일반화 금지: 최소 3개).
+//
+// HYK-226-activation-invariant-3 (coder-task.md §0/§2, PR #140 CI 실패
+// 수리): 이 시험은 이전 라운드까지 이 파일 머리의 "SYNTHETIC git
+// fixtures only -- never the real" 계약을 스스로 어기는 유일한 곳이었다
+// -- `checkRefPathExists`가 cwd 지정 없이 `execFileSync("git", ...)`를
+// 불러 "현재 프로세스가 실행되는 실제 저장소"(로컬은 이 저장소 자신)를
+// 상대로 조회했다. 로컬 워크트리는 `refs/remotes/origin/master`가
+// 있어 통과했지만, GitHub Actions의 PR 체크아웃(단일 브랜치, 얕은 클론)
+// 에는 그 원격 추적 ref가 없어 `git rev-parse --verify` 자체가 throw
+// -> `REJECT_UNJUDGABLE` -> 이 시험이 기대한 `ALLOW`와 어긋나 CI에서만
+// 낙제했다(로컬 재현: 같은 브랜치만 `--single-branch`로 새로 clone한
+// 임시 디렉터리에서 이 시험을 실행하면 동일하게 실패, §1 재현 기록
+// 참고). 아래는 그 실물 의존을 걷어내고 다른 시험들과 같은 합성
+// 픽스처(withSyntheticGitFixture)로 옮긴 버전이다.
+//
+// ★이 시험의 고유 축(ⓑ 양성 대조와 겹치지 않는 부분): ⓑ는 참조 1개만
+// 확인한다. 이 시험은 **관제실이 실제 참조하는 경로 문자열 3개를 한
+// patchText에 한꺼번에 넣어도 전부 추출되고 전부 통과하는지**(다중
+// 참조 추출 + 전부-ALLOW 집계)를 확인한다 -- extractRepoPathReferences가
+// 세 슬래시 포함 경로를 모두 뽑아내고, judgeActivationDependency가 그
+// 셋 전부에 대해 checkRefPathExists를 호출해 셋 다 true를 받아야 최종
+// ALLOW로 집계되는 경로는 ⓑ가 커버하지 않는다.
+//
+// ⛔이 시험은 "이 3개 경로가 실제 origin/master에 있다"는 사실 자체를
+// 검사하지 않는다(그러면 다시 실물 의존이 된다) -- 그 사실은 사람/REVIEW
+// 실측으로 남긴다: §0(dropped_at 2026-08-11 17:xx, 이번 트랙 1R)에서
+// `git cat-file -e origin/master:<path>` 3회 직접 실행 + REVIEW 1R이
+// `.harness/review.md` §4에서 CLI `--ref origin/master`로 독립 재확인
+// (3/3 ALLOW). 아래 픽스처는 그 3개 경로 문자열을 "합성 커밋"에 그대로
+// 심어 다중 참조 추출/집계 로직만 검사한다.
+test("오탐 분모(합성 픽스처): dispatch-worker.ps1이 실제 참조하는 저장소 경로 3개를 한 patchText에 넣어도 전부 추출·전부 ALLOW로 집계됨", () => {
+  withSyntheticGitFixture(({ dir, run }) => {
+    // 이 3개 경로 문자열은 §0 실측 그대로다(dispatch-worker.ps1 grep,
+    // Test-Path로 확인되는 세 스크립트) -- 합성 픽스처 안에 그 경로
+    // "모양"으로 빈 파일을 만들어 커밋할 뿐, 실제 관제실/저장소 파일과는
+    // 무관하다.
+    const realReferencedPaths = [
+      "scripts/check/dispatch-gate-decision.mjs",
+      "scripts/supervisor/admission-cli.mjs",
+      "scripts/relay/dispatch-receipt-cli.mjs",
+    ];
+    for (const p of realReferencedPaths) {
+      const abs = join(dir, ...p.split("/"));
+      mkdirSync(dirname(abs), { recursive: true });
+      writeFileSync(abs, `// synthetic stand-in for ${p}\n`, "utf8");
+    }
+    run(["add", "."]);
+    commitAndTagAsOriginMaster(dir, run);
+
+    const patchText = realReferencedPaths
+      .map((p) => `$x = Join-Path $Worktree "${p}"`)
+      .join("\n");
+    const r = judgeActivationDependency({
+      patchText,
+      ref: "origin/master",
+      checkRefPathExists: gitChecker(dir),
+    });
+    assert.equal(r.state, ACTIVATION_DEPENDENCY_STATE.ALLOW);
+    assert.equal(r.exitCode, 0);
+    assert.equal(r.references.length, 3);
+    assert.deepEqual(r.missing, []);
   });
-  assert.equal(r.state, ACTIVATION_DEPENDENCY_STATE.ALLOW);
-  assert.equal(r.exitCode, 0);
-  assert.equal(r.references.length, 3);
-  assert.deepEqual(r.missing, []);
 });
