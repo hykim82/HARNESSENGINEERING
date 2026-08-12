@@ -461,13 +461,30 @@ export function checkRelayHandshake({
   // in-process alike -- gets it, with no new notification device.
   autoArchiveRoundEnvelope({ role, resultContent, harnessDir });
   autoRecordRejectStreak({ role, resultContent });
+  // HYK-227 §2: moved here from the CLI-only `invokedDirectly` block below
+  // (was line-local to that block prior to this change) so EVERY caller of
+  // checkRelayHandshake -- not only the CLI entry point -- reaches this
+  // completion step, exactly mirroring autoArchiveRoundEnvelope/
+  // autoRecordRejectStreak immediately above (same call site, same "every
+  // caller, CLI and in-process alike, gets it" contract). This is the fix
+  // for the HYK-224-2R §3 옵션3 header comment's own documented gap ("in-
+  // process callers... don't get this completion wiring -- CLI spawn point
+  // only"): spawnAdmissionCompletion itself is unchanged (still a
+  // try/catch-wrapped subprocess spawn, never a static import, so the 1R
+  // isolated-fixture failure this design avoids stays avoided -- see that
+  // function's own header).
+  spawnAdmissionCompletion(taskId);
 
   return { ok: true, reason: `relay handshake ok for ${taskId}` };
 }
 
-// HYK-224-2R §3 옵션3 -- CLI-only, best-effort spawn of the neutral
-// admission-completion executor (scripts/check/admission-completion-
-// adapter.mjs). Deliberately NOT a module-level import (see that file's own
+// HYK-224-2R §3 옵션3, rewired HYK-227 §2 -- best-effort spawn of the
+// neutral admission-completion executor (scripts/check/admission-
+// completion-adapter.mjs), now called from INSIDE checkRelayHandshake's own
+// ok:true branch above, so every caller (CLI entry point below AND every
+// in-process caller -- relay-core.mjs, watch-result.mjs, seat-signal-
+// adapter.mjs, orca-spike-live.mjs, orca-spike-runner.mjs) reaches it, not
+// only the CLI. Deliberately NOT a module-level import (see that file's own
 // header for why: an import here reintroduces the exact failure 1R hit --
 // 6 mutation test files' stageTree()/checkFiles isolate relay-handshake.mjs
 // with a small fixed dependency list, and importing a file outside that
@@ -475,10 +492,10 @@ export function checkRelayHandshake({
 // even runs). A subprocess spawn only fails at CALL time (this function),
 // which the try/catch below absorbs -- so an isolated fixture missing the
 // adapter file degrades to a silent no-op here, never to a load error.
-// Runs ONLY after checkRelayHandshake already returned ok:true (dispatch
-// binding independently verified) -- never changes this CLI's own exit
-// code either way (S11: this is best-effort bookkeeping, not part of the
-// handshake verdict).
+// Runs ONLY after checkRelayHandshake has already decided ok:true (dispatch
+// binding independently verified) -- never changes checkRelayHandshake's own
+// return value or the CLI's exit code either way (S11: this is best-effort
+// bookkeeping, not part of the handshake verdict).
 function spawnAdmissionCompletion(taskId) {
   try {
     const adapterPath = join(
@@ -528,14 +545,15 @@ if (invokedDirectly) {
     console.error("usage: node relay-handshake.mjs <role> [harnessDir]");
     process.exit(1);
   }
+  // HYK-227 §2: spawnAdmissionCompletion is no longer called here directly
+  // -- it now runs INSIDE checkRelayHandshake itself (see that function's
+  // own ok:true branch, right before its return), so every caller gets it,
+  // not just this CLI block. Calling it again here would double-spawn on
+  // every CLI-path completion.
   const harnessDirArg = process.argv[3];
   const result = harnessDirArg
     ? checkRelayHandshake({ role, harnessDir: harnessDirArg })
     : checkRelayHandshake({ role });
-  const okTaskId = result.ok
-    ? (result.reason.match(/relay handshake ok for (\S+)/) ?? [])[1]
-    : undefined;
-  if (okTaskId) spawnAdmissionCompletion(okTaskId);
   if (result.ok) {
     process.exit(0);
   } else {

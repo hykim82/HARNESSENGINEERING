@@ -11,23 +11,108 @@
 // are wired (same call site, same "never mutates the caller's verdict"
 // contract).
 //
-// 정직 한계(S11, same pattern as concurrency-cap-adapter.mjs's `live=false`):
-// this is env-gated (`ADMISSION_LEDGER_PATH`), not wired into every relay-
-// handshake invocation unconditionally. Reason: the admission ledger is a
-// GLOBAL, cross-repo/cross-worktree file (관제실 소유, coder-task §4 -- the
-// ps1 side owns that path, not this repo), so this repo cannot hardcode it
-// without breaking the isolated-clone CI runner (scripts/check/isolated-
-// suite-runner.mjs clones this repo into a disposable tmp dir per run --
-// a hardcoded real-world path would make CI runs silently mutate 관제실
-// state, or fail there, neither of which this task's scope covers). Until
-// the invoking environment (관제실's own launcher/orchestrator wiring, NOT
-// this repo) sets that env var, this adapter is a documented no-op
-// (`attempted:false`) -- exactly like concurrency-cap-adapter.mjs's own
-// "no live caller yet" honesty note when it was first added.
-import { appendFileSync, mkdirSync } from "node:fs";
-import { dirname } from "node:path";
+// 정직 한계(S11, same pattern as concurrency-cap-adapter.mjs's `live=false`)
+// -- 1R: this was purely env-gated (`ADMISSION_LEDGER_PATH`), never wired
+// unconditionally. Reason: the admission ledger is a GLOBAL, cross-repo/
+// cross-worktree file (관제실 소유, coder-task §4 -- the ps1 side owns that
+// path, not this repo), so this repo cannot hardcode it without breaking
+// the isolated-clone CI runner (scripts/check/isolated-suite-runner.mjs
+// clones this repo into a disposable tmp dir per run -- a hardcoded
+// real-world path would make CI runs silently mutate 관제실 state, or fail
+// there, neither of which 1R's scope covered). 1R shipped that env-only
+// gate and escalated: nothing in this repo or 관제실 ever SET that env var,
+// so in production the adapter was a 100% no-op regardless of how correct
+// the call-site wiring was (1R's own coder.md 결과, confirmed by a live
+// incident the same night -- ORCH had to hand-run
+// `admission-cli complete` because nothing auto-released the slot).
+//
+// HYK-227 2R §2 (한용 판정 2026-08-12 08:56): env stays first-priority (a
+// caller that explicitly sets it always wins, e.g. this file's own test
+// suite), but resolvePersistentLedgerPaths() below adds a SECOND source --
+// a small JSON pointer file the installer (templates/harness-init/
+// install.mjs) writes once, at the one location every process (regardless
+// of worktree) can find via mainRepoRoot() -- the exact "one place
+// regardless of which worktree runs this" resolution relay-handshake.mjs's
+// own reject-streak ledger already relies on (see that file's
+// mainRepoRoot(), duplicated here rather than imported to keep this file's
+// own isolated-fixture dependency closure unchanged -- see this file's
+// own header on why a NEW static import here is exactly the risk 1R's
+// spawn-not-import design avoided at the relay-handshake.mjs boundary).
+// ⛔ this is "env-priority + persistent fallback", NOT "env got wired in" --
+// when BOTH are absent, the adapter is still the exact same documented
+// no-op (`attempted:false`) it always was; that branch's behavior and
+// message text are UNCHANGED by this round (HYK-227 2R §3 항1 요구).
+import { appendFileSync, mkdirSync, existsSync, readFileSync } from "node:fs";
+import { execSync } from "node:child_process";
+import { dirname, join } from "node:path";
 import { completeReservation } from "../supervisor/admission-ledger-core.mjs";
 import { withLedgerLock } from "../supervisor/admission-ledger-store.mjs";
+
+// repoRoot/mainRepoRoot -- duplicated from relay-handshake.mjs's own
+// (exported) versions rather than imported. This mirrors the repo-wide
+// convention (every scripts/check/*.mjs file that needs this resolves it
+// locally -- grep confirms ~30 independent copies) precisely because each
+// of these files must stay independently copyable into an isolated
+// fixture/target repo without dragging in an unrelated module's full
+// import graph (relay-handshake.mjs alone pulls in reject-streak.mjs,
+// envelope-archive.mjs, time-authority.mjs -- none of which this adapter
+// needs).
+function repoRoot() {
+  try {
+    return execSync("git rev-parse --show-toplevel", {
+      encoding: "utf8",
+    }).trim();
+  } catch {
+    return process.cwd();
+  }
+}
+
+function mainRepoRoot() {
+  const root = repoRoot();
+  try {
+    const commonDir = execSync("git rev-parse --git-common-dir", {
+      encoding: "utf8",
+      cwd: root,
+    }).trim();
+    const absCommonDir = /^([A-Za-z]:[\\/]|\/)/.test(commonDir)
+      ? commonDir
+      : join(root, commonDir);
+    return absCommonDir.replace(/[\\/]\.git$/, "");
+  } catch {
+    return root;
+  }
+}
+
+const PERSISTENT_LEDGER_POINTER_FILENAME = "admission-ledger-path.json";
+
+// resolvePersistentLedgerPaths -- reads the installer-written pointer file
+// (see install.mjs's installAdmissionLedgerPointer). Fail-open on every
+// error shape (file absent, unreadable, malformed JSON, missing/blank
+// `ledgerPath` field) -- treated identically to "nothing configured here",
+// never a new failure mode layered on top of the pre-existing no-op.
+function resolvePersistentLedgerPaths() {
+  const pointerPath = join(
+    mainRepoRoot(),
+    ".harness",
+    PERSISTENT_LEDGER_POINTER_FILENAME,
+  );
+  if (!existsSync(pointerPath)) return null;
+  try {
+    const parsed = JSON.parse(readFileSync(pointerPath, "utf8"));
+    if (typeof parsed.ledgerPath !== "string" || !parsed.ledgerPath) {
+      return null;
+    }
+    return {
+      ledgerPath: parsed.ledgerPath,
+      lockPath:
+        typeof parsed.lockPath === "string" && parsed.lockPath
+          ? parsed.lockPath
+          : null,
+    };
+  } catch {
+    return null;
+  }
+}
 
 // HYK-224-3R §3 (REVIEW 2R 반려): 검토자 실측 -- 잘못된 ledger로 이 adapter가
 // 실패해도 relay-handshake CLI는 exit 0, 부모 경고는 non-fatal, 게다가 사유
@@ -123,16 +208,35 @@ function appendCompletionFailureAudit({
 }
 
 // autoCompleteAdmission -- the relay-handshake.mjs call-site wrapper.
-// `attempted:false` (env var unset) is deliberately distinct from
-// `attempted:true, ok:false` (env var set, but the release itself failed) --
-// a caller/reader must never conflate "not wired here yet" with "wired and
-// silently failing."
+// `attempted:false` (no ledger path resolved from EITHER source) is
+// deliberately distinct from `attempted:true, ok:false` (a path was
+// resolved, but the release itself failed) -- a caller/reader must never
+// conflate "not wired here yet" with "wired and silently failing."
+//
+// HYK-227 2R §2/§3 항1: `ADMISSION_LEDGER_PATH` still wins whenever it is
+// set (unchanged 1R priority -- e.g. this file's own test suite always
+// takes this branch). Only when it is ABSENT does this now fall through to
+// resolvePersistentLedgerPaths()'s installer-written pointer file. When
+// NEITHER source resolves a path, the outcome is byte-for-byte the exact
+// same `{ attempted: false }` 1R always returned -- this branch's shape and
+// meaning are unchanged (§3 항1's explicit "사유 문구를 바꾸지 마라").
 export function autoCompleteAdmission({ reservationId }) {
-  const ledgerPath = process.env.ADMISSION_LEDGER_PATH;
+  let ledgerPath = process.env.ADMISSION_LEDGER_PATH;
+  let persistentLockPath = null;
+  if (!ledgerPath) {
+    const persistent = resolvePersistentLedgerPaths();
+    if (persistent) {
+      ledgerPath = persistent.ledgerPath;
+      persistentLockPath = persistent.lockPath;
+    }
+  }
   if (!ledgerPath) {
     return { attempted: false };
   }
-  const lockPath = process.env.ADMISSION_LOCK_PATH || `${ledgerPath}.lock`;
+  const lockPath =
+    process.env.ADMISSION_LOCK_PATH ||
+    persistentLockPath ||
+    `${ledgerPath}.lock`;
   const outcome = completeAdmissionReservation({
     reservationId,
     ledgerPath,
@@ -154,17 +258,22 @@ export function autoCompleteAdmission({ reservationId }) {
 // handshake 밖에 두기)". relay-handshake.mjs는 이 파일을 IMPORT하지
 // 않는다(1R에서 정확히 그 import가 6개 mutation 시험 파일의 stageTree
 // 고정 의존성 목록을 깨서 19건 RED를 냈다 -- coder.md 1R §4). 대신
-// relay-handshake.mjs의 CLI 진입점(맨 아래 invokedDirectly 블록)만이
-// checkRelayHandshake가 ok:true를 반환한 "뒤"에 이 파일을 별도 자식
-// 프로세스로 스폰한다 -- import가 아니라 execFileSync 스폰이므로, 이
-// 파일이 격리 픽스처 디렉터리에 없을 때(스폰 자체가 ENOENT로 실패) 그
-// 실패는 relay-handshake.mjs 모듈 "로드 시점"이 아니라 "호출 시점"에
-// 일어나고, 그 호출부가 try/catch로 감싸 무시한다 -- 그래서 기존
-// mutation 시험들의 소규모 격리 의존성 목록을 하나도 건드리지 않는다.
-// 정직 한계: in-process로 checkRelayHandshake를 호출하는 호출자(주석에
-// 언급된 relay-core.mjs 등)는 이 완료 결선을 받지 못한다 -- CLI 스폰
-// 지점에만 있다(autoArchiveRoundEnvelope/autoRecordRejectStreak처럼
-// "모든 호출자가 받는다"는 이 파일 안 주석과 달리, 이 축은 CLI 전용).
+// relay-handshake.mjs가 이 파일을 별도 자식 프로세스로 스폰한다 --
+// import가 아니라 execFileSync 스폰이므로, 이 파일이 격리 픽스처
+// 디렉터리에 없을 때(스폰 자체가 ENOENT로 실패) 그 실패는 relay-
+// handshake.mjs 모듈 "로드 시점"이 아니라 "호출 시점"에 일어나고, 그
+// 호출부가 try/catch로 감싸 무시한다 -- 그래서 기존 mutation 시험들의
+// 소규모 격리 의존성 목록을 하나도 건드리지 않는다.
+// HYK-227 1R 갱신 (이 문단은 1R 전 상태를 그대로 남겨둔 채였던 오기 --
+// 2R에서 정정): 스폰 호출 자체는 더 이상 relay-handshake.mjs의 CLI
+// 진입점(`invokedDirectly` 블록)에만 있지 않다 -- checkRelayHandshake
+// 함수 본문(ok:true 분기, autoArchiveRoundEnvelope/autoRecordRejectStreak
+// 바로 다음)으로 옮겨져 CLI·in-process 호출자 6곳(relay-core.mjs·
+// watch-result.mjs·seat-signal-adapter.mjs·orca-spike-live.mjs·
+// orca-spike-runner.mjs·CLI 진입점) 전부가 동일하게 이 스폰을 거친다.
+// 그 "부르는 지점"의 결선은 2R 시점 기준 모든 저장소 호출자를 덮는다 --
+// 다만 이 스폰이 실제로 슬롯을 반납하는지는 여전히 이 함수가 얻는
+// `ledgerPath`(env 우선 + 영속 기본값, 위 §2 참고)에 달려 있다.
 if (
   process.argv[1] &&
   process.argv[1]

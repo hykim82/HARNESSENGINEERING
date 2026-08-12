@@ -828,6 +828,51 @@ function installProfileAgnosticCore(params, targetRepoPath, map, { dryRun }) {
   }
 }
 
+// installAdmissionLedgerPointer -- HYK-227 2R §2/§3 항2 (한용 판정
+// 2026-08-12 08:56): writes the persistent pointer file
+// `admission-completion-adapter.mjs`'s `resolvePersistentLedgerPaths()`
+// reads as its env-absent fallback. solo-full only -- team-local has no
+// control room (no `controlRoomPath`), so there is no admission ledger to
+// point at; the adapter's own no-op stays the whole story for that
+// profile, unchanged from 1R.
+//
+// ★정직 한계 (§2-4, 미리 못 박은 그대로): this file write happens ONLY when
+// install.mjs itself runs against a target repo. install.mjs has no
+// automatic/scheduled/hooked invocation anywhere in this repo (confirmed:
+// every reference to it in docs/harness-init.md is a documented CLI
+// example for a human/agent to run by hand at bootstrap time) -- so for a
+// repo that was already bootstrapped BEFORE this round (this repo itself
+// included), this pointer file does not appear on its own. It requires
+// one manual re-run of install.mjs against that target (idempotent and
+// safe: writeTemplateFile-style skip-if-exists means a re-run only adds
+// files that are still missing, never overwrites anything already there).
+function installAdmissionLedgerPointer(params, targetRepoPath, { dryRun }) {
+  const pointerPath = path.join(
+    targetRepoPath,
+    ".harness",
+    "admission-ledger-path.json",
+  );
+  if (existsSync(pointerPath)) {
+    skipped.push(pointerPath);
+    console.warn(`skip (already exists): ${pointerPath}`);
+    return;
+  }
+  const ledgerPath = joinPosix(params.controlRoomPath, "admission-ledger.json");
+  const pointer = {
+    ledgerPath,
+    lockPath: `${ledgerPath}.lock`,
+  };
+  const content = `${JSON.stringify(pointer, null, 2)}\n`;
+  if (!dryRun) {
+    ensureParentDir(pointerPath);
+    writeFileSync(pointerPath, content, "utf8");
+  }
+  installed.push(pointerPath);
+  console.log(
+    `${dryRun ? "[dry-run] would install" : "installed"}: ${pointerPath}\n${content}`,
+  );
+}
+
 function main() {
   const params = resolveParams(process.argv.slice(2));
   validateParams(params);
@@ -868,6 +913,10 @@ function main() {
   }
 
   if (params.profile === "solo-full") {
+    // HYK-227 2R §3 항2: the persistent admission-ledger pointer file --
+    // see installAdmissionLedgerPointer's own header for scope/limits.
+    installAdmissionLedgerPointer(params, targetRepoPath, { dryRun });
+
     // Server-side anchor: CI workflow + gitleaks ruleset. Never automated
     // past the file copy — branch protection, bot invite, and secret
     // scanning are one-time human steps in the GitHub web UI (checklist
