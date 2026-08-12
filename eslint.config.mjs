@@ -112,6 +112,21 @@ export default [
     // postcheck-axis-wire.test.mjs exercise the same production path
     // (runOrchStallDetect/runWatchOnce) as their seat-liveness/escalation
     // predecessors above.
+    // HYK-228-sweeper-liveness (coder-task.md §3, 4R quality-gate repair):
+    // the same narrow exception, one more time, for the admission-sweep
+    // trigger axis -- admission-sweep-wire.mjs's queryTerminalList reads
+    // live seat state through orca-adapter.mjs's buildTerminalListCommand/
+    // parseTerminalList/createOrcaExecFn. This is read-only: the only
+    // execFn call this file makes is buildTerminalListCommand() =
+    // ["terminal", "list", "--json"] -- a query, never dispatch/send/close
+    // (verified by reading admission-sweep-wire.mjs's queryTerminalList,
+    // its sole exec call site). admission-sweep-wire.mjs is itself a
+    // production entry point (both the watch-run.mjs periodic sweep step
+    // and its own standalone CLI event-trigger path, per its file-header
+    // design note) wiring that read-only adapter port to the pure
+    // judgment core (admission-sweep-trigger-core.mjs) -- the same shape
+    // as orch-stall-detect.mjs/watch-run.mjs above, not a reopening of
+    // the general relay -> non-relay dependency direction.
     files: [
       "scripts/supervisor/orch-stall-detect.mjs",
       "scripts/supervisor/seat-liveness-wire.test.mjs",
@@ -124,6 +139,7 @@ export default [
       "scripts/supervisor/reach-report-core.test.mjs",
       "scripts/supervisor/dispatch-postcheck-wire.test.mjs",
       "scripts/supervisor/dispatch-postcheck-axis-wire.test.mjs",
+      "scripts/supervisor/admission-sweep-wire.mjs",
     ],
     rules: {
       "no-restricted-imports": "off",
