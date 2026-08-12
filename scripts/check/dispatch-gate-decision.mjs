@@ -22,6 +22,25 @@ import {
   DISPATCH_GATE_STATE,
 } from "./dispatch-gate-decision-core.mjs";
 import { loadLedger, writeLedger } from "./reject-streak.mjs";
+// HYK-239: reject-streak-chain.mjs's tamper-detection engine has existed
+// since HYK-218 with zero production callers (§0 실측). This is the wiring
+// -- NOT reject-streak.mjs/relay-handshake.mjs/review-gate.mjs, which the
+// 9 mutation tests reject-streak-chain.mjs's own header comment names copy
+// those three files into isolated tmpdirs that do not include this sidecar
+// module (a sibling import there breaks all 9 with MODULE_NOT_FOUND).
+// dispatch-gate-decision.mjs is never copied by any of those tests (every
+// test that touches it imports the real file by URL, see
+// dispatch-gate-decision.test.mjs/activation-dependency-core.test.mjs) and
+// it already runs on EVERY dispatch (관제실 dispatch-worker.ps1 calls this
+// CLI before injecting a task, see file header) -- the one place a chain
+// check both runs every round and cannot be starved by the mutation-test
+// copy mechanics.
+import {
+  loadChainLedger,
+  catchUpCheckpoints,
+  writeChainLedger,
+  checkAppendOnly,
+} from "./reject-streak-chain.mjs";
 
 const REJECT_STREAK_PATH = join(
   dirname(fileURLToPath(import.meta.url)),
@@ -95,9 +114,17 @@ function parseArgs(argv) {
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === "--ledger") out.ledger = argv[++i];
     else if (argv[i] === "--expect-repo-root") out.expectRepoRoot = argv[++i];
+    else if (argv[i] === "--chain") out.chain = argv[++i];
     else out._.push(argv[i]);
   }
   return out;
+}
+
+// HYK-239: mirrors reject-streak-chain.mjs's own CLI default (sidecar lives
+// next to the ledger, same basename swap) -- `--chain` is an explicit
+// override for tests/tooling, same shape as `--ledger`'s own override.
+function resolveChainPath(args, ledgerPath) {
+  return args.chain || join(dirname(ledgerPath), "reject-streak-chain.json");
 }
 
 function firstNonEmptyErrorText(err) {
@@ -293,7 +320,80 @@ function evaluatePrecondition(taskPath, ledgerPath) {
     ledgerEntryShapeValid: entryShape.valid,
     ledgerEntryShapeReason: entryShape.reason,
   });
-  return { precondition, loaded };
+  return { precondition, loaded, issueId };
+}
+
+// HYK-239: the wiring. Runs once per dispatch, after the precondition check
+// and the two reject-streak.mjs gate subprocesses have already confirmed
+// this task is well-formed and the primary ledger is readable --
+// `primaryLedger`/`issueId` here are the SAME values `runGatesAgainstSnapshot`
+// just judged, not a second independent read (no new TOCTOU window).
+//
+// Two-step, same order the hash-chain literature uses: verify what is
+// ALREADY checkpointed first (that is where tamper detection lives -- see
+// checkAppendOnly), THEN extend the sidecar to cover whatever the primary
+// ledger grew to since the last time this ran (catchUpCheckpoints, pure --
+// only appends, never rewrites an already-verified entry). Extending AFTER
+// verifying means a checkpoint can only ever be added for an entry that was
+// itself just cross-checked as live-consistent one line above.
+//
+// §2 requirement 2 (판정 불가 ≠ 정상): a chain sidecar that exists but is
+// unreadable/corrupt is fail-closed here (REJECT_CHAIN_UNJUDGABLE, its OWN
+// state -- never folded into REJECT_CHAIN_TAMPER_DETECTED's "content is bad"
+// meaning, nor into ALLOW). This diverges from reject-streak-chain.mjs's own
+// CLI (which fail-OPENs on the same load failure, exit 0, matching
+// reject-streak.mjs's convention) because THIS module's surrounding contract
+// (dispatch-gate-decision-core.mjs's documented default-reject stance,
+// checkGatePreconditions's five confirmations) is fail-closed throughout --
+// an ambiguous sidecar is exactly the kind of "cannot confirm" case that
+// stance already treats as REJECT, not a special exception carved out for
+// this one axis.
+// Split out of evaluateChainDecision below purely to keep that function's
+// own cyclomatic complexity under the repo's ESLint ceiling (same reason
+// reject-streak-chain.mjs/reject-streak.mjs extract their own helpers) --
+// no behavior change, same order, same values.
+function extendChainCheckpoints(chainPath, primaryLedger, chain, issueId) {
+  const before = chain?.issues?.[issueId]?.entries?.length ?? 0;
+  const nextChain = catchUpCheckpoints(primaryLedger, chain, issueId);
+  const after = nextChain.issues?.[issueId]?.entries?.length ?? 0;
+  if (after !== before) {
+    writeChainLedger(chainPath, nextChain);
+  }
+  return { before, after };
+}
+
+function evaluateChainDecision({ chainPath, primaryLedger, issueId }) {
+  const loadedChain = loadChainLedger(chainPath);
+  if (!loadedChain.ok) {
+    return {
+      state: DISPATCH_GATE_STATE.REJECT_CHAIN_UNJUDGABLE,
+      allow: false,
+      reason: `dispatch-gate-decision chain: ${loadedChain.reason} -> 배달 거부(안전측 기본값 -- 사이드카 판정 불가는 "정상"으로 접지 않는다). 조치: 사이드카(${chainPath})를 복구하거나, 손상이 확실하면 별도 판단으로 재구축하라`,
+    };
+  }
+  const verify = checkAppendOnly({
+    primaryLedger,
+    chain: loadedChain.chain,
+    issueId,
+  });
+  if (verify.status === "BLOCK") {
+    return {
+      state: DISPATCH_GATE_STATE.REJECT_CHAIN_TAMPER_DETECTED,
+      allow: false,
+      reason: `dispatch-gate-decision chain: BLOCK -> 배달 거부 -- ${verify.reason}`,
+    };
+  }
+  const { before, after } = extendChainCheckpoints(
+    chainPath,
+    primaryLedger,
+    loadedChain.chain,
+    issueId,
+  );
+  return {
+    state: DISPATCH_GATE_STATE.ALLOW,
+    allow: true,
+    reason: `dispatch-gate-decision chain: PASS -> 배달 허용 -- ${verify.reason} (checkpoint ${before} -> ${after})`,
+  };
 }
 
 // 4R §3 (TOCTOU): checkGatePreconditions already judged `loadedLedger` --
@@ -384,7 +484,7 @@ export function runDispatchGateDecision(argv) {
       // checkGatePreconditions/either gate subprocess is ever reached.
       decisions.push(pathDecision);
     } else {
-      const { precondition, loaded } = evaluatePrecondition(
+      const { precondition, loaded, issueId } = evaluatePrecondition(
         taskPath,
         ledgerResolution.path,
       );
@@ -392,6 +492,13 @@ export function runDispatchGateDecision(argv) {
         decisions.push(precondition);
       } else {
         decisions.push(...runGatesAgainstSnapshot(taskPath, loaded.ledger));
+        decisions.push(
+          evaluateChainDecision({
+            chainPath: resolveChainPath(args, ledgerResolution.path),
+            primaryLedger: loaded.ledger,
+            issueId,
+          }),
+        );
       }
     }
   }

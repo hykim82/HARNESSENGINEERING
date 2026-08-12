@@ -2406,6 +2406,203 @@ export function judgeDispatchPostcheckAcrossWorktrees({ repoRoot }, opts = {}) {
   };
 }
 
+// ---- HYK-239-chain-wire-2 (coder-task.md §1) -- «원장 해시체인 위조
+// 탐지» 축의 감시 시점 결선(push 도달 경로) ----
+//
+// 검토 1R 반려: 1R이 만든 배달 차단(dispatch-gate-decision.mjs)은 사람이
+// 다음 CODER 배달을 시도할 때만 발동한다 -- 사람이 아무 명령도 치지
+// 않아도 위조를 알게 되는 경로가 아니었다. 이 축은 HYK-212-postcheck-1
+// (바로 위 블록)과 완전히 같은 형태로 그 경로를 만든다: 감시 사이클이
+// 매 tick마다 이 축을 "무조건" 재조회하므로, 배달이 한 건도 없어도
+// 위조가 있으면 다음 tick에 표면화된다.
+//
+// ★scripts/check/**는 이 저장소의 무접촉 범위다(바로 위 §2 §1-3 주석과
+// 동일 원칙 -- collectResultFileCompletion 헤더가 이미 "scripts/check/**
+// 는 무접촉 범위라 그 파일을 import하지 않는다"고 선언한 그 경계). 그래서
+// 이 축은 scripts/check/reject-streak-chain.mjs나 reject-streak.mjs의
+// 함수를 import하지 않는다 -- 대신 dispatch-gate-decision.mjs가 이미
+// reject-streak.mjs의 gate/diagnostic-gate CLI를 다루는 것과 동일한
+// 방식으로, 각 워크트리 "자기 자신의" reject-streak-chain.mjs CLI를
+// `verify-all` 서브커맨드로 스폰한다(정본 판정 로직 재구현 0 -- 이미
+// 검토가 load-bearing으로 확인한 checkAppendOnlyAll을 그대로 호출).
+// 워크트리마다 자기 자신의 스크립트를 부르는 이유: 워크트리가 서로 다른
+// 브랜치일 수 있어(dispatch-gate-decision.mjs의 REJECT_STREAK_PATH가
+// import.meta.url 기준으로 "자기 워크트리"를 쓰는 것과 동일 이유), 그
+// 워크트리에 실제로 체크아웃된 버전의 판정 로직으로 그 워크트리 자신의
+// 원장을 재는 것이 옳다.
+export const CHAIN_WIRE_STATUS = Object.freeze({
+  JUDGED: "JUDGED",
+  // reject-streak-chain.mjs verify-all 자신이 UNJUDGABLE(원장/사이드카
+  // 판독 불가)로 fail-open했거나, 스폰/파싱 자체가 실패한 경우. §1-5
+  // 요구대로 "판정 불가"를 "정상"(CLEAN)으로도 "위조"(TAMPER_DETECTED)로도
+  // 접지 않는다 -- 별도 상태.
+  QUERY_FAILED: "CHAIN_QUERY_FAILED",
+});
+
+export const CHAIN_SCAN_FAILURE = Object.freeze({
+  WORKTREE_LIST_FAILED: "CHAIN_SCAN_WORKTREE_LIST_FAILED",
+});
+
+export const CHAIN_VERDICT = Object.freeze({
+  CLEAN: "CLEAN",
+  TAMPER_DETECTED: "TAMPER_DETECTED",
+});
+
+// runChainVerifyAll에서 분리(§6 eslint max-complexity 상한 준수) --
+// execFileSync가 던지는 에러 객체를 이 함수의 결과 shape로 옮겨 적을
+// 뿐, 판정 로직은 없다.
+function chainVerifyErrorToResult(err) {
+  const status = err && err.status !== undefined ? err.status : null;
+  const stdout = err && err.stdout ? String(err.stdout) : "";
+  const stderrText = err && err.stderr ? String(err.stderr) : "";
+  const fallbackText = String(err?.message ?? err ?? "");
+  return {
+    exitCode: status,
+    stdout,
+    stderr: stderrText || fallbackText,
+  };
+}
+
+function runChainVerifyAll(worktreePath, opts) {
+  const execFn =
+    typeof opts.chainExecFn === "function" ? opts.chainExecFn : execFileSync;
+  const scriptPath = path.join(
+    worktreePath,
+    "scripts",
+    "check",
+    "reject-streak-chain.mjs",
+  );
+  const ledgerPath = path.join(worktreePath, ".harness", "reject-streak.json");
+  const chainPath = path.join(
+    worktreePath,
+    ".harness",
+    "reject-streak-chain.json",
+  );
+  try {
+    const stdout = execFn(
+      "node",
+      [scriptPath, "verify-all", "--ledger", ledgerPath, "--chain", chainPath],
+      { encoding: "utf8" },
+    );
+    return { exitCode: 0, stdout: String(stdout ?? "") };
+  } catch (err) {
+    return chainVerifyErrorToResult(err);
+  }
+}
+
+// verify-all의 exit 2 stdout은 `  BLOCK <issueId> -- <reason>` 줄을
+// 최소 1개 담는다(reject-streak-chain.mjs 자신의 CLI 포맷, 이 파일이
+// 재구현하지 않고 그대로 파싱만 한다).
+const CHAIN_BLOCK_LINE_RE = /^\s*BLOCK\s+(\S+)\s+--\s+(.*)$/m;
+
+function extractTamperDetail(stdout) {
+  const m = CHAIN_BLOCK_LINE_RE.exec(stdout ?? "");
+  return m
+    ? { issueId: m[1], reason: m[2].trim() }
+    : { issueId: null, reason: null };
+}
+
+function firstLine(text) {
+  const t = String(text ?? "").trim();
+  const nl = t.indexOf("\n");
+  return nl === -1 ? t : t.slice(0, nl);
+}
+
+function judgeChainIntegrityForWorktree(worktreePath, opts) {
+  const r = runChainVerifyAll(worktreePath, opts);
+  if (r.exitCode === 2) {
+    const { issueId, reason } = extractTamperDetail(r.stdout);
+    return {
+      worktreePath,
+      status: CHAIN_WIRE_STATUS.JUDGED,
+      verdict: CHAIN_VERDICT.TAMPER_DETECTED,
+      issueId,
+      reason,
+    };
+  }
+  if (r.exitCode === 0) {
+    if (r.stdout.includes("UNJUDGABLE")) {
+      return {
+        worktreePath,
+        status: CHAIN_WIRE_STATUS.QUERY_FAILED,
+        reason: firstLine(r.stdout),
+      };
+    }
+    return {
+      worktreePath,
+      status: CHAIN_WIRE_STATUS.JUDGED,
+      verdict: CHAIN_VERDICT.CLEAN,
+    };
+  }
+  return {
+    worktreePath,
+    status: CHAIN_WIRE_STATUS.QUERY_FAILED,
+    reason: firstLine(r.stderr || r.stdout || `exit=${String(r.exitCode)}`),
+  };
+}
+
+export const CHAIN_SCAN_SEVERITY = Object.freeze({
+  NORMAL: 0, // JUDGED+CLEAN
+  QUERY_FAILURE: 1, // 판정 불가(원장/사이드카 판독 실패, 스폰 실패)
+  COLLECTION_FAILURE: 2, // 워크트리 열거 실패
+  TAMPER_DETECTED: 3, // 가장 나쁨 -- 위조 확인
+});
+
+function chainSeverityOf(entry) {
+  if (entry.status === CHAIN_SCAN_FAILURE.WORKTREE_LIST_FAILED) {
+    return CHAIN_SCAN_SEVERITY.COLLECTION_FAILURE;
+  }
+  if (entry.status === CHAIN_WIRE_STATUS.QUERY_FAILED) {
+    return CHAIN_SCAN_SEVERITY.QUERY_FAILURE;
+  }
+  if (
+    entry.status === CHAIN_WIRE_STATUS.JUDGED &&
+    entry.verdict === CHAIN_VERDICT.TAMPER_DETECTED
+  ) {
+    return CHAIN_SCAN_SEVERITY.TAMPER_DETECTED;
+  }
+  return CHAIN_SCAN_SEVERITY.NORMAL;
+}
+
+// judgeChainIntegrityAcrossWorktrees({repoRoot}, opts) -- postcheck 축과
+// 대칭 구조(워크트리 전부 열거 -> 각각 개별 판정 -> 가장 나쁜 항목을
+// 대표값으로 상위에 싣는다). postcheck와 달리 이 축은 배달이 남긴
+// 영수증이 아니라 매번 원장 자체를 재검증한다 -- 배달이 0건이어도
+// 다음 tick에 위조가 드러난다(§1 요건 "push 경로").
+export function judgeChainIntegrityAcrossWorktrees({ repoRoot }, opts = {}) {
+  const list = collectGitWorktrees(repoRoot, opts);
+  if (!list.ok) {
+    return {
+      status: CHAIN_SCAN_FAILURE.WORKTREE_LIST_FAILED,
+      detail: list.detail,
+      worktrees: [],
+      totalWorktrees: 0,
+      worstCount: 1,
+    };
+  }
+  const worktrees = list.worktrees.map((wt) =>
+    judgeChainIntegrityForWorktree(wt, opts),
+  );
+  const worstSeverity = worktrees.reduce(
+    (acc, w) => Math.max(acc, chainSeverityOf(w)),
+    CHAIN_SCAN_SEVERITY.NORMAL,
+  );
+  const worstEntries = worktrees.filter(
+    (w) => chainSeverityOf(w) === worstSeverity,
+  );
+  const worst = worstEntries[0] ?? null;
+  return {
+    status: worst ? worst.status : CHAIN_WIRE_STATUS.JUDGED,
+    verdict: worst ? worst.verdict : CHAIN_VERDICT.CLEAN,
+    issueId: worst ? worst.issueId : undefined,
+    reason: worst ? worst.reason : undefined,
+    worktreePath: worst ? worst.worktreePath : undefined,
+    worktrees,
+    totalWorktrees: worktrees.length,
+    worstCount: worstEntries.length,
+  };
+}
+
 // runOrchStallDetect(argv) -> {result, exitCode} -- CLI 몸통을 순수 함수에
 // 가깝게 뽑아 시험이 process.exit 없이 호출할 수 있게 한다. I/O(파일
 // 읽기·git 실행)는 그대로 하되, 프로세스 종료·stdout 출력은 하지 않는다.
@@ -2505,6 +2702,10 @@ export function runOrchStallDetect(argv, opts = {}) {
   // 조립된다 -- orca 재호출 0(영수증 파일만 읽는다), §2-3 부작용 0 계약
   // 유지.
   const postcheck = judgeDispatchPostcheckAcrossWorktrees({ repoRoot }, opts);
+  // HYK-239-chain-wire-2: 원장 해시체인 위조 탐지 축도 같은 진입점에서
+  // 조립된다(push 경로, §1). 언제나 맨 끝에 붙는다(§1 설계 제약 3 --
+  // 기존 축의 필드·순서·값 불변).
+  const chain = judgeChainIntegrityAcrossWorktrees({ repoRoot }, opts);
   return {
     result: {
       ...result,
@@ -2520,6 +2721,7 @@ export function runOrchStallDetect(argv, opts = {}) {
       unconsumed,
       escalation,
       postcheck,
+      chain,
     },
     exitCode: EXIT_CODE_BY_VERDICT[result.verdict] ?? 3,
     cli,

@@ -277,6 +277,22 @@ function extractPostcheckFields(postcheck) {
   };
 }
 
+// HYK-239-chain-wire-2 (coder-task.md §1) -- 원장 해시체인 위조 탐지 축
+// 필드도 같은 4필드 관례로 옮겨 적는다. 위조가 확인됐을 때(TAMPER_DETECTED)
+// 사람이 읽는 상세(어느 이슈·무슨 사유)를 위해 issueId/reason도 함께
+// 옮긴다(postcheck의 runtimeTaskId/harnessTaskId/worktreePath와 같은 이유).
+function extractChainFields(chain) {
+  return {
+    chainStatus: pickString(chain, "status"),
+    chainVerdict: pickString(chain, "verdict"),
+    chainWorstCount: pickNumber(chain, "worstCount"),
+    chainTotalWorktrees: pickNumber(chain, "totalWorktrees"),
+    chainIssueId: pickString(chain, "issueId"),
+    chainReason: pickString(chain, "reason"),
+    chainWorktreePath: pickString(chain, "worktreePath"),
+  };
+}
+
 function parseDetectorStdout(stdout) {
   try {
     const parsed = JSON.parse(String(stdout).trim());
@@ -294,6 +310,7 @@ function parseDetectorStdout(stdout) {
       ? parsed.escalation
       : null;
     const postcheck = isPlainObject(parsed.postcheck) ? parsed.postcheck : null;
+    const chain = isPlainObject(parsed.chain) ? parsed.chain : null;
     return {
       verdict: typeof parsed.verdict === "string" ? parsed.verdict : null,
       reasonCode:
@@ -304,6 +321,7 @@ function parseDetectorStdout(stdout) {
       ...extractUnconsumedFields(unconsumed),
       ...extractEscalationFields(escalation),
       ...extractPostcheckFields(postcheck),
+      ...extractChainFields(chain),
     };
   } catch {
     return {
@@ -339,6 +357,13 @@ function parseDetectorStdout(stdout) {
       postcheckRuntimeTaskId: null,
       postcheckHarnessTaskId: null,
       postcheckWorktreePath: null,
+      chainStatus: null,
+      chainVerdict: null,
+      chainWorstCount: null,
+      chainTotalWorktrees: null,
+      chainIssueId: null,
+      chainReason: null,
+      chainWorktreePath: null,
     };
   }
 }
@@ -650,6 +675,39 @@ function buildPostcheckSegments(detectorResult) {
   };
 }
 
+// HYK-239-chain-wire-2 (coder-task.md §1 요건2 "코드값만 찍고 끝내지
+// 마라") -- TAMPER_DETECTED일 때만 사람이 읽는 상세를 덧붙인다(postcheck의
+// postcheckDetailSegment와 동일 원칙 -- 정상/판정불가는 4필드 세그먼트만
+// 으로 충분, 소음 최소화).
+function chainDetailSegment({ verdict, issueId, reason, worktreePath }) {
+  if (verdict !== "TAMPER_DETECTED") return null;
+  const issue = sanitizeFailureToken(issueId, "unknown_issue");
+  const why = truncateToken(
+    sanitizeFailureToken(reason, "reason_unavailable"),
+    MAX_PARTIAL_FAILURE_REASON_CHARS,
+  );
+  const wt = sanitizeFailureToken(worktreePath, "unknown_worktree");
+  return `chain_detail=${issue}@${wt}:${why}`;
+}
+
+// buildLogLine에서 분리(postcheck와 동일 위치/이유).
+function buildChainSegments(detectorResult) {
+  return {
+    chainSegment: axisLogSegment("chain", {
+      status: detectorResult.chainStatus,
+      verdict: detectorResult.chainVerdict,
+      worstCount: detectorResult.chainWorstCount,
+      totalWorktrees: detectorResult.chainTotalWorktrees,
+    }),
+    chainDetail: chainDetailSegment({
+      verdict: detectorResult.chainVerdict,
+      issueId: detectorResult.chainIssueId,
+      reason: detectorResult.chainReason,
+      worktreePath: detectorResult.chainWorktreePath,
+    }),
+  };
+}
+
 function escalationDetailSegment({ wakeScopes, newlyNotified, stateMissing }) {
   if (!Array.isArray(wakeScopes) || wakeScopes.length === 0) return null;
   const newKeys = new Set(
@@ -762,6 +820,9 @@ function buildAxisLogSegments(detectorResult, capResult, escalationDedupe) {
   // 세그먼트의 필드·순서·값 불변, §7-7/§6 기존 축 회귀 0).
   const { postcheckSegment, postcheckDetail } =
     buildPostcheckSegments(detectorResult);
+  // HYK-239-chain-wire-2: 새 축은 언제나 맨 끝에 붙는다(§1 설계 제약 3 --
+  // 기존 여섯+postcheck+sweep 세그먼트의 필드·순서·값 불변).
+  const { chainSegment, chainDetail } = buildChainSegments(detectorResult);
   return {
     seatSegment,
     seatFailureSegment,
@@ -774,6 +835,8 @@ function buildAxisLogSegments(detectorResult, capResult, escalationDedupe) {
     escalationDetail,
     postcheckSegment,
     postcheckDetail,
+    chainSegment,
+    chainDetail,
   };
 }
 
@@ -815,6 +878,11 @@ export function buildLogLine({
     segments.postcheckSegment,
     segments.postcheckDetail,
     sweepLogSegment(sweepResult),
+    // HYK-239-chain-wire-2 (coder-task.md §1 설계 제약 3): 이 축은 지금
+    // 이 시점의 맨 끝이다 -- 앞선 모든 세그먼트의 필드·순서·값은 이
+    // 라운드가 손대지 않았다(§4-3 무회귀로 실증).
+    segments.chainSegment,
+    segments.chainDetail,
   ]
     .filter(Boolean)
     .join(" ");
