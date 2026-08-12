@@ -70,6 +70,13 @@ import { judgeConcurrency } from "./concurrency-core.mjs";
 // 부작용 0을 유지해야 하는데 dedupe는 상태 파일 쓰기가 필요하다). 판단
 // 로직(escalation-state.mjs)은 여기서도 재구현하지 않고 그대로 부른다.
 import { shouldNotify } from "../relay/escalation-state.mjs";
+// HYK-228 (coder-task.md §2 항1) -- admission sweep의 "발동 주체"를 이
+// 기존 주기 사이클에 얹는다(admission-sweep-wire.mjs 헤더의 설계 선택
+// 근거 참조). ★opt-in만: `admissionSweep`을 호출자가 명시적으로 주지
+// 않으면(기본값 null) 이 단계는 아예 실행되지 않는다 -- 기존 호출자
+// (기존 시험 포함)는 아무 것도 바뀌지 않는다(§6/§7 회귀 0, notifyDir
+// 패턴과 동일 원칙).
+import { runAdmissionSweepTrigger } from "./admission-sweep-wire.mjs";
 
 export const MAX_LOG_LINES = 5000;
 
@@ -694,17 +701,10 @@ function computeCapResult({ repoRoot, capPath, capReadFn }) {
   }
 }
 
-export function buildLogLine({
-  nowIso,
-  detectorResult,
-  capResult,
-  escalationDedupe,
-}) {
-  if (detectorResult.runnerFailure) {
-    return `${nowIso} RUNNER_FAILURE message=${detectorResult.message}`;
-  }
-  const verdict = detectorResult.verdict ?? "UNKNOWN";
-  const reason = detectorResult.reasonCode ?? "NONE";
+// HYK-228 4R (coder-task.md §1 항3/§2): buildLogLine에서 세그먼트 조립부만
+// 추출(max-lines-per-function 수리) -- 각 세그먼트의 축·필드·순서·값은
+// 원문 그대로, 호출 순서만 옮겼다(동작 무변경, node --test 수치로 증명).
+function buildAxisLogSegments(detectorResult, capResult, escalationDedupe) {
   const seatSegment = axisLogSegment("seat", {
     status: detectorResult.seatLivenessStatus,
     verdict: detectorResult.seatLivenessVerdict,
@@ -762,11 +762,7 @@ export function buildLogLine({
   // 세그먼트의 필드·순서·값 불변, §7-7/§6 기존 축 회귀 0).
   const { postcheckSegment, postcheckDetail } =
     buildPostcheckSegments(detectorResult);
-  return [
-    nowIso,
-    `exit=${detectorResult.exitCode}`,
-    `verdict=${verdict}`,
-    `reason=${reason}`,
+  return {
     seatSegment,
     seatFailureSegment,
     idleSegment,
@@ -778,6 +774,47 @@ export function buildLogLine({
     escalationDetail,
     postcheckSegment,
     postcheckDetail,
+  };
+}
+
+export function buildLogLine({
+  nowIso,
+  detectorResult,
+  capResult,
+  escalationDedupe,
+  sweepResult,
+}) {
+  if (detectorResult.runnerFailure) {
+    return `${nowIso} RUNNER_FAILURE message=${detectorResult.message}`;
+  }
+  const verdict = detectorResult.verdict ?? "UNKNOWN";
+  const reason = detectorResult.reasonCode ?? "NONE";
+  const segments = buildAxisLogSegments(
+    detectorResult,
+    capResult,
+    escalationDedupe,
+  );
+  // HYK-228 (coder-task.md §2 항1): 새 축은 언제나 맨 끝에 붙는다(기존
+  // 여섯+postcheck 세그먼트의 필드·순서·값 불변, §7 기존 축 회귀 0) --
+  // admissionSweep이 주어지지 않은 기존 호출자는 sweepLogSegment가 null을
+  // 돌려주므로(filter(Boolean)) 로그 줄이 한 글자도 달라지지 않는다.
+  return [
+    nowIso,
+    `exit=${detectorResult.exitCode}`,
+    `verdict=${verdict}`,
+    `reason=${reason}`,
+    segments.seatSegment,
+    segments.seatFailureSegment,
+    segments.idleSegment,
+    segments.startSegment,
+    segments.startFailureSegment,
+    segments.unconsumedSegment,
+    segments.capSegment,
+    segments.escalationSegment,
+    segments.escalationDetail,
+    segments.postcheckSegment,
+    segments.postcheckDetail,
+    sweepLogSegment(sweepResult),
   ]
     .filter(Boolean)
     .join(" ");
@@ -855,29 +892,211 @@ function runReachStep({
   }
 }
 
-// runWatchOnce(...) -- 한 번의 실행 사이클. 모든 I/O는 주입 가능(시험이
-// 실제 fs/child_process를 건드리지 않고 스파이로 검증할 수 있게).
-export function runWatchOnce({
+// runSweepStep -- admission sweep 트리거 단계(coder-task §2 항1). 이
+// 단계 자신의 실패가 이 러너의 계약(로그 한 줄 + 생존 기록)을 깨서는
+// 안 된다(runReachStep/computeCapResult와 동일 원칙 -- v1은 로그만).
+// `admissionSweep`이 없으면(기본값, 대부분의 호출자) 아예 실행하지
+// 않고 `{notRun:true}`를 돌려준다 -- 로그 줄에 아무 세그먼트도 더하지
+// 않는다(회귀 0).
+function runSweepStep({ admissionSweep, sweepExecFn, now }) {
+  if (
+    !admissionSweep ||
+    !admissionSweep.ledgerPath ||
+    !admissionSweep.lockPath
+  ) {
+    return { notRun: true };
+  }
+  try {
+    const result = runAdmissionSweepTrigger({
+      ledgerPath: admissionSweep.ledgerPath,
+      lockPath: admissionSweep.lockPath,
+      staleAfterMs: admissionSweep.staleAfterMs,
+      recoveryGraceMs: admissionSweep.recoveryGraceMs,
+      execFn: sweepExecFn,
+      now: new Date(now).toISOString(),
+    });
+    return { notRun: false, ...result };
+  } catch (err) {
+    return {
+      notRun: false,
+      ok: false,
+      status: "SWEEP_TRIGGER_RUNNER_FAILURE",
+      reasonCode: "RUNNER_THREW",
+      message: err && err.message ? err.message : String(err),
+    };
+  }
+}
+
+// sweepLogSegment -- admissionSweep이 이 회차에 실제로 돌았을 때만 로그
+// 줄에 한 세그먼트를 더한다(기존 세그먼트와 동일한 "사람이 읽는 사유"
+// 원칙 -- status/reasonCode/회수 건수).
+function sweepLogSegment(sweepResult) {
+  if (!sweepResult || sweepResult.notRun) return null;
+  const status = sweepResult.status ?? "NONE";
+  const reason = sweepResult.reasonCode ?? "NONE";
+  const recovered = Array.isArray(sweepResult.changed)
+    ? sweepResult.changed.length
+    : "NONE";
+  return `sweep_status=${status} sweep_reason=${reason} sweep_recovered=${recovered}`;
+}
+
+// sweepRecordField -- coder-r2 rejection-2 (review-r1.md §B): watch.log의
+// 로그 줄만으로는 "사이클은 돌았지만 수거 단계 자신이 죽었다"를 last-run.
+// json 소비자(신선도 판정)가 알 수 없었다 -- 로그는 사람이 읽는 트레일일
+// 뿐, judgeWatchFreshness는 last-run.json만 본다. 그래서 이 필드를
+// `record`(last-run.json에 그대로 쓰이는 객체)에도 심는다.
+//
+// `watch-freshness-core.mjs`의 계약은 건드리지 않는다(coder-r2 지시 그대로)
+// -- `isValidLastRun`은 `recordedAtMs`만 검사하므로(그 파일 §57-60 참조)
+// 이 형제 필드는 그 함수에 아무 영향도 주지 않는다(실측: 아래 새 코어의
+// 시험이 기존 watch-freshness-core.test.mjs 스위트와 별개로 이를 재확인).
+//
+// 모양은 admission-sweep-freshness-core.mjs가 기대하는 것과 1:1로
+// 맞춘다: `{ran:false}`(sweep 미설정, 기존 호출자 대다수) 또는
+// `{ran:true, ok, status, reasonCode}`(sweep이 이 회차에 실제로 돌았음 --
+// ok:false는 수거 자체의 실패, ok:true + 아래 changedCount:0은 "할 일이
+// 없어 조용히 0건"과 구별하지 않는다 -- 그 구별은 이미 sweepResult.changed
+// 자체가 갖고 있으므로 이 필드는 changedCount도 함께 싣는다).
+function sweepRecordField(sweepResult) {
+  if (!sweepResult || sweepResult.notRun) {
+    return { ran: false };
+  }
+  return {
+    ran: true,
+    ok: sweepResult.ok === true,
+    status: sweepResult.status ?? null,
+    reasonCode: sweepResult.reasonCode ?? null,
+    changedCount: Array.isArray(sweepResult.changed)
+      ? sweepResult.changed.length
+      : null,
+  };
+}
+
+// HYK-228 4R (coder-task.md §1 항4): fs 계열 주입 함수 5개의 기본값
+// 해석만 떼어낸다(runWatchOnce의 complexity 수리 -- 기본 파라미터 각각이
+// 분기 하나로 잡히므로, 여기로 옮긴 5개만큼 runWatchOnce 자신의 complexity
+// 가 줄어든다).
+// HYK-228 5R(coder-task.md §1, review-r3.md 반려 수리): ⛔`??` 금지 --
+// 원래 기본 파라미터(`readFn = readFileSync` 형태)는 값이 **`undefined`
+// 일 때만** 기본값을 쓴다. `??`는 `null`도 기본값으로 바꿔버려, 호출자가
+// 의도적으로 `readFn: null`을 주입하는 경우의 의미가 달라진다(검토가
+// 실측 재현: 기존 로그가 있는 상태에서 `readFn: null`로 돌리면 2R 원본은
+// appendLogWithRotation에 null이 그대로 전달돼 예외 → 기존 로그를 빈
+// 값으로 처리했는데, `??`로 바꾼 뒤에는 기존 로그가 보존돼 동작이
+// 달라졌다). 아래는 `value === undefined ? default : value` -- 원래
+// 기본 파라미터와 동형, `null`은 그대로 통과시킨다.
+function resolveWatchOnceFsFns({
+  readFn,
+  writeFn,
+  renameFn,
+  mkdirFn,
+  existsFn,
+}) {
+  return {
+    readFn: readFn === undefined ? readFileSync : readFn,
+    writeFn: writeFn === undefined ? writeFileSync : writeFn,
+    renameFn: renameFn === undefined ? renameSync : renameFn,
+    mkdirFn: mkdirFn === undefined ? mkdirSync : mkdirFn,
+    existsFn: existsFn === undefined ? existsSync : existsFn,
+  };
+}
+
+// runWatchOnceCore(...) -- runWatchOnce 본문 그 자체(HYK-228 4R,
+// max-lines-per-function 수리를 위해 얇은 기본값 래퍼 runWatchOnce에서
+// 추출). 모든 파라미터는 이미 해석된 값이며, 이 함수 자신은 기본값을
+// 갖지 않는다(complexity를 늘리지 않는다) -- 로직·순서·값은 원문 그대로.
+// HYK-228 4R (coder-task.md §1 항4): runWatchOnceCore에서 "로그 줄 조립 +
+// 생존 기록 쓰기 + reach 알림" 꼬리만 한 번 더 추출한다(prettier가 되돌린
+// 줄바꿈으로 84줄까지 다시 늘어난 것을 수리) -- 순서·값·부작용 모두 원문
+// 그대로, 이름과 위치만 옮겼다.
+function finalizeWatchOnceCycle({
+  watchDir,
+  now,
+  readFn,
+  writeFn,
+  renameFn,
+  mkdirFn,
+  existsFn,
+  maxLogLines,
+  notifyDir,
+  detectorResult,
+  capResult,
+  escalationDedupe,
+  sweepResult,
+}) {
+  const nowIso = new Date(now).toISOString();
+  const logPath = path.join(watchDir, "watch.log");
+  const aliveRecordPath = path.join(watchDir, "last-run.json");
+  const line = buildLogLine({
+    nowIso,
+    detectorResult,
+    capResult,
+    escalationDedupe,
+    sweepResult,
+  });
+  appendLogWithRotation({
+    readFn,
+    writeFn,
+    logPath,
+    line,
+    maxLines: maxLogLines,
+  });
+  writeAliveRecordAtomic({
+    writeFn,
+    renameFn,
+    aliveRecordPath,
+    // HYK-228 coder-r2 rejection-2 (review-r1.md §B): `sweep`을 형제
+    // 필드로 심는다 -- `...detectorResult` 뒤에 와서 detectorResult가
+    // 우연히 `sweep` 키를 갖더라도(현재는 갖지 않는다) 이 필드가 이긴다.
+    // `recordedAtMs`는 여전히 유일한 신선도 판정 입력이라
+    // (watch-freshness-core.mjs 계약 불변) 기존 소비자는 이 새 형제
+    // 필드를 무시해도 완전히 무회귀다.
+    record: {
+      recordedAtMs: now,
+      ...detectorResult,
+      sweep: sweepRecordField(sweepResult),
+    },
+  });
+  const reachResult = runReachStep({
+    notifyDir,
+    watchDir,
+    now,
+    readFn,
+    writeFn,
+    mkdirFn,
+    existsFn,
+    logPath,
+  });
+  return {
+    logPath,
+    aliveRecordPath,
+    line,
+    detectorResult,
+    reachResult,
+    capResult,
+    escalationDedupe,
+    sweepResult,
+  };
+}
+
+function runWatchOnceCore({
   repoRoot,
   watchDir,
-  nodePath = process.execPath,
-  detectorPath = path.join(
-    repoRoot,
-    "scripts",
-    "supervisor",
-    "orch-stall-detect.mjs",
-  ),
-  execFn = defaultExec,
-  now = Date.now(),
-  maxLogLines = MAX_LOG_LINES,
-  readFn = readFileSync,
-  writeFn = writeFileSync,
-  renameFn = renameSync,
-  mkdirFn = mkdirSync,
-  existsFn = existsSync,
-  notifyDir = null,
+  nodePath,
+  detectorPath,
+  execFn,
+  now,
+  maxLogLines,
+  readFn,
+  writeFn,
+  renameFn,
+  mkdirFn,
+  existsFn,
+  notifyDir,
   capPath,
   capReadFn,
+  admissionSweep,
+  sweepExecFn,
 }) {
   mkdirFn(watchDir, { recursive: true });
   const detectorResult = runDetector({
@@ -899,47 +1118,75 @@ export function runWatchOnce({
     existsFn,
     mkdirFn,
   });
-  const nowIso = new Date(now).toISOString();
-  const logPath = path.join(watchDir, "watch.log");
-  const aliveRecordPath = path.join(watchDir, "last-run.json");
-  const line = buildLogLine({
-    nowIso,
-    detectorResult,
-    capResult,
-    escalationDedupe,
-  });
-  appendLogWithRotation({
-    readFn,
-    writeFn,
-    logPath,
-    line,
-    maxLines: maxLogLines,
-  });
-  writeAliveRecordAtomic({
-    writeFn,
-    renameFn,
-    aliveRecordPath,
-    record: { recordedAtMs: now, ...detectorResult },
-  });
-  const reachResult = runReachStep({
-    notifyDir,
+  const sweepResult = runSweepStep({ admissionSweep, sweepExecFn, now });
+  return finalizeWatchOnceCycle({
     watchDir,
     now,
     readFn,
     writeFn,
+    renameFn,
     mkdirFn,
     existsFn,
-    logPath,
-  });
-  return {
-    logPath,
-    aliveRecordPath,
-    line,
+    maxLogLines,
+    notifyDir,
     detectorResult,
-    reachResult,
     capResult,
     escalationDedupe,
-  };
+    sweepResult,
+  });
+}
+
+// runWatchOnce(...) -- 한 번의 실행 사이클. 모든 I/O는 주입 가능(시험이
+// 실제 fs/child_process를 건드리지 않고 스파이로 검증할 수 있게). 이
+// 함수 자신은 기본값 해석 + runWatchOnceCore 호출만 한다(HYK-228 4R,
+// coder-task.md §1 항4 -- max-lines-per-function/complexity 수리, 공개
+// 시그니처·기본값·호출 순서·반환값은 원문과 완전히 동일).
+export function runWatchOnce({
+  repoRoot,
+  watchDir,
+  nodePath = process.execPath,
+  detectorPath = path.join(
+    repoRoot,
+    "scripts",
+    "supervisor",
+    "orch-stall-detect.mjs",
+  ),
+  execFn = defaultExec,
+  now = Date.now(),
+  maxLogLines = MAX_LOG_LINES,
+  readFn,
+  writeFn,
+  renameFn,
+  mkdirFn,
+  existsFn,
+  notifyDir = null,
+  capPath,
+  capReadFn,
+  admissionSweep = null,
+  sweepExecFn,
+}) {
+  const fsFns = resolveWatchOnceFsFns({
+    readFn,
+    writeFn,
+    renameFn,
+    mkdirFn,
+    existsFn,
+  });
+  return runWatchOnceCore({
+    repoRoot,
+    watchDir,
+    nodePath,
+    detectorPath,
+    execFn,
+    now,
+    maxLogLines,
+    ...fsFns,
+    notifyDir,
+    capPath,
+    capReadFn,
+    admissionSweep,
+    sweepExecFn,
+  });
 }
 
 const invokedDirectly =
@@ -956,16 +1203,37 @@ if (invokedDirectly) {
   // 쓴다. `--no-reach`를 주면 reach 단계 자체를 끈다(기존 운영 결선을
   // 그대로 유지하고 싶을 때의 탈출구).
   let notifyDir = DEFAULT_NOTIFY_DIR;
+  // HYK-228 (coder-task.md §2 항1): 사람이 이 CLI를 직접(또는 등록된
+  // schtasks 명령줄에 추가해) 부를 때만 admission sweep 단계가 켜진다 --
+  // 생략하면(기본값) 이 저장소의 어떤 기존 호출자도 바뀌지 않는다(회귀
+  // 0). ★실제 스케줄러 등록 명령줄에 이 두 플래그를 추가하는 것은 사람
+  // 손이다(schedule-wire.mjs의 `--confirm` 게이트와 동일한 재량 -- 이
+  // 라운드는 코드 경로만 잇는다, CODER 보고서 §5 참조).
+  let admissionSweepLedger = null;
+  let admissionSweepLock = null;
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === "--repo-root") repoRoot = argv[++i];
     else if (argv[i] === "--watch-dir") watchDir = argv[++i];
     else if (argv[i] === "--notify-dir") notifyDir = argv[++i];
     else if (argv[i] === "--no-reach") notifyDir = null;
+    else if (argv[i] === "--admission-sweep-ledger")
+      admissionSweepLedger = argv[++i];
+    else if (argv[i] === "--admission-sweep-lock")
+      admissionSweepLock = argv[++i];
   }
   if (!repoRoot || !watchDir) {
     console.error("usage: watch-run.mjs --repo-root <path> --watch-dir <path>");
     process.exit(1);
   }
-  const result = runWatchOnce({ repoRoot, watchDir, notifyDir });
+  const admissionSweep =
+    admissionSweepLedger && admissionSweepLock
+      ? { ledgerPath: admissionSweepLedger, lockPath: admissionSweepLock }
+      : null;
+  const result = runWatchOnce({
+    repoRoot,
+    watchDir,
+    notifyDir,
+    admissionSweep,
+  });
   process.exit(result.detectorResult.runnerFailure ? 1 : 0);
 }
