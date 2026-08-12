@@ -114,6 +114,15 @@ export const DISPATCH_GATE_STATE = Object.freeze({
   REJECT_LEDGER_CORRUPT: "REJECT_LEDGER_CORRUPT",
   REJECT_LEDGER_ENTRY_MALFORMED: "REJECT_LEDGER_ENTRY_MALFORMED",
   REJECT_LEDGER_RESOLUTION_UNJUDGABLE: "REJECT_LEDGER_RESOLUTION_UNJUDGABLE",
+  // HYK-239: reject-streak-chain.mjs wiring (dispatch-gate-decision.mjs's
+  // evaluateChainDecision). Kept distinct from REJECT_BLOCKED (which means
+  // "the gate SUBPROCESS itself said BLOCK") because these two originate
+  // from a different check entirely (checkAppendOnly, not a gate exit
+  // code) and from each other (판정 불가 vs. 판정됨-그리고-나쁨, §2 requirement
+  // 2 -- see evaluateChainDecision's header comment for the fail-closed
+  // rationale on the UNJUDGABLE branch specifically).
+  REJECT_CHAIN_TAMPER_DETECTED: "REJECT_CHAIN_TAMPER_DETECTED",
+  REJECT_CHAIN_UNJUDGABLE: "REJECT_CHAIN_UNJUDGABLE",
 });
 
 function firstNonEmpty(...candidates) {

@@ -7,6 +7,7 @@ import {
   writeFileSync,
   rmSync,
   readFileSync,
+  existsSync,
 } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -999,5 +1000,134 @@ test("(25) HYK-221 축1 회귀 방지 -- taskPath가 어떤 git 저장소에도 
     const r = runCli([taskPath, "--ledger", ledgerPath]);
     assert.equal(r.status, 0, r.stdout + r.stderr);
     assert.match(r.stdout, /ALLOW/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// HYK-239: reject-streak-chain.mjs wiring. §1 결선 위치 = this file (측정
+// 근거는 파일 헤더의 HYK-239 주석 참조). §2 세 요건의 기계 증거:
+//   1) N -> N+1 checkpoint 증가가 stdout에 사람이 읽을 수 있게 보인다(아래
+//      (26)).
+//   2) 위조 시 사람이 읽을 수 있는 사유와 함께 비0 종료(아래 (27)/(28)).
+//   3) 도달 경로 = 이 CLI 자체가 배달 게이트다(파일 헤더 참조) -- REJECT는
+//      곧 배달 거부.
+// ---------------------------------------------------------------------------
+
+function envelopeText() {
+  return [
+    "<!-- reject-streak-envelope",
+    "원인 분류: 모델 한계",
+    "ORCH 조치:",
+    "- 모델 변경: sonnet -> opus 승격",
+    "-->",
+  ].join("\n");
+}
+
+test("(26) HYK-239 결선: 첫 실행에서 체크포인트가 0 -> N으로 늘어나고, 두 번째 실행은 변화 없음(N -> N, 멱등) -- 둘 다 stdout에 사람이 읽을 수 있게 보인다", () => {
+  withFixtureDir((dir) => {
+    const taskPath = join(dir, "coder-task.md");
+    writeFileSync(
+      taskPath,
+      `task_id: HYK-9300-chainwire-1\n${envelopeText()}\n`,
+      "utf8",
+    );
+    const ledgerPath = join(dir, "reject-streak.json");
+    writeLedger(ledgerPath, {
+      schema_version: 1,
+      issues: {
+        "HYK-9300": {
+          streak: 2,
+          history: [
+            { task_id: "HYK-9300-coder-1", verdict: "rejected", at: "a" },
+            { task_id: "HYK-9300-coder-2", verdict: "rejected", at: "b" },
+          ],
+        },
+      },
+    });
+    const r1 = runCli([taskPath, "--ledger", ledgerPath]);
+    assert.equal(r1.status, 0, r1.stdout + r1.stderr);
+    assert.match(r1.stdout, /ALLOW/);
+    assert.match(r1.stdout, /dispatch-gate-decision chain: PASS/);
+    assert.match(r1.stdout, /checkpoint 0 -> 2/);
+    const chainPath = join(dir, "reject-streak-chain.json");
+    assert.equal(existsSync(chainPath), true, "chain sidecar must be created");
+    const chain = JSON.parse(readFileSync(chainPath, "utf8"));
+    assert.equal(chain.issues["HYK-9300"].entries.length, 2);
+
+    const r2 = runCli([taskPath, "--ledger", ledgerPath]);
+    assert.equal(r2.status, 0, r2.stdout + r2.stderr);
+    assert.match(
+      r2.stdout,
+      /checkpoint 2 -> 2/,
+      "no new entries -> idempotent",
+    );
+  });
+});
+
+test("(27) HYK-239 ★핵심★ 위조 탐지 -- 이미 체크포인트된 원장 항목을 사후에 조용히 고치면(원장만 손댐, 사이드카는 그대로) 기존 두 게이트는 여전히 PASS 하지만 chain 검사가 REJECT하여 배달이 막힌다", () => {
+  withFixtureDir((dir) => {
+    const taskPath = join(dir, "coder-task.md");
+    writeFileSync(
+      taskPath,
+      `task_id: HYK-9301-tamper-1\n${envelopeText()}\n`,
+      "utf8",
+    );
+    const ledgerPath = join(dir, "reject-streak.json");
+    writeLedger(ledgerPath, {
+      schema_version: 1,
+      issues: {
+        "HYK-9301": {
+          streak: 2,
+          history: [
+            { task_id: "HYK-9301-coder-1", verdict: "rejected", at: "a" },
+            { task_id: "HYK-9301-coder-2", verdict: "rejected", at: "b" },
+          ],
+        },
+      },
+    });
+    // round 1: establishes the checkpoint baseline (as production would,
+    // one real dispatch at a time)
+    const r1 = runCli([taskPath, "--ledger", ledgerPath]);
+    assert.equal(r1.status, 0, r1.stdout + r1.stderr);
+
+    // self-tamper: the primary ledger's ALREADY-checkpointed history[1] is
+    // silently edited (e.g. a hand edit or a partial rollback script) --
+    // the sidecar is left untouched, exactly the "한쪽만 건드리고 다른 쪽은
+    // 잊는" scenario reject-streak-chain.mjs's own header documents as its
+    // real target.
+    const ledger = JSON.parse(readFileSync(ledgerPath, "utf8"));
+    ledger.issues["HYK-9301"].history[1].task_id = "HYK-9301-coder-2-TAMPERED";
+    writeFileSync(ledgerPath, JSON.stringify(ledger, null, 2), "utf8");
+
+    const r2 = runCli([taskPath, "--ledger", ledgerPath]);
+    assert.equal(
+      r2.status,
+      1,
+      "the two original gates alone would ALLOW this (envelope present, streak unchanged) -- only the chain check catches it",
+    );
+    assert.match(r2.stderr, /reject-streak gate: PASS/);
+    assert.match(r2.stderr, /reject-streak diagnostic-gate: PASS/);
+    assert.match(r2.stderr, /dispatch-gate-decision chain: BLOCK/);
+    assert.match(r2.stderr, /no longer matches checkpoint/);
+    assert.match(r2.stderr, /REJECT --/);
+  });
+});
+
+test("(28) HYK-239 판정 불가 ≠ 정상 -- 사이드카 파일이 손상(JSON 파싱 실패)되면 ALLOW로 접지 않고 REJECT_CHAIN_UNJUDGABLE 로 분리된 사유와 함께 배달 거부", () => {
+  withFixtureDir((dir) => {
+    const taskPath = join(dir, "coder-task.md");
+    writeFileSync(taskPath, "task_id: HYK-9302-corruptchain-1\nbody\n", "utf8");
+    const ledgerPath = join(dir, "reject-streak.json");
+    writeLedger(ledgerPath, { schema_version: 1, issues: {} });
+    const chainPath = join(dir, "reject-streak-chain.json");
+    writeFileSync(chainPath, "{ not valid json ][", "utf8");
+    const r = runCli([taskPath, "--ledger", ledgerPath]);
+    assert.equal(r.status, 1, r.stdout + r.stderr);
+    assert.match(r.stderr, /dispatch-gate-decision chain:.*UNJUDGABLE/);
+    assert.doesNotMatch(
+      r.stderr,
+      /chain: BLOCK/,
+      "corrupt sidecar must not be reported as a tamper BLOCK -- it is a distinct judgment-impossible state",
+    );
   });
 });

@@ -983,7 +983,13 @@ test("static: no PRODUCTION code imports orch-stall-detect.mjs yet (h -- can be 
         // the new dispatch-postcheck axis. Excluded on the identical "own
         // .test.mjs" basis as the files above.
         !f.endsWith("dispatch-postcheck-wire.test.mjs") &&
-        !f.endsWith("dispatch-postcheck-axis-wire.test.mjs"),
+        !f.endsWith("dispatch-postcheck-axis-wire.test.mjs") &&
+        // HYK-239-chain-wire-2: dispatch-chain-wire.test.mjs/dispatch-
+        // chain-axis-wire.test.mjs are the same shape once more for the
+        // new chain (원장 해시체인 위조 탐지) axis. Excluded on the
+        // identical "own .test.mjs" basis as the files above.
+        !f.endsWith("dispatch-chain-wire.test.mjs") &&
+        !f.endsWith("dispatch-chain-axis-wire.test.mjs"),
     );
   assert.deepEqual(
     importers,

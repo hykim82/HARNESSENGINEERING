@@ -171,6 +171,29 @@ export const AXES = Object.freeze([
       "DISPATCH_POSTCHECK_SCAN_RECEIPT_READ_FAILED",
     ]),
   }),
+  // HYK-239-chain-wire-2 (coder-task.md §1, 검토 1R 반려 수리) -- «원장
+  // 해시체인 위조 탐지» 축. §4 요건3과 동일 이유로 네 번째 예외가 생긴다:
+  // 이 AXES는 닫힌 배열이고 여기 등록된 축의 verdict/status만 "열린
+  // 이상"으로 분류돼 받는함(reach-notify-*.md)에 도달한다 -- 등록하지
+  // 않으면 watch.log(chain_*)까지만 가고 사람에게 안 간다(1-B가 금지하는
+  // "로그에만" 실패 형태 그 자체, 이번 라운드가 정확히 그 반려를 닫는다).
+  // badVerdicts = TAMPER_DETECTED(orch-stall-detect.mjs의
+  // judgeChainIntegrityAcrossWorktrees가 reject-streak-chain.mjs
+  // verify-all을 실호출해 얻은 exit 2). badStatuses = 이 축 자신의
+  // 판정 불가(CHAIN_QUERY_FAILED -- 원장/사이드카 판독 실패, §1-5 "판정
+  // 불가를 위조로 보고하지 마라"의 정반대 실수 방지: 판정 불가도
+  // 조용함으로 접지 않고 표면화는 하되 TAMPER_DETECTED와 다른 사유
+  // 문자열로 구별한다) + 워크트리 열거 실패.
+  Object.freeze({
+    key: "chain",
+    prefix: "chain",
+    label: "원장 위조 탐지(해시체인)",
+    badVerdicts: Object.freeze(["TAMPER_DETECTED"]),
+    badStatuses: Object.freeze([
+      "CHAIN_QUERY_FAILED",
+      "CHAIN_SCAN_WORKTREE_LIST_FAILED",
+    ]),
+  }),
 ]);
 
 // HYK-191-reach-1 실측 수리: 4축 필드(seat_*/idle_*/start_*/unconsumed_*)가

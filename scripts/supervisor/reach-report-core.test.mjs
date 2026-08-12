@@ -35,6 +35,8 @@ const LINE_DEFAULTS = {
   escalationVerdict: "NONE",
   postcheckStatus: "OK",
   postcheckVerdict: "NONE",
+  chainStatus: "JUDGED",
+  chainVerdict: "NONE",
 };
 
 function line(overrides) {
@@ -58,6 +60,8 @@ function line(overrides) {
     escalationVerdict,
     postcheckStatus,
     postcheckVerdict,
+    chainStatus,
+    chainVerdict,
   } = { ...LINE_DEFAULTS, ...overrides };
   return (
     `${ts} exit=0 verdict=${verdict} reason=${reason} ` +
@@ -67,7 +71,8 @@ function line(overrides) {
     `unconsumed_status=${unconsumedStatus} unconsumed_verdict=${unconsumedVerdict} unconsumed_worst_count=NONE unconsumed_worktrees=4 ` +
     `cap_status=${capStatus} cap_verdict=${capVerdict} cap_value=${capValue} cap_source=${capSource} ` +
     `escalation_status=${escalationStatus} escalation_verdict=${escalationVerdict} escalation_worst_count=NONE escalation_worktrees=1 ` +
-    `postcheck_status=${postcheckStatus} postcheck_verdict=${postcheckVerdict} postcheck_worst_count=NONE postcheck_worktrees=1`
+    `postcheck_status=${postcheckStatus} postcheck_verdict=${postcheckVerdict} postcheck_worst_count=NONE postcheck_worktrees=1 ` +
+    `chain_status=${chainStatus} chain_verdict=${chainVerdict} chain_worst_count=NONE chain_worktrees=1`
   );
 }
 
@@ -273,7 +278,7 @@ test("computeRecentSummary counts anomalous samples within the window, distinct 
   );
 });
 
-test("all 7 axes are independently tracked (one axis bad does not mask another) (1/1)", () => {
+test("all 8 axes are independently tracked (one axis bad does not mask another) (1/1)", () => {
   const t0 = Date.parse("2026-08-05T00:00:00.000Z");
   const entries = parseWatchLog(
     line({
@@ -292,6 +297,8 @@ test("all 7 axes are independently tracked (one axis bad does not mask another) 
       escalationVerdict: "NEEDS_INPUT",
       postcheckStatus: "OK",
       postcheckVerdict: "RECORD_MISSING",
+      chainStatus: "JUDGED",
+      chainVerdict: "TAMPER_DETECTED",
     }),
   ).entries;
   const open = computeOpenAnomalies(entries, t0);
