@@ -163,6 +163,45 @@ test("log rotation: a log pre-seeded at MAX_LOG_LINES stays capped after one mor
   }
 });
 
+// HYK-228 5R (coder-task.md §1 항2, review-r3.md 반려 재현 고정) --
+// resolveWatchOnceFsFns가 fs 기본값을 `??`로 해석했을 때 관측 가능한
+// 차이가 생겼던 그 경로를 회귀 시험으로 고정한다: `readFn: null`을 명시
+// 주입하면(기존 기본 파라미터와 동형으로) `null`은 기본값으로 치환되지
+// 않고 그대로 appendLogWithRotation에 전달돼 예외 -> catch에서 기존
+// 로그를 빈 값으로 처리한다(2R 원본 동작). `??`로 되돌아가면 `readFn`이
+// `readFileSync`로 치환돼 기존 로그가 보존되므로, 이 시험은 그 회귀를
+// 곧바로 잡는다.
+test("HYK-228 5R regression: readFn:null on an existing on-disk log is NOT defaulted (matches pre-refactor behavior -- null is swallowed by appendLogWithRotation's catch, old line is not preserved) (1/1)", () => {
+  const watchDir = tmpWatchDir();
+  try {
+    fs.mkdirSync(watchDir, { recursive: true });
+    const logPath = join(watchDir, "watch.log");
+    fs.writeFileSync(logPath, "old-line\n", "utf8");
+    const last = runWatchOnce({
+      repoRoot: ROOT,
+      watchDir,
+      now: NOW_MS,
+      execFn: () => progressingExec(),
+      readFn: null,
+    });
+    const logText = fs.readFileSync(last.logPath, "utf8");
+    assert.doesNotMatch(
+      logText,
+      /old-line/,
+      "readFn:null must not be silently defaulted to readFileSync (?? semantics) -- the pre-existing log line must be lost, exactly like the pre-HYK-228-4R behavior",
+    );
+    const lines = logText.trim().split("\n");
+    assert.equal(
+      lines.length,
+      1,
+      "only the new line should be present -- the old on-disk line was never read back in",
+    );
+    assert.match(lines[0], /verdict=PROGRESSING/);
+  } finally {
+    fs.rmSync(watchDir, { recursive: true, force: true });
+  }
+});
+
 test("buildLogLine: runner failure and detector result produce distinguishable single-line formats (2/2)", () => {
   const failLine = buildLogLine({
     nowIso: "2026-08-03T18:00:00.000Z",
