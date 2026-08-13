@@ -37,6 +37,8 @@ const LINE_DEFAULTS = {
   postcheckVerdict: "NONE",
   chainStatus: "JUDGED",
   chainVerdict: "NONE",
+  bindingStatus: "JUDGED",
+  bindingVerdict: "NONE",
 };
 
 function line(overrides) {
@@ -62,6 +64,8 @@ function line(overrides) {
     postcheckVerdict,
     chainStatus,
     chainVerdict,
+    bindingStatus,
+    bindingVerdict,
   } = { ...LINE_DEFAULTS, ...overrides };
   return (
     `${ts} exit=0 verdict=${verdict} reason=${reason} ` +
@@ -72,7 +76,8 @@ function line(overrides) {
     `cap_status=${capStatus} cap_verdict=${capVerdict} cap_value=${capValue} cap_source=${capSource} ` +
     `escalation_status=${escalationStatus} escalation_verdict=${escalationVerdict} escalation_worst_count=NONE escalation_worktrees=1 ` +
     `postcheck_status=${postcheckStatus} postcheck_verdict=${postcheckVerdict} postcheck_worst_count=NONE postcheck_worktrees=1 ` +
-    `chain_status=${chainStatus} chain_verdict=${chainVerdict} chain_worst_count=NONE chain_worktrees=1`
+    `chain_status=${chainStatus} chain_verdict=${chainVerdict} chain_worst_count=NONE chain_worktrees=1 ` +
+    `binding_status=${bindingStatus} binding_verdict=${bindingVerdict} binding_worst_count=NONE binding_worktrees=1`
   );
 }
 
@@ -278,7 +283,7 @@ test("computeRecentSummary counts anomalous samples within the window, distinct 
   );
 });
 
-test("all 8 axes are independently tracked (one axis bad does not mask another) (1/1)", () => {
+test("all 9 axes are independently tracked (one axis bad does not mask another) (1/1)", () => {
   const t0 = Date.parse("2026-08-05T00:00:00.000Z");
   const entries = parseWatchLog(
     line({
@@ -299,6 +304,8 @@ test("all 8 axes are independently tracked (one axis bad does not mask another) 
       postcheckVerdict: "RECORD_MISSING",
       chainStatus: "JUDGED",
       chainVerdict: "TAMPER_DETECTED",
+      bindingStatus: "JUDGED",
+      bindingVerdict: "MISMATCH",
     }),
   ).entries;
   const open = computeOpenAnomalies(entries, t0);

@@ -194,6 +194,25 @@ export const AXES = Object.freeze([
       "CHAIN_SCAN_WORKTREE_LIST_FAILED",
     ]),
   }),
+  // HYK-240 요건3 (coder-task.md §3) -- 승인<->코드지문 결속 위반 축.
+  // badVerdicts = MISMATCH(orch-stall-detect.mjs의
+  // judgeApprovalBindingAcrossWorktrees가 각 워크트리 자기 자신의
+  // review-approval-binding.mjs --explain을 실행해 얻은 "3) 판정: 불일치"
+  // 판독). badStatuses = 이 축 자신의 판정 불가(BINDING_QUERY_FAILED --
+  // 스폰/파싱 실패) + 워크트리 열거 실패. ⛔정직 한계: review.md는
+  // 있지만 binding-fingerprint 줄이 없는 "결속 없음" 상태는 이 축에서
+  // 열린 이상으로 잡지 않는다(judgeApprovalBindingForWorktree의 헤더
+  // 주석 참조 -- 그 상태의 강제는 커밋 게이트 자신의 몫).
+  Object.freeze({
+    key: "binding",
+    prefix: "binding",
+    label: "승인<->코드지문 결속 위반",
+    badVerdicts: Object.freeze(["MISMATCH"]),
+    badStatuses: Object.freeze([
+      "BINDING_QUERY_FAILED",
+      "BINDING_SCAN_WORKTREE_LIST_FAILED",
+    ]),
+  }),
 ]);
 
 // HYK-191-reach-1 실측 수리: 4축 필드(seat_*/idle_*/start_*/unconsumed_*)가

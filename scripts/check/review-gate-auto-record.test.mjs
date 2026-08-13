@@ -28,6 +28,10 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { execFileSync, spawnSync } from "node:child_process";
+import {
+  computeFingerprint,
+  formatBindingBlock,
+} from "./review-approval-binding.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REVIEW_GATE_PATH = join(HERE, "review-gate.mjs");
@@ -95,16 +99,40 @@ function addLinkedWorktree(mainDir) {
   return linkedDir;
 }
 
+// HYK-240: an approved review.md now needs a binding-fingerprint matching
+// `linkedDir`'s state at CLI time or checkApprovalBinding fail-closes it
+// ("결속 없음"). Compute it fresh here rather than hardcoding, so it stays
+// correct regardless of what else is on disk. Only meaningful for
+// verdict=approved -- rejected fixtures never reach the binding check.
 function writeReviewMd(linkedDir, { taskId, verdict, doneAt }) {
+  let binding = "";
+  if (verdict === "approved") {
+    const fp = computeFingerprint({ cwd: linkedDir });
+    assert.equal(
+      fp.ok,
+      true,
+      `fingerprint must be computable in ${linkedDir}: ${fp.reason}`,
+    );
+    binding = formatBindingBlock({
+      fingerprint: fp.fingerprint,
+      entries: fp.entries,
+    });
+  }
   writeFileSync(
     join(linkedDir, ".harness", "review.md"),
-    `for: ${taskId}\ntask_id: ${taskId}\nrole: REVIEW-CODEX\nverdict: ${verdict}\n\n>>> DONE: REVIEW-CODEX @ ${doneAt} KST\n`,
+    `for: ${taskId}\ntask_id: ${taskId}\nrole: REVIEW-CODEX\nverdict: ${verdict}\n${binding}\n>>> DONE: REVIEW-CODEX @ ${doneAt} KST\n`,
     "utf8",
   );
 }
 
+// HYK-240: production's commit-message file lives under `.git/`, outside
+// the working tree `git status` scans -- writing it inside `dir` would shift
+// the fingerprint computed above (writeReviewMd runs before this in every
+// call site, but keeping the message file physically out of `dir` makes
+// that ordering a non-issue either way).
 function writeCommitMsg(dir, subject) {
-  const p = join(dir, "commit-msg.txt");
+  const msgDir = mkdtempSync(join(tmpdir(), "hyk183-rg-commit-msg-"));
+  const p = join(msgDir, "commit-msg.txt");
   writeFileSync(p, `${subject}\n`, "utf8");
   return p;
 }

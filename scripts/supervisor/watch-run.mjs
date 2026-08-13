@@ -293,6 +293,77 @@ function extractChainFields(chain) {
   };
 }
 
+// HYK-240 요건3 (coder-task.md §3) -- 승인<->코드지문 결속 위반 축도 같은
+// 4필드 관례로 옮겨 적는다. MISMATCH일 때 사람이 읽는 상세(어느 워크트리,
+// 무슨 사유)를 위해 reason/worktreePath도 함께 옮긴다(chain의
+// issueId/reason/worktreePath와 같은 이유 -- 이 축엔 issueId가 없다,
+// review-approval-binding.mjs --explain은 이슈 단위가 아니라 워크트리
+// 단위로 판정한다).
+function extractBindingFields(binding) {
+  return {
+    bindingStatus: pickString(binding, "status"),
+    bindingVerdict: pickString(binding, "verdict"),
+    bindingWorstCount: pickNumber(binding, "worstCount"),
+    bindingTotalWorktrees: pickNumber(binding, "totalWorktrees"),
+    bindingReason: pickString(binding, "reason"),
+    bindingWorktreePath: pickString(binding, "worktreePath"),
+  };
+}
+
+// parseDetectorStdout에서 분리(§6 eslint max-lines-per-function 상한 준수 --
+// HYK-240이 binding 필드를 추가하며 넘긴 만큼, 실패 시 반환하는 고정
+// 기본값 뭉치를 그 함수 밖으로 뽑는다. 판정 로직은 없다 -- 파싱 실패를
+// "축이 전부 관측 안 됨"으로 표현하는 상수 모양뿐이다.
+function emptyDetectorFields() {
+  return {
+    verdict: null,
+    reasonCode: null,
+    seatLivenessStatus: null,
+    seatLivenessVerdict: null,
+    seatLivenessWorstCount: null,
+    seatLivenessTotalWorktrees: null,
+    seatLivenessPartialFailures: [],
+    seatIdleStatus: null,
+    seatIdleVerdict: null,
+    seatIdleWorstCount: null,
+    seatIdleTotalWorktrees: null,
+    startStatus: null,
+    startVerdict: null,
+    startWorstCount: null,
+    startTotalWorktrees: null,
+    startPartialFailures: [],
+    unconsumedStatus: null,
+    unconsumedVerdict: null,
+    unconsumedWorstCount: null,
+    unconsumedTotalWorktrees: null,
+    escalationStatus: null,
+    escalationVerdict: null,
+    escalationWorstCount: null,
+    escalationTotalWorktrees: null,
+    escalationScopes: [],
+    postcheckStatus: null,
+    postcheckVerdict: null,
+    postcheckWorstCount: null,
+    postcheckTotalWorktrees: null,
+    postcheckRuntimeTaskId: null,
+    postcheckHarnessTaskId: null,
+    postcheckWorktreePath: null,
+    chainStatus: null,
+    chainVerdict: null,
+    chainWorstCount: null,
+    chainTotalWorktrees: null,
+    chainIssueId: null,
+    chainReason: null,
+    chainWorktreePath: null,
+    bindingStatus: null,
+    bindingVerdict: null,
+    bindingWorstCount: null,
+    bindingTotalWorktrees: null,
+    bindingReason: null,
+    bindingWorktreePath: null,
+  };
+}
+
 function parseDetectorStdout(stdout) {
   try {
     const parsed = JSON.parse(String(stdout).trim());
@@ -311,6 +382,7 @@ function parseDetectorStdout(stdout) {
       : null;
     const postcheck = isPlainObject(parsed.postcheck) ? parsed.postcheck : null;
     const chain = isPlainObject(parsed.chain) ? parsed.chain : null;
+    const binding = isPlainObject(parsed.binding) ? parsed.binding : null;
     return {
       verdict: typeof parsed.verdict === "string" ? parsed.verdict : null,
       reasonCode:
@@ -322,49 +394,10 @@ function parseDetectorStdout(stdout) {
       ...extractEscalationFields(escalation),
       ...extractPostcheckFields(postcheck),
       ...extractChainFields(chain),
+      ...extractBindingFields(binding),
     };
   } catch {
-    return {
-      verdict: null,
-      reasonCode: null,
-      seatLivenessStatus: null,
-      seatLivenessVerdict: null,
-      seatLivenessWorstCount: null,
-      seatLivenessTotalWorktrees: null,
-      seatLivenessPartialFailures: [],
-      seatIdleStatus: null,
-      seatIdleVerdict: null,
-      seatIdleWorstCount: null,
-      seatIdleTotalWorktrees: null,
-      startStatus: null,
-      startVerdict: null,
-      startWorstCount: null,
-      startTotalWorktrees: null,
-      startPartialFailures: [],
-      unconsumedStatus: null,
-      unconsumedVerdict: null,
-      unconsumedWorstCount: null,
-      unconsumedTotalWorktrees: null,
-      escalationStatus: null,
-      escalationVerdict: null,
-      escalationWorstCount: null,
-      escalationTotalWorktrees: null,
-      escalationScopes: [],
-      postcheckStatus: null,
-      postcheckVerdict: null,
-      postcheckWorstCount: null,
-      postcheckTotalWorktrees: null,
-      postcheckRuntimeTaskId: null,
-      postcheckHarnessTaskId: null,
-      postcheckWorktreePath: null,
-      chainStatus: null,
-      chainVerdict: null,
-      chainWorstCount: null,
-      chainTotalWorktrees: null,
-      chainIssueId: null,
-      chainReason: null,
-      chainWorktreePath: null,
-    };
+    return emptyDetectorFields();
   }
 }
 
@@ -708,6 +741,35 @@ function buildChainSegments(detectorResult) {
   };
 }
 
+// HYK-240 요건3 (coder-task.md §3 "코드값만 찍고 끝내지 마라") -- MISMATCH일
+// 때만 사람이 읽는 상세를 덧붙인다(chainDetailSegment와 동일 원칙).
+function bindingDetailSegment({ verdict, reason, worktreePath }) {
+  if (verdict !== "MISMATCH") return null;
+  const why = truncateToken(
+    sanitizeFailureToken(reason, "reason_unavailable"),
+    MAX_PARTIAL_FAILURE_REASON_CHARS,
+  );
+  const wt = sanitizeFailureToken(worktreePath, "unknown_worktree");
+  return `binding_detail=${wt}:${why}`;
+}
+
+// buildLogLine에서 분리(chain과 동일 위치/이유).
+function buildBindingSegments(detectorResult) {
+  return {
+    bindingSegment: axisLogSegment("binding", {
+      status: detectorResult.bindingStatus,
+      verdict: detectorResult.bindingVerdict,
+      worstCount: detectorResult.bindingWorstCount,
+      totalWorktrees: detectorResult.bindingTotalWorktrees,
+    }),
+    bindingDetail: bindingDetailSegment({
+      verdict: detectorResult.bindingVerdict,
+      reason: detectorResult.bindingReason,
+      worktreePath: detectorResult.bindingWorktreePath,
+    }),
+  };
+}
+
 function escalationDetailSegment({ wakeScopes, newlyNotified, stateMissing }) {
   if (!Array.isArray(wakeScopes) || wakeScopes.length === 0) return null;
   const newKeys = new Set(
@@ -823,6 +885,10 @@ function buildAxisLogSegments(detectorResult, capResult, escalationDedupe) {
   // HYK-239-chain-wire-2: 새 축은 언제나 맨 끝에 붙는다(§1 설계 제약 3 --
   // 기존 여섯+postcheck+sweep 세그먼트의 필드·순서·값 불변).
   const { chainSegment, chainDetail } = buildChainSegments(detectorResult);
+  // HYK-240 요건3: 새 축은 언제나 맨 끝에 붙는다(§1 설계 제약 3 -- 기존
+  // 여섯+postcheck+chain 세그먼트의 필드·순서·값 불변).
+  const { bindingSegment, bindingDetail } =
+    buildBindingSegments(detectorResult);
   return {
     seatSegment,
     seatFailureSegment,
@@ -837,6 +903,8 @@ function buildAxisLogSegments(detectorResult, capResult, escalationDedupe) {
     postcheckDetail,
     chainSegment,
     chainDetail,
+    bindingSegment,
+    bindingDetail,
   };
 }
 
@@ -883,6 +951,11 @@ export function buildLogLine({
     // 라운드가 손대지 않았다(§4-3 무회귀로 실증).
     segments.chainSegment,
     segments.chainDetail,
+    // HYK-240 요건3 (coder-task.md §3 설계 제약 3): 이 축은 지금 이
+    // 시점의 맨 끝이다 -- 앞선 모든 세그먼트의 필드·순서·값은 이
+    // 라운드가 손대지 않았다.
+    segments.bindingSegment,
+    segments.bindingDetail,
   ]
     .filter(Boolean)
     .join(" ");

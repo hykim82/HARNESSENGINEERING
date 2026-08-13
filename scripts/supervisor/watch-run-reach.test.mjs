@@ -65,6 +65,62 @@ test("notifyDir supplied: a run whose detector output is anomalous writes a noti
   }
 });
 
+// HYK-240 요건3 §0-실증: 합성 원장 위조가 아니라 합성 "detector stdout"
+// (execFn)으로 binding 축의 MISMATCH를 주입해, watch-run.mjs의 reach 단계가
+// 그대로 통지 파일 + 아침 보고에 반영하는지 확인한다(idleAbandonedExec와
+// 동일 패턴 -- 실 orch-stall-detect.mjs 스폰/실 review-approval-binding.mjs
+// 스폰은 이 시험의 대상이 아니다, 그건 orch-stall-detect.test.mjs와
+// review-approval-binding-wire.test.mjs가 각각 따로 고정한다). ★실 통역
+// 받는함 무접촉 -- notifyDir은 mkdtemp 경로.
+function bindingMismatchExec() {
+  return JSON.stringify({
+    verdict: "PROGRESSING",
+    reasonCode: "OK",
+    binding: {
+      status: "JUDGED",
+      verdict: "MISMATCH",
+      worstCount: 1,
+      totalWorktrees: 1,
+      reason: "불일치(커밋 차단): 승인 지문과 현재 작업트리 지문이 다르다",
+      worktreePath: "/synthetic/worktree/hyk240-test",
+    },
+  });
+}
+
+test("HYK-240 §4c 실증: a synthetic binding-axis MISMATCH surfaces in the morning report AND fires a notice, through the real production entry point (watch-run.mjs -> reach-report-core.mjs AXES) (2/2)", () => {
+  const watchDir = tmpWatchDir();
+  const notifyDir = join(watchDir, "받는함-binding-테스트");
+  try {
+    const result = runWatchOnce({
+      repoRoot: ROOT,
+      watchDir,
+      now: NOW_MS,
+      execFn: () => bindingMismatchExec(),
+      notifyDir,
+    });
+    assert.equal(result.reachResult.notRun, undefined);
+    assert.equal(result.reachResult.failed, undefined);
+    assert.ok(
+      result.reachResult.noticePath,
+      "a transition notice must be written on first anomalous run",
+    );
+    assert.ok(fs.existsSync(result.reachResult.noticePath));
+    const notice = fs.readFileSync(result.reachResult.noticePath, "utf8");
+    assert.match(notice, /승인.*코드지문 결속 위반|결속 위반/);
+    assert.ok(fs.existsSync(join(watchDir, "morning-report.md")));
+    assert.match(
+      fs.readFileSync(join(watchDir, "morning-report.md"), "utf8"),
+      /승인.*코드지문 결속 위반|결속 위반/,
+    );
+    assert.ok(
+      AXES.some((a) => a.key === "binding"),
+      "sanity: binding axis must actually be registered in AXES",
+    );
+  } finally {
+    fs.rmSync(watchDir, { recursive: true, force: true });
+  }
+});
+
 test("notifyDir omitted (default): reach step is skipped entirely -- no morning-report.md, no notice dir created (2/2)", () => {
   const watchDir = tmpWatchDir();
   try {

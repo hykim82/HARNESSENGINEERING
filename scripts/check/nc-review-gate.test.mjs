@@ -315,6 +315,14 @@ function readCommittedOrWorkingTree(relPath) {
 const TIME_AUTHORITY_SRC = readCommittedOrWorkingTree(
   "scripts/check/time-authority.mjs",
 );
+// HYK-240: review-gate.mjs now also imports "./review-approval-binding.mjs"
+// (approval<->code-state binding check) -- same transitive-sibling
+// MODULE_NOT_FOUND risk as time-authority.mjs above. Falls back to the
+// working-tree copy until this task's own commit lands (new file, no HEAD
+// snapshot yet).
+const REVIEW_APPROVAL_BINDING_SRC = readCommittedOrWorkingTree(
+  "scripts/check/review-approval-binding.mjs",
+);
 
 // HYK-183 (§10 2R fix, ORCH ruling): mutation #1/#4 below target the
 // `resolveVerdict` function's exact shape. `REVIEW_GATE_SRC` is deliberately
@@ -350,6 +358,11 @@ async function importMutatedCopy(mutate) {
     "utf8",
   );
   writeFileSync(join(dir, "time-authority.mjs"), TIME_AUTHORITY_SRC, "utf8");
+  writeFileSync(
+    join(dir, "review-approval-binding.mjs"),
+    REVIEW_APPROVAL_BINDING_SRC,
+    "utf8",
+  );
   try {
     const mod = await import(`file://${filePath.replace(/\\/g, "/")}`);
     return mod;

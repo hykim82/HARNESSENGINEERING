@@ -27,6 +27,10 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { execFileSync, spawnSync } from "node:child_process";
+import {
+  computeFingerprint,
+  formatBindingBlock,
+} from "./review-approval-binding.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REJECT_STREAK_PATH = join(HERE, "reject-streak.mjs");
@@ -40,6 +44,8 @@ const REVIEW_GATE_PATH = join(HERE, "review-gate.mjs");
 const ENVELOPE_ARCHIVE_PATH = join(HERE, "envelope-archive.mjs");
 // HYK-186: relay-handshake.mjs now also imports "./time-authority.mjs".
 const TIME_AUTHORITY_PATH = join(HERE, "time-authority.mjs");
+// HYK-240: review-gate.mjs now also imports "./review-approval-binding.mjs".
+const REVIEW_APPROVAL_BINDING_PATH = join(HERE, "review-approval-binding.mjs");
 
 function tmpDir(prefix) {
   return mkdtempSync(join(tmpdir(), prefix));
@@ -207,14 +213,42 @@ test("mutation 축B (필수): review-gate.mjs's recordApprovalToLedger call remo
       readFileSync(TIME_AUTHORITY_PATH, "utf8"),
       "utf8",
     );
-    const mutantReviewGate = join(scriptsCheckDir, "review-gate.mjs");
-
     writeFileSync(
-      join(mainDir, ".harness", "review.md"),
-      "for: HYK-9700\ntask_id: HYK-9700\nrole: REVIEW-CODEX\nverdict: approved\n\n>>> DONE: REVIEW-CODEX @ 2026-08-05 12:00 KST\n",
+      join(scriptsCheckDir, "review-approval-binding.mjs"),
+      readFileSync(REVIEW_APPROVAL_BINDING_PATH, "utf8"),
       "utf8",
     );
-    const commitMsgFile = join(mainDir, "commit-msg.txt");
+    const mutantReviewGate = join(scriptsCheckDir, "review-gate.mjs");
+    // HYK-240 2R: stage the harness scaffold itself -- in the real repo
+    // scripts/check/ is tracked (part of HEAD), so this never shows up as
+    // an unstaged change there. Leaving these copies untracked here would
+    // make review-approval-binding.mjs's index<->worktree sync check (F1
+    // fix) see them as desynced regardless of what this test exercises.
+    git(mainDir, ["add", "-A"]);
+
+    // HYK-240: binding-fingerprint must match `mainDir`'s state at CLI
+    // time -- computed AFTER all staging above so the staged
+    // scripts/check/*.mjs files are already accounted for. Production's
+    // commit-message file lives under `.git/` (outside the tree `git
+    // status` scans), so the message file below is written elsewhere and
+    // never touches this fingerprint.
+    const fp = computeFingerprint({ cwd: mainDir });
+    assert.equal(
+      fp.ok,
+      true,
+      `fingerprint must be computable in ${mainDir}: ${fp.reason}`,
+    );
+    const binding = formatBindingBlock({
+      fingerprint: fp.fingerprint,
+      entries: fp.entries,
+    });
+    writeFileSync(
+      join(mainDir, ".harness", "review.md"),
+      `for: HYK-9700\ntask_id: HYK-9700\nrole: REVIEW-CODEX\nverdict: approved\n${binding}\n>>> DONE: REVIEW-CODEX @ 2026-08-05 12:00 KST\n`,
+      "utf8",
+    );
+    const msgDir = mkdtempSync(join(tmpdir(), "hyk183-lf-mut-b-msg-"));
+    const commitMsgFile = join(msgDir, "commit-msg.txt");
     writeFileSync(commitMsgFile, "fix(check): HYK-9700 -- something\n", "utf8");
 
     const result = runCli(mutantReviewGate, [commitMsgFile], {
