@@ -86,10 +86,16 @@ function writeFixture(dir, role, taskId, droppedAt, doneAt, extra = "") {
 
 test("mutation ⓐ (필수): autoArchiveRoundEnvelope call removed from checkRelayHandshake -> handshake still passes but no round text survives -> RED", async () => {
   const src = readFileSync(RELAY_HANDSHAKE_PATH, "utf8");
+  // HYK-244 2R-a: the call site now captures a return value (`const
+  // envelopeArchived = ...`) for the consumption-receipt wiring, so the
+  // target isolates just the call expression (not the whole statement) --
+  // replacing it with `undefined` keeps `envelopeArchived` declared (no
+  // ReferenceError downstream) while still skipping the actual archive
+  // side effect, which is exactly what this mutation needs to prove RED.
   const target =
-    "  autoArchiveRoundEnvelope({ role, resultContent, harnessDir });\n";
+    "autoArchiveRoundEnvelope({\n    role,\n    resultContent,\n    harnessDir,\n  })";
   assertExactlyOneMatch(src, target, "autoArchiveRoundEnvelope call site");
-  const mutated = src.replace(target, "");
+  const mutated = src.replace(target, "undefined");
 
   await withTempDir("hyk204-mut-a-", async (dir) => {
     const scriptsCheckDir = stageScriptsCheckDir(dir, {
@@ -102,7 +108,7 @@ test("mutation ⓐ (필수): autoArchiveRoundEnvelope call removed from checkRel
       "coder",
       "HYK-9900",
       "2026-08-08 06:00 KST",
-      "2026-08-08 06:10 KST",
+      "2026-08-08 06:10:00 KST",
     );
 
     const mod = await import(
@@ -173,7 +179,7 @@ test("mutation ⓑ (필수): nextArchiveFileName hardcoded to always return roun
       "review",
       "HYK-9901",
       "2026-08-08 06:00 KST",
-      "2026-08-08 06:10 KST",
+      "2026-08-08 06:10:00 KST",
       "outcome-note: needs-rework\n",
     );
     const first = mod.checkRelayHandshake({ role: "review", harnessDir });
@@ -184,7 +190,7 @@ test("mutation ⓑ (필수): nextArchiveFileName hardcoded to always return roun
       "review",
       "HYK-9901",
       "2026-08-08 07:00 KST",
-      "2026-08-08 07:10 KST",
+      "2026-08-08 07:10:00 KST",
       "outcome-note: looks-good\n",
     );
     const second = mod.checkRelayHandshake({ role: "review", harnessDir });
@@ -242,7 +248,7 @@ test("mutation ⓒ (자유 선택): archiveRoundEnvelope writes a blank body ins
       "coder",
       "HYK-9902",
       "2026-08-08 06:00 KST",
-      "2026-08-08 06:10 KST",
+      "2026-08-08 06:10:00 KST",
       "some report body with real detail\n",
     );
 

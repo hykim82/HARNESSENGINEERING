@@ -62,7 +62,7 @@ function writeValidFixture(dir, role, taskId) {
   );
   writeFileSync(
     join(dir, `${role}.md`),
-    `task_id: ${taskId}\n\n>>> DONE: ${role.toUpperCase()} @ 2026-08-03 06:10 KST\n`,
+    `task_id: ${taskId}\n\n>>> DONE: ${role.toUpperCase()} @ 2026-08-03 06:10:00 KST\n`,
     "utf8",
   );
 }
@@ -103,7 +103,7 @@ test("(a) task_id matches + DONE after dropped_at -> ok", () => {
     writeResult(
       dir,
       "coder",
-      "task_id: HYK-1\n\nsome report body\n\n>>> DONE: CODER @ 2026-07-05 06:10 KST\n",
+      "task_id: HYK-1\n\nsome report body\n\n>>> DONE: CODER @ 2026-07-05 06:10:00 KST\n",
     );
     const result = checkRelayHandshake({ role: "coder", harnessDir: dir });
     assert.equal(result.ok, true);
@@ -196,7 +196,7 @@ test("(g) stale: DONE timestamp predates dropped_at -> blocked", () => {
     writeResult(
       dir,
       "coder",
-      "task_id: HYK-1\n\n>>> DONE: CODER @ 2026-07-05 06:00 KST\n",
+      "task_id: HYK-1\n\n>>> DONE: CODER @ 2026-07-05 06:00:00 KST\n",
     );
     const result = checkRelayHandshake({ role: "coder", harnessDir: dir });
     assert.equal(result.ok, false);
@@ -284,7 +284,7 @@ test("(l) frozen: dropped_at with HH:MM:SS form -> ok", () => {
     writeResult(
       dir,
       "coder",
-      "task_id: HYK-1\n\n>>> DONE: CODER @ 2026-07-05 06:10 KST\n",
+      "task_id: HYK-1\n\n>>> DONE: CODER @ 2026-07-05 06:10:00 KST\n",
     );
     const result = checkRelayHandshake({ role: "coder", harnessDir: dir });
     assert.equal(result.ok, true);
@@ -326,6 +326,84 @@ test("(n) frozen: both dropped_at and DONE carry HH:MM:SS -> ok, and seconds are
   });
 });
 
+// ---------------------------------------------------------------------------
+// HYK-244 2R-a §2 조각1: 완료시각(>>> DONE:) 분 단위 거부는 «약화 없이
+// 유지»(한용 확정 문면). 이 시험들은 정밀도 축 하나만 격리해서 확인한다
+// -- droppedAt/mismatch 등 다른 축이 섞이지 않도록, dropped_at은 항상
+// DONE보다 충분히 이전으로 고정한다.
+// ---------------------------------------------------------------------------
+
+test("HYK-244 (분단위 거부) DONE with minute precision (no seconds) -> blocked loudly, distinct reason naming the offending raw value, never silently accepted", () => {
+  withFixtureDir((dir) => {
+    writeTask(
+      dir,
+      "coder",
+      "task_id: HYK-1\ndropped_at: 2026-07-05 06:00 KST\n",
+    );
+    writeResult(
+      dir,
+      "coder",
+      "task_id: HYK-1\n\n>>> DONE: CODER @ 2026-07-05 06:10 KST\n",
+    );
+    const result = checkRelayHandshake({ role: "coder", harnessDir: dir });
+    assert.equal(result.ok, false);
+    assert.match(result.reason, /minute-precision, seconds required/);
+    assert.match(result.reason, /2026-07-05 06:10 KST/);
+    assert.match(result.reason, /HH:MM:SS/);
+  });
+});
+
+test("HYK-244 (분단위 거부, CLI) minute-precision DONE -> CLI exits non-zero with the precision reason on stderr (loud, not quiet)", () => {
+  withFixtureDirCli((dir) => {
+    writeFileSync(
+      join(dir, "coder-task.md"),
+      "task_id: HYK-244-minute-cli\ndropped_at: 2026-08-14 07:00 KST\n",
+      "utf8",
+    );
+    writeFileSync(
+      join(dir, "coder.md"),
+      "task_id: HYK-244-minute-cli\n\n>>> DONE: CODER @ 2026-08-14 07:10 KST\n",
+      "utf8",
+    );
+    const { exit, stderr } = runCli(["coder", dir]);
+    assert.notEqual(exit, 0);
+    assert.match(stderr, /minute-precision, seconds required/);
+  });
+});
+
+test("HYK-244 (초단위 정상통과, 오탐 0) DONE with seconds precision -> ok:true, precision check never fires on a well-formed input", () => {
+  withFixtureDir((dir) => {
+    writeTask(
+      dir,
+      "coder",
+      "task_id: HYK-1\ndropped_at: 2026-07-05 06:00 KST\n",
+    );
+    writeResult(
+      dir,
+      "coder",
+      "task_id: HYK-1\n\n>>> DONE: CODER @ 2026-07-05 06:10:07 KST\n",
+    );
+    const result = checkRelayHandshake({ role: "coder", harnessDir: dir });
+    assert.equal(result.ok, true);
+    assert.doesNotMatch(result.reason, /minute-precision/);
+  });
+});
+
+test("HYK-244 (분단위 거부) unparseable DONE ('@ soon') keeps its ORIGINAL 'not parseable' reason -- the new precision check never masks a pre-existing distinct failure mode", () => {
+  withFixtureDir((dir) => {
+    writeTask(
+      dir,
+      "coder",
+      "task_id: HYK-1\ndropped_at: 2026-07-05 06:00 KST\n",
+    );
+    writeResult(dir, "coder", "task_id: HYK-1\n\n>>> DONE: CODER @ soon\n");
+    const result = checkRelayHandshake({ role: "coder", harnessDir: dir });
+    assert.equal(result.ok, false);
+    assert.match(result.reason, /DONE timestamp not parseable/);
+    assert.doesNotMatch(result.reason, /minute-precision/);
+  });
+});
+
 // --- HYK-180 사이클1: mid-line task_id echo distinguished from genuine
 // absence (사이클0 증거 -- REVIEW's `for: X / task_id: Y / role: Z` shape
 // previously fell through to "missing echo", pending forever) --------
@@ -359,7 +437,7 @@ test("(q) paired good: same content, task_id moved to a standalone column-0 line
     writeResult(
       dir,
       "review",
-      "dispatch_verified: yes\ntask_id_from_dispatch: HYK-167-review-2\npane_match: 일치\ntask_id: HYK-167-review-2\n\nfor: HYK-167 / role: REVIEW-CODEX\n\n>>> DONE: REVIEW-CODEX @ 2026-07-05 06:10 KST\n",
+      "dispatch_verified: yes\ntask_id_from_dispatch: HYK-167-review-2\npane_match: 일치\ntask_id: HYK-167-review-2\n\nfor: HYK-167 / role: REVIEW-CODEX\n\n>>> DONE: REVIEW-CODEX @ 2026-07-05 06:10:00 KST\n",
     );
     const result = checkRelayHandshake({ role: "review", harnessDir: dir });
     assert.equal(result.ok, true);
@@ -533,7 +611,7 @@ test("HYK-173-escalation-1 (y) regression: a normal DONE result with an incident
     writeResult(
       dir,
       "coder",
-      "task_id: HYK-1\n\nearlier round note: >>> BLOCKED: old, resolved already\n\n>>> DONE: CODER @ 2026-07-05 06:10 KST\n",
+      "task_id: HYK-1\n\nearlier round note: >>> BLOCKED: old, resolved already\n\n>>> DONE: CODER @ 2026-07-05 06:10:00 KST\n",
     );
     const result = checkRelayHandshake({ role: "coder", harnessDir: dir });
     assert.equal(result.ok, true);
@@ -1153,7 +1231,7 @@ test("HYK-186 (★PM 실측 in-process repro): dropped_at=2026-07-31 03:00 / DON
     writeResult(
       dir,
       "coder",
-      "task_id: FUTURE-1\n\n>>> DONE: CODER @ 2099-01-01 00:00 KST\n",
+      "task_id: FUTURE-1\n\n>>> DONE: CODER @ 2099-01-01 00:00:00 KST\n",
     );
     const result = checkRelayHandshake({
       role: "coder",

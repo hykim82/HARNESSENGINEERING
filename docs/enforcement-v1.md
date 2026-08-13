@@ -365,6 +365,18 @@ Orchestrator's own goodwill — left for a future revision.
   still passes the staleness check on its merits. The caller is what changed
   in an earlier revision: `null` from either timestamp now means "reject",
   not "skip the check" — see Rule step 7.
+  ⚠️**HYK-244 2R-a update**: the paragraph above describes `parseKstTimestamp`
+  itself, which is unchanged. But `checkRelayHandshake`'s `resolveDoneAt` now
+  layers an ADDITIONAL check on top, specific to the `>>> DONE:` field only
+  (not `dropped_at:`): once a DONE value parses successfully, it is rejected
+  unless the raw text also contains an `HH:MM:SS` group (seconds required).
+  Root cause: `templates/harness-init/status.template.md` used to spell the
+  DONE format as minute-only, and this file's own consumer never checked
+  precision, so minute-only DONE lines were the near-universal production
+  reality — which meant two rounds finishing in the same minute produced
+  identical `doneAt` values, unable to be told apart. `dropped_at:` keeps
+  accepting minute precision unchanged; only the result's own completion
+  stamp now requires seconds.
 - `scripts/check/relay-handshake.test.mjs` is a fixture-based test suite
   (node's built-in test runner, `withFixtureDir` pattern from
   `review-gate.test.mjs`), 15 cases: id match with DONE after the drop

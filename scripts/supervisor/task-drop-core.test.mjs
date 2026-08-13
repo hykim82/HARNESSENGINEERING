@@ -424,7 +424,7 @@ test("(c) produced header passes the real relay-handshake.mjs parser (task_id/dr
 
     fs.writeFileSync(
       join(harnessDir, "coder.md"),
-      `for: HYK-183\nrole: CODER\ntask_id: ${args.taskId}\n\n본문.\n\n>>> DONE: 완료 @ 2026-08-03 15:00 KST\n`,
+      `for: HYK-183\nrole: CODER\ntask_id: ${args.taskId}\n\n본문.\n\n>>> DONE: 완료 @ 2026-08-03 15:00:00 KST\n`,
       "utf8",
     );
 

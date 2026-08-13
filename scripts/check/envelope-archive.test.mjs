@@ -288,7 +288,7 @@ function writeResult(dir, role, taskId, doneAt, extra = "") {
 test("wiring: checkRelayHandshake ok -> archives the round AND still returns the same pass/fail contract as before (regression 0)", () => {
   withFixtureDir("relay-wiring-", (dir) => {
     writeTask(dir, "coder", "HYK-204", "2026-08-08 06:00 KST");
-    writeResult(dir, "coder", "HYK-204", "2026-08-08 06:10 KST");
+    writeResult(dir, "coder", "HYK-204", "2026-08-08 06:10:00 KST");
     const result = checkRelayHandshake({ role: "coder", harnessDir: dir });
     assert.equal(result.ok, true);
     assert.equal(result.reason, "relay handshake ok for HYK-204");
@@ -304,7 +304,7 @@ test("wiring: checkRelayHandshake ok -> archives the round AND still returns the
 test("wiring (HYK-241 §2 조각1): checkRelayHandshake ok -> ALSO archives the round's TASK file, via the SAME production call site -- never calling archiveRoundTaskFile directly", () => {
   withFixtureDir("relay-wiring-task-", (dir) => {
     writeTask(dir, "coder", "HYK-241", "2026-08-13 06:00 KST");
-    writeResult(dir, "coder", "HYK-241", "2026-08-13 06:10 KST");
+    writeResult(dir, "coder", "HYK-241", "2026-08-13 06:10:00 KST");
     const result = checkRelayHandshake({ role: "coder", harnessDir: dir });
     assert.equal(result.ok, true);
     const archivedTask = readFileSync(
@@ -323,7 +323,7 @@ test("wiring (HYK-241 §2 조각1): 라운드 2회 -> 두 라운드의 task 지�
       "task_id: HYK-242\ndropped_at: 2026-08-13 06:00 KST\n라운드1 지시문\n",
       "utf8",
     );
-    writeResult(dir, "coder", "HYK-242", "2026-08-13 06:10 KST");
+    writeResult(dir, "coder", "HYK-242", "2026-08-13 06:10:00 KST");
     const first = checkRelayHandshake({ role: "coder", harnessDir: dir });
     assert.equal(first.ok, true);
 
@@ -334,7 +334,7 @@ test("wiring (HYK-241 §2 조각1): 라운드 2회 -> 두 라운드의 task 지�
       "task_id: HYK-242\ndropped_at: 2026-08-13 07:00 KST\n라운드2 지시문\n",
       "utf8",
     );
-    writeResult(dir, "coder", "HYK-242", "2026-08-13 07:10 KST");
+    writeResult(dir, "coder", "HYK-242", "2026-08-13 07:10:00 KST");
     const second = checkRelayHandshake({ role: "coder", harnessDir: dir });
     assert.equal(second.ok, true);
 
@@ -382,7 +382,7 @@ test("wiring: same track, two rounds re-checked via checkRelayHandshake -> both 
       dir,
       "review",
       "HYK-204",
-      "2026-08-08 06:10 KST",
+      "2026-08-08 06:10:00 KST",
       "outcome-note: needs-rework\n",
     );
     const first = checkRelayHandshake({ role: "review", harnessDir: dir });
@@ -396,7 +396,7 @@ test("wiring: same track, two rounds re-checked via checkRelayHandshake -> both 
       dir,
       "review",
       "HYK-204",
-      "2026-08-08 07:10 KST",
+      "2026-08-08 07:10:00 KST",
       "outcome-note: looks-good\n",
     );
     const second = checkRelayHandshake({ role: "review", harnessDir: dir });

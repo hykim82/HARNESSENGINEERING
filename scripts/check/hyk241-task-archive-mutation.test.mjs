@@ -82,10 +82,15 @@ function writeFixture(dir, role, taskId, droppedAt, doneAt, taskBody = "") {
 
 test("mutation ⓐ (필수): autoArchiveRoundTaskFile call removed from checkRelayHandshake -> handshake still passes but no task-round text survives -> RED", async () => {
   const src = readFileSync(RELAY_HANDSHAKE_PATH, "utf8");
+  // HYK-244 2R-a: the call site now captures a return value (`const
+  // taskArchived = ...`) for the consumption-receipt wiring, so the target
+  // isolates just the call expression -- replacing it with `undefined`
+  // keeps `taskArchived` declared (no ReferenceError downstream) while
+  // still skipping the actual archive side effect.
   const target =
-    "  autoArchiveRoundTaskFile({ role, taskContent, harnessDir });\n";
+    "autoArchiveRoundTaskFile({\n    role,\n    taskContent,\n    harnessDir,\n  })";
   assertExactlyOneMatch(src, target, "autoArchiveRoundTaskFile call site");
-  const mutated = src.replace(target, "");
+  const mutated = src.replace(target, "undefined");
 
   await withTempDir("hyk241-task-mut-a-", async (dir) => {
     const scriptsCheckDir = stageScriptsCheckDir(dir, {
@@ -98,7 +103,7 @@ test("mutation ⓐ (필수): autoArchiveRoundTaskFile call removed from checkRel
       "coder",
       "HYK-9910",
       "2026-08-13 06:00 KST",
-      "2026-08-13 06:10 KST",
+      "2026-08-13 06:10:00 KST",
       "이번 라운드의 지시문 원본\n",
     );
 
@@ -156,7 +161,7 @@ test("mutation ⓑ (필수): nextTaskArchiveFileName hardcoded to always return 
       "coder",
       "HYK-9911",
       "2026-08-13 06:00 KST",
-      "2026-08-13 06:10 KST",
+      "2026-08-13 06:10:00 KST",
       "라운드1 지시문(원본)\n",
     );
     const first = mod.checkRelayHandshake({ role: "coder", harnessDir });
@@ -167,7 +172,7 @@ test("mutation ⓑ (필수): nextTaskArchiveFileName hardcoded to always return 
       "coder",
       "HYK-9911",
       "2026-08-13 07:00 KST",
-      "2026-08-13 07:10 KST",
+      "2026-08-13 07:10:00 KST",
       "라운드2 지시문(새 것)\n",
     );
     const second = mod.checkRelayHandshake({ role: "coder", harnessDir });
@@ -218,7 +223,7 @@ test("mutation ⓒ (자유 선택): archiveRoundTaskFile writes a blank body ins
       "coder",
       "HYK-9912",
       "2026-08-13 06:00 KST",
-      "2026-08-13 06:10 KST",
+      "2026-08-13 06:10:00 KST",
       "지시문에 실려 있는 구체적 세부사항\n",
     );
 

@@ -2,7 +2,11 @@ import { readFileSync, existsSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execSync, execFileSync } from "node:child_process";
-import { recordRejectStreakFromResultText } from "./reject-streak.mjs";
+import { createHash } from "node:crypto";
+import {
+  recordRejectStreakFromResultText,
+  isReviewFamilyRole,
+} from "./reject-streak.mjs";
 import {
   archiveRoundEnvelope,
   archiveRoundTaskFile,
@@ -259,6 +263,12 @@ function resolveResultDoneOutcome(resultContent, resultDone) {
 // HYK-204: mirrors autoRecordRejectStreak's shape -- surfaces
 // archiveRoundEnvelope's outcome via console.log/console.error rather than
 // swallowing it, and never touches this function's own return value.
+// HYK-244 2R-a 조각2: return value added (was void) so the receipt-writing
+// call site below can know whether this effect actually succeeded --
+// logging alone (the pre-existing behavior, kept unchanged above) is
+// invisible to a caller that needs a boolean. checkRelayHandshake's OWN
+// return value/exit code contract is untouched (§3 금지) -- this return
+// value is new surface, not a repurposing of an existing one.
 function autoArchiveRoundEnvelope({ role, resultContent, harnessDir }) {
   const outcome = archiveRoundEnvelope({ role, resultContent, harnessDir });
   if (outcome.ok) {
@@ -266,6 +276,7 @@ function autoArchiveRoundEnvelope({ role, resultContent, harnessDir }) {
   } else {
     console.error(outcome.reason);
   }
+  return outcome.ok;
 }
 
 // HYK-241 §2 조각1: archiveRoundEnvelope의 TASK-file 쌍 -- 이 함수가 불리는
@@ -281,20 +292,27 @@ function autoArchiveRoundTaskFile({ role, taskContent, harnessDir }) {
   } else {
     console.error(outcome.reason);
   }
+  return outcome.ok;
 }
 
+// HYK-244 2R-a 조각2: now returns `{ attempted, ok }` (was void) for the
+// same reason as autoArchiveRoundEnvelope above -- REVIEW 계열의
+// `ledgerRecorded` 효과를 판단하려면 이 결과가 필요하다. Non-REVIEW roles
+// have `attempted:false`, which the receipt-writing call site below reads
+// as "이 효과는 이 역할에 해당하지 않는다" (never treated as a failure).
 function autoRecordRejectStreak({ role, resultContent }) {
   const autoRecord = recordRejectStreakFromResultText({
     role,
     resultText: resultContent,
     ledgerPath: join(mainRepoRoot(), ".harness", "reject-streak.json"),
   });
-  if (!autoRecord.attempted) return;
+  if (!autoRecord.attempted) return { attempted: false, ok: false };
   if (autoRecord.ok) {
     console.log(autoRecord.reason);
   } else {
     console.error(autoRecord.reason);
   }
+  return { attempted: true, ok: autoRecord.ok };
 }
 
 function parseKstTimestamp(str) {
@@ -365,15 +383,39 @@ function resolveDroppedAt(taskContent, now) {
   return { ok: true, droppedAt, droppedMatch };
 }
 
+// HYK-244 2R-a §1/§2 조각1: 저장소가 «분 단위»를 시켰다(templates/
+// harness-init/status.template.md의 예전 `>>> DONE: <role> @ <YYYY-MM-DD
+// HH:MM>`)는 것이 실측된 뿌리 원인이고, 소비 절차(여기)는 그 형식을 전혀
+// 검사하지 않았다(예전 `DONE_RE`는 `.+?`로 뒤 텍스트 전체를 그냥 받았다).
+// 한용 확정 문면(coder-task.md §0, 2026-08-14 07:10, 조정 금지) = "«분
+// 단위 거부» 문면은 약화 없이 유지" -- «시키는 곳»(템플릿)과 «검사하는
+// 곳»(여기) 둘 다 손봐야 실제로 초 단위가 남는다.
+//
+// 왜 doneAt이 성공적으로 파싱된 «뒤에만» 이 검사를 거는가: `parseKstTimestamp`
+// 는 여전히 `HH:MM(:SS)?`(초 선택)를 그대로 받아들인다(HYK-142 6A가 얼린
+// 계약, time-authority.mjs 참조) -- 이 함수를 고치면 "형식이 아예 깨진
+// 값"(예: `@ soon`)의 기존 "not parseable" 판정까지 건드리게 된다. 대신
+// «값은 유효한 KST 시각으로 파싱됐지만 초가 없다»는 경우만 새로 거부하는
+// 것이 이번 조각의 정확한 범위다 -- 그래서 파싱 성공 직후, future-skew
+// 검사보다 먼저 이 확인을 끼워 넣는다(사유 문자열이 겹치지 않게).
+const DONE_SECONDS_PRECISION_RE = /\d{2}:\d{2}:\d{2}/;
+
+function hasDoneSecondsPrecision(rawDoneAtText) {
+  return DONE_SECONDS_PRECISION_RE.test(rawDoneAtText);
+}
+
 // Extracted from checkRelayHandshake (same ESLint-ceiling reason as
 // resolveDroppedAt above) -- resolves the result file's '>>> DONE:' line
-// into a parsed Date, applying the HYK-186 future-skew check as part of
-// that resolution. ★PM 실측 재현 대상: before this fix, a DONE line dated
-// 2099-01-01 passed silently ({"ok":true, reason:"relay handshake ok for
-// FUTURE-1"}) -- checkRelayHandshake had exactly one time comparison
-// (`doneAt < droppedAt`) and zero comparisons against `now`. This function
-// is the fix: reject a DONE timestamp beyond authority-clock skew before it
-// can ever reach the staleness/ok:true path in checkRelayHandshake.
+// into a parsed Date, applying the HYK-244 seconds-precision check and the
+// HYK-186 future-skew check as part of that resolution. ★PM 실측 재현
+// 대상: before the HYK-186 fix, a DONE line dated 2099-01-01 passed
+// silently ({"ok":true, reason:"relay handshake ok for FUTURE-1"}) --
+// checkRelayHandshake had exactly one time comparison (`doneAt <
+// droppedAt`) and zero comparisons against `now`. That fix rejects a DONE
+// timestamp beyond authority-clock skew before it can ever reach the
+// staleness/ok:true path in checkRelayHandshake; this HYK-244 addition
+// rejects a DONE timestamp that lacks seconds precision, for the same
+// "reject loudly before the ok:true path" reason.
 function resolveDoneAt(resultContent, now) {
   const resultDone = resolveResultDoneMatch(resultContent);
   if (!resultDone.ok) {
@@ -392,6 +434,12 @@ function resolveDoneAt(resultContent, now) {
       reason: `result DONE timestamp not parseable: '${doneMatch[1].trim()}'`,
     };
   }
+  if (!hasDoneSecondsPrecision(doneMatch[1])) {
+    return {
+      ok: false,
+      reason: `result DONE timestamp is minute-precision, seconds required: '${doneMatch[1].trim()}' (need YYYY-MM-DD HH:MM:SS KST -- HYK-244 2R-a: minute precision cannot distinguish same-minute rounds, and the "분 단위 거부" contract is fixed, not relaxable)`,
+    };
+  }
   const doneFuture = checkFutureSkew({
     candidateDate: doneAt,
     rawText: doneMatch[1],
@@ -402,10 +450,17 @@ function resolveDoneAt(resultContent, now) {
   return { ok: true, doneAt, doneMatch };
 }
 
+// HYK-244 2R-a §2 조각2: `dispatchId`는 ⛔호출자가 명시적으로 넘긴 값만
+// 쓴다(추측·유추 금지) -- 기본값 undefined, 넘어오지 않으면 영수증의
+// binding에 그대로 undefined로 남아 1R 코어(consumption-receipt-core.mjs)
+// 의 checkBindingPreconditions가 "주 열쇠 미확정"으로 거부한다(영수증이
+// 있어도 아직 PASS를 못 낸다는 뜻 -- 이 조각의 범위 그대로, §3 정직
+// 한계). 어디서 이 값을 넘길지는 2R-b가 결선한다.
 export function checkRelayHandshake({
   role,
   harnessDir = join(repoRoot(), ".harness"),
   now = Date.now(),
+  dispatchId,
 }) {
   const taskPath = join(harnessDir, `${role}-task.md`);
   const resultPath = join(harnessDir, `${role}.md`);
@@ -477,9 +532,17 @@ export function checkRelayHandshake({
   // 실사례 hit. Archived here (not left to the worker to remember) for the
   // same reason autoRecordRejectStreak lives here: every caller -- CLI and
   // in-process alike -- gets it, with no new notification device.
-  autoArchiveRoundEnvelope({ role, resultContent, harnessDir });
-  autoArchiveRoundTaskFile({ role, taskContent, harnessDir });
-  autoRecordRejectStreak({ role, resultContent });
+  const envelopeArchived = autoArchiveRoundEnvelope({
+    role,
+    resultContent,
+    harnessDir,
+  });
+  const taskArchived = autoArchiveRoundTaskFile({
+    role,
+    taskContent,
+    harnessDir,
+  });
+  const recordOutcome = autoRecordRejectStreak({ role, resultContent });
   // HYK-227 §2: moved here from the CLI-only `invokedDirectly` block below
   // (was line-local to that block prior to this change) so EVERY caller of
   // checkRelayHandshake -- not only the CLI entry point -- reaches this
@@ -492,7 +555,27 @@ export function checkRelayHandshake({
   // try/catch-wrapped subprocess spawn, never a static import, so the 1R
   // isolated-fixture failure this design avoids stays avoided -- see that
   // function's own header).
-  spawnAdmissionCompletion(taskId);
+  const admissionReturned = spawnAdmissionCompletion(taskId);
+
+  // HYK-244 2R-a §2 조각2: the moment every above effect's OWN outcome is
+  // known (never before -- §1 실측: 이 셋은 실패해도 로그만 남기고 위
+  // ok:true 자체는 바뀌지 않는다) is the one moment a consumption receipt
+  // can be honestly issued. ⛔비타협: 후속효과 중 하나라도 실패하면 성공
+  // 영수증을 만들지 않는다(§2 조각2 원문) -- writeReceipt below is only
+  // ever called when requiredEffectsOk is true.
+  autoWriteConsumptionReceipt({
+    role,
+    harnessDir,
+    resultContent,
+    taskId,
+    droppedAt: droppedMatch[1].trim(),
+    dispatchId,
+    doneAt: doneMatch[1].trim(),
+    envelopeArchived,
+    taskArchived,
+    admissionReturned,
+    recordOutcome,
+  });
 
   return { ok: true, reason: `relay handshake ok for ${taskId}` };
 }
@@ -526,6 +609,11 @@ function spawnAdmissionCompletion(taskId) {
       stdio: ["ignore", "pipe", "pipe"],
     });
     console.log(out.trim());
+    // HYK-244 2R-a 조각2: return value added (was void/undefined) so the
+    // receipt-writing call site can know this effect (admissionReturned)
+    // actually succeeded. Does not change try/catch structure or any
+    // existing log line above/below.
+    return true;
   } catch (err) {
     // Missing adapter file (isolated test fixture), non-zero exit
     // (attempted but failed), or any other spawn failure -- all logged,
@@ -549,6 +637,140 @@ function spawnAdmissionCompletion(taskId) {
     // sees the failure (coder-task §3: "화면에만 = 도달로 안 침").
     console.error(
       `relay-handshake: admission-completion spawn skipped/failed (non-fatal to this handshake's own exit code, HYK-224-3R §3 reasoning above): ${err.stderr ?? err.message}`,
+    );
+    return false;
+  }
+}
+
+// HYK-244 2R-a §2 조각2: resultFingerprint = 결과 파일 내용의 SHA-256(hex)
+// -- ⛔지정(coder-task.md §2 원문), 다른 알고리즘을 고르지 않는다. This is
+// a small, deliberate duplicate of consumption-receipt-writer.mjs's own
+// `computeResultFingerprint` (same reason spawnAdmissionCompletion never
+// statically imports its sibling adapter -- see spawnConsumptionReceiptWriter
+// below): relay-handshake.mjs itself must stay inside the 4-file fixed
+// dependency list the mutation-test isolation fixtures stage, and computing
+// the fingerprint here (to decide whether it's even worth spawning the
+// writer CLI) does not require importing anything beyond node:crypto
+// (already a builtin import above).
+function computeResultFingerprint(resultContent) {
+  return createHash("sha256").update(resultContent, "utf8").digest("hex");
+}
+
+// HYK-244 2R-a §2 조각2: consumption-receipt-core.mjs's checkReviewVerdictLine
+// counts exactly this -- REVIEW-family result 파일의 'verdict: approved|
+// rejected' 줄 개수. Duplicated from reject-streak.mjs's own (unexported)
+// VERDICT_LINE_RE_G (that file's line 26) for the same reason: this file
+// needs the RAW count (0/1/2+), not reject-streak.mjs's own collapsed
+// ok:false-on-ambiguous shape (`parseReviewOutcome` never exposes the count
+// itself).
+const VERDICT_LINE_RE_G = /^verdict:\s*(approved|rejected)\s*$/gim;
+
+function countVerdictLines(resultContent) {
+  return [...resultContent.matchAll(VERDICT_LINE_RE_G)].length;
+}
+
+// HYK-244 2R-a §2 조각2: builds the consumption-receipt-core.mjs candidate
+// shape (binding/effects/verdictLineCount) and spawns the writer CLI ONLY
+// when every required effect for this role succeeded -- ⛔비타협: 부분
+// 성공은 성공 영수증이 아니다(§2 원문). REVIEW 계열(isReviewFamilyRole,
+// reject-streak.mjs 385-394행과 동일 규칙)만 ledgerRecorded를 필수로 본다,
+// consumption-receipt-core.mjs의 requiredEffectKeysFor와 정확히 같은
+// 판별. Never mutates checkRelayHandshake's own return value either way
+// (같은 이유로 spawnAdmissionCompletion도 그렇다) -- 실패/스킵 모두
+// console.error로만 드러난다.
+function autoWriteConsumptionReceipt({
+  role,
+  harnessDir,
+  resultContent,
+  taskId,
+  droppedAt,
+  dispatchId,
+  doneAt,
+  envelopeArchived,
+  taskArchived,
+  admissionReturned,
+  recordOutcome,
+}) {
+  const isReview = isReviewFamilyRole(role);
+  const ledgerRecorded = isReview ? recordOutcome.ok : undefined;
+  const requiredEffectsOk =
+    envelopeArchived === true &&
+    taskArchived === true &&
+    admissionReturned === true &&
+    (isReview ? ledgerRecorded === true : true);
+  if (!requiredEffectsOk) {
+    console.error(
+      `relay-handshake: consumption receipt NOT written for ${taskId} -- 필수 후속효과 미확인(envelopeArchived=${envelopeArchived}, taskArchived=${taskArchived}, admissionReturned=${admissionReturned}${isReview ? `, ledgerRecorded=${ledgerRecorded}` : ""}) -- 부분 성공은 성공 영수증이 아니다(HYK-244 2R-a §2)`,
+    );
+    return;
+  }
+
+  const binding = {
+    taskId,
+    role,
+    droppedAt,
+    resultFingerprint: computeResultFingerprint(resultContent),
+    dispatchId,
+    doneAt,
+  };
+  const effects = isReview
+    ? { envelopeArchived, taskArchived, admissionReturned, ledgerRecorded }
+    : { envelopeArchived, taskArchived, admissionReturned };
+  const verdictLineCount = isReview
+    ? countVerdictLines(resultContent)
+    : undefined;
+
+  spawnConsumptionReceiptWriter({
+    role,
+    harnessDir,
+    binding,
+    effects,
+    verdictLineCount,
+  });
+}
+
+// HYK-244 2R-a §2 조각2: mirrors spawnAdmissionCompletion exactly (see that
+// function's own header, right above) -- deliberately NOT a static import
+// of consumption-receipt-writer.mjs, for the identical reason: the 6
+// mutation-test isolation fixtures (hyk186-time-authority-mutation.test.mjs
+// 등) stage relay-handshake.mjs inside a fixed 4-file clone (relay-
+// handshake.mjs/time-authority.mjs/reject-streak.mjs/envelope-archive.mjs)
+// -- a static import of a 5th file breaks module resolution at LOAD time
+// for every mutation test in those files, not just the ones this feature
+// touches. A subprocess spawn only fails at CALL time, absorbed by the
+// try/catch below -- an isolated fixture missing the writer file degrades
+// to a silent no-op, never a load error. Never changes checkRelayHandshake's
+// own return value or exit code either way (same S11 rationale as
+// spawnAdmissionCompletion).
+function spawnConsumptionReceiptWriter({
+  role,
+  harnessDir,
+  binding,
+  effects,
+  verdictLineCount,
+}) {
+  try {
+    const writerPath = join(
+      dirname(fileURLToPath(new URL(import.meta.url))),
+      "consumption-receipt-writer.mjs",
+    );
+    const payload = JSON.stringify({
+      role,
+      binding,
+      effects,
+      verdictLineCount,
+    });
+    const out = execFileSync("node", [writerPath, harnessDir, payload], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    console.log(out.trim());
+  } catch (err) {
+    // Missing writer file (isolated test fixture), non-zero exit, or any
+    // other spawn failure -- all logged, none fatal to the handshake's own
+    // verdict/exit code (mirrors spawnAdmissionCompletion's catch exactly).
+    console.error(
+      `relay-handshake: consumption-receipt-writer spawn skipped/failed (non-fatal to this handshake's own exit code): ${err.stderr ?? err.message}`,
     );
   }
 }

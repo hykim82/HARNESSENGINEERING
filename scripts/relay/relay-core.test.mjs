@@ -113,7 +113,7 @@ function dropTaskFile(
 function dropResultFile(
   harnessDir,
   rolePrefix,
-  { taskId = "HYK-x", doneAt = "2026-07-22 08:00" } = {},
+  { taskId = "HYK-x", doneAt = "2026-07-22 08:00:00" } = {},
 ) {
   writeFileSync(
     join(harnessDir, `${rolePrefix}.md`),

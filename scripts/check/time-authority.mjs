@@ -55,7 +55,8 @@ export const TIME_AUTHORITY_REGISTRY = Object.freeze([
     consumer: "scripts/check/relay-handshake.mjs:checkRelayHandshake",
     authorityClock:
       "checkRelayHandshake's `now` param (default Date.now()) -- caller never overrides this in the CLI entry point",
-    formatPrecision: "YYYY-MM-DD HH:MM[:SS] KST",
+    formatPrecision:
+      "YYYY-MM-DD HH:MM:SS KST, seconds required (HYK-244 2R-a -- relay-handshake.mjs rejects a minute-only DONE line before this future-skew check ever runs; the historical HH:MM[:SS] optional-seconds parsing in parseKstTimestamp is unchanged, only DONE additionally requires seconds now)",
     lowerRule: "doneAt >= droppedAt (pre-existing stale-result rejection)",
     upperRule: "doneAt <= now + MAX_FUTURE_SKEW_MS",
     upperBoundMs: MAX_FUTURE_SKEW_MS,

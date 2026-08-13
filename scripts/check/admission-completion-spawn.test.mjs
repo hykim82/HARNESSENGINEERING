@@ -48,7 +48,7 @@ function writeFixture(dir, taskId) {
   );
   writeFileSync(
     join(dir, "coder.md"),
-    `task_id: ${taskId}\n\n>>> DONE: CODER @ 2026-08-11 06:10 KST\n`,
+    `task_id: ${taskId}\n\n>>> DONE: CODER @ 2026-08-11 06:10:00 KST\n`,
     "utf8",
   );
 }
