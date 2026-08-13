@@ -19,6 +19,7 @@ import {
   checkGatePreconditions,
   checkLedgerEntryShape,
   checkLedgerPathResolution,
+  checkOneBPrecondition,
   DISPATCH_GATE_STATE,
 } from "./dispatch-gate-decision-core.mjs";
 import { loadLedger, writeLedger } from "./reject-streak.mjs";
@@ -84,6 +85,37 @@ function extractTaskIdFacts(taskText) {
     taskIdMatchCount,
     taskIdFormatValid,
     issueId: issueIdMatch ? issueIdMatch[1] : null,
+  };
+}
+
+// HYK-241 §2 조각2: same normalize/regex idiom as extractTaskIdFacts above --
+// input validation on the task packet's own text, never a reimplementation
+// of another module's decision logic. Anchored `^...$` column-0 lines,
+// mirroring `task_id:`/`dropped_at:` throughout this codebase. Kept as a
+// SEPARATE extraction (not folded into extractTaskIdFacts) so that
+// function's existing return shape stays untouched.
+const ONE_B_EXEC_RE = /^1b_exec_line:\s*(\S.*)$/im;
+const ONE_B_SHOWN_RE = /^1b_shown:\s*(\S.*)$/im;
+const ONE_B_REACH_RE = /^1b_reach_path:\s*(\S.*)$/im;
+const ONE_B_PREREQ_RE = /^1b_prerequisite_for:\s*(\S.*)$/im;
+// ⛔"아무 문장이나 있으면 통과"를 막기 위한 최소 서술 길이(코더-task §2 조각2
+// 비타협). 정확한 값 자체는 판단이므로, 이 상수 하나로 좁혀 결과 파일에서
+// 근거를 밝힌다.
+const ONE_B_PREREQ_MIN_LEN = 10;
+
+function extractOneBFacts(taskText) {
+  const text = normalizeNewlines(taskText);
+  const missingA = [];
+  if (!ONE_B_EXEC_RE.test(text)) missingA.push("1b_exec_line");
+  if (!ONE_B_SHOWN_RE.test(text)) missingA.push("1b_shown");
+  if (!ONE_B_REACH_RE.test(text)) missingA.push("1b_reach_path");
+  const prereqMatch = text.match(ONE_B_PREREQ_RE);
+  const prereqValue = prereqMatch ? prereqMatch[1].trim() : null;
+  return {
+    aComplete: missingA.length === 0,
+    missingA,
+    bDeclared: prereqValue !== null,
+    bValid: prereqValue !== null && prereqValue.length >= ONE_B_PREREQ_MIN_LEN,
   };
 }
 
@@ -499,6 +531,22 @@ export function runDispatchGateDecision(argv) {
             issueId,
           }),
         );
+        // HYK-241 §2 조각2: placed LAST (after both gates + chain), not
+        // ahead of them like checkGatePreconditions/checkLedgerPathResolution
+        // -- an earlier placement would short-circuit before the gates ever
+        // run, which changes the "gates never spawned" assertions every
+        // existing precondition-reject test in dispatch-gate-decision.test.mjs
+        // already makes about task_id/ledger shapes. Running last means the
+        // OUTCOME (delivery blocked) is identical either way when 1-B is
+        // missing; only ALLOW-bound fixtures need a 1-B declaration added.
+        // checkOneBPrecondition returns null on success -- nothing is pushed
+        // then, same convention checkGatePreconditions/
+        // checkLedgerPathResolution already follow (no positive confirmation
+        // line, only the final combined ALLOW/REJECT line covers it).
+        const oneBDecision = checkOneBPrecondition(
+          extractOneBFacts(readFileSync(taskPath, "utf8")),
+        );
+        if (oneBDecision) decisions.push(oneBDecision);
       }
     }
   }

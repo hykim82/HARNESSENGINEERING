@@ -60,6 +60,89 @@ export function nextArchiveFileName(role, existingNames) {
   return `${role}-r${maxRound + 1}.md`;
 }
 
+// HYK-241 §2 조각1: task 파일(`<role>-task.md`) 쪽의 같은 덮어쓰기 문제 --
+// 라운드마다 ORCH가 다음 task 파일을 같은 이름으로 다시 쓰면, 지금까지
+// «우리가 무엇을 지시했는가»의 원문이 그 순간 사라진다(§1 실사고: 결과
+// 파일은 archiveRoundEnvelope가 보존하는데 지시서는 그 대상이 아니었다).
+// 별도 이름 패턴(`<role>-task-r<N>.md`)을 써서 nextArchiveFileName의 기존
+// 계약(정확히 `<role>-r<N>.md`만 셈)과 절대 충돌하지 않는다 -- 두 정규식
+// 모두 상대방의 파일명을 매치하지 않는다(태그 사이에 반드시 `-task-`가
+// 끼어 있어야 함).
+export function nextTaskArchiveFileName(role, existingNames) {
+  const pattern = new RegExp(`^${escapeForRegex(role)}-task-r(\\d+)\\.md$`);
+  let maxRound = 0;
+  for (const name of existingNames) {
+    const m = pattern.exec(name);
+    if (m) {
+      const n = Number(m[1]);
+      if (n > maxRound) maxRound = n;
+    }
+  }
+  return `${role}-task-r${maxRound + 1}.md`;
+}
+
+const DROPPED_AT_RE_G = /^dropped_at:\s*(.+)$/gim;
+
+// Metadata-only extraction, mirrors extractDoneAt below (ambiguous -> "unknown"
+// rather than guessing).
+function extractDroppedAt(taskContent) {
+  const matches = [...taskContent.matchAll(DROPPED_AT_RE_G)];
+  return matches.length === 1 ? matches[0][1].trim() : "unknown";
+}
+
+// Writes a verbatim copy of `taskContent` under
+// `<harnessDir>/rounds/<role>-task-r<N>.md` -- the TASK-file sibling of
+// archiveRoundEnvelope above. ⛔봉투 형식(계약)은 여기서도 바꾸지 않는다:
+// `<role>-task.md` 자체는 절대 쓰지/지우지 않는다 -- 보존은 항상 "추가"다.
+// Never throws -- same contract as archiveRoundEnvelope (a failure to
+// archive must not block the handshake decision that triggered it).
+export function archiveRoundTaskFile({
+  role,
+  taskContent,
+  harnessDir,
+  readdirFn = readdirSync,
+  mkdirFn = mkdirSync,
+  writeFileFn = writeFileSync,
+  existsFn = existsSync,
+}) {
+  if (typeof role !== "string" || role === "") {
+    return {
+      ok: false,
+      reason:
+        "envelope-archive: role missing -- cannot preserve round task file",
+    };
+  }
+  if (typeof taskContent !== "string") {
+    return {
+      ok: false,
+      reason:
+        "envelope-archive: taskContent missing -- cannot preserve round task file",
+    };
+  }
+  const archiveDir = join(harnessDir, ARCHIVE_SUBDIR);
+  try {
+    if (!existsFn(archiveDir)) {
+      mkdirFn(archiveDir, { recursive: true });
+    }
+    const existing = readdirFn(archiveDir);
+    const fileName = nextTaskArchiveFileName(role, existing);
+    const destPath = join(archiveDir, fileName);
+    const droppedAt = extractDroppedAt(taskContent);
+    const header = `<!-- envelope-archive: role=${role} kind=task dropped_at=${droppedAt} -->\n`;
+    writeFileFn(destPath, header + taskContent, "utf8");
+    return {
+      ok: true,
+      reason: `envelope-archive: ${role} round TASK file preserved -> ${join(ARCHIVE_SUBDIR, fileName)}`,
+      path: destPath,
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      reason: `envelope-archive: failed to preserve ${role} round task file (${err.message})`,
+    };
+  }
+}
+
 const DONE_RE_G = /^>>>\s*DONE:.*@\s*(.+?)\s*$/gim;
 
 // Metadata-only extraction (never used for pass/fail decisions -- that's
