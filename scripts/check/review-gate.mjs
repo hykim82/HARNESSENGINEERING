@@ -4,6 +4,7 @@ import { execSync } from "node:child_process";
 import { recordRejectStreakFromResultText } from "./reject-streak.mjs";
 import { mainRepoRoot } from "./relay-handshake.mjs";
 import { archiveRoundEnvelope } from "./envelope-archive.mjs";
+import { checkApprovalBinding } from "./review-approval-binding.mjs";
 
 // HYK-183: 결과 파일에 이 표지가 2개 이상이면 어느 것이 최종인지 결정할 수
 // 없으므로 조용히 하나를 고르지 않고 판정 불가로 멈춘다(2026-07-31 거짓
@@ -283,6 +284,19 @@ if (invokedDirectly) {
   const result = checkReviewGate({ message, reviewPath });
   if (result.ok) {
     if (isGenuineReviewApproval(message, reviewPath)) {
+      // HYK-240: checkReviewGate above only confirms "for:/verdict:
+      // approved/role: REVIEW" evidence exists -- it never checked THAT
+      // approval was for the code state actually about to be committed.
+      // This binding check closes that gap: fail-closed (missing binding,
+      // unmeasurable worktree, or a fingerprint mismatch all block), kept
+      // as a separate call rather than folded into checkReviewGate so that
+      // function's own pure-function contract (and the ~20 existing tests
+      // asserting its return shape) stay untouched.
+      const binding = checkApprovalBinding({ reviewPath, cwd: repoRoot() });
+      if (!binding.ok) {
+        console.error(binding.reason);
+        process.exit(1);
+      }
       recordApprovalToLedger(reviewPath);
       archiveApprovedRound(reviewPath);
     }

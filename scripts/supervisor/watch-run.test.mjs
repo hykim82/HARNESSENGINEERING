@@ -441,7 +441,7 @@ test("HYK-210-human-log-1: buildLogLine falls back to a readable placeholder (no
   );
 });
 
-test("HYK-210-human-log-1/HYK-212-postcheck-1/HYK-239-chain-wire-2: no partial failures -> log line is byte-identical to the pre-HYK-210 format up through the cap segment, plus the HYK-173-push-wire escalation segment, the HYK-212-postcheck-1 postcheck segment, and now the HYK-239-chain-wire-2 chain segment appended at the very end (existing consumer regression guard, coder-task.md §7-7/§6 '기존 축 회귀 0') (1/1)", () => {
+test("HYK-210-human-log-1/HYK-212-postcheck-1/HYK-239-chain-wire-2/HYK-240: no partial failures -> log line is byte-identical to the pre-HYK-210 format up through the cap segment, plus the HYK-173-push-wire escalation segment, the HYK-212-postcheck-1 postcheck segment, the HYK-239-chain-wire-2 chain segment, and now the HYK-240 binding segment appended at the very end (existing consumer regression guard, coder-task.md §7-7/§6 '기존 축 회귀 0') (1/1)", () => {
   const line = buildLogLine({
     nowIso: "2026-08-09T12:00:00.000Z",
     detectorResult: {
@@ -461,7 +461,8 @@ test("HYK-210-human-log-1/HYK-212-postcheck-1/HYK-239-chain-wire-2: no partial f
       "cap_status=NONE cap_verdict=NONE cap_value=NONE cap_source=NONE " +
       "escalation_status=NONE escalation_verdict=NONE escalation_worst_count=NONE escalation_worktrees=NONE " +
       "postcheck_status=NONE postcheck_verdict=NONE postcheck_worst_count=NONE postcheck_worktrees=NONE " +
-      "chain_status=NONE chain_verdict=NONE chain_worst_count=NONE chain_worktrees=NONE",
+      "chain_status=NONE chain_verdict=NONE chain_worst_count=NONE chain_worktrees=NONE " +
+      "binding_status=NONE binding_verdict=NONE binding_worst_count=NONE binding_worktrees=NONE",
   );
 });
 

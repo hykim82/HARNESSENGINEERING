@@ -30,6 +30,10 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { execFileSync, spawnSync } from "node:child_process";
+import {
+  computeFingerprint,
+  formatBindingBlock,
+} from "./review-approval-binding.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REVIEW_GATE_PATH = join(HERE, "review-gate.mjs");
@@ -41,6 +45,10 @@ const ENVELOPE_ARCHIVE_PATH = join(HERE, "envelope-archive.mjs");
 // envelope-archive.mjs's own copies above already exist to avoid, now for a
 // third sibling.
 const TIME_AUTHORITY_PATH = join(HERE, "time-authority.mjs");
+// HYK-240: review-gate.mjs now also imports "./review-approval-binding.mjs"
+// (approval<->code-state binding check) -- same MODULE_NOT_FOUND risk as
+// the siblings above, now for a fourth.
+const REVIEW_APPROVAL_BINDING_PATH = join(HERE, "review-approval-binding.mjs");
 
 function git(cwd, args) {
   return execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
@@ -99,19 +107,52 @@ function stageRepo(dir, { reviewGateSrc }) {
     readFileSync(TIME_AUTHORITY_PATH, "utf8"),
     "utf8",
   );
+  writeFileSync(
+    join(scriptsCheckDir, "review-approval-binding.mjs"),
+    readFileSync(REVIEW_APPROVAL_BINDING_PATH, "utf8"),
+    "utf8",
+  );
+  // HYK-240 2R: stage the harness scaffold itself -- in the real repo
+  // scripts/check/ is tracked (part of HEAD), so this never shows up as an
+  // "unstaged change" there. Leaving these copies untracked here would make
+  // review-approval-binding.mjs's new index<->worktree sync check (F1 fix)
+  // see them as desynced on every test in this file, regardless of what
+  // the test itself is actually exercising.
+  git(dir, ["add", "-A"]);
   return join(scriptsCheckDir, "review-gate.mjs");
 }
 
+// HYK-240: an approval with no binding-fingerprint now fails fail-closed
+// ("결속 없음"), so tests exercising the SUCCESS path must record one that
+// matches `dir`'s state at the moment the CLI actually runs. `writeCommitMsg`
+// below writes the message file OUTSIDE `dir` specifically so calling this
+// AFTER staging (and before/after writeCommitMsg, order no longer matters)
+// still measures exactly what review-gate.mjs will measure at CLI time.
 function writeApprovedReview(dir, issueId) {
+  const fp = computeFingerprint({ cwd: dir });
+  assert.equal(
+    fp.ok,
+    true,
+    `fingerprint must be computable in ${dir}: ${fp.reason}`,
+  );
+  const binding = formatBindingBlock({
+    fingerprint: fp.fingerprint,
+    entries: fp.entries,
+  });
   writeFileSync(
     join(dir, ".harness", "review.md"),
-    `for: ${issueId}\ntask_id: ${issueId}\nrole: REVIEW-CODEX\nverdict: approved\n\n>>> DONE: REVIEW-CODEX @ 2026-08-08 17:45 KST\n`,
+    `for: ${issueId}\ntask_id: ${issueId}\nrole: REVIEW-CODEX\nverdict: approved\n${binding}\n>>> DONE: REVIEW-CODEX @ 2026-08-08 17:45 KST\n`,
     "utf8",
   );
 }
 
+// HYK-240: production's real commit-message file lives under `.git/`
+// (outside the working tree `git status` scans), so mirror that here --
+// writing it inside `dir` would make it show up as an untracked file and
+// shift the fingerprint computed above.
 function writeCommitMsg(dir, subject) {
-  const p = join(dir, "commit-msg.txt");
+  const msgDir = mkdtempSync(join(tmpdir(), "hyk205-commit-msg-"));
+  const p = join(msgDir, "commit-msg.txt");
   writeFileSync(p, `${subject}\n`, "utf8");
   return p;
 }
@@ -280,19 +321,52 @@ test("mutation ⓐ (필수): site #1 guard removed -> EISDIR crashes uncaught ag
 // mutation ⓑ (필수): the catch swallows the read failure and treats it as a
 // PASS (fail-open) -- exactly the regression §2 forbids: "couldn't read the
 // evidence" must never look like "evidence approved".
+//
+// HYK-240 2R (반려 2 수리, 검토 지적): 1R 버전은 `review.md`를 디렉터리로
+// 만들어(EISDIR) checkReviewGate의 읽기를 실패시켰는데, checkApprovalBinding
+// (review-approval-binding.mjs)도 **같은 경로를 같은 방식으로 다시 읽어서**
+// 독립적으로 fail-closed 됐다 -- 그래서 이 변이의 "fail-open이면 exit 0"라는
+// 단일 지점 증명이 binding 계층에 가려졌다(검토 반려 사유). 되살리는 방법 =
+// review.md는 **정상적으로 읽히는 유효한 승인+결속 파일**로 두고(그래서
+// checkApprovalBinding은 독립적으로 정상 통과한다), checkReviewGate **자기
+// 자신의 읽기 호출만** 강제로 던지게 만든다(파일 상태가 아니라 소스 코드
+// 변이로) -- 그러면 "읽기가 실패했을 때 그 결과를 검증 없이 통과시키는가"를
+// binding 계층과 완전히 분리해서 다시 단일 변수로 시험할 수 있다.
 test("mutation ⓑ (필수): site #1 catch turns fail-closed into fail-open (returns ok:true on read failure) -> unreadable evidence lets the commit through -> RED", () => {
-  const target =
+  const catchTarget =
     "  } catch (err) {\n    return {\n      ok: false,\n      reason: `review file unreadable: ${reviewPath} (${err.message}); the gate cannot verify approval and blocks -- fix or restore the file (e.g. re-run the review step), then retry the commit`,\n    };\n  }";
-  assertExactlyOneMatch(REVIEW_GATE_SRC, target, "site #1 catch block");
+  assertExactlyOneMatch(REVIEW_GATE_SRC, catchTarget, "site #1 catch block");
   const failOpen =
     "  } catch (err) {\n    return { ok: true, reason: `review file unreadable, proceeding anyway: ${err.message}` };\n  }";
-  const mutated = REVIEW_GATE_SRC.replace(target, failOpen);
+
+  // Second, independent mutation: force checkReviewGate's OWN read to throw
+  // regardless of what's actually on disk -- so the file itself can stay a
+  // normal, valid, readable review.md (binding layer sees it fine) while
+  // ONLY checkReviewGate's read call fails. Isolates the catch's fail-open
+  // behavior from binding entirely.
+  const readTarget = '    content = readFileSync(reviewPath, "utf8");\n';
+  assertExactlyOneMatch(REVIEW_GATE_SRC, readTarget, "site #1 read call");
+  const forcedThrow =
+    '    content = (() => { throw new Error("HYK-240 2R forced read failure for mutation isolation"); })();\n';
+
+  const mutated = REVIEW_GATE_SRC.replace(catchTarget, failOpen).replace(
+    readTarget,
+    forcedThrow,
+  );
+  assert.notEqual(
+    mutated,
+    REVIEW_GATE_SRC,
+    "both replacements must actually have matched and applied",
+  );
 
   const dir = mkdtempSync(join(tmpdir(), "hyk205-site1-mut-b-"));
   try {
     initPlainGitRepo(dir);
     const scriptPath = stageRepo(dir, { reviewGateSrc: mutated });
-    makeReviewPathADirectory(dir);
+    // review.md is a NORMAL, valid, fully-bound approval -- checkReviewGate
+    // is the only thing that (via the forced-throw mutation above) can't
+    // see it.
+    writeApprovedReview(dir, "HYK-9923");
     const commitMsgFile = writeCommitMsg(
       dir,
       "fix(check): HYK-9923 -- something",
@@ -300,12 +374,48 @@ test("mutation ⓑ (필수): site #1 catch turns fail-closed into fail-open (ret
 
     const result = runHookLikeCli(scriptPath, commitMsgFile, dir);
     console.log(
-      `[HYK-205 §1 mutation ⓑ 원문 로그] exit=${result.exit} stderr=${JSON.stringify(result.stderr)}`,
+      `[HYK-240 2R mutation ⓑ 원문 로그] exit=${result.exit} stderr=${JSON.stringify(result.stderr)}`,
     );
     assert.equal(
       result.exit,
       0,
-      "RED: a commit whose review evidence could not even be read passed anyway (fail-open regression -- the exact defect this repo has repeatedly treated as a bug)",
+      "RED: a review checkReviewGate could not even read (forced failure) passed anyway -- the fail-open regression, now isolated from the binding layer's own independent pass (review.md is genuinely valid, so binding legitimately says OK; checkReviewGate's own guard is the only thing standing between 'could not verify' and 'treated as approved')",
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// HYK-240 2R (반려 2 수리): 되살린 증명이 진짜인지 -- 위 mutation ⓑ가 정말
+// checkReviewGate의 fail-open 여부에 반응하는지, catch를 되돌린(=수리된
+// 원본 그대로의) 사본으로 같은 시나리오를 돌려 exit 1(차단)임을 확인한다.
+// 이게 없으면 "항상 exit 0을 내는 시험을 만들었을 뿐"일 수 있다.
+test("mutation ⓑ 대조군: same forced-read-failure scenario, but with checkReviewGate's catch LEFT INTACT (not fail-open) -> still blocked (exit != 0) -- proves the RED above is caused by the catch mutation, not by some other accident", () => {
+  const readTarget = '    content = readFileSync(reviewPath, "utf8");\n';
+  assertExactlyOneMatch(REVIEW_GATE_SRC, readTarget, "site #1 read call");
+  const forcedThrow =
+    '    content = (() => { throw new Error("HYK-240 2R forced read failure for mutation isolation"); })();\n';
+  const mutated = REVIEW_GATE_SRC.replace(readTarget, forcedThrow);
+  assert.notEqual(mutated, REVIEW_GATE_SRC);
+
+  const dir = mkdtempSync(join(tmpdir(), "hyk205-site1-mut-b-control-"));
+  try {
+    initPlainGitRepo(dir);
+    const scriptPath = stageRepo(dir, { reviewGateSrc: mutated });
+    writeApprovedReview(dir, "HYK-9924");
+    const commitMsgFile = writeCommitMsg(
+      dir,
+      "fix(check): HYK-9924 -- something",
+    );
+
+    const result = runHookLikeCli(scriptPath, commitMsgFile, dir);
+    console.log(
+      `[HYK-240 2R mutation ⓑ 대조군 원문 로그] exit=${result.exit} stderr=${JSON.stringify(result.stderr)}`,
+    );
+    assert.notEqual(
+      result.exit,
+      0,
+      "with the catch intact (fail-closed), a forced read failure must still block -- confirms the mutation ⓑ RED above is specifically caused by the catch mutation",
     );
   } finally {
     rmSync(dir, { recursive: true, force: true });

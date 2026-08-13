@@ -21,6 +21,10 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { execFileSync, spawnSync } from "node:child_process";
+import {
+  computeFingerprint,
+  formatBindingBlock,
+} from "./review-approval-binding.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REVIEW_GATE_PATH = join(HERE, "review-gate.mjs");
@@ -29,6 +33,8 @@ const REJECT_STREAK_PATH = join(HERE, "reject-streak.mjs");
 const ENVELOPE_ARCHIVE_PATH = join(HERE, "envelope-archive.mjs");
 // HYK-186: relay-handshake.mjs now also imports "./time-authority.mjs".
 const TIME_AUTHORITY_PATH = join(HERE, "time-authority.mjs");
+// HYK-240: review-gate.mjs now also imports "./review-approval-binding.mjs".
+const REVIEW_APPROVAL_BINDING_PATH = join(HERE, "review-approval-binding.mjs");
 
 function git(cwd, args) {
   return execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
@@ -102,15 +108,48 @@ function stageRepo(dir, { reviewGateSrc }) {
     readFileSync(TIME_AUTHORITY_PATH, "utf8"),
     "utf8",
   );
+  writeFileSync(
+    join(scriptsCheckDir, "review-approval-binding.mjs"),
+    readFileSync(REVIEW_APPROVAL_BINDING_PATH, "utf8"),
+    "utf8",
+  );
+  // HYK-240 2R: stage the harness scaffold itself -- see the identical note
+  // in review-gate-unguarded-reads.test.mjs's stageRepo.
+  git(dir, ["add", "-A"]);
   return join(scriptsCheckDir, "review-gate.mjs");
 }
 
+// HYK-240: fail-closed binding check needs a fingerprint matching `dir`'s
+// state at CLI time -- call this AFTER staging and (if used) after the
+// commit-msg file is written elsewhere (writeCommitMsgOutside below keeps
+// it out of `dir` entirely, so ordering relative to it no longer matters).
 function writeApprovedReview(dir, issueId) {
+  const fp = computeFingerprint({ cwd: dir });
+  assert.equal(
+    fp.ok,
+    true,
+    `fingerprint must be computable in ${dir}: ${fp.reason}`,
+  );
+  const binding = formatBindingBlock({
+    fingerprint: fp.fingerprint,
+    entries: fp.entries,
+  });
   writeFileSync(
     join(dir, ".harness", "review.md"),
-    `for: ${issueId}\ntask_id: ${issueId}\nrole: REVIEW-CODEX\nverdict: approved\n\n>>> DONE: REVIEW-CODEX @ 2026-08-08 17:00 KST\n`,
+    `for: ${issueId}\ntask_id: ${issueId}\nrole: REVIEW-CODEX\nverdict: approved\n${binding}\n>>> DONE: REVIEW-CODEX @ 2026-08-08 17:00 KST\n`,
     "utf8",
   );
+}
+
+// HYK-240: production's commit-message file lives under `.git/`, outside
+// the working tree `git status` scans -- writing it inside `dir` (as the
+// four call sites below used to) would shift the fingerprint computed
+// above. Mirror production by writing it elsewhere.
+function writeCommitMsgOutside(subject) {
+  const msgDir = mkdtempSync(join(tmpdir(), "hyk204-commit-msg-"));
+  const p = join(msgDir, "commit-msg.txt");
+  writeFileSync(p, `${subject}\n`, "utf8");
+  return p;
 }
 
 function runHookLikeCli(scriptPath, commitMsgFile, cwd) {
@@ -159,8 +198,9 @@ test("§2-1 fix: review.md deleted right as archiveApprovedRound enters -> commi
     initPlainGitRepo(dir);
     const scriptPath = stageRepo(dir, { reviewGateSrc: fixedWithInjection });
     writeApprovedReview(dir, "HYK-9910");
-    const commitMsgFile = join(dir, "commit-msg.txt");
-    writeFileSync(commitMsgFile, "fix(check): HYK-9910 -- something\n", "utf8");
+    const commitMsgFile = writeCommitMsgOutside(
+      "fix(check): HYK-9910 -- something",
+    );
 
     const result = runHookLikeCli(scriptPath, commitMsgFile, dir);
     // 원문 로그 (요구사항: "확인했다" 문장 대신 실제 종료코드/출력을 남긴다)
@@ -205,8 +245,9 @@ test("mutation ⓐ (필수): archiveApprovedRound's try/catch guard removed -> d
     initPlainGitRepo(dir);
     const scriptPath = stageRepo(dir, { reviewGateSrc: withInjection });
     writeApprovedReview(dir, "HYK-9911");
-    const commitMsgFile = join(dir, "commit-msg.txt");
-    writeFileSync(commitMsgFile, "fix(check): HYK-9911 -- something\n", "utf8");
+    const commitMsgFile = writeCommitMsgOutside(
+      "fix(check): HYK-9911 -- something",
+    );
 
     const result = runHookLikeCli(scriptPath, commitMsgFile, dir);
     console.log(
@@ -244,8 +285,9 @@ test("mutation ⓑ (필수): archiveApprovedRound's catch block silently swallow
     initPlainGitRepo(dir);
     const scriptPath = stageRepo(dir, { reviewGateSrc: withInjection });
     writeApprovedReview(dir, "HYK-9912");
-    const commitMsgFile = join(dir, "commit-msg.txt");
-    writeFileSync(commitMsgFile, "fix(check): HYK-9912 -- something\n", "utf8");
+    const commitMsgFile = writeCommitMsgOutside(
+      "fix(check): HYK-9912 -- something",
+    );
 
     const result = runHookLikeCli(scriptPath, commitMsgFile, dir);
     console.log(
@@ -285,8 +327,9 @@ test("mutation ⓒ (자유 선택): partial guard -- only wraps archiveRoundEnve
     initPlainGitRepo(dir);
     const scriptPath = stageRepo(dir, { reviewGateSrc: withInjection });
     writeApprovedReview(dir, "HYK-9913");
-    const commitMsgFile = join(dir, "commit-msg.txt");
-    writeFileSync(commitMsgFile, "fix(check): HYK-9913 -- something\n", "utf8");
+    const commitMsgFile = writeCommitMsgOutside(
+      "fix(check): HYK-9913 -- something",
+    );
 
     const result = runHookLikeCli(scriptPath, commitMsgFile, dir);
     console.log(

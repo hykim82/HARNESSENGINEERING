@@ -24,6 +24,10 @@ import {
   nextArchiveFileName,
 } from "./envelope-archive.mjs";
 import { checkRelayHandshake } from "./relay-handshake.mjs";
+import {
+  computeFingerprint,
+  formatBindingBlock,
+} from "./review-approval-binding.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REVIEW_GATE_CLI = join(HERE, "review-gate.mjs");
@@ -289,12 +293,30 @@ function runCli(scriptPath, args, opts = {}) {
 test("wiring: review-gate.mjs commit-msg hook archives the APPROVED (winning, terminal) round -- the one round relay-handshake never re-checks", () => {
   withFixtureDir("review-gate-wiring-", (dir) => {
     initPlainGitRepo(dir);
+    // HYK-240: binding-fingerprint must match `dir`'s state at CLI time or
+    // checkApprovalBinding fail-closes this ("결속 없음"). Computed fresh
+    // (not hardcoded) so it stays correct regardless of what else is on
+    // disk here.
+    const fp = computeFingerprint({ cwd: dir });
+    assert.equal(
+      fp.ok,
+      true,
+      `fingerprint must be computable in ${dir}: ${fp.reason}`,
+    );
+    const binding = formatBindingBlock({
+      fingerprint: fp.fingerprint,
+      entries: fp.entries,
+    });
     writeFileSync(
       join(dir, ".harness", "review.md"),
-      "for: HYK-9800\ntask_id: HYK-9800\nrole: REVIEW-CODEX\nverdict: approved\n\n>>> DONE: REVIEW-CODEX @ 2026-08-08 12:00 KST\n",
+      `for: HYK-9800\ntask_id: HYK-9800\nrole: REVIEW-CODEX\nverdict: approved\n${binding}\n>>> DONE: REVIEW-CODEX @ 2026-08-08 12:00 KST\n`,
       "utf8",
     );
-    const commitMsgFile = join(dir, "commit-msg.txt");
+    // Production's commit-message file lives under `.git/`, outside the
+    // working tree `git status` scans -- write it elsewhere so it doesn't
+    // shift the fingerprint just recorded above.
+    const msgDir = mkdtempSync(join(tmpdir(), "review-gate-wiring-msg-"));
+    const commitMsgFile = join(msgDir, "commit-msg.txt");
     writeFileSync(commitMsgFile, "fix(check): HYK-9800 -- something\n", "utf8");
 
     const result = runCli(REVIEW_GATE_CLI, [commitMsgFile], { cwd: dir });

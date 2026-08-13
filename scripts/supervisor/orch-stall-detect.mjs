@@ -2603,6 +2603,177 @@ export function judgeChainIntegrityAcrossWorktrees({ repoRoot }, opts = {}) {
   };
 }
 
+// HYK-240 요건3 (push 경로): 승인<->코드지문 결속(scripts/check/
+// review-approval-binding.mjs, commit-msg 훅이 이미 실시간으로 막는 것)이
+// "커밋 시도가 있었을 때만" 사람에게 도달한다는 한계를 push 경로로 닫는다.
+// chain 축(HYK-239)과 동일 구조 -- 각 워크트리 "자기 자신의"
+// review-approval-binding.mjs를 스폰한다(함수 import 0, 그 워크트리에
+// 실제 체크아웃된 버전으로 그 워크트리 자신의 review.md/작업트리를 잰다).
+// 커밋을 아직 시도하지 않은 채 조용히 방치된 "승인 후 변경"도 다음 tick에
+// 드러난다(커밋 게이트는 커밋을 "시도"해야만 발동하므로 그 사이의 침묵을
+// 이 축이 메운다).
+export const BINDING_WIRE_STATUS = Object.freeze({
+  JUDGED: "JUDGED",
+  // review-approval-binding.mjs --explain 스폰/파싱 자체가 실패했거나,
+  // 그 도구가 "판정 불가"를 낸 경우. §1-5와 동일하게 "정상"으로도
+  // "위조"로도 접지 않는다.
+  QUERY_FAILED: "BINDING_QUERY_FAILED",
+});
+
+export const BINDING_SCAN_FAILURE = Object.freeze({
+  WORKTREE_LIST_FAILED: "BINDING_SCAN_WORKTREE_LIST_FAILED",
+});
+
+export const BINDING_VERDICT = Object.freeze({
+  // review.md가 아예 없거나(검토 전/무관 워크트리), 지문이 있고 일치하는
+  // 경우. ⛔정직 한계: "결속 없음"(review.md는 있는데 binding-fingerprint
+  // 줄이 없는 구버전 승인)도 이 축에서는 CLEAN으로 접는다 -- 이 필드가
+  // 아직 없던 기존 review.md 전부를 이 축이 "열린 이상"으로 잡으면 이
+  // 기능이 배포되는 순간 저장소 전체가 오경보로 뒤덮인다. 그 상태의
+  // 유일한 정본 강제는 커밋 게이트 자신(fail-closed, review-gate.mjs)이다
+  // -- 이 축은 "승인됐는데 그 뒤 코드가 바뀐" 조용한 사고만 잡는다.
+  CLEAN: "CLEAN",
+  MISMATCH: "MISMATCH",
+});
+
+const BINDING_JUDGEMENT_LINE_RE = /^3\)\s*판정:\s*(\S+)/m;
+
+// runBindingExplain에서 분리(§6 eslint complexity 상한 준수 --
+// chainVerifyErrorToResult와 동일 이유/모양).
+function bindingExplainErrorToResult(err) {
+  const status = err && err.status !== undefined ? err.status : null;
+  const stdout = err && err.stdout ? String(err.stdout) : "";
+  const stderrText = err && err.stderr ? String(err.stderr) : "";
+  const fallbackText = String(err?.message ?? err ?? "");
+  return { exitCode: status, stdout, stderr: stderrText || fallbackText };
+}
+
+function runBindingExplain(worktreePath, opts) {
+  const execFn =
+    typeof opts.bindingExecFn === "function"
+      ? opts.bindingExecFn
+      : execFileSync;
+  const scriptPath = path.join(
+    worktreePath,
+    "scripts",
+    "check",
+    "review-approval-binding.mjs",
+  );
+  try {
+    const stdout = execFn(
+      "node",
+      [scriptPath, "--explain", "--cwd", worktreePath],
+      {
+        encoding: "utf8",
+      },
+    );
+    return { exitCode: 0, stdout: String(stdout ?? "") };
+  } catch (err) {
+    return bindingExplainErrorToResult(err);
+  }
+}
+
+// review.md가 없는 워크트리는 조회조차 하지 않는다 -- 검토가 시작되지
+// 않은/무관한 워크트리를 매 tick마다 스폰해 잡음을 만들 이유가 없다(§0
+// 실측: 이 저장소의 정상 상태는 대부분의 워크트리가 review.md 없이 존재).
+function judgeApprovalBindingForWorktree(worktreePath, opts) {
+  const reviewPath = path.join(worktreePath, ".harness", "review.md");
+  if (!existsSync(reviewPath)) {
+    return {
+      worktreePath,
+      status: BINDING_WIRE_STATUS.JUDGED,
+      verdict: BINDING_VERDICT.CLEAN,
+    };
+  }
+  const r = runBindingExplain(worktreePath, opts);
+  if (r.exitCode !== 0) {
+    return {
+      worktreePath,
+      status: BINDING_WIRE_STATUS.QUERY_FAILED,
+      reason: firstLine(r.stderr || r.stdout || `exit=${String(r.exitCode)}`),
+    };
+  }
+  const judgementLine =
+    r.stdout.split("\n").find((l) => l.startsWith("3)")) ?? "";
+  const m = BINDING_JUDGEMENT_LINE_RE.exec(r.stdout);
+  if (!m) {
+    return {
+      worktreePath,
+      status: BINDING_WIRE_STATUS.QUERY_FAILED,
+      reason: `--explain output did not match the expected format: ${firstLine(r.stdout)}`,
+    };
+  }
+  // "판정 불가" contains a space, so the \S+ capture above only grabs
+  // "판정" for it -- check the full line text instead of the capture group
+  // for that one case.
+  if (judgementLine.includes("판정 불가")) {
+    return {
+      worktreePath,
+      status: BINDING_WIRE_STATUS.QUERY_FAILED,
+      reason: firstLine(judgementLine),
+    };
+  }
+  if (m[1] === "불일치") {
+    return {
+      worktreePath,
+      status: BINDING_WIRE_STATUS.JUDGED,
+      verdict: BINDING_VERDICT.MISMATCH,
+      reason: firstLine(judgementLine),
+    };
+  }
+  // "일치" or "결속 없음" -- see BINDING_VERDICT.CLEAN's honesty-limit note.
+  return {
+    worktreePath,
+    status: BINDING_WIRE_STATUS.JUDGED,
+    verdict: BINDING_VERDICT.CLEAN,
+  };
+}
+
+function bindingSeverityOf(entry) {
+  if (entry.status === BINDING_SCAN_FAILURE.WORKTREE_LIST_FAILED) return 2;
+  if (entry.status === BINDING_WIRE_STATUS.QUERY_FAILED) return 1;
+  if (
+    entry.status === BINDING_WIRE_STATUS.JUDGED &&
+    entry.verdict === BINDING_VERDICT.MISMATCH
+  ) {
+    return 3;
+  }
+  return 0;
+}
+
+export function judgeApprovalBindingAcrossWorktrees({ repoRoot }, opts = {}) {
+  const list = collectGitWorktrees(repoRoot, opts);
+  if (!list.ok) {
+    return {
+      status: BINDING_SCAN_FAILURE.WORKTREE_LIST_FAILED,
+      detail: list.detail,
+      worktrees: [],
+      totalWorktrees: 0,
+      worstCount: 1,
+    };
+  }
+  const worktrees = list.worktrees.map((wt) =>
+    judgeApprovalBindingForWorktree(wt, opts),
+  );
+  const worstSeverity = worktrees.reduce(
+    (acc, w) => Math.max(acc, bindingSeverityOf(w)),
+    0,
+  );
+  const worstEntries = worktrees.filter(
+    (w) => bindingSeverityOf(w) === worstSeverity,
+  );
+  const worst = worstEntries[0] ?? null;
+  return {
+    status: worst ? worst.status : BINDING_WIRE_STATUS.JUDGED,
+    verdict: worst ? worst.verdict : BINDING_VERDICT.CLEAN,
+    reason: worst ? worst.reason : undefined,
+    worktreePath: worst ? worst.worktreePath : undefined,
+    worktrees,
+    totalWorktrees: worktrees.length,
+    worstCount: worstEntries.length,
+  };
+}
+
 // runOrchStallDetect(argv) -> {result, exitCode} -- CLI 몸통을 순수 함수에
 // 가깝게 뽑아 시험이 process.exit 없이 호출할 수 있게 한다. I/O(파일
 // 읽기·git 실행)는 그대로 하되, 프로세스 종료·stdout 출력은 하지 않는다.
@@ -2706,6 +2877,10 @@ export function runOrchStallDetect(argv, opts = {}) {
   // 조립된다(push 경로, §1). 언제나 맨 끝에 붙는다(§1 설계 제약 3 --
   // 기존 축의 필드·순서·값 불변).
   const chain = judgeChainIntegrityAcrossWorktrees({ repoRoot }, opts);
+  // HYK-240 요건3: 승인<->코드지문 결속 위반 축도 같은 진입점에서
+  // 조립된다(push 경로, coder-task.md §3 요건3). chain과 마찬가지로 언제나
+  // 맨 끝에 붙는다(§1 설계 제약 3 -- 기존 축의 필드·순서·값 불변).
+  const binding = judgeApprovalBindingAcrossWorktrees({ repoRoot }, opts);
   return {
     result: {
       ...result,
@@ -2722,6 +2897,7 @@ export function runOrchStallDetect(argv, opts = {}) {
       escalation,
       postcheck,
       chain,
+      binding,
     },
     exitCode: EXIT_CODE_BY_VERDICT[result.verdict] ?? 3,
     cli,
