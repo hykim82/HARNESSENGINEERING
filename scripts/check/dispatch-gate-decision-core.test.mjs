@@ -7,6 +7,7 @@ import {
   checkGatePreconditions,
   checkLedgerEntryShape,
   checkLedgerPathResolution,
+  checkOneBPrecondition,
   DISPATCH_GATE_STATE,
 } from "./dispatch-gate-decision-core.mjs";
 
@@ -502,4 +503,83 @@ test("DISPATCH_GATE_STATE: HYK-220 2R additions are present and REJECT_LEDGER_MI
     DISPATCH_GATE_STATE.REJECT_REPO_MISMATCH,
     DISPATCH_GATE_STATE.REJECT_LEDGER_MISSING,
   );
+});
+
+// ---------------------------------------------------------------------------
+// HYK-241 §2 조각2: checkOneBPrecondition -- ⓐ 세 요건 완비 OR ⓑ 유효한
+// 선행 작업 선언, 둘 중 하나가 없으면 REJECT_ONE_B_MISSING.
+// ---------------------------------------------------------------------------
+
+test("checkOneBPrecondition: ⓐ complete -> null (proceed), regardless of ⓑ", () => {
+  assert.equal(
+    checkOneBPrecondition({
+      aComplete: true,
+      missingA: [],
+      bDeclared: false,
+      bValid: false,
+    }),
+    null,
+  );
+});
+
+test("checkOneBPrecondition: ⓐ incomplete but ⓑ declared AND valid -> null (proceed)", () => {
+  assert.equal(
+    checkOneBPrecondition({
+      aComplete: false,
+      missingA: ["1b_exec_line", "1b_shown", "1b_reach_path"],
+      bDeclared: true,
+      bValid: true,
+    }),
+    null,
+  );
+});
+
+test("checkOneBPrecondition: ⓐ incomplete AND ⓑ not declared at all -> REJECT_ONE_B_MISSING, names the missing ⓐ cells and ⓑ's absence", () => {
+  const r = checkOneBPrecondition({
+    aComplete: false,
+    missingA: ["1b_shown"],
+    bDeclared: false,
+    bValid: false,
+  });
+  assert.equal(r.state, DISPATCH_GATE_STATE.REJECT_ONE_B_MISSING);
+  assert.equal(r.allow, false);
+  assert.match(r.reason, /1b_shown/);
+  assert.match(r.reason, /선언 없음/);
+});
+
+test("checkOneBPrecondition: ⓐ incomplete AND ⓑ declared but too short -> REJECT_ONE_B_MISSING, reason distinguishes 'too short' from 'absent' (⛔아무 문장이나 통과 금지)", () => {
+  const r = checkOneBPrecondition({
+    aComplete: false,
+    missingA: ["1b_exec_line", "1b_shown", "1b_reach_path"],
+    bDeclared: true,
+    bValid: false,
+  });
+  assert.equal(r.state, DISPATCH_GATE_STATE.REJECT_ONE_B_MISSING);
+  assert.match(r.reason, /너무 짧아/);
+  assert.doesNotMatch(r.reason, /선언 없음/);
+});
+
+test("checkOneBPrecondition: ⓑ declared+valid but ⓐ also complete -> still null (either is sufficient, not both required)", () => {
+  assert.equal(
+    checkOneBPrecondition({
+      aComplete: true,
+      missingA: [],
+      bDeclared: true,
+      bValid: true,
+    }),
+    null,
+  );
+});
+
+test("checkOneBPrecondition: missing/undefined input object -> treated as neither ⓐ nor ⓑ satisfied -> REJECT_ONE_B_MISSING (never a silent proceed on absent facts)", () => {
+  const r = checkOneBPrecondition();
+  assert.equal(r.state, DISPATCH_GATE_STATE.REJECT_ONE_B_MISSING);
+  assert.equal(r.allow, false);
+});
+
+test("DISPATCH_GATE_STATE: REJECT_ONE_B_MISSING is present and distinct from every other REJECT_* state", () => {
+  const keys = Object.keys(DISPATCH_GATE_STATE);
+  assert.ok(keys.includes("REJECT_ONE_B_MISSING"));
+  const values = keys.map((k) => DISPATCH_GATE_STATE[k]);
+  assert.equal(new Set(values).size, values.length, "no two states collide");
 });

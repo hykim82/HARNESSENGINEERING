@@ -3,7 +3,10 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execSync, execFileSync } from "node:child_process";
 import { recordRejectStreakFromResultText } from "./reject-streak.mjs";
-import { archiveRoundEnvelope } from "./envelope-archive.mjs";
+import {
+  archiveRoundEnvelope,
+  archiveRoundTaskFile,
+} from "./envelope-archive.mjs";
 import {
   TIME_FIELD,
   TIME_AUTHORITY_STATE,
@@ -265,6 +268,21 @@ function autoArchiveRoundEnvelope({ role, resultContent, harnessDir }) {
   }
 }
 
+// HYK-241 §2 조각1: archiveRoundEnvelope의 TASK-file 쌍 -- 이 함수가 불리는
+// 시점(checkRelayHandshake의 ok:true 분기, 바로 아래)은 이 라운드의 task
+// 파일(`<role>-task.md`)이 «다음 라운드가 그 자리를 덮어쓰기 전」 마지막
+// 순간이다. §3-3 요건 1의 합격 기준(실패도 한 줄로 보이게)을 그대로
+// 만족시키기 위해 autoArchiveRoundEnvelope와 동일하게 성공/실패 모두
+// console.log/console.error로 찍는다 -- 조용히 사라지는 실패를 만들지 않는다.
+function autoArchiveRoundTaskFile({ role, taskContent, harnessDir }) {
+  const outcome = archiveRoundTaskFile({ role, taskContent, harnessDir });
+  if (outcome.ok) {
+    console.log(outcome.reason);
+  } else {
+    console.error(outcome.reason);
+  }
+}
+
 function autoRecordRejectStreak({ role, resultContent }) {
   const autoRecord = recordRejectStreakFromResultText({
     role,
@@ -460,6 +478,7 @@ export function checkRelayHandshake({
   // same reason autoRecordRejectStreak lives here: every caller -- CLI and
   // in-process alike -- gets it, with no new notification device.
   autoArchiveRoundEnvelope({ role, resultContent, harnessDir });
+  autoArchiveRoundTaskFile({ role, taskContent, harnessDir });
   autoRecordRejectStreak({ role, resultContent });
   // HYK-227 §2: moved here from the CLI-only `invokedDirectly` block below
   // (was line-local to that block prior to this change) so EVERY caller of

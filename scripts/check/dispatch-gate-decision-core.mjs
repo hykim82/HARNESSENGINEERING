@@ -123,6 +123,12 @@ export const DISPATCH_GATE_STATE = Object.freeze({
   // rationale on the UNJUDGABLE branch specifically).
   REJECT_CHAIN_TAMPER_DETECTED: "REJECT_CHAIN_TAMPER_DETECTED",
   REJECT_CHAIN_UNJUDGABLE: "REJECT_CHAIN_UNJUDGABLE",
+  // HYK-241 §2 조각2: dispatch-gate-decision.mjs's own 1-B precondition axis
+  // (checkOneBPrecondition below) -- distinct from every REJECT_* above
+  // because it originates from the task packet's OWN text (does it declare
+  // 북극성 1-B 세 요건 or a prerequisite-work declaration), never from a
+  // spawned gate subprocess or the reject-streak ledger.
+  REJECT_ONE_B_MISSING: "REJECT_ONE_B_MISSING",
 });
 
 function firstNonEmpty(...candidates) {
@@ -389,6 +395,50 @@ export function checkLedgerEntryShape(ledger, issueId) {
     };
   }
   return { valid: true, reason: `streak=${streak} 해석 가능` };
+}
+
+// HYK-241 §2 조각2 (배달 게이트에 «1-B 검문» 추가): a NEW, ADDITIVE precondition
+// axis, kept as its OWN pure function rather than folded into
+// checkGatePreconditions' existing five-field object -- same reason
+// checkLedgerPathResolution (HYK-220 2R) was kept separate: so that function's
+// already-reviewed contract (exactly five `=== true` checks, byte-for-byte)
+// stays untouched, and every existing caller/test that never supplies these
+// new facts is unaffected by this addition.
+//
+// 태스크 패킷은 다음 둘 중 하나를 갖춰야 한다:
+//   ⓐ 북극성 1-B 세 요건 -- 1. 사람이 직접 칠 수 있는 실행 한 줄
+//                          2. 그때 무엇이 보여야 하는지
+//                          3. 울렸을 때 사람에게 도달하는 경로
+//   ⓑ 선행 작업 선언 -- 이 작업이 어느 사람-실측 작업을 «위한» 선행인지 명시
+// (2026-08-13 한용 확정: 1-B는 금지 필터가 아니라 우선순위다 -- 선행 작업은
+// 허용되지만 목적을 명시해야 한다.) caller(dispatch-gate-decision.mjs의
+// extractOneBFacts)가 태스크 텍스트에서 이미 구조적으로 추출한 사실만 받는다
+// (S8: 이 코어는 정규식/파일을 스스로 읽지 않는다).
+//
+// ⛔ⓑ를 "아무 문장이나 있으면 통과"로 만들지 않는다: bValid는 caller가 최소
+// 길이(현재 10자) 이상의 서술인지까지 확인한 결과여야 한다 -- 빈 값이나
+// 한두 글자짜리 placeholder는 bDeclared:true여도 bValid:false로 떨어진다.
+export function checkOneBPrecondition({
+  aComplete,
+  missingA,
+  bDeclared,
+  bValid,
+} = {}) {
+  if (aComplete === true) return null;
+  if (bDeclared === true && bValid === true) return null;
+  const missingAText =
+    Array.isArray(missingA) && missingA.length > 0
+      ? `ⓐ 누락 칸: ${missingA.join(", ")}`
+      : "ⓐ 요건 미충족";
+  const bText =
+    bDeclared !== true
+      ? "ⓑ 선행 작업 선언 없음('1b_prerequisite_for:' 줄 없음)"
+      : "ⓑ 선행 작업 선언이 너무 짧아 근거로 보기 어려움(최소 10자 이상 서술 필요)";
+  return {
+    state: DISPATCH_GATE_STATE.REJECT_ONE_B_MISSING,
+    allow: false,
+    reason: `dispatch-gate-decision precondition: 북극성 1-B 세 요건(ⓐ) 또는 선행 작업 선언(ⓑ) 중 하나가 필요하나 둘 다 충족되지 않음 -- ${missingAText} / ${bText} -> 배달 거부(안전측 기본값 -- HYK-241 §2 조각2). 조치: task 패킷에 '1b_exec_line:'/'1b_shown:'/'1b_reach_path:' 세 줄을 모두 채우거나, '1b_prerequisite_for: <이 작업이 준비하는 사람-실측 작업>' 한 줄(10자 이상 서술)을 추가하라`,
+  };
 }
 
 // Combines N independent gate decisions (e.g. `gate` + `diagnostic-gate`,

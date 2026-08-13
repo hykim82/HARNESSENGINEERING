@@ -18,6 +18,16 @@ const SCRIPT_PATH = fileURLToPath(
   new URL("./dispatch-gate-decision.mjs", import.meta.url),
 );
 
+// HYK-241 §2 조각2: every ALLOW-expected fixture below now also needs a
+// 1-B declaration (checked LAST, after both gates + chain -- see
+// dispatch-gate-decision.mjs's own comment at the call site) or the new
+// axis alone would flip these fixtures to REJECT. REJECT-expected fixtures
+// (task_id/ledger precondition failures, gate/chain BLOCKs) are unaffected
+// -- they already short-circuit or already REJECT before/regardless of
+// this axis, so they are left untouched.
+const ONE_B_BLOCK =
+  "1b_exec_line: node scripts/check/dispatch-gate-decision.mjs <task-path>\n1b_shown: ALLOW 또는 REJECT 한 줄과 사유\n1b_reach_path: CLI 종료코드가 관제실 화면에 즉시 뜬다\n";
+
 function withFixtureDir(fn) {
   const dir = mkdtempSync(join(tmpdir(), "dispatch-gate-decision-test-"));
   try {
@@ -49,7 +59,11 @@ function runCli(args, opts = {}) {
 test("(1) streak 0 (empty but present ledger), fresh task file -> ALLOW, exit 0", () => {
   withFixtureDir((dir) => {
     const taskPath = join(dir, "coder-task.md");
-    writeFileSync(taskPath, "task_id: HYK-9001-fresh-1\nsome body\n", "utf8");
+    writeFileSync(
+      taskPath,
+      `task_id: HYK-9001-fresh-1\nsome body\n${ONE_B_BLOCK}`,
+      "utf8",
+    );
     const ledgerPath = join(dir, "reject-streak.json");
     // 2R §2: an empty-but-PRESENT ledger (no issue entries yet) is the
     // normal "no rejections yet" state and must ALLOW -- distinct from a
@@ -65,7 +79,11 @@ test("(1) streak 0 (empty but present ledger), fresh task file -> ALLOW, exit 0"
 test("(2) streak 1 (below envelope threshold) -> ALLOW, exit 0", () => {
   withFixtureDir((dir) => {
     const taskPath = join(dir, "coder-task.md");
-    writeFileSync(taskPath, "task_id: HYK-9002-streak1-1\n", "utf8");
+    writeFileSync(
+      taskPath,
+      `task_id: HYK-9002-streak1-1\n${ONE_B_BLOCK}`,
+      "utf8",
+    );
     const ledgerPath = join(dir, "reject-streak.json");
     writeLedger(ledgerPath, {
       schema_version: 1,
@@ -96,7 +114,7 @@ test("(3) streak 2 with a complete envelope -> ALLOW, exit 0", () => {
     const taskPath = join(dir, "coder-task.md");
     writeFileSync(
       taskPath,
-      `task_id: HYK-9003-streak2-1\n${envelope}\n`,
+      `task_id: HYK-9003-streak2-1\n${envelope}\n${ONE_B_BLOCK}`,
       "utf8",
     );
     const ledgerPath = join(dir, "reject-streak.json");
@@ -452,7 +470,7 @@ test("(12) normal: streak 3, complete general envelope -> ALLOW (below hard-stop
     const taskPath = join(dir, "coder-task.md");
     writeFileSync(
       taskPath,
-      `task_id: HYK-9009-streak3-1\n${envelope}\n`,
+      `task_id: HYK-9009-streak3-1\n${envelope}\n${ONE_B_BLOCK}`,
       "utf8",
     );
     const ledgerPath = join(dir, "reject-streak.json");
@@ -488,7 +506,7 @@ test("(13) normal: streak 4 (hard-stop), complete DIAGNOSTIC envelope (incl. 재
     const taskPath = join(dir, "coder-task.md");
     writeFileSync(
       taskPath,
-      `task_id: HYK-9010-hardstop-1\n${envelope}\n`,
+      `task_id: HYK-9010-hardstop-1\n${envelope}\n${ONE_B_BLOCK}`,
       "utf8",
     );
     const ledgerPath = join(dir, "reject-streak.json");
@@ -517,7 +535,7 @@ test("(14) normal: CRLF-terminated task file (fresh, streak 0) -> ALLOW (precond
     const taskPath = join(dir, "coder-task.md");
     writeFileSync(
       taskPath,
-      "task_id: HYK-9011-crlf-1\r\nbody line\r\n",
+      `task_id: HYK-9011-crlf-1\r\nbody line\r\n${ONE_B_BLOCK}`,
       "utf8",
     );
     const ledgerPath = join(dir, "reject-streak.json");
@@ -550,7 +568,11 @@ test("(15) 2R: no --ledger given, invoking CWD is a DIFFERENT (also real) git re
       "- 모델 변경: sonnet -> opus 승격",
       "-->",
     ].join("\n");
-    writeFileSync(taskPath, `task_id: HYK-9012-cwd-1\n${envelope}\n`, "utf8");
+    writeFileSync(
+      taskPath,
+      `task_id: HYK-9012-cwd-1\n${envelope}\n${ONE_B_BLOCK}`,
+      "utf8",
+    );
     // The task file's OWN repo ledger says streak=2 WITH an envelope
     // present -> should ALLOW. A DIFFERENT ledger, in a DIFFERENT real git
     // repo (the invoking CWD), says streak=4 (hard-stop, needs a
@@ -729,7 +751,11 @@ test("(17) §2-1 정상 링크드 워크트리 -- 메인 정본 원장으로 수
     // wtDir already checked out .harness/ from HEAD (git worktree add
     // materializes the working tree) -- no mkdir needed.
     const taskPath = join(wtDir, ".harness", "coder-task.md");
-    writeFileSync(taskPath, "task_id: HYK-9100-fresh-1\nbody\n", "utf8");
+    writeFileSync(
+      taskPath,
+      `task_id: HYK-9100-fresh-1\nbody\n${ONE_B_BLOCK}`,
+      "utf8",
+    );
     // wt1 has NO local reject-streak.json at all -- must still ALLOW by
     // converging on main's ledger.
     const r = runCli([taskPath]);
@@ -956,7 +982,11 @@ test("(23) HYK-221 축1 양성 대조 -- --ledger가 taskPath와 같은 저장�
     writeFileSync(join(repo, "a.txt"), "x\n", "utf8");
     commitAll(repo, "init");
     const taskPath = join(repo, ".harness", "coder-task.md");
-    writeFileSync(taskPath, "task_id: HYK-9200-samerepo-1\nbody\n", "utf8");
+    writeFileSync(
+      taskPath,
+      `task_id: HYK-9200-samerepo-1\nbody\n${ONE_B_BLOCK}`,
+      "utf8",
+    );
     const ledgerPath = join(repo, ".harness", "reject-streak.json");
     writeLedger(ledgerPath, { schema_version: 1, issues: {} });
     const r = runCli([taskPath, "--ledger", ledgerPath]);
@@ -994,7 +1024,11 @@ test("(25) HYK-221 축1 회귀 방지 -- taskPath가 어떤 git 저장소에도 
   withFixtureDir((dir) => {
     // deliberately NOT a git repo, mirrors tests (1)-(14)/P1-B's own fixture
     const taskPath = join(dir, "coder-task.md");
-    writeFileSync(taskPath, "task_id: HYK-9202-nongit-1\nbody\n", "utf8");
+    writeFileSync(
+      taskPath,
+      `task_id: HYK-9202-nongit-1\nbody\n${ONE_B_BLOCK}`,
+      "utf8",
+    );
     const ledgerPath = join(dir, "reject-streak.json");
     writeLedger(ledgerPath, { schema_version: 1, issues: {} });
     const r = runCli([taskPath, "--ledger", ledgerPath]);
@@ -1028,7 +1062,7 @@ test("(26) HYK-239 결선: 첫 실행에서 체크포인트가 0 -> N으로 늘�
     const taskPath = join(dir, "coder-task.md");
     writeFileSync(
       taskPath,
-      `task_id: HYK-9300-chainwire-1\n${envelopeText()}\n`,
+      `task_id: HYK-9300-chainwire-1\n${envelopeText()}\n${ONE_B_BLOCK}`,
       "utf8",
     );
     const ledgerPath = join(dir, "reject-streak.json");
@@ -1069,7 +1103,7 @@ test("(27) HYK-239 ★핵심★ 위조 탐지 -- 이미 체크포인트된 원�
     const taskPath = join(dir, "coder-task.md");
     writeFileSync(
       taskPath,
-      `task_id: HYK-9301-tamper-1\n${envelopeText()}\n`,
+      `task_id: HYK-9301-tamper-1\n${envelopeText()}\n${ONE_B_BLOCK}`,
       "utf8",
     );
     const ledgerPath = join(dir, "reject-streak.json");
@@ -1129,5 +1163,91 @@ test("(28) HYK-239 판정 불가 ≠ 정상 -- 사이드카 파일이 손상(JSO
       /chain: BLOCK/,
       "corrupt sidecar must not be reported as a tamper BLOCK -- it is a distinct judgment-impossible state",
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// HYK-241 §2 조각2: 1-B 검문 -- 태스크 패킷에 북극성 1-B 세 요건(ⓐ) 또는
+// 선행 작업 선언(ⓑ) 중 하나가 없으면 REJECT. 다른 모든 전제조건과 두 게이트
+// 모두 통과했을 때만 이 축이 최종 판정을 좌우한다(dispatch-gate-decision.mjs
+// 호출부 주석 참조).
+// ---------------------------------------------------------------------------
+
+test("(29) HYK-241 1-B 검문: ⓐ 세 칸 전부 없음, ⓑ 선언도 없음 -> REJECT_ONE_B_MISSING, 누락 칸 이름이 사유 문장에 나온다", () => {
+  withFixtureDir((dir) => {
+    const taskPath = join(dir, "coder-task.md");
+    writeFileSync(taskPath, "task_id: HYK-9400-nooneb-1\nbody\n", "utf8");
+    const ledgerPath = join(dir, "reject-streak.json");
+    writeLedger(ledgerPath, { schema_version: 1, issues: {} });
+    const r = runCli([taskPath, "--ledger", ledgerPath]);
+    assert.equal(r.status, 1, r.stdout + r.stderr);
+    assert.match(r.stderr, /REJECT_ONE_B_MISSING|북극성 1-B/);
+    assert.match(r.stderr, /1b_exec_line/);
+    assert.match(r.stderr, /1b_shown/);
+    assert.match(r.stderr, /1b_reach_path/);
+    assert.match(r.stderr, /선언 없음/);
+    assert.match(r.stderr, /REJECT --/);
+  });
+});
+
+test("(30) HYK-241 1-B 검문: ⓐ 세 칸이 모두 채워지면 -> ALLOW (다른 전제조건도 정상일 때)", () => {
+  withFixtureDir((dir) => {
+    const taskPath = join(dir, "coder-task.md");
+    writeFileSync(
+      taskPath,
+      "task_id: HYK-9401-onebA-1\n1b_exec_line: node scripts/check/dispatch-gate-decision.mjs <task>\n1b_shown: ALLOW/REJECT 한 줄\n1b_reach_path: CLI 종료코드 -- 관제실 화면\n",
+      "utf8",
+    );
+    const ledgerPath = join(dir, "reject-streak.json");
+    writeLedger(ledgerPath, { schema_version: 1, issues: {} });
+    const r = runCli([taskPath, "--ledger", ledgerPath]);
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.match(r.stdout, /ALLOW/);
+  });
+});
+
+test("(31) HYK-241 1-B 검문: ⓐ 없이 ⓑ 선행 작업 선언(10자 이상)만 있으면 -> ALLOW (1-B는 금지 필터가 아니라 우선순위)", () => {
+  withFixtureDir((dir) => {
+    const taskPath = join(dir, "coder-task.md");
+    writeFileSync(
+      taskPath,
+      "task_id: HYK-9402-onebB-1\n1b_prerequisite_for: HYK-9999 사람 실측 게이트를 준비하는 선행 작업\n",
+      "utf8",
+    );
+    const ledgerPath = join(dir, "reject-streak.json");
+    writeLedger(ledgerPath, { schema_version: 1, issues: {} });
+    const r = runCli([taskPath, "--ledger", ledgerPath]);
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.match(r.stdout, /ALLOW/);
+  });
+});
+
+test("(32) HYK-241 1-B 검문: ⓑ 선언은 있으나 10자 미만(placeholder) -> REJECT_ONE_B_MISSING, '너무 짧아' 사유 (⛔아무 문장이나 통과 금지)", () => {
+  withFixtureDir((dir) => {
+    const taskPath = join(dir, "coder-task.md");
+    writeFileSync(
+      taskPath,
+      "task_id: HYK-9403-onebBshort-1\n1b_prerequisite_for: ok\n",
+      "utf8",
+    );
+    const ledgerPath = join(dir, "reject-streak.json");
+    writeLedger(ledgerPath, { schema_version: 1, issues: {} });
+    const r = runCli([taskPath, "--ledger", ledgerPath]);
+    assert.equal(r.status, 1, r.stdout + r.stderr);
+    assert.match(r.stderr, /너무 짧아/);
+    assert.match(r.stderr, /REJECT --/);
+  });
+});
+
+test("(33) HYK-241 1-B 검문: 다른 전제조건이 먼저 실패하면(task_id 없음) 1-B 사유는 등장하지 않는다 -- gates never spawned 규약과 동일하게 앞단이 이긴다", () => {
+  withFixtureDir((dir) => {
+    const taskPath = join(dir, "coder-task.md");
+    writeFileSync(taskPath, "no task_id line here\nbody\n", "utf8");
+    const ledgerPath = join(dir, "reject-streak.json");
+    writeLedger(ledgerPath, { schema_version: 1, issues: {} });
+    const r = runCli([taskPath, "--ledger", ledgerPath]);
+    assert.equal(r.status, 1, r.stdout + r.stderr);
+    assert.match(r.stderr, /task_id 줄이 정확히 1개가 아님/);
+    assert.doesNotMatch(r.stderr, /REJECT_ONE_B_MISSING/);
   });
 });

@@ -115,16 +115,24 @@ test("mutation ⓐ (필수): autoArchiveRoundEnvelope call removed from checkRel
       "the handshake decision itself must be untouched by this mutation",
     );
 
-    let roundsExist = true;
+    // HYK-241 §2 조각1: checkRelayHandshake now ALSO archives the round's
+    // TASK file at a SEPARATE, unmutated call site (autoArchiveRoundTaskFile)
+    // -- so `rounds/` itself now exists (holding coder-task-r1.md) even
+    // under this mutation. This test's own target is the RESULT envelope
+    // specifically, so the RED assertion narrows to "no coder-r*.md exists",
+    // not "the whole rounds/ dir is absent".
+    let resultEnvelopeFiles;
     try {
-      readdirSync(join(harnessDir, "rounds"));
+      resultEnvelopeFiles = readdirSync(join(harnessDir, "rounds")).filter(
+        (f) => /^coder-r\d+\.md$/.test(f),
+      );
     } catch {
-      roundsExist = false;
+      resultEnvelopeFiles = [];
     }
-    assert.equal(
-      roundsExist,
-      false,
-      "RED: without the wiring, a confirmed round leaves nothing preserved -- the original 2026-08-08 incident, reintroduced silently",
+    assert.deepEqual(
+      resultEnvelopeFiles,
+      [],
+      "RED: without the wiring, a confirmed round leaves the RESULT envelope unpreserved -- the original 2026-08-08 incident, reintroduced silently",
     );
   });
 });
@@ -182,7 +190,13 @@ test("mutation ⓑ (필수): nextArchiveFileName hardcoded to always return roun
     const second = mod.checkRelayHandshake({ role: "review", harnessDir });
     assert.equal(second.ok, true);
 
-    const files = readdirSync(join(harnessDir, "rounds"));
+    // HYK-241 §2 조각1: nextTaskArchiveFileName (task-file side) is a
+    // SEPARATE, unmutated function with its own return line -- filtered out
+    // here since this test's target is nextArchiveFileName (result side)
+    // specifically.
+    const files = readdirSync(join(harnessDir, "rounds")).filter((f) =>
+      /^review-r\d+\.md$/.test(f),
+    );
     assert.deepEqual(
       files,
       ["review-r1.md"],
@@ -238,7 +252,14 @@ test("mutation ⓒ (자유 선택): archiveRoundEnvelope writes a blank body ins
     const result = mod.checkRelayHandshake({ role: "coder", harnessDir });
     assert.equal(result.ok, true);
 
-    const files = readdirSync(join(harnessDir, "rounds"));
+    // HYK-241 §2 조각1: archiveRoundTaskFile's own write call uses a
+    // DIFFERENT variable (`taskContent`, not `resultContent`) so this
+    // mutation target still matches exactly once (unaffected) -- but it
+    // still produces its own coder-task-r1.md via the separate call site,
+    // filtered out here since this test's target is the RESULT side only.
+    const files = readdirSync(join(harnessDir, "rounds")).filter((f) =>
+      /^coder-r\d+\.md$/.test(f),
+    );
     assert.deepEqual(
       files,
       ["coder-r1.md"],

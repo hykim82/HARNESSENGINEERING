@@ -22,6 +22,8 @@ import { execFileSync, spawnSync } from "node:child_process";
 import {
   archiveRoundEnvelope,
   nextArchiveFileName,
+  archiveRoundTaskFile,
+  nextTaskArchiveFileName,
 } from "./envelope-archive.mjs";
 import { checkRelayHandshake } from "./relay-handshake.mjs";
 import {
@@ -62,6 +64,121 @@ test("nextArchiveFileName: only counts files for THIS role -- a sibling role's f
 
 test("nextArchiveFileName: a gap (r1 deleted, r2 present) still advances past the max -- never reuses a past round number", () => {
   assert.equal(nextArchiveFileName("coder", ["coder-r2.md"]), "coder-r3.md");
+});
+
+// ---------------------------------------------------------------------------
+// HYK-241 §2 조각1: nextTaskArchiveFileName -- TASK-file 쌍. 같은 디렉터리
+// 안에서 nextArchiveFileName의 (`<role>-r<N>.md`) 패턴과 절대 서로의
+// 파일을 세지 않는다는 것도 함께 증명한다.
+// ---------------------------------------------------------------------------
+
+test("nextTaskArchiveFileName: empty archive dir -> round 1", () => {
+  assert.equal(nextTaskArchiveFileName("coder", []), "coder-task-r1.md");
+});
+
+test("nextTaskArchiveFileName: existing task-r1 -> next is task-r2 (never reuses r1)", () => {
+  assert.equal(
+    nextTaskArchiveFileName("coder", ["coder-task-r1.md"]),
+    "coder-task-r2.md",
+  );
+});
+
+test("nextTaskArchiveFileName: does NOT count sibling result-envelope files (coder-r1.md) -- separate namespaces", () => {
+  assert.equal(
+    nextTaskArchiveFileName("coder", ["coder-r1.md", "coder-r2.md"]),
+    "coder-task-r1.md",
+  );
+});
+
+test("nextArchiveFileName (result side): does NOT count sibling task files (coder-task-r1.md) -- separate namespaces, symmetric check", () => {
+  assert.equal(
+    nextArchiveFileName("coder", ["coder-task-r1.md", "coder-task-r2.md"]),
+    "coder-r1.md",
+  );
+});
+
+// ---------------------------------------------------------------------------
+// archiveRoundTaskFile: fs-backed behavior
+// ---------------------------------------------------------------------------
+
+test("archiveRoundTaskFile: writes a verbatim copy under <harnessDir>/rounds/<role>-task-r1.md", () => {
+  withFixtureDir("task-archive-basic-", (dir) => {
+    const content = "task_id: HYK-1\ndropped_at: 2026-08-13 06:00 KST\nbody\n";
+    const outcome = archiveRoundTaskFile({
+      role: "coder",
+      taskContent: content,
+      harnessDir: dir,
+    });
+    assert.equal(outcome.ok, true);
+    const written = readFileSync(
+      join(dir, "rounds", "coder-task-r1.md"),
+      "utf8",
+    );
+    assert.ok(
+      written.includes(content),
+      "archived file must contain the round's actual task text, not just exist",
+    );
+  });
+});
+
+test("archiveRoundTaskFile: <role>-task.md itself is never touched -- preservation is additive only", () => {
+  withFixtureDir("task-archive-contract-", (dir) => {
+    const taskPath = join(dir, "coder-task.md");
+    const content = "task_id: HYK-1\ndropped_at: 2026-08-13 06:00 KST\n";
+    writeFileSync(taskPath, content, "utf8");
+    archiveRoundTaskFile({
+      role: "coder",
+      taskContent: content,
+      harnessDir: dir,
+    });
+    assert.equal(readFileSync(taskPath, "utf8"), content);
+  });
+});
+
+test("archiveRoundTaskFile: two rounds for the same role -> BOTH original task texts survive, each in its own file", () => {
+  withFixtureDir("task-archive-two-rounds-", (dir) => {
+    const round1 = "task_id: HYK-241\n라운드1 지시\n";
+    const round2 = "task_id: HYK-241\n라운드2 지시\n";
+    const r1 = archiveRoundTaskFile({
+      role: "coder",
+      taskContent: round1,
+      harnessDir: dir,
+    });
+    const r2 = archiveRoundTaskFile({
+      role: "coder",
+      taskContent: round2,
+      harnessDir: dir,
+    });
+    assert.equal(r1.ok, true);
+    assert.equal(r2.ok, true);
+    assert.notEqual(r1.path, r2.path);
+    const files = readdirSync(join(dir, "rounds")).filter((f) =>
+      f.includes("-task-"),
+    );
+    assert.deepEqual(files.sort(), ["coder-task-r1.md", "coder-task-r2.md"]);
+    const stored1 = readFileSync(
+      join(dir, "rounds", "coder-task-r1.md"),
+      "utf8",
+    );
+    const stored2 = readFileSync(
+      join(dir, "rounds", "coder-task-r2.md"),
+      "utf8",
+    );
+    assert.ok(stored1.includes("라운드1 지시"));
+    assert.ok(stored2.includes("라운드2 지시"));
+  });
+});
+
+test("archiveRoundTaskFile: role missing -> ok:false, never throws", () => {
+  withFixtureDir("task-archive-bad-role-", (dir) => {
+    const outcome = archiveRoundTaskFile({
+      role: "",
+      taskContent: "x",
+      harnessDir: dir,
+    });
+    assert.equal(outcome.ok, false);
+    assert.match(outcome.reason, /role missing/);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -184,6 +301,56 @@ test("wiring: checkRelayHandshake ok -> archives the round AND still returns the
   });
 });
 
+test("wiring (HYK-241 §2 조각1): checkRelayHandshake ok -> ALSO archives the round's TASK file, via the SAME production call site -- never calling archiveRoundTaskFile directly", () => {
+  withFixtureDir("relay-wiring-task-", (dir) => {
+    writeTask(dir, "coder", "HYK-241", "2026-08-13 06:00 KST");
+    writeResult(dir, "coder", "HYK-241", "2026-08-13 06:10 KST");
+    const result = checkRelayHandshake({ role: "coder", harnessDir: dir });
+    assert.equal(result.ok, true);
+    const archivedTask = readFileSync(
+      join(dir, "rounds", "coder-task-r1.md"),
+      "utf8",
+    );
+    assert.match(archivedTask, /HYK-241/);
+    assert.match(archivedTask, /dropped_at: 2026-08-13 06:00 KST/);
+  });
+});
+
+test("wiring (HYK-241 §2 조각1): 라운드 2회 -> 두 라운드의 task 지시 원문이 각각 다른 파일로 남는다 (덮어쓰기 재발 없음)", () => {
+  withFixtureDir("relay-wiring-task-two-rounds-", (dir) => {
+    writeFileSync(
+      join(dir, "coder-task.md"),
+      "task_id: HYK-242\ndropped_at: 2026-08-13 06:00 KST\n라운드1 지시문\n",
+      "utf8",
+    );
+    writeResult(dir, "coder", "HYK-242", "2026-08-13 06:10 KST");
+    const first = checkRelayHandshake({ role: "coder", harnessDir: dir });
+    assert.equal(first.ok, true);
+
+    // ORCH가 다음 라운드 task 파일을 같은 자리에 덮어쓴다 -- 이 덮어쓰기가
+    // §1 실사고의 원인이었다.
+    writeFileSync(
+      join(dir, "coder-task.md"),
+      "task_id: HYK-242\ndropped_at: 2026-08-13 07:00 KST\n라운드2 지시문\n",
+      "utf8",
+    );
+    writeResult(dir, "coder", "HYK-242", "2026-08-13 07:10 KST");
+    const second = checkRelayHandshake({ role: "coder", harnessDir: dir });
+    assert.equal(second.ok, true);
+
+    const round1 = readFileSync(
+      join(dir, "rounds", "coder-task-r1.md"),
+      "utf8",
+    );
+    const round2 = readFileSync(
+      join(dir, "rounds", "coder-task-r2.md"),
+      "utf8",
+    );
+    assert.match(round1, /라운드1 지시문/);
+    assert.match(round2, /라운드2 지시문/);
+  });
+});
+
 test("wiring: checkRelayHandshake blocked (mismatch) -> no archive is written -- only CONFIRMED rounds are preserved", () => {
   withFixtureDir("relay-wiring-blocked-", (dir) => {
     writeTask(dir, "coder", "HYK-204", "2026-08-08 06:00 KST");
@@ -235,8 +402,17 @@ test("wiring: same track, two rounds re-checked via checkRelayHandshake -> both 
     const second = checkRelayHandshake({ role: "review", harnessDir: dir });
     assert.equal(second.ok, true);
 
+    // HYK-241 §2 조각1: checkRelayHandshake now ALSO archives the round's
+    // TASK file at the same call site -- this test's own writeTask() calls
+    // above mean review-task-r1.md/review-task-r2.md now appear here too
+    // (additive, not a regression: result-envelope filenames are unchanged).
     const files = readdirSync(join(dir, "rounds")).sort();
-    assert.deepEqual(files, ["review-r1.md", "review-r2.md"]);
+    assert.deepEqual(files, [
+      "review-r1.md",
+      "review-r2.md",
+      "review-task-r1.md",
+      "review-task-r2.md",
+    ]);
     assert.match(
       readFileSync(join(dir, "rounds", "review-r1.md"), "utf8"),
       /needs-rework/,
