@@ -25,6 +25,15 @@ const DISPATCH_GATE_DECISION_PATH = join(HERE, "dispatch-gate-decision.mjs");
 const CORE_PATH = join(HERE, "dispatch-gate-decision-core.mjs");
 const REJECT_STREAK_PATH = join(HERE, "reject-streak.mjs");
 const REJECT_STREAK_CHAIN_PATH = join(HERE, "reject-streak-chain.mjs");
+// HYK-244-receipt-wire-2b2 §3-1: dispatch-gate-decision.mjs now statically
+// imports consumption-receipt-core.mjs (the approved 1R core) -- this
+// isolated fixture's dependency list must mirror that or the mutant module
+// fails to load at all (MODULE_NOT_FOUND), which would break every mutation
+// test in this file, not just ones related to the new axis.
+const CONSUMPTION_RECEIPT_CORE_PATH = join(
+  HERE,
+  "consumption-receipt-core.mjs",
+);
 
 function assertExactlyOneMatch(src, target, label) {
   const count = src.split(target).length - 1;
@@ -58,6 +67,10 @@ function stageScriptsCheckDir(rootDir, overrides) {
     "dispatch-gate-decision-core.mjs": readFileSync(CORE_PATH, "utf8"),
     "reject-streak.mjs": readFileSync(REJECT_STREAK_PATH, "utf8"),
     "reject-streak-chain.mjs": readFileSync(REJECT_STREAK_CHAIN_PATH, "utf8"),
+    "consumption-receipt-core.mjs": readFileSync(
+      CONSUMPTION_RECEIPT_CORE_PATH,
+      "utf8",
+    ),
     ...overrides,
   };
   for (const [name, content] of Object.entries(files)) {
