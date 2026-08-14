@@ -36,8 +36,11 @@
 // 5. `ALLOWLIST_REF_MISMATCH`의 운영 결과 -- 새 병합이 origin에 올라온
 //    직후 `git fetch` 전에는 판정이 모름(시작 0)이 된다. 이것은 설계된
 //    fail-closed이며, 라이브 도입 시 호출자가 fetch를 선행해야 한다.
-// 6. live=false -- 이 코드를 실제로 호출하는 상시 실행기는 아직 없다
-//    (호출자가 없다).
+// 6. 결선 상태(HYK-255 2R 정정) -- 온디맨드 부분 계수 CLI(scripts/
+//    supervisor/partial-count-report.mjs의 collectGate4Independent ->
+//    createGitHubApprovalPort -> isHumanApproved)에는 결선됐으나
+//    상시 실행기·스케줄러는 없음(주기 실행·감시 루프 경로는 여전히 0
+//    -- 이 사실 자체가 정직 표기이며 지우지 않는다).
 //
 // 비타협(coder-task.md §2):
 // - `orca` CLI 호출 0건(문자열 존재 자체는 위반이 아니다 -- 판정은 호출
@@ -139,9 +142,10 @@ function verdictFor(reason, evidence) {
 }
 
 // ---------------------------------------------------------------------------
-// 무인증 fetchJson 실 구현 -- 테스트는 이걸 호출하지 않는다(§4-9). 라이브
-// 호출자가 아직 없으므로(live=false) 이 함수 자체도 아직 아무도 부르지
-// 않는다.
+// 무인증 fetchJson 실 구현 -- 테스트는 이걸 호출하지 않는다(§4-9).
+// 온디맨드 부분 계수 CLI(partial-count-report.mjs)에는 결선됐으나
+// 상시 실행기·스케줄러는 없음 -- 이 함수는 그 CLI의 기본 fetch
+// 포트로만 불린다(HYK-255 2R 정정).
 // ---------------------------------------------------------------------------
 
 export function createAnonymousFetchJson() {

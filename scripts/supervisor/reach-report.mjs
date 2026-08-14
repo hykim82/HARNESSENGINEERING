@@ -39,6 +39,11 @@ import {
   buildNoticeText,
   buildNoticeFileName,
 } from "./reach-notify-core.mjs";
+// HYK-255-partial-counter-1 -- 부분 계수 보고(PM 판정 3 규격)를 아침
+// 보고에 편입한다(1-B «아침 보고 도달» 축). 판정·렌더링은 전부
+// partial-count-core.mjs의 순수 함수 몫이고, 이 wire는 파일 하나를
+// 읽어 넘길 뿐이다.
+import { formatPartialCountSection } from "./partial-count-core.mjs";
 
 export const DEFAULT_WATCH_LOG_PATH =
   "D:/문서관리/하네스-관제실/watch/watch.log";
@@ -62,6 +67,23 @@ function readStateFile(readFn, statePath) {
   }
 }
 
+// HYK-255 -- 부분 계수 보고 파일을 읽어 아침 보고용 절로 바꾼다. 파일이
+// 없으면(첫 운영 전·아직 안 만든 경우) null을 넘겨 «UNKNOWN — 파일 없음»
+// 절이 나온다 -- 조용한 생략 경로는 없다.
+function readPartialCountSection({ readFn, partialCountPath, now }) {
+  let fileText = null;
+  try {
+    fileText = readFn(partialCountPath, "utf8");
+  } catch {
+    // 파일 없음/읽기 실패 -> fileText는 null 그대로.
+  }
+  return formatPartialCountSection({
+    fileText,
+    sourceLabel: partialCountPath,
+    nowMs: now,
+  });
+}
+
 // runReachOnce(...) -- 한 번의 실행. 모든 I/O가 주입 가능(시험이 실제
 // fs를 건드리지 않고 mkdtemp 경로만 명시적으로 쓰게 하기 위함,
 // coder-task.md §5 비타협).
@@ -70,6 +92,14 @@ export function runReachOnce({
   reportOutPath,
   statePath,
   notifyDir,
+  // HYK-255 -- 부분 계수 보고 파일의 위치. 기본값 = morning-report.md
+  // 옆의 partial-count-report.md(운영 실경로에선 관제실 watch/ 밑이 된다
+  // -- watch-run.mjs의 기존 호출을 바꾸지 않고도 실 아침 보고에 닿는
+  // 이유). 파일이 없으면 조용히 생략하지 않고 UNKNOWN을 명시한다.
+  partialCountPath = path.join(
+    path.dirname(reportOutPath),
+    "partial-count-report.md",
+  ),
   now = Date.now(),
   readFn = readFileSync,
   writeFn = writeFileSync,
@@ -83,12 +113,21 @@ export function runReachOnce({
     watchLogText = "";
   }
   const { entries, skipped } = parseWatchLog(watchLogText);
-  const reportText = formatMorningReport({
-    entries,
-    nowMs: now,
-    skipped,
-    sourceLabel: watchLogPath,
+  const partialCountSection = readPartialCountSection({
+    readFn,
+    partialCountPath,
+    now,
   });
+  const reportText =
+    formatMorningReport({
+      entries,
+      nowMs: now,
+      skipped,
+      sourceLabel: watchLogPath,
+    }) +
+    "\n" +
+    partialCountSection.join("\n") +
+    "\n";
 
   const reportDir = path.dirname(reportOutPath);
   if (!existsFn(reportDir)) mkdirFn(reportDir, { recursive: true });
@@ -135,11 +174,13 @@ if (invokedDirectly) {
   let reportOutPath = DEFAULT_REPORT_OUT_PATH;
   let statePath = DEFAULT_STATE_PATH;
   let notifyDir = DEFAULT_NOTIFY_DIR;
+  let partialCountPath; // undefined면 runReachOnce 기본값(보고 파일 옆) 사용.
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === "--watch-log") watchLogPath = argv[++i];
     else if (argv[i] === "--report-out") reportOutPath = argv[++i];
     else if (argv[i] === "--state-path") statePath = argv[++i];
     else if (argv[i] === "--notify-dir") notifyDir = argv[++i];
+    else if (argv[i] === "--partial-count") partialCountPath = argv[++i];
     // `--report`는 의도 문서화용(요건1 문구 그대로) -- 있어도 없어도
     // 동작은 같다(인자 없이도 돌아가야 한다, coder-task.md §1 요건1).
   }
@@ -149,6 +190,7 @@ if (invokedDirectly) {
       reportOutPath,
       statePath,
       notifyDir,
+      partialCountPath,
     });
     console.log(result.reportText);
     process.exit(0);
