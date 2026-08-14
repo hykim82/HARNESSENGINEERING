@@ -30,6 +30,7 @@ import {
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = dirname(dirname(HERE));
 const REVIEW_GATE_CLI = join(HERE, "review-gate.mjs");
+const REVIEW_APPROVAL_BINDING_CLI = join(HERE, "review-approval-binding.mjs");
 const HOOKS_COMMIT_MSG = join(REPO_ROOT, "hooks", "commit-msg");
 
 function git(cwd, args, opts = {}) {
@@ -551,6 +552,84 @@ test("HYK-240 2R §4 요건4 (부분 스테이징): two files change, only ONE i
       res.stderr,
       /b\.js/,
       "reason must name the unstaged file (b.js)",
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// HYK-244 gate-unblock-1 §1 조각2: --record가 이제 review.md를 절대
+// 건드리지 않는지(사이드카로 분리했는지)를 실물 CLI로 증명한다. ⛔합성
+// 헬퍼(approveAt)로 review.md 안에 블록을 직접 써넣는 게 아니라, 진짜
+// `--record` 서브프로세스를 스폰해 그 산출물(사이드카 파일 + review.md
+// 바이트)을 직접 관측한다.
+// ---------------------------------------------------------------------------
+
+test("§1 조각2 실물 증명: review-approval-binding.mjs --record 실행 전후로 review.md가 바이트 단위로 하나도 안 바뀐다 -- 결속은 사이드카 파일에만 쓰인다", () => {
+  withRepo((dir) => {
+    writeFileSync(join(dir, "a.js"), "a-approved", "utf8");
+    git(dir, ["add", "a.js"]);
+    git(
+      dir,
+      [
+        "-c",
+        "user.email=t@t",
+        "-c",
+        "user.name=t",
+        "commit",
+        "-q",
+        "-m",
+        "add a.js",
+      ],
+      {},
+    );
+    // 검토자가 review.md를 쓰는 시점 -- 아직 결속 블록은 없다(코더가
+    // 곧이어 --record를 실행하는 것이 실제 순서 그대로).
+    const reviewPath = join(dir, ".harness", "review.md");
+    const beforeContent =
+      "for: HYK-9970\ntask_id: HYK-9970\nrole: REVIEW-CODEX\nverdict: approved\n\n>>> DONE: REVIEW-CODEX @ 2026-08-14 14:00:00 KST\n";
+    writeFileSync(reviewPath, beforeContent, "utf8");
+    const beforeBytes = readFileSync(reviewPath);
+
+    const record = spawnSync(
+      process.execPath,
+      [REVIEW_APPROVAL_BINDING_CLI, "--record", "--cwd", dir],
+      { encoding: "utf8", cwd: dir },
+    );
+    assert.equal(record.status, 0, `--record must succeed: ${record.stderr}`);
+
+    const afterBytes = readFileSync(reviewPath);
+    assert.deepEqual(
+      afterBytes,
+      beforeBytes,
+      "review.md은 --record 전후로 바이트 단위로 완전히 동일해야 한다(소비 완료 결과 파일 무수정 수칙)",
+    );
+    assert.equal(
+      readFileSync(reviewPath, "utf8"),
+      beforeContent,
+      "문자열로도 재확인(바이트 비교의 보조 증거)",
+    );
+
+    const sidecarPath = join(dir, ".harness", "review-approval-binding.md");
+    const sidecarContent = readFileSync(sidecarPath, "utf8");
+    assert.match(
+      sidecarContent,
+      /^binding-fingerprint: [0-9a-f]{64}$/m,
+      "결속은 review.md가 아니라 사이드카 파일에 쓰였어야 한다",
+    );
+
+    // 결선 확인: 사이드카만으로도 실제 커밋 게이트가 정상 통과하는지
+    // (진짜 review-gate.mjs CLI를 그대로 spawn -- 읽는 자리가 실제로
+    // 갱신됐다는 end-to-end 증거). 커밋 메시지 파일은 저장소 «밖»에
+    // 둔다(실제 프로덕션 위치인 .git/ 안쪽을 흉내내는 기존 관례 그대로
+    // -- writeMsgOutside) -- 저장소 안에 두면 git add -A가 그 파일까지
+    // 새 untracked로 잡아 --record 시점과 게이트 시점의 지문이
+    // 달라지는 시험 자신의 부작용이 생긴다.
+    const commitMsgFile = writeMsgOutside("fix(check): HYK-9970 -- something");
+    const gateResult = runGateCli(REVIEW_GATE_CLI, commitMsgFile, dir);
+    assert.equal(
+      gateResult.exit,
+      0,
+      `사이드카만으로 게이트가 통과해야 한다(결선 증거), 실제 stderr: ${gateResult.stderr}`,
     );
   });
 });

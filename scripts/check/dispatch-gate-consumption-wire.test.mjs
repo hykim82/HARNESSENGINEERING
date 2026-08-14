@@ -1032,6 +1032,156 @@ test("§C 어느 사본이 그 라운드 것인지: 같은 라벨의 보존 사�
 });
 
 // ---------------------------------------------------------------------------
+// HYK-244 gate-unblock-1 §1 조각3 (한용 «가» 확정): 정밀화 -- 후보가 여럿
+// 이어도, 그중 «영수증 결속의 resultFingerprint와 정확히 일치»하는 후보가
+// «정확히 하나»면 그것으로 인정한다. §0의 실사고(REVIEW-r8.md=진짜,
+// REVIEW-r1.md=대소문자 충돌 버그가 남긴 손상 잔재, 같은 라벨) 모양을
+// 그대로 재현한다.
+// ---------------------------------------------------------------------------
+
+test("§1 조각3 ⓐ 정밀화 GREEN: 같은 라벨의 후보 2건 중 목표 지문과 «정확히 일치»하는 것이 1건뿐이면 그것으로 인정해 ALLOW(나머지 1건은 지문이 달라도 무시)", () => {
+  withFixtureDir((dir) => {
+    const ledgerPath = join(dir, "reject-streak.json");
+    writeLedger(ledgerPath, { schema_version: 1, issues: {} });
+    const { taskPath, dispatchReceiptPath } = buildArchiveMatchFixture(
+      dir,
+      "coder",
+      {
+        prevTaskId: "HYK-9114-consumption-archive-precision-prev",
+        nextTaskId: "HYK-9114-consumption-archive-precision-next",
+        droppedAt: "2026-08-14 09:00:00 KST",
+        doneAt: "2026-08-14 09:10:05 KST",
+        nextDroppedAt: "2026-08-14 10:00:00 KST",
+        dispatchId: "ctx_test_archive_precision",
+        tamperLive: true, // live만 손질됨 -- rounds/CODER-r1.md는 원본(=목표 지문과 일치).
+      },
+    );
+    // 같은 라벨을 가리키지만 «내용이 다른»(=지문이 다른) 손상된 잔재
+    // 사본을 하나 더 추가한다(§0 REVIEW-r1.md와 같은 모양 -- 라벨은
+    // 같은데 실제 내용은 다른 라운드/손질된 것).
+    writeFileSync(
+      join(dir, "rounds", "CODER-r2.md"),
+      `<!-- envelope-archive: role=CODER archived_at=2026-08-14 09:10:05 KST -->\ntask_id: HYK-9114-consumption-archive-precision-prev\n\n>>> DONE: CODER @ 2026-08-14 09:10:05 KST\n<!-- 손상된 잔재(§0 REVIEW-r1.md와 같은 모양) -->\n`,
+      "utf8",
+    );
+
+    const r = runCli(SCRIPT_PATH, [
+      taskPath,
+      "--ledger",
+      ledgerPath,
+      "--dispatch-receipt-path",
+      dispatchReceiptPath,
+    ]);
+    assert.equal(
+      r.status,
+      0,
+      `ALLOW 기대(후보 2건 중 목표 지문 일치 1건), 실제 stderr: ${r.stderr}`,
+    );
+    assert.match(r.stdout, /ALLOW/);
+    assert.match(r.stderr, /ARCHIVE_MATCH/);
+    assert.match(
+      r.stderr,
+      /같은 라벨 후보 2건 중 일치 1건/,
+      "몇 건 중 몇 건이 일치했는지가 사유에 찍혀야 한다(§1 점4)",
+    );
+  });
+});
+
+test("§1 조각3 ⓑ 정밀화 대조군: 같은 라벨의 후보가 있어도 목표 지문과 «하나도» 일치하지 않으면 여전히 REJECT(면제가 새 구멍이 되지 않는다)", () => {
+  withFixtureDir((dir) => {
+    const ledgerPath = join(dir, "reject-streak.json");
+    writeLedger(ledgerPath, { schema_version: 1, issues: {} });
+    const { taskPath, dispatchReceiptPath } = buildArchiveMatchFixture(
+      dir,
+      "coder",
+      {
+        prevTaskId: "HYK-9115-consumption-archive-zero-match-prev",
+        nextTaskId: "HYK-9115-consumption-archive-zero-match-next",
+        droppedAt: "2026-08-14 09:00:00 KST",
+        doneAt: "2026-08-14 09:10:05 KST",
+        nextDroppedAt: "2026-08-14 10:00:00 KST",
+        dispatchId: "ctx_test_archive_zero_match",
+        tamperLive: true,
+        tamperArchiveToo: true, // 유일한 보존 사본(r1)도 목표 지문과 어긋나게 한다.
+      },
+    );
+    const r = runCli(SCRIPT_PATH, [
+      taskPath,
+      "--ledger",
+      ledgerPath,
+      "--dispatch-receipt-path",
+      dispatchReceiptPath,
+    ]);
+    assert.notEqual(
+      r.status,
+      0,
+      "일치하는 보존 사본이 0건이면 여전히 REJECT여야 한다",
+    );
+    assert.doesNotMatch(r.stderr, /ARCHIVE_MATCH/);
+  });
+});
+
+test("§1 조각3 ⓓ RED(변이, 필수): 정밀화(목표 지문 일치 필터)를 되돌리면 ⓐ의 «후보 2건 중 1건만 일치» 입력이 다시 판정 불가(REJECT)로 새어 버린다", () => {
+  const src = readFileSync(SCRIPT_PATH, "utf8");
+  const target =
+    "  const exactMatches = labelMatches.filter(\n    (m) => m.fingerprint === targetFingerprint,\n  );\n  if (exactMatches.length === 0) return { ok: true, fingerprint: null };\n  if (exactMatches.length > 1) {";
+  assertExactlyOneMatch(src, target, "정밀화 필터(exactMatches) 블록");
+  // 정밀화 이전 규칙을 그대로 재현: 목표 지문과 무관하게 "라벨만 같은
+  // 후보가 2개 이상이면 무조건 판정 불가"로 되돌린다.
+  const mutated = src.replace(
+    target,
+    "  const exactMatches = labelMatches;\n  if (exactMatches.length === 0) return { ok: true, fingerprint: null };\n  if (exactMatches.length > 1) {",
+  );
+
+  withFixtureDir((dir) => {
+    const scriptsCheckDir = stageScriptsCheckDir(dir, {
+      "dispatch-gate-decision.mjs": mutated,
+    });
+    const mutantPath = join(scriptsCheckDir, "dispatch-gate-decision.mjs");
+
+    const fixtureDir = mkdtempSync(
+      join(tmpdir(), "dispatch-gate-consumption-precision-mut-fix-"),
+    );
+    try {
+      const ledgerPath = join(fixtureDir, "reject-streak.json");
+      writeLedger(ledgerPath, { schema_version: 1, issues: {} });
+      const { taskPath, dispatchReceiptPath } = buildArchiveMatchFixture(
+        fixtureDir,
+        "coder",
+        {
+          prevTaskId: "HYK-9116-consumption-archive-precision-red-prev",
+          nextTaskId: "HYK-9116-consumption-archive-precision-red-next",
+          droppedAt: "2026-08-14 09:00:00 KST",
+          doneAt: "2026-08-14 09:10:05 KST",
+          nextDroppedAt: "2026-08-14 10:00:00 KST",
+          dispatchId: "ctx_test_archive_precision_red",
+          tamperLive: true,
+        },
+      );
+      writeFileSync(
+        join(fixtureDir, "rounds", "CODER-r2.md"),
+        `<!-- envelope-archive: role=CODER archived_at=2026-08-14 09:10:05 KST -->\ntask_id: HYK-9116-consumption-archive-precision-red-prev\n\n>>> DONE: CODER @ 2026-08-14 09:10:05 KST\n<!-- 손상된 잔재 -->\n`,
+        "utf8",
+      );
+      const r = runCli(mutantPath, [
+        taskPath,
+        "--ledger",
+        ledgerPath,
+        "--dispatch-receipt-path",
+        dispatchReceiptPath,
+      ]);
+      assert.notEqual(
+        r.status,
+        0,
+        "RED: 정밀화를 되돌리면 후보 2건 중 1건만 일치하는 입력도 다시 무조건 판정 불가(REJECT)로 새야 한다 -- 이 정밀화가 실제로 결과를 바꾼다는 증거",
+      );
+    } finally {
+      rmSync(fixtureDir, { recursive: true, force: true });
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
 // 부트스트랩: 직전 라운드의 결과 파일 자체가 없으면(첫 배달) 새 축이
 // 적용 대상이 없다고 판단해 ALLOW를 막지 않는다.
 // ---------------------------------------------------------------------------

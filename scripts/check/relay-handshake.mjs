@@ -623,6 +623,23 @@ export function checkRelayHandshake({
 // binding independently verified) -- never changes checkRelayHandshake's own
 // return value or the CLI's exit code either way (S11: this is best-effort
 // bookkeeping, not part of the handshake verdict).
+// HYK-244 ci-repair-1 §1 묶음C 수리: exit 0만으로 "성공"을 판단하면
+// admission-completion-adapter.mjs 자신의 "attempted:false"(원장 경로가
+// 아예 안 잡혀 시도조차 안 함, ⛔`admission-completion-adapter.mjs` 자체는
+// HYK-250 범위라 수정하지 않음)도 exit 0으로 끝나므로 "시도조차 안 함"이
+// "반납 성공"으로 둔갑한다(ORCH 실측, not ok 157 원문). 이 저장소 전체의
+// 반복 원칙("부분 성공은 성공이 아니다", HYK-244 2R-a §2)과 정확히 같은
+// 결의 결함이라, 그 adapter를 고치지 않고 여기서 stdout을 읽어 구별한다
+// -- adapter가 실제로 찍는 안정된 문자열(admission-completion-adapter.mjs
+// 293행, 바이트 동일 인용)과 대조한다. 순수 문자열 판별이라 파일시스템/
+// 환경(설치기 포인터 파일 유무)과 무관하게 export해 직접 단언할 수 있다
+// (HYK-244 2R-ci-1의 resolveLiveRoundFilePaths와 같은 이유 -- 그 환경
+// 의존성 자체가 이 저장소 전체를 "로컬 통과가 증거가 아니다"로 만드는
+// 근본 원인이므로, 문자열 수준에서 독립적으로 확인 가능해야 한다).
+export function wasAdmissionCompletionAttempted(stdout) {
+  return !String(stdout ?? "").includes("not attempted");
+}
+
 function spawnAdmissionCompletion(taskId) {
   try {
     const adapterPath = join(
@@ -634,6 +651,7 @@ function spawnAdmissionCompletion(taskId) {
       stdio: ["ignore", "pipe", "pipe"],
     });
     console.log(out.trim());
+    if (!wasAdmissionCompletionAttempted(out)) return false;
     // HYK-244 2R-a 조각2: return value added (was void/undefined) so the
     // receipt-writing call site can know this effect (admissionReturned)
     // actually succeeded. Does not change try/catch structure or any

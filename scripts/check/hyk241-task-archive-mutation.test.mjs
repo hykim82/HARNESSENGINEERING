@@ -134,12 +134,19 @@ test("mutation ⓐ (필수): autoArchiveRoundTaskFile call removed from checkRel
 });
 
 // ---------------------------------------------------------------------------
-// mutation ⓑ (필수): nextTaskArchiveFileName ignores existing files and
-// always returns round 1 -> two genuinely distinct rounds' task files land
-// on the SAME filename -> the second silently overwrites the first.
+// mutation ⓑ: nextTaskArchiveFileName ignores existing files and always
+// returns round 1 -> two genuinely distinct rounds' task files would land
+// on the SAME filename.
+//
+// HYK-244 gate-unblock-1 §1 조각1 갱신 (RED에서 GREEN으로, 무르게 만든
+// 것이 아니다 -- envelope-archive-mutation.test.mjs의 대칭 갱신과 동일한
+// 이유): archiveRoundTaskFile도 이제 쓰기 직전에 대소문자 무관 충돌을
+// 다시 확인한다(findCaseInsensitiveCollision). 번호 매기기가 이렇게
+// 고장 나도 그 안전장치가 충돌을 잡아 거부하므로, 더 이상 조용한
+// 덮어쓰기로 이어지지 않는다 -- round 1의 task 원문이 살아남는다.
 // ---------------------------------------------------------------------------
 
-test("mutation ⓑ (필수): nextTaskArchiveFileName hardcoded to always return round 1 -> round 2's task text silently overwrites round 1's -> RED", async () => {
+test("mutation ⓑ 갱신: nextTaskArchiveFileName이 항상 round 1을 반환하도록 고장 나도, archiveRoundTaskFile 자신의 대소문자 무관 충돌 재확인(gate-unblock-1 §1 조각1)이 덮어쓰기를 거부해 round 1의 task 원문이 살아남는다", async () => {
   const src = readFileSync(ENVELOPE_ARCHIVE_PATH, "utf8");
   const target = "  return `${role}-task-r${maxRound + 1}.md`;\n";
   assertExactlyOneMatch(src, target, "nextTaskArchiveFileName return line");
@@ -184,16 +191,16 @@ test("mutation ⓑ (필수): nextTaskArchiveFileName hardcoded to always return 
     assert.deepEqual(
       taskArchiveFiles,
       ["coder-task-r1.md"],
-      "RED-setup: only one file exists because the mutant always names round 1",
+      "번호 매기기 자체는 여전히 고장 나 있다(mutated 그대로) -- round 2가 자기만의 파일을 갖지 못한다는 것은 변하지 않는다",
     );
     const survivor = readFileSync(
       join(harnessDir, "rounds", "coder-task-r1.md"),
       "utf8",
     );
-    assert.doesNotMatch(
+    assert.match(
       survivor,
       /라운드1 지시문/,
-      "RED: round 1's task text is gone -- round 2's task text silently overwrote it",
+      "GREEN(gate-unblock-1 §1 조각1): round 1의 task 원문이 살아남아야 한다 -- 쓰기 직전 재확인이 충돌을 잡아 덮어쓰기를 거부한다(조용한 덮어쓰기 재발 0)",
     );
   });
 });

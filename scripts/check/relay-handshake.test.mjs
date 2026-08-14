@@ -24,6 +24,7 @@ import { spawnSync, execFileSync } from "node:child_process";
 import {
   checkRelayHandshake,
   resolveLiveRoundFilePaths,
+  wasAdmissionCompletionAttempted,
 } from "./relay-handshake.mjs";
 
 // import.meta.url is resolved relative to this file's own location, not the
@@ -1349,7 +1350,7 @@ test("HYK-244 2R-ci-1: resolveLiveRoundFilePaths는 role 대소문자와 무관�
   }
 });
 
-test("HYK-244 2R-ci-1 RED(변이, 필수): 경로 조립에서 소문자화를 제거하면 대문자 role일 때 문자열 시험이 실제로 실패한다(이 시험이 load-bearing임을 증명, 파일시스템 동작 무관)", () => {
+test("HYK-244 2R-ci-1 RED(변이, 필수): 경로 조립에서 소문자화를 제거하면 대문자 role일 때 문자열 시험이 실제로 실패한다(이 시험이 load-bearing임을 증명, 파일시스템 동작 무관)", async () => {
   const src = readFileSync(
     fileURLToPath(new URL("./relay-handshake.mjs", import.meta.url)),
     "utf8",
@@ -1385,20 +1386,56 @@ test("HYK-244 2R-ci-1 RED(변이, 필수): 경로 조립에서 소문자화를 �
     }
     const mutPath = join(mutDir, "relay-handshake.mjs");
     writeFileSync(mutPath, mutated, "utf8");
-    return import(pathToFileURL(mutPath).href).then((mod) => {
-      const { taskPath } = mod.resolveLiveRoundFilePaths(
-        "CODER",
-        "/fixture-root",
-      );
-      const normalized = taskPath.replace(/\\/g, "/");
-      assert.notEqual(
-        normalized,
-        "/fixture-root/coder-task.md",
-        "RED: 소문자화를 제거하면 대문자 role일 때 경로가 더 이상 소문자 파일명이 아니어야 한다(예: /fixture-root/CODER-task.md) -- 이 시험이 그 회귀를 실제로 잡는다는 증거",
-      );
-      assert.equal(normalized, "/fixture-root/CODER-task.md");
-    });
+    // HYK-244 ci-repair-1 §1 묶음B 수리: 원래 `return import(...).then(...)`
+    // 이었다 -- 화살표 함수가 async가 아니었으므로 try 블록의 "동기적"
+    // 실행은 그 Promise를 반환하는 순간 끝나고, 바로 이어지는 finally의
+    // rmSync가 import()의 실제 모듈 로드(파일 읽기)가 끝나기 «전에»
+    // mutDir를 지워 버리는 경쟁 조건이었다(ORCH 실측: Linux CI에서
+    // ENOENT로 재현, Windows에서는 우연히 타이밍이 맞아 통과했을 뿐).
+    // `await`로 바꿔 import()의 완료(그리고 아래 단언까지)가 try 블록
+    // 안에서 전부 끝난 뒤에만 finally의 rmSync가 돌게 한다.
+    const mod = await import(pathToFileURL(mutPath).href);
+    const { taskPath } = mod.resolveLiveRoundFilePaths(
+      "CODER",
+      "/fixture-root",
+    );
+    const normalized = taskPath.replace(/\\/g, "/");
+    assert.notEqual(
+      normalized,
+      "/fixture-root/coder-task.md",
+      "RED: 소문자화를 제거하면 대문자 role일 때 경로가 더 이상 소문자 파일명이 아니어야 한다(예: /fixture-root/CODER-task.md) -- 이 시험이 그 회귀를 실제로 잡는다는 증거",
+    );
+    assert.equal(normalized, "/fixture-root/CODER-task.md");
   } finally {
     rmSync(mutDir, { recursive: true, force: true });
   }
+});
+
+// ---------------------------------------------------------------------------
+// HYK-244 ci-repair-1 §1 묶음C: wasAdmissionCompletionAttempted -- 문자열
+// 수준(파일시스템/환경 무관)으로 "시도조차 안 함"과 "시도해서 실패/성공"을
+// 구별하는지 직접 확인한다. admission-completion-adapter.mjs 293행이 실제로
+// 찍는 문자열을 그대로 인용(추측 아님).
+// ---------------------------------------------------------------------------
+
+test("HYK-244 ci-repair-1: wasAdmissionCompletionAttempted는 adapter의 '시도조차 안 함' 출력을 attempted:false로 정확히 구별한다(문자열 수준)", () => {
+  assert.equal(
+    wasAdmissionCompletionAttempted(
+      "admission-completion-adapter: not attempted (ADMISSION_LEDGER_PATH unset)",
+    ),
+    false,
+    "adapter가 실제로 찍는(293행) 그 문자열 -- attempted:false로 읽혀야 한다",
+  );
+  assert.equal(
+    wasAdmissionCompletionAttempted(
+      "admission-completion-adapter: reservation 'HYK-9-1' released (changed=true)",
+    ),
+    true,
+    "실제로 시도해서 성공한 출력 -- attempted:true로 읽혀야 한다",
+  );
+  assert.equal(
+    wasAdmissionCompletionAttempted(""),
+    true,
+    "빈 출력(아직 안 읽음 등)은 '시도 안 함'으로 오판하면 안 된다 -- 안전측은 attempted:true 유지(exit 0이면 성공으로 보는 기존 관례 그대로, 이 함수는 오직 그 명시적 문자열 하나만 골라낸다)",
+  );
 });

@@ -853,7 +853,22 @@ function stripArchiveEnvelopeHeader(content) {
 // resolveMatchingCandidate의 ambiguous 처리와 같은 정신). 반환:
 // {ok:true, fingerprint, path} | {ok:true, fingerprint:null}(못 찾음,
 // 지어내지 않음) | {ok:false, reason}(찾았지만 2개 이상 -- 판정 불가).
-function findArchivedResultFingerprint(harnessDir, role, harnessTaskLabel) {
+// HYK-244 gate-unblock-1 §1 조각3 (한용 «가» 확정): 옛 규칙은 "같은
+// 라벨의 후보가 2개 이상이면 무조건 판정 불가"였다 -- 그런데 실사고
+// (§0)로 보존함에 진짜 사본(REVIEW-r8.md, 영수증과 지문 일치)과 손상된
+// 잔재(REVIEW-r1.md, 대소문자 충돌 버그가 남긴 것)가 같은 라벨로 함께
+// 남으면서 영구 판정 불가가 됐다. ⛔코어(consumption-receipt-core.mjs)는
+// 무변경, SHA-256 완전 일치 요구도 그대로 -- 바뀌는 것은 "후보가 여럿일
+// 때 조용히 하나를 고르는" 것이 아니라 "targetFingerprint(영수증
+// 결속의 resultFingerprint)와 «정확히 일치»하는 후보가 «정확히 하나»면
+// 그것으로 인정, 0개거나 2개 이상이면 여전히 판정 불가"로 정밀화하는
+// 것뿐이다.
+function findArchivedResultFingerprint(
+  harnessDir,
+  role,
+  harnessTaskLabel,
+  targetFingerprint,
+) {
   const roundsDir = join(harnessDir, "rounds");
   let names;
   try {
@@ -862,7 +877,7 @@ function findArchivedResultFingerprint(harnessDir, role, harnessTaskLabel) {
     return { ok: true, fingerprint: null };
   }
   const pattern = new RegExp(`^${role}-r\\d+\\.md$`, "i");
-  const matches = [];
+  const labelMatches = [];
   for (const name of names) {
     if (!pattern.test(name)) continue;
     let raw;
@@ -876,23 +891,62 @@ function findArchivedResultFingerprint(harnessDir, role, harnessTaskLabel) {
       extractSoleMatch(stripped, CONSUMPTION_TASK_ID_RE_G) !== harnessTaskLabel
     )
       continue;
-    matches.push({
+    labelMatches.push({
       path: join("rounds", name),
       fingerprint: computeConsumptionResultFingerprint(stripped),
     });
   }
-  if (matches.length === 0) return { ok: true, fingerprint: null };
-  if (matches.length > 1) {
+  if (labelMatches.length === 0) return { ok: true, fingerprint: null };
+  if (!isNonEmptyString(targetFingerprint)) {
+    // 무엇과 대조해야 할지(영수증 쪽 목표 지문)조차 모른다 -- 후보가
+    // 있어도 "하나를 고를 근거"가 없으므로 옛 규칙과 동일하게 판정
+    // 불가로 물러난다(지어내지 않는다).
     return {
       ok: false,
-      reason: `보존 사본 후보 ${matches.length}건이 같은 라벨(${harnessTaskLabel})과 일치 -- 어느 것이 그 라운드의 것인지 결정할 수 없다(판정 불가, 조용히 하나를 고르지 않음)`,
+      reason: `보존 사본 후보 ${labelMatches.length}건이 같은 라벨(${harnessTaskLabel})과 일치하지만 대조할 목표 지문(영수증 결속)을 확정할 수 없다 -- 판정 불가`,
+    };
+  }
+  const exactMatches = labelMatches.filter(
+    (m) => m.fingerprint === targetFingerprint,
+  );
+  if (exactMatches.length === 0) return { ok: true, fingerprint: null };
+  if (exactMatches.length > 1) {
+    return {
+      ok: false,
+      reason: `보존 사본 후보 ${labelMatches.length}건 중 목표 지문과 일치하는 것이 ${exactMatches.length}건 -- 어느 것이 그 라운드의 것인지 결정할 수 없다(판정 불가, 조용히 하나를 고르지 않음)`,
     };
   }
   return {
     ok: true,
-    fingerprint: matches[0].fingerprint,
-    path: matches[0].path,
+    fingerprint: exactMatches[0].fingerprint,
+    path: exactMatches[0].path,
+    labelMatchCount: labelMatches.length,
   };
+}
+
+// HYK-244 gate-unblock-1 §1 조각3: currentBinding과 taskId/role/droppedAt/
+// dispatchId/doneAt(=resultFingerprint를 제외한 나머지 5성분) 전부가
+// 정확히 같은 영수증 후보를 찾는다 -- 그 후보의 resultFingerprint가
+// "보관함 대조가 맞혀야 할 목표값"이다(1R 코어의 6성분 목록을 그대로
+// 옮긴 것일 뿐, 코어 자체는 호출하지 않는다). 정확히 하나가 아니면
+// 목표를 확정할 수 없다(undefined 반환, 지어내지 않음).
+const OTHER_BINDING_FIELDS = [
+  "taskId",
+  "role",
+  "droppedAt",
+  "dispatchId",
+  "doneAt",
+];
+
+function findTargetFingerprint(currentBinding, candidates) {
+  const matches = (Array.isArray(candidates) ? candidates : []).filter((c) =>
+    OTHER_BINDING_FIELDS.every(
+      (field) => c?.binding?.[field] === currentBinding?.[field],
+    ),
+  );
+  return matches.length === 1
+    ? matches[0].binding.resultFingerprint
+    : undefined;
 }
 
 // HYK-244 2R-ci-1 §C: 1R 코어(⛔수정 금지)를 그대로 두고, live 지문으로
@@ -908,10 +962,12 @@ function tryArchiveFallback({
   harnessDir,
   harnessTaskLabel,
 }) {
+  const targetFingerprint = findTargetFingerprint(currentBinding, candidates);
   const archived = findArchivedResultFingerprint(
     harnessDir,
     role,
     harnessTaskLabel,
+    targetFingerprint,
   );
   if (!archived.ok) {
     console.error(
@@ -939,9 +995,12 @@ function tryArchiveFallback({
   });
   if (retry !== null) return null; // 보관함 지문으로도 매치 안 됨 -- 원래 실패를 그대로 반환.
 
-  // ★조건① -- 보관함 대조로 인정될 때 사유가 반드시 찍힌다(조용한 통과 0).
+  // ★조건① -- 보관함 대조로 인정될 때 사유가 반드시 찍힌다(조용한 통과
+  // 0). §1 조각3 점4: 어느 사본을 왜 골랐는지 + 같은 라벨 후보 몇 건 중
+  // 몇 건이 목표 지문과 일치했는지(정밀화가 실제로 "정확히 하나"만
+  // 골랐다는 증거)를 함께 남긴다.
   console.error(
-    `dispatch-gate-decision consumption: ARCHIVE_MATCH -- live 지문 불일치이나 보존 사본(${archived.path}) 지문이 영수증과 일치 -> 소비 완료로 판정, 허용`,
+    `dispatch-gate-decision consumption: ARCHIVE_MATCH -- live 지문 불일치이나 보존 사본(${archived.path}) 지문이 영수증 결속의 목표 지문과 정확히 일치(같은 라벨 후보 ${archived.labelMatchCount}건 중 일치 1건) -> 소비 완료로 판정, 허용`,
   );
   return true;
 }

@@ -67,6 +67,42 @@ test("nextArchiveFileName: a gap (r1 deleted, r2 present) still advances past th
 });
 
 // ---------------------------------------------------------------------------
+// HYK-244 gate-unblock-1 §1 조각1 원인ⓑ 실사고 재현 방지: role 대소문자가
+// 호출마다 섞여도(실제로 이 워크트리의 REVIEW-r1..r8.md가 이렇게
+// 만들어졌다가 "review"로 불린 한 번 때문에 REVIEW-r1.md가 실제로
+// 소실됐다) 기존 사본을 전부 세야 한다. 파일시스템 대소문자 동작에
+// 기대지 않는 순수 문자열/배열 단언(Windows·Linux 어디서나 같은 값).
+// ---------------------------------------------------------------------------
+
+test("nextArchiveFileName: role 대소문자가 기존 파일과 달라도(role='review', 기존='REVIEW-r*') 기존 사본을 전부 세어 다음 번호를 매긴다(실사고 재현 방지)", () => {
+  assert.equal(
+    nextArchiveFileName("review", [
+      "REVIEW-r1.md",
+      "REVIEW-r2.md",
+      "REVIEW-r8.md",
+    ]),
+    "review-r9.md",
+  );
+});
+
+test("nextArchiveFileName: role 대소문자 반대 방향(role='REVIEW', 기존='review-r*')도 동일하게 기존을 전부 센다", () => {
+  assert.equal(
+    nextArchiveFileName("REVIEW", ["review-r1.md", "review-r2.md"]),
+    "REVIEW-r3.md",
+  );
+});
+
+test("nextTaskArchiveFileName: role 대소문자 혼재에서도 기존 TASK 사본을 전부 센다(결과 쪽과 대칭)", () => {
+  assert.equal(
+    nextTaskArchiveFileName("review", [
+      "REVIEW-task-r1.md",
+      "REVIEW-task-r5.md",
+    ]),
+    "review-task-r6.md",
+  );
+});
+
+// ---------------------------------------------------------------------------
 // HYK-241 §2 조각1: nextTaskArchiveFileName -- TASK-file 쌍. 같은 디렉터리
 // 안에서 nextArchiveFileName의 (`<role>-r<N>.md`) 패턴과 절대 서로의
 // 파일을 세지 않는다는 것도 함께 증명한다.
@@ -200,6 +236,70 @@ test("archiveRoundEnvelope: writes a verbatim copy under <harnessDir>/rounds/<ro
       written.includes(content),
       "archived file must contain the round's actual content, not just exist",
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// HYK-244 gate-unblock-1 §1 조각1 비타협 안전장치: 목적지가 대소문자만
+// 다르게 이미 있으면 절대 덮어쓰지 않는다. 실제 동시성 없이(단일
+// 프로세스, node --test) 이 TOCTOU 창을 재현하려고, readdirFn을 호출
+// 횟수에 따라 다른 목록을 반환하도록 주입한다 -- 1차 호출(번호 계산)
+// 때는 아직 충돌 파일이 "없다"고 답하고, 2차 호출(쓰기 직전 재확인)
+// 때는 "방금 다른 프로세스가 만든 것"처럼 그 파일이 나타나게 한다.
+// 프로덕션 export(archiveRoundEnvelope/archiveRoundTaskFile)를 직접
+// 구동하고, 반환된 계약 필드(ok/reason)의 실제 내용을 검사한다(공허
+// 시험 금지 요구 그대로).
+// ---------------------------------------------------------------------------
+
+function makeRacingReaddir(firstList, secondList) {
+  let calls = 0;
+  return () => {
+    calls += 1;
+    return calls === 1 ? firstList : secondList;
+  };
+}
+
+test("archiveRoundEnvelope: 쓰기 직전 재확인에서 대소문자만 다른 목적지가 새로 나타나면(TOCTOU 경합 재현) 덮어쓰지 않고 ok:false를 반환한다", () => {
+  withFixtureDir("envelope-archive-race-", (dir) => {
+    const roundsDir = join(dir, "rounds");
+    mkdirSync(roundsDir, { recursive: true });
+    const outcome = archiveRoundEnvelope({
+      role: "review",
+      resultContent:
+        "task_id: HYK-1\n\n>>> DONE: REVIEW @ 2026-08-08 06:10 KST\n",
+      harnessDir: dir,
+      readdirFn: makeRacingReaddir([], ["REVIEW-r1.md"]),
+    });
+    assert.equal(
+      outcome.ok,
+      false,
+      "경합으로 나타난 대소문자-충돌 목적지를 놓치면 안 된다",
+    );
+    assert.match(outcome.reason, /refusing to overwrite/);
+    assert.match(outcome.reason, /review-r1\.md/);
+    assert.match(outcome.reason, /REVIEW-r1\.md/);
+    assert.equal(
+      existsSync(join(roundsDir, "REVIEW-r1.md")),
+      false,
+      "실제로 쓰기가 시도조차 되지 않아야 한다(원래 있던 파일도 아니고, 새로 만들어지지도 않아야 함)",
+    );
+  });
+});
+
+test("archiveRoundTaskFile: 쓰기 직전 재확인에서 대소문자만 다른 목적지가 새로 나타나면(TOCTOU 경합 재현) 덮어쓰지 않고 ok:false를 반환한다(대칭)", () => {
+  withFixtureDir("envelope-archive-race-task-", (dir) => {
+    const roundsDir = join(dir, "rounds");
+    mkdirSync(roundsDir, { recursive: true });
+    const outcome = archiveRoundTaskFile({
+      role: "review",
+      taskContent: "task_id: HYK-1\ndropped_at: 2026-08-08 06:00 KST\n",
+      harnessDir: dir,
+      readdirFn: makeRacingReaddir([], ["REVIEW-task-r1.md"]),
+    });
+    assert.equal(outcome.ok, false);
+    assert.match(outcome.reason, /refusing to overwrite/);
+    assert.match(outcome.reason, /review-task-r1\.md/);
+    assert.match(outcome.reason, /REVIEW-task-r1\.md/);
   });
 });
 

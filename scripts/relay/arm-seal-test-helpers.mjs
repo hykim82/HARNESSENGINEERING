@@ -94,10 +94,20 @@ export function makeFixtureDir(prefix = "arm-seal-test-") {
 
   const taskContent =
     "task_id: SPIKE-LIVE-1\ndropped_at: 2026-07-19 11:00 KST\n\ngo SPIKE-LIVE-1 content.\n";
-  const taskPath = join(harnessDir, "CODER-task.md");
+  // HYK-244 ci-repair-1 §1 묶음A 수리: 이 픽스처가 만드는 라이브 task/
+  // result 파일명은 대문자였다("CODER-task.md"/"CODER.md"), 하지만
+  // resolveLiveRoundFilePaths(2R-ci-1)가 이제 role을 파일 경로 조립
+  // 시점에만 소문자화한다(관제실 dispatch-worker.ps1의 실제 관례,
+  // $Role.ToLower()) -- 이 워크트리의 실제 .harness/*.md도 전부 소문자.
+  // Windows는 대소문자를 구별하지 않아 대문자 픽스처도 그대로 통과했지만
+  // Linux(CI)는 정확히 이 불일치로 "task file not found"를 낸다(ORCH
+  // 실측, not ok 2670 원문). 시험 전제(픽스처의 파일명)가 생산 관례와
+  // 어긋난 쪽이므로 시험을 고친다(ⓐ) -- allowed_lane 등 role "값" 자체는
+  // 여전히 대문자("CODER")로 둔다(그건 결속 표기이지 파일 경로가 아니다).
+  const taskPath = join(harnessDir, "coder-task.md");
   writeFileSync(taskPath, taskContent, "utf8");
 
-  const resultPath = join(harnessDir, "CODER.md");
+  const resultPath = join(harnessDir, "coder.md");
 
   const fields = {
     addendum_id: "ADD-PKT-TEST-HYK162-ARM-1",
