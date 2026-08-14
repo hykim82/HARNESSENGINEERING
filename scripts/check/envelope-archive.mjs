@@ -47,8 +47,20 @@ function escapeForRegex(str) {
 // 뜻이다. 실제 운영에서 그런 동시 호출이 실제로 벌어지는지는 확인하지
 // 못했다(좁은 위험으로만 기재). 수리하려면 파일 잠금/원자적 rename 같은
 // 설계 변경이 필요해 이 트랙 범위 밖으로 남긴다.
+// HYK-244 gate-unblock-1 §1 조각1 원인ⓑ 수리 (ORCH 실측 근거: envelope-
+// archive.mjs 51행): 이 정규식이 role 대소문자를 정규화하지 않아서,
+// 실제 생산 호출자가 어떤 호출은 "REVIEW"(대문자)로, 다른 호출은
+// "review"(소문자)로 넘기면(둘 다 같은 role 개념인데 표기만 다름 --
+// 2R-ci-1의 role 대소문자 분리와 같은 계열 결함) 이 함수가 기존
+// `REVIEW-r1..r8.md`를 하나도 못 세고 번호를 1부터 다시 매겨
+// `review-r1.md`를 만들었다. Windows는 대소문자를 구별하지 않아 그
+// 새 파일이 기존 `REVIEW-r1.md`를 그대로 덮어써 보존 사본 1건이
+// 실제로 소실됐다(`.gitignore`로 미추적이라 git 복구도 불가 -- 실사고,
+// 되돌리지 않는다). 정규식에 `i` 플래그를 붙여 role 대소문자와 무관하게
+// 기존 사본 전부를 세도록 고친다 -- "동일 파일명 재사용을 막는다"는
+// 이 함수의 유일한 계약을 대소문자에도 확장할 뿐, 다른 동작은 그대로다.
 export function nextArchiveFileName(role, existingNames) {
-  const pattern = new RegExp(`^${escapeForRegex(role)}-r(\\d+)\\.md$`);
+  const pattern = new RegExp(`^${escapeForRegex(role)}-r(\\d+)\\.md$`, "i");
   let maxRound = 0;
   for (const name of existingNames) {
     const m = pattern.exec(name);
@@ -60,6 +72,22 @@ export function nextArchiveFileName(role, existingNames) {
   return `${role}-r${maxRound + 1}.md`;
 }
 
+// HYK-244 gate-unblock-1 §1 조각1 비타협 안전장치: nextArchiveFileName이
+// 계산한 다음 번호라도, 그 정확한 파일명이 대소문자만 다르게 이미
+// 존재하면(예: 계산 결과 "review-r9.md"인데 디렉터리엔 "REVIEW-r9.md"가
+// 이미 있음 -- TOCTOU 경합, 또는 위 수리 이전에 실제로 벌어졌던 것과
+// 같은 계열의 불일치) 절대 조용히 덮어쓰지 않는다. ⚠️existsSync(path)
+// 하나만으로는 부족하다 -- Windows는 대소문자를 구별하지 않아
+// existsSync 자체가 이미 "있다"고 답해 버려 호출자가 그 판단을 신뢰할
+// 수 없고, Linux(대소문자 구별, 이 결함의 진짜 반증 자리)에서는
+// existsSync가 그 반대로 "없다"고 답해 이 안전장치가 있으나마나가
+// 된다. 그래서 둘 다에서 동일하게 동작하도록, 이미 읽어 둔 디렉터리
+// 목록(existingNames)을 대소문자 무관 문자열 비교로 직접 대조한다.
+export function findCaseInsensitiveCollision(fileName, existingNames) {
+  const lower = fileName.toLowerCase();
+  return existingNames.find((name) => name.toLowerCase() === lower) ?? null;
+}
+
 // HYK-241 §2 조각1: task 파일(`<role>-task.md`) 쪽의 같은 덮어쓰기 문제 --
 // 라운드마다 ORCH가 다음 task 파일을 같은 이름으로 다시 쓰면, 지금까지
 // «우리가 무엇을 지시했는가»의 원문이 그 순간 사라진다(§1 실사고: 결과
@@ -69,7 +97,10 @@ export function nextArchiveFileName(role, existingNames) {
 // 모두 상대방의 파일명을 매치하지 않는다(태그 사이에 반드시 `-task-`가
 // 끼어 있어야 함).
 export function nextTaskArchiveFileName(role, existingNames) {
-  const pattern = new RegExp(`^${escapeForRegex(role)}-task-r(\\d+)\\.md$`);
+  const pattern = new RegExp(
+    `^${escapeForRegex(role)}-task-r(\\d+)\\.md$`,
+    "i",
+  );
   let maxRound = 0;
   for (const name of existingNames) {
     const m = pattern.exec(name);
@@ -126,6 +157,23 @@ export function archiveRoundTaskFile({
     }
     const existing = readdirFn(archiveDir);
     const fileName = nextTaskArchiveFileName(role, existing);
+    // HYK-204 2R이 이미 기재한 TOCTOU 창(readdirSync와 writeFileSync
+    // 사이, 파일 상단 주석 참조)을 좁히려고 쓰기 직전에 디렉터리를
+    // 한 번 더 읽는다 -- 위 `existing`(번호 계산용 스냅샷)을 재사용하지
+    // 않는다. 그 스냅샷을 그대로 대조하면 fileName은 항상 그 목록 안의
+    // 무엇과도 case-insensitive로 같을 수 없어(정의상 max+1) 이 안전장치
+    // 자체가 죽은 코드가 된다 -- 반드시 "새로 다시 읽은" 목록과 대조해야
+    // 그 사이에 다른 프로세스가 만든 파일을 실제로 잡을 수 있다.
+    const collision = findCaseInsensitiveCollision(
+      fileName,
+      readdirFn(archiveDir),
+    );
+    if (collision) {
+      return {
+        ok: false,
+        reason: `envelope-archive: refusing to overwrite -- destination '${fileName}' collides (case-insensitive) with existing '${collision}'`,
+      };
+    }
     const destPath = join(archiveDir, fileName);
     const droppedAt = extractDroppedAt(taskContent);
     const header = `<!-- envelope-archive: role=${role} kind=task dropped_at=${droppedAt} -->\n`;
@@ -188,6 +236,18 @@ export function archiveRoundEnvelope({
     }
     const existing = readdirFn(archiveDir);
     const fileName = nextArchiveFileName(role, existing);
+    // TOCTOU 창을 좁히려고 쓰기 직전 재확인 -- archiveRoundTaskFile 위와
+    // 같은 이유(번호 계산용 스냅샷 재사용 금지).
+    const collision = findCaseInsensitiveCollision(
+      fileName,
+      readdirFn(archiveDir),
+    );
+    if (collision) {
+      return {
+        ok: false,
+        reason: `envelope-archive: refusing to overwrite -- destination '${fileName}' collides (case-insensitive) with existing '${collision}'`,
+      };
+    }
     const destPath = join(archiveDir, fileName);
     const doneAt = extractDoneAt(resultContent);
     const header = `<!-- envelope-archive: role=${role} archived_at=${doneAt} -->\n`;

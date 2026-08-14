@@ -86,10 +86,16 @@ function writeFixture(dir, role, taskId, droppedAt, doneAt, extra = "") {
 
 test("mutation ⓐ (필수): autoArchiveRoundEnvelope call removed from checkRelayHandshake -> handshake still passes but no round text survives -> RED", async () => {
   const src = readFileSync(RELAY_HANDSHAKE_PATH, "utf8");
+  // HYK-244 2R-a: the call site now captures a return value (`const
+  // envelopeArchived = ...`) for the consumption-receipt wiring, so the
+  // target isolates just the call expression (not the whole statement) --
+  // replacing it with `undefined` keeps `envelopeArchived` declared (no
+  // ReferenceError downstream) while still skipping the actual archive
+  // side effect, which is exactly what this mutation needs to prove RED.
   const target =
-    "  autoArchiveRoundEnvelope({ role, resultContent, harnessDir });\n";
+    "autoArchiveRoundEnvelope({\n    role,\n    resultContent,\n    harnessDir,\n  })";
   assertExactlyOneMatch(src, target, "autoArchiveRoundEnvelope call site");
-  const mutated = src.replace(target, "");
+  const mutated = src.replace(target, "undefined");
 
   await withTempDir("hyk204-mut-a-", async (dir) => {
     const scriptsCheckDir = stageScriptsCheckDir(dir, {
@@ -102,7 +108,7 @@ test("mutation ⓐ (필수): autoArchiveRoundEnvelope call removed from checkRel
       "coder",
       "HYK-9900",
       "2026-08-08 06:00 KST",
-      "2026-08-08 06:10 KST",
+      "2026-08-08 06:10:00 KST",
     );
 
     const mod = await import(
@@ -138,12 +144,23 @@ test("mutation ⓐ (필수): autoArchiveRoundEnvelope call removed from checkRel
 });
 
 // ---------------------------------------------------------------------------
-// mutation ⓑ (필수): nextArchiveFileName ignores existing files and always
-// returns round 1 -> two genuinely distinct rounds land on the SAME
-// filename -> the second overwrites the first (덮어쓰기 재발).
+// mutation ⓑ: nextArchiveFileName ignores existing files and always returns
+// round 1 -> two genuinely distinct rounds would land on the SAME filename.
+//
+// HYK-244 gate-unblock-1 §1 조각1 갱신 (이 시험이 RED에서 GREEN으로 바뀐
+// 이유, 무르게 만든 것이 아니다): 이 시험은 원래 "번호 매기기가 틀리면
+// 조용히 덮어쓴다"는 위험을 RED로 증명했다. 이번 라운드가 archiveRoundEnvelope
+// 자체에 독립적인 안전장치(findCaseInsensitiveCollision, 쓰기 직전 재확인)
+// 를 추가했으므로, 이제는 번호 매기기가 이렇게 고장 나도 그 안전장치가
+// 충돌을 잡아 쓰기를 거부한다 -- 그래서 이 정확히 같은 변이가 더 이상
+// 조용한 덮어쓰기로 이어지지 않는다(라운드 1 생존, 라운드 2는 그저 보존
+// 실패로 안전하게 물러날 뿐). 이 시험은 이제 "그 방어가 실제로 작동한다"
+// 는 GREEN 증거다 -- 원래 위험이 사라졌다고 주장하는 게 아니라(번호
+// 매기기 자체는 여전히 고장난 채로 있다, mutated 그대로), 두 번째
+// 방어선이 그 고장의 결과를 무력화한다는 것만 보인다.
 // ---------------------------------------------------------------------------
 
-test("mutation ⓑ (필수): nextArchiveFileName hardcoded to always return round 1 -> round 2 silently overwrites round 1's archive -> RED", async () => {
+test("mutation ⓑ 갱신: nextArchiveFileName이 항상 round 1을 반환하도록 고장 나도, archiveRoundEnvelope 자신의 대소문자 무관 충돌 재확인(gate-unblock-1 §1 조각1)이 덮어쓰기를 거부해 round 1이 살아남는다", async () => {
   const src = readFileSync(ENVELOPE_ARCHIVE_PATH, "utf8");
   const target = "  return `${role}-r${maxRound + 1}.md`;\n";
   assertExactlyOneMatch(src, target, "nextArchiveFileName return line");
@@ -173,7 +190,7 @@ test("mutation ⓑ (필수): nextArchiveFileName hardcoded to always return roun
       "review",
       "HYK-9901",
       "2026-08-08 06:00 KST",
-      "2026-08-08 06:10 KST",
+      "2026-08-08 06:10:00 KST",
       "outcome-note: needs-rework\n",
     );
     const first = mod.checkRelayHandshake({ role: "review", harnessDir });
@@ -184,7 +201,7 @@ test("mutation ⓑ (필수): nextArchiveFileName hardcoded to always return roun
       "review",
       "HYK-9901",
       "2026-08-08 07:00 KST",
-      "2026-08-08 07:10 KST",
+      "2026-08-08 07:10:00 KST",
       "outcome-note: looks-good\n",
     );
     const second = mod.checkRelayHandshake({ role: "review", harnessDir });
@@ -200,16 +217,16 @@ test("mutation ⓑ (필수): nextArchiveFileName hardcoded to always return roun
     assert.deepEqual(
       files,
       ["review-r1.md"],
-      "RED-setup: only one file exists because the mutant always names round 1",
+      "번호 매기기 자체는 여전히 고장 나 있다(mutated 그대로) -- round 2가 자기만의 파일을 갖지 못한다는 것은 변하지 않는다(그 자체는 이 시험의 별개 관심사가 아니다)",
     );
     const survivor = readFileSync(
       join(harnessDir, "rounds", "review-r1.md"),
       "utf8",
     );
-    assert.doesNotMatch(
+    assert.match(
       survivor,
       /needs-rework/,
-      "RED: round 1's text ('needs-rework') is gone -- round 2 ('looks-good') silently overwrote it, the exact 덮어쓰기 재발 this feature exists to prevent",
+      "GREEN(gate-unblock-1 §1 조각1): round 1의 원문('needs-rework')이 살아남아야 한다 -- 번호 매기기가 고장 나 round 2가 같은 파일명을 노려도, 쓰기 직전 재확인(findCaseInsensitiveCollision)이 그 충돌을 잡아 덮어쓰기를 거부한다(조용한 덮어쓰기 재발 0)",
     );
   });
 });
@@ -242,7 +259,7 @@ test("mutation ⓒ (자유 선택): archiveRoundEnvelope writes a blank body ins
       "coder",
       "HYK-9902",
       "2026-08-08 06:00 KST",
-      "2026-08-08 06:10 KST",
+      "2026-08-08 06:10:00 KST",
       "some report body with real detail\n",
     );
 

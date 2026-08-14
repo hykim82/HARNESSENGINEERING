@@ -115,7 +115,7 @@ test("ⓐ 자동 반납: in-process checkRelayHandshake() call releases a synthe
       "coder",
       taskId,
       "2026-08-11 06:00 KST",
-      "2026-08-11 06:10 KST",
+      "2026-08-11 06:10:00 KST",
     );
 
     const result = withEnv(
@@ -187,14 +187,14 @@ test("ⓑ 경로 동등성: CLI-spawned path and in-process path both drive thei
       "coder",
       taskIdCli,
       "2026-08-11 06:00 KST",
-      "2026-08-11 06:10 KST",
+      "2026-08-11 06:10:00 KST",
     );
     writeFixture(
       harnessDirInProc,
       "coder",
       taskIdInProc,
       "2026-08-11 06:00 KST",
-      "2026-08-11 06:10 KST",
+      "2026-08-11 06:10:00 KST",
     );
 
     // CLI path: real subprocess spawn, exactly what a human/relay watcher
@@ -282,14 +282,22 @@ function stageIsolatedRelayHandshakeDeps(rootDir) {
 
 test("ⓒ 의무성: removing spawnAdmissionCompletion(taskId) from checkRelayHandshake's ok:true branch -> handshake still passes but reservation stays ACTIVE -> RED, and the real source file is provably untouched", async () => {
   const src = readFileSync(RELAY_HANDSHAKE_PATH, "utf8");
-  const target = "  spawnAdmissionCompletion(taskId);\n";
+  // HYK-244 2R-a: the call site now captures a return value (`const
+  // admissionReturned = spawnAdmissionCompletion(taskId);`) for the
+  // consumption-receipt wiring, so the target isolates just the call
+  // expression + semicolon (distinct from the function DECLARATION line
+  // "function spawnAdmissionCompletion(taskId) {", which has no trailing
+  // semicolon there) -- replacing with `undefined;` keeps
+  // `admissionReturned` declared (no ReferenceError downstream) while
+  // still skipping the actual spawn side effect.
+  const target = "spawnAdmissionCompletion(taskId);";
   const count = src.split(target).length - 1;
   assert.equal(
     count,
     1,
     `mutation target "spawnAdmissionCompletion(taskId) call" must appear exactly once in the current working-tree source (found ${count})`,
   );
-  const mutated = src.replace(target, "");
+  const mutated = src.replace(target, "undefined;");
 
   const rootDir = tmpDir("hyk227-c-root-");
   const harnessDir = tmpDir("hyk227-c-harness-");
@@ -307,7 +315,7 @@ test("ⓒ 의무성: removing spawnAdmissionCompletion(taskId) from checkRelayHa
       "coder",
       taskId,
       "2026-08-11 06:00 KST",
-      "2026-08-11 06:10 KST",
+      "2026-08-11 06:10:00 KST",
     );
 
     const mod = await import(

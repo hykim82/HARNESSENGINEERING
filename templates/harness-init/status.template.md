@@ -59,8 +59,14 @@ Read these once; do not re-derive them after a `/clear`.
    there (a real incident this rule closes, coder-11).
 4. **Result = file + DONE line.** The role writes its result to
    `.harness/<role>.md` and ends with exactly
-   `>>> DONE: <role> @ <YYYY-MM-DD HH:MM>` (get the timestamp from a real
-   command; do not guess it).
+   `>>> DONE: <role> @ <YYYY-MM-DD HH:MM:SS>` (get the timestamp from a real
+   command; do not guess it). Seconds are required (HYK-244) --
+   `relay-handshake.mjs` rejects a minute-only DONE line. **Do not edit this
+   file again once the handshake has consumed it** -- the consumption
+   receipt records that file's exact fingerprint, and a single later edit
+   (even a formatting-only touch-up) makes that fingerprint stop matching,
+   which permanently misjudges an already-consumed round as unconsumed
+   (HYK-244, real incident).
 5. **Self-report, twice, one per event.** The role that just received "go"
    updates its own row on this board immediately, before starting work, to
    something like `working: <task_id>`. The role that just finished updates

@@ -76,7 +76,7 @@ test("codex REVIEW lane, production CLI (relay-handshake.mjs review <dir>): now+
   withDir((dir) => {
     writeCodexReviewFixture(dir, {
       droppedAt: "2026-08-01 00:00 KST",
-      doneAt: "2099-01-01 00:00 KST",
+      doneAt: "2099-01-01 00:00:00 KST",
     });
     const res = runCli(RELAY_HANDSHAKE_CLI, ["review", dir]);
     assert.notEqual(
@@ -92,7 +92,7 @@ test("codex REVIEW lane, boundary control: DONE well within the past -> passes (
   withDir((dir) => {
     writeCodexReviewFixture(dir, {
       droppedAt: "2026-08-01 00:00 KST",
-      doneAt: "2026-08-01 00:10 KST",
+      doneAt: "2026-08-01 00:10:00 KST",
     });
     const res = runCli(RELAY_HANDSHAKE_CLI, ["review", dir]);
     assert.equal(
@@ -113,7 +113,7 @@ test("codex VERIFY lane, production CLI: same future-block fires for role=verify
     );
     writeFileSync(
       join(dir, "verify.md"),
-      "task_id: HYK-9186-codex-v\n\n>>> DONE: VERIFY-CODEX @ 2099-01-01 00:00 KST\n",
+      "task_id: HYK-9186-codex-v\n\n>>> DONE: VERIFY-CODEX @ 2099-01-01 00:00:00 KST\n",
       "utf8",
     );
     const res = runCli(RELAY_HANDSHAKE_CLI, ["verify", dir]);
@@ -127,7 +127,7 @@ test("codex REVIEW lane, production CLI (watch-result.mjs --role review): future
   withDir((dir) => {
     writeCodexReviewFixture(dir, {
       droppedAt: "2026-08-01 00:00 KST",
-      doneAt: "2099-01-01 00:00 KST",
+      doneAt: "2099-01-01 00:00:00 KST",
     });
     const res = runCli(WATCH_RESULT_CLI, [
       "--role",
@@ -191,7 +191,7 @@ test("mutation (§5 변조2, codex 경로 고정): future-skew 호출 제거 -> 
   withDir((dir) => {
     writeCodexReviewFixture(dir, {
       droppedAt: "2026-08-01 00:00 KST",
-      doneAt: "2099-01-01 00:00 KST",
+      doneAt: "2099-01-01 00:00:00 KST",
     });
     const res = runCli(mutantPath, ["review", dir]);
     assert.equal(

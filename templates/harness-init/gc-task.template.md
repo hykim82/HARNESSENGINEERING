@@ -99,8 +99,8 @@ Report both kinds honestly (see "Report format" below).
 
 ## Findings
 
-| Location | Category | Evidence | Severity | Suggestion |
-|---|---|---|---|---|
+| Location            | Category         | Evidence                                                                  | Severity          | Suggestion                                   |
+| ------------------- | ---------------- | ------------------------------------------------------------------------- | ----------------- | -------------------------------------------- |
 | <path:line or path> | <1-5 from above> | <repro cmd + its real output, or an exact quote/citation — never a guess> | <Low/Medium/High> | <what a future fix task should do, one line> |
 
 (one row per finding; if a category found nothing, still say so in prose
@@ -137,4 +137,7 @@ outside `.harness/gc-report.md`. Secrets/token output.
 `.harness/gc-report.md` for the detail, and an honest limitations note (scan
 coverage depends on the scanning model's own judgment/recall — this is not a
 mechanically-guaranteed-complete process, only a structured one). End with
-`>>> DONE: CODER @ <real KST timestamp>`.
+`>>> DONE: CODER @ <real KST timestamp>`. ⛔Once written, do not edit this
+result file again — the consumption receipt records its exact fingerprint,
+and any later edit (even formatting-only) permanently misjudges an
+already-consumed round as unconsumed (HYK-244, real incident).

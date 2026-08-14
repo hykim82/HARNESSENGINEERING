@@ -28,7 +28,7 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { readFileSync, existsSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
 
 function repoRoot(cwd) {
   try {
@@ -201,6 +201,44 @@ export function formatBindingBlock({ fingerprint, entries }) {
   return `binding-fingerprint: ${fingerprint}\n\`\`\`binding-entries\n${entriesBlock}\n\`\`\`\n`;
 }
 
+// HYK-244 gate-unblock-1 §1 조각2 원인ⓐ 수리 (ORCH 실측 근거: 이 파일의
+// 옛 --record가 `writeFileSync(reviewPath, existing + block)`로 이미
+// 소비 완료된 `.harness/review.md`에 직접 덧붙였다 -- 그 결과 review.md의
+// 지문이 승인 직후 즉시 무효가 됐다). binding-fingerprint/binding-entries
+// 를 review.md 밖의 사이드카 파일로 분리한다 -- "소비 완료된 <role>.md를
+// 어떤 경우에도 수정하지 않는다"는 이 브랜치가 새로 넣은 워커 지시
+// 수칙(0017a15)을 하네스 도구 자신도 지킨다. 사이드카는 review.md와
+// 같은 디렉터리에 두어(위치 추적이 쉬움) `.harness/` 밖 신규 최상위
+// 디렉터리를 만들지 않는다.
+function sidecarPathFor(reviewPath) {
+  return join(dirname(reviewPath), "review-approval-binding.md");
+}
+
+// 하위호환(§1 점3 "사이드카 분리 + 읽는 자리 전건 갱신 + 하위호환" 요구
+// 그대로): 사이드카가 있으면 그것을 정본으로 읽는다. 없으면(이 수리
+// 이전에 review.md 안에 직접 적힌 옛 라운드들) review.md 자신을 그대로
+// 읽어 예전과 동일하게 동작한다 -- 옛 기록을 무효화하지 않는다. 어느
+// 쪽도 못 읽으면 빈 문자열로 물러난다("결속 없음"이 정직하게 뜨게
+// 한다 -- 조용히 다른 경로로 넘어가 오류를 감추지 않는다).
+function readBindingSourceText(reviewPath) {
+  const sidecarPath = sidecarPathFor(reviewPath);
+  if (existsSync(sidecarPath)) {
+    try {
+      return readFileSync(sidecarPath, "utf8");
+    } catch {
+      return "";
+    }
+  }
+  if (existsSync(reviewPath)) {
+    try {
+      return readFileSync(reviewPath, "utf8");
+    } catch {
+      return "";
+    }
+  }
+  return "";
+}
+
 function diffEntryLists(approvedLines, currentLines) {
   const approvedByPath = new Map();
   for (const line of approvedLines ?? []) {
@@ -313,34 +351,40 @@ export function evaluateBinding(content, cwd) {
 // a separate function (not folded into checkReviewGate) so
 // checkReviewGate's own pure-function contract, and the ~20 existing tests
 // asserting its return shape, stay untouched.
+// HYK-244 gate-unblock-1 §1 조각2: 사이드카가 있으면(existsSync로 먼저
+// 확인) 사이드카를 정본으로 읽는다 -- 없으면 review.md 자신을 그대로
+// 읽는다(하위호환, 위 readBindingSourceText와 같은 우선순위). ⛔여기서는
+// 실패를 삼키지 않는다(readBindingSourceText와 달리) -- checkApprovalBinding
+// 은 커밋 게이트 자신의 판정이라 "못 읽었다"를 반드시 throw로 드러내
+// 아래 catch가 fail-closed(판정 불가)로 명시적으로 처리하게 한다(옛
+// 동작과 동일한 계약 -- review.md가 아예 없을 때도 옛 코드는 이 catch로
+// 떨어졌다, 그 동작을 그대로 보존).
 export function checkApprovalBinding({ reviewPath, cwd = process.cwd() }) {
+  const sidecarPath = sidecarPathFor(reviewPath);
+  const sourcePath = existsSync(sidecarPath) ? sidecarPath : reviewPath;
   let content;
   try {
-    content = readFileSync(reviewPath, "utf8");
+    content = readFileSync(sourcePath, "utf8");
   } catch (err) {
     return {
       ok: false,
       judgement: "판정 불가",
-      reason: `판정 불가(커밋 차단): review.md를 다시 읽을 수 없음 (${err.message}) -- node scripts/check/review-approval-binding.mjs --explain`,
+      reason: `판정 불가(커밋 차단): ${sourcePath === sidecarPath ? "승인 결속 사이드카" : "review.md"}를 다시 읽을 수 없음 (${err.message}) -- node scripts/check/review-approval-binding.mjs --explain`,
     };
   }
   return evaluateBinding(content, cwd);
 }
 
 function readReviewContentIfPresent(reviewPath) {
-  if (!existsSync(reviewPath)) return null;
-  try {
-    return readFileSync(reviewPath, "utf8");
-  } catch {
-    return null;
-  }
+  const text = readBindingSourceText(reviewPath);
+  return text.length > 0 ? text : null;
 }
 
 function judgeForExplain(content, reviewPath, cwd) {
   if (content) return evaluateBinding(content, cwd);
   return {
     judgement: "결속 없음",
-    reason: `결속 없음(커밋 차단): review.md가 없음(${reviewPath}) -- node scripts/check/review-approval-binding.mjs --explain`,
+    reason: `결속 없음(커밋 차단): review.md와 승인 결속 사이드카(${sidecarPathFor(reviewPath)}) 둘 다 없음 -- node scripts/check/review-approval-binding.mjs --explain`,
   };
 }
 
@@ -405,6 +449,10 @@ if (invokedDirectly) {
       : join(repoRoot(cwd), ".harness", "review.md");
 
   if (args.includes("--record")) {
+    // HYK-244 gate-unblock-1 §1 조각2 원인ⓐ 수리: 옛 코드는 이 블록을
+    // review.md 자신에 덧붙여 썼다(소비 완료된 결과 파일 무수정 수칙
+    // 위반, §0 실사고의 직접 원인). 사이드카 파일(review.md 밖)에 항상
+    // «새로» 쓴다 -- review.md는 여기서 단 한 글자도 건드리지 않는다.
     const current = computeFingerprint({ cwd });
     if (!current.ok) {
       console.error(`지문을 잴 수 없음: ${current.reason}`);
@@ -415,24 +463,18 @@ if (invokedDirectly) {
       entries: current.entries,
     });
     const force = args.includes("--force");
-    let existing = "";
-    if (existsSync(reviewPath)) {
-      existing = readFileSync(reviewPath, "utf8");
-      if (!force && extractBindingFingerprint(existing) !== null) {
+    const sidecarPath = sidecarPathFor(reviewPath);
+    if (existsSync(sidecarPath)) {
+      const existingSidecar = readFileSync(sidecarPath, "utf8");
+      if (!force && extractBindingFingerprint(existingSidecar) !== null) {
         console.error(
-          `review.md에 이미 binding-fingerprint가 있음 -- 덮어쓰려면 --force 추가 (${reviewPath})`,
+          `승인 결속 사이드카에 이미 binding-fingerprint가 있음 -- 덮어쓰려면 --force 추가 (${sidecarPath})`,
         );
         process.exit(1);
       }
     }
-    writeFileSync(
-      reviewPath,
-      existing +
-        (existing.endsWith("\n") || existing === "" ? "" : "\n") +
-        block,
-      "utf8",
-    );
-    console.log(`기록 완료: ${reviewPath}\n${block}`);
+    writeFileSync(sidecarPath, block, "utf8");
+    console.log(`기록 완료: ${sidecarPath}\n${block}`);
     process.exit(0);
   }
 

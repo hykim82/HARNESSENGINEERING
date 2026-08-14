@@ -866,7 +866,7 @@ test("E2E (§6 1-B + 완료조건5 receipt): real CLI, real fixture, future DONE
     );
     writeFileSync(
       join(dir, "coder.md"),
-      "task_id: HYK-9186-1\n\n>>> DONE: CODER @ 2099-01-01 00:00 KST\n",
+      "task_id: HYK-9186-1\n\n>>> DONE: CODER @ 2099-01-01 00:00:00 KST\n",
       "utf8",
     );
     const res = spawnSync(
@@ -889,7 +889,7 @@ test("E2E (§6 1-B + 완료조건5 receipt): real CLI, real fixture, future DONE
       sampleId: "HYK-186-e2e-future-done-1",
       input: {
         droppedAt: "2026-08-01 00:00 KST",
-        doneAt: "2099-01-01 00:00 KST",
+        doneAt: "2099-01-01 00:00:00 KST",
       },
       measuredNow: new Date().toISOString(),
       exit: res.status,
@@ -905,7 +905,7 @@ test("E2E (§6 1-B + 완료조건5 receipt): real CLI, real fixture, future DONE
     assert.equal(receipt.exit, 7, "EXIT_FUTURE_REJECTED");
     assert.match(
       receipt.stderr,
-      /WATCH_FUTURE_REJECTED: FUTURE_DONE:.*'result\.>>> DONE' value '2099-01-01 00:00 KST' is \d+s ahead of authority now/,
+      /WATCH_FUTURE_REJECTED: FUTURE_DONE:.*'result\.>>> DONE' value '2099-01-01 00:00:00 KST' is \d+s ahead of authority now/,
       "human-readable: names the field AND the measured skew in seconds, not just a bare code",
     );
     assert.equal(

@@ -10,12 +10,22 @@
 // 고치지 않고 미수리 결함으로만 등재한다.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, rmSync, mkdirSync } from "node:fs";
+import {
+  mkdtempSync,
+  writeFileSync,
+  readFileSync,
+  rmSync,
+  mkdirSync,
+} from "node:fs";
 import { join, dirname } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { tmpdir } from "node:os";
 import { spawnSync, execFileSync } from "node:child_process";
-import { checkRelayHandshake } from "./relay-handshake.mjs";
+import {
+  checkRelayHandshake,
+  resolveLiveRoundFilePaths,
+  wasAdmissionCompletionAttempted,
+} from "./relay-handshake.mjs";
 
 // import.meta.url is resolved relative to this file's own location, not the
 // process cwd -- unaffected by the cwd axis (repo root vs scripts/check),
@@ -62,7 +72,7 @@ function writeValidFixture(dir, role, taskId) {
   );
   writeFileSync(
     join(dir, `${role}.md`),
-    `task_id: ${taskId}\n\n>>> DONE: ${role.toUpperCase()} @ 2026-08-03 06:10 KST\n`,
+    `task_id: ${taskId}\n\n>>> DONE: ${role.toUpperCase()} @ 2026-08-03 06:10:00 KST\n`,
     "utf8",
   );
 }
@@ -103,7 +113,7 @@ test("(a) task_id matches + DONE after dropped_at -> ok", () => {
     writeResult(
       dir,
       "coder",
-      "task_id: HYK-1\n\nsome report body\n\n>>> DONE: CODER @ 2026-07-05 06:10 KST\n",
+      "task_id: HYK-1\n\nsome report body\n\n>>> DONE: CODER @ 2026-07-05 06:10:00 KST\n",
     );
     const result = checkRelayHandshake({ role: "coder", harnessDir: dir });
     assert.equal(result.ok, true);
@@ -196,7 +206,7 @@ test("(g) stale: DONE timestamp predates dropped_at -> blocked", () => {
     writeResult(
       dir,
       "coder",
-      "task_id: HYK-1\n\n>>> DONE: CODER @ 2026-07-05 06:00 KST\n",
+      "task_id: HYK-1\n\n>>> DONE: CODER @ 2026-07-05 06:00:00 KST\n",
     );
     const result = checkRelayHandshake({ role: "coder", harnessDir: dir });
     assert.equal(result.ok, false);
@@ -284,7 +294,7 @@ test("(l) frozen: dropped_at with HH:MM:SS form -> ok", () => {
     writeResult(
       dir,
       "coder",
-      "task_id: HYK-1\n\n>>> DONE: CODER @ 2026-07-05 06:10 KST\n",
+      "task_id: HYK-1\n\n>>> DONE: CODER @ 2026-07-05 06:10:00 KST\n",
     );
     const result = checkRelayHandshake({ role: "coder", harnessDir: dir });
     assert.equal(result.ok, true);
@@ -326,6 +336,84 @@ test("(n) frozen: both dropped_at and DONE carry HH:MM:SS -> ok, and seconds are
   });
 });
 
+// ---------------------------------------------------------------------------
+// HYK-244 2R-a §2 조각1: 완료시각(>>> DONE:) 분 단위 거부는 «약화 없이
+// 유지»(한용 확정 문면). 이 시험들은 정밀도 축 하나만 격리해서 확인한다
+// -- droppedAt/mismatch 등 다른 축이 섞이지 않도록, dropped_at은 항상
+// DONE보다 충분히 이전으로 고정한다.
+// ---------------------------------------------------------------------------
+
+test("HYK-244 (분단위 거부) DONE with minute precision (no seconds) -> blocked loudly, distinct reason naming the offending raw value, never silently accepted", () => {
+  withFixtureDir((dir) => {
+    writeTask(
+      dir,
+      "coder",
+      "task_id: HYK-1\ndropped_at: 2026-07-05 06:00 KST\n",
+    );
+    writeResult(
+      dir,
+      "coder",
+      "task_id: HYK-1\n\n>>> DONE: CODER @ 2026-07-05 06:10 KST\n",
+    );
+    const result = checkRelayHandshake({ role: "coder", harnessDir: dir });
+    assert.equal(result.ok, false);
+    assert.match(result.reason, /minute-precision, seconds required/);
+    assert.match(result.reason, /2026-07-05 06:10 KST/);
+    assert.match(result.reason, /HH:MM:SS/);
+  });
+});
+
+test("HYK-244 (분단위 거부, CLI) minute-precision DONE -> CLI exits non-zero with the precision reason on stderr (loud, not quiet)", () => {
+  withFixtureDirCli((dir) => {
+    writeFileSync(
+      join(dir, "coder-task.md"),
+      "task_id: HYK-244-minute-cli\ndropped_at: 2026-08-14 07:00 KST\n",
+      "utf8",
+    );
+    writeFileSync(
+      join(dir, "coder.md"),
+      "task_id: HYK-244-minute-cli\n\n>>> DONE: CODER @ 2026-08-14 07:10 KST\n",
+      "utf8",
+    );
+    const { exit, stderr } = runCli(["coder", dir]);
+    assert.notEqual(exit, 0);
+    assert.match(stderr, /minute-precision, seconds required/);
+  });
+});
+
+test("HYK-244 (초단위 정상통과, 오탐 0) DONE with seconds precision -> ok:true, precision check never fires on a well-formed input", () => {
+  withFixtureDir((dir) => {
+    writeTask(
+      dir,
+      "coder",
+      "task_id: HYK-1\ndropped_at: 2026-07-05 06:00 KST\n",
+    );
+    writeResult(
+      dir,
+      "coder",
+      "task_id: HYK-1\n\n>>> DONE: CODER @ 2026-07-05 06:10:07 KST\n",
+    );
+    const result = checkRelayHandshake({ role: "coder", harnessDir: dir });
+    assert.equal(result.ok, true);
+    assert.doesNotMatch(result.reason, /minute-precision/);
+  });
+});
+
+test("HYK-244 (분단위 거부) unparseable DONE ('@ soon') keeps its ORIGINAL 'not parseable' reason -- the new precision check never masks a pre-existing distinct failure mode", () => {
+  withFixtureDir((dir) => {
+    writeTask(
+      dir,
+      "coder",
+      "task_id: HYK-1\ndropped_at: 2026-07-05 06:00 KST\n",
+    );
+    writeResult(dir, "coder", "task_id: HYK-1\n\n>>> DONE: CODER @ soon\n");
+    const result = checkRelayHandshake({ role: "coder", harnessDir: dir });
+    assert.equal(result.ok, false);
+    assert.match(result.reason, /DONE timestamp not parseable/);
+    assert.doesNotMatch(result.reason, /minute-precision/);
+  });
+});
+
 // --- HYK-180 사이클1: mid-line task_id echo distinguished from genuine
 // absence (사이클0 증거 -- REVIEW's `for: X / task_id: Y / role: Z` shape
 // previously fell through to "missing echo", pending forever) --------
@@ -359,7 +447,7 @@ test("(q) paired good: same content, task_id moved to a standalone column-0 line
     writeResult(
       dir,
       "review",
-      "dispatch_verified: yes\ntask_id_from_dispatch: HYK-167-review-2\npane_match: 일치\ntask_id: HYK-167-review-2\n\nfor: HYK-167 / role: REVIEW-CODEX\n\n>>> DONE: REVIEW-CODEX @ 2026-07-05 06:10 KST\n",
+      "dispatch_verified: yes\ntask_id_from_dispatch: HYK-167-review-2\npane_match: 일치\ntask_id: HYK-167-review-2\n\nfor: HYK-167 / role: REVIEW-CODEX\n\n>>> DONE: REVIEW-CODEX @ 2026-07-05 06:10:00 KST\n",
     );
     const result = checkRelayHandshake({ role: "review", harnessDir: dir });
     assert.equal(result.ok, true);
@@ -533,7 +621,7 @@ test("HYK-173-escalation-1 (y) regression: a normal DONE result with an incident
     writeResult(
       dir,
       "coder",
-      "task_id: HYK-1\n\nearlier round note: >>> BLOCKED: old, resolved already\n\n>>> DONE: CODER @ 2026-07-05 06:10 KST\n",
+      "task_id: HYK-1\n\nearlier round note: >>> BLOCKED: old, resolved already\n\n>>> DONE: CODER @ 2026-07-05 06:10:00 KST\n",
     );
     const result = checkRelayHandshake({ role: "coder", harnessDir: dir });
     assert.equal(result.ok, true);
@@ -1153,7 +1241,7 @@ test("HYK-186 (★PM 실측 in-process repro): dropped_at=2026-07-31 03:00 / DON
     writeResult(
       dir,
       "coder",
-      "task_id: FUTURE-1\n\n>>> DONE: CODER @ 2099-01-01 00:00 KST\n",
+      "task_id: FUTURE-1\n\n>>> DONE: CODER @ 2099-01-01 00:00:00 KST\n",
     );
     const result = checkRelayHandshake({
       role: "coder",
@@ -1218,5 +1306,136 @@ test(`HYK-186 완료조건6: normal control battery, N=${NORMAL_CONTROL_SAMPLES.
     falsePositives,
     0,
     `오탐 ${falsePositives}/${NORMAL_CONTROL_SAMPLES.length}`,
+  );
+});
+
+// ---------------------------------------------------------------------------
+// HYK-244 2R-ci-1 §3: Windows에서도 잡히는 문자열 수준 시험.
+//
+// 원인(CI `enforce` 잡 실측, not ok 224): checkRelayHandshake가 라이브
+// task/result 파일 경로를 `${role}-task.md`/`${role}.md`로 만드는데,
+// role이 대문자("CODER")로 넘어오면(2R-b 결선 이후 실제 생산 관례) 경로도
+// "CODER-task.md"가 된다. 이 워크트리의 실제 관례(dispatch-worker.ps1
+// 166/260행 `$Role.ToLower()`, `ls .harness/*.md`로 직접 확인)는 항상
+// 소문자 파일명이라 Linux(대소문자 구별)에서는 파일을 못 찾는다.
+// Windows는 파일시스템이 대소문자를 구별하지 않아 이 결함을 원리적으로
+// 못 잡는다 -- 그래서 파일 존재 여부가 아니라 "join이 만드는 문자열
+// 자체"를 단언한다(파일시스템 동작에 기대지 않음).
+// ---------------------------------------------------------------------------
+
+test("HYK-244 2R-ci-1: resolveLiveRoundFilePaths는 role 대소문자와 무관하게 항상 소문자 파일명 문자열을 낸다(문자열 수준, OS 무관)", () => {
+  const dir = "/fixture-root"; // 실존 여부와 무관 -- 순수 문자열 join만 검사.
+  for (const role of ["CODER", "coder", "CoDeR", "REVIEW", "review"]) {
+    const { taskPath, resultPath } = resolveLiveRoundFilePaths(role, dir);
+    assert.match(
+      taskPath.replace(/\\/g, "/"),
+      /\/[a-z]+-task\.md$/,
+      `role='${role}': taskPath('${taskPath}')는 소문자 파일명으로 끝나야 한다`,
+    );
+    assert.match(
+      resultPath.replace(/\\/g, "/"),
+      /\/[a-z]+\.md$/,
+      `role='${role}': resultPath('${resultPath}')는 소문자 파일명으로 끝나야 한다`,
+    );
+    assert.equal(
+      taskPath.replace(/\\/g, "/"),
+      `${dir}/${role.toLowerCase()}-task.md`,
+      `role='${role}': taskPath는 정확히 소문자화된 role로 만든 경로여야 한다`,
+    );
+    assert.equal(
+      resultPath.replace(/\\/g, "/"),
+      `${dir}/${role.toLowerCase()}.md`,
+      `role='${role}': resultPath는 정확히 소문자화된 role로 만든 경로여야 한다`,
+    );
+  }
+});
+
+test("HYK-244 2R-ci-1 RED(변이, 필수): 경로 조립에서 소문자화를 제거하면 대문자 role일 때 문자열 시험이 실제로 실패한다(이 시험이 load-bearing임을 증명, 파일시스템 동작 무관)", async () => {
+  const src = readFileSync(
+    fileURLToPath(new URL("./relay-handshake.mjs", import.meta.url)),
+    "utf8",
+  );
+  const target = "  const roleForPath = String(role).toLowerCase();\n";
+  const count = src.split(target).length - 1;
+  assert.equal(
+    count,
+    1,
+    `mutation target must appear exactly once (found ${count})`,
+  );
+  // 소문자화를 제거 -- role을 가공 없이 그대로 쓰게 되돌린다(결함 재현).
+  const mutated = src.replace(target, "  const roleForPath = role;\n");
+
+  const mutDir = mkdtempSync(join(tmpdir(), "relay-handshake-ci-mut-"));
+  try {
+    // relay-handshake.mjs 자신이 3개 형제 모듈(reject-streak.mjs·
+    // envelope-archive.mjs·time-authority.mjs)을 정적 import하므로, 동적
+    // import가 module resolution에서 성공하려면 그 사본도 같은
+    // 디렉터리에 함께 있어야 한다(이 저장소의 다른 mutation 격리
+    // 픽스처들과 동일한 관례).
+    const here = dirname(fileURLToPath(import.meta.url));
+    for (const dep of [
+      "reject-streak.mjs",
+      "envelope-archive.mjs",
+      "time-authority.mjs",
+    ]) {
+      writeFileSync(
+        join(mutDir, dep),
+        readFileSync(join(here, dep), "utf8"),
+        "utf8",
+      );
+    }
+    const mutPath = join(mutDir, "relay-handshake.mjs");
+    writeFileSync(mutPath, mutated, "utf8");
+    // HYK-244 ci-repair-1 §1 묶음B 수리: 원래 `return import(...).then(...)`
+    // 이었다 -- 화살표 함수가 async가 아니었으므로 try 블록의 "동기적"
+    // 실행은 그 Promise를 반환하는 순간 끝나고, 바로 이어지는 finally의
+    // rmSync가 import()의 실제 모듈 로드(파일 읽기)가 끝나기 «전에»
+    // mutDir를 지워 버리는 경쟁 조건이었다(ORCH 실측: Linux CI에서
+    // ENOENT로 재현, Windows에서는 우연히 타이밍이 맞아 통과했을 뿐).
+    // `await`로 바꿔 import()의 완료(그리고 아래 단언까지)가 try 블록
+    // 안에서 전부 끝난 뒤에만 finally의 rmSync가 돌게 한다.
+    const mod = await import(pathToFileURL(mutPath).href);
+    const { taskPath } = mod.resolveLiveRoundFilePaths(
+      "CODER",
+      "/fixture-root",
+    );
+    const normalized = taskPath.replace(/\\/g, "/");
+    assert.notEqual(
+      normalized,
+      "/fixture-root/coder-task.md",
+      "RED: 소문자화를 제거하면 대문자 role일 때 경로가 더 이상 소문자 파일명이 아니어야 한다(예: /fixture-root/CODER-task.md) -- 이 시험이 그 회귀를 실제로 잡는다는 증거",
+    );
+    assert.equal(normalized, "/fixture-root/CODER-task.md");
+  } finally {
+    rmSync(mutDir, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// HYK-244 ci-repair-1 §1 묶음C: wasAdmissionCompletionAttempted -- 문자열
+// 수준(파일시스템/환경 무관)으로 "시도조차 안 함"과 "시도해서 실패/성공"을
+// 구별하는지 직접 확인한다. admission-completion-adapter.mjs 293행이 실제로
+// 찍는 문자열을 그대로 인용(추측 아님).
+// ---------------------------------------------------------------------------
+
+test("HYK-244 ci-repair-1: wasAdmissionCompletionAttempted는 adapter의 '시도조차 안 함' 출력을 attempted:false로 정확히 구별한다(문자열 수준)", () => {
+  assert.equal(
+    wasAdmissionCompletionAttempted(
+      "admission-completion-adapter: not attempted (ADMISSION_LEDGER_PATH unset)",
+    ),
+    false,
+    "adapter가 실제로 찍는(293행) 그 문자열 -- attempted:false로 읽혀야 한다",
+  );
+  assert.equal(
+    wasAdmissionCompletionAttempted(
+      "admission-completion-adapter: reservation 'HYK-9-1' released (changed=true)",
+    ),
+    true,
+    "실제로 시도해서 성공한 출력 -- attempted:true로 읽혀야 한다",
+  );
+  assert.equal(
+    wasAdmissionCompletionAttempted(""),
+    true,
+    "빈 출력(아직 안 읽음 등)은 '시도 안 함'으로 오판하면 안 된다 -- 안전측은 attempted:true 유지(exit 0이면 성공으로 보는 기존 관례 그대로, 이 함수는 오직 그 명시적 문자열 하나만 골라낸다)",
   );
 });

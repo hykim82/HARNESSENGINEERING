@@ -84,7 +84,7 @@ test("(G1) known-good: matching packet/arm/task/target -> exactly one task-creat
   const { fx, seal } = await sealGoodArm();
   assert.equal(seal.ok, true, seal.reason);
   try {
-    writeResultFile(fx.resultPath, "SPIKE-LIVE-1", "2026-07-19 11:10 KST");
+    writeResultFile(fx.resultPath, "SPIKE-LIVE-1", "2026-07-19 11:10:00 KST");
     const spawnSyncFn = fakeSpawnSyncFn(goodHandlers());
     const result = runLive(
       [
@@ -267,7 +267,7 @@ test("(A8) known-bad: a second sequential attempt on the same arm makes zero Orc
   const { fx, seal } = await sealGoodArm();
   assert.equal(seal.ok, true, seal.reason);
   try {
-    writeResultFile(fx.resultPath, "SPIKE-LIVE-1", "2026-07-19 11:10 KST");
+    writeResultFile(fx.resultPath, "SPIKE-LIVE-1", "2026-07-19 11:10:00 KST");
     const spawnSyncFn1 = fakeSpawnSyncFn(goodHandlers());
     const first = runLive(
       ["node", "x", "--live", "--authorization", seal.authorizationPath],
@@ -310,7 +310,7 @@ test("(A10) known-bad: stale result (DONE predates dropped_at) -> completion 0",
   const { fx, seal } = await sealGoodArm();
   assert.equal(seal.ok, true, seal.reason);
   try {
-    writeResultFile(fx.resultPath, "SPIKE-LIVE-1", "2026-07-19 10:00 KST"); // before dropped_at 11:00
+    writeResultFile(fx.resultPath, "SPIKE-LIVE-1", "2026-07-19 10:00:00 KST"); // before dropped_at 11:00
     const spawnSyncFn = fakeSpawnSyncFn(goodHandlers());
     const result = runLive(
       ["node", "x", "--live", "--authorization", seal.authorizationPath],
@@ -588,7 +588,7 @@ test("(T4) known-bad: fresh handshake recheck fails though the attempt itself su
   const { fx, seal } = await sealGoodArm();
   assert.equal(seal.ok, true, seal.reason);
   try {
-    writeResultFile(fx.resultPath, "SPIKE-LIVE-1", "2026-07-19 11:10 KST");
+    writeResultFile(fx.resultPath, "SPIKE-LIVE-1", "2026-07-19 11:10:00 KST");
     const spawnSyncFn = fakeSpawnSyncFn(goodHandlers());
     let calls = 0;
     // nowFn is called 11 times across a good run (preflight/claim/start/dispatch
@@ -696,7 +696,7 @@ test("(T6) success-path regression: writeLiveOutputs still writes exactly receip
   const { fx, seal } = await sealGoodArm();
   assert.equal(seal.ok, true, seal.reason);
   try {
-    writeResultFile(fx.resultPath, "SPIKE-LIVE-1", "2026-07-19 11:10 KST");
+    writeResultFile(fx.resultPath, "SPIKE-LIVE-1", "2026-07-19 11:10:00 KST");
     const spawnSyncFn = fakeSpawnSyncFn(goodHandlers());
     const result = runLive(
       ["node", "x", "--live", "--authorization", seal.authorizationPath],
@@ -744,7 +744,7 @@ test("(M9) writeLiveOutputs refuses to overwrite an existing file at the output 
   const { fx, seal } = await sealGoodArm();
   assert.equal(seal.ok, true, seal.reason);
   try {
-    writeResultFile(fx.resultPath, "SPIKE-LIVE-1", "2026-07-19 11:10 KST");
+    writeResultFile(fx.resultPath, "SPIKE-LIVE-1", "2026-07-19 11:10:00 KST");
     const spawnSyncFn = fakeSpawnSyncFn(goodHandlers());
     const result = runLive(
       ["node", "x", "--live", "--authorization", seal.authorizationPath],

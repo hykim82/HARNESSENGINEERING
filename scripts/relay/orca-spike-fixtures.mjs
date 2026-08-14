@@ -156,7 +156,7 @@ function buildSyntheticTaskContent(issuedAtIso) {
     "Orca 라이브 스파이크 합성 지시 (HYK-162 사이클2, 관찰 전용 -- 이 문서 하나로 자족).",
     "당신은 다음 세 가지만 정확히 수행하고, 그 외 어떤 행동도 하지 않는다:",
     "1. 이 작업 디렉토리의 `spike-live-result.md` 파일에 정확히 한 줄을 기록한다:",
-    "   `>>> DONE: spike @ <실제 완료 시각, YYYY-MM-DD HH:MM KST>`",
+    "   `>>> DONE: spike @ <실제 완료 시각, YYYY-MM-DD HH:MM:SS KST>`(초 단위 필수, HYK-244)",
     "2. Orca 주입 preamble이 안내하는 방식으로 worker_done을 정확히 1회 전송한다",
     "   (preamble이 제공하는 taskId/dispatchId를 그대로 사용 -- 임의로 지어내지 않는다).",
     "3. 그 외의 파일 읽기·쓰기·명령 실행·질문·에스컬레이션·시크릿/개인정보/작업전문",

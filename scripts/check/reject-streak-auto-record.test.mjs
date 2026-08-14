@@ -151,7 +151,7 @@ test("(a)★ 결선 실증: rejected review, run from a LINKED WORKTREE cwd -> r
         taskId: "HYK-9500-review-1",
         verdict: "rejected",
         droppedAt: "2026-08-04 21:00",
-        doneAt: "2026-08-04 21:10",
+        doneAt: "2026-08-04 21:10:00",
       });
 
       const result = runRelayHandshakeCli(
@@ -190,7 +190,7 @@ test("(a) 결선 실증: approved review after a prior reject -> streak resets t
         taskId: "HYK-9501-review-1",
         verdict: "rejected",
         droppedAt: "2026-08-04 21:00",
-        doneAt: "2026-08-04 21:10",
+        doneAt: "2026-08-04 21:10:00",
       });
       let result = runRelayHandshakeCli(
         RELAY_HANDSHAKE_PATH,
@@ -206,7 +206,7 @@ test("(a) 결선 실증: approved review after a prior reject -> streak resets t
         taskId: "HYK-9501-review-2",
         verdict: "approved",
         droppedAt: "2026-08-04 21:20",
-        doneAt: "2026-08-04 21:30",
+        doneAt: "2026-08-04 21:30:00",
       });
       result = runRelayHandshakeCli(
         RELAY_HANDSHAKE_PATH,
@@ -242,7 +242,7 @@ test("(b)★ 멱등성: the exact same review.md handshake re-confirmed twice (a
         taskId: "HYK-9502-review-1",
         verdict: "rejected",
         droppedAt: "2026-08-04 21:00",
-        doneAt: "2026-08-04 21:10",
+        doneAt: "2026-08-04 21:10:00",
       });
 
       for (let i = 0; i < 3; i++) {
@@ -286,7 +286,7 @@ test("(c)★ 원장 위치: no reject-streak.json is EVER created inside the lin
         taskId: "HYK-9503-review-1",
         verdict: "rejected",
         droppedAt: "2026-08-04 21:00",
-        doneAt: "2026-08-04 21:10",
+        doneAt: "2026-08-04 21:10:00",
       });
       const result = runRelayHandshakeCli(
         RELAY_HANDSHAKE_PATH,
@@ -332,7 +332,7 @@ test("(d)★ 실패 가시성: a corrupted main-repo ledger does not silently no
         taskId: "HYK-9504-review-1",
         verdict: "rejected",
         droppedAt: "2026-08-04 21:00",
-        doneAt: "2026-08-04 21:10",
+        doneAt: "2026-08-04 21:10:00",
       });
       const result = runRelayHandshakeCli(
         RELAY_HANDSHAKE_PATH,
@@ -369,7 +369,7 @@ test("(d) 실패 가시성: a REVIEW result file with no 'verdict:' line still c
       );
       writeFileSync(
         join(harnessDir, "review.md"),
-        "task_id: HYK-9505-review-1\n\n>>> DONE: REVIEW-CODEX @ 2026-08-04 21:10 KST\n",
+        "task_id: HYK-9505-review-1\n\n>>> DONE: REVIEW-CODEX @ 2026-08-04 21:10:00 KST\n",
         "utf8",
       );
       const result = runRelayHandshakeCli(
@@ -404,7 +404,7 @@ test("role scoping: a CODER handshake (no verdict possible) never touches the le
       );
       writeFileSync(
         join(harnessDir, "coder.md"),
-        "task_id: HYK-9506\n\n>>> DONE: CODER @ 2026-08-04 21:10 KST\n",
+        "task_id: HYK-9506\n\n>>> DONE: CODER @ 2026-08-04 21:10:00 KST\n",
         "utf8",
       );
       const result = runRelayHandshakeCli(
@@ -512,7 +512,7 @@ test("(f) mutation #1 (필수): computeRecord's idempotency dedupe removed -> a 
           taskId: "HYK-9600-review-1",
           verdict: "rejected",
           droppedAt: "2026-08-04 21:00",
-          doneAt: "2026-08-04 21:10",
+          doneAt: "2026-08-04 21:10:00",
         });
         for (let i = 0; i < 2; i++) {
           const r = runRelayHandshakeCli(mutantRelay, ["review", harnessDir], {
@@ -560,7 +560,7 @@ test("(f) mutation #2 (필수): isReviewFamilyRole always returns false -> a REV
           taskId: "HYK-9601-review-1",
           verdict: "rejected",
           droppedAt: "2026-08-04 21:00",
-          doneAt: "2026-08-04 21:10",
+          doneAt: "2026-08-04 21:10:00",
         });
         const r = runRelayHandshakeCli(mutantRelay, ["review", harnessDir], {
           cwd: linkedDir,
@@ -605,7 +605,7 @@ test("(f) mutation #3 (필수): mainRepoRoot's --git-common-dir resolution rever
           taskId: "HYK-9602-review-1",
           verdict: "rejected",
           droppedAt: "2026-08-04 21:00",
-          doneAt: "2026-08-04 21:10",
+          doneAt: "2026-08-04 21:10:00",
         });
         const r = runRelayHandshakeCli(mutantRelay, ["review", harnessDir], {
           cwd: linkedDir,
