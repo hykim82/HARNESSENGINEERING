@@ -824,6 +824,128 @@ function checkPredatesReceipts(currentBinding) {
 // toConsumptionGateDecision(1R 코어)의 반환값을 그대로 내놓는다(PASS면
 // null, 아니면 {state, allow:false, reason}) -- 이 함수 자신은 ALLOW/
 // REJECT를 스스로 판단하지 않는다.
+// HYK-244 2R-ci-1 §C (한용 확정 12:40, 조건 4개): live 결과 파일
+// (`<role>.md`)의 지문이 후보와 안 맞아도, 그 라운드가 실제로 소비될
+// 때 envelope-archive.mjs가 남긴 보존 사본(`.harness/rounds/<ROLE>-r<N>.md`)
+// 의 지문이 영수증과 일치하면 "소비됨"으로 인정한다 -- 소비 완료 *후에*
+// live 파일이 한 글자만 손질돼도 영구 미소비가 되는 문제(ORCH 실측: 이
+// 워크트리 자신의 커밋 라운드 영수증이 정확히 이 모양으로 걸렸다,
+// resultFingerprint만 다름)의 대응.
+//
+// 보존 사본 헤더 처리(⛔추측 금지, 실측): archiveRoundEnvelope가 남기는
+// 사본은 정확히 한 줄의 헤더 `<!-- envelope-archive: role=<ROLE>
+// archived_at=<시각> -->\n`를 원문 앞에 덧붙인다(envelope-archive.mjs
+// 193행 원문 그대로). 이 워크트리의 실제 rounds/CODER-r15.md로 직접
+// 검증: 그 헤더 한 줄만 제거한 나머지가 그 라운드의 실제 영수증
+// resultFingerprint(36d83fd8…)와 SHA-256이 정확히 일치했다(coder.md
+// §B 참조) -- 그래서 아래는 "그 정확한 헤더 패턴이면 한 줄만 벗기고,
+// 아니면(추측 금지) 지문을 계산하지 않고 판정 불가로 물러난다."
+const ARCHIVE_ENVELOPE_HEADER_RE =
+  /^<!-- envelope-archive: role=\S+ archived_at=.*? -->\n/;
+
+function stripArchiveEnvelopeHeader(content) {
+  const match = content.match(ARCHIVE_ENVELOPE_HEADER_RE);
+  return match ? content.slice(match[0].length) : content;
+}
+
+// 여러 개면 조용히 하나를 고르지 않고 판정 불가로 거부한다(§C 지시
+// "어느 사본이 그 라운드의 것인지" 규칙 -- 이 저장소의 확정 방향,
+// resolveMatchingCandidate의 ambiguous 처리와 같은 정신). 반환:
+// {ok:true, fingerprint, path} | {ok:true, fingerprint:null}(못 찾음,
+// 지어내지 않음) | {ok:false, reason}(찾았지만 2개 이상 -- 판정 불가).
+function findArchivedResultFingerprint(harnessDir, role, harnessTaskLabel) {
+  const roundsDir = join(harnessDir, "rounds");
+  let names;
+  try {
+    names = readdirSync(roundsDir);
+  } catch {
+    return { ok: true, fingerprint: null };
+  }
+  const pattern = new RegExp(`^${role}-r\\d+\\.md$`, "i");
+  const matches = [];
+  for (const name of names) {
+    if (!pattern.test(name)) continue;
+    let raw;
+    try {
+      raw = readFileSync(join(roundsDir, name), "utf8");
+    } catch {
+      continue;
+    }
+    const stripped = stripArchiveEnvelopeHeader(raw);
+    if (
+      extractSoleMatch(stripped, CONSUMPTION_TASK_ID_RE_G) !== harnessTaskLabel
+    )
+      continue;
+    matches.push({
+      path: join("rounds", name),
+      fingerprint: computeConsumptionResultFingerprint(stripped),
+    });
+  }
+  if (matches.length === 0) return { ok: true, fingerprint: null };
+  if (matches.length > 1) {
+    return {
+      ok: false,
+      reason: `보존 사본 후보 ${matches.length}건이 같은 라벨(${harnessTaskLabel})과 일치 -- 어느 것이 그 라운드의 것인지 결정할 수 없다(판정 불가, 조용히 하나를 고르지 않음)`,
+    };
+  }
+  return {
+    ok: true,
+    fingerprint: matches[0].fingerprint,
+    path: matches[0].path,
+  };
+}
+
+// HYK-244 2R-ci-1 §C: 1R 코어(⛔수정 금지)를 그대로 두고, live 지문으로
+// 실패했을 때만 "그 실패의 유일한 원인이 resultFingerprint였다면" 보존
+// 사본 지문으로 한 번 더 시도한다 -- 다른 필드(role/droppedAt/dispatchId/
+// doneAt)까지 함께 바뀌는 것은 아니므로, resultFingerprint 하나만 바꾼
+// currentBinding으로 같은 코어를 다시 부르는 것은 코어의 판정 로직을
+// 조금도 바꾸지 않는다(그 함수를 두 번째로 호출할 뿐).
+function tryArchiveFallback({
+  role,
+  currentBinding,
+  candidates,
+  harnessDir,
+  harnessTaskLabel,
+}) {
+  const archived = findArchivedResultFingerprint(
+    harnessDir,
+    role,
+    harnessTaskLabel,
+  );
+  if (!archived.ok) {
+    console.error(
+      `dispatch-gate-decision consumption: 보관함 대조 판정 불가(안 지어냄) -- ${archived.reason}`,
+    );
+    return null;
+  }
+  if (!archived.fingerprint) return null; // 사본 자체가 없음 -- 조용히 물러난다(원래 실패를 그대로 반환).
+  if (archived.fingerprint === currentBinding.resultFingerprint) return null; // live와 같음 -- 애초에 실패 원인이 아니었다.
+
+  // ★조건② -- live≠보관함 불일치 관측을 무조건 먼저 찍는다(뒷손질
+  // 관측 -- 이 사실 자체는 아래 재시도의 성패와 무관하게 항상 보인다).
+  console.error(
+    `dispatch-gate-decision consumption: live≠보관함 지문 불일치 관측 -- live=${currentBinding.resultFingerprint} archive(${archived.path})=${archived.fingerprint} (소비 후 결과 파일이 손질됐을 가능성)`,
+  );
+
+  const archiveBinding = {
+    ...currentBinding,
+    resultFingerprint: archived.fingerprint,
+  };
+  const retry = toConsumptionGateDecision({
+    role,
+    currentBinding: archiveBinding,
+    candidates,
+  });
+  if (retry !== null) return null; // 보관함 지문으로도 매치 안 됨 -- 원래 실패를 그대로 반환.
+
+  // ★조건① -- 보관함 대조로 인정될 때 사유가 반드시 찍힌다(조용한 통과 0).
+  console.error(
+    `dispatch-gate-decision consumption: ARCHIVE_MATCH -- live 지문 불일치이나 보존 사본(${archived.path}) 지문이 영수증과 일치 -> 소비 완료로 판정, 허용`,
+  );
+  return true;
+}
+
 function evaluateConsumptionDecision(taskPath, args, env = process.env) {
   const role = deriveRoleFromTaskPath(taskPath);
   if (!role) return null;
@@ -876,7 +998,26 @@ function evaluateConsumptionDecision(taskPath, args, env = process.env) {
 
   const candidates = readConsumptionCandidates(harnessDir, role, receiptPath);
 
-  return toConsumptionGateDecision({ role, currentBinding, candidates });
+  const decision = toConsumptionGateDecision({
+    role,
+    currentBinding,
+    candidates,
+  });
+  if (decision === null) return null;
+
+  if (
+    tryArchiveFallback({
+      role,
+      currentBinding,
+      candidates,
+      harnessDir,
+      harnessTaskLabel,
+    })
+  ) {
+    return null; // ALLOW -- 사유는 tryArchiveFallback이 이미 찍었다.
+  }
+
+  return decision;
 }
 
 export function runDispatchGateDecision(argv) {

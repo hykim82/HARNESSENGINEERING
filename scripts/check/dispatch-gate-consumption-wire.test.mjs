@@ -831,6 +831,207 @@ test("§4-4 회귀 0 (조합, 대조군): 기존 축(streak>=2)이 거부하면 
 });
 
 // ---------------------------------------------------------------------------
+// HYK-244 2R-ci-1 §C/§E: 보관함(rounds/) 지문 대조 -- live 결과 파일이
+// 소비 *후* 손질돼도, 보존 사본(envelope-archive.mjs가 남긴 원문)의
+// 지문이 영수증과 일치하면 여전히 소비 완료로 인정한다.
+// ---------------------------------------------------------------------------
+
+// prev 라운드가 "실제로 소비됐고"(영수증 존재, 그 영수증의 지문 =
+// 원본 결과 내용의 지문), 그 원본이 보존 사본(rounds/<ROLE>-r1.md,
+// envelope-archive.mjs와 바이트 동일한 헤더 형식)에 그대로 남아 있는
+// 상태를 만든다. tamperLive:true(기본)면 live 결과 파일만 그 뒤에
+// 손질해 원본과 달라지게 한다(§B가 실측한 실제 사고 모양 그대로).
+function buildArchiveMatchFixture(
+  dir,
+  role,
+  {
+    prevTaskId,
+    nextTaskId,
+    droppedAt,
+    doneAt,
+    nextDroppedAt,
+    dispatchId,
+    tamperLive = true,
+    tamperArchiveToo = false,
+  },
+) {
+  const upperRole = role.toUpperCase();
+  const originalResultContent = `task_id: ${prevTaskId}\n\n>>> DONE: ${upperRole} @ ${doneAt}\n`;
+
+  const roundsDir = join(dir, "rounds");
+  mkdirSync(roundsDir, { recursive: true });
+  // 보존 TASK 사본(droppedAt 조회용, seedHandoff와 동일 헤더 관례).
+  writeFileSync(
+    join(roundsDir, `${upperRole}-task-r1.md`),
+    `<!-- envelope-archive: role=${upperRole} kind=task dropped_at=${droppedAt} -->\ntask_id: ${prevTaskId}\ndropped_at: ${droppedAt}\n${ONE_B_BLOCK}`,
+    "utf8",
+  );
+  // 보존 RESULT 사본 -- envelope-archive.mjs 193행과 바이트 동일한 헤더
+  // 형식(`<!-- envelope-archive: role=<ROLE> archived_at=<시각> -->\n`).
+  const archiveResultContent = tamperArchiveToo
+    ? originalResultContent.replace(">>> DONE:", ">>> DONE(위조):")
+    : originalResultContent;
+  writeFileSync(
+    join(roundsDir, `${upperRole}-r1.md`),
+    `<!-- envelope-archive: role=${upperRole} archived_at=${doneAt} -->\n${archiveResultContent}`,
+    "utf8",
+  );
+
+  const dispatchReceiptPath = join(dir, "dispatch-receipts.jsonl");
+  writeDispatchReceiptLine(dispatchReceiptPath, {
+    role: upperRole,
+    harnessTaskLabel: prevTaskId,
+    dispatchId,
+  });
+  writeConsumptionReceipt(
+    dir,
+    role,
+    {
+      taskId: prevTaskId,
+      role: upperRole,
+      droppedAt,
+      resultFingerprint: computeFingerprint(originalResultContent),
+      doneAt,
+      // dispatchId 의도적으로 생략(실물 생산기 관례, buildConsumedFixture와 동일 이유).
+    },
+    { envelopeArchived: true, taskArchived: true, admissionReturned: true },
+  );
+
+  // live 결과 파일 -- tamperLive면 소비 *후* 손질된 모양(서식만 다름).
+  const liveResultContent = tamperLive
+    ? `task_id: ${prevTaskId}\n\n>>> DONE: ${upperRole} @ ${doneAt}\n<!-- 소비 후 손질(가정) -->\n`
+    : originalResultContent;
+  writeFileSync(join(dir, `${role}.md`), liveResultContent, "utf8");
+
+  const taskPath = join(dir, `${role}-task.md`);
+  writeFileSync(
+    taskPath,
+    `task_id: ${nextTaskId}\ndropped_at: ${nextDroppedAt}\n${ONE_B_BLOCK}`,
+    "utf8",
+  );
+  return { taskPath, dispatchReceiptPath };
+}
+
+test("§E-1/2 ARCHIVE_MATCH: live 지문이 안 맞아도 보존 사본 지문이 영수증과 일치하면 ALLOW + 사유(ARCHIVE_MATCH)와 live≠보관함 불일치 관측이 둘 다 stderr에 찍힌다", () => {
+  withFixtureDir((dir) => {
+    const ledgerPath = join(dir, "reject-streak.json");
+    writeLedger(ledgerPath, { schema_version: 1, issues: {} });
+    const { taskPath, dispatchReceiptPath } = buildArchiveMatchFixture(
+      dir,
+      "coder",
+      {
+        prevTaskId: "HYK-9111-consumption-archive-match-prev",
+        nextTaskId: "HYK-9111-consumption-archive-match-next",
+        droppedAt: "2026-08-14 09:00:00 KST",
+        doneAt: "2026-08-14 09:10:05 KST",
+        nextDroppedAt: "2026-08-14 10:00:00 KST",
+        dispatchId: "ctx_test_archive_match",
+        tamperLive: true,
+      },
+    );
+
+    const r = runCli(SCRIPT_PATH, [
+      taskPath,
+      "--ledger",
+      ledgerPath,
+      "--dispatch-receipt-path",
+      dispatchReceiptPath,
+    ]);
+    assert.equal(
+      r.status,
+      0,
+      `ALLOW 기대(보관함 대조), 실제 stderr: ${r.stderr}`,
+    );
+    assert.match(r.stdout, /ALLOW/);
+    assert.match(
+      r.stderr,
+      /ARCHIVE_MATCH/,
+      "조용한 통과 금지(조건①) -- 보관함 대조로 인정됐다는 사유가 찍혀야 한다",
+    );
+    assert.match(
+      r.stderr,
+      /live≠보관함 지문 불일치 관측/,
+      "뒷손질 관측(조건②) -- live와 보관함이 다르다는 사실 자체가 찍혀야 한다",
+    );
+  });
+});
+
+test("§E-3 여전히 엄격: live도 보관함도 둘 다 안 맞으면(보존 사본까지 어긋나면) 여전히 REJECT", () => {
+  withFixtureDir((dir) => {
+    const ledgerPath = join(dir, "reject-streak.json");
+    writeLedger(ledgerPath, { schema_version: 1, issues: {} });
+    const { taskPath, dispatchReceiptPath } = buildArchiveMatchFixture(
+      dir,
+      "coder",
+      {
+        prevTaskId: "HYK-9112-consumption-archive-both-bad-prev",
+        nextTaskId: "HYK-9112-consumption-archive-both-bad-next",
+        droppedAt: "2026-08-14 09:00:00 KST",
+        doneAt: "2026-08-14 09:10:05 KST",
+        nextDroppedAt: "2026-08-14 10:00:00 KST",
+        dispatchId: "ctx_test_archive_both_bad",
+        tamperLive: true,
+        tamperArchiveToo: true, // 보존 사본까지 어긋낸다.
+      },
+    );
+
+    const r = runCli(SCRIPT_PATH, [
+      taskPath,
+      "--ledger",
+      ledgerPath,
+      "--dispatch-receipt-path",
+      dispatchReceiptPath,
+    ]);
+    assert.notEqual(
+      r.status,
+      0,
+      "면제가 새 구멍이 되면 안 된다 -- live·보관함 둘 다 안 맞으면 여전히 REJECT",
+    );
+    assert.doesNotMatch(r.stderr, /ARCHIVE_MATCH/);
+  });
+});
+
+test("§C 어느 사본이 그 라운드 것인지: 같은 라벨의 보존 사본이 2개면 조용히 하나를 고르지 않고 판정 불가로 거부한다(REJECT, ARCHIVE_MATCH 아님)", () => {
+  withFixtureDir((dir) => {
+    const ledgerPath = join(dir, "reject-streak.json");
+    writeLedger(ledgerPath, { schema_version: 1, issues: {} });
+    const { taskPath, dispatchReceiptPath } = buildArchiveMatchFixture(
+      dir,
+      "coder",
+      {
+        prevTaskId: "HYK-9113-consumption-archive-ambiguous-prev",
+        nextTaskId: "HYK-9113-consumption-archive-ambiguous-next",
+        droppedAt: "2026-08-14 09:00:00 KST",
+        doneAt: "2026-08-14 09:10:05 KST",
+        nextDroppedAt: "2026-08-14 10:00:00 KST",
+        dispatchId: "ctx_test_archive_ambiguous",
+        tamperLive: true,
+      },
+    );
+    // 같은 라벨(prevTaskId)을 가리키는 두 번째 보존 사본을 추가한다 --
+    // 어느 쪽이 진짜인지 이 축 스스로는 결정할 수 없어야 한다.
+    const raw = readFileSync(join(dir, "rounds", "CODER-r1.md"), "utf8");
+    writeFileSync(join(dir, "rounds", "CODER-r2.md"), raw, "utf8");
+
+    const r = runCli(SCRIPT_PATH, [
+      taskPath,
+      "--ledger",
+      ledgerPath,
+      "--dispatch-receipt-path",
+      dispatchReceiptPath,
+    ]);
+    assert.notEqual(
+      r.status,
+      0,
+      "중복 라벨은 조용히 하나를 고르지 않고 거부해야 한다",
+    );
+    assert.doesNotMatch(r.stderr, /ARCHIVE_MATCH/);
+    assert.match(r.stderr, /보관함 대조 판정 불가/);
+    assert.match(r.stderr, /결정할 수 없다/);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // 부트스트랩: 직전 라운드의 결과 파일 자체가 없으면(첫 배달) 새 축이
 // 적용 대상이 없다고 판단해 ALLOW를 막지 않는다.
 // ---------------------------------------------------------------------------

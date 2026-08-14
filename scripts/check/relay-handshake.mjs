@@ -456,14 +456,39 @@ function resolveDoneAt(resultContent, now) {
 // 의 checkBindingPreconditions가 "주 열쇠 미확정"으로 거부한다(영수증이
 // 있어도 아직 PASS를 못 낸다는 뜻 -- 이 조각의 범위 그대로, §3 정직
 // 한계). 어디서 이 값을 넘길지는 2R-b가 결선한다.
+// HYK-244 2R-ci-1: 파일 경로에 쓰는 표기와 결속/영수증에 담기는 role
+// 값을 분리한다 -- 관제실 dispatch-worker.ps1(166/260행)이 실측으로
+// 확인된 실제 관례: 라이브 task/result 파일은 항상 `$Role.ToLower()`로
+// 쓴다(`.harness/coder-task.md`/`.harness/coder.md`, 이 워크트리에서
+// `ls .harness/*.md`로 직접 확인 -- 전부 소문자). Windows는 파일시스템이
+// 대소문자를 구별하지 않아 role이 대문자("CODER")로 와도 그 lowercase
+// 파일을 그대로 찾지만, Linux(CI)는 구별해 못 찾는다(PR #152 CI
+// `enforce` 잡 실측: "task file not found: .../CODER-task.md"). role
+// 자신(바인딩·영수증·isReviewFamilyRole·아카이브 파일명에 쓰이는 값)은
+// 검토 승인분이라 그대로 둔다 -- 오직 파일 경로 조립에만 소문자화한
+// 별도 값을 쓴다.
+//
+// ⛔이 함수를 export하는 이유(HYK-244 2R-ci-1 §3): 파일시스템의 대소문자
+// 구별 여부에 기대는 시험은 Windows에서 이 결함이 재발해도 절대 못
+// 잡는다(오늘 실제로 그랬다 -- 로컬 3자리 전부 통과, CI만 반증). 이
+// 함수를 순수 문자열 변환으로 분리해 export하면, "join 결과 문자열이
+// 항상 소문자 파일명을 낸다"를 파일 존재 여부와 무관하게, 어느
+// OS에서든 assert.equal 하나로 확인할 수 있다.
+export function resolveLiveRoundFilePaths(role, harnessDir) {
+  const roleForPath = String(role).toLowerCase();
+  return {
+    taskPath: join(harnessDir, `${roleForPath}-task.md`),
+    resultPath: join(harnessDir, `${roleForPath}.md`),
+  };
+}
+
 export function checkRelayHandshake({
   role,
   harnessDir = join(repoRoot(), ".harness"),
   now = Date.now(),
   dispatchId,
 }) {
-  const taskPath = join(harnessDir, `${role}-task.md`);
-  const resultPath = join(harnessDir, `${role}.md`);
+  const { taskPath, resultPath } = resolveLiveRoundFilePaths(role, harnessDir);
 
   if (!existsSync(taskPath)) {
     return { ok: false, reason: `task file not found: ${taskPath}` };
