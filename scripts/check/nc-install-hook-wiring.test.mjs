@@ -91,6 +91,20 @@ function runInstallerDryRun(installerPath, targetDir) {
       "bot",
       "--verify-cmd",
       "true",
+      // HYK-209-frame-1: five new solo-full-required placeholders
+      // (validateUnattendedLayerParams) -- without these, validateParams
+      // now throws before the installer ever reaches the hooks-block step
+      // this suite inspects.
+      "--notify-dir",
+      join(targetDir, "control-room", "notify"),
+      "--approver-login",
+      "approver",
+      "--approver-id",
+      "1",
+      "--workspaces-root",
+      join(targetDir, "workspaces"),
+      "--main-repo-path",
+      join(targetDir, "main-repo"),
       "--dry-run",
     ],
     { encoding: "utf8" },
