@@ -18,7 +18,11 @@
 // Usage:
 //   node install.mjs --profile <solo-full|team-local> --repo-path <path>
 //     [--control-room-path <path>] --github-repo <owner/repo>
-//     [--bot-account <name>] --verify-cmd "<command>" [--dry-run]
+//     [--bot-account <name>] --verify-cmd "<command>"
+//     [solo-full only, HYK-209-frame-1 — see installUnattendedLayerManifest:
+//      --notify-dir <path> --approver-login <name> --approver-id <n>
+//      --workspaces-root <path> --main-repo-path <path>]
+//     [--dry-run]
 //   node install.mjs --config <path-to-harness-init.config.json> [--dry-run]
 //
 // If --config is omitted, the installer also looks for
@@ -81,6 +85,22 @@ const FLAG_TO_KEY = {
   "github-repo": "githubRepo",
   "bot-account": "botAccount",
   "verify-cmd": "verifyCmd",
+  // HYK-209-frame-1: five new placeholders for the "무인·병렬 층"
+  // (unattended/parallel layer -- scripts/supervisor/*,
+  // scripts/relay/adapters/orca-adapter.mjs) that ORCH's own instance has
+  // built directly into itself, hardcoded, never through this installer
+  // (§2 placeholder table in .harness/coder.md has the exact file:line
+  // citations). This round does NOT copy those source files (§3
+  // "내용물 조립 0" -- that is a separate, later assembly step) -- these
+  // flags exist so the installer already knows how to receive and validate
+  // the values a future assembly round's templates will need, and records
+  // them now in a manifest (installUnattendedLayerManifest below) instead
+  // of silently deferring the whole question.
+  "notify-dir": "notifyDir",
+  "approver-login": "approverLogin",
+  "approver-id": "approverId",
+  "workspaces-root": "workspacesRoot",
+  "main-repo-path": "mainRepoPath",
   config: "config",
 };
 
@@ -106,6 +126,38 @@ function resolveParams(argv) {
   return merged;
 }
 
+// HYK-209-frame-1: extracted from validateParams (ESLint complexity ceiling)
+// -- loud-reject, not a silent default, same convention as
+// controlRoomPath/botAccount in validateParams itself. Each of these five
+// mirrors a real hardcoded value ORCH's own instance carries outside this
+// installer's current copy list (source cited so the rejection message
+// itself tells a human *why* the value is needed, not just that it's
+// missing). team-local never calls this — it has no control room, no bot
+// collaborator, and (since it has neither a control room nor a
+// scheduler/PM-lane install) no unattended layer to describe.
+function validateUnattendedLayerParams(params, errors) {
+  if (!params.notifyDir)
+    errors.push(
+      "solo-full requires notifyDir (--notify-dir) -- mirrors reach-report.mjs's DEFAULT_NOTIFY_DIR hardcode",
+    );
+  if (!params.approverLogin)
+    errors.push(
+      "solo-full requires approverLogin (--approver-login) -- mirrors approver-allowlist.json's approvers[].login hardcode",
+    );
+  if (!params.approverId)
+    errors.push(
+      "solo-full requires approverId (--approver-id) -- mirrors approver-allowlist.json's approvers[].id hardcode",
+    );
+  if (!params.workspacesRoot)
+    errors.push(
+      "solo-full requires workspacesRoot (--workspaces-root) -- mirrors orca-adapter.mjs's WORKSPACES_ROOT hardcode",
+    );
+  if (!params.mainRepoPath)
+    errors.push(
+      "solo-full requires mainRepoPath (--main-repo-path) -- mirrors orca-adapter.mjs's MAIN_REPO_PATH hardcode",
+    );
+}
+
 function validateParams(params) {
   const errors = [];
   if (!PROFILES.includes(params.profile)) {
@@ -122,9 +174,12 @@ function validateParams(params) {
       errors.push("solo-full requires controlRoomPath (--control-room-path)");
     if (!params.botAccount)
       errors.push("solo-full requires botAccount (--bot-account)");
+    validateUnattendedLayerParams(params, errors);
   }
-  // team-local: controlRoomPath / botAccount are allowed to be empty or
-  // absent — team-local has no control room and no bot collaborator.
+  // team-local: controlRoomPath / botAccount / the five unattended-layer
+  // placeholders are all allowed to be empty or absent — team-local has no
+  // control room, no bot collaborator, and (since it has neither a control
+  // room nor a scheduler/PM-lane install) no unattended layer to describe.
   if (errors.length) {
     throw new Error("invalid parameters:\n  - " + errors.join("\n  - "));
   }
@@ -141,6 +196,20 @@ function placeholderMap(params) {
       params.botAccount ||
       "(none — team-local pushes directly under this account)",
     "<VERIFY_CMD>": params.verifyCmd,
+    // HYK-209-frame-1: not yet substituted into any template file this
+    // installer writes (see installUnattendedLayerManifest) — carried here
+    // too so `--dry-run`'s printed plan (main() logs this whole map) shows
+    // every placeholder this install run knows about, substituted or not.
+    "<NOTIFY_DIR>":
+      params.notifyDir || "(none — team-local has no unattended layer)",
+    "<APPROVER_LOGIN>":
+      params.approverLogin || "(none — team-local has no unattended layer)",
+    "<APPROVER_ID>":
+      params.approverId || "(none — team-local has no unattended layer)",
+    "<WORKSPACES_ROOT>":
+      params.workspacesRoot || "(none — team-local has no unattended layer)",
+    "<MAIN_REPO_PATH>":
+      params.mainRepoPath || "(none — team-local has no unattended layer)",
   };
 }
 
@@ -873,6 +942,130 @@ function installAdmissionLedgerPointer(params, targetRepoPath, { dryRun }) {
   );
 }
 
+// installUnattendedLayerManifest -- HYK-209-frame-1 §2 항2 ("설치기 «틀»
+// 확장"). Writes `.harness/unattended-layer-placeholders.json`: the five
+// new placeholder values (validated above, never silently defaulted) plus
+// an honest `knownGaps` list of the source hardcodes they mirror and the
+// two hardcodes found during this round that have NO placeholder yet
+// (scheduler task name, concurrency cap value) because they live in code
+// this round is not allowed to touch (§3 "본체 동작 변경 0").
+//
+// ★정직 한계, stated once here and not repeated at every call site: this
+// manifest is a record of what a FUTURE assembly round needs, not an
+// install of the unattended layer itself. None of the files this manifest
+// cites (scripts/supervisor/*, scripts/relay/adapters/orca-adapter.mjs,
+// scripts/check/{linear-sync,pm-guard,selfcheck,selfcheck-inventory}.mjs,
+// scripts/supervisor/approver-allowlist.json) are copied by this
+// installer, in this round or any prior one — a repo installed today with
+// this manifest present still has zero unattended/parallel-layer
+// enforcement. solo-full only: team-local has no control room, no
+// scheduler, no PM lane, so it has no unattended layer for this manifest
+// to describe.
+// buildSourceHardcodes/buildKnownGaps -- extracted from
+// installUnattendedLayerManifest (ESLint max-lines-per-function ceiling);
+// pure data, no behavior. See that function's own header for what this
+// data means and its honesty boundary.
+function buildSourceHardcodes() {
+  return [
+    {
+      placeholder: "NOTIFY_DIR",
+      file: "scripts/supervisor/reach-report.mjs",
+      line: 49,
+      constant: "DEFAULT_NOTIFY_DIR",
+    },
+    {
+      placeholder: "APPROVER_LOGIN / APPROVER_ID",
+      file: "scripts/supervisor/approver-allowlist.json",
+      line: 4,
+      constant: "approvers[].login / approvers[].id",
+    },
+    {
+      placeholder: "WORKSPACES_ROOT",
+      file: "scripts/relay/adapters/orca-adapter.mjs",
+      line: 158,
+      constant: "WORKSPACES_ROOT",
+    },
+    {
+      placeholder: "MAIN_REPO_PATH",
+      file: "scripts/relay/adapters/orca-adapter.mjs",
+      line: 159,
+      constant: "MAIN_REPO_PATH",
+    },
+    {
+      placeholder: "(also CONTROL_ROOM_PATH, already an existing token)",
+      file:
+        "scripts/check/linear-sync.mjs:8, scripts/check/pm-guard.mjs:10, " +
+        "scripts/check/selfcheck.mjs:90,144, scripts/check/selfcheck-inventory.mjs:1021, " +
+        "scripts/relay/adapters/orca-adapter.mjs:161",
+      line: null,
+      constant:
+        "DEFAULT_STATUS_PATH / CONTROL_ROOM_ROOT / controlRoomPath default / CONTROL_ROOM_PATH",
+    },
+    {
+      placeholder:
+        "SEAT_LAUNCHER_PATH (derivable: <CONTROL_ROOM_PATH>/orca-worker-seat.ps1)",
+      file: "scripts/relay/adapters/orca-adapter.mjs",
+      line: 141,
+      constant: "SEAT_LAUNCHER_PATH",
+    },
+  ];
+}
+
+function buildKnownGaps() {
+  return [
+    {
+      item: "schedule task name",
+      file: "scripts/supervisor/schedule-plan-core.mjs",
+      line: 87,
+      constant: "TASK_NAME",
+      value: "HARNESS\\OrchStallWatch",
+      gap: "고정 문자열(§2-3 자기 주석: '이 감시자 하나만 등록하는 고정 이름') -- 자리표가 아니다. 같은 계정에 두 저장소를 이식하면 schtasks 작업 이름이 충돌한다. 이번 라운드는 고치지 않는다(§3 '본체 동작 변경 0' -- schedule-plan-core.mjs는 scripts/ 산하 강제 장치).",
+    },
+    {
+      item: "concurrency admission cap",
+      file: "scripts/supervisor/concurrency-cap.json",
+      line: 3,
+      constant: "global_hard_cap",
+      value: 2,
+      gap: "커밋된 값 파일(코드 상수는 아니다, concurrency-cap-adapter.mjs가 fail-closed로 읽음)이지만 install.mjs는 scripts/supervisor/*를 전혀 복사하지 않으므로 이 파일 자체가 이식 대상 밖이다. 값의 출처는 한용(PKT-20260807-SUPERVISOR-CONCURRENCY-ADDENDUM-V1 S-5)이지 이 설치기가 아니다.",
+    },
+  ];
+}
+
+function installUnattendedLayerManifest(params, targetRepoPath, { dryRun }) {
+  const manifestPath = path.join(
+    targetRepoPath,
+    ".harness",
+    "unattended-layer-placeholders.json",
+  );
+  if (existsSync(manifestPath)) {
+    skipped.push(manifestPath);
+    console.warn(`skip (already exists): ${manifestPath}`);
+    return;
+  }
+  const manifest = {
+    note: "이 파일이 존재해도 무인·병렬 층(scripts/supervisor/*, scripts/relay/adapters/orca-adapter.mjs 등)은 이 저장소에 설치되지 않았다 -- install.mjs는 그 파일들을 아직 복사하지 않는다(HYK-209 §3 '내용물 조립 0'). 이 값들은 그 조립 단계가 실제로 시작될 때 쓰일 자리표 값의 기록일 뿐이다.",
+    placeholders: {
+      NOTIFY_DIR: params.notifyDir,
+      APPROVER_LOGIN: params.approverLogin,
+      APPROVER_ID: params.approverId,
+      WORKSPACES_ROOT: params.workspacesRoot,
+      MAIN_REPO_PATH: params.mainRepoPath,
+    },
+    sourceHardcodes: buildSourceHardcodes(),
+    knownGaps: buildKnownGaps(),
+  };
+  const content = `${JSON.stringify(manifest, null, 2)}\n`;
+  if (!dryRun) {
+    ensureParentDir(manifestPath);
+    writeFileSync(manifestPath, content, "utf8");
+  }
+  installed.push(manifestPath);
+  console.log(
+    `${dryRun ? "[dry-run] would install" : "installed"}: ${manifestPath}\n${content}`,
+  );
+}
+
 function main() {
   const params = resolveParams(process.argv.slice(2));
   validateParams(params);
@@ -916,6 +1109,11 @@ function main() {
     // HYK-227 2R §3 항2: the persistent admission-ledger pointer file --
     // see installAdmissionLedgerPointer's own header for scope/limits.
     installAdmissionLedgerPointer(params, targetRepoPath, { dryRun });
+
+    // HYK-209-frame-1 §2 항2: record the five new unattended-layer
+    // placeholder values (+ the two known gaps this round found but can't
+    // place) — see installUnattendedLayerManifest's own header for limits.
+    installUnattendedLayerManifest(params, targetRepoPath, { dryRun });
 
     // Server-side anchor: CI workflow + gitleaks ruleset. Never automated
     // past the file copy — branch protection, bot invite, and secret

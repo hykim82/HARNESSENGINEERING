@@ -31,6 +31,17 @@ Reason:
   HYK-92)" below. Validated by installing `team-local` into a real second
   repository (`TEAM10`, a shared team SPA) and dry-running `solo-full`
   against this repository itself.
+- HYK-209-frame-1 ("«틀» 한정") adds five more solo-full placeholders and a
+  `.harness/unattended-layer-placeholders.json` manifest for the
+  unattended/parallel layer (see "Unattended-layer placeholder manifest"
+  below) plus `verify-install.mjs`. ★**Content, not installed**: this round
+  does not copy `scripts/supervisor/*` or
+  `scripts/relay/adapters/orca-adapter.mjs` — a repo installed with this
+  manifest still has zero unattended-layer enforcement; assembling that
+  content is a separate, later step (한용 확정, Linear HYK-209). Validated
+  by a synthetic-target pilot (dry-run loud-rejection, dry-run full plan,
+  real install, `verify-install.mjs` 24/24 green) — see `.harness/coder.md`
+  for the run.
 
 ## Profiles (v2, HYK-92)
 
@@ -56,7 +67,7 @@ profiles, each backed by a real instance:
 
 ### Parameters
 
-Five placeholder tokens, filled in at install time (`install.mjs` does
+Six placeholder tokens, filled in at install time (`install.mjs` does
 plain string substitution — no template engine):
 
 | Token                 | Meaning                                                | solo-full example                                | team-local example                            |
@@ -67,6 +78,18 @@ plain string substitution — no template engine):
 | `<GITHUB_REPO>`       | `owner/repo`                                           | `hykim82/HARNESSENGINEERING`                     | `AL06-Class/AL06TEAM10`                       |
 | `<BOT_ACCOUNT>`       | Write-only bot collaborator                            | `codexlocal101-rgb`                              | _(omit — team-local pushes directly, no bot)_ |
 | `<VERIFY_CMD>`        | the one command verify.sh runs                         | `node scripts/check/review-gate.test.mjs && ...` | `npm run build`                               |
+
+**Five more, solo-full only, HYK-209-frame-1 (recorded, not yet substituted
+into any installed file — see "Unattended-layer placeholder manifest"
+below):**
+
+| Token               | Meaning                                                                                             | Mirrors (source hardcode)                       |
+| ------------------- | --------------------------------------------------------------------------------------------------- | ----------------------------------------------- |
+| `<NOTIFY_DIR>`      | directory the reach/notify layer writes human-readable alerts into                                  | `reach-report.mjs:49` `DEFAULT_NOTIFY_DIR`      |
+| `<APPROVER_LOGIN>`  | GitHub login of the human approver the admission/approval layer checks                              | `approver-allowlist.json:4` `approvers[].login` |
+| `<APPROVER_ID>`     | that approver's numeric GitHub user id                                                              | `approver-allowlist.json:4` `approvers[].id`    |
+| `<WORKSPACES_ROOT>` | root directory worker worktrees/seats must live under                                               | `orca-adapter.mjs:158` `WORKSPACES_ROOT`        |
+| `<MAIN_REPO_PATH>`  | the canonical main-clone checkout path (ORCH-only, distinct from a worker's worktree `<REPO_PATH>`) | `orca-adapter.mjs:159` `MAIN_REPO_PATH`         |
 
 `<CONTROL_ROOM_PATH>` and `<BOT_ACCOUNT>` are optional and may be blank for
 `team-local`; `install.mjs` requires them only when `<PROFILE>` is
@@ -334,6 +357,71 @@ for `.claude/settings.local.json`'s control-room hook wiring above. See
 `docs/multi-agent-v1.md`'s `### PM` role section for the role boundary these
 templates implement.
 
+### Unattended-layer placeholder manifest (HYK-209-frame-1)
+
+**Why:** the 2026-08 unattended/parallel layer (the OS-scheduler-driven
+watcher `scripts/supervisor/*`, the admission ledger, the seat-location
+gates and control-room paths in `scripts/relay/adapters/orca-adapter.mjs`,
+`pm-guard.mjs`'s control-room allow-list, `linear-sync.mjs`/`selfcheck.mjs`/
+`selfcheck-inventory.mjs`'s control-room defaults) was built directly into
+this repository's own instance, never through this installer — exactly the
+drift v2 (HYK-92, above) already closed once for the enforcement scripts.
+HYK-209 ("«틀» 한정") enumerates the project-specific values that layer
+would need to become placeholders in a future transplant, and extends
+`install.mjs` to receive and validate them, **without installing the layer
+itself** — the north-star decision (한용 확정, Linear HYK-209) is that
+actually assembling that content into the package is a separate, later
+step.
+
+**solo-full only**, five new required placeholders (table above) —
+`--notify-dir --approver-login --approver-id --workspaces-root
+--main-repo-path`, loud-rejected (non-zero exit, names exactly which
+token and why) the same way `--control-room-path`/`--bot-account` already
+were before this round. Missing any one of them is a **usage error**, not
+a silent default — same convention as the original six.
+
+**What actually gets written — a manifest, not the layer:**
+`.harness/unattended-layer-placeholders.json` records the five values plus
+two lists:
+
+- `sourceHardcodes` — where each placeholder's real-world value currently
+  lives, hardcoded, file:line.
+- `knownGaps` — two hardcodes this round found that have **no** placeholder
+  yet, because they live in code this round is not allowed to touch (the
+  boundary above): the OS scheduler's fixed task name
+  (`schedule-plan-core.mjs:87`, `TASK_NAME = "HARNESS\\OrchStallWatch"` —
+  collides if two repos' schedulers are ever registered under the same
+  Windows account) and the concurrency admission cap
+  (`concurrency-cap.json:3`, `global_hard_cap` — a committed value file,
+  not a code constant, but one `install.mjs` never copies).
+
+**Honest limit, stated once here:** a repo installed with this manifest
+present still has **zero** unattended/parallel-layer enforcement —
+`scripts/supervisor/*` and `scripts/relay/adapters/orca-adapter.mjs` are
+not copied, in this round or any prior one. The manifest is a record for
+whenever the later assembly step starts, not evidence that step already
+happened.
+
+**Verification (`verify-install.mjs`, HYK-209-frame-1 §2 항3):** a new,
+separate script (`templates/harness-init/verify-install.mjs`, not copied
+into target repos — run manually against an already-installed target,
+`node verify-install.mjs --repo-path <path> --profile <profile> [--verify-cmd ...] ...`)
+re-reads an installed repo and checks, item by item (PASS/FAIL per line,
+non-zero exit on any FAIL), that install.mjs's own "installed: `<path>`"
+log line is not the whole story:
+
+1. no installed (non-template-convention) file still contains one of
+   `install.mjs`'s own eleven token names unsubstituted — the exact "file
+   copied, not substituted" bug class a plain existence check cannot see;
+2. the original six placeholders' actual VALUES are readable back out of a
+   real consumer's input (`verify.sh`'s shell command, `STATUS.md`'s
+   `Profile:` header, `settings.local.json`'s hook path arguments,
+   `.gitignore`'s profile marker);
+3. (solo-full) the five new placeholders' actual values match
+   `unattended-layer-placeholders.json`, and both `knownGaps` entries
+   survive;
+4. the tracked git hooks are present.
+
 ### Observability layer (observe.sh, HYK-102)
 
 **Why:** of the harness's own eight principles, "let the agent read the app"
@@ -355,7 +443,7 @@ pass/fail). They answer different questions and are meant to be run
 separately, not merged into one script.
 
 **Filling in `REPLACE_ME_*` — a human/agent step, not `install.mjs`'s:**
-unlike `<VERIFY_CMD>` and the other five angle-bracket tokens (known at
+unlike `<VERIFY_CMD>` and the other angle-bracket tokens (known at
 install time, from CLI flags), `observe.sh`'s three values are project
 runtime specifics no installer call can know in advance, so they ship as
 plain `<UPPER_SNAKE>`-shaped `REPLACE_ME_*` strings (same convention as
@@ -578,6 +666,11 @@ node templates/harness-init/install.mjs \
   --github-repo "owner/repo" \
   --bot-account "bot-account-name" \
   --verify-cmd "node scripts/check/review-gate.test.mjs && ..." \
+  --notify-dir "D:\path\to\control-room\notify" \
+  --approver-login "github-login-of-human-approver" \
+  --approver-id 12345678 \
+  --workspaces-root "C:\path\to\worktrees-root" \
+  --main-repo-path "C:\path\to\repo" \
   [--dry-run]
 
 node templates/harness-init/install.mjs \
@@ -623,6 +716,9 @@ Contents:
   package contents only, not copied by `install.mjs`
 - `codex-reviewer-prompt.template.md`: Codex Reviewer startup prompt —
   package contents only, not copied by `install.mjs`
+- `verify-install.mjs`: post-install verification script (HYK-209-frame-1)
+  — not copied into target repos, run manually against an installed
+  target; see "Unattended-layer placeholder manifest" above
 - `handoff-packet.template.md`: Claude-to-Codex handoff format
 - `question-packet.template.md`: role-to-Orchestrator question format
 - `phase-handoff.template.md`: phase-boundary handoff for session rotation
