@@ -63,6 +63,10 @@ import {
 } from "node:fs";
 import path from "node:path";
 import { runReachOnce, DEFAULT_NOTIFY_DIR } from "./reach-report.mjs";
+// HYK-255-watch-wire-1 (coder-task.md §1) -- 부분 계수 보고 «실파일» 생성을
+// 감시 실행에 잇는다. 계수 로직은 새로 쓰지 않는다 -- 병합된 프로덕션 API
+// (runPartialCountOnce)를 그대로 호출해 그 출력을 파일로 쓸 뿐이다.
+import { runPartialCountOnce } from "./partial-count-report.mjs";
 import { readConcurrencyCap } from "./concurrency-cap-adapter.mjs";
 import { judgeConcurrency } from "./concurrency-core.mjs";
 // HYK-173-push-wire (coder-task.md §5-D) -- shouldNotify는 이 러너가
@@ -1033,6 +1037,128 @@ function runReachStep({
   }
 }
 
+// HYK-255-watch-wire-1 (coder-task.md §1 항1) -- 부분 계수 보고 파일 생성
+// 단계. runWatchOnce/runWatchOnceCore(동기 계약 -- 다수 기존 호출자·기존
+// 시험이 동기 반환을 기대한다, §2 비타협3 회귀 0)와 같은 함수 안에 넣지
+// 않는다: runPartialCountOnce는 GitHub REST 조회(ㄱ-4)가 있어 비동기다.
+// 그래서 이 단계는 별도 함수로 분리해 CLI 진입점에서만 await한다.
+//
+// ⛔관제실 절대경로를 코드에 박지 않는다(§1 항1) -- 출력 경로는 호출자가
+// 주는 `watchDir`에서 파생한다(기본값 = watchDir/partial-count-report.md,
+// reach-report.mjs의 partialCountPath 기본값과 동일한 상대 위치).
+//
+// ⛔조용한 생략 금지(§1 항2) -- 생성 실패는 ⓐ감시 로그(`logPath`가 주어지면
+// watch.log)에 한 줄로 남고 ⓑ파일을 쓰지 않으므로 아침 보고는 여전히
+// UNKNOWN이며(reach-report.mjs readPartialCountSection이 이미 그렇게
+// 처리한다 -- 숫자를 지어내지 않는다) ⓒ이 단계 자신의 실패가 감시 실행
+// 전체를 죽이지 않는다(throw하지 않고 항상 결과 객체를 반환, runReachStep과
+// 동일 원칙).
+// HYK-255-watch-wire-3 (coder-task.md §1) -- eslint complexity(상한 12)
+// 위반 수리. `runPartialCountStep`의 실측 복잡도 15는 실행 분기가 아니라
+// **기본 파라미터 8개**가 대부분이었다(ESLint complexity.js는 기본
+// 파라미터 각각을 분기 하나로 센다 -- 위 `resolveWatchOnceFsFns`의
+// HYK-228 5R 주석과 동일 실측). 그래서 그 8개의 기본값 해석만 이 함수로
+// 뽑는다 -- 로직·순서·값은 원문과 완전히 동일하고, `undefined`일 때만
+// 기본값을 쓰는 것도 그대로다(`??`는 `null`도 기본값으로 바꿔버려 의미가
+// 달라진다 -- `resolveWatchOnceFsFns`와 같은 이유로 피한다).
+function resolvePartialCountStepDefaults({
+  watchDir,
+  partialCountOut,
+  runPartialCountOnceFn,
+  writeFn,
+  readFn,
+  mkdirFn,
+  existsFn,
+  maxLogLines,
+  options,
+}) {
+  return {
+    partialCountOut:
+      partialCountOut === undefined
+        ? path.join(watchDir, "partial-count-report.md")
+        : partialCountOut,
+    runPartialCountOnceFn:
+      runPartialCountOnceFn === undefined
+        ? runPartialCountOnce
+        : runPartialCountOnceFn,
+    writeFn: writeFn === undefined ? writeFileSync : writeFn,
+    readFn: readFn === undefined ? readFileSync : readFn,
+    mkdirFn: mkdirFn === undefined ? mkdirSync : mkdirFn,
+    existsFn: existsFn === undefined ? existsSync : existsFn,
+    maxLogLines: maxLogLines === undefined ? MAX_LOG_LINES : maxLogLines,
+    options: options === undefined ? {} : options,
+  };
+}
+
+// runPartialCountStepCore -- 원래 `runPartialCountStep`의 본문 그 자체
+// (기본값 해석을 뺀 나머지, HYK-255-watch-wire-3). 모든 파라미터는 이미
+// 해석된 값이며 기본값을 갖지 않는다(complexity를 늘리지 않는다) --
+// 로직·순서·값·반환 모양(`{ran, ok, message}`)·실패 로그 문면
+// (`PARTIAL_COUNT_STEP_FAILED`)은 원문 그대로.
+async function runPartialCountStepCore({
+  now,
+  partialCountOut,
+  runPartialCountOnceFn,
+  writeFn,
+  readFn,
+  mkdirFn,
+  existsFn,
+  logPath,
+  maxLogLines,
+  options,
+}) {
+  try {
+    const result = await runPartialCountOnceFn({ now, ...options });
+    const dir = path.dirname(partialCountOut);
+    if (!existsFn(dir)) mkdirFn(dir, { recursive: true });
+    writeFn(partialCountOut, result.reportText, "utf8");
+    return { ran: true, ok: true, partialCountOut };
+  } catch (err) {
+    const message = err && err.message ? err.message : String(err);
+    if (logPath) {
+      try {
+        appendLogWithRotation({
+          readFn,
+          writeFn,
+          logPath,
+          line: `${new Date(now).toISOString()} PARTIAL_COUNT_STEP_FAILED message=${message}`,
+          maxLines: maxLogLines,
+        });
+      } catch {
+        // 로그 실패는 이 단계 계약을 깨지 않는다(runReachStep과 동일 원칙).
+      }
+    }
+    return { ran: true, ok: false, message };
+  }
+}
+
+export async function runPartialCountStep({
+  watchDir,
+  now,
+  partialCountOut,
+  runPartialCountOnceFn,
+  writeFn,
+  readFn,
+  mkdirFn,
+  existsFn,
+  logPath,
+  maxLogLines,
+  options,
+}) {
+  const resolved = resolvePartialCountStepDefaults({
+    watchDir,
+    partialCountOut,
+    runPartialCountOnceFn,
+    writeFn,
+    readFn,
+    mkdirFn,
+    existsFn,
+    maxLogLines,
+    options,
+  });
+  return runPartialCountStepCore({ now, logPath, ...resolved });
+}
+
 // runSweepStep -- admission sweep 트리거 단계(coder-task §2 항1). 이
 // 단계 자신의 실패가 이 러너의 계약(로그 한 줄 + 생존 기록)을 깨서는
 // 안 된다(runReachStep/computeCapResult와 동일 원칙 -- v1은 로그만).
@@ -1352,6 +1478,12 @@ if (invokedDirectly) {
   // 라운드는 코드 경로만 잇는다, CODER 보고서 §5 참조).
   let admissionSweepLedger = null;
   let admissionSweepLock = null;
+  // HYK-255-watch-wire-1 (coder-task.md §1 항1): 부분 계수 보고 파일 생성은
+  // 기본으로 켜져 있다(notifyDir/admissionSweep과 달리 opt-in이 아니다 --
+  // 이 라운드의 목표 자체가 "아무도 그 파일을 안 만든다"는 결손을 닫는
+  // 것이다). `--no-partial-count`는 기존 운영 결선을 그대로 유지하고 싶을
+  // 때의 탈출구(다른 `--no-*` 플래그와 동일한 재량).
+  let noPartialCount = false;
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === "--repo-root") repoRoot = argv[++i];
     else if (argv[i] === "--watch-dir") watchDir = argv[++i];
@@ -1361,6 +1493,7 @@ if (invokedDirectly) {
       admissionSweepLedger = argv[++i];
     else if (argv[i] === "--admission-sweep-lock")
       admissionSweepLock = argv[++i];
+    else if (argv[i] === "--no-partial-count") noPartialCount = true;
   }
   if (!repoRoot || !watchDir) {
     console.error("usage: watch-run.mjs --repo-root <path> --watch-dir <path>");
@@ -1370,11 +1503,27 @@ if (invokedDirectly) {
     admissionSweepLedger && admissionSweepLock
       ? { ledgerPath: admissionSweepLedger, lockPath: admissionSweepLock }
       : null;
+  const cliNow = Date.now();
   const result = runWatchOnce({
     repoRoot,
     watchDir,
     notifyDir,
     admissionSweep,
+    now: cliNow,
   });
+  if (!noPartialCount) {
+    // HYK-255-watch-wire-1 (coder-task.md §1 항2): 실패는 감시 로그 줄로
+    // 시끄럽게 남고, 감시 실행 자체(위 result/process.exit)는 이 단계와
+    // 무관하게 계속된다 -- runPartialCountStep은 절대 throw하지 않는다.
+    await runPartialCountStep({
+      watchDir,
+      now: cliNow,
+      logPath: result.logPath,
+      options: {
+        repoRoot,
+        watchLogPath: result.logPath,
+      },
+    });
+  }
   process.exit(result.detectorResult.runnerFailure ? 1 : 0);
 }

@@ -36,11 +36,13 @@
 // 5. `ALLOWLIST_REF_MISMATCH`의 운영 결과 -- 새 병합이 origin에 올라온
 //    직후 `git fetch` 전에는 판정이 모름(시작 0)이 된다. 이것은 설계된
 //    fail-closed이며, 라이브 도입 시 호출자가 fetch를 선행해야 한다.
-// 6. 결선 상태(HYK-255 2R 정정) -- 온디맨드 부분 계수 CLI(scripts/
+// 6. 결선 상태(HYK-255-watch-wire-1 갱신) -- 온디맨드 부분 계수 CLI(scripts/
 //    supervisor/partial-count-report.mjs의 collectGate4Independent ->
-//    createGitHubApprovalPort -> isHumanApproved)에는 결선됐으나
-//    상시 실행기·스케줄러는 없음(주기 실행·감시 루프 경로는 여전히 0
-//    -- 이 사실 자체가 정직 표기이며 지우지 않는다).
+//    createGitHubApprovalPort -> isHumanApproved)에 결선됐고, 이제 상시
+//    감시 실행 경로(watch-run.mjs의 runPartialCountStep -> 같은
+//    runPartialCountOnce 경유)에도 결선됐다. ⚠️과대 주장 금지 -- "항상
+//    최신"이라는 뜻은 아니다: 그 경로가 실제로 주기적으로 도는지(스케줄러
+//    등록 여부)는 사람 손이고 이 파일 자신은 그 등록 여부를 모른다.
 //
 // 비타협(coder-task.md §2):
 // - `orca` CLI 호출 0건(문자열 존재 자체는 위반이 아니다 -- 판정은 호출
@@ -143,9 +145,10 @@ function verdictFor(reason, evidence) {
 
 // ---------------------------------------------------------------------------
 // 무인증 fetchJson 실 구현 -- 테스트는 이걸 호출하지 않는다(§4-9).
-// 온디맨드 부분 계수 CLI(partial-count-report.mjs)에는 결선됐으나
-// 상시 실행기·스케줄러는 없음 -- 이 함수는 그 CLI의 기본 fetch
-// 포트로만 불린다(HYK-255 2R 정정).
+// 온디맨드 부분 계수 CLI(partial-count-report.mjs)와 상시 감시 실행 경로
+// (watch-run.mjs, HYK-255-watch-wire-1) 양쪽의 기본 fetch 포트로 불린다.
+// ⚠️과대 주장 금지 -- 이 함수 자신은 그 경로가 실제로 주기적으로 도는지
+// (스케줄러 등록 여부)를 모른다.
 // ---------------------------------------------------------------------------
 
 export function createAnonymousFetchJson() {
