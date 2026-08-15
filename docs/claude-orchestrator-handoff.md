@@ -266,6 +266,23 @@ Purpose: eliminate copy/paste between the human operator and role terminals.
 - The role writes its result or handoff to `.harness/<role>.md` (not long
   terminal output) and ends with exactly two lines: `>>> DONE: <role>` and a
   human-next-action line (for example, tell the Orchestrator "<role> 됐어").
+- **Once `>>> DONE:` has been written, the result file must never be
+  rewritten for any reason** — not to fix a typo, reformat, or tidy up a
+  cover line. Why: the consumption-receipt handshake fingerprints the
+  result file's bytes at the moment it is consumed; any edit after that
+  point changes the fingerprint and permanently blocks the next dispatch
+  for that lane (2026-08-14 incident: a review seat rewrote its own
+  already-consumed result file — trimming three lines of output and
+  bumping the `>>> DONE:` timestamp — and stalled that lane's next
+  delivery; see HYK-263 for the archive-lookup rescue that widened the
+  fingerprint match to tolerate this specific case after the fact, but
+  it does not prevent the edit itself, see HYK-254). If something needs
+  fixing, fix it in the next round instead of touching a file that has
+  already been marked done.
+  **Honesty limit**: this is a documentary promise, not a machine-enforced
+  one — it is not carried to Codex seats via system prompt, so the task
+  file is the only path by which a Codex-seated worker can see it
+  (tracked separately as HYK-264).
 - Blocking-question variant: the role writes a question_packet to
   `.harness/<role>.md` and ends with `>>> QUESTION: <role>` plus a
   human-next-action line; the role does not start work.
