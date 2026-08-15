@@ -26,6 +26,7 @@ import { runReachOnce } from "./reach-report.mjs";
 import { formatKst } from "./partial-count-core.mjs";
 
 const HOUR = 60 * 60 * 1000;
+const DAY = 24 * HOUR;
 const NOW = Date.parse("2026-08-14T06:00:00.000Z");
 const MERGE_SHA = "f".repeat(40);
 const HEAD_SHA = MERGE_SHA;
@@ -135,23 +136,28 @@ function fakeFetchJson(calledUrls) {
   };
 }
 
-function writeFixtures(root) {
+// nowMs -- 이 fixture가 만드는 시각들이 상대적으로 서 있는 기준점.
+// «지금부터 지난 24시간» 창을 재는 쪽(runPartialCountOnce)의 `now`와
+// 반드시 같은 기준이어야 한다 -- 절대 리터럴로 못 박으면 그 기준(now)이
+// 며칠만 지나도 창 밖으로 밀려난다(HYK-255 시한폭탄 실사고). 창 안 2건은
+// nowMs-1h·nowMs-2h(항상 안), 창 밖 1건은 nowMs-5일(항상 밖)로 둔다.
+function writeFixtures(root, nowMs = NOW) {
   const dispatchReceiptsPath = join(root, "dispatch-receipts.jsonl");
   fs.writeFileSync(
     dispatchReceiptsPath,
     [
       JSON.stringify({
-        recorded_at: "2026-08-14T01:00:00.000Z",
+        recorded_at: new Date(nowMs - 1 * HOUR).toISOString(),
         role: "CODER",
         harness_task_label: "HYK-1-a",
       }),
       JSON.stringify({
-        recorded_at: "2026-08-14T02:00:00.000Z",
+        recorded_at: new Date(nowMs - 2 * HOUR).toISOString(),
         role: "REVIEW",
         harness_task_label: "HYK-2-b",
       }),
       JSON.stringify({
-        recorded_at: "2026-08-10T00:00:00.000Z",
+        recorded_at: new Date(nowMs - 5 * DAY).toISOString(),
         role: "CODER",
         harness_task_label: "HYK-old",
       }),
@@ -165,11 +171,11 @@ function writeFixtures(root) {
     watchLogPath,
     [
       watchLogLine({
-        ts: new Date(NOW - 3 * HOUR).toISOString(),
+        ts: new Date(nowMs - 3 * HOUR).toISOString(),
         idleStatus: "SEAT_IDLE_JUDGED",
         idleVerdict: "SUSPECTED_ABANDONED",
       }),
-      watchLogLine({ ts: new Date(NOW - 2 * HOUR).toISOString() }),
+      watchLogLine({ ts: new Date(nowMs - 2 * HOUR).toISOString() }),
     ].join("\n"),
     "utf8",
   );
@@ -184,8 +190,8 @@ function writeFixtures(root) {
       binding: {
         taskId: "HYK-1-a",
         role: "CODER",
-        droppedAt: "2026-08-14 09:00 KST",
-        doneAt: formatKst(NOW - 2 * HOUR),
+        droppedAt: formatKst(nowMs - 3 * HOUR),
+        doneAt: formatKst(nowMs - 2 * HOUR),
       },
       effects: {
         envelopeArchived: true,
@@ -320,7 +326,11 @@ test("collectMergeCandidates: git log 실패는 ok:false(UNKNOWN 재료)이고 �
 test("CLI 진입점: 인자만으로 격리 실행되고(비 git 폴더 -> 소비·ㄱ-4가 UNKNOWN) PARTIAL 배너가 첫 줄이다", () => {
   const root = tmpDir("nc-pcw-cli-");
   try {
-    const fx = writeFixtures(root);
+    // CLI(partial-count-report.mjs)는 --now를 받지 않고 실행 시각의
+    // Date.now()로 창을 잰다 -- fixture도 그 실제 현재 시각 기준으로
+    // 써야 한다(고정된 NOW를 쓰면 시간이 지날수록 창 밖으로 밀려난다 --
+    // HYK-255 시한폭탄의 원인).
+    const fx = writeFixtures(root, Date.now());
     const stdout = execFileSync(
       process.execPath,
       [
