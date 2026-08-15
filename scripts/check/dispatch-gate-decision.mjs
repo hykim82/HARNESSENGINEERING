@@ -924,29 +924,47 @@ function findArchivedResultFingerprint(
   };
 }
 
-// HYK-244 gate-unblock-1 §1 조각3: currentBinding과 taskId/role/droppedAt/
-// dispatchId/doneAt(=resultFingerprint를 제외한 나머지 5성분) 전부가
-// 정확히 같은 영수증 후보를 찾는다 -- 그 후보의 resultFingerprint가
-// "보관함 대조가 맞혀야 할 목표값"이다(1R 코어의 6성분 목록을 그대로
-// 옮긴 것일 뿐, 코어 자체는 호출하지 않는다). 정확히 하나가 아니면
-// 목표를 확정할 수 없다(undefined 반환, 지어내지 않음).
-const OTHER_BINDING_FIELDS = [
-  "taskId",
-  "role",
-  "droppedAt",
-  "dispatchId",
-  "doneAt",
-];
+// HYK-244 gate-unblock-1 §1 조각3 / HYK-263 §1 확장: currentBinding과
+// taskId/role/droppedAt/dispatchId(=resultFingerprint·doneAt을 제외한
+// 나머지 4성분) 전부가 정확히 같은 영수증 후보를 찾는다 -- 그 후보의
+// resultFingerprint가 "보관함 대조가 맞혀야 할 목표값"이다. 정확히
+// 하나가 아니면(0개 또는 2개 이상) 목표를 확정할 수 없다(undefined
+// 반환, 지어내지 않음). HYK-263: doneAt은 더 이상 대조 성분이 아니다
+// -- 검토 좌석이 소비 후 자기 결과 파일의 `>>> DONE:` 시각을 갱신하면
+// 영수증의 doneAt과 라이브 결과 파일에서 새로 읽은 doneAt이 달라져
+// 옛 5성분 규칙에서는 후보를 하나도 못 찾았다(2026-08-14 실사고,
+// coder-task.md §0). ⛔resultFingerprint의 완전 일치 요구, "정확히
+// 하나만 인정" 원칙, live 우선 재시도 구조는 조금도 바뀌지 않는다 --
+// 대조 성분에서 doneAt 하나만 빠졌을 뿐이다.
+const OTHER_BINDING_FIELDS = ["taskId", "role", "droppedAt", "dispatchId"];
 
-function findTargetFingerprint(currentBinding, candidates) {
+// HYK-263 2R §1-② 갈래 «가»: 이 선별 함수 자체를 단위로 시험하려면
+// export가 필요하다(dispatch-gate-decision.mjs는 그 전까지 CLI
+// 진입점(runDispatchGateDecision)만 내보냈다 -- 이 라운드가 유일한
+// export 추가다, 동작은 조금도 바뀌지 않는다).
+export function findTargetFingerprint(currentBinding, candidates) {
   const matches = (Array.isArray(candidates) ? candidates : []).filter((c) =>
     OTHER_BINDING_FIELDS.every(
       (field) => c?.binding?.[field] === currentBinding?.[field],
     ),
   );
-  return matches.length === 1
-    ? matches[0].binding.resultFingerprint
-    : undefined;
+  if (matches.length !== 1) return undefined;
+  const matched = matches[0];
+  if (matched.binding?.doneAt !== currentBinding?.doneAt) {
+    // ★무엇을 완화했는지 사람이 보게(coder-task.md §1 점5) -- doneAt이
+    // 달라서 대조 성분을 좁혀 이 후보를 인정했다는 사실 자체를 남긴다.
+    console.error(
+      `dispatch-gate-decision consumption: doneAt 성분 제외 후보 인정 -- live doneAt=${currentBinding?.doneAt} 영수증 doneAt=${matched.binding?.doneAt} (taskId/role/droppedAt/dispatchId 4성분만 일치, doneAt 불일치는 허용됨)`,
+    );
+  }
+  // HYK-263: fingerprint뿐 아니라 그 후보의 doneAt도 함께 돌려준다 --
+  // 아래 재시도가 부르는 1R 코어(⛔수정 금지)는 여전히 6성분 전부를
+  // 정확히 비교하므로, doneAt을 목표 후보 것으로 맞추지 않으면 live의
+  // (손질된) doneAt과 어긋나 재시도가 코어 자체에서 실패한다.
+  return {
+    fingerprint: matched.binding.resultFingerprint,
+    doneAt: matched.binding.doneAt,
+  };
 }
 
 // HYK-244 2R-ci-1 §C: 1R 코어(⛔수정 금지)를 그대로 두고, live 지문으로
@@ -962,7 +980,8 @@ function tryArchiveFallback({
   harnessDir,
   harnessTaskLabel,
 }) {
-  const targetFingerprint = findTargetFingerprint(currentBinding, candidates);
+  const target = findTargetFingerprint(currentBinding, candidates);
+  const targetFingerprint = target?.fingerprint;
   const archived = findArchivedResultFingerprint(
     harnessDir,
     role,
@@ -987,6 +1006,11 @@ function tryArchiveFallback({
   const archiveBinding = {
     ...currentBinding,
     resultFingerprint: archived.fingerprint,
+    // HYK-263: doneAt도 목표 후보의 것으로 맞춘다(위 findTargetFingerprint
+    // 주석 참조) -- 대조 성분에서 doneAt을 뺀 것은 "후보를 찾는" 단계
+    // 뿐이고, 코어 자신의 6성분 완전 일치 요구는 손대지 않았으므로
+    // 재시도도 그 6성분을 채워 줘야 한다.
+    doneAt: target?.doneAt ?? currentBinding.doneAt,
   };
   const retry = toConsumptionGateDecision({
     role,
