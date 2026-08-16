@@ -748,9 +748,15 @@ function autoWriteConsumptionReceipt({
     return;
   }
 
+  // HYK-269 §2-1 조각1: binding.role만 정본 대문자로 굳힌다 -- dispatch-
+  // gate-decision.mjs:1074의 currentBinding.role(`role.toUpperCase()`)과
+  // 정확히 같은 정규화. 아래 spawnConsumptionReceiptWriter 호출의 최상위
+  // `role`(영수증 파일명 조립에 쓰임, consumption-receipt-writer.mjs의
+  // nextReceiptFileName)은 손대지 않는다 -- 파일명 관례(소문자)는 그대로
+  // 둔다(coder-task.md §2-1 원문 비타협).
   const binding = {
     taskId,
-    role,
+    role: role.toUpperCase(),
     droppedAt,
     resultFingerprint: computeResultFingerprint(resultContent),
     dispatchId,
@@ -818,6 +824,21 @@ function spawnConsumptionReceiptWriter({
   }
 }
 
+// HYK-269 §2-1 조각2: 소비 CLI 진입점에서 role 인자가 정본 4개(CODER/
+// REVIEW/VERIFY/PM) 중 하나인지 대소문자 무관으로 검증하는 허용 목록.
+// ⚠️여기서는 role의 표기(대소문자)를 바꾸지 않고 그대로 통과시킨다 --
+// resolveLiveRoundFilePaths(라이브 파일 경로)/envelope-archive.mjs(라운드
+// 보관 파일명)/consumption-receipt-writer.mjs(영수증 파일명)이 전부 이
+// role 문자열을 그대로 파일명 조립에 쓰므로, 여기서 케이스를 바꾸면
+// «파일명 관례를 바꾸지 마라»는 비타협을 깬다. 정본 표기 정규화는 결속
+// 기록(binding.role) 쪽에서만, 그 필드가 실제로 쓰이는 자리(아래
+// autoWriteConsumptionReceipt의 binding 조립부)에서 한다.
+const ALLOWED_ROLES = Object.freeze(["CODER", "REVIEW", "VERIFY", "PM"]);
+
+function describeRoleUsage() {
+  return `allowed roles: ${ALLOWED_ROLES.join(", ")}\nexample: node relay-handshake.mjs CODER .harness`;
+}
+
 const invokedDirectly =
   process.argv[1] &&
   process.argv[1]
@@ -827,6 +848,10 @@ if (invokedDirectly) {
   const role = process.argv[2];
   if (!role) {
     console.error("usage: node relay-handshake.mjs <role> [harnessDir]");
+    process.exit(1);
+  }
+  if (!ALLOWED_ROLES.includes(role.toUpperCase())) {
+    console.error(`unknown role '${role}' -- ${describeRoleUsage()}`);
     process.exit(1);
   }
   // HYK-227 §2: spawnAdmissionCompletion is no longer called here directly

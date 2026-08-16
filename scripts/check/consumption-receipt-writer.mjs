@@ -22,8 +22,17 @@
 import { existsSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
+import { findCaseInsensitiveCollision } from "./envelope-archive.mjs";
 
 const RECEIPT_SUBDIR = "receipts";
+
+// envelope-archive.mjs의 escapeForRegex(export 안 됨)를 그대로 복제한다 --
+// role 문자열이 언젠가 정규식 특수문자를 포함해도 nextReceiptFileName의
+// 패턴 조립이 깨지지 않게 하는 순수 헬퍼, import할 값이 없다(export되지
+// 않은 모듈-지역 함수).
+function escapeForRegex(str) {
+  return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
 
 // reject-streak.mjs 26행의 VERDICT_LINE_RE_G를 그대로 복제한다(import하지
 // 않는 이유: 그 상수 자체는 export되지 않고, `parseReviewOutcome`은 개수를
@@ -48,8 +57,19 @@ export function countVerdictLines(resultContent) {
 // "이미 쌓인 개수를 세어 다음 번호를 매기는" 방식 -- 같은 파일명 재사용
 // (=덮어쓰기)을 막는 것이 유일한 계약이다. 그 두 함수와 겹치지 않는 새
 // 패턴(`<role>-receipt-r<N>.json`)을 쓴다.
+//
+// HYK-269 2R P1① 수리 (검토자 실측: 소문자 coder-receipt-r1.json이 있는
+// 상태에서 대문자 CODER로 소비하자 이 정규식이 그 기존 사본을 하나도 못
+// 세고 번호를 1부터 다시 매겨 -- Windows가 대소문자를 구별하지 않아 그
+// 새 파일이 기존 파일을 실제로 덮어썼다). envelope-archive.mjs의
+// nextArchiveFileName이 HYK-244 gate-unblock-1에서 이미 겪고 고친 것과
+// 정확히 같은 결함 계열이라, 그 수리(정규식에 `i` 플래그)를 그대로
+// 옮겨 심는다 -- 새 설계를 만들지 않는다.
 export function nextReceiptFileName(role, existingNames) {
-  const pattern = new RegExp(`^${role}-receipt-r(\\d+)\\.json$`);
+  const pattern = new RegExp(
+    `^${escapeForRegex(role)}-receipt-r(\\d+)\\.json$`,
+    "i",
+  );
   let maxRound = 0;
   for (const name of existingNames) {
     const m = pattern.exec(name);
@@ -96,6 +116,24 @@ export function writeConsumptionReceipt({
     }
     const existing = readdirFn(receiptDir);
     const fileName = nextReceiptFileName(role, existing);
+    // HYK-269 2R P1① 수리: envelope-archive.mjs의 archiveRoundEnvelope/
+    // archiveRoundTaskFile과 같은 두 번째 겹 -- 번호 계산에 쓴 스냅샷
+    // (`existing`)을 재사용하지 않고 쓰기 직전 디렉터리를 다시 읽어
+    // 대소문자 무관으로 충돌을 재확인한다(TOCTOU 창을 좁힌다, 그 두
+    // 함수의 주석과 동일 근거). ⚠️existsSync만으로는 부족하다 --
+    // Windows는 대소문자를 구별하지 않아 existsSync가 이미 "있다"고
+    // 답해도 그 값 자체를 신뢰할 수 없고, Linux(이 결함의 진짜 반증
+    // 자리)에서는 반대로 "없다"고 답해 안전장치가 있으나마나가 된다.
+    const collision = findCaseInsensitiveCollision(
+      fileName,
+      readdirFn(receiptDir),
+    );
+    if (collision) {
+      return {
+        ok: false,
+        reason: `consumption-receipt-writer: refusing to overwrite -- destination '${fileName}' collides (case-insensitive) with existing '${collision}' -- 사람이 확인할 것: 같은 role의 대소문자만 다른 영수증이 이미 있다(예: 소문자 소비 후 대문자로, 또는 그 반대로 다시 소비). 두 파일이 서로 다른 라운드라면 그대로 두고 다음 소비는 이 라운드가 끝난 뒤 재시도하라 -- 조용히 덮어쓰지 않는다`,
+      };
+    }
     const destPath = join(receiptDir, fileName);
     const receipt = { binding, effects, verdictLineCount };
     writeFileFn(destPath, JSON.stringify(receipt, null, 2) + "\n", "utf8");

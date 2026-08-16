@@ -157,6 +157,170 @@ test("writeConsumptionReceipt: two rounds for the same role -> BOTH receipts sur
   });
 });
 
+// ---------------------------------------------------------------------------
+// HYK-269 2R P1① fixture: 검토자가 실제로 재현한 그 사고 -- 소문자 영수증이
+// 이미 있는 상태에서 대문자 role로 소비(또는 그 반대)해도, 기존 파일은
+// 내용 무변경(sentinel 비교)이고 새 영수증은 case-insensitive 계수 덕에
+// 다음 번호(r2)로 생성된다(같은 r1으로 되돌아가 덮어쓰지 않는다).
+// ---------------------------------------------------------------------------
+
+test("HYK-269 2R P1① fixture: lowercase receipt exists ('coder-receipt-r1.json') -> consuming with role 'CODER' does NOT overwrite it, writes 'CODER-receipt-r2.json' instead", () => {
+  withFixtureDir((dir) => {
+    const sentinelBinding = {
+      taskId: "HYK-9200-lower-sentinel",
+      role: "CODER",
+      droppedAt: "SENTINEL-DROPPED-AT",
+      resultFingerprint: "SENTINEL-FINGERPRINT",
+      dispatchId: "ctx_sentinel",
+      doneAt: "SENTINEL-DONE-AT",
+    };
+    const first = writeConsumptionReceipt({
+      role: "coder",
+      harnessDir: dir,
+      binding: sentinelBinding,
+      effects: {
+        envelopeArchived: true,
+        taskArchived: true,
+        admissionReturned: true,
+      },
+    });
+    assert.equal(first.ok, true);
+    const sentinelPath = join(dir, "receipts", "coder-receipt-r1.json");
+    const sentinelContentBefore = readFileSync(sentinelPath, "utf8");
+
+    const second = writeConsumptionReceipt({
+      role: "CODER",
+      harnessDir: dir,
+      binding: {
+        taskId: "HYK-9200-upper-next",
+        role: "CODER",
+        droppedAt: "d2",
+        resultFingerprint: "fp2",
+        dispatchId: "ctx_2",
+        doneAt: "t2",
+      },
+      effects: {
+        envelopeArchived: true,
+        taskArchived: true,
+        admissionReturned: true,
+      },
+    });
+    assert.equal(
+      second.ok,
+      true,
+      "정상 케이스(TOCTOU 아님)에서는 case-insensitive 계수가 다음 번호를 정확히 찾아 충돌 자체가 없다",
+    );
+
+    assert.equal(
+      readFileSync(sentinelPath, "utf8"),
+      sentinelContentBefore,
+      "기존 소문자 영수증 내용은 단 1바이트도 바뀌지 않아야 한다(오늘 실측: role 대문자 소비가 이 파일을 실제로 덮어썼다)",
+    );
+    const files = readdirSync(join(dir, "receipts")).sort();
+    assert.deepEqual(
+      files,
+      ["CODER-receipt-r2.json", "coder-receipt-r1.json"],
+      "새 영수증은 같은 r1이 아니라 다음 번호(r2)로 생성된다 -- 오늘 사고는 정확히 이 지점에서 r1으로 되돌아갔다",
+    );
+  });
+});
+
+test("HYK-269 2R P1① fixture (거꾸로): uppercase receipt exists ('CODER-receipt-r1.json') -> consuming with role 'coder' does NOT overwrite it either (symmetric protection)", () => {
+  withFixtureDir((dir) => {
+    const sentinelBinding = {
+      taskId: "HYK-9201-upper-sentinel",
+      role: "CODER",
+      droppedAt: "SENTINEL-DROPPED-AT-2",
+      resultFingerprint: "SENTINEL-FINGERPRINT-2",
+      dispatchId: "ctx_sentinel_2",
+      doneAt: "SENTINEL-DONE-AT-2",
+    };
+    const first = writeConsumptionReceipt({
+      role: "CODER",
+      harnessDir: dir,
+      binding: sentinelBinding,
+      effects: {
+        envelopeArchived: true,
+        taskArchived: true,
+        admissionReturned: true,
+      },
+    });
+    assert.equal(first.ok, true);
+    const sentinelPath = join(dir, "receipts", "CODER-receipt-r1.json");
+    const sentinelContentBefore = readFileSync(sentinelPath, "utf8");
+
+    const second = writeConsumptionReceipt({
+      role: "coder",
+      harnessDir: dir,
+      binding: {
+        taskId: "HYK-9201-lower-next",
+        role: "CODER",
+        droppedAt: "d2",
+        resultFingerprint: "fp2",
+        dispatchId: "ctx_2",
+        doneAt: "t2",
+      },
+      effects: {
+        envelopeArchived: true,
+        taskArchived: true,
+        admissionReturned: true,
+      },
+    });
+    assert.equal(second.ok, true);
+    assert.equal(
+      readFileSync(sentinelPath, "utf8"),
+      sentinelContentBefore,
+      "반대 방향(대문자 먼저, 소문자로 소비)도 동일하게 보호돼야 한다",
+    );
+    const files = readdirSync(join(dir, "receipts")).sort();
+    assert.deepEqual(files, ["CODER-receipt-r1.json", "coder-receipt-r2.json"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// HYK-269 2R P1① 두 번째 겹(쓰기 직전 재확인) 단독 시험: nextReceiptFileName의
+// case-insensitive 계수만으로는 못 잡는 TOCTOU 경합을 readdirFn 주입으로
+// 재현한다 -- 번호 계산용 첫 readdirFn 호출은 빈 목록을 주고(그래서
+// "CODER-receipt-r1.json"을 다음 번호로 계산), 쓰기 직전 재확인용 두
+// 번째 호출에서는 그 사이 다른 프로세스가 이미 만들어 둔 것처럼
+// "coder-receipt-r1.json"이 있는 목록을 준다 -- 두 번째 겹이 없으면
+// 이 상황에서 그대로 덮어쓴다.
+// ---------------------------------------------------------------------------
+test("HYK-269 2R P1① 두 번째 겹(TOCTOU 재확인, readdirFn 주입으로 재현): 번호 계산 스냅샷 이후 다른 프로세스가 같은 이름을 대소문자만 다르게 이미 써 뒀다면, 쓰기 직전 재확인이 그것을 잡아 거부한다(ok:false, 파일 안 씀)", () => {
+  withFixtureDir((dir) => {
+    let call = 0;
+    const readdirFn = () => {
+      call += 1;
+      return call === 1 ? [] : ["coder-receipt-r1.json"];
+    };
+    let writeFileCalled = false;
+    const writeFileFn = (...args) => {
+      writeFileCalled = true;
+      return writeFileSync(...args);
+    };
+    const outcome = writeConsumptionReceipt({
+      role: "CODER",
+      harnessDir: dir,
+      binding: { taskId: "HYK-9202-race", role: "CODER" },
+      effects: {
+        envelopeArchived: true,
+        taskArchived: true,
+        admissionReturned: true,
+      },
+      readdirFn,
+      writeFileFn,
+    });
+    assert.equal(outcome.ok, false);
+    assert.match(outcome.reason, /refusing to overwrite/);
+    assert.match(outcome.reason, /collides \(case-insensitive\)/);
+    assert.equal(
+      writeFileCalled,
+      false,
+      "충돌이 잡히면 writeFileFn 자체가 호출되지 않아야 한다(조용한 덮어쓰기 0)",
+    );
+  });
+});
+
 test("writeConsumptionReceipt: role missing -> ok:false, never throws", () => {
   withFixtureDir((dir) => {
     const outcome = writeConsumptionReceipt({

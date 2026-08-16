@@ -458,6 +458,98 @@ test("§4-2-real 실물 생산 경로: checkRelayHandshake가 실제로 만든(�
   });
 });
 
+// ---------------------------------------------------------------------------
+// HYK-269 §3 오늘의 실물 사고 fixture: ORCH가 소비 명령을 소문자 인자
+// (`relay-handshake.mjs coder .harness`)로 친 것과 정확히 같은 입력을
+// 실물 checkRelayHandshake에 태운다. 정규화 이전이었다면 이 영수증의
+// binding.role이 "coder"로 남아, 대문자로 굳는 currentBinding.role
+// ("CODER")과 6성분 중 role 하나만 달라 다음 배달이 BINDING_MISMATCH로
+// REJECT됐다(오늘 실측 원문 그대로). 이 시험은 정규화 이후 그 REJECT가
+// 사라짐을 실물 게이트 CLI로 증명한다.
+// ---------------------------------------------------------------------------
+test("HYK-269 §3 실물 사고 fixture: 소문자 role 인자('coder')로 소비해도 영수증 role은 CODER로 남고, 다음 배달은 ALLOW(정규화 이전에는 이 표적이 REJECT였다)", () => {
+  withFixtureDir((dir) => {
+    const prevTaskId = "HYK-9111-lowercase-incident-prev";
+    const nextTaskId = "HYK-9111-lowercase-incident-next";
+
+    const ledgerDir = mkdtempSync(
+      join(tmpdir(), "dispatch-gate-consumption-lowercase-ledger-"),
+    );
+    const admissionLedger = join(ledgerDir, "l.json");
+    const admissionLock = join(ledgerDir, "l.lock");
+    initAndAdmit(admissionLedger, admissionLock, prevTaskId);
+    writeFileSync(
+      join(dir, "coder-task.md"),
+      `task_id: ${prevTaskId}\ndropped_at: 2026-08-16 09:00:00 KST\n${ONE_B_BLOCK}`,
+      "utf8",
+    );
+    writeFileSync(
+      join(dir, "coder.md"),
+      `task_id: ${prevTaskId}\n\n>>> DONE: CODER @ 2026-08-16 09:10:05 KST\n`,
+      "utf8",
+    );
+
+    // ⛔오늘 실물 사고 그대로: 소문자 인자로 소비.
+    let handshake;
+    try {
+      handshake = withEnv(
+        {
+          ADMISSION_LEDGER_PATH: admissionLedger,
+          ADMISSION_LOCK_PATH: admissionLock,
+        },
+        () => checkRelayHandshake({ role: "coder", harnessDir: dir }),
+      );
+    } finally {
+      rmSync(ledgerDir, { recursive: true, force: true });
+    }
+    assert.equal(handshake.ok, true);
+
+    const receiptFiles = readdirSync(join(dir, "receipts"));
+    assert.deepEqual(
+      receiptFiles,
+      ["coder-receipt-r1.json"],
+      "영수증 파일명 관례는 소문자 그대로(변경 금지 대상)",
+    );
+    const producedReceipt = JSON.parse(
+      readFileSync(join(dir, "receipts", "coder-receipt-r1.json"), "utf8"),
+    );
+    assert.equal(
+      producedReceipt.binding.role,
+      "CODER",
+      "binding.role은 소문자 인자로 소비해도 정본 대문자로 굳어야 한다(HYK-269 정규화)",
+    );
+
+    const dispatchReceiptPath = join(dir, "dispatch-receipts.jsonl");
+    writeDispatchReceiptLine(dispatchReceiptPath, {
+      role: "CODER",
+      harnessTaskLabel: prevTaskId,
+      dispatchId: "ctx_test_lowercase_incident",
+    });
+
+    writeFileSync(
+      join(dir, "coder-task.md"),
+      `task_id: ${nextTaskId}\ndropped_at: 2026-08-16 10:00:00 KST\n${ONE_B_BLOCK}`,
+      "utf8",
+    );
+
+    const ledgerPath = join(dir, "reject-streak.json");
+    writeLedger(ledgerPath, { schema_version: 1, issues: {} });
+    const r = runCli(SCRIPT_PATH, [
+      join(dir, "coder-task.md"),
+      "--ledger",
+      ledgerPath,
+      "--dispatch-receipt-path",
+      dispatchReceiptPath,
+    ]);
+    assert.equal(
+      r.status,
+      0,
+      `ALLOW 기대(소문자 소비도 정규화로 결속이 일치해야 한다), 실제 stderr: ${r.stderr}`,
+    );
+    assert.match(r.stdout, /ALLOW/);
+  });
+});
+
 // §4-2 오탐 0 대조군의 픽스처 구성만 분리(quality-check: eslint
 // max-lines-per-function 유지 목적, 동작/단언 변경 없음) -- 과거
 // 라운드(다른 droppedAt/dispatchId) 영수증이 섞여 있어도 현재 라운드가
