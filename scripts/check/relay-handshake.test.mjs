@@ -803,15 +803,56 @@ test("HYK-189 (b)+(d) CLI: positional args coder/review/verify (denominator 3/3)
 });
 
 // ---------------------------------------------------------------------------
-// HYK-189 §완료조건 (c): 플래그 모양 인자의 «현재» 의미 계약을 고정한다
-// (결함으로 명시 -- 위 파일 헤더 참조). `node relay-handshake.mjs --role
-// coder --harness-dir .harness` 호출에서 process.argv[2] === "--role"가
-// 그대로 role로, process.argv[3] === "coder"가 그대로 harnessDir로 쓰이고
-// 나머지 인자(--harness-dir .harness)는 완전히 무시된다. 경로 단언은
-// 구분자 무관(`coder[/\\]--role-task.md`)으로 한다(HYK-185 리눅스 CI
-// 회귀 전례, coder-task.md §2 비타협 #9).
+// HYK-189 §완료조건 (c), HYK-269 재작업: 플래그 모양 인자의 «현재» 의미
+// 계약을 고정한다(argv 위치 파싱 결함 자체는 여전히 미수리 -- 위 파일
+// 헤더 참조, gap#73 그대로). `node relay-handshake.mjs --role coder
+// --harness-dir .harness` 호출에서 process.argv[2] === "--role"이 role
+// 위치 인자로 그대로 들어가는 것은 이전과 같지만, HYK-269가 그 자리에
+// role 허용 목록 검증(ALLOWED_ROLES)을 얹었으므로 "--role"은 이제 그
+// 검증에서 바로 거부된다(task file not found까지 가지 않는다) -- role
+// 값 자체가 알 수 없는 문자열이면 정본 4개(CODER/REVIEW/VERIFY/PM) 중
+// 무엇에도 안 걸리는 게 당연하다. 나머지 인자(--harness-dir .harness)가
+// 무시된다는 계약은 이 시험이 원래 고정하려던 게 아니므로 별도 확인하지
+// 않는다.
 // ---------------------------------------------------------------------------
-test("HYK-189 (c) CLI: flag-shaped args -- role becomes literal '--role', harnessDir becomes 'coder', trailing args ignored, exit 1, path assertion separator-agnostic", () => {
+test("HYK-269 CLI: unknown role literal ('bogus') is rejected with exit 1, allowed roles + a correct-format example shown", () => {
+  const { exit, stdout, stderr } = runCli(["bogus"]);
+  assert.equal(exit, 1);
+  assert.equal(
+    stderr.trim(),
+    "unknown role 'bogus' -- allowed roles: CODER, REVIEW, VERIFY, PM\nexample: node relay-handshake.mjs CODER .harness",
+    "rejection message must name the offending value, the allowed list, and a correct-format example -- not just a bare reason",
+  );
+  assert.equal(
+    stdout,
+    "",
+    "unknown-role rejection must not print anything to stdout",
+  );
+});
+
+test("HYK-269 CLI: lowercase/mixed-case role args (coder/Coder/CODER) are all accepted -- case-insensitive validation, never rejected as unknown", () => {
+  for (const role of [
+    "coder",
+    "Coder",
+    "CODER",
+    "review",
+    "REVIEW",
+    "pm",
+    "PM",
+  ]) {
+    withFixtureDirCli((dir) => {
+      writeValidFixture(dir, role.toLowerCase(), `HYK-269-case-${role}`);
+      const { exit, stderr } = runCli([role, dir]);
+      assert.equal(
+        exit,
+        0,
+        `role '${role}' must be accepted (case-insensitive match against CODER/REVIEW/VERIFY/PM), got stderr: ${stderr}`,
+      );
+    });
+  }
+});
+
+test("HYK-269 CLI: flag-shaped role arg '--role' fails role validation (unknown role), exit 1, allowed-list + example shown", () => {
   const { exit, stderr } = runCli([
     "--role",
     "coder",
@@ -821,8 +862,13 @@ test("HYK-189 (c) CLI: flag-shaped args -- role becomes literal '--role', harnes
   assert.equal(exit, 1);
   assert.match(
     stderr.trim(),
-    /^task file not found: coder[/\\]--role-task\.md$/,
-    "must resolve to harnessDir='coder', role='--role' (trailing '--harness-dir .harness' ignored), path separator-agnostic",
+    /^unknown role '--role' -- allowed roles: CODER, REVIEW, VERIFY, PM$/m,
+    "unrecognized role literal must be rejected with the allowed-role list, not silently treated as a role name",
+  );
+  assert.match(
+    stderr,
+    /example: node relay-handshake\.mjs CODER \.harness/,
+    "rejection must show a correct-format example call",
   );
 });
 

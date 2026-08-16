@@ -138,7 +138,10 @@ test("§4-3/§4-5: checkRelayHandshake ok:true (모든 후속효과 성공) -> �
       ),
     );
     assert.equal(candidate.binding.taskId, taskId);
-    assert.equal(candidate.binding.role, "coder");
+    // HYK-269: binding.role은 정본 대문자로 굳는다(dispatch-gate-decision의
+    // currentBinding.role과 정확히 같은 정규화) -- 파일명(coder-receipt-
+    // r1.json)은 소문자 그대로다(위 files 단언 참조), 결속 기록만 대문자.
+    assert.equal(candidate.binding.role, "CODER");
     assert.equal(candidate.binding.droppedAt, "2026-08-01 07:00 KST");
     assert.equal(candidate.binding.doneAt, "2026-08-01 07:10:05 KST");
     assert.equal(candidate.binding.dispatchId, "ctx_hyk244_wire_a");
