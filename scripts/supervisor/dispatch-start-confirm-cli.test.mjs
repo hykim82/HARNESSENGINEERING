@@ -316,6 +316,210 @@ test("★4R 알려진 한계 fixture(★고치지 않음, 고정만): 첫 관측
   assert.equal(result.status, DISPATCH_START_CONFIRM_STATUS.NOT_STARTED);
 });
 
+// ★HYK-280(coder-task.md §2 항3, §4 항3) -- 위 "4R 알려진 한계" fixture가
+// 고정했던 바로 그 자리(첫 실관측 전에 이미 커져 있어 growth를 이번
+// 실행 안에서 전혀 못 보는 경우)를, 호출자가 `baselineBytes`(배달 시점에
+// 잰 크기)를 넘기면 이제 정확히 판정한다는 것을 보인다. 위 4R 시험은
+// 그대로 둔다(baselineBytes 없이 부르면 여전히 옛 동작 -- 회귀 0, §4
+// 항2 요구 그대로).
+test("★HYK-280 수리: baselineBytes(배달 시점 크기)를 넘기면, 첫 실관측 전에 이미 커져 있어도 더는 NOT_STARTED로 오판하지 않는다(성장 이력을 기준선부터 정확히 잡는다)", async () => {
+  // 배달 순간(관측 밖)에 이미 0 -> 5000 만큼 커져 있었고, 이 실행의 첫
+  // 실관측부터는 계속 5000(=승인창 등으로 멈춘 것과 동형)만 본다.
+  const collectFn = () => ({ ok: true, totalBytes: 5000 });
+  const result = await runDispatchStartConfirm({
+    repoRoot: "C:\\wt",
+    dispatchedAtMs: 0,
+    baselineBytes: 0, // 배달 순간에 잰 크기(=아직 아무것도 없었음).
+    timeoutMs: 90000,
+    stallThresholdMs: 10000,
+    pollIntervalMs: 15000,
+    now: fakeClock(0, 15000),
+    sleepFn: instantSleep,
+    collectFn,
+  });
+  // ★이전(4R, baselineBytes 없이)이라면 NOT_STARTED로 오판했을 바로 그
+  // 관측열이다 -- 이번엔 기준선(0)부터 growth(0->5000)가 dispatchedAtMs
+  // 시각에 정확히 기록되므로, "시작은 했다"가 인정되고 그 뒤 무증가가
+  // stallThresholdMs를 넘겨 STALLED_AFTER_START로 정확히 갈린다.
+  assert.equal(
+    result.status,
+    DISPATCH_START_CONFIRM_STATUS.STALLED_AFTER_START,
+  );
+  assert.equal(result.details.lastGrowthAtMs, 0);
+});
+
+test("★HYK-280 회귀 0: baselineBytes를 안 넘기면(undefined) 기존과 동일하게 동작한다(기준선을 심지 않음)", async () => {
+  const collectFn = () => ({ ok: true, totalBytes: 5000 });
+  const result = await runDispatchStartConfirm({
+    repoRoot: "C:\\wt",
+    dispatchedAtMs: 0,
+    timeoutMs: 90000,
+    stallThresholdMs: 10000,
+    pollIntervalMs: 15000,
+    now: fakeClock(0, 15000),
+    sleepFn: instantSleep,
+    collectFn,
+  });
+  // baselineBytes 없이는 여전히 "이번 실행 안에서 늘어난 적이 없다" ->
+  // NOT_STARTED(4R 알려진 한계, 위 fixture와 동일 -- 회귀 0).
+  assert.equal(result.status, DISPATCH_START_CONFIRM_STATUS.NOT_STARTED);
+});
+
+// ★HYK-280(coder-task.md §2 항1, §5) -- ps1이 넘길 `--claude-home` 인자가
+// argv 파싱부터 실제 폴더 선택까지 실제로 결선돼 있는지 스폰으로
+// 확인한다(항상 os.homedir()/.claude 고정이던 것이 이번 조각의 핵심
+// 결함이었다 -- §1 실측). HOME/USERPROFILE 환경변수를 흔들지 않고
+// `--claude-home`만으로 기록 폴더를 바꿀 수 있음을 보인다(item 1
+// 완료조건). 같은 스폰에 `--baseline-bytes 0`도 함께 넘겨 그 인자도
+// argv에서 실제로 읽히는지 같이 확인한다(수집 자체는 항상 실패 없이
+// 진행되므로 COLLECTION_FAILED로 새지 않는다는 것만으로 파싱 성공을
+// 판별할 수 있다 -- 아래 growContinuously가 실제 STALLED_AFTER_START로
+// 확정시켜 두 인자 모두 실제로 쓰였음을 입증한다).
+test("CLI end-to-end(spawn): --claude-home·--baseline-bytes 인자가 실제로 argv에서 읽혀 그 폴더/기준선을 쓴다(HOME 환경변수 조작 없이)", async () => {
+  await withTempDir("dsc-notify-claudehome-", async (notifyDir) => {
+    await withTempDir("dsc-claudehome-", async (claudeHomeDir) => {
+      const { execFile } = await import("node:child_process");
+      const { promisify } = await import("node:util");
+      const execFileAsync = promisify(execFile);
+      const { mkdirSync, writeFileSync } = await import("node:fs");
+      const { deriveClaudeProjectDirName } =
+        await import("./rate-limit-stall-adapter.mjs");
+      const repoRoot = "C:\\wt\\hyk280-claudehome-demo";
+      const projectDir = join(
+        claudeHomeDir,
+        "projects",
+        deriveClaudeProjectDirName(repoRoot),
+      );
+      mkdirSync(projectDir, { recursive: true });
+      const logPath = join(projectDir, "s.jsonl");
+      writeFileSync(logPath, "", "utf8");
+
+      const stopGrowing = growContinuously(
+        logPath,
+        GROWTH_WINDOW_MS,
+        GROWTH_TICK_MS,
+        writeFileSync,
+      );
+
+      let threw = null;
+      let stderr = "";
+      try {
+        await execFileAsync(
+          process.execPath,
+          [
+            CLI_PATH,
+            "--repo-root",
+            repoRoot,
+            "--dispatched-at-ms",
+            String(Date.now()),
+            "--notify-dir",
+            notifyDir,
+            "--task-id",
+            "HYK-TEST-claudehome",
+            "--claude-home",
+            claudeHomeDir,
+            "--baseline-bytes",
+            "0",
+            "--timeout-ms",
+            "4000",
+            "--stall-threshold-ms",
+            "1200",
+            "--poll-interval-ms",
+            "40",
+          ],
+          { encoding: "utf8" }, // ★HOME/USERPROFILE 무접촉 -- --claude-home만으로 폴더가 갈려야 한다.
+        );
+      } catch (err) {
+        threw = err;
+        stderr = err.stderr || "";
+      } finally {
+        stopGrowing();
+      }
+      assert.ok(threw, "STALLED_AFTER_START도 비0 종료코드여야 한다");
+      assert.equal(threw.code, 3);
+      assert.match(stderr, /STALLED_AFTER_START/);
+      const files = readdirSync(notifyDir);
+      assert.equal(files.length, 1);
+    });
+  });
+});
+
+// ★HYK-280(coder-task.md §2 항4) -- codex 좌석 기록 폴더도 "그냥 다른
+// 폴더"로 --claude-home에 넘기면 그대로 동작한다는 것을 보인다(코드에
+// codex·claude를 분기하는 문자열이 전혀 없다는 사실 자체가 완료조건 --
+// 이 시험은 폴더 이름을 codex류로 지어 같은 코드 경로가 그대로 먹힘을
+// 보여준다. 실제 codex 세션 로그의 구체 포맷은 HYK-275 보류 사안이라
+// 건드리지 않는다 -- 여기서 검증하는 것은 "인자가 제너릭하다"는 사실
+// 뿐이다).
+test("CLI end-to-end(spawn): --claude-home에 codex류 폴더를 넘겨도 동일 코드 경로로 동작한다(엔진 이름 분기 0 실증)", async () => {
+  await withTempDir("dsc-notify-codexhome-", async (notifyDir) => {
+    await withTempDir("dsc-codex-home-", async (codexHomeDir) => {
+      const { execFile } = await import("node:child_process");
+      const { promisify } = await import("node:util");
+      const execFileAsync = promisify(execFile);
+      const { mkdirSync, writeFileSync } = await import("node:fs");
+      const { deriveClaudeProjectDirName } =
+        await import("./rate-limit-stall-adapter.mjs");
+      const repoRoot = "C:\\wt\\hyk280-codexhome-demo";
+      // ★실제 ORCA_CODEX_HOME 하위 구조를 흉내내는 것이 아니라, "이
+      // 코드가 폴더 이름/출처에 무관하게 똑같이 동작한다"만 보인다
+      // (deriveClaudeProjectDirName 재사용 자체가 클래스 이름과 무관한
+      // 순수 경로 규약임을 이미 §2 항4에서 요구한 그대로).
+      const projectDir = join(
+        codexHomeDir,
+        "projects",
+        deriveClaudeProjectDirName(repoRoot),
+      );
+      mkdirSync(projectDir, { recursive: true });
+      const logPath = join(projectDir, "s.jsonl");
+      writeFileSync(logPath, "", "utf8");
+
+      const stopGrowing = growContinuously(
+        logPath,
+        GROWTH_WINDOW_MS,
+        GROWTH_TICK_MS,
+        writeFileSync,
+      );
+
+      let threw = null;
+      let stderr = "";
+      try {
+        await execFileAsync(
+          process.execPath,
+          [
+            CLI_PATH,
+            "--repo-root",
+            repoRoot,
+            "--dispatched-at-ms",
+            String(Date.now()),
+            "--notify-dir",
+            notifyDir,
+            "--task-id",
+            "HYK-TEST-codexhome",
+            "--claude-home",
+            codexHomeDir,
+            "--timeout-ms",
+            "4000",
+            "--stall-threshold-ms",
+            "1200",
+            "--poll-interval-ms",
+            "40",
+          ],
+          { encoding: "utf8" },
+        );
+      } catch (err) {
+        threw = err;
+        stderr = err.stderr || "";
+      } finally {
+        stopGrowing();
+      }
+      assert.ok(threw);
+      assert.equal(threw.code, 3);
+      assert.match(stderr, /STALLED_AFTER_START/);
+    });
+  });
+});
+
 // ★3R 신규 / ★4R 수리: STALLED_AFTER_START 경로를 실제 CLI 프로세스로
 // spawn해 종료코드 3 + «좌석 확인» 문구 통지 파일이 실제로 생기는지
 // 확인한다. ★4R부터 시간 예약(고정 지연 1회) 대신 "계속 자라다가 멈춤"

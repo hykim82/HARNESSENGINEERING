@@ -4,9 +4,19 @@
 //
 //   node scripts/supervisor/dispatch-start-confirm-cli.mjs \
 //     --repo-root <워크트리 절대경로> --dispatched-at-ms <배달 시각 epoch ms> \
+//     --claude-home <좌석 런처가 쓰는 실제 세션 기록 폴더> \
+//     --baseline-bytes <배달 시점에 그 폴더에서 잰 총 바이트 수 -- 선택> \
 //     --watch-dir <D:\문서관리\하네스-관제실\watch> \
 //     --notify-dir <D:\문서관리\통역\받는함> \
 //     --task-id <하네스 라벨>
+//
+// ★HYK-280(coder-task.md §2) -- `--claude-home`과 `--baseline-bytes`는
+// 둘 다 선택 인자다. 안 넘기면 이전과 100% 동일하게 동작한다(회귀 0):
+// `--claude-home` 생략 시 `os.homedir()/.claude`(기존 기본값), `--baseline-
+// bytes` 생략 시 기준선을 심지 않는다(기존처럼 이 실행의 첫 실관측이
+// 곧 기준선). `--claude-home`은 순수 폴더 경로이므로 claude 워커 좌석
+// (`.claude-team` 등)이든 codex 좌석(`ORCA_CODEX_HOME` 아래)이든 호출자가
+// 무엇을 넘기든 코드는 그 이름을 몰라도 된다(§2 항4 -- 엔진 이름 분기 0).
 //
 // 종료코드(★3R부터 3상태 -- coder-task.md §2 항4 "값을 뭉개지 마라"):
 // - 0 = 착수 확인(STARTED).
@@ -149,6 +159,23 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+// ★HYK-280(coder-task.md §2 항3) -- "배달 시점" 크기를 기준선으로 심는다.
+// 이 CLI의 첫 실관측(runDispatchStartConfirm 루프의 첫 collect())이 배달
+// 순간보다 늦게 일어나면(항상 그렇다 -- 프로세스 기동 자체에 시간이
+// 든다), 그 사이에 이미 커진 몫이 "언제 늘었는지" 정보 없이 그 첫
+// 관측값 자체에 녹아 버려 이후로 더 안 늘면 NOT_STARTED로 오판한다(4R
+// 알려진 한계 fixture가 고정했던 그 자리). 호출자(ps1)가 배달 순간에
+// 잰 크기를 `baselineBytes`로 넘기면, 그 값을 `dispatchedAtMs` 시각의
+// 관측으로 미리 심어 둔다 -- 그러면 그 뒤 첫 실관측이 이 값보다 크기만
+// 해도 "증가"로 정상 인식된다. 안 넘기면(기존 호출부 그대로) 빈
+// 배열을 돌려줘 기존 동작과 100% 동일(회귀 0).
+function buildInitialObservations(dispatchedAtMs, baselineBytes) {
+  if (!Number.isFinite(baselineBytes) || baselineBytes < 0) return [];
+  return [
+    { observedAtMs: dispatchedAtMs, totalBytes: Math.trunc(baselineBytes) },
+  ];
+}
+
 // 코어가 낸 판정 하나를 이 CLI의 status로 옮긴다(judged.verdict === STARTED
 // 지만 아직 전체 관측 창이 안 끝났으면 여기서 status를 정하지 않고 null을
 // 돌려준다 -- 호출부가 계속 폴링한다).
@@ -172,6 +199,7 @@ export async function runDispatchStartConfirm({
   repoRoot,
   dispatchedAtMs,
   claudeHomeDir = defaultClaudeHomeDir(),
+  baselineBytes = null,
   timeoutMs = DEFAULT_TIMEOUT_MS,
   stallThresholdMs = DEFAULT_STALL_THRESHOLD_MS,
   pollIntervalMs = 15000,
@@ -187,7 +215,7 @@ export async function runDispatchStartConfirm({
       { readdirFn, statFn },
     );
 
-  const observations = [];
+  const observations = buildInitialObservations(dispatchedAtMs, baselineBytes);
   for (;;) {
     const nowMs = now();
     const snap = collect();
@@ -269,6 +297,8 @@ if (invokedDirectly) {
   let dispatchedAtMs = null;
   let notifyDir = null;
   let taskId = null;
+  let claudeHomeDir = undefined; // undefined -> runDispatchStartConfirm이 기존 기본값(os.homedir()/.claude) 그대로 씀(회귀 0).
+  let baselineBytes = null;
   let timeoutMs = DEFAULT_TIMEOUT_MS;
   let stallThresholdMs = DEFAULT_STALL_THRESHOLD_MS;
   let pollIntervalMs = 15000;
@@ -278,6 +308,16 @@ if (invokedDirectly) {
       dispatchedAtMs = Number(argv[++i]);
     else if (argv[i] === "--notify-dir") notifyDir = argv[++i];
     else if (argv[i] === "--task-id") taskId = argv[++i];
+    // ★HYK-280(coder-task.md §2 항1) -- "어떤 폴더의 세션 기록을 볼지"를
+    // 호출자가 정한다. 이름은 ORCH가 §1b_exec_line에 제시한 그대로
+    // `--claude-home`을 쓰되, 값은 순수 폴더 경로라 claude·codex 어느
+    // 좌석의 기록 폴더든 그대로 넘기면 된다(코드는 엔진 이름을 전혀 모른다
+    // -- §2 항4 "엔진 이름 분기 0").
+    else if (argv[i] === "--claude-home") claudeHomeDir = argv[++i];
+    // ★HYK-280(coder-task.md §2 항3) -- 배달 시점에 호출자가 이미 재 둔
+    // 세션 기록 총 바이트 수. 안 넘기면 기준선을 심지 않는다(기존 동작
+    // 그대로, 회귀 0).
+    else if (argv[i] === "--baseline-bytes") baselineBytes = Number(argv[++i]);
     else if (argv[i] === "--timeout-ms") timeoutMs = Number(argv[++i]);
     else if (argv[i] === "--stall-threshold-ms")
       stallThresholdMs = Number(argv[++i]);
@@ -291,13 +331,15 @@ if (invokedDirectly) {
   }
   if (!repoRoot || !Number.isFinite(dispatchedAtMs) || !notifyDir) {
     console.error(
-      "usage: dispatch-start-confirm-cli.mjs --repo-root <path> --dispatched-at-ms <epoch-ms> --notify-dir <path> [--task-id <id>] [--timeout-ms <n>] [--stall-threshold-ms <n>] [--poll-interval-ms <n>]",
+      "usage: dispatch-start-confirm-cli.mjs --repo-root <path> --dispatched-at-ms <epoch-ms> --notify-dir <path> [--task-id <id>] [--claude-home <path>] [--baseline-bytes <n>] [--timeout-ms <n>] [--stall-threshold-ms <n>] [--poll-interval-ms <n>]",
     );
     process.exit(2);
   }
   const result = await runDispatchStartConfirm({
     repoRoot,
     dispatchedAtMs,
+    ...(claudeHomeDir !== undefined ? { claudeHomeDir } : {}),
+    baselineBytes,
     timeoutMs,
     stallThresholdMs,
     pollIntervalMs,
