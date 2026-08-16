@@ -56,20 +56,50 @@ function formatKstIsh(ms) {
 // 알림 파일 1장의 본문(coder-task.md §1 요건3-b "새 이상이 전이할 때
 // 받는함에 파일 1장"). 이번 tick에서 새로 열린 이상이 여럿이어도 파일은
 // 1장(묶어서 싣는다).
+//
+// HYK-265-observe-split-1 (coder-task.md §3-1 항1·§4 완료조건1, §5 1-B
+// 요건3): toNotify는 이제 «이상»(badVerdicts, kind:"anomaly")과 «측정
+// 불가»(badStatuses, kind:"measurement_failure")가 섞여 들어올 수 있다
+// (reach-report.mjs가 두 배열을 합쳐 넘긴다) -- 아침 보고(formatMorningReport)
+// 와 같은 원칙으로 여기서도 다른 절로 가른다. ⛔합쳐서 "이상"으로만
+// 부르면 대상이 실제로 이상한 것인지 우리가 못 읽은 것인지 통지만
+// 보고는 다시 구별할 수 없다(§2 실측 배경 그대로 재발). 측정 불가 쪽은
+// 사유(reasonDetail, 있으면)도 함께 싣는다 -- «절을 가르는 것만으로는
+// 경보 피로가 다른 상자로 옮겨갈 뿐»이라는 책임자 우려(coder-task.md §4)
+// 때문에 "왜"가 이 통지에도 닿아야 한다.
+function formatNoticeEntry(a) {
+  const why =
+    a.kind === "measurement_failure" && a.reasonDetail
+      ? ` -- 사유: ${a.reasonDetail}`
+      : "";
+  return `- **${a.label}** (${a.verdict ?? a.status}) -- ${formatKstIsh(a.sinceMs)}부터${why}`;
+}
+
 export function buildNoticeText({ toNotify, nowMs }) {
+  const list = Array.isArray(toNotify) ? toNotify : [];
+  const anomalies = list.filter((a) => a.kind !== "measurement_failure");
+  const measurementFailures = list.filter(
+    (a) => a.kind === "measurement_failure",
+  );
   const lines = [];
   lines.push(`# 예약 감시 이상 전이 통지 -- ${formatKstIsh(nowMs)}`);
   lines.push("");
-  lines.push(
-    "새로 열린 이상(반복 재통지 아님 -- 같은 이상이 계속되면 다시 오지 않습니다):",
-  );
-  lines.push("");
-  for (const a of toNotify) {
+  if (anomalies.length > 0) {
     lines.push(
-      `- **${a.label}** (${a.verdict ?? a.status}) -- ${formatKstIsh(a.sinceMs)}부터`,
+      "새로 열린 이상(반복 재통지 아님 -- 같은 이상이 계속되면 다시 오지 않습니다):",
     );
+    lines.push("");
+    for (const a of anomalies) lines.push(formatNoticeEntry(a));
+    lines.push("");
   }
-  lines.push("");
+  if (measurementFailures.length > 0) {
+    lines.push(
+      "새로 측정 불가(수집 실패)가 된 축(반복 재통지 아님 -- 대상이 이상하다는 뜻이 아니라 우리가 못 읽었다는 뜻입니다):",
+    );
+    lines.push("");
+    for (const a of measurementFailures) lines.push(formatNoticeEntry(a));
+    lines.push("");
+  }
   lines.push(
     "이 파일이 정본입니다. 계속 열려 있는지·언제부터인지는 아침 보고(morning-report.md)에서 다시 확인하십시오.",
   );

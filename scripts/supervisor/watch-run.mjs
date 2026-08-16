@@ -126,26 +126,24 @@ function collectPartialFailures(axisRaw) {
 // parseDetectorStdout에서 분리(복잡도 분산).
 function extractSeatLivenessFields(seatLiveness) {
   return {
-    seatLivenessStatus:
-      seatLiveness && typeof seatLiveness.status === "string"
-        ? seatLiveness.status
-        : null,
-    seatLivenessVerdict:
-      seatLiveness && typeof seatLiveness.verdict === "string"
-        ? seatLiveness.verdict
-        : null,
-    seatLivenessWorstCount:
-      seatLiveness && typeof seatLiveness.worstCount === "number"
-        ? seatLiveness.worstCount
-        : null,
-    seatLivenessTotalWorktrees:
-      seatLiveness && typeof seatLiveness.totalWorktrees === "number"
-        ? seatLiveness.totalWorktrees
-        : null,
+    seatLivenessStatus: pickString(seatLiveness, "status"),
+    seatLivenessVerdict: pickString(seatLiveness, "verdict"),
+    seatLivenessWorstCount: pickNumber(seatLiveness, "worstCount"),
+    seatLivenessTotalWorktrees: pickNumber(seatLiveness, "totalWorktrees"),
     // HYK-210-human-log-1: HYK-207이 correlation.partialFailures로 보존한
     // 좌석별 실패 사유를 buildLogLine이 로그 줄에 실을 수 있도록 평탄화해
     // 함께 옮긴다(§1 "마지막 한 조각").
     seatLivenessPartialFailures: collectPartialFailures(seatLiveness),
+    // HYK-265-observe-split-1 (coder-task.md §3-1 항2): judgeSeatLivenessForRepo
+    // 가 COLLECTION_FAILED일 때 이미 만드는 observationReason/reason(위
+    // orch-stall-detect.mjs 수정으로 이제 top-level까지 올라온다)을 이
+    // 러너가 로그 줄까지 옮긴다 -- "수집이 왜 실패했는지"가 사람이 보는
+    // 기록(watch.log -> reach-report)까지 닿게 하는 것이 이 조각의 핵심.
+    seatLivenessObservationReason: pickString(
+      seatLiveness,
+      "observationReason",
+    ),
+    seatLivenessReason: pickString(seatLiveness, "reason"),
   };
 }
 
@@ -154,20 +152,13 @@ function extractSeatLivenessFields(seatLiveness) {
 // `seatIdle*` 접두를 쓴다(§2-1-1 "구별되는 이름" 비타협).
 function extractSeatIdleFields(seatIdle) {
   return {
-    seatIdleStatus:
-      seatIdle && typeof seatIdle.status === "string" ? seatIdle.status : null,
-    seatIdleVerdict:
-      seatIdle && typeof seatIdle.verdict === "string"
-        ? seatIdle.verdict
-        : null,
-    seatIdleWorstCount:
-      seatIdle && typeof seatIdle.worstCount === "number"
-        ? seatIdle.worstCount
-        : null,
-    seatIdleTotalWorktrees:
-      seatIdle && typeof seatIdle.totalWorktrees === "number"
-        ? seatIdle.totalWorktrees
-        : null,
+    seatIdleStatus: pickString(seatIdle, "status"),
+    seatIdleVerdict: pickString(seatIdle, "verdict"),
+    seatIdleWorstCount: pickNumber(seatIdle, "worstCount"),
+    seatIdleTotalWorktrees: pickNumber(seatIdle, "totalWorktrees"),
+    // HYK-265-observe-split-1: seatLiveness와 동일 이유(§3-1 항2).
+    seatIdleObservationReason: pickString(seatIdle, "observationReason"),
+    seatIdleReason: pickString(seatIdle, "reason"),
   };
 }
 
@@ -177,27 +168,18 @@ function extractSeatIdleFields(seatIdle) {
 // `start_*` 접두를 쓴다(§2-1-1 "구별되는 이름" 비타협).
 function extractDispatchStartFields(dispatchStart) {
   return {
-    startStatus:
-      dispatchStart && typeof dispatchStart.status === "string"
-        ? dispatchStart.status
-        : null,
-    startVerdict:
-      dispatchStart && typeof dispatchStart.verdict === "string"
-        ? dispatchStart.verdict
-        : null,
-    startWorstCount:
-      dispatchStart && typeof dispatchStart.worstCount === "number"
-        ? dispatchStart.worstCount
-        : null,
-    startTotalWorktrees:
-      dispatchStart && typeof dispatchStart.totalWorktrees === "number"
-        ? dispatchStart.totalWorktrees
-        : null,
+    startStatus: pickString(dispatchStart, "status"),
+    startVerdict: pickString(dispatchStart, "verdict"),
+    startWorstCount: pickNumber(dispatchStart, "worstCount"),
+    startTotalWorktrees: pickNumber(dispatchStart, "totalWorktrees"),
     // HYK-210-human-log-1: seatLiveness와 동일 이유 -- dispatchStart 축도
     // resolveObservationWithDeliveredSeatFallback을 거치므로 같은 모양의
     // correlation.partialFailures를 가질 수 있다(orch-stall-detect.mjs
     // judgeDispatchStartForRepo 참조).
     startPartialFailures: collectPartialFailures(dispatchStart),
+    // HYK-265-observe-split-1: seatLiveness와 동일 이유(§3-1 항2).
+    startObservationReason: pickString(dispatchStart, "observationReason"),
+    startReason: pickString(dispatchStart, "reason"),
   };
 }
 
@@ -207,22 +189,14 @@ function extractDispatchStartFields(dispatchStart) {
 // 이름" 원칙).
 function extractUnconsumedFields(unconsumed) {
   return {
-    unconsumedStatus:
-      unconsumed && typeof unconsumed.status === "string"
-        ? unconsumed.status
-        : null,
-    unconsumedVerdict:
-      unconsumed && typeof unconsumed.verdict === "string"
-        ? unconsumed.verdict
-        : null,
-    unconsumedWorstCount:
-      unconsumed && typeof unconsumed.worstCount === "number"
-        ? unconsumed.worstCount
-        : null,
-    unconsumedTotalWorktrees:
-      unconsumed && typeof unconsumed.totalWorktrees === "number"
-        ? unconsumed.totalWorktrees
-        : null,
+    unconsumedStatus: pickString(unconsumed, "status"),
+    unconsumedVerdict: pickString(unconsumed, "verdict"),
+    unconsumedWorstCount: pickNumber(unconsumed, "worstCount"),
+    unconsumedTotalWorktrees: pickNumber(unconsumed, "totalWorktrees"),
+    // HYK-265-observe-split-1 (coder-task.md §3-1 항2): 이 축은
+    // observationReason이 없고(judgeUnconsumedForRepo 참조) reason(자유
+    // 텍스트)만 만든다.
+    unconsumedReason: pickString(unconsumed, "reason"),
   };
 }
 
@@ -327,19 +301,26 @@ function emptyDetectorFields() {
     seatLivenessWorstCount: null,
     seatLivenessTotalWorktrees: null,
     seatLivenessPartialFailures: [],
+    seatLivenessObservationReason: null,
+    seatLivenessReason: null,
     seatIdleStatus: null,
     seatIdleVerdict: null,
     seatIdleWorstCount: null,
     seatIdleTotalWorktrees: null,
+    seatIdleObservationReason: null,
+    seatIdleReason: null,
     startStatus: null,
     startVerdict: null,
     startWorstCount: null,
     startTotalWorktrees: null,
     startPartialFailures: [],
+    startObservationReason: null,
+    startReason: null,
     unconsumedStatus: null,
     unconsumedVerdict: null,
     unconsumedWorstCount: null,
     unconsumedTotalWorktrees: null,
+    unconsumedReason: null,
     escalationStatus: null,
     escalationVerdict: null,
     escalationWorstCount: null,
@@ -560,6 +541,31 @@ function failureLogSegment(prefix, failures) {
   const detail =
     omitted > 0 ? `${shown.join("|")}|+${omitted}_more` : shown.join("|");
   return `${prefix}_partial_failures=${failures.length} ${prefix}_partial_failure_detail=${detail}`;
+}
+
+// HYK-265-observe-split-1 (coder-task.md §3-1 항2, §4 완료조건2): 이 축이
+// "수집 실패"(COLLECTION_FAILED -- observationReason/reason이 실제로
+// 채워지는 유일한 status, orch-stall-detect.mjs의 judge*ForRepo 참조)일
+// 때만 사람이 읽는 상세를 덧붙인다(chainDetailSegment/bindingDetailSegment
+// 와 동일 원칙 -- 정상/판정불가는 4필드 세그먼트만으로 충분, 소음 최소화).
+// observationReason(있으면, seat/idle/start만)과 reason을 함께 실어
+// "왜 실패했는지"가 사람이 보는 기록까지 닿게 한다(HYK-265 배경 §2 실측:
+// 이 값들이 지금까지 로그에 아예 실리지 않았다).
+function reasonDetailSegment(
+  prefix,
+  collectionFailedStatus,
+  { status, observationReason, reason },
+) {
+  if (status !== collectionFailedStatus) return null;
+  const obsPart =
+    typeof observationReason === "string" && observationReason.trim().length > 0
+      ? `${sanitizeFailureToken(observationReason, "unknown_observation_reason")}:`
+      : "";
+  const why = truncateToken(
+    sanitizeFailureToken(reason, "reason_unavailable"),
+    MAX_PARTIAL_FAILURE_REASON_CHARS,
+  );
+  return `${prefix}_reason_detail=${obsPart}${why}`;
 }
 
 // buildLogLine에서 분리(axisLogSegment와 같은 4필드 shape 관례 재사용,
@@ -828,7 +834,12 @@ function computeCapResult({ repoRoot, capPath, capReadFn }) {
 // HYK-228 4R (coder-task.md §1 항3/§2): buildLogLine에서 세그먼트 조립부만
 // 추출(max-lines-per-function 수리) -- 각 세그먼트의 축·필드·순서·값은
 // 원문 그대로, 호출 순서만 옮겼다(동작 무변경, node --test 수치로 증명).
-function buildAxisLogSegments(detectorResult, capResult, escalationDedupe) {
+// HYK-265-observe-split-1 (§6 eslint max-lines-per-function 상한 준수 --
+// buildAxisLogSegments가 seat/idle/start/unconsumed 네 축에 reasonDetail을
+// 추가하며 상한을 넘겼다) -- seat+idle 두 축의 4필드 세그먼트 +
+// partial-failure 세그먼트(seat만) + reasonDetail 세그먼트 조립을 여기로
+// 뽑는다. 세그먼트의 필드·순서·값은 원문 그대로(동작 무변경).
+function buildSeatIdleSegments(detectorResult) {
   const seatSegment = axisLogSegment("seat", {
     status: detectorResult.seatLivenessStatus,
     verdict: detectorResult.seatLivenessVerdict,
@@ -839,12 +850,42 @@ function buildAxisLogSegments(detectorResult, capResult, escalationDedupe) {
     "seat",
     detectorResult.seatLivenessPartialFailures,
   );
+  const seatReasonDetail = reasonDetailSegment(
+    "seat",
+    "SEAT_LIVENESS_COLLECTION_FAILED",
+    {
+      status: detectorResult.seatLivenessStatus,
+      observationReason: detectorResult.seatLivenessObservationReason,
+      reason: detectorResult.seatLivenessReason,
+    },
+  );
   const idleSegment = axisLogSegment("idle", {
     status: detectorResult.seatIdleStatus,
     verdict: detectorResult.seatIdleVerdict,
     worstCount: detectorResult.seatIdleWorstCount,
     totalWorktrees: detectorResult.seatIdleTotalWorktrees,
   });
+  const idleReasonDetail = reasonDetailSegment(
+    "idle",
+    "SEAT_IDLE_COLLECTION_FAILED",
+    {
+      status: detectorResult.seatIdleStatus,
+      observationReason: detectorResult.seatIdleObservationReason,
+      reason: detectorResult.seatIdleReason,
+    },
+  );
+  return {
+    seatSegment,
+    seatFailureSegment,
+    seatReasonDetail,
+    idleSegment,
+    idleReasonDetail,
+  };
+}
+
+// buildSeatIdleSegments와 대칭(start+unconsumed 두 축, §6 상한 준수를
+// 위해 같은 이유로 분리).
+function buildStartUnconsumedSegments(detectorResult) {
   const startSegment = axisLogSegment("start", {
     status: detectorResult.startStatus,
     verdict: detectorResult.startVerdict,
@@ -855,12 +896,59 @@ function buildAxisLogSegments(detectorResult, capResult, escalationDedupe) {
     "start",
     detectorResult.startPartialFailures,
   );
+  const startReasonDetail = reasonDetailSegment(
+    "start",
+    "DISPATCH_START_COLLECTION_FAILED",
+    {
+      status: detectorResult.startStatus,
+      observationReason: detectorResult.startObservationReason,
+      reason: detectorResult.startReason,
+    },
+  );
   const unconsumedSegment = axisLogSegment("unconsumed", {
     status: detectorResult.unconsumedStatus,
     verdict: detectorResult.unconsumedVerdict,
     worstCount: detectorResult.unconsumedWorstCount,
     totalWorktrees: detectorResult.unconsumedTotalWorktrees,
   });
+  const unconsumedReasonDetail = reasonDetailSegment(
+    "unconsumed",
+    "UNCONSUMED_COLLECTION_FAILED",
+    {
+      status: detectorResult.unconsumedStatus,
+      observationReason: null,
+      reason: detectorResult.unconsumedReason,
+    },
+  );
+  return {
+    startSegment,
+    startFailureSegment,
+    startReasonDetail,
+    unconsumedSegment,
+    unconsumedReasonDetail,
+  };
+}
+
+function buildSeatIdleStartUnconsumedSegments(detectorResult) {
+  return {
+    ...buildSeatIdleSegments(detectorResult),
+    ...buildStartUnconsumedSegments(detectorResult),
+  };
+}
+
+function buildAxisLogSegments(detectorResult, capResult, escalationDedupe) {
+  const {
+    seatSegment,
+    seatFailureSegment,
+    seatReasonDetail,
+    idleSegment,
+    idleReasonDetail,
+    startSegment,
+    startFailureSegment,
+    startReasonDetail,
+    unconsumedSegment,
+    unconsumedReasonDetail,
+  } = buildSeatIdleStartUnconsumedSegments(detectorResult);
   const capSegment = capLogSegment(capResult ?? {});
   // HYK-173-push-wire (coder-task.md §4 요건2): escalation 축도 기존
   // 4필드 관례 그대로(escalation_status/escalation_verdict/
@@ -896,10 +984,14 @@ function buildAxisLogSegments(detectorResult, capResult, escalationDedupe) {
   return {
     seatSegment,
     seatFailureSegment,
+    seatReasonDetail,
     idleSegment,
+    idleReasonDetail,
     startSegment,
     startFailureSegment,
+    startReasonDetail,
     unconsumedSegment,
+    unconsumedReasonDetail,
     capSegment,
     escalationSegment,
     escalationDetail,
@@ -940,10 +1032,14 @@ export function buildLogLine({
     `reason=${reason}`,
     segments.seatSegment,
     segments.seatFailureSegment,
+    segments.seatReasonDetail,
     segments.idleSegment,
+    segments.idleReasonDetail,
     segments.startSegment,
     segments.startFailureSegment,
+    segments.startReasonDetail,
     segments.unconsumedSegment,
+    segments.unconsumedReasonDetail,
     segments.capSegment,
     segments.escalationSegment,
     segments.escalationDetail,

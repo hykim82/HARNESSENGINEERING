@@ -248,6 +248,12 @@ function buildAxesFromFields(fields) {
       verdict: verdictField === "NONE" ? null : verdictField,
       worstCount: numOrNull(fields[`${axis.prefix}_worst_count`]),
       worktrees: numOrNull(fields[`${axis.prefix}_worktrees`]),
+      // HYK-265-observe-split-1 (coder-task.md §3-1 항2): watch-run.mjs가
+      // COLLECTION_FAILED류 status일 때만 싣는 "왜"(observationReason:reason
+      // 을 합친 사람이 읽는 문자열, reasonDetailSegment 참조). 없으면 null
+      // -- 축 전부가 이 필드를 갖는 것은 아니다(seat/idle/start/unconsumed
+      // 넷뿐, §3-1 범위).
+      reasonDetail: fields[`${axis.prefix}_reason_detail`] ?? null,
     };
   }
   return axes;
@@ -286,34 +292,56 @@ export function parseWatchLog(text) {
   return { entries, skipped };
 }
 
-function isAxisAnomalous(axisEntry, axis) {
+// HYK-265-observe-split-1 (coder-task.md §1 상설 문장 · §3-1 항1): «열려
+// 있는 이상»(badVerdicts -- 대상이 실제로 이상하다)과 «측정 불가»
+// (badStatuses -- 우리가 못 읽었다)는 원인이 다른 별개 신호다(§2 분류
+// 규칙 원문 그대로 -- badStatuses를 없애지 않는다, «판정 불가를 조용함
+// 으로 접지 않는다»는 기존 설계 의도 유지). 아래 두 술어로 갈라
+// computeOpenAnomalies(badVerdicts만)와 computeOpenMeasurementFailures
+// (badStatuses만)가 서로 다른 목록을 낸다 -- 실측(watch-run.mjs
+// buildLogLine/axisLogSegment)상 COLLECTION_FAILED류 status일 때
+// verdict는 항상 null이므로(그 축의 judge*ForRepo가 status만 채우고
+// 반환한다, orch-stall-detect.mjs 참조) 두 술어가 동시에 참이 되는
+// entry는 없다 -- 한 axis, 한 entry가 두 목록에 동시에 오르지 않는다.
+function isAxisAnomalousVerdict(axisEntry, axis) {
   if (!axisEntry) return false;
-  if (axisEntry.status && axis.badStatuses.includes(axisEntry.status)) {
-    return true;
-  }
-  if (axisEntry.verdict && axis.badVerdicts.includes(axisEntry.verdict)) {
-    return true;
-  }
-  return false;
+  return Boolean(
+    axisEntry.verdict && axis.badVerdicts.includes(axisEntry.verdict),
+  );
 }
 
-// entries(시간순) + nowMs -> 현재 "열려 있는 이상" 배열. 각 axis마다:
-// 가장 최근 entry가 이상이 아니면 건너뛴다. 이상이면, 끝에서부터 거꾸로
-// 훑어 "연속으로 이상이었던" 구간의 시작 시각(sinceMs)을 찾는다 -- 중간에
-// 정상(비이상) entry가 하나라도 있으면 그 직후부터 다시 연속 구간이
-// 시작된다.
-export function computeOpenAnomalies(entries, nowMs) {
+function isAxisMeasurementFailure(axisEntry, axis) {
+  if (!axisEntry) return false;
+  return Boolean(
+    axisEntry.status && axis.badStatuses.includes(axisEntry.status),
+  );
+}
+
+// computeRecentSummary(아래)는 이 라운드 범위 밖(§3-2 "감시 항목 추가·삭제
+// 0", 이 요약 절은 손대지 않는다) -- «이상»과 «측정 불가»를 합쳐 세던
+// 기존 동작(회귀 0)을 그대로 유지하기 위한 결합 술어.
+function isAxisAnomalousOrMeasurementFailure(axisEntry, axis) {
+  return (
+    isAxisAnomalousVerdict(axisEntry, axis) ||
+    isAxisMeasurementFailure(axisEntry, axis)
+  );
+}
+
+// computeOpenAnomalies/computeOpenMeasurementFailures가 공유하는 "지금까지
+// 연속으로 predicate가 참이었던 구간" 계산(§(c) 41.5h 원칙 -- 매번 로그
+// 전체를 다시 훑어 "언제부터"를 계산한다, 전이 통지 1건에 기대지 않는다).
+function computeOpenByPredicate(entries, nowMs, predicate, kind) {
   const list = Array.isArray(entries) ? entries : [];
   const open = [];
   if (list.length === 0) return open;
   const latest = list[list.length - 1];
   for (const axis of AXES) {
     const latestAxisEntry = latest.axes[axis.key];
-    if (!isAxisAnomalous(latestAxisEntry, axis)) continue;
+    if (!predicate(latestAxisEntry, axis)) continue;
     let sinceMs = latest.tsMs;
     for (let i = list.length - 1; i >= 0; i--) {
       const e = list[i];
-      if (!isAxisAnomalous(e.axes[axis.key], axis)) break;
+      if (!predicate(e.axes[axis.key], axis)) break;
       sinceMs = e.tsMs;
     }
     const openMs = Math.max(
@@ -325,11 +353,41 @@ export function computeOpenAnomalies(entries, nowMs) {
       label: axis.label,
       verdict: latestAxisEntry.verdict,
       status: latestAxisEntry.status,
+      reasonDetail: latestAxisEntry.reasonDetail ?? null,
+      // HYK-265-observe-split-1 (coder-task.md §4 완료조건1): 통지
+      // (reach-notify-core.mjs buildNoticeText)도 이 둘을 다른 절로
+      // 갈라야 하므로, 각 원소가 자기 출처를 스스로 밝힌다(호출부가
+      // 두 배열을 합쳐도 구별이 사라지지 않도록).
+      kind,
       sinceMs,
       openMs,
     });
   }
   return open;
+}
+
+// entries(시간순) + nowMs -> 현재 "열려 있는 이상"(badVerdicts, 대상 자체가
+// 이상함) 배열. §(c) 41.5h 원칙(주석은 computeOpenByPredicate 참조).
+export function computeOpenAnomalies(entries, nowMs) {
+  return computeOpenByPredicate(
+    entries,
+    nowMs,
+    isAxisAnomalousVerdict,
+    "anomaly",
+  );
+}
+
+// HYK-265-observe-split-1 (coder-task.md §3-1 항1·§4 완료조건1): entries +
+// nowMs -> 현재 "측정 불가"(badStatuses, 우리가 못 읽었다) 배열. 모양은
+// computeOpenAnomalies와 동일(axisKey/label/verdict/status/sinceMs/openMs)
+// + reasonDetail(있으면 "왜"를 사람이 읽는 문자열로).
+export function computeOpenMeasurementFailures(entries, nowMs) {
+  return computeOpenByPredicate(
+    entries,
+    nowMs,
+    isAxisMeasurementFailure,
+    "measurement_failure",
+  );
 }
 
 // 지난 windowMs(기본 24시간) 동안 각 axis가 이상 상태로 관측된 샘플 수 --
@@ -350,7 +408,9 @@ export function computeRecentSummary(
   for (const axis of AXES) {
     let anomalousSamples = 0;
     for (const e of inWindow) {
-      if (isAxisAnomalous(e.axes[axis.key], axis)) anomalousSamples += 1;
+      if (isAxisAnomalousOrMeasurementFailure(e.axes[axis.key], axis)) {
+        anomalousSamples += 1;
+      }
     }
     summary[axis.key] = {
       label: axis.label,
@@ -376,22 +436,11 @@ function formatKstIsh(ms) {
   return new Date(ms).toISOString();
 }
 
-// 사람이 읽는 보고문 본문(요건 2). 맨 위에 "지금 열려 있는 이상"(비어
-// 있어도 "없음"을 명시적으로 찍는다 -- 빈 출력 금지), 그 아래 "지난
-// 24시간 요약".
-export function formatMorningReport({
-  entries,
-  nowMs,
-  skipped = 0,
-  sourceLabel = "",
-}) {
-  const openAnomalies = computeOpenAnomalies(entries, nowMs);
-  const summary = computeRecentSummary(entries, nowMs);
-  const lines = [];
-  lines.push(`# 예약 감시 아침 보고 -- ${formatKstIsh(nowMs)} 기준`);
-  if (sourceLabel) lines.push(`source: ${sourceLabel}`);
-  lines.push("");
-  lines.push("## 지금 열려 있는 이상");
+// formatMorningReport에서 분리(§6 eslint max-complexity 상한 준수 --
+// HYK-265-observe-split-1이 「측정 불가」절을 추가하며 상한을 넘겼다).
+// "지금 열려 있는 이상" 절 -- 비어 있어도 "없음"을 명시적으로 찍는다.
+function formatOpenAnomaliesSection(openAnomalies) {
+  const lines = ["## 지금 열려 있는 이상"];
   if (openAnomalies.length === 0) {
     // HYK-173-push-wire 2R P2-1 -- 축 수를 문면에 손으로 박지 않는다
     // (coder-task.md §2-2 "적힌 수 != 실제 목록", 이 계열 재발 5회째).
@@ -401,27 +450,80 @@ export function formatMorningReport({
     lines.push(
       `없음 -- 열려 있는 이상이 없습니다(${AXES.length}축 전부 정상 또는 관측 대상 없음).`,
     );
-  } else {
-    for (const a of openAnomalies) {
-      lines.push(
-        `- **${a.label}** (${a.verdict ?? a.status}) -- ${formatKstIsh(a.sinceMs)}부터, ${formatDurationKo(a.openMs)}째`,
-      );
-    }
+    return lines;
   }
-  lines.push("");
-  lines.push("## 지난 24시간 요약");
+  for (const a of openAnomalies) {
+    lines.push(
+      `- **${a.label}** (${a.verdict ?? a.status}) -- ${formatKstIsh(a.sinceMs)}부터, ${formatDurationKo(a.openMs)}째`,
+    );
+  }
+  return lines;
+}
+
+// HYK-265-observe-split-1 (coder-task.md §4 완료조건1·2) -- «측정 불가
+// (수집 실패)» 절. 사유(reasonDetail, 있으면)를 함께 찍는다 -- ⛔조용히
+// 만들지 않는다(§2 실측 배경 "판정 불가를 조용함으로 접지 않는다"의
+// 설계 의도 유지).
+function formatOpenMeasurementFailuresSection(openMeasurementFailures) {
+  const lines = ["## 측정 불가(수집 실패)"];
+  if (openMeasurementFailures.length === 0) {
+    lines.push("없음 -- 지금 측정 불가 상태인 축이 없습니다.");
+    return lines;
+  }
+  for (const a of openMeasurementFailures) {
+    const why = a.reasonDetail ? ` -- 사유: ${a.reasonDetail}` : "";
+    lines.push(
+      `- **${a.label}** (${a.verdict ?? a.status}) -- ${formatKstIsh(a.sinceMs)}부터, ${formatDurationKo(a.openMs)}째${why}`,
+    );
+  }
+  return lines;
+}
+
+function formatRecentSummarySection(entries, summary) {
+  const lines = ["## 지난 24시간 요약"];
   if (entries.length === 0) {
     lines.push(
       "없음 -- 지난 24시간 내 로그 항목이 없습니다(watch.log 비어있음 또는 감시 미실행).",
     );
-  } else {
-    for (const axis of AXES) {
-      const s = summary[axis.key];
-      lines.push(
-        `- ${s.label}: 표본 ${s.sampleCount}건 중 이상 ${s.anomalousSamples}건`,
-      );
-    }
+    return lines;
   }
+  for (const axis of AXES) {
+    const s = summary[axis.key];
+    lines.push(
+      `- ${s.label}: 표본 ${s.sampleCount}건 중 이상 ${s.anomalousSamples}건`,
+    );
+  }
+  return lines;
+}
+
+// 사람이 읽는 보고문 본문(요건 2). 맨 위에 "지금 열려 있는 이상"(비어
+// 있어도 "없음"을 명시적으로 찍는다 -- 빈 출력 금지), 그 아래 "측정 불가
+// (수집 실패)"(HYK-265-observe-split-1), 그 아래 "지난 24시간 요약".
+export function formatMorningReport({
+  entries,
+  nowMs,
+  skipped = 0,
+  sourceLabel = "",
+}) {
+  const openAnomalies = computeOpenAnomalies(entries, nowMs);
+  // HYK-265-observe-split-1 (coder-task.md §3-1 항1·§4 완료조건1): «측정
+  // 불가»(수집 실패)는 «이상»과 «다른 절»로 싣는다 -- badStatuses가
+  // badVerdicts와 같은 절에 합류하면 대상이 실제로 이상한 것인지 우리가
+  // 못 읽은 것인지 사람이 매번 손으로 대조해야 한다(§2 실측 배경).
+  const openMeasurementFailures = computeOpenMeasurementFailures(
+    entries,
+    nowMs,
+  );
+  const summary = computeRecentSummary(entries, nowMs);
+  const lines = [];
+  lines.push(`# 예약 감시 아침 보고 -- ${formatKstIsh(nowMs)} 기준`);
+  if (sourceLabel) lines.push(`source: ${sourceLabel}`);
+  lines.push("");
+  lines.push(...formatOpenAnomaliesSection(openAnomalies));
+  lines.push("");
+  lines.push(...formatOpenMeasurementFailuresSection(openMeasurementFailures));
+  lines.push("");
+  lines.push(...formatRecentSummarySection(entries, summary));
   if (skipped > 0) {
     lines.push("");
     lines.push(`(참고: 파싱 못한 로그 줄 ${skipped}개는 이 보고에서 제외됨)`);

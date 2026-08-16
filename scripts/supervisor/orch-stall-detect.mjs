@@ -934,6 +934,12 @@ export function judgeSeatLivenessAcrossWorktrees({ repoRoot, now }, opts = {}) {
     reasonCode: worst ? worst.reasonCode : undefined,
     details: worst ? worst.details : undefined,
     worktreePath: worst ? worst.worktreePath : undefined,
+    // HYK-265-observe-split-1 (coder-task.md §3-1 항2): judgeSeatLivenessForRepo
+    // 가 COLLECTION_FAILED일 때 이미 만드는 observationReason/reason을
+    // 여기서도 잃지 않고 위로 올린다 -- watch-run.mjs가 이 필드를 로그
+    // 줄까지 옮겨야 사람이 "왜" 수집이 실패했는지 볼 수 있다(§2 실측).
+    observationReason: worst ? worst.observationReason : undefined,
+    reason: worst ? worst.reason : undefined,
     worktrees,
     totalWorktrees: worktrees.length,
     worstCount: worstEntries.length,
@@ -1164,6 +1170,11 @@ export function judgeSeatIdleAcrossWorktrees({ repoRoot, now }, opts = {}) {
     reasonCode: worst ? worst.reasonCode : undefined,
     details: worst ? worst.details : undefined,
     worktreePath: worst ? worst.worktreePath : undefined,
+    // HYK-265-observe-split-1 (coder-task.md §3-1 항2): seat 축과 동일 이유
+    // -- judgeSeatIdleForRepo/judgeSeatIdleAcrossSeats의 COLLECTION_FAILED
+    // observationReason/reason을 잃지 않고 위로 올린다.
+    observationReason: worst ? worst.observationReason : undefined,
+    reason: worst ? worst.reason : undefined,
     worktrees,
     totalWorktrees: worktrees.length,
     worstCount: worstEntries.length,
@@ -1517,6 +1528,11 @@ export function judgeDispatchStartAcrossWorktrees(
     reasonCode: worst ? worst.reasonCode : undefined,
     details: worst ? worst.details : undefined,
     worktreePath: worst ? worst.worktreePath : undefined,
+    // HYK-265-observe-split-1 (coder-task.md §3-1 항2): seat/idle 축과 동일
+    // 이유 -- judgeDispatchStartForRepo의 COLLECTION_FAILED
+    // observationReason/reason을 잃지 않고 위로 올린다.
+    observationReason: worst ? worst.observationReason : undefined,
+    reason: worst ? worst.reason : undefined,
     worktrees,
     totalWorktrees: worktrees.length,
     worstCount: worstEntries.length,
@@ -1894,6 +1910,11 @@ export function judgeUnconsumedAcrossWorktrees({ repoRoot, now }, opts = {}) {
     reasonCode: worst ? worst.reasonCode : undefined,
     details: worst ? worst.details : undefined,
     worktreePath: worst ? worst.worktreePath : undefined,
+    // HYK-265-observe-split-1 (coder-task.md §3-1 항2): 이 축은
+    // observationReason이 없고(judgeUnconsumedForRepo 참조) reason(자유
+    // 텍스트, 예: "unconsumed: git log failed")만 만든다 -- 있는 그대로
+    // 위로 올린다.
+    reason: worst ? worst.reason : undefined,
     worktrees,
     totalWorktrees: worktrees.length,
     worstCount: worstEntries.length,
