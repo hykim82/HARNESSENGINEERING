@@ -140,6 +140,10 @@ test("회복 흔적(정상 활동)이 있으면 통지하지 않는다(이미 �
             JSON.stringify({
               type: "assistant",
               timestamp: "2026-08-16T03:30:00.000Z",
+              message: {
+                model: "claude-fable-5",
+                usage: { output_tokens: 42 },
+              },
             }),
           ].join("\n") + "\n",
           "utf8",
@@ -153,6 +157,54 @@ test("회복 흔적(정상 활동)이 있으면 통지하지 않는다(이미 �
         });
         assert.equal(r.verdict, RATE_LIMIT_STALL_VERDICT.RECOVERED);
         assert.equal(r.noticePath, null);
+      });
+    });
+  });
+});
+
+// ★P1 수리 e2e(검토자 fixture, coder-task.md §2): 429 뒤 사용자 입력만
+// 있어도 STALLED 통지가 그대로 나가야 한다(억제되지 않는다).
+test("★P1 e2e: 429 뒤 type:user 입력만 있어도 STALLED_ON_LIMIT 통지가 그대로 나간다(억제되지 않는다)", () => {
+  withTempDir("rl-wire-p1-home-", (home) => {
+    withTempDir("rl-wire-p1-watch-", (watchDir) => {
+      withTempDir("rl-wire-p1-notify-", (notifyDir) => {
+        const repoRoot = "C:\\wt\\hyk270p1";
+        const projectDir = join(
+          home,
+          "projects",
+          deriveClaudeProjectDirName(repoRoot),
+        );
+        mkdirSync(projectDir, { recursive: true });
+        writeFileSync(
+          join(projectDir, "session.jsonl"),
+          [
+            JSON.stringify({
+              type: "assistant",
+              timestamp: "2026-08-16T02:00:00.000Z",
+              isApiErrorMessage: true,
+              apiErrorStatus: 429,
+            }),
+            JSON.stringify({
+              type: "user",
+              timestamp: "2026-08-16T02:05:00.000Z",
+              message: { role: "user", content: "다시 시도해줘" },
+            }),
+          ].join("\n") + "\n",
+          "utf8",
+        );
+        const r = runRateLimitStallOnce({
+          repoRoot,
+          claudeHomeDir: home,
+          watchDir,
+          notifyDir,
+          now: Date.parse("2026-08-16T05:00:00.000Z"),
+        });
+        assert.equal(r.verdict, RATE_LIMIT_STALL_VERDICT.STALLED_ON_LIMIT);
+        assert.ok(
+          r.noticePath,
+          "사용자 입력만으로 회복 처리돼 통지가 억제되면 안 된다",
+        );
+        assert.equal(existsSync(r.noticePath), true);
       });
     });
   });

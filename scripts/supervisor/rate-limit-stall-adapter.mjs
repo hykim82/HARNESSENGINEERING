@@ -68,13 +68,34 @@ function isRateLimitHitEntry(entry) {
   );
 }
 
-function isNormalActivityEntry(entry) {
-  return (
-    entry &&
-    typeof entry === "object" &&
-    typeof entry.timestamp === "string" &&
-    entry.isApiErrorMessage !== true
-  );
+// ★P1 수리(2026-08-16, 검토자 실측 반려 -- coder-task.md §2 그대로):
+// 이전 버전은 `isApiErrorMessage !== true`인 timestamp 보유 항목을 전부
+// "정상 활동"으로 쳤다. `type:"user"`(사용자 입력·tool_result 제출 포함)
+// 항목도 이 조건을 만족하므로, 429 한 건 뒤 사용자 입력만 있어도
+// `recoveredAtMs`가 채워져 STALLED 통지가 조용히 억제됐다 -- 사용자
+// 입력은 모델이 실제로 응답했다는 증거가 아니다.
+//
+// 실측(세션 jsonl 다건 대조, 표본 12,360여 건, 예외 0건): **진짜 성공
+// 응답**은 top-level `type === "assistant"` +
+// `message.model`이 `"<synthetic>"`이 아닌 실제 모델명 +
+// `message.usage.output_tokens > 0`이다. 429/합성 메시지(errorEntry
+// 포함)는 항상 `model:"<synthetic>"`이고 `output_tokens`는 항상 0이다
+// (전수 조사에서 예외 0건 -- coder-task.md §2 "회복" 정의를 이 실측으로
+// 좁힌다). ⚠️이 실측이 못 미치는 형태(예: 신모델·신API 응답 스키마
+// 변경)를 만나면 fail-closed로 "회복 아님"에 접힌다(§2 요구사항 그대로
+// -- 놓치는 것보다 과대검출이 낫다, 이 파일의 기존 관례와 동일).
+function isSuccessResponseEntry(entry) {
+  if (!entry || typeof entry !== "object") return false;
+  if (entry.type !== "assistant") return false;
+  if (typeof entry.timestamp !== "string") return false;
+  if (entry.isApiErrorMessage === true) return false;
+  const message = entry.message;
+  if (!message || typeof message !== "object") return false;
+  if (typeof message.model !== "string" || message.model === "<synthetic>") {
+    return false;
+  }
+  const outputTokens = message.usage ? message.usage.output_tokens : undefined;
+  return typeof outputTokens === "number" && outputTokens > 0;
 }
 
 function entryTimeMs(entry) {
@@ -107,7 +128,7 @@ function foldEntryIntoAcc(acc, entry, now) {
   if (t === null || t > now) return; // 미래 시각은 무시(시계 이상 방어).
   if (isRateLimitHitEntry(entry)) {
     if (acc.hitAtMs === null || t > acc.hitAtMs) acc.hitAtMs = t;
-  } else if (isNormalActivityEntry(entry)) {
+  } else if (isSuccessResponseEntry(entry)) {
     if (acc.latestNormalAfterHitMs === null || t > acc.latestNormalAfterHitMs) {
       acc.latestNormalAfterHitMs = t;
     }
