@@ -20,7 +20,7 @@ import {
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
-import { spawnSync } from "node:child_process";
+import { spawnSync, execFileSync } from "node:child_process";
 import { runAdmissionCli } from "../supervisor/admission-cli.mjs";
 
 const CHECK_DIR = dirname(fileURLToPath(import.meta.url));
@@ -179,8 +179,33 @@ test("HYK-224-3R §3: a completion failure surfaces its real detail on relay-han
   }
 });
 
+// HYK-279: "ADMISSION_LEDGER_PATH is unset" must mean neither resolution
+// source is present. relay-handshake.mjs's spawnAdmissionCompletion spawns
+// admission-completion-adapter.mjs as ITS OWN child, which inherits this
+// test's spawnSync `cwd` (defaulted here to the current process's cwd, i.e.
+// this worktree) -- so admission-completion-adapter.mjs's mainRepoRoot()
+// resolves the shared main HARNESSENGINEERING checkout, whose installed
+// `.harness/admission-ledger-path.json` (실측: confirmed present on disk)
+// points at the REAL control-room ledger. Deleting only the two env vars
+// left that persistent-pointer fallback fully reachable -- this test's own
+// "no-op baseline" fixture id ("HYK-SPAWN-3") was actually attempted (and
+// failed: RESERVATION_NOT_FOUND) against the real ledger and durably
+// appended to the real `*.completion-failures.jsonl` (실측: HYK-279 §1
+// fingerprint check caught this exact leak on a full local sweep run).
+// Fix: run the CLI with `cwd` pinned at a synthetic, pointer-file-less git
+// repo (same pattern as admission-completion-persistent-source.test.mjs's
+// buildSyntheticRepo/ⓒ test) so the grandchild's mainRepoRoot() has nothing
+// real to resolve to, regardless of which worktree/machine runs this.
+function buildSyntheticRepoWithoutPointer() {
+  const dir = mkdtempSync(join(tmpdir(), "hyk279-spawn-noop-repo-"));
+  execFileSync("git", ["init", "-q"], { cwd: dir });
+  mkdirSync(join(dir, ".harness"), { recursive: true });
+  return dir;
+}
+
 test("relay-handshake CLI exits 0 normally when ADMISSION_LEDGER_PATH is unset (no-op baseline, unchanged behavior)", () => {
   const harnessDir = mkdtempSync(join(tmpdir(), "admission-spawn-harness3-"));
+  const repoDir = buildSyntheticRepoWithoutPointer();
   try {
     writeFixture(harnessDir, "HYK-SPAWN-3");
     const env = { ...process.env };
@@ -189,11 +214,12 @@ test("relay-handshake CLI exits 0 normally when ADMISSION_LEDGER_PATH is unset (
     const res = spawnSync(
       process.execPath,
       [RELAY_HANDSHAKE_PATH, "coder", harnessDir],
-      { encoding: "utf8", env },
+      { encoding: "utf8", env, cwd: repoDir },
     );
     assert.equal(res.status, 0);
   } finally {
     rmSync(harnessDir, { recursive: true, force: true });
+    rmSync(repoDir, { recursive: true, force: true });
   }
 });
 
