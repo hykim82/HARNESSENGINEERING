@@ -1,8 +1,15 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, readFileSync, existsSync } from "node:fs";
+import {
+  mkdtempSync,
+  mkdirSync,
+  rmSync,
+  readFileSync,
+  existsSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { execSync } from "node:child_process";
 import {
   autoCompleteAdmission,
   completeAdmissionReservation,
@@ -18,14 +25,45 @@ function tmpPaths() {
   };
 }
 
+// HYK-279: "ADMISSION_LEDGER_PATH is unset" must mean neither resolution
+// source is present -- not just the env var. admission-completion-adapter.mjs
+// (HYK-227 2R) also falls back to a persistent pointer file at
+// `<mainRepoRoot>/.harness/admission-ledger-path.json`, resolved via
+// `git rev-parse --git-common-dir` off `process.cwd()`. Before this fix, this
+// test deleted only the env var and ran with cwd left at this worktree's real
+// path -- whose mainRepoRoot IS the shared main HARNESSENGINEERING checkout,
+// which (실측: confirmed present on disk) has that pointer file installed,
+// pointing at the REAL control-room ledger. So the test's own premise
+// (attempted:false) was false in this environment: the adapter actually
+// attempted a completion for the literal fixture id "HYK-000-x-1" against the
+// real ledger (RESERVATION_NOT_FOUND) and durably appended that failure to
+// the real `*.completion-failures.jsonl` -- exactly the ORCH-measured leak
+// (coder-task.md §1) and this repo's one pre-existing baseline test failure.
+// Fix: chdir into a synthetic, pointer-file-less git repo for the duration of
+// the assertion (same pattern as
+// admission-completion-persistent-source.test.mjs's ⓒ test), so mainRepoRoot()
+// has nothing real to resolve to regardless of which worktree/machine this
+// runs on.
+function buildSyntheticRepoWithoutPointer() {
+  const dir = mkdtempSync(join(tmpdir(), "hyk279-adapter-noop-repo-"));
+  execSync("git init -q", { cwd: dir });
+  mkdirSync(join(dir, ".harness"), { recursive: true });
+  return dir;
+}
+
 test("autoCompleteAdmission is a documented no-op (attempted:false) when ADMISSION_LEDGER_PATH is unset (honesty limit, not silent success)", () => {
   const saved = process.env.ADMISSION_LEDGER_PATH;
+  const savedCwd = process.cwd();
+  const repoDir = buildSyntheticRepoWithoutPointer();
   delete process.env.ADMISSION_LEDGER_PATH;
+  process.chdir(repoDir);
   try {
     const outcome = autoCompleteAdmission({ reservationId: "HYK-000-x-1" });
     assert.deepEqual(outcome, { attempted: false });
   } finally {
+    process.chdir(savedCwd);
     if (saved !== undefined) process.env.ADMISSION_LEDGER_PATH = saved;
+    rmSync(repoDir, { recursive: true, force: true });
   }
 });
 

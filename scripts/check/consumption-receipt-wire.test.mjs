@@ -19,6 +19,7 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { execSync } from "node:child_process";
 import { runAdmissionCli } from "../supervisor/admission-cli.mjs";
 import { checkRelayHandshake } from "./relay-handshake.mjs";
 import {
@@ -177,8 +178,31 @@ test("§4-3/§4-5: checkRelayHandshake ok:true (모든 후속효과 성공) -> �
 // 생산 관례에서 가장 흔한 미설정 형태를 그대로 재현).
 // ---------------------------------------------------------------------------
 
+// HYK-279: "ADMISSION_LEDGER_PATH가 없으면" must mean neither resolution
+// source is present. checkRelayHandshake spawns admission-completion-adapter.mjs
+// as a child process that inherits process.env AND process.cwd() -- deleting
+// only the env var, with cwd left at this worktree's real path, lets that
+// child's mainRepoRoot() resolve the shared main repo's real, installed
+// `.harness/admission-ledger-path.json` (실측: confirmed present on disk,
+// pointing at the real control-room ledger), so the "미설정" premise this
+// test's name asserts was false in this environment -- the adapter actually
+// attempted (and failed: RESERVATION_NOT_FOUND) against the REAL ledger,
+// exactly contradicting this file's own header ("실제 관제실 정본 원장에는
+// 절대 쓰지 않는다") and matching the ORCH-measured leak (coder-task.md §1).
+// Fix: chdir into a synthetic, pointer-file-less git repo for the duration
+// of the call (same pattern as
+// admission-completion-persistent-source.test.mjs's ⓒ test) so the spawned
+// child's mainRepoRoot() has nothing real to resolve to.
+function buildSyntheticRepoWithoutPointer() {
+  const dir = mkdtempSync(join(tmpdir(), "hyk279-receipt-wire-b-repo-"));
+  execSync("git init -q", { cwd: dir });
+  mkdirSync(join(dir, ".harness"), { recursive: true });
+  return dir;
+}
+
 test("§4-4 (표적: admissionReturned 실패): ADMISSION_LEDGER_PATH가 없으면 handshake는 여전히 ok:true지만 영수증은 생성되지 않는다", () => {
   const harnessDir = tmpDir("hyk244-wire-b-harness-");
+  const repoDir = buildSyntheticRepoWithoutPointer();
   try {
     const taskId = "HYK-244-WIRE-B-1";
     writeFixture(
@@ -190,11 +214,14 @@ test("§4-4 (표적: admissionReturned 실패): ADMISSION_LEDGER_PATH가 없으�
     );
 
     const savedLedger = process.env.ADMISSION_LEDGER_PATH;
+    const savedCwd = process.cwd();
     delete process.env.ADMISSION_LEDGER_PATH;
+    process.chdir(repoDir);
     let result;
     try {
       result = checkRelayHandshake({ role: "coder", harnessDir });
     } finally {
+      process.chdir(savedCwd);
       if (savedLedger !== undefined)
         process.env.ADMISSION_LEDGER_PATH = savedLedger;
     }
@@ -211,6 +238,7 @@ test("§4-4 (표적: admissionReturned 실패): ADMISSION_LEDGER_PATH가 없으�
     );
   } finally {
     rmSync(harnessDir, { recursive: true, force: true });
+    rmSync(repoDir, { recursive: true, force: true });
   }
 });
 
