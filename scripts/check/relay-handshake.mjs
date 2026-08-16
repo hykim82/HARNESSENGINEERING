@@ -16,7 +16,9 @@ import {
   TIME_FIELD,
   TIME_AUTHORITY_STATE,
   MAX_FUTURE_SKEW_MS,
+  KST_OFFSET_MS,
   isBeyondFutureSkew,
+  isSuspectedTimezoneMislabel,
 } from "./time-authority.mjs";
 
 export { TIME_AUTHORITY_STATE, MAX_FUTURE_SKEW_MS };
@@ -400,6 +402,58 @@ function parseKstTimestamp(str) {
 // 아니어야 한다" means in practice: the *candidate* timestamps (dropped_at,
 // DONE) are caller-supplied (they come from files workers/ORCH write), but
 // the *authority clock* they are judged against is not.
+// HYK-257 ⓒ: producer 도구 이름을 필드별로 하나로 고정한다 -- 거부 사유에
+// "고치는 법"을 붙일 때마다 매번 다시 조립하지 않도록.
+function fixToolHintFor(field) {
+  return field === TIME_FIELD.TASK_DROPPED_AT
+    ? "node scripts/relay/stamp-dropped-at.mjs (아직 미결선 -- coder-task.md §2 ⓐ 참조)"
+    : "node scripts/relay/finalize-done.mjs <role>";
+}
+
+function pad2(n) {
+  return String(n).padStart(2, "0");
+}
+
+// dropped_at은 분 단위(초 없음), DONE은 초 단위(HYK-244) -- rawText에 초가
+// 있는지로 보정값의 정밀도를 맞춘다(원래 값 형식을 그대로 흉내낸다).
+function formatKstLike(ms, rawText) {
+  const kst = new Date(ms + KST_OFFSET_MS);
+  const base = `${kst.getUTCFullYear()}-${pad2(kst.getUTCMonth() + 1)}-${pad2(
+    kst.getUTCDate(),
+  )} ${pad2(kst.getUTCHours())}:${pad2(kst.getUTCMinutes())}`;
+  const hasSeconds = /\d{2}:\d{2}:\d{2}/.test(rawText);
+  return hasSeconds
+    ? `${base}:${pad2(kst.getUTCSeconds())} KST`
+    : `${base} KST`;
+}
+
+// HYK-257 (★새 변종): a value off by ~exactly 9 hours from authority now is
+// far more likely a UTC/KST mislabel than a genuine future or genuine
+// staleness -- see time-authority.mjs's isSuspectedTimezoneMislabel header
+// for why this is a heuristic, not a proof. Checked BEFORE checkFutureSkew
+// so a +9h mislabel gets this more specific, correctable diagnosis instead
+// of the generic future-skew message.
+function checkTimezoneMislabel({ candidateDate, rawText, field, now }) {
+  const candidateMs = candidateDate.getTime();
+  if (!isSuspectedTimezoneMislabel(candidateMs, now)) return null;
+  const state =
+    field === TIME_FIELD.TASK_DROPPED_AT
+      ? TIME_AUTHORITY_STATE.SUSPECTED_TZ_MISLABEL_DROPPED_AT
+      : TIME_AUTHORITY_STATE.SUSPECTED_TZ_MISLABEL_DONE;
+  const isAheadOfNow = candidateMs > now;
+  const correctedMs = isAheadOfNow
+    ? candidateMs - KST_OFFSET_MS
+    : candidateMs + KST_OFFSET_MS;
+  const corrected = formatKstLike(correctedMs, rawText);
+  return {
+    ok: false,
+    state,
+    reason: `'${field}' value '${rawText.trim()}' is suspiciously close to exactly 9 hours ${
+      isAheadOfNow ? "ahead of" : "behind"
+    } authority now (${new Date(now).toISOString()}) -- looks like a UTC value mislabeled 'KST' (or vice versa), not a genuine ${isAheadOfNow ? "future" : "stale"} value. 고치는 법: 손으로 9시간을 더하거나 빼지 말고 시계를 다시 읽어라 -- 아마 '${corrected}'를 의도했을 것이다. 앞으로는 ${fixToolHintFor(field)} 로 찍어라(손기입 금지).`,
+  };
+}
+
 function checkFutureSkew({ candidateDate, rawText, field, now }) {
   const beyond = isBeyondFutureSkew(candidateDate.getTime(), now, field);
   if (beyond === false) return null;
@@ -413,7 +467,7 @@ function checkFutureSkew({ candidateDate, rawText, field, now }) {
       ? `time-authority registry has no row for '${field}' -- fail-closed, treating '${rawText.trim()}' as a future violation`
       : `'${field}' value '${rawText.trim()}' is ${Math.round(
           skewMs / 1000,
-        )}s ahead of authority now (${new Date(now).toISOString()}), which exceeds the allowed skew of ${MAX_FUTURE_SKEW_MS}ms`;
+        )}s ahead of authority now (${new Date(now).toISOString()}), which exceeds the allowed skew of ${MAX_FUTURE_SKEW_MS}ms. 고치는 법: 시계를 다시 읽어 지금(now)에 가까운 값으로 고쳐라(미리 적지 마라) -- 앞으로는 ${fixToolHintFor(field)} 로 찍어라.`;
   return { ok: false, state, reason };
 }
 
@@ -436,9 +490,16 @@ function resolveDroppedAt(taskContent, now) {
   if (!droppedAt) {
     return {
       ok: false,
-      reason: `task dropped_at not parseable: '${droppedMatch[1].trim()}' (need YYYY-MM-DD HH:MM KST)`,
+      reason: `task dropped_at not parseable: '${droppedMatch[1].trim()}' (need YYYY-MM-DD HH:MM KST format, e.g. '2026-08-17 05:22 KST' -- 앞으로는 ${fixToolHintFor(TIME_FIELD.TASK_DROPPED_AT)} 로 찍어라)`,
     };
   }
+  const droppedMislabel = checkTimezoneMislabel({
+    candidateDate: droppedAt,
+    rawText: droppedMatch[1],
+    field: TIME_FIELD.TASK_DROPPED_AT,
+    now,
+  });
+  if (droppedMislabel) return droppedMislabel;
   const droppedFuture = checkFutureSkew({
     candidateDate: droppedAt,
     rawText: droppedMatch[1],
@@ -497,15 +558,22 @@ function resolveDoneAt(resultContent, now) {
   if (!doneAt) {
     return {
       ok: false,
-      reason: `result DONE timestamp not parseable: '${doneMatch[1].trim()}'`,
+      reason: `result DONE timestamp not parseable: '${doneMatch[1].trim()}' (need 'YYYY-MM-DD HH:MM:SS KST' format, e.g. '2026-08-17 05:22:47 KST' -- 앞으로는 ${fixToolHintFor(TIME_FIELD.RESULT_DONE_AT)} 로 찍어라)`,
     };
   }
   if (!hasDoneSecondsPrecision(doneMatch[1])) {
     return {
       ok: false,
-      reason: `result DONE timestamp is minute-precision, seconds required: '${doneMatch[1].trim()}' (need YYYY-MM-DD HH:MM:SS KST -- HYK-244 2R-a: minute precision cannot distinguish same-minute rounds, and the "분 단위 거부" contract is fixed, not relaxable)`,
+      reason: `result DONE timestamp is minute-precision, seconds required: '${doneMatch[1].trim()}' (need YYYY-MM-DD HH:MM:SS KST -- HYK-244 2R-a: minute precision cannot distinguish same-minute rounds, and the "분 단위 거부" contract is fixed, not relaxable. 앞으로는 ${fixToolHintFor(TIME_FIELD.RESULT_DONE_AT)} 로 찍어라)`,
     };
   }
+  const doneMislabel = checkTimezoneMislabel({
+    candidateDate: doneAt,
+    rawText: doneMatch[1],
+    field: TIME_FIELD.RESULT_DONE_AT,
+    now,
+  });
+  if (doneMislabel) return doneMislabel;
   const doneFuture = checkFutureSkew({
     candidateDate: doneAt,
     rawText: doneMatch[1],

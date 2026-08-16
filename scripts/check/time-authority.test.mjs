@@ -98,9 +98,21 @@ test("isBeyondFutureSkew: within skew -> false, beyond skew -> true, unregistere
   );
 });
 
-test("HYK-186: TIME_AUTHORITY_STATE exposes exactly the two states relay-handshake.mjs/watch-result.mjs consume", () => {
+// HYK-257: two more states added -- SUSPECTED_TZ_MISLABEL_DONE/
+// SUSPECTED_TZ_MISLABEL_DROPPED_AT (relay-handshake.mjs's checkTimezoneMislabel,
+// see that file's own header). watch-result.mjs's isFutureRejectedState does
+// NOT recognize these two (deliberately -- they are a distinct diagnosis
+// from "future", not a future-rejected verdict) -- a round blocked this way
+// still surfaces loudly through checkRelayHandshake's own ok:false/reason,
+// just not through the future_rejected watch-result exit code. 정직 한계:
+// wiring the watch-result-side notification for this new state pair is
+// follow-up scope, not this task's (coder-task.md §2 범위: relay-handshake
+// 소비 게이트 자체가 막는지가 이 라운드의 완료 조건).
+test("HYK-186/HYK-257: TIME_AUTHORITY_STATE exposes exactly the four states relay-handshake.mjs consumes", () => {
   assert.deepEqual(Object.keys(TIME_AUTHORITY_STATE).sort(), [
     "FUTURE_DONE",
     "FUTURE_DROPPED_AT",
+    "SUSPECTED_TZ_MISLABEL_DONE",
+    "SUSPECTED_TZ_MISLABEL_DROPPED_AT",
   ]);
 });
