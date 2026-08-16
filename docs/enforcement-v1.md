@@ -2306,8 +2306,19 @@ block.
 - No-op (`exit 0`) unless `HARNESS_ROLE === "PM"` — this guard regulates only
   PM sessions; every other role is role-guard's concern.
 - Blocks any call to a Linear write MCP tool matching
-  `mcp__linear-server__(save_|create_|delete_)` outright — PM proposes via a
-  packet, it does not commit to Linear itself.
+  `mcp__(linear-server|claude_ai_Linear)__(save_|create_|delete_)` outright —
+  PM proposes via a packet, it does not commit to Linear itself.
+  **HYK-267/HYK-273**: originally this regex named only `linear-server`; a
+  real audit found `mcp__claude_ai_Linear__save_issue` (a second MCP
+  connector exposing the same write surface) sailed through unblocked,
+  because nothing in the repo referenced `claude_ai_Linear` at all. This is
+  now the **2nd-layer** defense (name-matching, principled-incomplete — see
+  the code comment on `LINEAR_WRITE_TOOL_RE` in `pm-guard.mjs`), not the
+  primary one. The **1st layer** is keeping the PM session's own MCP config
+  empty at launch (Claude: `--strict-mcp-config` + `{"mcpServers":{}}`) so no
+  `mcp__*` tool exists to call in the first place — see "Known limitations"
+  below for why that layer is a launch argument, not an anchor this repo can
+  verify, and §HYK-267 below for the codex-side findings.
 - For a write-family tool (`Edit`/`Write`/`MultiEdit`/`NotebookEdit`) with a
   file path, the path is normalized (`path-normalize.mjs`'s
   `normalizeAbsolute` — the same backslash/WSL (`/mnt/c/...`)/Git-Bash
@@ -2412,7 +2423,7 @@ repo's), since that is where PM sessions actually run:
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "Edit|Write|MultiEdit|NotebookEdit|mcp__linear-server__.*",
+        "matcher": "Edit|Write|MultiEdit|NotebookEdit|mcp__linear-server__.*|mcp__claude_ai_Linear__.*",
         "hooks": [
           {
             "type": "command",
@@ -2490,6 +2501,181 @@ sandboxing`" (the corrected framing above) is not replaced by "pm-guard
   with shell access could edit or remove the PreToolUse entry, and nothing
   here detects that tampering. Mitigated the same way role-guard already is
   — human installation and ownership convention, not a stronger guarantee.
+
+### E-follow — HYK-267: MCP Linear-write blocking, "believed blocked" vs "measured blocked"
+
+Prompted by "believing a gate blocks something isn't the same as it actually
+blocking it" (this round's guiding line). HYK-273's gap (§E1 above — the
+missing `claude_ai_Linear` prefix) is the concrete instance; this
+subsection is the broader measurement work that gap triggered: what's
+actually blocked today, what mechanism can block the other seats, and how to
+_prove_ a block instead of assuming one.
+
+**Two-layer model (applies to every mcp\__-tool-name guard in this repo, not
+just pm-guard):**
+
+1. **1st layer — empty MCP config at launch.** No `mcp__*` tool exists to
+   call. This is the only layer that closes the _class_ of connectors, known
+   or not-yet-known.
+2. **2nd layer — tool-name matching** (`pm-guard.mjs`'s `LINEAR_WRITE_TOOL_RE`,
+   this manifest's `matcher`). Catches exactly the prefixes someone has
+   already enumerated. Principled-incomplete by construction — see the code
+   comment in `pm-guard.mjs`.
+
+Layer 1 is a **Claude seat launch argument** (`--strict-mcp-config` +
+`{"mcpServers":{}}`), confirmed live only for the **claude worker seat**
+(§1-2 of this task's `.harness/coder-task.md`). It is not a config file this
+repo can read — it is process-argv at spawn time, chosen by the control
+room's seat launcher, outside this repo and outside this task's write scope.
+
+**ORCH's own Linear-read need (condition ② resolution, decided by the
+responsible party, quoted verbatim):**
+
+> _"이슈 본문이 필요하면 나에게 요청하라. 내가 받는함이나 지시문에 실어 주겠다.
+> 오히려 이쪽이 정본 경로가 더 분명하다."_
+> (If the issue body is needed, ask me for it — I'll deliver it via inbox or
+> instruction. That's actually a clearer path of record than a live MCP read.)
+
+Concretely, ORCH's own launch line should carry the same empty-MCP-config
+argument as the claude worker seat (`--strict-mcp-config` +
+`{"mcpServers":{}}` for a Claude-engine ORCH seat). This task does not edit
+the control-room launcher (out of scope, §4) — this paragraph is the text
+for the human/ORCH to apply; no functionality is lost because §1-2 already
+established ORCH makes zero MCP calls in this repo (all `mcp__` references
+are guard code/config/tests, never a live call — `linear-sync.mjs` talks to
+Linear over a direct `fetch()` + `LINEAR_API_KEY`, not MCP).
+
+**codex-side blocking mechanism (condition ④, §3-3 — read-only CLI/config
+survey, nothing executed against a live PM/REVIEW session):**
+
+- `codex --help` has no `--strict-mcp-config`-equivalent global flag.
+- `codex mcp list --json` on this machine shows a live, **enabled** MCP
+  connector named `linear-server` (`auth_status: not_logged_in` in this
+  sandbox, but `enabled: true`) plus a separate, already-disabled `linear`
+  entry (`enabled: false`). This confirms §1-2's "codex 좌석은 미차단"
+  claim concretely: codex's own Linear MCP connector is live and enabled
+  today, not merely un-audited.
+- **A real per-invocation disable mechanism does exist**:
+  `codex exec -c 'mcp_servers.<name>.enabled=false'` (repeatable, one `-c`
+  per server) suppresses that server for the invocation. Measured, not
+  assumed — see the discriminating procedure below; a blanket
+  `-c 'mcp_servers={}'` override does **not** work (the baseline connection
+  attempt still fires), so the override must name each server individually.
+- **A persistent, config-file-level anchor also exists**: `codex`'s MCP
+  server list lives in `%USERPROFILE%\.codex\config.toml` under
+  `[mcp_servers.<name>]` stanzas (unlike Claude's launch-argument-only
+  block). The already-disabled `linear` entry there carries `enabled = false`
+  directly in that file; the currently-active `linear-server` entry (added
+  under a `# BEGIN/END OMC MANAGED MCP REGISTRY` block) does not. This is a
+  **harder anchor than Claude's launch argument** (§3-4) — a settings file,
+  not an ephemeral argv — but this task does not edit it (§4: "codex
+  계정·설정 변경 0", human/account territory); this paragraph is a finding
+  for the human to act on, not an action taken.
+  ⚠️ **Side finding, not this task's scope, flagged here for the record
+  without reproducing the value**: that `config.toml` `linear-server` stanza
+  stores its Linear API bearer token in plaintext inside the config file
+  (an `Authorization` header value under
+  `[mcp_servers.linear-server.headers]`). This task does not print, copy, or
+  act on that value anywhere (chat, file, or commit) — flagging its
+  _existence_ only, since it is directly adjacent to what this round
+  measured and a live credential sitting in a plaintext config file is a
+  standing exposure independent of the MCP-block question. No action taken;
+  human decision required (rotate/move to a secret store, or accept as
+  already-scoped local-machine risk).
+- **No repo-side checkable anchor exists for either engine today.** Neither
+  Claude's launch argument nor codex's `config.toml` stanza is something
+  this repo's checkers can read without a path to that file being passed in
+  (Claude: not a file at all; codex: a per-user-home file this repo has no
+  standing reason to read outside of this measurement). A `seat-preflight`-
+  style checker (same family as `hook-sync-check.mjs`/`seat-preflight.mjs`)
+  that reads `%USERPROFILE%\.codex\config.toml` and asserts
+  `mcp_servers.linear-server.enabled == false` is buildable in principle —
+  not built in this round (would require the human decision above on the
+  credential finding first, and a decision on where such a checker's
+  install target belongs; flagged for a follow-up task, not invented here).
+
+**Discriminating measurement procedure (§3-5/§6 — every command below
+distinguishes "blocked" from "not blocked" by producing a _different_
+observable in each state, closing the gap named in `.harness/coder-task.md`
+§1-5's table of five failed prior attempts, all of which returned the same
+value regardless of block state):**
+
+1. **codex seat — per-invocation block, discriminating via transport error
+   presence:**
+   ```
+   # baseline (server enabled, default config) -- expect AuthRequired transport errors on stderr
+   codex exec --json "just say hi, do not call any tools"
+
+   # blocked (per-invocation override) -- expect NO AuthRequired transport errors
+   codex exec -c 'mcp_servers.linear-server.enabled=false' -c 'mcp_servers.linear.enabled=false' -c 'mcp_servers.node_repl.enabled=false' --json "just say hi, do not call any tools"
+   ```
+   Discriminating because the baseline run's stderr contains
+   `rmcp::transport::worker: worker quit with fatal: ... AuthRequired` lines
+   (the MCP client actually attempted a connection) and the override run's
+   does not — the _presence_ of that line is the go/no-go signal, not
+   `mcp_servers` count or tool-name grep (both of which return 0 in either
+   state per the coder-task.md §1-5 table, i.e. non-discriminating).
+2. **codex seat — server enumeration (static, discriminating via
+   `enabled` field, not presence/absence):**
+   ```
+   codex mcp list --json
+   ```
+   Discriminating because a disabled server still appears in the list
+   (`"enabled": false`) — checking for the _name's absence_ would be
+   non-discriminating (name stays either way); checking the `enabled`
+   boolean is what actually distinguishes the two states.
+3. **claude 분리설정/기본 좌석 — launch-argument block, corrected method
+   (this task re-tested `claude mcp list` live, from inside this very
+   CODER session, and found it is NOT discriminating — coder-task.md §1-5's
+   own △ caution about it turns out to be right, for a reason worth
+   spelling out):**
+
+   ```
+   claude mcp list
+   ```
+
+   returned `claude.ai Linear: https://mcp.linear.app/mcp - ✔ Connected`
+   when run inside this very CODER session — even though this task's own
+   `ToolSearch` (query `"linear"`, run in the same session, same turn) found
+   **zero** `mcp__`-prefixed tools available to call. That gap is the actual
+   finding: `claude mcp list` health-checks the **account-level OAuth
+   connector**, a property of the Anthropic account, not of any one
+   session's tool registry — it reports "Connected" regardless of whether
+   `--strict-mcp-config` kept that connector's tools out of _this_
+   session's callable tool set. It is not a discriminator for the
+   session-level block at all, and should not be used as one (correcting
+   the reading that would otherwise seem natural from coder-task.md §1-5's
+   table, which flagged this command as "△ shows pre-block state only"
+   without spelling out _why_ it can't be pushed further into a real
+   discriminator by re-running it after the block).
+
+   The method that **is** discriminating, verified live in this session:
+   from inside a running session, search the tool registry itself for any
+   `mcp__`-prefixed tool (in Claude Code, `ToolSearch` with a query matching
+   the connector's name, e.g. `"linear"`). A blocked session (this one,
+   CODER, `--strict-mcp-config` applied per §1-2) returns no match despite
+   the account-level connector being reachable (per the `claude mcp list`
+   run above) — connector-reachable-but-zero-tools-exposed is the
+   discriminating pair, not connector-reachable alone. An unblocked session
+   would instead surface `mcp__claude_ai_Linear__*` (or `mcp__linear-server__*`
+   if that connector is what's configured) entries in that same search.
+
+4. **ORCH — same in-session `ToolSearch`/tool-registry check as (3)**, not
+   `claude mcp list`, once ORCH's own launch line carries the empty-MCP-config
+   argument (see the condition ② text above). Until that line is attached,
+   an in-session search for `mcp__`-prefixed Linear tools inside an ORCH
+   session is expected to find one (unblocked today, per §1-2's "codex/claude
+   ORCH 좌석 today는 미차단" baseline) — that positive result is the honest
+   current-state baseline to compare the post-fix session against, not a
+   passing result on its own.
+
+Any of the five methods coder-task.md §1-5 already tried and found
+non-discriminating (`claude -p` tool-name prompting, `--debug` mcp string
+count, `--output-format json`'s `mcp_servers` field, stream-json init
+tools/mcp_servers, or grepping for `mcp__` occurrences anywhere) should not
+be reused as a stand-in for the four above — each of those returns the same
+value in both the blocked and unblocked state on this machine, which is
+exactly the failure mode this subsection exists to not repeat.
 
 ## F — go-time worker status (worker-status-onstart.mjs, HYK-110)
 
@@ -2727,7 +2913,7 @@ entry from §E, not replacing it):
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "Edit|Write|MultiEdit|NotebookEdit|mcp__linear-server__.*",
+        "matcher": "Edit|Write|MultiEdit|NotebookEdit|mcp__linear-server__.*|mcp__claude_ai_Linear__.*",
         "hooks": [
           {
             "type": "command",
