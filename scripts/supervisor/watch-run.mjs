@@ -81,6 +81,12 @@ import { shouldNotify } from "../relay/escalation-state.mjs";
 // (기존 시험 포함)는 아무 것도 바뀌지 않는다(§6/§7 회귀 0, notifyDir
 // 패턴과 동일 원칙).
 import { runAdmissionSweepTrigger } from "./admission-sweep-wire.mjs";
+// HYK-270 (coder-task.md §5) -- 한도 정지 감지+통지 결선을 이 기존 주기
+// 사이클에 얹는다(admission sweep과 동일한 opt-in 재량 -- notifyDir이
+// 없으면 이 단계는 실행되지 않는다, §7 "새 알림 채널 0 -- 기존 통지
+// 경로 재사용"). 판정 로직 자체는 재구현하지 않고 이미 만든
+// rate-limit-stall-wire.mjs의 runRateLimitStallOnce를 그대로 부른다.
+import { runRateLimitStallOnce } from "./rate-limit-stall-wire.mjs";
 
 export const MAX_LOG_LINES = 5000;
 
@@ -1133,6 +1139,42 @@ function runReachStep({
   }
 }
 
+// HYK-270 (coder-task.md §5) -- 한도 정지 감지+통지 단계.
+// runReachStep과 대칭: `notifyDir`이 없으면 아예 실행하지 않는다(opt-in,
+// §7 "새 알림 채널 0" -- 기존 notifyDir을 그대로 재사용할 때만 동작).
+// 이 단계 자신의 실패(예외)는 감시 사이클 전체를 죽이지 않는다 -- 다른
+// 축이 이미 이 원칙을 쓰고 있다(runReachStep과 동일 catch 형태).
+function runRateLimitStallStep({
+  repoRoot,
+  notifyDir,
+  watchDir,
+  now,
+  readFn,
+  writeFn,
+  mkdirFn,
+  existsFn,
+}) {
+  if (!notifyDir) return { notRun: true };
+  try {
+    return runRateLimitStallOnce({
+      repoRoot,
+      watchDir,
+      notifyDir,
+      now,
+      readFn,
+      writeFn,
+      mkdirFn,
+      existsFn,
+    });
+  } catch (err) {
+    return {
+      notRun: false,
+      failed: true,
+      message: err && err.message ? err.message : String(err),
+    };
+  }
+}
+
 // HYK-255-watch-wire-1 (coder-task.md §1 항1) -- 부분 계수 보고 파일 생성
 // 단계. runWatchOnce/runWatchOnceCore(동기 계약 -- 다수 기존 호출자·기존
 // 시험이 동기 반환을 기대한다, §2 비타협3 회귀 0)와 같은 함수 안에 넣지
@@ -1373,6 +1415,7 @@ function resolveWatchOnceFsFns({
 // 줄바꿈으로 84줄까지 다시 늘어난 것을 수리) -- 순서·값·부작용 모두 원문
 // 그대로, 이름과 위치만 옮겼다.
 function finalizeWatchOnceCycle({
+  repoRoot,
   watchDir,
   now,
   readFn,
@@ -1430,12 +1473,23 @@ function finalizeWatchOnceCycle({
     existsFn,
     logPath,
   });
+  const rateLimitStallResult = runRateLimitStallStep({
+    repoRoot,
+    notifyDir,
+    watchDir,
+    now,
+    readFn,
+    writeFn,
+    mkdirFn,
+    existsFn,
+  });
   return {
     logPath,
     aliveRecordPath,
     line,
     detectorResult,
     reachResult,
+    rateLimitStallResult,
     capResult,
     escalationDedupe,
     sweepResult,
@@ -1483,6 +1537,7 @@ function runWatchOnceCore({
   });
   const sweepResult = runSweepStep({ admissionSweep, sweepExecFn, now });
   return finalizeWatchOnceCycle({
+    repoRoot,
     watchDir,
     now,
     readFn,
@@ -1620,6 +1675,20 @@ if (invokedDirectly) {
         watchLogPath: result.logPath,
       },
     });
+  }
+  // HYK-270 (coder-task.md §9-8 "전부 실행 출력으로 보여라") -- 한도
+  // 정지 단계 결과를 사람이 읽는 한 줄로 찍는다(watch.log 줄 형식은
+  // 다른 시험이 이미 정확히 고정하고 있어 건드리지 않는다, §6/§7 회귀 0
+  // -- 이 줄은 그 로그 줄과 별개의 stdout 한 줄이다).
+  const rl = result.rateLimitStallResult;
+  if (rl && rl.notRun !== true) {
+    console.log(
+      `rate-limit-stall: ${rl.failed ? "FAILED" : rl.status}` +
+        `${rl.verdict ? ` verdict=${rl.verdict}` : ""}` +
+        `${rl.noticePath ? ` notice=${rl.noticePath}` : ""}` +
+        `${rl.alreadyNotified ? " (already notified)" : ""}` +
+        `${rl.message ? ` -- ${rl.message}` : ""}`,
+    );
   }
   process.exit(result.detectorResult.runnerFailure ? 1 : 0);
 }
