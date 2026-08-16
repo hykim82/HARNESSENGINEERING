@@ -2,7 +2,26 @@ import { readFileSync } from "node:fs";
 import { normalizeAbsolute } from "./path-normalize.mjs";
 
 const WRITE_TOOLS = new Set(["Edit", "Write", "MultiEdit", "NotebookEdit"]);
-const LINEAR_WRITE_TOOL_RE = /^mcp__linear-server__(save_|create_|delete_)/;
+
+// HYK-267: this is the 2nd-layer defense, not the 1st. The 1st layer is
+// keeping the PM session's MCP config empty at launch (e.g. Claude's
+// `--strict-mcp-config` + `{"mcpServers":{}}`) so no `mcp__*` tool exists to
+// call in the first place -- that layer lives in the session's own launch
+// line (control room's settings.local.json / seat launcher), outside this
+// repo, and this script cannot see or verify it.
+//
+// This regex is a name-matching fallback for when that 1st layer is
+// missing, misconfigured, or the connector changes shape. It is
+// PRINCIPLED-INCOMPLETE: it can only list prefixes for connectors we know
+// about today. HYK-273 found a live gap this way -- `mcp__linear-server__*`
+// was listed but `mcp__claude_ai_Linear__*` (a different MCP connector
+// exposing the same Linear write capability) was not, so it passed through
+// unblocked. A 3rd connector with a 3rd tool-name prefix would reopen the
+// exact same hole tomorrow. Do NOT read "this regex exists" as "Linear
+// writes are blocked" -- read it as "the two prefixes we know about today
+// are blocked; the 1st layer is what actually closes the class."
+const LINEAR_WRITE_TOOL_RE =
+  /^mcp__(linear-server|claude_ai_Linear)__(save_|create_|delete_)/;
 
 // Fixed control-room root (PM's lane, outside every repo). Not configurable
 // per-invocation: pm-guard is installed once, in the control room's own
@@ -30,11 +49,17 @@ export function checkPmGuard({ role, toolName, filePath }) {
   }
 
   if (typeof toolName === "string" && LINEAR_WRITE_TOOL_RE.test(toolName)) {
-    return { ok: false, reason: `pm-guard: PM may not call Linear write tool '${toolName}' (packet + human sign-off only)` };
+    return {
+      ok: false,
+      reason: `pm-guard: PM may not call Linear write tool '${toolName}' (packet + human sign-off only)`,
+    };
   }
 
   if (!WRITE_TOOLS.has(toolName)) {
-    return { ok: true, reason: `pm-guard: '${toolName}' is not a regulated write tool` };
+    return {
+      ok: true,
+      reason: `pm-guard: '${toolName}' is not a regulated write tool`,
+    };
   }
 
   if (typeof filePath !== "string" || filePath.length === 0) {
@@ -52,13 +77,15 @@ export function checkPmGuard({ role, toolName, filePath }) {
   };
 }
 
-const invokedDirectly = process.argv[1] && process.argv[1].replace(/\\/g, "/").endsWith("scripts/check/pm-guard.mjs");
+const invokedDirectly =
+  process.argv[1] &&
+  process.argv[1].replace(/\\/g, "/").endsWith("scripts/check/pm-guard.mjs");
 if (invokedDirectly) {
   let raw = "";
   try {
     raw = readFileSync(0, "utf8");
   } catch {
-    raw = "";
+    // leave raw as ""
   }
 
   let hookInput;
@@ -73,7 +100,11 @@ if (invokedDirectly) {
   const toolInput = hookInput.tool_input || {};
   const filePath = toolInput.file_path || toolInput.notebook_path;
 
-  const result = checkPmGuard({ role: process.env.HARNESS_ROLE, toolName, filePath });
+  const result = checkPmGuard({
+    role: process.env.HARNESS_ROLE,
+    toolName,
+    filePath,
+  });
   if (result.ok) {
     process.exit(0);
   }

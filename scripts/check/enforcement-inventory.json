@@ -91,11 +91,12 @@
           "kind": "claude-settings",
           "path": "CONTROL_ROOM/.claude/settings.local.json",
           "hook_event": "PreToolUse",
-          "matcher": "Edit|Write|MultiEdit|NotebookEdit|mcp__linear-server__.*",
+          "matcher": "Edit|Write|MultiEdit|NotebookEdit|mcp__linear-server__.*|mcp__claude_ai_Linear__.*",
           "required": true
         }
       ],
-      "expected_bad": "HARNESS_ROLE=PM writes inside the repo or a non-control-room path -> exit 2",
+      "hyk267_layer_note": "This matcher (and pm-guard.mjs's own LINEAR_WRITE_TOOL_RE) is the 2nd-layer, name-matching defense, principled-incomplete by construction -- it only lists mcp__ prefixes for connectors known today (linear-server, claude_ai_Linear as of HYK-273/HYK-267). The 1st layer is keeping the session's MCP config empty at launch so no mcp__* tool exists to call; that layer lives in the session's launch line, not in this manifest, and this checker cannot verify it. Do not read a passing selfcheck against this matcher as 'Linear writes are blocked' -- read it as 'the connectors we know about today are blocked.'",
+      "expected_bad": "HARNESS_ROLE=PM writes inside the repo or a non-control-room path, or calls a save_/create_/delete_ tool under mcp__linear-server__ or mcp__claude_ai_Linear__ -> exit 2",
       "expected_good": "HARNESS_ROLE=PM writes inside the control room / scratchpad -> exit 0",
       "failure_exit": 2,
       "uncertain_exit": 0,
