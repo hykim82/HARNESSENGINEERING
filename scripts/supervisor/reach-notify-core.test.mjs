@@ -83,6 +83,44 @@ test("one axis stays open (no notify) while another axis newly opens (notify) in
   });
 });
 
+// HYK-265-observe-split-1 (coder-task.md §3-1 항1·§4 완료조건1, §5 1-B
+// 요건3): toNotify에 kind:"anomaly"와 kind:"measurement_failure"가 섞여
+// 있으면 buildNoticeText가 서로 다른 절로 가르고, 측정 불가 쪽엔
+// reasonDetail(있으면)을 함께 싣는다 -- 통지 파일도 아침 보고와 같은
+// 분리 원칙을 따른다는 계약을 직접 고정한다.
+test("HYK-265-observe-split-1: buildNoticeText splits anomaly vs measurement_failure entries into distinct sections, and shows reasonDetail for the latter (2/2)", () => {
+  const text = buildNoticeText({
+    toNotify: [
+      {
+        axisKey: "idle",
+        label: "좌석 유휴 방치",
+        verdict: "SUSPECTED_ABANDONED",
+        status: null,
+        sinceMs: 1000,
+        openMs: 0,
+        kind: "anomaly",
+      },
+      {
+        axisKey: "seat",
+        label: "좌석 무응답",
+        verdict: undefined,
+        status: "SEAT_LIVENESS_COLLECTION_FAILED",
+        sinceMs: 2000,
+        openMs: 0,
+        kind: "measurement_failure",
+        reasonDetail: "AMBIGUOUS:orca_terminal_list_failed",
+      },
+    ],
+    nowMs: 3000,
+  });
+  const anomalySection = text.split("새로 측정 불가")[0];
+  const measurementSection = text.split("새로 측정 불가")[1];
+  assert.match(anomalySection, /좌석 유휴 방치/);
+  assert.doesNotMatch(anomalySection, /좌석 무응답/);
+  assert.match(measurementSection, /좌석 무응답/);
+  assert.match(measurementSection, /AMBIGUOUS:orca_terminal_list_failed/);
+});
+
 test("buildNoticeText never blank, lists every entry in toNotify, and buildNoticeFileName is filesystem-safe (no colons) (1/1)", () => {
   const text = buildNoticeText({
     toNotify: [anomaly("idle", 1000), anomaly("seat", 2000)],

@@ -7,6 +7,7 @@ import {
   parseLogLine,
   parseWatchLog,
   computeOpenAnomalies,
+  computeOpenMeasurementFailures,
   computeRecentSummary,
   formatDurationKo,
   formatMorningReport,
@@ -40,6 +41,24 @@ const LINE_DEFAULTS = {
   bindingStatus: "JUDGED",
   bindingVerdict: "NONE",
 };
+
+// HYK-265-observe-split-3 (검토자 P1 수리) -- `report.split("## 헤더")[1]`은
+// «헤더 뒤 끝까지 전부»를 돌려주므로 다음 절(예: "## 지난 24시간 요약")까지
+// 딸려 들어온다. 그 다음 절이 같은 축 라벨을 담고 있으면(요약 절은 8축
+// 라벨을 전부 나열) 분리를 깨는 변이도 이 라벨 때문에 시험이 통과해
+// 버린다(검토자 실측 -- computeOpenMeasurementFailures의 술어를
+// isAxisAnomalousVerdict로 바꿔도 RED가 안 됨). 이 헬퍼는 «헤더 다음 줄부터
+// 다음 `## ` 헤더 직전까지»로 정확히 잘라, 뒤 절이 검사 범위에 새지 않게
+// 한다.
+function extractSection(report, headerPrefix) {
+  const headerIdx = report.indexOf(headerPrefix);
+  if (headerIdx === -1) return "";
+  const afterHeader = report.slice(headerIdx + headerPrefix.length);
+  const nextHeaderIdx = afterHeader.indexOf("\n## ");
+  return nextHeaderIdx === -1
+    ? afterHeader
+    : afterHeader.slice(0, nextHeaderIdx);
+}
 
 function line(overrides) {
   const {
@@ -260,6 +279,49 @@ test("empty log (no entries at all) still produces a non-blank report saying so 
   assert.ok(report.trim().length > 0);
 });
 
+// HYK-265-observe-split-1 (coder-task.md §4 완료조건1·2) -- 이 라운드의
+// 핵심 계약: (a) badVerdicts 축과 badStatuses 축이 formatMorningReport의
+// 서로 다른 절("지금 열려 있는 이상" vs "측정 불가(수집 실패)")에 실린다
+// (b) badStatuses 축의 사유 문자열(watch-run.mjs가 만드는 `*_reason_detail=`
+// 로그 토큰, 이 시험은 그 토큰을 직접 실어 round-trip을 확인한다)이 그
+// "측정 불가" 절에 실제로 찍힌다.
+test("HYK-265-observe-split-1: badVerdicts axis -> '지금 열려 있는 이상' section; badStatuses axis -> separate '측정 불가(수집 실패)' section with its reason string shown (2/2)", () => {
+  const t0 = Date.parse("2026-08-16T00:00:00.000Z");
+  const withReasonDetail =
+    line({
+      ts: new Date(t0).toISOString(),
+      idleStatus: "SEAT_IDLE_JUDGED",
+      idleVerdict: "SUSPECTED_ABANDONED", // badVerdicts 축 -- "이상"
+      seatStatus: "SEAT_LIVENESS_COLLECTION_FAILED", // badStatuses 축 -- "측정 불가"
+    }) + " seat_reason_detail=AMBIGUOUS:orca_terminal_list_failed_timeout";
+  const entries = parseWatchLog(withReasonDetail).entries;
+  const report = formatMorningReport({ entries, nowMs: t0 });
+
+  const anomalySection = extractSection(report, "## 지금 열려 있는 이상");
+  const measurementSection = extractSection(report, "## 측정 불가");
+
+  assert.match(
+    anomalySection,
+    /좌석 유휴 방치/,
+    "the badVerdicts axis (idle) must appear under '지금 열려 있는 이상'",
+  );
+  assert.doesNotMatch(
+    anomalySection,
+    /좌석 무응답/,
+    "the badStatuses axis (seat, COLLECTION_FAILED) must NOT appear under '지금 열려 있는 이상'",
+  );
+  assert.match(
+    measurementSection,
+    /좌석 무응답/,
+    "the badStatuses axis (seat) must appear under '측정 불가(수집 실패)'",
+  );
+  assert.match(
+    measurementSection,
+    /AMBIGUOUS:orca_terminal_list_failed_timeout/,
+    "the reason string must reach the human-facing report, not just the log",
+  );
+});
+
 test("computeRecentSummary counts anomalous samples within the window, distinct from computeOpenAnomalies (1/1)", () => {
   const t0 = Date.parse("2026-08-05T00:00:00.000Z");
   const entries = parseWatchLog(
@@ -283,7 +345,13 @@ test("computeRecentSummary counts anomalous samples within the window, distinct 
   );
 });
 
-test("all 9 axes are independently tracked (one axis bad does not mask another) (1/1)", () => {
+// HYK-265-observe-split-1 (coder-task.md §3-1 항1) 갱신: cap 축은
+// badVerdicts가 비어 있고(reach-report-core.mjs AXES 정의, cap_verdict는
+// 정상일 때 항상 "DECIDED") CAP_READ_FAILED는 badStatuses 소속이다 --
+// 즉 cap은 "이상"이 아니라 "측정 불가"로 갈라져야 한다(이 시험이 그
+// 분리를 고정한다. 분리 전에는 두 절이 합쳐져 있어 cap이 computeOpenAnomalies
+// 에도 나타났다).
+test("all 8 badVerdict axes are independently tracked in computeOpenAnomalies (one axis bad does not mask another); cap(badStatuses-only) goes to computeOpenMeasurementFailures instead (2/2)", () => {
   const t0 = Date.parse("2026-08-05T00:00:00.000Z");
   const entries = parseWatchLog(
     line({
@@ -310,7 +378,14 @@ test("all 9 axes are independently tracked (one axis bad does not mask another) 
   ).entries;
   const open = computeOpenAnomalies(entries, t0);
   const keys = open.map((a) => a.axisKey).sort();
-  assert.deepEqual(keys, AXES.map((a) => a.key).sort());
+  const expectedAnomalyKeys = AXES.map((a) => a.key)
+    .filter((k) => k !== "cap")
+    .sort();
+  assert.deepEqual(keys, expectedAnomalyKeys);
+
+  const measurementFailures = computeOpenMeasurementFailures(entries, t0);
+  const mfKeys = measurementFailures.map((a) => a.axisKey);
+  assert.deepEqual(mfKeys, ["cap"]);
 });
 
 test("formatDurationKo formats hours+minutes, and sub-hour durations without a '0시간' prefix (2/2)", () => {

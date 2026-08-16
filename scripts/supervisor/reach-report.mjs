@@ -32,6 +32,7 @@ import path from "node:path";
 import {
   parseWatchLog,
   computeOpenAnomalies,
+  computeOpenMeasurementFailures,
   formatMorningReport,
 } from "./reach-report-core.mjs";
 import {
@@ -134,10 +135,20 @@ export function runReachOnce({
   writeFn(reportOutPath, reportText, "utf8");
 
   const openAnomalies = computeOpenAnomalies(entries, now);
+  // HYK-265-observe-split-1 (coder-task.md §5 1-B 요건3·§4 완료조건1): 통지
+  // (받는함 reach-notify-*.md)도 아침 보고와 같은 원칙을 따른다 -- «측정
+  // 불가»(badStatuses)를 조용히 통지에서 빠뜨리지 않는다(이 축도 여전히
+  // 사람에게 "관측이 실패하고 있다"는 알려야 한다, §2 실측 배경). 두
+  // 배열은 axisKey가 절대 겹치지 않으므로(한 axis, 한 entry가 동시에
+  // badVerdicts와 badStatuses를 만족할 수 없다 -- computeOpenByPredicate
+  // 주석 참조) 합쳐도 decideNotifications의 per-axis sinceMs 추적이
+  // 깨지지 않는다. 각 원소는 kind로 자기 출처를 밝히므로 buildNoticeText
+  // 가 다시 두 절로 가른다.
+  const openMeasurementFailures = computeOpenMeasurementFailures(entries, now);
   const previousState = readStateFile(readFn, statePath);
   const { nextState, toNotify } = decideNotifications({
     previousState,
-    openAnomalies,
+    openAnomalies: [...openAnomalies, ...openMeasurementFailures],
   });
 
   let noticePath = null;
@@ -157,6 +168,7 @@ export function runReachOnce({
     reportText,
     reportOutPath,
     openAnomalies,
+    openMeasurementFailures,
     toNotify,
     noticePath,
     skipped,

@@ -336,6 +336,74 @@ test("HYK-185-unconsumed-1: unconsumed fields from detector stdout are logged wi
   }
 });
 
+// HYK-265-observe-split-1 (coder-task.md §3-1 항2·§4 완료조건2): 수집
+// 실패(COLLECTION_FAILED)일 때 observationReason/reason이 로그 줄까지
+// 닿는지 직접 확인한다(seat -- observationReason 있음, unconsumed --
+// observationReason 없이 reason만).
+test("HYK-265-observe-split-1: seatLiveness COLLECTION_FAILED with observationReason+reason -> seat_reason_detail= token in watch.log (1/1)", () => {
+  const watchDir = tmpWatchDir();
+  try {
+    const result = runWatchOnce({
+      repoRoot: ROOT,
+      watchDir,
+      now: NOW_MS,
+      execFn: () =>
+        JSON.stringify({
+          verdict: "PROGRESSING",
+          reasonCode: "OK",
+          seatLiveness: {
+            status: "SEAT_LIVENESS_COLLECTION_FAILED",
+            observationReason: "AMBIGUOUS",
+            reason: "orca terminal list failed: multiple candidates",
+          },
+          seatIdle: { status: "SEAT_IDLE_NOT_APPLICABLE" },
+          dispatchStart: { status: "DISPATCH_START_NOT_APPLICABLE" },
+        }),
+    });
+    const logText = fs.readFileSync(result.logPath, "utf8");
+    assert.match(logText, /seat_status=SEAT_LIVENESS_COLLECTION_FAILED/);
+    assert.match(
+      logText,
+      /seat_reason_detail=AMBIGUOUS:orca_terminal_list_failed:_multiple_candidates/,
+    );
+  } finally {
+    fs.rmSync(watchDir, { recursive: true, force: true });
+  }
+});
+
+test("HYK-265-observe-split-1: unconsumed COLLECTION_FAILED with reason only (no observationReason) -> unconsumed_reason_detail= token, and normal statuses produce NO *_reason_detail= tokens (regression -- noise stays 0 in the common case) (2/2)", () => {
+  const watchDir = tmpWatchDir();
+  try {
+    const result = runWatchOnce({
+      repoRoot: ROOT,
+      watchDir,
+      now: NOW_MS,
+      execFn: () =>
+        JSON.stringify({
+          verdict: "PROGRESSING",
+          reasonCode: "OK",
+          seatLiveness: { status: "SEAT_LIVENESS_NOT_APPLICABLE" },
+          seatIdle: { status: "SEAT_IDLE_NOT_APPLICABLE" },
+          dispatchStart: { status: "DISPATCH_START_NOT_APPLICABLE" },
+          unconsumed: {
+            status: "UNCONSUMED_COLLECTION_FAILED",
+            reason: "unconsumed: git log failed",
+          },
+        }),
+    });
+    const logText = fs.readFileSync(result.logPath, "utf8");
+    assert.match(
+      logText,
+      /unconsumed_reason_detail=unconsumed:_git_log_failed/,
+    );
+    assert.doesNotMatch(logText, /seat_reason_detail=/);
+    assert.doesNotMatch(logText, /idle_reason_detail=/);
+    assert.doesNotMatch(logText, /start_reason_detail=/);
+  } finally {
+    fs.rmSync(watchDir, { recursive: true, force: true });
+  }
+});
+
 test("HYK-185-unconsumed-1: missing unconsumed field in detector stdout logs unconsumed_status=NONE (regression guard: old detector payloads without this axis still parse) (1/1)", () => {
   const watchDir = tmpWatchDir();
   try {
