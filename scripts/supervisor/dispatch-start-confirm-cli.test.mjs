@@ -188,22 +188,48 @@ test("CLI end-to-end(spawn): NOT_STARTED면 종료코드 1 + notifyDir에 «재�
   });
 });
 
-// ★3R 신규: STALLED_AFTER_START 경로도 실제 CLI 프로세스로 spawn해 종료
-// 코드 3 + «좌석 확인» 문구 통지 파일이 실제로 생기는지 확인한다. 실제
-// 세션 로그가 폴링 도중(=관측 창 «안»에서) 한 번 커졌다가 멈추는 모양을
-// 그대로 재현해야 하므로(그래야 "관측 시작 전부터 이미 컸다"와 구별되는
-// 진짜 성장 신호가 잡힌다) 짧은 실제 대기(수백ms) 하나를 쓴다 -- 시험
-// 전체 길이에 영향이 없는 범위(<2초)로만.
-test("CLI end-to-end(spawn): 폴링 도중 한 번 커졌다가 멈추면 종료코드 3 + notifyDir에 «좌석 확인» 문구 통지 파일이 실제로 생긴다", async () => {
-  await withTempDir("dsc-notify-stalled-", async (notifyDir) => {
-    await withTempDir("dsc-home-stalled-", async (fakeHome) => {
+// ★4R 수리(coder-task.md §2, REVIEW 3R 반려 그대로): 이전 버전은 "150ms
+// 뒤 딱 한 번" 파일을 키우는 `setTimeout` 하나에 기대고 있었다. 부하가
+// 큰 전체 스윕에서는 자식 프로세스의 «첫 관측» 자체가 150ms보다 늦게
+// 일어날 수 있고, 그러면 그 한 번의 쓰기가 첫 관측 «전에» 이미 반영돼
+// 버려 growth가 전혀 감지되지 않는다(검토자가 동일 조건을 직접 주입해
+// `NOT_STARTED`로 재현했다). ⛔"대기 시간을 늘리는 것"은 해법이 아니다
+// (부하가 더 크면 또 깨진다).
+//
+// ★수리 방법(동기화 -- 시간 예약이 아니라 "계속 자라는 상태") -- 한 번의
+// 정밀한 타이밍에 기대는 대신, 자식이 살아 있는 동안 **짧은 간격으로
+// 계속 키우다가 멈춘다.** 이러면 자식이 자신의 «첫 관측»을 정확히
+// 언제 하든(부하로 늦어지든 빠르든) 그 순간의 크기가 무엇이든, **그
+// 뒤에 최소 한 번은 더 큰 값을 보게 된다**(계속 자라는 동안 관측하는
+// 한, 자식이 최소 2회 폴링만 하면 성립 -- 특정 시각 정렬에 기대지
+// 않는다). 성장 창(`GROWTH_WINDOW_MS`)이 끝나면 더는 안 건드려
+// "승인창 등으로 멈춤"과 동형이 되고, 그 뒤 `stallThresholdMs`가
+// 지나면 결정적으로 STALLED_AFTER_START가 된다.
+const GROWTH_WINDOW_MS = 900; // 이 창이 끝날 때까지 자식이 최소 2회는 폴링한다(poll-interval 40ms 기준 넉넉한 여유).
+const GROWTH_TICK_MS = 20;
+
+function growContinuously(logPath, windowMs, tickMs, writeFileSync) {
+  let elapsed = 0;
+  let chunk = 0;
+  const timer = setInterval(() => {
+    elapsed += tickMs;
+    chunk += 1;
+    writeFileSync(logPath, "x".repeat(chunk * 200), "utf8");
+    if (elapsed >= windowMs) clearInterval(timer);
+  }, tickMs);
+  return () => clearInterval(timer);
+}
+
+async function runStalledAfterStartOnce({ label }) {
+  return withTempDir(`dsc-notify-stalled-${label}-`, async (notifyDir) => {
+    return withTempDir(`dsc-home-stalled-${label}-`, async (fakeHome) => {
       const { execFile } = await import("node:child_process");
       const { promisify } = await import("node:util");
       const execFileAsync = promisify(execFile);
       const { mkdirSync, writeFileSync } = await import("node:fs");
       const { deriveClaudeProjectDirName } =
         await import("./rate-limit-stall-adapter.mjs");
-      const repoRoot = "C:\\wt\\hyk270-stalled-demo";
+      const repoRoot = `C:\\wt\\hyk270-stalled-demo-${label}`;
       const projectDir = join(
         fakeHome,
         ".claude",
@@ -214,52 +240,113 @@ test("CLI end-to-end(spawn): 폴링 도중 한 번 커졌다가 멈추면 종료
       const logPath = join(projectDir, "s.jsonl");
       writeFileSync(logPath, "", "utf8"); // 배달 직후, 아직 아무것도 없음.
 
-      // 짧은 지연 뒤 딱 한 번 커지게 한다(=관측 창 «안»에서의 진짜 성장),
-      // 그 뒤로는 더 안 건드린다(=승인창 등으로 멈춘 것과 동형).
-      setTimeout(() => writeFileSync(logPath, "x".repeat(5000), "utf8"), 150);
-
-      const child = execFileAsync(
-        process.execPath,
-        [
-          CLI_PATH,
-          "--repo-root",
-          repoRoot,
-          "--dispatched-at-ms",
-          String(Date.now()),
-          "--notify-dir",
-          notifyDir,
-          "--task-id",
-          "HYK-TEST-stalled",
-          "--timeout-ms",
-          "1500",
-          "--stall-threshold-ms",
-          "500",
-          "--poll-interval-ms",
-          "80",
-        ],
-        {
-          encoding: "utf8",
-          env: { ...process.env, HOME: fakeHome, USERPROFILE: fakeHome },
-        },
+      const stopGrowing = growContinuously(
+        logPath,
+        GROWTH_WINDOW_MS,
+        GROWTH_TICK_MS,
+        writeFileSync,
       );
 
       let threw = null;
       let stderr = "";
       try {
-        await child;
+        await execFileAsync(
+          process.execPath,
+          [
+            CLI_PATH,
+            "--repo-root",
+            repoRoot,
+            "--dispatched-at-ms",
+            String(Date.now()),
+            "--notify-dir",
+            notifyDir,
+            "--task-id",
+            `HYK-TEST-stalled-${label}`,
+            // ★부하 여유: 이 세 값은 타이밍을 "맞추기" 위한 것이 아니라
+            // "growth 창이 끝난 뒤에도 자식이 stallThreshold 도달을 볼
+            // 시간이 있다"는 여유만 준다 -- 정밀 정렬은 growContinuously
+            // 쪽 로직(계속 자람)이 담당한다.
+            "--timeout-ms",
+            "4000",
+            "--stall-threshold-ms",
+            "1200",
+            "--poll-interval-ms",
+            "40",
+          ],
+          {
+            encoding: "utf8",
+            env: { ...process.env, HOME: fakeHome, USERPROFILE: fakeHome },
+          },
+        );
       } catch (err) {
         threw = err;
         stderr = err.stderr || "";
+      } finally {
+        stopGrowing();
       }
-      assert.ok(threw, "STALLED_AFTER_START도 비0 종료코드여야 한다");
-      assert.equal(threw.code, 3);
-      assert.match(stderr, /STALLED_AFTER_START/);
-      assert.match(stderr, /좌석 확인/);
-      const files = readdirSync(notifyDir);
-      assert.equal(files.length, 1);
-      const text = readFileSync(join(notifyDir, files[0]), "utf8");
-      assert.match(text, /시작 후 멈춤/);
-      assert.match(text, /좌석 상태를 직접 확인/);
+      return { threw, stderr, notifyDir };
     });
   });
+}
+
+// ★4R 신규(coder-task.md §2 항2 요구 -- 검토자가 반증에 쓴 그 부하 조건을
+// «고치지 않고» fixture로 고정한다): 세션 로그가 자식의 «첫 관측 전에»
+// 이미 커져 있으면(=이번 실행의 첫 관측 자체가 그 값을 기준선으로
+// 삼는다), 그 뒤로 더 안 늘어도 이 CLI는 `STALLED_AFTER_START`가 아니라
+// `NOT_STARTED`를 낸다 -- ★이것은 버그가 아니라 "현재 설계가 구조적으로
+// 못 보는" 알려진 한계다(한용 확정: 이번 라운드에서 고치지 않는다, «첫
+// 관측 기준선» 근본 수리는 ps1 결선과 함께 다음 조각). 이 시험은 그 한계
+// 자체를 고정한다(결정적 -- 실제 시간에 전혀 기대지 않는다, collectFn을
+// 호출 순서로만 제어).
+test("★4R 알려진 한계 fixture(★고치지 않음, 고정만): 첫 관측 전에 이미 커져 있으면(=growth가 이번 실행의 관측 구간 밖) NOT_STARTED다 -- STALLED_AFTER_START가 아니다", async () => {
+  const collectFn = () => ({ ok: true, totalBytes: 5000 }); // 첫 호출부터 이미 5000 -- 이번 실행 안에서는 절대 "늘어난 적"이 없다.
+  const result = await runDispatchStartConfirm({
+    repoRoot: "C:\\wt",
+    dispatchedAtMs: 0,
+    timeoutMs: 60000,
+    stallThresholdMs: 60000,
+    pollIntervalMs: 15000,
+    now: fakeClock(0, 15000),
+    sleepFn: instantSleep,
+    collectFn,
+  });
+  // ⚠️의도된 동작 확인(고치는 시험이 아니다) -- «첫 관측이 이미 큰 값»과
+  // «전혀 시작 못 함」을 이 설계는 구별하지 못한다. 그 사실을 정직하게
+  // 고정한다.
+  assert.equal(result.status, DISPATCH_START_CONFIRM_STATUS.NOT_STARTED);
+});
+
+// ★3R 신규 / ★4R 수리: STALLED_AFTER_START 경로를 실제 CLI 프로세스로
+// spawn해 종료코드 3 + «좌석 확인» 문구 통지 파일이 실제로 생기는지
+// 확인한다. ★4R부터 시간 예약(고정 지연 1회) 대신 "계속 자라다가 멈춤"
+// 동기화를 쓴다(위 growContinuously/runStalledAfterStartOnce 헤더 주석
+// 참조) -- 부하와 무관하게 결정적이어야 한다는 요구를 이 시험 자신이
+// 실증한다: 아래 반복 실행 시험이 이 시험을 5회 이상 연속 통과시킨다.
+test("CLI end-to-end(spawn, 부하-무관 동기화): 폴링 도중 계속 커지다 멈추면 종료코드 3 + notifyDir에 «좌석 확인» 문구 통지 파일이 실제로 생긴다", async () => {
+  const { threw, stderr, notifyDir } = await runStalledAfterStartOnce({
+    label: "single",
+  });
+  assert.ok(threw, "STALLED_AFTER_START도 비0 종료코드여야 한다");
+  assert.equal(threw.code, 3);
+  assert.match(stderr, /STALLED_AFTER_START/);
+  assert.match(stderr, /좌석 확인/);
+  const files = readdirSync(notifyDir);
+  assert.equal(files.length, 1);
+  const text = readFileSync(join(notifyDir, files[0]), "utf8");
+  assert.match(text, /시작 후 멈춤/);
+  assert.match(text, /좌석 상태를 직접 확인/);
+});
+
+// ★4R 완료조건3(coder-task.md §4 항3) -- 같은 시험을 반복 실행해 전건
+// 동일 결과임을 실행 출력으로 보인다(최소 5회). withTempDir가 매번 새
+// mkdtemp 디렉터리를 쓰므로 라운드끼리 간섭 없음.
+test("반복 실행 결정성(5회 연속): 매번 동일하게 STALLED_AFTER_START·종료코드 3 (부하 무관 동기화 실증)", async () => {
+  for (let i = 0; i < 5; i++) {
+    const { threw, stderr } = await runStalledAfterStartOnce({
+      label: `repeat${i}`,
+    });
+    assert.ok(threw, `round ${i}: 비0 종료코드여야 한다`);
+    assert.equal(threw.code, 3, `round ${i}: 종료코드가 3이어야 한다`);
+    assert.match(stderr, /STALLED_AFTER_START/, `round ${i}`);
+  }
 });
