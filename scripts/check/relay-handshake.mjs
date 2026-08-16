@@ -6,6 +6,7 @@ import { createHash } from "node:crypto";
 import {
   recordRejectStreakFromResultText,
   isReviewFamilyRole,
+  REJECT_STREAK_REASON_CODE,
 } from "./reject-streak.mjs";
 import {
   archiveRoundEnvelope,
@@ -300,6 +301,9 @@ function autoArchiveRoundTaskFile({ role, taskContent, harnessDir }) {
 // `ledgerRecorded` 효과를 판단하려면 이 결과가 필요하다. Non-REVIEW roles
 // have `attempted:false`, which the receipt-writing call site below reads
 // as "이 효과는 이 역할에 해당하지 않는다" (never treated as a failure).
+// HYK-262: also carries `reason` through (was discarded after logging) so
+// the caller can distinguish WHICH kind of `attempted:true, ok:false`
+// this is -- see checkRelayHandshake's own use of it, right below.
 function autoRecordRejectStreak({ role, resultContent }) {
   const autoRecord = recordRejectStreakFromResultText({
     role,
@@ -312,7 +316,69 @@ function autoRecordRejectStreak({ role, resultContent }) {
   } else {
     console.error(autoRecord.reason);
   }
-  return { attempted: true, ok: autoRecord.ok };
+  return {
+    attempted: true,
+    ok: autoRecord.ok,
+    reason: autoRecord.reason,
+    reasonCode: autoRecord.reasonCode,
+  };
+}
+
+// Extracted from checkRelayHandshake (quality-check: keeps its own
+// complexity/line-count under the repo's ESLint ceiling) -- HYK-262 §3-1/
+// §3-2: ⛔only the AMBIGUOUS-count 표지 줄 계약 violation (`for:`/`task_id:`/
+// 판정 줄이 2개 이상이라 «어느 것이 최종인지 결정할 수 없다» --
+// reject-streak.mjs:180-185/191/214 원문, all three share this exact
+// phrase) rejects consumption. Every OTHER attempted-but-failed shape (no
+// verdict line at all, a corrupt/unreadable ledger file) is a pre-existing,
+// already-tested "still ok:true, still logs UNJUDGABLE" shape this task's
+// scope does NOT touch (§4 완료조건 2: 정상 라운드 회귀 0). Returns null
+// when this round is not blocked (the normal case), or the ok:false
+// verdict to return immediately otherwise.
+// HYK-262 §2 (책임자 확정 2R): the block used to be decided by regex-
+// matching the Korean sentence 어느 것이 최종인지 결정할 수 없다 against
+// `reason` -- 1R 검토 실측: rewording that sentence by one character
+// silently killed the block. This set is the stable, never-reworded
+// coupling value instead -- membership check against reject-streak.mjs's
+// own REJECT_STREAK_REASON_CODE enum (imported, not re-declared), so the
+// two files can never drift out of sync on what "ambiguous cover line"
+// means. `reason` (the Korean sentence) is still carried through into this
+// function's own return reason below for human readers -- it is read-only
+// here now, never matched.
+const AMBIGUOUS_COVER_REASON_CODES = new Set([
+  REJECT_STREAK_REASON_CODE.AMBIGUOUS_FOR_LINE,
+  REJECT_STREAK_REASON_CODE.AMBIGUOUS_TASK_ID_LINE,
+  REJECT_STREAK_REASON_CODE.AMBIGUOUS_VERDICT_LINE,
+]);
+
+function checkAmbiguousCoverViolation(recordOutcome) {
+  const isAmbiguous =
+    recordOutcome.attempted &&
+    !recordOutcome.ok &&
+    AMBIGUOUS_COVER_REASON_CODES.has(recordOutcome.reasonCode);
+  if (!isAmbiguous) return null;
+  return {
+    ok: false,
+    reason: `consumption rejected (HYK-262): REVIEW-family result file violates the 표지 줄 계약 (for:/task_id:/판정 줄이 2개 이상 -- ${recordOutcome.reason}) -- envelope/task archiving and consumption receipt are skipped for this round (표지 줄을 고쳐 다시 완료해야 한다)`,
+  };
+}
+
+// HYK-262 §3 (책임자 확정 2R): the two shapes that reach `attempted:true,
+// ok:false` WITHOUT being an ambiguous-cover-line violation (checked above)
+// -- e.g. 판정 줄 0개(NO_VERDICT_LINE) or 원장 파일 손상(LEDGER_READ_FAILED/
+// LEDGER_INVALID_JSON/LEDGER_INVALID_SHAPE) -- are deliberately NOT blocked
+// this round (HYK-266 범위, 착수 금지). But §3의 근거 문장("관측·기록이
+// 실패했으면 그 사실이 다음 단계의 「진행 가능 여부」에 반영되어야 한다 --
+// 화면 출력만으로는 「반영」이 아니다")은 여전히 지켜야 하므로, 최소한
+// «이 경우는 차단하지 않았다»는 사실 자체를 명시적으로 남긴다 -- 기존
+// autoRecordRejectStreak의 console.error 한 줄(레코딩 실패 그 자체)과는
+// 별개로, «그리고 이건 차단 안 했다»는 판단을 새로 찍는다.
+function traceUnblockedRecordFailure(recordOutcome) {
+  if (!recordOutcome.attempted || recordOutcome.ok) return;
+  const reasonCode = recordOutcome.reasonCode ?? "UNKNOWN_REASON_CODE";
+  console.log(
+    `relay-handshake: NOT_BLOCKED (HYK-262 §3) -- reject-streak record failed with reasonCode=${reasonCode} but this round is NOT blocked (${recordOutcome.reason}) -- consumption/archiving/receipt proceed normally; HYK-266 (별건) decides whether this reasonCode class should block in future`,
+  );
 }
 
 function parseKstTimestamp(str) {
@@ -546,10 +612,34 @@ export function checkRelayHandshake({
   // here (inside the shared decision function, not only the CLI block) so
   // every caller -- the CLI AND in-process callers like relay-core.mjs --
   // gets it; §1's original gap was that NOTHING called `record` anywhere.
-  // Never mutates this function's own return value or the CLI's exit code
-  // (§2-1 R5) -- purely a side effect layered on top of an already-decided
-  // PASS. Failure/duplicate/skip are never swallowed (§2-1 R4) --
-  // autoRecordRejectStreak surfaces every branch via console.log/error.
+  //
+  // HYK-262: moved AHEAD of autoArchiveRoundEnvelope/autoArchiveRoundTaskFile
+  // (was after both -- see git history) and now DOES mutate this function's
+  // own return value/exit code for one specific case: a REVIEW-family
+  // result whose ledger record was attempted but failed (`attempted:true,
+  // ok:false` -- e.g. a 표지 줄 계약 위반 that reject-streak.mjs itself
+  // reports UNJUDGABLE for). Before this change that failure was only ever
+  // surfaced via console.error while checkRelayHandshake still returned
+  // ok:true -- the round finished silently with the reject-streak ledger
+  // permanently missing an entry, disarming 게이트 2 (연속반려) with no
+  // trace beyond a log line nobody was watching (실사고 2026-08-14, HYK-262
+  // §2). ⛔이 조각의 상설 문장: «관측·기록이 실패했으면 그 사실이 다음
+  // 단계의 «진행 가능 여부»에 반영되어야 한다 -- 화면 출력만으로는 «반영»이
+  // 아니다.» Placing this check BEFORE the archive calls (rather than after,
+  // leaving them unchanged) is a deliberate design choice, not an
+  // accident: the completion condition's literal wording is "종료코드 0
+  // 아님 · 영수증 미발행 · 보관 미실시" (exit nonzero, no receipt, NO
+  // ARCHIVE) -- reordering makes "보관 미실시" literally true (the archive
+  // calls are never reached) instead of leaving a half-true state where the
+  // round is rejected AFTER its envelope/task file already got copied into
+  // `.harness/rounds/`. CODER/VERIFY (isReviewFamilyRole false) are
+  // unaffected: `autoRecordRejectStreak` returns `{attempted:false}` for
+  // them, so this branch never fires and archiving/completion proceed
+  // exactly as before (§3-1 요건, HYK-262 범위 -- REVIEW 계열만 영향).
+  const recordOutcome = autoRecordRejectStreak({ role, resultContent });
+  const coverViolation = checkAmbiguousCoverViolation(recordOutcome);
+  if (coverViolation) return coverViolation;
+  traceUnblockedRecordFailure(recordOutcome);
   // HYK-204: the moment this function confirms a round's result file is
   // COMPLETE (every check above already passed) is also the last moment
   // before ORCH drops the next round's task file and this same
@@ -567,7 +657,6 @@ export function checkRelayHandshake({
     taskContent,
     harnessDir,
   });
-  const recordOutcome = autoRecordRejectStreak({ role, resultContent });
   // HYK-227 §2: moved here from the CLI-only `invokedDirectly` block below
   // (was line-local to that block prior to this change) so EVERY caller of
   // checkRelayHandshake -- not only the CLI entry point -- reaches this

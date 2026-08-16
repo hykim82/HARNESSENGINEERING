@@ -88,6 +88,32 @@ export const HARD_STOP_STREAK = 4;
 // replace, the same `<!-- reject-streak-envelope ... -->` block.
 const EVIDENCE_POINTER_LINE_RE = /^\s*재현\s*증거\s*포인터\s*:\s*(.+?)\s*$/m;
 
+// HYK-262 §2 (책임자 확정): relay-handshake.mjs used to decide "block
+// consumption" by matching the Korean sentence 어느 것이 최종인지 결정할
+// 수 없다 against `reason` with a regex -- 1R's own검토 실측 showed
+// rewording that sentence by one character silently kills the block. A
+// structured, never-reworded reasonCode is the stable coupling value the
+// 책임자 asked for; `reason` stays exactly as-is (added, not replaced) for
+// human readers/logs. Every ok:false branch below that can occur sets one
+// of these -- relay-handshake.mjs matches on reasonCode membership, never
+// on `reason` text.
+export const REJECT_STREAK_REASON_CODE = Object.freeze({
+  // 표지 줄(for:/task_id:/verdict:)이 2개 이상 -- 어느 것이 최종인지 결정할
+  // 수 없어 판정 자체를 거부하는 세 갈래. relay-handshake.mjs가 소비를
+  // 막는 대상은 정확히 이 세 코드다.
+  AMBIGUOUS_FOR_LINE: "AMBIGUOUS_FOR_LINE",
+  AMBIGUOUS_TASK_ID_LINE: "AMBIGUOUS_TASK_ID_LINE",
+  AMBIGUOUS_VERDICT_LINE: "AMBIGUOUS_VERDICT_LINE",
+  // 표지 줄 계약 위반이 아닌, 다른 이유로 UNJUDGABLE한 갈래들 -- §3의
+  // "막지 않는 2종"이 흔적을 남길 때 어느 종류인지 구분하는 데 쓰인다.
+  NO_COVER_LINE: "NO_COVER_LINE",
+  ISSUE_ID_UNPARSEABLE: "ISSUE_ID_UNPARSEABLE",
+  NO_VERDICT_LINE: "NO_VERDICT_LINE",
+  LEDGER_READ_FAILED: "LEDGER_READ_FAILED",
+  LEDGER_INVALID_JSON: "LEDGER_INVALID_JSON",
+  LEDGER_INVALID_SHAPE: "LEDGER_INVALID_SHAPE",
+});
+
 function repoRoot() {
   try {
     return execSync("git rev-parse --show-toplevel", {
@@ -180,6 +206,7 @@ export function parseReviewOutcome(reviewText) {
   if (forMatches.length > 1) {
     return {
       ok: false,
+      reasonCode: REJECT_STREAK_REASON_CODE.AMBIGUOUS_FOR_LINE,
       reason: `reject-streak record: UNJUDGABLE -- 'for:' 줄이 ${forMatches.length}개라 어느 것이 최종인지 결정할 수 없다`,
     };
   }
@@ -188,6 +215,7 @@ export function parseReviewOutcome(reviewText) {
   } else if (taskIdMatches.length > 1) {
     return {
       ok: false,
+      reasonCode: REJECT_STREAK_REASON_CODE.AMBIGUOUS_TASK_ID_LINE,
       reason: `reject-streak record: UNJUDGABLE -- 'task_id:' 줄이 ${taskIdMatches.length}개라 어느 것이 최종인지 결정할 수 없다`,
     };
   } else if (taskIdMatches.length === 1) {
@@ -196,6 +224,7 @@ export function parseReviewOutcome(reviewText) {
   if (!rawTaskId) {
     return {
       ok: false,
+      reasonCode: REJECT_STREAK_REASON_CODE.NO_COVER_LINE,
       reason:
         "reject-streak record: no 'for:' or 'task_id:' line found -- cannot resolve which task this verdict is about",
     };
@@ -204,6 +233,7 @@ export function parseReviewOutcome(reviewText) {
   if (!issueId) {
     return {
       ok: false,
+      reasonCode: REJECT_STREAK_REASON_CODE.ISSUE_ID_UNPARSEABLE,
       reason: `reject-streak record: task id '${rawTaskId}' does not start with HYK-<digits> -- cannot derive issue id`,
     };
   }
@@ -211,12 +241,14 @@ export function parseReviewOutcome(reviewText) {
   if (verdictMatches.length > 1) {
     return {
       ok: false,
+      reasonCode: REJECT_STREAK_REASON_CODE.AMBIGUOUS_VERDICT_LINE,
       reason: `reject-streak record: UNJUDGABLE -- 판정 줄이 ${verdictMatches.length}개라 어느 것이 최종인지 결정할 수 없다`,
     };
   }
   if (verdictMatches.length === 0) {
     return {
       ok: false,
+      reasonCode: REJECT_STREAK_REASON_CODE.NO_VERDICT_LINE,
       reason:
         "reject-streak record: no 'verdict: approved' or 'verdict: rejected' line found",
     };
@@ -284,7 +316,12 @@ export function applyOutcome(ledger, { issueId, taskId, verdict, at, doneAt }) {
 // available) -- see parseReviewOutcome's own DONE-line handling.
 export function computeRecord({ reviewText, ledger, at }) {
   const outcome = parseReviewOutcome(reviewText);
-  if (!outcome.ok) return { ok: false, reason: outcome.reason };
+  if (!outcome.ok)
+    return {
+      ok: false,
+      reason: outcome.reason,
+      reasonCode: outcome.reasonCode,
+    };
 
   const existing = ledger?.issues?.[outcome.issueId];
   const lastEntry = existing?.history?.[existing.history.length - 1];
@@ -357,6 +394,7 @@ export function loadLedger(
   } catch (err) {
     return {
       ok: false,
+      reasonCode: REJECT_STREAK_REASON_CODE.LEDGER_READ_FAILED,
       reason: `reject-streak: UNJUDGABLE -- failed to read ledger '${ledgerPath}' (${err.message})`,
     };
   }
@@ -366,12 +404,14 @@ export function loadLedger(
   } catch (err) {
     return {
       ok: false,
+      reasonCode: REJECT_STREAK_REASON_CODE.LEDGER_INVALID_JSON,
       reason: `reject-streak: UNJUDGABLE -- ledger '${ledgerPath}' is not valid JSON (${err.message})`,
     };
   }
   if (!hasValidIssuesShape(parsed)) {
     return {
       ok: false,
+      reasonCode: REJECT_STREAK_REASON_CODE.LEDGER_INVALID_SHAPE,
       reason: `reject-streak: UNJUDGABLE -- ledger '${ledgerPath}' missing/invalid 'issues' object`,
     };
   }
@@ -418,7 +458,12 @@ export function recordRejectStreakFromResultText({
 
   const loaded = loadLedger(ledgerPath);
   if (!loaded.ok) {
-    return { attempted: true, ok: false, reason: loaded.reason };
+    return {
+      attempted: true,
+      ok: false,
+      reasonCode: loaded.reasonCode,
+      reason: loaded.reason,
+    };
   }
 
   const computed = computeRecord({
@@ -430,6 +475,7 @@ export function recordRejectStreakFromResultText({
     return {
       attempted: true,
       ok: false,
+      reasonCode: computed.reasonCode,
       reason: `reject-streak auto-record: UNJUDGABLE -- ${computed.reason} (fail-open, ledger untouched)`,
     };
   }
