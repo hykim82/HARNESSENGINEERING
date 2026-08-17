@@ -31,7 +31,37 @@ export const TIME_FIELD = Object.freeze({
 export const TIME_AUTHORITY_STATE = Object.freeze({
   FUTURE_DROPPED_AT: "FUTURE_DROPPED_AT",
   FUTURE_DONE: "FUTURE_DONE",
+  SUSPECTED_TZ_MISLABEL_DROPPED_AT: "SUSPECTED_TZ_MISLABEL_DROPPED_AT",
+  SUSPECTED_TZ_MISLABEL_DONE: "SUSPECTED_TZ_MISLABEL_DONE",
 });
+
+// HYK-257 (★새 변종 -- coder-task.md §1 추기 2026-08-16): a "시간대 착오"
+// (UTC value hand-typed with a 'KST' label, or vice versa) does NOT always
+// surface as a future-skew violation -- the 실사례(레인 F, HYK-265)의 값은
+// 오히려 과거처럼 보였다(UTC로 찍힌 값에 KST 라벨만 붙었으므로 실제보다
+// 9시간 «이른» 값으로 읽힌다). A value that is off by *exactly* the KST/UTC
+// offset in either direction, within a tight tolerance, is far more likely
+// to be this specific mislabeling than either a genuinely stale result or a
+// genuinely long-running round -- KST_OFFSET_MS 자체가 uncommon 값이다
+// (정직 우연히 정확히 9시간 근처로 끝나는 정상 라운드는 극히 드물다).
+export const KST_OFFSET_MS = 9 * 60 * 60 * 1000; // 9 hours
+
+// Tight on purpose (10 minutes, not the 5-minute MAX_FUTURE_SKEW_MS's
+// wider sibling) -- narrow enough that it fires only near-exactly on the
+// 9-hour offset itself (the mislabeling signature), not on ordinary drift.
+export const TZ_MISLABEL_TOLERANCE_MS = 10 * 60 * 1000; // 10 minutes
+
+// isSuspectedTimezoneMislabel(candidateMs, nowMs) -> boolean
+//
+// ⚠️정직 한계: this is a heuristic, not a proof -- a round that genuinely
+// takes ~9h ± this tolerance to complete would also match. It is offered as
+// an additional loud diagnostic (coder-task.md §2 ⓒ: 거부할 때 고치는 법을
+// 함께 출력한다), not as a claim that every match IS a mislabel.
+export function isSuspectedTimezoneMislabel(candidateMs, nowMs) {
+  if (!Number.isFinite(candidateMs) || !Number.isFinite(nowMs)) return false;
+  const absDiff = Math.abs(candidateMs - nowMs);
+  return Math.abs(absDiff - KST_OFFSET_MS) <= TZ_MISLABEL_TOLERANCE_MS;
+}
 
 export const TIME_AUTHORITY_REGISTRY = Object.freeze([
   Object.freeze({
