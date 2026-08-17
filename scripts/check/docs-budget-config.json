@@ -1,0 +1,6 @@
+{
+  "schema_version": "docs-budget/v1",
+  "status_budget_bytes": 65536,
+  "orch_boot_budget_bytes": 98304,
+  "pm_output_budget_bytes": null
+}
