@@ -69,8 +69,10 @@ the harness.
 - Role relay uses `.harness/<role>-task.md` (orchestrator to role) and
   `.harness/<role>.md` (role to orchestrator); add `.harness/` to the target
   repo `.gitignore`.
-- Roles end each task with `>>> DONE: <role>` and a human-next-action line.
-  Full protocol: `docs/claude-orchestrator-handoff.md` (Relay Protocol v2).
+- Roles end each task with a `>>> DONE: <role>` line (produced by running
+  `node scripts/relay/finalize-done.mjs <role> .harness` -- do not
+  hand-type it) and a human-next-action line. Full protocol:
+  `docs/claude-orchestrator-handoff.md` (Relay Protocol v2).
 - At phase boundaries the Orchestrator writes `.harness/PHASE-HANDOFF.md` and
   keeps `.harness/STATUS.md` current so a fresh session resumes cheaply; the
   Orchestrator ends every response with an `— YYYY-MM-DD HH:MM KST` timestamp.

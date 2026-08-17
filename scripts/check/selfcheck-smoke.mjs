@@ -223,6 +223,23 @@ export function smokeRelayHandshake({ scriptPath }) {
       evidence: bad.stderr,
     });
 
+    // HYK-257-done-stamp-2 §2 범위1: dropped_at must DIFFER from the "bad"
+    // variant above, not just the DONE line -- relay-handshake.mjs's new
+    // intermediate-rewrite channel (first-observation.mjs) keys its
+    // per-round observation on `${taskId}::${dropped_at}` (envelope-
+    // archive.test.mjs's own "라운드 2회" fixture is why taskId alone isn't
+    // safe -- this repo legitimately reuses task_id across rounds). Reusing
+    // the SAME dropped_at for both variants here would make this smoke
+    // test's own "bad" DONE line look like an in-round intermediate rewrite
+    // once the "good" DONE line is observed next -- a false positive this
+    // channel must never produce for two genuinely DIFFERENT rounds. A
+    // fresh dropped_at (still before the "good" DONE line, still a valid
+    // KST header) makes this unambiguously a second, distinct round.
+    writeFileSync(
+      join(dir, "coder-task.md"),
+      "task_id: SMOKE-1\ndropped_at: 2026-07-12 00:00 KST\n",
+      "utf8",
+    );
     writeFileSync(
       join(dir, "coder.md"),
       "task_id: SMOKE-1\n>>> DONE: CODER @ 2026-07-13 01:00:00 KST\n",

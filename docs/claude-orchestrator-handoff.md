@@ -264,8 +264,16 @@ Purpose: eliminate copy/paste between the human operator and role terminals.
 - The human types a short trigger `go` in the role terminal; the role reads
   `.harness/<role>-task.md` and executes.
 - The role writes its result or handoff to `.harness/<role>.md` (not long
-  terminal output) and ends with exactly two lines: `>>> DONE: <role>` and a
-  human-next-action line (for example, tell the Orchestrator "<role> 됐어").
+  terminal output) and ends with exactly two lines: a `>>> DONE: <role>` line
+  and a human-next-action line (for example, tell the Orchestrator "<role>
+  됐어"). **Produce the `>>> DONE:` line by running
+  `node scripts/relay/finalize-done.mjs <role> .harness`** (HYK-186) — it
+  appends the line itself, stamped from its own machine clock, and refuses
+  any caller-supplied time outright. Do not hand-type the line or its
+  timestamp (a hand-typed clock reading is exactly the failure mode HYK-186
+  and HYK-257 exist to catch — see "Honesty limit" immediately below for why
+  this is a documentary instruction, not a universal machine block, on a
+  Codex seat).
 - **Once `>>> DONE:` has been written, the result file must never be
   rewritten for any reason** — not to fix a typo, reformat, or tidy up a
   cover line. Why: the consumption-receipt handshake fingerprints the

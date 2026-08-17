@@ -40,7 +40,9 @@ YYYY-MM-DD-<주제>/`)에 쓴다. PRD는 이 프로젝트가 지정한 PRD 골�
 ① 먼저 STATUS §1 PM 행 = "📝 기획중: `<task_id>`"(현재시각) ② `relay/
 pm-task.md`만 읽고 실행 ③ 결과를 `relay/pm.md`에 — 상단 `task_id:` 에코 +
 마지막 줄 `>>> DONE: PM @ YYYY-MM-DD HH:MM:SS KST`(초 단위 필수, HYK-244 --
-relay-handshake.mjs가 role과 무관하게 분 단위 DONE을 거부한다) ④ 그 즉시 STATUS §1 PM 행 =
+relay-handshake.mjs가 role과 무관하게 분 단위 DONE을 거부한다) -- 이 줄은
+`node scripts/relay/finalize-done.mjs PM .harness`를 실행해 만든다(손기입
+금지) ④ 그 즉시 STATUS §1 PM 행 =
 "ORCH 완료 보고"(2회 갱신 관례).
 
 **유형별 규약**(task 헤더 `type:` — 상세 골격은 태스크 파일이 명시):

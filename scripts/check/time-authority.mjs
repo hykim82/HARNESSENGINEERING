@@ -33,6 +33,14 @@ export const TIME_AUTHORITY_STATE = Object.freeze({
   FUTURE_DONE: "FUTURE_DONE",
   SUSPECTED_TZ_MISLABEL_DROPPED_AT: "SUSPECTED_TZ_MISLABEL_DROPPED_AT",
   SUSPECTED_TZ_MISLABEL_DONE: "SUSPECTED_TZ_MISLABEL_DONE",
+  // HYK-257-done-stamp-2 §2 범위1: 소비 직전 첫 읽기(scripts/check/
+  // first-observation.mjs, watch-result.mjs의 반복 폴링을 통해 매 라운드
+  // 여러 번 관측됨)에서 기록된 DONE 표지가, 최종 판정 시점에 다시 읽은
+  // DONE 표지와 다를 때(지문 또는 원문 중 하나라도) -- 판정 «전에» 결과
+  // 파일이 다시 쓰였다는 뜻이다. 즉시 거부(경고-후-통과 아님)를 택한
+  // 근거는 relay-handshake.mjs의 이 상태를 반환하는 지점 주석 참조.
+  DONE_REWRITTEN_AFTER_FIRST_OBSERVATION:
+    "DONE_REWRITTEN_AFTER_FIRST_OBSERVATION",
 });
 
 // HYK-257 (★새 변종 -- coder-task.md §1 추기 2026-08-16): a "시간대 착오"
@@ -57,6 +65,26 @@ export const TZ_MISLABEL_TOLERANCE_MS = 10 * 60 * 1000; // 10 minutes
 // takes ~9h ± this tolerance to complete would also match. It is offered as
 // an additional loud diagnostic (coder-task.md §2 ⓒ: 거부할 때 고치는 법을
 // 함께 출력한다), not as a claim that every match IS a mislabel.
+//
+// HYK-257b §4 (제거 조건, 삭제 금지 -- unconditional 제거 금지, coder-task.md
+// 원문): this heuristic exists ONLY because a hand-written `>>> DONE:`/
+// `dropped_at:` value can still reach checkRelayHandshake with no machine
+// provenance to check against (gap#95/gap#101, docs/enforcement-known-
+// gaps.md) -- so a genuine UTC/KST mislabel and a genuine 9h-long round are
+// indistinguishable from the timestamp text alone, and this guess is the
+// best available signal. **삭제해도 되는 유일한 조건**: gap#95의 이전
+// 계획(런처/supervisor가 좌석을 "완료"로 표시하기 직전 `finalize-done.mjs`
+// provenance를 모든 소비 경로에서 강제 검증하도록 결선되는 것 -- 즉
+// `relay-handshake.mjs`의 checkRelayHandshake가 더 이상 caller가 직접
+// 손으로 쓴 타임스탬프 텍스트를 신뢰하지 않고, 그 값이 machine-clock
+// 생산자를 거쳤음을 검증할 수 있는 상태)이 실제로 코드로 결선되고, 그
+// 결선이 codex 좌석 포함 모든 엔진에서 검증됐을 때만 이 함수(및
+// checkTimezoneMislabel 호출부, relay-handshake.mjs)를 제거해도 안전하다.
+// 그 전에 제거하면 hand-written 시각 오기입(9시간 시간대 착오)이 아무
+// 진단 없이 FUTURE_DONE/FUTURE_DROPPED_AT 같은 일반 미래-시각 오류로만
+// 보여, "고치는 법"이 사라진다(§2 ⓒ 요건 위반) -- 이번 라운드(HYK-257b)는
+// 이 조건을 충족하지 못했으므로(gap#101: 코드 강제 미착수, 문서 수정만)
+// 이 함수를 그대로 둔다.
 export function isSuspectedTimezoneMislabel(candidateMs, nowMs) {
   if (!Number.isFinite(candidateMs) || !Number.isFinite(nowMs)) return false;
   const absDiff = Math.abs(candidateMs - nowMs);

@@ -59,9 +59,14 @@ Read these once; do not re-derive them after a `/clear`.
    there (a real incident this rule closes, coder-11).
 4. **Result = file + DONE line.** The role writes its result to
    `.harness/<role>.md` and ends with exactly
-   `>>> DONE: <role> @ <YYYY-MM-DD HH:MM:SS>` (get the timestamp from a real
-   command; do not guess it). Seconds are required (HYK-244) --
-   `relay-handshake.mjs` rejects a minute-only DONE line. **Do not edit this
+   `>>> DONE: <role> @ <YYYY-MM-DD HH:MM:SS>`. **Produce this line by
+   running `node scripts/relay/finalize-done.mjs <role> .harness`**
+   (HYK-186) -- the one supported machine-clock producer: it appends the
+   line itself from its own clock and refuses any caller-supplied
+   timestamp. Do not hand-type the line or guess/derive the timestamp
+   yourself. Seconds are required (HYK-244) -- `relay-handshake.mjs`
+   rejects a minute-only DONE line (finalize-done.mjs's own format already
+   satisfies this). **Do not edit this
    file again once the handshake has consumed it** -- the consumption
    receipt records that file's exact fingerprint, and a single later edit
    (even a formatting-only touch-up) makes that fingerprint stop matching,
