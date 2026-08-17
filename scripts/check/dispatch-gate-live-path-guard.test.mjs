@@ -19,11 +19,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  existsSync,
   writeFileSync,
   readFileSync,
   statSync,
   mkdtempSync,
+  mkdirSync,
 } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { join, dirname } from "node:path";
@@ -43,10 +43,23 @@ function repoRootFromHere() {
 test("HYK-257-done-stamp-3 §2 범위2: 실물 .harness/*-task.md(이 저장소 자신의 워크트리)를 겨눈 호출은 --expect-repo-root 없이 실패한다 (fail-loud, 파일 무접촉)", () => {
   const root = repoRootFromHere();
   const harnessDir = join(root, ".harness");
-  assert.ok(
-    existsSync(harnessDir),
-    "sanity: this repo's own .harness dir must exist for this test to be meaningful",
-  );
+  // HYK-257-done-stamp-ci-fix-1: `.harness/` is gitignored (repo root
+  // `.gitignore` line 1) -- a fresh `git clone` of committed HEAD (exactly
+  // what CI's canonical isolated-suite-runner.mjs runs against) never
+  // materializes it, so the OLD `assert.ok(existsSync(harnessDir), ...)`
+  // sanity check here failed 100% of the time in that environment (CI PR
+  // #167 run 31997660969, reproduced locally byte-for-byte). This is not a
+  // production defect -- guardAgainstLiveTaskPathStamp only cares whether
+  // taskPath's git repo matches dispatch-gate-decision.mjs's own repo
+  // (scripts/check/dispatch-gate-decision.mjs's own header), never whether
+  // a directory happens to be named `.harness`. Creating the directory
+  // here (idempotent, recursive -- a harmless no-op in the live worktree
+  // where it already exists) fixes the test's own broken environmental
+  // assumption without touching production code or weakening either
+  // assertion below: the guard-fires / production-still-stamps checks
+  // still run for real, on a real file, in a real git repo, in BOTH
+  // environments.
+  mkdirSync(harnessDir, { recursive: true });
 
   // Throwaway probe fixture, clearly namespaced so no live role file name
   // (coder-task.md/review-task.md/verify-task.md/pm-task.md) is ever
@@ -114,6 +127,12 @@ test("HYK-257-done-stamp-3 §2 범위2: 실물 .harness/*-task.md(이 저장소 
 test("HYK-257-done-stamp-3 §2 범위2: 같은 실물 경로라도 실제 배달과 동일하게 정확히 일치하는 --expect-repo-root를 받으면 여전히 동작한다 (프로덕션 동작 유지)", () => {
   const root = repoRootFromHere();
   const harnessDir = join(root, ".harness");
+  // HYK-257-done-stamp-ci-fix-1: same reason as the first test above --
+  // `.harness/` does not exist in a fresh isolated clone (gitignored),
+  // which previously made the writeFileSync below throw ENOENT before this
+  // test's own assertions ever ran. Idempotent, harmless in the live
+  // worktree.
+  mkdirSync(harnessDir, { recursive: true });
   const probePath = join(
     harnessDir,
     "zzz-hyk257-3r-guard-probe-prod-shape-task.md",
