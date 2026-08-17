@@ -23,56 +23,22 @@
 // Engine independence (coder-task.md §2 제약5): plain Node CLI, invokable as
 // `node scripts/relay/stamp-dropped-at.mjs` from any shell/cron/CI step --
 // nothing here depends on a Claude Code hook or any Claude-specific runtime.
-
-function pad(n) {
-  return String(n).padStart(2, "0");
-}
-
-// KST has no DST -- a fixed +9h offset from UTC is exact and stable, unlike
-// relying on the host machine's local timezone setting (same rationale as
-// finalize-done.mjs's own formatKst). Minute precision, no seconds --
-// dropped_at's registered formatPrecision (scripts/check/time-authority.mjs)
-// and task-drop-core.mjs's DROPPED_AT_FORMAT_RE both expect exactly this
-// shape ("YYYY-MM-DD HH:MM KST").
-function formatKstMinute(nowMs) {
-  const kst = new Date(nowMs + 9 * 60 * 60 * 1000);
-  return `${kst.getUTCFullYear()}-${pad(kst.getUTCMonth() + 1)}-${pad(
-    kst.getUTCDate(),
-  )} ${pad(kst.getUTCHours())}:${pad(kst.getUTCMinutes())} KST`;
-}
-
-export const STAMP_DROPPED_AT_REASON = Object.freeze({
-  CALLER_SUPPLIED_TIME_REJECTED: "CALLER_SUPPLIED_TIME_REJECTED",
-  STAMPED: "STAMPED",
-});
-
-// stampDroppedAt({ callerSuppliedAt, nowFn }) -> { ok, reasonCode, reason?, value?, nowMs? }
 //
-// `callerSuppliedAt`: MUST be omitted (undefined). Passing anything else --
-// a string, a Date, a number, even a value equal to what the machine clock
-// would have produced anyway -- is refused outright, mirroring
-// finalize-done.mjs's `callerSuppliedAt` contract exactly: this producer
-// does not read a caller-supplied time argument at all.
-export function stampDroppedAt({
-  callerSuppliedAt,
-  nowFn = () => Date.now(),
-} = {}) {
-  if (callerSuppliedAt !== undefined) {
-    return {
-      ok: false,
-      reasonCode: STAMP_DROPPED_AT_REASON.CALLER_SUPPLIED_TIME_REJECTED,
-      reason:
-        "stamp-dropped-at rejects caller-supplied timestamps -- this producer always records its own machine clock (Date.now()) at stamp time; do not pass callerSuppliedAt",
-    };
-  }
-  const nowMs = nowFn();
-  return {
-    ok: true,
-    reasonCode: STAMP_DROPPED_AT_REASON.STAMPED,
-    value: formatKstMinute(nowMs),
-    nowMs,
-  };
-}
+// HYK-257-done-stamp-lint-1: the pure formatting/contract logic now lives in
+// scripts/check/dropped-at-stamp-core.mjs (moved, not duplicated) so
+// scripts/check/dispatch-gate-decision.mjs can use it without importing
+// across the scripts/check -> scripts/relay boundary (that direction is an
+// ESLint no-restricted-imports error -- A3 inventory, HYK-148: "real
+// dependency direction is relay -> check only"). This file re-exports both
+// symbols unchanged (relay -> check is the allowed direction) so every
+// existing external import of `stampDroppedAt`/`STAMP_DROPPED_AT_REASON`
+// from THIS file keeps working byte-for-byte -- a pure move, zero behavior
+// change (this round's §3 요건1).
+import {
+  stampDroppedAt,
+  STAMP_DROPPED_AT_REASON,
+} from "../check/dropped-at-stamp-core.mjs";
+export { stampDroppedAt, STAMP_DROPPED_AT_REASON };
 
 const invokedDirectly =
   process.argv[1] &&

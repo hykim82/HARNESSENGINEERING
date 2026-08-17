@@ -42,6 +42,16 @@ const CONSUMPTION_RECEIPT_CORE_PATH = join(
   HERE,
   "consumption-receipt-core.mjs",
 );
+// HYK-257-done-stamp-2 §2 범위2 / HYK-257-done-stamp-lint-1 (경로 수정):
+// dispatch-gate-decision.mjs now statically imports
+// scripts/check/dropped-at-stamp-core.mjs's stampDroppedAt (moved from
+// scripts/relay/stamp-dropped-at.mjs to fix a scripts/check ->
+// scripts/relay ESLint import-direction violation) -- this isolated
+// fixture's staged tree must include it at the SAME relative path (`./`
+// from scripts/check/) or the mutant module fails to load
+// (MODULE_NOT_FOUND), same reasoning as CONSUMPTION_RECEIPT_CORE_PATH
+// above.
+const DROPPED_AT_STAMP_CORE_PATH = join(HERE, "dropped-at-stamp-core.mjs");
 
 const ONE_B_BLOCK =
   "1b_exec_line: node scripts/check/dispatch-gate-decision.mjs <task-path>\n1b_shown: ALLOW 또는 REJECT 한 줄과 사유\n1b_reach_path: CLI 종료코드가 관제실 화면에 즉시 뜬다\n";
@@ -688,6 +698,10 @@ function stageScriptsCheckDir(rootDir, overrides) {
     "reject-streak-chain.mjs": readFileSync(REJECT_STREAK_CHAIN_PATH, "utf8"),
     "consumption-receipt-core.mjs": readFileSync(
       CONSUMPTION_RECEIPT_CORE_PATH,
+      "utf8",
+    ),
+    "dropped-at-stamp-core.mjs": readFileSync(
+      DROPPED_AT_STAMP_CORE_PATH,
       "utf8",
     ),
     ...overrides,

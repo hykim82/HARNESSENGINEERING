@@ -108,8 +108,18 @@ test("isBeyondFutureSkew: within skew -> false, beyond skew -> true, unregistere
 // wiring the watch-result-side notification for this new state pair is
 // follow-up scope, not this task's (coder-task.md §2 범위: relay-handshake
 // 소비 게이트 자체가 막는지가 이 라운드의 완료 조건).
-test("HYK-186/HYK-257: TIME_AUTHORITY_STATE exposes exactly the four states relay-handshake.mjs consumes", () => {
+// HYK-257-done-stamp-2 §2 범위1: a fifth state added --
+// DONE_REWRITTEN_AFTER_FIRST_OBSERVATION (relay-handshake.mjs's
+// checkRelayHandshake, first-observation.mjs's observeDoneLine). Not a
+// future-skew or mislabel diagnosis -- it fires when a result file's
+// '>>> DONE:' line differs between the first time this exact round
+// (taskId + dropped_at) was observed and the final judged-ok:true moment,
+// proving an intermediate rewrite happened before judgment could ever see
+// it. Immediate reject (not warn-and-pass), matching this registry's
+// existing fail-loud posture for every other row here.
+test("HYK-186/HYK-257/HYK-257-done-stamp-2: TIME_AUTHORITY_STATE exposes exactly the five states relay-handshake.mjs consumes", () => {
   assert.deepEqual(Object.keys(TIME_AUTHORITY_STATE).sort(), [
+    "DONE_REWRITTEN_AFTER_FIRST_OBSERVATION",
     "FUTURE_DONE",
     "FUTURE_DROPPED_AT",
     "SUSPECTED_TZ_MISLABEL_DONE",

@@ -894,12 +894,7 @@ test("E2E (§6 1-B + 완료조건5 receipt): real CLI, real fixture, future DONE
       measuredNow: new Date().toISOString(),
       exit: res.status,
       stderr: res.stderr,
-      downstreamFileCount: (() => {
-        // downstream effect surface for this fixture dir: only the two
-        // files this test itself wrote should exist -- no reject-streak
-        // ledger, no envelope-archive rounds dir, nothing else appeared.
-        return readdirSync(dir).length;
-      })(),
+      downstreamEntries: readdirSync(dir),
     };
 
     assert.equal(receipt.exit, 7, "EXIT_FUTURE_REJECTED");
@@ -908,10 +903,30 @@ test("E2E (§6 1-B + 완료조건5 receipt): real CLI, real fixture, future DONE
       /WATCH_FUTURE_REJECTED: FUTURE_DONE:.*'result\.>>> DONE' value '2099-01-01 00:00:00 KST' is \d+s ahead of authority now/,
       "human-readable: names the field AND the measured skew in seconds, not just a bare code",
     );
-    assert.equal(
-      receipt.downstreamFileCount,
-      2,
-      `downstream effect count must be 0 beyond the two input files this test wrote (found ${receipt.downstreamFileCount} entries in fixture dir) -- no reject-streak ledger or round archive should have been created for a rejected handshake`,
+    // HYK-257-done-stamp-2 §2 범위1: relay-handshake.mjs now records this
+    // exact call's DONE line into `coder-done-first-observation.jsonl`
+    // BEFORE the future-skew rejection below fires (see resolveDoneAt's
+    // own comment -- the intermediate-rewrite channel must observe a
+    // DONE line even on a poll whose OWN value independently fails). This
+    // is the ONE new legitimate downstream entry beyond the two input
+    // files -- still zero reject-streak ledger, zero envelope-archive
+    // rounds dir (both of those remain unreached, exactly as before this
+    // round: this handshake never gets past the future-skew reject to
+    // reach autoRecordRejectStreak/autoArchiveRoundEnvelope).
+    const unexpected = receipt.downstreamEntries.filter(
+      (name) =>
+        name !== "coder-task.md" &&
+        name !== "coder.md" &&
+        name !== "coder-done-first-observation.jsonl",
+    );
+    assert.deepEqual(
+      unexpected,
+      [],
+      `downstream effect surface must be exactly the two input files plus the new first-observation log (found extra entries: ${JSON.stringify(unexpected)}) -- no reject-streak ledger or round archive should have been created for a rejected handshake`,
+    );
+    assert.ok(
+      receipt.downstreamEntries.includes("coder-done-first-observation.jsonl"),
+      "the first-observation channel must have recorded this poll's DONE line even though the round itself was rejected",
     );
   });
 });

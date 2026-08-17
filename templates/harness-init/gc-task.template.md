@@ -137,7 +137,9 @@ outside `.harness/gc-report.md`. Secrets/token output.
 `.harness/gc-report.md` for the detail, and an honest limitations note (scan
 coverage depends on the scanning model's own judgment/recall — this is not a
 mechanically-guaranteed-complete process, only a structured one). End with
-`>>> DONE: CODER @ <real KST timestamp>`. ⛔Once written, do not edit this
+`>>> DONE: CODER @ <real KST timestamp>` -- produce this line by running
+`node scripts/relay/finalize-done.mjs CODER .harness` (do not hand-type the
+line or the timestamp). ⛔Once written, do not edit this
 result file again — the consumption receipt records its exact fingerprint,
 and any later edit (even formatting-only) permanently misjudges an
 already-consumed round as unconsumed (HYK-244, real incident).

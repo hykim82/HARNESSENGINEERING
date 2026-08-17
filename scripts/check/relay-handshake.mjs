@@ -543,7 +543,94 @@ function hasDoneSecondsPrecision(rawDoneAtText) {
 // staleness/ok:true path in checkRelayHandshake; this HYK-244 addition
 // rejects a DONE timestamp that lacks seconds precision, for the same
 // "reject loudly before the ok:true path" reason.
-function resolveDoneAt(resultContent, now) {
+// HYK-257-done-stamp-2 §2 범위1: called the MOMENT a well-formed '>>> DONE:'
+// line is found -- before any validity check (mislabel/future-skew) below,
+// and on EVERY call (watch-result.mjs's watchResult polls checkRelayHandshake
+// repeatedly, see first-observation.mjs's own header for the real production
+// caller this closes the race against). Best-effort, non-fatal: a spawn
+// failure here must never block or alter checkRelayHandshake's own verdict
+// on its own (mirrors spawnAdmissionCompletion's house style exactly) --
+// treated as "no observation available" (rewritten:false), not as a reject.
+//
+// HYK-257-done-stamp-3 §2 범위1 (2R 반려 수리): `taskId`/`droppedAt`은
+// 이제 별도 필드로 넘어간다 -- 2R처럼 `${taskId}::${droppedAt}`로 이어붙인
+// 문자열 하나를 이 함수의 `taskId` 매개변수 자리에 밀어넣지 않는다(그
+// 이어붙이기가 2R 반려 사유였다: 레코드에 진짜 dropped_at 필드가 없었고,
+// 분-정밀도 충돌 시 같은 문자열 키가 서로 다른 라운드를 오염시켰다).
+function spawnObserveDoneLine({
+  taskId,
+  droppedAt,
+  role,
+  harnessDir,
+  resultContent,
+  doneLineRaw,
+}) {
+  try {
+    const scriptPath = join(
+      dirname(fileURLToPath(new URL(import.meta.url))),
+      "first-observation.mjs",
+    );
+    const payload = JSON.stringify({
+      taskId,
+      droppedAt,
+      role,
+      resultContent,
+      doneLineRaw,
+    });
+    const out = execFileSync("node", [scriptPath, harnessDir, payload], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    return JSON.parse(out.trim());
+  } catch (err) {
+    console.error(
+      `relay-handshake: first-observation spawn skipped/failed (non-fatal, treated as no-observation -- HYK-257-done-stamp-2 §2 범위1): ${err.stderr ?? err.message}`,
+    );
+    return { rewritten: false, error: "spawn failed" };
+  }
+}
+
+// HYK-257-done-stamp-3 §2 범위1 (로그 수명): called exactly once, at the
+// moment checkRelayHandshake has confirmed this round is fully COMPLETE
+// (every check above -- handshake, dropped_at/DONE parsing, mislabel,
+// future-skew, staleness, intermediate-rewrite -- has already passed).
+// Marks this (taskId, droppedAt) generation as consumed in the
+// first-observation log so a LATER round that happens to reuse the same
+// key (2R's missed 분-정밀도 충돌 시나리오) starts a clean new generation
+// instead of being compared against this already-judged round's value.
+// Best-effort, non-fatal -- mirrors spawnObserveDoneLine's own house style
+// exactly: a failure here must never change checkRelayHandshake's own
+// verdict (the round is already judged complete by this point regardless).
+function spawnMarkObservationConsumed({ taskId, droppedAt, role, harnessDir }) {
+  try {
+    const scriptPath = join(
+      dirname(fileURLToPath(new URL(import.meta.url))),
+      "first-observation.mjs",
+    );
+    const payload = JSON.stringify({
+      taskId,
+      droppedAt,
+      role,
+      action: "markConsumed",
+    });
+    const out = execFileSync("node", [scriptPath, harnessDir, payload], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    return JSON.parse(out.trim());
+  } catch (err) {
+    console.error(
+      `relay-handshake: first-observation mark-consumed spawn skipped/failed (non-fatal -- HYK-257-done-stamp-3 §2 범위1): ${err.stderr ?? err.message}`,
+    );
+    return { recorded: false, reason: "spawn failed" };
+  }
+}
+
+function resolveDoneAt(
+  resultContent,
+  now,
+  { taskId, droppedAtRaw, role, harnessDir } = {},
+) {
   const resultDone = resolveResultDoneMatch(resultContent);
   if (!resultDone.ok) {
     // HYK-173-escalation-1 (§2): only the genuine-absence case (no
@@ -554,6 +641,39 @@ function resolveDoneAt(resultContent, now) {
     return resolveResultDoneOutcome(resultContent, resultDone);
   }
   const doneMatch = resultDone.match;
+  // HYK-257-done-stamp-2 §2 범위1: record-then-compare happens here, BEFORE
+  // seconds-precision/mislabel/future-skew rejection can short-circuit --
+  // an intermediate rewrite (§2 범위1 실사례) must be observed even on a
+  // poll whose OWN value would independently fail one of those checks (the
+  // real incidents' first-observed value was itself a future/bad stamp,
+  // later self-corrected). The reject decision on `observation.rewritten`
+  // is only ACTED on at the final judged-ok:true moment in
+  // checkRelayHandshake -- see that function's own use of this field.
+  //
+  // HYK-257-done-stamp-3 §2 범위1 (2R 반려 수리): (taskId, droppedAt)을
+  // 별도 필드로 first-observation.mjs에 넘긴다 -- 2R처럼 이어붙인 문자열
+  // 하나를 taskId 자리에 밀어넣지 않는다. 이 저장소는 같은 task_id를
+  // 여러 라운드에 걸쳐 재사용한다(ORCH가 다음 라운드 task 파일을 같은
+  // taskId로 다시 덮어쓰는 것이 정상 -- HYK-241의 존재 이유 자체가 그
+  // 덮어쓰기), 그래서 (taskId, droppedAt) 둘 다로 라운드를 구별해야
+  // 한다. dropped_at은 «분» 정밀도뿐이라(DROPPED_AT_FORMAT_RE) 같은 분
+  // 안의 연속 두 라운드는 이 쌍이 우연히 같아질 수 있다 -- 그 충돌은
+  // first-observation.mjs의 소비-시(consumed) tombstone 수명 관리가
+  // 닫는다(그 파일 자신의 findFirstObservation 헤더 참조): 라운드가
+  // 소비 완료되면 그 세대는 tombstone으로 닫히고, 다음 라운드가 같은
+  // 키를 재사용해도 이전 세대의 값과 비교되지 않고 새로 관측을
+  // 시작한다.
+  const observation =
+    taskId && droppedAtRaw
+      ? spawnObserveDoneLine({
+          taskId,
+          droppedAt: droppedAtRaw,
+          role,
+          harnessDir,
+          resultContent,
+          doneLineRaw: doneMatch[0],
+        })
+      : { rewritten: false };
   const doneAt = parseKstTimestamp(doneMatch[1]);
   if (!doneAt) {
     return {
@@ -581,7 +701,7 @@ function resolveDoneAt(resultContent, now) {
     now,
   });
   if (doneFuture) return doneFuture;
-  return { ok: true, doneAt, doneMatch };
+  return { ok: true, doneAt, doneMatch, observation };
 }
 
 // HYK-244 2R-a §2 조각2: `dispatchId`는 ⛔호출자가 명시적으로 넘긴 값만
@@ -616,12 +736,12 @@ export function resolveLiveRoundFilePaths(role, harnessDir) {
   };
 }
 
-export function checkRelayHandshake({
-  role,
-  harnessDir = join(repoRoot(), ".harness"),
-  now = Date.now(),
-  dispatchId,
-}) {
+// HYK-257-done-stamp-lint-1: extracted from checkRelayHandshake (pure
+// decomposition -- max-lines-per-function/complexity ESLint limits, 동작
+// 변경 0) -- resolves the live task/result file paths, confirms both exist,
+// and reads their content. Identical checks/return shapes/order to what
+// used to be inline at the top of checkRelayHandshake.
+function resolveTaskAndResultFiles(role, harnessDir) {
   const { taskPath, resultPath } = resolveLiveRoundFilePaths(role, harnessDir);
 
   if (!existsSync(taskPath)) {
@@ -634,9 +754,21 @@ export function checkRelayHandshake({
     };
   }
 
-  const taskContent = readFileSync(taskPath, "utf8");
-  const resultContent = readFileSync(resultPath, "utf8");
+  return {
+    ok: true,
+    taskPath,
+    resultPath,
+    taskContent: readFileSync(taskPath, "utf8"),
+    resultContent: readFileSync(resultPath, "utf8"),
+  };
+}
 
+// HYK-257-done-stamp-lint-1: extracted from checkRelayHandshake (same
+// ESLint-limit reason as resolveTaskAndResultFiles above) -- resolves and
+// cross-checks the task file's task_id header against the result file's
+// task_id echo. Identical checks/return shapes/order to what used to be
+// inline in checkRelayHandshake.
+function resolveMatchedTaskId(taskContent, resultContent) {
   const taskIdMatch = taskContent.match(TASK_ID_RE);
   if (!taskIdMatch) {
     return { ok: false, reason: "task file missing task_id header" };
@@ -656,13 +788,46 @@ export function checkRelayHandshake({
     };
   }
 
-  const droppedResolved = resolveDroppedAt(taskContent, now);
-  if (!droppedResolved.ok) return droppedResolved;
-  const { droppedAt, droppedMatch } = droppedResolved;
+  return { ok: true, taskId };
+}
 
-  const doneResolved = resolveDoneAt(resultContent, now);
-  if (!doneResolved.ok) return doneResolved;
-  const { doneAt, doneMatch } = doneResolved;
+// HYK-257-done-stamp-lint-1: extracted from checkRelayHandshake (same
+// ESLint-limit reason as above) -- the two checks that sit between
+// resolveDoneAt succeeding and the completion side-effects starting:
+// intermediate-rewrite rejection (HYK-257-done-stamp-2 §2 범위1) and the
+// pre-existing staleness rejection. Returns the ok:false verdict to return
+// immediately, or null when neither check rejects (proceed). Comments
+// preserved verbatim from their original inline location -- same checks,
+// same order, same reasons, only moved.
+function checkRewriteAndStaleness({
+  observation,
+  doneAt,
+  droppedAt,
+  doneMatch,
+  droppedMatch,
+}) {
+  // HYK-257-done-stamp-2 §2 범위1: this is the "최종 판정 시점" the 반려
+  // 사유가 요구한 대조 지점 -- every check above (task_id 결속, dropped_at/
+  // DONE 파싱·미래-시각·시간대-착오·staleness) has already passed, so this
+  // is the moment checkRelayHandshake is ABOUT TO judge the round complete.
+  // ★판정 강도(즉시 거부, 경고-후-통과 아님): 이 저장소는 fail-loud를
+  // 일관되게 택해 왔다(HYK-183 결과파일 표지 중복=판정불가, HYK-262 표지
+  // 줄 계약 위반=거부 -- "조용히 하나를 고르지 않는다"는 이 파일 맨 위
+  // 주석부터의 반복 원칙). 중간 수정이 있었다는 것은 «기계가 판정하기 전
+  // 결과 파일이 최소 한 번 더 쓰였다»는 사실 자체가 이미 손기입/시간
+  // 착오 재발의 강한 신호이므로(§2 실사례 세 건 모두 자기정정이었지만,
+  // 이 채널은 "그 결과가 우연히 옳았는지"를 판단할 수단이 없다 -- 오직
+  // «달랐다»만 안다), 경고만 남기고 통과시키면 다음 라운드의 똑같은
+  // 손기입을 막을 계기를 잃는다. ⛔정상 라운드 오탐 0은 위 observeDoneLine
+  // 의 "처음 관측 = 스스로와 비교"설계로 이미 보장된다(rewritten은 오직
+  // 두 번째 이상 서로 다른 관측이 있을 때만 true).
+  if (observation?.rewritten) {
+    return {
+      ok: false,
+      state: TIME_AUTHORITY_STATE.DONE_REWRITTEN_AFTER_FIRST_OBSERVATION,
+      reason: `result DONE line was rewritten between first observation and final judgment (HYK-257-done-stamp-2 §2 범위1): first observed '${observation.existing?.doneLineRaw}' (at ${observation.existing?.observedAtMs}ms), now judging '${observation.currentDoneLine}' -- 소비 직전 중간 수정이 감지되어 거부한다(즉시 거부, 경고 아님). 고치는 법: DONE을 다시 손으로 고치지 말고 ${fixToolHintFor(TIME_FIELD.RESULT_DONE_AT)} 로 한 번만 찍어라.`,
+    };
+  }
 
   if (doneAt < droppedAt) {
     return {
@@ -670,6 +835,40 @@ export function checkRelayHandshake({
       reason: `stale result: DONE (${doneMatch[1].trim()}) predates task drop (${droppedMatch[1].trim()})`,
     };
   }
+
+  return null;
+}
+
+// HYK-257-done-stamp-lint-1: extracted from checkRelayHandshake (same
+// ESLint-limit reason as above) -- runs every completion side-effect for a
+// round that has passed every check above (consumed-observation tombstone,
+// reject-streak record, envelope/task archiving, admission-completion
+// return, consumption-receipt write), in the exact order/comments they used
+// to run inline in checkRelayHandshake. Returns the ok:false verdict to
+// return immediately for the one side-effect that can still change the
+// function's own verdict (HYK-262's ambiguous-cover-line REVIEW rejection),
+// or null when every check here still allows the round to complete.
+function runCompletionSideEffects({
+  role,
+  harnessDir,
+  taskId,
+  taskContent,
+  resultContent,
+  droppedMatch,
+  doneMatch,
+  dispatchId,
+}) {
+  // HYK-257-done-stamp-3 §2 범위1 (로그 수명): this round is now confirmed
+  // complete (every prior check passed) -- close out this generation's
+  // first-observation entry so a future round cannot be compared against
+  // it (see spawnMarkObservationConsumed's own header for why this must
+  // happen exactly here, not earlier/later).
+  spawnMarkObservationConsumed({
+    taskId,
+    droppedAt: droppedMatch[1].trim(),
+    role,
+    harnessDir,
+  });
 
   // HYK-183 §2: the moment this function confirms a REVIEW-family result
   // file is COMPLETE (every prior check above already passed) is the one
@@ -758,6 +957,65 @@ export function checkRelayHandshake({
     admissionReturned,
     recordOutcome,
   });
+
+  return null;
+}
+
+// HYK-257-done-stamp-lint-1: decomposed into resolveTaskAndResultFiles/
+// resolveMatchedTaskId/checkRewriteAndStaleness/runCompletionSideEffects
+// (all defined immediately above, in the exact original inline order) to
+// satisfy ESLint's max-lines-per-function/complexity limits (real
+// pre-commit gate, HYK-148) -- 순수 분해, 동작 변경 0: every check, every
+// side-effect call, every comment explaining WHY a step exists, is
+// unchanged and runs in the exact same order as before. Only the "which
+// function's stack frame it runs in" changed.
+export function checkRelayHandshake({
+  role,
+  harnessDir = join(repoRoot(), ".harness"),
+  now = Date.now(),
+  dispatchId,
+}) {
+  const filesResolved = resolveTaskAndResultFiles(role, harnessDir);
+  if (!filesResolved.ok) return filesResolved;
+  const { taskContent, resultContent } = filesResolved;
+
+  const idResolved = resolveMatchedTaskId(taskContent, resultContent);
+  if (!idResolved.ok) return idResolved;
+  const { taskId } = idResolved;
+
+  const droppedResolved = resolveDroppedAt(taskContent, now);
+  if (!droppedResolved.ok) return droppedResolved;
+  const { droppedAt, droppedMatch } = droppedResolved;
+
+  const doneResolved = resolveDoneAt(resultContent, now, {
+    taskId,
+    droppedAtRaw: droppedMatch[1].trim(),
+    role,
+    harnessDir,
+  });
+  if (!doneResolved.ok) return doneResolved;
+  const { doneAt, doneMatch, observation } = doneResolved;
+
+  const rewriteOrStaleVerdict = checkRewriteAndStaleness({
+    observation,
+    doneAt,
+    droppedAt,
+    doneMatch,
+    droppedMatch,
+  });
+  if (rewriteOrStaleVerdict) return rewriteOrStaleVerdict;
+
+  const sideEffectVerdict = runCompletionSideEffects({
+    role,
+    harnessDir,
+    taskId,
+    taskContent,
+    resultContent,
+    droppedMatch,
+    doneMatch,
+    dispatchId,
+  });
+  if (sideEffectVerdict) return sideEffectVerdict;
 
   return { ok: true, reason: `relay handshake ok for ${taskId}` };
 }

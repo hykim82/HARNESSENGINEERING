@@ -717,6 +717,15 @@ function redMutationRealGateImportsShadowModule() {
       ORIGINAL_CORE_SOURCE,
       "utf8",
     );
+    // HYK-257-done-stamp-2 §2 범위2 / HYK-257-done-stamp-lint-1 (경로
+    // 수정): dispatch-gate-decision.mjs statically imports
+    // scripts/check/dropped-at-stamp-core.mjs (moved from
+    // scripts/relay/stamp-dropped-at.mjs to fix a scripts/check ->
+    // scripts/relay ESLint import-direction violation) -- this dependency
+    // is now a `./` sibling inside scripts/check/ itself, so the whole-
+    // directory cpSync above already carries it; no separate scripts/relay/
+    // staging is needed any more (previously required a dedicated
+    // scripts/relay/stamp-dropped-at.mjs copy here, removed).
 
     const baselineGatePath = join(tempCheckDir, "dispatch-gate-decision.mjs");
     const baselineSource = readFileSync(baselineGatePath, "utf8");

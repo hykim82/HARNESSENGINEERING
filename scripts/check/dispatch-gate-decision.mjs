@@ -12,6 +12,7 @@ import { execFileSync } from "node:child_process";
 import {
   existsSync,
   readFileSync,
+  writeFileSync,
   readdirSync,
   mkdtempSync,
   rmSync,
@@ -30,6 +31,27 @@ import {
   DISPATCH_GATE_STATE,
 } from "./dispatch-gate-decision-core.mjs";
 import { loadLedger, writeLedger } from "./reject-streak.mjs";
+// HYK-257-done-stamp-2 §2 범위2 ⓑ: the ONE real, already-production-wired
+// anchor for a machine dropped_at stamp -- 관제실 dispatch-worker.ps1
+// (읽기 전용, 이 저장소 밖 실측 원문, 아래 bestEffortStampDroppedAt 헤더
+// 인용)이 배달 직전 항상 이 CLI를 부른다(`& node $gateScript $roleTaskFile
+// --expect-repo-root $Worktree`). in-repo function import, follows this
+// file's existing sibling-module pattern (reject-streak.mjs 등) -- not a
+// subprocess spawn, because stampDroppedAt has zero side-effect imports of
+// its own and this file already statically imports several siblings.
+//
+// HYK-257-done-stamp-lint-1: imports from `./dropped-at-stamp-core.mjs`
+// (scripts/check -> scripts/check, same directory), NOT
+// `../relay/stamp-dropped-at.mjs` -- the latter direction (scripts/check
+// importing scripts/relay) is this repo's ESLint no-restricted-imports
+// architecture rule (A3 inventory, HYK-148: "real dependency direction is
+// relay -> check only"), which real production commit-gate (pre-commit
+// quality-check) enforces and previously blocked exactly this import.
+// scripts/relay/stamp-dropped-at.mjs itself now re-exports from this same
+// core file (relay -> check, the allowed direction) -- see that file's own
+// header. Zero behavior change: same function, same contract, only the
+// module boundary moved.
+import { stampDroppedAt } from "./dropped-at-stamp-core.mjs";
 // HYK-244-receipt-wire-2b2 §3-1: 1R 승인·커밋분(consumption-receipt-
 // core.mjs) 판정 로직을 그대로 쓴다(⛔코어 무변경). zero-import 코어라
 // 이 import 자체가 어떤 새 전이 의존성도 끌어들이지 않는다(그 파일
@@ -1103,6 +1125,144 @@ function evaluateConsumptionDecision(taskPath, args, env = process.env) {
   return decision;
 }
 
+// HYK-257-done-stamp-2 §2 범위2 ⓑ -- 실재 앵커에 붙는 기계 dropped_at
+// 결선.
+//
+// 실재 앵커 인용(관제실 dispatch-worker.ps1, 읽기 전용 실측 원문 -- 이
+// 저장소 밖, 절대 수정하지 않음):
+//   166:  $roleTaskFile = Join-Path $Worktree (".harness/" + $Role.ToLower() + "-task.md")
+//   165:  $gateScript = Join-Path $Worktree "scripts/check/dispatch-gate-decision.mjs"
+//   171:  & node $gateScript $roleTaskFile --expect-repo-root $Worktree
+// 즉 관제실은 배달 «직전» 항상 이 CLI를 그 라운드의 task 파일 경로로
+// 부른다. 이 함수는 정확히 그 첫 인자(runDispatchGateDecision의 taskPath,
+// 곧 $roleTaskFile) 위에서 동작한다 -- 관제실 파일은 단 한 줄도 바뀌지
+// 않는다. 이 저장소 변경 하나만으로 모든 실제 배달에 기계 스탬프가 공짜로
+// 결선된다(관제실측 결선 불필요).
+//
+// 구조적 전제: dropped_at: 줄이 «이미 있을 때만» 덮어쓴다(없는 줄을
+// 새로 만들지 않는다 -- 그 부재는 이 라운드가 다루는 실패 모드가
+// 아니다). 손기입 대체값 금지(1R 원칙 유지): stampDroppedAt()이 실패하면
+// 기존 헤더를 그대로 둔다 -- 뭔가를 지어내지 않는다. Best-effort: 절대
+// throw하지 않고, 이 CLI 자신의 exit code에 영향을 주지 않는다(
+// relay-handshake.mjs의 spawnAdmissionCompletion/autoWriteConsumptionReceipt
+// 와 동일한 house style -- 실패는 console.error로만 드러난다).
+const DROPPED_AT_LINE_RE = /^dropped_at:\s*.+$/im;
+
+// HYK-257-done-stamp-3 §2 범위2 -- «시험·검증이 실물 .harness/*-task.md를
+// 만지지 못하게» fail-loud 경계.
+//
+// 반려 사유 원문(2R): "검토 시작 시 실제 .harness/review-task.md는
+// dropped_at: 2026-08-17 12:41 KST였으나 검증 후 12:50 KST로 바뀌었다."
+// -- 검증(시험·수동 확인)이 이 저장소 자신의 살아 있는 조율 파일을
+// 건드렸다. 문서로 "조심하자"는 조치로 인정되지 않는다(책임자 확정) --
+// 이 함수가 그 자리에서 실제로 거부한다.
+//
+// 판정: taskPath가 실물로 «판정»되는 조건 = ① taskPath가 실제 git
+// 저장소 안에 있고(resolveRepoRoot(dirname(taskPath)).root !== null --
+// 이 저장소의 기존 dispatch-gate-decision.test.mjs 다수 시험이 쓰는
+// `git init -q <tmpdir>` 픽스처도 "실제 git 저장소"이므로 이 조건 하나만
+// 으로는 부족하다), ② 그 저장소가 다름아닌 «이 dispatch-gate-decision.mjs
+// 소스 파일 자신이 속한 저장소»(=HARNESSENGINEERING 계열, 이 코드가
+// 실행되는 순간의 실제 워크트리 공유 .git)와 같고(정확히 이 조건이
+// 위 git-init 픽스처들을 걸러낸다 -- 그 픽스처들은 전혀 다른, 무관한
+// 1회용 저장소이므로 이 비교에서 자동으로 제외된다), ③ 배달 «직전»
+// 실물 앵커(관제실 dispatch-worker.ps1:171)가 항상 넘기는
+// `--expect-repo-root`가 «없거나» taskPath의 실제 저장소와 «다르다».
+// 실제 배달은 ①②까지는 참이어도(같은 워크트리) ③에서 항상
+// --expect-repo-root가 정확히 그 워크트리를 가리키므로(ps1 자신의
+// 구성상 구조적으로 보장됨, $roleTaskFile과 $Worktree가 같은 변수에서
+// 나온다) 거부되지 않는다 -- ⚠️정직 한계: --expect-repo-root를 정확히
+// 그 워크트리로 «수동으로 맞춰» 재현한 호출은 이 판정으로는 실물
+// 배달과 구별할 수 없다(그 시점에는 신호가 실제 배달과 동일해진다) --
+// 이 판정이 잡는 것은 그 정도로 정교하게 실제 배달을 흉내내지 «않은»
+// 시험·수동 호출이며, 실사고(review-task.md 4회 변경)가 정확히 이
+// 모양이었다(단순 taskPath 직접 지정, --expect-repo-root 부재/불일치).
+let cachedSelfRepoRoot;
+function selfRepoRoot() {
+  if (cachedSelfRepoRoot === undefined) {
+    cachedSelfRepoRoot = resolveRepoRoot(
+      dirname(fileURLToPath(new URL(import.meta.url))),
+    ).root;
+  }
+  return cachedSelfRepoRoot;
+}
+
+export class LiveTaskPathStampRefusedError extends Error {}
+
+function guardAgainstLiveTaskPathStamp(taskPath, args) {
+  const self = selfRepoRoot();
+  if (self === null) return; // this source file itself isn't in a git repo (unexpected, but not this guard's concern)
+  const taskRepo = resolveRepoRoot(dirname(taskPath));
+  if (taskRepo.root === null) return; // not a real repo path (e.g. plain tmpdir fixture) -- safe, matches existing tests
+  if (
+    normalizeRootForCompare(taskRepo.root) !== normalizeRootForCompare(self)
+  ) {
+    return; // a real git repo, but NOT this repo family (e.g. the throwaway `git init` fixtures in dispatch-gate-decision.test.mjs) -- unrelated, safe
+  }
+  // taskPath is inside THIS repo family's own worktree. Only proceed if
+  // --expect-repo-root was given AND resolves to this exact same repo --
+  // the one shape real production (dispatch-worker.ps1:171) always and
+  // only produces.
+  if (args.expectRepoRoot) {
+    const expected = resolveRepoRoot(args.expectRepoRoot);
+    if (
+      expected.root !== null &&
+      normalizeRootForCompare(expected.root) === normalizeRootForCompare(self)
+    ) {
+      return; // production-shaped: matches real dispatch exactly
+    }
+  }
+  throw new LiveTaskPathStampRefusedError(
+    `dispatch-gate-decision: REFUSING to run bestEffortStampDroppedAt against '${taskPath}' -- this path is judged to be a LIVE file inside this repo's own worktree (${self}), not an isolated test fixture, and this invocation did not carry a validated --expect-repo-root matching that same worktree (the one shape real production dispatch always provides, dispatch-worker.ps1:171). HYK-257-done-stamp-3 §2 범위2: test/verification runs must target an isolated fixture (e.g. mkdtempSync), never this repo's own .harness/*-task.md -- see this function's own header for the 2R incident this refuses.`,
+  );
+}
+
+function bestEffortStampDroppedAt(taskPath, args) {
+  guardAgainstLiveTaskPathStamp(taskPath, args);
+  try {
+    const original = readFileSync(taskPath, "utf8");
+    if (!DROPPED_AT_LINE_RE.test(original)) {
+      // HYK-257-done-stamp-2 §2 범위2 ⓑ (검토 실측 수리): this is an
+      // EXPECTED, common skip (many task-file fixtures/precondition-reject
+      // paths have no dropped_at: line at all), not a failure -- must go
+      // to stdout (console.log), never stderr. Printing it via
+      // console.error made this best-effort side-effect's own diagnostic
+      // text silently become the FIRST line of this CLI's stderr output
+      // for every existing precondition-reject fixture, shadowing the
+      // actual gate/precondition reason text those fixtures assert on
+      // (dispatch-gate-decision.test.mjs "P1-B all six precondition-reject
+      // shapes produce MUTUALLY DISTINCT reason strings" caught this: two
+      // fixtures sharing the same taskPath collapsed to the same stderr
+      // first line). console.error stays reserved for genuine failures
+      // below (stampDroppedAt itself failing, or an unexpected exception).
+      console.log(
+        `dispatch-gate-decision: dropped_at stamp skipped (no existing 'dropped_at:' line in ${taskPath} -- structural precondition not met, this round does not invent one)`,
+      );
+      return;
+    }
+    const stamped = stampDroppedAt({});
+    if (!stamped.ok) {
+      console.error(
+        `dispatch-gate-decision: dropped_at stamp skipped (stampDroppedAt failed: ${stamped.reason}) -- leaving existing header untouched (손기입 대체값 금지 원칙 유지), existing gate/consumption checks fail closed on whatever was already there`,
+      );
+      return;
+    }
+    const rewritten = original.replace(
+      DROPPED_AT_LINE_RE,
+      `dropped_at: ${stamped.value}`,
+    );
+    if (rewritten === original) return;
+    writeFileSync(taskPath, rewritten, "utf8");
+    console.log(
+      `dispatch-gate-decision: dropped_at machine-stamped (HYK-257-done-stamp-2 §2 범위2 ⓑ) -- ${taskPath} -> '${stamped.value}'`,
+    );
+  } catch (err) {
+    console.error(
+      `dispatch-gate-decision: dropped_at stamp best-effort failed (non-fatal to this CLI's own exit code): ${err.message}`,
+    );
+  }
+}
+
 export function runDispatchGateDecision(argv) {
   const args = parseArgs(argv);
   const taskPath = args._[0];
@@ -1130,6 +1290,10 @@ export function runDispatchGateDecision(argv) {
       }),
     );
   } else {
+    // HYK-257-done-stamp-2 §2 범위2 ⓑ: as early as possible once the file's
+    // existence is confirmed, before any gate decision runs -- best-effort,
+    // never blocks/changes what follows.
+    bestEffortStampDroppedAt(taskPath, args);
     const ledgerResolution = resolveLedgerPath(args, taskPath);
     const pathDecision = checkLedgerPathResolution(ledgerResolution);
     if (pathDecision) {
