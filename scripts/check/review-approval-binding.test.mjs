@@ -52,18 +52,48 @@ function withRepo(fn) {
 // computeFingerprint
 // ---------------------------------------------------------------------------
 
-test("computeFingerprint: clean worktree (only .harness/ present) -> constant empty-tree fingerprint", () => {
+// HYK-281: a clean worktree must NOT collapse to the constant empty-string
+// hash (e3b0c44298fc1c...) -- that value matches any clean worktree
+// regardless of code content, so a binding recorded on it isn't bound to
+// anything (실측: HYK-280 검토 2R/5R, 같은 상수 두 번 재현). Clean worktrees
+// bind to HEAD instead.
+test("computeFingerprint: clean worktree (only .harness/ present) -> bound to HEAD commit, NOT the empty-string constant", () => {
   withRepo((dir) => {
+    const head = git(dir, ["rev-parse", "HEAD"]);
     const r = computeFingerprint({ cwd: dir });
     assert.equal(r.ok, true);
-    assert.equal(
+    assert.notEqual(
       r.fingerprint,
-      "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".slice(
-        0,
-        64,
-      ),
+      "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "clean-tree fingerprint must never be the empty-string hash (HYK-281)",
     );
-    assert.deepEqual(r.entries, []);
+    assert.deepEqual(r.entries, [`H HEAD ${head}`]);
+  });
+});
+
+test("computeFingerprint: clean worktree, then a new commit lands -> fingerprint changes (HEAD-bound, not stuck on one constant)", () => {
+  withRepo((dir) => {
+    const before = computeFingerprint({ cwd: dir });
+    writeFileSync(join(dir, "a.js"), "one", "utf8");
+    git(dir, ["add", "a.js"]);
+    git(dir, [
+      "-c",
+      "user.email=t@t",
+      "-c",
+      "user.name=t",
+      "commit",
+      "-q",
+      "-m",
+      "add a",
+    ]);
+    const after = computeFingerprint({ cwd: dir });
+    assert.equal(before.ok, true);
+    assert.equal(after.ok, true);
+    assert.notEqual(
+      before.fingerprint,
+      after.fingerprint,
+      "different HEAD commits must not fingerprint the same",
+    );
   });
 });
 
@@ -301,6 +331,38 @@ test("evaluateBinding: current worktree unmeasurable (cwd not a git repo) -> 판
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// HYK-281: "이미 커밋된 판본을 검토" 경로 -- 리뷰어가 작업트리가 깨끗한
+// 상태(작업자가 이미 커밋한 뒤)에서 승인을 기록하는 흐름. 결속 대상은 그
+// 순간의 HEAD 커밋이어야 하고, 그 뒤 HEAD가 바뀌면(새 커밋) 반드시
+// 재검토를 요구해야 한다 -- 예전처럼 "빈 지문이라 아무 clean 트리에나
+// 일치"해서는 안 된다.
+test("evaluateBinding: clean-tree approval binds to HEAD -> still 일치 while HEAD unchanged, then 불일치 once a new commit lands (no silent pass-through)", () => {
+  withRepo((dir) => {
+    const fp = computeFingerprint({ cwd: dir });
+    const content = `for: HYK-1\nverdict: approved\n${formatBindingBlock({ fingerprint: fp.fingerprint, entries: fp.entries })}`;
+    const stillClean = evaluateBinding(content, dir);
+    assert.equal(stillClean.ok, true);
+    assert.equal(stillClean.judgement, "일치");
+
+    writeFileSync(join(dir, "a.js"), "one", "utf8");
+    git(dir, ["add", "a.js"]);
+    git(dir, [
+      "-c",
+      "user.email=t@t",
+      "-c",
+      "user.name=t",
+      "commit",
+      "-q",
+      "-m",
+      "add a after approval",
+    ]);
+    const afterNewCommit = evaluateBinding(content, dir);
+    assert.equal(afterNewCommit.ok, false);
+    assert.equal(afterNewCommit.judgement, "불일치");
+    assert.match(afterNewCommit.reason, /불일치\(커밋 차단\)/);
+  });
 });
 
 // ---------------------------------------------------------------------------

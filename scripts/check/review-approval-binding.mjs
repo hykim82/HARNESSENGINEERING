@@ -111,6 +111,35 @@ function buildEntries(cwd) {
     lines.push(`M ${path} ${contentHash}`);
   }
   lines.sort();
+  if (lines.length === 0) {
+    // HYK-281: a clean worktree used to leave `lines` empty, so the
+    // fingerprint below became sha256("") == the well-known empty-string
+    // constant e3b0c44298fc1c... -- a value that matches ANY clean worktree
+    // regardless of what code is actually checked out (실측: HYK-280 검토
+    // 2R/5R, 같은 상수 두 번 재현). That let "이미 커밋된 판본 검토" rounds
+    // record a binding that isn't bound to anything.
+    //
+    // Fix (범위 후보 ⓐ+ⓒ): when there is nothing uncommitted to fingerprint,
+    // bind to the checked-out HEAD commit instead of an empty set -- this is
+    // exactly the object "이미 커밋된 판본을 검토" approves, so it's the
+    // correct binding target for that path, and it can never collide with
+    // the old empty-tree constant (HEAD sha as string always differs from
+    // the empty join). If HEAD itself can't be read (no commits yet), fail
+    // closed (ⓑ) rather than falling back to the empty hash.
+    let headSha;
+    try {
+      headSha = execFileSync("git", ["rev-parse", "HEAD"], {
+        cwd,
+        encoding: "utf8",
+      }).trim();
+    } catch (err) {
+      return {
+        ok: false,
+        reason: `작업트리가 깨끗해 HEAD 커밋에 결속을 시도했으나 HEAD를 읽을 수 없음: ${err.message}`,
+      };
+    }
+    lines.push(`H HEAD ${headSha}`);
+  }
   return { ok: true, lines };
 }
 
