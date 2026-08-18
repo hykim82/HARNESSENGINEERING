@@ -505,7 +505,10 @@ function parseActiveRounds(raw) {
 //     (기존 --fake-exec-fail과 동일 의미 계승).
 //   - failSubmitOnly면 --enter가 실린 제출 호출만 실패한다(§1-D
 //     TEXT_ONLY 시험 seam -- --fake-exec-fail-submit).
-function buildFakeExecFn(
+// HYK-285-always-1 (coder-task.md §2-E): watch-run.mjs의 wake CLI 결선이
+// 같은 시험 seam(이름·의미 동일)을 재사용할 수 있도록 export한다 -- 로직
+// 변경 0(export 키워드만 추가), 이 파일 자신의 CLI 동작은 그대로다.
+export function buildFakeExecFn(
   logPath,
   { failAll = false, failSubmitOnly = false, terminalListResponse = null } = {},
 ) {

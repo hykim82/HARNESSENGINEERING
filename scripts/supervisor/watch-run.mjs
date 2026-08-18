@@ -57,6 +57,7 @@ import { execFileSync } from "node:child_process";
 import {
   readFileSync,
   writeFileSync,
+  appendFileSync,
   renameSync,
   mkdirSync,
   existsSync,
@@ -87,6 +88,21 @@ import { runAdmissionSweepTrigger } from "./admission-sweep-wire.mjs";
 // 경로 재사용"). 판정 로직 자체는 재구현하지 않고 이미 만든
 // rate-limit-stall-wire.mjs의 runRateLimitStallOnce를 그대로 부른다.
 import { runRateLimitStallOnce } from "./rate-limit-stall-wire.mjs";
+// HYK-285-always-1 (coder-task.md §1 "같은 자리에 같은 방식으로 붙인다") --
+// 어제 병합된 각성 배선(wake-wire.mjs, HYK-285-wake-*)의 발동 주체를
+// admissionSweep과 같은 opt-in 원칙으로 이 기존 주기에 얹는다. 판정·전송·
+// 영수증·쿨다운 로직은 재구현하지 않고 wake-wire.mjs가 이미 내보내는
+// runWakeOnce를 그대로 부른다(§2 비타협 1).
+import { runWakeOnce, buildFakeExecFn } from "./wake-wire.mjs";
+// activeRoundCount의 유일한 출처(§2-B 비타협 "상수·추정 금지") -- 이미
+// admissionSweep 단계가 쓰는 원장 스토어/코어를 그대로 재사용한다(재구현
+// 0). 쓰기는 하지 않는다(읽기 전용 -- withLedgerLock을 거치지 않는다,
+// admission-sweep-wire.mjs의 CLI `status` 서브커맨드와 동일한 재량).
+import { readLedgerUnlocked } from "./admission-ledger-store.mjs";
+import { countActive, isWellFormedLedger } from "./admission-ledger-core.mjs";
+// 실 좌석 전송(운영 --wake-live, 가짜 exec 시험 seam이 없을 때)에만
+// 쓰인다 -- orca 문자열 리터럴 spawn은 이 adapter 안에서만 일어난다(G9).
+import { createOrcaExecFn } from "../relay/adapters/orca-adapter.mjs";
 
 export const MAX_LOG_LINES = 5000;
 
@@ -1010,12 +1026,26 @@ function buildAxisLogSegments(detectorResult, capResult, escalationDedupe) {
   };
 }
 
+// wakeLogSegment -- HYK-285-always-1 (coder-task.md §2-C): sweepLogSegment/
+// chainSegment와 동일한 "이번 회차에 실제로 돌았을 때만 세그먼트를
+// 더한다" 원칙. 필드 이름은 §2-C 원문 그대로(wake_status=/wake_verdict=/
+// wake_sent=) -- 기존 필드 이름·순서·값 표현은 건드리지 않고 맨 끝에
+// 추가만 한다(§2-C 비타협).
+function wakeLogSegment(wakeResult) {
+  if (!wakeResult || wakeResult.notRun) return null;
+  const status = wakeResult.status ?? "NONE";
+  const verdict = wakeResult.verdict ?? "NONE";
+  const sent = wakeResult.sent === true ? "true" : "false";
+  return `wake_status=${status} wake_verdict=${verdict} wake_sent=${sent}`;
+}
+
 export function buildLogLine({
   nowIso,
   detectorResult,
   capResult,
   escalationDedupe,
   sweepResult,
+  wakeResult,
 }) {
   if (detectorResult.runnerFailure) {
     return `${nowIso} RUNNER_FAILURE message=${detectorResult.message}`;
@@ -1062,6 +1092,12 @@ export function buildLogLine({
     // 라운드가 손대지 않았다.
     segments.bindingSegment,
     segments.bindingDetail,
+    // HYK-285-always-1 (coder-task.md §1 설계 제약과 동일 원칙): 이 축은
+    // 지금 이 시점의 맨 끝이다 -- 앞선 모든 세그먼트의 필드·순서·값은
+    // 이 라운드가 손대지 않았다. wake가 opt-in으로 주어지지 않은 기존
+    // 호출자는 wakeLogSegment가 null을 돌려주므로(filter(Boolean)) 로그
+    // 줄이 한 글자도 달라지지 않는다(§2-A 회귀 0).
+    wakeLogSegment(wakeResult),
   ]
     .filter(Boolean)
     .join(" ");
@@ -1377,6 +1413,95 @@ function sweepRecordField(sweepResult) {
   };
 }
 
+// computeWakeActiveRoundCount -- HYK-285-always-1 (coder-task.md §2-B):
+// activeRoundCount의 유일한 출처는 실제 예약 원장(admissionSweep이
+// 이미 갖고 있는 ledgerPath -- 새 경로를 만들지 않는다, §1 원문 "그 값을
+// 쓴다")이다. ⛔상수·추정 금지 -- 못 읽으면(원장 미설정·미존재·손상·
+// 스키마 불일치) null을 돌려줘 decideWake가 UNDECIDABLE(ACTIVE_ROUNDS_
+// UNKNOWN)로 접게 한다(조용히 "활성 라운드 0"으로 접지 않는다 -- 그건
+// "관측 안 됨"과 "관측된 0건"을 혼동해 오탐 억제를 무너뜨린다).
+function computeWakeActiveRoundCount({ admissionSweep }) {
+  if (!admissionSweep || !admissionSweep.ledgerPath) return null;
+  let readResult;
+  try {
+    readResult = readLedgerUnlocked(admissionSweep.ledgerPath);
+  } catch {
+    return null;
+  }
+  if (!readResult || !readResult.ok || !isWellFormedLedger(readResult.ledger)) {
+    return null;
+  }
+  return countActive(readResult.ledger);
+}
+
+// runWakeStep -- HYK-285-always-1 (coder-task.md §1/§2 전체) 발동 주체의
+// 몸통. admissionSweep과 완전히 같은 opt-in 계약: `wake`을 호출자가
+// 명시적으로 주지 않으면(기본값 null) 이 단계는 아예 실행되지 않는다 --
+// 기존 호출자·기존 시험은 회귀 0(runSweepStep과 동일 원칙).
+//
+// ⛔§2-B 비타협: orchHandle을 여기서 넘기지 않는다 -- 좌석 후보 조회는
+// wake-wire.mjs(runWakeOnce -> resolveOrchHandle)가 스스로 하고, 후보가
+// 0개거나 2개 이상이면 그 안에서 이미 fail-closed(exit 2)한다. 이 함수가
+// 그 판단을 대신하거나 추측하지 않는다.
+//
+// watchLogPath는 "이번 tick이 append되기 전" 상태를 가리킨다(runWatchOnceCore
+// 호출 지점 참조) -- 그래서 이번 판정은 이전까지 기록된 연속성만 본다.
+// 다음 주기가 돌 때 이번 tick의 결과가 그 다음 판정의 재료가 된다(15분
+// 주기 대비 오차 1 tick -- wake-decide-core.mjs의 sustainTicks 자체가
+// 이미 "몇 tick 연속"을 요구하므로 실질적인 각성 지연에 영향을 주지
+// 않는다). 이 설계 선택 덕분에 이 단계는 detectorResult(이번 tick의 실
+// 판정)와 완전히 독립적으로 시험할 수 있다 -- watch.log에 미리 심어둔
+// 이력만으로 WAKE/HOLD/UNDECIDABLE을 결정적으로 재현 가능하다(§2-E
+// "헛시험 방지" 요구를 프로덕션 진입점 자식 프로세스 실행으로 충족하기
+// 위한 핵심 설계 선택).
+function runWakeStep({
+  wake,
+  admissionSweep,
+  watchLogPath,
+  now,
+  readFn,
+  writeFn,
+  appendFn,
+  existsFn,
+  mkdirFn,
+}) {
+  if (!wake) return { notRun: true };
+  const activeRoundCount = computeWakeActiveRoundCount({ admissionSweep });
+  try {
+    const result = runWakeOnce({
+      watchLogPath,
+      statePath: wake.statePath,
+      wakeLogPath: wake.wakeLogPath,
+      activeRoundCount,
+      live: wake.live === true,
+      execMode: wake.execMode ?? null,
+      injectedSeams: Array.isArray(wake.injectedSeams)
+        ? wake.injectedSeams
+        : [],
+      execFn: wake.execFn,
+      nowMs: now,
+      readFn,
+      writeFn,
+      appendFn,
+      existsFn,
+      mkdirFn,
+    });
+    return { notRun: false, ...result };
+  } catch (err) {
+    // 이 단계 자신의 실패가 감시 사이클 전체를 죽이면 안 된다
+    // (runSweepStep/computeCapResult와 동일 원칙 -- v1은 로그만).
+    return {
+      notRun: false,
+      status: "WAKE_STEP_RUNNER_FAILURE",
+      detail: err && err.message ? err.message : String(err),
+      verdict: null,
+      reasonCode: null,
+      sent: false,
+      receipt: null,
+    };
+  }
+}
+
 // HYK-228 4R (coder-task.md §1 항4): fs 계열 주입 함수 5개의 기본값
 // 해석만 떼어낸다(runWatchOnce의 complexity 수리 -- 기본 파라미터 각각이
 // 분기 하나로 잡히므로, 여기로 옮긴 5개만큼 runWatchOnce 자신의 complexity
@@ -1396,6 +1521,7 @@ function resolveWatchOnceFsFns({
   renameFn,
   mkdirFn,
   existsFn,
+  appendFn,
 }) {
   return {
     readFn: readFn === undefined ? readFileSync : readFn,
@@ -1403,6 +1529,11 @@ function resolveWatchOnceFsFns({
     renameFn: renameFn === undefined ? renameSync : renameFn,
     mkdirFn: mkdirFn === undefined ? mkdirSync : mkdirFn,
     existsFn: existsFn === undefined ? existsSync : existsFn,
+    // HYK-285-always-1 (coder-task.md §2-E): wake의 영수증(JSONL)은
+    // append-only로 쓴다(wake-wire.mjs runWakeOnce의 기본 IO와 동일한
+    // 함수 모양) -- 기존 다섯 함수와 동일한 "undefined일 때만 기본값"
+    // 규칙(`??` 대신 `=== undefined` -- 위 함수 헤더 주석과 동일 이유).
+    appendFn: appendFn === undefined ? appendFileSync : appendFn,
   };
 }
 
@@ -1429,6 +1560,7 @@ function finalizeWatchOnceCycle({
   capResult,
   escalationDedupe,
   sweepResult,
+  wakeResult,
 }) {
   const nowIso = new Date(now).toISOString();
   const logPath = path.join(watchDir, "watch.log");
@@ -1439,6 +1571,7 @@ function finalizeWatchOnceCycle({
     capResult,
     escalationDedupe,
     sweepResult,
+    wakeResult,
   });
   appendLogWithRotation({
     readFn,
@@ -1493,6 +1626,7 @@ function finalizeWatchOnceCycle({
     capResult,
     escalationDedupe,
     sweepResult,
+    wakeResult,
   };
 }
 
@@ -1509,11 +1643,13 @@ function runWatchOnceCore({
   renameFn,
   mkdirFn,
   existsFn,
+  appendFn,
   notifyDir,
   capPath,
   capReadFn,
   admissionSweep,
   sweepExecFn,
+  wake,
 }) {
   mkdirFn(watchDir, { recursive: true });
   const detectorResult = runDetector({
@@ -1536,6 +1672,20 @@ function runWatchOnceCore({
     mkdirFn,
   });
   const sweepResult = runSweepStep({ admissionSweep, sweepExecFn, now });
+  // HYK-285-always-1 (coder-task.md §1/§2): wake도 sweep과 동일한 지점
+  // (로그 줄 조립 *전*)에서 계산한다 -- runWakeStep 헤더 주석 참조("이번
+  // tick이 append되기 전" watch.log를 읽는 설계 선택 이유).
+  const wakeResult = runWakeStep({
+    wake,
+    admissionSweep,
+    watchLogPath: path.join(watchDir, "watch.log"),
+    now,
+    readFn,
+    writeFn,
+    appendFn,
+    existsFn,
+    mkdirFn,
+  });
   return finalizeWatchOnceCycle({
     repoRoot,
     watchDir,
@@ -1551,6 +1701,7 @@ function runWatchOnceCore({
     capResult,
     escalationDedupe,
     sweepResult,
+    wakeResult,
   });
 }
 
@@ -1577,11 +1728,16 @@ export function runWatchOnce({
   renameFn,
   mkdirFn,
   existsFn,
+  appendFn,
   notifyDir = null,
   capPath,
   capReadFn,
   admissionSweep = null,
   sweepExecFn,
+  // HYK-285-always-1 (coder-task.md §2-A "opt-in -- 기본은 꺼짐"):
+  // admissionSweep과 동일한 기본값 null -- 호출자가 명시적으로 주지
+  // 않으면 wake 단계는 아예 실행되지 않는다(회귀 0).
+  wake = null,
 }) {
   const fsFns = resolveWatchOnceFsFns({
     readFn,
@@ -1589,6 +1745,7 @@ export function runWatchOnce({
     renameFn,
     mkdirFn,
     existsFn,
+    appendFn,
   });
   return runWatchOnceCore({
     repoRoot,
@@ -1604,6 +1761,7 @@ export function runWatchOnce({
     capReadFn,
     admissionSweep,
     sweepExecFn,
+    wake,
   });
 }
 
@@ -1635,6 +1793,22 @@ if (invokedDirectly) {
   // 것이다). `--no-partial-count`는 기존 운영 결선을 그대로 유지하고 싶을
   // 때의 탈출구(다른 `--no-*` 플래그와 동일한 재량).
   let noPartialCount = false;
+  // HYK-285-always-1 (coder-task.md §1 "같은 자리에 같은 방식으로 붙인다",
+  // §2-A "opt-in -- 기본은 꺼짐"): `--wake`를 명시적으로 주지 않으면
+  // (기본값) 이 단계는 아예 실행되지 않는다(admissionSweep과 동일 원칙 --
+  // 기존 호출자·기존 시험은 회귀 0). `--wake-live` 없이는 실 전송을 절대
+  // 하지 않는다(wake-wire.mjs 자신의 §2 비타협 5를 runWakeOnce가 그대로
+  // 지킨다 -- 이 CLI는 그 게이트를 다시 구현하지 않는다). `--wake-fake-
+  // exec-*`는 wake-wire.mjs CLI와 동일한 이름·의미의 시험 전용 주입구
+  // (buildFakeExecFn을 그대로 재사용 -- 재구현 0).
+  let wakeEnabled = false;
+  let wakeState = null;
+  let wakeLog = null;
+  let wakeLive = false;
+  let wakeFakeExecLog = null;
+  let wakeFakeExecFail = false;
+  let wakeFakeExecFailSubmit = false;
+  let wakeFakeTerminalListJson = null;
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === "--repo-root") repoRoot = argv[++i];
     else if (argv[i] === "--watch-dir") watchDir = argv[++i];
@@ -1645,21 +1819,86 @@ if (invokedDirectly) {
     else if (argv[i] === "--admission-sweep-lock")
       admissionSweepLock = argv[++i];
     else if (argv[i] === "--no-partial-count") noPartialCount = true;
+    else if (argv[i] === "--wake") wakeEnabled = true;
+    else if (argv[i] === "--wake-state") wakeState = argv[++i];
+    else if (argv[i] === "--wake-log") wakeLog = argv[++i];
+    else if (argv[i] === "--wake-live") wakeLive = true;
+    else if (argv[i] === "--wake-fake-exec-log") wakeFakeExecLog = argv[++i];
+    else if (argv[i] === "--wake-fake-exec-fail") wakeFakeExecFail = true;
+    else if (argv[i] === "--wake-fake-exec-fail-submit")
+      wakeFakeExecFailSubmit = true;
+    else if (argv[i] === "--wake-fake-terminal-list-json")
+      wakeFakeTerminalListJson = argv[++i];
   }
   if (!repoRoot || !watchDir) {
     console.error("usage: watch-run.mjs --repo-root <path> --watch-dir <path>");
     process.exit(1);
   }
-  const admissionSweep =
-    admissionSweepLedger && admissionSweepLock
-      ? { ledgerPath: admissionSweepLedger, lockPath: admissionSweepLock }
-      : null;
+  // HYK-285-always-1 (coder-task.md §1 "그 값을 쓴다"): 게이트를
+  // ledgerPath 단독으로 완화한다 -- lockPath까지 있어야 실제로 도는
+  // runSweepStep 자신의 가드(`!admissionSweep.lockPath` -> notRun)는
+  // 그대로다(§7-A 회귀 0: 기존 호출은 언제나 둘 다 준다). 이 완화가
+  // 여는 것은 딱 하나 -- ledger 경로만 주고 lock은 안 줘서 "sweep은
+  // 끄고 wake의 activeRoundCount 읽기만 켠다"는 조합(실 orca 호출을
+  // 만드는 sweep 트리거를 켜지 않고도 원장을 읽을 수 있어야 한다, §2-B).
+  const admissionSweep = admissionSweepLedger
+    ? { ledgerPath: admissionSweepLedger, lockPath: admissionSweepLock }
+    : null;
+  // §1-B(wake-wire.mjs 원문 그대로 상속): 영수증이 "운영"과 "시험"을
+  // 구별할 수 있게, 가짜 exec을 썼는지를 execMode에 싣는다(fakeExecLog
+  // 유무가 유일한 판정 기준). live가 아니면 항상 null(비-live).
+  const wakeExecMode = !wakeLive ? null : wakeFakeExecLog ? "fake" : "live";
+  // HYK-285-wake-4와 동일 원칙: "어떤 주입구가 쓰였는지"를 영수증에
+  // 남긴다 -- fake exec가 실제로 살아 있을 때(execMode==="fake")만
+  // 의미가 있다(안 쓴 주입구는 목록에 없다 -- 거짓 양성 방지).
+  const wakeInjectedSeams = [];
+  if (wakeExecMode === "fake") {
+    wakeInjectedSeams.push("fake-exec-log");
+    if (wakeFakeTerminalListJson)
+      wakeInjectedSeams.push("fake-terminal-list-json");
+    if (wakeFakeExecFailSubmit) wakeInjectedSeams.push("fake-exec-fail-submit");
+    if (wakeFakeExecFail) wakeInjectedSeams.push("fake-exec-fail");
+  }
+  // 실행 구성(운영 execFn vs 가짜 execFn)은 live가 아니면 아예 만들지
+  // 않는다 -- runWakeOnce 자신이 `!live`일 때 execFn을 부르지 않으므로
+  // undefined로 둬도 안전하지만, "라이브 아닌 실행에 execFn을 만들지
+  // 않는다"를 이 조립부에서도 명시적으로 지킨다(§2 비타협 5와 동일
+  // 정신 -- 기본 발화 금지 경로에는 실 orca 핸들도 만들지 않는다).
+  const wakeExecFn = !wakeLive
+    ? undefined
+    : wakeFakeExecLog
+      ? buildFakeExecFn(wakeFakeExecLog, {
+          failAll: wakeFakeExecFail,
+          failSubmitOnly: wakeFakeExecFailSubmit,
+          terminalListResponse: wakeFakeTerminalListJson
+            ? {
+                ok: true,
+                result: { terminals: JSON.parse(wakeFakeTerminalListJson) },
+              }
+            : null,
+        })
+      : createOrcaExecFn();
+  // HYK-285-always-1 (coder-task.md §2-C "영수증(JSONL)은... watch-dir
+  // 아래로 둔다", §2-D-3 "쿨다운 상태 파일이 주기 실행 사이에 유지되는지"):
+  // 상태·영수증 경로 둘 다 기본으로 watchDir 아래 -- 같은 watchDir로
+  // 매 주기 다시 호출되므로 쿨다운 상태가 자연히 사이클 간에 유지된다.
+  const wake = wakeEnabled
+    ? {
+        statePath: wakeState || path.join(watchDir, "wake-state.json"),
+        wakeLogPath: wakeLog || path.join(watchDir, "wake-receipts.jsonl"),
+        live: wakeLive,
+        execMode: wakeExecMode,
+        injectedSeams: wakeInjectedSeams,
+        execFn: wakeExecFn,
+      }
+    : null;
   const cliNow = Date.now();
   const result = runWatchOnce({
     repoRoot,
     watchDir,
     notifyDir,
     admissionSweep,
+    wake,
     now: cliNow,
   });
   if (!noPartialCount) {
@@ -1688,6 +1927,18 @@ if (invokedDirectly) {
         `${rl.noticePath ? ` notice=${rl.noticePath}` : ""}` +
         `${rl.alreadyNotified ? " (already notified)" : ""}` +
         `${rl.message ? ` -- ${rl.message}` : ""}`,
+    );
+  }
+  // HYK-285-always-1 (coder-task.md §2-C, HYK-270과 동일 관례 "전부 실행
+  // 출력으로 보여라") -- wake 단계 결과를 사람이 읽는 한 줄로 찍는다.
+  // watch.log 줄 형식은 건드리지 않는다(§6/§7 회귀 0) -- 이 줄은 그
+  // 로그 줄과 별개의 stdout 한 줄이다.
+  const wk = result.wakeResult;
+  if (wk && wk.notRun !== true) {
+    console.log(
+      `wake: status=${wk.status ?? "NONE"} verdict=${wk.verdict ?? "NONE"}` +
+        ` reason=${wk.reasonCode ?? "NONE"} sent=${wk.sent === true}` +
+        `${wk.detail ? ` -- ${wk.detail}` : ""}`,
     );
   }
   process.exit(result.detectorResult.runnerFailure ? 1 : 0);
