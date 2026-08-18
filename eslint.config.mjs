@@ -127,6 +127,13 @@ export default [
     // judgment core (admission-sweep-trigger-core.mjs) -- the same shape
     // as orch-stall-detect.mjs/watch-run.mjs above, not a reopening of
     // the general relay -> non-relay dependency direction.
+    // HYK-285-wake-1 (coder-task.md §2 비타협 4): wake-wire.mjs must reuse
+    // orca-adapter.mjs's buildSeatLaunchTextCommand/createOrcaExecFn to
+    // send the fixed §3-C wake message rather than reimplementing a
+    // command builder or spawning "orca" itself (that spawn boundary is
+    // enforced separately by orca-cli-boundary.mjs/G9). Same shape as the
+    // exceptions above: a production entry point wiring an already-merged
+    // relay port, not a reopening of the general dependency direction.
     files: [
       "scripts/supervisor/orch-stall-detect.mjs",
       "scripts/supervisor/seat-liveness-wire.test.mjs",
@@ -140,6 +147,8 @@ export default [
       "scripts/supervisor/dispatch-postcheck-wire.test.mjs",
       "scripts/supervisor/dispatch-postcheck-axis-wire.test.mjs",
       "scripts/supervisor/admission-sweep-wire.mjs",
+      "scripts/supervisor/wake-wire.mjs",
+      "scripts/supervisor/wake-wire.test.mjs",
     ],
     rules: {
       "no-restricted-imports": "off",
