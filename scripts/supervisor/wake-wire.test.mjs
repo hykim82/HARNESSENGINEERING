@@ -292,6 +292,14 @@ test("wire: --live인데 --orch-handle이 없고 후보가 0개면 exit 2, fail-
     assert.equal(r.status, 2);
     assert.equal(r.parsed.status, "WAKE_WIRE_LIVE_HANDLE_AMBIGUOUS");
     assert.equal(r.parsed.sent, false);
+    // HYK-285-wake-4 (§1-A, 검토 2R P2): 조회 실패/모호로 닫히는 경로에서도
+    // 영수증에 execMode·주입구 표식이 남는다 -- 검토가 잡은 결함(이 경로에서
+    // execMode가 null로 뭉개짐)이 다시 나지 않는지 직접 단언.
+    assert.equal(r.parsed.receipt.execMode, "fake");
+    assert.deepEqual(r.parsed.receipt.injectedSeams, [
+      "fake-exec-log",
+      "fake-terminal-list-json",
+    ]);
     // list 조회 1건만 나가고, 후보가 없으니 텍스트/제출은 시도되지 않는다.
     const sends = readJsonl(fakeExecLog);
     assert.equal(sends.length, 1);
@@ -367,8 +375,48 @@ test("wire: --live인데 --orch-handle이 없고 후보가 2개 이상이면 exi
     assert.equal(r.status, 2);
     assert.equal(r.parsed.status, "WAKE_WIRE_LIVE_HANDLE_AMBIGUOUS");
     assert.equal(r.parsed.sent, false);
+    assert.equal(r.parsed.receipt.execMode, "fake");
+    assert.deepEqual(r.parsed.receipt.injectedSeams, [
+      "fake-exec-log",
+      "fake-terminal-list-json",
+    ]);
     const sends = readJsonl(fakeExecLog);
     assert.equal(sends.length, 1); // 후보가 애매하니 전송은 시도되지 않는다.
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// HYK-285-wake-4 (§1-A 요구 ⓑ, 거짓 양성 방지): 주입구 플래그가 argv에
+// 있어도 --live가 없으면 execFn 자체가 만들어지지 않아(코드 참조:
+// `const execFn = !live ? null : ...`) 그 플래그는 이 실행에서 전혀
+// "쓰이지" 않았다 -- 영수증도 그 사실을 정직하게 반영해야 한다
+// (execMode:null, injectedSeams:[] -- 플래그가 argv에 있었다는 이유만으로
+// "주입이 있었다"로 오검출하지 않는다).
+test("wire: --live 없이 주입구 플래그만 있으면 그 플래그는 쓰이지 않은 것 -- 영수증 execMode=null·injectedSeams=[] (거짓 양성 방지) (1/1)", () => {
+  const dir = tmpDir("hyk285-wake-noseam-");
+  try {
+    const watchLog = join(dir, "watch.log");
+    const wakeLog = join(dir, "wake-log.jsonl");
+    writeFileSync(watchLog, wouldWakeLogText(), "utf8");
+    const r = runWire([
+      "--watch-log",
+      watchLog,
+      "--active-rounds",
+      "1",
+      "--wake-log",
+      wakeLog,
+      "--fake-exec-log",
+      join(dir, "fake-exec.jsonl"),
+      "--fake-terminal-list-json",
+      JSON.stringify([]),
+      "--fake-exec-fail-submit",
+      // ★--live 없음 -- 위 세 주입구 플래그는 전부 무효화된다.
+    ]);
+    assert.equal(r.status, 3); // WAKE_NOT_LIVE, 기존 회귀 그대로.
+    assert.equal(r.parsed.sent, false);
+    assert.equal(r.parsed.receipt.execMode, null);
+    assert.deepEqual(r.parsed.receipt.injectedSeams, []);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

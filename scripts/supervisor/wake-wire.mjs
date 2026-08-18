@@ -225,7 +225,6 @@ function notLiveOutcome() {
     exitCode: WAKE_WIRE_EXIT.WAKE_NOT_LIVE,
     status: WAKE_WIRE_STATUS.DECIDED,
     sent: false,
-    execMode: null,
     deliveryStage: null,
     detail: null,
   };
@@ -236,19 +235,22 @@ function handleResolutionFailureOutcome(resolved) {
     exitCode: WAKE_WIRE_EXIT.OBSERVATION_OR_SEND_FAILED,
     status: resolved.status,
     sent: false,
-    execMode: null,
     deliveryStage: null,
     detail: resolved.detail,
   };
 }
 
-// §1-B 불변식: 영수증만 보고 "운영에서 실제로 보냈다"와 "시험이었다"를
-// 구별할 수 있어야 한다 -- execMode("live"/"fake")를 모든 전송 시도 결과에
-// 싣는다(가짜 exec든 진짜 exec든 --fake-exec-log 유무로 CLI가 결정해
-// 넘긴다, invokedDirectly 블록 참조). 시험은
-// "가짜 경로 영수증이 운영 성공으로 오독될 수 없다"를 execMode==="fake"
-// 로 직접 단언한다.
-function sendOutcomeFromResult(sendOutcome, execMode) {
+// HYK-285-wake-4 (coder-task.md §1-A, 검토 2R P2 수리): execMode/
+// injectedSeams는 더 이상 이 함수(또는 sendOutcomeFromResult/
+// notLiveOutcome/handleResolutionFailureOutcome)가 각자 실어 나르지
+// 않는다 -- 검토가 잡은 결함이 정확히 그 형태였다
+// (handleResolutionFailureOutcome이 execMode:null을 고정해, 조회
+// 실패/모호 경로에서 실 exec였는지 가짜 주입이었는지가 사라졌다).
+// 대신 runWakeOnce가 "이 실행이 어떻게 구성됐는지"(CLI가 넘긴 값)를
+// 딱 한 곳에서 읽어 **모든** 종료 경로의 영수증에 그대로 싣는다(아래
+// runWakeOnce의 receipt 조립부) -- 특정 분기가 그 전파를 빠뜨리는
+// 사고 자체가 구조적으로 불가능해진다.
+function sendOutcomeFromResult(sendOutcome) {
   return {
     exitCode: sendOutcome.ok
       ? WAKE_WIRE_EXIT.DECIDED
@@ -259,20 +261,19 @@ function sendOutcomeFromResult(sendOutcome, execMode) {
         ? WAKE_WIRE_STATUS.LIVE_SUBMIT_FAILED
         : WAKE_WIRE_STATUS.LIVE_SEND_FAILED,
     sent: sendOutcome.ok === true,
-    execMode,
     deliveryStage: sendOutcome.deliveryStage,
     detail: sendOutcome.detail,
   };
 }
 
 // WAKE 판정을 실제로 전송(§2 비타협 5: --live일 때만)하고, 성공하면 상태
-// 파일에 마지막 각성 시각을 남긴다. 반환:
-// {exitCode, status, sent, execMode, deliveryStage, detail}.
+// 파일에 마지막 각성 시각을 남긴다. 반환: {exitCode, status, sent,
+// deliveryStage, detail} -- execMode/injectedSeams는 runWakeOnce가
+// 별도로 싣는다(위 주석).
 function sendWakeIfLive({
   live,
   orchHandle,
   execFn,
-  execMode,
   statePath,
   nowMs,
   writeFn,
@@ -291,7 +292,7 @@ function sendWakeIfLive({
   if (sendOutcome.ok) {
     writeWakeState({ statePath, nowMs, writeFn, existsFn, mkdirFn });
   }
-  return sendOutcomeFromResult(sendOutcome, execMode);
+  return sendOutcomeFromResult(sendOutcome);
 }
 
 function appendReceipt({ appendFn, existsFn, mkdirFn, wakeLogPath, receipt }) {
@@ -379,6 +380,7 @@ function withValueDefaults(opts) {
     orchHandle: opts.orchHandle ?? null,
     live: opts.live ?? false,
     execMode: opts.execMode ?? null,
+    injectedSeams: Array.isArray(opts.injectedSeams) ? opts.injectedSeams : [],
     nowMs: opts.nowMs ?? Date.now(),
     config: opts.config ?? DEFAULT_WAKE_CONFIG,
   };
@@ -410,6 +412,7 @@ export function runWakeOnce(opts) {
     orchHandle,
     live,
     execMode,
+    injectedSeams,
     nowMs,
     config,
     readFn,
@@ -438,7 +441,6 @@ export function runWakeOnce(opts) {
           live,
           orchHandle,
           execFn,
-          execMode,
           statePath,
           nowMs,
           writeFn,
@@ -449,7 +451,6 @@ export function runWakeOnce(opts) {
           exitCode: WAKE_WIRE_EXIT.DECIDED,
           status: WAKE_WIRE_STATUS.DECIDED,
           sent: false,
-          execMode: null,
           deliveryStage: null,
           detail: null,
         };
@@ -461,10 +462,16 @@ export function runWakeOnce(opts) {
     sent: sendOutcome.sent,
     live,
     skippedLogLines: skipped,
-    // §1-B 불변식: 영수증만으로 "운영 실전송" vs "시험(가짜 exec)"을
-    // 구별한다(sendOutcomeFromResult 주석 참조). §1-D: 텍스트만 나가고
-    // 제출이 실패한 상태를 sent=true로 오독하지 않게 별도 필드로 남긴다.
-    execMode: sendOutcome.execMode ?? null,
+    // HYK-285-wake-4 (§1-A, 검토 2R P2 수리) §1-B 불변식: 영수증만으로
+    // "운영 실전송" vs "시험(가짜 exec)"을 구별할 수 있어야 한다 --
+    // *모든* 종료 경로(성공·실패·모호·조회 실패)에서 그렇다. execMode/
+    // injectedSeams는 이 실행이 어떻게 구성됐는지(CLI가 정한 값)를
+    // 딱 한 곳(여기)에서만 읽어 싣는다 -- sendOutcome의 특정 분기가
+    // 그 전파를 빠뜨리는 사고(검토 2R이 잡은 결함 그대로)가 이제
+    // 구조적으로 불가능하다. §1-D: 텍스트만 나가고 제출이 실패한
+    // 상태를 sent=true로 오독하지 않게 deliveryStage를 별도로 남긴다.
+    execMode,
+    injectedSeams,
     deliveryStage: sendOutcome.deliveryStage ?? null,
   };
 
@@ -557,6 +564,18 @@ if (invokedDirectly) {
   // §1-B: 영수증이 "운영"과 "시험"을 구별할 수 있게, 가짜 exec을 썼는지를
   // 그대로 execMode에 싣는다(fakeExecLog 유무가 유일한 판정 기준).
   const execMode = !live ? null : fakeExecLog ? "fake" : "live";
+  // HYK-285-wake-4 (§1-A, 검토 2R P2 수리): "어떤 주입구가 쓰였는지"를
+  // 영수증에 남긴다 -- fake exec가 실제로 살아 있을 때(execMode==="fake")
+  // 만 의미가 있으므로, 그 조건에서만 실제로 켜진 플래그 이름을 순서대로
+  // 모은다(안 쓴 주입구는 목록에 없다 -- 거짓 양성 방지, "하나도 안 쓴
+  // 실행"에서는 빈 배열로 남는다).
+  const injectedSeams = [];
+  if (execMode === "fake") {
+    injectedSeams.push("fake-exec-log");
+    if (fakeTerminalListJson) injectedSeams.push("fake-terminal-list-json");
+    if (fakeExecFailSubmit) injectedSeams.push("fake-exec-fail-submit");
+    if (fakeExecFail) injectedSeams.push("fake-exec-fail");
+  }
   const execFn = !live
     ? null
     : fakeExecLog
@@ -579,6 +598,7 @@ if (invokedDirectly) {
     orchHandle,
     live,
     execMode,
+    injectedSeams,
     execFn,
   });
   if (json) {
