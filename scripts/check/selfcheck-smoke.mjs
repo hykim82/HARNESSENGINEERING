@@ -1,3 +1,23 @@
+// HYK-289 (coder-task.md §2-1): this file is a "시험·점검 진입점" that is
+// run directly (`node scripts/check/selfcheck-smoke.mjs`), NEVER via
+// `node --test` -- so admission-completion-adapter.mjs's own
+// NODE_TEST_CONTEXT-based guard (see that file's persistentFallbackAllowed)
+// cannot see this invocation at all. ORCH measured the exact leak this
+// import closes: smokeRelayHandshake() below spawns relay-handshake.mjs's
+// CLI without an ADMISSION_LEDGER_PATH override, which (when its own
+// checkRelayHandshake spawn reaches ok:true) spawns
+// admission-completion-adapter.mjs as a further child that inherits this
+// process's env AND cwd -- with neither var set, that grandchild resolves
+// the REAL control-room ledger pointer file and durably appends a
+// RESERVATION_NOT_FOUND line to its real `.completion-failures.jsonl`
+// side file. Importing sweep-ledger-isolation.mjs here runs its top-level
+// side effect (set ADMISSION_LEDGER_PATH/ADMISSION_LOCK_PATH to a
+// disposable tmp-dir path, only if unset) before any smoke* function below
+// ever spawns a child -- every runNode() call defaults its `env` option to
+// `process.env`, so every spawned child (and any grandchild it spawns)
+// inherits this isolated default for free, with zero changes to
+// relay-handshake.mjs or admission-completion-adapter.mjs's call sites.
+import "./sweep-ledger-isolation.mjs";
 import { spawnSync, execSync } from "node:child_process";
 import {
   mkdtempSync,

@@ -111,6 +111,29 @@ function withEnv(overrides, fn) {
   })();
 }
 
+// withoutNodeTestContext -- HYK-289: admission-completion-adapter.mjs's
+// autoCompleteAdmission now gates the persistent-pointer branch behind
+// `!process.env.NODE_TEST_CONTEXT` (that file's own persistentFallbackAllowed,
+// see its header comment for the full leak this closes). `node --test`
+// itself sets NODE_TEST_CONTEXT on this very process (confirmed empirically:
+// a plain `node foo.mjs` never has it), so every test below that wants to
+// exercise the genuine "persistent pointer resolves" contract (ⓑ/ⓑ-2/ⓓ, and
+// two of ⓔ's samples) must delete it for the duration of that one call --
+// otherwise this file's own `node --test` runner would make the branch
+// under test unreachable, which is a test-harness artifact, not the
+// production behavior being pinned (a real in-process caller like
+// checkRelayHandshake, imported by scripts/relay/watch-result.mjs etc.,
+// never runs under `node --test`, so it never has this var either).
+async function withoutNodeTestContext(fn) {
+  const prior = process.env.NODE_TEST_CONTEXT;
+  delete process.env.NODE_TEST_CONTEXT;
+  try {
+    return await fn();
+  } finally {
+    if (prior !== undefined) process.env.NODE_TEST_CONTEXT = prior;
+  }
+}
+
 async function importFreshAdapter(pathOverride = ADAPTER_PATH) {
   return import(`file://${pathOverride}?t=${Math.random()}`);
 }
@@ -174,11 +197,13 @@ test("ⓑ env absent + persistent pointer present -> persistent path is used (th
     writePointerFile(repoDir, ledger, lock);
 
     const { autoCompleteAdmission } = await importFreshAdapter();
-    const outcome = await withSyntheticRepoCwd(repoDir, async () => {
-      delete process.env.ADMISSION_LEDGER_PATH;
-      delete process.env.ADMISSION_LOCK_PATH;
-      return autoCompleteAdmission({ reservationId: "HYK-227-B-PERSIST" });
-    });
+    const outcome = await withSyntheticRepoCwd(repoDir, () =>
+      withoutNodeTestContext(async () => {
+        delete process.env.ADMISSION_LEDGER_PATH;
+        delete process.env.ADMISSION_LOCK_PATH;
+        return autoCompleteAdmission({ reservationId: "HYK-227-B-PERSIST" });
+      }),
+    );
 
     assert.equal(
       outcome.attempted,
@@ -206,11 +231,13 @@ test("ⓑ-2: persistent pointer's own lockPath is honored when env supplies neit
     writePointerFile(repoDir, ledger, lock);
 
     const { autoCompleteAdmission } = await importFreshAdapter();
-    const outcome = await withSyntheticRepoCwd(repoDir, async () => {
-      delete process.env.ADMISSION_LEDGER_PATH;
-      delete process.env.ADMISSION_LOCK_PATH;
-      return autoCompleteAdmission({ reservationId: "HYK-227-B2-PERSIST" });
-    });
+    const outcome = await withSyntheticRepoCwd(repoDir, () =>
+      withoutNodeTestContext(async () => {
+        delete process.env.ADMISSION_LEDGER_PATH;
+        delete process.env.ADMISSION_LOCK_PATH;
+        return autoCompleteAdmission({ reservationId: "HYK-227-B2-PERSIST" });
+      }),
+    );
 
     assert.equal(outcome.attempted, true);
     assert.equal(outcome.ok, true, `release should succeed: ${outcome.reason}`);
@@ -297,7 +324,7 @@ test("ⓒ-3: a pointer file missing/blank ledgerPath degrades to the same no-op"
 test("ⓓ 변이 RED: removing the persistent-fallback branch from autoCompleteAdmission -> ⓑ's case goes RED, and the real source is provably untouched", async () => {
   const src = readFileSync(ADAPTER_PATH, "utf8");
   const target = `  let persistentLockPath = null;
-  if (!ledgerPath) {
+  if (!ledgerPath && persistentFallbackAllowed()) {
     const persistent = resolvePersistentLedgerPaths();
     if (persistent) {
       ledgerPath = persistent.ledgerPath;
@@ -382,15 +409,17 @@ test("ⓔ 오탐 분모 (N=3): three distinct normal-flow shapes never wrongly r
         initAndAdmit(ledger, lock, "HYK-227-E1-REAL");
         writePointerFile(repoDir, ledger, lock);
         const { autoCompleteAdmission } = await importFreshAdapter();
-        return withSyntheticRepoCwd(repoDir, async () => {
-          delete process.env.ADMISSION_LEDGER_PATH;
-          delete process.env.ADMISSION_LOCK_PATH;
-          // completing a DIFFERENT id than the one actually admitted --
-          // must fail closed, never touch HYK-227-E1-REAL.
-          return autoCompleteAdmission({
-            reservationId: "HYK-227-E1-UNRELATED",
-          });
-        });
+        return withSyntheticRepoCwd(repoDir, () =>
+          withoutNodeTestContext(async () => {
+            delete process.env.ADMISSION_LEDGER_PATH;
+            delete process.env.ADMISSION_LOCK_PATH;
+            // completing a DIFFERENT id than the one actually admitted --
+            // must fail closed, never touch HYK-227-E1-REAL.
+            return autoCompleteAdmission({
+              reservationId: "HYK-227-E1-UNRELATED",
+            });
+          }),
+        );
       },
       assertReal: (ledger) =>
         assert.equal(readStatus(ledger, "HYK-227-E1-REAL"), "ACTIVE"),
@@ -423,11 +452,13 @@ test("ⓔ 오탐 분모 (N=3): three distinct normal-flow shapes never wrongly r
           "utf8",
         );
         const { autoCompleteAdmission } = await importFreshAdapter();
-        return withSyntheticRepoCwd(repoDir, async () => {
-          delete process.env.ADMISSION_LEDGER_PATH;
-          delete process.env.ADMISSION_LOCK_PATH;
-          return autoCompleteAdmission({ reservationId: "HYK-227-E3-REAL" });
-        });
+        return withSyntheticRepoCwd(repoDir, () =>
+          withoutNodeTestContext(async () => {
+            delete process.env.ADMISSION_LEDGER_PATH;
+            delete process.env.ADMISSION_LOCK_PATH;
+            return autoCompleteAdmission({ reservationId: "HYK-227-E3-REAL" });
+          }),
+        );
       },
       assertReal: (ledger) =>
         assert.equal(readStatus(ledger, "HYK-227-E3-REAL"), "ACTIVE"),
@@ -446,5 +477,121 @@ test("ⓔ 오탐 분모 (N=3): three distinct normal-flow shapes never wrongly r
       rmSync(repoDir, { recursive: true, force: true });
       rmSync(ledgerDir, { recursive: true, force: true });
     }
+  }
+});
+
+// ---------------------------------------------------------------------------
+// ⓕ HYK-289 2R -- 경계 계약 고정: 프로덕션 진입점(NODE_TEST_CONTEXT 없음)은
+// persistent-pointer 폴백을 «계속» 쓴다. 이건 결함이 아니라 HYK-227이
+// 의도적으로 만든 장치다(그 파일이 "설치기가 써 두는 것"으로 설명한
+// 그대로) -- 관제실 스크립트는 `ADMISSION_LEDGER_PATH`를 절대 주지 않으므로
+// (ORCH 전수 grep 0건), 이 폴백을 막으면 예약 해제/감시가 조용히 죽는다.
+// 더 강한 계약(전면 거부 + 명시 opt-in)은 HYK-302로 별도 트랙됐고 이
+// 라운드 범위가 아니다 -- 이 시험의 존재 이유는 정확히 그 실수를 막는
+// 것: 누군가 `persistentFallbackAllowed()`를 "언제나 거부"로 바꾸면(=
+// HYK-302를 이 어댑터에 성급하게 앞당겨 적용하면) 이 시험이 즉시
+// RED여야 한다.
+// ---------------------------------------------------------------------------
+
+test("ⓕ HYK-289 2R: production entry points (no NODE_TEST_CONTEXT) keep using the persistent-pointer fallback -- this is the intended HYK-227 contract, not a gap HYK-302 needs to close here", async () => {
+  const repoDir = buildSyntheticRepo("hyk289-2r-f-repo-");
+  const ledgerDir = tmpDir("hyk289-2r-f-ledger-");
+  try {
+    const ledger = join(ledgerDir, "l.json");
+    const lock = join(ledgerDir, "l.lock");
+    initAndAdmit(ledger, lock, "HYK-289-2R-F-PROD");
+    writePointerFile(repoDir, ledger, lock);
+
+    const { autoCompleteAdmission } = await importFreshAdapter();
+    const outcome = await withSyntheticRepoCwd(repoDir, () =>
+      withoutNodeTestContext(async () => {
+        delete process.env.ADMISSION_LEDGER_PATH;
+        delete process.env.ADMISSION_LOCK_PATH;
+        return autoCompleteAdmission({ reservationId: "HYK-289-2R-F-PROD" });
+      }),
+    );
+
+    assert.equal(
+      outcome.attempted,
+      true,
+      "a production caller (no NODE_TEST_CONTEXT) must still reach the persistent pointer",
+    );
+    assert.equal(outcome.ok, true, `release should succeed: ${outcome.reason}`);
+    assert.equal(readStatus(ledger, "HYK-289-2R-F-PROD"), "COMPLETED");
+  } finally {
+    rmSync(repoDir, { recursive: true, force: true });
+    rmSync(ledgerDir, { recursive: true, force: true });
+  }
+});
+
+test("ⓕ 변이 RED: narrowing persistentFallbackAllowed() to 'always reject' (HYK-302's stronger contract, applied here prematurely) makes ⓕ's production case go RED -- proves the test is load-bearing, then restores the real source byte-for-byte", async () => {
+  const src = readFileSync(ADAPTER_PATH, "utf8");
+  const target =
+    "function persistentFallbackAllowed() {\n  return !process.env.NODE_TEST_CONTEXT;\n}";
+  const count = src.split(target).length - 1;
+  assert.equal(
+    count,
+    1,
+    `mutation target "persistentFallbackAllowed() body" must appear exactly once in the current working-tree source (found ${count})`,
+  );
+  const mutated = src.replace(
+    target,
+    "function persistentFallbackAllowed() {\n  return false;\n}",
+  );
+
+  const repoDir = buildSyntheticRepo("hyk289-2r-f-mutant-repo-");
+  const ledgerDir = tmpDir("hyk289-2r-f-mutant-ledger-");
+  const checkDir = join(repoDir, "scripts", "check");
+  const supervisorDir = join(repoDir, "scripts", "supervisor");
+  const mutatedFilePath = join(checkDir, "admission-completion-adapter.mjs");
+  try {
+    mkdirSync(checkDir, { recursive: true });
+    mkdirSync(supervisorDir, { recursive: true });
+    for (const name of [
+      "admission-ledger-core.mjs",
+      "admission-ledger-store.mjs",
+    ]) {
+      writeFileSync(
+        join(supervisorDir, name),
+        readFileSync(join(CHECK_DIR, "..", "supervisor", name), "utf8"),
+        "utf8",
+      );
+    }
+    const ledger = join(ledgerDir, "l.json");
+    const lock = join(ledgerDir, "l.lock");
+    initAndAdmit(ledger, lock, "HYK-289-2R-F-MUTANT");
+    writePointerFile(repoDir, ledger, lock);
+    writeFileSync(mutatedFilePath, mutated, "utf8");
+
+    const mod = await import(`file://${mutatedFilePath}?t=${Math.random()}`);
+    const outcome = await withSyntheticRepoCwd(repoDir, () =>
+      withoutNodeTestContext(async () => {
+        delete process.env.ADMISSION_LEDGER_PATH;
+        delete process.env.ADMISSION_LOCK_PATH;
+        return mod.autoCompleteAdmission({
+          reservationId: "HYK-289-2R-F-MUTANT",
+        });
+      }),
+    );
+
+    assert.deepEqual(
+      outcome,
+      { attempted: false },
+      "RED: with persistentFallbackAllowed() narrowed to 'always reject', a production caller (no NODE_TEST_CONTEXT) that WOULD have released the reservation is now silently blocked -- exactly the premature HYK-302 regression this test must catch",
+    );
+    assert.equal(
+      readStatus(ledger, "HYK-289-2R-F-MUTANT"),
+      "ACTIVE",
+      "RED corroboration: the reservation the pointer file names never gets released",
+    );
+  } finally {
+    rmSync(repoDir, { recursive: true, force: true });
+    rmSync(ledgerDir, { recursive: true, force: true });
+    const after = readFileSync(ADAPTER_PATH, "utf8");
+    assert.equal(
+      after,
+      src,
+      "원복 증명: the real admission-completion-adapter.mjs must be byte-identical before/after this test -- only an in-memory string and a tmp-dir copy were ever mutated",
+    );
   }
 });
