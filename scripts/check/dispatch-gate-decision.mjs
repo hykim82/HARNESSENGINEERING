@@ -65,6 +65,16 @@ import { stampDroppedAt } from "./dropped-at-stamp-core.mjs";
 // 자신이 이미 여러 형제 모듈을 정적 import하는 파일이라(reject-streak.mjs
 // 등) 이 파일에서는 애초에 "정적 import 회피"가 기존 관례도 아니다.
 import { toConsumptionGateDecision } from "./consumption-receipt-core.mjs";
+// HYK-298-abort-record-1 §2-2: 이 파일이 이미 세운 "판정 코어는 zero-
+// import, 사실 추출은 이 어댑터 파일이 한다" 선례(바로 위 consumption-
+// receipt-core.mjs와 동일 구조)를 그대로 따른다. ⛔이 새 import는 이
+// 파일을 격리 clone하는 기존 mutation 시험(hyk241-oneb-gate-mutation.
+// test.mjs · dispatch-gate-consumption-wire.test.mjs · hyk263-archive-
+// doneat.test.mjs)의 고정 파일 목록에도 함께 추가했다(안 하면 그
+// 시험들의 모듈 로드 자체가 MODULE_NOT_FOUND로 깨진다 -- 바로 위
+// CONSUMPTION_RECEIPT_CORE_PATH 추가 때와 같은 이유, 그 시험 파일들
+// 자신의 주석 참조).
+import { checkAbortRecord, ABORT_RECORD_STATE } from "./abort-record-core.mjs";
 // HYK-239: reject-streak-chain.mjs's tamper-detection engine has existed
 // since HYK-218 with zero production callers (§0 실측). This is the wiring
 // -- NOT reject-streak.mjs/relay-handshake.mjs/review-gate.mjs, which the
@@ -195,6 +205,16 @@ function parseArgs(argv) {
     // 인자/환경으로만 받는다.
     else if (argv[i] === "--dispatch-receipt-path")
       out.dispatchReceiptPath = argv[++i];
+    // HYK-298-abort-record-1 §2-2: --dispatch-receipt-path와 같은
+    // arg-with-env-fallback 모양(resolveAdmissionLedgerPathForAbort가 env
+    // 폴백을 읽는다) -- ⛔관제실 절대경로 하드코딩 금지, 경로는
+    // 인자/환경으로만 받는다. admission-completion-adapter.mjs의 영속
+    // 포인터 폴백(mainRepoRoot 기반)은 재사용하지 않는다(§4 범위 밖:
+    // 그 파일의 ADMISSION_LEDGER_PATH 폴백 동작 자체를 바꾸지 말라는
+    // 지시가 있고, 이 축은 읽기 전용 판정이라 그 복잡한 폴백 없이도
+    // 안전측(레코드 없음 취급)으로 물러날 수 있다).
+    else if (argv[i] === "--admission-ledger-path")
+      out.admissionLedgerPath = argv[++i];
     else out._.push(argv[i]);
   }
   return out;
@@ -560,7 +580,18 @@ function deriveRoleFromTaskPath(taskPath) {
   return m ? m[1] : null;
 }
 
-const CONSUMPTION_TASK_ID_RE_G = /^task_id:\s*(\S+)/gim;
+// HYK-298-abort-record-2 §2-2: `\s*`(원래 정규식) 대신 `[ \t]*`(수평
+// 공백만) -- `\s*`는 줄바꿈도 먹어서, `task_id:` 뒤가 같은 줄에서
+// 비어 있으면(예: `task_id:\nverdict: approved`) 다음 줄의 값을 그대로
+// 집어 왔다(검토 실측: `whitespace_crossline`에서 `label=verdict:`).
+// 값 추출을 같은 줄 안으로 한정한다 -- 이 상수는
+// findArchivedDroppedAt/findArchivedResultFingerprint(아카이브 사본의
+// task_id 대조)에서도 재사용되므로 그 두 자리도 함께 고쳐진다(같은
+// 종류의 크로스라인 오추출을 막는 것이므로 개선이지 회귀가 아니다).
+// ⛔`CONSUMPTION_DONE_RE_G`(바로 아래)는 건드리지 않는다 --
+// doneAt 추출은 이 축(§2-1의 "이름표 없음/깨짐" 판별) 대상이 아니고,
+// 지시서 §2-2가 "다른 축의 기존 동작을 깨뜨리지 마라"고 명시했다.
+const CONSUMPTION_TASK_ID_RE_G = /^task_id:[ \t]*(\S+)/gim;
 const CONSUMPTION_DROPPED_AT_RE = /^dropped_at:\s*(.+)$/im;
 const CONSUMPTION_DONE_RE_G = /^>>>\s*DONE:.*@\s*(.+?)\s*$/gim;
 
@@ -572,6 +603,96 @@ const CONSUMPTION_DONE_RE_G = /^>>>\s*DONE:.*@\s*(.+?)\s*$/gim;
 function extractSoleMatch(text, reG) {
   const matches = [...text.matchAll(reG)];
   return matches.length === 1 ? matches[0][1].trim() : undefined;
+}
+
+// HYK-298-abort-record-2 §2-1 -- ★공통 문장("없는 것"과 "깨진 것"은
+// 다르다) 그대로: `harnessTaskLabel === undefined`(위 extractSoleMatch)
+// 하나만으로는 "이름표가 진짜로 하나도 없음"과 "있지만 복수/빈값/줄
+// 중간이라 깨짐" 둘 다 undefined로 뭉개진다(검토가 재현한 반려 사유
+// ⓐ). 이 함수는 그 둘을 구조적으로 가른다 -- 파일을 다시 읽지 않고
+// resultText 하나만 받는 순수 함수(zero side-effect).
+//
+// HYK-298-label-classify-3 §2-1/2-2 (2R의 부작용 수리, ★공통 문장 그대로
+// 재적용 -- "표지는 «줄머리»에 있는 것이다. 글 속에서 그 이름을 «언급»한
+// 것은 표지가 아니다"): 2R은 "어디든 등장"(옛 TASK_ID_ANY_RE, 줄 시작
+// 여부 무관)까지 세어 그 수가 줄머리 등장 수와 다르면 무조건 BROKEN으로
+// 떨어뜨렸다. 그런데 검토 보고서(review.md)·이 코더 보고서(coder.md) 같은
+// «정상 라운드 결과 파일»은 자기 몸 안에서 `task_id:`라는 표지 «자체»를
+// 산문으로 설명하므로(예: "`task_id:` 줄이 0개·복수개이면 …") 원시
+// 출현이 여러 건 생긴다 -- 그 출현은 전부 줄 시작이 아니다(어떤 문장이
+// "task_id:"로 시작하는 경우가 없는 한). 그런데도 2R 규칙은 그 정상
+// 라운드를 BROKEN으로 오분류해 다음 배달을 영구 차단했다(오늘 실측,
+// coder-task.md §1 표). 3R은 그 오분류를 없앴다 -- 판정은 «줄머리»
+// (TASK_ID_LOOSE_LINE_RE)로 시작하는 줄의 개수와, 그 줄 안에서의 유효값
+// 개수(CONSUMPTION_TASK_ID_RE_G)를 먼저 본다. **`looseLines === 1 &&
+// strictCount === 1`(=`VALID`)은 이 질문에 도달조차 하지 않는다** --
+// 정상 봉투(오늘 실물 2개: 줄머리 1 + 원시 3·11)는 항상 이 분기에서
+// 먼저 걸러진다(HYK-298-label-boundary-5 §2 항ⓐ 요구 "과차단이 재발하지
+// 않는 이유를 코드로 보장하라" -- VALID 판정이 아래 원시 재질문보다
+// 먼저 오는 순서 자체가 그 보장이다).
+//
+// HYK-298-label-boundary-5 §2 항ⓐ(4R이 새로 연 구멍의 수리, 검토 실행
+// 재현): looseLines === 0(줄머리 표지가 아예 없음)을 곧바로 MISSING으로
+// 접으면, ★공통 문장이 이번에 다시 쓴 그대로 "«아예 없는 것»과 «쓰려다
+// 잘못 쓴 것»은 다르다"는 구분이 깨진다 -- "참고: task_id: HYK-…"
+// (middle_of_line)처럼 줄 중간에만 "task_id:"가 등장하는 라운드는
+// **판정 내용이 실제로 든 살아있는 결과**일 수 있는데도, 줄머리에 없다는
+// 이유만으로 "진짜 죽은 라운드"와 똑같이 MISSING 취급돼 abort-record
+// 축(중단 기록만으로 통과)을 탔다(4R 검토 실측: 중단 기록 붙인 4형태 중
+// middle_of_line만 `allow:true`). 그래서 looseLines === 0일 때 **한 번
+// 더** 묻는다 -- 파일 어디에든(줄머리 여부 무관) "task_id:" 원시 출현이
+// 하나라도 있으면 "쓰려다 잘못 쓴 것"으로 보고 `BROKEN`(차단)이다. 정말
+// 한 글자도 없으면(anyCount === 0)만 `MISSING`(중단 기록으로 통과, 진짜
+// 아무것도 못 쓰고 죽은 것)이다. ⛔이 재질문은 `looseLines === 0`
+// 분기에서만 일어난다 -- `VALID`/그 외 `BROKEN` 분기(줄머리 2개 이상·
+// 줄머리 1개인데 같은 줄 값이 비거나 크로스라인으로 새는 경우)는 이미
+// 위 3R 규칙 그대로이며 원시 출현 개수와 무관하다(오늘 실물 2봉투가
+// 원시 출현 3·11건이어도 여전히 VALID인 이유 -- 이 재질문에 도달하지
+// 않는다).
+//
+// - TASK_ID_LOOSE_LINE_RE: 줄 시작(`^`)에 "task_id:"로 시작하는 줄이
+//   몇 개인지(값의 유효성은 무관, ⓐ·ⓑ 대응) 센다.
+// - TASK_ID_ANY_RE: 줄 시작 여부와 무관하게 "task_id:"가 파일 어디에나
+//   등장하는지 센다 -- `looseLines === 0`일 때만 이 질문을 쓴다(위 설명).
+// - CONSUMPTION_TASK_ID_RE_G(위, 같은 줄로 한정됨): 값이 같은 줄 안에
+//   실제로 있는(비어 있지 않은) "유효한" 라벨이 몇 개인지 센다.
+//
+// looseLines === 0이고 anyCount === 0 -> MISSING(진짜 없음). looseLines
+// === 0이고 anyCount > 0 -> BROKEN(쓰려다 잘못 씀, 줄 중간 포함).
+// looseLines === 1 && strictCount === 1 -> VALID(원시 출현 개수와 무관).
+// 나머지 전부(줄머리 2개 이상·줄머리는 1개인데 같은 줄 값이 비었거나
+// 크로스라인으로 새는 경우) -> BROKEN. fail-closed 기본은 그대로다.
+const TASK_ID_LOOSE_LINE_RE = /^task_id:.*$/gim;
+const TASK_ID_ANY_RE = /task_id:/gi;
+
+function classifyTaskIdLabel(resultText) {
+  const looseLines = [...resultText.matchAll(TASK_ID_LOOSE_LINE_RE)].length;
+  if (looseLines === 0) {
+    const anyCount = [...resultText.matchAll(TASK_ID_ANY_RE)].length;
+    if (anyCount === 0) {
+      return { kind: "MISSING", looseLines: 0, strictCount: 0 };
+    }
+    return { kind: "BROKEN", looseLines: 0, strictCount: 0, anyCount };
+  }
+  const strictMatches = [...resultText.matchAll(CONSUMPTION_TASK_ID_RE_G)];
+  const strictCount = strictMatches.length;
+  if (looseLines === 1 && strictCount === 1) {
+    return {
+      kind: "VALID",
+      value: strictMatches[0][1].trim(),
+      looseLines,
+      strictCount,
+    };
+  }
+  return { kind: "BROKEN", looseLines, strictCount };
+}
+
+// evaluateConsumptionDecision 자신의 eslint complexity 상한을 지키려고
+// 뽑았다(HYK-244-receipt-core-1b 선례와 동일한 이유, 판정 불변). VALID가
+// 아니면 언제나 undefined -- 옛 경로들의 "지어내지 않는다" 계약과 동일.
+function labelInfoToHarnessTaskLabel(labelInfo) {
+  if (labelInfo.kind === "VALID") return labelInfo.value;
+  return undefined;
 }
 
 // §2 조각2 지정과 동일: resultFingerprint = 결과 파일 내용의 SHA-256(hex).
@@ -1051,6 +1172,246 @@ function tryArchiveFallback({
   return true;
 }
 
+// ===========================================================================
+// HYK-298-abort-record-1 §2 -- «중단 기록»(abort record) 축.
+//
+// §1 무엇을 위한 것인가(coder-task.md §1 원문): 죽은 라운드가 이름표
+// (`task_id:`) 없이 결과 파일을 남기면, 위 harnessTaskLabel이 undefined가
+// 되어 dispatchId 조회조차 못 하고 영원히 BINDING_MISMATCH로 거부된다 --
+// 그 상태에서 빠져나가는 설계된 문이 없었다(유일한 기계 통과법은 결과
+// 파일을 치우는 것뿐이었다). 이 축은 그 문이다: ORCH가 `.harness/aborts/
+// <role>-abort-r<N>.json`에 «이 라운드는 중단됐다»는 증거(직전 배달
+// 영수증에서 뽑은 dispatchId·harnessTaskLabel + 죽은 결과 파일의 SHA-256
+// 지문 + admission 원장의 SUSPECT_TIMEOUT_RECOVERED 회수 표식)를 남기면,
+// 그 기록이 abort-record-core.checkAbortRecord의 3개 독립 검증(지문 일치 ·
+// dispatchId 실재 확인 · 회수 표식 확인)을 전부 통과할 때만 소비된 것으로
+// 인정한다.
+//
+// §2 언제만 적용하는가(⛔coder-task.md §3 항3 요구 그대로 -- "내용 있는
+// 미소비는 붙이든 말든 REJECT 유지"): harnessTaskLabel이 결과 파일에서
+// 뽑히지 않을 때(이름표 자체가 없는 라운드)만 이 축을 켠다. 정상적으로
+// `task_id:` 줄이 있는(=진짜 완료됐거나 최소한 자기 신원은 남긴) 결과
+// 파일은 이 축을 아예 거치지 않는다 -- 그런 파일에 아무리 중단 기록을
+// 갖다 붙여도 evaluateConsumptionDecision이 이 분기 자체에 진입하지
+// 않으므로 옛 경로(consumption-receipt 축)만 그대로 적용된다. 이것이
+// "내용 있는 미소비"가 중단 기록의 존재 여부와 무관하게 항상 REJECT로
+// 남는 이유다.
+function isNonEmptyAbortString(v) {
+  return typeof v === "string" && v.trim().length > 0;
+}
+
+// §3-2와 동일한 arg-with-env-fallback 관례(resolveDispatchReceiptPath 참조).
+function resolveAdmissionLedgerPathForAbort(args, env) {
+  if (isNonEmptyAbortString(args.admissionLedgerPath))
+    return args.admissionLedgerPath;
+  if (isNonEmptyAbortString(env.ADMISSION_LEDGER_PATH))
+    return env.ADMISSION_LEDGER_PATH;
+  return null;
+}
+
+// `<harnessDir>/aborts/<role>-abort-r<N>.json` 전부를 후보로 읽는다 --
+// readConsumptionCandidates와 동일한 "전부 읽고 코어가 걸러낸다" 원칙
+// (과거/무관 라운드 기록이 섞여 있어도 지문이 안 맞으면 코어가 스스로
+// 무시한다는 보장을 시험할 기회를 남긴다). 개별 파일 읽기/파싱 실패는
+// 그 파일만 건너뛴다(손상된 기록 하나가 전체 조회를 막지 않는다 --
+// readConsumptionCandidates와 동일 이유).
+function readAbortRecordFiles(harnessDir, role) {
+  const abortsDir = join(harnessDir, "aborts");
+  let names;
+  try {
+    names = readdirSync(abortsDir);
+  } catch {
+    return [];
+  }
+  const pattern = new RegExp(`^${role}-abort-r\\d+\\.json$`, "i");
+  const records = [];
+  for (const name of names) {
+    if (!pattern.test(name)) continue;
+    try {
+      records.push(JSON.parse(readFileSync(join(abortsDir, name), "utf8")));
+    } catch {
+      // 손상/미완성 쓰기 -- 건너뛴다(위 함수 헤더 참조).
+    }
+  }
+  return records;
+}
+
+// §3 검증2 -- 기록이 주장하는 dispatchId가 실제 배달 영수증(dispatch-
+// receipts.jsonl)의 role+harnessTaskLabel 조합에서 나온 값과 정확히
+// 같은가. 기존 lookupDispatchId를 그대로 재사용한다(같은 파일, 같은
+// "지어내지 않는다" 계약 -- 조회 실패/정말 없음 둘 다 verified:false).
+function verifyAbortRecordDispatchId(record, receiptPath) {
+  const lookup = lookupDispatchId({
+    role: record?.role,
+    harnessTaskLabel: record?.harnessTaskLabel,
+    receiptPath,
+  });
+  return (
+    lookup.ok &&
+    lookup.found &&
+    isNonEmptyAbortString(record?.dispatchId) &&
+    lookup.dispatchId === record.dispatchId
+  );
+}
+
+// §3 검증3 -- admission 원장(scripts/supervisor/admission-ledger-core.mjs의
+// sweepAndRecover가 남기는 것과 정확히 같은 모양)을 «읽기만» 한다(⛔쓰지
+// 않는다, §4 범위 "실물 원장에 닿지 마라"와 별개로 이 축 자체가 읽기
+// 전용 판정이다). reservationId는 admission-completion-adapter.mjs의
+// spawnAdmissionCompletion(taskId)가 이미 실증한 관례(harnessTaskLabel을
+// 그대로 reservationId로 쓴다, relay-handshake.mjs 1058-1064행)를
+// 그대로 따른다 -- 새 관례를 만들지 않는다. 원장을 읽을 수 없거나
+// (경로 미설정·파일 없음·JSON 파싱 실패) 그 예약이 없거나 completion_
+// reason이 정확히 "SUSPECT_TIMEOUT_RECOVERED"가 아니면 false(안전측
+// 기본값 -- "없으면 막는다").
+function verifyAbortRecordRecoveryMarker(record, ledgerPath) {
+  if (!isNonEmptyAbortString(ledgerPath)) return false;
+  if (!isNonEmptyAbortString(record?.harnessTaskLabel)) return false;
+  let ledger;
+  try {
+    ledger = JSON.parse(readFileSync(ledgerPath, "utf8"));
+  } catch {
+    return false;
+  }
+  const entry = ledger?.reservations?.[record.harnessTaskLabel];
+  return entry?.completion_reason === "SUSPECT_TIMEOUT_RECOVERED";
+}
+
+// 이 축의 메인 진입점. evaluateConsumptionDecision이 harnessTaskLabel을
+// 못 뽑았을 때(§2)만 부른다. checkAbortRecord(코어)의 판정을 그대로
+// 내놓는다(VERIFIED면 null=ALLOW, 아니면 {state, allow:false, reason}) --
+// 이 함수 자신은 ALLOW/REJECT를 스스로 판단하지 않는다. candidates가
+// 하나 이상 있었다면(이 축이 실제로 판정에 관여했다면) 사유를 항상
+// stderr에 남긴다(조용한 통과/조용한 흡수 금지, ARCHIVE_MATCH와 동일
+// 원칙).
+function evaluateAbortRecordDecision({
+  role,
+  harnessDir,
+  resultText,
+  receiptPath,
+  admissionLedgerPath,
+}) {
+  const liveFingerprint = computeConsumptionResultFingerprint(resultText);
+  const records = readAbortRecordFiles(harnessDir, role);
+  const candidates = records.map((record) => ({
+    record,
+    dispatchIdVerified: verifyAbortRecordDispatchId(record, receiptPath),
+    recoveryMarkerVerified: verifyAbortRecordRecoveryMarker(
+      record,
+      admissionLedgerPath,
+    ),
+  }));
+  // HYK-244 2R-b3 결함3과 동일한 이유(위 currentBinding.role 주석 참조):
+  // 실제 생산 관례상 role은 대문자로 굳는다 -- 기록 파일의 role 필드도
+  // 그 관례를 따른다고 기대하고, 코어에 넘기는 role 사실도 그에 맞춘다.
+  const verdict = checkAbortRecord({
+    role: role.toUpperCase(),
+    liveFingerprint,
+    candidates,
+  });
+  // ★조용한 통과/조용한 흡수 금지 -- ARCHIVE_MATCH(위 tryArchiveFallback)와
+  // 동일 원칙: ALLOW든(중단 기록이 이 라운드를 소비된 것으로 인정) 이
+  // 축이 실제로 판정에 관여했다면(=candidates가 하나 이상, 즉 위조/시도된
+  // 중단 기록이 있었다면) 항상 사유를 stderr에 남긴다. candidates가
+  // 아예 없으면(이 axis를 시도조차 안 한 경우 -- 원래 사고의 기본 모양)
+  // 로그를 남기지 않는다 -- 옛 경로만 있던 시절과 화면 출력이 동일해야
+  // 회귀 0이다.
+  if (candidates.length > 0) {
+    console.error(`dispatch-gate-decision ${verdict.reason}`);
+  }
+  if (verdict.state === ABORT_RECORD_STATE.VERIFIED) return null;
+  return { state: verdict.state, allow: false, reason: verdict.reason };
+}
+
+// evaluateConsumptionDecision 자신의 eslint complexity 상한을 지키기 위해
+// §2 분기 하나를 여기로 뽑았다(HYK-244-receipt-core-1b 품질 보정 선례와
+// 동일한 이유 -- 판정/문구는 조금도 바뀌지 않는다, 몸통만 쪼갠다). 반환:
+// {done:true, result:null}(ALLOW) | {done:true, result:<REJECT 모양>} |
+// {done:false}(옛 경로로 흘러 내려간다 -- NO_RECORD일 때만).
+function resolveAbortRecordOutcome({
+  role,
+  harnessDir,
+  resultText,
+  receiptPath,
+  admissionLedgerPath,
+}) {
+  const abortDecision = evaluateAbortRecordDecision({
+    role,
+    harnessDir,
+    resultText,
+    receiptPath,
+    admissionLedgerPath,
+  });
+  if (abortDecision === null) return { done: true, result: null }; // ALLOW.
+  if (abortDecision.state !== ABORT_RECORD_STATE.NO_RECORD) {
+    return { done: true, result: abortDecision };
+  }
+  return { done: false };
+}
+
+// HYK-298-abort-record-2 §2-1 -> HYK-298-label-classify-3 §2-3(단락 순서
+// 수리) -> HYK-298-key-narrow-4 §2(열쇠 종류 좁히기, 검토 3R 반려 수리)
+// 로 갱신 -- ★한용 위임 판정 문자 그대로: ***«BROKEN 통과 열쇠 = 정상
+// 소비 영수증 체인뿐. 중단 기록은 MISSING 전용이며 BROKEN에서는 열쇠가
+// 아니다.»*** 3R은 "없는 것"(MISSING)과 "있지만 깨진 것"(BROKEN) 둘 다
+// 먼저 중단 기록(abort-record) 축을 시도하게 했다 -- 그런데 검토가
+// 실측했듯 `abort-record-writer.mjs`는 **호출자가 필드를 넘기면 그대로
+// JSON을 쓰는 생산자**일 뿐, 그 기록의 작성 주체·무결성·admission
+// 원장 자체의 변조 여부를 인증하지 않는다(★공통 문장: "문을 여는
+// 열쇠를 문 안에 있는 사람이 스스로 만들 수 있으면, 그건 잠긴 문이
+// 아니다"). `BROKEN`(복수·공백/빈값·줄 중간·줄넘김 오인식 -- 이름표를
+// 신뢰할 수 없는 라운드)에게 그 자가생산 가능한 열쇠로 문을 열어주는
+// 것은 3R이 고치려던 과차단 문제와 무관하게 새 위조 경로를 여는
+// 것이었다(검토 4형태 ALLOW 재현이 그 증거).
+//
+// 그래서 이제 **`MISSING`만** 중단 기록 축을 탄다(ⓑ, 본래 HYK-298의
+// 목적 그대로 -- 이름표 없이 죽은 라운드를 구제하는 문). `VALID`와
+// `BROKEN`은 **똑같이** {done:false}로 물러나 옛 consumption-receipt
+// 경로(보관 사본 + 소비 영수증, `toConsumptionGateDecision`)로 내려간다
+// (ⓐ). `BROKEN`을 위한 별도의 즉시 REJECT 분기(3R의 `rejectForBrokenLabel`)
+// 도 제거했다 -- BROKEN은 harnessTaskLabel이 애초에 undefined이므로
+// (`labelInfoToHarnessTaskLabel` 참조) 그 옛 경로 자체가 dispatchId를
+// 조회할 열쇠를 못 찾아 구조적으로 REJECT로 떨어진다(그 REJECT 사유는
+// VALID 미소비 라운드가 §C에서 이미 겪는 것과 같은 계열의 소비-영수증
+// 부재 사유이지, "이름표가 깨졌다"는 별도 사유가 아니다 -- BROKEN에게
+// 특별 취급을 하나도 남기지 않는 것이 이 열쇠 좁히기의 요지다).
+//
+// HYK-298-label-boundary-5 §2 항ⓑ(계약 문구 정직화, 4R 정직 한계에서
+// 검토가 실행으로 확인한 사실 그대로): `dispatchId`는 오직
+// `lookupDispatchId(role, harnessTaskLabel, receiptPath)`로만 조회되고,
+// `harnessTaskLabel`은 `kind === "VALID"`일 때만 실제 값을 갖는다. 즉
+// `kind === "BROKEN"`인 라운드는 `currentBinding.dispatchId`가 **항상**
+// `undefined`이므로 `checkBindingPreconditions`(주 열쇠 필수)에서
+// 구조적으로 걸려 반드시 `BINDING_MISMATCH`로 REJECT된다 -- "정상 소비
+// 영수증 체인이 있으면 BROKEN도 통과할 수 있다"는 4R의 표현은 ***도달
+// 불가능한 경로를 있는 것처럼 말한 것***이었다(검토 반려 사유 ⓑ 그대로:
+// "이 기록은 소비 영수증과 동일하지 않다"는 지적을 넘어, 그 소비
+// 영수증 경로 자체가 BROKEN에게는 열리지 않는다). ***현재의 진실은
+// «BROKEN = 언제나 차단»이다*** -- 아래 코드는 그 진실을 그대로
+// 구현한다(BROKEN이 통과할 "열쇠"를 새로 만들지 않는다, 지시서 §2 항ⓑ
+// ⛔"도달 경로를 새로 만들지는 마라"). 이 진입점(`{done:false}`로
+// 물러나 옛 경로로 흘려보내는 것) 자체는 §C(내용 있는 미소비)가 이미
+// 거치는 것과 동일한 관례를 재사용한 것일 뿐, BROKEN 전용의 새 통과
+// 가능성을 여는 것이 아니다.
+function maybeResolveAbortRecordForMissingLabel({
+  labelInfo,
+  role,
+  harnessDir,
+  resultText,
+  receiptPath,
+  args,
+  env,
+}) {
+  if (labelInfo.kind !== "MISSING") return { done: false };
+  return resolveAbortRecordOutcome({
+    role,
+    harnessDir,
+    resultText,
+    receiptPath,
+    admissionLedgerPath: resolveAdmissionLedgerPathForAbort(args, env),
+  });
+}
+
 function evaluateConsumptionDecision(taskPath, args, env = process.env) {
   const role = deriveRoleFromTaskPath(taskPath);
   if (!role) return null;
@@ -1065,12 +1426,42 @@ function evaluateConsumptionDecision(taskPath, args, env = process.env) {
   // 이 시점엔 이미 "다음에 보낼" 새 라운드로 덮여 있다 -- 라벨은 아직
   // 다음 라운드가 안 덮어쓴 resultText(직전 라운드 자신의 결과 파일)의
   // task_id 에코에서 뽑는다(taskText를 쓰지 않는다).
-  const harnessTaskLabel = extractSoleMatch(
-    resultText,
-    CONSUMPTION_TASK_ID_RE_G,
-  );
+  // HYK-298-abort-record-2 §2-1: harnessTaskLabel(sole-match)만으로는
+  // "없음"과 "깨짐"이 둘 다 undefined로 뭉개진다 -- labelInfo가 그 둘을
+  // 먼저 구조적으로 가른다. VALID일 때만 harnessTaskLabel에 실제 값이
+  // 들어간다(그 외에는 undefined, 아래 옛 경로들의 기존 계약과 동일한
+  // "지어내지 않는다" 모양을 유지).
+  const labelInfo = classifyTaskIdLabel(resultText);
+  const harnessTaskLabel = labelInfoToHarnessTaskLabel(labelInfo);
 
   const receiptPath = resolveDispatchReceiptPath(args, env);
+
+  // HYK-298-abort-record-1 §2 / 2R §2-1 -> HYK-298-label-classify-3 §2-3
+  // -> HYK-298-key-narrow-4 §2(열쇠 좁히기)로 갱신: 이름표가 «진짜로
+  // 없을 때»(kind === "MISSING")**만** 중단 기록(abort-record) 축을
+  // 거친다 -- 그 축은 이제 BROKEN을 위한 문이 아니다(위
+  // maybeResolveAbortRecordForMissingLabel 주석 원문). 정상적으로
+  // 이름표가 있는(VALID) 결과 파일과 «있지만 깨진»(BROKEN) 결과 파일은
+  // 둘 다 이 축 자체가 {done:false}로 물러나 곧장 아래 옛
+  // consumption-receipt 경로(정상 소비 영수증 체인)로 내려간다 --
+  // BROKEN에게 남은 유일한 통과 열쇠는 그 경로뿐이다(★한용 위임 판정
+  // 문자 그대로). MISSING이 그 축에서 NO_RECORD(=이 라운드를 가리키는
+  // 중단 기록이 아예 없음)로 물러나면 마찬가지로 옛 경로로 흘러
+  // 내려간다(원래 REJECT 사유를 그대로 보존, 회귀 0). 그 외(ALLOW·
+  // AMBIGUOUS·DISPATCH_ID_UNVERIFIED·RECOVERY_MARKER_MISSING)는 MISSING
+  // 한정으로 이 축의 결과를 그대로 반환한다 -- 위조/불완전 중단 기록이
+  // 옛 경로의 일반 사유 뒤에 숨지 않게 한다.
+  const abortOutcome = maybeResolveAbortRecordForMissingLabel({
+    labelInfo,
+    role,
+    harnessDir,
+    resultText,
+    receiptPath,
+    args,
+    env,
+  });
+  if (abortOutcome.done) return abortOutcome.result;
+
   const lookup = lookupDispatchId({ role, harnessTaskLabel, receiptPath });
   if (!lookup.ok) {
     console.error(
