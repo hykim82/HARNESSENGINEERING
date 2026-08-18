@@ -51,6 +51,13 @@ const DROPPED_AT_STAMP_CORE_PATH = join(HERE, "dropped-at-stamp-core.mjs");
 // the mutant module fails to load (MODULE_NOT_FOUND), same reasoning as
 // CONSUMPTION_RECEIPT_CORE_PATH/DROPPED_AT_STAMP_CORE_PATH above.
 const ABORT_RECORD_CORE_PATH = join(HERE, "abort-record-core.mjs");
+// HYK-307-order-1 §1: dispatch-gate-decision.mjs now statically imports
+// scripts/check/envelope-archive.mjs (the delivery-time round-task
+// snapshot, archiveRoundTaskFileIfNew) -- this isolated fixture's staged
+// tree must include it or the mutant module fails to load
+// (MODULE_NOT_FOUND), same reasoning as CONSUMPTION_RECEIPT_CORE_PATH/
+// DROPPED_AT_STAMP_CORE_PATH/ABORT_RECORD_CORE_PATH above.
+const ENVELOPE_ARCHIVE_PATH = join(HERE, "envelope-archive.mjs");
 
 function assertExactlyOneMatch(src, target, label) {
   const count = src.split(target).length - 1;
@@ -93,6 +100,7 @@ function stageScriptsCheckDir(rootDir, overrides) {
       "utf8",
     ),
     "abort-record-core.mjs": readFileSync(ABORT_RECORD_CORE_PATH, "utf8"),
+    "envelope-archive.mjs": readFileSync(ENVELOPE_ARCHIVE_PATH, "utf8"),
     ...overrides,
   };
   for (const [name, content] of Object.entries(files)) {

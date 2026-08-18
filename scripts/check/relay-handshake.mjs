@@ -10,7 +10,7 @@ import {
 } from "./reject-streak.mjs";
 import {
   archiveRoundEnvelope,
-  archiveRoundTaskFile,
+  archiveRoundTaskFileIfNew,
 } from "./envelope-archive.mjs";
 import {
   TIME_FIELD,
@@ -288,8 +288,22 @@ function autoArchiveRoundEnvelope({ role, resultContent, harnessDir }) {
 // 순간이다. §3-3 요건 1의 합격 기준(실패도 한 줄로 보이게)을 그대로
 // 만족시키기 위해 autoArchiveRoundEnvelope와 동일하게 성공/실패 모두
 // console.log/console.error로 찍는다 -- 조용히 사라지는 실패를 만들지 않는다.
+// HYK-307-order-1 §1: archiveRoundTaskFileIfNew instead of the plain
+// archiveRoundTaskFile this call used before -- dispatch-gate-decision.mjs
+// now ALSO snapshots this same round's task-file text at delivery time
+// (before this handshake-time call ever runs, see that file's own
+// bestEffortSnapshotRoundTaskFile comment). In the normal ordered flow
+// (deliver -> consume, §3 시험 ⓓ) the content here is byte-identical to
+// that earlier snapshot, so archiveRoundTaskFile's own next-round-number
+// logic would otherwise write a second, redundant copy every single
+// round. archiveRoundTaskFileIfNew skips that duplicate (ok:true,
+// skipped:true) while still delegating unchanged to archiveRoundTaskFile
+// whenever no identical snapshot exists yet (e.g. this axis's own zero-
+// import safety net if the new delivery-time hook ever fails/is
+// bypassed) -- outcome.ok stays the same true/false either way, so this
+// function's own success/failure contract to its caller is unchanged.
 function autoArchiveRoundTaskFile({ role, taskContent, harnessDir }) {
-  const outcome = archiveRoundTaskFile({ role, taskContent, harnessDir });
+  const outcome = archiveRoundTaskFileIfNew({ role, taskContent, harnessDir });
   if (outcome.ok) {
     console.log(outcome.reason);
   } else {
