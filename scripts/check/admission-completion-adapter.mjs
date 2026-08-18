@@ -220,10 +220,64 @@ function appendCompletionFailureAudit({
 // NEITHER source resolves a path, the outcome is byte-for-byte the exact
 // same `{ attempted: false }` 1R always returned -- this branch's shape and
 // meaning are unchanged (§3 항1's explicit "사유 문구를 바꾸지 마라").
+// HYK-289 (coder-task.md §2-1, "조용한 기본값은 안전장치가 아니다"): the
+// persistent-pointer branch below is itself a silent, unconfirmable default
+// -- ORCH measured it firing for real from a plain `node
+// scripts/check/selfcheck-smoke.mjs` run (no `--test`, no fixture isolation
+// at all), durably mutating the REAL control-room ledger's side file. The
+// persistent pointer is legitimate PRODUCTION behavior for this adapter's
+// real in-process callers (checkRelayHandshake, imported directly by
+// scripts/relay/{watch-result,relay-core,orca-spike-runner,orca-spike-live}.mjs
+// and scripts/relay/adapters/seat-signal-adapter.mjs -- none of these run
+// under `node --test`, ORCH confirmed via repo-wide grep) -- so it cannot
+// simply be removed or gated behind a brand-new opt-in nobody would ever
+// set. `process.env.NODE_TEST_CONTEXT` is a Node.js-builtin var the
+// `node --test` runner sets on its OWN process (confirmed empirically: a
+// plain `node foo.mjs` never has it, `node --test foo.test.mjs` always
+// does) -- not a guess, not derived from this adapter's own
+// reservationId/args. Any child spawned without an `env` override inherits
+// process.env, so this signal propagates through the existing spawn chain
+// (checkRelayHandshake -> spawnAdmissionCompletion -> this file's CLI) for
+// every `node --test` run that forgets sweep-ledger-isolation.mjs's
+// `--import` preload (coder-task.md §1's "확장된" scope), with zero changes
+// to relay-handshake.mjs. This does NOT close every gap (정직 한계, see
+// coder.md): a plain `node <check-script>.mjs` invocation that is neither
+// run under `node --test` NOR self-isolating (like this file's own
+// selfcheck-smoke.mjs fix) is still indistinguishable from a real
+// production caller from inside this function alone -- §2-1's "애매하면
+// 거부" is satisfied here only for the `node --test` class, not that
+// residual one.
+//
+// HYK-289 2R (coder-task.md §★★경계 계약, 책임자 확정 2026-08-18): this is
+// NOT "block the fallback everywhere except when told not to" -- the
+// boundary is drawn on PURPOSE, not as a residual gap:
+//   막는 것 (blocked)   = `node --test` + 점검·스모크 진입점 (test/check
+//                          entry points -- e.g. this file's own test suite,
+//                          selfcheck-smoke.mjs).
+//   유지하는 것 (kept)  = production consumption/monitoring entry points'
+//                          pointer fallback -- `relay-handshake.mjs` (its
+//                          CLI), `scripts/relay/watch-result.mjs`,
+//                          `scripts/relay/orca-spike-live.mjs`, and the
+//                          library callers `relay-core.mjs`,
+//                          `adapters/seat-signal-adapter.mjs`,
+//                          `orca-spike-runner.mjs`.
+// Why keeping it is correct, not a hole: the persistent pointer file is a
+// device HYK-227 built ON PURPOSE ("설치기가 써 두는 것") specifically so
+// these production callers get a working ledger path WITHOUT every 관제실
+// script having to set one -- and 관제실 never does: ORCH's repo-wide grep
+// found zero 관제실 scripts that set `ADMISSION_LEDGER_PATH`. Blocking the
+// fallback for these callers would not close a leak, it would silently kill
+// real reservation-release/monitoring in production. A strictly stronger
+// contract (reject everywhere unless explicitly opted in) is intentionally
+// NOT this round's scope -- tracked separately as HYK-302.
+function persistentFallbackAllowed() {
+  return !process.env.NODE_TEST_CONTEXT;
+}
+
 export function autoCompleteAdmission({ reservationId }) {
   let ledgerPath = process.env.ADMISSION_LEDGER_PATH;
   let persistentLockPath = null;
-  if (!ledgerPath) {
+  if (!ledgerPath && persistentFallbackAllowed()) {
     const persistent = resolvePersistentLedgerPaths();
     if (persistent) {
       ledgerPath = persistent.ledgerPath;

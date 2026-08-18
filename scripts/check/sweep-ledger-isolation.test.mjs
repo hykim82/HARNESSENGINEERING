@@ -93,7 +93,27 @@ function initAndAdmit(ledger, lock, reservationId) {
 // relay-handshake.mjs's spawnAdmissionCompletion spawns the real adapter
 // (execFileSync, env inherited except what we explicitly strip here to
 // simulate "genuinely unset").
-function runChildCompletion({ repoDir, reservationId, preload }) {
+// HYK-289: admission-completion-adapter.mjs now also gates the
+// persistent-pointer branch behind `!process.env.NODE_TEST_CONTEXT` (a
+// Node.js-builtin var `node --test` sets on ITS OWN process -- see that
+// file's persistentFallbackAllowed). Since this whole test file runs under
+// `node --test`, `childEnv = {...process.env}` below inherits that var into
+// every spawned child BY DEFAULT now, even a plain `node run.mjs` with no
+// `--test`/`--import` of its own -- closing the leak one layer earlier than
+// this file originally measured. `stripNodeTestContext` lets the ⓐ
+// "unisolated" branch simulate the one remaining ambiguous shape this
+// adapter-level guard cannot see (a check/smoke entry point invoked
+// completely outside `node --test`, e.g. `node
+// scripts/check/selfcheck-smoke.mjs` run by hand -- selfcheck-smoke.mjs
+// itself is separately fixed by self-importing this preload, coder.md's
+// 정직 한계 documents why that residual gap can't be closed from inside the
+// adapter alone).
+function runChildCompletion({
+  repoDir,
+  reservationId,
+  preload,
+  stripNodeTestContext = false,
+}) {
   const runnerSrc = `
 import { autoCompleteAdmission } from ${JSON.stringify(`file://${ADAPTER_PATH.replace(/\\/g, "/")}`)};
 const outcome = autoCompleteAdmission({ reservationId: ${JSON.stringify(reservationId)} });
@@ -106,6 +126,7 @@ process.stdout.write(JSON.stringify(outcome));
     const childEnv = { ...process.env };
     delete childEnv.ADMISSION_LEDGER_PATH;
     delete childEnv.ADMISSION_LOCK_PATH;
+    if (stripNodeTestContext) delete childEnv.NODE_TEST_CONTEXT;
     const args = preload
       ? [`--import=${pathToFileURL(ISOLATION_PRELOAD).href}`, runnerPath]
       : [runnerPath];
@@ -163,15 +184,19 @@ test("RED-on-revert (synthetic only): without the sweep-ledger-isolation preload
     initAndAdmit(ledger, lock, "HYK-279-RED-1");
     writePointerFile(repoDir, ledger, lock);
 
-    // ⓐ isolation NOT engaged (the pre-existing, unfixed shape) -- proves
-    // the leak mechanism is real: the synthetic "persistent" reservation
-    // actually gets completed by a spawned child that never opted in to
-    // any isolation, exactly like the pre-fix relay-handshake.mjs call
-    // sites this round found.
+    // ⓐ isolation NOT engaged, NODE_TEST_CONTEXT also stripped (the one
+    // shape HYK-289's adapter-level guard cannot see -- a check/smoke entry
+    // point run completely outside `node --test`, ambiguous by
+    // construction). Proves the leak mechanism is still real for that
+    // residual case: the synthetic "persistent" reservation actually gets
+    // completed by a spawned child that never opted in to any isolation,
+    // exactly like the pre-fix relay-handshake.mjs call sites this round
+    // found (and exactly like selfcheck-smoke.mjs's own pre-HYK-289 shape).
     const unisolated = runChildCompletion({
       repoDir,
       reservationId: "HYK-279-RED-1",
       preload: false,
+      stripNodeTestContext: true,
     });
     assert.equal(unisolated.attempted, true);
     assert.equal(unisolated.ok, true, `expected success: ${unisolated.reason}`);
@@ -215,6 +240,47 @@ test("RED-on-revert (synthetic only): without the sweep-ledger-isolation preload
       isolated.ok,
       true,
       "the isolated child must not report success against a reservation id it never actually released",
+    );
+  } finally {
+    rmSync(repoDir, { recursive: true, force: true });
+    rmSync(ledgerDir, { recursive: true, force: true });
+  }
+});
+
+// HYK-289: bonus defense-in-depth this round's adapter change adds -- a
+// spawned child that inherits NODE_TEST_CONTEXT naturally (this test file's
+// own `node --test` process env, no explicit preload, no explicit env
+// override at all) is now ALSO protected, one layer earlier than
+// sweep-ledger-isolation.mjs's own `--import` preload. This is not a
+// replacement for that preload (a plain `node foo.mjs` run outside
+// `node --test` still has no NODE_TEST_CONTEXT -- see the ⓐ branch above),
+// but it closes the gap for the common case of a check/test file spawning
+// relay-handshake.mjs's CLI from inside a `node --test` run without
+// remembering the preload.
+test("HYK-289 bonus: a child that merely inherits NODE_TEST_CONTEXT (no preload, no explicit env) never reaches the synthetic persistent pointer", () => {
+  const repoDir = buildSyntheticRepo("hyk289-node-test-context-repo-");
+  const ledgerDir = tmpDir("hyk289-node-test-context-ledger-");
+  try {
+    const ledger = join(ledgerDir, "l.json");
+    const lock = join(ledgerDir, "l.lock");
+    initAndAdmit(ledger, lock, "HYK-289-NTC-1");
+    writePointerFile(repoDir, ledger, lock);
+
+    const outcome = runChildCompletion({
+      repoDir,
+      reservationId: "HYK-289-NTC-1",
+      preload: false,
+    });
+
+    assert.deepEqual(
+      outcome,
+      { attempted: false },
+      "NODE_TEST_CONTEXT alone (inherited, no preload) must already fail closed",
+    );
+    assert.equal(
+      readStatus(ledger, "HYK-289-NTC-1"),
+      "ACTIVE",
+      "the synthetic persistent-pointer ledger must stay untouched",
     );
   } finally {
     rmSync(repoDir, { recursive: true, force: true });
