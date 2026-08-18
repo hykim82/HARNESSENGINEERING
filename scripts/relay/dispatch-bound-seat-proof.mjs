@@ -25,6 +25,28 @@
 //
 // 순수 함수: I/O 없음, `orca` CLI를 실행하지 않는다, 전역 상태를 읽지
 // 않는다.
+//
+// ★HYK-294 (2026-08-17) -- handle 축을 판정에서 뺐다.
+// ⓵ 무엇을 뺐나: `assigneeHandle`과 `terminalShow.handle`을 대조하던
+//   비교(구 HANDLE_MISMATCH 분기, buildMismatchChecks 표의 그 행)를
+//   findMismatchReason의 판정 경로에서 제거했다. `SEAT_PROOF_REASON.
+//   HANDLE_MISMATCH` 상수 자체는 계약 표면(seat-proof-contract-v1.mjs)의
+//   동결 키 집합을 건드리지 않기 위해 남겨두지만, 이 판정 함수는 더 이상
+//   그 값을 반환하지 않는다(도달 불가 -- 진단 필드로도 쓰지 않는다).
+// ⓶ 왜: handle은 회전한다 -- ⓐ벤더 규정(재접속 시 handle 재발급) ⓑ워커
+//   기동 규칙 §0("handle 비교는 쓰지 않는다 -- 재시작 시 회전되는 값이라
+//   신뢰할 수 없다") ⓒ2026-08-17 이 사이클 안 실측 재현(주입
+//   `term_75dd220d…` vs 현재 `term_9e5524d9…`, 같은 `tabId:leafId`) --
+//   세 겹으로 확인된 값을 PROVEN의 필수 조건으로 두면, 정당하게 회전한
+//   좌석의 정당한 배달을 거짓 UNPROVEN으로 반려한다(강제가 아니라
+//   「거짓 안전」).
+// ⓷ 남는 축이 보장하는 것과 보장하지 않는 것: 남는 축(pane key 완전 일치
+//   + terminalShow의 퇴화 형태 거부 + task/dispatch/worktree exact match)
+//   은 "Orca가 이 task/dispatch를 배정한 좌석의 pty/worktree가 지금 이
+//   응답과 같다"만 보증한다. handle 값 자체가 그 좌석을 가리키는지는 더
+//   이상 이 함수가 대조하지 않는다 -- handle은 여전히 호출자가 진단·로그
+//   목적으로 원시 응답에서 읽을 수 있지만(어댑터가 값 자체를 지우지는
+//   않는다), 이 판정의 PROVEN/UNPROVEN에는 관여하지 않는다.
 
 export const SEAT_PROOF = Object.freeze({
   PROVEN: "PROVEN",
@@ -56,9 +78,9 @@ function verdict(kind, reasonCode) {
 
 // dispatch-correlation-adapter.mjs의 normalizeDispatchShow 출력 계약
 // (재사용 -- 그 파일은 수정하지 않는다). assigneeHandle은 그 어댑터에서
-// 옵션 필드(§2-A 주석: "handle은 회전한다")이므로, 여기서는 값이 있을 때만
-// §4 handle 비교를 수행한다 -- 결손을 기본 통과로 두지 않고, 결손 자체를
-// HANDLE_MISMATCH로 접는다(아래 judgeDispatchBoundSeatProof 참조).
+// 옵션 필드다(§2-A 주석: "handle은 회전한다") -- ★HYK-294로 이 함수는
+// assigneeHandle을 판정에 아예 쓰지 않는다(파일 머리 주석 참조). 있어도
+// 없어도 findMismatchReason은 그 값을 보지 않는다.
 function hasValidDispatchShow(ds) {
   return (
     ds.ok === true &&
@@ -96,23 +118,16 @@ function hasCompleteExpected(expected) {
   );
 }
 
-// §2-B3~6의 exact-match 비교 다섯 개를 표로 선언한다(각 행 = [실패조건,
-// 사유코드]). 순서가 판정 우선순위다(첫 실패가 그대로 결과 사유가 된다).
-// 이 표 형태는 judgeDispatchBoundSeatProof 자체의 분기 복잡도를 낮추려는
-// 것일 뿐 -- 어떤 비교도 생략하거나 완화하지 않는다(비교 다섯 개 전부
-// 그대로 남아 있다).
+// §2-B3~6의 exact-match 비교를 표로 선언한다(각 행 = [실패조건, 사유코드]).
+// 순서가 판정 우선순위다(첫 실패가 그대로 결과 사유가 된다). ★HYK-294로
+// handle 비교 행을 이 표에서 뺐다(파일 머리 주석 참조) -- 남은 비교는
+// 전부 그대로다(어떤 것도 생략·완화하지 않는다).
 function buildMismatchChecks(ds, ts, exp) {
   return [
     // §1 결속점: assignee_pane_key === `${tabId}:${leafId}` 문자 완전 일치.
     [
       ds.assigneePaneKey !== ts.paneKeyFromShow,
       SEAT_PROOF_REASON.PANE_KEY_MISMATCH,
-    ],
-    // §2-B4: assigneeHandle 결손(옵션 필드가 안 채워짐)도 handle 불일치와
-    // 동일하게 취급한다 -- 기본 통과 금지.
-    [
-      !isNonEmptyString(ds.assigneeHandle) || ds.assigneeHandle !== ts.handle,
-      SEAT_PROOF_REASON.HANDLE_MISMATCH,
     ],
     [exp.runtimeTaskId !== ds.taskId, SEAT_PROOF_REASON.TASK_ID_MISMATCH],
     [exp.dispatchId !== ds.dispatchId, SEAT_PROOF_REASON.DISPATCH_ID_MISMATCH],
@@ -133,14 +148,13 @@ function findMismatchReason(ds, ts, exp) {
 // judgeDispatchBoundSeatProof({ dispatchShow, terminalShow, expected })
 // -> { verdict: PROVEN|UNPROVEN, reasonCode }.
 //
-// PROVEN은 §2-B1~6 전부가 성립할 때만:
+// PROVEN은 다음 전부가 성립할 때만(★HYK-294로 구 4번 handle 비교는 뺐다):
 // 1. dispatchShow 정규화 성공
-// 2. terminalShow 정규화 성공
+// 2. terminalShow 정규화 성공(퇴화 형태는 이 단계에서 이미 거부됨)
 // 3. assigneePaneKey === paneKeyFromShow(문자 완전 일치)
-// 4. assigneeHandle === terminalShow.handle
-// 5. expected.harnessTaskId/runtimeTaskId/dispatchId 전부 제공 및
+// 4. expected.harnessTaskId/runtimeTaskId/dispatchId 전부 제공 및
 //    runtimeTaskId/dispatchId는 dispatchShow와 exact 일치
-// 6. expected.worktreeId/worktreePath가 terminalShow와 exact 일치
+// 5. expected.worktreeId/worktreePath가 terminalShow와 exact 일치
 export function judgeDispatchBoundSeatProof({
   dispatchShow,
   terminalShow,

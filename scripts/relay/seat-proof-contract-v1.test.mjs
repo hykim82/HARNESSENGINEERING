@@ -160,12 +160,13 @@ test("type axis: DISPATCH_SHOW_RAW_FIELD_TYPES + DISPATCH_SHOW_NULLABLE_FIELDS t
 });
 
 // ---------------------------------------------------------------------------
-// 3. 카탈로그 완전성 -- §2-B의 10개 ID가 전부 있어야 한다.
+// 3. 카탈로그 완전성 -- §2-B의 8개 ID가 전부 있어야 한다(★HYK-294로
+// WRONG_HANDLE/ROTATED_HANDLE 2개를 뺐다 -- 이유는
+// contracts/seat-proof-contract-v1.mjs의 NEGATIVE_CONTROLS 머리 주석,
+// 그 회전-관용 동작 자체는 아래 §6-b의 행동 테스트가 커버한다).
 // ---------------------------------------------------------------------------
 const REQUIRED_CATALOG_IDS = [
-  "WRONG_HANDLE",
   "STALE_HANDLE",
-  "ROTATED_HANDLE",
   "WRONG_PANE",
   "WRONG_WORKTREE",
   "BEFORE_AFTER_TERMINATION",
@@ -175,7 +176,7 @@ const REQUIRED_CATALOG_IDS = [
   "DUPLICATE_PANE",
 ];
 
-test("catalog completeness: NEGATIVE_CONTROLS has exactly the 10 required IDs, no more, no fewer", () => {
+test("catalog completeness: NEGATIVE_CONTROLS has exactly the 8 required IDs, no more, no fewer", () => {
   assert.deepEqual(
     NEGATIVE_CONTROLS.map((c) => c.id).sort(),
     [...REQUIRED_CATALOG_IDS].sort(),
@@ -204,17 +205,6 @@ function outcome(verdict, reason) {
 }
 
 const CONNECTIVITY = {
-  WRONG_HANDLE() {
-    const ds = validDS({ assignee_handle: "term_different-handle-0000" });
-    const ts = validTS();
-    assert.equal(ds.assigneePaneKey, ts.paneKeyFromShow);
-    const v = judgeDispatchBoundSeatProof({
-      dispatchShow: ds,
-      terminalShow: ts,
-      expected: validExpected(),
-    });
-    return outcome(v.verdict, v.reasonCode);
-  },
   STALE_HANDLE() {
     const v = judgeDispatchBoundSeatProof({
       dispatchShow: validDS(),
@@ -230,19 +220,6 @@ const CONNECTIVITY = {
           _meta: { runtimeId: "runtimeMain" },
         },
       ),
-      expected: validExpected(),
-    });
-    return outcome(v.verdict, v.reasonCode);
-  },
-  ROTATED_HANDLE() {
-    // assignee_handle 자체가 결손(회전으로 필드가 안 채워짐) -- WRONG_HANDLE
-    // (값이 다름)과 다른 분기(값 자체가 없음)를 단독으로 격리한다.
-    const raw = rawDispatchShowP2({ assignee_handle: undefined });
-    const ds = normalizeDispatchShow(raw);
-    assert.equal(ds.assigneeHandle, undefined);
-    const v = judgeDispatchBoundSeatProof({
-      dispatchShow: ds,
-      terminalShow: validTS(),
       expected: validExpected(),
     });
     return outcome(v.verdict, v.reasonCode);
@@ -320,7 +297,7 @@ const CONNECTIVITY = {
   },
 };
 
-test("catalog connectivity: CONNECTIVITY declares an executable check for exactly the 10 catalog IDs (no ID left unverified)", () => {
+test("catalog connectivity: CONNECTIVITY declares an executable check for exactly the 8 catalog IDs (no ID left unverified)", () => {
   assert.deepEqual(
     Object.keys(CONNECTIVITY).sort(),
     [...REQUIRED_CATALOG_IDS].sort(),
@@ -340,7 +317,7 @@ for (const entry of NEGATIVE_CONTROLS) {
   });
 }
 
-test("catalog: all 10 outcomes are fail-closed -- none is a PROVEN/OWNED/success-shaped verdict", () => {
+test("catalog: all 8 outcomes are fail-closed -- none is a PROVEN/OWNED/success-shaped verdict", () => {
   const successShapes = ["PROVEN/PROVEN", "OWNED", "ok:true"];
   for (const entry of NEGATIVE_CONTROLS) {
     for (const shape of successShapes) {
@@ -350,6 +327,44 @@ test("catalog: all 10 outcomes are fail-closed -- none is a PROVEN/OWNED/success
       );
     }
   }
+});
+
+// ---------------------------------------------------------------------------
+// 4-b (★HYK-294 신규) -- WRONG_HANDLE/ROTATED_HANDLE을 §3 카탈로그에서
+// 뺀 만큼, 그 시나리오의 실제 동작(더 이상 반례가 아니라 이번 판정의
+// 핵심)을 여기서 직접 단언한다. hyk171-cycle4b2c-mutation.test.mjs의
+// N-e/N-e2가 같은 사실을 판정 함수 레벨에서 이미 커버하지만, 이 계약
+// 파일 스위트 안에서도 독립적으로 재확인해 "카탈로그에서 뺀 것 = 몰래
+// 지운 것"이 아니라는 근거를 남긴다.
+// ---------------------------------------------------------------------------
+test("HYK-294: assignee_handle differs from terminal-show's handle but paneKey matches -- PROVEN (handle axis removed)", () => {
+  const ds = validDS({ assignee_handle: "term_different-handle-0000" });
+  const ts = validTS();
+  assert.equal(ds.assigneePaneKey, ts.paneKeyFromShow);
+  assert.notEqual(ds.assigneeHandle, ts.handle);
+  const v = judgeDispatchBoundSeatProof({
+    dispatchShow: ds,
+    terminalShow: ts,
+    expected: validExpected(),
+  });
+  assert.equal(v.verdict, SEAT_PROOF.PROVEN);
+  assert.equal(v.reasonCode, SEAT_PROOF_REASON.PROVEN);
+});
+
+test("HYK-294: assignee_handle itself is missing (rotated away) but paneKey matches -- PROVEN", () => {
+  const ds = normalizeDispatchShow(
+    rawDispatchShowP2({ assignee_handle: undefined }),
+  );
+  assert.equal(ds.assigneeHandle, undefined);
+  const ts = validTS();
+  assert.equal(ds.assigneePaneKey, ts.paneKeyFromShow);
+  const v = judgeDispatchBoundSeatProof({
+    dispatchShow: ds,
+    terminalShow: ts,
+    expected: validExpected(),
+  });
+  assert.equal(v.verdict, SEAT_PROOF.PROVEN);
+  assert.equal(v.reasonCode, SEAT_PROOF_REASON.PROVEN);
 });
 
 // ---------------------------------------------------------------------------
@@ -481,7 +496,11 @@ for (const field of DISPATCH_SHOW_CONSUMED_FIELDS) {
 // 완전성 테스트가 RED가 되어야 한다 -- 그러려면 이 배열 자체가 fixture나
 // DISPATCH_SHOW_CONSUMED_FIELDS 어느 쪽에서도 파생되지 않은, 독립적으로
 // 손으로 쓴 진실이어야 한다.
+// ★HYK-294: `assignee_handle`이 여기 합류했다 -- handle 축이 판정에서
+// 빠지면서 이 필드를 변조해도 verdict가 더 이상 바뀌지 않는다(위
+// DISPATCH_SHOW_CONSUMED_FIELDS 쪽 HYK-294 주석 참조).
 const NOT_CONSUMED_DISPATCH_SHOW_FIELDS = [
+  "assignee_handle",
   "status",
   "failure_count",
   "dispatched_at",
