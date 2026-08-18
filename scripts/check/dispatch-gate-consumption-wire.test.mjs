@@ -52,6 +52,11 @@ const CONSUMPTION_RECEIPT_CORE_PATH = join(
 // (MODULE_NOT_FOUND), same reasoning as CONSUMPTION_RECEIPT_CORE_PATH
 // above.
 const DROPPED_AT_STAMP_CORE_PATH = join(HERE, "dropped-at-stamp-core.mjs");
+// HYK-298-abort-record-1 §2-2: same reasoning as
+// CONSUMPTION_RECEIPT_CORE_PATH/DROPPED_AT_STAMP_CORE_PATH above --
+// dispatch-gate-decision.mjs now statically imports the new abort-record
+// core too.
+const ABORT_RECORD_CORE_PATH = join(HERE, "abort-record-core.mjs");
 
 const ONE_B_BLOCK =
   "1b_exec_line: node scripts/check/dispatch-gate-decision.mjs <task-path>\n1b_shown: ALLOW 또는 REJECT 한 줄과 사유\n1b_reach_path: CLI 종료코드가 관제실 화면에 즉시 뜬다\n";
@@ -704,6 +709,7 @@ function stageScriptsCheckDir(rootDir, overrides) {
       DROPPED_AT_STAMP_CORE_PATH,
       "utf8",
     ),
+    "abort-record-core.mjs": readFileSync(ABORT_RECORD_CORE_PATH, "utf8"),
     ...overrides,
   };
   for (const [name, content] of Object.entries(files)) {

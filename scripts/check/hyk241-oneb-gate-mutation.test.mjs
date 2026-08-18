@@ -45,6 +45,12 @@ const CONSUMPTION_RECEIPT_CORE_PATH = join(
 // not just ones touching the new step (mirrors the
 // CONSUMPTION_RECEIPT_CORE_PATH addition's own reasoning above).
 const DROPPED_AT_STAMP_CORE_PATH = join(HERE, "dropped-at-stamp-core.mjs");
+// HYK-298-abort-record-1 §2-2: dispatch-gate-decision.mjs now statically
+// imports scripts/check/abort-record-core.mjs (the new zero-import abort
+// record core) -- this isolated fixture's staged tree must include it or
+// the mutant module fails to load (MODULE_NOT_FOUND), same reasoning as
+// CONSUMPTION_RECEIPT_CORE_PATH/DROPPED_AT_STAMP_CORE_PATH above.
+const ABORT_RECORD_CORE_PATH = join(HERE, "abort-record-core.mjs");
 
 function assertExactlyOneMatch(src, target, label) {
   const count = src.split(target).length - 1;
@@ -86,6 +92,7 @@ function stageScriptsCheckDir(rootDir, overrides) {
       DROPPED_AT_STAMP_CORE_PATH,
       "utf8",
     ),
+    "abort-record-core.mjs": readFileSync(ABORT_RECORD_CORE_PATH, "utf8"),
     ...overrides,
   };
   for (const [name, content] of Object.entries(files)) {
