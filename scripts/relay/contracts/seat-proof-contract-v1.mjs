@@ -129,41 +129,56 @@ export const DISPATCH_SHOW_NULLABLE_FIELDS = Object.freeze([
 ]);
 
 // 배정 결속 좌석 증명이 실제로 읽는 부분집합(dispatch-bound-seat-
-// proof.mjs가 normalizeDispatchShow를 거쳐 읽는 4개 raw 필드 -- `id`는
+// proof.mjs가 normalizeDispatchShow를 거쳐 읽는 raw 필드 -- `id`는
 // dispatchId로 정규화돼 DISPATCH_ID_MISMATCH 비교에 쓰인다. 재작업1(REVIEW
 // P1) 이전 버전은 이 `id`를 빠뜨린 채로 있었다 -- 아래 §2-C의 행동 기반
 // 연결성 테스트가 그 누락 자체를 RED로 잡아낸다). status/failure_count/
 // dispatched_at/completed_at/created_at/last_failure/last_heartbeat_at은
 // normalizeDispatchShow가 애초에 정규화 결과에 옮기지 않으므로 판정에
 // 도달조차 하지 않는다(§2-C 반대 방향 테스트가 이 사실을 실측한다).
+//
+// ★HYK-294 (2026-08-17): `assignee_handle`을 이 목록에서 뺐다.
+// dispatch-bound-seat-proof.mjs가 handle 비교 축을 판정에서 제거했으므로
+// (그 파일 머리 주석 참조) `assignee_handle`을 변조해도 verdict가 더 이상
+// 바뀌지 않는다 -- 즉 이 판정 함수 입장에서는 "소비되지 않는" 필드가
+// 됐다. 아래 NOT_CONSUMED_DISPATCH_SHOW_FIELDS(seat-proof-contract-
+// v1.test.mjs)로 옮겼다.
 export const DISPATCH_SHOW_CONSUMED_FIELDS = Object.freeze([
   "id",
   "task_id",
-  "assignee_handle",
   "assignee_pane_key",
 ]);
 
 // ---------------------------------------------------------------------------
-// 3. 반례 세트 카탈로그(§2-B). 기존 4b-2c/4b-2b 계열이 이미 다루는 7개 +
-// 이번 사이클 SV-8 신규 3개 = 10개. 각 항목의 실제 연결(모듈·실행 결과)은
-// seat-proof-contract-v1.test.mjs의 카탈로그 연결성 테스트가 이 파일의
-// `expectedOutcome` 문자열과 실행 결과를 정확히 대조해 증명한다 -- 문자열
-// 존재만으로 연결을 주장하지 않는다.
+// 3. 반례 세트 카탈로그(§2-B). 기존 4b-2c/4b-2b 계열이 이미 다루던 7개 +
+// SV-8 신규 3개 = 10개였으나, ★HYK-294(2026-08-17)로 2개(WRONG_HANDLE·
+// ROTATED_HANDLE)를 뺐다 -- 8개.
+//
+// ★왜 뺐나: 이 두 항목은 "dispatch-show의 assignee_handle이 terminal-
+// show의 handle과 다르면(값이 다르거나 결손) 거부해야 한다"는 옛 판정을
+// 반례로 실었다. dispatch-bound-seat-proof.mjs가 handle 축을 판정에서
+// 제거한 뒤(그 파일 머리 주석 HYK-294 참조) 이 시나리오의 실제 판정
+// 결과는 PROVEN/PROVEN이다 -- 더 이상 "반례"(fail-closed 기대)가 아니라
+// 이번 판정의 핵심 그 자체("handle이 달라도 paneKey가 맞으면 PROVEN")를
+// 보여주는 사례다. 카탈로그(NEGATIVE_CONTROLS)는 §5 아래 "all 10(→8)
+// outcomes are fail-closed" 불변식을 스스로 검증하므로, 더 이상 fail-
+// closed가 아닌 항목을 억지로 여기 남겨두면 그 불변식 자체가 거짓이
+// 된다 -- 그래서 카탈로그에서 빼고, 대신 이 회전-관용 동작은
+// hyk171-cycle4b2c-mutation.test.mjs의 N-e/N-e2(HYK-294)에서 직접
+// PROVEN을 단언하는 행동 테스트로 커버한다(seat-proof-contract-v1.test.mjs
+// 는 그 파일을 참조하지 않으므로 이 파일 자체에서 카탈로그 크기만
+// 8로 줄인다).
+//
+// 각 항목의 실제 연결(모듈·실행 결과)은 seat-proof-contract-v1.test.mjs의
+// 카탈로그 연결성 테스트가 이 파일의 `expectedOutcome` 문자열과 실행
+// 결과를 정확히 대조해 증명한다 -- 문자열 존재만으로 연결을 주장하지
+// 않는다.
 //
 // `expectedOutcome`은 `<verdict>/<reasonCode>` 형태의 사람이 읽는 표기다.
 // 전부 fail-closed(판정불가·거부)이며 어떤 항목도 "통과"(PROVEN 계열의
 // 성공 verdict)를 기대하지 않는다.
 // ---------------------------------------------------------------------------
 export const NEGATIVE_CONTROLS = Object.freeze([
-  Object.freeze({
-    id: "WRONG_HANDLE",
-    description:
-      "dispatch-show의 assignee_handle이 terminal-show의 handle과 다르다" +
-      "(pane key는 일치) -- 다른 좌석의 handle을 자기 것처럼 제시.",
-    sourceModule: "scripts/relay/dispatch-bound-seat-proof.mjs",
-    sourceJudge: "judgeDispatchBoundSeatProof",
-    expectedOutcome: "UNPROVEN/HANDLE_MISMATCH",
-  }),
   Object.freeze({
     id: "STALE_HANDLE",
     description:
@@ -173,16 +188,6 @@ export const NEGATIVE_CONTROLS = Object.freeze([
     sourceModule: "scripts/relay/adapters/terminal-show-adapter.mjs",
     sourceJudge: "normalizeTerminalShow -> judgeDispatchBoundSeatProof",
     expectedOutcome: "UNPROVEN/TERMINAL_SHOW_INVALID",
-  }),
-  Object.freeze({
-    id: "ROTATED_HANDLE",
-    description:
-      "dispatch-show의 assignee_handle 자체가 결손(회전으로 해당 " +
-      "필드가 채워지지 않음) -- WRONG_HANDLE(값이 다름)과 달리 " +
-      "'값 자체가 없음' 분기를 단독으로 격리한다.",
-    sourceModule: "scripts/relay/dispatch-bound-seat-proof.mjs",
-    sourceJudge: "judgeDispatchBoundSeatProof",
-    expectedOutcome: "UNPROVEN/HANDLE_MISMATCH",
   }),
   Object.freeze({
     id: "WRONG_PANE",

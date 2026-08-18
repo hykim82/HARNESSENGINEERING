@@ -448,9 +448,13 @@ test("N-d: a 1-character mismatch between assignee_pane_key and the show composi
 });
 
 // ---------------------------------------------------------------------------
-// N-e -- assignee_handle과 show.handle 불일치, pane key는 일치.
+// N-e (★HYK-294로 의미가 뒤집혔다) -- assignee_handle과 show.handle
+// 불일치, pane key는 일치. handle 회전은 정상 동작이므로(dispatch-bound-
+// seat-proof.mjs 파일 머리 주석 참조) 이 경우는 이제 PROVEN이어야 한다 --
+// handle 불일치만으로 정당한 배달을 거부하지 않는 것이 이번 판정의 핵심
+// (coder-task.md §2-1 항목4 ⓔ).
 // ---------------------------------------------------------------------------
-test("N-e: assignee_handle mismatches show.handle while the pane key still matches -- UNPROVEN/HANDLE_MISMATCH", () => {
+test("N-e (HYK-294): assignee_handle mismatches show.handle while the pane key still matches -- PROVEN (handle axis removed, rotation tolerated)", () => {
   const ds = validDS({ assignee_handle: "term_different-handle-0000" });
   const ts = validTS();
   assert.equal(ds.assigneePaneKey, ts.paneKeyFromShow);
@@ -460,8 +464,27 @@ test("N-e: assignee_handle mismatches show.handle while the pane key still match
     terminalShow: ts,
     expected: validExpected(),
   });
-  assert.equal(verdict.verdict, SEAT_PROOF.UNPROVEN);
-  assert.equal(verdict.reasonCode, SEAT_PROOF_REASON.HANDLE_MISMATCH);
+  assert.equal(verdict.verdict, SEAT_PROOF.PROVEN);
+  assert.equal(verdict.reasonCode, SEAT_PROOF_REASON.PROVEN);
+});
+
+// ---------------------------------------------------------------------------
+// N-e2 (★HYK-294 신규) -- assignee_handle 자체가 결손(회전으로 필드가
+// 안 채워짐), pane key는 일치. 결손도 값 불일치와 동일하게 더 이상 판정에
+// 관여하지 않아야 한다.
+// ---------------------------------------------------------------------------
+test("N-e2 (HYK-294): assignee_handle itself is missing while the pane key still matches -- PROVEN", () => {
+  const ds = validDS({ assignee_handle: undefined });
+  const ts = validTS();
+  assert.equal(ds.assigneeHandle, undefined);
+  assert.equal(ds.assigneePaneKey, ts.paneKeyFromShow);
+  const verdict = judgeDispatchBoundSeatProof({
+    dispatchShow: ds,
+    terminalShow: ts,
+    expected: validExpected(),
+  });
+  assert.equal(verdict.verdict, SEAT_PROOF.PROVEN);
+  assert.equal(verdict.reasonCode, SEAT_PROOF_REASON.PROVEN);
 });
 
 // ---------------------------------------------------------------------------
