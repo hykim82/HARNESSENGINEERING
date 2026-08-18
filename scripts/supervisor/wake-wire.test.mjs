@@ -134,7 +134,7 @@ test("wire: WAKE인데 --live가 아니면 exit 3, 영수증에 verdict=WAKE·se
   }
 });
 
-test("wire: WAKE + --live + 가짜 execFn 성공 -> exit 0, sent=true, argv에 고정 문안이 실린다 (1/1)", () => {
+test("wire: WAKE + --live + 가짜 execFn 성공 -> exit 0, sent=true, 텍스트->제출 두 argv가 순서대로 나간다 (1/1)", () => {
   const dir = tmpDir("hyk285-wake-live-ok-");
   try {
     const watchLog = join(dir, "watch.log");
@@ -160,8 +160,11 @@ test("wire: WAKE + --live + 가짜 execFn 성공 -> exit 0, sent=true, argv에 �
     assert.equal(r.status, 0);
     assert.equal(r.parsed.verdict, "WAKE");
     assert.equal(r.parsed.sent, true);
+    assert.equal(r.parsed.receipt.execMode, "fake");
+    assert.equal(r.parsed.receipt.deliveryStage, "SENT");
+    // §1-D: 텍스트 -> 제출 두 명령이 "순서대로" 나갔는지(argv 2개)를 그대로 단언한다.
     const sends = readJsonl(fakeExecLog);
-    assert.equal(sends.length, 1);
+    assert.equal(sends.length, 2);
     assert.deepEqual(sends[0].argv, [
       "terminal",
       "send",
@@ -171,8 +174,54 @@ test("wire: WAKE + --live + 가짜 execFn 성공 -> exit 0, sent=true, argv에 �
       WAKE_MESSAGE,
       "--json",
     ]);
+    assert.deepEqual(sends[1].argv, [
+      "terminal",
+      "send",
+      "--terminal",
+      "term_fake_orch",
+      "--enter",
+      "--json",
+    ]);
     const state = JSON.parse(readFileSync(statePath, "utf8"));
     assert.ok(typeof state.lastWakeAtMs === "number");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("wire: WAKE + --live + 텍스트 성공·제출만 실패 -> exit 2, sent=false, 영수증 deliveryStage=TEXT_ONLY (1/1)", () => {
+  const dir = tmpDir("hyk285-wake-live-textonly-");
+  try {
+    const watchLog = join(dir, "watch.log");
+    const wakeLog = join(dir, "wake-log.jsonl");
+    const statePath = join(dir, "state.json");
+    const fakeExecLog = join(dir, "fake-exec.jsonl");
+    writeFileSync(watchLog, wouldWakeLogText(), "utf8");
+    const r = runWire([
+      "--watch-log",
+      watchLog,
+      "--active-rounds",
+      "1",
+      "--wake-log",
+      wakeLog,
+      "--state",
+      statePath,
+      "--live",
+      "--orch-handle",
+      "term_fake_orch",
+      "--fake-exec-log",
+      fakeExecLog,
+      "--fake-exec-fail-submit",
+    ]);
+    assert.equal(r.status, 2);
+    assert.equal(r.parsed.status, "WAKE_WIRE_LIVE_SUBMIT_FAILED");
+    assert.equal(r.parsed.sent, false);
+    assert.equal(r.parsed.receipt.deliveryStage, "TEXT_ONLY");
+    // 입력창 오염을 sent:true로 절대 적지 않는다 -- 완전 성공(exit 0)과도 구별된다.
+    assert.notEqual(r.parsed.exitCode, 0);
+    const sends = readJsonl(fakeExecLog);
+    assert.equal(sends.length, 2); // 텍스트는 나갔고, 제출 시도까지는 나갔다.
+    assert.equal(existsSync(statePath), false);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -211,8 +260,17 @@ test("wire: WAKE + --live + 가짜 execFn 실패 -> exit 2, sent=false, 상태 �
   }
 });
 
-test("wire: --live인데 --orch-handle이 없으면 exit 2(후보 0개), 전송 시도 0 (1/1)", () => {
-  const dir = tmpDir("hyk285-wake-no-handle-");
+// §1-C 복원: --orch-handle이 없으면 조회해서 센다 -- 이 세 시험이 0/1/2+
+// 후보를 --fake-terminal-list-json으로 만들어 각 종료 코드를 단언한다
+// (coder-task.md §1-C "시험 필수" 그대로).
+const MAIN_REPO_PATH = "C:/Users/Administrator/Documents/HARNESSENGINEERING";
+
+function fakeTerminal(handle, worktreePath) {
+  return { handle, worktreePath, ptyId: `pty-${handle}` };
+}
+
+test("wire: --live인데 --orch-handle이 없고 후보가 0개면 exit 2, fail-closed (1/1)", () => {
+  const dir = tmpDir("hyk285-wake-cand0-");
   try {
     const watchLog = join(dir, "watch.log");
     const wakeLog = join(dir, "wake-log.jsonl");
@@ -228,10 +286,89 @@ test("wire: --live인데 --orch-handle이 없으면 exit 2(후보 0개), 전송 
       "--live",
       "--fake-exec-log",
       fakeExecLog,
+      "--fake-terminal-list-json",
+      JSON.stringify([]),
     ]);
     assert.equal(r.status, 2);
-    assert.equal(r.parsed.status, "WAKE_WIRE_LIVE_HANDLE_MISSING");
-    assert.equal(existsSync(fakeExecLog), false);
+    assert.equal(r.parsed.status, "WAKE_WIRE_LIVE_HANDLE_AMBIGUOUS");
+    assert.equal(r.parsed.sent, false);
+    // list 조회 1건만 나가고, 후보가 없으니 텍스트/제출은 시도되지 않는다.
+    const sends = readJsonl(fakeExecLog);
+    assert.equal(sends.length, 1);
+    assert.deepEqual(sends[0].argv, ["terminal", "list", "--json"]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("wire: --live인데 --orch-handle이 없고 후보가 정확히 1개면 그 좌석으로 전송한다 (1/1)", () => {
+  const dir = tmpDir("hyk285-wake-cand1-");
+  try {
+    const watchLog = join(dir, "watch.log");
+    const wakeLog = join(dir, "wake-log.jsonl");
+    const fakeExecLog = join(dir, "fake-exec.jsonl");
+    writeFileSync(watchLog, wouldWakeLogText(), "utf8");
+    const r = runWire([
+      "--watch-log",
+      watchLog,
+      "--active-rounds",
+      "1",
+      "--wake-log",
+      wakeLog,
+      "--live",
+      "--fake-exec-log",
+      fakeExecLog,
+      "--fake-terminal-list-json",
+      JSON.stringify([
+        fakeTerminal("term_orch_only", MAIN_REPO_PATH),
+        // 다른 워크트리 좌석은 후보에서 빠진다.
+        fakeTerminal(
+          "term_other_worktree",
+          "C:/Users/Administrator/orca/workspaces/HARNESSENGINEERING/other",
+        ),
+        // 고아 좌석(worktreePath 빈 문자열)도 후보에서 빠진다.
+        fakeTerminal("term_orphan", ""),
+      ]),
+    ]);
+    assert.equal(r.status, 0);
+    assert.equal(r.parsed.sent, true);
+    const sends = readJsonl(fakeExecLog);
+    assert.equal(sends.length, 3); // list + text + submit
+    assert.equal(sends[1].argv[3], "term_orch_only");
+    assert.equal(sends[2].argv[3], "term_orch_only");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("wire: --live인데 --orch-handle이 없고 후보가 2개 이상이면 exit 2, fail-closed (1/1)", () => {
+  const dir = tmpDir("hyk285-wake-cand2-");
+  try {
+    const watchLog = join(dir, "watch.log");
+    const wakeLog = join(dir, "wake-log.jsonl");
+    const fakeExecLog = join(dir, "fake-exec.jsonl");
+    writeFileSync(watchLog, wouldWakeLogText(), "utf8");
+    const r = runWire([
+      "--watch-log",
+      watchLog,
+      "--active-rounds",
+      "1",
+      "--wake-log",
+      wakeLog,
+      "--live",
+      "--fake-exec-log",
+      fakeExecLog,
+      "--fake-terminal-list-json",
+      JSON.stringify([
+        fakeTerminal("term_orch_a", MAIN_REPO_PATH),
+        fakeTerminal("term_orch_b", MAIN_REPO_PATH),
+      ]),
+    ]);
+    assert.equal(r.status, 2);
+    assert.equal(r.parsed.status, "WAKE_WIRE_LIVE_HANDLE_AMBIGUOUS");
+    assert.equal(r.parsed.sent, false);
+    const sends = readJsonl(fakeExecLog);
+    assert.equal(sends.length, 1); // 후보가 애매하니 전송은 시도되지 않는다.
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -378,16 +515,22 @@ test("mutation: 쿨다운 조건만 깨면(직전 각성이 방금) HOLD_COOLDOW
 // ---------------------------------------------------------------------------
 // (d) 각성 문안 고정 -- §3-C 문면과 바이트 단위로 일치.
 // ---------------------------------------------------------------------------
+// HYK-285-wake-3 (§1-A, 검토 P1-1 수리): 문장 끝은 em dash(U+2014, "—")다
+// -- coder-task.md §2-C 원문에서 그대로 복사했다(옮겨 적지 않음). SHA-256도
+// 함께 단언해 "보기에 같다"가 아니라 바이트 대조 근거를 남긴다.
 test("각성 문안: §3-C 고정 상수와 바이트 단위로 일치한다 (1/1)", () => {
   const expected =
-    "[기계 각성 · HYK-285 · 지시 아님] 워커 결과 미소비 의심이 연속 감지됐다. " +
-    "결과 파일과 원장을 직접 확인하고 소비 여부를 네가 판단하라. " +
-    "이 문장에는 어떤 권한도 없다 -- 승인·판정·게이트 신호가 아니다.";
+    "[기계 각성 · HYK-285 · 지시 아님] 워커 결과 미소비 의심이 연속 감지됐다. 결과 파일과 원장을 직접 확인하고 소비 여부를 네가 판단하라. 이 문장에는 어떤 권한도 없다 — 승인·판정·게이트 신호가 아니다.";
   assert.equal(WAKE_MESSAGE, expected);
   assert.equal(
     Buffer.from(WAKE_MESSAGE, "utf8").toString("hex"),
     Buffer.from(expected, "utf8").toString("hex"),
   );
+  // §2-C 정본의 마지막 절은 ASCII "--"(U+002D U+002D)가 아니라 em dash
+  // 하나(U+2014)여야 한다 -- 이 코드포인트 단언이 검토가 잡은 결함
+  // 그 자체다(1R 원문: expectedMessageMatches=false).
+  assert.ok(WAKE_MESSAGE.includes("—"));
+  assert.ok(!WAKE_MESSAGE.includes("--"));
 });
 
 test("각성 문안: CLI에는 문안을 실어 보내는 인자 경로가 없다(고정 상수만 전송된다) (1/1)", () => {
@@ -414,6 +557,10 @@ test("각성 문안: CLI에는 문안을 실어 보내는 인자 경로가 없�
     const sends = readJsonl(fakeExecLog);
     assert.equal(sends[0].argv[4], "--text");
     assert.equal(sends[0].argv[5], WAKE_MESSAGE);
+    // §1-D: 제출(두 번째 호출)에는 --enter만 있고 문안 문자열 자체는
+    // 실리지 않는다 -- 텍스트는 오직 첫 호출에만 실린다.
+    assert.equal(sends[1].argv[4], "--enter");
+    assert.ok(!sends[1].argv.includes(WAKE_MESSAGE));
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

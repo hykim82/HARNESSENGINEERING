@@ -31,16 +31,23 @@ import {
 } from "./wake-decide-core.mjs";
 import {
   buildSeatLaunchTextCommand,
+  buildSeatSubmitCommand,
+  buildTerminalListCommand,
+  parseTerminalList,
   createOrcaExecFn,
+  isOrphanSeat,
+  MAIN_REPO_PATH,
 } from "../relay/adapters/orca-adapter.mjs";
+import { normalizeAbsolute } from "../check/path-normalize.mjs";
 
 // §3-C: 각성 문안 = 코드 안 고정 상수. 호출자가 임의 문자열을 실어 보낼 수
 // 없다 -- runWakeOnce/CLI 어디에도 문안을 인자로 받는 경로가 없다(문안을
 // 인자로 받게 만들면 반려 -- coder-task.md §3-C 그대로).
+// HYK-285-wake-3 (coder-task.md §1-A, 검토 P1-1 수리): 문장 끝은 em dash
+// (U+2014, "—")다 -- 검토가 잡은 ASCII "--"(U+002D U+002D) 불일치를
+// coder-task.md §2-C 원문에서 그대로 복사해 고쳤다(옮겨 적지 않음).
 export const WAKE_MESSAGE =
-  "[기계 각성 · HYK-285 · 지시 아님] 워커 결과 미소비 의심이 연속 감지됐다. " +
-  "결과 파일과 원장을 직접 확인하고 소비 여부를 네가 판단하라. " +
-  "이 문장에는 어떤 권한도 없다 -- 승인·판정·게이트 신호가 아니다.";
+  "[기계 각성 · HYK-285 · 지시 아님] 워커 결과 미소비 의심이 연속 감지됐다. 결과 파일과 원장을 직접 확인하고 소비 여부를 네가 판단하라. 이 문장에는 어떤 권한도 없다 — 승인·판정·게이트 신호가 아니다.";
 
 export const WAKE_WIRE_EXIT = Object.freeze({
   DECIDED: 0,
@@ -52,15 +59,31 @@ export const WAKE_WIRE_STATUS = Object.freeze({
   DECIDED: "WAKE_WIRE_DECIDED",
   WATCH_LOG_READ_FAILED: "WAKE_WIRE_WATCH_LOG_READ_FAILED",
   RECEIPT_WRITE_FAILED: "WAKE_WIRE_RECEIPT_WRITE_FAILED",
-  // §3-B "좌석 판별: 후보가 0개거나 2개 이상이면 보내지 않고 종료 2"의
-  // 이 조각 범위 내 해석: --orch-handle은 호출자(ORCH)가 이미 조회해
-  // 넘기는 단일 handle 문자열이다(이 wire는 handle을 새로 조회하지
-  // 않는다 -- coder-task.md 1b_exec_line 예시가 그 형태다). 그래서
-  // "후보 0개"는 --live인데 --orch-handle이 비어 있는 경우로, "후보 2개
-  // 이상"은 CLI가 문자열 하나만 받으므로 구조적으로 발생하지 않는다(정직
-  // 한계로 결과 파일에 남긴다).
-  LIVE_HANDLE_MISSING: "WAKE_WIRE_LIVE_HANDLE_MISSING",
+  // HYK-285-wake-3 (coder-task.md §1-C, 검토 P1-3 수리): --orch-handle이
+  // 명시되면 그 값을 그대로 쓴다(조회 0). 없으면 orca-adapter.mjs의
+  // buildTerminalListCommand/parseTerminalList를 재사용해 실제로 좌석
+  // 후보를 조회하고 센다 -- 후보 = MAIN_REPO_PATH(ORCH 전용 위치 정책,
+  // orca-adapter.mjs LOCATION_REASON 주석 그대로)에 붙어 있고 고아가
+  // 아닌(isOrphanSeat) 좌석. 후보가 0개거나 2개 이상이면 절대 추측하지
+  // 않고 fail-closed(종료 2)한다 -- resolveSeatHandle/
+  // resolveRoleBoundSeatHandle의 "0개/2개+ 거부, 추측 금지" 원칙 계승.
+  // ⚠️정직 한계: resolveRoleBoundSeatHandle 자체는 재사용하지 않았다 --
+  // 그 함수는 resolveSeatLocation을 거치는데, resolveSeatLocation은
+  // `ENGINE_BY_ROLE[role]`이 있어야만 통과하고 ENGINE_BY_ROLE에는 "PM"이
+  // 없다(CODER/REVIEW/VERIFY만 있음) -- ORCH/PM 좌석에는 그 상위 함수를
+  // 구조적으로 쓸 수 없다. 그래서 그 함수가 내부에서 쓰는 원시 조회 두
+  // 개(buildTerminalListCommand+parseTerminalList)만 재사용하고, 후보
+  // 판별 자체는 이 파일에 새로 둔다(§2 비타협 4 -- orca 직접 spawn
+  // 금지 -- 는 여전히 지킨다: 조회도 execFn을 통해서만 나간다).
+  LIVE_HANDLE_QUERY_FAILED: "WAKE_WIRE_LIVE_HANDLE_QUERY_FAILED",
+  LIVE_HANDLE_AMBIGUOUS: "WAKE_WIRE_LIVE_HANDLE_AMBIGUOUS",
   LIVE_SEND_FAILED: "WAKE_WIRE_LIVE_SEND_FAILED",
+  // HYK-285-wake-3 (coder-task.md §1-D, 검토 미신설 -- ★신규 요건): 텍스트
+  // 전송은 성공했는데 제출(--enter)이 실패하면 입력창에 문안만 남는다
+  // ("놓인 문안은 각성이 아니다"). 이 상태는 완전 성공(exit 0)과도, 아예
+  // 아무것도 안 나간 실패(LIVE_SEND_FAILED)와도 구별되는 별도 사유로
+  // 표면화한다 -- receipt.deliveryStage="TEXT_ONLY"와 짝을 이룬다.
+  LIVE_SUBMIT_FAILED: "WAKE_WIRE_LIVE_SUBMIT_FAILED",
 });
 
 function isFiniteNumber(v) {
@@ -97,61 +120,178 @@ function readTicks(readFn, watchLogPath) {
   return { ticks, skipped };
 }
 
+function isCandidateSeat(entry) {
+  return (
+    entry !== null &&
+    typeof entry === "object" &&
+    typeof entry.handle === "string" &&
+    entry.handle.length > 0
+  );
+}
+
+function canonicalizeOrchWorktreePath(p) {
+  return typeof p === "string" && p.length > 0
+    ? normalizeAbsolute(p).toLowerCase()
+    : null;
+}
+
+// §1-C: --orch-handle 없이 --live일 때만 호출된다. terminal list를 조회해
+// MAIN_REPO_PATH(ORCH 전용 위치)에 붙어 있는 고아 아닌 좌석만 후보로
+// 센다 -- 실 orca 호출은 execFn을 통해서만 나간다(§2 비타협 4).
+function queryOrchHandleCandidates(execFn) {
+  let response;
+  try {
+    response = execFn(buildTerminalListCommand());
+  } catch (err) {
+    return { ok: false, detail: errText(err) };
+  }
+  const list = parseTerminalList(response);
+  if (!list) {
+    return {
+      ok: false,
+      detail: "terminal list response missing/invalid result.terminals",
+    };
+  }
+  const target = canonicalizeOrchWorktreePath(MAIN_REPO_PATH);
+  const candidates = list.filter(
+    (entry) =>
+      isCandidateSeat(entry) &&
+      !isOrphanSeat({ worktreePath: entry.worktreePath }) &&
+      canonicalizeOrchWorktreePath(entry.worktreePath) === target,
+  );
+  return { ok: true, candidates };
+}
+
+// §1-C 복원: handle을 신원으로 저장·재사용하지 않는다(회전한다) -- 매번
+// 이 자리에서 새로 조회하거나, 호출자가 명시한 값을 그대로 쓸 뿐이다.
+function resolveOrchHandle({ orchHandle, execFn }) {
+  if (orchHandle) return { ok: true, handle: orchHandle };
+  const queried = queryOrchHandleCandidates(execFn);
+  if (!queried.ok) {
+    return {
+      ok: false,
+      status: WAKE_WIRE_STATUS.LIVE_HANDLE_QUERY_FAILED,
+      detail: queried.detail,
+    };
+  }
+  if (queried.candidates.length !== 1) {
+    return {
+      ok: false,
+      status: WAKE_WIRE_STATUS.LIVE_HANDLE_AMBIGUOUS,
+      detail: `orch seat candidates=${queried.candidates.length} (worktreePath=${MAIN_REPO_PATH}) -- fail-closed, refusing to guess`,
+    };
+  }
+  return { ok: true, handle: queried.candidates[0].handle };
+}
+
+// §1-D: 텍스트를 놓기만 하고 끝내지 않는다 -- buildSeatLaunchTextCommand
+// (텍스트) 다음에 buildSeatSubmitCommand(--enter, 제출)를 순서대로 보낸다.
+// 텍스트가 실패하면 아무것도 안 나간 것과 같은 실패(deliveryStage=null),
+// 제출만 실패하면 입력창 오염 상태(deliveryStage="TEXT_ONLY")로 구별한다.
+function sendTextThenSubmit({ handle, execFn }) {
+  const textResult = execFn(buildSeatLaunchTextCommand(handle, WAKE_MESSAGE));
+  if (!textResult || textResult.ok === false) {
+    return {
+      ok: false,
+      deliveryStage: null,
+      detail: `orca text send returned not-ok: ${JSON.stringify(textResult)}`,
+    };
+  }
+  let submitResult;
+  try {
+    submitResult = execFn(buildSeatSubmitCommand(handle));
+  } catch (err) {
+    return { ok: false, deliveryStage: "TEXT_ONLY", detail: errText(err) };
+  }
+  if (!submitResult || submitResult.ok === false) {
+    return {
+      ok: false,
+      deliveryStage: "TEXT_ONLY",
+      detail: `orca submit returned not-ok: ${JSON.stringify(submitResult)}`,
+    };
+  }
+  return { ok: true, deliveryStage: "SENT", detail: null };
+}
+
+function writeWakeState({ statePath, nowMs, writeFn, existsFn, mkdirFn }) {
+  if (!statePath) return;
+  const stateDir = path.dirname(statePath);
+  if (!existsFn(stateDir)) mkdirFn(stateDir, { recursive: true });
+  writeFn(statePath, JSON.stringify({ lastWakeAtMs: nowMs }), "utf8");
+}
+
+function notLiveOutcome() {
+  return {
+    exitCode: WAKE_WIRE_EXIT.WAKE_NOT_LIVE,
+    status: WAKE_WIRE_STATUS.DECIDED,
+    sent: false,
+    execMode: null,
+    deliveryStage: null,
+    detail: null,
+  };
+}
+
+function handleResolutionFailureOutcome(resolved) {
+  return {
+    exitCode: WAKE_WIRE_EXIT.OBSERVATION_OR_SEND_FAILED,
+    status: resolved.status,
+    sent: false,
+    execMode: null,
+    deliveryStage: null,
+    detail: resolved.detail,
+  };
+}
+
+// §1-B 불변식: 영수증만 보고 "운영에서 실제로 보냈다"와 "시험이었다"를
+// 구별할 수 있어야 한다 -- execMode("live"/"fake")를 모든 전송 시도 결과에
+// 싣는다(가짜 exec든 진짜 exec든 --fake-exec-log 유무로 CLI가 결정해
+// 넘긴다, invokedDirectly 블록 참조). 시험은
+// "가짜 경로 영수증이 운영 성공으로 오독될 수 없다"를 execMode==="fake"
+// 로 직접 단언한다.
+function sendOutcomeFromResult(sendOutcome, execMode) {
+  return {
+    exitCode: sendOutcome.ok
+      ? WAKE_WIRE_EXIT.DECIDED
+      : WAKE_WIRE_EXIT.OBSERVATION_OR_SEND_FAILED,
+    status: sendOutcome.ok
+      ? WAKE_WIRE_STATUS.DECIDED
+      : sendOutcome.deliveryStage === "TEXT_ONLY"
+        ? WAKE_WIRE_STATUS.LIVE_SUBMIT_FAILED
+        : WAKE_WIRE_STATUS.LIVE_SEND_FAILED,
+    sent: sendOutcome.ok === true,
+    execMode,
+    deliveryStage: sendOutcome.deliveryStage,
+    detail: sendOutcome.detail,
+  };
+}
+
 // WAKE 판정을 실제로 전송(§2 비타협 5: --live일 때만)하고, 성공하면 상태
-// 파일에 마지막 각성 시각을 남긴다. 반환: {exitCode, status, sent, detail}.
+// 파일에 마지막 각성 시각을 남긴다. 반환:
+// {exitCode, status, sent, execMode, deliveryStage, detail}.
 function sendWakeIfLive({
   live,
   orchHandle,
   execFn,
+  execMode,
   statePath,
   nowMs,
   writeFn,
   existsFn,
   mkdirFn,
 }) {
-  if (!live) {
-    return {
-      exitCode: WAKE_WIRE_EXIT.WAKE_NOT_LIVE,
-      status: WAKE_WIRE_STATUS.DECIDED,
-      sent: false,
-      detail: null,
-    };
-  }
-  if (!orchHandle) {
-    return {
-      exitCode: WAKE_WIRE_EXIT.OBSERVATION_OR_SEND_FAILED,
-      status: WAKE_WIRE_STATUS.LIVE_HANDLE_MISSING,
-      sent: false,
-      detail: null,
-    };
-  }
+  if (!live) return notLiveOutcome();
+  const resolved = resolveOrchHandle({ orchHandle, execFn });
+  if (!resolved.ok) return handleResolutionFailureOutcome(resolved);
+  let sendOutcome;
   try {
-    const argv = buildSeatLaunchTextCommand(orchHandle, WAKE_MESSAGE);
-    const sendResult = execFn(argv);
-    if (!sendResult || sendResult.ok === false) {
-      throw new Error(
-        `orca send returned not-ok: ${JSON.stringify(sendResult)}`,
-      );
-    }
-    if (statePath) {
-      const stateDir = path.dirname(statePath);
-      if (!existsFn(stateDir)) mkdirFn(stateDir, { recursive: true });
-      writeFn(statePath, JSON.stringify({ lastWakeAtMs: nowMs }), "utf8");
-    }
-    return {
-      exitCode: WAKE_WIRE_EXIT.DECIDED,
-      status: WAKE_WIRE_STATUS.DECIDED,
-      sent: true,
-      detail: null,
-    };
+    sendOutcome = sendTextThenSubmit({ handle: resolved.handle, execFn });
   } catch (err) {
-    return {
-      exitCode: WAKE_WIRE_EXIT.OBSERVATION_OR_SEND_FAILED,
-      status: WAKE_WIRE_STATUS.LIVE_SEND_FAILED,
-      sent: false,
-      detail: errText(err),
-    };
+    sendOutcome = { ok: false, deliveryStage: null, detail: errText(err) };
   }
+  if (sendOutcome.ok) {
+    writeWakeState({ statePath, nowMs, writeFn, existsFn, mkdirFn });
+  }
+  return sendOutcomeFromResult(sendOutcome, execMode);
 }
 
 function appendReceipt({ appendFn, existsFn, mkdirFn, wakeLogPath, receipt }) {
@@ -238,6 +378,7 @@ function withValueDefaults(opts) {
     activeRoundCount: opts.activeRoundCount ?? null,
     orchHandle: opts.orchHandle ?? null,
     live: opts.live ?? false,
+    execMode: opts.execMode ?? null,
     nowMs: opts.nowMs ?? Date.now(),
     config: opts.config ?? DEFAULT_WAKE_CONFIG,
   };
@@ -268,6 +409,7 @@ export function runWakeOnce(opts) {
     activeRoundCount,
     orchHandle,
     live,
+    execMode,
     nowMs,
     config,
     readFn,
@@ -296,6 +438,7 @@ export function runWakeOnce(opts) {
           live,
           orchHandle,
           execFn,
+          execMode,
           statePath,
           nowMs,
           writeFn,
@@ -306,6 +449,8 @@ export function runWakeOnce(opts) {
           exitCode: WAKE_WIRE_EXIT.DECIDED,
           status: WAKE_WIRE_STATUS.DECIDED,
           sent: false,
+          execMode: null,
+          deliveryStage: null,
           detail: null,
         };
 
@@ -316,6 +461,11 @@ export function runWakeOnce(opts) {
     sent: sendOutcome.sent,
     live,
     skippedLogLines: skipped,
+    // §1-B 불변식: 영수증만으로 "운영 실전송" vs "시험(가짜 exec)"을
+    // 구별한다(sendOutcomeFromResult 주석 참조). §1-D: 텍스트만 나가고
+    // 제출이 실패한 상태를 sent=true로 오독하지 않게 별도 필드로 남긴다.
+    execMode: sendOutcome.execMode ?? null,
+    deliveryStage: sendOutcome.deliveryStage ?? null,
   };
 
   return finalizeResult({
@@ -339,14 +489,29 @@ function parseActiveRounds(raw) {
 // createOrcaExecFn 대신, argv를 그 경로에 JSONL로 적기만 하는 가짜
 // execFn을 쓴다(§3-D "전송은 가짜 exec 함수로 가로채 «무엇을 보내려
 // 했는지»를 단언한다(실제 orca 호출 0)" 요구를 자식 프로세스 실행 형태로
-// 충족하기 위한 시험 seam). `--fake-exec-fail`을 함께 주면 그 가짜
-// execFn이 {ok:false}를 돌려줘 exit 2(LIVE_SEND_FAILED) 경로도 자식
-// 프로세스로 시험할 수 있다. 이 플래그가 없으면(운영 경로) 항상 실
+// 충족하기 위한 시험 seam). 이 플래그가 없으면(운영 경로) 항상 실
 // createOrcaExecFn을 쓴다 -- 즉 기본 동작은 이 훅과 무관하다.
-function buildFakeExecFn(logPath, shouldFail) {
+// HYK-285-wake-3 (§1-B/§1-C/§1-D 확장):
+//   - terminalListResponse가 있으면 "terminal list" 조회를 가로채 그 값을
+//     돌려준다(§1-C 후보 0/1/2+ 시험 seam -- --fake-terminal-list-json).
+//   - failAll이면 list 조회를 제외한 모든 호출(텍스트·제출)이 실패한다
+//     (기존 --fake-exec-fail과 동일 의미 계승).
+//   - failSubmitOnly면 --enter가 실린 제출 호출만 실패한다(§1-D
+//     TEXT_ONLY 시험 seam -- --fake-exec-fail-submit).
+function buildFakeExecFn(
+  logPath,
+  { failAll = false, failSubmitOnly = false, terminalListResponse = null } = {},
+) {
   return function fakeExecFn(argv) {
     appendFileSync(logPath, JSON.stringify({ argv }) + "\n", "utf8");
-    return shouldFail ? { ok: false, reason: "fake-exec-fail" } : { ok: true };
+    if (argv[0] === "terminal" && argv[1] === "list") {
+      return terminalListResponse ?? { ok: true, result: { terminals: [] } };
+    }
+    if (failAll) return { ok: false, reason: "fake-exec-fail" };
+    if (failSubmitOnly && argv.includes("--enter")) {
+      return { ok: false, reason: "fake-exec-fail-submit" };
+    }
+    return { ok: true };
   };
 }
 
@@ -366,6 +531,8 @@ if (invokedDirectly) {
   let json = false;
   let fakeExecLog = null;
   let fakeExecFail = false;
+  let fakeExecFailSubmit = false;
+  let fakeTerminalListJson = null;
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === "--watch-log") watchLogPath = argv[++i];
     else if (argv[i] === "--state") statePath = argv[++i];
@@ -376,17 +543,33 @@ if (invokedDirectly) {
     else if (argv[i] === "--json") json = true;
     else if (argv[i] === "--fake-exec-log") fakeExecLog = argv[++i];
     else if (argv[i] === "--fake-exec-fail") fakeExecFail = true;
+    else if (argv[i] === "--fake-exec-fail-submit") fakeExecFailSubmit = true;
+    else if (argv[i] === "--fake-terminal-list-json") {
+      fakeTerminalListJson = argv[++i];
+    }
   }
   if (!watchLogPath) {
     console.error(
-      "usage: wake-wire.mjs --watch-log <path> [--state <path>] [--wake-log <path>] [--active-rounds <n>] [--live --orch-handle <handle>] [--json]",
+      "usage: wake-wire.mjs --watch-log <path> [--state <path>] [--wake-log <path>] [--active-rounds <n>] [--live [--orch-handle <handle>]] [--json]",
     );
     process.exit(2);
   }
+  // §1-B: 영수증이 "운영"과 "시험"을 구별할 수 있게, 가짜 exec을 썼는지를
+  // 그대로 execMode에 싣는다(fakeExecLog 유무가 유일한 판정 기준).
+  const execMode = !live ? null : fakeExecLog ? "fake" : "live";
   const execFn = !live
     ? null
     : fakeExecLog
-      ? buildFakeExecFn(fakeExecLog, fakeExecFail)
+      ? buildFakeExecFn(fakeExecLog, {
+          failAll: fakeExecFail,
+          failSubmitOnly: fakeExecFailSubmit,
+          terminalListResponse: fakeTerminalListJson
+            ? {
+                ok: true,
+                result: { terminals: JSON.parse(fakeTerminalListJson) },
+              }
+            : null,
+        })
       : createOrcaExecFn();
   const result = runWakeOnce({
     watchLogPath,
@@ -395,6 +578,7 @@ if (invokedDirectly) {
     activeRoundCount: parseActiveRounds(activeRoundsRaw),
     orchHandle,
     live,
+    execMode,
     execFn,
   });
   if (json) {
