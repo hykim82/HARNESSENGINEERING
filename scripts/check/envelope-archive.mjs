@@ -1,4 +1,10 @@
-import { existsSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 
 // HYK-204: 워커 봉투(`.harness/<role>.md`)는 라운드마다 덮어쓴다 -- 같은
@@ -189,6 +195,109 @@ export function archiveRoundTaskFile({
       reason: `envelope-archive: failed to preserve ${role} round task file (${err.message})`,
     };
   }
+}
+
+// HYK-307-order-1 §1: archiveRoundTaskFile always assigns the NEXT
+// incrementing round number and writes -- calling it twice for the SAME
+// round's content (once at delivery time via the new dispatch-gate
+// snapshot below, once at the normal successful-consumption archive that
+// already existed before this track) would create two archive copies of
+// identical content. Not a data-loss bug (nothing is overwritten -- the
+// existing collision guard already refuses that), just a wasteful
+// duplicate that also shifts round numbering. This header-stripping
+// comparison lets a caller ask "is this exact content already preserved?"
+// before calling archiveRoundTaskFile, so a second call for an unchanged
+// round becomes a no-op instead of a second file.
+const ARCHIVE_HEADER_LINE_RE = /^<!-- envelope-archive:[^\n]*-->\n/;
+
+function stripArchiveHeader(fileText) {
+  return fileText.replace(ARCHIVE_HEADER_LINE_RE, "");
+}
+
+// Scans `<harnessDir>/rounds/<role>-task-r*.md` (role match case-insensitive,
+// same convention as nextTaskArchiveFileName/findCaseInsensitiveCollision
+// above) for an existing archive whose body (header line stripped) is
+// byte-identical to `taskContent`. Never throws -- an unreadable archive
+// dir/file is treated as "no match found" (fail toward archiving, not
+// toward silently skipping a round that in fact isn't preserved yet).
+export function hasIdenticalArchivedTaskFile({
+  role,
+  taskContent,
+  harnessDir,
+  readdirFn = readdirSync,
+  readFileFn = readFileSync,
+}) {
+  const archiveDir = join(harnessDir, ARCHIVE_SUBDIR);
+  let names;
+  try {
+    names = readdirFn(archiveDir);
+  } catch {
+    return false;
+  }
+  const pattern = new RegExp(
+    `^${escapeForRegex(role)}-task-r(\\d+)\\.md$`,
+    "i",
+  );
+  for (const name of names) {
+    if (!pattern.test(name)) continue;
+    let body;
+    try {
+      body = stripArchiveHeader(readFileFn(join(archiveDir, name), "utf8"));
+    } catch {
+      continue;
+    }
+    if (body === taskContent) return true;
+  }
+  return false;
+}
+
+// Thin wrapper around archiveRoundTaskFile: skips the write (ok:true,
+// skipped:true) when an archive with IDENTICAL content already exists for
+// this role, otherwise delegates unchanged. archiveRoundTaskFile itself is
+// untouched (⛔기존 계약 변경 금지) -- every existing caller/test of that
+// function keeps its exact current behavior; this is a new, additive entry
+// point for callers (the dispatch-gate delivery-time snapshot, §1) that
+// need "preserve this round's text, but don't duplicate it" semantics.
+export function archiveRoundTaskFileIfNew({
+  role,
+  taskContent,
+  harnessDir,
+  readdirFn = readdirSync,
+  mkdirFn = mkdirSync,
+  writeFileFn = writeFileSync,
+  existsFn = existsSync,
+  readFileFn = readFileSync,
+}) {
+  if (
+    typeof role === "string" &&
+    role !== "" &&
+    typeof taskContent === "string" &&
+    hasIdenticalArchivedTaskFile({
+      role,
+      taskContent,
+      harnessDir,
+      readdirFn,
+      readFileFn,
+    })
+  ) {
+    return {
+      ok: true,
+      skipped: true,
+      reason: `envelope-archive: ${role} round TASK file content already preserved (identical snapshot exists in ${ARCHIVE_SUBDIR}/) -- skipped duplicate`,
+    };
+  }
+  return {
+    ...archiveRoundTaskFile({
+      role,
+      taskContent,
+      harnessDir,
+      readdirFn,
+      mkdirFn,
+      writeFileFn,
+      existsFn,
+    }),
+    skipped: false,
+  };
 }
 
 const DONE_RE_G = /^>>>\s*DONE:.*@\s*(.+?)\s*$/gim;
