@@ -290,3 +290,72 @@ Write-Host "[3/3] OK — 워커가 dispatch-show로 대조 후 기동합니다."
 1. worktreeId 축을 진짜 독립으로 만들려면 핸들→워크트리id 정적 매핑이 필요하다(위 "정직 한계" 절) — 이 라운드 범위 밖.
 2. `dispatch-worker.ps1` 자체는 이 저장소의 CI·PR 강제 밖이다(HYK-256 문서와 같은 정직 한계 — ORCH의 적용 보고가 유일한 신뢰 근거다).
 3. 관제실 적용은 사람 게이트(ORCH 몫) — 이 문서는 "제안"이며, ORCH가 실제로 파일에 붙여넣고 파싱 검사한 뒤에만 "APPLIED"로 갱신돼야 한다.
+
+## HYK-323 — 좌석 증명 래퍼 «항상 거부» 결함과 비상 직수리 (2026-08-19 후속, HYK-299-casefold-doc-1 라운드 정식화)
+
+### 결함 설명 (§1)
+
+`dispatch-worker.ps1`의 `Invoke-SeatProofGate` 끝부분은 원래 이렇게 짜여 있었다:
+
+```powershell
+& node $gateCliPath --dispatch-show $dsShowPath --terminal-show $tsShowPath --harness-task-id $label --runtime-task-id $Task --dispatch-id $dispatchId --worktree-id $seatProofWorktreeId --worktree-path (Norm $Worktree)
+return $LASTEXITCODE
+```
+
+PowerShell 함수는 캡처되지 않은 모든 출력(파이프라인에 실린 값)을 자동으로 반환값에 포함한다. `& node ...` 호출의 stdout(게이트 CLI가 찍는 결과 한 줄)이 변수에 담기지 않고 그대로 파이프라인에 남아 있었기 때문에, 이 함수는 실제로는 `[stdout문장, $LASTEXITCODE]` 형태의 **2요소 배열**을 반환하고 있었다. 호출부는 `$seatProofExit = Invoke-SeatProofGate ...`로 받아 `if ($seatProofExit -ne 0)`로 판정하는데, PowerShell에서 배열과 정수 0을 `-ne`로 비교하면 배열이 비어 있지 않은 한 참으로 평가된다 — **게이트가 PROVEN(exit 0)을 반환해도 호출부는 실패로 읽었다.** 즉 이 검문소는 «거부만 가능하고 통과가 원천적으로 불가능한» 상태였다: PROVEN이든 UNPROVEN이든 결과가 무엇이든 항상 `SEAT_PROOF_REJECTED`(exit 7)로 떨어졌다.
+
+### 적용된 교체 문면 전문 (§2)
+
+관제실 `dispatch-worker.ps1`을 직접 열어 읽고 그대로 옮긴 것이다(고치지 않았다 — 읽기만):
+
+```powershell
+  $tsShowObj = Get-Content $tsShowPath -Raw | ConvertFrom-Json
+  $seatProofWorktreeId = $tsShowObj.result.terminal.worktreeId
+  # ★HYK-323 비상 직수리(2026-08-19, ORCH 교대 28회차 · 검토 없이 적용 -- 상신
+  # 통역 받는함 `2026-08-19-1906-상신-좌석증명-래퍼결함-배달전면차단.md` 5항 ⓐ 승인분).
+  # 결함: `& node ...` 의 stdout 한 줄이 함수 반환값에 섞여 `return $LASTEXITCODE` 와
+  # 함께 [문장, 코드] 배열로 나갔다 -> 호출부 `-ne 0` 이 «PROVEN(exit 0)» 도 참으로 읽어
+  # **모든 배달을 거부**했다(합성 재현 완료: exit 0 인데 거부). 판정 로직·검사 강도는
+  # 그대로이며, 화면 출력을 Write-Host 로 분리해 반환값을 종료코드 하나로 만든다.
+  $gateOut = & node $gateCliPath --dispatch-show $dsShowPath --terminal-show $tsShowPath --harness-task-id $label --runtime-task-id $Task --dispatch-id $dispatchId --worktree-id $seatProofWorktreeId --worktree-path (Norm $Worktree) 2>&1
+  $gateExit = $LASTEXITCODE
+  foreach ($line in @($gateOut)) { Write-Host "      $line" }
+  return $gateExit
+}
+```
+
+(위는 `Invoke-SeatProofGate` 함수의 마지막 블록만 발췌한 것이다 — 함수 앞부분·`$dsShowPath`/`$tsShowPath` 조립·`Test-Path`/`SEAT_PROOF_CLI_MISSING` 부분은 이번 교체로 손대지 않았다. 지금 파일에는 주석 6줄 + 코드 4줄(`$gateOut = ...` / `$gateExit = ...` / `foreach ...` / `return $gateExit`)로 들어가 있다 — 기존의 코드 2줄(`& node ...` / `return $LASTEXITCODE`)을 대체했다.)
+
+수리 핵심: `& node ...`의 출력을 `$gateOut` 변수로 캡처해 파이프라인에서 빼내고(`2>&1`로 stderr까지 함께 캡처), 그 내용은 `Write-Host`로 화면에만 찍은 뒤, 함수는 정수 `$gateExit` 하나만 `return`한다. 판정 로직(게이트 CLI 자체의 대조 규칙)은 한 글자도 바뀌지 않았다 — 바뀐 것은 오직 "함수가 무엇을 반환하는가"뿐이다.
+
+### 지문 — 직접 재계산 대조 (§3)
+
+ORCH 보고값을 그대로 믿지 않고, 이 라운드에서 관제실 파일을 직접 읽어 `Get-FileHash -Algorithm SHA256`으로 재계산했다:
+
+| 항목                                                           | 보고된 값                                                          | 직접 재계산한 값                                                                                                    | 일치                                      |
+| -------------------------------------------------------------- | ------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------- | ----------------------------------------- |
+| 적용 전 (`dispatch-worker.ps1.bak-HYK323-2026-08-19T19-11-05`) | `cff75d2fd3c965ba5a0c88e598f0f3441c426a3dca855d7fca7bcdde9a30d458` | `CFF75D2FD3C965BA5A0C88E598F0F3441C426A3DCA855D7FCA7BCDDE9A30D458`                                                  | ✅ 일치(대소문자만 다름 — 16진수 값 동일) |
+| 적용 후 (현재 라이브 `dispatch-worker.ps1`)                    | `8b1d717688d14f93ad31df87a1a441951a01830a946c2f354940c733a6722b58` | `8B1D717688D14F93AD31DF87A1A441951A01830A946C2F354940C733A6722B58`                                                  | ✅ 일치(대소문자만 다름 — 16진수 값 동일) |
+| 백업 파일명                                                    | `dispatch-worker.ps1.bak-HYK323-2026-08-19T19-11-05`               | 관제실 디렉터리에 해당 파일명 그대로 존재함을 `Get-ChildItem`으로 확인                                              | ✅ 일치                                   |
+| 관제실 커밋                                                    | `00f78f0`                                                          | `git log`/`git show 00f78f0 -- dispatch-worker.ps1`로 커밋이 존재하고 위 교체 문면과 동일한 diff를 담고 있음을 확인 | ✅ 일치                                   |
+
+세 지문 모두 직접 재계산해 대조했고, 전부 보고된 값과 일치한다.
+
+### 정직 기록 (§2-4)
+
+⛔이 수리는 **독립 검토 없이** 적용된 비상 수리다. 좌석 증명 게이트가 «항상 거부»하는 상태였기 때문에, 이 게이트를 거쳐야 하는 claude/codex 배달 자체가 전면으로 막혀 워커를 띄울 수 없는 **순환 교착**이었다(게이트를 고치려면 워커를 배달해야 하는데, 배달 자체가 그 게이트에 막힌다). 이 교착 때문에 책임자가 2026-08-19 19:08 판정으로 **ORCH 직접 수리를 승인**했다. **소급 독립 검토는 다음 정상 검토 라운드에서 이뤄진다** — 지금 이 문서 절은 그 소급 검토를 위한 기록이지, 검토 완료 선언이 아니다.
+
+### 왜 시험이 못 잡았나 (§2-5)
+
+저장소 안(`scripts/relay/`)의 게이트 CLI·판정 코어에 대한 단위 시험은 존재했지만, **관제실 `dispatch-worker.ps1` 래퍼 계층 자체를 구동해 «통과 경로»(exit 0 실제 반환값)를 검증하는 시험은 0건**이었다(이번에 등재 = HYK-323). 저장소 쪽 판정 시험들은 게이트 CLI를 직접 부르거나 판정 함수를 직접 호출했기 때문에, `Invoke-SeatProofGate`라는 PowerShell 함수의 반환값 조립 방식(파이프라인에 stdout이 섞여 배열이 되는 문제)은 시험 범위 밖에 있었다. 이 한계는 그대로 남아 있다 — ⛔**«이제 안전하다»고 쓰지 않는다.** 관제실 래퍼 계층에 대한 통과-경로 시험을 새로 두는 것은 이 라운드 범위 밖이며, 다음 트랙 후보로 남긴다.
+
+## r1 라운드(HYK-299-casefold-1) 완료 표지 소비 실패 기록 (§3, 사실만)
+
+`HYK-299-casefold-1` 코더 라운드(r1)는 작업 자체는 완료됐으나, 완료 표지를 `>>> DONE: CODER @ 2026-08-19 18:56 KST` 형태로 **분 단위**로 손기입했다. 핸드셰이크 계약은 같은 분 안의 서로 다른 라운드를 구별하기 위해 **초 단위 표기가 필수**이며 이 계약은 완화되지 않는다. 그 결과 r1의 완료 표지는 **소비되지 못했다.** 게다가 ORCH가 띄운 감시기가 그 분 단위 표지를 이미 «첫 관측»으로 기록해 버려, 표지를 다시 발행하는 통상 경로(같은 라운드를 재발행)도 막혔다.
+
+기계적으로 확인된 사실:
+
+- 같은 워크트리(`hyk299-casefold`)에 새 라운드를 배달하려 하면 **HYK-217 배달 게이트가 막는다** — 사유: 직전 라운드의 완료시각이 분 단위라 소비 영수증을 결속할 수 없음(배달 시도 2회, 실측 거부 메시지 2회로 보고됨).
+- 표지를 사후에 고쳐 초 단위로 바꾸는 것은 **첫 관측 이후 재기입**에 해당해 규칙상 금지되며, 책임자가 "고쳐서 재활용"(예외) 안을 **기각**했다.
+
+⇒ **r1 라운드는 «소비되지 못한 채»로 남는다.** 코드 변경 자체(HYK-299 좌석 증명 결선, casefold 수리)는 증거가 보존돼 있다(결과 파일 · 첫 관측 로그 · `.harness/rounds/coder-task-r1.md` 보관본 · 배달 영수증) — 이번 r2 라운드가 하는 일은 **그 완료 표지를 정식으로 다시 발행하는 것**뿐이며, r1 자체의 코드 작업 결과를 다시 만들거나 고치지 않는다. 표지 형식 사고로 소비에 실패했고, 그 자리표는 sweep으로 정직 사유(`SUSPECT_TIMEOUT_RECOVERED`)와 함께 회수됐다.
