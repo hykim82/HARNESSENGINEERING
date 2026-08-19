@@ -34,6 +34,39 @@ const EXIT = Object.freeze({
   USAGE: 2,
 });
 
+// HYK-306 (coder-task.md §4-1): 2026-08-18 관제실이 `-GoLabel`을 빠뜨리자
+// dispatch-worker.ps1이 조용히 런타임 id(`$Task`, `task_...` 모양)를 하네스
+// 이름표 자리에 채워 넣었다(관제실 197행 `$label = if ($GoLabel) {...} else
+// {$Task}`). 그 값이 흘러오는 첫 지점이 이 CLI의 `--reservation-id`다(ps1
+// 220행, `orca orchestration dispatch` 호출 «전») -- 그래서 여기가 배달을
+// 막을 수 있는 가장 이른 지점이고, "판단은 저장소" 원칙(coder-task §2)에
+// 따라 판정 로직 전부를 여기 둔다. 관제실 쪽 수정은 그 조용한 대체 한
+// 줄을 없애는 것뿐이다(§2, docs/control-room-patches/HYK-306-*.md).
+// 런타임 id 모양 검사는 `orca orchestration dispatch-show`가 실제로 내는
+// id 형식(`task_` + 16진수, 예 `task_ac822047b14d`)을 실측해 고정했다.
+const RUNTIME_TASK_ID_SHAPE = /^task_[0-9a-f]+$/i;
+
+// { ok: true } | { ok: false, reason: <사람이 읽고 바로 원인을 알 수 있는 문장> }
+function validateHarnessLabel(label) {
+  if (!label) {
+    return {
+      ok: false,
+      reason:
+        "--reservation-id is required -- dispatch-worker.ps1 must pass the harness task label (-GoLabel <HYK-...-N>), it cannot be omitted",
+    };
+  }
+  if (RUNTIME_TASK_ID_SHAPE.test(label)) {
+    return {
+      ok: false,
+      reason: `--reservation-id '${label}' looks like an orca runtime task id (task_...), not a harness label -- pass -GoLabel <HYK-...-N> explicitly instead of letting it fall back to the runtime id`,
+    };
+  }
+  return { ok: true };
+}
+
+// exported for tests that want to check the shape rule without shelling out
+export { validateHarnessLabel };
+
 function parseArgs(argv) {
   const out = { _: [] };
   for (let i = 0; i < argv.length; i++) {
@@ -151,10 +184,15 @@ function cmdAdmit(args) {
     role,
     "seat-key": seatKey,
   } = args;
-  if (!ledgerPath || !lockPath || !reservationId || (!cap && !capPath)) {
+  if (!ledgerPath || !lockPath || (!cap && !capPath)) {
     console.error(
       "usage: admit --ledger <path> --lock <path> --reservation-id <id> (--cap <n> | --cap-path <concurrency-cap.json>) [--role <r>] [--seat-key <k>]",
     );
+    return EXIT.USAGE;
+  }
+  const labelCheck = validateHarnessLabel(reservationId);
+  if (!labelCheck.ok) {
+    console.error(`admit: ${labelCheck.reason}`);
     return EXIT.USAGE;
   }
   const capResolved = resolveAdmitCap({ cap, capPath });
