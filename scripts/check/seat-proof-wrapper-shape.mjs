@@ -6,36 +6,48 @@
 // wrapper leaked the gate CLI's stdout into its own PowerShell return value
 // alongside `return $LASTEXITCODE`, so callers received a 2-element array
 // and `-ne 0` read PROVEN (exit 0) as a failure too -- every delivery was
-// rejected, with no passing path. This module mechanizes a shape check for
-// that specific class of defect so it cannot silently return.
+// rejected, with no passing path. This module mechanizes a check for that
+// specific class of defect so it cannot silently return.
 //
-// HYK-323 (wrapper-shape-2, review r1 rejection, P1 x3): review r1 found
-// three notations that all read as OK from the wrapper-shape-1 checker but
-// are semantically the same defect class or worse:
-//   1. capture the gate call's stdout into a variable, then leak that
-//      variable back out via `Write-Output`/bare-expression anyway;
-//   2. declare a second, uncaptured `Invoke-SeatProofGate` after a fixed
-//      one -- PowerShell keeps only the LAST definition, but the old judge
-//      only ever inspected the first;
-//   3. invoke the gate CLI via array splatting (`& node @nodeArgs`) --
-//      the old call-recognition regex required the literal
-//      `& node $gateCliPath` token sequence and missed this entirely.
-// All three are fixed below. Fail-closed principle (kept from round 1,
-// restated per review's explicit ask in §2-3): a form this checker does not
-// specifically recognize as safe is BROKEN, never silently OK. This applies
-// to unrecognized invocation notations (shape ⓐ) and to any function text
-// where more than one definition of the same name exists (shape ⓓ) --
-// finding it un-parseable or ambiguous is itself a fail-closed BROKEN, not
-// a pass.
+// HYK-323 (wrapper-shape-2, review r1 rejection, P1 x3): a first version of
+// this checker judged the wrapper by regex-matched *shape* (notation
+// pattern-matching). Review r1 found three notations that all read as OK
+// from that version but are the same defect class or worse (capture-then-
+// leak via Write-Output/bare-expression, a second uncaptured definition
+// shadowing a fixed one, and array-splatted call args). All three were
+// patched into the shape regexes.
+//
+// HYK-323 (wrapper-shape-3, review r2 rejection, P1 x6, ORCH judgment
+// "accept 가+나, reject 다" 2026-08-19 23:12): review r2 found SIX MORE
+// notations the patched shape checker still read as OK (Invoke-Expression
+// indirection, leaking only the first of two captured calls, `-InputObject`,
+// a parenthesized bare expression, `& (Get-Command node)`, and a `$Node`
+// case variant the checker's case-sensitive regex missed). Chasing notation
+// is a losing game -- PowerShell has unboundedly many ways to write "call
+// this and don't discard its output," and every regex fix invites the next
+// unrecognized one. ORCH's judgment: stop trying to recognize every unsafe
+// *shape*; instead pin what the *known-good* function body looks like
+// (a SHA-256 fingerprint of its exact text) and treat any deviation --
+// recognized-safe-looking or not -- as BROKEN. Shape checking is kept, but
+// demoted to a DIAGNOSTIC that explains *why* a fingerprint mismatch
+// happened; it is never the verdict authority. See
+// judgeSeatProofWrapperShape (diagnostic) vs. judgeSeatProofWrapperCanonical
+// (verdict) below.
 //
 // Honesty limits (§2-3, keep in both this header and the result file):
 // - CI cannot see the control room (`D:\문서관리\하네스-관제실\`) -- this
 //   checker inspects the real wrapper only when run locally by a human/ORCH
 //   with that path. What CI runs is this module's OWN unit tests, never a
 //   check of the live wrapper. Do not claim "CI prevents recurrence."
-// - This checker inspects *shape* only -- it never executes the wrapper to
-//   confirm exit 0 is actually read as a pass (that needs PowerShell, which
-//   CI does not have).
+// - The fingerprint check (this module's verdict) inspects *exact text*,
+//   never *execution* -- it does not run the wrapper to confirm exit 0 is
+//   actually read as a pass. The separate behavioral checker
+//   (seat-proof-wrapper-behavior.mjs) covers execution, but it too only
+//   runs locally where PowerShell exists (same local-anchor limit).
+// - This local-anchor limit is not new to this round -- the wrapper-shape-1
+//   shape checker was exactly as local-anchored as this fingerprint checker
+//   is. Neither version has ever run as part of CI's view of the control
+//   room.
 // - Wiring this checker into the control room's delivery path itself
 //   (dispatch-worker.ps1 calling this CLI before trusting the seat-proof
 //   gate) is proposed only, in docs/control-room-patches/
@@ -48,7 +60,10 @@ const FUNCTION_NAME = "Invoke-SeatProofGate";
 // (which required the literal token sequence `& node $gateCliPath`) simply
 // by splatting the same arguments through an array (`& node @nodeArgs`).
 // Argument notation will keep growing new forms; the call-operator anchor
-// does not need to.
+// does not need to. NOTE (wrapper-shape-3): this regex, and everything
+// derived from it below, is now DIAGNOSTIC ONLY (see module header) --
+// review r2 proved conclusively that no finite set of such regexes can be
+// trusted as the verdict authority.
 const GATE_CALL_RE = /&\s*(node\b|\$node\b)/;
 const CAPTURED_ASSIGNMENT_RE = /^\$[A-Za-z_]\w*\s*=/;
 const CAPTURED_VAR_NAME_RE = /^\$([A-Za-z_]\w*)\s*=/;
@@ -69,9 +84,8 @@ function normalizeNewlines(text) {
 // opening and matching closing brace (brace-depth counted, so a nested
 // `foreach (...) { ... }` block doesn't truncate it early). An empty
 // array means the header was never found; a `null` entry means a header
-// was found but its braces never balanced -- both fold into fail-closed
-// FUNCTION_NOT_FOUND at the caller.
-function extractAllFunctionBodies(text) {
+// was found but its braces never balanced.
+export function extractAllFunctionBodies(text) {
   const headerRe = new RegExp(
     `function\\s+${FUNCTION_NAME}\\s*\\([^)]*\\)\\s*\\{`,
     "g",
@@ -104,11 +118,11 @@ function extractAllFunctionBodies(text) {
 // continuations are joined into one logical line first (so a call split
 // across lines is still seen whole by GATE_CALL_RE), then full-line
 // `#`-comments and blank lines are dropped so a defect shape quoted inside
-// a comment (test 4's requirement) is never mistaken for the live
-// statement it describes. Only whole-line comments are recognized -- this
-// file's actual PowerShell style (control room + this repo's docs) never
-// mixes code and comment on one line, so that's the shape worth trusting;
-// a trailing `# ...` on a code line is not stripped.
+// a comment is never mistaken for the live statement it describes. Only
+// whole-line comments are recognized -- this file's actual PowerShell
+// style (control room + this repo's docs) never mixes code and comment on
+// one line, so that's the shape worth trusting; a trailing `# ...` on a
+// code line is not stripped.
 function codeLinesOf(functionBody) {
   const rawLines = functionBody.split("\n").map((line) => line.trim());
   const logicalLines = [];
@@ -139,11 +153,10 @@ function lastAssignmentRhs(codeLines, varName, fromIndex) {
 
 // Shape ⓐ: the gate CLI is invoked without capturing its output into a
 // variable. In PowerShell, an uncaptured command's stdout joins the
-// enclosing function's own pipeline output -- wrapper-shape-1's original
-// defect. Returns `{ broken, capturedVar }`: `broken` is a verdict object if
-// an uncaptured call was found (fail-closed), else null; `capturedVar` is
-// the name (if any) of the variable that captured the gate call's output,
-// for shape ⓒ below.
+// enclosing function's own pipeline output. Returns `{ broken, capturedVar
+// }`: `broken` is a verdict object if an uncaptured call was found, else
+// null; `capturedVar` is the name (if any) of the variable that captured
+// the gate call's output, for shape ⓒ below.
 function findUncapturedGateCall(codeLines) {
   let capturedVar = null;
   for (const line of codeLines) {
@@ -173,6 +186,17 @@ function findUncapturedGateCall(codeLines) {
 // `Write-Host` (writes to the host, not the pipeline), `$null = ...`, and
 // `| Out-Null` are void/discarding forms and stay OK. Returns a BROKEN
 // verdict if a leak is found, else null.
+//
+// KNOWN DIAGNOSTIC GAP (review r2 forms 5-9, not fixed here -- see module
+// header): this only tracks the LAST captured variable name, so a leak of
+// an earlier captured variable (form 5) is missed; `-InputObject` (form 6),
+// a parenthesized bare expression (form 7), `& (Get-Command node)` (form
+// 8), and the case-insensitive `$Node` variant (form 9) are not recognized
+// either. These are NOT patched, on purpose -- wrapper-shape-3's judgment
+// is that patching individual notations is the losing strategy review r2
+// demonstrated; the fingerprint check (judgeSeatProofWrapperCanonical) is
+// what actually closes all nine, regardless of this function's blind
+// spots. This function stays only as an explanatory diagnostic.
 function findLeakedCapturedOutput(codeLines, capturedVar) {
   if (!capturedVar) return null;
   const leakWriteRe = new RegExp(
@@ -194,6 +218,7 @@ function findLeakedCapturedOutput(codeLines, capturedVar) {
 
 // Judges a single function body's code lines. Never sees whether other
 // definitions of the same function exist -- that's the caller's job.
+// DIAGNOSTIC ONLY as of wrapper-shape-3 -- see module header.
 function judgeFunctionBody(codeLines) {
   const { broken: uncapturedBroken, capturedVar } =
     findUncapturedGateCall(codeLines);
@@ -206,7 +231,7 @@ function judgeFunctionBody(codeLines) {
   // traceably an exit code -- either `$LASTEXITCODE` directly, or a
   // variable whose last assignment before the return is exactly
   // `$LASTEXITCODE`. Anything else means the function's return value isn't
-  // provably a bare exit code (fail-closed: unknown shape -> BROKEN).
+  // provably a bare exit code.
   const last = codeLines[codeLines.length - 1];
   const returnMatch = last ? RETURN_RE.exec(last) : null;
   if (!returnMatch) {
@@ -243,14 +268,14 @@ function judgeFunctionBody(codeLines) {
   return { verdict: "OK" };
 }
 
-// Pure judge: given the wrapper script's full text, decides whether
-// `Invoke-SeatProofGate` can only ever return a bare exit code, or whether
-// it has a shape that can leak extra output into its return value, return
-// something that isn't traceably an exit code, or exist as more than one
-// definition (PowerShell keeps only the LAST one live -- a judge that only
-// inspected the first would be blind to exactly review r1's P1-2 case).
-// I/O 0, global state 0, `process.platform` unused -- takes script text in,
-// returns a verdict out, nothing else.
+// Pure DIAGNOSTIC judge (wrapper-shape-3: demoted from verdict authority --
+// see module header): given the wrapper script's full text, explains
+// whether its recognized shape looks safe or not. This function's OK does
+// NOT mean the wrapper is safe (review r2 proved 6 notations it misses);
+// its BROKEN is useful only to explain *why* a fingerprint mismatch
+// happened when the mismatch is one of the two forms this function does
+// still recognize (forms 1-3, plus the always-checked shape ⓑ/ⓓ). The
+// actual pass/fail decision is judgeSeatProofWrapperCanonical, always.
 export function judgeSeatProofWrapperShape(scriptText) {
   const text = normalizeNewlines(scriptText);
   const bodies = extractAllFunctionBodies(text);
@@ -291,10 +316,99 @@ export function judgeSeatProofWrapperShape(scriptText) {
   return judgments[0];
 }
 
+// Computes the fingerprint of the LIVE definition -- PowerShell keeps only
+// the LAST `function Invoke-SeatProofGate` definition when more than one
+// exists, so that is the one whose behavior actually matters and the one
+// this hashes. Normalization is CRLF->LF only (see
+// seat-proof-wrapper-canonical.json's "normalization" field for why it is
+// kept this narrow). Returns `{ sha256, bodyCount }` on success, or a
+// BROKEN verdict object (via the `error` field) if no function was found or
+// its braces never balanced.
+export function computeCanonicalFingerprint(scriptText) {
+  const text = normalizeNewlines(scriptText);
+  const bodies = extractAllFunctionBodies(text);
+  if (bodies.length === 0) {
+    return {
+      error: {
+        verdict: "BROKEN",
+        reasonCode: "FUNCTION_NOT_FOUND",
+        detail: `function ${FUNCTION_NAME} not found (or braces unbalanced)`,
+      },
+    };
+  }
+  const liveBody = bodies[bodies.length - 1];
+  if (liveBody === null) {
+    return {
+      error: {
+        verdict: "BROKEN",
+        reasonCode: "FUNCTION_NOT_FOUND",
+        detail: "braces unbalanced",
+      },
+    };
+  }
+  // node:crypto is imported lazily (module-scope top-level await is
+  // avoided so this file stays importable in non-async contexts) -- see
+  // call sites below, both of which are already async/CLI paths.
+  return { liveBody, bodyCount: bodies.length };
+}
+
+async function sha256Hex(text) {
+  const { createHash } = await import("node:crypto");
+  return createHash("sha256").update(text, "utf8").digest("hex");
+}
+
+// PRIMARY VERDICT (wrapper-shape-3): the wrapper's live
+// `Invoke-SeatProofGate` body must byte-match (after CRLF->LF
+// normalization) the pinned canonical fingerprint. A match is OK; anything
+// else -- a recognized-unsafe shape, an unrecognized-but-actually-unsafe
+// shape (all nine review r1/r2 bypass forms), or a legitimate-but-
+// unreviewed edit -- is BROKEN/CANONICAL_MISMATCH. There is no third
+// option and no "shape looked fine so let it through" escape hatch: shape
+// is diagnostic only (see judgeSeatProofWrapperShape above).
+//
+// `canonical` must be `{ sha256: "<hex>" }` (see
+// seat-proof-wrapper-canonical.json). A missing/malformed canonical
+// argument is itself fail-closed BROKEN -- this checker refuses to fall
+// back to "no fingerprint pinned, so anything passes."
+export async function judgeSeatProofWrapperCanonical(scriptText, canonical) {
+  if (!canonical || typeof canonical.sha256 !== "string" || !canonical.sha256) {
+    return {
+      verdict: "BROKEN",
+      reasonCode: "CANONICAL_MISSING",
+      detail: "no canonical fingerprint (sha256) supplied to compare against",
+    };
+  }
+
+  const fp = computeCanonicalFingerprint(scriptText);
+  if (fp.error) return fp.error;
+
+  const actualSha256 = await sha256Hex(fp.liveBody);
+  if (actualSha256 !== canonical.sha256) {
+    return {
+      verdict: "BROKEN",
+      reasonCode: "CANONICAL_MISMATCH",
+      detail: `expected sha256=${canonical.sha256} actual sha256=${actualSha256} (live definition is the LAST of ${fp.bodyCount} found)`,
+    };
+  }
+  return { verdict: "OK" };
+}
+
+// Combined entry point: primary verdict (fingerprint) plus a diagnostic
+// field (shape) that never overrides it. Callers that only need pass/fail
+// should read `.verdict`/`.reasonCode`; `.diagnostic` exists purely to
+// help a human understand *why* a CANONICAL_MISMATCH happened when the
+// mismatch happens to be a shape this checker's regexes still recognize.
+export async function judgeSeatProofWrapper(scriptText, canonical) {
+  const primary = await judgeSeatProofWrapperCanonical(scriptText, canonical);
+  const diagnostic = judgeSeatProofWrapperShape(scriptText);
+  return { ...primary, diagnostic };
+}
+
 function parseArgs(argv) {
   const out = {};
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === "--script") out.script = argv[++i];
+    else if (argv[i] === "--canonical") out.canonical = argv[++i];
   }
   return out;
 }
@@ -306,13 +420,23 @@ const invokedDirectly =
     .endsWith("scripts/check/seat-proof-wrapper-shape.mjs");
 if (invokedDirectly) {
   const { readFileSync } = await import("node:fs");
+  const { fileURLToPath } = await import("node:url");
+  const { dirname, join } = await import("node:path");
+
   const args = parseArgs(process.argv.slice(2));
   if (!args.script) {
     console.error(
-      "usage: node seat-proof-wrapper-shape.mjs --script <path-to-dispatch-worker.ps1>",
+      "usage: node seat-proof-wrapper-shape.mjs --script <path-to-dispatch-worker.ps1> [--canonical <path-to-canonical.json>]",
     );
     process.exit(2);
   }
+
+  const canonicalPath =
+    args.canonical ??
+    join(
+      dirname(fileURLToPath(import.meta.url)),
+      "seat-proof-wrapper-canonical.json",
+    );
 
   let scriptText;
   try {
@@ -324,7 +448,28 @@ if (invokedDirectly) {
     process.exit(2);
   }
 
-  const result = judgeSeatProofWrapperShape(scriptText);
+  let canonical;
+  try {
+    canonical = JSON.parse(readFileSync(canonicalPath, "utf8"));
+  } catch (err) {
+    // Fail-closed (§3 item 6): a missing/unreadable canonical file must
+    // never be silently treated as "no fingerprint required."
+    console.log(`WRAPPER_SHAPE: BROKEN reason=CANONICAL_FILE_UNREADABLE`);
+    console.error(
+      `  detail: failed to read/parse --canonical file '${canonicalPath}': ${err.message}`,
+    );
+    process.exit(2);
+  }
+
+  const result = await judgeSeatProofWrapper(scriptText, canonical);
+  if (result.diagnostic) {
+    const d = result.diagnostic;
+    console.log(
+      d.verdict === "OK"
+        ? "WRAPPER_SHAPE_DIAGNOSTIC: OK (shape recognized as safe -- informational only, not the verdict)"
+        : `WRAPPER_SHAPE_DIAGNOSTIC: BROKEN reason=${d.reasonCode} (informational only, not the verdict)`,
+    );
+  }
   if (result.verdict === "OK") {
     console.log("WRAPPER_SHAPE: OK");
     process.exit(0);

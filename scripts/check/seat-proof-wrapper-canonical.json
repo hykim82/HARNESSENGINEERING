@@ -1,0 +1,15 @@
+{
+  "functionName": "Invoke-SeatProofGate",
+  "sha256": "71d1f630029037d6aad5b991b07a520a1ac18b55bf8cb9f104ae0dc15de065ae",
+  "measuredAt": "2026-08-19 23:22:18 KST",
+  "measuredFrom": "D:\\문서관리\\하네스-관제실\\dispatch-worker.ps1 (읽기 전용, HYK-323-wrapper-shape-3 라운드가 §0 비타협2 \"읽기 허용\"으로 직접 읽어 실측)",
+  "wholeFileSha256AtMeasurement": "8b1d717688d14f93ad31df87a1a441951a01830a946c2f354940c733a6722b58",
+  "basis": "docs/control-room-patches/HYK-299-dispatch-worker-seat-proof.md의 HYK-323절이 기록한 \"적용 후\" 전체 파일 지문과 동일 -- 이 라운드가 새로 관찰한 시점까지 관제실 파일이 그 비상 직수리 이후 변경되지 않았다는 뜻이다. 함수 본문(위 sha256)은 이 전체 파일 지문에서 scripts/check/seat-proof-wrapper-shape.mjs의 extractAllFunctionBodies와 동일한 브레이스-깊이 카운팅으로 `function Invoke-SeatProofGate([string]$dispatchId) { ... }`의 여는/닫는 중괄호 사이 텍스트만 잘라 측정했다.",
+  "normalization": "함수 본문 문자열에 CRLF(\\r\\n) -> LF(\\n) 치환만 적용한 뒤 SHA-256을 뜬다. 그 외 정규화(들여쓰기 통일, 트리밍, 대소문자 통일 등) 없음 -- 정규화가 넓어질수록 '지문이 알아보지 못하는 안전한 새 형태'가 늘어나 다시 표기법 추격전이 재발하므로, 최소로 고정한다.",
+  "changeProcedure": [
+    "관제실 dispatch-worker.ps1의 Invoke-SeatProofGate 함수 본문을 정당하게 바꾸는 경우에만 이 파일을 갱신한다 (HYK-306 방식 준용):",
+    "1) 바뀐 함수 본문을 이 파일과 동일한 방식(브레이스 깊이 카운팅 추출 + CRLF->LF 정규화)으로 다시 측정해 새 sha256을 얻는다.",
+    "2) 이 파일의 sha256/measuredAt/measuredFrom/wholeFileSha256AtMeasurement를 새 값으로 갱신하고, basis에 '왜 바뀌었는지'(이슈 번호·사유)를 적는다.",
+    "3) 이 갱신은 반드시 검토 라운드를 거친다 -- 지문 갱신 = 사람이 한 번 본다. 검토 없이 지문만 바꿔 판정을 통과시키는 것은 이 검사기의 존재 이유(fail-closed)를 무력화한다."
+  ]
+}
