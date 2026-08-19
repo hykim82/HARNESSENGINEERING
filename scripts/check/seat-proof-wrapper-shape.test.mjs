@@ -1,7 +1,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import {
+  mkdtempSync,
+  writeFileSync,
+  rmSync,
+  existsSync,
+  readFileSync,
+} from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -10,6 +16,12 @@ import { judgeSeatProofWrapperShape } from "./seat-proof-wrapper-shape.mjs";
 const SCRIPT_PATH = fileURLToPath(
   new URL("./seat-proof-wrapper-shape.mjs", import.meta.url),
 );
+
+// review r1 §2-4 P2: this checker's own local anchor for the live control
+// room file. Not a fixture -- read at test time, so it always reflects
+// whatever the live wrapper currently says (see the live-file test below).
+const CONTROL_ROOM_SCRIPT_PATH =
+  "D:\\문서관리\\하네스-관제실\\dispatch-worker.ps1";
 
 function withFixtureDir(fn) {
   const dir = mkdtempSync(join(tmpdir(), "seat-proof-wrapper-shape-test-"));
@@ -35,11 +47,16 @@ function runCli(args) {
   }
 }
 
-// 실물 문면 — 2026-08-19 관제실 커밋 00f78f0의 부모(수리 전) `dispatch-worker.ps1`
-// 380~405행을 `git show 00f78f0^:dispatch-worker.ps1`으로 직접 떠서 그대로 옮긴
-// 것이다(합성 아님). 이 텍스트가 바로 HYK-323 §1의 «오늘의 결함» 문면이다:
-// `& node ...`의 stdout이 변수에 담기지 않고 그대로 `return $LASTEXITCODE`로
-// 이어져, 함수가 실제로는 [stdout문장, exit코드] 2요소 배열을 반환했다.
+// ⚠️큐레이트된 사본(review r1 §2-4 P2 정리, 가안) — 2026-08-19 관제실 커밋
+// 00f78f0의 부모(수리 전) `dispatch-worker.ps1` 380~405행을
+// `git show 00f78f0^:dispatch-worker.ps1`으로 뜬 시점의 스냅샷을 그대로 옮긴
+// 것이다(합성 아님. 다만 그 시점 이후 관제실이 바뀌었어도 이 문자열은 갱신되지
+// 않는다 — «지금의 실물과 바이트 동일»이라는 주장은 하지 않는다). 이 텍스트가
+// 바로 HYK-323 §1의 «오늘의 결함» 문면이다: `& node ...`의 stdout이 변수에
+// 담기지 않고 그대로 `return $LASTEXITCODE`로 이어져, 함수가 실제로는
+// [stdout문장, exit코드] 2요소 배열을 반환했다. 지금 살아있는 관제실 파일과의
+// 실제 대조는 fixture가 아니라 아래 "실물: 현재 관제실..." 시험이 CLI 1회
+// 로컬 실행(로컬 앵커)으로 담당한다.
 const BROKEN_FUNCTION_TEXT = [
   "function Invoke-SeatProofGate([string]$dispatchId) {",
   '  $gateCliPath = Join-Path $Worktree "scripts/relay/dispatch-worker-seat-proof-gate.mjs"',
@@ -67,11 +84,14 @@ const BROKEN_FUNCTION_TEXT = [
   "}",
 ].join("\n");
 
-// 실물 문면 — 지금 라이브인 관제실 `dispatch-worker.ps1`을 이 라운드에서 직접
-// 읽어(§0 비타협2 «읽기 허용») 그대로 옮긴 것이다(합성 아님). 2026-08-19 19:11
-// 비상 직수리(커밋 00f78f0) 이후의 현재 수리된 문면이며, docs/control-room-
-// patches/HYK-299-dispatch-worker-seat-proof.md HYK-323절의 발췌와도 바이트
-// 단위로 동일함을 대조했다.
+// ⚠️큐레이트된 사본(review r1 §2-4 P2 정리, 가안) — HYK-323-wrapper-shape-1
+// 라운드에서 그 시점의 라이브 관제실 `dispatch-worker.ps1`을 직접 읽어(§0
+// 비타협2 «읽기 허용») 그대로 옮긴 스냅샷이다(합성 아님). 그 시점 이후
+// 관제실이 다시 바뀌었을 수 있으므로(review r1 실측: fixture 2,129 B vs 그때의
+// 실물 2,633 B로 이미 어긋나 있었다) «지금의 실물과 바이트 동일»이라는 주장은
+// 하지 않는다 — 이 fixture는 "이 정형의 OK 판정"을 고정해 두는 단위 시험용일
+// 뿐이다. 지금 살아있는 파일과의 실제 대조는 아래 "실물: 현재 관제실..."
+// 시험이 담당한다.
 const FIXED_FUNCTION_TEXT = [
   "function Invoke-SeatProofGate([string]$dispatchId) {",
   '  $gateCliPath = Join-Path $Worktree "scripts/relay/dispatch-worker-seat-proof-gate.mjs"',
@@ -204,4 +224,230 @@ test("CLI: 존재하지 않는 파일 -> exit 2 (fail-closed)", () => {
 
 test("BROKEN/FIXED 실물 fixture가 실제로 서로 다른 텍스트임을 확인 (동어반복 방지)", () => {
   assert.notEqual(BROKEN_FUNCTION_TEXT, FIXED_FUNCTION_TEXT);
+});
+
+// ---------------------------------------------------------------------
+// review r1 P1 재현 시험 (§3) -- 검토자가 뚫은 세 문면이 이제 BROKEN이어야
+// 한다.
+// ---------------------------------------------------------------------
+
+// P1-1: 캡처했다가 `Write-Output`으로 다시 흘려보내는 문면. return 자체는
+// 여전히 `$LASTEXITCODE`를 정직하게 반환하지만(shape ⓑ만 보면 OK로 잘못
+// 판정됐던 문면), 함수의 실제 파이프라인 출력에는 게이트 CLI의 stdout까지
+// 섞여 나간다 -- shape ⓒ가 이걸 잡아야 한다.
+const LEAK_VIA_WRITE_OUTPUT_TEXT = [
+  "function Invoke-SeatProofGate([string]$dispatchId) {",
+  '  $gateCliPath = Join-Path $Worktree "scripts/relay/dispatch-worker-seat-proof-gate.mjs"',
+  "  $gateOut = & node $gateCliPath --dispatch-show $dsShowPath 2>&1",
+  "  Write-Output $gateOut",
+  "  return $LASTEXITCODE",
+  "}",
+].join("\n");
+
+test("P1-1 재현a: Write-Output으로 캡처 변수를 되흘리면 -> BROKEN + LEAKED_CAPTURED_OUTPUT", () => {
+  const result = judgeSeatProofWrapperShape(LEAK_VIA_WRITE_OUTPUT_TEXT);
+  assert.equal(result.verdict, "BROKEN");
+  assert.equal(result.reasonCode, "LEAKED_CAPTURED_OUTPUT");
+});
+
+// P1-1 변형: `echo`는 `Write-Output`의 별칭이다 -- 별칭도 잡혀야 한다.
+const LEAK_VIA_ECHO_ALIAS_TEXT = [
+  "function Invoke-SeatProofGate([string]$dispatchId) {",
+  '  $gateCliPath = Join-Path $Worktree "scripts/relay/dispatch-worker-seat-proof-gate.mjs"',
+  "  $gateOut = & node $gateCliPath --dispatch-show $dsShowPath 2>&1",
+  "  echo $gateOut",
+  "  return $LASTEXITCODE",
+  "}",
+].join("\n");
+
+test("P1-1 재현b: echo(Write-Output 별칭)로 캡처 변수를 되흘리면 -> BROKEN + LEAKED_CAPTURED_OUTPUT", () => {
+  const result = judgeSeatProofWrapperShape(LEAK_VIA_ECHO_ALIAS_TEXT);
+  assert.equal(result.verdict, "BROKEN");
+  assert.equal(result.reasonCode, "LEAKED_CAPTURED_OUTPUT");
+});
+
+// P1-1 변형: 캡처 변수를 단독 표현식으로 둔 줄 -- PowerShell에서 이 자체가
+// 출력문이다.
+const LEAK_VIA_BARE_EXPRESSION_TEXT = [
+  "function Invoke-SeatProofGate([string]$dispatchId) {",
+  '  $gateCliPath = Join-Path $Worktree "scripts/relay/dispatch-worker-seat-proof-gate.mjs"',
+  "  $gateOut = & node $gateCliPath --dispatch-show $dsShowPath 2>&1",
+  "  $gateExit = $LASTEXITCODE",
+  "  $gateOut",
+  "  return $gateExit",
+  "}",
+].join("\n");
+
+test("P1-1 재현c: 캡처 변수를 단독 표현식 줄로 두면 -> BROKEN + LEAKED_CAPTURED_OUTPUT", () => {
+  const result = judgeSeatProofWrapperShape(LEAK_VIA_BARE_EXPRESSION_TEXT);
+  assert.equal(result.verdict, "BROKEN");
+  assert.equal(result.reasonCode, "LEAKED_CAPTURED_OUTPUT");
+});
+
+// P1-2: 수리된 정의 뒤에 같은 이름의 미캡처 결함 정의를 두 번 선언 --
+// PowerShell은 마지막 정의만 살아있는데, 첫 정의만 보던 옛 판정기는 이걸
+// 놓쳤다.
+const DUPLICATE_DEFINITION_TEXT = [
+  FIXED_FUNCTION_TEXT,
+  "",
+  "function Invoke-SeatProofGate([string]$dispatchId) {",
+  '  $gateCliPath = Join-Path $Worktree "scripts/relay/dispatch-worker-seat-proof-gate.mjs"',
+  "  & node $gateCliPath --dispatch-show $dsShowPath",
+  "  return $LASTEXITCODE",
+  "}",
+].join("\n");
+
+test("P1-2 재현: 수리본 뒤에 미캡처 결함본을 중복 선언하면 -> BROKEN (첫 정의만 보지 않는다)", () => {
+  const result = judgeSeatProofWrapperShape(DUPLICATE_DEFINITION_TEXT);
+  assert.equal(result.verdict, "BROKEN");
+  assert.match(result.detail, /MULTIPLE_DEFINITIONS: 2 definitions/);
+});
+
+test("P1-2 재현b: 개별 판정이 전부 OK인 중복 정의도 -> BROKEN (모호성 자체가 결함)", () => {
+  const bothOkDuplicate = [FIXED_FUNCTION_TEXT, "", FIXED_FUNCTION_TEXT].join(
+    "\n",
+  );
+  const result = judgeSeatProofWrapperShape(bothOkDuplicate);
+  assert.equal(result.verdict, "BROKEN");
+  assert.equal(result.reasonCode, "MULTIPLE_DEFINITIONS");
+  assert.match(result.detail, /MULTIPLE_DEFINITIONS: 2 definitions/);
+});
+
+// P1-3: 게이트 CLI 호출을 배열 splatting으로 인자를 넘기면, 옛 정규식
+// (`& node $gateCliPath` 리터럴 토큰열)은 이 호출 자체를 놓쳐 OK로
+// 오판했다.
+const SPLATTED_UNCAPTURED_CALL_TEXT = [
+  "function Invoke-SeatProofGate([string]$dispatchId) {",
+  '  $gateCliPath = Join-Path $Worktree "scripts/relay/dispatch-worker-seat-proof-gate.mjs"',
+  '  $nodeArgs = @($gateCliPath, "--dispatch-show", $dsShowPath)',
+  "  & node @nodeArgs",
+  "  return $LASTEXITCODE",
+  "}",
+].join("\n");
+
+test("P1-3 재현: splatting(@nodeArgs)으로 인자를 넘긴 미캡처 호출 -> BROKEN + UNCAPTURED_GATE_OUTPUT", () => {
+  const result = judgeSeatProofWrapperShape(SPLATTED_UNCAPTURED_CALL_TEXT);
+  assert.equal(result.verdict, "BROKEN");
+  assert.equal(result.reasonCode, "UNCAPTURED_GATE_OUTPUT");
+});
+
+// P1-3 변형: `$node` 변수를 호출 대상으로 쓰는 표기도 놓치면 안 된다.
+const NODE_VAR_UNCAPTURED_CALL_TEXT = [
+  "function Invoke-SeatProofGate([string]$dispatchId) {",
+  '  $gateCliPath = Join-Path $Worktree "scripts/relay/dispatch-worker-seat-proof-gate.mjs"',
+  "  & $node $gateCliPath --dispatch-show $dsShowPath",
+  "  return $LASTEXITCODE",
+  "}",
+].join("\n");
+
+test("P1-3 재현b: `& $node ...` 변수 호출 표기의 미캡처도 -> BROKEN + UNCAPTURED_GATE_OUTPUT", () => {
+  const result = judgeSeatProofWrapperShape(NODE_VAR_UNCAPTURED_CALL_TEXT);
+  assert.equal(result.verdict, "BROKEN");
+  assert.equal(result.reasonCode, "UNCAPTURED_GATE_OUTPUT");
+});
+
+// P1-3 변형a: 백틱 줄바꿈 이어쓰기로 호출이 여러 줄에 걸쳐도 미캡처는
+// 여전히 잡혀야 한다 -- 다만 이 표기는 첫 물리 줄에 이미 `& node`가 있어
+// 줄 합치기(join) 없이도 원래 잡힌다(참고용, §4 변이 검증에서 join을
+// 무력화해도 이 시험만은 GREEN으로 남는 게 정상임을 확인했다).
+const BACKTICK_CONTINUED_UNCAPTURED_CALL_TEXT = [
+  "function Invoke-SeatProofGate([string]$dispatchId) {",
+  '  $gateCliPath = Join-Path $Worktree "scripts/relay/dispatch-worker-seat-proof-gate.mjs"',
+  "  & node $gateCliPath `",
+  "    --dispatch-show $dsShowPath `",
+  "    --worktree-path (Norm $Worktree)",
+  "  return $LASTEXITCODE",
+  "}",
+].join("\n");
+
+test("P1-3 재현c: 백틱 줄바꿈 이어쓰기로 나뉜 미캡처 호출도 -> BROKEN + UNCAPTURED_GATE_OUTPUT", () => {
+  const result = judgeSeatProofWrapperShape(
+    BACKTICK_CONTINUED_UNCAPTURED_CALL_TEXT,
+  );
+  assert.equal(result.verdict, "BROKEN");
+  assert.equal(result.reasonCode, "UNCAPTURED_GATE_OUTPUT");
+});
+
+// P1-3 변형b: 줄 합치기(join) 자체에 실제로 의존하는 시험 -- `| Out-Null`
+// (안전 폐기 표기)이 첫 줄이 아니라 이어지는 백틱 연속 줄에 있으면, 줄을
+// 합치지 않고서는 그 안전 표기를 볼 수 없어 오탐(BROKEN)이 난다. §4 변이
+// 검증에서 join을 무력화하면 이 시험이 RED가 되는 것으로 join 로직의
+// 존재 이유를 직접 검증했다.
+const BACKTICK_CONTINUED_SAFE_OUT_NULL_TEXT = [
+  "function Invoke-SeatProofGate([string]$dispatchId) {",
+  '  $gateCliPath = Join-Path $Worktree "scripts/relay/dispatch-worker-seat-proof-gate.mjs"',
+  "  & node $gateCliPath `",
+  "    --dispatch-show $dsShowPath | Out-Null",
+  "  return $LASTEXITCODE",
+  "}",
+].join("\n");
+
+test("P1-3 재현d: 백틱 이어쓰기 뒷줄의 | Out-Null 도 줄 합치기 덕에 안전 표기로 인식되어 OK", () => {
+  const result = judgeSeatProofWrapperShape(
+    BACKTICK_CONTINUED_SAFE_OUT_NULL_TEXT,
+  );
+  assert.deepEqual(result, { verdict: "OK" });
+});
+
+// ---------------------------------------------------------------------
+// 안전 표기 대조군 (§2-2·§3) -- 과잉 차단(false positive) 0을 확인한다.
+// ---------------------------------------------------------------------
+
+const SAFE_WRITE_HOST_TEXT = [
+  "function Invoke-SeatProofGate([string]$dispatchId) {",
+  '  $gateCliPath = Join-Path $Worktree "scripts/relay/dispatch-worker-seat-proof-gate.mjs"',
+  "  $gateOut = & node $gateCliPath --dispatch-show $dsShowPath 2>&1",
+  "  $gateExit = $LASTEXITCODE",
+  '  foreach ($line in @($gateOut)) { Write-Host "      $line" }',
+  "  return $gateExit",
+  "}",
+].join("\n");
+
+test("안전 표기a: Write-Host로 캡처 변수를 쓰는 것은 그대로 OK", () => {
+  const result = judgeSeatProofWrapperShape(SAFE_WRITE_HOST_TEXT);
+  assert.deepEqual(result, { verdict: "OK" });
+});
+
+const SAFE_NULL_ASSIGN_TEXT = [
+  "function Invoke-SeatProofGate([string]$dispatchId) {",
+  '  $gateCliPath = Join-Path $Worktree "scripts/relay/dispatch-worker-seat-proof-gate.mjs"',
+  "  $null = & node $gateCliPath --dispatch-show $dsShowPath 2>&1",
+  "  return $LASTEXITCODE",
+  "}",
+].join("\n");
+
+test("안전 표기b: $null = ... 으로 게이트 호출 출력을 버리는 것은 그대로 OK", () => {
+  const result = judgeSeatProofWrapperShape(SAFE_NULL_ASSIGN_TEXT);
+  assert.deepEqual(result, { verdict: "OK" });
+});
+
+const SAFE_OUT_NULL_PIPE_TEXT = [
+  "function Invoke-SeatProofGate([string]$dispatchId) {",
+  '  $gateCliPath = Join-Path $Worktree "scripts/relay/dispatch-worker-seat-proof-gate.mjs"',
+  "  & node $gateCliPath --dispatch-show $dsShowPath | Out-Null",
+  "  return $LASTEXITCODE",
+  "}",
+].join("\n");
+
+test("안전 표기c: | Out-Null 로 게이트 호출 출력을 버리는 것은 그대로 OK", () => {
+  const result = judgeSeatProofWrapperShape(SAFE_OUT_NULL_PIPE_TEXT);
+  assert.deepEqual(result, { verdict: "OK" });
+});
+
+// ---------------------------------------------------------------------
+// 실물 (§3 항목5 · §2-4 P2 나안 부분 적용) -- 로컬에 관제실 경로가 있으면
+// 지금 살아있는 파일 자체를 넣어 회귀 0을 확인한다. CI에는 이 경로가 없으므로
+// (§2-3 정직 한계) 조용히 통과가 아니라 명시 사유와 함께 skip한다.
+// ---------------------------------------------------------------------
+
+test("실물: 현재 관제실 dispatch-worker.ps1이 있으면 OK 유지(회귀 0); 없으면(CI) 사유와 함께 skip", (t) => {
+  if (!existsSync(CONTROL_ROOM_SCRIPT_PATH)) {
+    t.skip(
+      `SKIP_REASON: control room path not present in this environment (expected on CI) -- ${CONTROL_ROOM_SCRIPT_PATH}`,
+    );
+    return;
+  }
+  const liveText = readFileSync(CONTROL_ROOM_SCRIPT_PATH, "utf8");
+  const result = judgeSeatProofWrapperShape(liveText);
+  assert.deepEqual(result, { verdict: "OK" });
 });
