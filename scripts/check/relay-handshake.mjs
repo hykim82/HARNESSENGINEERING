@@ -950,7 +950,7 @@ function runCompletionSideEffects({
   // try/catch-wrapped subprocess spawn, never a static import, so the 1R
   // isolated-fixture failure this design avoids stays avoided -- see that
   // function's own header).
-  const admissionReturned = spawnAdmissionCompletion(taskId);
+  const admissionReturned = spawnAdmissionCompletion(taskId, harnessDir);
 
   // HYK-244 2R-a §2 조각2: the moment every above effect's OWN outcome is
   // known (never before -- §1 실측: 이 셋은 실패해도 로그만 남기고 위
@@ -1069,13 +1069,23 @@ export function wasAdmissionCompletionAttempted(stdout) {
   return !String(stdout ?? "").includes("not attempted");
 }
 
-function spawnAdmissionCompletion(taskId) {
+function spawnAdmissionCompletion(taskId, harnessDir) {
   try {
     const adapterPath = join(
       dirname(fileURLToPath(new URL(import.meta.url))),
       "admission-completion-adapter.mjs",
     );
-    const out = execFileSync("node", [adapterPath, taskId], {
+    // HYK-312 §1: harnessDir is now forwarded so the adapter can tell
+    // whether the round directory actually being consumed lives inside a
+    // registered git worktree, instead of trusting THIS process's own cwd
+    // (see admission-completion-adapter.mjs's isInsideGitWorktree header for
+    // the incident this closes). Backward-compatible: an absent harnessDir
+    // omits the arg entirely, which the adapter treats exactly as before
+    // this round (execFileSync's args array rejects `undefined` elements).
+    const args = harnessDir
+      ? [adapterPath, taskId, harnessDir]
+      : [adapterPath, taskId];
+    const out = execFileSync("node", args, {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
     });

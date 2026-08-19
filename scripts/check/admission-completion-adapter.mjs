@@ -274,8 +274,63 @@ function persistentFallbackAllowed() {
   return !process.env.NODE_TEST_CONTEXT;
 }
 
-export function autoCompleteAdmission({ reservationId }) {
+// isInsideGitWorktree -- HYK-312 §1: the persistent-pointer fallback resolves
+// the ledger path via `mainRepoRoot()`, which is derived from THIS PROCESS'S
+// cwd, not from `harnessDir` (the round directory actually being consumed).
+// 2026-08-19 오전 실사고: ORCH ran the production CLI entry point
+// (`relay-handshake.mjs CODER <scratch-copy-of-.harness>`) from inside the
+// real repo checkout -- cwd resolved to the real repo, so the real pointer
+// file was found and the real global ledger got mutated, even though the
+// `.harness` actually being consumed was a plain filesystem copy outside any
+// git worktree. This function is the gate that catches exactly that shape:
+// "is the round directory the caller told us to consume itself inside SOME
+// git worktree" -- a plain `git rev-parse --is-inside-work-tree` run with
+// cwd=harnessDir. A scratch/temp copy (never `git init`-ed) fails this
+// immediately.
+// 정직 한계 (coder-task.md §1 원문 그대로): a deliberate SEPARATE git clone
+// used for an experiment still passes this check (it genuinely is inside a
+// worktree) -- this gate closes the "plain filesystem copy" shape the actual
+// incident took, not every conceivable isolation escape. Documented, not
+// silently swept under "fixed".
+function isInsideGitWorktree(dir) {
+  if (!existsSync(dir)) return false;
+  try {
+    const out = execSync("git rev-parse --is-inside-work-tree", {
+      cwd: dir,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+    return out === "true";
+  } catch {
+    return false;
+  }
+}
+
+export function autoCompleteAdmission({ reservationId, harnessDir }) {
   let ledgerPath = process.env.ADMISSION_LEDGER_PATH;
+  // HYK-312 §1: gate the persistent-pointer fallback below (never the
+  // explicit ADMISSION_LEDGER_PATH env path just above, which is this
+  // file's own "designed door", coder-task.md §4 ⓒ) behind a harnessDir
+  // isolation check, checked and returned BEFORE the pre-existing
+  // persistent-fallback block so that block's own source text (pinned
+  // byte-for-byte by admission-completion-persistent-source.test.mjs's ⓓ
+  // mutation target) stays untouched. `harnessDir` is optional/backward-
+  // compatible: callers that don't pass it (every pre-HYK-312 in-process
+  // caller/test) get the exact unchanged pre-HYK-312 behavior -- this is a
+  // strictly additive gate, not a stricter default.
+  if (
+    !ledgerPath &&
+    harnessDir &&
+    persistentFallbackAllowed() &&
+    !isInsideGitWorktree(harnessDir)
+  ) {
+    return {
+      attempted: false,
+      blocked: true,
+      reasonCode: "UNISOLATED_HARNESS_DIR",
+      reason: `admission-completion-adapter: refusing persistent-pointer fallback -- harnessDir '${harnessDir}' is not inside a registered git worktree (test/experiment consumption context without an explicit ADMISSION_LEDGER_PATH) -- see HYK-312`,
+    };
+  }
   let persistentLockPath = null;
   if (!ledgerPath && persistentFallbackAllowed()) {
     const persistent = resolvePersistentLedgerPaths();
@@ -337,11 +392,20 @@ if (
   const reservationId = process.argv[2];
   if (!reservationId) {
     console.error(
-      "usage: node admission-completion-adapter.mjs <reservationId>",
+      "usage: node admission-completion-adapter.mjs <reservationId> [harnessDir]",
     );
     process.exit(1);
   }
-  const outcome = autoCompleteAdmission({ reservationId });
+  const harnessDir = process.argv[3];
+  const outcome = autoCompleteAdmission({ reservationId, harnessDir });
+  // HYK-312 §1: a blocked persistent-fallback attempt is the one outcome
+  // shape that must NOT be treated like the pre-existing silent no-op below
+  // -- it is a refusal (거부), not "not attempted", so it gets its own
+  // nonzero exit + reason on stderr instead of exit 0 on stdout.
+  if (outcome.blocked) {
+    console.error(outcome.reason);
+    process.exit(1);
+  }
   if (!outcome.attempted) {
     console.log(
       "admission-completion-adapter: not attempted (ADMISSION_LEDGER_PATH unset)",
