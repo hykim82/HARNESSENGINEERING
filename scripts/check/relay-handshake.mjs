@@ -39,7 +39,15 @@ const TASK_ID_RE_G = /^task_id:\s*(\S+)/gim;
 // a distinct diagnosis for the latter case.
 const TASK_ID_ANYWHERE_RE = /task_id:\s*(\S+)/i;
 const DROPPED_AT_RE = /^dropped_at:\s*(.+)$/im;
-const DONE_RE = /^>>>\s*DONE:.*@\s*(.+?)\s*$/gim;
+// HYK-183: 결과 파일에 이 표지가 2개 이상이면 어느 것이 최종인지 결정할
+// 수 없으므로 조용히 하나를 고르지 않고 판정 불가로 멈춘다 (see the file
+// header above for the fuller rationale this constant shares with
+// TASK_ID_RE_G).
+// ⛔HYK-324/HYK-325: exported so finalize-done.mjs can reuse the EXACT same
+// "what counts as a well-formed DONE line" contract (coder-task.md §2-1's
+// explicit "재사용하라, 새 기준을 발명하지 마라") instead of inventing its
+// own copy that could silently drift from this one.
+export const DONE_RE = /^>>>\s*DONE:.*@\s*(.+?)\s*$/gim;
 // HYK-173-escalation-1: 결과 파일이 명시적으로 «막혔다»고 적을 수 있는
 // column-0 표지. `>>> DONE:` 관례를 그대로 재사용한다(같은 파일 자리에서
 // 같은 눈으로 찾을 수 있게). 이유 텍스트는 필수(빈 이유는 아래
@@ -73,6 +81,24 @@ const BLOCKED_RE = /^>>>[ \t]*(BLOCKED|NEEDS_INPUT):[ \t]*(\S.*?)[ \t]*$/gim;
 // 건드리지 않으므로(내부적으로 복제) 이 상수를 여러 곳에서 반복 호출해도
 // 안전하다.
 const BLOCKED_ANYWHERE_RE = />>>\s*(BLOCKED|NEEDS_INPUT)\b/gi;
+// HYK-325 §2-3: the non-column-0 meta line finalize-done.mjs appends right
+// after a `>>> DONE:` line it wrote itself (see that file's own
+// FINALIZE_DONE_MARKER_LINE). Presence is only ever used for a warning
+// (see warnIfMissingFinalizeDoneMarker below) -- absence never blocks
+// consumption.
+const DONE_STAMPED_BY_MARKER_RE = /^done_stamped_by:\s*finalize-done\s*$/im;
+
+// HYK-325 §2-3: best-effort, non-fatal, console-only -- deliberately does
+// NOT return a verdict (unlike every other resolve*/check* helper in this
+// file) because this signal must never change checkRelayHandshake's own
+// ok/reject decision (승격은 이번 범위 밖, coder-task.md §2-3).
+function warnIfMissingFinalizeDoneMarker(resultContent) {
+  if (!DONE_STAMPED_BY_MARKER_RE.test(resultContent)) {
+    console.error(
+      "relay-handshake: warning: DONE line has no finalize-done marker -- 손기입 가능성(HYK-325)",
+    );
+  }
+}
 
 function repoRoot() {
   try {
@@ -599,9 +625,13 @@ function resolveDroppedAt(taskContent, now) {
 // «값은 유효한 KST 시각으로 파싱됐지만 초가 없다»는 경우만 새로 거부하는
 // 것이 이번 조각의 정확한 범위다 -- 그래서 파싱 성공 직후, future-skew
 // 검사보다 먼저 이 확인을 끼워 넣는다(사유 문자열이 겹치지 않게).
+// HYK-244 2R-a: minute-precision timestamps can't distinguish two rounds
+// completed in the same minute -- seconds are required, not optional.
+// ⛔HYK-324/HYK-325: exported so finalize-done.mjs can reuse this exact
+// criterion (see DONE_RE's own export comment above -- same reason).
 const DONE_SECONDS_PRECISION_RE = /\d{2}:\d{2}:\d{2}/;
 
-function hasDoneSecondsPrecision(rawDoneAtText) {
+export function hasDoneSecondsPrecision(rawDoneAtText) {
   return DONE_SECONDS_PRECISION_RE.test(rawDoneAtText);
 }
 
@@ -618,13 +648,25 @@ function hasDoneSecondsPrecision(rawDoneAtText) {
 // rejects a DONE timestamp that lacks seconds precision, for the same
 // "reject loudly before the ok:true path" reason.
 // HYK-257-done-stamp-2 §2 범위1: called the MOMENT a well-formed '>>> DONE:'
-// line is found -- before any validity check (mislabel/future-skew) below,
+// line is found -- before the mislabel/future-skew validity checks below,
 // and on EVERY call (watch-result.mjs's watchResult polls checkRelayHandshake
 // repeatedly, see first-observation.mjs's own header for the real production
 // caller this closes the race against). Best-effort, non-fatal: a spawn
 // failure here must never block or alter checkRelayHandshake's own verdict
 // on its own (mirrors spawnAdmissionCompletion's house style exactly) --
 // treated as "no observation available" (rewritten:false), not as a reject.
+//
+// HYK-324 §2-2: "well-formed" now specifically means format-valid (parses
+// AND has seconds precision) -- see resolveDoneAt's call site below. This
+// function itself does not decide that; it only records whatever it is
+// asked to observe. A format-invalid DONE line is filtered out BEFORE
+// reaching this call (never observed at all) because it can never be
+// consumed anyway (checkRelayHandshake's own format checks reject it), so
+// pinning it as "first observed" would only block finalize-done's one-time
+// malformed-replace recovery path (HYK-324/HYK-325) without protecting
+// anything -- the HYK-257 race this function guards against is about a
+// FORMAT-VALID value being rewritten mid-flight, which is unaffected by
+// this change (see resolveDoneAt).
 //
 // HYK-257-done-stamp-3 §2 범위1 (2R 반려 수리): `taskId`/`droppedAt`은
 // 이제 별도 필드로 넘어간다 -- 2R처럼 `${taskId}::${droppedAt}`로 이어붙인
@@ -722,14 +764,48 @@ function resolveDoneAt(
     });
   }
   const doneMatch = resultDone.match;
+
+  // HYK-324 §2-2: format validity (parseable AND seconds-precision) is now
+  // checked FIRST, before the first-observation spawn below. A format-
+  // invalid DONE line can never be consumed regardless (checkRelayHandshake
+  // rejects it here, every time), so recording it as "first observed" would
+  // only block finalize-done's one-time malformed-replace recovery path,
+  // not protect anything -- see spawnObserveDoneLine's own header for why
+  // this is safe. When the format check fails, first observation is
+  // skipped entirely (never spawned) and the reason is surfaced on stderr
+  // so an operator watching the log sees why no observation was recorded.
+  const doneAt = parseKstTimestamp(doneMatch[1]);
+  if (!doneAt) {
+    console.error(
+      `relay-handshake: first-observation skipped: DONE line malformed (not parseable: '${doneMatch[1].trim()}') -- finalize-done 으로 1회 교체할 수 있다`,
+    );
+    return {
+      ok: false,
+      reason: `result DONE timestamp not parseable: '${doneMatch[1].trim()}' (need 'YYYY-MM-DD HH:MM:SS KST' format, e.g. '2026-08-17 05:22:47 KST' -- 앞으로는 ${fixToolHintFor(TIME_FIELD.RESULT_DONE_AT)} 로 찍어라)`,
+    };
+  }
+  if (!hasDoneSecondsPrecision(doneMatch[1])) {
+    console.error(
+      `relay-handshake: first-observation skipped: DONE line malformed (minute-precision, seconds required: '${doneMatch[1].trim()}') -- finalize-done 으로 1회 교체할 수 있다`,
+    );
+    return {
+      ok: false,
+      reason: `result DONE timestamp is minute-precision, seconds required: '${doneMatch[1].trim()}' (need YYYY-MM-DD HH:MM:SS KST -- HYK-244 2R-a: minute precision cannot distinguish same-minute rounds, and the "분 단위 거부" contract is fixed, not relaxable. 앞으로는 ${fixToolHintFor(TIME_FIELD.RESULT_DONE_AT)} 로 찍어라)`,
+    };
+  }
+
   // HYK-257-done-stamp-2 §2 범위1: record-then-compare happens here, BEFORE
-  // seconds-precision/mislabel/future-skew rejection can short-circuit --
-  // an intermediate rewrite (§2 범위1 실사례) must be observed even on a
-  // poll whose OWN value would independently fail one of those checks (the
-  // real incidents' first-observed value was itself a future/bad stamp,
-  // later self-corrected). The reject decision on `observation.rewritten`
-  // is only ACTED on at the final judged-ok:true moment in
+  // mislabel/future-skew rejection can short-circuit -- an intermediate
+  // rewrite (§2 범위1 실사례) must be observed even on a poll whose OWN
+  // value would independently fail one of those checks (the real
+  // incidents' first-observed value was itself a future/bad stamp, later
+  // self-corrected). The reject decision on `observation.rewritten` is
+  // only ACTED on at the final judged-ok:true moment in
   // checkRelayHandshake -- see that function's own use of this field.
+  // HYK-324 §2-2: this call site moved BELOW the format-validity checks
+  // above (was above them before this change) -- see this function's
+  // header comment for why that reordering is safe (HYK-257's protection
+  // is unaffected: it is about a format-VALID value rewritten mid-flight).
   //
   // HYK-257-done-stamp-3 §2 범위1 (2R 반려 수리): (taskId, droppedAt)을
   // 별도 필드로 first-observation.mjs에 넘긴다 -- 2R처럼 이어붙인 문자열
@@ -755,19 +831,6 @@ function resolveDoneAt(
           doneLineRaw: doneMatch[0],
         })
       : { rewritten: false };
-  const doneAt = parseKstTimestamp(doneMatch[1]);
-  if (!doneAt) {
-    return {
-      ok: false,
-      reason: `result DONE timestamp not parseable: '${doneMatch[1].trim()}' (need 'YYYY-MM-DD HH:MM:SS KST' format, e.g. '2026-08-17 05:22:47 KST' -- 앞으로는 ${fixToolHintFor(TIME_FIELD.RESULT_DONE_AT)} 로 찍어라)`,
-    };
-  }
-  if (!hasDoneSecondsPrecision(doneMatch[1])) {
-    return {
-      ok: false,
-      reason: `result DONE timestamp is minute-precision, seconds required: '${doneMatch[1].trim()}' (need YYYY-MM-DD HH:MM:SS KST -- HYK-244 2R-a: minute precision cannot distinguish same-minute rounds, and the "분 단위 거부" contract is fixed, not relaxable. 앞으로는 ${fixToolHintFor(TIME_FIELD.RESULT_DONE_AT)} 로 찍어라)`,
-    };
-  }
   const doneMislabel = checkTimezoneMislabel({
     candidateDate: doneAt,
     rawText: doneMatch[1],
@@ -1104,6 +1167,14 @@ export function checkRelayHandshake({
   });
   if (!doneResolved.ok) return doneResolved;
   const { doneAt, doneMatch, observation } = doneResolved;
+
+  // HYK-325 §2-3 (탐지, 거부 아님): a format-valid DONE line that finalize-
+  // done.mjs did NOT stamp (no `done_stamped_by: finalize-done` marker
+  // line) is very likely a hand-typed one -- warn so an operator watching
+  // the log has a signal, but do NOT block consumption on it (existing
+  // manual-edit / no-marker rounds must keep working; escalating this to a
+  // reject is a separate, out-of-scope decision -- see coder-task.md §2-3).
+  warnIfMissingFinalizeDoneMarker(resultContent);
 
   const rewriteOrStaleVerdict = checkRewriteAndStaleness({
     observation,
