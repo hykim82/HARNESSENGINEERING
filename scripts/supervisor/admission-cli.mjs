@@ -289,6 +289,22 @@ function cmdComplete(args) {
   return EXIT.OK;
 }
 
+// HYK-317 (coder-task.md §2-2): --live-seats 항목은 원장의 seat_key와 같은
+// 축(paneKey, `${tabId}:${leafId}`)이어야 한다. 오늘 밤 ORCH가 손으로
+// sweep을 돌리며 여기에 orca terminal handle(`term_...`) 목록을 넣어 진행
+// 중이던 좌석의 자리표가 회수된 실사고(coder-task §1)가 실제로 났다 --
+// 그 정확한 입력 모양을 여기서 거부한다(fail-closed: 조용히 도는 것보다
+// 멈추는 게 낫다).
+// ★정직 한계: 이 검사는 **모양만** 본다(handle 접두어 `term_`) -- "맞는
+// 좌석 목록인지"는 이 검사로 알 수 없다. 오늘 사고처럼 형식은 맞는데
+// (paneKey 모양인데) 목록 자체가 불완전한 경우는 여전히 못 잡는다.
+const HANDLE_SHAPE = /^term_/i;
+function findHandleShapedSeat(liveSeatKeys) {
+  return liveSeatKeys.find(
+    (k) => typeof k === "string" && HANDLE_SHAPE.test(k),
+  );
+}
+
 // sweep -- 비정상 종료 회수 (coder-task §2 "비정상 종료 SUSPECT·복구").
 // `--live-seats` is a JSON array of seat keys, caller-observed ground truth
 // (this CLI never queries `orca` itself -- I/O 0 discipline extended to "no
@@ -314,6 +330,15 @@ function cmdSweep(args) {
   } catch {
     console.error("sweep: --live-seats must be a JSON array of strings");
     return EXIT.USAGE;
+  }
+  if (Array.isArray(liveSeatKeys)) {
+    const badSeat = findHandleShapedSeat(liveSeatKeys);
+    if (badSeat) {
+      console.error(
+        `sweep: --live-seats contains a handle-shaped entry ('${badSeat}') -- pass paneKey values (tabId:leafId, matching the ledger's seat_key), not orca terminal handles (term_...); refusing to sweep with a mismatched-format seat list`,
+      );
+      return EXIT.USAGE;
+    }
   }
   const now = nowIso();
   const outcome = withLedgerLock(ledgerPath, lockPath, (readResult) => {

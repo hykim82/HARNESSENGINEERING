@@ -136,9 +136,11 @@ test("(a) POSITIVE: a dead seat's leftover ACTIVE reservation is recovered to CO
 test("(b) NEGATIVE (false-positive=0, 1/1 live-seat fixture): a live seat's in-progress reservation is untouched", () => {
   const { dir, ledger, lock } = tmpPaths();
   try {
+    // HYK-317: seat_key와 terminals 항목은 같은 축(paneKey, `${tabId}:
+    // ${leafId}`)이어야 한다 -- handle이 아니다.
     seedLedger(ledger, {
       r1: activeReservation({
-        seatKey: "live-seat",
+        seatKey: "tab-live:leaf-live",
         admittedAt: "2026-08-01T00:00:00.000Z",
       }),
     });
@@ -148,7 +150,12 @@ test("(b) NEGATIVE (false-positive=0, 1/1 live-seat fixture): a live seat's in-p
       staleAfterMs: 0,
       recoveryGraceMs: 0,
       now: "2026-08-01T02:00:00.000Z",
-      terminalListOverride: { ok: true, terminals: [{ handle: "live-seat" }] },
+      terminalListOverride: {
+        ok: true,
+        terminals: [
+          { handle: "term_live", tabId: "tab-live", leafId: "leaf-live" },
+        ],
+      },
     });
     assert.equal(result.ok, true);
     assert.deepEqual(result.changed, []);
@@ -166,9 +173,12 @@ test("(b) NEGATIVE (false-positive=0, 1/1 live-seat fixture): a live seat's in-p
 test("(c) FAIL-CLOSED: seat-query failure -> 0 recovered AND loud failure, distinguishable from a genuine silent-0 success", () => {
   const { dir, ledger, lock } = tmpPaths();
   try {
+    // HYK-317: seat_key는 paneKey 축(`${tabId}:${leafId}`)이다 -- "dead"/
+    // "seat" 두 필드가 이 값으로 합성된다(아래 genuinelyZero의 terminals
+    // 항목 참조).
     seedLedger(ledger, {
       r1: activeReservation({
-        seatKey: "dead-seat",
+        seatKey: "dead:seat",
         admittedAt: "2026-08-01T00:00:00.000Z",
       }),
     });
@@ -201,13 +211,18 @@ test("(c) FAIL-CLOSED: seat-query failure -> 0 recovered AND loud failure, disti
     );
 
     // 대조군: 진짜 «조용히 0건» -- 조회는 성공했고 마침 회수 대상이 없다.
+    // terminals의 tabId:leafId("dead:seat")가 원장의 seat_key와 같은
+    // paneKey로 조합돼 "살아있다"로 관측되므로 회수 대상이 없다.
     const genuinelyZero = runAdmissionSweepTrigger({
       ledgerPath: ledger,
       lockPath: lock,
       staleAfterMs: 0,
       recoveryGraceMs: 0,
       now: "2026-08-01T02:00:00.000Z",
-      terminalListOverride: { ok: true, terminals: [{ handle: "dead-seat" }] },
+      terminalListOverride: {
+        ok: true,
+        terminals: [{ handle: "term_dead", tabId: "dead", leafId: "seat" }],
+      },
     });
     assert.equal(
       genuinelyZero.ok,

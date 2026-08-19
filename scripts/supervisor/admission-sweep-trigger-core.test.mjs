@@ -27,23 +27,34 @@ const preStatus = execFileSync("git", ["status", "--porcelain"], {
   encoding: "utf8",
 });
 
-test("PROCEED: successful terminal list yields deduped, non-empty-string handles only (1/1 fixture)", () => {
+// HYK-317: liveSeatKeys는 원장의 seat_key와 같은 축(paneKey, `${tabId}:
+// ${leafId}`)이어야 한다 -- entry.handle이 아니다(수리 전 버그, coder-task
+// .md §1). 이 표본은 hyk185-seat-multi-2026-08-05-2136-sample.json 실측
+// terminals 배열과 같은 형태(handle/tabId/leafId 모두 원시 필드로 공존)를
+// 쓴다.
+test("PROCEED: successful terminal list yields deduped paneKeys (tabId:leafId), NOT handles (1/1 fixture)", () => {
   const result = judgeSweepTrigger({
     terminalList: {
       ok: true,
       terminals: [
-        { handle: "seat-a" },
-        { handle: "seat-b" },
-        { handle: "seat-a" }, // duplicate -- must not double-count
-        { handle: "" }, // empty string -- must be dropped
-        { notHandle: "x" }, // missing handle -- must be dropped
+        { handle: "term_aaa", tabId: "tab-1", leafId: "leaf-1" },
+        { handle: "term_bbb", tabId: "tab-2", leafId: "leaf-2" },
+        { handle: "term_aaa", tabId: "tab-1", leafId: "leaf-1" }, // duplicate pane -- must not double-count
+        { handle: "term_ccc", tabId: "", leafId: "leaf-3" }, // empty tabId -- must be dropped
+        { handle: "term_ddd", leafId: "leaf-4" }, // missing tabId -- must be dropped
+        { handle: "term_eee", tabId: "tab-5" }, // missing leafId -- must be dropped
         "not-an-object", // malformed entry -- must be dropped, not thrown
       ],
     },
   });
   assert.equal(result.verdict, SWEEP_TRIGGER_VERDICT.PROCEED);
   assert.equal(result.reasonCode, SWEEP_TRIGGER_REASON.OK);
-  assert.deepEqual(result.liveSeatKeys, ["seat-a", "seat-b"]);
+  assert.deepEqual(result.liveSeatKeys, ["tab-1:leaf-1", "tab-2:leaf-2"]);
+  // ★수리 확증: handle 문자열 그대로는 절대 liveSeatKeys에 나오지 않는다
+  // (형식 불일치 버그의 재발 신호).
+  for (const key of result.liveSeatKeys) {
+    assert.doesNotMatch(key, /^term_/);
+  }
 });
 
 test("ABSTAIN (fail-closed): seat query failure never yields liveSeatKeys:[] (3/3: ok:false, malformed shape, undefined)", () => {
