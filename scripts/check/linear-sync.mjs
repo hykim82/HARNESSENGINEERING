@@ -1,6 +1,28 @@
-import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { join, dirname } from "node:path";
 import { execSync } from "node:child_process";
+
+// HYK-305: the screen output of a drift verdict used to print every single
+// stale/missing/stateDrift line, every turn, for as long as the drift stood
+// -- once enough drift accumulated this buried the ORCH stop-hook's actual
+// per-turn report under dozens of repeated lines. This file's *judgment*
+// (IN_SYNC/DRIFT/UNJUDGABLE, exit code) is completely unchanged by this --
+// only reportDriftDetails' screen output changed, to a one-line summary plus
+// a transition-only detail dump. Two honest limits:
+//   1. The screen going quiet does NOT mean drift went away -- the full
+//      current list is always in the drift-report JSON file (see
+//      resolveDriftReportPath/writeDriftReport below), every run, in full.
+//   2. "new since last time" is judged against that same drift-report file.
+//      If it's deleted (or unreadable), the next run cannot tell what's new
+//      and treats every current drift item as new -- one louder run, by
+//      design (see readPreviousDriftKeys below), not a bug.
+// HYK-305-quiet-2 (P1 fix, review r1 rejected): IN_SYNC now also updates the
+// drift-report file to "0 keys" (clearDriftReportForInSync) instead of
+// leaving the previous drift run's list sitting there stale -- otherwise a
+// resolved item that later recurs is never "new" (its key never left the
+// previous-keys set) and silently stops showing detail on screen forever.
+// UNJUDGABLE deliberately does NOT clear it -- "couldn't judge" must never
+// be read as "found 0 drift" (see reportVerdictAndExit).
 
 // STATUS lives outside the repo (control room), same situation status-fresh.mjs
 // documents -- there is no in-repo default that resolves to a real file, so the
@@ -445,23 +467,168 @@ function reportSevenReferenceCheck(sevenResult, linearIssues) {
   }
 }
 
-function reportDriftDetails({ staleInStatus, missingInStatus, stateDrift }) {
+// One drift-detail line's exact text, unchanged from the pre-HYK-305 output
+// -- reportDriftDetails used to print these unconditionally; now they're
+// only shown for entries computeDriftTransition marks as new, but the text
+// itself (what a human reads) is byte-identical to before.
+function driftLineText(kind, item) {
+  if (kind === "stale") {
+    return (
+      `  staleInStatus: ${item.id} listed open in STATUS (state="${item.statusState}") but Linear state is ` +
+      `'${item.linearState}' (done/canceled) -- STATUS §6 needs updating`
+    );
+  }
+  if (kind === "missing") {
+    return `  missingInStatus: ${item.id} is open in Linear ('${item.linearState}') but has no entry in STATUS §6`;
+  }
+  return (
+    `  stateDrift: ${item.id} open in both but STATUS §6 says '${item.statusState}' while Linear is ` +
+    `'${item.linearState}' -- §6 state needs updating`
+  );
+}
+
+// Flattens a diffSync result into an ordered list of { key, text } entries.
+// key is the transition identifier from §2-2 (`<kind>:<id>`, e.g.
+// "stale:HYK-123") -- used to diff this run's drift set against the
+// previous run's, never shown on screen. text is the exact detail line.
+export function buildDriftEntries({
+  staleInStatus,
+  missingInStatus,
+  stateDrift,
+}) {
+  const entries = [];
+  for (const s of staleInStatus)
+    entries.push({ key: `stale:${s.id}`, text: driftLineText("stale", s) });
+  for (const m of missingInStatus)
+    entries.push({ key: `missing:${m.id}`, text: driftLineText("missing", m) });
+  for (const d of stateDrift)
+    entries.push({ key: `state:${d.id}`, text: driftLineText("state", d) });
+  return entries;
+}
+
+// Entries whose key was not present in the previous run's key set.
+// previousKeys === null means "no usable previous set" (first run, or the
+// previous file was missing/unreadable/malformed) -- §2-2/§2-4 both require
+// that case to surface everything as new, never to hide it.
+export function computeDriftTransition(entries, previousKeys) {
+  if (previousKeys === null) return entries;
+  return entries.filter((e) => !previousKeys.has(e.key));
+}
+
+export function parseDriftReportPathArg(args) {
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === "--drift-report") return args[i + 1];
+  }
+  return undefined;
+}
+
+// §2-3: explicit --drift-report wins; otherwise the default sits next to
+// STATUS.md's own directory, under watch/linear-sync-drift.json -- with the
+// real control-room STATUS path this resolves to the real watch folder
+// without any settings.local.json change.
+export function resolveDriftReportPath(driftReportArg, statusPath) {
+  if (driftReportArg) return driftReportArg;
+  return join(dirname(statusPath), "watch", "linear-sync-drift.json");
+}
+
+// Returns the previous run's drift key set, or null if there isn't one to
+// use (no file yet, or it can't be read/parsed) -- null is the signal
+// computeDriftTransition treats as "show everything," per §2-2/§2-4.
+export function readPreviousDriftKeys(driftReportPath) {
+  try {
+    if (!existsSync(driftReportPath)) return null;
+    const json = JSON.parse(readFileSync(driftReportPath, "utf8"));
+    if (!Array.isArray(json.keys)) return null;
+    return new Set(json.keys);
+  } catch {
+    return null;
+  }
+}
+
+// §2-4: writing the drift-report file is best-effort and isolated -- a
+// failure here (missing dir permissions, etc.) never throws out to the
+// caller and never touches the verdict/exit code. The directory is created
+// if missing; no other path is touched.
+export function writeDriftReport(
+  driftReportPath,
+  { generatedAt, counts, keys, lines },
+) {
+  try {
+    mkdirSync(dirname(driftReportPath), { recursive: true });
+    writeFileSync(
+      driftReportPath,
+      JSON.stringify({ generatedAt, counts, keys, lines }, null, 2),
+      "utf8",
+    );
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+}
+
+// Exported for tests (monkey-patch console.error to capture screen output,
+// same technique test (12b) uses for fetch) -- this is the actual function
+// main() calls, not a test-only reimplementation of its logic.
+export function reportDriftDetails(
+  { staleInStatus, missingInStatus, stateDrift },
+  driftReportPath,
+) {
+  // Unchanged from before HYK-305 -- this is the "verdict: …" summary line
+  // other tools/humans already read (§2-1).
   console.error(`linear-sync verdict: ${SYNC_VERDICT.DRIFT} detected:`);
-  for (const s of staleInStatus) {
+
+  const entries = buildDriftEntries({
+    staleInStatus,
+    missingInStatus,
+    stateDrift,
+  });
+  const counts = {
+    stale: staleInStatus.length,
+    missing: missingInStatus.length,
+    state: stateDrift.length,
+  };
+
+  console.error(
+    `linear-sync: DRIFT 어긋남 ${entries.length}건 (stale ${counts.stale} · missing ${counts.missing} · state ${counts.state}) -- 상세: ${driftReportPath}`,
+  );
+
+  const previousKeys = readPreviousDriftKeys(driftReportPath);
+  const newEntries = computeDriftTransition(entries, previousKeys);
+  for (const e of newEntries) console.error(e.text);
+
+  const writeResult = writeDriftReport(driftReportPath, {
+    generatedAt: new Date().toISOString(),
+    counts,
+    keys: entries.map((e) => e.key),
+    lines: entries.map((e) => e.text),
+  });
+  if (!writeResult.ok) {
     console.error(
-      `  staleInStatus: ${s.id} listed open in STATUS (state="${s.statusState}") but Linear state is ` +
-        `'${s.linearState}' (done/canceled) -- STATUS §6 needs updating`,
+      `linear-sync: 상세 파일을 쓰지 못했습니다(${writeResult.error}) -- 판정에는 영향 없음`,
     );
   }
-  for (const m of missingInStatus) {
-    console.error(
-      `  missingInStatus: ${m.id} is open in Linear ('${m.linearState}') but has no entry in STATUS §6`,
-    );
-  }
-  for (const d of stateDrift) {
-    console.error(
-      `  stateDrift: ${d.id} open in both but STATUS §6 says '${d.statusState}' while Linear is ` +
-        `'${d.linearState}' -- §6 state needs updating`,
+}
+
+// HYK-305-quiet-2 (P1 fix): IN_SYNC must also update the drift-report file,
+// clearing its key set to empty -- otherwise a resolved drift item that
+// later recurs is never "new" (computeDriftTransition sees it in a stale,
+// never-cleared previous-keys set) and its detail silently stops showing on
+// screen forever, even though the drift-report file is supposed to always
+// reflect the *current* state. This is deliberately NOT called for
+// UNJUDGABLE (see reportVerdictAndExit) -- "couldn't judge" is not "found
+// 0 drift," and clearing on UNJUDGABLE would make every real drift item
+// look "new" again the next time a judgment succeeds, which is exactly the
+// silent-loss failure mode §2-4 forbids.
+export function clearDriftReportForInSync(driftReportPath) {
+  const writeResult = writeDriftReport(driftReportPath, {
+    generatedAt: new Date().toISOString(),
+    counts: { stale: 0, missing: 0, state: 0 },
+    keys: [],
+    lines: [],
+  });
+  if (!writeResult.ok) {
+    console.warn(
+      `linear-sync: 상세 파일을 갱신하지 못했습니다(${writeResult.error}) -- 판정에는 영향 없음`,
     );
   }
 }
@@ -516,9 +683,15 @@ async function gatherSyncInputs(root, statusPath) {
 
 function reportVerdictAndExit(
   verdict,
-  { sixResult, staleInStatus, missingInStatus, stateDrift },
+  { sixResult, staleInStatus, missingInStatus, stateDrift, driftReportPath },
 ) {
   if (verdict === SYNC_VERDICT.UNJUDGABLE) {
+    // HYK-305-quiet-2: deliberately does NOT touch the drift-report file
+    // (no clearDriftReportForInSync call here, unlike the IN_SYNC branch
+    // below) -- "couldn't judge" is not "found 0 drift." Clearing it here
+    // would make every real, still-standing drift item look brand new the
+    // next time a judgment actually succeeds, which is the same silent-loss
+    // failure this round exists to close, just via the opposite branch.
     const reason = !sixResult.headerFound
       ? "section_6_header_not_found"
       : "api_error";
@@ -534,20 +707,30 @@ function reportVerdictAndExit(
     console.log(
       `linear-sync verdict: ${SYNC_VERDICT.IN_SYNC} -- ${sixResult.issues.length} open issue(s) in STATUS §6 match Linear.`,
     );
+    // P1 fix: reflect "0 drift now" in the drift-report file too, so a
+    // later recurrence of a resolved item is judged against an empty
+    // previous-keys set and shows up as new (see clearDriftReportForInSync).
+    clearDriftReportForInSync(driftReportPath);
   } else {
     // HYK-131: advisory normalization. A confirmed drift is a signal for a
     // human/ORCH to reconcile against live Linear, not something ORCH can
     // always self-repair -- exit 1, never exit 2, matching status-fresh.mjs/
     // clear-safe-check.mjs/controlroom-fresh.mjs's own non-blocking severity.
-    reportDriftDetails({ staleInStatus, missingInStatus, stateDrift });
+    reportDriftDetails(
+      { staleInStatus, missingInStatus, stateDrift },
+      driftReportPath,
+    );
   }
   process.exit(SYNC_VERDICT_EXIT_CODE[verdict]);
 }
 
 async function main() {
-  const statusPathArg = parseStatusPathArg(process.argv.slice(2));
+  const argv = process.argv.slice(2);
+  const statusPathArg = parseStatusPathArg(argv);
+  const driftReportArg = parseDriftReportPathArg(argv);
   const root = repoRoot();
   const statusPath = statusPathArg ?? DEFAULT_STATUS_PATH;
+  const driftReportPath = resolveDriftReportPath(driftReportArg, statusPath);
 
   const inputs = await gatherSyncInputs(root, statusPath);
   if (!inputs) {
@@ -572,6 +755,7 @@ async function main() {
     staleInStatus,
     missingInStatus,
     stateDrift,
+    driftReportPath,
   });
 }
 

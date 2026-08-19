@@ -1,8 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, writeFileSync, rmSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { spawnSync } from "node:child_process";
+import { pathToFileURL, fileURLToPath } from "node:url";
 import {
   parseStatusOpenIssues,
   parseStatusOpenIssuesDetailed,
@@ -15,7 +17,19 @@ import {
   resolveSyncVerdict,
   SYNC_VERDICT,
   SYNC_VERDICT_EXIT_CODE,
+  buildDriftEntries,
+  computeDriftTransition,
+  parseDriftReportPathArg,
+  resolveDriftReportPath,
+  readPreviousDriftKeys,
+  writeDriftReport,
+  reportDriftDetails,
+  clearDriftReportForInSync,
 } from "./linear-sync.mjs";
+
+const LINEAR_SYNC_SCRIPT = fileURLToPath(
+  new URL("./linear-sync.mjs", import.meta.url),
+);
 
 function withFixtureDir(fn) {
   const dir = mkdtempSync(join(tmpdir(), "linear-sync-test-"));
@@ -561,4 +575,431 @@ test("(13e) SYNC_VERDICT_EXIT_CODE: IN_SYNC=0, DRIFT=1, UNJUDGABLE=3 -- UNJUDGAB
   assert.equal(SYNC_VERDICT_EXIT_CODE.DRIFT, 1);
   assert.equal(SYNC_VERDICT_EXIT_CODE.UNJUDGABLE, 3);
   assert.notEqual(SYNC_VERDICT_EXIT_CODE.UNJUDGABLE, 2);
+});
+
+// --- HYK-305: reportDriftDetails screen summarization + drift-report file ---
+// Judgment (SYNC_VERDICT/SYNC_VERDICT_EXIT_CODE, tests 9-13e above) is
+// completely untouched by this section -- only reportDriftDetails' *output*
+// changed. All fixture paths below live under the test's own tmpdir, never
+// the real control room (§3 requirement: no test may touch the real path).
+
+function captureConsoleError(fn) {
+  const lines = [];
+  const original = console.error;
+  console.error = (msg) => lines.push(msg);
+  try {
+    fn();
+  } finally {
+    console.error = original;
+  }
+  return lines;
+}
+
+const DRIFT_3 = {
+  staleInStatus: [{ id: "HYK-1", statusState: "Todo", linearState: "Done" }],
+  missingInStatus: [{ id: "HYK-2", linearState: "Todo" }],
+  stateDrift: [
+    { id: "HYK-3", statusState: "Todo", linearState: "In Progress" },
+  ],
+};
+
+test("(14) buildDriftEntries: flattens stale/missing/state into ordered {key,text} entries with the exact pre-existing detail text", () => {
+  const entries = buildDriftEntries(DRIFT_3);
+  assert.deepEqual(
+    entries.map((e) => e.key),
+    ["stale:HYK-1", "missing:HYK-2", "state:HYK-3"],
+  );
+  assert.ok(entries[0].text.includes("staleInStatus: HYK-1"));
+  assert.ok(entries[1].text.includes("missingInStatus: HYK-2"));
+  assert.ok(entries[2].text.includes("stateDrift: HYK-3"));
+});
+
+test("(15) computeDriftTransition: previousKeys null (first run / unreadable) -> every entry is new", () => {
+  const entries = buildDriftEntries(DRIFT_3);
+  const newEntries = computeDriftTransition(entries, null);
+  assert.equal(newEntries.length, 3);
+});
+
+test("(15b) computeDriftTransition: previousKeys has all current keys -> nothing new", () => {
+  const entries = buildDriftEntries(DRIFT_3);
+  const previousKeys = new Set(entries.map((e) => e.key));
+  const newEntries = computeDriftTransition(entries, previousKeys);
+  assert.equal(newEntries.length, 0);
+});
+
+test("(15c) computeDriftTransition: only entries absent from previousKeys are new, disappeared ones are never re-surfaced by this function", () => {
+  const entries = buildDriftEntries(DRIFT_3);
+  const previousKeys = new Set([
+    "stale:HYK-1",
+    "missing:HYK-2",
+    "state:HYK-999",
+  ]);
+  const newEntries = computeDriftTransition(entries, previousKeys);
+  assert.deepEqual(
+    newEntries.map((e) => e.key),
+    ["state:HYK-3"],
+  );
+});
+
+test("(16) parseDriftReportPathArg + resolveDriftReportPath: explicit --drift-report is respected verbatim", () => {
+  const arg = parseDriftReportPathArg([
+    "--status",
+    "x",
+    "--drift-report",
+    "C:/tmp/custom.json",
+  ]);
+  assert.equal(arg, "C:/tmp/custom.json");
+  assert.equal(
+    resolveDriftReportPath(arg, "C:/whatever/STATUS.md"),
+    "C:/tmp/custom.json",
+  );
+});
+
+test("(16b) resolveDriftReportPath: no --drift-report -> defaults to <status dir>/watch/linear-sync-drift.json", () => {
+  const arg = parseDriftReportPathArg(["--status", "x"]);
+  assert.equal(arg, undefined);
+  withFixtureDir((dir) => {
+    const statusPath = join(dir, "STATUS.md");
+    assert.equal(
+      resolveDriftReportPath(arg, statusPath),
+      join(dir, "watch", "linear-sync-drift.json"),
+    );
+  });
+});
+
+test("(17) reportDriftDetails: drift with no previous file -> screen shows summary + all 3 detail lines, drift-report file has all 3", () => {
+  withFixtureDir((dir) => {
+    const reportPath = join(dir, "watch", "linear-sync-drift.json");
+    const lines = captureConsoleError(() =>
+      reportDriftDetails(DRIFT_3, reportPath),
+    );
+    assert.ok(lines[0].startsWith("linear-sync verdict: DRIFT detected:"));
+    assert.ok(
+      lines[1].includes("linear-sync: DRIFT 어긋남 3건") &&
+        lines[1].includes("stale 1") &&
+        lines[1].includes("missing 1") &&
+        lines[1].includes("state 1") &&
+        lines[1].includes(reportPath),
+    );
+    const detailLines = lines.slice(2);
+    assert.equal(detailLines.length, 3);
+    const saved = JSON.parse(readFileSync(reportPath, "utf8"));
+    assert.deepEqual(saved.keys, [
+      "stale:HYK-1",
+      "missing:HYK-2",
+      "state:HYK-3",
+    ]);
+    assert.equal(saved.counts.stale, 1);
+    assert.equal(saved.lines.length, 3);
+  });
+});
+
+test("(18) reportDriftDetails: identical drift rerun (previous file present) -> screen is summary only, 0 detail lines, file still has all 3", () => {
+  withFixtureDir((dir) => {
+    const reportPath = join(dir, "watch", "linear-sync-drift.json");
+    reportDriftDetails(DRIFT_3, reportPath); // first run writes the previous-state file
+    const lines = captureConsoleError(() =>
+      reportDriftDetails(DRIFT_3, reportPath),
+    );
+    assert.equal(
+      lines.length,
+      2,
+      "only the verdict line + summary line, no detail lines",
+    );
+    const saved = JSON.parse(readFileSync(reportPath, "utf8"));
+    assert.equal(saved.keys.length, 3);
+  });
+});
+
+test("(19) reportDriftDetails: one new drift item added -> screen shows only the new item's detail line, file grows to 4", () => {
+  withFixtureDir((dir) => {
+    const reportPath = join(dir, "watch", "linear-sync-drift.json");
+    reportDriftDetails(DRIFT_3, reportPath);
+    const DRIFT_4 = {
+      ...DRIFT_3,
+      staleInStatus: [
+        ...DRIFT_3.staleInStatus,
+        { id: "HYK-4", statusState: "Todo", linearState: "Done" },
+      ],
+    };
+    const lines = captureConsoleError(() =>
+      reportDriftDetails(DRIFT_4, reportPath),
+    );
+    assert.ok(lines[1].includes("DRIFT 어긋남 4건"));
+    const detailLines = lines.slice(2);
+    assert.equal(detailLines.length, 1);
+    assert.ok(detailLines[0].includes("HYK-4"));
+    const saved = JSON.parse(readFileSync(reportPath, "utf8"));
+    assert.equal(saved.keys.length, 4);
+  });
+});
+
+test("(20) reportDriftDetails: one drift item disappears -> summary count drops, 0 detail lines, file shrinks", () => {
+  withFixtureDir((dir) => {
+    const reportPath = join(dir, "watch", "linear-sync-drift.json");
+    reportDriftDetails(DRIFT_3, reportPath);
+    const DRIFT_2 = {
+      staleInStatus: DRIFT_3.staleInStatus,
+      missingInStatus: [],
+      stateDrift: DRIFT_3.stateDrift,
+    };
+    const lines = captureConsoleError(() =>
+      reportDriftDetails(DRIFT_2, reportPath),
+    );
+    assert.ok(lines[1].includes("DRIFT 어긋남 2건"));
+    const detailLines = lines.slice(2);
+    assert.equal(detailLines.length, 0);
+    const saved = JSON.parse(readFileSync(reportPath, "utf8"));
+    assert.deepEqual(saved.keys, ["stale:HYK-1", "state:HYK-3"]);
+  });
+});
+
+test("(21) readPreviousDriftKeys: missing file -> null (never throws)", () => {
+  withFixtureDir((dir) => {
+    const result = readPreviousDriftKeys(join(dir, "nope.json"));
+    assert.equal(result, null);
+  });
+});
+
+test("(21b) readPreviousDriftKeys: malformed JSON -> null, not a throw", () => {
+  withFixtureDir((dir) => {
+    const p = join(dir, "bad.json");
+    writeFileSync(p, "{ not valid json", "utf8");
+    const result = readPreviousDriftKeys(p);
+    assert.equal(result, null);
+  });
+});
+
+test("(22) writeDriftReport: succeeds and creates missing parent directories", () => {
+  withFixtureDir((dir) => {
+    const p = join(dir, "a", "b", "drift.json");
+    const result = writeDriftReport(p, {
+      generatedAt: "2026-08-19T00:00:00.000Z",
+      counts: { stale: 1, missing: 0, state: 0 },
+      keys: ["stale:HYK-1"],
+      lines: ["  staleInStatus: HYK-1 ..."],
+    });
+    assert.equal(result.ok, true);
+    const saved = JSON.parse(readFileSync(p, "utf8"));
+    assert.deepEqual(saved.keys, ["stale:HYK-1"]);
+  });
+});
+
+test("(23) reportDriftDetails: drift-report write failure -> screen still shows summary + warning line, judgment/exit code untouched (fail toward showing detail, not hiding it)", () => {
+  withFixtureDir((dir) => {
+    // "watch" exists as a plain file, so mkdirSync(dirname, {recursive:true})
+    // for "watch/linear-sync-drift.json" is forced to fail -- a reliable,
+    // cross-platform way to trigger the write-failure path without touching
+    // real filesystem permissions.
+    const watchAsFile = join(dir, "watch");
+    writeFileSync(watchAsFile, "not a directory", "utf8");
+    const reportPath = join(watchAsFile, "linear-sync-drift.json");
+
+    const lines = captureConsoleError(() =>
+      reportDriftDetails(DRIFT_3, reportPath),
+    );
+    assert.ok(lines[0].startsWith("linear-sync verdict: DRIFT detected:"));
+    assert.ok(lines[1].includes("DRIFT 어긋남 3건"));
+    // first run against an unwritable report path: no previous file readable
+    // either (dirname is a file, so existsSync(reportPath) is false) -> all
+    // 3 shown, per §2-4's "show, don't hide" fail-open rule.
+    const detailLines = lines.slice(2, 5);
+    assert.equal(detailLines.length, 3);
+    const warningLine = lines[lines.length - 1];
+    assert.ok(warningLine.includes("상세 파일을 쓰지 못했습니다"));
+    assert.ok(warningLine.includes("판정에는 영향 없음"));
+  });
+});
+
+// --- HYK-305-quiet-2: review r1 rejected P1 (IN_SYNC never cleared the
+// drift-report file, so a resolved item's recurrence was never "new") + P2
+// (no test drove main()/the real CLI entry point with a mocked Linear
+// response). Both addressed below. ---
+
+test("(24) clearDriftReportForInSync: overwrites a previously-populated report file with an empty key set", () => {
+  withFixtureDir((dir) => {
+    const reportPath = join(dir, "watch", "linear-sync-drift.json");
+    reportDriftDetails(DRIFT_3, reportPath); // seed the file with 3 keys
+    let saved = JSON.parse(readFileSync(reportPath, "utf8"));
+    assert.equal(saved.keys.length, 3);
+
+    clearDriftReportForInSync(reportPath);
+    saved = JSON.parse(readFileSync(reportPath, "utf8"));
+    assert.deepEqual(saved.keys, []);
+    assert.deepEqual(saved.lines, []);
+    assert.deepEqual(saved.counts, { stale: 0, missing: 0, state: 0 });
+  });
+});
+
+test("(25) clearDriftReportForInSync + reportDriftDetails: a cleared item that recurs is judged 'new' again (the exact P1 bug shape, at the helper level)", () => {
+  withFixtureDir((dir) => {
+    const reportPath = join(dir, "watch", "linear-sync-drift.json");
+    reportDriftDetails(DRIFT_3, reportPath); // first: all 3 are "new"
+    clearDriftReportForInSync(reportPath); // resolved -> IN_SYNC clears it
+    const lines = captureConsoleError(() =>
+      reportDriftDetails(DRIFT_3, reportPath),
+    ); // same 3 recur
+    const detailLines = lines.slice(2);
+    assert.equal(
+      detailLines.length,
+      3,
+      "after a clear, a full recurrence must show all 3 as new -- not 0 (the P1 defect)",
+    );
+  });
+});
+
+test("(26) reportVerdictAndExit's UNJUDGABLE path never calls clearDriftReportForInSync -- a pre-existing report file survives untouched (verified at the CLI level, no LINEAR_API_KEY -> UNJUDGABLE before driftReportPath is ever reached)", () => {
+  withFixtureDir((dir) => {
+    const statusPath = join(dir, "STATUS.md");
+    writeFileSync(
+      statusPath,
+      "### 6) 열린 이슈 (Linear)\n- **HYK-1** 테스트 — *Todo*\n",
+      "utf8",
+    );
+    const reportPath = join(dir, "watch", "linear-sync-drift.json");
+    const seeded = {
+      generatedAt: "2026-01-01T00:00:00.000Z",
+      counts: { stale: 1, missing: 0, state: 0 },
+      keys: ["stale:HYK-1"],
+      lines: ["  staleInStatus: HYK-1 ..."],
+    };
+    writeDriftReport(reportPath, seeded);
+
+    const env = { ...process.env };
+    delete env.LINEAR_API_KEY;
+    const result = spawnSync(
+      process.execPath,
+      [
+        LINEAR_SYNC_SCRIPT,
+        "--status",
+        statusPath,
+        "--drift-report",
+        reportPath,
+      ],
+      { encoding: "utf8", env, cwd: process.cwd() },
+    );
+    assert.equal(result.status, SYNC_VERDICT_EXIT_CODE.UNJUDGABLE);
+    assert.ok(result.stdout.includes("UNJUDGABLE"));
+    const saved = JSON.parse(readFileSync(reportPath, "utf8"));
+    assert.deepEqual(
+      saved,
+      seeded,
+      "UNJUDGABLE must leave the report file byte-for-byte alone",
+    );
+  });
+});
+
+// --- P2: drive the real CLI entry point (main()), Linear response mocked
+// via an --import preload that overrides globalThis.fetch, matching the
+// technique the reviewer used to independently verify r1. ---
+
+function writeFetchPreload(dir) {
+  const preloadPath = join(dir, "mock-fetch-preload.mjs");
+  writeFileSync(
+    preloadPath,
+    [
+      "globalThis.fetch = async () => ({",
+      "  ok: true,",
+      "  json: async () => ({",
+      '    data: { issues: { nodes: JSON.parse(process.env.MOCK_LINEAR_ISSUES || "[]") } },',
+      "  }),",
+      "});",
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+  return preloadPath;
+}
+
+function runLinearSyncCli({ dir, statusPath, driftReportPath, mockIssues }) {
+  const preloadPath = writeFetchPreload(dir);
+  return spawnSync(
+    process.execPath,
+    [
+      "--import",
+      pathToFileURL(preloadPath).href,
+      LINEAR_SYNC_SCRIPT,
+      "--status",
+      statusPath,
+      "--drift-report",
+      driftReportPath,
+    ],
+    {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        LINEAR_API_KEY: "dummy-test-key-for-cli-mock",
+        MOCK_LINEAR_ISSUES: JSON.stringify(mockIssues),
+      },
+      cwd: process.cwd(),
+    },
+  );
+}
+
+test("(27) P2 + reviewer's exact 4-step reproduction, driven through the real CLI entry point (main()) with a mocked Linear response: resolved-then-recurring drift shows new detail again, never silently swallowed", () => {
+  withFixtureDir((dir) => {
+    const statusPath = join(dir, "STATUS.md");
+    writeFileSync(
+      statusPath,
+      "### 6) 열린 이슈 (Linear)\n- **HYK-1** 테스트 — *Todo*\n",
+      "utf8",
+    );
+    const driftReportPath = join(dir, "watch", "linear-sync-drift.json");
+    const staleIssue = [
+      { identifier: "HYK-1", state: { name: "Done", type: "completed" } },
+    ];
+    const matchingIssue = [
+      { identifier: "HYK-1", state: { name: "Todo", type: "unstarted" } },
+    ];
+
+    // (1) first run, stale -- exit 1, summary + 1 detail line.
+    const r1 = runLinearSyncCli({
+      dir,
+      statusPath,
+      driftReportPath,
+      mockIssues: staleIssue,
+    });
+    assert.equal(r1.status, SYNC_VERDICT_EXIT_CODE.DRIFT);
+    assert.ok(r1.stderr.includes("DRIFT 어긋남 1건"));
+    assert.ok(r1.stderr.includes("staleInStatus: HYK-1"));
+
+    // (2) same drift again -- exit 1, summary only.
+    const r2 = runLinearSyncCli({
+      dir,
+      statusPath,
+      driftReportPath,
+      mockIssues: staleIssue,
+    });
+    assert.equal(r2.status, SYNC_VERDICT_EXIT_CODE.DRIFT);
+    assert.ok(r2.stderr.includes("DRIFT 어긋남 1건"));
+    assert.ok(!r2.stderr.includes("staleInStatus: HYK-1"));
+
+    // (3) resolved -- IN_SYNC, exit 0, and the report file must now read 0.
+    const r3 = runLinearSyncCli({
+      dir,
+      statusPath,
+      driftReportPath,
+      mockIssues: matchingIssue,
+    });
+    assert.equal(r3.status, SYNC_VERDICT_EXIT_CODE.IN_SYNC);
+    assert.ok(r3.stdout.includes("IN_SYNC"));
+    const clearedReport = JSON.parse(readFileSync(driftReportPath, "utf8"));
+    assert.deepEqual(clearedReport.keys, []);
+
+    // (4) the P1 bug shape: same stale item recurs -- must show new detail,
+    // not just the summary (r1 rejected r1's coder submission on exactly
+    // this step being silent).
+    const r4 = runLinearSyncCli({
+      dir,
+      statusPath,
+      driftReportPath,
+      mockIssues: staleIssue,
+    });
+    assert.equal(r4.status, SYNC_VERDICT_EXIT_CODE.DRIFT);
+    assert.ok(r4.stderr.includes("DRIFT 어긋남 1건"));
+    assert.ok(
+      r4.stderr.includes("staleInStatus: HYK-1"),
+      "recurrence after IN_SYNC must show detail again -- this is the exact P1 defect the review rejected",
+    );
+  });
 });
