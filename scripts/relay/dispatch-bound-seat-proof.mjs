@@ -72,6 +72,66 @@ function isNonEmptyString(v) {
   return typeof v === "string" && v.length > 0;
 }
 
+// HYK-299-casefold-1 -- 경로 동등성 판정.
+//
+// 배경(실배달 사고): 관제실 `dispatch-worker.ps1`의 `Norm()`은 워크트리
+// 경로를 넘길 때 소문자화까지 한다(`\` -> `/`, 끝 `/` 제거, `ToLowerInvariant()`).
+// 그런데 `terminal show`가 돌려주는 `worktreePath`/`worktreeId`는 대소문자가
+// 살아 있다. 기존 판정은 `!==` 문자 완전 일치라 정상 배달이 WORKTREE_MISMATCH로
+// 거부됐다(2026-08-19 실배달, .harness/evidence/hyk299-seatproof-*.json).
+//
+// ★"윈도우 드라이브문자 절대경로 모양"일 때만 대소문자를 무시한다 --
+// 무조건 대소문자 무시로 바꾸면 대소문자를 구별하는 파일시스템(리눅스, CI가
+// 도는 곳)에서 `/srv/Foo`와 `/srv/foo`처럼 실제로 다른 두 디렉터리를 같다고
+// 판정해 탐지력을 깎는다. `C:/...` 모양은 윈도우 경로 표기이고 윈도우
+// 파일시스템에서 대소문자는 정보를 담지 않으므로, 그 모양에 한해 무시하는
+// 것은 탐지력을 깎지 않는다. 기준은 "판정하는 쪽의 OS"가 아니라 "경로 자체의
+// 모양"이다(관제실=윈도우, CI=리눅스가 같은 입력을 판정할 수 있다).
+const WINDOWS_DRIVE_ABSOLUTE_PATH_RE = /^[A-Za-z]:\//;
+
+function normalizePathSlashes(p) {
+  if (typeof p !== "string") return p;
+  return p.replace(/\\/g, "/").replace(/\/+$/, "");
+}
+
+function pathsEqual(a, b) {
+  const na = normalizePathSlashes(a);
+  const nb = normalizePathSlashes(b);
+  if (
+    typeof na === "string" &&
+    typeof nb === "string" &&
+    WINDOWS_DRIVE_ABSOLUTE_PATH_RE.test(na) &&
+    WINDOWS_DRIVE_ABSOLUTE_PATH_RE.test(nb)
+  ) {
+    return na.toLowerCase() === nb.toLowerCase();
+  }
+  // 윈도우 드라이브문자 모양이 아니면(POSIX 절대경로 등) 정규화도 하지
+  // 않는다 -- 기존 그대로 문자 완전 일치.
+  return a === b;
+}
+
+// worktreeId는 `<repoId>::<path>` 모양이다. `::`로 갈라 repoId(GUID, 대소문자
+// 무시)와 path(위 경로 규칙)를 따로 비교한다. `::`가 없으면 전체를 하나의
+// 값으로 보고 경로 규칙을 그대로 적용한다.
+function splitWorktreeId(id) {
+  if (typeof id !== "string") return null;
+  const idx = id.indexOf("::");
+  if (idx === -1) return null;
+  return { repoId: id.slice(0, idx), path: id.slice(idx + 2) };
+}
+
+function worktreeIdsEqual(a, b) {
+  const pa = splitWorktreeId(a);
+  const pb = splitWorktreeId(b);
+  if (pa && pb) {
+    return (
+      pa.repoId.toLowerCase() === pb.repoId.toLowerCase() &&
+      pathsEqual(pa.path, pb.path)
+    );
+  }
+  return pathsEqual(a, b);
+}
+
 function verdict(kind, reasonCode) {
   return { verdict: kind, reasonCode };
 }
@@ -132,7 +192,8 @@ function buildMismatchChecks(ds, ts, exp) {
     [exp.runtimeTaskId !== ds.taskId, SEAT_PROOF_REASON.TASK_ID_MISMATCH],
     [exp.dispatchId !== ds.dispatchId, SEAT_PROOF_REASON.DISPATCH_ID_MISMATCH],
     [
-      exp.worktreeId !== ts.worktreeId || exp.worktreePath !== ts.worktreePath,
+      !worktreeIdsEqual(exp.worktreeId, ts.worktreeId) ||
+        !pathsEqual(exp.worktreePath, ts.worktreePath),
       SEAT_PROOF_REASON.WORKTREE_MISMATCH,
     ],
   ];

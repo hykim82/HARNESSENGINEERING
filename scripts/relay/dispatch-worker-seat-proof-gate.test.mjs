@@ -238,3 +238,126 @@ test("gate args: unrecognized flag -- GATE_ARGS_UNRECOGNIZED, exit 2", () => {
   assert.equal(result.exitCode, 2);
   assert.equal(result.reasonCode, GATE_REASON.ARGS_UNRECOGNIZED);
 });
+
+// ---------------------------------------------------------------------------
+// §3 항목8 -- HYK-299-casefold-1 실배달 재현 시험(게이트 계층). 아래 두
+// 상수는 .harness/evidence/hyk299-seatproof-task_5ba32ba9e6bd-{dispatch,
+// terminal}-show.json 의 내용을 그대로 옮긴 것이다(2026-08-19 18:10 실제
+// 배달에서 배달기가 만든 원본 파일 -- 이 시험은 그 내용을 저장소 안
+// fixture로 박아 넣을 뿐, `.harness/`를 읽지 않는다). argv는 관제실
+// `dispatch-worker.ps1`이 실제로 만드는 모양 그대로 조립한다: `--worktree-id`
+// 는 terminal-show의 원본 대소문자 그대로(코드 원문에 `--worktree-id
+// $seatProofWorktreeId`, Norm()을 거치지 않는다), `--worktree-path`만
+// `Norm()`(소문자화)을 거친다. 합성 입력으로 대소문자를 미리 맞춰 놓지
+//않는다.
+// ---------------------------------------------------------------------------
+const HYK299_REAL_DISPATCH_SHOW = {
+  id: "04d19cbd-cc5f-4ce3-a230-1eaf377b2a99",
+  ok: true,
+  result: {
+    dispatch: {
+      id: "ctx_fd5d03771398",
+      task_id: "task_5ba32ba9e6bd",
+      assignee_handle: "term_82babd3c-4f10-41bb-adeb-edf128e3f2fc",
+      assignee_pane_key:
+        "0ace207a-d6ac-46f6-8f2f-b9747d0c2e6a:d441ce36-38a7-4e19-8611-9fa7b81e485f",
+      status: "dispatched",
+      failure_count: 0,
+      last_failure: null,
+      dispatched_at: "2026-08-19 09:10:58",
+      completed_at: null,
+      created_at: "2026-08-19 09:10:58",
+      last_heartbeat_at: null,
+    },
+  },
+  _meta: { runtimeId: "50b1e964-1a53-4f20-8704-bf75c4c69f75" },
+};
+
+const HYK299_REAL_TERMINAL_SHOW = {
+  id: "c14fb8a8-15dd-4bf7-af05-48327e948f2e",
+  ok: true,
+  result: {
+    terminal: {
+      handle: "term_82babd3c-4f10-41bb-adeb-edf128e3f2fc",
+      ptyId:
+        "e841ec57-d1b5-4be0-a44b-2023793e7d33::C:/Users/Administrator/orca/workspaces/HARNESSENGINEERING/hyk306-review@@9ea19715",
+      worktreeId:
+        "e841ec57-d1b5-4be0-a44b-2023793e7d33::C:/Users/Administrator/orca/workspaces/HARNESSENGINEERING/hyk306-review",
+      worktreePath:
+        "C:/Users/Administrator/orca/workspaces/HARNESSENGINEERING/hyk306-review",
+      branch: "refs/heads/hyk306-review",
+      tabId: "0ace207a-d6ac-46f6-8f2f-b9747d0c2e6a",
+      leafId: "d441ce36-38a7-4e19-8611-9fa7b81e485f",
+      title: "hyk306-review",
+      connected: true,
+      writable: true,
+      lastOutputAt: 1787130631932,
+      preview: "SYNTHETIC(placeholder -- not a contract)",
+      paneRuntimeId: 1,
+      rendererGraphEpoch: 0,
+    },
+  },
+  _meta: { runtimeId: "50b1e964-1a53-4f20-8704-bf75c4c69f75" },
+};
+
+function hyk299RealFiles() {
+  return {
+    "/hyk299-ds.json": JSON.stringify(HYK299_REAL_DISPATCH_SHOW),
+    "/hyk299-ts.json": JSON.stringify(HYK299_REAL_TERMINAL_SHOW),
+  };
+}
+
+// dispatch-worker.ps1이 실제로 조립하는 argv 모양: --worktree-id는
+// terminal-show의 원본 worktreeId(대소문자 보존, Norm() 미적용), --worktree-path는
+// Norm(원본 worktreePath)(소문자화).
+function hyk299RealArgv(worktreePathOverride) {
+  return [
+    "--dispatch-show",
+    "/hyk299-ds.json",
+    "--terminal-show",
+    "/hyk299-ts.json",
+    "--harness-task-id",
+    "HYK-299-casefold-1",
+    "--runtime-task-id",
+    HYK299_REAL_DISPATCH_SHOW.result.dispatch.task_id,
+    "--dispatch-id",
+    HYK299_REAL_DISPATCH_SHOW.result.dispatch.id,
+    "--worktree-id",
+    HYK299_REAL_TERMINAL_SHOW.result.terminal.worktreeId,
+    "--worktree-path",
+    worktreePathOverride,
+  ];
+}
+
+test("HYK-299-casefold-1 repro (a): Norm()-lowercased --worktree-path, real evidence pair -- exit 0 (was exit 2 / WORKTREE_MISMATCH before the fix)", () => {
+  const files = hyk299RealFiles();
+  const lowered =
+    HYK299_REAL_TERMINAL_SHOW.result.terminal.worktreePath.toLowerCase();
+  const result = runGate(hyk299RealArgv(lowered), {
+    readFileFn: fakeReadFileFn(files),
+  });
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.verdict, "PROVEN");
+});
+
+test("HYK-299-casefold-1 repro (b): case-preserved --worktree-path, real evidence pair -- exit 0 (regression check)", () => {
+  const files = hyk299RealFiles();
+  const preserved = HYK299_REAL_TERMINAL_SHOW.result.terminal.worktreePath;
+  const result = runGate(hyk299RealArgv(preserved), {
+    readFileFn: fakeReadFileFn(files),
+  });
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.verdict, "PROVEN");
+});
+
+test("HYK-299-casefold-1 repro (c): genuinely different --worktree-path, real evidence pair -- exit 2/WORKTREE_MISMATCH (detection preserved)", () => {
+  const files = hyk299RealFiles();
+  const wrong =
+    "c:/users/administrator/orca/workspaces/harnessengineering/hyk306-label";
+  const result = runGate(hyk299RealArgv(wrong), {
+    readFileFn: fakeReadFileFn(files),
+  });
+  assert.equal(result.exitCode, 2);
+  assert.equal(result.verdict, "UNPROVEN");
+  assert.equal(result.reasonCode, "WORKTREE_MISMATCH");
+});
