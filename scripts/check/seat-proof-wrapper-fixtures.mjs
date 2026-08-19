@@ -185,6 +185,32 @@ export const BYPASS_FORMS = [
   },
 ];
 
+// HYK-323 (wrapper-shape-4) §2-2/§2-3 item 3, §3 item 4: KNOWN LIMITATION,
+// not a bypass to close. Both forms below embed the EXACT canonical body
+// text (byte-identical `function Invoke-SeatProofGate(...) { ... }`) inside
+// a context where PowerShell never actually defines that function --
+// review r3 proved `extractAllFunctionBodies`'s brace-depth text scan finds
+// and hashes that braced text regardless of what surrounds it, so the
+// fingerprint verdict reads both as OK/unchanged even though calling
+// Invoke-SeatProofGate afterward fails with "not recognized"
+// (FUNCTION_ABSENT, confirmed with pwsh -- see the behavioral tests below).
+// This is deliberate deception a human would have to construct on purpose;
+// it is NOT the accidental-regression class this checker promises to catch
+// (module header, wrapper-shape-4 section). Kept as fixtures so the gap is
+// pinned by a test instead of only described in prose.
+export const KNOWN_LIMITATION_FORMS = [
+  {
+    id: "limit-herestring",
+    label: "정본 본문을 here-string 안에 넣음(함수로 정의되지 않음)",
+    text: ["$notAFunction = @'", FIXED_FUNCTION_TEXT, "'@"].join("\n"),
+  },
+  {
+    id: "limit-if-false",
+    label: "정본 함수를 죽은 if ($false) 블록 안에 넣음(실행 경로 없음)",
+    text: ["if ($false) {", FIXED_FUNCTION_TEXT, "}"].join("\n"),
+  },
+];
+
 // Safe notations (§2-2/§3 false-positive guard) -- must behave PASS/REJECT
 // correctly under the behavioral check same as FIXED_FUNCTION_TEXT.
 export const SAFE_FORMS = [

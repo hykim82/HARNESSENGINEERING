@@ -28,6 +28,7 @@ import {
   FIXED_FUNCTION_TEXT,
   BROKEN_FUNCTION_TEXT,
   BYPASS_FORMS,
+  KNOWN_LIMITATION_FORMS,
   SAFE_FORMS,
 } from "./seat-proof-wrapper-fixtures.mjs";
 
@@ -179,6 +180,74 @@ test("우회 9종이 서로 다른 텍스트이고 정본과도 다름을 확인
     ...BYPASS_FORMS.map((f) => f.text),
   ]);
   assert.equal(texts.size, BYPASS_FORMS.length + 1);
+});
+
+// ---------------------------------------------------------------------
+// HYK-323 (wrapper-shape-4) §2-2/§3 항목4: 한계 실증 시험. ⛔이 아래 두
+// 시험은 "버그"가 아니라 "이 검사기가 원리적으로 막지 못하는 것"의
+// 증거다(모듈 헤더 wrapper-shape-4 절 참조). here-string / 죽은
+// `if ($false)` 블록 안에 정본 본문을 그대로 넣으면, 함수가 실제로는
+// 정의되지 않는데도 지문은 정본과 같아 "변경 없음"으로 읽힌다 -- 고의
+// 우회는 이 층의 탐지 대상이 아니다.
+// ---------------------------------------------------------------------
+
+for (const form of KNOWN_LIMITATION_FORMS) {
+  test(`알려진 한계 ${form.id} (${form.label}): 함수가 실제로는 정의되지 않는데도 지문은 정본과 같아 -> OK(변경 없음) -- 버그 아님, 문서화된 한계`, async () => {
+    const result = await judgeSeatProofWrapperCanonical(form.text, CANONICAL);
+    assert.deepEqual(
+      result,
+      { verdict: "OK" },
+      `${form.id}: 이 OK는 "함수가 안전하다"는 뜻이 아니다 -- 텍스트가 우연히 정본과 같은 바이트를 담고 있다는 뜻뿐이다(고의 우회는 탐지 대상 아님, §2-2)`,
+    );
+  });
+}
+
+// Direct existence check (not via runWrapperBehavior's PASS/REJECT/ERROR
+// classifier): confirms PowerShell never actually defines the function for
+// either known-limitation form. Deliberately does NOT assert what the
+// caller-convention comparison (`$seatProofExit -ne 0`) does with the
+// resulting $null -- that happens to read as REJECT for this specific
+// harness because $null -ne 0 is $true in PowerShell, but that is an
+// accident of this one comparison, not a guarantee this checker makes; the
+// only claim this module makes is FUNCTION_ABSENT itself.
+function checkFunctionDefined(functionDefinitionText, psExe) {
+  const dir = mkdtempSync(join(tmpdir(), "seat-proof-known-limit-"));
+  try {
+    const scriptPath = join(dir, "check.ps1");
+    const script = [
+      functionDefinitionText,
+      'if (Get-Command Invoke-SeatProofGate -ErrorAction SilentlyContinue) { Write-Output "FUNCTION_LIVE" } else { Write-Output "FUNCTION_ABSENT" }',
+    ].join("\n");
+    writeFileSync(scriptPath, script, "utf8");
+    try {
+      return execFileSync(
+        psExe,
+        ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", scriptPath],
+        { encoding: "utf8" },
+      );
+    } catch (err) {
+      return (err.stdout ?? "") + (err.stderr ?? "");
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+test(`알려진 한계 실증(행동): here-string/if($false) 문면은 PowerShell이 실제로는 Invoke-SeatProofGate 함수를 정의하지 않는다(FUNCTION_ABSENT) -- 지문은 OK라 해도 실물은 살아있지 않다는 뜻. PowerShell 없으면 사유와 함께 skip`, (t) => {
+  if (!PS_EXE) {
+    t.skip(
+      "SKIP_REASON: no PowerShell executable found on PATH (expected on CI without pwsh)",
+    );
+    return;
+  }
+  for (const form of KNOWN_LIMITATION_FORMS) {
+    const stdout = checkFunctionDefined(form.text, PS_EXE);
+    assert.match(
+      stdout,
+      /FUNCTION_ABSENT/,
+      `${form.id}: 실제로는 함수가 정의되지 않아야 한다 (actual output=${stdout})`,
+    );
+  }
 });
 
 // ---------------------------------------------------------------------
@@ -373,17 +442,17 @@ for (const form of SAFE_FORMS) {
 // CLI
 // ---------------------------------------------------------------------
 
-test("CLI: 정본 문면 파일(+실제 canonical.json) -> WRAPPER_SHAPE: OK + exit 0", () => {
+test("CLI: 정본 문면 파일(+실제 canonical.json) -> WRAPPER_CHANGED: NO + exit 0", () => {
   withFixtureDir((dir) => {
     const path = join(dir, "fixed.ps1");
     writeFileSync(path, FIXED_FUNCTION_TEXT, "utf8");
     const result = runCli(["--script", path]);
     assert.equal(result.status, 0);
-    assert.match(result.stdout, /^WRAPPER_SHAPE: OK$/m);
+    assert.match(result.stdout, /^WRAPPER_CHANGED: NO$/m);
   });
 });
 
-test("CLI: 결함 문면 파일 -> WRAPPER_SHAPE: BROKEN reason=CANONICAL_MISMATCH + exit 2", () => {
+test("CLI: 결함 문면 파일 -> WRAPPER_CHANGED: YES reason=CANONICAL_MISMATCH + exit 2", () => {
   withFixtureDir((dir) => {
     const path = join(dir, "broken.ps1");
     writeFileSync(path, BROKEN_FUNCTION_TEXT, "utf8");
@@ -391,12 +460,12 @@ test("CLI: 결함 문면 파일 -> WRAPPER_SHAPE: BROKEN reason=CANONICAL_MISMAT
     assert.equal(result.status, 2);
     assert.match(
       result.stdout,
-      /^WRAPPER_SHAPE: BROKEN reason=CANONICAL_MISMATCH$/m,
+      /^WRAPPER_CHANGED: YES reason=CANONICAL_MISMATCH$/m,
     );
   });
 });
 
-test("CLI: 우회 표기 파일도 -> BROKEN reason=CANONICAL_MISMATCH + exit 2 (표본 1개)", () => {
+test("CLI: 우회 표기 파일도 -> WRAPPER_CHANGED: YES reason=CANONICAL_MISMATCH + exit 2 (표본 1개)", () => {
   withFixtureDir((dir) => {
     const path = join(dir, "bypass.ps1");
     writeFileSync(path, BYPASS_FORMS[6].text, "utf8"); // form 7: 괄호식, 모양진단은 OK인 형태
@@ -404,8 +473,18 @@ test("CLI: 우회 표기 파일도 -> BROKEN reason=CANONICAL_MISMATCH + exit 2 
     assert.equal(result.status, 2);
     assert.match(
       result.stdout,
-      /^WRAPPER_SHAPE: BROKEN reason=CANONICAL_MISMATCH$/m,
+      /^WRAPPER_CHANGED: YES reason=CANONICAL_MISMATCH$/m,
     );
+  });
+});
+
+test("CLI: 알려진 한계 표기(here-string) -> 지문은 정본과 같아 WRAPPER_CHANGED: NO + exit 0 (버그 아님, 문서화된 한계 -- §2-2)", () => {
+  withFixtureDir((dir) => {
+    const path = join(dir, "limit.ps1");
+    writeFileSync(path, KNOWN_LIMITATION_FORMS[0].text, "utf8");
+    const result = runCli(["--script", path]);
+    assert.equal(result.status, 0);
+    assert.match(result.stdout, /^WRAPPER_CHANGED: NO$/m);
   });
 });
 
@@ -422,7 +501,7 @@ test("CLI: 존재하지 않는 --script 파일 -> exit 2 (fail-closed)", () => {
   assert.equal(result.status, 2);
 });
 
-test("CLI: 존재하지 않는 --canonical 파일 -> BROKEN reason=CANONICAL_FILE_UNREADABLE + exit 2 (fail-closed)", () => {
+test("CLI: 존재하지 않는 --canonical 파일 -> WRAPPER_CHANGED: YES reason=CANONICAL_FILE_UNREADABLE + exit 2 (fail-closed)", () => {
   withFixtureDir((dir) => {
     const scriptPath = join(dir, "fixed.ps1");
     writeFileSync(scriptPath, FIXED_FUNCTION_TEXT, "utf8");
@@ -435,7 +514,7 @@ test("CLI: 존재하지 않는 --canonical 파일 -> BROKEN reason=CANONICAL_FIL
     assert.equal(result.status, 2);
     assert.match(
       result.stdout,
-      /^WRAPPER_SHAPE: BROKEN reason=CANONICAL_FILE_UNREADABLE$/m,
+      /^WRAPPER_CHANGED: YES reason=CANONICAL_FILE_UNREADABLE$/m,
     );
   });
 });
@@ -464,7 +543,7 @@ test("CLI: 커스텀 --canonical 로 다른 정본 지정 가능 -- 그 지문�
       canonicalPath,
     ]);
     assert.equal(result.status, 0);
-    assert.match(result.stdout, /^WRAPPER_SHAPE: OK$/m);
+    assert.match(result.stdout, /^WRAPPER_CHANGED: NO$/m);
   });
 });
 

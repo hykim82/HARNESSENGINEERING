@@ -52,6 +52,47 @@
 //   (dispatch-worker.ps1 calling this CLI before trusting the seat-proof
 //   gate) is proposed only, in docs/control-room-patches/
 //   HYK-323-seat-proof-wrapper-shape-check.md -- not applied by this round.
+//
+// HYK-323 (wrapper-shape-4, scope-narrowing final round, 책임자 판정
+// 2026-08-20 00:02 "ⓐ 범위 축소" 확정): review r3 proved the fingerprint
+// verdict itself is text-only in a way wrapper-shape-3's header did not
+// spell out plainly enough -- pasting the EXACT canonical body inside a
+// PowerShell here-string (`@'...'@`), or inside a dead `if ($false) { ... }`
+// block, makes `extractAllFunctionBodies` find and hash the same braced
+// text even though no `Invoke-SeatProofGate` function is ever actually
+// defined at runtime (confirmed with pwsh: calling the wrapper then throws
+// "not recognized" -- FUNCTION_ABSENT). The fingerprint verdict reads that
+// as OK/unchanged. This is not a bug to patch (three straight review rounds
+// already proved chasing individual notations is a losing game -- see
+// wrapper-shape-3 header above); it is the FLOOR of what text comparison
+// can ever promise, and this round's job is to say that floor out loud
+// instead of letting the tool's name imply more. Restated as the six-line
+// honesty contract (§2-2 of the HYK-323-wrapper-shape-4 task, keep this
+// wording identical in the result file and in
+// docs/control-room-patches/HYK-323-seat-proof-wrapper-shape-check.md):
+//
+//   1. 이 검사기가 하는 일: 관제실 좌석증명 래퍼 함수가 정본과 달라졌는지
+//      알린다. 그뿐이다.
+//   2. 막는 것: 사고성 회귀(실수로 결함 재도입) -- 텍스트가 바뀌면 반드시
+//      걸린다.
+//   3. 막지 못하는 것: 고의 우회. 실측된 예 -- 정본 본문을 here-string
+//      안에 넣거나 `if ($false)` 블록 안에 넣으면 함수가 존재하지
+//      않는데도 지문이 같다(검토 3차 실증, pwsh 로 FUNCTION_ABSENT 확인).
+//   4. 왜 그 이상 못 가나: 텍스트 분석은 실행 문맥을 모른다. 그리고
+//      관제실을 고칠 수 있는 주체는 이 검사기도 끌 수 있다 -- 이 층에
+//      "공격자 방어"를 기대하면 안 된다.
+//   5. CI 는 관제실을 볼 수 없다 -- 이 검사는 로컬 앵커다(기존 방식도
+//      마찬가지였다).
+//   6. 정본 갱신 절차: 관제실 함수를 정당하게 고치면 ⑴새 지문 측정
+//      ⑵사유 기재 ⑶검토 라운드 경유(HYK-306 방식).
+//
+// The verdict's printed vocabulary changed accordingly: `WRAPPER_SHAPE:
+// OK|BROKEN` (read too easily as "the wrapper is safe") is now
+// `WRAPPER_CHANGED: NO|YES` (says only what was actually checked -- did the
+// live text move away from the pinned fingerprint). The `verdict`/
+// `reasonCode` fields returned by the exported functions are internal API
+// and are unchanged (OK/BROKEN) -- only the CLI's human-facing stdout
+// wording changed; callers that parse the exported objects are unaffected.
 
 const FUNCTION_NAME = "Invoke-SeatProofGate";
 // Call recognition is anchored on the call operator + command name
@@ -454,7 +495,7 @@ if (invokedDirectly) {
   } catch (err) {
     // Fail-closed (§3 item 6): a missing/unreadable canonical file must
     // never be silently treated as "no fingerprint required."
-    console.log(`WRAPPER_SHAPE: BROKEN reason=CANONICAL_FILE_UNREADABLE`);
+    console.log(`WRAPPER_CHANGED: YES reason=CANONICAL_FILE_UNREADABLE`);
     console.error(
       `  detail: failed to read/parse --canonical file '${canonicalPath}': ${err.message}`,
     );
@@ -466,15 +507,15 @@ if (invokedDirectly) {
     const d = result.diagnostic;
     console.log(
       d.verdict === "OK"
-        ? "WRAPPER_SHAPE_DIAGNOSTIC: OK (shape recognized as safe -- informational only, not the verdict)"
-        : `WRAPPER_SHAPE_DIAGNOSTIC: BROKEN reason=${d.reasonCode} (informational only, not the verdict)`,
+        ? "WRAPPER_SHAPE_DIAGNOSTIC: NO_KNOWN_SHAPE_DEVIATION (informational only, not the verdict -- see module header for what this does and does not prove)"
+        : `WRAPPER_SHAPE_DIAGNOSTIC: DEVIATION reason=${d.reasonCode} (informational only, not the verdict)`,
     );
   }
   if (result.verdict === "OK") {
-    console.log("WRAPPER_SHAPE: OK");
+    console.log("WRAPPER_CHANGED: NO");
     process.exit(0);
   }
-  console.log(`WRAPPER_SHAPE: BROKEN reason=${result.reasonCode}`);
+  console.log(`WRAPPER_CHANGED: YES reason=${result.reasonCode}`);
   if (result.detail) console.error(`  detail: ${result.detail}`);
   process.exit(2);
 }
