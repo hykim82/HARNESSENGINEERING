@@ -16,6 +16,13 @@ import { execSync } from "node:child_process";
 //      If it's deleted (or unreadable), the next run cannot tell what's new
 //      and treats every current drift item as new -- one louder run, by
 //      design (see readPreviousDriftKeys below), not a bug.
+// HYK-305-quiet-2 (P1 fix, review r1 rejected): IN_SYNC now also updates the
+// drift-report file to "0 keys" (clearDriftReportForInSync) instead of
+// leaving the previous drift run's list sitting there stale -- otherwise a
+// resolved item that later recurs is never "new" (its key never left the
+// previous-keys set) and silently stops showing detail on screen forever.
+// UNJUDGABLE deliberately does NOT clear it -- "couldn't judge" must never
+// be read as "found 0 drift" (see reportVerdictAndExit).
 
 // STATUS lives outside the repo (control room), same situation status-fresh.mjs
 // documents -- there is no in-repo default that resolves to a real file, so the
@@ -602,6 +609,30 @@ export function reportDriftDetails(
   }
 }
 
+// HYK-305-quiet-2 (P1 fix): IN_SYNC must also update the drift-report file,
+// clearing its key set to empty -- otherwise a resolved drift item that
+// later recurs is never "new" (computeDriftTransition sees it in a stale,
+// never-cleared previous-keys set) and its detail silently stops showing on
+// screen forever, even though the drift-report file is supposed to always
+// reflect the *current* state. This is deliberately NOT called for
+// UNJUDGABLE (see reportVerdictAndExit) -- "couldn't judge" is not "found
+// 0 drift," and clearing on UNJUDGABLE would make every real drift item
+// look "new" again the next time a judgment succeeds, which is exactly the
+// silent-loss failure mode §2-4 forbids.
+export function clearDriftReportForInSync(driftReportPath) {
+  const writeResult = writeDriftReport(driftReportPath, {
+    generatedAt: new Date().toISOString(),
+    counts: { stale: 0, missing: 0, state: 0 },
+    keys: [],
+    lines: [],
+  });
+  if (!writeResult.ok) {
+    console.warn(
+      `linear-sync: 상세 파일을 갱신하지 못했습니다(${writeResult.error}) -- 판정에는 영향 없음`,
+    );
+  }
+}
+
 // Loads §6/§7 from STATUS.md and fetches Linear -- returns everything the
 // verdict/reporting stage needs, or null if a precondition (API key, STATUS
 // file) already forces UNJUDGABLE without ever reading STATUS.md.
@@ -655,6 +686,12 @@ function reportVerdictAndExit(
   { sixResult, staleInStatus, missingInStatus, stateDrift, driftReportPath },
 ) {
   if (verdict === SYNC_VERDICT.UNJUDGABLE) {
+    // HYK-305-quiet-2: deliberately does NOT touch the drift-report file
+    // (no clearDriftReportForInSync call here, unlike the IN_SYNC branch
+    // below) -- "couldn't judge" is not "found 0 drift." Clearing it here
+    // would make every real, still-standing drift item look brand new the
+    // next time a judgment actually succeeds, which is the same silent-loss
+    // failure this round exists to close, just via the opposite branch.
     const reason = !sixResult.headerFound
       ? "section_6_header_not_found"
       : "api_error";
@@ -670,6 +707,10 @@ function reportVerdictAndExit(
     console.log(
       `linear-sync verdict: ${SYNC_VERDICT.IN_SYNC} -- ${sixResult.issues.length} open issue(s) in STATUS §6 match Linear.`,
     );
+    // P1 fix: reflect "0 drift now" in the drift-report file too, so a
+    // later recurrence of a resolved item is judged against an empty
+    // previous-keys set and shows up as new (see clearDriftReportForInSync).
+    clearDriftReportForInSync(driftReportPath);
   } else {
     // HYK-131: advisory normalization. A confirmed drift is a signal for a
     // human/ORCH to reconcile against live Linear, not something ORCH can
