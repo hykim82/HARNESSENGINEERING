@@ -1,4 +1,4 @@
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync, existsSync, statSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execSync, execFileSync } from "node:child_process";
@@ -219,13 +219,54 @@ function resolveResultBlockedState(resultContent) {
   return { state: RESULT_BLOCK_STATE.NONE };
 }
 
+// HYK-313 §2: how long the round has gone with no observable change to its
+// result file. `now`/`resultMtimeMs` are both caller-supplied (mirrors the
+// rest of this file's clock-injection convention, see checkRelayHandshake's
+// own `now` header comment) -- a missing/unmeasurable mtime (stat failure,
+// isolated fixture with no fs access) returns `null`, never a guessed value
+// (resolveMissingDoneOutcome treats `null` as "cannot judge age", falling
+// back to the pre-HYK-313 unconditional PENDING -- fail-quiet, not
+// fail-stalled, per §4-1's "오탐 0" 비타협).
+function computePendingAgeMs(now, resultMtimeMs) {
+  if (typeof now !== "number" || !Number.isFinite(now)) return null;
+  if (typeof resultMtimeMs !== "number" || !Number.isFinite(resultMtimeMs)) {
+    return null;
+  }
+  const ageMs = now - resultMtimeMs;
+  return Number.isFinite(ageMs) ? ageMs : null;
+}
+
+// HYK-313 §4-1: threshold picked with a documented margin over the longest
+// OBSERVED legitimate round in coder-task.md §0 (26 minutes, real incident on
+// 2026-08-19) -- 30 minutes give that round ~15% headroom before this axis
+// would ever call it stalled. This is the ONLY place §2's invariant trades
+// off false positives against detection latency; a round genuinely still
+// writing its result file within the last 30 minutes is never reclassified.
+export const PENDING_STALL_THRESHOLD_MS = 30 * 60 * 1000;
+
 // Extracted from checkRelayHandshake (quality-check: keeps its own
 // complexity/line-count under the repo's ESLint ceiling) -- called only
 // when resolveResultDoneMatch already confirmed genuine absence
 // (`resultDone.missing`, i.e. not the separate ambiguous-DONE case above).
 // Turns resolveResultBlockedState's 5-way state into the handshake's
 // final ok:false return shape for this branch.
-function resolveMissingDoneOutcome(resultContent, resultDoneReason) {
+//
+// HYK-313 §2/§4-2: `age` is the only new parameter -- BLOCKED/NEEDS_INPUT/
+// AMBIGUOUS_BLOCKED/MALFORMED_BLOCKED below are all returned byte-identical
+// to before this round (§4-2 비타협). Only the trailing `blocked.state ===
+// NONE` branch (the actual "PENDING" case) changes: it now distinguishes a
+// freshly-written result file (state stays "PENDING", reason unchanged --
+// §4-1 오탐 0, byte-identical to pre-HYK-313 for every round under the
+// threshold) from one whose mtime has not moved in
+// >= PENDING_STALL_THRESHOLD_MS (a NEW `state: "STALLED_PENDING"`, §2's
+// "표면화된 신호" -- still `ok:false`, so §4-2's "기존 ok/state 계약을 깨지
+// 마라" is read as "don't touch the other four states", not "PENDING itself
+// may never gain a new sibling value").
+function resolveMissingDoneOutcome(
+  resultContent,
+  resultDoneReason,
+  { now, resultMtimeMs } = {},
+) {
   const blocked = resolveResultBlockedState(resultContent);
   if (
     blocked.state === RESULT_BLOCK_STATE.BLOCKED ||
@@ -243,7 +284,26 @@ function resolveMissingDoneOutcome(resultContent, resultDoneReason) {
   ) {
     return { ok: false, state: blocked.state, reason: blocked.reason };
   }
-  // blocked.state === NONE -- genuinely still in progress, not blocked.
+  // blocked.state === NONE -- genuinely still in progress or genuinely
+  // stalled; computePendingAgeMs (not this function) is where that line is
+  // decided.
+  const ageMs = computePendingAgeMs(now, resultMtimeMs);
+  if (ageMs !== null && ageMs >= PENDING_STALL_THRESHOLD_MS) {
+    return {
+      ok: false,
+      state: "STALLED_PENDING",
+      reason: `${resultDoneReason} -- result file has not changed in ${Math.round(
+        ageMs / 1000,
+      )}s (>= ${PENDING_STALL_THRESHOLD_MS / 1000}s stall threshold, HYK-313): worker may have stopped mid-task without a DONE/BLOCKED/NEEDS_INPUT marker (조용한 무한 대기 방지 -- 오탐 방지 근거는 이 함수 바로 위 PENDING_STALL_THRESHOLD_MS 주석 참조)`,
+      ageMs,
+    };
+  }
+  // HYK-313 2R (REVIEW 반려 1 수리): fresh PENDING returns EXACTLY the same
+  // shape as the pre-HYK-313 parent commit -- `ageMs` is deliberately never
+  // attached here (only the STALLED_PENDING branch above carries it, since
+  // that is the new state this round introduces). The task's own "기존과
+  // byte-identical" contract for fresh PENDING means the object itself, not
+  // just its `state`/`reason` string values.
   return { ok: false, state: "PENDING", reason: resultDoneReason };
 }
 
@@ -251,9 +311,9 @@ function resolveMissingDoneOutcome(resultContent, resultDoneReason) {
 // siblings above) -- wraps resolveResultDoneMatch's ok:false outcome,
 // routing the genuine-absence case through resolveMissingDoneOutcome and
 // leaving the ambiguous-DONE case's existing reason untouched.
-function resolveResultDoneOutcome(resultContent, resultDone) {
+function resolveResultDoneOutcome(resultContent, resultDone, ageCtx) {
   if (resultDone.missing) {
-    return resolveMissingDoneOutcome(resultContent, resultDone.reason);
+    return resolveMissingDoneOutcome(resultContent, resultDone.reason, ageCtx);
   }
   return { ok: false, reason: resultDone.reason };
 }
@@ -643,7 +703,7 @@ function spawnMarkObservationConsumed({ taskId, droppedAt, role, harnessDir }) {
 function resolveDoneAt(
   resultContent,
   now,
-  { taskId, droppedAtRaw, role, harnessDir } = {},
+  { taskId, droppedAtRaw, role, harnessDir, resultMtimeMs } = {},
 ) {
   const resultDone = resolveResultDoneMatch(resultContent);
   if (!resultDone.ok) {
@@ -652,7 +712,14 @@ function resolveDoneAt(
     // reclassified as an explicit BLOCKED/NEEDS_INPUT state. The
     // ambiguous-DONE case above keeps its existing reason/behavior
     // untouched (regression 0 on the `>>> DONE:` path).
-    return resolveResultDoneOutcome(resultContent, resultDone);
+    // HYK-313: `{ now, resultMtimeMs }` only ever reaches
+    // resolveMissingDoneOutcome (via resolveResultDoneOutcome) -- the
+    // ambiguous-DONE branch inside resolveResultDoneOutcome ignores this
+    // 3rd argument entirely, so its own reason/behavior is untouched.
+    return resolveResultDoneOutcome(resultContent, resultDone, {
+      now,
+      resultMtimeMs,
+    });
   }
   const doneMatch = resultDone.match;
   // HYK-257-done-stamp-2 §2 범위1: record-then-compare happens here, BEFORE
@@ -768,12 +835,29 @@ function resolveTaskAndResultFiles(role, harnessDir) {
     };
   }
 
+  // HYK-313 §2: resultPath's own fs mtime is the one age signal this round
+  // adds -- engine-agnostic (filesystem-only, no Claude-hook/codex-session
+  // dependency, §3 요건) and reflects "언제 이 결과 파일이 마지막으로
+  // 쓰였는가" directly, unlike dropped_at (a round can legitimately still be
+  // actively writing long after it was dropped -- see resolveMissingDoneOutcome's
+  // own header for why dropped_at was rejected as the age basis). Best-effort:
+  // a stat failure here must not block the handshake's existing checks, so it
+  // degrades to `null` (resolveMissingDoneOutcome then falls back to the
+  // pre-HYK-313 unconditional PENDING, never mis-stalls on a measurement gap).
+  let resultMtimeMs;
+  try {
+    resultMtimeMs = statSync(resultPath).mtimeMs;
+  } catch {
+    resultMtimeMs = null;
+  }
+
   return {
     ok: true,
     taskPath,
     resultPath,
     taskContent: readFileSync(taskPath, "utf8"),
     resultContent: readFileSync(resultPath, "utf8"),
+    resultMtimeMs,
   };
 }
 
@@ -1001,7 +1085,7 @@ export function checkRelayHandshake({
 }) {
   const filesResolved = resolveTaskAndResultFiles(role, harnessDir);
   if (!filesResolved.ok) return filesResolved;
-  const { taskContent, resultContent } = filesResolved;
+  const { taskContent, resultContent, resultMtimeMs } = filesResolved;
 
   const idResolved = resolveMatchedTaskId(taskContent, resultContent);
   if (!idResolved.ok) return idResolved;
@@ -1016,6 +1100,7 @@ export function checkRelayHandshake({
     droppedAtRaw: droppedMatch[1].trim(),
     role,
     harnessDir,
+    resultMtimeMs,
   });
   if (!doneResolved.ok) return doneResolved;
   const { doneAt, doneMatch, observation } = doneResolved;
