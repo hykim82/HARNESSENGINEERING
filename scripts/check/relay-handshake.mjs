@@ -950,7 +950,17 @@ function runCompletionSideEffects({
   // try/catch-wrapped subprocess spawn, never a static import, so the 1R
   // isolated-fixture failure this design avoids stays avoided -- see that
   // function's own header).
-  const admissionReturned = spawnAdmissionCompletion(taskId, harnessDir);
+  // HYK-312 §1: this local closure captures `harnessDir` (already a
+  // parameter of the enclosing runCompletionSideEffects) so the module-level
+  // spawnAdmissionCompletionProcess can learn which round directory is
+  // actually being consumed, WITHOUT changing this call site's own text --
+  // relay-handshake-completion-wire.test.mjs's ⓒ mutation test pins that
+  // exact call-site line as its deletion target (see that test's own
+  // `target` constant), so the call site itself must stay byte-identical.
+  function spawnAdmissionCompletion(taskId) {
+    return spawnAdmissionCompletionProcess(taskId, harnessDir);
+  }
+  const admissionReturned = spawnAdmissionCompletion(taskId);
 
   // HYK-244 2R-a §2 조각2: the moment every above effect's OWN outcome is
   // known (never before -- §1 실측: 이 셋은 실패해도 로그만 남기고 위
@@ -1069,7 +1079,12 @@ export function wasAdmissionCompletionAttempted(stdout) {
   return !String(stdout ?? "").includes("not attempted");
 }
 
-function spawnAdmissionCompletion(taskId, harnessDir) {
+// HYK-312 §1: renamed from `spawnAdmissionCompletion` -- the name
+// `spawnAdmissionCompletion` is now the local single-arg closure defined
+// inside runCompletionSideEffects (captures harnessDir from that scope), so
+// this two-arg implementation function needed a distinct name to avoid
+// shadowing confusion. Behavior is otherwise byte-for-byte unchanged.
+function spawnAdmissionCompletionProcess(taskId, harnessDir) {
   try {
     const adapterPath = join(
       dirname(fileURLToPath(new URL(import.meta.url))),
