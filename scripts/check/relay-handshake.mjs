@@ -483,7 +483,16 @@ function traceUnblockedRecordFailure(recordOutcome) {
   );
 }
 
-function parseKstTimestamp(str) {
+// ⛔HYK-324/HYK-325 r2 (REVIEW 반려 P1 수리): exported so finalize-done.mjs
+// can reuse this exact parse -- same reason DONE_RE/hasDoneSecondsPrecision
+// are exported above. Before this export, finalize-done.mjs's own
+// "malformed, eligible for one-time replace" test only checked
+// hasDoneSecondsPrecision, never whether the value actually parses --
+// so a DONE line with an out-of-range date but seconds-shaped text (e.g.
+// '2026-99-99 23:19:01 KST') was "not parseable" here (first observation
+// skipped, "can be replaced" told to the caller) but NOT malformed there
+// (ALREADY_FINALIZED refused) -- the exact split 검토자가 실측한 것.
+export function parseKstTimestamp(str) {
   if (typeof str !== "string") return null;
   const cleaned = str.trim().replace(/\s*KST\s*$/i, "");
   const match = cleaned.match(
@@ -492,6 +501,19 @@ function parseKstTimestamp(str) {
   if (!match) return null;
   const date = new Date(`${match[1]}T${match[2]}+09:00`);
   return Number.isNaN(date.getTime()) ? null : date;
+}
+
+// HYK-324/HYK-325 r2: the ONE place "형식 유효" (format-valid DONE
+// timestamp) is defined -- "파싱 가능 + 초 단위", exactly what resolveDoneAt
+// below gates on (see its two checks just below this function's call
+// sites). finalize-done.mjs's malformedSingle reuses this directly instead
+// of re-deriving the same two conditions with its own (previously
+// incomplete) copy -- coder-task.md r2 §2-1's explicit "한 곳에서만
+// 정의하고 양쪽이 재사용하라".
+export function isWellFormedDoneTimestamp(rawText) {
+  return (
+    parseKstTimestamp(rawText) !== null && hasDoneSecondsPrecision(rawText)
+  );
 }
 
 // HYK-186 §2 완료조건2: `now` is the ONLY caller-injectable clock in this

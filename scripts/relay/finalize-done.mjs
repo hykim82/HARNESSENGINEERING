@@ -27,11 +27,20 @@ import {
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
-// HYK-324/HYK-325 §2-1: reuse relay-handshake.mjs's own "well-formed DONE
-// line" contract (DONE_RE + hasDoneSecondsPrecision) instead of inventing a
-// second copy that could silently drift -- coder-task.md §2-1's explicit
-// instruction. relay-handshake.mjs already exports both for this reason.
-import { DONE_RE, hasDoneSecondsPrecision } from "../check/relay-handshake.mjs";
+// HYK-324/HYK-325 §2-1 (r2 수리: 검토 반려 P1): reuse relay-handshake.mjs's
+// own "well-formed DONE line" contract -- DONE_RE for finding the line, and
+// isWellFormedDoneTimestamp (== "파싱 가능 + 초 단위", relay-handshake's
+// resolveDoneAt gate) for deciding whether it's malformed-and-replaceable --
+// instead of inventing a second copy that could silently drift. r1 only
+// reused hasDoneSecondsPrecision (not the parseability half), so a
+// seconds-shaped-but-unparseable value (e.g. '2026-99-99 23:19:01 KST')
+// was "not parseable" (replaceable) at the handshake but ALREADY_FINALIZED
+// (not replaceable) here -- 검토 반려 원문 참조. r2: both sides now call
+// the exact same exported function.
+import {
+  DONE_RE,
+  isWellFormedDoneTimestamp,
+} from "../check/relay-handshake.mjs";
 
 const DONE_LINE_RE = /^>>>\s*DONE:/im;
 // HYK-325 §2-1 (2회째 교체 금지): once finalizeDone has replaced one
@@ -85,14 +94,16 @@ export const FINALIZE_DONE_REASON = Object.freeze({
 // finalizeDone below only decides WHETHER to call this (does a DONE line
 // exist at all) and performs the actual write.
 //
-// HYK-324/HYK-325 §2-1: a '>>> DONE:' line already exists -- decide
-// whether it's format-valid (reuse relay-handshake.mjs's own seconds-
-// precision contract, per coder-task.md §2-1's explicit "don't invent a
-// new criterion" instruction) or eligible for a ONE-TIME replace. Only the
-// exact shape this repo actually hits (exactly one DONE_RE match, missing
-// seconds precision) is treated as malformed-and-replaceable; anything
-// else (zero matches despite the loose DONE_LINE_RE test, or more than one
-// DONE_RE match/ambiguous) falls back to the existing, conservative
+// HYK-324/HYK-325 §2-1 (r2: isWellFormedDoneTimestamp, not just
+// hasDoneSecondsPrecision -- 검토 반려 P1 수리): a '>>> DONE:' line already
+// exists -- decide whether it's format-valid (reuse relay-handshake.mjs's
+// own "파싱 가능 + 초 단위" contract wholesale, per coder-task.md's explicit
+// "don't invent a new criterion" instruction) or eligible for a ONE-TIME
+// replace. Only the exact shape this repo actually hits (exactly one
+// DONE_RE match, format-invalid per that shared contract) is treated as
+// malformed-and-replaceable; anything else (zero matches despite the loose
+// DONE_LINE_RE test, or more than one DONE_RE match/ambiguous) falls back
+// to the existing, conservative
 // ALREADY_FINALIZED refusal -- this producer never guesses which line to
 // touch when it can't tell.
 function resolveExistingDoneLine({ existing, resultPath, role, nowFn }) {
@@ -110,7 +121,7 @@ function resolveExistingDoneLine({ existing, resultPath, role, nowFn }) {
 
   const doneMatches = [...existing.matchAll(DONE_RE)];
   const malformedSingle =
-    doneMatches.length === 1 && !hasDoneSecondsPrecision(doneMatches[0][1]);
+    doneMatches.length === 1 && !isWellFormedDoneTimestamp(doneMatches[0][1]);
 
   if (!malformedSingle) {
     return {
