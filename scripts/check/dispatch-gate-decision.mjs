@@ -75,6 +75,12 @@ import { toConsumptionGateDecision } from "./consumption-receipt-core.mjs";
 // CONSUMPTION_RECEIPT_CORE_PATH 추가 때와 같은 이유, 그 시험 파일들
 // 자신의 주석 참조).
 import { checkAbortRecord, ABORT_RECORD_STATE } from "./abort-record-core.mjs";
+// HYK-307-order-1 §1: the delivery-time round-task snapshot (§ bestEffortSnapshotRoundTaskFile
+// below) reuses this existing, already-tested preservation primitive
+// (envelope-archive.mjs, HYK-204/HYK-241) rather than inventing a second
+// archive mechanism -- scripts/check -> scripts/check, same allowed
+// direction this file already uses for every other sibling import above.
+import { archiveRoundTaskFileIfNew } from "./envelope-archive.mjs";
 // HYK-239: reject-streak-chain.mjs's tamper-detection engine has existed
 // since HYK-218 with zero production callers (§0 실측). This is the wiring
 // -- NOT reject-streak.mjs/relay-handshake.mjs/review-gate.mjs, which the
@@ -1608,6 +1614,55 @@ function guardAgainstLiveTaskPathStamp(taskPath, args) {
   );
 }
 
+// HYK-307-order-1 §1 (실사고 재발 방지 -- §0 원문): ORCH가 소비(핸드셰이크)
+// 전에 `<role>-task.md`를 다음 라운드로 덮어쓰면, 이제껏 그 라운드의
+// 유일한 원본이던 그 파일 내용이 영구히 사라졌다 -- 소비가 성공할 때만
+// 원문을 보존하는 envelope-archive.mjs의 archiveRoundTaskFile(관제실
+// relay-handshake.mjs 쪽 호출, HYK-241)은 «소비가 아예 안 일어난» 이
+// 사고 모양을 덮지 못했다(§0-4 원문: 소비 실패 -> 보관본도 없음).
+//
+// ★언제 스냅숏하면 "직전 라운드 원문"이 보장되는가(실측 근거): 이 함수
+// (bestEffortStampDroppedAt)는 실물 앵커(관제실 dispatch-worker.ps1:171)가
+// «배달 직전 항상» 부르는 이 CLI 안에서, dropped_at을 막 기계로 찍은
+// 직후에 실행된다 -- 이 순간의 taskPath 내용은 "지금 배달하려는 바로 그
+// 라운드"의 최종 원문(막 찍힌 dropped_at 포함)이다. 이 시점에 스냅숏해
+// 두면, ORCH가 이 라운드의 소비를 하기 전에 다음 라운드로 taskPath를
+// 덮어쓰더라도 -- 심지어 소비 핸드셰이크가 영영 안 일어나더라도 -- 이
+// 라운드 원문은 이미 `.harness/rounds/<role>-task-r<N>.md`에 별도
+// 파일로 살아남는다. 정상 소비가 나중에 일어나면(relay-handshake.mjs의
+// archiveRoundTaskFile) 같은 내용을 다시 보존하려 시도하지만,
+// archiveRoundTaskFileIfNew의 동일-내용 중복 방지(바로 위 import 주석)
+// 덕에 두 번째 호출은 조용히 스킵되어 기존 흐름의 관찰 가능한 동작이
+// 바뀌지 않는다(§3 시험 ⓓ).
+//
+// best-effort, 절대 throw하지 않고 이 CLI의 exit code에 영향을 주지
+// 않는다 -- bestEffortStampDroppedAt 자신의 house style(주석 상단)과
+// 동일. dropped_at: 줄이 아예 없는 파일(구조적 전제 미충족, 위 skip
+// 분기)은 이 함수도 건드리지 않는다 -- 그 부재는 이 라운드가 다루는
+// 실패 모드가 아니다(위 house style 그대로).
+function bestEffortSnapshotRoundTaskFile(taskPath, taskContent) {
+  const role = deriveRoleFromTaskPath(taskPath);
+  if (!role) return;
+  try {
+    const outcome = archiveRoundTaskFileIfNew({
+      role,
+      taskContent,
+      harnessDir: dirname(taskPath),
+    });
+    if (!outcome.ok) {
+      console.error(
+        `dispatch-gate-decision: round task-file snapshot skipped (${outcome.reason})`,
+      );
+    } else if (!outcome.skipped) {
+      console.log(`dispatch-gate-decision: ${outcome.reason}`);
+    }
+  } catch (err) {
+    console.error(
+      `dispatch-gate-decision: round task-file snapshot failed (non-fatal, best-effort): ${err.message}`,
+    );
+  }
+}
+
 function bestEffortStampDroppedAt(taskPath, args) {
   guardAgainstLiveTaskPathStamp(taskPath, args);
   try {
@@ -1642,11 +1697,20 @@ function bestEffortStampDroppedAt(taskPath, args) {
       DROPPED_AT_LINE_RE,
       `dropped_at: ${stamped.value}`,
     );
-    if (rewritten === original) return;
+    if (rewritten === original) {
+      // HYK-307-order-1 §1: value didn't change (re-run against an
+      // already-stamped file), but the content is still this round's final
+      // text -- still worth snapshotting (idempotent via
+      // archiveRoundTaskFileIfNew's content match, see that call's own
+      // header comment above).
+      bestEffortSnapshotRoundTaskFile(taskPath, original);
+      return;
+    }
     writeFileSync(taskPath, rewritten, "utf8");
     console.log(
       `dispatch-gate-decision: dropped_at machine-stamped (HYK-257-done-stamp-2 §2 범위2 ⓑ) -- ${taskPath} -> '${stamped.value}'`,
     );
+    bestEffortSnapshotRoundTaskFile(taskPath, rewritten);
   } catch (err) {
     console.error(
       `dispatch-gate-decision: dropped_at stamp best-effort failed (non-fatal to this CLI's own exit code): ${err.message}`,

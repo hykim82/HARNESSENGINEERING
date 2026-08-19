@@ -47,6 +47,11 @@ const CONSUMPTION_RECEIPT_CORE_PATH = join(
 );
 const DROPPED_AT_STAMP_CORE_PATH = join(HERE, "dropped-at-stamp-core.mjs");
 const ABORT_RECORD_CORE_PATH = join(HERE, "abort-record-core.mjs");
+// HYK-307-order-1 §1: dispatch-gate-decision.mjs now statically imports
+// scripts/check/envelope-archive.mjs (the delivery-time round-task
+// snapshot, archiveRoundTaskFileIfNew) -- same MODULE_NOT_FOUND reasoning
+// as the other *_PATH additions above.
+const ENVELOPE_ARCHIVE_PATH = join(HERE, "envelope-archive.mjs");
 
 const ONE_B_BLOCK =
   "1b_exec_line: node scripts/check/dispatch-gate-decision.mjs <task-path>\n1b_shown: ALLOW 또는 REJECT 한 줄과 사유\n1b_reach_path: CLI 종료코드가 관제실 화면에 즉시 뜬다\n";
@@ -311,6 +316,7 @@ function stageScriptsCheckDir(rootDir, overrides) {
       "utf8",
     ),
     "abort-record-core.mjs": readFileSync(ABORT_RECORD_CORE_PATH, "utf8"),
+    "envelope-archive.mjs": readFileSync(ENVELOPE_ARCHIVE_PATH, "utf8"),
     ...overrides,
   };
   for (const [name, content] of Object.entries(files)) {
