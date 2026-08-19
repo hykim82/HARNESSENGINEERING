@@ -51,6 +51,11 @@ const DROPPED_AT_STAMP_CORE_PATH = join(HERE, "dropped-at-stamp-core.mjs");
 // the mutant module fails to load (MODULE_NOT_FOUND), same reasoning as
 // CONSUMPTION_RECEIPT_CORE_PATH/DROPPED_AT_STAMP_CORE_PATH above.
 const ABORT_RECORD_CORE_PATH = join(HERE, "abort-record-core.mjs");
+// HYK-311-retire-1 §2: dispatch-gate-decision.mjs now ALSO statically
+// imports scripts/check/retirement-record-core.mjs (the new, separate
+// zero-import retirement-record core) -- same MODULE_NOT_FOUND reasoning as
+// ABORT_RECORD_CORE_PATH immediately above.
+const RETIREMENT_RECORD_CORE_PATH = join(HERE, "retirement-record-core.mjs");
 // HYK-307-order-1 §1: dispatch-gate-decision.mjs now statically imports
 // scripts/check/envelope-archive.mjs (the delivery-time round-task
 // snapshot, archiveRoundTaskFileIfNew) -- this isolated fixture's staged
@@ -100,6 +105,10 @@ function stageScriptsCheckDir(rootDir, overrides) {
       "utf8",
     ),
     "abort-record-core.mjs": readFileSync(ABORT_RECORD_CORE_PATH, "utf8"),
+    "retirement-record-core.mjs": readFileSync(
+      RETIREMENT_RECORD_CORE_PATH,
+      "utf8",
+    ),
     "envelope-archive.mjs": readFileSync(ENVELOPE_ARCHIVE_PATH, "utf8"),
     ...overrides,
   };

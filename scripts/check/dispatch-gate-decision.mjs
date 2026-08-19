@@ -75,6 +75,22 @@ import { toConsumptionGateDecision } from "./consumption-receipt-core.mjs";
 // CONSUMPTION_RECEIPT_CORE_PATH 추가 때와 같은 이유, 그 시험 파일들
 // 자신의 주석 참조).
 import { checkAbortRecord, ABORT_RECORD_STATE } from "./abort-record-core.mjs";
+// HYK-311-retire-1 §2: same zero-import-core / adapter-extracts-facts
+// precedent as abort-record-core.mjs directly above (own closed state set,
+// own JSON directory `.harness/retirements/`) -- this is a SEPARATE axis,
+// does NOT touch abort-record-core.mjs's MISSING-label-only scope. ⛔this
+// new import is also added to the fixed-file-list mutation tests that
+// isolate-clone this file (hyk241-oneb-gate-mutation.test.mjs ·
+// dispatch-gate-consumption-wire.test.mjs · dispatch-gate-abort-wire.test.mjs ·
+// hyk263-archive-doneat.test.mjs · hyk298-3r-envelope-fixtures.test.mjs),
+// same reasoning as the ABORT_RECORD_CORE_PATH addition in each of those
+// files' own comments.
+import {
+  checkRetirementRecord,
+  RETIREMENT_RECORD_STATE,
+  RETIREMENT_BLOCK_REASON,
+  MECHANICALLY_CONFIRMABLE_BLOCK_REASONS,
+} from "./retirement-record-core.mjs";
 // HYK-307-order-1 §1: the delivery-time round-task snapshot (§ bestEffortSnapshotRoundTaskFile
 // below) reuses this existing, already-tested preservation primitive
 // (envelope-archive.mjs, HYK-204/HYK-241) rather than inventing a second
@@ -1355,6 +1371,233 @@ function resolveAbortRecordOutcome({
   return { done: false };
 }
 
+// ===========================================================================
+// HYK-311-retire-1 §2 -- «은퇴 기록»(retirement record) 축.
+//
+// §1 무엇을 위한 것인가(retirement-record-core.mjs 헤더 §1 원문 요약):
+// abort-record 축(바로 위)은 이름표(`task_id:`)가 «아예 없는»(MISSING)
+// 라운드만 구제한다 -- classifyTaskIdLabel의 kind === "MISSING" 한정,
+// HYK-298-key-narrow-4 §2가 확정한 경계이며 이 축은 그 경계를 조금도
+// 건드리지 않는다(아래 maybeResolveRetirementForValidLabel은 kind ===
+// "VALID"일 때만 시도된다, MISSING/BROKEN은 전혀 이 축을 거치지 않는다).
+// 그런데 이름표는 멀쩡한데(VALID) 정상 소비 영수증 체인
+// (consumption-receipt-core.mjs, tryArchiveFallback 포함)으로 절대 소비될
+// 수 없는 라운드가 생길 수 있다(예: DONE 타임스탬프가 기계로 파싱 불가한
+// 형태로 남았거나, 재작성이 금지됐거나, 그 태스크 계약 자체가 결과 수리를
+// 금지한 경우). 이 축은 그런 라운드를 위한, «정상 통로가 이미 실패했을
+// 때만» 시도되는 별도 문이다(아래 evaluateConsumptionDecision 결선 위치
+// 참조 -- tryArchiveFallback 다음, decision을 그대로 반환하기 직전).
+//
+// §2 언제만 적용하는가: labelInfo.kind === "VALID"일 때만(위 §1). BROKEN은
+// 여전히 어떤 통로도 얻지 못한다(HYK-298-key-narrow-4의 "BROKEN = 언제나
+// 차단" 진실을 그대로 유지 -- 이 축이 BROKEN을 위한 새 열쇠가 되지 않는다).
+// ===========================================================================
+
+// role/harnessTaskLabel 조합으로 `<harnessDir>/retirements/<role>-retire-
+// r<N>.json` 전부를 후보로 읽는다 -- readAbortRecordFiles와 동일한 "전부
+// 읽고 코어가 걸러낸다" 원칙. 개별 파일 읽기/파싱 실패는 그 파일만
+// 건너뛴다.
+function readRetirementRecordFiles(harnessDir, role) {
+  const retirementsDir = join(harnessDir, "retirements");
+  let names;
+  try {
+    names = readdirSync(retirementsDir);
+  } catch {
+    return [];
+  }
+  const pattern = new RegExp(`^${role}-retire-r\\d+\\.json$`, "i");
+  const records = [];
+  for (const name of names) {
+    if (!pattern.test(name)) continue;
+    try {
+      records.push(
+        JSON.parse(readFileSync(join(retirementsDir, name), "utf8")),
+      );
+    } catch {
+      // 손상/미완성 쓰기 -- 건너뛴다.
+    }
+  }
+  return records;
+}
+
+// §3-1 (retirement-record-core.mjs 헤더): 아카이브 위치·관례를 재구현하지
+// 않는다 -- 소비 축(tryArchiveFallback/findArchivedResultFingerprint)이
+// 이미 쓰는 `.harness/rounds/<role>-r<N>.md` 보존 사본 관례를 그대로
+// 재사용한다. findArchivedResultFingerprint(위, 소비 축 전용)는 "targetFingerprint
+// 와 정확히 일치"만 반환하고 "존재하지만 다른 지문"을 구별하지 않으므로
+// (그 함수는 재사용하지 않는다), 이 축은 자체적으로 label 일치 사본을
+// 먼저 찾고(존재 여부를 그 자체로 판정), 그 다음에야 지문을 대조한다 --
+// 위조 변종 c1(아카이브 자체가 없음)과 c2(아카이브는 있으나 지문이 다름)
+// 를 서로 다른 상태로 구별하기 위해서다(요구서 §c 세 위조 변종이 구별되는
+// 사유로 거부돼야 한다는 요구).
+function resolveRetirementArchiveCandidate(
+  harnessDir,
+  role,
+  harnessTaskLabel,
+  claimedFingerprint,
+) {
+  const roundsDir = join(harnessDir, "rounds");
+  let names;
+  try {
+    names = readdirSync(roundsDir);
+  } catch {
+    return { exists: false, fingerprintMatches: false };
+  }
+  const pattern = new RegExp(`^${role}-r\\d+\\.md$`, "i");
+  const matches = [];
+  for (const name of names) {
+    if (!pattern.test(name)) continue;
+    let raw;
+    try {
+      raw = readFileSync(join(roundsDir, name), "utf8");
+    } catch {
+      continue;
+    }
+    const stripped = stripArchiveEnvelopeHeader(raw);
+    if (
+      extractSoleMatch(stripped, CONSUMPTION_TASK_ID_RE_G) !== harnessTaskLabel
+    )
+      continue;
+    matches.push({
+      path: join("rounds", name),
+      fingerprint: computeConsumptionResultFingerprint(stripped),
+    });
+  }
+  if (matches.length === 0) return { exists: false, fingerprintMatches: false };
+  if (matches.length > 1) {
+    // 라벨이 일치하는 사본이 2개 이상 -- 어느 것을 대조해야 할지 조용히
+    // 고르지 않는다. "아카이브는 있으나(exists) 유일하게 확정할 수 없어
+    // 지문 대조를 통과시키지 않는다"는 뜻으로 fingerprintMatches:false를
+    // 반환한다(FINGERPRINT_MISMATCH 상태로 떨어진다, 안전측 기본값).
+    return {
+      exists: true,
+      fingerprintMatches: false,
+      ambiguousCount: matches.length,
+    };
+  }
+  return {
+    exists: true,
+    fingerprintMatches: matches[0].fingerprint === claimedFingerprint,
+    path: matches[0].path,
+  };
+}
+
+// §3-4 (retirement-record-core.mjs 헤더): DONE_TIMESTAMP_NOT_PARSEABLE
+// «만» 기계로 독립 재확인한다 -- live 결과 파일 자신에 `>>> DONE:` 원문이
+// 실제로 있고(그렇지 않으면 "파싱 불가"가 아니라 "애초에 없음"이라는 다른
+// 사실이므로 이 사유가 주장하는 바가 아니다), 그 값이 parseKstToMs로
+// 파싱되지 않을 때만 true를 돌려준다. 나머지 사유(DONE_REWRITE_LOCKED ·
+// TASK_CONTRACT_PROHIBITS_REPAIR)는 이 코드베이스가 기계로 재현할 수 없는
+// 계약 텍스트 질문이므로 null을 돌려준다(가짜 확인을 만들지 않는다 --
+// null은 코어가 "이 사유는 이 축에서 재확인 대상이 아니다"로 이미
+// 처리한다, MECHANICALLY_CONFIRMABLE_BLOCK_REASONS 확인).
+function confirmRetirementBlockReason(record, resultText) {
+  if (!MECHANICALLY_CONFIRMABLE_BLOCK_REASONS.has(record?.blockReasonCode)) {
+    return null;
+  }
+  // HYK-311-retire-1: 현재 집합에는 DONE_TIMESTAMP_NOT_PARSEABLE 하나뿐 --
+  // 그 사유의 구체적 재확인 방법(아래)만 여기 구현한다. 집합에 새 기계
+  // 확인 가능 사유가 추가되면 이 함수도 분기를 늘려야 한다(RETIREMENT_
+  // BLOCK_REASON은 그 새 사유의 이름 상수 출처로 계속 쓰인다).
+  if (
+    record.blockReasonCode !==
+    RETIREMENT_BLOCK_REASON.DONE_TIMESTAMP_NOT_PARSEABLE
+  ) {
+    return null;
+  }
+  const doneAt = extractSoleMatch(resultText, CONSUMPTION_DONE_RE_G);
+  return isNonEmptyAbortString(doneAt) && parseKstToMs(doneAt) === null;
+}
+
+// 이 축의 메인 진입점. checkRetirementRecord(코어)의 판정을 그대로
+// 내놓는다(RETIRED면 null=ALLOW, 아니면 {state, allow:false, reason}) --
+// abort 축의 evaluateAbortRecordDecision과 동일한 관례, 조용한 통과/조용한
+// 흡수 금지도 동일(candidates.length > 0일 때만 stderr에 사유를 남긴다).
+function evaluateRetirementDecision({
+  role,
+  harnessDir,
+  resultText,
+  harnessTaskLabel,
+}) {
+  const records = readRetirementRecordFiles(harnessDir, role);
+  const liveFingerprint = computeConsumptionResultFingerprint(resultText);
+  const candidates = records.map((record) => {
+    const archiveInfo = resolveRetirementArchiveCandidate(
+      harnessDir,
+      role,
+      harnessTaskLabel,
+      record?.archiveFingerprintClaimed,
+    );
+    return {
+      record,
+      archiveExists: archiveInfo.exists,
+      archiveFingerprintMatches: archiveInfo.fingerprintMatches,
+      // §3-1(c): 오늘의 실제 호출 경로는 liveFingerprint가 항상 계산
+      // 가능한 시점에서만 이 축을 시도한다(resultText가 이미 읽혀
+      // 있어야만 evaluateConsumptionDecision이 이 지점까지 도달한다) --
+      // null 분기(live 사본이 아예 없어 대조를 건너뜀)는 방어적으로
+      // 지원하되 이 배선에서는 도달하지 않는다(retirement-record-core.mjs
+      // §5-c에 명시).
+      liveFingerprintMatches:
+        liveFingerprint === record?.archiveFingerprintClaimed,
+      blockReasonConfirmed: confirmRetirementBlockReason(record, resultText),
+    };
+  });
+  const verdict = checkRetirementRecord({
+    role: role.toUpperCase(),
+    harnessTaskLabel,
+    candidates,
+  });
+  if (candidates.length > 0) {
+    console.error(`dispatch-gate-decision ${verdict.reason}`);
+  }
+  if (verdict.state === RETIREMENT_RECORD_STATE.RETIRED) return null;
+  return { state: verdict.state, allow: false, reason: verdict.reason };
+}
+
+// resolveAbortRecordOutcome과 동일한 구조: null=ALLOW, NO_RECORD가 아닌
+// 실패는 즉시 그 사유로 REJECT, NO_RECORD(=은퇴 기록을 시도조차 안 함)면
+// {done:false}로 물러나 호출자가 원래의 consumption REJECT 사유를 그대로
+// 쓰게 한다(§ REGRESSION 요구: 은퇴 기록이 없으면 정상 미소비 REJECT가
+// 조금도 바뀌지 않는다).
+function resolveRetirementOutcome({
+  role,
+  harnessDir,
+  resultText,
+  harnessTaskLabel,
+}) {
+  const retirementDecision = evaluateRetirementDecision({
+    role,
+    harnessDir,
+    resultText,
+    harnessTaskLabel,
+  });
+  if (retirementDecision === null) return { done: true, result: null };
+  if (retirementDecision.state !== RETIREMENT_RECORD_STATE.NO_RECORD) {
+    return { done: true, result: retirementDecision };
+  }
+  return { done: false };
+}
+
+// §2: kind === "VALID"일 때만 시도한다(위 헤더 §2). 그 외(MISSING/BROKEN)
+// 는 곧바로 {done:false}로 물러난다 -- MISSING은 abort 축의 전담 영역이고
+// (이 축은 관여하지 않는다), BROKEN은 어떤 축의 열쇠도 아니다.
+function maybeResolveRetirementForValidLabel({
+  labelInfo,
+  role,
+  harnessDir,
+  resultText,
+  harnessTaskLabel,
+}) {
+  if (labelInfo.kind !== "VALID") return { done: false };
+  return resolveRetirementOutcome({
+    role,
+    harnessDir,
+    resultText,
+    harnessTaskLabel,
+  });
+}
+
 // HYK-298-abort-record-2 §2-1 -> HYK-298-label-classify-3 §2-3(단락 순서
 // 수리) -> HYK-298-key-narrow-4 §2(열쇠 종류 좁히기, 검토 3R 반려 수리)
 // 로 갱신 -- ★한용 위임 판정 문자 그대로: ***«BROKEN 통과 열쇠 = 정상
@@ -1418,6 +1661,24 @@ function maybeResolveAbortRecordForMissingLabel({
   });
 }
 
+// evaluateConsumptionDecision 자신의 eslint complexity 상한을 지키려고
+// 뽑았다(HYK-244-receipt-core-1b 선례와 동일한 이유, 판정/로그 문구는
+// 조금도 바뀌지 않는다, 몸통만 쪼갠다) -- lookupDispatchId 호출 + 그
+// 결과에 따른 조용한 통과 금지 로그 두 줄을 하나로 묶는다.
+function lookupDispatchIdWithLogging({ role, harnessTaskLabel, receiptPath }) {
+  const lookup = lookupDispatchId({ role, harnessTaskLabel, receiptPath });
+  if (!lookup.ok) {
+    console.error(
+      `dispatch-gate-decision consumption: dispatch_id 조회 실패(안 지어냄) -- ${lookup.reason}`,
+    );
+  } else if (!lookup.found) {
+    console.error(
+      `dispatch-gate-decision consumption: role=${role} label=${harnessTaskLabel}에 대응하는 배달 영수증을 못 찾음(정말 없음, 안 지어냄)`,
+    );
+  }
+  return lookup;
+}
+
 function evaluateConsumptionDecision(taskPath, args, env = process.env) {
   const role = deriveRoleFromTaskPath(taskPath);
   if (!role) return null;
@@ -1468,16 +1729,11 @@ function evaluateConsumptionDecision(taskPath, args, env = process.env) {
   });
   if (abortOutcome.done) return abortOutcome.result;
 
-  const lookup = lookupDispatchId({ role, harnessTaskLabel, receiptPath });
-  if (!lookup.ok) {
-    console.error(
-      `dispatch-gate-decision consumption: dispatch_id 조회 실패(안 지어냄) -- ${lookup.reason}`,
-    );
-  } else if (!lookup.found) {
-    console.error(
-      `dispatch-gate-decision consumption: role=${role} label=${harnessTaskLabel}에 대응하는 배달 영수증을 못 찾음(정말 없음, 안 지어냄)`,
-    );
-  }
+  const lookup = lookupDispatchIdWithLogging({
+    role,
+    harnessTaskLabel,
+    receiptPath,
+  });
 
   // 결함1의 나머지 절반: droppedAt도 같은 이유로 taskText가 아니라 그
   // 직전 라운드가 자기 task 파일을 보존해 둔 아카이브 사본에서 온다.
@@ -1518,6 +1774,19 @@ function evaluateConsumptionDecision(taskPath, args, env = process.env) {
   ) {
     return null; // ALLOW -- 사유는 tryArchiveFallback이 이미 찍었다.
   }
+
+  // HYK-311-retire-1 §2: 정상 소비 경로(영수증 체인 + 보관함 대조)가 이미
+  // 실패로 확정된 뒤에만, VALID 이름표 라운드에 한해 은퇴 기록 축을
+  // 시도한다 -- 정상 통로를 조금도 앞지르지 않는다(그 통로가 이미 위에서
+  // 실패했을 때만 도달하는 위치).
+  const retirementOutcome = maybeResolveRetirementForValidLabel({
+    labelInfo,
+    role,
+    harnessDir,
+    resultText,
+    harnessTaskLabel,
+  });
+  if (retirementOutcome.done) return retirementOutcome.result;
 
   return decision;
 }
