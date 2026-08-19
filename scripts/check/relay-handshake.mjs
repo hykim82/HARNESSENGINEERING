@@ -298,12 +298,13 @@ function resolveMissingDoneOutcome(
       ageMs,
     };
   }
-  return {
-    ok: false,
-    state: "PENDING",
-    reason: resultDoneReason,
-    ...(ageMs !== null ? { ageMs } : {}),
-  };
+  // HYK-313 2R (REVIEW 반려 1 수리): fresh PENDING returns EXACTLY the same
+  // shape as the pre-HYK-313 parent commit -- `ageMs` is deliberately never
+  // attached here (only the STALLED_PENDING branch above carries it, since
+  // that is the new state this round introduces). The task's own "기존과
+  // byte-identical" contract for fresh PENDING means the object itself, not
+  // just its `state`/`reason` string values.
+  return { ok: false, state: "PENDING", reason: resultDoneReason };
 }
 
 // Extracted from checkRelayHandshake (same ESLint-ceiling reason as its

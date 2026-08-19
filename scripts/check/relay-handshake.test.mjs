@@ -1524,7 +1524,7 @@ test("HYK-313 (a) ★재현 -- DONE 없음 + 표지 없음 + 결과 파일이 �
   });
 });
 
-test("HYK-313 (b) ★오탐 방지(가장 중요) -- DONE 없음 + 표지 없음 + 결과 파일이 방금 쓰임 -> state=PENDING 그대로 (조용한 대기, 정지로 오판 금지)", () => {
+test("HYK-313 (b) ★오탐 방지(가장 중요) -- DONE 없음 + 표지 없음 + 결과 파일이 방금 쓰임 -> 반환 객체가 부모 커밋(HYK-313 이전)과 «완전히 동일»(deep equal) -- ageMs 같은 새 키가 하나라도 늘면 실패", () => {
   withFixtureDir((dir) => {
     writeTask(
       dir,
@@ -1535,16 +1535,15 @@ test("HYK-313 (b) ★오탐 방지(가장 중요) -- DONE 없음 + 표지 없음
     // 방금 write했으므로 mtime은 실제 현재 시각과 사실상 같다 -- 되돌리지
     // 않는다(정상 진행 중인 라운드의 실제 모양 그대로).
     const result = checkRelayHandshake({ role: "coder", harnessDir: dir });
-    assert.equal(result.ok, false);
-    assert.equal(
-      result.state,
-      "PENDING",
-      "정상 진행 중인 라운드가 STALLED_PENDING으로 오판되면 안 된다(§4-1 비타협)",
-    );
-    assert.ok(
-      typeof result.ageMs === "number" &&
-        result.ageMs < PENDING_STALL_THRESHOLD_MS,
-    );
+    // HYK-313 2R (REVIEW 반려 1 수리): state/ageMs 타입 검사만으로는 "여분의
+    // 키가 새로 붙었다"는 회귀를 놓친다(1R의 실제 반려 사유) -- deepStrictEqual
+    // 로 객체 전체를 부모 커밋(df2673f 이전, HYK-313 미적용)이 내던
+    // `{ ok:false, state:"PENDING", reason }` 세 키와 정확히 대조한다.
+    assert.deepStrictEqual(result, {
+      ok: false,
+      state: "PENDING",
+      reason: 'result missing ">>> DONE: ... @ <time KST>" line (required)',
+    });
   });
 });
 
@@ -1594,5 +1593,69 @@ test("HYK-313 (e) ★RED 대조 -- 임계값을 절대 넘지 않는 나이(thre
     const result = checkRelayHandshake({ role: "coder", harnessDir: dir });
     assert.equal(result.ok, false);
     assert.equal(result.state, "PENDING");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// HYK-313 2R (REVIEW 반려 2 수리): (a)-(e) above are all in-process
+// checkRelayHandshake() calls -- review-task §2-8's requirement (실 CLI
+// 자식 프로세스의 종료코드·stderr 내용 단언) was never actually exercised
+// for the new STALLED_PENDING path. These two spawn the real CLI
+// (relay-handshake.mjs's own `invokedDirectly` block, same runCli helper
+// the (e)/(h)/mutation-M1..M3 tests above already use) and assert on its
+// actual process-boundary exit code + stderr text -- not the in-process
+// return value.
+// ---------------------------------------------------------------------------
+
+test("HYK-313 2R (CLI-a) STALLED_PENDING 경로: 실 CLI 자식 프로세스 -- exit 1, stderr에 정지 사유(경과 초·임계값)가 식별 가능하게 찍힌다", () => {
+  withFixtureDirCli((dir) => {
+    writeTask(
+      dir,
+      "coder",
+      "task_id: HYK-1\ndropped_at: 2026-08-19 04:00 KST\n",
+    );
+    writeResult(dir, "coder", "task_id: HYK-1\n\n작업 중, 아직 보고 없음\n");
+    backdateResultMtime(dir, "coder", PENDING_STALL_THRESHOLD_MS + 60_000);
+    const { exit, stderr } = runCli(["coder", dir]);
+    assert.equal(exit, 1);
+    assert.match(
+      stderr,
+      /result file has not changed in \d+s/,
+      "stderr must name the elapsed-seconds stall signal, not just a bare 'not done yet'",
+    );
+    assert.match(
+      stderr,
+      />= 1800s stall threshold/,
+      "stderr must also name the threshold itself (PENDING_STALL_THRESHOLD_MS=30min=1800s), so a human reading stderr alone can tell this is a stall verdict, not plain pending",
+    );
+  });
+});
+
+test("HYK-313 2R (CLI-b) fresh PENDING 대조군: 실 CLI 자식 프로세스 -- exit 1 (동일한 실패 종료코드)이지만 stderr에 정지 표지가 «나오지 않는다» (구별 가능성 증명)", () => {
+  withFixtureDirCli((dir) => {
+    writeTask(
+      dir,
+      "coder",
+      "task_id: HYK-1\ndropped_at: 2026-08-19 04:00 KST\n",
+    );
+    writeResult(dir, "coder", "task_id: HYK-1\n\n작업 중, 아직 보고 없음\n");
+    // 방금 write -- 되돌리지 않는다(정상 진행 중인 라운드의 실제 모양).
+    const { exit, stderr } = runCli(["coder", dir]);
+    assert.equal(
+      exit,
+      1,
+      "PENDING도 여전히 ok:false이므로 exit code 자체는 STALLED_PENDING과 같다(§4-2 ok/state 계약 무변경) -- 구별은 stderr 텍스트로만 가능해야 한다",
+    );
+    assert.doesNotMatch(
+      stderr,
+      /result file has not changed in \d+s/,
+      "정상 진행 중인 라운드의 stderr에 정지 표지 문구가 새어들면 오탐이다",
+    );
+    assert.doesNotMatch(stderr, /stall threshold/);
+    assert.match(
+      stderr,
+      /result missing ">>> DONE/,
+      "여전히 기존 PENDING 사유 문구 그대로 나와야 한다(회귀 0)",
+    );
   });
 });
