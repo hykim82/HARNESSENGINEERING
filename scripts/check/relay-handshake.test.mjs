@@ -16,6 +16,7 @@ import {
   readFileSync,
   rmSync,
   mkdirSync,
+  utimesSync,
 } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -25,6 +26,7 @@ import {
   checkRelayHandshake,
   resolveLiveRoundFilePaths,
   wasAdmissionCompletionAttempted,
+  PENDING_STALL_THRESHOLD_MS,
 } from "./relay-handshake.mjs";
 
 // import.meta.url is resolved relative to this file's own location, not the
@@ -1484,4 +1486,113 @@ test("HYK-244 ci-repair-1: wasAdmissionCompletionAttempted는 adapter의 '시도
     true,
     "빈 출력(아직 안 읽음 등)은 '시도 안 함'으로 오판하면 안 된다 -- 안전측은 attempted:true 유지(exit 0이면 성공으로 보는 기존 관례 그대로, 이 함수는 오직 그 명시적 문자열 하나만 골라낸다)",
   );
+});
+
+// ---------------------------------------------------------------------------
+// HYK-313: PENDING의 나이(age) 인지 -- 결과 파일에 DONE도 BLOCKED/
+// NEEDS_INPUT 표지도 없을 때, 그 결과 파일의 fs mtime이
+// PENDING_STALL_THRESHOLD_MS 이상 정지해 있으면 `state: "STALLED_PENDING"`
+// 으로 표면화하고, 그 미만이면 기존과 완전히 동일한 `state: "PENDING"`을
+// 낸다(§4-1 오탐 0). backdateResultMtime은 실제 fs mtime을 과거로 되돌려
+// "결과 파일이 오래 전에 마지막으로 쓰였다"를 결정적으로 재현한다(엔진
+// 무관 신호 -- Claude 훅/codex 세션 파일에 의존하지 않는다, §3 요건).
+// ---------------------------------------------------------------------------
+
+function backdateResultMtime(dir, role, ageMs) {
+  const { resultPath } = resolveLiveRoundFilePaths(role, dir);
+  const past = new Date(Date.now() - ageMs);
+  utimesSync(resultPath, past, past);
+}
+
+test("HYK-313 (a) ★재현 -- DONE 없음 + 표지 없음 + 결과 파일이 임계값 이상 정지 -> state=STALLED_PENDING (미완/정지가 신호로 표면화)", () => {
+  withFixtureDir((dir) => {
+    writeTask(
+      dir,
+      "coder",
+      "task_id: HYK-1\ndropped_at: 2026-08-19 04:00 KST\n",
+    );
+    writeResult(dir, "coder", "task_id: HYK-1\n\n작업 중, 아직 보고 없음\n");
+    backdateResultMtime(dir, "coder", PENDING_STALL_THRESHOLD_MS + 60_000);
+    const result = checkRelayHandshake({ role: "coder", harnessDir: dir });
+    assert.equal(result.ok, false);
+    assert.equal(result.state, "STALLED_PENDING");
+    assert.match(result.reason, /result file has not changed in/);
+    assert.ok(
+      result.ageMs >= PENDING_STALL_THRESHOLD_MS,
+      "ageMs must reflect the actual elapsed time since the result file's last write",
+    );
+  });
+});
+
+test("HYK-313 (b) ★오탐 방지(가장 중요) -- DONE 없음 + 표지 없음 + 결과 파일이 방금 쓰임 -> state=PENDING 그대로 (조용한 대기, 정지로 오판 금지)", () => {
+  withFixtureDir((dir) => {
+    writeTask(
+      dir,
+      "coder",
+      "task_id: HYK-1\ndropped_at: 2026-08-19 04:00 KST\n",
+    );
+    writeResult(dir, "coder", "task_id: HYK-1\n\n작업 중, 아직 보고 없음\n");
+    // 방금 write했으므로 mtime은 실제 현재 시각과 사실상 같다 -- 되돌리지
+    // 않는다(정상 진행 중인 라운드의 실제 모양 그대로).
+    const result = checkRelayHandshake({ role: "coder", harnessDir: dir });
+    assert.equal(result.ok, false);
+    assert.equal(
+      result.state,
+      "PENDING",
+      "정상 진행 중인 라운드가 STALLED_PENDING으로 오판되면 안 된다(§4-1 비타협)",
+    );
+    assert.ok(
+      typeof result.ageMs === "number" &&
+        result.ageMs < PENDING_STALL_THRESHOLD_MS,
+    );
+  });
+});
+
+test("HYK-313 (c) 기존 표지 회귀 -- BLOCKED 표지가 있으면 결과 파일이 오래 정지해 있어도 state=BLOCKED 그대로(STALLED_PENDING으로 대체되지 않는다)", () => {
+  withFixtureDir((dir) => {
+    writeTask(
+      dir,
+      "coder",
+      "task_id: HYK-1\ndropped_at: 2026-08-19 04:00 KST\n",
+    );
+    writeResult(dir, "coder", "task_id: HYK-1\n\n>>> BLOCKED: 승인 대기 중\n");
+    backdateResultMtime(dir, "coder", PENDING_STALL_THRESHOLD_MS + 60_000);
+    const result = checkRelayHandshake({ role: "coder", harnessDir: dir });
+    assert.equal(result.ok, false);
+    assert.equal(result.state, "BLOCKED");
+    assert.match(result.reason, /worker reported BLOCKED: 승인 대기 중/);
+  });
+});
+
+test("HYK-313 (d) 정상 소비 회귀 -- DONE 이 제대로 있으면 결과 파일이 오래 정지해 있어도(=DONE 이후 재작성 없음) ok:true 그대로", () => {
+  withFixtureDir((dir) => {
+    writeTask(
+      dir,
+      "coder",
+      "task_id: HYK-1\ndropped_at: 2026-08-19 04:00 KST\n",
+    );
+    writeResult(
+      dir,
+      "coder",
+      "task_id: HYK-1\n\nsome report body\n\n>>> DONE: CODER @ 2026-08-19 04:10:00 KST\n",
+    );
+    backdateResultMtime(dir, "coder", PENDING_STALL_THRESHOLD_MS + 60_000);
+    const result = checkRelayHandshake({ role: "coder", harnessDir: dir });
+    assert.equal(result.ok, true);
+  });
+});
+
+test("HYK-313 (e) ★RED 대조 -- 임계값을 절대 넘지 않는 나이(threshold - 1ms)는 STALLED_PENDING이 되지 않는다(경계값 회귀)", () => {
+  withFixtureDir((dir) => {
+    writeTask(
+      dir,
+      "coder",
+      "task_id: HYK-1\ndropped_at: 2026-08-19 04:00 KST\n",
+    );
+    writeResult(dir, "coder", "task_id: HYK-1\n\n작업 중\n");
+    backdateResultMtime(dir, "coder", PENDING_STALL_THRESHOLD_MS - 1_000);
+    const result = checkRelayHandshake({ role: "coder", harnessDir: dir });
+    assert.equal(result.ok, false);
+    assert.equal(result.state, "PENDING");
+  });
 });
