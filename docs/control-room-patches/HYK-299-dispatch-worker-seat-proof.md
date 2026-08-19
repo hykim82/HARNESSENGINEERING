@@ -253,6 +253,38 @@ Write-Host "[3/3] OK — 워커가 dispatch-show로 대조 후 기동합니다."
 
 <!-- HYK-299-REPLACEMENT-END -->
 
+## HYK-299-casefold-1 — 과탐(false positive) 결함과 수리 (2026-08-19 후속)
+
+### 무엇이 잘못됐나 (§1)
+
+`dispatch-worker.ps1`은 좌석 증명 게이트를 부를 때 `Invoke-SeatProofGate` 끝부분에서 `--worktree-path (Norm $Worktree)`로 넘긴다. `Norm()`(79~82행)은 `\` → `/` 치환·끝 `/` 제거에 더해 **소문자화(`ToLowerInvariant()`)까지** 한다. 반면 `--worktree-id`는 `$tsShowObj.result.terminal.worktreeId`(방금 뜬 `terminal show` 원문, 대소문자 보존)를 그대로 넘긴다 — **같은 호출 한 줄 안에서 한 인자만 소문자화되는 비대칭**이다. 그런데 저장소 쪽 판정(`scripts/relay/dispatch-bound-seat-proof.mjs`의 `buildMismatchChecks`)은 `worktreePath`/`worktreeId`를 `!==` 문자 완전 일치로 대조했다 — 그래서 관제실이 소문자화해 넘긴 `worktreePath`가 대소문자가 살아 있는 `terminal show` 응답의 `worktreePath`와 문자 단위로 달라져 **정상 배달이 `WORKTREE_MISMATCH`로 거부**됐다.
+
+### 언제 잡혔나
+
+2026-08-19 18:10 KST 첫 실배달(`.harness/evidence/hyk299-seatproof-task_5ba32ba9e6bd-{dispatch,terminal}-show.json`, 배달기가 그 배달에서 실제로 만든 파일). ORCH가 같은 두 파일을 입력으로 2회 실측(§1-4): 대소문자를 보존해 넘기면 `PROVEN/exit=0`, 배달기가 실제로 넘기는 소문자화된 값으로 넘기면 `UNPROVEN/WORKTREE_MISMATCH/exit=2` — 차이는 경로 대소문자 하나뿐이었다. ★이 결함을 수리하는 이번 코더 라운드 자체가, 그 배달기의 「감지 후 중단」 동작이 실제로 발화한 채로 배달됐다(claude 경로, 배달 스크립트 exit 7 — `.harness/rounds/CODER-r1.md`·`.harness/coder.md`에 별도 기록).
+
+### 왜 시험·검토·CI가 못 잡았나 (§1-5)
+
+기존 `dispatch-worker-seat-proof-gate.test.mjs`/`seat-proof-cli.test.mjs`는 입력 JSON을 시험 스스로 만들면서 `worktreePath`/`worktreeId`의 대소문자를 처음부터 맞춰 놨다(정합 fixture). 호출자(`Norm()`)가 실제로 한쪽만 소문자화한다는 사실이 시험 입력 자체에 반영된 적이 없어, 판정 코드가 `!==`로 짜여 있어도 시험은 계속 GREEN이었다. 그래서 이번 시험(§3 항목8)은 `.harness/evidence/`의 실배달 원문을 그대로 저장소 fixture로 옮겨, 배달기가 실제로 조립하는 argv 모양(`--worktree-id`는 원본 대소문자, `--worktree-path`만 `Norm()` 소문자화) 그대로 게이트를 구동한다.
+
+### 무엇을 고쳤나
+
+`scripts/relay/dispatch-bound-seat-proof.mjs`의 경로 비교만 고쳤다(관제실 `Norm()`은 그대로 — 2-가 틀 유지, §2-4 참조):
+
+- `pathsEqual(a, b)`: `\`→`/` 정규화·끝 `/` 제거 후, **정규화된 두 값이 둘 다 윈도우 드라이브문자 절대경로 모양(`/^[A-Za-z]:\//`)일 때만** 소문자로 비교한다. 그 모양이 아니면(POSIX 절대경로 등) 정규화도 하지 않고 기존 그대로 문자 완전 일치.
+- `worktreeIdsEqual(a, b)`: `<repoId>::<path>` 모양을 첫 `::`에서 갈라, path 부분은 `pathsEqual`을 그대로 적용하고 repoId(GUID) 부분은 대소문자 무시로 비교한다. `::`가 없으면 전체를 하나의 값으로 보고 `pathsEqual`을 적용한다.
+- 그 외 축(pane key·task id·dispatch id·handle 제외·결손 거부·사유 코드 집합)은 전부 그대로다.
+
+### 정직한 한계 (2줄)
+
+- **윈도우 드라이브문자 경로에 한해 대소문자를 무시한다** — 그 모양이 아닌 경로(POSIX 절대경로 등)에서 대소문자가 다르면 여전히 불일치로 판정한다(대소문자를 구별하는 파일시스템에서 진짜 다른 두 디렉터리를 같다고 판정하지 않기 위함 — CI는 리눅스에서 돈다).
+- **관제실 `Norm()`의 소문자화 자체는 그대로 남아 있다** — 이번 라운드에서 고치지 않았다(수리 위치 = 저장소 판정 쪽만, 책임자 확정).
+
+### 시험/검증
+
+- 판정 코어 반례 8종(§3 항목1~8, `dispatch-bound-seat-proof.test.mjs` 7개 + `dispatch-worker-seat-proof-gate.test.mjs`에 추가한 게이트 계층 실배달 재현 3개)이 전부 존재하고 통과한다.
+- 변이 검증: `!==` 완전 일치로 되돌리자 항목1과 항목8ⓐ가 실제로 RED(`UNPROVEN`/`exit=2`)가 되는 것을 확인했고, 복구 후 파일이 수리본과 바이트 단위로 동일함(`sha256=f1092e1d883df34c045af40b563581b1970b72d8ec4437c7ec496e1362619fb4`, `cmp` 무차이)을 확인했다. 항목3·4는 수리 코드 상태에서도 GREEN — 탐지력이 깎이지 않았다는 증거다.
+
 ## 남은 것 (다음 트랙 후보)
 
 1. worktreeId 축을 진짜 독립으로 만들려면 핸들→워크트리id 정적 매핑이 필요하다(위 "정직 한계" 절) — 이 라운드 범위 밖.
