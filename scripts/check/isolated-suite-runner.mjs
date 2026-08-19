@@ -147,9 +147,25 @@ if (invokedDirectly) {
   const args = process.argv.slice(2);
   let sourceRoot;
   let keep = false;
+  const unrecognized = [];
   for (let i = 0; i < args.length; i++) {
-    if (args[i] === "--repo-root") sourceRoot = args[++i];
-    else if (args[i] === "--keep") keep = true;
+    if (args[i] === "--repo-root") {
+      if (i + 1 >= args.length) {
+        unrecognized.push(args[i]);
+      } else {
+        sourceRoot = args[++i];
+      }
+    } else if (args[i] === "--keep") {
+      keep = true;
+    } else {
+      unrecognized.push(args[i]);
+    }
+  }
+  if (unrecognized.length > 0) {
+    console.error(
+      `[isolated-suite-runner] unrecognized argument(s): ${unrecognized.join(" ")} -- refusing to silently ignore unknown arguments and run against the wrong target`,
+    );
+    process.exit(1);
   }
   const exitCode = runIsolatedSuite({ sourceRoot, keep });
   process.exit(exitCode);

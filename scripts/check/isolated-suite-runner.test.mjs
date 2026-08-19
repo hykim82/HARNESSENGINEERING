@@ -1,4 +1,9 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 import {
   TEST_DIRS,
@@ -6,6 +11,22 @@ import {
   formatBanner,
   runIsolatedSuite,
 } from "./isolated-suite-runner.mjs";
+
+// HYK-301: these tests spawn the real CLI entry point as a child process --
+// importing runIsolatedSuite()/collectTestFiles() directly would never
+// exercise the `invokedDirectly` argv-parsing branch these tests exist to
+// cover, and the bug this task closes (unknown args silently ignored) lives
+// entirely in that branch.
+const runnerPath = fileURLToPath(
+  new URL("./isolated-suite-runner.mjs", import.meta.url),
+);
+
+function runCli(args, opts = {}) {
+  return spawnSync(process.execPath, [runnerPath, ...args], {
+    encoding: "utf8",
+    ...opts,
+  });
+}
 
 test("collectTestFiles: lists *.test.mjs per dir, sorted, joined with the dir prefix", () => {
   const fakeTree = {
@@ -156,4 +177,51 @@ test("runIsolatedSuite: a fail-closed collectFiles throw propagates out (never s
     false,
     "the suite must never run once directory collection has failed closed",
   );
+});
+
+test("CLI: an unrecognized positional argument is rejected -- exit!=0, and the raw argument text is in the output (HYK-301 repro/fix)", () => {
+  const result = runCli(["/some/positional/path"]);
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /unrecognized argument/);
+  assert.match(result.stderr, /\/some\/positional\/path/);
+});
+
+test("CLI: an unrecognized flag is rejected the same way as a bad positional (HYK-301 §4b)", () => {
+  const result = runCli(["--nope"]);
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /unrecognized argument/);
+  assert.match(result.stderr, /--nope/);
+});
+
+test("CLI: zero-argument invocation (the CI-canonical call) still passes argv parsing -- no 'unrecognized argument' rejection (HYK-301 §2-1 / §4c)", () => {
+  // A bogus, non-git cwd makes runIsolatedSuite's `git rev-parse
+  // --show-toplevel` fail fast, so this test doesn't have to pay for a
+  // full clone + suite run to prove the arg-parsing stage was passed --
+  // it only needs to show the failure is NOT the "unrecognized argument"
+  // rejection, i.e. zero args reached runIsolatedSuite() same as before.
+  const notARepo = mkdtempSync(join(tmpdir(), "hyk301-not-a-repo-"));
+  try {
+    const result = runCli([], { cwd: notARepo });
+    assert.notEqual(result.status, 0);
+    assert.doesNotMatch(result.stderr, /unrecognized argument/);
+  } finally {
+    rmSync(notARepo, { recursive: true, force: true });
+  }
+});
+
+test("CLI: --repo-root <path> is still recognized and its value consumed -- no 'unrecognized argument' rejection (HYK-301 §4d)", () => {
+  // A bogus target path makes the downstream `git rev-parse HEAD` fail
+  // fast once the CLI hands sourceRoot to runIsolatedSuite -- proving
+  // --repo-root's value was consumed as a flag value, not flagged as an
+  // unrecognized bare argument.
+  const result = runCli(["--repo-root", "C:/definitely/not/a/repo/xyz"]);
+  assert.notEqual(result.status, 0);
+  assert.doesNotMatch(result.stderr, /unrecognized argument/);
+});
+
+test("CLI: --repo-root with no following value is rejected, not silently undefined->cwd fallback (HYK-301 §2-11)", () => {
+  const result = runCli(["--repo-root"]);
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /unrecognized argument/);
+  assert.match(result.stderr, /--repo-root/);
 });
