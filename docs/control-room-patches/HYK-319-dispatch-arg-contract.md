@@ -2,6 +2,12 @@
 
 ## 적용 상태: **PROPOSED** — ⛔이 라운드(CODER, HYK-319-argcheck-1)는 이 문서를 쓸 뿐 관제실 파일을 고치지 않는다(coder-task.md §0 비타협2 "관제실 쓰기 0"). 적용은 사람/ORCH 몫이다.
 
+★이 제안은 **HYK-327에서 적용됨** — 적용 상태는
+`docs/control-room-patches/HYK-327-wire-two-checkers.md`를 보라(이 문서
+자체의 "적용 상태"는 정본 갱신 규약상 `PROPOSED`로 남아 있지만, 실제
+적용 여부는 HYK-327 문서가 정본이다 — 이 문서가 거짓 상태를 주장하지
+않도록 남기는 한 줄).
+
 ## 왜 (coder-task.md §1, 실해 3건)
 
 - **HYK-256** — 배달기가 게이트 호출(`dispatch-gate-decision.mjs`)에

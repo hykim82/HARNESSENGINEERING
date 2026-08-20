@@ -208,14 +208,40 @@ test("CLI end-to-end(spawn): NOT_STARTED면 종료코드 1 + notifyDir에 «재�
 const GROWTH_WINDOW_MS = 900; // 이 창이 끝날 때까지 자식이 최소 2회는 폴링한다(poll-interval 40ms 기준 넉넉한 여유).
 const GROWTH_TICK_MS = 20;
 
-function growContinuously(logPath, windowMs, tickMs, writeFileSync) {
-  let elapsed = 0;
+// ★HYK-329 수리 -- 원인 기전(결과 파일 §1에 실측 기록): 이전 버전은
+// `elapsed += tickMs`로 "틱이 몇 번 불렸는가"만 셌다. setInterval의 콜백
+// 간격은 부하가 크면 예약된 tickMs(20ms)보다 훨씬 늘어질 수 있는데(콜백
+// 자체는 지연되지만 "이번에도 20ms 지났다"고 가정하고 누적하므로), 그
+// 결과 "명목상 900ms"(=45틱)를 채우는 데 걸리는 **실제** 시간이 부하 아래
+// 몇 배로 늘어난다(재현 실측: 인위적 이벤트 루프 부하 아래 900ms 명목
+// 창이 실제로는 1854ms 걸림 -- repro-growth.mjs, 45틱 그대로). 이 CLI의
+// 정지 판정(dispatch-start-size-core.mjs)은 반대로 항상 **실제 시각**
+// (Date.now())으로 lastGrowthAtMs/now를 비교하므로, "명목 900ms"가 실제로
+// 늘어져 성장이 CLI의 `timeoutMs`(4000ms) 턱밑까지 실제로 계속되면, CLI
+// 입장에서는 "최근에 진짜로 늘었다"가 참이 되어 STARTED(+ pastOverallTimeout)
+// 로 확정돼 버린다 -- 검토 좌석이 잡은 그 실패(round 0: exit code null)가
+// 바로 이 경로다.
+// 수리: 틱 카운트가 아니라 **실측 경과 시간**(Date.now() - start)으로
+// 창을 닫는다. 이러면 콜백이 부하로 얼마나 늦게 불리든 "실제로 흐른
+// 시간"만 기준이 되므로, 성장 창은 항상 실제 시계로 windowMs(900ms) 안팎
+// 에서 끝난다(콜백 빈도가 낮아지면 틱 수는 줄지만 -- 재현 결과 15틱 -- 그건
+// 이 시험이 요구하는 "최소 2회 폴링"과 무관: CLI는 파일 크기만 보므로
+// 몇 번 썼는지가 아니라 언제까지 커졌는지만 중요하다). ★대기 시간을
+// 늘리는 방향이 아니다 -- 같은 900ms 예산을 "명목"이 아니라 "실측"으로
+// 재는 것뿐이라 부하가 얼마나 크든 창 자체가 실제로 벌어지지 않는다.
+function growContinuously(
+  logPath,
+  windowMs,
+  tickMs,
+  writeFileSync,
+  nowFn = Date.now,
+) {
+  const startMs = nowFn();
   let chunk = 0;
   const timer = setInterval(() => {
-    elapsed += tickMs;
     chunk += 1;
     writeFileSync(logPath, "x".repeat(chunk * 200), "utf8");
-    if (elapsed >= windowMs) clearInterval(timer);
+    if (nowFn() - startMs >= windowMs) clearInterval(timer);
   }, tickMs);
   return () => clearInterval(timer);
 }
@@ -524,8 +550,23 @@ test("CLI end-to-end(spawn): --claude-home에 codex류 폴더를 넘겨도 동�
 // spawn해 종료코드 3 + «좌석 확인» 문구 통지 파일이 실제로 생기는지
 // 확인한다. ★4R부터 시간 예약(고정 지연 1회) 대신 "계속 자라다가 멈춤"
 // 동기화를 쓴다(위 growContinuously/runStalledAfterStartOnce 헤더 주석
-// 참조) -- 부하와 무관하게 결정적이어야 한다는 요구를 이 시험 자신이
-// 실증한다: 아래 반복 실행 시험이 이 시험을 5회 이상 연속 통과시킨다.
+// 참조).
+// ★HYK-329 정정(완료조건3 -- 아래 "부하 무관"이라는 옛 문구는 반증됐다,
+// ORCH/검토 좌석 실측 그대로): growContinuously가 성장 창을 "명목 틱 수"
+// (`elapsed += tickMs`)로 재고 있어서, 부하가 커서 setInterval 콜백이
+// 지연되면 그 창의 **실제** 길이가 늘어나 CLI의 `timeoutMs`(4000ms)를
+// 잠식했다(4819개 시험 전체 부하에서 1회 재현, 원인 경계값은 결과 파일
+// §1 참조 -- 재현 스크립트: 인위 이벤트 루프 부하 아래 명목 900ms 창이
+// 실측 1854ms 걸림, 45틱 그대로). 이제 growContinuously가 실측 경과
+// (Date.now())로 창을 닫으므로 **그 특정 원인 경로는 닫혔다.** 다만 이
+// 시험은 여전히 실제 자식 프로세스 spawn·실제 타이머·실제 파일 I/O에
+// 의존하는 E2E 시험이다 -- "부하와 무관하게 결정적"이 실제로 보장하는
+// 것은 정확히 «성장 창(900ms)이 부하 크기와 무관하게 실제 시계로 900ms
+// 안팎에서 끝난다»는 것뿐이며, "이 프로세스 전체가 어떤 부하에서도
+// 반드시 4000ms 안에 끝난다"는 수학적 증명은 아니다(운영체제가 그 예산
+// 자체를 삼킬 만큼 극단적인 부하라면 여전히 실패할 수 있다 -- 잔여
+// 위험은 아래 반복 실행 시험의 표본 통과로만 뒷받침된다). 아래 반복
+// 실행 시험이 이 시험을 5회 이상 연속 통과시킨다.
 test("CLI end-to-end(spawn, 부하-무관 동기화): 폴링 도중 계속 커지다 멈추면 종료코드 3 + notifyDir에 «좌석 확인» 문구 통지 파일이 실제로 생긴다", async () => {
   const { threw, stderr, notifyDir } = await runStalledAfterStartOnce({
     label: "single",
