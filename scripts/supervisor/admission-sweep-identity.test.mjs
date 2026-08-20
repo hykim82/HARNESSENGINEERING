@@ -10,7 +10,7 @@
 // - 표본 수는 각 test 이름에 명시한다.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runAdmissionCli } from "./admission-cli.mjs";
@@ -66,6 +66,20 @@ function cutover(ledger, lock) {
 const REAL_PANE_KEY =
   "b7011967-041a-45e4-843c-0cf8e2ccd418:ecdf87c2-a552-4370-9ecf-98d455404f0a";
 
+// HYK-326 (coder-task.md §2-1): admitted_at을 "충분히 과거"로 고정해
+// 발급->회수 간 벽시계 간격(수 ms)이 결과를 흔들지 못하게 한다. ageMs=0
+// (같은 밀리초)이면 회수 안 함이 제품의 의도된 경계(admission-ledger-
+// core.mjs:452, `ageMs <= staleAfterMs`)이므로, 그 경계를 우연에 맡기지
+// 않고 픽스처 시각을 고정해 회피한다. CLI(admit/sweep) 경로는 그대로 두고
+// 그 사이 임시 원장 파일의 admitted_at 필드만 직접 되돌린다.
+const FAR_PAST_ADMITTED_AT = "2020-01-01T00:00:00.000Z";
+
+function rewindAdmittedAt(ledgerPath, reservationId, isoPast) {
+  const ledger = JSON.parse(readFileSync(ledgerPath, "utf8"));
+  ledger.reservations[reservationId].admitted_at = isoPast;
+  writeFileSync(ledgerPath, JSON.stringify(ledger, null, 2));
+}
+
 // ---------------------------------------------------------------------------
 // 시험 1: 살아있는 좌석(원장 신분증과 같은 paneKey)이 목록에 있으면 회수
 // 되지 않는다.
@@ -94,6 +108,10 @@ test("HYK-317 §3-1: a live seat (paneKey matches the ledger's seat_key) is NOT 
       cap.restore();
     }
     assert.equal(admitExit, 0);
+    // HYK-326: admitted_at을 과거로 고정해 ageMs가 확실히 staleAfterMs(0)를
+    // 넘게 만든다 -- 그래야 아래 "회수되지 않음"이 "나이가 0이라서"가 아니라
+    // "좌석이 살아있어서"임이 확실해진다(vacuous pass 방지, coder-task §2-2).
+    rewindAdmittedAt(ledger, "HYK-317-live-1", FAR_PAST_ADMITTED_AT);
 
     const sweepCap = captureConsole();
     let sweepExit;
@@ -158,6 +176,9 @@ test("HYK-317 §3-2: a genuinely absent seat is still recovered (no regression)"
     } finally {
       admitCap.restore();
     }
+    // HYK-326: admitted_at을 과거로 고정 -- 발급->회수 간격이 0ms여도(같은
+    // 밀리초여도) ageMs가 크게 양수이므로 회수가 시각 운에 좌우되지 않는다.
+    rewindAdmittedAt(ledger, "HYK-317-dead-1", FAR_PAST_ADMITTED_AT);
 
     const sweepCap = captureConsole();
     let sweepExit;
@@ -340,4 +361,69 @@ test("HYK-317 §3-5 (defect pin): judgeSweepTrigger's real (fixed) liveSeatKeys 
   assert.deepEqual(sweptPreFix.changed, [
     { reservationId: "HYK-317-defect-pin", from: "ACTIVE", to: "SUSPECT" },
   ]);
+});
+
+// ---------------------------------------------------------------------------
+// 시험 6 (HYK-326 coder-task §2-3): sweepActiveEntry의 `ageMs <= staleAfterMs`
+// 경계를 코어 함수에 `now`를 직접 주어 못박는다 -- 경계값(ageMs==staleAfterMs)
+// 은 회수 안 함, 경계+1(ageMs==staleAfterMs+1)은 SUSPECT. 나중에 누가 이
+// 부등호를 바꾸면(C안) 조용히 통과하지 않고 RED가 나야 한다.
+// ---------------------------------------------------------------------------
+test("HYK-326 §2-3 (boundary pin): ageMs == staleAfterMs is NOT swept, ageMs == staleAfterMs + 1 IS swept", () => {
+  const STALE_AFTER_MS = 5000;
+  const ADMITTED_AT_MS = Date.parse("2023-01-01T00:00:00.000Z");
+  const admittedAt = new Date(ADMITTED_AT_MS).toISOString();
+
+  function buildLedgerWithOneActiveSeat(reservationId) {
+    let ledger = createEmptyLedger(admittedAt);
+    const admitted = admitReservation(ledger, {
+      reservationId,
+      cap: 1,
+      now: admittedAt,
+      role: "CODER",
+      seatKey: REAL_PANE_KEY,
+    });
+    assert.equal(admitted.decision, "ADMITTED");
+    return admitted.ledger;
+  }
+
+  // 경계값: ageMs === staleAfterMs -> 회수 안 함
+  {
+    const ledger = buildLedgerWithOneActiveSeat("HYK-326-boundary-eq");
+    const nowAtBoundary = new Date(
+      ADMITTED_AT_MS + STALE_AFTER_MS,
+    ).toISOString();
+    const swept = sweepAndRecover(ledger, {
+      now: nowAtBoundary,
+      liveSeatKeys: [],
+      staleAfterMs: STALE_AFTER_MS,
+      recoveryGraceMs: 999999999,
+    });
+    assert.equal(
+      swept.changed.length,
+      0,
+      "ageMs == staleAfterMs must NOT be swept (product-intended boundary)",
+    );
+  }
+
+  // 경계+1: ageMs === staleAfterMs + 1 -> SUSPECT로 회수
+  {
+    const ledger = buildLedgerWithOneActiveSeat("HYK-326-boundary-plus1");
+    const nowPastBoundary = new Date(
+      ADMITTED_AT_MS + STALE_AFTER_MS + 1,
+    ).toISOString();
+    const swept = sweepAndRecover(ledger, {
+      now: nowPastBoundary,
+      liveSeatKeys: [],
+      staleAfterMs: STALE_AFTER_MS,
+      recoveryGraceMs: 999999999,
+    });
+    assert.deepEqual(swept.changed, [
+      {
+        reservationId: "HYK-326-boundary-plus1",
+        from: "ACTIVE",
+        to: "SUSPECT",
+      },
+    ]);
+  }
 });
