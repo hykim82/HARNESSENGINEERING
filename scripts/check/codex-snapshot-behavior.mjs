@@ -19,16 +19,37 @@
 // JSON first line) are tolerated and a *real* enumeration failure still
 // fails.
 //
+// HYK-286-codex-collect-2 (coder-task.md §1, CI PR #192 run 32347838848):
+// the enumeration-failure regression case used to call the Windows-only
+// `icacls` binary UNCONDITIONALLY, regardless of platform. This module's
+// own comment already promised "skip with a reason if icacls is
+// unavailable", but no code actually checked platform or availability --
+// on ubuntu-latest (pwsh present, no icacls) that crashed the whole test
+// with `spawnSync icacls ENOENT` instead of skipping. Fixed by branching on
+// `platform`: Windows still uses `icacls` (guarded by an availability
+// check), everywhere else uses a plain `chmodSync(dir, 0o000)` -- no
+// external tool needed, and it actually verifies the regression axis for
+// real on CI instead of merely not-crashing. If the permission removal
+// itself turns out not to restrict access (e.g. a root-run process, where
+// POSIX mode bits are not enforced), that is detected and reported as an
+// explicit skip reason rather than silently passing.
+//
 // I/O: this module DOES touch the filesystem (temp dirs, synthetic rollout
 // files) and DOES spawn a child process -- it cannot be a pure function.
 // Every temp artifact is written under the OS temp dir and removed in a
 // `finally`.
 
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import {
+  mkdtempSync,
+  mkdirSync,
+  writeFileSync,
+  rmSync,
+  chmodSync,
+  readdirSync,
+} from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { execFileSync as execFileSyncForIcacls } from "node:child_process";
 
 const PS_CANDIDATES = ["pwsh", "powershell.exe", "powershell"];
 
@@ -194,31 +215,101 @@ export function buildSessionsDir(baseDir, rolloutSpecs) {
   return sessionsDir;
 }
 
+// Returns true iff an `icacls` executable actually runs on this PATH (not
+// just "the platform is Windows" -- a Windows host could still be missing
+// it, e.g. a minimal container image).
+export function isIcaclsAvailable() {
+  try {
+    execFileSync("icacls", ["/?"], { stdio: ["ignore", "ignore", "ignore"] });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 // Builds a sessions dir whose enumeration (`Get-ChildItem -Recurse`) itself
-// throws UnauthorizedAccessException -- a REAL collection failure, distinct
-// from any per-file first-line timing accident. Uses `icacls` (Windows) to
-// deny read/list on a locked subdirectory. Throws if `icacls` is not
-// available (caller should skip the enumeration-failure case with a
-// printed reason on non-Windows, same honesty-limit pattern as
-// findPowerShell()).
-export function buildUnreadableSessionsDir(baseDir) {
+// throws/fails -- a REAL collection failure, distinct from any per-file
+// first-line timing accident. Returns `{ ok: true, sessionsDir }` on
+// success, or `{ ok: false, sessionsDir, reason }` if a genuinely
+// permission-denied directory could not be constructed on this host --
+// callers MUST treat `ok:false` as an explicit skip (print `reason`), never
+// silently proceed as if the case ran (HYK-286-codex-collect-2: the
+// previous version threw ENOENT instead of returning this shape, which is
+// exactly what crashed CI).
+//
+// `platform` is injectable (defaults to `process.platform`) so tests can
+// force either branch's code path without needing to actually run on that
+// OS -- see codex-snapshot-behavior.test.mjs's portability self-check.
+export function buildUnreadableSessionsDir(
+  baseDir,
+  { platform = process.platform } = {},
+) {
   const sessionsDir = join(baseDir, "sessions");
   const lockedDir = join(sessionsDir, "locked");
   mkdirSync(lockedDir, { recursive: true });
   writeFileSync(join(lockedDir, "rollout-locked.jsonl"), "x\n", "utf8");
-  const user = process.env.USERNAME ?? process.env.USER;
-  execFileSyncForIcacls("icacls", [lockedDir, "/deny", `${user}:(OI)(CI)(RD)`]);
-  return sessionsDir;
+
+  if (platform === "win32") {
+    if (!isIcaclsAvailable()) {
+      return {
+        ok: false,
+        sessionsDir,
+        reason:
+          "icacls not found on PATH -- cannot construct a real permission-denied directory on this Windows host (HYK-286-codex-collect-2 honesty limit: skip, do not crash)",
+      };
+    }
+    const user = process.env.USERNAME ?? process.env.USER;
+    execFileSync("icacls", [lockedDir, "/deny", `${user}:(OI)(CI)(RD)`], {
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    return { ok: true, sessionsDir };
+  }
+
+  // POSIX (Linux/macOS, e.g. ubuntu-latest CI): no external tool needed --
+  // stripping all mode bits makes the directory unreadable/unlistable to
+  // any process that does not own the permission override (root).
+  chmodSync(lockedDir, 0o000);
+  try {
+    readdirSync(lockedDir);
+    // Listing still succeeded despite chmod 000 -- POSIX mode bits are not
+    // being enforced on this host (root-run process, or a filesystem that
+    // does not honor them). Restore access and report the honest reason
+    // instead of silently treating this as a passed/skipped case either
+    // way.
+    chmodSync(lockedDir, 0o755);
+    return {
+      ok: false,
+      sessionsDir,
+      reason:
+        "chmod 000 did not restrict directory access on this host (running as root, or POSIX mode bits not enforced by this filesystem) -- cannot construct a real permission-denied condition",
+    };
+  } catch {
+    return { ok: true, sessionsDir };
+  }
 }
 
-export function unlockSessionsDir(sessionsDir) {
+export function unlockSessionsDir(
+  sessionsDir,
+  { platform = process.platform } = {},
+) {
   const lockedDir = join(sessionsDir, "locked");
-  const user = process.env.USERNAME ?? process.env.USER;
+  if (platform === "win32") {
+    if (!isIcaclsAvailable()) return;
+    const user = process.env.USERNAME ?? process.env.USER;
+    try {
+      execFileSync("icacls", [lockedDir, "/remove:d", user], {
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+    } catch {
+      // best-effort cleanup -- rmSync in the caller's finally still runs,
+      // and a leftover deny ACL on a temp dir is not this module's concern
+      // to guarantee against.
+    }
+    return;
+  }
   try {
-    execFileSyncForIcacls("icacls", [lockedDir, "/remove:d", user]);
+    chmodSync(lockedDir, 0o755);
   } catch {
-    // best-effort cleanup -- rmSync below still runs in the caller's
-    // finally, and a leftover deny ACL on a temp dir is not this module's
-    // concern to guarantee against.
+    // same best-effort posture as the Windows branch above.
   }
 }

@@ -223,12 +223,22 @@ test("REGRESSION (must still fail): a real enumeration failure (Get-ChildItem it
     return;
   }
   const base = mkdtempSync(join(tmpdir(), "codex-snap-case-"));
-  let sessionsDir;
+  let built;
   try {
-    sessionsDir = buildUnreadableSessionsDir(base);
+    built = buildUnreadableSessionsDir(base);
+    if (!built.ok) {
+      // HYK-286-codex-collect-2: a host where a real permission-denied
+      // directory cannot be constructed (icacls missing, or POSIX mode
+      // bits not enforced e.g. running as root) is an explicit, printed
+      // skip -- never a silent pass and never a crash (the bug this round
+      // fixes: the old code called icacls unconditionally and died with
+      // ENOENT on ubuntu-latest CI, PR #192 run 32347838848).
+      t.skip(built.reason);
+      return;
+    }
     const result = runCodexSnapshotBehavior(
       loadCandidateFunctionText(),
-      sessionsDir,
+      built.sessionsDir,
       TARGET_WORKTREE,
       psExe,
     );
@@ -242,7 +252,52 @@ test("REGRESSION (must still fail): a real enumeration failure (Get-ChildItem it
       "expected a non-empty error message for a real enumeration failure",
     );
   } finally {
-    if (sessionsDir) unlockSessionsDir(sessionsDir);
+    if (built?.ok) unlockSessionsDir(built.sessionsDir);
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test("PORTABILITY (HYK-286-codex-collect-2 §4 self-check): forcing the POSIX (non-Windows) code path never shells out to icacls, and never throws -- it either builds a real permission-denied directory or returns an explicit skip reason", () => {
+  // This module's own platform branch decides which mechanism to use
+  // (icacls on win32, chmod everywhere else); this test forces the
+  // "everywhere else" branch via the injectable `platform` option so the
+  // ubuntu-latest CI code path is exercised even from this Windows dev
+  // worktree (coder-task.md §4: "로컬이 Windows라 그냥 돌리면 CI와 같은
+  // 조건이 아니다" -- this is the substitute verification method).
+  const base = mkdtempSync(join(tmpdir(), "codex-snap-portability-"));
+  let built;
+  try {
+    built = buildUnreadableSessionsDir(base, { platform: "linux" });
+    // Must always return the {ok, ...} shape -- never throw, regardless of
+    // whether this Windows host can actually enforce POSIX mode bits.
+    assert.equal(typeof built.ok, "boolean");
+    if (built.ok) {
+      assert.equal(built.sessionsDir, join(base, "sessions"));
+    } else {
+      assert.ok(
+        typeof built.reason === "string" && built.reason.length > 0,
+        "a false ok must carry a non-empty explicit reason (no silent skip)",
+      );
+    }
+  } finally {
+    if (built?.ok) unlockSessionsDir(built.sessionsDir, { platform: "linux" });
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test("PORTABILITY (HYK-286-codex-collect-2 §4 self-check): forcing win32 with icacls made unavailable returns an explicit skip reason, not a thrown ENOENT", () => {
+  const base = mkdtempSync(join(tmpdir(), "codex-snap-portability-"));
+  const originalPath = process.env.PATH;
+  try {
+    // Empty PATH -- no `icacls` (or anything else) resolvable, reproducing
+    // the exact "binary not found" condition that used to throw
+    // `spawnSync icacls ENOENT` uncaught.
+    process.env.PATH = "";
+    const built = buildUnreadableSessionsDir(base, { platform: "win32" });
+    assert.equal(built.ok, false);
+    assert.match(built.reason, /icacls/);
+  } finally {
+    process.env.PATH = originalPath;
     rmSync(base, { recursive: true, force: true });
   }
 });
