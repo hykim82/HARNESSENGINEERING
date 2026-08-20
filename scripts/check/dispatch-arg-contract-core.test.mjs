@@ -37,7 +37,7 @@ function buildSyntheticScript(omit = new Set()) {
 # 아니어야 한다: & node $gateScript --expect-repo-root $Worktree
 $gateScript = Join-Path $Worktree "scripts/check/dispatch-gate-decision.mjs"
 $roleTaskFile = Join-Path $Worktree ".harness/coder-task.md"
-& node $gateScript ${omit.has(`${G}:<positional task-path>`) ? "" : "$roleTaskFile"}${flagPair(G, "--expect-repo-root", "$Worktree", omit)}${flagPair(G, "--dispatch-receipt-path", "$ReceiptPath", omit)}
+& node $gateScript ${omit.has(`${G}:<positional task-path>`) ? "" : "$roleTaskFile"}${flagPair(G, "--expect-repo-root", "$Worktree", omit)}${flagPair(G, "--dispatch-receipt-path", "$ReceiptPath", omit)}${flagPair(G, "--admission-ledger-path", "$admissionLedgerPath", omit)}
 
 $admissionCliPath = Join-Path $Worktree "scripts/supervisor/admission-cli.mjs"
 $admissionOut = & node $admissionCliPath ${omit.has(`${A}:<subcommand:admit>`) ? "" : "admit"}${flagPair(A, "--ledger", "$admissionLedgerPath", omit)}${flagPair(A, "--lock", "$admissionLockPath", omit)}${flagPair(A, "--reservation-id", "$label", omit)}${flagPair(A, "--cap-path", "$capPath", omit)}${flagPair(A, "--role", "$Role", omit)}${flagPair(A, "--seat-key", "$paneKey", omit)} 2>&1
@@ -165,8 +165,8 @@ test("(fail-closed-2) 스크립트 경로 대입 자체를 못 찾음 -> SCRIPT_
 test("(fail-closed-3) 같은 변수를 부르는 호출 창이 2개 -> MULTIPLE_INVOCATIONS(통과 아님)", () => {
   const text = `
 $gateScript = Join-Path $Worktree "scripts/check/dispatch-gate-decision.mjs"
-& node $gateScript $roleTaskFile --expect-repo-root $Worktree --dispatch-receipt-path $ReceiptPath
-& node $gateScript $roleTaskFile --expect-repo-root $Worktree --dispatch-receipt-path $ReceiptPath
+& node $gateScript $roleTaskFile --expect-repo-root $Worktree --dispatch-receipt-path $ReceiptPath --admission-ledger-path $admissionLedgerPath
+& node $gateScript $roleTaskFile --expect-repo-root $Worktree --dispatch-receipt-path $ReceiptPath --admission-ledger-path $admissionLedgerPath
 `;
   const result = runContractCheck(text, [CLI_CONTRACTS[0]]);
   assert.equal(result.ok, false);
@@ -180,7 +180,7 @@ test("(fail-closed-4) 같은 CLI 상대경로를 서로 다른 변수 2개에 �
   const text = `
 $gateScriptA = Join-Path $Worktree "scripts/check/dispatch-gate-decision.mjs"
 $gateScriptB = Join-Path $Worktree "scripts/check/dispatch-gate-decision.mjs"
-& node $gateScriptA $roleTaskFile --expect-repo-root $Worktree --dispatch-receipt-path $ReceiptPath
+& node $gateScriptA $roleTaskFile --expect-repo-root $Worktree --dispatch-receipt-path $ReceiptPath --admission-ledger-path $admissionLedgerPath
 `;
   const result = runContractCheck(text, [CLI_CONTRACTS[0]]);
   assert.equal(result.ok, false);
@@ -199,7 +199,7 @@ test("(회귀) 호출문을 그대로 인용한 전체 줄 주석은 두 번째 
   const text = `
 # 게이트 호출(아래 & node $gateScript ...)에 --dispatch-receipt-path가 필요하다는 설명
 $gateScript = Join-Path $Worktree "scripts/check/dispatch-gate-decision.mjs"
-& node $gateScript $roleTaskFile --expect-repo-root $Worktree --dispatch-receipt-path $ReceiptPath
+& node $gateScript $roleTaskFile --expect-repo-root $Worktree --dispatch-receipt-path $ReceiptPath --admission-ledger-path $admissionLedgerPath
 `;
   const result = runContractCheck(text, [CLI_CONTRACTS[0]]);
   assert.equal(result.ok, true);
@@ -233,7 +233,7 @@ $admissionCliPath = Join-Path $Worktree "scripts/supervisor/admission-cli.mjs"
 test("(계약) 값의 옳음은 범위 밖 -- 존재하지 않는 파일을 가리키는 위치 인자도 «있다»로 통과", () => {
   const text = `
 $gateScript = Join-Path $Worktree "scripts/check/dispatch-gate-decision.mjs"
-& node $gateScript $ANY_TOKEN_EVEN_A_TYPO --expect-repo-root $Worktree --dispatch-receipt-path $ReceiptPath
+& node $gateScript $ANY_TOKEN_EVEN_A_TYPO --expect-repo-root $Worktree --dispatch-receipt-path $ReceiptPath --admission-ledger-path $admissionLedgerPath
 `;
   const result = runContractCheck(text, [CLI_CONTRACTS[0]]);
   assert.equal(result.findings[0].reasonCode, REASON.PASS);

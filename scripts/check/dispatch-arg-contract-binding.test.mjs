@@ -77,7 +77,7 @@ test("(A-hard) dispatch-gate-decision: positional task-path 빠지면 usage로 �
   assert.match(result.lines[0], /usage:/);
 });
 
-test("(A-soft x2) dispatch-gate-decision: --expect-repo-root/--dispatch-receipt-path 둘 다 빠져도 ALLOW 기준선은 그대로다(§2-2 헛선언 증명)", () => {
+test("(A-soft x3) dispatch-gate-decision: --expect-repo-root/--dispatch-receipt-path/--admission-ledger-path 셋 다 빠져도 ALLOW 기준선은 그대로다(§2-2 헛선언 증명)", () => {
   withFixtureDir("hyk319-gate-", (dir) => {
     const taskPath = join(dir, "coder-task.md");
     writeFileSync(
@@ -112,6 +112,27 @@ test("(A-soft x2) dispatch-gate-decision: --expect-repo-root/--dispatch-receipt-
       join(dir, "no-such-receipts.jsonl"),
     ]);
     assert.equal(withReceiptPath.allow, true);
+
+    // HYK-319-argcheck-2 (검토 1R P1 수리): --admission-ledger-path도
+    // (존재하지 않는 경로로) 추가해도 결과가 바뀌지 않는다 -- 이
+    // 부트스트랩 픽스처는 결과 파일 자체가 없어 harnessTaskLabel이
+    // classifyTaskIdLabel에서 MISSING으로 분류되지 않는다(task_id: 줄이
+    // 있는 taskPath 원문이 아니라 결과 파일 부재로 evaluateConsumptionDecision
+    // 이 조기에 null을 반환 -- abort-record 축 자체가 진입하지 않는다).
+    // 즉 이 인자도 CLI 프로세스 자체를 죽이지 않는다는 것을 같은 방식으로
+    // 보여준다(abort-record 축이 실제로 REJECT_ABORT_RECORD_RECOVERY_MARKER_MISSING
+    // 을 내는 시나리오는 abort record 후보 파일·영수증·원장까지 갖춘 훨씬
+    // 무거운 픽스처가 필요해 이 라운드 범위에서는 구성하지 않았다 --
+    // 레지스트리 note와 검토 P1 원문의 코드 인용이 그 인과를 이미 코드
+    // 라인 단위로 증명한다).
+    const withAdmissionLedgerPath = runDispatchGateDecision([
+      taskPath,
+      "--ledger",
+      ledgerPath,
+      "--admission-ledger-path",
+      join(dir, "no-such-admission-ledger.json"),
+    ]);
+    assert.equal(withAdmissionLedgerPath.allow, true);
 
     // --expect-repo-root를 추가하면(이 tmpdir은 git 저장소가 아니므로)
     // «인자가 없어서 죽는» 것과는 다른 축(레포 결속 확인, HYK-220 2R)이

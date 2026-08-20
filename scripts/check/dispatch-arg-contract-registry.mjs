@@ -49,6 +49,41 @@ export const CLI_CONTRACTS = Object.freeze([
           "REJECT일 수 있어 원인이 가려질 수 있다). 죽는지 여부와 무관하게 " +
           "이 인자가 바로 이 검사기를 만든 이유이므로 선언 유지.",
       }),
+      // HYK-319-argcheck-2 (검토 1R P1 반려 수리): 1R 선언에서 빠졌던
+      // 항목 -- 검토가 코드를 직접 인용해 지목했다. 코드 실측
+      // (dispatch-gate-decision.mjs 218-239행 파싱 · 1226-1231행
+      // resolveAdmissionLedgerPathForAbort · 1289-1299행
+      // verifyAbortRecordRecoveryMarker): 이 인자(또는 env
+      // ADMISSION_LEDGER_PATH)가 없으면 admission 원장을 읽을 경로
+      // 자체가 없어 verifyAbortRecordRecoveryMarker가 **항상 false**로
+      // 닫힌다 -- 즉 이름표 없이 죽은 라운드(abort record)의 정당한
+      // 회수 표식이 실재해도 "회수 표식 없음"과 똑같이 REJECT된다.
+      // Linear HYK-315(Todo·미수리)가 이미 등재한 바로 그 결함이고,
+      // HYK-319 정본이 이 검사기를 "HYK-256·315 병의 일반해"라고
+      // 못박았으므로 315를 못 잡으면 정본 요구를 충족하지 못한다.
+      Object.freeze({
+        flags: Object.freeze(["--admission-ledger-path"]),
+        hard: false,
+        note:
+          "--dispatch-receipt-path와 같은 arg-with-env-fallback 모양 " +
+          "(env ADMISSION_LEDGER_PATH) -- 둘 다 없어도 이 CLI 프로세스 " +
+          "자체는 usage로 죽지 않는다(회수 표식 검증만 조용히 항상 " +
+          "false로 닫힘, 값이 있는 다른 REJECT 사유 뒤에 원인이 가려질 " +
+          "수도 있음). 없으면 회수 표식 검증이 항상 false로 닫혀 정당한 " +
+          "abort record도 통과 못 한다(HYK-315) -- 죽는지 여부와 무관하게 " +
+          "이 검사기의 존재 이유(안전 경로 사고 방지)이므로 선언 유지. " +
+          "★환경변수 대체 경로의 한계: 이 검사기는 «호출 창 안의 플래그 " +
+          "토큰»만 본다(코어 계약, 값이 아니라 이름만 대조) -- " +
+          "`$env:ADMISSION_LEDGER_PATH = ...` 같은 전역 환경변수 설정은 " +
+          "호출 창 밖의 상태라 지금 선언 형식으로 표현할 수 없다(anyOf는 " +
+          "같은 창 안의 대체 «플래그»만 표현 가능, 전역 env 대입 문장을 " +
+          "인식하는 축이 코어에 없음). 지금 실물 배달기는 이 env var를 " +
+          "아예 설정하지 않으므로(검토 실측) 이 한계가 당장 오탐/누락을 " +
+          "만들지는 않지만, 미래에 배달기가 --admission-ledger-path 대신 " +
+          "이 env var만 설정하는 식으로 고쳐지면 이 검사기는 그 정당한 " +
+          "충족을 알아보지 못하고 계속 MISSING_ARGS를 낼 것이다(과탐 쪽 " +
+          "한계 -- 배달 자체를 막지는 않는다, 결선 전이므로).",
+      }),
     ]),
   }),
   Object.freeze({

@@ -68,7 +68,7 @@ test("정상 판정 시 exit code가 코어의 exitCode와 그대로 일치한�
       `
 $gateScript = Join-Path $Worktree "scripts/check/dispatch-gate-decision.mjs"
 $roleTaskFile = Join-Path $Worktree ".harness/coder-task.md"
-& node $gateScript $roleTaskFile --expect-repo-root $Worktree --dispatch-receipt-path $ReceiptPath
+& node $gateScript $roleTaskFile --expect-repo-root $Worktree --dispatch-receipt-path $ReceiptPath --admission-ledger-path $admissionLedgerPath
 
 $admissionCliPath = Join-Path $Worktree "scripts/supervisor/admission-cli.mjs"
 & node $admissionCliPath admit --ledger $l --lock $k --reservation-id $r --cap-path $c --role $Role --seat-key $paneKey
