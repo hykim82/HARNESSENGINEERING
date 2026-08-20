@@ -205,7 +205,22 @@ test("CLI end-to-end(spawn): NOT_STARTED면 종료코드 1 + notifyDir에 «재�
 // 않는다). 성장 창(`GROWTH_WINDOW_MS`)이 끝나면 더는 안 건드려
 // "승인창 등으로 멈춤"과 동형이 되고, 그 뒤 `stallThresholdMs`가
 // 지나면 결정적으로 STALLED_AFTER_START가 된다.
-const GROWTH_WINDOW_MS = 900; // 이 창이 끝날 때까지 자식이 최소 2회는 폴링한다(poll-interval 40ms 기준 넉넉한 여유).
+// ★HYK-329 2차 원인(결과 파일 §1 실측 -- tick-누적 수리 뒤에도 남아 있던
+// 별개의 실패 경로): 성장 창을 "실측 경과"로 닫아도(위 growContinuously
+// 수리), 자식 프로세스 자체의 spawn·node 기동이 이 창보다 «더» 지연되면
+// (전체 스윕 부하 아래 관측: round 1에서 exit code 1=NOT_STARTED로 재현),
+// 자식의 «첫 실관측»이 이미 성장이 다 끝난 뒤에야 일어나 이번 실행 안에서
+// 성장을 한 번도 못 본다 -- 이건 CLI 자신이 4R부터 "알려진 한계"로 고정해
+// 둔 바로 그 자리(첫 관측 전에 이미 커져 있으면 구조적으로 NOT_STARTED,
+// coder-task.md 범위 밖 -- 다음 조각 몫)이지, 오늘 고칠 CLI 버그가
+// 아니다. 이 시험이 그 알려진 한계를 «부하 때문에 우연히» 건드리지
+// 않으려면, 성장 창이 실전 부하에서 관측된 spawn 지연보다 충분히 커야
+// 한다 -- 900ms 창은 그 여유가 부족했다(실측 재현: 4819개 시험 전체
+// 부하에서 5회 반복 중 1회, round 1이 NOT_STARTED로 재현). 4000ms로
+// 늘려 여유를 키운다(수학적 보장은 아니다 -- §2-3 정정 문구와 동일한
+// 정직 한계, 극단적 부하면 여전히 이론상 깨질 수 있다 -- 다만 실측
+// 표본으로 그 여유가 실전에서 충분함을 보인다, 아래 반복 실행 실측).
+const GROWTH_WINDOW_MS = 4000; // 부하 아래 자식 spawn 지연에 대한 실측 기반 여유(위 주석).
 const GROWTH_TICK_MS = 20;
 
 // ★HYK-329 수리 -- 원인 기전(결과 파일 §1에 실측 기록): 이전 버전은
@@ -291,11 +306,14 @@ async function runStalledAfterStartOnce({ label }) {
             // ★부하 여유: 이 세 값은 타이밍을 "맞추기" 위한 것이 아니라
             // "growth 창이 끝난 뒤에도 자식이 stallThreshold 도달을 볼
             // 시간이 있다"는 여유만 준다 -- 정밀 정렬은 growContinuously
-            // 쪽 로직(계속 자람)이 담당한다.
+            // 쪽 로직(계속 자람)이 담당한다. ★HYK-329 2차 원인 수리(위
+            // GROWTH_WINDOW_MS 주석 참조) -- growth 창을 4000ms로 늘린
+            // 만큼 stall-threshold·timeout도 같이 늘려 자식 spawn 지연
+            // 여유를 유지한다.
             "--timeout-ms",
-            "4000",
+            "15000",
             "--stall-threshold-ms",
-            "1200",
+            "4000",
             "--poll-interval-ms",
             "40",
           ],
@@ -446,10 +464,12 @@ test("CLI end-to-end(spawn): --claude-home·--baseline-bytes 인자가 실제로
             claudeHomeDir,
             "--baseline-bytes",
             "0",
+            // ★HYK-329 2차 원인 수리(위 GROWTH_WINDOW_MS 주석 참조) -- 이
+            // 값들은 growth 창(4000ms)과 짝을 맞춘다.
             "--timeout-ms",
-            "4000",
+            "15000",
             "--stall-threshold-ms",
-            "1200",
+            "4000",
             "--poll-interval-ms",
             "40",
           ],
@@ -524,10 +544,12 @@ test("CLI end-to-end(spawn): --claude-home에 codex류 폴더를 넘겨도 동�
             "HYK-TEST-codexhome",
             "--claude-home",
             codexHomeDir,
+            // ★HYK-329 2차 원인 수리(위 GROWTH_WINDOW_MS 주석 참조) -- 이
+            // 값들은 growth 창(4000ms)과 짝을 맞춘다.
             "--timeout-ms",
-            "4000",
+            "15000",
             "--stall-threshold-ms",
-            "1200",
+            "4000",
             "--poll-interval-ms",
             "40",
           ],
