@@ -233,24 +233,52 @@ test("(c) 같은 라운드에 대해 게이트를 두 번 부르면(재시도), 
 // 이 축은 그 파일이 계속 통과한다는 사실 자체로도 이미 증명된다(같은
 // 스위프에서 함께 돈다).
 // ---------------------------------------------------------------------------
-test("(d) 정상 흐름 회귀 0: dropped_at 줄이 없는 기존 P1-B ALLOW fixture는 스냅숏 축이 생겨도 여전히 ALLOW이고 rounds/도 생기지 않는다(그 축 자신의 no-op 계약 유지)", () => {
+test("(d) HYK-316-dropped-stamp-1: dropped_at 줄이 없지만 task_id: 는 있는 fixture -- 이제 dropped_at이 삽입되고, 그 삽입도 기존 스냅숏 축을 그대로 타서 rounds/에 남는다", () => {
   withFixtureDir((dir) => {
     const taskPath = join(dir, "coder-task.md");
-    // 의도적으로 dropped_at: 줄이 없는 fixture -- bestEffortStampDroppedAt
-    // 자신의 기존 no-op 분기(구조적 전제 미충족)를 그대로 탄다.
-    writeFileSync(
-      taskPath,
-      `task_id: HYK-9304-nodropped-1\nrole: CODER\n${ONE_B_BLOCK}`,
-      "utf8",
-    );
+    // task_id: 는 있지만 dropped_at: 이 없는 fixture -- HYK-316 전에는
+    // bestEffortStampDroppedAt의 no-op 분기(구조적 전제 미충족)를 탔지만,
+    // 이제는 삽입 분기를 탄다(task_id: 존재가 그 경계).
+    const original = `task_id: HYK-9304-nodropped-1\nrole: CODER\n${ONE_B_BLOCK}`;
+    writeFileSync(taskPath, original, "utf8");
     const ledgerPath = freshLedger(dir);
     const r = runCli([taskPath, "--ledger", ledgerPath]);
     assert.equal(r.status, 0);
     assert.match(r.stdout, /ALLOW/);
+
+    const stamped = readFileSync(taskPath, "utf8");
+    assert.notEqual(
+      stamped,
+      original,
+      "dropped_at must have been machine-inserted",
+    );
+    assert.match(stamped, /^dropped_at: \d{4}-\d{2}-\d{2} \d{2}:\d{2} KST$/m);
+
     assert.deepEqual(
       roundArchiveNames(dir),
-      [],
-      "no dropped_at line -> stamp step is a no-op -> the new snapshot (which only runs from inside that step) must not create rounds/ either",
+      ["coder-task-r1.md"],
+      "an insertion is a real content-producing event, exactly like the existing overwrite branch -- it must snapshot the same way (bestEffortSnapshotRoundTaskFile), not skip",
     );
+    const archived = readFileSync(
+      join(dir, "rounds", "coder-task-r1.md"),
+      "utf8",
+    );
+    assert.ok(
+      archived.includes(stamped),
+      "the snapshot must contain this round's final text, including the newly inserted dropped_at",
+    );
+  });
+});
+
+test("(e) 진짜 no-op: dropped_at: 도 task_id: 도 없는 fixture는 여전히 삽입도 스냅숏도 없다(§3-3 경계: task_id: 없으면 삽입하지 않는다)", () => {
+  withFixtureDir((dir) => {
+    const taskPath = join(dir, "coder-task.md");
+    const original = `role: CODER\nno task_id header at all\n${ONE_B_BLOCK}`;
+    writeFileSync(taskPath, original, "utf8");
+    const ledgerPath = freshLedger(dir);
+    const r = runCli([taskPath, "--ledger", ledgerPath]);
+    assert.equal(readFileSync(taskPath, "utf8"), original);
+    assert.deepEqual(roundArchiveNames(dir), []);
+    void r;
   });
 });

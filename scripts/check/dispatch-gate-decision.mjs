@@ -1805,14 +1805,31 @@ function evaluateConsumptionDecision(taskPath, args, env = process.env) {
 // 않는다. 이 저장소 변경 하나만으로 모든 실제 배달에 기계 스탬프가 공짜로
 // 결선된다(관제실측 결선 불필요).
 //
-// 구조적 전제: dropped_at: 줄이 «이미 있을 때만» 덮어쓴다(없는 줄을
-// 새로 만들지 않는다 -- 그 부재는 이 라운드가 다루는 실패 모드가
-// 아니다). 손기입 대체값 금지(1R 원칙 유지): stampDroppedAt()이 실패하면
-// 기존 헤더를 그대로 둔다 -- 뭔가를 지어내지 않는다. Best-effort: 절대
-// throw하지 않고, 이 CLI 자신의 exit code에 영향을 주지 않는다(
-// relay-handshake.mjs의 spawnAdmissionCompletion/autoWriteConsumptionReceipt
-// 와 동일한 house style -- 실패는 console.error로만 드러난다).
+// HYK-316-dropped-stamp-1: dropped_at: 줄이 «이미 있으면» 덮어쓰고,
+// «아예 없으면»(수기 작성 지시서가 기계 스탬프를 우회한 모양-- 어제
+// 08-20 HYK-328-review-1 · HYK-330-pm-guard-prefix-1 라이브 재현: 배달은
+// 성공했는데 소비 핸드셰이크가 "task file missing dropped_at header"로
+// 영구 거부됨) `task_id:` 줄이 있을 때만 그 바로 다음 줄로 새로
+// 삽입한다(책임자 판정 2026-08-21: 「거부」가 아니라 「스탬프」로 우회
+// 경로를 막는다). `task_id:` 줄조차 없으면(라운드 지시서 모양이 아님)
+// 여전히 아무것도 만들지 않고 건너뛴다 -- 손기입 대체값 금지(1R 원칙
+// 유지): stampDroppedAt()이 실패하면 기존 파일을 그대로 둔다(삽입이든
+// 덮어쓰기든 뭔가를 지어내지 않는다). Best-effort: 절대 throw하지 않고,
+// 이 CLI 자신의 exit code에 영향을 주지 않는다(relay-handshake.mjs의
+// spawnAdmissionCompletion/autoWriteConsumptionReceipt와 동일한 house
+// style -- 실패는 console.error로만 드러난다).
 const DROPPED_AT_LINE_RE = /^dropped_at:\s*.+$/im;
+
+// HYK-316-dropped-stamp-1: 삽입 지점 판정용 -- 첫 `task_id:` 줄(값 유무·
+// 형식 무관, 존재 자체만) 바로 뒤에 dropped_at을 끼워 넣는다. 이 저장소·
+// 관제실 지시서 전부가 `task_id:`를 첫 줄로 쓰는 순서이므로(coder-task.md
+// 이번 라운드 §3-2 근거) 삽입 위치는 그 줄의 끝이다. 시험용 합성
+// precondition-reject 픽스처(예: 중복 task_id, 형식오류 task_id)도 이
+// 줄 자체는 갖고 있으므로 삽입 대상이 되는 것이 의도된 동작이다 --
+// 「task_id: 줄 존재 여부」만이 이 경계의 유일한 판정 기준이며, 그 값의
+// 유효성은 이 함수의 관심사가 아니다(그건 아래 이어지는
+// checkGatePreconditions의 몫).
+const TASK_ID_LINE_FOR_INSERT_RE = /^task_id:.*$/m;
 
 // HYK-257-done-stamp-3 §2 범위2 -- «시험·검증이 실물 .harness/*-task.md를
 // 만지지 못하게» fail-loud 경계.
@@ -1937,22 +1954,53 @@ function bestEffortStampDroppedAt(taskPath, args) {
   try {
     const original = readFileSync(taskPath, "utf8");
     if (!DROPPED_AT_LINE_RE.test(original)) {
-      // HYK-257-done-stamp-2 §2 범위2 ⓑ (검토 실측 수리): this is an
-      // EXPECTED, common skip (many task-file fixtures/precondition-reject
-      // paths have no dropped_at: line at all), not a failure -- must go
-      // to stdout (console.log), never stderr. Printing it via
-      // console.error made this best-effort side-effect's own diagnostic
-      // text silently become the FIRST line of this CLI's stderr output
-      // for every existing precondition-reject fixture, shadowing the
-      // actual gate/precondition reason text those fixtures assert on
-      // (dispatch-gate-decision.test.mjs "P1-B all six precondition-reject
-      // shapes produce MUTUALLY DISTINCT reason strings" caught this: two
-      // fixtures sharing the same taskPath collapsed to the same stderr
-      // first line). console.error stays reserved for genuine failures
-      // below (stampDroppedAt itself failing, or an unexpected exception).
+      // HYK-316-dropped-stamp-1: no existing dropped_at: line. Previously
+      // this was an unconditional skip (see git history for the old
+      // comment); now it's a skip ONLY when the file also lacks a
+      // `task_id:` line (not shaped like a round task file at all -- 손기입
+      // 대체값 금지 원칙, 없는 걸 지어내지 않는다). When `task_id:` IS
+      // present, fall through to the insertion branch below instead of
+      // returning here.
+      const taskIdLineMatch = original.match(TASK_ID_LINE_FOR_INSERT_RE);
+      if (!taskIdLineMatch) {
+        // HYK-257-done-stamp-2 §2 범위2 ⓑ (검토 실측 수리): this remains an
+        // EXPECTED, common skip (fixtures with neither header at all), not
+        // a failure -- must go to stdout (console.log), never stderr.
+        // Printing it via console.error made this best-effort side-effect's
+        // own diagnostic text silently become the FIRST line of this CLI's
+        // stderr output for every existing precondition-reject fixture,
+        // shadowing the actual gate/precondition reason text those
+        // fixtures assert on (dispatch-gate-decision.test.mjs "P1-B all six
+        // precondition-reject shapes produce MUTUALLY DISTINCT reason
+        // strings" caught this: two fixtures sharing the same taskPath
+        // collapsed to the same stderr first line). console.error stays
+        // reserved for genuine failures below (stampDroppedAt itself
+        // failing, or an unexpected exception).
+        console.log(
+          `dispatch-gate-decision: dropped_at stamp skipped (no existing 'dropped_at:' line AND no 'task_id:' line in ${taskPath} either -- not shaped like a round task file, this round does not invent either)`,
+        );
+        return;
+      }
+      const stampedForInsert = stampDroppedAt({});
+      if (!stampedForInsert.ok) {
+        console.error(
+          `dispatch-gate-decision: dropped_at stamp insertion skipped (stampDroppedAt failed: ${stampedForInsert.reason}) -- leaving file untouched (손기입 대체값 금지 원칙 유지), existing gate/consumption checks fail closed on whatever was already there`,
+        );
+        return;
+      }
+      const insertAt = taskIdLineMatch.index + taskIdLineMatch[0].length;
+      const inserted =
+        original.slice(0, insertAt) +
+        `\ndropped_at: ${stampedForInsert.value}` +
+        original.slice(insertAt);
+      writeFileSync(taskPath, inserted, "utf8");
+      // HYK-316-dropped-stamp-1 §2: 「거부」가 아니라 「스탬프」로 구현하되
+      // 조용히 고치지 말라는 책임자 판정 -- 삽입 사실이 배달 출력에
+      // 분명히 드러나도록 stdout에 명시적으로 남긴다.
       console.log(
-        `dispatch-gate-decision: dropped_at stamp skipped (no existing 'dropped_at:' line in ${taskPath} -- structural precondition not met, this round does not invent one)`,
+        `dispatch-gate-decision: dropped_at MISSING -- machine-inserted right after 'task_id:' (HYK-316-dropped-stamp-1: hand-authored task file bypassed the machine stamp) -- ${taskPath} -> 'dropped_at: ${stampedForInsert.value}'`,
       );
+      bestEffortSnapshotRoundTaskFile(taskPath, inserted);
       return;
     }
     const stamped = stampDroppedAt({});
