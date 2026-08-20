@@ -488,8 +488,8 @@ function injectDeleteAtRecordEntry(src) {
 
 function withUnlinkHelper(src) {
   return src.replace(
-    'import { readFileSync, existsSync } from "node:fs";',
-    'import { readFileSync, existsSync, unlinkSync } from "node:fs";\nfunction unlinkSyncInjected(p) { try { unlinkSync(p); } catch { /* already gone */ } }',
+    'import { readFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";',
+    'import { readFileSync, existsSync, mkdirSync, writeFileSync, unlinkSync } from "node:fs";\nfunction unlinkSyncInjected(p) { try { unlinkSync(p); } catch { /* already gone */ } }',
   );
 }
 

@@ -177,8 +177,8 @@ function runHookLikeCli(scriptPath, commitMsgFile, cwd) {
 // under a name that can never collide with review-gate.mjs's real code).
 function withUnlinkHelper(src) {
   return src.replace(
-    'import { readFileSync, existsSync } from "node:fs";',
-    'import { readFileSync, existsSync, unlinkSync } from "node:fs";\nfunction unlinkSyncInjected(p) { try { unlinkSync(p); } catch { /* already gone */ } }',
+    'import { readFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";',
+    'import { readFileSync, existsSync, mkdirSync, writeFileSync, unlinkSync } from "node:fs";\nfunction unlinkSyncInjected(p) { try { unlinkSync(p); } catch { /* already gone */ } }',
   );
 }
 
