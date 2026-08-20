@@ -113,6 +113,100 @@ test("finalizeDone: result file missing -> refuses with a distinct reason", () =
   });
 });
 
+// HYK-332 §3 시험1: task_id: missing -> DONE is not stamped, reasonCode
+// names exactly what's missing, no '>>> DONE:' line is written.
+test("finalizeDone: task_id: header missing -> refuses, no DONE stamped", () => {
+  withDir((dir) => {
+    writeFileSync(join(dir, "coder.md"), "no header here\n\nbody\n", "utf8");
+    const result = finalizeDone({ role: "coder", harnessDir: dir });
+    assert.equal(result.ok, false);
+    assert.equal(
+      result.reasonCode,
+      FINALIZE_DONE_REASON.HEADER_TASK_ID_MISSING,
+    );
+    const content = readFileSync(join(dir, "coder.md"), "utf8");
+    assert.doesNotMatch(content, />>> DONE/);
+  });
+});
+
+test("finalizeDone: task_id: header ambiguous (2+ standalone lines) -> refuses", () => {
+  withDir((dir) => {
+    writeFileSync(
+      join(dir, "coder.md"),
+      "task_id: HYK-1\ntask_id: HYK-2\n\nbody\n",
+      "utf8",
+    );
+    const result = finalizeDone({ role: "coder", harnessDir: dir });
+    assert.equal(result.ok, false);
+    assert.equal(
+      result.reasonCode,
+      FINALIZE_DONE_REASON.HEADER_TASK_ID_AMBIGUOUS,
+    );
+    const content = readFileSync(join(dir, "coder.md"), "utf8");
+    assert.doesNotMatch(content, />>> DONE/);
+  });
+});
+
+// HYK-332 §3 시험2: REVIEW-family result file missing 'for:' -> refused the
+// same way, even though its 'task_id:' header is present and well-formed.
+test("finalizeDone: REVIEW-family result missing 'for:' header -> refuses, no DONE stamped", () => {
+  withDir((dir) => {
+    writeFileSync(join(dir, "review.md"), "task_id: HYK-1\n\nbody\n", "utf8");
+    const result = finalizeDone({ role: "review", harnessDir: dir });
+    assert.equal(result.ok, false);
+    assert.equal(result.reasonCode, FINALIZE_DONE_REASON.HEADER_FOR_MISSING);
+    const content = readFileSync(join(dir, "review.md"), "utf8");
+    assert.doesNotMatch(content, />>> DONE/);
+  });
+});
+
+test("finalizeDone: REVIEW-family result with 2+ 'for:' lines -> refuses ambiguous", () => {
+  withDir((dir) => {
+    writeFileSync(
+      join(dir, "review.md"),
+      "task_id: HYK-1\nfor: HYK-1-coder-1\nfor: HYK-1-coder-2\n\nbody\n",
+      "utf8",
+    );
+    const result = finalizeDone({ role: "review", harnessDir: dir });
+    assert.equal(result.ok, false);
+    assert.equal(result.reasonCode, FINALIZE_DONE_REASON.HEADER_FOR_AMBIGUOUS);
+  });
+});
+
+// HYK-332 §3 시험3: regression -- a well-formed REVIEW result (task_id: +
+// for: both present, exactly once each) still gets DONE stamped normally.
+test("finalizeDone: REVIEW-family result with well-formed task_id: + for: -> still finalizes normally", () => {
+  withDir((dir) => {
+    writeFileSync(
+      join(dir, "review.md"),
+      "task_id: HYK-1\nfor: HYK-1-coder-1\n\nbody\n",
+      "utf8",
+    );
+    const result = finalizeDone({
+      role: "review",
+      harnessDir: dir,
+      nowFn: () => Date.parse("2026-08-09T05:00:00Z"),
+    });
+    assert.equal(result.ok, true);
+    assert.equal(result.reasonCode, FINALIZE_DONE_REASON.FINALIZED);
+    const content = readFileSync(join(dir, "review.md"), "utf8");
+    assert.match(content, />>> DONE: REVIEW @ 2026-08-09 14:00:00 KST/);
+  });
+});
+
+// HYK-332 §3 시험4 (프로덕션 진입점 -- CLI): the same gate fires through the
+// CLI path, not just the exported function.
+test("CLI: task_id: header missing -> non-zero exit, reason names what's missing, no DONE stamped", () => {
+  withDir((dir) => {
+    writeFileSync(join(dir, "coder.md"), "no header here\n\nbody\n", "utf8");
+    const res = runCli(["coder", dir]);
+    assert.notEqual(res.exit, 0);
+    assert.match(res.stderr, /missing task_id echo/);
+    const content = readFileSync(join(dir, "coder.md"), "utf8");
+    assert.doesNotMatch(content, />>> DONE/);
+  });
+});
+
 test("CLI (non-Claude engine path, 완료조건7): plain `node finalize-done.mjs <role> <dir>` writes a machine-stamped DONE line", () => {
   withDir((dir) => {
     writeFileSync(join(dir, "coder.md"), "task_id: HYK-1\n\nbody\n", "utf8");
