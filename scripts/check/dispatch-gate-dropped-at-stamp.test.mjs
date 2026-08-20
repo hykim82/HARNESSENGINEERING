@@ -15,6 +15,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { writeLedger } from "./reject-streak.mjs";
+import { checkRelayHandshake } from "./relay-handshake.mjs";
 
 const SCRIPT_PATH = fileURLToPath(
   new URL("./dispatch-gate-decision.mjs", import.meta.url),
@@ -103,7 +104,7 @@ test("(a) existing dropped_at: line is rewritten to a fresh machine-stamped valu
   });
 });
 
-test("(b) no dropped_at: line present -- stamp step is a no-op, file untouched, ALLOW unaffected", () => {
+test("(b) HYK-316-dropped-stamp-1: no dropped_at: line but task_id: IS present -- a machine dropped_at is INSERTED right after task_id:, ALLOW unaffected", () => {
   withFixtureDir((dir) => {
     const taskPath = join(dir, "coder-task.md");
     const original = `task_id: HYK-9102-nodropped-1\nrole: CODER\n${ONE_B_BLOCK}`;
@@ -114,12 +115,48 @@ test("(b) no dropped_at: line present -- stamp step is a no-op, file untouched, 
     const r = runCli([taskPath, "--ledger", ledgerPath]);
     assert.equal(r.status, 0);
     assert.match(r.stdout, /ALLOW/);
+    assert.match(
+      r.stdout,
+      /dropped_at MISSING -- machine-inserted/,
+      "insertion must be visible in the delivery-time stdout (§2 요건: 조용히 고치지 말 것)",
+    );
+    const after = readFileSync(taskPath, "utf8");
+    assert.notEqual(
+      after,
+      original,
+      "file must have been rewritten -- a dropped_at: line was inserted",
+    );
+    const lines = after.split("\n");
+    assert.equal(lines[0], "task_id: HYK-9102-nodropped-1");
+    assert.match(
+      lines[1],
+      /^dropped_at: \d{4}-\d{2}-\d{2} \d{2}:\d{2} KST$/,
+      "inserted dropped_at: line must sit immediately after task_id:",
+    );
+    assert.equal(
+      after,
+      `${lines[0]}\n${lines[1]}\n${original.slice(lines[0].length + 1)}`,
+      "everything else in the file must be preserved verbatim around the inserted line",
+    );
+  });
+});
+
+test("(b2) HYK-316-dropped-stamp-1: neither dropped_at: nor task_id: line present -- stamp step is still a no-op, file untouched", () => {
+  withFixtureDir((dir) => {
+    const taskPath = join(dir, "coder-task.md");
+    const original = `role: CODER\nno task_id line at all here\n${ONE_B_BLOCK}`;
+    writeFileSync(taskPath, original, "utf8");
+    const ledgerPath = join(dir, "reject-streak.json");
+    writeLedger(ledgerPath, { schema_version: 1, issues: {} });
+
+    const r = runCli([taskPath, "--ledger", ledgerPath]);
     const after = readFileSync(taskPath, "utf8");
     assert.equal(
       after,
       original,
-      "file must be byte-identical when no dropped_at: line exists",
+      "file must be byte-identical when neither dropped_at: nor task_id: line exists",
     );
+    void r;
   });
 });
 
@@ -154,5 +191,67 @@ test("(c) pre-existing REJECT fixture shape (streak 2, no envelope) still REJECT
     const match = rewritten.match(DROPPED_AT_RE);
     assert.ok(match);
     assert.notEqual(match[1].trim(), "2020-01-01 00:00 KST");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// (d) HYK-316-dropped-stamp-1 §5-2: 어제(08-20) 실사고 재현 -- 프로덕션
+// 소비 경로(relay-handshake.mjs의 checkRelayHandshake, helper 아님)로
+// «missing dropped_at header» 거부가 더는 발생하지 않음을 고정한다.
+// dropped_at 없이 배달된 task 파일이 이 CLI를 거치고 나면(=삽입됨),
+// checkRelayHandshake는 dropped_at 단계를 통과해 그 다음 단계(DONE 줄
+// 판정)에서만 멈춘다 -- 어제 실사고의 정확한 그 거부 문구
+// "task file missing dropped_at header (required for staleness check)"가
+// 다시는 이 경로에서 나오지 않는다는 것이 이 시험의 유일한 단언 대상이다.
+// ---------------------------------------------------------------------------
+test("(d) 프로덕션 경로: dropped_at 없이 배달된 지시서가 이 CLI를 거친 뒤에는, 실제 checkRelayHandshake가 더 이상 'missing dropped_at header'로 거부하지 않는다", () => {
+  withFixtureDir((dir) => {
+    const taskPath = join(dir, "coder-task.md");
+    // 어제 실사고와 같은 모양: task_id는 있지만 dropped_at이 없는 수기
+    // 지시서.
+    const original = `task_id: HYK-9110-relay-real-1\nrole: CODER\n${ONE_B_BLOCK}`;
+    writeFileSync(taskPath, original, "utf8");
+    const ledgerPath = join(dir, "reject-streak.json");
+    writeLedger(ledgerPath, { schema_version: 1, issues: {} });
+
+    const r = runCli([taskPath, "--ledger", ledgerPath]);
+    assert.equal(r.status, 0);
+    const stamped = readFileSync(taskPath, "utf8");
+    assert.match(stamped, DROPPED_AT_RE, "dropped_at must now be present");
+
+    // 아직 결과 파일이 없다(워커가 완료하지 않음) -- resolveTaskAndResultFiles
+    // 단계에서 'result file not found'로 그친다. dropped_at 판정까지도
+    // 가지 않는다는 점을 먼저 고정한다(참고용 하한선).
+    const beforeResult = checkRelayHandshake({
+      role: "CODER",
+      harnessDir: dir,
+    });
+    assert.equal(beforeResult.ok, false);
+    assert.match(beforeResult.reason, /result file not found/);
+
+    // 결과 파일을 만들되(>>> DONE: 줄은 아직 없음) -- 이제
+    // resolveTaskAndResultFiles/resolveMatchedTaskId를 지나 dropped_at
+    // 판정 단계에 실제로 도달한다.
+    writeFileSync(
+      join(dir, "coder.md"),
+      `task_id: HYK-9110-relay-real-1\n(아직 완료 안 함)\n`,
+      "utf8",
+    );
+    const result = checkRelayHandshake({ role: "CODER", harnessDir: dir });
+    assert.equal(
+      result.ok,
+      false,
+      "DONE 줄이 없으므로 여전히 ok:false여야 한다(이 시험의 관심사는 '어느 사유로 거부되는가'다)",
+    );
+    assert.doesNotMatch(
+      result.reason,
+      /missing dropped_at header/,
+      "어제(08-20) 실사고의 정확히 그 거부 문구가 더는 나오면 안 된다 -- dropped_at 판정은 이제 통과해야 한다",
+    );
+    assert.match(
+      result.reason,
+      /missing ">>> DONE:/,
+      "dropped_at을 통과했으므로 다음 단계(DONE 줄 판정)에서만 멈춰야 한다",
+    );
   });
 });
