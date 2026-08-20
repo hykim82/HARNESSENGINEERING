@@ -333,13 +333,51 @@ test("buildWorktreeCreateCommand: exact argv shape, no --path (option does not e
     "--repo",
     "id:repoId",
     "--setup",
-    "skip",
+    "run",
     "--no-parent",
     "--base-branch",
     "master",
     "--json",
   ]);
   assert.equal(argv.includes("--path"), false);
+});
+
+// HYK-331-worktree-deps-1: `--setup skip` 이 하드코딩돼 있어 하네스가
+// 만드는 워크트리마다 node_modules가 없었다(ORCH 실측, coder-task.md §1) --
+// 기본값을 run으로 뒤집는다.
+test("buildWorktreeCreateCommand: default setup is 'run' (HYK-331 fix)", () => {
+  const argv = buildWorktreeCreateCommand({ name: "x", repoId: "r" });
+  const idx = argv.indexOf("--setup");
+  assert.notEqual(idx, -1);
+  assert.equal(argv[idx + 1], "run");
+});
+
+test("buildWorktreeCreateCommand: setup explicitly 'skip' is preserved (choice retained)", () => {
+  const argv = buildWorktreeCreateCommand({
+    name: "x",
+    repoId: "r",
+    setup: "skip",
+  });
+  const idx = argv.indexOf("--setup");
+  assert.notEqual(idx, -1);
+  assert.equal(argv[idx + 1], "skip");
+});
+
+test("buildWorktreeCreateCommand: setup 'inherit' is preserved", () => {
+  const argv = buildWorktreeCreateCommand({
+    name: "x",
+    repoId: "r",
+    setup: "inherit",
+  });
+  const idx = argv.indexOf("--setup");
+  assert.notEqual(idx, -1);
+  assert.equal(argv[idx + 1], "inherit");
+});
+
+test("buildWorktreeCreateCommand: invalid setup value is rejected, not silently passed through", () => {
+  assert.throws(() => {
+    buildWorktreeCreateCommand({ name: "x", repoId: "r", setup: "nope" });
+  }, /invalid setup/);
 });
 
 // review-1 C1 반려 결함 수리: baseBranch 미제공 시 --base-branch 플래그
@@ -356,7 +394,7 @@ test("buildWorktreeCreateCommand: baseBranch omitted -- no --base-branch flag in
     "--repo",
     "id:repoId",
     "--setup",
-    "skip",
+    "run",
     "--no-parent",
     "--json",
   ]);
