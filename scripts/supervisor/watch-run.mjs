@@ -219,7 +219,27 @@ function extractUnconsumedFields(unconsumed) {
     // observationReason이 없고(judgeUnconsumedForRepo 참조) reason(자유
     // 텍스트)만 만든다.
     unconsumedReason: pickString(unconsumed, "reason"),
+    // HYK-328-receipt-name-1 (coder-task.md §3): chain/bindingWorktreePath와
+    // 같은 모양 -- 가장 나쁜 워크트리 하나의 경로(orch-stall-detect.mjs
+    // judgeUnconsumedAcrossWorktrees의 worktreePath 그대로).
+    unconsumedWorktreePath: pickString(unconsumed, "worktreePath"),
+    // HYK-328-receipt-name-1: worstCount가 1보다 클 때(오늘 실측 2) 첫
+    // 번째 하나만으로는 "어느 워크트리들 전부"인지 알 수 없었다 -- worst
+    // 등급 워크트리 이름 전부(orch-stall-detect.mjs가 이미 계산해 두는
+    // worstWorktreePaths, 위 코어 주석 참조). 배열이 아니면(구버전 감지기
+    // stdout 등) null -- 필드 자체는 항상 존재한다(emptyDetectorFields도
+    // 동일 키를 null로 둔다).
+    unconsumedWorstWorktrees: pickStringArray(unconsumed, "worstWorktreePaths"),
   };
+}
+
+// HYK-328-receipt-name-1: pickString/pickNumber와 동일한 "형태가 아니면
+// null" 원칙의 배열판 -- 문자열이 아닌 원소는 조용히 걸러낸다(사람이 읽는
+// 로그 줄에 "[object Object]" 같은 게 새지 않게, sanitizeFailureToken과
+// 동일 방어선의 앞단).
+function pickStringArray(obj, key) {
+  if (!obj || !Array.isArray(obj[key])) return null;
+  return obj[key].filter((v) => typeof v === "string");
 }
 
 // HYK-173-push-wire (coder-task.md §4 요건2) -- escalation 축 필드도
@@ -343,6 +363,8 @@ function emptyDetectorFields() {
     unconsumedWorstCount: null,
     unconsumedTotalWorktrees: null,
     unconsumedReason: null,
+    unconsumedWorktreePath: null,
+    unconsumedWorstWorktrees: null,
     escalationStatus: null,
     escalationVerdict: null,
     escalationWorstCount: null,
@@ -942,13 +964,46 @@ function buildStartUnconsumedSegments(detectorResult) {
       reason: detectorResult.unconsumedReason,
     },
   );
+  const unconsumedWorstDetail = unconsumedWorstSegment(
+    detectorResult.unconsumedWorstWorktrees,
+  );
   return {
     startSegment,
     startFailureSegment,
     startReasonDetail,
     unconsumedSegment,
     unconsumedReasonDetail,
+    unconsumedWorstDetail,
   };
+}
+
+// HYK-328-receipt-name-1 (coder-task.md §3 항2) -- failureLogSegment/
+// escalationDetailSegment와 동일한 "상한 + N_more" 관례(이 파일 안의 기존
+// 전례를 그대로 재사용, 새 형식을 발명하지 않는다). worst 등급 워크트리가
+// 없으면(빈 배열/미제공) 세그먼트 자체를 안 붙인다 -- 정상 상태의 로그
+// 줄을 조용히 유지하는 기존 원칙(§2-3)과 동일.
+function unconsumedWorstSegment(worstWorktrees) {
+  if (!Array.isArray(worstWorktrees) || worstWorktrees.length === 0) {
+    return null;
+  }
+  const shown = worstWorktrees
+    .slice(0, MAX_PARTIAL_FAILURE_ITEMS)
+    .map(worktreeShortName);
+  const omitted = worstWorktrees.length - shown.length;
+  const detail =
+    omitted > 0 ? `${shown.join("|")}|+${omitted}_more` : shown.join("|");
+  return `unconsumed_worst_worktrees=${worstWorktrees.length} unconsumed_worst_worktree_detail=${detail}`;
+}
+
+// 사람이 워크트리를 특정할 수 있으면서도 로그 줄을 폭발시키지 않도록
+// 전체 경로가 아니라 마지막 폴더명만 쓴다(전체 경로는 last-run.json의
+// unconsumedWorstWorktrees/unconsumedWorktreePath에 이미 그대로 남는다 --
+// 로그 줄은 사람이 훑어보는 요약, JSON은 기계가 읽는 정본이라는 기존
+// 역할 분담과 동일).
+function worktreeShortName(rawPath) {
+  const token = sanitizeFailureToken(rawPath, "unknown_worktree");
+  const parts = token.split(/[\\/]/).filter(Boolean);
+  return parts.length > 0 ? parts[parts.length - 1] : token;
 }
 
 function buildSeatIdleStartUnconsumedSegments(detectorResult) {
@@ -970,6 +1025,7 @@ function buildAxisLogSegments(detectorResult, capResult, escalationDedupe) {
     startReasonDetail,
     unconsumedSegment,
     unconsumedReasonDetail,
+    unconsumedWorstDetail,
   } = buildSeatIdleStartUnconsumedSegments(detectorResult);
   const capSegment = capLogSegment(capResult ?? {});
   // HYK-173-push-wire (coder-task.md §4 요건2): escalation 축도 기존
@@ -1014,6 +1070,7 @@ function buildAxisLogSegments(detectorResult, capResult, escalationDedupe) {
     startReasonDetail,
     unconsumedSegment,
     unconsumedReasonDetail,
+    unconsumedWorstDetail,
     capSegment,
     escalationSegment,
     escalationDetail,
@@ -1076,6 +1133,7 @@ export function buildLogLine({
     segments.startReasonDetail,
     segments.unconsumedSegment,
     segments.unconsumedReasonDetail,
+    segments.unconsumedWorstDetail,
     segments.capSegment,
     segments.escalationSegment,
     segments.escalationDetail,

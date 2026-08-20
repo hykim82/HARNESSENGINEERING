@@ -1904,6 +1904,21 @@ export function judgeUnconsumedAcrossWorktrees({ repoRoot, now }, opts = {}) {
     (w) => unconsumedSeverityOf(w) === worstSeverity,
   );
   const worst = worstEntries[0] ?? null;
+  // HYK-328-receipt-name-1 (coder-task.md §3) -- worstCount가 1보다 클 수
+  // 있는데(오늘 실측: 2) `worktreePath`(위)는 그 중 첫 번째 하나만 담아
+  // "어느 워크트리들이 전부 미소비 의심인지"를 사람이 정황으로 추측해야
+  // 했다. worstEntries는 이미 이 함수 안에서 계산돼 있으므로(신규 발명이
+  // 아니다) 그 전부의 워크트리 경로를 별도 필드로 얹는다. suspected 등급이
+  // 아닐 때(NORMAL/UNDECIDABLE/COLLECTION_FAILURE)는 빈 배열 -- "미소비
+  // 의심 워크트리 이름"이라는 이 필드의 의미상 그 등급에서 채울 이름이
+  // 없다(watch-run.mjs 쪽 시험 요구사항 "CONSUMED일 때도 필드는 존재하되
+  // 값은 비어 있다"와 합치).
+  const worstWorktreePaths =
+    worstSeverity === UNCONSUMED_SCAN_SEVERITY.SUSPECTED_UNCONSUMED
+      ? worstEntries
+          .map((w) => w.worktreePath)
+          .filter((p) => typeof p === "string" && p.length > 0)
+      : [];
   return {
     status: worst ? worst.status : UNCONSUMED_WIRE_STATUS.NOT_APPLICABLE,
     verdict: worst ? worst.verdict : undefined,
@@ -1915,6 +1930,9 @@ export function judgeUnconsumedAcrossWorktrees({ repoRoot, now }, opts = {}) {
     // 텍스트, 예: "unconsumed: git log failed")만 만든다 -- 있는 그대로
     // 위로 올린다.
     reason: worst ? worst.reason : undefined,
+    // HYK-328-receipt-name-1: worst 등급 워크트리 "전부"의 경로(위 주석
+    // 참조) -- worktreePath(첫 번째만)와 달리 worstCount 전부를 담는다.
+    worstWorktreePaths,
     worktrees,
     totalWorktrees: worktrees.length,
     worstCount: worstEntries.length,
