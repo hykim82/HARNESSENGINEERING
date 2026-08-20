@@ -54,21 +54,23 @@ const SHARED_DEPS = [
   "time-authority.mjs",
 ];
 
-// ★확인 (이 시험 파일이 성립하는 전제): 위 5개 의존 파일은 ba0eb54와 현재
-// HEAD 사이에 한 바이트도 다르지 않다 -- 그래서 "post-fix" 판을 만들 때
-// 디스크의 현재 사본을 그대로 써도, ba0eb54 시점 그 파일들과 동일하다.
-for (const f of SHARED_DEPS) {
-  const diff = execFileSync(
-    "git",
-    ["diff", PRE_FIX_SHA, "HEAD", "--", `scripts/check/${f}`],
-    { cwd: REPO_ROOT, encoding: "utf8" },
-  );
-  assert.equal(
-    diff,
-    "",
-    `sanity: scripts/check/${f} must be byte-identical between ${PRE_FIX_SHA} and HEAD for this parity test to be valid`,
-  );
-}
+// ★확인 (이 시험 파일이 성립하는 전제, HYK-332 2R 재작성): 이 시험의 핵심
+// 불변식은 "PRE-FIX 판과 POST-FIX 판을 가르는 유일한 변수는 review-gate.mjs
+// 자신이다" -- 즉 5개 의존 파일(SHARED_DEPS)이 두 판 사이에서 동일해야
+// 한다는 것이다. 1R은 이를 "디스크의 현재 사본을 두 판 모두에 심고, HEAD가
+// ba0eb54와 바이트동일한지 별도로 assert한다"는 방식으로 확보했었다 -- 그
+// assert는 review-gate.mjs와 무관한 이유로 그 5개 파일 중 하나가 조금이라도
+// 바뀌면(HYK-332의 resolveResultTaskId export 등, 순수 additive 변경이라도)
+// 무조건 실패하는 외부 사실 주장이었다(2026-08-20 실사고, ORCH 판정). 2R은
+// stageRepo() 아래에서 SHARED_DEPS를 디스크가 아니라 항상
+// `git show <PRE_FIX_SHA>:scripts/check/<f>`로 읽어 pre/post 양쪽에 똑같이
+// 심는다 -- PRE_FIX_SHA 이후 이 저장소가 그 5개 파일을 어떻게 바꾸든
+// (이 시험이 실행되는 그 순간의 디스크 상태와 무관하게) 두 판은 항상 같은
+// 고정 스냅숏을 공유하므로, 그 불변식은 이제 "그러기를 바라는 주장"이 아니라
+// "그렇게 구성되어 있다는 사실"이다. 잃는 것: 5개 의존 파일이 ba0eb54 이후
+// 실제로 바뀌었다는 사실 자체를 이 시험이 (부수적으로) 알려주던 효과는
+// 사라진다 -- 그러나 그건 이 시험의 임무가 아니었고, 알려주는 방식도
+// "무조건 실패"였을 뿐 "무엇이 왜 바뀌었는지"를 측정하지 않았다.
 
 const PRE_FIX_REVIEW_GATE_SRC = execFileSync(
   "git",
@@ -88,11 +90,25 @@ function tmpDir(prefix) {
   return mkdtempSync(join(tmpdir(), prefix));
 }
 
+// HYK-332 2R: SHARED_DEPS content, pinned to PRE_FIX_SHA -- read once, reused
+// for every stageRepo() call (both pre-fix and post-fix), so the two staged
+// repos share byte-identical dependency files BY CONSTRUCTION, never by an
+// assumption about the current disk/HEAD state (see the ★확인 comment above).
+const SHARED_DEP_SRC = Object.fromEntries(
+  SHARED_DEPS.map((f) => [
+    f,
+    execFileSync("git", ["show", `${PRE_FIX_SHA}:scripts/check/${f}`], {
+      cwd: REPO_ROOT,
+      encoding: "utf8",
+    }),
+  ]),
+);
+
 // Stages a synthetic repo with the given review-gate.mjs source + the
-// (byte-identical pre/post) shared deps, commits it so the worktree starts
-// CLEAN (a clean worktree binds to HEAD sha per HYK-281 -- this mirrors
-// review-r1-원문.md's own probe exactly, no code diff needed to reproduce the
-// forgery).
+// (byte-identical pre/post, PRE_FIX_SHA-pinned) shared deps, commits it so
+// the worktree starts CLEAN (a clean worktree binds to HEAD sha per
+// HYK-281 -- this mirrors review-r1-원문.md's own probe exactly, no code
+// diff needed to reproduce the forgery).
 function stageRepo(reviewGateSrc) {
   const dir = tmpDir("hyk314-parity-");
   mkdirSync(join(dir, ".harness"), { recursive: true });
@@ -115,11 +131,7 @@ function stageRepo(reviewGateSrc) {
     "utf8",
   );
   for (const f of SHARED_DEPS) {
-    writeFileSync(
-      join(dir, "scripts", "check", f),
-      readFileSync(join(HERE, f), "utf8"),
-      "utf8",
-    );
+    writeFileSync(join(dir, "scripts", "check", f), SHARED_DEP_SRC[f], "utf8");
   }
   git(dir, ["add", "-A"]);
   git(dir, [
