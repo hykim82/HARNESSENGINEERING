@@ -205,17 +205,62 @@ test("CLI end-to-end(spawn): NOT_STARTED면 종료코드 1 + notifyDir에 «재�
 // 않는다). 성장 창(`GROWTH_WINDOW_MS`)이 끝나면 더는 안 건드려
 // "승인창 등으로 멈춤"과 동형이 되고, 그 뒤 `stallThresholdMs`가
 // 지나면 결정적으로 STALLED_AFTER_START가 된다.
-const GROWTH_WINDOW_MS = 900; // 이 창이 끝날 때까지 자식이 최소 2회는 폴링한다(poll-interval 40ms 기준 넉넉한 여유).
+// ★HYK-329 2차 원인(결과 파일 §1 실측 -- tick-누적 수리 뒤에도 남아 있던
+// 별개의 실패 경로): 성장 창을 "실측 경과"로 닫아도(위 growContinuously
+// 수리), 자식 프로세스 자체의 spawn·node 기동이 이 창보다 «더» 지연되면
+// (전체 스윕 부하 아래 관측: round 1에서 exit code 1=NOT_STARTED로 재현),
+// 자식의 «첫 실관측»이 이미 성장이 다 끝난 뒤에야 일어나 이번 실행 안에서
+// 성장을 한 번도 못 본다 -- 이건 CLI 자신이 4R부터 "알려진 한계"로 고정해
+// 둔 바로 그 자리(첫 관측 전에 이미 커져 있으면 구조적으로 NOT_STARTED,
+// coder-task.md 범위 밖 -- 다음 조각 몫)이지, 오늘 고칠 CLI 버그가
+// 아니다. 이 시험이 그 알려진 한계를 «부하 때문에 우연히» 건드리지
+// 않으려면, 성장 창이 실전 부하에서 관측된 spawn 지연보다 충분히 커야
+// 한다 -- 900ms 창은 그 여유가 부족했다(실측 재현: 4819개 시험 전체
+// 부하에서 5회 반복 중 1회, round 1이 NOT_STARTED로 재현). 4000ms로
+// 늘려 여유를 키운다(수학적 보장은 아니다 -- §2-3 정정 문구와 동일한
+// 정직 한계, 극단적 부하면 여전히 이론상 깨질 수 있다 -- 다만 실측
+// 표본으로 그 여유가 실전에서 충분함을 보인다, 아래 반복 실행 실측).
+const GROWTH_WINDOW_MS = 4000; // 부하 아래 자식 spawn 지연에 대한 실측 기반 여유(위 주석).
 const GROWTH_TICK_MS = 20;
 
-function growContinuously(logPath, windowMs, tickMs, writeFileSync) {
-  let elapsed = 0;
+// ★HYK-329 수리 -- 원인 기전(결과 파일 §1에 실측 기록): 이전 버전은
+// `elapsed += tickMs`로 "틱이 몇 번 불렸는가"만 셌다. setInterval의 콜백
+// 간격은 부하가 크면 예약된 tickMs(20ms)보다 훨씬 늘어질 수 있는데(콜백
+// 자체는 지연되지만 "이번에도 20ms 지났다"고 가정하고 누적하므로), 그
+// 결과 "명목 windowMs"(1차 수리 당시 900ms=45틱)를 채우는 데 걸리는
+// **실제** 시간이 부하 아래 몇 배로 늘어난다(1차 수리 당시 재현 실측:
+// 인위적 이벤트 루프 부하 아래 명목 900ms 창이 실제로는 1854ms 걸림,
+// 45틱 그대로 -- 별도 임시 스크립트로 재현, 저장소에는 없음). 이 CLI의
+// 정지 판정(dispatch-start-size-core.mjs)은 반대로 항상 **실제 시각**
+// (Date.now())으로 lastGrowthAtMs/now를 비교하므로, "명목 windowMs"가
+// 실제로 늘어져 성장이 CLI의 `timeoutMs`(1차 수리 당시 4000ms, 지금은
+// 아래 spawn 인자와 함께 15000ms) 턱밑까지 실제로 계속되면, CLI 입장에서는
+// "최근에 진짜로 늘었다"가 참이 되어 STARTED(+ pastOverallTimeout)로
+// 확정돼 버린다 -- 검토 좌석이 잡은 그 실패(round 0: exit code null)가
+// 바로 이 경로다.
+// 수리: 틱 카운트가 아니라 **실측 경과 시간**(Date.now() - start)으로
+// 창을 닫는다. 이러면 콜백이 부하로 얼마나 늦게 불리든 "실제로 흐른
+// 시간"만 기준이 되므로, 성장 창은 항상 실제 시계로 windowMs(현재
+// GROWTH_WINDOW_MS=4000ms) 안팎에서 끝난다(콜백 빈도가 낮아지면 틱 수는
+// 줄지만 -- 1차 수리 당시 900ms 창 재현 결과 15틱 -- 그건 이 시험이
+// 요구하는 "최소 2회 폴링"과 무관: CLI는 파일 크기만 보므로 몇 번
+// 썼는지가 아니라 언제까지 커졌는지만 중요하다). ★대기 시간을 늘리는
+// 방향이 아니다 -- 같은 windowMs 예산(현재 4000ms)을 "명목"이 아니라
+// "실측"으로 재는 것뿐이라 부하가 얼마나 크든 창 자체가 실제로 벌어지지
+// 않는다.
+function growContinuously(
+  logPath,
+  windowMs,
+  tickMs,
+  writeFileSync,
+  nowFn = Date.now,
+) {
+  const startMs = nowFn();
   let chunk = 0;
   const timer = setInterval(() => {
-    elapsed += tickMs;
     chunk += 1;
     writeFileSync(logPath, "x".repeat(chunk * 200), "utf8");
-    if (elapsed >= windowMs) clearInterval(timer);
+    if (nowFn() - startMs >= windowMs) clearInterval(timer);
   }, tickMs);
   return () => clearInterval(timer);
 }
@@ -265,11 +310,14 @@ async function runStalledAfterStartOnce({ label }) {
             // ★부하 여유: 이 세 값은 타이밍을 "맞추기" 위한 것이 아니라
             // "growth 창이 끝난 뒤에도 자식이 stallThreshold 도달을 볼
             // 시간이 있다"는 여유만 준다 -- 정밀 정렬은 growContinuously
-            // 쪽 로직(계속 자람)이 담당한다.
+            // 쪽 로직(계속 자람)이 담당한다. ★HYK-329 2차 원인 수리(위
+            // GROWTH_WINDOW_MS 주석 참조) -- growth 창을 4000ms로 늘린
+            // 만큼 stall-threshold·timeout도 같이 늘려 자식 spawn 지연
+            // 여유를 유지한다.
             "--timeout-ms",
-            "4000",
+            "15000",
             "--stall-threshold-ms",
-            "1200",
+            "4000",
             "--poll-interval-ms",
             "40",
           ],
@@ -420,10 +468,12 @@ test("CLI end-to-end(spawn): --claude-home·--baseline-bytes 인자가 실제로
             claudeHomeDir,
             "--baseline-bytes",
             "0",
+            // ★HYK-329 2차 원인 수리(위 GROWTH_WINDOW_MS 주석 참조) -- 이
+            // 값들은 growth 창(4000ms)과 짝을 맞춘다.
             "--timeout-ms",
-            "4000",
+            "15000",
             "--stall-threshold-ms",
-            "1200",
+            "4000",
             "--poll-interval-ms",
             "40",
           ],
@@ -498,10 +548,12 @@ test("CLI end-to-end(spawn): --claude-home에 codex류 폴더를 넘겨도 동�
             "HYK-TEST-codexhome",
             "--claude-home",
             codexHomeDir,
+            // ★HYK-329 2차 원인 수리(위 GROWTH_WINDOW_MS 주석 참조) -- 이
+            // 값들은 growth 창(4000ms)과 짝을 맞춘다.
             "--timeout-ms",
-            "4000",
+            "15000",
             "--stall-threshold-ms",
-            "1200",
+            "4000",
             "--poll-interval-ms",
             "40",
           ],
@@ -524,8 +576,28 @@ test("CLI end-to-end(spawn): --claude-home에 codex류 폴더를 넘겨도 동�
 // spawn해 종료코드 3 + «좌석 확인» 문구 통지 파일이 실제로 생기는지
 // 확인한다. ★4R부터 시간 예약(고정 지연 1회) 대신 "계속 자라다가 멈춤"
 // 동기화를 쓴다(위 growContinuously/runStalledAfterStartOnce 헤더 주석
-// 참조) -- 부하와 무관하게 결정적이어야 한다는 요구를 이 시험 자신이
-// 실증한다: 아래 반복 실행 시험이 이 시험을 5회 이상 연속 통과시킨다.
+// 참조).
+// ★HYK-329 정정(완료조건3 -- 아래 "부하 무관"이라는 옛 문구는 반증됐다,
+// ORCH/검토 좌석 실측 그대로): growContinuously가 성장 창을 "명목 틱 수"
+// (`elapsed += tickMs`)로 재고 있어서, 부하가 커서 setInterval 콜백이
+// 지연되면 그 창의 **실제** 길이가 늘어나 CLI의 `timeoutMs`(1차 수리
+// 당시 4000ms)를 잠식했다(4819개 시험 전체 부하에서 1회 재현, 원인
+// 경계값은 결과 파일 §1 참조 -- 재현 스크립트: 인위 이벤트 루프 부하
+// 아래 명목 900ms 창이 실측 1854ms 걸림, 45틱 그대로 -- 별도 임시
+// 스크립트로 재현, 저장소에는 없음). 이제 growContinuously가 실측 경과
+// (Date.now())로 창을 닫으므로 **그 특정 원인 경로는 닫혔다.** 다만 이
+// 시험은 여전히 실제 자식 프로세스 spawn·실제 타이머·실제 파일 I/O에
+// 의존하는 E2E 시험이다 -- "부하와 무관하게 결정적"이 실제로 보장하는
+// 것은 정확히 «성장 창(현재 GROWTH_WINDOW_MS=4000ms)이 부하 크기와
+// 무관하게 실제 시계로 그 값 안팎에서 끝난다»는 것뿐이며, "이 프로세스
+// 전체가 어떤 부하에서도 반드시 timeoutMs(현재 15000ms) 안에 끝난다"는
+// 수학적 증명은 아니다(운영체제가 그 예산 자체를 삼킬 만큼 극단적인
+// 부하라면 여전히 실패할 수 있다 -- 잔여 위험은 아래 반복 실행 시험의
+// 표본 통과로만 뒷받침된다). 2차 수리(결과 파일 §2, coder-task.md
+// HYK-329-determinism-1 범위)에서 spawn 지연 여백을 위해 성장 창·
+// stall-threshold·timeout을 함께 늘렸다(900/1200/4000 -> 4000/4000/
+// 15000, 아래 spawn 인자·위 GROWTH_WINDOW_MS 참고). 아래 반복 실행
+// 시험이 이 시험을 5회 이상 연속 통과시킨다.
 test("CLI end-to-end(spawn, 부하-무관 동기화): 폴링 도중 계속 커지다 멈추면 종료코드 3 + notifyDir에 «좌석 확인» 문구 통지 파일이 실제로 생긴다", async () => {
   const { threw, stderr, notifyDir } = await runStalledAfterStartOnce({
     label: "single",
