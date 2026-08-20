@@ -1,4 +1,4 @@
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { execSync } from "node:child_process";
 import { recordRejectStreakFromResultText } from "./reject-streak.mjs";
@@ -250,6 +250,99 @@ function recordApprovalToLedger(reviewPath) {
 // autoArchiveRoundEnvelope's own try/catch boundary in
 // envelope-archive.mjs -- the CODER/rejected-REVIEW path already had this
 // exact guarantee, this closes the gap on the APPROVED path).
+// HYK-314: a rework round's commit often runs in a DIFFERENT `git worktree
+// add` checkout than the one where REVIEW approved it -- `.harness/` is
+// gitignored and lives on-disk per-worktree, so that worktree's own
+// `.harness/review.md` never sees an approval that happened elsewhere. The
+// worker's only escape used to be the `skip-review:` audit trailer on every
+// such commit (ORCH 2026-08-20 실사고: banning that trailer in a task file
+// left the worker unable to commit at all).
+//
+// Fix (direction ⓐ): mirror the SAME shared-anchor pattern
+// recordApprovalToLedger/mainRepoRoot already use for reject-streak.json --
+// on a GENUINE approval (isGenuineReviewApproval + binding already
+// verified against the worktree that actually holds the reviewed bytes),
+// cache a copy of the evidence (review text + binding-fingerprint block) at
+// `mainRepoRoot()/.harness/approved-reviews/<issueId>.md`. `mainRepoRoot()`
+// resolves via `git rev-parse --git-common-dir`, which is the ONE physical
+// directory every linked worktree of this repo shares -- unlike a plain
+// file copy into the next worktree (the "옆문" ORCH already rejected), nothing
+// here bypasses the binding check: a rework-round commit that falls back to
+// this cache still re-runs `checkApprovalBinding` against ITS OWN current
+// worktree bytes (see resolveEffectiveReviewPath's caller below), so the
+// fingerprint must still match byte-for-byte what REVIEW actually approved.
+//
+// ⛔정직 한계 (§2-3 self-cert 점검 결과): this cache is a plain file under a
+// path any worktree of this repo can write to -- it is NOT cryptographically
+// tied to "a real REVIEW round wrote it." That is the SAME trust level
+// `.harness/review.md` itself already has today (evaluateReviewEvidence's
+// `hasIndependentReviewer` check is a text convention -- `/role:\s*REVIEW/i`
+// -- not a signature). This change does not weaken that baseline: a worker
+// who could forge a local review.md today (self-cert) could equally forge
+// this shared cache file; no NEW bypass opens, and the SAME two guards
+// (role: REVIEW text + fingerprint match against current worktree bytes)
+// still gate every consumption of it, local or shared.
+const APPROVED_EVIDENCE_SUBDIR = join(".harness", "approved-reviews");
+
+function sharedApprovedEvidencePath(issueId) {
+  return join(mainRepoRoot(), APPROVED_EVIDENCE_SUBDIR, `${issueId}.md`);
+}
+
+// Resolves which review.md-shaped file checkReviewGate should read: the
+// local per-worktree file if it exists (unchanged default), otherwise -- for
+// the common single-issue commit case only -- the shared cache for that one
+// issue if the commit's own binding check will still be able to verify it.
+// Multi-issue commits (rare; HYK-315's abbreviated-enumeration guard already
+// discourages them) are NOT resolved through the shared cache: the cache's
+// evaluateReviewEvidence pass would need every id's own `verdict:` line in
+// one blob, and resolveVerdict's ambiguous-count check would then reject
+// TWO genuinely-approved ids as "모호" -- a false block, not a silent pass,
+// but out of scope for this fix. Those still need `skip-review:` (unchanged,
+// pre-existing behavior).
+function resolveEffectiveReviewPath(message, localReviewPath) {
+  if (existsSync(localReviewPath)) return localReviewPath;
+  const subject = message.split(/\r?\n/, 1)[0] ?? "";
+  const tagMatches = subject.match(HYK_TAG_RE_GLOBAL);
+  if (!tagMatches) return localReviewPath;
+  const issueIds = [...new Set(tagMatches)];
+  if (issueIds.length !== 1) return localReviewPath;
+  const sharedPath = sharedApprovedEvidencePath(issueIds[0]);
+  return existsSync(sharedPath) ? sharedPath : localReviewPath;
+}
+
+// Writes the shared cache entry above. Only called for a GENUINE, binding-
+// verified local approval (never for a commit that itself consumed the
+// cache -- see the CLI block's `reviewPath === defaultReviewPath` guard --
+// so this never re-derives a cache entry from a cache entry). Mirrors
+// archiveApprovedRound's own never-throws contract: a caching failure must
+// not block an otherwise-approved commit.
+function cacheApprovedEvidenceShared(reviewPath, message) {
+  const subject = message.split(/\r?\n/, 1)[0] ?? "";
+  const tagMatches = subject.match(HYK_TAG_RE_GLOBAL);
+  if (!tagMatches) return;
+  const issueIds = [...new Set(tagMatches)];
+  try {
+    const reviewText = readFileSync(reviewPath, "utf8");
+    const sidecarPath = join(dirname(reviewPath), "review-approval-binding.md");
+    const bindingBlock = existsSync(sidecarPath)
+      ? readFileSync(sidecarPath, "utf8")
+      : "";
+    const combined = `${reviewText.replace(/\s+$/, "")}\n\n${bindingBlock}`;
+    const dir = join(mainRepoRoot(), APPROVED_EVIDENCE_SUBDIR);
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+    for (const issueId of issueIds) {
+      writeFileSync(sharedApprovedEvidencePath(issueId), combined, "utf8");
+    }
+    console.log(
+      `shared-evidence-cache: cached approval for ${issueIds.join(", ")} -> ${dir}`,
+    );
+  } catch (err) {
+    console.error(
+      `shared-evidence-cache: failed to cache approval for cross-worktree rework (commit NOT blocked: ${err.message})`,
+    );
+  }
+}
+
 function archiveApprovedRound(reviewPath) {
   try {
     const reviewText = readFileSync(reviewPath, "utf8");
@@ -280,7 +373,11 @@ if (invokedDirectly) {
     process.exit(1);
   }
   const message = readFileSync(commitMsgFile, "utf8");
-  const reviewPath = join(repoRoot(), ".harness", "review.md");
+  const defaultReviewPath = join(repoRoot(), ".harness", "review.md");
+  // HYK-314: falls back to the shared cross-worktree evidence cache only
+  // when the local review.md is absent (see resolveEffectiveReviewPath's
+  // own header for the single-issue scope limit).
+  const reviewPath = resolveEffectiveReviewPath(message, defaultReviewPath);
   const result = checkReviewGate({ message, reviewPath });
   if (result.ok) {
     if (isGenuineReviewApproval(message, reviewPath)) {
@@ -292,13 +389,27 @@ if (invokedDirectly) {
       // as a separate call rather than folded into checkReviewGate so that
       // function's own pure-function contract (and the ~20 existing tests
       // asserting its return shape) stay untouched.
+      //
+      // HYK-314: this check ALWAYS re-runs here, even when `reviewPath` came
+      // from the shared cache -- the fingerprint inside that cached evidence
+      // must still match THIS worktree's current bytes byte-for-byte. A
+      // rework round that diverges from what REVIEW actually approved still
+      // fails closed ("불일치"), exactly like the local-file path always has.
       const binding = checkApprovalBinding({ reviewPath, cwd: repoRoot() });
       if (!binding.ok) {
         console.error(binding.reason);
         process.exit(1);
       }
-      recordApprovalToLedger(reviewPath);
-      archiveApprovedRound(reviewPath);
+      // Only a GENUINE local approval gets recorded/archived/cached -- a
+      // commit that merely CONSUMED the shared cache (reviewPath !==
+      // defaultReviewPath) is not itself a review round conclusion, so it
+      // must not re-record the streak ledger, re-archive a round envelope,
+      // or overwrite the cache with a copy of itself.
+      if (reviewPath === defaultReviewPath) {
+        recordApprovalToLedger(reviewPath);
+        archiveApprovedRound(reviewPath);
+        cacheApprovedEvidenceShared(reviewPath, message);
+      }
     }
     process.exit(0);
   } else {
