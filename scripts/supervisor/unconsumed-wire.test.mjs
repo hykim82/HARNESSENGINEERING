@@ -856,6 +856,97 @@ test("★P1-4 e2e(실물 mkdtemp): dropped_at 헤더가 아예 없는 task 파�
 });
 
 // ---------------------------------------------------------------------------
+// (4-b) HYK-339 -- 「재작업 라운드가 도는 동안 결과 파일이 이전 라운드
+// 라벨(task_id) + DONE 상태로 남아 있는데, 감지기가 라벨 대조 없이 DONE
+// 존재만 보고 오탐한다」는 관측 보고의 재현 게이트(§2). 이 축
+// (judgeUnconsumedForRepo)은 결과 파일의 내용(task_id/DONE 줄)을 아예
+// 읽지 않는다 -- mtime 두 개(결과 파일 mtime, 신호 mtime)만 본다(코어
+// 헤더 주석 참조). 그래서 "이전 라운드 라벨"이 남아 있어도 판정에 관여할
+// 자리가 구조적으로 없다: 이 시험은 그 구조를 실제로 e2e 재현해서
+// 고정한다 -- ①회의 재작업은 반드시 SUSPECTED_UNCONSUMED로 정상 발화
+// (완료 조건 2, 진짜 미소비는 계속 발화), ②같은 task 파일 이름을
+// **이어 쓰는 관례**(coder-task.md §5)로 재작업 라운드를 다시 드롭하면
+// -- 결과 파일에는 여전히 1라운드 라벨+DONE이 남아 있음에도 불구하고 --
+// CONSUMED로 정확히 넘어간다(오탐 없음). ★이 축과 별개로, DONE 줄의
+// task_id를 실제로 대조하는 dispatch-start 축(`resultFileDone`)의
+// 동일 시나리오 고정은 dispatch-start-wire.test.mjs의 "§R2 (a)★ 낡은
+// DONE 줄(이전 라운드 잔재)" 시험이 이미 담당한다(이 시험과 상호 보완,
+// 중복 아님).
+// ---------------------------------------------------------------------------
+test("HYK-339 재현 게이트: 재작업 라운드 도중 결과 파일에 이전 라운드 라벨+DONE이 남아 있어도 -- 드롭 전엔 SUSPECTED_UNCONSUMED(정상 발화), 같은 task 파일 이름으로 재작업이 드롭되면 CONSUMED(오탐 없음) (2/2)", () => {
+  withTempDir("hyk339-unconsumed-rework-", (dir) => {
+    initPlainGitRepo(dir);
+
+    // 1라운드: coder-task.md 드롭 -> coder.md에 1라운드 라벨+DONE 기록.
+    writeTaskFile(dir, {
+      name: "coder-task.md",
+      taskId: "HYK-339-round1",
+      droppedAt: "2026-08-21 00:00",
+      mtimeIso: "2026-08-21T00:00:00+09:00",
+    });
+    writeResultFileAt(dir, {
+      name: "coder.md",
+      updatedAtIso: "2026-08-21T00:05:00+09:00",
+    });
+
+    // (a) ORCH가 아직 재작업을 드롭하지 않은 채 임계(15분)를 넘긴 시점 --
+    // 이 구간은 진짜로 미소비다. 완료 조건 2(진짜 미소비는 계속 발화)를
+    // 이 시나리오 모양에서도 함께 고정한다.
+    const beforeRework = runOrchStallDetect(
+      [
+        "--repo-root",
+        dir,
+        "--now",
+        new Date(
+          Date.parse("2026-08-21T00:05:00+09:00") + 20 * 60_000,
+        ).toISOString(),
+        "--json",
+      ],
+      {},
+    );
+    assert.equal(
+      beforeRework.result.unconsumed.status,
+      UNCONSUMED_WIRE_STATUS.JUDGED,
+    );
+    assert.equal(
+      beforeRework.result.unconsumed.verdict,
+      UNCONSUMED_VERDICT.SUSPECTED_UNCONSUMED,
+    );
+
+    // (b) ORCH가 재작업 라운드를 드롭한다 -- ★같은 파일 이름(coder-task.md)을
+    // 다시 써서(이어 쓰는 관례) 새 task_id로 덮어쓴다. coder.md는 아직
+    // 손대지 않았다 -- 여전히 1라운드 라벨("HYK-339-round1")+DONE 그대로다.
+    writeTaskFile(dir, {
+      name: "coder-task.md",
+      taskId: "HYK-339-round2-rework",
+      droppedAt: "2026-08-21 00:20",
+      mtimeIso: "2026-08-21T00:20:00+09:00",
+    });
+    const afterRework = runOrchStallDetect(
+      [
+        "--repo-root",
+        dir,
+        "--now",
+        new Date(
+          Date.parse("2026-08-21T00:20:00+09:00") + 60_000,
+        ).toISOString(),
+        "--json",
+      ],
+      {},
+    );
+    assert.equal(
+      afterRework.result.unconsumed.status,
+      UNCONSUMED_WIRE_STATUS.JUDGED,
+    );
+    assert.equal(
+      afterRework.result.unconsumed.verdict,
+      UNCONSUMED_VERDICT.CONSUMED,
+      "라벨 불일치(이전 라운드 task_id)와 무관하게 재작업 드롭 신호만으로 정확히 CONSUMED여야 한다 -- 오탐 재현 실패(=이미 막혀 있음)",
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
 // (5) 오탐 0(§5-b) -- 정상적으로 빠르게 소비된 구간(fixture
 // synthetic_fast_consumption, 명시적으로 합성)에서는 경과 시간과 무관하게
 // 발화하지 않는다.
