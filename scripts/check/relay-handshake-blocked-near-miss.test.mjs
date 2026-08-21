@@ -10,6 +10,17 @@
 // 판정 「A」(coder-task.md §2)의 비대칭 요구대로, `>>>` 없는 표지는
 // MALFORMED_BLOCKED로 «보고»만 되고 «유효한 정지(BLOCKED/NEEDS_INPUT)로
 // 수락»되지는 않는다는 것을 각 시험이 명시적으로 단언한다.
+//
+// ⚠️HYK-333 2R (검토 P2-2, 한계 명시): BLOCKED_BARE_COLUMN0_RE는 column
+// 0(줄 맨 앞) 여부만 보고 그 줄이 «진짜 정지 표지»인지 «인용/코드 예시»인지
+// 구별하지 못한다. 예: 결과 파일 본문의 코드 펜스(```) 안에 예시로 적은
+// column-0 `BLOCKED: quoted example` 도 이 패턴에 걸려 MALFORMED_BLOCKED가
+// 된다(검토자 실측). 고치지 않는다 -- 코드 펜스 파싱까지 들어가면 그
+// 자체가 새로운 오탐/누락의 원천이 되고, 이 설계의 전제(§2, 설계 판정
+// 「A」)는 애초에 "놓친 정지(조용한 무한 대기)가 오탐(MALFORMED_BLOCKED로
+// 잘못 보고)보다 훨씬 나쁘다"는 비대칭이다 -- 인용문 오탐 몇 건을 감수하고
+// column 0을 신뢰 신호로 삼는 편이, 진짜 정지 표지를 또 한 번 놓치는 것보다
+// 낫다.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
@@ -152,7 +163,7 @@ test("HYK-333 (7) regression: 두 BLOCKED 표지(둘 다 >>> 있음) -> 여전�
   });
 });
 
-test("HYK-333 (8) 'BLOCKED:' 뒤에 사유 없이 개행(>>> 없음) -> 여전히 근처 마커 흔적으로 잡혀 MALFORMED_BLOCKED (사유 없는 near-miss도 조용히 사라지지 않는다)", () => {
+test("HYK-333 2R (8) 'BLOCKED:' 뒤에 사유도 화살표도 없이 개행 -> state=MALFORMED_BLOCKED로 보고된다 (검토 P2-1: 이전에는 이 입력이 근본적으로 어떤 near-miss 패턴에도 안 걸려 state=PENDING으로 조용히 묻혔다)", () => {
   withFixtureDir((dir) => {
     writeTask(dir, "coder", TASK_HEADER);
     writeResult(dir, "coder", "task_id: HYK-1\n\nBLOCKED:\n");
@@ -160,8 +171,28 @@ test("HYK-333 (8) 'BLOCKED:' 뒤에 사유 없이 개행(>>> 없음) -> 여전�
     assert.equal(result.ok, false);
     assert.equal(
       result.state,
-      "PENDING",
-      "빈 사유의 bare 'BLOCKED:'는 BLOCKED_BARE_COLUMN0_RE가 요구하는 콜론 뒤 최소 한 글자를 만족하지 못해 근본적으로 매치되지 않는다 -- state=NONE(PENDING) 경로가 맞다(BLOCKED_RE가 빈 사유를 애초에 거부하는 것과 대칭)",
+      "MALFORMED_BLOCKED",
+      "1R의 BLOCKED_BARE_COLUMN0_RE는 콜론 뒤 최소 한 글자(\\S)를 요구해 이 입력에 매치하지 않았고, `>>>`도 없어 BLOCKED_ANYWHERE_RE도 못 잡아 state=PENDING으로 조용히 묻혔다(검토 1R 실측 -- '`>>> BLOCKED:`도 사유 없인 거부되니 대칭'이라는 1R의 설명은 근거가 틀렸다: `>>>` 쪽은 near-miss가 받아 내지만 여기는 애초에 받아 낼 곳이 없는 사각지대였다). 2R에서 BLOCKED_BARE_COLUMN0_RE가 사유 요구 없이 넓어져 이제 잡힌다",
+    );
+    assert.notEqual(
+      result.state,
+      "BLOCKED",
+      "설계 판정 「A」: 사유 없는 arrowless 표지도 «보고»만 되고 «수락»되지는 않는다",
+    );
+  });
+});
+
+test("HYK-333 2R (9) 'NEEDS_INPUT:' 뒤에 사유도 화살표도 없이 개행 -> state=MALFORMED_BLOCKED로 보고된다 (검토 P2-1, BLOCKED와 동일한 방식)", () => {
+  withFixtureDir((dir) => {
+    writeTask(dir, "coder", TASK_HEADER);
+    writeResult(dir, "coder", "task_id: HYK-1\n\nNEEDS_INPUT:\n");
+    const result = checkRelayHandshake({ role: "coder", harnessDir: dir });
+    assert.equal(result.ok, false);
+    assert.equal(result.state, "MALFORMED_BLOCKED");
+    assert.notEqual(
+      result.state,
+      "NEEDS_INPUT",
+      "설계 판정 「A」: 사유 없는 arrowless NEEDS_INPUT도 «보고»만 되고 «수락»되지는 않는다",
     );
   });
 });

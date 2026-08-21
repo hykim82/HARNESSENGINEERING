@@ -86,15 +86,25 @@ const BLOCKED_ANYWHERE_RE = />>>\s*(BLOCKED|NEEDS_INPUT)\b/gi;
 // 보존된 옛 문면). 그 시기 규칙을 정확히 지킨 워커의 정지 표지는 위
 // BLOCKED_ANYWHERE_RE조차 매치하지 못해(둘 다 `>>>`를 요구) NONE으로 조용히
 // 유실됐다(ORCH 재현, coder-task.md §1). 이 상수는 그 흔적만 좁게 잡는다 --
-// column 0(줄 맨 앞, 선행 공백 0)에서 시작하고 콜론 뒤에 최소 한 글자가
-// 있어야 한다. `^`가 줄 시작만 고정하므로 §3-2 요구 4가 금지한 "줄 중간의
-// ... BLOCKED: ..." 는 이 패턴에도 매치하지 않는다(무한 확장 방지 -- 오탐
-// 억제는 여기서 끝나지 않고 아래 resolveResultBlockedState가 이 매치를
-// 절대 BLOCKED/NEEDS_INPUT으로 승격하지 않는 것으로 한 번 더 막는다, 설계
-// 판정 「A」).
-// ⛔BLOCKED_RE(엄격 채택 기준)는 이 상수와 무관하게 그대로 `>>>`를
-// 요구한다 -- 건드리지 않는다.
-const BLOCKED_BARE_COLUMN0_RE = /^(BLOCKED|NEEDS_INPUT):[ \t]*\S/gim;
+// column 0(줄 맨 앞, 선행 공백 0)에서 시작해야 한다. `^`가 줄 시작만
+// 고정하므로 §3-2 요구 4가 금지한 "줄 중간의 ... BLOCKED: ..." 는 이
+// 패턴에도 매치하지 않는다(무한 확장 방지 -- 오탐 억제는 여기서 끝나지
+// 않고 아래 resolveResultBlockedState가 이 매치를 절대 BLOCKED/
+// NEEDS_INPUT으로 승격하지 않는 것으로 한 번 더 막는다, 설계 판정 「A」).
+// HYK-333 2R (검토 1R P2-1): 콜론 뒤 사유(`\S`)를 요구하지 않는다 --
+// `BLOCKED:`(화살표도 사유도 없음) 한 단어만 쓴 줄이 이전에는 이 패턴에도
+// 안 걸려 근본적으로 매치되지 않았고, `>>>`가 없으니 BLOCKED_ANYWHERE_RE도
+// 못 잡아 결국 아무 near-miss도 안 잡혀 state=NONE(조용한 PENDING)으로
+// 묻혔다 -- "빈 사유는 BLOCKED_RE도 거부하니 대칭"이라는 1R의 근거는
+// 틀렸다(BLOCKED_RE 쪽은 `>>>`가 있으면 near-miss가 받아 내지만, 여기는
+// `>>>`가 없어 애초에 받아 낼 곳이 없었다 -- 대칭이 아니라 사각지대).
+// 사유를 요구하지 않도록 넓히면 이제 `>>>` 쪽(BLOCKED_ANYWHERE_RE는
+// `>>>\s*(BLOCKED|NEEDS_INPUT)\b` -- 이 역시 콜론/사유를 요구하지 않는다)과
+// 동작이 같아진다 -- "사유 없는 표지도 근처-미스로 본다"는 기준이 화살표
+// 유무와 무관하게 일관된다.
+// ⛔BLOCKED_RE(엄격 채택 기준, 채택에는 사유 필수)는 이 상수와 무관하게
+// 그대로다 -- 건드리지 않는다.
+const BLOCKED_BARE_COLUMN0_RE = /^(BLOCKED|NEEDS_INPUT):/gim;
 // HYK-325 §2-3: the non-column-0 meta line finalize-done.mjs appends right
 // after a `>>> DONE:` line it wrote itself (see that file's own
 // FINALIZE_DONE_MARKER_LINE). Presence is only ever used for a warning
