@@ -45,11 +45,47 @@ export const CI_EXIT_CODE = Object.freeze({
 // 재발한다(이 이슈의 원인 그 자체). UNKNOWN으로 fail-loud하면 호출자가
 // 최소한 "왜 0개인지" 직접 확인하게 된다. ⛔조용히 GREEN으로 떨어지는
 // 경로는 없다(거짓 통과 방지, §3-2 요구).
+// 2R P1-1 수리(검토 1R 반려): "완료" 판정(status !== "completed")이 아니라
+// "아직" 판정도 명시 허용 목록이어야 한다 -- 이전 구현은 status가 문자열이기만
+// 하면(타입 검사만) "completed"가 아닌 모든 값(예: "mystery")을 그대로
+// PENDING으로 흘려보냈다. 그게 이 이슈의 본질(확인 불가를 아직으로 뭉개지
+// 마라)을 정확히 어겼다(coder-task.md 2R §1).
+//
+// 허용 목록 근거: GitHub REST API 공식 문서(2026-08-21 WebFetch로 직접 확인,
+// https://docs.github.com/en/rest/checks/runs?apiVersion=2022-11-28 -- "List
+// check runs for a Git reference"/"Get a check run" 두 엔드포인트가 공통으로
+// 문서화한 check run의 status 필드) -- 이 API가 실제로 쓰는 status 값은
+// 정확히 이 6개뿐이다: queued · in_progress · completed · waiting ·
+// requested · pending. 추측으로 넣은 값은 0개 -- completed를 뺀 나머지
+// 5개(queued/in_progress/waiting/requested/pending) 전부가 "아직"을 뜻하는
+// 공식 문서 값이므로 전부 허용 목록에 넣었다(coder-task.md 2R §2-1이 최소
+// queued·in_progress 요구 + waiting/requested/pending 계열 존재 확인을
+// 요구했고, 셋 다 공식 문서에 있어 그대로 반영).
+//
+// ⛔이 하네스의 원칙(모르면 UNKNOWN, 좁게 잡는다)과 "허용 목록이 좁으면
+// 정상 CI가 UNKNOWN으로 뜬다"는 위험의 균형: 문서에 없는 값(예: 미래에
+// GitHub가 새 status를 추가하거나, 오타/스키마 드리프트로 다른 문자열이
+// 온 경우)은 전부 UNKNOWN으로 보낸다 -- "실제로 쓰이는 문서화된 값"만
+// PENDING으로 인정하고, 그 밖은 전부 확인 불가로 fail-loud한다. 정직
+// 한계: GitHub가 이 필드에 새 enum 값을 추가하면(문서 갱신 없이 조용히
+// 배포될 수도 있음) 그 값도 이 목록엔 없어 UNKNOWN이 뜬다 -- 그게 이
+// 원칙의 의도된 대가다(모르는 값 = 확인 불가, 조용한 PENDING 흡수보다
+// 낫다).
+const KNOWN_PENDING_STATUSES = Object.freeze([
+  "queued",
+  "in_progress",
+  "waiting",
+  "requested",
+  "pending",
+]);
+
 // ESLint complexity(<=12) 예산 때문에 하위 판정을 별 함수로 쪼갠다
 // (orca-posture-check.mjs의 tokensDirVerdict/workspacesFileVerdict 선례와
 // 동일한 이유).
 function isMalformedCheckRun(run) {
-  const statusOk = typeof run?.status === "string";
+  const statusOk =
+    typeof run?.status === "string" &&
+    (run.status === "completed" || KNOWN_PENDING_STATUSES.includes(run.status));
   const conclusionOk =
     run?.conclusion === undefined ||
     run?.conclusion === null ||

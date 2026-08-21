@@ -181,6 +181,84 @@ test("check_runs 항목의 status 필드 형식이 예상과 다름 -> UNKNOWN",
   assert.equal(result.verdict, CI_VERDICT.UNKNOWN);
 });
 
+// ---- 2R P1-1 수리: status 허용 목록 밖 값 -> UNKNOWN(⛔PENDING 아님) ---------
+test("status: 'mystery'(허용 목록 밖 문자열) -> UNKNOWN, PENDING 아님을 명시 단언", async () => {
+  const fetchFn = async () =>
+    jsonResponse(200, {
+      total_count: 1,
+      check_runs: [{ name: "build", status: "mystery", conclusion: null }],
+    });
+  const result = await fetchCheckRuns({
+    owner: "o",
+    repo: "r",
+    sha: "abc",
+    fetchFn,
+  });
+  assert.equal(result.verdict, CI_VERDICT.UNKNOWN);
+  assert.notEqual(result.verdict, CI_VERDICT.PENDING);
+});
+
+// 회귀 방지: 허용 목록의 각 "아직" 값이 여전히 PENDING인지 값마다 개별 단언.
+for (const pendingStatus of [
+  "queued",
+  "in_progress",
+  "waiting",
+  "requested",
+  "pending",
+]) {
+  test(`status: '${pendingStatus}'(허용 목록의 "아직" 값) -> 여전히 PENDING (회귀 방지)`, async () => {
+    const fetchFn = async () =>
+      jsonResponse(200, {
+        total_count: 1,
+        check_runs: [
+          { name: "build", status: pendingStatus, conclusion: null },
+        ],
+      });
+    const result = await fetchCheckRuns({
+      owner: "o",
+      repo: "r",
+      sha: "abc",
+      fetchFn,
+    });
+    assert.equal(result.verdict, CI_VERDICT.PENDING);
+  });
+}
+
+// status: "completed" 경로 회귀 0 -- GREEN/RED 판정 불변.
+test("status: 'completed' + conclusion: 'success' -> 여전히 GREEN (회귀 방지)", async () => {
+  const fetchFn = async () =>
+    jsonResponse(200, {
+      total_count: 1,
+      check_runs: [
+        { name: "build", status: "completed", conclusion: "success" },
+      ],
+    });
+  const result = await fetchCheckRuns({
+    owner: "o",
+    repo: "r",
+    sha: "abc",
+    fetchFn,
+  });
+  assert.equal(result.verdict, CI_VERDICT.GREEN);
+});
+
+test("status: 'completed' + conclusion: 'failure' -> 여전히 RED (회귀 방지)", async () => {
+  const fetchFn = async () =>
+    jsonResponse(200, {
+      total_count: 1,
+      check_runs: [
+        { name: "build", status: "completed", conclusion: "failure" },
+      ],
+    });
+  const result = await fetchCheckRuns({
+    owner: "o",
+    repo: "r",
+    sha: "abc",
+    fetchFn,
+  });
+  assert.equal(result.verdict, CI_VERDICT.RED);
+});
+
 // ---- 5. total_count: 0 -> 명시적 판정, ⛔GREEN 아님 --------------------------
 test("total_count: 0(체크 없음) -> UNKNOWN, GREEN이 아님을 명시 단언", async () => {
   const fetchFn = async () =>
