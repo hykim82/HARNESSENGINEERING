@@ -1843,7 +1843,30 @@ export function buildWorktreeRemoveCommand(worktreePath) {
 // 항상 붙였고, 미제공 시 undefined가 문자열 "undefined"가 아니라 그대로
 // JS 값(null/undefined)으로 배열에 들어가 CLI에 깨진 인자가 전달됐다(실측
 // §1: 생략 시 repo 기본 base 사용, 이게 정답이다).
-export function buildWorktreeCreateCommand({ name, repoId, baseBranch } = {}) {
+// HYK-331-worktree-deps-1 (coder-task.md §1/§2): `--setup skip`이 하드코딩돼
+// 있어 하네스가 만드는 모든 워크트리에 node_modules가 없었다 -- 그래서
+// 워커마다 quality-check 실패 -> npm ci 왕복이 라운드마다 고정으로
+// 발생했다(ORCH 실측, 워커 2명 각각). 왜 skip이었는지는 이 코드베이스
+// 어디에도 근거가 남아있지 않다(조용한 원래 결정이었을 가능성) -- ORCH
+// 라이브 실측(coder-task.md §1 표)으로 `--setup run`이면 node_modules가
+// 실제로 준비됨을 2건 확인했으므로 기본값을 그쪽으로 뒤집는다. 되돌리고
+// 싶은 다음 사람은 이 주석과 위 실측을 먼저 봐야 한다(조용한 변경
+// 금지). 기본을 안전한 쪽(run)으로 두되, 의도적으로 건너뛰려는 호출자
+// (예: 빠른 합성 시험)를 위해 인자로 선택 가능하게 열어둔다 -- 오타가
+// 조용히 skip으로 흐르면 이 버그가 재발하므로 허용 값 밖은 거부한다.
+export const WORKTREE_SETUP_VALUES = Object.freeze(["run", "skip", "inherit"]);
+
+export function buildWorktreeCreateCommand({
+  name,
+  repoId,
+  baseBranch,
+  setup = "run",
+} = {}) {
+  if (!WORKTREE_SETUP_VALUES.includes(setup)) {
+    throw new Error(
+      `orca-adapter: buildWorktreeCreateCommand -- invalid setup ${JSON.stringify(setup)} (allowed: ${WORKTREE_SETUP_VALUES.join("|")})`,
+    );
+  }
   const argv = [
     "worktree",
     "create",
@@ -1852,7 +1875,7 @@ export function buildWorktreeCreateCommand({ name, repoId, baseBranch } = {}) {
     "--repo",
     `id:${repoId}`,
     "--setup",
-    "skip",
+    setup,
     "--no-parent",
   ];
   if (isNonEmptyString(baseBranch)) {
