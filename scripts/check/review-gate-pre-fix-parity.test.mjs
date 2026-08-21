@@ -10,10 +10,15 @@
 // 워커가 스스로 계산한, 현재 작업트리와 실제로 일치하는 binding-fingerprint를
 // 직접 기록)를 가하고 같은 커밋 메시지로 review-gate.mjs CLI를 돌려 종료
 // 코드를 비교한다. review-approval-binding.mjs/reject-streak.mjs/
-// envelope-archive.mjs/relay-handshake.mjs/time-authority.mjs는 ba0eb54와
-// 현재 HEAD 사이에 한 바이트도 바뀌지 않았다(`git diff ba0eb54 HEAD --
-// scripts/check/review-approval-binding.mjs ...`로 확인, 0줄) -- 그래서 두
-// 판을 가르는 유일한 변수는 review-gate.mjs 자신이다.
+// envelope-archive.mjs/relay-handshake.mjs/time-authority.mjs는 (HYK-332 2R)
+// 두 판 모두 ba0eb54 시점 스냅숏(`git show <PRE_FIX_SHA>:scripts/check/<f>`)
+// 에서 그대로 심어진다 -- HEAD에서 이 저장소가 그 5개 파일을 실제로 어떻게
+// 바꾸든(예: HYK-332 1R의 relay-handshake.mjs/reject-streak.mjs export 추가)
+// 상관없이 두 판이 항상 같은 고정 내용을 공유하도록 **구성으로 보장**한다 --
+// 그래서 두 판을 가르는 유일한 변수는 review-gate.mjs 자신이다. (예전에는
+// 디스크의 현재 사본을 심고 "ba0eb54와 HEAD 사이 0줄"임을 별도로 단언했으나,
+// 그 단언은 review-gate.mjs와 무관한 편집에도 무조건 깨지는 구조라 폐기했다
+// -- 아래 ★확인 문단 참조.)
 //
 // 결과(아래 시험이 고정): **두 판 모두 이 위조를 통과시킨다**(exit 0) --
 // `hasIndependentReviewer = /role:\s*REVIEW/i.test(content)`는 서명이 아니라
