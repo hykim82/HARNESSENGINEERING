@@ -367,6 +367,89 @@ test("403 + Remaining:0 이지만 Reset이 깨짐(빈 문자열) -> 안전측 �
   assert.notEqual(result.reasonCode, CI_REASON_CODE.RATE_LIMIT_EXHAUSTED);
 });
 
+// ---- 4R P1-1 수리(검토 3R 반려): 범위 밖 Reset이 예외 없이 일반 UNKNOWN으로 --
+test("403 + Remaining:0 + 범위 초과 Reset(24자리 숫자) -> 예외 없이 일반 UNKNOWN, 한도 소진 아님, PENDING 아님", async () => {
+  // 검토 3R 재현 그대로: 이전엔 THREW: RangeError: Invalid time value.
+  const fetchFn = async () =>
+    jsonResponseWithHeaders(
+      403,
+      { message: "Forbidden" },
+      {
+        "X-RateLimit-Remaining": "0",
+        "X-RateLimit-Reset": "999999999999999999999999",
+      },
+    );
+  const result = await fetchCheckRuns({
+    owner: "o",
+    repo: "r",
+    sha: "abc",
+    fetchFn,
+  });
+  assert.equal(result.verdict, CI_VERDICT.UNKNOWN);
+  assert.notEqual(result.verdict, CI_VERDICT.PENDING);
+  assert.notEqual(result.reasonCode, CI_REASON_CODE.RATE_LIMIT_EXHAUSTED);
+});
+
+const BAD_RESET_CASES = [
+  ["negative", "-1"], // 음수(부호 문자 포함 -- DIGITS_ONLY_RE가 이미 걸러내지만 예외 없이 안전해야 한다)
+  ["huge-finite", "99999999999999999999999999999999999999"], // 매우 큰 값(Number()가 유한하지만 Date 범위 밖)
+  ["overflow-to-infinity", "9".repeat(400)], // Number()가 Infinity로 오버플로하는 값
+];
+for (const [label, badReset] of BAD_RESET_CASES) {
+  test(`403 + Remaining:0 + Reset(${label}) -> 예외 없이 안전하게 일반 UNKNOWN`, async () => {
+    const fetchFn = async () =>
+      jsonResponseWithHeaders(
+        403,
+        { message: "Forbidden" },
+        { "X-RateLimit-Remaining": "0", "X-RateLimit-Reset": badReset },
+      );
+    const result = await fetchCheckRuns({
+      owner: "o",
+      repo: "r",
+      sha: "abc",
+      fetchFn,
+    });
+    assert.equal(result.verdict, CI_VERDICT.UNKNOWN);
+    assert.notEqual(result.verdict, CI_VERDICT.PENDING);
+    assert.notEqual(result.reasonCode, CI_REASON_CODE.RATE_LIMIT_EXHAUSTED);
+  });
+}
+
+test("403 + Remaining:0 + Reset:'0'(유효 범위 안 최소값) -> 예외 없이 처리(경계값)", async () => {
+  const fetchFn = async () =>
+    jsonResponseWithHeaders(
+      403,
+      { message: "Forbidden" },
+      { "X-RateLimit-Remaining": "0", "X-RateLimit-Reset": "0" },
+    );
+  const result = await fetchCheckRuns({
+    owner: "o",
+    repo: "r",
+    sha: "abc",
+    fetchFn,
+  });
+  assert.equal(result.verdict, CI_VERDICT.UNKNOWN);
+  assert.notEqual(result.verdict, CI_VERDICT.PENDING);
+});
+
+test("403 + Remaining:0 + Reset:'1787294363'(정상 값) -> 회귀 0, 여전히 한도 소진(15:39:23)", async () => {
+  const fetchFn = async () =>
+    jsonResponseWithHeaders(
+      403,
+      { message: "Forbidden" },
+      { "X-RateLimit-Remaining": "0", "X-RateLimit-Reset": "1787294363" },
+    );
+  const result = await fetchCheckRuns({
+    owner: "o",
+    repo: "r",
+    sha: "abc",
+    fetchFn,
+  });
+  assert.equal(result.verdict, CI_VERDICT.UNKNOWN);
+  assert.equal(result.reasonCode, CI_REASON_CODE.RATE_LIMIT_EXHAUSTED);
+  assert.match(result.reason, /15:39:23/);
+});
+
 test("pollCiStatus: 기본 폴링 간격은 60000ms", async () => {
   let calls = 0;
   const fetchFn = async () => {

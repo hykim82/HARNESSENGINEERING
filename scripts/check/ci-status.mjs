@@ -183,19 +183,49 @@ function formatKstRetryTime(resetEpochSeconds) {
   return fmt.format(date);
 }
 
+// 4R P1-1 수리(검토 3R 반려): `DIGITS_ONLY_RE`는 "숫자 문자로만 이루어진
+// 문자열인가"만 확인했다 -- 자릿수 제한이 없어서 범위를 한참 벗어난 값
+// (예: "999999999999999999999999")도 통과시켰고, 그 값이 그대로
+// `new Date(...)`/`Intl.DateTimeFormat.format()`까지 흘러가 **예외를
+// 던졌다**(RangeError: Invalid time value, 재현: coder-task.md 4R §1
+// P1-1). ⛔fail-closed 계약 위반 -- 깨진 Reset은 verdict 없이 죽는 게
+// 아니라 일반 UNKNOWN으로 닫혀야 한다.
+//
+// 수리 방식(파싱 단계에서 유효 범위/유한성 검증, 변환을 try/catch로
+// 감싸는 대신 이 방식을 고른 이유): `isValidEpochSeconds`가 실제로
+// `new Date(...).getTime()`을 만들어 `NaN`인지 확인한다 -- Intl이 내부적으로
+// 던지는 것과 "같은 유효성 조건"을 그보다 먼저, side-effect(포맷 문자열
+// 생성) 없이 판정할 수 있어서다. try/catch로 `formatKstRetryTime` 호출을
+// 감싸는 대안도 가능했지만, 그러면 "예외를 잡아서 조용히 넘긴다"는 패턴이
+// 새로 생겨 이 모듈의 나머지(전부 사전 검증 후 분기, catch 없이 순수)와
+// 스타일이 어긋난다 -- 사전 검증 쪽을 택해 예외 자체가 발생할 조건을
+// 원천적으로 막았다.
+const DIGITS_ONLY_RE = /^\d+$/;
+
+// JS Date가 표현 가능한 범위(ECMA-262 §21.4.1.1) = epoch 기준 ±100,000,000일
+// = ±8,640,000,000,000,000ms. 이 범위를 벗어나거나 곱셈 자체가 유한하지
+// 않은(Infinity로 오버플로한) 값은 전부 무효로 취급한다.
+function isValidEpochSeconds(seconds) {
+  if (!Number.isFinite(seconds)) return false;
+  const ms = seconds * 1000;
+  if (!Number.isFinite(ms)) return false;
+  return !Number.isNaN(new Date(ms).getTime());
+}
+
 // 403 + X-RateLimit-Remaining/Reset 헤더 원문(문자열|null)을 받아
 // "한도 소진인지"를 판정하는 순수 함수. ⛔안전측 기본값 = "한도 소진
 // 아님"(coder-task.md 3R §2⑸/시험4 요구) -- 두 헤더 다 정확히 파싱되고
 // remaining이 "0"일 때만 exhausted:true. 헤더가 없거나(구버전 응답 흉내)
-// 숫자가 아니거나(스키마 드리프트) reset이 깨져 있으면(재시도 시각을 못
-// 만듦) 전부 "한도 소진 아님"으로 떨어진다 -- 조용히 한도 소진으로
-// 오판정하는 경로가 없다.
-const DIGITS_ONLY_RE = /^\d+$/;
-
+// 숫자가 아니거나(스키마 드리프트) reset이 깨져 있거나(4R 신설: 범위를
+// 벗어나) 있으면 전부 "한도 소진 아님"으로 떨어진다 -- 조용히 한도 소진으로
+// 오판정하는 경로도, 예외로 죽는 경로도 없다.
 function parseRateLimitInfo(remainingRaw, resetRaw) {
   const remainingOk =
     typeof remainingRaw === "string" && DIGITS_ONLY_RE.test(remainingRaw);
-  const resetOk = typeof resetRaw === "string" && DIGITS_ONLY_RE.test(resetRaw);
+  const resetOk =
+    typeof resetRaw === "string" &&
+    DIGITS_ONLY_RE.test(resetRaw) &&
+    isValidEpochSeconds(Number(resetRaw));
   if (!remainingOk || !resetOk || Number(remainingRaw) !== 0) {
     return { exhausted: false };
   }
@@ -370,12 +400,19 @@ export async function fetchCheckRuns({
 // 정직 한계 ②: 이 도구는 누가 호출할 때만 판정한다 -- 상시 감시(daemon)가
 // 아니다. 폴링 상한(maxAttempts)을 넘기면 최종 상태를 그대로 반환하고
 // 종료한다 -- 그 뒤로는 아무도 지켜보지 않는다.
-// 정직 한계 ③(3R 신설, coder-task.md 3R §2⑸): 무인증 GitHub REST API는
-// **시간당 60회**로 제한된다(도그푸딩 실측 X-RateLimit-Limit:60) -- 이
-// 폴러를 20초 간격으로 돌리면 시간당 180회를 시도해 30분 안에 한도를 태운다
-// (실제로 이 PR 자신의 CI를 감시하다 그렇게 소진됐다). 기본 간격을
-// 60000ms(60초)로 올린 이유가 이거다 -- 시간당 정확히 60회, 즉 한도 전부를
-// 이 폴러 하나가 다 쓴다고 가정해도 소진되지 않는 상한.
+// 정직 한계 ③(3R 신설, coder-task.md 3R §2⑸ / 4R P2-1 수리로 문면
+// 과장 제거): 무인증 GitHub REST API는 **시간당 60회**로 제한된다(도그푸딩
+// 실측 X-RateLimit-Limit:60) -- 이 폴러를 20초 간격으로 돌리면 시간당
+// 180회를 시도해 30분 안에 한도를 태운다(실제로 이 PR 자신의 CI를
+// 감시하다 그렇게 소진됐다). 기본 간격을 60000ms(60초)로 올린 이유가
+// 이거다. ⛔**과장 금지**(4R 검토 P2-1): 기본 `maxAttempts=60`은 한도(시간당
+// 60회)와 **정확히 같은 수**일 뿐, 여유(headroom)가 있는 게 아니다 -- 이
+// 폴러는 시간당 **최대 60회까지 시도**하며, 같은 시간대에 이 도구를 부르는
+// 다른 호출(다른 PR 감시, 사람의 수동 CLI 호출 등)이나 GitHub의 시간
+// window 경계 조건(한도 리셋 타이밍과 이 폴러의 시작 시각이 어긋나는 경우)
+// 에 따라 여전히 소진될 수 있다. "소진되지 않는다"고 보장하지 않는다 --
+// "1회 호출당 6배씩 태우던 것을 한도와 같은 속도로 낮췄다"가 정확한
+// 서술이다.
 //
 // 3R §2⑷ 결정: 한도 소진(reasonCode RATE_LIMIT_EXHAUSTED)을 만나도
 // **즉시 중단**한다 -- "리셋까지 기다린다"를 고르지 않았다. 이유: (1) 이미
