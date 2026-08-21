@@ -35,6 +35,7 @@ import {
   checkHookSetAdditive,
   checkHookWiringRegistered,
   EXPECTED_INJECTED_HOOKS,
+  checkControlRoomDoc,
 } from "./selfcheck-inventory.mjs";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -2413,5 +2414,214 @@ test("(63) judgeEntry: counterfactual -- research-receipt's install_target remov
       extras.map((r) => r.id),
       ["extra:repo-settings:research-receipt"],
     );
+  });
+});
+
+// --- checkControlRoomDoc (HYK-336: control-room live doc <-> repo drift
+// baseline copy, reusing checkNativeGitHook's 4-state judgment against a
+// CONTROL_ROOM-placeholder-resolved root instead of .git/hooks) ------------
+//
+// Every test below builds its own SYNTHETIC temp directory and points the
+// CONTROL_ROOM root at it -- per coder-task.md §0/§3-3, the real control
+// room (D:\문서관리\하네스-관제실\) is read-only and must never be touched
+// by a corruption test.
+
+const CONTRACT_DOC = [
+  "# worker-dispatch-rule (synthetic fixture)",
+  "",
+  "## 3-c. ask timeout contract",
+  "",
+  "`orca orchestration ask` cuts off at 30s; use send+check --wait instead.",
+  "",
+].join("\n");
+
+const CONTRACT_DOC_WITH_CLAUSE_DELETED = [
+  "# worker-dispatch-rule (synthetic fixture)",
+  "",
+  "(계약 절 삭제됨 -- 합성 훼손)",
+  "",
+].join("\n");
+
+test("(64) checkControlRoomDoc: live copy byte-identical to repo baseline -> ALIVE", () => {
+  withFixtureDir((repoDir) => {
+    withFixtureDir((controlRoomDir) => {
+      writeFileSync(
+        join(repoDir, "worker-dispatch-rule.md.txt"),
+        CONTRACT_DOC,
+        "utf8",
+      );
+      writeFileSync(
+        join(controlRoomDir, "worker-dispatch-rule.md"),
+        CONTRACT_DOC,
+        "utf8",
+      );
+      const result = checkControlRoomDoc({
+        target: {
+          versioned_path: "REPO/worker-dispatch-rule.md.txt",
+          installed_path: "CONTROL_ROOM/worker-dispatch-rule.md",
+        },
+        roots: { REPO: repoDir, CONTROL_ROOM: controlRoomDir },
+      });
+      assert.equal(result.status, "ALIVE");
+    });
+  });
+});
+
+test("(65) checkControlRoomDoc: synthetic corruption -- live copy has the contract clause deleted -> DRIFT (완료조건 2)", () => {
+  withFixtureDir((repoDir) => {
+    withFixtureDir((controlRoomDir) => {
+      writeFileSync(
+        join(repoDir, "worker-dispatch-rule.md.txt"),
+        CONTRACT_DOC,
+        "utf8",
+      );
+      writeFileSync(
+        join(controlRoomDir, "worker-dispatch-rule.md"),
+        CONTRACT_DOC_WITH_CLAUSE_DELETED,
+        "utf8",
+      );
+      const result = checkControlRoomDoc({
+        target: {
+          versioned_path: "REPO/worker-dispatch-rule.md.txt",
+          installed_path: "CONTROL_ROOM/worker-dispatch-rule.md",
+        },
+        roots: { REPO: repoDir, CONTROL_ROOM: controlRoomDir },
+      });
+      assert.equal(result.status, "DRIFT");
+    });
+  });
+});
+
+test("(66) checkControlRoomDoc: CONTROL_ROOM root missing from roots -> UNJUDGABLE (installed_path unresolved, never a false ALIVE)", () => {
+  withFixtureDir((repoDir) => {
+    writeFileSync(
+      join(repoDir, "worker-dispatch-rule.md.txt"),
+      CONTRACT_DOC,
+      "utf8",
+    );
+    const result = checkControlRoomDoc({
+      target: {
+        versioned_path: "REPO/worker-dispatch-rule.md.txt",
+        installed_path: "CONTROL_ROOM/worker-dispatch-rule.md",
+      },
+      roots: { REPO: repoDir },
+    });
+    assert.equal(result.status, "UNJUDGABLE");
+  });
+});
+
+test("(67) checkControlRoomDoc: REPO baseline missing from roots -> UNJUDGABLE", () => {
+  withFixtureDir((controlRoomDir) => {
+    writeFileSync(
+      join(controlRoomDir, "worker-dispatch-rule.md"),
+      CONTRACT_DOC,
+      "utf8",
+    );
+    const result = checkControlRoomDoc({
+      target: {
+        versioned_path: "REPO/worker-dispatch-rule.md.txt",
+        installed_path: "CONTROL_ROOM/worker-dispatch-rule.md",
+      },
+      roots: { CONTROL_ROOM: controlRoomDir },
+    });
+    assert.equal(result.status, "UNJUDGABLE");
+  });
+});
+
+test("(68) judgeEntry: control-room-doc install_target, live matches baseline, roots threaded end-to-end -> ALIVE (완료조건 3, 오탐 0)", () => {
+  withRepoFixture((repoDir) => {
+    withFixtureDir((controlRoomDir) => {
+      writeFileSync(
+        join(repoDir, "scripts", "check", "control-room-live-drift.mjs"),
+        "// stub\n",
+        "utf8",
+      );
+      writeFileSync(
+        join(repoDir, "scripts", "check", "control-room-live-drift.test.mjs"),
+        "// stub\n",
+        "utf8",
+      );
+      writeFileSync(
+        join(repoDir, "worker-dispatch-rule.md.txt"),
+        CONTRACT_DOC,
+        "utf8",
+      );
+      writeFileSync(
+        join(controlRoomDir, "worker-dispatch-rule.md"),
+        CONTRACT_DOC,
+        "utf8",
+      );
+      const entry = {
+        id: "control-room-live-drift",
+        script: "scripts/check/control-room-live-drift.mjs",
+        test: "scripts/check/control-room-live-drift.test.mjs",
+        claude_only: false,
+        install_targets: [
+          {
+            location: "control-room-doc",
+            kind: "control-room-doc",
+            versioned_path: "REPO/worker-dispatch-rule.md.txt",
+            installed_path: "CONTROL_ROOM/worker-dispatch-rule.md",
+            required: true,
+          },
+        ],
+      };
+      const result = judgeEntry(entry, {
+        repoRoot: repoDir,
+        roots: { REPO: repoDir, CONTROL_ROOM: controlRoomDir },
+      });
+      assert.equal(result.status, "ALIVE");
+    });
+  });
+});
+
+test("(69) judgeEntry: counterfactual -- fake CONTROL_ROOM live copy synthetically corrupted (contract clause deleted) -> DRIFT surfaces through the full judgeEntry/runInventory pipeline, not just the primitive (완료조건 2)", () => {
+  withRepoFixture((repoDir) => {
+    withFixtureDir((controlRoomDir) => {
+      writeFileSync(
+        join(repoDir, "scripts", "check", "control-room-live-drift.mjs"),
+        "// stub\n",
+        "utf8",
+      );
+      writeFileSync(
+        join(repoDir, "scripts", "check", "control-room-live-drift.test.mjs"),
+        "// stub\n",
+        "utf8",
+      );
+      writeFileSync(
+        join(repoDir, "worker-dispatch-rule.md.txt"),
+        CONTRACT_DOC,
+        "utf8",
+      );
+      writeFileSync(
+        join(controlRoomDir, "worker-dispatch-rule.md"),
+        CONTRACT_DOC_WITH_CLAUSE_DELETED,
+        "utf8",
+      );
+      const entry = {
+        id: "control-room-live-drift",
+        script: "scripts/check/control-room-live-drift.mjs",
+        test: "scripts/check/control-room-live-drift.test.mjs",
+        claude_only: false,
+        install_targets: [
+          {
+            location: "control-room-doc",
+            kind: "control-room-doc",
+            versioned_path: "REPO/worker-dispatch-rule.md.txt",
+            installed_path: "CONTROL_ROOM/worker-dispatch-rule.md",
+            required: true,
+          },
+        ],
+      };
+      const manifest = { checks: [entry] };
+      const { results, summary } = runInventory({
+        manifest,
+        repoRoot: repoDir,
+        roots: { REPO: repoDir, CONTROL_ROOM: controlRoomDir },
+      });
+      assert.equal(results[0].status, "DRIFT");
+      assert.match(results[0].evidence.join(" "), /sha256 mismatch/);
+      assert.equal(summary.DRIFT, 1);
+    });
   });
 });
