@@ -640,6 +640,70 @@ function judgeClaudeSettingsTarget(entry, target, settingsByLocation) {
   };
 }
 
+// Compares a control-room "live" doc (e.g. D:\문서관리\하네스-관제실\*.md)
+// against its repo-tracked drift baseline copy, by content hash -- same
+// four-state judgment as checkNativeGitHook (UNJUDGABLE/NOT_INSTALLED/
+// DRIFT/ALIVE), reused rather than re-implemented, because "installed copy
+// byte-identical to versioned copy" is exactly the same question a native
+// git hook answers, just with CONTROL_ROOM standing in for .git/hooks as
+// the "live" root (HYK-336 §2). Manifest paths are placeholders
+// (REPO/..., CONTROL_ROOM/...) resolved via resolvePlaceholderPath so the
+// manifest itself never hardcodes a machine-specific control-room path.
+export function checkControlRoomDoc({
+  target,
+  roots,
+  readFileFn = (p) => readFileSync(p, "utf8"),
+  existsFn = existsSync,
+}) {
+  const versionedPath = resolvePlaceholderPath(target.versioned_path, roots);
+  const installedPath = resolvePlaceholderPath(target.installed_path, roots);
+  if (!versionedPath) {
+    return {
+      status: "UNJUDGABLE",
+      reason: `versioned_path '${target.versioned_path}' could not be resolved (missing root) -- cannot compare`,
+    };
+  }
+  if (!installedPath) {
+    return {
+      status: "UNJUDGABLE",
+      reason: `installed_path '${target.installed_path}' could not be resolved (missing CONTROL_ROOM root) -- cannot compare`,
+    };
+  }
+  return checkNativeGitHook({
+    versionedPath,
+    installedPath,
+    readFileFn,
+    existsFn,
+  });
+}
+
+// One install_target's judgment, dispatched by kind -- extracted from
+// judgeWiring's per-target loop (HYK-336 quality-check: keeps judgeWiring's
+// own line count under the repo's ESLint ceiling once a third kind
+// (control-room-doc) joined git-hook/claude-settings). Returns null for an
+// unrecognized kind, same as the loop silently skipping it before.
+function judgeInstallTarget(
+  entry,
+  target,
+  { root, roots, settingsByLocation, readFileFn, existsFn },
+) {
+  if (target.kind === "git-hook") {
+    return checkNativeGitHook({
+      versionedPath: join(root, target.versioned_path),
+      installedPath: join(root, target.installed_path),
+      readFileFn,
+      existsFn,
+    });
+  }
+  if (target.kind === "claude-settings") {
+    return judgeClaudeSettingsTarget(entry, target, settingsByLocation);
+  }
+  if (target.kind === "control-room-doc") {
+    return checkControlRoomDoc({ target, roots, readFileFn, existsFn });
+  }
+  return null;
+}
+
 // judgeEntry step 3: wiring, dispatched by install_target kind (or a
 // source-reference / CI-coverage special case for entries with no
 // settings-based wiring). Extracted from judgeEntry itself for the same
@@ -647,7 +711,15 @@ function judgeClaudeSettingsTarget(entry, target, settingsByLocation) {
 // refactor, same statuses/evidence this block always produced.
 function judgeWiring(
   entry,
-  { root, settingsByLocation, readFileFn, existsFn, testFiles, scriptPath },
+  {
+    root,
+    roots = {},
+    settingsByLocation,
+    readFileFn,
+    existsFn,
+    testFiles,
+    scriptPath,
+  },
 ) {
   const statuses = [];
   const evidence = [];
@@ -686,24 +758,16 @@ function judgeWiring(
     entry.install_targets.length > 0
   ) {
     for (const target of entry.install_targets) {
-      if (target.kind === "git-hook") {
-        const git = checkNativeGitHook({
-          versionedPath: join(root, target.versioned_path),
-          installedPath: join(root, target.installed_path),
-          readFileFn,
-          existsFn,
-        });
-        statuses.push(git.status);
-        evidence.push(git.reason);
-      } else if (target.kind === "claude-settings") {
-        const judged = judgeClaudeSettingsTarget(
-          entry,
-          target,
-          settingsByLocation,
-        );
-        statuses.push(judged.status);
-        evidence.push(judged.reason);
-      }
+      const judged = judgeInstallTarget(entry, target, {
+        root,
+        roots,
+        settingsByLocation,
+        readFileFn,
+        existsFn,
+      });
+      if (!judged) continue;
+      statuses.push(judged.status);
+      evidence.push(judged.reason);
     }
     return { statuses, evidence };
   }
@@ -723,6 +787,7 @@ export function judgeEntry(
   entry,
   {
     repoRoot: root,
+    roots,
     settingsByLocation = {},
     canaryDir,
     now = Date.now(),
@@ -757,6 +822,7 @@ export function judgeEntry(
   // 3. Wiring (see judgeWiring above).
   const wiring = judgeWiring(entry, {
     root,
+    roots,
     settingsByLocation,
     readFileFn,
     existsFn,
