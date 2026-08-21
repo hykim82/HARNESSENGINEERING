@@ -141,10 +141,14 @@ function writeTaskFile(
 // 결과 파일을 쓰고, 그 mtime을 원하는 시각으로 고정한다(§3 표본이 실제
 // 관측한 것은 "파일 mtime"이므로 이 시험도 mtime을 직접 통제해야 실물과
 // 동형이다).
-function writeResultFileAt(dir, { name = "coder.md", updatedAtIso }) {
+// ★HYK-339-recommit-3(REVIEW 1R 반려 수리): `taskId`는 선택 인자다 --
+// 주면 결과 파일 첫 줄에 `task_id: <값>`을 실제로 쓰고, 생략하면 기존
+// 호출부 전부와 동일하게 라벨 없는 본문만 쓴다(기존 시험 회귀 0).
+function writeResultFileAt(dir, { name = "coder.md", updatedAtIso, taskId }) {
   mkdirSync(join(dir, ".harness"), { recursive: true });
   const p = join(dir, ".harness", name);
-  writeFileSync(p, "결과 본문\n>>> DONE: CODER @ test\n", "utf8");
+  const taskIdLine = taskId ? `task_id: ${taskId}\n` : "";
+  writeFileSync(p, `${taskIdLine}결과 본문\n>>> DONE: CODER @ test\n`, "utf8");
   const t = new Date(updatedAtIso);
   utimesSync(p, t, t);
 }
@@ -887,7 +891,17 @@ test("HYK-339 재현 게이트: 재작업 라운드 도중 결과 파일에 이�
     writeResultFileAt(dir, {
       name: "coder.md",
       updatedAtIso: "2026-08-21T00:05:00+09:00",
+      taskId: "HYK-339-round1",
     });
+    // ★REVIEW 1R 반려 수리: "썼다고 믿지 말고 읽어서 확인" -- 결과
+    // 파일에 이전 라운드 라벨+DONE이 실제로 들어갔는지 이 시험 안에서
+    // 직접 읽어 단언한다. 이게 없으면 이 시험은 다시 헛시험이 된다.
+    const resultFileBody = readFileSync(
+      join(dir, ".harness", "coder.md"),
+      "utf8",
+    );
+    assert.match(resultFileBody, /^task_id: HYK-339-round1\n/);
+    assert.match(resultFileBody, />>> DONE: CODER @ test/);
 
     // (a) ORCH가 아직 재작업을 드롭하지 않은 채 임계(15분)를 넘긴 시점 --
     // 이 구간은 진짜로 미소비다. 완료 조건 2(진짜 미소비는 계속 발화)를
