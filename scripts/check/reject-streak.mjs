@@ -20,7 +20,10 @@ const ISSUE_ID_RE = /^(HYK-\d+)/;
 // 기록 사고). `for:`/`verdict:`는 항상 개수부터 세야 하므로 global 버전만
 // 남긴다; `task_id:`는 checkGate/checkDiagnosticGate가 단일 매치로도 쓰므로
 // non-global과 global 버전을 함께 둔다.
-const FOR_LINE_RE_G = /^for:\s*(\S+)/gm;
+// ⛔HYK-332: exported so finalize-done.mjs can reuse this exact 'for:'
+// cover-line regex (coder-task.md §2 요구5) instead of inventing a second
+// copy that could silently drift from this one.
+export const FOR_LINE_RE_G = /^for:\s*(\S+)/gm;
 const TASK_ID_LINE_RE = /^task_id:\s*(\S+)/im;
 const TASK_ID_LINE_RE_G = /^task_id:\s*(\S+)/gim;
 const VERDICT_LINE_RE_G = /^verdict:\s*(approved|rejected)\s*$/gim;
