@@ -37,6 +37,25 @@ export const CI_EXIT_CODE = Object.freeze({
   [CI_VERDICT.UNKNOWN]: 3,
 });
 
+// 3R(coder-task.md 3R §2⑴) -- 도그푸딩(ORCH가 이 도구로 이 PR 자신의 CI를
+// 확인)이 찾은 한계 수리: 403이면서 X-RateLimit-Remaining:0인 경우를
+// "그냥 확인 불가"와 구별한다. ★설계 선택(두 방향 중 ⓐ 채택, 이유를 여기
+// 적는다): 상태값은 여전히 UNKNOWN(종료코드 3 그대로) -- 새 상태값/새
+// 종료코드(ⓑ)를 만들지 않았다. 이유: (1) 한도 소진도 "이 조회로는 확인
+// 불가"라는 사실 자체는 다른 UNKNOWN 사유들과 같다 -- CI_EXIT_CODE 계약
+// (호출자가 "3=확인 불가, 재시도하거나 사람이 봐라"로 이미 알고 있는 계약)을
+// 안 깨는 게 새 종료코드를 배우게 하는 것보다 싸다. (2) ⛔PENDING 흡수
+// 금지(1R 반려의 재발 방지)는 상태값을 안 바꿔도 그대로 지켜진다 -- 여전히
+// UNKNOWN 하나의 갈래 안에 있다. 대신 **사유를 기계가 구별**할 수 있게
+// `reasonCode`를 추가한다(사람은 `reason` 문자열의 재시도 시각으로,
+// 프로그램은 `reasonCode === CI_REASON_CODE.RATE_LIMIT_EXHAUSTED`로 구별).
+// ⛔"그냥 403"(한도와 무관한 접근 거부 등)은 reasonCode 없이 기존과 동일한
+// 일반 UNKNOWN으로 남는다 -- 둘을 뭉치면 이 라운드가 무의미하다는 지시를
+// 그대로 지킨다.
+export const CI_REASON_CODE = Object.freeze({
+  RATE_LIMIT_EXHAUSTED: "RATE_LIMIT_EXHAUSTED",
+});
+
 // total_count: 0(체크가 하나도 안 붙음)의 처리 -- coder-task.md §3-2
 // 요구대로 명시적으로 정한다: **UNKNOWN**으로 판정한다(PENDING이 아니다).
 // 이유: "check가 아직 안 붙었다"(워크플로 트리거 지연)와 "커밋 자체가
@@ -146,6 +165,58 @@ function classifyFromCheckRuns(checkRuns) {
 //   body: string|null -- 원문 응답 텍스트(파싱 실패 재현용, 성공 시 무시 가능)
 //   parsed: unknown -- JSON.parse(body) 결과 또는 파싱 실패 시 undefined
 //   parseError: boolean -- JSON.parse가 던졌으면 true
+// KST(Asia/Seoul) HH:MM:SS 변환 -- 순수 함수(입력 epoch초 하나에만
+// 의존, Date.now()/시스템 타임존 설정 어느 쪽도 읽지 않는다: Intl의
+// timeZone 옵션이 호스트 타임존과 무관하게 고정 변환을 보장하므로 시험이
+// 고정 값으로 검증 가능하다(coder-task.md 3R §2⑴/§3 요구). 실측:
+// epoch=1787294363(도그푸딩 실측값) -> "15:39:23", 이슈 원문의 "2026-08-21
+// 15:39:23 KST"와 일치 확인.
+function formatKstRetryTime(resetEpochSeconds) {
+  const date = new Date(resetEpochSeconds * 1000);
+  const fmt = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Seoul",
+    hour12: false,
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  });
+  return fmt.format(date);
+}
+
+// 403 + X-RateLimit-Remaining/Reset 헤더 원문(문자열|null)을 받아
+// "한도 소진인지"를 판정하는 순수 함수. ⛔안전측 기본값 = "한도 소진
+// 아님"(coder-task.md 3R §2⑸/시험4 요구) -- 두 헤더 다 정확히 파싱되고
+// remaining이 "0"일 때만 exhausted:true. 헤더가 없거나(구버전 응답 흉내)
+// 숫자가 아니거나(스키마 드리프트) reset이 깨져 있으면(재시도 시각을 못
+// 만듦) 전부 "한도 소진 아님"으로 떨어진다 -- 조용히 한도 소진으로
+// 오판정하는 경로가 없다.
+const DIGITS_ONLY_RE = /^\d+$/;
+
+function parseRateLimitInfo(remainingRaw, resetRaw) {
+  const remainingOk =
+    typeof remainingRaw === "string" && DIGITS_ONLY_RE.test(remainingRaw);
+  const resetOk = typeof resetRaw === "string" && DIGITS_ONLY_RE.test(resetRaw);
+  if (!remainingOk || !resetOk || Number(remainingRaw) !== 0) {
+    return { exhausted: false };
+  }
+  return { exhausted: true, retryAtKst: formatKstRetryTime(Number(resetRaw)) };
+}
+
+function classify403({ rateLimitRemaining, rateLimitReset }) {
+  const rateLimit = parseRateLimitInfo(rateLimitRemaining, rateLimitReset);
+  if (rateLimit.exhausted) {
+    return {
+      verdict: CI_VERDICT.UNKNOWN,
+      reasonCode: CI_REASON_CODE.RATE_LIMIT_EXHAUSTED,
+      reason: `HTTP 403 -- 무인증 호출 한도 소진(X-RateLimit-Remaining:0) -- ${rateLimit.retryAtKst} 이후 재시도(확인 불가, 일시적)`,
+    };
+  }
+  return {
+    verdict: CI_VERDICT.UNKNOWN,
+    reason: "HTTP 403 -- 접근 거부(한도 소진 아님) -- 확인 불가",
+  };
+}
+
 // ESLint complexity(<=12) 예산 때문에 전송 계층 실패(네트워크/파싱/HTTP)의
 // 판정을 별 함수로 쪼갠다. null을 돌려주면 "전송 계층은 통과, 본문 판정으로
 // 넘어가라"는 뜻이다.
@@ -154,6 +225,8 @@ function classifyTransportFailure({
   parseError,
   httpOk,
   status,
+  rateLimitRemaining,
+  rateLimitReset,
 }) {
   if (networkError) {
     return {
@@ -174,6 +247,9 @@ function classifyTransportFailure({
         reason: "HTTP 404 -- 커밋을 못 찾음(오타/미푸시/저장소 불일치)",
       };
     }
+    if (status === 403) {
+      return classify403({ rateLimitRemaining, rateLimitReset });
+    }
     return {
       verdict: CI_VERDICT.UNKNOWN,
       reason: `HTTP 오류 응답(status=${status ?? "?"}) -- 확인 불가`,
@@ -182,20 +258,10 @@ function classifyTransportFailure({
   return null;
 }
 
-export function classifyCiStatus({
-  networkError = false,
-  httpOk = null,
-  status = null,
-  parsed,
-  parseError = false,
-} = {}) {
-  const transportFailure = classifyTransportFailure({
-    networkError,
-    parseError,
-    httpOk,
-    status,
-  });
-  if (transportFailure) return transportFailure;
+// ESLint complexity(<=12) 예산 때문에 본문 스키마 판정을 별 함수로 쪼갠다
+// (classifyTransportFailure/classify403과 동일한 이유). null을 돌려주면
+// "본문은 판정 가능한 형태, check_runs 배열 판정으로 넘어가라"는 뜻이다.
+function classifyMalformedBody(parsed) {
   if (parsed === null || parsed === undefined || typeof parsed !== "object") {
     return {
       verdict: CI_VERDICT.UNKNOWN,
@@ -208,12 +274,45 @@ export function classifyCiStatus({
       reason: "응답에 check_runs 필드 부재 -- 예상 스키마와 다름",
     };
   }
+  return null;
+}
+
+export function classifyCiStatus({
+  networkError = false,
+  httpOk = null,
+  status = null,
+  parsed,
+  parseError = false,
+  rateLimitRemaining = null,
+  rateLimitReset = null,
+} = {}) {
+  const transportFailure = classifyTransportFailure({
+    networkError,
+    parseError,
+    httpOk,
+    status,
+    rateLimitRemaining,
+    rateLimitReset,
+  });
+  if (transportFailure) return transportFailure;
+  const malformedBody = classifyMalformedBody(parsed);
+  if (malformedBody) return malformedBody;
   return classifyFromCheckRuns(parsed.check_runs);
 }
 
 // ---- 어댑터: 실제 fetch 실행 -----------------------------------------------
 
 const GITHUB_API_BASE = "https://api.github.com";
+
+// res.headers.get(name)이 있는 응답에서만 읽는다 -- 기존(1R/2R) 시험이
+// 주입하는 최소 가짜 응답({status, ok, text})처럼 headers가 아예 없는
+// 경우도 여전히 지원해야 하므로(회귀 0), 없으면 null로 조용히 접는다.
+function readHeader(res, name) {
+  if (!res || !res.headers || typeof res.headers.get !== "function")
+    return null;
+  const value = res.headers.get(name);
+  return typeof value === "string" ? value : null;
+}
 
 // ⛔토큰 참조 0 -- Authorization 헤더를 세팅하지 않는다(공개 API 무인증
 // 읽기, coder-task.md §3-1). 이 함수 본문 전체에 토큰/자격증명 변수가
@@ -235,6 +334,8 @@ export async function fetchCheckRuns({
   }
   const status = res.status;
   const httpOk = res.ok === true;
+  const rateLimitRemaining = readHeader(res, "x-ratelimit-remaining");
+  const rateLimitReset = readHeader(res, "x-ratelimit-reset");
   let text;
   try {
     text = await res.text();
@@ -247,7 +348,13 @@ export async function fetchCheckRuns({
   } catch {
     return classifyCiStatus({ httpOk, status, parseError: true });
   }
-  return classifyCiStatus({ httpOk, status, parsed });
+  return classifyCiStatus({
+    httpOk,
+    status,
+    parsed,
+    rateLimitRemaining,
+    rateLimitReset,
+  });
 }
 
 // ---- 대기(폴링): 상한 필수 + UNKNOWN 즉시 중단 -----------------------------
@@ -263,12 +370,30 @@ export async function fetchCheckRuns({
 // 정직 한계 ②: 이 도구는 누가 호출할 때만 판정한다 -- 상시 감시(daemon)가
 // 아니다. 폴링 상한(maxAttempts)을 넘기면 최종 상태를 그대로 반환하고
 // 종료한다 -- 그 뒤로는 아무도 지켜보지 않는다.
+// 정직 한계 ③(3R 신설, coder-task.md 3R §2⑸): 무인증 GitHub REST API는
+// **시간당 60회**로 제한된다(도그푸딩 실측 X-RateLimit-Limit:60) -- 이
+// 폴러를 20초 간격으로 돌리면 시간당 180회를 시도해 30분 안에 한도를 태운다
+// (실제로 이 PR 자신의 CI를 감시하다 그렇게 소진됐다). 기본 간격을
+// 60000ms(60초)로 올린 이유가 이거다 -- 시간당 정확히 60회, 즉 한도 전부를
+// 이 폴러 하나가 다 쓴다고 가정해도 소진되지 않는 상한.
+//
+// 3R §2⑷ 결정: 한도 소진(reasonCode RATE_LIMIT_EXHAUSTED)을 만나도
+// **즉시 중단**한다 -- "리셋까지 기다린다"를 고르지 않았다. 이유: (1) 이미
+// UNKNOWN 즉시 중단 계약(정직 한계 ①/②와 같은 축)을 그대로 재사용할 수
+// 있어 새 분기·새 상한 로직이 필요 없다(작을수록 안전). (2) 리셋까지
+// 기다리는 옵션은 최악의 경우 거의 1시간을 대기해야 하는데, 그 사이
+// 호출자(ORCH)는 CI가 실제로 끝났는지 전혀 모르는 채로 이 도구만 하염없이
+// 잠들어 있게 된다 -- "무한 대기처럼 느껴지는 유한 대기"는 이 이슈가
+// 애초에 없애려던 바로 그 실패 모드(1b_shown)와 체감상 구별이 안 된다.
+// (3) 재시도 시각이 이미 `reason`/`retryAtKst`에 사람이 읽을 수 있게 실려
+// 나가므로, "언제 다시 하면 되는지"는 호출자(사람 또는 ORCH)가 판단해서
+// 스스로 재호출하면 된다 -- 그 판단을 이 폴러가 대신 떠안을 필요가 없다.
 export async function pollCiStatus({
   owner,
   repo,
   sha,
   fetchFn = fetch,
-  intervalMs = 5000,
+  intervalMs = 60000,
   maxAttempts = 60,
   sleepFn = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   onAttempt,
@@ -317,7 +442,7 @@ if (invokedDirectly) {
   const args = parseArgs(process.argv.slice(2));
   if (!args.sha) {
     console.error(
-      "usage: node scripts/check/ci-status.mjs --commit <sha> [--owner <owner>] [--repo <repo>] [--wait] [--max-attempts N] [--interval-ms N]",
+      "usage: node scripts/check/ci-status.mjs --commit <sha> [--owner <owner>] [--repo <repo>] [--wait] [--max-attempts N] [--interval-ms N(기본 60000)]",
     );
     process.exit(3);
   }
