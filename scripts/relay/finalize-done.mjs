@@ -40,7 +40,12 @@ import { join } from "node:path";
 import {
   DONE_RE,
   isWellFormedDoneTimestamp,
+  resolveResultTaskId,
 } from "../check/relay-handshake.mjs";
+// HYK-332 §2: reuse reject-streak.mjs's own 'for:' cover-line regex and
+// REVIEW-family test -- same reuse-not-reinvent instruction as the
+// relay-handshake.mjs import above.
+import { FOR_LINE_RE_G, isReviewFamilyRole } from "../check/reject-streak.mjs";
 
 const DONE_LINE_RE = /^>>>\s*DONE:/im;
 // HYK-325 §2-1 (2회째 교체 금지): once finalizeDone has replaced one
@@ -83,7 +88,63 @@ export const FINALIZE_DONE_REASON = Object.freeze({
   // HYK-325 §2-1: a malformed line was already replaced once before --
   // refuses to replace again (no infinite re-issue).
   ALREADY_REPLACED: "ALREADY_REPLACED",
+  // HYK-332 §2: the result file's required 'task_id:' cover line (all
+  // roles, coder-task.md §1⑴) is missing, ambiguous (2+ standalone
+  // matches), or present but not a standalone column-0 line.
+  HEADER_TASK_ID_MISSING: "HEADER_TASK_ID_MISSING",
+  HEADER_TASK_ID_AMBIGUOUS: "HEADER_TASK_ID_AMBIGUOUS",
+  HEADER_TASK_ID_MALFORMED: "HEADER_TASK_ID_MALFORMED",
+  // HYK-332 §2: the result file's required 'for:' cover line (REVIEW-family
+  // roles only, coder-task.md §1⑵) is missing or ambiguous.
+  HEADER_FOR_MISSING: "HEADER_FOR_MISSING",
+  HEADER_FOR_AMBIGUOUS: "HEADER_FOR_AMBIGUOUS",
 });
+
+// HYK-332 §2 요구1/2/3: called right after `existing` is read and before
+// any DONE line is inspected/written -- refuses to stamp DONE on a result
+// file that is missing a required cover line, and names exactly what's
+// missing (0 matches vs 2+ ambiguous vs present-but-not-standalone), per
+// coder-task.md §1's machine-verified consumer contract
+// (relay-handshake.mjs's resolveResultTaskId / reject-streak.mjs's
+// FOR_LINE_RE_G). `role:` is deliberately NOT checked here -- §1⑶ found it
+// is not gated by any consumer, so making it required here would newly
+// break existing well-formed result files that never wrote a `role:` line.
+function checkRequiredHeaders({ existing, role, resultPath }) {
+  const taskIdResult = resolveResultTaskId(existing);
+  if (!taskIdResult.ok) {
+    const reasonCode =
+      taskIdResult.kind === "AMBIGUOUS"
+        ? FINALIZE_DONE_REASON.HEADER_TASK_ID_AMBIGUOUS
+        : taskIdResult.kind === "MID_LINE"
+          ? FINALIZE_DONE_REASON.HEADER_TASK_ID_MALFORMED
+          : FINALIZE_DONE_REASON.HEADER_TASK_ID_MISSING;
+    return {
+      ok: false,
+      reasonCode,
+      reason: `finalize-done refuses to stamp DONE: ${taskIdResult.reason} (${resultPath})`,
+    };
+  }
+
+  if (isReviewFamilyRole(role)) {
+    const forMatches = [...existing.matchAll(FOR_LINE_RE_G)];
+    if (forMatches.length > 1) {
+      return {
+        ok: false,
+        reasonCode: FINALIZE_DONE_REASON.HEADER_FOR_AMBIGUOUS,
+        reason: `finalize-done refuses to stamp DONE: result has ${forMatches.length} standalone 'for:' lines -- 어느 것이 최종인지 결정할 수 없다 (ambiguous, cannot resolve) (${resultPath})`,
+      };
+    }
+    if (forMatches.length === 0) {
+      return {
+        ok: false,
+        reasonCode: FINALIZE_DONE_REASON.HEADER_FOR_MISSING,
+        reason: `finalize-done refuses to stamp DONE: REVIEW-family result missing required 'for:' cover line (need a standalone \`for: <id>\` line) (${resultPath})`,
+      };
+    }
+  }
+
+  return { ok: true };
+}
 
 // Extracted from finalizeDone (ESLint max-lines-per-function/complexity
 // ceiling, HYK-148 house rule) -- decides what to do with a result file
@@ -208,6 +269,11 @@ export function finalizeDone({
   }
 
   const existing = readFileSync(resultPath, "utf8");
+
+  const headerCheck = checkRequiredHeaders({ existing, role, resultPath });
+  if (!headerCheck.ok) {
+    return headerCheck;
+  }
 
   if (DONE_LINE_RE.test(existing)) {
     return resolveExistingDoneLine({ existing, resultPath, role, nowFn });

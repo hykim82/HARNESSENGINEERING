@@ -141,13 +141,20 @@ export function mainRepoRoot() {
 
 // Extracted from checkRelayHandshake (quality-check: keeps its own
 // complexity under the repo's ESLint ceiling) -- resolves the result
-// file's task_id echo into either a match or one of two distinct
+// file's task_id echo into either a match or one of three distinct
 // diagnoses for the anchored-miss case (see TASK_ID_ANYWHERE_RE above).
-function resolveResultTaskId(resultContent) {
+// ⛔HYK-332: exported so finalize-done.mjs can reuse this EXACT
+// "what counts as a valid task_id header" contract (coder-task.md §2
+// 요구5's "정규식을 새로 짓지 말고 재사용하라") instead of a second copy
+// that could silently drift. `kind` is additive (existing callers only
+// ever read `.ok`/`.reason`) and lets a caller branch on the failure
+// shape (missing/ambiguous/mid-line) without string-matching `.reason`.
+export function resolveResultTaskId(resultContent) {
   const resultIdMatches = [...resultContent.matchAll(TASK_ID_RE_G)];
   if (resultIdMatches.length > 1) {
     return {
       ok: false,
+      kind: "AMBIGUOUS",
       reason: `result has ${resultIdMatches.length} standalone 'task_id:' lines -- 어느 것이 최종인지 결정할 수 없다 (ambiguous, cannot resolve)`,
     };
   }
@@ -157,12 +164,14 @@ function resolveResultTaskId(resultContent) {
   if (TASK_ID_ANYWHERE_RE.test(resultContent)) {
     return {
       ok: false,
+      kind: "MID_LINE",
       reason:
         "result task_id echo not at line start (must be a standalone `task_id: <id>` line at column 0, found mid-line)",
     };
   }
   return {
     ok: false,
+    kind: "MISSING",
     reason: "result missing task_id echo (need a `task_id: <id>` line)",
   };
 }
