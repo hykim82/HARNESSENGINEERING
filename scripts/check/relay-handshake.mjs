@@ -81,6 +81,20 @@ const BLOCKED_RE = /^>>>[ \t]*(BLOCKED|NEEDS_INPUT):[ \t]*(\S.*?)[ \t]*$/gim;
 // 건드리지 않으므로(내부적으로 복제) 이 상수를 여러 곳에서 반복 호출해도
 // 안전하다.
 const BLOCKED_ANYWHERE_RE = />>>\s*(BLOCKED|NEEDS_INPUT)\b/gi;
+// HYK-333: 관제실 워커 규칙 §3-b가 2026-08-21까지 `>>>` 없이 column-0
+// `BLOCKED: <사유>` / `NEEDS_INPUT: <사유>` 를 쓰라고 가르쳤다(취소선으로
+// 보존된 옛 문면). 그 시기 규칙을 정확히 지킨 워커의 정지 표지는 위
+// BLOCKED_ANYWHERE_RE조차 매치하지 못해(둘 다 `>>>`를 요구) NONE으로 조용히
+// 유실됐다(ORCH 재현, coder-task.md §1). 이 상수는 그 흔적만 좁게 잡는다 --
+// column 0(줄 맨 앞, 선행 공백 0)에서 시작하고 콜론 뒤에 최소 한 글자가
+// 있어야 한다. `^`가 줄 시작만 고정하므로 §3-2 요구 4가 금지한 "줄 중간의
+// ... BLOCKED: ..." 는 이 패턴에도 매치하지 않는다(무한 확장 방지 -- 오탐
+// 억제는 여기서 끝나지 않고 아래 resolveResultBlockedState가 이 매치를
+// 절대 BLOCKED/NEEDS_INPUT으로 승격하지 않는 것으로 한 번 더 막는다, 설계
+// 판정 「A」).
+// ⛔BLOCKED_RE(엄격 채택 기준)는 이 상수와 무관하게 그대로 `>>>`를
+// 요구한다 -- 건드리지 않는다.
+const BLOCKED_BARE_COLUMN0_RE = /^(BLOCKED|NEEDS_INPUT):[ \t]*\S/gim;
 // HYK-325 §2-3: the non-column-0 meta line finalize-done.mjs appends right
 // after a `>>> DONE:` line it wrote itself (see that file's own
 // FINALIZE_DONE_MARKER_LINE). Presence is only ever used for a warning
@@ -232,8 +246,15 @@ function resolveResultBlockedState(resultContent) {
   // with a broken one, previously swallowed silently into the single valid
   // match.
   const anywhereCount = [...resultContent.matchAll(BLOCKED_ANYWHERE_RE)].length;
+  // HYK-333: BLOCKED_BARE_COLUMN0_RE matches lines that never start with
+  // `>>>` (it anchors on the keyword itself), so it can never overlap with
+  // anywhereCount's `>>>`-anchored matches -- summing the two counts every
+  // near-miss shape exactly once, no double counting.
+  const bareColumn0Count = [...resultContent.matchAll(BLOCKED_BARE_COLUMN0_RE)]
+    .length;
+  const nearMissCount = anywhereCount + bareColumn0Count;
   if (matches.length === 1) {
-    if (anywhereCount > matches.length) {
+    if (nearMissCount > matches.length) {
       return {
         state: RESULT_BLOCK_STATE.MALFORMED_BLOCKED,
         reason:
@@ -244,11 +265,11 @@ function resolveResultBlockedState(resultContent) {
     const detail = matches[0][2].trim();
     return { state: kind, detail };
   }
-  if (anywhereCount > 0) {
+  if (nearMissCount > 0) {
     return {
       state: RESULT_BLOCK_STATE.MALFORMED_BLOCKED,
       reason:
-        "result has a '>>> BLOCKED:'/'>>> NEEDS_INPUT:'-shaped marker that doesn't match the required column-0, single-line '>>> BLOCKED: <reason>' / '>>> NEEDS_INPUT: <reason>' form (fail-closed -- not treated as pending)",
+        "result has a '>>> BLOCKED:'/'>>> NEEDS_INPUT:'-shaped marker (or a `>>>`-less column-0 'BLOCKED:'/'NEEDS_INPUT:' near-miss, HYK-333) that doesn't match the required column-0, single-line '>>> BLOCKED: <reason>' / '>>> NEEDS_INPUT: <reason>' form (fail-closed -- not treated as pending)",
     };
   }
   return { state: RESULT_BLOCK_STATE.NONE };
