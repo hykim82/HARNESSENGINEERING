@@ -8,6 +8,18 @@
 // If this test goes RED, the document (§3 of the patch doc) and the
 // fixture have drifted apart -- see the patch doc's §4 for the SHA-256 the
 // anchor was cut against.
+//
+// ⚠️HYK-335-rule-anchor-2 (검토 1R P2-1 수리) -- 정직 한계: 이 시험은
+// 저장소에 커밋된 before/applied fixture만 읽는다. 관제실의 살아 있는
+// worker-dispatch-rule.md는 어디서도 열지 않는다. 그래서 라이브 파일이
+// 나중에 수정되거나 §3-c가 통째로 삭제되더라도, 이 시험은 그 사실을
+// 알 도리가 없고 계속 초록으로 남는다 -- CI는 라이브 드리프트를 잡지
+// 못한다(검토 1R이 관제실 live 파일만 바꾼 뒤 재실행해 5/5가 그대로
+// 통과함을 재현했다). 이 시험이 실제로 막는 것은 "저장소 안"의 계약
+// 문면 변경뿐이다: 패치 문서나 fixture에서 §3-c 계약 문장을 지우면
+// 이 시험(및 -effect.test.mjs)이 빨간불을 낸다. 관제실 live 파일과
+// 저장소 fixture를 계속 같은 값으로 유지하는 것은 이 시험의 책임 밖이며,
+// 그 동기화는 사람/ORCH가 patch-apply 절차로 수행한다.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";

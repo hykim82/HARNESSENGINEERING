@@ -21,6 +21,19 @@
 // none of them are checking something structurally guaranteed to be true.
 // The fixture FILE itself is never touched (coder-task.md §3-5 explicit
 // prohibition) -- only string variables inside this test.
+//
+// ⚠️HYK-335-rule-anchor-2 (검토 1R P2-1 수리) -- 정직 한계: 위 4개 claim은
+// 전부 저장소에 커밋된 applied fixture 문자열에 대한 검사이고, 관제실의
+// 살아 있는 worker-dispatch-rule.md는 이 시험 어디서도 읽지 않는다.
+// 그래서 라이브 파일에서 §3-c가 나중에 지워지거나 바뀌어도 이 시험은
+// 그 변화를 관측할 수 없고 계속 초록으로 남는다 -- CI는 라이브 드리프트를
+// 잡지 못한다(검토 1R이 관제실 live 파일만 바꾼 뒤 재실행해 9/9가 그대로
+// 통과함을 재현했다). 이 시험이 실제로 막는 사정거리는 "저장소 안"의
+// 계약 문면 변경뿐이다: applied fixture(또는 그 fixture를 재생산하는
+// 패치 문서)에서 §3-c의 이 4개 문장 중 하나라도 지우면 이 시험이
+// 빨간불을 낸다. 관제실 live 파일이 fixture와 계속 같은 값을 유지하는
+// 것은 이 시험의 책임 밖이며, 그 동기화는 사람/ORCH가 patch-apply
+// 절차로 수행한다.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
