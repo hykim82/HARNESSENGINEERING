@@ -3,17 +3,30 @@
 //
 // §0 M1 재현: 「마지막 라운드」(결과 파일이 가장 최신 + 그 뒤 새
 // task 파일도 새 커밋도 없음)에서, 영수증(.harness/receipts/<role>-
-// receipt-r<N>.json)만 결과 파일보다 새것이면 이제 SUSPECTED_UNCONSUMED가
+// receipt-r<N>.json)이 있고 그 내용이 워커가 못 쓰는 두 자리(배달
+// 영수증·admission 원장)로 독립 대조까지 되면 SUSPECTED_UNCONSUMED가
 // 아니라 CONSUMED(reasonCode=CONSUMED_VIA_RECEIPT)여야 한다.
+//
+// ★HYK-340 2R P1-1(검토 1R 반려 수리, coder-task.md §1): 1R은 이
+// 파일의 helper가 `{binding:{}, effects:{}}`라는 임의 JSON만으로
+// CONSUMED를 확인하는 헛시험이었다 -- 워크트리 안 파일 존재만으로
+// 통과했다는 뜻이다. 이 2R은 그 헛시험을 제거하고, ⑴ 위조(워크트리
+// 안 파일만)로는 이제 CONSUMED가 안 나오는 것 ⑵ 정당한 소비(배달
+// 영수증+원장 둘 다 대조 통과)는 여전히 CONSUMED인 것 ⑶ 대조 자료를
+// 못 읽으면(fail-closed) CONSUMED로 접지 않는 것을 각각 별도 시험으로
+// 고정한다.
 //
 // 이 계약이 보장하지 않는 것(S11):
 // 1. judgeUnconsumed 코어 자신의 3신호/임계 판정 로직은 unconsumed-
-//    core.test.mjs가 전담한다 -- 여기는 "영수증 파일 -> 세 번째 신호"
-//    결선만 본다.
+//    core.test.mjs가 전담한다 -- 여기는 "영수증 파일 + 독립 대조 ->
+//    세 번째 신호" 결선만 본다.
 // 2. consumption-receipt-writer.mjs가 실제로 그 파일을 올바른 모양으로
 //    쓰는지는 그 파일 자신의 시험(consumption-receipt-writer.test.mjs)이
 //    전담한다 -- 여기는 "파일 하나가 그 자리에 있고 mtime이 새것이면"만
 //    가정한다.
+// 3. dispatch-receipts.jsonl/admission-ledger.json 실물 파일의 정확한
+//    생산 경로(dispatch-receipt-cli.mjs/admission-cli.mjs)는 그 파일들
+//    자신의 시험이 전담한다 -- 여기는 그 모양을 흉내낸 합성 파일만 쓴다.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
@@ -79,10 +92,15 @@ function writeTaskFile(dir, { name = "coder-task.md", taskId, mtimeIso }) {
   const t = new Date(mtimeIso);
   utimesSync(p, t, t);
 }
-function writeResultFileAt(dir, { name = "coder.md", updatedAtIso }) {
+// ★2R: `taskId`가 주어지면 결과 파일도 그 라벨을 `task_id:`로 에코한다
+// (resolveEchoedRoundLabel이 읽는 바로 그 줄 -- HYK-183 anti-forgery와
+// 동일 관례). 생략하면(기존 호출부 다수) 에코 없이 본문만 -- 1R까지의
+// 파일과 byte-identical한 시험도 여전히 돌 수 있게 한다.
+function writeResultFileAt(dir, { name = "coder.md", updatedAtIso, taskId }) {
   mkdirSync(join(dir, ".harness"), { recursive: true });
   const p = join(dir, ".harness", name);
-  writeFileSync(p, "결과 본문\n>>> DONE: CODER @ test\n", "utf8");
+  const taskIdLine = taskId ? `task_id: ${taskId}\n` : "";
+  writeFileSync(p, `${taskIdLine}결과 본문\n>>> DONE: CODER @ test\n`, "utf8");
   const t = new Date(updatedAtIso);
   utimesSync(p, t, t);
 }
@@ -94,32 +112,264 @@ function writeReceiptAt(dir, { role, round = 1, mtimeIso }) {
   const t = new Date(mtimeIso);
   utimesSync(p, t, t);
 }
-function judgeFor(dir, now) {
+// ★2R -- 워커가 못 쓰는 두 자리를 흉내낸 합성 파일. 실물 모양(admission-
+// completion-adapter.mjs의 hasDispatchReceiptForRound가 읽는 필드,
+// admission-ledger-core.mjs의 reservations[id].status)만 재현한다.
+function writeDispatchReceiptsJsonl(dir, records) {
+  const p = join(dir, "dispatch-receipts.jsonl");
+  writeFileSync(
+    p,
+    records.map((r) => JSON.stringify(r)).join("\n") + "\n",
+    "utf8",
+  );
+  return p;
+}
+function writeAdmissionLedger(dir, reservations) {
+  const p = join(dir, "admission-ledger.json");
+  writeFileSync(
+    p,
+    JSON.stringify({
+      schema_version: "admission-ledger/v1",
+      epoch: "2020-01-01T00:00:00Z",
+      reservations,
+    }),
+    "utf8",
+  );
+  return p;
+}
+function judgeFor(dir, now, opts = {}) {
   const evidence = collectUnconsumedCandidates(dir);
   assert.equal(evidence.failed, false, "candidate collection must not fail");
-  return judgeUnconsumedForRepo({
-    repoRoot: dir,
-    taskFileCandidates: evidence.items,
-    now,
-  });
+  return judgeUnconsumedForRepo(
+    { repoRoot: dir, taskFileCandidates: evidence.items, now },
+    opts,
+  );
 }
 
 // ---------------------------------------------------------------------------
-// (1) §0 M1 재현: 마지막 라운드 + 영수증이 결과 파일보다 새것 -> CONSUMED
-// via CONSUMED_VIA_RECEIPT (요구1).
+// (1) §0 M1 재현, 정당한 소비: 마지막 라운드 + 영수증이 결과 파일보다
+// 새것 + 배달 영수증·admission 원장 둘 다 이 라운드를 실제로 확인 ->
+// CONSUMED via CONSUMED_VIA_RECEIPT (요구1 대조군 -- 요구2 오탐0).
 // ---------------------------------------------------------------------------
-test("HYK-340: 마지막 라운드에서 소비 영수증(coder-receipt-r1.json)이 결과 파일보다 새것이면 -- SUSPECTED_UNCONSUMED가 아니라 CONSUMED/CONSUMED_VIA_RECEIPT (1/1)", () => {
-  withTempDir("hyk340-receipt-consumed-", (dir) => {
+test("HYK-340 2R: 정당한 소비(영수증+배달영수증+원장 COMPLETED 셋 다 일치) -- SUSPECTED_UNCONSUMED가 아니라 CONSUMED/CONSUMED_VIA_RECEIPT (1/1)", () => {
+  withTempDir("hyk340-verified-consumed-", (dir) => {
     initPlainGitRepo(dir);
-    writeTaskFile(dir, {
-      taskId: "HYK-340-t",
-      mtimeIso: "2026-08-24T00:00:00Z",
+    const label = "HYK-340-verified-1";
+    writeTaskFile(dir, { taskId: label, mtimeIso: "2026-08-24T00:00:00Z" });
+    writeResultFileAt(dir, {
+      updatedAtIso: "2026-08-24T00:10:00Z",
+      taskId: label,
     });
+    writeReceiptAt(dir, { role: "coder", mtimeIso: "2026-08-24T00:15:00Z" });
+    const receiptPath = writeDispatchReceiptsJsonl(dir, [
+      { role: "CODER", harness_task_label: label, dispatchId: "ctx_1" },
+    ]);
+    const ledgerPath = writeAdmissionLedger(dir, {
+      [label]: { status: "COMPLETED" },
+    });
+    const now = new Date("2026-08-24T01:00:00Z").getTime(); // 임계(900초) 훌쩍 초과
+    const result = judgeFor(dir, now, {
+      dispatchReceiptPath: receiptPath,
+      admissionLedgerPath: ledgerPath,
+    });
+    assert.equal(result.status, UNCONSUMED_WIRE_STATUS.JUDGED);
+    assert.equal(result.verdict, UNCONSUMED_VERDICT.CONSUMED);
+    assert.equal(result.reasonCode, UNCONSUMED_REASON.CONSUMED_VIA_RECEIPT);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// (1b) §1 요구: 검토자가 재현한 위조를 그대로 재현 -- 워크트리 안에
+// 같은 이름의 새 파일(영수증)을 만드는 것만으로는(배달 영수증도
+// 원장 경로도 전혀 없음) 더 이상 CONSUMED가 안 나온다.
+// ---------------------------------------------------------------------------
+test("HYK-340 2R P1-1: 위조 재현 -- 워크트리 안 영수증 파일만 있고(배달 영수증·원장 대조 자료 없음) -- CONSUMED가 나오지 않는다(여전히 SUSPECTED_UNCONSUMED) (1/1)", () => {
+  withTempDir("hyk340-forged-receipt-", (dir) => {
+    initPlainGitRepo(dir);
+    const label = "HYK-340-forged-1";
+    writeTaskFile(dir, { taskId: label, mtimeIso: "2026-08-24T00:00:00Z" });
+    writeResultFileAt(dir, {
+      updatedAtIso: "2026-08-24T00:10:00Z",
+      taskId: label,
+    });
+    // 검토자가 재현한 정확한 형태: 워커가 워크트리 안에 직접 만들 수
+    // 있는 영수증 파일 하나 -- 대조할 배달 영수증/원장은 아무것도 없다
+    // (opts에 dispatchReceiptPath/admissionLedgerPath를 아예 안 준다 ==
+    // 실 운용에서 env도 안 설정된 상태와 동형).
+    writeReceiptAt(dir, { role: "coder", mtimeIso: "2026-08-24T00:15:00Z" });
+    const now = new Date("2026-08-24T01:00:00Z").getTime();
+    const result = judgeFor(dir, now, {});
+    assert.equal(
+      result.verdict,
+      UNCONSUMED_VERDICT.SUSPECTED_UNCONSUMED,
+      "a workspace-only forged receipt must not produce CONSUMED",
+    );
+    assert.notEqual(result.reasonCode, UNCONSUMED_REASON.CONSUMED_VIA_RECEIPT);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// (1c) fail-closed: 배달 영수증은 있는데 admission 원장을 못 읽으면(경로
+// 미설정) -- CONSUMED로 접지 않는다(요구3).
+// ---------------------------------------------------------------------------
+test("HYK-340 2R P1-1 fail-closed: 배달 영수증은 일치하지만 admission 원장 경로가 없으면 -- CONSUMED로 접지 않는다 (1/1)", () => {
+  withTempDir("hyk340-ledger-unreadable-", (dir) => {
+    initPlainGitRepo(dir);
+    const label = "HYK-340-noledger-1";
+    writeTaskFile(dir, { taskId: label, mtimeIso: "2026-08-24T00:00:00Z" });
+    writeResultFileAt(dir, {
+      updatedAtIso: "2026-08-24T00:10:00Z",
+      taskId: label,
+    });
+    writeReceiptAt(dir, { role: "coder", mtimeIso: "2026-08-24T00:15:00Z" });
+    const receiptPath = writeDispatchReceiptsJsonl(dir, [
+      { role: "CODER", harness_task_label: label, dispatchId: "ctx_1" },
+    ]);
+    const now = new Date("2026-08-24T01:00:00Z").getTime();
+    const result = judgeFor(dir, now, {
+      dispatchReceiptPath: receiptPath,
+      // admissionLedgerPath 생략 + env에도 없음(테스트 프로세스 env에
+      // ADMISSION_LEDGER_PATH가 실제로 안 잡혀 있다고 가정할 수 없으므로
+      // 명시적으로 env를 빈 객체로 주입해 결정적으로 재현한다).
+      env: {},
+    });
+    assert.notEqual(result.verdict, UNCONSUMED_VERDICT.CONSUMED);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// (1d) fail-closed: 원장은 있지만 이 라운드 예약이 COMPLETED가 아니다
+// (ACTIVE로 아직 진행 중, 또는 아예 없음) -- CONSUMED로 접지 않는다.
+// ---------------------------------------------------------------------------
+test("HYK-340 2R P1-1 fail-closed: 원장이 이 예약을 ACTIVE로 알면(아직 안 끝남) -- CONSUMED로 접지 않는다 (1/1)", () => {
+  withTempDir("hyk340-ledger-active-", (dir) => {
+    initPlainGitRepo(dir);
+    const label = "HYK-340-active-1";
+    writeTaskFile(dir, { taskId: label, mtimeIso: "2026-08-24T00:00:00Z" });
+    writeResultFileAt(dir, {
+      updatedAtIso: "2026-08-24T00:10:00Z",
+      taskId: label,
+    });
+    writeReceiptAt(dir, { role: "coder", mtimeIso: "2026-08-24T00:15:00Z" });
+    const receiptPath = writeDispatchReceiptsJsonl(dir, [
+      { role: "CODER", harness_task_label: label, dispatchId: "ctx_1" },
+    ]);
+    const ledgerPath = writeAdmissionLedger(dir, {
+      [label]: { status: "ACTIVE" },
+    });
+    const now = new Date("2026-08-24T01:00:00Z").getTime();
+    const result = judgeFor(dir, now, {
+      dispatchReceiptPath: receiptPath,
+      admissionLedgerPath: ledgerPath,
+    });
+    assert.notEqual(result.verdict, UNCONSUMED_VERDICT.CONSUMED);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// (1e) fail-closed: 원장은 COMPLETED로 알지만 배달 영수증이 이 라벨로는
+// 없다(다른 라벨/역할) -- CONSUMED로 접지 않는다(둘 다 필요).
+// ---------------------------------------------------------------------------
+test("HYK-340 2R P1-1 fail-closed: 원장은 COMPLETED지만 배달 영수증에 이 라벨의 기록이 없으면 -- CONSUMED로 접지 않는다 (1/1)", () => {
+  withTempDir("hyk340-no-receipt-match-", (dir) => {
+    initPlainGitRepo(dir);
+    const label = "HYK-340-nomatch-1";
+    writeTaskFile(dir, { taskId: label, mtimeIso: "2026-08-24T00:00:00Z" });
+    writeResultFileAt(dir, {
+      updatedAtIso: "2026-08-24T00:10:00Z",
+      taskId: label,
+    });
+    writeReceiptAt(dir, { role: "coder", mtimeIso: "2026-08-24T00:15:00Z" });
+    const receiptPath = writeDispatchReceiptsJsonl(dir, [
+      {
+        role: "CODER",
+        harness_task_label: "HYK-340-other-round",
+        dispatchId: "ctx_9",
+      },
+    ]);
+    const ledgerPath = writeAdmissionLedger(dir, {
+      [label]: { status: "COMPLETED" },
+    });
+    const now = new Date("2026-08-24T01:00:00Z").getTime();
+    const result = judgeFor(dir, now, {
+      dispatchReceiptPath: receiptPath,
+      admissionLedgerPath: ledgerPath,
+    });
+    assert.notEqual(result.verdict, UNCONSUMED_VERDICT.CONSUMED);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// (1f) fail-closed: 결과 파일이 라운드 라벨을 아예(또는 둘 이상) 에코하지
+// 않으면 대조할 라벨 자체가 없어 CONSUMED로 접지 않는다.
+// ---------------------------------------------------------------------------
+test("HYK-340 2R P1-1 fail-closed: 결과 파일이 task_id를 에코하지 않으면 -- 대조할 라벨이 없어 CONSUMED로 접지 않는다 (1/1)", () => {
+  withTempDir("hyk340-no-echo-", (dir) => {
+    initPlainGitRepo(dir);
+    const label = "HYK-340-noecho-1";
+    writeTaskFile(dir, { taskId: label, mtimeIso: "2026-08-24T00:00:00Z" });
+    // taskId를 안 줘서 결과 파일이 라벨을 에코하지 않는다.
     writeResultFileAt(dir, { updatedAtIso: "2026-08-24T00:10:00Z" });
     writeReceiptAt(dir, { role: "coder", mtimeIso: "2026-08-24T00:15:00Z" });
-    const now = new Date("2026-08-24T01:00:00Z").getTime(); // 임계(900초) 훌쩍 초과
-    const result = judgeFor(dir, now);
-    assert.equal(result.status, UNCONSUMED_WIRE_STATUS.JUDGED);
+    const receiptPath = writeDispatchReceiptsJsonl(dir, [
+      { role: "CODER", harness_task_label: label, dispatchId: "ctx_1" },
+    ]);
+    const ledgerPath = writeAdmissionLedger(dir, {
+      [label]: { status: "COMPLETED" },
+    });
+    const now = new Date("2026-08-24T01:00:00Z").getTime();
+    const result = judgeFor(dir, now, {
+      dispatchReceiptPath: receiptPath,
+      admissionLedgerPath: ledgerPath,
+    });
+    assert.notEqual(result.verdict, UNCONSUMED_VERDICT.CONSUMED);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// (1g) 영속 포인터 경로: 실 운용에서는 env(ADMISSION_LEDGER_PATH)도
+// --admission-ledger-path도 없는 것이 보통이다(admission-completion-
+// adapter.mjs 자신의 헤더: "관제실은 이 env를 설정한 적이 없다") -- 그래도
+// 이 축이 원장을 찾도록, 설치기가 남기는 포인터 파일(mainRepoRoot()/
+// .harness/admission-ledger-path.json)을 그대로 재사용한다. gitCommonDirExecFn
+// 을 주입해 "이 워크트리의 공통 git 디렉터리"를 결정적으로 재현한다.
+// ---------------------------------------------------------------------------
+test("HYK-340 2R P1-1: env/명시 인자 둘 다 없어도 -- 영속 포인터 파일(.harness/admission-ledger-path.json)로 원장을 찾아 CONSUMED가 나온다 (1/1)", () => {
+  withTempDir("hyk340-persistent-pointer-", (dir) => {
+    initPlainGitRepo(dir);
+    const label = "HYK-340-pointer-1";
+    writeTaskFile(dir, { taskId: label, mtimeIso: "2026-08-24T00:00:00Z" });
+    writeResultFileAt(dir, {
+      updatedAtIso: "2026-08-24T00:10:00Z",
+      taskId: label,
+    });
+    writeReceiptAt(dir, { role: "coder", mtimeIso: "2026-08-24T00:15:00Z" });
+    const receiptPath = writeDispatchReceiptsJsonl(dir, [
+      { role: "CODER", harness_task_label: label, dispatchId: "ctx_1" },
+    ]);
+    const ledgerPath = writeAdmissionLedger(dir, {
+      [label]: { status: "COMPLETED" },
+    });
+    mkdirSync(join(dir, ".harness"), { recursive: true });
+    writeFileSync(
+      join(dir, ".harness", "admission-ledger-path.json"),
+      JSON.stringify({ ledgerPath }),
+      "utf8",
+    );
+    const now = new Date("2026-08-24T01:00:00Z").getTime();
+    const result = judgeFor(dir, now, {
+      dispatchReceiptPath: receiptPath,
+      env: {}, // ADMISSION_LEDGER_PATH도 명시 인자도 둘 다 없음.
+      gitCommonDirExecFn: (cwd) =>
+        // mkdtemp 워크트리 자신이 "메인"이므로, 그 자신의 .git 디렉터리를
+        // 공통 디렉터리로 돌려준다(실 링크드 워크트리 대조는 이 시험
+        // 범위 밖 -- resolvePersistentLedgerPathForUnconsumed 자신의
+        // 경로 조립 로직만 결정적으로 재현한다).
+        execFileSync("git", ["rev-parse", "--git-common-dir"], {
+          cwd,
+          encoding: "utf8",
+        }),
+    });
     assert.equal(result.verdict, UNCONSUMED_VERDICT.CONSUMED);
     assert.equal(result.reasonCode, UNCONSUMED_REASON.CONSUMED_VIA_RECEIPT);
   });
@@ -148,7 +398,8 @@ test("HYK-340 회귀: 영수증도 다른 소비 흔적도 전혀 없으면 -- �
 // ---------------------------------------------------------------------------
 // (3) 영수증이 결과 파일보다 "이전"(정상적인 이전 라운드 잔재)이면 신호가
 // 아니다 -- 여전히 SUSPECTED_UNCONSUMED(§2 unconsumed-core.mjs의 기존
-// SIGNAL_BEFORE_RESULT 원칙과 동형).
+// SIGNAL_BEFORE_RESULT 원칙과 동형). 이 경우 후보 자체가 없으므로(mtime
+// 조건에서 이미 걸러짐) 독립 대조는 아예 시도되지 않는다.
 // ---------------------------------------------------------------------------
 test("HYK-340: 영수증이 결과 파일보다 이전(이전 라운드 잔재)이면 신호로 인정되지 않는다 -- SUSPECTED_UNCONSUMED 그대로 (1/1)", () => {
   withTempDir("hyk340-stale-receipt-", (dir) => {
@@ -185,24 +436,35 @@ test("HYK-340: 다른 role의 영수증(review-receipt-r1.json)은 coder 결과�
 });
 
 // ---------------------------------------------------------------------------
-// (5) 대소문자 무관 매칭: consumption-receipt-writer.mjs는 role을 호출자
-// 표기 그대로 파일명에 쓴다(binding.role만 대문자로 정규화, 파일명 자체는
-// 안 바뀐다) -- 실 운용에서 "CODER-receipt-r1.json"(대문자)가 생길 수
-// 있으므로, task 파일 이름 관례의 소문자 role("coder")과도 대소문자
-// 무관으로 매칭돼야 한다(consumption-receipt-writer.mjs의 nextReceiptFileName
-// 과 동일 계약, 그 파일 60-72행 주석 참조).
+// (5) 대소문자 무관 매칭 + 정당한 소비: consumption-receipt-writer.mjs는
+// role을 호출자 표기 그대로 파일명에 쓴다(binding.role만 대문자로 정규화,
+// 파일명 자체는 안 바뀐다) -- 실 운용에서 "CODER-receipt-r1.json"(대문자)
+// 가 생길 수 있으므로, task 파일 이름 관례의 소문자 role("coder")과도
+// 대소문자 무관으로 매칭돼야 한다(consumption-receipt-writer.mjs의
+// nextReceiptFileName과 동일 계약). 2R부터는 이 경로도 독립 대조를
+// 통과해야 CONSUMED가 난다.
 // ---------------------------------------------------------------------------
-test("HYK-340: 대문자 CODER-receipt-r1.json도 role='coder' task 파일의 소비 흔적으로 인정된다(대소문자 무관, Windows 실 운용 관례) (1/1)", () => {
+test("HYK-340 2R: 대문자 CODER-receipt-r1.json + 독립 대조 통과 -- role='coder' task 파일의 소비 흔적으로 인정된다(대소문자 무관) (1/1)", () => {
   withTempDir("hyk340-case-insensitive-", (dir) => {
     initPlainGitRepo(dir);
-    writeTaskFile(dir, {
-      taskId: "HYK-340-t5",
-      mtimeIso: "2026-08-24T00:00:00Z",
+    const label = "HYK-340-t5";
+    writeTaskFile(dir, { taskId: label, mtimeIso: "2026-08-24T00:00:00Z" });
+    writeResultFileAt(dir, {
+      updatedAtIso: "2026-08-24T00:10:00Z",
+      taskId: label,
     });
-    writeResultFileAt(dir, { updatedAtIso: "2026-08-24T00:10:00Z" });
     writeReceiptAt(dir, { role: "CODER", mtimeIso: "2026-08-24T00:15:00Z" });
+    const receiptPath = writeDispatchReceiptsJsonl(dir, [
+      { role: "CODER", harness_task_label: label, dispatchId: "ctx_1" },
+    ]);
+    const ledgerPath = writeAdmissionLedger(dir, {
+      [label]: { status: "COMPLETED" },
+    });
     const now = new Date("2026-08-24T01:00:00Z").getTime();
-    const result = judgeFor(dir, now);
+    const result = judgeFor(dir, now, {
+      dispatchReceiptPath: receiptPath,
+      admissionLedgerPath: ledgerPath,
+    });
     assert.equal(result.verdict, UNCONSUMED_VERDICT.CONSUMED);
     assert.equal(result.reasonCode, UNCONSUMED_REASON.CONSUMED_VIA_RECEIPT);
   });
