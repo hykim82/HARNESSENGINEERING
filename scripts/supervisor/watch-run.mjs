@@ -740,6 +740,22 @@ function runEscalationDedupeStep({
 // - "OK" -- 정상.
 // READ_FAILED/CORRUPTED 둘 다 "못 읽음"(파손 계열)이라 호출자(§4)가
 // 로그·reach 축에 표면화한다 -- MISSING만 조용하다.
+//
+// HYK-341-vanished-unresolved 3R P1-2(검토 2R 반려, 배열 원소 스키마
+// 검증 우회 재현 수리): 2R까지는 `suspectedPaths`가 배열이기만 하면
+// 통과시키고, 그 안의 비문자 원소는 `.filter(...)`로 **조용히** 걸러
+// 냈다 -- 검토자 probe(`{"suspectedPaths":[42]}`)가 재현한 대로, 그러면
+// 파손된 상태가 `CORRUPTED`로 드러나지 않고 진짜 의심 경로만 조용히
+// 사라진다(그 42가 필터링되며 원래 있던 문자열 경로까지 함께 있었어도
+// 배열 자체는 "유효"로 통과해 부분 파손이 은폐된다). 이제 배열의 **원소
+// 전부**가 비어있지 않은 문자열이어야 유효하다 -- 하나라도 아니면
+// 배열째로 CORRUPTED(부분 필터링 금지, 조용히 걸러내지 않는다). 빈
+// 배열은 `.every(...)`가 공허하게 참이라 그대로 OK(§2 "빈 배열은
+// 정상" 요구 그대로 -- 별도 분기 불필요).
+function isValidSuspectedPathsArray(arr) {
+  return arr.every((p) => typeof p === "string" && p.length > 0);
+}
+
 function readUnconsumedVanishState(readFn, statePath) {
   let text;
   try {
@@ -759,10 +775,11 @@ function readUnconsumedVanishState(readFn, statePath) {
   if (!isPlainObject(parsed) || !Array.isArray(parsed.suspectedPaths)) {
     return { suspectedPaths: [], stateKind: "CORRUPTED" };
   }
+  if (!isValidSuspectedPathsArray(parsed.suspectedPaths)) {
+    return { suspectedPaths: [], stateKind: "CORRUPTED" };
+  }
   return {
-    suspectedPaths: parsed.suspectedPaths.filter(
-      (p) => typeof p === "string" && p.length > 0,
-    ),
+    suspectedPaths: parsed.suspectedPaths,
     stateKind: "OK",
   };
 }

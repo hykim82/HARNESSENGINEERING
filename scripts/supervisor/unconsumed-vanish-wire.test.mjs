@@ -401,6 +401,108 @@ test("HYK-341 2R P1-2: 상태 파일 파손이 reach 축(badStatuses)을 통해 
   }
 });
 
+// ---------------------------------------------------------------------------
+// HYK-341 3R P1-2 (검토 원문): suspectedPaths 배열 원소까지 닫힌 스키마로
+// 검증한다 -- 배열 자체는 유효해도 그 안의 비문자 원소는 이제 조용히
+// 필터링되지 않고 배열째로 CORRUPTED다.
+// ---------------------------------------------------------------------------
+
+// (P1-2-f) §0 검토자 2R probe 그대로 재현: `{"suspectedPaths":[42]}`.
+test("HYK-341 3R P1-2: 검토자 probe 재현 -- suspectedPaths=[42](비문자 원소)는 조용히 필터링되지 않고 CORRUPTED로 드러난다 (1/1)", () => {
+  const watchDir = tmpWatchDir();
+  try {
+    fs.mkdirSync(watchDir, { recursive: true });
+    fs.writeFileSync(
+      join(watchDir, "unconsumed-vanish-state.json"),
+      JSON.stringify({ suspectedPaths: [42] }),
+      "utf8",
+    );
+    const line = lastLineAfterRun(watchDir, {
+      repoRoot: ROOT,
+      watchDir,
+      now: NOW_MS,
+      execFn: () => consumedExec(),
+    });
+    assert.match(line, /unconsumed_status=UNCONSUMED_VANISH_STATE_CORRUPTED/);
+  } finally {
+    fs.rmSync(watchDir, { recursive: true, force: true });
+  }
+});
+
+// (P1-2-g) 혼합 배열(문자열 + 비문자)도 부분 필터링 없이 통째로
+// CORRUPTED다 -- "일부는 살리고 일부만 버리는" 조용한 부분 성공이
+// 없어야 한다(검토자 지적 "조용히 필터링" 자체를 없앤다).
+test("HYK-341 3R P1-2: suspectedPaths에 문자열과 비문자가 섞여 있어도(부분 필터링 없이) 배열째로 CORRUPTED다 (1/1)", () => {
+  const watchDir = tmpWatchDir();
+  try {
+    fs.mkdirSync(watchDir, { recursive: true });
+    fs.writeFileSync(
+      join(watchDir, "unconsumed-vanish-state.json"),
+      JSON.stringify({ suspectedPaths: ["a-real-path", 42, null] }),
+      "utf8",
+    );
+    const line = lastLineAfterRun(watchDir, {
+      repoRoot: ROOT,
+      watchDir,
+      now: NOW_MS,
+      execFn: () => consumedExec(),
+    });
+    assert.match(line, /unconsumed_status=UNCONSUMED_VANISH_STATE_CORRUPTED/);
+  } finally {
+    fs.rmSync(watchDir, { recursive: true, force: true });
+  }
+});
+
+// (P1-2-h) 대조군: 빈 배열은 정상이다(§2 "빈 배열은 정상" 요구) --
+// CORRUPTED로 표면화되지 않는다.
+test("HYK-341 3R P1-2 대조군: suspectedPaths=[](빈 배열, 의심 대상이 없던 틱)는 정상이다 -- CORRUPTED로 표면화되지 않는다 (1/1)", () => {
+  const watchDir = tmpWatchDir();
+  try {
+    fs.mkdirSync(watchDir, { recursive: true });
+    fs.writeFileSync(
+      join(watchDir, "unconsumed-vanish-state.json"),
+      JSON.stringify({ suspectedPaths: [] }),
+      "utf8",
+    );
+    const line = lastLineAfterRun(watchDir, {
+      repoRoot: ROOT,
+      watchDir,
+      now: NOW_MS,
+      execFn: () => consumedExec(),
+    });
+    assert.doesNotMatch(line, /UNCONSUMED_VANISH_STATE_CORRUPTED/, line);
+  } finally {
+    fs.rmSync(watchDir, { recursive: true, force: true });
+  }
+});
+
+// (P1-2-i) 정상 배열(전부 유효한 문자열)이 이전 tick에 저장돼 있으면
+// 그대로 vanish 계산에 쓰인다 -- 스키마 강화가 정상 경로를 막지 않는다
+// (오탐0 회귀 확인).
+test("HYK-341 3R P1-2 회귀: 전부 유효한 문자열인 suspectedPaths는 그대로 vanish 판정에 쓰인다(스키마 강화가 정상 경로를 막지 않는다) (1/1)", () => {
+  const watchDir = tmpWatchDir();
+  const fakePath = join(watchDir, "fake-worktree-schema-ok");
+  try {
+    fs.mkdirSync(fakePath, { recursive: true });
+    fs.mkdirSync(watchDir, { recursive: true });
+    fs.writeFileSync(
+      join(watchDir, "unconsumed-vanish-state.json"),
+      JSON.stringify({ suspectedPaths: [fakePath] }),
+      "utf8",
+    );
+    const line = lastLineAfterRun(watchDir, {
+      repoRoot: ROOT,
+      watchDir,
+      now: NOW_MS,
+      execFn: () => consumedExec(),
+      existsFn: makeExistsFn([fakePath]),
+    });
+    assert.match(line, /unconsumed_verdict=VANISHED_UNRESOLVED/, line);
+  } finally {
+    fs.rmSync(watchDir, { recursive: true, force: true });
+  }
+});
+
 function lastLineAfterRun(watchDir, runArgs) {
   runWatchOnce(runArgs);
   return lastLine(watchDir);
