@@ -705,6 +705,163 @@ function runEscalationDedupeStep({
   return { newlyNotified, stateMissing: prior.stateMissing };
 }
 
+// ---- HYK-341-vanished-unresolved (coder-task.md §4) -- 사라진 미소비
+// 의심 대상 추적 ----
+//
+// 왜 필요한가(coder-task.md §0 M2 재현, orch-stall-detect.mjs 헤더
+// 주석과 동일 근거): `judgeUnconsumedAcrossWorktrees`는 매 tick
+// `git worktree list`로 대상을 새로 열거하고 이전 tick의 판정을 전혀
+// 기억하지 않는다 -- 의심(SUSPECTED_UNCONSUMED)이던 워크트리가 다음
+// tick에 목록에서 아예 사라지면(예: `git worktree remove`) 그 판정은
+// 그냥 조용히 없던 일이 된다(worstCount가 줄 뿐, "누가 왜 사라졌는지"는
+// 어디에도 안 남는다). watch-run.mjs는 새 프로세스로 매 tick 다시
+// 뜨므로 메모리로는 "직전 tick에 뭘 의심했는지"를 못 들고 다닌다 --
+// escalation-notify-state.json/reach-notify-state.json과 동일한
+// per-watchDir 상태 파일로 그 기억을 옮긴다(§4 "새 패턴을 발명하지
+// 마라").
+//
+// "사라짐"의 정의: 직전 tick에 unconsumed 축의 worst(=SUSPECTED_UNCONSUMED)
+// 워크트리였던 경로 중, 이번 tick에 그 디렉터리 자체가 더 이상 존재하지
+// 않는 것(existsFn). 340 수리 이후에는 진짜로 소비된 뒤 워크트리를
+// 정리한 경우 애초에 worst 목록에 오르지 않으므로(§5 요구4 오탐0), 그런
+// 정상 정리는 이 집합에 들어오지 않는다 -- verdict만 CONSUMED로 바뀌고
+// 디렉터리는 그대로 있는 정상 사례도 existsFn이 true이므로 걸리지 않는다.
+// HYK-341-vanished-unresolved 2R P1-2 (검토 원문): 1R은 상태 파일 누락·
+// 파손·읽기 실패를 전부 `{suspectedPaths:[], stateMissing:true}`로
+// 뭉뚱그렸다 -- "파일이 아직 없다"(첫 tick, 정상)와 "있는데 못 읽는다"
+// (파손, 표면화 대상)를 구별하지 않으면, 상태가 파손된 tick에 진짜
+// vanish가 있어도 조용히 빈 목록으로 접혀 VANISHED_UNRESOLVED가 영영
+// 안 뜬다(검토자 직접 재현: probe에서 `containsVanish=false` + 상태
+// 파일이 `{"suspectedPaths":[]}`로 덮여씀). `stateKind`로 넷을 구별한다:
+// - "MISSING" -- ENOENT(첫 tick 등, 정상 -- 표면화하지 않는다).
+// - "READ_FAILED" -- ENOENT가 아닌 다른 이유로 못 읽음(권한 등).
+// - "CORRUPTED" -- 읽혔지만 JSON 파싱 실패, 또는 파싱은 됐지만
+//   `suspectedPaths` 필드가 배열이 아닌 형식 위반.
+// - "OK" -- 정상.
+// READ_FAILED/CORRUPTED 둘 다 "못 읽음"(파손 계열)이라 호출자(§4)가
+// 로그·reach 축에 표면화한다 -- MISSING만 조용하다.
+//
+// HYK-341-vanished-unresolved 3R P1-2(검토 2R 반려, 배열 원소 스키마
+// 검증 우회 재현 수리): 2R까지는 `suspectedPaths`가 배열이기만 하면
+// 통과시키고, 그 안의 비문자 원소는 `.filter(...)`로 **조용히** 걸러
+// 냈다 -- 검토자 probe(`{"suspectedPaths":[42]}`)가 재현한 대로, 그러면
+// 파손된 상태가 `CORRUPTED`로 드러나지 않고 진짜 의심 경로만 조용히
+// 사라진다(그 42가 필터링되며 원래 있던 문자열 경로까지 함께 있었어도
+// 배열 자체는 "유효"로 통과해 부분 파손이 은폐된다). 이제 배열의 **원소
+// 전부**가 비어있지 않은 문자열이어야 유효하다 -- 하나라도 아니면
+// 배열째로 CORRUPTED(부분 필터링 금지, 조용히 걸러내지 않는다). 빈
+// 배열은 `.every(...)`가 공허하게 참이라 그대로 OK(§2 "빈 배열은
+// 정상" 요구 그대로 -- 별도 분기 불필요).
+function isValidSuspectedPathsArray(arr) {
+  return arr.every((p) => typeof p === "string" && p.length > 0);
+}
+
+function readUnconsumedVanishState(readFn, statePath) {
+  let text;
+  try {
+    text = readFn(statePath, "utf8");
+  } catch (err) {
+    if (err && err.code === "ENOENT") {
+      return { suspectedPaths: [], stateKind: "MISSING" };
+    }
+    return { suspectedPaths: [], stateKind: "READ_FAILED" };
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return { suspectedPaths: [], stateKind: "CORRUPTED" };
+  }
+  if (!isPlainObject(parsed) || !Array.isArray(parsed.suspectedPaths)) {
+    return { suspectedPaths: [], stateKind: "CORRUPTED" };
+  }
+  if (!isValidSuspectedPathsArray(parsed.suspectedPaths)) {
+    return { suspectedPaths: [], stateKind: "CORRUPTED" };
+  }
+  return {
+    suspectedPaths: parsed.suspectedPaths,
+    stateKind: "OK",
+  };
+}
+
+// stateKind 넷 중 "표면화 대상"(파손 계열)인 둘을 하나의 술어로 묶는다
+// (§4 요구 "부재/파손/읽기 실패가 구분되고 파손은 표면화된다" -- MISSING
+// 은 여기 안 낀다).
+function isVanishStateSurfaceable(stateKind) {
+  return stateKind === "CORRUPTED" || stateKind === "READ_FAILED";
+}
+
+// 순수 함수(시험 용이성, computeEscalationNotifications와 동일 스타일).
+export function computeVanishedUnconsumedPaths({
+  previousSuspectedPaths,
+  existsFn,
+}) {
+  return (
+    Array.isArray(previousSuspectedPaths) ? previousSuspectedPaths : []
+  ).filter(
+    (p) => typeof p === "string" && p.length > 0 && !safeExists(p, existsFn),
+  );
+}
+
+function safeExists(p, existsFn) {
+  try {
+    return existsFn(p);
+  } catch {
+    // 존재 확인 자체가 던지면(권한 등) "사라졌다"로 단정하지 않는다 --
+    // 이 축은 과소통지(놓침)보다 과대통지(오탐)가 더 위험한 쪽으로 이미
+    // 기울어 있으므로("정상 상태에서 계속 울리면 그것 자체가 실패형",
+    // §4 요구4), 확인 불가는 "아직 있다"로 보수적으로 취급한다.
+    return true;
+  }
+}
+
+// watchDir 하나에 저장(reach-notify-state.json과 나란히) -- runWatchOnceCore
+// 안에서 detectorResult 계산 직후(로그 줄 조립 전)에 부른다, runEscalation
+// DedupeStep과 동일한 시점(§4-D 원칙 재사용).
+function runUnconsumedVanishStep({
+  detectorResult,
+  watchDir,
+  readFn,
+  writeFn,
+  existsFn,
+  mkdirFn,
+}) {
+  const statePath = path.join(watchDir, "unconsumed-vanish-state.json");
+  const prior = readUnconsumedVanishState(readFn, statePath);
+  const vanishedPaths = computeVanishedUnconsumedPaths({
+    previousSuspectedPaths: prior.suspectedPaths,
+    existsFn,
+  });
+  const nextSuspectedPaths = Array.isArray(
+    detectorResult.unconsumedWorstWorktrees,
+  )
+    ? detectorResult.unconsumedWorstWorktrees
+    : [];
+  // HYK-341-vanished-unresolved 2R P1-2: 쓰기(mkdir/write) 실패도 더 이상
+  // 조용한 빈 catch가 아니다 -- 이 러너의 계약(로그 한 줄 + 생존 기록)은
+  // 여전히 깨지 않지만(throw하지 않는다, runEscalationDedupeStep과 동일
+  // 원칙), 실패했다는 사실 자체는 `writeFailed`로 호출자에게 돌려줘
+  // 표면화 대상이 된다(다음 tick에 이번 tick의 suspectedPaths가 반영되지
+  // 않았다는 뜻이므로 "쓰기 실패=CORRUPTED과 동급"으로 취급한다).
+  let writeFailed = false;
+  try {
+    if (!existsFn(watchDir)) mkdirFn(watchDir, { recursive: true });
+    writeFn(
+      statePath,
+      JSON.stringify({ suspectedPaths: nextSuspectedPaths }),
+      "utf8",
+    );
+  } catch {
+    writeFailed = true;
+  }
+  return {
+    vanishedPaths,
+    stateKind: prior.stateKind,
+    writeFailed,
+    surfaced: isVanishStateSurfaceable(prior.stateKind) || writeFailed,
+  };
+}
+
 // escalation 축의 사람이 읽는 사유(§4 요건2 "막힌 워커가 있으면 사유가
 // 사람이 읽을 수 있게 실려야 한다", HYK-210 전례와 동일 형식 -- 공백
 // 치환·길이 상한·건수 상한+N_more). wakeHuman 스코프 전부(새 것이든
@@ -930,7 +1087,20 @@ function buildSeatIdleSegments(detectorResult) {
 
 // buildSeatIdleSegments와 대칭(start+unconsumed 두 축, §6 상한 준수를
 // 위해 같은 이유로 분리).
-function buildStartUnconsumedSegments(detectorResult) {
+//
+// HYK-341-vanished-unresolved (coder-task.md §4 요구6 "새 상태가 사람에게
+// 도달하는지 확인하고, 안 가면 그 결선까지 포함"): `unconsumedVanish`가
+// 주어지고(runUnconsumedVanishStep의 결과) vanishedPaths가 있으면, 이번
+// tick의 unconsumed 축 verdict를 그대로 두지 않고 "VANISHED_UNRESOLVED"로
+// 덮어써서 로그에 남긴다 -- ★새 축을 만드는 것이 아니라(reach-report-
+// core.mjs AXES가 unconsumed 하나를 이미 갖고 있고, escalation-axis-
+// wire.test.mjs가 그 배열에 세 번째 항목이 조용히 늘어나지 않음을
+// 고정한다) 그 축의 verdict 필드가 취할 수 있는 값을 하나 늘리는
+// 것뿐이다(reach-report-core.mjs의 unconsumed axis badVerdicts를 그
+// 값까지 포함하도록 확장 -- 같은 파일). unconsumedVanish가 없는(기존)
+// 호출자는 이 분기를 타지 않으므로 unconsumedSegment는 byte-identical
+// (회귀 0).
+function buildStartUnconsumedSegments(detectorResult, unconsumedVanish) {
   const startSegment = axisLogSegment("start", {
     status: detectorResult.startStatus,
     verdict: detectorResult.startVerdict,
@@ -950,9 +1120,25 @@ function buildStartUnconsumedSegments(detectorResult) {
       reason: detectorResult.startReason,
     },
   );
+  const vanishedPaths = unconsumedVanish?.vanishedPaths ?? [];
+  const effectiveUnconsumedVerdict =
+    vanishedPaths.length > 0
+      ? "VANISHED_UNRESOLVED"
+      : detectorResult.unconsumedVerdict;
+  // HYK-341-vanished-unresolved 2R P1-2 (검토 원문 요구2 "그 사실을
+  // 로그·통지 축에 표면화하라"): vanish 상태 파일이 파손됐거나(§4 상단
+  // isVanishStateSurfaceable) 이번 tick의 쓰기 자체가 실패했으면, verdict
+  // 와 같은 자리(기존 "unconsumed" 축의 기존 필드)의 status 값을 덮어써
+  // reach 축(badStatuses)까지 닿게 한다 -- verdict 덮어쓰기와 정확히
+  // 같은 기법(새 필드/새 축이 아니라 기존 필드가 취할 수 있는 값을
+  // 하나 늘린다). unconsumedVanish가 없거나 surfaced가 아니면(기존
+  // 호출자·정상 tick) byte-identical(회귀 0).
+  const effectiveUnconsumedStatus = unconsumedVanish?.surfaced
+    ? "UNCONSUMED_VANISH_STATE_CORRUPTED"
+    : detectorResult.unconsumedStatus;
   const unconsumedSegment = axisLogSegment("unconsumed", {
-    status: detectorResult.unconsumedStatus,
-    verdict: detectorResult.unconsumedVerdict,
+    status: effectiveUnconsumedStatus,
+    verdict: effectiveUnconsumedVerdict,
     worstCount: detectorResult.unconsumedWorstCount,
     totalWorktrees: detectorResult.unconsumedTotalWorktrees,
   });
@@ -968,6 +1154,7 @@ function buildStartUnconsumedSegments(detectorResult) {
   const unconsumedWorstDetail = unconsumedWorstSegment(
     detectorResult.unconsumedWorstWorktrees,
   );
+  const unconsumedVanishedDetail = unconsumedVanishedSegment(vanishedPaths);
   return {
     startSegment,
     startFailureSegment,
@@ -975,7 +1162,24 @@ function buildStartUnconsumedSegments(detectorResult) {
     unconsumedSegment,
     unconsumedReasonDetail,
     unconsumedWorstDetail,
+    unconsumedVanishedDetail,
   };
+}
+
+// unconsumedWorstSegment와 동일한 "상한 + N_more" 관례(§4 요구6, 새 형식
+// 발명 금지). vanishedPaths가 비어 있으면(정상, 대부분의 tick) 세그먼트
+// 자체를 안 붙인다.
+function unconsumedVanishedSegment(vanishedPaths) {
+  if (!Array.isArray(vanishedPaths) || vanishedPaths.length === 0) {
+    return null;
+  }
+  const shown = vanishedPaths
+    .slice(0, MAX_PARTIAL_FAILURE_ITEMS)
+    .map(worktreeShortName);
+  const omitted = vanishedPaths.length - shown.length;
+  const detail =
+    omitted > 0 ? `${shown.join("|")}|+${omitted}_more` : shown.join("|");
+  return `unconsumed_vanished_worktrees=${vanishedPaths.length} unconsumed_vanished_worktree_detail=${detail}`;
 }
 
 // HYK-328-receipt-name-1 (coder-task.md §3 항2) -- failureLogSegment/
@@ -1007,14 +1211,22 @@ function worktreeShortName(rawPath) {
   return parts.length > 0 ? parts[parts.length - 1] : token;
 }
 
-function buildSeatIdleStartUnconsumedSegments(detectorResult) {
+function buildSeatIdleStartUnconsumedSegments(
+  detectorResult,
+  unconsumedVanish,
+) {
   return {
     ...buildSeatIdleSegments(detectorResult),
-    ...buildStartUnconsumedSegments(detectorResult),
+    ...buildStartUnconsumedSegments(detectorResult, unconsumedVanish),
   };
 }
 
-function buildAxisLogSegments(detectorResult, capResult, escalationDedupe) {
+function buildAxisLogSegments(
+  detectorResult,
+  capResult,
+  escalationDedupe,
+  unconsumedVanish,
+) {
   const {
     seatSegment,
     seatFailureSegment,
@@ -1027,7 +1239,8 @@ function buildAxisLogSegments(detectorResult, capResult, escalationDedupe) {
     unconsumedSegment,
     unconsumedReasonDetail,
     unconsumedWorstDetail,
-  } = buildSeatIdleStartUnconsumedSegments(detectorResult);
+    unconsumedVanishedDetail,
+  } = buildSeatIdleStartUnconsumedSegments(detectorResult, unconsumedVanish);
   const capSegment = capLogSegment(capResult ?? {});
   // HYK-173-push-wire (coder-task.md §4 요건2): escalation 축도 기존
   // 4필드 관례 그대로(escalation_status/escalation_verdict/
@@ -1072,6 +1285,7 @@ function buildAxisLogSegments(detectorResult, capResult, escalationDedupe) {
     unconsumedSegment,
     unconsumedReasonDetail,
     unconsumedWorstDetail,
+    unconsumedVanishedDetail,
     capSegment,
     escalationSegment,
     escalationDetail,
@@ -1105,6 +1319,11 @@ export function buildLogLine({
   sweepResult,
   wakeResult,
   blockedTerminationResult,
+  // HYK-341-vanished-unresolved (coder-task.md §4): 기존 호출자 전부는
+  // 이 인자를 안 주므로 undefined -> buildStartUnconsumedSegments의
+  // vanishedPaths는 빈 배열 -> unconsumedSegment/unconsumedVanishedDetail
+  // 둘 다 byte-identical(회귀 0).
+  unconsumedVanish,
 }) {
   if (detectorResult.runnerFailure) {
     return `${nowIso} RUNNER_FAILURE message=${detectorResult.message}`;
@@ -1115,6 +1334,7 @@ export function buildLogLine({
     detectorResult,
     capResult,
     escalationDedupe,
+    unconsumedVanish,
   );
   // HYK-228 (coder-task.md §2 항1): 새 축은 언제나 맨 끝에 붙는다(기존
   // 여섯+postcheck 세그먼트의 필드·순서·값 불변, §7 기존 축 회귀 0) --
@@ -1164,6 +1384,17 @@ export function buildLogLine({
     // blockedTerminationLogSegment가 null을 돌려주므로(filter(Boolean))
     // 로그 줄이 한 글자도 달라지지 않는다(회귀 0).
     blockedTerminationLogSegment(blockedTerminationResult),
+    // HYK-341-vanished-unresolved (coder-task.md §4 설계 제약과 동일
+    // 원칙): 이 축도 지금 이 시점의 맨 끝이다 -- 앞선 모든 세그먼트의
+    // 필드·순서·값은 이 라운드가 손대지 않았다(unconsumedSegment 자신의
+    // verdict 값이 vanish가 있을 때 "VANISHED_UNRESOLVED"로 바뀌는 것은
+    // 예외 -- 새 세그먼트가 아니라 기존 unconsumed 축 verdict 필드가
+    // 취할 수 있는 값이 하나 느는 것뿐이다, buildStartUnconsumedSegments
+    // 주석 참조). unconsumedVanish가 주어지지 않은(opt-in 아님, 다만
+    // 기존 단위 시험 호출자는 안 줄 수 있다) 경우
+    // unconsumedVanishedDetail은 null -> filter(Boolean)로 로그 줄이
+    // 한 글자도 달라지지 않는다.
+    segments.unconsumedVanishedDetail,
   ]
     .filter(Boolean)
     .join(" ");
@@ -1735,6 +1966,7 @@ function finalizeWatchOnceCycle({
   sweepResult,
   wakeResult,
   blockedTerminationResult,
+  unconsumedVanish,
 }) {
   const nowIso = new Date(now).toISOString();
   const logPath = path.join(watchDir, "watch.log");
@@ -1747,6 +1979,7 @@ function finalizeWatchOnceCycle({
     sweepResult,
     wakeResult,
     blockedTerminationResult,
+    unconsumedVanish,
   });
   appendLogWithRotation({
     readFn,
@@ -1763,10 +1996,16 @@ function finalizeWatchOnceCycle({
     // 그 필드와 충돌해도 이긴다. `recordedAtMs`가 여전히 유일한 신선도
     // 판정 입력이라(watch-freshness-core.mjs 계약 불변) 기존 소비자는 이
     // 형제 필드를 무시해도 무회귀다.
+    // HYK-341-vanished-unresolved (coder-task.md §4): `unconsumedVanished
+    // Worktrees`도 unconsumedWorstWorktrees(HYK-328)와 같은 이유로
+    // last-run.json에 기계가 읽는 정본으로 남긴다 -- watch.log의
+    // unconsumedVanishedDetail은 사람이 훑는 요약(상한+N_more)이라
+    // 전체 목록은 여기에만 있다.
     record: {
       recordedAtMs: now,
       ...detectorResult,
       sweep: sweepRecordField(sweepResult),
+      unconsumedVanishedWorktrees: unconsumedVanish?.vanishedPaths ?? [],
     },
   });
   return finalizeWatchOnceTail({
@@ -1847,6 +2086,42 @@ function finalizeWatchOnceTail({
   };
 }
 
+// HYK-341-vanished-unresolved (max-lines-per-function 수리): escalation
+// dedupe와 unconsumed-vanish 추적은 둘 다 "로그 줄을 만들기 *전에*, watchDir
+// 상태 파일 하나를 갱신하는" 같은 모양의 단계라 runWatchOnceCore에서
+// 한 번에 뽑는다(로직·순서·값 원문 그대로 -- 이름과 위치만 옮겼다,
+// HYK-228 4R의 동일 관례 재사용). HYK-341 쪽은 escalationDedupe와 동일
+// 지점(로그 줄 조립 전)에서, watchDir만 있으면 항상 돈다 -- notifyDir/wake
+// 처럼 별도 opt-in 인자를 요구하지 않는다(watchDir는 이 함수의 필수
+// 인자라 모든 실 운용 호출에서 항상 있다, coder-task.md §5 요구6 "opt-in
+// 으로 만들지 마라").
+function computePreLogDedupeSteps({
+  detectorResult,
+  watchDir,
+  readFn,
+  writeFn,
+  existsFn,
+  mkdirFn,
+}) {
+  const escalationDedupe = runEscalationDedupeStep({
+    scopes: detectorResult.escalationScopes,
+    watchDir,
+    readFn,
+    writeFn,
+    existsFn,
+    mkdirFn,
+  });
+  const unconsumedVanish = runUnconsumedVanishStep({
+    detectorResult,
+    watchDir,
+    readFn,
+    writeFn,
+    existsFn,
+    mkdirFn,
+  });
+  return { escalationDedupe, unconsumedVanish };
+}
+
 function runWatchOnceCore({
   repoRoot,
   watchDir,
@@ -1884,12 +2159,8 @@ function runWatchOnceCore({
     repoRoot,
   });
   const capResult = computeCapResult({ repoRoot, capPath, capReadFn });
-  // HYK-173-push-wire (coder-task.md §5-D): dedupe는 로그 줄을 만들기
-  // *전에* 계산한다 -- escalation_detail의 NEW: 표시가 이번 회차 통지
-  // 결과를 반영해야 한다(runReachStep과 달리, dedupe는 로그 줄 자체의
-  // 내용에 영향을 준다).
-  const escalationDedupe = runEscalationDedupeStep({
-    scopes: detectorResult.escalationScopes,
+  const { escalationDedupe, unconsumedVanish } = computePreLogDedupeSteps({
+    detectorResult,
     watchDir,
     readFn,
     writeFn,
@@ -1934,6 +2205,7 @@ function runWatchOnceCore({
     sweepResult,
     wakeResult,
     blockedTerminationResult,
+    unconsumedVanish,
   });
 }
 

@@ -1191,12 +1191,19 @@ test("NC mutation/unconsumed-wire #1 (필수): 결선 제거(코어를 부르지
 });
 
 test("NC mutation/unconsumed-wire #2 (필수): 커밋 신호 생성 제거 -> RED (실제로 소비된 커밋 구간이 여전히 SUSPECTED_UNCONSUMED로 남는다)", async () => {
+  // HYK-340-vanished-unresolved (coder-task.md §6 "숫자를 적어라" 대상 재정렬):
+  // buildUnconsumedSignals의 커밋-신호 조립이 commitAfterSignal(orch-stall-
+  // detect.mjs)로 분리되면서(eslint complexity 상한 준수) 이 mutation의
+  // 타깃 문자열도 그 함수 몸통으로 옮겨 적는다 -- 지우는 대상은 원문과
+  // 동일하게 "커밋이 결과 파일보다 나중이면 NEW_COMMIT_AFTER 신호를
+  // 만드는" 그 판단 자체이고(조건에 `&& false`를 얹어 항상 거짓으로
+  // 만든다), 검증하는 성질(무회귀·RED 신호)도 원문과 동일하다.
   const mutant = await importMutatedSibling(
     (src) =>
       applyMutation(
         src,
-        '  if (\n    commitInfo.ok &&\n    typeof commitInfo.commitTimeMs === "number" &&\n    commitInfo.commitTimeMs > targetMtimeMs\n  ) {\n    signals.push({\n      kind: UNCONSUMED_SIGNAL_KIND.NEW_COMMIT_AFTER,\n      atMs: commitInfo.commitTimeMs,\n    });\n  }\n',
-        "",
+        "    commitInfo.commitTimeMs > targetMtimeMs\n  ) {\n    return [\n      {\n        kind: UNCONSUMED_SIGNAL_KIND.NEW_COMMIT_AFTER,\n        atMs: commitInfo.commitTimeMs,\n      },\n    ];\n  }\n",
+        "    commitInfo.commitTimeMs > targetMtimeMs &&\n    false\n  ) {\n    return [\n      {\n        kind: UNCONSUMED_SIGNAL_KIND.NEW_COMMIT_AFTER,\n        atMs: commitInfo.commitTimeMs,\n      },\n    ];\n  }\n",
       ),
     "2",
   );

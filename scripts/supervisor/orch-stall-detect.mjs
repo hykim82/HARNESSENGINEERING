@@ -1734,7 +1734,345 @@ export function collectUnconsumedCandidates(repoRoot, opts = {}) {
   return { items, failed: false };
 }
 
-// unconsumed-core.mjs가 인정하는 두 신호를 저장소 흔적에서 만든다(코어
+// HYK-340-vanished-unresolved (coder-task.md §3) -- 세 번째 소비 흔적의
+// 수집부(호출자, 코어는 kind만 안다).
+//
+// ⛔★HYK-340 2R P1-1(검토 1R 반려, 신뢰 경계 교정) -- 1R은 ⓐ(워크트리 안의
+// 소비 영수증 mtime)만으로 신호를 만들었다. 근거는 "이 축은 게이트가
+// 아니라 감시기라 위조의 대가는 사람이 한 번 더 확인하는 것"이었다.
+// **검토자가 그 전제를 반박했고, 그 반박이 옳다**: 위조는 오탐(false
+// positive)이 아니라 경보 억제(false negative)를 만든다 -- 워커가 워크트리
+// 안에 같은 이름의 새 파일을 만들면 진짜 미소비 결과가 CONSUMED가 되어
+// SUSPECTED_UNCONSUMED에 영영 오르지 않는다(재현됨, `unconsumed-receipt-
+// signal-forgery.test.mjs` 참조).
+// ★1R의 사실 오류(ORCH 확인, coder-task.md §1): 1R은 ⓑ(admission 원장
+// 대조)가 "예약이 어느 결과 파일에 대응하는가"라는 새 결속을 발명해야
+// 한다고 적었다 -- **틀렸다.** 그 결속은 이미 있다: **원장의 예약 id는
+// 라운드 라벨(=결과 파일이 `task_id:`로 에코하는 바로 그 문자열)과 같은
+// 문자열**이다(dispatch-gate-decision.mjs의 verifyAbortRecordRecoveryMarker/
+// isReservationActiveForRound가 이미 이 관례로 원장을 조회한다).
+// 그래서 이제 워크트리 안 영수증(ⓐ)은 "후보"일 뿐이고, 워커가 못 쓰는
+// 두 자리로 **독립 대조**해야만 실제 신호가 된다(verifyReceiptConsumption
+// Evidence, 아래):
+//   (a) 배달 영수증(dispatch-receipts.jsonl, 관제실 소유) -- 이 role+
+//       라운드 라벨로 실제 배달된 적이 있는가. admission-completion-
+//       adapter.mjs의 (export 안 된) `hasDispatchReceiptForRound`와 동일
+//       계약을 최소 재현한다(⛔새 조회 로직 발명 금지 -- 그 파일 자신의
+//       헤더가 이미 "무겁게 참조되는 모듈을 끌어들이지 않기 위해 작은
+//       것들은 복제한다"고 밝힌 것과 동일 이유로 이 파일도 복제한다).
+//   (b) admission 원장(관제실 소유, `admission-ledger.json`) -- 그 예약이
+//       `COMPLETED`인가. dispatch-gate-decision.mjs의 (export 안 된)
+//       `verifyAbortRecordRecoveryMarker`/`isReservationActiveForRound`와
+//       동일한 "원장을 읽기만 한다" 계약을 최소 재현한다.
+// 둘 중 하나라도 확인 못 하면(경로 미설정·파일 없음·JSON 파싱 실패·
+// role/라벨 불일치·예약이 COMPLETED가 아님) **신호를 만들지 않는다**
+// (fail-closed, §3 요구3 "못 읽으면 CONSUMED로 접지 마라") -- 별도
+// UNDECIDABLE 상태로 승격하지 않고 "이 신호가 그냥 없다"로 접는다: 이
+// 축은 이미 신호 0건일 때 임계 전엔 UNDECIDABLE, 임계를 넘으면
+// SUSPECTED_UNCONSUMED로 떨어지는 unconsumed-core.mjs의 기존 3상태를
+// 그대로 쓰므로, 새 상태를 만들지 않고도 그 요구를 만족한다.
+//
+// eslint complexity 상한(12) 준수를 위해 collectReceiptEvidenceForRole의
+// 몸통을 세 조각으로 쪼갠다(consumption-receipt-core.mjs가 이미 쓴 선례
+// 그대로 -- "판정을 합치거나 줄여서"가 아니라 "각 단계를 작은 순수/단일
+// 책임 함수로 분리해서" 낮춘다, 그 파일 275-283행 주석 참조). 로직·값은
+// 원문과 동일하다.
+function resolveReceiptScanFns(opts) {
+  return {
+    readdirFn:
+      typeof opts.receiptsReaddirFn === "function"
+        ? opts.receiptsReaddirFn
+        : readdirSync,
+    statFn: typeof opts.statFn === "function" ? opts.statFn : statSync,
+    existsFn: typeof opts.existsFn === "function" ? opts.existsFn : existsSync,
+  };
+}
+
+// consumption-receipt-writer.mjs의 nextReceiptFileName과 동일한 대소문자
+// 무관 패턴("i" 플래그, 그 파일 60-72행 주석과 동일 근거 -- Windows가
+// 대소문자를 구별하지 않아 role 표기가 갈리면 실제로 같은 파일을 가리킬
+// 수 있다). role 자체를 정규식 특수문자로부터 이스케이프한다(그 파일의
+// escapeForRegex와 동일한 최소 재현 -- export 안 된 모듈-지역 함수라
+// import할 수 없다).
+function receiptFileNamePattern(role) {
+  const escapedRole = String(role).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`^${escapedRole}-receipt-r\\d+\\.json$`, "i");
+}
+
+// names(이미 readdir된 목록) 중 role 패턴에 맞는 파일들만 stat해 가장
+// 최신 mtime을 고른다. stat 실패는 {ok:false}로 전체를 닫는다(§4-2와
+// 동일 원칙 -- "영수증 없음"으로 뭉개지 않는다).
+function latestReceiptMtimeMs(
+  names,
+  { receiptsDir, pattern, statFn, existsFn },
+) {
+  let latestMtimeMs = null;
+  for (const name of names) {
+    if (!pattern.test(name)) continue;
+    const full = path.join(receiptsDir, name);
+    if (!existsFn(full)) continue; // readdir엔 있었는데 방금 사라짐(레이스).
+    let st;
+    try {
+      st = statFn(full);
+    } catch {
+      return { ok: false }; // stat 실패를 "영수증 없음"으로 뭉개지 않는다.
+    }
+    if (st.isDirectory()) continue; // 위장 방어(defensive, 실제로는 안 생김).
+    if (typeof st.mtimeMs === "number" && Number.isFinite(st.mtimeMs)) {
+      if (latestMtimeMs === null || st.mtimeMs > latestMtimeMs) {
+        latestMtimeMs = st.mtimeMs;
+      }
+    }
+  }
+  return { ok: true, latestMtimeMs };
+}
+
+function collectReceiptEvidenceForRole(repoRoot, role, opts = {}) {
+  const { readdirFn, statFn, existsFn } = resolveReceiptScanFns(opts);
+  const receiptsDir = path.join(repoRoot, ".harness", "receipts");
+  let names;
+  try {
+    names = readdirFn(receiptsDir);
+  } catch (err) {
+    if (err && err.code === "ENOENT") return { ok: true, latestMtimeMs: null };
+    return { ok: false };
+  }
+  return latestReceiptMtimeMs(names, {
+    receiptsDir,
+    pattern: receiptFileNamePattern(role),
+    statFn,
+    existsFn,
+  });
+}
+
+// ---- HYK-340-vanished-unresolved 2R P1-1 -- 워크트리 밖 독립 대조 ----
+
+function isNonEmptyReceiptString(v) {
+  return typeof v === "string" && v.length > 0;
+}
+
+const TASK_ID_ECHO_RE_G = /^task_id:\s*(\S+)/gim;
+
+// relay-handshake.mjs의 resolveResultTaskId/admission-completion-
+// adapter.mjs의 resolveEchoedTaskId와 동일한 "정확히 하나의 줄머리
+// task_id: 값만 인정" 계약(HYK-183 anti-forgery)의 최소 재현 -- export
+// 안 된 모듈-지역 함수라 import할 수 없다. 결과 파일이 스스로 주장하는
+// 라운드 라벨을 이 함수 하나로 뽑는다 -- 워커가 이 값 자체를 지어낼 수
+// 있다는 것은 남지만(§0 신뢰 경계), 그 값으로 실제 배달·원장을 대조하는
+// 아래 두 함수가 위조를 막는다(지어낸 라벨은 실재 기록과 안 맞는다).
+function resolveEchoedRoundLabel(resultAbsolutePath, opts) {
+  const readFileFn =
+    typeof opts.resultContentReadFn === "function"
+      ? opts.resultContentReadFn
+      : readFileSync;
+  let content;
+  try {
+    content = readFileFn(resultAbsolutePath, "utf8");
+  } catch {
+    return null;
+  }
+  const matches = [...content.matchAll(TASK_ID_ECHO_RE_G)];
+  if (matches.length !== 1) return null;
+  return matches[0][1];
+}
+
+// HYK-340-vanished-unresolved 3R P1-1 (검토 2R 반려, 라벨 결속 우회 재현
+// 수리): resolveEchoedRoundLabel(위)은 «결과 파일이 스스로 주장하는»
+// 라벨만 뽑는다 -- 워커가 관제실의 «과거에 실제로 COMPLETED였던» 라벨을
+// 그대로 결과 파일에 복사해 넣으면, 그 라벨로는 dispatch 영수증도
+// 원장도 전부 진짜로 일치해 검증을 통과했다(검토자 probe: taskLabel=
+// HYK-341-current-round인데 echoedResultLabel=HYK-341-previous-completed
+// 로 CONSUMED). 이 함수는 «지금 이 라운드가 실제로 요구하는» 라벨을
+// 독립적으로 뽑는다 -- 결과 파일이 아니라 **그 워크트리의 현재
+// `.harness/<role>-task.md`**(buildUnconsumedCandidateItem과 동일 relPath
+// 관례)에서, resolveEchoedRoundLabel과 동일한 "정확히 하나" 계약으로.
+// verifyReceiptConsumptionEvidence가 이 값과 echo 값이 같은지 대조한다
+// (§1 요구, fail-closed -- 둘 중 하나라도 못 뽑으면 애초에 대조가 안
+// 되므로 신호를 만들지 않는다).
+function resolveRequiredRoundLabel(repoRoot, role, opts) {
+  const taskFilePath = path.join(repoRoot, ".harness", `${role}-task.md`);
+  const readFileFn =
+    typeof opts.taskFileContentReadFn === "function"
+      ? opts.taskFileContentReadFn
+      : readFileSync;
+  let content;
+  try {
+    content = readFileFn(taskFilePath, "utf8");
+  } catch {
+    return null;
+  }
+  const matches = [...content.matchAll(TASK_ID_ECHO_RE_G)];
+  if (matches.length !== 1) return null;
+  return matches[0][1];
+}
+
+// admission-completion-adapter.mjs의 (export 안 된) hasDispatchReceiptForRound
+// 와 동일 계약의 최소 재현: role 대소문자 무관, harness_task_label 정확히
+// 일치, 손상된 줄은 건너뜀, append-only 로그에서 하나라도 일치하면 true.
+function hasDispatchReceiptForRound(role, roundLabel, receiptPath, opts) {
+  if (
+    !isNonEmptyReceiptString(receiptPath) ||
+    !isNonEmptyReceiptString(roundLabel)
+  ) {
+    return false;
+  }
+  const readFileFn =
+    typeof opts.dispatchReceiptReadFn === "function"
+      ? opts.dispatchReceiptReadFn
+      : readFileSync;
+  let raw;
+  try {
+    raw = readFileFn(receiptPath, "utf8");
+  } catch {
+    return false;
+  }
+  let found = false;
+  for (const line of raw.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    let rec;
+    try {
+      rec = JSON.parse(trimmed);
+    } catch {
+      continue;
+    }
+    if (
+      typeof rec.role === "string" &&
+      rec.role.toUpperCase() === String(role).toUpperCase() &&
+      rec.harness_task_label === roundLabel
+    ) {
+      found = true;
+    }
+  }
+  return found;
+}
+
+// dispatch-gate-decision.mjs의 (export 안 된) verifyAbortRecordRecoveryMarker/
+// isReservationActiveForRound와 동일한 "원장을 읽기만 한다" 계약의 최소
+// 재현 -- 예약 id = 라운드 라벨 그대로(1R의 사실 오류 정정, 위 헤더
+// 참조). 원장을 못 읽거나 그 예약이 없거나 상태가 정확히 COMPLETED가
+// 아니면 false(안전측 기본값).
+function isReservationCompletedForRound(ledgerPath, roundLabel, opts) {
+  if (
+    !isNonEmptyReceiptString(ledgerPath) ||
+    !isNonEmptyReceiptString(roundLabel)
+  ) {
+    return false;
+  }
+  const readFileFn =
+    typeof opts.ledgerReadFn === "function" ? opts.ledgerReadFn : readFileSync;
+  let ledger;
+  try {
+    ledger = JSON.parse(readFileFn(ledgerPath, "utf8"));
+  } catch {
+    return false;
+  }
+  return ledger?.reservations?.[roundLabel]?.status === "COMPLETED";
+}
+
+function resolveDispatchReceiptPathForUnconsumed(opts) {
+  if (isNonEmptyReceiptString(opts.dispatchReceiptPath)) {
+    return opts.dispatchReceiptPath;
+  }
+  const env = opts.env ?? process.env;
+  if (isNonEmptyReceiptString(env.DISPATCH_RECEIPT_PATH)) {
+    return env.DISPATCH_RECEIPT_PATH;
+  }
+  return null;
+}
+
+const PERSISTENT_LEDGER_POINTER_FILENAME = "admission-ledger-path.json";
+
+// admission-completion-adapter.mjs의 (export 안 된) resolvePersistentLedger
+// Paths와 동일 계약의 최소 재현 -- 그 함수는 mainRepoRoot()를
+// process.cwd()에서 유도하지만(그 파일 자신은 호출자가 어느 워크트리인지
+// 모른다), 이 축은 repoRoot를 이미 인자로 받으므로 그 경로를 기준으로
+// 직접 공통 git 디렉터리를 구한다(process.cwd()가 이 워크트리와 다를 수
+// 있는 상황을 원천적으로 피한다 -- 더 정확하다, 새 로직 발명이 아니라
+// 같은 계약을 더 정확한 입력으로 재현한 것).
+function resolvePersistentLedgerPathForUnconsumed(repoRoot, opts) {
+  const gitCommonDirExecFn =
+    typeof opts.gitCommonDirExecFn === "function"
+      ? opts.gitCommonDirExecFn
+      : (cwd) =>
+          execFileSync("git", ["rev-parse", "--git-common-dir"], {
+            cwd,
+            encoding: "utf8",
+            stdio: ["ignore", "pipe", "ignore"],
+          });
+  let commonDir;
+  try {
+    commonDir = gitCommonDirExecFn(repoRoot).trim();
+  } catch {
+    return null;
+  }
+  const absCommonDir = /^([A-Za-z]:[\\/]|\/)/.test(commonDir)
+    ? commonDir
+    : path.join(repoRoot, commonDir);
+  const mainRoot = absCommonDir.replace(/[\\/]\.git$/, "");
+  const pointerPath = path.join(
+    mainRoot,
+    ".harness",
+    PERSISTENT_LEDGER_POINTER_FILENAME,
+  );
+  const existsFn =
+    typeof opts.ledgerPointerExistsFn === "function"
+      ? opts.ledgerPointerExistsFn
+      : existsSync;
+  if (!existsFn(pointerPath)) return null;
+  const readFileFn =
+    typeof opts.ledgerPointerReadFn === "function"
+      ? opts.ledgerPointerReadFn
+      : readFileSync;
+  try {
+    const parsed = JSON.parse(readFileFn(pointerPath, "utf8"));
+    return typeof parsed.ledgerPath === "string" && parsed.ledgerPath
+      ? parsed.ledgerPath
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function resolveAdmissionLedgerPathForUnconsumed(repoRoot, opts) {
+  if (isNonEmptyReceiptString(opts.admissionLedgerPath)) {
+    return opts.admissionLedgerPath;
+  }
+  const env = opts.env ?? process.env;
+  if (isNonEmptyReceiptString(env.ADMISSION_LEDGER_PATH)) {
+    return env.ADMISSION_LEDGER_PATH;
+  }
+  return resolvePersistentLedgerPathForUnconsumed(repoRoot, opts);
+}
+
+// 이 축이 실제로 CONSUMPTION_RECEIPT_AFTER 신호를 만들어도 되는지 결정하는
+// 단 하나의 함수 -- 워크트리 안 영수증(후보)이 있을 때만 호출된다
+// (judgeUnconsumedForRepo 참조). 넷 다 확인돼야 true: ⑴ 결과 파일이
+// 정확히 하나의 라운드 라벨을 에코 ⑵(3R P1-1 신설) 그 라벨이 «지금 이
+// 라운드가 실제로 요구하는» 라벨(현재 task 파일 에코)과 정확히 같음 --
+// 과거에 실제로 COMPLETED였던 다른 라벨을 그대로 복사해 넣는 우회를
+// 막는다(§0 검토자 probe) ⑶ 그 role+라벨로 실제 배달된 기록이 dispatch-
+// receipts.jsonl에 있음 ⑷ admission 원장이 그 예약을 COMPLETED로 앎.
+// 하나라도 아니면 false(fail-closed).
+function verifyReceiptConsumptionEvidence({
+  repoRoot,
+  role,
+  resultAbsolutePath,
+  opts,
+}) {
+  const roundLabel = resolveEchoedRoundLabel(resultAbsolutePath, opts);
+  if (!roundLabel) return false;
+  const requiredLabel = resolveRequiredRoundLabel(repoRoot, role, opts);
+  if (!requiredLabel || requiredLabel !== roundLabel) return false;
+  const receiptPath = resolveDispatchReceiptPathForUnconsumed(opts);
+  if (!hasDispatchReceiptForRound(role, roundLabel, receiptPath, opts)) {
+    return false;
+  }
+  const ledgerPath = resolveAdmissionLedgerPathForUnconsumed(repoRoot, opts);
+  return isReservationCompletedForRound(ledgerPath, roundLabel, opts);
+}
+
+// unconsumed-core.mjs가 인정하는 세 신호를 저장소 흔적에서 만든다(코어
 // 헤더 주석 "«소비 흔적»의 정의" 참조). ★대상 자신의 task 파일뿐 아니라
 // 이 워크트리의 taskFileCandidates 전부를 본다 -- 오늘 실측 13:44 계열
 // 표본은 coder.md(대상)가 아니라 review-task.md(다음 role)가 다음 라운드를
@@ -1747,7 +2085,17 @@ export function collectUnconsumedCandidates(repoRoot, opts = {}) {
 // `taskFileMtimeMs`를 못 구한 항목(수집 단계에서 이미 실패로 닫혔어야
 // 하지만, 방어적으로 이 함수도 형식을 재확인한다)은 조용히 건너뛰지
 // 않고 `{ok:false}`로 함수 전체를 닫는다.
-function buildUnconsumedSignals(taskFileCandidates, targetMtimeMs, commitInfo) {
+//
+// HYK-340-vanished-unresolved (coder-task.md §3): `receiptInfo`가 셋째
+// 인자로 온다 -- `collectReceiptEvidenceForRole`의 결과, 대상(target)
+// 역할의 영수증 중 가장 최신 mtime. `null`이면(영수증 없음) 신호를 만들지
+// 않는다(§5 요구2 "증거가 없는 진짜 미소비는 여전히 SUSPECTED_UNCONSUMED"
+// -- 회귀 0).
+// eslint complexity 상한(12) 준수를 위해 taskFileCandidates 루프를 뽑는다
+// (HYK-340-vanished-unresolved, resolveReceiptScanFns와 동일 사유). 반환:
+// 성공 시 {ok:true, signals}, 실패(mtime 형식 위반) 시
+// {ok:false, unavailablePath}(원문과 동일).
+function taskFileDroppedSignals(taskFileCandidates, targetMtimeMs) {
   const signals = [];
   for (const item of Array.isArray(taskFileCandidates)
     ? taskFileCandidates
@@ -1766,23 +2114,92 @@ function buildUnconsumedSignals(taskFileCandidates, targetMtimeMs, commitInfo) {
       });
     }
   }
+  return { ok: true, signals };
+}
+
+// commitInfo/receiptInfo는 모양이 같다({ok, <필드> > targetMtimeMs면
+// 신호}) -- 두 신호 각각을 단일 항목 배열(또는 빈 배열)로 통일해 만들면
+// buildUnconsumedSignals 몸통이 분기 없이 이어붙이기만 하면 된다.
+function commitAfterSignal(commitInfo, targetMtimeMs) {
   if (
     commitInfo.ok &&
     typeof commitInfo.commitTimeMs === "number" &&
     commitInfo.commitTimeMs > targetMtimeMs
   ) {
-    signals.push({
-      kind: UNCONSUMED_SIGNAL_KIND.NEW_COMMIT_AFTER,
-      atMs: commitInfo.commitTimeMs,
-    });
+    return [
+      {
+        kind: UNCONSUMED_SIGNAL_KIND.NEW_COMMIT_AFTER,
+        atMs: commitInfo.commitTimeMs,
+      },
+    ];
   }
-  return { ok: true, signals };
+  return [];
+}
+
+function receiptAfterSignal(receiptInfo, targetMtimeMs) {
+  if (
+    receiptInfo &&
+    receiptInfo.ok &&
+    typeof receiptInfo.latestMtimeMs === "number" &&
+    receiptInfo.latestMtimeMs > targetMtimeMs
+  ) {
+    return [
+      {
+        kind: UNCONSUMED_SIGNAL_KIND.CONSUMPTION_RECEIPT_AFTER,
+        atMs: receiptInfo.latestMtimeMs,
+      },
+    ];
+  }
+  return [];
+}
+
+function buildUnconsumedSignals(
+  taskFileCandidates,
+  targetMtimeMs,
+  commitInfo,
+  receiptInfo,
+) {
+  const taskSignals = taskFileDroppedSignals(taskFileCandidates, targetMtimeMs);
+  if (!taskSignals.ok) return taskSignals;
+  return {
+    ok: true,
+    signals: [
+      ...taskSignals.signals,
+      ...commitAfterSignal(commitInfo, targetMtimeMs),
+      ...receiptAfterSignal(receiptInfo, targetMtimeMs),
+    ],
+  };
 }
 
 // judgeUnconsumedForRepo({repoRoot, taskFileCandidates, now}, opts) -- 단일
 // 저장소(워크트리) 하나에 대해 이 축을 판정한다(다른 세 축의
 // judge*ForRepo와 대칭 구조 -- 이미 수집된 taskFileCandidates를 받고, 이
 // 함수 자신은 .harness를 읽지 않는다).
+// HYK-340-vanished-unresolved 2R P1-1: collectReceiptEvidenceForRole은
+// 여전히 "워크트리 안 후보"만 낸다(mtime 스캔, 위조 가능) -- 그 후보가
+// 있을 때만(latestMtimeMs !== null) verifyReceiptConsumptionEvidence로
+// 독립 대조하고, 대조를 통과하지 못하면 신호를 만들지 않는다(빈 후보로
+// 되접는다, fail-closed). 후보 자체가 없으면(latestMtimeMs === null,
+// 흔한 경우) 대조 자체를 생략한다 -- 없는 것을 있다고 검증하지 않는다.
+function resolveVerifiedReceiptInfo({
+  repoRoot,
+  targetRole,
+  resultFileInfo,
+  receiptInfo,
+  opts,
+}) {
+  const noSignal = { ok: true, latestMtimeMs: null };
+  if (!targetRole || receiptInfo.latestMtimeMs === null) return noSignal;
+  const resultAbsolutePath = path.join(repoRoot, resultFileInfo.path);
+  const verified = verifyReceiptConsumptionEvidence({
+    repoRoot,
+    role: targetRole,
+    resultAbsolutePath,
+    opts,
+  });
+  return verified ? receiptInfo : noSignal;
+}
+
 export function judgeUnconsumedForRepo(
   { repoRoot, taskFileCandidates, now },
   opts = {},
@@ -1803,10 +2220,35 @@ export function judgeUnconsumedForRepo(
       resultFile: resultFileInfo,
     };
   }
+  // HYK-340-vanished-unresolved (coder-task.md §3): target 자신의 role을
+  // (`.harness/<role>-task.md` 관례, buildUnconsumedCandidateItem이 이미
+  // 이 관례로 relPath를 만든다) 대상 경로에서 역산해 그 역할의 영수증만
+  // 본다 -- 다른 역할의 영수증이 우연히 새것이라고 이 역할의 소비 흔적으로
+  // 오인하지 않는다.
+  const targetRoleMatch = /^\.harness\/(.+)-task\.md$/.exec(target.path);
+  const targetRole = targetRoleMatch ? targetRoleMatch[1] : null;
+  const receiptInfo = targetRole
+    ? collectReceiptEvidenceForRole(repoRoot, targetRole, opts)
+    : { ok: true, latestMtimeMs: null };
+  if (!receiptInfo.ok) {
+    return {
+      status: UNCONSUMED_WIRE_STATUS.COLLECTION_FAILED,
+      reason: "unconsumed: receipts read failed",
+      resultFile: resultFileInfo,
+    };
+  }
+  const verifiedReceiptInfo = resolveVerifiedReceiptInfo({
+    repoRoot,
+    targetRole,
+    resultFileInfo,
+    receiptInfo,
+    opts,
+  });
   const signalsResult = buildUnconsumedSignals(
     taskFileCandidates,
     resultFileInfo.mtimeMs,
     commitInfo,
+    verifiedReceiptInfo,
   );
   if (!signalsResult.ok) {
     return {
