@@ -388,6 +388,50 @@ test("all 8 badVerdict axes are independently tracked in computeOpenAnomalies (o
   assert.deepEqual(mfKeys, ["cap"]);
 });
 
+// HYK-321(A) (coder-task.md §1 갈래2): 「MAIN_REPO_PATH에 없어졌어야 할
+// 좌석이 남았다」는 orch-stall-detect.mjs judgeEscalationForRepo가 이미
+// escalation_status=ESCALATION_COLLECTION_FAILED로 fail-loud 표면화한다
+// (orch-stall-detect.mjs resolveCoordinatorHandle, "expected exactly 1
+// seat at MAIN_REPO_PATH, found 2" -- escalation-axis-wire.test.mjs가
+// 그 수집층을 시험한다). 이 시험은 그 신호가 실제로 사람에게 "도달"하는
+// 다음 단(reach-report-core.mjs의 AXES escalation 항목,
+// badStatuses:["ESCALATION_COLLECTION_FAILED"])까지 이어짐을 직접
+// 증명한다 -- watch.log의 escalation_status 필드 하나만 COLLECTION_FAILED
+// 이고 그 외 7축은 전부 정상인 샘플에서 computeOpenMeasurementFailures가
+// 그 한 줄을 집어내는가(reach path 확인, §2 완료조건3).
+test("HYK-321(A): escalation_status=ESCALATION_COLLECTION_FAILED (revived MAIN_REPO_PATH seat) surfaces via computeOpenMeasurementFailures -- the reach-notify path a human sees (2/2)", () => {
+  const t0 = Date.parse("2026-08-24T00:00:00.000Z");
+  const entries = parseWatchLog(
+    line({
+      ts: new Date(t0).toISOString(),
+      escalationStatus: "ESCALATION_COLLECTION_FAILED",
+      escalationVerdict: "SUPERVISOR_FAULT",
+    }),
+  ).entries;
+  const measurementFailures = computeOpenMeasurementFailures(entries, t0);
+  const mfKeys = measurementFailures.map((a) => a.axisKey);
+  assert.deepEqual(mfKeys, ["escalation"]);
+
+  // 오탐 0 (§2 완료조건4): 정상(ESCALATION_OK, 아직 wake 없음) 샘플은
+  // measurement-failure로도 anomaly로도 뜨지 않는다 -- 정상 정리/정상
+  // 가동 중인 좌석(=이 축이 조용한) 상태를 발화시키지 않는다.
+  const okEntries = parseWatchLog(
+    line({
+      ts: new Date(t0).toISOString(),
+      escalationStatus: "ESCALATION_OK",
+      escalationVerdict: "NONE",
+    }),
+  ).entries;
+  assert.deepEqual(
+    computeOpenMeasurementFailures(okEntries, t0).map((a) => a.axisKey),
+    [],
+  );
+  assert.deepEqual(
+    computeOpenAnomalies(okEntries, t0).map((a) => a.axisKey),
+    [],
+  );
+});
+
 test("formatDurationKo formats hours+minutes, and sub-hour durations without a '0시간' prefix (2/2)", () => {
   assert.equal(formatDurationKo(41.5 * 3_600_000), "41시간 30분");
   assert.equal(formatDurationKo(25 * 60000), "25분");
