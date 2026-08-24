@@ -1876,6 +1876,36 @@ function resolveEchoedRoundLabel(resultAbsolutePath, opts) {
   return matches[0][1];
 }
 
+// HYK-340-vanished-unresolved 3R P1-1 (검토 2R 반려, 라벨 결속 우회 재현
+// 수리): resolveEchoedRoundLabel(위)은 «결과 파일이 스스로 주장하는»
+// 라벨만 뽑는다 -- 워커가 관제실의 «과거에 실제로 COMPLETED였던» 라벨을
+// 그대로 결과 파일에 복사해 넣으면, 그 라벨로는 dispatch 영수증도
+// 원장도 전부 진짜로 일치해 검증을 통과했다(검토자 probe: taskLabel=
+// HYK-341-current-round인데 echoedResultLabel=HYK-341-previous-completed
+// 로 CONSUMED). 이 함수는 «지금 이 라운드가 실제로 요구하는» 라벨을
+// 독립적으로 뽑는다 -- 결과 파일이 아니라 **그 워크트리의 현재
+// `.harness/<role>-task.md`**(buildUnconsumedCandidateItem과 동일 relPath
+// 관례)에서, resolveEchoedRoundLabel과 동일한 "정확히 하나" 계약으로.
+// verifyReceiptConsumptionEvidence가 이 값과 echo 값이 같은지 대조한다
+// (§1 요구, fail-closed -- 둘 중 하나라도 못 뽑으면 애초에 대조가 안
+// 되므로 신호를 만들지 않는다).
+function resolveRequiredRoundLabel(repoRoot, role, opts) {
+  const taskFilePath = path.join(repoRoot, ".harness", `${role}-task.md`);
+  const readFileFn =
+    typeof opts.taskFileContentReadFn === "function"
+      ? opts.taskFileContentReadFn
+      : readFileSync;
+  let content;
+  try {
+    content = readFileFn(taskFilePath, "utf8");
+  } catch {
+    return null;
+  }
+  const matches = [...content.matchAll(TASK_ID_ECHO_RE_G)];
+  if (matches.length !== 1) return null;
+  return matches[0][1];
+}
+
 // admission-completion-adapter.mjs의 (export 안 된) hasDispatchReceiptForRound
 // 와 동일 계약의 최소 재현: role 대소문자 무관, harness_task_label 정확히
 // 일치, 손상된 줄은 건너뜀, append-only 로그에서 하나라도 일치하면 true.
@@ -2017,10 +2047,13 @@ function resolveAdmissionLedgerPathForUnconsumed(repoRoot, opts) {
 
 // 이 축이 실제로 CONSUMPTION_RECEIPT_AFTER 신호를 만들어도 되는지 결정하는
 // 단 하나의 함수 -- 워크트리 안 영수증(후보)이 있을 때만 호출된다
-// (judgeUnconsumedForRepo 참조). 셋 다 확인돼야 true: ⑴ 결과 파일이
-// 정확히 하나의 라운드 라벨을 에코 ⑵ 그 role+라벨로 실제 배달된 기록이
-// dispatch-receipts.jsonl에 있음 ⑶ admission 원장이 그 예약을 COMPLETED로
-// 앎. 하나라도 아니면 false(fail-closed).
+// (judgeUnconsumedForRepo 참조). 넷 다 확인돼야 true: ⑴ 결과 파일이
+// 정확히 하나의 라운드 라벨을 에코 ⑵(3R P1-1 신설) 그 라벨이 «지금 이
+// 라운드가 실제로 요구하는» 라벨(현재 task 파일 에코)과 정확히 같음 --
+// 과거에 실제로 COMPLETED였던 다른 라벨을 그대로 복사해 넣는 우회를
+// 막는다(§0 검토자 probe) ⑶ 그 role+라벨로 실제 배달된 기록이 dispatch-
+// receipts.jsonl에 있음 ⑷ admission 원장이 그 예약을 COMPLETED로 앎.
+// 하나라도 아니면 false(fail-closed).
 function verifyReceiptConsumptionEvidence({
   repoRoot,
   role,
@@ -2029,6 +2062,8 @@ function verifyReceiptConsumptionEvidence({
 }) {
   const roundLabel = resolveEchoedRoundLabel(resultAbsolutePath, opts);
   if (!roundLabel) return false;
+  const requiredLabel = resolveRequiredRoundLabel(repoRoot, role, opts);
+  if (!requiredLabel || requiredLabel !== roundLabel) return false;
   const receiptPath = resolveDispatchReceiptPathForUnconsumed(opts);
   if (!hasDispatchReceiptForRound(role, roundLabel, receiptPath, opts)) {
     return false;

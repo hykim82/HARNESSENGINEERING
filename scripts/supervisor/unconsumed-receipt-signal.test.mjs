@@ -35,6 +35,7 @@ import {
   writeFileSync,
   mkdirSync,
   utimesSync,
+  readFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -321,6 +322,132 @@ test("HYK-340 2R P1-1 fail-closed: 결과 파일이 task_id를 에코하지 않�
     const result = judgeFor(dir, now, {
       dispatchReceiptPath: receiptPath,
       admissionLedgerPath: ledgerPath,
+    });
+    assert.notEqual(result.verdict, UNCONSUMED_VERDICT.CONSUMED);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// (1h) §0 검토자 2R probe 재현: 현재 라운드가 요구하는 라벨과 결과 파일이
+// 에코한 라벨이 다르다(워커가 과거에 실제로 COMPLETED였던 다른 라벨을
+// 그대로 복사해 넣은 형태) -- dispatch 영수증·원장은 그 "복사된" 옛
+// 라벨로는 전부 진짜로 일치하지만, 그 라벨은 지금 이 라운드가 요구하는
+// 라벨이 아니므로 CONSUMED가 나오면 안 된다(3R P1-1 요구1).
+// ---------------------------------------------------------------------------
+test("HYK-340 3R P1-1: 검토자 probe 재현 -- taskLabel(현재 요구)과 echoedResultLabel(결과 파일 주장)이 다르면(옛 완료 라벨 복사) CONSUMED가 안 나온다 (1/1)", () => {
+  withTempDir("hyk340-label-mismatch-", (dir) => {
+    initPlainGitRepo(dir);
+    const currentLabel = "HYK-341-current-round";
+    const previousLabel = "HYK-341-previous-completed";
+    // 현재 라운드가 실제로 요구하는 라벨.
+    writeTaskFile(dir, {
+      taskId: currentLabel,
+      mtimeIso: "2026-08-24T00:00:00Z",
+    });
+    // 결과 파일은 그 이전에 진짜로 끝났던 라벨을 그대로 베껴 에코한다.
+    writeResultFileAt(dir, {
+      updatedAtIso: "2026-08-24T00:10:00Z",
+      taskId: previousLabel,
+    });
+    writeReceiptAt(dir, { role: "coder", mtimeIso: "2026-08-24T00:15:00Z" });
+    // 배달 영수증·원장은 그 옛 라벨로는 전부 진짜로 일치한다(검토자
+    // probe와 동일 -- 위조가 아니라 "정말 예전에 끝난" 증거를 재사용).
+    const receiptPath = writeDispatchReceiptsJsonl(dir, [
+      {
+        role: "CODER",
+        harness_task_label: previousLabel,
+        dispatchId: "ctx_old",
+      },
+    ]);
+    const ledgerPath = writeAdmissionLedger(dir, {
+      [previousLabel]: { status: "COMPLETED" },
+    });
+    const now = new Date("2026-08-24T01:00:00Z").getTime();
+    const result = judgeFor(dir, now, {
+      dispatchReceiptPath: receiptPath,
+      admissionLedgerPath: ledgerPath,
+    });
+    assert.notEqual(
+      result.verdict,
+      UNCONSUMED_VERDICT.CONSUMED,
+      "copying a genuinely-completed past label must not hide the current round's non-consumption",
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// (1i) §1 오탐 경계 확인: 같은 role의 다음 라운드 task 파일이 이미
+// 드롭돼(현재 요구 라벨이 새 라벨로 바뀜) 결과 파일은 아직 방금 끝난
+// 옛 라벨을 담고 있는 구간 -- 라벨 대조로는 receipt 신호가 안 서지만,
+// 그 시점엔 이미 task 파일 자신의 mtime이 결과 파일보다 나중이므로
+// TASK_FILE_DROPPED_AFTER 신호가 대신 선다 -- 여전히 CONSUMED(오탐 아님).
+// ---------------------------------------------------------------------------
+test("HYK-340 3R §1 오탐경계: 다음 라운드 task 파일이 이미 드롭된 구간(라벨이 바뀜) -- receipt 신호는 안 서도 TASK_FILE_DROPPED_AFTER로 여전히 CONSUMED (1/1)", () => {
+  withTempDir("hyk340-label-boundary-", (dir) => {
+    initPlainGitRepo(dir);
+    const oldLabel = "HYK-340-boundary-old";
+    const newLabel = "HYK-340-boundary-new";
+    writeResultFileAt(dir, {
+      updatedAtIso: "2026-08-24T00:10:00Z",
+      taskId: oldLabel,
+    });
+    writeReceiptAt(dir, { role: "coder", mtimeIso: "2026-08-24T00:15:00Z" });
+    const receiptPath = writeDispatchReceiptsJsonl(dir, [
+      { role: "CODER", harness_task_label: oldLabel, dispatchId: "ctx_1" },
+    ]);
+    const ledgerPath = writeAdmissionLedger(dir, {
+      [oldLabel]: { status: "COMPLETED" },
+    });
+    // 다음 라운드 task 파일이 결과 파일보다 나중에 드롭된다 -- 현재
+    // 요구 라벨은 이제 newLabel이다(옛 라벨과 다름).
+    writeTaskFile(dir, {
+      taskId: newLabel,
+      mtimeIso: "2026-08-24T00:20:00Z",
+    });
+    const now = new Date("2026-08-24T01:00:00Z").getTime();
+    const result = judgeFor(dir, now, {
+      dispatchReceiptPath: receiptPath,
+      admissionLedgerPath: ledgerPath,
+    });
+    assert.equal(
+      result.verdict,
+      UNCONSUMED_VERDICT.CONSUMED,
+      "the next round's task-file drop must still consume the prior round even though the receipt-label check no longer applies",
+    );
+    assert.equal(result.reasonCode, UNCONSUMED_REASON.CONSUMED_VIA_TASK_DROP);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// (1j) fail-closed: 현재 task 파일 자체를 못 읽으면(권한 등) 요구 라벨을
+// 못 뽑으므로 CONSUMED로 접지 않는다.
+// ---------------------------------------------------------------------------
+test("HYK-340 3R P1-1 fail-closed: 현재 task 파일 내용을 못 읽으면(권한 등) -- 요구 라벨을 못 뽑아 CONSUMED로 접지 않는다 (1/1)", () => {
+  withTempDir("hyk340-taskfile-unreadable-", (dir) => {
+    initPlainGitRepo(dir);
+    const label = "HYK-340-unreadable-task-1";
+    writeTaskFile(dir, { taskId: label, mtimeIso: "2026-08-24T00:00:00Z" });
+    writeResultFileAt(dir, {
+      updatedAtIso: "2026-08-24T00:10:00Z",
+      taskId: label,
+    });
+    writeReceiptAt(dir, { role: "coder", mtimeIso: "2026-08-24T00:15:00Z" });
+    const receiptPath = writeDispatchReceiptsJsonl(dir, [
+      { role: "CODER", harness_task_label: label, dispatchId: "ctx_1" },
+    ]);
+    const ledgerPath = writeAdmissionLedger(dir, {
+      [label]: { status: "COMPLETED" },
+    });
+    const now = new Date("2026-08-24T01:00:00Z").getTime();
+    const result = judgeFor(dir, now, {
+      dispatchReceiptPath: receiptPath,
+      admissionLedgerPath: ledgerPath,
+      taskFileContentReadFn: (p, ...rest) => {
+        if (String(p).endsWith("coder-task.md")) {
+          throw new Error("simulated read failure");
+        }
+        return readFileSync(p, ...rest);
+      },
     });
     assert.notEqual(result.verdict, UNCONSUMED_VERDICT.CONSUMED);
   });
