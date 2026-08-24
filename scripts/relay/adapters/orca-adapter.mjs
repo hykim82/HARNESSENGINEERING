@@ -1140,31 +1140,42 @@ export function previewLooksLikeAgent(preview) {
 // raw 후보(2개+)의 `terminal show` preview를 이어붙여 previewLooksLikeAgent로
 // 거른다. resolveSeatLivenessCandidate에서 분리(복잡도 분산) -- raw
 // candidates.length<=1일 때는 호출하지 않는다(예산: 모호할 때만 추가
-// terminal show 호출, coder-task.md 설계 노트). preview 조회 자체가
-// 실패하면(개별 후보든) 조용히 "에이전트 아님"으로 접지 않고 전체를
-// SHOW_QUERY_FAILED로 드러낸다 -- 진짜 에이전트 좌석의 조회가 어쩌다
-// 실패했을 때 그걸 빈 탭으로 오분류해 seatCount를 조용히 낮추는 사고를
-// 막기 위함(fail-closed, A-1 원칙 계승).
+// terminal show 호출, coder-task.md 설계 노트).
+//
+// ★후보를 "빼는" 것은 preview를 실제로 읽고 D15/마커 검사로 "이건
+// 에이전트가 아니다"라고 확신했을 때뿐이다 -- preview 조회 자체가
+// 실패했거나(개별 후보 하나의 terminal show throw/ok:false) preview
+// 필드가 없으면(malformed) 그 후보를 "확신 없이" 빼지 않고 그대로
+// 후보 목록에 남긴다(HYK-207-multiseat 원칙 재사용: 후보 하나의 조회
+// 실패가 축 전체 판정을 오분류하게 하지 않는다 -- 여기서는 "그 후보를
+// 조용히 빈 탭으로 접어 2개를 1개로 무르게 하지 않는다"는 형태로
+// 적용된다). 그 결과 원래 후보 수가 그대로 유지되면 아래
+// resolveSeatLivenessCandidate가 여전히 AMBIGUOUS로 거부하고, 그
+// AMBIGUOUS는 기존 delivered-seat correlation 재시도 경로
+// (orch-stall-detect.mjs resolveObservationWithDeliveredSeatFallback)로
+// 그대로 이어진다 -- 이 필터가 그 경로를 끊지 않는다. 그래서 이 함수는
+// {ok:false}를 반환하지 않는다(늘 {ok:true, candidates}).
 function filterAgentSeatCandidates(candidates, opts) {
   const kept = [];
   for (const candidate of candidates) {
     let showResponse;
     try {
       showResponse = opts.execFn(buildSeatShowCommand(candidate.handle));
-    } catch (err) {
-      return denySeatLivenessObservation(
-        SEAT_LIVENESS_OBSERVATION_REASON.SHOW_QUERY_FAILED,
-        `orca-adapter: collectSeatLivenessObservation -- terminal show query threw while filtering agent-vs-blank-tab candidates (${errText(err)})`,
-      );
+    } catch {
+      kept.push(candidate); // 조회 실패 -- 확신 없음, 빼지 않는다.
+      continue;
     }
     const preview = parseSeatPreview(showResponse);
-    if (preview === null) {
-      return denySeatLivenessObservation(
-        SEAT_LIVENESS_OBSERVATION_REASON.SHOW_QUERY_FAILED,
-        `orca-adapter: collectSeatLivenessObservation -- ${extractFailureDetail(showResponse)}`,
-      );
+    // preview 필드가 없거나(null) 빈 문자열이면 "확신을 갖고 빈 탭"이라
+    // 부를 근거가 약하다(막 뜬 좌석의 빈 preview와 구분이 안 된다) --
+    // 보수적으로 남긴다.
+    if (!isNonEmptyString(preview)) {
+      kept.push(candidate);
+      continue;
     }
     if (previewLooksLikeAgent(preview)) kept.push(candidate);
+    // else: preview를 실제로 읽었고 D15/마커 검사로 에이전트가 아니라고
+    // 확신했다 -- 이 경우에만 뺀다(빈 pwsh 탭 제외).
   }
   return { ok: true, candidates: kept };
 }
@@ -1212,9 +1223,9 @@ function resolveSeatLivenessCandidate(worktreePath, opts) {
     return { ok: true, seatCount: 1, handle: candidates[0].handle };
   }
   // raw 후보 2개 이상 -- HYK-345: 즉시 거부하기 전에 에이전트 마커로
-  // 한 번 더 거른다(빈 pwsh 탭 제외, 위 filterAgentSeatCandidates 주석).
+  // 한 번 더 거른다(빈 pwsh 탭 제외, 위 filterAgentSeatCandidates 주석 --
+  // 이 필터는 언제나 {ok:true}만 낸다, 확신 없는 후보는 빼지 않는다).
   const agentFiltered = filterAgentSeatCandidates(candidates, opts);
-  if (!agentFiltered.ok) return agentFiltered;
   if (agentFiltered.candidates.length === 0) {
     // 거른 뒤 에이전트로 보이는 후보가 0개 -- 정상(전부 빈 탭이었다).
     return { ok: true, seatCount: 0 };
