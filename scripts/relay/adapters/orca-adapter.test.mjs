@@ -55,6 +55,8 @@ import {
   collectSeatLivenessObservation,
   SEAT_LIVENESS_OBSERVATION_REASON,
   previewLooksLikeAgent,
+  classifySeatPreview,
+  SEAT_PREVIEW_CLASSIFICATION,
   resolveRoleBoundSeatHandle,
   classifySeatRoleFromRegistry,
   describeCandidateRoles,
@@ -1885,6 +1887,89 @@ test("collectSeatLivenessObservation: two candidates, BOTH blank pwsh tabs -- fi
   assert.equal("observation" in r, false);
 });
 
+// HYK-345 2R (검토 P1 반려 핵심 반례 -- coder-task.md §0 원문 그대로):
+// 후보 A는 terminal show가 성공하지만 preview 필드가 없다(에이전트인지
+// 빈 셸인지 미확정), 후보 B는 확실한 빈 셸(죽은 PS 프롬프트). 1R은
+// "빼지 않는다"를 "통과시킨다"로 잘못 축약해 A 하나만 남으면 seatCount:1로
+// 통과시켰다 -- 이 시험이 그 fail-open 구멍을 직접 막는다: 미확정 후보가
+// 있으면(설사 그게 유일하게 남은 후보여도) 고르지 않고 AMBIGUOUS로 닫는다.
+test("collectSeatLivenessObservation: candidate A has no preview field (undetermined) + candidate B is a confirmed dead shell -- does NOT resolve to seatCount:1 on the undetermined survivor (HYK-345 2R fix, review counter-example)", () => {
+  const execFn = fakeExecFn({
+    "terminal-list": terminalListStub([
+      terminalEntry({ handle: "term_a" }),
+      terminalEntry({ handle: "term_b" }),
+    ]),
+    show: (argv) => {
+      const handle = argv[argv.indexOf("--terminal") + 1];
+      if (handle === "term_a") {
+        // preview 필드 자체가 없음 -- lastOutputAt만 있음(미확정).
+        return {
+          ok: true,
+          result: { terminal: { lastOutputAt: 1_700_000_005_000 } },
+        };
+      }
+      return terminalShowStub({ preview: "PS C:\\blank>" });
+    },
+  });
+  const r = collectSeatLivenessObservation(
+    { worktreePath: VALID_WORKTREE, now: 1_700_000_010_000 },
+    { execFn },
+  );
+  assert.equal(r.ok, false);
+  assert.equal(r.observationReason, SEAT_LIVENESS_OBSERVATION_REASON.AMBIGUOUS);
+});
+
+// 같은 반례를 "terminal show 자체가 throw" 형태로도 확인한다(조회 실패도
+// preview 결손과 동형으로 UNKNOWN에 접힌다, classifySeatCandidates 주석).
+test("collectSeatLivenessObservation: candidate A's terminal show throws (undetermined) + candidate B is a confirmed dead shell -- does NOT resolve to seatCount:1 (HYK-345 2R fix)", () => {
+  const execFn = fakeExecFn({
+    "terminal-list": terminalListStub([
+      terminalEntry({ handle: "term_a" }),
+      terminalEntry({ handle: "term_b" }),
+    ]),
+    show: (argv) => {
+      const handle = argv[argv.indexOf("--terminal") + 1];
+      if (handle === "term_a") throw new Error("boom: show unreachable");
+      return terminalShowStub({ preview: "PS C:\\blank>" });
+    },
+  });
+  const r = collectSeatLivenessObservation(
+    { worktreePath: VALID_WORKTREE, now: 1_700_000_010_000 },
+    { execFn },
+  );
+  assert.equal(r.ok, false);
+  assert.equal(r.observationReason, SEAT_LIVENESS_OBSERVATION_REASON.AMBIGUOUS);
+});
+
+// §2-2 오탐 경계: 확정 에이전트 하나 옆에 "미확정" 후보가 하나 더 있으면
+// (에이전트인지 또 다른 빈 탭인지 모름) -- 이 조각의 설계 선택은 "그래도
+// 막는다"이다(§2 완료조건3의 "판단과 근거를 결과 파일에 적을 것" 요구 --
+// 근거: 에이전트가 확정됐다는 사실이 "다른 미확정 후보가 진짜 중복
+// 에이전트가 아니다"를 보장하지 않는다 -- 미확정을 무시하면 완료조건2
+// (진짜 좌석 2개 거부)가 "하나만 마커를 보이면 통과"로 다시 무르게 될
+// 위험이 있다).
+test("collectSeatLivenessObservation: one confirmed agent + one undetermined candidate -- still blocked (AMBIGUOUS), an unknown neighbor is not assumed harmless even next to a confirmed agent", () => {
+  const execFn = fakeExecFn({
+    "terminal-list": terminalListStub([
+      terminalEntry({ handle: "term_agent" }),
+      terminalEntry({ handle: "term_unknown" }),
+    ]),
+    show: (argv) => {
+      const handle = argv[argv.indexOf("--terminal") + 1];
+      if (handle === "term_agent") {
+        return terminalShowStub({ preview: "Sonnet 4.5\n[CODER] working\n" });
+      }
+      return { ok: true, result: { terminal: {} } }; // preview 없음.
+    },
+  });
+  const r = collectSeatLivenessObservation(
+    { worktreePath: VALID_WORKTREE, now: 1_700_000_010_000 },
+    { execFn },
+  );
+  assert.equal(r.ok, false);
+  assert.equal(r.observationReason, SEAT_LIVENESS_OBSERVATION_REASON.AMBIGUOUS);
+});
+
 // 후보가 1개뿐이면(모호함이 없으면) 필터를 위한 추가 terminal show 호출을
 // 하지 않는다(예산: 모호할 때만, 위 orca-adapter.mjs 설계 노트) -- 기존
 // exactly-one-candidate 시험이 이미 terminal show를 정확히 1번만 기대
@@ -2747,6 +2832,32 @@ test("previewLooksLikeAgent: D15 -- a dead shell whose scrollback still contains
   const preview =
     "Sonnet 4.5\n[CODER] finished, agent exited\nPS C:\\Users\\Administrator\\orca\\workspaces\\foo>";
   assert.equal(previewLooksLikeAgent(preview), false);
+});
+
+// HYK-345 2R (§1 완료조건4): 세 갈래(AGENT/DEAD_SHELL/UNKNOWN)가 코드에서
+// 분명히 구분됨을 직접 시험한다 -- previewLooksLikeAgent(둘 중 하나만
+// true/false로 뭉갬)와 달리 classifySeatPreview는 세 값을 모두 낸다.
+test("classifySeatPreview: three-way split -- AGENT (marker, not dead shell), DEAD_SHELL (live PS prompt, D15 wins even with old markers), UNKNOWN (missing/empty/unrecognized content)", () => {
+  assert.equal(
+    classifySeatPreview("Sonnet 4.5\n[CODER] working\n"),
+    SEAT_PREVIEW_CLASSIFICATION.AGENT,
+  );
+  assert.equal(
+    classifySeatPreview("PS C:\\Users\\Administrator>"),
+    SEAT_PREVIEW_CLASSIFICATION.DEAD_SHELL,
+  );
+  assert.equal(
+    classifySeatPreview(
+      "Sonnet 4.5\n[CODER] finished\nPS C:\\Users\\Administrator>",
+    ),
+    SEAT_PREVIEW_CLASSIFICATION.DEAD_SHELL, // D15: dead-shell check wins over scrollback markers.
+  );
+  assert.equal(classifySeatPreview(null), SEAT_PREVIEW_CLASSIFICATION.UNKNOWN);
+  assert.equal(classifySeatPreview(""), SEAT_PREVIEW_CLASSIFICATION.UNKNOWN);
+  assert.equal(
+    classifySeatPreview("npm install running...\n"),
+    SEAT_PREVIEW_CLASSIFICATION.UNKNOWN, // content present, but neither a marker nor a dead-shell prompt -- "no marker" alone is not proof of "dead shell".
+  );
 });
 
 test("deliverTask: D11-B codex PASTE_UNCONFIRMED -- a truthy-but-not-true confirmPastedFn return value does not confirm (strict boolean check), zero Enter calls", () => {
