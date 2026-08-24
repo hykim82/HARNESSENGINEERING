@@ -726,25 +726,52 @@ function runEscalationDedupeStep({
 // 정리한 경우 애초에 worst 목록에 오르지 않으므로(§5 요구4 오탐0), 그런
 // 정상 정리는 이 집합에 들어오지 않는다 -- verdict만 CONSUMED로 바뀌고
 // 디렉터리는 그대로 있는 정상 사례도 existsFn이 true이므로 걸리지 않는다.
+// HYK-341-vanished-unresolved 2R P1-2 (검토 원문): 1R은 상태 파일 누락·
+// 파손·읽기 실패를 전부 `{suspectedPaths:[], stateMissing:true}`로
+// 뭉뚱그렸다 -- "파일이 아직 없다"(첫 tick, 정상)와 "있는데 못 읽는다"
+// (파손, 표면화 대상)를 구별하지 않으면, 상태가 파손된 tick에 진짜
+// vanish가 있어도 조용히 빈 목록으로 접혀 VANISHED_UNRESOLVED가 영영
+// 안 뜬다(검토자 직접 재현: probe에서 `containsVanish=false` + 상태
+// 파일이 `{"suspectedPaths":[]}`로 덮여씀). `stateKind`로 넷을 구별한다:
+// - "MISSING" -- ENOENT(첫 tick 등, 정상 -- 표면화하지 않는다).
+// - "READ_FAILED" -- ENOENT가 아닌 다른 이유로 못 읽음(권한 등).
+// - "CORRUPTED" -- 읽혔지만 JSON 파싱 실패, 또는 파싱은 됐지만
+//   `suspectedPaths` 필드가 배열이 아닌 형식 위반.
+// - "OK" -- 정상.
+// READ_FAILED/CORRUPTED 둘 다 "못 읽음"(파손 계열)이라 호출자(§4)가
+// 로그·reach 축에 표면화한다 -- MISSING만 조용하다.
 function readUnconsumedVanishState(readFn, statePath) {
+  let text;
   try {
-    const text = readFn(statePath, "utf8");
-    const parsed = JSON.parse(text);
-    return {
-      suspectedPaths: Array.isArray(parsed?.suspectedPaths)
-        ? parsed.suspectedPaths.filter(
-            (p) => typeof p === "string" && p.length > 0,
-          )
-        : [],
-      stateMissing: false,
-    };
-  } catch {
-    // fail-open(readEscalationNotifyState와 동일 원칙): 상태가 없으면
-    // "직전에 의심하던 것 없음"으로 접는다 -- 이번 tick에 새로 vanish를
-    // 만들지 않을 뿐, 이번 tick 자체의 SUSPECTED_UNCONSUMED 판정(있다면)은
-    // 조금도 잃지 않는다.
-    return { suspectedPaths: [], stateMissing: true };
+    text = readFn(statePath, "utf8");
+  } catch (err) {
+    if (err && err.code === "ENOENT") {
+      return { suspectedPaths: [], stateKind: "MISSING" };
+    }
+    return { suspectedPaths: [], stateKind: "READ_FAILED" };
   }
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return { suspectedPaths: [], stateKind: "CORRUPTED" };
+  }
+  if (!isPlainObject(parsed) || !Array.isArray(parsed.suspectedPaths)) {
+    return { suspectedPaths: [], stateKind: "CORRUPTED" };
+  }
+  return {
+    suspectedPaths: parsed.suspectedPaths.filter(
+      (p) => typeof p === "string" && p.length > 0,
+    ),
+    stateKind: "OK",
+  };
+}
+
+// stateKind 넷 중 "표면화 대상"(파손 계열)인 둘을 하나의 술어로 묶는다
+// (§4 요구 "부재/파손/읽기 실패가 구분되고 파손은 표면화된다" -- MISSING
+// 은 여기 안 낀다).
+function isVanishStateSurfaceable(stateKind) {
+  return stateKind === "CORRUPTED" || stateKind === "READ_FAILED";
 }
 
 // 순수 함수(시험 용이성, computeEscalationNotifications와 동일 스타일).
@@ -793,6 +820,13 @@ function runUnconsumedVanishStep({
   )
     ? detectorResult.unconsumedWorstWorktrees
     : [];
+  // HYK-341-vanished-unresolved 2R P1-2: 쓰기(mkdir/write) 실패도 더 이상
+  // 조용한 빈 catch가 아니다 -- 이 러너의 계약(로그 한 줄 + 생존 기록)은
+  // 여전히 깨지 않지만(throw하지 않는다, runEscalationDedupeStep과 동일
+  // 원칙), 실패했다는 사실 자체는 `writeFailed`로 호출자에게 돌려줘
+  // 표면화 대상이 된다(다음 tick에 이번 tick의 suspectedPaths가 반영되지
+  // 않았다는 뜻이므로 "쓰기 실패=CORRUPTED과 동급"으로 취급한다).
+  let writeFailed = false;
   try {
     if (!existsFn(watchDir)) mkdirFn(watchDir, { recursive: true });
     writeFn(
@@ -801,11 +835,14 @@ function runUnconsumedVanishStep({
       "utf8",
     );
   } catch {
-    // 저장 실패는 이 러너의 계약(로그 한 줄 + 생존 기록)을 깨지 않는다
-    // (runEscalationDedupeStep과 동일 원칙) -- 다음 tick에 fail-open으로
-    // 다시 이번 tick의 의심 목록과 비교될 뿐이다.
+    writeFailed = true;
   }
-  return { vanishedPaths, stateMissing: prior.stateMissing };
+  return {
+    vanishedPaths,
+    stateKind: prior.stateKind,
+    writeFailed,
+    surfaced: isVanishStateSurfaceable(prior.stateKind) || writeFailed,
+  };
 }
 
 // escalation 축의 사람이 읽는 사유(§4 요건2 "막힌 워커가 있으면 사유가
@@ -1071,8 +1108,19 @@ function buildStartUnconsumedSegments(detectorResult, unconsumedVanish) {
     vanishedPaths.length > 0
       ? "VANISHED_UNRESOLVED"
       : detectorResult.unconsumedVerdict;
+  // HYK-341-vanished-unresolved 2R P1-2 (검토 원문 요구2 "그 사실을
+  // 로그·통지 축에 표면화하라"): vanish 상태 파일이 파손됐거나(§4 상단
+  // isVanishStateSurfaceable) 이번 tick의 쓰기 자체가 실패했으면, verdict
+  // 와 같은 자리(기존 "unconsumed" 축의 기존 필드)의 status 값을 덮어써
+  // reach 축(badStatuses)까지 닿게 한다 -- verdict 덮어쓰기와 정확히
+  // 같은 기법(새 필드/새 축이 아니라 기존 필드가 취할 수 있는 값을
+  // 하나 늘린다). unconsumedVanish가 없거나 surfaced가 아니면(기존
+  // 호출자·정상 tick) byte-identical(회귀 0).
+  const effectiveUnconsumedStatus = unconsumedVanish?.surfaced
+    ? "UNCONSUMED_VANISH_STATE_CORRUPTED"
+    : detectorResult.unconsumedStatus;
   const unconsumedSegment = axisLogSegment("unconsumed", {
-    status: detectorResult.unconsumedStatus,
+    status: effectiveUnconsumedStatus,
     verdict: effectiveUnconsumedVerdict,
     worstCount: detectorResult.unconsumedWorstCount,
     totalWorktrees: detectorResult.unconsumedTotalWorktrees,

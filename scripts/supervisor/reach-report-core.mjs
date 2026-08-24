@@ -98,6 +98,13 @@ export const AXES = Object.freeze([
       "UNCONSUMED_COLLECTION_FAILED",
       "UNCONSUMED_SCAN_WORKTREE_LIST_FAILED",
       "UNCONSUMED_SCAN_HARNESS_READ_FAILED",
+      // HYK-341-vanished-unresolved 2R P1-2: watch-run.mjs's own
+      // unconsumed-vanish-state.json (a SEPARATE side-channel state file
+      // from the detector subprocess's own axis status above) surfaces
+      // through this SAME status field when it is corrupted/unreadable or
+      // a write to it just failed -- same technique as VANISHED_UNRESOLVED
+      // above (extend an existing field's value set, not a new axis).
+      "UNCONSUMED_VANISH_STATE_CORRUPTED",
     ]),
   }),
   // HYK-198-capwire-2 §2 -- watch-run.mjs의 cap_* 필드(HYK-198-capwire-1이

@@ -272,3 +272,136 @@ test("HYK-341 §4 요구6: VANISHED_UNRESOLVED가 기존 reach 축을 통해 통
     fs.rmSync(watchDir, { recursive: true, force: true });
   }
 });
+
+// ---------------------------------------------------------------------------
+// HYK-341 2R P1-2 (검토 원문): 상태 파일 누락·파손·읽기 실패를 구분하고,
+// 파손·읽기 실패는 표면화한다("없음"과 "모름"을 가른다).
+// ---------------------------------------------------------------------------
+
+// (P1-2-a) 검토자 probe 그대로 재현: 상태 파일이 파손돼 있으면(직전
+// tick의 진짜 의심 목록을 알 수 없음) vanishedPaths는 복구할 수 없지만
+// (구조적 한계, 정직 기재), 그 파손 자체는 이제 조용히 넘어가지 않고
+// unconsumed_status에 표면화된다.
+test("HYK-341 2R P1-2: 상태 파일이 파손(JSON 파싱 불가)돼 있으면 -- vanishedPaths는 복구 못 해도 unconsumed_status=UNCONSUMED_VANISH_STATE_CORRUPTED로 표면화된다 (1/1)", () => {
+  const watchDir = tmpWatchDir();
+  try {
+    fs.mkdirSync(watchDir, { recursive: true });
+    fs.writeFileSync(
+      join(watchDir, "unconsumed-vanish-state.json"),
+      "{ not valid json",
+      "utf8",
+    );
+    const line = lastLineAfterRun(watchDir, {
+      repoRoot: ROOT,
+      watchDir,
+      now: NOW_MS,
+      execFn: () => consumedExec(),
+    });
+    assert.match(
+      line,
+      /unconsumed_status=UNCONSUMED_VANISH_STATE_CORRUPTED/,
+      line,
+    );
+  } finally {
+    fs.rmSync(watchDir, { recursive: true, force: true });
+  }
+});
+
+// (P1-2-b) 형식 위반(파싱은 되지만 suspectedPaths가 배열이 아님)도 같은
+// "파손" 취급이다 -- JSON.parse 성공 여부 하나만으로 판정을 좁히지
+// 않는다.
+test("HYK-341 2R P1-2: 상태 파일이 파싱은 되지만 형식 위반(suspectedPaths가 배열이 아님)이면 -- 역시 CORRUPTED로 표면화된다 (1/1)", () => {
+  const watchDir = tmpWatchDir();
+  try {
+    fs.mkdirSync(watchDir, { recursive: true });
+    fs.writeFileSync(
+      join(watchDir, "unconsumed-vanish-state.json"),
+      JSON.stringify({ suspectedPaths: "not-an-array" }),
+      "utf8",
+    );
+    const line = lastLineAfterRun(watchDir, {
+      repoRoot: ROOT,
+      watchDir,
+      now: NOW_MS,
+      execFn: () => consumedExec(),
+    });
+    assert.match(line, /unconsumed_status=UNCONSUMED_VANISH_STATE_CORRUPTED/);
+  } finally {
+    fs.rmSync(watchDir, { recursive: true, force: true });
+  }
+});
+
+// (P1-2-c) 대조군 -- "파일이 아직 없음"(첫 tick, 정상)은 CORRUPTED로
+// 표면화되지 않는다(§2 "누락과 파손은 다르다").
+test("HYK-341 2R P1-2 대조군: 상태 파일이 아예 없음(첫 tick, 정상)은 CORRUPTED로 표면화되지 않는다 (1/1)", () => {
+  const watchDir = tmpWatchDir();
+  try {
+    const line = lastLineAfterRun(watchDir, {
+      repoRoot: ROOT,
+      watchDir,
+      now: NOW_MS,
+      execFn: () => consumedExec(),
+    });
+    assert.doesNotMatch(line, /UNCONSUMED_VANISH_STATE_CORRUPTED/, line);
+  } finally {
+    fs.rmSync(watchDir, { recursive: true, force: true });
+  }
+});
+
+// (P1-2-d) 쓰기 실패도 조용히 삼키지 않는다 -- writeFn을 주입해 저장
+// 실패를 결정적으로 재현한다.
+test("HYK-341 2R P1-2: 상태 파일 쓰기(write) 자체가 실패해도 -- 조용히 삼켜지지 않고 표면화된다 (1/1)", () => {
+  const watchDir = tmpWatchDir();
+  try {
+    const failingWriteFn = (p, ...rest) => {
+      if (String(p).endsWith("unconsumed-vanish-state.json")) {
+        throw new Error("simulated disk full");
+      }
+      return fs.writeFileSync(p, ...rest);
+    };
+    const line = lastLineAfterRun(watchDir, {
+      repoRoot: ROOT,
+      watchDir,
+      now: NOW_MS,
+      execFn: () => consumedExec(),
+      writeFn: failingWriteFn,
+    });
+    assert.match(line, /unconsumed_status=UNCONSUMED_VANISH_STATE_CORRUPTED/);
+  } finally {
+    fs.rmSync(watchDir, { recursive: true, force: true });
+  }
+});
+
+// (P1-2-e) §4 요구6과 동일 원칙: 파손 표면화도 기존 reach 축(badStatuses)
+// 을 타고 사람에게 도달한다.
+test("HYK-341 2R P1-2: 상태 파일 파손이 reach 축(badStatuses)을 통해 통지 파일까지 도달한다 (1/1)", () => {
+  const watchDir = tmpWatchDir();
+  const notifyDir = join(watchDir, "받는함-테스트");
+  try {
+    fs.mkdirSync(watchDir, { recursive: true });
+    fs.writeFileSync(
+      join(watchDir, "unconsumed-vanish-state.json"),
+      "{ not valid json",
+      "utf8",
+    );
+    const result = runWatchOnce({
+      repoRoot: ROOT,
+      watchDir,
+      now: NOW_MS,
+      execFn: () => consumedExec(),
+      notifyDir,
+    });
+    assert.ok(
+      result.reachResult.noticePath,
+      "vanish-state corruption must fire a reach notice",
+    );
+    assert.ok(fs.existsSync(result.reachResult.noticePath));
+  } finally {
+    fs.rmSync(watchDir, { recursive: true, force: true });
+  }
+});
+
+function lastLineAfterRun(watchDir, runArgs) {
+  runWatchOnce(runArgs);
+  return lastLine(watchDir);
+}
