@@ -54,6 +54,7 @@ import {
   buildTeardownWorktreeRemoveCommand,
   collectSeatLivenessObservation,
   SEAT_LIVENESS_OBSERVATION_REASON,
+  previewLooksLikeAgent,
   resolveRoleBoundSeatHandle,
   classifySeatRoleFromRegistry,
   describeCandidateRoles,
@@ -1803,12 +1804,19 @@ test("collectSeatLivenessObservation: zero candidates -- ok:true, seatCount:0 (n
   assert.equal("observation" in r, false);
 });
 
-test("collectSeatLivenessObservation: two candidates -- ok:false, AMBIGUOUS (A-1 principle reused, refuses to guess)", () => {
+// HYK-345 완료조건2 (§2 비타협): 진짜 좌석이 2개(둘 다 에이전트 마커를
+// 보인다)면 D15/Looks-Like-Agent 필터를 거친 뒤에도 여전히 2개다 --
+// AMBIGUOUS 거부는 무르게 하지 않는다. 이 시험이 그 정당한 거부의
+// 무회귀를 직접 증명한다(둘 다 "Sonnet"/"[CODER]" 마커를 가진 preview).
+test("collectSeatLivenessObservation: two candidates, BOTH look like real agents -- still ok:false, AMBIGUOUS (HYK-345 non-regression: legitimate refusal is not softened)", () => {
   const execFn = fakeExecFn({
     "terminal-list": terminalListStub([
       terminalEntry({ handle: "term_a" }),
       terminalEntry({ handle: "term_b" }),
     ]),
+    show: terminalShowStub({
+      preview: "Sonnet 4.5\n[CODER] bypass permissions\n> ",
+    }),
   });
   const r = collectSeatLivenessObservation(
     { worktreePath: VALID_WORKTREE, now: 1_700_000_010_000 },
@@ -1816,6 +1824,89 @@ test("collectSeatLivenessObservation: two candidates -- ok:false, AMBIGUOUS (A-1
   );
   assert.equal(r.ok, false);
   assert.equal(r.observationReason, SEAT_LIVENESS_OBSERVATION_REASON.AMBIGUOUS);
+});
+
+// HYK-345 (§0-A 재현): `orca worktree create`가 실제 워커 좌석 옆에 빈
+// pwsh 탭을 하나 더 만들면 raw 후보가 2개가 된다 -- 정리 없이도 빈 탭은
+// (D15/Looks-Like-Agent 필터로) 제외되고 진짜 에이전트 좌석 1개로
+// 정상 판정(SEAT_LIVENESS_JUDGED로 이어질 수 있는 ok:true/seatCount:1)
+// 해야 한다.
+test("collectSeatLivenessObservation: two candidates, one is a blank pwsh tab (dead-shell prompt preview) -- filters it out, resolves to the one real agent seat (HYK-345 fix)", () => {
+  const execFn = fakeExecFn({
+    "terminal-list": terminalListStub([
+      terminalEntry({ handle: "term_agent" }),
+      terminalEntry({ handle: "term_blank" }),
+    ]),
+    show: (argv) => {
+      const handle = argv[argv.indexOf("--terminal") + 1];
+      if (handle === "term_agent") {
+        return terminalShowStub({
+          preview: "Sonnet 4.5\n[CODER] bypass permissions\n> ",
+          lastOutputAt: 1_700_000_005_000,
+          title: "CODER",
+        });
+      }
+      // 빈 pwsh 탭 -- 살아있는 PS 프롬프트로 끝난다(D15).
+      return terminalShowStub({
+        preview: "PS C:\\Users\\Administrator\\orca\\workspaces\\foo>",
+      });
+    },
+  });
+  const r = collectSeatLivenessObservation(
+    { worktreePath: VALID_WORKTREE, now: 1_700_000_010_000 },
+    { execFn },
+  );
+  assert.equal(r.ok, true);
+  assert.equal(r.seatCount, 1);
+  assert.equal(r.handle, "term_agent");
+  assert.deepEqual(r.observation, {
+    observedAtMs: 1_700_000_010_000,
+    lastOutputAt: 1_700_000_005_000,
+    reasonHint: "CODER",
+  });
+});
+
+// 두 후보 모두 빈 탭(둘 다 죽은 PS 프롬프트)이면 필터 뒤 0개 -- 정상
+// (좌석이 아예 없는 것과 동형, seatCount:0이지 실패가 아니다).
+test("collectSeatLivenessObservation: two candidates, BOTH blank pwsh tabs -- filters to zero, ok:true seatCount:0 (not a collection failure)", () => {
+  const execFn = fakeExecFn({
+    "terminal-list": terminalListStub([
+      terminalEntry({ handle: "term_blank_a" }),
+      terminalEntry({ handle: "term_blank_b" }),
+    ]),
+    show: terminalShowStub({ preview: "PS C:\\some\\path>" }),
+  });
+  const r = collectSeatLivenessObservation(
+    { worktreePath: VALID_WORKTREE, now: 1_700_000_010_000 },
+    { execFn },
+  );
+  assert.equal(r.ok, true);
+  assert.equal(r.seatCount, 0);
+  assert.equal("observation" in r, false);
+});
+
+// 후보가 1개뿐이면(모호함이 없으면) 필터를 위한 추가 terminal show 호출을
+// 하지 않는다(예산: 모호할 때만, 위 orca-adapter.mjs 설계 노트) -- 기존
+// exactly-one-candidate 시험이 이미 terminal show를 정확히 1번만 기대
+// 한다(그 테스트가 그대로 GREEN이면 이 계약은 유지된 것이다). 여기서는
+// terminal show 필터 경로가 raw 후보 2개 이상일 때만 실행됨을 직접
+// 증명한다 -- 만약 1개 후보에서도 필터를 태우면 이 시험은 실패한다
+// (fakeExecFn이 "show" 키를 여러 번 요구하는 형태가 아니라 값이 그대로면
+// 상관없지만, calls 배열 길이로 호출 횟수를 직접 잰다).
+test("collectSeatLivenessObservation: exactly one raw candidate -- terminal show is called exactly once (no extra agent-marker filter call when there's no ambiguity)", () => {
+  const execFn = fakeExecFn({
+    "terminal-list": terminalListStub([terminalEntry({ handle: "term_only" })]),
+    show: terminalShowStub({ lastOutputAt: 1_700_000_005_000 }),
+  });
+  const r = collectSeatLivenessObservation(
+    { worktreePath: VALID_WORKTREE, now: 1_700_000_010_000 },
+    { execFn },
+  );
+  assert.equal(r.ok, true);
+  const showCalls = execFn.calls.filter(
+    (argv) => argv[0] === "terminal" && argv[1] === "show",
+  );
+  assert.equal(showCalls.length, 1);
 });
 
 test("collectSeatLivenessObservation: terminal-list query throws -- ok:false, LIST_QUERY_FAILED (collection failure, not folded to seatCount:0)", () => {
@@ -2627,6 +2718,35 @@ test("previewShowsBusySignal: unit -- recognizes both known busy signals, reject
   );
   assert.equal(previewShowsBusySignal("[Pasted Content 123 chars]"), true);
   assert.equal(previewShowsBusySignal("plain prompt"), false);
+});
+
+// HYK-345: previewLooksLikeAgent is a direct port of dispatch-worker.ps1's
+// Looks-Like-Agent (fixtures/dispatch-worker-snapshot-2026-08-20-hyk327-applied.ps1.txt
+// 86~93) -- same marker set, same D15 dead-shell-wins-over-old-markers
+// ordering. Unit-tested independently of collectSeatLivenessObservation's
+// wiring (same convention as previewShowsBusySignal above).
+test("previewLooksLikeAgent: unit -- recognizes each ported agent marker, rejects a blank/plain shell", () => {
+  assert.equal(previewLooksLikeAgent("gpt-5.6\n? for shortcuts\n"), true);
+  assert.equal(previewLooksLikeAgent("Sonnet 4.5\n"), true);
+  assert.equal(previewLooksLikeAgent("Opus 4.1\n"), true);
+  assert.equal(previewLooksLikeAgent("[CODER] working on HYK-345\n"), true);
+  assert.equal(previewLooksLikeAgent("[REVIEW] checking diff\n"), true);
+  assert.equal(previewLooksLikeAgent("bypass permissions on\n"), true);
+  assert.equal(previewLooksLikeAgent("MCP startup complete\n"), true);
+  assert.equal(previewLooksLikeAgent("weekly 3 summary\n"), true);
+  assert.equal(previewLooksLikeAgent(""), false);
+  assert.equal(previewLooksLikeAgent("PS C:\\Users\\Administrator>"), false);
+  assert.equal(previewLooksLikeAgent("just a normal shell prompt"), false);
+});
+
+// D15 비타협 (§3): 죽은 셸(마지막 프레임이 살아있는 PS 프롬프트로 끝남)은
+// 스크롤백 어딘가에 옛 에이전트 마커가 남아 있어도 무조건 shell -- 이
+// 순서(죽은-셸-검사가 마커-검사보다 먼저)를 뒤집으면 이 시험이 RED가
+// 된다(mutation coverage).
+test("previewLooksLikeAgent: D15 -- a dead shell whose scrollback still contains an old agent marker is still classified as NOT an agent (dead-shell check wins)", () => {
+  const preview =
+    "Sonnet 4.5\n[CODER] finished, agent exited\nPS C:\\Users\\Administrator\\orca\\workspaces\\foo>";
+  assert.equal(previewLooksLikeAgent(preview), false);
 });
 
 test("deliverTask: D11-B codex PASTE_UNCONFIRMED -- a truthy-but-not-true confirmPastedFn return value does not confirm (strict boolean check), zero Enter calls", () => {

@@ -1096,10 +1096,89 @@ function validateSeatLivenessObservationInput(worktreePath, now, opts) {
   return null;
 }
 
+// ---- HYK-345: 「빈 탭 vs 에이전트 좌석」 판별 ----
+// `orca worktree create`가 워크트리마다 빈 pwsh 탭을 하나 더 만들어
+// 이 아래 resolveSeatLivenessCandidate가 raw 후보 2개를 보고 즉시
+// AMBIGUOUS로 거부하던 문제(coder-task.md §0-A)의 수리. 새 판별을
+// 발명하지 않는다 -- 관제실 배달기 `D:\문서관리\하네스-관제실\dispatch-worker.ps1`
+// 의 `Looks-Like-Agent`(fixtures/dispatch-worker-snapshot-2026-08-20-hyk327-applied.ps1.txt
+// 86~93행)가 이미 같은 판별을 한다. 그 PS 정규식 원문을 그대로 포팅한다
+// (마커 목록도 그대로: gpt-5.6/Sonnet/Opus/[CODER]/[REVIEW]/bypass
+// permissions/MCP startup/weekly \d). D15 비타협: 마지막 비어있지 않은
+// 줄이 살아있는 PS 프롬프트로 끝나면 스크롤백에 옛 마커가 남아 있어도
+// 무조건 죽은 셸로 접는다(마커 검사보다 먼저 -- 순서를 바꾸면 안 된다).
+//
+// scripts/relay/adapters/seat-candidate-adapter.mjs에도 비슷한 마커
+// 목록(CLAUDE_AGENT_MARKERS/CODEX_AGENT_MARKERS)이 있지만 그 파일 자신의
+// 헤더가 "UNVERIFIED, opt-in only, 어떤 운영 판정 경로에도 안 물려 있음"
+// 이라고 명시한다 -- 이 축(seatLiveness/dispatchStart)은 실제 운영
+// 판정이라 그 실험적 모듈에 기대지 않고, 검증된 원본(PS 스크립트)을
+// 직접 이식한다(제3의 마커 목록을 새로 짓지 않는다 -- 이식이지 발명이
+// 아니다).
+const DEAD_SHELL_PROMPT_RE = /^PS [A-Za-z]:\\.*>\s*$/;
+const AGENT_MARKER_RE =
+  /gpt-5\.6|Sonnet|Opus|\[CODER\]|\[REVIEW\]|bypass permissions|MCP startup|weekly \d/;
+
+function lastNonEmptyPreviewLine(text) {
+  const lines = String(text ?? "").split(/\r?\n/);
+  for (let i = lines.length - 1; i >= 0; i -= 1) {
+    if (lines[i].trim() !== "") return lines[i].trim();
+  }
+  return "";
+}
+
+// dispatch-worker.ps1 Looks-Like-Agent와 동형(D15 순서 포함) -- preview
+// 원문 하나를 받아 "이건 에이전트 좌석으로 보인다"만 판정한다(부작용 0).
+export function previewLooksLikeAgent(preview) {
+  if (!isNonEmptyString(preview)) return false;
+  if (DEAD_SHELL_PROMPT_RE.test(lastNonEmptyPreviewLine(preview))) {
+    return false;
+  }
+  return AGENT_MARKER_RE.test(preview);
+}
+
+// raw 후보(2개+)의 `terminal show` preview를 이어붙여 previewLooksLikeAgent로
+// 거른다. resolveSeatLivenessCandidate에서 분리(복잡도 분산) -- raw
+// candidates.length<=1일 때는 호출하지 않는다(예산: 모호할 때만 추가
+// terminal show 호출, coder-task.md 설계 노트). preview 조회 자체가
+// 실패하면(개별 후보든) 조용히 "에이전트 아님"으로 접지 않고 전체를
+// SHOW_QUERY_FAILED로 드러낸다 -- 진짜 에이전트 좌석의 조회가 어쩌다
+// 실패했을 때 그걸 빈 탭으로 오분류해 seatCount를 조용히 낮추는 사고를
+// 막기 위함(fail-closed, A-1 원칙 계승).
+function filterAgentSeatCandidates(candidates, opts) {
+  const kept = [];
+  for (const candidate of candidates) {
+    let showResponse;
+    try {
+      showResponse = opts.execFn(buildSeatShowCommand(candidate.handle));
+    } catch (err) {
+      return denySeatLivenessObservation(
+        SEAT_LIVENESS_OBSERVATION_REASON.SHOW_QUERY_FAILED,
+        `orca-adapter: collectSeatLivenessObservation -- terminal show query threw while filtering agent-vs-blank-tab candidates (${errText(err)})`,
+      );
+    }
+    const preview = parseSeatPreview(showResponse);
+    if (preview === null) {
+      return denySeatLivenessObservation(
+        SEAT_LIVENESS_OBSERVATION_REASON.SHOW_QUERY_FAILED,
+        `orca-adapter: collectSeatLivenessObservation -- ${extractFailureDetail(showResponse)}`,
+      );
+    }
+    if (previewLooksLikeAgent(preview)) kept.push(candidate);
+  }
+  return { ok: true, candidates: kept };
+}
+
 // terminal list 조회 -> worktreePath 정규화 일치 후보 추리기 (resolveSeatHandle,
 // A-1과 같은 형태) -- 0개는 {ok:true, seatCount:0}(정상), 2개+는 AMBIGUOUS로
 // 거부(자동 선택 금지), 조회 자체 실패는 LIST_QUERY_FAILED. collectSeatLivenessObservation
 // 에서 분리(복잡도 분산).
+//
+// HYK-345: raw 후보가 2개 이상일 때만(모호할 때만) previewLooksLikeAgent로
+// 한 번 더 거른다(D15/Looks-Like-Agent 이식, 위 주석) -- 걸러서 정확히
+// 1개면 그걸 고른다(빈 탭이 섞여 있던 경우), 0개면 좌석 없음(정상), 2개
+// 이상이면(진짜 좌석이 실제로 중복 기동한 경우) 여전히 AMBIGUOUS로
+// 거부한다(정당한 거부 무회귀, coder-task.md §2 완료조건2).
 function resolveSeatLivenessCandidate(worktreePath, opts) {
   let listResponse;
   try {
@@ -1129,13 +1208,24 @@ function resolveSeatLivenessCandidate(worktreePath, opts) {
     // 정상 -- 이 worktree에 좌석이 없다(조회 실패가 아니다).
     return { ok: true, seatCount: 0 };
   }
-  if (candidates.length > 1) {
+  if (candidates.length === 1) {
+    return { ok: true, seatCount: 1, handle: candidates[0].handle };
+  }
+  // raw 후보 2개 이상 -- HYK-345: 즉시 거부하기 전에 에이전트 마커로
+  // 한 번 더 거른다(빈 pwsh 탭 제외, 위 filterAgentSeatCandidates 주석).
+  const agentFiltered = filterAgentSeatCandidates(candidates, opts);
+  if (!agentFiltered.ok) return agentFiltered;
+  if (agentFiltered.candidates.length === 0) {
+    // 거른 뒤 에이전트로 보이는 후보가 0개 -- 정상(전부 빈 탭이었다).
+    return { ok: true, seatCount: 0 };
+  }
+  if (agentFiltered.candidates.length > 1) {
     return denySeatLivenessObservation(
       SEAT_LIVENESS_OBSERVATION_REASON.AMBIGUOUS,
-      `orca-adapter: collectSeatLivenessObservation -- ${candidates.length} seats found for worktreePath '${worktreePath}', refusing to guess (A-1 원칙 계승)`,
+      `orca-adapter: collectSeatLivenessObservation -- ${agentFiltered.candidates.length} agent seats found for worktreePath '${worktreePath}' (of ${candidates.length} raw candidates), refusing to guess (A-1 원칙 계승)`,
     );
   }
-  return { ok: true, seatCount: 1, handle: candidates[0].handle };
+  return { ok: true, seatCount: 1, handle: agentFiltered.candidates[0].handle };
 }
 
 // terminal show 조회 -> lastOutputAt(계약: number, epoch ms) + title(reasonHint
