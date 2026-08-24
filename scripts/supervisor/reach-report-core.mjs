@@ -85,7 +85,15 @@ export const AXES = Object.freeze([
     key: "unconsumed",
     prefix: "unconsumed",
     label: "워커 결과 미소비",
-    badVerdicts: Object.freeze(["SUSPECTED_UNCONSUMED"]),
+    // HYK-341-vanished-unresolved (coder-task.md §4 요구6): 새 축을
+    // 만들지 않는다(§0 "새 감지 축 금지"와 escalation-axis-wire.test.mjs가
+    // 고정한 두 예외 밖 세 번째 항목 금지) -- 대신 이 기존 축의 verdict
+    // 필드가 취할 수 있는 값을 하나 늘린다. 직전 tick에 SUSPECTED_
+    // UNCONSUMED였던 워크트리가 소비 흔적 없이(340 수리 이후에는 진짜
+    // 소비면 애초에 이 상태에 오르지 않는다) 워크트리 목록에서 아예
+    // 사라지면 watch-run.mjs가 이 값을 unconsumed_verdict에 싣는다
+    // (buildStartUnconsumedSegments 참조).
+    badVerdicts: Object.freeze(["SUSPECTED_UNCONSUMED", "VANISHED_UNRESOLVED"]),
     badStatuses: Object.freeze([
       "UNCONSUMED_COLLECTION_FAILED",
       "UNCONSUMED_SCAN_WORKTREE_LIST_FAILED",
