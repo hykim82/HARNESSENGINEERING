@@ -1096,10 +1096,132 @@ function validateSeatLivenessObservationInput(worktreePath, now, opts) {
   return null;
 }
 
+// ---- HYK-345: 「빈 탭 vs 에이전트 좌석」 판별 ----
+// `orca worktree create`가 워크트리마다 빈 pwsh 탭을 하나 더 만들어
+// 이 아래 resolveSeatLivenessCandidate가 raw 후보 2개를 보고 즉시
+// AMBIGUOUS로 거부하던 문제(coder-task.md §0-A)의 수리. 새 판별을
+// 발명하지 않는다 -- 관제실 배달기 `D:\문서관리\하네스-관제실\dispatch-worker.ps1`
+// 의 `Looks-Like-Agent`(fixtures/dispatch-worker-snapshot-2026-08-20-hyk327-applied.ps1.txt
+// 86~93행)가 이미 같은 판별을 한다. 그 PS 정규식 원문을 그대로 포팅한다
+// (마커 목록도 그대로: gpt-5.6/Sonnet/Opus/[CODER]/[REVIEW]/bypass
+// permissions/MCP startup/weekly \d). D15 비타협: 마지막 비어있지 않은
+// 줄이 살아있는 PS 프롬프트로 끝나면 스크롤백에 옛 마커가 남아 있어도
+// 무조건 죽은 셸로 접는다(마커 검사보다 먼저 -- 순서를 바꾸면 안 된다).
+//
+// scripts/relay/adapters/seat-candidate-adapter.mjs에도 비슷한 마커
+// 목록(CLAUDE_AGENT_MARKERS/CODEX_AGENT_MARKERS)이 있지만 그 파일 자신의
+// 헤더가 "UNVERIFIED, opt-in only, 어떤 운영 판정 경로에도 안 물려 있음"
+// 이라고 명시한다 -- 이 축(seatLiveness/dispatchStart)은 실제 운영
+// 판정이라 그 실험적 모듈에 기대지 않고, 검증된 원본(PS 스크립트)을
+// 직접 이식한다(제3의 마커 목록을 새로 짓지 않는다 -- 이식이지 발명이
+// 아니다).
+const DEAD_SHELL_PROMPT_RE = /^PS [A-Za-z]:\\.*>\s*$/;
+const AGENT_MARKER_RE =
+  /gpt-5\.6|Sonnet|Opus|\[CODER\]|\[REVIEW\]|bypass permissions|MCP startup|weekly \d/;
+
+function lastNonEmptyPreviewLine(text) {
+  const lines = String(text ?? "").split(/\r?\n/);
+  for (let i = lines.length - 1; i >= 0; i -= 1) {
+    if (lines[i].trim() !== "") return lines[i].trim();
+  }
+  return "";
+}
+
+// dispatch-worker.ps1 Looks-Like-Agent와 동형(D15 순서 포함) -- preview
+// 원문 하나를 받아 "이건 에이전트 좌석으로 보인다"만 판정한다(부작용 0).
+// ★HYK-345 2R (검토 P1 반려 수리): 이 함수 하나로는 "아니다"와 "모른다"를
+// 구분할 수 없다(둘 다 false) -- 그래서 호출부는 이제 이 함수를 직접
+// 쓰지 않고 아래 classifySeatPreview(세 갈래)를 쓴다. 이 함수는 기존
+// 시험/외부 소비자를 위해 그대로 남긴다(순수 파생: AGENT 갈래일 때만
+// true).
+export function previewLooksLikeAgent(preview) {
+  return classifySeatPreview(preview) === SEAT_PREVIEW_CLASSIFICATION.AGENT;
+}
+
+// ---- HYK-345 2R (coder-task.md §1, 검토 P1 반려 수리) ----
+// 검토자 반례: 1R의 filterAgentSeatCandidates는 "빼지 않는다"(조회 실패·
+// preview 결손)와 "에이전트로 통과시킨다"(마커 확정)를 같은 `kept` 배열에
+// 섞었다 -- 그래서 다른 후보가 확정 빈 셸로 빠지고 미확정 후보 하나만
+// `kept`에 남으면, 그 미확정 후보가 "그 워크트리의 유일한 좌석"으로
+// 조용히 통과했다(fail-open). §1 요구대로 세 갈래를 코드에서 분명히
+// 나눈다 -- "모른다"는 "에이전트다"도 "빈 셸이다"도 아닌 별도 값이다.
+//
+// 정의(★반드시 이 순서로 읽는다, D15 그대로 -- 마커 검사보다 죽은 셸
+// 검사가 항상 먼저):
+//   - DEAD_SHELL(빈 셸 확정): 마지막 비어있지 않은 줄이 살아있는 PS
+//     프롬프트로 끝난다 -- 이것만이 "확실히 에이전트가 아니다"의 근거다.
+//   - AGENT(에이전트 확정): DEAD_SHELL이 아니고, 알려진 에이전트 마커를
+//     포함한다.
+//   - UNKNOWN(모름): 그 외 전부 -- preview 조회 자체가 실패했거나
+//     (execFn throw/ok:false), preview 필드가 없거나 빈 문자열이거나,
+//     내용은 있지만 DEAD_SHELL도 AGENT도 아닌 경우(예: 방금 뜬 좌석의
+//     초기 화면 -- 아직 마커도 안 보이고 죽은 셸 프롬프트도 아닌 과도기).
+//     ★"마커가 없다"는 "빈 셸이다"의 증거가 아니다 -- 오직 살아있는 죽은
+//     셸 프롬프트만 그 증거다(1R에서는 이 구분이 없어 "마커 없음"을
+//     암묵적으로 "빈 셸"과 동일시했다 -- 그 자체는 이번 사고의 원인이
+//     아니었지만, 이 재작업에서 정의를 명시하며 함께 바로잡는다).
+export const SEAT_PREVIEW_CLASSIFICATION = Object.freeze({
+  AGENT: "AGENT",
+  DEAD_SHELL: "DEAD_SHELL",
+  UNKNOWN: "UNKNOWN",
+});
+
+export function classifySeatPreview(preview) {
+  if (!isNonEmptyString(preview)) return SEAT_PREVIEW_CLASSIFICATION.UNKNOWN;
+  if (DEAD_SHELL_PROMPT_RE.test(lastNonEmptyPreviewLine(preview))) {
+    return SEAT_PREVIEW_CLASSIFICATION.DEAD_SHELL;
+  }
+  return AGENT_MARKER_RE.test(preview)
+    ? SEAT_PREVIEW_CLASSIFICATION.AGENT
+    : SEAT_PREVIEW_CLASSIFICATION.UNKNOWN;
+}
+
+// raw 후보(2개+)의 `terminal show` preview를 조회해 세 갈래로 분류한다.
+// resolveSeatLivenessCandidate에서 분리(복잡도 분산) -- raw
+// candidates.length<=1일 때는 호출하지 않는다(예산: 모호할 때만 추가
+// terminal show 호출, 1R 설계 노트 그대로 유지).
+//
+// terminal show 조회 자체가 실패한 후보(throw/ok:false)는 UNKNOWN으로
+// 분류한다 -- "조회 실패"와 "preview 결손"을 이 함수 층위에서는 같은
+// "모른다"로 접는다(둘 다 이 후보가 에이전트인지 빈 셸인지 판단할 근거가
+// 없다는 점에서 동형이다). 이 함수는 항상 {ok:true, agents, unknowns,
+// deadShells}만 낸다({ok:false}를 내지 않는다) -- "닫을지 말지"의 결정은
+// 호출부(resolveSeatLivenessCandidate)가 세 배열의 개수를 보고 한다.
+function classifySeatCandidates(candidates, opts) {
+  const agents = [];
+  const unknowns = [];
+  const deadShells = [];
+  for (const candidate of candidates) {
+    let showResponse;
+    try {
+      showResponse = opts.execFn(buildSeatShowCommand(candidate.handle));
+    } catch {
+      unknowns.push(candidate);
+      continue;
+    }
+    const preview = parseSeatPreview(showResponse);
+    const classification = classifySeatPreview(preview);
+    if (classification === SEAT_PREVIEW_CLASSIFICATION.AGENT) {
+      agents.push(candidate);
+    } else if (classification === SEAT_PREVIEW_CLASSIFICATION.DEAD_SHELL) {
+      deadShells.push(candidate);
+    } else {
+      unknowns.push(candidate);
+    }
+  }
+  return { ok: true, agents, unknowns, deadShells };
+}
+
 // terminal list 조회 -> worktreePath 정규화 일치 후보 추리기 (resolveSeatHandle,
 // A-1과 같은 형태) -- 0개는 {ok:true, seatCount:0}(정상), 2개+는 AMBIGUOUS로
 // 거부(자동 선택 금지), 조회 자체 실패는 LIST_QUERY_FAILED. collectSeatLivenessObservation
 // 에서 분리(복잡도 분산).
+//
+// HYK-345: raw 후보가 2개 이상일 때만(모호할 때만) previewLooksLikeAgent로
+// 한 번 더 거른다(D15/Looks-Like-Agent 이식, 위 주석) -- 걸러서 정확히
+// 1개면 그걸 고른다(빈 탭이 섞여 있던 경우), 0개면 좌석 없음(정상), 2개
+// 이상이면(진짜 좌석이 실제로 중복 기동한 경우) 여전히 AMBIGUOUS로
+// 거부한다(정당한 거부 무회귀, coder-task.md §2 완료조건2).
 function resolveSeatLivenessCandidate(worktreePath, opts) {
   let listResponse;
   try {
@@ -1129,13 +1251,34 @@ function resolveSeatLivenessCandidate(worktreePath, opts) {
     // 정상 -- 이 worktree에 좌석이 없다(조회 실패가 아니다).
     return { ok: true, seatCount: 0 };
   }
-  if (candidates.length > 1) {
+  if (candidates.length === 1) {
+    return { ok: true, seatCount: 1, handle: candidates[0].handle };
+  }
+  // raw 후보 2개 이상 -- HYK-345: 즉시 거부하기 전에 에이전트 마커로
+  // 세 갈래(agents/unknowns/deadShells)를 나눈다(classifySeatCandidates,
+  // 위 주석). ★HYK-345 2R(검토 P1 반려 수리): "미확정(unknowns)" 후보가
+  // 하나라도 남으면, 그것이 유일하게 남은 후보여도 "그게 에이전트다"라고
+  // 확정할 근거가 없다 -- deadShells를 뺀 나머지(agents+unknowns) 안에
+  // unknowns가 하나라도 있으면 고르지 않고 AMBIGUOUS로 닫는다(1R의
+  // "빼지 않는다"≠"통과시킨다" 결함 수리 -- §1 요구 그대로).
+  const classified = classifySeatCandidates(candidates, opts);
+  if (classified.unknowns.length > 0) {
     return denySeatLivenessObservation(
       SEAT_LIVENESS_OBSERVATION_REASON.AMBIGUOUS,
-      `orca-adapter: collectSeatLivenessObservation -- ${candidates.length} seats found for worktreePath '${worktreePath}', refusing to guess (A-1 원칙 계승)`,
+      `orca-adapter: collectSeatLivenessObservation -- ${classified.unknowns.length} candidate(s) for worktreePath '${worktreePath}' could not be confirmed as agent or dead shell (preview query failed/empty/unrecognized), refusing to guess whether the sole remaining candidate is the seat (of ${candidates.length} raw candidates, ${classified.agents.length} confirmed agent, ${classified.deadShells.length} confirmed dead shell)`,
     );
   }
-  return { ok: true, seatCount: 1, handle: candidates[0].handle };
+  if (classified.agents.length === 0) {
+    // 미확정 0 + 에이전트 0 -- 전부 확정 빈 셸이었다(정상, 좌석 없음).
+    return { ok: true, seatCount: 0 };
+  }
+  if (classified.agents.length > 1) {
+    return denySeatLivenessObservation(
+      SEAT_LIVENESS_OBSERVATION_REASON.AMBIGUOUS,
+      `orca-adapter: collectSeatLivenessObservation -- ${classified.agents.length} agent seats found for worktreePath '${worktreePath}' (of ${candidates.length} raw candidates), refusing to guess (A-1 원칙 계승)`,
+    );
+  }
+  return { ok: true, seatCount: 1, handle: classified.agents[0].handle };
 }
 
 // terminal show 조회 -> lastOutputAt(계약: number, epoch ms) + title(reasonHint
