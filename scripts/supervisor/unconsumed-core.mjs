@@ -66,9 +66,18 @@ export const UNCONSUMED_VERDICT = Object.freeze({
   UNDECIDABLE: "UNDECIDABLE",
 });
 
+// HYK-340-vanished-unresolved (coder-task.md §3) -- 세 번째 소비 흔적.
+// 「마지막 라운드」(결과 파일 갱신 이후 다음 task 파일도, 새 커밋도 아직
+// 없는 상태)에서도 소비가 실제로는 이미 끝났을 수 있다 -- 소비
+// 핸드셰이크(relay-handshake.mjs) 자신이 성공할 때마다 워크트리 안
+// `.harness/receipts/<role>-receipt-r<N>.json`에 영수증을 남기기 때문
+// (consumption-receipt-writer.mjs). 그 영수증이 결과 파일보다 새것이면
+// 세 번째 소비 흔적으로 인정한다 -- 신뢰 경계 판단(coder-task.md §3 ⓐ/ⓑ)은
+// 호출자(orch-stall-detect.mjs)가 지고, 이 코어는 새 kind 하나만 안다.
 export const UNCONSUMED_SIGNAL_KIND = Object.freeze({
   TASK_FILE_DROPPED_AFTER: "TASK_FILE_DROPPED_AFTER",
   NEW_COMMIT_AFTER: "NEW_COMMIT_AFTER",
+  CONSUMPTION_RECEIPT_AFTER: "CONSUMPTION_RECEIPT_AFTER",
 });
 
 export const UNCONSUMED_REASON = Object.freeze({
@@ -83,6 +92,7 @@ export const UNCONSUMED_REASON = Object.freeze({
   SIGNAL_IN_FUTURE: "SIGNAL_IN_FUTURE",
   CONSUMED_VIA_TASK_DROP: "CONSUMED_VIA_TASK_DROP",
   CONSUMED_VIA_NEW_COMMIT: "CONSUMED_VIA_NEW_COMMIT",
+  CONSUMED_VIA_RECEIPT: "CONSUMED_VIA_RECEIPT",
   NO_SIGNAL_TOO_EARLY: "NO_SIGNAL_TOO_EARLY",
   NO_SIGNAL_PAST_THRESHOLD: "NO_SIGNAL_PAST_THRESHOLD",
 });
@@ -148,6 +158,8 @@ const REASON_BY_SIGNAL_KIND = Object.freeze({
     UNCONSUMED_REASON.CONSUMED_VIA_TASK_DROP,
   [UNCONSUMED_SIGNAL_KIND.NEW_COMMIT_AFTER]:
     UNCONSUMED_REASON.CONSUMED_VIA_NEW_COMMIT,
+  [UNCONSUMED_SIGNAL_KIND.CONSUMPTION_RECEIPT_AFTER]:
+    UNCONSUMED_REASON.CONSUMED_VIA_RECEIPT,
 });
 
 // 가장 이른(=가장 먼저 소비를 증명한) 신호를 고른다 -- 여러 신호가 동시에

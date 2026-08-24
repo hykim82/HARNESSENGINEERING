@@ -1734,7 +1734,97 @@ export function collectUnconsumedCandidates(repoRoot, opts = {}) {
   return { items, failed: false };
 }
 
-// unconsumed-core.mjs가 인정하는 두 신호를 저장소 흔적에서 만든다(코어
+// HYK-340-vanished-unresolved (coder-task.md §3) -- 세 번째 소비 흔적의
+// 수집부(호출자, 코어는 kind만 안다). 신뢰 경계 선택(coder-task.md §3
+// ⓐ/ⓑ): 이 축은 게이트가 아니라 감시기다(오탐이 나도 사람이 원장을
+// 직접 확인해 접는다 -- §0 M3 실측, 오늘 이미 두 번 그렇게 했다). ⓑ(관제실
+// admission 원장이 그 라운드 예약을 반납된 상태로 아는가)는 더 강한 신뢰
+// 경계지만, 그 원장은 워크트리 밖 관제실 소유 자원이라 경로를 얻으려면
+// admission-completion-adapter.mjs의 mainRepoRoot/영속 포인터 결선 전체를
+// 이 축에도 새로 심어야 한다(레저 자체가 "예약 하나"를 다루지 "이 라운드가
+// 이 워크트리의 어느 결과 파일에 대응하는가"를 모른다 -- reservationId
+// 결속을 이 축이 새로 만들어야 함). ⓐ(워크트리 안의 소비 영수증)는
+// consumption-receipt-writer.mjs가 이미 `checkRelayHandshake`(ORCH 쪽 중립
+// 실행부, 워커 프로세스가 아니다)의 성공 경로에서만 실제로 쓰는 파일이고,
+// mtime 하나만 읽으면 되어 이 축의 나머지 두 신호(TASK_FILE_DROPPED_AFTER/
+// NEW_COMMIT_AFTER)와 정확히 같은 "가벼운 관측"으로 남는다. 그래서 ⓐ를
+// 택한다 -- 워커가 이론상 이 파일을 위조할 수 있다는 사실은 남지만(§3의
+// 명시된 잔여 표면), 이 축이 오탐을 냈을 때의 결과는 "사람이 한 번 더
+// 확인한다"이지 "배달이 막힌다"가 아니므로 그 위험을 감당할 수 있다.
+// eslint complexity 상한(12) 준수를 위해 collectReceiptEvidenceForRole의
+// 몸통을 세 조각으로 쪼갠다(consumption-receipt-core.mjs가 이미 쓴 선례
+// 그대로 -- "판정을 합치거나 줄여서"가 아니라 "각 단계를 작은 순수/단일
+// 책임 함수로 분리해서" 낮춘다, 그 파일 275-283행 주석 참조). 로직·값은
+// 원문과 동일하다.
+function resolveReceiptScanFns(opts) {
+  return {
+    readdirFn:
+      typeof opts.receiptsReaddirFn === "function"
+        ? opts.receiptsReaddirFn
+        : readdirSync,
+    statFn: typeof opts.statFn === "function" ? opts.statFn : statSync,
+    existsFn: typeof opts.existsFn === "function" ? opts.existsFn : existsSync,
+  };
+}
+
+// consumption-receipt-writer.mjs의 nextReceiptFileName과 동일한 대소문자
+// 무관 패턴("i" 플래그, 그 파일 60-72행 주석과 동일 근거 -- Windows가
+// 대소문자를 구별하지 않아 role 표기가 갈리면 실제로 같은 파일을 가리킬
+// 수 있다). role 자체를 정규식 특수문자로부터 이스케이프한다(그 파일의
+// escapeForRegex와 동일한 최소 재현 -- export 안 된 모듈-지역 함수라
+// import할 수 없다).
+function receiptFileNamePattern(role) {
+  const escapedRole = String(role).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`^${escapedRole}-receipt-r\\d+\\.json$`, "i");
+}
+
+// names(이미 readdir된 목록) 중 role 패턴에 맞는 파일들만 stat해 가장
+// 최신 mtime을 고른다. stat 실패는 {ok:false}로 전체를 닫는다(§4-2와
+// 동일 원칙 -- "영수증 없음"으로 뭉개지 않는다).
+function latestReceiptMtimeMs(
+  names,
+  { receiptsDir, pattern, statFn, existsFn },
+) {
+  let latestMtimeMs = null;
+  for (const name of names) {
+    if (!pattern.test(name)) continue;
+    const full = path.join(receiptsDir, name);
+    if (!existsFn(full)) continue; // readdir엔 있었는데 방금 사라짐(레이스).
+    let st;
+    try {
+      st = statFn(full);
+    } catch {
+      return { ok: false }; // stat 실패를 "영수증 없음"으로 뭉개지 않는다.
+    }
+    if (st.isDirectory()) continue; // 위장 방어(defensive, 실제로는 안 생김).
+    if (typeof st.mtimeMs === "number" && Number.isFinite(st.mtimeMs)) {
+      if (latestMtimeMs === null || st.mtimeMs > latestMtimeMs) {
+        latestMtimeMs = st.mtimeMs;
+      }
+    }
+  }
+  return { ok: true, latestMtimeMs };
+}
+
+function collectReceiptEvidenceForRole(repoRoot, role, opts = {}) {
+  const { readdirFn, statFn, existsFn } = resolveReceiptScanFns(opts);
+  const receiptsDir = path.join(repoRoot, ".harness", "receipts");
+  let names;
+  try {
+    names = readdirFn(receiptsDir);
+  } catch (err) {
+    if (err && err.code === "ENOENT") return { ok: true, latestMtimeMs: null };
+    return { ok: false };
+  }
+  return latestReceiptMtimeMs(names, {
+    receiptsDir,
+    pattern: receiptFileNamePattern(role),
+    statFn,
+    existsFn,
+  });
+}
+
+// unconsumed-core.mjs가 인정하는 세 신호를 저장소 흔적에서 만든다(코어
 // 헤더 주석 "«소비 흔적»의 정의" 참조). ★대상 자신의 task 파일뿐 아니라
 // 이 워크트리의 taskFileCandidates 전부를 본다 -- 오늘 실측 13:44 계열
 // 표본은 coder.md(대상)가 아니라 review-task.md(다음 role)가 다음 라운드를
@@ -1747,7 +1837,17 @@ export function collectUnconsumedCandidates(repoRoot, opts = {}) {
 // `taskFileMtimeMs`를 못 구한 항목(수집 단계에서 이미 실패로 닫혔어야
 // 하지만, 방어적으로 이 함수도 형식을 재확인한다)은 조용히 건너뛰지
 // 않고 `{ok:false}`로 함수 전체를 닫는다.
-function buildUnconsumedSignals(taskFileCandidates, targetMtimeMs, commitInfo) {
+//
+// HYK-340-vanished-unresolved (coder-task.md §3): `receiptInfo`가 셋째
+// 인자로 온다 -- `collectReceiptEvidenceForRole`의 결과, 대상(target)
+// 역할의 영수증 중 가장 최신 mtime. `null`이면(영수증 없음) 신호를 만들지
+// 않는다(§5 요구2 "증거가 없는 진짜 미소비는 여전히 SUSPECTED_UNCONSUMED"
+// -- 회귀 0).
+// eslint complexity 상한(12) 준수를 위해 taskFileCandidates 루프를 뽑는다
+// (HYK-340-vanished-unresolved, resolveReceiptScanFns와 동일 사유). 반환:
+// 성공 시 {ok:true, signals}, 실패(mtime 형식 위반) 시
+// {ok:false, unavailablePath}(원문과 동일).
+function taskFileDroppedSignals(taskFileCandidates, targetMtimeMs) {
   const signals = [];
   for (const item of Array.isArray(taskFileCandidates)
     ? taskFileCandidates
@@ -1766,17 +1866,61 @@ function buildUnconsumedSignals(taskFileCandidates, targetMtimeMs, commitInfo) {
       });
     }
   }
+  return { ok: true, signals };
+}
+
+// commitInfo/receiptInfo는 모양이 같다({ok, <필드> > targetMtimeMs면
+// 신호}) -- 두 신호 각각을 단일 항목 배열(또는 빈 배열)로 통일해 만들면
+// buildUnconsumedSignals 몸통이 분기 없이 이어붙이기만 하면 된다.
+function commitAfterSignal(commitInfo, targetMtimeMs) {
   if (
     commitInfo.ok &&
     typeof commitInfo.commitTimeMs === "number" &&
     commitInfo.commitTimeMs > targetMtimeMs
   ) {
-    signals.push({
-      kind: UNCONSUMED_SIGNAL_KIND.NEW_COMMIT_AFTER,
-      atMs: commitInfo.commitTimeMs,
-    });
+    return [
+      {
+        kind: UNCONSUMED_SIGNAL_KIND.NEW_COMMIT_AFTER,
+        atMs: commitInfo.commitTimeMs,
+      },
+    ];
   }
-  return { ok: true, signals };
+  return [];
+}
+
+function receiptAfterSignal(receiptInfo, targetMtimeMs) {
+  if (
+    receiptInfo &&
+    receiptInfo.ok &&
+    typeof receiptInfo.latestMtimeMs === "number" &&
+    receiptInfo.latestMtimeMs > targetMtimeMs
+  ) {
+    return [
+      {
+        kind: UNCONSUMED_SIGNAL_KIND.CONSUMPTION_RECEIPT_AFTER,
+        atMs: receiptInfo.latestMtimeMs,
+      },
+    ];
+  }
+  return [];
+}
+
+function buildUnconsumedSignals(
+  taskFileCandidates,
+  targetMtimeMs,
+  commitInfo,
+  receiptInfo,
+) {
+  const taskSignals = taskFileDroppedSignals(taskFileCandidates, targetMtimeMs);
+  if (!taskSignals.ok) return taskSignals;
+  return {
+    ok: true,
+    signals: [
+      ...taskSignals.signals,
+      ...commitAfterSignal(commitInfo, targetMtimeMs),
+      ...receiptAfterSignal(receiptInfo, targetMtimeMs),
+    ],
+  };
 }
 
 // judgeUnconsumedForRepo({repoRoot, taskFileCandidates, now}, opts) -- 단일
@@ -1803,10 +1947,28 @@ export function judgeUnconsumedForRepo(
       resultFile: resultFileInfo,
     };
   }
+  // HYK-340-vanished-unresolved (coder-task.md §3): target 자신의 role을
+  // (`.harness/<role>-task.md` 관례, buildUnconsumedCandidateItem이 이미
+  // 이 관례로 relPath를 만든다) 대상 경로에서 역산해 그 역할의 영수증만
+  // 본다 -- 다른 역할의 영수증이 우연히 새것이라고 이 역할의 소비 흔적으로
+  // 오인하지 않는다.
+  const targetRoleMatch = /^\.harness\/(.+)-task\.md$/.exec(target.path);
+  const targetRole = targetRoleMatch ? targetRoleMatch[1] : null;
+  const receiptInfo = targetRole
+    ? collectReceiptEvidenceForRole(repoRoot, targetRole, opts)
+    : { ok: true, latestMtimeMs: null };
+  if (!receiptInfo.ok) {
+    return {
+      status: UNCONSUMED_WIRE_STATUS.COLLECTION_FAILED,
+      reason: "unconsumed: receipts read failed",
+      resultFile: resultFileInfo,
+    };
+  }
   const signalsResult = buildUnconsumedSignals(
     taskFileCandidates,
     resultFileInfo.mtimeMs,
     commitInfo,
+    receiptInfo,
   );
   if (!signalsResult.ok) {
     return {

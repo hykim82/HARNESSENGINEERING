@@ -912,29 +912,10 @@ test("static: orch-stall-detect.mjs never fetches over the network (no fetch/git
   assert.equal(/["']pull["']/.test(codeOnly), false);
 });
 
-// HYK-185 seat-wire: seat-liveness-wire.test.mjs now legitimately imports
-// orch-stall-detect.mjs too (it exercises the same production entry point
-// from a different angle -- the seat-liveness wiring). It is excluded
-// below on the same "own .test.mjs" basis as orch-stall-detect.test.mjs
-// itself; no production (non-test) file imports this module.
-// HYK-185-seat-idle-1: seat-idle-wire.test.mjs is the same shape one more
-// time -- it exercises the same production entry point for the new idle
-// axis. Excluded on the identical "own .test.mjs" basis.
-// HYK-185-startcheck-wire: dispatch-start-wire.test.mjs is the same shape
-// again for the new dispatch-start axis. Excluded on the identical "own
-// .test.mjs" basis (watch-run.mjs itself still only ever spawns this file
-// as a subprocess -- it never `import`s it, so this test's actual claim,
-// "no production ES-module import exists," remains true after this wiring).
-// HYK-185-seat-multi: hyk185-seat-multi-repro.test.mjs is the same shape
-// once more -- it imports judgeSeatIdleForRepo/judgeSeatLivenessForRepo/
-// judgeDispatchStartForRepo directly to show the real 2026-08-05 21:36 KST
-// sample's before/after difference (coder-task.md acceptance (a)). It is
-// itself a `.test.mjs`, so it is excluded on the identical basis as the
-// three files above.
-// HYK-185-unconsumed-1: unconsumed-wire.test.mjs is the same shape once
-// more -- it exercises the same production entry point for the new
-// "unconsumed" axis (judgeUnconsumedForRepo/judgeUnconsumedAcrossWorktrees).
-// Excluded on the identical "own .test.mjs" basis.
+// no production (non-test) file imports this module -- only its own
+// .test.mjs wire tests do, each with its own "why excluded" comment
+// inline in OWN_TEST_FILE_SUFFIXES below (HYK-340-vanished-unresolved
+// moved this explanation there when the exclusion list became an array).
 test("static: no PRODUCTION code imports orch-stall-detect.mjs yet (h -- can be called is not the same as is being called; only its own .test.mjs files do)", () => {
   let grepOut;
   try {
@@ -961,35 +942,54 @@ test("static: no PRODUCTION code imports orch-stall-detect.mjs yet (h -- can be 
     if (err.status === 1) grepOut = "";
     else throw err;
   }
+  // HYK-340-vanished-unresolved (eslint complexity 상한 준수 수리): 이
+  // 목록이 늘어날수록 아래 filter의 `&&` 체인 길이가 그대로 eslint
+  // complexity 분기 수가 되어(ESLint complexity.js 실측, orch-stall-
+  // detect.mjs의 REASON_BY_SIGNAL_KIND 등과 동일 계열 실측) 새 wire 시험
+  // 파일 하나를 추가할 때마다 상한을 넘길 위험이 커진다. 그래서 배열 +
+  // `.some()`로 바꾼다 -- 각 항목의 "왜 제외되는가" 설명은 그대로
+  // 보존한다(판단 로직·값은 원문과 동일, 표현 형태만 바꾼다).
+  const OWN_TEST_FILE_SUFFIXES = [
+    "orch-stall-detect.mjs",
+    "orch-stall-detect.test.mjs",
+    "seat-liveness-wire.test.mjs",
+    "seat-idle-wire.test.mjs",
+    "dispatch-start-wire.test.mjs",
+    "hyk185-seat-multi-repro.test.mjs",
+    // HYK-185-unconsumed-1: unconsumed-wire.test.mjs exercises the same
+    // production entry point for the "unconsumed" axis
+    // (judgeUnconsumedForRepo/judgeUnconsumedAcrossWorktrees). Excluded
+    // on the same "own .test.mjs" basis as the files above.
+    "unconsumed-wire.test.mjs",
+    // HYK-340-vanished-unresolved: unconsumed-receipt-signal.test.mjs is
+    // the same shape once more -- it exercises the real production entry
+    // point (judgeUnconsumedForRepo/collectUnconsumedCandidates) for the
+    // new consumption-receipt signal on the existing "unconsumed" axis.
+    // Excluded on the identical "own .test.mjs" basis as
+    // unconsumed-wire.test.mjs above.
+    "unconsumed-receipt-signal.test.mjs",
+    // HYK-173-push-wire: escalation-axis-wire.test.mjs exercises the real
+    // production entry point (runOrchStallDetect) for the escalation
+    // axis. Excluded on the identical "own .test.mjs" basis.
+    "escalation-axis-wire.test.mjs",
+    // HYK-212-postcheck-1: dispatch-postcheck-wire.test.mjs/dispatch-
+    // postcheck-axis-wire.test.mjs are the same shape once more for the
+    // dispatch-postcheck axis. Excluded on the identical "own .test.mjs"
+    // basis.
+    "dispatch-postcheck-wire.test.mjs",
+    "dispatch-postcheck-axis-wire.test.mjs",
+    // HYK-239-chain-wire-2: dispatch-chain-wire.test.mjs/dispatch-chain-
+    // axis-wire.test.mjs are the same shape once more for the chain(원장
+    // 해시체인 위조 탐지) axis. Excluded on the identical "own .test.mjs"
+    // basis.
+    "dispatch-chain-wire.test.mjs",
+    "dispatch-chain-axis-wire.test.mjs",
+  ];
   const importers = grepOut
     .split(/\r?\n/)
     .filter(Boolean)
     .filter(
-      (f) =>
-        !f.endsWith("orch-stall-detect.mjs") &&
-        !f.endsWith("orch-stall-detect.test.mjs") &&
-        !f.endsWith("seat-liveness-wire.test.mjs") &&
-        !f.endsWith("seat-idle-wire.test.mjs") &&
-        !f.endsWith("dispatch-start-wire.test.mjs") &&
-        !f.endsWith("hyk185-seat-multi-repro.test.mjs") &&
-        !f.endsWith("unconsumed-wire.test.mjs") &&
-        // HYK-173-push-wire: escalation-axis-wire.test.mjs is the same
-        // shape once more -- it exercises the real production entry point
-        // (runOrchStallDetect) for the new escalation axis. Excluded on
-        // the identical "own .test.mjs" basis as the files above.
-        !f.endsWith("escalation-axis-wire.test.mjs") &&
-        // HYK-212-postcheck-1: dispatch-postcheck-wire.test.mjs/dispatch-
-        // postcheck-axis-wire.test.mjs are the same shape once more for
-        // the new dispatch-postcheck axis. Excluded on the identical "own
-        // .test.mjs" basis as the files above.
-        !f.endsWith("dispatch-postcheck-wire.test.mjs") &&
-        !f.endsWith("dispatch-postcheck-axis-wire.test.mjs") &&
-        // HYK-239-chain-wire-2: dispatch-chain-wire.test.mjs/dispatch-
-        // chain-axis-wire.test.mjs are the same shape once more for the
-        // new chain (원장 해시체인 위조 탐지) axis. Excluded on the
-        // identical "own .test.mjs" basis as the files above.
-        !f.endsWith("dispatch-chain-wire.test.mjs") &&
-        !f.endsWith("dispatch-chain-axis-wire.test.mjs"),
+      (f) => !OWN_TEST_FILE_SUFFIXES.some((suffix) => f.endsWith(suffix)),
     );
   assert.deepEqual(
     importers,
