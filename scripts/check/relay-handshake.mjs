@@ -1194,6 +1194,86 @@ function runCompletionSideEffects({
   return null;
 }
 
+// HYK-342/HYK-249 §3 채택 설계 -- «정지 종결(termination)» 후속효과.
+//
+// coder-task.md §1 기전: relay-handshake.mjs는 BLOCKED/NEEDS_INPUT을
+// ok:false로 되돌리고 여기서 멈췄다 -- 라운드를 닫는 후속효과 5종(봉투
+// 보관 2종·원장 자리 반납·소비 영수증 발행·첫 관측 기록)이 전부 ok:true
+// 가지(runCompletionSideEffects)에만 매달려 있어 정지 라운드는 그 중 어느
+// 것도 받지 못했다. HYK-249(자리 미반납)와 HYK-342(다음 배달 영구 거부)는
+// 이 하나의 결손의 증상 둘이다.
+//
+// 이 함수는 그 중 정지 경로에 맞는 세 가지만 붙인다: 봉투 보관 2종(그대로
+// 재사용, envelope-archive.mjs는 role/resultContent 또는 taskContent/
+// harnessDir만 받는 순수 함수라 ok:true 분기와 똑같이 부를 수 있다) ·
+// 원장 자리 반납(단 «완료»가 아니라 «정지 회수» 사유로 -- admission-
+// ledger-core.mjs의 completeReservation에 새로 추가된 선택적 reason 인자,
+// COMPLETION_REASON.BLOCKED_TERMINATION_RELEASED) · 중단 기록 작성
+// (abort-record-writer.mjs를 여기서 프로덕션에 처음 결선한다, HYK-298이
+// 만들었지만 프로덕션 호출자가 0이었던 그 문). 소비 영수증(정상 완료
+// 전용)과 첫 관측 기록(DONE 라인 전용)은 정지 라운드에 해당하지 않으므로
+// 붙이지 않는다.
+//
+// ⛔모두 best-effort, non-fatal -- 이 함수의 반환값(void)은 checkRelayHandshake
+// 자신의 ok:false/reason/state를 조금도 바꾸지 않는다(runCompletionSideEffects의
+// ok:true 분기와 동일한 "부수효과는 판정을 바꾸지 않는다" 원칙, S11).
+//
+// ⛔state가 정확히 "BLOCKED" | "NEEDS_INPUT"일 때만 실행한다(§3 "BLOCKED/
+// NEEDS_INPUT 가지" 그대로) -- AMBIGUOUS_BLOCKED/MALFORMED_BLOCKED/PENDING/
+// STALLED_PENDING은 "정상적으로 정지를 선언한 라운드"가 아니라 "판정 자체가
+// 불확실한" 상태이므로, 그런 상태에서 원장 자리를 반납하거나 중단 기록을
+// 남기면 아직 살아있을 수도 있는 라운드의 자리를 성급하게 빼앗는 결과가
+// 된다.
+function runBlockedTerminationSideEffectsIfApplicable({
+  state,
+  role,
+  harnessDir,
+  taskId,
+  taskContent,
+  resultContent,
+  droppedMatch,
+  dispatchId,
+  resultPath,
+  now,
+}) {
+  if (state !== "BLOCKED" && state !== "NEEDS_INPUT") return;
+
+  // ⚠️인자 순서가 runCompletionSideEffects의 동일 호출과 다르다(의도적 --
+  // 동작은 완전히 같지만, envelope-archive-mutation.test.mjs/hyk241-task-
+  // archive-mutation.test.mjs의 assertExactlyOneMatch가 정확히 1개의
+  // call-site 문자열만 찾도록 요구한다. 두 자리를 byte-identical로
+  // 만들면 "어느 자리를 변이할지" 자체가 모호해진다).
+  const envelopeArchived = autoArchiveRoundEnvelope({
+    role,
+    harnessDir,
+    resultContent,
+  });
+  const taskArchived = autoArchiveRoundTaskFile({
+    role,
+    harnessDir,
+    taskContent,
+  });
+  const abortReleased = spawnAdmissionAbortProcess(taskId, harnessDir);
+
+  spawnAbortRecordWriter({
+    role: role.toUpperCase(),
+    harnessDir,
+    harnessTaskLabel: taskId,
+    dispatchId,
+    droppedAt: droppedMatch[1].trim(),
+    leftoverFingerprint: computeResultFingerprint(resultContent),
+    leftoverPath: resultPath,
+    recordedAt: new Date(now).toISOString(),
+    evidence: {
+      source: "relay-handshake-blocked-termination",
+      state,
+      envelopeArchived,
+      taskArchived,
+      abortReleased,
+    },
+  });
+}
+
 // HYK-257-done-stamp-lint-1: decomposed into resolveTaskAndResultFiles/
 // resolveMatchedTaskId/checkRewriteAndStaleness/runCompletionSideEffects
 // (all defined immediately above, in the exact original inline order) to
@@ -1210,7 +1290,8 @@ export function checkRelayHandshake({
 }) {
   const filesResolved = resolveTaskAndResultFiles(role, harnessDir);
   if (!filesResolved.ok) return filesResolved;
-  const { taskContent, resultContent, resultMtimeMs } = filesResolved;
+  const { taskContent, resultContent, resultMtimeMs, resultPath } =
+    filesResolved;
 
   const idResolved = resolveMatchedTaskId(taskContent, resultContent);
   if (!idResolved.ok) return idResolved;
@@ -1227,7 +1308,26 @@ export function checkRelayHandshake({
     harnessDir,
     resultMtimeMs,
   });
-  if (!doneResolved.ok) return doneResolved;
+  if (!doneResolved.ok) {
+    // HYK-342/HYK-249: BLOCKED/NEEDS_INPUT termination side-effects run
+    // here, AFTER doneResolved's own verdict/reason/state are already fixed
+    // -- this call never changes `doneResolved` (returned byte-identical
+    // right below), it only adds best-effort bookkeeping (see the function's
+    // own header for why it's scoped to exactly these two states).
+    runBlockedTerminationSideEffectsIfApplicable({
+      state: doneResolved.state,
+      role,
+      harnessDir,
+      taskId,
+      taskContent,
+      resultContent,
+      droppedMatch,
+      dispatchId,
+      resultPath,
+      now,
+    });
+    return doneResolved;
+  }
   const { doneAt, doneMatch, observation } = doneResolved;
 
   // HYK-325 §2-3 (탐지, 거부 아님): a format-valid DONE line that finalize-
@@ -1352,6 +1452,38 @@ function spawnAdmissionCompletionProcess(taskId, harnessDir) {
     // sees the failure (coder-task §3: "화면에만 = 도달로 안 침").
     console.error(
       `relay-handshake: admission-completion spawn skipped/failed (non-fatal to this handshake's own exit code, HYK-224-3R §3 reasoning above): ${err.stderr ?? err.message}`,
+    );
+    return false;
+  }
+}
+
+// HYK-342/HYK-249: mirrors spawnAdmissionCompletionProcess exactly (same
+// subprocess-not-import reasoning, same try/catch/never-throws contract,
+// same wasAdmissionCompletionAttempted stdout-string check) -- the one
+// difference is the 4th CLI arg, which asks admission-completion-adapter.mjs
+// to stamp `completion_reason: BLOCKED_TERMINATION_RELEASED` (admission-
+// ledger-core.mjs's COMPLETION_REASON) on the released reservation instead
+// of leaving it unset (the ok:true path's normal-completion shape). Never
+// changes checkRelayHandshake's own return value/exit code (same S11
+// rationale as its sibling).
+function spawnAdmissionAbortProcess(taskId, harnessDir) {
+  try {
+    const adapterPath = join(
+      dirname(fileURLToPath(new URL(import.meta.url))),
+      "admission-completion-adapter.mjs",
+    );
+    const args = harnessDir
+      ? [adapterPath, taskId, harnessDir, "BLOCKED_TERMINATION_RELEASED"]
+      : [adapterPath, taskId];
+    const out = execFileSync("node", args, {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    console.log(out.trim());
+    return wasAdmissionCompletionAttempted(out);
+  } catch (err) {
+    console.error(
+      `relay-handshake: admission-abort spawn skipped/failed (non-fatal to this handshake's own exit code, HYK-342/HYK-249): ${err.stderr ?? err.message}`,
     );
     return false;
   }
@@ -1493,6 +1625,57 @@ function spawnConsumptionReceiptWriter({
     console.error(
       `relay-handshake: consumption-receipt-writer spawn skipped/failed (non-fatal to this handshake's own exit code): ${err.stderr ?? err.message}`,
     );
+  }
+}
+
+// HYK-342/HYK-249: mirrors spawnConsumptionReceiptWriter exactly (same
+// subprocess-not-import reasoning -- this file is staged into a small fixed-
+// file mutation-test isolation clone, relay-handshake.mjs/time-authority.mjs/
+// reject-streak.mjs/envelope-archive.mjs, and a 5th static import of
+// abort-record-writer.mjs would break module resolution for every one of
+// those tests at LOAD time; a spawn only fails at CALL time, absorbed by the
+// try/catch below). Writes `<harnessDir>/aborts/<role>-abort-r<N>.json` via
+// abort-record-writer.mjs's own CLI (HYK-298-abort-record-1) -- this is that
+// writer's first production caller (its own header documented zero
+// production callers before this round). Never changes checkRelayHandshake's
+// own return value/exit code (same S11 rationale as its sibling).
+function spawnAbortRecordWriter({
+  role,
+  harnessDir,
+  harnessTaskLabel,
+  dispatchId,
+  droppedAt,
+  leftoverFingerprint,
+  leftoverPath,
+  recordedAt,
+  evidence,
+}) {
+  try {
+    const scriptPath = join(
+      dirname(fileURLToPath(new URL(import.meta.url))),
+      "abort-record-writer.mjs",
+    );
+    const payload = JSON.stringify({
+      role,
+      harnessTaskLabel,
+      dispatchId,
+      droppedAt,
+      leftoverFingerprint,
+      leftoverPath,
+      recordedAt,
+      evidence,
+    });
+    const out = execFileSync("node", [scriptPath, harnessDir, payload], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    console.log(out.trim());
+    return true;
+  } catch (err) {
+    console.error(
+      `relay-handshake: abort-record-writer spawn skipped/failed (non-fatal to this handshake's own exit code, HYK-342/HYK-249): ${err.stderr ?? err.message}`,
+    );
+    return false;
   }
 }
 

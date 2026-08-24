@@ -129,6 +129,13 @@ export const DISPATCH_GATE_STATE = Object.freeze({
   // 북극성 1-B 세 요건 or a prerequisite-work declaration), never from a
   // spawned gate subprocess or the reject-streak ledger.
   REJECT_ONE_B_MISSING: "REJECT_ONE_B_MISSING",
+  // HYK-342 §4 요구6 (옆문 R4): evaluateConsumptionDecision's own bootstrap
+  // check (dispatch-gate-decision.mjs) -- distinct from every REJECT_* above
+  // because it originates from comparing "no live result file" against
+  // "does .harness/rounds/ hold any archived round for this role", never
+  // from a spawned gate subprocess, the reject-streak ledger, or the task
+  // packet's own 1-B declaration.
+  REJECT_RESULT_EVIDENCE_MISSING: "REJECT_RESULT_EVIDENCE_MISSING",
 });
 
 function firstNonEmpty(...candidates) {

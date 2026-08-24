@@ -1286,6 +1286,21 @@ function verifyAbortRecordDispatchId(record, receiptPath) {
 // (경로 미설정·파일 없음·JSON 파싱 실패) 그 예약이 없거나 completion_
 // reason이 정확히 "SUSPECT_TIMEOUT_RECOVERED"가 아니면 false(안전측
 // 기본값 -- "없으면 막는다").
+// HYK-342/HYK-249: 두 번째로 인정하는 회수 표식 값. sweepAndRecover의
+// 시간-기반 회수(SUSPECT_TIMEOUT_RECOVERED)와 달리, relay-handshake.mjs가
+// BLOCKED/NEEDS_INPUT 핸드셰이크에서 즉시(sweep 대기 없이) admission-
+// ledger-core.mjs의 completeReservation을 이 reason으로 불러 자리를
+// 반납한다(admission-ledger-core.mjs의 COMPLETION_REASON 참조 -- 이 파일은
+// 그 모듈을 새로 import하지 않는다, 기존 SUSPECT_TIMEOUT_RECOVERED 리터럴도
+// import 없이 직접 비교하는 이 파일의 기존 관례를 그대로 따른다). 둘 중
+// 하나만 있어도 "이 예약이 실제로 회수됐다"는 기계 표식으로 인정한다 --
+// admission-ledger-core.mjs의 sweep 상태기계 의미는 조금도 바뀌지 않는다
+// (completeReservation은 sweep이 아니라 명시적 소비자 호출이다).
+const RECOVERY_MARKER_ALLOWED_REASONS = new Set([
+  "SUSPECT_TIMEOUT_RECOVERED",
+  "BLOCKED_TERMINATION_RELEASED",
+]);
+
 function verifyAbortRecordRecoveryMarker(record, ledgerPath) {
   if (!isNonEmptyAbortString(ledgerPath)) return false;
   if (!isNonEmptyAbortString(record?.harnessTaskLabel)) return false;
@@ -1296,7 +1311,7 @@ function verifyAbortRecordRecoveryMarker(record, ledgerPath) {
     return false;
   }
   const entry = ledger?.reservations?.[record.harnessTaskLabel];
-  return entry?.completion_reason === "SUSPECT_TIMEOUT_RECOVERED";
+  return RECOVERY_MARKER_ALLOWED_REASONS.has(entry?.completion_reason);
 }
 
 // 이 축의 메인 진입점. evaluateConsumptionDecision이 harnessTaskLabel을
@@ -1306,6 +1321,29 @@ function verifyAbortRecordRecoveryMarker(record, ledgerPath) {
 // 하나 이상 있었다면(이 축이 실제로 판정에 관여했다면) 사유를 항상
 // stderr에 남긴다(조용한 통과/조용한 흡수 금지, ARCHIVE_MATCH와 동일
 // 원칙).
+// HYK-342/HYK-249 (HYK-244 2R-b3 결함2와 동일한 근본 원인): abort-record-
+// writer.mjs를 실제로 호출하는 프로덕션 생산자(relay-handshake.mjs의
+// runBlockedTerminationSideEffectsIfApplicable)는 완료 시점에 자기
+// dispatchId를 알 방법이 없다(그 파일 자신의 CLI 진입점은 dispatchId를
+// 전혀 받지 않는다 -- ORCH 실측: relay-core.mjs/orca-spike-*.mjs 등 어느
+// 실제 호출자도 checkRelayHandshake에 dispatchId를 넘기지 않는다). 같은
+// 비대칭을 consumption 축의 enrichCandidateDispatchId(위)가 이미
+// currentBinding 쪽에서 풀었다 -- 이 함수는 abort-record 후보 쪽에 같은
+// 보강을 적용한다: 기록이 이미 dispatchId를 담고 있으면(예: HYK-298의
+// 원래 MISSING-label 사용례처럼 사람이 직접 채운 경우) 그대로 두고, 비어
+// 있을 때만 같은 출처(dispatch-receipts.jsonl)에서 role+harnessTaskLabel로
+// 조회해 채운다 -- 지어내지 않는다(조회 실패/불명이면 그대로 undefined).
+function enrichAbortRecordDispatchId(record, receiptPath) {
+  if (isNonEmptyAbortString(record?.dispatchId)) return record;
+  const role = record?.role;
+  const harnessTaskLabel = record?.harnessTaskLabel;
+  if (!isNonEmptyAbortString(role) || !isNonEmptyAbortString(harnessTaskLabel))
+    return record;
+  const lookup = lookupDispatchId({ role, harnessTaskLabel, receiptPath });
+  if (!lookup.ok || !lookup.found) return record;
+  return { ...record, dispatchId: lookup.dispatchId };
+}
+
 function evaluateAbortRecordDecision({
   role,
   harnessDir,
@@ -1314,7 +1352,9 @@ function evaluateAbortRecordDecision({
   admissionLedgerPath,
 }) {
   const liveFingerprint = computeConsumptionResultFingerprint(resultText);
-  const records = readAbortRecordFiles(harnessDir, role);
+  const records = readAbortRecordFiles(harnessDir, role).map((record) =>
+    enrichAbortRecordDispatchId(record, receiptPath),
+  );
   const candidates = records.map((record) => ({
     record,
     dispatchIdVerified: verifyAbortRecordDispatchId(record, receiptPath),
@@ -1661,6 +1701,55 @@ function maybeResolveAbortRecordForMissingLabel({
   });
 }
 
+// HYK-342/HYK-249 §3/§4 요구1 -- 이름표가 VALID여도(정지 라운드는 task_id
+// 줄을 정상적으로 쓴다, §1 "빠진 고리 1") 중단 기록 축을 연다. ⛔새 판정
+// 로직을 발명하지 않는다 -- checkAbortRecord(코어)도 resolveAbortRecordOutcome
+// (바로 위 MISSING 축이 쓰는 그 함수)도 조금도 건드리지 않는다. 이 함수는
+// «언제 그 축에 도달하는가»라는 게이팅 조건 하나만 추가한다(위 MISSING
+// 전용 함수와 정확히 같은 모양, kind만 다르다). ⛔BROKEN은 여전히 이 문을
+// 얻지 못한다 -- kind가 정확히 "VALID"일 때만 열린다(★한용 위임 판정
+// "BROKEN 통과 열쇠 = 정상 소비 영수증 체인뿐"은 이 축이 조금도 건드리지
+// 않는다).
+//
+// evaluateConsumptionDecision에서의 호출 위치(정상 소비 경로 + 아카이브
+// 대조 + retirement 축이 전부 실패한 뒤, 맨 마지막)가 핵심이다 -- VALID
+// 라벨의 대다수(정상 완료 라운드)는 doneAt이 있어 정상 경로에서 이미
+// ALLOW로 끝나고 이 축에 도달조차 하지 않는다. 이 축에 실제로 도달하는
+// VALID 라운드는 "이름표는 멀쩡한데 정상 경로로는 절대 소비될 수 없는"
+// 라운드뿐이다 -- 그 중 진짜로 여기서 통과하는 것은 checkAbortRecord의
+// 증거 3종(지문 일치·dispatchId 실재·회수 표식)을 전부 갖춘 것뿐이다
+// (안전측 기본값은 그대로: 후보가 없거나 안 맞으면 NO_RECORD로 물러나
+// 원래 REJECT 사유가 그대로 보존된다).
+// HYK-342/HYK-249 2R (dispatch-gate-abort-wire.test.mjs §C 반례 수리):
+// `labelInfo.kind === "VALID"` 하나만으로 이 문을 열면, task_id도 있고
+// `>>> DONE:`도 있는데 «영수증만 아직 안 쓰인» 진짜 완료 라운드까지(HYK-298
+// 이전부터 있던 별개의 결손, 이 라운드 범위 밖) 이 축을 타 버린다 -- §C가
+// 지키던 "내용 있는 미소비는 이 축이 아예 적용되지 않는다"는 경계를
+// 침범한다. ⛔이 축이 실제로 구제해야 하는 것은 BLOCKED-termination 라운드
+// (task_id는 있지만 `>>> DONE:` 자체가 없는 모양)뿐이다 -- 그래서
+// `doneAtMissing`(호출자가 이미 뽑아 둔 currentBinding.doneAt이 undefined인지)
+// 을 두 번째 조건으로 함께 요구한다. DONE이 있는 VALID 라벨은(§C의 그
+// 시나리오) 여전히 이 축에 닿지 않는다 -- 경계는 조금도 넓어지지 않는다.
+function maybeResolveAbortRecordForValidLabel({
+  labelInfo,
+  doneAtMissing,
+  role,
+  harnessDir,
+  resultText,
+  receiptPath,
+  args,
+  env,
+}) {
+  if (labelInfo.kind !== "VALID" || !doneAtMissing) return { done: false };
+  return resolveAbortRecordOutcome({
+    role,
+    harnessDir,
+    resultText,
+    receiptPath,
+    admissionLedgerPath: resolveAdmissionLedgerPathForAbort(args, env),
+  });
+}
+
 // evaluateConsumptionDecision 자신의 eslint complexity 상한을 지키려고
 // 뽑았다(HYK-244-receipt-core-1b 선례와 동일한 이유, 판정/로그 문구는
 // 조금도 바뀌지 않는다, 몸통만 쪼갠다) -- lookupDispatchId 호출 + 그
@@ -1679,13 +1768,73 @@ function lookupDispatchIdWithLogging({ role, harnessTaskLabel, receiptPath }) {
   return lookup;
 }
 
+// HYK-342 §4 요구6 (옆문 R4): `.harness/rounds/`에 이 role의 이전 라운드
+// **결과** 봉투 사본(`<role>-r<N>.md`, envelope-archive.mjs의
+// archiveRoundEnvelope가 쓰는 그 파일 -- ⛔`<role>-task-r<N>.md`가 아니다)
+// 이 하나라도 있는지만 본다. task-file 사본(`-task-r<N>.md`)은 이 CLI
+// 자신이 매 배달마다 무조건 미리 찍어 두는 스냅샷(bestEffortSnapshot
+// RoundTaskFile, HYK-307-order-1)이라 「이 CLI가 최소 한 번 실행된 적
+// 있는가」만 증명할 뿐 「라운드가 실제로 완료/종결됐는가」는 증명하지
+// 못한다(진짜 첫 배달에서도 이 CLI 자신이 그 스냅샷을 찍은 뒤 부트스트랩
+// 검사를 하므로, task-file 패턴으로 확인하면 첫 배달조차 "이전 라운드
+// 있음"으로 오탐한다). 결과 봉투 사본은 오직 라운드가 실제로 소비될
+// 때만(정상 ok:true 완료의 autoArchiveRoundEnvelope, 또는 이제 BLOCKED-
+// termination의 동일 호출) 쓰이므로 "이 role이 이 harnessDir에서 최소
+// 한 라운드를 실제로 마쳤는가"의 정확한 신호다. 디렉터리 자체가 없으면
+// (가장 흔한 진짜 부트스트랩) false -- 지어내지 않는다.
+function hasAnyArchivedRoundForRole(harnessDir, role) {
+  const archiveDir = join(harnessDir, "rounds");
+  let names;
+  try {
+    names = readdirSync(archiveDir);
+  } catch {
+    return false;
+  }
+  const pattern = new RegExp(`^${role}-r\\d+\\.md$`, "i");
+  return names.some((name) => pattern.test(name));
+}
+
+// HYK-342 §4 요구6 (옆문 R4 수리) -- evaluateConsumptionDecision 자신의
+// eslint complexity/line 상한을 지키려고 뽑았다(HYK-244-receipt-core-1b
+// 선례와 동일한 이유, 판정/문구는 조금도 바뀌지 않는다). 결과 파일이 없는
+// 이유가 "이 role의 첫 라운드라 아직 아무것도 없다"(진짜 부트스트랩)와
+// "라운드가 있었고 완료/아카이브까지 됐는데 결과 파일 자체가(실수로든
+// 고의로든) 사라졌다"를 이전에는 구분하지 않고 둘 다 조용히 ALLOW했다 --
+// 직전 결과 파일(coder.md)을 치우기만 하면 같은 게이트가 뒤집히는
+// 옆문이었다. 아카이브 디렉터리(`.harness/rounds/`)에 이 role의 이전
+// 라운드 결과 봉투 사본이 하나라도 있으면 "첫 라운드"가 아니다 -- 그
+// 경우는 "증거가 사라진 폴더"로 보고 거부한다(안전측 기본값). 아카이브가
+// 전혀 없으면 진짜 부트스트랩이므로 기존과 동일하게 ALLOW한다(오탐 0).
+// 반환: `{shortCircuit:true, result:<null 또는 REJECT 모양>}` 이면 즉시
+// 그 result를 반환하라, `{shortCircuit:false}`면 결과 파일이 있으니 계속
+// 진행하라는 뜻이다.
+function resolveMissingResultFileOutcome(harnessDir, role, resultPath) {
+  if (existsSync(resultPath)) return { shortCircuit: false };
+  if (hasAnyArchivedRoundForRole(harnessDir, role)) {
+    return {
+      shortCircuit: true,
+      result: {
+        state: DISPATCH_GATE_STATE.REJECT_RESULT_EVIDENCE_MISSING,
+        allow: false,
+        reason: `dispatch-gate-decision consumption: 직전 결과 파일(${resultPath})이 없지만 .harness/rounds/ 에 이 role의 이전 라운드 아카이브가 있음 -> 부트스트랩(첫 라운드)이 아니라 증거가 사라진 것으로 판단, 배달 거부(안전측 기본값, HYK-342 §4 요구6). 조치: 결과 파일이 실수로 삭제됐는지 확인하거나, 진짜 정지 종결이면 relay-handshake.mjs의 BLOCKED-termination 경로(중단 기록 작성)를 거치게 하라`,
+      },
+    };
+  }
+  return { shortCircuit: true, result: null }; // 진짜 부트스트랩.
+}
+
 function evaluateConsumptionDecision(taskPath, args, env = process.env) {
   const role = deriveRoleFromTaskPath(taskPath);
   if (!role) return null;
 
   const harnessDir = dirname(taskPath);
   const resultPath = join(harnessDir, `${role}.md`);
-  if (!existsSync(resultPath)) return null; // 부트스트랩: 아직 소비할 직전 라운드가 없다.
+  const missingResult = resolveMissingResultFileOutcome(
+    harnessDir,
+    role,
+    resultPath,
+  );
+  if (missingResult.shortCircuit) return missingResult.result;
 
   const resultText = readFileSync(resultPath, "utf8");
 
@@ -1787,6 +1936,22 @@ function evaluateConsumptionDecision(taskPath, args, env = process.env) {
     harnessTaskLabel,
   });
   if (retirementOutcome.done) return retirementOutcome.result;
+
+  // HYK-342/HYK-249 §3/§4 요구1: 정상 경로 + retirement 축이 전부 실패로
+  // 확정된 뒤에만, VALID 라벨에 한해 중단 기록 축을 시도한다(정상 통로를
+  // 앞지르지 않는다, retirement와 동일 위치 원칙 -- 자세한 근거는
+  // maybeResolveAbortRecordForValidLabel 자신의 헤더 참조).
+  const validAbortOutcome = maybeResolveAbortRecordForValidLabel({
+    labelInfo,
+    doneAtMissing: currentBinding.doneAt === undefined,
+    role,
+    harnessDir,
+    resultText,
+    receiptPath,
+    args,
+    env,
+  });
+  if (validAbortOutcome.done) return validAbortOutcome.result;
 
   return decision;
 }

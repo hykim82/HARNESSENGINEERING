@@ -125,11 +125,17 @@ function reasonWithDetail(reasonCode, detail) {
   return `${reasonCode}${detail ? ` -- ${detail}` : " (no detail available)"}`;
 }
 
+// HYK-342/HYK-249: `reason` is a NEW, optional field threaded straight
+// through to completeReservation's own `args.reason` (admission-ledger-
+// core.mjs) -- see that function's header for the stamping contract. Every
+// pre-existing caller (the ok:true completion path) omits it, so this
+// function's behavior for them is byte-identical to before this round.
 export function completeAdmissionReservation({
   reservationId,
   ledgerPath,
   lockPath,
   now = new Date().toISOString(),
+  reason,
 }) {
   const outcome = withLedgerLock(ledgerPath, lockPath, (readResult) => {
     if (!readResult.ok) {
@@ -144,6 +150,7 @@ export function completeAdmissionReservation({
     const complete = completeReservation(readResult.ledger, {
       reservationId,
       now,
+      reason,
     });
     if (!complete.ok) {
       return {
@@ -306,7 +313,10 @@ function isInsideGitWorktree(dir) {
   }
 }
 
-export function autoCompleteAdmission({ reservationId, harnessDir }) {
+// HYK-342/HYK-249: `reason` (optional) is forwarded to completeAdmission
+// Reservation below unchanged -- see that function's own header. Every
+// pre-existing caller omits it (byte-identical no-op stamping behavior).
+export function autoCompleteAdmission({ reservationId, harnessDir, reason }) {
   let ledgerPath = process.env.ADMISSION_LEDGER_PATH;
   // HYK-312 §1: gate the persistent-pointer fallback below (never the
   // explicit ADMISSION_LEDGER_PATH env path just above, which is this
@@ -350,6 +360,7 @@ export function autoCompleteAdmission({ reservationId, harnessDir }) {
     reservationId,
     ledgerPath,
     lockPath,
+    reason,
   });
   if (!outcome.ok) {
     appendCompletionFailureAudit({
@@ -397,7 +408,12 @@ if (
     process.exit(1);
   }
   const harnessDir = process.argv[3];
-  const outcome = autoCompleteAdmission({ reservationId, harnessDir });
+  // HYK-342/HYK-249: 4th positional arg, optional, backward-compatible --
+  // pre-existing callers (relay-handshake.mjs's ok:true spawn) pass only
+  // 2-3 args, so `reason` is undefined and completeReservation's stamping
+  // stays off (see completeAdmissionReservation's own header).
+  const reason = process.argv[4];
+  const outcome = autoCompleteAdmission({ reservationId, harnessDir, reason });
   // HYK-312 §1: a blocked persistent-fallback attempt is the one outcome
   // shape that must NOT be treated like the pre-existing silent no-op below
   // -- it is a refusal (거부), not "not attempted", so it gets its own

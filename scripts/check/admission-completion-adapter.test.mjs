@@ -124,6 +124,99 @@ test("autoCompleteAdmission releases a real reservation when the env var is set 
   }
 });
 
+// HYK-342/HYK-249: `reason` is a NEW, optional field threaded straight
+// through to completeReservation's own `completion_reason` stamp -- this
+// pins the integration path relay-handshake.mjs's BLOCKED-termination side
+// effects use (spawnAdmissionAbortProcess -> this adapter's CLI -> here).
+test("autoCompleteAdmission with `reason` stamps completion_reason on the released reservation (BLOCKED-termination integration path)", () => {
+  const { dir, ledger, lock } = tmpPaths();
+  const savedLedger = process.env.ADMISSION_LEDGER_PATH;
+  const savedLock = process.env.ADMISSION_LOCK_PATH;
+  try {
+    runAdmissionCli([
+      "init-cutover",
+      "--ledger",
+      ledger,
+      "--lock",
+      lock,
+      "--live-seats",
+      "[]",
+    ]);
+    runAdmissionCli([
+      "admit",
+      "--ledger",
+      ledger,
+      "--lock",
+      lock,
+      "--reservation-id",
+      "HYK-342-blocked-1",
+      "--cap",
+      "1",
+    ]);
+
+    process.env.ADMISSION_LEDGER_PATH = ledger;
+    process.env.ADMISSION_LOCK_PATH = lock;
+    const outcome = autoCompleteAdmission({
+      reservationId: "HYK-342-blocked-1",
+      reason: "BLOCKED_TERMINATION_RELEASED",
+    });
+    assert.equal(outcome.attempted, true);
+    assert.equal(outcome.ok, true);
+
+    const written = JSON.parse(readFileSync(ledger, "utf8"));
+    assert.equal(
+      written.reservations["HYK-342-blocked-1"].completion_reason,
+      "BLOCKED_TERMINATION_RELEASED",
+    );
+  } finally {
+    if (savedLedger !== undefined)
+      process.env.ADMISSION_LEDGER_PATH = savedLedger;
+    else delete process.env.ADMISSION_LEDGER_PATH;
+    if (savedLock !== undefined) process.env.ADMISSION_LOCK_PATH = savedLock;
+    else delete process.env.ADMISSION_LOCK_PATH;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("completeAdmissionReservation without `reason` leaves completion_reason unset (byte-identical to the pre-HYK-342 ok:true path)", () => {
+  const { dir, ledger, lock } = tmpPaths();
+  try {
+    runAdmissionCli([
+      "init-cutover",
+      "--ledger",
+      ledger,
+      "--lock",
+      lock,
+      "--live-seats",
+      "[]",
+    ]);
+    runAdmissionCli([
+      "admit",
+      "--ledger",
+      ledger,
+      "--lock",
+      lock,
+      "--reservation-id",
+      "HYK-342-normal-1",
+      "--cap",
+      "1",
+    ]);
+    const outcome = completeAdmissionReservation({
+      reservationId: "HYK-342-normal-1",
+      ledgerPath: ledger,
+      lockPath: lock,
+    });
+    assert.equal(outcome.ok, true);
+    const written = JSON.parse(readFileSync(ledger, "utf8"));
+    assert.equal(
+      "completion_reason" in written.reservations["HYK-342-normal-1"],
+      false,
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("completeAdmissionReservation fails closed (ok:false) when the ledger path does not exist", () => {
   const { dir, ledger, lock } = tmpPaths();
   try {
