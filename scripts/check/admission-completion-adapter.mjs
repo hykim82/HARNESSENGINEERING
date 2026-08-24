@@ -45,8 +45,49 @@
 import { appendFileSync, mkdirSync, existsSync, readFileSync } from "node:fs";
 import { execSync } from "node:child_process";
 import { dirname, join } from "node:path";
-import { completeReservation } from "../supervisor/admission-ledger-core.mjs";
+import {
+  completeReservation,
+  COMPLETION_REASON,
+} from "../supervisor/admission-ledger-core.mjs";
 import { withLedgerLock } from "../supervisor/admission-ledger-store.mjs";
+// HYK-342 2R P1-1 (검토 원문 "회수 표식의 생산자 권한이 검증되지 않는다"):
+// ⛔처음에는 relay-handshake.mjs에서 resolveResultTaskId/
+// resolveResultBlockedState를 static import했으나, 실측 결과 이 파일을
+// 고정 파일 목록으로 격리 clone하는 mutation 시험이 실제로 있었다
+// (admission-completion-worktree-isolation.test.mjs·admission-completion-
+// persistent-source.test.mjs 등 -- 실행해서 MODULE_NOT_FOUND로 직접 확인,
+// "0건"이라던 최초 추정이 틀렸다). 그래서 이 파일 헤더가 위(§51-59
+// repoRoot/mainRepoRoot 주석)에서 이미 설명한 그 원칙("무거운/많이 참조되는
+// 모듈을 끌어들이지 않기 위해 작은 것들은 복제한다") 그대로, task_id 에코·
+// BLOCKED/NEEDS_INPUT 표지 판정에 필요한 최소 조각만 아래에 복제한다 --
+// relay-handshake.mjs의 TASK_ID_RE_G/BLOCKED_RE와 **바이트 동일**(그 파일
+// 자신의 정의를 그대로 인용) -- "새로 발명"이 아니라 "같은 계약을 옮겨
+// 적은 것"이다. 이 두 파일이 갈라지면(예: 근접-미스 처리가 relay-
+// handshake.mjs에서 갱신되는데 여기가 안 따라가면) 그 자체가 회귀이므로,
+// 이 상수들을 고칠 때는 반드시 relay-handshake.mjs의 동명 상수와
+// 대조하라(주석으로만 강제되는 계약 -- 기계 강제는 이번 범위 밖).
+const TASK_ID_RE_G = /^task_id:\s*(\S+)/gim;
+const BLOCKED_RE = /^>>>[ \t]*(BLOCKED|NEEDS_INPUT):[ \t]*(\S.*?)[ \t]*$/gim;
+
+// resolveResultTaskId(relay-handshake.mjs)의 최소 재현 -- "정확히 하나의
+// 줄머리 task_id: 값만 인정, 0개/2개 이상은 확정하지 않는다"는 동일 계약.
+function resolveEchoedTaskId(resultContent) {
+  const matches = [...resultContent.matchAll(TASK_ID_RE_G)];
+  if (matches.length !== 1) return { ok: false, count: matches.length };
+  return { ok: true, id: matches[0][1] };
+}
+
+// resolveResultBlockedState(relay-handshake.mjs)의 최소 재현 -- "정확히
+// 하나의 well-formed '>>> BLOCKED:'/'>>> NEEDS_INPUT:' 줄만 인정"은 그대로
+// 옮기되, 이 검증은 relay-handshake.mjs 자신의 전체 5-상태 판정(근접-미스
+// 세분류 포함)을 재구현하지 않는다 -- 여기 필요한 질문은 "유효한 표지가
+// 정확히 하나 있는가" 하나뿐이다(모호/근접-미스는 전부 "없음"으로 접어
+// 거부한다 -- 안전측 기본값, relay-handshake.mjs보다 엄격하면 엄격했지
+// 느슨하지 않다).
+function hasWellFormedBlockedMarker(resultContent) {
+  const matches = [...resultContent.matchAll(BLOCKED_RE)];
+  return matches.length === 1;
+}
 
 // repoRoot/mainRepoRoot -- duplicated from relay-handshake.mjs's own
 // (exported) versions rather than imported. This mirrors the repo-wide
@@ -125,18 +166,111 @@ function reasonWithDetail(reasonCode, detail) {
   return `${reasonCode}${detail ? ` -- ${detail}` : " (no detail available)"}`;
 }
 
+function isNonEmptyString(v) {
+  return typeof v === "string" && v.length > 0;
+}
+
+// HYK-342 2R P1-1 -- the closed set of `reason` values this adapter will
+// ever act on. 검토자 원문: "completeReservation은 비어 있지 않은 임의
+// 문자열을 completion_reason으로 기록한다" -- 어댑터가 그 임의성을
+// 그대로 통과시키던 것이 결함의 절반이었다. `undefined`(정상 완료, 기존
+// ok:true 경로)는 이 집합 밖에서 별도로 허용된다(아래 completeAdmission
+// Reservation 참조) -- 이 집합은 "완료 사유를 명시하는" 값만 닫는다.
+const KNOWN_COMPLETION_REASONS = new Set([
+  COMPLETION_REASON.BLOCKED_TERMINATION_RELEASED,
+]);
+
+// HYK-342 2R P1-1 -- «회수 표식의 생산자 권한» 검증. 검토자가 재현한
+// 공격(중단 핸드셰이크를 거치지 않고 이 어댑터를 직접 실행해 completion_
+// reason=BLOCKED_TERMINATION_RELEASED를 찍는 것)을 막는다: 이 reason을
+// 받아들이기 전에, «호출자가 만들어 낼 수 없는 것»이 아니라 «real relay-
+// handshake가 이미 확인했던 바로 그 사실»을 이 어댑터가 독립적으로
+// 다시 확인한다 -- (a) harnessDir/role이 가리키는 라이브 결과 파일이
+// 실제로 존재하고 (b) 그 결과 파일의 task_id 에코가 정확히 이
+// reservationId와 일치하고(HYK-183 anti-forgery, resolveResultTaskId 그대로
+// 재사용) (c) 그 결과 파일이 정확히 BLOCKED 또는 NEEDS_INPUT 상태로 판정
+// 되는가(resolveResultBlockedState 그대로 재사용, AMBIGUOUS/MALFORMED는
+// 불충분). 셋 중 하나라도 아니면 거부(fail-closed, "없으면 막는다") --
+// 표식 문자열 자체나 비밀값에 기대지 않는다(⛔검토자가 금지한 그 경로).
+function verifyBlockedTerminationEvidence({ harnessDir, role, reservationId }) {
+  if (!isNonEmptyString(harnessDir) || !isNonEmptyString(role)) {
+    return {
+      ok: false,
+      reason: `admission-completion-adapter: BLOCKED_TERMINATION_RELEASED 요청에 harnessDir/role이 없음 -- 증거를 확인할 대상 자체를 특정할 수 없음, 거부(안전측 기본값)`,
+    };
+  }
+  // resolveLiveRoundFilePaths(relay-handshake.mjs)와 동일한 파일명 관례
+  // (role을 소문자화해 `<role>.md`) -- Windows는 대소문자를 구별하지
+  // 않지만 Linux(CI)는 구별하므로 그대로 맞춘다.
+  const resultPath = join(harnessDir, `${String(role).toLowerCase()}.md`);
+  let resultContent;
+  try {
+    resultContent = readFileSync(resultPath, "utf8");
+  } catch (err) {
+    return {
+      ok: false,
+      reason: `admission-completion-adapter: BLOCKED_TERMINATION_RELEASED 증거 확인 실패 -- 결과 파일을 읽을 수 없음('${resultPath}': ${err.message}), 거부(안전측 기본값)`,
+    };
+  }
+  const taskIdResolved = resolveEchoedTaskId(resultContent);
+  if (!taskIdResolved.ok || taskIdResolved.id !== reservationId) {
+    return {
+      ok: false,
+      reason: `admission-completion-adapter: BLOCKED_TERMINATION_RELEASED 증거 확인 실패 -- 결과 파일('${resultPath}')의 task_id 에코가 reservationId('${reservationId}')와 일치하지 않거나 확정되지 않음(${taskIdResolved.ok ? `실제: ${taskIdResolved.id}` : `task_id 줄 ${taskIdResolved.count}개`}), 거부(안전측 기본값)`,
+    };
+  }
+  if (!hasWellFormedBlockedMarker(resultContent)) {
+    return {
+      ok: false,
+      reason: `admission-completion-adapter: BLOCKED_TERMINATION_RELEASED 증거 확인 실패 -- 결과 파일('${resultPath}')에 유효한 '>>> BLOCKED:'/'>>> NEEDS_INPUT:' 표지가 정확히 하나 있지 않음, 거부(안전측 기본값)`,
+    };
+  }
+  return { ok: true };
+}
+
 // HYK-342/HYK-249: `reason` is a NEW, optional field threaded straight
 // through to completeReservation's own `args.reason` (admission-ledger-
 // core.mjs) -- see that function's header for the stamping contract. Every
 // pre-existing caller (the ok:true completion path) omits it, so this
 // function's behavior for them is byte-identical to before this round.
+//
+// HYK-342 2R P1-1: `reason` is no longer trusted at face value -- a non-
+// empty value MUST be one of KNOWN_COMPLETION_REASONS (closed set), and
+// BLOCKED_TERMINATION_RELEASED specifically requires `harnessDir`/`role`
+// and passes verifyBlockedTerminationEvidence BEFORE completeReservation is
+// ever called -- a failed verification means NO completion happens at all
+// (fail-closed: this release path either has real corroborating evidence,
+// or it does not run).
 export function completeAdmissionReservation({
   reservationId,
   ledgerPath,
   lockPath,
   now = new Date().toISOString(),
   reason,
+  harnessDir,
+  role,
 }) {
+  if (reason !== undefined && !KNOWN_COMPLETION_REASONS.has(reason)) {
+    return {
+      ok: false,
+      reasonCode: "UNKNOWN_COMPLETION_REASON",
+      reason: `admission-completion-adapter: 알 수 없는 completion reason('${reason}') -- 닫힌 집합(${[...KNOWN_COMPLETION_REASONS].join(", ")}) 밖의 값은 거부(안전측 기본값, HYK-342 2R P1-1) -- reservation '${reservationId}' NOT released`,
+    };
+  }
+  if (reason === COMPLETION_REASON.BLOCKED_TERMINATION_RELEASED) {
+    const evidence = verifyBlockedTerminationEvidence({
+      harnessDir,
+      role,
+      reservationId,
+    });
+    if (!evidence.ok) {
+      return {
+        ok: false,
+        reasonCode: "BLOCKED_TERMINATION_EVIDENCE_MISSING",
+        reason: `${evidence.reason} -- reservation '${reservationId}' NOT released`,
+      };
+    }
+  }
   const outcome = withLedgerLock(ledgerPath, lockPath, (readResult) => {
     if (!readResult.ok) {
       return {
@@ -316,7 +450,15 @@ function isInsideGitWorktree(dir) {
 // HYK-342/HYK-249: `reason` (optional) is forwarded to completeAdmission
 // Reservation below unchanged -- see that function's own header. Every
 // pre-existing caller omits it (byte-identical no-op stamping behavior).
-export function autoCompleteAdmission({ reservationId, harnessDir, reason }) {
+// HYK-342 2R P1-1: `role` (optional) is forwarded alongside `reason` --
+// required only when reason===BLOCKED_TERMINATION_RELEASED (see
+// verifyBlockedTerminationEvidence); every pre-existing caller omits both.
+export function autoCompleteAdmission({
+  reservationId,
+  harnessDir,
+  reason,
+  role,
+}) {
   let ledgerPath = process.env.ADMISSION_LEDGER_PATH;
   // HYK-312 §1: gate the persistent-pointer fallback below (never the
   // explicit ADMISSION_LEDGER_PATH env path just above, which is this
@@ -361,6 +503,8 @@ export function autoCompleteAdmission({ reservationId, harnessDir, reason }) {
     ledgerPath,
     lockPath,
     reason,
+    harnessDir,
+    role,
   });
   if (!outcome.ok) {
     appendCompletionFailureAudit({
@@ -413,7 +557,17 @@ if (
   // 2-3 args, so `reason` is undefined and completeReservation's stamping
   // stays off (see completeAdmissionReservation's own header).
   const reason = process.argv[4];
-  const outcome = autoCompleteAdmission({ reservationId, harnessDir, reason });
+  // HYK-342 2R P1-1: 5th positional arg, optional -- required only when
+  // reason===BLOCKED_TERMINATION_RELEASED (verifyBlockedTerminationEvidence
+  // rejects that reason without it). Every pre-2R call site (and the
+  // ok:true normal-completion path) never passes a 5th arg.
+  const role = process.argv[5];
+  const outcome = autoCompleteAdmission({
+    reservationId,
+    harnessDir,
+    reason,
+    role,
+  });
   // HYK-312 §1: a blocked persistent-fallback attempt is the one outcome
   // shape that must NOT be treated like the pre-existing silent no-op below
   // -- it is a refusal (거부), not "not attempted", so it gets its own

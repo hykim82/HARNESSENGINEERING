@@ -447,18 +447,17 @@ test("RED(변이, 필수): validAbortOutcome.done 단락을 제거하면 §A의 
 test("RED(변이, 필수): R4 부트스트랩 판별을 되돌리면(항상 null) §C-1의 옆문이 다시 열려 증거 사라짐도 조용히 ALLOW된다", () => {
   const src = readFileSync(SCRIPT_PATH, "utf8");
   const target =
-    "function resolveMissingResultFileOutcome(harnessDir, role, resultPath) {\n  if (existsSync(resultPath)) return { shortCircuit: false };\n";
+    "  if (existsSync(resultPath)) return { shortCircuit: false };\n  const hasLocalArchive = hasAnyArchivedRoundForRole(harnessDir, role);\n";
   assertExactlyOneMatch(
     src,
     target,
     "resolveMissingResultFileOutcome R4 guard entry",
   );
-  // 옆문을 원상(HYK-342 이전)으로 되돌리는 변이: hasAnyArchivedRoundForRole
-  // 판별 없이 결과 파일이 없으면 항상 부트스트랩(null)으로 접는다(나머지
-  // 원문 몸통은 그 뒤에 죽은 코드로 남는다 -- 문법은 여전히 유효하다).
+  // 옆문을 원상(HYK-342 1R 이전)으로 되돌리는 변이: 어떤 증거 판별도 없이
+  // 결과 파일이 없으면 항상 부트스트랩(null)으로 접는다.
   const mutated = src.replace(
     target,
-    "function resolveMissingResultFileOutcome(harnessDir, role, resultPath) {\n  if (existsSync(resultPath)) return { shortCircuit: false };\n  return { shortCircuit: true, result: null }; // MUTATED: 옛 무조건 부트스트랩\n",
+    "  if (existsSync(resultPath)) return { shortCircuit: false };\n  return { shortCircuit: true, result: null }; // MUTATED: 옛 무조건 부트스트랩\n  const hasLocalArchive = hasAnyArchivedRoundForRole(harnessDir, role);\n",
   );
 
   withFixtureDir((dir) => {
@@ -492,6 +491,75 @@ test("RED(변이, 필수): R4 부트스트랩 판별을 되돌리면(항상 null
         r.status,
         0,
         "RED: 옆문을 원상복구하면 증거 사라짐도 다시 조용히 ALLOW돼야 한다 -- 이 판별이 실제로 결과를 바꾼다는 증거",
+      );
+    } finally {
+      rmSync(fixtureDir, { recursive: true, force: true });
+    }
+  });
+
+  const srcAfter = readFileSync(SCRIPT_PATH, "utf8");
+  assert.equal(
+    srcAfter,
+    src,
+    "원본 dispatch-gate-decision.mjs는 이 시험 전후 바이트 동일해야 한다",
+  );
+});
+
+// ---------------------------------------------------------------------------
+// RED(변이, 필수, HYK-342 2R P1-2): 검토자가 재현한 «결과 파일 + rounds/
+// 함께 삭제» 공격이 dispatch-receipts.jsonl 앵커(hasReceipt) 없이는
+// 다시 뚫리는 것을 확인한다 -- 로컬 아카이브 판별(hasLocalArchive)만
+// 남기고 영수증 판별을 빼면, 둘 다 지운 공격이 다시 조용히 ALLOW된다.
+// ---------------------------------------------------------------------------
+
+test("RED(변이, 필수, HYK-342 2R P1-2): hasReceipt 판별을 빼면(로컬 아카이브만 남으면) 결과 파일+rounds/를 함께 지운 공격이 다시 ALLOW로 샌다", () => {
+  const src = readFileSync(SCRIPT_PATH, "utf8");
+  const target = "if (hasLocalArchive || hasReceipt) {";
+  assertExactlyOneMatch(src, target, "P1-2 combined evidence check");
+  const mutated = src.replace(
+    target,
+    "if (hasLocalArchive /* MUTATED: || hasReceipt 제거 */) {",
+  );
+
+  withFixtureDir((dir) => {
+    const scriptsCheckDir = stageScriptsCheckDir(dir, {
+      "dispatch-gate-decision.mjs": mutated,
+    });
+    const mutantPath = join(scriptsCheckDir, "dispatch-gate-decision.mjs");
+
+    const fixtureDir = mkdtempSync(
+      join(tmpdir(), "dispatch-gate-blocked-term-mut-p12-"),
+    );
+    try {
+      const role = "coder";
+      const taskPath = writeNextTaskFile(
+        fixtureDir,
+        role,
+        "HYK-9304-p12-mut",
+        "2026-08-24 08:00:00 KST",
+      );
+      const dispatchReceiptPath = join(fixtureDir, "dispatch-receipts.jsonl");
+      writeDispatchReceiptLine(dispatchReceiptPath, {
+        role: "CODER",
+        harnessTaskLabel: "HYK-9304-p12-mut",
+        dispatchId: "ctx_p12_mut",
+      });
+      const streakLedgerPath = join(fixtureDir, "reject-streak.json");
+      writeLedger(streakLedgerPath, { schema_version: 1, issues: {} });
+
+      // ⛔결과 파일도 rounds/도 만들지 않는다(검토자 재현 그대로) -- 유일한
+      // 남은 증거는 dispatch-receipts.jsonl뿐이다.
+      const r = runCli(mutantPath, [
+        taskPath,
+        "--ledger",
+        streakLedgerPath,
+        "--dispatch-receipt-path",
+        dispatchReceiptPath,
+      ]);
+      assert.equal(
+        r.status,
+        0,
+        "RED: hasReceipt 판별이 빠지면 «둘 다 지운» 공격이 다시 ALLOW로 새야 한다 -- 이 판별이 실제로 결과를 바꾼다는 증거",
       );
     } finally {
       rmSync(fixtureDir, { recursive: true, force: true });

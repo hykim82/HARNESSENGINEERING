@@ -1253,7 +1253,7 @@ function runBlockedTerminationSideEffectsIfApplicable({
     harnessDir,
     taskContent,
   });
-  const abortReleased = spawnAdmissionAbortProcess(taskId, harnessDir);
+  const abortReleased = spawnAdmissionAbortProcess(taskId, harnessDir, role);
 
   spawnAbortRecordWriter({
     role: role.toUpperCase(),
@@ -1460,20 +1460,26 @@ function spawnAdmissionCompletionProcess(taskId, harnessDir) {
 // HYK-342/HYK-249: mirrors spawnAdmissionCompletionProcess exactly (same
 // subprocess-not-import reasoning, same try/catch/never-throws contract,
 // same wasAdmissionCompletionAttempted stdout-string check) -- the one
-// difference is the 4th CLI arg, which asks admission-completion-adapter.mjs
-// to stamp `completion_reason: BLOCKED_TERMINATION_RELEASED` (admission-
-// ledger-core.mjs's COMPLETION_REASON) on the released reservation instead
-// of leaving it unset (the ok:true path's normal-completion shape). Never
-// changes checkRelayHandshake's own return value/exit code (same S11
+// difference is the 4th/5th CLI args, which ask admission-completion-
+// adapter.mjs to stamp `completion_reason: BLOCKED_TERMINATION_RELEASED`
+// (admission-ledger-core.mjs's COMPLETION_REASON) on the released
+// reservation instead of leaving it unset (the ok:true path's normal-
+// completion shape). HYK-342 2R P1-1: the adapter now REQUIRES `role`
+// (5th arg) to independently re-verify this round's own live result file
+// before it will accept that reason -- this call always supplies it
+// (checkRelayHandshake already confirmed BLOCKED/NEEDS_INPUT on that exact
+// file moments ago, so the verification is redundant-but-consistent for a
+// genuine call, and is exactly what a forged direct invocation lacks).
+// Never changes checkRelayHandshake's own return value/exit code (same S11
 // rationale as its sibling).
-function spawnAdmissionAbortProcess(taskId, harnessDir) {
+function spawnAdmissionAbortProcess(taskId, harnessDir, role) {
   try {
     const adapterPath = join(
       dirname(fileURLToPath(new URL(import.meta.url))),
       "admission-completion-adapter.mjs",
     );
     const args = harnessDir
-      ? [adapterPath, taskId, harnessDir, "BLOCKED_TERMINATION_RELEASED"]
+      ? [adapterPath, taskId, harnessDir, "BLOCKED_TERMINATION_RELEASED", role]
       : [adapterPath, taskId];
     const out = execFileSync("node", args, {
       encoding: "utf8",

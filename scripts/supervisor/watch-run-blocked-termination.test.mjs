@@ -97,7 +97,15 @@ test("scanBlockedTerminationRecords: 손상된(파싱 불가) 기록 파일은 �
   assert.equal(result.records[0].taskId, "HYK-3");
 });
 
-test("회귀 0: blockedTerminationScan을 주지 않으면(기존 호출자) 로그 줄이 한 글자도 달라지지 않는다", () => {
+// HYK-342 2R P1-3: 이 시험의 전제가 뒤집혔다 -- 이전에는 blockedTermination
+// Scan을 안 주면 이 축 자체가 로그 줄에서 사라졌지만(1R, opt-in), 이제는
+// "안 주면 repoRoot에서 harnessDir을 스스로 파생해 계속 돈다"가 올바른
+// 동작이다(§3 요구: "평소 돌리는 방식 그대로" 실행했을 때 축이 돈다).
+// 두 회차가 결정적으로 같은(같은 repoRoot·같은 now) 입력을 주면 로그 줄이
+// 여전히 서로 같아야 한다는 "결정성" 자체는 유효하므로 그건 유지하되,
+// "세그먼트가 없어야 한다"는 단언은 정반대(있어야 한다·NONE이어야 한다)로
+// 고친다.
+test("HYK-342 2R P1-3: blockedTerminationScan을 명시로 주지 않아도(기본 실행 그대로) 이 축은 repoRoot에서 harnessDir을 스스로 찾아 항상 돈다 -- 대상이 없으면 status=NONE으로 조용하다", () => {
   const watchDirOff = tmpWatchDir();
   const watchDirRef = tmpWatchDir();
   try {
@@ -113,11 +121,15 @@ test("회귀 0: blockedTerminationScan을 주지 않으면(기존 호출자) 로
       now: NOW_MS,
       execFn: () => progressingExec(),
     });
-    assert.equal(off.line, ref.line);
     assert.equal(
-      off.line.includes("blocked_termination"),
-      false,
-      "opt-in 하지 않으면 이 축의 세그먼트 자체가 로그 줄에 없어야 한다",
+      off.line,
+      ref.line,
+      "결정성: 같은 입력이면 여전히 같은 줄이 나와야 한다",
+    );
+    assert.match(
+      off.line,
+      /blocked_termination_status=NONE blocked_termination_count=0 blocked_termination_source=harness\/aborts/,
+      "이제는 명시로 안 줘도(기본 실행) 이 축의 세그먼트가 항상 로그 줄에 있어야 한다(실 저장소 .harness/aborts에 정지-종결 기록이 없는 정상 상태 -- 조용하다=NONE이지 부재가 아니다)",
     );
   } finally {
     fs.rmSync(watchDirOff, { recursive: true, force: true });

@@ -1794,33 +1794,147 @@ function hasAnyArchivedRoundForRole(harnessDir, role) {
   return names.some((name) => pattern.test(name));
 }
 
-// HYK-342 §4 요구6 (옆문 R4 수리) -- evaluateConsumptionDecision 자신의
-// eslint complexity/line 상한을 지키려고 뽑았다(HYK-244-receipt-core-1b
-// 선례와 동일한 이유, 판정/문구는 조금도 바뀌지 않는다). 결과 파일이 없는
-// 이유가 "이 role의 첫 라운드라 아직 아무것도 없다"(진짜 부트스트랩)와
-// "라운드가 있었고 완료/아카이브까지 됐는데 결과 파일 자체가(실수로든
-// 고의로든) 사라졌다"를 이전에는 구분하지 않고 둘 다 조용히 ALLOW했다 --
-// 직전 결과 파일(coder.md)을 치우기만 하면 같은 게이트가 뒤집히는
-// 옆문이었다. 아카이브 디렉터리(`.harness/rounds/`)에 이 role의 이전
-// 라운드 결과 봉투 사본이 하나라도 있으면 "첫 라운드"가 아니다 -- 그
-// 경우는 "증거가 사라진 폴더"로 보고 거부한다(안전측 기본값). 아카이브가
-// 전혀 없으면 진짜 부트스트랩이므로 기존과 동일하게 ALLOW한다(오탐 0).
+// HYK-342 2R P1-2 (검토 원문 "옆문이 «한 겹 뒤로 물러난 것»에 그치지
+// 않게"): 검토자가 재현한 공격은 결과 파일 «과» `.harness/rounds/` 를
+// «함께» 지운 것이었다 -- 위 hasAnyArchivedRoundForRole 하나만으로는
+// 이 경우를 "증거 없음"으로 오판해 다시 조용히 ALLOW했다. 이 함수는
+// 워크트리 밖(관제실) 배달 영수증(dispatch-receipts.jsonl)에 이 role +
+// 이 taskId 조합의 배달 기록이 남아 있는지 «추가로» 확인한다 -- 이
+// 파일은 워크트리 안을 아무리 지워도 남는다(검토자 힌트 원문). lookup
+// Dispatch Id를 재사용한다(이미 이 파일이 abort-record/consumption 두 축
+// 모두에서 쓰는 그 함수 그대로 -- 새 조회 로직을 발명하지 않는다). role
+// 비교는 그 함수 자신이 이미 대소문자 무관으로 처리한다.
+function hasDispatchReceiptForCurrentRound(role, taskId, receiptPath) {
+  if (!isNonEmptyString(taskId) || !isNonEmptyString(receiptPath)) {
+    return false;
+  }
+  const lookup = lookupDispatchId({
+    role,
+    harnessTaskLabel: taskId,
+    receiptPath,
+  });
+  return lookup.ok && lookup.found;
+}
+
+// HYK-342 §4 요구6 (옆문 R4 수리) / HYK-342 2R P1-2(옆문이 "한 겹 뒤로
+// 물러난 것"에 그치지 않게) -- evaluateConsumptionDecision 자신의 eslint
+// complexity/line 상한을 지키려고 뽑았다(HYK-244-receipt-core-1b 선례와
+// 동일한 이유, 판정/문구는 조금도 바뀌지 않는다). 결과 파일이 없는 이유가
+// "이 role의 첫 라운드라 아직 아무것도 없다"(진짜 부트스트랩)와 "라운드가
+// 있었고 완료/아카이브까지 됐는데 결과 파일 자체가(실수로든 고의로든)
+// 사라졌다"를 이전에는 구분하지 않고 둘 다 조용히 ALLOW했다.
+//
+// 1R 수리(워크트리 안 `.harness/rounds/` 대조)만으로는 «결과 파일 +
+// rounds/ 를 함께 지운» 공격을 못 막는다(검토 2R P1-2 실측: 둘 다 지우면
+// 다시 exit=0/ALLOW). 그래서 이제 **둘 중 하나라도** "이 role+taskId
+// 조합이 진짜 배달된 적 있다"는 증거면 부트스트랩이 아니라고 본다:
+//   ⓐ 워크트리 «안» -- `.harness/rounds/<role>-r<N>.md`(결과 봉투 아카이브)
+//   ⓑ 워크트리 «밖»(관제실) -- `dispatch-receipts.jsonl`에 이 role+taskId
+//      배달 기록. 워크트리 안을 아무리 지워도 이 기록은 남는다(검토자
+//      힌트 원문 그대로) -- ⓐ만 지워진 공격이 남아도 ⓑ가 잡는다.
+// 둘 다 없으면(이 role이 이 harnessDir에서 한 번도 보관된 적 없고, 이
+// taskId로 배달된 적도 없으면) 진짜 부트스트랩이므로 기존과 동일하게
+// ALLOW한다(오탐 0 -- 정당한 첫 배달은 애초에 ⓑ의 영수증조차 아직
+// 없다, dispatch-worker.ps1이 이 게이트를 통과시킨 «뒤에만» 영수증을
+// 쓰기 때문).
 // 반환: `{shortCircuit:true, result:<null 또는 REJECT 모양>}` 이면 즉시
 // 그 result를 반환하라, `{shortCircuit:false}`면 결과 파일이 있으니 계속
 // 진행하라는 뜻이다.
-function resolveMissingResultFileOutcome(harnessDir, role, resultPath) {
+function resolveMissingResultFileOutcome(
+  harnessDir,
+  role,
+  resultPath,
+  taskId,
+  receiptPath,
+) {
   if (existsSync(resultPath)) return { shortCircuit: false };
-  if (hasAnyArchivedRoundForRole(harnessDir, role)) {
+  const hasLocalArchive = hasAnyArchivedRoundForRole(harnessDir, role);
+  const hasReceipt = hasDispatchReceiptForCurrentRound(
+    role.toUpperCase(),
+    taskId,
+    receiptPath,
+  );
+  if (hasLocalArchive || hasReceipt) {
     return {
       shortCircuit: true,
       result: {
         state: DISPATCH_GATE_STATE.REJECT_RESULT_EVIDENCE_MISSING,
         allow: false,
-        reason: `dispatch-gate-decision consumption: 직전 결과 파일(${resultPath})이 없지만 .harness/rounds/ 에 이 role의 이전 라운드 아카이브가 있음 -> 부트스트랩(첫 라운드)이 아니라 증거가 사라진 것으로 판단, 배달 거부(안전측 기본값, HYK-342 §4 요구6). 조치: 결과 파일이 실수로 삭제됐는지 확인하거나, 진짜 정지 종결이면 relay-handshake.mjs의 BLOCKED-termination 경로(중단 기록 작성)를 거치게 하라`,
+        reason: `dispatch-gate-decision consumption: 직전 결과 파일(${resultPath})이 없지만 이 role이 이전에 실제로 배달/보관된 증거가 있음(로컬 아카이브=${hasLocalArchive}, 배달 영수증=${hasReceipt}, taskId=${taskId ?? "(미확정)"}) -> 부트스트랩(첫 라운드)이 아니라 증거가 사라진 것으로 판단, 배달 거부(안전측 기본값, HYK-342 §4 요구6 / 2R P1-2). 조치: 결과 파일이 실수로 삭제됐는지 확인하거나, 진짜 정지 종결이면 relay-handshake.mjs의 BLOCKED-termination 경로(중단 기록 작성)를 거치게 하라`,
       },
     };
   }
   return { shortCircuit: true, result: null }; // 진짜 부트스트랩.
+}
+
+// HYK-342 2R P1-2 (evaluateConsumptionDecision 자신의 eslint max-lines
+// 상한을 지키려고 뽑았다, 판정/문구는 조금도 바뀌지 않는다): receiptPath와
+// 이 게이트가 지금 보고 있는 taskPath 자신(직전 라운드의 own task_id --
+// 아직 다음 라운드가 안 덮어썼다면 그 값, HYK-244 2R-b3 결함1 주석과 동일
+// 전제)의 task_id를 뽑아 resolveMissingResultFileOutcome에 넘긴다.
+// receiptPath도 함께 돌려줘서 호출자가 뒤에서 재사용할 수 있게 한다(중복
+// resolveDispatchReceiptPath 호출을 피한다).
+function resolveMissingResultFileGate(
+  taskPath,
+  harnessDir,
+  role,
+  resultPath,
+  args,
+  env,
+) {
+  const receiptPath = resolveDispatchReceiptPath(args, env);
+  const currentTaskId = extractSoleMatch(
+    readFileSync(taskPath, "utf8"),
+    CONSUMPTION_TASK_ID_RE_G,
+  );
+  const missingResult = resolveMissingResultFileOutcome(
+    harnessDir,
+    role,
+    resultPath,
+    currentTaskId,
+    receiptPath,
+  );
+  if (missingResult.shortCircuit) return { ...missingResult, receiptPath };
+  return {
+    shortCircuit: false,
+    receiptPath,
+    resultText: readFileSync(resultPath, "utf8"),
+  };
+}
+
+// classifyTaskIdLabel + labelInfoToHarnessTaskLabel 한 자리 묶음
+// (evaluateConsumptionDecision 자신의 eslint max-lines 상한을 지키려고
+// 뽑았다, 판정/값은 조금도 바뀌지 않는다).
+function classifyAndLabel(resultText) {
+  const labelInfo = classifyTaskIdLabel(resultText);
+  return {
+    labelInfo,
+    harnessTaskLabel: labelInfoToHarnessTaskLabel(labelInfo),
+  };
+}
+
+// evaluateConsumptionDecision 자신의 eslint max-lines 상한을 지키려고
+// 뽑았다(HYK-244-receipt-core-1b 선례와 동일한 이유, 판정/값은 조금도
+// 바뀌지 않는다) -- HYK-244 2R-b3 결함3 수리: 파일명 관례상 role은
+// 소문자("coder")지만, 실제 생산 경로(관제실이 대문자 $Role로 relay-
+// handshake.mjs CLI를 직접 호출)가 만드는 영수증의 role은 대문자
+// ("CODER")다(ORCH 실측 원문, coder-task.md §2 결함3). 1R 코어는 6성분을
+// strict === 로 비교하므로 실제 생산 값의 대소문자에 맞춘다.
+function buildCurrentBinding({
+  harnessTaskLabel,
+  role,
+  resultText,
+  lookup,
+  droppedAt,
+}) {
+  return {
+    taskId: harnessTaskLabel,
+    role: role.toUpperCase(),
+    droppedAt,
+    resultFingerprint: computeConsumptionResultFingerprint(resultText),
+    dispatchId: lookup.ok && lookup.found ? lookup.dispatchId : undefined,
+    doneAt: extractSoleMatch(resultText, CONSUMPTION_DONE_RE_G),
+  };
 }
 
 function evaluateConsumptionDecision(taskPath, args, env = process.env) {
@@ -1829,14 +1943,16 @@ function evaluateConsumptionDecision(taskPath, args, env = process.env) {
 
   const harnessDir = dirname(taskPath);
   const resultPath = join(harnessDir, `${role}.md`);
-  const missingResult = resolveMissingResultFileOutcome(
+  const missingResult = resolveMissingResultFileGate(
+    taskPath,
     harnessDir,
     role,
     resultPath,
+    args,
+    env,
   );
   if (missingResult.shortCircuit) return missingResult.result;
-
-  const resultText = readFileSync(resultPath, "utf8");
+  const { receiptPath, resultText } = missingResult;
 
   // HYK-244 2R-b3 결함1 수리: taskPath(`<role>-task.md`)는 게이트가 도는
   // 이 시점엔 이미 "다음에 보낼" 새 라운드로 덮여 있다 -- 라벨은 아직
@@ -1847,11 +1963,7 @@ function evaluateConsumptionDecision(taskPath, args, env = process.env) {
   // 먼저 구조적으로 가른다. VALID일 때만 harnessTaskLabel에 실제 값이
   // 들어간다(그 외에는 undefined, 아래 옛 경로들의 기존 계약과 동일한
   // "지어내지 않는다" 모양을 유지).
-  const labelInfo = classifyTaskIdLabel(resultText);
-  const harnessTaskLabel = labelInfoToHarnessTaskLabel(labelInfo);
-
-  const receiptPath = resolveDispatchReceiptPath(args, env);
-
+  const { labelInfo, harnessTaskLabel } = classifyAndLabel(resultText);
   // HYK-298-abort-record-1 §2 / 2R §2-1 -> HYK-298-label-classify-3 §2-3
   // -> HYK-298-key-narrow-4 §2(열쇠 좁히기)로 갱신: 이름표가 «진짜로
   // 없을 때»(kind === "MISSING")**만** 중단 기록(abort-record) 축을
@@ -1887,20 +1999,13 @@ function evaluateConsumptionDecision(taskPath, args, env = process.env) {
   // 결함1의 나머지 절반: droppedAt도 같은 이유로 taskText가 아니라 그
   // 직전 라운드가 자기 task 파일을 보존해 둔 아카이브 사본에서 온다.
   const droppedAt = findArchivedDroppedAt(harnessDir, role, harnessTaskLabel);
-
-  const currentBinding = {
-    taskId: harnessTaskLabel,
-    // HYK-244 2R-b3 결함3 수리: 파일명 관례상 role은 소문자("coder")지만,
-    // 실제 생산 경로(관제실이 대문자 $Role로 relay-handshake.mjs CLI를
-    // 직접 호출)가 만드는 영수증의 role은 대문자("CODER")다(ORCH 실측
-    // 원문, coder-task.md §2 결함3). 1R 코어는 6성분을 strict === 로
-    // 비교하므로 실제 생산 값의 대소문자에 맞춘다.
-    role: role.toUpperCase(),
+  const currentBinding = buildCurrentBinding({
+    harnessTaskLabel,
+    role,
+    resultText,
+    lookup,
     droppedAt,
-    resultFingerprint: computeConsumptionResultFingerprint(resultText),
-    dispatchId: lookup.ok && lookup.found ? lookup.dispatchId : undefined,
-    doneAt: extractSoleMatch(resultText, CONSUMPTION_DONE_RE_G),
-  };
+  });
   if (checkPredatesReceipts(currentBinding)) return null; // ALLOW -- 사유는 위에서 이미 찍었다.
 
   const candidates = readConsumptionCandidates(harnessDir, role, receiptPath);

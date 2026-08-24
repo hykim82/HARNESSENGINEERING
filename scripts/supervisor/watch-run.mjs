@@ -1502,21 +1502,35 @@ export function scanBlockedTerminationRecords({
 // "notRun unless the caller explicitly configures it" shape (admissionSweep/
 // wake 관례 그대로). `blockedTerminationScan` is null by default, so every
 // pre-existing caller/test is byte-for-byte unaffected (§7 회귀 0).
+// HYK-342 2R P1-3 (검토 원문 "1-B 도달 경로가 운영상 기본 결선되지
+// 않았다" -- watch-run.mjs를 평소 돌리는 방식 그대로, 추가 인자 없이,
+// 실행했을 때 이 축이 돌아야 한다): resolveCapPath(바로 위 cap 축)와
+// 정확히 같은 모양 -- `blockedTerminationScan?.harnessDir`이 명시로
+// 주어지면 그 값(시험/재정의용), 없으면 `repoRoot`에서 스스로 파생한다.
+// ⛔더 이상 opt-in이 아니다 -- null 가드가 없다, 이 축은 항상 돈다(다른
+// 상시 축인 cap/detector/escalation과 같은 자리). 대상이 없을 때(정지
+// 라운드가 없을 때) 시끄러워지지 않는 이유는 scanBlockedTerminationRecords
+// 자신이 이미 그렇다 -- `.harness/aborts/`가 없거나 비어 있으면
+// status=NONE/count=0을 반환할 뿐 던지거나 알림을 만들지 않는다(§3
+// "정상 상태에서 상시 발화" 금지 요건은 애초에 "로그 필드 하나가
+// 항상 보인다"와는 다른 축이다 -- cap_status=NONE이 이미 그 전례다).
+function resolveBlockedTerminationHarnessDir(repoRoot, blockedTerminationScan) {
+  return blockedTerminationScan?.harnessDir ?? path.join(repoRoot, ".harness");
+}
+
 function runBlockedTerminationScanStep({
+  repoRoot,
   blockedTerminationScan,
   readdirFn = readdirSync,
   readFileFn = readFileSync,
 }) {
-  if (!blockedTerminationScan || !blockedTerminationScan.harnessDir) {
-    return { notRun: true };
-  }
+  const harnessDir = resolveBlockedTerminationHarnessDir(
+    repoRoot,
+    blockedTerminationScan,
+  );
   return {
     notRun: false,
-    ...scanBlockedTerminationRecords({
-      harnessDir: blockedTerminationScan.harnessDir,
-      readdirFn,
-      readFileFn,
-    }),
+    ...scanBlockedTerminationRecords({ harnessDir, readdirFn, readFileFn }),
   };
 }
 
@@ -1853,9 +1867,11 @@ function runWatchOnceCore({
   admissionSweep,
   sweepExecFn,
   wake,
-  // HYK-342/HYK-249 §4 요구7: opt-in, null이면 이 축은 아예 돌지 않는다
-  // (admissionSweep/wake와 동일 관례, §7 회귀 0). 켜려면
-  // `{harnessDir: <.harness 경로>}`를 준다.
+  // HYK-342 2R P1-3: 더 이상 opt-in이 아니다 -- null이면(기존 호출자
+  // 전부) resolveBlockedTerminationHarnessDir이 `repoRoot`에서 기본
+  // harnessDir(`<repoRoot>/.harness`)을 스스로 파생한다(resolveCapPath와
+  // 같은 자리, cap 축 참조). 시험/재정의가 필요할 때만
+  // `{harnessDir: <다른 경로>}`를 명시로 준다.
   blockedTerminationScan = null,
   blockedTerminationReaddirFn,
   blockedTerminationReadFileFn,
@@ -1896,6 +1912,7 @@ function runWatchOnceCore({
     mkdirFn,
   });
   const blockedTerminationResult = runBlockedTerminationScanStep({
+    repoRoot,
     blockedTerminationScan,
     readdirFn: blockedTerminationReaddirFn,
     readFileFn: blockedTerminationReadFileFn,
@@ -1953,7 +1970,9 @@ export function runWatchOnce({
   // admissionSweep과 동일한 기본값 null -- 호출자가 명시적으로 주지
   // 않으면 wake 단계는 아예 실행되지 않는다(회귀 0).
   wake = null,
-  // HYK-342/HYK-249 §4 요구7: admissionSweep/wake와 동일한 opt-in 관례.
+  // HYK-342 2R P1-3: null은 "꺼짐"이 아니라 "기본값을 repoRoot에서 스스로
+  // 파생"으로 읽힌다 -- runWatchOnceCore/resolveBlockedTerminationHarnessDir
+  // 참조. admissionSweep/wake와 달리 이 축은 항상 돈다.
   blockedTerminationScan = null,
   blockedTerminationReaddirFn,
   blockedTerminationReadFileFn,

@@ -5,6 +5,7 @@ import {
   mkdirSync,
   rmSync,
   readFileSync,
+  writeFileSync,
   existsSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -128,6 +129,13 @@ test("autoCompleteAdmission releases a real reservation when the env var is set 
 // through to completeReservation's own `completion_reason` stamp -- this
 // pins the integration path relay-handshake.mjs's BLOCKED-termination side
 // effects use (spawnAdmissionAbortProcess -> this adapter's CLI -> here).
+//
+// HYK-342 2R P1-1: BLOCKED_TERMINATION_RELEASED now requires corroborating
+// evidence (a live `<role>.md` result file whose task_id echo matches the
+// reservationId and carries a well-formed `>>> BLOCKED:`/`>>> NEEDS_INPUT:`
+// marker) -- this test seeds that file (mirroring what a genuine relay-
+// handshake.mjs BLOCKED round leaves behind) so it still exercises the
+// success path, not just the (separately tested) forgery-rejection path.
 test("autoCompleteAdmission with `reason` stamps completion_reason on the released reservation (BLOCKED-termination integration path)", () => {
   const { dir, ledger, lock } = tmpPaths();
   const savedLedger = process.env.ADMISSION_LEDGER_PATH;
@@ -153,15 +161,22 @@ test("autoCompleteAdmission with `reason` stamps completion_reason on the releas
       "--cap",
       "1",
     ]);
+    writeFileSync(
+      join(dir, "coder.md"),
+      "task_id: HYK-342-blocked-1\n\n>>> BLOCKED: 시험용 정지\n",
+      "utf8",
+    );
 
     process.env.ADMISSION_LEDGER_PATH = ledger;
     process.env.ADMISSION_LOCK_PATH = lock;
     const outcome = autoCompleteAdmission({
       reservationId: "HYK-342-blocked-1",
       reason: "BLOCKED_TERMINATION_RELEASED",
+      harnessDir: dir,
+      role: "CODER",
     });
     assert.equal(outcome.attempted, true);
-    assert.equal(outcome.ok, true);
+    assert.equal(outcome.ok, true, outcome.reason);
 
     const written = JSON.parse(readFileSync(ledger, "utf8"));
     assert.equal(
@@ -174,6 +189,109 @@ test("autoCompleteAdmission with `reason` stamps completion_reason on the releas
     else delete process.env.ADMISSION_LEDGER_PATH;
     if (savedLock !== undefined) process.env.ADMISSION_LOCK_PATH = savedLock;
     else delete process.env.ADMISSION_LOCK_PATH;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// HYK-342 2R P1-1 (검토자가 재현한 공격의 재현): a caller that invokes the
+// adapter directly with BLOCKED_TERMINATION_RELEASED but NO corroborating
+// live BLOCKED result file must be refused -- the reservation stays ACTIVE.
+test("HYK-342 2R P1-1: autoCompleteAdmission with reason=BLOCKED_TERMINATION_RELEASED but no live BLOCKED result file is refused (reviewer's direct-adapter-call attack, now blocked)", () => {
+  const { dir, ledger, lock } = tmpPaths();
+  const savedLedger = process.env.ADMISSION_LEDGER_PATH;
+  const savedLock = process.env.ADMISSION_LOCK_PATH;
+  try {
+    runAdmissionCli([
+      "init-cutover",
+      "--ledger",
+      ledger,
+      "--lock",
+      lock,
+      "--live-seats",
+      "[]",
+    ]);
+    runAdmissionCli([
+      "admit",
+      "--ledger",
+      ledger,
+      "--lock",
+      lock,
+      "--reservation-id",
+      "HYK-342-forged-1",
+      "--cap",
+      "1",
+    ]);
+    // ⛔결과 파일을 전혀 만들지 않는다 -- 검토자가 재현한 공격 그대로
+    // (증거 없이 어댑터를 직접 실행).
+
+    process.env.ADMISSION_LEDGER_PATH = ledger;
+    process.env.ADMISSION_LOCK_PATH = lock;
+    const outcome = autoCompleteAdmission({
+      reservationId: "HYK-342-forged-1",
+      reason: "BLOCKED_TERMINATION_RELEASED",
+      harnessDir: dir,
+      role: "CODER",
+    });
+    assert.equal(outcome.attempted, true);
+    assert.equal(outcome.ok, false);
+    assert.equal(outcome.reasonCode, "BLOCKED_TERMINATION_EVIDENCE_MISSING");
+
+    const written = JSON.parse(readFileSync(ledger, "utf8"));
+    assert.equal(
+      written.reservations["HYK-342-forged-1"].status,
+      "ACTIVE",
+      "위조 시도는 예약 상태를 조금도 바꾸지 못해야 한다",
+    );
+  } finally {
+    if (savedLedger !== undefined)
+      process.env.ADMISSION_LEDGER_PATH = savedLedger;
+    else delete process.env.ADMISSION_LEDGER_PATH;
+    if (savedLock !== undefined) process.env.ADMISSION_LOCK_PATH = savedLock;
+    else delete process.env.ADMISSION_LOCK_PATH;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// HYK-342 2R P1-1: an unknown/arbitrary reason string (not in the closed
+// COMPLETION_REASON set) is refused outright -- closes the "비어 있지 않은
+// 임의 문자열" half of the finding, independent of the evidence check.
+test("HYK-342 2R P1-1: an unknown completion reason string is refused (closed enum, not arbitrary)", () => {
+  const { dir, ledger, lock } = tmpPaths();
+  try {
+    runAdmissionCli([
+      "init-cutover",
+      "--ledger",
+      ledger,
+      "--lock",
+      lock,
+      "--live-seats",
+      "[]",
+    ]);
+    runAdmissionCli([
+      "admit",
+      "--ledger",
+      ledger,
+      "--lock",
+      lock,
+      "--reservation-id",
+      "HYK-342-unknown-reason",
+      "--cap",
+      "1",
+    ]);
+    const outcome = completeAdmissionReservation({
+      reservationId: "HYK-342-unknown-reason",
+      ledgerPath: ledger,
+      lockPath: lock,
+      reason: "TOTALLY_MADE_UP_REASON",
+    });
+    assert.equal(outcome.ok, false);
+    assert.equal(outcome.reasonCode, "UNKNOWN_COMPLETION_REASON");
+    const written = JSON.parse(readFileSync(ledger, "utf8"));
+    assert.equal(
+      written.reservations["HYK-342-unknown-reason"].status,
+      "ACTIVE",
+    );
+  } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });
