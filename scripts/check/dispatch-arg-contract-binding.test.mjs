@@ -91,14 +91,25 @@ test("(A-soft x3) dispatch-gate-decision: --expect-repo-root/--dispatch-receipt-
     const ledgerPath = join(dir, "reject-streak.json");
     writeLedger(ledgerPath, { schema_version: 1, issues: {} });
 
-    // 기준선: 둘 다 없음 -> ALLOW (이 자체가 "필수라서 죽는다"는 주장과
-    // 반대되는 관측 -- 그래서 hard:false다).
+    // 기준선: 셋 다 없어도 CLI 프로세스 자체는 죽지 않는다(usage로 즉시
+    // 거부되지 않는다 -- "필수라서 죽는다"는 주장과 반대되는 관측, 그래서
+    // hard:false다). ⚠️HYK-342 4R §1부터는 --dispatch-receipt-path가
+    // 정말 미설정이면(경우1) 소비 확인 축이 "확인 불가"로 안전측 REJECT를
+    // 낸다 -- 이건 인자 파싱이 죽는 것과는 다른, 의도된 판정 변화다. 그래서
+    // 이 기준선의 검증 대상을 "ALLOW로 고정"에서 "usage 오류 없이 well-formed
+    // 판정을 낸다"로 좁힌다(§2-2가 원래 증명하려던 것 -- 인자 부재가 CLI를
+    // 죽이지 않는다 -- 는 여전히 참이다).
     const baseline = runDispatchGateDecision([
       taskPath,
       "--ledger",
       ledgerPath,
     ]);
-    assert.equal(baseline.allow, true);
+    assert.equal(baseline.allow, false);
+    assert.match(
+      baseline.lines.join("\n"),
+      /UNSET|확인할 수 없음/,
+      "usage 오류가 아니라 HYK-342 4R §1의 «영수증 경로 미설정 -> 확인 불가 REJECT» 사유여야 한다",
+    );
 
     // --dispatch-receipt-path를 (존재하지 않는 경로로) 추가해도 이 부트
     // 스트랩 픽스처(직전 라운드 결과 파일이 아예 없음)에서는 소비 확인
@@ -125,10 +136,15 @@ test("(A-soft x3) dispatch-gate-decision: --expect-repo-root/--dispatch-receipt-
     // 무거운 픽스처가 필요해 이 라운드 범위에서는 구성하지 않았다 --
     // 레지스트리 note와 검토 P1 원문의 코드 인용이 그 인과를 이미 코드
     // 라인 단위로 증명한다).
+    // --dispatch-receipt-path를 함께 줘서(경우2 -- 부재 확인됨) 이 하위
+    // 검증의 대상을 --admission-ledger-path 하나로 좁힌다(안 그러면 위
+    // baseline과 같은 이유로 REJECT가 나서 이 인자 자체의 효과를 가린다).
     const withAdmissionLedgerPath = runDispatchGateDecision([
       taskPath,
       "--ledger",
       ledgerPath,
+      "--dispatch-receipt-path",
+      join(dir, "no-such-receipts-2.jsonl"),
       "--admission-ledger-path",
       join(dir, "no-such-admission-ledger.json"),
     ]);

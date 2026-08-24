@@ -44,10 +44,22 @@ function withFixtureDir(fn) {
   }
 }
 
+// HYK-342 4R §1: this file's fixtures never seed a sibling result file, so
+// every run here is the "missing result file" bootstrap path. Give every
+// call a readable, confirmably-empty receipt so these snapshot/ALLOW tests
+// keep meaning "genuine first delivery" instead of hitting the new
+// UNSET/REJECT case (receipt path unconfirmed -> reject).
+const SHARED_EMPTY_RECEIPT_PATH = join(
+  mkdtempSync(join(tmpdir(), "dispatch-gate-round-snapshot-test-receipts-")),
+  "dispatch-receipts.jsonl",
+);
+writeFileSync(SHARED_EMPTY_RECEIPT_PATH, "", "utf8");
+
 function runCli(args) {
   try {
     const stdout = execFileSync("node", [SCRIPT_PATH, ...args], {
       encoding: "utf8",
+      env: { ...process.env, DISPATCH_RECEIPT_PATH: SHARED_EMPTY_RECEIPT_PATH },
     });
     return { status: 0, stdout, stderr: "" };
   } catch (err) {

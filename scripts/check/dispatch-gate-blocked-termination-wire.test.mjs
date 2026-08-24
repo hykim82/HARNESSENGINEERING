@@ -333,7 +333,13 @@ function buildCompletedLedger(taskId, role) {
   return completed.ledger;
 }
 
-test("§C-1 ALLOW (3R §3 요구1 -- 진짜 첫 배달): 영수증도 원장 항목도 전혀 없으면 부트스트랩으로 통과한다", () => {
+// HYK-342 4R §1: 진짜 첫 배달은 «영수증 경로가 아예 안 주어진» 모양이
+// 아니라 «관제실이 항상 넘기는 그 경로에 아직 파일이 없는» 모양이다
+// (관제실 실제 배달 경로는 --dispatch-receipt-path를 언제나 구체적인
+// 값으로 넘긴다, fixtures/dispatch-worker-snapshot-2026-08-20.ps1.txt
+// 171·191행 실측 -- 아래 §C-1b가 그 사실 자체를 코드로 고정한다). 경로
+// 자체가 없는 경우(§1 표 #1)는 이제 REJECT다(§C-1b).
+test("§C-1 ALLOW (4R §1 표#2 -- 진짜 첫 배달): 영수증 경로는 주어졌지만 파일이 아직 없으면(관제실이 실제로 넘기는 모양) 부트스트랩으로 통과한다", () => {
   withFixtureDir((dir) => {
     const role = "coder";
     const taskPath = writeNextTaskFile(
@@ -344,8 +350,95 @@ test("§C-1 ALLOW (3R §3 요구1 -- 진짜 첫 배달): 영수증도 원장 항
     );
     const streakLedgerPath = join(dir, "reject-streak.json");
     writeLedger(streakLedgerPath, { schema_version: 1, issues: {} });
+    const absentReceiptPath = join(dir, "dispatch-receipts.jsonl"); // 만들지 않는다.
 
-    const r = runCli(SCRIPT_PATH, [taskPath, "--ledger", streakLedgerPath]);
+    const r = runCli(SCRIPT_PATH, [
+      taskPath,
+      "--ledger",
+      streakLedgerPath,
+      "--dispatch-receipt-path",
+      absentReceiptPath,
+    ]);
+    assert.equal(r.status, 0, `stdout=${r.stdout}\nstderr=${r.stderr}`);
+    assert.match(r.stdout + r.stderr, /ALLOW/);
+  });
+});
+
+// HYK-342 4R §1 표 다섯 경우 -- 여기 §C-1b/1c/1d가 §1(경로 미설정)·
+// §3(파손)·§4(읽히고 비어 있음)를 채운다(§C-1이 §2, §C-2/3/4가 §5의
+// 두 갈래 -- ACTIVE/COMPLETED). 다섯 경우 전부 이 파일 하나에 있다.
+
+test("§C-1b REJECT (4R §1 표#1 -- 영수증 경로 자체가 미설정): 인자·env 둘 다 없으면 «확인 불가»로 거부한다(진짜 부트스트랩과 다르다)", () => {
+  withFixtureDir((dir) => {
+    const role = "coder";
+    const taskPath = writeNextTaskFile(
+      dir,
+      role,
+      "HYK-9306-path-unset",
+      "2026-08-24 08:00:00 KST",
+    );
+    const streakLedgerPath = join(dir, "reject-streak.json");
+    writeLedger(streakLedgerPath, { schema_version: 1, issues: {} });
+    const savedEnv = process.env.DISPATCH_RECEIPT_PATH;
+    delete process.env.DISPATCH_RECEIPT_PATH;
+    try {
+      // ⛔--dispatch-receipt-path를 아예 안 준다(§1 표#1 그대로).
+      const r = runCli(SCRIPT_PATH, [taskPath, "--ledger", streakLedgerPath]);
+      assert.notEqual(r.status, 0, `stdout=${r.stdout}\nstderr=${r.stderr}`);
+      assert.match(r.stdout + r.stderr, /UNSET|확인할 수 없음/);
+    } finally {
+      if (savedEnv !== undefined) process.env.DISPATCH_RECEIPT_PATH = savedEnv;
+    }
+  });
+});
+
+test("§C-1c REJECT (4R §1 표#3 -- 영수증 파일 파손): 내용이 통째로 파싱 불가면 «확인 불가»로 거부한다", () => {
+  withFixtureDir((dir) => {
+    const role = "coder";
+    const taskPath = writeNextTaskFile(
+      dir,
+      role,
+      "HYK-9307-corrupt-receipt",
+      "2026-08-24 08:00:00 KST",
+    );
+    const streakLedgerPath = join(dir, "reject-streak.json");
+    writeLedger(streakLedgerPath, { schema_version: 1, issues: {} });
+    const receiptPath = join(dir, "dispatch-receipts.jsonl");
+    writeFileSync(receiptPath, "not json at all {{{\ngarbage %%%\n", "utf8");
+
+    const r = runCli(SCRIPT_PATH, [
+      taskPath,
+      "--ledger",
+      streakLedgerPath,
+      "--dispatch-receipt-path",
+      receiptPath,
+    ]);
+    assert.notEqual(r.status, 0, `stdout=${r.stdout}\nstderr=${r.stderr}`);
+    assert.match(r.stdout + r.stderr, /CORRUPT|확인할 수 없음/);
+  });
+});
+
+test("§C-1d ALLOW (4R §1 표#4 -- 영수증 파일이 읽히고 비어 있음): 진짜 첫 배달로 통과한다", () => {
+  withFixtureDir((dir) => {
+    const role = "coder";
+    const taskPath = writeNextTaskFile(
+      dir,
+      role,
+      "HYK-9308-empty-receipt",
+      "2026-08-24 08:00:00 KST",
+    );
+    const streakLedgerPath = join(dir, "reject-streak.json");
+    writeLedger(streakLedgerPath, { schema_version: 1, issues: {} });
+    const receiptPath = join(dir, "dispatch-receipts.jsonl");
+    writeFileSync(receiptPath, "", "utf8");
+
+    const r = runCli(SCRIPT_PATH, [
+      taskPath,
+      "--ledger",
+      streakLedgerPath,
+      "--dispatch-receipt-path",
+      receiptPath,
+    ]);
     assert.equal(r.status, 0, `stdout=${r.stdout}\nstderr=${r.stderr}`);
     assert.match(r.stdout + r.stderr, /ALLOW/);
   });
@@ -723,6 +816,63 @@ test("RED(변이, 필수, HYK-342 2R P1-2 -> 3R §3): hasReceipt 판별을 빼�
         r.status,
         0,
         "RED: hasReceipt 판별이 무력화되면 증거 삭제도 부트스트랩으로 오인해 ALLOW로 새야 한다 -- 이 판별이 실제로 결과를 바꾼다는 증거",
+      );
+    } finally {
+      rmSync(fixtureDir, { recursive: true, force: true });
+    }
+  });
+
+  const srcAfter = readFileSync(SCRIPT_PATH, "utf8");
+  assert.equal(
+    srcAfter,
+    src,
+    "원본 dispatch-gate-decision.mjs는 이 시험 전후 바이트 동일해야 한다",
+  );
+});
+
+// ---------------------------------------------------------------------------
+// RED(변이, 필수, HYK-342 4R §1): 검토자가 3R에서 재현한 fail-open 결함
+// ("영수증을 못 읽을 때"가 "없을 때"로 접힌다)이 이 판별을 무력화하면
+// 다시 뚫리는 것을 확인한다 -- 경로가 아예 미설정인데도(§1 표#1) 조용히
+// ALLOW로 새야 RED다.
+// ---------------------------------------------------------------------------
+
+test("RED(변이, 필수, HYK-342 4R §1): classifyReceiptReadability의 confirmed 게이트를 무력화하면(항상 통과) 영수증 경로 미설정도 다시 조용히 ALLOW로 샌다", () => {
+  const src = readFileSync(SCRIPT_PATH, "utf8");
+  const target = "  if (!receiptReadability.confirmed) {\n";
+  assertExactlyOneMatch(src, target, "receiptReadability confirmed 게이트");
+  const mutated = src.replace(
+    target,
+    "  if (!receiptReadability.confirmed && false) {\n    // MUTATED: 4R §1 이전(fail-open)으로 되돌림\n",
+  );
+
+  withFixtureDir((dir) => {
+    const scriptsCheckDir = stageScriptsCheckDir(dir, {
+      "dispatch-gate-decision.mjs": mutated,
+    });
+    const mutantPath = join(scriptsCheckDir, "dispatch-gate-decision.mjs");
+
+    const fixtureDir = mkdtempSync(
+      join(tmpdir(), "dispatch-gate-blocked-term-mut-4r-"),
+    );
+    try {
+      const role = "coder";
+      const taskPath = writeNextTaskFile(
+        fixtureDir,
+        role,
+        "HYK-9309-mut-4r",
+        "2026-08-24 08:00:00 KST",
+      );
+      const streakLedgerPath = join(fixtureDir, "reject-streak.json");
+      writeLedger(streakLedgerPath, { schema_version: 1, issues: {} });
+
+      // ⛔--dispatch-receipt-path를 아예 안 준다(검토자 3R 재현 그대로 --
+      // "확인 불가"인 상태).
+      const r = runCli(mutantPath, [taskPath, "--ledger", streakLedgerPath]);
+      assert.equal(
+        r.status,
+        0,
+        "RED: confirmed 게이트가 무력화되면 «확인 불가»도 다시 ALLOW로 새야 한다 -- 이 판별이 실제로 결과를 바꾼다는 증거",
       );
     } finally {
       rmSync(fixtureDir, { recursive: true, force: true });

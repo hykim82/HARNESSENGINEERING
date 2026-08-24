@@ -1787,6 +1787,73 @@ function hasDispatchReceiptForCurrentRound(role, taskId, receiptPath) {
   return lookup.ok && lookup.found;
 }
 
+// HYK-342 4R §1 (검토 3R 원문 "«항목이 없음»과 «확인 불가»가 같은
+// hasReceipt=false로 접힌다"): 위 hasDispatchReceiptForCurrentRound는
+// "이 taskId 항목이 있는가"만 답한다 -- 영수증 경로가 아예 없거나, 파일을
+// 못 읽거나, 내용이 통째로 깨져 있어도 똑같이 false를 돌려준다(fail-open
+// 결함의 근원). 이 함수는 그보다 «먼저» 묻는다: "이 영수증 로그를 애초에
+// 신뢰할 수 있게 읽었는가?" -- isReservationActiveForRound(바로 아래,
+// 원장 쪽)가 이미 쓰는 것과 같은 "판단 불가는 안전측으로 접는다" 모양을
+// «발명하지 않고» 그대로 옮긴 것이다(§1 요구 "그 모양에 맞춰라").
+//
+// 닫힌 3-상태:
+//   ⓐ `confirmed:false`(경로 미설정 · 읽기 실패 · 내용이 통째로 깨짐 --
+//      비어 있지 않은 줄이 하나라도 있는데 단 한 줄도 JSON으로 파싱되지
+//      않으면 "이 파일이 진짜 영수증 로그인지조차 확신할 수 없다"로
+//      본다) -- 호출자는 이걸 REJECT로 접어야 한다(§1 표 #1·#3).
+//   ⓑ `confirmed:true`(파일이 없거나 · 읽혔지만 비어 있거나 · 읽혔고
+//      최소 한 줄이 유효한 JSON) -- 이 경우엔 hasDispatchReceiptForCurrentRound
+//      의 "이 taskId 항목이 있는가" 질문이 안전하게 의미를 갖는다: 항목이
+//      없으면 "이 로그를 확인했는데 정말 없다"(§1 표 #2·#4, 진짜 부트스트랩
+//      -- 파일 부재도 여기 포함한다, 이유는 함수 헤더 아래 참조), 있으면
+//      기존 3R 판정(§1 표 #5)으로 넘어간다.
+//
+// ⚠️파일 «부재»(ENOENT)를 ⓑ(확인됨)로 두는 이유(§1 표 #2, 판단은 위임됐지만
+// 다른 네 경우와 모순되지 않아야 한다는 요구): 관제실 실제 배달 경로
+// (dispatch-worker.ps1, 아래 fixture 실측 참조)는 `--dispatch-receipt-path`
+// 를 항상 «구체적인 값»으로 넘긴다(env 우선, 없으면 자기 스크립트
+// 디렉터리 밑 기본 파일) -- 그 기본 파일은 이 관제실 전체에서 단 한 번도
+// 배달이 없었을 때만 부재한다(진짜 최초 부트스트랩, 전역 로그라 사실상
+// 전무한 경우). 그런 극단적인 경우를 제외하면 파일이 «있는데 이
+// taskId 항목만 없는» 것과 파일이 «아예 없는» 것은 둘 다 "이 taskId로는
+// 배달된 적이 없다"는 같은 사실을 말한다 -- 그래서 부재도 파손과 달리
+// ⓑ로 둔다(파손은 "로그 자체가 신뢰 불가"이지만 부재는 "로그가 아직
+// 시작되지 않았다"이다, 서로 다른 사실).
+function classifyReceiptReadability(receiptPath) {
+  if (!isNonEmptyString(receiptPath)) {
+    return { confirmed: false, reason: "UNSET" };
+  }
+  let raw;
+  try {
+    raw = readFileSync(receiptPath, "utf8");
+  } catch (err) {
+    if (err.code === "ENOENT") return { confirmed: true, reason: "ABSENT" };
+    return {
+      confirmed: false,
+      reason: `UNREADABLE(${err.code ?? err.message})`,
+    };
+  }
+  const nonEmptyLines = raw
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+  if (nonEmptyLines.length === 0) {
+    return { confirmed: true, reason: "EMPTY" };
+  }
+  const anyLineParses = nonEmptyLines.some((line) => {
+    try {
+      JSON.parse(line);
+      return true;
+    } catch {
+      return false;
+    }
+  });
+  if (!anyLineParses) {
+    return { confirmed: false, reason: "CORRUPT" };
+  }
+  return { confirmed: true, reason: "READABLE" };
+}
+
 // HYK-342 3R §0/§3: verifyAbortRecordRecoveryMarker(위, 같은 파일)와 동일한
 // 모양 -- admission 원장(워크트리 밖, 워커가 못 쓰는 파일)을 «읽기만»
 // 해서 이 taskId의 예약이 지금 `ACTIVE`인지 본다. 읽을 수 없거나(경로
@@ -1844,13 +1911,28 @@ function resolveMissingResultFileOutcome(
   admissionLedgerPath,
 ) {
   if (existsSync(resultPath)) return { shortCircuit: false };
+  // HYK-342 4R §1: "확인 불가"부터 먼저 걸러낸다 -- 아래
+  // hasDispatchReceiptForCurrentRound의 false는 이제부터 "확인했는데
+  // 정말 없다"만 뜻한다(§0 신뢰 경계 -- 판단 불가를 부트스트랩으로
+  // 접지 않는다).
+  const receiptReadability = classifyReceiptReadability(receiptPath);
+  if (!receiptReadability.confirmed) {
+    return {
+      shortCircuit: true,
+      result: {
+        state: DISPATCH_GATE_STATE.REJECT_RESULT_EVIDENCE_MISSING,
+        allow: false,
+        reason: `dispatch-gate-decision consumption: 직전 결과 파일(${resultPath})이 없는데 배달 영수증(dispatch-receipts.jsonl)을 확인할 수 없음(${receiptReadability.reason} -- 경로 미설정/읽기 실패/내용 파손 중 하나) -> "항목이 없음"과 "확인 불가"는 다르다, 확인 불가는 안전측으로 거부(HYK-342 4R §1). 조치: --dispatch-receipt-path/DISPATCH_RECEIPT_PATH가 실제 영수증 로그를 가리키는지 확인하라`,
+      },
+    };
+  }
   const hasReceipt = hasDispatchReceiptForCurrentRound(
     role.toUpperCase(),
     taskId,
     receiptPath,
   );
   if (!hasReceipt) {
-    return { shortCircuit: true, result: null }; // 진짜 부트스트랩.
+    return { shortCircuit: true, result: null }; // 진짜 부트스트랩(확인함, 정말 없다).
   }
   const reservationActive = isReservationActiveForRound(
     admissionLedgerPath,

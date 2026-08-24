@@ -37,10 +37,27 @@ function withFixtureDir(fn) {
   }
 }
 
+// HYK-342 4R §1: this file predates the receipt-evidence axis entirely --
+// none of its fixtures ever create a sibling result file, so every case
+// here is the "missing result file" bootstrap path. Since 4R distinguishes
+// "receipt confirmed absent" from "receipt can't be confirmed at all"
+// (UNSET path/env -> REJECT), every ALLOW-expected fixture below now needs
+// a readable, confirmably-empty receipt to keep meaning "genuine first
+// delivery" rather than accidentally exercising the new UNSET/REJECT case.
+// A single shared empty receipts file (module-scoped, never written to)
+// covers this for the whole file without touching each of the ~35 call
+// sites individually.
+const SHARED_EMPTY_RECEIPT_PATH = join(
+  mkdtempSync(join(tmpdir(), "dispatch-gate-decision-test-receipts-")),
+  "dispatch-receipts.jsonl",
+);
+writeFileSync(SHARED_EMPTY_RECEIPT_PATH, "", "utf8");
+
 function runCli(args, opts = {}) {
   try {
     const stdout = execFileSync("node", [SCRIPT_PATH, ...args], {
       encoding: "utf8",
+      env: { ...process.env, DISPATCH_RECEIPT_PATH: SHARED_EMPTY_RECEIPT_PATH },
       ...opts,
     });
     return { status: 0, stdout, stderr: "" };
