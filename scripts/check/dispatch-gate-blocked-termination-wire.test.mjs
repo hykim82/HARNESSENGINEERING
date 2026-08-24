@@ -295,38 +295,45 @@ test("§B-3 REJECT: 원장에 회수 표식이 없는(아직 ACTIVE인) 중단 �
 });
 
 // ---------------------------------------------------------------------------
-// §C -- HYK-342 §4 요구6 (옆문 R4): 결과 파일 없음 = 부트스트랩이 아니라
-// "증거가 사라진 것"과 "진짜 첫 라운드"를 구별한다.
+// §C -- HYK-342 §4 요구6(1R) -> 2R P1-2 -> 3R §0/§3: 결과 파일 없음을
+// "진짜 첫 배달" · "정당한 재배달/재시도" · "증거가 사라진 것" 셋으로
+// 가른다. 3R부터는 워크트리 안(`.harness/rounds/`)을 더 이상 증거로 쓰지
+// 않는다(§0 신뢰 경계 -- 워커가 쓸 수 있는 자리다) -- 오직 배달 영수증
+// (dispatch-receipts.jsonl)과 admission 원장(ACTIVE 여부)만 본다. 3R §3
+// "합격 기준에 반드시 포함할 경우들" 4건을 그대로 시험 이름에 매핑한다.
 // ---------------------------------------------------------------------------
 
-test("§C-1 REJECT: 이 role의 결과 봉투 아카이브(rounds/<role>-r<N>.md)가 이미 있는데 결과 파일이 없으면 -- 부트스트랩이 아니라 증거 사라짐으로 거부", () => {
-  withFixtureDir((dir) => {
-    const role = "coder";
-    mkdirSync(join(dir, "rounds"), { recursive: true });
-    writeFileSync(
-      join(dir, "rounds", `${role}-r1.md`),
-      "task_id: HYK-9301-prior\n>>> DONE: CODER @ 2026-08-24 07:00:00 KST\n",
-      "utf8",
-    );
-    const taskPath = writeNextTaskFile(
-      dir,
-      role,
-      "HYK-9301-r4-fix",
-      "2026-08-24 08:00:00 KST",
-    );
-    const streakLedgerPath = join(dir, "reject-streak.json");
-    writeLedger(streakLedgerPath, { schema_version: 1, issues: {} });
-
-    const r = runCli(SCRIPT_PATH, [taskPath, "--ledger", streakLedgerPath]);
-    assert.notEqual(r.status, 0, `stdout=${r.stdout}\nstderr=${r.stderr}`);
-    assert.match(
-      r.stdout + r.stderr,
-      /REJECT_RESULT_EVIDENCE_MISSING|증거가 사라진/,
-    );
+// admission-ledger-core.mjs의 실물 함수(admitReservation)를 그대로 돌려
+// ACTIVE 원장을 만든다 -- 합성 JSON을 손으로 짜지 않는다(이 파일의 §A
+// buildRealBlockedTerminationLedger와 동일 원칙).
+function buildActiveLedger(taskId, role) {
+  const ledger = createEmptyLedger("2026-08-24T00:00:00.000Z");
+  const admit = admitReservation(ledger, {
+    reservationId: taskId,
+    cap: 1,
+    now: "2026-08-24T00:00:00.000Z",
+    role,
+    seatKey: "seat-in-flight",
   });
-});
+  assert.equal(admit.decision, "ADMITTED");
+  return admit.ledger;
+}
 
-test("§C-2 ALLOW (오탐 0): 이 role의 rounds/ 아카이브가 전혀 없으면(진짜 첫 라운드) 정당한 부트스트랩은 여전히 통과한다", () => {
+// 위 ACTIVE 원장을 completeReservation(정상 완료 경로, reason 없음)으로
+// 한 번 더 진행시켜 COMPLETED 원장을 만든다 -- "라운드가 끝났고 자리도
+// 반납됐는데 결과 파일만 사라진" 시나리오의 실물 재현.
+function buildCompletedLedger(taskId, role) {
+  const active = buildActiveLedger(taskId, role);
+  const completed = completeReservation(active, {
+    reservationId: taskId,
+    now: "2026-08-24T00:05:00.000Z",
+  });
+  assert.equal(completed.ok, true);
+  assert.equal(completed.changed, true);
+  return completed.ledger;
+}
+
+test("§C-1 ALLOW (3R §3 요구1 -- 진짜 첫 배달): 영수증도 원장 항목도 전혀 없으면 부트스트랩으로 통과한다", () => {
   withFixtureDir((dir) => {
     const role = "coder";
     const taskPath = writeNextTaskFile(
@@ -339,6 +346,139 @@ test("§C-2 ALLOW (오탐 0): 이 role의 rounds/ 아카이브가 전혀 없으�
     writeLedger(streakLedgerPath, { schema_version: 1, issues: {} });
 
     const r = runCli(SCRIPT_PATH, [taskPath, "--ledger", streakLedgerPath]);
+    assert.equal(r.status, 0, `stdout=${r.stdout}\nstderr=${r.stderr}`);
+    assert.match(r.stdout + r.stderr, /ALLOW/);
+  });
+});
+
+test("§C-2 ALLOW (3R §3 요구2 -- 정당한 재배달/재시도): 영수증은 있고 결과는 없지만 원장이 아직 ACTIVE로 안다", () => {
+  withFixtureDir((dir) => {
+    const role = "coder";
+    const taskId = "HYK-9303-retry-in-flight";
+    const taskPath = writeNextTaskFile(
+      dir,
+      role,
+      taskId,
+      "2026-08-24 08:00:00 KST",
+    );
+    const dispatchReceiptPath = join(dir, "dispatch-receipts.jsonl");
+    writeDispatchReceiptLine(dispatchReceiptPath, {
+      role: "CODER",
+      harnessTaskLabel: taskId,
+      dispatchId: "ctx_retry",
+    });
+    const ledgerPath = join(dir, "admission-ledger.json");
+    writeFileSync(
+      ledgerPath,
+      JSON.stringify(buildActiveLedger(taskId, "CODER")) + "\n",
+      "utf8",
+    );
+    const streakLedgerPath = join(dir, "reject-streak.json");
+    writeLedger(streakLedgerPath, { schema_version: 1, issues: {} });
+
+    const r = runCli(SCRIPT_PATH, [
+      taskPath,
+      "--ledger",
+      streakLedgerPath,
+      "--dispatch-receipt-path",
+      dispatchReceiptPath,
+      "--admission-ledger-path",
+      ledgerPath,
+    ]);
+    assert.equal(r.status, 0, `stdout=${r.stdout}\nstderr=${r.stderr}`);
+    assert.match(r.stdout + r.stderr, /ALLOW/);
+  });
+});
+
+test("§C-3 REJECT (3R §3 요구3 -- 증거 삭제): 영수증은 있는데 원장이 COMPLETED(더 이상 ACTIVE 아님)이고 결과가 없다", () => {
+  withFixtureDir((dir) => {
+    const role = "coder";
+    const taskId = "HYK-9304-evidence-deleted";
+    const taskPath = writeNextTaskFile(
+      dir,
+      role,
+      taskId,
+      "2026-08-24 08:00:00 KST",
+    );
+    const dispatchReceiptPath = join(dir, "dispatch-receipts.jsonl");
+    writeDispatchReceiptLine(dispatchReceiptPath, {
+      role: "CODER",
+      harnessTaskLabel: taskId,
+      dispatchId: "ctx_deleted",
+    });
+    const ledgerPath = join(dir, "admission-ledger.json");
+    writeFileSync(
+      ledgerPath,
+      JSON.stringify(buildCompletedLedger(taskId, "CODER")) + "\n",
+      "utf8",
+    );
+    const streakLedgerPath = join(dir, "reject-streak.json");
+    writeLedger(streakLedgerPath, { schema_version: 1, issues: {} });
+
+    const r = runCli(SCRIPT_PATH, [
+      taskPath,
+      "--ledger",
+      streakLedgerPath,
+      "--dispatch-receipt-path",
+      dispatchReceiptPath,
+      "--admission-ledger-path",
+      ledgerPath,
+    ]);
+    assert.notEqual(r.status, 0, `stdout=${r.stdout}\nstderr=${r.stderr}`);
+    assert.match(
+      r.stdout + r.stderr,
+      /REJECT_RESULT_EVIDENCE_MISSING|증거가 사라진/,
+    );
+  });
+});
+
+test("§C-4 ALLOW (3R §3 요구4 -- 여러 라운드가 오간 뒤의 정당한 재배달): 워크트리에 과거 아카이브가 쌓여 있어도, 이번 taskId의 영수증+ACTIVE 원장만으로 통과한다", () => {
+  withFixtureDir((dir) => {
+    const role = "coder";
+    // 과거에 이 role이 이미 여러 번 완료된 흔적(워크트리 «안», 3R부터는
+    // 이 판정에 관여하지 않아야 한다는 것 자체를 증명하는 자리).
+    mkdirSync(join(dir, "rounds"), { recursive: true });
+    writeFileSync(
+      join(dir, "rounds", `${role}-r1.md`),
+      "task_id: HYK-9305-old-1\n>>> DONE: CODER @ 2026-08-24 06:00:00 KST\n",
+      "utf8",
+    );
+    writeFileSync(
+      join(dir, "rounds", `${role}-r2.md`),
+      "task_id: HYK-9305-old-2\n>>> DONE: CODER @ 2026-08-24 07:00:00 KST\n",
+      "utf8",
+    );
+    const taskId = "HYK-9305-new-redelivery";
+    const taskPath = writeNextTaskFile(
+      dir,
+      role,
+      taskId,
+      "2026-08-24 08:00:00 KST",
+    );
+    const dispatchReceiptPath = join(dir, "dispatch-receipts.jsonl");
+    writeDispatchReceiptLine(dispatchReceiptPath, {
+      role: "CODER",
+      harnessTaskLabel: taskId,
+      dispatchId: "ctx_redelivery",
+    });
+    const ledgerPath = join(dir, "admission-ledger.json");
+    writeFileSync(
+      ledgerPath,
+      JSON.stringify(buildActiveLedger(taskId, "CODER")) + "\n",
+      "utf8",
+    );
+    const streakLedgerPath = join(dir, "reject-streak.json");
+    writeLedger(streakLedgerPath, { schema_version: 1, issues: {} });
+
+    const r = runCli(SCRIPT_PATH, [
+      taskPath,
+      "--ledger",
+      streakLedgerPath,
+      "--dispatch-receipt-path",
+      dispatchReceiptPath,
+      "--admission-ledger-path",
+      ledgerPath,
+    ]);
     assert.equal(r.status, 0, `stdout=${r.stdout}\nstderr=${r.stderr}`);
     assert.match(r.stdout + r.stderr, /ALLOW/);
   });
@@ -444,20 +584,14 @@ test("RED(변이, 필수): validAbortOutcome.done 단락을 제거하면 §A의 
   );
 });
 
-test("RED(변이, 필수): R4 부트스트랩 판별을 되돌리면(항상 null) §C-1의 옆문이 다시 열려 증거 사라짐도 조용히 ALLOW된다", () => {
+test("RED(변이, 필수, HYK-342 3R §3): isReservationActiveForRound을 항상 true로 되돌리면(원장을 안 본 척하면) §C-3(증거 삭제)이 다시 조용히 ALLOW된다", () => {
   const src = readFileSync(SCRIPT_PATH, "utf8");
   const target =
-    "  if (existsSync(resultPath)) return { shortCircuit: false };\n  const hasLocalArchive = hasAnyArchivedRoundForRole(harnessDir, role);\n";
-  assertExactlyOneMatch(
-    src,
-    target,
-    "resolveMissingResultFileOutcome R4 guard entry",
-  );
-  // 옆문을 원상(HYK-342 1R 이전)으로 되돌리는 변이: 어떤 증거 판별도 없이
-  // 결과 파일이 없으면 항상 부트스트랩(null)으로 접는다.
+    '  return ledger?.reservations?.[taskId]?.status === "ACTIVE";\n}';
+  assertExactlyOneMatch(src, target, "isReservationActiveForRound 판정 줄");
   const mutated = src.replace(
     target,
-    "  if (existsSync(resultPath)) return { shortCircuit: false };\n  return { shortCircuit: true, result: null }; // MUTATED: 옛 무조건 부트스트랩\n  const hasLocalArchive = hasAnyArchivedRoundForRole(harnessDir, role);\n",
+    "  return true; // MUTATED: 원장을 안 본 척 -- 항상 ACTIVE로 취급\n}",
   );
 
   withFixtureDir((dir) => {
@@ -467,30 +601,47 @@ test("RED(변이, 필수): R4 부트스트랩 판별을 되돌리면(항상 null
     const mutantPath = join(scriptsCheckDir, "dispatch-gate-decision.mjs");
 
     const fixtureDir = mkdtempSync(
-      join(tmpdir(), "dispatch-gate-blocked-term-mut-c-"),
+      join(tmpdir(), "dispatch-gate-blocked-term-mut-c3-"),
     );
     try {
       const role = "coder";
-      mkdirSync(join(fixtureDir, "rounds"), { recursive: true });
-      writeFileSync(
-        join(fixtureDir, "rounds", `${role}-r1.md`),
-        "task_id: HYK-9303-prior\n>>> DONE: CODER @ 2026-08-24 07:00:00 KST\n",
-        "utf8",
-      );
+      const taskId = "HYK-9306-mut-c3";
       const taskPath = writeNextTaskFile(
         fixtureDir,
         role,
-        "HYK-9303-r4-mut",
+        taskId,
         "2026-08-24 08:00:00 KST",
+      );
+      const dispatchReceiptPath = join(fixtureDir, "dispatch-receipts.jsonl");
+      writeDispatchReceiptLine(dispatchReceiptPath, {
+        role: "CODER",
+        harnessTaskLabel: taskId,
+        dispatchId: "ctx_mut_c3",
+      });
+      const ledgerPath = join(fixtureDir, "admission-ledger.json");
+      writeFileSync(
+        ledgerPath,
+        JSON.stringify(buildCompletedLedger(taskId, "CODER")) + "\n",
+        "utf8",
       );
       const streakLedgerPath = join(fixtureDir, "reject-streak.json");
       writeLedger(streakLedgerPath, { schema_version: 1, issues: {} });
 
-      const r = runCli(mutantPath, [taskPath, "--ledger", streakLedgerPath]);
+      // ⛔결과 파일을 만들지 않는다 -- 원장은 COMPLETED인데(진짜 증거
+      // 삭제) 변이가 "항상 ACTIVE"로 거짓 보고하면 다시 통과해야 RED다.
+      const r = runCli(mutantPath, [
+        taskPath,
+        "--ledger",
+        streakLedgerPath,
+        "--dispatch-receipt-path",
+        dispatchReceiptPath,
+        "--admission-ledger-path",
+        ledgerPath,
+      ]);
       assert.equal(
         r.status,
         0,
-        "RED: 옆문을 원상복구하면 증거 사라짐도 다시 조용히 ALLOW돼야 한다 -- 이 판별이 실제로 결과를 바꾼다는 증거",
+        "RED: 원장 ACTIVE 판별을 무시하면 증거 삭제(COMPLETED)도 다시 ALLOW로 새야 한다 -- 이 판별이 실제로 결과를 바꾼다는 증거",
       );
     } finally {
       rmSync(fixtureDir, { recursive: true, force: true });
@@ -506,19 +657,21 @@ test("RED(변이, 필수): R4 부트스트랩 판별을 되돌리면(항상 null
 });
 
 // ---------------------------------------------------------------------------
-// RED(변이, 필수, HYK-342 2R P1-2): 검토자가 재현한 «결과 파일 + rounds/
-// 함께 삭제» 공격이 dispatch-receipts.jsonl 앵커(hasReceipt) 없이는
-// 다시 뚫리는 것을 확인한다 -- 로컬 아카이브 판별(hasLocalArchive)만
-// 남기고 영수증 판별을 빼면, 둘 다 지운 공격이 다시 조용히 ALLOW된다.
+// RED(변이, 필수, HYK-342 2R P1-2 -> 3R §3): 검토자가 재현한 «결과 파일 +
+// (당시 rounds/) 함께 삭제» 공격이 dispatch-receipts.jsonl 앵커(hasReceipt)
+// 없이는 다시 뚫리는 것을 확인한다 -- 영수증 존재 판별 자체를 빼면(항상
+// "영수증 없음"으로 취급하면) 진짜 첫 배달과 증거-삭제를 더 이상 구분하지
+// 못해 §C-3(증거 삭제)이 조용히 ALLOW로 샌다(부트스트랩 분기로 잘못
+// 떨어진다).
 // ---------------------------------------------------------------------------
 
-test("RED(변이, 필수, HYK-342 2R P1-2): hasReceipt 판별을 빼면(로컬 아카이브만 남으면) 결과 파일+rounds/를 함께 지운 공격이 다시 ALLOW로 샌다", () => {
+test("RED(변이, 필수, HYK-342 2R P1-2 -> 3R §3): hasReceipt 판별을 빼면(항상 false) 증거 삭제도 부트스트랩으로 오인돼 다시 ALLOW로 샌다", () => {
   const src = readFileSync(SCRIPT_PATH, "utf8");
-  const target = "if (hasLocalArchive || hasReceipt) {";
-  assertExactlyOneMatch(src, target, "P1-2 combined evidence check");
+  const target = "  if (!hasReceipt) {\n";
+  assertExactlyOneMatch(src, target, "hasReceipt 부트스트랩 분기 진입");
   const mutated = src.replace(
     target,
-    "if (hasLocalArchive /* MUTATED: || hasReceipt 제거 */) {",
+    "  if (!hasReceipt || true) {\n    // MUTATED: hasReceipt 판별 무력화(항상 부트스트랩으로 접음)\n",
   );
 
   withFixtureDir((dir) => {
@@ -532,34 +685,44 @@ test("RED(변이, 필수, HYK-342 2R P1-2): hasReceipt 판별을 빼면(로컬 �
     );
     try {
       const role = "coder";
+      const taskId = "HYK-9304-p12-mut";
       const taskPath = writeNextTaskFile(
         fixtureDir,
         role,
-        "HYK-9304-p12-mut",
+        taskId,
         "2026-08-24 08:00:00 KST",
       );
       const dispatchReceiptPath = join(fixtureDir, "dispatch-receipts.jsonl");
       writeDispatchReceiptLine(dispatchReceiptPath, {
         role: "CODER",
-        harnessTaskLabel: "HYK-9304-p12-mut",
+        harnessTaskLabel: taskId,
         dispatchId: "ctx_p12_mut",
       });
+      const ledgerPath = join(fixtureDir, "admission-ledger.json");
+      writeFileSync(
+        ledgerPath,
+        JSON.stringify(buildCompletedLedger(taskId, "CODER")) + "\n",
+        "utf8",
+      );
       const streakLedgerPath = join(fixtureDir, "reject-streak.json");
       writeLedger(streakLedgerPath, { schema_version: 1, issues: {} });
 
-      // ⛔결과 파일도 rounds/도 만들지 않는다(검토자 재현 그대로) -- 유일한
-      // 남은 증거는 dispatch-receipts.jsonl뿐이다.
+      // ⛔결과 파일을 만들지 않는다 -- 영수증+COMPLETED 원장은 "증거 삭제"
+      // 여야 하는데, hasReceipt가 무력화되면 부트스트랩으로 오인해
+      // ALLOW로 새야 RED다.
       const r = runCli(mutantPath, [
         taskPath,
         "--ledger",
         streakLedgerPath,
         "--dispatch-receipt-path",
         dispatchReceiptPath,
+        "--admission-ledger-path",
+        ledgerPath,
       ]);
       assert.equal(
         r.status,
         0,
-        "RED: hasReceipt 판별이 빠지면 «둘 다 지운» 공격이 다시 ALLOW로 새야 한다 -- 이 판별이 실제로 결과를 바꾼다는 증거",
+        "RED: hasReceipt 판별이 무력화되면 증거 삭제도 부트스트랩으로 오인해 ALLOW로 새야 한다 -- 이 판별이 실제로 결과를 바꾼다는 증거",
       );
     } finally {
       rmSync(fixtureDir, { recursive: true, force: true });

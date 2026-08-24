@@ -89,6 +89,66 @@ function hasWellFormedBlockedMarker(resultContent) {
   return matches.length === 1;
 }
 
+// HYK-342 3R §0/§2 (신뢰 경계 교정: 결과 파일은 워커가 쓴다 -- "워커가
+// 만들어 낼 수 없는 것"이 아니다): 검토자가 2R에서 재현한 우회로 -- 워커가
+// 자기 결과 파일에 지어낸 task_id(`HYK-342-fake-result-1`)와 지어낸
+// `>>> BLOCKED:` 표지를 함께 써 두면, 위 두 확인(task_id 에코 일치·
+// 표지 존재)만으로는 그대로 통과했다. 그 둘 다 워커가 쓸 수 있는 파일
+// 안에서만 확인하기 때문이다. 이 라운드는 세 번째 확인을 추가한다: 그
+// task_id가 실제로 관제실 배달 영수증(dispatch-receipts.jsonl, 워커가
+// 쓸 수 없는 파일)에 이 role로 실재하는가. dispatch-gate-decision.mjs의
+// lookupDispatchId와 동일한 계약(role 대소문자 무관, harness_task_label
+// 정확히 일치, 마지막 매치 채택, 손상된 줄 건너뜀)을 최소 재현한다
+// (⛔새 조회 로직 발명 금지 -- 이 파일 헤더가 이미 설명한 "무겁게 참조되는
+// 모듈을 끌어들이지 않기 위해 작은 것들은 복제한다" 원칙 그대로, dispatch-
+// gate-decision.mjs는 abort-record-core/consumption-receipt-core/
+// retirement-record-core/reject-streak 등을 정적 import하는 무거운
+// 파일이라 그 파일 자체를 끌어들이면 이 파일의 격리 시험들이 다시 깨진다
+// -- P1-1 때 relay-handshake.mjs를 정적 import했다가 실측으로 확인한 것과
+// 동일한 위험).
+function hasDispatchReceiptForRound(role, harnessTaskLabel, receiptPath) {
+  if (!isNonEmptyString(receiptPath) || !isNonEmptyString(harnessTaskLabel)) {
+    return false;
+  }
+  let raw;
+  try {
+    raw = readFileSync(receiptPath, "utf8");
+  } catch {
+    return false;
+  }
+  let found = false;
+  for (const line of raw.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    let rec;
+    try {
+      rec = JSON.parse(trimmed);
+    } catch {
+      continue;
+    }
+    if (
+      typeof rec.role === "string" &&
+      rec.role.toUpperCase() === role.toUpperCase() &&
+      rec.harness_task_label === harnessTaskLabel
+    ) {
+      found = true;
+    }
+  }
+  return found;
+}
+
+// resolveDispatchReceiptPath(dispatch-gate-decision.mjs)와 동일한 arg-
+// with-env-fallback 관례(같은 env 이름, `DISPATCH_RECEIPT_PATH` --
+// dispatch-receipt-cli.mjs가 이미 쓰는 바로 그 이름) -- 관제실 절대경로
+// 하드코딩 금지.
+function resolveReceiptPathForVerification(receiptPathArg, env) {
+  if (isNonEmptyString(receiptPathArg)) return receiptPathArg;
+  if (isNonEmptyString(env?.DISPATCH_RECEIPT_PATH)) {
+    return env.DISPATCH_RECEIPT_PATH;
+  }
+  return null;
+}
+
 // repoRoot/mainRepoRoot -- duplicated from relay-handshake.mjs's own
 // (exported) versions rather than imported. This mirrors the repo-wide
 // convention (every scripts/check/*.mjs file that needs this resolves it
@@ -180,19 +240,35 @@ const KNOWN_COMPLETION_REASONS = new Set([
   COMPLETION_REASON.BLOCKED_TERMINATION_RELEASED,
 ]);
 
-// HYK-342 2R P1-1 -- «회수 표식의 생산자 권한» 검증. 검토자가 재현한
-// 공격(중단 핸드셰이크를 거치지 않고 이 어댑터를 직접 실행해 completion_
-// reason=BLOCKED_TERMINATION_RELEASED를 찍는 것)을 막는다: 이 reason을
-// 받아들이기 전에, «호출자가 만들어 낼 수 없는 것»이 아니라 «real relay-
-// handshake가 이미 확인했던 바로 그 사실»을 이 어댑터가 독립적으로
-// 다시 확인한다 -- (a) harnessDir/role이 가리키는 라이브 결과 파일이
-// 실제로 존재하고 (b) 그 결과 파일의 task_id 에코가 정확히 이
-// reservationId와 일치하고(HYK-183 anti-forgery, resolveResultTaskId 그대로
-// 재사용) (c) 그 결과 파일이 정확히 BLOCKED 또는 NEEDS_INPUT 상태로 판정
-// 되는가(resolveResultBlockedState 그대로 재사용, AMBIGUOUS/MALFORMED는
-// 불충분). 셋 중 하나라도 아니면 거부(fail-closed, "없으면 막는다") --
-// 표식 문자열 자체나 비밀값에 기대지 않는다(⛔검토자가 금지한 그 경로).
-function verifyBlockedTerminationEvidence({ harnessDir, role, reservationId }) {
+// HYK-342 2R P1-1 / 3R §0/§2 -- «회수 표식의 생산자 권한» 검증. 검토자가
+// 재현한 공격(중단 핸드셰이크를 거치지 않고 이 어댑터를 직접 실행해
+// completion_reason=BLOCKED_TERMINATION_RELEASED를 찍는 것)을 막는다.
+//
+// ⚠️3R §0 신뢰 경계 교정: 2R은 "harnessDir/role이 가리키는 결과 파일의
+// task_id 에코 + BLOCKED 표지"를 «호출자가 만들어 낼 수 없는 것»으로
+// 잘못 취급했다 -- 결과 파일은 워커가 쓰는 파일이므로 워커가 지어낸
+// task_id + 지어낸 표지를 직접 써 두면 그 둘만으로는 여전히 통과했다
+// (검토자 2R §1 항1 실측). 워커가 쓸 수 없는 곳은 관제실 배달 영수증
+// (dispatch-receipts.jsonl)뿐이다(§0). 그래서 이 함수는 이제 **셋**을
+// 확인한다 -- (a) 결과 파일이 실제로 존재하고 (b) 그 결과 파일의 task_id
+// 에코가 정확히 이 reservationId와 일치하고(HYK-183 anti-forgery) (c) 그
+// 결과 파일이 정확히 BLOCKED/NEEDS_INPUT 상태이며 **(d, 신규) 그
+// reservationId가 실제로 dispatch-receipts.jsonl에 이 role로 배달된 적이
+// 있다**(hasDispatchReceiptForRound, 워커가 못 쓰는 파일). 넷 중
+// 하나라도 아니면 거부(fail-closed) -- 표식 문자열 자체나 비밀값에
+// 기대지 않는다(⛔검토자가 금지한 그 경로).
+//
+// ★남는 표면(3R §2 "닫으려 하지 마라"): 워커가 «자기 실제(진짜 배달된)
+// 라벨»로 가짜 정지 표지를 쓰는 경우는 이 확인으로 막히지 않는다 --
+// BLOCKED 선언 자체는 이 하네스가 정상 신호로 받아들이기로 설계한
+// 것이므로, 이 검증이 닫는 것은 "배달된 적 없는 라운드로 표식을 만드는
+// 것"뿐이다(coder.md 정직 한계 절에도 명시).
+function verifyBlockedTerminationEvidence({
+  harnessDir,
+  role,
+  reservationId,
+  receiptPath,
+}) {
   if (!isNonEmptyString(harnessDir) || !isNonEmptyString(role)) {
     return {
       ok: false,
@@ -225,6 +301,12 @@ function verifyBlockedTerminationEvidence({ harnessDir, role, reservationId }) {
       reason: `admission-completion-adapter: BLOCKED_TERMINATION_RELEASED 증거 확인 실패 -- 결과 파일('${resultPath}')에 유효한 '>>> BLOCKED:'/'>>> NEEDS_INPUT:' 표지가 정확히 하나 있지 않음, 거부(안전측 기본값)`,
     };
   }
+  if (!hasDispatchReceiptForRound(role, reservationId, receiptPath)) {
+    return {
+      ok: false,
+      reason: `admission-completion-adapter: BLOCKED_TERMINATION_RELEASED 증거 확인 실패 -- reservationId('${reservationId}')가 role='${role}'로 실제 배달된 기록이 dispatch-receipts.jsonl(${receiptPath ?? "(경로 미설정)"})에 없음 -- 워커가 지어낸 이름표로 의심, 거부(안전측 기본값, HYK-342 3R §2)`,
+    };
+  }
   return { ok: true };
 }
 
@@ -249,6 +331,7 @@ export function completeAdmissionReservation({
   reason,
   harnessDir,
   role,
+  receiptPath,
 }) {
   if (reason !== undefined && !KNOWN_COMPLETION_REASONS.has(reason)) {
     return {
@@ -262,6 +345,7 @@ export function completeAdmissionReservation({
       harnessDir,
       role,
       reservationId,
+      receiptPath: resolveReceiptPathForVerification(receiptPath, process.env),
     });
     if (!evidence.ok) {
       return {
@@ -453,11 +537,16 @@ function isInsideGitWorktree(dir) {
 // HYK-342 2R P1-1: `role` (optional) is forwarded alongside `reason` --
 // required only when reason===BLOCKED_TERMINATION_RELEASED (see
 // verifyBlockedTerminationEvidence); every pre-existing caller omits both.
+// HYK-342 3R §2: `receiptPath` (optional) is forwarded alongside `reason`/
+// `role` -- required (directly or via DISPATCH_RECEIPT_PATH env,
+// resolveReceiptPathForVerification) only when reason===
+// BLOCKED_TERMINATION_RELEASED. Every pre-existing caller omits it.
 export function autoCompleteAdmission({
   reservationId,
   harnessDir,
   reason,
   role,
+  receiptPath,
 }) {
   let ledgerPath = process.env.ADMISSION_LEDGER_PATH;
   // HYK-312 §1: gate the persistent-pointer fallback below (never the
@@ -505,6 +594,7 @@ export function autoCompleteAdmission({
     reason,
     harnessDir,
     role,
+    receiptPath,
   });
   if (!outcome.ok) {
     appendCompletionFailureAudit({
@@ -562,11 +652,17 @@ if (
   // rejects that reason without it). Every pre-2R call site (and the
   // ok:true normal-completion path) never passes a 5th arg.
   const role = process.argv[5];
+  // HYK-342 3R §2: 6th positional arg, optional -- explicit override for
+  // the receipt path (falls back to DISPATCH_RECEIPT_PATH env otherwise,
+  // resolveReceiptPathForVerification). Every pre-3R call site never
+  // passes a 6th arg.
+  const receiptPath = process.argv[6];
   const outcome = autoCompleteAdmission({
     reservationId,
     harnessDir,
     reason,
     role,
+    receiptPath,
   });
   // HYK-312 §1: a blocked persistent-fallback attempt is the one outcome
   // shape that must NOT be treated like the pre-existing silent no-op below

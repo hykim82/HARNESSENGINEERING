@@ -1768,42 +1768,13 @@ function lookupDispatchIdWithLogging({ role, harnessTaskLabel, receiptPath }) {
   return lookup;
 }
 
-// HYK-342 §4 요구6 (옆문 R4): `.harness/rounds/`에 이 role의 이전 라운드
-// **결과** 봉투 사본(`<role>-r<N>.md`, envelope-archive.mjs의
-// archiveRoundEnvelope가 쓰는 그 파일 -- ⛔`<role>-task-r<N>.md`가 아니다)
-// 이 하나라도 있는지만 본다. task-file 사본(`-task-r<N>.md`)은 이 CLI
-// 자신이 매 배달마다 무조건 미리 찍어 두는 스냅샷(bestEffortSnapshot
-// RoundTaskFile, HYK-307-order-1)이라 「이 CLI가 최소 한 번 실행된 적
-// 있는가」만 증명할 뿐 「라운드가 실제로 완료/종결됐는가」는 증명하지
-// 못한다(진짜 첫 배달에서도 이 CLI 자신이 그 스냅샷을 찍은 뒤 부트스트랩
-// 검사를 하므로, task-file 패턴으로 확인하면 첫 배달조차 "이전 라운드
-// 있음"으로 오탐한다). 결과 봉투 사본은 오직 라운드가 실제로 소비될
-// 때만(정상 ok:true 완료의 autoArchiveRoundEnvelope, 또는 이제 BLOCKED-
-// termination의 동일 호출) 쓰이므로 "이 role이 이 harnessDir에서 최소
-// 한 라운드를 실제로 마쳤는가"의 정확한 신호다. 디렉터리 자체가 없으면
-// (가장 흔한 진짜 부트스트랩) false -- 지어내지 않는다.
-function hasAnyArchivedRoundForRole(harnessDir, role) {
-  const archiveDir = join(harnessDir, "rounds");
-  let names;
-  try {
-    names = readdirSync(archiveDir);
-  } catch {
-    return false;
-  }
-  const pattern = new RegExp(`^${role}-r\\d+\\.md$`, "i");
-  return names.some((name) => pattern.test(name));
-}
-
 // HYK-342 2R P1-2 (검토 원문 "옆문이 «한 겹 뒤로 물러난 것»에 그치지
-// 않게"): 검토자가 재현한 공격은 결과 파일 «과» `.harness/rounds/` 를
-// «함께» 지운 것이었다 -- 위 hasAnyArchivedRoundForRole 하나만으로는
-// 이 경우를 "증거 없음"으로 오판해 다시 조용히 ALLOW했다. 이 함수는
-// 워크트리 밖(관제실) 배달 영수증(dispatch-receipts.jsonl)에 이 role +
-// 이 taskId 조합의 배달 기록이 남아 있는지 «추가로» 확인한다 -- 이
-// 파일은 워크트리 안을 아무리 지워도 남는다(검토자 힌트 원문). lookup
-// Dispatch Id를 재사용한다(이미 이 파일이 abort-record/consumption 두 축
-// 모두에서 쓰는 그 함수 그대로 -- 새 조회 로직을 발명하지 않는다). role
-// 비교는 그 함수 자신이 이미 대소문자 무관으로 처리한다.
+// 않게"): 워크트리 밖(관제실) 배달 영수증(dispatch-receipts.jsonl)에 이
+// role + 이 taskId 조합의 배달 기록이 남아 있는지 확인한다 -- 이 파일은
+// 워크트리 안을 아무리 지워도 남는다(검토자 힌트 원문). lookupDispatchId
+// 를 재사용한다(이미 이 파일이 abort-record/consumption 두 축 모두에서
+// 쓰는 그 함수 그대로 -- 새 조회 로직을 발명하지 않는다). role 비교는
+// 그 함수 자신이 이미 대소문자 무관으로 처리한다.
 function hasDispatchReceiptForCurrentRound(role, taskId, receiptPath) {
   if (!isNonEmptyString(taskId) || !isNonEmptyString(receiptPath)) {
     return false;
@@ -1816,55 +1787,86 @@ function hasDispatchReceiptForCurrentRound(role, taskId, receiptPath) {
   return lookup.ok && lookup.found;
 }
 
-// HYK-342 §4 요구6 (옆문 R4 수리) / HYK-342 2R P1-2(옆문이 "한 겹 뒤로
-// 물러난 것"에 그치지 않게) -- evaluateConsumptionDecision 자신의 eslint
-// complexity/line 상한을 지키려고 뽑았다(HYK-244-receipt-core-1b 선례와
-// 동일한 이유, 판정/문구는 조금도 바뀌지 않는다). 결과 파일이 없는 이유가
-// "이 role의 첫 라운드라 아직 아무것도 없다"(진짜 부트스트랩)와 "라운드가
-// 있었고 완료/아카이브까지 됐는데 결과 파일 자체가(실수로든 고의로든)
-// 사라졌다"를 이전에는 구분하지 않고 둘 다 조용히 ALLOW했다.
+// HYK-342 3R §0/§3: verifyAbortRecordRecoveryMarker(위, 같은 파일)와 동일한
+// 모양 -- admission 원장(워크트리 밖, 워커가 못 쓰는 파일)을 «읽기만»
+// 해서 이 taskId의 예약이 지금 `ACTIVE`인지 본다. 읽을 수 없거나(경로
+// 미설정·파일 없음·JSON 파싱 실패) 그 예약이 없거나 상태가 `ACTIVE`가
+// 아니면 false(안전측 기본값 -- "판단 불가는 ACTIVE 아님으로 접는다").
+function isReservationActiveForRound(ledgerPath, taskId) {
+  if (!isNonEmptyString(ledgerPath) || !isNonEmptyString(taskId)) return false;
+  let ledger;
+  try {
+    ledger = JSON.parse(readFileSync(ledgerPath, "utf8"));
+  } catch {
+    return false;
+  }
+  return ledger?.reservations?.[taskId]?.status === "ACTIVE";
+}
+
+// HYK-342 §4 요구6(1R) -> 2R P1-2 -> 3R §0/§3(신뢰 경계 교정 + 재시도
+// 오탐 수리) -- evaluateConsumptionDecision 자신의 eslint complexity/line
+// 상한을 지키려고 뽑았다(판정/문구는 조금도 바뀌지 않는다는 기존 관례를
+// 이 라운드도 지킨다, 다만 이번엔 판정 «로직 자체»가 바뀐다 -- 이전 두
+// 라운드의 "문구만 바뀐다" 전제와 다르다).
 //
-// 1R 수리(워크트리 안 `.harness/rounds/` 대조)만으로는 «결과 파일 +
-// rounds/ 를 함께 지운» 공격을 못 막는다(검토 2R P1-2 실측: 둘 다 지우면
-// 다시 exit=0/ALLOW). 그래서 이제 **둘 중 하나라도** "이 role+taskId
-// 조합이 진짜 배달된 적 있다"는 증거면 부트스트랩이 아니라고 본다:
-//   ⓐ 워크트리 «안» -- `.harness/rounds/<role>-r<N>.md`(결과 봉투 아카이브)
-//   ⓑ 워크트리 «밖»(관제실) -- `dispatch-receipts.jsonl`에 이 role+taskId
-//      배달 기록. 워크트리 안을 아무리 지워도 이 기록은 남는다(검토자
-//      힌트 원문 그대로) -- ⓐ만 지워진 공격이 남아도 ⓑ가 잡는다.
-// 둘 다 없으면(이 role이 이 harnessDir에서 한 번도 보관된 적 없고, 이
-// taskId로 배달된 적도 없으면) 진짜 부트스트랩이므로 기존과 동일하게
-// ALLOW한다(오탐 0 -- 정당한 첫 배달은 애초에 ⓑ의 영수증조차 아직
-// 없다, dispatch-worker.ps1이 이 게이트를 통과시킨 «뒤에만» 영수증을
-// 쓰기 때문).
+// ⛔3R §0 신뢰 경계 교정: 1R/2R이 썼던 `.harness/rounds/` 로컬 아카이브
+// 대조는 이 함수에서 완전히 뺐다 -- 그 디렉터리는 워크트리 «안»이라
+// 워커가 지우거나 조작할 수 있는 자리다(§0: "워커 워크트리 안의 파일은
+// 전부 워커가 쓸 수 있다"). 증거로 쓸 수 있는 것은 워커가 못 쓰는 두
+// 곳뿐이다: 배달 영수증(hasDispatchReceiptForCurrentRound) · admission
+// 원장(isReservationActiveForRound).
+//
+// ⛔3R §3 재시도 오탐 수리: 2R까지는 "이 role+taskId로 배달된 적이
+// 있다"(영수증 존재)만으로 곧장 REJECT했다 -- 그런데 검토자가 지적한
+// 대로, 관제실의 실제 순서는 «게이트 허용 -> 영수증 기록 -> 좌석증명·go
+// 전달»이라 **정당한 재시도**(영수증은 남았지만 뒤 단계가 실패해 워커가
+// 아직 결과를 낸 적이 없는 경우)도 영수증만으로 REJECT됐다. 원장이 그
+// 라운드를 아직 `ACTIVE`로 안다면(예약이 살아 있다면) 그건 «증거가
+// 사라진 것»이 아니라 «아직 안 끝난(또는 재시도 중인) 것»이므로
+// ALLOW해야 한다. 이제 판정은:
+//   1. 영수증 없음 -> **ALLOW**(진짜 부트스트랩 -- 이 taskId로 배달된
+//      기록 자체가 없다).
+//   2. 영수증 있음 + 원장이 이 예약을 `ACTIVE`로 앎 -> **ALLOW**(정당한
+//      재배달/재시도 -- 3R §3 요구 2 · 4. 과거 다른 라운드의 아카이브가
+//      워크트리에 쌓여 있어도 무관하다, 그건 더 이상 이 판정에 관여하지
+//      않는다).
+//   3. 영수증 있음 + 원장이 ACTIVE로 모름(COMPLETED·예약 없음·원장
+//      판독 불가) -> **REJECT**(증거 삭제 -- 3R §3 요구 3, fail-closed
+//      기본값: 판단 불가도 여기 떨어진다).
 // 반환: `{shortCircuit:true, result:<null 또는 REJECT 모양>}` 이면 즉시
 // 그 result를 반환하라, `{shortCircuit:false}`면 결과 파일이 있으니 계속
 // 진행하라는 뜻이다.
 function resolveMissingResultFileOutcome(
-  harnessDir,
-  role,
   resultPath,
+  role,
   taskId,
   receiptPath,
+  admissionLedgerPath,
 ) {
   if (existsSync(resultPath)) return { shortCircuit: false };
-  const hasLocalArchive = hasAnyArchivedRoundForRole(harnessDir, role);
   const hasReceipt = hasDispatchReceiptForCurrentRound(
     role.toUpperCase(),
     taskId,
     receiptPath,
   );
-  if (hasLocalArchive || hasReceipt) {
-    return {
-      shortCircuit: true,
-      result: {
-        state: DISPATCH_GATE_STATE.REJECT_RESULT_EVIDENCE_MISSING,
-        allow: false,
-        reason: `dispatch-gate-decision consumption: 직전 결과 파일(${resultPath})이 없지만 이 role이 이전에 실제로 배달/보관된 증거가 있음(로컬 아카이브=${hasLocalArchive}, 배달 영수증=${hasReceipt}, taskId=${taskId ?? "(미확정)"}) -> 부트스트랩(첫 라운드)이 아니라 증거가 사라진 것으로 판단, 배달 거부(안전측 기본값, HYK-342 §4 요구6 / 2R P1-2). 조치: 결과 파일이 실수로 삭제됐는지 확인하거나, 진짜 정지 종결이면 relay-handshake.mjs의 BLOCKED-termination 경로(중단 기록 작성)를 거치게 하라`,
-      },
-    };
+  if (!hasReceipt) {
+    return { shortCircuit: true, result: null }; // 진짜 부트스트랩.
   }
-  return { shortCircuit: true, result: null }; // 진짜 부트스트랩.
+  const reservationActive = isReservationActiveForRound(
+    admissionLedgerPath,
+    taskId,
+  );
+  if (reservationActive) {
+    return { shortCircuit: true, result: null }; // 정당한 재배달/재시도.
+  }
+  return {
+    shortCircuit: true,
+    result: {
+      state: DISPATCH_GATE_STATE.REJECT_RESULT_EVIDENCE_MISSING,
+      allow: false,
+      reason: `dispatch-gate-decision consumption: 직전 결과 파일(${resultPath})이 없지만 이 role+taskId(${taskId ?? "(미확정)"})가 실제로 배달됐다는 영수증이 있고, admission 원장은 이 예약을 ACTIVE로 알지 못함(reservationActive=false -- 판단 불가도 포함) -> 재시도 중인 라운드가 아니라 증거가 사라진 것으로 판단, 배달 거부(안전측 기본값, HYK-342 3R §3). 조치: 결과 파일이 실수로 삭제됐는지 확인하거나, 진짜 정지 종결이면 relay-handshake.mjs의 BLOCKED-termination 경로(중단 기록 작성)를 거치게 하라`,
+    },
+  };
 }
 
 // HYK-342 2R P1-2 (evaluateConsumptionDecision 자신의 eslint max-lines
@@ -1874,25 +1876,22 @@ function resolveMissingResultFileOutcome(
 // 전제)의 task_id를 뽑아 resolveMissingResultFileOutcome에 넘긴다.
 // receiptPath도 함께 돌려줘서 호출자가 뒤에서 재사용할 수 있게 한다(중복
 // resolveDispatchReceiptPath 호출을 피한다).
-function resolveMissingResultFileGate(
-  taskPath,
-  harnessDir,
-  role,
-  resultPath,
-  args,
-  env,
-) {
+function resolveMissingResultFileGate(taskPath, role, resultPath, args, env) {
   const receiptPath = resolveDispatchReceiptPath(args, env);
+  // HYK-342 3R §3: admission 원장 경로도 abort-record 축과 같은 인자/환경
+  // 변수(resolveAdmissionLedgerPathForAbort, 이 파일에 이미 있는 그
+  // 함수)로 받는다 -- 새 경로 해석을 발명하지 않는다.
+  const admissionLedgerPath = resolveAdmissionLedgerPathForAbort(args, env);
   const currentTaskId = extractSoleMatch(
     readFileSync(taskPath, "utf8"),
     CONSUMPTION_TASK_ID_RE_G,
   );
   const missingResult = resolveMissingResultFileOutcome(
-    harnessDir,
-    role,
     resultPath,
+    role,
     currentTaskId,
     receiptPath,
+    admissionLedgerPath,
   );
   if (missingResult.shortCircuit) return { ...missingResult, receiptPath };
   return {
@@ -1945,7 +1944,6 @@ function evaluateConsumptionDecision(taskPath, args, env = process.env) {
   const resultPath = join(harnessDir, `${role}.md`);
   const missingResult = resolveMissingResultFileGate(
     taskPath,
-    harnessDir,
     role,
     resultPath,
     args,

@@ -136,6 +136,11 @@ test("autoCompleteAdmission releases a real reservation when the env var is set 
 // marker) -- this test seeds that file (mirroring what a genuine relay-
 // handshake.mjs BLOCKED round leaves behind) so it still exercises the
 // success path, not just the (separately tested) forgery-rejection path.
+// HYK-342 3R §0/§2: the reviewer's 2R attack showed the worker CAN write
+// its own task_id + BLOCKED marker (both are worker-writable) -- so this
+// test also seeds a real dispatch-receipts.jsonl entry for this exact
+// role+reservationId (the one thing a worker cannot fabricate) to still
+// exercise the genuine success path under the tightened 3R contract.
 test("autoCompleteAdmission with `reason` stamps completion_reason on the released reservation (BLOCKED-termination integration path)", () => {
   const { dir, ledger, lock } = tmpPaths();
   const savedLedger = process.env.ADMISSION_LEDGER_PATH;
@@ -166,6 +171,12 @@ test("autoCompleteAdmission with `reason` stamps completion_reason on the releas
       "task_id: HYK-342-blocked-1\n\n>>> BLOCKED: 시험용 정지\n",
       "utf8",
     );
+    const receiptPath = join(dir, "dispatch-receipts.jsonl");
+    writeFileSync(
+      receiptPath,
+      `${JSON.stringify({ role: "CODER", harness_task_label: "HYK-342-blocked-1", dispatch_id: "ctx_test" })}\n`,
+      "utf8",
+    );
 
     process.env.ADMISSION_LEDGER_PATH = ledger;
     process.env.ADMISSION_LOCK_PATH = lock;
@@ -174,6 +185,7 @@ test("autoCompleteAdmission with `reason` stamps completion_reason on the releas
       reason: "BLOCKED_TERMINATION_RELEASED",
       harnessDir: dir,
       role: "CODER",
+      receiptPath,
     });
     assert.equal(outcome.attempted, true);
     assert.equal(outcome.ok, true, outcome.reason);
@@ -182,6 +194,77 @@ test("autoCompleteAdmission with `reason` stamps completion_reason on the releas
     assert.equal(
       written.reservations["HYK-342-blocked-1"].completion_reason,
       "BLOCKED_TERMINATION_RELEASED",
+    );
+  } finally {
+    if (savedLedger !== undefined)
+      process.env.ADMISSION_LEDGER_PATH = savedLedger;
+    else delete process.env.ADMISSION_LEDGER_PATH;
+    if (savedLock !== undefined) process.env.ADMISSION_LOCK_PATH = savedLock;
+    else delete process.env.ADMISSION_LOCK_PATH;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// HYK-342 3R §0/§2 (검토자가 2R에서 재현한 우회로의 재현): the worker
+// writes its OWN result file with a made-up task_id + a well-formed
+// BLOCKED marker (both are worker-writable, per the corrected §0 trust
+// boundary) and admits a matching reservation under that same fake id --
+// but NO dispatch receipt exists for it (nobody ever really dispatched
+// this "round"). The 2R contract (task_id echo + BLOCKED marker only)
+// would have accepted this; the 3R receipt check must refuse it.
+test("HYK-342 3R §2: a worker-forged task_id + worker-forged BLOCKED marker with NO matching dispatch receipt is refused (reviewer's 2R bypass, now blocked)", () => {
+  const { dir, ledger, lock } = tmpPaths();
+  const savedLedger = process.env.ADMISSION_LEDGER_PATH;
+  const savedLock = process.env.ADMISSION_LOCK_PATH;
+  try {
+    runAdmissionCli([
+      "init-cutover",
+      "--ledger",
+      ledger,
+      "--lock",
+      lock,
+      "--live-seats",
+      "[]",
+    ]);
+    runAdmissionCli([
+      "admit",
+      "--ledger",
+      ledger,
+      "--lock",
+      lock,
+      "--reservation-id",
+      "HYK-342-fake-result-1",
+      "--cap",
+      "1",
+    ]);
+    // ⛔워커가 자기 결과 파일에 지어낸 task_id + 지어낸 BLOCKED 표지를
+    // 직접 쓴다(검토자 2R §1 항1 실측 그대로 재현).
+    writeFileSync(
+      join(dir, "coder.md"),
+      "task_id: HYK-342-fake-result-1\n\n>>> BLOCKED: forged by worker\n",
+      "utf8",
+    );
+    // ⛔dispatch-receipts.jsonl은 아예 만들지 않는다 -- 이 task_id로 배달된
+    // 적이 정말 없다(워커가 지어낸 것이므로).
+
+    process.env.ADMISSION_LEDGER_PATH = ledger;
+    process.env.ADMISSION_LOCK_PATH = lock;
+    const outcome = autoCompleteAdmission({
+      reservationId: "HYK-342-fake-result-1",
+      reason: "BLOCKED_TERMINATION_RELEASED",
+      harnessDir: dir,
+      role: "CODER",
+      receiptPath: join(dir, "dispatch-receipts.jsonl"), // 존재하지 않는 파일
+    });
+    assert.equal(outcome.attempted, true);
+    assert.equal(outcome.ok, false);
+    assert.equal(outcome.reasonCode, "BLOCKED_TERMINATION_EVIDENCE_MISSING");
+
+    const written = JSON.parse(readFileSync(ledger, "utf8"));
+    assert.equal(
+      written.reservations["HYK-342-fake-result-1"].status,
+      "ACTIVE",
+      "워커 자작 이름표+표지만으로는 자리를 반납받지 못해야 한다",
     );
   } finally {
     if (savedLedger !== undefined)

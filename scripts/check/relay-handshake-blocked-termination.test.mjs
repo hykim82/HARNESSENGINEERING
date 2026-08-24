@@ -177,13 +177,28 @@ test("HYK-342/HYK-249 (5) ADMISSION_LEDGER_PATH가 설정돼 있으면 BLOCKED �
 
     const ledgerPath = join(dir, "ledger.json");
     writeFileSync(ledgerPath, JSON.stringify(ledger), "utf8");
+    // HYK-342 3R §0/§2: 어댑터가 이제 dispatch-receipts.jsonl에 이
+    // role+task_id 조합이 실재하는지 추가로 확인한다(워커가 못 쓰는
+    // 파일) -- 이 시험은 진짜 배달을 재현하는 것이므로 그 영수증을
+    // 미리 남겨 둔다.
+    const receiptPath = join(dir, "dispatch-receipts.jsonl");
+    writeFileSync(
+      receiptPath,
+      `${JSON.stringify({ role: "CODER", harness_task_label: "HYK-1", dispatch_id: "ctx_test" })}\n`,
+      "utf8",
+    );
     const prevEnv = process.env.ADMISSION_LEDGER_PATH;
+    const prevReceiptEnv = process.env.DISPATCH_RECEIPT_PATH;
     process.env.ADMISSION_LEDGER_PATH = ledgerPath;
+    process.env.DISPATCH_RECEIPT_PATH = receiptPath;
     try {
       checkRelayHandshake({ role: "coder", harnessDir: dir });
     } finally {
       if (prevEnv === undefined) delete process.env.ADMISSION_LEDGER_PATH;
       else process.env.ADMISSION_LEDGER_PATH = prevEnv;
+      if (prevReceiptEnv === undefined)
+        delete process.env.DISPATCH_RECEIPT_PATH;
+      else process.env.DISPATCH_RECEIPT_PATH = prevReceiptEnv;
     }
 
     const after = JSON.parse(readFileSync(ledgerPath, "utf8"));
