@@ -45,8 +45,109 @@
 import { appendFileSync, mkdirSync, existsSync, readFileSync } from "node:fs";
 import { execSync } from "node:child_process";
 import { dirname, join } from "node:path";
-import { completeReservation } from "../supervisor/admission-ledger-core.mjs";
+import {
+  completeReservation,
+  COMPLETION_REASON,
+} from "../supervisor/admission-ledger-core.mjs";
 import { withLedgerLock } from "../supervisor/admission-ledger-store.mjs";
+// HYK-342 2R P1-1 (검토 원문 "회수 표식의 생산자 권한이 검증되지 않는다"):
+// ⛔처음에는 relay-handshake.mjs에서 resolveResultTaskId/
+// resolveResultBlockedState를 static import했으나, 실측 결과 이 파일을
+// 고정 파일 목록으로 격리 clone하는 mutation 시험이 실제로 있었다
+// (admission-completion-worktree-isolation.test.mjs·admission-completion-
+// persistent-source.test.mjs 등 -- 실행해서 MODULE_NOT_FOUND로 직접 확인,
+// "0건"이라던 최초 추정이 틀렸다). 그래서 이 파일 헤더가 위(§51-59
+// repoRoot/mainRepoRoot 주석)에서 이미 설명한 그 원칙("무거운/많이 참조되는
+// 모듈을 끌어들이지 않기 위해 작은 것들은 복제한다") 그대로, task_id 에코·
+// BLOCKED/NEEDS_INPUT 표지 판정에 필요한 최소 조각만 아래에 복제한다 --
+// relay-handshake.mjs의 TASK_ID_RE_G/BLOCKED_RE와 **바이트 동일**(그 파일
+// 자신의 정의를 그대로 인용) -- "새로 발명"이 아니라 "같은 계약을 옮겨
+// 적은 것"이다. 이 두 파일이 갈라지면(예: 근접-미스 처리가 relay-
+// handshake.mjs에서 갱신되는데 여기가 안 따라가면) 그 자체가 회귀이므로,
+// 이 상수들을 고칠 때는 반드시 relay-handshake.mjs의 동명 상수와
+// 대조하라(주석으로만 강제되는 계약 -- 기계 강제는 이번 범위 밖).
+const TASK_ID_RE_G = /^task_id:\s*(\S+)/gim;
+const BLOCKED_RE = /^>>>[ \t]*(BLOCKED|NEEDS_INPUT):[ \t]*(\S.*?)[ \t]*$/gim;
+
+// resolveResultTaskId(relay-handshake.mjs)의 최소 재현 -- "정확히 하나의
+// 줄머리 task_id: 값만 인정, 0개/2개 이상은 확정하지 않는다"는 동일 계약.
+function resolveEchoedTaskId(resultContent) {
+  const matches = [...resultContent.matchAll(TASK_ID_RE_G)];
+  if (matches.length !== 1) return { ok: false, count: matches.length };
+  return { ok: true, id: matches[0][1] };
+}
+
+// resolveResultBlockedState(relay-handshake.mjs)의 최소 재현 -- "정확히
+// 하나의 well-formed '>>> BLOCKED:'/'>>> NEEDS_INPUT:' 줄만 인정"은 그대로
+// 옮기되, 이 검증은 relay-handshake.mjs 자신의 전체 5-상태 판정(근접-미스
+// 세분류 포함)을 재구현하지 않는다 -- 여기 필요한 질문은 "유효한 표지가
+// 정확히 하나 있는가" 하나뿐이다(모호/근접-미스는 전부 "없음"으로 접어
+// 거부한다 -- 안전측 기본값, relay-handshake.mjs보다 엄격하면 엄격했지
+// 느슨하지 않다).
+function hasWellFormedBlockedMarker(resultContent) {
+  const matches = [...resultContent.matchAll(BLOCKED_RE)];
+  return matches.length === 1;
+}
+
+// HYK-342 3R §0/§2 (신뢰 경계 교정: 결과 파일은 워커가 쓴다 -- "워커가
+// 만들어 낼 수 없는 것"이 아니다): 검토자가 2R에서 재현한 우회로 -- 워커가
+// 자기 결과 파일에 지어낸 task_id(`HYK-342-fake-result-1`)와 지어낸
+// `>>> BLOCKED:` 표지를 함께 써 두면, 위 두 확인(task_id 에코 일치·
+// 표지 존재)만으로는 그대로 통과했다. 그 둘 다 워커가 쓸 수 있는 파일
+// 안에서만 확인하기 때문이다. 이 라운드는 세 번째 확인을 추가한다: 그
+// task_id가 실제로 관제실 배달 영수증(dispatch-receipts.jsonl, 워커가
+// 쓸 수 없는 파일)에 이 role로 실재하는가. dispatch-gate-decision.mjs의
+// lookupDispatchId와 동일한 계약(role 대소문자 무관, harness_task_label
+// 정확히 일치, 마지막 매치 채택, 손상된 줄 건너뜀)을 최소 재현한다
+// (⛔새 조회 로직 발명 금지 -- 이 파일 헤더가 이미 설명한 "무겁게 참조되는
+// 모듈을 끌어들이지 않기 위해 작은 것들은 복제한다" 원칙 그대로, dispatch-
+// gate-decision.mjs는 abort-record-core/consumption-receipt-core/
+// retirement-record-core/reject-streak 등을 정적 import하는 무거운
+// 파일이라 그 파일 자체를 끌어들이면 이 파일의 격리 시험들이 다시 깨진다
+// -- P1-1 때 relay-handshake.mjs를 정적 import했다가 실측으로 확인한 것과
+// 동일한 위험).
+function hasDispatchReceiptForRound(role, harnessTaskLabel, receiptPath) {
+  if (!isNonEmptyString(receiptPath) || !isNonEmptyString(harnessTaskLabel)) {
+    return false;
+  }
+  let raw;
+  try {
+    raw = readFileSync(receiptPath, "utf8");
+  } catch {
+    return false;
+  }
+  let found = false;
+  for (const line of raw.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    let rec;
+    try {
+      rec = JSON.parse(trimmed);
+    } catch {
+      continue;
+    }
+    if (
+      typeof rec.role === "string" &&
+      rec.role.toUpperCase() === role.toUpperCase() &&
+      rec.harness_task_label === harnessTaskLabel
+    ) {
+      found = true;
+    }
+  }
+  return found;
+}
+
+// resolveDispatchReceiptPath(dispatch-gate-decision.mjs)와 동일한 arg-
+// with-env-fallback 관례(같은 env 이름, `DISPATCH_RECEIPT_PATH` --
+// dispatch-receipt-cli.mjs가 이미 쓰는 바로 그 이름) -- 관제실 절대경로
+// 하드코딩 금지.
+function resolveReceiptPathForVerification(receiptPathArg, env) {
+  if (isNonEmptyString(receiptPathArg)) return receiptPathArg;
+  if (isNonEmptyString(env?.DISPATCH_RECEIPT_PATH)) {
+    return env.DISPATCH_RECEIPT_PATH;
+  }
+  return null;
+}
 
 // repoRoot/mainRepoRoot -- duplicated from relay-handshake.mjs's own
 // (exported) versions rather than imported. This mirrors the repo-wide
@@ -125,12 +226,135 @@ function reasonWithDetail(reasonCode, detail) {
   return `${reasonCode}${detail ? ` -- ${detail}` : " (no detail available)"}`;
 }
 
+function isNonEmptyString(v) {
+  return typeof v === "string" && v.length > 0;
+}
+
+// HYK-342 2R P1-1 -- the closed set of `reason` values this adapter will
+// ever act on. 검토자 원문: "completeReservation은 비어 있지 않은 임의
+// 문자열을 completion_reason으로 기록한다" -- 어댑터가 그 임의성을
+// 그대로 통과시키던 것이 결함의 절반이었다. `undefined`(정상 완료, 기존
+// ok:true 경로)는 이 집합 밖에서 별도로 허용된다(아래 completeAdmission
+// Reservation 참조) -- 이 집합은 "완료 사유를 명시하는" 값만 닫는다.
+const KNOWN_COMPLETION_REASONS = new Set([
+  COMPLETION_REASON.BLOCKED_TERMINATION_RELEASED,
+]);
+
+// HYK-342 2R P1-1 / 3R §0/§2 -- «회수 표식의 생산자 권한» 검증. 검토자가
+// 재현한 공격(중단 핸드셰이크를 거치지 않고 이 어댑터를 직접 실행해
+// completion_reason=BLOCKED_TERMINATION_RELEASED를 찍는 것)을 막는다.
+//
+// ⚠️3R §0 신뢰 경계 교정: 2R은 "harnessDir/role이 가리키는 결과 파일의
+// task_id 에코 + BLOCKED 표지"를 «호출자가 만들어 낼 수 없는 것»으로
+// 잘못 취급했다 -- 결과 파일은 워커가 쓰는 파일이므로 워커가 지어낸
+// task_id + 지어낸 표지를 직접 써 두면 그 둘만으로는 여전히 통과했다
+// (검토자 2R §1 항1 실측). 워커가 쓸 수 없는 곳은 관제실 배달 영수증
+// (dispatch-receipts.jsonl)뿐이다(§0). 그래서 이 함수는 이제 **셋**을
+// 확인한다 -- (a) 결과 파일이 실제로 존재하고 (b) 그 결과 파일의 task_id
+// 에코가 정확히 이 reservationId와 일치하고(HYK-183 anti-forgery) (c) 그
+// 결과 파일이 정확히 BLOCKED/NEEDS_INPUT 상태이며 **(d, 신규) 그
+// reservationId가 실제로 dispatch-receipts.jsonl에 이 role로 배달된 적이
+// 있다**(hasDispatchReceiptForRound, 워커가 못 쓰는 파일). 넷 중
+// 하나라도 아니면 거부(fail-closed) -- 표식 문자열 자체나 비밀값에
+// 기대지 않는다(⛔검토자가 금지한 그 경로).
+//
+// ★남는 표면(3R §2 "닫으려 하지 마라"): 워커가 «자기 실제(진짜 배달된)
+// 라벨»로 가짜 정지 표지를 쓰는 경우는 이 확인으로 막히지 않는다 --
+// BLOCKED 선언 자체는 이 하네스가 정상 신호로 받아들이기로 설계한
+// 것이므로, 이 검증이 닫는 것은 "배달된 적 없는 라운드로 표식을 만드는
+// 것"뿐이다(coder.md 정직 한계 절에도 명시).
+function verifyBlockedTerminationEvidence({
+  harnessDir,
+  role,
+  reservationId,
+  receiptPath,
+}) {
+  if (!isNonEmptyString(harnessDir) || !isNonEmptyString(role)) {
+    return {
+      ok: false,
+      reason: `admission-completion-adapter: BLOCKED_TERMINATION_RELEASED 요청에 harnessDir/role이 없음 -- 증거를 확인할 대상 자체를 특정할 수 없음, 거부(안전측 기본값)`,
+    };
+  }
+  // resolveLiveRoundFilePaths(relay-handshake.mjs)와 동일한 파일명 관례
+  // (role을 소문자화해 `<role>.md`) -- Windows는 대소문자를 구별하지
+  // 않지만 Linux(CI)는 구별하므로 그대로 맞춘다.
+  const resultPath = join(harnessDir, `${String(role).toLowerCase()}.md`);
+  let resultContent;
+  try {
+    resultContent = readFileSync(resultPath, "utf8");
+  } catch (err) {
+    return {
+      ok: false,
+      reason: `admission-completion-adapter: BLOCKED_TERMINATION_RELEASED 증거 확인 실패 -- 결과 파일을 읽을 수 없음('${resultPath}': ${err.message}), 거부(안전측 기본값)`,
+    };
+  }
+  const taskIdResolved = resolveEchoedTaskId(resultContent);
+  if (!taskIdResolved.ok || taskIdResolved.id !== reservationId) {
+    return {
+      ok: false,
+      reason: `admission-completion-adapter: BLOCKED_TERMINATION_RELEASED 증거 확인 실패 -- 결과 파일('${resultPath}')의 task_id 에코가 reservationId('${reservationId}')와 일치하지 않거나 확정되지 않음(${taskIdResolved.ok ? `실제: ${taskIdResolved.id}` : `task_id 줄 ${taskIdResolved.count}개`}), 거부(안전측 기본값)`,
+    };
+  }
+  if (!hasWellFormedBlockedMarker(resultContent)) {
+    return {
+      ok: false,
+      reason: `admission-completion-adapter: BLOCKED_TERMINATION_RELEASED 증거 확인 실패 -- 결과 파일('${resultPath}')에 유효한 '>>> BLOCKED:'/'>>> NEEDS_INPUT:' 표지가 정확히 하나 있지 않음, 거부(안전측 기본값)`,
+    };
+  }
+  if (!hasDispatchReceiptForRound(role, reservationId, receiptPath)) {
+    return {
+      ok: false,
+      reason: `admission-completion-adapter: BLOCKED_TERMINATION_RELEASED 증거 확인 실패 -- reservationId('${reservationId}')가 role='${role}'로 실제 배달된 기록이 dispatch-receipts.jsonl(${receiptPath ?? "(경로 미설정)"})에 없음 -- 워커가 지어낸 이름표로 의심, 거부(안전측 기본값, HYK-342 3R §2)`,
+    };
+  }
+  return { ok: true };
+}
+
+// HYK-342/HYK-249: `reason` is a NEW, optional field threaded straight
+// through to completeReservation's own `args.reason` (admission-ledger-
+// core.mjs) -- see that function's header for the stamping contract. Every
+// pre-existing caller (the ok:true completion path) omits it, so this
+// function's behavior for them is byte-identical to before this round.
+//
+// HYK-342 2R P1-1: `reason` is no longer trusted at face value -- a non-
+// empty value MUST be one of KNOWN_COMPLETION_REASONS (closed set), and
+// BLOCKED_TERMINATION_RELEASED specifically requires `harnessDir`/`role`
+// and passes verifyBlockedTerminationEvidence BEFORE completeReservation is
+// ever called -- a failed verification means NO completion happens at all
+// (fail-closed: this release path either has real corroborating evidence,
+// or it does not run).
 export function completeAdmissionReservation({
   reservationId,
   ledgerPath,
   lockPath,
   now = new Date().toISOString(),
+  reason,
+  harnessDir,
+  role,
+  receiptPath,
 }) {
+  if (reason !== undefined && !KNOWN_COMPLETION_REASONS.has(reason)) {
+    return {
+      ok: false,
+      reasonCode: "UNKNOWN_COMPLETION_REASON",
+      reason: `admission-completion-adapter: 알 수 없는 completion reason('${reason}') -- 닫힌 집합(${[...KNOWN_COMPLETION_REASONS].join(", ")}) 밖의 값은 거부(안전측 기본값, HYK-342 2R P1-1) -- reservation '${reservationId}' NOT released`,
+    };
+  }
+  if (reason === COMPLETION_REASON.BLOCKED_TERMINATION_RELEASED) {
+    const evidence = verifyBlockedTerminationEvidence({
+      harnessDir,
+      role,
+      reservationId,
+      receiptPath: resolveReceiptPathForVerification(receiptPath, process.env),
+    });
+    if (!evidence.ok) {
+      return {
+        ok: false,
+        reasonCode: "BLOCKED_TERMINATION_EVIDENCE_MISSING",
+        reason: `${evidence.reason} -- reservation '${reservationId}' NOT released`,
+      };
+    }
+  }
   const outcome = withLedgerLock(ledgerPath, lockPath, (readResult) => {
     if (!readResult.ok) {
       return {
@@ -144,6 +368,7 @@ export function completeAdmissionReservation({
     const complete = completeReservation(readResult.ledger, {
       reservationId,
       now,
+      reason,
     });
     if (!complete.ok) {
       return {
@@ -306,7 +531,23 @@ function isInsideGitWorktree(dir) {
   }
 }
 
-export function autoCompleteAdmission({ reservationId, harnessDir }) {
+// HYK-342/HYK-249: `reason` (optional) is forwarded to completeAdmission
+// Reservation below unchanged -- see that function's own header. Every
+// pre-existing caller omits it (byte-identical no-op stamping behavior).
+// HYK-342 2R P1-1: `role` (optional) is forwarded alongside `reason` --
+// required only when reason===BLOCKED_TERMINATION_RELEASED (see
+// verifyBlockedTerminationEvidence); every pre-existing caller omits both.
+// HYK-342 3R §2: `receiptPath` (optional) is forwarded alongside `reason`/
+// `role` -- required (directly or via DISPATCH_RECEIPT_PATH env,
+// resolveReceiptPathForVerification) only when reason===
+// BLOCKED_TERMINATION_RELEASED. Every pre-existing caller omits it.
+export function autoCompleteAdmission({
+  reservationId,
+  harnessDir,
+  reason,
+  role,
+  receiptPath,
+}) {
   let ledgerPath = process.env.ADMISSION_LEDGER_PATH;
   // HYK-312 §1: gate the persistent-pointer fallback below (never the
   // explicit ADMISSION_LEDGER_PATH env path just above, which is this
@@ -350,6 +591,10 @@ export function autoCompleteAdmission({ reservationId, harnessDir }) {
     reservationId,
     ledgerPath,
     lockPath,
+    reason,
+    harnessDir,
+    role,
+    receiptPath,
   });
   if (!outcome.ok) {
     appendCompletionFailureAudit({
@@ -397,7 +642,28 @@ if (
     process.exit(1);
   }
   const harnessDir = process.argv[3];
-  const outcome = autoCompleteAdmission({ reservationId, harnessDir });
+  // HYK-342/HYK-249: 4th positional arg, optional, backward-compatible --
+  // pre-existing callers (relay-handshake.mjs's ok:true spawn) pass only
+  // 2-3 args, so `reason` is undefined and completeReservation's stamping
+  // stays off (see completeAdmissionReservation's own header).
+  const reason = process.argv[4];
+  // HYK-342 2R P1-1: 5th positional arg, optional -- required only when
+  // reason===BLOCKED_TERMINATION_RELEASED (verifyBlockedTerminationEvidence
+  // rejects that reason without it). Every pre-2R call site (and the
+  // ok:true normal-completion path) never passes a 5th arg.
+  const role = process.argv[5];
+  // HYK-342 3R §2: 6th positional arg, optional -- explicit override for
+  // the receipt path (falls back to DISPATCH_RECEIPT_PATH env otherwise,
+  // resolveReceiptPathForVerification). Every pre-3R call site never
+  // passes a 6th arg.
+  const receiptPath = process.argv[6];
+  const outcome = autoCompleteAdmission({
+    reservationId,
+    harnessDir,
+    reason,
+    role,
+    receiptPath,
+  });
   // HYK-312 §1: a blocked persistent-fallback attempt is the one outcome
   // shape that must NOT be treated like the pre-existing silent no-op below
   // -- it is a refusal (거부), not "not attempted", so it gets its own

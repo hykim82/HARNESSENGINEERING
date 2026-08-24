@@ -118,12 +118,30 @@ function stageScriptsCheckDir(rootDir, overrides) {
   return scriptsCheckDir;
 }
 
+// HYK-342 4R §1: none of this file's fixtures seed a sibling result file,
+// so every run is the "missing result file" bootstrap path. Give every call
+// a readable, confirmably-empty receipt so these 1-B mutation tests stay
+// isolated to the axis they target instead of also tripping the new
+// UNSET/REJECT case (receipt path unconfirmed -> reject) added in this
+// round, which would mask the RED signal these tests exist to prove.
+const SHARED_EMPTY_RECEIPT_PATH = join(
+  mkdtempSync(join(tmpdir(), "hyk241-oneb-gate-mutation-receipts-")),
+  "dispatch-receipts.jsonl",
+);
+writeFileSync(SHARED_EMPTY_RECEIPT_PATH, "", "utf8");
+
 function runCli(scriptsCheckDir, args) {
   try {
     const stdout = execFileSync(
       "node",
       [join(scriptsCheckDir, "dispatch-gate-decision.mjs"), ...args],
-      { encoding: "utf8" },
+      {
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          DISPATCH_RECEIPT_PATH: SHARED_EMPTY_RECEIPT_PATH,
+        },
+      },
     );
     return { status: 0, stdout, stderr: "" };
   } catch (err) {

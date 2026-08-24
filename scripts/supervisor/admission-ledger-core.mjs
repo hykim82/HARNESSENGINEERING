@@ -49,6 +49,26 @@ export const ADMISSION_REASON = Object.freeze({
   RESERVATION_NOT_ACTIVE: "RESERVATION_NOT_ACTIVE",
 });
 
+// HYK-342/HYK-249 -- named `completion_reason` values a caller may ask
+// completeReservation (below) to stamp. This is NOT a new state (RESERVATION_
+// STATUS above is untouched, sweepAndRecover's own state-machine meaning is
+// untouched) -- `completion_reason` was already an existing, optional field
+// on a COMPLETED entry (sweepSuspectEntry has written the SUSPECT_TIMEOUT_
+// RECOVERED value into it since HYK-224-3R; completeReservation itself never
+// wrote it before this round). BLOCKED_TERMINATION_RELEASED is the new value:
+// an EXPLICIT, immediate release of a reservation whose round ended in a
+// BLOCKED/NEEDS_INPUT handshake outcome (relay-handshake.mjs), as opposed to
+// SUSPECT_TIMEOUT_RECOVERED's mechanical, age-based sweep recovery. Kept as
+// plain string constants (not re-exported by sweepSuspectEntry's own
+// pre-existing literal, to avoid touching that already-tested line) so both
+// producers and readers (dispatch-gate-decision.mjs's
+// verifyAbortRecordRecoveryMarker) can refer to a single source of truth for
+// the NEW value without touching sweep's own code.
+export const COMPLETION_REASON = Object.freeze({
+  SUSPECT_TIMEOUT_RECOVERED: "SUSPECT_TIMEOUT_RECOVERED",
+  BLOCKED_TERMINATION_RELEASED: "BLOCKED_TERMINATION_RELEASED",
+});
+
 function isPlainObject(v) {
   return v !== null && typeof v === "object" && !Array.isArray(v);
 }
@@ -243,6 +263,16 @@ export function admitReservation(ledger, args) {
 // genuinely finished; this function only records that decision and frees the
 // slot. Completing an already-COMPLETED reservation is idempotent (ok:true,
 // unchanged ledger) so a duplicate consumer call never errors.
+//
+// HYK-342/HYK-249: `args.reason` is a NEW, optional field -- when the caller
+// supplies a non-empty string (e.g. COMPLETION_REASON.BLOCKED_TERMINATION_
+// RELEASED, above), the resulting entry's `completion_reason` is stamped
+// with it. When omitted (every pre-existing caller, the ok:true completion
+// path in relay-handshake.mjs via admission-completion-adapter.mjs), the
+// entry's `completion_reason` stays unset -- byte-identical to this
+// function's behavior before this round. This is purely additive: it does
+// not change WHEN a reservation transitions to COMPLETED, only what optional
+// bookkeeping rides along with an already-decided transition.
 export function completeReservation(ledger, args) {
   if (!isWellFormedLedger(ledger)) {
     return {
@@ -258,7 +288,7 @@ export function completeReservation(ledger, args) {
       reasonCode: ADMISSION_REASON.INVALID_ARGUMENTS,
     };
   }
-  const { reservationId, now } = args;
+  const { reservationId, now, reason } = args;
   if (!isNonEmptyString(reservationId) || !isIsoString(now)) {
     return {
       ok: false,
@@ -282,15 +312,19 @@ export function completeReservation(ledger, args) {
       reasonCode: ADMISSION_REASON.OK,
     };
   }
+  const nextEntry = {
+    ...entry,
+    status: RESERVATION_STATUS.COMPLETED,
+    completed_at: now,
+  };
+  if (isNonEmptyString(reason)) {
+    nextEntry.completion_reason = reason;
+  }
   const nextLedger = {
     ...ledger,
     reservations: {
       ...ledger.reservations,
-      [reservationId]: {
-        ...entry,
-        status: RESERVATION_STATUS.COMPLETED,
-        completed_at: now,
-      },
+      [reservationId]: nextEntry,
     },
   };
   return {

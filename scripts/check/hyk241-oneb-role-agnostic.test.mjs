@@ -138,7 +138,18 @@ for (const filename of ROLE_TASK_FILENAMES) {
       );
       const ledgerPath = join(dir, "reject-streak.json");
       writeLedger(ledgerPath, { schema_version: 1, issues: {} });
-      const r = runCli([taskPath, "--ledger", ledgerPath]);
+      // HYK-342 4R §1 표#4: 결과 파일이 없을 때 「영수증을 확인할 수
+      // 없음」과 혼동되지 않도록, 읽을 수 있고 비어 있는 영수증 파일을
+      // 명시적으로 준다(진짜 첫 배달 -- 이 시험의 의도와 무관한 축).
+      const receiptPath = join(dir, "dispatch-receipts.jsonl");
+      writeFileSync(receiptPath, "", "utf8");
+      const r = runCli([
+        taskPath,
+        "--ledger",
+        ledgerPath,
+        "--dispatch-receipt-path",
+        receiptPath,
+      ]);
       assert.equal(r.status, 0, r.stdout + r.stderr);
       assert.match(r.stdout, /ALLOW/);
     });
@@ -157,7 +168,15 @@ for (const filename of ROLE_TASK_FILENAMES) {
       );
       const ledgerPath = join(dir, "reject-streak.json");
       writeLedger(ledgerPath, { schema_version: 1, issues: {} });
-      const r = runCli([taskPath, "--ledger", ledgerPath]);
+      const receiptPath = join(dir, "dispatch-receipts.jsonl");
+      writeFileSync(receiptPath, "", "utf8");
+      const r = runCli([
+        taskPath,
+        "--ledger",
+        ledgerPath,
+        "--dispatch-receipt-path",
+        receiptPath,
+      ]);
       assert.equal(r.status, 0, r.stdout + r.stderr);
       assert.match(r.stdout, /ALLOW/);
     });
@@ -173,8 +192,27 @@ test("role-agnostic: byte-identical decisions for CODER-named and REVIEW-named f
     writeFileSync(reviewPath, body, "utf8");
     const ledgerPath = join(dir, "reject-streak.json");
     writeLedger(ledgerPath, { schema_version: 1, issues: {} });
-    const coderResult = runCli([coderPath, "--ledger", ledgerPath]);
-    const reviewResult = runCli([reviewPath, "--ledger", ledgerPath]);
+    // HYK-342 4R §1: 영수증 경로를 안 주면 "확인 불가" REJECT 사유가
+    // 결과 파일 경로(coder.md/review.md)를 물고 나와 role별로 문구가
+    // 달라진다 -- 이 시험의 취지(같은 내용이면 역할과 무관하게 같은
+    // 판정 모양)와 무관한 축이므로, 읽히고 비어 있는 영수증 파일을 줘서
+    // 그 축을 우회한다(진짜 첫 배달, 표#4).
+    const receiptPath = join(dir, "dispatch-receipts.jsonl");
+    writeFileSync(receiptPath, "", "utf8");
+    const coderResult = runCli([
+      coderPath,
+      "--ledger",
+      ledgerPath,
+      "--dispatch-receipt-path",
+      receiptPath,
+    ]);
+    const reviewResult = runCli([
+      reviewPath,
+      "--ledger",
+      ledgerPath,
+      "--dispatch-receipt-path",
+      receiptPath,
+    ]);
     assert.equal(coderResult.status, reviewResult.status);
     assert.equal(coderResult.status, 1);
     // Only the echoed file path differs inside the reason text -- strip it

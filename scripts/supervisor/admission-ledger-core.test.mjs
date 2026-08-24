@@ -144,6 +144,68 @@ test("completeReservation frees the slot and is idempotent on a second call", ()
   assert.equal(again.changed, false);
 });
 
+// HYK-342/HYK-249: `reason` is a new, optional field -- omitted (every
+// pre-existing caller, including the two tests directly above) leaves
+// `completion_reason` unset, byte-identical to before this round.
+test("completeReservation without `reason` leaves completion_reason unset (byte-identical to pre-HYK-342)", () => {
+  const admitted = admitReservation(createEmptyLedger(EPOCH), {
+    reservationId: "r1",
+    cap: 1,
+    now: T0,
+  });
+  const completed = completeReservation(admitted.ledger, {
+    reservationId: "r1",
+    now: T1,
+  });
+  assert.equal(completed.ok, true);
+  assert.equal("completion_reason" in completed.ledger.reservations.r1, false);
+});
+
+test("completeReservation with `reason` stamps completion_reason on the released entry", () => {
+  const admitted = admitReservation(createEmptyLedger(EPOCH), {
+    reservationId: "r1",
+    cap: 1,
+    now: T0,
+  });
+  const completed = completeReservation(admitted.ledger, {
+    reservationId: "r1",
+    now: T1,
+    reason: "BLOCKED_TERMINATION_RELEASED",
+  });
+  assert.equal(completed.ok, true);
+  assert.equal(completed.changed, true);
+  assert.equal(
+    completed.ledger.reservations.r1.completion_reason,
+    "BLOCKED_TERMINATION_RELEASED",
+  );
+  assert.equal(countActive(completed.ledger), 0);
+});
+
+test("completeReservation with `reason` is still idempotent -- a second call on an already-COMPLETED entry changes nothing (including completion_reason)", () => {
+  const admitted = admitReservation(createEmptyLedger(EPOCH), {
+    reservationId: "r1",
+    cap: 1,
+    now: T0,
+  });
+  const completed = completeReservation(admitted.ledger, {
+    reservationId: "r1",
+    now: T1,
+    reason: "BLOCKED_TERMINATION_RELEASED",
+  });
+  const again = completeReservation(completed.ledger, {
+    reservationId: "r1",
+    now: T1,
+    reason: "SOME_OTHER_REASON_THAT_MUST_NOT_OVERWRITE",
+  });
+  assert.equal(again.ok, true);
+  assert.equal(again.changed, false);
+  assert.equal(
+    again.ledger.reservations.r1.completion_reason,
+    "BLOCKED_TERMINATION_RELEASED",
+    "이미 COMPLETED인 항목은 재호출로 completion_reason이 덮어써지지 않는다",
+  );
+});
+
 test("completeReservation on an unknown reservationId fails closed", () => {
   const ledger = createEmptyLedger(EPOCH);
   const result = completeReservation(ledger, {

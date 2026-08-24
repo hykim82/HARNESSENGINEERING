@@ -61,6 +61,7 @@ import {
   renameSync,
   mkdirSync,
   existsSync,
+  readdirSync,
 } from "node:fs";
 import path from "node:path";
 import { runReachOnce, DEFAULT_NOTIFY_DIR } from "./reach-report.mjs";
@@ -1103,6 +1104,7 @@ export function buildLogLine({
   escalationDedupe,
   sweepResult,
   wakeResult,
+  blockedTerminationResult,
 }) {
   if (detectorResult.runnerFailure) {
     return `${nowIso} RUNNER_FAILURE message=${detectorResult.message}`;
@@ -1156,6 +1158,12 @@ export function buildLogLine({
     // 호출자는 wakeLogSegment가 null을 돌려주므로(filter(Boolean)) 로그
     // 줄이 한 글자도 달라지지 않는다(§2-A 회귀 0).
     wakeLogSegment(wakeResult),
+    // HYK-342/HYK-249 §4 요구7: 이 축도 지금 이 시점의 맨 끝이다 -- 앞선
+    // 모든 세그먼트의 필드·순서·값은 이 라운드가 손대지 않았다.
+    // blockedTerminationScan이 opt-in으로 주어지지 않은 기존 호출자는
+    // blockedTerminationLogSegment가 null을 돌려주므로(filter(Boolean))
+    // 로그 줄이 한 글자도 달라지지 않는다(회귀 0).
+    blockedTerminationLogSegment(blockedTerminationResult),
   ]
     .filter(Boolean)
     .join(" ");
@@ -1429,6 +1437,113 @@ function runSweepStep({ admissionSweep, sweepExecFn, now }) {
 // sweepLogSegment -- admissionSweep이 이 회차에 실제로 돌았을 때만 로그
 // 줄에 한 세그먼트를 더한다(기존 세그먼트와 동일한 "사람이 읽는 사유"
 // 원칙 -- status/reasonCode/회수 건수).
+// HYK-342/HYK-249 §4 요구7 (task 머리말 1b_reach_path, "이 상태가 사람에게
+// 도달하는 경로가 없으면 그 경로를 만든다") -- relay-handshake.mjs가
+// BLOCKED/NEEDS_INPUT 라운드에서 남기는 중단 기록(`<harnessDir>/aborts/
+// <role>-abort-r<N>.json`, evidence.source ===
+// "relay-handshake-blocked-termination")을 사람이 읽는 감시 로그로
+// 끌어올린다. 이전에는 watch-run.mjs가 checkRelayHandshake(relay-
+// handshake.mjs)를 아예 호출/참조하지 않아(ORCH 실측, 이 라운드 착수 전
+// grep 0건) 이 상태에 도달하는 경로 자체가 없었다.
+//
+// readAbortRecordFiles(dispatch-gate-decision.mjs)와 같은 디렉터리·같은
+// 파일명 관례(`<role>-abort-r<N>.json`, 대소문자 무관)를 읽지만, 그 축의
+// 판정 로직(checkAbortRecord)은 조금도 재구현하지 않는다 -- 이 함수는
+// 순전히 "사람이 볼 수 있게 표면화"만 한다(판정은 여전히 그 게이트가
+// 한다). 손상/미완성 쓰기는 그 파일만 건너뛴다(readAbortRecordFiles와
+// 동일 원칙 -- 손상된 기록 하나가 전체 스캔을 막지 않는다).
+// scanBlockedTerminationRecords 자신의 eslint complexity 상한을 지키려고
+// 파일 1개 처리를 뽑았다(판정/문구는 조금도 바뀌지 않는다) -- 손상/미완성
+// 쓰기(파싱 실패)나 이름 패턴이 안 맞으면 null(건너뛴다), 이 축이 찾는
+// 출처(relay-handshake-blocked-termination)가 아니면도 null이다.
+function readBlockedTerminationRecord(abortsDir, name, readFileFn) {
+  if (!/-abort-r\d+\.json$/i.test(name)) return null;
+  let parsed;
+  try {
+    parsed = JSON.parse(readFileFn(path.join(abortsDir, name), "utf8"));
+  } catch {
+    return null;
+  }
+  if (parsed?.evidence?.source !== "relay-handshake-blocked-termination") {
+    return null;
+  }
+  return {
+    file: name,
+    role: parsed.role ?? null,
+    taskId: parsed.harnessTaskLabel ?? null,
+    state: parsed.evidence?.state ?? null,
+    recordedAt: parsed.recordedAt ?? null,
+  };
+}
+
+export function scanBlockedTerminationRecords({
+  harnessDir,
+  readdirFn = readdirSync,
+  readFileFn = readFileSync,
+}) {
+  const abortsDir = path.join(harnessDir, "aborts");
+  let names;
+  try {
+    names = readdirFn(abortsDir);
+  } catch {
+    return { status: "NONE", count: 0, records: [] };
+  }
+  const records = names
+    .map((name) => readBlockedTerminationRecord(abortsDir, name, readFileFn))
+    .filter(Boolean);
+  return {
+    status: records.length > 0 ? "FOUND" : "NONE",
+    count: records.length,
+    records,
+  };
+}
+
+// HYK-342/HYK-249: opt-in axis step -- mirrors runSweepStep/runWakeStep's own
+// "notRun unless the caller explicitly configures it" shape (admissionSweep/
+// wake 관례 그대로). `blockedTerminationScan` is null by default, so every
+// pre-existing caller/test is byte-for-byte unaffected (§7 회귀 0).
+// HYK-342 2R P1-3 (검토 원문 "1-B 도달 경로가 운영상 기본 결선되지
+// 않았다" -- watch-run.mjs를 평소 돌리는 방식 그대로, 추가 인자 없이,
+// 실행했을 때 이 축이 돌아야 한다): resolveCapPath(바로 위 cap 축)와
+// 정확히 같은 모양 -- `blockedTerminationScan?.harnessDir`이 명시로
+// 주어지면 그 값(시험/재정의용), 없으면 `repoRoot`에서 스스로 파생한다.
+// ⛔더 이상 opt-in이 아니다 -- null 가드가 없다, 이 축은 항상 돈다(다른
+// 상시 축인 cap/detector/escalation과 같은 자리). 대상이 없을 때(정지
+// 라운드가 없을 때) 시끄러워지지 않는 이유는 scanBlockedTerminationRecords
+// 자신이 이미 그렇다 -- `.harness/aborts/`가 없거나 비어 있으면
+// status=NONE/count=0을 반환할 뿐 던지거나 알림을 만들지 않는다(§3
+// "정상 상태에서 상시 발화" 금지 요건은 애초에 "로그 필드 하나가
+// 항상 보인다"와는 다른 축이다 -- cap_status=NONE이 이미 그 전례다).
+function resolveBlockedTerminationHarnessDir(repoRoot, blockedTerminationScan) {
+  return blockedTerminationScan?.harnessDir ?? path.join(repoRoot, ".harness");
+}
+
+function runBlockedTerminationScanStep({
+  repoRoot,
+  blockedTerminationScan,
+  readdirFn = readdirSync,
+  readFileFn = readFileSync,
+}) {
+  const harnessDir = resolveBlockedTerminationHarnessDir(
+    repoRoot,
+    blockedTerminationScan,
+  );
+  return {
+    notRun: false,
+    ...scanBlockedTerminationRecords({ harnessDir, readdirFn, readFileFn }),
+  };
+}
+
+// blockedTerminationLogSegment -- 이 축이 실제로(opt-in) 켜졌을 때만 로그
+// 줄에 한 세그먼트를 더한다(capLogSegment/sweepLogSegment와 동일한 "사람이
+// 읽는 사유" 원칙 -- status/count/source).
+function blockedTerminationLogSegment(result) {
+  if (!result || result.notRun) return null;
+  const status = result.status ?? "NONE";
+  const count = typeof result.count === "number" ? result.count : "NONE";
+  return `blocked_termination_status=${status} blocked_termination_count=${count} blocked_termination_source=harness/aborts`;
+}
+
 function sweepLogSegment(sweepResult) {
   if (!sweepResult || sweepResult.notRun) return null;
   const status = sweepResult.status ?? "NONE";
@@ -1619,6 +1734,7 @@ function finalizeWatchOnceCycle({
   escalationDedupe,
   sweepResult,
   wakeResult,
+  blockedTerminationResult,
 }) {
   const nowIso = new Date(now).toISOString();
   const logPath = path.join(watchDir, "watch.log");
@@ -1630,6 +1746,7 @@ function finalizeWatchOnceCycle({
     escalationDedupe,
     sweepResult,
     wakeResult,
+    blockedTerminationResult,
   });
   appendLogWithRotation({
     readFn,
@@ -1642,18 +1759,59 @@ function finalizeWatchOnceCycle({
     writeFn,
     renameFn,
     aliveRecordPath,
-    // HYK-228 coder-r2 rejection-2 (review-r1.md §B): `sweep`을 형제
-    // 필드로 심는다 -- `...detectorResult` 뒤에 와서 detectorResult가
-    // 우연히 `sweep` 키를 갖더라도(현재는 갖지 않는다) 이 필드가 이긴다.
-    // `recordedAtMs`는 여전히 유일한 신선도 판정 입력이라
-    // (watch-freshness-core.mjs 계약 불변) 기존 소비자는 이 새 형제
-    // 필드를 무시해도 완전히 무회귀다.
+    // HYK-228 coder-r2 rejection-2: `sweep`은 `...detectorResult` 뒤에 와서
+    // 그 필드와 충돌해도 이긴다. `recordedAtMs`가 여전히 유일한 신선도
+    // 판정 입력이라(watch-freshness-core.mjs 계약 불변) 기존 소비자는 이
+    // 형제 필드를 무시해도 무회귀다.
     record: {
       recordedAtMs: now,
       ...detectorResult,
       sweep: sweepRecordField(sweepResult),
     },
   });
+  return finalizeWatchOnceTail({
+    repoRoot,
+    watchDir,
+    now,
+    readFn,
+    writeFn,
+    mkdirFn,
+    existsFn,
+    notifyDir,
+    logPath,
+    aliveRecordPath,
+    line,
+    detectorResult,
+    capResult,
+    escalationDedupe,
+    sweepResult,
+    wakeResult,
+    blockedTerminationResult,
+  });
+}
+
+// HYK-342/HYK-249 (max-lines-per-function 수리): finalizeWatchOnceCycle의
+// 꼬리(reach 알림 + rate-limit-stall 알림 + 반환 객체 조립)를 뽑았다 --
+// 순서·값·부작용 모두 원문 그대로, 이름과 위치만 옮겼다.
+function finalizeWatchOnceTail({
+  repoRoot,
+  watchDir,
+  now,
+  readFn,
+  writeFn,
+  mkdirFn,
+  existsFn,
+  notifyDir,
+  logPath,
+  aliveRecordPath,
+  line,
+  detectorResult,
+  capResult,
+  escalationDedupe,
+  sweepResult,
+  wakeResult,
+  blockedTerminationResult,
+}) {
   const reachResult = runReachStep({
     notifyDir,
     watchDir,
@@ -1685,6 +1843,7 @@ function finalizeWatchOnceCycle({
     escalationDedupe,
     sweepResult,
     wakeResult,
+    blockedTerminationResult,
   };
 }
 
@@ -1708,6 +1867,14 @@ function runWatchOnceCore({
   admissionSweep,
   sweepExecFn,
   wake,
+  // HYK-342 2R P1-3: 더 이상 opt-in이 아니다 -- null이면(기존 호출자
+  // 전부) resolveBlockedTerminationHarnessDir이 `repoRoot`에서 기본
+  // harnessDir(`<repoRoot>/.harness`)을 스스로 파생한다(resolveCapPath와
+  // 같은 자리, cap 축 참조). 시험/재정의가 필요할 때만
+  // `{harnessDir: <다른 경로>}`를 명시로 준다.
+  blockedTerminationScan = null,
+  blockedTerminationReaddirFn,
+  blockedTerminationReadFileFn,
 }) {
   mkdirFn(watchDir, { recursive: true });
   const detectorResult = runDetector({
@@ -1744,6 +1911,12 @@ function runWatchOnceCore({
     existsFn,
     mkdirFn,
   });
+  const blockedTerminationResult = runBlockedTerminationScanStep({
+    repoRoot,
+    blockedTerminationScan,
+    readdirFn: blockedTerminationReaddirFn,
+    readFileFn: blockedTerminationReadFileFn,
+  });
   return finalizeWatchOnceCycle({
     repoRoot,
     watchDir,
@@ -1760,6 +1933,7 @@ function runWatchOnceCore({
     escalationDedupe,
     sweepResult,
     wakeResult,
+    blockedTerminationResult,
   });
 }
 
@@ -1796,6 +1970,12 @@ export function runWatchOnce({
   // admissionSweep과 동일한 기본값 null -- 호출자가 명시적으로 주지
   // 않으면 wake 단계는 아예 실행되지 않는다(회귀 0).
   wake = null,
+  // HYK-342 2R P1-3: null은 "꺼짐"이 아니라 "기본값을 repoRoot에서 스스로
+  // 파생"으로 읽힌다 -- runWatchOnceCore/resolveBlockedTerminationHarnessDir
+  // 참조. admissionSweep/wake와 달리 이 축은 항상 돈다.
+  blockedTerminationScan = null,
+  blockedTerminationReaddirFn,
+  blockedTerminationReadFileFn,
 }) {
   const fsFns = resolveWatchOnceFsFns({
     readFn,
@@ -1820,6 +2000,9 @@ export function runWatchOnce({
     admissionSweep,
     sweepExecFn,
     wake,
+    blockedTerminationScan,
+    blockedTerminationReaddirFn,
+    blockedTerminationReadFileFn,
   });
 }
 
@@ -1867,9 +2050,15 @@ if (invokedDirectly) {
   let wakeFakeExecFail = false;
   let wakeFakeExecFailSubmit = false;
   let wakeFakeTerminalListJson = null;
+  // HYK-342/HYK-249 §4 요구7: `--blocked-termination-harness-dir`을 생략
+  //하면(기본값) 이 축은 아예 실행되지 않는다(admissionSweep/wake와 동일한
+  // opt-in 관례 -- 기존 호출자·기존 시험은 회귀 0).
+  let blockedTerminationHarnessDir = null;
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === "--repo-root") repoRoot = argv[++i];
     else if (argv[i] === "--watch-dir") watchDir = argv[++i];
+    else if (argv[i] === "--blocked-termination-harness-dir")
+      blockedTerminationHarnessDir = argv[++i];
     else if (argv[i] === "--notify-dir") notifyDir = argv[++i];
     else if (argv[i] === "--no-reach") notifyDir = null;
     else if (argv[i] === "--admission-sweep-ledger")
@@ -1951,6 +2140,9 @@ if (invokedDirectly) {
       }
     : null;
   const cliNow = Date.now();
+  const blockedTerminationScan = blockedTerminationHarnessDir
+    ? { harnessDir: blockedTerminationHarnessDir }
+    : null;
   const result = runWatchOnce({
     repoRoot,
     watchDir,
@@ -1958,6 +2150,7 @@ if (invokedDirectly) {
     admissionSweep,
     wake,
     now: cliNow,
+    blockedTerminationScan,
   });
   if (!noPartialCount) {
     // HYK-255-watch-wire-1 (coder-task.md §1 항2): 실패는 감시 로그 줄로

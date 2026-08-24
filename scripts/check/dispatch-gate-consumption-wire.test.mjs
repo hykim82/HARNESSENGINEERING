@@ -1324,7 +1324,18 @@ test("부트스트랩: 형제 결과 파일(<role>.md)이 아예 없으면 새 �
       "utf8",
     );
     // coder.md(형제 결과 파일)를 의도적으로 만들지 않는다.
-    const r = runCli(SCRIPT_PATH, [taskPath, "--ledger", ledgerPath]);
+    // HYK-342 4R §1 표#2: 「결과 파일 없음」과 「영수증 확인 불가」를
+    // 섞지 않기 위해, 읽히고 비어 있는 영수증 파일을 명시적으로 준다
+    // (진짜 첫 배달 -- 이 시험이 격리하려는 "부트스트랩" 그 자체).
+    const receiptPath = join(dir, "dispatch-receipts.jsonl");
+    writeFileSync(receiptPath, "", "utf8");
+    const r = runCli(SCRIPT_PATH, [
+      taskPath,
+      "--ledger",
+      ledgerPath,
+      "--dispatch-receipt-path",
+      receiptPath,
+    ]);
     assert.equal(
       r.status,
       0,

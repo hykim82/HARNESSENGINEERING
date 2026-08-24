@@ -33,10 +33,25 @@ function withFixtureDir(fn) {
   }
 }
 
+// HYK-342 4R §1: this file's fixtures never seed a sibling result file, so
+// every run here is the "missing result file" bootstrap path. Since 4R now
+// REJECTs when the receipt path can't be confirmed at all (unset path/env),
+// give every call a readable, confirmably-empty receipt so these
+// dropped_at/ALLOW-REJECT-axis tests keep meaning "genuine first delivery"
+// instead of accidentally exercising the new UNSET/REJECT case. A single
+// shared empty receipts file (module-scoped, never written to) covers this
+// for the whole file.
+const SHARED_EMPTY_RECEIPT_PATH = join(
+  mkdtempSync(join(tmpdir(), "dispatch-gate-stamp-test-receipts-")),
+  "dispatch-receipts.jsonl",
+);
+writeFileSync(SHARED_EMPTY_RECEIPT_PATH, "", "utf8");
+
 function runCli(args) {
   try {
     const stdout = execFileSync("node", [SCRIPT_PATH, ...args], {
       encoding: "utf8",
+      env: { ...process.env, DISPATCH_RECEIPT_PATH: SHARED_EMPTY_RECEIPT_PATH },
     });
     return { status: 0, stdout, stderr: "" };
   } catch (err) {
