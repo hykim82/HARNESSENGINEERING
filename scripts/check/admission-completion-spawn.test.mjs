@@ -148,11 +148,20 @@ test("relay-handshake CLI still exits 0 when the admission-completion-adapter.mj
 
 // HYK-224-3R §3 (REVIEW 2R 반려, 검토자 실측 정확히 재현): ADMISSION_LEDGER_PATH
 // set to a path that will make the completion step genuinely fail (no
-// init-cutover, ledger missing). Handshake itself must still exit 0 (§3
-// 판단: round success != bookkeeping success), but stderr must now carry
-// the REAL detail (not be empty) -- this is the exact defect the reviewer
-// found ("handshake CLI는 exit 0이고 ... 세부 오류가 비어 있었다").
-test("HYK-224-3R §3: a completion failure surfaces its real detail on relay-handshake's stderr (not empty), exit code still 0", () => {
+// init-cutover, ledger missing).
+//
+// ⚠️HYK-344 2R/3R 갱신 (review-r1-verbatim.md §A P1 반려 -> 3R 채택):
+// 이 시험의 원래 이름/문면은 "exit code still 0"이었다 -- 그 판단
+// (round success != bookkeeping success) 자체는 3R 에서도 뒤집지 않았다
+// (0/1의 의미는 그대로다), 하지만 검토자가 지적한 대로 그 결론을 실어
+// 나르던 두 통로(stderr + 감사 JSONL) 중 감사 JSONL을 읽는 프로덕션
+// 소비자가 0건이라 "자동 호출자가 성공으로 오인한다"는 핵심 결함이
+// 남아 있었다. HYK-344 2R가 세 번째 값(exit 3)을 신설해 이 정확한
+// 시나리오(완료가 실제로 시도됐는데 실패)를 0/1과 겹치지 않게 구별
+// 가능한 값으로 만들었으므로, 이 시험의 기대값도 그 새 계약에 맞춰
+// 갱신한다(⛔조용히 넘어가지 않는다 -- exit 0을 기대하는 옛 시험을
+// 그대로 두면 정확히 이 회귀가 재발한다, HYK-344 3R §2-1 재현 실측).
+test("HYK-224-3R §3 -> HYK-344 2R/3R: a completion failure surfaces its real detail on relay-handshake's stderr (not empty), exit code is now 3 (distinct from 0/1, not silently 0 anymore)", () => {
   const harnessDir = mkdtempSync(join(tmpdir(), "admission-spawn-harness4-"));
   const ledgerDir = mkdtempSync(join(tmpdir(), "admission-spawn-ledger4-"));
   const ledger = join(ledgerDir, "nonexistent-ledger.json");
@@ -164,8 +173,8 @@ test("HYK-224-3R §3: a completion failure surfaces its real detail on relay-han
     });
     assert.equal(
       result.exit,
-      0,
-      "round success must not depend on completion bookkeeping",
+      3,
+      "HYK-344 2R/3R: a genuinely-attempted-and-failed completion now exits 3 (distinct from 0=full success), not silently 0 -- round pass/fail (0/1) semantics themselves are unchanged",
     );
     assert.notEqual(
       result.stderr.trim(),

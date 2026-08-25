@@ -1404,10 +1404,14 @@ export function wasAdmissionCompletionAttempted(stdout) {
 // 결함이 닫히지 않는다. This module-scoped slot is how that gap closes
 // without widening `spawnAdmissionCompletionProcess`'s own return value: the
 // boolean `admissionReturned` it returns is pinned byte-for-byte by
-// relay-handshake-completion-wire.test.mjs's ⓒ mutation target
-// (`"spawnAdmissionCompletion(taskId);"` must appear exactly once, and the
-// mutated `undefined;` substitution must stay a valid boolean-shaped
-// assignment) AND is threaded into the consumption-receipt `effects` object
+// relay-handshake-completion-wire.test.mjs's ⓒ mutation target (that test's
+// own `target` constant -- the call-expression-plus-semicolon text pinned
+// to appear exactly once in this file's working-tree source; NOT quoted
+// verbatim here on purpose, HYK-344 3R -- writing it out literally in this
+// very comment made it appear TWICE and broke that exact-once invariant,
+// caught by the full isolated-suite-runner) -- the mutated `undefined;`
+// substitution must stay a valid boolean-shaped assignment) AND is threaded
+// into the consumption-receipt `effects` object
 // downstream (consumption-receipt-core.mjs expects a boolean there, not an
 // object) -- changing its shape would ripple into both. So the richer detail
 // (was this genuinely ATTEMPTED-and-FAILED, vs never attempted at all

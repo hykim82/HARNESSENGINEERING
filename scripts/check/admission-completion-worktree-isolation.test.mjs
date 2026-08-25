@@ -215,7 +215,17 @@ test("ⓐ HYK-312: unisolated harnessDir (plain, non-git scratch copy) -> adapte
 // 이유가 stderr에 드러나야 한다.
 // ---------------------------------------------------------------------------
 
-test("ⓐ-2 HYK-312: relay-handshake.mjs CLI consuming a scratch (non-worktree) harnessDir -- round still completes, admission side-effect refuses, ledger untouched", () => {
+// HYK-344 2R/3R 갱신: 이 시험의 원래 이름/기대값은 "round still completes"
+// (exit 0)였다. 그 판단(라운드 자체는 원장 인프라 도달성과 무관하게
+// 완료해야 한다)은 지금도 유효하다 -- 다만 그 완료 «직후» admission
+// 완료가 실제로 시도됐다가 거부됐다는 사실(이 경우 UNISOLATED_HARNESS_DIR
+// 안전핀 발동)은 이제 exit 3으로 구별 가능하게 표면화된다(HYK-344 2R,
+// review-r1-verbatim.md §A P1 반려 -> 3R 채택). 라운드 판정(task_id
+// 결속·staleness) 자체가 실패한 게 아니므로 exit 1은 아니고, 원장
+// 반납이 안전핀에 의해 거부된 채로 조용히 exit 0을 내지도 않는다 --
+// 정확히 이 시험이 검증하려는 "안전핀이 실제로 발동했다"는 사실 자체가
+// 이제 exit code에도 반영된다.
+test("ⓐ-2 HYK-312: relay-handshake.mjs CLI consuming a scratch (non-worktree) harnessDir -- round's own binding is valid but admission side-effect refuses (HYK-344 2R/3R: now surfaced as exit 3, not silently 0), ledger untouched", () => {
   const repoDir = buildSyntheticRepo("hyk312-a2-repo-");
   const ledgerDir = tmpDir("hyk312-a2-ledger-");
   const scratchHarness = tmpDir("hyk312-a2-scratch-harness-");
@@ -234,8 +244,8 @@ test("ⓐ-2 HYK-312: relay-handshake.mjs CLI consuming a scratch (non-worktree) 
 
     assert.equal(
       exit,
-      0,
-      "the round's own task_id/staleness handshake is valid and must still complete (§3-1: production consumption must not break)",
+      3,
+      "HYK-344 2R/3R: the round's own task_id/staleness handshake is valid (not exit 1), but the admission side-effect was genuinely attempted and refused by the HYK-312 safety pin -- that is now surfaced as exit 3, distinct from a clean exit 0",
     );
     assert.match(
       stderr,
