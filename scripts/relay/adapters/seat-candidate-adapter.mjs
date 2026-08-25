@@ -258,7 +258,15 @@ export function observeSeatCandidates(ctx = {}, opts = {}) {
 // 남아 dispatchable이 아닌 상태)을 idle로 오분류한다(review-1 P1 재현
 // 그대로: `gpt-5.6 / ? for shortcuts / Press up to edit queued messages`).
 const DEAD_SHELL_PROMPT_RE = /^PS [A-Za-z]:\\.*>\s*$/;
-const CLAUDE_AGENT_MARKERS = [
+// HYK-350 §1: exported (was module-private) SOLELY so a contract test
+// (scripts/relay/adapters/seat-marker-divergence.contract.test.mjs) can pin
+// these two arrays against orca-adapter.mjs's canonical, production-
+// verified AGENT_MARKER_RE and fail loudly if either drifts without the
+// other being consciously reviewed -- this file's own header (above) already
+// documents that these are UNVERIFIED/opt-in-only and known to differ from
+// the canonical set; exporting them for a lock/pin test does not change that
+// status or wire them into any production decision path.
+export const CLAUDE_AGENT_MARKERS = [
   "Sonnet",
   "Opus",
   "Haiku",
@@ -267,7 +275,7 @@ const CLAUDE_AGENT_MARKERS = [
   "[VERIFY]",
   "bypass permissions",
 ];
-const CODEX_AGENT_MARKERS = ["gpt-5.6", "codex"];
+export const CODEX_AGENT_MARKERS = ["gpt-5.6", "codex"];
 const IDLE_PROMPT_MARKERS = ["? for shortcuts", "Ctrl+C to exit"];
 // review-1 P1 (2): active dispatch/queued work를 명시 관측하는 별도
 // capability(detectActiveWork)의 기준 신호 -- PM 위험2 경고대로

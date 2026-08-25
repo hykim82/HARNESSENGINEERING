@@ -1116,7 +1116,15 @@ function validateSeatLivenessObservationInput(worktreePath, now, opts) {
 // 직접 이식한다(제3의 마커 목록을 새로 짓지 않는다 -- 이식이지 발명이
 // 아니다).
 const DEAD_SHELL_PROMPT_RE = /^PS [A-Za-z]:\\.*>\s*$/;
-const AGENT_MARKER_RE =
+// HYK-350 §1: exported (was module-private) SOLELY so a contract test
+// (scripts/relay/adapters/seat-marker-divergence.contract.test.mjs) can pin
+// this -- the canonical, production-verified marker set -- against the
+// separate, UNVERIFIED opt-in copy in seat-candidate-adapter.mjs
+// (CLAUDE_AGENT_MARKERS/CODEX_AGENT_MARKERS) and fail loudly if either one
+// drifts without the other being consciously reviewed. Exporting a regex
+// object changes no runtime behavior anywhere this module is already
+// imported (classifySeatPreview below is still the only production caller).
+export const AGENT_MARKER_RE =
   /gpt-5\.6|Sonnet|Opus|\[CODER\]|\[REVIEW\]|bypass permissions|MCP startup|weekly \d/;
 
 function lastNonEmptyPreviewLine(text) {

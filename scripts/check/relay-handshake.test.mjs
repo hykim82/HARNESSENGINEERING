@@ -17,6 +17,7 @@ import {
   rmSync,
   mkdirSync,
   utimesSync,
+  existsSync,
 } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -28,6 +29,7 @@ import {
   wasAdmissionCompletionAttempted,
   PENDING_STALL_THRESHOLD_MS,
 } from "./relay-handshake.mjs";
+import { runAdmissionCli } from "../supervisor/admission-cli.mjs";
 
 // import.meta.url is resolved relative to this file's own location, not the
 // process cwd -- unaffected by the cwd axis (repo root vs scripts/check),
@@ -1657,5 +1659,163 @@ test("HYK-313 2R (CLI-b) fresh PENDING 대조군: 실 CLI 자식 프로세스 --
       /result missing ">>> DONE/,
       "여전히 기존 PENDING 사유 문구 그대로 나와야 한다(회귀 0)",
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// HYK-344 §1 (본체) -- 재현 게이트 + 수리 고정. ORCH 실측(2026-08-24 08:40):
+// 원장 예약 키가 라운드 라벨과 어긋나면(dispatch-worker.ps1의 GoLabel/Task
+// 폴백 어긋남 형태) 자리 반납·영수증 작성이 조용히 안 되면서도 이 CLI의
+// 종료코드는 0으로 남는다. 아래 시험들은 그 세 증거를 CLI 수준(진짜 자식
+// 프로세스, 격리된 원장)에서 동시에 확인하고, 수리(RESERVATION_KEY_MISMATCH
+// 구별) 이후에도 종료코드 0 자체는 바뀌지 않는다는 설계 판단(HYK-224-3R §3,
+// 뒤집지 않음)을 함께 고정한다 -- 대신 감사 기록(*.completion-failures.jsonl)
+// 이 "어느 키가 실제로 살아있는지"를 담아, 그 파일을 읽는 자동 호출자가
+// 「성공」으로 오독하지 못하게 한다.
+// ---------------------------------------------------------------------------
+
+function isolatedLedgerPaths() {
+  const dir = mkdtempSync(join(tmpdir(), "hyk344-ledger-repro-"));
+  return {
+    dir,
+    ledger: join(dir, "ledger.json"),
+    lock: join(dir, "ledger.lock"),
+  };
+}
+
+test("HYK-344 재현 게이트: 원장 예약 키(GoLabel 흉내)와 완료측 taskId(Task 폴백 흉내)가 어긋나면 -- (1) CLI exit code는 0, (2) 원장의 진짜 키는 반납되지 않음(ACTIVE 유지), (3) 소비 영수증은 안 써진다 -- 셋이 동시에 재현된다", () => {
+  const { dir: ledgerDir, ledger, lock } = isolatedLedgerPaths();
+  withFixtureDirCli((harnessDir) => {
+    try {
+      const GO_LABEL = "HYK-344-golabel-1";
+      const TASK_FALLBACK_ID = "HYK-344-task-fallback-1";
+
+      runAdmissionCli([
+        "init-cutover",
+        "--ledger",
+        ledger,
+        "--lock",
+        lock,
+        "--live-seats",
+        "[]",
+      ]);
+      runAdmissionCli([
+        "admit",
+        "--ledger",
+        ledger,
+        "--lock",
+        lock,
+        "--reservation-id",
+        GO_LABEL,
+        "--cap",
+        "1",
+      ]);
+
+      writeValidFixture(harnessDir, "coder", TASK_FALLBACK_ID);
+
+      const { exit, stdout, stderr } = runCli(["coder", harnessDir], {
+        env: {
+          ...process.env,
+          ADMISSION_LEDGER_PATH: ledger,
+          ADMISSION_LOCK_PATH: lock,
+        },
+      });
+
+      // (1) exit code stays 0 -- HYK-224-3R §3's design decision (this
+      // round does NOT overturn it, see coder.md's explicit choice).
+      assert.equal(exit, 0, `stdout=${stdout}\nstderr=${stderr}`);
+
+      // (2) the REAL reservation (GO_LABEL) is still ACTIVE -- the slot was
+      // never released, even though the CLI reported exit 0.
+      const ledgerRaw = JSON.parse(readFileSync(ledger, "utf8"));
+      assert.equal(ledgerRaw.reservations[GO_LABEL].status, "ACTIVE");
+
+      // (3) no consumption receipt was written (admissionReturned stayed
+      // false -- "부분 성공은 성공 영수증이 아니다").
+      const receiptDir = join(harnessDir, "receipts");
+      assert.equal(
+        existsSync(receiptDir),
+        false,
+        "consumption receipt directory must not exist -- receipt was never written",
+      );
+
+      // Bonus (수리 고정): the audit trail must distinguish this as a key
+      // MISMATCH (a real reservation exists, just under a different key),
+      // not a bare "not found" -- and must name the real key.
+      const auditPath = `${ledger}.completion-failures.jsonl`;
+      assert.ok(existsSync(auditPath));
+      const lines = readFileSync(auditPath, "utf8").trim().split("\n");
+      const record = JSON.parse(lines[lines.length - 1]);
+      assert.equal(record.reservationId, TASK_FALLBACK_ID);
+      assert.equal(record.reasonCode, "RESERVATION_KEY_MISMATCH");
+      assert.equal(record.candidates.length, 1);
+      assert.equal(record.candidates[0].reservationId, GO_LABEL);
+    } finally {
+      rmSync(ledgerDir, { recursive: true, force: true });
+    }
+  });
+});
+
+test("HYK-344 정상 경로 회귀 0: 원장 예약 키와 완료측 taskId가 일치하면 -- exit 0, 원장 자리는 실제로 반납(COMPLETED), 소비 영수증이 실제로 써진다", () => {
+  const { dir: ledgerDir, ledger, lock } = isolatedLedgerPaths();
+  withFixtureDirCli((harnessDir) => {
+    try {
+      const MATCHING_ID = "HYK-344-matching-1";
+
+      runAdmissionCli([
+        "init-cutover",
+        "--ledger",
+        ledger,
+        "--lock",
+        lock,
+        "--live-seats",
+        "[]",
+      ]);
+      runAdmissionCli([
+        "admit",
+        "--ledger",
+        ledger,
+        "--lock",
+        lock,
+        "--reservation-id",
+        MATCHING_ID,
+        "--cap",
+        "1",
+      ]);
+
+      writeValidFixture(harnessDir, "coder", MATCHING_ID);
+
+      const { exit, stdout, stderr } = runCli(["coder", harnessDir], {
+        env: {
+          ...process.env,
+          ADMISSION_LEDGER_PATH: ledger,
+          ADMISSION_LOCK_PATH: lock,
+        },
+      });
+      assert.equal(exit, 0, `stdout=${stdout}\nstderr=${stderr}`);
+
+      const ledgerRaw = JSON.parse(readFileSync(ledger, "utf8"));
+      assert.equal(
+        ledgerRaw.reservations[MATCHING_ID].status,
+        "COMPLETED",
+        "matching-key completion must actually release the slot",
+      );
+
+      const receiptDir = join(harnessDir, "receipts");
+      assert.equal(
+        existsSync(receiptDir),
+        true,
+        "matching-key completion must actually write a consumption receipt",
+      );
+
+      const auditPath = `${ledger}.completion-failures.jsonl`;
+      assert.equal(
+        existsSync(auditPath),
+        false,
+        "a successful matching-key completion must not write a failure-audit record",
+      );
+    } finally {
+      rmSync(ledgerDir, { recursive: true, force: true });
+    }
   });
 });

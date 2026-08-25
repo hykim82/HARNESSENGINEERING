@@ -731,6 +731,24 @@ function computeConsumptionResultFingerprint(resultContent) {
 // ⛔관제실 절대경로 하드코딩 금지 -- args(--dispatch-receipt-path)나
 // env(DISPATCH_RECEIPT_PATH, dispatch-receipt-cli.mjs가 이미 쓰는 바로 그
 // 이름)로만 받는다.
+//
+// HYK-347 §1 경로 계약 (누가 넣어 주는가 · 설정되지 않으면 무슨 일이
+// 일어나는가):
+//   출처(어디서 오는가): 관제실 dispatch-worker.ps1이 자기 자식 프로세스
+//   (이 CLI 포함, dispatch-receipt-cli.mjs·admission-completion-adapter.mjs·
+//   scripts/supervisor/orch-stall-detect.mjs 전부 같은 이름을 읽는다)에
+//   상속시키는 환경변수다 -- 이 저장소의 어떤 스크립트도 이 값을 자체
+//   생성/기본값 지정하지 않는다(값의 "정본 소유자"는 관제실이다,
+//   coder-task.md §4 표 "관제실이 넣어 준다").
+//   미설정 시 무슨 일이 일어나는가: 이 함수는 null을 돌려준다 -- 그
+//   null이 lookupDispatchId로 흘러가 `reasonCode: PATH_UNSET`(ok:false)이
+//   되고, 이 함수를 호출하는 모든 소비 축(evaluateConsumptionDecision의
+//   enrichCandidateDispatchId·evaluateAbortRecordDecision의
+//   enrichAbortRecordDispatchId·hasDispatchReceiptForCurrentRound·
+//   resolveMissingResultFileGate)은 그 실패를 "정말 없음"이 아니라
+//   "확인 불가"로 취급해 안전측(REJECT 또는 무보강)으로 접는다 -- 판정을
+//   ALLOW 쪽으로 뒤집는 법은 없다(fail-closed, HYK-342 4R §1 그대로 유지,
+//   이 라운드가 그 판정 로직 자체를 바꾸지 않는다).
 function resolveDispatchReceiptPath(args, env) {
   if (isNonEmptyString(args.dispatchReceiptPath))
     return args.dispatchReceiptPath;
@@ -772,11 +790,36 @@ function findLatestReceiptMatch(raw, role, harnessTaskLabel) {
 // "REVIEW" 대문자, 이 CLI의 role은 파일명 관례상 소문자 "coder"/
 // "review" -- 실측: dispatch-receipt-cli.mjs 44행 USAGE 문자열과
 // 관제실 dispatch-receipts.jsonl 실제 샘플 라인을 직접 대조).
-function lookupDispatchId({ role, harnessTaskLabel, receiptPath }) {
+//
+// HYK-347 §1/§2: every branch below now ALSO carries a machine-checkable
+// `reasonCode` (previously only a Korean prose `reason` string existed --
+// a caller/monitoring script had to string-match to tell branches apart).
+// This is purely additive: every existing call site (enrichCandidateDispatchId,
+// enrichAbortRecordDispatchId, hasDispatchReceiptForCurrentRound,
+// resolveMissingResultFileGate) only ever reads `.ok`/`.found`/`.dispatchId`
+// -- none of them read `.reason` or (before this round) `.reasonCode`, so
+// adding this field changes zero accept/reject decisions (coder-task.md §2
+// 비타협: "판정 로직 자체는 바꾸지 마라"). The specific pairing HYK-347
+// names -- "미설정"(PATH_UNSET) vs "설정됐지만 0건"(NOT_FOUND) -- are two
+// DIFFERENT reasonCode values here, never collapsed into one.
+export const DISPATCH_RECEIPT_LOOKUP_REASON = Object.freeze({
+  PATH_UNSET: "PATH_UNSET",
+  LABEL_MISSING: "LABEL_MISSING",
+  READ_FAILED: "READ_FAILED",
+  MISSING_DISPATCH_ID_FIELD: "MISSING_DISPATCH_ID_FIELD",
+  NOT_FOUND: "NOT_FOUND",
+  FOUND: "FOUND",
+});
+
+// HYK-347 §3: exported so a contract test can pin the reasonCode
+// distinction directly, without threading the full CLI/gate-decision
+// surface just to observe this one function's return shape.
+export function lookupDispatchId({ role, harnessTaskLabel, receiptPath }) {
   if (!isNonEmptyString(receiptPath)) {
     return {
       ok: false,
       found: false,
+      reasonCode: DISPATCH_RECEIPT_LOOKUP_REASON.PATH_UNSET,
       reason:
         "dispatch receipt path 없음(--dispatch-receipt-path/DISPATCH_RECEIPT_PATH 둘 다 미설정)",
     };
@@ -785,6 +828,7 @@ function lookupDispatchId({ role, harnessTaskLabel, receiptPath }) {
     return {
       ok: false,
       found: false,
+      reasonCode: DISPATCH_RECEIPT_LOOKUP_REASON.LABEL_MISSING,
       reason:
         "조회할 harness_task_label 없음(task 파일의 task_id: 줄이 없거나 모호함)",
     };
@@ -796,19 +840,32 @@ function lookupDispatchId({ role, harnessTaskLabel, receiptPath }) {
     return {
       ok: false,
       found: false,
+      reasonCode: DISPATCH_RECEIPT_LOOKUP_REASON.READ_FAILED,
       reason: `dispatch receipt 파일을 읽을 수 없음('${receiptPath}': ${err.message})`,
     };
   }
   const match = findLatestReceiptMatch(raw, role, harnessTaskLabel);
-  if (!match) return { ok: true, found: false };
+  if (!match) {
+    return {
+      ok: true,
+      found: false,
+      reasonCode: DISPATCH_RECEIPT_LOOKUP_REASON.NOT_FOUND,
+    };
+  }
   if (typeof match.dispatch_id !== "string" || match.dispatch_id.length === 0) {
     return {
       ok: false,
       found: false,
+      reasonCode: DISPATCH_RECEIPT_LOOKUP_REASON.MISSING_DISPATCH_ID_FIELD,
       reason: `role=${role} label=${harnessTaskLabel}로 찾은 영수증 항목에 dispatch_id 필드가 없음`,
     };
   }
-  return { ok: true, found: true, dispatchId: match.dispatch_id };
+  return {
+    ok: true,
+    found: true,
+    reasonCode: DISPATCH_RECEIPT_LOOKUP_REASON.FOUND,
+    dispatchId: match.dispatch_id,
+  };
 }
 
 // HYK-244 2R-b3 결함1 수리: 게이트는 배달 "전"에 돈다 -- 이 시점에는

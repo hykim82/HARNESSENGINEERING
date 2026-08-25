@@ -1970,6 +1970,19 @@ function isReservationCompletedForRound(ledgerPath, roundLabel, opts) {
   return ledger?.reservations?.[roundLabel]?.status === "COMPLETED";
 }
 
+// HYK-347 §1 경로 계약 (이 축에서의 사용): 출처는 dispatch-gate-
+// decision.mjs/admission-completion-adapter.mjs와 동일한 env
+// (`DISPATCH_RECEIPT_PATH`, 관제실이 넣어 준다 -- 이 저장소는 기본값을
+// 만들지 않는다). 미설정 시 이 함수는 null을 돌려주고, 그 null은
+// verifyReceiptConsumptionEvidence(아래) -> hasDispatchReceiptForRound로
+// 흘러가 즉시 false가 된다 -- 그 false는 "이 라운드가 진짜 미소비"가
+// 아니라 "영수증을 확인할 방법이 없었다"는 뜻이지만, 이 축은 fail-closed
+// 설계라 어느 쪽이든 CONSUMPTION_RECEIPT_AFTER 신호를 만들지 않는 쪽으로만
+// 접힌다(정지 경보를 잘못 끄는 방향으로는 절대 안 접는다) -- 그래서 경로
+// 미설정은 "정지 경보가 실제로 필요 없는데도 계속 켜져 있는" 영구 오탐을
+// 만들 수 있다(HYK-347이 닫으려는 문제 그 자체, coder-task.md §2 원문:
+// "영구 오탐은 «경보 무시»를 학습시킨다"). 이 라운드는 그 판정 로직 자체는
+// 바꾸지 않는다 -- 문서화만 한다(§2 비타협).
 function resolveDispatchReceiptPathForUnconsumed(opts) {
   if (isNonEmptyReceiptString(opts.dispatchReceiptPath)) {
     return opts.dispatchReceiptPath;

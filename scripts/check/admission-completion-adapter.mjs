@@ -141,6 +141,20 @@ function hasDispatchReceiptForRound(role, harnessTaskLabel, receiptPath) {
 // with-env-fallback 관례(같은 env 이름, `DISPATCH_RECEIPT_PATH` --
 // dispatch-receipt-cli.mjs가 이미 쓰는 바로 그 이름) -- 관제실 절대경로
 // 하드코딩 금지.
+//
+// HYK-347 §1 경로 계약 (이 파일에서의 사용): 출처는 dispatch-gate-
+// decision.mjs 위 주석과 동일(관제실이 자식 프로세스에 상속시키는 env,
+// 이 저장소 어디도 기본값을 만들지 않는다). 미설정(및 `receiptPathArg`도
+// 없음) 시 이 함수는 null을 돌려주고, 그 null은
+// verifyBlockedTerminationEvidence -> hasDispatchReceiptForRound로 흘러가
+// 즉시 `false`(증거 없음, 아래 hasDispatchReceiptForRound 헤더 참조)가
+// 되어 BLOCKED_TERMINATION_RELEASED 완료 자체가 거부(fail-closed)된다 --
+// "정말 배달 안 됨"과 "경로를 몰라서 확인 못 함"이 이 지점에서는 둘 다
+// 거부라는 같은 결과로 이어지지만(§0 신뢰 경계: 워커가 위조할 수 있는
+// 표식만으로 자리를 반납하지 않는다는 요구가 우선), reason 문자열은
+// receiptPath 자체를 그대로 담아(§0 아래 verifyBlockedTerminationEvidence
+// 참조) "(경로 미설정)"과 실제 경로 문자열을 구별해 남긴다 -- 판정
+// 로직(거부 여부)은 바꾸지 않는다.
 function resolveReceiptPathForVerification(receiptPathArg, env) {
   if (isNonEmptyString(receiptPathArg)) return receiptPathArg;
   if (isNonEmptyString(env?.DISPATCH_RECEIPT_PATH)) {
@@ -228,6 +242,24 @@ function reasonWithDetail(reasonCode, detail) {
 
 function isNonEmptyString(v) {
   return typeof v === "string" && v.length > 0;
+}
+
+// HYK-344 §1-3 항1/항2 -- distinguishes the three outcomes a completion
+// rejection can now carry (RESERVATION_NOT_FOUND vs the new RESERVATION_
+// KEY_MISMATCH from admission-ledger-core.mjs's completeReservation; the
+// third, "ledger unreadable", is already a structurally different code path
+// -- see `reasonWithDetail` above and the `outcome.ok`-false branch below,
+// neither of which ever calls this function). Both the expected key
+// (reservationId) and what was actually found in the ledger (candidates, or
+// explicitly none) are always named -- never collapsed to a bare "failed".
+function buildCompletionRejectionReason(reservationId, complete) {
+  if (complete.reasonCode === "RESERVATION_KEY_MISMATCH") {
+    const found = complete.candidates
+      .map((c) => `${c.reservationId} (status=${c.status})`)
+      .join(", ");
+    return `admission-completion-adapter: completeReservation rejected (RESERVATION_KEY_MISMATCH) -- expected reservation key '${reservationId}' not found, but ${complete.candidates.length} OTHER active/suspect reservation(s) exist in this ledger snapshot: ${found} -- this looks like a key drift (e.g. GoLabel/Task mismatch), NOT "no reservation was ever made"`;
+  }
+  return `admission-completion-adapter: completeReservation rejected (${complete.reasonCode}) for '${reservationId}' -- the reservation could not be transitioned to COMPLETED in the current ledger snapshot (no other active/suspect reservation exists in this ledger snapshot either -- no reservation was ever admitted under any key visible here)`;
 }
 
 // HYK-342 2R P1-1 -- the closed set of `reason` values this adapter will
@@ -375,7 +407,12 @@ export function completeAdmissionReservation({
         result: {
           ok: false,
           reasonCode: complete.reasonCode,
-          reason: `admission-completion-adapter: completeReservation rejected (${complete.reasonCode}) for '${reservationId}' -- the reservation could not be transitioned to COMPLETED in the current ledger snapshot`,
+          reason: buildCompletionRejectionReason(reservationId, complete),
+          // HYK-344 §1-3 항1: surfaced as its own field (not just folded
+          // into the `reason` string) so an automated caller/monitoring
+          // script can act on it without parsing prose -- the durable audit
+          // record below (appendCompletionFailureAudit) also carries this.
+          candidates: complete.candidates ?? [],
         },
       };
     }
@@ -413,6 +450,7 @@ function appendCompletionFailureAudit({
   reservationId,
   reasonCode,
   reason,
+  candidates,
   now,
 }) {
   const auditPath = `${ledgerPath}.completion-failures.jsonl`;
@@ -421,6 +459,13 @@ function appendCompletionFailureAudit({
     reservationId,
     reasonCode: reasonCode ?? "UNKNOWN",
     reason,
+    // HYK-344 §1-3 항1/항3: durable, machine-parseable record of "what was
+    // actually found" alongside "what was expected" (reservationId above) --
+    // present (possibly empty array) only when the failure came from
+    // completeAdmissionReservation's RESERVATION_NOT_FOUND/RESERVATION_KEY_
+    // MISMATCH branch; absent for other failure shapes (e.g. ledger
+    // unreadable) where it would not mean anything.
+    ...(candidates !== undefined ? { candidates } : {}),
   };
   try {
     mkdirSync(dirname(auditPath), { recursive: true });
@@ -602,6 +647,7 @@ export function autoCompleteAdmission({
       reservationId,
       reasonCode: outcome.reasonCode,
       reason: outcome.reason,
+      candidates: outcome.candidates,
       now: new Date().toISOString(),
     });
   }

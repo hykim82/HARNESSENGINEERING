@@ -47,6 +47,20 @@ export const ADMISSION_REASON = Object.freeze({
   LEDGER_MALFORMED: "LEDGER_MALFORMED",
   RESERVATION_NOT_FOUND: "RESERVATION_NOT_FOUND",
   RESERVATION_NOT_ACTIVE: "RESERVATION_NOT_ACTIVE",
+  // HYK-344 §1-3 항2 -- completeReservation's pre-existing RESERVATION_NOT_
+  // FOUND collapsed two genuinely different situations into one value: "no
+  // reservation was ever admitted for this round" vs. "a reservation WAS
+  // admitted, but under a different key than the one this completion call is
+  // asking about" (the exact GoLabel/Task fallback drift ORCH observed,
+  // 2026-08-24 08:40 -- dispatch-worker.ps1 admits under `$GoLabel`,
+  // relay-handshake.mjs completes under the task file's `task_id:`; when
+  // those two differ, completion silently misses). RESERVATION_KEY_MISMATCH
+  // is the new, distinct value: it fires only when the ledger snapshot has
+  // at least one OTHER active/suspect reservation that the requested id does
+  // not match -- i.e. "something IS reserved here, just not under the key
+  // you asked about" -- so a reader no longer has to guess which of the two
+  // (never-admitted vs. wrong-key) actually happened.
+  RESERVATION_KEY_MISMATCH: "RESERVATION_KEY_MISMATCH",
 });
 
 // HYK-342/HYK-249 -- named `completion_reason` values a caller may ask
@@ -273,6 +287,44 @@ export function admitReservation(ledger, args) {
 // function's behavior before this round. This is purely additive: it does
 // not change WHEN a reservation transitions to COMPLETED, only what optional
 // bookkeeping rides along with an already-decided transition.
+// HYK-344 §1-3 항1/항2 -- extracted from completeReservation purely to keep
+// its own cyclomatic/line-count complexity under the repo's ESLint ceiling
+// (quality-check); no behavior change. Records BOTH the expected key
+// (reservationId) AND what was actually found (or "nothing") in the ledger,
+// instead of a bare "failed". A reservation is a plausible key-drift
+// candidate only while it is still ACTIVE or SUSPECT (a COMPLETED entry
+// already released its slot -- it is not "the round this caller meant", it
+// is unrelated history).
+function buildReservationNotFoundResult(ledger, reservationId) {
+  const candidates = Object.entries(ledger.reservations)
+    .filter(
+      ([id, e]) =>
+        id !== reservationId &&
+        (e.status === RESERVATION_STATUS.ACTIVE ||
+          e.status === RESERVATION_STATUS.SUSPECT),
+    )
+    .map(([id, e]) => ({
+      reservationId: id,
+      status: e.status,
+      role: e.role ?? null,
+      seatKey: e.seat_key ?? null,
+    }));
+  if (candidates.length > 0) {
+    return {
+      ok: false,
+      ledger: null,
+      reasonCode: ADMISSION_REASON.RESERVATION_KEY_MISMATCH,
+      candidates,
+    };
+  }
+  return {
+    ok: false,
+    ledger: null,
+    reasonCode: ADMISSION_REASON.RESERVATION_NOT_FOUND,
+    candidates: [],
+  };
+}
+
 export function completeReservation(ledger, args) {
   if (!isWellFormedLedger(ledger)) {
     return {
@@ -298,11 +350,7 @@ export function completeReservation(ledger, args) {
   }
   const entry = ledger.reservations[reservationId];
   if (!entry) {
-    return {
-      ok: false,
-      ledger: null,
-      reasonCode: ADMISSION_REASON.RESERVATION_NOT_FOUND,
-    };
+    return buildReservationNotFoundResult(ledger, reservationId);
   }
   if (entry.status === RESERVATION_STATUS.COMPLETED) {
     return {

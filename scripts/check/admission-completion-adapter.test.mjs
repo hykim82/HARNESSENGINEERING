@@ -487,6 +487,110 @@ test("HYK-224-3R §3: a completion failure is durably audit-logged (JSONL file n
   }
 });
 
+// HYK-344 §1 (본체, ORCH 실측 2026-08-24 08:40): the GoLabel/Task key-drift
+// repro -- a reservation is admitted under one key ('HYK-344-real-1', mirrors
+// dispatch-worker.ps1's `$GoLabel`) but completion is attempted under a
+// DIFFERENT key ('HYK-344-drifted-1', mirrors relay-handshake.mjs's own
+// task_id-file-resolved `$Task` fallback). Pins that the adapter surfaces
+// this as the distinct RESERVATION_KEY_MISMATCH reasonCode (not the bare
+// RESERVATION_NOT_FOUND a truly-never-admitted round would get), names the
+// real key it found, and durably records both in the audit JSONL.
+test("HYK-344: a key-drift completion (reservation exists under a DIFFERENT key) surfaces RESERVATION_KEY_MISMATCH with the real key named, both in the returned reason and the durable audit record", () => {
+  const { dir, ledger, lock } = tmpPaths();
+  const savedLedger = process.env.ADMISSION_LEDGER_PATH;
+  const savedLock = process.env.ADMISSION_LOCK_PATH;
+  try {
+    runAdmissionCli([
+      "init-cutover",
+      "--ledger",
+      ledger,
+      "--lock",
+      lock,
+      "--live-seats",
+      "[]",
+    ]);
+    runAdmissionCli([
+      "admit",
+      "--ledger",
+      ledger,
+      "--lock",
+      lock,
+      "--reservation-id",
+      "HYK-344-real-1",
+      "--cap",
+      "1",
+    ]);
+
+    process.env.ADMISSION_LEDGER_PATH = ledger;
+    process.env.ADMISSION_LOCK_PATH = lock;
+    const outcome = autoCompleteAdmission({
+      reservationId: "HYK-344-drifted-1",
+    });
+    assert.equal(outcome.attempted, true);
+    assert.equal(outcome.ok, false);
+    assert.equal(outcome.reasonCode, "RESERVATION_KEY_MISMATCH");
+    assert.match(outcome.reason, /HYK-344-real-1/);
+    assert.equal(outcome.candidates.length, 1);
+    assert.equal(outcome.candidates[0].reservationId, "HYK-344-real-1");
+
+    // The mismatched-against reservation itself must stay untouched/ACTIVE
+    // -- a mismatch is a rejection, never a guessed completion.
+    const written = JSON.parse(readFileSync(ledger, "utf8"));
+    assert.equal(written.reservations["HYK-344-real-1"].status, "ACTIVE");
+
+    const auditPath = `${ledger}.completion-failures.jsonl`;
+    const lines = readFileSync(auditPath, "utf8").trim().split("\n");
+    const record = JSON.parse(lines[lines.length - 1]);
+    assert.equal(record.reservationId, "HYK-344-drifted-1");
+    assert.equal(record.reasonCode, "RESERVATION_KEY_MISMATCH");
+    assert.equal(record.candidates.length, 1);
+    assert.equal(record.candidates[0].reservationId, "HYK-344-real-1");
+  } finally {
+    if (savedLedger !== undefined)
+      process.env.ADMISSION_LEDGER_PATH = savedLedger;
+    else delete process.env.ADMISSION_LEDGER_PATH;
+    if (savedLock !== undefined) process.env.ADMISSION_LOCK_PATH = savedLock;
+    else delete process.env.ADMISSION_LOCK_PATH;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// HYK-344 §1-3 항2: the genuinely-never-admitted case (an empty ledger, no
+// candidates anywhere) must stay RESERVATION_NOT_FOUND -- distinct from the
+// key-mismatch case above -- with an EMPTY candidates array, not a missing
+// field (a caller/monitoring script must be able to tell "checked, found
+// none" apart from "field absent, meaning unclear").
+test("HYK-344: completion against a genuinely empty ledger (no reservation ever admitted) stays RESERVATION_NOT_FOUND with an empty candidates list", () => {
+  const { dir, ledger, lock } = tmpPaths();
+  const savedLedger = process.env.ADMISSION_LEDGER_PATH;
+  const savedLock = process.env.ADMISSION_LOCK_PATH;
+  try {
+    runAdmissionCli([
+      "init-cutover",
+      "--ledger",
+      ledger,
+      "--lock",
+      lock,
+      "--live-seats",
+      "[]",
+    ]);
+    process.env.ADMISSION_LEDGER_PATH = ledger;
+    process.env.ADMISSION_LOCK_PATH = lock;
+    const outcome = autoCompleteAdmission({ reservationId: "HYK-344-ghost-1" });
+    assert.equal(outcome.attempted, true);
+    assert.equal(outcome.ok, false);
+    assert.equal(outcome.reasonCode, "RESERVATION_NOT_FOUND");
+    assert.deepEqual(outcome.candidates, []);
+  } finally {
+    if (savedLedger !== undefined)
+      process.env.ADMISSION_LEDGER_PATH = savedLedger;
+    else delete process.env.ADMISSION_LEDGER_PATH;
+    if (savedLock !== undefined) process.env.ADMISSION_LOCK_PATH = savedLock;
+    else delete process.env.ADMISSION_LOCK_PATH;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("HYK-224-3R §3: a SUCCESSFUL completion does NOT write an audit-failure record", () => {
   const { dir, ledger, lock } = tmpPaths();
   const savedLedger = process.env.ADMISSION_LEDGER_PATH;
