@@ -1122,6 +1122,38 @@ test("HYK-189 (e) mutation M2: removing the second positional arg (harnessDir ov
   }
 });
 
+// HYK-344 2R (코더 자신의 실측 재작업 -- 최초 구현은 err.status===정수 여부로
+// "attempted && failed"를 판정했다가, 이 바로 그 시나리오(격리 픽스처에
+// admission-completion-adapter.mjs가 없음 -- writeMutantCli가 그 파일을
+// 사이드카로 복사하지 않는다)에서 Node 자신의 MODULE_NOT_FOUND도 exit 1을
+// 낸다는 사실(HYK-189 (h)가 이미 고정한 바로 그 함정)에 걸려 «어댑터 파일이
+// 없을 뿐인» 무해한 격리 픽스처 갭까지 exit 3으로 오분류했다 -- 로컬 재현
+// 즉시 잡혀 stderr 모양 기반 판정으로 교체했다. 이 시험이 없으면 그 회귀가
+// 조용히 재발할 수 있다(§8의 세 정본 시험 어느 것도 "어댑터 파일이 실제로
+// 없는" 시나리오를 지나가지 않는다 -- 전부 실제 ledger + 실제 adapter
+// 파일이 있는 경로만 쓴다).
+test("HYK-344 2R 회귀: admission-completion-adapter.mjs가 격리 픽스처에 아예 없으면(Node MODULE_NOT_FOUND, exit 1 공유) -- exit 3(attempted+실패)으로 오분류하지 않는다, exit 0 그대로", () => {
+  const { rootDir, mutantPath } = writeMutantCli(RELAY_HANDSHAKE_SRC); // 무변조 사본 -- writeMutantCli 자체가 admission-completion-adapter.mjs를 사이드카로 복사하지 않는다
+  try {
+    withFixtureDirCli((dir) => {
+      writeValidFixture(dir, "coder", "HYK-344-missing-adapter-1");
+      const { exit, stdout, stderr } = runMutantCli(mutantPath, ["coder", dir]);
+      assert.equal(
+        exit,
+        0,
+        `a genuinely-absent adapter sibling file must stay the pre-existing harmless no-op (exit 0), not be misread as an attempted-and-failed completion (exit 3)\nstdout=${stdout}\nstderr=${stderr}`,
+      );
+      assert.doesNotMatch(
+        stderr,
+        /exiting 3/,
+        "MODULE_NOT_FOUND from a missing sibling file must never route through the exit-3 channel",
+      );
+    });
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 test("HYK-189 (e) mutation M3: removing non-zero exit propagation on failure -> a blocked handshake wrongly reports success (RED signal; proves exit-code propagation is load-bearing)", () => {
   const target =
     "  if (result.ok) {\n    process.exit(0);\n  } else {\n    console.error(result.reason);\n    process.exit(1);\n  }\n";

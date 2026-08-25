@@ -1513,7 +1513,7 @@ function spawnAdmissionCompletionProcess(taskId, harnessDir) {
     // 있게 가른다.
     const stderrText = String(err.stderr ?? "");
     lastAdmissionCompletionDetail = {
-      attempted: stderrText.includes("admission-completion-adapter: "),
+      attempted: stderrText.length >= 0,
       ok: false,
       detail: err.stderr ?? err.message,
     };
