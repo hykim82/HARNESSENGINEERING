@@ -1397,12 +1397,39 @@ export function wasAdmissionCompletionAttempted(stdout) {
   return !String(stdout ?? "").includes("not attempted");
 }
 
+// HYK-344 2R (review-r1-verbatim.md §A P1, orch-measured-r1.md 잰 것1): the
+// audit trail (${ledgerPath}.completion-failures.jsonl) HYK-344 1R added has
+// ZERO production readers (검토자 rg 확인 + ORCH 독립 재확인, 둘 다 grep 0건)
+// -- so "구별해서 기록한다"만으로는 "자동 호출자가 성공으로 오인한다"는 핵심
+// 결함이 닫히지 않는다. This module-scoped slot is how that gap closes
+// without widening `spawnAdmissionCompletionProcess`'s own return value: the
+// boolean `admissionReturned` it returns is pinned byte-for-byte by
+// relay-handshake-completion-wire.test.mjs's ⓒ mutation target
+// (`"spawnAdmissionCompletion(taskId);"` must appear exactly once, and the
+// mutated `undefined;` substitution must stay a valid boolean-shaped
+// assignment) AND is threaded into the consumption-receipt `effects` object
+// downstream (consumption-receipt-core.mjs expects a boolean there, not an
+// object) -- changing its shape would ripple into both. So the richer detail
+// (was this genuinely ATTEMPTED-and-FAILED, vs never attempted at all
+// because no ledger path resolved) rides this separate slot instead, read
+// by the CLI entry point right after `checkRelayHandshake` returns (see
+// `invokedDirectly` below). Reset at the top of every call so a call that
+// never reaches admission completion this round (REJECTed/BLOCKED rounds,
+// which don't invoke this function at all) never sees a PRIOR round's stale
+// detail leak through a long-lived in-process caller.
+let lastAdmissionCompletionDetail = null;
+
+export function peekLastAdmissionCompletionDetail() {
+  return lastAdmissionCompletionDetail;
+}
+
 // HYK-312 §1: renamed from `spawnAdmissionCompletion` -- the name
 // `spawnAdmissionCompletion` is now the local single-arg closure defined
 // inside runCompletionSideEffects (captures harnessDir from that scope), so
 // this two-arg implementation function needed a distinct name to avoid
 // shadowing confusion. Behavior is otherwise byte-for-byte unchanged.
 function spawnAdmissionCompletionProcess(taskId, harnessDir) {
+  lastAdmissionCompletionDetail = null;
   try {
     const adapterPath = join(
       dirname(fileURLToPath(new URL(import.meta.url))),
@@ -1423,7 +1450,14 @@ function spawnAdmissionCompletionProcess(taskId, harnessDir) {
       stdio: ["ignore", "pipe", "pipe"],
     });
     console.log(out.trim());
-    if (!wasAdmissionCompletionAttempted(out)) return false;
+    const attempted = wasAdmissionCompletionAttempted(out);
+    // HYK-344 2R: recorded on the SUCCESS path too (attempted && ok:true, or
+    // genuinely not-attempted because no ledger path resolved) -- the CLI
+    // reads this slot unconditionally, so a `null` left over from module
+    // load (never actually reached this function) must not be
+    // indistinguishable from "ran and everything was fine".
+    lastAdmissionCompletionDetail = { attempted, ok: true };
+    if (!attempted) return false;
     // HYK-244 2R-a 조각2: return value added (was void/undefined) so the
     // receipt-writing call site can know this effect (admissionReturned)
     // actually succeeded. Does not change try/catch structure or any
@@ -1450,6 +1484,30 @@ function spawnAdmissionCompletionProcess(taskId, harnessDir) {
     // here), and (2) the adapter durably appends a JSON line to
     // `${ledgerPath}.completion-failures.jsonl` BEFORE this process ever
     // sees the failure (coder-task §3: "화면에만 = 도달로 안 침").
+    //
+    // HYK-344 2R §4 후보ⓐ 채택 (review-r1-verbatim.md §A P1): the "두 통로"
+    // above turned out to have zero readers for one of them (audit JSONL,
+    // orch-measured-r1.md 잰 것1) -- so THIS CLI's own exit code still needs
+    // to distinguish "attempted and genuinely failed" from "not attempted at
+    // all" (env not wired -- an expected, harmless gap this repo has always
+    // tolerated). The 3R reasoning above (round pass/fail must not depend on
+    // admission-ledger reachability) is still honored: exit 0 (full success)
+    // and exit 1 (round itself rejected) keep their EXACT pre-existing
+    // meaning, untouched. A THIRD, previously-unused value is what an
+    // automated caller now sees for this one narrow case (see
+    // `lastAdmissionCompletionDetail`/`peekLastAdmissionCompletionDetail`
+    // above and the CLI entry point below) -- never conflated with either
+    // existing code, so no caller's existing 0-vs-1 branching changes.
+    // `err.status` is only a real integer when the adapter process actually
+    // ran and exited non-zero (Node's child_process contract) -- a spawn
+    // that never started at all (missing adapter file, isolated fixture)
+    // has no `.status`, so that harmless no-op case is NOT mistaken for a
+    // genuine attempted-and-failed completion here.
+    lastAdmissionCompletionDetail = {
+      attempted: Number.isInteger(err.status),
+      ok: false,
+      detail: err.stderr ?? err.message,
+    };
     console.error(
       `relay-handshake: admission-completion spawn skipped/failed (non-fatal to this handshake's own exit code, HYK-224-3R §3 reasoning above): ${err.stderr ?? err.message}`,
     );
@@ -1725,6 +1783,26 @@ if (invokedDirectly) {
     ? checkRelayHandshake({ role, harnessDir: harnessDirArg })
     : checkRelayHandshake({ role });
   if (result.ok) {
+    // HYK-344 2R (review-r1-verbatim.md §A P1): this round genuinely
+    // finished (task_id binding + staleness all passed) -- but that is not
+    // the same question as "did the admission-ledger reservation for it
+    // actually get released". `peekLastAdmissionCompletionDetail()` is set
+    // synchronously inside THIS process's own single `checkRelayHandshake`
+    // call above (module-scoped slot, see its own header) -- exit 3 only
+    // when completion was genuinely ATTEMPTED and FAILED (e.g. a reservation
+    // key mismatch), never for the harmless "not attempted" gap (no ledger
+    // path resolved), so existing deployments that never wired
+    // ADMISSION_LEDGER_PATH keep seeing exit 0 exactly as before.
+    const completionDetail = peekLastAdmissionCompletionDetail();
+    if (
+      completionDetail?.attempted === true &&
+      completionDetail?.ok === false
+    ) {
+      console.error(
+        `relay-handshake: round completed but admission-ledger reservation release FAILED (${completionDetail.detail ?? "no detail available"}) -- exiting 3 (distinct from 0=full success / 1=round rejected) so an automated caller cannot mistake this for a clean success (HYK-344 2R)`,
+      );
+      process.exit(3);
+    }
     process.exit(0);
   } else {
     console.error(result.reason);

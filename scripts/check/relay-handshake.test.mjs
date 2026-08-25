@@ -1683,7 +1683,13 @@ function isolatedLedgerPaths() {
   };
 }
 
-test("HYK-344 재현 게이트: 원장 예약 키(GoLabel 흉내)와 완료측 taskId(Task 폴백 흉내)가 어긋나면 -- (1) CLI exit code는 0, (2) 원장의 진짜 키는 반납되지 않음(ACTIVE 유지), (3) 소비 영수증은 안 써진다 -- 셋이 동시에 재현된다", () => {
+// HYK-344 2R (review-r1-verbatim.md §A P1): 1R은 이 시험이 "exit 0"을
+// «수리 결과»로 단언했다 -- 그게 정확히 검토자가 반려한 지점이다(감사
+// 파일에 프로덕션 소비자가 없어 exit 0이 여전히 "성공"으로 오독됐다). 2R은
+// 같은 재현 입력에 대해 CLI 자신의 exit code가 이제 3(구별되는 값)임을
+// 단언하도록 갱신한다 -- 나머지 두 증거(자리 미반납·영수증 미기록)는
+// 그대로 유지(회귀 대상 아님, 검토자가 그 둘을 문제삼지 않았다).
+test("HYK-344 2R 재현->수리 확인: 원장 예약 키(GoLabel 흉내)와 완료측 taskId(Task 폴백 흉내)가 어긋나면 -- (1) CLI exit code는 3(구별되는 값, 더 이상 0이 아니다), (2) 원장의 진짜 키는 반납되지 않음(ACTIVE 유지), (3) 소비 영수증은 안 써진다", () => {
   const { dir: ledgerDir, ledger, lock } = isolatedLedgerPaths();
   withFixtureDirCli((harnessDir) => {
     try {
@@ -1721,9 +1727,15 @@ test("HYK-344 재현 게이트: 원장 예약 키(GoLabel 흉내)와 완료측 t
         },
       });
 
-      // (1) exit code stays 0 -- HYK-224-3R §3's design decision (this
-      // round does NOT overturn it, see coder.md's explicit choice).
-      assert.equal(exit, 0, `stdout=${stdout}\nstderr=${stderr}`);
+      // (1) 2R: exit code is now 3 -- a distinct value from 0 (full
+      // success) and 1 (round itself rejected), so an automated caller can
+      // no longer read this as a clean success (coder.md §4 후보ⓐ 채택).
+      assert.equal(exit, 3, `stdout=${stdout}\nstderr=${stderr}`);
+      assert.match(
+        stderr,
+        /exiting 3.*HYK-344 2R/,
+        "the distinguishing stderr line must actually be present, not just the exit code",
+      );
 
       // (2) the REAL reservation (GO_LABEL) is still ACTIVE -- the slot was
       // never released, even though the CLI reported exit 0.
@@ -1817,5 +1829,29 @@ test("HYK-344 정상 경로 회귀 0: 원장 예약 키와 완료측 taskId가 �
     } finally {
       rmSync(ledgerDir, { recursive: true, force: true });
     }
+  });
+});
+
+// HYK-344 2R §4 후보ⓐ 정직 한계 고정: ADMISSION_LEDGER_PATH가 아예 미설정인
+// 기존(HYK-224 1R 이전부터의) 배포는 "not attempted"이지 "attempted+실패"가
+// 아니다 -- 이 시험은 그 harmless 갭이 새 exit 3으로 잘못 넘어가지 않는지
+// 고정한다(그랬다면 ADMISSION_LEDGER_PATH를 아예 안 쓰는 모든 기존 호출자가
+// 이번 라운드로 갑자기 exit 3을 받는 회귀가 됐을 것).
+test("HYK-344 2R 정직 한계 회귀: ADMISSION_LEDGER_PATH가 아예 미설정이면(=not attempted) exit는 여전히 0 -- attempted+실패(exit 3)와 혼동하지 않는다", () => {
+  withFixtureDirCli((harnessDir) => {
+    const NO_LEDGER_ID = "HYK-344-no-ledger-1";
+    writeValidFixture(harnessDir, "coder", NO_LEDGER_ID);
+
+    const env = { ...process.env };
+    delete env.ADMISSION_LEDGER_PATH;
+    delete env.ADMISSION_LOCK_PATH;
+    const { exit, stdout, stderr } = runCli(["coder", harnessDir], { env });
+
+    assert.equal(exit, 0, `stdout=${stdout}\nstderr=${stderr}`);
+    assert.doesNotMatch(
+      stderr,
+      /exiting 3/,
+      "the not-attempted gap must never be reported through the exit-3 channel",
+    );
   });
 });
