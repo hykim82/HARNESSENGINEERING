@@ -18,6 +18,7 @@ import {
   mkdirSync,
   utimesSync,
   existsSync,
+  readdirSync,
 } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -1886,4 +1887,107 @@ test("HYK-344 2R 정직 한계 회귀: ADMISSION_LEDGER_PATH가 아예 미설정
       "the not-attempted gap must never be reported through the exit-3 channel",
     );
   });
+});
+
+// ---------------------------------------------------------------------------
+// HYK-344 3R §2-2: "지금은 사람이 유일한 호출자다"를 시험으로 고정한다 --
+// 검토 원문(review-r2-verbatim.md §A P1)이 확인한 바 그대로, 이 저장소
+// 안에서 relay-handshake.mjs의 CLI를 실제로 자식 프로세스로 «실행»하는
+// 프로덕션 경로가 0건이다(관제실 dispatch-worker.ps1도 배달만 하지 이
+// CLI를 부르지 않는다 -- 그건 이 저장소 밖 파일이라 CI가 닿을 수 없으므로
+// 이 시험의 범위 밖이며, 결과 파일에 «수동 확인, 자동 고정 아님»으로
+// 명시한다). ⛔주석/문서 문자열만 보는 시험이면 안 된다는 요구(coder-task
+// §2-2) 그대로, 이 시험은 저장소 소스 파일을 실제로 읽어 스캔한다.
+//
+// 방법: scripts/ 아래 모든 *.mjs 파일(테스트 파일과 relay-handshake.mjs
+// 자기 자신은 제외 -- 아래 이유)에서, 주석을 벗겨낸 뒤 남는 텍스트에
+// 따옴표로 감싼 리터럴 "relay-handshake.mjs" 문자열이 있는지 찾는다.
+// 그런 리터럴이 프로덕션 코드에 있어야 할 유일한 이유는 그 파일 경로를
+// 조립해 실행(spawn)하려는 것뿐이다(이 저장소의 기존 관례 -- 예:
+// admission-completion-adapter.mjs를 스폰하는 코드가 정확히 이 모양으로
+// "admission-completion-adapter.mjs" 리터럴을 쓴다). 오탐 제외:
+// (a) relay-handshake.mjs 자기 자신 -- 자기 CLI 진입점 판별(`endsWith(...)`)
+//     이 자기 파일명을 리터럴로 갖고 있는 게 정상이라 제외.
+// (b) *.test.mjs 파일 전부 -- 시험이 CLI를 자식 프로세스로 실행해
+//     검증하는 것은 이미 알려진 정당한 용도이므로 제외(정의상 "프로덕션
+//     호출자"가 아니다).
+// 주석 벗기기는 정규식 기반 최선-노력이다(완전한 JS 파서 아님) -- 블록
+// 주석(`/* */`)과 줄 주석(`//`)을 지운다. ⚠️정직 한계: 문자열 리터럴
+// 안에 `//`가 들어있으면(예: URL) 그 뒤가 주석으로 잘못 벗겨질 수 있다 --
+// 이 저장소의 실제 소스에서 relay-handshake.mjs 리터럴 근처에 그런 문자열이
+// 없음을 이 시험 자신의 결과(0건)로 확인했다. 그리고 문자열을 쪼개
+// 이어붙이거나 동적으로 조립한 경로(예: `"relay-" + "handshake.mjs"`)는
+// 이 정규식 스캔으로 원리적으로 잡지 못한다 -- 고의적 회피는 이 시험의
+// 범위 밖이다(결과 파일에 동일하게 명시).
+function stripCommentsBestEffort(src) {
+  return src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
+}
+
+// 정적/동적 import 지정자는 "in-process 함수 호출자" 범주다(검토자가 이미
+// 확인: "checkRelayHandshake를 import하는 in-process 호출자들도 프로세스
+// 종료 코드를 소비하지 않습니다") -- 이 시험이 찾는 것은 그 반대(자식
+// 프로세스로 «실행»하는 것)이므로, 세 import 모양(정적 `from "..."`,
+// 사이드이펙트 `import "..."`, 동적 `import("...")`)을 먼저 지운 뒤
+// 남는 리터럴만 offender 후보로 본다.
+function stripRelayHandshakeImportSpecifiers(src) {
+  return src
+    .replace(/from\s*(["'])[^"']*relay-handshake\.mjs\1/g, "")
+    .replace(/import\s*\(\s*(["'])[^"']*relay-handshake\.mjs\1\s*\)/g, "")
+    .replace(/import\s*(["'])[^"']*relay-handshake\.mjs\1/g, "");
+}
+
+function listMjsFilesRecursive(rootDir) {
+  const out = [];
+  for (const entry of readdirSync(rootDir, {
+    recursive: true,
+    withFileTypes: true,
+  })) {
+    if (!entry.isFile() || !entry.name.endsWith(".mjs")) continue;
+    // entry.parentPath (Node 20.12+) / entry.path (older) -- both give the
+    // directory containing this entry; fall back defensively.
+    const parentDir = entry.parentPath ?? entry.path ?? rootDir;
+    out.push(join(parentDir, entry.name));
+  }
+  return out;
+}
+
+test("HYK-344 3R: relay-handshake.mjs CLI를 실제로 실행(spawn)하는 프로덕션 호출자는 이 저장소 안에 0건 -- «지금은 사람이 유일한 호출자»가 시험으로 고정된다", () => {
+  const scriptsRoot = join(
+    dirname(fileURLToPath(new URL(import.meta.url))),
+    "..",
+  );
+  const selfPath = fileURLToPath(new URL(import.meta.url).href).replace(
+    /relay-handshake\.test\.mjs$/,
+    "relay-handshake.mjs",
+  );
+  const allFiles = listMjsFilesRecursive(scriptsRoot);
+  assert.ok(
+    allFiles.length > 50,
+    `sanity: recursive .mjs walk under scripts/ must find far more than 50 files (found ${allFiles.length}) -- a near-zero count would silently make this test's "0 callers" pass meaninglessly`,
+  );
+  const offenders = [];
+  for (const filePath of allFiles) {
+    const normalized = filePath.replace(/\\/g, "/");
+    if (normalized.endsWith("/relay-handshake.mjs")) continue; // (a) self
+    if (normalized.endsWith(".test.mjs")) continue; // (b) test callers
+    const stripped = stripRelayHandshakeImportSpecifiers(
+      stripCommentsBestEffort(readFileSync(filePath, "utf8")),
+    );
+    if (/["'][^"']*relay-handshake\.mjs["']/.test(stripped)) {
+      offenders.push(filePath);
+    }
+  }
+  assert.deepEqual(
+    offenders,
+    [],
+    `these non-test, non-self files reference the literal "relay-handshake.mjs" filename outside a comment -- a production caller may have been added; wire its exit-3 handling and update this test's allowlist deliberately (never silently): ${JSON.stringify(offenders)}`,
+  );
+  // self-check: relay-handshake.mjs itself DOES contain the literal (its own
+  // invokedDirectly guard) -- confirms the scan mechanism actually works
+  // rather than e.g. silently reading zero bytes from every file.
+  assert.match(
+    stripCommentsBestEffort(readFileSync(selfPath, "utf8")),
+    /["'][^"']*relay-handshake\.mjs["']/,
+    "sanity: relay-handshake.mjs's own source must still contain its own filename literal (its CLI-invocation guard) -- if this fails, the scan/strip mechanism itself is broken, not the claim being tested",
+  );
 });

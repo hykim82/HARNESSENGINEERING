@@ -1779,6 +1779,22 @@ function describeRoleUsage() {
 // exit 0 exactly as before. A no-op (returns normally) whenever `result.ok`
 // is false or the completion detail doesn't apply, so the caller's own
 // pinned (result.ok) block always runs next exactly as before.
+//
+// HYK-344 3R (책임자 판정 2026-08-25 11:19, review-r2-verbatim.md §A P1
+// 반려): full exit-code table + this fact are documented in
+// `docs/relay-handshake-exit-code-contract.md` -- keep both in sync.
+// ★★ WHO READS THIS RIGHT NOW: nothing in this repo spawns this CLI as a
+// child process in a production path (검증됨 -- relay-handshake.test.mjs의
+// "HYK-344 3R" 시험이 저장소 소스를 실제로 스캔해 이를 계약으로 고정한다,
+// 관제실 dispatch-worker.ps1도 배달만 하지 이 CLI를 부르지 않는다는 사실은
+// 그 ps1이 이 저장소 밖에 있어 CI가 못 닿으므로 사람이 확인한 사실로만
+// 남는다). `checkRelayHandshake`를 함수로 import하는 in-process
+// 호출자들(relay-core.mjs 등)은 프로세스가 아니라 반환값을 보므로 이
+// exit code 자체를 볼 수 없다. ⇒ exit 3은 지금 **두 가지 뜻**을 동시에
+// 갖는다: (1) 장차 supervisor 자동 호출 층(HYK-354, 이 라운드 범위 밖)이
+// 읽을 신호다. (2) 지금은 ORCH(사람 역할)가 매 라운드 이 CLI를 손으로
+// 치고 출력을 눈으로 읽는 것이 유일한 소비 경로다. ⛔이건 결함이 아니라
+// "아직 안 만든 층"이다 -- 자동 호출 층을 여기서 급조하지 않는다.
 function exitDistinctlyOnAdmissionCompletionFailure(result) {
   if (!result.ok) return;
   const completionDetail = peekLastAdmissionCompletionDetail();
