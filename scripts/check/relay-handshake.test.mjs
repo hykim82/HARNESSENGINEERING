@@ -1222,6 +1222,57 @@ test("HYK-353: first-observation.mjs가 존재하지만 실제로 실패하면 -
   }
 });
 
+// HYK-353 2R §1 (P1-1, 검토 반려): the real first-observation.mjs sidecar is
+// copied alongside the mutant relay-handshake.mjs (writeMutantCli's default
+// siblings don't include it) so this test exercises the ACTUAL write-failure
+// detection path (recordFirstDoneObservation's own catch -> observeDoneLine's
+// `record` field -> spawnObserveDoneLine's `recordFailed` check), not a
+// stand-in. Making the observation log PATH a directory (appendFileSync
+// throws EISDIR) reproduces 검토자의 정확한 재현: the child process still
+// exits 0 with well-formed JSON, and only the NEW `record.reason` field lets
+// the parent tell "wrote nothing" apart from "wrote successfully".
+const FIRST_OBSERVATION_SRC = execFileSync(
+  "git",
+  ["show", "HEAD:scripts/check/first-observation.mjs"],
+  { encoding: "utf8" },
+);
+
+test("HYK-353 2R: 관측 로그 경로가 디렉터리라서 쓰기 자체가 실패하면 -- 자식이 exit 0으로 JSON을 돌려줘도 exit 3으로 구별해 드러낸다 (P1-1)", () => {
+  const { rootDir, mutantPath } = writeMutantCli(RELAY_HANDSHAKE_SRC);
+  const scriptsCheckDir = join(rootDir, "scripts", "check");
+  writeFileSync(
+    join(scriptsCheckDir, "first-observation.mjs"),
+    FIRST_OBSERVATION_SRC,
+    "utf8",
+  );
+  try {
+    withFixtureDirCli((dir) => {
+      writeValidFixture(dir, "coder", "HYK-353-2R-write-failure-1");
+      // Make the observation log's own path a directory -- appendFileSync
+      // inside recordFirstDoneObservation throws (EISDIR), caught internally
+      // and returned as {recorded:false, reason:"record failed: ..."}.
+      mkdirSync(join(dir, "coder-done-first-observation.jsonl"));
+      const { exit, stdout, stderr } = runMutantCli(mutantPath, ["coder", dir]);
+      assert.equal(
+        exit,
+        3,
+        `an observation-log write failure must exit 3, not the pre-2R silent exit 0\nstdout=${stdout}\nstderr=${stderr}`,
+      );
+      assert.match(
+        stderr,
+        /first-observation recording FAILED even though the child process exited cleanly/,
+      );
+      assert.match(stderr, /record failed:/);
+      assert.ok(
+        existsSync(join(dir, "coder-done-first-observation.jsonl")),
+        "the directory-shaped log path must be left untouched, not silently replaced",
+      );
+    });
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 test("HYK-189 (e) mutation M3: removing non-zero exit propagation on failure -> a blocked handshake wrongly reports success (RED signal; proves exit-code propagation is load-bearing)", () => {
   const target =
     "  if (result.ok) {\n    process.exit(0);\n  } else {\n    console.error(result.reason);\n    process.exit(1);\n  }\n";
