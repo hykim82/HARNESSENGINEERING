@@ -743,6 +743,7 @@ function spawnObserveDoneLine({
   resultContent,
   doneLineRaw,
 }) {
+  lastFirstObservationDetail = null;
   try {
     const scriptPath = join(
       dirname(fileURLToPath(new URL(import.meta.url))),
@@ -755,15 +756,28 @@ function spawnObserveDoneLine({
       resultContent,
       doneLineRaw,
     });
-    const out = execFileSync("node", [scriptPath, harnessDir, payload], {
+    // HYK-353: payload used to ride argv (`[scriptPath, harnessDir,
+    // payload]`) -- a large `resultContent` (the full result file text)
+    // blew past the OS command-line length limit (Windows ENAMETOOLONG),
+    // silently dropping this round's first-observation entry (the round
+    // still completed with exit 0, see spawnMarkObservationConsumed and
+    // exitDistinctlyOnFirstObservationFailure below for how that silence is
+    // now closed). Passing it via stdin (`input`) makes this channel
+    // size-independent -- argv only ever carries the small, fixed
+    // `harnessDir` path now.
+    const out = execFileSync("node", [scriptPath, harnessDir], {
+      input: payload,
       encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"],
+      stdio: ["pipe", "pipe", "pipe"],
     });
+    lastFirstObservationDetail = { attempted: true, ok: true };
     return JSON.parse(out.trim());
   } catch (err) {
+    const detail = err.stderr ?? err.message;
     console.error(
-      `relay-handshake: first-observation spawn skipped/failed (non-fatal, treated as no-observation -- HYK-257-done-stamp-2 §2 범위1): ${err.stderr ?? err.message}`,
+      `relay-handshake: first-observation spawn skipped/failed (non-fatal, treated as no-observation -- HYK-257-done-stamp-2 §2 범위1): ${detail}`,
     );
+    lastFirstObservationDetail = { attempted: true, ok: false, reason: detail };
     return { rewritten: false, error: "spawn failed" };
   }
 }
@@ -791,9 +805,14 @@ function spawnMarkObservationConsumed({ taskId, droppedAt, role, harnessDir }) {
       role,
       action: "markConsumed",
     });
-    const out = execFileSync("node", [scriptPath, harnessDir, payload], {
+    // HYK-353: same stdin transport as spawnObserveDoneLine above (this
+    // payload is always small -- no resultContent -- but kept consistent so
+    // the two spawn call sites share one CLI contract, see first-
+    // observation.mjs's own CLI entry point).
+    const out = execFileSync("node", [scriptPath, harnessDir], {
+      input: payload,
       encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"],
+      stdio: ["pipe", "pipe", "pipe"],
     });
     return JSON.parse(out.trim());
   } catch (err) {
@@ -1427,6 +1446,20 @@ export function peekLastAdmissionCompletionDetail() {
   return lastAdmissionCompletionDetail;
 }
 
+// HYK-353 §3-3: mirrors lastAdmissionCompletionDetail's exact shape/reset
+// discipline above -- a round that completes ok:true but whose
+// first-observation spawn genuinely ATTEMPTED and FAILED (as opposed to
+// never attempted, e.g. no taskId/droppedAtRaw yet) must not look
+// indistinguishable from a clean success to a human/automated caller reading
+// this CLI's exit code. Reset at the top of spawnObserveDoneLine's own call
+// (see that function) so a long-lived in-process caller never sees a PRIOR
+// round's stale detail leak through.
+let lastFirstObservationDetail = null;
+
+export function peekLastFirstObservationDetail() {
+  return lastFirstObservationDetail;
+}
+
 // HYK-312 §1: renamed from `spawnAdmissionCompletion` -- the name
 // `spawnAdmissionCompletion` is now the local single-arg closure defined
 // inside runCompletionSideEffects (captures harnessDir from that scope), so
@@ -1810,6 +1843,36 @@ function exitDistinctlyOnAdmissionCompletionFailure(result) {
   }
 }
 
+// HYK-353 §3-3: same "완료를 시도했으나 실패 -> exit 3" channel as
+// exitDistinctlyOnAdmissionCompletionFailure above, applied to the
+// first-observation spawn (spawnObserveDoneLine) -- a round genuinely
+// finishing (task_id 결속/staleness 통과, `result.ok === true`) while its
+// first-observation record genuinely ATTEMPTED and FAILED (e.g. the
+// ENAMETOOLONG-class transport failure this task closes, or any future
+// spawn failure) must not read as indistinguishable from a clean success.
+// Never attempted (no taskId/droppedAtRaw yet, e.g. a rejected/blocked
+// round that never reaches resolveDoneAt's observation call) stays exit 0,
+// exactly like the admission-completion sibling above. This deliberately
+// does NOT change checkRelayHandshake's own ok/state/reason -- §3-3's own
+// caveat ("라운드의 합격/불합격 신호를 부수적 기록 실패와 뒤섞지 마라"는
+// 원 설계 판단은 유지한다) is read literally: the round's verdict is
+// untouched, only the CLI's exit code gains a second, distinguishable
+// failure channel (mirroring HYK-344 2R's own precedent instead of
+// inventing a new one).
+function exitDistinctlyOnFirstObservationFailure(result) {
+  if (!result.ok) return;
+  const observationDetail = peekLastFirstObservationDetail();
+  if (
+    observationDetail?.attempted === true &&
+    observationDetail?.ok === false
+  ) {
+    console.error(
+      `relay-handshake: round completed but first-observation recording FAILED (${observationDetail.reason ?? "no detail available"}) -- exiting 3 (distinct from 0=full success / 1=round rejected) so an automated caller cannot mistake this for a clean success (HYK-353, mirrors HYK-344 2R's admission-completion channel)`,
+    );
+    process.exit(3);
+  }
+}
+
 const invokedDirectly =
   process.argv[1] &&
   process.argv[1]
@@ -1843,6 +1906,7 @@ if (invokedDirectly) {
   // exit -- it returns normally (no-op) whenever exit 3 does not apply, so
   // the pinned block below is always reached exactly as before.
   exitDistinctlyOnAdmissionCompletionFailure(result);
+  exitDistinctlyOnFirstObservationFailure(result);
   if (result.ok) {
     process.exit(0);
   } else {

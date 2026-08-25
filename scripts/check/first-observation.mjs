@@ -270,10 +270,26 @@ if (
     .endsWith("scripts/check/first-observation.mjs")
 ) {
   const harnessDir = process.argv[2];
-  const payloadJson = process.argv[3];
+  // HYK-353: payload used to arrive as argv[3] -- a large `resultContent`
+  // (the full result file text) blew past the OS command-line length limit
+  // (Windows ENAMETOOLONG), silently dropping this round's first-observation
+  // entry while the caller (relay-handshake.mjs's spawnObserveDoneLine)
+  // treated the spawn failure as best-effort/non-fatal and the round still
+  // completed with exit 0. Reading the payload from stdin instead makes this
+  // channel size-independent -- argv only ever carries the small, fixed
+  // `harnessDir` path now.
+  let payloadJson;
+  try {
+    payloadJson = readFileSync(0, "utf8");
+  } catch (err) {
+    console.error(
+      `first-observation: failed to read payload from stdin: ${err.message}`,
+    );
+    process.exit(1);
+  }
   if (!harnessDir || !payloadJson) {
     console.error(
-      "usage: node first-observation.mjs <harnessDir> <payloadJson={taskId,droppedAt,role,resultContent,doneLineRaw,action?}>",
+      "usage: node first-observation.mjs <harnessDir> <payloadJson={taskId,droppedAt,role,resultContent,doneLineRaw,action?} via stdin>",
     );
     process.exit(1);
   }
