@@ -556,13 +556,47 @@ export function extractRunText(workflowText) {
   return runChunks.join("\n");
 }
 
+// HYK-338: CI's canonical scripts/check step no longer names files or a
+// glob directly -- it delegates to isolated-suite-runner.mjs, which scans
+// its own TEST_DIRS (scripts/check among them). Recognizing that indirection
+// means reading TEST_DIRS out of the runner's OWN source at judge time
+// (single source of truth -- see the runner's own comment) rather than
+// copying the directory list into this file by hand, which would just
+// create a second copy that can drift out of sync the same way the glob
+// check itself drifted (HYK-350 is exactly that "two copies" failure mode).
+const RUNNER_SCRIPT_REL_PATH = "scripts/check/isolated-suite-runner.mjs";
+
+// Extracts the TEST_DIRS string array literal out of isolated-suite-runner.
+// mjs's source text -- `export const TEST_DIRS = ["a", "b", ...]`. Returns
+// null (not []) when the export can't be found or contains no quoted
+// strings, so the caller can tell "parsed, empty" apart from "unparseable"
+// and fail closed on the latter (task §2-2).
+export function parseRunnerTestDirs(sourceText) {
+  if (typeof sourceText !== "string") return null;
+  const m = /export\s+const\s+TEST_DIRS\s*=\s*\[([\s\S]*?)\]/.exec(sourceText);
+  if (!m) return null;
+  const dirs = [...m[1].matchAll(/"([^"]*)"|'([^']*)'/g)].map(
+    (mm) => mm[1] ?? mm[2],
+  );
+  return dirs.length > 0 ? dirs : null;
+}
+
 // CI coverage: every scripts/check/*.test.mjs basename that actually exists
 // on disk (discovered dynamically, not hardcoded, so a brand-new check's
 // test file is caught even before anyone updates the manifest) must be run by
-// CI -- either by a whole-directory glob in a run: step, or referenced
-// literally in one. Only the run: steps count (extractRunText); text in a step
-// name: or a comment executes nothing and is ignored (review-8 defect 1).
-export function checkCiCoverage({ workflowText, testFiles }) {
+// CI -- either by a whole-directory glob in a run: step, referenced
+// literally in one, or (HYK-338) run indirectly through isolated-suite-
+// runner.mjs, whose own TEST_DIRS this function reads to confirm scripts/
+// check is actually among the directories that runner scans. Only the run:
+// steps count (extractRunText); text in a step name: or a comment executes
+// nothing and is ignored (review-8 defect 1).
+export function checkCiCoverage({
+  workflowText,
+  testFiles,
+  runnerSourceText,
+  checkDirRelPath = "scripts/check",
+  runnerScriptRelPath = RUNNER_SCRIPT_REL_PATH,
+}) {
   const runText = extractRunText(workflowText);
   const words = bashWords(runText);
   if (words.some((w) => w.literal === WHOLE_CHECK_DIR_GLOB && w.starUnquoted)) {
@@ -582,6 +616,39 @@ export function checkCiCoverage({ workflowText, testFiles }) {
       status: "ALIVE",
       missing: [],
       reason: `all ${testFiles.length} check test suite(s) referenced in CI run: steps`,
+    };
+  }
+  // Indirect coverage via the runner: a run: step invokes the runner script
+  // itself (not a glob, not per-file names), so the literal fallback above
+  // always reports every file "missing" for this case -- check the runner's
+  // OWN TEST_DIRS before believing that.
+  if (words.some((w) => w.literal === runnerScriptRelPath)) {
+    if (typeof runnerSourceText !== "string") {
+      return {
+        status: "UNJUDGABLE",
+        missing,
+        reason: `CI run: step invokes '${runnerScriptRelPath}' but its source could not be read -- fail-closed, cannot confirm which directories it actually scans`,
+      };
+    }
+    const dirs = parseRunnerTestDirs(runnerSourceText);
+    if (dirs === null) {
+      return {
+        status: "UNJUDGABLE",
+        missing,
+        reason: `could not parse TEST_DIRS out of '${runnerScriptRelPath}' -- fail-closed, cannot confirm which directories it actually scans`,
+      };
+    }
+    if (!dirs.includes(checkDirRelPath)) {
+      return {
+        status: "DRIFT",
+        missing,
+        reason: `'${runnerScriptRelPath}' is invoked by CI but its TEST_DIRS (${JSON.stringify(dirs)}) does not include '${checkDirRelPath}' -- ${missing.length}/${testFiles.length} check test suite(s) not actually run: ${missing.join(", ")}`,
+      };
+    }
+    return {
+      status: "ALIVE",
+      missing: [],
+      reason: `CI runs '${checkDirRelPath}' indirectly via '${runnerScriptRelPath}', whose own TEST_DIRS (single source of truth) includes '${checkDirRelPath}' -- covers all ${testFiles.length} discovered suite(s)`,
     };
   }
   return {
@@ -709,6 +776,22 @@ function judgeInstallTarget(
 // settings-based wiring). Extracted from judgeEntry itself for the same
 // quality-check reason as judgeClaudeSettingsTarget above -- pure
 // refactor, same statuses/evidence this block always produced.
+// Best-effort read of isolated-suite-runner.mjs's source, for
+// checkCiCoverage's runner-indirection branch -- undefined (not a thrown
+// error) when the file is missing or unreadable, so checkCiCoverage's own
+// fail-closed UNJUDGABLE handles the "couldn't confirm" case (§2-2).
+// Extracted from judgeWiring's ci-enforce branch (HYK-160 quality-check:
+// keeps judgeWiring's own complexity under the repo's ESLint ceiling).
+function readRunnerSourceText({ root, readFileFn, existsFn }) {
+  const runnerPath = join(root, RUNNER_SCRIPT_REL_PATH);
+  if (!existsFn(runnerPath)) return undefined;
+  try {
+    return readFileFn(runnerPath);
+  } catch {
+    return undefined;
+  }
+}
+
 function judgeWiring(
   entry,
   {
@@ -729,6 +812,7 @@ function judgeWiring(
       const ci = checkCiCoverage({
         workflowText: readFileFn(scriptPath),
         testFiles,
+        runnerSourceText: readRunnerSourceText({ root, readFileFn, existsFn }),
       });
       statuses.push(ci.status);
       evidence.push(ci.reason);

@@ -36,6 +36,7 @@ import {
   checkHookWiringRegistered,
   EXPECTED_INJECTED_HOOKS,
   checkControlRoomDoc,
+  parseRunnerTestDirs,
 } from "./selfcheck-inventory.mjs";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -2624,4 +2625,138 @@ test("(69) judgeEntry: counterfactual -- fake CONTROL_ROOM live copy synthetical
       assert.equal(summary.DRIFT, 1);
     });
   });
+});
+
+// --- HYK-338: checkCiCoverage recognizes indirect coverage via
+// isolated-suite-runner.mjs (task §2-1..§2-4). The false "133 test suites
+// not wired into CI" DRIFT this task fixes came from checkCiCoverage only
+// ever crediting a directory glob or per-file literal names -- never a
+// `run:` step that just invokes the runner script, which is what
+// enforce.yml actually does since HYK-208 (commit c39ce31). ---
+
+const REAL_RUNNER_SOURCE = `
+// comment
+export const TEST_DIRS = [
+  "scripts/check",
+  "scripts/relay",
+  "scripts/relay/adapters",
+  "scripts/supervisor",
+];
+
+export function collectTestFiles() {}
+`;
+
+test("(70) parseRunnerTestDirs: extracts the TEST_DIRS string array literal", () => {
+  assert.deepEqual(parseRunnerTestDirs(REAL_RUNNER_SOURCE), [
+    "scripts/check",
+    "scripts/relay",
+    "scripts/relay/adapters",
+    "scripts/supervisor",
+  ]);
+});
+
+test("(71) parseRunnerTestDirs: no TEST_DIRS export in source -> null (unparseable, not [])", () => {
+  assert.equal(parseRunnerTestDirs("export const OTHER = [1, 2];"), null);
+});
+
+test("(72) parseRunnerTestDirs: TEST_DIRS export present but empty -> null (unparseable, not [])", () => {
+  assert.equal(parseRunnerTestDirs("export const TEST_DIRS = [];"), null);
+});
+
+test("(73) checkCiCoverage §2-4(1): the real workflow string (runner invocation, no glob/file names) -> ALIVE, runner's TEST_DIRS includes scripts/check", () => {
+  const result = checkCiCoverage({
+    workflowText:
+      "      - name: check test suites\n        run: node scripts/check/isolated-suite-runner.mjs\n",
+    testFiles: ["a.test.mjs", "b.test.mjs"],
+    runnerSourceText: REAL_RUNNER_SOURCE,
+  });
+  assert.equal(result.status, "ALIVE");
+  assert.deepEqual(result.missing, []);
+  assert.match(result.reason, /isolated-suite-runner\.mjs/);
+});
+
+test("(74) checkCiCoverage §2-4(2): the old whole-directory glob form still works unchanged -> ALIVE (no regression from the runner-indirection addition)", () => {
+  const result = checkCiCoverage({
+    workflowText: "run: node --test scripts/check/*.test.mjs\n",
+    testFiles: ["a.test.mjs", "b.test.mjs"],
+    runnerSourceText: REAL_RUNNER_SOURCE,
+  });
+  assert.equal(result.status, "ALIVE");
+  assert.deepEqual(result.missing, []);
+});
+
+test("(75) checkCiCoverage §2-4(3): neither a runner invocation nor a glob nor per-file names -> DRIFT (proves the signal is not dead)", () => {
+  const result = checkCiCoverage({
+    workflowText: "run: echo nothing-to-do\n",
+    testFiles: ["a.test.mjs", "b.test.mjs"],
+    runnerSourceText: REAL_RUNNER_SOURCE,
+  });
+  assert.equal(result.status, "DRIFT");
+  assert.deepEqual(result.missing, ["a.test.mjs", "b.test.mjs"]);
+});
+
+test("(76) checkCiCoverage §2-4(4): runner is invoked but its source could not be read -> UNJUDGABLE, never ALIVE (fail-closed, §2-2)", () => {
+  const result = checkCiCoverage({
+    workflowText: "run: node scripts/check/isolated-suite-runner.mjs\n",
+    testFiles: ["a.test.mjs"],
+    runnerSourceText: undefined,
+  });
+  assert.equal(result.status, "UNJUDGABLE");
+  assert.match(result.reason, /could not be read/);
+});
+
+test("(76b) checkCiCoverage: runner is invoked but its TEST_DIRS export can't be parsed -> UNJUDGABLE, never ALIVE (fail-closed, §2-2)", () => {
+  const result = checkCiCoverage({
+    workflowText: "run: node scripts/check/isolated-suite-runner.mjs\n",
+    testFiles: ["a.test.mjs"],
+    runnerSourceText: "export const NOT_TEST_DIRS = [];",
+  });
+  assert.equal(result.status, "UNJUDGABLE");
+  assert.match(result.reason, /could not parse TEST_DIRS/);
+});
+
+test("(77) checkCiCoverage §2-4(5): runner invoked, but its TEST_DIRS omits scripts/check -> DRIFT naming the missing suites, not credited as wired", () => {
+  const runnerSourceWithoutCheckDir = `
+export const TEST_DIRS = [
+  "scripts/relay",
+  "scripts/supervisor",
+];
+`;
+  const result = checkCiCoverage({
+    workflowText: "run: node scripts/check/isolated-suite-runner.mjs\n",
+    testFiles: ["a.test.mjs", "b.test.mjs"],
+    runnerSourceText: runnerSourceWithoutCheckDir,
+  });
+  assert.equal(result.status, "DRIFT");
+  assert.deepEqual(result.missing, ["a.test.mjs", "b.test.mjs"]);
+  assert.match(result.reason, /does not include 'scripts\/check'/);
+});
+
+test("(78) checkCiCoverage: the runner-indirection path never fires for a workflow that merely mentions the runner path in a step name: (only run: steps count, review-8 defect 1)", () => {
+  const result = checkCiCoverage({
+    workflowText:
+      "      - name: runs scripts/check/isolated-suite-runner.mjs\n        run: echo hi\n",
+    testFiles: ["a.test.mjs"],
+    runnerSourceText: REAL_RUNNER_SOURCE,
+  });
+  assert.equal(result.status, "DRIFT");
+  assert.deepEqual(result.missing, ["a.test.mjs"]);
+});
+
+test("(79) judgeEntry: ci-enforce entry against the real repo's enforce.yml + real isolated-suite-runner.mjs -> ALIVE (end-to-end, real files, no injection)", () => {
+  const root = fileURLToPath(new URL("../..", import.meta.url));
+  const entry = {
+    id: "ci-enforce",
+    script: ".github/workflows/enforce.yml",
+    test: null,
+    claude_only: false,
+    install_targets: [],
+  };
+  const testFiles = discoverCheckTestFiles(join(root, "scripts", "check"));
+  const result = judgeEntry(entry, {
+    repoRoot: root,
+    testFiles,
+  });
+  assert.equal(result.status, "ALIVE");
+  assert.match(result.evidence.join(" "), /isolated-suite-runner\.mjs/);
 });
