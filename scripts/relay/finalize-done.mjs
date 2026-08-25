@@ -51,7 +51,10 @@ import { FOR_LINE_RE_G, isReviewFamilyRole } from "../check/reject-streak.mjs";
 // HYK-353 2R §1 (P1-2): reuse first-observation.mjs's own generation-lookup
 // (active vs tombstoned) instead of re-deriving the same logic here -- same
 // reuse-not-reinvent instruction as the relay-handshake.mjs import above.
-import { findFirstObservation } from "../check/first-observation.mjs";
+import {
+  findFirstObservation,
+  hasCorruptEntries,
+} from "../check/first-observation.mjs";
 
 const DONE_LINE_RE = /^>>>\s*DONE:/im;
 // HYK-325 §2-1 (2회째 교체 금지): once finalizeDone has replaced one
@@ -103,6 +106,14 @@ export const FINALIZE_DONE_REASON = Object.freeze({
   // point) instead of letting checkRelayHandshake's own
   // DONE_REWRITTEN_AFTER_FIRST_OBSERVATION rejection ever see it.
   ACTIVE_OBSERVATION_BLOCKED: "ACTIVE_OBSERVATION_BLOCKED",
+  // HYK-353 3R (책임자 판정 2026-08-25 22:16, 범위 한 줄 한정): the
+  // observation log has at least one line that fails to parse as JSON, so
+  // whether THIS round has an active observation cannot be determined --
+  // "판정 불가"(모름), distinct from ACTIVE_OBSERVATION_BLOCKED's "판정
+  // 가능, 실제로 활성"(있음이 확인됨). Refused for the same reason: a
+  // "모름"이 "없음"으로 조용히 접히면 손상된 흔적이 지워지고 새 DONE이
+  // 찍힌다.
+  OBSERVATION_LOG_UNDECIDABLE: "OBSERVATION_LOG_UNDECIDABLE",
   // HYK-332 §2: the result file's required 'task_id:' cover line (all
   // roles, coder-task.md §1⑴) is missing, ambiguous (2+ standalone
   // matches), or present but not a standalone column-0 line.
@@ -208,6 +219,26 @@ function resolveActiveObservation({ existing, role, harnessDir }) {
   const droppedMatch = taskContent.match(DROPPED_AT_RE);
   if (!droppedMatch) return null;
   const droppedAt = droppedMatch[1].trim();
+  // HYK-353 3R (책임자 판정 2026-08-25 22:16, 범위 한 줄 한정): "판정할 수
+  // 없으면(손상·부분 파손 포함) 재발행을 거부한다" -- readEntries가
+  // 손상된 줄을 조용히 건너뛰기 때문에, 손상된 줄이 정확히 이 라운드의
+  // 관측이었어도 findFirstObservation은 그냥 null(= "관측 없음")을
+  // 돌려준다. 이 라운드에 진짜 관측이 «없는» 경우(정당한 관측 전 첫
+  // finalize)와 관측이 «있었는데 손상돼 못 읽은» 경우를 반드시 갈라야
+  // 한다(§2 요구) -- 후자를 전자와 같이 취급하면 손상된 흔적을 조용히
+  // 지우고 새 DONE을 찍게 된다. 손상 여부는 어느 (taskId, droppedAt)
+  // 소속인지 알 수 없으므로 로그 파일 전체를 훑는다(hasCorruptEntries의
+  // 헤더 참조) -- findFirstObservation 호출보다 먼저 확인해, 손상이
+  // 있으면 그 판정 자체를 "모름"으로 접고 아래 active 판정을 아예
+  // 신뢰하지 않는다.
+  if (hasCorruptEntries(role, harnessDir)) {
+    return {
+      taskId: taskIdResult.id,
+      droppedAt,
+      entry: null,
+      undecidable: true,
+    };
+  }
   const active = findFirstObservation({
     taskId: taskIdResult.id,
     droppedAt,
@@ -258,6 +289,13 @@ function resolveExistingDoneLine({
     role,
     harnessDir,
   });
+  if (activeObservation?.undecidable) {
+    return {
+      ok: false,
+      reasonCode: FINALIZE_DONE_REASON.OBSERVATION_LOG_UNDECIDABLE,
+      reason: `finalize-done refuses to replace a malformed '>>> DONE:' line: the observation log for taskId='${activeObservation.taskId}' droppedAt='${activeObservation.droppedAt}' (first-observation.mjs) contains at least one line that failed to parse -- whether this round has an active observation cannot be determined, and "모름" must not be silently treated as "없음" (${resultPath})`,
+    };
+  }
   if (activeObservation) {
     return {
       ok: false,
