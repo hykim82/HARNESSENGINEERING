@@ -777,7 +777,23 @@ function spawnObserveDoneLine({
     console.error(
       `relay-handshake: first-observation spawn skipped/failed (non-fatal, treated as no-observation -- HYK-257-done-stamp-2 §2 범위1): ${detail}`,
     );
-    lastFirstObservationDetail = { attempted: true, ok: false, reason: detail };
+    // HYK-353 (mirrors spawnAdmissionCompletionProcess's own `stderrText.
+    // includes("admission-completion-adapter: ")` split, same file, right
+    // above): `err.status`/exit code alone cannot tell "first-observation.mjs
+    // actually ran and failed on its own" apart from "the script file itself
+    // is simply absent in this context" (isolated mutation-test fixtures
+    // that clone only a fixed dependency list, see this file's own header
+    // comment on that -- both shapes share Node's generic module-resolution
+    // exit code). first-observation.mjs's own error paths (usage guard,
+    // payload-JSON-not-parseable, the new stdin-read failure) all print a
+    // stable `"first-observation: "`-prefixed line; Node's own "Cannot find
+    // module" text never does. Only the former counts as a genuine attempt.
+    const stderrText = String(err.stderr ?? "");
+    lastFirstObservationDetail = {
+      attempted: stderrText.includes("first-observation: "),
+      ok: false,
+      reason: detail,
+    };
     return { rewritten: false, error: "spawn failed" };
   }
 }
