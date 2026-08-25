@@ -2,6 +2,11 @@ import { readFileSync, existsSync, readdirSync } from "node:fs";
 import { execSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
+// HYK-338 3R: the runner's REAL exported TEST_DIRS, imported statically --
+// see the HYK-338 3R block above checkCiCoverage for why this is
+// side-effect-free (isolated-suite-runner.mjs's own invokedDirectly
+// main-guard) and why it replaced all text-based TEST_DIRS parsing.
+import { TEST_DIRS as RUNNER_TEST_DIRS } from "./isolated-suite-runner.mjs";
 
 // The five judgment values this whole module ever returns for a check's
 // wiring state (design report §2, "판정 5값 고정") -- listed worst-first so
@@ -406,81 +411,6 @@ export function coversViaCheckDirGlob(text) {
   );
 }
 
-// HYK-338 2R (review P1-1): a Bash word matching the runner's path proves
-// only that the TEXT is present -- `echo scripts/check/isolated-suite-
-// runner.mjs` or `test -f ...` mention it without ever executing it. Real
-// coverage requires the path to appear as an ARGUMENT of a command whose
-// own name is `node` -- e.g. `node scripts/check/isolated-suite-runner.mjs`
-// (flags in between are fine; `node --foo ... isolated-suite-runner.mjs`
-// still counts, matching whatever real invocation style the workflow uses).
-// Grouping words into commands (split at unquoted `;`/`&`/`|`/newline,
-// mirroring bashWords' own quote-awareness via consumeWord) is what makes
-// this possible -- bashWords alone has no notion of "this word is this
-// command's first word."
-const COMMAND_SEPARATOR_CHARS = new Set([";", "&", "|", "\n"]);
-
-// Splits `text` into Bash-style *commands* (arrays of words), the same
-// quote-aware tokenization as bashWords but grouped at unquoted control-
-// operator boundaries instead of flattened into one list. Shares
-// consumeWord/WORD_TERMINATORS so quoting and `#` comment handling stay
-// identical to bashWords -- this is a grouping layer on top, not a second
-// tokenizer.
-function bashCommands(text) {
-  const s = text.replace(/\\/g, "/");
-  const commands = [];
-  let current = [];
-  let i = 0;
-  const n = s.length;
-  while (i < n) {
-    const ch = s[i];
-    if (ch === "#") {
-      while (i < n && s[i] !== "\n") i++;
-      continue;
-    }
-    if (COMMAND_SEPARATOR_CHARS.has(ch)) {
-      if (current.length > 0) {
-        commands.push(current);
-        current = [];
-      }
-      i++;
-      continue;
-    }
-    if (WORD_TERMINATORS.has(ch)) {
-      i++;
-      continue;
-    }
-    const { literal, starUnquoted, nextIndex } = consumeWord(s, i);
-    current.push({ literal, starUnquoted });
-    i = nextIndex;
-  }
-  if (current.length > 0) commands.push(current);
-  return commands;
-}
-
-// A command-name word counts as the `node` interpreter if its final path
-// segment is exactly `node`/`node.exe` -- so both `node <script>` and
-// `/usr/bin/node <script>` count, but `nodemon <script>` or a directory
-// literally named `.../node/<script>` do not (basename equality, not a
-// substring/prefix check).
-function isNodeInterpreterToken(literal) {
-  const base = literal.split("/").pop();
-  return base === "node" || base === "node.exe";
-}
-
-// True iff some command actually RUNS the runner script under node -- its
-// first word (the command name) is the node interpreter, and the runner's
-// path appears somewhere later in that same command. A mention in a
-// different command (an `echo`, a `test -f`, a `printf`) never counts, even
-// if the two commands sit right next to each other in the same run: step.
-export function runnerInvokedByNode(commands, runnerScriptRelPath) {
-  return commands.some((cmd) => {
-    if (cmd.length === 0 || !isNodeInterpreterToken(cmd[0].literal)) {
-      return false;
-    }
-    return cmd.slice(1).some((w) => w.literal === runnerScriptRelPath);
-  });
-}
-
 // Decodes a YAML flow scalar (the text after `run:` on one line) into the
 // exact string the runner hands to the shell. YAML quoting is a SEPARATE
 // layer from shell quoting: the runner removes YAML quotes before bash ever
@@ -595,7 +525,14 @@ function decodeQuotedScalar(v, q) {
 // scalar, indentation variants, multi-step, name/comment exclusion). Shell
 // (#) comments inside a run block are left in the raw text here and dropped at
 // tokenization time by bashWords, so a commented-out glob is not counted.
-export function extractRunText(workflowText) {
+// HYK-338 3R: returns each `run:` step's decoded text as its OWN array
+// entry (not pre-joined) -- extractRunText below joins them for the
+// existing glob/literal-fallback callers, but the 3R allow-list check
+// (matchesExactRunnerInvocation) needs each step in isolation: a step's
+// *entire* text must be exactly `node <runnerPath>`, and joining steps
+// together would let one step's trailing content bleed into the next
+// step's leading content, corrupting that exactness check.
+export function extractRunChunks(workflowText) {
   const lines = workflowText.split("\n");
   const runChunks = [];
   for (let i = 0; i < lines.length; i++) {
@@ -628,7 +565,11 @@ export function extractRunText(workflowText) {
       runChunks.push(decodeYamlScalar(rest));
     }
   }
-  return runChunks.join("\n");
+  return runChunks;
+}
+
+export function extractRunText(workflowText) {
+  return extractRunChunks(workflowText).join("\n");
 }
 
 // HYK-338: CI's canonical scripts/check step no longer names files or a
@@ -641,173 +582,112 @@ export function extractRunText(workflowText) {
 // check itself drifted (HYK-350 is exactly that "two copies" failure mode).
 const RUNNER_SCRIPT_REL_PATH = "scripts/check/isolated-suite-runner.mjs";
 
-// HYK-338 2R (review P1-2): the 1R implementation found `export const
-// TEST_DIRS = [...]` with a single regex over the RAW source text, so a
-// decoy declaration sitting inside a `/* ... */` comment or a plain string
-// literal -- BEFORE the real one -- matched first and won. Regex.exec
-// cannot tell "this text is code" from "this text is a comment/string";
-// only actually skipping comments and strings can. stripJsCommentsAndStrings
-// below does exactly that, char-for-char, preserving length (comment/string
-// interior chars -> spaces, newlines kept) so byte offsets into the
-// stripped text still index correctly into the ORIGINAL source -- which
-// matters because the array's own (legitimate) string literals must be
-// read back from the ORIGINAL text, not the stripped one, or every real
-// directory name would come back blank too.
-//
-// LIMITATION (documented, same posture as coversViaCheckDirGlob's LIMITATION
-// block): template-literal (`` ` ``) interpolation (`${...}`) is not
-// modeled -- an interpolated backtick string is treated as one opaque span
-// to its next unescaped backtick. isolated-suite-runner.mjs's real TEST_DIRS
-// uses plain double-quoted strings, so this never applies to the actual
-// file; it only means a hypothetical TEST_DIRS written with backticks
-// containing `${...}` could mis-parse. A plain backtick array (no
-// interpolation) already yields no quoted strings for the same reason it
-// did in 1R -- dirs.length === 0 -- and falls out to `null` below.
-// One lexical span's worth of stripJsCommentsAndStrings' work, each
-// extracted so the dispatcher loop itself stays a single low-branching
-// dispatch (HYK-160 quality-check: keeps stripJsCommentsAndStrings' own
-// complexity under the repo's ESLint ceiling) -- identical char-by-char
-// behavior to the single-function version, just split by construct.
-function consumeLineComment(source, startIndex) {
-  const n = source.length;
-  let i = startIndex;
-  let out = "";
-  while (i < n && source[i] !== "\n") {
-    out += " ";
-    i++;
-  }
-  return { out, nextIndex: i };
-}
+// HYK-338 3R (책임자 판정 «가», 2026-08-25): 1R and 2R both tried to INFER
+// runner coverage from workflow TEXT -- 1R read TEST_DIRS with a regex over
+// the runner's raw source (beaten by a decoy declaration in a comment/
+// string), 2R fixed that but still tried to INFER "does this run: step
+// execute the runner" from token shape (beaten by node -e/--check/other-
+// script argument forms the heuristic never anticipated). Each fix chased a
+// new synthetic bypass because inference from text has no natural stopping
+// point. The reroute (coder-task.md §2, 책임자 조건 확인): stop inferring
+// BOTH questions --
+//   (2-1) TEST_DIRS: import the runner module's REAL exported value
+//         directly. No text is parsed at all, so no decoy text (comment,
+//         string, nested object/array, regex-before-real, template
+//         interpolation, re-export) can ever be mistaken for it -- there is
+//         nothing left to parse. isolated-suite-runner.mjs has a
+//         `invokedDirectly` main-guard (its own line ~146) gating all
+//         process-executing code behind `process.argv[1]` ending in that
+//         file's own path, so a plain `import` from HERE never satisfies
+//         that guard -- static import is side-effect-free and synchronous,
+//         confirmed by ORCH before this round (coder-task.md §2-1).
+//   (2-2) run: step recognition: flip from "infer whether this looks like
+//         an invocation" to an ALLOW LIST -- matchesExactRunnerInvocation
+//         below recognizes exactly one shape (`node <runnerPath>`, the
+//         step's ENTIRE text and nothing else) as ALIVE-eligible. Every
+//         other shape that still mentions the path (a flag, a second
+//         command, npx/pwsh/env prefixes, a relative path, "nodejs"
+//         instead of "node", ...) is real text CI might be running --
+//         UNJUDGABLE, not silently ALIVE and not asserted DRIFT, with the
+//         actual offending text in the reason so a human can extend the
+//         allow list (책임자 조건①, coder-task.md §2-2).
 
-function consumeBlockComment(source, startIndex) {
-  const n = source.length;
-  let i = startIndex + 2;
-  let out = "  ";
-  while (i < n && source.slice(i, i + 2) !== "*/") {
-    out += source[i] === "\n" ? "\n" : " ";
-    i++;
-  }
-  if (i < n) {
-    out += "  ";
-    i += 2;
-  }
-  return { out, nextIndex: i };
-}
+// The one recognized shape: the step's run: text, trimmed, is exactly
+// `node <runnerScriptRelPath>` -- the path may optionally be wrapped in a
+// single matching pair of straight quotes (the same quote char on both
+// sides), nothing else. No flags, no second command, no interpreter other
+// than the literal token `node` (this workflow runs on ubuntu-latest, so
+// `node.exe`/`nodejs` are real-but-different forms, not this one -- see
+// nodejs-interpreter in the test suite). Anything not matching this is a
+// real form this checker does not yet recognize, not an absence.
+const ACCEPTED_RUNNER_INVOCATION_RE = /^node\s+(["']?)(.+)\1$/;
 
-function consumeStringLiteral(source, startIndex) {
-  const quote = source[startIndex];
-  const n = source.length;
-  let i = startIndex + 1;
-  let out = " ";
-  while (i < n && source[i] !== quote) {
-    if (source[i] === "\\" && i + 1 < n) {
-      out += "  ";
-      i += 2;
-      continue;
-    }
-    out += source[i] === "\n" ? "\n" : " ";
-    i++;
-  }
-  if (i < n) {
-    out += " ";
-    i++;
-  }
-  return { out, nextIndex: i };
-}
-
-function stripJsCommentsAndStrings(source) {
-  let out = "";
-  let i = 0;
-  const n = source.length;
-  while (i < n) {
-    const two = source.slice(i, i + 2);
-    const ch = source[i];
-    let span;
-    if (two === "//") span = consumeLineComment(source, i);
-    else if (two === "/*") span = consumeBlockComment(source, i);
-    else if (ch === '"' || ch === "'" || ch === "`")
-      span = consumeStringLiteral(source, i);
-    if (span) {
-      out += span.out;
-      i = span.nextIndex;
-      continue;
-    }
-    out += ch;
-    i++;
-  }
-  return out;
-}
-
-// Finds the `]` matching the `[` at `codeOnly[openIndex]`, counting bracket
-// depth over the COMMENT/STRING-STRIPPED text so a bracket-like character
-// that happens to sit inside a directory string can never desync the count
-// (see stripJsCommentsAndStrings above). Returns -1 if unbalanced.
-function findMatchingBracket(codeOnly, openIndex) {
-  let depth = 0;
-  for (let i = openIndex; i < codeOnly.length; i++) {
-    if (codeOnly[i] === "[") depth++;
-    else if (codeOnly[i] === "]") {
-      depth--;
-      if (depth === 0) return i;
-    }
-  }
-  return -1;
-}
-
-// Extracts the TEST_DIRS string array literal out of isolated-suite-runner.
-// mjs's source text -- `export const TEST_DIRS = ["a", "b", ...]`. Locates
-// the declaration in the comment/string-stripped text (so a decoy inside a
-// comment or string literal can never be found first -- P1-2), then reads
-// the array's actual contents back out of the ORIGINAL source between the
-// same bracket indices. Returns null (not []) when the export can't be
-// found or contains no quoted strings, so the caller can tell "parsed,
-// empty" apart from "unparseable" and fail closed on the latter (§2-2).
-export function parseRunnerTestDirs(sourceText) {
-  if (typeof sourceText !== "string") return null;
-  const codeOnly = stripJsCommentsAndStrings(sourceText);
-  const declRe = /export\s+const\s+TEST_DIRS\s*=\s*\[/;
-  const m = declRe.exec(codeOnly);
-  if (!m) return null;
-  const openBracketIndex = m.index + m[0].length - 1;
-  const closeBracketIndex = findMatchingBracket(codeOnly, openBracketIndex);
-  if (closeBracketIndex === -1) return null;
-  const arrayLiteralText = sourceText.slice(
-    openBracketIndex + 1,
-    closeBracketIndex,
-  );
-  const dirs = [...arrayLiteralText.matchAll(/"([^"]*)"|'([^']*)'/g)].map(
-    (mm) => mm[1] ?? mm[2],
-  );
-  return dirs.length > 0 ? dirs : null;
+export function matchesExactRunnerInvocation(chunkText, runnerScriptRelPath) {
+  const m = ACCEPTED_RUNNER_INVOCATION_RE.exec(chunkText.trim());
+  return m !== null && m[2] === runnerScriptRelPath;
 }
 
 // CI coverage: every scripts/check/*.test.mjs basename that actually exists
 // on disk (discovered dynamically, not hardcoded, so a brand-new check's
 // test file is caught even before anyone updates the manifest) must be run by
 // CI -- either by a whole-directory glob in a run: step, referenced
-// literally in one, or (HYK-338) run indirectly through isolated-suite-
-// runner.mjs, whose own TEST_DIRS this function reads to confirm scripts/
-// check is actually among the directories that runner scans. Only the run:
-// steps count (extractRunText); text in a step name: or a comment executes
-// nothing and is ignored (review-8 defect 1).
+// literally in one, or (HYK-338) run through isolated-suite-runner.mjs in
+// its one recognized invocation shape, credited against that module's own
+// REAL imported TEST_DIRS (see the HYK-338 3R block above -- no text is
+// parsed for either question anymore). Only the run: steps count
+// (extractRunChunks/extractRunText); text in a step name: or a comment
+// executes nothing and is ignored (review-8 defect 1).
+// checkCiCoverage's recognized-invocation branch (§2-2's ALIVE/DRIFT
+// decision once a step's text matches matchesExactRunnerInvocation).
+// Extracted so checkCiCoverage itself stays a single dispatch per branch
+// (HYK-160 quality-check: keeps checkCiCoverage's own complexity under the
+// repo's ESLint ceiling) -- pure refactor, identical statuses/reasons.
+function judgeRecognizedRunnerInvocation({
+  runnerTestDirs,
+  runnerScriptRelPath,
+  checkDirRelPath,
+  missing,
+  testFiles,
+}) {
+  if (!Array.isArray(runnerTestDirs) || runnerTestDirs.length === 0) {
+    return {
+      status: "UNJUDGABLE",
+      missing,
+      reason: `CI runs '${runnerScriptRelPath}' but its imported TEST_DIRS could not be determined (got ${JSON.stringify(runnerTestDirs)}) -- fail-closed, cannot confirm which directories it actually scans`,
+    };
+  }
+  if (!runnerTestDirs.includes(checkDirRelPath)) {
+    return {
+      status: "DRIFT",
+      missing,
+      reason: `'${runnerScriptRelPath}' is invoked by CI but its TEST_DIRS (${JSON.stringify(runnerTestDirs)}) does not include '${checkDirRelPath}' -- ${missing.length}/${testFiles.length} check test suite(s) not actually run: ${missing.join(", ")}`,
+    };
+  }
+  return {
+    status: "ALIVE",
+    missing: [],
+    reason: `CI runs '${checkDirRelPath}' indirectly via '${runnerScriptRelPath}' (run: step is exactly 'node ${runnerScriptRelPath}'), whose own imported TEST_DIRS (real value, no text parsing) includes '${checkDirRelPath}' -- covers all ${testFiles.length} discovered suite(s)`,
+  };
+}
+
 export function checkCiCoverage({
   workflowText,
   testFiles,
-  runnerSourceText,
+  runnerTestDirs = RUNNER_TEST_DIRS,
   checkDirRelPath = "scripts/check",
   runnerScriptRelPath = RUNNER_SCRIPT_REL_PATH,
 }) {
-  // HYK-338 2R (review P1-3): zero discovered test files must never read as
-  // "all covered" -- an empty `testFiles` makes every path below vacuously
-  // true (a glob "covers all 0 suites", the literal fallback's `missing`
-  // list starts empty), which is exactly the failure mode this whole issue
-  // is about: CI reporting green while nothing actually runs. UNJUDGABLE
-  // (not DRIFT) because zero discovered files is ambiguous on its own --
-  // it could be a real (if unusual) empty target directory or a broken
-  // discovery step upstream -- and this function has no way to tell which
-  // from testFiles alone; either way it must not be credited as coverage.
-  // This check comes before every other path (glob/literal/runner) so none
-  // of them can short-circuit past it.
+  // HYK-338 2R (review P1-3, kept in 3R -- 검토자가 통과시킨 부분): zero
+  // discovered test files must never read as "all covered" -- an empty
+  // `testFiles` makes every path below vacuously true (a glob "covers all 0
+  // suites", the literal fallback's `missing` list starts empty), which is
+  // exactly the failure mode this whole issue is about: CI reporting green
+  // while nothing actually runs. UNJUDGABLE (not DRIFT) because zero
+  // discovered files is ambiguous on its own -- it could be a real (if
+  // unusual) empty target directory or a broken discovery step upstream --
+  // and this function has no way to tell which from testFiles alone; either
+  // way it must not be credited as coverage. This check comes before every
+  // other path so none of them can short-circuit past it.
   if (!Array.isArray(testFiles) || testFiles.length === 0) {
     return {
       status: "UNJUDGABLE",
@@ -816,7 +696,8 @@ export function checkCiCoverage({
         'zero check test suite(s) were discovered to judge CI coverage against -- an empty set is not the same as "everything is wired," and this function cannot tell a genuinely empty target from a broken discovery step -- fail-closed',
     };
   }
-  const runText = extractRunText(workflowText);
+  const runChunks = extractRunChunks(workflowText);
+  const runText = runChunks.join("\n");
   const words = bashWords(runText);
   if (words.some((w) => w.literal === WHOLE_CHECK_DIR_GLOB && w.starUnquoted)) {
     return {
@@ -837,40 +718,39 @@ export function checkCiCoverage({
       reason: `all ${testFiles.length} check test suite(s) referenced in CI run: steps`,
     };
   }
-  // Indirect coverage via the runner: a run: step actually EXECUTES the
-  // runner script under node (HYK-338 2R, review P1-1 -- a mention alone,
-  // e.g. `echo <path>`/`printf <path>`/`test -f <path>`, is not execution;
-  // runnerInvokedByNode requires the path to be an argument of a command
-  // whose own name is the node interpreter), so the literal fallback above
-  // always reports every file "missing" for this case -- check the runner's
-  // OWN TEST_DIRS before believing that.
-  if (runnerInvokedByNode(bashCommands(runText), runnerScriptRelPath)) {
-    if (typeof runnerSourceText !== "string") {
-      return {
-        status: "UNJUDGABLE",
-        missing,
-        reason: `CI run: step invokes '${runnerScriptRelPath}' but its source could not be read -- fail-closed, cannot confirm which directories it actually scans`,
-      };
-    }
-    const dirs = parseRunnerTestDirs(runnerSourceText);
-    if (dirs === null) {
-      return {
-        status: "UNJUDGABLE",
-        missing,
-        reason: `could not parse TEST_DIRS out of '${runnerScriptRelPath}' -- fail-closed, cannot confirm which directories it actually scans`,
-      };
-    }
-    if (!dirs.includes(checkDirRelPath)) {
-      return {
-        status: "DRIFT",
-        missing,
-        reason: `'${runnerScriptRelPath}' is invoked by CI but its TEST_DIRS (${JSON.stringify(dirs)}) does not include '${checkDirRelPath}' -- ${missing.length}/${testFiles.length} check test suite(s) not actually run: ${missing.join(", ")}`,
-      };
-    }
+  // HYK-338 3R allow-list (§2-2): a step whose ENTIRE text is exactly
+  // `node <runnerScriptRelPath>` is the one recognized invocation shape.
+  const isRecognizedInvocation = runChunks.some((chunk) =>
+    matchesExactRunnerInvocation(chunk, runnerScriptRelPath),
+  );
+  if (isRecognizedInvocation) {
+    return judgeRecognizedRunnerInvocation({
+      runnerTestDirs,
+      runnerScriptRelPath,
+      checkDirRelPath,
+      missing,
+      testFiles,
+    });
+  }
+  // HYK-338 3R (§2-2, 책임자 조건①): the runner path is mentioned somewhere
+  // in a run: step (bashWords already drops `#` shell comments, so a
+  // commented-out mention does not count here) but not in the one
+  // recognized shape -- this is a REAL, unrecognized form, not an absence.
+  // UNJUDGABLE with the actual offending text, never a silent DRIFT that
+  // would look identical to "the path isn't there at all." A SUBSTRING
+  // check (not exact word equality) on purpose: a relative "./scripts/..."
+  // path or a quoted multi-word argument (`pwsh -c "node <path>"` tokenizes
+  // as ONE word containing the whole quoted string, spaces included -- see
+  // consumeWord) both still genuinely reference the runner path without
+  // that word ever being equal to it.
+  const mentioningChunks = runChunks.filter((chunk) =>
+    bashWords(chunk).some((w) => w.literal.includes(runnerScriptRelPath)),
+  );
+  if (mentioningChunks.length > 0) {
     return {
-      status: "ALIVE",
-      missing: [],
-      reason: `CI runs '${checkDirRelPath}' indirectly via '${runnerScriptRelPath}', whose own TEST_DIRS (single source of truth) includes '${checkDirRelPath}' -- covers all ${testFiles.length} discovered suite(s)`,
+      status: "UNJUDGABLE",
+      missing,
+      reason: `CI's run: step(s) reference '${runnerScriptRelPath}' but not in the one recognized form 'node ${runnerScriptRelPath}' (found: ${JSON.stringify(mentioningChunks.map((c) => c.trim()))}) -- if this really runs the suite, add its shape to selfcheck-inventory.mjs's allow list (matchesExactRunnerInvocation)`,
     };
   }
   return {
@@ -998,22 +878,6 @@ function judgeInstallTarget(
 // settings-based wiring). Extracted from judgeEntry itself for the same
 // quality-check reason as judgeClaudeSettingsTarget above -- pure
 // refactor, same statuses/evidence this block always produced.
-// Best-effort read of isolated-suite-runner.mjs's source, for
-// checkCiCoverage's runner-indirection branch -- undefined (not a thrown
-// error) when the file is missing or unreadable, so checkCiCoverage's own
-// fail-closed UNJUDGABLE handles the "couldn't confirm" case (§2-2).
-// Extracted from judgeWiring's ci-enforce branch (HYK-160 quality-check:
-// keeps judgeWiring's own complexity under the repo's ESLint ceiling).
-function readRunnerSourceText({ root, readFileFn, existsFn }) {
-  const runnerPath = join(root, RUNNER_SCRIPT_REL_PATH);
-  if (!existsFn(runnerPath)) return undefined;
-  try {
-    return readFileFn(runnerPath);
-  } catch {
-    return undefined;
-  }
-}
-
 function judgeWiring(
   entry,
   {
@@ -1031,10 +895,12 @@ function judgeWiring(
 
   if (entry.id === "ci-enforce") {
     if (existsFn(scriptPath) && testFiles) {
+      // HYK-338 3R: checkCiCoverage no longer needs the runner's source
+      // text at all -- its TEST_DIRS default is the real static import
+      // (RUNNER_TEST_DIRS), not a file read.
       const ci = checkCiCoverage({
         workflowText: readFileFn(scriptPath),
         testFiles,
-        runnerSourceText: readRunnerSourceText({ root, readFileFn, existsFn }),
       });
       statuses.push(ci.status);
       evidence.push(ci.reason);

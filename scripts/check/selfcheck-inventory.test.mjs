@@ -36,9 +36,10 @@ import {
   checkHookWiringRegistered,
   EXPECTED_INJECTED_HOOKS,
   checkControlRoomDoc,
-  parseRunnerTestDirs,
-  runnerInvokedByNode,
+  extractRunChunks,
+  matchesExactRunnerInvocation,
 } from "./selfcheck-inventory.mjs";
+import * as selfcheckInventoryModule from "./selfcheck-inventory.mjs";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
@@ -2628,123 +2629,329 @@ test("(69) judgeEntry: counterfactual -- fake CONTROL_ROOM live copy synthetical
   });
 });
 
-// --- HYK-338: checkCiCoverage recognizes indirect coverage via
-// isolated-suite-runner.mjs (task §2-1..§2-4). The false "133 test suites
-// not wired into CI" DRIFT this task fixes came from checkCiCoverage only
-// ever crediting a directory glob or per-file literal names -- never a
-// `run:` step that just invokes the runner script, which is what
-// enforce.yml actually does since HYK-208 (commit c39ce31). ---
+// ============================================================================
+// HYK-338 3R (책임자 판정 «가», 2026-08-25): 1R and 2R both tried to INFER
+// coverage from workflow/runner-source TEXT and lost a new synthetic bypass
+// every round (echo/printf/test-f mentions -> node-argument forms; regex
+// decoys before the real TEST_DIRS -> decoys INSIDE the real array's own
+// nested values). The reroute: (2-1) stop parsing TEST_DIRS text at all --
+// import the runner module's REAL exported value; (2-2) flip run: step
+// recognition from inference to an ALLOW LIST -- only `node <runnerPath>`
+// as a step's ENTIRE text counts, everything else that still mentions the
+// path is UNJUDGABLE (real form, not yet recognized), never a silent
+// ALIVE and never a silent DRIFT that looks like "the path isn't there."
+//
+// Every fixture below is named after the review-r2-verbatim.md JSON output
+// it reproduces (task §3: "그 이름을 그대로 시험 이름으로 써서"), except
+// where noted (the P1-2 decoy-list names are retired -- see the "list
+// forgery is moot" section, since there is no longer any text to forge).
+// ============================================================================
 
-const REAL_RUNNER_SOURCE = `
-// comment
-export const TEST_DIRS = [
-  "scripts/check",
-  "scripts/relay",
-  "scripts/relay/adapters",
-  "scripts/supervisor",
-];
+const RUNNER_PATH = "scripts/check/isolated-suite-runner.mjs";
+const FIXTURE_DIRS = ["scripts/check", "scripts/relay"];
 
-export function collectTestFiles() {}
-`;
+function run(workflowText, opts = {}) {
+  return checkCiCoverage({
+    workflowText,
+    testFiles: ["a.test.mjs"],
+    runnerTestDirs: FIXTURE_DIRS,
+    ...opts,
+  });
+}
 
-test("(70) parseRunnerTestDirs: extracts the TEST_DIRS string array literal", () => {
-  assert.deepEqual(parseRunnerTestDirs(REAL_RUNNER_SOURCE), [
-    "scripts/check",
-    "scripts/relay",
-    "scripts/relay/adapters",
-    "scripts/supervisor",
-  ]);
+// --- (105) matchesExactRunnerInvocation: the allow-list's one recognized shape ---
+
+test("(105) matchesExactRunnerInvocation: bare 'node <path>' matches", () => {
+  assert.equal(
+    matchesExactRunnerInvocation(`node ${RUNNER_PATH}`, RUNNER_PATH),
+    true,
+  );
 });
 
-test("(71) parseRunnerTestDirs: no TEST_DIRS export in source -> null (unparseable, not [])", () => {
-  assert.equal(parseRunnerTestDirs("export const OTHER = [1, 2];"), null);
+test("(105b) matchesExactRunnerInvocation: double- or single-quoted path still matches (documented spec: quotes around the PATH only are accepted)", () => {
+  assert.equal(
+    matchesExactRunnerInvocation(`node "${RUNNER_PATH}"`, RUNNER_PATH),
+    true,
+  );
+  assert.equal(
+    matchesExactRunnerInvocation(`node '${RUNNER_PATH}'`, RUNNER_PATH),
+    true,
+  );
 });
 
-test("(72) parseRunnerTestDirs: TEST_DIRS export present but empty -> null (unparseable, not [])", () => {
-  assert.equal(parseRunnerTestDirs("export const TEST_DIRS = [];"), null);
+test("(105c) matchesExactRunnerInvocation: surrounding whitespace on the chunk is trimmed away, not part of the spec violation", () => {
+  assert.equal(
+    matchesExactRunnerInvocation(`  node ${RUNNER_PATH}  `, RUNNER_PATH),
+    true,
+  );
 });
 
-test("(73) checkCiCoverage §2-4(1): the real workflow string (runner invocation, no glob/file names) -> ALIVE, runner's TEST_DIRS includes scripts/check", () => {
+test("(105d) matchesExactRunnerInvocation: any extra token (flag, second command, prefix) breaks the match", () => {
+  assert.equal(
+    matchesExactRunnerInvocation(`node --check ${RUNNER_PATH}`, RUNNER_PATH),
+    false,
+  );
+  assert.equal(
+    matchesExactRunnerInvocation(`node ${RUNNER_PATH} --check`, RUNNER_PATH),
+    false,
+  );
+  assert.equal(
+    matchesExactRunnerInvocation(`npx node ${RUNNER_PATH}`, RUNNER_PATH),
+    false,
+  );
+  assert.equal(
+    matchesExactRunnerInvocation(`echo hi && node ${RUNNER_PATH}`, RUNNER_PATH),
+    false,
+  );
+});
+
+test("(105e) matchesExactRunnerInvocation: a different interpreter token ('nodejs') does not match ('정확히 node' -- not a substring/prefix check)", () => {
+  assert.equal(
+    matchesExactRunnerInvocation(`nodejs ${RUNNER_PATH}`, RUNNER_PATH),
+    false,
+  );
+});
+
+test("(105f) matchesExactRunnerInvocation: a relative './' path does not match the bare constant (exact string equality, not a suffix check)", () => {
+  assert.equal(
+    matchesExactRunnerInvocation(`node ./${RUNNER_PATH}`, RUNNER_PATH),
+    false,
+  );
+});
+
+// --- (106) extractRunChunks: per-step chunks (not pre-joined) ---
+
+test("(106) extractRunChunks: two run: steps come back as two separate array entries, each step's own text isolated", () => {
+  const workflowText = [
+    "      - name: a",
+    "        run: echo hi",
+    "      - name: b",
+    `        run: node ${RUNNER_PATH}`,
+  ].join("\n");
+  const chunks = extractRunChunks(workflowText);
+  assert.deepEqual(chunks, ["echo hi", `node ${RUNNER_PATH}`]);
+});
+
+test("(106b) extractRunText: still the chunks joined with a newline (regression -- existing callers/tests of extractRunText are unaffected by the 3R split)", () => {
+  const workflowText = "run: echo a\nrun: echo b\n";
+  assert.equal(extractRunText(workflowText), "echo a\necho b");
+});
+
+// --- §2-1: TEST_DIRS is a real import now, not parsed text -- no more
+// text-parsing surface exists for anything to forge. ---
+
+test("(107) no text-parsing surface: parseRunnerTestDirs/stripJsCommentsAndStrings are no longer exported at all (HYK-338 3R §2-1 -- there is nothing left for a comment/string/nested-value decoy to fool, because nothing reads runner SOURCE TEXT anymore)", () => {
+  assert.equal(selfcheckInventoryModule.parseRunnerTestDirs, undefined);
+  assert.equal(selfcheckInventoryModule.stripJsCommentsAndStrings, undefined);
+});
+
+test("(108) checkCiCoverage's TEST_DIRS input is a plain array (runnerTestDirs), not a source-text parameter -- a caller that still passes 'runnerSourceText' (the 1R/2R shape) is silently ignored, proving there is no parsing code path left to feed", () => {
   const result = checkCiCoverage({
-    workflowText:
-      "      - name: check test suites\n        run: node scripts/check/isolated-suite-runner.mjs\n",
-    testFiles: ["a.test.mjs", "b.test.mjs"],
-    runnerSourceText: REAL_RUNNER_SOURCE,
+    workflowText: `run: node ${RUNNER_PATH}\n`,
+    testFiles: ["a.test.mjs"],
+    runnerTestDirs: FIXTURE_DIRS,
+    // 1R/2R shape -- must have zero effect now:
+    runnerSourceText: '/* export const TEST_DIRS = ["scripts/relay-only"]; */',
   });
   assert.equal(result.status, "ALIVE");
-  assert.deepEqual(result.missing, []);
-  assert.match(result.reason, /isolated-suite-runner\.mjs/);
 });
 
-test("(74) checkCiCoverage §2-4(2): the old whole-directory glob form still works unchanged -> ALIVE (no regression from the runner-indirection addition)", () => {
-  const result = checkCiCoverage({
+// list-forgery names retired: nested_object_fake / nested_array_fake /
+// comment_fake / regex_before_real / old_export / local_only / reexport
+// (review-r2-verbatim.md P1-2) all attacked TEXT PARSING of the runner's
+// source -- decoy declarations in comments, strings, or nested object/array
+// values that a regex-based extractor could mistake for the real TEST_DIRS
+// array. §2-1 deletes that extractor outright (test 107), so there is no
+// text for any of these shapes to exist IN -- checkCiCoverage's only TEST_DIRS
+// input is the plain `runnerTestDirs` array (test 108), which is either the
+// real static import or a test's direct array injection. This is proven
+// structurally (no parsing function exists), not by re-running the old
+// decoy fixtures against a function that no longer exists.
+
+// --- Required table (task §3): every review-r2-verbatim.md JSON output name,
+// reproduced against the 3R implementation. Each case's "내가 돌린 명령 +
+// 출력 원문" is the literal `run(...)` call plus its printed JSON below;
+// the assertions ARE the check that they match. ---
+
+const REQUIRED_TABLE = [
+  // --- ALIVE ---
+  {
+    name: "real-node",
+    workflowText: `run: node ${RUNNER_PATH}\n`,
+    expect: "ALIVE",
+  },
+  {
+    name: "old-glob",
     workflowText: "run: node --test scripts/check/*.test.mjs\n",
-    testFiles: ["a.test.mjs", "b.test.mjs"],
-    runnerSourceText: REAL_RUNNER_SOURCE,
-  });
-  assert.equal(result.status, "ALIVE");
-  assert.deepEqual(result.missing, []);
-});
-
-test("(75) checkCiCoverage §2-4(3): neither a runner invocation nor a glob nor per-file names -> DRIFT (proves the signal is not dead)", () => {
-  const result = checkCiCoverage({
-    workflowText: "run: echo nothing-to-do\n",
-    testFiles: ["a.test.mjs", "b.test.mjs"],
-    runnerSourceText: REAL_RUNNER_SOURCE,
-  });
-  assert.equal(result.status, "DRIFT");
-  assert.deepEqual(result.missing, ["a.test.mjs", "b.test.mjs"]);
-});
-
-test("(76) checkCiCoverage §2-4(4): runner is invoked but its source could not be read -> UNJUDGABLE, never ALIVE (fail-closed, §2-2)", () => {
-  const result = checkCiCoverage({
-    workflowText: "run: node scripts/check/isolated-suite-runner.mjs\n",
-    testFiles: ["a.test.mjs"],
-    runnerSourceText: undefined,
-  });
-  assert.equal(result.status, "UNJUDGABLE");
-  assert.match(result.reason, /could not be read/);
-});
-
-test("(76b) checkCiCoverage: runner is invoked but its TEST_DIRS export can't be parsed -> UNJUDGABLE, never ALIVE (fail-closed, §2-2)", () => {
-  const result = checkCiCoverage({
-    workflowText: "run: node scripts/check/isolated-suite-runner.mjs\n",
-    testFiles: ["a.test.mjs"],
-    runnerSourceText: "export const NOT_TEST_DIRS = [];",
-  });
-  assert.equal(result.status, "UNJUDGABLE");
-  assert.match(result.reason, /could not parse TEST_DIRS/);
-});
-
-test("(77) checkCiCoverage §2-4(5): runner invoked, but its TEST_DIRS omits scripts/check -> DRIFT naming the missing suites, not credited as wired", () => {
-  const runnerSourceWithoutCheckDir = `
-export const TEST_DIRS = [
-  "scripts/relay",
-  "scripts/supervisor",
+    expect: "ALIVE",
+  },
+  {
+    name: "literal-filenames",
+    workflowText: "run: node --test scripts/check/a.test.mjs\n",
+    expect: "ALIVE",
+  },
+  {
+    name: "quoted-path-accepted",
+    workflowText: `run: node "${RUNNER_PATH}"\n`,
+    expect: "ALIVE",
+  },
+  // --- UNJUDGABLE (runner path present, not the one recognized form) ---
+  {
+    name: "node-e-with-path-arg",
+    workflowText: `run: node -e "0" ${RUNNER_PATH}\n`,
+    expect: "UNJUDGABLE",
+  },
+  {
+    name: "node-other-script-with-path-arg",
+    workflowText: `run: node other.mjs --arg ${RUNNER_PATH}\n`,
+    expect: "UNJUDGABLE",
+  },
+  {
+    name: "node-check-runner",
+    workflowText: `run: node --check ${RUNNER_PATH}\n`,
+    expect: "UNJUDGABLE",
+  },
+  {
+    name: "node-help-runner",
+    workflowText: `run: node --help ${RUNNER_PATH}\n`,
+    expect: "UNJUDGABLE",
+  },
+  {
+    name: "second-command-node",
+    workflowText: `run: echo hi && node ${RUNNER_PATH}\n`,
+    expect: "UNJUDGABLE",
+  },
+  {
+    name: "second-line-node",
+    workflowText: [
+      "      - run: |",
+      "          echo hi",
+      `          node ${RUNNER_PATH}`,
+    ].join("\n"),
+    expect: "UNJUDGABLE",
+  },
+  {
+    name: "npx-node",
+    workflowText: `run: npx node ${RUNNER_PATH}\n`,
+    expect: "UNJUDGABLE",
+  },
+  {
+    name: "pwsh-node",
+    workflowText: `run: pwsh -c "node ${RUNNER_PATH}"\n`,
+    expect: "UNJUDGABLE",
+  },
+  {
+    name: "env-prefix",
+    workflowText: `run: CI=1 node ${RUNNER_PATH}\n`,
+    expect: "UNJUDGABLE",
+  },
+  {
+    name: "relative-runner-path",
+    workflowText: `run: node ./${RUNNER_PATH}\n`,
+    expect: "UNJUDGABLE",
+  },
+  {
+    name: "nodejs-interpreter",
+    workflowText: `run: nodejs ${RUNNER_PATH}\n`,
+    expect: "UNJUDGABLE",
+  },
+  {
+    name: "pipeline-other-node",
+    workflowText: `run: node other.mjs | node ${RUNNER_PATH}\n`,
+    expect: "UNJUDGABLE",
+  },
+  {
+    // task §3's explicit "you decide DRIFT or UNJUDGABLE, either satisfies
+    // 'not ALIVE'" case -- decided UNJUDGABLE here: the path genuinely
+    // appears in the run: text (echo would print it), so asserting DRIFT
+    // ("definitely not wired") would overclaim what a mention-only line
+    // actually proves; UNJUDGABLE + the offending text is the honest call.
+    name: "run-echo-mention",
+    workflowText: `run: echo ${RUNNER_PATH}\n`,
+    expect: "UNJUDGABLE",
+  },
+  // --- DRIFT (runner path not present at all) ---
+  {
+    name: "node-version-then-echo",
+    workflowText: "run: node --version && echo done\n",
+    expect: "DRIFT",
+  },
+  {
+    name: "name-only",
+    workflowText: `      - name: mentions ${RUNNER_PATH}\n        run: echo hi\n`,
+    expect: "DRIFT",
+  },
+  {
+    name: "run-comment-mention",
+    workflowText: `run: # ${RUNNER_PATH}\n      echo hi\n`,
+    expect: "DRIFT",
+  },
+  // --- P1-3 (kept from 2R, still safe) ---
+  {
+    name: "zero-tests-noop",
+    workflowText: "run: echo nothing\n",
+    testFiles: [],
+    expect: "UNJUDGABLE",
+  },
+  {
+    name: "zero-tests-runner-echo",
+    workflowText: `run: node ${RUNNER_PATH}\n`,
+    testFiles: [],
+    expect: "UNJUDGABLE",
+  },
+  // --- TEST_DIRS-value edge cases (renamed from the retired text-parsing
+  // names -- same fail-closed contract, now driven by direct value
+  // injection instead of a source-text read failure). Note: `undefined` is
+  // deliberately NOT one of these cases -- checkCiCoverage's own default
+  // parameter (`runnerTestDirs = RUNNER_TEST_DIRS`) makes `undefined`
+  // indistinguishable from "omitted", which resolves to the real import
+  // (test 111 covers that path); `null`/`[]` are what actually exercise the
+  // fail-closed branch, since default parameters only trigger on
+  // `undefined`, never on any other falsy/empty value. ---
+  {
+    name: "runner-test-dirs-empty-array",
+    workflowText: `run: node ${RUNNER_PATH}\n`,
+    runnerTestDirs: [],
+    expect: "UNJUDGABLE",
+  },
+  {
+    name: "runner-test-dirs-not-an-array",
+    workflowText: `run: node ${RUNNER_PATH}\n`,
+    runnerTestDirs: null,
+    expect: "UNJUDGABLE",
+  },
+  {
+    name: "similar-checkx",
+    workflowText: `run: node ${RUNNER_PATH}\n`,
+    runnerTestDirs: ["scripts/checkx"],
+    expect: "DRIFT",
+  },
 ];
-`;
-  const result = checkCiCoverage({
-    workflowText: "run: node scripts/check/isolated-suite-runner.mjs\n",
-    testFiles: ["a.test.mjs", "b.test.mjs"],
-    runnerSourceText: runnerSourceWithoutCheckDir,
+
+for (const c of REQUIRED_TABLE) {
+  test(`(109-table) checkCiCoverage['${c.name}'] -> ${c.expect}`, () => {
+    const result = run(c.workflowText, {
+      ...(c.testFiles !== undefined ? { testFiles: c.testFiles } : {}),
+      ...(c.runnerTestDirs !== undefined || "runnerTestDirs" in c
+        ? { runnerTestDirs: c.runnerTestDirs }
+        : {}),
+    });
+    console.log(JSON.stringify({ name: c.name, ...result }));
+    assert.equal(
+      result.status,
+      c.expect,
+      `'${c.name}': expected ${c.expect}, got ${result.status} (reason: ${result.reason})`,
+    );
   });
-  assert.equal(result.status, "DRIFT");
-  assert.deepEqual(result.missing, ["a.test.mjs", "b.test.mjs"]);
-  assert.match(result.reason, /does not include 'scripts\/check'/);
+}
+
+test("(110) UNJUDGABLE reason names the actual offending text (책임자 조건①: never a silent 'unrecognized', always actionable)", () => {
+  const result = run(`run: node --check ${RUNNER_PATH}\n`);
+  assert.match(result.reason, /node --check/);
+  assert.match(result.reason, /allow list/);
 });
 
-test("(78) checkCiCoverage: the runner-indirection path never fires for a workflow that merely mentions the runner path in a step name: (only run: steps count, review-8 defect 1)", () => {
-  const result = checkCiCoverage({
-    workflowText:
-      "      - name: runs scripts/check/isolated-suite-runner.mjs\n        run: echo hi\n",
-    testFiles: ["a.test.mjs"],
-    runnerSourceText: REAL_RUNNER_SOURCE,
-  });
-  assert.equal(result.status, "DRIFT");
-  assert.deepEqual(result.missing, ["a.test.mjs"]);
-});
-
-test("(79) judgeEntry: ci-enforce entry against the real repo's enforce.yml + real isolated-suite-runner.mjs -> ALIVE (end-to-end, real files, no injection)", () => {
+test("(111) judgeEntry: ci-enforce entry against the real repo's enforce.yml + real isolated-suite-runner.mjs, real import, no injection at all -> ALIVE (조건②)", () => {
   const root = fileURLToPath(new URL("../..", import.meta.url));
   const entry = {
     id: "ci-enforce",
@@ -2754,271 +2961,16 @@ test("(79) judgeEntry: ci-enforce entry against the real repo's enforce.yml + re
     install_targets: [],
   };
   const testFiles = discoverCheckTestFiles(join(root, "scripts", "check"));
-  const result = judgeEntry(entry, {
-    repoRoot: root,
-    testFiles,
-  });
+  const result = judgeEntry(entry, { repoRoot: root, testFiles });
   assert.equal(result.status, "ALIVE");
-  assert.match(result.evidence.join(" "), /isolated-suite-runner\.mjs/);
-});
-
-// --- HYK-338 2R: review-1 rejected 1R for three synthesized bypasses (P1-1
-// mention-without-execution, P1-2 forged TEST_DIRS in a comment/string,
-// P1-3 zero discovered files -> vacuous ALIVE). These tests reproduce the
-// review's exact synthetic inputs against the 2R fix, plus the six-item
-// regression list task §2 demands. ---
-
-const RUNNER_SCRIPT_REL_PATH_FOR_TESTS =
-  "scripts/check/isolated-suite-runner.mjs";
-
-test("(80) runnerInvokedByNode: 'node <path>' is an invocation -> true", () => {
-  assert.equal(
-    runnerInvokedByNode(
-      [[{ literal: "node" }, { literal: RUNNER_SCRIPT_REL_PATH_FOR_TESTS }]],
-      RUNNER_SCRIPT_REL_PATH_FOR_TESTS,
-    ),
-    true,
+  assert.match(
+    result.evidence.join(" "),
+    new RegExp(RUNNER_PATH.replace(/\//g, "\\/")),
   );
 });
 
-test("(81) runnerInvokedByNode: 'echo <path>' is a mention, not an invocation -> false (review P1-1 repro)", () => {
-  assert.equal(
-    runnerInvokedByNode(
-      [[{ literal: "echo" }, { literal: RUNNER_SCRIPT_REL_PATH_FOR_TESTS }]],
-      RUNNER_SCRIPT_REL_PATH_FOR_TESTS,
-    ),
-    false,
-  );
-});
-
-test("(82) runnerInvokedByNode: flags between node and the path still count ('node --foo <path>' -> true)", () => {
-  assert.equal(
-    runnerInvokedByNode(
-      [
-        [
-          { literal: "node" },
-          { literal: "--foo" },
-          { literal: RUNNER_SCRIPT_REL_PATH_FOR_TESTS },
-        ],
-      ],
-      RUNNER_SCRIPT_REL_PATH_FOR_TESTS,
-    ),
-    true,
-  );
-});
-
-test("(83) runnerInvokedByNode: the path in a DIFFERENT command from the node one never counts, even adjacent (mixing an echo command with a node command)", () => {
-  assert.equal(
-    runnerInvokedByNode(
-      [
-        [{ literal: "echo" }, { literal: RUNNER_SCRIPT_REL_PATH_FOR_TESTS }],
-        [{ literal: "node" }, { literal: "unrelated.mjs" }],
-      ],
-      RUNNER_SCRIPT_REL_PATH_FOR_TESTS,
-    ),
-    false,
-  );
-});
-
-test("(84) checkCiCoverage P1-1 repro: 'run: echo <runner path>' -> NOT ALIVE (mention without execution)", () => {
-  const result = checkCiCoverage({
-    workflowText: "run: echo scripts/check/isolated-suite-runner.mjs\n",
-    testFiles: ["a.test.mjs"],
-    runnerSourceText:
-      'export const TEST_DIRS = ["scripts/check", "scripts/relay"];',
-  });
-  assert.notEqual(result.status, "ALIVE");
-  assert.equal(result.status, "DRIFT");
-});
-
-test("(85) checkCiCoverage P1-1 repro: 'run: printf <runner path>' -> NOT ALIVE", () => {
-  const result = checkCiCoverage({
-    workflowText: "run: printf scripts/check/isolated-suite-runner.mjs\n",
-    testFiles: ["a.test.mjs"],
-    runnerSourceText:
-      'export const TEST_DIRS = ["scripts/check", "scripts/relay"];',
-  });
-  assert.notEqual(result.status, "ALIVE");
-  assert.equal(result.status, "DRIFT");
-});
-
-test("(86) checkCiCoverage P1-1 repro: 'run: test -f <runner path>' -> NOT ALIVE", () => {
-  const result = checkCiCoverage({
-    workflowText: "run: test -f scripts/check/isolated-suite-runner.mjs\n",
-    testFiles: ["a.test.mjs"],
-    runnerSourceText:
-      'export const TEST_DIRS = ["scripts/check", "scripts/relay"];',
-  });
-  assert.notEqual(result.status, "ALIVE");
-  assert.equal(result.status, "DRIFT");
-});
-
-const P1_2_COMMENT_FORGED_SOURCE = `/* export const TEST_DIRS = ["scripts/check"]; */
-export const TEST_DIRS = ["scripts/relay"];
-`;
-
-const P1_2_STRING_FORGED_SOURCE = `const decoy = "export const TEST_DIRS = [\\"scripts/check\\"];";
-export const TEST_DIRS = ["scripts/relay"];
-`;
-
-test("(87) parseRunnerTestDirs P1-2 repro: a decoy TEST_DIRS inside a /* */ comment does not win -- the real (later) declaration is read", () => {
-  assert.deepEqual(parseRunnerTestDirs(P1_2_COMMENT_FORGED_SOURCE), [
-    "scripts/relay",
-  ]);
-});
-
-test("(88) parseRunnerTestDirs P1-2 repro: a decoy TEST_DIRS inside a string literal does not win -- the real (later) declaration is read", () => {
-  assert.deepEqual(parseRunnerTestDirs(P1_2_STRING_FORGED_SOURCE), [
-    "scripts/relay",
-  ]);
-});
-
-test("(89) checkCiCoverage P1-2 repro: comment-forged decoy -> NOT ALIVE (real TEST_DIRS lacks scripts/check)", () => {
-  const result = checkCiCoverage({
-    workflowText: "run: node scripts/check/isolated-suite-runner.mjs\n",
-    testFiles: ["a.test.mjs"],
-    runnerSourceText: P1_2_COMMENT_FORGED_SOURCE,
-  });
-  assert.notEqual(result.status, "ALIVE");
-  assert.equal(result.status, "DRIFT");
-  assert.match(result.reason, /does not include 'scripts\/check'/);
-});
-
-test("(90) checkCiCoverage P1-2 repro: string-forged decoy -> NOT ALIVE (real TEST_DIRS lacks scripts/check)", () => {
-  const result = checkCiCoverage({
-    workflowText: "run: node scripts/check/isolated-suite-runner.mjs\n",
-    testFiles: ["a.test.mjs"],
-    runnerSourceText: P1_2_STRING_FORGED_SOURCE,
-  });
-  assert.notEqual(result.status, "ALIVE");
-  assert.equal(result.status, "DRIFT");
-  assert.match(result.reason, /does not include 'scripts\/check'/);
-});
-
-test("(91) checkCiCoverage P1-3 repro: zero discovered test files with a no-op workflow -> NOT ALIVE (UNJUDGABLE)", () => {
-  const result = checkCiCoverage({
-    workflowText: "run: echo nothing\n",
-    testFiles: [],
-  });
-  assert.notEqual(result.status, "ALIVE");
-  assert.equal(result.status, "UNJUDGABLE");
-});
-
-test("(92) checkCiCoverage P1-3 repro: zero discovered test files even when the run: step mentions the runner -> NOT ALIVE (UNJUDGABLE)", () => {
-  const result = checkCiCoverage({
-    workflowText: "run: node scripts/check/isolated-suite-runner.mjs\n",
-    testFiles: [],
-    runnerSourceText: REAL_RUNNER_SOURCE,
-  });
-  assert.notEqual(result.status, "ALIVE");
-  assert.equal(result.status, "UNJUDGABLE");
-});
-
-test("(93) checkCiCoverage P1-3: zero discovered test files overrides even the whole-directory glob path -- the glob's own vacuous-true is exactly the failure mode this closes", () => {
-  const result = checkCiCoverage({
-    workflowText: "run: node --test scripts/check/*.test.mjs\n",
-    testFiles: [],
-  });
-  assert.notEqual(result.status, "ALIVE");
-  assert.equal(result.status, "UNJUDGABLE");
-});
-
-test("(94) checkCiCoverage P1-3: zero discovered test files overrides even the per-file literal path", () => {
-  const result = checkCiCoverage({
-    workflowText: "run: node --test a.test.mjs b.test.mjs\n",
-    testFiles: [],
-  });
-  assert.notEqual(result.status, "ALIVE");
-  assert.equal(result.status, "UNJUDGABLE");
-});
-
-// --- task §2 item 6: the six-way regression matrix, fixed in one place ---
-
-test("(95) regression: the real workflow form 'run: node <runner path>' -> ALIVE", () => {
-  const result = checkCiCoverage({
-    workflowText: "run: node scripts/check/isolated-suite-runner.mjs\n",
-    testFiles: ["a.test.mjs"],
-    runnerSourceText: REAL_RUNNER_SOURCE,
-  });
-  assert.equal(result.status, "ALIVE");
-});
-
-test("(96) regression: the old whole-directory glob -> ALIVE", () => {
-  const result = checkCiCoverage({
-    workflowText: "run: node --test scripts/check/*.test.mjs\n",
-    testFiles: ["a.test.mjs", "b.test.mjs"],
-  });
-  assert.equal(result.status, "ALIVE");
-});
-
-test("(97) regression: per-file literal names -> ALIVE", () => {
-  const result = checkCiCoverage({
-    workflowText:
-      "run: node --test scripts/check/a.test.mjs scripts/check/b.test.mjs\n",
-    testFiles: ["a.test.mjs", "b.test.mjs"],
-  });
-  assert.equal(result.status, "ALIVE");
-});
-
-test("(98) regression: a similarly-named directory 'scripts/checkx' does not count as scripts/check -> DRIFT", () => {
-  const result = checkCiCoverage({
-    workflowText: "run: node scripts/check/isolated-suite-runner.mjs\n",
-    testFiles: ["a.test.mjs"],
-    runnerSourceText: 'export const TEST_DIRS = ["scripts/checkx"];',
-  });
-  assert.equal(result.status, "DRIFT");
-});
-
-test("(99) regression: a './scripts/check' prefix variant does not count as scripts/check -> DRIFT", () => {
-  const result = checkCiCoverage({
-    workflowText: "run: node scripts/check/isolated-suite-runner.mjs\n",
-    testFiles: ["a.test.mjs"],
-    runnerSourceText: 'export const TEST_DIRS = ["./scripts/check"];',
-  });
-  assert.equal(result.status, "DRIFT");
-});
-
-test("(100) regression: a backslash path variant does not count as scripts/check -> DRIFT", () => {
-  const result = checkCiCoverage({
-    workflowText: "run: node scripts/check/isolated-suite-runner.mjs\n",
-    testFiles: ["a.test.mjs"],
-    runnerSourceText: 'export const TEST_DIRS = ["scripts\\\\check"];',
-  });
-  assert.equal(result.status, "DRIFT");
-});
-
-test("(101) regression: runner source unreadable (undefined) -> UNJUDGABLE", () => {
-  const result = checkCiCoverage({
-    workflowText: "run: node scripts/check/isolated-suite-runner.mjs\n",
-    testFiles: ["a.test.mjs"],
-    runnerSourceText: undefined,
-  });
-  assert.equal(result.status, "UNJUDGABLE");
-});
-
-test("(102) regression: empty runner source file -> UNJUDGABLE", () => {
-  const result = checkCiCoverage({
-    workflowText: "run: node scripts/check/isolated-suite-runner.mjs\n",
-    testFiles: ["a.test.mjs"],
-    runnerSourceText: "",
-  });
-  assert.equal(result.status, "UNJUDGABLE");
-});
-
-test("(103) regression: TEST_DIRS declared but empty array -> UNJUDGABLE", () => {
-  const result = checkCiCoverage({
-    workflowText: "run: node scripts/check/isolated-suite-runner.mjs\n",
-    testFiles: ["a.test.mjs"],
-    runnerSourceText: "export const TEST_DIRS = [];",
-  });
-  assert.equal(result.status, "UNJUDGABLE");
-});
-
-test("(104) regression: TEST_DIRS import re-export (no local array literal) -> UNJUDGABLE", () => {
-  const result = checkCiCoverage({
-    workflowText: "run: node scripts/check/isolated-suite-runner.mjs\n",
-    testFiles: ["a.test.mjs"],
-    runnerSourceText: 'export { TEST_DIRS } from "./other.mjs";',
-  });
-  assert.equal(result.status, "UNJUDGABLE");
-});
+// --- Mutation checks (task §3 "변이 검사"): each new defense disabled one
+// at a time, RED confirmed, reverted. Numbers recorded in .harness/coder.md
+// (this file only fixes the expected-GREEN baseline; the mutation RUN
+// itself is done by temporarily editing selfcheck-inventory.mjs, not by a
+// test here). ---
