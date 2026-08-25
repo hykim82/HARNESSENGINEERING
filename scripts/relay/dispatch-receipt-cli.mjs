@@ -60,6 +60,14 @@ function classifyFlag(arg) {
   return { field: FLAG_TO_FIELD[arg] };
 }
 
+// HYK-347 §1 경로 계약 (이 CLI에서의 사용, 쓰기 측): `DISPATCH_RECEIPT_PATH`
+// 는 관제실(dispatch-worker.ps1)이 이 CLI를 자식 프로세스로 부를 때 넣어
+// 주는 env다 -- 이 저장소는 값을 생성하거나 기본 경로를 하드코딩하지
+// 않는다(§1 "관제실 소유" 원칙, dispatch-gate-decision.mjs의
+// resolveDispatchReceiptPath 주석과 동일 계약). `--receipt-path`도 env도
+// 둘 다 없으면 아래 parseDispatchReceiptArgs가 즉시 `ok:false`(파일을
+// 쓰지 않는다) -- 조용히 어딘가에 기본 파일을 만들지 않는다(§1 "얇은
+// 껍데기 금지").
 const USAGE =
   "usage: dispatch-receipt-cli.mjs --role <CODER|REVIEW|VERIFY|PM> --task-label <harness task label> [--receipt-path <path>]\n" +
   "  dispatch 응답 JSON(orca orchestration dispatch --json 출력)을 stdin으로 받는다.\n" +

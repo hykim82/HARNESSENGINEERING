@@ -17,6 +17,8 @@ import {
   rmSync,
   mkdirSync,
   utimesSync,
+  existsSync,
+  readdirSync,
 } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -28,6 +30,7 @@ import {
   wasAdmissionCompletionAttempted,
   PENDING_STALL_THRESHOLD_MS,
 } from "./relay-handshake.mjs";
+import { runAdmissionCli } from "../supervisor/admission-cli.mjs";
 
 // import.meta.url is resolved relative to this file's own location, not the
 // process cwd -- unaffected by the cwd axis (repo root vs scripts/check),
@@ -1120,6 +1123,38 @@ test("HYK-189 (e) mutation M2: removing the second positional arg (harnessDir ov
   }
 });
 
+// HYK-344 2R (코더 자신의 실측 재작업 -- 최초 구현은 err.status===정수 여부로
+// "attempted && failed"를 판정했다가, 이 바로 그 시나리오(격리 픽스처에
+// admission-completion-adapter.mjs가 없음 -- writeMutantCli가 그 파일을
+// 사이드카로 복사하지 않는다)에서 Node 자신의 MODULE_NOT_FOUND도 exit 1을
+// 낸다는 사실(HYK-189 (h)가 이미 고정한 바로 그 함정)에 걸려 «어댑터 파일이
+// 없을 뿐인» 무해한 격리 픽스처 갭까지 exit 3으로 오분류했다 -- 로컬 재현
+// 즉시 잡혀 stderr 모양 기반 판정으로 교체했다. 이 시험이 없으면 그 회귀가
+// 조용히 재발할 수 있다(§8의 세 정본 시험 어느 것도 "어댑터 파일이 실제로
+// 없는" 시나리오를 지나가지 않는다 -- 전부 실제 ledger + 실제 adapter
+// 파일이 있는 경로만 쓴다).
+test("HYK-344 2R 회귀: admission-completion-adapter.mjs가 격리 픽스처에 아예 없으면(Node MODULE_NOT_FOUND, exit 1 공유) -- exit 3(attempted+실패)으로 오분류하지 않는다, exit 0 그대로", () => {
+  const { rootDir, mutantPath } = writeMutantCli(RELAY_HANDSHAKE_SRC); // 무변조 사본 -- writeMutantCli 자체가 admission-completion-adapter.mjs를 사이드카로 복사하지 않는다
+  try {
+    withFixtureDirCli((dir) => {
+      writeValidFixture(dir, "coder", "HYK-344-missing-adapter-1");
+      const { exit, stdout, stderr } = runMutantCli(mutantPath, ["coder", dir]);
+      assert.equal(
+        exit,
+        0,
+        `a genuinely-absent adapter sibling file must stay the pre-existing harmless no-op (exit 0), not be misread as an attempted-and-failed completion (exit 3)\nstdout=${stdout}\nstderr=${stderr}`,
+      );
+      assert.doesNotMatch(
+        stderr,
+        /exiting 3/,
+        "MODULE_NOT_FOUND from a missing sibling file must never route through the exit-3 channel",
+      );
+    });
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 test("HYK-189 (e) mutation M3: removing non-zero exit propagation on failure -> a blocked handshake wrongly reports success (RED signal; proves exit-code propagation is load-bearing)", () => {
   const target =
     "  if (result.ok) {\n    process.exit(0);\n  } else {\n    console.error(result.reason);\n    process.exit(1);\n  }\n";
@@ -1658,4 +1693,301 @@ test("HYK-313 2R (CLI-b) fresh PENDING 대조군: 실 CLI 자식 프로세스 --
       "여전히 기존 PENDING 사유 문구 그대로 나와야 한다(회귀 0)",
     );
   });
+});
+
+// ---------------------------------------------------------------------------
+// HYK-344 §1 (본체) -- 재현 게이트 + 수리 고정. ORCH 실측(2026-08-24 08:40):
+// 원장 예약 키가 라운드 라벨과 어긋나면(dispatch-worker.ps1의 GoLabel/Task
+// 폴백 어긋남 형태) 자리 반납·영수증 작성이 조용히 안 되면서도 이 CLI의
+// 종료코드는 0으로 남는다. 아래 시험들은 그 세 증거를 CLI 수준(진짜 자식
+// 프로세스, 격리된 원장)에서 동시에 확인하고, 수리(RESERVATION_KEY_MISMATCH
+// 구별) 이후에도 종료코드 0 자체는 바뀌지 않는다는 설계 판단(HYK-224-3R §3,
+// 뒤집지 않음)을 함께 고정한다 -- 대신 감사 기록(*.completion-failures.jsonl)
+// 이 "어느 키가 실제로 살아있는지"를 담아, 그 파일을 읽는 자동 호출자가
+// 「성공」으로 오독하지 못하게 한다.
+// ---------------------------------------------------------------------------
+
+function isolatedLedgerPaths() {
+  const dir = mkdtempSync(join(tmpdir(), "hyk344-ledger-repro-"));
+  return {
+    dir,
+    ledger: join(dir, "ledger.json"),
+    lock: join(dir, "ledger.lock"),
+  };
+}
+
+// HYK-344 2R (review-r1-verbatim.md §A P1): 1R은 이 시험이 "exit 0"을
+// «수리 결과»로 단언했다 -- 그게 정확히 검토자가 반려한 지점이다(감사
+// 파일에 프로덕션 소비자가 없어 exit 0이 여전히 "성공"으로 오독됐다). 2R은
+// 같은 재현 입력에 대해 CLI 자신의 exit code가 이제 3(구별되는 값)임을
+// 단언하도록 갱신한다 -- 나머지 두 증거(자리 미반납·영수증 미기록)는
+// 그대로 유지(회귀 대상 아님, 검토자가 그 둘을 문제삼지 않았다).
+test("HYK-344 2R 재현->수리 확인: 원장 예약 키(GoLabel 흉내)와 완료측 taskId(Task 폴백 흉내)가 어긋나면 -- (1) CLI exit code는 3(구별되는 값, 더 이상 0이 아니다), (2) 원장의 진짜 키는 반납되지 않음(ACTIVE 유지), (3) 소비 영수증은 안 써진다", () => {
+  const { dir: ledgerDir, ledger, lock } = isolatedLedgerPaths();
+  withFixtureDirCli((harnessDir) => {
+    try {
+      const GO_LABEL = "HYK-344-golabel-1";
+      const TASK_FALLBACK_ID = "HYK-344-task-fallback-1";
+
+      runAdmissionCli([
+        "init-cutover",
+        "--ledger",
+        ledger,
+        "--lock",
+        lock,
+        "--live-seats",
+        "[]",
+      ]);
+      runAdmissionCli([
+        "admit",
+        "--ledger",
+        ledger,
+        "--lock",
+        lock,
+        "--reservation-id",
+        GO_LABEL,
+        "--cap",
+        "1",
+      ]);
+
+      writeValidFixture(harnessDir, "coder", TASK_FALLBACK_ID);
+
+      const { exit, stdout, stderr } = runCli(["coder", harnessDir], {
+        env: {
+          ...process.env,
+          ADMISSION_LEDGER_PATH: ledger,
+          ADMISSION_LOCK_PATH: lock,
+        },
+      });
+
+      // (1) 2R: exit code is now 3 -- a distinct value from 0 (full
+      // success) and 1 (round itself rejected), so an automated caller can
+      // no longer read this as a clean success (coder.md §4 후보ⓐ 채택).
+      assert.equal(exit, 3, `stdout=${stdout}\nstderr=${stderr}`);
+      assert.match(
+        stderr,
+        /exiting 3.*HYK-344 2R/,
+        "the distinguishing stderr line must actually be present, not just the exit code",
+      );
+
+      // (2) the REAL reservation (GO_LABEL) is still ACTIVE -- the slot was
+      // never released, even though the CLI reported exit 0.
+      const ledgerRaw = JSON.parse(readFileSync(ledger, "utf8"));
+      assert.equal(ledgerRaw.reservations[GO_LABEL].status, "ACTIVE");
+
+      // (3) no consumption receipt was written (admissionReturned stayed
+      // false -- "부분 성공은 성공 영수증이 아니다").
+      const receiptDir = join(harnessDir, "receipts");
+      assert.equal(
+        existsSync(receiptDir),
+        false,
+        "consumption receipt directory must not exist -- receipt was never written",
+      );
+
+      // Bonus (수리 고정): the audit trail must distinguish this as a key
+      // MISMATCH (a real reservation exists, just under a different key),
+      // not a bare "not found" -- and must name the real key.
+      const auditPath = `${ledger}.completion-failures.jsonl`;
+      assert.ok(existsSync(auditPath));
+      const lines = readFileSync(auditPath, "utf8").trim().split("\n");
+      const record = JSON.parse(lines[lines.length - 1]);
+      assert.equal(record.reservationId, TASK_FALLBACK_ID);
+      assert.equal(record.reasonCode, "RESERVATION_KEY_MISMATCH");
+      assert.equal(record.candidates.length, 1);
+      assert.equal(record.candidates[0].reservationId, GO_LABEL);
+    } finally {
+      rmSync(ledgerDir, { recursive: true, force: true });
+    }
+  });
+});
+
+test("HYK-344 정상 경로 회귀 0: 원장 예약 키와 완료측 taskId가 일치하면 -- exit 0, 원장 자리는 실제로 반납(COMPLETED), 소비 영수증이 실제로 써진다", () => {
+  const { dir: ledgerDir, ledger, lock } = isolatedLedgerPaths();
+  withFixtureDirCli((harnessDir) => {
+    try {
+      const MATCHING_ID = "HYK-344-matching-1";
+
+      runAdmissionCli([
+        "init-cutover",
+        "--ledger",
+        ledger,
+        "--lock",
+        lock,
+        "--live-seats",
+        "[]",
+      ]);
+      runAdmissionCli([
+        "admit",
+        "--ledger",
+        ledger,
+        "--lock",
+        lock,
+        "--reservation-id",
+        MATCHING_ID,
+        "--cap",
+        "1",
+      ]);
+
+      writeValidFixture(harnessDir, "coder", MATCHING_ID);
+
+      const { exit, stdout, stderr } = runCli(["coder", harnessDir], {
+        env: {
+          ...process.env,
+          ADMISSION_LEDGER_PATH: ledger,
+          ADMISSION_LOCK_PATH: lock,
+        },
+      });
+      assert.equal(exit, 0, `stdout=${stdout}\nstderr=${stderr}`);
+
+      const ledgerRaw = JSON.parse(readFileSync(ledger, "utf8"));
+      assert.equal(
+        ledgerRaw.reservations[MATCHING_ID].status,
+        "COMPLETED",
+        "matching-key completion must actually release the slot",
+      );
+
+      const receiptDir = join(harnessDir, "receipts");
+      assert.equal(
+        existsSync(receiptDir),
+        true,
+        "matching-key completion must actually write a consumption receipt",
+      );
+
+      const auditPath = `${ledger}.completion-failures.jsonl`;
+      assert.equal(
+        existsSync(auditPath),
+        false,
+        "a successful matching-key completion must not write a failure-audit record",
+      );
+    } finally {
+      rmSync(ledgerDir, { recursive: true, force: true });
+    }
+  });
+});
+
+// HYK-344 2R §4 후보ⓐ 정직 한계 고정: ADMISSION_LEDGER_PATH가 아예 미설정인
+// 기존(HYK-224 1R 이전부터의) 배포는 "not attempted"이지 "attempted+실패"가
+// 아니다 -- 이 시험은 그 harmless 갭이 새 exit 3으로 잘못 넘어가지 않는지
+// 고정한다(그랬다면 ADMISSION_LEDGER_PATH를 아예 안 쓰는 모든 기존 호출자가
+// 이번 라운드로 갑자기 exit 3을 받는 회귀가 됐을 것).
+test("HYK-344 2R 정직 한계 회귀: ADMISSION_LEDGER_PATH가 아예 미설정이면(=not attempted) exit는 여전히 0 -- attempted+실패(exit 3)와 혼동하지 않는다", () => {
+  withFixtureDirCli((harnessDir) => {
+    const NO_LEDGER_ID = "HYK-344-no-ledger-1";
+    writeValidFixture(harnessDir, "coder", NO_LEDGER_ID);
+
+    const env = { ...process.env };
+    delete env.ADMISSION_LEDGER_PATH;
+    delete env.ADMISSION_LOCK_PATH;
+    const { exit, stdout, stderr } = runCli(["coder", harnessDir], { env });
+
+    assert.equal(exit, 0, `stdout=${stdout}\nstderr=${stderr}`);
+    assert.doesNotMatch(
+      stderr,
+      /exiting 3/,
+      "the not-attempted gap must never be reported through the exit-3 channel",
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// HYK-344 3R §2-2: "지금은 사람이 유일한 호출자다"를 시험으로 고정한다 --
+// 검토 원문(review-r2-verbatim.md §A P1)이 확인한 바 그대로, 이 저장소
+// 안에서 relay-handshake.mjs의 CLI를 실제로 자식 프로세스로 «실행»하는
+// 프로덕션 경로가 0건이다(관제실 dispatch-worker.ps1도 배달만 하지 이
+// CLI를 부르지 않는다 -- 그건 이 저장소 밖 파일이라 CI가 닿을 수 없으므로
+// 이 시험의 범위 밖이며, 결과 파일에 «수동 확인, 자동 고정 아님»으로
+// 명시한다). ⛔주석/문서 문자열만 보는 시험이면 안 된다는 요구(coder-task
+// §2-2) 그대로, 이 시험은 저장소 소스 파일을 실제로 읽어 스캔한다.
+//
+// 방법: scripts/ 아래 모든 *.mjs 파일(테스트 파일과 relay-handshake.mjs
+// 자기 자신은 제외 -- 아래 이유)에서, 주석을 벗겨낸 뒤 남는 텍스트에
+// 따옴표로 감싼 리터럴 "relay-handshake.mjs" 문자열이 있는지 찾는다.
+// 그런 리터럴이 프로덕션 코드에 있어야 할 유일한 이유는 그 파일 경로를
+// 조립해 실행(spawn)하려는 것뿐이다(이 저장소의 기존 관례 -- 예:
+// admission-completion-adapter.mjs를 스폰하는 코드가 정확히 이 모양으로
+// "admission-completion-adapter.mjs" 리터럴을 쓴다). 오탐 제외:
+// (a) relay-handshake.mjs 자기 자신 -- 자기 CLI 진입점 판별(`endsWith(...)`)
+//     이 자기 파일명을 리터럴로 갖고 있는 게 정상이라 제외.
+// (b) *.test.mjs 파일 전부 -- 시험이 CLI를 자식 프로세스로 실행해
+//     검증하는 것은 이미 알려진 정당한 용도이므로 제외(정의상 "프로덕션
+//     호출자"가 아니다).
+// 주석 벗기기는 정규식 기반 최선-노력이다(완전한 JS 파서 아님) -- 블록
+// 주석(`/* */`)과 줄 주석(`//`)을 지운다. ⚠️정직 한계: 문자열 리터럴
+// 안에 `//`가 들어있으면(예: URL) 그 뒤가 주석으로 잘못 벗겨질 수 있다 --
+// 이 저장소의 실제 소스에서 relay-handshake.mjs 리터럴 근처에 그런 문자열이
+// 없음을 이 시험 자신의 결과(0건)로 확인했다. 그리고 문자열을 쪼개
+// 이어붙이거나 동적으로 조립한 경로(예: `"relay-" + "handshake.mjs"`)는
+// 이 정규식 스캔으로 원리적으로 잡지 못한다 -- 고의적 회피는 이 시험의
+// 범위 밖이다(결과 파일에 동일하게 명시).
+function stripCommentsBestEffort(src) {
+  return src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
+}
+
+// 정적/동적 import 지정자는 "in-process 함수 호출자" 범주다(검토자가 이미
+// 확인: "checkRelayHandshake를 import하는 in-process 호출자들도 프로세스
+// 종료 코드를 소비하지 않습니다") -- 이 시험이 찾는 것은 그 반대(자식
+// 프로세스로 «실행»하는 것)이므로, 세 import 모양(정적 `from "..."`,
+// 사이드이펙트 `import "..."`, 동적 `import("...")`)을 먼저 지운 뒤
+// 남는 리터럴만 offender 후보로 본다.
+function stripRelayHandshakeImportSpecifiers(src) {
+  return src
+    .replace(/from\s*(["'])[^"']*relay-handshake\.mjs\1/g, "")
+    .replace(/import\s*\(\s*(["'])[^"']*relay-handshake\.mjs\1\s*\)/g, "")
+    .replace(/import\s*(["'])[^"']*relay-handshake\.mjs\1/g, "");
+}
+
+function listMjsFilesRecursive(rootDir) {
+  const out = [];
+  for (const entry of readdirSync(rootDir, {
+    recursive: true,
+    withFileTypes: true,
+  })) {
+    if (!entry.isFile() || !entry.name.endsWith(".mjs")) continue;
+    // entry.parentPath (Node 20.12+) / entry.path (older) -- both give the
+    // directory containing this entry; fall back defensively.
+    const parentDir = entry.parentPath ?? entry.path ?? rootDir;
+    out.push(join(parentDir, entry.name));
+  }
+  return out;
+}
+
+test("HYK-344 3R: relay-handshake.mjs CLI를 실제로 실행(spawn)하는 프로덕션 호출자는 이 저장소 안에 0건 -- «지금은 사람이 유일한 호출자»가 시험으로 고정된다", () => {
+  const scriptsRoot = join(
+    dirname(fileURLToPath(new URL(import.meta.url))),
+    "..",
+  );
+  const selfPath = fileURLToPath(new URL(import.meta.url).href).replace(
+    /relay-handshake\.test\.mjs$/,
+    "relay-handshake.mjs",
+  );
+  const allFiles = listMjsFilesRecursive(scriptsRoot);
+  assert.ok(
+    allFiles.length > 50,
+    `sanity: recursive .mjs walk under scripts/ must find far more than 50 files (found ${allFiles.length}) -- a near-zero count would silently make this test's "0 callers" pass meaninglessly`,
+  );
+  const offenders = [];
+  for (const filePath of allFiles) {
+    const normalized = filePath.replace(/\\/g, "/");
+    if (normalized.endsWith("/relay-handshake.mjs")) continue; // (a) self
+    if (normalized.endsWith(".test.mjs")) continue; // (b) test callers
+    const stripped = stripRelayHandshakeImportSpecifiers(
+      stripCommentsBestEffort(readFileSync(filePath, "utf8")),
+    );
+    if (/["'][^"']*relay-handshake\.mjs["']/.test(stripped)) {
+      offenders.push(filePath);
+    }
+  }
+  assert.deepEqual(
+    offenders,
+    [],
+    `these non-test, non-self files reference the literal "relay-handshake.mjs" filename outside a comment -- a production caller may have been added; wire its exit-3 handling and update this test's allowlist deliberately (never silently): ${JSON.stringify(offenders)}`,
+  );
+  // self-check: relay-handshake.mjs itself DOES contain the literal (its own
+  // invokedDirectly guard) -- confirms the scan mechanism actually works
+  // rather than e.g. silently reading zero bytes from every file.
+  assert.match(
+    stripCommentsBestEffort(readFileSync(selfPath, "utf8")),
+    /["'][^"']*relay-handshake\.mjs["']/,
+    "sanity: relay-handshake.mjs's own source must still contain its own filename literal (its CLI-invocation guard) -- if this fails, the scan/strip mechanism itself is broken, not the claim being tested",
+  );
 });

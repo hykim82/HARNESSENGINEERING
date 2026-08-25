@@ -30,6 +30,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { checkReviewGate } from "./review-gate.mjs";
 import { parseStatusOpenIssues, diffSync } from "./linear-sync.mjs";
+import { runAdmissionCli } from "../supervisor/admission-cli.mjs";
 
 // Runs `node <scriptPath> <args...>` with the given stdin/env/cwd and
 // returns { exit, stdout, stderr } regardless of exit code (spawnSync, not
@@ -265,6 +266,50 @@ export function smokeRelayHandshake({ scriptPath }) {
       "task_id: SMOKE-1\n>>> DONE: CODER @ 2026-07-13 01:00:00 KST\n",
       "utf8",
     ); // postdates drop, HYK-244: seconds required
+    // HYK-344 3R (진짜 회귀 수리): 이 "good" 변형은 relay-handshake.mjs의
+    // CLI를 이 프로세스의 (상단 sweep-ledger-isolation.mjs가 채운) env
+    // 그대로 상속해 부른다 -- ADMISSION_LEDGER_PATH는 «설정»돼 있지만
+    // 그 경로의 ledger.json 파일 자체는 아직 존재하지 않는다(아무도
+    // admit을 부른 적이 없다). 실제 프로덕션에서는 admission-cli admit이
+    // 항상 완료보다 먼저 호출되므로(HYK-224) 이 파일이 없는 상태는
+    // 진짜 정상 라운드에서는 일어나지 않는 조합이다 -- 그런데도 이
+    // 시험은 그 조합을 만들어, admission-completion-adapter.mjs가
+    // LEDGER_MISSING(진짜 원장 문제와 같은 reasonCode)으로 완료를
+    // 거부하게 만들었고, HYK-344 2R의 exit-3 신호가 그걸 «attempted +
+    // 실패»로 정확히 읽어(신호 자체는 옳다) exit 3을 냈다 -- ★이건
+    // exit-3 로직의 결함이 아니라 **이 스모크 픽스처가 admit 을 빼먹은
+    // 결함**이다(검토자 표의 `ledger-unreadable: exit=3; LEDGER_MISSING`
+    // 이 그대로 «맞는» 동작임을 보여준다). 고치는 법 = 실제 프로덕션처럼
+    // "good" 라운드 전에 이 taskId로 미리 admit해 둔다 -- 그러면
+    // completion이 실제로 COMPLETED로 성공하고 exit 0이 된다(기대값을
+    // 3으로 낮추는 게 아니라, 픽스처를 실제 순서에 맞춘다).
+    // ⚠️실측: sweep-ledger-isolation.mjs가 채운 경로는 «경로»만 만들고
+    // 그 자리의 ledger.json 파일 자체는 만들지 않는다 -- plain `admit`은
+    // 이미 존재하는 원장 위에서만 도는 전이라 그 상태 그대로는
+    // LEDGER_MISSING으로 거부된다(직접 실행해 확인). 그래서 admit 전에
+    // `init-cutover`로 빈 원장을 먼저 만든다(비어 있는 live-seats로 --
+    // 이 스모크의 관심사는 진짜 좌석 목록이 아니라 "원장 파일이 있고
+    // SMOKE-1을 admit할 수 있는가"뿐이다).
+    runAdmissionCli([
+      "init-cutover",
+      "--ledger",
+      process.env.ADMISSION_LEDGER_PATH,
+      "--lock",
+      process.env.ADMISSION_LOCK_PATH,
+      "--live-seats",
+      "[]",
+    ]);
+    runAdmissionCli([
+      "admit",
+      "--ledger",
+      process.env.ADMISSION_LEDGER_PATH,
+      "--lock",
+      process.env.ADMISSION_LOCK_PATH,
+      "--reservation-id",
+      "SMOKE-1",
+      "--cap",
+      "1",
+    ]);
     const good = runNode(scriptPath, ["coder", dir]);
     results.push({
       id: "relay-handshake",

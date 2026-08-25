@@ -214,6 +214,69 @@ test("completeReservation on an unknown reservationId fails closed", () => {
   });
   assert.equal(result.ok, false);
   assert.equal(result.reasonCode, ADMISSION_REASON.RESERVATION_NOT_FOUND);
+  assert.deepEqual(
+    result.candidates,
+    [],
+    "an EMPTY ledger has no other active/suspect reservation to point at -- candidates must be []",
+  );
+});
+
+// HYK-344 §1-3 항2 (재현 게이트, ORCH 실측 2026-08-24 08:40): the GoLabel/
+// Task key-drift shape -- a reservation IS admitted (under key 'r1'), but
+// the completion call asks about a DIFFERENT key ('r1-drifted'). Before this
+// round, completeReservation returned the exact same RESERVATION_NOT_FOUND
+// as the genuinely-empty-ledger case above, with no way to tell them apart.
+// It must now return the distinct RESERVATION_KEY_MISMATCH reasonCode and
+// name the actual key it found.
+test("HYK-344: completeReservation on a MISMATCHED key (reservation exists under a different id) returns RESERVATION_KEY_MISMATCH, not RESERVATION_NOT_FOUND -- and names the real key", () => {
+  let ledger = createEmptyLedger(EPOCH);
+  const admitted = admitReservation(ledger, {
+    reservationId: "r1",
+    cap: 1,
+    now: T0,
+  });
+  ledger = admitted.ledger;
+
+  const result = completeReservation(ledger, {
+    reservationId: "r1-drifted",
+    now: T1,
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.reasonCode, ADMISSION_REASON.RESERVATION_KEY_MISMATCH);
+  assert.equal(result.candidates.length, 1);
+  assert.equal(result.candidates[0].reservationId, "r1");
+  assert.equal(result.candidates[0].status, RESERVATION_STATUS.ACTIVE);
+  // The ledger itself must be completely untouched -- a mismatch is a
+  // rejection, not a partial/guessed completion of the wrong entry.
+  assert.equal(ledger.reservations.r1.status, RESERVATION_STATUS.ACTIVE);
+});
+
+// A COMPLETED (already-released) entry under a different key is NOT a
+// plausible "the real key" candidate -- it already finished its own
+// lifecycle, so surfacing it as a mismatch candidate would be misleading
+// (coder-task.md §1-3 항2: 셋을 섞지 않는다, 즉 "이미 끝난 것"을 "지금
+// 어긋난 것"으로 오인시키면 안 된다).
+test("HYK-344: a COMPLETED reservation under a different key is NOT offered as a mismatch candidate -- falls back to RESERVATION_NOT_FOUND", () => {
+  let ledger = createEmptyLedger(EPOCH);
+  const admitted = admitReservation(ledger, {
+    reservationId: "r1",
+    cap: 1,
+    now: T0,
+  });
+  ledger = admitted.ledger;
+  const completed = completeReservation(ledger, {
+    reservationId: "r1",
+    now: T1,
+  });
+  ledger = completed.ledger;
+
+  const result = completeReservation(ledger, {
+    reservationId: "r1-drifted",
+    now: T1,
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.reasonCode, ADMISSION_REASON.RESERVATION_NOT_FOUND);
+  assert.deepEqual(result.candidates, []);
 });
 
 test("completing a reservation frees the cap for a new admit (full lifecycle)", () => {

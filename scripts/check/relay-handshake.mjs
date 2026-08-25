@@ -1397,12 +1397,43 @@ export function wasAdmissionCompletionAttempted(stdout) {
   return !String(stdout ?? "").includes("not attempted");
 }
 
+// HYK-344 2R (review-r1-verbatim.md §A P1, orch-measured-r1.md 잰 것1): the
+// audit trail (${ledgerPath}.completion-failures.jsonl) HYK-344 1R added has
+// ZERO production readers (검토자 rg 확인 + ORCH 독립 재확인, 둘 다 grep 0건)
+// -- so "구별해서 기록한다"만으로는 "자동 호출자가 성공으로 오인한다"는 핵심
+// 결함이 닫히지 않는다. This module-scoped slot is how that gap closes
+// without widening `spawnAdmissionCompletionProcess`'s own return value: the
+// boolean `admissionReturned` it returns is pinned byte-for-byte by
+// relay-handshake-completion-wire.test.mjs's ⓒ mutation target (that test's
+// own `target` constant -- the call-expression-plus-semicolon text pinned
+// to appear exactly once in this file's working-tree source; NOT quoted
+// verbatim here on purpose, HYK-344 3R -- writing it out literally in this
+// very comment made it appear TWICE and broke that exact-once invariant,
+// caught by the full isolated-suite-runner) -- the mutated `undefined;`
+// substitution must stay a valid boolean-shaped assignment) AND is threaded
+// into the consumption-receipt `effects` object
+// downstream (consumption-receipt-core.mjs expects a boolean there, not an
+// object) -- changing its shape would ripple into both. So the richer detail
+// (was this genuinely ATTEMPTED-and-FAILED, vs never attempted at all
+// because no ledger path resolved) rides this separate slot instead, read
+// by the CLI entry point right after `checkRelayHandshake` returns (see
+// `invokedDirectly` below). Reset at the top of every call so a call that
+// never reaches admission completion this round (REJECTed/BLOCKED rounds,
+// which don't invoke this function at all) never sees a PRIOR round's stale
+// detail leak through a long-lived in-process caller.
+let lastAdmissionCompletionDetail = null;
+
+export function peekLastAdmissionCompletionDetail() {
+  return lastAdmissionCompletionDetail;
+}
+
 // HYK-312 §1: renamed from `spawnAdmissionCompletion` -- the name
 // `spawnAdmissionCompletion` is now the local single-arg closure defined
 // inside runCompletionSideEffects (captures harnessDir from that scope), so
 // this two-arg implementation function needed a distinct name to avoid
 // shadowing confusion. Behavior is otherwise byte-for-byte unchanged.
 function spawnAdmissionCompletionProcess(taskId, harnessDir) {
+  lastAdmissionCompletionDetail = null;
   try {
     const adapterPath = join(
       dirname(fileURLToPath(new URL(import.meta.url))),
@@ -1423,7 +1454,14 @@ function spawnAdmissionCompletionProcess(taskId, harnessDir) {
       stdio: ["ignore", "pipe", "pipe"],
     });
     console.log(out.trim());
-    if (!wasAdmissionCompletionAttempted(out)) return false;
+    const attempted = wasAdmissionCompletionAttempted(out);
+    // HYK-344 2R: recorded on the SUCCESS path too (attempted && ok:true, or
+    // genuinely not-attempted because no ledger path resolved) -- the CLI
+    // reads this slot unconditionally, so a `null` left over from module
+    // load (never actually reached this function) must not be
+    // indistinguishable from "ran and everything was fine".
+    lastAdmissionCompletionDetail = { attempted, ok: true };
+    if (!attempted) return false;
     // HYK-244 2R-a 조각2: return value added (was void/undefined) so the
     // receipt-writing call site can know this effect (admissionReturned)
     // actually succeeded. Does not change try/catch structure or any
@@ -1450,6 +1488,39 @@ function spawnAdmissionCompletionProcess(taskId, harnessDir) {
     // here), and (2) the adapter durably appends a JSON line to
     // `${ledgerPath}.completion-failures.jsonl` BEFORE this process ever
     // sees the failure (coder-task §3: "화면에만 = 도달로 안 침").
+    //
+    // HYK-344 2R §4 후보ⓐ 채택 (review-r1-verbatim.md §A P1): the "두 통로"
+    // above turned out to have zero readers for one of them (audit JSONL,
+    // orch-measured-r1.md 잰 것1) -- so THIS CLI's own exit code still needs
+    // to distinguish "attempted and genuinely failed" from "not attempted at
+    // all" (env not wired -- an expected, harmless gap this repo has always
+    // tolerated). The 3R reasoning above (round pass/fail must not depend on
+    // admission-ledger reachability) is still honored: exit 0 (full success)
+    // and exit 1 (round itself rejected) keep their EXACT pre-existing
+    // meaning, untouched. A THIRD, previously-unused value is what an
+    // automated caller now sees for this one narrow case (see
+    // `lastAdmissionCompletionDetail`/`peekLastAdmissionCompletionDetail`
+    // above and the CLI entry point below) -- never conflated with either
+    // existing code, so no caller's existing 0-vs-1 branching changes.
+    // ⚠️ORCH/코더 실측(2R, isolated-fixture 회귀에서 직접 재현): `err.status`
+    // 만으로는 "어댑터가 실제로 실행돼 자기 판단으로 실패했다"와 "어댑터
+    // 파일이 격리 픽스처에 아예 없어 node 자신이 모듈을 못 찾아 죽었다"를
+    // 구별하지 못한다 -- 둘 다 exit 1을 공유한다(정확히 HYK-189 (h)가 이미
+    // 고정한 "Node의 module-not-found도 CLI 자신의 exit(1)과 같은 코드를
+    // 쓴다"는 바로 그 함정). 그래서 exit code가 아니라 stderr 모양으로
+    // 가른다: 어댑터가 실제로 실행돼 도달한 모든 실패 경로는 예외 없이
+    // "admission-completion-adapter: "로 시작하는 자기 사유 문구를 찍는다
+    // (admission-completion-adapter.mjs의 모든 outcome.reason/console.error
+    // 호출부가 그 접두어로 시작 -- 이 파일이 그 문자열을 지어내지 않고
+    // 그대로 인용한다). Node 자신의 "Cannot find module" 에러 텍스트는 그
+    // 접두어를 절대 만들지 않으므로, 이 판정은 실제 실행 여부를 신뢰성
+    // 있게 가른다.
+    const stderrText = String(err.stderr ?? "");
+    lastAdmissionCompletionDetail = {
+      attempted: stderrText.includes("admission-completion-adapter: "),
+      ok: false,
+      detail: err.stderr ?? err.message,
+    };
     console.error(
       `relay-handshake: admission-completion spawn skipped/failed (non-fatal to this handshake's own exit code, HYK-224-3R §3 reasoning above): ${err.stderr ?? err.message}`,
     );
@@ -1700,6 +1771,45 @@ function describeRoleUsage() {
   return `allowed roles: ${ALLOWED_ROLES.join(", ")}\nexample: node relay-handshake.mjs CODER .harness`;
 }
 
+// HYK-344 2R (review-r1-verbatim.md §A P1): this round genuinely finished
+// (task_id binding + staleness all passed, `result.ok === true`) -- but that
+// is not the same question as "did the admission-ledger reservation for it
+// actually get released". `peekLastAdmissionCompletionDetail()` is set
+// synchronously inside THIS process's own single `checkRelayHandshake` call
+// (module-scoped slot, see its own header) -- exits 3 only when completion
+// was genuinely ATTEMPTED and FAILED (e.g. a reservation key mismatch),
+// never for the harmless "not attempted" gap (no ledger path resolved), so
+// existing deployments that never wired ADMISSION_LEDGER_PATH keep seeing
+// exit 0 exactly as before. A no-op (returns normally) whenever `result.ok`
+// is false or the completion detail doesn't apply, so the caller's own
+// pinned (result.ok) block always runs next exactly as before.
+//
+// HYK-344 3R (책임자 판정 2026-08-25 11:19, review-r2-verbatim.md §A P1
+// 반려): full exit-code table + this fact are documented in
+// `docs/relay-handshake-exit-code-contract.md` -- keep both in sync.
+// ★★ WHO READS THIS RIGHT NOW: nothing in this repo spawns this CLI as a
+// child process in a production path (검증됨 -- relay-handshake.test.mjs의
+// "HYK-344 3R" 시험이 저장소 소스를 실제로 스캔해 이를 계약으로 고정한다,
+// 관제실 dispatch-worker.ps1도 배달만 하지 이 CLI를 부르지 않는다는 사실은
+// 그 ps1이 이 저장소 밖에 있어 CI가 못 닿으므로 사람이 확인한 사실로만
+// 남는다). `checkRelayHandshake`를 함수로 import하는 in-process
+// 호출자들(relay-core.mjs 등)은 프로세스가 아니라 반환값을 보므로 이
+// exit code 자체를 볼 수 없다. ⇒ exit 3은 지금 **두 가지 뜻**을 동시에
+// 갖는다: (1) 장차 supervisor 자동 호출 층(HYK-354, 이 라운드 범위 밖)이
+// 읽을 신호다. (2) 지금은 ORCH(사람 역할)가 매 라운드 이 CLI를 손으로
+// 치고 출력을 눈으로 읽는 것이 유일한 소비 경로다. ⛔이건 결함이 아니라
+// "아직 안 만든 층"이다 -- 자동 호출 층을 여기서 급조하지 않는다.
+function exitDistinctlyOnAdmissionCompletionFailure(result) {
+  if (!result.ok) return;
+  const completionDetail = peekLastAdmissionCompletionDetail();
+  if (completionDetail?.attempted === true && completionDetail?.ok === false) {
+    console.error(
+      `relay-handshake: round completed but admission-ledger reservation release FAILED (${completionDetail.detail ?? "no detail available"}) -- exiting 3 (distinct from 0=full success / 1=round rejected) so an automated caller cannot mistake this for a clean success (HYK-344 2R)`,
+    );
+    process.exit(3);
+  }
+}
+
 const invokedDirectly =
   process.argv[1] &&
   process.argv[1]
@@ -1724,6 +1834,15 @@ if (invokedDirectly) {
   const result = harnessDirArg
     ? checkRelayHandshake({ role, harnessDir: harnessDirArg })
     : checkRelayHandshake({ role });
+  // HYK-344 2R: kept as a call BEFORE the pinned (result.ok) block below,
+  // rather than inlined inside it -- relay-handshake-cli-mutation-M3.test.mjs
+  // (HYK-189 (e) mutation M3) pins that exact block's source text byte-for-
+  // byte (`assertExactlyOneMatch`) to prove non-zero exit propagation is
+  // load-bearing; inlining new lines inside it would break that pin without
+  // changing anything the mutation itself tests. This call is a pure early
+  // exit -- it returns normally (no-op) whenever exit 3 does not apply, so
+  // the pinned block below is always reached exactly as before.
+  exitDistinctlyOnAdmissionCompletionFailure(result);
   if (result.ok) {
     process.exit(0);
   } else {

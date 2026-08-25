@@ -13,6 +13,10 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { writeLedger } from "./reject-streak.mjs";
+import {
+  lookupDispatchId,
+  DISPATCH_RECEIPT_LOOKUP_REASON,
+} from "./dispatch-gate-decision.mjs";
 
 const SCRIPT_PATH = fileURLToPath(
   new URL("./dispatch-gate-decision.mjs", import.meta.url),
@@ -1266,5 +1270,68 @@ test("(33) HYK-241 1-B 검문: 다른 전제조건이 먼저 실패하면(task_i
     assert.equal(r.status, 1, r.stdout + r.stderr);
     assert.match(r.stderr, /task_id 줄이 정확히 1개가 아님/);
     assert.doesNotMatch(r.stderr, /REJECT_ONE_B_MISSING/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// HYK-347 §3 계약 시험: `DISPATCH_RECEIPT_PATH` 미설정과 "설정됐지만 이
+// 라운드로 배달된 영수증이 0건"이 lookupDispatchId의 reasonCode에서
+// 서로 다른 값으로 나오는지 고정한다 (§2: "판정 로직 자체는 바꾸지
+// 않는다" -- 이 시험은 ok/found 불리언이 아니라 오직 reasonCode만 본다).
+// ---------------------------------------------------------------------------
+
+test("HYK-347 계약 ⓐ: receiptPath 자체가 미설정이면 reasonCode=PATH_UNSET (ok:false)", () => {
+  const result = lookupDispatchId({
+    role: "CODER",
+    harnessTaskLabel: "HYK-347-x-1",
+    receiptPath: null,
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.found, false);
+  assert.equal(result.reasonCode, DISPATCH_RECEIPT_LOOKUP_REASON.PATH_UNSET);
+});
+
+test("HYK-347 계약 ⓑ: receiptPath는 설정됐지만 이 role+label로 배달된 영수증이 0건이면 reasonCode=NOT_FOUND (ok:true, found:false) -- ⓐ와 다른 값", () => {
+  withFixtureDir((dir) => {
+    const receiptPath = join(dir, "dispatch-receipts.jsonl");
+    // 파일은 존재하고 읽을 수 있지만, 이 role+label과 일치하는 줄이 없다.
+    writeFileSync(
+      receiptPath,
+      `${JSON.stringify({ role: "REVIEW", harness_task_label: "OTHER-LABEL", dispatch_id: "ctx_other" })}\n`,
+      "utf8",
+    );
+    const result = lookupDispatchId({
+      role: "CODER",
+      harnessTaskLabel: "HYK-347-x-1",
+      receiptPath,
+    });
+    assert.equal(result.ok, true);
+    assert.equal(result.found, false);
+    assert.equal(result.reasonCode, DISPATCH_RECEIPT_LOOKUP_REASON.NOT_FOUND);
+    assert.notEqual(
+      result.reasonCode,
+      DISPATCH_RECEIPT_LOOKUP_REASON.PATH_UNSET,
+      "«미설정»과 «설정됐지만 0건»은 서로 다른 값으로 표면화돼야 한다(HYK-347 §2)",
+    );
+  });
+});
+
+test("HYK-347 계약 ⓒ (회귀 확인): 실제로 일치하는 영수증이 있으면 reasonCode=FOUND, ok:true, found:true, dispatchId가 채워진다 -- 판정 로직 자체는 그대로", () => {
+  withFixtureDir((dir) => {
+    const receiptPath = join(dir, "dispatch-receipts.jsonl");
+    writeFileSync(
+      receiptPath,
+      `${JSON.stringify({ role: "CODER", harness_task_label: "HYK-347-x-1", dispatch_id: "ctx_real" })}\n`,
+      "utf8",
+    );
+    const result = lookupDispatchId({
+      role: "CODER",
+      harnessTaskLabel: "HYK-347-x-1",
+      receiptPath,
+    });
+    assert.equal(result.ok, true);
+    assert.equal(result.found, true);
+    assert.equal(result.reasonCode, DISPATCH_RECEIPT_LOOKUP_REASON.FOUND);
+    assert.equal(result.dispatchId, "ctx_real");
   });
 });
