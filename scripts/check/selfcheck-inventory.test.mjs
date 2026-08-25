@@ -37,6 +37,7 @@ import {
   EXPECTED_INJECTED_HOOKS,
   checkControlRoomDoc,
   parseRunnerTestDirs,
+  runnerInvokedByNode,
 } from "./selfcheck-inventory.mjs";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -2759,4 +2760,265 @@ test("(79) judgeEntry: ci-enforce entry against the real repo's enforce.yml + re
   });
   assert.equal(result.status, "ALIVE");
   assert.match(result.evidence.join(" "), /isolated-suite-runner\.mjs/);
+});
+
+// --- HYK-338 2R: review-1 rejected 1R for three synthesized bypasses (P1-1
+// mention-without-execution, P1-2 forged TEST_DIRS in a comment/string,
+// P1-3 zero discovered files -> vacuous ALIVE). These tests reproduce the
+// review's exact synthetic inputs against the 2R fix, plus the six-item
+// regression list task §2 demands. ---
+
+const RUNNER_SCRIPT_REL_PATH_FOR_TESTS =
+  "scripts/check/isolated-suite-runner.mjs";
+
+test("(80) runnerInvokedByNode: 'node <path>' is an invocation -> true", () => {
+  assert.equal(
+    runnerInvokedByNode(
+      [[{ literal: "node" }, { literal: RUNNER_SCRIPT_REL_PATH_FOR_TESTS }]],
+      RUNNER_SCRIPT_REL_PATH_FOR_TESTS,
+    ),
+    true,
+  );
+});
+
+test("(81) runnerInvokedByNode: 'echo <path>' is a mention, not an invocation -> false (review P1-1 repro)", () => {
+  assert.equal(
+    runnerInvokedByNode(
+      [[{ literal: "echo" }, { literal: RUNNER_SCRIPT_REL_PATH_FOR_TESTS }]],
+      RUNNER_SCRIPT_REL_PATH_FOR_TESTS,
+    ),
+    false,
+  );
+});
+
+test("(82) runnerInvokedByNode: flags between node and the path still count ('node --foo <path>' -> true)", () => {
+  assert.equal(
+    runnerInvokedByNode(
+      [
+        [
+          { literal: "node" },
+          { literal: "--foo" },
+          { literal: RUNNER_SCRIPT_REL_PATH_FOR_TESTS },
+        ],
+      ],
+      RUNNER_SCRIPT_REL_PATH_FOR_TESTS,
+    ),
+    true,
+  );
+});
+
+test("(83) runnerInvokedByNode: the path in a DIFFERENT command from the node one never counts, even adjacent (mixing an echo command with a node command)", () => {
+  assert.equal(
+    runnerInvokedByNode(
+      [
+        [{ literal: "echo" }, { literal: RUNNER_SCRIPT_REL_PATH_FOR_TESTS }],
+        [{ literal: "node" }, { literal: "unrelated.mjs" }],
+      ],
+      RUNNER_SCRIPT_REL_PATH_FOR_TESTS,
+    ),
+    false,
+  );
+});
+
+test("(84) checkCiCoverage P1-1 repro: 'run: echo <runner path>' -> NOT ALIVE (mention without execution)", () => {
+  const result = checkCiCoverage({
+    workflowText: "run: echo scripts/check/isolated-suite-runner.mjs\n",
+    testFiles: ["a.test.mjs"],
+    runnerSourceText:
+      'export const TEST_DIRS = ["scripts/check", "scripts/relay"];',
+  });
+  assert.notEqual(result.status, "ALIVE");
+  assert.equal(result.status, "DRIFT");
+});
+
+test("(85) checkCiCoverage P1-1 repro: 'run: printf <runner path>' -> NOT ALIVE", () => {
+  const result = checkCiCoverage({
+    workflowText: "run: printf scripts/check/isolated-suite-runner.mjs\n",
+    testFiles: ["a.test.mjs"],
+    runnerSourceText:
+      'export const TEST_DIRS = ["scripts/check", "scripts/relay"];',
+  });
+  assert.notEqual(result.status, "ALIVE");
+  assert.equal(result.status, "DRIFT");
+});
+
+test("(86) checkCiCoverage P1-1 repro: 'run: test -f <runner path>' -> NOT ALIVE", () => {
+  const result = checkCiCoverage({
+    workflowText: "run: test -f scripts/check/isolated-suite-runner.mjs\n",
+    testFiles: ["a.test.mjs"],
+    runnerSourceText:
+      'export const TEST_DIRS = ["scripts/check", "scripts/relay"];',
+  });
+  assert.notEqual(result.status, "ALIVE");
+  assert.equal(result.status, "DRIFT");
+});
+
+const P1_2_COMMENT_FORGED_SOURCE = `/* export const TEST_DIRS = ["scripts/check"]; */
+export const TEST_DIRS = ["scripts/relay"];
+`;
+
+const P1_2_STRING_FORGED_SOURCE = `const decoy = "export const TEST_DIRS = [\\"scripts/check\\"];";
+export const TEST_DIRS = ["scripts/relay"];
+`;
+
+test("(87) parseRunnerTestDirs P1-2 repro: a decoy TEST_DIRS inside a /* */ comment does not win -- the real (later) declaration is read", () => {
+  assert.deepEqual(parseRunnerTestDirs(P1_2_COMMENT_FORGED_SOURCE), [
+    "scripts/relay",
+  ]);
+});
+
+test("(88) parseRunnerTestDirs P1-2 repro: a decoy TEST_DIRS inside a string literal does not win -- the real (later) declaration is read", () => {
+  assert.deepEqual(parseRunnerTestDirs(P1_2_STRING_FORGED_SOURCE), [
+    "scripts/relay",
+  ]);
+});
+
+test("(89) checkCiCoverage P1-2 repro: comment-forged decoy -> NOT ALIVE (real TEST_DIRS lacks scripts/check)", () => {
+  const result = checkCiCoverage({
+    workflowText: "run: node scripts/check/isolated-suite-runner.mjs\n",
+    testFiles: ["a.test.mjs"],
+    runnerSourceText: P1_2_COMMENT_FORGED_SOURCE,
+  });
+  assert.notEqual(result.status, "ALIVE");
+  assert.equal(result.status, "DRIFT");
+  assert.match(result.reason, /does not include 'scripts\/check'/);
+});
+
+test("(90) checkCiCoverage P1-2 repro: string-forged decoy -> NOT ALIVE (real TEST_DIRS lacks scripts/check)", () => {
+  const result = checkCiCoverage({
+    workflowText: "run: node scripts/check/isolated-suite-runner.mjs\n",
+    testFiles: ["a.test.mjs"],
+    runnerSourceText: P1_2_STRING_FORGED_SOURCE,
+  });
+  assert.notEqual(result.status, "ALIVE");
+  assert.equal(result.status, "DRIFT");
+  assert.match(result.reason, /does not include 'scripts\/check'/);
+});
+
+test("(91) checkCiCoverage P1-3 repro: zero discovered test files with a no-op workflow -> NOT ALIVE (UNJUDGABLE)", () => {
+  const result = checkCiCoverage({
+    workflowText: "run: echo nothing\n",
+    testFiles: [],
+  });
+  assert.notEqual(result.status, "ALIVE");
+  assert.equal(result.status, "UNJUDGABLE");
+});
+
+test("(92) checkCiCoverage P1-3 repro: zero discovered test files even when the run: step mentions the runner -> NOT ALIVE (UNJUDGABLE)", () => {
+  const result = checkCiCoverage({
+    workflowText: "run: node scripts/check/isolated-suite-runner.mjs\n",
+    testFiles: [],
+    runnerSourceText: REAL_RUNNER_SOURCE,
+  });
+  assert.notEqual(result.status, "ALIVE");
+  assert.equal(result.status, "UNJUDGABLE");
+});
+
+test("(93) checkCiCoverage P1-3: zero discovered test files overrides even the whole-directory glob path -- the glob's own vacuous-true is exactly the failure mode this closes", () => {
+  const result = checkCiCoverage({
+    workflowText: "run: node --test scripts/check/*.test.mjs\n",
+    testFiles: [],
+  });
+  assert.notEqual(result.status, "ALIVE");
+  assert.equal(result.status, "UNJUDGABLE");
+});
+
+test("(94) checkCiCoverage P1-3: zero discovered test files overrides even the per-file literal path", () => {
+  const result = checkCiCoverage({
+    workflowText: "run: node --test a.test.mjs b.test.mjs\n",
+    testFiles: [],
+  });
+  assert.notEqual(result.status, "ALIVE");
+  assert.equal(result.status, "UNJUDGABLE");
+});
+
+// --- task §2 item 6: the six-way regression matrix, fixed in one place ---
+
+test("(95) regression: the real workflow form 'run: node <runner path>' -> ALIVE", () => {
+  const result = checkCiCoverage({
+    workflowText: "run: node scripts/check/isolated-suite-runner.mjs\n",
+    testFiles: ["a.test.mjs"],
+    runnerSourceText: REAL_RUNNER_SOURCE,
+  });
+  assert.equal(result.status, "ALIVE");
+});
+
+test("(96) regression: the old whole-directory glob -> ALIVE", () => {
+  const result = checkCiCoverage({
+    workflowText: "run: node --test scripts/check/*.test.mjs\n",
+    testFiles: ["a.test.mjs", "b.test.mjs"],
+  });
+  assert.equal(result.status, "ALIVE");
+});
+
+test("(97) regression: per-file literal names -> ALIVE", () => {
+  const result = checkCiCoverage({
+    workflowText:
+      "run: node --test scripts/check/a.test.mjs scripts/check/b.test.mjs\n",
+    testFiles: ["a.test.mjs", "b.test.mjs"],
+  });
+  assert.equal(result.status, "ALIVE");
+});
+
+test("(98) regression: a similarly-named directory 'scripts/checkx' does not count as scripts/check -> DRIFT", () => {
+  const result = checkCiCoverage({
+    workflowText: "run: node scripts/check/isolated-suite-runner.mjs\n",
+    testFiles: ["a.test.mjs"],
+    runnerSourceText: 'export const TEST_DIRS = ["scripts/checkx"];',
+  });
+  assert.equal(result.status, "DRIFT");
+});
+
+test("(99) regression: a './scripts/check' prefix variant does not count as scripts/check -> DRIFT", () => {
+  const result = checkCiCoverage({
+    workflowText: "run: node scripts/check/isolated-suite-runner.mjs\n",
+    testFiles: ["a.test.mjs"],
+    runnerSourceText: 'export const TEST_DIRS = ["./scripts/check"];',
+  });
+  assert.equal(result.status, "DRIFT");
+});
+
+test("(100) regression: a backslash path variant does not count as scripts/check -> DRIFT", () => {
+  const result = checkCiCoverage({
+    workflowText: "run: node scripts/check/isolated-suite-runner.mjs\n",
+    testFiles: ["a.test.mjs"],
+    runnerSourceText: 'export const TEST_DIRS = ["scripts\\\\check"];',
+  });
+  assert.equal(result.status, "DRIFT");
+});
+
+test("(101) regression: runner source unreadable (undefined) -> UNJUDGABLE", () => {
+  const result = checkCiCoverage({
+    workflowText: "run: node scripts/check/isolated-suite-runner.mjs\n",
+    testFiles: ["a.test.mjs"],
+    runnerSourceText: undefined,
+  });
+  assert.equal(result.status, "UNJUDGABLE");
+});
+
+test("(102) regression: empty runner source file -> UNJUDGABLE", () => {
+  const result = checkCiCoverage({
+    workflowText: "run: node scripts/check/isolated-suite-runner.mjs\n",
+    testFiles: ["a.test.mjs"],
+    runnerSourceText: "",
+  });
+  assert.equal(result.status, "UNJUDGABLE");
+});
+
+test("(103) regression: TEST_DIRS declared but empty array -> UNJUDGABLE", () => {
+  const result = checkCiCoverage({
+    workflowText: "run: node scripts/check/isolated-suite-runner.mjs\n",
+    testFiles: ["a.test.mjs"],
+    runnerSourceText: "export const TEST_DIRS = [];",
+  });
+  assert.equal(result.status, "UNJUDGABLE");
+});
+
+test("(104) regression: TEST_DIRS import re-export (no local array literal) -> UNJUDGABLE", () => {
+  const result = checkCiCoverage({
+    workflowText: "run: node scripts/check/isolated-suite-runner.mjs\n",
+    testFiles: ["a.test.mjs"],
+    runnerSourceText: 'export { TEST_DIRS } from "./other.mjs";',
+  });
+  assert.equal(result.status, "UNJUDGABLE");
 });
