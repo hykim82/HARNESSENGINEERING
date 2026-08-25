@@ -942,6 +942,51 @@ function installAdmissionLedgerPointer(params, targetRepoPath, { dryRun }) {
   );
 }
 
+// installDispatchReceiptPointer -- HYK-356 (합성 재현으로 기전 확정,
+// coder-task.md §0/§4 항1): installAdmissionLedgerPointer(위)와 정확히
+// 같은 모양의 짝 -- `orch-stall-detect.mjs`의
+// resolveDispatchReceiptPathForUnconsumed()가 env(`DISPATCH_RECEIPT_PATH`)
+// 다음 셋째 자리로 읽는 영속 포인터 파일 `dispatch-receipt-path.json`을
+// 쓴다. ADMISSION_LEDGER_PATH에는 이미 이 셋째 자리가 있었는데
+// DISPATCH_RECEIPT_PATH에는 없었다 -- 그 비대칭이 "영수증이 결과보다
+// 새것인데도 SUSPECTED_UNCONSUMED"가 나오는 실측 헛울림의 기전이었다
+// (env는 `dispatch-worker.ps1`가 매 배달 호출 프로세스 안에서만 잠깐
+// 채우고, 이 축을 도는 장기 실행 감시 루프의 프로세스 환경에는 그 값이
+// 없다).
+//
+// ★정직 한계(installAdmissionLedgerPointer 헤더와 동일 사유 재적용):
+// install.mjs는 이 저장소 어디서도 자동/예약 실행되지 않는다 -- 이미
+// 부트스트랩된 저장소(이 워크트리 포함)에 이 포인터 파일이 나타나려면
+// 그 대상에 install.mjs를 한 번 더 수동으로 재실행해야 한다(멱등 --
+// 이미 있는 파일은 건드리지 않는다). 그 재실행은 관제실 쪽 조치라 이
+// 코더 라운드가 대신 실행하지 않는다(§5 비타협 3, 관제실 무접촉).
+function installDispatchReceiptPointer(params, targetRepoPath, { dryRun }) {
+  const pointerPath = path.join(
+    targetRepoPath,
+    ".harness",
+    "dispatch-receipt-path.json",
+  );
+  if (existsSync(pointerPath)) {
+    skipped.push(pointerPath);
+    console.warn(`skip (already exists): ${pointerPath}`);
+    return;
+  }
+  const receiptPath = joinPosix(
+    params.controlRoomPath,
+    "dispatch-receipts.jsonl",
+  );
+  const pointer = { receiptPath };
+  const content = `${JSON.stringify(pointer, null, 2)}\n`;
+  if (!dryRun) {
+    ensureParentDir(pointerPath);
+    writeFileSync(pointerPath, content, "utf8");
+  }
+  installed.push(pointerPath);
+  console.log(
+    `${dryRun ? "[dry-run] would install" : "installed"}: ${pointerPath}\n${content}`,
+  );
+}
+
 // installUnattendedLayerManifest -- HYK-209-frame-1 §2 항2 ("설치기 «틀»
 // 확장"). Writes `.harness/unattended-layer-placeholders.json`: the five
 // new placeholder values (validated above, never silently defaulted) plus
@@ -1109,6 +1154,10 @@ function main() {
     // HYK-227 2R §3 항2: the persistent admission-ledger pointer file --
     // see installAdmissionLedgerPointer's own header for scope/limits.
     installAdmissionLedgerPointer(params, targetRepoPath, { dryRun });
+
+    // HYK-356: the matching persistent dispatch-receipt-path pointer file --
+    // see installDispatchReceiptPointer's own header for scope/limits.
+    installDispatchReceiptPointer(params, targetRepoPath, { dryRun });
 
     // HYK-209-frame-1 §2 항2: record the five new unattended-layer
     // placeholder values (+ the two known gaps this round found but can't

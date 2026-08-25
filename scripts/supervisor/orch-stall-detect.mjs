@@ -1970,20 +1970,28 @@ function isReservationCompletedForRound(ledgerPath, roundLabel, opts) {
   return ledger?.reservations?.[roundLabel]?.status === "COMPLETED";
 }
 
-// HYK-347 §1 경로 계약 (이 축에서의 사용): 출처는 dispatch-gate-
-// decision.mjs/admission-completion-adapter.mjs와 동일한 env
-// (`DISPATCH_RECEIPT_PATH`, 관제실이 넣어 준다 -- 이 저장소는 기본값을
-// 만들지 않는다). 미설정 시 이 함수는 null을 돌려주고, 그 null은
-// verifyReceiptConsumptionEvidence(아래) -> hasDispatchReceiptForRound로
-// 흘러가 즉시 false가 된다 -- 그 false는 "이 라운드가 진짜 미소비"가
-// 아니라 "영수증을 확인할 방법이 없었다"는 뜻이지만, 이 축은 fail-closed
-// 설계라 어느 쪽이든 CONSUMPTION_RECEIPT_AFTER 신호를 만들지 않는 쪽으로만
-// 접힌다(정지 경보를 잘못 끄는 방향으로는 절대 안 접는다) -- 그래서 경로
-// 미설정은 "정지 경보가 실제로 필요 없는데도 계속 켜져 있는" 영구 오탐을
-// 만들 수 있다(HYK-347이 닫으려는 문제 그 자체, coder-task.md §2 원문:
-// "영구 오탐은 «경보 무시»를 학습시킨다"). 이 라운드는 그 판정 로직 자체는
-// 바꾸지 않는다 -- 문서화만 한다(§2 비타협).
-function resolveDispatchReceiptPathForUnconsumed(opts) {
+// HYK-356 (기전 확정: ORCH 실측 2026-08-25 헛울림 2건 -- .harness/coder-
+// task.md §0/§1): 경로 계약 자체는 아래 HYK-347 주석 그대로다(인자 ->
+// env(`DISPATCH_RECEIPT_PATH`) -> 없으면 null, fail-closed). ★그런데
+// ADMISSION_LEDGER_PATH(§ resolveAdmissionLedgerPathForUnconsumed)에는
+// 이미 셋째 자리 -- 설치기가 남기는 영속 포인터 파일
+// (`admission-ledger-path.json`) -- 가 있어 실 운용(env 미설정)에서도
+// 원장을 찾는데, DISPATCH_RECEIPT_PATH에는 그 셋째 자리가 아예 없었다
+// (env를 매 배달마다 한 번 `dispatch-worker.ps1`가 그 프로세스 안에서만
+// 잠깐 채우고, 이 축을 도는 장기 실행 감시 루프(watch-run.mjs)의
+// 프로세스 환경에는 그 값이 없다 -- ★합성 재현으로 직접 확인함, 아래
+// 재현 스크립트 참조). 그래서 영수증이 결과 파일보다 실제로 새것이어도
+// (진짜 소비 흔적) 이 축의 fail-closed 설계상 신호가 영구히 안 서
+// SUSPECTED_UNCONSUMED로 계속 새는 것이 실제 헛울림의 기전이었다(정확히
+// ⓒ 셋째 가능성, ⓐ role 역산/ⓑ repoRoot는 재현 결과 정상이었다). 이제
+// ADMISSION_LEDGER_PATH와 대칭으로 `dispatch-receipt-path.json` 영속
+// 포인터(installDispatchReceiptPointer, templates/harness-init/
+// install.mjs)를 셋째 자리로 추가한다 -- ★생산 활성화(실 관제실에 이
+// 포인터 파일이 실제로 생기는 것)는 그 설치기의 수동 재실행이 필요하다
+// (admission-ledger-path.json과 동일한 한계, installAdmissionLedgerPointer
+// 헤더 참조) -- 이 저장소 쪽 코드 변경만으로는 아직 production 값이
+// 바뀌지 않는다(정직 한계).
+function resolveDispatchReceiptPathForUnconsumed(repoRoot, opts) {
   if (isNonEmptyReceiptString(opts.dispatchReceiptPath)) {
     return opts.dispatchReceiptPath;
   }
@@ -1991,10 +1999,15 @@ function resolveDispatchReceiptPathForUnconsumed(opts) {
   if (isNonEmptyReceiptString(env.DISPATCH_RECEIPT_PATH)) {
     return env.DISPATCH_RECEIPT_PATH;
   }
-  return null;
+  return resolvePersistentDispatchReceiptPathForUnconsumed(repoRoot, opts);
 }
 
 const PERSISTENT_LEDGER_POINTER_FILENAME = "admission-ledger-path.json";
+// HYK-356: admission-ledger-path.json과 동일 설치기 관례(install.mjs의
+// installAdmissionLedgerPointer 옆에 installDispatchReceiptPointer로
+// 나란히 설치된다) -- 필드명만 다르다(`receiptPath`).
+const PERSISTENT_DISPATCH_RECEIPT_POINTER_FILENAME =
+  "dispatch-receipt-path.json";
 
 // admission-completion-adapter.mjs의 (export 안 된) resolvePersistentLedger
 // Paths와 동일 계약의 최소 재현 -- 그 함수는 mainRepoRoot()를
@@ -2003,10 +2016,20 @@ const PERSISTENT_LEDGER_POINTER_FILENAME = "admission-ledger-path.json";
 // 직접 공통 git 디렉터리를 구한다(process.cwd()가 이 워크트리와 다를 수
 // 있는 상황을 원천적으로 피한다 -- 더 정확하다, 새 로직 발명이 아니라
 // 같은 계약을 더 정확한 입력으로 재현한 것).
-function resolvePersistentLedgerPathForUnconsumed(repoRoot, opts) {
-  const gitCommonDirExecFn =
-    typeof opts.gitCommonDirExecFn === "function"
-      ? opts.gitCommonDirExecFn
+//
+// HYK-356: admission-ledger-path.json 전용이던 몸통을 그대로 뽑아
+// 일반화했다(파일명·JSON 필드명·exists/read 주입 함수만 인자로 받음) --
+// dispatch-receipt-path.json도 "설치기가 남기는 영속 포인터 파일에서
+// 필드 하나를 읽는다"는 같은 모양이라 새 로직을 발명하지 않고 이
+// 하나로 두 자리(원장·영수증)를 함께 커버한다. 로직·반환값은 원문과
+// 완전히 동일 -- 이름과 인자만 넓혔다.
+function resolvePersistentPointerField(
+  repoRoot,
+  { pointerFilename, field, gitCommonDirExecFn, existsFn, readFileFn },
+) {
+  const resolvedGitCommonDirExecFn =
+    typeof gitCommonDirExecFn === "function"
+      ? gitCommonDirExecFn
       : (cwd) =>
           execFileSync("git", ["rev-parse", "--git-common-dir"], {
             cwd,
@@ -2015,7 +2038,7 @@ function resolvePersistentLedgerPathForUnconsumed(repoRoot, opts) {
           });
   let commonDir;
   try {
-    commonDir = gitCommonDirExecFn(repoRoot).trim();
+    commonDir = resolvedGitCommonDirExecFn(repoRoot).trim();
   } catch {
     return null;
   }
@@ -2023,28 +2046,46 @@ function resolvePersistentLedgerPathForUnconsumed(repoRoot, opts) {
     ? commonDir
     : path.join(repoRoot, commonDir);
   const mainRoot = absCommonDir.replace(/[\\/]\.git$/, "");
-  const pointerPath = path.join(
-    mainRoot,
-    ".harness",
-    PERSISTENT_LEDGER_POINTER_FILENAME,
-  );
-  const existsFn =
-    typeof opts.ledgerPointerExistsFn === "function"
-      ? opts.ledgerPointerExistsFn
-      : existsSync;
-  if (!existsFn(pointerPath)) return null;
-  const readFileFn =
-    typeof opts.ledgerPointerReadFn === "function"
-      ? opts.ledgerPointerReadFn
-      : readFileSync;
+  const pointerPath = path.join(mainRoot, ".harness", pointerFilename);
+  const resolvedExistsFn =
+    typeof existsFn === "function" ? existsFn : existsSync;
+  if (!resolvedExistsFn(pointerPath)) return null;
+  const resolvedReadFileFn =
+    typeof readFileFn === "function" ? readFileFn : readFileSync;
   try {
-    const parsed = JSON.parse(readFileFn(pointerPath, "utf8"));
-    return typeof parsed.ledgerPath === "string" && parsed.ledgerPath
-      ? parsed.ledgerPath
+    const parsed = JSON.parse(resolvedReadFileFn(pointerPath, "utf8"));
+    return typeof parsed[field] === "string" && parsed[field]
+      ? parsed[field]
       : null;
   } catch {
     return null;
   }
+}
+
+function resolvePersistentLedgerPathForUnconsumed(repoRoot, opts) {
+  return resolvePersistentPointerField(repoRoot, {
+    pointerFilename: PERSISTENT_LEDGER_POINTER_FILENAME,
+    field: "ledgerPath",
+    gitCommonDirExecFn: opts.gitCommonDirExecFn,
+    existsFn: opts.ledgerPointerExistsFn,
+    readFileFn: opts.ledgerPointerReadFn,
+  });
+}
+
+// HYK-356: admission-ledger-path.json 짝 -- 같은 포인터 관례로
+// dispatch-receipt-path.json의 `receiptPath` 필드를 읽는다. 주입 함수
+// 이름은 ledger 쪽과 구별되게 `receiptPointer*`를 쓴다(§2-1-1류 "구별되는
+// 이름" 관례 재사용) -- gitCommonDirExecFn만은 같은 git 조회이므로 opts의
+// 같은 자리를 공유한다(호출자가 한 번만 주입해도 두 자리 모두 결정적으로
+// 재현된다).
+function resolvePersistentDispatchReceiptPathForUnconsumed(repoRoot, opts) {
+  return resolvePersistentPointerField(repoRoot, {
+    pointerFilename: PERSISTENT_DISPATCH_RECEIPT_POINTER_FILENAME,
+    field: "receiptPath",
+    gitCommonDirExecFn: opts.gitCommonDirExecFn,
+    existsFn: opts.receiptPointerExistsFn,
+    readFileFn: opts.receiptPointerReadFn,
+  });
 }
 
 function resolveAdmissionLedgerPathForUnconsumed(repoRoot, opts) {
@@ -2077,7 +2118,7 @@ function verifyReceiptConsumptionEvidence({
   if (!roundLabel) return false;
   const requiredLabel = resolveRequiredRoundLabel(repoRoot, role, opts);
   if (!requiredLabel || requiredLabel !== roundLabel) return false;
-  const receiptPath = resolveDispatchReceiptPathForUnconsumed(opts);
+  const receiptPath = resolveDispatchReceiptPathForUnconsumed(repoRoot, opts);
   if (!hasDispatchReceiptForRound(role, roundLabel, receiptPath, opts)) {
     return false;
   }
