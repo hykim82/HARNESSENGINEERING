@@ -36,6 +36,12 @@ const RELAY_HANDSHAKE_PATH = join(CHECK_DIR, "relay-handshake.mjs");
 const TIME_AUTHORITY_PATH = join(CHECK_DIR, "time-authority.mjs");
 const REJECT_STREAK_PATH = join(CHECK_DIR, "reject-streak.mjs");
 const ENVELOPE_ARCHIVE_PATH = join(CHECK_DIR, "envelope-archive.mjs");
+// HYK-353 2R §1 (P1-2): finalize-done.mjs now statically imports
+// first-observation.mjs (the active-observation gate) -- this fixed sidecar
+// list must grow to match finalize-done.mjs's own real dependency list, or
+// mutation 3 below (which stages finalize-done.mjs) fails to even load
+// (ERR_MODULE_NOT_FOUND) regardless of the mutation itself.
+const FIRST_OBSERVATION_PATH = join(CHECK_DIR, "first-observation.mjs");
 const WATCH_RESULT_PATH = join(RELAY_DIR, "watch-result.mjs");
 const FINALIZE_DONE_PATH = join(RELAY_DIR, "finalize-done.mjs");
 
@@ -101,6 +107,7 @@ function stageTree({ checkOverrides = {}, relayOverrides = {} } = {}) {
     "time-authority.mjs": TIME_AUTHORITY_PATH,
     "reject-streak.mjs": REJECT_STREAK_PATH,
     "envelope-archive.mjs": ENVELOPE_ARCHIVE_PATH,
+    "first-observation.mjs": FIRST_OBSERVATION_PATH,
   };
   for (const [name, srcPath] of Object.entries(checkFiles)) {
     const content = checkOverrides[name] ?? readFileSync(srcPath, "utf8");
