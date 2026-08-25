@@ -38,7 +38,12 @@ const TASK_ID_RE_G = /^task_id:\s*(\S+)/gim;
 // amount of waiting fixes). Never used to accept a match; only to produce
 // a distinct diagnosis for the latter case.
 const TASK_ID_ANYWHERE_RE = /task_id:\s*(\S+)/i;
-const DROPPED_AT_RE = /^dropped_at:\s*(.+)$/im;
+// HYK-353 2R §1 (P1-2): exported so finalize-done.mjs can resolve the exact
+// same `dropped_at:` raw text this file itself uses when it composes the
+// (taskId, droppedAt) key it hands to first-observation.mjs's
+// findFirstObservation -- same reuse-not-reinvent instruction as DONE_RE/
+// isWellFormedDoneTimestamp above.
+export const DROPPED_AT_RE = /^dropped_at:\s*(.+)$/im;
 // HYK-183: 결과 파일에 이 표지가 2개 이상이면 어느 것이 최종인지 결정할
 // 수 없으므로 조용히 하나를 고르지 않고 판정 불가로 멈춘다 (see the file
 // header above for the fuller rationale this constant shares with
@@ -770,8 +775,35 @@ function spawnObserveDoneLine({
       encoding: "utf8",
       stdio: ["pipe", "pipe", "pipe"],
     });
-    lastFirstObservationDetail = { attempted: true, ok: true };
-    return JSON.parse(out.trim());
+    const parsed = JSON.parse(out.trim());
+    // HYK-353 2R §1 (P1-1, 검토 반려): the child can exit 0 with a
+    // WELL-FORMED JSON payload while the actual log write inside it still
+    // failed (e.g. the observation log's path is a directory --
+    // `appendFileSync` throws, `recordFirstDoneObservation` catches its own
+    // error and returns `{recorded:false, reason:"record failed: ..."}`,
+    // and the pre-2R code here never looked at that field at all). Only
+    // `reason` starting with `"record failed:"` counts as a genuine write
+    // failure -- `reason === "already observed"` is the normal, expected
+    // shape on a round's 2nd+ poll (recordFirstDoneObservation intentionally
+    // no-ops once a generation already has an entry) and must stay
+    // `ok:true`.
+    const recordFailed =
+      parsed?.record?.recorded === false &&
+      typeof parsed.record.reason === "string" &&
+      parsed.record.reason.startsWith("record failed:");
+    if (recordFailed) {
+      console.error(
+        `relay-handshake: first-observation recording FAILED even though the child process exited cleanly (HYK-353 2R §1): ${parsed.record.reason}`,
+      );
+      lastFirstObservationDetail = {
+        attempted: true,
+        ok: false,
+        reason: parsed.record.reason,
+      };
+    } else {
+      lastFirstObservationDetail = { attempted: true, ok: true };
+    }
+    return parsed;
   } catch (err) {
     const detail = err.stderr ?? err.message;
     console.error(

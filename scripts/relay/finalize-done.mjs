@@ -39,13 +39,19 @@ import { join } from "node:path";
 // the exact same exported function.
 import {
   DONE_RE,
+  DROPPED_AT_RE,
   isWellFormedDoneTimestamp,
   resolveResultTaskId,
+  resolveLiveRoundFilePaths,
 } from "../check/relay-handshake.mjs";
 // HYK-332 §2: reuse reject-streak.mjs's own 'for:' cover-line regex and
 // REVIEW-family test -- same reuse-not-reinvent instruction as the
 // relay-handshake.mjs import above.
 import { FOR_LINE_RE_G, isReviewFamilyRole } from "../check/reject-streak.mjs";
+// HYK-353 2R §1 (P1-2): reuse first-observation.mjs's own generation-lookup
+// (active vs tombstoned) instead of re-deriving the same logic here -- same
+// reuse-not-reinvent instruction as the relay-handshake.mjs import above.
+import { findFirstObservation } from "../check/first-observation.mjs";
 
 const DONE_LINE_RE = /^>>>\s*DONE:/im;
 // HYK-325 §2-1 (2회째 교체 금지): once finalizeDone has replaced one
@@ -88,6 +94,15 @@ export const FINALIZE_DONE_REASON = Object.freeze({
   // HYK-325 §2-1: a malformed line was already replaced once before --
   // refuses to replace again (no infinite re-issue).
   ALREADY_REPLACED: "ALREADY_REPLACED",
+  // HYK-353 2R §1 (P1-2): a well-formed DONE line for this exact
+  // (taskId, droppedAt) round was already recorded by the first-observation
+  // channel (HYK-257-done-stamp-2) and has not yet been consumed -- the
+  // current '>>> DONE:' line is malformed only because the result file was
+  // rewritten AFTER that observation. Replacing it here would silently
+  // launder a suspicious intermediate rewrite (defeats HYK-257's whole
+  // point) instead of letting checkRelayHandshake's own
+  // DONE_REWRITTEN_AFTER_FIRST_OBSERVATION rejection ever see it.
+  ACTIVE_OBSERVATION_BLOCKED: "ACTIVE_OBSERVATION_BLOCKED",
   // HYK-332 §2: the result file's required 'task_id:' cover line (all
   // roles, coder-task.md §1⑴) is missing, ambiguous (2+ standalone
   // matches), or present but not a standalone column-0 line.
@@ -167,7 +182,48 @@ function checkRequiredHeaders({ existing, role, resultPath }) {
 // to the existing, conservative
 // ALREADY_FINALIZED refusal -- this producer never guesses which line to
 // touch when it can't tell.
-function resolveExistingDoneLine({ existing, resultPath, role, nowFn }) {
+// HYK-353 2R §1 (P1-2): "활성" 정의 -- 이 (taskId, droppedAt) 라운드의 첫
+// 관측 항목이 first-observation.mjs의 관측 로그에 존재하고(recorded),
+// 아직 소비 표시(tombstone, `markObservationConsumed`)가 없다. 이는
+// `findFirstObservation`이 이미 구현한 바로 그 판정이다(HYK-257-done-
+// stamp-3의 세대 구분 -- 소비까지 끝난 세대는 tombstone 이후 null을
+// 반환해 "활성"에서 자동으로 빠진다, 재사용 그대로). taskId/droppedAt을
+// 독립적으로 다시 구할 수 없으면(task 파일 없음/dropped_at 헤더 없음/
+// 파싱 불가) 판정 불가로 fail-open한다 -- 이 새 게이트가 기존
+// FINALIZED/ALREADY_REPLACED/malformed-replace 경로의 회귀를 만들지
+// 않는다는 §3 요구를 지키기 위함이다(기존 시험들은 task 파일 없이
+// finalizeDone을 직접 호출하는 경우가 많다).
+function resolveActiveObservation({ existing, role, harnessDir }) {
+  if (typeof harnessDir !== "string" || harnessDir.length === 0) return null;
+  const taskIdResult = resolveResultTaskId(existing);
+  if (!taskIdResult.ok) return null;
+  const { taskPath } = resolveLiveRoundFilePaths(role, harnessDir);
+  if (!existsSync(taskPath)) return null;
+  let taskContent;
+  try {
+    taskContent = readFileSync(taskPath, "utf8");
+  } catch {
+    return null;
+  }
+  const droppedMatch = taskContent.match(DROPPED_AT_RE);
+  if (!droppedMatch) return null;
+  const droppedAt = droppedMatch[1].trim();
+  const active = findFirstObservation({
+    taskId: taskIdResult.id,
+    droppedAt,
+    role,
+    harnessDir,
+  });
+  return active ? { taskId: taskIdResult.id, droppedAt, entry: active } : null;
+}
+
+function resolveExistingDoneLine({
+  existing,
+  resultPath,
+  role,
+  nowFn,
+  harnessDir,
+}) {
   // Checked BEFORE the malformed/valid split below: a file that already
   // underwent one replace must never be replaced again, regardless of
   // whether its CURRENT '>>> DONE:' line happens to look valid or
@@ -189,6 +245,24 @@ function resolveExistingDoneLine({ existing, resultPath, role, nowFn }) {
       ok: false,
       reasonCode: FINALIZE_DONE_REASON.ALREADY_FINALIZED,
       reason: `result file already has a '>>> DONE:' line -- finalize-done never overwrites (${resultPath})`,
+    };
+  }
+
+  // HYK-353 2R §1 (P1-2): this line looks malformed-and-replaceable, but if
+  // an active (not-yet-consumed) first observation already exists for this
+  // exact round, the malformed shape is itself suspicious (the file was
+  // rewritten AFTER a well-formed value was already seen) -- refuse the
+  // replace instead of quietly producing a fresh, never-observed value.
+  const activeObservation = resolveActiveObservation({
+    existing,
+    role,
+    harnessDir,
+  });
+  if (activeObservation) {
+    return {
+      ok: false,
+      reasonCode: FINALIZE_DONE_REASON.ACTIVE_OBSERVATION_BLOCKED,
+      reason: `finalize-done refuses to replace a malformed '>>> DONE:' line: an active (not yet consumed) first observation already exists for taskId='${activeObservation.taskId}' droppedAt='${activeObservation.droppedAt}' (first-observation.mjs) -- replacing it now would launder a suspicious post-observation rewrite instead of letting checkRelayHandshake's own intermediate-rewrite rejection see it (${resultPath})`,
     };
   }
 
@@ -276,7 +350,13 @@ export function finalizeDone({
   }
 
   if (DONE_LINE_RE.test(existing)) {
-    return resolveExistingDoneLine({ existing, resultPath, role, nowFn });
+    return resolveExistingDoneLine({
+      existing,
+      resultPath,
+      role,
+      nowFn,
+      harnessDir,
+    });
   }
 
   const nowMs = nowFn();

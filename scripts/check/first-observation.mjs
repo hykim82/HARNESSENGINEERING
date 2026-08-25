@@ -222,6 +222,19 @@ export function checkIntermediateRewrite({
 // spawn 2회 대신 1회 -- CLI 호출자(relay-handshake.mjs)가 이것 하나만
 // 쓴다). 정상 라운드에서 이 세대를 처음 보는 호출은 recordFirst가 방금
 // 쓴 값을 그대로 다시 읽어 스스로와 비교하므로 항상 rewritten:false다.
+// HYK-353 2R §1 (P1-1): the `record` field is additive -- existing callers
+// that only ever read `rewritten`/`reason`/`existing`/`currentDoneLine`
+// (this file's own tests, relay-handshake.mjs's pre-existing usage) see no
+// shape change. It surfaces `recordFirstDoneObservation`'s own outcome
+// (previously discarded -- called for its side effect only) so a caller can
+// tell "the record write itself failed" (`recorded:false`, `reason` starts
+// with 'record failed:') apart from "this generation was already observed"
+// (`recorded:false`, `reason` === 'already observed', the normal 2nd-poll
+// case) apart from "recorded for the first time just now" (`recorded:true`)
+// -- three genuinely different outcomes that `checkIntermediateRewrite`'s
+// own return value alone cannot distinguish (a write failure still leaves
+// `findFirstObservation` seeing nothing, so `checkIntermediateRewrite`
+// reports the same "no prior observation" shape as a clean first poll).
 export function observeDoneLine({
   taskId,
   droppedAt,
@@ -231,7 +244,7 @@ export function observeDoneLine({
   doneLineRaw,
   observedAtMs = Date.now(),
 }) {
-  recordFirstDoneObservation({
+  const recordOutcome = recordFirstDoneObservation({
     taskId,
     droppedAt,
     role,
@@ -240,7 +253,7 @@ export function observeDoneLine({
     doneLineRaw,
     observedAtMs,
   });
-  return checkIntermediateRewrite({
+  const rewriteOutcome = checkIntermediateRewrite({
     taskId,
     droppedAt,
     role,
@@ -248,6 +261,13 @@ export function observeDoneLine({
     resultContent,
     doneLineRaw,
   });
+  return {
+    ...rewriteOutcome,
+    record: {
+      recorded: recordOutcome.recorded,
+      reason: recordOutcome.reason,
+    },
+  };
 }
 
 // HYK-257-done-stamp-2/3 §2 범위1: CLI 진입점. relay-handshake.mjs는 이
@@ -288,8 +308,18 @@ if (
     process.exit(1);
   }
   if (!harnessDir || !payloadJson) {
+    // HYK-353 2R §1 (P2-2, 검토 반려): every other error path in this CLI
+    // block prints a `"first-observation: "`-prefixed line -- this one used
+    // to be the sole exception (bare `"usage: ..."`, no prefix). The
+    // parent's genuine-attempt-vs-missing-sidecar split
+    // (relay-handshake.mjs's `spawnObserveDoneLine`) keys off that exact
+    // prefix, so a stdin-cut-before-payload failure (empty stdin, e.g. the
+    // pipe closed early) was silently indistinguishable from "the script
+    // file itself doesn't exist" -- both would fail the `.includes(
+    // "first-observation: ")` check even though this one is a genuine,
+    // reachable failure.
     console.error(
-      "usage: node first-observation.mjs <harnessDir> <payloadJson={taskId,droppedAt,role,resultContent,doneLineRaw,action?} via stdin>",
+      "first-observation: usage: node first-observation.mjs <harnessDir> <payloadJson={taskId,droppedAt,role,resultContent,doneLineRaw,action?} via stdin>",
     );
     process.exit(1);
   }
