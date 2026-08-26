@@ -1155,6 +1155,124 @@ test("HYK-344 2R 회귀: admission-completion-adapter.mjs가 격리 픽스처에
   }
 });
 
+// HYK-353 §3-3: mirrors the HYK-344 2R regression right above it, one level
+// down -- writeMutantCli never copies first-observation.mjs as a sidecar
+// either, so a genuinely-absent first-observation.mjs (isolated fixture gap,
+// not a real spawn failure) must stay the pre-existing harmless exit 0, not
+// be misread as an attempted-and-failed first-observation recording.
+test("HYK-353: first-observation.mjs가 격리 픽스처에 아예 없으면(Node MODULE_NOT_FOUND) -- exit 3으로 오분류하지 않는다, exit 0 그대로", () => {
+  const { rootDir, mutantPath } = writeMutantCli(RELAY_HANDSHAKE_SRC); // 무변조 사본 -- writeMutantCli는 first-observation.mjs를 사이드카로 복사하지 않는다
+  try {
+    withFixtureDirCli((dir) => {
+      writeValidFixture(dir, "coder", "HYK-353-missing-first-observation-1");
+      const { exit, stdout, stderr } = runMutantCli(mutantPath, ["coder", dir]);
+      assert.equal(
+        exit,
+        0,
+        `a genuinely-absent first-observation.mjs sibling file must stay the pre-existing harmless no-op (exit 0), not be misread as an attempted-and-failed recording (exit 3)\nstdout=${stdout}\nstderr=${stderr}`,
+      );
+      assert.doesNotMatch(
+        stderr,
+        /first-observation recording FAILED/,
+        "MODULE_NOT_FOUND from a missing sibling file must never route through the exit-3 channel",
+      );
+    });
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+// HYK-353 §3-3: the positive case -- first-observation.mjs sidecar IS
+// present but genuinely fails on its own (a real defect, not a fixture
+// gap). Proves the round's own verdict stays ok:true (§3-3's "라운드
+// 합격/불합격 신호를 부수적 기록 실패와 뒤섞지 마라" honored) while the CLI
+// exit code still surfaces the failure distinctly (exit 3, same channel as
+// HYK-344's admission-completion sibling) instead of folding it into a
+// silent exit 0 (the exact HYK-353 실사고 shape this task closes).
+test("HYK-353: first-observation.mjs가 존재하지만 실제로 실패하면 -- 라운드는 ok:true 그대로, CLI는 exit 3으로 구별해 드러낸다", () => {
+  const { rootDir, mutantPath } = writeMutantCli(RELAY_HANDSHAKE_SRC);
+  const scriptsCheckDir = join(rootDir, "scripts", "check");
+  // A first-observation.mjs stand-in that always fails with a stable,
+  // self-identifying "first-observation: " prefix -- exactly the shape a
+  // genuine failure inside the real file would produce (usage guard /
+  // payload-not-parseable / stdin-read failure all share this prefix, see
+  // spawnObserveDoneLine's own header comment).
+  writeFileSync(
+    join(scriptsCheckDir, "first-observation.mjs"),
+    "console.error('first-observation: forced failure for HYK-353 test'); process.exit(1);\n",
+    "utf8",
+  );
+  try {
+    withFixtureDirCli((dir) => {
+      writeValidFixture(dir, "coder", "HYK-353-genuine-failure-1");
+      const { exit, stdout, stderr } = runMutantCli(mutantPath, ["coder", dir]);
+      assert.equal(
+        exit,
+        3,
+        `a genuine first-observation failure must exit 3 (distinct from 0/1), not be silently folded into exit 0\nstdout=${stdout}\nstderr=${stderr}`,
+      );
+      assert.match(
+        stderr,
+        /first-observation recording FAILED/,
+        "exit 3 must be traceable to the first-observation channel specifically, not just any nonzero exit",
+      );
+    });
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+// HYK-353 2R §1 (P1-1, 검토 반려): the real first-observation.mjs sidecar is
+// copied alongside the mutant relay-handshake.mjs (writeMutantCli's default
+// siblings don't include it) so this test exercises the ACTUAL write-failure
+// detection path (recordFirstDoneObservation's own catch -> observeDoneLine's
+// `record` field -> spawnObserveDoneLine's `recordFailed` check), not a
+// stand-in. Making the observation log PATH a directory (appendFileSync
+// throws EISDIR) reproduces 검토자의 정확한 재현: the child process still
+// exits 0 with well-formed JSON, and only the NEW `record.reason` field lets
+// the parent tell "wrote nothing" apart from "wrote successfully".
+const FIRST_OBSERVATION_SRC = execFileSync(
+  "git",
+  ["show", "HEAD:scripts/check/first-observation.mjs"],
+  { encoding: "utf8" },
+);
+
+test("HYK-353 2R: 관측 로그 경로가 디렉터리라서 쓰기 자체가 실패하면 -- 자식이 exit 0으로 JSON을 돌려줘도 exit 3으로 구별해 드러낸다 (P1-1)", () => {
+  const { rootDir, mutantPath } = writeMutantCli(RELAY_HANDSHAKE_SRC);
+  const scriptsCheckDir = join(rootDir, "scripts", "check");
+  writeFileSync(
+    join(scriptsCheckDir, "first-observation.mjs"),
+    FIRST_OBSERVATION_SRC,
+    "utf8",
+  );
+  try {
+    withFixtureDirCli((dir) => {
+      writeValidFixture(dir, "coder", "HYK-353-2R-write-failure-1");
+      // Make the observation log's own path a directory -- appendFileSync
+      // inside recordFirstDoneObservation throws (EISDIR), caught internally
+      // and returned as {recorded:false, reason:"record failed: ..."}.
+      mkdirSync(join(dir, "coder-done-first-observation.jsonl"));
+      const { exit, stdout, stderr } = runMutantCli(mutantPath, ["coder", dir]);
+      assert.equal(
+        exit,
+        3,
+        `an observation-log write failure must exit 3, not the pre-2R silent exit 0\nstdout=${stdout}\nstderr=${stderr}`,
+      );
+      assert.match(
+        stderr,
+        /first-observation recording FAILED even though the child process exited cleanly/,
+      );
+      assert.match(stderr, /record failed:/);
+      assert.ok(
+        existsSync(join(dir, "coder-done-first-observation.jsonl")),
+        "the directory-shaped log path must be left untouched, not silently replaced",
+      );
+    });
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 test("HYK-189 (e) mutation M3: removing non-zero exit propagation on failure -> a blocked handshake wrongly reports success (RED signal; proves exit-code propagation is load-bearing)", () => {
   const target =
     "  if (result.ok) {\n    process.exit(0);\n  } else {\n    console.error(result.reason);\n    process.exit(1);\n  }\n";
