@@ -559,6 +559,38 @@ function persistentFallbackAllowed() {
 // one prior behavioral difference (relay-handshake.mjs's `!dir` guard) it
 // carries forward unchanged for this file's call site below.
 
+// HYK-302/355 §2-C (coder-task.md, «최소 요구»): under `node --test`
+// (persistentFallbackAllowed()===false), this stays the exact
+// byte-identical pre-existing no-op -- HYK-227 2R §3 항1's "사유 문구를
+// 바꾸지 마라" still applies to this branch (admission-completion-
+// persistent-source.test.mjs's ⓒ/ⓒ-2/ⓒ-3 pin exactly this shape under
+// `node --test`, and the entire local test suite runs there). Outside
+// `node --test`, with genuinely NEITHER source resolved (no
+// ADMISSION_LEDGER_PATH, no installer-written pointer file), the
+// pre-existing behavior was an equally silent {attempted:false} -- the
+// exact "quiet default" HYK-289's own header calls out as not a safety
+// net. This now reuses the SAME loud, already-tested channel HYK-312's own
+// UNISOLATED_HARNESS_DIR gate established (`blocked:true`, CLI exit 1, and
+// -- via relay-handshake.mjs's existing
+// exitDistinctlyOnAdmissionCompletionFailure, unchanged by this round --
+// the round's own CLI surfaces this as exit 3, not a silent 0) instead of
+// inventing a new one. 정직 한계: in real production this branch should
+// essentially never fire (ORCH confirmed the real control-room pointer
+// file is already installed) -- this closes the "nobody configured
+// anything at all" shape, the exact one HYK-227 1R's silent no-op let
+// through into a real incident (see this file's own header).
+function unconfiguredLedgerOutcome() {
+  if (!persistentFallbackAllowed()) {
+    return { attempted: false };
+  }
+  return {
+    attempted: false,
+    blocked: true,
+    reasonCode: "LEDGER_PATH_UNCONFIGURED",
+    reason: `admission-completion-adapter: no admission ledger path configured -- set ADMISSION_LEDGER_PATH, or ensure the installer-written .harness/${PERSISTENT_LEDGER_POINTER_FILENAME} pointer file exists at the main repo root -- see HYK-302`,
+  };
+}
+
 // HYK-342/HYK-249: `reason` (optional) is forwarded to completeAdmission
 // Reservation below unchanged -- see that function's own header. Every
 // pre-existing caller omits it (byte-identical no-op stamping behavior).
@@ -609,7 +641,7 @@ export function autoCompleteAdmission({
     }
   }
   if (!ledgerPath) {
-    return { attempted: false };
+    return unconfiguredLedgerOutcome();
   }
   const lockPath =
     process.env.ADMISSION_LOCK_PATH ||

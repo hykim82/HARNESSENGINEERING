@@ -20,7 +20,7 @@ import {
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
-import { execSync } from "node:child_process";
+import { execSync, spawnSync } from "node:child_process";
 import { runAdmissionCli } from "../supervisor/admission-cli.mjs";
 
 const CHECK_DIR = dirname(fileURLToPath(import.meta.url));
@@ -310,6 +310,129 @@ test("ⓒ-3: a pointer file missing/blank ledgerPath degrades to the same no-op"
     assert.deepEqual(outcome, { attempted: false });
   } finally {
     rmSync(repoDir, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// ⓒ-4 HYK-302/355 §2-C («최소 요구»): ⓒ와 정확히 같은 입력(neither env nor
+// persistent pointer present)이지만 NODE_TEST_CONTEXT까지 벗겨 "진짜 실
+// 운영/실험 호출"을 흉내낸다 -- ⓒ 자신은 `node --test` 아래에서 도는 한
+// NODE_TEST_CONTEXT가 항상 설정돼 있어 이 새 분기(persistentFallbackAllowed()
+// ===true일 때만 발화)에 절대 닿지 않는다(§0 회귀 0: ⓒ는 그래서 여전히
+// {attempted:false} 그대로 통과한다 -- 위 시험이 이미 그걸 증명한다). 이
+// 시험이 바로 그 "닿는" 경우다.
+// ---------------------------------------------------------------------------
+
+test("ⓒ-4 HYK-302/355 §2-C: neither env nor persistent pointer present, AND not under node --test (real production/experiment shape) -> loud refusal (blocked:true), not the silent no-op", async () => {
+  const repoDir = buildSyntheticRepo("hyk302-355-c4-repo-");
+  try {
+    // Deliberately no writePointerFile() call -- same premise as ⓒ.
+    const { autoCompleteAdmission } = await importFreshAdapter();
+    const outcome = await withSyntheticRepoCwd(repoDir, () =>
+      withoutNodeTestContext(async () => {
+        delete process.env.ADMISSION_LEDGER_PATH;
+        delete process.env.ADMISSION_LOCK_PATH;
+        return autoCompleteAdmission({ reservationId: "HYK-302-355-C4-LOUD" });
+      }),
+    );
+    assert.equal(outcome.attempted, false);
+    assert.equal(outcome.blocked, true);
+    assert.equal(outcome.reasonCode, "LEDGER_PATH_UNCONFIGURED");
+    assert.match(outcome.reason, /^admission-completion-adapter: /);
+    assert.match(
+      outcome.reason,
+      /ADMISSION_LEDGER_PATH/,
+      "reason must name what to set -- '막다른 길 금지' (coder-task.md §2-C)",
+    );
+  } finally {
+    rmSync(repoDir, { recursive: true, force: true });
+  }
+});
+
+test("ⓒ-5 HYK-302/355 §2-C: the CLI entry point surfaces ⓒ-4's shape as exit 1 with the reason on stderr (mirrors HYK-312's own UNISOLATED_HARNESS_DIR blocked shape, an already-established channel)", () => {
+  const repoDir = buildSyntheticRepo("hyk302-355-c5-repo-");
+  try {
+    const env = { ...process.env };
+    delete env.ADMISSION_LEDGER_PATH;
+    delete env.ADMISSION_LOCK_PATH;
+    delete env.NODE_TEST_CONTEXT;
+    const res = spawnSync(
+      process.execPath,
+      [ADAPTER_PATH, "HYK-302-355-C5-LOUD"],
+      { cwd: repoDir, env, encoding: "utf8" },
+    );
+    assert.equal(res.status, 1);
+    assert.match(res.stderr, /^admission-completion-adapter: /);
+    assert.match(res.stderr, /ADMISSION_LEDGER_PATH/);
+  } finally {
+    rmSync(repoDir, { recursive: true, force: true });
+  }
+});
+
+test("ⓒ-6 변이 RED: removing the persistentFallbackAllowed() guard from unconfiguredLedgerOutcome() makes ⓒ (node --test, no config) go RED (loud refusal fires even under node --test), and the real source is provably untouched", async () => {
+  const src = readFileSync(ADAPTER_PATH, "utf8");
+  const target = `function unconfiguredLedgerOutcome() {
+  if (!persistentFallbackAllowed()) {
+    return { attempted: false };
+  }
+  return {`;
+  const count = src.split(target).length - 1;
+  assert.equal(
+    count,
+    1,
+    `mutation target "§2-C persistentFallbackAllowed() guard" must appear exactly once in the current working-tree source (found ${count})`,
+  );
+  const mutated = src.replace(
+    target,
+    `function unconfiguredLedgerOutcome() {\n  return {`,
+  );
+
+  const repoDir = buildSyntheticRepo("hyk302-355-c6-repo-");
+  const checkDir = join(repoDir, "scripts", "check");
+  const supervisorDir = join(repoDir, "scripts", "supervisor");
+  const mutatedFilePath = join(checkDir, "admission-completion-adapter.mjs");
+  try {
+    mkdirSync(checkDir, { recursive: true });
+    mkdirSync(supervisorDir, { recursive: true });
+    for (const name of [
+      "admission-ledger-core.mjs",
+      "admission-ledger-store.mjs",
+    ]) {
+      writeFileSync(
+        join(supervisorDir, name),
+        readFileSync(join(CHECK_DIR, "..", "supervisor", name), "utf8"),
+        "utf8",
+      );
+    }
+    writeFileSync(
+      join(checkDir, "ledger-pointer-shared.mjs"),
+      readFileSync(join(CHECK_DIR, "ledger-pointer-shared.mjs"), "utf8"),
+      "utf8",
+    );
+    writeFileSync(mutatedFilePath, mutated, "utf8");
+
+    const mod = await import(`file://${mutatedFilePath}?t=${Math.random()}`);
+    const outcome = await withSyntheticRepoCwd(repoDir, async () => {
+      delete process.env.ADMISSION_LEDGER_PATH;
+      delete process.env.ADMISSION_LOCK_PATH;
+      return mod.autoCompleteAdmission({
+        reservationId: "HYK-302-355-C6-MUTANT",
+      });
+    });
+
+    assert.equal(
+      outcome.blocked,
+      true,
+      "RED: with the guard removed, the loud refusal now fires even under node --test -- exactly the regression ⓒ/ⓒ-2/ⓒ-3 must catch",
+    );
+  } finally {
+    rmSync(repoDir, { recursive: true, force: true });
+    const after = readFileSync(ADAPTER_PATH, "utf8");
+    assert.equal(
+      after,
+      src,
+      "원복 증명: the real admission-completion-adapter.mjs must be byte-identical before/after this test -- only an in-memory string and a tmp-dir copy were ever mutated",
+    );
   }
 });
 
