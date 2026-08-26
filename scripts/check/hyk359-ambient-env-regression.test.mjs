@@ -74,10 +74,21 @@ test("HYK-359 완료조건4: 아홉 개 시험 파일 각각이 떠도는 ADMISS
         encoding: "utf8",
         env: floatingEnv,
       });
-      if (res.status !== 0) {
+      // ORCH review (msg_0465cc91dc7d): "exit 0" alone is the SAME failure
+      // shape this file's own NODE_TEST_CONTEXT bug just produced -- a
+      // child that silently runs zero tests also exits 0. Read the actual
+      // executed-test count out of the child's own `ℹ tests <n>` summary
+      // line (node:test's default reporter, stdout) and require it to be
+      // positive, so a child that quietly ran nothing can never pass this
+      // assertion by accident again.
+      const testsRun = Number(
+        (res.stdout ?? "").match(/^ℹ tests (\d+)/m)?.[1] ?? 0,
+      );
+      if (res.status !== 0 || testsRun < 1) {
         failures.push({
           file,
           status: res.status,
+          testsRun,
           stderrTail: (res.stderr ?? "").slice(-2000),
         });
       }
@@ -85,7 +96,7 @@ test("HYK-359 완료조건4: 아홉 개 시험 파일 각각이 떠도는 ADMISS
     assert.deepEqual(
       failures,
       [],
-      `these files still fail under a floating ambient ledger env -- isolation regressed: ${JSON.stringify(failures, null, 2)}`,
+      `these files still fail (or silently ran zero tests) under a floating ambient ledger env -- isolation regressed: ${JSON.stringify(failures, null, 2)}`,
     );
   } finally {
     rmSync(dir, { recursive: true, force: true });

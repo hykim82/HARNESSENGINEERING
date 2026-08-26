@@ -37,6 +37,16 @@ const AMBIENT_LEDGER_ENV_KEYS = [
 // caller-supplied `overrides` applied on top (so a test that explicitly
 // wants to set one of these three for its own fixture -- e.g. pointing at
 // its own mkdtemp ledger -- still can, on purpose, in its own call).
+// ★MERGE, not replace: `overrides` is shallow-merged onto the cleaned base,
+// it does not become the child's whole env -- a caller passing an
+// `overrides` object that itself already spreads `...process.env` (this
+// repo's existing pattern at two relay-handshake.test.mjs call sites, see
+// coder.md) gets that raw, unfiltered ambient value back for any key it
+// doesn't explicitly set itself. That is fine here because both existing
+// callers explicitly set every key they care about -- but a future caller
+// relying on `overrides` to fully REPLACE the child's env (no ambient
+// inheritance at all) would not get that from this function; it would need
+// to build its own complete env object instead.
 export function isolatedChildEnv(overrides = {}, baseEnv = process.env) {
   const clean = { ...baseEnv };
   for (const key of AMBIENT_LEDGER_ENV_KEYS) delete clean[key];
