@@ -510,6 +510,44 @@ function checkAmbiguousCoverViolation(recordOutcome) {
   };
 }
 
+// HYK-357-352 2R §1 (P1-1 수리): a SECOND, DISTINCT gate from the
+// AMBIGUOUS-count violation above. 1R added `FOR_LINE_ISSUE_ID_UNPARSEABLE`
+// (reject-streak.mjs) for a 'for:' line whose VALUE doesn't start with
+// HYK-<digits> (e.g. 'for: ORCH') but never wired it into any consumption
+// block -- the reasonCode existed, nothing consumed it, so the 2026-08-25
+// 실사고 shape (`for: ORCH` + a valid `task_id:`) still passed consumption
+// silently with the rejected verdict never reaching the ledger (검토 1R 급소
+// 1). ⛔This is kept as its OWN Set/function (not folded into
+// AMBIGUOUS_COVER_REASON_CODES/checkAmbiguousCoverViolation) precisely
+// because 검토 1R flagged that reusing that block's "표지 줄이 2개 이상"
+// wording here would misdescribe the cause: this is a VALUE violation
+// (one cover line, wrong content), not a COUNT violation (too many cover
+// lines). Currently the sole member is FOR_LINE_ISSUE_ID_UNPARSEABLE -- the
+// plain ISSUE_ID_UNPARSEABLE branch (task_id:-sourced, 'for:' line absent)
+// is deliberately NOT added here; that shape is unchanged, pre-existing,
+// out-of-scope behavior (HYK-266 여지, 이 조각의 §1이 명시한 대상은 오직
+// 'for:'가 원인인 갈래다).
+const VALUE_INVALID_COVER_REASON_CODES = new Set([
+  REJECT_STREAK_REASON_CODE.FOR_LINE_ISSUE_ID_UNPARSEABLE,
+]);
+
+function checkValueInvalidCoverViolation(recordOutcome) {
+  const isValueInvalid =
+    recordOutcome.attempted &&
+    !recordOutcome.ok &&
+    VALUE_INVALID_COVER_REASON_CODES.has(recordOutcome.reasonCode);
+  if (!isValueInvalid) return null;
+  // coder-task.md §1-3: a block must not be a dead end -- `recordOutcome.reason`
+  // already carries the 1R diagnostic (which line was at fault, and whether
+  // 'task_id:' was itself fine, verbatim including its value) built by
+  // reject-streak.mjs's buildForLineUnparseableOutcome; carried through
+  // here unmodified so the fix-it detail is not re-derived or paraphrased.
+  return {
+    ok: false,
+    reason: `consumption rejected (HYK-357): REVIEW-family result file's 'for:' line fails the value spec (must be a CODER round's harness task_id, HYK-<digits>-..., not a role/person name -- ${recordOutcome.reason}) -- envelope/task archiving and consumption receipt are skipped for this round ('for:' 줄을 판정 대상 CODER 라운드의 harness task_id로 고쳐 다시 완료해야 한다)`,
+  };
+}
+
 // HYK-262 §3 (책임자 확정 2R): the two shapes that reach `attempted:true,
 // ok:false` WITHOUT being an ambiguous-cover-line violation (checked above)
 // -- e.g. 판정 줄 0개(NO_VERDICT_LINE) or 원장 파일 손상(LEDGER_READ_FAILED/
@@ -1196,6 +1234,8 @@ function runCompletionSideEffects({
   const recordOutcome = autoRecordRejectStreak({ role, resultContent });
   const coverViolation = checkAmbiguousCoverViolation(recordOutcome);
   if (coverViolation) return coverViolation;
+  const valueViolation = checkValueInvalidCoverViolation(recordOutcome);
+  if (valueViolation) return valueViolation;
   traceUnblockedRecordFailure(recordOutcome);
   // HYK-204: the moment this function confirms a round's result file is
   // COMPLETE (every check above already passed) is also the last moment

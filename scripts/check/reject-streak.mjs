@@ -228,6 +228,25 @@ function buildForLineUnparseableOutcome(rawTaskId, taskIdMatches) {
   };
 }
 
+// HYK-357-352 2R §2 (P1-2 판정 = ⓑ 위반 아님, 스펙 오류(ORCH) 자인): a
+// 'for:' value and a 'task_id:' value CAN legitimately name different
+// issues -- e.g. a bundled multi-issue review round whose 'for:' reads
+// 'HYK-344+347+350' (issueIdFrom only ever extracts the FIRST HYK-<n>
+// prefix, so a bundled round's derived issueId can differ from its own
+// task_id:'s issueId BY DESIGN, not by mistake). Strict equality would
+// therefore block a legitimate round (정당한 거부 회귀 -- the exact thing
+// this task's §2 forbids). Instead of blocking, this surfaces the mismatch
+// as a non-blocking diagnostic note (§0-B "없음≠모름": the fact that the
+// two values point at different issues must not vanish silently just
+// because it isn't a violation) -- see recordRejectStreakFromResultText
+// for where this note reaches the console log.
+function crossIssueNote(rawTaskIdFromForLine, issueId, taskIdMatches) {
+  if (!rawTaskIdFromForLine || taskIdMatches.length !== 1) return null;
+  const taskIdIssueId = issueIdFrom(taskIdMatches[0][1]);
+  if (!taskIdIssueId || taskIdIssueId === issueId) return null;
+  return `'for:' issue (${issueId}) differs from 'task_id:' issue (${taskIdIssueId}) -- not treated as a violation (e.g. legitimate bundled multi-issue rounds), noted for visibility only`;
+}
+
 // Reads `.harness/review.md`-shaped text and extracts what `record` needs:
 // which task the verdict is about (prefers `for:`, the coder-round id being
 // judged; falls back to the review round's own `task_id:` if `for:` is
@@ -306,12 +325,14 @@ export function parseReviewOutcome(reviewText) {
   // 막히지는 않는다.
   const doneMatches = [...text.matchAll(DONE_LINE_RE_G)];
   const doneAt = doneMatches.length === 1 ? doneMatches[0][1] : null;
+  const note = crossIssueNote(rawTaskIdFromForLine, issueId, taskIdMatches);
   return {
     ok: true,
     taskId: rawTaskId,
     issueId,
     verdict: verdictMatches[0][1].toLowerCase(),
     doneAt,
+    ...(note ? { crossIssueNote: note } : {}),
   };
 }
 
@@ -360,6 +381,15 @@ export function applyOutcome(ledger, { issueId, taskId, verdict, at, doneAt }) {
 // missing/ambiguous on either side falls back to the original two-field
 // comparison (no new false negatives introduced when the new signal isn't
 // available) -- see parseReviewOutcome's own DONE-line handling.
+// HYK-357-352 2R §2: extracted so computeRecord doesn't gain a third/fourth
+// ternary branch (repo's ESLint complexity ceiling) -- both computeRecord
+// return sites attach the SAME optional field the same way.
+function withCrossIssueNote(result, outcome) {
+  return outcome.crossIssueNote
+    ? { ...result, crossIssueNote: outcome.crossIssueNote }
+    : result;
+}
+
 export function computeRecord({ reviewText, ledger, at }) {
   const outcome = parseReviewOutcome(reviewText);
   if (!outcome.ok)
@@ -377,15 +407,18 @@ export function computeRecord({ reviewText, ledger, at }) {
     lastEntry.verdict === outcome.verdict &&
     (lastEntry.done_at ?? null) === (outcome.doneAt ?? null);
   if (isDuplicate) {
-    return {
-      ok: true,
-      duplicate: true,
-      ledger,
-      issueId: outcome.issueId,
-      taskId: outcome.taskId,
-      verdict: outcome.verdict,
-      streak: existing.streak,
-    };
+    return withCrossIssueNote(
+      {
+        ok: true,
+        duplicate: true,
+        ledger,
+        issueId: outcome.issueId,
+        taskId: outcome.taskId,
+        verdict: outcome.verdict,
+        streak: existing.streak,
+      },
+      outcome,
+    );
   }
 
   const nextLedger = applyOutcome(ledger, {
@@ -395,15 +428,18 @@ export function computeRecord({ reviewText, ledger, at }) {
     at,
     doneAt: outcome.doneAt,
   });
-  return {
-    ok: true,
-    duplicate: false,
-    ledger: nextLedger,
-    issueId: outcome.issueId,
-    taskId: outcome.taskId,
-    verdict: outcome.verdict,
-    streak: nextLedger.issues[outcome.issueId].streak,
-  };
+  return withCrossIssueNote(
+    {
+      ok: true,
+      duplicate: false,
+      ledger: nextLedger,
+      issueId: outcome.issueId,
+      taskId: outcome.taskId,
+      verdict: outcome.verdict,
+      streak: nextLedger.issues[outcome.issueId].streak,
+    },
+    outcome,
+  );
 }
 
 // Extracted from loadLedger (HYK-160 quality-check: keep loadLedger's own
@@ -525,12 +561,21 @@ export function recordRejectStreakFromResultText({
       reason: `reject-streak auto-record: UNJUDGABLE -- ${computed.reason} (fail-open, ledger untouched)`,
     };
   }
+  // HYK-357-352 2R §2: a 'for:'/'task_id:' cross-issue mismatch is NOT a
+  // violation (see crossIssueNote's own header) but must not vanish
+  // silently either -- appended to the SAME reason line every caller
+  // already logs (relay-handshake.mjs's autoRecordRejectStreak does
+  // `console.log(autoRecord.reason)` on the ok:true path), no new log
+  // channel needed.
+  const noteSuffix = computed.crossIssueNote
+    ? ` [NOTE: ${computed.crossIssueNote}]`
+    : "";
   if (computed.duplicate) {
     return {
       attempted: true,
       ok: true,
       duplicate: true,
-      reason: `reject-streak auto-record: DUPLICATE -- ${computed.issueId} <- ${computed.taskId} verdict=${computed.verdict} already last-recorded (streak=${computed.streak} unchanged), ledger not rewritten`,
+      reason: `reject-streak auto-record: DUPLICATE -- ${computed.issueId} <- ${computed.taskId} verdict=${computed.verdict} already last-recorded (streak=${computed.streak} unchanged), ledger not rewritten${noteSuffix}`,
     };
   }
 
@@ -539,7 +584,7 @@ export function recordRejectStreakFromResultText({
     attempted: true,
     ok: true,
     duplicate: false,
-    reason: `reject-streak auto-record: ${computed.issueId} <- ${computed.taskId} verdict=${computed.verdict} -> streak=${computed.streak}`,
+    reason: `reject-streak auto-record: ${computed.issueId} <- ${computed.taskId} verdict=${computed.verdict} -> streak=${computed.streak}${noteSuffix}`,
   };
 }
 
