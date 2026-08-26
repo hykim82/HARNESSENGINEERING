@@ -1319,3 +1319,85 @@ if (invokedDirectly) {
   }
   process.exit(0);
 }
+
+// HYK-160-coder-8 (moved from selfcheck-inventory.test.mjs by HYK-364, same
+// behavior): `.claude/settings.local.json` is git-untracked by design, so a
+// fresh worktree/CI checkout never has it -- there is no live wiring to
+// audit there (covered by the local weekly selfcheck loop instead). Living
+// here (a non-test module) lets any caller -- the test file's own (47)/(58)
+// cases, and HYK-364's skip-inventory-contract.test.mjs -- resolve the exact
+// same skip decision instead of re-implementing it.
+export const CI_MISSING_SETTINGS_SKIP_REASON =
+  "live wiring file '.claude/settings.local.json' is local-only (git-untracked) -- CI has no live wiring to audit here; local weekly selfcheck covers this gap";
+
+export function resolveRealRepoGuard47({
+  repoRoot,
+  settingsPathOverride,
+  existsFn = existsSync,
+  readFileFn = (p) => readFileSync(p, "utf8"),
+}) {
+  const settingsPath =
+    settingsPathOverride ?? join(repoRoot, ".claude", "settings.local.json");
+  if (!existsFn(settingsPath)) {
+    return { outcome: "skip", reason: CI_MISSING_SETTINGS_SKIP_REASON };
+  }
+  const manifest = JSON.parse(
+    readFileFn(
+      join(repoRoot, "scripts", "check", "enforcement-inventory.json"),
+    ),
+  );
+  const settings = JSON.parse(readFileFn(settingsPath));
+  const result = checkEnforcementInventoryRegistration({
+    manifest,
+    settingsByLocation: { "repo-settings": settings },
+  });
+  return {
+    outcome: result.status === "PASS" ? "pass" : "fail",
+    reason: result.reason,
+  };
+}
+
+export const CI_MISSING_REPO_SETTINGS_SKIP_REASON =
+  "live wiring file '.claude/settings.local.json' is local-only (git-untracked) -- CI has no repo-settings wiring to audit here; local weekly selfcheck covers this gap";
+
+export function resolveRealRepoGuard58({
+  repoRoot,
+  repoSettingsPathOverride,
+  userSettingsPathOverride,
+  existsFn = existsSync,
+  readFileFn = (p) => readFileSync(p, "utf8"),
+}) {
+  const repoSettingsPath =
+    repoSettingsPathOverride ??
+    join(repoRoot, ".claude", "settings.local.json");
+  if (!existsFn(repoSettingsPath)) {
+    return { outcome: "skip", reason: CI_MISSING_REPO_SETTINGS_SKIP_REASON };
+  }
+  const repoSettings = JSON.parse(readFileFn(repoSettingsPath));
+
+  const userSettingsPath =
+    userSettingsPathOverride ??
+    join(
+      process.env.USERPROFILE || process.env.HOME,
+      ".claude-team",
+      "settings.json",
+    );
+  let userSettings = { hooks: {} };
+  if (existsFn(userSettingsPath)) {
+    try {
+      userSettings = JSON.parse(readFileFn(userSettingsPath));
+    } catch {
+      userSettings = { hooks: {} };
+    }
+  }
+
+  const hookCommands = [
+    ...parseHookCommands(repoSettings),
+    ...parseHookCommands(userSettings),
+  ];
+  const result = checkHookSetAdditive({ hookCommands });
+  return {
+    outcome: result.status === "PASS" ? "pass" : "fail",
+    reason: result.reason,
+  };
+}

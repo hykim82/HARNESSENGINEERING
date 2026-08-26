@@ -1,12 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import {
-  mkdtempSync,
-  writeFileSync,
-  rmSync,
-  mkdirSync,
-  existsSync,
-} from "node:fs";
+import { mkdtempSync, writeFileSync, rmSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { execFileSync } from "node:child_process";
@@ -38,9 +32,12 @@ import {
   checkControlRoomDoc,
   extractRunChunks,
   matchesExactRunnerInvocation,
+  resolveRealRepoGuard47,
+  resolveRealRepoGuard58,
+  CI_MISSING_SETTINGS_SKIP_REASON,
+  CI_MISSING_REPO_SETTINGS_SKIP_REASON,
 } from "./selfcheck-inventory.mjs";
 import * as selfcheckInventoryModule from "./selfcheck-inventory.mjs";
-import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 // --- POSIX shell discovery (HYK-129 coder-9/10, review-8/9 defect 2/1) ------
@@ -1718,35 +1715,10 @@ test("(46) forbidden side effect: checkEnforcementInventoryRegistration never mu
 // a test without relying on node:test's own skip semantics to prove the
 // point. A path can be injected so the "absent" state is exercised
 // deterministically, never by moving/deleting the real file.
-const CI_MISSING_SETTINGS_SKIP_REASON =
-  "live wiring file '.claude/settings.local.json' is local-only (git-untracked) -- CI has no live wiring to audit here; local weekly selfcheck covers this gap";
-
-export function resolveRealRepoGuard47({
-  repoRoot,
-  settingsPathOverride,
-  existsFn = existsSync,
-  readFileFn = (p) => readFileSync(p, "utf8"),
-}) {
-  const settingsPath =
-    settingsPathOverride ?? join(repoRoot, ".claude", "settings.local.json");
-  if (!existsFn(settingsPath)) {
-    return { outcome: "skip", reason: CI_MISSING_SETTINGS_SKIP_REASON };
-  }
-  const manifest = JSON.parse(
-    readFileFn(
-      join(repoRoot, "scripts", "check", "enforcement-inventory.json"),
-    ),
-  );
-  const settings = JSON.parse(readFileFn(settingsPath));
-  const result = checkEnforcementInventoryRegistration({
-    manifest,
-    settingsByLocation: { "repo-settings": settings },
-  });
-  return {
-    outcome: result.status === "PASS" ? "pass" : "fail",
-    reason: result.reason,
-  };
-}
+// HYK-364: resolveRealRepoGuard47 now lives in selfcheck-inventory.mjs (a
+// non-test module) so skip-inventory-contract.test.mjs can import the exact
+// same skip-decision function instead of re-implementing it -- moved, not
+// duplicated; behavior unchanged.
 
 test("(47) real-repo regression guard: the actual enforcement-inventory.json + the actual repo .claude/settings.local.json agree (report-style-guard drift closed, HYK-160 라이더ⓐ)", (t) => {
   const repoRoot = fileURLToPath(new URL("../..", import.meta.url));
@@ -2098,50 +2070,10 @@ test("(57) paired good: role-guard's command restored into the same loaded setti
 // `~/.claude-team/settings.json` path already degrades gracefully (treated
 // as empty hooks when absent, same as before this fix) -- only the repo
 // settings file needed the same skip-if-absent treatment test 47 got.
-const CI_MISSING_REPO_SETTINGS_SKIP_REASON =
-  "live wiring file '.claude/settings.local.json' is local-only (git-untracked) -- CI has no repo-settings wiring to audit here; local weekly selfcheck covers this gap";
-
-export function resolveRealRepoGuard58({
-  repoRoot,
-  repoSettingsPathOverride,
-  userSettingsPathOverride,
-  existsFn = existsSync,
-  readFileFn = (p) => readFileSync(p, "utf8"),
-}) {
-  const repoSettingsPath =
-    repoSettingsPathOverride ??
-    join(repoRoot, ".claude", "settings.local.json");
-  if (!existsFn(repoSettingsPath)) {
-    return { outcome: "skip", reason: CI_MISSING_REPO_SETTINGS_SKIP_REASON };
-  }
-  const repoSettings = JSON.parse(readFileFn(repoSettingsPath));
-
-  const userSettingsPath =
-    userSettingsPathOverride ??
-    join(
-      process.env.USERPROFILE || process.env.HOME,
-      ".claude-team",
-      "settings.json",
-    );
-  let userSettings = { hooks: {} };
-  if (existsFn(userSettingsPath)) {
-    try {
-      userSettings = JSON.parse(readFileFn(userSettingsPath));
-    } catch {
-      userSettings = { hooks: {} };
-    }
-  }
-
-  const hookCommands = [
-    ...parseHookCommands(repoSettings),
-    ...parseHookCommands(userSettings),
-  ];
-  const result = checkHookSetAdditive({ hookCommands });
-  return {
-    outcome: result.status === "PASS" ? "pass" : "fail",
-    reason: result.reason,
-  };
-}
+// HYK-364: resolveRealRepoGuard58 now lives in selfcheck-inventory.mjs (a
+// non-test module) so skip-inventory-contract.test.mjs can import the exact
+// same skip-decision function instead of re-implementing it -- moved, not
+// duplicated; behavior unchanged.
 
 test("(58) real-repo regression guard: EXPECTED_INJECTED_HOOKS all appear in the actual repo settings.local.json + user-level settings.json (both real files, additive check against live wiring)", (t) => {
   const repoRoot = fileURLToPath(new URL("../..", import.meta.url));
