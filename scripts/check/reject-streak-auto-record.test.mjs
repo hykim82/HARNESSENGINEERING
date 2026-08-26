@@ -490,7 +490,7 @@ function writeMutantPair(rootDir, { relaySrc, streakSrc }) {
 
 test("(f) mutation #1 (필수): computeRecord's idempotency dedupe removed -> a re-confirmed identical handshake DOUBLE-COUNTS the streak -> RED", () => {
   const target =
-    "  const existing = ledger?.issues?.[outcome.issueId];\n  const lastEntry = existing?.history?.[existing.history.length - 1];\n  const isDuplicate =\n    !!lastEntry &&\n    lastEntry.task_id === outcome.taskId &&\n    lastEntry.verdict === outcome.verdict &&\n    (lastEntry.done_at ?? null) === (outcome.doneAt ?? null);\n  if (isDuplicate) {\n    return {\n      ok: true,\n      duplicate: true,\n      ledger,\n      issueId: outcome.issueId,\n      taskId: outcome.taskId,\n      verdict: outcome.verdict,\n      streak: existing.streak,\n    };\n  }\n\n";
+    "  const existing = ledger?.issues?.[outcome.issueId];\n  const lastEntry = existing?.history?.[existing.history.length - 1];\n  const isDuplicate =\n    !!lastEntry &&\n    lastEntry.task_id === outcome.taskId &&\n    lastEntry.verdict === outcome.verdict &&\n    (lastEntry.done_at ?? null) === (outcome.doneAt ?? null);\n  if (isDuplicate) {\n    return withCrossIssueNote(\n      {\n        ok: true,\n        duplicate: true,\n        ledger,\n        issueId: outcome.issueId,\n        taskId: outcome.taskId,\n        verdict: outcome.verdict,\n        streak: existing.streak,\n      },\n      outcome,\n    );\n  }\n\n";
   assertExactlyOneMatch(
     REJECT_STREAK_SRC_HEAD,
     target,

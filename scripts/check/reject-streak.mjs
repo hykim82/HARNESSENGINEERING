@@ -111,6 +111,15 @@ export const REJECT_STREAK_REASON_CODE = Object.freeze({
   // "막지 않는 2종"이 흔적을 남길 때 어느 종류인지 구분하는 데 쓰인다.
   NO_COVER_LINE: "NO_COVER_LINE",
   ISSUE_ID_UNPARSEABLE: "ISSUE_ID_UNPARSEABLE",
+  // HYK-357: 'for:' 값이 있는데 HYK-<숫자>로 시작하지 않아 실패한 갈래를
+  // ISSUE_ID_UNPARSEABLE에서 따로 뗀 코드. 이 갈래는 조용히 task_id:로
+  // 폴백하지 않는다(§0-B "없음≠모름") -- 대신 이 reasonCode 자체가
+  // "for: 때문에 막혔다"는 신호가 되고, reason 문자열에 task_id: 줄이
+  // 멀쩡했는지(값과 함께)를 항상 덧붙여 사람이 5초 안에 원인을 알 수
+  // 있게 한다. task_id: 자체가 unparseable한 경우(즉 rawTaskId가 for:
+  // 없이 task_id:에서 왔거나, for:는 있었지만 task_id:도 같이 깨진 경우)는
+  // 여전히 일반 ISSUE_ID_UNPARSEABLE로 남는다.
+  FOR_LINE_ISSUE_ID_UNPARSEABLE: "FOR_LINE_ISSUE_ID_UNPARSEABLE",
   NO_VERDICT_LINE: "NO_VERDICT_LINE",
   LEDGER_READ_FAILED: "LEDGER_READ_FAILED",
   LEDGER_INVALID_JSON: "LEDGER_INVALID_JSON",
@@ -193,6 +202,51 @@ function normalizeNewlines(text) {
   return (text ?? "").replace(/\r\n/g, "\n");
 }
 
+// HYK-357: extracted out of parseReviewOutcome to keep that function under
+// the repo's max-lines-per-function/complexity ceiling. Builds the
+// diagnostic reason for the 'for:'-sourced-but-unparseable branch -- no
+// silent fallback to 'task_id:' (§0-B "없음≠모름"), but the reason string
+// always names whether 'task_id:' was itself fine (and its value) so a
+// human can tell within 5 seconds that 'for:' -- not 'task_id:' -- is what
+// blocked this round.
+function buildForLineUnparseableOutcome(rawTaskId, taskIdMatches) {
+  const singleTaskIdRaw =
+    taskIdMatches.length === 1 ? taskIdMatches[0][1] : null;
+  const taskIdIssueId = singleTaskIdRaw ? issueIdFrom(singleTaskIdRaw) : null;
+  const taskIdDiagnostic =
+    taskIdMatches.length === 0
+      ? "task_id: 줄도 없다"
+      : taskIdMatches.length > 1
+        ? `task_id: 줄이 ${taskIdMatches.length}개라 그쪽도 모호하다`
+        : taskIdIssueId
+          ? `task_id: 은 멀쩡했다 (task_id: ${singleTaskIdRaw}) -- 그러나 조용히 그쪽으로 폴백하지 않는다`
+          : `task_id: 도 같이 깨졌다 (task_id: ${singleTaskIdRaw})`;
+  return {
+    ok: false,
+    reasonCode: REJECT_STREAK_REASON_CODE.FOR_LINE_ISSUE_ID_UNPARSEABLE,
+    reason: `reject-streak record: 'for: ${rawTaskId}' does not start with HYK-<digits> -- cannot derive issue id from the 'for:' line. ${taskIdDiagnostic}`,
+  };
+}
+
+// HYK-357-352 2R §2 (P1-2 판정 = ⓑ 위반 아님, 스펙 오류(ORCH) 자인): a
+// 'for:' value and a 'task_id:' value CAN legitimately name different
+// issues -- e.g. a bundled multi-issue review round whose 'for:' reads
+// 'HYK-344+347+350' (issueIdFrom only ever extracts the FIRST HYK-<n>
+// prefix, so a bundled round's derived issueId can differ from its own
+// task_id:'s issueId BY DESIGN, not by mistake). Strict equality would
+// therefore block a legitimate round (정당한 거부 회귀 -- the exact thing
+// this task's §2 forbids). Instead of blocking, this surfaces the mismatch
+// as a non-blocking diagnostic note (§0-B "없음≠모름": the fact that the
+// two values point at different issues must not vanish silently just
+// because it isn't a violation) -- see recordRejectStreakFromResultText
+// for where this note reaches the console log.
+function crossIssueNote(rawTaskIdFromForLine, issueId, taskIdMatches) {
+  if (!rawTaskIdFromForLine || taskIdMatches.length !== 1) return null;
+  const taskIdIssueId = issueIdFrom(taskIdMatches[0][1]);
+  if (!taskIdIssueId || taskIdIssueId === issueId) return null;
+  return `'for:' issue (${issueId}) differs from 'task_id:' issue (${taskIdIssueId}) -- not treated as a violation (e.g. legitimate bundled multi-issue rounds), noted for visibility only`;
+}
+
 // Reads `.harness/review.md`-shaped text and extracts what `record` needs:
 // which task the verdict is about (prefers `for:`, the coder-round id being
 // judged; falls back to the review round's own `task_id:` if `for:` is
@@ -206,6 +260,7 @@ export function parseReviewOutcome(reviewText) {
   const taskIdMatches = [...text.matchAll(TASK_ID_LINE_RE_G)];
 
   let rawTaskId = null;
+  let rawTaskIdFromForLine = false;
   if (forMatches.length > 1) {
     return {
       ok: false,
@@ -215,6 +270,7 @@ export function parseReviewOutcome(reviewText) {
   }
   if (forMatches.length === 1) {
     rawTaskId = forMatches[0][1];
+    rawTaskIdFromForLine = true;
   } else if (taskIdMatches.length > 1) {
     return {
       ok: false,
@@ -234,6 +290,12 @@ export function parseReviewOutcome(reviewText) {
   }
   const issueId = issueIdFrom(rawTaskId);
   if (!issueId) {
+    // HYK-357: 조용한 폴백은 하지 않는다 -- rawTaskId가 'for:'에서 왔고
+    // 그 값이 깨졌다면, 'task_id:'가 멀쩡했든 아니든 그 사실이 reason에
+    // 그대로 드러나야 사람이 5초 안에 "for: 때문"임을 알 수 있다.
+    if (rawTaskIdFromForLine) {
+      return buildForLineUnparseableOutcome(rawTaskId, taskIdMatches);
+    }
     return {
       ok: false,
       reasonCode: REJECT_STREAK_REASON_CODE.ISSUE_ID_UNPARSEABLE,
@@ -263,12 +325,14 @@ export function parseReviewOutcome(reviewText) {
   // 막히지는 않는다.
   const doneMatches = [...text.matchAll(DONE_LINE_RE_G)];
   const doneAt = doneMatches.length === 1 ? doneMatches[0][1] : null;
+  const note = crossIssueNote(rawTaskIdFromForLine, issueId, taskIdMatches);
   return {
     ok: true,
     taskId: rawTaskId,
     issueId,
     verdict: verdictMatches[0][1].toLowerCase(),
     doneAt,
+    ...(note ? { crossIssueNote: note } : {}),
   };
 }
 
@@ -317,6 +381,15 @@ export function applyOutcome(ledger, { issueId, taskId, verdict, at, doneAt }) {
 // missing/ambiguous on either side falls back to the original two-field
 // comparison (no new false negatives introduced when the new signal isn't
 // available) -- see parseReviewOutcome's own DONE-line handling.
+// HYK-357-352 2R §2: extracted so computeRecord doesn't gain a third/fourth
+// ternary branch (repo's ESLint complexity ceiling) -- both computeRecord
+// return sites attach the SAME optional field the same way.
+function withCrossIssueNote(result, outcome) {
+  return outcome.crossIssueNote
+    ? { ...result, crossIssueNote: outcome.crossIssueNote }
+    : result;
+}
+
 export function computeRecord({ reviewText, ledger, at }) {
   const outcome = parseReviewOutcome(reviewText);
   if (!outcome.ok)
@@ -334,15 +407,18 @@ export function computeRecord({ reviewText, ledger, at }) {
     lastEntry.verdict === outcome.verdict &&
     (lastEntry.done_at ?? null) === (outcome.doneAt ?? null);
   if (isDuplicate) {
-    return {
-      ok: true,
-      duplicate: true,
-      ledger,
-      issueId: outcome.issueId,
-      taskId: outcome.taskId,
-      verdict: outcome.verdict,
-      streak: existing.streak,
-    };
+    return withCrossIssueNote(
+      {
+        ok: true,
+        duplicate: true,
+        ledger,
+        issueId: outcome.issueId,
+        taskId: outcome.taskId,
+        verdict: outcome.verdict,
+        streak: existing.streak,
+      },
+      outcome,
+    );
   }
 
   const nextLedger = applyOutcome(ledger, {
@@ -352,15 +428,18 @@ export function computeRecord({ reviewText, ledger, at }) {
     at,
     doneAt: outcome.doneAt,
   });
-  return {
-    ok: true,
-    duplicate: false,
-    ledger: nextLedger,
-    issueId: outcome.issueId,
-    taskId: outcome.taskId,
-    verdict: outcome.verdict,
-    streak: nextLedger.issues[outcome.issueId].streak,
-  };
+  return withCrossIssueNote(
+    {
+      ok: true,
+      duplicate: false,
+      ledger: nextLedger,
+      issueId: outcome.issueId,
+      taskId: outcome.taskId,
+      verdict: outcome.verdict,
+      streak: nextLedger.issues[outcome.issueId].streak,
+    },
+    outcome,
+  );
 }
 
 // Extracted from loadLedger (HYK-160 quality-check: keep loadLedger's own
@@ -482,12 +561,21 @@ export function recordRejectStreakFromResultText({
       reason: `reject-streak auto-record: UNJUDGABLE -- ${computed.reason} (fail-open, ledger untouched)`,
     };
   }
+  // HYK-357-352 2R §2: a 'for:'/'task_id:' cross-issue mismatch is NOT a
+  // violation (see crossIssueNote's own header) but must not vanish
+  // silently either -- appended to the SAME reason line every caller
+  // already logs (relay-handshake.mjs's autoRecordRejectStreak does
+  // `console.log(autoRecord.reason)` on the ok:true path), no new log
+  // channel needed.
+  const noteSuffix = computed.crossIssueNote
+    ? ` [NOTE: ${computed.crossIssueNote}]`
+    : "";
   if (computed.duplicate) {
     return {
       attempted: true,
       ok: true,
       duplicate: true,
-      reason: `reject-streak auto-record: DUPLICATE -- ${computed.issueId} <- ${computed.taskId} verdict=${computed.verdict} already last-recorded (streak=${computed.streak} unchanged), ledger not rewritten`,
+      reason: `reject-streak auto-record: DUPLICATE -- ${computed.issueId} <- ${computed.taskId} verdict=${computed.verdict} already last-recorded (streak=${computed.streak} unchanged), ledger not rewritten${noteSuffix}`,
     };
   }
 
@@ -496,7 +584,7 @@ export function recordRejectStreakFromResultText({
     attempted: true,
     ok: true,
     duplicate: false,
-    reason: `reject-streak auto-record: ${computed.issueId} <- ${computed.taskId} verdict=${computed.verdict} -> streak=${computed.streak}`,
+    reason: `reject-streak auto-record: ${computed.issueId} <- ${computed.taskId} verdict=${computed.verdict} -> streak=${computed.streak}${noteSuffix}`,
   };
 }
 
