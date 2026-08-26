@@ -503,6 +503,99 @@ test("HYK-340 2R P1-1: env/명시 인자 둘 다 없어도 -- 영속 포인터 �
 });
 
 // ---------------------------------------------------------------------------
+// (1h) HYK-356 기전 확정 재현: env도 --dispatch-receipt-path도 둘 다
+// 없으면(실 감시 루프의 실제 프로세스 환경과 동형 -- dispatch-worker.ps1가
+// DISPATCH_RECEIPT_PATH를 매 배달 호출 자신의 프로세스 안에서만 잠깐
+// 채우고, 장기 실행 감시 루프에는 그 값이 없다) -- 영수증이 결과 파일보다
+// 실제로 새것이어도(진짜 소비 흔적) CONSUMED가 나오지 않고
+// SUSPECTED_UNCONSUMED로 새는 것이 오늘 관측된 헛울림의 정확한 기전이다.
+// ★영속 포인터 파일(dispatch-receipt-path.json)이 없는 상태에서만 이
+// 재현이 성립한다 -- 있으면 (1i)로 CONSUMED가 나와야 정상(그게 이 라운드의
+// 수리).
+// ---------------------------------------------------------------------------
+test("HYK-356 기전 재현: env/인자/영속 포인터 셋 다 없으면 -- 진짜 새 영수증이 있어도 SUSPECTED_UNCONSUMED로 샌다(관측된 헛울림과 동일 기전) (1/1)", () => {
+  withTempDir("hyk356-repro-no-pointer-", (dir) => {
+    initPlainGitRepo(dir);
+    const label = "HYK-356-repro-1";
+    writeTaskFile(dir, { taskId: label, mtimeIso: "2026-08-25T00:00:00Z" });
+    writeResultFileAt(dir, {
+      updatedAtIso: "2026-08-25T00:10:00Z",
+      taskId: label,
+    });
+    // 실제 배달 영수증 + COMPLETED 원장이 진짜로 존재해도(정당한 소비) --
+    writeReceiptAt(dir, { role: "coder", mtimeIso: "2026-08-25T00:15:00Z" });
+    writeDispatchReceiptsJsonl(dir, [
+      { role: "CODER", harness_task_label: label, dispatchId: "ctx_1" },
+    ]);
+    writeAdmissionLedger(dir, { [label]: { status: "COMPLETED" } });
+    const now = new Date("2026-08-25T01:00:00Z").getTime();
+    // -- 이 축이 그 둘을 찾을 방법이 전혀 없다(인자 X, env X, 영속
+    // 포인터 파일도 이 워크트리엔 없음 -- writeDispatchReceiptsJsonl/
+    // writeAdmissionLedger는 파일을 "어딘가"에 썼을 뿐, dispatch-receipt-
+    // path.json/admission-ledger-path.json 포인터로 그 자리를 가리키지
+    // 않았다).
+    const result = judgeFor(dir, now, { env: {} });
+    assert.equal(
+      result.verdict,
+      UNCONSUMED_VERDICT.SUSPECTED_UNCONSUMED,
+      "진짜 소비 흔적이 있어도 대조 경로를 못 찾으면 fail-closed로 신호를 만들지 않아야 한다(설계 그대로) -- 헛울림의 진짜 원인은 이 fail-closed 자체가 아니라 셋째 자리(영속 포인터)가 없었다는 것",
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// (1i) HYK-356 수리 확인: dispatch-receipt-path.json 영속 포인터가
+// admission-ledger-path.json과 나란히 설치돼 있으면(이 라운드가 새로
+// 추가한 셋째 자리) -- 위 (1h)와 완전히 같은 조건에서 이제는 인자도
+// env도 없이 CONSUMED가 나온다. resolvePersistentDispatchReceiptPathFor
+// Unconsumed가 admission 쪽과 동일한 gitCommonDirExecFn 주입 한 자리를
+// 공유한다는 것도 이 시험이 함께 증명한다(별도 주입 없이 한 번의
+// gitCommonDirExecFn으로 원장·영수증 포인터 둘 다 해소됨).
+// ---------------------------------------------------------------------------
+test("HYK-356 수리 확인: dispatch-receipt-path.json 영속 포인터가 설치돼 있으면 -- 인자/env 없이도 CONSUMED/CONSUMED_VIA_RECEIPT (1/1)", () => {
+  withTempDir("hyk356-pointer-installed-", (dir) => {
+    initPlainGitRepo(dir);
+    const label = "HYK-356-fixed-1";
+    writeTaskFile(dir, { taskId: label, mtimeIso: "2026-08-25T00:00:00Z" });
+    writeResultFileAt(dir, {
+      updatedAtIso: "2026-08-25T00:10:00Z",
+      taskId: label,
+    });
+    writeReceiptAt(dir, { role: "coder", mtimeIso: "2026-08-25T00:15:00Z" });
+    const receiptPath = writeDispatchReceiptsJsonl(dir, [
+      { role: "CODER", harness_task_label: label, dispatchId: "ctx_1" },
+    ]);
+    const ledgerPath = writeAdmissionLedger(dir, {
+      [label]: { status: "COMPLETED" },
+    });
+    mkdirSync(join(dir, ".harness"), { recursive: true });
+    writeFileSync(
+      join(dir, ".harness", "admission-ledger-path.json"),
+      JSON.stringify({ ledgerPath }),
+      "utf8",
+    );
+    // HYK-356이 새로 설치하는 셋째 자리 -- installDispatchReceiptPointer
+    // (templates/harness-init/install.mjs)가 실 운용에서 이 파일을 쓴다.
+    writeFileSync(
+      join(dir, ".harness", "dispatch-receipt-path.json"),
+      JSON.stringify({ receiptPath }),
+      "utf8",
+    );
+    const now = new Date("2026-08-25T01:00:00Z").getTime();
+    const result = judgeFor(dir, now, {
+      env: {}, // 인자도 env도 둘 다 없음 -- 영속 포인터만으로 대조돼야 한다.
+      gitCommonDirExecFn: (cwd) =>
+        execFileSync("git", ["rev-parse", "--git-common-dir"], {
+          cwd,
+          encoding: "utf8",
+        }),
+    });
+    assert.equal(result.verdict, UNCONSUMED_VERDICT.CONSUMED);
+    assert.equal(result.reasonCode, UNCONSUMED_REASON.CONSUMED_VIA_RECEIPT);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // (2) 340 회귀: 영수증이 없는 진짜 미소비는 여전히 SUSPECTED_UNCONSUMED
 // (요구2 -- 오탐 반대 방향인 위양성 방지가 아니라, 새 신호가 없다고
 // 기존 판정을 조용히 CONSUMED로 낙관하지 않는지 확인).
