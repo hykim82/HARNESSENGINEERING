@@ -111,6 +111,15 @@ export const REJECT_STREAK_REASON_CODE = Object.freeze({
   // "막지 않는 2종"이 흔적을 남길 때 어느 종류인지 구분하는 데 쓰인다.
   NO_COVER_LINE: "NO_COVER_LINE",
   ISSUE_ID_UNPARSEABLE: "ISSUE_ID_UNPARSEABLE",
+  // HYK-357: 'for:' 값이 있는데 HYK-<숫자>로 시작하지 않아 실패한 갈래를
+  // ISSUE_ID_UNPARSEABLE에서 따로 뗀 코드. 이 갈래는 조용히 task_id:로
+  // 폴백하지 않는다(§0-B "없음≠모름") -- 대신 이 reasonCode 자체가
+  // "for: 때문에 막혔다"는 신호가 되고, reason 문자열에 task_id: 줄이
+  // 멀쩡했는지(값과 함께)를 항상 덧붙여 사람이 5초 안에 원인을 알 수
+  // 있게 한다. task_id: 자체가 unparseable한 경우(즉 rawTaskId가 for:
+  // 없이 task_id:에서 왔거나, for:는 있었지만 task_id:도 같이 깨진 경우)는
+  // 여전히 일반 ISSUE_ID_UNPARSEABLE로 남는다.
+  FOR_LINE_ISSUE_ID_UNPARSEABLE: "FOR_LINE_ISSUE_ID_UNPARSEABLE",
   NO_VERDICT_LINE: "NO_VERDICT_LINE",
   LEDGER_READ_FAILED: "LEDGER_READ_FAILED",
   LEDGER_INVALID_JSON: "LEDGER_INVALID_JSON",
@@ -193,6 +202,32 @@ function normalizeNewlines(text) {
   return (text ?? "").replace(/\r\n/g, "\n");
 }
 
+// HYK-357: extracted out of parseReviewOutcome to keep that function under
+// the repo's max-lines-per-function/complexity ceiling. Builds the
+// diagnostic reason for the 'for:'-sourced-but-unparseable branch -- no
+// silent fallback to 'task_id:' (§0-B "없음≠모름"), but the reason string
+// always names whether 'task_id:' was itself fine (and its value) so a
+// human can tell within 5 seconds that 'for:' -- not 'task_id:' -- is what
+// blocked this round.
+function buildForLineUnparseableOutcome(rawTaskId, taskIdMatches) {
+  const singleTaskIdRaw =
+    taskIdMatches.length === 1 ? taskIdMatches[0][1] : null;
+  const taskIdIssueId = singleTaskIdRaw ? issueIdFrom(singleTaskIdRaw) : null;
+  const taskIdDiagnostic =
+    taskIdMatches.length === 0
+      ? "task_id: 줄도 없다"
+      : taskIdMatches.length > 1
+        ? `task_id: 줄이 ${taskIdMatches.length}개라 그쪽도 모호하다`
+        : taskIdIssueId
+          ? `task_id: 은 멀쩡했다 (task_id: ${singleTaskIdRaw}) -- 그러나 조용히 그쪽으로 폴백하지 않는다`
+          : `task_id: 도 같이 깨졌다 (task_id: ${singleTaskIdRaw})`;
+  return {
+    ok: false,
+    reasonCode: REJECT_STREAK_REASON_CODE.FOR_LINE_ISSUE_ID_UNPARSEABLE,
+    reason: `reject-streak record: 'for: ${rawTaskId}' does not start with HYK-<digits> -- cannot derive issue id from the 'for:' line. ${taskIdDiagnostic}`,
+  };
+}
+
 // Reads `.harness/review.md`-shaped text and extracts what `record` needs:
 // which task the verdict is about (prefers `for:`, the coder-round id being
 // judged; falls back to the review round's own `task_id:` if `for:` is
@@ -206,6 +241,7 @@ export function parseReviewOutcome(reviewText) {
   const taskIdMatches = [...text.matchAll(TASK_ID_LINE_RE_G)];
 
   let rawTaskId = null;
+  let rawTaskIdFromForLine = false;
   if (forMatches.length > 1) {
     return {
       ok: false,
@@ -215,6 +251,7 @@ export function parseReviewOutcome(reviewText) {
   }
   if (forMatches.length === 1) {
     rawTaskId = forMatches[0][1];
+    rawTaskIdFromForLine = true;
   } else if (taskIdMatches.length > 1) {
     return {
       ok: false,
@@ -234,6 +271,12 @@ export function parseReviewOutcome(reviewText) {
   }
   const issueId = issueIdFrom(rawTaskId);
   if (!issueId) {
+    // HYK-357: 조용한 폴백은 하지 않는다 -- rawTaskId가 'for:'에서 왔고
+    // 그 값이 깨졌다면, 'task_id:'가 멀쩡했든 아니든 그 사실이 reason에
+    // 그대로 드러나야 사람이 5초 안에 "for: 때문"임을 알 수 있다.
+    if (rawTaskIdFromForLine) {
+      return buildForLineUnparseableOutcome(rawTaskId, taskIdMatches);
+    }
     return {
       ok: false,
       reasonCode: REJECT_STREAK_REASON_CODE.ISSUE_ID_UNPARSEABLE,
