@@ -31,6 +31,7 @@ import {
   PENDING_STALL_THRESHOLD_MS,
 } from "./relay-handshake.mjs";
 import { runAdmissionCli } from "../supervisor/admission-cli.mjs";
+import { isolatedChildEnv } from "./admission-ledger-env-isolation.mjs";
 
 // import.meta.url is resolved relative to this file's own location, not the
 // process cwd -- unaffected by the cwd axis (repo root vs scripts/check),
@@ -51,6 +52,10 @@ function runCli(args, opts = {}) {
   const res = spawnSync(process.execPath, [CLI_PATH, ...args], {
     encoding: "utf8",
     ...opts,
+    // HYK-359: never let an ambient ADMISSION_LEDGER_PATH/ADMISSION_LOCK_PATH/
+    // DISPATCH_RECEIPT_PATH leaked from the invoking shell reach this child --
+    // see admission-ledger-env-isolation.mjs's header for why.
+    env: isolatedChildEnv(opts.env),
   });
   if (res.error) {
     assert.fail(
