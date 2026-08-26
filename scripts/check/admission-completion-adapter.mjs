@@ -50,6 +50,15 @@ import {
   COMPLETION_REASON,
 } from "../supervisor/admission-ledger-core.mjs";
 import { withLedgerLock } from "../supervisor/admission-ledger-store.mjs";
+// HYK-302/355 §2-A: single-source these two (previously duplicated here and
+// in orch-stall-detect.mjs / relay-handshake.mjs respectively) -- see
+// ledger-pointer-shared.mjs's own header for why this is now imported
+// rather than duplicated a third time, and coder.md for the fixture sibling
+// lists this round updated to keep every isolated mutation test loadable.
+import {
+  PERSISTENT_LEDGER_POINTER_FILENAME,
+  isInsideGitWorktree,
+} from "./ledger-pointer-shared.mjs";
 // HYK-342 2R P1-1 (검토 원문 "회수 표식의 생산자 권한이 검증되지 않는다"):
 // ⛔처음에는 relay-handshake.mjs에서 resolveResultTaskId/
 // resolveResultBlockedState를 static import했으나, 실측 결과 이 파일을
@@ -197,8 +206,6 @@ function mainRepoRoot() {
     return root;
   }
 }
-
-const PERSISTENT_LEDGER_POINTER_FILENAME = "admission-ledger-path.json";
 
 // resolvePersistentLedgerPaths -- reads the installer-written pointer file
 // (see install.mjs's installAdmissionLedgerPointer). Fail-open on every
@@ -544,36 +551,44 @@ function persistentFallbackAllowed() {
   return !process.env.NODE_TEST_CONTEXT;
 }
 
-// isInsideGitWorktree -- HYK-312 §1: the persistent-pointer fallback resolves
-// the ledger path via `mainRepoRoot()`, which is derived from THIS PROCESS'S
-// cwd, not from `harnessDir` (the round directory actually being consumed).
-// 2026-08-19 오전 실사고: ORCH ran the production CLI entry point
-// (`relay-handshake.mjs CODER <scratch-copy-of-.harness>`) from inside the
-// real repo checkout -- cwd resolved to the real repo, so the real pointer
-// file was found and the real global ledger got mutated, even though the
-// `.harness` actually being consumed was a plain filesystem copy outside any
-// git worktree. This function is the gate that catches exactly that shape:
-// "is the round directory the caller told us to consume itself inside SOME
-// git worktree" -- a plain `git rev-parse --is-inside-work-tree` run with
-// cwd=harnessDir. A scratch/temp copy (never `git init`-ed) fails this
-// immediately.
-// 정직 한계 (coder-task.md §1 원문 그대로): a deliberate SEPARATE git clone
-// used for an experiment still passes this check (it genuinely is inside a
-// worktree) -- this gate closes the "plain filesystem copy" shape the actual
-// incident took, not every conceivable isolation escape. Documented, not
-// silently swept under "fixed".
-function isInsideGitWorktree(dir) {
-  if (!existsSync(dir)) return false;
-  try {
-    const out = execSync("git rev-parse --is-inside-work-tree", {
-      cwd: dir,
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"],
-    }).trim();
-    return out === "true";
-  } catch {
-    return false;
+// isInsideGitWorktree -- HYK-312 §1's original gate against the exact
+// 2026-08-19 실사고 shape (a scratch/temp `.harness` copy outside any git
+// worktree still resolving the real persistent pointer via cwd-derived
+// `mainRepoRoot()`). Now imported from ledger-pointer-shared.mjs (HYK-302/
+// 355 §2-A dedup) -- see that file's header for the full history and the
+// one prior behavioral difference (relay-handshake.mjs's `!dir` guard) it
+// carries forward unchanged for this file's call site below.
+
+// HYK-302/355 §2-C (coder-task.md, «최소 요구»): under `node --test`
+// (persistentFallbackAllowed()===false), this stays the exact
+// byte-identical pre-existing no-op -- HYK-227 2R §3 항1's "사유 문구를
+// 바꾸지 마라" still applies to this branch (admission-completion-
+// persistent-source.test.mjs's ⓒ/ⓒ-2/ⓒ-3 pin exactly this shape under
+// `node --test`, and the entire local test suite runs there). Outside
+// `node --test`, with genuinely NEITHER source resolved (no
+// ADMISSION_LEDGER_PATH, no installer-written pointer file), the
+// pre-existing behavior was an equally silent {attempted:false} -- the
+// exact "quiet default" HYK-289's own header calls out as not a safety
+// net. This now reuses the SAME loud, already-tested channel HYK-312's own
+// UNISOLATED_HARNESS_DIR gate established (`blocked:true`, CLI exit 1, and
+// -- via relay-handshake.mjs's existing
+// exitDistinctlyOnAdmissionCompletionFailure, unchanged by this round --
+// the round's own CLI surfaces this as exit 3, not a silent 0) instead of
+// inventing a new one. 정직 한계: in real production this branch should
+// essentially never fire (ORCH confirmed the real control-room pointer
+// file is already installed) -- this closes the "nobody configured
+// anything at all" shape, the exact one HYK-227 1R's silent no-op let
+// through into a real incident (see this file's own header).
+function unconfiguredLedgerOutcome() {
+  if (!persistentFallbackAllowed()) {
+    return { attempted: false };
   }
+  return {
+    attempted: false,
+    blocked: true,
+    reasonCode: "LEDGER_PATH_UNCONFIGURED",
+    reason: `admission-completion-adapter: no admission ledger path configured -- set ADMISSION_LEDGER_PATH, or ensure the installer-written .harness/${PERSISTENT_LEDGER_POINTER_FILENAME} pointer file exists at the main repo root -- see HYK-302`,
+  };
 }
 
 // HYK-342/HYK-249: `reason` (optional) is forwarded to completeAdmission
@@ -626,7 +641,7 @@ export function autoCompleteAdmission({
     }
   }
   if (!ledgerPath) {
-    return { attempted: false };
+    return unconfiguredLedgerOutcome();
   }
   const lockPath =
     process.env.ADMISSION_LOCK_PATH ||

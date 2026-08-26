@@ -339,6 +339,9 @@ test("(d)★ RED: HYK-357 값-위반 차단 코드를 제거한 변이는 (a)와
         "envelope-archive.mjs",
         "time-authority.mjs",
         "admission-completion-adapter.mjs",
+        // HYK-302/355 §2-A dedup: admission-completion-adapter.mjs now
+        // statically imports this shared module.
+        "ledger-pointer-shared.mjs",
         "consumption-receipt-writer.mjs",
         "consumption-receipt-core.mjs",
       ]) {

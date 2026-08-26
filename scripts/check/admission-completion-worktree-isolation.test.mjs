@@ -423,6 +423,13 @@ test("RED 변이: removing the harnessDir isolation gate from autoCompleteAdmiss
         "utf8",
       );
     }
+    // HYK-302/355 §2-A dedup: the adapter now also statically imports
+    // "./ledger-pointer-shared.mjs" -- same sibling requirement as above.
+    writeFileSync(
+      join(checkDir, "ledger-pointer-shared.mjs"),
+      readFileSync(join(CHECK_DIR, "ledger-pointer-shared.mjs"), "utf8"),
+      "utf8",
+    );
     const ledger = join(ledgerDir, "l.json");
     const lock = join(ledgerDir, "l.lock");
     initAndAdmit(ledger, lock, "HYK-312-RED-MUTANT");

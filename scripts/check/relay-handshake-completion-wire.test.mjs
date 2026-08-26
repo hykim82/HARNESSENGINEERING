@@ -260,6 +260,10 @@ function stageIsolatedRelayHandshakeDeps(rootDir) {
     "reject-streak.mjs",
     "envelope-archive.mjs",
     "admission-completion-adapter.mjs",
+    // HYK-302/355 §2-A dedup: both admission-completion-adapter.mjs and
+    // relay-handshake.mjs (staged elsewhere in this test) now statically
+    // import this shared module.
+    "ledger-pointer-shared.mjs",
   ]) {
     writeFileSync(
       join(checkDir, name),

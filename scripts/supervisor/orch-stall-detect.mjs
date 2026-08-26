@@ -130,6 +130,12 @@ import {
   isOrphanSeat,
 } from "../relay/adapters/orca-adapter.mjs";
 import { normalizeAbsolute } from "../check/path-normalize.mjs";
+// HYK-302/355 §2-A: single-source (previously duplicated here and in
+// admission-completion-adapter.mjs) -- see ledger-pointer-shared.mjs's own
+// header. This file's own isolated-fixture copies rewrite relative imports
+// to absolute file:// paths back into the real repo (see coder.md), so this
+// new import needs no fixture sibling-list update, unlike the other two.
+import { PERSISTENT_LEDGER_POINTER_FILENAME } from "../check/ledger-pointer-shared.mjs";
 // HYK-173-push-wire (coder-task.md §5-C) -- 판단층(escalation-state.mjs)을
 // 이 축이 "실제로" 부른다. ⛔이 import는 판정 로직을 재구현하지 않는다는
 // 증거 그 자체다 -- reduceCoordinatorState/shouldWakeHuman은 여기서
@@ -2002,7 +2008,6 @@ function resolveDispatchReceiptPathForUnconsumed(repoRoot, opts) {
   return resolvePersistentDispatchReceiptPathForUnconsumed(repoRoot, opts);
 }
 
-const PERSISTENT_LEDGER_POINTER_FILENAME = "admission-ledger-path.json";
 // HYK-356: admission-ledger-path.json과 동일 설치기 관례(install.mjs의
 // installAdmissionLedgerPointer 옆에 installDispatchReceiptPointer로
 // 나란히 설치된다) -- 필드명만 다르다(`receiptPath`).
