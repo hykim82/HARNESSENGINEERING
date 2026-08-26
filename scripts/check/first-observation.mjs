@@ -78,6 +78,40 @@ function sameRound(entry, taskId, droppedAt) {
   return entry && entry.taskId === taskId && entry.droppedAt === droppedAt;
 }
 
+// HYK-353 3R (책임자 판정 2026-08-25 22:16, 범위 한 줄 한정): "관측 로그를
+// 판정할 수 없으면(손상·부분 파손 포함) 재발행을 거부한다" -- 읽기 실패
+// 경로(파일이 디렉터리라 readFileSync 자체가 던지는 경우)는 이미 호출자
+// 쪽에서 예외로 전파돼 안전하게 거부되지만(§3 회귀 대상, 손대지 않음),
+// readEntries는 손상된 한 줄을 조용히 건너뛰어(위 readEntries 자신의
+// house style 주석 참조 -- append-only 로그가 다른 줄에 영향을 주지
+// 않아야 한다는 기존 관례, 이 함수는 그 관례를 뒤집지 않는다) "이 라운드의
+// 관측이 원래 없다"와 "관측이 있었는데 손상돼 못 읽었다"를 구별하지
+// 못하게 만든다. 손상된 줄은 파싱 자체가 실패하므로 어느 (taskId,
+// droppedAt)에 속했는지 알 수 없다 -- 그래서 "이 라운드에 속한 손상"만
+// 골라내지 않고, 로그 파일 «전체»에 파싱 실패 줄이 하나라도 있으면
+// 무조건 true를 반환한다(더 정밀한 귀속은 이 판정에 필요 없다 -- 호출자
+// finalize-done.mjs의 resolveActiveObservation은 "판정 불가 -> 거부"만
+// 필요로 하지, "어느 라운드가 손상됐는지"는 필요로 하지 않는다 -- ORCH
+// 지시서의 "손상 JSONL 일반론으로 확장 금지"를 문자 그대로 지키는
+// 범위). readEntries/findFirstObservation의 기존 동작(생산 소비
+// 경로 -- checkIntermediateRewrite/observeDoneLine)은 이 함수와 무관하게
+// 그대로다(다른 개선 금지).
+export function hasCorruptEntries(role, harnessDir) {
+  const path = logPath(role, harnessDir);
+  if (!existsSync(path)) return false;
+  const raw = readFileSync(path, "utf8");
+  for (const line of raw.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    try {
+      JSON.parse(trimmed);
+    } catch {
+      return true;
+    }
+  }
+  return false;
+}
+
 // HYK-257-done-stamp-3 §2 범위1: 이 (taskId, droppedAt) 쌍의 «현재 세대»
 // 첫 관측을 찾는다. 파일을 순서대로 훑으며 이 쌍에 매치하는 항목을 볼 때
 // -- tombstone(consumed:true)이면 현재 세대를 리셋(active=null, "이 쌍은
@@ -222,6 +256,19 @@ export function checkIntermediateRewrite({
 // spawn 2회 대신 1회 -- CLI 호출자(relay-handshake.mjs)가 이것 하나만
 // 쓴다). 정상 라운드에서 이 세대를 처음 보는 호출은 recordFirst가 방금
 // 쓴 값을 그대로 다시 읽어 스스로와 비교하므로 항상 rewritten:false다.
+// HYK-353 2R §1 (P1-1): the `record` field is additive -- existing callers
+// that only ever read `rewritten`/`reason`/`existing`/`currentDoneLine`
+// (this file's own tests, relay-handshake.mjs's pre-existing usage) see no
+// shape change. It surfaces `recordFirstDoneObservation`'s own outcome
+// (previously discarded -- called for its side effect only) so a caller can
+// tell "the record write itself failed" (`recorded:false`, `reason` starts
+// with 'record failed:') apart from "this generation was already observed"
+// (`recorded:false`, `reason` === 'already observed', the normal 2nd-poll
+// case) apart from "recorded for the first time just now" (`recorded:true`)
+// -- three genuinely different outcomes that `checkIntermediateRewrite`'s
+// own return value alone cannot distinguish (a write failure still leaves
+// `findFirstObservation` seeing nothing, so `checkIntermediateRewrite`
+// reports the same "no prior observation" shape as a clean first poll).
 export function observeDoneLine({
   taskId,
   droppedAt,
@@ -231,7 +278,7 @@ export function observeDoneLine({
   doneLineRaw,
   observedAtMs = Date.now(),
 }) {
-  recordFirstDoneObservation({
+  const recordOutcome = recordFirstDoneObservation({
     taskId,
     droppedAt,
     role,
@@ -240,7 +287,7 @@ export function observeDoneLine({
     doneLineRaw,
     observedAtMs,
   });
-  return checkIntermediateRewrite({
+  const rewriteOutcome = checkIntermediateRewrite({
     taskId,
     droppedAt,
     role,
@@ -248,6 +295,13 @@ export function observeDoneLine({
     resultContent,
     doneLineRaw,
   });
+  return {
+    ...rewriteOutcome,
+    record: {
+      recorded: recordOutcome.recorded,
+      reason: recordOutcome.reason,
+    },
+  };
 }
 
 // HYK-257-done-stamp-2/3 §2 범위1: CLI 진입점. relay-handshake.mjs는 이
@@ -270,10 +324,36 @@ if (
     .endsWith("scripts/check/first-observation.mjs")
 ) {
   const harnessDir = process.argv[2];
-  const payloadJson = process.argv[3];
-  if (!harnessDir || !payloadJson) {
+  // HYK-353: payload used to arrive as argv[3] -- a large `resultContent`
+  // (the full result file text) blew past the OS command-line length limit
+  // (Windows ENAMETOOLONG), silently dropping this round's first-observation
+  // entry while the caller (relay-handshake.mjs's spawnObserveDoneLine)
+  // treated the spawn failure as best-effort/non-fatal and the round still
+  // completed with exit 0. Reading the payload from stdin instead makes this
+  // channel size-independent -- argv only ever carries the small, fixed
+  // `harnessDir` path now.
+  let payloadJson;
+  try {
+    payloadJson = readFileSync(0, "utf8");
+  } catch (err) {
     console.error(
-      "usage: node first-observation.mjs <harnessDir> <payloadJson={taskId,droppedAt,role,resultContent,doneLineRaw,action?}>",
+      `first-observation: failed to read payload from stdin: ${err.message}`,
+    );
+    process.exit(1);
+  }
+  if (!harnessDir || !payloadJson) {
+    // HYK-353 2R §1 (P2-2, 검토 반려): every other error path in this CLI
+    // block prints a `"first-observation: "`-prefixed line -- this one used
+    // to be the sole exception (bare `"usage: ..."`, no prefix). The
+    // parent's genuine-attempt-vs-missing-sidecar split
+    // (relay-handshake.mjs's `spawnObserveDoneLine`) keys off that exact
+    // prefix, so a stdin-cut-before-payload failure (empty stdin, e.g. the
+    // pipe closed early) was silently indistinguishable from "the script
+    // file itself doesn't exist" -- both would fail the `.includes(
+    // "first-observation: ")` check even though this one is a genuine,
+    // reachable failure.
+    console.error(
+      "first-observation: usage: node first-observation.mjs <harnessDir> <payloadJson={taskId,droppedAt,role,resultContent,doneLineRaw,action?} via stdin>",
     );
     process.exit(1);
   }

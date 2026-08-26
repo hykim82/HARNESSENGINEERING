@@ -4,16 +4,24 @@
 // report, no cleanup command run).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
-import { join } from "node:path";
+import { mkdtempSync, mkdirSync, writeFileSync, appendFileSync } from "node:fs";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
+import { spawnSync } from "node:child_process";
 import {
   observeDoneLine,
   recordFirstDoneObservation,
   markObservationConsumed,
   checkIntermediateRewrite,
   findFirstObservation,
+  hasCorruptEntries,
 } from "./first-observation.mjs";
+
+const CLI_PATH = join(
+  dirname(fileURLToPath(import.meta.url)),
+  "first-observation.mjs",
+);
 
 function freshDir() {
   return mkdtempSync(join(tmpdir(), "hyk257-3r-first-obs-test-"));
@@ -322,4 +330,118 @@ test("HYK-257-done-stamp-3: normal 1R -> 2R end-to-end sequence (production shap
     false,
     "round 2 (normal, no tampering) must pass cleanly after round 1's consumption",
   );
+});
+
+// HYK-353 2R §1 (P1-1) -----------------------------------------------------
+
+test("observeDoneLine: successful first record -- returned `record` field says recorded:true", () => {
+  const harnessDir = freshDir();
+  const outcome = observeDoneLine({
+    taskId: "task_record_success",
+    droppedAt: "2026-08-25 09:00 KST",
+    role: "coder",
+    harnessDir,
+    resultContent:
+      "task_id: task_record_success\n>>> DONE: CODER @ 2026-08-25 09:05:00 KST\n",
+    doneLineRaw: ">>> DONE: CODER @ 2026-08-25 09:05:00 KST",
+  });
+  assert.equal(outcome.record.recorded, true);
+});
+
+test("observeDoneLine: second poll of the SAME generation -- `record` says recorded:false, reason 'already observed' (NOT a failure)", () => {
+  const harnessDir = freshDir();
+  const args = {
+    taskId: "task_record_already",
+    droppedAt: "2026-08-25 09:10 KST",
+    role: "coder",
+    harnessDir,
+    resultContent:
+      "task_id: task_record_already\n>>> DONE: CODER @ 2026-08-25 09:15:00 KST\n",
+    doneLineRaw: ">>> DONE: CODER @ 2026-08-25 09:15:00 KST",
+  };
+  observeDoneLine(args);
+  const second = observeDoneLine(args);
+  assert.equal(second.record.recorded, false);
+  assert.equal(second.record.reason, "already observed");
+});
+
+test("observeDoneLine: the log path itself is a directory -- write fails, `record` surfaces recorded:false with a 'record failed:' reason", () => {
+  const harnessDir = freshDir();
+  mkdirSync(join(harnessDir, "coder-done-first-observation.jsonl"));
+  const outcome = observeDoneLine({
+    taskId: "task_write_failure",
+    droppedAt: "2026-08-25 09:20 KST",
+    role: "coder",
+    harnessDir,
+    resultContent:
+      "task_id: task_write_failure\n>>> DONE: CODER @ 2026-08-25 09:25:00 KST\n",
+    doneLineRaw: ">>> DONE: CODER @ 2026-08-25 09:25:00 KST",
+  });
+  assert.equal(outcome.record.recorded, false);
+  assert.match(
+    outcome.record.reason,
+    /^record failed:/,
+    `must be distinguishable from the 'already observed' shape: ${JSON.stringify(outcome.record)}`,
+  );
+});
+
+// HYK-353 2R §1 (P2-2) -------------------------------------------------------
+
+test("CLI: stdin cut before any payload arrives -- usage error carries the 'first-observation: ' prefix (machine-distinguishable from a missing sidecar file)", () => {
+  const res = spawnSync(process.execPath, [CLI_PATH, "somedir"], {
+    encoding: "utf8",
+    input: "",
+  });
+  assert.notEqual(res.status, 0);
+  assert.match(res.stderr, /^first-observation: usage: /);
+});
+
+// HYK-353 3R §2 (책임자 판정 2026-08-25 22:16, 범위 한 줄 한정) -----------
+
+test("hasCorruptEntries: log missing entirely -> false (없음, not 모름)", () => {
+  const harnessDir = freshDir();
+  assert.equal(hasCorruptEntries("coder", harnessDir), false);
+});
+
+test("hasCorruptEntries: log exists, every line parses -> false", () => {
+  const harnessDir = freshDir();
+  observeDoneLine({
+    taskId: "task_clean",
+    droppedAt: "2026-08-25 10:00 KST",
+    role: "coder",
+    harnessDir,
+    resultContent:
+      "task_id: task_clean\n>>> DONE: CODER @ 2026-08-25 10:05:00 KST\n",
+    doneLineRaw: ">>> DONE: CODER @ 2026-08-25 10:05:00 KST",
+  });
+  assert.equal(hasCorruptEntries("coder", harnessDir), false);
+});
+
+test("hasCorruptEntries: log has one unparseable line -> true, regardless of which round it would have belonged to", () => {
+  const harnessDir = freshDir();
+  writeFileSync(
+    join(harnessDir, "coder-done-first-observation.jsonl"),
+    "{ not valid json\n",
+    "utf8",
+  );
+  assert.equal(hasCorruptEntries("coder", harnessDir), true);
+});
+
+test("hasCorruptEntries: one valid entry + one corrupted line -> still true (corruption anywhere blocks judgment)", () => {
+  const harnessDir = freshDir();
+  observeDoneLine({
+    taskId: "task_mixed",
+    droppedAt: "2026-08-25 11:00 KST",
+    role: "coder",
+    harnessDir,
+    resultContent:
+      "task_id: task_mixed\n>>> DONE: CODER @ 2026-08-25 11:05:00 KST\n",
+    doneLineRaw: ">>> DONE: CODER @ 2026-08-25 11:05:00 KST",
+  });
+  appendFileSync(
+    join(harnessDir, "coder-done-first-observation.jsonl"),
+    "{ garbage\n",
+    "utf8",
+  );
+  assert.equal(hasCorruptEntries("coder", harnessDir), true);
 });
