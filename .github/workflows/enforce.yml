@@ -28,10 +28,10 @@ jobs:
         run: npm ci
 
       # HYK-365 2R: moved ahead of the suite so gitleaks is on PATH when it
-      # runs. No continue-on-error here (downgraded from 1R's design,
-      # rejected review P1-1) -- an install failure now fails the job here,
-      # same fail-closed behavior nc-ci-enforce.test.mjs:145 already requires
-      # workflow-wide.
+      # runs. This step is fail-closed like every other step here (1R's
+      # error-tolerant flag was downgraded after review) -- an install
+      # failure fails the job right here, nc-ci-enforce.test.mjs:145 keeps
+      # that true workflow-wide.
       - name: Install gitleaks (pinned, checksum-verified)
         run: |
           set -e
