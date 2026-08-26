@@ -168,6 +168,45 @@ export function mainRepoRoot() {
   }
 }
 
+// HYK-355 §2-B: mainRepoRoot() above resolves purely off THIS PROCESS's own
+// cwd -- it has no idea which round directory (`harnessDir`) is actually
+// being consumed. 2026-08-26 실사고: a worker ran a probe against this
+// module's reject-streak recording path without `cd`-ing into an isolated
+// fixture first; cwd defaulted to the real repo checkout, mainRepoRoot()
+// happily resolved to that real repo's root, and a fabricated entry landed
+// in the REAL `.harness/reject-streak.json` (coder-task.md §0/§1, HYK-357
+// 칸 1→2). Unlike admission-completion-adapter.mjs (HYK-312's own
+// isInsideGitWorktree, duplicated below by the same repo-wide convention --
+// see that file's header on why small helpers are copied rather than
+// imported), autoRecordRejectStreak had ZERO isolation gate at all: every
+// call silently trusted mainRepoRoot()'s cwd-derived answer. This is the
+// gate that closes exactly that gap -- fail-closed (refuse to record, do
+// NOT fall back to any default) whenever `harnessDir` (the round directory
+// the caller told us to consume) is missing or does not itself resolve
+// inside SOME registered git worktree. A real production round's
+// `harnessDir` is always inside a real worktree of this very repo (it IS
+// that worktree's own `.harness/`), so this never fires for a legitimate
+// consumption -- only for the exact "ran outside an isolated fixture, no
+// folder specified" shape the incident took.
+// 정직 한계 (mirrors HYK-312's own, coder-task.md §1 원문 그대로): a
+// deliberate separate git clone used for an experiment still passes this
+// check (it genuinely is inside a worktree) -- this closes the "plain
+// filesystem copy / no folder at all" shape the actual incident took, not
+// every conceivable isolation escape.
+function isInsideGitWorktree(dir) {
+  if (!dir || !existsSync(dir)) return false;
+  try {
+    const out = execSync("git rev-parse --is-inside-work-tree", {
+      cwd: dir,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+    return out === "true";
+  } catch {
+    return false;
+  }
+}
+
 // Extracted from checkRelayHandshake (quality-check: keeps its own
 // complexity under the repo's ESLint ceiling) -- resolves the result
 // file's task_id echo into either a match or one of three distinct
@@ -451,7 +490,24 @@ function autoArchiveRoundTaskFile({ role, taskContent, harnessDir }) {
 // HYK-262: also carries `reason` through (was discarded after logging) so
 // the caller can distinguish WHICH kind of `attempted:true, ok:false`
 // this is -- see checkRelayHandshake's own use of it, right below.
-function autoRecordRejectStreak({ role, resultContent }) {
+// HYK-355 §2-B: `harnessDir` is now required to reach the mainRepoRoot()
+// default -- see isInsideGitWorktree's own header for the incident this
+// closes. Checked only for REVIEW-family roles (isReviewFamilyRole), the
+// same set recordRejectStreakFromResultText itself would otherwise attempt
+// for -- a non-REVIEW role keeps the exact pre-existing `{attempted:false}`
+// no-op shape (recordRejectStreakFromResultText's own early return), never
+// reaching this new gate at all.
+function autoRecordRejectStreak({ role, resultContent, harnessDir }) {
+  if (isReviewFamilyRole(role) && !isInsideGitWorktree(harnessDir)) {
+    const blocked = {
+      attempted: false,
+      blocked: true,
+      reasonCode: "UNISOLATED_HARNESS_DIR",
+      reason: `reject-streak auto-record: refusing mainRepoRoot() default -- harnessDir '${harnessDir}' is not inside a registered git worktree (probe/experiment consumption context without an isolated ledger path) -- see HYK-355`,
+    };
+    console.error(blocked.reason);
+    return blocked;
+  }
   const autoRecord = recordRejectStreakFromResultText({
     role,
     resultText: resultContent,
@@ -1231,7 +1287,11 @@ function runCompletionSideEffects({
   // unaffected: `autoRecordRejectStreak` returns `{attempted:false}` for
   // them, so this branch never fires and archiving/completion proceed
   // exactly as before (§3-1 요건, HYK-262 범위 -- REVIEW 계열만 영향).
-  const recordOutcome = autoRecordRejectStreak({ role, resultContent });
+  const recordOutcome = autoRecordRejectStreak({
+    role,
+    resultContent,
+    harnessDir,
+  });
   const coverViolation = checkAmbiguousCoverViolation(recordOutcome);
   if (coverViolation) return coverViolation;
   const valueViolation = checkValueInvalidCoverViolation(recordOutcome);
