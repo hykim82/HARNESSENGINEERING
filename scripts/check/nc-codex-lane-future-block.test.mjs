@@ -10,6 +10,7 @@
 // 그 프로덕션 진입점을 직접 구동해 이 사실을 실측으로 고정한다.
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { isolatedChildEnv } from "./admission-ledger-env-isolation.mjs";
 import {
   mkdtempSync,
   writeFileSync,
@@ -42,6 +43,10 @@ function withDir(fn) {
 function runCli(scriptPath, args) {
   const res = spawnSync(process.execPath, [scriptPath, ...args], {
     encoding: "utf8",
+    // HYK-359: never let an ambient ADMISSION_LEDGER_PATH/ADMISSION_LOCK_PATH/
+    // DISPATCH_RECEIPT_PATH leaked from the invoking shell reach this child --
+    // see admission-ledger-env-isolation.mjs's header for why.
+    env: isolatedChildEnv(),
   });
   assert.equal(
     res.error,

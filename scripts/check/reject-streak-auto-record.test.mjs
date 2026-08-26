@@ -11,6 +11,7 @@
 // 이 파일 안에 다시 작성했다).
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
+import { isolatedChildEnv } from "./admission-ledger-env-isolation.mjs";
 import {
   mkdtempSync,
   writeFileSync,
@@ -116,6 +117,10 @@ function runRelayHandshakeCli(scriptPath, args, opts = {}) {
   const res = spawnSync(process.execPath, [scriptPath, ...args], {
     encoding: "utf8",
     ...opts,
+    // HYK-359: never let an ambient ADMISSION_LEDGER_PATH/ADMISSION_LOCK_PATH/
+    // DISPATCH_RECEIPT_PATH leaked from the invoking shell reach this child --
+    // see admission-ledger-env-isolation.mjs's header for why.
+    env: isolatedChildEnv(opts.env),
   });
   assert.equal(
     res.error,
