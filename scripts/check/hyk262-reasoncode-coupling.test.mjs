@@ -41,6 +41,11 @@ const SIBLING_DEPS = [
   "admission-completion-adapter.mjs",
   "consumption-receipt-writer.mjs",
   "consumption-receipt-core.mjs",
+  // HYK-302/355 §2-A dedup: relay-handshake.mjs (spawned as this fixture's
+  // real CLI entry point, unlike admission-completion-adapter.mjs which is
+  // only ever spawned as a child that already tolerates MODULE_NOT_FOUND)
+  // now statically imports this shared module -- its own load must succeed.
+  "ledger-pointer-shared.mjs",
 ];
 
 function tmpDir(prefix) {

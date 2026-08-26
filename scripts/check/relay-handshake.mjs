@@ -178,12 +178,18 @@ export function mainRepoRoot() {
 // 칸 1→2). Unlike admission-completion-adapter.mjs (HYK-312's own
 // isInsideGitWorktree, duplicated below by the same repo-wide convention --
 // see that file's header on why small helpers are copied rather than
-// imported), autoRecordRejectStreak had ZERO isolation gate at all: every
-// call silently trusted mainRepoRoot()'s cwd-derived answer. This is the
-// gate that closes exactly that gap -- fail-closed (refuse to record, do
-// NOT fall back to any default) whenever `harnessDir` (the round directory
-// the caller told us to consume) is missing or does not itself resolve
-// inside SOME registered git worktree. A real production round's
+// imported; HYK-302/355 §2-A this round assessed importing a shared module
+// here too, but relay-handshake.mjs is staged as a mutated/spawned fixture
+// copy in ~20 separate test files across scripts/check -- see coder.md's
+// §2-A note -- so a new static import here was judged too high-blast-radius
+// to verify safely in this round's budget and was reverted; only
+// admission-completion-adapter.mjs's and orch-stall-detect.mjs's copies
+// were consolidated), autoRecordRejectStreak had ZERO isolation gate at
+// all: every call silently trusted mainRepoRoot()'s cwd-derived answer.
+// This is the gate that closes exactly that gap -- fail-closed (refuse to
+// record, do NOT fall back to any default) whenever `harnessDir` (the round
+// directory the caller told us to consume) is missing or does not itself
+// resolve inside SOME registered git worktree. A real production round's
 // `harnessDir` is always inside a real worktree of this very repo (it IS
 // that worktree's own `.harness/`), so this never fires for a legitimate
 // consumption -- only for the exact "ran outside an isolated fixture, no

@@ -342,9 +342,10 @@ test("ⓓ 변이 RED: removing the persistent-fallback branch from autoCompleteA
 
   const repoDir = buildSyntheticRepo("hyk227-2r-d-repo-");
   const ledgerDir = tmpDir("hyk227-2r-d-ledger-");
-  // The adapter statically imports "../supervisor/admission-ledger-core.mjs"
-  // and "../supervisor/admission-ledger-store.mjs" -- the mutated copy needs
-  // those same siblings at the same relative location to load at all.
+  // The adapter statically imports "../supervisor/admission-ledger-core.mjs",
+  // "../supervisor/admission-ledger-store.mjs", and (HYK-302/355 §2-A dedup)
+  // "./ledger-pointer-shared.mjs" -- the mutated copy needs those same
+  // siblings at the same relative location to load at all.
   const checkDir = join(repoDir, "scripts", "check");
   const supervisorDir = join(repoDir, "scripts", "supervisor");
   const mutatedFilePath = join(checkDir, "admission-completion-adapter.mjs");
@@ -361,6 +362,11 @@ test("ⓓ 변이 RED: removing the persistent-fallback branch from autoCompleteA
         "utf8",
       );
     }
+    writeFileSync(
+      join(checkDir, "ledger-pointer-shared.mjs"),
+      readFileSync(join(CHECK_DIR, "ledger-pointer-shared.mjs"), "utf8"),
+      "utf8",
+    );
     const ledger = join(ledgerDir, "l.json");
     const lock = join(ledgerDir, "l.lock");
     initAndAdmit(ledger, lock, "HYK-227-D-MUTANT");
@@ -557,6 +563,11 @@ test("ⓕ 변이 RED: narrowing persistentFallbackAllowed() to 'always reject' (
         "utf8",
       );
     }
+    writeFileSync(
+      join(checkDir, "ledger-pointer-shared.mjs"),
+      readFileSync(join(CHECK_DIR, "ledger-pointer-shared.mjs"), "utf8"),
+      "utf8",
+    );
     const ledger = join(ledgerDir, "l.json");
     const lock = join(ledgerDir, "l.lock");
     initAndAdmit(ledger, lock, "HYK-289-2R-F-MUTANT");
