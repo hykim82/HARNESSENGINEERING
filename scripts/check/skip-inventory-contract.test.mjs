@@ -15,11 +15,17 @@
 // cases already carries its own honest skip reason (`t.skip()`/`skip:`) --
 // this file does not touch any of that production skip logic. It only adds
 // an independent, exact, BY-NAME check that (a) none of the 10 silently
-// vanished or got renamed, and (b) each one's skip/run status matches this
-// file's OWN, independently-computed capability probe -- so if the
+// vanished or got renamed, (b) each one's skip/run status matches this
+// file's OWN, independently-computed capability probe, and (c, HYK-364 2R
+// fix) no test OUTSIDE the known 10 is skipped either -- so if the
 // production skip *condition* itself is ever mutated (e.g. inverted, or
-// changed to check the wrong path), this contract goes red instead of
-// silently drifting.
+// changed to check the wrong path), OR a brand-new conditional skip is
+// introduced anywhere in the four affected files, this contract goes red
+// instead of silently drifting. (c) is set equality (observed skip set vs
+// expected skip set, both directions), not list traversal -- 1R's version
+// only walked the known-names list, so a skip appearing OUTSIDE that list
+// was invisible to it (review-1's exact repro: a real, disk-written
+// `t.skip("mutation probe")` added to nc-gitleaks.test.mjs stayed green).
 //
 // Two of the ten (`(47)`/`(58)` in selfcheck-inventory.test.mjs) already
 // expose their skip DECISION as an exported pure function
@@ -216,10 +222,42 @@ const EXPECTATIONS = [
   },
 ];
 
-test("HYK-364: known environment-conditional skip set is pinned BY NAME, and each one's skip/run status matches an independently-computed capability probe", () => {
+// HYK-364 2R P1 (review-1 finding, coder-task.md §2 원문): iterating only
+// EXPECTATIONS is a one-way check -- it can never notice a skip that shows
+// up OUTSIDE that list (review's repro: adding a real, disk-written
+// `t.skip("mutation probe")` case to nc-gitleaks.test.mjs made this file
+// report `exit=0 tests=2 pass=2 fail=0`, silently green, because the new
+// skip was never in EXPECTATIONS to begin with -- the exact "몰래 늘어나는
+// skip" shape HYK-359 1R/2R already burned two rounds on for a different
+// list). The fix is SET equality, not list traversal: compare the FULL
+// observed skip set (every skipped test across the four affected files,
+// not just the ones this file already knows to ask about) against the FULL
+// expected skip set, in both directions --
+//   expected has it, observed doesn't -> already caught below (per-name loop)
+//   observed has it, expected doesn't -> NEW, ungoverned skip -> RED (the P1)
+// "정당한 변화 stays green" (coder-task.md §3-3) falls out of this for free:
+// adding an ordinary (non-conditional) test never adds a skip, so it never
+// touches either set. Only a NEW skip -- conditional or not -- trips this.
+function assertNoUngovernedSkips(results) {
+  const knownNames = new Set(EXPECTATIONS.map((e) => e.name));
+  const observedSkippedNames = [...results.entries()]
+    .filter(([, r]) => r.skipped)
+    .map(([name]) => name);
+  const ungoverned = observedSkippedNames.filter((n) => !knownNames.has(n));
+  assert.deepEqual(
+    ungoverned,
+    [],
+    `${ungoverned.length} test(s) in the four affected files are skipped but are NOT in this contract's known-name set -- this is the exact "silently growing skip set" HYK-364 2R exists to catch: a new (or newly-conditional) test appeared skipped and nobody pinned why. Add it to EXPECTATIONS with an explicit, independently-probed condition, or fix the regression that made it skip. Ungoverned skipped name(s): ${JSON.stringify(ungoverned)}`,
+  );
+}
+
+test("HYK-364: known environment-conditional skip set is pinned BY NAME (set equality, not list traversal) -- no member may silently vanish, misfire, or appear ungoverned", () => {
   const stdout = runAffectedFiles();
   const results = parseTapNamedResults(stdout);
 
+  // Direction 1: nothing in the known set silently vanished, and each
+  // known name's skip/run status matches this file's own independently
+  // computed capability probe.
   for (const expectation of EXPECTATIONS) {
     const observed = results.get(expectation.name);
     assert.ok(
@@ -244,6 +282,9 @@ test("HYK-364: known environment-conditional skip set is pinned BY NAME, and eac
       `"${expectation.name}" skipped=${observed.skipped}, expected ${expectation.expectSkipped} given this environment's independently-probed capability -- either the production skip condition changed, or this environment's capability set changed without this contract's probe agreeing`,
     );
   }
+
+  // Direction 2 (2R fix, the P1): nothing OUTSIDE the known set is skipped.
+  assertNoUngovernedSkips(results);
 });
 
 test("HYK-364 sanity: resolveRealRepoGuard47 and resolveRealRepoGuard58 agree on whether .claude/settings.local.json is present (both gate on the identical file)", () => {
