@@ -54,6 +54,40 @@
 // unrelated commit. That is the intended, narrow place where a real
 // exception-list change requires touching this test -- it is not "noise",
 // it is the one knob this file exists to guard.
+//
+// HYK-359 4R (PR #213 CI 실사고, coder-task.md §2 원문): this file itself
+// passed on every local (Windows) run across 1R-3R, but CI (Linux, Node 20
+// pinned by enforce.yml) failed with the spawned sweep reporting "0 tests"
+// and the child exiting 7, stderr empty. Diagnosed (원문 `.harness/
+// phase-a-ci-diagnosis.md`) by reproducing the EXACT symptom in a disposable
+// Linux clone outside this worktree -- two INDEPENDENT bugs, both in this
+// file, neither in the swept test files themselves:
+//
+// ① `spawnSync` below had no `maxBuffer` override -- Node's default is 1MB,
+// and the full CI-canonical sweep's TAP output is >1.6MB. Exceeding it
+// makes Node kill the child and set `res.error.code === 'ENOBUFS'` -- which
+// this file never checked, so a truncated/killed child silently read as
+// "0 tests" instead of the real, loud buffer-overflow error it was.
+//
+// ② Even with maxBuffer fixed, the regex here (`/^ℹ tests (\d+)/m`) still
+// found nothing, because Node's default `--test` reporter is
+// `process.stdout.isTTY ? 'spec' : 'tap'` in the Node version CI pins (20.x,
+// confirmed via that tag's own source) -- spawnSync's captured stdout is
+// ALWAYS a pipe, never a TTY, so the child ALWAYS emits `tap` format
+// (`# tests N`), never the `ℹ tests N` this regex expected. 실측(원문
+// phase-a-ci-diagnosis.md): every human/worker who tested this locally ran
+// a Node version >=24, where `kDefaultReporter` was changed to an
+// unconditional `'spec'` (no TTY check at all) -- so local runs got `ℹ
+// tests N` regardless of piping, while CI's pinned Node 20 never could.
+// This was a NODE-VERSION difference wearing an OS-difference costume, not
+// an OS difference itself.
+//
+// Fix for ②: stop depending on whichever reporter Node defaults to for a
+// given version. Pin `--test-reporter=tap` explicitly on the spawned child
+// so the output shape is deterministic across every Node version this
+// repo's tooling might run under, then parse ONLY that pinned shape.
+// Fix for ①: raise `maxBuffer` generously AND treat `res.error` as its own,
+// distinct, loud failure -- never silently reinterpreted as "0 tests ran".
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync, execFileSync } from "node:child_process";
@@ -140,36 +174,70 @@ test("HYK-359 완료조건4 (3R): CI-canonical 시험 디렉토리 전체(예외
     // (~37.5KB of argv) trip Windows's ~32KB CreateProcess command-line
     // limit (ENAMETOOLONG, 실측). Relative paths cut every entry by
     // `root.length` bytes, comfortably inside the limit.
-    const res = spawnSync(process.execPath, ["--test", ...swept], {
-      cwd: root,
-      encoding: "utf8",
-      env: floatingEnv,
-    });
-    const testsRun = Number(
-      (res.stdout ?? "").match(/^ℹ tests (\d+)/m)?.[1] ?? 0,
+    //
+    // `--test-reporter=tap`: pin the reporter explicitly (HYK-359 4R ②,
+    // see module header) -- the parsing below depends on TAP's exact
+    // summary shape (`# tests N`), not whatever a given Node version
+    // defaults to. `maxBuffer`: generous fixed ceiling (HYK-359 4R ①) --
+    // 실측 CI-canonical sweep output was ~1.6MB; 200MB leaves headroom for
+    // years of legitimate growth without silently truncating again.
+    const res = spawnSync(
+      process.execPath,
+      ["--test", "--test-reporter=tap", ...swept],
+      {
+        cwd: root,
+        encoding: "utf8",
+        env: floatingEnv,
+        maxBuffer: 1024 * 1024 * 200,
+      },
     );
-    const failCount = Number(
-      (res.stdout ?? "").match(/^ℹ fail (\d+)/m)?.[1] ?? -1,
+    // HYK-359 4R ①: `res.error` (e.g. ENOBUFS from exceeding even this
+    // generous maxBuffer, or a spawn failure) must fail LOUDLY with its own
+    // distinct message -- never silently fall through to the "0 tests"
+    // parsing below, which is exactly how CI's real ENOBUFS got misread as
+    // "the sweep found nothing wrong" instead of "the sweep never finished
+    // reporting at all".
+    assert.equal(
+      res.error,
+      undefined,
+      `spawnSync itself failed (child may have been killed mid-run, e.g. exceeding maxBuffer) -- error: ${res.error?.message} (code: ${res.error?.code}), signal: ${res.signal}, status: ${res.status}, stdout captured so far: ${(res.stdout ?? "").length} byte(s), stderr: ${(res.stderr ?? "").slice(-2000)}`,
     );
-    // Same defense as 1R's per-file version: a child that silently ran
-    // zero tests still exits 0 -- require a real count that scales with
+
+    const stdout = res.stdout ?? "";
+    const testsMatch = stdout.match(/^# tests (\d+)$/m);
+    const failMatch = stdout.match(/^# fail (\d+)$/m);
+    // HYK-359 4R ③ (ORCH 요구): "파싱 실패"(요약 줄 자체를 못 찾음 -- 리포터
+    // 형식이 또 바뀌었거나 출력이 잘렸다는 뜻)와 "0건 실행"(요약 줄은 찾았고
+    // 그 값이 정말 0)을 같은 메시지로 접지 않는다 -- 원인이 다르면 사람이
+    // 다음에 뭘 봐야 하는지도 다르다.
+    assert.ok(
+      testsMatch,
+      `could not find TAP's '# tests N' summary line in the child's stdout at all -- --test-reporter=tap may not have taken effect, or the output was cut off before the summary. status=${res.status}, signal=${res.signal}, stdout length=${stdout.length}, stdout tail: ${stdout.slice(-3000)}\nstderr tail: ${(res.stderr ?? "").slice(-2000)}`,
+    );
+    assert.ok(
+      failMatch,
+      `found '# tests N' but not '# fail N' in the child's stdout -- malformed/truncated TAP summary. status=${res.status}, stdout tail: ${stdout.slice(-3000)}`,
+    );
+    const testsRun = Number(testsMatch[1]);
+    const failCount = Number(failMatch[1]);
+    // Same defense as 1R's per-file version: a child that genuinely reports
+    // "# tests 0" (as opposed to no summary line at all, caught above) is
+    // still a silent-skip shape -- require a real count that scales with
     // the swept file count itself (`>= swept.length`, not a fixed magic
-    // number) so this stays meaningful as the repo grows and still catches
-    // "ran way fewer tests than files swept" (e.g. the sweep silently
-    // stopped early).
+    // number) so this stays meaningful as the repo grows.
     assert.ok(
       testsRun >= swept.length,
-      `child ran only ${testsRun} tests across ${swept.length} swept files -- looks like a silent skip (exit=${res.status}), not a real sweep. stderr tail: ${(res.stderr ?? "").slice(-2000)}`,
+      `child's TAP summary reports only ${testsRun} tests across ${swept.length} swept files -- looks like a silent skip, not a real sweep. status=${res.status}, signal=${res.signal}, stderr tail: ${(res.stderr ?? "").slice(-2000)}`,
     );
     assert.equal(
       failCount,
       0,
-      `${failCount} test(s) failed under a floating ambient ledger env across the swept CI-canonical set -- isolation regressed. stdout tail: ${(res.stdout ?? "").slice(-4000)}\nstderr tail: ${(res.stderr ?? "").slice(-2000)}`,
+      `${failCount} test(s) failed under a floating ambient ledger env across the swept CI-canonical set -- isolation regressed. status=${res.status}, stdout tail: ${stdout.slice(-4000)}\nstderr tail: ${(res.stderr ?? "").slice(-2000)}`,
     );
     assert.equal(
       res.status,
       0,
-      `child exited ${res.status} even though the parsed summary showed fail 0 -- unexpected, investigate. stderr tail: ${(res.stderr ?? "").slice(-2000)}`,
+      `child exited ${res.status} (signal=${res.signal}) even though the parsed TAP summary showed fail 0 -- unexpected, investigate. stderr tail: ${(res.stderr ?? "").slice(-2000)}`,
     );
   } finally {
     rmSync(dir, { recursive: true, force: true });
