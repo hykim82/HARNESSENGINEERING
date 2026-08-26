@@ -30,27 +30,76 @@ const AMBIENT_LEDGER_ENV_KEYS = [
   "DISPATCH_RECEIPT_PATH",
 ];
 
+// HYK-359 2R P1-2 (검토자 실사고, msg 원문 coder-task.md §2): 1R's
+// isolatedChildEnv shallow-merged `overrides` onto the cleaned base WITHOUT
+// stripping `overrides` itself. relay-handshake.test.mjs's two mutation call
+// sites passed `overrides = { ...process.env, ADMISSION_LEDGER_PATH: x,
+// ADMISSION_LOCK_PATH: y }` -- a common, easy-to-write shape ("just spread
+// process.env and override the two keys I care about") -- which silently
+// resurrected DISPATCH_RECEIPT_PATH (the one key that call site never
+// mentioned) straight from the ambient shell, through `overrides`'s own
+// spread, defeating the whole point of this module. 검토자가 ambient-on
+// 5건 실패로 실측했다.
+//
+// Fix: isolatedChildEnv now strips the three protected keys from BOTH
+// `baseEnv` AND `overrides`, unconditionally -- so no shape of `overrides`,
+// including one built by spreading `process.env`, can ever put one of the
+// three keys back. This is a deliberate CONTRACT CHANGE from 1R: a caller
+// can no longer set ADMISSION_LEDGER_PATH/ADMISSION_LOCK_PATH/
+// DISPATCH_RECEIPT_PATH by putting them directly inside `overrides` at all --
+// there is now exactly one sanctioned way to do that on purpose, see
+// isolatedChildEnvWithLedger below.
+function stripAmbientLedgerKeys(env) {
+  const clean = { ...env };
+  for (const key of AMBIENT_LEDGER_ENV_KEYS) delete clean[key];
+  return clean;
+}
+
 // isolatedChildEnv -- build the `env` option for a spawnSync/execFileSync
 // call: a copy of `baseEnv` (defaults to this process's own env, so
 // unrelated ambient vars a fixture legitimately relies on -- PATH, TEMP,
-// etc. -- are preserved) with the three ambient-leak keys removed, then any
-// caller-supplied `overrides` applied on top (so a test that explicitly
-// wants to set one of these three for its own fixture -- e.g. pointing at
-// its own mkdtemp ledger -- still can, on purpose, in its own call).
-// ★MERGE, not replace: `overrides` is shallow-merged onto the cleaned base,
-// it does not become the child's whole env -- a caller passing an
-// `overrides` object that itself already spreads `...process.env` (this
-// repo's existing pattern at two relay-handshake.test.mjs call sites, see
-// coder.md) gets that raw, unfiltered ambient value back for any key it
-// doesn't explicitly set itself. That is fine here because both existing
-// callers explicitly set every key they care about -- but a future caller
-// relying on `overrides` to fully REPLACE the child's env (no ambient
-// inheritance at all) would not get that from this function; it would need
-// to build its own complete env object instead.
+// etc. -- are preserved) with the three ambient-leak keys removed from BOTH
+// `baseEnv` and `overrides`, then `overrides` merged on top for every OTHER
+// key. Because both sides are stripped, there is no `overrides` shape --
+// not even one that spreads `...process.env` wholesale -- that can smuggle
+// one of the three protected keys back in. A caller that needs to
+// deliberately set one of them (e.g. pointing a child at its own mkdtemp
+// ledger fixture) must use isolatedChildEnvWithLedger instead; plain
+// `overrides` can no longer do it, on purpose.
 export function isolatedChildEnv(overrides = {}, baseEnv = process.env) {
-  const clean = { ...baseEnv };
-  for (const key of AMBIENT_LEDGER_ENV_KEYS) delete clean[key];
-  return { ...clean, ...overrides };
+  return {
+    ...stripAmbientLedgerKeys(baseEnv),
+    ...stripAmbientLedgerKeys(overrides),
+  };
+}
+
+// isolatedChildEnvWithLedger -- the ONLY sanctioned way to deliberately set
+// one or more of the three protected keys on a child's env (e.g. "point
+// this spawned CLI at MY OWN mkdtemp ledger so I can assert exit 3 fires").
+// `ledgerEnv`'s three named fields are applied strictly AFTER
+// isolatedChildEnv's stripping, so they always win regardless of what
+// `overrides`/`baseEnv` contained -- including ambient noise that survived
+// in `overrides` via a `...process.env` spread (the exact HYK-359 2R P1-2
+// shape). A field left `undefined` is not set at all (stays absent, same as
+// isolatedChildEnv's default -- it does NOT fall back to reading the
+// ambient value for that key).
+export function isolatedChildEnvWithLedger(
+  ledgerEnv = {},
+  overrides = {},
+  baseEnv = process.env,
+) {
+  const base = isolatedChildEnv(overrides, baseEnv);
+  const explicit = {};
+  if (ledgerEnv.admissionLedgerPath !== undefined) {
+    explicit.ADMISSION_LEDGER_PATH = ledgerEnv.admissionLedgerPath;
+  }
+  if (ledgerEnv.admissionLockPath !== undefined) {
+    explicit.ADMISSION_LOCK_PATH = ledgerEnv.admissionLockPath;
+  }
+  if (ledgerEnv.dispatchReceiptPath !== undefined) {
+    explicit.DISPATCH_RECEIPT_PATH = ledgerEnv.dispatchReceiptPath;
+  }
+  return { ...base, ...explicit };
 }
 
 // withIsolatedAmbientLedgerEnv -- for in-process callers (no child process,

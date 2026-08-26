@@ -31,7 +31,10 @@ import {
   PENDING_STALL_THRESHOLD_MS,
 } from "./relay-handshake.mjs";
 import { runAdmissionCli } from "../supervisor/admission-cli.mjs";
-import { isolatedChildEnv } from "./admission-ledger-env-isolation.mjs";
+import {
+  isolatedChildEnv,
+  isolatedChildEnvWithLedger,
+} from "./admission-ledger-env-isolation.mjs";
 
 // import.meta.url is resolved relative to this file's own location, not the
 // process cwd -- unaffected by the cwd axis (repo root vs scripts/check),
@@ -48,14 +51,23 @@ const USAGE_MESSAGE = "usage: node relay-handshake.mjs <role> [harnessDir]";
 // 처리하되 "계약 위반"으로 세지 않는다. 여기서는 spawn 자체가 깨지면
 // assert.fail로 그 사실을 명시하고, 정상적으로 끝난 프로세스만 그 exit
 // code/stderr를 CLI 계약 단언에 넘긴다.
-function runCli(args, opts = {}) {
+// HYK-359 2R P1-2: `opts.ledgerEnv` (named fields, see
+// admission-ledger-env-isolation.mjs) is the ONLY way a call site may
+// deliberately set one of the three protected keys -- `opts.env` itself is
+// always run through isolatedChildEnv's stripping regardless, even if it
+// spreads `...process.env` (that exact shape used to resurrect
+// DISPATCH_RECEIPT_PATH, see the two call sites below that now use
+// `ledgerEnv` instead of building `env` by hand).
+function runCli(args, { ledgerEnv, ...opts } = {}) {
   const res = spawnSync(process.execPath, [CLI_PATH, ...args], {
     encoding: "utf8",
     ...opts,
     // HYK-359: never let an ambient ADMISSION_LEDGER_PATH/ADMISSION_LOCK_PATH/
     // DISPATCH_RECEIPT_PATH leaked from the invoking shell reach this child --
     // see admission-ledger-env-isolation.mjs's header for why.
-    env: isolatedChildEnv(opts.env),
+    env: ledgerEnv
+      ? isolatedChildEnvWithLedger(ledgerEnv, opts.env)
+      : isolatedChildEnv(opts.env),
   });
   if (res.error) {
     assert.fail(
@@ -1876,11 +1888,10 @@ test("HYK-344 2R 재현->수리 확인: 원장 예약 키(GoLabel 흉내)와 완
       writeValidFixture(harnessDir, "coder", TASK_FALLBACK_ID);
 
       const { exit, stdout, stderr } = runCli(["coder", harnessDir], {
-        env: {
-          ...process.env,
-          ADMISSION_LEDGER_PATH: ledger,
-          ADMISSION_LOCK_PATH: lock,
-        },
+        // HYK-359 2R P1-2: `ledgerEnv` (named fields), never a hand-built
+        // `env: { ...process.env, ... }` -- that shape is exactly what
+        // resurrected an ambient DISPATCH_RECEIPT_PATH in 1R.
+        ledgerEnv: { admissionLedgerPath: ledger, admissionLockPath: lock },
       });
 
       // (1) 2R: exit code is now 3 -- a distinct value from 0 (full
@@ -1954,11 +1965,8 @@ test("HYK-344 정상 경로 회귀 0: 원장 예약 키와 완료측 taskId가 �
       writeValidFixture(harnessDir, "coder", MATCHING_ID);
 
       const { exit, stdout, stderr } = runCli(["coder", harnessDir], {
-        env: {
-          ...process.env,
-          ADMISSION_LEDGER_PATH: ledger,
-          ADMISSION_LOCK_PATH: lock,
-        },
+        // HYK-359 2R P1-2: same fix as the sibling mutation test above.
+        ledgerEnv: { admissionLedgerPath: ledger, admissionLockPath: lock },
       });
       assert.equal(exit, 0, `stdout=${stdout}\nstderr=${stderr}`);
 
