@@ -378,7 +378,7 @@ function consumeWord(s, startIndex) {
   return { literal, starUnquoted, nextIndex: i };
 }
 
-function bashWords(text) {
+export function bashWords(text) {
   const s = text.replace(/\\/g, "/");
   const words = [];
   let i = 0;

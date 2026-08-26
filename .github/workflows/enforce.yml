@@ -27,11 +27,12 @@ jobs:
       - name: Install pinned quality tooling (eslint/prettier, HYK-148)
         run: npm ci
 
-      # HYK-365: moved ahead of the suite so gitleaks is on PATH when it
-      # runs; continue-on-error keeps an install failure from blocking the
-      # suite (the later gitleaks scan step still gates without this flag).
+      # HYK-365 2R: moved ahead of the suite so gitleaks is on PATH when it
+      # runs. No continue-on-error here (downgraded from 1R's design,
+      # rejected review P1-1) -- an install failure now fails the job here,
+      # same fail-closed behavior nc-ci-enforce.test.mjs:145 already requires
+      # workflow-wide.
       - name: Install gitleaks (pinned, checksum-verified)
-        continue-on-error: true
         run: |
           set -e
           curl -sSL -o gitleaks.tar.gz "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
