@@ -2861,20 +2861,38 @@ function confirmPasteViaInjectedHook(fn) {
 // 요구한다. 오탐 방향(§6 "새는 게 낫다"와 반대): 여기서는 **놓치는 쪽**이
 // 안전하다(D11-B at-most-once Enter 원칙 -- 잘못 제출하면 되돌릴 수
 // 없다), 그래서 AND로만 조인한다(OR 금지).
-// ★회귀 0: `result.send.{accepted,bytesWritten}` 구조 자체가 없으면(구형
-// 스텁·응답 shape 변경 등) `null`(=신호 없음, 판단 보류)을 돌려준다 --
-// `false`(불일치로 단정)와 구별한다. confirmCodexStaging은 `null`이면
-// 화면 판정을 그대로 존중한다(이 축이 없던 시절과 100% 동일 동작) --
-// 이 축은 신호가 실재할 때만 추가로 조인되는 additive 축이다.
-function sendWasFullyAccepted(sendResponse, expectedText) {
+// HYK-274-stale-screen-3 (검토 1R 반려 P1 수리): 이전 판은 `result.send`
+// 구조 자체가 없으면 `null`(=신호 없음)을 돌려주고 confirmCodexStaging이
+// 그걸 "화면 판정 존중"으로 접었다 -- **fail-open**이었다. `orca`는 하루
+// 1회 업데이트되므로 응답 shape가 바뀌는 순간(그 필드가 사라지는 순간)
+// 이 수리가 막으려던 "화면 단독 경로"가 조용히 재개된다(검토자 지적,
+// coder-task.md §1 그대로). ⇒ **부재도 이제 미확인(fail-closed)이다** --
+// "신호가 없으니 통과"가 아니라 "신호가 없으니 거부"로 뒤집는다.
+// ★사유 코드를 가른다(검토자 요구) -- "바이트가 안 맞았다"(BYTE_MISMATCH,
+// send는 왔는데 내용이 어긋남 -- 통상적 실패)와 "그 필드 자체가 없다"
+// (FIELD_ABSENT, orca 응답 shape가 바뀌었다는 신호일 수 있음 -- 운영상
+// 훨씬 급한 사건)는 다른 사건이다. 로그·사유 문면에서 사람이 이 둘을
+// 구별하지 못하면 "shape가 바뀌었다"는 신호가 "그냥 이번 건 실패"에
+// 묻혀 진단이 죽는다.
+const OFF_SCREEN_SEND_VERDICT = Object.freeze({
+  MATCH: "MATCH",
+  BYTE_MISMATCH: "BYTE_MISMATCH",
+  NOT_ACCEPTED: "NOT_ACCEPTED",
+  FIELD_ABSENT: "FIELD_ABSENT",
+});
+function classifyOffScreenSend(sendResponse, expectedText) {
   const send =
     isPlainObject(sendResponse) && isPlainObject(sendResponse.result)
       ? sendResponse.result.send
       : null;
-  if (!isPlainObject(send)) return null; // 신호 없음 -- 판단 보류.
-  if (typeof expectedText !== "string") return false;
-  if (send.accepted !== true) return false;
-  return send.bytesWritten === Buffer.byteLength(expectedText, "utf8");
+  if (!isPlainObject(send)) return OFF_SCREEN_SEND_VERDICT.FIELD_ABSENT;
+  if (send.accepted !== true) return OFF_SCREEN_SEND_VERDICT.NOT_ACCEPTED;
+  if (typeof expectedText !== "string") {
+    return OFF_SCREEN_SEND_VERDICT.BYTE_MISMATCH;
+  }
+  return send.bytesWritten === Buffer.byteLength(expectedText, "utf8")
+    ? OFF_SCREEN_SEND_VERDICT.MATCH
+    : OFF_SCREEN_SEND_VERDICT.BYTE_MISMATCH;
 }
 
 // D11-B: codex 제출 전 staging 확인은 runtime+harness task에 결속된 exact
@@ -2902,28 +2920,91 @@ function confirmCodexStagingViaTerminalShow(seatHandle, marker, opts) {
   return false;
 }
 
+// HYK-274-stale-screen-3: confirmCodexStaging은 이제 boolean이 아니라
+// {ok, reasonCode}를 돌려준다 -- 호출부가 "왜" 미확인인지(화면 마커
+// 부재 vs 화면 밖 축의 바이트 불일치 vs 화면 밖 축 자체가 사라짐)를
+// 사람이 읽는 사유 문면에 그대로 옮길 수 있어야 하기 때문이다(검토
+// 반려 요구: "사람이 그 둘을 못 가르면 진단이 죽는다").
+const CONFIRM_CODEX_STAGING_REASON = Object.freeze({
+  CONFIRMED: "CONFIRMED",
+  SCREEN_MARKER_ABSENT: "SCREEN_MARKER_ABSENT",
+  INJECTED_HOOK_REJECTED: "INJECTED_HOOK_REJECTED",
+  OFF_SCREEN_BYTE_MISMATCH: "OFF_SCREEN_BYTE_MISMATCH",
+  OFF_SCREEN_NOT_ACCEPTED: "OFF_SCREEN_NOT_ACCEPTED",
+  // ★가장 급한 사유: `result.send`에 그 필드 자체가 없다 -- orca 응답
+  // shape가 바뀌었을 수 있다는 신호(coder-task.md §1 그대로).
+  OFF_SCREEN_FIELD_ABSENT: "OFF_SCREEN_FIELD_ABSENT",
+});
+
 // opts.offScreenSend?: {response, expectedText} -- deliverToCodexSeat이 이미
 // 받아 둔 textSent.response(§포트2, 새 orca 호출 0)와 그때 보낸 bootstrapText
-// 를 그대로 넘긴다. 생략하면(기존 호출부 그대로) 이전과 100% 동일하게
-// 화면 마커 단독으로 판정한다(회귀 0) -- 이 축은 순수 additive다.
+// 를 그대로 넘긴다. ⛔더 이상 "미주입/신호 없음 = 화면 판정 존중"이
+// 아니다(fail-open 폐기, 검토 반려 P1 수리) -- `offScreenSend`가 실제로
+// 주입된 호출(=실배달 경로, deliverToCodexSeat이 아래에서 항상 채운다)
+// 에서는 그 축이 MATCH일 때만 확인된다. `opts.offScreenSend` 자체를
+// 아예 넘기지 않는 것(단위 시험에서 이 축을 시험하지 않을 때의 호출
+// 형태)만 "이 축을 아예 안 쓴다"로 남겨 화면 단독 판정을 허용한다 --
+// 이건 "신호가 왔는데 없다고 접는 것"과 다르다(호출자가 애초에 이 축을
+// 쓰지 않겠다고 명시한 것).
 function confirmCodexStaging(seatHandle, marker, opts) {
   if (typeof opts.confirmPastedFn === "function") {
-    return confirmPasteViaInjectedHook(opts.confirmPastedFn);
+    const hookOk = confirmPasteViaInjectedHook(opts.confirmPastedFn);
+    return {
+      ok: hookOk,
+      reasonCode: hookOk
+        ? CONFIRM_CODEX_STAGING_REASON.CONFIRMED
+        : CONFIRM_CODEX_STAGING_REASON.INJECTED_HOOK_REJECTED,
+    };
   }
   const screenConfirmed = confirmCodexStagingViaTerminalShow(
     seatHandle,
     marker,
     opts,
   );
-  if (!screenConfirmed) return false;
+  if (!screenConfirmed) {
+    return {
+      ok: false,
+      reasonCode: CONFIRM_CODEX_STAGING_REASON.SCREEN_MARKER_ABSENT,
+    };
+  }
   const offScreen = opts.offScreenSend;
-  if (!isPlainObject(offScreen)) return true; // 미주입 = 기존 동작(회귀 0).
-  const offScreenResult = sendWasFullyAccepted(
+  if (!isPlainObject(offScreen)) {
+    return { ok: true, reasonCode: CONFIRM_CODEX_STAGING_REASON.CONFIRMED };
+  }
+  const verdict = classifyOffScreenSend(
     offScreen.response,
     offScreen.expectedText,
   );
-  if (offScreenResult === null) return true; // 신호 없음 -- 화면 판정 존중(회귀 0).
-  return offScreenResult;
+  if (verdict === OFF_SCREEN_SEND_VERDICT.MATCH) {
+    return { ok: true, reasonCode: CONFIRM_CODEX_STAGING_REASON.CONFIRMED };
+  }
+  const reasonCode =
+    verdict === OFF_SCREEN_SEND_VERDICT.FIELD_ABSENT
+      ? CONFIRM_CODEX_STAGING_REASON.OFF_SCREEN_FIELD_ABSENT
+      : verdict === OFF_SCREEN_SEND_VERDICT.NOT_ACCEPTED
+        ? CONFIRM_CODEX_STAGING_REASON.OFF_SCREEN_NOT_ACCEPTED
+        : CONFIRM_CODEX_STAGING_REASON.OFF_SCREEN_BYTE_MISMATCH;
+  return { ok: false, reasonCode };
+}
+
+// 사람이 읽는 사유 문면 -- reasonCode별로 구별되게 쓴다(검토 반려 요구:
+// "사람이 그 둘을 못 가르면 진단이 죽는다"). FIELD_ABSENT는 다른 사유와
+// 문면이 확실히 갈리게(orca 응답 shape 변경 가능성을 명시) 적는다.
+function describeConfirmCodexStagingFailure(reasonCode) {
+  switch (reasonCode) {
+    case CONFIRM_CODEX_STAGING_REASON.SCREEN_MARKER_ABSENT:
+      return "screen preview did not contain the task-specific marker";
+    case CONFIRM_CODEX_STAGING_REASON.INJECTED_HOOK_REJECTED:
+      return "confirmPastedFn override returned other than true";
+    case CONFIRM_CODEX_STAGING_REASON.OFF_SCREEN_BYTE_MISMATCH:
+      return "off-screen axis: terminal send bytesWritten did not match the bootstrap text length";
+    case CONFIRM_CODEX_STAGING_REASON.OFF_SCREEN_NOT_ACCEPTED:
+      return "off-screen axis: terminal send response reported accepted !== true";
+    case CONFIRM_CODEX_STAGING_REASON.OFF_SCREEN_FIELD_ABSENT:
+      return "off-screen axis: terminal send response has no result.send field -- orca response shape may have changed (fail-closed, not screen-only fallback)";
+    default:
+      return "unconfirmed";
+  }
 }
 
 // D13 (pm-2 §QE): codex 최소 기동문 -- runtime task id + 역할별 local task
@@ -3129,10 +3210,11 @@ function deliverToCodexSeat(c, seatHandle, runtimeTaskId, opts) {
           expectedText: bootstrapText,
         },
       };
-  if (!confirmCodexStaging(seatHandle, c.taskId, confirmOpts)) {
+  const confirmation = confirmCodexStaging(seatHandle, c.taskId, confirmOpts);
+  if (!confirmation.ok) {
     return {
       ok: false,
-      reason: `orca-adapter: ${REASON.PASTE_UNCONFIRMED} -- codex staging marker not observed (task-specific marker required, generic busy insufficient); submit refused (0 terminal send --enter calls)`,
+      reason: `orca-adapter: ${REASON.PASTE_UNCONFIRMED} (${confirmation.reasonCode}) -- ${describeConfirmCodexStagingFailure(confirmation.reasonCode)}; submit refused (0 terminal send --enter calls)`,
       runtimeTaskId: rtId,
     };
   }

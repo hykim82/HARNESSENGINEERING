@@ -2714,9 +2714,26 @@ test("deliverTask: D11-B codex default confirm path -- omitting confirmPastedFn 
 });
 
 test("deliverTask: D11-B codex default confirm path -- marker (taskId) alone in the preview confirms and allows exactly one Enter call", () => {
+  // HYK-274-stale-screen-3: default 경로는 이제 화면 밖 축이 fail-closed다
+  // -- result.send가 실려 있고 bytesWritten이 실제 기동문 길이와 맞아야
+  // (즉 실제 orca 응답 shape를 흉내내야) 확인된다(구형/부재 shape 시험은
+  // 위 ★변이(필수, 검토 P1 수리) 시험이 별도로 고정한다).
+  const bootstrapText = buildCodexBootstrapText({
+    role: "REVIEW",
+    runtimeTaskId: "task_rt1",
+    harnessTaskId: "HYK-169-coder-1",
+  });
   const execFn = fakeExecFn({
     ...taskCreateDispatchStubs(),
-    send: { ok: true },
+    send: {
+      ok: true,
+      result: {
+        send: {
+          accepted: true,
+          bytesWritten: Buffer.byteLength(bootstrapText, "utf8"),
+        },
+      },
+    },
     show: {
       ok: true,
       result: { terminal: { preview: "go HYK-169-coder-1\nrunning..." } },
@@ -2735,9 +2752,24 @@ test("deliverTask: D11-B codex default confirm path -- marker (taskId) alone in 
 // 아니라 부분 일치를 쓴다"를 증명한다.
 test("deliverTask: D11-B codex default confirm path -- exact real-world redraw-mangled preview fixture (2단 §3) confirms via partial match, not exact match", () => {
   const marker = "HYK170_ARRIVAL_MARK";
+  // HYK-274-stale-screen-3: 화면 밖 축이 fail-closed이므로 실제 orca
+  // 응답 shape(result.send.{accepted,bytesWritten})를 흉내내야 확인된다.
+  const bootstrapText = buildCodexBootstrapText({
+    role: "REVIEW",
+    runtimeTaskId: "task_rt1",
+    harnessTaskId: marker,
+  });
   const execFn = fakeExecFn({
     ...taskCreateDispatchStubs(),
-    send: { ok: true },
+    send: {
+      ok: true,
+      result: {
+        send: {
+          accepted: true,
+          bytesWritten: Buffer.byteLength(bootstrapText, "utf8"),
+        },
+      },
+    },
     show: {
       ok: true,
       result: { terminal: { preview: FIXTURE_PREVIEW_REDRAW } },
@@ -2794,14 +2826,19 @@ test("deliverTask: D11-B codex -- a *different* task's marker in the preview doe
 });
 
 // ---------------------------------------------------------------------------
-// HYK-274-stale-screen-1 (coder-task.md §4, 완료 조건 2) -- codex staging
+// HYK-274-stale-screen-1/-3 (coder-task.md §4, 완료 조건 2) -- codex staging
 // 확인에 화면 밖 축(terminal send의 raw 응답 `result.send.{accepted,
 // bytesWritten}`, orca 실측 확인)을 additive로 얹은 것의 계약 시험.
+// ★-3(검토 1R 반려 P1 수리): "result.send가 없으면 화면 판정을 존중한다"는
+// fail-open이었다 -- orca 응답 shape가 바뀌는 순간 이 수리가 막으려던
+// 화면 단독 경로가 조용히 재개된다. 아래 첫 시험이 그 반증(fail-closed로
+// 뒤집힌 것)을 고정한다 -- "회귀 0"이 아니라 "부재는 미확인"이 이제
+// 맞는 계약이다.
 // ---------------------------------------------------------------------------
-test("deliverTask: D11-B codex 화면밖 축 -- send 응답에 result.send가 없으면(구형 shape) 화면 판정만으로 그대로 확인된다(회귀 0)", () => {
+test("★변이(필수, 검토 P1 수리): send 응답에 result.send 필드 자체가 없으면(orca 응답 shape 변경 흉내) -- 화면에 마커가 있어도 PASTE_UNCONFIRMED/OFF_SCREEN_FIELD_ABSENT, zero Enter calls (fail-closed -- 예전엔 여기서 화면 판정만으로 통과했다, 그게 검토 반려 P1)", () => {
   const execFn = fakeExecFn({
     ...taskCreateDispatchStubs(),
-    send: { ok: true }, // result.send 없음 -- 신호 부재, 판단 보류로 접혀야 한다.
+    send: { ok: true }, // result.send 없음 -- orca 응답 shape가 바뀐 것을 흉내낸다.
     show: {
       ok: true,
       result: { terminal: { preview: "go HYK-169-coder-1\nrunning..." } },
@@ -2811,11 +2848,46 @@ test("deliverTask: D11-B codex 화면밖 축 -- send 응답에 result.send가 �
     { taskId: "HYK-169-coder-1", role: "REVIEW", worktreePath: VALID_WORKTREE },
     { execFn, existingSeatHandle: "term_x" },
   );
-  assert.equal(r.ok, true);
-  assert.equal(terminalSendEnterCalls(execFn).length, 1);
+  assert.equal(r.ok, false);
+  assert.match(r.reason, /PASTE_UNCONFIRMED/);
+  assert.match(r.reason, /OFF_SCREEN_FIELD_ABSENT/);
+  assert.match(r.reason, /orca response shape may have changed/);
+  assert.equal(terminalSendEnterCalls(execFn).length, 0);
 });
 
-test("★변이(필수): send 응답이 result.send를 실어 오는데 bytesWritten이 실제 기동문 길이와 다르면 -- 화면에 마커가 있어도 PASTE_UNCONFIRMED, zero Enter calls (화면 단독이었다면 이 시험이 놓쳤을 사례)", () => {
+test("deliverTask: D11-B codex 화면밖 축 -- send 응답에 result.send는 있는데 accepted!==true면 -- PASTE_UNCONFIRMED/OFF_SCREEN_NOT_ACCEPTED(바이트 불일치와 다른 사유 코드), zero Enter calls", () => {
+  const bootstrapText = buildCodexBootstrapText({
+    role: "REVIEW",
+    runtimeTaskId: "task_rt1",
+    harnessTaskId: "HYK-169-coder-1",
+  });
+  const execFn = fakeExecFn({
+    ...taskCreateDispatchStubs(),
+    send: {
+      ok: true,
+      result: {
+        send: {
+          accepted: false,
+          bytesWritten: Buffer.byteLength(bootstrapText, "utf8"),
+        },
+      },
+    },
+    show: {
+      ok: true,
+      result: { terminal: { preview: "go HYK-169-coder-1\nrunning..." } },
+    },
+  });
+  const r = deliverTask(
+    { taskId: "HYK-169-coder-1", role: "REVIEW", worktreePath: VALID_WORKTREE },
+    { execFn, existingSeatHandle: "term_x" },
+  );
+  assert.equal(r.ok, false);
+  assert.match(r.reason, /PASTE_UNCONFIRMED/);
+  assert.match(r.reason, /OFF_SCREEN_NOT_ACCEPTED/);
+  assert.equal(terminalSendEnterCalls(execFn).length, 0);
+});
+
+test("★변이(필수): send 응답이 result.send를 실어 오는데 bytesWritten이 실제 기동문 길이와 다르면 -- 화면에 마커가 있어도 PASTE_UNCONFIRMED/OFF_SCREEN_BYTE_MISMATCH(필드 부재와 다른 사유 코드), zero Enter calls (화면 단독이었다면 이 시험이 놓쳤을 사례)", () => {
   const bootstrapText = buildCodexBootstrapText({
     role: "REVIEW",
     runtimeTaskId: "task_rt1",
@@ -2843,6 +2915,7 @@ test("★변이(필수): send 응답이 result.send를 실어 오는데 bytesWri
   );
   assert.equal(r.ok, false);
   assert.match(r.reason, /PASTE_UNCONFIRMED/);
+  assert.match(r.reason, /OFF_SCREEN_BYTE_MISMATCH/);
   assert.equal(terminalSendEnterCalls(execFn).length, 0);
 });
 
