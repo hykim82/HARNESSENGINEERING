@@ -28,10 +28,6 @@ const NOW_ISO = "2026-08-03T18:00:00+09:00";
 const NOW_MS = Date.parse(NOW_ISO);
 const EXPIRES_IN_7D = new Date(NOW_MS + 7 * 24 * 3600_000).toISOString();
 
-// HYK-369 3R P1(fail-closed): 대부분의 시험은 각성 인자 자체를 다루지
-// 않으니, 기본 인자 목록에 `--no-runner-args`를 포함해 "빈 게 맞다"고
-// 명시적으로 확인한 상태로 시작한다 -- 이 확인 자체를 다루는 시험만
-// 이 플래그를 빼거나 `--runner-arg`로 대체한다.
 function commonArgs(extra = []) {
   return [
     "--repo-root",
@@ -48,7 +44,6 @@ function commonArgs(extra = []) {
     "HOST\\hykim",
     "--now",
     NOW_ISO,
-    "--no-runner-args",
     ...extra,
   ];
 }
@@ -104,131 +99,6 @@ test("register: with --confirm (mock exec only -- real schtasks never invoked), 
   assert.deepEqual(calls[0][1].slice(0, 2), ["/Create", "/SC"]);
 });
 
-// ---------------------------------------------------------------------------
-// HYK-369 3R P1(2R 검토 반려, 한용 확정 fail-closed) -- CLI 층에서도
-// `--runner-arg`/`--no-runner-args` 둘 다 안 주면 계획이 거부되는지.
-// commonArgs()가 기본으로 `--no-runner-args`를 넣어 두므로, 여기서는
-// 그걸 빼서 원래(순정) 인자 목록으로 시험한다.
-// ---------------------------------------------------------------------------
-test("plan: --runner-arg도 --no-runner-args도 안 주면 계획을 거부한다 -- 조용한 통과 금지(1/1)", () => {
-  const args = [
-    "--repo-root",
-    ROOT,
-    "--node-path",
-    "C:\\Program Files\\nodejs\\node.exe",
-    "--watch-dir",
-    "D:\\문서관리\\하네스-관제실\\watch",
-    "--interval-minutes",
-    "10",
-    "--expires-at",
-    EXPIRES_IN_7D,
-    "--run-as-user",
-    "HOST\\hykim",
-    "--now",
-    NOW_ISO,
-  ]; // --runner-arg도 --no-runner-args도 고의로 뺐다.
-  const { output, exitCode } = runScheduleWire(["plan", ...args], {
-    exec: neverCalledExec,
-  });
-  assert.equal(exitCode, EXIT_CODE.PLAN_REJECTED);
-  assert.match(output, /EXTRA_RUNNER_ARGS_CONFIRMATION_REQUIRED/);
-  // HYK-369 P(3R 검토 반려 지적) -- 거부 원문이 "무엇을 잃는지" 말해야
-  // 한다. 개별 플래그 이름은 여기(schedule-wire.mjs, 결선 계층)의 안내
-  // 문구에만 있고 코어 로직에는 없다(§본문 참조).
-  assert.match(output, /--wake/);
-  assert.match(output, /--runner-arg/);
-  assert.match(output, /--no-runner-args/);
-});
-
-// ---------------------------------------------------------------------------
-// HYK-369 4R P1(3R 검토 반려 그대로 재현, CLI 층) -- 3R을 반려시킨
-// 정확한 그 명령: `--runner-arg ""`. 지금은 CLI에서도 거부돼야 한다.
-// ---------------------------------------------------------------------------
-test('plan: --runner-arg ""(빈 문자열, 3R 반려를 부른 그 우회)는 CLI 층에서도 거부된다(1/1)', () => {
-  const { output, exitCode } = runScheduleWire(
-    // commonArgs()는 기본으로 --no-runner-args를 넣는다 -- 이 시험은 그
-    // opt-out 없이, 순수하게 빈 문자열 하나로 우회를 시도하는 시나리오를
-    // 재현해야 하므로 그 플래그를 제거한다.
-    ["plan", ...commonArgs(["--runner-arg", ""])].filter(
-      (a) => a !== "--no-runner-args",
-    ),
-    { exec: neverCalledExec },
-  );
-  assert.equal(exitCode, EXIT_CODE.PLAN_REJECTED);
-  assert.match(output, /EXTRA_RUNNER_ARGS_CONFIRMATION_REQUIRED/);
-});
-
-test('register: --runner-arg ""만 반복해도(여러 개, 전부 공백류) CLI 층에서 거부된다 -- --confirm과 무관하게 exec에 안 닿는다(1/1)', () => {
-  const args = commonArgs([
-    "--runner-arg",
-    "",
-    "--runner-arg",
-    "   ",
-    "--confirm",
-  ]).filter((a) => a !== "--no-runner-args");
-  const { exitCode } = runScheduleWire(["register", ...args], {
-    exec: neverCalledExec,
-  });
-  assert.equal(exitCode, EXIT_CODE.PLAN_REJECTED);
-});
-
-// (별도 시험 불필요 -- 위 "register: with --confirm" 시험이 이미
-// commonArgs()의 기본 `--no-runner-args`로 이 경로를 exec 호출까지
-// 통과시킨다: 그 자체가 "명시적으로 확인하면 정당한 신규 설치가 안
-// 막힌다"는 증거다.)
-
-// ---------------------------------------------------------------------------
-// HYK-369 2R P1-1(검토 반려) -- `--runner-arg`를 반복 지정하면 라이브
-// 작업의 각성/sweep 인자가 등장 순서 그대로 등록 계획의 `/TR`에 실린다.
-// 이게 없으면 코드 경로로 재등록할 때마다 그 인자들이 조용히 사라진다.
-// ---------------------------------------------------------------------------
-test("register: --runner-arg를 반복 지정하면 등장 순서 그대로 /TR에 실린다 -- 각성 인자 보존 계약(1/1)", () => {
-  const calls = [];
-  const { exitCode } = runScheduleWire(
-    [
-      "register",
-      ...commonArgs([
-        "--runner-arg",
-        "--wake",
-        "--runner-arg",
-        "--admission-sweep-ledger",
-        "--runner-arg",
-        "D:\\문서관리\\하네스-관제실\\admission-ledger.json",
-        "--runner-arg",
-        "--wake-live",
-        "--confirm",
-      ]),
-    ],
-    {
-      exec: (cmd, args) => {
-        calls.push([cmd, args]);
-        return "SUCCESS: registered.";
-      },
-    },
-  );
-  assert.equal(exitCode, EXIT_CODE.OK);
-  const trIdx = calls[0][1].indexOf("/TR");
-  const commandLine = calls[0][1][trIdx + 1];
-  assert.ok(
-    commandLine.endsWith(
-      ' "--wake" "--admission-sweep-ledger" ' +
-        '"D:\\문서관리\\하네스-관제실\\admission-ledger.json" "--wake-live"',
-    ),
-    `/TR must end with the live wake/sweep args in order, got: ${commandLine}`,
-  );
-});
-
-test("plan: --runner-arg를 안 주면 commandLine에 아무것도 안 붙는다 -- 회귀 0(1/1)", () => {
-  const { output } = runScheduleWire(["plan", ...commonArgs(["--json"])], {
-    exec: neverCalledExec,
-  });
-  const plan = JSON.parse(output);
-  assert.ok(
-    !plan.commandLine.includes("--wake"),
-    "no --runner-arg means no extra tokens appended",
-  );
-});
-
 test("register: rejected plan (e.g. missing expiresAt) never reaches exec, even with --confirm (1/1)", () => {
   const args = [
     "--repo-root",
@@ -243,11 +113,8 @@ test("register: rejected plan (e.g. missing expiresAt) never reaches exec, even 
     "HOST\\hykim",
     "--now",
     NOW_ISO,
-    "--no-runner-args",
     "--confirm",
-  ]; // --expires-at 생략(고의 -- 계획 거부를 유도). --no-runner-args는
-  // 넣어 둔다 -- 안 그러면 그 확인 요구가 먼저 걸려 이 시험이 원래
-  // 겨냥하는 "만료 누락" 경로를 더 이상 보여주지 못한다.
+  ]; // --expires-at 생략(고의 -- 계획 거부를 유도).
   const { exitCode } = runScheduleWire(["register", ...args], {
     exec: neverCalledExec,
   });

@@ -39,10 +39,6 @@ function validArgs(overrides = {}) {
     nodePath: "C:\\Program Files\\nodejs\\node.exe",
     watchDir: "D:\\문서관리\\하네스-관제실\\watch",
     conhostPath: "C:\\Windows\\System32\\conhost.exe",
-    // HYK-369 P1(3R fail-closed): 대부분의 시험은 각성 인자 자체를
-    // 다루지 않으니, 기본 픽스처는 "빈 게 맞다"고 명시적으로 확인한
-    // 상태로 시작한다 -- 이 확인 자체를 다루는 시험만 지운다(overrides).
-    extraRunnerArgsConfirmedEmpty: true,
     intervalMinutes: 10,
     expiresAt: EXPIRES_IN_7D,
     accountMode: ACCOUNT_MODE.LOGON_ONLY,
@@ -231,6 +227,10 @@ test("register/unregister pair: unregisterArgs always present alongside register
 // 사라지면(=node.exe를 다시 직접 `/TR`로 실행하면) 등록된 이 태스크가
 // 돌 때마다 사람 화면에 새 터미널 창이 뜬다(coder.md §1-6 실측 -- ORCH가
 // 확인한 실 등록 Execute 경로와 한용이 본 창 제목이 글자 그대로 일치).
+//
+// 이 조각이 HYK-369의 본체다(5R 디스코프, coder-task.md §2-1) -- 인자
+// 검증(각성/sweep 보존) 배관은 HYK-372로 빠졌지만, 이 시험과 아래 P1-3
+// 실행형 시험은 창 수리 그 자체를 지키므로 그대로 남는다.
 // ---------------------------------------------------------------------------
 test("HYK-369: commandLine이 node.exe를 conhost.exe --headless --로 감싸 실행한다 -- 창 없이 뜨는 계약(1/1)", () => {
   const { plan } = buildSchedulePlan(validArgs());
@@ -251,39 +251,7 @@ test("HYK-369: commandLine이 node.exe를 conhost.exe --headless --로 감싸 �
   assert.ok(plan.registerArgs.includes("/IT"));
 });
 
-// ---------------------------------------------------------------------------
-// HYK-369 2R P1-1(검토 반려) -- 재등록 계획이 라이브 작업의 각성/sweep
-// watch-run.mjs 인자(`--wake --admission-sweep-ledger … --wake-live`류)를
-// 보존하는지. 이 계약이 사라지면(=extraRunnerArgs가 다시 무시되면)
-// 코드 경로로 재등록할 때마다 감시자의 각성 기능이 조용히 꺼진다.
-// ---------------------------------------------------------------------------
-test("HYK-369 P1-1: extraRunnerArgs가 commandLine 끝에 등장 순서 그대로 이어붙는다 -- 재등록해도 각성 인자가 안 사라지는 계약(1/1)", () => {
-  const liveWakeArgs = [
-    "--wake",
-    "--admission-sweep-ledger",
-    "D:\\문서관리\\하네스-관제실\\admission-ledger.json",
-    "--wake-live",
-  ];
-  const { plan } = buildSchedulePlan(
-    validArgs({ extraRunnerArgs: liveWakeArgs }),
-  );
-  const expectedSuffix =
-    ` "--wake" "--admission-sweep-ledger" ` +
-    `"D:\\문서관리\\하네스-관제실\\admission-ledger.json" "--wake-live"`;
-  assert.ok(
-    plan.commandLine.endsWith(expectedSuffix),
-    `commandLine must end with the live wake/sweep args in order, got: ${plan.commandLine}`,
-  );
-  // 순서를 뒤섞지 않는다는 것까지 명시 -- watch-run.mjs 자신의 인자
-  // 파서는 위치가 아니라 이름으로 읽지만(§ argv 루프), 등록 명령줄
-  // 자체가 사람이 검토·비교하는 대상이라 순서 보존이 필요하다.
-  const wakeIdx = plan.commandLine.indexOf('"--wake"');
-  const ledgerIdx = plan.commandLine.indexOf('"--admission-sweep-ledger"');
-  const liveIdx = plan.commandLine.indexOf('"--wake-live"');
-  assert.ok(wakeIdx < ledgerIdx && ledgerIdx < liveIdx);
-});
-
-test("HYK-369 P1-1: extraRunnerArgs 생략 시 기본값 []이고 commandLine이 1R과 바이트 동일하다 -- 회귀 0(1/1)", () => {
+test("commandLine이 1R과 바이트 동일하다 -- 회귀 0(1/1)", () => {
   const { plan } = buildSchedulePlan(validArgs());
   assert.equal(
     plan.commandLine,
@@ -294,127 +262,6 @@ test("HYK-369 P1-1: extraRunnerArgs 생략 시 기본값 []이고 commandLine이
       ROOT +
       '" --watch-dir "D:\\문서관리\\하네스-관제실\\watch"',
   );
-});
-
-// ---------------------------------------------------------------------------
-// HYK-369 3R P1(검토 2R 반려, 한용 확정 fail-closed) -- 각성 인자가
-// 없는데 그게 의도인지 말하지 않으면 계획 자체를 거부한다. 2R은
-// "주면 보존"만 했고, 하나도 안 줘도 조용히 정상 계획이 나와 운영자가
-// `--runner-arg`를 깜빡하면 각성·sweep 감시가 티 안 나게 꺼졌다(2R 검토
-// 반려 원문 재현). 그렇다고 "비어 있으면 무조건 거부"하면 각성이 필요
-// 없는 정당한 신규 설치까지 막으므로(coder-task.md 3R §2-4), 빈 것
-// 자체가 아니라 "빈 게 확인 안 됐다"만 거부한다.
-// ---------------------------------------------------------------------------
-test("HYK-369 3R P1: extraRunnerArgs를 생략(또는 빈 배열)하고 extraRunnerArgsConfirmedEmpty도 안 주면 계획을 거부한다 -- 조용한 통과 금지(3/3)", () => {
-  for (const overrides of [
-    { extraRunnerArgs: undefined, extraRunnerArgsConfirmedEmpty: undefined },
-    { extraRunnerArgs: [], extraRunnerArgsConfirmedEmpty: undefined },
-    { extraRunnerArgs: [], extraRunnerArgsConfirmedEmpty: false },
-  ]) {
-    const result = buildSchedulePlan(validArgs(overrides));
-    assert.equal(result.ok, false, `must reject: ${JSON.stringify(overrides)}`);
-    assert.equal(
-      result.reasonCode,
-      SCHEDULE_PLAN_REASON.EXTRA_RUNNER_ARGS_CONFIRMATION_REQUIRED,
-    );
-  }
-});
-
-test("HYK-369 3R P1: extraRunnerArgsConfirmedEmpty:true를 명시하면 빈 각성 인자로도 정당한 신규 설치가 통과한다 -- 막는 쪽이 항상 옳지는 않다(1/1)", () => {
-  const result = buildSchedulePlan(
-    validArgs({
-      extraRunnerArgs: [],
-      extraRunnerArgsConfirmedEmpty: true,
-    }),
-  );
-  assert.equal(result.ok, true);
-  assert.ok(
-    !result.plan.commandLine.includes("--wake"),
-    "explicit empty means no extra tokens, exactly like a real fresh install with no wake needs",
-  );
-});
-
-test("HYK-369 3R P1: extraRunnerArgs가 하나라도 있으면 extraRunnerArgsConfirmedEmpty 없이도 통과한다 -- 있는 걸 또 확인하라고 요구하지 않는다(1/1)", () => {
-  const result = buildSchedulePlan(
-    validArgs({
-      extraRunnerArgs: ["--wake"],
-      extraRunnerArgsConfirmedEmpty: undefined,
-    }),
-  );
-  assert.equal(result.ok, true);
-  assert.match(result.plan.commandLine, /"--wake"/);
-});
-
-// ---------------------------------------------------------------------------
-// HYK-369 4R P1(3R 검토 반려, 한용 확정 "불변식, 목록이 아니다") -- 이
-// 시험은 개별 입력 모양을 나열하지 않는다. §2-1 불변식 그 자체를
-// 시험으로 박는다: "extraRunnerArgsConfirmedEmpty 없이 성공한 계획은
-// commandLine에 의미 있는(공백류만이 아닌) 러너 토큰을 최소 1개 담고
-// 있어야 한다." 아래 CANDIDATES는 그 불변식을 깨뜨리려는 시도(우회
-// 후보)들의 «종류»별 대표값이다 -- coder.md 4R §2-3에 이 표를 그대로
-// 옮겼다(같은 배열, 같은 실행, 같은 결과). 3R 반려를 부른 `--runner-arg
-// ""`도 여기 포함된다.
-//
-// ★"통과해야 하는" 대조군(GENUINE)도 같이 돈다 -- 우회를 막다가 진짜
-// 인자까지 거부하면 안 되기 때문이다(coder-task.md §3 "정당한 신규
-// 설치를 막지 마라"와 대칭인 축).
-const CONFIRMATION_BYPASS_CANDIDATES = [
-  { label: "빈 배열", extraRunnerArgs: [] },
-  { label: "생략(undefined)", extraRunnerArgs: undefined },
-  { label: "빈 문자열 원소 1개 (3R 반려 원인)", extraRunnerArgs: [""] },
-  { label: "스페이스만", extraRunnerArgs: ["   "] },
-  { label: "탭만", extraRunnerArgs: ["\t"] },
-  { label: "개행만(복수)", extraRunnerArgs: ["\n\n"] },
-  {
-    label: "여러 원소가 전부 공백류(섞임)",
-    extraRunnerArgs: ["", "  ", "\t\n"],
-  },
-  { label: "빈 문자열 여러 개", extraRunnerArgs: ["", ""] },
-];
-const CONFIRMATION_GENUINE_CANDIDATES = [
-  { label: "정상 플래그 1개", extraRunnerArgs: ["--wake"] },
-  {
-    label: "공백류 원소 사이에 정상 값 1개(섞여도 있으면 통과해야 함)",
-    extraRunnerArgs: ["", "--wake", "  "],
-  },
-  { label: "값 형태(공백 아닌 아무 문자열)", extraRunnerArgs: ["0"] },
-];
-
-test("HYK-369 4R P1 불변식: 우회 후보 전부(확인 없이) -- commandLine에 의미 있는 토큰이 없으면 반드시 거부된다(8/8, 원문은 coder.md §2-3)", () => {
-  for (const c of CONFIRMATION_BYPASS_CANDIDATES) {
-    const result = buildSchedulePlan(
-      validArgs({
-        extraRunnerArgs: c.extraRunnerArgs,
-        extraRunnerArgsConfirmedEmpty: undefined,
-      }),
-    );
-    assert.equal(
-      result.ok,
-      false,
-      `bypass candidate "${c.label}" must be rejected, got ok:true commandLine=${result.plan?.commandLine}`,
-    );
-    assert.equal(
-      result.reasonCode,
-      SCHEDULE_PLAN_REASON.EXTRA_RUNNER_ARGS_CONFIRMATION_REQUIRED,
-      `bypass candidate "${c.label}" must fail for the confirmation reason, not something else`,
-    );
-  }
-});
-
-test("HYK-369 4R P1 불변식(대조군): 의미 있는 토큰이 하나라도 섞여 있으면 확인 없이도 통과한다 -- 우회 방어가 정상 인자를 못 물어야 한다(3/3)", () => {
-  for (const c of CONFIRMATION_GENUINE_CANDIDATES) {
-    const result = buildSchedulePlan(
-      validArgs({
-        extraRunnerArgs: c.extraRunnerArgs,
-        extraRunnerArgsConfirmedEmpty: undefined,
-      }),
-    );
-    assert.equal(
-      result.ok,
-      true,
-      `genuine candidate "${c.label}" must be accepted, got reasonCode=${result.reasonCode}`,
-    );
-  }
 });
 
 // ---------------------------------------------------------------------------
@@ -489,7 +336,6 @@ test(
       validArgs({
         watchDir,
         nodePath: process.execPath, // 이 기계에 실재하는 node.exe -- validArgs 기본값은 시험용 리터럴이라 실행 불가.
-        extraRunnerArgs: ["--no-reach"], // 실 관제실 받는함 미접촉 -- §0 원장 무접촉과 같은 정신.
       }),
     );
     assert.equal(ok, true, "buildSchedulePlan must accept these valid args");
@@ -504,7 +350,15 @@ test(
     );
     const [firstToken, ...restTokens] = tokens;
     const conhostExe = firstToken.replace(/^"|"$/g, "");
-    const restArgs = restTokens.map((t) => t.replace(/^"|"$/g, ""));
+    // --no-reach: 실 관제실 받는함 미접촉(§0 원장 무접촉과 같은 정신).
+    // buildCommandLine 자체가 만드는 토큰이 아니라 이 시험이 안전을
+    // 위해 별도로 덧붙이는 실 watch-run.mjs 플래그다 -- 위의 conhost
+    // 감쌈/repo-root/watch-dir 재구성과는 무관해 "손으로 다시 조립"
+    // 원칙을 깨지 않는다.
+    const restArgs = [
+      ...restTokens.map((t) => t.replace(/^"|"$/g, "")),
+      "--no-reach",
+    ];
 
     const psArgList = restArgs
       .map((a) => `'${a.replace(/'/g, "''")}'`)
@@ -639,13 +493,21 @@ async function importMutatedCopy(mutate) {
   }
 }
 
+// HYK-369 5R(디스코프, coder-task.md §2-1 경고): 2R 리팩터가
+// `validateAllArgs`/`assemblePlan`으로 쪼갠 건 각성 인자 검증(3R fail-
+// closed)이 `buildSchedulePlan`을 80줄 ESLint 상한 위로 밀어냈기
+// 때문이었다. 그 인자 검증 배관을 HYK-372로 걷어내면서 함수가 다시
+// 짧아졌으므로, 2R 이전의 단일 함수 형태로 되돌렸다(§ schedule-plan-
+// core.mjs 본문) -- `b2d03d5`가 고쳤던 needle(`return { code:
+// expires.code }`)도 원래 형태(`return fail(expires.code)`)로 되돌아
+// 가야 이 mutation이 실제 소스와 다시 맞는다. 아래 needle이 그 원복이다.
 test(
   "NC mutation/schedule-plan-core #2 (필수): 만료 필수 검사 제거 -> RED (무기한 등록 계획이 만들어짐)",
   { skip: !SRC_COMMITTED && NOT_COMMITTED_SKIP_REASON },
   async () => {
     const mutant = await importMutatedCopy((src) =>
       src.replace(
-        "  const expires = validateExpiresAt(expiresAt, now);\n  if (expires.code) return { code: expires.code };\n",
+        "  const expires = validateExpiresAt(expiresAt, now);\n  if (expires.code) return fail(expires.code);\n",
         "  const expires = validateExpiresAt(expiresAt, now);\n",
       ),
     );

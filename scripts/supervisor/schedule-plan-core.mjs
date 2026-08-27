@@ -68,9 +68,6 @@ export const SCHEDULE_PLAN_REASON = Object.freeze({
   NODE_PATH_INVALID: "NODE_PATH_INVALID",
   WATCH_DIR_INVALID: "WATCH_DIR_INVALID",
   CONHOST_PATH_INVALID: "CONHOST_PATH_INVALID",
-  EXTRA_RUNNER_ARGS_INVALID: "EXTRA_RUNNER_ARGS_INVALID",
-  EXTRA_RUNNER_ARGS_CONFIRMATION_REQUIRED:
-    "EXTRA_RUNNER_ARGS_CONFIRMATION_REQUIRED",
   RUN_AS_USER_INVALID: "RUN_AS_USER_INVALID",
   INTERVAL_MINUTES_INVALID: "INTERVAL_MINUTES_INVALID",
   ACCOUNT_MODE_INVALID: "ACCOUNT_MODE_INVALID",
@@ -140,76 +137,6 @@ function validateInterval(intervalMinutes) {
     intervalMinutes > MAX_INTERVAL_MINUTES
   ) {
     return SCHEDULE_PLAN_REASON.INTERVAL_MINUTES_INVALID;
-  }
-  return null;
-}
-
-// HYK-369 P1-1(검토 반려, 2R): 재등록 계획이 라이브 작업의 `--wake
-// --admission-sweep-ledger … --wake-live` 같은 watch-run.mjs 각성/sweep
-// CLI 인자를 보존하지 못해, 코드 경로로 재등록하면 그 인자들이 조용히
-// 사라지는(각성이 꺼지는) 회귀였다. 호출자가 라이브 인자를 그대로
-// `extraRunnerArgs`로 넘기면 이 코어가 `/TR`에 그대로 이어붙인다 --
-// 이름을 알아야 하는 개별 플래그로 하드코딩하지 않는다(watch-run.mjs가
-// 새 플래그를 얻어도 이 코어를 다시 고칠 필요가 없다).
-//
-// HYK-369 P1(검토 반려, 3R -- 한용 확정 fail-closed): 2R은 "주면 보존"만
-// 했다 -- `extraRunnerArgs`를 아예 안 주거나 빈 배열을 줘도 조용히
-// "정상" 계획이 나왔고, 운영자가 `--runner-arg`를 한 번 빠뜨리면
-// 각성·sweep 감시가 티 안 나게 꺼졌다(2R 검토 반려 그대로 재현). 그렇다고
-// "비어 있으면 무조건 거부"하면 각성이 필요 없는 정당한 신규 설치까지
-// 막는다(coder-task.md §2-4, "막는 쪽이 항상 옳지는 않다"). 그래서
-// **"비어 있음" 자체가 아니라 "비어 있는데 그게 의도인지 말하지 않았다"**
-// 를 거부한다 -- `extraRunnerArgsConfirmedEmpty: true`로 명시적으로
-// "이 설치는 각성 인자가 없는 게 맞다"고 말해야 빈 배열이 통과한다.
-// 인자가 하나라도 «의미 있으면» 이 확인은 필요 없다(있는 걸 굳이
-// "확인"해 달라고 요구하는 건 실 사용자에게 마찰만 늘린다).
-//
-// HYK-369 P1(검토 반려, 4R -- 한용 확정 "불변식, 목록이 아니다"):
-// 1R→3R은 매번 "방금 발견된 구멍"을 막았다 -- 빈 배열 → 원소 0개 → 빈
-// 문자열 원소, 검토자가 매번 옆 구멍을 찾았다(3R: `--runner-arg ""` 가
-// "원소가 문자열이긴 하다"는 이유로 통과했다). 그 패턴은 **입력이 어떤
-// "모양"인지를 열거해서 걸렀기 때문**이다 -- 새 모양이 나올 때마다 또
-// 뚫린다. 그래서 이번엔 검사 대상 자체를 바꿨다: 개별 원소의 모양이
-// 아니라 **"조립 결과에 실제로 쓰일 것이 하나라도 있는가"** 를 본다.
-//
-// 정의(★): 원소 하나가 "의미 있다" ⟺ 그 문자열을 공백류 문자(스페이스·
-// 탭·개행 등, JS String.prototype.trim이 제거하는 전부)를 제거했을 때
-// 길이가 0보다 크다. extraRunnerArgs 전체가 "의미 있다" ⟺ 그런 원소가
-// 하나 이상 있다.
-//
-// ★왜 빠짐없는가(열거가 아니라 성질로 논증): watch-run.mjs가 실제로
-// 읽는 모든 CLI 토큰(`--wake`, `--admission-sweep-ledger`, 그 값인
-// 파일 경로, 앞으로 생길 어떤 새 플래그든)은 **정의상** trim 후 길이가
-// 0보다 크다 -- 이름 있는 플래그는 최소 두 글자 이상의 `--`로 시작하고,
-// 경로 값은 빈 문자열일 수 없다(빈 경로는애초에 유효한 경로가 아니다).
-// 역으로 이 조건을 만족 못하는 문자열(""·공백만·탭/개행만)은 그 정의상
-// **watch-run.mjs가 실행할 수 있는 어떤 실제 명령행 토큰도 될 수
-// 없다** -- 이름 있는 플래그도, 값도 아니다. 즉 이 검사는 "알려진 나쁜
-// 값의 목록"이 아니라 "명령행 토큰이 되려면 반드시 참이어야 하는
-// 필요조건"을 검사한다 -- 그 필요조건을 못 만족하는 문자열의 가짓수는
-// 무한하지만(""·" "·"\t"·"\n\n"·...) 전부 이 한 조건 하나로 걸린다.
-// (한계 하나는 정직하게 적는다 -- §2-3/coder.md 참조: 화면에 안 보이는
-// 진짜 문자를 가진 문자열(예: 폭 없는 공백 U+200B)은 JS trim()이 공백
-// 취급을 안 해 이 조건을 통과할 수 있다. 실제 CLI 플래그/경로 값이
-// 그런 문자를 담을 일은 없다고 판단해 이번 라운드에서는 막지 않았다 --
-// coder.md에 발견 사실과 판단 근거를 그대로 남겼다.)
-function validateExtraRunnerArgs(
-  extraRunnerArgs,
-  extraRunnerArgsConfirmedEmpty,
-) {
-  if (extraRunnerArgs !== undefined) {
-    if (!Array.isArray(extraRunnerArgs)) {
-      return SCHEDULE_PLAN_REASON.EXTRA_RUNNER_ARGS_INVALID;
-    }
-    if (!extraRunnerArgs.every((a) => typeof a === "string")) {
-      return SCHEDULE_PLAN_REASON.EXTRA_RUNNER_ARGS_INVALID;
-    }
-  }
-  const hasMeaningfulArg =
-    Array.isArray(extraRunnerArgs) &&
-    extraRunnerArgs.some((a) => a.trim().length > 0);
-  if (!hasMeaningfulArg && extraRunnerArgsConfirmedEmpty !== true) {
-    return SCHEDULE_PLAN_REASON.EXTRA_RUNNER_ARGS_CONFIRMATION_REQUIRED;
   }
   return null;
 }
@@ -294,13 +221,10 @@ function buildCommandLine(
   runnerPath,
   repoRoot,
   watchDir,
-  extraRunnerArgs,
 ) {
-  const extra = extraRunnerArgs.map((a) => `"${a}"`).join(" ");
   return (
     `"${conhostPath}" --headless -- ` +
-    `"${nodePath}" "${runnerPath}" --repo-root "${repoRoot}" --watch-dir "${watchDir}"` +
-    (extra ? ` ${extra}` : "")
+    `"${nodePath}" "${runnerPath}" --repo-root "${repoRoot}" --watch-dir "${watchDir}"`
   );
 }
 
@@ -332,33 +256,26 @@ function buildRegisterArgs({
 }
 
 // buildSchedulePlan({repoRoot, nodePath, watchDir, conhostPath,
-// extraRunnerArgs, extraRunnerArgsConfirmedEmpty, intervalMinutes,
-// expiresAt, accountMode, runAsUser, now}) -> {ok, plan, reasonCode}.
-// `conhostPath`는 호출자가 실제 `%SystemRoot%\System32\conhost.exe`를
-// 조립해 넘긴다(P2-1 수리 -- 이 코어는 하드코딩하지 않는다).
-// `extraRunnerArgs`는 라이브 작업이 이미 쓰는 `--wake`/
-// `--admission-sweep-*`류 watch-run.mjs 인자를 재등록 시에도 보존하기
-// 위한 통로다(P1-1 수리). ★fail-closed(P1, 3R): 비어 있으면(생략 포함)
-// `extraRunnerArgsConfirmedEmpty: true`를 명시적으로 같이 줘야만 통과
-// 한다 -- 그냥 빈 채로 두면 거부된다(운영자가 인자를 깜빡했는지, 각성이
-// 정말 필요 없는 신규 설치인지 이 코어가 구분할 수 없어서다).
-// 위에서 아래로: 인자 하나가 잘못되면 그 자리에서 바로 reasonCode를
-// 반환한다(early-return fail-closed) -- buildSchedulePlan 자체를 80줄
-// 아래로 유지하기 위해 검증 단계만 여기 모았다(순서·의미는 그대로).
-function validateAllArgs({
-  repoRoot,
-  nodePath,
-  watchDir,
-  conhostPath,
-  extraRunnerArgs,
-  extraRunnerArgsConfirmedEmpty,
-  intervalMinutes,
-  expiresAt,
-  accountMode,
-  runAsUser,
-  now,
-}) {
-  if (!isFiniteNumber(now)) return { code: SCHEDULE_PLAN_REASON.NOW_INVALID };
+// intervalMinutes, expiresAt, accountMode, runAsUser, now}) -> {ok, plan,
+// reasonCode}. `conhostPath`는 호출자가 실제 `%SystemRoot%\System32\
+// conhost.exe`를 조립해 넘긴다(P2-1 수리 -- 이 코어는 하드코딩하지
+// 않는다).
+export function buildSchedulePlan(args) {
+  if (args === null || typeof args !== "object" || Array.isArray(args)) {
+    return fail(SCHEDULE_PLAN_REASON.INVALID_ARGUMENTS);
+  }
+  const {
+    repoRoot,
+    nodePath,
+    watchDir,
+    conhostPath,
+    intervalMinutes,
+    expiresAt,
+    accountMode,
+    runAsUser,
+    now,
+  } = args;
+  if (!isFiniteNumber(now)) return fail(SCHEDULE_PLAN_REASON.NOW_INVALID);
 
   const pathReason = validatePaths({
     repoRoot,
@@ -367,38 +284,17 @@ function validateAllArgs({
     conhostPath,
     runAsUser,
   });
-  if (pathReason) return { code: pathReason };
-
-  const extraArgsReason = validateExtraRunnerArgs(
-    extraRunnerArgs,
-    extraRunnerArgsConfirmedEmpty,
-  );
-  if (extraArgsReason) return { code: extraArgsReason };
+  if (pathReason) return fail(pathReason);
 
   const intervalReason = validateInterval(intervalMinutes);
-  if (intervalReason) return { code: intervalReason };
+  if (intervalReason) return fail(intervalReason);
 
   const accountReason = validateAccountMode(accountMode);
-  if (accountReason) return { code: accountReason };
+  if (accountReason) return fail(accountReason);
 
   const expires = validateExpiresAt(expiresAt, now);
-  if (expires.code) return { code: expires.code };
+  if (expires.code) return fail(expires.code);
 
-  return { code: null, expiresMs: expires.ms };
-}
-
-// 검증을 전부 통과한 뒤 계획 객체를 조립한다(순수 조립, 검증 없음).
-function assemblePlan({
-  repoRoot,
-  nodePath,
-  watchDir,
-  conhostPath,
-  extraRunnerArgs,
-  intervalMinutes,
-  accountMode,
-  runAsUser,
-  expiresMs,
-}) {
   const runnerPath = winPath.join(
     repoRoot,
     "scripts",
@@ -407,23 +303,24 @@ function assemblePlan({
   );
   const logPath = winPath.join(watchDir, "watch.log");
   const aliveRecordPath = winPath.join(watchDir, "last-run.json");
-  const expiresAtDate = toSchtasksDate(expiresMs);
+  const expiresAtDate = toSchtasksDate(expires.ms);
   const commandLine = buildCommandLine(
     conhostPath,
     nodePath,
     runnerPath,
     repoRoot,
     watchDir,
-    extraRunnerArgs ?? [],
   );
+
   const registerArgs = buildRegisterArgs({
     intervalMinutes,
     commandLine,
     runAsUser,
     expiresAtDate,
   });
+  const unregisterArgs = ["/Delete", "/TN", TASK_NAME, "/F"];
 
-  return {
+  const plan = {
     taskName: TASK_NAME,
     runnerPath,
     commandLine,
@@ -431,11 +328,11 @@ function assemblePlan({
     accountMode,
     runAsUser,
     passwordStored: false,
-    expiresAt: new Date(expiresMs).toISOString(),
+    expiresAt: new Date(expires.ms).toISOString(),
     logPath,
     aliveRecordPath,
     registerArgs,
-    unregisterArgs: ["/Delete", "/TN", TASK_NAME, "/F"],
+    unregisterArgs,
     humanSummary: buildHumanSummary({
       taskName: TASK_NAME,
       commandLine,
@@ -446,16 +343,6 @@ function assemblePlan({
       aliveRecordPath,
     }),
   };
-}
-
-export function buildSchedulePlan(args) {
-  if (args === null || typeof args !== "object" || Array.isArray(args)) {
-    return fail(SCHEDULE_PLAN_REASON.INVALID_ARGUMENTS);
-  }
-  const validated = validateAllArgs(args);
-  if (validated.code) return fail(validated.code);
-
-  const plan = assemblePlan({ ...args, expiresMs: validated.expiresMs });
   return { ok: true, plan, reasonCode: SCHEDULE_PLAN_REASON.PLANNED };
 }
 
