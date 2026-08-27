@@ -67,6 +67,8 @@ export const SCHEDULE_PLAN_REASON = Object.freeze({
   REPO_ROOT_INVALID: "REPO_ROOT_INVALID",
   NODE_PATH_INVALID: "NODE_PATH_INVALID",
   WATCH_DIR_INVALID: "WATCH_DIR_INVALID",
+  CONHOST_PATH_INVALID: "CONHOST_PATH_INVALID",
+  EXTRA_RUNNER_ARGS_INVALID: "EXTRA_RUNNER_ARGS_INVALID",
   RUN_AS_USER_INVALID: "RUN_AS_USER_INVALID",
   INTERVAL_MINUTES_INVALID: "INTERVAL_MINUTES_INVALID",
   ACCOUNT_MODE_INVALID: "ACCOUNT_MODE_INVALID",
@@ -96,7 +98,13 @@ function fail(reasonCode) {
   return { ok: false, plan: null, reasonCode };
 }
 
-function validatePaths({ repoRoot, nodePath, watchDir, runAsUser }) {
+function validatePaths({
+  repoRoot,
+  nodePath,
+  watchDir,
+  conhostPath,
+  runAsUser,
+}) {
   if (!isNonEmptyString(repoRoot) || !winPath.isAbsolute(repoRoot)) {
     return SCHEDULE_PLAN_REASON.REPO_ROOT_INVALID;
   }
@@ -105,6 +113,16 @@ function validatePaths({ repoRoot, nodePath, watchDir, runAsUser }) {
   }
   if (!isNonEmptyString(watchDir) || !winPath.isAbsolute(watchDir)) {
     return SCHEDULE_PLAN_REASON.WATCH_DIR_INVALID;
+  }
+  // HYK-369 P2-1(검토 반려): 이전엔 이 함수가 "C:\Windows\System32\
+  // conhost.exe"를 리터럴로 하드코딩했다 -- 이 코어의 다른 모든 경로는
+  // 인자인데 이것만 아니었다. 이제 호출자(schedule-wire.mjs, I/O를 이미
+  // 담당하는 결선 계층)가 실제 `%SystemRoot%`로 이 경로를 만들어 넘기고,
+  // 이 순수 코어는 "비어있지 않은 절대 win32 경로인가"만 검증한다 --
+  // conhost.exe가 실제로 그 자리에 있는지(fs 접근)는 여전히 이 코어의
+  // 일이 아니다("I/O 0" 비타협 그대로).
+  if (!isNonEmptyString(conhostPath) || !winPath.isAbsolute(conhostPath)) {
+    return SCHEDULE_PLAN_REASON.CONHOST_PATH_INVALID;
   }
   if (!isNonEmptyString(runAsUser)) {
     return SCHEDULE_PLAN_REASON.RUN_AS_USER_INVALID;
@@ -120,6 +138,24 @@ function validateInterval(intervalMinutes) {
     intervalMinutes > MAX_INTERVAL_MINUTES
   ) {
     return SCHEDULE_PLAN_REASON.INTERVAL_MINUTES_INVALID;
+  }
+  return null;
+}
+
+// HYK-369 P1-1(검토 반려): 재등록 계획이 라이브 작업의 `--wake
+// --admission-sweep-ledger … --wake-live` 같은 watch-run.mjs 각성/sweep
+// CLI 인자를 보존하지 못해, 코드 경로로 재등록하면 그 인자들이 조용히
+// 사라지는(각성이 꺼지는) 회귀였다. 이제 호출자가 라이브 인자를 그대로
+// `extraRunnerArgs`로 넘기면 이 코어가 `/TR`에 그대로 이어붙인다 --
+// 이름을 알아야 하는 개별 플래그로 하드코딩하지 않는다(watch-run.mjs가
+// 새 플래그를 얻어도 이 코어를 다시 고칠 필요가 없다).
+function validateExtraRunnerArgs(extraRunnerArgs) {
+  if (extraRunnerArgs === undefined) return null; // 기본값 []는 buildSchedulePlan에서 채운다.
+  if (!Array.isArray(extraRunnerArgs)) {
+    return SCHEDULE_PLAN_REASON.EXTRA_RUNNER_ARGS_INVALID;
+  }
+  if (!extraRunnerArgs.every((a) => typeof a === "string")) {
+    return SCHEDULE_PLAN_REASON.EXTRA_RUNNER_ARGS_INVALID;
   }
   return null;
 }
@@ -175,27 +211,42 @@ function toSchtasksDate(ms) {
 // 호출 등)은 그대로다. `/IT`(대화형 세션 유지)와 `/RU`(실행 계정)는
 // 손대지 않는다 -- 이 창-숨김은 오직 콘솔 "호스팅 방식"만 바꾼다.
 //
-// 재현 검증(HYK-369 coder.md §1-6): `.harness/repro/ConsoleRepro.cs`
-// 헬퍼(콘솔 없는 조상 시뮬레이션)로 이 정확한 커맨드라인 형태를 실행해
-// `top_level_window_count_delta=0`(창 0개, 시작~자연 종료 전 구간
-// 전부)을 확인했고, 같은 실행이 실제로 파일을 쓰는지(headless 콘솔
-// 아래서도 코드가 정상 동작하는지)도 별도 마커 파일로 확인했다.
+// 재현 검증(HYK-369 coder.md §1-6, 2R §2): `.harness/repro/ConsoleRepro.cs`
+// 헬퍼(콘솔 없는 조상을 raw CreateProcess로 시뮬레이션 -- 예약 작업의
+// 실제 조건과 같다, bInheritHandles=false)로 정확히 이 커맨드라인
+// 형태를 실행해 `top_level_window_count_delta=0`(창 0개, 시작~자연 종료
+// 전 구간 전부)과 `watch.log`/`last-run.json` 정상 생성을 **함께**
+// 확인했다.
 //
-// 대안 검토(고르지 않은 이유): (a) 자기 프로세스가 런타임에 자기 창을
-// `ShowWindow(SW_HIDE)`로 숨기는 방법 -- 창이 뜬 "뒤" 숨기므로 짧은
-// 깜빡임이 남고, 이 기계의 터미널 핸드오프 구조상 GetConsoleWindow()가
-// 가리키는 창이 WindowsTerminal.exe 자신(다른 탭 포함)일 수 있어
-// 사람의 작업 창 전체를 건드릴 위험이 있다(ORCH 지적, 실측 아닌 추론
-// -- 그래서 채택하지 않는다). (b) wscript+VBS 히든 런처 -- 새 스크립트
-// 파일을 저장소에 추가해야 하고, WshShell.Run의 숨김 방식이 정말
-// "핸드오프 자체를 막는지" 대비 "숨기기만 하는지" 미검증이라 conhost
-// --headless보다 근거가 약하다. `conhost --headless`는 Windows가 이
-// 정확한 용도(콘솔 앱을 창 없이 자동화 실행)로 문서화해 제공하는
-// 기능이라 새 파일도, 사후 숨김도 필요 없다 -- 가장 직접적이다.
-function buildCommandLine(nodePath, runnerPath, repoRoot, watchDir) {
+// ★2R 정정(검토 P1-2 관련): 검토자는 "정확히 이 명령을 직접 돌리면
+// exit 0인데 watch.log/last-run.json 둘 다 안 만들어진다"고 반려했다.
+// 재현했다 -- 그러나 원인은 이 코드가 아니라 **검토자(그리고 CODER 1R
+// 자신도)가 그 명령을 검증한 방식**이었다: Node의 child_process(
+// spawn/execFileSync, stdio·windowsHide·detached·shell 옵션과 무관하게
+// 전부)와 상호작용 콘솔에 직접 타이핑하는 방식은 둘 다 이 명령의 호출자
+// 프로세스에 **상속 가능한 콘솔 핸들**을 쥐어 준 채로 `conhost.exe
+// --headless`를 만든다 -- `conhost --headless`는 그 상속된 핸들과
+// 충돌해 조용히 자식을 못 돌린다(관측: exit 0, 파일 0개, 재현
+// 4가지 변형 전부 동일). 반면 **핸들을 상속하지 않는** 호출(.NET
+// `Process.Start`를 리다이렉션 없이 쓰거나, 예약 작업이 실제로 쓰는
+// raw `CreateProcess`)에서는 콘솔 존재 여부와 무관하게 **항상 성공**
+// 했다 -- 콘솔 있는 호출자에서도, 콘솔 없는 호출자에서도. 예약 작업은
+// 셸도 없고 상속할 콘솔 핸들 자체가 없으므로 이 실패 모드의 전제
+// 조건과 만나지 않는다. coder.md 2R §2 의 2×2×2 원문에 모든 조합의
+// exit/파일 유무가 있다.
+function buildCommandLine(
+  conhostPath,
+  nodePath,
+  runnerPath,
+  repoRoot,
+  watchDir,
+  extraRunnerArgs,
+) {
+  const extra = extraRunnerArgs.map((a) => `"${a}"`).join(" ");
   return (
-    `"C:\\Windows\\System32\\conhost.exe" --headless -- ` +
-    `"${nodePath}" "${runnerPath}" --repo-root "${repoRoot}" --watch-dir "${watchDir}"`
+    `"${conhostPath}" --headless -- ` +
+    `"${nodePath}" "${runnerPath}" --repo-root "${repoRoot}" --watch-dir "${watchDir}"` +
+    (extra ? ` ${extra}` : "")
   );
 }
 
@@ -226,36 +277,66 @@ function buildRegisterArgs({
   ];
 }
 
-// buildSchedulePlan({repoRoot, nodePath, watchDir, intervalMinutes,
-// expiresAt, accountMode, runAsUser, now}) -> {ok, plan, reasonCode}
-export function buildSchedulePlan(args) {
-  if (args === null || typeof args !== "object" || Array.isArray(args)) {
-    return fail(SCHEDULE_PLAN_REASON.INVALID_ARGUMENTS);
-  }
-  const {
+// buildSchedulePlan({repoRoot, nodePath, watchDir, conhostPath,
+// extraRunnerArgs, intervalMinutes, expiresAt, accountMode, runAsUser,
+// now}) -> {ok, plan, reasonCode}. `conhostPath`는 호출자가 실제
+// `%SystemRoot%\System32\conhost.exe`를 조립해 넘긴다(P2-1 수리 -- 이
+// 코어는 하드코딩하지 않는다). `extraRunnerArgs`는 라이브 작업이
+// 이미 쓰는 `--wake`/`--admission-sweep-*`류 watch-run.mjs 인자를
+// 재등록 시에도 보존하기 위한 통로다(P1-1 수리, 생략 시 기본 `[]`).
+// 위에서 아래로: 인자 하나가 잘못되면 그 자리에서 바로 reasonCode를
+// 반환한다(early-return fail-closed) -- buildSchedulePlan 자체를 80줄
+// 아래로 유지하기 위해 검증 단계만 여기 모았다(순서·의미는 그대로).
+function validateAllArgs({
+  repoRoot,
+  nodePath,
+  watchDir,
+  conhostPath,
+  extraRunnerArgs,
+  intervalMinutes,
+  expiresAt,
+  accountMode,
+  runAsUser,
+  now,
+}) {
+  if (!isFiniteNumber(now)) return { code: SCHEDULE_PLAN_REASON.NOW_INVALID };
+
+  const pathReason = validatePaths({
     repoRoot,
     nodePath,
     watchDir,
-    intervalMinutes,
-    expiresAt,
-    accountMode,
+    conhostPath,
     runAsUser,
-    now,
-  } = args;
-  if (!isFiniteNumber(now)) return fail(SCHEDULE_PLAN_REASON.NOW_INVALID);
+  });
+  if (pathReason) return { code: pathReason };
 
-  const pathReason = validatePaths({ repoRoot, nodePath, watchDir, runAsUser });
-  if (pathReason) return fail(pathReason);
+  const extraArgsReason = validateExtraRunnerArgs(extraRunnerArgs);
+  if (extraArgsReason) return { code: extraArgsReason };
 
   const intervalReason = validateInterval(intervalMinutes);
-  if (intervalReason) return fail(intervalReason);
+  if (intervalReason) return { code: intervalReason };
 
   const accountReason = validateAccountMode(accountMode);
-  if (accountReason) return fail(accountReason);
+  if (accountReason) return { code: accountReason };
 
   const expires = validateExpiresAt(expiresAt, now);
-  if (expires.code) return fail(expires.code);
+  if (expires.code) return { code: expires.code };
 
+  return { code: null, expiresMs: expires.ms };
+}
+
+// 검증을 전부 통과한 뒤 계획 객체를 조립한다(순수 조립, 검증 없음).
+function assemblePlan({
+  repoRoot,
+  nodePath,
+  watchDir,
+  conhostPath,
+  extraRunnerArgs,
+  intervalMinutes,
+  accountMode,
+  runAsUser,
+  expiresMs,
+}) {
   const runnerPath = winPath.join(
     repoRoot,
     "scripts",
@@ -264,23 +345,23 @@ export function buildSchedulePlan(args) {
   );
   const logPath = winPath.join(watchDir, "watch.log");
   const aliveRecordPath = winPath.join(watchDir, "last-run.json");
-  const expiresAtDate = toSchtasksDate(expires.ms);
+  const expiresAtDate = toSchtasksDate(expiresMs);
   const commandLine = buildCommandLine(
+    conhostPath,
     nodePath,
     runnerPath,
     repoRoot,
     watchDir,
+    extraRunnerArgs ?? [],
   );
-
   const registerArgs = buildRegisterArgs({
     intervalMinutes,
     commandLine,
     runAsUser,
     expiresAtDate,
   });
-  const unregisterArgs = ["/Delete", "/TN", TASK_NAME, "/F"];
 
-  const plan = {
+  return {
     taskName: TASK_NAME,
     runnerPath,
     commandLine,
@@ -288,11 +369,11 @@ export function buildSchedulePlan(args) {
     accountMode,
     runAsUser,
     passwordStored: false,
-    expiresAt: new Date(expires.ms).toISOString(),
+    expiresAt: new Date(expiresMs).toISOString(),
     logPath,
     aliveRecordPath,
     registerArgs,
-    unregisterArgs,
+    unregisterArgs: ["/Delete", "/TN", TASK_NAME, "/F"],
     humanSummary: buildHumanSummary({
       taskName: TASK_NAME,
       commandLine,
@@ -303,6 +384,16 @@ export function buildSchedulePlan(args) {
       aliveRecordPath,
     }),
   };
+}
+
+export function buildSchedulePlan(args) {
+  if (args === null || typeof args !== "object" || Array.isArray(args)) {
+    return fail(SCHEDULE_PLAN_REASON.INVALID_ARGUMENTS);
+  }
+  const validated = validateAllArgs(args);
+  if (validated.code) return fail(validated.code);
+
+  const plan = assemblePlan({ ...args, expiresMs: validated.expiresMs });
   return { ok: true, plan, reasonCode: SCHEDULE_PLAN_REASON.PLANNED };
 }
 

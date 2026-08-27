@@ -36,6 +36,8 @@ import {
   WATCH_FRESHNESS_VERDICT,
 } from "./watch-freshness-core.mjs";
 
+const winPath = path.win32;
+
 export const EXIT_CODE = Object.freeze({
   OK: 0,
   INVALID_ARGUMENTS: 2,
@@ -50,6 +52,10 @@ const STRING_FLAGS = Object.freeze({
   "--repo-root": "repoRoot",
   "--node-path": "nodePath",
   "--watch-dir": "watchDir",
+  // HYK-369 P2-1(검토 반려): conhost.exe 경로를 코드에 하드코딩하지
+  // 않는다 -- 기본값은 실제 %SystemRoot%에서 유도하고(아래
+  // defaultConhostPath), 시험/비표준 설치를 위해 오버라이드만 허용한다.
+  "--conhost-path": "conhostPath",
   "--expires-at": "expiresAt",
   "--run-as-user": "runAsUser",
   "--account-mode": "accountMode",
@@ -63,12 +69,28 @@ const BOOLEAN_FLAGS = Object.freeze({
   "--json": "json",
   "--confirm": "confirm",
 });
+// HYK-369 P1-1(검토 반려): 라이브 작업이 이미 쓰는 watch-run.mjs 각성/
+// sweep 인자(`--wake --admission-sweep-ledger … --wake-live`)를 재등록
+// 계획에도 그대로 실어 보내는 통로. 반복 가능(등장 순서 그대로 보존).
+const REPEATABLE_STRING_FLAG = "--runner-arg";
+
+// HYK-369 P2-1: schtasks 자체가 Windows 전용이라 이 파일도 실질적으로
+// Windows에서만 동작하지만(schedule-plan-core.mjs와 달리 이 파일은 I/O
+// 담당이라 플랫폼 순수성 비타협이 없다), `%SystemRoot%`가 없는(=
+// 비Windows) 환경에서도 예외 없이 값 하나를 반환한다 -- 실제로 쓰이지
+// 않을 뿐 호출 자체가 죽지는 않는다.
+function defaultConhostPath() {
+  const systemRoot = process.env.SystemRoot || "C:\\Windows";
+  return winPath.join(systemRoot, "System32", "conhost.exe");
+}
 
 function parseCommonArgs(argv) {
   const parsed = {
     repoRoot: null,
     nodePath: process.execPath,
     watchDir: null,
+    conhostPath: defaultConhostPath(),
+    extraRunnerArgs: [],
     intervalMinutes: null,
     expiresAt: null,
     runAsUser: null,
@@ -80,7 +102,9 @@ function parseCommonArgs(argv) {
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
-    if (a in BOOLEAN_FLAGS) {
+    if (a === REPEATABLE_STRING_FLAG) {
+      parsed.extraRunnerArgs.push(argv[++i] ?? "");
+    } else if (a in BOOLEAN_FLAGS) {
       parsed[BOOLEAN_FLAGS[a]] = true;
     } else if (a in STRING_FLAGS) {
       parsed[STRING_FLAGS[a]] = argv[++i] ?? null;
@@ -103,6 +127,8 @@ function planFromCli(cli) {
     repoRoot: cli.repoRoot,
     nodePath: cli.nodePath,
     watchDir: cli.watchDir,
+    conhostPath: cli.conhostPath,
+    extraRunnerArgs: cli.extraRunnerArgs,
     intervalMinutes: cli.intervalMinutes,
     expiresAt: cli.expiresAt,
     accountMode: cli.accountMode,

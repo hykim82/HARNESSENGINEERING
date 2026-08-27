@@ -99,6 +99,58 @@ test("register: with --confirm (mock exec only -- real schtasks never invoked), 
   assert.deepEqual(calls[0][1].slice(0, 2), ["/Create", "/SC"]);
 });
 
+// ---------------------------------------------------------------------------
+// HYK-369 2R P1-1(검토 반려) -- `--runner-arg`를 반복 지정하면 라이브
+// 작업의 각성/sweep 인자가 등장 순서 그대로 등록 계획의 `/TR`에 실린다.
+// 이게 없으면 코드 경로로 재등록할 때마다 그 인자들이 조용히 사라진다.
+// ---------------------------------------------------------------------------
+test("register: --runner-arg를 반복 지정하면 등장 순서 그대로 /TR에 실린다 -- 각성 인자 보존 계약(1/1)", () => {
+  const calls = [];
+  const { exitCode } = runScheduleWire(
+    [
+      "register",
+      ...commonArgs([
+        "--runner-arg",
+        "--wake",
+        "--runner-arg",
+        "--admission-sweep-ledger",
+        "--runner-arg",
+        "D:\\문서관리\\하네스-관제실\\admission-ledger.json",
+        "--runner-arg",
+        "--wake-live",
+        "--confirm",
+      ]),
+    ],
+    {
+      exec: (cmd, args) => {
+        calls.push([cmd, args]);
+        return "SUCCESS: registered.";
+      },
+    },
+  );
+  assert.equal(exitCode, EXIT_CODE.OK);
+  const trIdx = calls[0][1].indexOf("/TR");
+  const commandLine = calls[0][1][trIdx + 1];
+  assert.ok(
+    commandLine.endsWith(
+      ' "--wake" "--admission-sweep-ledger" ' +
+        '"D:\\문서관리\\하네스-관제실\\admission-ledger.json" "--wake-live"',
+    ),
+    `/TR must end with the live wake/sweep args in order, got: ${commandLine}`,
+  );
+});
+
+test("plan: --runner-arg를 안 주면 commandLine에 아무것도 안 붙는다 -- 회귀 0(1/1)", () => {
+  const { output } = runScheduleWire(["plan", ...commonArgs(["--json"])], {
+    exec: neverCalledExec,
+  });
+  const plan = JSON.parse(output);
+  assert.ok(
+    !plan.commandLine.includes("--wake"),
+    "no --runner-arg means no extra tokens appended",
+  );
+});
+
 test("register: rejected plan (e.g. missing expiresAt) never reaches exec, even with --confirm (1/1)", () => {
   const args = [
     "--repo-root",

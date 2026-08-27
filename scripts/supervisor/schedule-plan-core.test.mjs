@@ -38,6 +38,7 @@ function validArgs(overrides = {}) {
     repoRoot: ROOT,
     nodePath: "C:\\Program Files\\nodejs\\node.exe",
     watchDir: "D:\\문서관리\\하네스-관제실\\watch",
+    conhostPath: "C:\\Windows\\System32\\conhost.exe",
     intervalMinutes: 10,
     expiresAt: EXPIRES_IN_7D,
     accountMode: ACCOUNT_MODE.LOGON_ONLY,
@@ -245,6 +246,167 @@ test("HYK-369: commandLine이 node.exe를 conhost.exe --headless --로 감싸 �
   // 바꿀 뿐, 등록 계정/세션 방식(§1의 registerArgs)은 건드리지 않는다.
   assert.ok(plan.registerArgs.includes("/IT"));
 });
+
+// ---------------------------------------------------------------------------
+// HYK-369 2R P1-1(검토 반려) -- 재등록 계획이 라이브 작업의 각성/sweep
+// watch-run.mjs 인자(`--wake --admission-sweep-ledger … --wake-live`류)를
+// 보존하는지. 이 계약이 사라지면(=extraRunnerArgs가 다시 무시되면)
+// 코드 경로로 재등록할 때마다 감시자의 각성 기능이 조용히 꺼진다.
+// ---------------------------------------------------------------------------
+test("HYK-369 P1-1: extraRunnerArgs가 commandLine 끝에 등장 순서 그대로 이어붙는다 -- 재등록해도 각성 인자가 안 사라지는 계약(1/1)", () => {
+  const liveWakeArgs = [
+    "--wake",
+    "--admission-sweep-ledger",
+    "D:\\문서관리\\하네스-관제실\\admission-ledger.json",
+    "--wake-live",
+  ];
+  const { plan } = buildSchedulePlan(
+    validArgs({ extraRunnerArgs: liveWakeArgs }),
+  );
+  const expectedSuffix =
+    ` "--wake" "--admission-sweep-ledger" ` +
+    `"D:\\문서관리\\하네스-관제실\\admission-ledger.json" "--wake-live"`;
+  assert.ok(
+    plan.commandLine.endsWith(expectedSuffix),
+    `commandLine must end with the live wake/sweep args in order, got: ${plan.commandLine}`,
+  );
+  // 순서를 뒤섞지 않는다는 것까지 명시 -- watch-run.mjs 자신의 인자
+  // 파서는 위치가 아니라 이름으로 읽지만(§ argv 루프), 등록 명령줄
+  // 자체가 사람이 검토·비교하는 대상이라 순서 보존이 필요하다.
+  const wakeIdx = plan.commandLine.indexOf('"--wake"');
+  const ledgerIdx = plan.commandLine.indexOf('"--admission-sweep-ledger"');
+  const liveIdx = plan.commandLine.indexOf('"--wake-live"');
+  assert.ok(wakeIdx < ledgerIdx && ledgerIdx < liveIdx);
+});
+
+test("HYK-369 P1-1: extraRunnerArgs 생략 시 기본값 []이고 commandLine이 1R과 바이트 동일하다 -- 회귀 0(1/1)", () => {
+  const { plan } = buildSchedulePlan(validArgs());
+  assert.equal(
+    plan.commandLine,
+    '"C:\\Windows\\System32\\conhost.exe" --headless -- ' +
+      '"C:\\Program Files\\nodejs\\node.exe" ' +
+      `"${win32Path.join(ROOT, "scripts", "supervisor", "watch-run.mjs")}" ` +
+      '--repo-root "' +
+      ROOT +
+      '" --watch-dir "D:\\문서관리\\하네스-관제실\\watch"',
+  );
+});
+
+// ---------------------------------------------------------------------------
+// HYK-369 2R P2-1(검토 반려) -- conhost.exe 경로가 더 이상 리터럴로
+// 하드코딩돼 있지 않고, 이 함수의 다른 경로 인자(repoRoot/nodePath/
+// watchDir)와 똑같이 검증되는 매개변수인지.
+// ---------------------------------------------------------------------------
+test("HYK-369 P2-1: conhostPath는 매개변수다 -- 넘긴 값이 commandLine에 그대로 쓰이고, 없으면/상대경로면 거부된다(3/3)", () => {
+  const custom = buildSchedulePlan(
+    validArgs({ conhostPath: "D:\\다른설치\\conhost.exe" }),
+  );
+  assert.equal(custom.ok, true);
+  assert.match(
+    custom.plan.commandLine,
+    /^"D:\\다른설치\\conhost\.exe" --headless -- /,
+    "conhostPath must NOT be hardcoded -- a different valid path must be honored verbatim",
+  );
+
+  const missing = buildSchedulePlan(validArgs({ conhostPath: undefined }));
+  assert.equal(missing.ok, false);
+  assert.equal(missing.reasonCode, SCHEDULE_PLAN_REASON.CONHOST_PATH_INVALID);
+
+  const relative = buildSchedulePlan(validArgs({ conhostPath: "conhost.exe" }));
+  assert.equal(relative.ok, false);
+  assert.equal(relative.reasonCode, SCHEDULE_PLAN_REASON.CONHOST_PATH_INVALID);
+});
+
+// ---------------------------------------------------------------------------
+// HYK-369 2R P1-3(검토 반려) -- 실행형 시험. 위의 문자열 계약 시험들은
+// `commandLine`이 어떤 "모양"인지만 본다 -- 검토자가 지적한 대로, 그
+// 모양이 실제로 자식을 돌리고 파일을 쓰는지는 안 본다. 이 시험은 실제
+// `conhost.exe --headless -- <buildCommandLine이 만드는 그 모양>`을
+// 돌려 `watch.log`/`last-run.json`이 실제로 생기는지 확인한다.
+//
+// ★왜 `execFileSync`로 conhost.exe를 직접 부르지 않는가(coder.md 2R §2
+// 참조): Node의 child_process는 Windows에서 자식에게 항상 콘솔 핸들을
+// 상속시킨다(stdio/windowsHide/detached/shell 옵션과 무관) -- 그 상속된
+// 핸들이 `conhost --headless`와 충돌해 "exit 0, 파일 0개"로 조용히
+// 실패한다(이게 검토자가 본 것과 똑같은 현상이다, 원인은 이 코드가
+// 아니라 그 호출 방식). 예약 작업(schtasks)은 셸이 없어 상속할 콘솔
+// 핸들 자체가 없으므로 이 실패 모드와 만나지 않는다(§1-6 WINEXE
+// 재현으로 확인). 이 시험은 그 차이를 정면으로 피해 간다 -- Node가
+// PowerShell을 부르는 건 그대로 두되(그 계층은 상관없다), **PowerShell
+// 자신이 conhost.exe를 부를 때 표준 스트림을 리다이렉션하지 않는
+// `Start-Process`를 쓴다** -- 이게 신뢰 가능한 CreateProcess 그대로다.
+test(
+  "HYK-369 P1-3: buildSchedulePlan이 실제로 만드는 plan.commandLine 문자열 그대로 돌리면 watch.log/last-run.json이 생긴다(1/1)",
+  {
+    skip:
+      process.platform !== "win32" &&
+      "Windows 전용(schtasks/conhost) -- 다른 플랫폼에서는 실행 자체가 성립하지 않는다",
+  },
+  () => {
+    const watchDir = fs.mkdtempSync(join(tmpdir(), "hyk369-exec-repro-"));
+    // ★손으로 인자 배열을 다시 조립하지 않는다 -- 조립 자체가 틀리면
+    // 손조립 배열은 여전히 "옳은 모양"으로 남아 이 시험이 그 회귀를 못
+    // 잡는다(1차 초안의 결함, 변이로 직접 확인: `--repo-root`/
+    // `--watch-dir` 값을 서로 바꿔치기하는 변이를 넣었더니 손조립판은
+    // 여전히 초록이었지만, 실제로 그 변이는 watch.log를 워크트리
+    // 루트에 실물로 써 버리는 심각한 결함이었다 -- coder.md 2R §3
+    // 원문 참조). 그래서 `buildSchedulePlan`이
+    // **실제로 반환한 `plan.commandLine` 문자열**을 이 시험이 직접
+    // 토큰화해(따옴표로 묶인 조각을 하나의 토큰으로) `Start-Process`의
+    // FilePath/ArgumentList로 넘긴다 -- `cmd.exe /c "<전체 문자열>"`을
+    // 거치면 cmd 자신의 따옴표 해체 규칙(첫 토큰이 따옴표로 시작하는
+    // 문자열을 다루는 유명한 함정)이 끼어들어 이 코드와 무관한 이유로
+    // 깨진다는 것을 직접 확인했다(1차 시도 -- REVERT, coder.md 2R §3
+    // 원문 참조). CreateProcess 자체(schtasks가 실제로 하는 일)는 셸을
+    // 거치지 않으므로, 셸 파싱 함정 없이 토큰 배열을 직접 넘기는 이
+    // 방식이 실제 조건에 더 가깝다.
+    const { ok, plan } = buildSchedulePlan(
+      validArgs({
+        watchDir,
+        nodePath: process.execPath, // 이 기계에 실재하는 node.exe -- validArgs 기본값은 시험용 리터럴이라 실행 불가.
+        extraRunnerArgs: ["--no-reach"], // 실 관제실 받는함 미접촉 -- §0 원장 무접촉과 같은 정신.
+      }),
+    );
+    assert.equal(ok, true, "buildSchedulePlan must accept these valid args");
+
+    // 따옴표로 묶인 조각은 하나의 토큰, 나머지는 공백 기준 토큰 --
+    // buildCommandLine이 만드는 문자열(각 인자를 "..."로 감싸고 "--"만
+    // 안 감싼다)에 정확히 맞는 최소 토크나이저다.
+    const tokens = plan.commandLine.match(/"[^"]*"|\S+/g);
+    assert.ok(
+      tokens && tokens.length >= 2,
+      `commandLine must tokenize into at least [conhostPath, ...], got: ${plan.commandLine}`,
+    );
+    const [firstToken, ...restTokens] = tokens;
+    const conhostExe = firstToken.replace(/^"|"$/g, "");
+    const restArgs = restTokens.map((t) => t.replace(/^"|"$/g, ""));
+
+    const psArgList = restArgs
+      .map((a) => `'${a.replace(/'/g, "''")}'`)
+      .join(",");
+    const psCommand =
+      `$p = Start-Process -FilePath '${conhostExe.replace(/'/g, "''")}' ` +
+      `-ArgumentList @(${psArgList}) -PassThru -Wait -WindowStyle Hidden; ` +
+      `exit $p.ExitCode`;
+    execFileSync(
+      "powershell.exe",
+      ["-NoProfile", "-NonInteractive", "-Command", psCommand],
+      { stdio: "ignore", windowsHide: true, timeout: 30_000 },
+    );
+
+    const watchLogPath = join(watchDir, "watch.log");
+    const lastRunPath = join(watchDir, "last-run.json");
+    assert.ok(
+      fs.existsSync(watchLogPath) && fs.statSync(watchLogPath).size > 0,
+      "watch.log must exist and be non-empty after running plan.commandLine verbatim -- if empty/missing, the headless wrap silently prevented the real runner from executing (검토 P1-2)",
+    );
+    assert.ok(
+      fs.existsSync(lastRunPath) && fs.statSync(lastRunPath).size > 0,
+      "last-run.json must exist and be non-empty for the same reason",
+    );
+    fs.rmSync(watchDir, { recursive: true, force: true });
+  },
+);
 
 // ---------------------------------------------------------------------------
 // fail-closed 검증 -- ★mutation #2/#3 표적 가드가 실제로 거부하는지.
