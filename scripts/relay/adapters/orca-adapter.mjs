@@ -2844,6 +2844,39 @@ function confirmPasteViaInjectedHook(fn) {
 // (text/Enter 각 최대 1회, 실패 시 즉시 DELIVERY_UNJUDGABLE)로 대체한다.
 // confirmPasteViaInjectedHook(테스트·특수 상황용 override 훅)만 계승한다.
 
+// HYK-274-stale-screen-1 (coder-task.md §4, 완료 조건 2 -- 화면 단독 판정
+// 제거): confirmCodexStagingViaTerminalShow는 `preview`(화면 스냅샷) 문자열
+// 하나에만 기대 왔다 -- coder.md 실측(§관측 지연): 화면은 무한정 낡을 수
+// 있다(76초+ 미반영 관측). 그래서 이 함수는 **screen 판정을 지우지 않고**
+// (완료 조건 2 요구: 단독 의존 제거이지 화면 제거가 아니다) 화면 밖 축을
+// 하나 더 얹는다 -- textSendResponse(§포트2 배달에서 기동문을 보낼 때 이미
+// 받은 `terminal send --json`의 raw 응답, `result.send.{accepted,
+// bytesWritten}`, orca 실측 확인)가 "이번 send 호출 자체가 온전히
+// 받아들여졌는가"를 화면과 무관한 채널(IPC 응답, 화면 렌더 경로를 타지
+// 않는다)로 증명한다. ⛔이 축은 마커 확인을 «대신»하지 않는다(AND) --
+// bytesWritten이 맞아도 preview에 마커가 없으면 여전히 미확인이다. 이유:
+// bytesWritten 일치는 "이번 호출이 pty에 그 바이트 수를 썼다"만 증명하고
+// "그 내용이 codex TUI 편집 버퍼에 실제로 올라갔다"는 증명하지 않는다
+// (예: TUI가 그 사이 화면을 지웠을 수 있다) -- 그래서 여전히 마커도
+// 요구한다. 오탐 방향(§6 "새는 게 낫다"와 반대): 여기서는 **놓치는 쪽**이
+// 안전하다(D11-B at-most-once Enter 원칙 -- 잘못 제출하면 되돌릴 수
+// 없다), 그래서 AND로만 조인한다(OR 금지).
+// ★회귀 0: `result.send.{accepted,bytesWritten}` 구조 자체가 없으면(구형
+// 스텁·응답 shape 변경 등) `null`(=신호 없음, 판단 보류)을 돌려준다 --
+// `false`(불일치로 단정)와 구별한다. confirmCodexStaging은 `null`이면
+// 화면 판정을 그대로 존중한다(이 축이 없던 시절과 100% 동일 동작) --
+// 이 축은 신호가 실재할 때만 추가로 조인되는 additive 축이다.
+function sendWasFullyAccepted(sendResponse, expectedText) {
+  const send =
+    isPlainObject(sendResponse) && isPlainObject(sendResponse.result)
+      ? sendResponse.result.send
+      : null;
+  if (!isPlainObject(send)) return null; // 신호 없음 -- 판단 보류.
+  if (typeof expectedText !== "string") return false;
+  if (send.accepted !== true) return false;
+  return send.bytesWritten === Buffer.byteLength(expectedText, "utf8");
+}
+
 // D11-B: codex 제출 전 staging 확인은 runtime+harness task에 결속된 exact
 // marker(하네스 task_id)만 인정한다 -- previewShowsBusySignal(generic busy)
 // 은 여기서 절대 확인 조건으로 쓰지 않는다.
@@ -2869,11 +2902,28 @@ function confirmCodexStagingViaTerminalShow(seatHandle, marker, opts) {
   return false;
 }
 
+// opts.offScreenSend?: {response, expectedText} -- deliverToCodexSeat이 이미
+// 받아 둔 textSent.response(§포트2, 새 orca 호출 0)와 그때 보낸 bootstrapText
+// 를 그대로 넘긴다. 생략하면(기존 호출부 그대로) 이전과 100% 동일하게
+// 화면 마커 단독으로 판정한다(회귀 0) -- 이 축은 순수 additive다.
 function confirmCodexStaging(seatHandle, marker, opts) {
   if (typeof opts.confirmPastedFn === "function") {
     return confirmPasteViaInjectedHook(opts.confirmPastedFn);
   }
-  return confirmCodexStagingViaTerminalShow(seatHandle, marker, opts);
+  const screenConfirmed = confirmCodexStagingViaTerminalShow(
+    seatHandle,
+    marker,
+    opts,
+  );
+  if (!screenConfirmed) return false;
+  const offScreen = opts.offScreenSend;
+  if (!isPlainObject(offScreen)) return true; // 미주입 = 기존 동작(회귀 0).
+  const offScreenResult = sendWasFullyAccepted(
+    offScreen.response,
+    offScreen.expectedText,
+  );
+  if (offScreenResult === null) return true; // 신호 없음 -- 화면 판정 존중(회귀 0).
+  return offScreenResult;
 }
 
 // D13 (pm-2 §QE): codex 최소 기동문 -- runtime task id + 역할별 local task
@@ -3064,7 +3114,22 @@ function deliverToCodexSeat(c, seatHandle, runtimeTaskId, opts) {
     return { ok: false, reason: textSent.reason, runtimeTaskId: rtId };
   }
 
-  if (!confirmCodexStaging(seatHandle, c.taskId, opts)) {
+  // HYK-274-stale-screen-1 완료 조건 2: 이미 받아 둔 textSent.response(새
+  // orca 호출 0)를 화면 밖 축으로 얹는다 -- opts.offScreenSend를 호출자가
+  // 이미 명시했으면(테스트 override) 그 값을 존중하고 덮어쓰지 않는다.
+  const confirmOpts = Object.prototype.hasOwnProperty.call(
+    opts,
+    "offScreenSend",
+  )
+    ? opts
+    : {
+        ...opts,
+        offScreenSend: {
+          response: textSent.response,
+          expectedText: bootstrapText,
+        },
+      };
+  if (!confirmCodexStaging(seatHandle, c.taskId, confirmOpts)) {
     return {
       ok: false,
       reason: `orca-adapter: ${REASON.PASTE_UNCONFIRMED} -- codex staging marker not observed (task-specific marker required, generic busy insufficient); submit refused (0 terminal send --enter calls)`,

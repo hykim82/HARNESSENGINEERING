@@ -2793,6 +2793,89 @@ test("deliverTask: D11-B codex -- a *different* task's marker in the preview doe
   assert.equal(terminalSendEnterCalls(execFn).length, 0);
 });
 
+// ---------------------------------------------------------------------------
+// HYK-274-stale-screen-1 (coder-task.md §4, 완료 조건 2) -- codex staging
+// 확인에 화면 밖 축(terminal send의 raw 응답 `result.send.{accepted,
+// bytesWritten}`, orca 실측 확인)을 additive로 얹은 것의 계약 시험.
+// ---------------------------------------------------------------------------
+test("deliverTask: D11-B codex 화면밖 축 -- send 응답에 result.send가 없으면(구형 shape) 화면 판정만으로 그대로 확인된다(회귀 0)", () => {
+  const execFn = fakeExecFn({
+    ...taskCreateDispatchStubs(),
+    send: { ok: true }, // result.send 없음 -- 신호 부재, 판단 보류로 접혀야 한다.
+    show: {
+      ok: true,
+      result: { terminal: { preview: "go HYK-169-coder-1\nrunning..." } },
+    },
+  });
+  const r = deliverTask(
+    { taskId: "HYK-169-coder-1", role: "REVIEW", worktreePath: VALID_WORKTREE },
+    { execFn, existingSeatHandle: "term_x" },
+  );
+  assert.equal(r.ok, true);
+  assert.equal(terminalSendEnterCalls(execFn).length, 1);
+});
+
+test("★변이(필수): send 응답이 result.send를 실어 오는데 bytesWritten이 실제 기동문 길이와 다르면 -- 화면에 마커가 있어도 PASTE_UNCONFIRMED, zero Enter calls (화면 단독이었다면 이 시험이 놓쳤을 사례)", () => {
+  const bootstrapText = buildCodexBootstrapText({
+    role: "REVIEW",
+    runtimeTaskId: "task_rt1",
+    harnessTaskId: "HYK-169-coder-1",
+  });
+  const execFn = fakeExecFn({
+    ...taskCreateDispatchStubs(),
+    send: {
+      ok: true,
+      result: {
+        send: {
+          accepted: true,
+          bytesWritten: Buffer.byteLength(bootstrapText, "utf8") - 1, // 의도적 불일치.
+        },
+      },
+    },
+    show: {
+      ok: true,
+      result: { terminal: { preview: "go HYK-169-coder-1\nrunning..." } },
+    },
+  });
+  const r = deliverTask(
+    { taskId: "HYK-169-coder-1", role: "REVIEW", worktreePath: VALID_WORKTREE },
+    { execFn, existingSeatHandle: "term_x" },
+  );
+  assert.equal(r.ok, false);
+  assert.match(r.reason, /PASTE_UNCONFIRMED/);
+  assert.equal(terminalSendEnterCalls(execFn).length, 0);
+});
+
+test("deliverTask: D11-B codex 화면밖 축 -- send 응답의 bytesWritten이 실제 기동문 길이와 정확히 일치하면(accepted:true) 마커와 함께 확인되어 Enter 1회 진행", () => {
+  const bootstrapText = buildCodexBootstrapText({
+    role: "REVIEW",
+    runtimeTaskId: "task_rt1",
+    harnessTaskId: "HYK-169-coder-1",
+  });
+  const execFn = fakeExecFn({
+    ...taskCreateDispatchStubs(),
+    send: {
+      ok: true,
+      result: {
+        send: {
+          accepted: true,
+          bytesWritten: Buffer.byteLength(bootstrapText, "utf8"),
+        },
+      },
+    },
+    show: {
+      ok: true,
+      result: { terminal: { preview: "go HYK-169-coder-1\nrunning..." } },
+    },
+  });
+  const r = deliverTask(
+    { taskId: "HYK-169-coder-1", role: "REVIEW", worktreePath: VALID_WORKTREE },
+    { execFn, existingSeatHandle: "term_x" },
+  );
+  assert.equal(r.ok, true);
+  assert.equal(terminalSendEnterCalls(execFn).length, 1);
+});
+
 // previewShowsBusySignal 단위 시험은 그대로 유지(다른 소비자 없이도 독립
 // 순수함수로서 유효 -- D11-B는 codex 제출-전 확인에서 이 술어를 안 쓰기로
 // 한 것이지, 술어 자체를 폐기한 게 아니다).
