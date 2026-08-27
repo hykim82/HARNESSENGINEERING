@@ -1,57 +1,49 @@
-// HYK-365 2R (설계 하향 라, 1R review-1 rejection): pins the workflow-step
-// ORDER shape the gitleaks-order fix (enforce.yml) depends on, plus that the
-// install step genuinely PERFORMS the install (not just mentions the target
-// path in a comment) -- so a future edit that silently reverts the order or
-// hollows out the install step goes red instead of quietly resurrecting the
-// 3 nc-gitleaks.test.mjs skips this fix closed.
+// HYK-365 3R (책임자 판정 2026-08-27, 갈래 ⓐ 승인 -- 연속반려 2 게이트 해제):
+// pins ONLY the workflow-step ORDER shape the gitleaks-order fix
+// (enforce.yml) depends on -- the install step comes before the suite step
+// -- so a future edit that silently reverts the order goes red instead of
+// quietly resurrecting the 3 nc-gitleaks.test.mjs skips this fix closed.
 //
-// 2R change from 1R's `judgeGitleaksOrder`: 1R's ⓑ/ⓒ both asserted
-// `continue-on-error` presence/absence -- review-1 P1-1 found that
-// contradicts nc-ci-enforce.test.mjs:145's existing, workflow-wide
-// `hasContinueOnError(text) === false` contract (that file owns "no
-// continue-on-error anywhere in this workflow, full stop" already; this file
-// duplicating it in the install-step-only direction is what conflicted).
-// The responsible party downgraded the design from 라′ to 라: the install
-// step no longer carries continue-on-error at all, so nc-ci-enforce's
-// existing contract and this file's are no longer in tension, and this file
-// drops the continue-on-error checks entirely rather than re-deriving a
-// second copy of a check the other file already owns (coder-task.md 2R §3ⓑ:
-// "같은 것을 두 번 검사하지 마라").
+// 3R change from 2R: 2R also carried a second invariant, REALNESS (does the
+// install step's run: text actually EXECUTE the install, not just mention
+// the target path in a comment -- fixed there via Bash word-tokenization to
+// close review-1's P1-2 false-GREEN). review-2 then found REALNESS itself
+// has a deeper, structural limitation: any static-text approach to proving
+// "this shell script really executes X" is a losing chase -- comments were
+// only the first bypass; the SAME question re-opens for the marker sitting
+// inside a quoted string, a shell variable, a heredoc, or an `eval` argument
+// that never actually runs, and closing each of those only invites the next
+// one ($(...) command substitution, a sourced function, ...). The
+// responsible party's ruling: proving real execution by reading TEXT is
+// fighting a losing whack-a-mole against an interpreter this file would
+// have to keep re-implementing -- the honest way to know installation
+// happened is to observe the OUTCOME (did the 3 nc-gitleaks.test.mjs cases
+// actually run, unskipped, in CI) rather than parse the RECIPE. That
+// observation-based check is a different LAYER (reads CI results, not
+// workflow source text) and is deliberately NOT this file's job -- it is
+// tracked separately as **HYK-368** (observation-based contract: did the
+// gitleaks-gated cases actually run in CI, read from CI's own output).
 //
-// This file's OWN remaining unique concerns are exactly two:
-//   ⓐ ORDER -- the install step comes before the suite step. Nothing else
-//     in the repo checks step ORDER; nc-ci-enforce checks step CONTENTS
-//     workflow-wide but is order-blind.
-//   ⓑ REALNESS -- the install step's run: text actually references the
-//     gitleaks install target path as EXECUTED CODE, not merely as text
-//     inside a shell comment. review-1 P1-2 found the 1R version's
-//     `run.includes(marker)` matched a mutation where the real `sudo mv`
-//     command was replaced by `echo install-skipped` and the marker only
-//     survived in a trailing `# intended install path: ...` comment -- a
-//     silent false-GREEN. Fixed here by tokenizing run: text into Bash
-//     WORDS (via selfcheck-inventory.mjs's own bashWords, reused rather
-//     than re-invented -- it already drops shell `#`-comments at word
-//     boundaries, tested by that file's own (28ag) case) and requiring the
-//     marker to appear as/inside an actual WORD, not merely as a substring
-//     of the raw text. A full-line or trailing `#`-comment mentioning the
-//     path no longer counts, by construction -- not by matching a list of
-//     known install-command names (coder-task.md 2R §3ⓒ's explicit warning
-//     against that shape, the same one HYK-367 was rejected for the same
-//     day). An install step using a different real command (`install -m`,
-//     `cp`, `apt-get install` to a different path, ...) is judged the same
-//     way every other unrecognized shape in this file is: loudly reported
-//     as "marker not found in executed code", never silently passed --
-//     which is honest under-recognition, not false acceptance.
+// This is a removal, not a silent shrink: REALNESS is gone from THIS
+// file's assertions on purpose, moved to a different, more honest
+// verification layer under a tracked issue -- not abandoned. Proof this
+// isn't quietly losing coverage: review-1's original repro (the install
+// command replaced by `echo install-skipped`, target path surviving only in
+// a trailing `# ...` comment) is now GREEN here (see ci-gitleaks-order.test.mjs
+// §4-3) -- intentionally, because this file no longer claims to know
+// whether the install is real, only where the step claiming to install
+// sits relative to the suite step.
 //
-// Still no YAML parser dependency (parseWorkflowSteps below, unchanged
-// approach from 1R): a step array is built by walking `steps:` list
-// indentation structurally, never by iterating a fixed list of known step
-// names -- see that function's own comment for the documented line-scanner
-// limitation.
+// ⇒ This file's ONE remaining, OWNED concern is ORDER. It does not, and no
+// longer tries to, verify that the install step's contents are genuine.
+//
+// No YAML parser dependency (parseWorkflowSteps below, unchanged approach
+// since 1R): a step array is built by walking `steps:` list indentation
+// structurally, never by iterating a fixed list of known step names -- see
+// that function's own comment for the documented line-scanner limitation.
 import {
   decodeYamlScalar,
   matchesExactRunnerInvocation,
-  bashWords,
 } from "./selfcheck-inventory.mjs";
 
 // Parses a GitHub Actions workflow's FIRST `jobs.<job>.steps:` sequence into
@@ -169,30 +161,40 @@ function findStepIndex(steps, predicate) {
   return steps.findIndex((s) => predicate(s.run ?? ""));
 }
 
-// ⓑ REALNESS: true iff the install target path appears in an actually
-// EXECUTED Bash word of `runText` -- i.e. survives comment-stripping. Reuses
-// bashWords (selfcheck-inventory.mjs), which already drops everything from
-// an unquoted `#` to end-of-line at a word boundary (the exact Bash comment
-// rule), so `# intended install path: /usr/local/bin/gitleaks` tokenizes to
-// zero words and can never satisfy this -- review-1's exact P1-2 repro.
-// Checking substring-within-a-word (not exact word equality) still covers
-// the real form `sudo mv gitleaks /usr/local/bin/gitleaks` (the path is its
-// own word) without requiring any particular command name.
-function installMarkerInExecutedCode(runText) {
-  return bashWords(runText).some((w) =>
-    w.literal.includes(GITLEAKS_INSTALL_MARKER),
-  );
+// LOCATES (does not verify) the step that claims to install gitleaks, by a
+// plain substring match on the install target path -- deliberately the
+// naive 1R shape, not 2R's Bash-word-tokenized "is this really executed
+// code" check (that check is what got separated out this round, see module
+// header). This function answers only "which step is the order-relevant
+// install step", never "does that step actually perform a real install" --
+// a step whose run: text merely MENTIONS the path (a comment, a variable, a
+// heredoc, ...) is found here just the same as one that executes it, and
+// that is intentional now: order is all this file owns.
+//
+// P2-1 (review-2, carried forward as an accepted, undocumented-further
+// limitation per coder-task.md 3R §3ⓑ -- do not make this "smarter"): an
+// install step using a method that never spells out this exact path (e.g.
+// `apt-get install -y gitleaks`, which installs to whatever location the
+// package manager chooses) is NOT found by this substring match either, and
+// so still can't be order-checked -- the same shared anchor this file uses
+// to find the step in the first place is the limitation, not something 3R's
+// removal of REALNESS fixes on its own. When that happens the step is
+// simply not found, which surfaces as the loud (not silent) "no step's
+// run: text..." reason below -- never a silent pass.
+function installMarkerMentioned(runText) {
+  return runText.includes(GITLEAKS_INSTALL_MARKER);
 }
 
-// Locates the two steps this fix cares about and judges the two invariants
-// ⓐ (order) and ⓑ (install realness) -- see module header for why
-// continue-on-error is no longer this file's concern (2R downgrade, owned
-// by nc-ci-enforce.test.mjs:145 workflow-wide). Returns { ok, reasons } --
-// reasons is always populated with either the pass description or the
-// exact violated invariant, never a bare boolean.
+// Locates the steps this fix cares about and judges the ONE invariant this
+// file still owns -- ⓐ ORDER (install before suite). See module header for
+// why REALNESS (does the install step really install) and continue-on-error
+// (owned by nc-ci-enforce.test.mjs:145) are both, deliberately, not checked
+// here. Returns { ok, reasons } -- reasons is always populated with either
+// the pass description or the exact violated invariant, never a bare
+// boolean.
 export function judgeGitleaksOrder(workflowText) {
   const steps = parseWorkflowSteps(workflowText);
-  const installIdx = findStepIndex(steps, installMarkerInExecutedCode);
+  const installIdx = findStepIndex(steps, installMarkerMentioned);
   const scanIdx = findStepIndex(steps, (run) =>
     GITLEAKS_SCAN_RE.test(run.trim()),
   );
@@ -203,7 +205,7 @@ export function judgeGitleaksOrder(workflowText) {
   const reasons = [];
   if (installIdx === -1)
     reasons.push(
-      `no step's run: text installs to ${GITLEAKS_INSTALL_MARKER} as executed code (ⓑ) -- a comment mentioning the path, or a different real install method, does not count; either the install is missing or it uses a shape this contract doesn't yet recognize (loudly, not silently)`,
+      `no step's run: text mentions the gitleaks install target path ${GITLEAKS_INSTALL_MARKER} -- this contract only orders that step against the suite step (ⓐ); it does not verify the install is real (that is HYK-368's concern, an observation-based layer, not this file)`,
     );
   if (scanIdx === -1)
     reasons.push("no step's run: text is a 'gitleaks detect ...' invocation");

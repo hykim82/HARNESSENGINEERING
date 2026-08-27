@@ -1,12 +1,12 @@
-// HYK-365 2R: contract test for ci-gitleaks-order.mjs -- pins that
-// enforce.yml keeps gitleaks installed BEFORE the test suite runs (ⓐ), and
-// that the install step's run: text actually performs the install as
-// EXECUTED code rather than merely mentioning the target path in a comment
-// (ⓑ). continue-on-error is deliberately NOT this file's concern anymore
-// (2R downgrade after review-1 P1-1) -- see ci-gitleaks-order.mjs's module
-// header and the comment above §4 test 3 below (no automated test here;
-// nc-ci-enforce.test.mjs's own workflow-wide continue-on-error contract
-// already owns it, verified live once instead -- see coder.md).
+// HYK-365 3R: contract test for ci-gitleaks-order.mjs -- pins ONLY that
+// enforce.yml keeps gitleaks installed BEFORE the test suite runs (ⓐ
+// order). The install-REALNESS check (does the install step actually
+// execute, not just mention the target path) that 2R added is deliberately
+// REMOVED this round (책임자 판정 2026-08-27, 갈래 ⓐ) -- see
+// ci-gitleaks-order.mjs's module header for the full separation rationale
+// and HYK-368 (the new observation-based layer that owns that concern now).
+// continue-on-error remains not-this-file's-concern (2R downgrade, owned by
+// nc-ci-enforce.test.mjs:145).
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -27,9 +27,9 @@ function realWorkflowText() {
 }
 
 // A minimal, self-contained fixture shaped like enforce.yml's real
-// jobs.enforce.steps sequence (HYK-365 2R order, no continue-on-error), used
-// for the break/no-break scenarios below so those tests never depend on the
-// real file's exact text drifting for unrelated reasons.
+// jobs.enforce.steps sequence, used for the break/no-break scenarios below
+// so those tests never depend on the real file's exact text drifting for
+// unrelated reasons.
 function goodFixture() {
   return [
     "name: enforce",
@@ -72,12 +72,12 @@ test("HYK-365: parseWorkflowSteps builds a real ordered step array from indentat
   );
 });
 
-test("HYK-365 ⑴: the REAL enforce.yml passes both remaining invariants (ⓐ order, ⓑ install realness)", () => {
+test("HYK-365 ⑴: the REAL enforce.yml passes the one remaining invariant (ⓐ order)", () => {
   const result = judgeGitleaksOrder(realWorkflowText());
   assert.equal(result.ok, true, result.reasons.join("; "));
 });
 
-// §4 test 1: order violation -> RED (original text unchanged from 1R).
+// §4 test 1: order violation -> RED (unchanged shape since 1R).
 test("HYK-365 §4-1 counterfactual: install step moved back AFTER the suite -> RED naming ⓐ, indices, and the consequence", () => {
   const broken = [
     "jobs:",
@@ -104,100 +104,9 @@ test("HYK-365 §4-1 counterfactual: install step moved back AFTER the suite -> R
   assert.match(result.reasons[0], /silently skip again/);
 });
 
-// §4 test 2 (★the P1-2 fix, must show GREEN-before / RED-after): the exact
-// review-1 repro -- real `sudo mv` replaced by a no-op echo, target path
-// only survives in a trailing run: comment.
-test("HYK-365 §4-2 ⓑ regression repro: review-1's install-marker-in-run-comment mutation -- BEFORE this file's bashWords fix it was a silent 7/7 GREEN, AFTER it must be RED", () => {
-  const mutatedNoInstall = [
-    "jobs:",
-    "  enforce:",
-    "    steps:",
-    "      - name: Install gitleaks (pinned, checksum-verified)",
-    "        run: |",
-    "          echo install-skipped",
-    "          # intended install path: /usr/local/bin/gitleaks",
-    "",
-    "      - name: check test suites",
-    "        run: node scripts/check/isolated-suite-runner.mjs",
-    "",
-    "      - name: gitleaks secret scan",
-    "        run: gitleaks detect --source . --redact",
-    "",
-  ].join("\n");
-
-  // "BEFORE": demonstrate the raw-substring shape (what 1R's `run.includes`
-  // would have seen) still finds the marker in the comment -- proving this
-  // mutation really is invisible to a plain substring search, i.e. review-1's
-  // repro is real and would have been a false GREEN under the old detector.
-  assert.equal(
-    mutatedNoInstall.includes("/usr/local/bin/gitleaks"),
-    true,
-    "fixture assumption: the marker text is present SOMEWHERE (in the comment) -- a naive substring check would have wrongly passed this",
-  );
-
-  // "AFTER": the real (2R, bashWords-based) detector must go RED.
-  const result = judgeGitleaksOrder(mutatedNoInstall);
-  assert.equal(result.ok, false);
-  assert.match(result.reasons.join(" "), /as executed code \(ⓑ\)/);
-  assert.match(
-    result.reasons.join(" "),
-    /a comment mentioning the path, or a different real install method, does not count/,
-  );
-
-  // Restoring the real command (not just the comment) must flip back to GREEN.
-  const restored = mutatedNoInstall.replace(
-    "          echo install-skipped\n          # intended install path: /usr/local/bin/gitleaks",
-    "          sudo mv gitleaks /usr/local/bin/gitleaks",
-  );
-  assert.notEqual(restored, mutatedNoInstall);
-  const restoredResult = judgeGitleaksOrder(restored);
-  assert.equal(restoredResult.ok, true, restoredResult.reasons.join("; "));
-});
-
-test("HYK-365 §4-2 ⓑ: a legitimate but unrecognized install method (apt-get, different path) is judged LOUDLY (RED), never silently accepted", () => {
-  const aptInstall = [
-    "jobs:",
-    "  enforce:",
-    "    steps:",
-    "      - name: Install gitleaks via apt",
-    "        run: |",
-    "          sudo apt-get update",
-    "          sudo apt-get install -y gitleaks",
-    "",
-    "      - name: check test suites",
-    "        run: node scripts/check/isolated-suite-runner.mjs",
-    "",
-    "      - name: gitleaks secret scan",
-    "        run: gitleaks detect --source . --redact",
-    "",
-  ].join("\n");
-  const result = judgeGitleaksOrder(aptInstall);
-  assert.equal(
-    result.ok,
-    false,
-    "an unrecognized install shape must not silently pass",
-  );
-  assert.match(result.reasons.join(" "), /as executed code \(ⓑ\)/);
-});
-
-// §4 test 3 (scan-step continue-on-error contamination) is deliberately NOT
-// an automated test in this file. nc-ci-enforce.test.mjs reads its baseline
-// via `git show HEAD:.github/workflows/enforce.yml` (tracked commit content,
-// by its own explicit design -- see that file's header), not the working
-// tree, so mutating the disk copy here would not actually change what that
-// file's ENFORCE_YML sees; and its detector function (hasContinueOnError)
-// is not exported, so it cannot be imported and driven directly without
-// touching that file (forbidden this round, coder-task.md §6). This
-// invariant was instead verified once, live, via a temporary commit +
-// `git reset --hard` back to the prior commit (both real, both reverted) --
-// see coder.md's §4 test 3 section for the full transcript. Baking a
-// commit/reset cycle into a permanently-running test would mutate real git
-// history on every run, which is a worse cost than the one-time manual
-// verification recorded in the result file.
-
-// §4 test 4: legitimate changes stay GREEN (regression list carried from 1R,
-// minus the two continue-on-error cases which no longer apply to this file).
-test("HYK-365 §4-4: legitimate changes (name, quoting, whitespace, unrelated step, extra job) stay GREEN", () => {
+// §4 test 2: legitimate changes stay GREEN (regression list carried since
+// 1R/2R -- name/quoting/whitespace/unrelated-step/extra-job).
+test("HYK-365 §4-2: legitimate changes (name, quoting, whitespace, unrelated step, extra job) stay GREEN", () => {
   const variants = {
     "renamed step": [
       "jobs:",
@@ -257,6 +166,79 @@ test("HYK-365 §4-4: legitimate changes (name, quoting, whitespace, unrelated st
     const result = judgeGitleaksOrder(text);
     assert.equal(result.ok, true, `${label}: ${result.reasons.join("; ")}`);
   }
+});
+
+// §4 test 3 (★the required "separation is not a silent feature loss"
+// proof): review-1's exact original repro -- the real `sudo mv` replaced by
+// a no-op echo, the target path surviving only in a trailing run: comment.
+// In 2R this was RED (the whole point of that round's REALNESS check). In
+// 3R it is intentionally GREEN again -- not because the underlying gap
+// reopened silently, but because this file no longer claims to verify
+// installation realness at all; that concern now lives at HYK-368's
+// observation layer. This test exists specifically so that fact is visible
+// and tested, not just asserted in prose.
+test("HYK-365 §4-3 (separation is not silent loss): review-1's install-marker-in-run-comment mutation is GREEN again in 3R -- REALNESS moved to HYK-368, not lost", () => {
+  const installMentionOnlyInComment = [
+    "jobs:",
+    "  enforce:",
+    "    steps:",
+    "      - name: Install gitleaks (pinned, checksum-verified)",
+    "        run: |",
+    "          echo install-skipped",
+    "          # intended install path: /usr/local/bin/gitleaks",
+    "",
+    "      - name: check test suites",
+    "        run: node scripts/check/isolated-suite-runner.mjs",
+    "",
+    "      - name: gitleaks secret scan",
+    "        run: gitleaks detect --source . --redact",
+    "",
+  ].join("\n");
+
+  const result = judgeGitleaksOrder(installMentionOnlyInComment);
+  assert.equal(
+    result.ok,
+    true,
+    `this mutation must be GREEN in 3R (order-only) -- if it isn't, REALNESS checking crept back in: ${result.reasons.join("; ")}`,
+  );
+});
+
+// §4 test 4: the residual P2-1 shape (review-2) -- an install method that
+// never mentions the target path at all (apt-get, installing wherever the
+// package manager puts the binary) still cannot be ORDER-checked, because
+// order-location shares the same substring anchor. This is an accepted,
+// documented limitation (module header), NOT something this round tries to
+// fix further (coder-task.md 3R §6 explicitly forbids making the
+// install-detection "smarter") -- the requirement is only that it fails
+// LOUDLY, never silently passes.
+test("HYK-365 §4-4 (P2-1, accepted limitation): an apt-get-style install that never mentions the target path still cannot be ORDER-checked -- loud RED, never a silent pass", () => {
+  const aptInstall = [
+    "jobs:",
+    "  enforce:",
+    "    steps:",
+    "      - name: Install gitleaks via apt",
+    "        run: |",
+    "          sudo apt-get update",
+    "          sudo apt-get install -y gitleaks",
+    "",
+    "      - name: check test suites",
+    "        run: node scripts/check/isolated-suite-runner.mjs",
+    "",
+    "      - name: gitleaks secret scan",
+    "        run: gitleaks detect --source . --redact",
+    "",
+  ].join("\n");
+  const result = judgeGitleaksOrder(aptInstall);
+  assert.equal(
+    result.ok,
+    false,
+    "an unrecognized install shape must not silently pass",
+  );
+  assert.match(
+    result.reasons.join(" "),
+    /this contract only orders that step against the suite step/,
+  );
+  assert.match(result.reasons.join(" "), /HYK-368/);
 });
 
 test("HYK-365: a step referencing the runner in an UNRECOGNIZED shape (e.g. with a flag) is not mistaken for the suite step", () => {

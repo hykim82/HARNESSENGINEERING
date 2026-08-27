@@ -41,9 +41,11 @@ jobs:
           chmod +x gitleaks
           sudo mv gitleaks /usr/local/bin/gitleaks
 
-      # HYK-365: 3 conditional skips stay accepted -- a Windows-only
+      # HYK-365 3R: 3 conditional skips stay accepted -- a Windows-only
       # control-room script path and 2 checks on the untracked
-      # .claude/settings.local.json can never exist in this checkout.
+      # .claude/settings.local.json can never exist in the CI RUNNER'S
+      # checkout (they do exist on this review host, which is why this says
+      # "CI runner's checkout" specifically, not "this checkout" generally).
       # Local weekly selfcheck covers them; that is not an external anchor.
       - name: check test suites (scripts/check + scripts/relay + scripts/relay/adapters + scripts/supervisor *.test.mjs)
         run: node scripts/check/isolated-suite-runner.mjs
