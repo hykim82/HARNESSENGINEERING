@@ -399,13 +399,24 @@ test(
     delete scrubbedEnv.ADMISSION_LEDGER_PATH;
     delete scrubbedEnv.ADMISSION_LOCK_PATH;
     delete scrubbedEnv.DISPATCH_RECEIPT_PATH;
+    // timeout 120_000(HYK-373 후속): 값 누수(위 scrubbedEnv)를 고쳐도
+    // 이 시험은 여전히 실제 conhost→node→watch-run.mjs→orch-stall-
+    // detect.mjs 4단 프로세스 체인을 도는 시험이라, 전체 러너처럼 이미
+    // 수백 개의 `node --test`가 동시에 도는 무거운 조건에서는 그 체인의
+    // 각 프로세스 기동 자체가 CPU 경합으로 느려진다. 격리 단일 실행
+    // 기준선은 ~7-9s였지만, 전체 러너(격리 러너가 hyk359 스윕을 포함해
+    // 그 스윕이 또 자신의 전체 스윕을 도는 3중 중첩) 아래서 재현했을 때
+    // `duration_ms: 30020.635`로 옛 30_000ms 한도에 거의 정확히 걸려
+    // 실패했다(무한 정지가 아니라 한도 도달 -- coder.md §5-4 원문 로그).
+    // 진짜 멈춘 게 아니라 부하 아래서 진행이 느려진 것이므로, 무한
+    // 재시도/은폐가 아니라 정당한 여유를 주는 게 맞는 고침이다.
     execFileSync(
       "powershell.exe",
       ["-NoProfile", "-NonInteractive", "-Command", psCommand],
       {
         stdio: "ignore",
         windowsHide: true,
-        timeout: 30_000,
+        timeout: 120_000,
         env: scrubbedEnv,
       },
     );
