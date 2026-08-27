@@ -2714,9 +2714,26 @@ test("deliverTask: D11-B codex default confirm path -- omitting confirmPastedFn 
 });
 
 test("deliverTask: D11-B codex default confirm path -- marker (taskId) alone in the preview confirms and allows exactly one Enter call", () => {
+  // HYK-274-stale-screen-3: default 경로는 이제 화면 밖 축이 fail-closed다
+  // -- result.send가 실려 있고 bytesWritten이 실제 기동문 길이와 맞아야
+  // (즉 실제 orca 응답 shape를 흉내내야) 확인된다(구형/부재 shape 시험은
+  // 위 ★변이(필수, 검토 P1 수리) 시험이 별도로 고정한다).
+  const bootstrapText = buildCodexBootstrapText({
+    role: "REVIEW",
+    runtimeTaskId: "task_rt1",
+    harnessTaskId: "HYK-169-coder-1",
+  });
   const execFn = fakeExecFn({
     ...taskCreateDispatchStubs(),
-    send: { ok: true },
+    send: {
+      ok: true,
+      result: {
+        send: {
+          accepted: true,
+          bytesWritten: Buffer.byteLength(bootstrapText, "utf8"),
+        },
+      },
+    },
     show: {
       ok: true,
       result: { terminal: { preview: "go HYK-169-coder-1\nrunning..." } },
@@ -2735,9 +2752,24 @@ test("deliverTask: D11-B codex default confirm path -- marker (taskId) alone in 
 // 아니라 부분 일치를 쓴다"를 증명한다.
 test("deliverTask: D11-B codex default confirm path -- exact real-world redraw-mangled preview fixture (2단 §3) confirms via partial match, not exact match", () => {
   const marker = "HYK170_ARRIVAL_MARK";
+  // HYK-274-stale-screen-3: 화면 밖 축이 fail-closed이므로 실제 orca
+  // 응답 shape(result.send.{accepted,bytesWritten})를 흉내내야 확인된다.
+  const bootstrapText = buildCodexBootstrapText({
+    role: "REVIEW",
+    runtimeTaskId: "task_rt1",
+    harnessTaskId: marker,
+  });
   const execFn = fakeExecFn({
     ...taskCreateDispatchStubs(),
-    send: { ok: true },
+    send: {
+      ok: true,
+      result: {
+        send: {
+          accepted: true,
+          bytesWritten: Buffer.byteLength(bootstrapText, "utf8"),
+        },
+      },
+    },
     show: {
       ok: true,
       result: { terminal: { preview: FIXTURE_PREVIEW_REDRAW } },
@@ -2792,6 +2824,252 @@ test("deliverTask: D11-B codex -- a *different* task's marker in the preview doe
   assert.match(r.reason, /PASTE_UNCONFIRMED/);
   assert.equal(terminalSendEnterCalls(execFn).length, 0);
 });
+
+// ---------------------------------------------------------------------------
+// HYK-274-stale-screen-1/-3 (coder-task.md §4, 완료 조건 2) -- codex staging
+// 확인에 화면 밖 축(terminal send의 raw 응답 `result.send.{accepted,
+// bytesWritten}`, orca 실측 확인)을 additive로 얹은 것의 계약 시험.
+// ★-3(검토 1R 반려 P1 수리): "result.send가 없으면 화면 판정을 존중한다"는
+// fail-open이었다 -- orca 응답 shape가 바뀌는 순간 이 수리가 막으려던
+// 화면 단독 경로가 조용히 재개된다. 아래 첫 시험이 그 반증(fail-closed로
+// 뒤집힌 것)을 고정한다 -- "회귀 0"이 아니라 "부재는 미확인"이 이제
+// 맞는 계약이다.
+// ---------------------------------------------------------------------------
+test("★변이(필수, 검토 P1 수리): send 응답에 result.send 필드 자체가 없으면(orca 응답 shape 변경 흉내) -- 화면에 마커가 있어도 PASTE_UNCONFIRMED/OFF_SCREEN_FIELD_ABSENT, zero Enter calls (fail-closed -- 예전엔 여기서 화면 판정만으로 통과했다, 그게 검토 반려 P1)", () => {
+  const execFn = fakeExecFn({
+    ...taskCreateDispatchStubs(),
+    send: { ok: true }, // result.send 없음 -- orca 응답 shape가 바뀐 것을 흉내낸다.
+    show: {
+      ok: true,
+      result: { terminal: { preview: "go HYK-169-coder-1\nrunning..." } },
+    },
+  });
+  const r = deliverTask(
+    { taskId: "HYK-169-coder-1", role: "REVIEW", worktreePath: VALID_WORKTREE },
+    { execFn, existingSeatHandle: "term_x" },
+  );
+  assert.equal(r.ok, false);
+  assert.match(r.reason, /PASTE_UNCONFIRMED/);
+  assert.match(r.reason, /OFF_SCREEN_FIELD_ABSENT/);
+  assert.match(r.reason, /orca response shape may have changed/);
+  assert.equal(terminalSendEnterCalls(execFn).length, 0);
+});
+
+test("deliverTask: D11-B codex 화면밖 축 -- send 응답에 result.send는 있는데 accepted!==true면 -- PASTE_UNCONFIRMED/OFF_SCREEN_NOT_ACCEPTED(바이트 불일치와 다른 사유 코드), zero Enter calls", () => {
+  const bootstrapText = buildCodexBootstrapText({
+    role: "REVIEW",
+    runtimeTaskId: "task_rt1",
+    harnessTaskId: "HYK-169-coder-1",
+  });
+  const execFn = fakeExecFn({
+    ...taskCreateDispatchStubs(),
+    send: {
+      ok: true,
+      result: {
+        send: {
+          accepted: false,
+          bytesWritten: Buffer.byteLength(bootstrapText, "utf8"),
+        },
+      },
+    },
+    show: {
+      ok: true,
+      result: { terminal: { preview: "go HYK-169-coder-1\nrunning..." } },
+    },
+  });
+  const r = deliverTask(
+    { taskId: "HYK-169-coder-1", role: "REVIEW", worktreePath: VALID_WORKTREE },
+    { execFn, existingSeatHandle: "term_x" },
+  );
+  assert.equal(r.ok, false);
+  assert.match(r.reason, /PASTE_UNCONFIRMED/);
+  assert.match(r.reason, /OFF_SCREEN_NOT_ACCEPTED/);
+  assert.equal(terminalSendEnterCalls(execFn).length, 0);
+});
+
+test("★변이(필수): send 응답이 result.send를 실어 오는데 bytesWritten이 실제 기동문 길이와 다르면 -- 화면에 마커가 있어도 PASTE_UNCONFIRMED/OFF_SCREEN_BYTE_MISMATCH(필드 부재와 다른 사유 코드), zero Enter calls (화면 단독이었다면 이 시험이 놓쳤을 사례)", () => {
+  const bootstrapText = buildCodexBootstrapText({
+    role: "REVIEW",
+    runtimeTaskId: "task_rt1",
+    harnessTaskId: "HYK-169-coder-1",
+  });
+  const execFn = fakeExecFn({
+    ...taskCreateDispatchStubs(),
+    send: {
+      ok: true,
+      result: {
+        send: {
+          accepted: true,
+          bytesWritten: Buffer.byteLength(bootstrapText, "utf8") - 1, // 의도적 불일치.
+        },
+      },
+    },
+    show: {
+      ok: true,
+      result: { terminal: { preview: "go HYK-169-coder-1\nrunning..." } },
+    },
+  });
+  const r = deliverTask(
+    { taskId: "HYK-169-coder-1", role: "REVIEW", worktreePath: VALID_WORKTREE },
+    { execFn, existingSeatHandle: "term_x" },
+  );
+  assert.equal(r.ok, false);
+  assert.match(r.reason, /PASTE_UNCONFIRMED/);
+  assert.match(r.reason, /OFF_SCREEN_BYTE_MISMATCH/);
+  assert.equal(terminalSendEnterCalls(execFn).length, 0);
+});
+
+test("deliverTask: D11-B codex 화면밖 축 -- send 응답의 bytesWritten이 실제 기동문 길이와 정확히 일치하면(accepted:true) 마커와 함께 확인되어 Enter 1회 진행", () => {
+  const bootstrapText = buildCodexBootstrapText({
+    role: "REVIEW",
+    runtimeTaskId: "task_rt1",
+    harnessTaskId: "HYK-169-coder-1",
+  });
+  const execFn = fakeExecFn({
+    ...taskCreateDispatchStubs(),
+    send: {
+      ok: true,
+      result: {
+        send: {
+          accepted: true,
+          bytesWritten: Buffer.byteLength(bootstrapText, "utf8"),
+        },
+      },
+    },
+    show: {
+      ok: true,
+      result: { terminal: { preview: "go HYK-169-coder-1\nrunning..." } },
+    },
+  });
+  const r = deliverTask(
+    { taskId: "HYK-169-coder-1", role: "REVIEW", worktreePath: VALID_WORKTREE },
+    { execFn, existingSeatHandle: "term_x" },
+  );
+  assert.equal(r.ok, true);
+  assert.equal(terminalSendEnterCalls(execFn).length, 1);
+});
+
+// ---------------------------------------------------------------------------
+// HYK-274-stale-screen-4 (게이트 2 · 검토 3R 반려 P1 수리 -- 불변식화):
+// 3R까지는 `opts.offScreenSend` 자체를 "안 넘기는" 호출 형태만 화면
+// 단독 판정을 허용했는데, 검토자가 호출자가 그 키를 own property로
+// 만들되 값을 `undefined`로 두는 형태(흔한 선택값 전개 패턴)로 같은
+// 결과(화면 마커+`undefined` -> ok:true, Enter 1회)를 실증했다. 이제
+// deliverToCodexSeat은 opts.offScreenSend를 아예 신뢰하지 않고 자신의
+// 실제 textSent.response+bootstrapText로 **항상** 덮어쓴다 -- 그래서
+// 아래 시험들은 "호출 인자의 모양"이 아니라 "execFn의 실제 send 응답"
+// 으로만 결과를 제어한다(검토자 처방 그대로): 호출자가 무슨 값으로
+// 이 축을 끄려 시도하든, 화면에 마커가 있어도 실제 send 응답에 유효한
+// result.send가 없으면 Enter는 절대 나가지 않는다는 것을 "결과"로
+// 확인한다.
+// ---------------------------------------------------------------------------
+const OFF_SCREEN_OPT_OUT_ATTEMPTS = Object.freeze({
+  "생략(키 자체를 안 만듦)": undefined, // buildOpts가 이 값이면 키를 아예 안 만든다.
+  "명시적 undefined(own property, 흔한 선택값 전개 패턴)": undefined,
+  null: null,
+  "비객체(문자열)": "off",
+  "빈 객체": {},
+});
+
+function buildDeliverOptsAttemptingOptOut(execFn, formLabel, value) {
+  const base = { execFn, existingSeatHandle: "term_x" };
+  if (formLabel === "생략(키 자체를 안 만듦)") return base;
+  return { ...base, offScreenSend: value };
+}
+
+for (const [formLabel, value] of Object.entries(OFF_SCREEN_OPT_OUT_ATTEMPTS)) {
+  test(`★불변식(필수, 게이트 2 수리): opts.offScreenSend를 "${formLabel}"로 만들어 축을 끄려 해도 -- 실제 send 응답에 result.send가 없으면(execFn 제어) 화면에 마커가 있어도 Enter 0회(결과 검사, 인자 모양 무관)`, () => {
+    const execFn = fakeExecFn({
+      ...taskCreateDispatchStubs(),
+      send: { ok: true }, // 실제 orca 응답에 result.send가 없다 -- 이게 유일한 통제 지점.
+      show: {
+        ok: true,
+        result: { terminal: { preview: "go HYK-169-coder-1\nrunning..." } },
+      },
+    });
+    const r = deliverTask(
+      {
+        taskId: "HYK-169-coder-1",
+        role: "REVIEW",
+        worktreePath: VALID_WORKTREE,
+      },
+      buildDeliverOptsAttemptingOptOut(execFn, formLabel, value),
+    );
+    assert.equal(r.ok, false);
+    assert.match(r.reason, /PASTE_UNCONFIRMED/);
+    assert.match(r.reason, /OFF_SCREEN_FIELD_ABSENT/);
+    assert.equal(terminalSendEnterCalls(execFn).length, 0);
+  });
+}
+
+test("★불변식(필수, 게이트 2 수리): 호출자가 opts.offScreenSend에 «가짜로 일치하는» 응답을 직접 주입해도 -- 실제 send 응답이 다르면(execFn 제어) 무시되고 그 실제 응답으로만 판정된다(주입값은 완전히 무력)", () => {
+  // 호출자가 이 축을 끄기는커녕 오히려 "속이려" 시도하는 반대 방향 --
+  // deliverToCodexSeat이 opts.offScreenSend를 아예 안 읽는다는 것을
+  // 증명하는 가장 강한 형태(단순 부재보다 한 단계 더 나아간 우회 시도).
+  const execFn = fakeExecFn({
+    ...taskCreateDispatchStubs(),
+    send: { ok: true }, // 실제 응답은 여전히 result.send가 없다(부재).
+    show: {
+      ok: true,
+      result: { terminal: { preview: "go HYK-169-coder-1\nrunning..." } },
+    },
+  });
+  const r = deliverTask(
+    { taskId: "HYK-169-coder-1", role: "REVIEW", worktreePath: VALID_WORKTREE },
+    {
+      execFn,
+      existingSeatHandle: "term_x",
+      // 호출자가 스스로 "완벽히 일치하는" 가짜 축을 만들어 봐도:
+      offScreenSend: {
+        response: {
+          ok: true,
+          result: { send: { accepted: true, bytesWritten: 999999 } },
+        },
+        expectedText: "whatever length matches 999999 if trusted",
+      },
+    },
+  );
+  assert.equal(r.ok, false);
+  assert.match(r.reason, /PASTE_UNCONFIRMED/);
+  assert.match(r.reason, /OFF_SCREEN_FIELD_ABSENT/);
+  assert.equal(terminalSendEnterCalls(execFn).length, 0);
+});
+
+for (const [formLabel, value] of Object.entries(OFF_SCREEN_OPT_OUT_ATTEMPTS)) {
+  test(`★불변식(필수, 게이트 2 수리): opts.offScreenSend를 "${formLabel}"로 만들어도 -- 실제 send 응답이 진짜로 일치하면(execFn 제어) 그대로 확인되어 Enter 1회(축을 끄려 해도 진짜 일치를 막지도 못한다 -- 완전히 무력화됨을 양방향으로 증명)`, () => {
+    const bootstrapText = buildCodexBootstrapText({
+      role: "REVIEW",
+      runtimeTaskId: "task_rt1",
+      harnessTaskId: "HYK-169-coder-1",
+    });
+    const execFn = fakeExecFn({
+      ...taskCreateDispatchStubs(),
+      send: {
+        ok: true,
+        result: {
+          send: {
+            accepted: true,
+            bytesWritten: Buffer.byteLength(bootstrapText, "utf8"),
+          },
+        },
+      },
+      show: {
+        ok: true,
+        result: { terminal: { preview: "go HYK-169-coder-1\nrunning..." } },
+      },
+    });
+    const r = deliverTask(
+      {
+        taskId: "HYK-169-coder-1",
+        role: "REVIEW",
+        worktreePath: VALID_WORKTREE,
+      },
+      buildDeliverOptsAttemptingOptOut(execFn, formLabel, value),
+    );
+    assert.equal(r.ok, true);
+    assert.equal(terminalSendEnterCalls(execFn).length, 1);
+  });
+}
 
 // previewShowsBusySignal 단위 시험은 그대로 유지(다른 소비자 없이도 독립
 // 순수함수로서 유효 -- D11-B는 codex 제출-전 확인에서 이 술어를 안 쓰기로
