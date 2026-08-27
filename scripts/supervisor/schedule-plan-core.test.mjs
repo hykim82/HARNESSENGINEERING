@@ -39,6 +39,10 @@ function validArgs(overrides = {}) {
     nodePath: "C:\\Program Files\\nodejs\\node.exe",
     watchDir: "D:\\문서관리\\하네스-관제실\\watch",
     conhostPath: "C:\\Windows\\System32\\conhost.exe",
+    // HYK-369 P1(3R fail-closed): 대부분의 시험은 각성 인자 자체를
+    // 다루지 않으니, 기본 픽스처는 "빈 게 맞다"고 명시적으로 확인한
+    // 상태로 시작한다 -- 이 확인 자체를 다루는 시험만 지운다(overrides).
+    extraRunnerArgsConfirmedEmpty: true,
     intervalMinutes: 10,
     expiresAt: EXPIRES_IN_7D,
     accountMode: ACCOUNT_MODE.LOGON_ONLY,
@@ -290,6 +294,55 @@ test("HYK-369 P1-1: extraRunnerArgs 생략 시 기본값 []이고 commandLine이
       ROOT +
       '" --watch-dir "D:\\문서관리\\하네스-관제실\\watch"',
   );
+});
+
+// ---------------------------------------------------------------------------
+// HYK-369 3R P1(검토 2R 반려, 한용 확정 fail-closed) -- 각성 인자가
+// 없는데 그게 의도인지 말하지 않으면 계획 자체를 거부한다. 2R은
+// "주면 보존"만 했고, 하나도 안 줘도 조용히 정상 계획이 나와 운영자가
+// `--runner-arg`를 깜빡하면 각성·sweep 감시가 티 안 나게 꺼졌다(2R 검토
+// 반려 원문 재현). 그렇다고 "비어 있으면 무조건 거부"하면 각성이 필요
+// 없는 정당한 신규 설치까지 막으므로(coder-task.md 3R §2-4), 빈 것
+// 자체가 아니라 "빈 게 확인 안 됐다"만 거부한다.
+// ---------------------------------------------------------------------------
+test("HYK-369 3R P1: extraRunnerArgs를 생략(또는 빈 배열)하고 extraRunnerArgsConfirmedEmpty도 안 주면 계획을 거부한다 -- 조용한 통과 금지(3/3)", () => {
+  for (const overrides of [
+    { extraRunnerArgs: undefined, extraRunnerArgsConfirmedEmpty: undefined },
+    { extraRunnerArgs: [], extraRunnerArgsConfirmedEmpty: undefined },
+    { extraRunnerArgs: [], extraRunnerArgsConfirmedEmpty: false },
+  ]) {
+    const result = buildSchedulePlan(validArgs(overrides));
+    assert.equal(result.ok, false, `must reject: ${JSON.stringify(overrides)}`);
+    assert.equal(
+      result.reasonCode,
+      SCHEDULE_PLAN_REASON.EXTRA_RUNNER_ARGS_CONFIRMATION_REQUIRED,
+    );
+  }
+});
+
+test("HYK-369 3R P1: extraRunnerArgsConfirmedEmpty:true를 명시하면 빈 각성 인자로도 정당한 신규 설치가 통과한다 -- 막는 쪽이 항상 옳지는 않다(1/1)", () => {
+  const result = buildSchedulePlan(
+    validArgs({
+      extraRunnerArgs: [],
+      extraRunnerArgsConfirmedEmpty: true,
+    }),
+  );
+  assert.equal(result.ok, true);
+  assert.ok(
+    !result.plan.commandLine.includes("--wake"),
+    "explicit empty means no extra tokens, exactly like a real fresh install with no wake needs",
+  );
+});
+
+test("HYK-369 3R P1: extraRunnerArgs가 하나라도 있으면 extraRunnerArgsConfirmedEmpty 없이도 통과한다 -- 있는 걸 또 확인하라고 요구하지 않는다(1/1)", () => {
+  const result = buildSchedulePlan(
+    validArgs({
+      extraRunnerArgs: ["--wake"],
+      extraRunnerArgsConfirmedEmpty: undefined,
+    }),
+  );
+  assert.equal(result.ok, true);
+  assert.match(result.plan.commandLine, /"--wake"/);
 });
 
 // ---------------------------------------------------------------------------

@@ -28,7 +28,7 @@
 // Node 20 호환(ESM 표준 API만 사용).
 
 import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { readFileSync, existsSync } from "node:fs";
 import path from "node:path";
 import { buildSchedulePlan, ACCOUNT_MODE } from "./schedule-plan-core.mjs";
 import {
@@ -68,6 +68,13 @@ const NUMBER_FLAGS = Object.freeze({
 const BOOLEAN_FLAGS = Object.freeze({
   "--json": "json",
   "--confirm": "confirm",
+  // HYK-369 P1(검토 반려, 3R -- fail-closed): `--runner-arg`를 하나도
+  // 안 주면(=각성/sweep 인자를 빠뜨렸을 수 있다) 계획 자체를 거부한다
+  // (schedule-plan-core.mjs의 EXTRA_RUNNER_ARGS_CONFIRMATION_REQUIRED).
+  // 각성이 정말 필요 없는 신규 설치라면 "빈 게 맞다"고 이 플래그로
+  // 명시해야 한다 -- 말 없이 비어 있는 것과 "비어 있다고 확인함"을
+  // 구분하는 게 이 수리의 핵심이다.
+  "--no-runner-args": "extraRunnerArgsConfirmedEmpty",
 });
 // HYK-369 P1-1(검토 반려): 라이브 작업이 이미 쓰는 watch-run.mjs 각성/
 // sweep 인자(`--wake --admission-sweep-ledger … --wake-live`)를 재등록
@@ -91,6 +98,7 @@ function parseCommonArgs(argv) {
     watchDir: null,
     conhostPath: defaultConhostPath(),
     extraRunnerArgs: [],
+    extraRunnerArgsConfirmedEmpty: false,
     intervalMinutes: null,
     expiresAt: null,
     runAsUser: null,
@@ -129,6 +137,7 @@ function planFromCli(cli) {
     watchDir: cli.watchDir,
     conhostPath: cli.conhostPath,
     extraRunnerArgs: cli.extraRunnerArgs,
+    extraRunnerArgsConfirmedEmpty: cli.extraRunnerArgsConfirmedEmpty,
     intervalMinutes: cli.intervalMinutes,
     expiresAt: cli.expiresAt,
     accountMode: cli.accountMode,
@@ -150,14 +159,35 @@ function formatPlanOutput(built, cli) {
   return { output, exitCode: EXIT_CODE.OK };
 }
 
-function runPlan(cli) {
-  return formatPlanOutput(planFromCli(cli), cli);
+// HYK-369 P2-1(2R 검토 반려, 3R 처리) -- `schedule-plan-core.mjs`는 "I/O
+// 0" 순수 함수 계약이 있어(파일 존재 확인은 fs 호출이라 그 계약을 깬다)
+// `conhostPath`가 실제로 존재하는지 검증할 수 없다 -- 그래서 여기(이미
+// fs/child_process를 다루는 결선 계층)에 둔다. 기본값(%SystemRoot%\
+// System32\conhost.exe)은 거의 항상 존재하지만, `--conhost-path`로
+// 명시 오버라이드했을 때(검토자 재현: 존재하지 않는 경로)는 계획 단계
+// (사람이 dry-run으로 미리 보는 시점)에서 바로 잡아 준다 -- 예약 등록
+// 뒤에야 조용히 실패하는 것보다 이쪽이 사람에게 더 이르고 시끄럽다.
+function checkConhostExists(cli, existsFn) {
+  if (existsFn(cli.conhostPath)) return null;
+  return {
+    output: `PLAN_REJECTED (CONHOST_NOT_FOUND: ${cli.conhostPath})`,
+    exitCode: EXIT_CODE.PLAN_REJECTED,
+  };
+}
+
+function runPlan(cli, existsFn) {
+  const built = planFromCli(cli);
+  if (built.ok) {
+    const conhostRejection = checkConhostExists(cli, existsFn);
+    if (conhostRejection) return conhostRejection;
+  }
+  return formatPlanOutput(built, cli);
 }
 
 // register/unregister 공용 -- `--confirm` 없으면 계획만 출력하고 종료
 // (★mutation #1 표적: 아래 `if (!cli.confirm)` 가드가 이 파일의 핵심
 // 안전 장치다).
-function runRegisterOrUnregister(cli, kind, exec) {
+function runRegisterOrUnregister(cli, kind, exec, existsFn) {
   const built = planFromCli(cli);
   if (!built.ok) {
     return {
@@ -165,6 +195,8 @@ function runRegisterOrUnregister(cli, kind, exec) {
       exitCode: EXIT_CODE.PLAN_REJECTED,
     };
   }
+  const conhostRejection = checkConhostExists(cli, existsFn);
+  if (conhostRejection) return conhostRejection;
   const args =
     kind === "register" ? built.plan.registerArgs : built.plan.unregisterArgs;
   if (!cli.confirm) {
@@ -219,12 +251,14 @@ function runStatus(cli, readFn) {
 export function runScheduleWire(argv, deps = {}) {
   const exec = deps.exec ?? execFileSync;
   const readFn = deps.readFn ?? readFileSync;
+  const existsFn = deps.existsFn ?? existsSync;
   const [sub, ...rest] = argv;
   const cli = parseCommonArgs(rest);
-  if (sub === "plan") return runPlan(cli);
-  if (sub === "register") return runRegisterOrUnregister(cli, "register", exec);
+  if (sub === "plan") return runPlan(cli, existsFn);
+  if (sub === "register")
+    return runRegisterOrUnregister(cli, "register", exec, existsFn);
   if (sub === "unregister")
-    return runRegisterOrUnregister(cli, "unregister", exec);
+    return runRegisterOrUnregister(cli, "unregister", exec, existsFn);
   if (sub === "status") return runStatus(cli, readFn);
   return {
     output: `UNKNOWN_SUBCOMMAND: ${sub}`,

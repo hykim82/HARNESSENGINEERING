@@ -69,6 +69,8 @@ export const SCHEDULE_PLAN_REASON = Object.freeze({
   WATCH_DIR_INVALID: "WATCH_DIR_INVALID",
   CONHOST_PATH_INVALID: "CONHOST_PATH_INVALID",
   EXTRA_RUNNER_ARGS_INVALID: "EXTRA_RUNNER_ARGS_INVALID",
+  EXTRA_RUNNER_ARGS_CONFIRMATION_REQUIRED:
+    "EXTRA_RUNNER_ARGS_CONFIRMATION_REQUIRED",
   RUN_AS_USER_INVALID: "RUN_AS_USER_INVALID",
   INTERVAL_MINUTES_INVALID: "INTERVAL_MINUTES_INVALID",
   ACCOUNT_MODE_INVALID: "ACCOUNT_MODE_INVALID",
@@ -142,20 +144,40 @@ function validateInterval(intervalMinutes) {
   return null;
 }
 
-// HYK-369 P1-1(검토 반려): 재등록 계획이 라이브 작업의 `--wake
+// HYK-369 P1-1(검토 반려, 2R): 재등록 계획이 라이브 작업의 `--wake
 // --admission-sweep-ledger … --wake-live` 같은 watch-run.mjs 각성/sweep
 // CLI 인자를 보존하지 못해, 코드 경로로 재등록하면 그 인자들이 조용히
-// 사라지는(각성이 꺼지는) 회귀였다. 이제 호출자가 라이브 인자를 그대로
+// 사라지는(각성이 꺼지는) 회귀였다. 호출자가 라이브 인자를 그대로
 // `extraRunnerArgs`로 넘기면 이 코어가 `/TR`에 그대로 이어붙인다 --
 // 이름을 알아야 하는 개별 플래그로 하드코딩하지 않는다(watch-run.mjs가
 // 새 플래그를 얻어도 이 코어를 다시 고칠 필요가 없다).
-function validateExtraRunnerArgs(extraRunnerArgs) {
-  if (extraRunnerArgs === undefined) return null; // 기본값 []는 buildSchedulePlan에서 채운다.
-  if (!Array.isArray(extraRunnerArgs)) {
-    return SCHEDULE_PLAN_REASON.EXTRA_RUNNER_ARGS_INVALID;
+//
+// HYK-369 P1(검토 반려, 3R -- 한용 확정 fail-closed): 2R은 "주면 보존"만
+// 했다 -- `extraRunnerArgs`를 아예 안 주거나 빈 배열을 줘도 조용히
+// "정상" 계획이 나왔고, 운영자가 `--runner-arg`를 한 번 빠뜨리면
+// 각성·sweep 감시가 티 안 나게 꺼졌다(2R 검토 반려 그대로 재현). 그렇다고
+// "비어 있으면 무조건 거부"하면 각성이 필요 없는 정당한 신규 설치까지
+// 막는다(coder-task.md §2-4, "막는 쪽이 항상 옳지는 않다"). 그래서
+// **"비어 있음" 자체가 아니라 "비어 있는데 그게 의도인지 말하지 않았다"**
+// 를 거부한다 -- `extraRunnerArgsConfirmedEmpty: true`로 명시적으로
+// "이 설치는 각성 인자가 없는 게 맞다"고 말해야 빈 배열이 통과한다.
+// 인자가 하나라도 있으면 이 확인은 필요 없다(있는 걸 굳이 "확인"해
+// 달라고 요구하는 건 실 사용자에게 마찰만 늘린다).
+function validateExtraRunnerArgs(
+  extraRunnerArgs,
+  extraRunnerArgsConfirmedEmpty,
+) {
+  if (extraRunnerArgs !== undefined) {
+    if (!Array.isArray(extraRunnerArgs)) {
+      return SCHEDULE_PLAN_REASON.EXTRA_RUNNER_ARGS_INVALID;
+    }
+    if (!extraRunnerArgs.every((a) => typeof a === "string")) {
+      return SCHEDULE_PLAN_REASON.EXTRA_RUNNER_ARGS_INVALID;
+    }
   }
-  if (!extraRunnerArgs.every((a) => typeof a === "string")) {
-    return SCHEDULE_PLAN_REASON.EXTRA_RUNNER_ARGS_INVALID;
+  const isEmpty = !extraRunnerArgs || extraRunnerArgs.length === 0;
+  if (isEmpty && extraRunnerArgsConfirmedEmpty !== true) {
+    return SCHEDULE_PLAN_REASON.EXTRA_RUNNER_ARGS_CONFIRMATION_REQUIRED;
   }
   return null;
 }
@@ -278,12 +300,16 @@ function buildRegisterArgs({
 }
 
 // buildSchedulePlan({repoRoot, nodePath, watchDir, conhostPath,
-// extraRunnerArgs, intervalMinutes, expiresAt, accountMode, runAsUser,
-// now}) -> {ok, plan, reasonCode}. `conhostPath`는 호출자가 실제
-// `%SystemRoot%\System32\conhost.exe`를 조립해 넘긴다(P2-1 수리 -- 이
-// 코어는 하드코딩하지 않는다). `extraRunnerArgs`는 라이브 작업이
-// 이미 쓰는 `--wake`/`--admission-sweep-*`류 watch-run.mjs 인자를
-// 재등록 시에도 보존하기 위한 통로다(P1-1 수리, 생략 시 기본 `[]`).
+// extraRunnerArgs, extraRunnerArgsConfirmedEmpty, intervalMinutes,
+// expiresAt, accountMode, runAsUser, now}) -> {ok, plan, reasonCode}.
+// `conhostPath`는 호출자가 실제 `%SystemRoot%\System32\conhost.exe`를
+// 조립해 넘긴다(P2-1 수리 -- 이 코어는 하드코딩하지 않는다).
+// `extraRunnerArgs`는 라이브 작업이 이미 쓰는 `--wake`/
+// `--admission-sweep-*`류 watch-run.mjs 인자를 재등록 시에도 보존하기
+// 위한 통로다(P1-1 수리). ★fail-closed(P1, 3R): 비어 있으면(생략 포함)
+// `extraRunnerArgsConfirmedEmpty: true`를 명시적으로 같이 줘야만 통과
+// 한다 -- 그냥 빈 채로 두면 거부된다(운영자가 인자를 깜빡했는지, 각성이
+// 정말 필요 없는 신규 설치인지 이 코어가 구분할 수 없어서다).
 // 위에서 아래로: 인자 하나가 잘못되면 그 자리에서 바로 reasonCode를
 // 반환한다(early-return fail-closed) -- buildSchedulePlan 자체를 80줄
 // 아래로 유지하기 위해 검증 단계만 여기 모았다(순서·의미는 그대로).
@@ -293,6 +319,7 @@ function validateAllArgs({
   watchDir,
   conhostPath,
   extraRunnerArgs,
+  extraRunnerArgsConfirmedEmpty,
   intervalMinutes,
   expiresAt,
   accountMode,
@@ -310,7 +337,10 @@ function validateAllArgs({
   });
   if (pathReason) return { code: pathReason };
 
-  const extraArgsReason = validateExtraRunnerArgs(extraRunnerArgs);
+  const extraArgsReason = validateExtraRunnerArgs(
+    extraRunnerArgs,
+    extraRunnerArgsConfirmedEmpty,
+  );
   if (extraArgsReason) return { code: extraArgsReason };
 
   const intervalReason = validateInterval(intervalMinutes);

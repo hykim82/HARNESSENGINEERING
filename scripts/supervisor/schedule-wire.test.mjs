@@ -28,6 +28,10 @@ const NOW_ISO = "2026-08-03T18:00:00+09:00";
 const NOW_MS = Date.parse(NOW_ISO);
 const EXPIRES_IN_7D = new Date(NOW_MS + 7 * 24 * 3600_000).toISOString();
 
+// HYK-369 3R P1(fail-closed): 대부분의 시험은 각성 인자 자체를 다루지
+// 않으니, 기본 인자 목록에 `--no-runner-args`를 포함해 "빈 게 맞다"고
+// 명시적으로 확인한 상태로 시작한다 -- 이 확인 자체를 다루는 시험만
+// 이 플래그를 빼거나 `--runner-arg`로 대체한다.
 function commonArgs(extra = []) {
   return [
     "--repo-root",
@@ -44,6 +48,7 @@ function commonArgs(extra = []) {
     "HOST\\hykim",
     "--now",
     NOW_ISO,
+    "--no-runner-args",
     ...extra,
   ];
 }
@@ -98,6 +103,41 @@ test("register: with --confirm (mock exec only -- real schtasks never invoked), 
   assert.equal(calls[0][0], "schtasks");
   assert.deepEqual(calls[0][1].slice(0, 2), ["/Create", "/SC"]);
 });
+
+// ---------------------------------------------------------------------------
+// HYK-369 3R P1(2R 검토 반려, 한용 확정 fail-closed) -- CLI 층에서도
+// `--runner-arg`/`--no-runner-args` 둘 다 안 주면 계획이 거부되는지.
+// commonArgs()가 기본으로 `--no-runner-args`를 넣어 두므로, 여기서는
+// 그걸 빼서 원래(순정) 인자 목록으로 시험한다.
+// ---------------------------------------------------------------------------
+test("plan: --runner-arg도 --no-runner-args도 안 주면 계획을 거부한다 -- 조용한 통과 금지(1/1)", () => {
+  const args = [
+    "--repo-root",
+    ROOT,
+    "--node-path",
+    "C:\\Program Files\\nodejs\\node.exe",
+    "--watch-dir",
+    "D:\\문서관리\\하네스-관제실\\watch",
+    "--interval-minutes",
+    "10",
+    "--expires-at",
+    EXPIRES_IN_7D,
+    "--run-as-user",
+    "HOST\\hykim",
+    "--now",
+    NOW_ISO,
+  ]; // --runner-arg도 --no-runner-args도 고의로 뺐다.
+  const { output, exitCode } = runScheduleWire(["plan", ...args], {
+    exec: neverCalledExec,
+  });
+  assert.equal(exitCode, EXIT_CODE.PLAN_REJECTED);
+  assert.match(output, /EXTRA_RUNNER_ARGS_CONFIRMATION_REQUIRED/);
+});
+
+// (별도 시험 불필요 -- 위 "register: with --confirm" 시험이 이미
+// commonArgs()의 기본 `--no-runner-args`로 이 경로를 exec 호출까지
+// 통과시킨다: 그 자체가 "명시적으로 확인하면 정당한 신규 설치가 안
+// 막힌다"는 증거다.)
 
 // ---------------------------------------------------------------------------
 // HYK-369 2R P1-1(검토 반려) -- `--runner-arg`를 반복 지정하면 라이브
@@ -165,8 +205,11 @@ test("register: rejected plan (e.g. missing expiresAt) never reaches exec, even 
     "HOST\\hykim",
     "--now",
     NOW_ISO,
+    "--no-runner-args",
     "--confirm",
-  ]; // --expires-at 생략(고의 -- 계획 거부를 유도).
+  ]; // --expires-at 생략(고의 -- 계획 거부를 유도). --no-runner-args는
+  // 넣어 둔다 -- 안 그러면 그 확인 요구가 먼저 걸려 이 시험이 원래
+  // 겨냥하는 "만료 누락" 경로를 더 이상 보여주지 못한다.
   const { exitCode } = runScheduleWire(["register", ...args], {
     exec: neverCalledExec,
   });
@@ -215,6 +258,51 @@ test("status: fresh record -> ALIVE (1/1)", () => {
   );
   assert.match(result.output, /^ALIVE/);
   assert.equal(result.exitCode, EXIT_CODE.OK);
+});
+
+// ---------------------------------------------------------------------------
+// HYK-369 3R P2-1(2R 검토 반려) -- `--conhost-path`로 존재하지 않는
+// 경로를 명시 오버라이드하면, 등록 실행까지 가지 않고 `plan`/`register`
+// 드라이런 단계에서 바로 잡힌다(검토자 재현: 이전엔 `MISSING_CONHOST_
+// PLAN_EXIT=0`로 조용히 통과했다). `schedule-plan-core.mjs`는 "I/O 0"
+// 순수 함수 계약이 있어 존재 확인을 할 수 없으므로, 이미 fs를 다루는
+// 이 결선 계층(`schedule-wire.mjs`)에 검증을 뒀다 -- injected `existsFn`
+// 으로 실제 파일시스템을 건드리지 않고 both 방향(있음/없음)을 잰다.
+// ---------------------------------------------------------------------------
+test("plan: --conhost-path가 존재하지 않으면 PLAN_REJECTED(CONHOST_NOT_FOUND)로 즉시 거부한다(1/1)", () => {
+  const { output, exitCode } = runScheduleWire(
+    [
+      "plan",
+      ...commonArgs(["--conhost-path", "Z:\\not-installed\\conhost.exe"]),
+    ],
+    { exec: neverCalledExec, existsFn: () => false },
+  );
+  assert.equal(exitCode, EXIT_CODE.PLAN_REJECTED);
+  assert.match(output, /CONHOST_NOT_FOUND/);
+  assert.match(output, /Z:\\not-installed\\conhost\.exe/);
+});
+
+test("register: --conhost-path가 존재하지 않으면 --confirm과 무관하게 exec에 닿지 못한다(1/1)", () => {
+  const { exitCode } = runScheduleWire(
+    [
+      "register",
+      ...commonArgs([
+        "--conhost-path",
+        "Z:\\not-installed\\conhost.exe",
+        "--confirm",
+      ]),
+    ],
+    { exec: neverCalledExec, existsFn: () => false },
+  );
+  assert.equal(exitCode, EXIT_CODE.PLAN_REJECTED);
+});
+
+test("plan: --conhost-path를 안 주면(기본값) existsFn이 참을 반환하는 한 그대로 통과한다(1/1)", () => {
+  const { exitCode } = runScheduleWire(["plan", ...commonArgs()], {
+    exec: neverCalledExec,
+    existsFn: () => true,
+  });
+  assert.equal(exitCode, EXIT_CODE.OK);
 });
 
 test("unknown subcommand -> INVALID_ARGUMENTS, exec never called (1/1)", () => {
