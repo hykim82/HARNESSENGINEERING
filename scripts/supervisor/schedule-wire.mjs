@@ -80,6 +80,24 @@ function defaultConhostPath() {
   return winPath.join(systemRoot, "System32", "conhost.exe");
 }
 
+// HYK-369 6R(CI 반려 수리): `checkConhostExists`의 기본 `existsFn`을 그냥
+// `existsSync`로 두면, 비Windows에서 실제로 존재할 수 없는 win32 형태의
+// 기본 경로(`defaultConhostPath()`가 항상 만드는 문자열)를 실 파일시스템에
+// 대고 검사하게 된다 -- `conhost.exe`는 개념 자체가 Windows 전용이라 이
+// 검사는 비Windows에서 "그 경로가 실제로 있는가"를 재는 게 아니라
+// "Windows 스타일 문자열이 우연히 이 파일시스템의 실재 경로와 겹치는가"
+// (항상 아니오)를 재는 것이다 -- 그래서 `--conhost-path`를 아무도 손대지
+// 않은 순수 dry-run(plan/register 도움말성 시험들)까지도 비Windows에서
+// 무조건 PLAN_REJECTED(CONHOST_NOT_FOUND)로 떨어뜨린다(CI ubuntu-latest에서
+// 재현: PR #216, `not ok 4844`~`4847`/`4855` — 로컬 Windows에선 기본 경로가
+// 실재해 통과했었다). `--conhost-path`를 **명시로 오버라이드**했을 때는
+// 여전히(어느 플랫폼이든) 주입된 `existsFn`을 그대로 쓴다 -- 그건 실
+// 파일시스템과 무관한 순수 로직 시험(P2-1)이라 이 분기와 무관하다. Windows
+// 기본 동작은 그대로(`existsSync`) 유지 -- 로컬 초록 회귀 0.
+function defaultExistsFn() {
+  return process.platform === "win32" ? existsSync : () => true;
+}
+
 function parseCommonArgs(argv) {
   const parsed = {
     repoRoot: null,
@@ -234,7 +252,7 @@ function runStatus(cli, readFn) {
 export function runScheduleWire(argv, deps = {}) {
   const exec = deps.exec ?? execFileSync;
   const readFn = deps.readFn ?? readFileSync;
-  const existsFn = deps.existsFn ?? existsSync;
+  const existsFn = deps.existsFn ?? defaultExistsFn();
   const [sub, ...rest] = argv;
   const cli = parseCommonArgs(rest);
   if (sub === "plan") return runPlan(cli, existsFn);
