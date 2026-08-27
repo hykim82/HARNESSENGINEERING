@@ -2936,16 +2936,21 @@ const CONFIRM_CODEX_STAGING_REASON = Object.freeze({
   OFF_SCREEN_FIELD_ABSENT: "OFF_SCREEN_FIELD_ABSENT",
 });
 
-// opts.offScreenSend?: {response, expectedText} -- deliverToCodexSeat이 이미
+// opts.offScreenSend: {response, expectedText} -- deliverToCodexSeat이 이미
 // 받아 둔 textSent.response(§포트2, 새 orca 호출 0)와 그때 보낸 bootstrapText
-// 를 그대로 넘긴다. ⛔더 이상 "미주입/신호 없음 = 화면 판정 존중"이
-// 아니다(fail-open 폐기, 검토 반려 P1 수리) -- `offScreenSend`가 실제로
-// 주입된 호출(=실배달 경로, deliverToCodexSeat이 아래에서 항상 채운다)
-// 에서는 그 축이 MATCH일 때만 확인된다. `opts.offScreenSend` 자체를
-// 아예 넘기지 않는 것(단위 시험에서 이 축을 시험하지 않을 때의 호출
-// 형태)만 "이 축을 아예 안 쓴다"로 남겨 화면 단독 판정을 허용한다 --
-// 이건 "신호가 왔는데 없다고 접는 것"과 다르다(호출자가 애초에 이 축을
-// 쓰지 않겠다고 명시한 것).
+// 를 그대로 넘긴다.
+// ★HYK-274-stale-screen-4 (게이트 2 · 불변식화): ⛔이 축에는 "opt-out"이
+// 없다 -- 3R까지는 `opts.offScreenSend`가 plain object가 아니면(생략·
+// `undefined`·`null`·비객체 전부 포함) "이 축을 안 쓴다"로 접어 화면
+// 마커 단독으로 통과시켰다. 검토자가 그 자리를 옆문으로 실증했다(가짜
+// 실행기: 마커+`offScreenSend: undefined` -> ok:true). 이제 이 함수는
+// **호출자가 무엇을 넘기든 결과로 판정한다** -- "넘긴 값의 모양"으로
+// 분기하지 않는다: `offScreenSend`가 plain object가 아니면 그냥 빈
+// 객체로 접어(`{}`) `classifyOffScreenSend`에 그대로 흘려보낸다. 그러면
+// `response`/`expectedText`가 둘 다 `undefined`인 채로 들어가고,
+// `classifyOffScreenSend`는 그 입력을 (생략과 완전히 동일하게)
+// `FIELD_ABSENT`로 분류해 **fail-closed**로 떨어진다 -- "생략"과
+// "undefined"를 다르게 취급하는 코드 경로 자체가 이제 존재하지 않는다.
 function confirmCodexStaging(seatHandle, marker, opts) {
   if (typeof opts.confirmPastedFn === "function") {
     const hookOk = confirmPasteViaInjectedHook(opts.confirmPastedFn);
@@ -2967,10 +2972,7 @@ function confirmCodexStaging(seatHandle, marker, opts) {
       reasonCode: CONFIRM_CODEX_STAGING_REASON.SCREEN_MARKER_ABSENT,
     };
   }
-  const offScreen = opts.offScreenSend;
-  if (!isPlainObject(offScreen)) {
-    return { ok: true, reasonCode: CONFIRM_CODEX_STAGING_REASON.CONFIRMED };
-  }
+  const offScreen = isPlainObject(opts.offScreenSend) ? opts.offScreenSend : {};
   const verdict = classifyOffScreenSend(
     offScreen.response,
     offScreen.expectedText,
@@ -3195,21 +3197,24 @@ function deliverToCodexSeat(c, seatHandle, runtimeTaskId, opts) {
     return { ok: false, reason: textSent.reason, runtimeTaskId: rtId };
   }
 
-  // HYK-274-stale-screen-1 완료 조건 2: 이미 받아 둔 textSent.response(새
-  // orca 호출 0)를 화면 밖 축으로 얹는다 -- opts.offScreenSend를 호출자가
-  // 이미 명시했으면(테스트 override) 그 값을 존중하고 덮어쓰지 않는다.
-  const confirmOpts = Object.prototype.hasOwnProperty.call(
-    opts,
-    "offScreenSend",
-  )
-    ? opts
-    : {
-        ...opts,
-        offScreenSend: {
-          response: textSent.response,
-          expectedText: bootstrapText,
-        },
-      };
+  // HYK-274-stale-screen-4 (게이트 2 · 검토 3R 반려 P1 수리 -- 불변식화):
+  // 3R까지는 "호출자가 opts.offScreenSend를 이미 명시했으면(hasOwnProperty)
+  // 그 값을 존중"했다 -- 검토자가 그 자리에서 옆문을 찾았다: 호출자가
+  // 선택값을 전개해(`{...base, offScreenSend: maybeUndefined}`) own
+  // property로 `undefined`를 만들면 hasOwnProperty는 true이므로 자동
+  // 주입이 건너뛰어지고, confirmCodexStaging은 `opts.offScreenSend`가
+  // plain object가 아니라는 이유로 이 축 자체를 "안 쓴다"로 접어 화면
+  // 마커 단독으로 Enter를 허용했다(검토자 가짜 실행기로 실증: 마커+
+  // `offScreenSend: undefined` -> ok:true, Enter 1회).
+  // ★불변식: 이 배달 경로(deliverToCodexSeat)는 codex 좌석에 실제로 보낸
+  // 이 호출 자신의 textSent.response + bootstrapText로 **항상** 화면 밖
+  // 축을 구성한다 -- opts에 무엇이 들어있든(생략·undefined·null·비객체·
+  // 빈 객체·심지어 다른 값) 그 값을 절대 신뢰하지 않는다. "이미 명시된
+  // 값을 존중한다"는 예외 자체를 없앤다 -- 그 예외가 옆문이었다.
+  const confirmOpts = {
+    ...opts,
+    offScreenSend: { response: textSent.response, expectedText: bootstrapText },
+  };
   const confirmation = confirmCodexStaging(seatHandle, c.taskId, confirmOpts);
   if (!confirmation.ok) {
     return {
