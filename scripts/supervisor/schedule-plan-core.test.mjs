@@ -520,7 +520,7 @@ test(
   async () => {
     const mutant = await importMutatedCopy((src) =>
       src.replace(
-        "  const expires = validateExpiresAt(expiresAt, now);\n  if (expires.code) return fail(expires.code);\n",
+        "  const expires = validateExpiresAt(expiresAt, now);\n  if (expires.code) return { code: expires.code };\n",
         "  const expires = validateExpiresAt(expiresAt, now);\n",
       ),
     );
