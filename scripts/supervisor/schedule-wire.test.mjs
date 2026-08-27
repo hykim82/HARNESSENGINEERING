@@ -132,6 +132,44 @@ test("plan: --runner-arg도 --no-runner-args도 안 주면 계획을 거부한�
   });
   assert.equal(exitCode, EXIT_CODE.PLAN_REJECTED);
   assert.match(output, /EXTRA_RUNNER_ARGS_CONFIRMATION_REQUIRED/);
+  // HYK-369 P(3R 검토 반려 지적) -- 거부 원문이 "무엇을 잃는지" 말해야
+  // 한다. 개별 플래그 이름은 여기(schedule-wire.mjs, 결선 계층)의 안내
+  // 문구에만 있고 코어 로직에는 없다(§본문 참조).
+  assert.match(output, /--wake/);
+  assert.match(output, /--runner-arg/);
+  assert.match(output, /--no-runner-args/);
+});
+
+// ---------------------------------------------------------------------------
+// HYK-369 4R P1(3R 검토 반려 그대로 재현, CLI 층) -- 3R을 반려시킨
+// 정확한 그 명령: `--runner-arg ""`. 지금은 CLI에서도 거부돼야 한다.
+// ---------------------------------------------------------------------------
+test('plan: --runner-arg ""(빈 문자열, 3R 반려를 부른 그 우회)는 CLI 층에서도 거부된다(1/1)', () => {
+  const { output, exitCode } = runScheduleWire(
+    // commonArgs()는 기본으로 --no-runner-args를 넣는다 -- 이 시험은 그
+    // opt-out 없이, 순수하게 빈 문자열 하나로 우회를 시도하는 시나리오를
+    // 재현해야 하므로 그 플래그를 제거한다.
+    ["plan", ...commonArgs(["--runner-arg", ""])].filter(
+      (a) => a !== "--no-runner-args",
+    ),
+    { exec: neverCalledExec },
+  );
+  assert.equal(exitCode, EXIT_CODE.PLAN_REJECTED);
+  assert.match(output, /EXTRA_RUNNER_ARGS_CONFIRMATION_REQUIRED/);
+});
+
+test('register: --runner-arg ""만 반복해도(여러 개, 전부 공백류) CLI 층에서 거부된다 -- --confirm과 무관하게 exec에 안 닿는다(1/1)', () => {
+  const args = commonArgs([
+    "--runner-arg",
+    "",
+    "--runner-arg",
+    "   ",
+    "--confirm",
+  ]).filter((a) => a !== "--no-runner-args");
+  const { exitCode } = runScheduleWire(["register", ...args], {
+    exec: neverCalledExec,
+  });
+  assert.equal(exitCode, EXIT_CODE.PLAN_REJECTED);
 });
 
 // (별도 시험 불필요 -- 위 "register: with --confirm" 시험이 이미

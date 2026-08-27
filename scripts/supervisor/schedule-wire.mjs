@@ -146,10 +146,34 @@ function planFromCli(cli) {
   });
 }
 
+// HYK-369 P(검토 반려, 3R -- "무엇을 잃는지 말하라"): `PLAN_REJECTED
+// (EXTRA_RUNNER_ARGS_CONFIRMATION_REQUIRED)`라는 원문만으로는 사람이
+// "각성 인자를 챙겨야 한다"는 결론에 닿기 어렵다. 개별 플래그 이름을
+// 이 코어(`schedule-plan-core.mjs`)에는 여전히 하드코딩하지 않는다(2R
+// 원칙 유지) -- 그러나 이 파일(`schedule-wire.mjs`)은 애초에 이
+// 감시자 하나만을 위한 결선 계층이라 "watch-run.mjs가 각성/sweep에
+// 쓰는 플래그"라는 도메인 지식을 이미 갖고 있는 게 자연스럽다(P2-1의
+// `%SystemRoot%` 조립과 같은 위치 판단). 여기서는 그 플래그 이름을
+// 로직(무엇을 거부할지 판단하는 코드)이 아니라 안내 문구(사람이 읽는
+// 설명)에만 쓴다 -- 나중에 watch-run.mjs가 플래그를 더 얻어도 이
+// 문구만 갱신하면 되고, 게이트 자체의 판정 로직은 그대로다.
+function describePlanRejection(reasonCode) {
+  if (reasonCode === "EXTRA_RUNNER_ARGS_CONFIRMATION_REQUIRED") {
+    return (
+      `PLAN_REJECTED (${reasonCode}): 이 계획엔 감시자(watch-run.mjs)에 실릴 ` +
+      `의미 있는 러너 인자가 하나도 없습니다 -- 재등록하면 --wake/` +
+      `--admission-sweep-ledger/--wake-live 같은 각성·sweep 감시가 조용히 ` +
+      `꺼집니다. 그게 필요하면 --runner-arg <값>으로 채우고, 각성이 정말 ` +
+      `필요 없는 신규 설치라면 --no-runner-args로 그 사실을 명시하세요.`
+    );
+  }
+  return `PLAN_REJECTED (${reasonCode})`;
+}
+
 function formatPlanOutput(built, cli) {
   if (!built.ok) {
     return {
-      output: `PLAN_REJECTED (${built.reasonCode})`,
+      output: describePlanRejection(built.reasonCode),
       exitCode: EXIT_CODE.PLAN_REJECTED,
     };
   }
@@ -191,7 +215,7 @@ function runRegisterOrUnregister(cli, kind, exec, existsFn) {
   const built = planFromCli(cli);
   if (!built.ok) {
     return {
-      output: `PLAN_REJECTED (${built.reasonCode})`,
+      output: describePlanRejection(built.reasonCode),
       exitCode: EXIT_CODE.PLAN_REJECTED,
     };
   }

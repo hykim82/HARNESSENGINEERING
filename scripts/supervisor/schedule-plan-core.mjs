@@ -161,8 +161,38 @@ function validateInterval(intervalMinutes) {
 // **"비어 있음" 자체가 아니라 "비어 있는데 그게 의도인지 말하지 않았다"**
 // 를 거부한다 -- `extraRunnerArgsConfirmedEmpty: true`로 명시적으로
 // "이 설치는 각성 인자가 없는 게 맞다"고 말해야 빈 배열이 통과한다.
-// 인자가 하나라도 있으면 이 확인은 필요 없다(있는 걸 굳이 "확인"해
-// 달라고 요구하는 건 실 사용자에게 마찰만 늘린다).
+// 인자가 하나라도 «의미 있으면» 이 확인은 필요 없다(있는 걸 굳이
+// "확인"해 달라고 요구하는 건 실 사용자에게 마찰만 늘린다).
+//
+// HYK-369 P1(검토 반려, 4R -- 한용 확정 "불변식, 목록이 아니다"):
+// 1R→3R은 매번 "방금 발견된 구멍"을 막았다 -- 빈 배열 → 원소 0개 → 빈
+// 문자열 원소, 검토자가 매번 옆 구멍을 찾았다(3R: `--runner-arg ""` 가
+// "원소가 문자열이긴 하다"는 이유로 통과했다). 그 패턴은 **입력이 어떤
+// "모양"인지를 열거해서 걸렀기 때문**이다 -- 새 모양이 나올 때마다 또
+// 뚫린다. 그래서 이번엔 검사 대상 자체를 바꿨다: 개별 원소의 모양이
+// 아니라 **"조립 결과에 실제로 쓰일 것이 하나라도 있는가"** 를 본다.
+//
+// 정의(★): 원소 하나가 "의미 있다" ⟺ 그 문자열을 공백류 문자(스페이스·
+// 탭·개행 등, JS String.prototype.trim이 제거하는 전부)를 제거했을 때
+// 길이가 0보다 크다. extraRunnerArgs 전체가 "의미 있다" ⟺ 그런 원소가
+// 하나 이상 있다.
+//
+// ★왜 빠짐없는가(열거가 아니라 성질로 논증): watch-run.mjs가 실제로
+// 읽는 모든 CLI 토큰(`--wake`, `--admission-sweep-ledger`, 그 값인
+// 파일 경로, 앞으로 생길 어떤 새 플래그든)은 **정의상** trim 후 길이가
+// 0보다 크다 -- 이름 있는 플래그는 최소 두 글자 이상의 `--`로 시작하고,
+// 경로 값은 빈 문자열일 수 없다(빈 경로는애초에 유효한 경로가 아니다).
+// 역으로 이 조건을 만족 못하는 문자열(""·공백만·탭/개행만)은 그 정의상
+// **watch-run.mjs가 실행할 수 있는 어떤 실제 명령행 토큰도 될 수
+// 없다** -- 이름 있는 플래그도, 값도 아니다. 즉 이 검사는 "알려진 나쁜
+// 값의 목록"이 아니라 "명령행 토큰이 되려면 반드시 참이어야 하는
+// 필요조건"을 검사한다 -- 그 필요조건을 못 만족하는 문자열의 가짓수는
+// 무한하지만(""·" "·"\t"·"\n\n"·...) 전부 이 한 조건 하나로 걸린다.
+// (한계 하나는 정직하게 적는다 -- §2-3/coder.md 참조: 화면에 안 보이는
+// 진짜 문자를 가진 문자열(예: 폭 없는 공백 U+200B)은 JS trim()이 공백
+// 취급을 안 해 이 조건을 통과할 수 있다. 실제 CLI 플래그/경로 값이
+// 그런 문자를 담을 일은 없다고 판단해 이번 라운드에서는 막지 않았다 --
+// coder.md에 발견 사실과 판단 근거를 그대로 남겼다.)
 function validateExtraRunnerArgs(
   extraRunnerArgs,
   extraRunnerArgsConfirmedEmpty,
@@ -175,8 +205,10 @@ function validateExtraRunnerArgs(
       return SCHEDULE_PLAN_REASON.EXTRA_RUNNER_ARGS_INVALID;
     }
   }
-  const isEmpty = !extraRunnerArgs || extraRunnerArgs.length === 0;
-  if (isEmpty && extraRunnerArgsConfirmedEmpty !== true) {
+  const hasMeaningfulArg =
+    Array.isArray(extraRunnerArgs) &&
+    extraRunnerArgs.some((a) => a.trim().length > 0);
+  if (!hasMeaningfulArg && extraRunnerArgsConfirmedEmpty !== true) {
     return SCHEDULE_PLAN_REASON.EXTRA_RUNNER_ARGS_CONFIRMATION_REQUIRED;
   }
   return null;

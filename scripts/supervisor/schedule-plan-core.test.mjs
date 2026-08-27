@@ -346,6 +346,78 @@ test("HYK-369 3R P1: extraRunnerArgs가 하나라도 있으면 extraRunnerArgsCo
 });
 
 // ---------------------------------------------------------------------------
+// HYK-369 4R P1(3R 검토 반려, 한용 확정 "불변식, 목록이 아니다") -- 이
+// 시험은 개별 입력 모양을 나열하지 않는다. §2-1 불변식 그 자체를
+// 시험으로 박는다: "extraRunnerArgsConfirmedEmpty 없이 성공한 계획은
+// commandLine에 의미 있는(공백류만이 아닌) 러너 토큰을 최소 1개 담고
+// 있어야 한다." 아래 CANDIDATES는 그 불변식을 깨뜨리려는 시도(우회
+// 후보)들의 «종류»별 대표값이다 -- coder.md 4R §2-3에 이 표를 그대로
+// 옮겼다(같은 배열, 같은 실행, 같은 결과). 3R 반려를 부른 `--runner-arg
+// ""`도 여기 포함된다.
+//
+// ★"통과해야 하는" 대조군(GENUINE)도 같이 돈다 -- 우회를 막다가 진짜
+// 인자까지 거부하면 안 되기 때문이다(coder-task.md §3 "정당한 신규
+// 설치를 막지 마라"와 대칭인 축).
+const CONFIRMATION_BYPASS_CANDIDATES = [
+  { label: "빈 배열", extraRunnerArgs: [] },
+  { label: "생략(undefined)", extraRunnerArgs: undefined },
+  { label: "빈 문자열 원소 1개 (3R 반려 원인)", extraRunnerArgs: [""] },
+  { label: "스페이스만", extraRunnerArgs: ["   "] },
+  { label: "탭만", extraRunnerArgs: ["\t"] },
+  { label: "개행만(복수)", extraRunnerArgs: ["\n\n"] },
+  {
+    label: "여러 원소가 전부 공백류(섞임)",
+    extraRunnerArgs: ["", "  ", "\t\n"],
+  },
+  { label: "빈 문자열 여러 개", extraRunnerArgs: ["", ""] },
+];
+const CONFIRMATION_GENUINE_CANDIDATES = [
+  { label: "정상 플래그 1개", extraRunnerArgs: ["--wake"] },
+  {
+    label: "공백류 원소 사이에 정상 값 1개(섞여도 있으면 통과해야 함)",
+    extraRunnerArgs: ["", "--wake", "  "],
+  },
+  { label: "값 형태(공백 아닌 아무 문자열)", extraRunnerArgs: ["0"] },
+];
+
+test("HYK-369 4R P1 불변식: 우회 후보 전부(확인 없이) -- commandLine에 의미 있는 토큰이 없으면 반드시 거부된다(8/8, 원문은 coder.md §2-3)", () => {
+  for (const c of CONFIRMATION_BYPASS_CANDIDATES) {
+    const result = buildSchedulePlan(
+      validArgs({
+        extraRunnerArgs: c.extraRunnerArgs,
+        extraRunnerArgsConfirmedEmpty: undefined,
+      }),
+    );
+    assert.equal(
+      result.ok,
+      false,
+      `bypass candidate "${c.label}" must be rejected, got ok:true commandLine=${result.plan?.commandLine}`,
+    );
+    assert.equal(
+      result.reasonCode,
+      SCHEDULE_PLAN_REASON.EXTRA_RUNNER_ARGS_CONFIRMATION_REQUIRED,
+      `bypass candidate "${c.label}" must fail for the confirmation reason, not something else`,
+    );
+  }
+});
+
+test("HYK-369 4R P1 불변식(대조군): 의미 있는 토큰이 하나라도 섞여 있으면 확인 없이도 통과한다 -- 우회 방어가 정상 인자를 못 물어야 한다(3/3)", () => {
+  for (const c of CONFIRMATION_GENUINE_CANDIDATES) {
+    const result = buildSchedulePlan(
+      validArgs({
+        extraRunnerArgs: c.extraRunnerArgs,
+        extraRunnerArgsConfirmedEmpty: undefined,
+      }),
+    );
+    assert.equal(
+      result.ok,
+      true,
+      `genuine candidate "${c.label}" must be accepted, got reasonCode=${result.reasonCode}`,
+    );
+  }
+});
+
+// ---------------------------------------------------------------------------
 // HYK-369 2R P2-1(검토 반려) -- conhost.exe 경로가 더 이상 리터럴로
 // 하드코딩돼 있지 않고, 이 함수의 다른 경로 인자(repoRoot/nodePath/
 // watchDir)와 똑같이 검증되는 매개변수인지.
