@@ -38,6 +38,7 @@ function validArgs(overrides = {}) {
     repoRoot: ROOT,
     nodePath: "C:\\Program Files\\nodejs\\node.exe",
     watchDir: "D:\\문서관리\\하네스-관제실\\watch",
+    conhostPath: "C:\\Windows\\System32\\conhost.exe",
     intervalMinutes: 10,
     expiresAt: EXPIRES_IN_7D,
     accountMode: ACCOUNT_MODE.LOGON_ONLY,
@@ -221,6 +222,220 @@ test("register/unregister pair: unregisterArgs always present alongside register
 });
 
 // ---------------------------------------------------------------------------
+// HYK-369 -- `/TR` 실행 대상이 콘솔 서브시스템 실행파일(node.exe)을 창
+// 없이 호스팅하는 `conhost.exe --headless --` 로 감싸져 있는지. 이 계약이
+// 사라지면(=node.exe를 다시 직접 `/TR`로 실행하면) 등록된 이 태스크가
+// 돌 때마다 사람 화면에 새 터미널 창이 뜬다(coder.md §1-6 실측 -- ORCH가
+// 확인한 실 등록 Execute 경로와 한용이 본 창 제목이 글자 그대로 일치).
+//
+// 이 조각이 HYK-369의 본체다(5R 디스코프, coder-task.md §2-1) -- 인자
+// 검증(각성/sweep 보존) 배관은 HYK-372로 빠졌지만, 이 시험과 아래 P1-3
+// 실행형 시험은 창 수리 그 자체를 지키므로 그대로 남는다.
+// ---------------------------------------------------------------------------
+test("HYK-369: commandLine이 node.exe를 conhost.exe --headless --로 감싸 실행한다 -- 창 없이 뜨는 계약(1/1)", () => {
+  const { plan } = buildSchedulePlan(validArgs());
+  assert.match(
+    plan.commandLine,
+    /^"C:\\Windows\\System32\\conhost\.exe" --headless -- /,
+    "commandLine must start by wrapping the real command through headless conhost -- if this regresses to a bare node.exe invocation, HYK-369's console-window flash comes back",
+  );
+  // 원래 node.exe 호출 자체는 그대로 이어붙어 있어야 한다(경로/인자 손실
+  // 없이 감싸기만 했는지 -- 창을 없애려다 실행 대상 자체를 바꾸면 안 된다).
+  assert.match(plan.commandLine, /"C:\\Program Files\\nodejs\\node\.exe"/);
+  assert.match(plan.commandLine, /watch-run\.mjs/);
+  assert.match(plan.commandLine, /--repo-root/);
+  assert.match(plan.commandLine, /--watch-dir/);
+  // `/IT`는 그대로 살아 있어야 한다(대화형 세션 -- orca 터미널 관측 능력의
+  // 전제, ORCH 비타협 ⓐ). 이 창-숨김은 실행 대상의 콘솔 호스팅 방식만
+  // 바꿀 뿐, 등록 계정/세션 방식(§1의 registerArgs)은 건드리지 않는다.
+  assert.ok(plan.registerArgs.includes("/IT"));
+});
+
+test("commandLine이 1R과 바이트 동일하다 -- 회귀 0(1/1)", () => {
+  const { plan } = buildSchedulePlan(validArgs());
+  assert.equal(
+    plan.commandLine,
+    '"C:\\Windows\\System32\\conhost.exe" --headless -- ' +
+      '"C:\\Program Files\\nodejs\\node.exe" ' +
+      `"${win32Path.join(ROOT, "scripts", "supervisor", "watch-run.mjs")}" ` +
+      '--repo-root "' +
+      ROOT +
+      '" --watch-dir "D:\\문서관리\\하네스-관제실\\watch"',
+  );
+});
+
+// ---------------------------------------------------------------------------
+// HYK-369 2R P2-1(검토 반려) -- conhost.exe 경로가 더 이상 리터럴로
+// 하드코딩돼 있지 않고, 이 함수의 다른 경로 인자(repoRoot/nodePath/
+// watchDir)와 똑같이 검증되는 매개변수인지.
+// ---------------------------------------------------------------------------
+test("HYK-369 P2-1: conhostPath는 매개변수다 -- 넘긴 값이 commandLine에 그대로 쓰이고, 없으면/상대경로면 거부된다(3/3)", () => {
+  const custom = buildSchedulePlan(
+    validArgs({ conhostPath: "D:\\다른설치\\conhost.exe" }),
+  );
+  assert.equal(custom.ok, true);
+  assert.match(
+    custom.plan.commandLine,
+    /^"D:\\다른설치\\conhost\.exe" --headless -- /,
+    "conhostPath must NOT be hardcoded -- a different valid path must be honored verbatim",
+  );
+
+  const missing = buildSchedulePlan(validArgs({ conhostPath: undefined }));
+  assert.equal(missing.ok, false);
+  assert.equal(missing.reasonCode, SCHEDULE_PLAN_REASON.CONHOST_PATH_INVALID);
+
+  const relative = buildSchedulePlan(validArgs({ conhostPath: "conhost.exe" }));
+  assert.equal(relative.ok, false);
+  assert.equal(relative.reasonCode, SCHEDULE_PLAN_REASON.CONHOST_PATH_INVALID);
+});
+
+// ---------------------------------------------------------------------------
+// HYK-369 2R P1-3(검토 반려) -- 실행형 시험. 위의 문자열 계약 시험들은
+// `commandLine`이 어떤 "모양"인지만 본다 -- 검토자가 지적한 대로, 그
+// 모양이 실제로 자식을 돌리고 파일을 쓰는지는 안 본다. 이 시험은 실제
+// `conhost.exe --headless -- <buildCommandLine이 만드는 그 모양>`을
+// 돌려 `watch.log`/`last-run.json`이 실제로 생기는지 확인한다.
+//
+// ★왜 `execFileSync`로 conhost.exe를 직접 부르지 않는가(coder.md 2R §2
+// 참조): Node의 child_process는 Windows에서 자식에게 항상 콘솔 핸들을
+// 상속시킨다(stdio/windowsHide/detached/shell 옵션과 무관) -- 그 상속된
+// 핸들이 `conhost --headless`와 충돌해 "exit 0, 파일 0개"로 조용히
+// 실패한다(이게 검토자가 본 것과 똑같은 현상이다, 원인은 이 코드가
+// 아니라 그 호출 방식). 예약 작업(schtasks)은 셸이 없어 상속할 콘솔
+// 핸들 자체가 없으므로 이 실패 모드와 만나지 않는다(§1-6 WINEXE
+// 재현으로 확인). 이 시험은 그 차이를 정면으로 피해 간다 -- Node가
+// PowerShell을 부르는 건 그대로 두되(그 계층은 상관없다), **PowerShell
+// 자신이 conhost.exe를 부를 때 표준 스트림을 리다이렉션하지 않는
+// `Start-Process`를 쓴다** -- 이게 신뢰 가능한 CreateProcess 그대로다.
+// HYK-373(5R, 검토 4R이 지목한 회귀): 이 시험이 실제 `watch-run.mjs`를
+// 띄우면 그 자식(`orch-stall-detect.mjs`)이 `ADMISSION_LEDGER_PATH`
+// 같은 admission 세 변수를 `process.env`에서 기본값으로 읽는다
+// (`orch-stall-detect.mjs`의 `resolveAdmissionLedgerPathForUnconsumed`
+// 등, `opts.env ?? process.env`). 이 시험이 그 세 변수를 명시적으로
+// 지우지 않고 `execFileSync`를 부르면 Node의 기본 동작(부모 env를
+// 그대로 물려줌)대로 **호출자의 떠도는 값이 conhost→node→watch-run.mjs
+// →orch-stall-detect.mjs 로 그대로 새어 들어간다** -- `scripts/check/
+// hyk359-ambient-env-regression.test.mjs`가 정확히 이 부류(격리 밖
+// 원장 경로가 떠 있을 때도 같은 결과가 나와야 한다)를 스윕으로 잡는데,
+// 그 스윕 자신이 온 저장소의 시험을 도는 자식에게 떠 있는 admission
+// 경로를 주입하므로 이 시험이 걸렸다(coder.md §3-2 재현 원문 -- 실제로
+// `node --test scripts/check/hyk359-ambient-env-regression.test.mjs`를
+// 돌려 정확히 이 시험 이름으로 `spawnSync powershell.exe ETIMEDOUT`
+// 실패를 재현했다). 실 예약 작업(schtasks)은 애초에 이 세 변수를
+// 환경변수로 받지 않는다(§ watch-run.mjs의 opt-in `--admission-sweep-
+// ledger` 관례와 동일한 정신 -- 값은 항상 명시 인자로만 흐른다) --
+// 그러니 이 시험이 조상 프로세스의 admission 환경을 그대로 물려주는
+// 것 자체가 실제 조건과 다르다. 고정: 이 시험이 스폰하는
+// `powershell.exe`에는 그 세 변수를 뺀 env를 명시적으로 넘긴다 -- 실
+// 스케줄 실행과 같은 "그 세 변수는 아예 없다"는 조건을 만든다.
+// ⛔스윕 예외 목록에 이 파일을 추가하는 식으로 피하지 않았다(HYK-365가
+// 다루던 바로 그 형태 -- coder-task.md §2-2 항3 금지).
+test(
+  "HYK-369 P1-3: buildSchedulePlan이 실제로 만드는 plan.commandLine 문자열 그대로 돌리면 watch.log/last-run.json이 생긴다 -- admission 세 변수가 떠 있어도 같은 결과(1/1)",
+  {
+    skip:
+      process.platform !== "win32" &&
+      "Windows 전용(schtasks/conhost) -- 다른 플랫폼에서는 실행 자체가 성립하지 않는다",
+  },
+  () => {
+    const watchDir = fs.mkdtempSync(join(tmpdir(), "hyk369-exec-repro-"));
+    // ★손으로 인자 배열을 다시 조립하지 않는다 -- 조립 자체가 틀리면
+    // 손조립 배열은 여전히 "옳은 모양"으로 남아 이 시험이 그 회귀를 못
+    // 잡는다(1차 초안의 결함, 변이로 직접 확인: `--repo-root`/
+    // `--watch-dir` 값을 서로 바꿔치기하는 변이를 넣었더니 손조립판은
+    // 여전히 초록이었지만, 실제로 그 변이는 watch.log를 워크트리
+    // 루트에 실물로 써 버리는 심각한 결함이었다 -- coder.md 2R §3
+    // 원문 참조). 그래서 `buildSchedulePlan`이
+    // **실제로 반환한 `plan.commandLine` 문자열**을 이 시험이 직접
+    // 토큰화해(따옴표로 묶인 조각을 하나의 토큰으로) `Start-Process`의
+    // FilePath/ArgumentList로 넘긴다 -- `cmd.exe /c "<전체 문자열>"`을
+    // 거치면 cmd 자신의 따옴표 해체 규칙(첫 토큰이 따옴표로 시작하는
+    // 문자열을 다루는 유명한 함정)이 끼어들어 이 코드와 무관한 이유로
+    // 깨진다는 것을 직접 확인했다(1차 시도 -- REVERT, coder.md 2R §3
+    // 원문 참조). CreateProcess 자체(schtasks가 실제로 하는 일)는 셸을
+    // 거치지 않으므로, 셸 파싱 함정 없이 토큰 배열을 직접 넘기는 이
+    // 방식이 실제 조건에 더 가깝다.
+    const { ok, plan } = buildSchedulePlan(
+      validArgs({
+        watchDir,
+        nodePath: process.execPath, // 이 기계에 실재하는 node.exe -- validArgs 기본값은 시험용 리터럴이라 실행 불가.
+      }),
+    );
+    assert.equal(ok, true, "buildSchedulePlan must accept these valid args");
+
+    // 따옴표로 묶인 조각은 하나의 토큰, 나머지는 공백 기준 토큰 --
+    // buildCommandLine이 만드는 문자열(각 인자를 "..."로 감싸고 "--"만
+    // 안 감싼다)에 정확히 맞는 최소 토크나이저다.
+    const tokens = plan.commandLine.match(/"[^"]*"|\S+/g);
+    assert.ok(
+      tokens && tokens.length >= 2,
+      `commandLine must tokenize into at least [conhostPath, ...], got: ${plan.commandLine}`,
+    );
+    const [firstToken, ...restTokens] = tokens;
+    const conhostExe = firstToken.replace(/^"|"$/g, "");
+    // --no-reach: 실 관제실 받는함 미접촉(§0 원장 무접촉과 같은 정신).
+    // buildCommandLine 자체가 만드는 토큰이 아니라 이 시험이 안전을
+    // 위해 별도로 덧붙이는 실 watch-run.mjs 플래그다 -- 위의 conhost
+    // 감쌈/repo-root/watch-dir 재구성과는 무관해 "손으로 다시 조립"
+    // 원칙을 깨지 않는다.
+    const restArgs = [
+      ...restTokens.map((t) => t.replace(/^"|"$/g, "")),
+      "--no-reach",
+    ];
+
+    const psArgList = restArgs
+      .map((a) => `'${a.replace(/'/g, "''")}'`)
+      .join(",");
+    const psCommand =
+      `$p = Start-Process -FilePath '${conhostExe.replace(/'/g, "''")}' ` +
+      `-ArgumentList @(${psArgList}) -PassThru -Wait -WindowStyle Hidden; ` +
+      `exit $p.ExitCode`;
+    // HYK-373: 이 프로세스(그리고 이 프로세스를 부른 조상, 예를 들어
+    // HYK-359 스윕)의 ADMISSION_LEDGER_PATH/ADMISSION_LOCK_PATH/
+    // DISPATCH_RECEIPT_PATH가 무엇이든, 아래로 흘려보내지 않는다 --
+    // 실 예약 작업(schtasks)이 이 프로세스를 만들 때도 이 세 변수는
+    // 애초에 없다(모듈 헤더 주석 참조).
+    const scrubbedEnv = { ...process.env };
+    delete scrubbedEnv.ADMISSION_LEDGER_PATH;
+    delete scrubbedEnv.ADMISSION_LOCK_PATH;
+    delete scrubbedEnv.DISPATCH_RECEIPT_PATH;
+    // timeout 120_000(HYK-373 후속): 값 누수(위 scrubbedEnv)를 고쳐도
+    // 이 시험은 여전히 실제 conhost→node→watch-run.mjs→orch-stall-
+    // detect.mjs 4단 프로세스 체인을 도는 시험이라, 전체 러너처럼 이미
+    // 수백 개의 `node --test`가 동시에 도는 무거운 조건에서는 그 체인의
+    // 각 프로세스 기동 자체가 CPU 경합으로 느려진다. 격리 단일 실행
+    // 기준선은 ~7-9s였지만, 전체 러너(격리 러너가 hyk359 스윕을 포함해
+    // 그 스윕이 또 자신의 전체 스윕을 도는 3중 중첩) 아래서 재현했을 때
+    // `duration_ms: 30020.635`로 옛 30_000ms 한도에 거의 정확히 걸려
+    // 실패했다(무한 정지가 아니라 한도 도달 -- coder.md §5-4 원문 로그).
+    // 진짜 멈춘 게 아니라 부하 아래서 진행이 느려진 것이므로, 무한
+    // 재시도/은폐가 아니라 정당한 여유를 주는 게 맞는 고침이다.
+    execFileSync(
+      "powershell.exe",
+      ["-NoProfile", "-NonInteractive", "-Command", psCommand],
+      {
+        stdio: "ignore",
+        windowsHide: true,
+        timeout: 120_000,
+        env: scrubbedEnv,
+      },
+    );
+
+    const watchLogPath = join(watchDir, "watch.log");
+    const lastRunPath = join(watchDir, "last-run.json");
+    assert.ok(
+      fs.existsSync(watchLogPath) && fs.statSync(watchLogPath).size > 0,
+      "watch.log must exist and be non-empty after running plan.commandLine verbatim -- if empty/missing, the headless wrap silently prevented the real runner from executing (검토 P1-2)",
+    );
+    assert.ok(
+      fs.existsSync(lastRunPath) && fs.statSync(lastRunPath).size > 0,
+      "last-run.json must exist and be non-empty for the same reason",
+    );
+    fs.rmSync(watchDir, { recursive: true, force: true });
+  },
+);
+
+// ---------------------------------------------------------------------------
 // fail-closed 검증 -- ★mutation #2/#3 표적 가드가 실제로 거부하는지.
 // ---------------------------------------------------------------------------
 test("fail-closed: expiresAt missing/empty -> ok:false EXPIRES_AT_REQUIRED (3/3: undefined, null, empty string)", () => {
@@ -326,6 +541,14 @@ async function importMutatedCopy(mutate) {
   }
 }
 
+// HYK-369 5R(디스코프, coder-task.md §2-1 경고): 2R 리팩터가
+// `validateAllArgs`/`assemblePlan`으로 쪼갠 건 각성 인자 검증(3R fail-
+// closed)이 `buildSchedulePlan`을 80줄 ESLint 상한 위로 밀어냈기
+// 때문이었다. 그 인자 검증 배관을 HYK-372로 걷어내면서 함수가 다시
+// 짧아졌으므로, 2R 이전의 단일 함수 형태로 되돌렸다(§ schedule-plan-
+// core.mjs 본문) -- `b2d03d5`가 고쳤던 needle(`return { code:
+// expires.code }`)도 원래 형태(`return fail(expires.code)`)로 되돌아
+// 가야 이 mutation이 실제 소스와 다시 맞는다. 아래 needle이 그 원복이다.
 test(
   "NC mutation/schedule-plan-core #2 (필수): 만료 필수 검사 제거 -> RED (무기한 등록 계획이 만들어짐)",
   { skip: !SRC_COMMITTED && NOT_COMMITTED_SKIP_REASON },

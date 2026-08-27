@@ -67,6 +67,7 @@ export const SCHEDULE_PLAN_REASON = Object.freeze({
   REPO_ROOT_INVALID: "REPO_ROOT_INVALID",
   NODE_PATH_INVALID: "NODE_PATH_INVALID",
   WATCH_DIR_INVALID: "WATCH_DIR_INVALID",
+  CONHOST_PATH_INVALID: "CONHOST_PATH_INVALID",
   RUN_AS_USER_INVALID: "RUN_AS_USER_INVALID",
   INTERVAL_MINUTES_INVALID: "INTERVAL_MINUTES_INVALID",
   ACCOUNT_MODE_INVALID: "ACCOUNT_MODE_INVALID",
@@ -96,7 +97,13 @@ function fail(reasonCode) {
   return { ok: false, plan: null, reasonCode };
 }
 
-function validatePaths({ repoRoot, nodePath, watchDir, runAsUser }) {
+function validatePaths({
+  repoRoot,
+  nodePath,
+  watchDir,
+  conhostPath,
+  runAsUser,
+}) {
   if (!isNonEmptyString(repoRoot) || !winPath.isAbsolute(repoRoot)) {
     return SCHEDULE_PLAN_REASON.REPO_ROOT_INVALID;
   }
@@ -105,6 +112,16 @@ function validatePaths({ repoRoot, nodePath, watchDir, runAsUser }) {
   }
   if (!isNonEmptyString(watchDir) || !winPath.isAbsolute(watchDir)) {
     return SCHEDULE_PLAN_REASON.WATCH_DIR_INVALID;
+  }
+  // HYK-369 P2-1(검토 반려): 이전엔 이 함수가 "C:\Windows\System32\
+  // conhost.exe"를 리터럴로 하드코딩했다 -- 이 코어의 다른 모든 경로는
+  // 인자인데 이것만 아니었다. 이제 호출자(schedule-wire.mjs, I/O를 이미
+  // 담당하는 결선 계층)가 실제 `%SystemRoot%`로 이 경로를 만들어 넘기고,
+  // 이 순수 코어는 "비어있지 않은 절대 win32 경로인가"만 검증한다 --
+  // conhost.exe가 실제로 그 자리에 있는지(fs 접근)는 여전히 이 코어의
+  // 일이 아니다("I/O 0" 비타협 그대로).
+  if (!isNonEmptyString(conhostPath) || !winPath.isAbsolute(conhostPath)) {
+    return SCHEDULE_PLAN_REASON.CONHOST_PATH_INVALID;
   }
   if (!isNonEmptyString(runAsUser)) {
     return SCHEDULE_PLAN_REASON.RUN_AS_USER_INVALID;
@@ -158,8 +175,57 @@ function toSchtasksDate(ms) {
   return new Date(ms).toISOString().slice(0, 10).replace(/-/g, "/");
 }
 
-function buildCommandLine(nodePath, runnerPath, repoRoot, watchDir) {
-  return `"${nodePath}" "${runnerPath}" --repo-root "${repoRoot}" --watch-dir "${watchDir}"`;
+// HYK-369 (coder-task.md, ORCH 실측 -- 등록된 태스크의 `/TR`/`Execute`가
+// 한용이 보고한 창 제목("C:\Program Files\nodejs\node.exe")과 글자 그대로
+// 일치했다): `/IT`(대화형 세션)로 등록된 이 태스크가 콘솔 서브시스템
+// 실행파일(node.exe)을 직접 `/TR`로 실행하면, Task Scheduler 가 이
+// 프로세스를 콘솔 없는 컨텍스트에서 만들고 Windows 는 그 콘솔 호스팅을
+// (이 기계처럼 Windows Terminal 이 기본 터미널일 때) 이미 떠 있는
+// WindowsTerminal.exe 의 새 탭으로 넘긴다("터미널 핸드오프") -- 그 결과
+// 이 태스크가 돌 때마다 사람 화면에 새 터미널 창이 나타난다.
+//
+// 고정: `/TR` 실행 대상을 `conhost.exe --headless -- <원래 커맨드라인>`
+// 으로 감싼다. `conhost --headless` 는 Windows 가 기본 제공하는, 콘솔을
+// **창 없이** 호스팅하는 표준 모드다(OpenSSH 서버 등이 이미 이 용도로
+// 쓴다) -- node.exe 는 여전히 완전한 콘솔(표준 입출력 핸들)을 갖고 실행
+// 되므로 코드 동작(watch.log/last-run.json 파일 쓰기, orca CLI 자식
+// 호출 등)은 그대로다. `/IT`(대화형 세션 유지)와 `/RU`(실행 계정)는
+// 손대지 않는다 -- 이 창-숨김은 오직 콘솔 "호스팅 방식"만 바꾼다.
+//
+// 재현 검증(HYK-369 coder.md §1-6, 2R §2): `.harness/repro/ConsoleRepro.cs`
+// 헬퍼(콘솔 없는 조상을 raw CreateProcess로 시뮬레이션 -- 예약 작업의
+// 실제 조건과 같다, bInheritHandles=false)로 정확히 이 커맨드라인
+// 형태를 실행해 `top_level_window_count_delta=0`(창 0개, 시작~자연 종료
+// 전 구간 전부)과 `watch.log`/`last-run.json` 정상 생성을 **함께**
+// 확인했다.
+//
+// ★2R 정정(검토 P1-2 관련): 검토자는 "정확히 이 명령을 직접 돌리면
+// exit 0인데 watch.log/last-run.json 둘 다 안 만들어진다"고 반려했다.
+// 재현했다 -- 그러나 원인은 이 코드가 아니라 **검토자(그리고 CODER 1R
+// 자신도)가 그 명령을 검증한 방식**이었다: Node의 child_process(
+// spawn/execFileSync, stdio·windowsHide·detached·shell 옵션과 무관하게
+// 전부)와 상호작용 콘솔에 직접 타이핑하는 방식은 둘 다 이 명령의 호출자
+// 프로세스에 **상속 가능한 콘솔 핸들**을 쥐어 준 채로 `conhost.exe
+// --headless`를 만든다 -- `conhost --headless`는 그 상속된 핸들과
+// 충돌해 조용히 자식을 못 돌린다(관측: exit 0, 파일 0개, 재현
+// 4가지 변형 전부 동일). 반면 **핸들을 상속하지 않는** 호출(.NET
+// `Process.Start`를 리다이렉션 없이 쓰거나, 예약 작업이 실제로 쓰는
+// raw `CreateProcess`)에서는 콘솔 존재 여부와 무관하게 **항상 성공**
+// 했다 -- 콘솔 있는 호출자에서도, 콘솔 없는 호출자에서도. 예약 작업은
+// 셸도 없고 상속할 콘솔 핸들 자체가 없으므로 이 실패 모드의 전제
+// 조건과 만나지 않는다. coder.md 2R §2 의 2×2×2 원문에 모든 조합의
+// exit/파일 유무가 있다.
+function buildCommandLine(
+  conhostPath,
+  nodePath,
+  runnerPath,
+  repoRoot,
+  watchDir,
+) {
+  return (
+    `"${conhostPath}" --headless -- ` +
+    `"${nodePath}" "${runnerPath}" --repo-root "${repoRoot}" --watch-dir "${watchDir}"`
+  );
 }
 
 // schtasks 실측 표(coder-task.md §6-1) 그대로 -- `/RU` + `/IT`(비밀번호
@@ -189,8 +255,11 @@ function buildRegisterArgs({
   ];
 }
 
-// buildSchedulePlan({repoRoot, nodePath, watchDir, intervalMinutes,
-// expiresAt, accountMode, runAsUser, now}) -> {ok, plan, reasonCode}
+// buildSchedulePlan({repoRoot, nodePath, watchDir, conhostPath,
+// intervalMinutes, expiresAt, accountMode, runAsUser, now}) -> {ok, plan,
+// reasonCode}. `conhostPath`는 호출자가 실제 `%SystemRoot%\System32\
+// conhost.exe`를 조립해 넘긴다(P2-1 수리 -- 이 코어는 하드코딩하지
+// 않는다).
 export function buildSchedulePlan(args) {
   if (args === null || typeof args !== "object" || Array.isArray(args)) {
     return fail(SCHEDULE_PLAN_REASON.INVALID_ARGUMENTS);
@@ -199,6 +268,7 @@ export function buildSchedulePlan(args) {
     repoRoot,
     nodePath,
     watchDir,
+    conhostPath,
     intervalMinutes,
     expiresAt,
     accountMode,
@@ -207,7 +277,13 @@ export function buildSchedulePlan(args) {
   } = args;
   if (!isFiniteNumber(now)) return fail(SCHEDULE_PLAN_REASON.NOW_INVALID);
 
-  const pathReason = validatePaths({ repoRoot, nodePath, watchDir, runAsUser });
+  const pathReason = validatePaths({
+    repoRoot,
+    nodePath,
+    watchDir,
+    conhostPath,
+    runAsUser,
+  });
   if (pathReason) return fail(pathReason);
 
   const intervalReason = validateInterval(intervalMinutes);
@@ -229,6 +305,7 @@ export function buildSchedulePlan(args) {
   const aliveRecordPath = winPath.join(watchDir, "last-run.json");
   const expiresAtDate = toSchtasksDate(expires.ms);
   const commandLine = buildCommandLine(
+    conhostPath,
     nodePath,
     runnerPath,
     repoRoot,

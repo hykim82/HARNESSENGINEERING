@@ -165,6 +165,51 @@ test("status: fresh record -> ALIVE (1/1)", () => {
   assert.equal(result.exitCode, EXIT_CODE.OK);
 });
 
+// ---------------------------------------------------------------------------
+// HYK-369 3R P2-1(2R 검토 반려) -- `--conhost-path`로 존재하지 않는
+// 경로를 명시 오버라이드하면, 등록 실행까지 가지 않고 `plan`/`register`
+// 드라이런 단계에서 바로 잡힌다(검토자 재현: 이전엔 `MISSING_CONHOST_
+// PLAN_EXIT=0`로 조용히 통과했다). `schedule-plan-core.mjs`는 "I/O 0"
+// 순수 함수 계약이 있어 존재 확인을 할 수 없으므로, 이미 fs를 다루는
+// 이 결선 계층(`schedule-wire.mjs`)에 검증을 뒀다 -- injected `existsFn`
+// 으로 실제 파일시스템을 건드리지 않고 both 방향(있음/없음)을 잰다.
+// ---------------------------------------------------------------------------
+test("plan: --conhost-path가 존재하지 않으면 PLAN_REJECTED(CONHOST_NOT_FOUND)로 즉시 거부한다(1/1)", () => {
+  const { output, exitCode } = runScheduleWire(
+    [
+      "plan",
+      ...commonArgs(["--conhost-path", "Z:\\not-installed\\conhost.exe"]),
+    ],
+    { exec: neverCalledExec, existsFn: () => false },
+  );
+  assert.equal(exitCode, EXIT_CODE.PLAN_REJECTED);
+  assert.match(output, /CONHOST_NOT_FOUND/);
+  assert.match(output, /Z:\\not-installed\\conhost\.exe/);
+});
+
+test("register: --conhost-path가 존재하지 않으면 --confirm과 무관하게 exec에 닿지 못한다(1/1)", () => {
+  const { exitCode } = runScheduleWire(
+    [
+      "register",
+      ...commonArgs([
+        "--conhost-path",
+        "Z:\\not-installed\\conhost.exe",
+        "--confirm",
+      ]),
+    ],
+    { exec: neverCalledExec, existsFn: () => false },
+  );
+  assert.equal(exitCode, EXIT_CODE.PLAN_REJECTED);
+});
+
+test("plan: --conhost-path를 안 주면(기본값) existsFn이 참을 반환하는 한 그대로 통과한다(1/1)", () => {
+  const { exitCode } = runScheduleWire(["plan", ...commonArgs()], {
+    exec: neverCalledExec,
+    existsFn: () => true,
+  });
+  assert.equal(exitCode, EXIT_CODE.OK);
+});
+
 test("unknown subcommand -> INVALID_ARGUMENTS, exec never called (1/1)", () => {
   const { exitCode } = runScheduleWire(["bogus"], { exec: neverCalledExec });
   assert.equal(exitCode, EXIT_CODE.INVALID_ARGUMENTS);

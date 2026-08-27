@@ -28,13 +28,15 @@
 // Node 20 호환(ESM 표준 API만 사용).
 
 import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { readFileSync, existsSync } from "node:fs";
 import path from "node:path";
 import { buildSchedulePlan, ACCOUNT_MODE } from "./schedule-plan-core.mjs";
 import {
   judgeWatchFreshness,
   WATCH_FRESHNESS_VERDICT,
 } from "./watch-freshness-core.mjs";
+
+const winPath = path.win32;
 
 export const EXIT_CODE = Object.freeze({
   OK: 0,
@@ -50,6 +52,10 @@ const STRING_FLAGS = Object.freeze({
   "--repo-root": "repoRoot",
   "--node-path": "nodePath",
   "--watch-dir": "watchDir",
+  // HYK-369 P2-1(검토 반려): conhost.exe 경로를 코드에 하드코딩하지
+  // 않는다 -- 기본값은 실제 %SystemRoot%에서 유도하고(아래
+  // defaultConhostPath), 시험/비표준 설치를 위해 오버라이드만 허용한다.
+  "--conhost-path": "conhostPath",
   "--expires-at": "expiresAt",
   "--run-as-user": "runAsUser",
   "--account-mode": "accountMode",
@@ -64,11 +70,40 @@ const BOOLEAN_FLAGS = Object.freeze({
   "--confirm": "confirm",
 });
 
+// HYK-369 P2-1: schtasks 자체가 Windows 전용이라 이 파일도 실질적으로
+// Windows에서만 동작하지만(schedule-plan-core.mjs와 달리 이 파일은 I/O
+// 담당이라 플랫폼 순수성 비타협이 없다), `%SystemRoot%`가 없는(=
+// 비Windows) 환경에서도 예외 없이 값 하나를 반환한다 -- 실제로 쓰이지
+// 않을 뿐 호출 자체가 죽지는 않는다.
+function defaultConhostPath() {
+  const systemRoot = process.env.SystemRoot || "C:\\Windows";
+  return winPath.join(systemRoot, "System32", "conhost.exe");
+}
+
+// HYK-369 6R(CI 반려 수리): `checkConhostExists`의 기본 `existsFn`을 그냥
+// `existsSync`로 두면, 비Windows에서 실제로 존재할 수 없는 win32 형태의
+// 기본 경로(`defaultConhostPath()`가 항상 만드는 문자열)를 실 파일시스템에
+// 대고 검사하게 된다 -- `conhost.exe`는 개념 자체가 Windows 전용이라 이
+// 검사는 비Windows에서 "그 경로가 실제로 있는가"를 재는 게 아니라
+// "Windows 스타일 문자열이 우연히 이 파일시스템의 실재 경로와 겹치는가"
+// (항상 아니오)를 재는 것이다 -- 그래서 `--conhost-path`를 아무도 손대지
+// 않은 순수 dry-run(plan/register 도움말성 시험들)까지도 비Windows에서
+// 무조건 PLAN_REJECTED(CONHOST_NOT_FOUND)로 떨어뜨린다(CI ubuntu-latest에서
+// 재현: PR #216, `not ok 4844`~`4847`/`4855` — 로컬 Windows에선 기본 경로가
+// 실재해 통과했었다). `--conhost-path`를 **명시로 오버라이드**했을 때는
+// 여전히(어느 플랫폼이든) 주입된 `existsFn`을 그대로 쓴다 -- 그건 실
+// 파일시스템과 무관한 순수 로직 시험(P2-1)이라 이 분기와 무관하다. Windows
+// 기본 동작은 그대로(`existsSync`) 유지 -- 로컬 초록 회귀 0.
+function defaultExistsFn() {
+  return process.platform === "win32" ? existsSync : () => true;
+}
+
 function parseCommonArgs(argv) {
   const parsed = {
     repoRoot: null,
     nodePath: process.execPath,
     watchDir: null,
+    conhostPath: defaultConhostPath(),
     intervalMinutes: null,
     expiresAt: null,
     runAsUser: null,
@@ -103,6 +138,7 @@ function planFromCli(cli) {
     repoRoot: cli.repoRoot,
     nodePath: cli.nodePath,
     watchDir: cli.watchDir,
+    conhostPath: cli.conhostPath,
     intervalMinutes: cli.intervalMinutes,
     expiresAt: cli.expiresAt,
     accountMode: cli.accountMode,
@@ -124,14 +160,35 @@ function formatPlanOutput(built, cli) {
   return { output, exitCode: EXIT_CODE.OK };
 }
 
-function runPlan(cli) {
-  return formatPlanOutput(planFromCli(cli), cli);
+// HYK-369 P2-1(2R 검토 반려, 3R 처리) -- `schedule-plan-core.mjs`는 "I/O
+// 0" 순수 함수 계약이 있어(파일 존재 확인은 fs 호출이라 그 계약을 깬다)
+// `conhostPath`가 실제로 존재하는지 검증할 수 없다 -- 그래서 여기(이미
+// fs/child_process를 다루는 결선 계층)에 둔다. 기본값(%SystemRoot%\
+// System32\conhost.exe)은 거의 항상 존재하지만, `--conhost-path`로
+// 명시 오버라이드했을 때(검토자 재현: 존재하지 않는 경로)는 계획 단계
+// (사람이 dry-run으로 미리 보는 시점)에서 바로 잡아 준다 -- 예약 등록
+// 뒤에야 조용히 실패하는 것보다 이쪽이 사람에게 더 이르고 시끄럽다.
+function checkConhostExists(cli, existsFn) {
+  if (existsFn(cli.conhostPath)) return null;
+  return {
+    output: `PLAN_REJECTED (CONHOST_NOT_FOUND: ${cli.conhostPath})`,
+    exitCode: EXIT_CODE.PLAN_REJECTED,
+  };
+}
+
+function runPlan(cli, existsFn) {
+  const built = planFromCli(cli);
+  if (built.ok) {
+    const conhostRejection = checkConhostExists(cli, existsFn);
+    if (conhostRejection) return conhostRejection;
+  }
+  return formatPlanOutput(built, cli);
 }
 
 // register/unregister 공용 -- `--confirm` 없으면 계획만 출력하고 종료
 // (★mutation #1 표적: 아래 `if (!cli.confirm)` 가드가 이 파일의 핵심
 // 안전 장치다).
-function runRegisterOrUnregister(cli, kind, exec) {
+function runRegisterOrUnregister(cli, kind, exec, existsFn) {
   const built = planFromCli(cli);
   if (!built.ok) {
     return {
@@ -139,6 +196,8 @@ function runRegisterOrUnregister(cli, kind, exec) {
       exitCode: EXIT_CODE.PLAN_REJECTED,
     };
   }
+  const conhostRejection = checkConhostExists(cli, existsFn);
+  if (conhostRejection) return conhostRejection;
   const args =
     kind === "register" ? built.plan.registerArgs : built.plan.unregisterArgs;
   if (!cli.confirm) {
@@ -193,12 +252,14 @@ function runStatus(cli, readFn) {
 export function runScheduleWire(argv, deps = {}) {
   const exec = deps.exec ?? execFileSync;
   const readFn = deps.readFn ?? readFileSync;
+  const existsFn = deps.existsFn ?? defaultExistsFn();
   const [sub, ...rest] = argv;
   const cli = parseCommonArgs(rest);
-  if (sub === "plan") return runPlan(cli);
-  if (sub === "register") return runRegisterOrUnregister(cli, "register", exec);
+  if (sub === "plan") return runPlan(cli, existsFn);
+  if (sub === "register")
+    return runRegisterOrUnregister(cli, "register", exec, existsFn);
   if (sub === "unregister")
-    return runRegisterOrUnregister(cli, "unregister", exec);
+    return runRegisterOrUnregister(cli, "unregister", exec, existsFn);
   if (sub === "status") return runStatus(cli, readFn);
   return {
     output: `UNKNOWN_SUBCOMMAND: ${sub}`,
