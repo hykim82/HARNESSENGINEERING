@@ -307,8 +307,31 @@ test("HYK-369 P2-1: conhostPath는 매개변수다 -- 넘긴 값이 commandLine�
 // PowerShell을 부르는 건 그대로 두되(그 계층은 상관없다), **PowerShell
 // 자신이 conhost.exe를 부를 때 표준 스트림을 리다이렉션하지 않는
 // `Start-Process`를 쓴다** -- 이게 신뢰 가능한 CreateProcess 그대로다.
+// HYK-373(5R, 검토 4R이 지목한 회귀): 이 시험이 실제 `watch-run.mjs`를
+// 띄우면 그 자식(`orch-stall-detect.mjs`)이 `ADMISSION_LEDGER_PATH`
+// 같은 admission 세 변수를 `process.env`에서 기본값으로 읽는다
+// (`orch-stall-detect.mjs`의 `resolveAdmissionLedgerPathForUnconsumed`
+// 등, `opts.env ?? process.env`). 이 시험이 그 세 변수를 명시적으로
+// 지우지 않고 `execFileSync`를 부르면 Node의 기본 동작(부모 env를
+// 그대로 물려줌)대로 **호출자의 떠도는 값이 conhost→node→watch-run.mjs
+// →orch-stall-detect.mjs 로 그대로 새어 들어간다** -- `scripts/check/
+// hyk359-ambient-env-regression.test.mjs`가 정확히 이 부류(격리 밖
+// 원장 경로가 떠 있을 때도 같은 결과가 나와야 한다)를 스윕으로 잡는데,
+// 그 스윕 자신이 온 저장소의 시험을 도는 자식에게 떠 있는 admission
+// 경로를 주입하므로 이 시험이 걸렸다(coder.md §3-2 재현 원문 -- 실제로
+// `node --test scripts/check/hyk359-ambient-env-regression.test.mjs`를
+// 돌려 정확히 이 시험 이름으로 `spawnSync powershell.exe ETIMEDOUT`
+// 실패를 재현했다). 실 예약 작업(schtasks)은 애초에 이 세 변수를
+// 환경변수로 받지 않는다(§ watch-run.mjs의 opt-in `--admission-sweep-
+// ledger` 관례와 동일한 정신 -- 값은 항상 명시 인자로만 흐른다) --
+// 그러니 이 시험이 조상 프로세스의 admission 환경을 그대로 물려주는
+// 것 자체가 실제 조건과 다르다. 고정: 이 시험이 스폰하는
+// `powershell.exe`에는 그 세 변수를 뺀 env를 명시적으로 넘긴다 -- 실
+// 스케줄 실행과 같은 "그 세 변수는 아예 없다"는 조건을 만든다.
+// ⛔스윕 예외 목록에 이 파일을 추가하는 식으로 피하지 않았다(HYK-365가
+// 다루던 바로 그 형태 -- coder-task.md §2-2 항3 금지).
 test(
-  "HYK-369 P1-3: buildSchedulePlan이 실제로 만드는 plan.commandLine 문자열 그대로 돌리면 watch.log/last-run.json이 생긴다(1/1)",
+  "HYK-369 P1-3: buildSchedulePlan이 실제로 만드는 plan.commandLine 문자열 그대로 돌리면 watch.log/last-run.json이 생긴다 -- admission 세 변수가 떠 있어도 같은 결과(1/1)",
   {
     skip:
       process.platform !== "win32" &&
@@ -367,10 +390,24 @@ test(
       `$p = Start-Process -FilePath '${conhostExe.replace(/'/g, "''")}' ` +
       `-ArgumentList @(${psArgList}) -PassThru -Wait -WindowStyle Hidden; ` +
       `exit $p.ExitCode`;
+    // HYK-373: 이 프로세스(그리고 이 프로세스를 부른 조상, 예를 들어
+    // HYK-359 스윕)의 ADMISSION_LEDGER_PATH/ADMISSION_LOCK_PATH/
+    // DISPATCH_RECEIPT_PATH가 무엇이든, 아래로 흘려보내지 않는다 --
+    // 실 예약 작업(schtasks)이 이 프로세스를 만들 때도 이 세 변수는
+    // 애초에 없다(모듈 헤더 주석 참조).
+    const scrubbedEnv = { ...process.env };
+    delete scrubbedEnv.ADMISSION_LEDGER_PATH;
+    delete scrubbedEnv.ADMISSION_LOCK_PATH;
+    delete scrubbedEnv.DISPATCH_RECEIPT_PATH;
     execFileSync(
       "powershell.exe",
       ["-NoProfile", "-NonInteractive", "-Command", psCommand],
-      { stdio: "ignore", windowsHide: true, timeout: 30_000 },
+      {
+        stdio: "ignore",
+        windowsHide: true,
+        timeout: 30_000,
+        env: scrubbedEnv,
+      },
     );
 
     const watchLogPath = join(watchDir, "watch.log");
