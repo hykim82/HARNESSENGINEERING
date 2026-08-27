@@ -27,6 +27,26 @@ jobs:
       - name: Install pinned quality tooling (eslint/prettier, HYK-148)
         run: npm ci
 
+      # HYK-365 2R: moved ahead of the suite so gitleaks is on PATH when it
+      # runs. This step is fail-closed like every other step here (1R's
+      # error-tolerant flag was downgraded after review) -- an install
+      # failure fails the job right here, nc-ci-enforce.test.mjs:145 keeps
+      # that true workflow-wide.
+      - name: Install gitleaks (pinned, checksum-verified)
+        run: |
+          set -e
+          curl -sSL -o gitleaks.tar.gz "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "${GITLEAKS_SHA256}  gitleaks.tar.gz" | sha256sum -c -
+          tar -xzf gitleaks.tar.gz gitleaks
+          chmod +x gitleaks
+          sudo mv gitleaks /usr/local/bin/gitleaks
+
+      # HYK-365 3R: 3 conditional skips stay accepted -- a Windows-only
+      # control-room script path and 2 checks on the untracked
+      # .claude/settings.local.json can never exist in the CI RUNNER'S
+      # checkout (they do exist on this review host, which is why this says
+      # "CI runner's checkout" specifically, not "this checkout" generally).
+      # Local weekly selfcheck covers them; that is not an external anchor.
       - name: check test suites (scripts/check + scripts/relay + scripts/relay/adapters + scripts/supervisor *.test.mjs)
         run: node scripts/check/isolated-suite-runner.mjs
 
@@ -55,15 +75,6 @@ jobs:
 
       - name: nul-byte-guard -- changed-files raw NUL byte scan (HYK-183, mirrors local pre-commit)
         run: node scripts/check/nul-byte-guard.mjs --mode ci --base-sha "${{ steps.quality_base.outputs.sha }}"
-
-      - name: Install gitleaks (pinned, checksum-verified)
-        run: |
-          set -e
-          curl -sSL -o gitleaks.tar.gz "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
-          echo "${GITLEAKS_SHA256}  gitleaks.tar.gz" | sha256sum -c -
-          tar -xzf gitleaks.tar.gz gitleaks
-          chmod +x gitleaks
-          sudo mv gitleaks /usr/local/bin/gitleaks
 
       - name: gitleaks secret scan
         run: gitleaks detect --source . --redact
