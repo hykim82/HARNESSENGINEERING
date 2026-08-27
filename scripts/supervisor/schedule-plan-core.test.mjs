@@ -221,6 +221,32 @@ test("register/unregister pair: unregisterArgs always present alongside register
 });
 
 // ---------------------------------------------------------------------------
+// HYK-369 -- `/TR` 실행 대상이 콘솔 서브시스템 실행파일(node.exe)을 창
+// 없이 호스팅하는 `conhost.exe --headless --` 로 감싸져 있는지. 이 계약이
+// 사라지면(=node.exe를 다시 직접 `/TR`로 실행하면) 등록된 이 태스크가
+// 돌 때마다 사람 화면에 새 터미널 창이 뜬다(coder.md §1-6 실측 -- ORCH가
+// 확인한 실 등록 Execute 경로와 한용이 본 창 제목이 글자 그대로 일치).
+// ---------------------------------------------------------------------------
+test("HYK-369: commandLine이 node.exe를 conhost.exe --headless --로 감싸 실행한다 -- 창 없이 뜨는 계약(1/1)", () => {
+  const { plan } = buildSchedulePlan(validArgs());
+  assert.match(
+    plan.commandLine,
+    /^"C:\\Windows\\System32\\conhost\.exe" --headless -- /,
+    "commandLine must start by wrapping the real command through headless conhost -- if this regresses to a bare node.exe invocation, HYK-369's console-window flash comes back",
+  );
+  // 원래 node.exe 호출 자체는 그대로 이어붙어 있어야 한다(경로/인자 손실
+  // 없이 감싸기만 했는지 -- 창을 없애려다 실행 대상 자체를 바꾸면 안 된다).
+  assert.match(plan.commandLine, /"C:\\Program Files\\nodejs\\node\.exe"/);
+  assert.match(plan.commandLine, /watch-run\.mjs/);
+  assert.match(plan.commandLine, /--repo-root/);
+  assert.match(plan.commandLine, /--watch-dir/);
+  // `/IT`는 그대로 살아 있어야 한다(대화형 세션 -- orca 터미널 관측 능력의
+  // 전제, ORCH 비타협 ⓐ). 이 창-숨김은 실행 대상의 콘솔 호스팅 방식만
+  // 바꿀 뿐, 등록 계정/세션 방식(§1의 registerArgs)은 건드리지 않는다.
+  assert.ok(plan.registerArgs.includes("/IT"));
+});
+
+// ---------------------------------------------------------------------------
 // fail-closed 검증 -- ★mutation #2/#3 표적 가드가 실제로 거부하는지.
 // ---------------------------------------------------------------------------
 test("fail-closed: expiresAt missing/empty -> ok:false EXPIRES_AT_REQUIRED (3/3: undefined, null, empty string)", () => {

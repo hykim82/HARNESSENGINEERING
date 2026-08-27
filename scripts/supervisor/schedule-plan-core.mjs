@@ -158,8 +158,45 @@ function toSchtasksDate(ms) {
   return new Date(ms).toISOString().slice(0, 10).replace(/-/g, "/");
 }
 
+// HYK-369 (coder-task.md, ORCH 실측 -- 등록된 태스크의 `/TR`/`Execute`가
+// 한용이 보고한 창 제목("C:\Program Files\nodejs\node.exe")과 글자 그대로
+// 일치했다): `/IT`(대화형 세션)로 등록된 이 태스크가 콘솔 서브시스템
+// 실행파일(node.exe)을 직접 `/TR`로 실행하면, Task Scheduler 가 이
+// 프로세스를 콘솔 없는 컨텍스트에서 만들고 Windows 는 그 콘솔 호스팅을
+// (이 기계처럼 Windows Terminal 이 기본 터미널일 때) 이미 떠 있는
+// WindowsTerminal.exe 의 새 탭으로 넘긴다("터미널 핸드오프") -- 그 결과
+// 이 태스크가 돌 때마다 사람 화면에 새 터미널 창이 나타난다.
+//
+// 고정: `/TR` 실행 대상을 `conhost.exe --headless -- <원래 커맨드라인>`
+// 으로 감싼다. `conhost --headless` 는 Windows 가 기본 제공하는, 콘솔을
+// **창 없이** 호스팅하는 표준 모드다(OpenSSH 서버 등이 이미 이 용도로
+// 쓴다) -- node.exe 는 여전히 완전한 콘솔(표준 입출력 핸들)을 갖고 실행
+// 되므로 코드 동작(watch.log/last-run.json 파일 쓰기, orca CLI 자식
+// 호출 등)은 그대로다. `/IT`(대화형 세션 유지)와 `/RU`(실행 계정)는
+// 손대지 않는다 -- 이 창-숨김은 오직 콘솔 "호스팅 방식"만 바꾼다.
+//
+// 재현 검증(HYK-369 coder.md §1-6): `.harness/repro/ConsoleRepro.cs`
+// 헬퍼(콘솔 없는 조상 시뮬레이션)로 이 정확한 커맨드라인 형태를 실행해
+// `top_level_window_count_delta=0`(창 0개, 시작~자연 종료 전 구간
+// 전부)을 확인했고, 같은 실행이 실제로 파일을 쓰는지(headless 콘솔
+// 아래서도 코드가 정상 동작하는지)도 별도 마커 파일로 확인했다.
+//
+// 대안 검토(고르지 않은 이유): (a) 자기 프로세스가 런타임에 자기 창을
+// `ShowWindow(SW_HIDE)`로 숨기는 방법 -- 창이 뜬 "뒤" 숨기므로 짧은
+// 깜빡임이 남고, 이 기계의 터미널 핸드오프 구조상 GetConsoleWindow()가
+// 가리키는 창이 WindowsTerminal.exe 자신(다른 탭 포함)일 수 있어
+// 사람의 작업 창 전체를 건드릴 위험이 있다(ORCH 지적, 실측 아닌 추론
+// -- 그래서 채택하지 않는다). (b) wscript+VBS 히든 런처 -- 새 스크립트
+// 파일을 저장소에 추가해야 하고, WshShell.Run의 숨김 방식이 정말
+// "핸드오프 자체를 막는지" 대비 "숨기기만 하는지" 미검증이라 conhost
+// --headless보다 근거가 약하다. `conhost --headless`는 Windows가 이
+// 정확한 용도(콘솔 앱을 창 없이 자동화 실행)로 문서화해 제공하는
+// 기능이라 새 파일도, 사후 숨김도 필요 없다 -- 가장 직접적이다.
 function buildCommandLine(nodePath, runnerPath, repoRoot, watchDir) {
-  return `"${nodePath}" "${runnerPath}" --repo-root "${repoRoot}" --watch-dir "${watchDir}"`;
+  return (
+    `"C:\\Windows\\System32\\conhost.exe" --headless -- ` +
+    `"${nodePath}" "${runnerPath}" --repo-root "${repoRoot}" --watch-dir "${watchDir}"`
+  );
 }
 
 // schtasks 실측 표(coder-task.md §6-1) 그대로 -- `/RU` + `/IT`(비밀번호
