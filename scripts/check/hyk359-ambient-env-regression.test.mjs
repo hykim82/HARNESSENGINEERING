@@ -97,6 +97,15 @@ import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { collectTestFiles } from "./isolated-suite-runner.mjs";
 
+// HYK-371 2R P1-1 (검토자 실사고, coder-task.md §2 불변식 A): 1R은
+// `EXCEPTIONS`(어떤 파일이 예외인지)와 `EXPECTED_EXCEPTIONS_SIZE`(개수만)를
+// 따로 뒀다 -- `selfcheck-smoke.test.mjs` 항목을 다른 실재하는
+// `.test.mjs` 이름으로 «교체»하고 개수를 1로 유지하면, 개수 동등성은
+// 그대로 통과하면서 실제로 보호에서 빠지는 파일은 조용히 바뀐다("커버리지
+// 불변"이 개수가 아니라 «어느 파일이 대상인가»로 증명돼야 하는 이유).
+// 고침: 개수가 아니라 **원소 자체**를 고정값과 정확히 비교(deepEqual) --
+// 항목을 교체하면 개수는 같아도 정렬된 배열 내용이 달라져 즉시 RED.
+
 // HYK-371 (측정: 08-27 기준선, 이 기계 CPU 24, Node v26.2.0): `node --test`
 // 는 파일 하나당 프로세스 하나를 띄우고 기본 동시성은 CPU 코어 수 - 1이라,
 // 이 아래 nested spawnSync가 예외 없이 기본 동시성으로 돌면 이미 밖에서
@@ -120,10 +129,12 @@ const THIS_FILE_BASENAME = basename(fileURLToPath(import.meta.url));
 // entry) only makes the sweep below stricter -- never a way to hide a
 // regression.
 const EXCEPTIONS = new Set(["selfcheck-smoke.test.mjs"]);
-// Pinned deliberately (HYK-359 3R P1) -- bump this the SAME diff you add or
-// remove an EXCEPTIONS entry in. Left stale, it turns a silent addition
-// into a loud, exact-count mismatch instead of a floor that never notices.
-const EXPECTED_EXCEPTIONS_SIZE = 1;
+// HYK-371 2R (불변식 A): pin the MEMBER(S), not just the count -- bump this
+// the SAME diff you add/remove/rename an EXCEPTIONS entry in. Swapping
+// "selfcheck-smoke.test.mjs" for a different existing file name here (and
+// nowhere else) is exactly the silent-swap this array must catch: same
+// `.size`, different actual protected-set membership.
+const EXPECTED_EXCEPTIONS = ["selfcheck-smoke.test.mjs"];
 
 function repoRoot() {
   return execFileSync("git", ["rev-parse", "--show-toplevel"], {
@@ -132,24 +143,45 @@ function repoRoot() {
   }).trim();
 }
 
+// HYK-371 2R (불변식 B): the ONE place that builds the nested sweep's
+// `node --test` argv -- both the real CI-canonical sweep below AND the
+// synthetic throttling-observation test further down call this SAME
+// function, so a mutation here (deleting the concurrency flag, or
+// reverting NESTED_SWEEP_CONCURRENCY to Node's default) is exercised by
+// both. Extracted specifically so the observation test can drive it
+// against a small, fast synthetic fixture instead of paying for a second
+// ~280-file sweep just to prove the flag survived.
+function buildNestedSweepArgs(files) {
+  return [
+    "--test",
+    "--test-reporter=tap",
+    `--test-concurrency=${NESTED_SWEEP_CONCURRENCY}`,
+    ...files,
+  ];
+}
+
+// NODE_TEST_CONTEXT/NODE_TEST_WORKER_ID (set by `node --test` on THIS
+// process, since this file is itself a test) must NOT leak into a spawned
+// nested `node --test` child -- inherited, it makes the child detect
+// "recursive test run" and silently skip running any tests at all (exit 0,
+// zero tests executed), which would make an assertion on the child's
+// output pass vacuously. 실사고(1R): this exact bug hid a genuine RED for a
+// full debugging pass before being caught. Shared by both spawn sites
+// below (the real CI-canonical sweep and the synthetic throttling probe).
+function envWithoutTestMarkers() {
+  const env = { ...process.env };
+  delete env.NODE_TEST_CONTEXT;
+  delete env.NODE_TEST_WORKER_ID;
+  return env;
+}
+
 // runSweepAndAssert -- spawns the nested `node --test` sweep, parses its
 // TAP output, and asserts on it. Extracted out of the test() callback
 // itself purely to keep that callback under this repo's ESLint
 // max-lines-per-function ceiling; the assertions here ARE the test.
 function runSweepAndAssert({ root, swept, dir }) {
-  // NODE_TEST_CONTEXT/NODE_TEST_WORKER_ID (set by `node --test` on THIS
-  // process, since this file is itself a test) must NOT leak into the
-  // spawned child below -- inherited, it makes the child's own
-  // `node --test` detect "recursive test run" and silently skip running
-  // any tests at all (exit 0 with zero tests executed), which would make
-  // this assertion pass vacuously regardless of whether the swept files
-  // are actually isolated. 실사고(1R): this exact bug hid a genuine RED
-  // for a full debugging pass before being caught.
-  const parentEnvWithoutTestMarkers = { ...process.env };
-  delete parentEnvWithoutTestMarkers.NODE_TEST_CONTEXT;
-  delete parentEnvWithoutTestMarkers.NODE_TEST_WORKER_ID;
   const floatingEnv = {
-    ...parentEnvWithoutTestMarkers,
+    ...envWithoutTestMarkers(),
     ADMISSION_LEDGER_PATH: join(dir, "floating-ledger.json"),
     ADMISSION_LOCK_PATH: join(dir, "floating-ledger.lock"),
     DISPATCH_RECEIPT_PATH: join(dir, "floating-dispatch-receipt.json"),
@@ -165,21 +197,12 @@ function runSweepAndAssert({ root, swept, dir }) {
   // `maxBuffer`: generous fixed ceiling (HYK-359 4R ①) -- 실측 CI-canonical
   // sweep output was ~1.6MB; 200MB leaves headroom for years of legitimate
   // growth without silently truncating again.
-  const res = spawnSync(
-    process.execPath,
-    [
-      "--test",
-      "--test-reporter=tap",
-      `--test-concurrency=${NESTED_SWEEP_CONCURRENCY}`,
-      ...swept,
-    ],
-    {
-      cwd: root,
-      encoding: "utf8",
-      env: floatingEnv,
-      maxBuffer: 1024 * 1024 * 200,
-    },
-  );
+  const res = spawnSync(process.execPath, buildNestedSweepArgs(swept), {
+    cwd: root,
+    encoding: "utf8",
+    env: floatingEnv,
+    maxBuffer: 1024 * 1024 * 200,
+  });
   // HYK-359 4R ①: `res.error` (e.g. ENOBUFS from exceeding even this
   // generous maxBuffer, or a spawn failure) must fail LOUDLY with its own
   // distinct message -- never silently fall through to the "0 tests"
@@ -253,11 +276,16 @@ test("HYK-359 완료조건4 (3R): CI-canonical 시험 디렉토리 전체(예외
   const root = repoRoot();
   const allFiles = collectTestFiles(root); // relative paths, e.g. "scripts/check/foo.test.mjs"
 
-  // HYK-359 3R P1: pinned exact size, not a floor -- see module header.
-  assert.equal(
-    EXCEPTIONS.size,
-    EXPECTED_EXCEPTIONS_SIZE,
-    `EXCEPTIONS has ${EXCEPTIONS.size} entries, expected exactly ${EXPECTED_EXCEPTIONS_SIZE} (${JSON.stringify([...EXCEPTIONS])}) -- if this change is deliberate, update EXPECTED_EXCEPTIONS_SIZE in the SAME diff; if not, something silently widened the exception list`,
+  // HYK-371 2R P1-1 (불변식 A): compare the SORTED MEMBER LIST, not the
+  // size -- a size-only check (3R's `EXCEPTIONS.size === EXPECTED_
+  // EXCEPTIONS_SIZE`) passes unchanged if an entry is swapped for a
+  // different existing file name (same size, different actual protected
+  // set). deepEqual on the sorted array fails the moment membership
+  // diverges from the pinned list, regardless of size.
+  assert.deepEqual(
+    [...EXCEPTIONS].sort(),
+    [...EXPECTED_EXCEPTIONS].sort(),
+    `EXCEPTIONS = ${JSON.stringify([...EXCEPTIONS].sort())}, expected exactly ${JSON.stringify([...EXPECTED_EXCEPTIONS].sort())} -- if this change is deliberate, update EXPECTED_EXCEPTIONS in the SAME diff; if not, an entry was silently added, removed, or swapped for a different file`,
   );
 
   const swept = allFiles.filter((relPath) => {
@@ -273,6 +301,10 @@ test("HYK-359 완료조건4 (3R): CI-canonical 시험 디렉토리 전체(예외
   // growth (a new .test.mjs file anywhere in TEST_DIRS) changes
   // `allFiles.length` and `swept.length` together on the same fresh
   // `collectTestFiles` read, so the equality still holds with no edit here.
+  // (HYK-371 2R: this count check catches "one MORE/FEWER file swept" but
+  // NOT "the same count, different membership" -- that's what the
+  // deepEqual above is for. The two checks are complementary, neither
+  // subsumes the other.)
   const expectedSweptCount = allFiles.length - 1 - EXCEPTIONS.size;
   assert.equal(
     swept.length,
@@ -290,4 +322,75 @@ test("HYK-359 완료조건4 (3R): CI-canonical 시험 디렉토리 전체(예외
   // cleanup below.
   runSweepAndAssert({ root, swept, dir });
   rmSync(dir, { recursive: true, force: true });
+});
+
+// HYK-371 2R (불변식 B, coder-task.md §3): 완료조건 ⑶("줄인 뒤 같은 보장이
+// 유지된다를 시험으로 고정")은 "동시성 캡이 살아 있다"도 포함한다 -- 1R은
+// argv에 `--test-concurrency=4`를 추가만 했을 뿐, 그걸 지우거나 기본값으로
+// 되돌려도 초록인 채였다(검토자 P1-2).
+//
+// 이상적으로는 "실제 최고 동시 프로세스 수"를 재는 것이지만, coder-task.md
+// §3이 지적한 대로 그건 비싸고(전체 스윕 재실행) 기계 부하에 흔들린다
+// (1R 실측: 같은 커밋도 실행마다 수십 초·수십 개 차이). 그렇다고 "argv에
+// 그 문자열이 있는가"만 보는 건 이 하네스가 여러 번 물린 형태 검사다.
+//
+// 채택한 절충 -- **작은 합성 픽스처로 실제 스로틀링을 관측**: 8개의 합성
+// `.test.mjs`(각각 500ms 슬립)를 만들어 `buildNestedSweepArgs`(실제
+// 스윕이 쓰는 바로 그 함수)로 돌리고 총 소요시간을 잰다. concurrency=4면
+// 8개가 2묶음(≥2*500ms)으로 나뉘어 도니 소요시간이 눈에 띄게 길고,
+// concurrency가 지워지거나 기본값(이 기계 CPU 24 → 기본 23)으로 돌아가면
+// 8개가 한 묶음(~500ms+오버헤드)으로 끝나 짧다. 실측 보정(이 기계, 같은
+// 조건 3회): 캡 있음 1237~1272ms / 캡 없음 677~691ms -- 여유 있게 갈리므로
+// 임계값 900ms로 판정.
+//
+// ★이 시험이 증명하는 것: `buildNestedSweepArgs`가 만드는 argv가 "지금 이
+// 순간 이 기계에서" 실제로 동시성을 묶는다는 것(순수 argv 형태 검사보다
+// 강함 -- 실행 결과를 관측한다).
+// ★이 시험이 증명하지 «않는» 것: ⓐ 실제 288개 파일 CI-canonical 스윕이
+// 이 픽스처와 같은 배치 패턴을 보인다는 것(파일마다 소요시간이 다르고
+// I/O·CPU 경합도 다르다) ⓑ 최고 «OS 프로세스 수»가 정확히 얼마인지(여기선
+// 벽시계로 스로틀링을 «추론»할 뿐, 프로세스를 세지 않는다) ⓒ `4`가 최적값
+// 이라는 것(1R coder.md·2R coder.md에 정직하게 남긴 미결 사항).
+test("HYK-371 2R 완료조건⑶ (불변식 B): 중첩 스윕의 동시성 캡이 실제로 스로틀한다 -- 캡 인자를 지우거나 기본 동시성으로 되돌리면 합성 픽스처의 소요시간이 짧아져 RED", () => {
+  const dir = mkdtempSync(join(tmpdir(), "hyk371-concurrency-throttle-"));
+  try {
+    const SLEEP_MS = 500;
+    const FIXTURE_COUNT = 8;
+    const fixtureFiles = Array.from(
+      { length: FIXTURE_COUNT },
+      (_, i) => `sleep-${i}.test.mjs`,
+    );
+    for (const name of fixtureFiles) {
+      writeFileSync(
+        join(dir, name),
+        `import { test } from "node:test";\ntest("sleep", async () => { await new Promise((r) => setTimeout(r, ${SLEEP_MS})); });\n`,
+        "utf8",
+      );
+    }
+
+    const t0 = Date.now();
+    const res = spawnSync(
+      process.execPath,
+      buildNestedSweepArgs(fixtureFiles),
+      { cwd: dir, encoding: "utf8", env: envWithoutTestMarkers() },
+    );
+    const elapsedMs = Date.now() - t0;
+
+    assert.equal(
+      res.status,
+      0,
+      `synthetic throttling fixture itself failed to run cleanly (status=${res.status}, signal=${res.signal}) -- stderr: ${(res.stderr ?? "").slice(-2000)}`,
+    );
+    // 실측 보정치(위 주석): 캡 있음 ~1.24s / 캡 없음 ~0.68s. 900ms는 그
+    // 사이 여유 구간 -- 캡이 지워지거나(인자 삭제) 기본 동시성으로
+    // 되돌아가면(NESTED_SWEEP_CONCURRENCY를 큰 값으로 변경) 8개가 한
+    // 묶음으로 끝나 이 임계값 아래로 떨어져 RED가 된다.
+    const THROTTLE_EVIDENCE_THRESHOLD_MS = 900;
+    assert.ok(
+      elapsedMs >= THROTTLE_EVIDENCE_THRESHOLD_MS,
+      `${FIXTURE_COUNT} synthetic ${SLEEP_MS}ms-sleep test files finished in ${elapsedMs}ms (< ${THROTTLE_EVIDENCE_THRESHOLD_MS}ms) -- looks like they ran in a single unthrottled batch, meaning the nested sweep's concurrency cap (NESTED_SWEEP_CONCURRENCY=${NESTED_SWEEP_CONCURRENCY}, via buildNestedSweepArgs) is not actually limiting concurrency anymore`,
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
