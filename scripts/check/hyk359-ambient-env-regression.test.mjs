@@ -91,7 +91,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync, execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -311,6 +317,78 @@ function runSweepAndAssert({ root, swept, dir, spawn = spawnSync }) {
 function runProductionSweep({ root, swept, dir }) {
   runSweepAndAssert({ root, swept, dir, spawn: spawnSync });
 }
+
+// HYK-371 5R (검토자 4R-1 P1, coder-task.md §2): 불변식을 «래퍼는 받은
+// 것을 그대로 실행한다»는 «전체 입력»으로 넓힌다. `runProductionSweep`이
+// 손댈 수 있는 입력은 정확히 셋 -- `root`·`swept`·`dir`(넷째로 보이는
+// "동시성"은 이 함수의 매개변수가 아니다: `runSweepAndAssert` 안에서
+// `buildNestedSweepArgs(swept)`가 상수로 만들어 내며, 그 경로는 이미 층
+// 2(계약) 시험이 별도로 고정한다 -- 여기서 다시 다룰 필요가 없다).
+// `spawn`은 넷째처럼 보이지만 이 래퍼 안에서 **리터럴로 하드코딩**돼
+// 있어 애초에 "받는" 입력이 아니다(4R의 단일 관문 설계) -- 열거에서
+// 뺀다.
+//
+// 검토자의 4R-1 재현(래퍼 내부 호출을 `swept: ["...dummy...test.mjs"]`
+// 로 몰래 치환)은 `runProductionSweep`에 **가짜 실행기를 주입하지 않고**
+// 이뤄졌다 -- 그러니 이 시험도 4R에서 막 세운 "진짜 관문은 실행기를
+// 못 바꾼다"는 안전장치를 다시 허물지 않는다: 가짜 실행기 대신 **작고
+// 진짜인** swept·root·dir 값으로 `runProductionSweep`을 실제로 구동한다
+// (합성 픽스처가 작아 빠름 -- 288개가 아니라 3개).
+//
+// swept 원소마다 자기 이름을 딴 마커 파일을 스스로 남기게 해서, 호출
+// 뒤 그 마커 전부가 존재하는지로 "호출자가 준 목록이 축소·치환 없이
+// 그대로 실행됐는가"를 직접 관측한다 -- 래퍼가 목록을 줄이거나 다른
+// 파일로 바꾸면 해당 마커가 나타나지 않아 즉시 RED. root 위조(다른
+// 디렉터리)도 같은 메커니즘으로 잡힌다: swept의 상대 경로는 «그» root
+// 안에만 존재하므로, 래퍼가 다른 root를 넘기면 파일을 못 찾아
+// `runSweepAndAssert` 자신의 기존 `res.error`/`testsRun` 어서션이 이미
+// loud하게 실패한다(4R까지 있던 방어를 그대로 재사용, 새로 만들 필요
+// 없음). dir 위조는 그 dir 안에 남아야 할 stdout 로그가 없는 것으로
+// 잡는다.
+function writeMarkerFixture(dir, name) {
+  const markerPath = join(dir, `${name}.marker`);
+  writeFileSync(
+    join(dir, `${name}.test.mjs`),
+    [
+      `import { test } from "node:test";`,
+      `import { writeFileSync } from "node:fs";`,
+      `test("marker", () => {`,
+      `  writeFileSync(${JSON.stringify(markerPath)}, "ran");`,
+      `});`,
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+  return { testFile: `${name}.test.mjs`, markerPath };
+}
+
+test("HYK-371 5R 완료조건①②④ (전달 충실성): runProductionSweep이 호출자가 준 swept·root·dir를 축소·치환·다른 디렉터리로 바꾸지 않고 «그대로» 실행한다 -- 가짜 실행기 없이, 작은 진짜 픽스처로 진짜 관문을 구동하고 각 대상이 스스로 남기는 마커로 검증", () => {
+  const fixtureRoot = mkdtempSync(join(tmpdir(), "hyk371-5r-fidelity-root-"));
+  const scratchDir = mkdtempSync(join(tmpdir(), "hyk371-5r-fidelity-scratch-"));
+  try {
+    const FIXTURE_COUNT = 3;
+    const fixtures = Array.from({ length: FIXTURE_COUNT }, (_, i) =>
+      writeMarkerFixture(fixtureRoot, `marker-${i}`),
+    );
+    const swept = fixtures.map((f) => f.testFile);
+
+    runProductionSweep({ root: fixtureRoot, swept, dir: scratchDir });
+
+    for (const f of fixtures) {
+      assert.ok(
+        existsSync(f.markerPath),
+        `marker for "${f.testFile}" is missing after runProductionSweep({ root: fixtureRoot, swept, dir: scratchDir }) -- the wrapper did not actually execute this element of the swept list it was given (a substitution/truncation inside runProductionSweep would look exactly like this)`,
+      );
+    }
+    assert.ok(
+      existsSync(join(scratchDir, "sweep-full-stdout.log")),
+      `runProductionSweep did not write its stdout log into the caller-given dir (${scratchDir}) -- dir was not forwarded faithfully`,
+    );
+  } finally {
+    rmSync(fixtureRoot, { recursive: true, force: true });
+    rmSync(scratchDir, { recursive: true, force: true });
+  }
+});
 
 test("HYK-359 완료조건4 (3R): CI-canonical 시험 디렉토리 전체(예외 목록 제외, 정확한 개수)가 떠도는 ADMISSION_LEDGER_PATH/ADMISSION_LOCK_PATH/DISPATCH_RECEIPT_PATH 아래에서도 fail 0 -- 보호 대상이 목록 없이 디스크에서 직접 발견되고, 예외 더하기·목록 잘라내기 어느 쪽도 조용히 통과하지 못한다", () => {
   const root = repoRoot();
