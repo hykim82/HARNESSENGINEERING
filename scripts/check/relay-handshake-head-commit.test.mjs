@@ -329,6 +329,36 @@ test("(head-6) AMBIGUOUS: result에 head_commit: 줄이 2개 -> 거부, 둘 중 
 });
 
 // ---------------------------------------------------------------------------
+// (6b) HYK-383 2R §2 (검토 1R P2 실측): 대소문자 신원 -- 대문자
+// `HEAD_COMMIT:`은 더 이상 표지로 인정되지 않는다(1R은 `gim` 플래그라
+// 수락했었다, 검토자가 직접 probe해 실측). column-0 독립 줄에 유효한
+// 40-hex 값이라도 대문자면 근사매치(malformed)로 거부된다 -- "missing"이
+// 아니라 더 정확한 진단을 준다.
+// ---------------------------------------------------------------------------
+test("(head-6b)★ 대소문자 신원: 대문자 HEAD_COMMIT:(column-0, 유효 40-hex)는 표지로 인정되지 않고 거부된다", () => {
+  withFixtureDir("hyk383-uppercase-", (dir) => {
+    const sha = ensureGitHeadCommit(dir);
+    writeFileSync(
+      join(dir, "review-task.md"),
+      `task_id: HYK-383-T\ndropped_at: 2026-08-28 06:00 KST\nhead_commit: ${sha}\n`,
+      "utf8",
+    );
+    writeFileSync(
+      join(dir, "review.md"),
+      `task_id: HYK-383-T\nHEAD_COMMIT: ${sha}\n\n>>> DONE: REVIEW @ 2026-08-28 06:10:00 KST\n`,
+      "utf8",
+    );
+    const res = runCli(["review", dir]);
+    assert.notEqual(
+      res.exit,
+      0,
+      "uppercase HEAD_COMMIT: must no longer be accepted as a valid cover line",
+    );
+    assert.match(res.stderr, /not a standalone column-0/);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // (7) 범위 확인: CODER 결과는 이 축 밖이다(coder-task.md §2 범위, 작성자는
 // 커밋을 만들며 그 라운드 안에서 HEAD가 움직이므로 정적 대조가 성립하지
 // 않는다) -- head_commit이 전혀 없어도 CODER 라운드는 그대로 통과해야

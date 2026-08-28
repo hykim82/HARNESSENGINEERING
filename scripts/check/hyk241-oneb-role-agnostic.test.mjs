@@ -52,6 +52,17 @@ const ROLE_TASK_FILENAMES = [
   "pm-task.md",
 ];
 
+// HYK-383 2R §2: a NEW, role-SPECIFIC axis (checkHeadCommitPrecondition) now
+// also gates review-task.md deliveries -- a deliberate, explicitly-scoped
+// exception to this file's own "role-agnostic" principle (this round's own
+// coder-task.md §2: "검사 대상 = REVIEW 계열 배달"), not a regression of it.
+// Every ALLOW-expected fixture below (and the shared-content byte-identical
+// comparison) needs a valid head_commit: line so this orthogonal axis never
+// masks the 1-B behavior these tests actually target -- harmless no-op for
+// the three non-REVIEW filenames (extractHeadCommitFacts short-circuits to
+// isReviewRole:false for them), required for review-task.md.
+const HEAD_COMMIT_LINE = `head_commit: ${"a".repeat(40)}\n`;
+
 function withFixtureDir(fn) {
   const dir = mkdtempSync(join(tmpdir(), "hyk241-oneb-role-agnostic-test-"));
   try {
@@ -133,7 +144,7 @@ for (const filename of ROLE_TASK_FILENAMES) {
           "1b_exec_line: node scripts/check/dispatch-gate-decision.mjs <task>",
           "1b_shown: ALLOW/REJECT 한 줄",
           "1b_reach_path: CLI 종료코드 -- 관제실 화면",
-        ].join("\n"),
+        ].join("\n") + `\n${HEAD_COMMIT_LINE}`,
         "utf8",
       );
       const ledgerPath = join(dir, "reject-streak.json");
@@ -163,7 +174,7 @@ for (const filename of ROLE_TASK_FILENAMES) {
         [
           `task_id: HYK-9602-${filename.replace(/[^a-z]/g, "")}-1`,
           "1b_prerequisite_for: HYK-9999 사람 실측 게이트를 준비하는 선행 작업",
-        ].join("\n"),
+        ].join("\n") + `\n${HEAD_COMMIT_LINE}`,
         "utf8",
       );
       const ledgerPath = join(dir, "reject-streak.json");
@@ -185,7 +196,7 @@ for (const filename of ROLE_TASK_FILENAMES) {
 
 test("role-agnostic: byte-identical decisions for CODER-named and REVIEW-named fixtures holding the SAME task content (only the filename differs)", () => {
   withFixtureDir((dir) => {
-    const body = "task_id: HYK-9603-same-1\nno 1-B here\n";
+    const body = `task_id: HYK-9603-same-1\nno 1-B here\n${HEAD_COMMIT_LINE}`;
     const coderPath = join(dir, "coder-task.md");
     const reviewPath = join(dir, "review-task.md");
     writeFileSync(coderPath, body, "utf8");

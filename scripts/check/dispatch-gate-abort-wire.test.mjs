@@ -121,11 +121,19 @@ function existsSafe(path) {
 // (<role>.md)은 손대지 않는다(직전 라운드 것 그대로 남는다), 게이트가
 // 실제로 도는 시점의 정확한 모양(dispatch-gate-consumption-wire.test.mjs
 // 의 seedHandoff와 동일 원칙).
+// HYK-383 2R §2: this file's role is always "review" -- the new
+// head_commit precondition axis (dispatch-gate-decision.mjs's
+// checkHeadCommitPrecondition) now also gates every review-task.md
+// delivery, so every fixture built here needs a valid cover line or the
+// gate REJECTs before ever reaching the abort-record axis this file
+// actually targets.
+const HEAD_COMMIT_LINE = `head_commit: ${"b".repeat(40)}\n`;
+
 function writeNextTaskFile(dir, role, nextTaskId, nextDroppedAt) {
   const taskPath = join(dir, `${role}-task.md`);
   writeFileSync(
     taskPath,
-    `task_id: ${nextTaskId}\ndropped_at: ${nextDroppedAt}\n${ONE_B_BLOCK}`,
+    `task_id: ${nextTaskId}\ndropped_at: ${nextDroppedAt}\n${HEAD_COMMIT_LINE}${ONE_B_BLOCK}`,
     "utf8",
   );
   return taskPath;

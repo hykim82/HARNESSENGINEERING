@@ -136,6 +136,20 @@ export const DISPATCH_GATE_STATE = Object.freeze({
   // from a spawned gate subprocess, the reject-streak ledger, or the task
   // packet's own 1-B declaration.
   REJECT_RESULT_EVIDENCE_MISSING: "REJECT_RESULT_EVIDENCE_MISSING",
+  // HYK-383 2R §2: dispatch-gate-decision.mjs's own head_commit precondition
+  // axis (checkHeadCommitPrecondition below) -- distinct from every REJECT_*
+  // above because it originates from the ABOUT-TO-BE-DELIVERED review task
+  // packet's OWN text (does it declare an independent `head_commit:` cover
+  // line naming the target commit), never from a spawned gate subprocess,
+  // the reject-streak ledger, or the 1-B precondition. Four closed states,
+  // matching relay-handshake.mjs's own consumption-side head_commit axis's
+  // fail-closed shape (표지 부재/형식 위반/다중/조회 실패) at delivery time
+  // instead of consumption time -- "대상 커밋을 지정하지 않은 REVIEW 배달은
+  // 애초에 나가지 않는다" (coder-task.md §2 원문).
+  REJECT_HEAD_COMMIT_MISSING: "REJECT_HEAD_COMMIT_MISSING",
+  REJECT_HEAD_COMMIT_MALFORMED: "REJECT_HEAD_COMMIT_MALFORMED",
+  REJECT_HEAD_COMMIT_AMBIGUOUS: "REJECT_HEAD_COMMIT_AMBIGUOUS",
+  REJECT_HEAD_COMMIT_UNREADABLE: "REJECT_HEAD_COMMIT_UNREADABLE",
 });
 
 function firstNonEmpty(...candidates) {
@@ -445,6 +459,60 @@ export function checkOneBPrecondition({
     state: DISPATCH_GATE_STATE.REJECT_ONE_B_MISSING,
     allow: false,
     reason: `dispatch-gate-decision precondition: 북극성 1-B 세 요건(ⓐ) 또는 선행 작업 선언(ⓑ) 중 하나가 필요하나 둘 다 충족되지 않음 -- ${missingAText} / ${bText} -> 배달 거부(안전측 기본값 -- HYK-241 §2 조각2). 조치: task 패킷에 '1b_exec_line:'/'1b_shown:'/'1b_reach_path:' 세 줄을 모두 채우거나, '1b_prerequisite_for: <이 작업이 준비하는 사람-실측 작업>' 한 줄(10자 이상 서술)을 추가하라`,
+  };
+}
+
+// HYK-383 2R §2: "대상 커밋을 지정하지 않은 REVIEW 배달은 애초에 나가지
+// 않는다" -- 지금까지는 워커가 일을 다 한 뒤에야 relay-handshake.mjs의
+// 소비 축(resolveHeadCommitBinding)이 이를 막았다(2026-08-28 23:14 실사고:
+// 검토 라운드 하나를 통째로 버렸다). 이 함수는 그 실패를 배달 시점으로
+// 앞당긴다 -- ⛔REVIEW 계열 배달에만 건다(caller가 이미 role을 판별해
+// isReviewRole로 넘긴다, CODER/VERIFY/PM 배달은 즉시 null=통과). caller
+// (dispatch-gate-decision.mjs의 extractHeadCommitFacts)가 태스크 파일
+// 텍스트에서 이미 구조적으로 추출한 사실만 받는다(S8: 이 코어는 파일을
+// 스스로 읽지 않는다).
+//
+// 닫힌 4상태(순서대로 확인, 첫 매치가 최종): 읽기 실패 > 부재/형식위반
+// (근사매치 유무로 가른다) > 다중(2개 이상, 어느 것이 최종인지 결정할 수
+// 없다 -- task_id/head_commit 소비축과 같은 결). 정확히 1개의 엄격 매치
+// (줄 시작 독립 줄 + 소문자 `head_commit:` + 40-hex, caller가 이미 확정)
+// 일 때만 null(통과).
+export function checkHeadCommitPrecondition({
+  isReviewRole,
+  readOk,
+  readErrorReason,
+  headCommitMatchCount,
+  headCommitNearMissPresent,
+} = {}) {
+  if (isReviewRole !== true) return null;
+  if (readOk !== true) {
+    return {
+      state: DISPATCH_GATE_STATE.REJECT_HEAD_COMMIT_UNREADABLE,
+      allow: false,
+      reason: `dispatch-gate-decision precondition: 검토 task 파일을 읽을 수 없음(HYK-383 2R) -- 원인: ${readErrorReason ?? "(no detail)"} -> 배달 거부(안전측 기본값 -- "확인 못하니 통과"는 금지). 조치: task 파일 경로/권한을 확인한 뒤 재시도하라`,
+    };
+  }
+  if (headCommitMatchCount === 1) return null;
+  if (headCommitMatchCount > 1) {
+    return {
+      state: DISPATCH_GATE_STATE.REJECT_HEAD_COMMIT_AMBIGUOUS,
+      allow: false,
+      reason: `dispatch-gate-decision precondition: 검토 task 파일에 독립 'head_commit:' 표지가 ${headCommitMatchCount}개 있어 어느 것이 최종 대상 커밋인지 결정할 수 없음(HYK-383 2R) -> 배달 거부(안전측 기본값). 조치: task 파일에 'head_commit: <40자리 hex>' 줄을 정확히 하나만 남겨라`,
+    };
+  }
+  if (headCommitNearMissPresent === true) {
+    return {
+      state: DISPATCH_GATE_STATE.REJECT_HEAD_COMMIT_MALFORMED,
+      allow: false,
+      reason:
+        "dispatch-gate-decision precondition: 검토 task 파일에 'head_commit:'로 보이는 흔적은 있으나 줄 시작 독립 줄이 아니거나(문장 중간·코드펜스 등), 정확히 소문자 'head_commit:'가 아니거나, 값이 40자리 hex가 아님(HYK-383 2R) -> 배달 거부(안전측 기본값 -- 대문자 'HEAD_COMMIT:'는 더 이상 표지로 인정되지 않는다). 조치: 'head_commit: <40자리 hex>' 형식의 독립 줄로 고쳐라",
+    };
+  }
+  return {
+    state: DISPATCH_GATE_STATE.REJECT_HEAD_COMMIT_MISSING,
+    allow: false,
+    reason:
+      "dispatch-gate-decision precondition: 검토 task 파일에 대상 커밋을 지정하는 'head_commit:' 표지가 없음(HYK-383 2R) -> 배달 거부(안전측 기본값 -- 대상 커밋 없는 REVIEW 배달은 애초에 나가지 않는다). 조치: task 파일에 'head_commit: <판정 대상 커밋 40자리 hex>' 줄 시작 독립 줄을 추가하라",
   };
 }
 

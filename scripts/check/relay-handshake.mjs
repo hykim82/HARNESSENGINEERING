@@ -1204,11 +1204,15 @@ function resolveMatchedTaskId(taskContent, resultContent) {
 // 이 파일 위쪽 HYK-173-escalation-2 주석 참조 -- coder-task.md §2도 "08-27
 // 에 문장 속 인용이 표지로 오인된 전례"를 이 축의 앵커 요건 근거로 직접
 // 인용한다).
-const HEAD_COMMIT_RE_G = /^head_commit:[ \t]*([0-9a-fA-F]{40})[ \t]*$/gim;
+// HYK-383 2R §2 (검토 1R P2 실측): ⛔`i` 플래그 없음 -- 정확히 소문자
+// `head_commit:`만 표지로 인정한다. 1R은 `gim`(대문자 `HEAD_COMMIT:`도
+// 수락)이었고, 검토자가 직접 probe해 실측했다 -- 신원을 좁힌다.
+const HEAD_COMMIT_RE_G = /^head_commit:[ \t]*([0-9a-fA-F]{40})[ \t]*$/gm;
 // resolveResultTaskId의 TASK_ID_ANYWHERE_RE와 동일한 역할 -- 매치 채택에는
 // 절대 쓰지 않고, "표지 자체가 아예 없다"와 "표지를 쓰려는 흔적은 있는데
-// 줄 시작이 아니거나 값이 40자 hex가 아니다"를 가르는 near-miss 진단에만
-// 쓴다.
+// 줄 시작이 아니거나 값이 40자 hex가 아니거나 대소문자가 다르다"를 가르는
+// near-miss 진단에만 쓴다(대소문자 무관 유지 -- 대문자 HEAD_COMMIT:도 이제
+// "근사매치"로는 잡혀야 "missing"이 아니라 더 정확한 진단을 준다).
 const HEAD_COMMIT_ANYWHERE_RE = /head_commit:\s*(\S+)/i;
 
 function resolveHeadCommitField(content, { label }) {
