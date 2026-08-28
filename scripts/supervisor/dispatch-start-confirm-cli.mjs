@@ -205,6 +205,18 @@ function buildInvalidArgsNoticeText({ taskId, nowMs, reasonCode }) {
 // 통합하지 않는다 -- 인자 형태가 달라(이쪽은 `stallThresholdMs`처럼
 // 판정 세부값이 없다) 억지로 합치면 옵션 인자가 늘어나 오히려 "경우
 // 나열"에 가까워진다(4R 지시서가 지목한 패턴).
+//
+// ★HYK-378 6R(REVIEW P1 반려 수리, 불변식 P "통지 실패가 결론을 바꾸면
+// 안 된다") -- 5R까지는 이 함수가 `mkdirFn`/`writeFn` 실패를 전혀
+// 처리하지 않았다. 검토자 실측: `notifyDir`를 파일로 만들어 두면
+// (그 안에 하위 파일을 만들 수 없으므로) `mkdirFn`이 `ENOENT`로 던지고,
+// 그 예외가 이 함수 밖으로 그대로 새 나가 `invokedDirectly` 블록의
+// 나머지(=`process.exit(4)`)가 **아예 실행되지 않았다** -- Node가 처리
+// 안 된 예외로 죽으면서 실측 `status:1`(기본 실패 종료 코드)이 됐다 --
+// "잘못된 인자로 불렸다"는 결론(exit 4) 자체가 통지 실패라는 «부수
+// 효과» 때문에 뒤집힌 것이다. ⇒ 이 함수는 이제 **절대 던지지 않는다**
+// -- 성공/실패를 판정 객체로 돌려주고, 호출부가 원래의 `INVALID_ARGS`
+// 결론과 무관하게 처리하게 한다(아래 `invokedDirectly` 블록).
 function writeInvalidArgsNotice({
   result,
   taskId,
@@ -214,19 +226,30 @@ function writeInvalidArgsNotice({
   mkdirFn,
   existsFn,
 }) {
-  if (!existsFn(notifyDir)) mkdirFn(notifyDir, { recursive: true });
-  const nowMs = nowFn();
-  const text = buildInvalidArgsNoticeText({
-    taskId,
-    nowMs,
-    reasonCode: result.reasonCode,
-  });
-  const noticePath = path.join(
-    notifyDir,
-    buildInvalidArgsNoticeFileName(nowMs),
-  );
-  writeFn(noticePath, text, "utf8");
-  return noticePath;
+  try {
+    if (!existsFn(notifyDir)) mkdirFn(notifyDir, { recursive: true });
+    const nowMs = nowFn();
+    const text = buildInvalidArgsNoticeText({
+      taskId,
+      nowMs,
+      reasonCode: result.reasonCode,
+    });
+    const noticePath = path.join(
+      notifyDir,
+      buildInvalidArgsNoticeFileName(nowMs),
+    );
+    writeFn(noticePath, text, "utf8");
+    return { ok: true, noticePath };
+  } catch (err) {
+    // ★6R -- 조용히 삼키지 않는다(불변식 P ⛔"조용히 삼키지 마라"): 실패
+    // 사실 자체를 호출부에 돌려준다. 원본 스택은 여기서 버리고 사람이
+    // 읽을 짧은 사유(`err.message`)만 담는다 -- stderr에 스택 트레이스
+    // 대신 문장이 남아야 한다는 완료조건 1 요구 그대로.
+    return {
+      ok: false,
+      detail: err && err.message ? err.message : String(err),
+    };
+  }
 }
 
 function sleep(ms) {
@@ -565,7 +588,11 @@ if (invokedDirectly) {
   // "좌석이 멈췄다"는 신호와 파일명부터 다르다(위 buildInvalidArgsNoticeFileName
   // 헤더 주석 참조).
   if (result.status === DISPATCH_START_CONFIRM_STATUS.INVALID_ARGS) {
-    const noticePath = writeInvalidArgsNotice({
+    // ★6R(불변식 P) -- 통지 시도 자체가 실패해도(예: notifyDir가 파일)
+    // 그 실패는 여기서 조용히 삼키거나 예외로 새 나가게 두지 않는다 --
+    // `writeInvalidArgsNotice`는 이제 절대 던지지 않으므로(위 헤더 주석)
+    // 아래 exit(4)는 통지 성공/실패와 무관하게 **항상** 실행된다.
+    const notice = writeInvalidArgsNotice({
       result,
       taskId,
       notifyDir,
@@ -574,9 +601,18 @@ if (invokedDirectly) {
       mkdirFn: mkdirSync,
       existsFn: existsSync,
     });
-    console.error(
-      `dispatch-start-confirm: INVALID_ARGS(${result.reasonCode}) -- 수치 인자를 확인하십시오(NaN·Infinity·범위 밖 값 등). 폴링을 시작하지 않았습니다. notice=${noticePath}`,
-    );
+    const reasonLine = `dispatch-start-confirm: INVALID_ARGS(${result.reasonCode}) -- 수치 인자를 확인하십시오(NaN·Infinity·범위 밖 값 등). 폴링을 시작하지 않았습니다.`;
+    if (notice.ok) {
+      console.error(`${reasonLine} notice=${notice.noticePath}`);
+    } else {
+      // ★6R -- 통지 실패 «자체»도 사람이 읽을 문장으로 남긴다(스택
+      // 트레이스가 아니라, 검토자가 지적한 "ENOENT 스택만 남았다"의
+      // 정확한 반례). 원래 결론(잘못된 인자·exit 4)은 안 바뀐다.
+      console.error(reasonLine);
+      console.error(
+        `dispatch-start-confirm: 통지 파일을 남기지 못했습니다(${notice.detail}) -- notifyDir을 확인하십시오. 이 실행 자체의 결론(잘못된 인자, exit 4)은 바뀌지 않습니다.`,
+      );
+    }
     process.exit(DISPATCH_START_CONFIRM_EXIT_CODE[result.status]);
   }
   if (

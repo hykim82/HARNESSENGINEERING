@@ -3,7 +3,13 @@
 // ~/.claude·실 관제실 무접촉.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, readFileSync, readdirSync } from "node:fs";
+import {
+  mkdtempSync,
+  rmSync,
+  readFileSync,
+  readdirSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -309,6 +315,90 @@ test("★HYK-378 5R 불변식 O(숫자로): INVALID_ARGS 결과가 나오면 run
     result.reasonCode,
     "CLI 계층이 통지 파일에 적을 사유 코드가 결과 객체에 있어야 한다",
   );
+});
+
+// ---------------------------------------------------------------------------
+// ★HYK-378 6R(REVIEW P1 재현+수리, 불변식 P "통지 실패가 결론을 바꾸면
+// 안 된다") -- 검토자의 정확한 재현: `notifyDir`를 **파일**로 만들면
+// (그 밑에 하위 파일을 만들 수 없으므로) `mkdirSync`가 `ENOENT`로
+// 던진다. 5R까지는 그 예외가 처리되지 않고 그대로 새 나가 Node의 기본
+// 처리 안 된 예외 종료(exit 1)로 이어졌다 -- "잘못된 인자"라는 원래
+// 결론(exit 4)과 구조화된 통지가 둘 다 사라졌다. 이 시험은 그 정확한
+// 실 CLI 재현이 이제 exit 4를 유지하고, stderr에 스택이 아니라 사람이
+// 읽을 문장이 남는지 확인한다.
+test("★HYK-378 6R P1 재현+수리(불변식 P): notifyDir를 파일로 만들어 통지 쓰기를 실패시켜도 exit 4가 유지되고 stderr에 문장이 남는다(스택 아님)", async () => {
+  // ★`withTempDir`(위 정의)은 `fn(dir)`이 반환한 프로미스를 기다리지
+  // 않고 `finally`에서 곧바로 `rmSync`한다 -- 콜백이 첫 `await`에서
+  // 제어를 넘기는 순간 그 임시 폴더가 지워져 버려, "notifyDir 자체를
+  // 파일로 만들어 둔 채 자식 프로세스를 실행"하는 이 시험과는 안
+  // 맞는다(실측: 파일을 미리 만들어도 자식이 실행되기 전에 지워지고
+  // CLI의 `mkdirFn`이 새 빈 디렉터리를 만들어 버려 재현 자체가 안 됨).
+  // 그래서 이 시험만 임시 폴더 수명을 직접 관리한다(비동기 작업이 전부
+  // 끝난 뒤에만 정리).
+  const scratchDir = mkdtempSync(join(tmpdir(), "dsc-notify-write-fail-"));
+  try {
+    // ★검토자 재현 그대로 -- notifyDir 자체를 디렉터리가 아니라 파일로
+    // 만든다(그 경로에 하위 항목을 만들 수 없어 통지 쓰기가 실패한다).
+    const notifyDirAsFile = join(scratchDir, "notify-as-file");
+    writeFileSync(notifyDirAsFile, "x", "utf8");
+
+    const { execFile } = await import("node:child_process");
+    const { promisify } = await import("node:util");
+    const execFileAsync = promisify(execFile);
+
+    let threw = null;
+    let stderr = "";
+    try {
+      await execFileAsync(
+        process.execPath,
+        [
+          CLI_PATH,
+          "--repo-root",
+          "C:\\definitely-not-a-real-worktree-6r",
+          "--dispatched-at-ms",
+          String(Date.now()),
+          "--notify-dir",
+          notifyDirAsFile,
+          "--task-id",
+          "HYK-TEST-notify-write-fail",
+          "--stall-threshold-ms",
+          "NaN", // ★검토자 실측 그대로 -- 잘못된 인자.
+          "--timeout-ms",
+          "1",
+          "--poll-interval-ms",
+          "1",
+        ],
+        { encoding: "utf8", timeout: 10_000 }, // 안전망일 뿐.
+      );
+    } catch (err) {
+      threw = err;
+      stderr = err.stderr || "";
+    }
+    assert.ok(threw, "비0 종료코드여야 한다");
+    assert.equal(
+      threw.code,
+      4,
+      "통지 쓰기가 실패해도 원래 결론(잘못된 인자)의 종료코드는 바뀌면 안 된다 -- 수리 전엔 여기서 1(처리 안 된 예외 기본 종료코드)이 나왔다",
+    );
+    assert.equal(threw.signal, null, "강제 종료가 아니라 스스로 exit해야 한다");
+    assert.match(
+      stderr,
+      /INVALID_ARGS/,
+      "원래 사유(잘못된 인자)가 여전히 stderr에 남아야 한다",
+    );
+    assert.match(
+      stderr,
+      /통지 파일을 남기지 못했습니다/,
+      "통지 실패 자체도 조용히 삼키지 않고 stderr에 남아야 한다",
+    );
+    assert.doesNotMatch(
+      stderr,
+      /at\s+\S+\s+\(.*:\d+:\d+\)/,
+      "사람이 읽는 문장이어야 한다 -- Node 스택 트레이스 형태(`at ... (file:line:col)`)가 그대로 노출되면 안 된다",
+    );
+  } finally {
+    rmSync(scratchDir, { recursive: true, force: true });
+  }
 });
 
 // ---------------------------------------------------------------------------
