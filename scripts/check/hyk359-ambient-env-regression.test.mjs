@@ -95,6 +95,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
   writeFileSync,
@@ -733,23 +734,61 @@ test("HYK-377 3R 완료조건② 무회귀 (비마커형 초과, 파일 신원 �
   }
 });
 
-// HYK-377 3R 완료조건⑥ («안 하는 것» 아님 -- 실제 real-gate 무회귀): the
-// argv-identity test above bypasses `runProductionSweep` (calls
-// `runSweepAndAssert` directly, reusing the layer-2 injection point) --
-// this separate test keeps exercising the ACTUAL hardcoded-spawnSync
-// gateway end to end with small real fixtures, so a regression in
-// `runProductionSweep`'s own one-line body (its only content: which
-// executor it hardcodes) still has a direct real-execution smoke test,
-// independent of the identity mechanism above.
-test("HYK-377 3R 완료조건① 보강 (real gate 무회귀): runProductionSweep(하드코딩된 진짜 spawnSync)이 작은 실재 픽스처에서 여전히 정상 종료하고 dir에 로그를 남긴다", () => {
-  const fixtureRoot = mkdtempSync(join(tmpdir(), "hyk377-3r-realgate-root-"));
-  const scratchDir = mkdtempSync(join(tmpdir(), "hyk377-3r-realgate-scratch-"));
+// HYK-377 4R (검토자 실사고, orch-evidence-REVIEW-r3.md P1, coder-task.md
+// §2 불변식 J): 3R의 argv-identity 시험은 주입 가능한
+// `runSweepAndAssert`를 직접 부르고, 진짜 생산 진입점 `runProductionSweep`
+// 은 이 "real gate" 시험에서만 실행됐는데 -- 그 시험은 **로그 존재와
+// 실행 성공만** 봤다. 독립 기대 목록과 대조가 전혀 없어서, `swept:
+// swept.slice(0, -1)`처럼 `runProductionSweep`의 «생산 코드 자체»(래퍼
+// 몸통, 호출부가 아니라)를 변이해 마지막 파일을 몰래 빼도 이 시험은
+// `tests 1 / pass 1 / fail 0`으로 무사통과했다(검토자 재현).
+//
+// 고침(불변식 J, «검사 지점 = 생산 진입점»): `runProductionSweep`에는
+// 4R 에서도 새 실행기 주입 지점을 추가하지 않는다(§2-C, 3R 이 연 지점을
+// 확대 금지) -- 대신 REAL 실행이 필연적으로 남기는, `runProductionSweep`
+// 자신은 전혀 모르는 **독립적** 디스크 관측(마커)을 다시 쓴다. 여기서
+// 마커는 1R 이 겪은 "협조 안 하면 못 잡는다"는 impersonation 문제와는
+// 다른 것을 증명한다 -- **누락**(어떤 파일이 실행 «안» 됐는가)은 그
+// 파일 자신이 «협조를 거부»할 수 없는 성질이다(안 돌았으면 마커 자체가
+// 없다, 실행됐는데 마커만 숨기는 것과는 다른 문제). `expectedMarkerNames`
+// 는 `runProductionSweep`에 넘기는 `swept`가 아니라 그것을 만들기 전의
+// `fixtures`(원본)에서 뽑는다 -- 그래야 «래퍼가 받은 값을 자기 자신과
+// 비교»하는 동어반복이 되지 않는다(완료조건③). 동일-이름 치환(진짜
+// 신원 스푸핑) 축은 여전히 3R의 argv-identity 시험이 `runSweepAndAssert`
+// 층에서 지킨다 -- `runProductionSweep`은 그 함수에 실행기만 하드코딩해
+// 위임하는 한 줄짜리 래퍼라 그 축의 방어가 약해지지 않는다.
+test("HYK-377 4R 완료조건①②③ (real gate, 생산 진입점 자체에서 독립 기대값 대조): runProductionSweep -- 캡처·주입 없는 진짜 하드코딩 spawnSync 경로 -- 이 «생산 래퍼 몸통이 손댈 수 있는» swept·root·dir 를, 그 래퍼가 넘긴 값이 아니라 호출 전에 스냅샷한 독립 기대값과 실행 뒤 디스크에 남은 마커로 대조한다 -- 래퍼 내부에서 마지막 파일을 몰래 빼거나(swept.slice(0,-1)) root·dir 를 속여도 잡힌다", () => {
+  const fixtureRoot = mkdtempSync(join(tmpdir(), "hyk377-4r-realgate-root-"));
+  const scratchDir = mkdtempSync(join(tmpdir(), "hyk377-4r-realgate-scratch-"));
   try {
     const fixtures = Array.from({ length: 3 }, (_, i) =>
       writeMarkerFixture(fixtureRoot, `marker-${i}`),
     );
+    // Snapshot BEFORE handing anything to runProductionSweep -- this is
+    // the "independent expected value" completion condition③ requires:
+    // comparison is against what THIS TEST intended, never against
+    // whatever runProductionSweep's own (possibly-tampered) body decided
+    // to forward.
+    const expectedMarkerNames = fixtures
+      .map((f) => basename(f.markerPath))
+      .sort();
     const swept = fixtures.map((f) => f.testFile);
+
+    // Present on disk in fixtureRoot (a real, runnable fixture) but NOT
+    // in swept -- proves excess-via-marker doesn't sneak past the
+    // PRODUCTION entry point either, not just the argv-identity layer.
+    const uninvited = writeMarkerFixture(fixtureRoot, "marker-uninvited");
+
     runProductionSweep({ root: fixtureRoot, swept, dir: scratchDir });
+
+    const actualMarkerNames = readdirSync(fixtureRoot)
+      .filter((name) => name.endsWith(".marker"))
+      .sort();
+    assert.deepEqual(
+      actualMarkerNames,
+      expectedMarkerNames,
+      `markers actually left in fixtureRoot after runProductionSweep = ${JSON.stringify(actualMarkerNames)}, expected exactly ${JSON.stringify(expectedMarkerNames)} (independent of swept as given to runProductionSweep) -- fewer than expected means the PRODUCTION entry point itself dropped/substituted a file (e.g. the reviewer's swept.slice(0,-1) mutation inside runProductionSweep's own body), more than expected means an unrequested real file (e.g. "${basename(uninvited.markerPath)}") got swept in at the production entry point too`,
+    );
     assert.ok(
       existsSync(join(scratchDir, "sweep-full-stdout.log")),
       `runProductionSweep did not write its stdout log into the caller-given dir (${scratchDir})`,
@@ -757,6 +796,76 @@ test("HYK-377 3R 완료조건① 보강 (real gate 무회귀): runProductionSwee
   } finally {
     rmSync(fixtureRoot, { recursive: true, force: true });
     rmSync(scratchDir, { recursive: true, force: true });
+  }
+});
+
+// HYK-377 4R 완료조건② (생산 진입점에서 root 위조도 RED): 3R 은 이 축을
+// `runSweepAndAssert`를 직접 불러서만 확인했다(3R 결과 파일 §3-1) --
+// 이번엔 `runProductionSweep` 자체를 잘못된 root 로 불러 같은 방어(실재
+// 파일이 그 root 에 없어 `testsRun` 이 기대에 못 미쳐 `runSweepAndAssert`
+// 내부의 기존 어서션이 loud 하게 실패)가 생산 진입점을 통해서도 여전히
+// 작동하는지 직접 구동해 증명한다.
+test("HYK-377 4R 완료조건② (생산 진입점 root 위조 RED): runProductionSweep을 엉뚱한 root로 부르면 그 root에 swept 파일이 없어 즉시 실패한다", () => {
+  const fixtureRoot = mkdtempSync(
+    join(tmpdir(), "hyk377-4r-realgate-root-forge-"),
+  );
+  const wrongRoot = mkdtempSync(
+    join(tmpdir(), "hyk377-4r-realgate-wrong-root-"),
+  );
+  const scratchDir = mkdtempSync(
+    join(tmpdir(), "hyk377-4r-realgate-root-forge-scratch-"),
+  );
+  try {
+    const fixtures = Array.from({ length: 3 }, (_, i) =>
+      writeMarkerFixture(fixtureRoot, `marker-${i}`),
+    );
+    const swept = fixtures.map((f) => f.testFile);
+    // No message-shaped constraint on the thrown error -- the point is
+    // simply that it throws AT ALL (loud failure) rather than returning
+    // normally (silent success), through the PRODUCTION entry point.
+    assert.throws(() =>
+      runProductionSweep({ root: wrongRoot, swept, dir: scratchDir }),
+    );
+  } finally {
+    rmSync(fixtureRoot, { recursive: true, force: true });
+    rmSync(wrongRoot, { recursive: true, force: true });
+    rmSync(scratchDir, { recursive: true, force: true });
+  }
+});
+
+// HYK-377 4R 완료조건② (생산 진입점에서 dir 도 진짜 매개변수임을 재확인):
+// `dir`이 `runProductionSweep` 내부에서 무시되거나 고정 경로로
+// 하드코딩되지 않고, 호출자가 준 그 값을 그대로 따른다는 것을 «양성»
+// (준 dir 에 로그가 실제로 남는다) 과 «음성»(다른, 안 준 dir 에는 안
+// 남는다) 둘 다로 증명한다 -- 어느 한쪽만 보면 "항상 같은 고정 경로에
+// 쓰는" 버그를 놓칠 수 있다(양성만 볼 때) 혹은 "아무 데도 안 쓰는" 버그를
+// 놓칠 수 있다(음성만 볼 때).
+test("HYK-377 4R 완료조건② (생산 진입점 dir 이 진짜 매개변수): runProductionSweep(intended dir A) 과 runProductionSweep(intended dir B) 를 각각 부르면 로그가 각자 «자신의» dir 에만 남고 서로 섞이지 않는다", () => {
+  const fixtureRoot = mkdtempSync(
+    join(tmpdir(), "hyk377-4r-realgate-dir-forge-root-"),
+  );
+  const dirA = mkdtempSync(join(tmpdir(), "hyk377-4r-realgate-dir-a-"));
+  const dirB = mkdtempSync(join(tmpdir(), "hyk377-4r-realgate-dir-b-"));
+  try {
+    const fixtures = Array.from({ length: 3 }, (_, i) =>
+      writeMarkerFixture(fixtureRoot, `marker-${i}`),
+    );
+    const swept = fixtures.map((f) => f.testFile);
+    runProductionSweep({ root: fixtureRoot, swept, dir: dirA });
+    assert.ok(
+      existsSync(join(dirA, "sweep-full-stdout.log")) &&
+        !existsSync(join(dirB, "sweep-full-stdout.log")),
+      "after calling with dir=A, the log must exist in A and NOT in B -- proves dir isn't hardcoded to some other fixed path",
+    );
+    runProductionSweep({ root: fixtureRoot, swept, dir: dirB });
+    assert.ok(
+      existsSync(join(dirB, "sweep-full-stdout.log")),
+      "after calling with dir=B, the log must exist in B too -- proves dir genuinely follows whichever value is passed, not a value memoized from the first call",
+    );
+  } finally {
+    rmSync(fixtureRoot, { recursive: true, force: true });
+    rmSync(dirA, { recursive: true, force: true });
+    rmSync(dirB, { recursive: true, force: true });
   }
 });
 
