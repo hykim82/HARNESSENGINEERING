@@ -94,6 +94,7 @@ import { spawnSync, execFileSync } from "node:child_process";
 import {
   existsSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
   writeFileSync,
@@ -362,7 +363,28 @@ function writeMarkerFixture(dir, name) {
   return { testFile: `${name}.test.mjs`, markerPath };
 }
 
-test("HYK-371 5R 완료조건①②④ (전달 충실성): runProductionSweep이 호출자가 준 swept·root·dir를 축소·치환·다른 디렉터리로 바꾸지 않고 «그대로» 실행한다 -- 가짜 실행기 없이, 작은 진짜 픽스처로 진짜 관문을 구동하고 각 대상이 스스로 남기는 마커로 검증", () => {
+// HYK-377 (검토자 실사고, coder-task.md §1 원문): 5R의 마커 검증은
+// «호출자가 준 목록의 원소가 전부 실행됐는가»만 봤다 -- 반대 방향(«그
+// 목록에 없던 것까지 함께 실행됐는가»)은 아무도 관측하지 않았다. 검토자
+// 실측: `runProductionSweep`으로 넘기는 `swept`를 `[...swept,
+// "marker-extra.test.mjs"]`처럼 «실재하는» 파일 하나로 부풀려도(그
+// 파일이 정말 존재해 정말 실행되므로 `testsRun`도 함께 늘어 기존
+// `testsRun >= swept.length` 바닥선을 그대로 만족) 전건 마커 존재 검사는
+// 무사통과했다 -- exit 0 / tests 1 / pass 1 / fail 0.
+//
+// 고침(불변식 양방향화, coder-task.md §2): fixtureRoot 안에 «호출자가
+// swept에 넣지 않은» 마커 픽스처(`uninvited`)를 하나 더 심어 둔다 --
+// 실재하는 파일이라는 점에서 검토자가 실측한 「존재하지만 몰래 끼어드는
+// 파일」과 동형이다. 검증은 개별 원소 존재 확인이 아니라, 실행 뒤
+// fixtureRoot에 실제로 남은 «.marker 파일 전체 집합»을 스윕이 «의도한»
+// 마커 집합과 정렬 후 deepEqual -- 이 형태는 특정 파일 이름 하나를
+// 하드코딩해 막는 게 아니라 «실행된 대상 집합 == 의도한 대상 집합»이라는
+// 집합 동일성 자체를 검사하므로, 어떤 이름의 실재 파일이 몰래 더
+// 실행되더라도(uninvited든 그 밖의 것이든) 여분의 마커로 즉시 드러난다.
+// uninvited 자신의 마커가 나타나면 그 자체가 「swept에 없는 실재 파일이
+// 실행됐다」는 직접 증거 -- 마커 집합이 커지면 RED, 하나라도 빠지면(기존
+// 5R 계약) 역시 RED, 양방향 모두 같은 한 번의 deepEqual로 잡힌다.
+test("HYK-371 5R + HYK-377 완료조건①②④ (전달 충실성, 양방향): runProductionSweep이 호출자가 준 swept·root·dir를 축소·치환·다른 디렉터리로 바꾸지 «않고», 호출자가 주지 않은 실재 파일을 몰래 «더»하지도 않고 «그대로» 실행한다 -- 가짜 실행기 없이, 작은 진짜 픽스처로 진짜 관문을 구동하고 «실제로 남은 마커 전체 집합»을 의도한 집합과 정렬 후 deepEqual 로 검증", () => {
   const fixtureRoot = mkdtempSync(join(tmpdir(), "hyk371-5r-fidelity-root-"));
   const scratchDir = mkdtempSync(join(tmpdir(), "hyk371-5r-fidelity-scratch-"));
   try {
@@ -372,14 +394,32 @@ test("HYK-371 5R 완료조건①②④ (전달 충실성): runProductionSweep이
     );
     const swept = fixtures.map((f) => f.testFile);
 
+    // Exists on disk in fixtureRoot (a real, runnable .test.mjs -- same
+    // shape as every other fixture) but deliberately NOT included in
+    // `swept` -- this is the "uninvited" element. It must never run.
+    const uninvited = writeMarkerFixture(fixtureRoot, "marker-uninvited");
+
     runProductionSweep({ root: fixtureRoot, swept, dir: scratchDir });
 
-    for (const f of fixtures) {
-      assert.ok(
-        existsSync(f.markerPath),
-        `marker for "${f.testFile}" is missing after runProductionSweep({ root: fixtureRoot, swept, dir: scratchDir }) -- the wrapper did not actually execute this element of the swept list it was given (a substitution/truncation inside runProductionSweep would look exactly like this)`,
-      );
-    }
+    const expectedMarkerNames = fixtures
+      .map((f) => basename(f.markerPath))
+      .sort();
+    // HYK-377: read back the marker directory itself rather than probing
+    // each expected path individually -- probing only ever asks "is X
+    // present", never "is anything present that shouldn't be". Reading the
+    // full `.marker` set answers both in one deepEqual: an entry silently
+    // dropped from `expectedMarkerNames` (truncation/substitution, 5R's
+    // original concern) makes the actual set a SUBSET and fails; an entry
+    // like uninvited's own marker appearing makes the actual set a
+    // SUPERSET and fails too.
+    const actualMarkerNames = readdirSync(fixtureRoot)
+      .filter((name) => name.endsWith(".marker"))
+      .sort();
+    assert.deepEqual(
+      actualMarkerNames,
+      expectedMarkerNames,
+      `markers actually left in fixtureRoot after runProductionSweep = ${JSON.stringify(actualMarkerNames)}, expected exactly ${JSON.stringify(expectedMarkerNames)} (swept = ${JSON.stringify(swept)}) -- a mismatch here means runProductionSweep executed something other than precisely the given swept list (fewer = truncation/substitution, more = an unrequested-but-real file -- e.g. "${basename(uninvited.markerPath)}" -- got swept in too)`,
+    );
     assert.ok(
       existsSync(join(scratchDir, "sweep-full-stdout.log")),
       `runProductionSweep did not write its stdout log into the caller-given dir (${scratchDir}) -- dir was not forwarded faithfully`,
