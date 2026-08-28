@@ -73,6 +73,53 @@ export const DEFAULT_TIMEOUT_MS = 3 * 60 * 1000;
 // 호출자가 언제든 다른 값으로 덮어쓸 수 있다(하드코딩 아님).
 export const DEFAULT_STALL_THRESHOLD_MS = 3 * 60 * 1000;
 
+// ★신규(HYK-378) -- "임계 시간을 그냥 늘린다"가 아니라 "실제로 검증된
+// 작업량이 있었는가"라는 별개 증거에 «조건부로» 여유를 준다. 오늘
+// 실사고 표본 2(HYK-377 2R, coder.md §1 첨부 원문)는 하위 에이전트 없이도
+// «단일 긴 호출» 하나(첨부 원문의 "almost done thinking with medium
+// effort")가 기본 무증가 허용(3분)을 살짝 넘겨 조용했다 -- 그 시점까지
+// 이미 baseline 대비 75,724B가 실제로 자라 있었다(diagnostic 원문:
+// baseline=634067 -> last_observation=709791). ★B를 지키는 장치: 이
+// 여유는 "이미 sustainedGrowthBytes 이상 실제로 자란 적이 있을 때만"
+// 켜지고 배수만큼 상한이 있다(무제한 아님) -- 완료조건 2의 합성 표본은
+// growthSinceStartBytes=0이라 이 여유를 아예 못 받고 기본 임계 그대로
+// 잡힌다. 진짜 승인창 정지는 대개 위험한 명령을 실행하기 «직전»에 걸려
+// 증거가 쌓이기 전에 일어나므로, 이미 많이 자란 뒤의 정지까지 이 여유가
+// 가려버리는 경우는 알려진 한계로 남긴다(신호·눈멂 표 참조).
+export const DEFAULT_SUSTAINED_GROWTH_BYTES = 50_000;
+export const DEFAULT_STALL_GRACE_MULTIPLIER = 2;
+// ★HYK-378 2R(REVIEW P1-1 반려 수리) -- `stallGraceMultiplier`가 검증 없이
+// 그대로 곱해져 `Infinity`/`NaN`/과대 유한값이면 무증가가 얼마나 길든
+// `STARTED`로 새는 구멍이 있었다(검토자 실측: 1,000,000,000ms 무증가도
+// `STARTED`). ★결정(반박 환영) -- "안전하게 접는다"(값을 조용히 clamp)가
+// 아니라 **"거부한다"**를 택했다: `timeoutMs`/`stallThresholdMs`가 이미
+// 같은 파일에서 "0 이하면 UNDECIDABLE/THRESHOLD_INVALID"로 거부하는
+// 선례가 있고, 이 축도 정지 판정을 좌우하는 안전 계수이므로 같은 자리·
+// 같은 방식으로 다뤄야 값이 뭉개지지 않는다(잘못된 배수를 몰래 4로
+// 깎아 쓰면 호출자가 자신이 준 값이 안 먹혔다는 것을 영영 모른다).
+export const MAX_STALL_GRACE_MULTIPLIER = 4;
+
+// ★HYK-378 3R(REVIEW P1-1 재반려 수리 -- ORCH 재설계 지시 그대로) -- 2R은
+// «새 인자»(stallGraceMultiplier)만 검증했지, 곱셈의 다른 항인 기존
+// `stallThresholdMs`는 여전히 "유한·양수"뿐이었다. `Number.MAX_VALUE`는
+// 유한하지만 `stallThresholdMs * stallGraceMultiplier`가 부동소수점
+// 오버플로로 `Infinity`가 된다 -- 이 값은 기존 CLI `--stall-threshold-ms`
+// 로 그대로 전달 가능해 운영 경로에서도 재현됐다(검토자 실측). ★수리
+// 원칙(불변식 G) -- 개별 인자를 검증하는 대신 **"무증가 허용으로 실제
+// 쓰이는 값"(effectiveStallThresholdMs) 자체에 절대 상한을 건다**: 아래
+// `judgeFromGrowthHistory`가 유예 적용 여부와 무관하게 이 값을
+// `Math.min(..., MAX_EFFECTIVE_STALL_THRESHOLD_MS)`으로 클램프한다.
+// `Math.min(Infinity, cap)`은 항상 `cap`이므로, 두 인자의 곱이 오버플로로
+// `Infinity`가 되든, 그냥 큰 유한값이 되든 결과는 always bounded --
+// "어떤 인자 조합으로도"(불변식 G 문구 그대로)를 인자별 검증이 아니라
+// 결과값 클램프로 만족시킨다. 값 = 기본 유예 상한(6분)의 5배(30분) --
+// 정상적인 큰 `stallThresholdMs` 설정(예: 부하 큰 CI에서 10분 무증가
+// 허용)까지는 여유를 주되, "10억 ms"류 공격값과는 수 자릿수 차이 나게
+// 낮게 잡는다(호출자가 언제든 다른 값으로 덮어쓸 수 있다 -- 하드코딩
+// 아님, 다만 검증 단계가 아니라 결과 클램프이므로 거부 사유는 안 남는다
+// -- §신호·눈멂 표 "곱셈 오버플로" 행 참조).
+export const MAX_EFFECTIVE_STALL_THRESHOLD_MS = 30 * 60 * 1000;
+
 function isPlainObject(v) {
   return v !== null && typeof v === "object" && !Array.isArray(v);
 }
@@ -134,19 +181,81 @@ function computeLastGrowthAtMs(sortedObservations) {
   return lastGrowthAtMs;
 }
 
+// ★HYK-378 2R(REVIEW P1-1 반려 수리) -- 누적 성장량이 `sustainedGrowthBytes`
+// 바를 «처음» 넘긴 시각을 돌려준다(못 넘겼으면 `null`). ★이 시각이
+// "유예의 총 수명" 기준점이다 -- `lastGrowthAtMs`(가장 최근 증가)를
+// 기준으로 삼으면 검토자가 실측한 대로 "359,999ms마다 1B씩" 흘려 넣는
+// 관측열이 매번 유예를 다시 시작시켜 사실상 무한이 된다. 이 시각은 한
+// 번 확정되면(=한 번 그 바를 넘기면) 그 뒤 관측이 아무리 늘어도
+// 바뀌지 않으므로, 유예 마감(`sustainedAtMs + stallThresholdMs *
+// stallGraceMultiplier`)이 고정된 벽시계 상한이 된다 -- 갱신 불가.
+function computeSustainedAtMs(sortedObservations, sustainedGrowthBytes) {
+  if (sortedObservations.length === 0) return null;
+  const startBytes = sortedObservations[0].totalBytes;
+  let runningMax = startBytes;
+  if (runningMax - startBytes >= sustainedGrowthBytes) {
+    return sortedObservations[0].observedAtMs;
+  }
+  for (let i = 1; i < sortedObservations.length; i++) {
+    const entry = sortedObservations[i];
+    if (entry.totalBytes > runningMax) runningMax = entry.totalBytes;
+    if (runningMax - startBytes >= sustainedGrowthBytes) {
+      return entry.observedAtMs;
+    }
+  }
+  return null;
+}
+
 function resolveThreshold(value, defaultValue) {
   return value === undefined || value === null ? defaultValue : value;
+}
+
+// 네 임계 인자(timeout·stallThreshold·sustainedGrowth·graceMultiplier)를
+// 한데 모아 검증한다(judgeDispatchStartBySize에서 분리 -- eslint
+// complexity 상한 준수, 로직은 그대로). 문제가 있으면 그 사유 코드를,
+// 전부 온전하면 `null`을 돌려준다. ★HYK-378 2R(REVIEW P1-1 반려 수리) --
+// 기존 timeout/stallThreshold와 «같은 자리·같은 방식»(0 이하 거부)으로
+// 이 축의 두 인자(sustainedGrowth·graceMultiplier)도 검증한다.
+// sustainedGrowthBytes는 음수면 무의미(항상 즉시 "이미 자람"으로 뭉갤 수
+// 있어 사실상 무제한 유예 통로), stallGraceMultiplier는 1(=여유 없음)
+// 미만이거나 MAX_STALL_GRACE_MULTIPLIER를 넘으면(★검토자 실측:
+// `Infinity`/`NaN`/과대 유한값이 무제한 유예로 샜다) 거부한다.
+function firstThresholdProblem({
+  timeout,
+  stallThreshold,
+  sustainedGrowth,
+  graceMultiplier,
+}) {
+  if (!isFiniteNumber(timeout) || timeout <= 0) {
+    return DISPATCH_START_SIZE_REASON.THRESHOLD_INVALID;
+  }
+  if (!isFiniteNumber(stallThreshold) || stallThreshold <= 0) {
+    return DISPATCH_START_SIZE_REASON.THRESHOLD_INVALID;
+  }
+  if (!isFiniteNumber(sustainedGrowth) || sustainedGrowth < 0) {
+    return DISPATCH_START_SIZE_REASON.THRESHOLD_INVALID;
+  }
+  if (
+    !isFiniteNumber(graceMultiplier) ||
+    graceMultiplier < 1 ||
+    graceMultiplier > MAX_STALL_GRACE_MULTIPLIER
+  ) {
+    return DISPATCH_START_SIZE_REASON.THRESHOLD_INVALID;
+  }
+  return null;
 }
 
 // 성장 이력(`lastGrowthAtMs`)이 확정된 뒤의 판정만 모은다(judgeDispatchStartBySize
 // 에서 분리 -- eslint complexity 상한 준수).
 function judgeFromGrowthHistory({
   lastGrowthAtMs,
+  sustainedAtMs,
   observationCount,
   dispatchedAtMs,
   now,
   timeoutMs,
   stallThresholdMs,
+  stallGraceMultiplier,
 }) {
   if (lastGrowthAtMs === null) {
     const pastTimeout = now - dispatchedAtMs > timeoutMs;
@@ -161,20 +270,113 @@ function judgeFromGrowthHistory({
     };
   }
 
+  // DEFAULT_SUSTAINED_GROWTH_BYTES/computeSustainedAtMs 헤더 주석 참조 --
+  // 이미 검증된 실제 작업량이 있을 때만, 그리고 그 유예가 «고정된
+  // 벽시계 마감»(sustainedAtMs 기준, 갱신 불가) 안에서만 상한 있는
+  // 배수만큼 무증가 허용을 늘린다. 합성 진짜-정지 표본(증가 0)은
+  // sustainedAtMs가 `null`이라 이 조건을 절대 못 만족해 기본 임계
+  // 그대로 잡힌다(B 보존) -- ★2R: 마감이 lastGrowthAtMs가 아니라
+  // sustainedAtMs에 고정되므로, 소량 증가를 반복해도 마감이 갱신되지
+  // 않는다(P1-1 "359,999ms마다 1B" 회귀 가드).
+  // ★3R(P1-1 재반려 수리) -- 마감 계산 자체도 클램프된 유예 폭
+  // (cappedGraceSpanMs)으로 한다. 클램프 전 원값(stallThresholdMs *
+  // stallGraceMultiplier)이 오버플로로 `Infinity`가 되면 마감 시각도
+  // `Infinity`가 돼 "영원히 유예 적용됨"이 성립해 버리므로, 마감 계산에
+  // 들어가는 폭 자체를 먼저 절대 상한(MAX_EFFECTIVE_STALL_THRESHOLD_MS)
+  // 으로 자른다.
+  const cappedGraceSpanMs = Math.min(
+    stallThresholdMs * stallGraceMultiplier,
+    MAX_EFFECTIVE_STALL_THRESHOLD_MS,
+  );
+  const graceDeadlineMs =
+    sustainedAtMs === null ? null : sustainedAtMs + cappedGraceSpanMs;
+  const sustainedGrowthApplied =
+    graceDeadlineMs !== null && now <= graceDeadlineMs;
+  // ★3R(P1-1 재반려 수리, 불변식 G) -- 유예 미적용 분기(기본
+  // `stallThresholdMs` 그대로)도 같은 절대 상한으로 클램프한다 --
+  // `stallThresholdMs` 자체가 이미 거대하면(배수 곱 없이도) "사실상
+  // 무증가 허용 무제한"과 같은 결과이므로, "곱셈 결과"뿐 아니라 이 축이
+  // 실제로 판정에 쓰는 값 어디든 이 절대 상한을 벗어나지 않는다.
+  const effectiveStallThresholdMs = Math.min(
+    sustainedGrowthApplied ? cappedGraceSpanMs : stallThresholdMs,
+    MAX_EFFECTIVE_STALL_THRESHOLD_MS,
+  );
+
   const sinceGrowth = now - lastGrowthAtMs;
-  if (sinceGrowth > stallThresholdMs) {
+  if (sinceGrowth > effectiveStallThresholdMs) {
     return {
       ok: true,
       verdict: DISPATCH_START_SIZE_VERDICT.STALLED_AFTER_START,
       reasonCode: DISPATCH_START_SIZE_REASON.STALLED_PAST_THRESHOLD,
-      details: { observationCount, lastGrowthAtMs, stallThresholdMs },
+      details: {
+        observationCount,
+        lastGrowthAtMs,
+        stallThresholdMs,
+        effectiveStallThresholdMs,
+        sustainedGrowthApplied,
+      },
     };
   }
   return {
     ok: true,
     verdict: DISPATCH_START_SIZE_VERDICT.STARTED,
     reasonCode: DISPATCH_START_SIZE_REASON.GREW_RECENTLY,
-    details: { observationCount, lastGrowthAtMs },
+    details: {
+      observationCount,
+      lastGrowthAtMs,
+      effectiveStallThresholdMs,
+      sustainedGrowthApplied,
+    },
+  };
+}
+
+// ★HYK-378 4R(REVIEW P1-1 반려 수리, 불변식 K "입력 관문") -- 이 코어의
+// 임계 인자 4개(timeout·stallThreshold·sustainedGrowth·graceMultiplier)를
+// «기본값 해석 + 검증»까지 한 번에 하는 재사용 가능한 관문. 지금까지는
+// 이 로직이 `judgeDispatchStartBySize` 안에만 있어서, 그 함수를 호출하지
+// 않는 생산 진입점(`runDispatchStartConfirm`)은 `NaN` 같은 값을 아예
+// 걸러낼 방법이 없었다(검토자 실측: `stallThresholdMs: Number.NaN`을
+// 그대로 폴링 루프에 흘려 넣으면 코어는 매 폴링마다 `UNDECIDABLE`을
+// 내지만, 그 루프 자신은 `UNDECIDABLE`을 "아직 확정 안 됨"으로만 알아
+// 영원히 폴링했다 -- `--stall-threshold-ms NaN`이 기존 CLI 인자로 그대로
+// 전달 가능해 실측 `ETIMEDOUT`/`SIGTERM`까지 재현됨). ★생산 진입점이
+// 폴링을 시작하기 «전에» 이 함수를 한 번 불러 확정적으로 거부할 수 있게
+// 만드는 것이 이 함수의 존재 이유다 -- `judgeDispatchStartBySize`도 이제
+// 이 함수를 그대로 재사용해 로직이 두 곳에서 갈라지지 않는다(같은 판단을
+// 두 번 구현하면 한쪽만 고쳐지는 사고가 난다, 2R~3R이 반복해서 겪은
+// "새 인자만 검증" 패턴과 동형).
+export function resolveAndValidateThresholds({
+  timeoutMs,
+  stallThresholdMs,
+  sustainedGrowthBytes,
+  stallGraceMultiplier,
+} = {}) {
+  const timeout = resolveThreshold(timeoutMs, DEFAULT_TIMEOUT_MS);
+  const stallThreshold = resolveThreshold(
+    stallThresholdMs,
+    DEFAULT_STALL_THRESHOLD_MS,
+  );
+  const sustainedGrowth = resolveThreshold(
+    sustainedGrowthBytes,
+    DEFAULT_SUSTAINED_GROWTH_BYTES,
+  );
+  const graceMultiplier = resolveThreshold(
+    stallGraceMultiplier,
+    DEFAULT_STALL_GRACE_MULTIPLIER,
+  );
+  const reasonCode = firstThresholdProblem({
+    timeout,
+    stallThreshold,
+    sustainedGrowth,
+    graceMultiplier,
+  });
+  if (reasonCode) return { ok: false, reasonCode };
+  return {
+    ok: true,
+    timeoutMs: timeout,
+    stallThresholdMs: stallThreshold,
+    sustainedGrowthBytes: sustainedGrowth,
+    stallGraceMultiplier: graceMultiplier,
   };
 }
 
@@ -197,23 +399,26 @@ export function judgeDispatchStartBySize(args) {
       details: null,
     };
   }
-  const { observations, dispatchedAtMs, now, timeoutMs, stallThresholdMs } =
-    args;
+  const {
+    observations,
+    dispatchedAtMs,
+    now,
+    timeoutMs,
+    stallThresholdMs,
+    sustainedGrowthBytes,
+    stallGraceMultiplier,
+  } = args;
   if (!isFiniteNumber(now))
     return undecidable(DISPATCH_START_SIZE_REASON.NOW_INVALID);
   if (!isFiniteNumber(dispatchedAtMs))
     return undecidable(DISPATCH_START_SIZE_REASON.ARGS_INVALID);
-  const timeout = resolveThreshold(timeoutMs, DEFAULT_TIMEOUT_MS);
-  const stallThreshold = resolveThreshold(
+  const resolved = resolveAndValidateThresholds({
+    timeoutMs,
     stallThresholdMs,
-    DEFAULT_STALL_THRESHOLD_MS,
-  );
-  if (!isFiniteNumber(timeout) || timeout <= 0) {
-    return undecidable(DISPATCH_START_SIZE_REASON.THRESHOLD_INVALID);
-  }
-  if (!isFiniteNumber(stallThreshold) || stallThreshold <= 0) {
-    return undecidable(DISPATCH_START_SIZE_REASON.THRESHOLD_INVALID);
-  }
+    sustainedGrowthBytes,
+    stallGraceMultiplier,
+  });
+  if (!resolved.ok) return undecidable(resolved.reasonCode);
   const observationProblem = firstObservationProblem(observations, now);
   if (observationProblem) return undecidable(observationProblem);
 
@@ -221,12 +426,19 @@ export function judgeDispatchStartBySize(args) {
     (a, b) => a.observedAtMs - b.observedAtMs,
   );
   const lastGrowthAtMs = computeLastGrowthAtMs(sorted);
+  const sustainedAtMs = computeSustainedAtMs(
+    sorted,
+    resolved.sustainedGrowthBytes,
+  );
   return judgeFromGrowthHistory({
     lastGrowthAtMs,
+    sustainedAtMs,
     observationCount: sorted.length,
     dispatchedAtMs,
     now,
-    timeoutMs: timeout,
-    stallThresholdMs: stallThreshold,
+    timeoutMs: resolved.timeoutMs,
+    stallThresholdMs: resolved.stallThresholdMs,
+    sustainedGrowthBytes: resolved.sustainedGrowthBytes,
+    stallGraceMultiplier: resolved.stallGraceMultiplier,
   });
 }

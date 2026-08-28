@@ -351,11 +351,16 @@ test("computeRecentSummary counts anomalous samples within the window, distinct 
 // 즉 cap은 "이상"이 아니라 "측정 불가"로 갈라져야 한다(이 시험이 그
 // 분리를 고정한다. 분리 전에는 두 절이 합쳐져 있어 cap이 computeOpenAnomalies
 // 에도 나타났다).
-test("all 8 badVerdict axes are independently tracked in computeOpenAnomalies (one axis bad does not mask another); cap(badStatuses-only) goes to computeOpenMeasurementFailures instead (2/2)", () => {
+// HYK-337-pledge-stall-1: `pledge` reads the line's own top-level
+// `verdict=` field (see reach-report-core.mjs AXES comment) -- so this
+// fixture must set `verdict: "STALLED"` for the new axis to also be
+// among the "all N badVerdict axes" it asserts (8 -> 9 with pledge added).
+test("all 9 badVerdict axes are independently tracked in computeOpenAnomalies (one axis bad does not mask another); cap(badStatuses-only) goes to computeOpenMeasurementFailures instead (2/2)", () => {
   const t0 = Date.parse("2026-08-05T00:00:00.000Z");
   const entries = parseWatchLog(
     line({
       ts: new Date(t0).toISOString(),
+      verdict: "STALLED",
       seatStatus: "SEAT_LIVENESS_JUDGED",
       seatVerdict: "SUSPECTED_UNRESPONSIVE",
       idleStatus: "SEAT_IDLE_JUDGED",

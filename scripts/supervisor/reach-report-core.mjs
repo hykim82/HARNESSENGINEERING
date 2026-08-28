@@ -228,6 +228,50 @@ export const AXES = Object.freeze([
       "BINDING_SCAN_WORKTREE_LIST_FAILED",
     ]),
   }),
+  // HYK-337-pledge-stall-1 (coder-task.md §2 불변식2 "감지가 «울리면»
+  // 사람에게 «도달»한다 -- «로그에만 적힌다»는 실패다") -- ORCH 무진행
+  // (pledge/gap#61) 축. §4 요건3과 동일 이유로 다섯 번째 예외가 생긴다:
+  // 이 AXES는 닫힌 배열이고 여기 등록된 축의 verdict/status만 "열린
+  // 이상"으로 분류돼 받는함(reach-notify-*.md)에 도달한다.
+  //
+  // ★실측(이 라운드의 핵심 발견, `.harness/coder.md` §1 참조): 이 축의
+  // 판정은 이미 orch-stall-detect.mjs가 **매 실행마다** 계산해 watch.log
+  // "맨 앞" 필드(`exit=`/`verdict=`/`reason=`, 다른 모든 axis 세그먼트보다
+  // 앞)로 이미 적고 있었다(judgeOrchProgress의 집계 verdict -- gap#61의
+  // pledge-derive-core.mjs가 유도한 약속 + `--pledges`로 준 선언된 약속을
+  // 합쳐 orch-progress-core.mjs가 판정한 결과 그 자체다). 그런데 이
+  // AXES 배열에는 그 신호를 읽는 항목이 하나도 없었다 -- 다른 8개 축과
+  // 달리 `<prefix>_status`/`<prefix>_verdict` 형식의 **전용 필드가 없고**
+  // (이미 있는 최상단 `verdict=`/`reason=` 자신이 그 값이다), 그래서
+  // `buildAxesFromFields`의 제네릭 prefix 루프가 이 신호를 절대 만들어낼
+  // 수 없었다(prefix가 없으니 `${prefix}_status` 같은 키 자체가 존재하지
+  // 않는다). 결과: STALLED가 나와도 watch.log에는 찍히지만
+  // computeOpenAnomalies/computeOpenMeasurementFailures 어느 쪽도 보지
+  // 못해 받는함에 영영 안 갔다 -- 정확히 1-B 실패 유형 ⓐ("감지는 됐는데
+  // 아무 데도 도달 안 함", coder-task.md §6-3-ⓐ) 그 자체였다. 이 축을
+  // 등록하는 것만으로(코드 변경은 `buildAxesFromFields`의 특례 분기 하나뿐,
+  // watch-run.mjs/orch-stall-detect.mjs는 무변경) 이미 계산·이미 로그된
+  // 신호가 처음으로 사람에게 도달하게 된다.
+  //
+  // badVerdicts: `STALLED`(무진행 확정) + `UNDECIDABLE`(판정 불가 --
+  // orch-progress-core.mjs 자신의 원칙 "판정 불가를 «괜찮음»으로 접지
+  // 않는다"를 여기서도 반복한다, 관측 결손을 침묵으로 접지 않는다).
+  // `WAITING_HUMAN_GATE`(사유 등록된 정당한 대기, `PLEDGE_RESOLUTION_
+  // STATUS.HUMAN_GATE`)와 `PROGRESSING`은 배제 -- 불변식3(오탐 0)이
+  // 요구하는 정확히 그 경계(orch-progress-core.mjs의 `judgeResolution
+  // Shortcut`이 이미 그 경계를 구조적으로 보장한다, 이 축은 그 보장을
+  // 재구현하지 않고 그대로 옮겨 적을 뿐이다). badStatuses는 비워 둔다 --
+  // 이 축엔 별도 "수집 실패" 신호 필드가 없다(있다면 그 자체가
+  // UNDECIDABLE로 verdict에 이미 실린다, orch-stall-detect.mjs가
+  // evidence.collectionFailures를 UNDECIDABLE(exit 3)로 표면화하는 경로
+  // 그대로 -- pledge-derive-core.mjs 헤더 참조).
+  Object.freeze({
+    key: "pledge",
+    prefix: null,
+    label: "ORCH 약속(pledge) 무진행",
+    badVerdicts: Object.freeze(["STALLED", "UNDECIDABLE"]),
+    badStatuses: Object.freeze([]),
+  }),
 ]);
 
 // HYK-191-reach-1 실측 수리: 4축 필드(seat_*/idle_*/start_*/unconsumed_*)가
@@ -253,9 +297,31 @@ function numOrNull(raw) {
   return raw && raw !== "NONE" ? Number(raw) : null;
 }
 
-function buildAxesFromFields(fields) {
+// HYK-337-pledge-stall-1: `pledge` axis has no `<prefix>_status`/
+// `<prefix>_verdict` pair of its own (see AXES entry comment above) -- it
+// reads the line's own top-level `verdict=`/`reason=` fields instead
+// (`topLevelVerdict`/`topLevelReasonCode`, passed in by parseLogLine from
+// the same regex match that already extracts them). Kept as an early
+// `continue` rather than folded into the generic prefix lookup below so
+// the generic loop's contract ("every axis has `<prefix>_status`/
+// `<prefix>_verdict` fields") stays true for the other 8 axes (same
+// pattern as the cap-axis exception documented above).
+function buildAxesFromFields(fields, topLevelVerdict, topLevelReasonCode) {
   const axes = {};
   for (const axis of AXES) {
+    if (axis.key === "pledge") {
+      axes.pledge = {
+        status: null,
+        verdict: topLevelVerdict === "UNKNOWN" ? null : topLevelVerdict,
+        worstCount: null,
+        worktrees: null,
+        reasonDetail:
+          topLevelReasonCode && topLevelReasonCode !== "NONE"
+            ? topLevelReasonCode
+            : null,
+      };
+      continue;
+    }
     const status = fields[`${axis.prefix}_status`] ?? null;
     const verdictField = fields[`${axis.prefix}_verdict`] ?? null;
     axes[axis.key] = {
@@ -289,7 +355,12 @@ export function parseLogLine(line) {
   const tsMs = Date.parse(tsRaw);
   if (Number.isNaN(tsMs)) return null;
   const fields = parseFieldTokens(restRaw ?? "");
-  return { tsMs, verdict, reasonCode, axes: buildAxesFromFields(fields) };
+  return {
+    tsMs,
+    verdict,
+    reasonCode,
+    axes: buildAxesFromFields(fields, verdict, reasonCode),
+  };
 }
 
 // watch.log 전체 텍스트 -> {entries, skipped}. entries는 시간순(오름차순,

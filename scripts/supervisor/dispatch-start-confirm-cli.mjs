@@ -72,6 +72,7 @@ import os from "node:os";
 import { collectTotalSessionBytes } from "./dispatch-start-size-adapter.mjs";
 import {
   judgeDispatchStartBySize,
+  resolveAndValidateThresholds,
   DISPATCH_START_SIZE_VERDICT,
   DEFAULT_TIMEOUT_MS,
   DEFAULT_STALL_THRESHOLD_MS,
@@ -82,6 +83,13 @@ export const DISPATCH_START_CONFIRM_STATUS = Object.freeze({
   NOT_STARTED: "DISPATCH_START_CONFIRM_NOT_STARTED",
   STALLED_AFTER_START: "DISPATCH_START_CONFIRM_STALLED_AFTER_START",
   COLLECTION_FAILED: "DISPATCH_START_CONFIRM_COLLECTION_FAILED",
+  // ★HYK-378 4R(REVIEW P1-1 반려 수리, 불변식 K) -- 생산 진입점이 폴링을
+  // «시작하기 전에» 수치 인자를 일괄 거부할 때 쓰는 종결 상태. 기존
+  // COLLECTION_FAILED(런타임 중 관측 수집이 실패)와 성격이 다르다 --
+  // 이건 "애초에 이 호출 자체가 말이 안 된다"는 것이라 폴링을 단 한
+  // 번도 시작하지 않는다(사람 조치도 다르다: 좌석·재배달이 아니라
+  // 호출부(ps1 등)의 인자 자체를 고쳐야 한다).
+  INVALID_ARGS: "DISPATCH_START_CONFIRM_INVALID_ARGS",
 });
 
 // 종료코드(문서 헤더와 동일 값 -- CLI 블록과 시험 양쪽이 이 표를 재사용).
@@ -90,6 +98,10 @@ export const DISPATCH_START_CONFIRM_EXIT_CODE = Object.freeze({
   [DISPATCH_START_CONFIRM_STATUS.NOT_STARTED]: 1,
   [DISPATCH_START_CONFIRM_STATUS.COLLECTION_FAILED]: 2,
   [DISPATCH_START_CONFIRM_STATUS.STALLED_AFTER_START]: 3,
+  // ★4R -- 기존 0~3과 안 겹치는 새 코드. "판정 불가"(2, 관측 실패)와도
+  // 값을 공유하지 않는다 -- 하나는 실행 중 I/O가 실패한 것이고, 이건
+  // 애초에 시작할 자격이 없는 호출이었다는 뜻이라 사람이 볼 조치가 다르다.
+  [DISPATCH_START_CONFIRM_STATUS.INVALID_ARGS]: 4,
 });
 
 function defaultClaudeHomeDir() {
@@ -155,6 +167,91 @@ function buildNoticeFileName(nowMs) {
   return `dispatch-start-confirm-notify-${iso}.md`;
 }
 
+// ★HYK-378 5R(REVIEW P1-2 저장소 쪽 절반 수리, 불변식 O "관측 가능성") --
+// `INVALID_ARGS`는 4R까지 stderr 한 줄뿐이었다. 무인 운용에서 그 줄을
+// 아무도 안 읽으면(검토자 실측: 관제실 `dispatch-worker.ps1`이 미지
+// 종료코드에 경고만 남기고 배달을 계속함 -- fail-open) 신호가 통째로
+// 유실된다. ★설계 선택(반박 환영) -- 4R에서 "통지 파일을 안 남긴다"고
+// 판단한 이유("좌석이 멈췄다"와 독자가 다르다)는 여전히 옳다고 본다 --
+// 그래서 이번에도 NOT_STARTED/STALLED_AFTER_START와 **같은 파일**을
+// 안 쓴다. 대신 **다른 파일명 접두사**로 별도 종류의 통지를 남긴다 --
+// 좌석을 확인하라는 뜻이 아니라 "이 호출 자체(ps1 등 호출부가 넘긴
+// 인자)가 잘못됐다"는 뜻임을 파일명만 보고도 구별할 수 있어야 한다는
+// 원칙을 지키면서, 동시에 "저장소 안에서 관측 가능한 산출물"(불변식 O)
+// 요구도 채운다.
+function buildInvalidArgsNoticeFileName(nowMs) {
+  const iso = new Date(nowMs).toISOString().replace(/[:.]/g, "-");
+  return `dispatch-start-confirm-invalid-args-${iso}.md`;
+}
+
+function buildInvalidArgsNoticeText({ taskId, nowMs, reasonCode }) {
+  const lines = [];
+  lines.push(
+    `# 배달 후 착수 확인 실패 -- 잘못된 인자 -- ${formatKstIsh(nowMs)}`,
+  );
+  lines.push("");
+  lines.push(`- 태스크: ${taskId || "(미상)"}`);
+  lines.push(`- 사유 코드: ${reasonCode || "(미상)"}`);
+  lines.push("");
+  lines.push(
+    "이건 **좌석이 멈춘 것이 아닙니다** -- 이 CLI를 호출한 쪽(예: 관제실 `dispatch-worker.ps1`)이 넘긴 수치 인자 자체가 잘못됐습니다(`NaN`·`Infinity`·범위 밖 값 등). **좌석 확인이 아니라 호출부의 인자를 고쳐야 합니다.** 이 실행은 세션 폴더를 단 한 번도 들여다보지 않았습니다(폴링 미시작).",
+  );
+  return lines.join("\n") + "\n";
+}
+
+// writeInvalidArgsNotice(...) -- NOT_STARTED/STALLED_AFTER_START와 같은
+// notifyDir을 쓰되 파일명 접두사가 달라(위 buildInvalidArgsNoticeFileName)
+// 다른 종류의 실패임을 구별한다. `writeFailureNotice`와 나란히 두되
+// 통합하지 않는다 -- 인자 형태가 달라(이쪽은 `stallThresholdMs`처럼
+// 판정 세부값이 없다) 억지로 합치면 옵션 인자가 늘어나 오히려 "경우
+// 나열"에 가까워진다(4R 지시서가 지목한 패턴).
+//
+// ★HYK-378 6R(REVIEW P1 반려 수리, 불변식 P "통지 실패가 결론을 바꾸면
+// 안 된다") -- 5R까지는 이 함수가 `mkdirFn`/`writeFn` 실패를 전혀
+// 처리하지 않았다. 검토자 실측: `notifyDir`를 파일로 만들어 두면
+// (그 안에 하위 파일을 만들 수 없으므로) `mkdirFn`이 `ENOENT`로 던지고,
+// 그 예외가 이 함수 밖으로 그대로 새 나가 `invokedDirectly` 블록의
+// 나머지(=`process.exit(4)`)가 **아예 실행되지 않았다** -- Node가 처리
+// 안 된 예외로 죽으면서 실측 `status:1`(기본 실패 종료 코드)이 됐다 --
+// "잘못된 인자로 불렸다"는 결론(exit 4) 자체가 통지 실패라는 «부수
+// 효과» 때문에 뒤집힌 것이다. ⇒ 이 함수는 이제 **절대 던지지 않는다**
+// -- 성공/실패를 판정 객체로 돌려주고, 호출부가 원래의 `INVALID_ARGS`
+// 결론과 무관하게 처리하게 한다(아래 `invokedDirectly` 블록).
+function writeInvalidArgsNotice({
+  result,
+  taskId,
+  notifyDir,
+  nowFn,
+  writeFn,
+  mkdirFn,
+  existsFn,
+}) {
+  try {
+    if (!existsFn(notifyDir)) mkdirFn(notifyDir, { recursive: true });
+    const nowMs = nowFn();
+    const text = buildInvalidArgsNoticeText({
+      taskId,
+      nowMs,
+      reasonCode: result.reasonCode,
+    });
+    const noticePath = path.join(
+      notifyDir,
+      buildInvalidArgsNoticeFileName(nowMs),
+    );
+    writeFn(noticePath, text, "utf8");
+    return { ok: true, noticePath };
+  } catch (err) {
+    // ★6R -- 조용히 삼키지 않는다(불변식 P ⛔"조용히 삼키지 마라"): 실패
+    // 사실 자체를 호출부에 돌려준다. 원본 스택은 여기서 버리고 사람이
+    // 읽을 짧은 사유(`err.message`)만 담는다 -- stderr에 스택 트레이스
+    // 대신 문장이 남아야 한다는 완료조건 1 요구 그대로.
+    return {
+      ok: false,
+      detail: err && err.message ? err.message : String(err),
+    };
+  }
+}
+
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -193,6 +290,146 @@ function statusFromJudged(judged, nowMs, dispatchedAtMs, timeoutMs) {
   return null; // UNDECIDABLE -- 계속 폴링.
 }
 
+function isFiniteNumber(v) {
+  return typeof v === "number" && Number.isFinite(v);
+}
+
+// ★HYK-378 4R(REVIEW P1-1 반려 수리, 불변식 K "입력 관문") -- 생산
+// 진입점(`runDispatchStartConfirm`)이 폴링 루프에 들어가기 «전에» 모든
+// 수치 인자를 한 번에 검증한다. 코어의 `resolveAndValidateThresholds`를
+// 그대로 재사용해(중복 구현 0) `timeoutMs`·`stallThresholdMs`·
+// `sustainedGrowthBytes`·`stallGraceMultiplier`를 검증하고, 이 함수
+// 스스로는 코어가 모르는 두 인자(`dispatchedAtMs`·`pollIntervalMs`)를
+// 같은 자리에서 함께 검증한다 -- ★"경우를 나열"(4R 지시서 §1 원인
+// 분류가 정확히 지목한 패턴)하지 않도록, 여섯 인자 전부가 이 한 함수
+// 하나를 거치지 않고는 루프에 도달할 수 없다(생산 코드에 각 인자별
+// `if (Number.isNaN(x))` 를 따로 흩어 심지 않는다).
+function validateProductionArgs({
+  dispatchedAtMs,
+  timeoutMs,
+  stallThresholdMs,
+  pollIntervalMs,
+  sustainedGrowthBytes,
+  stallGraceMultiplier,
+}) {
+  if (!isFiniteNumber(dispatchedAtMs)) {
+    return { ok: false, reasonCode: "DISPATCHED_AT_MS_INVALID" };
+  }
+  const pollInterval =
+    pollIntervalMs === undefined || pollIntervalMs === null
+      ? 15000
+      : pollIntervalMs;
+  if (!isFiniteNumber(pollInterval) || pollInterval <= 0) {
+    return { ok: false, reasonCode: "POLL_INTERVAL_MS_INVALID" };
+  }
+  const resolved = resolveAndValidateThresholds({
+    timeoutMs,
+    stallThresholdMs,
+    sustainedGrowthBytes,
+    stallGraceMultiplier,
+  });
+  if (!resolved.ok) return resolved;
+  return { ok: true, ...resolved, pollIntervalMs: pollInterval };
+}
+
+// pollOnce(...) -- 폴링 한 회차(관측 1회 + 판정)를 수행한다
+// (runDispatchStartConfirm에서 분리 -- eslint 함수 길이·complexity 상한
+// 준수, 로직은 그대로). `terminal`이 있으면 루프가 그 자리에서 끝나야
+// 한다는 뜻, 없으면 계속 폴링. `excludedSymlinkCount`는 이번 회차에
+// 관측된 값(불변식 M) -- `null`이면 이번 회차엔 배제가 없었다는 뜻이라
+// 호출부가 이전 값을 그대로 유지한다.
+function pollOnce({ collect, observations, dispatchedAtMs, nowMs, validated }) {
+  const snap = collect();
+  if (!snap.ok) {
+    return {
+      terminal: {
+        status: DISPATCH_START_CONFIRM_STATUS.COLLECTION_FAILED,
+        reasonCode: snap.reasonCode,
+        detail: snap.detail,
+      },
+      excludedSymlinkCount: null,
+    };
+  }
+  let excludedSymlinkCount = null;
+  if (
+    isFiniteNumber(snap.excludedSymlinkCount) &&
+    snap.excludedSymlinkCount > 0
+  ) {
+    excludedSymlinkCount = snap.excludedSymlinkCount;
+    // ★M -- 로그 소비(완료조건 3 "결과·통지·로그 중 하나 이상"의 로그 축).
+    console.error(
+      `dispatch-start-confirm: excludedSymlinkCount=${snap.excludedSymlinkCount} (신뢰 경계 밖 링크/junction 배제 -- 세션 폴더 구조를 확인하십시오)`,
+    );
+  }
+  observations.push({ observedAtMs: nowMs, totalBytes: snap.totalBytes });
+
+  const judged = judgeDispatchStartBySize({
+    observations,
+    dispatchedAtMs,
+    now: nowMs,
+    timeoutMs: validated.timeoutMs,
+    stallThresholdMs: validated.stallThresholdMs,
+    sustainedGrowthBytes: validated.sustainedGrowthBytes,
+    stallGraceMultiplier: validated.stallGraceMultiplier,
+  });
+  const status = statusFromJudged(
+    judged,
+    nowMs,
+    dispatchedAtMs,
+    validated.timeoutMs,
+  );
+  if (status === null) return { terminal: null, excludedSymlinkCount };
+  return {
+    terminal: {
+      status,
+      reasonCode: judged.reasonCode,
+      details: judged.details,
+    },
+    excludedSymlinkCount,
+  };
+}
+
+// pollUntilTerminal(...) -- 검증을 통과한 뒤의 실제 폴링 루프(runDispatchStartConfirm
+// 에서 분리 -- eslint complexity 상한 준수, 로직은 그대로). ★HYK-378
+// 4R(불변식 M) -- 배제 신호(excludedSymlinkCount)의 마지막 관측값을
+// 최종 결과에 실어 보낸다(3R까지는 아무도 안 읽었다).
+async function pollUntilTerminal({
+  collect,
+  observations,
+  dispatchedAtMs,
+  validated,
+  now,
+  sleepFn,
+}) {
+  let lastExcludedSymlinkCount = 0;
+  for (;;) {
+    const nowMs = now();
+    const { terminal, excludedSymlinkCount } = pollOnce({
+      collect,
+      observations,
+      dispatchedAtMs,
+      nowMs,
+      validated,
+    });
+    if (excludedSymlinkCount !== null) {
+      lastExcludedSymlinkCount = excludedSymlinkCount;
+    }
+    if (terminal !== null) {
+      return {
+        ...terminal,
+        observations,
+        excludedSymlinkCount: lastExcludedSymlinkCount,
+      };
+    }
+    // 아직 확정 안 됨(UNDECIDABLE, 또는 STARTED지만 전체 관측 창이 안
+    // 끝남) -- 계속 폴링한다. ★2R 결함이 정확히 이 지점이었다: "STARTED
+    // 처음 보이면 즉시 반환"했었다. ★4R: 여기 도달했다는 것 자체가
+    // `validated`를 이미 통과했다는 뜻이라 `stallThresholdMs=NaN`류
+    // 인자로는 이 루프에 절대 들어오지 않는다(불변식 K).
+    await sleepFn(validated.pollIntervalMs);
+  }
+}
+
 // runDispatchStartConfirm(...) -- 폴링 루프 본체. 전부 주입 가능(시험은
 // sleepFn을 즉시 반환하는 가짜로 넘겨 실제로 기다리지 않는다).
 export async function runDispatchStartConfirm({
@@ -203,54 +440,47 @@ export async function runDispatchStartConfirm({
   timeoutMs = DEFAULT_TIMEOUT_MS,
   stallThresholdMs = DEFAULT_STALL_THRESHOLD_MS,
   pollIntervalMs = 15000,
+  sustainedGrowthBytes,
+  stallGraceMultiplier,
   now = Date.now,
   sleepFn = sleep,
   readdirFn = readdirSync,
   statFn,
+  lstatFn,
   collectFn,
 }) {
+  // ★불변식 K -- 루프 진입 전에 딱 한 번, 전부 함께 검증한다.
+  const validated = validateProductionArgs({
+    dispatchedAtMs,
+    timeoutMs,
+    stallThresholdMs,
+    pollIntervalMs,
+    sustainedGrowthBytes,
+    stallGraceMultiplier,
+  });
+  if (!validated.ok) {
+    return {
+      status: DISPATCH_START_CONFIRM_STATUS.INVALID_ARGS,
+      reasonCode: validated.reasonCode,
+      observations: [],
+    };
+  }
+
   const collect = () =>
     (collectFn ?? collectTotalSessionBytes)(
       { repoRoot, claudeHomeDir },
-      { readdirFn, statFn },
+      { readdirFn, statFn, lstatFn },
     );
 
   const observations = buildInitialObservations(dispatchedAtMs, baselineBytes);
-  for (;;) {
-    const nowMs = now();
-    const snap = collect();
-    if (!snap.ok) {
-      return {
-        status: DISPATCH_START_CONFIRM_STATUS.COLLECTION_FAILED,
-        reasonCode: snap.reasonCode,
-        detail: snap.detail,
-        observations,
-      };
-    }
-    observations.push({ observedAtMs: nowMs, totalBytes: snap.totalBytes });
-
-    const judged = judgeDispatchStartBySize({
-      observations,
-      dispatchedAtMs,
-      now: nowMs,
-      timeoutMs,
-      stallThresholdMs,
-    });
-
-    const status = statusFromJudged(judged, nowMs, dispatchedAtMs, timeoutMs);
-    if (status !== null) {
-      return {
-        status,
-        reasonCode: judged.reasonCode,
-        details: judged.details,
-        observations,
-      };
-    }
-    // 아직 확정 안 됨(UNDECIDABLE, 또는 STARTED지만 전체 관측 창이 안
-    // 끝남) -- 계속 폴링한다. ★2R 결함이 정확히 이 지점이었다: "STARTED
-    // 처음 보이면 즉시 반환"했었다.
-    await sleepFn(pollIntervalMs);
-  }
+  return pollUntilTerminal({
+    collect,
+    observations,
+    dispatchedAtMs,
+    validated,
+    now,
+    sleepFn,
+  });
 }
 
 function writeFailureNotice({
@@ -346,6 +576,43 @@ if (invokedDirectly) {
   });
   if (result.status === DISPATCH_START_CONFIRM_STATUS.STARTED) {
     console.log(`dispatch-start-confirm: STARTED (${result.reasonCode})`);
+    process.exit(DISPATCH_START_CONFIRM_EXIT_CODE[result.status]);
+  }
+  // ★4R(불변식 K) -- 잘못된 수치 인자는 폴링을 단 한 번도 시작하지 않고
+  // 여기서 스스로, 시끄럽게 끝난다(강제 종료가 아니라 정상적인 return
+  // 경로). ★5R(REVIEW P1-2 저장소 쪽 절반, 불변식 O) -- 4R까지는 stderr
+  // 한 줄뿐이라 호출부가 그 줄을 안 읽으면(검토자 실측: 관제실
+  // dispatch-worker.ps1의 fail-open) 신호가 통째로 유실됐다. stderr는
+  // 그대로 두고(휘발성 로그로도 여전히 유용), **저장소 안에서 관측
+  // 가능한 산출물**(notifyDir의 별도 종류 통지 파일)을 추가로 남긴다 --
+  // "좌석이 멈췄다"는 신호와 파일명부터 다르다(위 buildInvalidArgsNoticeFileName
+  // 헤더 주석 참조).
+  if (result.status === DISPATCH_START_CONFIRM_STATUS.INVALID_ARGS) {
+    // ★6R(불변식 P) -- 통지 시도 자체가 실패해도(예: notifyDir가 파일)
+    // 그 실패는 여기서 조용히 삼키거나 예외로 새 나가게 두지 않는다 --
+    // `writeInvalidArgsNotice`는 이제 절대 던지지 않으므로(위 헤더 주석)
+    // 아래 exit(4)는 통지 성공/실패와 무관하게 **항상** 실행된다.
+    const notice = writeInvalidArgsNotice({
+      result,
+      taskId,
+      notifyDir,
+      nowFn: Date.now,
+      writeFn: writeFileSync,
+      mkdirFn: mkdirSync,
+      existsFn: existsSync,
+    });
+    const reasonLine = `dispatch-start-confirm: INVALID_ARGS(${result.reasonCode}) -- 수치 인자를 확인하십시오(NaN·Infinity·범위 밖 값 등). 폴링을 시작하지 않았습니다.`;
+    if (notice.ok) {
+      console.error(`${reasonLine} notice=${notice.noticePath}`);
+    } else {
+      // ★6R -- 통지 실패 «자체»도 사람이 읽을 문장으로 남긴다(스택
+      // 트레이스가 아니라, 검토자가 지적한 "ENOENT 스택만 남았다"의
+      // 정확한 반례). 원래 결론(잘못된 인자·exit 4)은 안 바뀐다.
+      console.error(reasonLine);
+      console.error(
+        `dispatch-start-confirm: 통지 파일을 남기지 못했습니다(${notice.detail}) -- notifyDir을 확인하십시오. 이 실행 자체의 결론(잘못된 인자, exit 4)은 바뀌지 않습니다.`,
+      );
+    }
     process.exit(DISPATCH_START_CONFIRM_EXIT_CODE[result.status]);
   }
   if (
