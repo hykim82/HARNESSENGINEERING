@@ -95,7 +95,6 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
-  readdirSync,
   readFileSync,
   rmSync,
   writeFileSync,
@@ -272,7 +271,42 @@ function runSweepAndAssert({ root, swept, dir, spawn = spawnSync }) {
   // `maxBuffer`: generous fixed ceiling (HYK-359 4R ①) -- 실측 CI-canonical
   // sweep output was ~1.6MB; 200MB leaves headroom for years of legitimate
   // growth without silently truncating again.
-  const res = spawn(process.execPath, buildNestedSweepArgs(swept), {
+  const nestedArgs = buildNestedSweepArgs(swept);
+  // HYK-377 5R (불변식 N, coder-task.md §2, 검토자 실사고
+  // orch-evidence-REVIEW-r4.md P1): 4R까지의 생산 진입점 real-gate는
+  // `.marker` 산출물(대상 파일의 자발적 협조)에 의존했다 -- 검토자가
+  // 정확히 예견한 대로, «비마커 초과»(test() 0개, 아무것도 안 씀)와
+  // «동일 마커 치환»(다른 파일이 marker-0.marker를 대신 생성)이 그 층에서
+  // 각각 부활해 `tests 1 / pass 1 / fail 0`으로 통과했다. 4R이 "생산
+  // 진입점에서 검사" × "새 주입 지점 금지"를 동시에 요구한 계약 자체가
+  // 그 층에서 argv를 볼 수단을 없앤 것(책임자 자인, coder-task.md §1).
+  //
+  // 고침(★불변식 N, «관측 출구»): 생산 경로가 spawn에 실제로 넘기는 바로
+  // 그 `nestedArgs`(입력이 아니라, 인자를 다 조립한 뒤의 결과)에서 파일
+  // 목록을 뽑아 `dir` 옆에 **스스로** 적는다 -- 이건 «주입 지점»이
+  // 아니다: 아무 매개변수도 새로 받지 않고, 어떤 caller도 이 값을 바꿀
+  // 수 없으며, spawn을 실제로 부르기 전 계산된 값을 그대로 내보낼 뿐
+  // 행동을 하나도 바꾸지 않는다(4R이 지킨 "spawn은 하드코딩된 real
+  // spawnSync" 자산 그대로). 파일 신원(어떤 이름의 파일을 정말 spawn에
+  // 넘겼는가)은 이제 대상 파일이 무엇을 하든(마커를 쓰든 안 쓰든, 다른
+  // 파일의 마커 경로를 흉내 내든) 전혀 영향받지 않는다 -- manifest는
+  // 대상의 산출물이 아니라 부모 자신의 기록이다.
+  //
+  // ★정직 한계(coder-task.md §2, 책임자 지시로 그대로 남김): manifest도
+  // 결국 생산 코드가 스스로 쓰는 것이라, 생산 코드가 «자기 기록 자체를
+  // 위조»하면(예: nestedArgs와 다른 값을 manifest에 적도록 몰래 바꾸면)
+  // 이 검사는 못 잡는다. 다만 그건 "스윕이 자기 목록을 위조하는" 성격이
+  // 다른 공격이지, 이 조각이 겨냥한 "래퍼가 (manifest를 건드리지 않고)
+  // swept만 조용히 바꾼다"와는 층이 다르다 -- 위조하려면 manifest와 실제
+  // spawn 인자를 동시에, 서로 다르게 속여야 하는데 이 함수는 둘 다 같은
+  // `nestedArgs` 하나에서 파생시키므로 그런 이중 위조가 이 함수 내부
+  // 자체에서는 성립하지 않는다(같은 소스에서 나온 두 관측이 항상 일치).
+  writeFileSync(
+    join(dir, "swept-manifest.json"),
+    JSON.stringify(nestedArgs.slice(3)),
+    "utf8",
+  );
+  const res = spawn(process.execPath, nestedArgs, {
     cwd: root,
     encoding: "utf8",
     env: floatingEnv,
@@ -459,6 +493,35 @@ function writeSameNameFixture(dir, ownName, impersonatedTestName) {
     [
       `import { test } from "node:test";`,
       `test(${JSON.stringify(impersonatedTestName)}, () => {});`,
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+  return { testFile };
+}
+
+// HYK-377 5R (검토자 실사고, orch-evidence-REVIEW-r4.md P1, «동일 마커
+// 치환»): a same-name impersonator that goes further than
+// writeSameNameFixture -- it ALSO writes to the SPECIFIC marker path the
+// file it's replacing would have written, so it defeats BOTH signals a
+// marker-based check could have used (the TAP-visible test() description
+// AND the marker artifact itself). Only the manifest (parent's own record
+// of what it actually handed to spawn) is not fooled by this.
+function writeSameNameFixtureWithMarker(
+  dir,
+  ownName,
+  impersonatedTestName,
+  impersonatedMarkerPath,
+) {
+  const testFile = `${ownName}.test.mjs`;
+  writeFileSync(
+    join(dir, testFile),
+    [
+      `import { test } from "node:test";`,
+      `import { writeFileSync } from "node:fs";`,
+      `test(${JSON.stringify(impersonatedTestName)}, () => {`,
+      `  writeFileSync(${JSON.stringify(impersonatedMarkerPath)}, "ran");`,
+      `});`,
       "",
     ].join("\n"),
     "utf8",
@@ -734,60 +797,64 @@ test("HYK-377 3R 완료조건② 무회귀 (비마커형 초과, 파일 신원 �
   }
 });
 
-// HYK-377 4R (검토자 실사고, orch-evidence-REVIEW-r3.md P1, coder-task.md
-// §2 불변식 J): 3R의 argv-identity 시험은 주입 가능한
-// `runSweepAndAssert`를 직접 부르고, 진짜 생산 진입점 `runProductionSweep`
-// 은 이 "real gate" 시험에서만 실행됐는데 -- 그 시험은 **로그 존재와
-// 실행 성공만** 봤다. 독립 기대 목록과 대조가 전혀 없어서, `swept:
-// swept.slice(0, -1)`처럼 `runProductionSweep`의 «생산 코드 자체»(래퍼
-// 몸통, 호출부가 아니라)를 변이해 마지막 파일을 몰래 빼도 이 시험은
-// `tests 1 / pass 1 / fail 0`으로 무사통과했다(검토자 재현).
+// HYK-377 4R (검토자 실사고, orch-evidence-REVIEW-r3.md P1) + HYK-377 5R
+// (검토자 실사고, orch-evidence-REVIEW-r4.md P1, coder-task.md §2 불변식
+// N): 4R은 생산 진입점의 real-gate 검사를 «독립 기대값과의 대조»로
+// 옮겼지만, 그 대조 자체가 다시 `.marker`(대상의 자발적 산출물)에
+// 의존했다 -- 1R에서 이미 뚫린 두 공격이 이 층에서 그대로 부활했다:
+// 검토자 실측 ⓐ 비마커 초과(`silent-uninvited.test.mjs`, test() 0개·
+// 산출물 0)를 swept에 끼워도 마커 집합이 그대로라 통과. ⓑ 동일 마커
+// 치환(`same-name-replacement.test.mjs`가 `marker-0.marker`를 대신
+// 생성하도록 하고 `swept[0]`을 이 파일로 바꿔치기)해도 마커 «집합»은
+// 여전히 같아 통과. 둘 다 `tests 1 / pass 1 / fail 0`(검토자 재현).
 //
-// 고침(불변식 J, «검사 지점 = 생산 진입점»): `runProductionSweep`에는
-// 4R 에서도 새 실행기 주입 지점을 추가하지 않는다(§2-C, 3R 이 연 지점을
-// 확대 금지) -- 대신 REAL 실행이 필연적으로 남기는, `runProductionSweep`
-// 자신은 전혀 모르는 **독립적** 디스크 관측(마커)을 다시 쓴다. 여기서
-// 마커는 1R 이 겪은 "협조 안 하면 못 잡는다"는 impersonation 문제와는
-// 다른 것을 증명한다 -- **누락**(어떤 파일이 실행 «안» 됐는가)은 그
-// 파일 자신이 «협조를 거부»할 수 없는 성질이다(안 돌았으면 마커 자체가
-// 없다, 실행됐는데 마커만 숨기는 것과는 다른 문제). `expectedMarkerNames`
-// 는 `runProductionSweep`에 넘기는 `swept`가 아니라 그것을 만들기 전의
-// `fixtures`(원본)에서 뽑는다 -- 그래야 «래퍼가 받은 값을 자기 자신과
-// 비교»하는 동어반복이 되지 않는다(완료조건③). 동일-이름 치환(진짜
-// 신원 스푸핑) 축은 여전히 3R의 argv-identity 시험이 `runSweepAndAssert`
-// 층에서 지킨다 -- `runProductionSweep`은 그 함수에 실행기만 하드코딩해
-// 위임하는 한 줄짜리 래퍼라 그 축의 방어가 약해지지 않는다.
-test("HYK-377 4R 완료조건①②③ (real gate, 생산 진입점 자체에서 독립 기대값 대조): runProductionSweep -- 캡처·주입 없는 진짜 하드코딩 spawnSync 경로 -- 이 «생산 래퍼 몸통이 손댈 수 있는» swept·root·dir 를, 그 래퍼가 넘긴 값이 아니라 호출 전에 스냅샷한 독립 기대값과 실행 뒤 디스크에 남은 마커로 대조한다 -- 래퍼 내부에서 마지막 파일을 몰래 빼거나(swept.slice(0,-1)) root·dir 를 속여도 잡힌다", () => {
-  const fixtureRoot = mkdtempSync(join(tmpdir(), "hyk377-4r-realgate-root-"));
-  const scratchDir = mkdtempSync(join(tmpdir(), "hyk377-4r-realgate-scratch-"));
+// 책임자 자인(coder-task.md §1): 4R의 계약("생산 진입점에서 검사" ×
+// "새 주입 지점 금지") 자체가 그 층에서 argv를 관측할 방법을 없앴다.
+//
+// 고침(★불변식 N, «관측 출구»): `runSweepAndAssert`(생산 진입점이
+// 실행기만 하드코딩해 그대로 위임하는 바로 그 함수, 위 함수 정의 자체
+// 참고)가 spawn을 실제로 부르기 «직전»에, 그 호출에 쓸 파일 목록을
+// `dir` 옆에 `swept-manifest.json`으로 스스로 적는다 -- 이건 «주입
+// 지점»이 아니라 «출구»다: 새 매개변수도, 새 분기도, caller가 바꿀 수
+// 있는 것도 없다(4R이 지킨 "spawn은 하드코딩된 real spawnSync" 자산
+// 그대로 유지). 이제 파일 신원은 대상 파일이 무엇을 하든(마커를 쓰든
+// 안 쓰든, 다른 파일의 마커 경로를 흉내 내든) 전혀 영향받지 않는다 --
+// manifest는 부모 자신의 기록이지 자식이 «보고»하는 것이 아니다.
+//
+// ★정직 한계(coder-task.md §2, 책임자 지시로 그대로 남김): manifest도
+// 결국 생산 코드가 스스로 쓰는 것이라, 생산 코드가 «자기 기록 자체를
+// 위조»하면(예: manifest에 nestedArgs와 다른 값을 적도록 그 한 줄만
+// 몰래 바꾸면) 이 검사는 못 잡는다. 다만 그건 "스윕이 자기 목록을
+// 위조하는" 다른 층의 공격이지, 이 조각이 겨냥한 "래퍼가 (manifest는
+// 안 건드리고) swept만 조용히 바꾼다"와는 다르다 -- 위조하려면 manifest
+// 문자열과 실제 spawn 인자를 서로 다르게 이중으로 속여야 하는데,
+// `runSweepAndAssert`는 둘 다 같은 `nestedArgs` 변수 하나에서
+// 파생시키므로(위 함수 정의 참고) 그런 이중 위조가 이 함수 «내부»에서는
+// 구조적으로 성립하지 않는다.
+test("HYK-377 5R 완료조건①②③ (real gate, 생산 진입점 «관측 출구» manifest 대조): runProductionSweep이 spawn 직전 스스로 적는 swept-manifest.json을, 호출 전에 스냅샷한 독립 기대 파일 목록과 대조한다 -- 대상의 산출물(마커) 없이 부모 자신의 기록만 보므로 비마커 초과·동일 마커 치환 둘 다 잡힌다", () => {
+  const fixtureRoot = mkdtempSync(join(tmpdir(), "hyk377-5r-realgate-root-"));
+  const scratchDir = mkdtempSync(join(tmpdir(), "hyk377-5r-realgate-scratch-"));
   try {
     const fixtures = Array.from({ length: 3 }, (_, i) =>
       writeMarkerFixture(fixtureRoot, `marker-${i}`),
     );
-    // Snapshot BEFORE handing anything to runProductionSweep -- this is
-    // the "independent expected value" completion condition③ requires:
+    // Snapshot BEFORE handing anything to runProductionSweep -- the
+    // independent expected value completion condition③ requires:
     // comparison is against what THIS TEST intended, never against
     // whatever runProductionSweep's own (possibly-tampered) body decided
     // to forward.
-    const expectedMarkerNames = fixtures
-      .map((f) => basename(f.markerPath))
-      .sort();
-    const swept = fixtures.map((f) => f.testFile);
-
-    // Present on disk in fixtureRoot (a real, runnable fixture) but NOT
-    // in swept -- proves excess-via-marker doesn't sneak past the
-    // PRODUCTION entry point either, not just the argv-identity layer.
-    const uninvited = writeMarkerFixture(fixtureRoot, "marker-uninvited");
+    const expectedFiles = fixtures.map((f) => f.testFile);
+    const swept = [...expectedFiles];
 
     runProductionSweep({ root: fixtureRoot, swept, dir: scratchDir });
 
-    const actualMarkerNames = readdirSync(fixtureRoot)
-      .filter((name) => name.endsWith(".marker"))
-      .sort();
+    const manifestFiles = JSON.parse(
+      readFileSync(join(scratchDir, "swept-manifest.json"), "utf8"),
+    );
     assert.deepEqual(
-      actualMarkerNames,
-      expectedMarkerNames,
-      `markers actually left in fixtureRoot after runProductionSweep = ${JSON.stringify(actualMarkerNames)}, expected exactly ${JSON.stringify(expectedMarkerNames)} (independent of swept as given to runProductionSweep) -- fewer than expected means the PRODUCTION entry point itself dropped/substituted a file (e.g. the reviewer's swept.slice(0,-1) mutation inside runProductionSweep's own body), more than expected means an unrequested real file (e.g. "${basename(uninvited.markerPath)}") got swept in at the production entry point too`,
+      manifestFiles,
+      expectedFiles,
+      `swept-manifest.json (what runProductionSweep's spawn call actually received) = ${JSON.stringify(manifestFiles)}, expected exactly ${JSON.stringify(expectedFiles)} -- fewer than expected means the production entry point dropped/substituted a file (e.g. the reviewer's swept.slice(0,-1)), more than expected means an unrequested file got swept in`,
     );
     assert.ok(
       existsSync(join(scratchDir, "sweep-full-stdout.log")),
@@ -799,13 +866,115 @@ test("HYK-377 4R 완료조건①②③ (real gate, 생산 진입점 자체에서
   }
 });
 
-// HYK-377 4R 완료조건② (생산 진입점에서 root 위조도 RED): 3R 은 이 축을
-// `runSweepAndAssert`를 직접 불러서만 확인했다(3R 결과 파일 §3-1) --
-// 이번엔 `runProductionSweep` 자체를 잘못된 root 로 불러 같은 방어(실재
-// 파일이 그 root 에 없어 `testsRun` 이 기대에 못 미쳐 `runSweepAndAssert`
-// 내부의 기존 어서션이 loud 하게 실패)가 생산 진입점을 통해서도 여전히
-// 작동하는지 직접 구동해 증명한다.
-test("HYK-377 4R 완료조건② (생산 진입점 root 위조 RED): runProductionSweep을 엉뚱한 root로 부르면 그 root에 swept 파일이 없어 즉시 실패한다", () => {
+// HYK-377 5R 완료조건① (생산 진입점 «비마커 초과» RED, 검토자 형태
+// 그대로 영구 회귀 시험): test() 0개, 아무 산출물도 없는 실재 파일을
+// swept에 초과 삽입 -- manifest는 그 파일의 협조 여부와 무관하게
+// «부모가 실제로 무엇을 spawn에 넘겼는가»만 기록하므로 잡힌다.
+test("HYK-377 5R 완료조건① (생산 진입점 비마커 초과 RED): silent-uninvited.test.mjs(test() 0개·산출물 0)를 swept에 몰래 끼워 넣어도 manifest가 그 실재 여부를 그대로 드러낸다", () => {
+  const fixtureRoot = mkdtempSync(
+    join(tmpdir(), "hyk377-5r-realgate-nonmarker-root-"),
+  );
+  const scratchDir = mkdtempSync(
+    join(tmpdir(), "hyk377-5r-realgate-nonmarker-scratch-"),
+  );
+  try {
+    const fixtures = Array.from({ length: 3 }, (_, i) =>
+      writeMarkerFixture(fixtureRoot, `marker-${i}`),
+    );
+    const expectedFiles = fixtures.map((f) => f.testFile);
+    const silent = writeSilentFixture(fixtureRoot, "silent-uninvited");
+    const swept = [...expectedFiles, silent.testFile];
+
+    runProductionSweep({ root: fixtureRoot, swept, dir: scratchDir });
+
+    const manifestFiles = JSON.parse(
+      readFileSync(join(scratchDir, "swept-manifest.json"), "utf8"),
+    );
+    assert.notDeepEqual(
+      manifestFiles,
+      expectedFiles,
+      `non-marker excess must be observable via manifest -- captured manifest = ${JSON.stringify(manifestFiles)} unexpectedly equals the original intended list ${JSON.stringify(expectedFiles)}`,
+    );
+    assert.ok(
+      manifestFiles.includes(silent.testFile),
+      `expected the silent extra file's own filename ("${silent.testFile}") to appear verbatim in the manifest`,
+    );
+  } finally {
+    rmSync(fixtureRoot, { recursive: true, force: true });
+    rmSync(scratchDir, { recursive: true, force: true });
+  }
+});
+
+// HYK-377 5R 완료조건② (생산 진입점 «동일 마커 치환» RED, 검토자 형태
+// 그대로 영구 회귀 시험): same-name-replacement.test.mjs가 marker-0을
+// 자칭하는 test()를 등록하고(3R의 impersonation 픽스처와 같은 모양)
+// «게다가» marker-0.marker 경로에 직접 마커까지 심어(4R까지의 마커
+// 기반 검사를 완전히 흉내) swept[0]을 대체 -- manifest는 파일이 무엇을
+// «자칭»하든 실제로 spawn에 넘어간 문자열 자체만 기록하므로 여전히
+// 잡힌다.
+test("HYK-377 5R 완료조건② (생산 진입점 동일 마커 치환 RED): same-name-replacement.test.mjs 가 marker-0 을 자칭하며 marker-0.marker 까지 대신 만들어도 manifest 는 진짜 파일명으로 그 차이를 드러낸다", () => {
+  const fixtureRoot = mkdtempSync(
+    join(tmpdir(), "hyk377-5r-realgate-samename-root-"),
+  );
+  const scratchDir = mkdtempSync(
+    join(tmpdir(), "hyk377-5r-realgate-samename-scratch-"),
+  );
+  try {
+    const fixtures = Array.from({ length: 3 }, (_, i) =>
+      writeMarkerFixture(fixtureRoot, `marker-${i}`),
+    );
+    const expectedFiles = fixtures.map((f) => f.testFile);
+    // Impersonates marker-0 AT BOTH signals a 4R-era check might have
+    // used -- its own test() description AND the marker file marker-0
+    // would have written -- to prove manifest doesn't care about either.
+    const impersonatorMarkerPath = fixtures[0].markerPath;
+    const impersonator = writeSameNameFixtureWithMarker(
+      fixtureRoot,
+      "same-name-replacement",
+      "marker-0",
+      impersonatorMarkerPath,
+    );
+    const tamperedSwept = [impersonator.testFile, ...expectedFiles.slice(1)];
+
+    runProductionSweep({
+      root: fixtureRoot,
+      swept: tamperedSwept,
+      dir: scratchDir,
+    });
+
+    const manifestFiles = JSON.parse(
+      readFileSync(join(scratchDir, "swept-manifest.json"), "utf8"),
+    );
+    assert.notDeepEqual(
+      manifestFiles,
+      expectedFiles,
+      `same-name substitution must be observable via manifest -- captured manifest = ${JSON.stringify(manifestFiles)} unexpectedly equals the original intended list ${JSON.stringify(expectedFiles)}`,
+    );
+    assert.ok(
+      manifestFiles.includes(impersonator.testFile),
+      `expected the impersonator's own filename ("${impersonator.testFile}") to appear verbatim in the manifest`,
+    );
+  } finally {
+    rmSync(fixtureRoot, { recursive: true, force: true });
+    rmSync(scratchDir, { recursive: true, force: true });
+  }
+});
+
+// HYK-377 4R 완료조건② (생산 진입점에서 root 위조도 RED) + HYK-377 5R
+// P2 (검토자 실사고, orch-evidence-REVIEW-r4.md, coder-task.md §3-4):
+// 4R의 이 시험은 `assert.throws`뿐이라 «무엇이든 던지면» 통과했다 --
+// 검토자가 `runProductionSweep` 몸통을 `throw new Error("unrelated
+// production failure")`로 바꿔도 같은 `1/1/0`으로 통과함을 실측했다.
+// 예외가 «root 위조 때문에» 났다는 원인 자체는 아무도 확인하지 않았다.
+//
+// 고침: 던져진 에러의 메시지가 `runSweepAndAssert` 내부의 «TAP 요약
+// 줄을 못 찾았다»(실측: root가 틀리면 swept의 상대경로가 그 cwd에
+// 없어 node --test가 아무 TAP 출력도 못 남기고 요약 줄 파싱이
+// 실패한다는 이 함수 고유의 실패 시그니처)와 일치하는지 직접 검사한다
+// -- "unrelated production failure" 같은 무관한 예외는 이 정규식을
+// 통과하지 못해 이 시험 자체가 fail 하게 된다(P2가 요구한 «원인
+// 검증»).
+test("HYK-377 4R 완료조건② + 5R P2 (생산 진입점 root 위조, 원인까지 검증): runProductionSweep을 엉뚱한 root로 부르면 그 root에 swept 파일이 없어 즉시 실패하고, 그 실패는 구체적으로 «TAP 요약 줄을 못 찾았다»는 root-위조 고유의 원인이어야 한다 -- 몸통을 무관한 예외로 바꾸는 변이는 이 시험 자체를 fail 시킨다", () => {
   const fixtureRoot = mkdtempSync(
     join(tmpdir(), "hyk377-4r-realgate-root-forge-"),
   );
@@ -820,11 +989,15 @@ test("HYK-377 4R 완료조건② (생산 진입점 root 위조 RED): runProducti
       writeMarkerFixture(fixtureRoot, `marker-${i}`),
     );
     const swept = fixtures.map((f) => f.testFile);
-    // No message-shaped constraint on the thrown error -- the point is
-    // simply that it throws AT ALL (loud failure) rather than returning
-    // normally (silent success), through the PRODUCTION entry point.
-    assert.throws(() =>
-      runProductionSweep({ root: wrongRoot, swept, dir: scratchDir }),
+    assert.throws(
+      () => runProductionSweep({ root: wrongRoot, swept, dir: scratchDir }),
+      (err) => {
+        assert.ok(
+          /could not find TAP's '# tests N' summary line/.test(err.message),
+          `expected root-forgery's own failure signature (no TAP summary because none of swept's relative paths exist under the wrong root) -- got a DIFFERENT error, which means this test would also pass for an unrelated failure (the exact P2 gap): ${err.message}`,
+        );
+        return true;
+      },
     );
   } finally {
     rmSync(fixtureRoot, { recursive: true, force: true });
