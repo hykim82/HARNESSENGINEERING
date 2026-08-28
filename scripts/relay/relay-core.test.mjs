@@ -1037,6 +1037,61 @@ test("HYK-376: relayStep -> runDeliverStage -> production deliverTask (REVIEW/co
   }
 });
 
+// HYK-376-paste-hook-seam-2 (완료 조건 1 -- review-1 P1의 정확한 재현을
+// relayStep 쪽에서도 고정): review.md 그대로 -- review-1은 이 opts 자리에
+// 온 값 자체를 `Proxy`(own `confirmPastedFn`을 가진 target을 감싸고
+// `has`만 거짓)로 만들어 `relayStep -> runDeliverStage -> production
+// deliverTask`가 화면 마커/화면 밖 증거 둘 다 없이 `ok:true`·Enter 1회를
+// 내는 것을 실측했다. `runDeliverStage`(relay-core.mjs)는 이 opts를
+// 필터링 없이 그대로 넘기므로, 안전은 전적으로 `deliverTask`의
+// `stripConfirmPastedFn`(1R에서는 `"confirmPastedFn" in opts`로 먼저
+// 물어봐 이 Proxy에 뚫렸다, 2R에서 무조건 `{...opts}`+`delete`로 고침)에서
+// 나온다. ★되돌림 변이(stripConfirmPastedFn이 다시 `in`으로 먼저
+// 묻는 형태로 돌아가면) 이 시험은 정확히 이 Proxy 때문에 빨간불이 된다.
+test("HYK-376: relayStep -> runDeliverStage -> production deliverTask (REVIEW/codex) -- review-1's exact Proxy repro (own confirmPastedFn, `has` trap lies false) passed as the opts value itself is structurally unreachable, zero Enter calls", () => {
+  const harnessDir = makeHarnessDir();
+  const mainRepoDir = makeTaskFileSource("review");
+  try {
+    const execFn = readinessFakeExecFn({
+      list: staticListResponse(["term_ready"]),
+      show: showByHandle({ term_ready: "IDLE" }),
+      "task-create": { ok: true, result: { task: { id: "task_rt" } } },
+      dispatch: { ok: true },
+      send: { ok: true },
+    });
+    const optsTarget = {
+      execFn,
+      capabilities: READINESS_CAPS,
+      existingSeatHandle: "term_ready",
+      confirmPastedFn: () => true,
+    };
+    const optsProxy = new Proxy(optsTarget, {
+      has(target, prop) {
+        if (prop === "confirmPastedFn") return false;
+        return Reflect.has(target, prop);
+      },
+    });
+    const r = relayStep(
+      {
+        role: "REVIEW",
+        worktreePath: READINESS_WORKTREE,
+        taskId: "HYK-x",
+        harnessDir,
+        mainRepoDir,
+      },
+      READINESS_ADAPTER,
+      optsProxy,
+    );
+    assert.equal(r.ok, false);
+    assert.equal(r.stage, STAGE.DELIVER);
+    assert.match(r.reason, /PASTE_UNCONFIRMED/);
+    assert.equal(sinkCallCounts(execFn).enter, 0);
+  } finally {
+    rmSync(harnessDir, { recursive: true, force: true });
+    rmSync(mainRepoDir, { recursive: true, force: true });
+  }
+});
+
 // mutation 6 (TOCTOU, PM Q2): READY 관측 직후 deliver 직전 재관측에서 후보
 // 세대가 바뀌면(새 후보 등장 -> AMBIGUOUS) 이전 READY를 폐기하고 sink 0.
 test("§5-6: TOCTOU -- readiness flips from READY to AMBIGUOUS between the initial observation and the pre-deliver recheck -- previous READY is discarded, sink 0", () => {

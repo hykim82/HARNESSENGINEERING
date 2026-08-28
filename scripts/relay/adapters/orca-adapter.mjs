@@ -3078,11 +3078,36 @@ function deliverTaskInternal(ctx, opts = {}) {
 // createRealLaunchSink/relayStep(runDeliverStage)/runStepCli/run-step.mjs
 // CLI는 전부 이 export만 import한다(아래 각 지점 주석 참조) -- 그래서
 // 이 한 곳의 제거가 네 프로덕션 진입점 전부에 구조적으로 적용된다.
+//
+// HYK-376-paste-hook-seam-2 (P1 반려 수리 -- 검토자 실측: 위 1R 판이 먼저
+// `"confirmPastedFn" in opts`로 **호출자에게 물어본 뒤**, 그 대답이
+// 거짓이면 원본 객체를 그대로 통과시켰다. 호출자를 own `confirmPastedFn`
+// 을 가진 객체를 감싼 `Proxy`로 만들고 `has` 트랩만 `false`를 답하게
+// 하면, `in` 연산자는 그 거짓말을 그대로 믿는다 -- 검토자가 프로덕션
+// `deliverTask`와 `relayStep` 양쪽에서 화면 마커/화면 밖 증거 둘 다 없이
+// `ok:true`·Enter 1회로 재현했다.
+// ★불변식(coder-task.md §2 2R): "호출자가 준 객체를 절대 그대로
+// 흘려보내지 않는다" -- 그래서 이제 **묻지 않는다**. 무엇이 오든 조건
+// 없이 새 plain object를 만든다(`{...opts}`). 객체 스프레드는 `in`/`has`
+// 트랩을 전혀 쓰지 않는다 -- 내부적으로 `[[OwnPropertyKeys]]`(ownKeys
+// 트랩 또는 기본 동작)로 얻은 키 중 `[[GetOwnProperty]]`가 enumerable로
+// 보고하는 키만 `[[Get]]`으로 값을 읽어 복사한다. 그래서:
+//  - `has`가 무엇을 답하든(1R을 뚫은 그 트랩) 복사 자체에는 영향이 없다.
+//  - `ownKeys`가 `confirmPastedFn`을 열거 목록에서 숨기면 애초에
+//    복사되지 않는다(=생략과 동일한 안전한 결과).
+//  - own 속성으로 실제 존재하고 열거되면 복사된 뒤 아래에서 명시적으로
+//    지운다 -- "물어보고 지운다"가 아니라 "일단 내 사본을 만들고, 그
+//    사본에서 그 키를 삭제한다"이므로 원본이 무엇을 주장하는지는
+//    결과에 관여하지 않는다.
+// 정직 한계: `getOwnPropertyDescriptor`/`get` 두 트랩이 서로 다른 값을
+// 짜맞춰(예: 다른 이름의 own 속성 뒤에서 get이 그 값을 가로채는 형태)
+// 스프레드 자체의 의미론을 깨는 극단적 조합까지는 이 함수 하나로
+// 증명하지 않는다 -- §3-2가 요구한 모양 6종(일반·상속·getter·비열거·
+// Proxy has·Proxy ownKeys 은닉+get 함수반환) 표 구동 시험이 그 경계를
+// 실측으로 고정한다(아래 STRIP_CONFIRM_PASTED_FN_PROBE_SHAPES,
+// orca-adapter.test.mjs).
 function stripConfirmPastedFn(opts) {
-  if (!isPlainObject(opts) || !("confirmPastedFn" in opts)) {
-    return isPlainObject(opts) ? opts : {};
-  }
-  const rest = { ...opts };
+  const rest = isPlainObject(opts) ? { ...opts } : {};
   delete rest.confirmPastedFn;
   return rest;
 }
