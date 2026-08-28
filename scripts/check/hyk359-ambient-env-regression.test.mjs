@@ -188,7 +188,18 @@ function envWithoutTestMarkers() {
 // TAP output, and asserts on it. Extracted out of the test() callback
 // itself purely to keep that callback under this repo's ESLint
 // max-lines-per-function ceiling; the assertions here ARE the test.
-function runSweepAndAssert({ root, swept, dir }) {
+//
+// HYK-371 4R (검토자 3R-1, coder-task.md §2): `spawn` is injectable
+// (defaults to the real `spawnSync`, same pattern isolated-suite-runner.mjs
+// already uses for its own execFile/spawn) SOLELY so the layer-2 contract
+// test below can capture the REAL argv this function passes to its
+// executor -- without paying for a real ~280-file sweep just to read an
+// array. `runProductionSweep` further down is the ONLY call site the
+// actual CI-canonical safety-net test uses, and it hardcodes the real
+// `spawnSync` with no way for any caller to override it -- see that
+// function's own comment for why the injection capability here can't
+// become a bypass for the real check.
+function runSweepAndAssert({ root, swept, dir, spawn = spawnSync }) {
   const floatingEnv = {
     ...envWithoutTestMarkers(),
     ADMISSION_LEDGER_PATH: join(dir, "floating-ledger.json"),
@@ -206,7 +217,7 @@ function runSweepAndAssert({ root, swept, dir }) {
   // `maxBuffer`: generous fixed ceiling (HYK-359 4R ①) -- 실측 CI-canonical
   // sweep output was ~1.6MB; 200MB leaves headroom for years of legitimate
   // growth without silently truncating again.
-  const res = spawnSync(process.execPath, buildNestedSweepArgs(swept), {
+  const res = spawn(process.execPath, buildNestedSweepArgs(swept), {
     cwd: root,
     encoding: "utf8",
     env: floatingEnv,
@@ -281,6 +292,26 @@ function runSweepAndAssert({ root, swept, dir }) {
   );
 }
 
+// HYK-371 4R (coder-task.md §2, "주입 지점이 우회로가 되면 안 된다"): the
+// single production-facing gateway (HYK-376's pattern, PR #218) -- this is
+// the ONLY function the real CI-canonical safety-net test below calls, and
+// it hardcodes `spawn: spawnSync` as a literal with no parameter through
+// which a caller could inject anything else. The executor-injection
+// capability on `runSweepAndAssert` exists ONLY for the layer-2 contract
+// test further down, which never touches this wrapper -- it calls
+// `runSweepAndAssert` directly with its own fake spawn. So even if
+// `runSweepAndAssert`'s real production call (inside this wrapper) were
+// mutated to pass a different concurrency to `buildNestedSweepArgs`, the
+// real CI-canonical sweep below still always executes with a REAL
+// `spawnSync` (this wrapper is never bypassed) -- the injection capability
+// cannot turn into "skip the real check", it can only ever be used by code
+// that explicitly calls the lower-level function instead of this one, which
+// is a visible, reviewable choice at that call site, not something this
+// wrapper's existence enables silently.
+function runProductionSweep({ root, swept, dir }) {
+  runSweepAndAssert({ root, swept, dir, spawn: spawnSync });
+}
+
 test("HYK-359 완료조건4 (3R): CI-canonical 시험 디렉토리 전체(예외 목록 제외, 정확한 개수)가 떠도는 ADMISSION_LEDGER_PATH/ADMISSION_LOCK_PATH/DISPATCH_RECEIPT_PATH 아래에서도 fail 0 -- 보호 대상이 목록 없이 디스크에서 직접 발견되고, 예외 더하기·목록 잘라내기 어느 쪽도 조용히 통과하지 못한다", () => {
   const root = repoRoot();
   const allFiles = collectTestFiles(root); // relative paths, e.g. "scripts/check/foo.test.mjs"
@@ -329,7 +360,7 @@ test("HYK-359 완료조건4 (3R): CI-canonical 시험 디렉토리 전체(예외
   // the only place the failing subtest's full context survived, exactly
   // the mistake this round is fixing. Only a genuine pass reaches the
   // cleanup below.
-  runSweepAndAssert({ root, swept, dir });
+  runProductionSweep({ root, swept, dir });
   rmSync(dir, { recursive: true, force: true });
 });
 
@@ -473,14 +504,61 @@ test("HYK-371 3R 완료조건② (층 1·기전): --test-concurrency=N 인자가
   }
 });
 
-test("HYK-371 3R 완료조건① (층 2·계약): 생산 argv가 항상 --test-concurrency=<의도된 캡>을 포함한다 -- 실행 없이 순수 문자열/숫자 비교이므로 CPU 수와 무관하게 캡 삭제·완화가 항상 RED", () => {
-  const args = buildNestedSweepArgs(["dummy.test.mjs"]);
-  assert.ok(
-    args.includes(`--test-concurrency=${NESTED_SWEEP_CONCURRENCY}`),
-    `production argv (via buildNestedSweepArgs's default concurrency) does not contain "--test-concurrency=${NESTED_SWEEP_CONCURRENCY}" -- args: ${JSON.stringify(args)}`,
-  );
-  assert.ok(
-    NESTED_SWEEP_CONCURRENCY <= MAX_INTENDED_NESTED_SWEEP_CONCURRENCY,
-    `NESTED_SWEEP_CONCURRENCY is ${NESTED_SWEEP_CONCURRENCY}, which exceeds the pinned ceiling ${MAX_INTENDED_NESTED_SWEEP_CONCURRENCY} -- this is what "reverted to effectively no cap" looks like on ANY machine (a plain numeric comparison, not an execution-based inference), regardless of what that machine's own default concurrency happens to be`,
-  );
+// HYK-371 4R (검토자 3R-1 P1, coder-task.md §2): 3R의 층 2는
+// `buildNestedSweepArgs(["dummy.test.mjs"])`를 **별도로 다시 불러** 그
+// 기본 반환값만 봤다 -- 실제 생산 호출부(`runSweepAndAssert` 안의
+// `buildNestedSweepArgs(swept)` 호출)와는 **연결이 없어서**, 그 호출부
+// 자체를 `buildNestedSweepArgs(swept, 24)`로 몰래 바꾸는 변이가 층 2를
+// 완전히 비켜갔다(검토자 실측: exit 0, tests 3, pass 3, fail 0).
+//
+// 고침: 관측 지점을 «빌더의 기본 반환»에서 **«생산 경로가 실제로 실행한
+// argv»**로 옮긴다. `runSweepAndAssert`(생산 호출부가 실제로 쓰는 바로 그
+// 함수)를 가짜 실행기(fake spawn)로 직접 구동해, 그 함수가 자신의 내부
+// 호출부에서 만들어 낸 argv를 **그대로** 붙잡는다 -- 이제 호출부 자체가
+// 바뀌면(override 추가·다른 값 등) 이 시험이 곧바로 그 실제 argv를 본다.
+// 가짜 실행기는 진짜 `node --test`를 돌리지 않고 통과 모양의 TAP 결과만
+// 합성해 반환하므로(수 ms) 층 2는 여전히 실행 없는 관측만큼 빠르다 --
+// 다만 그 대상이 이제 "생산 코드가 실제로 만든 argv"라는 점이 3R과 다르다.
+test("HYK-371 4R 완료조건① (층 2·계약, 관측 지점 = 생산 경로): 생산 호출부(runSweepAndAssert)가 실제로 실행하는 argv에 --test-concurrency=<의도된 캡>이 있다 -- 빌더의 기본 반환이 아니라 그 호출부 자체를 가짜 실행기로 구동해 실제 argv를 붙잡는다, CPU 수와 무관", () => {
+  const dir = mkdtempSync(join(tmpdir(), "hyk371-4r-contract-"));
+  try {
+    let capturedArgs;
+    const captureSpawn = (cmd, args) => {
+      capturedArgs = args;
+      // Synthesize a passing TAP shape so runSweepAndAssert's OWN parsing/
+      // assertions (which this test still exercises, unmodified) succeed
+      // without a real node --test process ever running.
+      return {
+        status: 0,
+        signal: null,
+        error: undefined,
+        stdout: "# tests 1\n# fail 0\n",
+        stderr: "",
+      };
+    };
+
+    // Same function, same call site logic the real CI-canonical sweep uses
+    // (via runProductionSweep) -- only the executor differs.
+    runSweepAndAssert({
+      root: repoRoot(),
+      swept: ["dummy.test.mjs"],
+      dir,
+      spawn: captureSpawn,
+    });
+
+    assert.ok(
+      capturedArgs,
+      "captureSpawn was never called -- runSweepAndAssert did not reach its executor at all, cannot verify the real argv",
+    );
+    assert.ok(
+      capturedArgs.includes(`--test-concurrency=${NESTED_SWEEP_CONCURRENCY}`),
+      `the argv runSweepAndAssert ACTUALLY executed does not contain "--test-concurrency=${NESTED_SWEEP_CONCURRENCY}" -- captured args: ${JSON.stringify(capturedArgs)}`,
+    );
+    assert.ok(
+      NESTED_SWEEP_CONCURRENCY <= MAX_INTENDED_NESTED_SWEEP_CONCURRENCY,
+      `NESTED_SWEEP_CONCURRENCY is ${NESTED_SWEEP_CONCURRENCY}, which exceeds the pinned ceiling ${MAX_INTENDED_NESTED_SWEEP_CONCURRENCY} -- this is what "reverted to effectively no cap" looks like on ANY machine (a plain numeric comparison, not an execution-based inference), regardless of what that machine's own default concurrency happens to be`,
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
