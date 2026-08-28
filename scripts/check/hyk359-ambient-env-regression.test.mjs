@@ -91,7 +91,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync, execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -117,6 +117,14 @@ import { collectTestFiles } from "./isolated-suite-runner.mjs";
 // 않으므로 커버리지 손실 없이 가시적 피크만 낮춘다(HYK-371 §6 실패조건
 // ⓑ 회피).
 const NESTED_SWEEP_CONCURRENCY = 4;
+// HYK-371 3R (계약, coder-task.md §2 층 2): pinned SEPARATELY from the
+// constant above so a mutation that raises NESTED_SWEEP_CONCURRENCY back up
+// toward "no real cap" is caught by a plain, machine-independent numeric
+// comparison -- no execution, no timing, works identically whether this
+// runs on a 2-core CI box or a 24-core workstation. A deliberate cap-value
+// change (coder-task.md §4 P2-2, still unexplored) updates this constant in
+// the SAME diff, same pattern as EXPECTED_EXCEPTIONS above.
+const MAX_INTENDED_NESTED_SWEEP_CONCURRENCY = 8;
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const THIS_FILE_BASENAME = basename(fileURLToPath(import.meta.url));
@@ -143,19 +151,20 @@ function repoRoot() {
   }).trim();
 }
 
-// HYK-371 2R (불변식 B): the ONE place that builds the nested sweep's
-// `node --test` argv -- both the real CI-canonical sweep below AND the
-// synthetic throttling-observation test further down call this SAME
-// function, so a mutation here (deleting the concurrency flag, or
-// reverting NESTED_SWEEP_CONCURRENCY to Node's default) is exercised by
-// both. Extracted specifically so the observation test can drive it
-// against a small, fast synthetic fixture instead of paying for a second
-// ~280-file sweep just to prove the flag survived.
-function buildNestedSweepArgs(files) {
+// HYK-371 2R (불변식 B) / 3R (층 1·층 2 공용): the ONE place that builds
+// the nested sweep's `node --test` argv -- the real CI-canonical sweep
+// below AND both layer tests further down call this SAME function, so a
+// mutation here (deleting the concurrency flag entirely) is exercised by
+// all three. `concurrency` defaults to the production value
+// (NESTED_SWEEP_CONCURRENCY) but the layer-1 mechanism test below passes
+// its OWN explicit value -- that test isn't about whether production picked
+// 4, it's about whether the `--test-concurrency=N` flag genuinely caps
+// concurrent execution AT ALL, for an N the test controls itself.
+function buildNestedSweepArgs(files, concurrency = NESTED_SWEEP_CONCURRENCY) {
   return [
     "--test",
     "--test-reporter=tap",
-    `--test-concurrency=${NESTED_SWEEP_CONCURRENCY}`,
+    `--test-concurrency=${concurrency}`,
     ...files,
   ];
 }
@@ -324,73 +333,154 @@ test("HYK-359 완료조건4 (3R): CI-canonical 시험 디렉토리 전체(예외
   rmSync(dir, { recursive: true, force: true });
 });
 
-// HYK-371 2R (불변식 B, coder-task.md §3): 완료조건 ⑶("줄인 뒤 같은 보장이
-// 유지된다를 시험으로 고정")은 "동시성 캡이 살아 있다"도 포함한다 -- 1R은
-// argv에 `--test-concurrency=4`를 추가만 했을 뿐, 그걸 지우거나 기본값으로
-// 되돌려도 초록인 채였다(검토자 P1-2).
+// HYK-371 3R (검토자 2R-3 P1, coder-task.md §2): 2R의 "불변식 B" 시험은
+// 8개×500ms 픽스처의 총 소요시간이 900ms를 넘는지로 캡 삭제를 판정했다 --
+// 이 기계(CPU 24, 기본 동시성 23)에서는 안전했지만, 검토자가 4-way CI를
+// `--test-concurrency=3`으로 직접 모델링해 같은 픽스처가 1817ms(>900ms)로
+// 나오는 것을 실측했다: **캡이 삭제됐는데도 GREEN**(거짓 통과) -- 벽시계
+// 임계값은 "이 기계의 기본 동시성이 캡보다 큰가"에 우연히 의존했다.
 //
-// 이상적으로는 "실제 최고 동시 프로세스 수"를 재는 것이지만, coder-task.md
-// §3이 지적한 대로 그건 비싸고(전체 스윕 재실행) 기계 부하에 흔들린다
-// (1R 실측: 같은 커밋도 실행마다 수십 초·수십 개 차이). 그렇다고 "argv에
-// 그 문자열이 있는가"만 보는 건 이 하네스가 여러 번 물린 형태 검사다.
+// 3R 완료조건③(coder-task.md): 시간 임계 시험은 걷어내고(대체이지 추가가
+// 아니다) 기계-무관 불변식으로 바꾼다. 채택한 설계(ORCH 분석, coder-task.md
+// §2 층 1·층 2 -- 검증해 그대로 채택, 반박 못 찾음):
 //
-// 채택한 절충 -- **작은 합성 픽스처로 실제 스로틀링을 관측**: 8개의 합성
-// `.test.mjs`(각각 500ms 슬립)를 만들어 `buildNestedSweepArgs`(실제
-// 스윕이 쓰는 바로 그 함수)로 돌리고 총 소요시간을 잰다. concurrency=4면
-// 8개가 2묶음(≥2*500ms)으로 나뉘어 도니 소요시간이 눈에 띄게 길고,
-// concurrency가 지워지거나 기본값(이 기계 CPU 24 → 기본 23)으로 돌아가면
-// 8개가 한 묶음(~500ms+오버헤드)으로 끝나 짧다. 실측 보정(이 기계, 같은
-// 조건 3회): 캡 있음 1237~1272ms / 캡 없음 677~691ms -- 여유 있게 갈리므로
-// 임계값 900ms로 판정.
-//
-// ★이 시험이 증명하는 것: `buildNestedSweepArgs`가 만드는 argv가 "지금 이
-// 순간 이 기계에서" 실제로 동시성을 묶는다는 것(순수 argv 형태 검사보다
-// 강함 -- 실행 결과를 관측한다).
-// ★이 시험이 증명하지 «않는» 것: ⓐ 실제 288개 파일 CI-canonical 스윕이
-// 이 픽스처와 같은 배치 패턴을 보인다는 것(파일마다 소요시간이 다르고
-// I/O·CPU 경합도 다르다) ⓑ 최고 «OS 프로세스 수»가 정확히 얼마인지(여기선
-// 벽시계로 스로틀링을 «추론»할 뿐, 프로세스를 세지 않는다) ⓒ `4`가 최적값
-// 이라는 것(1R coder.md·2R coder.md에 정직하게 남긴 미결 사항).
-test("HYK-371 2R 완료조건⑶ (불변식 B): 중첩 스윕의 동시성 캡이 실제로 스로틀한다 -- 캡 인자를 지우거나 기본 동시성으로 되돌리면 합성 픽스처의 소요시간이 짧아져 RED", () => {
-  const dir = mkdtempSync(join(tmpdir(), "hyk371-concurrency-throttle-"));
-  try {
-    const SLEEP_MS = 500;
-    const FIXTURE_COUNT = 8;
-    const fixtureFiles = Array.from(
-      { length: FIXTURE_COUNT },
-      (_, i) => `sleep-${i}.test.mjs`,
-    );
-    for (const name of fixtureFiles) {
-      writeFileSync(
-        join(dir, name),
-        `import { test } from "node:test";\ntest("sleep", async () => { await new Promise((r) => setTimeout(r, ${SLEEP_MS})); });\n`,
-        "utf8",
-      );
-    }
+// ★층 1(기전, 이 아래) -- `--test-concurrency=N` 인자가 실제로 최대 동시
+// 실행 수를 N 이하로 묶는다는 것을, 벽시계 임계값 없이 증명한다. 각 합성
+// 픽스처가 스스로 시작·종료 시각(epoch ms)을 파일에 남기고, 부모가 그
+// 구간들의 최대 동시 겹침 수를 스윕라인으로 센다 -- "얼마나 걸렸는가"가
+// 아니라 "몇 개가 동시에 떠 있었는가"만 보므로 기계 속도와 무관하다. 캡을
+// 시험이 직접 지정(2)하므로 생산 코드의 NESTED_SWEEP_CONCURRENCY 값과도
+// 무관 -- 이건 "N을 지정하면 Node가 실제로 N을 지킨다"는 기전 자체를
+// 증명하는 시험이다.
+// ★층 2(계약, 더 아래) -- 생산 코드가 실제로 그 인자를 넘긴다는 것을,
+// 실행 없이 순수 문자열/숫자 비교로 증명한다. 인자가 삭제되면 문자열이
+// 없어 RED, 상수가 "사실상 무제한"으로 되돌아가면(MAX_INTENDED_
+// NESTED_SWEEP_CONCURRENCY 초과) 숫자 비교로 RED -- 실행이 없으므로 CI의
+// CPU 수와 무관하게 항상 같은 결과.
+// ★층 1만으로는 "생산 코드가 실제로 그 인자를 넘기는가"를 못 잡고(기전은
+// 검증하지만 호출 여부는 안 봄), 층 2만으로는 "입력의 모양" 검사라 그
+// 값이 정말 동시성을 묶는지는 안 본다 -- **둘이 함께여야** "캡이 사라지면
+// 어느 기계에서도 RED"라는 불변식이 선다.
+function computeMaxOverlap(intervals) {
+  // Sweep-line over epoch-ms start/end events. Ties are processed
+  // end-before-start (delta -1 sorts before +1 at the same timestamp) --
+  // a conservative choice that never OVERcounts overlap from millisecond
+  // rounding, only ever undercounts it, so it can't produce a false RED on
+  // the "capped" assertion below.
+  const events = intervals.flatMap(({ start, end }) => [
+    [start, 1],
+    [end, -1],
+  ]);
+  events.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+  let current = 0;
+  let max = 0;
+  for (const [, delta] of events) {
+    current += delta;
+    if (current > max) max = current;
+  }
+  return max;
+}
 
-    const t0 = Date.now();
-    const res = spawnSync(
+// Generates one synthetic `.test.mjs` that sleeps `sleepMs`, then writes
+// its own {start, end} (epoch ms) to `<name>.times.json` in the same dir --
+// each child reports its own wall-clock interval, so the parent can later
+// reconstruct exactly how many ran concurrently without polling processes
+// or trusting anything about the parent's own view of timing.
+function writeIntervalFixture(dir, name, sleepMs) {
+  const timesPath = join(dir, `${name}.times.json`);
+  writeFileSync(
+    join(dir, `${name}.test.mjs`),
+    [
+      `import { test } from "node:test";`,
+      `import { writeFileSync } from "node:fs";`,
+      `test("interval", async () => {`,
+      `  const start = Date.now();`,
+      `  await new Promise((r) => setTimeout(r, ${sleepMs}));`,
+      `  const end = Date.now();`,
+      `  writeFileSync(${JSON.stringify(timesPath)}, JSON.stringify({ start, end }));`,
+      `});`,
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+  return { testFile: `${name}.test.mjs`, timesPath };
+}
+
+test("HYK-371 3R 완료조건② (층 1·기전): --test-concurrency=N 인자가 최대 동시 실행 수를 실제로 N 이하로 묶는다 -- 벽시계 임계값 없이, 자식이 스스로 남긴 시작·종료 시각의 최대 겹침으로 결정론적 관측(기계 무관)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "hyk371-3r-mechanism-"));
+  try {
+    const SLEEP_MS = 300;
+    const CAP = 2;
+    // A second, larger explicit concurrency (not "no flag") to prove this
+    // fixture is CAPABLE of overlapping beyond CAP when allowed to -- sleep
+    // is non-CPU-bound (an idle timer), so even a low-core-count machine
+    // can run many sleeping children "concurrently" (nothing is competing
+    // for CPU while they wait). Without this comparison run, a fixture that
+    // happened to never overlap at all would make the CAP assertion below
+    // vacuously true regardless of whether the flag does anything.
+    const HIGH_CONCURRENCY = 8;
+    const FIXTURE_COUNT = 8;
+
+    const capped = Array.from({ length: FIXTURE_COUNT }, (_, i) =>
+      writeIntervalFixture(dir, `capped-${i}`, SLEEP_MS),
+    );
+    const cappedRes = spawnSync(
       process.execPath,
-      buildNestedSweepArgs(fixtureFiles),
+      buildNestedSweepArgs(
+        capped.map((f) => f.testFile),
+        CAP,
+      ),
       { cwd: dir, encoding: "utf8", env: envWithoutTestMarkers() },
     );
-    const elapsedMs = Date.now() - t0;
-
     assert.equal(
-      res.status,
+      cappedRes.status,
       0,
-      `synthetic throttling fixture itself failed to run cleanly (status=${res.status}, signal=${res.signal}) -- stderr: ${(res.stderr ?? "").slice(-2000)}`,
+      `capped mechanism fixture failed to run cleanly (status=${cappedRes.status}) -- stderr: ${(cappedRes.stderr ?? "").slice(-2000)}`,
     );
-    // 실측 보정치(위 주석): 캡 있음 ~1.24s / 캡 없음 ~0.68s. 900ms는 그
-    // 사이 여유 구간 -- 캡이 지워지거나(인자 삭제) 기본 동시성으로
-    // 되돌아가면(NESTED_SWEEP_CONCURRENCY를 큰 값으로 변경) 8개가 한
-    // 묶음으로 끝나 이 임계값 아래로 떨어져 RED가 된다.
-    const THROTTLE_EVIDENCE_THRESHOLD_MS = 900;
+    const cappedOverlap = computeMaxOverlap(
+      capped.map((f) => JSON.parse(readFileSync(f.timesPath, "utf8"))),
+    );
     assert.ok(
-      elapsedMs >= THROTTLE_EVIDENCE_THRESHOLD_MS,
-      `${FIXTURE_COUNT} synthetic ${SLEEP_MS}ms-sleep test files finished in ${elapsedMs}ms (< ${THROTTLE_EVIDENCE_THRESHOLD_MS}ms) -- looks like they ran in a single unthrottled batch, meaning the nested sweep's concurrency cap (NESTED_SWEEP_CONCURRENCY=${NESTED_SWEEP_CONCURRENCY}, via buildNestedSweepArgs) is not actually limiting concurrency anymore`,
+      cappedOverlap <= CAP,
+      `--test-concurrency=${CAP} produced a max observed overlap of ${cappedOverlap} (> ${CAP}) -- the flag is not actually limiting concurrent execution`,
+    );
+
+    const uncapped = Array.from({ length: FIXTURE_COUNT }, (_, i) =>
+      writeIntervalFixture(dir, `uncapped-${i}`, SLEEP_MS),
+    );
+    const uncappedRes = spawnSync(
+      process.execPath,
+      buildNestedSweepArgs(
+        uncapped.map((f) => f.testFile),
+        HIGH_CONCURRENCY,
+      ),
+      { cwd: dir, encoding: "utf8", env: envWithoutTestMarkers() },
+    );
+    assert.equal(
+      uncappedRes.status,
+      0,
+      `high-concurrency comparison fixture failed to run cleanly (status=${uncappedRes.status}) -- stderr: ${(uncappedRes.stderr ?? "").slice(-2000)}`,
+    );
+    const uncappedOverlap = computeMaxOverlap(
+      uncapped.map((f) => JSON.parse(readFileSync(f.timesPath, "utf8"))),
+    );
+    assert.ok(
+      uncappedOverlap > CAP,
+      `with --test-concurrency=${HIGH_CONCURRENCY}, max observed overlap was only ${uncappedOverlap} (expected > ${CAP}) -- this fixture doesn't demonstrate real concurrency at all on this machine, so the capped assertion above would be vacuous (not evidence the flag does anything)`,
     );
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("HYK-371 3R 완료조건① (층 2·계약): 생산 argv가 항상 --test-concurrency=<의도된 캡>을 포함한다 -- 실행 없이 순수 문자열/숫자 비교이므로 CPU 수와 무관하게 캡 삭제·완화가 항상 RED", () => {
+  const args = buildNestedSweepArgs(["dummy.test.mjs"]);
+  assert.ok(
+    args.includes(`--test-concurrency=${NESTED_SWEEP_CONCURRENCY}`),
+    `production argv (via buildNestedSweepArgs's default concurrency) does not contain "--test-concurrency=${NESTED_SWEEP_CONCURRENCY}" -- args: ${JSON.stringify(args)}`,
+  );
+  assert.ok(
+    NESTED_SWEEP_CONCURRENCY <= MAX_INTENDED_NESTED_SWEEP_CONCURRENCY,
+    `NESTED_SWEEP_CONCURRENCY is ${NESTED_SWEEP_CONCURRENCY}, which exceeds the pinned ceiling ${MAX_INTENDED_NESTED_SWEEP_CONCURRENCY} -- this is what "reverted to effectively no cap" looks like on ANY machine (a plain numeric comparison, not an execution-based inference), regardless of what that machine's own default concurrency happens to be`,
+  );
 });
