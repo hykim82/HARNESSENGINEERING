@@ -99,6 +99,27 @@ export const DEFAULT_STALL_GRACE_MULTIPLIER = 2;
 // 깎아 쓰면 호출자가 자신이 준 값이 안 먹혔다는 것을 영영 모른다).
 export const MAX_STALL_GRACE_MULTIPLIER = 4;
 
+// ★HYK-378 3R(REVIEW P1-1 재반려 수리 -- ORCH 재설계 지시 그대로) -- 2R은
+// «새 인자»(stallGraceMultiplier)만 검증했지, 곱셈의 다른 항인 기존
+// `stallThresholdMs`는 여전히 "유한·양수"뿐이었다. `Number.MAX_VALUE`는
+// 유한하지만 `stallThresholdMs * stallGraceMultiplier`가 부동소수점
+// 오버플로로 `Infinity`가 된다 -- 이 값은 기존 CLI `--stall-threshold-ms`
+// 로 그대로 전달 가능해 운영 경로에서도 재현됐다(검토자 실측). ★수리
+// 원칙(불변식 G) -- 개별 인자를 검증하는 대신 **"무증가 허용으로 실제
+// 쓰이는 값"(effectiveStallThresholdMs) 자체에 절대 상한을 건다**: 아래
+// `judgeFromGrowthHistory`가 유예 적용 여부와 무관하게 이 값을
+// `Math.min(..., MAX_EFFECTIVE_STALL_THRESHOLD_MS)`으로 클램프한다.
+// `Math.min(Infinity, cap)`은 항상 `cap`이므로, 두 인자의 곱이 오버플로로
+// `Infinity`가 되든, 그냥 큰 유한값이 되든 결과는 always bounded --
+// "어떤 인자 조합으로도"(불변식 G 문구 그대로)를 인자별 검증이 아니라
+// 결과값 클램프로 만족시킨다. 값 = 기본 유예 상한(6분)의 5배(30분) --
+// 정상적인 큰 `stallThresholdMs` 설정(예: 부하 큰 CI에서 10분 무증가
+// 허용)까지는 여유를 주되, "10억 ms"류 공격값과는 수 자릿수 차이 나게
+// 낮게 잡는다(호출자가 언제든 다른 값으로 덮어쓸 수 있다 -- 하드코딩
+// 아님, 다만 검증 단계가 아니라 결과 클램프이므로 거부 사유는 안 남는다
+// -- §신호·눈멂 표 "곱셈 오버플로" 행 참조).
+export const MAX_EFFECTIVE_STALL_THRESHOLD_MS = 30 * 60 * 1000;
+
 function isPlainObject(v) {
   return v !== null && typeof v === "object" && !Array.isArray(v);
 }
@@ -257,15 +278,29 @@ function judgeFromGrowthHistory({
   // 그대로 잡힌다(B 보존) -- ★2R: 마감이 lastGrowthAtMs가 아니라
   // sustainedAtMs에 고정되므로, 소량 증가를 반복해도 마감이 갱신되지
   // 않는다(P1-1 "359,999ms마다 1B" 회귀 가드).
+  // ★3R(P1-1 재반려 수리) -- 마감 계산 자체도 클램프된 유예 폭
+  // (cappedGraceSpanMs)으로 한다. 클램프 전 원값(stallThresholdMs *
+  // stallGraceMultiplier)이 오버플로로 `Infinity`가 되면 마감 시각도
+  // `Infinity`가 돼 "영원히 유예 적용됨"이 성립해 버리므로, 마감 계산에
+  // 들어가는 폭 자체를 먼저 절대 상한(MAX_EFFECTIVE_STALL_THRESHOLD_MS)
+  // 으로 자른다.
+  const cappedGraceSpanMs = Math.min(
+    stallThresholdMs * stallGraceMultiplier,
+    MAX_EFFECTIVE_STALL_THRESHOLD_MS,
+  );
   const graceDeadlineMs =
-    sustainedAtMs === null
-      ? null
-      : sustainedAtMs + stallThresholdMs * stallGraceMultiplier;
+    sustainedAtMs === null ? null : sustainedAtMs + cappedGraceSpanMs;
   const sustainedGrowthApplied =
     graceDeadlineMs !== null && now <= graceDeadlineMs;
-  const effectiveStallThresholdMs = sustainedGrowthApplied
-    ? stallThresholdMs * stallGraceMultiplier
-    : stallThresholdMs;
+  // ★3R(P1-1 재반려 수리, 불변식 G) -- 유예 미적용 분기(기본
+  // `stallThresholdMs` 그대로)도 같은 절대 상한으로 클램프한다 --
+  // `stallThresholdMs` 자체가 이미 거대하면(배수 곱 없이도) "사실상
+  // 무증가 허용 무제한"과 같은 결과이므로, "곱셈 결과"뿐 아니라 이 축이
+  // 실제로 판정에 쓰는 값 어디든 이 절대 상한을 벗어나지 않는다.
+  const effectiveStallThresholdMs = Math.min(
+    sustainedGrowthApplied ? cappedGraceSpanMs : stallThresholdMs,
+    MAX_EFFECTIVE_STALL_THRESHOLD_MS,
+  );
 
   const sinceGrowth = now - lastGrowthAtMs;
   if (sinceGrowth > effectiveStallThresholdMs) {

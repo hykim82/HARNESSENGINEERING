@@ -9,6 +9,7 @@ import {
   DEFAULT_SUSTAINED_GROWTH_BYTES,
   DEFAULT_STALL_GRACE_MULTIPLIER,
   MAX_STALL_GRACE_MULTIPLIER,
+  MAX_EFFECTIVE_STALL_THRESHOLD_MS,
 } from "./dispatch-start-size-core.mjs";
 
 test("judgeDispatchStartBySize: args가 plain object 아니면 UNDECIDABLE/ARGS_INVALID", () => {
@@ -437,4 +438,134 @@ test("★완료조건2(진짜 정지, 합성 표본): 증가 0(=새 축도 못 �
     stallThresholdMs: DEFAULT_STALL_THRESHOLD_MS,
   });
   assert.equal(r.verdict, DISPATCH_START_SIZE_VERDICT.NOT_STARTED);
+});
+
+// ---------------------------------------------------------------------------
+// ★HYK-378 3R(REVIEW P1-1 재반려 재현+수리) -- 검토자의 정확한 재현 수치
+// 그대로: `0B → 50,001B`(sustained 켜짐), 마지막 증가 후
+// `1,000,000,000ms` 무증가, `stallThresholdMs: Number.MAX_VALUE`(유한하지만
+// 배수(기본 2)와 곱하면 부동소수점 오버플로로 `Infinity`). 2R까지는
+// `stallGraceMultiplier`만 검증했지 이 기존 인자는 "유한·양수"뿐이라
+// 이 공격이 `STARTED`로 샜다 -- ★3R은 곱셈 "결과"(effectiveStallThresholdMs)
+// 자체를 절대 상한으로 클램프해 인자 조합과 무관하게 막는다.
+test("★HYK-378 3R P1-1 재현+수리(숫자로): stallThresholdMs=Number.MAX_VALUE(유한)로 곱셈 오버플로를 노려도 STARTED가 아니다", () => {
+  const SUSTAINED_AT_MS = 1000;
+  const r = judgeDispatchStartBySize({
+    observations: [
+      { observedAtMs: 0, totalBytes: 0 },
+      {
+        observedAtMs: SUSTAINED_AT_MS,
+        totalBytes: DEFAULT_SUSTAINED_GROWTH_BYTES + 1, // 50,001B -- sustained 켜짐.
+      },
+      {
+        observedAtMs: SUSTAINED_AT_MS + 1_000_000_000,
+        totalBytes: DEFAULT_SUSTAINED_GROWTH_BYTES + 1, // 그 뒤 10억ms 무증가.
+      },
+    ],
+    dispatchedAtMs: 0,
+    now: SUSTAINED_AT_MS + 1_000_000_000,
+    timeoutMs: DEFAULT_TIMEOUT_MS,
+    stallThresholdMs: Number.MAX_VALUE, // 유한하지만 배수와 곱하면 오버플로.
+  });
+  // 검증: 곱셈 자체가 실제로 오버플로되는지(이 시험이 재현하려는 정확한
+  // 산술 조건) -- 아니면 이 시험이 증명하는 바가 없다.
+  assert.equal(
+    Number.MAX_VALUE * DEFAULT_STALL_GRACE_MULTIPLIER,
+    Infinity,
+    "이 시험의 전제(곱셈 오버플로) 자체가 성립해야 한다",
+  );
+  assert.notEqual(
+    r.verdict,
+    DISPATCH_START_SIZE_VERDICT.STARTED,
+    "10억ms 무증가가 STARTED로 새면 «상한이 곱셈 결과에 걸린다»는 불변식 G가 깨진 것",
+  );
+  assert.equal(r.verdict, DISPATCH_START_SIZE_VERDICT.STALLED_AFTER_START);
+  assert.equal(
+    r.details.effectiveStallThresholdMs,
+    MAX_EFFECTIVE_STALL_THRESHOLD_MS,
+    "클램프된 값이 정확히 절대 상한이어야 한다(Infinity가 살아남으면 안 된다)",
+  );
+});
+
+// ★되돌림 변이(§5 요구) -- 클램프(Math.min)를 제거하면(=절대 상한 미적용)
+// 위 표본이 다시 STARTED로 RED가 됨을 숫자로 보인다.
+test("★되돌림 변이: effectiveStallThresholdMs 클램프를 제거하면(수동 재현) STARTED로 RED가 된다", () => {
+  // 클램프 없이 코어와 동일한 산술을 그대로 재현 -- 코어 파일을 건드리지
+  // 않고 "이 축을 껐을 때 나오는 값"만 별도로 계산해 대조한다(코어
+  // mutation 시험은 dispatch-start-size-core.test.mjs 밖 hyk274 가드가
+  // 이미 이 파일에 대해 하는 방식과 결이 다르므로, 여기서는 산술적
+  // 동치성으로 "클램프가 실제로 결과를 바꾼다"를 증명한다).
+  const stallThresholdMs = Number.MAX_VALUE;
+  const stallGraceMultiplier = DEFAULT_STALL_GRACE_MULTIPLIER;
+  const unclampedEffective = stallThresholdMs * stallGraceMultiplier;
+  const now = 1000 + 1_000_000_000;
+  const lastGrowthAtMs = 1000;
+  const sinceGrowth = now - lastGrowthAtMs;
+  assert.equal(
+    sinceGrowth > unclampedEffective,
+    false,
+    "클램프 없이 계산하면(Infinity와 비교) 10억ms도 «무증가 허용 안»으로 판정돼 STARTED가 나왔을 것 -- 이게 2R까지의 실제 버그였다",
+  );
+});
+
+// ---------------------------------------------------------------------------
+// ★HYK-378 3R(REVIEW P2-a 대응, 불변식 I "계약을 명시하고 시험으로
+// 고정") -- `computeSustainedAtMs`/`sustainedAtMs`는 호출자가 "배달
+// 이후의 관측 전체(빠짐없이)"를 넘긴다는 것을 전제한다. 그 전제가
+// 깨지면(중간 관측을 잘라내면) 앵커가 재계산된다 -- 이 코어는 순수
+// 함수라 자신에게 전달되지 «않은» 과거를 알 방법이 원리적으로 없다
+// (영속 상태를 코어에 두면 "I/O 0, 순수 함수" 설계를 깬다, 이번 라운드
+// 범위 밖). ★현재의 유일한 소비자 `runDispatchStartConfirm`은 이력을
+// 절대 자르지 않는다(매 폴링마다 누적만 함, dispatch-start-confirm-cli.mjs
+// 실측) -- 그래서 이 계약 위반은 "미래의 다른 소비자"에게만 열려 있는
+// 위험이다. 검토자 실측 재현 그대로: 첫 임계 교차 관측을 제거하면
+// 앵커가 재계산돼 같은 시각에 STARTED가 나온다 -- 이 시험은 그 사실을
+// **버그가 아니라 명시된 계약(GIGO)으로 고정**한다.
+test("★계약 고정(P2-a, 되돌리지 않음): 관측 이력에서 첫 임계 교차 관측을 잘라내면 sustainedAtMs가 재계산된다(호출자는 전체 이력을 넘겨야 한다는 계약)", () => {
+  const full = judgeDispatchStartBySize({
+    observations: [
+      { observedAtMs: 0, totalBytes: 0 },
+      { observedAtMs: 1000, totalBytes: DEFAULT_SUSTAINED_GROWTH_BYTES + 1 },
+      {
+        observedAtMs: 360999,
+        totalBytes: DEFAULT_SUSTAINED_GROWTH_BYTES + 2,
+      },
+      {
+        observedAtMs: 541000,
+        totalBytes: DEFAULT_SUSTAINED_GROWTH_BYTES + 2,
+      },
+    ],
+    dispatchedAtMs: 0,
+    now: 541000,
+    timeoutMs: DEFAULT_TIMEOUT_MS,
+    stallThresholdMs: DEFAULT_STALL_THRESHOLD_MS,
+  });
+  // 전체 이력 -- 고정 앵커(1000ms) 기준 마감(361000ms)을 넘겨 STALLED.
+  assert.equal(full.verdict, DISPATCH_START_SIZE_VERDICT.STALLED_AFTER_START);
+
+  const truncated = judgeDispatchStartBySize({
+    observations: [
+      { observedAtMs: 0, totalBytes: 0 },
+      // ★1000ms 시점의 교차 관측을 «호출자가» 잘라냈다 -- 코어는 이
+      // 결손을 알 도리가 없다(계약 위반, GIGO).
+      {
+        observedAtMs: 360999,
+        totalBytes: DEFAULT_SUSTAINED_GROWTH_BYTES + 2,
+      },
+      {
+        observedAtMs: 541000,
+        totalBytes: DEFAULT_SUSTAINED_GROWTH_BYTES + 2,
+      },
+    ],
+    dispatchedAtMs: 0,
+    now: 541000,
+    timeoutMs: DEFAULT_TIMEOUT_MS,
+    stallThresholdMs: DEFAULT_STALL_THRESHOLD_MS,
+  });
+  // 잘린 이력 -- 앵커가 360999ms로 재계산돼 마감이 아직 안 지나 STARTED.
+  // ⚠️의도된 동작 확인(고치는 시험이 아니다) -- 이 코어는 "이번 호출에
+  // 주어진 이력"만으로 판정한다. 계약(전체 이력)을 지키는 것은 호출자
+  // 몫이다(현재 유일한 소비자 runDispatchStartConfirm은 지킨다 -- 아래
+  // dispatch-start-confirm-cli.test.mjs가 그 사실을 검증).
+  assert.equal(truncated.verdict, DISPATCH_START_SIZE_VERDICT.STARTED);
 });

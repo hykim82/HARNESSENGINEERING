@@ -31,7 +31,12 @@ test("collectTotalSessionBytes: 디렉터리 없음 -> 정상(totalBytes:0), 결
       },
     },
   );
-  assert.deepEqual(r, { ok: true, totalBytes: 0, fileCount: 0 });
+  assert.deepEqual(r, {
+    ok: true,
+    totalBytes: 0,
+    fileCount: 0,
+    excludedSymlinkCount: 0,
+  });
 });
 
 test("collectTotalSessionBytes: ENOENT 아닌 열거 실패 -> ok:false(조용함으로 접지 않는다)", () => {
@@ -311,6 +316,96 @@ test("★HYK-378 2R P2 정책 고정: 프로젝트 밖을 가리키는 심볼릭
         "링크가 가리키는 밖의 400B가 섞여 들어오면 안 된다",
       );
       assert.equal(r.fileCount, 1, "링크 자체도 개수에서 제외된다");
+      assert.equal(
+        r.excludedSymlinkCount,
+        1,
+        "★3R -- 배제 진단 신호(불변식 I)가 결과에 남아야 한다",
+      );
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ★HYK-378 3R(REVIEW P1-2 재반려 재현+수리) -- 검토자의 정확한 재현: 프로젝트
+// 아래 `session`을 외부 디렉터리를 가리키는 junction으로 만들고 그 밖의
+// `subagents/agent.jsonl` 400B를 두면, 2R까지는 `entry` 자신(디렉터리
+// 항목)을 lstat하지 않아 `ok:true,totalBytes:400,fileCount:1`로 새어
+// 나갔다. ★수리 후에는 그 디렉터리 항목 자체가 링크임을 먼저 확인해
+// 안을 들여다보지도 않는다.
+test("★HYK-378 3R P1-2 재현+수리: 세션 디렉터리 자체가 junction이면 그 안의 파일까지 통째로 제외된다(파일 링크뿐 아니라 디렉터리 링크도 안 따라감)", () => {
+  withTempDir("dss-dirjunction-", (home) => {
+    withTempDir("dss-dirjunction-outside-", (outside) => {
+      const projectDir = join(
+        home,
+        "projects",
+        deriveClaudeProjectDirName("C:\\wt"),
+      );
+      mkdirSync(projectDir, { recursive: true });
+      writeFileSync(join(projectDir, "main.jsonl"), "x".repeat(100), "utf8");
+
+      // 프로젝트 밖 -- 신뢰 경계 밖 데이터.
+      const outsideSubagents = join(outside, "subagents");
+      mkdirSync(outsideSubagents, { recursive: true });
+      writeFileSync(
+        join(outsideSubagents, "agent.jsonl"),
+        "x".repeat(400),
+        "utf8",
+      );
+
+      // "session" 항목 자체가 밖을 가리키는 junction -- ★검토자의 정확한
+      // 재현 레이아웃.
+      const sessionLink = join(projectDir, "session");
+      symlinkSync(outside, sessionLink, "junction");
+
+      const r = collectTotalSessionBytes(
+        { repoRoot: "C:\\wt", claudeHomeDir: home },
+        { readdirFn: (p) => readdirSync(p) },
+      );
+      assert.equal(r.ok, true);
+      assert.equal(
+        r.totalBytes,
+        100,
+        "junction 밖의 400B가 섞여 들어오면 안 된다(2R까지는 500B로 샜다)",
+      );
+      assert.equal(r.fileCount, 1);
+      assert.equal(
+        r.excludedSymlinkCount,
+        1,
+        "디렉터리 링크 배제도 진단 신호에 잡혀야 한다",
+      );
+    });
+  });
+});
+
+test("collectTotalSessionBytes: excludedSymlinkCount는 파일 링크 + 디렉터리 링크를 합산한다", () => {
+  withTempDir("dss-mixed-links-", (home) => {
+    withTempDir("dss-mixed-links-outside-", (outside) => {
+      const projectDir = join(
+        home,
+        "projects",
+        deriveClaudeProjectDirName("C:\\wt"),
+      );
+      mkdirSync(projectDir, { recursive: true });
+      writeFileSync(join(projectDir, "main.jsonl"), "x".repeat(10), "utf8");
+
+      // 파일 링크 1개.
+      const outsideFile = join(outside, "outside.jsonl");
+      writeFileSync(outsideFile, "x".repeat(20), "utf8");
+      symlinkSync(outsideFile, join(projectDir, "linked.jsonl"), "file");
+
+      // 디렉터리 링크 1개.
+      const outsideDir = join(outside, "outside-dir");
+      mkdirSync(outsideDir, { recursive: true });
+      symlinkSync(outsideDir, join(projectDir, "linked-session"), "junction");
+
+      const r = collectTotalSessionBytes(
+        { repoRoot: "C:\\wt", claudeHomeDir: home },
+        { readdirFn: (p) => readdirSync(p) },
+      );
+      assert.equal(r.ok, true);
+      assert.equal(r.totalBytes, 10);
+      assert.equal(r.fileCount, 1);
+      assert.equal(r.excludedSymlinkCount, 2);
     });
   });
 });

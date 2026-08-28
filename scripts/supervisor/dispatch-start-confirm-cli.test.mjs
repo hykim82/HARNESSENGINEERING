@@ -12,6 +12,7 @@ import {
   DISPATCH_START_CONFIRM_STATUS,
   DISPATCH_START_CONFIRM_EXIT_CODE,
 } from "./dispatch-start-confirm-cli.mjs";
+import { MAX_EFFECTIVE_STALL_THRESHOLD_MS } from "./dispatch-start-size-core.mjs";
 
 function withTempDir(prefix, fn) {
   const dir = mkdtempSync(join(tmpdir(), prefix));
@@ -101,6 +102,38 @@ test("★★2R 반례: 한 번만 늘고(0->5000) 그 뒤 계속 그대로면(�
     DISPATCH_START_CONFIRM_STATUS.STALLED_AFTER_START,
   );
   assert.equal(result.details.lastGrowthAtMs, 15000);
+});
+
+// ★HYK-378 3R(REVIEW P1-1 재반려 재현+수리) -- 검토자가 "프로덕션
+// runDispatchStartConfirm 결선에서도 재현됐다"고 명시적으로 요구한
+// 결선 시험. `--stall-threshold-ms`(기존 CLI 인자)로 실제 전달 가능한
+// `Number.MAX_VALUE`를 그대로 주입해 이 결선 레벨에서도 곱셈 오버플로가
+// 더 이상 STARTED로 새지 않음을 확인한다.
+test("★HYK-378 3R P1-1 결선 재현+수리: stallThresholdMs=Number.MAX_VALUE(기존 CLI 인자로 전달 가능)를 줘도 결선 레벨에서 STALLED_AFTER_START로 잡힌다", async () => {
+  let call = 0;
+  const sizes = [0, 50001]; // 2번째 이후로는 계속 50,001(무증가)만 반환 -- sustained 켜짐.
+  const collectFn = () => ({
+    ok: true,
+    totalBytes: sizes[Math.min(call++, sizes.length - 1)],
+  });
+  const result = await runDispatchStartConfirm({
+    repoRoot: "C:\\wt",
+    dispatchedAtMs: 0,
+    timeoutMs: MAX_EFFECTIVE_STALL_THRESHOLD_MS + 10_000,
+    stallThresholdMs: Number.MAX_VALUE, // ★검토자 실측 그대로 -- 유한이지만 오버플로 유발.
+    // 절대 상한을 몇 번의 폴링 안에 확실히 «넘기도록»(경계값과 겹치지
+    // 않게 +1) 큰 보폭을 준다 -- 마감과 정확히 같은 시각이면 "그 이내"
+    // (sinceGrowth<=threshold)로 아직 STARTED다.
+    pollIntervalMs: MAX_EFFECTIVE_STALL_THRESHOLD_MS + 1,
+    now: fakeClock(0, MAX_EFFECTIVE_STALL_THRESHOLD_MS + 1),
+    sleepFn: instantSleep,
+    collectFn,
+  });
+  assert.equal(
+    result.status,
+    DISPATCH_START_CONFIRM_STATUS.STALLED_AFTER_START,
+    "곱셈 오버플로(Number.MAX_VALUE * 배수 = Infinity)가 결선 레벨에서도 STARTED로 새면 안 된다",
+  );
 });
 
 test("관측 수집 자체가 실패하면 즉시 COLLECTION_FAILED로 멈춘다(조용히 STARTED로 접지 않는다)", async () => {

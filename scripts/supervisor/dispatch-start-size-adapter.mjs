@@ -21,6 +21,23 @@ export const DISPATCH_START_SIZE_COLLECT_REASON = Object.freeze({
 // 등)는 실패로 전파한다(불변식 E).
 const BENIGN_SUBAGENT_ENUMERATION_CODES = new Set(["ENOENT", "ENOTDIR"]);
 
+// ★HYK-378 3R(REVIEW P1-2 재반려 수리) -- `statSync`/`lstatSync`가 링크를
+// 판정하는 대상은 "파일"만이 아니다. 2R은 각 후보 **파일**에만 `lstatFn`을
+// 적용해 심볼릭 링크를 걸렀지만, 그 파일에 도달하기 전에 거치는
+// **디렉터리 항목**(세션 UUID 폴더 자신)이 프로젝트 "밖"을 가리키는
+// junction/symlink인지는 전혀 확인하지 않았다 -- 검토자 실측: 프로젝트
+// 아래 `session` 자체를 junction으로 만들면 그 밖의 `subagents/agent.jsonl`
+// 400B가 그대로 집계됐다(파일 링크 정책과 실제 구현이 불일치). ★불변식
+// H(«항목 종류에 안 걸린다») 그대로: 이 함수가 그 디렉터리 항목
+// 자신을 먼저 `lstatFn`으로 확인해 링크면 재귀하지 않는다(그 폴더
+// 자체를 신뢰 안 함 -- 안에 뭐가 있는지도 안 본다).
+function isSymlink(candidatePath, lstatFn) {
+  return lstatFn(candidatePath).isSymbolicLink();
+}
+
+// collectSubagentJsonlPaths(projectDir, entryName, {readdirFn, lstatFn}) ->
+// {ok, paths, excludedSymlinkCount} | {ok:false, reasonCode, detail}
+//
 // ★HYK-378 -- 하위 에이전트(subagent) 전사록은 최상위 프로젝트 디렉터리에
 // 바로 안 쌓이고 `<프로젝트디렉터리>/<세션UUID>/subagents/agent-*.jsonl`에
 // 별도로 쌓인다(실측: HYK-337 표본 1이 실제로 남긴 레이아웃 그대로 --
@@ -33,15 +50,40 @@ const BENIGN_SUBAGENT_ENUMERATION_CODES = new Set(["ENOENT", "ENOTDIR"]);
 // 관측한 적이 없다 -- 관측 안 된 형태까지 선제로 재귀를 넓히는 것은
 // 과설계다(§0 항목·coder-task.md 반복 지시). 그런 레이아웃이 실제로
 // 나타나면 그때 재귀 깊이를 넓히고 그 근거를 여기 남긴다.
-function collectSubagentJsonlPaths(projectDir, entryName, readdirFn) {
-  const subagentsDir = path.join(projectDir, entryName, "subagents");
+function collectSubagentJsonlPaths(
+  projectDir,
+  entryName,
+  { readdirFn, lstatFn },
+) {
+  const entryPath = path.join(projectDir, entryName);
+  let entryIsSymlink;
+  try {
+    entryIsSymlink = isSymlink(entryPath, lstatFn);
+  } catch (err) {
+    if (err && BENIGN_SUBAGENT_ENUMERATION_CODES.has(err.code)) {
+      return { ok: true, paths: [], excludedSymlinkCount: 0 };
+    }
+    return {
+      ok: false,
+      reasonCode: DISPATCH_START_SIZE_COLLECT_REASON.STAT_FAILED,
+      detail: err && err.message ? err.message : String(err),
+    };
+  }
+  if (entryIsSymlink) {
+    // ★3R -- 이 디렉터리 항목 자신이 신뢰 경계 밖(junction/symlink)이다
+    // -- 안을 들여다보지도 않는다(파일 정책과 대칭: "링크는 안 따라간다").
+    return { ok: true, paths: [], excludedSymlinkCount: 1 };
+  }
+
+  const subagentsDir = path.join(entryPath, "subagents");
   let subNames;
   try {
     subNames = readdirFn(subagentsDir);
   } catch (err) {
     if (err && BENIGN_SUBAGENT_ENUMERATION_CODES.has(err.code)) {
-      return { ok: true, paths: [] }; // 그런 서브폴더가 없다 -- 정상
-      // (하위 에이전트 미가동 또는 entryName이 애초에 디렉터리가 아님).
+      return { ok: true, paths: [], excludedSymlinkCount: 0 }; // 그런
+      // 서브폴더가 없다 -- 정상(하위 에이전트 미가동 또는 entryName이
+      // 애초에 디렉터리가 아님).
     }
     return {
       ok: false,
@@ -54,20 +96,22 @@ function collectSubagentJsonlPaths(projectDir, entryName, readdirFn) {
     paths: subNames
       .filter((n) => n.endsWith(".jsonl"))
       .map((n) => path.join(subagentsDir, n)),
+    excludedSymlinkCount: 0,
   };
 }
 
-// listAllSessionJsonlPaths(projectDir, readdirFn) -> {ok, paths} |
-// {ok:false, reasonCode, detail} -- collectTotalSessionBytes에서 분리(eslint
-// complexity 상한 준수, 로직은 그대로). 최상위 `.jsonl` + 그 아래
-// `<entry>/subagents/*.jsonl`(위 collectSubagentJsonlPaths)을 한데 모은다.
-function listAllSessionJsonlPaths(projectDir, readdirFn) {
+// listAllSessionJsonlPaths(projectDir, {readdirFn, lstatFn}) -> {ok, paths,
+// excludedSymlinkCount} | {ok:false, reasonCode, detail} --
+// collectTotalSessionBytes에서 분리(eslint complexity 상한 준수, 로직은
+// 그대로). 최상위 `.jsonl` + 그 아래 `<entry>/subagents/*.jsonl`(위
+// collectSubagentJsonlPaths)을 한데 모은다.
+function listAllSessionJsonlPaths(projectDir, { readdirFn, lstatFn }) {
   let entries;
   try {
     entries = readdirFn(projectDir);
   } catch (err) {
     if (err && err.code === "ENOENT") {
-      return { ok: true, paths: [] };
+      return { ok: true, paths: [], excludedSymlinkCount: 0 };
     }
     return {
       ok: false,
@@ -77,39 +121,35 @@ function listAllSessionJsonlPaths(projectDir, readdirFn) {
   }
 
   const paths = [];
+  let excludedSymlinkCount = 0;
   for (const name of entries) {
     if (name.endsWith(".jsonl")) {
       paths.push(path.join(projectDir, name));
       continue;
     }
-    const sub = collectSubagentJsonlPaths(projectDir, name, readdirFn);
+    const sub = collectSubagentJsonlPaths(projectDir, name, {
+      readdirFn,
+      lstatFn,
+    });
     if (!sub.ok) return sub; // ★2R -- 열거 실패를 조용히 안 삼킨다(불변식 E).
     paths.push(...sub.paths);
+    excludedSymlinkCount += sub.excludedSymlinkCount;
   }
-  return { ok: true, paths };
-}
-
-// ★HYK-378 2R(REVIEW P2 대응) -- `statSync`는 심볼릭 링크를 따라간다.
-// 검토자 실측: 프로젝트 "밖"을 가리키는 링크(`linked.jsonl`)가 있으면
-// 그 바깥 파일의 바이트가 합계에 섞여 들어왔다(신뢰 경계 밖 데이터가
-// "이 세션이 자랐다"는 증거로 둔갑). ★결정(반박 환영) -- 이 세션 기록
-// 폴더는 관제실이 아니라 좌석 프로세스가 직접 쓰는 자리라 정상 운영
-// 중에는 심볼릭 링크가 나타날 이유가 없다 -- 그래서 "따라가지 않는다"
-// (신뢰 경계 밖은 세지 않는다, 검토자 권고 그대로): 링크로 확인되면
-// 그 항목은 총합·개수 양쪽에서 제외한다(에러로 취급하지 않는다 -- 링크
-// 자체는 "관측 실패"가 아니라 "이 항목은 신뢰 안 함"이라는 정책적 배제).
-function isSymlink(filePath, lstatFn) {
-  return lstatFn(filePath).isSymbolicLink();
+  return { ok: true, paths, excludedSymlinkCount };
 }
 
 // sumFileSizes(filePaths, {statFn, lstatFn}) -> {ok, totalBytes,
-// includedCount} | {ok:false, reasonCode, detail} --
+// includedCount, excludedSymlinkCount} | {ok:false, reasonCode, detail} --
 // collectTotalSessionBytes에서 분리(위와 동일 이유). 심볼릭 링크는
 // 위 정책대로 조용히 건너뛴다(개수·총합 모두 제외) -- lstat 자체가
 // 실패하면(파일이 그 사이 사라짐 등) 기존과 동일하게 실패로 전파한다.
+// ★HYK-378 3R(REVIEW P2 대응, 불변식 I "조용한 배제는 신호를 남겨라") --
+// 제외한 링크 개수를 `excludedSymlinkCount`로 돌려줘 호출부가 진단할 수
+// 있게 한다(2R까지는 제외 사실이 결과 어디에도 안 남았다).
 function sumFileSizes(filePaths, { statFn, lstatFn }) {
   let totalBytes = 0;
   let includedCount = 0;
+  let excludedSymlinkCount = 0;
   for (const filePath of filePaths) {
     let linkIsSymlink;
     try {
@@ -121,7 +161,10 @@ function sumFileSizes(filePaths, { statFn, lstatFn }) {
         detail: err && err.message ? err.message : String(err),
       };
     }
-    if (linkIsSymlink) continue; // 신뢰 경계 밖 -- 안 세고 안 따라간다.
+    if (linkIsSymlink) {
+      excludedSymlinkCount += 1;
+      continue; // 신뢰 경계 밖 -- 안 세고 안 따라간다.
+    }
     try {
       totalBytes += statFn(filePath).size;
     } catch (err) {
@@ -133,15 +176,18 @@ function sumFileSizes(filePaths, { statFn, lstatFn }) {
     }
     includedCount += 1;
   }
-  return { ok: true, totalBytes, includedCount };
+  return { ok: true, totalBytes, includedCount, excludedSymlinkCount };
 }
 
 // collectTotalSessionBytes({repoRoot, claudeHomeDir}, {readdirFn, statFn,
-// lstatFn}) -> {ok, totalBytes, fileCount} | {ok:false, reasonCode, detail}
+// lstatFn}) -> {ok, totalBytes, fileCount, excludedSymlinkCount} |
+// {ok:false, reasonCode, detail}
 //
 // - 세션 로그 디렉터리 자체가 없으면(아직 이 워크트리에 세션이 하나도
 //   시작 안 됨) 정상적으로 `totalBytes:0`이다(결손 아님 -- "아직 시작
 //   전"과 "판정 불가"를 구별한다).
+// - `excludedSymlinkCount`(★3R) = 신뢰 경계 밖이라 배제한 항목 수(파일
+//   심볼릭 링크 + 디렉터리 junction/symlink 합계) -- 0이면 배제 없음.
 export function collectTotalSessionBytes(
   { repoRoot, claudeHomeDir },
   { readdirFn, statFn = statSync, lstatFn = lstatSync },
@@ -151,7 +197,7 @@ export function collectTotalSessionBytes(
     "projects",
     deriveClaudeProjectDirName(repoRoot),
   );
-  const listed = listAllSessionJsonlPaths(projectDir, readdirFn);
+  const listed = listAllSessionJsonlPaths(projectDir, { readdirFn, lstatFn });
   if (!listed.ok) return listed;
 
   const summed = sumFileSizes(listed.paths, { statFn, lstatFn });
@@ -161,5 +207,7 @@ export function collectTotalSessionBytes(
     ok: true,
     totalBytes: summed.totalBytes,
     fileCount: summed.includedCount,
+    excludedSymlinkCount:
+      listed.excludedSymlinkCount + summed.excludedSymlinkCount,
   };
 }
