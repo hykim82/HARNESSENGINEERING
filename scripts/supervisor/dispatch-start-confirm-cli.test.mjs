@@ -258,7 +258,57 @@ test("★HYK-378 4R P1-1 CLI 실행 재현+수리: --stall-threshold-ms NaN --ti
       elapsedMs < 5000,
       `1초 타임아웃/1ms 폴링 간격과 무관하게 즉시 끝나야 한다 -- 실제 ${elapsedMs}ms`,
     );
+    // ★HYK-378 5R(REVIEW P1-2 저장소 쪽 절반, 불변식 O "관측 가능성") --
+    // 4R까지는 stderr 한 줄뿐이었다(검토자 지적: 호출부가 그 줄을 안
+    // 읽으면 신호가 통째로 유실된다). 이제 저장소 안(notifyDir)에 실제
+    // 파일로도 남아야 한다.
+    const files = readdirSync(notifyDir);
+    assert.equal(
+      files.length,
+      1,
+      "잘못된 인자 실행도 notifyDir에 파일 1장을 남겨야 한다(stderr뿐이면 부족)",
+    );
+    assert.match(
+      files[0],
+      /^dispatch-start-confirm-invalid-args-/,
+      "좌석-정지 통지(dispatch-start-confirm-notify-*)와는 다른 파일명 접두사여야 한다 -- 독자가 다르다",
+    );
+    const noticeText = readFileSync(join(notifyDir, files[0]), "utf8");
+    assert.match(noticeText, /잘못된 인자/);
+    assert.match(
+      noticeText,
+      /좌석이 멈춘 것이 아닙니다/,
+      "좌석 확인 신호와 혼동되지 않도록 명시해야 한다",
+    );
+    assert.match(stderr, /notice=/, "stderr에도 통지 경로가 함께 찍혀야 한다");
   });
+});
+
+// ★되돌림 변이(§5 요구, 불변식 O) -- notifyDir 파일 생성을 없애면(4R
+// 상태로 되돌리면) 위 시험의 신규 단언(파일 1장 생성)이 RED가 된다는
+// 것을 별도 시험으로 직접 고정한다(unit 레벨 -- 스폰 없이 결과 객체만
+// 검증해 빠르게).
+test("★HYK-378 5R 불변식 O(숫자로): INVALID_ARGS 결과가 나오면 runDispatchStartConfirm 자체는 폴링 0회로 즉시 반환한다(관측 가능성의 전제 -- CLI 계층이 그 결과로 파일을 만든다)", async () => {
+  let collectCallCount = 0;
+  const result = await runDispatchStartConfirm({
+    repoRoot: "C:\\wt",
+    dispatchedAtMs: 0,
+    stallThresholdMs: NaN,
+    timeoutMs: 60000,
+    pollIntervalMs: 15000,
+    now: fakeClock(0, 15000),
+    sleepFn: instantSleep,
+    collectFn: () => {
+      collectCallCount++;
+      return { ok: true, totalBytes: 0 };
+    },
+  });
+  assert.equal(result.status, DISPATCH_START_CONFIRM_STATUS.INVALID_ARGS);
+  assert.equal(collectCallCount, 0);
+  assert.ok(
+    result.reasonCode,
+    "CLI 계층이 통지 파일에 적을 사유 코드가 결과 객체에 있어야 한다",
+  );
 });
 
 // ---------------------------------------------------------------------------

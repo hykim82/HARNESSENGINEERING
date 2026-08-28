@@ -167,6 +167,68 @@ function buildNoticeFileName(nowMs) {
   return `dispatch-start-confirm-notify-${iso}.md`;
 }
 
+// ★HYK-378 5R(REVIEW P1-2 저장소 쪽 절반 수리, 불변식 O "관측 가능성") --
+// `INVALID_ARGS`는 4R까지 stderr 한 줄뿐이었다. 무인 운용에서 그 줄을
+// 아무도 안 읽으면(검토자 실측: 관제실 `dispatch-worker.ps1`이 미지
+// 종료코드에 경고만 남기고 배달을 계속함 -- fail-open) 신호가 통째로
+// 유실된다. ★설계 선택(반박 환영) -- 4R에서 "통지 파일을 안 남긴다"고
+// 판단한 이유("좌석이 멈췄다"와 독자가 다르다)는 여전히 옳다고 본다 --
+// 그래서 이번에도 NOT_STARTED/STALLED_AFTER_START와 **같은 파일**을
+// 안 쓴다. 대신 **다른 파일명 접두사**로 별도 종류의 통지를 남긴다 --
+// 좌석을 확인하라는 뜻이 아니라 "이 호출 자체(ps1 등 호출부가 넘긴
+// 인자)가 잘못됐다"는 뜻임을 파일명만 보고도 구별할 수 있어야 한다는
+// 원칙을 지키면서, 동시에 "저장소 안에서 관측 가능한 산출물"(불변식 O)
+// 요구도 채운다.
+function buildInvalidArgsNoticeFileName(nowMs) {
+  const iso = new Date(nowMs).toISOString().replace(/[:.]/g, "-");
+  return `dispatch-start-confirm-invalid-args-${iso}.md`;
+}
+
+function buildInvalidArgsNoticeText({ taskId, nowMs, reasonCode }) {
+  const lines = [];
+  lines.push(
+    `# 배달 후 착수 확인 실패 -- 잘못된 인자 -- ${formatKstIsh(nowMs)}`,
+  );
+  lines.push("");
+  lines.push(`- 태스크: ${taskId || "(미상)"}`);
+  lines.push(`- 사유 코드: ${reasonCode || "(미상)"}`);
+  lines.push("");
+  lines.push(
+    "이건 **좌석이 멈춘 것이 아닙니다** -- 이 CLI를 호출한 쪽(예: 관제실 `dispatch-worker.ps1`)이 넘긴 수치 인자 자체가 잘못됐습니다(`NaN`·`Infinity`·범위 밖 값 등). **좌석 확인이 아니라 호출부의 인자를 고쳐야 합니다.** 이 실행은 세션 폴더를 단 한 번도 들여다보지 않았습니다(폴링 미시작).",
+  );
+  return lines.join("\n") + "\n";
+}
+
+// writeInvalidArgsNotice(...) -- NOT_STARTED/STALLED_AFTER_START와 같은
+// notifyDir을 쓰되 파일명 접두사가 달라(위 buildInvalidArgsNoticeFileName)
+// 다른 종류의 실패임을 구별한다. `writeFailureNotice`와 나란히 두되
+// 통합하지 않는다 -- 인자 형태가 달라(이쪽은 `stallThresholdMs`처럼
+// 판정 세부값이 없다) 억지로 합치면 옵션 인자가 늘어나 오히려 "경우
+// 나열"에 가까워진다(4R 지시서가 지목한 패턴).
+function writeInvalidArgsNotice({
+  result,
+  taskId,
+  notifyDir,
+  nowFn,
+  writeFn,
+  mkdirFn,
+  existsFn,
+}) {
+  if (!existsFn(notifyDir)) mkdirFn(notifyDir, { recursive: true });
+  const nowMs = nowFn();
+  const text = buildInvalidArgsNoticeText({
+    taskId,
+    nowMs,
+    reasonCode: result.reasonCode,
+  });
+  const noticePath = path.join(
+    notifyDir,
+    buildInvalidArgsNoticeFileName(nowMs),
+  );
+  writeFn(noticePath, text, "utf8");
+  return noticePath;
+}
+
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -495,12 +557,25 @@ if (invokedDirectly) {
   }
   // ★4R(불변식 K) -- 잘못된 수치 인자는 폴링을 단 한 번도 시작하지 않고
   // 여기서 스스로, 시끄럽게 끝난다(강제 종료가 아니라 정상적인 return
-  // 경로). notifyDir에 통지 파일은 안 남긴다 -- 이건 "좌석이 멈췄다"는
-  // 신호가 아니라 "이 호출 자체(ps1 등 호출부의 인자)가 잘못됐다"는
-  // 신호라 대상 독자가 다르다(좌석 확인이 아니라 호출부 수정).
+  // 경로). ★5R(REVIEW P1-2 저장소 쪽 절반, 불변식 O) -- 4R까지는 stderr
+  // 한 줄뿐이라 호출부가 그 줄을 안 읽으면(검토자 실측: 관제실
+  // dispatch-worker.ps1의 fail-open) 신호가 통째로 유실됐다. stderr는
+  // 그대로 두고(휘발성 로그로도 여전히 유용), **저장소 안에서 관측
+  // 가능한 산출물**(notifyDir의 별도 종류 통지 파일)을 추가로 남긴다 --
+  // "좌석이 멈췄다"는 신호와 파일명부터 다르다(위 buildInvalidArgsNoticeFileName
+  // 헤더 주석 참조).
   if (result.status === DISPATCH_START_CONFIRM_STATUS.INVALID_ARGS) {
+    const noticePath = writeInvalidArgsNotice({
+      result,
+      taskId,
+      notifyDir,
+      nowFn: Date.now,
+      writeFn: writeFileSync,
+      mkdirFn: mkdirSync,
+      existsFn: existsSync,
+    });
     console.error(
-      `dispatch-start-confirm: INVALID_ARGS(${result.reasonCode}) -- 수치 인자를 확인하십시오(NaN·Infinity·범위 밖 값 등). 폴링을 시작하지 않았습니다.`,
+      `dispatch-start-confirm: INVALID_ARGS(${result.reasonCode}) -- 수치 인자를 확인하십시오(NaN·Infinity·범위 밖 값 등). 폴링을 시작하지 않았습니다. notice=${noticePath}`,
     );
     process.exit(DISPATCH_START_CONFIRM_EXIT_CODE[result.status]);
   }
