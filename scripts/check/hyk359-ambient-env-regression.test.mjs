@@ -97,6 +97,18 @@ import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { collectTestFiles } from "./isolated-suite-runner.mjs";
 
+// HYK-371 (측정: 08-27 기준선, 이 기계 CPU 24, Node v26.2.0): `node --test`
+// 는 파일 하나당 프로세스 하나를 띄우고 기본 동시성은 CPU 코어 수 - 1이라,
+// 이 아래 nested spawnSync가 예외 없이 기본 동시성으로 돌면 이미 밖에서
+// 도는 중인 CI-canonical 스윕(그 자체로 동시 node.exe 최고 23) 위에
+// 똑같은 크기의 두 번째 트리(최고 23)가 얹혀 순간 최고 동시 node.exe를
+// 밀어올린다(기준선: 최고 82, 그중 46이 이 두 트리). 이 상수는 스윕
+// «대상»(swept 파일 목록·통과 기준)은 그대로 두고 그 트리의 «동시성»만
+// 낮춰 피크 기여를 줄인다 -- 도는 파일 수·fail 0 기준 어느 쪽도 건드리지
+// 않으므로 커버리지 손실 없이 가시적 피크만 낮춘다(HYK-371 §6 실패조건
+// ⓑ 회피).
+const NESTED_SWEEP_CONCURRENCY = 4;
+
 const HERE = dirname(fileURLToPath(import.meta.url));
 const THIS_FILE_BASENAME = basename(fileURLToPath(import.meta.url));
 
@@ -155,7 +167,12 @@ function runSweepAndAssert({ root, swept, dir }) {
   // growth without silently truncating again.
   const res = spawnSync(
     process.execPath,
-    ["--test", "--test-reporter=tap", ...swept],
+    [
+      "--test",
+      "--test-reporter=tap",
+      `--test-concurrency=${NESTED_SWEEP_CONCURRENCY}`,
+      ...swept,
+    ],
     {
       cwd: root,
       encoding: "utf8",
