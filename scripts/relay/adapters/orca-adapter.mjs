@@ -3041,7 +3041,7 @@ export function buildCodexBootstrapText({
 // 기동문 text 1회 -> exact marker 확인 -> Enter 1회(재시도 0, at-most-once).
 // 미지원/불명 엔진은 어느 경로도 추정하지 않고 side effect 0으로 거부한다
 // (task-create/handle 해석보다도 먼저 -- 아래 참조).
-export function deliverTask(ctx, opts = {}) {
+function deliverTaskInternal(ctx, opts = {}) {
   const c = isPlainObject(ctx) ? ctx : {};
   const invalid = validateDeliverInput(c, opts);
   if (invalid) return { ok: false, reason: invalid };
@@ -3065,6 +3065,39 @@ export function deliverTask(ctx, opts = {}) {
     return deliverToCodexSeat(c, seatHandle, taskResult.runtimeTaskId, opts);
   }
   return deliverToClaudeSeat(c, seatHandle, taskResult.runtimeTaskId, opts);
+}
+
+// HYK-376-paste-hook-seam-1 (불변식화): `confirmPastedFn`은
+// confirmCodexStaging의 화면+화면 밖 두 확인 축을 통째로 건너뛰게 하는
+// 시험 전용 훅이다(§HYK-169-coder-3 주석). 이전에는 이 export가 그 opts
+// 키를 그대로 deliverToCodexSeat까지 흘려보냈다 -- 즉 "지금은 아무도 안
+// 넘긴다"만 사실이었지 "넘길 수 없다"는 아니었다(이슈 지적 그대로).
+// ⛔이제 이 export는 **호출자가 무엇을 넘기든** confirmPastedFn을 opts에서
+// 물리적으로 제거한 뒤에만 deliverTaskInternal에 넘긴다 -- "넘긴 값을
+// 무시한다"가 아니라 "그 키 자체가 이 지점을 넘어 존재하지 않는다"이다.
+// createRealLaunchSink/relayStep(runDeliverStage)/runStepCli/run-step.mjs
+// CLI는 전부 이 export만 import한다(아래 각 지점 주석 참조) -- 그래서
+// 이 한 곳의 제거가 네 프로덕션 진입점 전부에 구조적으로 적용된다.
+function stripConfirmPastedFn(opts) {
+  if (!isPlainObject(opts) || !("confirmPastedFn" in opts)) {
+    return isPlainObject(opts) ? opts : {};
+  }
+  const rest = { ...opts };
+  delete rest.confirmPastedFn;
+  return rest;
+}
+
+export function deliverTask(ctx, opts = {}) {
+  return deliverTaskInternal(ctx, stripConfirmPastedFn(opts));
+}
+
+// ⛔시험 전용 진입점(coder-task.md §2 방향 ⓐ): confirmCodexStaging의
+// confirmPastedFn 오버라이드 경로 자체를 계속 시험하기 위해서만 존재한다.
+// 프로덕션 진입점(createRealLaunchSink/runDeliverStage/runStepCli/CLI) 중
+// 어느 것도 이 함수를 import하지 않는다 -- import 그래프에 없으므로 어떤
+// opts를 넘겨도 프로덕션 배달에는 도달할 방법이 없다.
+export function deliverTaskWithConfirmOverrideForTests(ctx, opts = {}) {
+  return deliverTaskInternal(ctx, opts);
 }
 
 // ---- HYK-212-postcheck-1: 배달 직후 재조회 사후검증(§2 ⓐ) ----

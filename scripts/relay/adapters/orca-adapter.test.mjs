@@ -4,6 +4,7 @@ import { readFileSync } from "node:fs";
 import {
   ensureSeat,
   deliverTask,
+  deliverTaskWithConfirmOverrideForTests,
   collectCompletionSignals,
   teardownSeat,
   buildSeatCreateCommand,
@@ -2508,7 +2509,7 @@ test("deliverTask: codex engine (REVIEW) -- postcheck never runs (no --inject, i
     send: { ok: true },
   });
   const { fs, writes } = fakePostcheckFs();
-  const r = deliverTask(
+  const r = deliverTaskWithConfirmOverrideForTests(
     { taskId: "HYK-169-coder-1", role: "REVIEW", worktreePath: VALID_WORKTREE },
     {
       execFn,
@@ -2549,7 +2550,7 @@ test("deliverTask: D11 codex (REVIEW) -- no-inject dispatch, then bootstrap text
     ...taskCreateDispatchStubs(),
     send: { ok: true },
   });
-  const r = deliverTask(
+  const r = deliverTaskWithConfirmOverrideForTests(
     { taskId: "HYK-169-coder-1", role: "REVIEW", worktreePath: VALID_WORKTREE },
     { execFn, existingSeatHandle: "term_x", confirmPastedFn: () => true },
   );
@@ -2583,7 +2584,7 @@ test("deliverTask: D11-B codex -- confirmPastedFn is invoked before the Enter ca
       return { ok: true };
     },
   });
-  const r = deliverTask(
+  const r = deliverTaskWithConfirmOverrideForTests(
     { taskId: "HYK-169-coder-1", role: "REVIEW", worktreePath: VALID_WORKTREE },
     {
       execFn,
@@ -2612,7 +2613,7 @@ test("deliverTask: D11-C codex -- Enter failing returns DELIVERY_UNJUDGABLE imme
         : { ok: false, reason: "response lost" }; // Enter fails
     },
   });
-  const r = deliverTask(
+  const r = deliverTaskWithConfirmOverrideForTests(
     { taskId: "HYK-169-coder-1", role: "REVIEW", worktreePath: VALID_WORKTREE },
     { execFn, existingSeatHandle: "term_x", confirmPastedFn: () => true },
   );
@@ -2630,7 +2631,7 @@ test("deliverTask: D11-C codex -- bootstrap text-send failing returns DELIVERY_U
       return { ok: false, reason: "response lost" };
     },
   });
-  const r = deliverTask(
+  const r = deliverTaskWithConfirmOverrideForTests(
     { taskId: "HYK-169-coder-1", role: "REVIEW", worktreePath: VALID_WORKTREE },
     { execFn, existingSeatHandle: "term_x", confirmPastedFn: () => true },
   );
@@ -2644,7 +2645,7 @@ test("deliverTask: D11-B codex PASTE_UNCONFIRMED -- confirmPastedFn returning fa
     ...taskCreateDispatchStubs(),
     send: { ok: true },
   });
-  const r = deliverTask(
+  const r = deliverTaskWithConfirmOverrideForTests(
     { taskId: "HYK-169-coder-1", role: "REVIEW", worktreePath: VALID_WORKTREE },
     { execFn, existingSeatHandle: "term_x", confirmPastedFn: () => false },
   );
@@ -2660,7 +2661,7 @@ test("deliverTask: D11-B codex PASTE_UNCONFIRMED -- confirmPastedFn returning tr
     ...taskCreateDispatchStubs(),
     send: { ok: true },
   });
-  const r = deliverTask(
+  const r = deliverTaskWithConfirmOverrideForTests(
     { taskId: "HYK-169-coder-1", role: "REVIEW", worktreePath: VALID_WORKTREE },
     { execFn, existingSeatHandle: "term_x", confirmPastedFn: () => true },
   );
@@ -2673,7 +2674,7 @@ test("deliverTask: D11-B codex PASTE_UNCONFIRMED -- confirmPastedFn throwing is 
     ...taskCreateDispatchStubs(),
     send: { ok: true },
   });
-  const r = deliverTask(
+  const r = deliverTaskWithConfirmOverrideForTests(
     { taskId: "HYK-169-coder-1", role: "REVIEW", worktreePath: VALID_WORKTREE },
     {
       execFn,
@@ -2710,6 +2711,42 @@ test("deliverTask: D11-B codex default confirm path -- omitting confirmPastedFn 
   assert.match(r.reason, /PASTE_UNCONFIRMED/);
   assert.equal(terminalSendEnterCalls(execFn).length, 0);
   // task-create, dispatch, text-send, terminal show (self-check) -- no Enter.
+  assert.equal(execFn.calls.length, 4);
+});
+
+// HYK-376-paste-hook-seam-1 (불변식 RED 시험 -- 되돌림 변이에서 빨간불):
+// 이 시험은 **프로덕션 export인 `deliverTask`**를 직접 부른다(시험 전용
+// `deliverTaskWithConfirmOverrideForTests`가 아니다) -- 그리고 화면에
+// 마커가 없고 화면 밖 축도 성립하지 않는 가짜 실행기 위에서
+// `opts.confirmPastedFn: () => true`를 얹는다. "입력의 모양"이 아니라
+// "결과"를 본다(coder-task.md §3-2 요구, HYK-274 검토자가 쓴 그 수법과
+// 동형): confirmPastedFn이 조금이라도 프로덕션 경로에 도달했다면 이
+// 가짜 훅은 무조건 true를 돌려주므로 ok:true·Enter 1회로 통과했을
+// 것이다. 실제로는 stripConfirmPastedFn이 `deliverTask` 진입점에서 그
+// 키를 물리적으로 제거하므로, 이 시험은 confirmPastedFn이 없을 때와
+// 완전히 같은 결과(PASTE_UNCONFIRMED, zero Enter)를 본다. ★되돌림
+// 변이(stripConfirmPastedFn 호출을 제거하거나 무력화)를 넣으면 이 시험은
+// ok:true·Enter 1회를 관측해 즉시 빨간불이 된다.
+test("deliverTask (production export, NOT the test-only override): a caller-supplied confirmPastedFn that always returns true is structurally unreachable -- with no screen marker and no matching off-screen send, delivery still reports PASTE_UNCONFIRMED with zero Enter calls", () => {
+  const execFn = fakeExecFn({
+    ...taskCreateDispatchStubs(),
+    send: { ok: true }, // no result.send -> off-screen axis is FIELD_ABSENT (fail-closed)
+    show: {
+      ok: true,
+      result: { terminal: { preview: "just a normal shell prompt" } }, // no marker
+    },
+  });
+  const alwaysTrueHook = () => true;
+  const r = deliverTask(
+    { taskId: "HYK-169-coder-1", role: "REVIEW", worktreePath: VALID_WORKTREE },
+    { execFn, existingSeatHandle: "term_x", confirmPastedFn: alwaysTrueHook },
+  );
+  assert.equal(r.ok, false);
+  assert.match(r.reason, /PASTE_UNCONFIRMED/);
+  assert.equal(terminalSendEnterCalls(execFn).length, 0);
+  // task-create, dispatch, text-send, terminal show (self-check) -- identical
+  // call shape to the "omitting confirmPastedFn" test above: proof that the
+  // supplied hook made literally no difference to the production path.
   assert.equal(execFn.calls.length, 4);
 });
 
@@ -3143,7 +3180,7 @@ test("deliverTask: D11-B codex PASTE_UNCONFIRMED -- a truthy-but-not-true confir
     ...taskCreateDispatchStubs(),
     send: { ok: true },
   });
-  const r = deliverTask(
+  const r = deliverTaskWithConfirmOverrideForTests(
     { taskId: "HYK-169-coder-1", role: "REVIEW", worktreePath: VALID_WORKTREE },
     { execFn, existingSeatHandle: "term_x", confirmPastedFn: () => "yes" },
   );

@@ -983,6 +983,60 @@ test("§5-5: the NOT_READY fixture's deliverTask would succeed if actually invok
   assert.equal(sinkCallCounts(execFn).taskCreate, 1);
 });
 
+// HYK-376-paste-hook-seam-1 (완료 조건 1 -- runDeliverStage 경로 실증):
+// runDeliverStage(relay-core.mjs)는 relayStep의 세 번째 인자 opts를
+// **그대로** `adapter.deliverTask(ctx, opts)`에 넘긴다(필터링 0) --
+// 그래서 이 경로의 안전은 전적으로 `adapter.deliverTask`가 REVIEW_ADAPTER
+// 위에서 바로 그 production export(orca-adapter.mjs의 `deliverTask`, 위
+// §5-5가 이미 "fake가 아니라 진짜"임을 증명한 그 결선)라는 데서 나온다.
+// 이 시험은 role: "REVIEW"(codex 엔진)로 relayStep을 직접 구동해 --
+// 화면에 마커가 없고 화면 밖 축도 성립하지 않는 픽스처 위에서 --
+// `opts.confirmPastedFn: () => true`를 얹어도 여전히 배달이
+// PASTE_UNCONFIRMED로 거부됨을 본다. ★되돌림 변이(runDeliverStage가
+// confirmPastedFn 자리를 다시 살리거나, orca-adapter.mjs의
+// stripConfirmPastedFn 호출이 빠지면) 이 시험은 ok:true·Enter 1회를
+// 관측해 즉시 빨간불이 된다.
+test("HYK-376: relayStep -> runDeliverStage -> production deliverTask (REVIEW/codex) -- a caller-supplied opts.confirmPastedFn is structurally unreachable; no screen marker + no off-screen match still yields PASTE_UNCONFIRMED, zero Enter calls", () => {
+  const harnessDir = makeHarnessDir();
+  const mainRepoDir = makeTaskFileSource("review");
+  try {
+    const execFn = readinessFakeExecFn({
+      list: staticListResponse(["term_ready"]),
+      // Same static preview services both readiness classification (tail)
+      // and confirmCodexStagingViaTerminalShow's marker check -- "IDLE"
+      // satisfies the former and (deliberately) contains no task marker,
+      // so the screen axis alone would already refuse without the hook.
+      show: showByHandle({ term_ready: "IDLE" }),
+      "task-create": { ok: true, result: { task: { id: "task_rt" } } },
+      dispatch: { ok: true },
+      send: { ok: true }, // no result.send -> off-screen axis FIELD_ABSENT (fail-closed)
+    });
+    const r = relayStep(
+      {
+        role: "REVIEW",
+        worktreePath: READINESS_WORKTREE,
+        taskId: "HYK-x",
+        harnessDir,
+        mainRepoDir,
+      },
+      READINESS_ADAPTER,
+      {
+        execFn,
+        capabilities: READINESS_CAPS,
+        existingSeatHandle: "term_ready",
+        confirmPastedFn: () => true,
+      },
+    );
+    assert.equal(r.ok, false);
+    assert.equal(r.stage, STAGE.DELIVER);
+    assert.match(r.reason, /PASTE_UNCONFIRMED/);
+    assert.equal(sinkCallCounts(execFn).enter, 0);
+  } finally {
+    rmSync(harnessDir, { recursive: true, force: true });
+    rmSync(mainRepoDir, { recursive: true, force: true });
+  }
+});
+
 // mutation 6 (TOCTOU, PM Q2): READY 관측 직후 deliver 직전 재관측에서 후보
 // 세대가 바뀌면(새 후보 등장 -> AMBIGUOUS) 이전 READY를 폐기하고 sink 0.
 test("§5-6: TOCTOU -- readiness flips from READY to AMBIGUOUS between the initial observation and the pre-deliver recheck -- previous READY is discarded, sink 0", () => {
