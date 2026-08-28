@@ -330,6 +330,56 @@ function judgeFromGrowthHistory({
   };
 }
 
+// ★HYK-378 4R(REVIEW P1-1 반려 수리, 불변식 K "입력 관문") -- 이 코어의
+// 임계 인자 4개(timeout·stallThreshold·sustainedGrowth·graceMultiplier)를
+// «기본값 해석 + 검증»까지 한 번에 하는 재사용 가능한 관문. 지금까지는
+// 이 로직이 `judgeDispatchStartBySize` 안에만 있어서, 그 함수를 호출하지
+// 않는 생산 진입점(`runDispatchStartConfirm`)은 `NaN` 같은 값을 아예
+// 걸러낼 방법이 없었다(검토자 실측: `stallThresholdMs: Number.NaN`을
+// 그대로 폴링 루프에 흘려 넣으면 코어는 매 폴링마다 `UNDECIDABLE`을
+// 내지만, 그 루프 자신은 `UNDECIDABLE`을 "아직 확정 안 됨"으로만 알아
+// 영원히 폴링했다 -- `--stall-threshold-ms NaN`이 기존 CLI 인자로 그대로
+// 전달 가능해 실측 `ETIMEDOUT`/`SIGTERM`까지 재현됨). ★생산 진입점이
+// 폴링을 시작하기 «전에» 이 함수를 한 번 불러 확정적으로 거부할 수 있게
+// 만드는 것이 이 함수의 존재 이유다 -- `judgeDispatchStartBySize`도 이제
+// 이 함수를 그대로 재사용해 로직이 두 곳에서 갈라지지 않는다(같은 판단을
+// 두 번 구현하면 한쪽만 고쳐지는 사고가 난다, 2R~3R이 반복해서 겪은
+// "새 인자만 검증" 패턴과 동형).
+export function resolveAndValidateThresholds({
+  timeoutMs,
+  stallThresholdMs,
+  sustainedGrowthBytes,
+  stallGraceMultiplier,
+} = {}) {
+  const timeout = resolveThreshold(timeoutMs, DEFAULT_TIMEOUT_MS);
+  const stallThreshold = resolveThreshold(
+    stallThresholdMs,
+    DEFAULT_STALL_THRESHOLD_MS,
+  );
+  const sustainedGrowth = resolveThreshold(
+    sustainedGrowthBytes,
+    DEFAULT_SUSTAINED_GROWTH_BYTES,
+  );
+  const graceMultiplier = resolveThreshold(
+    stallGraceMultiplier,
+    DEFAULT_STALL_GRACE_MULTIPLIER,
+  );
+  const reasonCode = firstThresholdProblem({
+    timeout,
+    stallThreshold,
+    sustainedGrowth,
+    graceMultiplier,
+  });
+  if (reasonCode) return { ok: false, reasonCode };
+  return {
+    ok: true,
+    timeoutMs: timeout,
+    stallThresholdMs: stallThreshold,
+    sustainedGrowthBytes: sustainedGrowth,
+    stallGraceMultiplier: graceMultiplier,
+  };
+}
+
 // judgeDispatchStartBySize({observations, dispatchedAtMs, now, timeoutMs,
 // stallThresholdMs}) -> {ok, verdict, reasonCode, details}
 //
@@ -362,26 +412,13 @@ export function judgeDispatchStartBySize(args) {
     return undecidable(DISPATCH_START_SIZE_REASON.NOW_INVALID);
   if (!isFiniteNumber(dispatchedAtMs))
     return undecidable(DISPATCH_START_SIZE_REASON.ARGS_INVALID);
-  const timeout = resolveThreshold(timeoutMs, DEFAULT_TIMEOUT_MS);
-  const stallThreshold = resolveThreshold(
+  const resolved = resolveAndValidateThresholds({
+    timeoutMs,
     stallThresholdMs,
-    DEFAULT_STALL_THRESHOLD_MS,
-  );
-  const sustainedGrowth = resolveThreshold(
     sustainedGrowthBytes,
-    DEFAULT_SUSTAINED_GROWTH_BYTES,
-  );
-  const graceMultiplier = resolveThreshold(
     stallGraceMultiplier,
-    DEFAULT_STALL_GRACE_MULTIPLIER,
-  );
-  const thresholdProblem = firstThresholdProblem({
-    timeout,
-    stallThreshold,
-    sustainedGrowth,
-    graceMultiplier,
   });
-  if (thresholdProblem) return undecidable(thresholdProblem);
+  if (!resolved.ok) return undecidable(resolved.reasonCode);
   const observationProblem = firstObservationProblem(observations, now);
   if (observationProblem) return undecidable(observationProblem);
 
@@ -389,16 +426,19 @@ export function judgeDispatchStartBySize(args) {
     (a, b) => a.observedAtMs - b.observedAtMs,
   );
   const lastGrowthAtMs = computeLastGrowthAtMs(sorted);
-  const sustainedAtMs = computeSustainedAtMs(sorted, sustainedGrowth);
+  const sustainedAtMs = computeSustainedAtMs(
+    sorted,
+    resolved.sustainedGrowthBytes,
+  );
   return judgeFromGrowthHistory({
     lastGrowthAtMs,
     sustainedAtMs,
     observationCount: sorted.length,
     dispatchedAtMs,
     now,
-    timeoutMs: timeout,
-    stallThresholdMs: stallThreshold,
-    sustainedGrowthBytes: sustainedGrowth,
-    stallGraceMultiplier: graceMultiplier,
+    timeoutMs: resolved.timeoutMs,
+    stallThresholdMs: resolved.stallThresholdMs,
+    sustainedGrowthBytes: resolved.sustainedGrowthBytes,
+    stallGraceMultiplier: resolved.stallGraceMultiplier,
   });
 }

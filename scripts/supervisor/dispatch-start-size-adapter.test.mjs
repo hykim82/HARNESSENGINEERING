@@ -39,10 +39,30 @@ test("collectTotalSessionBytes: 디렉터리 없음 -> 정상(totalBytes:0), 결
   });
 });
 
+// ★4R -- 뿌리 신뢰 검사(claudeHomeDir·projects·projectDir 자신이 링크가
+// 아닌지)가 실제 readdir/stat보다 먼저 도니, 이 조작(readdirFn이 실제
+// 열거 실패를 낸다)을 시험하려면 뿌리 세 경로는 "존재하고 링크가
+// 아니다"라고 lstatFn을 함께 주입해야 한다(그래야 readdirFn까지
+// 도달한다) -- 실 파일시스템에 없는 가짜 경로라 lstatFn 없이는 항상
+// ENOENT로 먼저 걸려 "없음"(정상)으로 접힌다.
+const notLinkStat = { isSymbolicLink: () => false };
+function fakeRootLstatFn(rootPaths) {
+  return (p) => {
+    if (rootPaths.includes(p)) return notLinkStat;
+    throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+  };
+}
+
 test("collectTotalSessionBytes: ENOENT 아닌 열거 실패 -> ok:false(조용함으로 접지 않는다)", () => {
+  const claudeHomeDir = "C:\\home";
   const r = collectTotalSessionBytes(
-    { repoRoot: "C:\\wt", claudeHomeDir: "C:\\home" },
+    { repoRoot: "C:\\wt", claudeHomeDir },
     {
+      lstatFn: fakeRootLstatFn([
+        claudeHomeDir,
+        join(claudeHomeDir, "projects"),
+        join(claudeHomeDir, "projects", deriveClaudeProjectDirName("C:\\wt")),
+      ]),
       readdirFn: () => {
         throw Object.assign(new Error("EACCES"), { code: "EACCES" });
       },
@@ -74,9 +94,21 @@ test("collectTotalSessionBytes: 여러 jsonl 파일의 크기를 더한다", () 
 });
 
 test("collectTotalSessionBytes: stat 실패는 ok:false(STAT_FAILED)", () => {
+  const claudeHomeDir = "C:\\home";
+  const projectDir = join(
+    claudeHomeDir,
+    "projects",
+    deriveClaudeProjectDirName("C:\\wt"),
+  );
   const r = collectTotalSessionBytes(
-    { repoRoot: "C:\\wt", claudeHomeDir: "C:\\home" },
+    { repoRoot: "C:\\wt", claudeHomeDir },
     {
+      lstatFn: fakeRootLstatFn([
+        claudeHomeDir,
+        join(claudeHomeDir, "projects"),
+        projectDir,
+      ]),
+      realpathFn: (p) => p, // 가짜 경로라 실제 realpath 대신 그대로 돌려준다.
       readdirFn: () => ["a.jsonl"],
       statFn: () => {
         throw new Error("boom");
@@ -393,9 +425,18 @@ test("collectTotalSessionBytes: excludedSymlinkCount는 파일 링크 + 디렉�
       writeFileSync(outsideFile, "x".repeat(20), "utf8");
       symlinkSync(outsideFile, join(projectDir, "linked.jsonl"), "file");
 
-      // 디렉터리 링크 1개.
+      // 디렉터리 링크 1개 -- ★4R: containment 방식에서는 «발견된 파일이
+      // 경계 밖일 때»만 세므로, 안에 실제로 뭔가 있어야 exclusion이
+      // 잡힌다(빈 디렉터리 링크는 셀 대상 자체가 없다 -- 이 자체가
+      // 정책 변경, coder.md §3R->4R 근거 참조).
       const outsideDir = join(outside, "outside-dir");
-      mkdirSync(outsideDir, { recursive: true });
+      const outsideDirSubagents = join(outsideDir, "subagents");
+      mkdirSync(outsideDirSubagents, { recursive: true });
+      writeFileSync(
+        join(outsideDirSubagents, "agent.jsonl"),
+        "x".repeat(400),
+        "utf8",
+      );
       symlinkSync(outsideDir, join(projectDir, "linked-session"), "junction");
 
       const r = collectTotalSessionBytes(
@@ -406,6 +447,140 @@ test("collectTotalSessionBytes: excludedSymlinkCount는 파일 링크 + 디렉�
       assert.equal(r.totalBytes, 10);
       assert.equal(r.fileCount, 1);
       assert.equal(r.excludedSymlinkCount, 2);
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ★HYK-378 4R(REVIEW P1-2 세 번째 반려 재현+수리, 불변식 L "경로 관문")
+// -- 검토자가 실측한 «한 겹 바깥» 세 경로를 그대로 재현한다. 3R까지의
+// 층별 lstat 검사(세션 UUID 폴더만 확인)로는 이 셋을 못 잡았다 -- ★4R은
+// 층별 검사를 폐기하고 "뿌리 신뢰 검사 + 최종 realpath containment"
+// 단일 관문으로 교체했다.
+
+// (a) projectDir 자신이 외부 폴더 junction -- 검토자 실측: 외부
+// outside.jsonl 300B를 두면 수리 전엔 ok:true,totalBytes:300.
+test("★HYK-378 4R P1-2 재현+수리(경로 a): projectDir 자신이 junction이면 그 안의 외부 바이트가 0으로 잡힌다(뿌리 신뢰 검사)", () => {
+  withTempDir("dss-projectdir-junction-", (home) => {
+    withTempDir("dss-projectdir-junction-outside-", (outside) => {
+      const projectDir = join(
+        home,
+        "projects",
+        deriveClaudeProjectDirName("C:\\wt"),
+      );
+      mkdirSync(join(home, "projects"), { recursive: true });
+      writeFileSync(join(outside, "outside.jsonl"), "x".repeat(300), "utf8");
+      // ★검토자의 정확한 재현: projectDir 자신이 junction.
+      symlinkSync(outside, projectDir, "junction");
+
+      const r = collectTotalSessionBytes(
+        { repoRoot: "C:\\wt", claudeHomeDir: home },
+        { readdirFn: (p) => readdirSync(p) },
+      );
+      assert.equal(r.ok, true);
+      assert.equal(
+        r.totalBytes,
+        0,
+        "projectDir 자신이 junction이면 그 밖 300B가 섞이면 안 된다(3R까지는 300B로 샜다)",
+      );
+      assert.equal(r.fileCount, 0);
+      assert.equal(
+        r.excludedSymlinkCount,
+        1,
+        "뿌리 자체가 배제됐다는 신호(1건)가 남아야 한다",
+      );
+    });
+  });
+});
+
+// (b) session/subagents 자신이 외부 폴더 junction -- 2R·3R 지정 시험
+// (세션 UUID 폴더 자체가 junction)과 다른 지점: 이번엔 세션 UUID
+// 폴더는 real, 그 안의 "subagents" 폴더 자신이 junction.
+test("★HYK-378 4R P1-2 재현+수리(경로 b): session/subagents 자신이 junction이어도 realpath containment로 잡힌다", () => {
+  withTempDir("dss-subagentsdir-junction-", (home) => {
+    withTempDir("dss-subagentsdir-junction-outside-", (outside) => {
+      const projectDir = join(
+        home,
+        "projects",
+        deriveClaudeProjectDirName("C:\\wt"),
+      );
+      const sessionUuid = "22222222-3333-4444-5555-666666666666";
+      const sessionDir = join(projectDir, sessionUuid);
+      mkdirSync(sessionDir, { recursive: true });
+      writeFileSync(join(outside, "agent.jsonl"), "x".repeat(400), "utf8");
+      // ★검토자의 정확한 재현: "subagents" 폴더 자신이 junction(세션
+      // UUID 폴더 자신은 real -- 3R이 이미 막은 지점과 다른 한 겹 아래).
+      symlinkSync(outside, join(sessionDir, "subagents"), "junction");
+
+      const r = collectTotalSessionBytes(
+        { repoRoot: "C:\\wt", claudeHomeDir: home },
+        { readdirFn: (p) => readdirSync(p) },
+      );
+      assert.equal(r.ok, true);
+      assert.equal(r.totalBytes, 0, "3R까지는 400B로 샜다");
+      assert.equal(r.fileCount, 0);
+      assert.equal(r.excludedSymlinkCount, 1);
+    });
+  });
+});
+
+// (c) claudeHomeDir(또는 그 바로 아래 "projects") 자신이 junction --
+// 검토자 실측: 외부 파일 250B.
+test("★HYK-378 4R P1-2 재현+수리(경로 c): claudeHomeDir 자신이 junction이어도 뿌리 신뢰 검사에 걸린다", () => {
+  withTempDir("dss-claudehome-junction-", (outer) => {
+    withTempDir("dss-claudehome-junction-outside-", (outside) => {
+      const claudeHomeDir = join(outer, "home");
+      const projectDir = join(
+        outside,
+        "projects",
+        deriveClaudeProjectDirName("C:\\wt"),
+      );
+      mkdirSync(projectDir, { recursive: true });
+      writeFileSync(join(projectDir, "leaked.jsonl"), "x".repeat(250), "utf8");
+      // ★검토자의 정확한 재현: claudeHomeDir 자신이 junction(그 상위
+      // 경로가 외부를 가리킴).
+      symlinkSync(outside, claudeHomeDir, "junction");
+
+      const r = collectTotalSessionBytes(
+        { repoRoot: "C:\\wt", claudeHomeDir },
+        { readdirFn: (p) => readdirSync(p) },
+      );
+      assert.equal(r.ok, true);
+      assert.equal(r.totalBytes, 0, "3R까지는 250B로 샜다");
+      assert.equal(r.fileCount, 0);
+      assert.equal(r.excludedSymlinkCount, 1);
+    });
+  });
+});
+
+// ★4R 완료조건 3(불변식 M) -- 정상 세션(뿌리는 real, 파일 링크 하나만
+// 신뢰 경계 밖)에서도 excludedSymlinkCount가 정확히 잡히는지 재확인
+// (§M의 "생산 경로 소비" 시험은 dispatch-start-confirm-cli.test.mjs에
+// 있다 -- 이 시험은 그 소비가 읽는 값의 어댑터 쪽 정확성만 고정한다).
+test("★HYK-378 4R 완료조건 3(M 값 정확성): 정상 프로젝트 + 신뢰 경계 밖 파일 1개 -> excludedSymlinkCount:1", () => {
+  withTempDir("dss-m-value-", (home) => {
+    withTempDir("dss-m-value-outside-", (outside) => {
+      const projectDir = join(
+        home,
+        "projects",
+        deriveClaudeProjectDirName("C:\\wt"),
+      );
+      mkdirSync(projectDir, { recursive: true });
+      writeFileSync(join(projectDir, "main.jsonl"), "x".repeat(50), "utf8");
+      writeFileSync(join(outside, "outside.jsonl"), "x".repeat(999), "utf8");
+      symlinkSync(
+        join(outside, "outside.jsonl"),
+        join(projectDir, "linked.jsonl"),
+        "file",
+      );
+
+      const r = collectTotalSessionBytes(
+        { repoRoot: "C:\\wt", claudeHomeDir: home },
+        { readdirFn: (p) => readdirSync(p) },
+      );
+      assert.equal(r.ok, true);
+      assert.equal(r.totalBytes, 50);
+      assert.equal(r.excludedSymlinkCount, 1);
     });
   });
 });

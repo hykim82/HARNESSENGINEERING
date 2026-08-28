@@ -136,6 +136,172 @@ test("★HYK-378 3R P1-1 결선 재현+수리: stallThresholdMs=Number.MAX_VALUE
   );
 });
 
+// ---------------------------------------------------------------------------
+// ★HYK-378 4R(REVIEW P1-1 재재반려 재현+수리, 불변식 K "입력 관문") --
+// 검토자 실측 그대로: 코어는 `NaN`을 `UNDECIDABLE/THRESHOLD_INVALID`로
+// 옳게 판정하지만, 이 루프는 `UNDECIDABLE`을 "아직 확정 안 됨"으로만
+// 알아 영원히 폴링했다(`status: null`이 계속 반환되고 `sleepFn`이
+// 즉시 반환되는 시험 환경에서는 이 관측 자체가 "무한 루프가 났다"는
+// 증거다 -- 그래서 아래 시험은 루프가 실제로 «몇 번째 폴링에서» 멈추는지
+// 확인하는 대신, 폴링을 아예 "시작하지 않고" 첫 호출에서 바로 확정
+// 상태로 끝나는지를 확인한다).
+test("★HYK-378 4R P1-1 재재반려 재현+수리(불변식 K): stallThresholdMs=NaN을 줘도 폴링 시작 전에 INVALID_ARGS로 즉시 종결한다(collectFn 0회 호출)", async () => {
+  let collectCallCount = 0;
+  const collectFn = () => {
+    collectCallCount++;
+    return { ok: true, totalBytes: 0 };
+  };
+  const result = await runDispatchStartConfirm({
+    repoRoot: "C:\\wt",
+    dispatchedAtMs: 0,
+    stallThresholdMs: NaN, // ★검토자 실측 그대로.
+    timeoutMs: 60000,
+    pollIntervalMs: 15000,
+    now: fakeClock(0, 15000),
+    sleepFn: instantSleep,
+    collectFn,
+  });
+  assert.equal(result.status, DISPATCH_START_CONFIRM_STATUS.INVALID_ARGS);
+  assert.equal(
+    collectCallCount,
+    0,
+    "폴링이 «한 번도» 시작되지 않아야 한다 -- 관문은 루프 진입 전에 있다",
+  );
+});
+
+test("★HYK-378 4R 불변식 K: 여섯 인자(dispatchedAtMs·timeoutMs·stallThresholdMs·pollIntervalMs·sustainedGrowthBytes·stallGraceMultiplier) 각각의 NaN/Infinity가 전부 INVALID_ARGS로 즉시 종결한다(숫자로 -- 6/6)", async () => {
+  const baseArgs = {
+    repoRoot: "C:\\wt",
+    dispatchedAtMs: 0,
+    timeoutMs: 60000,
+    stallThresholdMs: 60000,
+    pollIntervalMs: 15000,
+    now: fakeClock(0, 15000),
+    sleepFn: instantSleep,
+    collectFn: () => ({ ok: true, totalBytes: 0 }),
+  };
+  const attacks = [
+    { dispatchedAtMs: NaN },
+    { timeoutMs: NaN },
+    { stallThresholdMs: Infinity },
+    { pollIntervalMs: NaN },
+    { sustainedGrowthBytes: -1 },
+    { stallGraceMultiplier: Infinity },
+  ];
+  let invalidCount = 0;
+  for (const override of attacks) {
+    const result = await runDispatchStartConfirm({ ...baseArgs, ...override });
+    if (result.status === DISPATCH_START_CONFIRM_STATUS.INVALID_ARGS) {
+      invalidCount++;
+    }
+  }
+  assert.equal(
+    invalidCount,
+    attacks.length,
+    `여섯 인자 전부(${attacks.length}건) INVALID_ARGS여야 한다 -- ${invalidCount}건만 잡힘`,
+  );
+});
+
+// ★CLI 실 프로세스 실행(완료조건 1 요구 "실제 CLI 실행으로 확인") --
+// 검토자의 정확한 재현 인자 그대로: `--stall-threshold-ms NaN
+// --timeout-ms 1 --poll-interval-ms 1`. 수리 전엔 1초 안에
+// `ETIMEDOUT`/`SIGTERM`(강제 종료)으로 끝났다 -- 수리 후에는 그 인자값과
+// 무관하게(1ms 타임아웃이든 아니든) 즉시, 정상 종료(자기 스스로 exit)
+// 해야 한다. 넉넉한 상한(10초)만 execFileAsync에 주고, 실제 소요 시간이
+// 그보다 훨씬 짧다는 것으로 "스스로 끝났다"를 실증한다(강제 종료라면
+// 이 상한에 걸려 별도 에러 형태로 나타난다 -- 아래 timeout 옵션은 안전망
+// 일 뿐 이 시험이 통과하려면 그 안에서 정상적으로 exit해야 한다).
+test("★HYK-378 4R P1-1 CLI 실행 재현+수리: --stall-threshold-ms NaN --timeout-ms 1 --poll-interval-ms 1 이 스스로(강제 종료 아님) 즉시 종결한다", async () => {
+  await withTempDir("dsc-invalid-args-", async (notifyDir) => {
+    const { execFile } = await import("node:child_process");
+    const { promisify } = await import("node:util");
+    const execFileAsync = promisify(execFile);
+    const startedAtMs = Date.now();
+    let threw = null;
+    let stderr = "";
+    try {
+      await execFileAsync(
+        process.execPath,
+        [
+          CLI_PATH,
+          "--repo-root",
+          "C:\\definitely-not-a-real-worktree-4r",
+          "--dispatched-at-ms",
+          String(Date.now()),
+          "--notify-dir",
+          notifyDir,
+          "--task-id",
+          "HYK-TEST-invalid-args",
+          "--stall-threshold-ms",
+          "NaN", // ★검토자 실측 그대로.
+          "--timeout-ms",
+          "1",
+          "--poll-interval-ms",
+          "1",
+        ],
+        { encoding: "utf8", timeout: 10_000 }, // 안전망일 뿐(위 헤더 주석).
+      );
+    } catch (err) {
+      threw = err;
+      stderr = err.stderr || "";
+    }
+    const elapsedMs = Date.now() - startedAtMs;
+    assert.ok(threw, "INVALID_ARGS도 비0 종료코드여야 한다");
+    assert.equal(
+      threw.signal,
+      null,
+      "강제 종료(SIGTERM 등)가 아니라 스스로 exit해야 한다 -- 수리 전엔 여기서 SIGTERM이 찍혔다",
+    );
+    assert.equal(threw.code, 4);
+    assert.match(stderr, /INVALID_ARGS/);
+    assert.ok(
+      elapsedMs < 5000,
+      `1초 타임아웃/1ms 폴링 간격과 무관하게 즉시 끝나야 한다 -- 실제 ${elapsedMs}ms`,
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ★HYK-378 4R(REVIEW P2 재반려 수리, 불변식 M "배제 신호는 생산 경로에서
+// 소비돼야 한다") -- 3R까지는 `excludedSymlinkCount`가 어댑터 반환값에
+// 존재했지만 `runDispatchStartConfirm`이 `snap.totalBytes`만 읽고 이
+// 필드는 아무도 안 읽었다(검토자 지적 그대로 -- "만들어만 두고 아무도
+// 안 보면 없는 것과 같다"). 이 시험은 그 소비가 실제로 일어나는지
+// 두 자리(결과 객체 + stderr 로그)에서 확인한다.
+test("★HYK-378 4R 불변식 M 재현+수리: excludedSymlinkCount>0이면 결과 객체에 실리고 stderr 로그로도 소비된다", async () => {
+  const originalConsoleError = console.error;
+  const loggedLines = [];
+  console.error = (msg) => loggedLines.push(msg);
+  try {
+    const collectFn = () => ({
+      ok: true,
+      totalBytes: 5000,
+      excludedSymlinkCount: 3,
+    });
+    const result = await runDispatchStartConfirm({
+      repoRoot: "C:\\wt",
+      dispatchedAtMs: 0,
+      timeoutMs: 30000,
+      stallThresholdMs: 60000,
+      pollIntervalMs: 15000,
+      now: fakeClock(0, 15000),
+      sleepFn: instantSleep,
+      collectFn,
+    });
+    assert.equal(
+      result.excludedSymlinkCount,
+      3,
+      "결과 소비(완료조건 3의 '결과' 축) -- 최종 결과 객체에 실려야 한다",
+    );
+    assert.ok(
+      loggedLines.some((line) => /excludedSymlinkCount=3/.test(line)),
+      "로그 소비(완료조건 3의 '로그' 축) -- stderr에 실제로 찍혀야 한다",
+    );
+  } finally {
+    console.error = originalConsoleError;
+  }
+});
+
 test("관측 수집 자체가 실패하면 즉시 COLLECTION_FAILED로 멈춘다(조용히 STARTED로 접지 않는다)", async () => {
   const collectFn = () => ({
     ok: false,
