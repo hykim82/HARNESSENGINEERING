@@ -8,6 +8,7 @@ import {
   DEFAULT_STALL_THRESHOLD_MS,
   DEFAULT_SUSTAINED_GROWTH_BYTES,
   DEFAULT_STALL_GRACE_MULTIPLIER,
+  MAX_STALL_GRACE_MULTIPLIER,
 } from "./dispatch-start-size-core.mjs";
 
 test("judgeDispatchStartBySize: args가 plain object 아니면 UNDECIDABLE/ARGS_INVALID", () => {
@@ -271,7 +272,148 @@ test("★완료조건2(진짜 정지, 숫자로): 많이 자란 뒤라도(sustai
     stallThresholdMs: DEFAULT_STALL_THRESHOLD_MS,
   });
   assert.equal(r.verdict, DISPATCH_START_SIZE_VERDICT.STALLED_AFTER_START);
-  assert.equal(r.details.sustainedGrowthApplied, true);
+  // ★2R(P1-1 수리) -- 유예 마감은 sustainedAtMs(=60000, 자란 시점)에 고정
+  // 되므로 이 시각(60000+상한+1000)엔 이미 마감을 넘겨 sustainedGrowthApplied
+  // 는 false로 떨어진다(기본 임계로 되돌아간 뒤에도 STALLED로 잡힌다는
+  // 것이 이 시험의 요지 -- "상한이 실제로 상한"이라는 증거).
+  assert.equal(r.details.sustainedGrowthApplied, false);
+});
+
+// ---------------------------------------------------------------------------
+// ★HYK-378 2R(REVIEW P1-1 반려 수리) -- `stallGraceMultiplier`를 timeout·
+// stallThreshold와 같은 자리에서 같은 방식으로 검증한다. 검토자 실측
+// 재현: 0B -> 50,001B(sustained 켜짐) 뒤 1,000,000,000ms 무증가 관측에
+// `stallGraceMultiplier: Infinity`(또는 `NaN`)를 주면 예전엔 STARTED로
+// 샜다 -- 이제는 인자 검증 단계에서 거부한다.
+test("★HYK-378 2R P1-1 재현+수리: stallGraceMultiplier=Infinity는 거부된다(무증가 10억ms에도 STARTED로 새던 자리)", () => {
+  const r = judgeDispatchStartBySize({
+    observations: [
+      { observedAtMs: 0, totalBytes: 0 },
+      { observedAtMs: 1000, totalBytes: DEFAULT_SUSTAINED_GROWTH_BYTES + 1 },
+      {
+        observedAtMs: 1000 + 1_000_000_000,
+        totalBytes: DEFAULT_SUSTAINED_GROWTH_BYTES + 1,
+      },
+    ],
+    dispatchedAtMs: 0,
+    now: 1000 + 1_000_000_000,
+    timeoutMs: DEFAULT_TIMEOUT_MS,
+    stallThresholdMs: DEFAULT_STALL_THRESHOLD_MS,
+    stallGraceMultiplier: Infinity,
+  });
+  assert.equal(r.verdict, DISPATCH_START_SIZE_VERDICT.UNDECIDABLE);
+  assert.equal(r.reasonCode, DISPATCH_START_SIZE_REASON.THRESHOLD_INVALID);
+});
+
+test("★HYK-378 2R P1-1: stallGraceMultiplier=NaN도 거부된다", () => {
+  const r = judgeDispatchStartBySize({
+    observations: [{ observedAtMs: 0, totalBytes: 0 }],
+    dispatchedAtMs: 0,
+    now: 1000,
+    stallGraceMultiplier: NaN,
+  });
+  assert.equal(r.reasonCode, DISPATCH_START_SIZE_REASON.THRESHOLD_INVALID);
+});
+
+test(`★HYK-378 2R P1-1: stallGraceMultiplier가 MAX_STALL_GRACE_MULTIPLIER(${MAX_STALL_GRACE_MULTIPLIER})를 넘는 과대 유한값도 거부된다`, () => {
+  const r = judgeDispatchStartBySize({
+    observations: [{ observedAtMs: 0, totalBytes: 0 }],
+    dispatchedAtMs: 0,
+    now: 1000,
+    stallGraceMultiplier: MAX_STALL_GRACE_MULTIPLIER + 0.001,
+  });
+  assert.equal(r.reasonCode, DISPATCH_START_SIZE_REASON.THRESHOLD_INVALID);
+});
+
+test("★HYK-378 2R P1-1: stallGraceMultiplier가 1 미만(0·음수)도 거부된다", () => {
+  const r1 = judgeDispatchStartBySize({
+    observations: [{ observedAtMs: 0, totalBytes: 0 }],
+    dispatchedAtMs: 0,
+    now: 1000,
+    stallGraceMultiplier: 0,
+  });
+  assert.equal(r1.reasonCode, DISPATCH_START_SIZE_REASON.THRESHOLD_INVALID);
+  const r2 = judgeDispatchStartBySize({
+    observations: [{ observedAtMs: 0, totalBytes: 0 }],
+    dispatchedAtMs: 0,
+    now: 1000,
+    stallGraceMultiplier: -1,
+  });
+  assert.equal(r2.reasonCode, DISPATCH_START_SIZE_REASON.THRESHOLD_INVALID);
+});
+
+test("★HYK-378 2R P1-1: sustainedGrowthBytes가 음수면 거부된다(항상 즉시 '이미 자람'으로 뭉갤 통로)", () => {
+  const r = judgeDispatchStartBySize({
+    observations: [{ observedAtMs: 0, totalBytes: 0 }],
+    dispatchedAtMs: 0,
+    now: 1000,
+    sustainedGrowthBytes: -1,
+  });
+  assert.equal(r.reasonCode, DISPATCH_START_SIZE_REASON.THRESHOLD_INVALID);
+});
+
+test(`★HYK-378 2R P1-1: MAX_STALL_GRACE_MULTIPLIER(${MAX_STALL_GRACE_MULTIPLIER}) 자체는 유효한 값이다(경계값 포함)`, () => {
+  const r = judgeDispatchStartBySize({
+    observations: [
+      { observedAtMs: 0, totalBytes: 0 },
+      { observedAtMs: 1000, totalBytes: DEFAULT_SUSTAINED_GROWTH_BYTES + 1 },
+    ],
+    dispatchedAtMs: 0,
+    now: 1000,
+    stallGraceMultiplier: MAX_STALL_GRACE_MULTIPLIER,
+  });
+  assert.equal(r.verdict, DISPATCH_START_SIZE_VERDICT.STARTED);
+});
+
+// ---------------------------------------------------------------------------
+// ★HYK-378 2R(REVIEW P1-1 반려 수리, 유예 «총 수명» 상한) -- 검토자 실측
+// 재현: `stallGraceMultiplier`는 기본값(2, 유효)인 채로, "359,999ms마다
+// 1B씩" 늘어나는 관측열은 1R 구현에서 매번 유예를 다시 시작시켜
+// 사실상 무한(약 2시간)이 됐다. ★수리 검증: 유예 마감을 sustainedAtMs
+// (=처음 sustained 바를 넘긴 시각)에 고정하면, 그 마감을 넘긴 뒤에는
+// "방금도 359,999ms 전에 늘었다"는 사실이 더 이상 유예를 안 준다 --
+// 마감 이후엔 기본 임계(3분)만으로 판정하므로, 이 주기(359,999ms > 3분)
+// 자체가 매번 STALLED_AFTER_START를 만든다.
+test("★HYK-378 2R P1-1 재현+수리(숫자로): 359,999ms 주기 1B 증가도 유예 마감을 넘기면 STALLED_AFTER_START로 잡힌다", () => {
+  const SUSTAINED_AT_MS = 1000;
+  const PERIOD_MS = 359_999;
+  const graceDeadlineMs =
+    SUSTAINED_AT_MS +
+    DEFAULT_STALL_THRESHOLD_MS * DEFAULT_STALL_GRACE_MULTIPLIER; // 361000
+  const secondGrowthAtMs = SUSTAINED_AT_MS + PERIOD_MS; // 360999 -- 마감 이전(아직 유예 안).
+  assert.ok(
+    secondGrowthAtMs < graceDeadlineMs,
+    "이 시험이 재현하려는 조건: 두 번째 증가 자체는 아직 마감 전이어야 한다",
+  );
+  const observations = [
+    { observedAtMs: 0, totalBytes: 0 },
+    {
+      observedAtMs: SUSTAINED_AT_MS,
+      totalBytes: DEFAULT_SUSTAINED_GROWTH_BYTES + 1, // sustained 켜짐(60001B 등가).
+    },
+    {
+      observedAtMs: secondGrowthAtMs,
+      totalBytes: DEFAULT_SUSTAINED_GROWTH_BYTES + 2,
+    },
+  ];
+  // 마감을 넘긴 뒤, 그 다음(세 번째) 1B가 오기(=secondGrowthAtMs+PERIOD_MS)
+  // «전에» 이미 기본 임계(3분)만으로 STALLED가 확정돼야 한다 -- 1R이라면
+  // "방금도(359,999ms 전에) 늘었다"는 유예가 매번 갱신돼 이 시각에도
+  // STARTED로 남았을 자리(검토자 실측 원문의 형태 그대로).
+  const now = secondGrowthAtMs + DEFAULT_STALL_THRESHOLD_MS + 1; // 마감(361000) 이후 + 기본임계 초과.
+  assert.ok(
+    now > graceDeadlineMs,
+    "이 시험이 재현하려는 조건: 판정 시각이 유예 마감 이후여야 한다",
+  );
+  const r = judgeDispatchStartBySize({
+    observations,
+    dispatchedAtMs: 0,
+    now,
+    timeoutMs: DEFAULT_TIMEOUT_MS,
+    stallThresholdMs: DEFAULT_STALL_THRESHOLD_MS,
+  });
+  assert.equal(r.verdict, DISPATCH_START_SIZE_VERDICT.STALLED_AFTER_START);
+  assert.equal(r.details.sustainedGrowthApplied, false);
 });
 
 // ★완료조건2(§3 항2, 합성 표본 = 증가 0 + 새 축도 죽어 있음) -- 새 축

@@ -88,6 +88,16 @@ export const DEFAULT_STALL_THRESHOLD_MS = 3 * 60 * 1000;
 // 가려버리는 경우는 알려진 한계로 남긴다(신호·눈멂 표 참조).
 export const DEFAULT_SUSTAINED_GROWTH_BYTES = 50_000;
 export const DEFAULT_STALL_GRACE_MULTIPLIER = 2;
+// ★HYK-378 2R(REVIEW P1-1 반려 수리) -- `stallGraceMultiplier`가 검증 없이
+// 그대로 곱해져 `Infinity`/`NaN`/과대 유한값이면 무증가가 얼마나 길든
+// `STARTED`로 새는 구멍이 있었다(검토자 실측: 1,000,000,000ms 무증가도
+// `STARTED`). ★결정(반박 환영) -- "안전하게 접는다"(값을 조용히 clamp)가
+// 아니라 **"거부한다"**를 택했다: `timeoutMs`/`stallThresholdMs`가 이미
+// 같은 파일에서 "0 이하면 UNDECIDABLE/THRESHOLD_INVALID"로 거부하는
+// 선례가 있고, 이 축도 정지 판정을 좌우하는 안전 계수이므로 같은 자리·
+// 같은 방식으로 다뤄야 값이 뭉개지지 않는다(잘못된 배수를 몰래 4로
+// 깎아 쓰면 호출자가 자신이 준 값이 안 먹혔다는 것을 영영 모른다).
+export const MAX_STALL_GRACE_MULTIPLIER = 4;
 
 function isPlainObject(v) {
   return v !== null && typeof v === "object" && !Array.isArray(v);
@@ -150,35 +160,80 @@ function computeLastGrowthAtMs(sortedObservations) {
   return lastGrowthAtMs;
 }
 
-// ★신규(HYK-378) -- "이 dispatch가 지금까지 총 얼마나 자랐는가"(관측
-// 시작점 대비). DEFAULT_SUSTAINED_GROWTH_BYTES 상수 헤더 주석 참조 --
-// 이 값이 클수록만(=검증된 실제 작업 증거) 무증가 허용 배수를 켠다.
-function computeGrowthSinceStartBytes(sortedObservations) {
-  if (sortedObservations.length === 0) return 0;
-  let runningMax = sortedObservations[0].totalBytes;
+// ★HYK-378 2R(REVIEW P1-1 반려 수리) -- 누적 성장량이 `sustainedGrowthBytes`
+// 바를 «처음» 넘긴 시각을 돌려준다(못 넘겼으면 `null`). ★이 시각이
+// "유예의 총 수명" 기준점이다 -- `lastGrowthAtMs`(가장 최근 증가)를
+// 기준으로 삼으면 검토자가 실측한 대로 "359,999ms마다 1B씩" 흘려 넣는
+// 관측열이 매번 유예를 다시 시작시켜 사실상 무한이 된다. 이 시각은 한
+// 번 확정되면(=한 번 그 바를 넘기면) 그 뒤 관측이 아무리 늘어도
+// 바뀌지 않으므로, 유예 마감(`sustainedAtMs + stallThresholdMs *
+// stallGraceMultiplier`)이 고정된 벽시계 상한이 된다 -- 갱신 불가.
+function computeSustainedAtMs(sortedObservations, sustainedGrowthBytes) {
+  if (sortedObservations.length === 0) return null;
+  const startBytes = sortedObservations[0].totalBytes;
+  let runningMax = startBytes;
+  if (runningMax - startBytes >= sustainedGrowthBytes) {
+    return sortedObservations[0].observedAtMs;
+  }
   for (let i = 1; i < sortedObservations.length; i++) {
-    if (sortedObservations[i].totalBytes > runningMax) {
-      runningMax = sortedObservations[i].totalBytes;
+    const entry = sortedObservations[i];
+    if (entry.totalBytes > runningMax) runningMax = entry.totalBytes;
+    if (runningMax - startBytes >= sustainedGrowthBytes) {
+      return entry.observedAtMs;
     }
   }
-  return runningMax - sortedObservations[0].totalBytes;
+  return null;
 }
 
 function resolveThreshold(value, defaultValue) {
   return value === undefined || value === null ? defaultValue : value;
 }
 
+// 네 임계 인자(timeout·stallThreshold·sustainedGrowth·graceMultiplier)를
+// 한데 모아 검증한다(judgeDispatchStartBySize에서 분리 -- eslint
+// complexity 상한 준수, 로직은 그대로). 문제가 있으면 그 사유 코드를,
+// 전부 온전하면 `null`을 돌려준다. ★HYK-378 2R(REVIEW P1-1 반려 수리) --
+// 기존 timeout/stallThreshold와 «같은 자리·같은 방식»(0 이하 거부)으로
+// 이 축의 두 인자(sustainedGrowth·graceMultiplier)도 검증한다.
+// sustainedGrowthBytes는 음수면 무의미(항상 즉시 "이미 자람"으로 뭉갤 수
+// 있어 사실상 무제한 유예 통로), stallGraceMultiplier는 1(=여유 없음)
+// 미만이거나 MAX_STALL_GRACE_MULTIPLIER를 넘으면(★검토자 실측:
+// `Infinity`/`NaN`/과대 유한값이 무제한 유예로 샜다) 거부한다.
+function firstThresholdProblem({
+  timeout,
+  stallThreshold,
+  sustainedGrowth,
+  graceMultiplier,
+}) {
+  if (!isFiniteNumber(timeout) || timeout <= 0) {
+    return DISPATCH_START_SIZE_REASON.THRESHOLD_INVALID;
+  }
+  if (!isFiniteNumber(stallThreshold) || stallThreshold <= 0) {
+    return DISPATCH_START_SIZE_REASON.THRESHOLD_INVALID;
+  }
+  if (!isFiniteNumber(sustainedGrowth) || sustainedGrowth < 0) {
+    return DISPATCH_START_SIZE_REASON.THRESHOLD_INVALID;
+  }
+  if (
+    !isFiniteNumber(graceMultiplier) ||
+    graceMultiplier < 1 ||
+    graceMultiplier > MAX_STALL_GRACE_MULTIPLIER
+  ) {
+    return DISPATCH_START_SIZE_REASON.THRESHOLD_INVALID;
+  }
+  return null;
+}
+
 // 성장 이력(`lastGrowthAtMs`)이 확정된 뒤의 판정만 모은다(judgeDispatchStartBySize
 // 에서 분리 -- eslint complexity 상한 준수).
 function judgeFromGrowthHistory({
   lastGrowthAtMs,
-  growthSinceStartBytes,
+  sustainedAtMs,
   observationCount,
   dispatchedAtMs,
   now,
   timeoutMs,
   stallThresholdMs,
-  sustainedGrowthBytes,
   stallGraceMultiplier,
 }) {
   if (lastGrowthAtMs === null) {
@@ -194,11 +249,20 @@ function judgeFromGrowthHistory({
     };
   }
 
-  // DEFAULT_SUSTAINED_GROWTH_BYTES 헤더 주석 참조 -- 이미 검증된 실제
-  // 작업량(sustainedGrowthBytes 이상)이 있을 때만, 상한 있는 배수만큼
-  // 무증가 허용을 늘린다. 합성 진짜-정지 표본(증가 0)은 이 조건을 절대
-  // 못 만족해 기본 임계 그대로 잡힌다(B 보존).
-  const sustainedGrowthApplied = growthSinceStartBytes >= sustainedGrowthBytes;
+  // DEFAULT_SUSTAINED_GROWTH_BYTES/computeSustainedAtMs 헤더 주석 참조 --
+  // 이미 검증된 실제 작업량이 있을 때만, 그리고 그 유예가 «고정된
+  // 벽시계 마감»(sustainedAtMs 기준, 갱신 불가) 안에서만 상한 있는
+  // 배수만큼 무증가 허용을 늘린다. 합성 진짜-정지 표본(증가 0)은
+  // sustainedAtMs가 `null`이라 이 조건을 절대 못 만족해 기본 임계
+  // 그대로 잡힌다(B 보존) -- ★2R: 마감이 lastGrowthAtMs가 아니라
+  // sustainedAtMs에 고정되므로, 소량 증가를 반복해도 마감이 갱신되지
+  // 않는다(P1-1 "359,999ms마다 1B" 회귀 가드).
+  const graceDeadlineMs =
+    sustainedAtMs === null
+      ? null
+      : sustainedAtMs + stallThresholdMs * stallGraceMultiplier;
+  const sustainedGrowthApplied =
+    graceDeadlineMs !== null && now <= graceDeadlineMs;
   const effectiveStallThresholdMs = sustainedGrowthApplied
     ? stallThresholdMs * stallGraceMultiplier
     : stallThresholdMs;
@@ -276,12 +340,13 @@ export function judgeDispatchStartBySize(args) {
     stallGraceMultiplier,
     DEFAULT_STALL_GRACE_MULTIPLIER,
   );
-  if (!isFiniteNumber(timeout) || timeout <= 0) {
-    return undecidable(DISPATCH_START_SIZE_REASON.THRESHOLD_INVALID);
-  }
-  if (!isFiniteNumber(stallThreshold) || stallThreshold <= 0) {
-    return undecidable(DISPATCH_START_SIZE_REASON.THRESHOLD_INVALID);
-  }
+  const thresholdProblem = firstThresholdProblem({
+    timeout,
+    stallThreshold,
+    sustainedGrowth,
+    graceMultiplier,
+  });
+  if (thresholdProblem) return undecidable(thresholdProblem);
   const observationProblem = firstObservationProblem(observations, now);
   if (observationProblem) return undecidable(observationProblem);
 
@@ -289,10 +354,10 @@ export function judgeDispatchStartBySize(args) {
     (a, b) => a.observedAtMs - b.observedAtMs,
   );
   const lastGrowthAtMs = computeLastGrowthAtMs(sorted);
-  const growthSinceStartBytes = computeGrowthSinceStartBytes(sorted);
+  const sustainedAtMs = computeSustainedAtMs(sorted, sustainedGrowth);
   return judgeFromGrowthHistory({
     lastGrowthAtMs,
-    growthSinceStartBytes,
+    sustainedAtMs,
     observationCount: sorted.length,
     dispatchedAtMs,
     now,
