@@ -240,14 +240,20 @@ test("(c)★ 소비 경로 실측: 급소 2 재현 입력을 실제 checkRelayHa
     try {
       const harnessDir = join(linkedDir, ".harness");
       mkdirSync(harnessDir, { recursive: true });
+      // HYK-383: REVIEW 계열 소비는 head_commit: 축(축 ⓐ+ⓑ)도 통과해야
+      // 한다 -- harnessDir는 이미 진짜 링크드 워크트리 안이므로 그 실제
+      // HEAD를 양쪽 표지에 적어 넣는다(이 시험은 그 축과 무관한
+      // cross-issue note를 확인하므로, head_commit 축이 회귀 0 결과를
+      // 가려서는 안 된다).
+      const headCommit = git(harnessDir, ["rev-parse", "HEAD"]);
       writeFileSync(
         join(harnessDir, "review-task.md"),
-        "task_id: HYK-9705-review-1\ndropped_at: 2026-08-25 20:00 KST\n",
+        `task_id: HYK-9705-review-1\ndropped_at: 2026-08-25 20:00 KST\nhead_commit: ${headCommit}\n`,
         "utf8",
       );
       writeFileSync(
         join(harnessDir, "review.md"),
-        "task_id: HYK-9705-review-1\nfor: HYK-357-coder-1\nverdict: rejected\nrole: REVIEW-CODEX\n\n>>> DONE: REVIEW-CODEX @ 2026-08-25 20:10:00 KST\n",
+        `task_id: HYK-9705-review-1\nfor: HYK-357-coder-1\nverdict: rejected\nrole: REVIEW-CODEX\nhead_commit: ${headCommit}\n\n>>> DONE: REVIEW-CODEX @ 2026-08-25 20:10:00 KST\n`,
         "utf8",
       );
 

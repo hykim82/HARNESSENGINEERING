@@ -1181,6 +1181,141 @@ function resolveMatchedTaskId(taskContent, resultContent) {
   return { ok: true, taskId };
 }
 
+// HYK-383: 검토 결과 계약의 자기확인이 dispatch/pane 일치뿐이라 «엉뚱한
+// 커밋을 열심히 검토»해도 형식은 전부 통과했다(2026-08-28 19:07 실사고,
+// HYK-377 review-5 -- 표지 task_id·dispatch·pane 전부 일치했으나 본문은
+// 직전 라운드 커밋을 판정했고, 검토자 워크트리 HEAD도 그 값에서 한 번도
+// 움직이지 않았다). 이 축은 REVIEW 계열 결과에만 건다(coder-task.md §2
+// 범위) -- CODER 결과는 이번 범위 밖이다: 작성자는 커밋을 «만들며» 그
+// 라운드 안에서 HEAD가 움직이므로 "판정 시점 HEAD == 배달 시점 지정
+// 커밋" 같은 정적 대조가 성립하지 않는다(검토자는 판정 동안 커밋을 만들지
+// 않으므로 HEAD가 고정돼 있어야 이 대조가 의미를 가진다).
+//
+// 두 축을 독립적으로 건다(coder-task.md §2 원문): 축 ⓐ만 있으면 워커가
+// 지정값을 그대로 베껴 써도(실제로 그 커밋에 있지 않아도) 통과하고, 축
+// ⓑ만 있으면 «엉뚱한 커밋에 머문 채 그 커밋을 정직하게 신고»하는 이번
+// 실사고가 그대로 통과한다(축 ⓑ는 결과와 실물 워크트리의 내부 일관성만
+// 보고, 그 워크트리가 애초에 배달이 지정한 대상 커밋에 있는지는 보지
+// 않는다) -- 그래서 반드시 둘 다 건다.
+// HYK-383: 콜론과 값 사이·값과 줄 끝 사이의 공백은 개행을 포함하지 않는
+// `[ \t]*`로 좁힌다 -- `\s*`를 썼다면 "head_commit:\n<40-hex>"처럼 콜론
+// 바로 뒤에 개행이 와도 그 개행을 통째로 삼켜 다중 행 입력이 "한 줄"
+// 계약을 어기고도 매치를 수락한다(BLOCKED_RE가 이미 겪은 바로 그 함정,
+// 이 파일 위쪽 HYK-173-escalation-2 주석 참조 -- coder-task.md §2도 "08-27
+// 에 문장 속 인용이 표지로 오인된 전례"를 이 축의 앵커 요건 근거로 직접
+// 인용한다).
+const HEAD_COMMIT_RE_G = /^head_commit:[ \t]*([0-9a-fA-F]{40})[ \t]*$/gim;
+// resolveResultTaskId의 TASK_ID_ANYWHERE_RE와 동일한 역할 -- 매치 채택에는
+// 절대 쓰지 않고, "표지 자체가 아예 없다"와 "표지를 쓰려는 흔적은 있는데
+// 줄 시작이 아니거나 값이 40자 hex가 아니다"를 가르는 near-miss 진단에만
+// 쓴다.
+const HEAD_COMMIT_ANYWHERE_RE = /head_commit:\s*(\S+)/i;
+
+function resolveHeadCommitField(content, { label }) {
+  const matches = [...content.matchAll(HEAD_COMMIT_RE_G)];
+  if (matches.length > 1) {
+    return {
+      ok: false,
+      reason: `${label} has ${matches.length} standalone 'head_commit:' lines -- 어느 것이 최종인지 결정할 수 없다 (ambiguous, cannot resolve, HYK-383)`,
+    };
+  }
+  if (matches.length === 1) {
+    return { ok: true, sha: matches[0][1].toLowerCase() };
+  }
+  if (HEAD_COMMIT_ANYWHERE_RE.test(content)) {
+    return {
+      ok: false,
+      reason: `${label} head_commit not a standalone column-0 'head_commit: <40-hex sha>' line (found mid-line, or value is not a full 40-hex git SHA, HYK-383)`,
+    };
+  }
+  return {
+    ok: false,
+    reason: `${label} missing head_commit header (need a standalone \`head_commit: <40-hex sha>\` line, HYK-383)`,
+  };
+}
+
+// 소비 시점에 «검토자 워크트리의 실제 HEAD»를 기계가 직접 읽는다(축 ⓑ) --
+// 워커의 자기 진술(결과 파일 안의 head_commit:)을 신뢰하지 않는다.
+// isInsideGitWorktree(위)와 동일하게 harnessDir를 cwd로 써서 git이 위로
+// 저장소를 탐색하게 둔다(harnessDir 자신이 워크트리 루트가 아니라 그 안의
+// `.harness/` 서브디렉터리인 정상 배치를 그대로 지원). `git rev-parse
+// HEAD` 실패(워크트리가 아님·git 자체가 없음 등)는 ⛔fail-closed -- "확인할
+// 수 없으니 통과"는 하지 않는다.
+function readActualWorktreeHeadCommit(harnessDir) {
+  try {
+    const out = execSync("git rev-parse HEAD", {
+      cwd: harnessDir,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    }).trim();
+    if (!/^[0-9a-fA-F]{40}$/.test(out)) {
+      return {
+        ok: false,
+        reason: `git rev-parse HEAD at '${harnessDir}' returned an unexpected value: '${out}' (HYK-383, fail-closed)`,
+      };
+    }
+    return { ok: true, sha: out.toLowerCase() };
+  } catch (err) {
+    return {
+      ok: false,
+      reason: `git rev-parse HEAD failed at '${harnessDir}': ${err.stderr ?? err.message} (HYK-383, fail-closed -- cannot verify the reviewer worktree's actual HEAD)`,
+    };
+  }
+}
+
+// Extracted from checkRelayHandshake (same ESLint-limit reason as its
+// siblings) -- REVIEW 계열에만 건다(isReviewFamilyRole, coder-task.md §2
+// 범위: CODER는 이 축 밖). 비REVIEW 역할은 즉시 `{ok:true, skipped:true}`로
+// 빠져 나가 이 축의 어떤 검사도 겪지 않는다(§4 무회귀: CODER/VERIFY 라운드
+// 는 이 축이 존재하기 전과 완전히 동일하게 움직인다).
+export function resolveHeadCommitBinding({
+  role,
+  taskContent,
+  resultContent,
+  harnessDir,
+}) {
+  if (!isReviewFamilyRole(role)) return { ok: true, skipped: true };
+
+  const resultHead = resolveHeadCommitField(resultContent, {
+    label: "result",
+  });
+  if (!resultHead.ok) return { ok: false, reason: resultHead.reason };
+
+  const taskHead = resolveHeadCommitField(taskContent, { label: "task" });
+  if (!taskHead.ok) {
+    return {
+      ok: false,
+      reason: `task file missing head_commit header (required for REVIEW-family 판정 대상 커밋 지정, HYK-383) -- ${taskHead.reason}`,
+    };
+  }
+
+  // 축 ⓐ(지정 대조): 결과가 배달이 지정한 대상 커밋과 같은가.
+  if (resultHead.sha !== taskHead.sha) {
+    return {
+      ok: false,
+      reason: `head_commit mismatch (축 ⓐ 지정 대조, HYK-383): task dispatch specifies '${taskHead.sha}' but result echoes '${resultHead.sha}' -- 배달이 지정한 대상 커밋과 결과가 판정했다고 신고한 커밋이 다르다`,
+    };
+  }
+
+  // 축 ⓑ(실물 대조): 결과가 검토자 워크트리의 실제 HEAD와 같은가 --
+  // 워커 진술이 아니라 기계가 직접 읽는다.
+  const actualHead = readActualWorktreeHeadCommit(harnessDir);
+  if (!actualHead.ok) {
+    return {
+      ok: false,
+      reason: `head_commit verification failed (축 ⓑ 실물 대조, HYK-383): ${actualHead.reason}`,
+    };
+  }
+  if (resultHead.sha !== actualHead.sha) {
+    return {
+      ok: false,
+      reason: `head_commit mismatch (축 ⓑ 실물 대조, HYK-383): result echoes '${resultHead.sha}' but the reviewer worktree's actual HEAD ('${harnessDir}') is '${actualHead.sha}' -- 엉뚱한 커밋에 머문 채 그 커밋을 정직하게 신고했더라도 거부한다(2026-08-28 19:07 실사고 재현 방지)`,
+    };
+  }
+
+  return { ok: true, sha: resultHead.sha };
+}
+
 // HYK-257-done-stamp-lint-1: extracted from checkRelayHandshake (same
 // ESLint-limit reason as above) -- the two checks that sit between
 // resolveDoneAt succeeding and the completion side-effects starting:
@@ -1519,6 +1654,21 @@ export function checkRelayHandshake({
     droppedMatch,
   });
   if (rewriteOrStaleVerdict) return rewriteOrStaleVerdict;
+
+  // HYK-383: 이 라운드가 완료로 판정되기 «직전», 다른 모든 사유별 검사
+  // (task_id 결속·dropped_at/DONE 파싱·시간대 착오·미래-시각·staleness·
+  // 중간수정)가 이미 통과한 뒤에 건다 -- 그래야 이 축이 없던 시절부터
+  // 있던, 다른 구체적 거부 사유(예: future-skew의 "ahead of authority
+  // now")를 가리키는 기존 시험들이 여전히 그 사유를 그대로 본다(§4
+  // 무회귀). REVIEW 계열이 아니면 즉시 통과(resolveHeadCommitBinding 자체
+  // 헤더 참조).
+  const headCommitVerdict = resolveHeadCommitBinding({
+    role,
+    taskContent,
+    resultContent,
+    harnessDir,
+  });
+  if (!headCommitVerdict.ok) return headCommitVerdict;
 
   const sideEffectVerdict = runCompletionSideEffects({
     role,

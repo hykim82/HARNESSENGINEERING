@@ -17,11 +17,12 @@ import {
   rmSync,
   mkdirSync,
   readFileSync,
+  existsSync,
 } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
-import { spawnSync } from "node:child_process";
+import { spawnSync, execFileSync } from "node:child_process";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const RELAY_HANDSHAKE_CLI = join(HERE, "relay-handshake.mjs");
@@ -61,18 +62,45 @@ function runCli(scriptPath, args) {
   };
 }
 
+// HYK-383: REVIEW 계열 소비는 이제 head_commit: 축(축 ⓐ 지정 대조 + 축 ⓑ
+// 실물 대조)도 통과해야 한다 -- 축 ⓑ가 harnessDir에서 `git rev-parse
+// HEAD`를 직접 읽으므로, 이 fixture 디렉터리를 진짜 git 저장소로 만들고
+// task/result 양쪽에 그 실제 HEAD를 head_commit:으로 적어 넣는다. 이 축은
+// role="verify"에는 걸리지 않는다(isReviewFamilyRole은 "review"로
+// 시작하는 role만 REVIEW 계열로 본다) -- 그래서 verify-task.md/verify.md를
+// 쓰는 다른 시험은 이 fixture를 쓰지 않고 손대지 않는다.
+function ensureGitHeadCommit(dir) {
+  if (!existsSync(join(dir, ".git"))) {
+    execFileSync("git", ["init", "-q"], { cwd: dir });
+    execFileSync("git", ["config", "user.email", "test@example.invalid"], {
+      cwd: dir,
+    });
+    execFileSync("git", ["config", "user.name", "test"], { cwd: dir });
+    execFileSync(
+      "git",
+      ["commit", "-q", "--allow-empty", "-m", "nc-codex-lane test fixture"],
+      { cwd: dir },
+    );
+  }
+  return execFileSync("git", ["rev-parse", "HEAD"], {
+    cwd: dir,
+    encoding: "utf8",
+  }).trim();
+}
+
 // codex REVIEW seat's own DONE-line convention (role-tagged label, see
 // hyk183-ledger-fix-mutation.test.mjs's own fixtures: "REVIEW-CODEX").
 function writeCodexReviewFixture(dir, { droppedAt, doneAt }) {
   mkdirSync(dir, { recursive: true });
+  const headCommit = ensureGitHeadCommit(dir);
   writeFileSync(
     join(dir, "review-task.md"),
-    `task_id: HYK-9186-codex\ndropped_at: ${droppedAt}\n`,
+    `task_id: HYK-9186-codex\ndropped_at: ${droppedAt}\nhead_commit: ${headCommit}\n`,
     "utf8",
   );
   writeFileSync(
     join(dir, "review.md"),
-    `task_id: HYK-9186-codex\n\n>>> DONE: REVIEW-CODEX @ ${doneAt}\n`,
+    `task_id: HYK-9186-codex\nhead_commit: ${headCommit}\n\n>>> DONE: REVIEW-CODEX @ ${doneAt}\n`,
     "utf8",
   );
 }
