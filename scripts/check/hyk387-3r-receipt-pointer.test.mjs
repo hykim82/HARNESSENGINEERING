@@ -23,15 +23,20 @@ import {
   rmSync,
 } from "node:fs";
 import { join, dirname } from "node:path";
+import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { checkRelayHandshake } from "./relay-handshake.mjs";
 import { isolatedChildEnv } from "./admission-ledger-env-isolation.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = dirname(dirname(HERE));
 const CLI_PATH = join(HERE, "relay-handshake.mjs");
-const SCRATCH_ROOT = join(REPO_ROOT, ".harness", "hyk387-3r-scratch");
+// HYK-394-test-leak-3 §2 Q1 (검토자 rejected 판정, 2026-08-30 실사고):
+// 이전에는 이 워크트리 자신의 라이브 `.harness/` 아래(`hyk387-3r-scratch`)
+// 였다 -- 오늘 밤 그 형태로 실제 검토 결과·영수증이 소실됐다.
+// `os.tmpdir()`는 저장소 밖이라 git status에 안 잡히면서(과거 git-status
+// 오염 회피 근거 유지) 라이브 `.harness/`와도 물리적으로 분리된다.
+const SCRATCH_ROOT = join(tmpdir(), "hyk387-3r-scratch");
 
 function withFixtureDir(prefix, fn) {
   mkdirSync(SCRATCH_ROOT, { recursive: true });

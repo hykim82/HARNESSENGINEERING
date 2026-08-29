@@ -814,6 +814,19 @@ function resolveDispatchReceiptPath(args, env) {
 // harnessTaskLabel이 일치하는 "마지막" 레코드를 고른다(먼저 나온 매치가
 // 아니라 마지막 -- append-only 로그이므로 그게 최신이다). 손상된 줄은
 // 건너뛴다(부분쓰기 가능성, §참조 아래 lookupDispatchId 헤더).
+// ⛔⛔ HYK-394-test-leak-3 §2 Q3 (2026-08-30, 검토자 rejected 판정
+// 그대로 명시): 아래 anchor는 **계약이 아니다.** 검토자 원문: "dispatch_id
+// 가 배달 시점 보존 사본에 박히지 않는다... 조회 시점을 안정화한
+// 개선이지 «배달 시점에 파일에 박아 둔 결속»이 아니다." currentBinding과
+// candidate 양쪽 dispatchId가 여전히 같은 (role, harnessTaskLabel) 조회
+// 함수에서 파생되므로, 다른 5개 결속 필드(taskId/role/droppedAt/
+// resultFingerprint/doneAt)가 이미 일치하는 한 dispatchId는 구조적으로
+// redundant하다(HYK-394 2R coder.md §8 상세). **완성(dispatch_id를 배달
+// 시점에 보존 사본에 실제로 굽는 것)은 이 저장소 범위 밖 -- HYK-396
+// 예정.** 이 anchor 자체는 독립적으로 안전한 개선(옛 "매번 재계산"
+// 결함을 닫아 false-reject 하나를 막는다, HYK-394 2R §5 RED 확인
+// 완료)이라 남겨 뒀을 뿐, "배달 시점 결속"을 달성했다고 주장하지 않는다
+// -- 이 축을 근거로 "dispatch_id 결속이 끝났다"고 판단하지 마라.
 // HYK-394-dispatch-id-bind-2 §2 (P1): `beforeMs`, when given, restricts
 // matches to ledger lines whose OWN `recorded_at` (dispatch-receipt-cli.mjs's
 // buildReceiptRecord field, ISO, stamped the moment `orca orchestration
@@ -1053,6 +1066,9 @@ function findArchivedDroppedAt(harnessDir, role, harnessTaskLabel) {
 // requires a valid doneAt for ANY candidate to ever match, so an
 // unanchored enrichment here can, at worst, feed a value into a comparison
 // that a downstream check would reject anyway on other grounds).
+// ⛔이 함수와 enrichCandidateDispatchId 아래는 HYK-394-test-leak-3 §2 Q3
+// 명시가 적용되는 "계약 아님" 축의 일부다 -- findLatestReceiptMatch의
+// 헤더(위쪽, "⛔⛔ HYK-394-test-leak-3 §2 Q3"로 시작) 참조, 완성은 HYK-396.
 // eslint complexity 상한 유지 목적으로 뽑은 한 줄짜리 헬퍼(동작 변경 없음)
 // -- enrichCandidateDispatchId 자신의 옵셔널 체이닝 개수가 이미 상한에
 // 가까웠고, beforeMs 계산 하나를 더 인라인하면 초과한다.
@@ -2221,6 +2237,8 @@ function buildCurrentBinding({
   };
 }
 
+// ⛔"계약 아님" 축 -- findLatestReceiptMatch의 헤더("⛔⛔ HYK-394-test-leak-3
+// §2 Q3"로 시작, dispatch-gate-decision.mjs 상단부) 참조, 완성은 HYK-396.
 // HYK-394-dispatch-id-bind-2 §2 (P1): same extraction buildCurrentBinding
 // uses for `doneAt` itself, converted to epoch ms for the dispatch_id
 // lookup's `beforeMs` anchor. A missing/ambiguous DONE line yields
