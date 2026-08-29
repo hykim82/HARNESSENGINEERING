@@ -969,6 +969,15 @@ function findArchivedDroppedAt(harnessDir, role, harnessTaskLabel) {
   return bestDroppedAt;
 }
 
+// HYK-394 Q7/Q8 (2026-08-30 00:31 범위 추가): a "try every archived copy
+// with this label, not just the highest-numbered one" relaxation was
+// prototyped here and proven exploitable by an adversarial same-task_id
+// redrop fixture (scripts/check/hyk394-q7-q8-consumption-multi-archive.test.mjs)
+// -- see the header comment on the caller below (evaluateConsumptionDecision)
+// for the full analysis. Per Q8's explicit instruction ("통과시키면 완화를
+// 넣지 마라"), the relaxation was reverted and this helper removed
+// (findArchivedDroppedAt below, unchanged, remains the only lookup).
+
 // HYK-244 2R-b3 결함2 수리 (필수 부속): 실물 생산 경로(relay-handshake.mjs
 // -> consumption-receipt-writer.mjs)는 완료 시점에 자기 dispatchId를 알
 // 방법이 없다(관제실 dispatch-receipts.jsonl에 그 라운드의 항목이 남는
@@ -2199,6 +2208,29 @@ function evaluateConsumptionDecision(taskPath, args, env = process.env) {
 
   const candidates = readConsumptionCandidates(harnessDir, role, receiptPath);
 
+  // HYK-394 Q7/Q8 (2026-08-30 00:31 범위 추가, 책임자 승인): "가장 높은
+  // 번호 사본 하나"만 보는 대신 "같은 라벨의 사본 중 하나라도 결속과
+  // 전체 일치하면 소비로 인정"하는 완화를 실제로 구현하고(findAllArchived
+  // DroppedAtValues + 이 자리의 재시도 루프, git 이력에서 조회 가능),
+  // Q8이 요구한 적대 표본(같은 task_id가 재드롭되고 새 라운드가 아직
+  // 결과를 안 낸 경우)으로 직접 검증했다 -- scripts/check/hyk394-q7-q8-
+  // consumption-multi-archive.test.mjs. 결과: ★적대 표본이 통과했다(즉
+  // 뚫렸다) -- 재드롭된, 진짜로는 아직 소비되지 않은 라운드가 옛(첫 드롭)
+  // 라운드의 영수증과 우연히 결속 6성분 전체가 일치해(재드롭도 같은
+  // task_id를 쓰므로 harnessTaskLabel이 같고, 새 라운드의 결과 파일이
+  // 아직 안 바뀌어 resultFingerprint/doneAt도 옛 라운드 것과 그대로
+  // 같다) ALLOW로 새어 버렸다. 두 시나리오("재스탬프 버그로 같은 라운드가
+  // 중복 보존됨" vs "같은 task_id가 실제로 재사용된 서로 다른 라운드")는
+  // droppedAt/resultFingerprint/doneAt/taskId/role 6성분만으로는 원리적으로
+  // 구별할 수 없다(재드롭이 남긴 보존 사본도 "같은 라벨의 사본"이라는
+  // 점에서 재스탬프 버그의 사본과 데이터 모양이 동일하다). Q8 지시
+  // 원문("통과시키면 완화를 넣지 마라")에 따라 이 완화는 반려하고 원래
+  // 로직(findArchivedDroppedAt, 가장 높은 번호 사본 하나만 대조)을
+  // 유지한다 -- coder.md Q7/Q8/Q9 절에 시험 코드와 실행 로그 전문을
+  // 남겼다. ⛔이 로직을 다시 완화하려면 먼저 "같은 task_id 재사용은
+  // 이 저장소에서 구조적으로 불가능하다"는 것을 별도로 증명하거나,
+  // 재사용을 막는 상위 계층 불변식을 함께 도입해야 한다(이 라운드
+  // 범위 밖).
   const decision = toConsumptionGateDecision({
     role,
     currentBinding,
