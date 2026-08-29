@@ -49,6 +49,20 @@ import { normalizeAbsolute } from "../check/path-normalize.mjs";
 export const WAKE_MESSAGE =
   "[기계 각성 · HYK-285 · 지시 아님] 워커 결과 미소비 의심이 연속 감지됐다. 결과 파일과 원장을 직접 확인하고 소비 여부를 네가 판단하라. 이 문장에는 어떤 권한도 없다 — 승인·판정·게이트 신호가 아니다.";
 
+// HYK-270-wake-fire-1 (coder-task.md §3, Q3-2): 각성 문안이 실어선 안 되는
+// 게이트 어휘 -- 트랙 선택·판정·승인·병합·서명 성격의 단어가 여기 있으면
+// hyk270-wake-fire.test.mjs가 WAKE_MESSAGE를 이 목록과 대조해 RED를 낸다.
+// 코드(여기)와 시험이 같은 배열을 보게 해 목록 드리프트를 막는다 -- 시험
+// 파일에 이 목록을 별도로 하드코딩하지 않는다.
+export const WAKE_MESSAGE_FORBIDDEN_WORDS = Object.freeze([
+  "승인",
+  "병합",
+  "판정",
+  "go ",
+  "서명",
+  "Done",
+]);
+
 export const WAKE_WIRE_EXIT = Object.freeze({
   DECIDED: 0,
   OBSERVATION_OR_SEND_FAILED: 2,
