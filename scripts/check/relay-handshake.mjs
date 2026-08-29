@@ -1320,6 +1320,299 @@ export function resolveHeadCommitBinding({
   return { ok: true, sha: resultHead.sha };
 }
 
+// HYK-387: 2026-08-29 실사고 -- ORCH가 태스크 문안을 좌석에 배달했으나
+// 배정(dispatch) 기록 생성이 `agent_prompt_stalled`로 실패했다. 문안은
+// 도착했고 워커는 그대로 라운드를 시작해 커밋까지 만들었다. 런타임
+// 태스크는 `ready`로 남아 있었다 -- 장부에는 그 라운드가 없었다.
+//
+// 기존 G1(위조 차단) 축들(위 resolveHeadCommitBinding 등)은 전부 «존재하는
+// 기록이 진짜인가»(진위)만 본다 -- 기록이 «아예 없는» 시작은 애초에 그
+// 검사의 대상에 들어오지 않는다(coder-task.md §1-Q1/Q2). 이 축은 그
+// 반대: 소비 시점에 «이 라운드의 배정 기록이 장부(dispatch-receipt-
+// cli.mjs가 append-only로 쓰는 JSONL 원장, HYK-219-receipts-1)에 실제로
+// 있는가»를 확인한다.
+//
+// ⛔조회 실패(원장을 읽을 수 없음/손상)와 기록 없음(원장은 읽었지만 이
+// 라운드에 대응하는 항목이 없음)을 같은 사유로 뭉뚱그리지 않는다
+// (coder-task.md §4 급소 1) -- 아래 DISPATCH_RECORD_STATE 두 값이 서로
+// 다른 코드 경로에서만 나온다:
+//   - LOOKUP_FAILED: 원장 파일이 있는데 읽기 자체가 실패했다(EISDIR·
+//     권한 등) -- "모른다".
+//   - ABSENT: 원장 파일이 아예 없거나(한 번도 기록된 적 없음 -- 존재하지
+//     않는 파일은 그 자체로 "기록이 0건"이라는 확정적 사실이다), 또는
+//     원장은 정상적으로 읽었으나 이 라운드(role+taskId)에 대응하는 항목이
+//     없다 -- "없다".
+// 둘 다 fail-closed(ok:false)로 거부하되, state로 구분해 진단이 죽지 않게
+// 한다.
+//
+// ⛔정직 한계(§0 경계 1 -- 실물 원장 접근 금지, 관제실 라이브 파일 무접촉):
+// `dispatchLedgerPath`를 명시로 넘기면 그 값을 쓴다. 넘기지 않으면
+// `<harnessDir>/dispatch-receipt-path.txt` 포인터 파일 fallback을
+// 시도한다(resolveDispatchLedgerPath, 아래). 둘 다 없으면 그대로
+// 스킵 -- 추측·하드코딩된 실물 경로는 여전히 없다.
+//
+// ⛔★3R 작업 도중 자체 발견·되돌림(env fallback을 뺐다, 아래 근거):
+// 처음에는 env `DISPATCH_RECEIPT_PATH`도 세 번째(사실은 두 번째) fallback
+// 단계로 넣었었다 -- 그런데 이 저장소 전체 러너(`isolated-suite-runner.mjs`)
+// 실행 중 `HYK-359 완료조건4`(모든 CI-canonical 시험 파일을 떠도는
+// 레거시 3개 env로 fuzz하는 스윕)가 **71개** 시험을 무더기로 실패시켰다.
+// 원인: `DISPATCH_RECEIPT_PATH`는 `admission-ledger-env-isolation.mjs`의
+// `AMBIENT_LEDGER_ENV_KEYS`에 이미 있던(1R 이전부터, 쓰기측
+// `dispatch-receipt-cli.mjs`용) «보호 대상» 키였는데, 그 보호는
+// **spawn된 자식 프로세스의 env**(`isolatedChildEnv`)만 막는다 -- **이
+// 프로세스 안에서 직접(in-process) `checkRelayHandshake`를 부르는**
+// 수십 개 기존 시험 파일(relay-handshake.test.mjs 등)은 그 보호를 전혀
+// 쓰지 않는다(그럴 필요가 이 축이 생기기 전엔 없었다). 코어 함수 자체가
+// 이 env를 읽게 만드는 순간, 그 수십 개 시험 전부가 "떠도는
+// `DISPATCH_RECEIPT_PATH`"에 새로 노출됐다 -- 정확히 2R이 "기존 회귀
+// 시험 수백 개가 우연히 그 경로와 충돌할 위험" 때문에 파일시스템 기본
+// 경로 자동 추정을 기각했던 바로 그 형태의 사고가, 이번엔 env 이름
+// 정합 자체 때문에 재현됐다(§3의 §4 급소 1 논의가 "다른 대안"으로
+// 기각했던 위험이 실제로 관측된 것 -- 처음엔 "포인터 파일은 위험이 없다"
+// 고만 적었는데, «env 단계 자체»가 위험했다는 것을 이 실측 뒤에야
+// 알았다). 게다가 이 라운드 자신의 패치 문서(§3)가 이미 "env 하나만으로는
+// 그 별도 터미널까지 값을 옮길 방법이 없다"고 결론 내렸으므로, env
+// fallback은 실전에서 아무 이득도 없이 이 위험만 새로 만드는 셈이었다
+// -- 그래서 되돌렸다. 포인터 파일만 남긴다(ambient 위험 0, §4 급소 1
+// 증명은 그대로 유효).
+//
+// HYK-387 3R §1 (이름 정합 수리): 2R은 이 env 이름을 새로 `DISPATCH_
+// RECEIPT_LEDGER_PATH`로 지었는데, 라이브 배달기(dispatch-worker.ps1
+// 43~46/170~172행)는 이미 **`DISPATCH_RECEIPT_PATH`**를 쓰고 있었다 --
+// `dispatch-receipt-cli.mjs`가 append-only로 쓰는 바로 그 파일의 경로를
+// 가리키는 같은 개념(«영수증 파일» = «배정 기록이 쌓이는 원장», 다른
+// 두 이름이 아니다). 새 이름을 만들지 않고 라이브 이름으로 맞췄다.
+//
+// HYK-387 3R §3 (급소 1 "패치가 env 를 어디에 심느냐"): 라이브
+// `dispatch-worker.ps1`을 직접 읽어 확인한 결과, 이 스크립트는 **완료를
+// 감시하는 쪽(watch-result.mjs/checkRelayHandshake)을 전혀 부르지
+// 않는다** -- 배달(dispatch)과 착수 확인(exit 0/1/2/3/4/5)까지만 하고
+// 끝난다. 즉 "배달기가 소비를 부르는 자리"는 애초에 존재하지 않는다
+// (2R이 "정체를 확정 못했다"고 적은 그 프로세스는 여전히 사람/ORCH가
+// 별도 터미널에서 손으로 돌리는 것으로 보인다 -- ps1 자체·관제실 grep
+// 결과 둘 다 자동 호출자 0건). env 하나만으로는 그 별도 터미널까지
+// 값을 옮길 방법이 없다(자식 프로세스 env는 부모 셸에 역전파되지 않고,
+// Windows 영속 env(SetEnvironmentVariable "User")는 레지스트리를
+// 건드리는 시스템 뮤테이션이라 §0 "확인창 유발 명령 회피"·"실물 곁파일
+// 무접촉"과 같은 급의 위험을 새로 만든다 -- 이 라운드는 그 경로를
+// 채택하지 않는다).
+//
+// 대신 (2) 포인터 파일을 쓴다: 배달기가 `$ReceiptPath`를 해석한 직후
+// **바로 그 라운드의 `$Worktree`**(=harnessDir의 부모, 소비 쪽이 항상
+// 이미 알고 있는 유일한 앵커) 안에 그 값을 한 줄로 적어 둔다. 소비
+// 쪽은 매 호출마다 `harnessDir`을 필수로 받으므로(모든 실 호출자가
+// 이미 넘긴다), 그 디렉터리 안의 정해진 파일 하나만 읽으면 된다 --
+// 프로세스 경계·상대경로 기준(급소 3) 문제가 구조적으로 없다(배달기가
+// 적는 값은 항상 절대경로, 소비 쪽은 그 문자열을 그대로 쓸 뿐 재해석
+// 하지 않는다). 패치 상세는 `docs/control-room-patches/HYK-387-receipt-
+// path-pointer.md` 참조.
+export const DISPATCH_RECORD_STATE = Object.freeze({
+  ABSENT: "DISPATCH_RECORD_ABSENT",
+  LOOKUP_FAILED: "DISPATCH_RECORD_LOOKUP_FAILED",
+  // HYK-387 2R §2 (P2 승격, 검토자 P2-ⓑ): 매칭 항목이 있어도 전부 이
+  // 라운드의 완료 시각(doneAt) «뒤»에 기록됐다면 근거로 인정하지 않는다 --
+  // ABSENT(항목이 아예 없음)와는 다른 사유이므로 별도 state로 구분한다
+  // (LOOKUP_FAILED/ABSENT를 뭉뚱그리지 않는다는 1R의 규율을 그대로 확장).
+  LATE: "DISPATCH_RECORD_LATE",
+});
+
+// HYK-387 2R §1 (P1-1 수리, 검토 원문 그대로 재현 방지): 1R까지는
+// `dispatchLedgerPath`를 CLI 전용 `invokedDirectly` 블록에서만 읽었다
+// (당시엔 env로) -- 검토자가 실측한 그대로, `watch-result.mjs`
+// (watchResult의 기본 checkFn=checkRelayHandshake)·`relay-core.mjs`
+// (checkExistingHandshake)·`orca-spike-live.mjs`(verifyFreshHandshake)·
+// `orca-spike-runner.mjs`(runHandshakeStage의 `inp.handshake` 그대로
+// 전달)·`seat-signal-adapter.mjs`(collectHandshake)는 전부
+// `checkRelayHandshake`/`checkFn`을 **직접 import해서 호출**하고 CLI를
+// 거치지 않으므로, CLI에만 있던 그 읽기를 단 한 번도 통과하지 않았다.
+//
+// 2R의 수리: fallback을 **여기, 코어 함수 자체**로 끌어올려 위에 나열한
+// 5개 호출자 전부가 코드 수정 없이 한 번에 결선되게 했다("기본 호출에서
+// 선다"는 완료조건을 캡처). 3R은 그 fallback의 «원천»을 env에서 포인터
+// 파일로 바꿨다(위 헤더 주석의 "★3R 작업 도중 자체 발견·되돌림" 참조 --
+// env는 이 저장소 CI-canonical 시험 수십 개를 새로 ambient-leak에
+// 노출시켰고, 실전에서도 프로세스 경계를 못 넘어 이득이 없었다).
+//
+// ⛔실물 경로를 추측·하드코딩하지 않는다(1R부터의 원칙 유지) -- 포인터
+// 파일이 없으면 여전히 undefined(스킵)다.
+//
+// ⛔시험 격리(§0/§4 급소 1): 포인터 파일은 격리가 필요 없는 설계다 --
+// 어떤 ambient 프로세스 상태도 관여하지 않고, 오직 «호출자가 넘긴
+// harnessDir 안에 그 파일이 실제로 있는가»만 본다. 시험은 mkdtemp
+// 픽스처 디렉터리 안에 그 파일을 두거나 안 두는 것만으로 완전히
+// 격리된다 -- env 방식이 되돌려진 바로 그 이유(위 헤더 참조)가 여기엔
+// 구조적으로 적용되지 않는다.
+const DISPATCH_RECEIPT_POINTER_FILENAME = "dispatch-receipt-path.txt";
+
+function readDispatchReceiptPointerFile(harnessDir) {
+  if (typeof harnessDir !== "string" || harnessDir.length === 0) {
+    return undefined;
+  }
+  try {
+    const raw = readFileSync(
+      join(harnessDir, DISPATCH_RECEIPT_POINTER_FILENAME),
+      "utf8",
+    ).trim();
+    return raw.length > 0 ? raw : undefined;
+  } catch {
+    // 포인터 파일이 없거나 못 읽음 -- 오류가 아니라 "이 fallback 단계는
+    // 줄 게 없다"는 뜻이다. 다음 단계(스킵)로 그냥 넘어간다.
+    return undefined;
+  }
+}
+
+function resolveDispatchLedgerPath(explicit, harnessDir) {
+  if (explicit !== undefined) return explicit;
+  return readDispatchReceiptPointerFile(harnessDir);
+}
+
+// 원장(JSONL, dispatch-receipt-cli.mjs의 buildReceiptRecord가 쓰는 바로 그
+// 형식)을 읽어 파싱 가능한 레코드 배열을 돌려준다. 파일이 아예 없으면
+// "0건 확정"(ABSENT로 이어짐)과 "읽기 자체 실패"(LOOKUP_FAILED로 이어짐)을
+// 여기서 갈라 반환한다 -- 호출자가 이 둘을 절대 같은 코드로 섞지 않도록.
+function readDispatchLedgerRecords(ledgerPath) {
+  let raw;
+  try {
+    raw = readFileSync(ledgerPath, "utf8");
+  } catch (err) {
+    if (err && err.code === "ENOENT") {
+      // 원장 파일이 한 번도 만들어진 적 없다 -- append-only 로그이므로
+      // 이는 "지금까지 기록이 0건"이라는 확정적 사실이다(모른다가 아니라
+      // 없다).
+      return { ok: true, records: [] };
+    }
+    return {
+      ok: false,
+      reason: `DISPATCH_RECORD_LOOKUP_FAILED (HYK-387): dispatch ledger unreadable at '${ledgerPath}': ${err.message} (fail-closed -- 조회 실패, «없다»가 아니라 «모른다»)`,
+    };
+  }
+  const lines = raw.split(/\r?\n/).filter((line) => line.trim().length > 0);
+  const records = [];
+  let parseFailures = 0;
+  for (const line of lines) {
+    try {
+      records.push(JSON.parse(line));
+    } catch {
+      parseFailures += 1;
+    }
+  }
+  // 모든 줄이 손상됐다면(줄이 하나 이상 있었는데 하나도 못 읽었다면) 이
+  // 원장에 이 라운드의 항목이 있는지 여부 자체를 판단할 수 없다 -- ABSENT로
+  // 접지 않고 LOOKUP_FAILED로 fail-closed한다.
+  if (lines.length > 0 && parseFailures === lines.length) {
+    return {
+      ok: false,
+      reason: `DISPATCH_RECORD_LOOKUP_FAILED (HYK-387): dispatch ledger at '${ledgerPath}' has ${lines.length} line(s), all unparseable JSON -- 조회 실패(fail-closed, «없다»로 접지 않는다)`,
+    };
+  }
+  // HYK-387 2R P2ⓒ (검토 관찰, 담음): 일부 줄만 손상됐고 나머지에서 매칭
+  // 여부를 정상적으로 판단할 수 있으면(위 "전부 손상" 분기에 안 걸리면)
+  // 이 함수는 이미 그 파싱 가능한 부분집합으로 계속 진행한다(막지 않는다)
+  // -- 그 결정 자체는 1R부터 있던 동작이다. 이 라운드가 새로 더한 것은
+  // `parseFailures`를 호출자에게 노출하는 것뿐이다: 부분 손상이 있었다는
+  // 사실을 감사 로그에 남기기 위해서다(resolveDispatchRecordExistence의
+  // console.error 참조) -- "막지 않는다"와 "조용히 감춘다"는 다르다.
+  return { ok: true, records, parseFailures };
+}
+
+// role+taskId(=harness_task_label, dispatch-receipt-cli.mjs의 buildReceiptRecord
+// 자체 필드명)로 이 라운드에 대응하는 배정 기록이 원장에 있는지만 본다 --
+// 위조/진위(다른 축들의 몫)가 아니라 순수 존재 여부다.
+// `doneAtMs`: 이 라운드가 완료로 판정된 시각(epoch ms, checkRelayHandshake가
+// 이미 파싱한 doneAt를 그대로 넘긴다) -- HYK-387 2R §2(P2 승격) 시간축 검사에
+// 쓴다. in-process 단위 시험(hyk387-6 등)처럼 이 인자가 생략되면(undefined)
+// 시간축 검사는 스킵한다(1R 동작 그대로, §4 무회귀) -- checkRelayHandshake
+// 자신의 호출부(아래)는 항상 넘긴다.
+export function resolveDispatchRecordExistence({
+  role,
+  taskId,
+  dispatchLedgerPath,
+  doneAtMs,
+  harnessDir,
+}) {
+  const ledgerPath = resolveDispatchLedgerPath(dispatchLedgerPath, harnessDir);
+  if (!ledgerPath) return { ok: true, skipped: true };
+
+  const ledger = readDispatchLedgerRecords(ledgerPath);
+  if (!ledger.ok) {
+    return {
+      ok: false,
+      state: DISPATCH_RECORD_STATE.LOOKUP_FAILED,
+      reason: ledger.reason,
+    };
+  }
+
+  // HYK-387 2R P2ⓒ (담음, 담지 않은 것 아님): 일부 줄만 손상됐어도 매칭은
+  // 여전히 파싱 가능한 부분집합에서 진행한다(막지 않는다) -- 하지만 그
+  // 손상이 있었다는 사실 자체는 조용히 삼키지 않고 감사 로그로 남긴다.
+  if (ledger.parseFailures > 0) {
+    console.error(
+      `relay-handshake: dispatch ledger '${ledgerPath}' has ${ledger.parseFailures} corrupted line(s) alongside ${ledger.records.length} parseable record(s) -- 부분 손상은 이 축을 막지 않는다(HYK-387 P2ⓒ), 파싱 가능한 부분집합으로 계속 진행하되 이 사실을 남긴다`,
+    );
+  }
+
+  // HYK-387 2R P2ⓐ (담음): role 비교를 대소문자 무시로 정규화한다 -- 검토자
+  // 실측(소문자 호출 role vs 대문자로 기록된 정상 항목이 exact-equality
+  // 때문에 false rejection). harness_task_label(taskId)은 대소문자 정규화
+  // 대상이 아니다(그 값은 사람이 읽는 issue id 문자열이라 대소문자가
+  // 의미를 가질 수 있다 -- role만 이 저장소 전역에서 이미 대소문자를
+  // 섞어 쓰는 관용(coder/CODER)이 있다는 것이 검토자가 짚은 실제 문제였다).
+  const roleLower = typeof role === "string" ? role.toLowerCase() : role;
+  const matches = ledger.records.filter(
+    (r) =>
+      r &&
+      typeof r === "object" &&
+      typeof r.role === "string" &&
+      r.role.toLowerCase() === roleLower &&
+      r.harness_task_label === taskId,
+  );
+  if (matches.length === 0) {
+    return {
+      ok: false,
+      state: DISPATCH_RECORD_STATE.ABSENT,
+      reason: `DISPATCH_RECORD_ABSENT (HYK-387): no entry in ledger '${ledgerPath}' matches role='${role}' harness_task_label='${taskId}' -- 배정 기록이 장부에 없는 라운드는 정상으로 받아들여지지 않는다(2026-08-29 실사고 재현 방지)`,
+    };
+  }
+
+  // HYK-387 2R §2 (P2 승격, 검토자 P2-ⓑ 원문): "결과가 끝난 뒤에 기록된
+  // 배정 항목은 그 라운드의 근거가 될 수 없다." recorded_at(ISO, ms 정밀도)이
+  // doneAtMs보다 «엄격히 이전»이어야만 근거로 인정한다.
+  // ⛔경계값 설계(같은 초/역방향 스큐, 2R §2 요구): doneAt은 DONE 라인에서
+  // 초 단위까지만 파싱된다(parseKstTimestamp) -- 즉 doneAtMs는 그 초의
+  // "시작"(ms=000)을 가리킨다. recorded_at이 doneAtMs와 «정확히 같은
+  // 값»이면 그 항목이 doneAt이 가리키는 바로 그 순간보다 앞선다는 것을
+  // 증명할 수 없다(같은 밀리초) -- fail-closed 쪽(=LATE 취급)으로 접는다,
+  // "<=" 이 아니라 "<"를 쓴다. 이 저장소의 다른 시간축 검사들
+  // (isBeyondFutureSkew 등)도 동률을 안전측으로 접는 관례를 이미 쓴다
+  // (checkFutureSkew 주석 참조) -- 새 기준을 발명하지 않고 그 관례를
+  // 그대로 따른다. recorded_at이 파싱 불가능한 항목은 "근거 못 됨"으로
+  // 취급한다(모른다는 있다로 접지 않는다, 1R의 fail-closed 규율과 동일).
+  // 역방향 스큐(기록 기계 시계가 완료 기계 시계보다 빠르거나 느려 원인·
+  // 결과 순서가 뒤집혀 보이는 경우)는 이 비교로는 원리적으로 구별할 수
+  // 없다 -- 이 축은 "시간 선후는 진위의 값싼 대용"(검토자 원문)이라는
+  // 것을 그대로 인정하고, 애매하면 거부(오탐보다 오인식 방지 우선)한다.
+  if (typeof doneAtMs === "number" && Number.isFinite(doneAtMs)) {
+    const timely = matches.filter((r) => {
+      const recordedAtMs = Date.parse(r.recorded_at);
+      return Number.isFinite(recordedAtMs) && recordedAtMs < doneAtMs;
+    });
+    if (timely.length === 0) {
+      return {
+        ok: false,
+        state: DISPATCH_RECORD_STATE.LATE,
+        reason: `DISPATCH_RECORD_LATE (HYK-387 P2): ${matches.length} matching ledger entr${
+          matches.length === 1 ? "y" : "ies"
+        } for role='${role}' harness_task_label='${taskId}' in '${ledgerPath}' but none were recorded strictly before this round's completion time (doneAt=${new Date(
+          doneAtMs,
+        ).toISOString()}) -- a dispatch record written at or after completion cannot serve as proof of assignment (fail-closed; 같은 밀리초도 "그 전"으로 인정하지 않는다)`,
+      };
+    }
+    return { ok: true, matches: timely.length };
+  }
+
+  return { ok: true, matches: matches.length };
+}
+
 // HYK-257-done-stamp-lint-1: extracted from checkRelayHandshake (same
 // ESLint-limit reason as above) -- the two checks that sit between
 // resolveDoneAt succeeding and the completion side-effects starting:
@@ -1599,6 +1892,7 @@ export function checkRelayHandshake({
   harnessDir = join(repoRoot(), ".harness"),
   now = Date.now(),
   dispatchId,
+  dispatchLedgerPath,
 }) {
   const filesResolved = resolveTaskAndResultFiles(role, harnessDir);
   if (!filesResolved.ok) return filesResolved;
@@ -1673,6 +1967,20 @@ export function checkRelayHandshake({
     harnessDir,
   });
   if (!headCommitVerdict.ok) return headCommitVerdict;
+
+  // HYK-387: 다른 모든 사유별 검사가 통과한 뒤, 이 라운드가 완료로
+  // 판정되기 «직전»에 건다(headCommitVerdict와 같은 자리 -- 그래야 이
+  // 축이 없던 시절부터 있던 다른 구체적 거부 사유를 가리키는 기존 시험이
+  // 여전히 그 사유를 그대로 본다, §4 무회귀). REVIEW 계열 한정이 아니다
+  // -- 오늘의 실사고는 CODER 라운드였다(coder-task.md §1 원문).
+  const dispatchRecordVerdict = resolveDispatchRecordExistence({
+    role,
+    taskId,
+    dispatchLedgerPath,
+    doneAtMs: doneAt.getTime(),
+    harnessDir,
+  });
+  if (!dispatchRecordVerdict.ok) return dispatchRecordVerdict;
 
   const sideEffectVerdict = runCompletionSideEffects({
     role,
@@ -2202,6 +2510,21 @@ if (invokedDirectly) {
   // not just this CLI block. Calling it again here would double-spawn on
   // every CLI-path completion.
   const harnessDirArg = process.argv[3];
+  // HYK-387 3R (자체 발견 결함 수리): 이 블록은 2R까지 `dispatchLedgerPath`
+  // 를 자기 스스로 `process.env`에서 읽어 명시로 넘겼다 -- 그런데
+  // `checkRelayHandshake`/`resolveDispatchRecordExistence` 자신이 이제
+  // 같은 env(+포인터 파일)를 «자기 안에서» 이미 읽는다(위 헤더 참조).
+  // 명시로 넘기면(비록 그 값이 "env를 그대로 읽어온 것"이어도)
+  // `resolveDispatchLedgerPath`의 `explicit !== undefined` 분기가 즉시
+  // 그 값을 채택해 버려, 코어 함수 자신의 env/포인터파일 fallback
+  // 경로가 CLI를 통해서는 «한 번도 실행되지 않는» 사각을 만든다(3R
+  // 작업 중 실측: 이 사각 때문에 되돌림 변이 hyk387-11이 fallback을
+  // 실제로 무력화해도 CLI 경로에서는 그 무력화가 전혀 드러나지
+  // 않았다 -- 이 줄 자체가 그 무력화를 우회하는 별도 경로였던 것).
+  // 이 줄을 지워 CLI도 다른 모든 실 호출자와 완전히 같은 모양
+  // (`{role, harnessDir}`, dispatchLedgerPath 키 자체를 안 넘김)으로
+  // 부르게 한다 -- 이제 CLI 경로도 코어 함수의 fallback을 실제로 타고,
+  // 그 fallback을 무력화하면 CLI 경로에서도 정직하게 드러난다.
   const result = harnessDirArg
     ? checkRelayHandshake({ role, harnessDir: harnessDirArg })
     : checkRelayHandshake({ role });

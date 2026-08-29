@@ -24,6 +24,15 @@
 // what lets mainRepoRoot()'s git-ancestry resolution reach the synthetic
 // fixture repo the test built, the same way it always did before an ambient
 // var started shadowing that path.
+// HYK-387 3R §1 (이름 정합 수리): 2R은 소비측 fallback에 새 이름
+// `DISPATCH_RECEIPT_LEDGER_PATH`를 만들어 여기 네 번째 키로 추가했었다.
+// 3R에서 라이브 배달기(`dispatch-worker.ps1` 43~46/170~172행)가 이미
+// 쓰고 있는 이름이 바로 **`DISPATCH_RECEIPT_PATH`**(아래, 이 상수에
+// 원래부터 있던 키)라는 것을 확인해 -- 같은 물리 파일(영수증 CLI가
+// append-only로 쓰는 그 JSONL)을 가리키는 같은 개념이므로 새 이름을
+// 만들지 않고 라이브 이름으로 맞췄다(3R coder-task.md §3-1 "이름이
+// 둘이면 다음 사람이 또 어긋난다"). 그래서 2R이 추가했던 네 번째 키는
+// 삭제한다 -- 이제 소비측도 이 기존 `DISPATCH_RECEIPT_PATH` 하나만 쓴다.
 const AMBIENT_LEDGER_ENV_KEYS = [
   "ADMISSION_LEDGER_PATH",
   "ADMISSION_LOCK_PATH",
@@ -96,6 +105,13 @@ export function isolatedChildEnvWithLedger(
   if (ledgerEnv.admissionLockPath !== undefined) {
     explicit.ADMISSION_LOCK_PATH = ledgerEnv.admissionLockPath;
   }
+  // HYK-387 3R: this field is now the ONE sanctioned way to set the value
+  // both the live dispatch-worker.ps1 (receipt-writing side) AND
+  // relay-handshake.mjs's resolveDispatchLedgerPath (consumption-side
+  // fallback, since 3R's name-alignment fix) read -- previously (2R) there
+  // was a separate `dispatchReceiptLedgerPath` field for a differently-
+  // named env key; that key never existed live, so it's removed rather
+  // than kept as a second way to do the same thing.
   if (ledgerEnv.dispatchReceiptPath !== undefined) {
     explicit.DISPATCH_RECEIPT_PATH = ledgerEnv.dispatchReceiptPath;
   }
