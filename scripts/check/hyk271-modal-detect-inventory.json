@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "note": "HYK-271-modal-stall-1 1R -- machine-readable Q2 inventory of candidate axes for detecting 'is this seat currently blocked on an interactive prompt (approval modal etc.)' BEFORE dispatching new work to it. This is an INTEGRITY list (format/required-fields/no-duplicates/확실-needs-real-evidence), not the detector implementation itself -- see .harness/coder.md §Q2 for the narrative table and .harness/coder-task.md §2 invariant P for the rule this list enforces (an axis only enters the list if there is evidence it actually distinguishes modal-stall from normal idle). Read/validated by scripts/check/hyk271-modal-detect-inventory.test.mjs. Do not hand-edit an item's evidence without re-verifying the citation against the live file -- a stale evidence pointer is worse than none.",
+  "items": [
+    {
+      "id": "axis-screen-scrollback",
+      "axis_label": "화면/스크롤백 (orca terminal read --screen)",
+      "can_indicate_modal": "부분적 -- 모달 문구가 화면에 실제로 그려지면 문자열 매칭으로 검출 가능",
+      "distinguishes_idle": "부분적 -- 08-28 실측: --screen과 raw stream은 서로 다른 백엔드이고 배치 접힘 구간(80줄이 '+76 lines'로 요약됨, 표본 2)은 지연 도착이 아니라 아예 도착하지 않는다. 그 구간에 모달 문구가 있었다면 통째로 놓친다(위음성).",
+      "evidence": ".harness/coder-task.md:29-30 -- 08-28 실측 인용(이 라운드는 재실측 금지 대상으로 명시됨)",
+      "confidence": "추론"
+    },
+    {
+      "id": "axis-session-jsonl-tail",
+      "axis_label": "세션 기록 파일(.jsonl) 마지막 이벤트 종류·크기/mtime 변화",
+      "can_indicate_modal": "이론상 가능 -- 정상 경로는 assistant tool_use 이벤트 직후(관측 샘플 28ms) user tool_result 이벤트가 뒤따른다. 대화형 승인 모달이 실제로 사람 입력을 기다리는 경우 tool_use만 기록되고 그 뒤 tool_result가 안 붙는(파일에 새 줄이 안 늘어나는) 상태가 이론적으로 예상된다.",
+      "distinguishes_idle": "미확인 -- 이 라운드가 확보한 표본은 permissionMode:\"default\"/entrypoint:\"sdk-cli\" 세션 4건뿐이고, 전부 'This command requires approval'이 tool_result(is_error:true)로 수십 ms 내 즉시 반환되며 세션이 멈추지 않았다(정상 경로 확인). 워커 좌석이 실제로 쓰는 permissionMode:bypassPermissions/entrypoint:cli 조건에서 '짝없는 tool_use로 멈춘' 표본은 이 워크트리에서 찾지 못했다 -- 표본 없음.",
+      "evidence": "C:\\Users\\Administrator\\.claude-team\\projects\\C--Users-Administrator-Documents-HARNESSENGINEERING\\e1ae453f-7610-4bd1-b4b7-d4e5e809beef.jsonl:16-17 -- tool_use(11:30:58.855Z) 직후 tool_result is_error:true 'This command requires approval'(11:30:58.883Z), 세션은 계속 진행(줄 18-24)",
+      "confidence": "추론"
+    },
+    {
+      "id": "axis-process-pty-liveness",
+      "axis_label": "프로세스/PTY 존재·연결 상태 (orca terminal list의 connected/writable/ptyId)",
+      "can_indicate_modal": "불가 -- connected/writable은 좌석 프로세스가 살아서 붙어 있는지만 말해줄 뿐, 그 프로세스가 정상 사고 중인지 승인 모달을 그리고 있는지는 구별하지 않는다.",
+      "distinguishes_idle": "불가 -- 정상 작업 중과 모달 대기 중 모두 connected:true/writable:true로 동일하게 관측된다. 이 축 단독으로는 '정지'와 '유휴'조차 구별하지 못한다(오직 '죽었는지'만 구별).",
+      "evidence": "scripts/relay/adapters/orca-adapter.mjs:475-477 -- 검토자가 전수 열거한 terminal list 필드 합집합(branch/connected/handle/lastOutputAt/leafId/preview/ptyId/tabId/title/worktreePath/worktreeId/writable) 중 프롬프트-대기 여부를 나타내는 별도 필드가 없음(코드 직접 확인)",
+      "confidence": "확실"
+    },
+    {
+      "id": "axis-orca-query-preview",
+      "axis_label": "orca 조회 계열 (terminal show/list의 preview 문자열 + lastOutputAt)",
+      "can_indicate_modal": "부분적 -- previewContainsMarker/previewShowsBusySignal 같은 기존 마커·busy-signal 매칭 코드가 이미 있어 승인 모달의 알려진 문구를 정규화 후 부분일치로 찾는 것은 기술적으로 가능하다. lastOutputAt은 axis-b의 mtime 신호를 orca 쪽에서 얻는 엔진-무관 대체 소스가 될 수 있다.",
+      "distinguishes_idle": "부분적 -- 코드 자체 주석이 명시: preview는 원문이 아니라 셸 예측입력으로 문자 단위 재그림이 섞이고, 완전 일치 단언은 금지되어 정규화 후 부분일치만 허용된다. 모달 마커가 재그림 구간에 걸리면 위음성이 날 수 있다(정량 실측은 이 라운드 범위 밖, 재현 실험 금지).",
+      "evidence": "scripts/relay/adapters/orca-adapter.mjs:2178-2209 -- buildSeatShowCommand/parseSeatPreview/normalizePreview/previewContainsMarker/previewShowsBusySignal 및 'preview는 원문이 아니다' 주석 직접 확인",
+      "confidence": "추론"
+    },
+    {
+      "id": "axis-result-file-silence",
+      "axis_label": "결과 파일 (.harness/*.md)",
+      "can_indicate_modal": "불가 -- 결과 파일은 워커가 작업을 마쳤을 때만 `>>> DONE:` 줄로 갱신된다. 모달 대기 중에는 애초에 쓸 손(실행 흐름)이 없으므로 파일이 갱신되지 않는다.",
+      "distinguishes_idle": "불가(이슈 본문이 지적하는 구멍 그 자체) -- 정상 작업 중(아직 완료 전)의 침묵과 모달 정지 중의 침묵이 파일 관점에서 구별되지 않는다. 완료 감시는 `>>> DONE:` 줄만 보므로 모달 정지 시 영영 울리지 않는다.",
+      "evidence": ".harness/coder-task.md:22-23 -- '완료 감시는 >>> DONE: 줄을 보므로 영영 안 울린다 ⇒ 무기한 정지'",
+      "confidence": "확실"
+    },
+    {
+      "id": "axis-heartbeat-absence",
+      "axis_label": "워커 자기보고 heartbeat 신호의 부재 (`orca orchestration send --type heartbeat`, 5분 주기)",
+      "can_indicate_modal": "간접 가능 -- 워커 좌석이 대화형 모달에 멈추면 이 좌석 자신의 실행 흐름도 함께 멈추므로 5분 주기 heartbeat 전송 자체를 실행할 수 없다. 따라서 heartbeat 부재(타임아웃)는 '이 좌석이 무언가에 멈췄다'는 fail-closed 신호가 된다.",
+      "distinguishes_idle": "부분적 -- '정지 여부'는 구별하지만(정상 유휴는 heartbeat가 계속 옴) '정지 원인'(모달 vs 크래시 vs 매우 긴 단일 tool 실행)은 이 축 단독으로 구별하지 못한다. 또한 워커가 규칙을 안 지키고 heartbeat를 누락하는 경우와 실제 모달 정지도 구별하지 못한다.",
+      "evidence": "이 CODER 좌석 자신에게 실린 orca 전달 문구(preamble)의 'BEHAVIOR RULE: send a heartbeat every 5 minutes' 규약 -- 저장소 파일이 아니라 이 세션에 실린 지시문 자체이므로 파일 포인터 없음(그래서 확실이 아닌 추론으로 태깅)",
+      "confidence": "추론"
+    }
+  ]
+}
