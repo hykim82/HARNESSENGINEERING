@@ -60,6 +60,25 @@ import { resolveChangedFiles } from "./quality-check.mjs";
 
 const TARGET_EXT_RE = /\.(mjs|js)$/;
 
+// HYK-394-guard-self-4 §2 Q1 (검토자 rejected 판정, 2026-08-30): 이 가드
+// 자신의 소스·시험 파일은 스캔 대상에서 제외한다 -- 이 파일의 헤더
+// 예시(위 "What this PROVES" 문단)와 이 가드 자신의 시험(live-harness-
+// scratch-guard.test.mjs, 시험 ⓐ)이 "합성 위반 문자열"을 리터럴로 담고
+// 있어야 하는데(진짜 실행 코드가 아니라 검증용 텍스트), CI 형태로
+// 스캔하면 이 가드 자신이 그 리터럴을 "진짜 위반"으로 오인해 exit 1을
+// 낸다(2026-08-30 실측: `node scripts/check/live-harness-scratch-guard.mjs
+// --mode ci --base-sha 6634c2862ec3` -> exit 1, live-harness-scratch-
+// guard.test.mjs:26 신고). ⛔정확히 이 두 파일의 «절대·전체» 상대경로
+// 문자열만 제외한다(예: "가드"라는 이름이 들어간 파일이면 무조건 제외
+// 같은 넓은 규칙이 아니다) -- 그렇게 넓히면 미래의 «진짜» 라이브 쓰기
+// 누수를 이 파일들과 이름이 비슷하다는 이유로 숨길 수 있다(이 라운드
+// 자신의 시험 "과잉 제외 방지" 축이 정확히 이 위험을 시험으로 고정한다,
+// live-harness-scratch-guard.test.mjs 참조).
+const SELF_EXCLUDED_FILES = new Set([
+  "scripts/check/live-harness-scratch-guard.mjs",
+  "scripts/check/live-harness-scratch-guard.test.mjs",
+]);
+
 // Repo-root derivation idiom this codebase uses everywhere:
 // `const X = dirname(dirname(<anything>))` (usually
 // `dirname(dirname(fileURLToPath(import.meta.url)))` or
@@ -125,7 +144,9 @@ export function runLiveHarnessScratchGuard({
     readText = (file) => readBlobText({ cwd, file, mode });
   }
 
-  const scanned = targets.filter((f) => TARGET_EXT_RE.test(f));
+  const scanned = targets.filter(
+    (f) => TARGET_EXT_RE.test(f) && !SELF_EXCLUDED_FILES.has(f),
+  );
   const allViolations = [];
 
   for (const file of scanned) {
