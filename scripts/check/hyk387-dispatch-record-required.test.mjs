@@ -29,7 +29,7 @@ import {
   resolveDispatchRecordExistence,
   DISPATCH_RECORD_STATE,
 } from "./relay-handshake.mjs";
-import { isolatedChildEnvWithLedger } from "./admission-ledger-env-isolation.mjs";
+import { isolatedChildEnv } from "./admission-ledger-env-isolation.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = dirname(dirname(HERE)); // scripts/check -> scripts -> repo root
@@ -142,18 +142,22 @@ function validReceipt({
 }
 
 // 실 CLI(생산 진입점) spawn -- checkRelayHandshake를 직접 부르는 것과
-// 별개로 §5의 «실제 소비 명령»을 그대로 구동한다. HYK-387 2R §1:
-// `DISPATCH_RECEIPT_LEDGER_PATH`는 이제 코어 함수(resolveDispatchLedgerPath)
-// 자신이 읽으므로 admission-ledger-env-isolation.mjs의
-// AMBIENT_LEDGER_ENV_KEYS에도 새로 추가됐다 -- 그 결과 plain
-// `isolatedChildEnv({DISPATCH_RECEIPT_LEDGER_PATH: ledgerPath})`(1R 방식)는
-// 이제 그 값을 스스로 걸러내 버린다(isolatedChildEnv 자신의 계약, HYK-359
-// 2R P1-2). 의도적으로 이 키를 세팅하는 유일한 승인 경로인
-// isolatedChildEnvWithLedger의 `dispatchReceiptLedgerPath` 필드를 쓴다.
+// 별개로 §5의 «실제 소비 명령»을 그대로 구동한다. HYK-387 3R: fallback
+// 원천이 env에서 포인터 파일로 바뀌었다(relay-handshake.mjs 헤더의
+// "★3R 작업 도중 자체 발견·되돌림" 참조 -- env 방식은 이 저장소
+// CI-canonical 시험 수십 개를 ambient-leak에 새로 노출시켰다). `args[1]`
+// 이 harnessDir(모든 호출부가 `runCli(["coder", dir], ...)` 모양으로
+// 부른다)이므로, `ledgerPath`가 주어지면 그 디렉터리 안에 포인터 파일을
+// 직접 쓴다 -- env는 더 이상 이 축에 아무 영향도 주지 않는다.
 function runCli(args, { ledgerPath } = {}) {
-  const env = isolatedChildEnvWithLedger(
-    ledgerPath ? { dispatchReceiptLedgerPath: ledgerPath } : {},
-  );
+  if (ledgerPath) {
+    writeFileSync(
+      join(args[1], "dispatch-receipt-path.txt"),
+      ledgerPath,
+      "utf8",
+    );
+  }
+  const env = isolatedChildEnv({});
   const res = spawnSync(process.execPath, [CLI_PATH, ...args], {
     encoding: "utf8",
     env,
@@ -284,49 +288,70 @@ const SIBLING_DEPS = [
   "time-authority.mjs",
 ];
 
+// HYK-387 3R (자체 발견 결함 수리, 검토자 지목 아님): 1R부터 이 함수는
+// 변조본을 `stageDir/relay-handshake.mjs`(임의 파일명, "scripts/check/"
+// 접두 없음)에 썼다 -- 그런데 CLI 진입 게이트(`invokedDirectly`, 이
+// 파일 맨 아래)는 `process.argv[1]`이 정확히 `"scripts/check/relay-
+// handshake.mjs"`로 «끝나는지»만 본다(경로 suffix 매치). 3R 작업 중
+// 직접 실측: 그 접두 없이 spawn하면 `invokedDirectly`가 단 한 번도
+// true가 되지 않아 CLI 블록 전체가 «아무 것도 안 하고» exit 0으로
+// 끝난다(무엇을 무력화했든 상관없이 항상 그렇다) -- 즉 이 시험이
+// 지금까지 관측한 "RED"는 «무력화된 코드가 실제로 통과시킨 것»이
+// 아니라 «변조본이 애초에 한 줄도 실행되지 않은 것»이었을 위험이
+// 있었다(헛시험). `stageDir` 아래 `scripts/check/`를 그대로 재현해
+// suffix 매치를 실제로 성립시킨다 -- SIBLING_DEPS의 상대 import
+// (`./reject-streak.mjs` 등)는 같은 디렉터리 안이면 중첩 깊이와
+// 무관하게 그대로 풀린다.
 function stageMutatedRelayHandshake(stageDir) {
+  const nestedDir = join(stageDir, "scripts", "check");
+  mkdirSync(nestedDir, { recursive: true });
   const original = readFileSync(join(HERE, "relay-handshake.mjs"), "utf8");
   const marker =
-    "export function resolveDispatchRecordExistence({\n  role,\n  taskId,\n  dispatchLedgerPath,\n  doneAtMs,\n}) {\n  const ledgerPath = resolveDispatchLedgerPath(dispatchLedgerPath);\n  if (!ledgerPath) return { ok: true, skipped: true };";
+    "export function resolveDispatchRecordExistence({\n  role,\n  taskId,\n  dispatchLedgerPath,\n  doneAtMs,\n  harnessDir,\n}) {\n  const ledgerPath = resolveDispatchLedgerPath(dispatchLedgerPath, harnessDir);\n  if (!ledgerPath) return { ok: true, skipped: true };";
   assert.ok(
     original.includes(marker),
     "mutation anchor text must exist verbatim in relay-handshake.mjs (되돌림 변이 anchor drifted)",
   );
   const mutated = original.replace(
     marker,
-    "export function resolveDispatchRecordExistence({\n  role,\n  taskId,\n  dispatchLedgerPath,\n  doneAtMs,\n}) {\n  return { ok: true, skipped: true, mutated: true }; // HYK-387 되돌림 변이: 이 축을 무력화\n  const ledgerPath = resolveDispatchLedgerPath(dispatchLedgerPath);\n  if (!ledgerPath) return { ok: true, skipped: true };",
+    "export function resolveDispatchRecordExistence({\n  role,\n  taskId,\n  dispatchLedgerPath,\n  doneAtMs,\n  harnessDir,\n}) {\n  return { ok: true, skipped: true, mutated: true }; // HYK-387 되돌림 변이: 이 축을 무력화\n  const ledgerPath = resolveDispatchLedgerPath(dispatchLedgerPath, harnessDir);\n  if (!ledgerPath) return { ok: true, skipped: true };",
   );
   assert.notEqual(
     mutated,
     original,
     "mutation must actually change the source",
   );
-  writeFileSync(join(stageDir, "relay-handshake.mjs"), mutated, "utf8");
+  writeFileSync(join(nestedDir, "relay-handshake.mjs"), mutated, "utf8");
   for (const dep of SIBLING_DEPS) {
     writeFileSync(
-      join(stageDir, dep),
+      join(nestedDir, dep),
       readFileSync(join(HERE, dep), "utf8"),
       "utf8",
     );
   }
+  return join(nestedDir, "relay-handshake.mjs");
 }
 
 test("(hyk387-4)★ 되돌림 변이: 이 축을 무력화한 복제본은 (1)의 ABSENT 표본을 잘못 통과시킨다(RED)", () => {
   withFixtureDir("mutation-red-", (dir) => {
     const stageDir = join(dir, "stage");
     mkdirSync(stageDir);
-    stageMutatedRelayHandshake(stageDir);
+    const mutatedCliPath = stageMutatedRelayHandshake(stageDir);
 
     const roundDir = join(dir, "round");
     mkdirSync(roundDir);
     writeCoderRound(roundDir, { taskId: "HYK-387-T" });
     const ledgerPath = join(roundDir, "dispatch-receipts.jsonl");
     writeFileSync(ledgerPath, "", "utf8"); // 기록 0건 -- 원본은 반드시 거부해야 하는 표본
+    // HYK-387 3R: 포인터 파일로 배달한다(env는 더 이상 이 축에 영향을
+    // 주지 않는다, relay-handshake.mjs 헤더 참조).
+    writeFileSync(
+      join(roundDir, "dispatch-receipt-path.txt"),
+      ledgerPath,
+      "utf8",
+    );
 
-    const mutatedCliPath = join(stageDir, "relay-handshake.mjs");
-    const env = isolatedChildEnvWithLedger({
-      dispatchReceiptLedgerPath: ledgerPath,
-    });
+    const env = isolatedChildEnv({});
     const res = spawnSync(
       process.execPath,
       [mutatedCliPath, "coder", roundDir],
@@ -358,22 +383,24 @@ test("(hyk387-4)★ 되돌림 변이: 이 축을 무력화한 복제본은 (1)�
 // 정직하게 적는다.
 // ---------------------------------------------------------------------------
 
-// 변이 A: env(DISPATCH_RECEIPT_LEDGER_PATH)를 아예 세팅하지 않는다 -- 이
-// 축은 «호출자가 명시로 넘긴 경로가 있을 때만» 작동한다(설계 자체의 정직
-// 한계, relay-handshake.mjs의 resolveDispatchRecordExistence 헤더 원문).
-// 결과: 뚫린다 -- 기록이 실제로 0건인 라운드도 env가 없으면 그대로
-// 통과한다. 관제실(dispatch-worker.ps1, 이 워크트리 밖의 살아 있는 자원)이
-// 이 env를 채우기 전까지는 라이브 소비 경로에서 이 축이 한 번도 발동하지
-// 않는다는 뜻이다 -- Q3의 정직 한계 그대로.
-test("(hyk387-5a) 변이 A(env 미설정) -- ★뚫린다: 기록 0건 라운드도 env 없이는 그대로 통과", () => {
+// 변이 A(3R 갱신): HYK-387 3R이 env fallback을 되돌리면서(위 relay-
+// handshake.mjs 헤더 "★3R 작업 도중 자체 발견·되돌림" 참조), «호출자가
+// 명시로 넘긴 경로»가 없을 때 유일하게 남은 자동 fallback은 포인터
+// 파일(`<harnessDir>/dispatch-receipt-path.txt`)뿐이다. 그 파일 자체를
+// 세팅하지 않으면 -- 결과: 여전히 뚫린다 -- 기록이 실제로 0건인 라운드도
+// 포인터 파일이 없으면 그대로 통과한다. 관제실(dispatch-worker.ps1,
+// 이 워크트리 밖의 살아 있는 자원)이 이 패치(HYK-387-receipt-path-
+// pointer.md)를 실제로 적용하기 전까지는 라이브 소비 경로에서 이 축이
+// 한 번도 발동하지 않는다는 뜻이다 -- Q3의 정직 한계 그대로.
+test("(hyk387-5a) 변이 A(포인터 파일 미설정, 3R 갱신) -- ★뚫린다: 기록 0건 라운드도 포인터 파일 없이는 그대로 통과", () => {
   withFixtureDir("mutation-a-", (dir) => {
     writeCoderRound(dir, { taskId: "HYK-387-T" });
-    // ledgerPath를 만들지도, env로 넘기지도 않는다.
+    // ledgerPath도 포인터 파일도 만들지 않는다.
     const res = runCli(["coder", dir]);
     assert.equal(
       res.exit,
       0,
-      "정직 기록: env가 없으면 이 축은 스킵되고 기록 0건도 통과한다(뚫린다) -- 이 축은 관제실이 env를 채워야 완성된다",
+      "정직 기록: 포인터 파일이 없으면 이 축은 스킵되고 기록 0건도 통과한다(뚫린다) -- 이 축은 관제실 패치가 적용돼야 완성된다",
     );
   });
 });
@@ -449,7 +476,7 @@ test("(hyk387-5c, 대조) 필드명 대소문자를 바꾼 변이는 막힌다 -
 // (skip/ABSENT/LOOKUP_FAILED)를 직접 구동(§4 «프로덕션 실체를 구동» 요건 --
 // CLI 레벨 시험과 별개로, export된 실제 함수 그 자체도 직접 부른다).
 // ---------------------------------------------------------------------------
-test("(hyk387-6) in-process: dispatchLedgerPath 생략 + env 미설정 -> skipped:true", () => {
+test("(hyk387-6) in-process: dispatchLedgerPath 생략 + harnessDir도 없음(포인터 파일을 찾을 곳조차 없음) -> skipped:true", () => {
   const r = resolveDispatchRecordExistence({ role: "coder", taskId: "X" });
   assert.equal(r.ok, true);
   assert.equal(r.skipped, true);
@@ -471,41 +498,27 @@ test("(hyk387-7) in-process: checkRelayHandshake에 dispatchLedgerPath를 직접
 });
 
 // ---------------------------------------------------------------------------
-// HYK-387 2R §1 (P1-1 직접 수리): «인자 없는 기본 호출»에서도 이 축이
-// 발동한다 -- 검토자가 실측한 정확히 그 모양(watchResult의 실 호출은
+// HYK-387 2R §1 (P1-1 직접 수리), 3R §1 갱신(fallback 원천을 env에서
+// 포인터 파일로 교체): «인자 없는 기본 호출»에서도 이 축이 발동한다 --
+// 검토자가 실측한 정확히 그 모양(watchResult의 실 호출은
 // `checkFn({role, harnessDir})`뿐, dispatchLedgerPath 인자가 코드 어디에도
-// 없다)을 그대로 재현해, env(DISPATCH_RECEIPT_LEDGER_PATH)만 세팅하고
-// **코드는 손대지 않은 채** 거부되는지를 본다. withDispatchLedgerEnv는 이
-// 시험 프로세스 자신의 process.env만 건드리고 항상 원상복구한다(다른
-// 시험에 새는 것 방지) -- §0 "라이브 원장 무접촉"과는 별개 축(이 값 자체는
-// 합성 mkdtemp 경로만 가리킨다).
+// 없다)을 그대로 재현해, `<harnessDir>/dispatch-receipt-path.txt`
+// 포인터 파일만 두고 **코드는 손대지 않은 채** 거부되는지를 본다.
 // ---------------------------------------------------------------------------
-function withDispatchLedgerEnv(ledgerPath, fn) {
-  const prior = process.env.DISPATCH_RECEIPT_LEDGER_PATH;
-  process.env.DISPATCH_RECEIPT_LEDGER_PATH = ledgerPath;
-  try {
-    return fn();
-  } finally {
-    if (prior === undefined) delete process.env.DISPATCH_RECEIPT_LEDGER_PATH;
-    else process.env.DISPATCH_RECEIPT_LEDGER_PATH = prior;
-  }
-}
-
-test("(hyk387-8)★ 완료조건1: 기본 호출(checkRelayHandshake({role,harnessDir}), dispatchLedgerPath 인자 없음) + env만 설정 -> 기록 0건 라운드 거부", () => {
+test("(hyk387-8)★ 완료조건1: 기본 호출(checkRelayHandshake({role,harnessDir}), dispatchLedgerPath 인자 없음) + 포인터 파일만 설정 -> 기록 0건 라운드 거부", () => {
   withFixtureDir("default-wiring-inprocess-", (dir) => {
     writeCoderRound(dir, { taskId: "HYK-387-T" });
     const ledgerPath = join(dir, "dispatch-receipts.jsonl");
     writeFileSync(ledgerPath, "", "utf8"); // 기록 0건
-    const result = withDispatchLedgerEnv(ledgerPath, () =>
-      // ⛔dispatchLedgerPath 인자를 절대 넘기지 않는다 -- watch-result.mjs/
-      // relay-core.mjs/orca-spike-live.mjs/seat-signal-adapter.mjs가 실제로
-      // 부르는 그 정확한 모양(role, harnessDir 둘뿐)이다.
-      checkRelayHandshake({ role: "coder", harnessDir: dir }),
-    );
+    writeFileSync(join(dir, "dispatch-receipt-path.txt"), ledgerPath, "utf8");
+    // ⛔dispatchLedgerPath 인자를 절대 넘기지 않는다 -- watch-result.mjs/
+    // relay-core.mjs/orca-spike-live.mjs/seat-signal-adapter.mjs가 실제로
+    // 부르는 그 정확한 모양(role, harnessDir 둘뿐)이다.
+    const result = checkRelayHandshake({ role: "coder", harnessDir: dir });
     assert.equal(
       result.ok,
       false,
-      "기본 호출(인자 없음)도 env만 있으면 기록 0건 라운드를 거부해야 한다",
+      "기본 호출(인자 없음)도 포인터 파일만 있으면 기록 0건 라운드를 거부해야 한다",
     );
     assert.equal(result.state, DISPATCH_RECORD_STATE.ABSENT);
   });
@@ -519,12 +532,11 @@ test("(hyk387-8)★ 완료조건1: 기본 호출(checkRelayHandshake({role,harne
 // (관계 방향이 허용되는 relay -> check 쪽에 둔다) -- 완료조건1의 "검토자의
 // 정확한 재현"(watchResult 자체 구동)은 거기서 계속 확인한다.
 
-test("(hyk387-10) 무회귀: env도 dispatchLedgerPath 인자도 둘 다 없으면 기본 호출은 여전히 스킵된다(기존 호출자 바이트 단위 무회귀)", () => {
+test("(hyk387-10) 무회귀: 포인터 파일도 dispatchLedgerPath 인자도 둘 다 없으면 기본 호출은 여전히 스킵된다(기존 호출자 바이트 단위 무회귀)", () => {
   withFixtureDir("default-wiring-noop-", (dir) => {
     writeCoderRound(dir, { taskId: "HYK-387-T" });
-    // 원장 파일조차 만들지 않는다 -- env가 정말 안 읽히면 이 축은 존재
-    // 자체를 확인할 방법이 없어야 한다(스킵).
-    assert.equal(process.env.DISPATCH_RECEIPT_LEDGER_PATH, undefined);
+    // 원장 파일도 포인터 파일도 만들지 않는다 -- 이 축은 존재 자체를
+    // 확인할 방법이 없어야 한다(스킵).
     const result = checkRelayHandshake({ role: "coder", harnessDir: dir });
     assert.equal(result.ok, true, `무회귀 위반: ${result.reason}`);
   });
@@ -537,28 +549,35 @@ test("(hyk387-10) 무회귀: env도 dispatchLedgerPath 인자도 둘 다 없으�
 test("(hyk387-11)★ 되돌림 변이: 기본 호출 env-fallback(resolveDispatchLedgerPath) 자체를 무력화하면 -- 인자 없는 기본 호출이 기록 0건 라운드를 다시 통과시켜버린다(RED, 새 결선 코드가 실제로 이 시험을 지탱한다는 증거)", () => {
   withFixtureDir("mutation-default-wiring-red-", (dir) => {
     const stageDir = join(dir, "stage");
-    mkdirSync(stageDir);
+    // HYK-387 3R (자체 발견 결함 수리): stageMutatedRelayHandshake의 헤더
+    // 주석 참조 -- CLI invokedDirectly 게이트는 경로 suffix
+    // "scripts/check/relay-handshake.mjs" 매치만 본다. 그 접두 없이
+    // 임의 파일명에 쓰면 무엇을 무력화했든 항상 조용히 exit 0(헛시험)이
+    // 된다 -- 여기도 같은 중첩 구조로 고친다.
+    const nestedDir = join(stageDir, "scripts", "check");
+    mkdirSync(nestedDir, { recursive: true });
     const original = readFileSync(join(HERE, "relay-handshake.mjs"), "utf8");
     const marker =
-      'function resolveDispatchLedgerPath(explicit) {\n  if (explicit !== undefined) return explicit;\n  const fromEnv = process.env.DISPATCH_RECEIPT_LEDGER_PATH;\n  return typeof fromEnv === "string" && fromEnv.length > 0\n    ? fromEnv\n    : undefined;\n}';
+      "function resolveDispatchLedgerPath(explicit, harnessDir) {\n  if (explicit !== undefined) return explicit;\n  return readDispatchReceiptPointerFile(harnessDir);\n}";
     assert.ok(
       original.includes(marker),
       "mutation anchor text must exist verbatim in relay-handshake.mjs (되돌림 변이 anchor drifted)",
     );
     const mutated = original.replace(
       marker,
-      // 2R 이전(1R) 동작으로 되돌린다: env fallback 없이 explicit만 쓴다.
-      "function resolveDispatchLedgerPath(explicit) {\n  return explicit; // HYK-387 되돌림 변이: env fallback 제거\n}",
+      // 3R 이전(2R) 동작으로 되돌린다: 포인터파일 fallback 없이
+      // explicit만 쓴다.
+      "function resolveDispatchLedgerPath(explicit, harnessDir) {\n  return explicit; // HYK-387 되돌림 변이: pointer-file fallback 제거\n}",
     );
     assert.notEqual(
       mutated,
       original,
       "mutation must actually change the source",
     );
-    writeFileSync(join(stageDir, "relay-handshake.mjs"), mutated, "utf8");
+    writeFileSync(join(nestedDir, "relay-handshake.mjs"), mutated, "utf8");
     for (const dep of SIBLING_DEPS) {
       writeFileSync(
-        join(stageDir, dep),
+        join(nestedDir, dep),
         readFileSync(join(HERE, dep), "utf8"),
         "utf8",
       );
@@ -569,18 +588,23 @@ test("(hyk387-11)★ 되돌림 변이: 기본 호출 env-fallback(resolveDispatc
     writeCoderRound(roundDir, { taskId: "HYK-387-T" });
     const ledgerPath = join(roundDir, "dispatch-receipts.jsonl");
     writeFileSync(ledgerPath, "", "utf8");
+    // HYK-387 3R: fallback 원천이 env에서 포인터 파일로 바뀌었으므로
+    // (relay-handshake.mjs 헤더 참조), 이 되돌림 변이도 포인터 파일로
+    // 배달한다 -- env는 더 이상 이 축에 아무 영향도 주지 않는다.
+    writeFileSync(
+      join(roundDir, "dispatch-receipt-path.txt"),
+      ledgerPath,
+      "utf8",
+    );
 
-    const mutatedCliPath = join(stageDir, "relay-handshake.mjs");
+    const mutatedCliPath = join(nestedDir, "relay-handshake.mjs");
     // ⛔"인자 없는 기본 호출"이 가리키는 것은 dispatchLedgerPath 인자다 --
     // harnessDir는 정상적인 모든 호출자가 항상 넘기는 값이라(watch-
     // result.mjs 등도 harnessDir는 넘긴다) 여기서도 그대로 넘긴다(§0
     // "실물 원장 무접촉" 안전을 위해서도 필수 -- 생략하면 repoRoot()가
     // roundDir의 git 조상(=이 실제 저장소!)을 타고 올라가 진짜
-    // `.harness/`를 가리킬 위험이 있다). dispatchLedgerPath만 env로만
-    // 준다.
-    const env = isolatedChildEnvWithLedger({
-      dispatchReceiptLedgerPath: ledgerPath,
-    });
+    // `.harness/`를 가리킬 위험이 있다).
+    const env = isolatedChildEnv({});
     const mutantRes = spawnSync(
       process.execPath,
       [mutatedCliPath, "coder", roundDir],
@@ -594,7 +618,7 @@ test("(hyk387-11)★ 되돌림 변이: 기본 호출 env-fallback(resolveDispatc
     assert.equal(
       mutantRes.status,
       0,
-      `되돌림 변이가 env-fallback을 실제로 제거했다면, 인자 없는 기본 호출은 기록 0건 라운드도 «잘못» 통과해야 한다(RED). stderr: ${mutantRes.stderr}`,
+      `되돌림 변이가 fallback을 실제로 제거했다면, 인자 없는 기본 호출은 기록 0건 라운드도 «잘못» 통과해야 한다(RED). stderr: ${mutantRes.stderr}`,
     );
 
     // 대조: 무력화 안 된 원본 CLI는 같은 표본을 반드시 거부한다(GREEN).
@@ -606,7 +630,7 @@ test("(hyk387-11)★ 되돌림 변이: 기본 호출 env-fallback(resolveDispatc
     assert.notEqual(
       originalRes.status,
       0,
-      "원본(무력화 안 된) env-fallback은 같은 표본을 반드시 거부해야 한다(대조군)",
+      "원본(무력화 안 된) fallback은 같은 표본을 반드시 거부해야 한다(대조군)",
     );
   });
 });

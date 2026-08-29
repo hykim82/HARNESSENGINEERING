@@ -1346,20 +1346,66 @@ export function resolveHeadCommitBinding({
 // 한다.
 //
 // ⛔정직 한계(§0 경계 1 -- 실물 원장 접근 금지, 관제실 라이브 파일 무접촉):
-// `dispatchLedgerPath`를 명시로 넘기면 그 값을 쓴다. 넘기지 않으면(1R까지는
-// 그대로 스킵이었다) 2R부터는 env `DISPATCH_RECEIPT_LEDGER_PATH`를
-// fallback으로 읽는다(resolveDispatchLedgerPath, 아래) -- ⛔여전히
-// 추측·하드코딩된 실물 경로는 없다(둘 다 없으면 그대로 스킵). 이 fallback을
-// CLI 전용 블록이 아니라 **이 코어 함수 자신**에 넣은 것이 2R P1-1 수리의
-// 핵심이다 -- watch-result.mjs/relay-core.mjs/orca-spike-live.mjs/
-// orca-spike-runner.mjs/seat-signal-adapter.mjs 전부가 `checkRelayHandshake`
-// 를 직접 import해서 부르고 `dispatchLedgerPath` 인자를 넘기지 않으므로
-// (검토 1R이 실측한 그대로), 코어에 넣어야 그 다섯 호출자 전부가 코드
-// 수정 없이 한 번에 결선된다. 관제실(dispatch-worker.ps1)이 실제로 이
-// env를 채워 넣기 전까지는(이 워크트리 밖의 살아 있는 관제실 자원이라
-// §0 경계 밖 -- 이 라운드가 그 배선을 만들지 않는다) 이 축이 라이브
-// 소비 경로에서 발동하지 않는다는 정직 한계는 그대로 남는다 -- §6 보고
-// 참조.
+// `dispatchLedgerPath`를 명시로 넘기면 그 값을 쓴다. 넘기지 않으면
+// `<harnessDir>/dispatch-receipt-path.txt` 포인터 파일 fallback을
+// 시도한다(resolveDispatchLedgerPath, 아래). 둘 다 없으면 그대로
+// 스킵 -- 추측·하드코딩된 실물 경로는 여전히 없다.
+//
+// ⛔★3R 작업 도중 자체 발견·되돌림(env fallback을 뺐다, 아래 근거):
+// 처음에는 env `DISPATCH_RECEIPT_PATH`도 세 번째(사실은 두 번째) fallback
+// 단계로 넣었었다 -- 그런데 이 저장소 전체 러너(`isolated-suite-runner.mjs`)
+// 실행 중 `HYK-359 완료조건4`(모든 CI-canonical 시험 파일을 떠도는
+// 레거시 3개 env로 fuzz하는 스윕)가 **71개** 시험을 무더기로 실패시켰다.
+// 원인: `DISPATCH_RECEIPT_PATH`는 `admission-ledger-env-isolation.mjs`의
+// `AMBIENT_LEDGER_ENV_KEYS`에 이미 있던(1R 이전부터, 쓰기측
+// `dispatch-receipt-cli.mjs`용) «보호 대상» 키였는데, 그 보호는
+// **spawn된 자식 프로세스의 env**(`isolatedChildEnv`)만 막는다 -- **이
+// 프로세스 안에서 직접(in-process) `checkRelayHandshake`를 부르는**
+// 수십 개 기존 시험 파일(relay-handshake.test.mjs 등)은 그 보호를 전혀
+// 쓰지 않는다(그럴 필요가 이 축이 생기기 전엔 없었다). 코어 함수 자체가
+// 이 env를 읽게 만드는 순간, 그 수십 개 시험 전부가 "떠도는
+// `DISPATCH_RECEIPT_PATH`"에 새로 노출됐다 -- 정확히 2R이 "기존 회귀
+// 시험 수백 개가 우연히 그 경로와 충돌할 위험" 때문에 파일시스템 기본
+// 경로 자동 추정을 기각했던 바로 그 형태의 사고가, 이번엔 env 이름
+// 정합 자체 때문에 재현됐다(§3의 §4 급소 1 논의가 "다른 대안"으로
+// 기각했던 위험이 실제로 관측된 것 -- 처음엔 "포인터 파일은 위험이 없다"
+// 고만 적었는데, «env 단계 자체»가 위험했다는 것을 이 실측 뒤에야
+// 알았다). 게다가 이 라운드 자신의 패치 문서(§3)가 이미 "env 하나만으로는
+// 그 별도 터미널까지 값을 옮길 방법이 없다"고 결론 내렸으므로, env
+// fallback은 실전에서 아무 이득도 없이 이 위험만 새로 만드는 셈이었다
+// -- 그래서 되돌렸다. 포인터 파일만 남긴다(ambient 위험 0, §4 급소 1
+// 증명은 그대로 유효).
+//
+// HYK-387 3R §1 (이름 정합 수리): 2R은 이 env 이름을 새로 `DISPATCH_
+// RECEIPT_LEDGER_PATH`로 지었는데, 라이브 배달기(dispatch-worker.ps1
+// 43~46/170~172행)는 이미 **`DISPATCH_RECEIPT_PATH`**를 쓰고 있었다 --
+// `dispatch-receipt-cli.mjs`가 append-only로 쓰는 바로 그 파일의 경로를
+// 가리키는 같은 개념(«영수증 파일» = «배정 기록이 쌓이는 원장», 다른
+// 두 이름이 아니다). 새 이름을 만들지 않고 라이브 이름으로 맞췄다.
+//
+// HYK-387 3R §3 (급소 1 "패치가 env 를 어디에 심느냐"): 라이브
+// `dispatch-worker.ps1`을 직접 읽어 확인한 결과, 이 스크립트는 **완료를
+// 감시하는 쪽(watch-result.mjs/checkRelayHandshake)을 전혀 부르지
+// 않는다** -- 배달(dispatch)과 착수 확인(exit 0/1/2/3/4/5)까지만 하고
+// 끝난다. 즉 "배달기가 소비를 부르는 자리"는 애초에 존재하지 않는다
+// (2R이 "정체를 확정 못했다"고 적은 그 프로세스는 여전히 사람/ORCH가
+// 별도 터미널에서 손으로 돌리는 것으로 보인다 -- ps1 자체·관제실 grep
+// 결과 둘 다 자동 호출자 0건). env 하나만으로는 그 별도 터미널까지
+// 값을 옮길 방법이 없다(자식 프로세스 env는 부모 셸에 역전파되지 않고,
+// Windows 영속 env(SetEnvironmentVariable "User")는 레지스트리를
+// 건드리는 시스템 뮤테이션이라 §0 "확인창 유발 명령 회피"·"실물 곁파일
+// 무접촉"과 같은 급의 위험을 새로 만든다 -- 이 라운드는 그 경로를
+// 채택하지 않는다).
+//
+// 대신 (2) 포인터 파일을 쓴다: 배달기가 `$ReceiptPath`를 해석한 직후
+// **바로 그 라운드의 `$Worktree`**(=harnessDir의 부모, 소비 쪽이 항상
+// 이미 알고 있는 유일한 앵커) 안에 그 값을 한 줄로 적어 둔다. 소비
+// 쪽은 매 호출마다 `harnessDir`을 필수로 받으므로(모든 실 호출자가
+// 이미 넘긴다), 그 디렉터리 안의 정해진 파일 하나만 읽으면 된다 --
+// 프로세스 경계·상대경로 기준(급소 3) 문제가 구조적으로 없다(배달기가
+// 적는 값은 항상 절대경로, 소비 쪽은 그 문자열을 그대로 쓸 뿐 재해석
+// 하지 않는다). 패치 상세는 `docs/control-room-patches/HYK-387-receipt-
+// path-pointer.md` 참조.
 export const DISPATCH_RECORD_STATE = Object.freeze({
   ABSENT: "DISPATCH_RECORD_ABSENT",
   LOOKUP_FAILED: "DISPATCH_RECORD_LOOKUP_FAILED",
@@ -1370,40 +1416,54 @@ export const DISPATCH_RECORD_STATE = Object.freeze({
   LATE: "DISPATCH_RECORD_LATE",
 });
 
-// HYK-387 2R §1 (P1-1 수리, 검토 원문 그대로 재현 방지): 1R까지는 이 env를
-// CLI 전용 `invokedDirectly` 블록만 읽었다 -- 검토자가 실측한 그대로,
-// `watch-result.mjs`(watchResult의 기본 checkFn=checkRelayHandshake)·
-// `relay-core.mjs`(checkExistingHandshake)·`orca-spike-live.mjs`
-// (verifyFreshHandshake)·`orca-spike-runner.mjs`(runHandshakeStage의
-// `inp.handshake` 그대로 전달)·`seat-signal-adapter.mjs`(collectHandshake)
-// 는 전부 `checkRelayHandshake`/`checkFn`을 **직접 import해서 호출**하고
-// CLI를 거치지 않으므로, CLI에만 있던 env 읽기를 단 한 번도 통과하지
-// 않았다 -- 이게 정확히 "env가 원장 없는 경로를 가리켜도 watchResult가
-// done/exit 0을 냈다"는 검토자의 관측 숫자다.
+// HYK-387 2R §1 (P1-1 수리, 검토 원문 그대로 재현 방지): 1R까지는
+// `dispatchLedgerPath`를 CLI 전용 `invokedDirectly` 블록에서만 읽었다
+// (당시엔 env로) -- 검토자가 실측한 그대로, `watch-result.mjs`
+// (watchResult의 기본 checkFn=checkRelayHandshake)·`relay-core.mjs`
+// (checkExistingHandshake)·`orca-spike-live.mjs`(verifyFreshHandshake)·
+// `orca-spike-runner.mjs`(runHandshakeStage의 `inp.handshake` 그대로
+// 전달)·`seat-signal-adapter.mjs`(collectHandshake)는 전부
+// `checkRelayHandshake`/`checkFn`을 **직접 import해서 호출**하고 CLI를
+// 거치지 않으므로, CLI에만 있던 그 읽기를 단 한 번도 통과하지 않았다.
 //
-// 이 라운드의 수리: 같은 env 이름을 **여기, 코어 함수 자체**에서도
-// fallback으로 읽는다 -- 위에 나열한 5개 호출자 전부가 `dispatchLedgerPath`
-// 인자를 단 하나도 넘기지 않으므로(소스 재확인, 이 라운드), `explicit`이
-// 항상 `undefined`로 들어온다 -- 그래서 이 fallback이 그 다섯 곳 «전부»를
-// 코드 수정 없이 한 번에 결선한다("기본 호출에서 선다"는 완료조건을 캡처).
+// 2R의 수리: fallback을 **여기, 코어 함수 자체**로 끌어올려 위에 나열한
+// 5개 호출자 전부가 코드 수정 없이 한 번에 결선되게 했다("기본 호출에서
+// 선다"는 완료조건을 캡처). 3R은 그 fallback의 «원천»을 env에서 포인터
+// 파일로 바꿨다(위 헤더 주석의 "★3R 작업 도중 자체 발견·되돌림" 참조 --
+// env는 이 저장소 CI-canonical 시험 수십 개를 새로 ambient-leak에
+// 노출시켰고, 실전에서도 프로세스 경계를 못 넘어 이득이 없었다).
 //
-// ⛔실물 경로를 추측·하드코딩하지 않는다(1R부터의 원칙 유지) -- env가
-// 없으면 여전히 undefined(스킵)다. 관제실이 이 env를 실제로 채워야
-// 라이브에서 발동한다(정직 한계, §6 보고 참조) -- 그 전까지는 이 fallback도
-// "계약 고정 + 기계 강제 코드" 까지다.
+// ⛔실물 경로를 추측·하드코딩하지 않는다(1R부터의 원칙 유지) -- 포인터
+// 파일이 없으면 여전히 undefined(스킵)다.
 //
-// ⛔시험 격리(§0/§4 급소 1): 이 env 이름은
-// admission-ledger-env-isolation.mjs의 AMBIENT_LEDGER_ENV_KEYS에도
-// 추가했다(그 파일 자체 diff 참조) -- isolatedChildEnv/
-// withIsolatedAmbientLedgerEnv를 쓰는 기존 모든 시험이 자동으로 이
-// env로부터도 격리되므로, 이 fallback을 추가해도 그 시험들을 하나씩
-// 고칠 필요가 없다(무회귀).
-function resolveDispatchLedgerPath(explicit) {
+// ⛔시험 격리(§0/§4 급소 1): 포인터 파일은 격리가 필요 없는 설계다 --
+// 어떤 ambient 프로세스 상태도 관여하지 않고, 오직 «호출자가 넘긴
+// harnessDir 안에 그 파일이 실제로 있는가»만 본다. 시험은 mkdtemp
+// 픽스처 디렉터리 안에 그 파일을 두거나 안 두는 것만으로 완전히
+// 격리된다 -- env 방식이 되돌려진 바로 그 이유(위 헤더 참조)가 여기엔
+// 구조적으로 적용되지 않는다.
+const DISPATCH_RECEIPT_POINTER_FILENAME = "dispatch-receipt-path.txt";
+
+function readDispatchReceiptPointerFile(harnessDir) {
+  if (typeof harnessDir !== "string" || harnessDir.length === 0) {
+    return undefined;
+  }
+  try {
+    const raw = readFileSync(
+      join(harnessDir, DISPATCH_RECEIPT_POINTER_FILENAME),
+      "utf8",
+    ).trim();
+    return raw.length > 0 ? raw : undefined;
+  } catch {
+    // 포인터 파일이 없거나 못 읽음 -- 오류가 아니라 "이 fallback 단계는
+    // 줄 게 없다"는 뜻이다. 다음 단계(스킵)로 그냥 넘어간다.
+    return undefined;
+  }
+}
+
+function resolveDispatchLedgerPath(explicit, harnessDir) {
   if (explicit !== undefined) return explicit;
-  const fromEnv = process.env.DISPATCH_RECEIPT_LEDGER_PATH;
-  return typeof fromEnv === "string" && fromEnv.length > 0
-    ? fromEnv
-    : undefined;
+  return readDispatchReceiptPointerFile(harnessDir);
 }
 
 // 원장(JSONL, dispatch-receipt-cli.mjs의 buildReceiptRecord가 쓰는 바로 그
@@ -1468,8 +1528,9 @@ export function resolveDispatchRecordExistence({
   taskId,
   dispatchLedgerPath,
   doneAtMs,
+  harnessDir,
 }) {
-  const ledgerPath = resolveDispatchLedgerPath(dispatchLedgerPath);
+  const ledgerPath = resolveDispatchLedgerPath(dispatchLedgerPath, harnessDir);
   if (!ledgerPath) return { ok: true, skipped: true };
 
   const ledger = readDispatchLedgerRecords(ledgerPath);
@@ -1917,6 +1978,7 @@ export function checkRelayHandshake({
     taskId,
     dispatchLedgerPath,
     doneAtMs: doneAt.getTime(),
+    harnessDir,
   });
   if (!dispatchRecordVerdict.ok) return dispatchRecordVerdict;
 
@@ -2448,19 +2510,24 @@ if (invokedDirectly) {
   // not just this CLI block. Calling it again here would double-spawn on
   // every CLI-path completion.
   const harnessDirArg = process.argv[3];
-  // HYK-387: env가 설정된 경우에만 넘긴다(기본 undefined -- resolveDispatch
-  // RecordExistence 자체 헤더 참조, 하드코딩된 실물 경로 없음). 관제실이
-  // 아직 이 env를 채우지 않으므로 오늘 이 값은 라이브 소비 경로에서 항상
-  // undefined다 -- 이 축은 스킵되고, CLI의 기존 동작은 완전히 그대로다.
-  const dispatchLedgerPathArg =
-    process.env.DISPATCH_RECEIPT_LEDGER_PATH || undefined;
+  // HYK-387 3R (자체 발견 결함 수리): 이 블록은 2R까지 `dispatchLedgerPath`
+  // 를 자기 스스로 `process.env`에서 읽어 명시로 넘겼다 -- 그런데
+  // `checkRelayHandshake`/`resolveDispatchRecordExistence` 자신이 이제
+  // 같은 env(+포인터 파일)를 «자기 안에서» 이미 읽는다(위 헤더 참조).
+  // 명시로 넘기면(비록 그 값이 "env를 그대로 읽어온 것"이어도)
+  // `resolveDispatchLedgerPath`의 `explicit !== undefined` 분기가 즉시
+  // 그 값을 채택해 버려, 코어 함수 자신의 env/포인터파일 fallback
+  // 경로가 CLI를 통해서는 «한 번도 실행되지 않는» 사각을 만든다(3R
+  // 작업 중 실측: 이 사각 때문에 되돌림 변이 hyk387-11이 fallback을
+  // 실제로 무력화해도 CLI 경로에서는 그 무력화가 전혀 드러나지
+  // 않았다 -- 이 줄 자체가 그 무력화를 우회하는 별도 경로였던 것).
+  // 이 줄을 지워 CLI도 다른 모든 실 호출자와 완전히 같은 모양
+  // (`{role, harnessDir}`, dispatchLedgerPath 키 자체를 안 넘김)으로
+  // 부르게 한다 -- 이제 CLI 경로도 코어 함수의 fallback을 실제로 타고,
+  // 그 fallback을 무력화하면 CLI 경로에서도 정직하게 드러난다.
   const result = harnessDirArg
-    ? checkRelayHandshake({
-        role,
-        harnessDir: harnessDirArg,
-        dispatchLedgerPath: dispatchLedgerPathArg,
-      })
-    : checkRelayHandshake({ role, dispatchLedgerPath: dispatchLedgerPathArg });
+    ? checkRelayHandshake({ role, harnessDir: harnessDirArg })
+    : checkRelayHandshake({ role });
   // HYK-344 2R: kept as a call BEFORE the pinned (result.ok) block below,
   // rather than inlined inside it -- relay-handshake-cli-mutation-M3.test.mjs
   // (HYK-189 (e) mutation M3) pins that exact block's source text byte-for-

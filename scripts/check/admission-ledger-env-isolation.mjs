@@ -24,20 +24,19 @@
 // what lets mainRepoRoot()'s git-ancestry resolution reach the synthetic
 // fixture repo the test built, the same way it always did before an ambient
 // var started shadowing that path.
-// HYK-387 2R §1: `DISPATCH_RECEIPT_LEDGER_PATH`(소비/읽기측 -- relay-
-// handshake.mjs의 resolveDispatchLedgerPath fallback, 이 라운드가 그
-// 코어 함수 자체에 넣었다) 추가 -- 위 `DISPATCH_RECEIPT_PATH`(생산/쓰기측,
-// dispatch-receipt-cli.mjs)와 이름이 비슷하지만 별개 키다. 이 키를 코어
-// 함수(모든 checkRelayHandshake 호출자가 공유)가 직접 읽게 만든 이상,
-// 같은 급의 "떠다니는 ambient 값이 시험을 오염시킨다" 위험이 생긴다 --
-// 나머지 세 키와 동일하게 취급해 기존 isolatedChildEnv/
-// withIsolatedAmbientLedgerEnv 사용자 전부가 자동으로 이 키로부터도
-// 격리되게 한다(그 시험들을 하나씩 고칠 필요가 없다).
+// HYK-387 3R §1 (이름 정합 수리): 2R은 소비측 fallback에 새 이름
+// `DISPATCH_RECEIPT_LEDGER_PATH`를 만들어 여기 네 번째 키로 추가했었다.
+// 3R에서 라이브 배달기(`dispatch-worker.ps1` 43~46/170~172행)가 이미
+// 쓰고 있는 이름이 바로 **`DISPATCH_RECEIPT_PATH`**(아래, 이 상수에
+// 원래부터 있던 키)라는 것을 확인해 -- 같은 물리 파일(영수증 CLI가
+// append-only로 쓰는 그 JSONL)을 가리키는 같은 개념이므로 새 이름을
+// 만들지 않고 라이브 이름으로 맞췄다(3R coder-task.md §3-1 "이름이
+// 둘이면 다음 사람이 또 어긋난다"). 그래서 2R이 추가했던 네 번째 키는
+// 삭제한다 -- 이제 소비측도 이 기존 `DISPATCH_RECEIPT_PATH` 하나만 쓴다.
 const AMBIENT_LEDGER_ENV_KEYS = [
   "ADMISSION_LEDGER_PATH",
   "ADMISSION_LOCK_PATH",
   "DISPATCH_RECEIPT_PATH",
-  "DISPATCH_RECEIPT_LEDGER_PATH",
 ];
 
 // HYK-359 2R P1-2 (검토자 실사고, msg 원문 coder-task.md §2): 1R's
@@ -106,16 +105,15 @@ export function isolatedChildEnvWithLedger(
   if (ledgerEnv.admissionLockPath !== undefined) {
     explicit.ADMISSION_LOCK_PATH = ledgerEnv.admissionLockPath;
   }
+  // HYK-387 3R: this field is now the ONE sanctioned way to set the value
+  // both the live dispatch-worker.ps1 (receipt-writing side) AND
+  // relay-handshake.mjs's resolveDispatchLedgerPath (consumption-side
+  // fallback, since 3R's name-alignment fix) read -- previously (2R) there
+  // was a separate `dispatchReceiptLedgerPath` field for a differently-
+  // named env key; that key never existed live, so it's removed rather
+  // than kept as a second way to do the same thing.
   if (ledgerEnv.dispatchReceiptPath !== undefined) {
     explicit.DISPATCH_RECEIPT_PATH = ledgerEnv.dispatchReceiptPath;
-  }
-  // HYK-387 2R §1: the fourth sanctioned field, mirrors the three above --
-  // a test that wants to deliberately exercise the new core-function env
-  // fallback (relay-handshake.mjs's resolveDispatchLedgerPath) sets this
-  // instead of poking `overrides` directly (which isolatedChildEnv now
-  // strips unconditionally, same as the other three keys).
-  if (ledgerEnv.dispatchReceiptLedgerPath !== undefined) {
-    explicit.DISPATCH_RECEIPT_LEDGER_PATH = ledgerEnv.dispatchReceiptLedgerPath;
   }
   return { ...base, ...explicit };
 }

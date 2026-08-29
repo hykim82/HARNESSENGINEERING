@@ -1,11 +1,14 @@
-// HYK-387 2R §1 (P1-1 직접 수리, 검토자의 정확한 재현): 검토자가 실사고를
-// 증명한 정확한 모양 -- `DISPATCH_RECEIPT_LEDGER_PATH`가 존재하지 않는
-// 원장 파일을 가리키게 세팅한 채, `watch-result.mjs`의 실 진입점
-// `watchResult({role, harnessDir})`을 (checkFn 주입 없이, 기본값
-// `checkRelayHandshake` 그대로) 그대로 구동한다. 검토 원문의 관측 숫자:
-// "env가 가리키는 원장 파일은 없음인데 watchResult 결과가 status:'done',
-// elapsedS:0, 프로세스 exit 0" -- 이 시험은 그 관측이 2R 수리 뒤에는 더 이상
-// 재현되지 않음을 고정한다.
+// HYK-387 2R §1 (P1-1 직접 수리, 검토자의 정확한 재현), 3R §1 갱신
+// (fallback 원천을 env에서 포인터 파일로 교체 -- relay-handshake.mjs
+// 헤더의 "★3R 작업 도중 자체 발견·되돌림" 참조, env 방식이 이 저장소
+// CI-canonical 시험 수십 개를 새로 ambient-leak에 노출시켰다): 검토자가
+// 실사고를 증명한 정확한 모양 -- 존재하지 않는 원장 파일을 가리키는
+// `<harnessDir>/dispatch-receipt-path.txt` 포인터 파일만 두고,
+// `watch-result.mjs`의 실 진입점 `watchResult({role, harnessDir})`을
+// (checkFn 주입 없이, 기본값 `checkRelayHandshake` 그대로) 그대로
+// 구동한다. 검토 원문의 관측 숫자: "env가 가리키는 원장 파일은 없음인데
+// watchResult 결과가 status:'done', elapsedS:0, 프로세스 exit 0" -- 이
+// 시험은 그 관측이 2R/3R 수리 뒤에는 더 이상 재현되지 않음을 고정한다.
 //
 // ⛔이 시험을 scripts/check/hyk387-dispatch-record-required.test.mjs에
 // 두지 않은 이유: A3 인벤토리 경계(HYK-148, quality-check의
@@ -16,11 +19,17 @@
 //
 // ⛔실물 원장·곁파일 무접촉: 모든 fixture는 이 워크트리 «안»의 mkdtemp
 // 디렉터리에만 쓴다(coder-task.md §0 경계 2 그대로) -- 시스템 TEMP/TMP는
-// 건드리지 않는다. `DISPATCH_RECEIPT_LEDGER_PATH`는 이 시험 프로세스
-// 자신의 process.env만, 항상 원상복구하며 건드린다.
+// 건드리지 않는다. 포인터 파일은 그 mkdtemp 디렉터리 안에만 쓴다 --
+// 어떤 ambient 프로세스 상태도 건드리지 않는다.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import {
+  mkdtempSync,
+  mkdirSync,
+  writeFileSync,
+  existsSync,
+  rmSync,
+} from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { watchResult } from "./watch-result.mjs";
@@ -40,17 +49,6 @@ async function withFixtureDirAsync(prefix, fn) {
   } finally {
     rmSync(dir, { recursive: true, force: true });
     rmSync(SCRATCH_ROOT, { recursive: true, force: true });
-  }
-}
-
-async function withDispatchLedgerEnvAsync(ledgerPath, fn) {
-  const prior = process.env.DISPATCH_RECEIPT_LEDGER_PATH;
-  process.env.DISPATCH_RECEIPT_LEDGER_PATH = ledgerPath;
-  try {
-    return await fn();
-  } finally {
-    if (prior === undefined) delete process.env.DISPATCH_RECEIPT_LEDGER_PATH;
-    else process.env.DISPATCH_RECEIPT_LEDGER_PATH = prior;
   }
 }
 
@@ -83,27 +81,30 @@ function writeCoderRound(dir, { taskId = "HYK-387-WR-T" } = {}) {
   );
 }
 
-test("(hyk387-wr-1)★ 완료조건1(검토자의 정확한 재현): watch-result.mjs의 실 진입점 watchResult({role,harnessDir}) -- checkFn 주입 없이, 기본값 그대로 -- env만 설정하면 존재하지 않는 원장을 가리켜도 더 이상 done/exit-equivalent 0이 아니다", async () => {
+test("(hyk387-wr-1)★ 완료조건1(검토자의 정확한 재현): watch-result.mjs의 실 진입점 watchResult({role,harnessDir}) -- checkFn 주입 없이, 기본값 그대로 -- 포인터 파일만 있으면 존재하지 않는 원장을 가리켜도 더 이상 done/exit-equivalent 0이 아니다", async () => {
   await withFixtureDirAsync("default-wiring-watchresult-", async (dir) => {
     writeCoderRound(dir);
     const ledgerPath = join(dir, "does-not-exist.jsonl"); // 검토자 원문과 동일: 존재하지 않는 원장
-    const outcome = await withDispatchLedgerEnvAsync(ledgerPath, () =>
-      // checkFn을 주입하지 않는다 -- 기본값(checkRelayHandshake) 그대로,
-      // watch-result.mjs가 production에서 실제로 쓰는 바로 그 호출 모양.
-      watchResult({ role: "coder", harnessDir: dir, maxWaitS: 1 }),
-    );
+    writeFileSync(join(dir, "dispatch-receipt-path.txt"), ledgerPath, "utf8");
+    assert.equal(existsSync(ledgerPath), false);
+    // checkFn을 주입하지 않는다 -- 기본값(checkRelayHandshake) 그대로,
+    // watch-result.mjs가 production에서 실제로 쓰는 바로 그 호출 모양.
+    const outcome = await watchResult({
+      role: "coder",
+      harnessDir: dir,
+      maxWaitS: 1,
+    });
     assert.notEqual(
       outcome.status,
       "done",
-      `검토자 원문 재현: env가 존재하지 않는 원장을 가리킬 때 watchResult가 더 이상 "done"을 내면 안 된다 (실제: ${JSON.stringify(outcome)})`,
+      `검토자 원문 재현: 포인터 파일이 존재하지 않는 원장을 가리킬 때 watchResult가 더 이상 "done"을 내면 안 된다 (실제: ${JSON.stringify(outcome)})`,
     );
   });
 });
 
-test("(hyk387-wr-2) 무회귀: env가 설정되지 않으면 watchResult는 그대로 done(정상 라운드는 여전히 통과)", async () => {
+test("(hyk387-wr-2) 무회귀: 포인터 파일이 없으면 watchResult는 그대로 done(정상 라운드는 여전히 통과)", async () => {
   await withFixtureDirAsync("noop-watchresult-", async (dir) => {
     writeCoderRound(dir);
-    assert.equal(process.env.DISPATCH_RECEIPT_LEDGER_PATH, undefined);
     const outcome = await watchResult({
       role: "coder",
       harnessDir: dir,

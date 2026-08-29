@@ -1091,7 +1091,7 @@ test("HYK-189 (e) mutation M1: removing the no-arg usage guard -> the exact usag
 //     결함이 드러난다»는 것 자체를 시험으로 고정한다(§9 항목 3).
 test("HYK-189 (e) mutation M2: removing the second positional arg (harnessDir override) -> a valid fixture in a custom dir is no longer honored (RED signal; proves passing harnessDirArg is load-bearing), hermetic and invariant across ambient-default state", () => {
   const target =
-    "  const harnessDirArg = process.argv[3];\n  // HYK-387: env가 설정된 경우에만 넘긴다(기본 undefined -- resolveDispatch\n  // RecordExistence 자체 헤더 참조, 하드코딩된 실물 경로 없음). 관제실이\n  // 아직 이 env를 채우지 않으므로 오늘 이 값은 라이브 소비 경로에서 항상\n  // undefined다 -- 이 축은 스킵되고, CLI의 기존 동작은 완전히 그대로다.\n  const dispatchLedgerPathArg =\n    process.env.DISPATCH_RECEIPT_LEDGER_PATH || undefined;\n  const result = harnessDirArg\n    ? checkRelayHandshake({\n        role,\n        harnessDir: harnessDirArg,\n        dispatchLedgerPath: dispatchLedgerPathArg,\n      })\n    : checkRelayHandshake({ role, dispatchLedgerPath: dispatchLedgerPathArg });\n";
+    '  const harnessDirArg = process.argv[3];\n  // HYK-387 3R (자체 발견 결함 수리): 이 블록은 2R까지 `dispatchLedgerPath`\n  // 를 자기 스스로 `process.env`에서 읽어 명시로 넘겼다 -- 그런데\n  // `checkRelayHandshake`/`resolveDispatchRecordExistence` 자신이 이제\n  // 같은 env(+포인터 파일)를 «자기 안에서» 이미 읽는다(위 헤더 참조).\n  // 명시로 넘기면(비록 그 값이 "env를 그대로 읽어온 것"이어도)\n  // `resolveDispatchLedgerPath`의 `explicit !== undefined` 분기가 즉시\n  // 그 값을 채택해 버려, 코어 함수 자신의 env/포인터파일 fallback\n  // 경로가 CLI를 통해서는 «한 번도 실행되지 않는» 사각을 만든다(3R\n  // 작업 중 실측: 이 사각 때문에 되돌림 변이 hyk387-11이 fallback을\n  // 실제로 무력화해도 CLI 경로에서는 그 무력화가 전혀 드러나지\n  // 않았다 -- 이 줄 자체가 그 무력화를 우회하는 별도 경로였던 것).\n  // 이 줄을 지워 CLI도 다른 모든 실 호출자와 완전히 같은 모양\n  // (`{role, harnessDir}`, dispatchLedgerPath 키 자체를 안 넘김)으로\n  // 부르게 한다 -- 이제 CLI 경로도 코어 함수의 fallback을 실제로 타고,\n  // 그 fallback을 무력화하면 CLI 경로에서도 정직하게 드러난다.\n  const result = harnessDirArg\n    ? checkRelayHandshake({ role, harnessDir: harnessDirArg })\n    : checkRelayHandshake({ role });\n'; // exact-copy anchor rebuilt from source (3R)
   assertExactlyOneMatch(
     RELAY_HANDSHAKE_SRC,
     target,
@@ -1099,7 +1099,7 @@ test("HYK-189 (e) mutation M2: removing the second positional arg (harnessDir ov
   );
   const mutated = RELAY_HANDSHAKE_SRC.replace(
     target,
-    "  const dispatchLedgerPathArg =\n    process.env.DISPATCH_RECEIPT_LEDGER_PATH || undefined;\n  const result = checkRelayHandshake({ role, dispatchLedgerPath: dispatchLedgerPathArg });\n",
+    "  const result = checkRelayHandshake({ role });\n",
   );
   const { rootDir, mutantPath } = writeMutantCli(mutated);
   try {
