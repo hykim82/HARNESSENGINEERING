@@ -4,7 +4,7 @@
 
 ## 0. 이 실험 전에 반드시 먼저 읽을 것
 
-`.harness/coder.md`(이 라운드 결과 파일) §2(Q2)를 먼저 읽어라. **실측 결과, 각성 배선은 이미 라이브에서 반복 발화 중이다**(2026-08-29 18:13:30 KST 포함 최근 31회 `sent:true` 기록 확인 — `D:/문서관리/하네스-관제실/watch/wake-receipts.jsonl`). 이 절차서가 겨냥하는 것은 "한 번도 안 울렸다"를 재현하는 것이 아니라, **①합성 표적으로 발화 경로 자체를 재확인** ②**실 좌석에서 관측 가능한 흔적이 무엇인지 확정**하는 것이다.
+`.harness/coder.md`(이 라운드 결과 파일) §2(Q2)를 먼저 읽어라. **실측 결과, 각성 배선은 이미 라이브에서 반복 발화 중이다**(2026-08-29 14:13:30 KST 포함 최근 31회 `sent:true` 기록 확인 — `D:/문서관리/하네스-관제실/watch/wake-receipts.jsonl`. ⚠️1R은 이 시각을 "18:13:30 KST"로 4시간 오기했다 — 2R 검토가 잡아 여기서 바로잡는다). 이 절차서가 겨냥하는 것은 "한 번도 안 울렸다"를 재현하는 것이 아니라, **①합성 표적으로 발화 경로 자체를 재확인** ②**실 좌석에서 관측 가능한 흔적이 무엇인지 확정**하는 것이다.
 
 ## 1. 안전 조건 (실행 전 전부 충족돼야 함)
 
@@ -13,31 +13,17 @@
 3. **문구에 게이트 신호 0.** 전송되는 문구는 `wake-wire.mjs`의 고정 상수 `WAKE_MESSAGE`뿐이다 — 이 절차서 어디에도 그 문구를 대체하거나 덧붙이는 인자가 없다(`hyk270-wake-fire.test.mjs`의 금지어 시험이 그 상수 자체를 이미 잠갔다).
 4. **실 orca CLI를 실제로 호출한다** — `--fake-exec-log` 없이 돈다는 뜻이다(그래야 "발화가 실제로 좌석에 닿는가"를 검증할 수 있다). 이 절차서의 표적이 폐기용 좌석이어야 하는 이유가 바로 이것이다.
 
-## 2. 정확히 칠 명령 한 줄
+## 2. 정확히 칠 명령 한 줄 (Windows PowerShell — 그대로 붙여넣기)
 
-ORCH가 먼저 폐기용 좌석을 하나 만들고(기존 orca 절차대로 `orca orchestration terminal create ...` 등 — 이 문서 범위 밖), 그 좌석의 handle을 얻은 뒤 아래를 워크트리 루트(`C:/Users/Administrator/orca/workspaces/HARNESSENGINEERING/hyk270-wake-fire-1-2` 또는 병합 후에는 메인 저장소)에서 실행한다:
+ORCH가 먼저 폐기용 좌석을 하나 만들고(기존 orca 절차대로 `orca orchestration terminal create ...` 등 — 이 문서 범위 밖) 그 handle을 얻은 뒤, 워크트리 루트(`C:/Users/Administrator/orca/workspaces/HARNESSENGINEERING/hyk270-wake-fire-1-2` 또는 병합 후에는 메인 저장소)에서 아래 **한 줄**(줄바꿈 0 — PowerShell 프롬프트에 그대로 붙여넣으면 실행된다)의 `<합성 표적 좌석 handle>`만 실제 handle로 바꿔 실행한다. 이 한 줄이 하는 일 = ⓐ이 실험 전용 임시 디렉터리·`watch.log`를 새로 만들고(⛔실물 관제실 파일 무접촉 — §0 비타협) ⓑ발화 조건(연속 2 tick `SUSPECTED_UNCONSUMED`, 두 번째 tick은 "지금"에서 1분 전 — `maxTickAgeMs=2700000`=45분 이내라 `STALE_WATCH`로 안 접힘)을 충족하는 두 줄을 그 파일에 쓰고 ⓒ`wake-wire.mjs`를 `--live`로 실행한다:
 
-```
-node scripts/supervisor/wake-wire.mjs \
-  --watch-log <이 실험용으로 새로 만든 watch.log 경로> \
-  --active-rounds 1 \
-  --state <임시 state.json 경로> \
-  --wake-log <임시 wake-receipts.jsonl 경로> \
-  --live \
-  --orch-handle <합성 표적 좌석 handle> \
-  --json
+```powershell
+$dir = New-Item -ItemType Directory -Force -Path (Join-Path $env:TEMP ("hyk270-livefire-" + [guid]::NewGuid().ToString("N").Substring(0,8))); $wl = Join-Path $dir.FullName "watch.log"; $t1 = (Get-Date).ToUniversalTime().AddMinutes(-20).ToString("yyyy-MM-ddTHH:mm:ss.fffZ"); $t2 = (Get-Date).ToUniversalTime().AddMinutes(-1).ToString("yyyy-MM-ddTHH:mm:ss.fffZ"); "$t1 exit=0 verdict=PROGRESSING reason=NO_PLEDGES_RECORDED unconsumed_status=UNCONSUMED_JUDGED unconsumed_verdict=SUSPECTED_UNCONSUMED unconsumed_worst_count=1 unconsumed_worktrees=1`n$t2 exit=0 verdict=PROGRESSING reason=NO_PLEDGES_RECORDED unconsumed_status=UNCONSUMED_JUDGED unconsumed_verdict=SUSPECTED_UNCONSUMED unconsumed_worst_count=1 unconsumed_worktrees=1" | Set-Content -Path $wl -Encoding utf8; node scripts/supervisor/wake-wire.mjs --watch-log $wl --active-rounds 1 --state (Join-Path $dir.FullName "state.json") --wake-log (Join-Path $dir.FullName "wake-receipts.jsonl") --live --orch-handle <합성 표적 좌석 handle> --json
 ```
 
-`<이 실험용으로 새로 만든 watch.log 경로>`는 **실물 관제실 watch.log가 아니라 이 실험 전용으로 새로 만든 파일**이어야 한다(⛔실물 관제실 파일에 쓰기 0 — §0 비타협). 그 파일의 내용은 발화 조건(연속 2 tick `SUSPECTED_UNCONSUMED`)을 충족시키는 최소 두 줄이면 된다:
+`--orch-handle`을 명시했으므로 좌석 후보 조회 자체는 생략된다(§1-C 경로 미시험 — 조회 경로를 함께 보고 싶다면 위 한 줄에서 `--orch-handle <...>`을 빼고 실행하되, 그 경우 MAIN_REPO_PATH에 좌석이 정확히 1개만 있어야 한다는 조건이 걸린다는 것을 유의).
 
-```
-2026-08-29T09:00:00.000Z exit=0 verdict=PROGRESSING reason=NO_PLEDGES_RECORDED unconsumed_status=UNCONSUMED_JUDGED unconsumed_verdict=SUSPECTED_UNCONSUMED unconsumed_worst_count=1 unconsumed_worktrees=1
-2026-08-29T09:15:00.000Z exit=0 verdict=PROGRESSING reason=NO_PLEDGES_RECORDED unconsumed_status=UNCONSUMED_JUDGED unconsumed_verdict=SUSPECTED_UNCONSUMED unconsumed_worst_count=1 unconsumed_worktrees=1
-```
-
-(두 번째 줄의 시각이 실행 시점으로부터 45분 이내여야 `STALE_WATCH`로 접히지 않는다 — `DEFAULT_WAKE_CONFIG.maxTickAgeMs = 2700000`.)
-
-`--orch-handle`을 명시했으므로 좌석 후보 조회 자체는 생략된다(§1-C 경로 미시험 — 조회 경로를 함께 보고 싶다면 `--orch-handle`을 빼고 실행하되, 그 경우 MAIN_REPO_PATH에 좌석이 정확히 1개만 있어야 한다는 조건이 걸린다는 것을 유의).
+이 실험이 만든 임시 경로(`$dir.FullName`)는 위 한 줄이 콘솔에 그대로 남기므로 §4(되돌리기)에서 그 값을 그대로 쓰면 된다.
 
 ## 3. 기대 관측 — 무엇이 어디에 남으면 "발화했다"인가
 
