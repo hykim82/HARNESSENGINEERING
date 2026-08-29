@@ -24,10 +24,20 @@
 // what lets mainRepoRoot()'s git-ancestry resolution reach the synthetic
 // fixture repo the test built, the same way it always did before an ambient
 // var started shadowing that path.
+// HYK-387 2R §1: `DISPATCH_RECEIPT_LEDGER_PATH`(소비/읽기측 -- relay-
+// handshake.mjs의 resolveDispatchLedgerPath fallback, 이 라운드가 그
+// 코어 함수 자체에 넣었다) 추가 -- 위 `DISPATCH_RECEIPT_PATH`(생산/쓰기측,
+// dispatch-receipt-cli.mjs)와 이름이 비슷하지만 별개 키다. 이 키를 코어
+// 함수(모든 checkRelayHandshake 호출자가 공유)가 직접 읽게 만든 이상,
+// 같은 급의 "떠다니는 ambient 값이 시험을 오염시킨다" 위험이 생긴다 --
+// 나머지 세 키와 동일하게 취급해 기존 isolatedChildEnv/
+// withIsolatedAmbientLedgerEnv 사용자 전부가 자동으로 이 키로부터도
+// 격리되게 한다(그 시험들을 하나씩 고칠 필요가 없다).
 const AMBIENT_LEDGER_ENV_KEYS = [
   "ADMISSION_LEDGER_PATH",
   "ADMISSION_LOCK_PATH",
   "DISPATCH_RECEIPT_PATH",
+  "DISPATCH_RECEIPT_LEDGER_PATH",
 ];
 
 // HYK-359 2R P1-2 (검토자 실사고, msg 원문 coder-task.md §2): 1R's
@@ -98,6 +108,14 @@ export function isolatedChildEnvWithLedger(
   }
   if (ledgerEnv.dispatchReceiptPath !== undefined) {
     explicit.DISPATCH_RECEIPT_PATH = ledgerEnv.dispatchReceiptPath;
+  }
+  // HYK-387 2R §1: the fourth sanctioned field, mirrors the three above --
+  // a test that wants to deliberately exercise the new core-function env
+  // fallback (relay-handshake.mjs's resolveDispatchLedgerPath) sets this
+  // instead of poking `overrides` directly (which isolatedChildEnv now
+  // strips unconditionally, same as the other three keys).
+  if (ledgerEnv.dispatchReceiptLedgerPath !== undefined) {
+    explicit.DISPATCH_RECEIPT_LEDGER_PATH = ledgerEnv.dispatchReceiptLedgerPath;
   }
   return { ...base, ...explicit };
 }

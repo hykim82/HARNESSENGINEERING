@@ -1346,22 +1346,65 @@ export function resolveHeadCommitBinding({
 // 한다.
 //
 // ⛔정직 한계(§0 경계 1 -- 실물 원장 접근 금지, 관제실 라이브 파일 무접촉):
-// `dispatchLedgerPath`는 ⛔호출자가 명시로 넘긴 값만 쓴다(기본값
-// undefined -- 추측·하드코딩된 실물 경로 없음). 넘어오지 않으면 이 축은
-// 즉시 스킵한다({ok:true, skipped:true}) -- 이 축이 생기기 전과 완전히
-// 동일하게 동작한다(§4 무회귀, 기존 어떤 호출자도 이 값을 넘기지 않는다).
-// CLI 진입점(아래 invokedDirectly)은 env `DISPATCH_RECEIPT_LEDGER_PATH`가
-// 설정된 경우에만 이 값을 전달한다 -- 관제실(dispatch-worker.ps1)이 실제로
-// 이 env를 채워 넣기 전까지는 이 축이 라이브 소비 경로에서 한 번도
-// 발동하지 않는다(이 라운드는 그 결선을 만들지 않는다 -- 그 파일은 이
-// 워크트리 밖의 살아 있는 관제실 자원이라 §0 경계 밖이다). 즉 이 축은
-// «계약 고정 + 기계 강제 코드 + 합성 시험» 까지이며, 실제로 배달을 막는
-// 것은 관제실 쪽 배선이 이 env를 채워야 완성된다 -- Q3에 이 한계를 그대로
-// 적는다.
+// `dispatchLedgerPath`를 명시로 넘기면 그 값을 쓴다. 넘기지 않으면(1R까지는
+// 그대로 스킵이었다) 2R부터는 env `DISPATCH_RECEIPT_LEDGER_PATH`를
+// fallback으로 읽는다(resolveDispatchLedgerPath, 아래) -- ⛔여전히
+// 추측·하드코딩된 실물 경로는 없다(둘 다 없으면 그대로 스킵). 이 fallback을
+// CLI 전용 블록이 아니라 **이 코어 함수 자신**에 넣은 것이 2R P1-1 수리의
+// 핵심이다 -- watch-result.mjs/relay-core.mjs/orca-spike-live.mjs/
+// orca-spike-runner.mjs/seat-signal-adapter.mjs 전부가 `checkRelayHandshake`
+// 를 직접 import해서 부르고 `dispatchLedgerPath` 인자를 넘기지 않으므로
+// (검토 1R이 실측한 그대로), 코어에 넣어야 그 다섯 호출자 전부가 코드
+// 수정 없이 한 번에 결선된다. 관제실(dispatch-worker.ps1)이 실제로 이
+// env를 채워 넣기 전까지는(이 워크트리 밖의 살아 있는 관제실 자원이라
+// §0 경계 밖 -- 이 라운드가 그 배선을 만들지 않는다) 이 축이 라이브
+// 소비 경로에서 발동하지 않는다는 정직 한계는 그대로 남는다 -- §6 보고
+// 참조.
 export const DISPATCH_RECORD_STATE = Object.freeze({
   ABSENT: "DISPATCH_RECORD_ABSENT",
   LOOKUP_FAILED: "DISPATCH_RECORD_LOOKUP_FAILED",
+  // HYK-387 2R §2 (P2 승격, 검토자 P2-ⓑ): 매칭 항목이 있어도 전부 이
+  // 라운드의 완료 시각(doneAt) «뒤»에 기록됐다면 근거로 인정하지 않는다 --
+  // ABSENT(항목이 아예 없음)와는 다른 사유이므로 별도 state로 구분한다
+  // (LOOKUP_FAILED/ABSENT를 뭉뚱그리지 않는다는 1R의 규율을 그대로 확장).
+  LATE: "DISPATCH_RECORD_LATE",
 });
+
+// HYK-387 2R §1 (P1-1 수리, 검토 원문 그대로 재현 방지): 1R까지는 이 env를
+// CLI 전용 `invokedDirectly` 블록만 읽었다 -- 검토자가 실측한 그대로,
+// `watch-result.mjs`(watchResult의 기본 checkFn=checkRelayHandshake)·
+// `relay-core.mjs`(checkExistingHandshake)·`orca-spike-live.mjs`
+// (verifyFreshHandshake)·`orca-spike-runner.mjs`(runHandshakeStage의
+// `inp.handshake` 그대로 전달)·`seat-signal-adapter.mjs`(collectHandshake)
+// 는 전부 `checkRelayHandshake`/`checkFn`을 **직접 import해서 호출**하고
+// CLI를 거치지 않으므로, CLI에만 있던 env 읽기를 단 한 번도 통과하지
+// 않았다 -- 이게 정확히 "env가 원장 없는 경로를 가리켜도 watchResult가
+// done/exit 0을 냈다"는 검토자의 관측 숫자다.
+//
+// 이 라운드의 수리: 같은 env 이름을 **여기, 코어 함수 자체**에서도
+// fallback으로 읽는다 -- 위에 나열한 5개 호출자 전부가 `dispatchLedgerPath`
+// 인자를 단 하나도 넘기지 않으므로(소스 재확인, 이 라운드), `explicit`이
+// 항상 `undefined`로 들어온다 -- 그래서 이 fallback이 그 다섯 곳 «전부»를
+// 코드 수정 없이 한 번에 결선한다("기본 호출에서 선다"는 완료조건을 캡처).
+//
+// ⛔실물 경로를 추측·하드코딩하지 않는다(1R부터의 원칙 유지) -- env가
+// 없으면 여전히 undefined(스킵)다. 관제실이 이 env를 실제로 채워야
+// 라이브에서 발동한다(정직 한계, §6 보고 참조) -- 그 전까지는 이 fallback도
+// "계약 고정 + 기계 강제 코드" 까지다.
+//
+// ⛔시험 격리(§0/§4 급소 1): 이 env 이름은
+// admission-ledger-env-isolation.mjs의 AMBIENT_LEDGER_ENV_KEYS에도
+// 추가했다(그 파일 자체 diff 참조) -- isolatedChildEnv/
+// withIsolatedAmbientLedgerEnv를 쓰는 기존 모든 시험이 자동으로 이
+// env로부터도 격리되므로, 이 fallback을 추가해도 그 시험들을 하나씩
+// 고칠 필요가 없다(무회귀).
+function resolveDispatchLedgerPath(explicit) {
+  if (explicit !== undefined) return explicit;
+  const fromEnv = process.env.DISPATCH_RECEIPT_LEDGER_PATH;
+  return typeof fromEnv === "string" && fromEnv.length > 0
+    ? fromEnv
+    : undefined;
+}
 
 // 원장(JSONL, dispatch-receipt-cli.mjs의 buildReceiptRecord가 쓰는 바로 그
 // 형식)을 읽어 파싱 가능한 레코드 배열을 돌려준다. 파일이 아예 없으면
@@ -1402,20 +1445,34 @@ function readDispatchLedgerRecords(ledgerPath) {
       reason: `DISPATCH_RECORD_LOOKUP_FAILED (HYK-387): dispatch ledger at '${ledgerPath}' has ${lines.length} line(s), all unparseable JSON -- 조회 실패(fail-closed, «없다»로 접지 않는다)`,
     };
   }
-  return { ok: true, records };
+  // HYK-387 2R P2ⓒ (검토 관찰, 담음): 일부 줄만 손상됐고 나머지에서 매칭
+  // 여부를 정상적으로 판단할 수 있으면(위 "전부 손상" 분기에 안 걸리면)
+  // 이 함수는 이미 그 파싱 가능한 부분집합으로 계속 진행한다(막지 않는다)
+  // -- 그 결정 자체는 1R부터 있던 동작이다. 이 라운드가 새로 더한 것은
+  // `parseFailures`를 호출자에게 노출하는 것뿐이다: 부분 손상이 있었다는
+  // 사실을 감사 로그에 남기기 위해서다(resolveDispatchRecordExistence의
+  // console.error 참조) -- "막지 않는다"와 "조용히 감춘다"는 다르다.
+  return { ok: true, records, parseFailures };
 }
 
 // role+taskId(=harness_task_label, dispatch-receipt-cli.mjs의 buildReceiptRecord
 // 자체 필드명)로 이 라운드에 대응하는 배정 기록이 원장에 있는지만 본다 --
 // 위조/진위(다른 축들의 몫)가 아니라 순수 존재 여부다.
+// `doneAtMs`: 이 라운드가 완료로 판정된 시각(epoch ms, checkRelayHandshake가
+// 이미 파싱한 doneAt를 그대로 넘긴다) -- HYK-387 2R §2(P2 승격) 시간축 검사에
+// 쓴다. in-process 단위 시험(hyk387-6 등)처럼 이 인자가 생략되면(undefined)
+// 시간축 검사는 스킵한다(1R 동작 그대로, §4 무회귀) -- checkRelayHandshake
+// 자신의 호출부(아래)는 항상 넘긴다.
 export function resolveDispatchRecordExistence({
   role,
   taskId,
   dispatchLedgerPath,
+  doneAtMs,
 }) {
-  if (!dispatchLedgerPath) return { ok: true, skipped: true };
+  const ledgerPath = resolveDispatchLedgerPath(dispatchLedgerPath);
+  if (!ledgerPath) return { ok: true, skipped: true };
 
-  const ledger = readDispatchLedgerRecords(dispatchLedgerPath);
+  const ledger = readDispatchLedgerRecords(ledgerPath);
   if (!ledger.ok) {
     return {
       ok: false,
@@ -1424,20 +1481,74 @@ export function resolveDispatchRecordExistence({
     };
   }
 
+  // HYK-387 2R P2ⓒ (담음, 담지 않은 것 아님): 일부 줄만 손상됐어도 매칭은
+  // 여전히 파싱 가능한 부분집합에서 진행한다(막지 않는다) -- 하지만 그
+  // 손상이 있었다는 사실 자체는 조용히 삼키지 않고 감사 로그로 남긴다.
+  if (ledger.parseFailures > 0) {
+    console.error(
+      `relay-handshake: dispatch ledger '${ledgerPath}' has ${ledger.parseFailures} corrupted line(s) alongside ${ledger.records.length} parseable record(s) -- 부분 손상은 이 축을 막지 않는다(HYK-387 P2ⓒ), 파싱 가능한 부분집합으로 계속 진행하되 이 사실을 남긴다`,
+    );
+  }
+
+  // HYK-387 2R P2ⓐ (담음): role 비교를 대소문자 무시로 정규화한다 -- 검토자
+  // 실측(소문자 호출 role vs 대문자로 기록된 정상 항목이 exact-equality
+  // 때문에 false rejection). harness_task_label(taskId)은 대소문자 정규화
+  // 대상이 아니다(그 값은 사람이 읽는 issue id 문자열이라 대소문자가
+  // 의미를 가질 수 있다 -- role만 이 저장소 전역에서 이미 대소문자를
+  // 섞어 쓰는 관용(coder/CODER)이 있다는 것이 검토자가 짚은 실제 문제였다).
+  const roleLower = typeof role === "string" ? role.toLowerCase() : role;
   const matches = ledger.records.filter(
     (r) =>
       r &&
       typeof r === "object" &&
-      r.role === role &&
+      typeof r.role === "string" &&
+      r.role.toLowerCase() === roleLower &&
       r.harness_task_label === taskId,
   );
   if (matches.length === 0) {
     return {
       ok: false,
       state: DISPATCH_RECORD_STATE.ABSENT,
-      reason: `DISPATCH_RECORD_ABSENT (HYK-387): no entry in ledger '${dispatchLedgerPath}' matches role='${role}' harness_task_label='${taskId}' -- 배정 기록이 장부에 없는 라운드는 정상으로 받아들여지지 않는다(2026-08-29 실사고 재현 방지)`,
+      reason: `DISPATCH_RECORD_ABSENT (HYK-387): no entry in ledger '${ledgerPath}' matches role='${role}' harness_task_label='${taskId}' -- 배정 기록이 장부에 없는 라운드는 정상으로 받아들여지지 않는다(2026-08-29 실사고 재현 방지)`,
     };
   }
+
+  // HYK-387 2R §2 (P2 승격, 검토자 P2-ⓑ 원문): "결과가 끝난 뒤에 기록된
+  // 배정 항목은 그 라운드의 근거가 될 수 없다." recorded_at(ISO, ms 정밀도)이
+  // doneAtMs보다 «엄격히 이전»이어야만 근거로 인정한다.
+  // ⛔경계값 설계(같은 초/역방향 스큐, 2R §2 요구): doneAt은 DONE 라인에서
+  // 초 단위까지만 파싱된다(parseKstTimestamp) -- 즉 doneAtMs는 그 초의
+  // "시작"(ms=000)을 가리킨다. recorded_at이 doneAtMs와 «정확히 같은
+  // 값»이면 그 항목이 doneAt이 가리키는 바로 그 순간보다 앞선다는 것을
+  // 증명할 수 없다(같은 밀리초) -- fail-closed 쪽(=LATE 취급)으로 접는다,
+  // "<=" 이 아니라 "<"를 쓴다. 이 저장소의 다른 시간축 검사들
+  // (isBeyondFutureSkew 등)도 동률을 안전측으로 접는 관례를 이미 쓴다
+  // (checkFutureSkew 주석 참조) -- 새 기준을 발명하지 않고 그 관례를
+  // 그대로 따른다. recorded_at이 파싱 불가능한 항목은 "근거 못 됨"으로
+  // 취급한다(모른다는 있다로 접지 않는다, 1R의 fail-closed 규율과 동일).
+  // 역방향 스큐(기록 기계 시계가 완료 기계 시계보다 빠르거나 느려 원인·
+  // 결과 순서가 뒤집혀 보이는 경우)는 이 비교로는 원리적으로 구별할 수
+  // 없다 -- 이 축은 "시간 선후는 진위의 값싼 대용"(검토자 원문)이라는
+  // 것을 그대로 인정하고, 애매하면 거부(오탐보다 오인식 방지 우선)한다.
+  if (typeof doneAtMs === "number" && Number.isFinite(doneAtMs)) {
+    const timely = matches.filter((r) => {
+      const recordedAtMs = Date.parse(r.recorded_at);
+      return Number.isFinite(recordedAtMs) && recordedAtMs < doneAtMs;
+    });
+    if (timely.length === 0) {
+      return {
+        ok: false,
+        state: DISPATCH_RECORD_STATE.LATE,
+        reason: `DISPATCH_RECORD_LATE (HYK-387 P2): ${matches.length} matching ledger entr${
+          matches.length === 1 ? "y" : "ies"
+        } for role='${role}' harness_task_label='${taskId}' in '${ledgerPath}' but none were recorded strictly before this round's completion time (doneAt=${new Date(
+          doneAtMs,
+        ).toISOString()}) -- a dispatch record written at or after completion cannot serve as proof of assignment (fail-closed; 같은 밀리초도 "그 전"으로 인정하지 않는다)`,
+      };
+    }
+    return { ok: true, matches: timely.length };
+  }
+
   return { ok: true, matches: matches.length };
 }
 
@@ -1805,6 +1916,7 @@ export function checkRelayHandshake({
     role,
     taskId,
     dispatchLedgerPath,
+    doneAtMs: doneAt.getTime(),
   });
   if (!dispatchRecordVerdict.ok) return dispatchRecordVerdict;
 
