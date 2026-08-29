@@ -81,17 +81,32 @@ function computeFingerprint(content) {
   return createHash("sha256").update(content, "utf8").digest("hex");
 }
 
+// HYK-394-dispatch-id-bind-2 §2 (P1): `recordedAt` defaults to a fixed
+// instant well before every fixture's `doneAt` in this file (all use
+// 2026-08-1x dates) -- dispatch-gate-decision.mjs's dispatch_id lookup is
+// now anchored to "strictly before this round's own doneAt" (see
+// findLatestReceiptMatch's own header in dispatch-gate-decision.mjs), so a
+// ledger line recorded at real wall-clock "now" (this file's old default)
+// falls AFTER any of these historical doneAt fixtures and is silently
+// excluded -- not a bug in the lookup, a now-unrealistic fixture default (a
+// real dispatch is always recorded before its own round completes, never
+// after).
 function writeDispatchReceiptLine(
   path,
-  { role, harnessTaskLabel, dispatchId },
+  {
+    role,
+    harnessTaskLabel,
+    dispatchId,
+    recordedAt = "2020-01-01T00:00:00.000Z",
+  },
   append = false,
 ) {
   const record = {
-    recorded_at: new Date().toISOString(),
+    recorded_at: recordedAt,
     runtime_task_id: `task_${Math.random().toString(16).slice(2, 14)}`,
     dispatch_id: dispatchId,
     assignee_pane_key: "test-pane-key",
-    dispatch_timestamp_utc: new Date().toISOString(),
+    dispatch_timestamp_utc: recordedAt,
     dispatch_timestamp_source: "response.dispatched_at",
     role,
     harness_task_label: harnessTaskLabel,
