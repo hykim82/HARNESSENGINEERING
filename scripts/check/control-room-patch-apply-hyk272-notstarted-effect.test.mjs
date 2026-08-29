@@ -126,42 +126,161 @@ test("★anti-vacuity (양방향): deleting the exit 5 statement flips RED, orig
 });
 
 // ---- 자동 재전달 0 (coder-task.md §5-6, 이슈 완료조건 4) ------------------
+//
+// ⚠️1R 검토 P1 (coder-task.md §1, rejected): the original version of this
+// check counted occurrences of four KNOWN redispatch-shaped patterns
+// (Start-Process/Start-Job/dispatch --inject/--type dispatch) before vs.
+// after -- a denylist. The reviewer demonstrated a real bypass: inserting
+// `& orca orchestration dispatch --task task_fake --json` (the actual
+// redispatch shape this repo uses elsewhere, e.g.
+// scripts/relay/orca-adapter.mjs) into the new block matches NONE of the
+// four patterns, so `detected=false` even though a real redispatch call was
+// added. A denylist can only ever catch shapes someone already thought of.
+//
+// coder-task.md §2's own hint: an ALLOWLIST closes this by construction --
+// fix what this block is allowed to DO as a closed set, and anything
+// outside that set fails, regardless of what NEW shape it takes. The new
+// block's own text (extracted verbatim from the applied fixture, anchored
+// right after HYK-378's unique exit-4 block -- see EXIT4_BLOCK_END_MARKER
+// below) is scanned line-by-line: blank lines and `#`-comment lines (inert,
+// PowerShell never executes them) are allowed to vary freely; every OTHER
+// (i.e. potentially-executable) line must match one of the exact lines this
+// patch is known to add. A line that doesn't match either bucket is a
+// closed-set violation -- this is true whether it's the reviewer's exact
+// repro, a variable-obfuscated form, a different CLI surface, or anything
+// nobody has thought of yet.
+const EXIT4_BLOCK_END_MARKER =
+  'Write-Host "[4/4] 이 스크립트는 4 로 끝난다(0=정상 진행 · 4=착수확인 인자계약 위반)."\n  exit 4\n}';
 
-const REDISPATCH_CALL_PATTERNS = [
-  /Start-Process/g,
-  /Start-Job/g,
-  /dispatch\s+--inject/g,
-  /--type\s+dispatch/g,
-];
+const ALLOWED_NEW_BLOCK_STATEMENT_LINES = new Set([
+  "if ($confirmExit -in @(1, 2, 3)) {",
+  '  Write-Host "[4/4] 착수 확인 결과가 성공이 아니다 -- 종료코드=$confirmExit (1=NOT_STARTED, 2=COLLECTION_FAILED, 3=STALLED_AFTER_START)"',
+  '  Write-Host "[4/4] 배달 자체는 이미 이뤄졌다(dispatch 완료) -- 이 실행을 성공으로 취급하지 마라."',
+  '  Write-Host "[4/4] 이 스크립트는 5 로 끝난다(0=정상 진행 · 4=착수확인 인자계약 위반 · 5=착수 확인 결과 미성공)."',
+  "  exit 5",
+  "}",
+]);
 
-function countRedispatchCalls(text) {
-  return REDISPATCH_CALL_PATTERNS.reduce(
-    (sum, re) => sum + (text.match(re) || []).length,
-    0,
-  );
+function extractNewBlockRegion(appliedText) {
+  const first = appliedText.indexOf(EXIT4_BLOCK_END_MARKER);
+  if (first === -1) {
+    throw new Error(
+      "extractNewBlockRegion: EXIT4_BLOCK_END_MARKER not found -- fixture drifted from what this test was written against",
+    );
+  }
+  const second = appliedText.indexOf(EXIT4_BLOCK_END_MARKER, first + 1);
+  if (second !== -1) {
+    throw new Error(
+      "extractNewBlockRegion: EXIT4_BLOCK_END_MARKER is not unique -- cannot slice unambiguously",
+    );
+  }
+  return appliedText.slice(first + EXIT4_BLOCK_END_MARKER.length);
 }
 
-test("★자동 재전달 0: applied fixture introduces ZERO new redispatch-shaped calls (Start-Process/Start-Job/dispatch --inject/--type dispatch) compared to the before fixture -- the new block is diagnostics + exit only", () => {
-  const beforeCount = countRedispatchCalls(loadBefore());
-  const appliedCount = countRedispatchCalls(loadApplied());
+// Returns the list of lines in `regionText` that are neither blank, nor a
+// `#`-comment, nor an exact member of the closed allowlist -- i.e. every
+// line a closed-set reading of this block cannot account for. Empty list =
+// the region contains ONLY what this patch is documented to add.
+function findClosedSetViolations(regionText) {
+  return regionText.split("\n").filter((line) => {
+    const trimmed = line.trim();
+    if (trimmed === "") return false;
+    if (trimmed.startsWith("#")) return false;
+    return !ALLOWED_NEW_BLOCK_STATEMENT_LINES.has(line);
+  });
+}
+
+test("self-check: EXIT4_BLOCK_END_MARKER is unique in the applied fixture (before trusting the closed-set scan below)", () => {
+  const applied = loadApplied();
+  assert.doesNotThrow(() => extractNewBlockRegion(applied));
+});
+
+test("★자동 재전달 0 (닫힌 집합): the new block, as committed, contains ONLY the documented statements -- zero closed-set violations (regression baseline, must be 0 for the RED cases below to mean anything)", () => {
+  const violations = findClosedSetViolations(
+    extractNewBlockRegion(loadApplied()),
+  );
+  assert.deepEqual(violations, []);
+});
+
+test("★위양성 0: the SAME closed-set scan applied to the untouched before fixture (which has no new block at all, so the marker+everything-after is just whatever already existed) does not spuriously report new-block violations -- sanity-checking the scan targets the right region, not the whole file", () => {
+  // The before fixture already contains HYK-378's exit-4 block (this round
+  // builds on that fixture unmodified), so the SAME marker resolves there
+  // too -- with nothing after it (before fixture ends exactly at that
+  // block's closing brace, see coder-task.md §1R note: before == HYK-378's
+  // applied fixture byte-for-byte).
+  const region = extractNewBlockRegion(loadBefore());
   assert.equal(
-    appliedCount,
-    beforeCount,
-    `applied fixture must add no new redispatch-shaped calls; before=${beforeCount} applied=${appliedCount}`,
+    region.trim(),
+    "",
+    "before fixture must have nothing after the exit-4 block -- this round's block hasn't been inserted yet",
   );
 });
 
-test("★자동 재전달 0 (직접): the new block's own text (from its guard line to end-of-file) contains no redispatch-shaped call at all", () => {
-  const applied = loadApplied();
-  const newBlockStart = applied.indexOf(NOTSTARTED_BLOCK_SNIPPET);
-  assert.notEqual(
-    newBlockStart,
-    -1,
-    "sanity-check: new block guard must be present",
-  );
-  const newBlockText = applied.slice(newBlockStart);
-  assert.equal(countRedispatchCalls(newBlockText), 0);
-});
+// ---- ★검토자가 실증한 정확한 우회 + 2가지 다른 모양, 전부 RED (완료조건 1·2) --
+
+const REVIEWER_REPRO_LINE =
+  "& orca orchestration dispatch --task task_fake --json";
+// A different CLI surface entirely (not the orca CLI the reviewer used) --
+// proves this isn't just pattern-matching "orca orchestration dispatch".
+const DIFFERENT_CLI_SURFACE_LINE =
+  'Invoke-Expression "node scripts/relay/dispatch-worker-cli.mjs --task task_fake"';
+// A variable-obfuscated form: neither line alone contains the literal
+// substring "dispatch --inject" or "--type dispatch" the OLD denylist
+// looked for, and splitting the call across a variable assignment plus an
+// invocation is exactly the shape a denylist regex is blind to.
+const VARIABLE_OBFUSCATED_LINES =
+  "$__reissue = 'orca'\n  & $__reissue orchestration dispatch --task task_fake --json";
+
+for (const [label, injected] of [
+  ["검토자 원문 그대로", REVIEWER_REPRO_LINE],
+  [
+    "다른 CLI 표면(Invoke-Expression + 별도 워커 CLI)",
+    DIFFERENT_CLI_SURFACE_LINE,
+  ],
+  ["변수로 우회한 2줄 형태", VARIABLE_OBFUSCATED_LINES],
+]) {
+  test(`★목록 밖 형태도 RED: inserting "${label}" into the new block flips the closed-set scan RED (proves this is not the old denylist -- none of these four match Start-Process/Start-Job/dispatch --inject/--type dispatch literally)`, () => {
+    const region = extractNewBlockRegion(loadApplied());
+    // Insert right after the block's opening `{` -- "새 블록 안" per
+    // coder-task.md §3-1's exact wording, mirroring where the reviewer's
+    // manual repro placed it.
+    const openBraceLine = "if ($confirmExit -in @(1, 2, 3)) {";
+    const openBraceIdx = region.indexOf(openBraceLine);
+    assert.notEqual(
+      openBraceIdx,
+      -1,
+      "sanity-check: open brace line must be present",
+    );
+    const insertAt = openBraceIdx + openBraceLine.length;
+    const mutatedRegion =
+      region.slice(0, insertAt) + "\n  " + injected + region.slice(insertAt);
+    const violations = findClosedSetViolations(mutatedRegion);
+    assert.notEqual(
+      violations.length,
+      0,
+      `expected the injected redispatch line(s) to be flagged as closed-set violations, got none -- injected=${JSON.stringify(injected)}`,
+    );
+    // None of the four OLD denylist patterns would have caught the
+    // variable-obfuscated form -- proves this specific case is genuinely
+    // new coverage, not just a restatement of the old check.
+    if (injected === VARIABLE_OBFUSCATED_LINES) {
+      const oldDenylistPatterns = [
+        /Start-Process/,
+        /Start-Job/,
+        /dispatch\s+--inject/,
+        /--type\s+dispatch/,
+      ];
+      const oldDenylistWouldHaveCaught = oldDenylistPatterns.some((re) =>
+        re.test(injected),
+      );
+      assert.equal(
+        oldDenylistWouldHaveCaught,
+        false,
+        "sanity-check: the variable-obfuscated form must NOT match any of the old four patterns -- otherwise this case doesn't demonstrate new coverage",
+      );
+    }
+  });
+}
 
 // ---------------------------------------------------------------------------
 // ★근본: drive the REAL applied-fixture text (never a reimplementation) in a
