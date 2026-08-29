@@ -127,32 +127,78 @@ test("★anti-vacuity (양방향): deleting the exit 5 statement flips RED, orig
 
 // ---- 자동 재전달 0 (coder-task.md §5-6, 이슈 완료조건 4) ------------------
 //
-// ⚠️1R 검토 P1 (coder-task.md §1, rejected): the original version of this
-// check counted occurrences of four KNOWN redispatch-shaped patterns
-// (Start-Process/Start-Job/dispatch --inject/--type dispatch) before vs.
-// after -- a denylist. The reviewer demonstrated a real bypass: inserting
-// `& orca orchestration dispatch --task task_fake --json` (the actual
-// redispatch shape this repo uses elsewhere, e.g.
-// scripts/relay/orca-adapter.mjs) into the new block matches NONE of the
-// four patterns, so `detected=false` even though a real redispatch call was
-// added. A denylist can only ever catch shapes someone already thought of.
+// ⚠️2R 검토 P1 (coder-task.md §1, rejected -- STREAK 2, 게이트 2 발동): the
+// 2R version of this check sliced out "the new block" by finding
+// EXIT4_BLOCK_END_MARKER and scanning everything AFTER it. The reviewer
+// showed that's still a POSITIONAL check in different clothes: inserting
+// the redispatch call BEFORE that marker is never scanned at all --
+// violation_count=0 regardless of what's hidden there. coder-task.md §2
+// (책임자 판정 ㄱ) is explicit: stop using "where" language (marker/region/
+// "new block") entirely. The invariant is about WHAT CHANGED, not WHERE.
 //
-// coder-task.md §2's own hint: an ALLOWLIST closes this by construction --
-// fix what this block is allowed to DO as a closed set, and anything
-// outside that set fails, regardless of what NEW shape it takes. The new
-// block's own text (extracted verbatim from the applied fixture, anchored
-// right after HYK-378's unique exit-4 block -- see EXIT4_BLOCK_END_MARKER
-// below) is scanned line-by-line: blank lines and `#`-comment lines (inert,
-// PowerShell never executes them) are allowed to vary freely; every OTHER
-// (i.e. potentially-executable) line must match one of the exact lines this
-// patch is known to add. A line that doesn't match either bucket is a
-// closed-set violation -- this is true whether it's the reviewer's exact
-// repro, a variable-obfuscated form, a different CLI surface, or anything
-// nobody has thought of yet.
-const EXIT4_BLOCK_END_MARKER =
-  'Write-Host "[4/4] 이 스크립트는 4 로 끝난다(0=정상 진행 · 4=착수확인 인자계약 위반)."\n  exit 4\n}';
+// This round replaces position-based extraction with a before -> applied
+// DIFF: every line that exists in `applied` more times than it exists in
+// `before` (a per-exact-line-text multiset difference, order-independent,
+// no normalization) is "newly added," no matter where in the file it
+// landed -- front, middle, right before where a marker used to be, it makes
+// no difference because there is no marker in this computation at all.
+// coder-task.md §2 also points at the precedent already in this repo:
+// control-room-patch-apply.mjs's own before/applied model. This mirrors
+// that shape (whole-file compare) instead of inventing a new one.
+//
+// Newly-added lines are then classified: blank lines and TRUE PowerShell
+// comments are inert and allowed to vary freely; everything else must
+// exactly match one of the six statements this patch is documented to add.
+// ⚠️2R 검토 P1 also flagged a second defect in the SAME "comment = inert"
+// assumption: `#requires -Version 7.0` starts with `#` but is a PowerShell
+// directive the interpreter actually acts on, not a no-op comment --
+// isInertLine excludes it explicitly (coder-task.md §4).
+//
+// ⚠️No case/whitespace normalization is applied anywhere in this diff --
+// coder-task.md §2's own warning: widening what counts as "the same line"
+// only widens what a bypass can hide behind. Comparing raw, un-normalized
+// line text means a whitespace or capitalization variant of an allowed
+// line is simply a DIFFERENT line, present in `applied` but not `before`,
+// and therefore flagged like anything else new.
+function lineMultiset(text) {
+  const counts = new Map();
+  for (const line of text.split("\n")) {
+    counts.set(line, (counts.get(line) ?? 0) + 1);
+  }
+  return counts;
+}
 
-const ALLOWED_NEW_BLOCK_STATEMENT_LINES = new Set([
+// Lines present in `appliedText` strictly more often than in `beforeText`,
+// one entry per extra occurrence -- e.g. if a line appears twice in
+// `applied` and once in `before`, it contributes exactly one entry (the
+// one genuinely new occurrence), not zero and not two. Position in the
+// file plays no role in this computation.
+function newlyAddedLines(beforeText, appliedText) {
+  const beforeCounts = lineMultiset(beforeText);
+  const added = [];
+  for (const [line, appliedCount] of lineMultiset(appliedText)) {
+    const extra = appliedCount - (beforeCounts.get(line) ?? 0);
+    for (let i = 0; i < extra; i++) added.push(line);
+  }
+  return added;
+}
+
+// `#requires` (case-insensitive, PowerShell resolves it regardless of
+// case) is a real directive the interpreter parses and acts on before the
+// script runs -- it is NOT a no-op the way an ordinary `#`-prefixed
+// comment is, so "starts with #" alone is not sufficient to call a line
+// inert (coder-task.md §4, 2R 검토 P1's second finding).
+const REQUIRES_DIRECTIVE_RE = /^#requires\b/i;
+
+function isInertLine(line) {
+  const trimmed = line.trim();
+  if (trimmed === "") return true;
+  if (!trimmed.startsWith("#")) return false;
+  if (REQUIRES_DIRECTIVE_RE.test(trimmed)) return false;
+  return true;
+}
+
+const ALLOWED_NEW_STATEMENT_LINES = new Set([
   "if ($confirmExit -in @(1, 2, 3)) {",
   '  Write-Host "[4/4] 착수 확인 결과가 성공이 아니다 -- 종료코드=$confirmExit (1=NOT_STARTED, 2=COLLECTION_FAILED, 3=STALLED_AFTER_START)"',
   '  Write-Host "[4/4] 배달 자체는 이미 이뤄졌다(dispatch 완료) -- 이 실행을 성공으로 취급하지 마라."',
@@ -161,62 +207,28 @@ const ALLOWED_NEW_BLOCK_STATEMENT_LINES = new Set([
   "}",
 ]);
 
-function extractNewBlockRegion(appliedText) {
-  const first = appliedText.indexOf(EXIT4_BLOCK_END_MARKER);
-  if (first === -1) {
-    throw new Error(
-      "extractNewBlockRegion: EXIT4_BLOCK_END_MARKER not found -- fixture drifted from what this test was written against",
-    );
-  }
-  const second = appliedText.indexOf(EXIT4_BLOCK_END_MARKER, first + 1);
-  if (second !== -1) {
-    throw new Error(
-      "extractNewBlockRegion: EXIT4_BLOCK_END_MARKER is not unique -- cannot slice unambiguously",
-    );
-  }
-  return appliedText.slice(first + EXIT4_BLOCK_END_MARKER.length);
-}
-
-// Returns the list of lines in `regionText` that are neither blank, nor a
-// `#`-comment, nor an exact member of the closed allowlist -- i.e. every
-// line a closed-set reading of this block cannot account for. Empty list =
-// the region contains ONLY what this patch is documented to add.
-function findClosedSetViolations(regionText) {
-  return regionText.split("\n").filter((line) => {
-    const trimmed = line.trim();
-    if (trimmed === "") return false;
-    if (trimmed.startsWith("#")) return false;
-    return !ALLOWED_NEW_BLOCK_STATEMENT_LINES.has(line);
-  });
-}
-
-test("self-check: EXIT4_BLOCK_END_MARKER is unique in the applied fixture (before trusting the closed-set scan below)", () => {
-  const applied = loadApplied();
-  assert.doesNotThrow(() => extractNewBlockRegion(applied));
-});
-
-test("★자동 재전달 0 (닫힌 집합): the new block, as committed, contains ONLY the documented statements -- zero closed-set violations (regression baseline, must be 0 for the RED cases below to mean anything)", () => {
-  const violations = findClosedSetViolations(
-    extractNewBlockRegion(loadApplied()),
+// The load-bearing function: any line newly added anywhere between
+// `beforeText` and `appliedText` that is neither inert nor an exact member
+// of the closed allowlist is a violation. No positional concept appears
+// anywhere in this function's body.
+function findClosedSetViolations(beforeText, appliedText) {
+  return newlyAddedLines(beforeText, appliedText).filter(
+    (line) => !isInertLine(line) && !ALLOWED_NEW_STATEMENT_LINES.has(line),
   );
+}
+
+test("★자동 재전달 0 (before→applied 차분, 자리 무관): the applied fixture, as committed, adds ONLY the documented statement lines relative to before -- zero violations (regression baseline, must be 0 for the RED cases below to mean anything)", () => {
+  const violations = findClosedSetViolations(loadBefore(), loadApplied());
   assert.deepEqual(violations, []);
 });
 
-test("★위양성 0: the SAME closed-set scan applied to the untouched before fixture (which has no new block at all, so the marker+everything-after is just whatever already existed) does not spuriously report new-block violations -- sanity-checking the scan targets the right region, not the whole file", () => {
-  // The before fixture already contains HYK-378's exit-4 block (this round
-  // builds on that fixture unmodified), so the SAME marker resolves there
-  // too -- with nothing after it (before fixture ends exactly at that
-  // block's closing brace, see coder-task.md §1R note: before == HYK-378's
-  // applied fixture byte-for-byte).
-  const region = extractNewBlockRegion(loadBefore());
-  assert.equal(
-    region.trim(),
-    "",
-    "before fixture must have nothing after the exit-4 block -- this round's block hasn't been inserted yet",
-  );
+test("★위양성 0: running the SAME diff-based scan with applied treated as its own before (i.e. no change at all) reports zero added lines -- sanity-checking the diff primitive itself before trusting the RED cases below", () => {
+  const applied = loadApplied();
+  assert.deepEqual(newlyAddedLines(applied, applied), []);
 });
 
-// ---- ★검토자가 실증한 정확한 우회 + 2가지 다른 모양, 전부 RED (완료조건 1·2) --
+// ---- ★검토자가 실증한 정확한 우회 + 목록 밖 모양들, «어디에 넣어도» RED
+// (완료조건 1·2·5) --------------------------------------------------------
 
 const REVIEWER_REPRO_LINE =
   "& orca orchestration dispatch --task task_fake --json";
@@ -225,62 +237,192 @@ const REVIEWER_REPRO_LINE =
 const DIFFERENT_CLI_SURFACE_LINE =
   'Invoke-Expression "node scripts/relay/dispatch-worker-cli.mjs --task task_fake"';
 // A variable-obfuscated form: neither line alone contains the literal
-// substring "dispatch --inject" or "--type dispatch" the OLD denylist
-// looked for, and splitting the call across a variable assignment plus an
-// invocation is exactly the shape a denylist regex is blind to.
+// substring "dispatch --inject" or "--type dispatch" the original (1R)
+// denylist looked for, and splitting the call across a variable assignment
+// plus an invocation is exactly the shape a denylist regex is blind to.
 const VARIABLE_OBFUSCATED_LINES =
   "$__reissue = 'orca'\n  & $__reissue orchestration dispatch --task task_fake --json";
+// 2R 검토 P1's own whitespace/case variant -- must stay RED without any
+// normalization (this design deliberately adds none, see block comment
+// above).
+const WHITESPACE_CASE_VARIANT_LINE =
+  "& ORCA  orchestration dispatch --task task_fake --json";
+// 2R 검토 P1's semicolon-chained variant -- proves this isn't line-prefix
+// matching either (the malicious call rides on the SAME physical line as
+// an otherwise-allowed statement).
+const SEMICOLON_CHAINED_LINE =
+  "  exit 5; & orca orchestration dispatch --task task_fake --json";
 
-for (const [label, injected] of [
-  ["검토자 원문 그대로", REVIEWER_REPRO_LINE],
+const REDISPATCH_FORMS = [
+  ["검토자 원문 그대로(2R 재확인)", REVIEWER_REPRO_LINE],
   [
     "다른 CLI 표면(Invoke-Expression + 별도 워커 CLI)",
     DIFFERENT_CLI_SURFACE_LINE,
   ],
   ["변수로 우회한 2줄 형태", VARIABLE_OBFUSCATED_LINES],
-]) {
-  test(`★목록 밖 형태도 RED: inserting "${label}" into the new block flips the closed-set scan RED (proves this is not the old denylist -- none of these four match Start-Process/Start-Job/dispatch --inject/--type dispatch literally)`, () => {
-    const region = extractNewBlockRegion(loadApplied());
-    // Insert right after the block's opening `{` -- "새 블록 안" per
-    // coder-task.md §3-1's exact wording, mirroring where the reviewer's
-    // manual repro placed it.
-    const openBraceLine = "if ($confirmExit -in @(1, 2, 3)) {";
-    const openBraceIdx = region.indexOf(openBraceLine);
-    assert.notEqual(
-      openBraceIdx,
-      -1,
-      "sanity-check: open brace line must be present",
+  ["공백·대소문자 변형(3R 검토 P1 재현)", WHITESPACE_CASE_VARIANT_LINE],
+  ["세미콜론으로 허용 줄에 편승(3R 검토 P1 재현)", SEMICOLON_CHAINED_LINE],
+];
+
+// Three distinct insertion points in the FULL applied fixture, chosen to
+// prove the scan has no positional preference at all (완료조건 2 요구
+// 그대로: 맨 앞 근처 · 중간 · 마커 앞):
+//   - near the top of the file (long before anything HYK-272 added)
+//   - the middle, spliced into unrelated pre-existing code
+//   - immediately before where EXIT4_BLOCK_END_MARKER used to gate the
+//     2R scan -- this is 2R 검토 P1's own exact repro point
+const EXIT4_BLOCK_END_MARKER =
+  'Write-Host "[4/4] 이 스크립트는 4 로 끝난다(0=정상 진행 · 4=착수확인 인자계약 위반)."\n  exit 4\n}';
+// Unique, existing, unrelated-to-this-patch lines used purely as splice
+// points for the mutation tests below -- NOT part of the closed-set or the
+// diff computation itself (findClosedSetViolations never sees an anchor).
+const FRONT_ANCHOR =
+  "# 왜 사람이 실행하나 — ★2026-08-10 정정(HYK-219 리서치 + PM 교차비평 실측):";
+const UNRELATED_MIDDLE_ANCHOR =
+  '$confirmEngineSource = "dispatch-worker.ps1:`$engine"';
+
+function insertLineAt(text, anchor, injected) {
+  const idx = text.indexOf(anchor);
+  if (idx === -1) {
+    throw new Error(
+      `insertLineAt: anchor not found: ${JSON.stringify(anchor)}`,
     );
-    const insertAt = openBraceIdx + openBraceLine.length;
-    const mutatedRegion =
-      region.slice(0, insertAt) + "\n  " + injected + region.slice(insertAt);
-    const violations = findClosedSetViolations(mutatedRegion);
-    assert.notEqual(
-      violations.length,
-      0,
-      `expected the injected redispatch line(s) to be flagged as closed-set violations, got none -- injected=${JSON.stringify(injected)}`,
-    );
-    // None of the four OLD denylist patterns would have caught the
-    // variable-obfuscated form -- proves this specific case is genuinely
-    // new coverage, not just a restatement of the old check.
-    if (injected === VARIABLE_OBFUSCATED_LINES) {
-      const oldDenylistPatterns = [
-        /Start-Process/,
-        /Start-Job/,
-        /dispatch\s+--inject/,
-        /--type\s+dispatch/,
-      ];
-      const oldDenylistWouldHaveCaught = oldDenylistPatterns.some((re) =>
-        re.test(injected),
-      );
-      assert.equal(
-        oldDenylistWouldHaveCaught,
-        false,
-        "sanity-check: the variable-obfuscated form must NOT match any of the old four patterns -- otherwise this case doesn't demonstrate new coverage",
-      );
-    }
-  });
+  }
+  return text.slice(0, idx) + injected + "\n" + text.slice(idx);
 }
+
+const INSERTION_SITES = [
+  [
+    "파일 맨 앞 근처",
+    () => insertLineAt(loadApplied(), FRONT_ANCHOR, "PLACEHOLDER"),
+  ],
+  [
+    "무관한 기존 코드 사이(중간)",
+    () => insertLineAt(loadApplied(), UNRELATED_MIDDLE_ANCHOR, "PLACEHOLDER"),
+  ],
+  [
+    "마커 바로 앞(2R 검토 P1 정확 재현 지점)",
+    () => insertLineAt(loadApplied(), EXIT4_BLOCK_END_MARKER, "PLACEHOLDER"),
+  ],
+];
+
+for (const [formLabel, injected] of REDISPATCH_FORMS) {
+  for (const [siteLabel, buildMutated] of INSERTION_SITES) {
+    test(`★어디에 넣어도 RED: "${formLabel}"를 "${siteLabel}"에 넣으면 before→applied 차분 스캔이 위반을 검출한다`, () => {
+      const mutatedApplied = buildMutated().replace("PLACEHOLDER", injected);
+      const violations = findClosedSetViolations(loadBefore(), mutatedApplied);
+      assert.notEqual(
+        violations.length,
+        0,
+        `expected a closed-set violation for form=${JSON.stringify(injected)} at site=${siteLabel}, got none`,
+      );
+    });
+  }
+}
+
+test("sanity-check: the variable-obfuscated redispatch form matches NONE of the original (1R) four denylist patterns -- proves this specific case is genuinely new coverage, not a restatement", () => {
+  const oldDenylistPatterns = [
+    /Start-Process/,
+    /Start-Job/,
+    /dispatch\s+--inject/,
+    /--type\s+dispatch/,
+  ];
+  const oldDenylistWouldHaveCaught = oldDenylistPatterns.some((re) =>
+    re.test(VARIABLE_OBFUSCATED_LINES),
+  );
+  assert.equal(oldDenylistWouldHaveCaught, false);
+});
+
+// ---- ★잘라내기 기준(마커) 흔들기가 더 이상 회피가 아님 (완료조건 3) ------
+//
+// coder-task.md §3's exact point: the 2R defect wasn't really about the
+// allowlist's line set -- it was that the scan depended on WHERE it cut.
+// This round's scan (findClosedSetViolations above) takes no marker
+// argument at all, so there is no "cutting criterion" left to corrupt --
+// but that claim needs to be demonstrated, not just asserted. The two
+// cases below tamper with the literal text that USED TO BE the 2R
+// extraction marker and show the scan neither silently passes malicious
+// content (case 1) nor spuriously flags benign textual drift by itself
+// (case 2) -- i.e. the marker's presence or absence has zero bearing on
+// the scan's correctness either way, because the scan was never told
+// about it.
+test("★마커 흔들기 1: corrupting the text that USED TO BE the extraction marker, together with a redispatch insertion at that exact spot, still produces a violation (RED, not a silent 0 -- 완료조건 3)", () => {
+  const applied = loadApplied();
+  const markerIdx = applied.indexOf(EXIT4_BLOCK_END_MARKER);
+  assert.notEqual(
+    markerIdx,
+    -1,
+    "sanity-check: marker text must be present before corrupting it",
+  );
+  // Corrupt one character inside the old marker text (this alone makes
+  // that line differ from its `before` counterpart -- it becomes "newly
+  // added" text too, which is expected and does not need to be a
+  // violation by itself) AND splice the redispatch call in right there.
+  const corrupted =
+    applied.slice(0, markerIdx) +
+    applied.slice(markerIdx).replace("exit 4", "exit 4X");
+  const withRedispatch = insertLineAt(
+    corrupted,
+    "exit 4X",
+    REVIEWER_REPRO_LINE,
+  );
+  const violations = findClosedSetViolations(loadBefore(), withRedispatch);
+  assert.notEqual(
+    violations.length,
+    0,
+    "expected the redispatch call to still be caught even with the old marker text corrupted around it",
+  );
+});
+
+test("★마커 흔들기 2: deleting the old extraction marker text entirely, with NO malicious insertion, produces zero violations -- the scan's baseline correctness does not depend on that marker existing at all (완료조건 3, «없으면 통과»가 아니라 «있든 없든 정확»함을 보임)", () => {
+  const applied = loadApplied();
+  const withoutMarkerText = applied.replace(EXIT4_BLOCK_END_MARKER, "");
+  // This mutation is a pure DELETION relative to applied -- deleting text
+  // can only ever REDUCE occurrence counts, never add a new line, so
+  // findClosedSetViolations (which only ever looks at ADDED lines) has
+  // nothing to flag here. This is the deliberate contrast with test 1
+  // above: the marker's fate by itself is inert to this scan either way.
+  const violations = findClosedSetViolations(loadBefore(), withoutMarkerText);
+  assert.deepEqual(violations, []);
+});
+
+// ---- ★#requires 오분류 수리 (완료조건 4) ---------------------------------
+
+test('★#requires는 주석이 아니다: inserting "#requires -Version 7.0" as a new line is a violation, not silently treated as an inert comment (2R 검토 P1 두 번째 발견, coder-task.md §4)', () => {
+  const applied = loadApplied();
+  const mutated = insertLineAt(
+    applied,
+    EXIT4_BLOCK_END_MARKER,
+    "#requires -Version 7.0",
+  );
+  const violations = findClosedSetViolations(loadBefore(), mutated);
+  assert.notEqual(
+    violations.length,
+    0,
+    "expected #requires -Version 7.0 to be flagged -- it is a real PowerShell directive, not an inert comment",
+  );
+});
+
+test("★#requires 대소문자 무관: PowerShell resolves #Requires/#REQUIRES the same as #requires -- isInertLine must reject all of them equally", () => {
+  for (const variant of [
+    "#requires -Version 7.0",
+    "#Requires -Version 7.0",
+    "#REQUIRES -Version 7.0",
+  ]) {
+    assert.equal(
+      isInertLine(variant),
+      false,
+      `expected ${JSON.stringify(variant)} to be non-inert`,
+    );
+  }
+});
+
+test("★ordinary comments stay inert: a genuinely no-op `#` comment line is still allowed to vary freely (regression -- the #requires fix must not turn every comment into a violation)", () => {
+  assert.equal(
+    isInertLine("# just an ordinary comment, changed wording is fine"),
+    true,
+  );
+});
 
 // ---------------------------------------------------------------------------
 // ★근본: drive the REAL applied-fixture text (never a reimplementation) in a
