@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as supervisor from "./go-wait-supervisor.mjs";
@@ -93,6 +94,25 @@ function freshDir(label) {
 }
 function cleanup(dir) {
   rmSync(dir, { recursive: true, force: true });
+}
+// HYK-383: REVIEW 계열 소비는 head_commit: 축(축 ⓐ+ⓑ)도 통과해야 한다 --
+// 축 ⓑ가 harnessDir에서 `git rev-parse HEAD`를 직접 읽으므로, "review"
+// lane을 쓰는 시나리오는 그 harnessDir를 진짜 git 저장소로 만들어야 한다.
+function ensureGitHeadCommit(dir) {
+  execFileSync("git", ["init", "-q"], { cwd: dir });
+  execFileSync("git", ["config", "user.email", "test@example.invalid"], {
+    cwd: dir,
+  });
+  execFileSync("git", ["config", "user.name", "test"], { cwd: dir });
+  execFileSync(
+    "git",
+    ["commit", "-q", "--allow-empty", "-m", "go-wait-pilot test fixture"],
+    { cwd: dir },
+  );
+  return execFileSync("git", ["rev-parse", "HEAD"], {
+    cwd: dir,
+    encoding: "utf8",
+  }).trim();
 }
 function counter() {
   const calls = [];
@@ -233,9 +253,10 @@ async function scenarioS1(tally) {
       "task_id: HYK-142-pilot-A\ndropped_at: 2026-07-14 21:00 KST\n",
       "utf8",
     );
+    const headCommitB = ensureGitHeadCommit(dirB);
     writeFileSync(
       join(dirB, "review-task.md"),
-      "task_id: HYK-142-pilot-B\ndropped_at: 2026-07-14 21:00 KST\n",
+      `task_id: HYK-142-pilot-B\ndropped_at: 2026-07-14 21:00 KST\nhead_commit: ${headCommitB}\n`,
       "utf8",
     );
     // A finishes immediately; B is still pending when the loop starts, then finishes on tick 1.
@@ -267,7 +288,7 @@ async function scenarioS1(tally) {
             if (bTicks === 1)
               writeFileSync(
                 join(dirB, "review.md"),
-                "task_id: HYK-142-pilot-B\n\n>>> DONE: REVIEW @ 2026-07-14 21:06:00 KST\n",
+                `task_id: HYK-142-pilot-B\nhead_commit: ${headCommitB}\n\n>>> DONE: REVIEW @ 2026-07-14 21:06:00 KST\n`,
                 "utf8",
               );
           },

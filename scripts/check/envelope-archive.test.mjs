@@ -369,20 +369,42 @@ test("archiveRoundEnvelope: role missing -> ok:false, never throws", () => {
 // wiring: checkRelayHandshake (CODER + rejected-then-rechecked REVIEW path)
 // ---------------------------------------------------------------------------
 
-function writeTask(dir, role, taskId, droppedAt) {
+function writeTask(dir, role, taskId, droppedAt, headCommit = "") {
   writeFileSync(
     join(dir, `${role}-task.md`),
-    `task_id: ${taskId}\ndropped_at: ${droppedAt}\n`,
+    `task_id: ${taskId}\ndropped_at: ${droppedAt}\n${headCommit ? `head_commit: ${headCommit}\n` : ""}`,
     "utf8",
   );
 }
 
-function writeResult(dir, role, taskId, doneAt, extra = "") {
+function writeResult(dir, role, taskId, doneAt, extra = "", headCommit = "") {
   writeFileSync(
     join(dir, `${role}.md`),
-    `task_id: ${taskId}\n${extra}\n>>> DONE: ${role.toUpperCase()} @ ${doneAt}\n`,
+    `task_id: ${taskId}\n${headCommit ? `head_commit: ${headCommit}\n` : ""}${extra}\n>>> DONE: ${role.toUpperCase()} @ ${doneAt}\n`,
     "utf8",
   );
+}
+
+// HYK-383: REVIEW 계열 소비는 head_commit: 축(축 ⓐ+ⓑ)도 통과해야 한다 --
+// 축 ⓑ가 harnessDir에서 `git rev-parse HEAD`를 직접 읽으므로, 이 fixture
+// 디렉터리를 진짜 git 저장소로 만들고 그 실제 HEAD를 반환한다.
+function ensureGitHeadCommit(dir) {
+  if (!existsSync(join(dir, ".git"))) {
+    execFileSync("git", ["init", "-q"], { cwd: dir });
+    execFileSync("git", ["config", "user.email", "test@example.invalid"], {
+      cwd: dir,
+    });
+    execFileSync("git", ["config", "user.name", "test"], { cwd: dir });
+    execFileSync(
+      "git",
+      ["commit", "-q", "--allow-empty", "-m", "envelope-archive test fixture"],
+      { cwd: dir },
+    );
+  }
+  return execFileSync("git", ["rev-parse", "HEAD"], {
+    cwd: dir,
+    encoding: "utf8",
+  }).trim();
 }
 
 test("wiring: checkRelayHandshake ok -> archives the round AND still returns the same pass/fail contract as before (regression 0)", () => {
@@ -474,16 +496,18 @@ test("wiring: checkRelayHandshake blocked (mismatch) -> no archive is written --
 // verdict-line requirement fails closed, so no write is ever attempted.
 test("wiring: same track, two rounds re-checked via checkRelayHandshake -> both round texts survive under harnessDir/rounds (§5 착수 기준 그대로)", () => {
   withFixtureDir("relay-wiring-two-rounds-", (dir) => {
+    const headCommit = ensureGitHeadCommit(dir);
     // Round 1: rejected review, re-checked once ORCH re-verifies the
     // handshake for "다음 라운드" (relay-handshake.mjs's own comment on
     // why its auto-record wiring lives here).
-    writeTask(dir, "review", "HYK-204", "2026-08-08 06:00 KST");
+    writeTask(dir, "review", "HYK-204", "2026-08-08 06:00 KST", headCommit);
     writeResult(
       dir,
       "review",
       "HYK-204",
       "2026-08-08 06:10:00 KST",
       "outcome-note: needs-rework\n",
+      headCommit,
     );
     const first = checkRelayHandshake({ role: "review", harnessDir: dir });
     assert.equal(first.ok, true);
@@ -491,13 +515,14 @@ test("wiring: same track, two rounds re-checked via checkRelayHandshake -> both 
     // Round 2: same track, task file re-dropped for the next review pass,
     // result overwritten -- this overwrite is exactly what used to erase
     // round 1's text.
-    writeTask(dir, "review", "HYK-204", "2026-08-08 07:00 KST");
+    writeTask(dir, "review", "HYK-204", "2026-08-08 07:00 KST", headCommit);
     writeResult(
       dir,
       "review",
       "HYK-204",
       "2026-08-08 07:10:00 KST",
       "outcome-note: looks-good\n",
+      headCommit,
     );
     const second = checkRelayHandshake({ role: "review", harnessDir: dir });
     assert.equal(second.ok, true);

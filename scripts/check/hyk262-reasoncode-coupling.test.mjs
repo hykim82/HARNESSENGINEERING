@@ -100,16 +100,22 @@ function runRelayHandshakeCli(scriptPath, args, opts = {}) {
 
 // The exact 2026-08-14 실사고 shape: `for:` appears twice, so
 // parseReviewOutcome takes the AMBIGUOUS_FOR_LINE branch.
+//
+// HYK-383: REVIEW 계열 소비는 head_commit: 축(축 ⓐ+ⓑ)도 통과해야 한다 --
+// 이 fixture는 그 축과 무관한(reasonCode 결합) 동작을 시험하므로,
+// head_commit 축이 그 관찰을 가리지 않도록 항상 실제 워크트리 HEAD로
+// 채운다(harnessDir는 이미 진짜 링크드 워크트리 안이다).
 function writeDoubleForFixture(harnessDir, { taskId, droppedAt, doneAt }) {
   mkdirSync(harnessDir, { recursive: true });
+  const headCommit = git(harnessDir, ["rev-parse", "HEAD"]);
   writeFileSync(
     join(harnessDir, "review-task.md"),
-    `task_id: ${taskId}\ndropped_at: ${droppedAt} KST\n`,
+    `task_id: ${taskId}\ndropped_at: ${droppedAt} KST\nhead_commit: ${headCommit}\n`,
     "utf8",
   );
   writeFileSync(
     join(harnessDir, "review.md"),
-    `task_id: ${taskId}\nfor: ${taskId}\nfor: ORCH\nverdict: rejected\nrole: REVIEW-CODEX\n\n>>> DONE: REVIEW-CODEX @ ${doneAt} KST\n`,
+    `task_id: ${taskId}\nfor: ${taskId}\nfor: ORCH\nverdict: rejected\nrole: REVIEW-CODEX\nhead_commit: ${headCommit}\n\n>>> DONE: REVIEW-CODEX @ ${doneAt} KST\n`,
     "utf8",
   );
 }

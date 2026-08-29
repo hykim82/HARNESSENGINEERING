@@ -257,16 +257,32 @@ test("§4-4 (표적: REVIEW ledgerRecorded 실패): verdict 줄이 없는 REVIEW
     const taskId = "HYK-244-WIRE-C-1";
     initAndAdmit(ledger, lock, taskId);
     mkdirSync(harnessDir, { recursive: true });
+    // HYK-383: REVIEW 계열 소비는 head_commit: 축(축 ⓐ+ⓑ)도 통과해야 한다
+    // -- 축 ⓑ가 harnessDir에서 `git rev-parse HEAD`를 직접 읽으므로,
+    // harnessDir 자신을 진짜 git 저장소로 만들고 그 실제 HEAD를 양쪽
+    // 표지에 적어 넣는다.
+    execSync("git init -q", { cwd: harnessDir });
+    execSync('git config user.email "test@example.invalid"', {
+      cwd: harnessDir,
+    });
+    execSync('git config user.name "test"', { cwd: harnessDir });
+    execSync('git commit -q --allow-empty -m "wire-c fixture"', {
+      cwd: harnessDir,
+    });
+    const headCommit = execSync("git rev-parse HEAD", {
+      cwd: harnessDir,
+      encoding: "utf8",
+    }).trim();
     writeFileSync(
       join(harnessDir, "review-task.md"),
-      `task_id: ${taskId}\ndropped_at: 2026-08-01 09:00 KST\n`,
+      `task_id: ${taskId}\ndropped_at: 2026-08-01 09:00 KST\nhead_commit: ${headCommit}\n`,
       "utf8",
     );
     // ⛔ verdict: 줄이 의도적으로 없다 -- recordRejectStreakFromResultText가
     // attempted:true, ok:false로 떨어지는 REVIEW 계열 입력.
     writeFileSync(
       join(harnessDir, "review.md"),
-      `task_id: ${taskId}\n\nno verdict line here\n\n>>> DONE: REVIEW @ 2026-08-01 09:12:41 KST\n`,
+      `task_id: ${taskId}\nhead_commit: ${headCommit}\n\nno verdict line here\n\n>>> DONE: REVIEW @ 2026-08-01 09:12:41 KST\n`,
       "utf8",
     );
 

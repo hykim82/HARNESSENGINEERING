@@ -11,10 +11,12 @@ import {
   readdirSync,
   rmSync,
   mkdirSync,
+  existsSync,
 } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
+import { execFileSync } from "node:child_process";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ENVELOPE_ARCHIVE_PATH = join(HERE, "envelope-archive.mjs");
@@ -65,17 +67,54 @@ function stageScriptsCheckDir(rootDir, overrides) {
   return scriptsCheckDir;
 }
 
-function writeFixture(dir, role, taskId, droppedAt, doneAt, extra = "") {
+function writeFixture(
+  dir,
+  role,
+  taskId,
+  droppedAt,
+  doneAt,
+  extra = "",
+  headCommit = "",
+) {
   writeFileSync(
     join(dir, `${role}-task.md`),
-    `task_id: ${taskId}\ndropped_at: ${droppedAt}\n`,
+    `task_id: ${taskId}\ndropped_at: ${droppedAt}\n${headCommit ? `head_commit: ${headCommit}\n` : ""}`,
     "utf8",
   );
   writeFileSync(
     join(dir, `${role}.md`),
-    `task_id: ${taskId}\n${extra}\n>>> DONE: ${role.toUpperCase()} @ ${doneAt}\n`,
+    `task_id: ${taskId}\n${headCommit ? `head_commit: ${headCommit}\n` : ""}${extra}\n>>> DONE: ${role.toUpperCase()} @ ${doneAt}\n`,
     "utf8",
   );
+}
+
+// HYK-383: REVIEW 계열 소비는 head_commit: 축(축 ⓐ+ⓑ)도 통과해야 한다 --
+// 축 ⓑ가 harnessDir에서 `git rev-parse HEAD`를 직접 읽으므로(위로
+// 탐색하니 harnessDir가 이 rootDir의 서브디렉터리여도 된다), rootDir를
+// 진짜 git 저장소로 만들고 그 실제 HEAD를 반환한다.
+function ensureGitHeadCommit(dir) {
+  if (!existsSync(join(dir, ".git"))) {
+    execFileSync("git", ["init", "-q"], { cwd: dir });
+    execFileSync("git", ["config", "user.email", "test@example.invalid"], {
+      cwd: dir,
+    });
+    execFileSync("git", ["config", "user.name", "test"], { cwd: dir });
+    execFileSync(
+      "git",
+      [
+        "commit",
+        "-q",
+        "--allow-empty",
+        "-m",
+        "envelope-archive-mutation test fixture",
+      ],
+      { cwd: dir },
+    );
+  }
+  return execFileSync("git", ["rev-parse", "HEAD"], {
+    cwd: dir,
+    encoding: "utf8",
+  }).trim();
 }
 
 // ---------------------------------------------------------------------------
@@ -172,6 +211,7 @@ test("mutation ⓑ 갱신: nextArchiveFileName이 항상 round 1을 반환하도
     });
     const harnessDir = join(dir, "harness-fixture");
     mkdirSync(harnessDir, { recursive: true });
+    const headCommit = ensureGitHeadCommit(dir);
 
     const mod = await import(
       `file://${join(scriptsCheckDir, "relay-handshake.mjs")}?t=${Date.now()}`
@@ -192,6 +232,7 @@ test("mutation ⓑ 갱신: nextArchiveFileName이 항상 round 1을 반환하도
       "2026-08-08 06:00 KST",
       "2026-08-08 06:10:00 KST",
       "outcome-note: needs-rework\n",
+      headCommit,
     );
     const first = mod.checkRelayHandshake({ role: "review", harnessDir });
     assert.equal(first.ok, true);
@@ -203,6 +244,7 @@ test("mutation ⓑ 갱신: nextArchiveFileName이 항상 round 1을 반환하도
       "2026-08-08 07:00 KST",
       "2026-08-08 07:10:00 KST",
       "outcome-note: looks-good\n",
+      headCommit,
     );
     const second = mod.checkRelayHandshake({ role: "review", harnessDir });
     assert.equal(second.ok, true);

@@ -176,10 +176,17 @@ function buildConsumedEnvelopeFixture(
     isReviewFamily ? 1 : undefined,
   );
 
+  // HYK-383 2R §2: the new head_commit precondition axis now also gates
+  // every REVIEW-family delivery -- a valid cover line is required here or
+  // the gate REJECTs before ever reaching the consumption axis this file
+  // actually targets (harmless no-op for CODER, isReviewFamily:false).
+  const headCommitLine = isReviewFamily
+    ? `head_commit: ${"d".repeat(40)}\n`
+    : "";
   const taskPath = join(dir, `${role}-task.md`);
   writeFileSync(
     taskPath,
-    `task_id: ${harnessTaskLabel}-next\ndropped_at: 2026-08-18 20:00:00 KST\n${ONE_B_BLOCK}`,
+    `task_id: ${harnessTaskLabel}-next\ndropped_at: 2026-08-18 20:00:00 KST\n${headCommitLine}${ONE_B_BLOCK}`,
     "utf8",
   );
 

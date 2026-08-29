@@ -96,19 +96,27 @@ function addLinkedWorktree(mainDir) {
   return linkedDir;
 }
 
+// HYK-383: REVIEW 계열 소비는 이제 head_commit: 축(축 ⓐ+ⓑ)도 통과해야
+// 한다 -- 축 ⓑ가 harnessDir에서 `git rev-parse HEAD`를 직접 읽으므로,
+// harnessDir는 항상 이미 진짜 (main 또는 링크드) 워크트리 안이다(이 파일의
+// 모든 호출자가 initPlainGitRepo/addLinkedWorktree로 만든 실제 git
+// 저장소를 넘긴다) -- 그래서 이 헬퍼 자신이 그 워크트리의 실제 HEAD를
+// 직접 읽어 양쪽 표지에 적어 넣기만 하면 되고, 호출자를 하나하나 고칠
+// 필요가 없다.
 function writeReviewFixture(
   harnessDir,
   { taskId, verdict, droppedAt, doneAt },
 ) {
   mkdirSync(harnessDir, { recursive: true });
+  const headCommit = git(harnessDir, ["rev-parse", "HEAD"]);
   writeFileSync(
     join(harnessDir, "review-task.md"),
-    `task_id: ${taskId}\ndropped_at: ${droppedAt} KST\n`,
+    `task_id: ${taskId}\ndropped_at: ${droppedAt} KST\nhead_commit: ${headCommit}\n`,
     "utf8",
   );
   writeFileSync(
     join(harnessDir, "review.md"),
-    `task_id: ${taskId}\nfor: ${taskId}\nverdict: ${verdict}\nrole: REVIEW-CODEX\n\n>>> DONE: REVIEW-CODEX @ ${doneAt} KST\n`,
+    `task_id: ${taskId}\nfor: ${taskId}\nverdict: ${verdict}\nrole: REVIEW-CODEX\nhead_commit: ${headCommit}\n\n>>> DONE: REVIEW-CODEX @ ${doneAt} KST\n`,
     "utf8",
   );
 }
@@ -367,14 +375,15 @@ test("(d) 실패 가시성: a REVIEW result file with no 'verdict:' line still c
     try {
       const harnessDir = join(linkedDir, ".harness");
       mkdirSync(harnessDir, { recursive: true });
+      const headCommit = git(harnessDir, ["rev-parse", "HEAD"]);
       writeFileSync(
         join(harnessDir, "review-task.md"),
-        "task_id: HYK-9505-review-1\ndropped_at: 2026-08-04 21:00 KST\n",
+        `task_id: HYK-9505-review-1\ndropped_at: 2026-08-04 21:00 KST\nhead_commit: ${headCommit}\n`,
         "utf8",
       );
       writeFileSync(
         join(harnessDir, "review.md"),
-        "task_id: HYK-9505-review-1\n\n>>> DONE: REVIEW-CODEX @ 2026-08-04 21:10:00 KST\n",
+        `task_id: HYK-9505-review-1\nhead_commit: ${headCommit}\n\n>>> DONE: REVIEW-CODEX @ 2026-08-04 21:10:00 KST\n`,
         "utf8",
       );
       const result = runRelayHandshakeCli(

@@ -28,6 +28,7 @@ import {
   checkLedgerEntryShape,
   checkLedgerPathResolution,
   checkOneBPrecondition,
+  checkHeadCommitPrecondition,
   DISPATCH_GATE_STATE,
 } from "./dispatch-gate-decision-core.mjs";
 import { loadLedger, writeLedger } from "./reject-streak.mjs";
@@ -141,6 +142,17 @@ const REJECT_STREAK_PATH = join(
 const TASK_ID_LINE_RE_G = /^task_id:\s*(\S+)/gim;
 const ISSUE_ID_PREFIX_RE = /^HYK-\d+/;
 const ISSUE_ID_CAPTURE_RE = /^(HYK-\d+)/;
+// HYK-383 2R §2: mirrors relay-handshake.mjs's own consumption-side
+// HEAD_COMMIT_RE_G exactly(column-0 독립 줄, `[ \t]*`로 개행을 삼키지
+// 않는다) -- ⛔`i` 플래그 없음(2R이 좁히는 신원: 정확히 소문자
+// `head_commit:`만 표지로 인정한다, 대문자 `HEAD_COMMIT:`는 더 이상
+// 아니다). ANYWHERE는 근사매치 진단 전용(매치 채택에는 절대 쓰지 않는다,
+// TASK_ID_ANYWHERE_RE와 동일한 역할) -- 대소문자 무관하게 유지한다: 이
+// 축은 "표지를 쓰려는 흔적이 있는데 형식이 깨졌다"(대문자 포함)와 "표지
+// 자체가 없다"를 가르는 진단일 뿐, 대문자를 통과시키는 문이 아니다.
+const DISPATCH_HEAD_COMMIT_RE_G =
+  /^head_commit:[ \t]*([0-9a-fA-F]{40})[ \t]*$/gm;
+const DISPATCH_HEAD_COMMIT_ANYWHERE_RE = /head_commit:\s*(\S+)/i;
 
 function normalizeNewlines(text) {
   return (text ?? "").replace(/\r\n/g, "\n");
@@ -190,6 +202,46 @@ function extractOneBFacts(taskText) {
     missingA,
     bDeclared: prereqValue !== null,
     bValid: prereqValue !== null && prereqValue.length >= ONE_B_PREREQ_MIN_LEN,
+  };
+}
+
+// HYK-383 2R §2: extracts the structural facts checkHeadCommitPrecondition
+// needs from the ABOUT-TO-BE-DELIVERED task packet's own text -- mirrors
+// extractOneBFacts's shape immediately above (S8: the pure core never
+// touches a filesystem). ⛔only applies to REVIEW-family deliveries
+// (isReviewRole, caller-derived from the task path's own filename, same
+// role-derivation this file already uses everywhere else) -- CODER/VERIFY/
+// PM callers never even reach the read below.
+//
+// Reads `taskPath` INDEPENDENTLY (not reusing a caller-supplied taskText)
+// so a genuine read failure at exactly this check's own moment (permission
+// change, file replaced mid-flight -- this repo's own TOCTOU-conscious
+// convention, see resolveRepoRoot's header above) is observable as its own
+// distinct REJECT_HEAD_COMMIT_UNREADABLE state, not silently absorbed into
+// whatever an earlier, already-successful read happened to see.
+function extractHeadCommitFacts(taskPath, role) {
+  const isReviewRole = typeof role === "string" && /^review/i.test(role);
+  if (!isReviewRole) {
+    return { isReviewRole: false };
+  }
+  let text;
+  try {
+    text = readFileSync(taskPath, "utf8");
+  } catch (err) {
+    return {
+      isReviewRole: true,
+      readOk: false,
+      readErrorReason: firstNonEmptyErrorText(err),
+    };
+  }
+  const normalized = normalizeNewlines(text);
+  const matches = [...normalized.matchAll(DISPATCH_HEAD_COMMIT_RE_G)];
+  return {
+    isReviewRole: true,
+    readOk: true,
+    headCommitMatchCount: matches.length,
+    headCommitNearMissPresent:
+      matches.length === 0 && DISPATCH_HEAD_COMMIT_ANYWHERE_RE.test(normalized),
   };
 }
 
@@ -2512,6 +2564,18 @@ export function runDispatchGateDecision(argv) {
           extractOneBFacts(readFileSync(taskPath, "utf8")),
         );
         if (oneBDecision) decisions.push(oneBDecision);
+        // HYK-383 2R §2: same placement reasoning as oneBDecision immediately
+        // above -- last among the precondition axes, after gates+chain+1-B,
+        // so this new axis's outcome never changes which existing
+        // precondition-reject fixture short-circuits before which gate (only
+        // ALLOW-bound REVIEW-role fixtures need a head_commit: line added).
+        // extractHeadCommitFacts itself no-ops (isReviewRole:false) for every
+        // non-REVIEW role, so CODER/VERIFY/PM delivery is untouched by
+        // construction, not by a caller-side branch here.
+        const headCommitDecision = checkHeadCommitPrecondition(
+          extractHeadCommitFacts(taskPath, deriveRoleFromTaskPath(taskPath)),
+        );
+        if (headCommitDecision) decisions.push(headCommitDecision);
         // HYK-244-receipt-wire-2b2 §3-1: same placement reasoning as
         // oneBDecision immediately above -- last, after gates+chain+1-B,
         // so this new axis's outcome never changes which existing

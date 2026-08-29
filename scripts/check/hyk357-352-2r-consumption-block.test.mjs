@@ -121,16 +121,21 @@ function readMainLedger(mainDir) {
 // well-formed `for:` line whose VALUE is a role name, not an issue id.
 // `task_id:` is fine -- that is the whole point (검토 1R: "task_id: 은
 // 멀쩡했다").
+// HYK-383: REVIEW 계열 소비는 head_commit: 축(축 ⓐ+ⓑ)도 통과해야 한다 --
+// 이 파일의 fixture는 그 축과 무관한('for:' 값 규격) 반려를 시험하므로,
+// head_commit 축이 그 사유를 가리지 않도록 항상 실제 워크트리 HEAD로
+// 채운다(harnessDir는 이미 진짜 링크드 워크트리 안이다).
 function writeForRoleNameFixture(harnessDir, { taskId, droppedAt, doneAt }) {
   mkdirSync(harnessDir, { recursive: true });
+  const headCommit = git(harnessDir, ["rev-parse", "HEAD"]);
   writeFileSync(
     join(harnessDir, "review-task.md"),
-    `task_id: ${taskId}\ndropped_at: ${droppedAt} KST\n`,
+    `task_id: ${taskId}\ndropped_at: ${droppedAt} KST\nhead_commit: ${headCommit}\n`,
     "utf8",
   );
   writeFileSync(
     join(harnessDir, "review.md"),
-    `task_id: ${taskId}\nfor: ORCH\nverdict: rejected\nrole: REVIEW-CODEX\n\n>>> DONE: REVIEW-CODEX @ ${doneAt} KST\n`,
+    `task_id: ${taskId}\nfor: ORCH\nverdict: rejected\nrole: REVIEW-CODEX\nhead_commit: ${headCommit}\n\n>>> DONE: REVIEW-CODEX @ ${doneAt} KST\n`,
     "utf8",
   );
 }
@@ -141,28 +146,30 @@ function writeForRoleNameFixture(harnessDir, { taskId, droppedAt, doneAt }) {
 // unblunted by today's new value-invalid gate sitting right next to it.
 function writeDoubleForFixture(harnessDir, { taskId, droppedAt, doneAt }) {
   mkdirSync(harnessDir, { recursive: true });
+  const headCommit = git(harnessDir, ["rev-parse", "HEAD"]);
   writeFileSync(
     join(harnessDir, "review-task.md"),
-    `task_id: ${taskId}\ndropped_at: ${droppedAt} KST\n`,
+    `task_id: ${taskId}\ndropped_at: ${droppedAt} KST\nhead_commit: ${headCommit}\n`,
     "utf8",
   );
   writeFileSync(
     join(harnessDir, "review.md"),
-    `task_id: ${taskId}\nfor: ${taskId}\nfor: ORCH\nverdict: rejected\nrole: REVIEW-CODEX\n\n>>> DONE: REVIEW-CODEX @ ${doneAt} KST\n`,
+    `task_id: ${taskId}\nfor: ${taskId}\nfor: ORCH\nverdict: rejected\nrole: REVIEW-CODEX\nhead_commit: ${headCommit}\n\n>>> DONE: REVIEW-CODEX @ ${doneAt} KST\n`,
     "utf8",
   );
 }
 
 function writeNormalRejectFixture(harnessDir, { taskId, droppedAt, doneAt }) {
   mkdirSync(harnessDir, { recursive: true });
+  const headCommit = git(harnessDir, ["rev-parse", "HEAD"]);
   writeFileSync(
     join(harnessDir, "review-task.md"),
-    `task_id: ${taskId}\ndropped_at: ${droppedAt} KST\n`,
+    `task_id: ${taskId}\ndropped_at: ${droppedAt} KST\nhead_commit: ${headCommit}\n`,
     "utf8",
   );
   writeFileSync(
     join(harnessDir, "review.md"),
-    `task_id: ${taskId}\nfor: ${taskId}\nverdict: rejected\nrole: REVIEW-CODEX\n\n>>> DONE: REVIEW-CODEX @ ${doneAt} KST\n`,
+    `task_id: ${taskId}\nfor: ${taskId}\nverdict: rejected\nrole: REVIEW-CODEX\nhead_commit: ${headCommit}\n\n>>> DONE: REVIEW-CODEX @ ${doneAt} KST\n`,
     "utf8",
   );
 }

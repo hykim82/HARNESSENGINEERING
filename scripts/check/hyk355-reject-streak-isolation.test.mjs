@@ -94,19 +94,32 @@ function addLinkedWorktree(mainDir) {
   return linkedDir;
 }
 
+// HYK-383: REVIEW 계열 소비는 이제 head_commit: 축(축 ⓐ+ⓑ)도 통과해야
+// 한다 -- harnessDir가 진짜 (링크드) 워크트리 안이면(test (b)) 그 실제
+// HEAD를 head_commit:으로 적어 넣고, probeDir처럼 애초에 git 워크트리가
+// 아니면(§0 실사고 재현, test (a)/(c)/(d)) head_commit 표지를 아예 쓰지
+// 않는다 -- 그 경우는 head_commit 축 자신이 "git 조회 실패"로 이미 더
+// 강하게 거부한다(아래 test (a) 참조, HYK-355의 좁은 보호를 흡수한다).
 function writeReviewFixture(
   harnessDir,
   { taskId, verdict, droppedAt, doneAt },
 ) {
   mkdirSync(harnessDir, { recursive: true });
+  let headCommitLine = "";
+  try {
+    headCommitLine = `head_commit: ${git(harnessDir, ["rev-parse", "HEAD"])}\n`;
+  } catch {
+    // probeDir 재현: 어떤 git 워크트리에도 속하지 않는다 -- 의도적으로
+    // head_commit 표지를 남기지 않는다.
+  }
   writeFileSync(
     join(harnessDir, "review-task.md"),
-    `task_id: ${taskId}\ndropped_at: ${droppedAt} KST\n`,
+    `task_id: ${taskId}\ndropped_at: ${droppedAt} KST\n${headCommitLine}`,
     "utf8",
   );
   writeFileSync(
     join(harnessDir, "review.md"),
-    `task_id: ${taskId}\nfor: ${taskId}\nverdict: ${verdict}\nrole: REVIEW-CODEX\n\n>>> DONE: REVIEW-CODEX @ ${doneAt} KST\n`,
+    `task_id: ${taskId}\nfor: ${taskId}\nverdict: ${verdict}\nrole: REVIEW-CODEX\n${headCommitLine}\n>>> DONE: REVIEW-CODEX @ ${doneAt} KST\n`,
     "utf8",
   );
 }
@@ -187,7 +200,7 @@ const GATE_TARGET =
   "    return blocked;\n" +
   "  }\n";
 
-test("HYK-355 (a)★ 실측 재현 고정: probe harnessDir가 어떤 git worktree에도 속하지 않고, cwd만 실물-모양 repo로 defaulting -> reject-streak 기록이 거부된다(가짜 항목 미착지), 라운드 자체는 계속 완료(exit 0)", () => {
+test("HYK-355 (a)★ 실측 재현 고정 (HYK-383로 갱신): probe harnessDir가 어떤 git worktree에도 속하지 않으면 -- 이제 head_commit 축(HYK-383 축 ⓑ)이 라운드 자체를 거부한다(더 넓은 보호가 HYK-355의 좁은 보호를 흡수), 가짜 항목은 여전히 미착지", () => {
   const mainDir = tmpDir("hyk355-main-");
   const probeDir = tmpDir("hyk355-probe-scratch-");
   try {
@@ -205,15 +218,20 @@ test("HYK-355 (a)★ 실측 재현 고정: probe harnessDir가 어떤 git worktr
       ["review", probeDir],
       { cwd: mainDir }, // "cd 없이" = cwd가 (합성) 실물 repo에 남아 있음
     );
-    assert.equal(
+    // HYK-383: probeDir가 애초에 git 워크트리가 아니므로 head_commit 표지를
+    // 못 쓴다(writeReviewFixture 자신의 try/catch) -- head_commit 축이
+    // "표지 부재"로 라운드 전체를 거부한다. 이 축은 REVIEW-family
+    // harnessDir가 real git worktree 안인지를 항상 먼저 확인하므로(축 ⓑ),
+    // reject-streak 전용이던 이 gate(HYK-355)에 도달하는 모든 경로는 이제
+    // 그 전에 이미 막힌다 -- 아래 (c)/(d)는 그 사실과 별개로 HYK-355
+    // 자신의 방어선이 여전히 올바른지를(head_commit 축을 함께 무력화한
+    // 채로) 독립적으로 증명한다.
+    assert.notEqual(
       result.exit,
       0,
-      `handshake round itself must not be blocked: ${result.stderr}`,
+      `probe harnessDir must now be rejected at the round level (HYK-383): ${result.stderr}`,
     );
-    assert.match(
-      result.stderr,
-      /reject-streak auto-record: refusing mainRepoRoot\(\) default/,
-    );
+    assert.match(result.stderr, /missing head_commit header/);
     assert.equal(
       readMainLedger(mainDir),
       null,
@@ -266,13 +284,40 @@ test("HYK-355 (b) 정당한 실물 기록 회귀 0: harnessDir가 실제로 링�
   }
 });
 
-test("HYK-355 (c) 변이 검사 ①: 게이트를 디스크에서 실제로 지우면 -> probe 시나리오가 (합성) 원장에 기록된다 (RED, 안전장치가 코드에 있다는 증거)", () => {
+// HYK-383: axis ⓑ(head_commit 실물 대조)가 이제 이 GATE_TARGET(HYK-355)에
+// 도달하는 모든 REVIEW-family 경로보다 앞서 harnessDir가 real git worktree
+// 안인지를 이미 확인한다(더 넓은 보호, 위 test (a) 참조) -- 그 결과
+// probeDir(비-워크트리) 시나리오는 GATE_TARGET에 아예 도달하지 못하게
+// 됐다(HYK-355의 좁은 보호는 REVIEW-family에 한해 사실상 도달 불가/죽은
+// 코드가 됐다 -- ORCH에게 별도로 보고). 아래 (c)/(d)는 그럼에도 GATE_TARGET
+// 자신이 «독립적으로»(axis ⓑ 없이 격리했을 때) 여전히 올바른지를
+// 증명한다(defense-in-depth) -- 그래서 GATE_TARGET과 함께 axis ⓑ의
+// checkRelayHandshake 호출부도 걷어내 원래 HYK-355가 겨냥했던 정확히 그
+// 격리 조건을 재현한다.
+const HEAD_COMMIT_AXIS_CALL_TARGET =
+  "  const headCommitVerdict = resolveHeadCommitBinding({\n" +
+  "    role,\n" +
+  "    taskContent,\n" +
+  "    resultContent,\n" +
+  "    harnessDir,\n" +
+  "  });\n" +
+  "  if (!headCommitVerdict.ok) return headCommitVerdict;\n";
+
+test("HYK-355 (c) 변이 검사 ① (axis ⓑ를 격리한 채로): 게이트를 디스크에서 실제로 지우면 -> probe 시나리오가 (합성) 원장에 기록된다 (RED, HYK-355 게이트 자신이 defense-in-depth로 여전히 올바르다는 증거)", () => {
   assertExactlyOneMatch(
     RELAY_HANDSHAKE_LIVE_SRC,
     GATE_TARGET,
     "HYK-355 isolation gate",
   );
-  const mutated = RELAY_HANDSHAKE_LIVE_SRC.replace(GATE_TARGET, "");
+  assertExactlyOneMatch(
+    RELAY_HANDSHAKE_LIVE_SRC,
+    HEAD_COMMIT_AXIS_CALL_TARGET,
+    "HYK-383 head_commit axis call site",
+  );
+  const mutated = RELAY_HANDSHAKE_LIVE_SRC.replace(GATE_TARGET, "").replace(
+    HEAD_COMMIT_AXIS_CALL_TARGET,
+    "",
+  );
   const { rootDir, mutantPath } = writeMutantRelayHandshake(mutated);
   const mainDir = tmpDir("hyk355-mutant-main-");
   const probeDir = tmpDir("hyk355-mutant-probe-");
@@ -300,10 +345,22 @@ test("HYK-355 (c) 변이 검사 ①: 게이트를 디스크에서 실제로 지�
   }
 });
 
-test("HYK-355 (d) 변이 검사 ②: 원복(라이브 소스 그대로)하면 -> 같은 probe 시나리오가 다시 초록(기록 거부)이다", () => {
-  const { rootDir, mutantPath } = writeMutantRelayHandshake(
+test("HYK-355 (d) 변이 검사 ② (axis ⓑ를 격리한 채로): GATE_TARGET만 원복하면 -> 같은 probe 시나리오가 다시 초록(HYK-355 게이트가 기록을 거부)이다", () => {
+  // ⛔"라이브 소스 그대로"가 아니다 -- HYK-383의 axis ⓑ가 그대로면
+  // probeDir는 GATE_TARGET에 도달하기도 전에 이미 거부된다(위 test (a)가
+  // 바로 그것을 고정한다). 여기서는 (c)와 같은 격리(axis ⓑ 호출부 제거)를
+  // 유지한 채 GATE_TARGET만 복원해 -- HYK-355 게이트 자신의 RED/GREEN
+  // 대비가 여전히 유효하다는 것만 좁게 증명한다.
+  assertExactlyOneMatch(
     RELAY_HANDSHAKE_LIVE_SRC,
+    HEAD_COMMIT_AXIS_CALL_TARGET,
+    "HYK-383 head_commit axis call site",
   );
+  const isolated = RELAY_HANDSHAKE_LIVE_SRC.replace(
+    HEAD_COMMIT_AXIS_CALL_TARGET,
+    "",
+  );
+  const { rootDir, mutantPath } = writeMutantRelayHandshake(isolated);
   const mainDir = tmpDir("hyk355-restored-main-");
   const probeDir = tmpDir("hyk355-restored-probe-");
   try {
@@ -325,7 +382,7 @@ test("HYK-355 (d) 변이 검사 ②: 원복(라이브 소스 그대로)하면 ->
     assert.equal(
       readMainLedger(mainDir),
       null,
-      "GREEN: restoring the live (unmutated) source blocks the write again",
+      "GREEN: restoring the live (unmutated) HYK-355 gate blocks the write again",
     );
   } finally {
     rmSync(rootDir, { recursive: true, force: true });

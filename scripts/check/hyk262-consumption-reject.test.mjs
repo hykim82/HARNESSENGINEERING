@@ -116,32 +116,38 @@ function readMainLedger(mainDir) {
   return existsSync(p) ? JSON.parse(readFileSync(p, "utf8")) : null;
 }
 
+// HYK-383: REVIEW 계열 소비는 head_commit: 축(축 ⓐ+ⓑ)도 통과해야 한다 --
+// 이 파일의 fixture는 이 축과 무관한(표지 줄 계약) 반려를 시험하므로,
+// head_commit 축 자체가 그 반려 사유를 가리지 않도록 항상 실제 워크트리
+// HEAD로 채운다(harnessDir는 이미 진짜 링크드 워크트리 안이다).
 function writeDoubleForFixture(harnessDir, { taskId, droppedAt, doneAt }) {
   mkdirSync(harnessDir, { recursive: true });
+  const headCommit = git(harnessDir, ["rev-parse", "HEAD"]);
   writeFileSync(
     join(harnessDir, "review-task.md"),
-    `task_id: ${taskId}\ndropped_at: ${droppedAt} KST\n`,
+    `task_id: ${taskId}\ndropped_at: ${droppedAt} KST\nhead_commit: ${headCommit}\n`,
     "utf8",
   );
   // ★2026-08-14 실사고 그대로: `for:` 줄이 2개(하나는 `for: ORCH`) -- 어느
   // 것이 최종인지 결정할 수 없는 AMBIGUOUS-count 표지 줄 계약 위반.
   writeFileSync(
     join(harnessDir, "review.md"),
-    `task_id: ${taskId}\nfor: ${taskId}\nfor: ORCH\nverdict: rejected\nrole: REVIEW-CODEX\n\n>>> DONE: REVIEW-CODEX @ ${doneAt} KST\n`,
+    `task_id: ${taskId}\nfor: ${taskId}\nfor: ORCH\nverdict: rejected\nrole: REVIEW-CODEX\nhead_commit: ${headCommit}\n\n>>> DONE: REVIEW-CODEX @ ${doneAt} KST\n`,
     "utf8",
   );
 }
 
 function writeNormalRejectFixture(harnessDir, { taskId, droppedAt, doneAt }) {
   mkdirSync(harnessDir, { recursive: true });
+  const headCommit = git(harnessDir, ["rev-parse", "HEAD"]);
   writeFileSync(
     join(harnessDir, "review-task.md"),
-    `task_id: ${taskId}\ndropped_at: ${droppedAt} KST\n`,
+    `task_id: ${taskId}\ndropped_at: ${droppedAt} KST\nhead_commit: ${headCommit}\n`,
     "utf8",
   );
   writeFileSync(
     join(harnessDir, "review.md"),
-    `task_id: ${taskId}\nfor: ${taskId}\nverdict: rejected\nrole: REVIEW-CODEX\n\n>>> DONE: REVIEW-CODEX @ ${doneAt} KST\n`,
+    `task_id: ${taskId}\nfor: ${taskId}\nverdict: rejected\nrole: REVIEW-CODEX\nhead_commit: ${headCommit}\n\n>>> DONE: REVIEW-CODEX @ ${doneAt} KST\n`,
     "utf8",
   );
 }

@@ -86,15 +86,44 @@ function runCli(args, { ledgerEnv, ...opts } = {}) {
   };
 }
 
+// HYK-383: REVIEW-family 결과는 이제 head_commit: 축(§2)이 소비를 막는다
+// -- axis ⓑ(실물 대조)가 `git rev-parse HEAD`로 harnessDir를 직접 읽으므로
+// REVIEW 계열 fixture는 실제 git 저장소 안에 있어야 하고, 그 실제 HEAD와
+// task/result 양쪽의 head_commit: 이 전부 일치해야 한다. CODER/VERIFY/PM은
+// 이 축 밖(resolveHeadCommitBinding 자체 스코프 가드)이라 git init 없이도
+// 그대로 통과한다 -- 그래서 git init은 REVIEW 계열일 때만 한다.
+function ensureGitHeadCommit(dir) {
+  if (!existsSync(join(dir, ".git"))) {
+    execFileSync("git", ["init", "-q"], { cwd: dir });
+    execFileSync("git", ["config", "user.email", "test@example.invalid"], {
+      cwd: dir,
+    });
+    execFileSync("git", ["config", "user.name", "test"], { cwd: dir });
+    execFileSync(
+      "git",
+      ["commit", "-q", "--allow-empty", "-m", "relay-handshake test fixture"],
+      { cwd: dir },
+    );
+  }
+  return execFileSync("git", ["rev-parse", "HEAD"], {
+    cwd: dir,
+    encoding: "utf8",
+  }).trim();
+}
+
 function writeValidFixture(dir, role, taskId) {
+  const isReview = /^review/i.test(role);
+  const headCommitLine = isReview
+    ? `head_commit: ${ensureGitHeadCommit(dir)}\n`
+    : "";
   writeFileSync(
     join(dir, `${role}-task.md`),
-    `task_id: ${taskId}\ndropped_at: 2026-08-03 06:00 KST\n`,
+    `task_id: ${taskId}\ndropped_at: 2026-08-03 06:00 KST\n${headCommitLine}`,
     "utf8",
   );
   writeFileSync(
     join(dir, `${role}.md`),
-    `task_id: ${taskId}\n\n>>> DONE: ${role.toUpperCase()} @ 2026-08-03 06:10:00 KST\n`,
+    `task_id: ${taskId}\n${headCommitLine}\n>>> DONE: ${role.toUpperCase()} @ 2026-08-03 06:10:00 KST\n`,
     "utf8",
   );
 }
@@ -461,15 +490,16 @@ test("(p) known-bad: actual review.md shape -- G1 header + mid-line 'for: X / ta
 
 test("(q) paired good: same content, task_id moved to a standalone column-0 line -> ok", () => {
   withFixtureDir((dir) => {
+    const headCommit = ensureGitHeadCommit(dir);
     writeTask(
       dir,
       "review",
-      "task_id: HYK-167-review-2\ndropped_at: 2026-07-05 06:00 KST\n",
+      `task_id: HYK-167-review-2\ndropped_at: 2026-07-05 06:00 KST\nhead_commit: ${headCommit}\n`,
     );
     writeResult(
       dir,
       "review",
-      "dispatch_verified: yes\ntask_id_from_dispatch: HYK-167-review-2\npane_match: 일치\ntask_id: HYK-167-review-2\n\nfor: HYK-167 / role: REVIEW-CODEX\n\n>>> DONE: REVIEW-CODEX @ 2026-07-05 06:10:00 KST\n",
+      `dispatch_verified: yes\ntask_id_from_dispatch: HYK-167-review-2\npane_match: 일치\ntask_id: HYK-167-review-2\nhead_commit: ${headCommit}\n\nfor: HYK-167 / role: REVIEW-CODEX\n\n>>> DONE: REVIEW-CODEX @ 2026-07-05 06:10:00 KST\n`,
     );
     const result = checkRelayHandshake({ role: "review", harnessDir: dir });
     assert.equal(result.ok, true);
