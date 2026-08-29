@@ -1320,6 +1320,127 @@ export function resolveHeadCommitBinding({
   return { ok: true, sha: resultHead.sha };
 }
 
+// HYK-387: 2026-08-29 실사고 -- ORCH가 태스크 문안을 좌석에 배달했으나
+// 배정(dispatch) 기록 생성이 `agent_prompt_stalled`로 실패했다. 문안은
+// 도착했고 워커는 그대로 라운드를 시작해 커밋까지 만들었다. 런타임
+// 태스크는 `ready`로 남아 있었다 -- 장부에는 그 라운드가 없었다.
+//
+// 기존 G1(위조 차단) 축들(위 resolveHeadCommitBinding 등)은 전부 «존재하는
+// 기록이 진짜인가»(진위)만 본다 -- 기록이 «아예 없는» 시작은 애초에 그
+// 검사의 대상에 들어오지 않는다(coder-task.md §1-Q1/Q2). 이 축은 그
+// 반대: 소비 시점에 «이 라운드의 배정 기록이 장부(dispatch-receipt-
+// cli.mjs가 append-only로 쓰는 JSONL 원장, HYK-219-receipts-1)에 실제로
+// 있는가»를 확인한다.
+//
+// ⛔조회 실패(원장을 읽을 수 없음/손상)와 기록 없음(원장은 읽었지만 이
+// 라운드에 대응하는 항목이 없음)을 같은 사유로 뭉뚱그리지 않는다
+// (coder-task.md §4 급소 1) -- 아래 DISPATCH_RECORD_STATE 두 값이 서로
+// 다른 코드 경로에서만 나온다:
+//   - LOOKUP_FAILED: 원장 파일이 있는데 읽기 자체가 실패했다(EISDIR·
+//     권한 등) -- "모른다".
+//   - ABSENT: 원장 파일이 아예 없거나(한 번도 기록된 적 없음 -- 존재하지
+//     않는 파일은 그 자체로 "기록이 0건"이라는 확정적 사실이다), 또는
+//     원장은 정상적으로 읽었으나 이 라운드(role+taskId)에 대응하는 항목이
+//     없다 -- "없다".
+// 둘 다 fail-closed(ok:false)로 거부하되, state로 구분해 진단이 죽지 않게
+// 한다.
+//
+// ⛔정직 한계(§0 경계 1 -- 실물 원장 접근 금지, 관제실 라이브 파일 무접촉):
+// `dispatchLedgerPath`는 ⛔호출자가 명시로 넘긴 값만 쓴다(기본값
+// undefined -- 추측·하드코딩된 실물 경로 없음). 넘어오지 않으면 이 축은
+// 즉시 스킵한다({ok:true, skipped:true}) -- 이 축이 생기기 전과 완전히
+// 동일하게 동작한다(§4 무회귀, 기존 어떤 호출자도 이 값을 넘기지 않는다).
+// CLI 진입점(아래 invokedDirectly)은 env `DISPATCH_RECEIPT_LEDGER_PATH`가
+// 설정된 경우에만 이 값을 전달한다 -- 관제실(dispatch-worker.ps1)이 실제로
+// 이 env를 채워 넣기 전까지는 이 축이 라이브 소비 경로에서 한 번도
+// 발동하지 않는다(이 라운드는 그 결선을 만들지 않는다 -- 그 파일은 이
+// 워크트리 밖의 살아 있는 관제실 자원이라 §0 경계 밖이다). 즉 이 축은
+// «계약 고정 + 기계 강제 코드 + 합성 시험» 까지이며, 실제로 배달을 막는
+// 것은 관제실 쪽 배선이 이 env를 채워야 완성된다 -- Q3에 이 한계를 그대로
+// 적는다.
+export const DISPATCH_RECORD_STATE = Object.freeze({
+  ABSENT: "DISPATCH_RECORD_ABSENT",
+  LOOKUP_FAILED: "DISPATCH_RECORD_LOOKUP_FAILED",
+});
+
+// 원장(JSONL, dispatch-receipt-cli.mjs의 buildReceiptRecord가 쓰는 바로 그
+// 형식)을 읽어 파싱 가능한 레코드 배열을 돌려준다. 파일이 아예 없으면
+// "0건 확정"(ABSENT로 이어짐)과 "읽기 자체 실패"(LOOKUP_FAILED로 이어짐)을
+// 여기서 갈라 반환한다 -- 호출자가 이 둘을 절대 같은 코드로 섞지 않도록.
+function readDispatchLedgerRecords(ledgerPath) {
+  let raw;
+  try {
+    raw = readFileSync(ledgerPath, "utf8");
+  } catch (err) {
+    if (err && err.code === "ENOENT") {
+      // 원장 파일이 한 번도 만들어진 적 없다 -- append-only 로그이므로
+      // 이는 "지금까지 기록이 0건"이라는 확정적 사실이다(모른다가 아니라
+      // 없다).
+      return { ok: true, records: [] };
+    }
+    return {
+      ok: false,
+      reason: `DISPATCH_RECORD_LOOKUP_FAILED (HYK-387): dispatch ledger unreadable at '${ledgerPath}': ${err.message} (fail-closed -- 조회 실패, «없다»가 아니라 «모른다»)`,
+    };
+  }
+  const lines = raw.split(/\r?\n/).filter((line) => line.trim().length > 0);
+  const records = [];
+  let parseFailures = 0;
+  for (const line of lines) {
+    try {
+      records.push(JSON.parse(line));
+    } catch {
+      parseFailures += 1;
+    }
+  }
+  // 모든 줄이 손상됐다면(줄이 하나 이상 있었는데 하나도 못 읽었다면) 이
+  // 원장에 이 라운드의 항목이 있는지 여부 자체를 판단할 수 없다 -- ABSENT로
+  // 접지 않고 LOOKUP_FAILED로 fail-closed한다.
+  if (lines.length > 0 && parseFailures === lines.length) {
+    return {
+      ok: false,
+      reason: `DISPATCH_RECORD_LOOKUP_FAILED (HYK-387): dispatch ledger at '${ledgerPath}' has ${lines.length} line(s), all unparseable JSON -- 조회 실패(fail-closed, «없다»로 접지 않는다)`,
+    };
+  }
+  return { ok: true, records };
+}
+
+// role+taskId(=harness_task_label, dispatch-receipt-cli.mjs의 buildReceiptRecord
+// 자체 필드명)로 이 라운드에 대응하는 배정 기록이 원장에 있는지만 본다 --
+// 위조/진위(다른 축들의 몫)가 아니라 순수 존재 여부다.
+export function resolveDispatchRecordExistence({
+  role,
+  taskId,
+  dispatchLedgerPath,
+}) {
+  if (!dispatchLedgerPath) return { ok: true, skipped: true };
+
+  const ledger = readDispatchLedgerRecords(dispatchLedgerPath);
+  if (!ledger.ok) {
+    return {
+      ok: false,
+      state: DISPATCH_RECORD_STATE.LOOKUP_FAILED,
+      reason: ledger.reason,
+    };
+  }
+
+  const matches = ledger.records.filter(
+    (r) =>
+      r &&
+      typeof r === "object" &&
+      r.role === role &&
+      r.harness_task_label === taskId,
+  );
+  if (matches.length === 0) {
+    return {
+      ok: false,
+      state: DISPATCH_RECORD_STATE.ABSENT,
+      reason: `DISPATCH_RECORD_ABSENT (HYK-387): no entry in ledger '${dispatchLedgerPath}' matches role='${role}' harness_task_label='${taskId}' -- 배정 기록이 장부에 없는 라운드는 정상으로 받아들여지지 않는다(2026-08-29 실사고 재현 방지)`,
+    };
+  }
+  return { ok: true, matches: matches.length };
+}
+
 // HYK-257-done-stamp-lint-1: extracted from checkRelayHandshake (same
 // ESLint-limit reason as above) -- the two checks that sit between
 // resolveDoneAt succeeding and the completion side-effects starting:
@@ -1599,6 +1720,7 @@ export function checkRelayHandshake({
   harnessDir = join(repoRoot(), ".harness"),
   now = Date.now(),
   dispatchId,
+  dispatchLedgerPath,
 }) {
   const filesResolved = resolveTaskAndResultFiles(role, harnessDir);
   if (!filesResolved.ok) return filesResolved;
@@ -1673,6 +1795,18 @@ export function checkRelayHandshake({
     harnessDir,
   });
   if (!headCommitVerdict.ok) return headCommitVerdict;
+
+  // HYK-387: 다른 모든 사유별 검사가 통과한 뒤, 이 라운드가 완료로
+  // 판정되기 «직전»에 건다(headCommitVerdict와 같은 자리 -- 그래야 이
+  // 축이 없던 시절부터 있던 다른 구체적 거부 사유를 가리키는 기존 시험이
+  // 여전히 그 사유를 그대로 본다, §4 무회귀). REVIEW 계열 한정이 아니다
+  // -- 오늘의 실사고는 CODER 라운드였다(coder-task.md §1 원문).
+  const dispatchRecordVerdict = resolveDispatchRecordExistence({
+    role,
+    taskId,
+    dispatchLedgerPath,
+  });
+  if (!dispatchRecordVerdict.ok) return dispatchRecordVerdict;
 
   const sideEffectVerdict = runCompletionSideEffects({
     role,
@@ -2202,9 +2336,19 @@ if (invokedDirectly) {
   // not just this CLI block. Calling it again here would double-spawn on
   // every CLI-path completion.
   const harnessDirArg = process.argv[3];
+  // HYK-387: env가 설정된 경우에만 넘긴다(기본 undefined -- resolveDispatch
+  // RecordExistence 자체 헤더 참조, 하드코딩된 실물 경로 없음). 관제실이
+  // 아직 이 env를 채우지 않으므로 오늘 이 값은 라이브 소비 경로에서 항상
+  // undefined다 -- 이 축은 스킵되고, CLI의 기존 동작은 완전히 그대로다.
+  const dispatchLedgerPathArg =
+    process.env.DISPATCH_RECEIPT_LEDGER_PATH || undefined;
   const result = harnessDirArg
-    ? checkRelayHandshake({ role, harnessDir: harnessDirArg })
-    : checkRelayHandshake({ role });
+    ? checkRelayHandshake({
+        role,
+        harnessDir: harnessDirArg,
+        dispatchLedgerPath: dispatchLedgerPathArg,
+      })
+    : checkRelayHandshake({ role, dispatchLedgerPath: dispatchLedgerPathArg });
   // HYK-344 2R: kept as a call BEFORE the pinned (result.ok) block below,
   // rather than inlined inside it -- relay-handshake-cli-mutation-M3.test.mjs
   // (HYK-189 (e) mutation M3) pins that exact block's source text byte-for-

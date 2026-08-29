@@ -1091,7 +1091,7 @@ test("HYK-189 (e) mutation M1: removing the no-arg usage guard -> the exact usag
 //     결함이 드러난다»는 것 자체를 시험으로 고정한다(§9 항목 3).
 test("HYK-189 (e) mutation M2: removing the second positional arg (harnessDir override) -> a valid fixture in a custom dir is no longer honored (RED signal; proves passing harnessDirArg is load-bearing), hermetic and invariant across ambient-default state", () => {
   const target =
-    "  const harnessDirArg = process.argv[3];\n  const result = harnessDirArg\n    ? checkRelayHandshake({ role, harnessDir: harnessDirArg })\n    : checkRelayHandshake({ role });\n";
+    "  const harnessDirArg = process.argv[3];\n  // HYK-387: env가 설정된 경우에만 넘긴다(기본 undefined -- resolveDispatch\n  // RecordExistence 자체 헤더 참조, 하드코딩된 실물 경로 없음). 관제실이\n  // 아직 이 env를 채우지 않으므로 오늘 이 값은 라이브 소비 경로에서 항상\n  // undefined다 -- 이 축은 스킵되고, CLI의 기존 동작은 완전히 그대로다.\n  const dispatchLedgerPathArg =\n    process.env.DISPATCH_RECEIPT_LEDGER_PATH || undefined;\n  const result = harnessDirArg\n    ? checkRelayHandshake({\n        role,\n        harnessDir: harnessDirArg,\n        dispatchLedgerPath: dispatchLedgerPathArg,\n      })\n    : checkRelayHandshake({ role, dispatchLedgerPath: dispatchLedgerPathArg });\n";
   assertExactlyOneMatch(
     RELAY_HANDSHAKE_SRC,
     target,
@@ -1099,7 +1099,7 @@ test("HYK-189 (e) mutation M2: removing the second positional arg (harnessDir ov
   );
   const mutated = RELAY_HANDSHAKE_SRC.replace(
     target,
-    "  const result = checkRelayHandshake({ role });\n",
+    "  const dispatchLedgerPathArg =\n    process.env.DISPATCH_RECEIPT_LEDGER_PATH || undefined;\n  const result = checkRelayHandshake({ role, dispatchLedgerPath: dispatchLedgerPathArg });\n",
   );
   const { rootDir, mutantPath } = writeMutantCli(mutated);
   try {
