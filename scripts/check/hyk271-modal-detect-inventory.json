@@ -1,13 +1,13 @@
 {
   "schema_version": 1,
-  "note": "HYK-271-modal-stall-1 1R -- machine-readable Q2 inventory of candidate axes for detecting 'is this seat currently blocked on an interactive prompt (approval modal etc.)' BEFORE dispatching new work to it. This is an INTEGRITY list (format/required-fields/no-duplicates/확실-needs-real-evidence), not the detector implementation itself -- see .harness/coder.md §Q2 for the narrative table and .harness/coder-task.md §2 invariant P for the rule this list enforces (an axis only enters the list if there is evidence it actually distinguishes modal-stall from normal idle). Read/validated by scripts/check/hyk271-modal-detect-inventory.test.mjs. Do not hand-edit an item's evidence without re-verifying the citation against the live file -- a stale evidence pointer is worse than none.",
+  "note": "HYK-271-modal-stall-1 1R -- machine-readable Q2 inventory of candidate axes for detecting 'is this seat currently blocked on an interactive prompt (approval modal etc.)' BEFORE dispatching new work to it. This is an INTEGRITY list (format/required-fields/no-duplicates/확실-needs-real-evidence), not the detector implementation itself -- see .harness/coder.md §Q2 for the narrative table and .harness/coder-task.md §2 invariant P for the rule this list enforces (an axis only enters the list if there is evidence it actually distinguishes modal-stall from normal idle). Read/validated by scripts/check/hyk271-modal-detect-inventory.test.mjs. Do not hand-edit an item's evidence without re-verifying the citation against the live file -- a stale evidence pointer is worse than none. HYK-271-modal-stall-2 2R (review P1 fix): evidence for axis-process-pty-liveness and axis-result-file-silence was replaced with citations that actually back the specific claim being made (a code-comment field list or this round's own now-overwritten task file is not evidence of behavior) -- see each item's evidence field. Two items' evidence was also moved off the live, round-overwritten `.harness/coder-task.md` onto the stable archived copy `.harness/rounds/coder-task-r1.md`, because coder-task.md is replaced every round and the old line numbers silently stopped pointing at the cited text the moment 2R's task file landed -- discovered live during this fix.",
   "items": [
     {
       "id": "axis-screen-scrollback",
       "axis_label": "화면/스크롤백 (orca terminal read --screen)",
       "can_indicate_modal": "부분적 -- 모달 문구가 화면에 실제로 그려지면 문자열 매칭으로 검출 가능",
       "distinguishes_idle": "부분적 -- 08-28 실측: --screen과 raw stream은 서로 다른 백엔드이고 배치 접힘 구간(80줄이 '+76 lines'로 요약됨, 표본 2)은 지연 도착이 아니라 아예 도착하지 않는다. 그 구간에 모달 문구가 있었다면 통째로 놓친다(위음성).",
-      "evidence": ".harness/coder-task.md:29-30 -- 08-28 실측 인용(이 라운드는 재실측 금지 대상으로 명시됨)",
+      "evidence": ".harness/rounds/coder-task-r1.md:30 -- 08-28 실측 인용(이 라운드는 재실측 금지 대상으로 명시됨). 이 파일은 1R task의 아카이브 사본(매 라운드 덮어써지는 .harness/coder-task.md와 달리 고정) -- 2R에서 원래 쓰던 .harness/coder-task.md:29-30 포인터가 2R task로 덮어써지며 조용히 다른 문장을 가리키게 된 것을 발견해 옮김",
       "confidence": "추론"
     },
     {
@@ -21,9 +21,9 @@
     {
       "id": "axis-process-pty-liveness",
       "axis_label": "프로세스/PTY 존재·연결 상태 (orca terminal list의 connected/writable/ptyId)",
-      "can_indicate_modal": "불가 -- connected/writable은 좌석 프로세스가 살아서 붙어 있는지만 말해줄 뿐, 그 프로세스가 정상 사고 중인지 승인 모달을 그리고 있는지는 구별하지 않는다.",
-      "distinguishes_idle": "불가 -- 정상 작업 중과 모달 대기 중 모두 connected:true/writable:true로 동일하게 관측된다. 이 축 단독으로는 '정지'와 '유휴'조차 구별하지 못한다(오직 '죽었는지'만 구별).",
-      "evidence": "scripts/relay/adapters/orca-adapter.mjs:475-477 -- 검토자가 전수 열거한 terminal list 필드 합집합(branch/connected/handle/lastOutputAt/leafId/preview/ptyId/tabId/title/worktreePath/worktreeId/writable) 중 프롬프트-대기 여부를 나타내는 별도 필드가 없음(코드 직접 확인)",
+      "can_indicate_modal": "불가 -- connected/writable은 좌석 프로세스가 살아서 붙어 있는지만 말해줄 뿐, 그 프로세스가 정상 사고 중인지 대화형 모달을 그리고 있는지는 구별하지 않는다.",
+      "distinguishes_idle": "불가 -- 정상 작업 중과 모달 대기 중 모두 connected:true/writable:true로 동일하게 관측된다. 이 축 단독으로는 '정지'와 '유휴'조차 구별하지 못한다(오직 '죽었는지'만 구별). 2R: 1R 근거(orca-adapter.mjs:475-477)는 필드명을 나열하는 주석일 뿐 '값이 같다'는 실측이 아니라는 지적(P1-1)을 받아, 실제로 이 상태(connected:true인데 모달에 갇힘)가 관측된 사고 표본으로 근거를 교체했다.",
+      "evidence": "D:\\문서관리\\하네스-관제실\\2026-08-21-HYK271-재현-codex-업데이트창.md:28-30 -- 실제 사고 관측: '좌석은 살아 있었고(PTY 정상·connected:true) 오류도 없었다' + '확인창에 갇혀 있다는 신호는 어디에도 없었다' -- connected:true와 모달-정지가 동시에 관측된 실물 표본(이 표본은 업데이트-확인창 사고이지, 명령 승인창 사고는 아니다 -- 다만 이 축의 주장 자체는 모달 종류에 무관하게 'connected 필드가 모달 유무를 반영하지 않는다'는 것이므로 그대로 뒷받침한다). 필드 목록 자체의 코드 근거는 scripts/relay/adapters/orca-adapter.mjs:475-477(교차 참조, 1R 근거 유지)",
       "confidence": "확실"
     },
     {
@@ -38,8 +38,8 @@
       "id": "axis-result-file-silence",
       "axis_label": "결과 파일 (.harness/*.md)",
       "can_indicate_modal": "불가 -- 결과 파일은 워커가 작업을 마쳤을 때만 `>>> DONE:` 줄로 갱신된다. 모달 대기 중에는 애초에 쓸 손(실행 흐름)이 없으므로 파일이 갱신되지 않는다.",
-      "distinguishes_idle": "불가(이슈 본문이 지적하는 구멍 그 자체) -- 정상 작업 중(아직 완료 전)의 침묵과 모달 정지 중의 침묵이 파일 관점에서 구별되지 않는다. 완료 감시는 `>>> DONE:` 줄만 보므로 모달 정지 시 영영 울리지 않는다.",
-      "evidence": ".harness/coder-task.md:22-23 -- '완료 감시는 >>> DONE: 줄을 보므로 영영 안 울린다 ⇒ 무기한 정지'",
+      "distinguishes_idle": "불가(이슈 본문이 지적하는 구멍 그 자체) -- 정상 작업 중(아직 완료 전)의 침묵과 모달 정지 중의 침묵이 파일 관점에서 구별되지 않는다. 완료 감시는 `>>> DONE:` 줄만 보므로 모달 정지 시 영영 울리지 않는다. 2R: 1R 근거(coder-task.md:22-23)는 문제 배경 서술일 뿐 구현/비교 표본이 아니라는 지적(P1-1)을 받아, 완료 감시가 실제로 무엇을 신호로 쓰는지 보여주는 동작 코드로 근거를 교체했다.",
+      "evidence": "scripts/check/relay-handshake.mjs:257-278 -- resolveResultDoneMatch()의 실제 구현: 결과 파일에서 확인하는 유일한 신호는 '>>> DONE:' 줄의 개수(0/1/2+)뿐이다. 0개(줄269-277, missing:true)는 '아직 진행 중'과 '모달에 멈춤'을 구별할 어떤 필드도 갖지 않는 동일한 분기로 떨어진다 -- 코드 자체가 이 축의 '불가' 판정을 직접 뒷받침한다",
       "confidence": "확실"
     },
     {
