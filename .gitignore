@@ -4,3 +4,4 @@
 img/
 .claude/settings.local.json.bak-freshness
 node_modules/
+scripts/check/.tmp-fixtures/
