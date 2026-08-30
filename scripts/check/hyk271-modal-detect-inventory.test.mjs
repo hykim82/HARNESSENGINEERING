@@ -4,38 +4,71 @@
 // blocked on an interactive prompt" before dispatch.
 //
 // This is NOT the detector itself (Q4's design doc is the proposal for
-// that). This file only checks the inventory stays well-formed: required
-// fields present and non-empty, confidence drawn from the allowed set, ids
-// unique, every required axis still present (2R P1-2), and -- per
-// coder-task.md §5 Q3 -- any axis tagged "확실" must carry evidence that
-// points at a real, currently-existing PLAIN FILE (not a directory or
-// symlink, 2R P1-3), and if the evidence names a line/line-range that range
-// must actually exist in that file.
+// that). This file checks the inventory stays well-formed: required fields
+// present and non-empty, confidence drawn from the allowed set, ids unique,
+// every required axis still present (2R P1-2) -- and, per coder-task.md §2
+// invariant P1, that EVERY item's evidence pointer resolves to a real,
+// currently-existing, repository-tracked PLAIN FILE (not a directory or
+// symlink, 2R P1-3; not an absolute machine path outside the repo, 3R
+// P1-fix -- see below), with any cited line/line-range actually existing in
+// that file. Separately, per invariant P2, any axis tagged "확실" must also
+// carry an evidence_kind of 실측관측 (a recorded real observation) or
+// 동작코드 (the evidence IS the implementation being described) -- 구조설명
+// (a field-list/comment enumeration that only describes structure, not
+// behavior) is never enough to carry "확실", no matter how real the file is.
 //
-// 2R review (HYK-271-modal-stall-2) rejected 1R for three reasons this
-// version fixes directly:
+// 3R (HYK-271-evidence-3) rejected 2R for three reasons this version fixes
+// directly:
+//   P1 (pointer tracking): axis-screen-scrollback's evidence pointed at
+//         `.harness/rounds/coder-task-r1.md:30` -- `.harness/` is
+//         `.gitignore`d, so that path does not exist in a fresh clone or in
+//         CI. The "existence" check below used to run ONLY for 확실-tagged
+//         items, so a 추론-tagged axis with a dead pointer slipped through
+//         "real inventory validates with zero errors" unnoticed -- exactly
+//         how this got past 2R. validateEvidencePointer now runs for EVERY
+//         item regardless of confidence, and rejects any evidence path that
+//         is an absolute machine path (outside what a fresh clone/CI has),
+//         not just a missing/directory/symlink one.
+//   Q2 (generalization): axis-process-pty-liveness's "확실" tag was
+//         demoted to "추론" -- its evidence (an update-confirmation-modal
+//         incident) did not establish that the same holds for a
+//         command-approval-modal, and the field-list code it cross-referenced
+//         only describes structure, not behavior.
+//   P2 (확실-needs-real-evidence, actually enforced): "whether evidence
+//         backs a claim" can't be read by a machine, so the contract is
+//         narrowed into something checkable: every item now also declares
+//         an evidence_kind (실측관측/동작코드/구조설명), and validateItem
+//         rejects "확실" + 구조설명 as a combination. This is the concrete
+//         fix for 2R's finding that reverting a 확실 axis to its old
+//         field-list-only evidence stayed GREEN -- see the "MUTATION (Q3)"
+//         test below, which performs exactly that revert on an in-memory
+//         clone and asserts it now goes RED. Known limit: this still cannot
+//         judge whether a given 실측관측/동작코드 citation is *convincing*
+//         evidence for the *specific* claim next to it -- that judgment
+//         stays human (reviewer read), same as before. What changed is that
+//         the one concrete failure mode actually observed (a demonstrably
+//         non-behavioral citation, e.g. a bare field-list comment, silently
+//         carrying "확실") is now mechanically closed.
+//
+// 2R (HYK-271-modal-stall-2) had already fixed, and this version keeps:
 //   P1-2: REQUIRED_AXIS_IDS below is the single source of truth for "the
 //         six axes" -- both the list-coverage test and validateInventory
 //         itself (so a deleted axis fails "zero errors" too, not just a
 //         separately-maintained test) read it, and a per-axis loop proves
 //         each one individually is load-bearing (deleting ANY of the six
 //         alone -- not just the whole set -- goes RED).
-//   P1-3: validateConfidentEvidence now lstat()s the resolved path and
-//         rejects anything that is not a plain file (directories,
-//         symlinks), then -- when the evidence string carries a
-//         "<path>:<line>" or "<path>:<start>-<end>" suffix -- reads the
-//         file and rejects an out-of-bounds line/range.
-//   P1-1: the two 확실-tagged axes' evidence was replaced (not padded) in
-//         the JSON itself with citations that actually back the specific
-//         behavioral claim being made; this file doesn't re-litigate that,
-//         it only re-verifies the replacement evidence is real.
+//   P1-3: the pointer check lstat()s the resolved path and rejects anything
+//         that is not a plain file (directories, symlinks), then -- when
+//         the evidence string carries a "<path>:<line>" or
+//         "<path>:<start>-<end>" suffix -- reads the file and rejects an
+//         out-of-bounds line/range.
 //
 // The "되돌림 변이 RED" requirement is proven here via in-memory mutated
 // clones of the real data (same technique as
 // scripts/check/hyk389-candidate0-inventory.test.mjs); a SEPARATE live-file
-// mutation + restore was performed by hand for both 1R and 2R and is
-// recorded in .harness/coder.md, not repeated here (this file must stay
-// green against the real inventory on every future run).
+// mutation + restore was performed by hand for 1R/2R/3R and is recorded in
+// .harness/coder.md, not repeated here (this file must stay green against
+// the real inventory on every future run).
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync, lstatSync } from "node:fs";
@@ -52,9 +85,22 @@ const REQUIRED_FIELDS = [
   "distinguishes_idle",
   "evidence",
   "confidence",
+  "evidence_kind",
 ];
 
 const ALLOWED_CONFIDENCE = new Set(["확실", "추론", "미확인"]);
+
+// 3R (Q3): the evidence *kind*, not just its existence. 실측관측 = a
+// recorded real observation/measurement; 동작코드 = the evidence IS the
+// implementation whose behavior is being cited; 구조설명 = a field-list or
+// comment enumeration that only describes structure/shape, never behavior.
+// This is the machine-checkable proxy coder-task.md §3 Q3 asks for ("근거가
+// 주장을 받치는가"는 기계가 읽을 수 없으니 판정 가능한 형태로 좁혀라) --
+// it does not judge whether a citation is convincing for its specific
+// claim, only whether its declared kind is strong enough to ever carry
+// "확실".
+const ALLOWED_EVIDENCE_KIND = new Set(["실측관측", "동작코드", "구조설명"]);
+const CONFIDENT_ALLOWED_EVIDENCE_KIND = new Set(["실측관측", "동작코드"]);
 
 // Single source of truth (2R P1-2): the six minimum candidate axes
 // coder-task.md §3 Q2 requires. Both the coverage test below AND
@@ -79,14 +125,8 @@ function validateField(item, field, label) {
     : [`${label}.${field}: must be a non-empty string`];
 }
 
-// "확실" 항목은 evidence가 실재하는 "파일"(디렉터리·심볼릭 링크 불가)을
-// 가리켜야 하고(coder-task.md §5 Q3-3, 2R P1-3), 줄 번호가 있으면 그 줄이
-// 실제 파일 범위 안에 있어야 한다. evidence 형식 관례 =
-// "<path>[:<line-or-range>] -- <설명>". " -- " 앞부분에서 경로(+줄 범위)를
-// 뽑는다. repo-relative 경로와 이 저장소 관례상의 절대 경로(예:
-// C:\Users\...\.claude-team\..., D:\문서관리\...)를 모두 허용한다 -- 이
-// 저장소는 이미 다른 곳에서도 이런 절대 경로를 근거로 쓴다(예: HYK-379
-// 패치 문서의 D:\ 경로).
+// evidence 형식 관례 = "<path>[:<line-or-range>] -- <설명>". " -- " 앞부분에서
+// 경로(+줄 범위)를 뽑는다.
 function extractPathAndLineFromEvidence(evidence) {
   const beforeDash = evidence.split(" -- ")[0].trim();
   const withLine = beforeDash.match(/^(.*?):(\d+)(?:-(\d+))?$/);
@@ -100,8 +140,19 @@ function extractPathAndLineFromEvidence(evidence) {
   return { rawPath: beforeDash, lineStart: null, lineEnd: null };
 }
 
-function resolveEvidencePath(rawPath) {
-  if (/^[A-Za-z]:[\\/]/.test(rawPath)) return rawPath;
+// 3R P1 fix: absolute machine paths (C:\Users\...\.claude-team\...,
+// D:\문서관리\...) used to be accepted on the theory that this repository
+// already cites such paths elsewhere. coder-task.md §2 invariant P1
+// overrides that precedent explicitly: an evidence pointer must be
+// something the REPOSITORY tracks (source code / commit SHA / a doc inside
+// the repo) -- a path on this machine is none of those, and does not exist
+// in a fresh clone or CI. So an absolute drive-letter path is now always a
+// validation error, regardless of confidence tier.
+function isAbsoluteMachinePath(rawPath) {
+  return /^[A-Za-z]:[\\/]/.test(rawPath);
+}
+
+function resolveRepoRelativePath(rawPath) {
   return fileURLToPath(new URL(`../../${rawPath}`, import.meta.url));
 }
 
@@ -112,51 +163,78 @@ function validateEvidenceLineRange(resolved, lineStart, lineEnd, label) {
     content = readFileSync(resolved, "utf8");
   } catch (err) {
     return [
-      `${label}: confidence "확실" but evidence file could not be read for line-range check: ${resolved} (${err.message})`,
+      `${label}: evidence file could not be read for line-range check: ${resolved} (${err.message})`,
     ];
   }
   const totalLines = content.split(/\r\n|\n/).length;
   if (lineStart < 1 || lineEnd < lineStart || lineEnd > totalLines) {
     return [
-      `${label}: confidence "확실" but evidence line range ${lineStart}-${lineEnd} is out of bounds for ${resolved} (file has ${totalLines} lines)`,
+      `${label}: evidence line range ${lineStart}-${lineEnd} is out of bounds for ${resolved} (file has ${totalLines} lines)`,
     ];
   }
   return [];
 }
 
-function validateConfidentEvidence(item, label) {
-  if (item.confidence !== "확실") return [];
+// 3R P1 fix: this used to run ONLY for confidence==="확실" items
+// (validateConfidentEvidence). That gap is exactly how axis-screen-scrollback
+// (confidence 추론) carried a dead `.harness/rounds/coder-task-r1.md:30`
+// pointer through 2R's "real inventory validates with zero errors" test
+// unnoticed -- a 추론 tag was never asked to prove its evidence was real.
+// coder-task.md §2 invariant P1 ("모든 근거 포인터는 저장소가 추적하는
+// 것을 가리킨다") applies to every item, not just 확실-tagged ones, so this
+// now runs unconditionally.
+function validateEvidencePointer(item, label) {
   if (typeof item.evidence !== "string" || item.evidence.trim() === "") {
-    return [`${label}: confidence "확실" but evidence is empty`];
+    return []; // covered by the generic required-field check
   }
   const { rawPath, lineStart, lineEnd } = extractPathAndLineFromEvidence(
     item.evidence,
   );
   if (!rawPath) {
-    return [`${label}: confidence "확실" but evidence has no parseable path`];
+    return [`${label}: evidence has no parseable path`];
   }
-  const resolved = resolveEvidencePath(rawPath);
+  if (isAbsoluteMachinePath(rawPath)) {
+    return [
+      `${label}: evidence path "${rawPath}" is an absolute machine path, not something the repository tracks (coder-task.md P1 -- only source code / commit SHA / a repo doc qualify)`,
+    ];
+  }
+  const resolved = resolveRepoRelativePath(rawPath);
 
   let stat;
   try {
     stat = lstatSync(resolved);
   } catch {
     return [
-      `${label}: confidence "확실" but evidence path does not exist: ${resolved}`,
+      `${label}: evidence path does not exist in the repository: ${resolved}`,
     ];
   }
   if (stat.isSymbolicLink()) {
     return [
-      `${label}: confidence "확실" but evidence path is a symlink, not a plain file: ${resolved}`,
+      `${label}: evidence path is a symlink, not a plain tracked file: ${resolved}`,
     ];
   }
   if (!stat.isFile()) {
     return [
-      `${label}: confidence "확실" but evidence path is not a plain file (directory?): ${resolved}`,
+      `${label}: evidence path is not a plain file (directory?): ${resolved}`,
     ];
   }
 
   return validateEvidenceLineRange(resolved, lineStart, lineEnd, label);
+}
+
+// 3R (Q3, P2 실발동): "확실"은 evidence_kind가 실측관측 또는 동작코드일
+// 때만 허용한다. 구조설명(필드 목록·주석 등 구조만 설명하는 근거)은 파일이
+// 아무리 real이어도 "확실"을 못 받친다 -- 2R의 근본 결함(1R의 약한
+// 근거를 되돌린 변이가 GREEN으로 통과)을 여기서 구조적으로 닫는다.
+function validateEvidenceKindAllowsConfidence(item, label) {
+  if (item.confidence !== "확실") return [];
+  if (typeof item.evidence_kind !== "string") return [];
+  if (!CONFIDENT_ALLOWED_EVIDENCE_KIND.has(item.evidence_kind)) {
+    return [
+      `${label}: confidence "확실" but evidence_kind "${item.evidence_kind}" is not strong enough to carry it (구조설명 등은 확실 근거로 인정하지 않는다 -- coder-task.md §3 Q3)`,
+    ];
+  }
+  return [];
 }
 
 function validateRequiredAxes(seenIds) {
@@ -195,7 +273,17 @@ function validateItem(item, index, seenIds) {
     );
   }
 
-  errors.push(...validateConfidentEvidence(item, label));
+  if (
+    typeof item.evidence_kind === "string" &&
+    !ALLOWED_EVIDENCE_KIND.has(item.evidence_kind)
+  ) {
+    errors.push(
+      `${label}.evidence_kind: "${item.evidence_kind}" is not one of ${[...ALLOWED_EVIDENCE_KIND].join("/")}`,
+    );
+  }
+
+  errors.push(...validateEvidencePointer(item, label));
+  errors.push(...validateEvidenceKindAllowsConfidence(item, label));
 
   return errors;
 }
@@ -393,6 +481,88 @@ test("MUTATION: 확실 axis with empty evidence is caught", () => {
         e.includes('confidence "확실" but evidence is empty') ||
         e.includes("must be a non-empty string"),
     ),
+  );
+});
+
+// 3R P1 fix: this is the exact gap that let axis-screen-scrollback's dead
+// `.harness/rounds/coder-task-r1.md:30` pointer through 2R -- it was
+// confidence 추론, and the old check only ran for 확실 items. Mutate a
+// non-확실 (추론) item's evidence to an absolute machine path and prove it
+// is caught anyway.
+test("MUTATION (3R P1): non-확실 axis with an absolute machine-path evidence pointer is caught", () => {
+  const data = cloneItems(loadRealInventory());
+  const nonConfidentIndex = data.items.findIndex(
+    (item) => item.confidence !== "확실",
+  );
+  assert.ok(
+    nonConfidentIndex >= 0,
+    "fixture must contain a non-확실 item to mutate",
+  );
+  data.items[nonConfidentIndex].evidence =
+    "C:\\Users\\Administrator\\.claude-team\\projects\\fake\\session.jsonl:1 -- not repo-tracked";
+  const errors = validateInventory(data);
+  assert.ok(
+    errors.some((e) => e.includes("absolute machine path")),
+    "expected an absolute machine-path evidence pointer on a non-확실 item to be rejected",
+  );
+});
+
+// Same gap, opposite shape: a non-확실 item with a dead repo-relative path
+// (not absolute) must also be caught, not just 확실 ones.
+test("MUTATION (3R P1): non-확실 axis with a fabricated repo-relative evidence path is caught", () => {
+  const data = cloneItems(loadRealInventory());
+  const nonConfidentIndex = data.items.findIndex(
+    (item) => item.confidence !== "확실",
+  );
+  assert.ok(
+    nonConfidentIndex >= 0,
+    "fixture must contain a non-확실 item to mutate",
+  );
+  data.items[nonConfidentIndex].evidence =
+    "scripts/check/this-file-does-not-exist-hyk271.mjs:1 -- fabricated";
+  const errors = validateInventory(data);
+  assert.ok(
+    errors.some((e) => e.includes("evidence path does not exist")),
+    "expected a non-확실 item with a fabricated path to be rejected",
+  );
+});
+
+test("MUTATION: unknown evidence_kind enum value is caught", () => {
+  const data = cloneItems(loadRealInventory());
+  data.items[0].evidence_kind = "그럴듯한근거";
+  const errors = validateInventory(data);
+  assert.ok(errors.some((e) => e.includes(".evidence_kind:")));
+});
+
+// 3R Q3 -- THE central "되돌림 변이 RED" proof coder-task.md §1⑶ demands:
+// 1R's weak evidence for a 확실 axis was a bare field-list/comment citation
+// (구조설명), and reverting to that kind of evidence used to stay GREEN
+// because nothing checked evidence *kind*, only its existence. Take the
+// current 확실 axis (a real, existing, in-bounds file -- passes every
+// existence/line-range check) and revert ONLY its evidence_kind to 구조설명,
+// leaving the file path untouched. This must now be RED.
+test("MUTATION (Q3, weak-evidence-revert RED): 확실 axis with evidence_kind reverted to 구조설명 is caught", () => {
+  const data = cloneItems(loadRealInventory());
+  const confidentIndex = data.items.findIndex(
+    (item) => item.confidence === "확실",
+  );
+  assert.ok(confidentIndex >= 0, "fixture must contain a 확실 item to mutate");
+  // sanity: the evidence path itself is untouched and still perfectly
+  // valid -- proves this failure is coming from the kind check, not a
+  // path/existence check silently doing the work instead.
+  assert.deepEqual(
+    validateEvidencePointer(data.items[confidentIndex], "sanity"),
+    [],
+  );
+  data.items[confidentIndex].evidence_kind = "구조설명";
+  const errors = validateInventory(data);
+  assert.ok(
+    errors.some(
+      (e) =>
+        e.includes('confidence "확실"') &&
+        e.includes('evidence_kind "구조설명"'),
+    ),
+    "expected reverting a 확실 axis's evidence_kind to 구조설명 to be rejected even though its evidence file is real",
   );
 });
 
