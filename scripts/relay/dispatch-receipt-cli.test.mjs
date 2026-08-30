@@ -1,7 +1,14 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, readFileSync, existsSync } from "node:fs";
+import {
+  mkdtempSync,
+  rmSync,
+  readFileSync,
+  existsSync,
+  mkdirSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -349,6 +356,81 @@ test("runDispatchReceiptCli: 2 dispatches -> 2 lines, and the 1st line is byte-i
       "1st line must be unchanged by the 2nd write",
     );
     assert.equal(JSON.parse(lines[1]).dispatch_id, "ctx_2");
+  });
+});
+
+// --- HYK-396 §3: optional --harness-dir wiring (delivery-time dispatch_id stamp) ---
+
+test("runDispatchReceiptCli: no --harness-dir -> stamp is skipped entirely (result.stamp is undefined, old callers unaffected)", () => {
+  withTempDir("hyk396-receipt-", (dir) => {
+    const receiptPath = join(dir, "receipts.jsonl");
+    const result = runDispatchReceiptCli(
+      [
+        "--role",
+        "CODER",
+        "--task-label",
+        "HYK-396-1",
+        "--receipt-path",
+        receiptPath,
+      ],
+      { stdinText: validResponse() },
+    );
+    assert.equal(result.ok, true);
+    assert.equal(result.stamp, undefined);
+  });
+});
+
+test("runDispatchReceiptCli: --harness-dir given + a matching rounds/CODER-task-r1.md snapshot exists -> stamps the real dispatch_id into it", () => {
+  withTempDir("hyk396-receipt-", (dir) => {
+    const receiptPath = join(dir, "receipts.jsonl");
+    const harnessDir = join(dir, ".harness");
+    const roundsDir = join(harnessDir, "rounds");
+    mkdirSync(roundsDir, { recursive: true });
+    writeFileSync(
+      join(roundsDir, "CODER-task-r1.md"),
+      "<!-- envelope-archive: role=CODER kind=task dropped_at=2026-08-30 10:00 KST dispatch_id=unknown -->\ntask_id: HYK-396-1\n",
+      "utf8",
+    );
+    const result = runDispatchReceiptCli(
+      [
+        "--role",
+        "CODER",
+        "--task-label",
+        "HYK-396-1",
+        "--receipt-path",
+        receiptPath,
+        "--harness-dir",
+        harnessDir,
+      ],
+      { stdinText: validResponse({ id: "ctx_stamped" }) },
+    );
+    assert.equal(result.ok, true, JSON.stringify(result));
+    assert.equal(result.stamp.ok, true);
+    const stamped = readFileSync(join(roundsDir, "CODER-task-r1.md"), "utf8");
+    assert.match(stamped, /dispatch_id=ctx_stamped/);
+  });
+});
+
+test("runDispatchReceiptCli: --harness-dir given but no snapshot exists -> receipt append still succeeds (stamp failure is best-effort, non-fatal)", () => {
+  withTempDir("hyk396-receipt-", (dir) => {
+    const receiptPath = join(dir, "receipts.jsonl");
+    const harnessDir = join(dir, ".harness");
+    const result = runDispatchReceiptCli(
+      [
+        "--role",
+        "CODER",
+        "--task-label",
+        "HYK-396-1",
+        "--receipt-path",
+        receiptPath,
+        "--harness-dir",
+        harnessDir,
+      ],
+      { stdinText: validResponse() },
+    );
+    assert.equal(result.ok, true, JSON.stringify(result));
+    assert.equal(result.stamp.ok, false);
+    assert.equal(existsSync(receiptPath), true);
   });
 });
 

@@ -97,7 +97,10 @@ import {
 // (envelope-archive.mjs, HYK-204/HYK-241) rather than inventing a second
 // archive mechanism -- scripts/check -> scripts/check, same allowed
 // direction this file already uses for every other sibling import above.
-import { archiveRoundTaskFileIfNew } from "./envelope-archive.mjs";
+import {
+  archiveRoundTaskFileIfNew,
+  extractArchivedDispatchId,
+} from "./envelope-archive.mjs";
 // HYK-239: reject-streak-chain.mjs's tamper-detection engine has existed
 // since HYK-218 with zero production callers (§0 실측). This is the wiring
 // -- NOT reject-streak.mjs/relay-handshake.mjs/review-gate.mjs, which the
@@ -983,17 +986,26 @@ export function lookupDispatchId({
 // 안전측으로 거부한다). role 비교는 대소문자 무관(결함3과 같은 이유 --
 // 아카이브 파일명은 실제 생산 경로가 쓴 그대로의 대소문자를 담고 있어
 // 파일명 관례상 소문자인 이 함수의 role 인자와 다를 수 있다).
-function findArchivedDroppedAt(harnessDir, role, harnessTaskLabel) {
+// HYK-396 §2 (확장, 회귀 0): 기존 계약("가장 높은 번호 사본 하나만 대조"·
+// task_id 일치 요구·droppedAt 못 찾으면 undefined) 그대로 두고, 같은
+// 파일을 두 번 읽지 않도록 그 자리에서 dispatch_id도 함께 뽑아 온다
+// (envelope-archive.mjs의 extractArchivedDispatchId -- "unknown"/부재는
+// 둘 다 undefined로 접힌다, 지어내지 않는다). 함수 이름을 findArchivedDroppedAt
+// 에서 findArchivedRoundMeta로 바꿨다(반환 모양이 바뀌었으므로) -- 이
+// 함수는 export되지 않고 이 파일 안 단일 호출부(evaluateConsumptionDecision)
+// 만 이 반환 모양에 의존하므로 외부 회귀는 없다.
+function findArchivedRoundMeta(harnessDir, role, harnessTaskLabel) {
   const archiveDir = join(harnessDir, "rounds");
   let names;
   try {
     names = readdirSync(archiveDir);
   } catch {
-    return undefined;
+    return { droppedAt: undefined, dispatchId: undefined };
   }
   const pattern = new RegExp(`^${role}-task-r(\\d+)\\.md$`, "i");
   let bestRound = -1;
   let bestDroppedAt;
+  let bestDispatchId;
   for (const name of names) {
     const m = pattern.exec(name);
     if (!m) continue;
@@ -1013,9 +1025,58 @@ function findArchivedDroppedAt(harnessDir, role, harnessTaskLabel) {
     if (roundNum > bestRound) {
       bestRound = roundNum;
       bestDroppedAt = droppedMatch[1].trim();
+      bestDispatchId = extractArchivedDispatchId(content);
     }
   }
-  return bestDroppedAt;
+  return { droppedAt: bestDroppedAt, dispatchId: bestDispatchId };
+}
+
+// HYK-396 §2 Q2 -- the new axis itself. Only called when the existing
+// 6-field binding (consumption-receipt-core.mjs's bindingEqual) has ALREADY
+// matched (decision === null, would-be ALLOW) -- this function can only
+// ever TIGHTEN that outcome (never loosen it): a missing archived stamp
+// (undefined, whether pre-migration or not-yet-post-hoc-stamped) skips the
+// axis (`{ reject: false }`, existing outcome stands, coder-task.md §3 Q2
+// "값이 없으면 없다고 기록"), a present stamp that agrees with the ledger's
+// resolved dispatchId for this round also skips (redundant confirmation,
+// same outcome), and a present stamp that DISAGREES rejects -- this last
+// case is the ONLY new REJECT this axis can ever produce (Q4 fixture ⓒ).
+// evaluateConsumptionDecision 자신의 eslint max-lines 상한을 지키려고
+// 뽑았다(HYK-244-receipt-core-1b 선례와 동일한 이유, 판정/값은 조금도
+// 바뀌지 않는다) -- HYK-396 §2: 기존 6성분 결속이 이미 ALLOW로 확정된
+// 뒤에만 이 축을 묻는다(§0 비타협 "판정 로직 자체는 바꾸지 마라" -- 이
+// 축은 그 로직을 대체하지 않고, 그 로직이 이미 낸 ALLOW를 조일 뿐이다).
+function resolveArchivedDispatchIdVeto(
+  role,
+  archivedRoundMeta,
+  currentBinding,
+) {
+  const idBinding = checkArchivedDispatchIdBinding(
+    role,
+    archivedRoundMeta.dispatchId,
+    currentBinding.dispatchId,
+  );
+  if (idBinding.reject) {
+    return {
+      state: DISPATCH_GATE_STATE.REJECT_ARCHIVED_DISPATCH_ID_MISMATCH,
+      allow: false,
+      reason: idBinding.reason,
+    };
+  }
+  return null;
+}
+
+function checkArchivedDispatchIdBinding(
+  role,
+  archivedDispatchId,
+  resolvedDispatchId,
+) {
+  if (archivedDispatchId === undefined) return { reject: false };
+  if (archivedDispatchId === resolvedDispatchId) return { reject: false };
+  return {
+    reject: true,
+    reason: `dispatch-gate-decision consumption: 보존 사본(rounds/${role}-task-r<N>.md)에 배달 시점 각인된 dispatch_id('${archivedDispatchId}')가 이 라운드의 실제 배달 원장(dispatch-receipts.jsonl)에서 조회된 dispatch_id('${resolvedDispatchId ?? "(조회 불가/없음)"}')와 다름 -> 위조 또는 다른 배달의 사본, 거부(HYK-396, 안전측 기본값)`,
+  };
 }
 
 // HYK-394-dispatch-id-bind-2 §2 (P2, reintroduced then RE-REVERTED --
@@ -2252,6 +2313,56 @@ function resultDoneAtMs(resultText) {
   );
 }
 
+// evaluateConsumptionDecision 자신의 eslint max-lines 상한을 지키려고
+// 뽑았다(HYK-244-receipt-core-1b 선례와 동일한 이유, 판정/값은 조금도
+// 바뀌지 않는다) -- HYK-394-dispatch-id-bind-2 §2 (P1)의 dispatch_id
+// lookup·HYK-244 2R-b3 결함1의 droppedAt 아카이브 조회·HYK-396 §2의
+// archivedRoundMeta.dispatchId 동시 추출·checkPredatesReceipts 면제
+// 판정·candidates 조회까지, currentBinding을 완성하는 데 필요한 모든
+// 단계를 한데 묶는다. `predatesReceipts: true`면 호출자가 즉시 ALLOW로
+// 물러난다(사유는 checkPredatesReceipts 자신이 이미 stderr에 찍는다).
+function buildConsumptionBindingContext({
+  role,
+  harnessTaskLabel,
+  harnessDir,
+  receiptPath,
+  resultText,
+}) {
+  const lookup = lookupDispatchIdWithLogging({
+    role,
+    harnessTaskLabel,
+    receiptPath,
+    beforeMs: resultDoneAtMs(resultText),
+  });
+
+  // 결함1의 나머지 절반: droppedAt도 같은 이유로 taskText가 아니라 그
+  // 직전 라운드가 자기 task 파일을 보존해 둔 아카이브 사본에서 온다.
+  // HYK-396 §2: 같은 조회에서 그 사본 헤더의 dispatch_id(배달 시점 각인,
+  // 부재/"unknown"이면 undefined)도 함께 뽑는다 -- 아래 decision===null
+  // (기존 6성분 결속이 이미 일치) 분기 뒤에서만 참조하는 별도 축이다.
+  const archivedRoundMeta = findArchivedRoundMeta(
+    harnessDir,
+    role,
+    harnessTaskLabel,
+  );
+  const currentBinding = buildCurrentBinding({
+    harnessTaskLabel,
+    role,
+    resultText,
+    lookup,
+    droppedAt: archivedRoundMeta.droppedAt,
+  });
+  if (checkPredatesReceipts(currentBinding)) {
+    return { predatesReceipts: true };
+  }
+  return {
+    predatesReceipts: false,
+    currentBinding,
+    archivedRoundMeta,
+    candidates: readConsumptionCandidates(harnessDir, role, receiptPath),
+  };
+}
+
 function evaluateConsumptionDecision(taskPath, args, env = process.env) {
   const role = deriveRoleFromTaskPath(taskPath);
   if (!role) return null;
@@ -2304,33 +2415,15 @@ function evaluateConsumptionDecision(taskPath, args, env = process.env) {
   });
   if (abortOutcome.done) return abortOutcome.result;
 
-  // HYK-394-dispatch-id-bind-2 §2 (P1): resultText's own doneAt anchors the
-  // dispatch_id lookup (see findLatestReceiptMatch's own header for the
-  // exploit this closes -- an unanchored "latest" query answers differently
-  // depending on when it's re-run). Extracted to its own function (quality:
-  // eslint max-lines-per-function) -- same value buildCurrentBinding
-  // computes for the binding itself a few lines below (same source, same
-  // regex), not a second, divergent computation.
-  const lookup = lookupDispatchIdWithLogging({
+  const bindingContext = buildConsumptionBindingContext({
     role,
     harnessTaskLabel,
+    harnessDir,
     receiptPath,
-    beforeMs: resultDoneAtMs(resultText),
-  });
-
-  // 결함1의 나머지 절반: droppedAt도 같은 이유로 taskText가 아니라 그
-  // 직전 라운드가 자기 task 파일을 보존해 둔 아카이브 사본에서 온다.
-  const droppedAt = findArchivedDroppedAt(harnessDir, role, harnessTaskLabel);
-  const currentBinding = buildCurrentBinding({
-    harnessTaskLabel,
-    role,
     resultText,
-    lookup,
-    droppedAt,
   });
-  if (checkPredatesReceipts(currentBinding)) return null; // ALLOW -- 사유는 위에서 이미 찍었다.
-
-  const candidates = readConsumptionCandidates(harnessDir, role, receiptPath);
+  if (bindingContext.predatesReceipts) return null; // ALLOW -- 사유는 위에서 이미 찍었다.
+  const { currentBinding, archivedRoundMeta, candidates } = bindingContext;
 
   // HYK-394-dispatch-id-bind-2 §2 (P2 재도입 -> 재반려, 실행으로 확인):
   // "가장 높은 번호 사본"만 보지 않고 같은 라벨의 사본 중 하나라도 결속
@@ -2355,7 +2448,13 @@ function evaluateConsumptionDecision(taskPath, args, env = process.env) {
     currentBinding,
     candidates,
   });
-  if (decision === null) return null;
+  if (decision === null) {
+    return resolveArchivedDispatchIdVeto(
+      role,
+      archivedRoundMeta,
+      currentBinding,
+    );
+  }
 
   if (
     tryArchiveFallback({
