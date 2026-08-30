@@ -135,16 +135,32 @@ function seedHandoff(dir, role, prev, next, { archivePrev = true } = {}) {
   return { taskPath, resultPath, resultContent };
 }
 
+// HYK-394-dispatch-id-bind-2 §2 (P1): `recordedAt` now defaults to a fixed
+// instant well before every fixture's `doneAt` in this file (all use
+// 2026-08-1x/2x dates) -- dispatch-gate-decision.mjs's dispatch_id lookup is
+// now anchored to "strictly before this round's own doneAt" (see
+// findLatestReceiptMatch's own header), so a ledger line recorded at real
+// wall-clock "now" (this file's old default) would fall AFTER any of these
+// historical doneAt fixtures and be silently excluded -- not a bug in the
+// lookup, a now-unrealistic fixture default (a real dispatch is always
+// recorded before its own round completes, never after). Callers that
+// specifically need to test the "recorded too late" rejection pass
+// `recordedAt` explicitly.
 function writeDispatchReceiptLine(
   path,
-  { role, harnessTaskLabel, dispatchId },
+  {
+    role,
+    harnessTaskLabel,
+    dispatchId,
+    recordedAt = "2020-01-01T00:00:00.000Z",
+  },
 ) {
   const record = {
-    recorded_at: new Date().toISOString(),
+    recorded_at: recordedAt,
     runtime_task_id: `task_${Math.random().toString(16).slice(2, 14)}`,
     dispatch_id: dispatchId,
     assignee_pane_key: "test-pane-key",
-    dispatch_timestamp_utc: new Date().toISOString(),
+    dispatch_timestamp_utc: recordedAt,
     dispatch_timestamp_source: "response.dispatched_at",
     role,
     harness_task_label: harnessTaskLabel,
@@ -588,21 +604,27 @@ function seedMixedReceiptsFixture(
     dispatchReceiptPath,
     [
       JSON.stringify({
-        recorded_at: new Date().toISOString(),
+        recorded_at: "2020-01-01T00:00:00.000Z",
         runtime_task_id: "task_stale",
         dispatch_id: "ctx_stale_prior",
         assignee_pane_key: "x",
-        dispatch_timestamp_utc: new Date().toISOString(),
+        dispatch_timestamp_utc: "2020-01-01T00:00:00.000Z",
         dispatch_timestamp_source: "response.dispatched_at",
         role: "CODER",
         harness_task_label: `${prevTaskId}-STALE`,
       }),
       JSON.stringify({
-        recorded_at: new Date().toISOString(),
+        // HYK-394-dispatch-id-bind-2 §2: must be BEFORE this fixture's own
+        // doneAt (2026-08-14 09:10:05 KST) -- the dispatch_id lookup is now
+        // anchored to "strictly before doneAt" (findLatestReceiptMatch's
+        // own header), so real wall-clock "now" (2026-08-30+) would fall
+        // AFTER and be silently excluded, which is exactly what this test
+        // must NOT trigger (it's the entry meant to match).
+        recorded_at: "2026-08-14T00:00:00.000Z",
         runtime_task_id: "task_current",
         dispatch_id: "ctx_test_mixed_current",
         assignee_pane_key: "x",
-        dispatch_timestamp_utc: new Date().toISOString(),
+        dispatch_timestamp_utc: "2026-08-14T00:00:00.000Z",
         dispatch_timestamp_source: "response.dispatched_at",
         role: "CODER",
         harness_task_label: prevTaskId,
@@ -988,9 +1010,17 @@ function buildArchiveMatchFixture(
   const roundsDir = join(dir, "rounds");
   mkdirSync(roundsDir, { recursive: true });
   // 보존 TASK 사본(droppedAt 조회용, seedHandoff와 동일 헤더 관례).
+  // HYK-396 3R §1 Q1⑵ (fallback 경로는 ABSENT를 허용하지 않는다) 이후:
+  // 이 픽스처는 fallback(ARCHIVE_MATCH) 경로를 실제로 태우므로, 이제
+  // 실물 배달과 동일하게 dispatch_id를 각인해 둬야 한다 -- 이 함수
+  // 자신이 이미 같은 dispatchId로 영수증도 쓰므로(아래), 여기서도 같은
+  // 값을 헤더에 넣으면 정확히 "정상적으로 각인된 사본"(MATCH) 모양이
+  // 된다(이 함수의 원래 의도인 "보관함 대조 자체가 안전한가"는 조금도
+  // 바뀌지 않는다 -- dispatch_id 축은 그 논리와 직교하는 별개의 관문일
+  // 뿐이다).
   writeFileSync(
     join(roundsDir, `${upperRole}-task-r1.md`),
-    `<!-- envelope-archive: role=${upperRole} kind=task dropped_at=${droppedAt} -->\ntask_id: ${prevTaskId}\ndropped_at: ${droppedAt}\n${ONE_B_BLOCK}`,
+    `<!-- envelope-archive: role=${upperRole} kind=task dropped_at=${droppedAt} dispatch_id=${dispatchId} -->\ntask_id: ${prevTaskId}\ndropped_at: ${droppedAt}\n${ONE_B_BLOCK}`,
     "utf8",
   );
   // 보존 RESULT 사본 -- envelope-archive.mjs 193행과 바이트 동일한 헤더

@@ -150,6 +150,18 @@ export const DISPATCH_GATE_STATE = Object.freeze({
   REJECT_HEAD_COMMIT_MALFORMED: "REJECT_HEAD_COMMIT_MALFORMED",
   REJECT_HEAD_COMMIT_AMBIGUOUS: "REJECT_HEAD_COMMIT_AMBIGUOUS",
   REJECT_HEAD_COMMIT_UNREADABLE: "REJECT_HEAD_COMMIT_UNREADABLE",
+  // HYK-396 §2: dispatch-gate-decision.mjs's delivery-time dispatch_id stamp
+  // axis (checkArchivedDispatchIdBinding below) -- distinct from every
+  // REJECT_* above because it fires only when the normal 6-field binding
+  // (consumption-receipt-core.mjs's bindingEqual) has ALREADY matched
+  // (decision === null, would-be ALLOW) and the archived round-task
+  // snapshot (.harness/rounds/<role>-task-r<N>.md header, envelope-
+  // archive.mjs) carries a dispatch_id stamped at delivery time that
+  // actively DISAGREES with the dispatch_id resolved for this same round
+  // from the ledger (dispatch-receipts.jsonl) -- a forged/tampered stamp,
+  // never a missing one (missing/unknown stamps skip this axis entirely,
+  // coder-task.md §3 Q2 "값이 없으면 없다고 기록").
+  REJECT_ARCHIVED_DISPATCH_ID_MISMATCH: "REJECT_ARCHIVED_DISPATCH_ID_MISMATCH",
 });
 
 function firstNonEmpty(...candidates) {
