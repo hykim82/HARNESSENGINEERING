@@ -1,5 +1,6 @@
 import { appendFileSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname } from "node:path";
+import { stampDispatchIdOnLatestArchivedTaskFile } from "../check/envelope-archive.mjs";
 
 // HYK-219-receipts-1 (gap#96 대조의 왼쪽 항): 배달 성공 직후 관제실
 // `dispatch-worker.ps1`이 호출하는 저장소 CLI -- "우리 도구가 이 배달을
@@ -41,10 +42,16 @@ function isNonEmptyString(v) {
   return typeof v === "string" && v.length > 0;
 }
 
+// HYK-396 §3: `--harness-dir`는 선택 필드다(§1 필수 6필드에 포함되지
+// 않는다 -- 이 플래그가 없어도 이 CLI의 기존 계약은 조금도 바뀌지
+// 않는다). 관제실이 넘겨 주면(이 CLI가 이미 아는 role+dispatch_id로) 배달
+// 시점 각인(§3 아래 runDispatchReceiptCli)을 시도하고, 안 넘기면 그
+// 시도 자체를 건너뛴다(기존 배포/구 버전 관제실과 100% 호환).
 const FLAG_TO_FIELD = Object.freeze({
   "--role": "role",
   "--task-label": "harnessTaskLabel",
   "--receipt-path": "receiptPath",
+  "--harness-dir": "harnessDir",
 });
 
 function classifyFlag(arg) {
@@ -69,9 +76,10 @@ function classifyFlag(arg) {
 // 쓰지 않는다) -- 조용히 어딘가에 기본 파일을 만들지 않는다(§1 "얇은
 // 껍데기 금지").
 const USAGE =
-  "usage: dispatch-receipt-cli.mjs --role <CODER|REVIEW|VERIFY|PM> --task-label <harness task label> [--receipt-path <path>]\n" +
+  "usage: dispatch-receipt-cli.mjs --role <CODER|REVIEW|VERIFY|PM> --task-label <harness task label> [--receipt-path <path>] [--harness-dir <path>]\n" +
   "  dispatch 응답 JSON(orca orchestration dispatch --json 출력)을 stdin으로 받는다.\n" +
-  "  --receipt-path 생략 시 env DISPATCH_RECEIPT_PATH를 쓴다 -- 둘 다 없으면 실패(저장소 안 절대경로 하드코딩 금지).";
+  "  --receipt-path 생략 시 env DISPATCH_RECEIPT_PATH를 쓴다 -- 둘 다 없으면 실패(저장소 안 절대경로 하드코딩 금지).\n" +
+  "  --harness-dir 생략 시 HYK-396 배달 시점 dispatch_id 각인을 건너뛴다(선택 필드, 구 버전 관제실 호환).";
 
 // env는 호출자가 명시로 주입한다(direct-entry는 process.env) -- 순수 함수로
 // 유지해 시험이 실 환경을 건드리지 않게 한다.
@@ -250,17 +258,36 @@ export function runDispatchReceiptCli(argv, opts = {}) {
   });
   if (!appended.ok) return appended;
 
-  return { ok: true, record };
+  // HYK-396 §3 (완성: dispatch_id를 배달 시점에 보존 사본에 실제로 굽는다).
+  // 이 지점이 그 순간이다 -- 이 CLI 호출 자체가 "방금 실제 dispatch 응답을
+  // 받았다"는 사실이고, record.dispatch_id는 그 응답에서 막 뽑은 값이다
+  // (위 REQUIRED_DISPATCH_FIELDS, 지어낸 값이 아니다). `--harness-dir`가
+  // 없으면(구 버전 관제실, 또는 아직 패치 미적용) 시도 자체를 건너뛴다 --
+  // best-effort, 이 CLI 자신의 exit code/ok는 영향받지 않는다(영수증
+  // append 자체가 이 CLI의 1차 계약, §1 그대로).
+  let stamp;
+  if (isNonEmptyString(parsed.harnessDir)) {
+    stamp = stampDispatchIdOnLatestArchivedTaskFile({
+      role: parsed.role,
+      harnessDir: parsed.harnessDir,
+      dispatchId: record.dispatch_id,
+    });
+  }
+
+  return { ok: true, record, stamp };
 }
 
 export function formatDispatchReceiptResult(result) {
   if (result.help) return USAGE;
   if (result.ok) {
     const r = result.record;
+    const stampSuffix = result.stamp
+      ? ` stamp=${result.stamp.ok ? (result.stamp.skipped ? "SKIPPED" : "OK") : "FAILED"}(${result.stamp.reason})`
+      : "";
     return (
       `RECORDED dispatch_id=${r.dispatch_id} runtime_task_id=${r.runtime_task_id} ` +
       `assignee_pane_key=${r.assignee_pane_key} role=${r.role} label=${r.harness_task_label} ` +
-      `timestamp_utc=${r.dispatch_timestamp_utc}(${r.dispatch_timestamp_source})`
+      `timestamp_utc=${r.dispatch_timestamp_utc}(${r.dispatch_timestamp_source})${stampSuffix}`
     );
   }
   return `FAILED reason=${result.reason}`;

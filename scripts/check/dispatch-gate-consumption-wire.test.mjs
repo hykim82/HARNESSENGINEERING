@@ -1010,9 +1010,17 @@ function buildArchiveMatchFixture(
   const roundsDir = join(dir, "rounds");
   mkdirSync(roundsDir, { recursive: true });
   // 보존 TASK 사본(droppedAt 조회용, seedHandoff와 동일 헤더 관례).
+  // HYK-396 3R §1 Q1⑵ (fallback 경로는 ABSENT를 허용하지 않는다) 이후:
+  // 이 픽스처는 fallback(ARCHIVE_MATCH) 경로를 실제로 태우므로, 이제
+  // 실물 배달과 동일하게 dispatch_id를 각인해 둬야 한다 -- 이 함수
+  // 자신이 이미 같은 dispatchId로 영수증도 쓰므로(아래), 여기서도 같은
+  // 값을 헤더에 넣으면 정확히 "정상적으로 각인된 사본"(MATCH) 모양이
+  // 된다(이 함수의 원래 의도인 "보관함 대조 자체가 안전한가"는 조금도
+  // 바뀌지 않는다 -- dispatch_id 축은 그 논리와 직교하는 별개의 관문일
+  // 뿐이다).
   writeFileSync(
     join(roundsDir, `${upperRole}-task-r1.md`),
-    `<!-- envelope-archive: role=${upperRole} kind=task dropped_at=${droppedAt} -->\ntask_id: ${prevTaskId}\ndropped_at: ${droppedAt}\n${ONE_B_BLOCK}`,
+    `<!-- envelope-archive: role=${upperRole} kind=task dropped_at=${droppedAt} dispatch_id=${dispatchId} -->\ntask_id: ${prevTaskId}\ndropped_at: ${droppedAt}\n${ONE_B_BLOCK}`,
     "utf8",
   );
   // 보존 RESULT 사본 -- envelope-archive.mjs 193행과 바이트 동일한 헤더

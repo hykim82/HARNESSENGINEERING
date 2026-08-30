@@ -35,6 +35,10 @@ function escapeForRegex(str) {
   return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+function isNonEmptyStringLocal(v) {
+  return typeof v === "string" && v.length > 0;
+}
+
 // HYK-204 §2 축3(이름): 라운드 번호는 사람이 손으로 대는 값이 아니라 이미
 // 그 role의 archive 폴더에 몇 개가 쌓여 있는지를 세어 기계적으로 매긴다
 // -- "동일 파일명 재사용(=덮어쓰기 재발)"을 막는 것이 이 함수의 유일한
@@ -137,6 +141,7 @@ export function archiveRoundTaskFile({
   role,
   taskContent,
   harnessDir,
+  dispatchId: providedDispatchId,
   readdirFn = readdirSync,
   mkdirFn = mkdirSync,
   writeFileFn = writeFileSync,
@@ -182,7 +187,21 @@ export function archiveRoundTaskFile({
     }
     const destPath = join(archiveDir, fileName);
     const droppedAt = extractDroppedAt(taskContent);
-    const header = `<!-- envelope-archive: role=${role} kind=task dropped_at=${droppedAt} -->\n`;
+    // HYK-396 §2/§3 (Q1 실측 근거: 이 헤더는 이 라운드가 배달되는 taskContent
+    // 자체를 스냅숏하는 유일한 지점인데, 여기서 dispatch_id는 원리적으로
+    // 아직 모른다 -- 이 CLI(dispatch-gate-decision.mjs의
+    // bestEffortSnapshotRoundTaskFile)는 실물 앵커(dispatch-worker.ps1:171)가
+    // 실제 `orca orchestration dispatch`를 부르기 «전»에 돈다, dispatch_id는
+    // 그 호출의 응답에만 있다. ⛔값을 지어내지 않는다(coder-task.md §3 Q2) --
+    // 호출자가 안 주면 리터럴 "unknown"을 적어 "모른다"는 사실 자체를
+    // 남긴다(extractDroppedAt의 기존 "unknown" 관례와 동일). 실제 값은
+    // stampDispatchIdOnLatestArchivedTaskFile(아래)이 배달 «직후»(dispatch_id를
+    // 실제로 아는 순간) 이 파일을 다시 열어 덮어쓴다 -- 관제실 패치 제안
+    // 문서 참조(docs/control-room-patches/HYK-396-dispatch-id-stamp.md).
+    const dispatchId = isNonEmptyStringLocal(providedDispatchId)
+      ? providedDispatchId
+      : "unknown";
+    const header = `<!-- envelope-archive: role=${role} kind=task dropped_at=${droppedAt} dispatch_id=${dispatchId} -->\n`;
     writeFileFn(destPath, header + taskContent, "utf8");
     return {
       ok: true,
@@ -262,6 +281,7 @@ export function archiveRoundTaskFileIfNew({
   role,
   taskContent,
   harnessDir,
+  dispatchId,
   readdirFn = readdirSync,
   mkdirFn = mkdirSync,
   writeFileFn = writeFileSync,
@@ -291,6 +311,7 @@ export function archiveRoundTaskFileIfNew({
       role,
       taskContent,
       harnessDir,
+      dispatchId,
       readdirFn,
       mkdirFn,
       writeFileFn,
@@ -372,4 +393,261 @@ export function archiveRoundEnvelope({
       reason: `envelope-archive: failed to preserve ${role} round (${err.message})`,
     };
   }
+}
+
+// HYK-396 §2/§3 -- the delivery-time-stamp completion HYK-394 punted here
+// (그 라운드 헤더의 "완성은 HYK-396 예정" 그대로). archiveRoundTaskFile's
+// header (위) is written BEFORE the actual `orca orchestration dispatch`
+// call fires (dispatch-gate-decision.mjs's bestEffortSnapshotRoundTaskFile
+// runs at the real anchor dispatch-worker.ps1:171, which is BEFORE the
+// dispatch response that carries dispatch_id exists) -- so it can only ever
+// write the literal "unknown" for dispatch_id at that instant (a real value
+// there would be invented, forbidden by coder-task.md §3 Q2). This function
+// is the second half: called once the real dispatch_id IS known (control
+// room, right after the dispatch response returns -- see the patch proposal
+// docs/control-room-patches/HYK-396-dispatch-id-stamp.md for exactly where),
+// it finds THIS round's own snapshot (the highest-numbered
+// `<role>-task-r<N>.md`, which is guaranteed to be the file
+// bestEffortSnapshotRoundTaskFile just wrote for this exact delivery,
+// because no other delivery for this role can occur between the gate call
+// and the dispatch response in the real single-threaded ps1 flow) and
+// rewrites its header's dispatch_id field in place -- the round-task
+// snapshot's BODY (the task instructions themselves) is never touched,
+// only the header line this module itself owns.
+//
+// One-shot: refuses (ok:false) to overwrite an already-real (non-"unknown")
+// stamp with a DIFFERENT value -- a second call for the same archive file
+// with a different dispatchId means either a retry raced with a new
+// delivery already claiming this label's next round slot, or a forged call;
+// either way, silently overwriting would erase the very binding this axis
+// exists to protect (fail loud instead, never fail silent). A call carrying
+// the SAME dispatchId as what's already stamped is a true no-op retry
+// (ok:true, skipped:true) -- idempotent, matching archiveRoundTaskFileIfNew's
+// house style.
+const ARCHIVE_TASK_FILE_NAME_RE_TEMPLATE = (role) =>
+  new RegExp(`^${escapeForRegex(role)}-task-r(\\d+)\\.md$`, "i");
+
+const ARCHIVE_TASK_HEADER_LINE_RE = /^<!-- envelope-archive:[^\n]*-->\n/;
+// HYK-396 2R §2 (P2 검토 rejected 사유 재현 방지): `\S+`(옛 정규식)는 `=`
+// 바로 뒤가 공백이거나(빈 값·앞 공백 변형) 값 안에 공백이 섞이면 그
+// 자리에서 매치 자체가 실패했다 -- 그 실패는 "필드가 있는데 값이 손상"과
+// "필드가 아예 없음"을 구별하지 못하고 둘 다 조용히 undefined(=ABSENT)로
+// 뭉갰다(검토자 실측: 빈 값·공백만·앞 공백 변형 셋 다 ALLOW로 새는 원인).
+// `[^\n]*?`(줄바꿈 제외, lazy) + 뒤이은 리터럴 ` -->`로 바꿔 "다음 필드
+// 구분자(닫는 주석)까지의 원문 그대로"를 무조건 캡처한다 -- 그 안에 무엇이
+// 들었든(빈 문자열·공백·앞뒤 공백 섞인 값) 아래 classifyArchivedDispatchId가
+// 「모른다」로 접지 않고 반드시 판정한다. ⛔이 정규식은 쓰기 쪽
+// (computeStampedContent)도 함께 쓴다 -- 전체 매치(`[0]`)가 항상 ` -->`로
+// 끝나므로, 치환 문자열에도 그 접미사를 그대로 되붙여야 헤더가 안 깨진다
+// (아래 replace 호출부 참고).
+const ARCHIVE_TASK_HEADER_DISPATCH_ID_RE = /dispatch_id=([^\n]*?) -->/;
+
+// HYK-396 3R §1 Q1⑶ (검토자 실증 재현 방지): 두 번째 우회 -- 각인 값 뒤에
+// 개행을 하나 심으면 ARCHIVE_TASK_HEADER_LINE_RE(줄바꿈을 절대 허용하지
+// 않는 `[^\n]*`)가 헤더 전체를 매치하지 못해 headerMatch가 null이 되고,
+// 옛 코드는 이를 "헤더 자체가 없음"(ABSENT)으로 접었다 -- 실제로는
+// `<!-- envelope-archive:` 접두사가 버젓이 있는, 이 모듈이 만든 사본이
+// 깨진 것이다(잘림·중복 필드도 같은 계열: "파싱 실패"이지 "없음"이
+// 아니다). 접두사 존재 여부로 그 둘을 가른다 -- 접두사가 있는데 온전한
+// 한 줄 헤더로 파싱되지 않으면 DAMAGED, 접두사 자체가 없으면(이 모듈이
+// 손댄 적 없는 파일) 진짜 ABSENT다.
+const ARCHIVE_TASK_HEADER_PREFIX = "<!-- envelope-archive:";
+const DISPATCH_ID_FIELD_OCCURRENCE_RE = /dispatch_id=/g;
+
+// HYK-396 2R §2 -- 헤더에서 dispatch_id를 "판정 가능한 셋 중 하나"로
+// 분류한다. 순수 함수(파일 I/O 없음), extractArchivedDispatchId(아래)와
+// checkArchivedDispatchIdBinding(dispatch-gate-decision.mjs)이 각각 다른
+// 목적으로 이 판정을 쓴다 -- 전자는 "값이 있으면 무엇인지"만 궁금하고,
+// 후자는 "손상(DAMAGED)이면 무조건 거부"라는 세 번째 갈래가 필요하다.
+//   - ABSENT: 헤더 접두사 자체가 없거나(이 모듈이 만든 사본이 아님),
+//     온전한 헤더인데 필드 자체가 없거나(이행 기간 옛 사본), 리터럴
+//     "unknown"(배달 시점 미확정 스냅숏, 아직
+//     stampDispatchIdOnLatestArchivedTaskFile이 못 돈 경우) -- 이 축을
+//     건드리지 않는다(1R Q2 "값 부재 스킵", 검토 §1 "다시 하지 마라"
+//     목록에 있는 회귀 0 계약 그대로 유지).
+//   - DAMAGED: 헤더 접두사는 있는데 한 줄로 온전히 파싱되지 않거나(개행
+//     삽입·잘림, 3R §1 Q1⑶), `dispatch_id=`가 두 번 이상 나타나거나(중복
+//     필드, 어느 것이 진짜인지 결정 불가), 필드는 있는데 값이 트림 후
+//     빈 문자열이거나(빈 값·공백만), 원문 자체가 트림 결과와 다르다(앞뒤
+//     공백 섞인 변형, 2R §2) -- ★"없음"이 아니라 "손상"이다. 이 상태는
+//     언제나 거부로 이어져야 한다(2R §2 P2 원문 그대로, 3R §1 Q1⑶로
+//     범위 확장: "파싱 실패는 «없음»이 아니다").
+//   - VALUE: 위 두 경우가 아닌, 앞뒤 공백 없는 순수 토큰 하나 -- 실값으로
+//     취급한다(원장 값과의 일치 여부는 호출자 몫).
+export function classifyArchivedDispatchId(content) {
+  const headerMatch = content.match(ARCHIVE_TASK_HEADER_LINE_RE);
+  if (!headerMatch) {
+    return content.startsWith(ARCHIVE_TASK_HEADER_PREFIX)
+      ? { kind: "DAMAGED" }
+      : { kind: "ABSENT" };
+  }
+  const headerLine = headerMatch[0];
+  const fieldOccurrences = (
+    headerLine.match(DISPATCH_ID_FIELD_OCCURRENCE_RE) ?? []
+  ).length;
+  if (fieldOccurrences > 1) return { kind: "DAMAGED" };
+  const idMatch = headerLine.match(ARCHIVE_TASK_HEADER_DISPATCH_ID_RE);
+  if (!idMatch) return { kind: "ABSENT" };
+  const raw = idMatch[1];
+  if (raw === "unknown") return { kind: "ABSENT" };
+  if (raw.trim().length === 0 || raw !== raw.trim()) {
+    return { kind: "DAMAGED", raw };
+  }
+  return { kind: "VALUE", value: raw };
+}
+
+function findLatestArchivedTaskFileName(role, existingNames) {
+  const pattern = ARCHIVE_TASK_FILE_NAME_RE_TEMPLATE(role);
+  let bestRound = -1;
+  let bestName;
+  for (const name of existingNames) {
+    const m = pattern.exec(name);
+    if (!m) continue;
+    const n = Number(m[1]);
+    if (n > bestRound) {
+      bestRound = n;
+      bestName = name;
+    }
+  }
+  return bestName ?? null;
+}
+
+// stampDispatchIdOnLatestArchivedTaskFile 자신의 eslint max-lines/
+// complexity 상한을 지키려고 뽑았다(동작 변경 없음) -- 대상 파일을
+// 찾고 읽는, 순수 I/O 부분만 담당한다.
+function readLatestArchivedTaskFile(role, harnessDir, readdirFn, readFileFn) {
+  const archiveDir = join(harnessDir, ARCHIVE_SUBDIR);
+  let names;
+  try {
+    names = readdirFn(archiveDir);
+  } catch (err) {
+    return {
+      ok: false,
+      reason: `envelope-archive: cannot list ${archiveDir} to find this round's snapshot (${err.message})`,
+    };
+  }
+  const fileName = findLatestArchivedTaskFileName(role, names);
+  if (!fileName) {
+    return {
+      ok: false,
+      reason: `envelope-archive: no ${role}-task-r*.md snapshot found in ${archiveDir} -- nothing to stamp (delivery-time snapshot must run first)`,
+    };
+  }
+  const destPath = join(archiveDir, fileName);
+  try {
+    return { ok: true, destPath, content: readFileFn(destPath, "utf8") };
+  } catch (err) {
+    return {
+      ok: false,
+      reason: `envelope-archive: cannot read ${destPath} to stamp dispatch_id (${err.message})`,
+    };
+  }
+}
+
+// stampDispatchIdOnLatestArchivedTaskFile 자신의 eslint max-lines/
+// complexity 상한을 지키려고 뽑았다(동작 변경 없음) -- 헤더 판독 +
+// one-shot 판정 + 새 헤더 텍스트 계산까지, 파일 I/O가 전혀 없는 순수
+// 함수(시험하기 쉽게 분리). 반환 모양: {ok:false, reason} | {ok:true,
+// skipped, reason} | {ok:true, skipped:false, rewritten}.
+function computeStampedContent(destPath, content, dispatchId) {
+  const headerMatch = content.match(ARCHIVE_TASK_HEADER_LINE_RE);
+  if (!headerMatch) {
+    return {
+      ok: false,
+      reason: `envelope-archive: ${destPath} has no envelope-archive header line -- not a file this module produced, refusing to stamp`,
+    };
+  }
+  const headerLine = headerMatch[0];
+  const idMatch = headerLine.match(ARCHIVE_TASK_HEADER_DISPATCH_ID_RE);
+  const existing = idMatch ? idMatch[1] : undefined;
+  if (existing === dispatchId) {
+    return {
+      ok: true,
+      skipped: true,
+      reason: `envelope-archive: ${destPath} already stamped with dispatch_id=${dispatchId} -- no-op retry`,
+    };
+  }
+  if (existing !== undefined && existing !== "unknown") {
+    return {
+      ok: false,
+      reason: `envelope-archive: refusing to overwrite ${destPath}'s existing dispatch_id=${existing} with a different value (${dispatchId}) -- one-shot stamp, this looks like a race or a forged call`,
+    };
+  }
+  // HYK-396 2R: ARCHIVE_TASK_HEADER_DISPATCH_ID_RE의 전체 매치(`[0]`)는
+  // 이제 항상 ` -->`로 끝난다(위 정규식 자신의 헤더 주석 참조) -- 치환
+  // 문자열에도 그 접미사를 그대로 되붙여야 헤더가 안 깨진다.
+  const newHeaderLine = idMatch
+    ? headerLine.replace(
+        ARCHIVE_TASK_HEADER_DISPATCH_ID_RE,
+        `dispatch_id=${dispatchId} -->`,
+      )
+    : headerLine.replace(/ -->\n$/, ` dispatch_id=${dispatchId} -->\n`);
+  return {
+    ok: true,
+    skipped: false,
+    rewritten: content.replace(ARCHIVE_TASK_HEADER_LINE_RE, newHeaderLine),
+  };
+}
+
+export function stampDispatchIdOnLatestArchivedTaskFile({
+  role,
+  harnessDir,
+  dispatchId,
+  readdirFn = readdirSync,
+  readFileFn = readFileSync,
+  writeFileFn = writeFileSync,
+}) {
+  if (!isNonEmptyStringLocal(role)) {
+    return {
+      ok: false,
+      reason: "envelope-archive: role missing -- cannot stamp dispatch_id",
+    };
+  }
+  if (!isNonEmptyStringLocal(dispatchId)) {
+    return {
+      ok: false,
+      reason:
+        "envelope-archive: dispatchId missing -- refusing to invent a value (손기입 대체값 금지)",
+    };
+  }
+  const found = readLatestArchivedTaskFile(
+    role,
+    harnessDir,
+    readdirFn,
+    readFileFn,
+  );
+  if (!found.ok) return found;
+  const { destPath, content } = found;
+  const computed = computeStampedContent(destPath, content, dispatchId);
+  if (!computed.ok || computed.skipped) {
+    return computed.ok ? { ...computed, path: destPath } : computed;
+  }
+  try {
+    writeFileFn(destPath, computed.rewritten, "utf8");
+  } catch (err) {
+    return {
+      ok: false,
+      reason: `envelope-archive: failed to write stamped dispatch_id to ${destPath} (${err.message})`,
+    };
+  }
+  return {
+    ok: true,
+    skipped: false,
+    reason: `envelope-archive: ${destPath} stamped with dispatch_id=${dispatchId}`,
+    path: destPath,
+  };
+}
+
+// Extraction counterpart of the above -- reads dispatch_id back out of an
+// archived round-task snapshot's header. Returns undefined for "no header"/
+// "no field"/literal "unknown" (ABSENT, §2 Q2 1R: absence is absence) AND
+// for DAMAGED (empty/whitespace-only/surrounded-by-whitespace -- §2 Q2 2R:
+// "손상"). ⛔이 thin wrapper만 쓰는 호출자는 ABSENT와 DAMAGED를 구별하지
+// 못한다 -- DAMAGED를 반드시 별도로 다뤄야 하는 호출자(소비 판정 축,
+// dispatch-gate-decision.mjs)는 classifyArchivedDispatchId를 직접 써야
+// 한다(findArchivedRoundMeta가 그렇게 한다). 이 wrapper는 순수 "값이
+// 있으면 무엇인지"만 궁금한 나머지 호출자·시험을 위해 남긴다.
+export function extractArchivedDispatchId(content) {
+  const classified = classifyArchivedDispatchId(content);
+  return classified.kind === "VALUE" ? classified.value : undefined;
 }

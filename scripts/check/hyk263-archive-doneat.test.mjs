@@ -253,9 +253,15 @@ function buildArchiveMatchFixture(
 
   const roundsDir = join(dir, "rounds");
   mkdirSync(roundsDir, { recursive: true });
+  // HYK-396 3R §1 Q1⑵ (fallback 경로는 ABSENT를 허용하지 않는다) 이후:
+  // 이 픽스처가 실제로 태우는 tryArchiveFallback(ARCHIVE_MATCH) 경로는
+  // 이제 dispatch_id 각인이 원장과 일치해야 통과한다 -- 이 함수가 이미
+  // 같은 dispatchId로 영수증도 쓰므로(아래) 여기서도 같은 값을 헤더에
+  // 넣는다(dispatch-gate-consumption-wire.test.mjs의 동형 픽스처와
+  // 동일한 이유·동일한 수정).
   writeFileSync(
     join(roundsDir, `${upperRole}-task-r1.md`),
-    `<!-- envelope-archive: role=${upperRole} kind=task dropped_at=${droppedAt} -->\ntask_id: ${prevTaskId}\ndropped_at: ${droppedAt}\n${ONE_B_BLOCK}`,
+    `<!-- envelope-archive: role=${upperRole} kind=task dropped_at=${droppedAt} dispatch_id=${dispatchId} -->\ntask_id: ${prevTaskId}\ndropped_at: ${droppedAt}\n${ONE_B_BLOCK}`,
     "utf8",
   );
   const archiveResultContent = tamperArchiveToo

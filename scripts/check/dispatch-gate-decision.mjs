@@ -97,7 +97,10 @@ import {
 // (envelope-archive.mjs, HYK-204/HYK-241) rather than inventing a second
 // archive mechanism -- scripts/check -> scripts/check, same allowed
 // direction this file already uses for every other sibling import above.
-import { archiveRoundTaskFileIfNew } from "./envelope-archive.mjs";
+import {
+  archiveRoundTaskFileIfNew,
+  classifyArchivedDispatchId,
+} from "./envelope-archive.mjs";
 // HYK-239: reject-streak-chain.mjs's tamper-detection engine has existed
 // since HYK-218 with zero production callers (§0 실측). This is the wiring
 // -- NOT reject-streak.mjs/relay-handshake.mjs/review-gate.mjs, which the
@@ -969,6 +972,52 @@ export function lookupDispatchId({
   };
 }
 
+// HYK-396 §2(여는 축, Q2 안전장치): (role, harnessTaskLabel) 라벨의
+// dispatch-receipts.jsonl 전체 이력에서 서로 다른 dispatch_id가 몇 종
+// 기록됐는지 센다 -- findLatestReceiptMatch/lookupDispatchId(위)와 달리
+// beforeMs 앵커 없이 «이 라벨이 실제로 몇 번 배달됐는가» 자체를 묻는다.
+// 이 값이 findArchivedRoundMeta의 새 선택축(아래) on/off 스위치다: 정확히
+// 1이면(이 라벨의 실배달이 단 한 번뿐이면) "그 배달의 dispatch_id로
+// 각인된 사본"을 골라도 헷갈릴 다른 진짜 배달이 없다. 2 이상이면(같은
+// 라벨이 재드롭돼 실배달이 두 번 이상 기록됐으면) 새 선택축을 끄고
+// findArchivedRoundMeta는 기존 "가장 높은 번호 사본만" 경로로 물러난다 --
+// hyk394-dispatch-id-bind.test.mjs (b)가 이미 증명한 안전장치(droppedAt
+// 불일치로 거부)를 그대로 남겨 둔다. HYK-394 2R/Q8이 반증한 것은
+// "dispatch_id로 결속 대조를 넓히면" 뚫린다는 것이었다 -- 이 축은 실배달이
+// 정확히 하나뿐일 때만 켜지므로 그 구멍을 다시 열지 않는다(재드롭 =
+// 실배달 2건 이상 = 이 축 자체가 발동하지 않음).
+function countDistinctDispatchIdsForLabel(receiptPath, role, harnessTaskLabel) {
+  if (!isNonEmptyString(receiptPath) || !isNonEmptyString(harnessTaskLabel)) {
+    return 0;
+  }
+  let raw;
+  try {
+    raw = readFileSync(receiptPath, "utf8");
+  } catch {
+    return 0;
+  }
+  const ids = new Set();
+  for (const line of raw.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    let rec;
+    try {
+      rec = JSON.parse(trimmed);
+    } catch {
+      continue;
+    }
+    if (
+      typeof rec.role === "string" &&
+      rec.role.toUpperCase() === role.toUpperCase() &&
+      rec.harness_task_label === harnessTaskLabel &&
+      isNonEmptyString(rec.dispatch_id)
+    ) {
+      ids.add(rec.dispatch_id);
+    }
+  }
+  return ids.size;
+}
+
 // HYK-244 2R-b3 결함1 수리: 게이트는 배달 "전"에 돈다 -- 이 시점에는
 // taskPath(`<role>-task.md`)가 이미 "다음에 보낼" 새 라운드로 덮여 있다
 // (ORCH 실측: dropped_at이 새 라운드 값이었다). "직전 라운드가
@@ -983,17 +1032,116 @@ export function lookupDispatchId({
 // 안전측으로 거부한다). role 비교는 대소문자 무관(결함3과 같은 이유 --
 // 아카이브 파일명은 실제 생산 경로가 쓴 그대로의 대소문자를 담고 있어
 // 파일명 관례상 소문자인 이 함수의 role 인자와 다를 수 있다).
-function findArchivedDroppedAt(harnessDir, role, harnessTaskLabel) {
+// HYK-396 §2 (확장, 회귀 0): 기존 계약("가장 높은 번호 사본 하나만 대조"·
+// task_id 일치 요구·droppedAt 못 찾으면 undefined) 그대로 두고, 같은
+// 파일을 두 번 읽지 않도록 그 자리에서 dispatch_id 판정도 함께 뽑아 온다.
+// droppedAt 자체는 여전히 "가장 높은 사본 하나만"이다(이 라운드 범위
+// 밖 -- Q1은 dispatch_id 축만 좁힌다).
+//
+// HYK-396 3R §1 Q1⑴ (검토 rejected 사유 재현 방지 -- ★비타협): 2R까지는
+// "가장 높은 사본이 ABSENT면 그걸로 «없음»을 확정"했다 -- 검토자가 직접
+// 실행해 반증했다: 낮은 사본(r1)에 위조 dispatch_id를 심고 높은 사본(r2,
+// 판정 대상)은 필드 자체를 안 남기면, 이 함수는 r2만 보고 ABSENT를
+// 돌려줘 r1의 위조를 «영원히 못 본다»(실증: r1=ctx_probe_higher_forged
+// / r2=필드없음 / 원장=ctx_probe_higher_real ⇒ fallback과 결합해
+// status=0 ARCHIVE_MATCH ALLOW). ★불변식(coder-task.md §2 P): "각인을
+// «없는 것처럼» 만드는 어떤 조작으로도 위조를 통과시킬 수 없다" -- 이
+// 요구를 만족하려면 "가장 높은 사본"이 ABSENT일 때 그것만으로 끝내지
+// 말고, 같은 라벨의 «다른 모든 사본»(더 낮은 번호)까지 살펴 그중
+// 하나라도 DAMAGED거나 원장과 다른 VALUE(=위조 의심)면 거부해야 한다.
+// 반대로 다른 사본이 전혀 없거나(단일 사본) 전부 ABSENT/원장과 일치하는
+// VALUE뿐이면 "정말 아무 증거도 없다"는 뜻이므로 여전히 스킵(ALLOW) --
+// 이게 깨지면 배달 시점 각인이 아예 없던 진짜 옛 사본(§2 Q3 회귀 요구,
+// "각인 이전 옛 사본은 여전히 통과해야 한다")까지 막혀 릴레이가 멈춘다.
+// ⛔"가장 높은 사본"이 ABSENT가 «아니면»(DAMAGED·VALUE) 이 스캔은 아예
+// 안 돈다 -- 그 경우는 이미 그 사본 자신의 상태만으로 결정적이다(기존
+// 계약 그대로, 회귀 0).
+//
+// lowerCopyEvidence: 가장 높은 사본이 ABSENT일 때만 채워지는, 더 낮은
+// 번호 사본들 중 ABSENT가 «아닌» 것들의 분류 목록(순서 무관 -- 호출자가
+// "하나라도 나쁘면 거부"만 물으므로 정렬이 필요 없다). 가장 높은 사본이
+// ABSENT가 아니면 항상 빈 배열.
+//
+// HYK-396 §2(여는 축, Q2 -- coder-task.md P1): resolvedDispatchId(넷째
+// 인자, countDistinctDispatchIdsForLabel이 정확히 1일 때만 호출자가
+// 채워 준다, undefined면 이 축 전체가 꺼진다 -- ⛔값을 지어내지 않는다)가
+// 주어지면, "가장 높은 번호 사본"으로 무조건 물러나기 전에 먼저 «이
+// 라운드 자신의 dispatch_id로 각인된 사본»을 찾는다 -- 오늘 실측(같은
+// 라벨 사본 5벌, 영수증은 19:13에 결속됐는데 가장 높은 번호는 19:45)의
+// 정면 수리다. 정확히 하나 찾으면 그 사본의 droppedAt/dispatch_id를
+// 채택하고(그 사본이 곧 "highest"의 자리를 대신한다 -- lowerCopyEvidence는
+// 의미가 없다, 이 사본은 ABSENT가 아니라 VALUE이므로), 2개 이상 찾으면
+// (경계값 ⓓ) 어느 것이 진짜인지 결정할 수 없으므로 새 kind
+// "AMBIGUOUS"로 거부를 확정한다(checkArchivedDispatchIdBinding이 아래
+// 표대로 두 경로 모두 거부), 0개면(각인된 사본이 하나도 없음 -- 이행
+// 기간·회귀 케이스 ⓕ 포함) 기존 "가장 높은 번호" 경로로 그대로 물러난다
+// (회귀 0 -- 이 축은 오직 "찾았을 때"만 선택을 바꾼다, 못 찾았을 때는
+// 조금도 다르게 행동하지 않는다).
+//
+// findArchivedRoundMeta 자신의 eslint max-lines-per-function/complexity
+// 상한을 지키려고 뽑았다(HYK-244-receipt-core-1b 선례와 동일한 이유,
+// 판정/값은 조금도 바뀌지 않는다 -- 몸통만 쪼갠다). null = "폴백하라"
+// (resolvedDispatchId가 없거나, 이 라운드 자신의 dispatch_id로 각인된
+// 사본이 하나도 없다 -- 지어내지 않는다).
+function selectArchivedRoundByDispatchId(matches, resolvedDispatchId) {
+  if (!isNonEmptyString(resolvedDispatchId)) return null;
+  const idMatches = matches.filter(
+    (m) =>
+      m.classified.kind === "VALUE" &&
+      m.classified.value === resolvedDispatchId,
+  );
+  if (idMatches.length === 1) {
+    return {
+      droppedAt: idMatches[0].droppedAt,
+      dispatchId: resolvedDispatchId,
+      dispatchIdKind: "VALUE",
+      lowerCopyEvidence: [],
+    };
+  }
+  if (idMatches.length > 1) {
+    // ⓓ 경계값: 같은 라벨의 사본 2벌 이상이 «이 라운드 자신의»
+    // dispatch_id와 동일하게 각인돼 있다 -- 어느 것이 진짜인지 조용히
+    // 고르지 않는다(P2 비타협). droppedAt은 그 중 하나(가장 높은 번호,
+    // 결정 무관 -- 어차피 아래 checkArchivedDispatchIdBinding이
+    // AMBIGUOUS를 무조건 거부하므로 이 값 자체가 최종 판정을 바꾸지
+    // 않는다)만 실어 정상 결속 경로까지는 도달하게 해서, 이 거부가
+    // "결속 불일치"라는 흔한 사유 뒤에 숨지 않고 AMBIGUOUS라는 자기
+    // 사유로 드러나게 한다.
+    const highestIdMatch = idMatches.reduce((a, b) =>
+      b.roundNum > a.roundNum ? b : a,
+    );
+    return {
+      droppedAt: highestIdMatch.droppedAt,
+      dispatchId: undefined,
+      dispatchIdKind: "AMBIGUOUS",
+      lowerCopyEvidence: [],
+    };
+  }
+  // idMatches.length === 0 -- 이 라운드 자신의 dispatch_id로 각인된 사본이
+  // 하나도 없다(이행 기간 옛 사본만 있거나, 스탬프가 아직 안 됐거나).
+  return null;
+}
+
+function findArchivedRoundMeta(
+  harnessDir,
+  role,
+  harnessTaskLabel,
+  resolvedDispatchId,
+) {
   const archiveDir = join(harnessDir, "rounds");
   let names;
   try {
     names = readdirSync(archiveDir);
   } catch {
-    return undefined;
+    return {
+      droppedAt: undefined,
+      dispatchId: undefined,
+      dispatchIdKind: "ABSENT",
+      lowerCopyEvidence: [],
+    };
   }
   const pattern = new RegExp(`^${role}-task-r(\\d+)\\.md$`, "i");
-  let bestRound = -1;
-  let bestDroppedAt;
+  const matches = [];
   for (const name of names) {
     const m = pattern.exec(name);
     if (!m) continue;
@@ -1009,13 +1157,214 @@ function findArchivedDroppedAt(harnessDir, role, harnessTaskLabel) {
       continue;
     const droppedMatch = content.match(CONSUMPTION_DROPPED_AT_RE);
     if (!droppedMatch) continue;
-    const roundNum = Number(m[1]);
-    if (roundNum > bestRound) {
-      bestRound = roundNum;
-      bestDroppedAt = droppedMatch[1].trim();
+    matches.push({
+      roundNum: Number(m[1]),
+      droppedAt: droppedMatch[1].trim(),
+      classified: classifyArchivedDispatchId(content),
+    });
+  }
+  if (matches.length === 0) {
+    return {
+      droppedAt: undefined,
+      dispatchId: undefined,
+      dispatchIdKind: "ABSENT",
+      lowerCopyEvidence: [],
+    };
+  }
+  // HYK-396 §2 Q2 -- 여는 축 선택(위 함수 헤더 참조, 헬퍼는
+  // findArchivedRoundMeta 자신의 eslint max-lines-per-function/complexity
+  // 상한을 지키려고 뽑았다 -- 판정/값은 조금도 바뀌지 않는다). null이면
+  // 폴백하라는 뜻(resolvedDispatchId가 없거나, 이 라운드 자신의
+  // dispatch_id로 각인된 사본이 하나도 없다).
+  const idSelected = selectArchivedRoundByDispatchId(
+    matches,
+    resolvedDispatchId,
+  );
+  if (idSelected) return idSelected;
+  matches.sort((a, b) => b.roundNum - a.roundNum);
+  const [highest, ...lower] = matches;
+  const dispatchIdKind = highest.classified.kind;
+  const lowerCopyEvidence =
+    dispatchIdKind === "ABSENT"
+      ? lower.map((m2) => m2.classified).filter((c) => c.kind !== "ABSENT")
+      : [];
+  return {
+    droppedAt: highest.droppedAt,
+    dispatchId:
+      dispatchIdKind === "VALUE" ? highest.classified.value : undefined,
+    dispatchIdKind,
+    lowerCopyEvidence,
+  };
+}
+
+// HYK-396 §2 Q2(1R/2R) + 3R §1 Q1⑵ -- the new axis itself. Only called
+// when the existing 6-field binding (consumption-receipt-core.mjs's
+// bindingEqual) has ALREADY matched -- either via the primary
+// decision===null branch (pathKind: "normal"), or via tryArchiveFallback's
+// ARCHIVE_MATCH ALLOW (pathKind: "fallback" -- 2R §2 P1-1 fix: both
+// ALLOW-producing paths must pass through this same veto, not just the
+// first one -- the 1R gap the reviewer's forged-stamp sample exploited).
+// This function can only ever TIGHTEN an already-ALLOW outcome (never
+// loosen it). See checkArchivedDispatchIdBinding's own header for the
+// full state×path disposition table (3R §2 Q2's explicit contract).
+function resolveArchivedDispatchIdVeto(
+  role,
+  archivedRoundMeta,
+  currentBinding,
+  pathKind,
+) {
+  const idBinding = checkArchivedDispatchIdBinding(
+    role,
+    archivedRoundMeta,
+    currentBinding.dispatchId,
+    pathKind,
+  );
+  if (idBinding.reject) {
+    return {
+      state: DISPATCH_GATE_STATE.REJECT_ARCHIVED_DISPATCH_ID_MISMATCH,
+      allow: false,
+      reason: idBinding.reason,
+    };
+  }
+  return null;
+}
+
+// HYK-396 3R §2 Q2 -- ★상태×경로 명시 계약 표(코드 자신이 이 표다, 문서는
+// coder.md에 재기재). 상태는 archivedRoundMeta.dispatchIdKind(가장 높은
+// 사본 자신의 분류) + lowerCopyEvidence(그 사본이 ABSENT일 때만 채워지는,
+// 3R §1 Q1⑴의 낮은 사본 스캔 결과)로 결정된다. 경로는 pathKind
+// ("normal" = 정상 6성분 결속 ALLOW, "fallback" = tryArchiveFallback
+// ARCHIVE_MATCH ALLOW)다.
+//
+// HYK-396 §2(여는 축, Q2) -- 표 갱신: 1차 조회(archivedRoundMeta,
+// buildConsumptionBindingContext)는 ⛔여전히 "가장 높은 번호 사본"이다
+// (회귀 0 -- hyk396-dispatch-stamp.test.mjs (j)가 이미 highest 기준으로
+// ALLOW하는 사례를 실행으로 고정해 뒀다, 그 사례까지 바꿔치기하면 안
+// 된다). 새 선택축은 그 1차 조회가 «실패했을 때만»
+// (tryDispatchIdArchiveSelection, resolveConsumptionAllowOrFallthrough
+// 아래) 켜지는 **재시도**다 -- «이 라운드 자신의 dispatch_id로 각인된
+// 사본»을 찾아 findArchivedRoundMeta를 다시 부르고, 그 결과로 이 표를
+// 다시 대조한다(tryArchiveFallback과 동일한 "정상 실패 시에만 재시도"
+// 형태). 그 재시도에서 정확히 하나 찾으면 dispatchIdKind는 VALUE(사실상
+// 항상 MATCH), lowerCopyEvidence는 빈 배열이다. 2개 이상 찾으면(같은
+// 라벨 사본 여럿이 «이 라운드 자신의» dispatch_id와 동일하게 각인 --
+// ⓓ 경계값) 새 상태 AMBIGUOUS로 떨어진다 -- 이 경우만 표에 새 행을
+// 추가했다(★비타협: 조용히 하나를 고르지 않는다, P2).
+//
+// | 상태(선택된 사본 기준)                 | normal 경로 | fallback 경로 |
+// |----------------------------------------|-------------|----------------|
+// | AMBIGUOUS(같은 dispatch_id 사본 2벌+)  | REJECT      | REJECT         |
+// | DAMAGED                                | REJECT      | REJECT         |
+// | ABSENT + 낮은 사본에 DAMAGED/MISMATCH  | REJECT      | REJECT         |
+// | ABSENT + 낮은 사본 전부 무해(없음·MATCH만) | ALLOW(스킵) | REJECT(★Q1⑵) |
+// | MATCH(원장과 일치)                     | ALLOW(스킵) | ALLOW(스킵)    |
+// | MISMATCH(원장과 다름)                  | REJECT      | REJECT         |
+//
+// 표에 없는 조합은 없다 -- dispatchIdKind는 정확히 {ABSENT, DAMAGED,
+// VALUE, AMBIGUOUS} 네 값이고(AMBIGUOUS는 findArchivedRoundMeta의 새
+// 선택축 전용, classifyArchivedDispatchId 자신은 여전히 3값만 반환)
+// VALUE는 MATCH/MISMATCH로만 갈리며, lowerCopyEvidence는
+// dispatchIdKind==="ABSENT"일 때만 의미를 갖는다(findArchivedRoundMeta가
+// 그 외엔 항상 빈 배열을 돌려준다). pathKind는 호출자가 "normal"|
+// "fallback" 둘 중 하나만 넘긴다(그 외 값을 넘기면 아래 fallback 분기
+// 코드가 그 값을 "normal 아님"으로 취급 -- 문자열 비교이므로 오타는
+// 곧장 REJECT 쪽으로 fail-closed된다, ALLOW로 새지 않는다).
+//
+// 시험(scripts/check/hyk396-dispatch-stamp.test.mjs, 상태별 최소 1개):
+//   DAMAGED × normal        = (f)/(g)/(h)
+//   ABSENT(단일, 증거 없음) × normal   = (d) -- ★Q3 회귀, 릴레이 정지 방지
+//   ABSENT + 낮은 사본 MISMATCH × fallback = (e) -- ★검토자 실증 재현
+//   ABSENT + 낮은 사본 MISMATCH × normal   = (j)
+//   ABSENT(증거 없음) × fallback   = (k) -- ★3R Q1⑵ 신규
+//   MATCH × normal          = (a)
+//   MATCH × fallback        = (l)
+//   MISMATCH × normal       = (c)
+//   MISMATCH × fallback     = (e)(부수 확인) · (m)
+// 시험(scripts/check/hyk396-open-axis.test.mjs, 이 여는 축 신규 6종,
+// coder-task.md §3 표 그대로):
+//   AMBIGUOUS × normal      = ⓓ(경계값)
+//   MATCH(선택된 사본) × normal = ⓐ(오염 -- 이 축이 여는 대상)
+//   (ⓑ/ⓒ/ⓔ/ⓕ는 선택축이 꺼지거나 기존 표로 떨어져 REJECT/ALLOW 유지)
+// checkArchivedDispatchIdBinding 자신의 eslint complexity 상한을 지키려고
+// 뽑았다(HYK-244-receipt-core-1b 선례와 동일한 이유, 판정/사유 문자열은
+// 조금도 바뀌지 않는다) -- dispatchIdKind==="ABSENT" 분기 하나만 그대로
+// 옮긴 것뿐이다.
+function checkAbsentDispatchIdBinding(
+  role,
+  archivedRoundMeta,
+  resolvedDispatchId,
+  pathKind,
+) {
+  // HYK-396 3R §1 Q1⑴: 가장 높은 사본이 ABSENT라도 그걸로 끝내지 않는다 --
+  // 더 낮은 사본들 중 하나라도 손상됐거나(DAMAGED) 원장과 다른 값(VALUE
+  // mismatch)이면 위조 의심 증거이므로 거부한다.
+  for (const evidence of archivedRoundMeta.lowerCopyEvidence) {
+    if (evidence.kind === "DAMAGED") {
+      return {
+        reject: true,
+        reason: `dispatch-gate-decision consumption: 가장 높은 보존 사본(rounds/${role}-task-r<N>.md)의 dispatch_id는 미각인(ABSENT)이지만, 같은 라벨의 더 낮은 사본에서 손상된 dispatch_id 각인이 발견됨 -- "없음"으로 결론 내리지 않는다(HYK-396 3R Q1⑴), 거부`,
+      };
+    }
+    if (evidence.kind === "VALUE" && evidence.value !== resolvedDispatchId) {
+      return {
+        reject: true,
+        reason: `dispatch-gate-decision consumption: 가장 높은 보존 사본(rounds/${role}-task-r<N>.md)의 dispatch_id는 미각인(ABSENT)이지만, 같은 라벨의 더 낮은 사본에 각인된 dispatch_id('${evidence.value}')가 이 라운드의 실제 배달 원장에서 조회된 값('${resolvedDispatchId ?? "(조회 불가/없음)"}')과 다름 -- 위조 의심, 거부(HYK-396 3R Q1⑴)`,
+      };
     }
   }
-  return bestDroppedAt;
+  // HYK-396 3R §1 Q1⑵ (★비타협, 검토 원문 그대로): "이행 허용은 정상
+  // 경로에만" -- fallback(ARCHIVE_MATCH) 경로는 이미 live 결과 지문이
+  // 어긋난(=이상 신호가 이미 하나 있는) 상태에서 판단하므로, 거기에
+  // dispatch_id 증거까지 «전혀 없다»는 것은 정상 경로의 "옛 사본이라
+  // 그렇다"는 무해한 설명과 같은 확신을 주지 못한다 -- 안전측으로
+  // 거부한다. normal 경로는 기존 계약(1R Q2 "값이 없으면 없다고
+  // 기록") 그대로 스킵한다.
+  if (pathKind === "fallback") {
+    return {
+      reject: true,
+      reason: `dispatch-gate-decision consumption: fallback(ARCHIVE_MATCH) 경로에서 보존 사본(rounds/${role}-task-r<N>.md, 및 같은 라벨의 다른 사본 전부)에 dispatch_id 각인 증거가 전혀 없음 -- 이행 허용은 정상 경로에만 적용된다(HYK-396 3R Q1⑵), fallback은 안전측 거부`,
+    };
+  }
+  return { reject: false };
+}
+
+function checkArchivedDispatchIdBinding(
+  role,
+  archivedRoundMeta,
+  resolvedDispatchId,
+  pathKind,
+) {
+  // HYK-396 §2(여는 축 Q2/Q3-ⓓ): 같은 라벨의 사본 2벌 이상이 «이 라운드
+  // 자신의» dispatch_id와 동일하게 각인돼 있으면(findArchivedRoundMeta의
+  // 새 선택축이 idMatches.length>1로 판정한 경우) 어느 것이 진짜 그
+  // 라운드의 것인지 조용히 고르지 않는다 -- pathKind와 무관하게 무조건
+  // 거부(P2 비타협, "애매 통과 금지").
+  if (archivedRoundMeta.dispatchIdKind === "AMBIGUOUS") {
+    return {
+      reject: true,
+      reason: `dispatch-gate-decision consumption: 같은 라벨(rounds/${role}-task-r<N>.md)의 보존 사본 2벌 이상이 이 라운드 자신의 dispatch_id('${resolvedDispatchId ?? "(조회 불가/없음)"}')와 동일하게 각인돼 있음 -- 어느 것이 진짜 그 라운드의 것인지 결정할 수 없다(HYK-396 여는 축 Q3-ⓓ 경계값), 조용히 하나를 고르지 않고 거부(안전측 기본값)`,
+    };
+  }
+  if (archivedRoundMeta.dispatchIdKind === "DAMAGED") {
+    return {
+      reject: true,
+      reason: `dispatch-gate-decision consumption: 보존 사본(rounds/${role}-task-r<N>.md) 헤더의 dispatch_id 값이 손상됨(빈 값·공백·앞뒤공백·개행·중복 필드 중 하나) -- "없음"이 아니라 "손상"이므로 무조건 거부(HYK-396, 안전측 기본값 -- 원장 조회 결과와 무관)`,
+    };
+  }
+  if (archivedRoundMeta.dispatchIdKind === "ABSENT") {
+    return checkAbsentDispatchIdBinding(
+      role,
+      archivedRoundMeta,
+      resolvedDispatchId,
+      pathKind,
+    );
+  }
+  const archivedDispatchId = archivedRoundMeta.dispatchId;
+  if (archivedDispatchId === resolvedDispatchId) return { reject: false };
+  return {
+    reject: true,
+    reason: `dispatch-gate-decision consumption: 보존 사본(rounds/${role}-task-r<N>.md)에 배달 시점 각인된 dispatch_id('${archivedDispatchId}')가 이 라운드의 실제 배달 원장(dispatch-receipts.jsonl)에서 조회된 dispatch_id('${resolvedDispatchId ?? "(조회 불가/없음)"}')와 다름 -> 위조 또는 다른 배달의 사본, 거부(HYK-396, 안전측 기본값)`,
+  };
 }
 
 // HYK-394-dispatch-id-bind-2 §2 (P2, reintroduced then RE-REVERTED --
@@ -2252,6 +2601,235 @@ function resultDoneAtMs(resultText) {
   );
 }
 
+// evaluateConsumptionDecision 자신의 eslint max-lines 상한을 지키려고
+// 뽑았다(HYK-244-receipt-core-1b 선례와 동일한 이유, 판정/값은 조금도
+// 바뀌지 않는다) -- HYK-394-dispatch-id-bind-2 §2 (P1)의 dispatch_id
+// lookup·HYK-244 2R-b3 결함1의 droppedAt 아카이브 조회·HYK-396 §2의
+// archivedRoundMeta.dispatchId 동시 추출·checkPredatesReceipts 면제
+// 판정·candidates 조회까지, currentBinding을 완성하는 데 필요한 모든
+// 단계를 한데 묶는다. `predatesReceipts: true`면 호출자가 즉시 ALLOW로
+// 물러난다(사유는 checkPredatesReceipts 자신이 이미 stderr에 찍는다).
+function buildConsumptionBindingContext({
+  role,
+  harnessTaskLabel,
+  harnessDir,
+  receiptPath,
+  resultText,
+}) {
+  const lookup = lookupDispatchIdWithLogging({
+    role,
+    harnessTaskLabel,
+    receiptPath,
+    beforeMs: resultDoneAtMs(resultText),
+  });
+
+  // 결함1의 나머지 절반: droppedAt도 같은 이유로 taskText가 아니라 그
+  // 직전 라운드가 자기 task 파일을 보존해 둔 아카이브 사본에서 온다.
+  // HYK-396 §2: 같은 조회에서 그 사본 헤더의 dispatch_id(배달 시점 각인,
+  // 부재/"unknown"이면 undefined)도 함께 뽑는다 -- 아래 decision===null
+  // (기존 6성분 결속이 이미 일치) 분기 뒤에서만 참조하는 별도 축이다.
+  //
+  // HYK-396 §2(여는 축 Q2, ★3R 회귀 0 실측으로 확정된 자리): 이 1차
+  // 조회는 ⛔의도적으로 옛 "가장 높은 번호 사본" 경로 그대로 둔다 --
+  // resolvedDispatchId를 여기서 곧장 넘기면 hyk396-dispatch-stamp.test.mjs
+  // (j)(ABSENT+낮은 사본이 원장과 «우연히» 일치하는 무해 사례, highest가
+  // 이미 영수증과 정확히 일치)가 REJECT로 뒤집힌다는 것을 직접 실행해
+  // 확인했다 -- highest가 이미 성공하는 사례까지 다른 사본으로 바꿔치기하면
+  // 안 된다. 새 선택축은 대신 resolveConsumptionAllowOrFallthrough(아래)가
+  // "highest 기준 1차 시도가 실패했을 때만" 재시도로 붙인다(tryArchiveFallback과
+  // 동일한 "정상 경로 실패 시에만" 원칙) -- 그래서 여기 1차 조회는
+  // resolvedDispatchId 없이 그대로 호출한다(회귀 0).
+  const archivedRoundMeta = findArchivedRoundMeta(
+    harnessDir,
+    role,
+    harnessTaskLabel,
+  );
+  const currentBinding = buildCurrentBinding({
+    harnessTaskLabel,
+    role,
+    resultText,
+    lookup,
+    droppedAt: archivedRoundMeta.droppedAt,
+  });
+  if (checkPredatesReceipts(currentBinding)) {
+    return { predatesReceipts: true };
+  }
+  return {
+    predatesReceipts: false,
+    currentBinding,
+    archivedRoundMeta,
+    candidates: readConsumptionCandidates(harnessDir, role, receiptPath),
+  };
+}
+
+// evaluateConsumptionDecision 자신의 eslint max-lines 상한을 지키려고
+// 뽑았다(HYK-244-receipt-core-1b 선례와 동일한 이유, 판정/값은 조금도
+// 바뀌지 않는다) -- 정상 6성분 결속(toConsumptionGateDecision)과
+// tryArchiveFallback, 두 개의 독립적인 ALLOW 생산 경로를 하나로 묶는다.
+//
+// HYK-394-dispatch-id-bind-2 §2 (P2 재도입 -> 재반려, 실행으로 확인):
+// "가장 높은 번호 사본"만 보지 않고 같은 라벨의 사본 중 하나라도 결속
+// 전체와 일치하면 소비로 인정하는 완화를, 이번엔 dispatch_id anchor
+// 수리(findLatestReceiptMatch/lookupDispatchId/enrichCandidateDispatchId의
+// `beforeMs`, 그대로 남아 있음)와 함께 다시 넣어 실제로 실행해 봤다
+// (scripts/check/hyk394-dispatch-id-bind.test.mjs 시험 (b)). ★결과: 여전히
+// 뚫린다 -- dispatchId anchor는 재드롭 자신의(더 나중) dispatch_id를
+// 정확히 걸러내지만, "가장 높은 번호가 아닌" 트라이얼(=첫 드롭 자신의
+// droppedAt)은 옛 영수증과 «진짜로» 결속 전체가 일치한다(재계산 버그가
+// 아니라 resultText 자체가 아직 첫 드롭 라운드 그대로이고, 그 라운드는
+// 실제로 소비됐다는 사실 그 자체). taskId/role/droppedAt/resultFingerprint/
+// dispatchId/doneAt 그 어떤 성분도 "같은 라운드가 재보존된 것"과 "다른
+// (아직 안 끝난) 라운드가 같은 라벨을 재사용한 것"을 구별하지 못한다 --
+// 살아 있는 결과 파일이 그 자체로 바뀌지 않았기 때문이다. Q8 지시
+// 원문("통과시키면 넣지 마라") 그대로 이 완화는 다시 반려한다 --
+// findArchivedRoundMeta(가장 높은 번호 사본 하나만 대조, 아래 미변경)가
+// 유일한 조회로 남는다(그 "가장 높은 번호만" 제약 자체가 fixture (b)를
+// 막아 주는 것 -- droppedAt 자체가 불일치로 떨어진다).
+//
+// HYK-396 2R §2 P1-1 (검토 rejected 사유 재현 방지 -- ★비타협): 1R은
+// dispatch_id veto를 정상 6성분 결속 경로(decision===null)에만 걸었다 --
+// tryArchiveFallback이 독립적으로 ALLOW(true)를 낼 수 있는 두 번째
+// 통로라는 것을 놓쳐, 검토자가 실증한 위조 표본(사본 각인 ctx_..._forged
+// / 원장 실값 ctx_..._real)이 이 통로로 그대로 새 나갔다(status=0 ALLOW
+// ARCHIVE_MATCH). fallback 자체는 그대로 둔다(§2 Q1 "fallback 자체를
+// 없애지 마라, 축을 추가하는 것이다") -- 두 ALLOW 경로 모두 ALLOW를 내기
+// 직전에 같은 veto를 통과시킬 뿐, toConsumptionGateDecision/
+// tryArchiveFallback 내부 로직·판정 사유는 조금도 바뀌지 않는다.
+// HYK-396 §2(여는 축 Q2) -- «그 배달 id로 각인된 사본»으로 다시 골라
+// 한 번 더 시도한다. tryArchiveFallback(바로 위, resultFingerprint 축)과
+// 정확히 같은 형태: 정상(highest 기준) 경로가 «이미 실패했을 때만»
+// 시도하는 재시도이지, 대체하는 것이 아니다 -- highest 기준이 이미
+// ALLOW인 사례(예: hyk396-dispatch-stamp.test.mjs (j))는 이 함수 자체가
+// 호출되지 않으므로 조금도 바뀌지 않는다(회귀 0, buildConsumptionBindingContext
+// 헤더 주석 참조).
+//
+// 켜지는 조건: (1) currentBinding.dispatchId가 이미 실값으로 확정돼
+// 있고(빈 값이면 무엇과 대조할지조차 모른다 -- 시도 안 함), (2) 이
+// 라벨의 dispatch-receipts.jsonl 이력이 정확히 실배달 1건뿐이다
+// (countDistinctDispatchIdsForLabel 헤더 참조 -- 재드롭=실배달 2건
+// 이상이면 이 축은 꺼진다, hyk394-dispatch-id-bind.test.mjs (b)의
+// 안전장치를 다시 열지 않기 위함).
+// 반환: null(재시도 자체를 안 했거나 재시도해도 여전히 불일치 -- 호출자는
+// 원래 실패를 그대로 쓴다) | { currentBinding, archivedRoundMeta }(재시도
+// 결속이 일치 -- 호출자는 이 값으로 다시 veto(resolveArchivedDispatchIdVeto)를
+// 통과시킨다). ★dispatchIdKind가 VALUE든 AMBIGUOUS든 이 함수는 "결속 재시도가
+// 성공했다"까지만 판단한다 -- ALLOW/REJECT 최종 판정은 항상 veto(및 그
+// 안의 checkArchivedDispatchIdBinding 상태×경로 표)의 몫이다(다른 ALLOW
+// 생산 경로 두 곳과 동일한 관례, resolveArchivedDispatchIdVeto 자신의 헤더
+// 참조) -- AMBIGUOUS는 그 표에서 항상 거부이므로, 재시도가 "성공"해도
+// 최종 결과는 여전히 REJECT다(ⓓ 경계값 표본이 바로 이 경로).
+function tryDispatchIdArchiveSelection({
+  role,
+  currentBinding,
+  candidates,
+  harnessDir,
+  harnessTaskLabel,
+  receiptPath,
+}) {
+  if (!isNonEmptyString(currentBinding?.dispatchId)) return null;
+  const dispatchIdCountForLabel = countDistinctDispatchIdsForLabel(
+    receiptPath,
+    role,
+    harnessTaskLabel,
+  );
+  if (dispatchIdCountForLabel !== 1) return null;
+
+  const altMeta = findArchivedRoundMeta(
+    harnessDir,
+    role,
+    harnessTaskLabel,
+    currentBinding.dispatchId,
+  );
+  if (
+    altMeta.dispatchIdKind !== "VALUE" &&
+    altMeta.dispatchIdKind !== "AMBIGUOUS"
+  ) {
+    return null; // 못 찾음 -- 지어내지 않는다, 원래 실패 유지.
+  }
+  if (altMeta.droppedAt === currentBinding.droppedAt) return null; // highest와 같은 사본 -- 재시도 무의미.
+
+  const altBinding = { ...currentBinding, droppedAt: altMeta.droppedAt };
+  const retryDecision = toConsumptionGateDecision({
+    role,
+    currentBinding: altBinding,
+    candidates,
+  });
+  if (retryDecision !== null) return null; // 재시도해도 여전히 불일치 -- 원래 실패 유지.
+
+  console.error(
+    `dispatch-gate-decision consumption: DISPATCH_ID_ARCHIVE_SELECT(${altMeta.dispatchIdKind}) -- «가장 높은 번호 사본»(droppedAt=${currentBinding.droppedAt}) 대조는 실패했으나, 이 라운드 자신의 dispatch_id('${currentBinding.dispatchId}')로 각인된 다른 보존 사본(droppedAt=${altMeta.droppedAt})으로 재시도하니 결속이 일치 -> veto로 최종 판정을 넘김(HYK-396 여는 축 Q2)`,
+  );
+  return { currentBinding: altBinding, archivedRoundMeta: altMeta };
+}
+
+function resolveConsumptionAllowOrFallthrough({
+  role,
+  currentBinding,
+  candidates,
+  archivedRoundMeta,
+  harnessDir,
+  harnessTaskLabel,
+  receiptPath,
+}) {
+  const decision = toConsumptionGateDecision({
+    role,
+    currentBinding,
+    candidates,
+  });
+  if (decision === null) {
+    return {
+      done: true,
+      result: resolveArchivedDispatchIdVeto(
+        role,
+        archivedRoundMeta,
+        currentBinding,
+        "normal",
+      ),
+    };
+  }
+
+  const idSelection = tryDispatchIdArchiveSelection({
+    role,
+    currentBinding,
+    candidates,
+    harnessDir,
+    harnessTaskLabel,
+    receiptPath,
+  });
+  if (idSelection) {
+    return {
+      done: true,
+      result: resolveArchivedDispatchIdVeto(
+        role,
+        idSelection.archivedRoundMeta,
+        idSelection.currentBinding,
+        "normal",
+      ),
+    };
+  }
+
+  if (
+    tryArchiveFallback({
+      role,
+      currentBinding,
+      candidates,
+      harnessDir,
+      harnessTaskLabel,
+    })
+  ) {
+    return {
+      done: true,
+      result: resolveArchivedDispatchIdVeto(
+        role,
+        archivedRoundMeta,
+        currentBinding,
+        "fallback",
+      ),
+    };
+  }
+  return { done: false, decision };
+}
+
 function evaluateConsumptionDecision(taskPath, args, env = process.env) {
   const role = deriveRoleFromTaskPath(taskPath);
   if (!role) return null;
@@ -2304,70 +2882,26 @@ function evaluateConsumptionDecision(taskPath, args, env = process.env) {
   });
   if (abortOutcome.done) return abortOutcome.result;
 
-  // HYK-394-dispatch-id-bind-2 §2 (P1): resultText's own doneAt anchors the
-  // dispatch_id lookup (see findLatestReceiptMatch's own header for the
-  // exploit this closes -- an unanchored "latest" query answers differently
-  // depending on when it's re-run). Extracted to its own function (quality:
-  // eslint max-lines-per-function) -- same value buildCurrentBinding
-  // computes for the binding itself a few lines below (same source, same
-  // regex), not a second, divergent computation.
-  const lookup = lookupDispatchIdWithLogging({
+  const bindingContext = buildConsumptionBindingContext({
     role,
     harnessTaskLabel,
+    harnessDir,
     receiptPath,
-    beforeMs: resultDoneAtMs(resultText),
-  });
-
-  // 결함1의 나머지 절반: droppedAt도 같은 이유로 taskText가 아니라 그
-  // 직전 라운드가 자기 task 파일을 보존해 둔 아카이브 사본에서 온다.
-  const droppedAt = findArchivedDroppedAt(harnessDir, role, harnessTaskLabel);
-  const currentBinding = buildCurrentBinding({
-    harnessTaskLabel,
-    role,
     resultText,
-    lookup,
-    droppedAt,
   });
-  if (checkPredatesReceipts(currentBinding)) return null; // ALLOW -- 사유는 위에서 이미 찍었다.
+  if (bindingContext.predatesReceipts) return null; // ALLOW -- 사유는 위에서 이미 찍었다.
+  const { currentBinding, archivedRoundMeta, candidates } = bindingContext;
 
-  const candidates = readConsumptionCandidates(harnessDir, role, receiptPath);
-
-  // HYK-394-dispatch-id-bind-2 §2 (P2 재도입 -> 재반려, 실행으로 확인):
-  // "가장 높은 번호 사본"만 보지 않고 같은 라벨의 사본 중 하나라도 결속
-  // 전체와 일치하면 소비로 인정하는 완화를, 이번엔 위 dispatch_id anchor
-  // 수리(findLatestReceiptMatch/lookupDispatchId/enrichCandidateDispatchId의
-  // `beforeMs`, 그대로 남아 있음)와 함께 다시 넣어 실제로 실행해 봤다
-  // (scripts/check/hyk394-dispatch-id-bind.test.mjs 시험 (b)). ★결과: 여전히
-  // 뚫린다 -- dispatchId anchor는 재드롭 자신의(더 나중) dispatch_id를
-  // 정확히 걸러내지만, "가장 높은 번호가 아닌" 트라이얼(=첫 드롭 자신의
-  // droppedAt)은 옛 영수증과 «진짜로» 결속 전체가 일치한다(재계산 버그가
-  // 아니라 resultText 자체가 아직 첫 드롭 라운드 그대로이고, 그 라운드는
-  // 실제로 소비됐다는 사실 그 자체). taskId/role/droppedAt/resultFingerprint/
-  // dispatchId/doneAt 그 어떤 성분도 "같은 라운드가 재보존된 것"과 "다른
-  // (아직 안 끝난) 라운드가 같은 라벨을 재사용한 것"을 구별하지 못한다 --
-  // 살아 있는 결과 파일이 그 자체로 바뀌지 않았기 때문이다. Q8 지시
-  // 원문("통과시키면 넣지 마라") 그대로 이 완화는 다시 반려한다 --
-  // findArchivedDroppedAt(가장 높은 번호 사본 하나만 대조, 아래 미변경)가
-  // 유일한 조회로 남는다(그 "가장 높은 번호만" 제약 자체가 fixture (b)를
-  // 막아 주는 것 -- droppedAt 자체가 불일치로 떨어진다).
-  const decision = toConsumptionGateDecision({
+  const allowOutcome = resolveConsumptionAllowOrFallthrough({
     role,
     currentBinding,
     candidates,
+    archivedRoundMeta,
+    harnessDir,
+    harnessTaskLabel,
+    receiptPath,
   });
-  if (decision === null) return null;
-
-  if (
-    tryArchiveFallback({
-      role,
-      currentBinding,
-      candidates,
-      harnessDir,
-      harnessTaskLabel,
-    })
-  ) {
-    return null; // ALLOW -- 사유는 tryArchiveFallback이 이미 찍었다.
-  }
+  if (allowOutcome.done) return allowOutcome.result;
 
   // HYK-311-retire-1 §2: 정상 소비 경로(영수증 체인 + 보관함 대조)가 이미
   // 실패로 확정된 뒤에만, VALID 이름표 라운드에 한해 은퇴 기록 축을
@@ -2398,7 +2932,7 @@ function evaluateConsumptionDecision(taskPath, args, env = process.env) {
   });
   if (validAbortOutcome.done) return validAbortOutcome.result;
 
-  return decision;
+  return allowOutcome.decision;
 }
 
 // HYK-257-done-stamp-2 §2 범위2 ⓑ -- 실재 앵커에 붙는 기계 dropped_at
