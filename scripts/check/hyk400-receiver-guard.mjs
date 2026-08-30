@@ -1,5 +1,12 @@
-import { existsSync, realpathSync } from "node:fs";
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+} from "node:fs";
 import { execFileSync } from "node:child_process";
+import { tmpdir } from "node:os";
 import { join, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
@@ -37,6 +44,38 @@ import { randomUUID } from "node:crypto";
 //     비었거나 필수 3필드조차 없으면 "검사할 게 없다"로 조용히 통과하지
 //     않고 거부한다(RECEIVER_GUARD_BAD_INPUT) -- "0개 검사"가 정당하려면
 //     그 사실이 «형태를 갖춘 진짜 배달 인자»에서 유도돼야 한다.
+//
+// HYK-400 4R (I-ROOT, 1R/2R/3R 반려의 공통 뿌리): 세 라운드 모두 같은
+// 결함의 다른 얼굴이었다 -- "부모가 «대상이 만들어낼 수 있는 바이트»를
+// 신뢰 채널로 썼다"(1R 파싱 성공=이해로 착각, 2R 죽은 자식의 stdout을
+// 믿음, 3R stdout 여러 줄 중 마지막 줄만 믿음). 이번 라운드는 표본을
+// 더 막는 대신 채널 자체를 바꾼다 -- stdout은 판정에서 «완전히»
+// 제외되고, 부모가 각 호출마다 새로 만드는 응답 파일(runIsolatedProbe의
+// responseDir/responsePath)만 신뢰한다.
+//   - 그 파일은 부모가 실행 «전»에 만들고, 자식에게는
+//     `--allow-fs-write`를 그 파일이 있는 디렉터리 하나로만 좁혀서
+//     준다(그 밖의 모든 쓰기는 여전히 거부 -- 대상이 실제로 워크트리
+//     안 어디에도 쓸 수 없다는 I1의 보장은 그대로 유지된다).
+//   - 러너는 그 파일에 `{flag:"wx"}`(exclusive create)로 쓴다 -- 대상이
+//     같은 프로세스 안에서(아래 참조) 그 경로를 먼저 알아내 선점하면
+//     러너 자신의 정당한 쓰기가 EEXIST로 실패해 비정상 종료하고, 3R의
+//     I1′("종료 상태가 1차 축")가 그 자체로 거부한다.
+//   - 부모는 자식이 «깨끗하게» 끝났을 때만(3R 그대로) 그 파일 전체를
+//     한 번에 읽어 `JSON.parse`한다 -- 줄 단위로 자르지 않으므로 앞뒤
+//     쓰레기·여러 줄 JSON은 파싱 자체가 실패해 거부된다(3R이 놓친
+//     "stdout.trim().split('\n').pop()" 패턴을 구조적으로 없앤다).
+// ⚠️정직 한계(완전한 격리가 아니다) -- 대상 코드는 러너와 «같은
+// 프로세스» 안에서 import된다(별도 프로세스가 아니다, I1은 「그
+// 프로세스가 워크트리 밖에 아무것도 못 쓴다」는 것만 보장한다). 즉
+// 이론상 대상이 `process.argv`를 읽어 응답 파일 경로를 알아내
+// 시도 전 그 파일을 exclusive-create로 선점할 수 있다 -- 러너는
+// import 직전에 `process.argv[2]`를 지워 이 경로를 좁히지만
+// (hyk400-receiver-probe-runner.mjs 참조), 이것이 "완전한 은닉"이라고
+// 주장하지 않는다: 클로저 변수 자체를 훔칠 다른 JS 트릭까지는 막지
+// 못한다. 이 라운드가 보장하는 것은 정확히 "stdout 내용은 판정에
+// 무관하다"이지, "동일 프로세스 안 임의 사이드채널까지 전부 봉쇄"가
+// 아니다 — 완전한 프로세스 경계가 필요하면 다음 축(별도 프로세스로
+// 대상을 재격리)이 후속 과제다.
 
 const RECEIPT_CLI_RELATIVE_PATH = "scripts/relay/dispatch-receipt-cli.mjs";
 const RUNNER_PATH = fileURLToPath(
@@ -135,27 +174,39 @@ function defaultExecFileSyncFn(cmd, args, opts) {
   return execFileSync(cmd, args, opts);
 }
 
-// I1: 대상을 절대 이 프로세스 안에서 import하지 않는다. 별도 자식
-// 프로세스(node --permission, fs 쓰기·child_process 등은 기본 거부)를
-// execFileSync의 timeout으로 감시하며 부른다. 타임아웃(무한 대기·무한
-// 루프)·비정상 종료·JSON 아닌 출력은 전부 거부로 접는다(fail-open 금지).
-function runIsolatedProbe({
+// I-ROOT(4R) 관문 1/2: 자식을 스폰하고, execFileSync가 던지는 예외만으로
+// 타임아웃(무한 대기/무한 루프)·비정상 종료(3R I1′)를 분류한다. 정상
+// 반환(종료코드 0·시그널 없음)이면 { ok: true }만 돌려준다 -- stdout은
+// 여기서도, 호출부에서도 참조하지 않는다.
+function spawnIsolatedChild({
+  responseDir,
   targetReal,
   worktreeReal,
   baselineArgs,
   flagArgs,
+  responsePath,
   execFileSyncFn,
   timeoutMs,
 }) {
   const payload = Buffer.from(
-    JSON.stringify({ targetPath: targetReal, baselineArgs, flagArgs }),
+    JSON.stringify({
+      targetPath: targetReal,
+      baselineArgs,
+      flagArgs,
+      responsePath,
+    }),
   ).toString("base64");
 
-  let stdout;
   try {
-    stdout = execFileSyncFn(
+    execFileSyncFn(
       process.execPath,
-      ["--permission", `--allow-fs-read=${worktreeReal}`, RUNNER_PATH, payload],
+      [
+        "--permission",
+        `--allow-fs-read=${worktreeReal}`,
+        `--allow-fs-write=${responseDir}`,
+        RUNNER_PATH,
+        payload,
+      ],
       {
         cwd: worktreeReal,
         encoding: "utf8",
@@ -164,38 +215,95 @@ function runIsolatedProbe({
         maxBuffer: 1024 * 1024,
       },
     );
+    return { ok: true };
   } catch (err) {
     if (err.signal === "SIGKILL" || err.code === "ETIMEDOUT") {
       return rejected(
         "RECEIVER_CLI_PROBE_TIMEOUT: 격리 프로세스가 제한시간 내 응답하지 않았다(무한 대기/무한 루프 의심)",
       );
     }
-    // execFileSync가 반환하는 유일한 경로가 종료코드 0·시그널 없음이다.
-    // 예외에 stdout이 붙어 있어도 child는 비정상 종료했으므로 절대 읽지
-    // 않고 거부한다 -- 그럴듯한 JSON이 종료 상태를 덮어쓸 수 없다.
+    // execFileSync가 정상 반환하는 유일한 경로가 종료코드 0·시그널
+    // 없음이다. stdout에 무엇이 찍혔든(그리고 응답 파일이 어떻게
+    // 됐든) child는 비정상 종료했으므로 읽지 않고 거부한다.
     return rejected(
       `RECEIVER_CLI_PROBE_CRASHED: 격리 프로세스가 비정상 종료했다(status=${err.status ?? "unknown"}, signal=${err.signal ?? "none"}; ${err.message})`,
     );
   }
+}
 
-  const lastLine = stdout.trim().split("\n").pop();
-  let parsed;
+// I-ROOT(4R) 관문 2/2: 응답 파일 «전체»를 한 번에 읽어 JSON.parse한다 --
+// 줄 단위로 자르지 않으므로(3R이 놓친 지점) 앞뒤 쓰레기·여러 줄 JSON은
+// 파싱 자체가 실패해 거부된다.
+function readIsolatedResponse(responsePath) {
+  if (!existsSync(responsePath)) {
+    return rejected(
+      "RECEIVER_CLI_PROBE_MISSING_RESPONSE: 격리 프로세스가 깨끗하게 끝났지만 응답 파일을 남기지 않았다",
+    );
+  }
+  let content;
   try {
-    parsed = JSON.parse(lastLine);
+    content = readFileSync(responsePath, "utf8");
   } catch (err) {
     return rejected(
-      `RECEIVER_CLI_PROBE_MALFORMED: 격리 프로세스 응답을 JSON으로 해석할 수 없다(${err.message})`,
+      `RECEIVER_CLI_PROBE_MALFORMED: 응답 파일을 읽을 수 없다(${err.message})`,
+    );
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(content);
+  } catch (err) {
+    return rejected(
+      `RECEIVER_CLI_PROBE_MALFORMED: 응답 파일을 JSON으로 해석할 수 없다(${err.message})`,
     );
   }
   if (!parsed || typeof parsed !== "object") {
     return rejected(
-      "RECEIVER_CLI_PROBE_MALFORMED: 격리 프로세스 응답이 객체가 아니다",
+      "RECEIVER_CLI_PROBE_MALFORMED: 응답 파일 내용이 객체가 아니다",
     );
   }
   if (parsed.ok !== true) {
     return rejected(parsed.reason ?? "RECEIVER_CLI_PROBE_MALFORMED: 사유 없음");
   }
   return { ok: true, baseline: parsed.baseline, withFlag: parsed.withFlag };
+}
+
+// I1 + I-ROOT(4R): 대상을 절대 이 프로세스 안에서 import하지 않는다.
+// 별도 자식 프로세스(node --permission, fs 쓰기는 이 함수가 만든 응답
+// 디렉터리 하나로만 좁혀서 허용, 그 밖엔 전부 기본 거부)를
+// execFileSync의 timeout으로 감시하며 부른다. 그 관문(spawnIsolatedChild)을
+// 통과했을 때만 -- stdout이 아니라 -- 이 함수가 만든 응답 파일을
+// 읽는다(readIsolatedResponse): 대상이 stdout에 무엇을 뿜든(여러 줄
+// 유효 JSON·앞뒤 쓰레기·러너 흉내) 판정과 무관하다(fail-open 금지).
+function runIsolatedProbe({
+  targetReal,
+  worktreeReal,
+  baselineArgs,
+  flagArgs,
+  execFileSyncFn,
+  timeoutMs,
+}) {
+  const responseDir = mkdtempSync(
+    join(tmpdir(), "hyk400-receiver-guard-response-"),
+  );
+  try {
+    const responsePath = join(responseDir, "response.json");
+    const spawned = spawnIsolatedChild({
+      responseDir,
+      targetReal,
+      worktreeReal,
+      baselineArgs,
+      flagArgs,
+      responsePath,
+      execFileSyncFn,
+      timeoutMs,
+    });
+    if (!spawned.ok) return spawned;
+    return readIsolatedResponse(responsePath);
+  } finally {
+    // 부모 소유의 임시 자원이다(OS 임시 디렉터리, 라이브 .harness가
+    // 아니다) -- 판정 결과와 무관하게 항상 정리한다.
+    rmSync(responseDir, { recursive: true, force: true });
+  }
 }
 
 // I2: "파싱이 성공했다"가 아니라 "우리가 보낸 값이 실제로 반영됐다"를

@@ -269,14 +269,22 @@ test("ⓐ 되돌림: --permission 격리를 끄면 같은 대상이 실제로 �
   const originalRunnerSrc = readFileSync(RUNNER_PATH, "utf8");
 
   const anchor =
-    '["--permission", `--allow-fs-read=${worktreeReal}`, RUNNER_PATH, payload],';
+    '        "--permission",\n' +
+    "        `--allow-fs-read=${worktreeReal}`,\n" +
+    "        `--allow-fs-write=${responseDir}`,\n";
   assert.ok(
     originalGuardSrc.includes(anchor),
     "mutation anchor not found -- guard source drifted",
   );
+  // 세 인자 전부 지운다(개별 삭제 불가 -- node는 --permission 없이
+  // --allow-fs-read/--allow-fs-write만 있으면 ERR_MISSING_OPTION으로
+  // 자식 자체가 뜨지도 못해, "격리가 꺼진 상태"가 아니라 "다른 이유로
+  // 크래시"가 되어 이 시험의 목적(I1이 실제로 이 표본을 막고 있었다는
+  // 증거)을 가린다). 셋 다 없으면 프로세스 권한 제약이 전혀 없는
+  // 평범한 자식이 되어 대상의 최상위 쓰기가 실제로 일어난다.
   const mutatedSrc = originalGuardSrc.replace(
     anchor,
-    "[RUNNER_PATH, payload], // I1 mutated off (no --permission)",
+    "        // I1 mutated off (no --permission/--allow-fs-*)\n",
   );
   assert.notEqual(mutatedSrc, originalGuardSrc);
 
@@ -404,14 +412,18 @@ test("I1′ 되돌림: 종료 상태 검사를 끄면 ⓐⓑⓒ가 다시 통과
     crashRejectStart,
     crashRejectEnd + crashRejectEndMarker.length,
   );
+  // 4R(I-ROOT)에서는 판정의 신뢰 채널이 stdout에서 부모 소유 응답
+  // 파일로 옮겨갔다 -- 이 표본들(SIGTERM/exitCode=1/exit(3))은 죽기
+  // «전»에 정상적으로 그 응답 파일을 쓴다(러너의 동기 코드가 자식의
+  // setImmediate 킬보다 먼저 끝난다). 그래서 3R 스타일 "stdout이
+  // 그럴듯하면 믿는다" 되돌림은 이제 성립하지 않는다(stdout이 신뢰
+  // 채널이 아니므로) -- 대신 이 변이는 "비정상 종료를 아예 무시하고
+  // 응답 파일을 읽으러 간다"로 되돌린다. 이게 새 아키텍처에서 I1′의
+  // 정확한 대응 축이다: 파일이 있든 없든, 응답이 유효하든 아니든, 종료
+  // 상태가 깨끗하지 않으면 그 자체로 거부해야 한다는 불변식을 끈다.
   const mutatedSrc = originalGuardSrc.replace(
     crashRejectAnchor,
-    [
-      "    stdout = err.stdout;",
-      "    if (!isNonEmptyString(stdout)) {",
-      '      return rejected("RECEIVER_CLI_PROBE_CRASHED: mutated status check");',
-      "    }",
-    ].join("\n"),
+    "    return { ok: true }; // I1′ mutated off (crash ignored)",
   );
   assert.notEqual(mutatedSrc, originalGuardSrc);
 
@@ -441,11 +453,244 @@ test("I1′ 되돌림: 종료 상태 검사를 끄면 ⓐⓑⓒ가 다시 통과
         assert.equal(
           result.supported,
           true,
-          `${label}: 종료 상태 검사를 끄면 유효 stdout 때문에 다시 통과해야 RED다`,
+          `${label}: 종료 상태 검사를 끄면 죽기 전에 쓰인 유효 응답 파일 때문에 다시 통과해야 RED다`,
         );
       } finally {
         rmSync(worktree, { recursive: true, force: true });
       }
+    }
+  } finally {
+    rmSync(mutDir, { recursive: true, force: true });
+    assert.equal(
+      readFileSync(GUARD_PATH, "utf8"),
+      originalGuardSrc,
+      "원본 guard 바이트가 변형된 채로 남았다",
+    );
+    assert.equal(
+      readFileSync(RUNNER_PATH, "utf8"),
+      originalRunnerSrc,
+      "원본 runner 바이트가 변형된 채로 남았다",
+    );
+  }
+});
+
+// ============================================================
+// I-ROOT(4R) -- 부모는 대상이 오염시킬 수 있는 어떤 바이트도(stdout)
+// 신뢰하지 않는다. 아래 네 표본은 전부 실제 --harness-dir 계약을
+// 정상적으로/비정상적으로 처리하되, stdout에 각기 다른 방식으로 소음을
+// 낸다 -- 판정은 부모가 만든 응답 파일만 보므로 그 소음과 무관해야
+// 한다.
+// ============================================================
+
+test("ⓐ I-ROOT: stdout에 유효 JSON 두 줄을 내도(3R을 뚫었던 모양) 실제 미지원(값을 버림)이 정확히 판정된다", async () => {
+  const worktree = tmpWorktree("hyk400-stdout-multiline-worktree-");
+  try {
+    seedReceiptCli(worktree, "hyk400-hostile-stdout-multiline-json.mjs.txt");
+    const result = await checkReceiptCliFlagSupport({
+      worktree,
+      deliveryArgs: deliveryArgsFor(worktree),
+    });
+    assert.equal(result.ok, true, "판정 자체는 성공(결론 = 미지원)");
+    assert.equal(
+      result.supported,
+      false,
+      "stdout의 여러 줄 JSON이 진짜(파일 기반) 판정을 흔들면 안 된다 -- 실제로는 값을 버리므로 미지원이어야 한다",
+    );
+    assert.match(result.reason, /RECEIVER_CLI_SEMANTIC_MISMATCH/);
+  } finally {
+    rmSync(worktree, { recursive: true, force: true });
+  }
+});
+
+test("ⓑ I-ROOT: stdout에 유효 JSON 뒤 쓰레기를 붙여도 실제 미지원(값을 버림)이 정확히 판정된다", async () => {
+  const worktree = tmpWorktree("hyk400-stdout-trailing-worktree-");
+  try {
+    seedReceiptCli(worktree, "hyk400-hostile-stdout-trailing-garbage.mjs.txt");
+    const result = await checkReceiptCliFlagSupport({
+      worktree,
+      deliveryArgs: deliveryArgsFor(worktree),
+    });
+    assert.equal(result.ok, true, "판정 자체는 성공(결론 = 미지원)");
+    assert.equal(
+      result.supported,
+      false,
+      "stdout의 뒤쪽 쓰레기가 진짜(파일 기반) 판정을 흔들면 안 된다 -- 실제로는 값을 버리므로 미지원이어야 한다",
+    );
+    assert.match(result.reason, /RECEIVER_CLI_SEMANTIC_MISMATCH/);
+  } finally {
+    rmSync(worktree, { recursive: true, force: true });
+  }
+});
+
+test("ⓒ I-ROOT: stdout에 유효 JSON 앞에 쓰레기를 붙여도 실제 미지원(값을 버림)이 정확히 판정된다", async () => {
+  const worktree = tmpWorktree("hyk400-stdout-leading-worktree-");
+  try {
+    seedReceiptCli(worktree, "hyk400-hostile-stdout-leading-garbage.mjs.txt");
+    const result = await checkReceiptCliFlagSupport({
+      worktree,
+      deliveryArgs: deliveryArgsFor(worktree),
+    });
+    assert.equal(result.ok, true, "판정 자체는 성공(결론 = 미지원)");
+    assert.equal(
+      result.supported,
+      false,
+      "stdout의 앞쪽 쓰레기가 진짜(파일 기반) 판정을 흔들면 안 된다 -- 실제로는 값을 버리므로 미지원이어야 한다",
+    );
+    assert.match(result.reason, /RECEIVER_CLI_SEMANTIC_MISMATCH/);
+  } finally {
+    rmSync(worktree, { recursive: true, force: true });
+  }
+});
+
+test("ⓓ I-ROOT: 대상이 러너를 흉내내 stdout에 완벽한 가짜 'supported:true'를 뿜어도, 진짜 결과(미지원)가 그대로 나온다", async () => {
+  const worktree = tmpWorktree("hyk400-stdout-forged-worktree-");
+  try {
+    seedReceiptCli(worktree, "hyk400-hostile-stdout-forged-response.mjs.txt");
+    const result = await checkReceiptCliFlagSupport({
+      worktree,
+      deliveryArgs: deliveryArgsFor(worktree),
+    });
+    assert.equal(
+      result.ok,
+      true,
+      "판정 자체는 성공(결론 = 미지원) -- 위조된 stdout이 크래시를 유발하지 않는다",
+    );
+    assert.equal(
+      result.supported,
+      false,
+      "대상이 stdout에 뭘 뿜든, 실제로 --harness-dir 값을 버리는 대상은 미지원으로 판정돼야 한다(위조 무시 확인)",
+    );
+    assert.match(result.reason, /RECEIVER_CLI_SEMANTIC_MISMATCH/);
+  } finally {
+    rmSync(worktree, { recursive: true, force: true });
+  }
+});
+
+// I-ROOT 되돌림 시험 전용 -- 채널을 응답 파일에서 옛 "stdout 마지막
+// 줄만 본다"(3R 이전) 로직으로 되돌린다. 두 관문을 순서대로 무력화한다:
+// (1) spawnIsolatedChild가 execFileSyncFn의 stdout 반환값을 다시 붙잡게
+// 만들고, (2) runIsolatedProbe가 readIsolatedResponse(파일) 대신 그
+// stdout의 마지막 줄만 파싱하게 만든다.
+function buildIRootLegacyMutation(originalGuardSrc) {
+  const spawnReturnAnchor = "    execFileSyncFn(\n      process.execPath,";
+  assert.ok(
+    originalGuardSrc.includes(spawnReturnAnchor),
+    "I-ROOT mutation anchor(spawn) not found -- guard source drifted",
+  );
+  let mutatedSrc = originalGuardSrc.replace(
+    spawnReturnAnchor,
+    "    const capturedStdout = execFileSyncFn(\n      process.execPath,",
+  );
+
+  const spawnOkAnchor = "    return { ok: true };\n  } catch (err) {";
+  assert.ok(
+    mutatedSrc.includes(spawnOkAnchor),
+    "I-ROOT mutation anchor(spawn-ok) not found -- guard source drifted",
+  );
+  mutatedSrc = mutatedSrc.replace(
+    spawnOkAnchor,
+    "    return { ok: true, stdout: capturedStdout }; // I-ROOT mutated: capture stdout\n  } catch (err) {",
+  );
+
+  const dispatchAnchor =
+    "    if (!spawned.ok) return spawned;\n    return readIsolatedResponse(responsePath);";
+  assert.ok(
+    mutatedSrc.includes(dispatchAnchor),
+    "I-ROOT mutation anchor(dispatch) not found -- guard source drifted",
+  );
+  mutatedSrc = mutatedSrc.replace(
+    dispatchAnchor,
+    [
+      "    if (!spawned.ok) return spawned;",
+      "    // I-ROOT mutated off: 파일이 아니라 stdout 마지막 줄을 신뢰(3R 이전 모양)",
+      '    const lastLine = (spawned.stdout ?? "").trim().split("\\n").pop();',
+      "    let legacyParsed;",
+      "    try {",
+      "      legacyParsed = JSON.parse(lastLine);",
+      "    } catch (err) {",
+      "      return rejected(`RECEIVER_CLI_PROBE_MALFORMED: ${err.message}`);",
+      "    }",
+      '    if (!legacyParsed || typeof legacyParsed !== "object" || legacyParsed.ok !== true) {',
+      '      return rejected(legacyParsed?.reason ?? "RECEIVER_CLI_PROBE_MALFORMED: legacy");',
+      "    }",
+      "    return { ok: true, baseline: legacyParsed.baseline, withFlag: legacyParsed.withFlag };",
+    ].join("\n"),
+  );
+
+  assert.notEqual(mutatedSrc, originalGuardSrc);
+  return mutatedSrc;
+}
+
+test("I-ROOT 되돌림: 채널을 응답 파일에서 다시 stdout으로 되돌리면 ⓐ~ⓓ 전부 진짜와 다른(잘못된) 결과로 새 버리고, 원본 바이트는 복원된다(RED)", async () => {
+  const originalGuardSrc = readFileSync(GUARD_PATH, "utf8");
+  const originalRunnerSrc = readFileSync(RUNNER_PATH, "utf8");
+  const mutatedSrc = buildIRootLegacyMutation(originalGuardSrc);
+
+  const mutDir = tmpWorktree("hyk400-iroot-mutant-");
+  // 실제 관측(2026-08-30 실측, 이 라운드가 직접 mutant를 빌드해 확인) --
+  // 진짜(4R) 답은 넷 다 supported:false(SEMANTIC_MISMATCH)인데, stdout
+  // 채널로 되돌리면 넷 다 «다른» 결과가 나온다: ⓐⓑⓒ는 stdout 소음이
+  // legacy 파서를 아예 망가뜨려 "판정 불가"(ok:false, CONTRACT_MISMATCH/
+  // MALFORMED)로 새고, ⓓ는 완벽하게 위조된 stdout을 그대로 믿어
+  // supported:true(진짜 보안 우회)로 새 버린다. 넷 다 진짜 채널이 내는
+  // "ok:true, supported:false, SEMANTIC_MISMATCH" 삼중주를 재현하지
+  // 못한다는 게 RED의 증거다.
+  const specimens = [
+    ["hyk400-hostile-stdout-multiline-json.mjs.txt", "multiline"],
+    ["hyk400-hostile-stdout-trailing-garbage.mjs.txt", "trailing"],
+    ["hyk400-hostile-stdout-leading-garbage.mjs.txt", "leading"],
+    ["hyk400-hostile-stdout-forged-response.mjs.txt", "forged"],
+  ];
+  try {
+    writeFileSync(join(mutDir, "hyk400-receiver-guard.mjs"), mutatedSrc);
+    writeFileSync(
+      join(mutDir, "hyk400-receiver-probe-runner.mjs"),
+      originalRunnerSrc,
+    );
+    const mutatedGuard = await import(
+      pathToFileURL(join(mutDir, "hyk400-receiver-guard.mjs")).href
+    );
+    for (const [fixtureName, label] of specimens) {
+      const worktree = tmpWorktree(`hyk400-iroot-${label}-`);
+      try {
+        seedReceiptCli(worktree, fixtureName);
+        const result = await mutatedGuard.checkReceiptCliFlagSupport({
+          worktree,
+          deliveryArgs: deliveryArgsFor(worktree),
+        });
+        const matchesCorrectTriple =
+          result.ok === true &&
+          result.supported === false &&
+          typeof result.reason === "string" &&
+          result.reason.includes("RECEIVER_CLI_SEMANTIC_MISMATCH");
+        assert.equal(
+          matchesCorrectTriple,
+          false,
+          `${label}: stdout 채널로 되돌리면 진짜 채널의 (ok:true, supported:false, SEMANTIC_MISMATCH) 답을 못 내야 RED다 -- 실제로는 ${JSON.stringify(result)}`,
+        );
+      } finally {
+        rmSync(worktree, { recursive: true, force: true });
+      }
+    }
+    // ⓓ는 가장 심각한 갈래(진짜 보안 우회)라 별도로 강하게 못박는다 --
+    // 실측 그대로: 위조가 완벽히 통해 supported:true로 승인된다.
+    const forgedWorktree = tmpWorktree("hyk400-iroot-forged-strict-");
+    try {
+      seedReceiptCli(
+        forgedWorktree,
+        "hyk400-hostile-stdout-forged-response.mjs.txt",
+      );
+      const forgedResult = await mutatedGuard.checkReceiptCliFlagSupport({
+        worktree: forgedWorktree,
+        deliveryArgs: deliveryArgsFor(forgedWorktree),
+      });
+      assert.equal(
+        forgedResult.supported,
+        true,
+        "stdout 채널로 되돌리면 ⓓ의 위조가 그대로 통과해 supported:true(진짜 보안 우회)가 돼야 RED다",
+      );
+    } finally {
+      rmSync(forgedWorktree, { recursive: true, force: true });
     }
   } finally {
     rmSync(mutDir, { recursive: true, force: true });
