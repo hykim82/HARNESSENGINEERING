@@ -664,31 +664,27 @@ test("(h) ★모양 손상 — 앞 공백 변형(dispatch_id=< >실값): 트림�
 });
 
 // ---------------------------------------------------------------------------
-// ⓘ ★HYK-396 2R §2 Q2 -- «같은 라벨 사본 2개, 더 높은 사본이 미각인»의
-// 명시적 정의: 더 낮은 번호 사본(r1)에 실값이 찍혀 있어도, 이 축은
-// «가장 높은 번호 사본»(r2, 이번에 판정 대상인 라운드 자신)의 상태만
-// 본다 -- r2가 미각인(ABSENT)이면 스킵(ALLOW 유지), r1의 실값을 끌어와
-// 대신 대조하지 않는다(findArchivedRoundMeta 자신의 헤더 주석 근거
-// 참조). 단일 사본만 있고 미각인인 경우(ⓓ, 검토 §1 "다시 하지 마라")와
-// 의도적으로 동일한 취급임을 시험으로 고정한다.
+// ⓘ ★★HYK-396 3R §1 Q1⑴ (2R의 «명시적 정의»가 검토 rejected로 뒤집힌
+// 자리 -- 2R은 "가장 높은 사본만 본다"는 원칙을 지키려고 이 시나리오를
+// ALLOW로 고정했으나, 검토자가 정확히 이 모양(낮은 사본 위조 + 높은
+// 사본 미각인)을 실제로 실행해 반증했다. 3R은 "가장 높은 사본이
+// ABSENT면 낮은 사본까지 검사한다"로 원칙 자체를 좁혔다 -- 이 표본은
+// 이제 REJECT가 정답이다(normal 경로 변형 -- fallback 경로 변형은 ⓔ).
 // ---------------------------------------------------------------------------
-test("(i) ★명시적 정의: 같은 라벨 사본 2개 중 낮은 사본(r1)만 각인, 더 높은 사본(r2, 판정 대상)은 미각인 -> ALLOW(가장 높은 사본만 본다는 원칙 유지, r1 값을 대신 쓰지 않는다)", () => {
+test("(i) ★★같은 라벨 사본 2개 중 낮은 사본(r1)이 위조, 더 높은 사본(r2, 판정 대상)은 미각인 -> REJECT(HYK-396 3R Q1⑴, normal 경로 -- 2R의 ALLOW 정의가 뒤집힌 자리)", () => {
   withFixtureDir((dir) => {
     const role = "coder";
     const taskId = "HYK-9609-higher-unstamped-1";
-    const olderDroppedAt = "2026-08-25 08:00:00 KST"; // r1 -- 무관한 옛 라운드, 실값 각인
+    const olderDroppedAt = "2026-08-25 08:00:00 KST"; // r1 -- 위조 각인
     const droppedAt = "2026-08-25 20:00:00 KST"; // r2 -- 이번 판정 대상, 미각인
     const doneAt = "2026-08-25 20:05:10 KST";
     const dispatchId = "ctx_hyk396_higher_unstamped_d1";
 
-    // r1: 같은 라벨, 다른(더 이른) droppedAt, 실값 각인 -- 이 값을
-    // 대신 끌어오면 안 된다는 것을 증명하려고 일부러 심는다.
     writeArchivedTaskCopy(dir, role, 1, {
       taskId,
       droppedAt: olderDroppedAt,
       dispatchId: "ctx_hyk396_should_never_be_used",
     });
-    // r2: 이번 라운드 자신 -- 미각인(필드 자체 없음).
     writeArchivedTaskCopy(dir, role, 2, {
       taskId,
       droppedAt,
@@ -739,11 +735,343 @@ test("(i) ★명시적 정의: 같은 라벨 사본 2개 중 낮은 사본(r1)�
       "--dispatch-receipt-path",
       dispatchReceiptPath,
     ]);
+    assert.notEqual(
+      r.status,
+      0,
+      `기대: REJECT(낮은 사본까지 검사). 실제 stdout=${r.stdout} stderr=${r.stderr}`,
+    );
+    assert.match(r.stderr, /위조 의심/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ⓙ HYK-396 3R §2 Q2 -- 대조 표의 "ABSENT + 낮은 사본 전부 무해" × normal
+// 셀. ⓘ와 대칭: 낮은 사본이 있어도 그 값이 원장과 «일치»하면(무해한
+// 증거) 여전히 ALLOW다 -- Q1⑴은 "낮은 사본을 무시하지 마라"는 것이지
+// "낮은 사본이 있으면 무조건 거부"가 아님을 증명한다.
+// ---------------------------------------------------------------------------
+test("(j) ABSENT + 낮은 사본이 있지만 원장과 일치(무해) × normal -> ALLOW(낮은 사본 존재 자체가 아니라 «위조 증거»만 거부 사유)", () => {
+  withFixtureDir((dir) => {
+    const role = "coder";
+    const taskId = "HYK-9610-lower-harmless-1";
+    const olderDroppedAt = "2026-08-25 08:00:00 KST";
+    const droppedAt = "2026-08-25 22:00:00 KST";
+    const doneAt = "2026-08-25 22:05:10 KST";
+    const dispatchId = "ctx_hyk396_lower_harmless_d1";
+
+    // r1: 낮은 사본이지만 dispatch_id가 이 라운드 원장 값과 «우연히»
+    // 같다(예: 같은 값을 재사용한 합성 표본 -- 실전에서 흔치 않지만,
+    // "낮은 사본 존재 = 자동 거부"가 아님을 보이는 데 필요한 유일한
+    // 조합이다).
+    writeArchivedTaskCopy(dir, role, 1, {
+      taskId,
+      droppedAt: olderDroppedAt,
+      dispatchId,
+    });
+    writeArchivedTaskCopy(dir, role, 2, {
+      taskId,
+      droppedAt,
+      dispatchId: undefined,
+    });
+
+    const resultPath = join(dir, `${role}.md`);
+    const resultContent = `task_id: ${taskId}\nverdict: approved\n>>> DONE: ${role.toUpperCase()} @ ${doneAt}\n`;
+    writeFileSync(resultPath, resultContent, "utf8");
+
+    const dispatchReceiptPath = join(dir, "dispatch-receipts.jsonl");
+    writeDispatchReceiptsLog(dispatchReceiptPath, [
+      {
+        role: role.toUpperCase(),
+        harnessTaskLabel: taskId,
+        dispatchId,
+        recordedAt: "2026-08-25T07:30:00.000Z",
+      },
+    ]);
+
+    writeConsumptionReceipt(
+      dir,
+      role,
+      {
+        taskId,
+        role: role.toUpperCase(),
+        droppedAt,
+        resultFingerprint: computeFingerprint(resultContent),
+        doneAt,
+      },
+      BASE_EFFECTS,
+      1,
+    );
+
+    const taskPath = writeNextTaskFile(dir, role, {
+      taskId: "HYK-9610-lower-harmless-next",
+      droppedAt: "2026-08-25 23:00:00 KST",
+      headCommit: "j".repeat(40),
+    });
+
+    const ledgerPath = join(dir, "reject-streak.json");
+    writeLedger(ledgerPath, { schema_version: 1, issues: {} });
+
+    const r = runCli([
+      taskPath,
+      "--ledger",
+      ledgerPath,
+      "--dispatch-receipt-path",
+      dispatchReceiptPath,
+    ]);
     assert.equal(
       r.status,
       0,
-      `기대: ALLOW(가장 높은 사본만 본다는 원칙 유지). 실제 stdout=${r.stdout} stderr=${r.stderr}`,
+      `기대: ALLOW(낮은 사본이 무해하면 거부 사유가 아니다). 실제 stdout=${r.stdout} stderr=${r.stderr}`,
     );
     assert.match(r.stdout, /ALLOW/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ⓚ ★★HYK-396 3R §1 Q1⑵ (신규 축) -- fallback 경로에서는 ABSENT를
+// 허용하지 않는다. 낮은 사본조차 전혀 없는(진짜 옛 사본 하나뿐인) 순수
+// ABSENT라도, fallback(ARCHIVE_MATCH) 경로에서는 REJECT다 -- ⓓ(normal
+// 경로 ABSENT -> ALLOW)와 정확히 대칭·대조되는 표본.
+// ---------------------------------------------------------------------------
+test("(k) ★★ABSENT(증거 전혀 없음, 단일 사본) × fallback -> REJECT(HYK-396 3R Q1⑵, 이행 허용은 정상 경로에만)", () => {
+  withFixtureDir((dir) => {
+    const role = "coder";
+    const taskId = "HYK-9611-fallback-absent-1";
+    const droppedAt = "2026-08-26 08:00:00 KST";
+    const doneAt = "2026-08-26 08:05:10 KST";
+    const dispatchId = "ctx_hyk396_fallback_absent_real";
+
+    // 사본은 단 하나, dispatch_id 필드 자체가 없다(진짜 옛 형태).
+    writeArchivedTaskCopy(dir, role, 1, {
+      taskId,
+      droppedAt,
+      dispatchId: undefined,
+    });
+
+    const originalResultContent = `task_id: ${taskId}\nverdict: approved\n>>> DONE: ${role.toUpperCase()} @ ${doneAt}\n`;
+    const originalFingerprint = computeFingerprint(originalResultContent);
+    writeArchivedResultEnvelope(dir, role, 1, {
+      resultContent: originalResultContent,
+      doneAt,
+    });
+
+    // live 결과가 소비 후 손질됨(verdict만 다름) -- fallback을 강제로 태운다.
+    const tamperedResultContent = `task_id: ${taskId}\nverdict: rejected\n>>> DONE: ${role.toUpperCase()} @ ${doneAt}\n`;
+    const resultPath = join(dir, `${role}.md`);
+    writeFileSync(resultPath, tamperedResultContent, "utf8");
+
+    const dispatchReceiptPath = join(dir, "dispatch-receipts.jsonl");
+    writeDispatchReceiptsLog(dispatchReceiptPath, [
+      {
+        role: role.toUpperCase(),
+        harnessTaskLabel: taskId,
+        dispatchId,
+        recordedAt: "2026-08-25T20:00:00.000Z",
+      },
+    ]);
+
+    writeConsumptionReceipt(
+      dir,
+      role,
+      {
+        taskId,
+        role: role.toUpperCase(),
+        droppedAt,
+        resultFingerprint: originalFingerprint,
+        doneAt,
+      },
+      BASE_EFFECTS,
+      1,
+    );
+
+    const taskPath = writeNextTaskFile(dir, role, {
+      taskId: "HYK-9611-fallback-absent-next",
+      droppedAt: "2026-08-26 09:00:00 KST",
+      headCommit: "k".repeat(40),
+    });
+
+    const ledgerPath = join(dir, "reject-streak.json");
+    writeLedger(ledgerPath, { schema_version: 1, issues: {} });
+
+    const r = runCli([
+      taskPath,
+      "--ledger",
+      ledgerPath,
+      "--dispatch-receipt-path",
+      dispatchReceiptPath,
+    ]);
+    assert.match(
+      r.stderr,
+      /ARCHIVE_MATCH/,
+      `사전 조건 확인 실패 -- fallback 경로 자체가 안 탔다. stdout=${r.stdout} stderr=${r.stderr}`,
+    );
+    assert.notEqual(
+      r.status,
+      0,
+      `기대: REJECT(fallback + ABSENT). 실제 stdout: ${r.stdout}`,
+    );
+    assert.match(r.stderr, /이행 허용은 정상 경로에만/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ⓛ HYK-396 3R §2 Q2 -- 대조 표의 MATCH × fallback 셀. fallback 경로라도
+// 각인이 실제로 있고 원장과 «일치»하면 정상적으로 ALLOW다(ⓚ와 대조 --
+// fallback이 무조건 거부하는 건 ABSENT뿐, 진짜 확인된 값은 그대로
+// 신뢰한다).
+// ---------------------------------------------------------------------------
+test("(l) MATCH(원장과 일치) × fallback -> ALLOW(fallback이 거부하는 건 ABSENT뿐, 확인된 값은 신뢰)", () => {
+  withFixtureDir((dir) => {
+    const role = "coder";
+    const taskId = "HYK-9612-fallback-match-1";
+    const droppedAt = "2026-08-26 10:00:00 KST";
+    const doneAt = "2026-08-26 10:05:10 KST";
+    const dispatchId = "ctx_hyk396_fallback_match_real";
+
+    writeArchivedTaskCopy(dir, role, 1, { taskId, droppedAt, dispatchId });
+
+    const originalResultContent = `task_id: ${taskId}\nverdict: approved\n>>> DONE: ${role.toUpperCase()} @ ${doneAt}\n`;
+    const originalFingerprint = computeFingerprint(originalResultContent);
+    writeArchivedResultEnvelope(dir, role, 1, {
+      resultContent: originalResultContent,
+      doneAt,
+    });
+
+    const tamperedResultContent = `task_id: ${taskId}\nverdict: rejected\n>>> DONE: ${role.toUpperCase()} @ ${doneAt}\n`;
+    const resultPath = join(dir, `${role}.md`);
+    writeFileSync(resultPath, tamperedResultContent, "utf8");
+
+    const dispatchReceiptPath = join(dir, "dispatch-receipts.jsonl");
+    writeDispatchReceiptsLog(dispatchReceiptPath, [
+      {
+        role: role.toUpperCase(),
+        harnessTaskLabel: taskId,
+        dispatchId,
+        recordedAt: "2026-08-25T22:00:00.000Z",
+      },
+    ]);
+
+    writeConsumptionReceipt(
+      dir,
+      role,
+      {
+        taskId,
+        role: role.toUpperCase(),
+        droppedAt,
+        resultFingerprint: originalFingerprint,
+        doneAt,
+      },
+      BASE_EFFECTS,
+      1,
+    );
+
+    const taskPath = writeNextTaskFile(dir, role, {
+      taskId: "HYK-9612-fallback-match-next",
+      droppedAt: "2026-08-26 11:00:00 KST",
+      headCommit: "l".repeat(40),
+    });
+
+    const ledgerPath = join(dir, "reject-streak.json");
+    writeLedger(ledgerPath, { schema_version: 1, issues: {} });
+
+    const r = runCli([
+      taskPath,
+      "--ledger",
+      ledgerPath,
+      "--dispatch-receipt-path",
+      dispatchReceiptPath,
+    ]);
+    assert.match(
+      r.stderr,
+      /ARCHIVE_MATCH/,
+      `사전 조건 확인 실패 -- fallback 경로 자체가 안 탔다. stdout=${r.stdout} stderr=${r.stderr}`,
+    );
+    assert.equal(
+      r.status,
+      0,
+      `기대: ALLOW(fallback + MATCH). 실제 stdout=${r.stdout} stderr=${r.stderr}`,
+    );
+    assert.match(r.stdout, /ALLOW/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ⓞ ★★HYK-396 3R §1 Q1⑶ -- 검토자의 두 번째 실증 재현: 각인 값 «뒤에»
+// 개행을 심으면 헤더 한 줄 정규식이 통째로 매치를 못 해 옛 코드는 이를
+// ABSENT(=스킵, ALLOW)로 접었다. 이 표본은 6성분이 전부 정상 일치하는
+// 상황에서 그 헤더 손상 «하나»만으로 REJECT가 되는지를 증명한다(부재가
+// 아니라 손상 -- classifyArchivedDispatchId가 접두사 존재로 갈랐는지
+// 직접 CLI로 확인).
+// ---------------------------------------------------------------------------
+test("(o) ★★모양 손상 — 각인 값 뒤 개행 삽입(헤더 파싱 실패): 6성분은 정상 일치하지만 헤더가 깨짐 -> REJECT(부재가 아니라 손상, 검토자 실증 재현)", () => {
+  withFixtureDir((dir) => {
+    const role = "coder";
+    const taskId = "HYK-9613-newline-shape-1";
+    const droppedAt = "2026-08-26 12:00:00 KST";
+    const doneAt = "2026-08-26 12:05:10 KST";
+    const ledgerDispatchId = "ctx_hyk396_newline_real";
+
+    // writeArchivedTaskCopy 헬퍼로는 개행을 헤더 «안에» 심을 수 없으므로
+    // (그 헬퍼는 정상 한 줄 헤더만 만든다) 여기서는 직접 파일을 쓴다 --
+    // 검토자 실증 그대로: dispatch_id 값 뒤, 닫는 `-->` 앞에 개행 삽입.
+    const roundsDir = join(dir, "rounds");
+    mkdirSync(roundsDir, { recursive: true });
+    const brokenHeader = `<!-- envelope-archive: role=CODER kind=task dropped_at=${droppedAt} dispatch_id=${ledgerDispatchId}\n -->\n`;
+    writeFileSync(
+      join(roundsDir, "CODER-task-r1.md"),
+      `${brokenHeader}task_id: ${taskId}\ndropped_at: ${droppedAt}\n${ONE_B_BLOCK}`,
+      "utf8",
+    );
+
+    const resultContent = `task_id: ${taskId}\nverdict: approved\n>>> DONE: ${role.toUpperCase()} @ ${doneAt}\n`;
+    const resultPath = join(dir, `${role}.md`);
+    writeFileSync(resultPath, resultContent, "utf8");
+
+    const dispatchReceiptPath = join(dir, "dispatch-receipts.jsonl");
+    writeDispatchReceiptsLog(dispatchReceiptPath, [
+      {
+        role: role.toUpperCase(),
+        harnessTaskLabel: taskId,
+        dispatchId: ledgerDispatchId,
+        recordedAt: "2026-08-26T02:30:00.000Z",
+      },
+    ]);
+
+    writeConsumptionReceipt(
+      dir,
+      role,
+      {
+        taskId,
+        role: role.toUpperCase(),
+        droppedAt,
+        resultFingerprint: computeFingerprint(resultContent),
+        doneAt,
+      },
+      BASE_EFFECTS,
+      1,
+    );
+
+    const taskPath = writeNextTaskFile(dir, role, {
+      taskId: "HYK-9613-newline-shape-next",
+      droppedAt: "2026-08-26 13:00:00 KST",
+      headCommit: "o".repeat(40),
+    });
+
+    const ledgerPath = join(dir, "reject-streak.json");
+    writeLedger(ledgerPath, { schema_version: 1, issues: {} });
+
+    const r = runCli([
+      taskPath,
+      "--ledger",
+      ledgerPath,
+      "--dispatch-receipt-path",
+      dispatchReceiptPath,
+    ]);
+    assert.notEqual(
+      r.status,
+      0,
+      `개행으로 헤더를 깨서 ABSENT로 새면 위조가 통과한다 -- 실제 stdout: ${r.stdout}`,
+    );
+    assert.match(r.stderr, /손상/);
   });
 });

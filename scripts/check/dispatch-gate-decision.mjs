@@ -989,30 +989,32 @@ export function lookupDispatchId({
 // HYK-396 §2 (확장, 회귀 0): 기존 계약("가장 높은 번호 사본 하나만 대조"·
 // task_id 일치 요구·droppedAt 못 찾으면 undefined) 그대로 두고, 같은
 // 파일을 두 번 읽지 않도록 그 자리에서 dispatch_id 판정도 함께 뽑아 온다.
-// HYK-396 2R §2 (검토 rejected 사유 재현 방지): extractArchivedDispatchId
-// (ABSENT/DAMAGED를 둘 다 undefined로 뭉개는 thin wrapper) 대신
-// classifyArchivedDispatchId를 직접 써서 세 갈래(ABSENT/DAMAGED/VALUE)를
-// 그대로 들고 온다 -- 이 축(resolveArchivedDispatchIdVeto)이 DAMAGED를
-// ABSENT와 다르게(무조건 거부) 다뤄야 하기 때문이다. 함수 이름을
-// findArchivedDroppedAt에서 findArchivedRoundMeta로 바꿨다(반환 모양이
-// 바뀌었으므로) -- 이 함수는 export되지 않고 이 파일 안 단일 호출부
-// (buildConsumptionBindingContext)만 이 반환 모양에 의존하므로 외부
-// 회귀는 없다.
+// droppedAt 자체는 여전히 "가장 높은 사본 하나만"이다(이 라운드 범위
+// 밖 -- Q1은 dispatch_id 축만 좁힌다).
 //
-// ★같은 라벨 사본 2개, 더 높은 사본이 미각인인 경우의 명시적 정의(2R §2
-// Q2 요구, 검토 지적 "지금은 조용히 ALLOW"): 이 함수는 "가장 높은 번호
-// 사본 하나만" 본다는 기존 계약(1R Q2·HYK-244 2R-b3 결함1 선례)을 그대로
-// 유지한다 -- 더 낮은 번호 사본에 실값이 찍혀 있어도 그 값을 절대
-// 끌어오지 않는다. 따라서 "더 높은 사본이 미각인(ABSENT)"이면 이 함수는
-// dispatchIdKind: "ABSENT"를 돌려주고, 아래 checkArchivedDispatchIdBinding
-// 은 ABSENT를 스킵(=ALLOW 유지)으로 판정한다 -- 이것은 단일 사본만 있고
-// 아예 안 찍힌 경우(1R Q4 ⓓ, 검토 §1 "다시 하지 마라"에 있는 회귀-0
-// 계약)와 **의도적으로 동일한 취급**이다: 이 축은 애초에 "가장 높은
-// 사본, 그 사본 하나의 헤더"만 근거로 삼으므로, 다른(낮은) 사본에 무엇이
-// 적혀 있는지는 이 축의 판단에 영향을 주지 않는다 -- 사본이 몇 벌이든
-// "가장 높은 사본 자신의 상태"만 유일한 입력이라는 원칙을 깨지 않는
-// 것이 완화가 아니라 오히려 그 원칙의 일관된 적용이다. 시험:
-// hyk396-dispatch-stamp.test.mjs (e).
+// HYK-396 3R §1 Q1⑴ (검토 rejected 사유 재현 방지 -- ★비타협): 2R까지는
+// "가장 높은 사본이 ABSENT면 그걸로 «없음»을 확정"했다 -- 검토자가 직접
+// 실행해 반증했다: 낮은 사본(r1)에 위조 dispatch_id를 심고 높은 사본(r2,
+// 판정 대상)은 필드 자체를 안 남기면, 이 함수는 r2만 보고 ABSENT를
+// 돌려줘 r1의 위조를 «영원히 못 본다»(실증: r1=ctx_probe_higher_forged
+// / r2=필드없음 / 원장=ctx_probe_higher_real ⇒ fallback과 결합해
+// status=0 ARCHIVE_MATCH ALLOW). ★불변식(coder-task.md §2 P): "각인을
+// «없는 것처럼» 만드는 어떤 조작으로도 위조를 통과시킬 수 없다" -- 이
+// 요구를 만족하려면 "가장 높은 사본"이 ABSENT일 때 그것만으로 끝내지
+// 말고, 같은 라벨의 «다른 모든 사본»(더 낮은 번호)까지 살펴 그중
+// 하나라도 DAMAGED거나 원장과 다른 VALUE(=위조 의심)면 거부해야 한다.
+// 반대로 다른 사본이 전혀 없거나(단일 사본) 전부 ABSENT/원장과 일치하는
+// VALUE뿐이면 "정말 아무 증거도 없다"는 뜻이므로 여전히 스킵(ALLOW) --
+// 이게 깨지면 배달 시점 각인이 아예 없던 진짜 옛 사본(§2 Q3 회귀 요구,
+// "각인 이전 옛 사본은 여전히 통과해야 한다")까지 막혀 릴레이가 멈춘다.
+// ⛔"가장 높은 사본"이 ABSENT가 «아니면»(DAMAGED·VALUE) 이 스캔은 아예
+// 안 돈다 -- 그 경우는 이미 그 사본 자신의 상태만으로 결정적이다(기존
+// 계약 그대로, 회귀 0).
+//
+// lowerCopyEvidence: 가장 높은 사본이 ABSENT일 때만 채워지는, 더 낮은
+// 번호 사본들 중 ABSENT가 «아닌» 것들의 분류 목록(순서 무관 -- 호출자가
+// "하나라도 나쁘면 거부"만 물으므로 정렬이 필요 없다). 가장 높은 사본이
+// ABSENT가 아니면 항상 빈 배열.
 function findArchivedRoundMeta(harnessDir, role, harnessTaskLabel) {
   const archiveDir = join(harnessDir, "rounds");
   let names;
@@ -1023,12 +1025,11 @@ function findArchivedRoundMeta(harnessDir, role, harnessTaskLabel) {
       droppedAt: undefined,
       dispatchId: undefined,
       dispatchIdKind: "ABSENT",
+      lowerCopyEvidence: [],
     };
   }
   const pattern = new RegExp(`^${role}-task-r(\\d+)\\.md$`, "i");
-  let bestRound = -1;
-  let bestDroppedAt;
-  let bestDispatchIdClassified = { kind: "ABSENT" };
+  const matches = [];
   for (const name of names) {
     const m = pattern.exec(name);
     if (!m) continue;
@@ -1044,49 +1045,57 @@ function findArchivedRoundMeta(harnessDir, role, harnessTaskLabel) {
       continue;
     const droppedMatch = content.match(CONSUMPTION_DROPPED_AT_RE);
     if (!droppedMatch) continue;
-    const roundNum = Number(m[1]);
-    if (roundNum > bestRound) {
-      bestRound = roundNum;
-      bestDroppedAt = droppedMatch[1].trim();
-      bestDispatchIdClassified = classifyArchivedDispatchId(content);
-    }
+    matches.push({
+      roundNum: Number(m[1]),
+      droppedAt: droppedMatch[1].trim(),
+      classified: classifyArchivedDispatchId(content),
+    });
   }
+  if (matches.length === 0) {
+    return {
+      droppedAt: undefined,
+      dispatchId: undefined,
+      dispatchIdKind: "ABSENT",
+      lowerCopyEvidence: [],
+    };
+  }
+  matches.sort((a, b) => b.roundNum - a.roundNum);
+  const [highest, ...lower] = matches;
+  const dispatchIdKind = highest.classified.kind;
+  const lowerCopyEvidence =
+    dispatchIdKind === "ABSENT"
+      ? lower.map((m2) => m2.classified).filter((c) => c.kind !== "ABSENT")
+      : [];
   return {
-    droppedAt: bestDroppedAt,
+    droppedAt: highest.droppedAt,
     dispatchId:
-      bestDispatchIdClassified.kind === "VALUE"
-        ? bestDispatchIdClassified.value
-        : undefined,
-    dispatchIdKind: bestDispatchIdClassified.kind,
+      dispatchIdKind === "VALUE" ? highest.classified.value : undefined,
+    dispatchIdKind,
+    lowerCopyEvidence,
   };
 }
 
-// HYK-396 §2 Q2 -- the new axis itself. Only called when the existing
-// 6-field binding (consumption-receipt-core.mjs's bindingEqual) has ALREADY
-// matched -- either via the primary decision===null branch, or via
-// tryArchiveFallback's ARCHIVE_MATCH ALLOW (HYK-396 2R §2 P1-1 fix: both
+// HYK-396 §2 Q2(1R/2R) + 3R §1 Q1⑵ -- the new axis itself. Only called
+// when the existing 6-field binding (consumption-receipt-core.mjs's
+// bindingEqual) has ALREADY matched -- either via the primary
+// decision===null branch (pathKind: "normal"), or via tryArchiveFallback's
+// ARCHIVE_MATCH ALLOW (pathKind: "fallback" -- 2R §2 P1-1 fix: both
 // ALLOW-producing paths must pass through this same veto, not just the
 // first one -- the 1R gap the reviewer's forged-stamp sample exploited).
 // This function can only ever TIGHTEN an already-ALLOW outcome (never
-// loosen it): ABSENT (undefined, whether pre-migration, not-yet-stamped,
-// or the highest-round copy simply never got stamped -- see
-// findArchivedRoundMeta's own header for why a lower round's real stamp
-// never overrides this) skips the axis (existing outcome stands,
-// coder-task.md §3 Q2 1R "값이 없으면 없다고 기록"); DAMAGED (empty/
-// whitespace-only/whitespace-wrapped -- 2R §2 "손상") ALWAYS rejects,
-// regardless of what the ledger resolves to (a malformed stamp is
-// evidence of tampering, not evidence of nothing); VALUE that agrees with
-// the ledger's resolved dispatchId also skips (redundant confirmation);
-// VALUE that DISAGREES rejects (Q4 fixture ⓒ, unchanged from 1R).
+// loosen it). See checkArchivedDispatchIdBinding's own header for the
+// full state×path disposition table (3R §2 Q2's explicit contract).
 function resolveArchivedDispatchIdVeto(
   role,
   archivedRoundMeta,
   currentBinding,
+  pathKind,
 ) {
   const idBinding = checkArchivedDispatchIdBinding(
     role,
     archivedRoundMeta,
     currentBinding.dispatchId,
+    pathKind,
   );
   if (idBinding.reject) {
     return {
@@ -1098,18 +1107,84 @@ function resolveArchivedDispatchIdVeto(
   return null;
 }
 
+// HYK-396 3R §2 Q2 -- ★상태×경로 명시 계약 표(코드 자신이 이 표다, 문서는
+// coder.md에 재기재). 상태는 archivedRoundMeta.dispatchIdKind(가장 높은
+// 사본 자신의 분류) + lowerCopyEvidence(그 사본이 ABSENT일 때만 채워지는,
+// 3R §1 Q1⑴의 낮은 사본 스캔 결과)로 결정된다. 경로는 pathKind
+// ("normal" = 정상 6성분 결속 ALLOW, "fallback" = tryArchiveFallback
+// ARCHIVE_MATCH ALLOW)다.
+//
+// | 상태(가장 높은 사본 기준)              | normal 경로 | fallback 경로 |
+// |----------------------------------------|-------------|----------------|
+// | DAMAGED                                | REJECT      | REJECT         |
+// | ABSENT + 낮은 사본에 DAMAGED/MISMATCH  | REJECT      | REJECT         |
+// | ABSENT + 낮은 사본 전부 무해(없음·MATCH만) | ALLOW(스킵) | REJECT(★Q1⑵) |
+// | MATCH(원장과 일치)                     | ALLOW(스킵) | ALLOW(스킵)    |
+// | MISMATCH(원장과 다름)                  | REJECT      | REJECT         |
+//
+// 표에 없는 조합은 없다 -- dispatchIdKind는 정확히 {ABSENT, DAMAGED,
+// VALUE} 세 값이고 VALUE는 MATCH/MISMATCH로만 갈리며, lowerCopyEvidence는
+// dispatchIdKind==="ABSENT"일 때만 의미를 갖는다(findArchivedRoundMeta가
+// 그 외엔 항상 빈 배열을 돌려준다). pathKind는 호출자가 "normal"|
+// "fallback" 둘 중 하나만 넘긴다(그 외 값을 넘기면 아래 fallback 분기
+// 코드가 그 값을 "normal 아님"으로 취급 -- 문자열 비교이므로 오타는
+// 곧장 REJECT 쪽으로 fail-closed된다, ALLOW로 새지 않는다).
+//
+// 시험(scripts/check/hyk396-dispatch-stamp.test.mjs, 상태별 최소 1개):
+//   DAMAGED × normal        = (f)/(g)/(h)
+//   ABSENT(단일, 증거 없음) × normal   = (d) -- ★Q3 회귀, 릴레이 정지 방지
+//   ABSENT + 낮은 사본 MISMATCH × fallback = (e) -- ★검토자 실증 재현
+//   ABSENT + 낮은 사본 MISMATCH × normal   = (j)
+//   ABSENT(증거 없음) × fallback   = (k) -- ★3R Q1⑵ 신규
+//   MATCH × normal          = (a)
+//   MATCH × fallback        = (l)
+//   MISMATCH × normal       = (c)
+//   MISMATCH × fallback     = (e)(부수 확인) · (m)
 function checkArchivedDispatchIdBinding(
   role,
   archivedRoundMeta,
   resolvedDispatchId,
+  pathKind,
 ) {
   if (archivedRoundMeta.dispatchIdKind === "DAMAGED") {
     return {
       reject: true,
-      reason: `dispatch-gate-decision consumption: 보존 사본(rounds/${role}-task-r<N>.md) 헤더의 dispatch_id 값이 손상됨(빈 값·공백만·앞뒤 공백 섞인 변형 중 하나) -- "없음"이 아니라 "손상"이므로 무조건 거부(HYK-396 2R, 안전측 기본값 -- 원장 조회 결과와 무관)`,
+      reason: `dispatch-gate-decision consumption: 보존 사본(rounds/${role}-task-r<N>.md) 헤더의 dispatch_id 값이 손상됨(빈 값·공백·앞뒤공백·개행·중복 필드 중 하나) -- "없음"이 아니라 "손상"이므로 무조건 거부(HYK-396, 안전측 기본값 -- 원장 조회 결과와 무관)`,
     };
   }
-  if (archivedRoundMeta.dispatchIdKind === "ABSENT") return { reject: false };
+  if (archivedRoundMeta.dispatchIdKind === "ABSENT") {
+    // HYK-396 3R §1 Q1⑴: 가장 높은 사본이 ABSENT라도 그걸로 끝내지
+    // 않는다 -- 더 낮은 사본들 중 하나라도 손상됐거나(DAMAGED) 원장과
+    // 다른 값(VALUE mismatch)이면 위조 의심 증거이므로 거부한다.
+    for (const evidence of archivedRoundMeta.lowerCopyEvidence) {
+      if (evidence.kind === "DAMAGED") {
+        return {
+          reject: true,
+          reason: `dispatch-gate-decision consumption: 가장 높은 보존 사본(rounds/${role}-task-r<N>.md)의 dispatch_id는 미각인(ABSENT)이지만, 같은 라벨의 더 낮은 사본에서 손상된 dispatch_id 각인이 발견됨 -- "없음"으로 결론 내리지 않는다(HYK-396 3R Q1⑴), 거부`,
+        };
+      }
+      if (evidence.kind === "VALUE" && evidence.value !== resolvedDispatchId) {
+        return {
+          reject: true,
+          reason: `dispatch-gate-decision consumption: 가장 높은 보존 사본(rounds/${role}-task-r<N>.md)의 dispatch_id는 미각인(ABSENT)이지만, 같은 라벨의 더 낮은 사본에 각인된 dispatch_id('${evidence.value}')가 이 라운드의 실제 배달 원장에서 조회된 값('${resolvedDispatchId ?? "(조회 불가/없음)"}')과 다름 -- 위조 의심, 거부(HYK-396 3R Q1⑴)`,
+        };
+      }
+    }
+    // HYK-396 3R §1 Q1⑵ (★비타협, 검토 원문 그대로): "이행 허용은 정상
+    // 경로에만" -- fallback(ARCHIVE_MATCH) 경로는 이미 live 결과 지문이
+    // 어긋난(=이상 신호가 이미 하나 있는) 상태에서 판단하므로, 거기에
+    // dispatch_id 증거까지 «전혀 없다»는 것은 정상 경로의 "옛 사본이라
+    // 그렇다"는 무해한 설명과 같은 확신을 주지 못한다 -- 안전측으로
+    // 거부한다. normal 경로는 기존 계약(1R Q2 "값이 없으면 없다고
+    // 기록") 그대로 스킵한다.
+    if (pathKind === "fallback") {
+      return {
+        reject: true,
+        reason: `dispatch-gate-decision consumption: fallback(ARCHIVE_MATCH) 경로에서 보존 사본(rounds/${role}-task-r<N>.md, 및 같은 라벨의 다른 사본 전부)에 dispatch_id 각인 증거가 전혀 없음 -- 이행 허용은 정상 경로에만 적용된다(HYK-396 3R Q1⑵), fallback은 안전측 거부`,
+      };
+    }
+    return { reject: false };
+  }
   const archivedDispatchId = archivedRoundMeta.dispatchId;
   if (archivedDispatchId === resolvedDispatchId) return { reject: false };
   return {
@@ -2455,6 +2530,7 @@ function resolveConsumptionAllowOrFallthrough({
         role,
         archivedRoundMeta,
         currentBinding,
+        "normal",
       ),
     };
   }
@@ -2473,6 +2549,7 @@ function resolveConsumptionAllowOrFallthrough({
         role,
         archivedRoundMeta,
         currentBinding,
+        "fallback",
       ),
     };
   }

@@ -442,26 +442,51 @@ const ARCHIVE_TASK_HEADER_LINE_RE = /^<!-- envelope-archive:[^\n]*-->\n/;
 // (아래 replace 호출부 참고).
 const ARCHIVE_TASK_HEADER_DISPATCH_ID_RE = /dispatch_id=([^\n]*?) -->/;
 
+// HYK-396 3R §1 Q1⑶ (검토자 실증 재현 방지): 두 번째 우회 -- 각인 값 뒤에
+// 개행을 하나 심으면 ARCHIVE_TASK_HEADER_LINE_RE(줄바꿈을 절대 허용하지
+// 않는 `[^\n]*`)가 헤더 전체를 매치하지 못해 headerMatch가 null이 되고,
+// 옛 코드는 이를 "헤더 자체가 없음"(ABSENT)으로 접었다 -- 실제로는
+// `<!-- envelope-archive:` 접두사가 버젓이 있는, 이 모듈이 만든 사본이
+// 깨진 것이다(잘림·중복 필드도 같은 계열: "파싱 실패"이지 "없음"이
+// 아니다). 접두사 존재 여부로 그 둘을 가른다 -- 접두사가 있는데 온전한
+// 한 줄 헤더로 파싱되지 않으면 DAMAGED, 접두사 자체가 없으면(이 모듈이
+// 손댄 적 없는 파일) 진짜 ABSENT다.
+const ARCHIVE_TASK_HEADER_PREFIX = "<!-- envelope-archive:";
+const DISPATCH_ID_FIELD_OCCURRENCE_RE = /dispatch_id=/g;
+
 // HYK-396 2R §2 -- 헤더에서 dispatch_id를 "판정 가능한 셋 중 하나"로
 // 분류한다. 순수 함수(파일 I/O 없음), extractArchivedDispatchId(아래)와
 // checkArchivedDispatchIdBinding(dispatch-gate-decision.mjs)이 각각 다른
 // 목적으로 이 판정을 쓴다 -- 전자는 "값이 있으면 무엇인지"만 궁금하고,
 // 후자는 "손상(DAMAGED)이면 무조건 거부"라는 세 번째 갈래가 필요하다.
-//   - ABSENT: 헤더 자체가 없거나(이 모듈이 만든 사본이 아님), 필드 자체가
-//     없거나(이행 기간 옛 사본), 리터럴 "unknown"(배달 시점 미확정 스냅숏,
-//     아직 stampDispatchIdOnLatestArchivedTaskFile이 못 돈 경우) -- 이
-//     축을 건드리지 않는다(1R Q2 "값 부재 스킵", 검토 §1 "다시 하지
-//     마라" 목록에 있는 회귀 0 계약 그대로 유지).
-//   - DAMAGED: 필드는 있는데 값이 트림 후 빈 문자열이거나(빈 값·공백만),
-//     원문 자체가 트림 결과와 다르다(앞뒤 공백 섞인 변형) -- ★"없음"이
-//     아니라 "손상"이다. 이 상태는 언제나 거부로 이어져야 한다(2R §2 P2
-//     원문: "트림 후 비면 «없음»이 아니라 «손상»으로 다뤄라").
-//   - VALUE: 위 두 경우가 아닌, 앞뒤 공백 없는 순수 토큰 -- 실값으로
+//   - ABSENT: 헤더 접두사 자체가 없거나(이 모듈이 만든 사본이 아님),
+//     온전한 헤더인데 필드 자체가 없거나(이행 기간 옛 사본), 리터럴
+//     "unknown"(배달 시점 미확정 스냅숏, 아직
+//     stampDispatchIdOnLatestArchivedTaskFile이 못 돈 경우) -- 이 축을
+//     건드리지 않는다(1R Q2 "값 부재 스킵", 검토 §1 "다시 하지 마라"
+//     목록에 있는 회귀 0 계약 그대로 유지).
+//   - DAMAGED: 헤더 접두사는 있는데 한 줄로 온전히 파싱되지 않거나(개행
+//     삽입·잘림, 3R §1 Q1⑶), `dispatch_id=`가 두 번 이상 나타나거나(중복
+//     필드, 어느 것이 진짜인지 결정 불가), 필드는 있는데 값이 트림 후
+//     빈 문자열이거나(빈 값·공백만), 원문 자체가 트림 결과와 다르다(앞뒤
+//     공백 섞인 변형, 2R §2) -- ★"없음"이 아니라 "손상"이다. 이 상태는
+//     언제나 거부로 이어져야 한다(2R §2 P2 원문 그대로, 3R §1 Q1⑶로
+//     범위 확장: "파싱 실패는 «없음»이 아니다").
+//   - VALUE: 위 두 경우가 아닌, 앞뒤 공백 없는 순수 토큰 하나 -- 실값으로
 //     취급한다(원장 값과의 일치 여부는 호출자 몫).
 export function classifyArchivedDispatchId(content) {
   const headerMatch = content.match(ARCHIVE_TASK_HEADER_LINE_RE);
-  if (!headerMatch) return { kind: "ABSENT" };
-  const idMatch = headerMatch[0].match(ARCHIVE_TASK_HEADER_DISPATCH_ID_RE);
+  if (!headerMatch) {
+    return content.startsWith(ARCHIVE_TASK_HEADER_PREFIX)
+      ? { kind: "DAMAGED" }
+      : { kind: "ABSENT" };
+  }
+  const headerLine = headerMatch[0];
+  const fieldOccurrences = (
+    headerLine.match(DISPATCH_ID_FIELD_OCCURRENCE_RE) ?? []
+  ).length;
+  if (fieldOccurrences > 1) return { kind: "DAMAGED" };
+  const idMatch = headerLine.match(ARCHIVE_TASK_HEADER_DISPATCH_ID_RE);
   if (!idMatch) return { kind: "ABSENT" };
   const raw = idMatch[1];
   if (raw === "unknown") return { kind: "ABSENT" };
