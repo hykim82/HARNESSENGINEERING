@@ -87,9 +87,16 @@
 // mutation + restore was performed by hand for 1R/2R/3R and is recorded in
 // .harness/coder.md, not repeated here (this file must stay green against
 // the real inventory on every future run).
-import { test } from "node:test";
+import { test, after } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync, lstatSync } from "node:fs";
+import {
+  readFileSync,
+  lstatSync,
+  mkdirSync,
+  writeFileSync,
+  unlinkSync,
+  rmdirSync,
+} from "node:fs";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
@@ -598,14 +605,66 @@ test("MUTATION (3R P1): non-확실 axis with a fabricated repo-relative evidence
   );
 });
 
+// HYK-271-ci-fixture-5: the pair below used to point at a real
+// `.harness/`-relative file (`.harness/` is `.gitignore`d, so it existed
+// on disk in every local worktree but is a wholly local artifact). CI runs
+// from a fresh clone that never has `.harness/` at all, so `lstatSync`
+// there throws for a DIFFERENT reason (missing file, not "exists but
+// untracked") and the assertions below failed for the wrong error message
+// (see PR #232 CI: not ok 972/973/974). Fixed by self-generating the
+// antagonistic sample: this file is written to disk right here, at test
+// time, and is never `git add`ed -- so it is untracked BY CONSTRUCTION in
+// any environment, local or CI, with no dependency on `.harness/` or any
+// other local-only path.
+//
+// It is written under `scripts/check/.tmp-fixtures/`, a directory this
+// round adds to `.gitignore` for exactly this purpose (NOT `.harness/` --
+// coder-task.md §0 forbids touching the live `.harness/` this round's own
+// task/result files live under). Being `.gitignore`d matters here for a
+// second, independent reason discovered while proving this fix against the
+// full CI-canonical sweep (scripts/check/hyk359-ambient-env-regression.test.mjs):
+// several other test files snapshot `git status --porcelain` of the whole
+// repo before/after their own run and assert it is unchanged. `git status
+// --porcelain` (no `--ignored`) never lists ignored paths, so a file
+// created and removed here mid-sweep is invisible to those unrelated
+// snapshots -- an earlier version of this fix wrote directly into
+// `scripts/check/` (untracked but NOT ignored) and transiently broke that
+// invariant for whichever other file's snapshot raced against this one's
+// create/remove window. It is removed again in the `after()` hook below.
+const SELF_GENERATED_UNTRACKED_FIXTURE_REL_PATH =
+  "scripts/check/.tmp-fixtures/hyk271-ci-fixture-5-self-generated.tmp";
+const SELF_GENERATED_UNTRACKED_FIXTURE_ABS_PATH = resolveRepoRelativePath(
+  SELF_GENERATED_UNTRACKED_FIXTURE_REL_PATH,
+);
+const SELF_GENERATED_UNTRACKED_FIXTURE_DIR_ABS_PATH = resolveRepoRelativePath(
+  "scripts/check/.tmp-fixtures",
+);
+mkdirSync(SELF_GENERATED_UNTRACKED_FIXTURE_DIR_ABS_PATH, { recursive: true });
+writeFileSync(
+  SELF_GENERATED_UNTRACKED_FIXTURE_ABS_PATH,
+  "self-generated antagonistic fixture for HYK-271-ci-fixture-5 -- exists on disk, never git-added, untracked by construction\n",
+);
+after(() => {
+  try {
+    unlinkSync(SELF_GENERATED_UNTRACKED_FIXTURE_ABS_PATH);
+  } catch {
+    // already removed -- nothing to clean up
+  }
+  try {
+    rmdirSync(SELF_GENERATED_UNTRACKED_FIXTURE_DIR_ABS_PATH);
+  } catch {
+    // not empty (a concurrent run also using it) or already removed --
+    // leaving an empty, gitignored directory behind is harmless either way
+  }
+});
+
 // HYK-271-tracked-4 (Q2, antagonistic sample -- the exact P1 this round
-// fixes): an existing, `.gitignore`d file. It is real on disk (passes
+// fixes): an existing but untracked file. It is real on disk (passes
 // lstat/isFile/line-range) but the repository does not track it, so a
 // fresh clone/CI would not have it. Both a 확실 axis AND a non-확실 axis
 // pointed at it must be rejected -- 3R's P1 was found on a non-확실 item
 // specifically, so covering only 확실 here would repeat that exact gap.
-const IGNORED_EXISTING_FILE_EVIDENCE =
-  ".harness/rounds/review-task-r1.md:1 -- exists on disk, .gitignore'd, not tracked";
+const IGNORED_EXISTING_FILE_EVIDENCE = `${SELF_GENERATED_UNTRACKED_FIXTURE_REL_PATH}:1 -- exists on disk, self-generated at test time, never tracked`;
 
 test("MUTATION (HYK-271-tracked-4, Q2): 확실 axis pointed at an existing but git-ignored file is caught", () => {
   const data = cloneItems(loadRealInventory());
@@ -638,22 +697,21 @@ test("MUTATION (HYK-271-tracked-4, Q2): non-확실 axis pointed at an existing b
   );
 });
 
-// sanity: confirm the fixture file this pair relies on is real on disk but
-// genuinely git-ignored -- if this assumption ever breaks (file deleted, or
-// someone un-ignores .harness/), the two tests above would start failing
-// for the wrong reason (missing-file, not tracking) without this guard
-// making that distinction explicit.
-test("sanity: the HYK-271-tracked-4 antagonistic fixture file exists on disk but is untracked by git", () => {
-  const resolved = resolveRepoRelativePath(".harness/rounds/review-task-r1.md");
+// sanity: confirm the self-generated fixture file this pair relies on is
+// real on disk but genuinely untracked -- if this assumption ever breaks
+// (write failed silently, or something `git add`s it), the two tests above
+// would start failing for the wrong reason (missing-file, not tracking)
+// without this guard making that distinction explicit.
+test("sanity: the HYK-271-ci-fixture-5 self-generated antagonistic fixture exists on disk but is untracked by git", () => {
   assert.doesNotThrow(
-    () => lstatSync(resolved),
+    () => lstatSync(SELF_GENERATED_UNTRACKED_FIXTURE_ABS_PATH),
     "fixture file must exist on disk for this sanity check to mean anything",
   );
-  const result = checkGitTracked(".harness/rounds/review-task-r1.md");
+  const result = checkGitTracked(SELF_GENERATED_UNTRACKED_FIXTURE_REL_PATH);
   assert.equal(
     result.tracked,
     false,
-    "fixture file must be untracked (ignored) -- if it is now tracked, pick a different .harness/ fixture",
+    "self-generated fixture file must be untracked -- if it is somehow tracked, this sanity check would mean nothing",
   );
 });
 
