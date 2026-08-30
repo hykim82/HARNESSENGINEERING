@@ -11,6 +11,21 @@ import { join, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 
+// HYK-400 5R 위협 모델(책임자 판단 2026-08-31, 제안 A 승인 -- 1R~4R
+// 4연속 반려가 하드스톱에 걸린 뒤 확정됐다): 이 판정기는 «낡음(stale)
+// 탐지»가 목적이다 -- 대상은 우리 저장소의 «옛 커밋» 체크아웃이며, 오늘
+// 실사고 2회의 실체도 둘 다 "워크트리 갱신을 잊고 배달"이었지 공격이
+// 아니었다. ⛔대상이 «적극적으로 속이려 드는 경우»(같은 프로세스 안에서
+// 전역을 오염시키거나 응답 채널을 선점하는 등, 4R 독립 검토가 실증:
+// 대상이 전역 JSON.stringify를 덮어쓰자 러너의 정당한 writeResult()가
+// 위조 응답을 쓰게 만들 수 있었다 -- child는 exit 0으로 깨끗이 끝나고
+// 부모 판정은 ok:true, supported:true가 됐다)는 이 가드의 방어 범위
+// 밖이다. ★정직 경계(원문): "악의적 대상 앞에서는 이 가드보다 더 쉬운
+// 우회가 존재한다(가드 파일 삭제 등) -- 진짜 해법은 OS 권한 분리이며
+// 그것은 HYK-89의 범위다." 이건 결함이 아니라 범위 밖이다 -- 자세한
+// 근거는 docs/control-room-patches/HYK-400-receiver-capability-guard.md
+// §0을 참조(이 라운드는 문서·주석만 바꾼다, 코드 동작은 4R 그대로다).
+//
 // HYK-400 2R (coder-task.md §1-2, 1R 검토 반려 P1-1/P1-2/P1-3 + P2 수리).
 // 1R은 "대상 워크트리의 dispatch-receipt-cli.mjs를 판정기 자신의
 // 프로세스 안에서 import해 파싱 성공 여부만 본다"였다 -- 검토가 실측으로
