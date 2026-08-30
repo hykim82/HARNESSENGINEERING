@@ -428,7 +428,48 @@ const ARCHIVE_TASK_FILE_NAME_RE_TEMPLATE = (role) =>
   new RegExp(`^${escapeForRegex(role)}-task-r(\\d+)\\.md$`, "i");
 
 const ARCHIVE_TASK_HEADER_LINE_RE = /^<!-- envelope-archive:[^\n]*-->\n/;
-const ARCHIVE_TASK_HEADER_DISPATCH_ID_RE = /dispatch_id=(\S+)/;
+// HYK-396 2R §2 (P2 검토 rejected 사유 재현 방지): `\S+`(옛 정규식)는 `=`
+// 바로 뒤가 공백이거나(빈 값·앞 공백 변형) 값 안에 공백이 섞이면 그
+// 자리에서 매치 자체가 실패했다 -- 그 실패는 "필드가 있는데 값이 손상"과
+// "필드가 아예 없음"을 구별하지 못하고 둘 다 조용히 undefined(=ABSENT)로
+// 뭉갰다(검토자 실측: 빈 값·공백만·앞 공백 변형 셋 다 ALLOW로 새는 원인).
+// `[^\n]*?`(줄바꿈 제외, lazy) + 뒤이은 리터럴 ` -->`로 바꿔 "다음 필드
+// 구분자(닫는 주석)까지의 원문 그대로"를 무조건 캡처한다 -- 그 안에 무엇이
+// 들었든(빈 문자열·공백·앞뒤 공백 섞인 값) 아래 classifyArchivedDispatchId가
+// 「모른다」로 접지 않고 반드시 판정한다. ⛔이 정규식은 쓰기 쪽
+// (computeStampedContent)도 함께 쓴다 -- 전체 매치(`[0]`)가 항상 ` -->`로
+// 끝나므로, 치환 문자열에도 그 접미사를 그대로 되붙여야 헤더가 안 깨진다
+// (아래 replace 호출부 참고).
+const ARCHIVE_TASK_HEADER_DISPATCH_ID_RE = /dispatch_id=([^\n]*?) -->/;
+
+// HYK-396 2R §2 -- 헤더에서 dispatch_id를 "판정 가능한 셋 중 하나"로
+// 분류한다. 순수 함수(파일 I/O 없음), extractArchivedDispatchId(아래)와
+// checkArchivedDispatchIdBinding(dispatch-gate-decision.mjs)이 각각 다른
+// 목적으로 이 판정을 쓴다 -- 전자는 "값이 있으면 무엇인지"만 궁금하고,
+// 후자는 "손상(DAMAGED)이면 무조건 거부"라는 세 번째 갈래가 필요하다.
+//   - ABSENT: 헤더 자체가 없거나(이 모듈이 만든 사본이 아님), 필드 자체가
+//     없거나(이행 기간 옛 사본), 리터럴 "unknown"(배달 시점 미확정 스냅숏,
+//     아직 stampDispatchIdOnLatestArchivedTaskFile이 못 돈 경우) -- 이
+//     축을 건드리지 않는다(1R Q2 "값 부재 스킵", 검토 §1 "다시 하지
+//     마라" 목록에 있는 회귀 0 계약 그대로 유지).
+//   - DAMAGED: 필드는 있는데 값이 트림 후 빈 문자열이거나(빈 값·공백만),
+//     원문 자체가 트림 결과와 다르다(앞뒤 공백 섞인 변형) -- ★"없음"이
+//     아니라 "손상"이다. 이 상태는 언제나 거부로 이어져야 한다(2R §2 P2
+//     원문: "트림 후 비면 «없음»이 아니라 «손상»으로 다뤄라").
+//   - VALUE: 위 두 경우가 아닌, 앞뒤 공백 없는 순수 토큰 -- 실값으로
+//     취급한다(원장 값과의 일치 여부는 호출자 몫).
+export function classifyArchivedDispatchId(content) {
+  const headerMatch = content.match(ARCHIVE_TASK_HEADER_LINE_RE);
+  if (!headerMatch) return { kind: "ABSENT" };
+  const idMatch = headerMatch[0].match(ARCHIVE_TASK_HEADER_DISPATCH_ID_RE);
+  if (!idMatch) return { kind: "ABSENT" };
+  const raw = idMatch[1];
+  if (raw === "unknown") return { kind: "ABSENT" };
+  if (raw.trim().length === 0 || raw !== raw.trim()) {
+    return { kind: "DAMAGED", raw };
+  }
+  return { kind: "VALUE", value: raw };
+}
 
 function findLatestArchivedTaskFileName(role, existingNames) {
   const pattern = ARCHIVE_TASK_FILE_NAME_RE_TEMPLATE(role);
@@ -507,10 +548,13 @@ function computeStampedContent(destPath, content, dispatchId) {
       reason: `envelope-archive: refusing to overwrite ${destPath}'s existing dispatch_id=${existing} with a different value (${dispatchId}) -- one-shot stamp, this looks like a race or a forged call`,
     };
   }
+  // HYK-396 2R: ARCHIVE_TASK_HEADER_DISPATCH_ID_RE의 전체 매치(`[0]`)는
+  // 이제 항상 ` -->`로 끝난다(위 정규식 자신의 헤더 주석 참조) -- 치환
+  // 문자열에도 그 접미사를 그대로 되붙여야 헤더가 안 깨진다.
   const newHeaderLine = idMatch
     ? headerLine.replace(
         ARCHIVE_TASK_HEADER_DISPATCH_ID_RE,
-        `dispatch_id=${dispatchId}`,
+        `dispatch_id=${dispatchId} -->`,
       )
     : headerLine.replace(/ -->\n$/, ` dispatch_id=${dispatchId} -->\n`);
   return {
@@ -570,16 +614,15 @@ export function stampDispatchIdOnLatestArchivedTaskFile({
 }
 
 // Extraction counterpart of the above -- reads dispatch_id back out of an
-// archived round-task snapshot's header. Returns undefined for both "no
-// header"/"no field" and the literal "unknown" placeholder (§2 Q2: absence
-// is absence, whether it's a pre-migration archive with no field at all or
-// a post-migration archive whose delivery-time snapshot hasn't been
-// stamped yet) -- callers must treat both the same way (skip the axis, do
-// not invent a comparison).
+// archived round-task snapshot's header. Returns undefined for "no header"/
+// "no field"/literal "unknown" (ABSENT, §2 Q2 1R: absence is absence) AND
+// for DAMAGED (empty/whitespace-only/surrounded-by-whitespace -- §2 Q2 2R:
+// "손상"). ⛔이 thin wrapper만 쓰는 호출자는 ABSENT와 DAMAGED를 구별하지
+// 못한다 -- DAMAGED를 반드시 별도로 다뤄야 하는 호출자(소비 판정 축,
+// dispatch-gate-decision.mjs)는 classifyArchivedDispatchId를 직접 써야
+// 한다(findArchivedRoundMeta가 그렇게 한다). 이 wrapper는 순수 "값이
+// 있으면 무엇인지"만 궁금한 나머지 호출자·시험을 위해 남긴다.
 export function extractArchivedDispatchId(content) {
-  const headerMatch = content.match(ARCHIVE_TASK_HEADER_LINE_RE);
-  if (!headerMatch) return undefined;
-  const idMatch = headerMatch[0].match(ARCHIVE_TASK_HEADER_DISPATCH_ID_RE);
-  if (!idMatch) return undefined;
-  return idMatch[1] === "unknown" ? undefined : idMatch[1];
+  const classified = classifyArchivedDispatchId(content);
+  return classified.kind === "VALUE" ? classified.value : undefined;
 }

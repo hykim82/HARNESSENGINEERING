@@ -99,7 +99,7 @@ import {
 // direction this file already uses for every other sibling import above.
 import {
   archiveRoundTaskFileIfNew,
-  extractArchivedDispatchId,
+  classifyArchivedDispatchId,
 } from "./envelope-archive.mjs";
 // HYK-239: reject-streak-chain.mjs's tamper-detection engine has existed
 // since HYK-218 with zero production callers (§0 실측). This is the wiring
@@ -988,24 +988,47 @@ export function lookupDispatchId({
 // 파일명 관례상 소문자인 이 함수의 role 인자와 다를 수 있다).
 // HYK-396 §2 (확장, 회귀 0): 기존 계약("가장 높은 번호 사본 하나만 대조"·
 // task_id 일치 요구·droppedAt 못 찾으면 undefined) 그대로 두고, 같은
-// 파일을 두 번 읽지 않도록 그 자리에서 dispatch_id도 함께 뽑아 온다
-// (envelope-archive.mjs의 extractArchivedDispatchId -- "unknown"/부재는
-// 둘 다 undefined로 접힌다, 지어내지 않는다). 함수 이름을 findArchivedDroppedAt
-// 에서 findArchivedRoundMeta로 바꿨다(반환 모양이 바뀌었으므로) -- 이
-// 함수는 export되지 않고 이 파일 안 단일 호출부(evaluateConsumptionDecision)
-// 만 이 반환 모양에 의존하므로 외부 회귀는 없다.
+// 파일을 두 번 읽지 않도록 그 자리에서 dispatch_id 판정도 함께 뽑아 온다.
+// HYK-396 2R §2 (검토 rejected 사유 재현 방지): extractArchivedDispatchId
+// (ABSENT/DAMAGED를 둘 다 undefined로 뭉개는 thin wrapper) 대신
+// classifyArchivedDispatchId를 직접 써서 세 갈래(ABSENT/DAMAGED/VALUE)를
+// 그대로 들고 온다 -- 이 축(resolveArchivedDispatchIdVeto)이 DAMAGED를
+// ABSENT와 다르게(무조건 거부) 다뤄야 하기 때문이다. 함수 이름을
+// findArchivedDroppedAt에서 findArchivedRoundMeta로 바꿨다(반환 모양이
+// 바뀌었으므로) -- 이 함수는 export되지 않고 이 파일 안 단일 호출부
+// (buildConsumptionBindingContext)만 이 반환 모양에 의존하므로 외부
+// 회귀는 없다.
+//
+// ★같은 라벨 사본 2개, 더 높은 사본이 미각인인 경우의 명시적 정의(2R §2
+// Q2 요구, 검토 지적 "지금은 조용히 ALLOW"): 이 함수는 "가장 높은 번호
+// 사본 하나만" 본다는 기존 계약(1R Q2·HYK-244 2R-b3 결함1 선례)을 그대로
+// 유지한다 -- 더 낮은 번호 사본에 실값이 찍혀 있어도 그 값을 절대
+// 끌어오지 않는다. 따라서 "더 높은 사본이 미각인(ABSENT)"이면 이 함수는
+// dispatchIdKind: "ABSENT"를 돌려주고, 아래 checkArchivedDispatchIdBinding
+// 은 ABSENT를 스킵(=ALLOW 유지)으로 판정한다 -- 이것은 단일 사본만 있고
+// 아예 안 찍힌 경우(1R Q4 ⓓ, 검토 §1 "다시 하지 마라"에 있는 회귀-0
+// 계약)와 **의도적으로 동일한 취급**이다: 이 축은 애초에 "가장 높은
+// 사본, 그 사본 하나의 헤더"만 근거로 삼으므로, 다른(낮은) 사본에 무엇이
+// 적혀 있는지는 이 축의 판단에 영향을 주지 않는다 -- 사본이 몇 벌이든
+// "가장 높은 사본 자신의 상태"만 유일한 입력이라는 원칙을 깨지 않는
+// 것이 완화가 아니라 오히려 그 원칙의 일관된 적용이다. 시험:
+// hyk396-dispatch-stamp.test.mjs (e).
 function findArchivedRoundMeta(harnessDir, role, harnessTaskLabel) {
   const archiveDir = join(harnessDir, "rounds");
   let names;
   try {
     names = readdirSync(archiveDir);
   } catch {
-    return { droppedAt: undefined, dispatchId: undefined };
+    return {
+      droppedAt: undefined,
+      dispatchId: undefined,
+      dispatchIdKind: "ABSENT",
+    };
   }
   const pattern = new RegExp(`^${role}-task-r(\\d+)\\.md$`, "i");
   let bestRound = -1;
   let bestDroppedAt;
-  let bestDispatchId;
+  let bestDispatchIdClassified = { kind: "ABSENT" };
   for (const name of names) {
     const m = pattern.exec(name);
     if (!m) continue;
@@ -1025,27 +1048,36 @@ function findArchivedRoundMeta(harnessDir, role, harnessTaskLabel) {
     if (roundNum > bestRound) {
       bestRound = roundNum;
       bestDroppedAt = droppedMatch[1].trim();
-      bestDispatchId = extractArchivedDispatchId(content);
+      bestDispatchIdClassified = classifyArchivedDispatchId(content);
     }
   }
-  return { droppedAt: bestDroppedAt, dispatchId: bestDispatchId };
+  return {
+    droppedAt: bestDroppedAt,
+    dispatchId:
+      bestDispatchIdClassified.kind === "VALUE"
+        ? bestDispatchIdClassified.value
+        : undefined,
+    dispatchIdKind: bestDispatchIdClassified.kind,
+  };
 }
 
 // HYK-396 §2 Q2 -- the new axis itself. Only called when the existing
 // 6-field binding (consumption-receipt-core.mjs's bindingEqual) has ALREADY
-// matched (decision === null, would-be ALLOW) -- this function can only
-// ever TIGHTEN that outcome (never loosen it): a missing archived stamp
-// (undefined, whether pre-migration or not-yet-post-hoc-stamped) skips the
-// axis (`{ reject: false }`, existing outcome stands, coder-task.md §3 Q2
-// "값이 없으면 없다고 기록"), a present stamp that agrees with the ledger's
-// resolved dispatchId for this round also skips (redundant confirmation,
-// same outcome), and a present stamp that DISAGREES rejects -- this last
-// case is the ONLY new REJECT this axis can ever produce (Q4 fixture ⓒ).
-// evaluateConsumptionDecision 자신의 eslint max-lines 상한을 지키려고
-// 뽑았다(HYK-244-receipt-core-1b 선례와 동일한 이유, 판정/값은 조금도
-// 바뀌지 않는다) -- HYK-396 §2: 기존 6성분 결속이 이미 ALLOW로 확정된
-// 뒤에만 이 축을 묻는다(§0 비타협 "판정 로직 자체는 바꾸지 마라" -- 이
-// 축은 그 로직을 대체하지 않고, 그 로직이 이미 낸 ALLOW를 조일 뿐이다).
+// matched -- either via the primary decision===null branch, or via
+// tryArchiveFallback's ARCHIVE_MATCH ALLOW (HYK-396 2R §2 P1-1 fix: both
+// ALLOW-producing paths must pass through this same veto, not just the
+// first one -- the 1R gap the reviewer's forged-stamp sample exploited).
+// This function can only ever TIGHTEN an already-ALLOW outcome (never
+// loosen it): ABSENT (undefined, whether pre-migration, not-yet-stamped,
+// or the highest-round copy simply never got stamped -- see
+// findArchivedRoundMeta's own header for why a lower round's real stamp
+// never overrides this) skips the axis (existing outcome stands,
+// coder-task.md §3 Q2 1R "값이 없으면 없다고 기록"); DAMAGED (empty/
+// whitespace-only/whitespace-wrapped -- 2R §2 "손상") ALWAYS rejects,
+// regardless of what the ledger resolves to (a malformed stamp is
+// evidence of tampering, not evidence of nothing); VALUE that agrees with
+// the ledger's resolved dispatchId also skips (redundant confirmation);
+// VALUE that DISAGREES rejects (Q4 fixture ⓒ, unchanged from 1R).
 function resolveArchivedDispatchIdVeto(
   role,
   archivedRoundMeta,
@@ -1053,7 +1085,7 @@ function resolveArchivedDispatchIdVeto(
 ) {
   const idBinding = checkArchivedDispatchIdBinding(
     role,
-    archivedRoundMeta.dispatchId,
+    archivedRoundMeta,
     currentBinding.dispatchId,
   );
   if (idBinding.reject) {
@@ -1068,10 +1100,17 @@ function resolveArchivedDispatchIdVeto(
 
 function checkArchivedDispatchIdBinding(
   role,
-  archivedDispatchId,
+  archivedRoundMeta,
   resolvedDispatchId,
 ) {
-  if (archivedDispatchId === undefined) return { reject: false };
+  if (archivedRoundMeta.dispatchIdKind === "DAMAGED") {
+    return {
+      reject: true,
+      reason: `dispatch-gate-decision consumption: 보존 사본(rounds/${role}-task-r<N>.md) 헤더의 dispatch_id 값이 손상됨(빈 값·공백만·앞뒤 공백 섞인 변형 중 하나) -- "없음"이 아니라 "손상"이므로 무조건 거부(HYK-396 2R, 안전측 기본값 -- 원장 조회 결과와 무관)`,
+    };
+  }
+  if (archivedRoundMeta.dispatchIdKind === "ABSENT") return { reject: false };
+  const archivedDispatchId = archivedRoundMeta.dispatchId;
   if (archivedDispatchId === resolvedDispatchId) return { reject: false };
   return {
     reject: true,
@@ -2363,6 +2402,83 @@ function buildConsumptionBindingContext({
   };
 }
 
+// evaluateConsumptionDecision 자신의 eslint max-lines 상한을 지키려고
+// 뽑았다(HYK-244-receipt-core-1b 선례와 동일한 이유, 판정/값은 조금도
+// 바뀌지 않는다) -- 정상 6성분 결속(toConsumptionGateDecision)과
+// tryArchiveFallback, 두 개의 독립적인 ALLOW 생산 경로를 하나로 묶는다.
+//
+// HYK-394-dispatch-id-bind-2 §2 (P2 재도입 -> 재반려, 실행으로 확인):
+// "가장 높은 번호 사본"만 보지 않고 같은 라벨의 사본 중 하나라도 결속
+// 전체와 일치하면 소비로 인정하는 완화를, 이번엔 dispatch_id anchor
+// 수리(findLatestReceiptMatch/lookupDispatchId/enrichCandidateDispatchId의
+// `beforeMs`, 그대로 남아 있음)와 함께 다시 넣어 실제로 실행해 봤다
+// (scripts/check/hyk394-dispatch-id-bind.test.mjs 시험 (b)). ★결과: 여전히
+// 뚫린다 -- dispatchId anchor는 재드롭 자신의(더 나중) dispatch_id를
+// 정확히 걸러내지만, "가장 높은 번호가 아닌" 트라이얼(=첫 드롭 자신의
+// droppedAt)은 옛 영수증과 «진짜로» 결속 전체가 일치한다(재계산 버그가
+// 아니라 resultText 자체가 아직 첫 드롭 라운드 그대로이고, 그 라운드는
+// 실제로 소비됐다는 사실 그 자체). taskId/role/droppedAt/resultFingerprint/
+// dispatchId/doneAt 그 어떤 성분도 "같은 라운드가 재보존된 것"과 "다른
+// (아직 안 끝난) 라운드가 같은 라벨을 재사용한 것"을 구별하지 못한다 --
+// 살아 있는 결과 파일이 그 자체로 바뀌지 않았기 때문이다. Q8 지시
+// 원문("통과시키면 넣지 마라") 그대로 이 완화는 다시 반려한다 --
+// findArchivedRoundMeta(가장 높은 번호 사본 하나만 대조, 아래 미변경)가
+// 유일한 조회로 남는다(그 "가장 높은 번호만" 제약 자체가 fixture (b)를
+// 막아 주는 것 -- droppedAt 자체가 불일치로 떨어진다).
+//
+// HYK-396 2R §2 P1-1 (검토 rejected 사유 재현 방지 -- ★비타협): 1R은
+// dispatch_id veto를 정상 6성분 결속 경로(decision===null)에만 걸었다 --
+// tryArchiveFallback이 독립적으로 ALLOW(true)를 낼 수 있는 두 번째
+// 통로라는 것을 놓쳐, 검토자가 실증한 위조 표본(사본 각인 ctx_..._forged
+// / 원장 실값 ctx_..._real)이 이 통로로 그대로 새 나갔다(status=0 ALLOW
+// ARCHIVE_MATCH). fallback 자체는 그대로 둔다(§2 Q1 "fallback 자체를
+// 없애지 마라, 축을 추가하는 것이다") -- 두 ALLOW 경로 모두 ALLOW를 내기
+// 직전에 같은 veto를 통과시킬 뿐, toConsumptionGateDecision/
+// tryArchiveFallback 내부 로직·판정 사유는 조금도 바뀌지 않는다.
+function resolveConsumptionAllowOrFallthrough({
+  role,
+  currentBinding,
+  candidates,
+  archivedRoundMeta,
+  harnessDir,
+  harnessTaskLabel,
+}) {
+  const decision = toConsumptionGateDecision({
+    role,
+    currentBinding,
+    candidates,
+  });
+  if (decision === null) {
+    return {
+      done: true,
+      result: resolveArchivedDispatchIdVeto(
+        role,
+        archivedRoundMeta,
+        currentBinding,
+      ),
+    };
+  }
+  if (
+    tryArchiveFallback({
+      role,
+      currentBinding,
+      candidates,
+      harnessDir,
+      harnessTaskLabel,
+    })
+  ) {
+    return {
+      done: true,
+      result: resolveArchivedDispatchIdVeto(
+        role,
+        archivedRoundMeta,
+        currentBinding,
+      ),
+    };
+  }
+  return { done: false, decision };
+}
+
 function evaluateConsumptionDecision(taskPath, args, env = process.env) {
   const role = deriveRoleFromTaskPath(taskPath);
   if (!role) return null;
@@ -2425,48 +2541,15 @@ function evaluateConsumptionDecision(taskPath, args, env = process.env) {
   if (bindingContext.predatesReceipts) return null; // ALLOW -- 사유는 위에서 이미 찍었다.
   const { currentBinding, archivedRoundMeta, candidates } = bindingContext;
 
-  // HYK-394-dispatch-id-bind-2 §2 (P2 재도입 -> 재반려, 실행으로 확인):
-  // "가장 높은 번호 사본"만 보지 않고 같은 라벨의 사본 중 하나라도 결속
-  // 전체와 일치하면 소비로 인정하는 완화를, 이번엔 위 dispatch_id anchor
-  // 수리(findLatestReceiptMatch/lookupDispatchId/enrichCandidateDispatchId의
-  // `beforeMs`, 그대로 남아 있음)와 함께 다시 넣어 실제로 실행해 봤다
-  // (scripts/check/hyk394-dispatch-id-bind.test.mjs 시험 (b)). ★결과: 여전히
-  // 뚫린다 -- dispatchId anchor는 재드롭 자신의(더 나중) dispatch_id를
-  // 정확히 걸러내지만, "가장 높은 번호가 아닌" 트라이얼(=첫 드롭 자신의
-  // droppedAt)은 옛 영수증과 «진짜로» 결속 전체가 일치한다(재계산 버그가
-  // 아니라 resultText 자체가 아직 첫 드롭 라운드 그대로이고, 그 라운드는
-  // 실제로 소비됐다는 사실 그 자체). taskId/role/droppedAt/resultFingerprint/
-  // dispatchId/doneAt 그 어떤 성분도 "같은 라운드가 재보존된 것"과 "다른
-  // (아직 안 끝난) 라운드가 같은 라벨을 재사용한 것"을 구별하지 못한다 --
-  // 살아 있는 결과 파일이 그 자체로 바뀌지 않았기 때문이다. Q8 지시
-  // 원문("통과시키면 넣지 마라") 그대로 이 완화는 다시 반려한다 --
-  // findArchivedDroppedAt(가장 높은 번호 사본 하나만 대조, 아래 미변경)가
-  // 유일한 조회로 남는다(그 "가장 높은 번호만" 제약 자체가 fixture (b)를
-  // 막아 주는 것 -- droppedAt 자체가 불일치로 떨어진다).
-  const decision = toConsumptionGateDecision({
+  const allowOutcome = resolveConsumptionAllowOrFallthrough({
     role,
     currentBinding,
     candidates,
+    archivedRoundMeta,
+    harnessDir,
+    harnessTaskLabel,
   });
-  if (decision === null) {
-    return resolveArchivedDispatchIdVeto(
-      role,
-      archivedRoundMeta,
-      currentBinding,
-    );
-  }
-
-  if (
-    tryArchiveFallback({
-      role,
-      currentBinding,
-      candidates,
-      harnessDir,
-      harnessTaskLabel,
-    })
-  ) {
-    return null; // ALLOW -- 사유는 tryArchiveFallback이 이미 찍었다.
-  }
+  if (allowOutcome.done) return allowOutcome.result;
 
   // HYK-311-retire-1 §2: 정상 소비 경로(영수증 체인 + 보관함 대조)가 이미
   // 실패로 확정된 뒤에만, VALID 이름표 라운드에 한해 은퇴 기록 축을
@@ -2497,7 +2580,7 @@ function evaluateConsumptionDecision(taskPath, args, env = process.env) {
   });
   if (validAbortOutcome.done) return validAbortOutcome.result;
 
-  return decision;
+  return allowOutcome.decision;
 }
 
 // HYK-257-done-stamp-2 §2 범위2 ⓑ -- 실재 앵커에 붙는 기계 dropped_at

@@ -109,6 +109,28 @@ function writeConsumptionReceipt(
   );
 }
 
+// HYK-396 2R §2 Q1 -- tryArchiveFallback(ARCHIVE_MATCH)이 참조하는 «결과
+// 봉투» 보존 사본(envelope-archive.mjs의 archiveRoundEnvelope가 만드는
+// 것과 동일한 헤더 모양, `.harness/rounds/<ROLE>-r<N>.md`) -- 위
+// writeArchivedTaskCopy(`<ROLE>-task-r<N>.md`, dispatch_id 각인 대상)와는
+// 별개 파일·별개 네임스페이스다.
+function writeArchivedResultEnvelope(
+  dir,
+  role,
+  round,
+  { resultContent, doneAt },
+) {
+  const roundsDir = join(dir, "rounds");
+  mkdirSync(roundsDir, { recursive: true });
+  const upperRole = role.toUpperCase();
+  const header = `<!-- envelope-archive: role=${upperRole} archived_at=${doneAt} -->\n`;
+  writeFileSync(
+    join(roundsDir, `${upperRole}-r${round}.md`),
+    header + resultContent,
+    "utf8",
+  );
+}
+
 function writeNextTaskFile(dir, role, { taskId, droppedAt, headCommit }) {
   const taskPath = join(dir, `${role}-task.md`);
   writeFileSync(
@@ -437,6 +459,290 @@ test("(d) 값 부재(옛 사본, dispatch_id 필드 없음) -> ALLOW: 새 축은
       r.status,
       0,
       `기대: ALLOW(값 부재는 스킵). 실제 stdout=${r.stdout} stderr=${r.stderr}`,
+    );
+    assert.match(r.stdout, /ALLOW/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ⓔ ★★★HYK-396 2R §2 Q1 -- 검토자가 실제로 실행해 반증한 fallback 우회
+// (before: status=0 ALLOW ARCHIVE_MATCH). live 결과 파일이 소비 후
+// 손질돼(verdict만 바뀜, DONE 줄은 그대로라 doneAt/dispatchId 앵커는
+// 안 흔들림) 기존 6성분 결속이 resultFingerprint 하나 때문에 실패하고,
+// tryArchiveFallback이 보존된 «원본» 결과 봉투 지문으로 재시도해 ALLOW를
+// 낸다 -- 그 통로가 dispatch_id veto를 거치지 않았다(1R 결함). 같은
+// 라운드의 보존 TASK 사본 헤더에는 검토자 표본과 똑같은 이름의 위조
+// dispatch_id가 각인돼 있다.
+// ---------------------------------------------------------------------------
+test("(e) ★★★fallback 경로 위조 거부(검토자 실증 재현): live 결과 손질 -> ARCHIVE_MATCH로 재시도 성공하지만 보존 TASK 사본의 dispatch_id가 원장과 다름 -> REJECT(2R 신규 결선)", () => {
+  withFixtureDir((dir) => {
+    const role = "coder";
+    const taskId = "HYK-9605-fallback-forge-1";
+    const droppedAt = "2026-08-25 14:00:00 KST";
+    const doneAt = "2026-08-25 14:05:10 KST";
+    const realDispatchId = "ctx_hyk396_fallback_real";
+    const forgedDispatchId = "ctx_hyk396_fallback_forged";
+
+    // 보존 TASK 사본 -- 검토자 표본과 동일한 이름의 위조 dispatch_id.
+    writeArchivedTaskCopy(dir, role, 1, {
+      taskId,
+      droppedAt,
+      dispatchId: forgedDispatchId,
+    });
+
+    // «원본»(실제로 소비된) 결과 -- 이 지문이 영수증에 결속된 목표 지문.
+    const originalResultContent = `task_id: ${taskId}\nverdict: approved\n>>> DONE: ${role.toUpperCase()} @ ${doneAt}\n`;
+    const originalFingerprint = computeFingerprint(originalResultContent);
+    writeArchivedResultEnvelope(dir, role, 1, {
+      resultContent: originalResultContent,
+      doneAt,
+    });
+
+    // live 결과는 소비 후 손질됨(verdict만 다름, DONE 줄은 그대로 -- doneAt/
+    // dispatchId 앵커는 안 흔들린다) -- resultFingerprint만 달라진다.
+    const tamperedResultContent = `task_id: ${taskId}\nverdict: rejected\n>>> DONE: ${role.toUpperCase()} @ ${doneAt}\n`;
+    const resultPath = join(dir, `${role}.md`);
+    writeFileSync(resultPath, tamperedResultContent, "utf8");
+
+    const dispatchReceiptPath = join(dir, "dispatch-receipts.jsonl");
+    writeDispatchReceiptsLog(dispatchReceiptPath, [
+      {
+        role: role.toUpperCase(),
+        harnessTaskLabel: taskId,
+        dispatchId: realDispatchId,
+        recordedAt: "2026-08-25T04:30:00.000Z",
+      },
+    ]);
+
+    // 영수증 자신의 결속은 «원본» 지문을 가리킨다(실제로 소비된 것).
+    writeConsumptionReceipt(
+      dir,
+      role,
+      {
+        taskId,
+        role: role.toUpperCase(),
+        droppedAt,
+        resultFingerprint: originalFingerprint,
+        doneAt,
+      },
+      BASE_EFFECTS,
+      1,
+    );
+
+    const taskPath = writeNextTaskFile(dir, role, {
+      taskId: "HYK-9605-fallback-forge-next",
+      droppedAt: "2026-08-25 15:00:00 KST",
+      headCommit: "e".repeat(40),
+    });
+
+    const ledgerPath = join(dir, "reject-streak.json");
+    writeLedger(ledgerPath, { schema_version: 1, issues: {} });
+
+    const r = runCli([
+      taskPath,
+      "--ledger",
+      ledgerPath,
+      "--dispatch-receipt-path",
+      dispatchReceiptPath,
+    ]);
+    assert.match(
+      r.stderr,
+      /ARCHIVE_MATCH/,
+      `사전 조건 확인 실패 -- fallback 경로 자체가 안 탔다(다른 이유로 REJECT됐을 수 있음). stdout=${r.stdout} stderr=${r.stderr}`,
+    );
+    assert.notEqual(
+      r.status,
+      0,
+      `검토자가 실증한 우회(fallback ALLOW가 dispatch_id veto를 안 거침)가 재발함 -- 실제 stdout: ${r.stdout}`,
+    );
+    assert.match(r.stderr, /위조 또는 다른 배달의 사본/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ⓕ/ⓖ/ⓗ ★HYK-396 2R §2 Q2 -- 각인 «모양» 엄격화. 셋 다 6성분은 정상적으로
+// 일치하도록 구성(모양만 손상) -- «모양이 잘못됐다는 사실 하나만으로»
+// 거부되는지를 증명한다(값이 우연히 맞아도 소용없다는 것까지 ⓗ가 보여준다).
+// ---------------------------------------------------------------------------
+function runShapeCase(
+  dir,
+  { taskId, droppedAt, doneAt, dispatchIdRaw, ledgerDispatchId },
+) {
+  const role = "coder";
+  writeArchivedTaskCopy(dir, role, 1, {
+    taskId,
+    droppedAt,
+    dispatchId: dispatchIdRaw,
+  });
+  const resultPath = join(dir, `${role}.md`);
+  const resultContent = `task_id: ${taskId}\nverdict: approved\n>>> DONE: ${role.toUpperCase()} @ ${doneAt}\n`;
+  writeFileSync(resultPath, resultContent, "utf8");
+
+  const dispatchReceiptPath = join(dir, "dispatch-receipts.jsonl");
+  writeDispatchReceiptsLog(dispatchReceiptPath, [
+    {
+      role: role.toUpperCase(),
+      harnessTaskLabel: taskId,
+      dispatchId: ledgerDispatchId,
+      recordedAt: "2026-08-25T05:30:00.000Z",
+    },
+  ]);
+  writeConsumptionReceipt(
+    dir,
+    role,
+    {
+      taskId,
+      role: role.toUpperCase(),
+      droppedAt,
+      resultFingerprint: computeFingerprint(resultContent),
+      doneAt,
+    },
+    BASE_EFFECTS,
+    1,
+  );
+  const taskPath = writeNextTaskFile(dir, role, {
+    taskId: `${taskId}-next`,
+    droppedAt: "2026-08-25 16:00:00 KST",
+    headCommit: "f".repeat(40),
+  });
+  const ledgerPath = join(dir, "reject-streak.json");
+  writeLedger(ledgerPath, { schema_version: 1, issues: {} });
+  return runCli([
+    taskPath,
+    "--ledger",
+    ledgerPath,
+    "--dispatch-receipt-path",
+    dispatchReceiptPath,
+  ]);
+}
+
+test("(f) ★모양 손상 — 빈 값(dispatch_id=<nothing>): 6성분은 정상 일치하지만 각인 값이 빈 문자열 -> REJECT(부재가 아니라 손상)", () => {
+  withFixtureDir((dir) => {
+    const r = runShapeCase(dir, {
+      taskId: "HYK-9606-empty-shape-1",
+      droppedAt: "2026-08-25 17:00:00 KST",
+      doneAt: "2026-08-25 17:05:10 KST",
+      dispatchIdRaw: "",
+      ledgerDispatchId: "ctx_hyk396_shape_real_f",
+    });
+    assert.notEqual(r.status, 0, `실제 stdout: ${r.stdout}`);
+    assert.match(r.stderr, /손상/);
+  });
+});
+
+test("(g) ★모양 손상 — 공백만(dispatch_id=<whitespace>): 6성분은 정상 일치하지만 각인 값이 공백뿐 -> REJECT(부재가 아니라 손상)", () => {
+  withFixtureDir((dir) => {
+    const r = runShapeCase(dir, {
+      taskId: "HYK-9607-whitespace-shape-1",
+      droppedAt: "2026-08-25 18:00:00 KST",
+      doneAt: "2026-08-25 18:05:10 KST",
+      dispatchIdRaw: "   ",
+      ledgerDispatchId: "ctx_hyk396_shape_real_g",
+    });
+    assert.notEqual(r.status, 0, `실제 stdout: ${r.stdout}`);
+    assert.match(r.stderr, /손상/);
+  });
+});
+
+test("(h) ★모양 손상 — 앞 공백 변형(dispatch_id=< >실값): 트림하면 원장 실값과 «우연히» 같아도 -> REJECT(값이 맞아도 모양이 틀리면 소용없다)", () => {
+  withFixtureDir((dir) => {
+    const realId = "ctx_hyk396_shape_real_h";
+    const r = runShapeCase(dir, {
+      taskId: "HYK-9608-leading-space-shape-1",
+      droppedAt: "2026-08-25 19:00:00 KST",
+      doneAt: "2026-08-25 19:05:10 KST",
+      dispatchIdRaw: ` ${realId}`,
+      ledgerDispatchId: realId,
+    });
+    assert.notEqual(
+      r.status,
+      0,
+      `트림하면 값이 일치하지만(우연) 모양 자체가 손상이므로 REJECT 기대 -- 실제 stdout: ${r.stdout}`,
+    );
+    assert.match(r.stderr, /손상/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ⓘ ★HYK-396 2R §2 Q2 -- «같은 라벨 사본 2개, 더 높은 사본이 미각인»의
+// 명시적 정의: 더 낮은 번호 사본(r1)에 실값이 찍혀 있어도, 이 축은
+// «가장 높은 번호 사본»(r2, 이번에 판정 대상인 라운드 자신)의 상태만
+// 본다 -- r2가 미각인(ABSENT)이면 스킵(ALLOW 유지), r1의 실값을 끌어와
+// 대신 대조하지 않는다(findArchivedRoundMeta 자신의 헤더 주석 근거
+// 참조). 단일 사본만 있고 미각인인 경우(ⓓ, 검토 §1 "다시 하지 마라")와
+// 의도적으로 동일한 취급임을 시험으로 고정한다.
+// ---------------------------------------------------------------------------
+test("(i) ★명시적 정의: 같은 라벨 사본 2개 중 낮은 사본(r1)만 각인, 더 높은 사본(r2, 판정 대상)은 미각인 -> ALLOW(가장 높은 사본만 본다는 원칙 유지, r1 값을 대신 쓰지 않는다)", () => {
+  withFixtureDir((dir) => {
+    const role = "coder";
+    const taskId = "HYK-9609-higher-unstamped-1";
+    const olderDroppedAt = "2026-08-25 08:00:00 KST"; // r1 -- 무관한 옛 라운드, 실값 각인
+    const droppedAt = "2026-08-25 20:00:00 KST"; // r2 -- 이번 판정 대상, 미각인
+    const doneAt = "2026-08-25 20:05:10 KST";
+    const dispatchId = "ctx_hyk396_higher_unstamped_d1";
+
+    // r1: 같은 라벨, 다른(더 이른) droppedAt, 실값 각인 -- 이 값을
+    // 대신 끌어오면 안 된다는 것을 증명하려고 일부러 심는다.
+    writeArchivedTaskCopy(dir, role, 1, {
+      taskId,
+      droppedAt: olderDroppedAt,
+      dispatchId: "ctx_hyk396_should_never_be_used",
+    });
+    // r2: 이번 라운드 자신 -- 미각인(필드 자체 없음).
+    writeArchivedTaskCopy(dir, role, 2, {
+      taskId,
+      droppedAt,
+      dispatchId: undefined,
+    });
+
+    const resultPath = join(dir, `${role}.md`);
+    const resultContent = `task_id: ${taskId}\nverdict: approved\n>>> DONE: ${role.toUpperCase()} @ ${doneAt}\n`;
+    writeFileSync(resultPath, resultContent, "utf8");
+
+    const dispatchReceiptPath = join(dir, "dispatch-receipts.jsonl");
+    writeDispatchReceiptsLog(dispatchReceiptPath, [
+      {
+        role: role.toUpperCase(),
+        harnessTaskLabel: taskId,
+        dispatchId,
+        recordedAt: "2026-08-25T06:30:00.000Z",
+      },
+    ]);
+
+    writeConsumptionReceipt(
+      dir,
+      role,
+      {
+        taskId,
+        role: role.toUpperCase(),
+        droppedAt,
+        resultFingerprint: computeFingerprint(resultContent),
+        doneAt,
+      },
+      BASE_EFFECTS,
+      1,
+    );
+
+    const taskPath = writeNextTaskFile(dir, role, {
+      taskId: "HYK-9609-higher-unstamped-next",
+      droppedAt: "2026-08-25 21:00:00 KST",
+      headCommit: "i".repeat(40),
+    });
+
+    const ledgerPath = join(dir, "reject-streak.json");
+    writeLedger(ledgerPath, { schema_version: 1, issues: {} });
+
+    const r = runCli([
+      taskPath,
+      "--ledger",
+      ledgerPath,
+      "--dispatch-receipt-path",
+      dispatchReceiptPath,
+    ]);
+    assert.equal(
+      r.status,
+      0,
+      `기대: ALLOW(가장 높은 사본만 본다는 원칙 유지). 실제 stdout=${r.stdout} stderr=${r.stderr}`,
     );
     assert.match(r.stdout, /ALLOW/);
   });
