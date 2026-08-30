@@ -7,7 +7,7 @@ import {
 } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
-import { join, sep } from "node:path";
+import { dirname, join, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 
@@ -25,6 +25,31 @@ import { randomUUID } from "node:crypto";
 // 그것은 HYK-89의 범위다." 이건 결함이 아니라 범위 밖이다 -- 자세한
 // 근거는 docs/control-room-patches/HYK-400-receiver-capability-guard.md
 // §0을 참조(이 라운드는 문서·주석만 바꾼다, 코드 동작은 4R 그대로다).
+//
+// HYK-400 6R (I-ENV, CI 런타임 실측 반려 수리): CI는 Node 20.20.2로
+// 돈다(워크플로 node-version: 20). 이 저장소가 4R까지 하드코딩해 온
+// `--permission` 플래그는 Node 22+에서만 통한다 -- Node 20 계열은 같은
+// 기능을 `--experimental-permission`으로 부른다(직접 다운받은 Node
+// 20.20.2 바이너리로 실측 확인, 2026-08-31: `--permission`은 즉시
+// "bad option"으로 죽고 `--experimental-permission`만 통한다). 두
+// 플래그는 서로 배타적이다 -- 하나가 다른 하나를 무해하게 무시하지
+// 않고, 모르는 플래그를 받은 Node는 그 즉시 죽는다. 그래서 하드코딩된
+// 버전 번호 분기 대신, 이 프로세스가 실제로 띄우는 node 바이너리에
+// 최소 비용 probe(빈 스크립트 1회 실행)를 던져 어느 플래그가 실제로
+// 통하는지 직접 확인한다(detectPermissionFlag, 결과는 execFileSyncFn별
+// 1회 캐시) -- 미래 Node 판본이 플래그를 또 바꿔도 이 판정기 쪽 버전 표를
+// 다시 손볼 필요가 없다. 두 후보 다 안 통하면(런타임이 권한 모델
+// 자체를 모름) 그 즉시 fail-closed로 거부한다(I-ENV, "조용히 통과"
+// 금지) -- 조용히 무권한 상태로 대상을 실행하는 경로는 없다.
+// 추가 실측: Node 20의 `--experimental-permission`은 진입 스크립트
+// 자신(러너 .mjs)도 `--allow-fs-read` 범위 밖이면 못 읽는다(Node 22+는
+// 진입 스크립트를 면제한다 -- 실측으로 그 차이를 확인). 그래서 이제
+// `--allow-fs-read`를 워크트리 경로«와» 러너 자신이 있는 디렉터리
+// 둘 다에(반복 플래그로, 콤마 목록은 Node 20 experimental 쪽이 더는
+// 안 받는다 -- 실측 확인) 준다 -- 실서비스에서는 러너가 항상 대상
+// 워크트리 안(scripts/check/)에 있으므로 사실상 한 경로지만, 이
+// 저장소의 시험처럼 러너와 대상 워크트리가 물리적으로 분리된 경우를
+// 위해 명시적으로 둘 다 연다.
 //
 // HYK-400 2R (coder-task.md §1-2, 1R 검토 반려 P1-1/P1-2/P1-3 + P2 수리).
 // 1R은 "대상 워크트리의 dispatch-receipt-cli.mjs를 판정기 자신의
@@ -96,7 +121,22 @@ const RECEIPT_CLI_RELATIVE_PATH = "scripts/relay/dispatch-receipt-cli.mjs";
 const RUNNER_PATH = fileURLToPath(
   new URL("./hyk400-receiver-probe-runner.mjs", import.meta.url),
 );
+const RUNNER_DIR = dirname(RUNNER_PATH);
 const DEFAULT_PROBE_TIMEOUT_MS = 5000;
+// I-ENV(6R): 하드코딩된 버전 분기 대신 실제로 통하는 플래그를 probe로
+// 확인한다(위 헤더 주석 참조). execPath 문자열이 아니라 execFileSyncFn
+// «함수 자체»로 캐시한다(WeakMap) -- production은 항상 같은
+// defaultExecFileSyncFn 참조 하나를 재사용하므로 사실상 프로세스당
+// 1회지만, execPath로 캐시하면 시험이 다른 execFileSyncFn(다른 런타임을
+// 흉내내는 스텁)을 주입해도 캐시가 실제 프로세스의 첫 probe 결과를 계속
+// 돌려줘 스텁이 무시되는 조용한 오염이 생긴다(직접 겪음, 2026-08-31) --
+// 함수 참조로 캐시하면 서로 다른 execFileSyncFn은 원리적으로 서로 다른
+// 캐시 칸을 쓴다.
+const PERMISSION_FLAG_CANDIDATES = Object.freeze([
+  "--permission",
+  "--experimental-permission",
+]);
+const permissionFlagCache = new WeakMap();
 const BASELINE_FIELD_FLAGS = Object.freeze([
   "--role",
   "--task-label",
@@ -189,6 +229,31 @@ function defaultExecFileSyncFn(cmd, args, opts) {
   return execFileSync(cmd, args, opts);
 }
 
+// I-ENV(6R): 이 execFileSyncFn이 실제로 어느 권한 모델 플래그를
+// 받아들이는지 최소 비용으로 확인한다(빈 스크립트 1회 실행, 부작용
+// 없음 -- process.exit(0)만 한다). 둘 다 안 통하면 null을 돌려준다.
+// execFileSyncFn별로 캐시해 매 확인마다 다시 묻지 않는다.
+function detectPermissionFlag(execFileSyncFn) {
+  if (permissionFlagCache.has(execFileSyncFn)) {
+    return permissionFlagCache.get(execFileSyncFn);
+  }
+  let detected = null;
+  for (const flag of PERMISSION_FLAG_CANDIDATES) {
+    try {
+      execFileSyncFn(process.execPath, [flag, "-e", "process.exit(0)"], {
+        timeout: 5000,
+        stdio: "ignore",
+      });
+      detected = flag;
+      break;
+    } catch {
+      // 이 후보는 이 런타임에서 안 통한다 -- 다음 후보로 넘어간다.
+    }
+  }
+  permissionFlagCache.set(execFileSyncFn, detected);
+  return detected;
+}
+
 // I-ROOT(4R) 관문 1/2: 자식을 스폰하고, execFileSync가 던지는 예외만으로
 // 타임아웃(무한 대기/무한 루프)·비정상 종료(3R I1′)를 분류한다. 정상
 // 반환(종료코드 0·시그널 없음)이면 { ok: true }만 돌려준다 -- stdout은
@@ -203,6 +268,16 @@ function spawnIsolatedChild({
   execFileSyncFn,
   timeoutMs,
 }) {
+  const permissionFlag = detectPermissionFlag(execFileSyncFn);
+  if (!permissionFlag) {
+    // I-ENV(6R): 이 런타임은 --permission도 --experimental-permission도
+    // 모른다 -- 격리를 세울 방법이 없다. 조용히 무권한으로 대상을 실행
+    // 하지 않는다(fail-closed, I-ENV 그대로).
+    return rejected(
+      `RECEIVER_CLI_RUNTIME_UNSUPPORTED: 이 Node 런타임(${process.version})은 --permission도 --experimental-permission도 지원하지 않아 격리 여부를 판정할 수 없다(fail-closed)`,
+    );
+  }
+
   const payload = Buffer.from(
     JSON.stringify({
       targetPath: targetReal,
@@ -216,7 +291,8 @@ function spawnIsolatedChild({
     execFileSyncFn(
       process.execPath,
       [
-        "--permission",
+        permissionFlag,
+        `--allow-fs-read=${RUNNER_DIR}`,
         `--allow-fs-read=${worktreeReal}`,
         `--allow-fs-write=${responseDir}`,
         RUNNER_PATH,

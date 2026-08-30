@@ -269,7 +269,8 @@ test("ⓐ 되돌림: --permission 격리를 끄면 같은 대상이 실제로 �
   const originalRunnerSrc = readFileSync(RUNNER_PATH, "utf8");
 
   const anchor =
-    '        "--permission",\n' +
+    "        permissionFlag,\n" +
+    "        `--allow-fs-read=${RUNNER_DIR}`,\n" +
     "        `--allow-fs-read=${worktreeReal}`,\n" +
     "        `--allow-fs-write=${responseDir}`,\n";
   assert.ok(
@@ -1051,5 +1052,216 @@ test("가드 없이 미지원 CLI를 직접 부르면 오늘 실사고와 같은
     assert.throws(() => readFileSync(join(dir, "receipt.jsonl"), "utf8"));
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ============================================================
+// I-ENV(6R) -- 이 판정기는 CI가 실제로 쓰는 런타임(Node 20, --permission이
+// 아니라 --experimental-permission만 아는)에서도 낡은 워크트리 거부·
+// 지원 워크트리 통과·확인 실패 거부 세 축이 성립해야 한다. 이 시험을
+// 돌리는 기계가 Node 20이든 26이든(둘 다로 직접 검증했다 -- §원인 확정
+// 절 참조, 별도로 Node 20.20.2 바이너리를 내려받아 전체 스위트를
+// 두 번째로 그 위에서도 실행했다) 이식 가능해야 한다. 그래서 이
+// 스텁은 "--permission은 늘 모른다고 답한다"(CI 실측 그대로, 호스트가
+// 실제로 그걸 알든 모르든 무조건 거부)로 고정하고, "--experimental-
+// permission"만 이 호스트가 실제로 이해하는 형태로 번역(이미 그
+// 이름이면 그대로, 아니면 --permission으로 바꿔) 진짜 execFileSync에
+// 위임한다 -- 어느 호스트에서 돌든 "CI처럼 --permission을 모르는
+// 런타임"이라는 시뮬레이션 자체는 항상 같은 뜻이 된다.
+// ============================================================
+
+function detectRealPermissionFlagOnThisHost() {
+  for (const flag of PERMISSION_FLAG_CANDIDATES_FOR_TEST) {
+    try {
+      execFileSync(process.execPath, [flag, "-e", "process.exit(0)"], {
+        stdio: "ignore",
+      });
+      return flag;
+    } catch {
+      // 다음 후보로.
+    }
+  }
+  throw new Error(
+    "이 호스트는 --permission도 --experimental-permission도 모른다 -- I-ENV 시험을 흉내낼 기준(진짜 플래그)이 없다",
+  );
+}
+
+const PERMISSION_FLAG_CANDIDATES_FOR_TEST = Object.freeze([
+  "--permission",
+  "--experimental-permission",
+]);
+
+function makeCiLikeExecFileSyncFn() {
+  const realWorkingFlag = detectRealPermissionFlagOnThisHost();
+  return (cmd, args, opts) => {
+    const [flag, ...rest] = args;
+    if (flag === "--permission") {
+      const err = new Error(
+        "bad option: --permission (simulated Node 20-like runtime)",
+      );
+      err.status = 9;
+      throw err;
+    }
+    if (flag === "--experimental-permission") {
+      return execFileSync(cmd, [realWorkingFlag, ...rest], opts);
+    }
+    return execFileSync(cmd, args, opts);
+  };
+}
+
+function makeNeitherFlagWorksExecFileSyncFn() {
+  let calls = 0;
+  const fn = (_cmd, args) => {
+    calls += 1;
+    const err = new Error(
+      `bad option: ${args[0]} (simulated unsupported runtime)`,
+    );
+    err.status = 9;
+    throw err;
+  };
+  fn.callCount = () => calls;
+  return fn;
+}
+
+test("I-ENV: --permission이 죽고 --experimental-permission만 사는 런타임(CI 흉내)에서도 지원 워크트리는 통과한다", async () => {
+  const execFileSyncFn = makeCiLikeExecFileSyncFn();
+  const result = await checkReceiptCliFlagSupport({
+    worktree: REPO_ROOT,
+    deliveryArgs: REAL_DELIVERY_ARGS,
+    execFileSyncFn,
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.supported, true);
+});
+
+test("I-ENV: --permission이 죽고 --experimental-permission만 사는 런타임(CI 흉내)에서도 미지원(HYK-396 이전) 워크트리는 거부된다", async () => {
+  const worktree = tmpWorktree("hyk400-ienv-unsupported-worktree-");
+  try {
+    seedReceiptCli(worktree, "hyk400-dispatch-receipt-cli-pre-hyk396.mjs.txt");
+    const execFileSyncFn = makeCiLikeExecFileSyncFn();
+    const result = await checkReceiptCliFlagSupport({
+      worktree,
+      deliveryArgs: deliveryArgsFor(worktree),
+      execFileSyncFn,
+    });
+    assert.equal(result.ok, true, "판정 자체는 성공(결론 = 미지원)");
+    assert.equal(result.supported, false);
+    assert.match(result.reason, /unrecognized flag '--harness-dir'/);
+  } finally {
+    rmSync(worktree, { recursive: true, force: true });
+  }
+});
+
+test("I-ENV: --permission이 죽고 --experimental-permission만 사는 런타임(CI 흉내)에서도 확인 자체 실패(파일 없음)는 거부된다", async () => {
+  const worktree = tmpWorktree("hyk400-ienv-missing-worktree-");
+  try {
+    const execFileSyncFn = makeCiLikeExecFileSyncFn();
+    const result = await checkReceiptCliFlagSupport({
+      worktree,
+      deliveryArgs: deliveryArgsFor(worktree),
+      execFileSyncFn,
+    });
+    assert.equal(result.ok, false);
+    assert.equal(result.supported, false);
+    assert.match(result.reason, /RECEIVER_CLI_MISSING/);
+  } finally {
+    rmSync(worktree, { recursive: true, force: true });
+  }
+});
+
+test("I-ENV: --permission도 --experimental-permission도 다 죽는 런타임은 fail-closed로 거부하고, 대상을 아예 실행하지 않는다", async () => {
+  const worktree = tmpWorktree("hyk400-ienv-neither-worktree-");
+  try {
+    // 대상 CLI가 있어도(지원 워크트리) -- 런타임 자체가 격리를 세울 수
+    // 없으면 대상을 아예 만지지 않는다는 것을 보이려고 REPO_ROOT를 쓴다.
+    const execFileSyncFn = makeNeitherFlagWorksExecFileSyncFn();
+    const result = await checkReceiptCliFlagSupport({
+      worktree: REPO_ROOT,
+      deliveryArgs: REAL_DELIVERY_ARGS,
+      execFileSyncFn,
+    });
+    assert.equal(result.ok, false);
+    assert.equal(result.supported, false);
+    assert.match(result.reason, /RECEIVER_CLI_RUNTIME_UNSUPPORTED/);
+    assert.match(
+      result.reason,
+      /v\d+\.\d+\.\d+/,
+      "런타임 버전을 사유에 남겨야 한다",
+    );
+    // 두 후보(--permission, --experimental-permission) probe만 시도하고
+    // 실제 격리 자식(러너 스폰)은 절대 시도하지 않는다 -- fail-closed는
+    // "시도했지만 실패"가 아니라 "애초에 시도하지 않는다"여야 한다.
+    assert.equal(
+      execFileSyncFn.callCount(),
+      2,
+      `probe만 2회(두 후보) 있어야 하는데 ${execFileSyncFn.callCount()}회 호출됐다 -- 실제 스폰까지 시도한 것으로 보인다`,
+    );
+  } finally {
+    rmSync(worktree, { recursive: true, force: true });
+  }
+});
+
+test("I-ENV 되돌림: 플래그 자동탐지를 끄고 --permission을 다시 하드코딩하면, CI 흉내 런타임에서 지원 워크트리도 크래시로 거부된다(RED, 바이트 동일 복원)", async () => {
+  const originalGuardSrc = readFileSync(GUARD_PATH, "utf8");
+  const originalRunnerSrc = readFileSync(RUNNER_PATH, "utf8");
+
+  const anchor =
+    "        permissionFlag,\n" +
+    "        `--allow-fs-read=${RUNNER_DIR}`,\n" +
+    "        `--allow-fs-read=${worktreeReal}`,\n" +
+    "        `--allow-fs-write=${responseDir}`,\n";
+  assert.ok(
+    originalGuardSrc.includes(anchor),
+    "I-ENV mutation anchor not found -- guard source drifted",
+  );
+  // I-ENV(6R) 이전(1R~5R) 그대로 -- 플래그를 probe하지 않고 "--permission"을
+  // 하드코딩한다. RUNNER_DIR 읽기 권한도 함께 빠지지만(이 시험의 핵심은
+  // 플래그 자체이므로), 이 변이 목적상 부차적이다.
+  const mutatedSrc = originalGuardSrc.replace(
+    anchor,
+    '        "--permission",\n' +
+      "        `--allow-fs-read=${worktreeReal}`,\n" +
+      "        `--allow-fs-write=${responseDir}`,\n",
+  );
+  assert.notEqual(mutatedSrc, originalGuardSrc);
+
+  const mutDir = tmpWorktree("hyk400-ienv-mutant-");
+  try {
+    writeFileSync(join(mutDir, "hyk400-receiver-guard.mjs"), mutatedSrc);
+    writeFileSync(
+      join(mutDir, "hyk400-receiver-probe-runner.mjs"),
+      originalRunnerSrc,
+    );
+    const mutatedGuard = await import(
+      pathToFileURL(join(mutDir, "hyk400-receiver-guard.mjs")).href
+    );
+    const execFileSyncFn = makeCiLikeExecFileSyncFn();
+    const result = await mutatedGuard.checkReceiptCliFlagSupport({
+      worktree: REPO_ROOT,
+      deliveryArgs: REAL_DELIVERY_ARGS,
+      execFileSyncFn,
+    });
+    assert.equal(
+      result.supported,
+      false,
+      "플래그 자동탐지를 끄면 CI 흉내 런타임에서 진짜 지원 워크트리도 거부돼야 RED다(이게 오늘 CI가 실제로 겪은 17건 실패의 재현이다)",
+    );
+    assert.match(
+      result.reason,
+      /RECEIVER_CLI_PROBE_CRASHED/,
+      `하드코딩된 --permission이 이 런타임에서 즉시 죽어야 하는데 실제 사유 = ${result.reason}`,
+    );
+  } finally {
+    rmSync(mutDir, { recursive: true, force: true });
+    assert.equal(
+      readFileSync(GUARD_PATH, "utf8"),
+      originalGuardSrc,
+      "원본 guard 바이트가 변형된 채로 남았다",
+    );
+    assert.equal(
+      readFileSync(RUNNER_PATH, "utf8"),
+      originalRunnerSrc,
+      "원본 runner 바이트가 변형된 채로 남았다",
+    );
   }
 });
