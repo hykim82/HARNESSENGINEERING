@@ -8,14 +8,32 @@
 // present and non-empty, confidence drawn from the allowed set, ids unique,
 // every required axis still present (2R P1-2) -- and, per coder-task.md §2
 // invariant P1, that EVERY item's evidence pointer resolves to a real,
-// currently-existing, repository-tracked PLAIN FILE (not a directory or
-// symlink, 2R P1-3; not an absolute machine path outside the repo, 3R
-// P1-fix -- see below), with any cited line/line-range actually existing in
-// that file. Separately, per invariant P2, any axis tagged "확실" must also
-// carry an evidence_kind of 실측관측 (a recorded real observation) or
-// 동작코드 (the evidence IS the implementation being described) -- 구조설명
-// (a field-list/comment enumeration that only describes structure, not
-// behavior) is never enough to carry "확실", no matter how real the file is.
+// currently-existing, GIT-TRACKED PLAIN FILE (not a directory or symlink,
+// 2R P1-3; not an absolute machine path outside the repo, 3R P1-fix; not
+// merely existing-on-disk-but-.gitignore'd, 4R P1-fix -- see below), with
+// any cited line/line-range actually existing in that file. Separately, per
+// invariant P2, any axis tagged "확실" must also carry an evidence_kind of
+// 실측관측 (a recorded real observation) or 동작코드 (the evidence IS the
+// implementation being described) -- 구조설명 (a field-list/comment
+// enumeration that only describes structure, not behavior) is never enough
+// to carry "확실", no matter how real the file is.
+//
+// 4R (HYK-271-tracked-4) rejected 3R for one reason this version fixes:
+//   P1 (existence != tracked): validateEvidencePointer only ever checked
+//         that the resolved path existed on disk (lstat). `.harness/` is
+//         `.gitignore`d, so a mutated evidence pointer at the real, existing
+//         file `.harness/rounds/review-task-r1.md:1` still passed every
+//         check with `errors: []` -- that path would not exist in a fresh
+//         clone or CI. Fixed by adding checkGitTracked(), which runs
+//         `git ls-files --error-unmatch <path>` (coder-task.md §2's named
+//         machine command: exit 0 = tracked, non-zero = not tracked) for
+//         EVERY item once it is confirmed to be a real plain file, and
+//         fails CLOSED (rejects, does not pass) if git itself cannot be
+//         asked. See the two "(HYK-271-tracked-4, Q2)" mutation tests below,
+//         which point a 확실 axis and a non-확실 axis at that exact ignored
+//         file and assert both go RED -- 3R's P1 was found on a non-확실
+//         item specifically, so covering only 확실 here would repeat that
+//         gap in a different shape.
 //
 // 3R (HYK-271-evidence-3) rejected 2R for three reasons this version fixes
 // directly:
@@ -72,11 +90,14 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync, lstatSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 const INVENTORY_PATH = fileURLToPath(
   new URL("./hyk271-modal-detect-inventory.json", import.meta.url),
 );
+
+const REPO_ROOT = fileURLToPath(new URL("../../", import.meta.url));
 
 const REQUIRED_FIELDS = [
   "id",
@@ -156,6 +177,37 @@ function resolveRepoRelativePath(rawPath) {
   return fileURLToPath(new URL(`../../${rawPath}`, import.meta.url));
 }
 
+// HYK-271-tracked-4: "exists on disk" and "the repository tracks it" are
+// different questions -- `.harness/` is `.gitignore`d, so a file under it
+// can pass every lstat/isFile/line-range check above while still being
+// invisible to a fresh clone or CI. coder-task.md §2 names the exact
+// machine command for the tracking judgment: `git ls-files --error-unmatch
+// <path>` (exit 0 = tracked, non-zero = not tracked). This must run
+// unconditionally (same reasoning as 3R's fix to validateEvidencePointer:
+// a 추론-tagged axis is not exempt just because it isn't "확실"), and it
+// must fail CLOSED if git itself cannot be asked (missing binary, not a
+// repo, etc.) -- an undecidable tracking judgment is never silently treated
+// as "tracked".
+function checkGitTracked(rawPath) {
+  try {
+    execFileSync("git", ["ls-files", "--error-unmatch", "--", rawPath], {
+      cwd: REPO_ROOT,
+      stdio: ["ignore", "ignore", "ignore"],
+    });
+    return { tracked: true };
+  } catch (err) {
+    if (typeof err.status === "number") {
+      // git ran and gave a definite answer: `--error-unmatch` exits
+      // non-zero (git spec: 1) when the path is not tracked.
+      return { tracked: false };
+    }
+    // git could not be run at all (ENOENT, spawn failure, etc.) -- this is
+    // not a "not tracked" answer, it is NO answer. Fail closed: never let
+    // an inability to ask the tracking question read as "passes".
+    return { tracked: false, undecidable: true, reason: err.message };
+  }
+}
+
 function validateEvidenceLineRange(resolved, lineStart, lineEnd, label) {
   if (lineStart === null) return [];
   let content;
@@ -216,6 +268,25 @@ function validateEvidencePointer(item, label) {
   if (!stat.isFile()) {
     return [
       `${label}: evidence path is not a plain file (directory?): ${resolved}`,
+    ];
+  }
+
+  // HYK-271-tracked-4: existing on disk (the checks above) is NOT the same
+  // as being tracked by the repository -- `.harness/` is `.gitignore`d, so
+  // a file under it can pass every check up to here while a fresh
+  // clone/CI would never have it. This runs only once the file is
+  // confirmed to be a real plain file, so the error message stays specific
+  // (fabricated path -> "does not exist"; real-but-ignored path -> "not
+  // tracked by git") instead of collapsing both into one message.
+  const trackResult = checkGitTracked(rawPath);
+  if (trackResult.undecidable) {
+    return [
+      `${label}: could not determine whether "${rawPath}" is git-tracked (git ls-files failed to run: ${trackResult.reason}) -- UNDECIDABLE tracking judgments are rejected, not passed`,
+    ];
+  }
+  if (!trackResult.tracked) {
+    return [
+      `${label}: evidence path "${rawPath}" is not tracked by git (git ls-files --error-unmatch exited non-zero) -- an ignored file can exist on disk here yet not exist in a fresh clone or CI (coder-task.md §2 P1)`,
     ];
   }
 
@@ -524,6 +595,65 @@ test("MUTATION (3R P1): non-확실 axis with a fabricated repo-relative evidence
   assert.ok(
     errors.some((e) => e.includes("evidence path does not exist")),
     "expected a non-확실 item with a fabricated path to be rejected",
+  );
+});
+
+// HYK-271-tracked-4 (Q2, antagonistic sample -- the exact P1 this round
+// fixes): an existing, `.gitignore`d file. It is real on disk (passes
+// lstat/isFile/line-range) but the repository does not track it, so a
+// fresh clone/CI would not have it. Both a 확실 axis AND a non-확실 axis
+// pointed at it must be rejected -- 3R's P1 was found on a non-확실 item
+// specifically, so covering only 확실 here would repeat that exact gap.
+const IGNORED_EXISTING_FILE_EVIDENCE =
+  ".harness/rounds/review-task-r1.md:1 -- exists on disk, .gitignore'd, not tracked";
+
+test("MUTATION (HYK-271-tracked-4, Q2): 확실 axis pointed at an existing but git-ignored file is caught", () => {
+  const data = cloneItems(loadRealInventory());
+  const confidentIndex = data.items.findIndex(
+    (item) => item.confidence === "확실",
+  );
+  assert.ok(confidentIndex >= 0, "fixture must contain a 확실 item to mutate");
+  data.items[confidentIndex].evidence = IGNORED_EXISTING_FILE_EVIDENCE;
+  const errors = validateInventory(data);
+  assert.ok(
+    errors.some((e) => e.includes("is not tracked by git")),
+    "expected a 확실 item pointed at an existing-but-untracked file to be rejected",
+  );
+});
+
+test("MUTATION (HYK-271-tracked-4, Q2): non-확실 axis pointed at an existing but git-ignored file is caught", () => {
+  const data = cloneItems(loadRealInventory());
+  const nonConfidentIndex = data.items.findIndex(
+    (item) => item.confidence !== "확실",
+  );
+  assert.ok(
+    nonConfidentIndex >= 0,
+    "fixture must contain a non-확실 item to mutate",
+  );
+  data.items[nonConfidentIndex].evidence = IGNORED_EXISTING_FILE_EVIDENCE;
+  const errors = validateInventory(data);
+  assert.ok(
+    errors.some((e) => e.includes("is not tracked by git")),
+    "expected a non-확실 item pointed at an existing-but-untracked file to be rejected (this is exactly the axis-screen-scrollback shape 3R found)",
+  );
+});
+
+// sanity: confirm the fixture file this pair relies on is real on disk but
+// genuinely git-ignored -- if this assumption ever breaks (file deleted, or
+// someone un-ignores .harness/), the two tests above would start failing
+// for the wrong reason (missing-file, not tracking) without this guard
+// making that distinction explicit.
+test("sanity: the HYK-271-tracked-4 antagonistic fixture file exists on disk but is untracked by git", () => {
+  const resolved = resolveRepoRelativePath(".harness/rounds/review-task-r1.md");
+  assert.doesNotThrow(
+    () => lstatSync(resolved),
+    "fixture file must exist on disk for this sanity check to mean anything",
+  );
+  const result = checkGitTracked(".harness/rounds/review-task-r1.md");
+  assert.equal(
+    result.tracked,
+    false,
+    "fixture file must be untracked (ignored) -- if it is now tracked, pick a different .harness/ fixture",
   );
 });
 
