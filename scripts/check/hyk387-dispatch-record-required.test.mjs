@@ -22,6 +22,7 @@ import {
   rmSync,
 } from "node:fs";
 import { join, dirname } from "node:path";
+import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import {
@@ -32,19 +33,23 @@ import {
 import { isolatedChildEnv } from "./admission-ledger-env-isolation.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = dirname(dirname(HERE)); // scripts/check -> scripts -> repo root
 const CLI_PATH = join(HERE, "relay-handshake.mjs");
 
-// ⛔이 워크트리 «안»의 스크래치 루트 -- os.tmpdir()(TEMP/TMP)를 쓰지 않는다.
-// `.harness/` 아래 두는 이유: 이 저장소의 .gitignore가 `.harness/` 전체를
-// 무시하므로(실측: `git check-ignore .harness/coder.md` -> `.gitignore:1:
-// .harness/`), 다른 시험이 동시에(병렬) 도는 동안에도 `git status
-// --porcelain`가 이 스크래치 디렉터리를 «워크트리 오염»으로 절대 보지
-// 않는다 -- 저장소 루트 바로 아래 새 디렉터리를 만들면 그 시험들이 병렬
-// 실행 중 일시적으로 그 존재를 untracked로 잡아채 flaky하게 실패한다(실측:
-// 최초 시도에서 hyk357-352-2r-cross-issue-note.test.mjs/nc-gitleaks.test.mjs/
-// reject-streak-auto-record.test.mjs가 정확히 이 경합으로 깨졌다).
-const SCRATCH_ROOT = join(REPO_ROOT, ".harness", "hyk387-scratch");
+// HYK-394-test-leak-3 §2 Q1 (검토자 rejected 판정, 2026-08-30 실사고):
+// 이전에는 이 워크트리 «자신의 라이브» `.harness/` 아래(`hyk387-scratch`)
+// 였다. 그 선택에는 실제 과거 근거가 있었다 -- 저장소 루트 바로 아래
+// (`.harness/` 밖) 새 디렉터리를 만들면 병렬 실행 중인 다른 시험의
+// `git status --porcelain` 스냅숏 단언이 그 존재를 untracked로 잡아채
+// flaky하게 깨진다(실측: hyk357-352-2r-cross-issue-note.test.mjs/
+// nc-gitleaks.test.mjs/reject-streak-auto-record.test.mjs). `.harness/`가
+// 전체 gitignore 대상이라 그 문제는 피했지만, 대가로 이 스크래치 트리가
+// «진짜» ORCH 라운드 파일과 같은 디렉터리 트리를 공유했다 -- 오늘 밤
+// 실사고: 그 형태로 이 워크트리의 실제 검토 결과·영수증이 소실됐다.
+// `os.tmpdir()`는 두 문제를 동시에 푼다 -- 저장소 밖이라 git status에
+// 절대 안 잡히고(위 과거 근거 그대로 유지), 라이브 `.harness/`와도
+// 물리적으로 분리돼 있어 어떤 실제 라운드 파일과도 경로를 공유하지
+// 않는다.
+const SCRATCH_ROOT = join(tmpdir(), "hyk387-scratch");
 
 function withFixtureDir(prefix, fn) {
   mkdirSync(SCRATCH_ROOT, { recursive: true });

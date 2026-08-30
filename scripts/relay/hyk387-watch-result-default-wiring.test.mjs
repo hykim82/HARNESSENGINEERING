@@ -30,16 +30,22 @@ import {
   existsSync,
   rmSync,
 } from "node:fs";
-import { join, dirname } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { watchResult } from "./watch-result.mjs";
 
-const HERE = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = dirname(dirname(HERE)); // scripts/relay -> scripts -> repo root
-// hyk387-dispatch-record-required.test.mjs와 동일한 이유로 `.harness/` 아래
-// 둔다(.gitignore 전체 무시 대상 -- 병렬 시험이 git status를 오염된 것으로
-// 보지 않는다).
-const SCRATCH_ROOT = join(REPO_ROOT, ".harness", "hyk387-watchresult-scratch");
+// HYK-394-test-leak-3 §2 Q1 (검토자 rejected 판정, 2026-08-30 실사고):
+// 이전에는 `join(REPO_ROOT, ".harness", "hyk387-watchresult-scratch")`
+// -- 이 워크트리 자신의 «라이브» `.harness/` 아래였다. `.harness/`가
+// 전체 gitignore 대상이라 병렬 시험의 git-status 스냅숏 오염은 피했지만
+// (그 자체는 유효한 과거 근거, hyk387-dispatch-record-required.test.mjs의
+// 같은 주석 참조), 그 대가로 이 스크래치 트리가 «진짜» ORCH 라운드 파일과
+// 같은 디렉터리 트리를 공유했다 -- 오늘 밤 실사고: 그 형태로 이 워크트리의
+// 실제 검토 결과·영수증이 소실됐다. `os.tmpdir()`는 두 문제를 동시에
+// 푼다 -- 저장소 밖이라 git status에 절대 안 잡히고(과거 근거 그대로
+// 유지), 라이브 `.harness/`와 물리적으로 분리돼 있어 어떤 실제 라운드
+// 파일과도 경로를 공유하지 않는다.
+const SCRATCH_ROOT = join(tmpdir(), "hyk387-watchresult-scratch");
 
 async function withFixtureDirAsync(prefix, fn) {
   mkdirSync(SCRATCH_ROOT, { recursive: true });

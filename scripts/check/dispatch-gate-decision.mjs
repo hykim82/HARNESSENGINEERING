@@ -814,7 +814,42 @@ function resolveDispatchReceiptPath(args, env) {
 // harnessTaskLabel이 일치하는 "마지막" 레코드를 고른다(먼저 나온 매치가
 // 아니라 마지막 -- append-only 로그이므로 그게 최신이다). 손상된 줄은
 // 건너뛴다(부분쓰기 가능성, §참조 아래 lookupDispatchId 헤더).
-function findLatestReceiptMatch(raw, role, harnessTaskLabel) {
+// ⛔⛔ HYK-394-test-leak-3 §2 Q3 (2026-08-30, 검토자 rejected 판정
+// 그대로 명시): 아래 anchor는 **계약이 아니다.** 검토자 원문: "dispatch_id
+// 가 배달 시점 보존 사본에 박히지 않는다... 조회 시점을 안정화한
+// 개선이지 «배달 시점에 파일에 박아 둔 결속»이 아니다." currentBinding과
+// candidate 양쪽 dispatchId가 여전히 같은 (role, harnessTaskLabel) 조회
+// 함수에서 파생되므로, 다른 5개 결속 필드(taskId/role/droppedAt/
+// resultFingerprint/doneAt)가 이미 일치하는 한 dispatchId는 구조적으로
+// redundant하다(HYK-394 2R coder.md §8 상세). **완성(dispatch_id를 배달
+// 시점에 보존 사본에 실제로 굽는 것)은 이 저장소 범위 밖 -- HYK-396
+// 예정.** 이 anchor 자체는 독립적으로 안전한 개선(옛 "매번 재계산"
+// 결함을 닫아 false-reject 하나를 막는다, HYK-394 2R §5 RED 확인
+// 완료)이라 남겨 뒀을 뿐, "배달 시점 결속"을 달성했다고 주장하지 않는다
+// -- 이 축을 근거로 "dispatch_id 결속이 끝났다"고 판단하지 마라.
+// HYK-394-dispatch-id-bind-2 §2 (P1): `beforeMs`, when given, restricts
+// matches to ledger lines whose OWN `recorded_at` (dispatch-receipt-cli.mjs's
+// buildReceiptRecord field, ISO, stamped the moment `orca orchestration
+// dispatch` actually fired for THAT round) is STRICTLY earlier than
+// `beforeMs` -- same tie-breaks-closed philosophy as relay-handshake.mjs's
+// own `resolveDispatchRecordExistence` "timely" filter (that function's own
+// header, HYK-387 2R §2 P2-ⓑ: "<" not "<=", a record at or after completion
+// is not proof of assignment). Without this anchor, "latest match for
+// (role, taskId)" silently drifts forward every time a NEW dispatch reuses
+// the same taskId (a later round, or a re-drop) -- exactly the flaw HYK-394
+// 1R proved exploitable (a query re-run at judgment time answers a
+// DIFFERENT question than the same query run once at the round's own
+// completion). Anchoring to `beforeMs` (the CALLER's own fixed, historical
+// doneAt/completion instant) makes the answer stable no matter how much
+// LATER the query actually runs, or how many more dispatches have been
+// recorded for this taskId since -- this is what turns a live re-lookup
+// into the "박아 두는 값" P1 requires, without needing to change WHERE or
+// WHEN any writer runs. `beforeMs` omitted (undefined) preserves the exact
+// prior behavior (existing callers/tests unaffected) -- callers that care
+// about this safety property must now supply it (evaluateConsumptionDecision/
+// enrichCandidateDispatchId below both do).
+function findLatestReceiptMatch(raw, role, harnessTaskLabel, beforeMs) {
+  const hasAnchor = typeof beforeMs === "number" && Number.isFinite(beforeMs);
   let match = null;
   for (const line of raw.split("\n")) {
     const trimmed = line.trim();
@@ -830,6 +865,15 @@ function findLatestReceiptMatch(raw, role, harnessTaskLabel) {
       rec.role.toUpperCase() === role.toUpperCase() &&
       rec.harness_task_label === harnessTaskLabel
     ) {
+      if (hasAnchor) {
+        const recordedAtMs = Date.parse(rec.recorded_at);
+        // unparseable/missing recorded_at can't be proven "before" the
+        // anchor -- excluded, not guessed into either side (fail-closed,
+        // same posture as the rest of this axis).
+        if (!Number.isFinite(recordedAtMs) || !(recordedAtMs < beforeMs)) {
+          continue;
+        }
+      }
       match = rec;
     }
   }
@@ -866,7 +910,12 @@ export const DISPATCH_RECEIPT_LOOKUP_REASON = Object.freeze({
 // HYK-347 §3: exported so a contract test can pin the reasonCode
 // distinction directly, without threading the full CLI/gate-decision
 // surface just to observe this one function's return shape.
-export function lookupDispatchId({ role, harnessTaskLabel, receiptPath }) {
+export function lookupDispatchId({
+  role,
+  harnessTaskLabel,
+  receiptPath,
+  beforeMs,
+}) {
   if (!isNonEmptyString(receiptPath)) {
     return {
       ok: false,
@@ -896,7 +945,7 @@ export function lookupDispatchId({ role, harnessTaskLabel, receiptPath }) {
       reason: `dispatch receipt 파일을 읽을 수 없음('${receiptPath}': ${err.message})`,
     };
   }
-  const match = findLatestReceiptMatch(raw, role, harnessTaskLabel);
+  const match = findLatestReceiptMatch(raw, role, harnessTaskLabel, beforeMs);
   if (!match) {
     return {
       ok: true,
@@ -969,6 +1018,29 @@ function findArchivedDroppedAt(harnessDir, role, harnessTaskLabel) {
   return bestDroppedAt;
 }
 
+// HYK-394-dispatch-id-bind-2 §2 (P2, reintroduced then RE-REVERTED --
+// see evaluateConsumptionDecision's own header below for the empirical
+// finding): a "try every distinct archived droppedAt for this label, not
+// just the highest-numbered one" relaxation was reintroduced here, this
+// time paired with the dispatch_id anchor fix (findLatestReceiptMatch/
+// lookupDispatchId/enrichCandidateDispatchId's `beforeMs`, still shipped,
+// see those functions' own headers). It was proven, by direct execution
+// (scripts/check/hyk394-dispatch-id-bind.test.mjs test (b)), that this
+// STILL lets a genuinely-unconsumed redrop through: dispatchId anchoring
+// correctly excludes the redrop's OWN (later) dispatch record, but the
+// non-highest-round trial (the FIRST drop's own droppedAt) still matches
+// the old receipt on every field -- not because of a stale/recomputed
+// value, but because resultText genuinely still IS the first drop's own,
+// truly-consumed content (the redrop's worker never overwrote it). No
+// per-round binding field (taskId/role/droppedAt/resultFingerprint/
+// dispatchId/doneAt) can distinguish "this is the same round, re-archived"
+// from "this is a different, later round that reused the label and never
+// finished" when the live result file simply hasn't changed. Per Q8's
+// explicit instruction ("통과시키면 넣지 마라"), this relaxation is
+// declined again; only this comment remains (findArchivedDroppedAt below,
+// unchanged, remains the only lookup -- "highest round only" is what
+// blocks fixture (b), by making droppedAt itself mismatch).
+
 // HYK-244 2R-b3 결함2 수리 (필수 부속): 실물 생산 경로(relay-handshake.mjs
 // -> consumption-receipt-writer.mjs)는 완료 시점에 자기 dispatchId를 알
 // 방법이 없다(관제실 dispatch-receipts.jsonl에 그 라운드의 항목이 남는
@@ -982,13 +1054,41 @@ function findArchivedDroppedAt(harnessDir, role, harnessTaskLabel) {
 // core.mjs, ⛔수정 금지)를 바꾸지 않고 이 비대칭을 없앨 수 있는 유일한
 // 지점이 여기(게이트가 후보를 읽는 지점)다. 이미 찾은 값이 있으면(이론상
 // 미래에 생산 경로가 직접 채우게 되더라도) 덮어쓰지 않는다.
+// HYK-394-dispatch-id-bind-2 §2 (P1): anchors this backfill to the
+// CANDIDATE'S OWN `doneAt` (its completion instant, fixed forever once the
+// receipt was written) instead of "whatever is latest right now" -- see
+// findLatestReceiptMatch's own header for why an unanchored "latest" query
+// answers a different question every time it's re-run (HYK-394 1R's proven
+// exploit). A candidate with a missing/malformed doneAt (parseKstToMs
+// returns null) gets no anchor and is enriched with the OLD unanchored
+// "latest" behavior -- this only affects receipts predating this field's
+// reliability, not a new unsafe path (checkBindingPreconditions already
+// requires a valid doneAt for ANY candidate to ever match, so an
+// unanchored enrichment here can, at worst, feed a value into a comparison
+// that a downstream check would reject anyway on other grounds).
+// ⛔이 함수와 enrichCandidateDispatchId 아래는 HYK-394-test-leak-3 §2 Q3
+// 명시가 적용되는 "계약 아님" 축의 일부다 -- findLatestReceiptMatch의
+// 헤더(위쪽, "⛔⛔ HYK-394-test-leak-3 §2 Q3"로 시작) 참조, 완성은 HYK-396.
+// eslint complexity 상한 유지 목적으로 뽑은 한 줄짜리 헬퍼(동작 변경 없음)
+// -- enrichCandidateDispatchId 자신의 옵셔널 체이닝 개수가 이미 상한에
+// 가까웠고, beforeMs 계산 하나를 더 인라인하면 초과한다.
+function candidateBeforeMs(candidate) {
+  return parseKstToMs(candidate?.binding?.doneAt) ?? undefined;
+}
+
 function enrichCandidateDispatchId(candidate, receiptPath) {
   if (isNonEmptyString(candidate?.binding?.dispatchId)) return candidate;
   const role = candidate?.binding?.role;
   const harnessTaskLabel = candidate?.binding?.taskId;
   if (!isNonEmptyString(role) || !isNonEmptyString(harnessTaskLabel))
     return candidate;
-  const lookup = lookupDispatchId({ role, harnessTaskLabel, receiptPath });
+  const beforeMs = candidateBeforeMs(candidate);
+  const lookup = lookupDispatchId({
+    role,
+    harnessTaskLabel,
+    receiptPath,
+    beforeMs,
+  });
   if (!lookup.ok || !lookup.found) return candidate;
   return {
     ...candidate,
@@ -1863,8 +1963,18 @@ function maybeResolveAbortRecordForValidLabel({
 // 뽑았다(HYK-244-receipt-core-1b 선례와 동일한 이유, 판정/로그 문구는
 // 조금도 바뀌지 않는다, 몸통만 쪼갠다) -- lookupDispatchId 호출 + 그
 // 결과에 따른 조용한 통과 금지 로그 두 줄을 하나로 묶는다.
-function lookupDispatchIdWithLogging({ role, harnessTaskLabel, receiptPath }) {
-  const lookup = lookupDispatchId({ role, harnessTaskLabel, receiptPath });
+function lookupDispatchIdWithLogging({
+  role,
+  harnessTaskLabel,
+  receiptPath,
+  beforeMs,
+}) {
+  const lookup = lookupDispatchId({
+    role,
+    harnessTaskLabel,
+    receiptPath,
+    beforeMs,
+  });
   if (!lookup.ok) {
     console.error(
       `dispatch-gate-decision consumption: dispatch_id 조회 실패(안 지어냄) -- ${lookup.reason}`,
@@ -2127,6 +2237,21 @@ function buildCurrentBinding({
   };
 }
 
+// ⛔"계약 아님" 축 -- findLatestReceiptMatch의 헤더("⛔⛔ HYK-394-test-leak-3
+// §2 Q3"로 시작, dispatch-gate-decision.mjs 상단부) 참조, 완성은 HYK-396.
+// HYK-394-dispatch-id-bind-2 §2 (P1): same extraction buildCurrentBinding
+// uses for `doneAt` itself, converted to epoch ms for the dispatch_id
+// lookup's `beforeMs` anchor. A missing/ambiguous DONE line yields
+// undefined (no anchor) -- the lookup then behaves exactly as before this
+// round (unanchored), which is the existing "can't confirm, don't guess"
+// posture this file already uses everywhere else.
+function resultDoneAtMs(resultText) {
+  return (
+    parseKstToMs(extractSoleMatch(resultText, CONSUMPTION_DONE_RE_G)) ??
+    undefined
+  );
+}
+
 function evaluateConsumptionDecision(taskPath, args, env = process.env) {
   const role = deriveRoleFromTaskPath(taskPath);
   if (!role) return null;
@@ -2179,10 +2304,18 @@ function evaluateConsumptionDecision(taskPath, args, env = process.env) {
   });
   if (abortOutcome.done) return abortOutcome.result;
 
+  // HYK-394-dispatch-id-bind-2 §2 (P1): resultText's own doneAt anchors the
+  // dispatch_id lookup (see findLatestReceiptMatch's own header for the
+  // exploit this closes -- an unanchored "latest" query answers differently
+  // depending on when it's re-run). Extracted to its own function (quality:
+  // eslint max-lines-per-function) -- same value buildCurrentBinding
+  // computes for the binding itself a few lines below (same source, same
+  // regex), not a second, divergent computation.
   const lookup = lookupDispatchIdWithLogging({
     role,
     harnessTaskLabel,
     receiptPath,
+    beforeMs: resultDoneAtMs(resultText),
   });
 
   // 결함1의 나머지 절반: droppedAt도 같은 이유로 taskText가 아니라 그
@@ -2199,6 +2332,24 @@ function evaluateConsumptionDecision(taskPath, args, env = process.env) {
 
   const candidates = readConsumptionCandidates(harnessDir, role, receiptPath);
 
+  // HYK-394-dispatch-id-bind-2 §2 (P2 재도입 -> 재반려, 실행으로 확인):
+  // "가장 높은 번호 사본"만 보지 않고 같은 라벨의 사본 중 하나라도 결속
+  // 전체와 일치하면 소비로 인정하는 완화를, 이번엔 위 dispatch_id anchor
+  // 수리(findLatestReceiptMatch/lookupDispatchId/enrichCandidateDispatchId의
+  // `beforeMs`, 그대로 남아 있음)와 함께 다시 넣어 실제로 실행해 봤다
+  // (scripts/check/hyk394-dispatch-id-bind.test.mjs 시험 (b)). ★결과: 여전히
+  // 뚫린다 -- dispatchId anchor는 재드롭 자신의(더 나중) dispatch_id를
+  // 정확히 걸러내지만, "가장 높은 번호가 아닌" 트라이얼(=첫 드롭 자신의
+  // droppedAt)은 옛 영수증과 «진짜로» 결속 전체가 일치한다(재계산 버그가
+  // 아니라 resultText 자체가 아직 첫 드롭 라운드 그대로이고, 그 라운드는
+  // 실제로 소비됐다는 사실 그 자체). taskId/role/droppedAt/resultFingerprint/
+  // dispatchId/doneAt 그 어떤 성분도 "같은 라운드가 재보존된 것"과 "다른
+  // (아직 안 끝난) 라운드가 같은 라벨을 재사용한 것"을 구별하지 못한다 --
+  // 살아 있는 결과 파일이 그 자체로 바뀌지 않았기 때문이다. Q8 지시
+  // 원문("통과시키면 넣지 마라") 그대로 이 완화는 다시 반려한다 --
+  // findArchivedDroppedAt(가장 높은 번호 사본 하나만 대조, 아래 미변경)가
+  // 유일한 조회로 남는다(그 "가장 높은 번호만" 제약 자체가 fixture (b)를
+  // 막아 주는 것 -- droppedAt 자체가 불일치로 떨어진다).
   const decision = toConsumptionGateDecision({
     role,
     currentBinding,
