@@ -335,6 +335,133 @@ test("ⓑ 무한 top-level await(이벤트 루프를 살려 둔 채): 제한시�
   }
 });
 
+async function assertAbnormalExitRejected(fixtureName, label) {
+  const worktree = tmpWorktree(`hyk400-${label}-worktree-`);
+  try {
+    seedReceiptCli(worktree, fixtureName);
+    const result = await checkReceiptCliFlagSupport({
+      worktree,
+      deliveryArgs: deliveryArgsFor(worktree),
+    });
+    assert.equal(
+      result.ok,
+      false,
+      `${label}: 비정상 child는 ok:false여야 한다`,
+    );
+    assert.equal(
+      result.supported,
+      false,
+      `${label}: 비정상 child가 supported:true가 되면 안 된다`,
+    );
+    assert.match(result.reason, /RECEIVER_CLI_PROBE_CRASHED/);
+  } finally {
+    rmSync(worktree, { recursive: true, force: true });
+  }
+}
+
+test("ⓐ I1′: 정상 JSON 출력 후 SIGTERM 자살은 stdout과 무관하게 거부된다", async () => {
+  await assertAbnormalExitRejected(
+    "hyk400-hostile-output-sigterm.mjs.txt",
+    "output-sigterm",
+  );
+});
+
+test("ⓑ I1′: 정상 JSON 출력 후 process.exitCode=1은 stdout과 무관하게 거부된다", async () => {
+  await assertAbnormalExitRejected(
+    "hyk400-hostile-output-exitcode.mjs.txt",
+    "output-exitcode",
+  );
+});
+
+test("ⓒ I1′: 정상 JSON 출력 후 process.exit(3)은 stdout과 무관하게 거부된다", async () => {
+  await assertAbnormalExitRejected(
+    "hyk400-hostile-output-exit3.mjs.txt",
+    "output-exit3",
+  );
+});
+
+test("I1′ 되돌림: 종료 상태 검사를 끄면 ⓐⓑⓒ가 다시 통과하고 원본 바이트는 복원된다(RED)", async () => {
+  const originalGuardSrc = readFileSync(GUARD_PATH, "utf8");
+  const originalRunnerSrc = readFileSync(RUNNER_PATH, "utf8");
+  const crashRejectStart = originalGuardSrc.indexOf(
+    "    return rejected(\n      `RECEIVER_CLI_PROBE_CRASHED:",
+  );
+  assert.notEqual(
+    crashRejectStart,
+    -1,
+    "I1′ mutation anchor not found -- guard source drifted",
+  );
+  const crashRejectEndMarker = "\n    );";
+  const crashRejectEnd = originalGuardSrc.indexOf(
+    crashRejectEndMarker,
+    crashRejectStart,
+  );
+  assert.ok(
+    crashRejectEnd > crashRejectStart,
+    "I1′ mutation anchor not found -- guard source drifted",
+  );
+  const crashRejectAnchor = originalGuardSrc.slice(
+    crashRejectStart,
+    crashRejectEnd + crashRejectEndMarker.length,
+  );
+  const mutatedSrc = originalGuardSrc.replace(
+    crashRejectAnchor,
+    [
+      "    stdout = err.stdout;",
+      "    if (!isNonEmptyString(stdout)) {",
+      '      return rejected("RECEIVER_CLI_PROBE_CRASHED: mutated status check");',
+      "    }",
+    ].join("\n"),
+  );
+  assert.notEqual(mutatedSrc, originalGuardSrc);
+
+  const mutDir = tmpWorktree("hyk400-i1-status-mutant-");
+  const specimens = [
+    ["hyk400-hostile-output-sigterm.mjs.txt", "SIGTERM"],
+    ["hyk400-hostile-output-exitcode.mjs.txt", "exitCode=1"],
+    ["hyk400-hostile-output-exit3.mjs.txt", "exit(3)"],
+  ];
+  try {
+    writeFileSync(join(mutDir, "hyk400-receiver-guard.mjs"), mutatedSrc);
+    writeFileSync(
+      join(mutDir, "hyk400-receiver-probe-runner.mjs"),
+      originalRunnerSrc,
+    );
+    const mutatedGuard = await import(
+      pathToFileURL(join(mutDir, "hyk400-receiver-guard.mjs")).href
+    );
+    for (const [fixtureName, label] of specimens) {
+      const worktree = tmpWorktree(`hyk400-i1-status-${label}-`);
+      try {
+        seedReceiptCli(worktree, fixtureName);
+        const result = await mutatedGuard.checkReceiptCliFlagSupport({
+          worktree,
+          deliveryArgs: deliveryArgsFor(worktree),
+        });
+        assert.equal(
+          result.supported,
+          true,
+          `${label}: 종료 상태 검사를 끄면 유효 stdout 때문에 다시 통과해야 RED다`,
+        );
+      } finally {
+        rmSync(worktree, { recursive: true, force: true });
+      }
+    }
+  } finally {
+    rmSync(mutDir, { recursive: true, force: true });
+    assert.equal(
+      readFileSync(GUARD_PATH, "utf8"),
+      originalGuardSrc,
+      "원본 guard 바이트가 변형된 채로 남았다",
+    );
+    assert.equal(
+      readFileSync(RUNNER_PATH, "utf8"),
+      originalRunnerSrc,
+      "원본 runner 바이트가 변형된 채로 남았다",
+    );
+  }
+});
+
 test("ⓑ 되돌림: 격리 프로세스 실패(타임아웃 포함)를 거부가 아니라 '건너뛰기'로 바꾸면(제한시간 자체는 여전히 작동) RED가 된다", async () => {
   const originalGuardSrc = readFileSync(GUARD_PATH, "utf8");
   const originalRunnerSrc = readFileSync(RUNNER_PATH, "utf8");

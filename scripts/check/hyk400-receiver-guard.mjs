@@ -170,12 +170,12 @@ function runIsolatedProbe({
         "RECEIVER_CLI_PROBE_TIMEOUT: 격리 프로세스가 제한시간 내 응답하지 않았다(무한 대기/무한 루프 의심)",
       );
     }
-    stdout = err.stdout;
-    if (!isNonEmptyString(stdout)) {
-      return rejected(
-        `RECEIVER_CLI_PROBE_CRASHED: 격리 프로세스가 비정상 종료했다(${err.message})`,
-      );
-    }
+    // execFileSync가 반환하는 유일한 경로가 종료코드 0·시그널 없음이다.
+    // 예외에 stdout이 붙어 있어도 child는 비정상 종료했으므로 절대 읽지
+    // 않고 거부한다 -- 그럴듯한 JSON이 종료 상태를 덮어쓸 수 없다.
+    return rejected(
+      `RECEIVER_CLI_PROBE_CRASHED: 격리 프로세스가 비정상 종료했다(status=${err.status ?? "unknown"}, signal=${err.signal ?? "none"}; ${err.message})`,
+    );
   }
 
   const lastLine = stdout.trim().split("\n").pop();
