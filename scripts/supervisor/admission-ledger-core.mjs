@@ -78,9 +78,20 @@ export const ADMISSION_REASON = Object.freeze({
 // producers and readers (dispatch-gate-decision.mjs's
 // verifyAbortRecordRecoveryMarker) can refer to a single source of truth for
 // the NEW value without touching sweep's own code.
+// HYK-398 §2-⑶: RETIREMENT_RELEASED -- a VALID-labeled round whose retirement
+// record was independently reconfirmed RETIRED (retirement-record-core.mjs's
+// checkRetirementRecord) is released with THIS reason, deliberately distinct
+// from SUSPECT_TIMEOUT_RECOVERED (age-based sweep recovery of a round that
+// simply never checked in) and from BLOCKED_TERMINATION_RELEASED (a round
+// that explicitly declared itself stopped). A retired round is neither -- it
+// is a VALID, real result that can never be consumed through the normal
+// receipt chain (stale/malformed timestamp, permanently). Keeping these three
+// reasons distinct means an audit reading completion_reason never has to
+// guess which of three very different closures actually happened.
 export const COMPLETION_REASON = Object.freeze({
   SUSPECT_TIMEOUT_RECOVERED: "SUSPECT_TIMEOUT_RECOVERED",
   BLOCKED_TERMINATION_RELEASED: "BLOCKED_TERMINATION_RELEASED",
+  RETIREMENT_RELEASED: "RETIREMENT_RELEASED",
 });
 
 function isPlainObject(v) {

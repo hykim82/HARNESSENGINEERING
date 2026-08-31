@@ -189,6 +189,139 @@ test("§A GREEN: VALID 이름표 + 영구 차단(정상 소비 불가) + 검증 
 });
 
 // ---------------------------------------------------------------------------
+// §A2 (HYK-398) -- 두 번째 기계-확인-가능 사유(DONE_PREDATES_DROPPED_AT):
+// DONE은 파싱은 되지만 dropped_at보다 과거인, 관제실 지시서 §1의 실제
+// 재현 표본과 같은 모양. droppedAt 재확인에는 직전 라운드가 보존해 둔 task
+// 파일 사본(`rounds/<role>-task-r1.md`)이 필요하다(buildCurrentBinding이
+// archivedRoundMeta.droppedAt으로 채우는 값 -- writeArchivedRoundTaskCopy
+// 참조).
+// ---------------------------------------------------------------------------
+
+function writeArchivedRoundTaskCopy(dir, role, harnessTaskLabel, droppedAt) {
+  const roundsDir = join(dir, "rounds");
+  mkdirSync(roundsDir, { recursive: true });
+  writeFileSync(
+    join(roundsDir, `${role}-task-r1.md`),
+    `task_id: ${harnessTaskLabel}\ndropped_at: ${droppedAt}\n`,
+    "utf8",
+  );
+}
+
+test("§A2 (HYK-398) GREEN: DONE_PREDATES_DROPPED_AT -- DONE이 파싱은 되지만 직전 라운드의 dropped_at보다 과거 + 검증 가능한 은퇴 기록 -> 다음 배달 ALLOW", () => {
+  withFixtureDir((dir) => {
+    const role = "coder";
+    const harnessTaskLabel = "HYK-9398-retire-stale-round";
+    const droppedAt = "2026-08-19 09:00:00 KST";
+    const resultContent = `task_id: ${harnessTaskLabel}\n>>> DONE: CODER @ 2026-08-19 08:00:00 KST\n`;
+    writeFileSync(join(dir, `${role}.md`), resultContent, "utf8");
+    writeArchivedRoundTaskCopy(dir, role, harnessTaskLabel, droppedAt);
+    writeArchivedRoundCopy(dir, role, resultContent);
+
+    const taskPath = writeNextTaskFile(
+      dir,
+      role,
+      "HYK-9398-retire-stale-round-next",
+      "2026-08-19 10:00:00 KST",
+    );
+    const ledgerPath = join(dir, "reject-streak.json");
+    writeLedger(ledgerPath, { schema_version: 1, issues: {} });
+    const admissionLedgerPath = join(dir, "admission-ledger.json");
+    writeFileSync(
+      admissionLedgerPath,
+      JSON.stringify(createEmptyLedger("2026-08-19T00:00:00.000Z")) + "\n",
+      "utf8",
+    );
+    const fixture = {
+      role,
+      dir,
+      taskPath,
+      harnessTaskLabel,
+      resultContent,
+      ledgerPath,
+      admissionLedgerPath,
+    };
+
+    const write = writeRetirementRecord({
+      role: role.toUpperCase(),
+      harnessDir: dir,
+      harnessTaskLabel,
+      archivePath: "rounds/CODER-r1.md",
+      archiveFingerprintClaimed: computeFingerprint(resultContent),
+      blockReasonCode: "DONE_PREDATES_DROPPED_AT",
+      successorLabel: "HYK-9398-retire-stale-round-next",
+      recordedAt: "2026-08-19 10:05:00 KST",
+      evidence: "DONE이 직전 라운드의 dropped_at보다 과거",
+    });
+    assert.equal(write.ok, true, write.reason);
+
+    const r = runGate(fixture);
+    assert.equal(r.status, 0, `ALLOW 기대, 실제 stderr: ${r.stderr}`);
+    assert.match(r.stdout, /ALLOW/);
+    assert.match(r.stderr, /RETIRED|은퇴 처리/);
+  });
+});
+
+test("§A2 (HYK-398) RED: DONE_PREDATES_DROPPED_AT라고 «거짓 주장»(실제로는 파싱 불가능한 DONE) -> BLOCK_REASON_UNCONFIRMED, REJECT", () => {
+  withFixtureDir((dir) => {
+    const role = "coder";
+    const harnessTaskLabel = "HYK-9398-retire-fake-stale-round";
+    const droppedAt = "2026-08-19 09:00:00 KST";
+    // ⛔실제로는 DONE이 파싱 불가능한 형태다 -- DONE_PREDATES_DROPPED_AT는
+    // "파싱은 되는데 과거"를 주장하므로, 어댑터가 live 파일을 다시 읽어
+    // 재확인하면 이 주장은 거짓으로 드러나야 한다(doneAtMs===null).
+    const resultContent = `task_id: ${harnessTaskLabel}\n>>> DONE: CODER @ 이것은-파싱될-수-없는-시각\n`;
+    writeFileSync(join(dir, `${role}.md`), resultContent, "utf8");
+    writeArchivedRoundTaskCopy(dir, role, harnessTaskLabel, droppedAt);
+    writeArchivedRoundCopy(dir, role, resultContent);
+
+    const taskPath = writeNextTaskFile(
+      dir,
+      role,
+      "HYK-9398-retire-fake-stale-round-next",
+      "2026-08-19 10:00:00 KST",
+    );
+    const ledgerPath = join(dir, "reject-streak.json");
+    writeLedger(ledgerPath, { schema_version: 1, issues: {} });
+    const admissionLedgerPath = join(dir, "admission-ledger.json");
+    writeFileSync(
+      admissionLedgerPath,
+      JSON.stringify(createEmptyLedger("2026-08-19T00:00:00.000Z")) + "\n",
+      "utf8",
+    );
+    const fixture = {
+      role,
+      dir,
+      taskPath,
+      harnessTaskLabel,
+      resultContent,
+      ledgerPath,
+      admissionLedgerPath,
+    };
+
+    const write = writeRetirementRecord({
+      role: role.toUpperCase(),
+      harnessDir: dir,
+      harnessTaskLabel,
+      archivePath: "rounds/CODER-r1.md",
+      archiveFingerprintClaimed: computeFingerprint(resultContent),
+      blockReasonCode: "DONE_PREDATES_DROPPED_AT",
+      successorLabel: "HYK-9398-retire-fake-stale-round-next",
+      recordedAt: "2026-08-19 10:05:00 KST",
+      evidence: "거짓 주장",
+    });
+    assert.equal(write.ok, true, write.reason);
+
+    const r = runGate(fixture);
+    assert.notEqual(r.status, 0, `REJECT 기대, 실제 stdout: ${r.stdout}`);
+    assert.match(
+      r.stderr,
+      /독립적으로 재확인되지 않음/,
+      "기계로 확인 가능한 사유가 재확인 실패했다는 사유가 찍혀야 한다(BLOCK_REASON_UNCONFIRMED)",
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
 // §B -- REGRESSION(가장 중요): 정상 회수 가능 미소비는 은퇴 기록이 없으면
 // 여전히 REJECT돼야 한다(기존 소비 게이트를 이 축이 조금도 약화시키지
 // 않는다는 증거).

@@ -2080,31 +2080,43 @@ function resolveRetirementArchiveCandidate(
   };
 }
 
-// §3-4 (retirement-record-core.mjs 헤더): DONE_TIMESTAMP_NOT_PARSEABLE
-// «만» 기계로 독립 재확인한다 -- live 결과 파일 자신에 `>>> DONE:` 원문이
-// 실제로 있고(그렇지 않으면 "파싱 불가"가 아니라 "애초에 없음"이라는 다른
-// 사실이므로 이 사유가 주장하는 바가 아니다), 그 값이 parseKstToMs로
-// 파싱되지 않을 때만 true를 돌려준다. 나머지 사유(DONE_REWRITE_LOCKED ·
+// §3-4 (retirement-record-core.mjs 헤더): 기계로 확인 가능한 사유(현재
+// 둘 -- DONE_TIMESTAMP_NOT_PARSEABLE · HYK-398이 추가한
+// DONE_PREDATES_DROPPED_AT)만 독립 재확인한다. DONE_TIMESTAMP_NOT_
+// PARSEABLE: live 결과 파일 자신에 `>>> DONE:` 원문이 실제로 있고(그렇지
+// 않으면 "파싱 불가"가 아니라 "애초에 없음"이라는 다른 사실이므로 이
+// 사유가 주장하는 바가 아니다), 그 값이 parseKstToMs로 파싱되지 않을
+// 때만 true. DONE_PREDATES_DROPPED_AT(HYK-398): live 결과 파일의
+// `>>> DONE:`과 `droppedAt`(호출자가 이미 아카이브 사본에서 독립적으로
+// 뽑아 온 값, buildCurrentBinding 참조) 둘 다 파싱되고, doneAt이
+// droppedAt보다 «엄격히» 과거일 때만 true -- relay-handshake.mjs의 기존
+// stale 판정(`doneAt < droppedAt`)과 정확히 같은 사실을 이 축에서
+// 독립적으로 다시 유도한다(§3-4 "ORCH가 그렇다고 했다만으로는 통과 못
+// 한다" 원칙 그대로). 나머지 사유(DONE_REWRITE_LOCKED ·
 // TASK_CONTRACT_PROHIBITS_REPAIR)는 이 코드베이스가 기계로 재현할 수 없는
 // 계약 텍스트 질문이므로 null을 돌려준다(가짜 확인을 만들지 않는다 --
 // null은 코어가 "이 사유는 이 축에서 재확인 대상이 아니다"로 이미
 // 처리한다, MECHANICALLY_CONFIRMABLE_BLOCK_REASONS 확인).
-function confirmRetirementBlockReason(record, resultText) {
+function confirmRetirementBlockReason(record, resultText, droppedAt) {
   if (!MECHANICALLY_CONFIRMABLE_BLOCK_REASONS.has(record?.blockReasonCode)) {
     return null;
   }
-  // HYK-311-retire-1: 현재 집합에는 DONE_TIMESTAMP_NOT_PARSEABLE 하나뿐 --
-  // 그 사유의 구체적 재확인 방법(아래)만 여기 구현한다. 집합에 새 기계
-  // 확인 가능 사유가 추가되면 이 함수도 분기를 늘려야 한다(RETIREMENT_
-  // BLOCK_REASON은 그 새 사유의 이름 상수 출처로 계속 쓰인다).
   if (
-    record.blockReasonCode !==
+    record.blockReasonCode ===
     RETIREMENT_BLOCK_REASON.DONE_TIMESTAMP_NOT_PARSEABLE
   ) {
-    return null;
+    const doneAt = extractSoleMatch(resultText, CONSUMPTION_DONE_RE_G);
+    return isNonEmptyAbortString(doneAt) && parseKstToMs(doneAt) === null;
   }
-  const doneAt = extractSoleMatch(resultText, CONSUMPTION_DONE_RE_G);
-  return isNonEmptyAbortString(doneAt) && parseKstToMs(doneAt) === null;
+  if (
+    record.blockReasonCode === RETIREMENT_BLOCK_REASON.DONE_PREDATES_DROPPED_AT
+  ) {
+    const doneAt = extractSoleMatch(resultText, CONSUMPTION_DONE_RE_G);
+    const doneAtMs = parseKstToMs(doneAt);
+    const droppedAtMs = parseKstToMs(droppedAt);
+    return doneAtMs !== null && droppedAtMs !== null && doneAtMs < droppedAtMs;
+  }
+  return null;
 }
 
 // 이 축의 메인 진입점. checkRetirementRecord(코어)의 판정을 그대로
@@ -2116,6 +2128,7 @@ function evaluateRetirementDecision({
   harnessDir,
   resultText,
   harnessTaskLabel,
+  droppedAt,
 }) {
   const records = readRetirementRecordFiles(harnessDir, role);
   const liveFingerprint = computeConsumptionResultFingerprint(resultText);
@@ -2138,7 +2151,14 @@ function evaluateRetirementDecision({
       // §5-c에 명시).
       liveFingerprintMatches:
         liveFingerprint === record?.archiveFingerprintClaimed,
-      blockReasonConfirmed: confirmRetirementBlockReason(record, resultText),
+      // HYK-398: droppedAt(호출자가 아카이브 사본에서 뽑아 온 값,
+      // buildCurrentBinding.droppedAt) 전달 -- DONE_PREDATES_DROPPED_AT
+      // 재확인에만 쓰인다(위 confirmRetirementBlockReason 헤더 참조).
+      blockReasonConfirmed: confirmRetirementBlockReason(
+        record,
+        resultText,
+        droppedAt,
+      ),
     };
   });
   const verdict = checkRetirementRecord({
@@ -2163,12 +2183,14 @@ function resolveRetirementOutcome({
   harnessDir,
   resultText,
   harnessTaskLabel,
+  droppedAt,
 }) {
   const retirementDecision = evaluateRetirementDecision({
     role,
     harnessDir,
     resultText,
     harnessTaskLabel,
+    droppedAt,
   });
   if (retirementDecision === null) return { done: true, result: null };
   if (retirementDecision.state !== RETIREMENT_RECORD_STATE.NO_RECORD) {
@@ -2186,6 +2208,7 @@ function maybeResolveRetirementForValidLabel({
   harnessDir,
   resultText,
   harnessTaskLabel,
+  droppedAt,
 }) {
   if (labelInfo.kind !== "VALID") return { done: false };
   return resolveRetirementOutcome({
@@ -2193,6 +2216,7 @@ function maybeResolveRetirementForValidLabel({
     harnessDir,
     resultText,
     harnessTaskLabel,
+    droppedAt,
   });
 }
 
@@ -2913,6 +2937,11 @@ function evaluateConsumptionDecision(taskPath, args, env = process.env) {
     harnessDir,
     resultText,
     harnessTaskLabel,
+    // HYK-398: DONE_PREDATES_DROPPED_AT 재확인에 필요한 droppedAt --
+    // currentBinding은 이미 buildConsumptionBindingContext에서
+    // archivedRoundMeta.droppedAt(직전 라운드가 보존한 task 파일 사본에서
+    // 뽑은 원문)으로 채워져 있다(이 함수 위 buildCurrentBinding 참조).
+    droppedAt: currentBinding.droppedAt,
   });
   if (retirementOutcome.done) return retirementOutcome.result;
 
