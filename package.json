@@ -3,6 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "test": "node scripts/check/isolated-suite-runner.mjs",
     "quality:check": "node scripts/check/quality-check.mjs"
   },
   "devDependencies": {

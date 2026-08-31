@@ -47,8 +47,13 @@ jobs:
       # checkout (they do exist on this review host, which is why this says
       # "CI runner's checkout" specifically, not "this checkout" generally).
       # Local weekly selfcheck covers them; that is not an external anchor.
+      # HYK-403: `npm test` is the canonical single line for the whole
+      # suite -- package.json's "test" script is this exact command
+      # (node scripts/check/isolated-suite-runner.mjs), so CI and a local
+      # run are byte-identical. Do not inline the node invocation here
+      # again; that duplication is what let CI and local drift silently.
       - name: check test suites (scripts/check + scripts/relay + scripts/relay/adapters + scripts/supervisor *.test.mjs)
-        run: node scripts/check/isolated-suite-runner.mjs
+        run: npm test
 
       - name: hooks POSIX syntax check
         run: |

@@ -73,11 +73,16 @@ const REQUIRED_TEST_DIRS = [
   "scripts/supervisor",
 ];
 // The exact `run:` line HYK-208's isolated-suite-runner installed at
-// enforce.yml:31. Match the line, not a substring, so swapping back to the
-// raw `node --test ...` glob (removing the isolation this whole track
-// exists for) is itself a contract violation, not just a coverage gap.
+// enforce.yml:31, OR (HYK-403) the canonical `npm test` line that now
+// resolves to the exact same invocation via package.json's "test" script
+// (selfcheck-inventory.mjs's isRecognizedSuiteInvocation is the machine
+// check that keeps that resolution honest -- this file only needs to
+// recognize the two literal shapes). Match the line, not a substring, so
+// swapping back to the raw `node --test ...` glob (removing the isolation
+// this whole track exists for) is itself a contract violation, not just a
+// coverage gap.
 const RUNNER_INVOCATION_RE =
-  /^[ \t]*run:[ \t]*node scripts\/check\/isolated-suite-runner\.mjs[ \t]*$/m;
+  /^[ \t]*run:[ \t]*(?:node scripts\/check\/isolated-suite-runner\.mjs|npm test)[ \t]*$/m;
 function hasRunnerInvocation(workflowText) {
   return RUNNER_INVOCATION_RE.test(workflowText);
 }
@@ -215,7 +220,7 @@ test("NC-3 mutation/ci-enforce #1: injecting 'continue-on-error: true' into a co
 
 test("NC-3 mutation/ci-enforce #2a: workflow test step reverted to the raw pre-HYK-208 node --test command (no longer invokes the runner) -> RED", () => {
   const mutated = ENFORCE_YML.replace(
-    "run: node scripts/check/isolated-suite-runner.mjs",
+    "run: npm test",
     "run: node --test scripts/check/*.test.mjs scripts/relay/*.test.mjs scripts/relay/adapters/*.test.mjs scripts/supervisor/*.test.mjs",
   );
   assert.notEqual(

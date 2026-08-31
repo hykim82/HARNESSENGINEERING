@@ -627,6 +627,58 @@ export function matchesExactRunnerInvocation(chunkText, runnerScriptRelPath) {
   return m !== null && m[2] === runnerScriptRelPath;
 }
 
+// HYK-403: a second recognized shape -- the step's run: text, trimmed, is
+// exactly `npm test`. Recognized ONLY when package.json's own "test" script
+// resolves (via the SAME allow-list check above) to `node
+// <runnerScriptRelPath>` -- so this never becomes a second, looser way to
+// claim ALIVE; it's the exact same allow-listed invocation, one indirection
+// through npm's script name. If package.json's "test" script is ever
+// repointed at something else, this stops recognizing "npm test" and falls
+// through to the existing UNJUDGABLE/DRIFT handling below, same as any
+// other unrecognized shape.
+export function matchesNpmTestInvocation(
+  chunkText,
+  npmTestScript,
+  runnerScriptRelPath,
+) {
+  if (chunkText.trim() !== "npm test") return false;
+  return (
+    typeof npmTestScript === "string" &&
+    matchesExactRunnerInvocation(npmTestScript, runnerScriptRelPath)
+  );
+}
+
+// Real default for npmTestScript below: package.json's own "scripts.test",
+// read once at judge time (not statically imported -- package.json is JSON,
+// not an ES module). Never throws: a missing/unparseable package.json
+// yields null, which matchesNpmTestInvocation always rejects (fail-closed,
+// same posture as RUNNER_TEST_DIRS import failing).
+function readNpmTestScript(root = repoRoot()) {
+  try {
+    const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
+    return typeof pkg?.scripts?.test === "string" ? pkg.scripts.test : null;
+  } catch {
+    return null;
+  }
+}
+
+// HYK-403: the single shared predicate for "is this run: text a canonical
+// whole-suite invocation" -- either recognized shape, one place. Every
+// consumer that needs to recognize the runner's canonical invocation (this
+// module's own checkCiCoverage, AND ci-gitleaks-order.mjs's step-order
+// check) calls this instead of matchesExactRunnerInvocation directly, so a
+// future third recognized shape only needs to be added here once.
+export function isRecognizedSuiteInvocation(
+  chunkText,
+  runnerScriptRelPath = RUNNER_SCRIPT_REL_PATH,
+  npmTestScript = readNpmTestScript(),
+) {
+  return (
+    matchesExactRunnerInvocation(chunkText, runnerScriptRelPath) ||
+    matchesNpmTestInvocation(chunkText, npmTestScript, runnerScriptRelPath)
+  );
+}
+
 // CI coverage: every scripts/check/*.test.mjs basename that actually exists
 // on disk (discovered dynamically, not hardcoded, so a brand-new check's
 // test file is caught even before anyone updates the manifest) must be run by
@@ -676,6 +728,7 @@ export function checkCiCoverage({
   runnerTestDirs = RUNNER_TEST_DIRS,
   checkDirRelPath = "scripts/check",
   runnerScriptRelPath = RUNNER_SCRIPT_REL_PATH,
+  npmTestScript = readNpmTestScript(),
 }) {
   // HYK-338 2R (review P1-3, kept in 3R -- 검토자가 통과시킨 부분): zero
   // discovered test files must never read as "all covered" -- an empty
@@ -718,10 +771,12 @@ export function checkCiCoverage({
       reason: `all ${testFiles.length} check test suite(s) referenced in CI run: steps`,
     };
   }
-  // HYK-338 3R allow-list (§2-2): a step whose ENTIRE text is exactly
-  // `node <runnerScriptRelPath>` is the one recognized invocation shape.
+  // HYK-338 3R allow-list (§2-2), extended HYK-403: a step whose ENTIRE
+  // text is exactly `node <runnerScriptRelPath>`, OR exactly `npm test`
+  // when package.json's "test" script itself resolves to that same
+  // invocation -- either is the one recognized invocation shape.
   const isRecognizedInvocation = runChunks.some((chunk) =>
-    matchesExactRunnerInvocation(chunk, runnerScriptRelPath),
+    isRecognizedSuiteInvocation(chunk, runnerScriptRelPath, npmTestScript),
   );
   if (isRecognizedInvocation) {
     return judgeRecognizedRunnerInvocation({

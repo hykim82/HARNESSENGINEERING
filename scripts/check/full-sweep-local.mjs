@@ -52,7 +52,16 @@ export function runFullSweepLocal({
   const result = spawn(
     process.execPath,
     ["--test", `--import=${pathToFileURL(isolationPreload).href}`, ...files],
-    { cwd: root, stdio: "inherit" },
+    {
+      cwd: root,
+      stdio: "inherit",
+      // HYK-403: see isolated-suite-runner.mjs's matching comment --
+      // canonical-suite-entrypoint.test.mjs checks for this marker.
+      env: {
+        ...process.env,
+        HYK403_CANONICAL_SUITE_ENTRYPOINT: "full-sweep-local",
+      },
+    },
   );
   return result.status ?? 1;
 }
