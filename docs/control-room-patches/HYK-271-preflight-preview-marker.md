@@ -2,12 +2,12 @@
 
 ★이 문서는 **제안**이다 — 적용은 ORCH + **S7 강화판 검토** 뒤, 사람이 한다. 이 라운드는 코드로 관제실을 고치지 않는다(coder-task.md §2 ⑶).
 
-**2R 정정 고지**: 1R 문서는 §0/§3에서 "patch-unit 0개"·"ps1 한 줄도 안 바뀐다"고 썼다가 같은 문서 §3 안에서 "ps1 쪽 변경(제안)"을 다시 적어 **스스로 모순**됐다(검토 P1-1). 이번 판은 그 모순을 없애고 **정확히 무엇이 필요한지 하나로 확정**한다 — 답은 "0개"가 아니라 **"ps1에 정확히 1줄, 관제실 라이브 파일 변경 = S7 대상"**이다. 1R의 "필요 없다"는 검증하지 않은 채 강한 문장을 쓴 것이었다(coder-task.md 2R §4 "«무엇이 필요 없다»류는 검증한 것만 써라" 규율 위반 — 이번 판은 이 규율을 지킨다).
+이 결선에 정확히 무엇이 필요한지(patch-unit 개수·S7 대상 여부), preview 축의 위음성을 heartbeat-absence가 실제로 덮는지, 분류기가 몇 갈래를 구별하는지 — 세 질문 모두 아래 본문은 **현재 유효한 결론만** 적는다. 이전 라운드에서 있었던 서술 정정의 이력은 **부록 A**에 모았다(3R 문면 정리 — coder-task.md §3 "철회문은 잔재가 아니다"의 기준에 맞춰, 본문은 지금 참인 것만, 철회 이력은 대상을 이름으로 부르는 문장까지 포함해 전부 부록으로).
 
 ## 0. 이 문서가 답하는 질문과 답하지 않는 질문
 
 - **답한다**: 후보 축 중 어느 것을 믿을지(§1), preview 마커 축의 위음성을 heartbeat-absence가 실제로 덮는지 «측정»한 결과(§1-c, 2R 신규), 결선에 정확히 무엇이 필요하고 그것이 S7 대상인지(§3).
-- **답하지 않는다**: 실제 관제실 파일 수정. `dispatch-worker.ps1`(SHA-256 `4E16E2E458E98A6E9C47074D011BD5F9554412A608C8C3C6BC7116DBCD0B2482`, 717줄 — `Get-FileHash`/`(Get-Content).Count` 직접 실측, 2026-08-31)은 이 문서로 고치지 않는다 — **다만 실제 결선 시 그 파일이 반드시 바뀐다는 것은 이 문서가 명시한다**(§3, 1R처럼 "안 바뀐다"고 적지 않는다).
+- **답하지 않는다**: 실제 관제실 파일 수정. `dispatch-worker.ps1`(SHA-256 `4E16E2E458E98A6E9C47074D011BD5F9554412A608C8C3C6BC7116DBCD0B2482`, 717줄 — `Get-FileHash`/`(Get-Content).Count` 직접 실측, 2026-08-31)은 이 문서로 고치지 않는다 — **다만 실제 결선 시 그 파일이 반드시 바뀐다는 것은 이 문서가 명시한다**(§2).
 
 ## 1. 축 선택 — «axis-orca-query-preview» + «axis-heartbeat-absence» 조합, 단독 아님
 
@@ -20,7 +20,7 @@
 `scripts/relay/hyk271-axis-preview-marker-synthetic.test.mjs`가 실측한 것:
 
 - **재사용, 재구현 안 함**: `normalizePreview`/`previewContainsMarker`는 `scripts/relay/adapters/orca-adapter.mjs`(이미 병합, evidence_kind=동작코드)에서 그대로 import.
-- **분류기는 boolean이다(2R 정정 — P1-3)**: `classifyPreviewForModal`은 **modal / non-modal 2분류**만 반환한다. idle과 busy는 둘 다 "모달 아님"이라는 **같은 결과**로 접힌다 — **idle과 busy를 서로 구별하는 3분류가 아니다.** 1R 문서는 "idle/busy/modal 3분류를 실행해 관찰"이라고 썼는데, 이는 표본의 *라벨*이 3종류였다는 것과 분류기의 *출력*이 3종류라는 것을 섞은 과장이었다(검토 P1-3). 이번 판은 주장을 **modal/non-modal 2분류**로 낮춘다(coder-task.md §2 ⓷ "둘 중 하나만" — 3분류 구현이 아니라 주장 하향을 택함: idle과 busy를 실제로 구별할 신호는 이 저장소에 별도로 없고, 이 축의 목적(배달 전 거부)에도 그 구별이 필요하지 않다).
+- **분류기는 boolean이다**: `classifyPreviewForModal`은 **modal / non-modal 2분류**만 반환한다. idle과 busy는 둘 다 "모달 아님"이라는 같은 결과로 접힌다 — idle과 busy를 서로 구별할 신호는 이 저장소에 별도로 없고, 이 축의 목적(배달 전 거부)에도 그 구별이 필요하지 않다(이전 라운드에 있었던 더 강한 분류 주장과 그 철회 경위는 부록 A.3 참조).
 - **합성 표본 9개**로 modal/non-modal 2분류를 실제로 실행해 관찰:
   - idle 셸 프롬프트, 빈 preview, "esc to interrupt" 작업중 신호, "Press up to edit queued messages" 큐 신호, 모달 낱말을 우연히 포함한 정상 대화문("Should I proceed...") → **전부 «모달 아님»으로 정확히 분류**(적대적 오탐 표본 포함, 0건 오탐 실측).
   - claude 권한모달 전문과 codex 승인모달 전문 → **정확히 «모달»로 분류**.
@@ -38,7 +38,7 @@
 
 **질문**: preview 마커 축이 절단으로 놓친 표본을, 2차 축인 `axis-heartbeat-absence`가 실제로 잡는가?
 
-**실측(그라운드 트루스, 부정적)**: 이 저장소를 `git grep -l "last_heartbeat_at" -- scripts`로 전수 조사(2026-08-31, `scripts/relay/hyk271-axis-heartbeat-absence-synthetic.test.mjs`의 세 번째 시험이 이 grep 결과를 코드로 고정) — **결과가 스키마 선언 파일(`scripts/relay/contracts/seat-proof-contract-v1.mjs`, nullable-field 목록) 1건뿐**이다. **heartbeat를 관측하거나, 부재를 판정하거나, 경보를 울리는 프로덕션 코드는 0건.** 1R이 "heartbeat 부재로 뒤늦게라도 걸린다"고 쓴 문장은 **관측/판정/경보 셋 중 아무것도 존재하지 않는 상태에서 나온 결론이 아니라 희망**이었다는 검토 지적(P1-2)이 실측으로 확인된다.
+**실측(그라운드 트루스, 부정적)**: 이 저장소를 `git grep -l "last_heartbeat_at" -- scripts`로 전수 조사(2026-08-31, `scripts/relay/hyk271-axis-heartbeat-absence-synthetic.test.mjs`의 세 번째 시험이 이 grep 결과를 코드로 고정) — **결과가 스키마 선언 파일(`scripts/relay/contracts/seat-proof-contract-v1.mjs`, nullable-field 목록) 1건뿐**이다. **heartbeat를 관측하거나, 부재를 판정하거나, 경보를 울리는 프로덕션 코드는 0건**이다(이전 라운드에 이 결론 없이 쓰였던 문장의 철회 경위는 부록 A.2 참조).
 
 ⇒ **오늘 시점의 사실**: `axis-heartbeat-absence`는 **아무것도 잡지 않는다** — 잡을 관측자 자체가 없다.
 
@@ -56,23 +56,23 @@
 - heartbeat 축의 신뢰도 근거는 여전히 **"필드 존재 확인(dispatch-show 응답에 `last_heartbeat_at`이 실재)" + "비권위 조건부 계산(위 표)"뿐**이다 — 관측·판정·경보가 실배선된 **권위 있는 실측**이 아니다. 강한 문장을 만들지 않는다(coder-task.md §2 ⓶의 경고 그대로 반영).
 - 절단이 일어난 뒤 "몇 초짜리 사각"이 실제로 몇 번 발생하는지(빈도 × 사각크기 = 총 위험도)는 이 판도 답하지 않는다(§1-b에 남긴 대로).
 
-## 2. 최소 결선 설계 — 정확히 무엇이 필요한가 (2R 정정, 모순 제거)
+## 2. 최소 결선 설계 — 정확히 무엇이 필요한가
 
-### 2R 결론: **"patch-unit 0개"는 틀렸다** — ps1에 **정확히 1줄**이 필요하고, 이것은 **S7 대상**이다
+### 결선에 필요한 변경 — ps1에 **정확히 1줄**, 그리고 이것은 **S7 대상**이다
 
-검토가 지적한 그대로(P1-1) 인용: `Invoke-SeatProofGate` 함수는 503~505행에서 `terminal show` 캡처 경로(`$tsShowPath`)를 만들고, **523행에서 기존 seat-proof CLI 게이트 단 하나만 부른다**. 새 모달 검사기를 추가하면, **그 검사기를 호출하는 코드가 어딘가에 반드시 새로 생겨야 한다** — 그 호출은 `dispatch-worker.ps1` 자신(새 함수 호출 1줄) 아니면 그 함수가 이미 부르는 대상(`scripts/relay/dispatch-worker-seat-proof-gate.mjs`) 둘 중 하나에 들어간다. **"둘 다 안 바뀐다"는 선택지는 없다** — 1R은 이 선택을 하지 않고 "0개"라고만 썼다.
+`Invoke-SeatProofGate` 함수는 503~505행에서 `terminal show` 캡처 경로(`$tsShowPath`)를 만들고, **523행에서 기존 seat-proof CLI 게이트 단 하나만 부른다**(직접 확인). 새 모달 검사기를 추가하면, **그 검사기를 호출하는 코드가 어딘가에 반드시 새로 생겨야 한다** — 그 호출은 `dispatch-worker.ps1` 자신(새 함수 호출 1줄) 아니면 그 함수가 이미 부르는 대상(`scripts/relay/dispatch-worker-seat-proof-gate.mjs`) 둘 중 하나에 들어간다. "둘 다 안 바뀐다"는 선택지는 구조상 없다.
 
-**둘 중 하나를 고른다(2R이 확정)**: **기존 게이트 확장이 아니라 ps1에 새 호출 1줄을 추가**하는 쪽을 택한다.
+**둘 중 하나를 고른다**: **기존 게이트 확장이 아니라 ps1에 새 호출 1줄을 추가**하는 쪽을 택한다.
 
 - **이유**: `scripts/relay/dispatch-worker-seat-proof-gate.mjs`는 스스로 "terminal-show/dispatch-show 파일의 *내용*을 열어서 읽지 않는다"는 것이 문서화된 계약이다(파일 헤더 주석 실측 확인 — `buildExpected`는 fs를 아예 import하지 않는다). 이 게이트를 확장해 preview 내용을 읽게 만드는 것은 **그 파일 자신의 계약을 깨는 것**이라 "기존 게이트 확장"은 기각한다.
 - **대신**: 저장소에 **새 사이드카 스크립트**(가칭 `scripts/relay/dispatch-worker-modal-check.mjs`, 아래 §2-a)를 추가하고, **`dispatch-worker.ps1`의 `Invoke-SeatProofGate` 함수 안에** 기존 seat-proof CLI 호출 **직후 새 호출 1줄**을 추가해 같은 `$tsShowPath`를 넘긴다. 두 게이트 중 하나라도 비0이면 기존 `SEAT_PROOF_REJECTED` 분기(codex=진짜 거부/claude=감지 후 중단·경보)에 그대로 올라탄다 — **새 분기·새 exit 코드는 만들지 않는다.**
 
-**★이것은 관제실 라이브 파일(`dispatch-worker.ps1`) 변경이다 — S7 강화판 검토 대상이다.** 필요한 절차(1R 문서가 "필요 없다"고 잘못 적었던 것과 반대): 원본 사본의 SHA-256 지문 보관, 앵커 유일성 확인(`Invoke-SeatProofGate` 함수 안에 대상 줄이 정확히 1곳뿐인지), 패치 적용 뒤 diff 육안 확인, `parse_errors=0` 확인, 사람이 라이브 교체, 3자(원본/적용본/라이브) 지문 대조 — HYK-379/HYK-396/HYK-400 선례와 동일한 절차. 이 문서 자신은 그 절차를 수행하지 않는다(제안 문서 범위, coder-task.md §2 ⑶) — **"수행이 필요 없다"고 쓰지 않는다는 것이 이번 판의 정정이다.**
+**★이것은 관제실 라이브 파일(`dispatch-worker.ps1`) 변경이다 — S7 강화판 검토 대상이다.** 필요한 절차: 원본 사본의 SHA-256 지문 보관, 앵커 유일성 확인(`Invoke-SeatProofGate` 함수 안에 대상 줄이 정확히 1곳뿐인지), 패치 적용 뒤 diff 육안 확인, `parse_errors=0` 확인, 사람이 라이브 교체, 3자(원본/적용본/라이브) 지문 대조 — HYK-379/HYK-396/HYK-400 선례와 동일한 절차. 이 문서 자신은 그 절차를 수행하지 않는다(제안 문서 범위, coder-task.md §2 ⑶). (이 결론에 이르기 전 있었던 서술 정정의 경위는 부록 A.1 참조.)
 
 ### 2-a. 새 사이드카 게이트의 설계 (문서 — 구현하지 않음)
 
 - 입력: `--terminal-show <path>`(이미 `$tsShowPath`로 존재하는 파일 — 추가 orca 조회 0).
-- 로직: `readFileSync` → JSON 파싱 → `result.terminal.preview` 추출(`parseSeatPreview`와 동일 모양, 재사용) → `normalizePreview` → `MODAL_MARKERS`(§1의 카탈로그, §1-b에 밝힌 대로 잠정치) 부분일치 → **modal/non-modal 2분류만 반환**(§1의 2R 정정 그대로 — 3분류를 약속하지 않는다).
+- 로직: `readFileSync` → JSON 파싱 → `result.terminal.preview` 추출(`parseSeatPreview`와 동일 모양, 재사용) → `normalizePreview` → `MODAL_MARKERS`(§1의 카탈로그, §1-b에 밝힌 대로 잠정치) 부분일치 → **modal/non-modal 2분류만 반환**(§1과 동일 — 부록 A.3 참조).
 - 출력: 마커 매치 시 exit 2(DRIFT류 fail-closed 관례 계승) + 매치된 마커 문자열을 stderr에.
 - `--terminal-show <path>`가 없으면(파일 없음/읽기 실패) exit 2로 fail-closed(HYK-400 워크트리 축 선례 — `seat-preflight.mjs`의 `foldEmptyComparisonToUndecidable` 패턴과 동형).
 - **2차 안전망(heartbeat-absence)은 이 사이드카·ps1 어느 쪽 범위에도 들지 않는다** — §1-c가 측정한 대로, 그 축은 오늘 관측자가 없고 배달 후 감시 프로세스(pull-supervisor 계열) 몫이며 이 라운드는 그 설계를 하지 않는다(축 재탐색·재설계 금지, coder-task.md §0).
@@ -89,3 +89,25 @@
 - `axis-heartbeat-absence`는 **오늘 실배선이 0건**이다(§1-c) — §1-c의 표는 조건부 계산이지 "지금 잡고 있다"는 뜻이 아니다.
 - claude 경로("감지 후 중단·경보")는 이미 `dispatch --inject`로 텍스트가 들어간 뒤다 — 완전한 사전 차단은 claude 경로에서 구조적으로 불가능하다(HYK-299 기존 한계, 이 라운드가 만든 제약이 아니다).
 - 이 문서가 제안하는 ps1 1줄 변경은 **설계만**이다 — 실제 diff·적용·S7 검토는 별도 라운드/사람 몫이다.
+
+## 부록 A. 철회 이력 (1R → 2R)
+
+★이 절은 **철회 대상을 이름으로 부르는 문장**을 모아 둔 곳이다 — coder-task.md §3(3R)의 기준대로, 본문에 살아 있는 주장으로 남지 않았다면 이런 문장이 이 절에 있는 것은 "잔재"가 아니다. 3R 문면 정리로 본문에서 이곳으로 옮겼을 뿐 내용은 삭제하지 않았다.
+
+### A.1 — 결선에 필요한 patch-unit 개수 (검토 1R P1-1)
+
+- **1R이 주장했던 것**: `dispatch-worker.ps1`에 "patch-unit 0개"가 필요하다 · "ps1 한 줄도 안 바뀐다"(1R 문서 §0/§3).
+- **왜 틀렸나**: 같은 문서 §3 안에서 스스로 "ps1 쪽 변경(제안)"을 다시 적어 자기모순 — 검토 1R P1-1. 새 모달 검사기를 걸려면 그 호출이 ps1 자신 또는 기존 게이트 중 하나에 반드시 새로 생겨야 하는데, "0개"는 이 중 어느 쪽도 선택하지 않은 채 쓴 문장이었다.
+- **2R이 내린 결론**: ps1에 정확히 1줄이 필요하며, 이는 관제실 라이브 파일 변경이므로 S7 대상이다(현재 결론은 본문 §2 참조).
+
+### A.2 — 조합(preview + heartbeat-absence)의 실효성 (검토 1R/2R P1-2)
+
+- **1R이 주장했던 것**: preview 마커가 절단으로 놓친 표본도 "heartbeat 부재로 뒤늦게라도 걸린다".
+- **왜 틀렸나**: 관측·판정·경보 중 아무것도 존재하지 않는 상태에서 나온 결론이 아니라 희망이었다 — 검토 지적(P1-2), 이 저장소에 `last_heartbeat_at`을 읽어 판정하는 프로덕션 코드가 0건이라는 전수 grep으로 확인됨.
+- **2R이 내린 결론**: 오늘 시점 `axis-heartbeat-absence`는 아무것도 잡지 않는다(관측자 자체가 없음). 대신 "이 저장소가 이미 가진 `judgeWatchFreshness`로 연결한다면 둘 다 놓치는 구간이 몇 초인가"라는 조건부 측정으로 주장을 낮췄다(현재 결론은 본문 §1-c 참조).
+
+### A.3 — 분류기가 구별하는 갈래 수 (검토 2R P1-3)
+
+- **1R이 주장했던 것**: "idle/busy/modal 3분류를 실행해 관찰".
+- **왜 틀렸나**: 표본의 *라벨*이 3종이었던 것과 분류기의 *출력*이 3종인 것을 섞은 과장 — 검토 2R P1-3. `classifyPreviewForModal`은 boolean만 반환하며 idle과 busy는 항상 같은 결과("모달 아님")로 접힌다.
+- **2R이 내린 결론**: modal / non-modal 2분류로 주장 하향(구현이 아니라 하향을 택함 — idle/busy를 구별할 신호가 이 저장소에 없고, 이 축의 목적(배달 전 거부)에도 그 구별이 필요 없다. 현재 결론은 본문 §1·§2-a 참조).
