@@ -41,6 +41,7 @@ import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { findPowerShell } from "./seat-proof-wrapper-behavior.mjs";
+import { SCRATCH_ROOT } from "./hyk387-ps1-scratch-root.mjs";
 
 const APPLIED_PATH = fileURLToPath(
   new URL(
@@ -118,11 +119,30 @@ function extractInsertedSnippet(appliedText) {
 // (control-room-patch-apply-hyk378-exit4-effect.test.mjs)가 이미
 // `-File <harness.ps1>`(임시 스크립트 파일 경로)를 쓰는 이유가 바로
 // 이것이었다(그 파일에서도 stdin 방식을 쓰지 않는다). 같은 관용구를
-// 따른다 -- 다만 그 선례는 harness.ps1을 시스템 `tmpdir()` 아래 뒀는데,
-// 이 라운드 §0 경계("네 파일은 이 워크트리 안")를 그대로 지키기 위해
-// harness.ps1도 이 워크트리 SCRATCH_ROOT 아래에 쓴다(호출자가 넘기는
-// `scratchDir` 인자, withPs1FixtureDir가 만든 그 디렉터리 자체를 그대로
-// 재사용 -- 별도 tmpdir 불필요).
+// 따른다 -- harness.ps1은 withPs1FixtureDir가 만드는 mkdtemp 디렉터리
+// 아래에 쓴다(호출자가 넘기는 `scratchDir` 인자를 그대로 재사용).
+//
+// HYK-404-race-1: SCRATCH_ROOT는 원래 `../../.harness/hyk387-3r-ps1-
+// scratch/`였다 -- 이 파일의 import.meta.url 기준 두 단계 위(repo root)의
+// LIVE `.harness/`(이 워크트리가 실제로 체크아웃한 그 디렉터리, ORCH의
+// 라운드 파일들이 사는 곳)였다. dispatch-gate-live-path-guard.test.mjs가
+// 바로 그 LIVE `.harness/`를 전체 재귀 지문(파일 목록 + 각 파일
+// sha256)으로 감시하는데, `npm test`의 node:test 러너는 시험 "파일"들을
+// 동시에(파일 간 병렬) 실행한다 -- 이 파일의 withPs1FixtureDir가
+// SCRATCH_ROOT 아래 mkdtemp로 만들고 지우는 하위 디렉터리가 바로 그
+// 지문의 관측 범위 "안"에 있었으므로, 두 시험 파일이 겹쳐 도는 순간
+// 지문 전/후가 달라져 무고한(자기 코드는 그대로인) live-path-guard 시험이
+// RED가 됐다(재현: control-room-patch-apply-hyk387-receipt-pointer-
+// concurrent-race.test.mjs, 이 시험 파일과 나란히 둔 재현 시험). 세 개의
+// 자매 파일(hyk387-watch-result-default-wiring.test.mjs,
+// hyk387-3r-receipt-pointer.test.mjs, hyk387-dispatch-record-
+// required.test.mjs, 전부 HYK-394-test-leak-3)이 이미 같은 문제를
+// `os.tmpdir()`로 고쳤다 -- 이 파일만 `new URL("../../.harness/...")`
+// 형태를 썼기 때문에 live-harness-scratch-guard.mjs(join(REPO_ROOT,
+// ".harness", ...) 형태만 스캔)가 이 파일을 놓쳤다. 같은 관용구
+// (`join(tmpdir(), "<name>-scratch")`)로 맞춘다 -- 저장소 밖이므로 어떤
+// 라이브 `.harness/` 지문과도 절대 겹치지 않는다(타이밍 회피가 아니라
+// 관측 대상 자체를 분리하는 구조적 수리).
 // HYK-387 3R (자체 발견 결함 수리 #2): `JSON.stringify(windowsPath)`를
 // PowerShell **큰따옴표** 문자열로 그대로 박으면 안 된다 -- JSON은
 // 백슬래시를 `\\`로 이스케이프하는데, PowerShell의 큰따옴표 문자열은
@@ -163,10 +183,6 @@ function runSnippet(snippet, { worktree, receiptPath, scratchDir }) {
     stderr: res.stderr ?? "",
   };
 }
-
-const SCRATCH_ROOT = fileURLToPath(
-  new URL("../../.harness/hyk387-3r-ps1-scratch/", import.meta.url),
-);
 
 function withPs1FixtureDir(fn) {
   mkdirSync(SCRATCH_ROOT, { recursive: true });
