@@ -984,6 +984,13 @@ test("static: no PRODUCTION code imports orch-stall-detect.mjs yet (h -- can be 
     // basis.
     "dispatch-chain-wire.test.mjs",
     "dispatch-chain-axis-wire.test.mjs",
+    // HYK-408-seat-decide: hyk408-seat-decide-repro.test.mjs is the same
+    // shape once more -- it exercises judgeSeatLivenessForRepo/
+    // judgeDispatchStartForRepo directly (same read-only production entry
+    // points as hyk185-seat-multi-repro.test.mjs above) to pin the
+    // ledger-primary/screen-fallback repro. Excluded on the identical
+    // "own .test.mjs" basis.
+    "hyk408-seat-decide-repro.test.mjs",
   ];
   const importers = grepOut
     .split(/\r?\n/)

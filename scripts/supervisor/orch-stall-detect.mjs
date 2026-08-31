@@ -123,6 +123,7 @@ import {
   MAIN_REPO_PATH,
   SEAT_LIVENESS_OBSERVATION_REASON,
   resolveDeliveredSeat,
+  DELIVERED_SEAT_REASON,
   fetchSeatLivenessShow,
   buildTerminalListCommand,
   parseTerminalList,
@@ -686,38 +687,85 @@ export function selectActiveDispatchForStart(droppedTaskFiles) {
   return selectActiveDispatch(droppedTaskFiles);
 }
 
-// HYK-185-seat-corr(coder-task.md §2): seatLiveness/dispatchStart 두 축이
-// 공유하던 좁은 관측(collectSeatLivenessObservation -- 좌석 2개+면
-// AMBIGUOUS)이 그 이유로만 실패했을 때 한해, "그 배달이 간 좌석"을
-// 실측 읽기전용 조회 3단(resolveDeliveredSeat, orca-adapter.mjs)으로
-// 재시도한다. AMBIGUOUS가 아닌 다른 실패(LIST_QUERY_FAILED/
-// SHOW_QUERY_FAILED/MALFORMED/INPUT_INVALID)나 harnessLabel 자체가 없으면
-// 재시도하지 않는다 -- "좌석이 여럿이라 못 골랐다"는 문제가 아닌 실패까지
-// 이 경로로 새로 흡수하면 그 실패들의 기존 동작(회귀 0 요구)이 바뀐다.
-// 재시도도 대조가 성립하지 않으면(후보 0/2개+ · 죽은 좌석만 일치) 여전히
-// COLLECTION_FAILED로 실패를 드러낸다(비타협: 못 고르면 못 고른다고
-// 말한다) -- 이 함수는 재시도를 "시도했다는 사실"만 `correlation`
-// 필드(부가 정보, 기존 필드 이름/모양은 그대로)에 얹는다.
-function resolveObservationWithDeliveredSeatFallback(
-  { worktreePath, harnessLabel, now, execFn },
-  primaryObserved,
-) {
-  const canRetry =
-    !primaryObserved.ok &&
-    primaryObserved.observationReason ===
-      SEAT_LIVENESS_OBSERVATION_REASON.AMBIGUOUS &&
-    typeof harnessLabel === "string" &&
-    harnessLabel.length > 0;
-  if (!canRetry) {
-    return { observed: primaryObserved, correlation: null };
+// ---- HYK-408-seat-decide (coder-task.md §1-§2): 1차 판별을 화면에서
+// 장부로 옮긴다 ----
+// ★배경(실측, coder-task.md §1): seatLiveness/dispatchStart 두 축이 공유한
+// 화면 후보 나열(collectSeatLivenessObservation -> resolveSeatLivenessCandidate)
+// 은 워크트리마다 기본으로 따라붙는 빈 pwsh 탭 때문에 raw 후보가 거의
+// 항상 2개(에이전트 좌석 + 그 빈 탭)이고, 2개 이상이면
+// classifySeatPreview로 preview 문자열을 마커 대조해 구분한다 -- 그런데
+// 그 preview 한 장이 마침 스피너 재그림 프레임(예: "Working..."이
+// 그려지는 도중의 부분 문자열)이면 마커가 하나도 안 보여 UNKNOWN으로
+// 떨어지고, 그 결과 AMBIGUOUS -> 축 전체 COLLECTION_FAILED다(2026-08-30
+// 실측 84%). 재시도(같은 화면을 다시 조회)는 HYK-404가 이미 기각한 것과
+// 같은 "타이밍 회피" 계열이라 쓰지 않는다.
+//
+// ★해법: 배달 기록(assignee_pane_key, `orca orchestration dispatch-show`)
+// 은 preview 내용이 아니라 `${tabId}:${leafId}` 구조 비교라 재그림
+// 프레임에 흔들리지 않는다 -- resolveDeliveredSeat(orca-adapter.mjs,
+// HYK-185-seat-corr에서 이미 pane key 대조 3단으로 실측 검증됨)를 이제
+// **1차**로 쓴다: harnessLabel이 있으면 화면을 먼저 보지 않고 장부부터
+// 대조하고, 장부가 그 좌석을 확정하면 그 결과만 쓴다(화면
+// classifySeatPreview는 아예 호출되지 않는다 -- "장부가 이미 답을 아는데
+// 화면으로 짐작하지 않는다", §2(1) 요구 그대로).
+//
+// 장부가 "이 라벨+워크트리에 맞는 dispatched 항목이 없다"고 확정
+// (DELIVERED_SEAT_REASON.NO_CANDIDATE_TASK -- task-list 조회 자체는
+// 성공했다)하면 그건 "기록이 없다"는 사실이므로 화면으로 물러나지 않고
+// 여기서 fail-closed로 멈춘다(SEAT_LIVENESS_OBSERVATION_REASON.
+// NO_DELIVERY_RECORD, §3-완료조건2 "장부가 없을 때는 여전히
+// fail-closed"). 장부 조회가 그 밖의 사유(task-list/dispatch-show/
+// terminal-list 자체가 실패했거나, 살아있는 좌석 후보와 대조가 안 됨 --
+// "기록에 닿지 못했다"이지 "기록이 없다"가 아니다)로 실패하면, 화면
+// 후보 나열(collectSeatLivenessObservation)로 물러난다 -- §2(2) "화면
+// 축은 보조로 남긴다"가 이 경로다. harnessLabel 자체가 없으면(활성
+// 배달에 라벨이 없어 장부를 조회할 근거가 없음) 예전 그대로 화면
+// 전용이다(correlation: null).
+function resolveObservationWithDeliveredSeatFallback({
+  worktreePath,
+  harnessLabel,
+  now,
+  execFn,
+}) {
+  const hasLabel = typeof harnessLabel === "string" && harnessLabel.length > 0;
+  if (!hasLabel) {
+    return {
+      observed: collectSeatLivenessObservation(
+        { worktreePath, now },
+        { execFn },
+      ),
+      correlation: null,
+    };
   }
   const resolved = resolveDeliveredSeat(
     { harnessLabel, worktreePath },
     { execFn },
   );
-  if (!resolved.ok) {
+  if (resolved.ok) {
+    const show = fetchSeatLivenessShow(resolved.handle, now, { execFn });
     return {
-      observed: primaryObserved,
+      observed: show,
+      correlation: {
+        attempted: true,
+        ok: true,
+        handle: resolved.handle,
+        runtimeTaskId: resolved.runtimeTaskId,
+        // HYK-207-multiseat 2R 계승: resolveDeliveredSeat가 성공(ok:true)
+        // 해도 다른(무관한) live 좌석 후보 하나 이상의 terminal-show
+        // 조회가 실패했을 수 있다 -- 그 사실을 여기서도 조용히 버리지
+        // 않고 그대로 얹는다(orca-adapter.mjs의 partialFailures, 단일
+        // 출처 그대로 전달).
+        partialFailures: resolved.partialFailures,
+      },
+    };
+  }
+  if (resolved.reasonCode === DELIVERED_SEAT_REASON.NO_CANDIDATE_TASK) {
+    return {
+      observed: {
+        ok: false,
+        observationReason: SEAT_LIVENESS_OBSERVATION_REASON.NO_DELIVERY_RECORD,
+        reason: resolved.reason,
+      },
       correlation: {
         attempted: true,
         ok: false,
@@ -726,19 +774,13 @@ function resolveObservationWithDeliveredSeatFallback(
       },
     };
   }
-  const show = fetchSeatLivenessShow(resolved.handle, now, { execFn });
   return {
-    observed: show,
+    observed: collectSeatLivenessObservation({ worktreePath, now }, { execFn }),
     correlation: {
       attempted: true,
-      ok: true,
-      handle: resolved.handle,
-      runtimeTaskId: resolved.runtimeTaskId,
-      // HYK-207-multiseat 2R: resolveDeliveredSeat가 성공(ok:true)해도
-      // 다른(무관한) live 좌석 후보 하나 이상의 terminal-show 조회가
-      // 실패했을 수 있다 -- 그 사실을 여기서도 조용히 버리지 않고 그대로
-      // 얹는다(orca-adapter.mjs의 partialFailures, 단일 출처 그대로 전달).
-      partialFailures: resolved.partialFailures,
+      ok: false,
+      reasonCode: resolved.reasonCode,
+      reason: resolved.reason,
     },
   };
 }
@@ -762,13 +804,13 @@ export function judgeSeatLivenessForRepo(
   };
   const execFn =
     typeof opts.execFn === "function" ? opts.execFn : createOrcaExecFn();
-  const primaryObserved = collectSeatLivenessObservation(
-    { worktreePath: repoRoot, now },
-    { execFn },
-  );
   const { observed, correlation } = resolveObservationWithDeliveredSeatFallback(
-    { worktreePath: repoRoot, harnessLabel: active.taskId, now, execFn },
-    primaryObserved,
+    {
+      worktreePath: repoRoot,
+      harnessLabel: active.taskId,
+      now,
+      execFn,
+    },
   );
   if (!observed.ok) {
     return {
@@ -1424,13 +1466,13 @@ export function judgeDispatchStartForRepo(
   };
   const execFn =
     typeof opts.execFn === "function" ? opts.execFn : createOrcaExecFn();
-  const primaryObserved = collectSeatLivenessObservation(
-    { worktreePath: repoRoot, now },
-    { execFn },
-  );
   const { observed, correlation } = resolveObservationWithDeliveredSeatFallback(
-    { worktreePath: repoRoot, harnessLabel: active.taskId, now, execFn },
-    primaryObserved,
+    {
+      worktreePath: repoRoot,
+      harnessLabel: active.taskId,
+      now,
+      execFn,
+    },
   );
   if (!observed.ok) {
     return {

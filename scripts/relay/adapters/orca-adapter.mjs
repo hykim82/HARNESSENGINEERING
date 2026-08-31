@@ -1068,6 +1068,14 @@ export const SEAT_LIVENESS_OBSERVATION_REASON = Object.freeze({
   SHOW_QUERY_FAILED: "SEAT_LIVENESS_OBSERVATION_SHOW_QUERY_FAILED",
   AMBIGUOUS: "SEAT_LIVENESS_OBSERVATION_AMBIGUOUS",
   MALFORMED: "SEAT_LIVENESS_OBSERVATION_MALFORMED",
+  // HYK-408-seat-decide (coder-task.md §2(1)/§3-완료조건2): 장부(dispatch
+  // 기록) 조회는 성공했지만 이 하네스 라벨+워크트리에 맞는 dispatched
+  // 항목 자체가 없다 -- "기록이 없다"는 확정 사실이라 화면으로 짐작하지
+  // 않고 fail-closed로 멈춘다(orch-stall-detect.mjs의
+  // resolveObservationWithDeliveredSeatFallback 참조). 장부 조회가
+  // "실패"한 것(LIST_QUERY_FAILED류)과는 다른 사유다 -- 그 경우는 여전히
+  // 화면 후보 나열로 물러난다(record 부재 ≠ 조회 실패).
+  NO_DELIVERY_RECORD: "SEAT_LIVENESS_OBSERVATION_NO_DELIVERY_RECORD",
 });
 
 function denySeatLivenessObservation(observationReason, detail) {
@@ -1116,6 +1124,18 @@ function validateSeatLivenessObservationInput(worktreePath, now, opts) {
 // 직접 이식한다(제3의 마커 목록을 새로 짓지 않는다 -- 이식이지 발명이
 // 아니다).
 const DEAD_SHELL_PROMPT_RE = /^PS [A-Za-z]:\\.*>\s*$/;
+// HYK-408-seat-decide (coder-task.md §1 실측 ⑵): `\[CODER\]`/`\[REVIEW\]`는
+// 한 번도 실물과 일치한 적이 없었다 -- 실제 런처
+// (`D:\문서관리\하네스-관제실\orca-worker-seat.ps1:19`,
+// `Write-Host "[$Role seat] worktree=$Worktree  pane=$env:ORCA_PANE_KEY"`)가
+// 찍는 배너는 `[CODER seat]`/`[REVIEW seat]`(역할 뒤에 " seat"가 항상
+// 붙는다) -- 원래 이식 대상이던 dispatch-worker.ps1의 Looks-Like-Agent가
+// 이 사실과 다른 가정을 담고 있었다(그 스크립트는 관제실 소유라 이
+// 조각에서 고치지 않는다, ⛔관제실 라이브 파일 쓰기 0 -- 우리 쪽 사본만
+// 실물에 맞춘다). 이 규칙은 CODER/REVIEW 역할의 화면 축 식별에만
+// 쓰인다(§2(2) "화면 축은 보조로 남긴다" -- 1차 식별은 이제
+// resolveDeliveredSeat/장부다, 아래 resolveObservationWithDeliveredSeatFallback
+// 참조).
 // HYK-350 §1: exported (was module-private) SOLELY so a contract test
 // (scripts/relay/adapters/seat-marker-divergence.contract.test.mjs) can pin
 // this -- the canonical, production-verified marker set -- against the
@@ -1125,7 +1145,7 @@ const DEAD_SHELL_PROMPT_RE = /^PS [A-Za-z]:\\.*>\s*$/;
 // object changes no runtime behavior anywhere this module is already
 // imported (classifySeatPreview below is still the only production caller).
 export const AGENT_MARKER_RE =
-  /gpt-5\.6|Sonnet|Opus|\[CODER\]|\[REVIEW\]|bypass permissions|MCP startup|weekly \d/;
+  /gpt-5\.6|Sonnet|Opus|\[CODER seat\]|\[REVIEW seat\]|bypass permissions|MCP startup|weekly \d/;
 
 function lastNonEmptyPreviewLine(text) {
   const lines = String(text ?? "").split(/\r?\n/);
