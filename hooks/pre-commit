@@ -15,7 +15,10 @@
 # a repo-relative script, so that step reuses the same worktree fallback
 # commit-msg already established. HYK-183 adds a third, chained step
 # (nul-byte-guard.mjs) that reuses the same worktree fallback for the same
-# reason.
+# reason. HYK-394 adds a fourth, chained step (live-harness-scratch-guard.mjs)
+# that reuses the same worktree fallback for the same reason -- this is the
+# device's first live invocation point (previously it existed but nothing
+# called it, see live-harness-scratch-guard.mjs's own header).
 root=$(git rev-parse --show-toplevel) || exit 1
 cd "$root" || exit 1
 
@@ -97,6 +100,33 @@ if [ -n "$NODE" ] && [ -f "$nb_script" ]; then
   [ "$nb_status" -ne 0 ] && status="$nb_status"
 else
   echo "pre-commit hook: nul-byte-guard script or node runtime not found -- skipping NUL-byte gate for this commit (fail-open, same posture as gitleaks-missing above; CI's nul-byte-guard mirror still blocks a real violation)." >&2
+fi
+
+# --- Step 4 (HYK-394): live-harness-scratch-guard on staged files (blocks a
+# test file from combining a repo-root-derived identifier with the literal
+# ".harness" in a join() call -- the exact HYK-394-test-leak-3 incident
+# shape). Chained after nul-byte-guard, same posture: earlier steps' exit
+# codes are preserved in $status regardless of what happens here. ---
+lhg_script="$root/scripts/check/live-harness-scratch-guard.mjs"
+if [ ! -f "$lhg_script" ]; then
+  common_dir=$(git rev-parse --git-common-dir) || common_dir=""
+  if [ -n "$common_dir" ]; then
+    case "$common_dir" in
+      /*|[A-Za-z]:*) : ;;
+      *) common_dir="$root/$common_dir" ;;
+    esac
+    main_root=${common_dir%/.git}
+    main_lhg_script="$main_root/scripts/check/live-harness-scratch-guard.mjs"
+    [ -f "$main_lhg_script" ] && lhg_script="$main_lhg_script"
+  fi
+fi
+
+if [ -n "$NODE" ] && [ -f "$lhg_script" ]; then
+  "$NODE" "$lhg_script" --mode staged --cwd "$root"
+  lhg_status=$?
+  [ "$lhg_status" -ne 0 ] && status="$lhg_status"
+else
+  echo "pre-commit hook: live-harness-scratch-guard script or node runtime not found -- skipping live-.harness-scratch gate for this commit (fail-open, same posture as gitleaks-missing above; CI's live-harness-scratch-guard mirror still blocks a real violation)." >&2
 fi
 
 exit "$status"

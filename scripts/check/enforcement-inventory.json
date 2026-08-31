@@ -657,6 +657,29 @@
       "ci_mirror_note": "Same posture as quality-check's ci_mirror_note: only this entry's git-hook chain is wiring-checked here; the enforce.yml run: step's own presence/correctness is confirmed by this cycle's manual smoke test (coder receipt: local hook path + CI-equivalent command both re-run against the same reproduction and both exit 1), not by an automated selfcheck category."
     },
     {
+      "id": "live-harness-scratch-guard",
+      "substrate": "git",
+      "script": "scripts/check/live-harness-scratch-guard.mjs",
+      "test": "scripts/check/live-harness-scratch-guard.test.mjs",
+      "install_targets": [
+        {
+          "location": "repo-git-hook",
+          "kind": "git-hook",
+          "versioned_path": "hooks/pre-commit",
+          "installed_path": ".git/hooks/pre-commit",
+          "required": true
+        }
+      ],
+      "expected_bad": "a changed *.mjs/*.js file (mode: staged = git diff --cached; mode: ci = injected base SHA...HEAD) combines a dirname(dirname(...))-bound repo-root identifier with the literal string '.harness' inside the same join() call (the exact HYK-394-test-leak-3 incident shape) -> non-zero exit, chained into hooks/pre-commit after gitleaks+quality-check+nul-byte-guard (not replacing them) so the commit is blocked; the same gate mirrored in .github/workflows/enforce.yml blocks the PR/push even if --no-verify skipped the local hook",
+      "expected_good": "changed set is empty, or no changed .mjs/.js file combines a repo-root identifier with '.harness' in a join() call -> exit 0; files untouched by the change, files outside .mjs/.js, and this gate's own two self-excluded files (its own source + its own test) are never flagged (see the script's own SELF_EXCLUDED_FILES header for why)",
+      "failure_exit": 1,
+      "uncertain_exit": null,
+      "owner": "ORCH",
+      "claude_only": false,
+      "self_registration_note": "HYK-394-guard-wire-1 self-registration, same convention as quality-check/nul-byte-guard above. Motivated by an HYK-394 gap ORCH measured directly (2026-08-31 13:39): the script existed since HYK-394 (PR #229) but had zero callers besides itself and its own test -- the device that was supposed to catch the 2026-08-30 live-.harness scratch-dir incidents never fired because nothing invoked it. This entry closes that gap by wiring it into the same git-hook + CI-mirror chain quality-check/nul-byte-guard already use.",
+      "ci_mirror_note": "Same posture as quality-check/nul-byte-guard's ci_mirror_note: only this entry's git-hook chain is wiring-checked here; the enforce.yml run: step's own presence/correctness is confirmed by this cycle's manual smoke test + live-harness-scratch-guard-wire.test.mjs's real spawnSync-against-a-real-git-fixture coverage (mode staged and mode ci both), not by an automated selfcheck category."
+    },
+    {
       "id": "ci-enforce",
       "substrate": "ci",
       "script": ".github/workflows/enforce.yml",

@@ -95,13 +95,28 @@ function findRepoRootIdentifiers(source) {
 }
 
 // For each repo-root identifier, look for `join(<ws>IDENT<ws>,<ws>"..harness"`
-// (single or double quotes) anywhere later in the file. Deliberately simple
-// (no full parenthesis-balance tracking) -- see file header for scope.
+// or `resolve(<ws>IDENT<ws>,<ws>"..harness"` (single or double quotes,
+// case-insensitive on the literal) anywhere later in the file. Deliberately
+// simple (no full parenthesis-balance tracking) -- see file header for
+// scope. HYK-394-guard-wire-1 §2⓶ widened this twice from the original
+// join()-only, exact-case match after measuring two accidental-shape
+// bypasses: ⓐ a case-differing literal (".Harness") still resolves to the
+// same live directory on this repo's case-insensitive filesystems (Windows/
+// macOS default) but slipped past a case-sensitive match; ⓒ `resolve(...)`
+// is a drop-in substitute for `join(...)` a contributor could reach for
+// without any intent to evade the gate, and produces the identical
+// filesystem effect. Both widenings stay inside the same narrow shape (an
+// already-repo-root-bound identifier + the literal ".harness" as an
+// argument to a path-building call) -- this does not attempt general
+// data-flow analysis, see the file header's "What this DOES NOT prove".
 function findViolations(source) {
   const idents = findRepoRootIdentifiers(source);
   const violations = [];
   for (const ident of idents) {
-    const re = new RegExp(`join\\(\\s*${ident}\\s*,\\s*["']\\.harness["']`);
+    const re = new RegExp(
+      `(?:join|resolve)\\(\\s*${ident}\\s*,\\s*["']\\.harness["']`,
+      "i",
+    );
     const m = source.match(re);
     if (m) {
       const line = source.slice(0, m.index).split("\n").length;
