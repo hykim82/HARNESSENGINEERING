@@ -14,6 +14,47 @@
 // diff), exactly the same trigger points quality-check/nul-byte-guard
 // already use.
 //
+// HYK-394-guard-wire-2 (2R) rewrite -- review caught two real defects in
+// the 1R version of this file (both retracted here, not just patched
+// quietly):
+//
+// P1 (canonical suite was red): 1R's runPreCommit() called
+// `spawnSync("sh", [join(dir, "hooks", "pre-commit")], ...)` directly --
+// "sh" resolved via PATH. On a default Windows dev machine (no Git Bash on
+// PATH) that spawn fails outright (ENOENT), so 3 of these tests -- and, in
+// a chain reaction, HYK-359's canonical-suite sweep that watches for
+// exactly this -- were RED on `npm test` run the plain way (no PATH
+// edits). Adding Git Bash to PATH made the numbers go green, but the task
+// this round is explicit: a fix that only works after a local PATH edit is
+// not a fix, it's hiding the same defect behind an environment
+// precondition the canonical suite is supposed to be free of. The fix
+// here calls no shell at all -- `git commit` itself resolves and invokes
+// the hook via git's own internal hook-execution machinery, the same way
+// a real `git commit` on a real Windows dev machine does, with zero PATH
+// dependency introduced by this test file.
+//
+// P2-1 (fixture didn't test the drift axis this device exists for): 1R
+// wrote the hook to a fixture-local `hooks/pre-commit` path and executed
+// that copy directly -- never `.git/hooks/pre-commit`, the actual
+// installed location `git commit` reads from. That skipped the exact
+// distinction this whole device is about (versioned hooks/ vs *installed*
+// .git/hooks/, see hook-sync-check.mjs/seat-preflight.mjs's own reason for
+// existing) -- a hook that's committed but never installed protects
+// nobody, and 1R's fixture could not have told the difference. Fixed by
+// installing the hook content into `.git/hooks/pre-commit` and only ever
+// triggering it via a real `git commit`.
+//
+// P2-2 (retracted claim): 1R's coder.md asserted "이 결선 자체가 이
+// 라운드의 실제 커밋(3acbd05)에서 이미 한 번 실전으로 돌았다" -- that is
+// FALSE and is retracted in this round's coder.md. At the time of that
+// commit there were zero installed-copy references anywhere (P2-1 above);
+// the pre-commit hook that actually ran against that commit was whatever
+// was already sitting in THIS worktree's own `.git/hooks/pre-commit` from
+// some earlier install, not something this round's test suite verified.
+// See coder.md §3 for the retraction and the accompanying operational-risk
+// note (a repo's committed hooks/pre-commit changes protect nobody in a
+// clone/worktree that never ran the install step).
+//
 // ⛔ Every fixture repo here is a disposable mkdtemp directory -- never the
 // real checkout. The real hooks/pre-commit and live-harness-scratch-guard.mjs
 // source files are only ever READ, never written, by this file (each test
@@ -25,8 +66,8 @@ import {
   mkdirSync,
   writeFileSync,
   readFileSync,
-  symlinkSync,
   rmSync,
+  chmodSync,
 } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -58,25 +99,57 @@ function git(cwd, args) {
   return execFileSync("git", args, { cwd, encoding: "utf8" });
 }
 
+// Writes hook content to the REAL installed location -- `.git/hooks/
+// pre-commit`, the path `git commit` actually reads (never a
+// fixture-local `hooks/pre-commit` copy, which git never looks at on its
+// own -- that distinction, versioned copy vs installed copy, is exactly
+// P2-1's gap). chmod is best-effort (POSIX exec bit -- a harmless no-op on
+// Windows, where Git for Windows' own hook runner does not consult it).
+function installHook(dir, content) {
+  const hookPath = join(dir, ".git", "hooks", "pre-commit");
+  writeFileSync(hookPath, content, "utf8");
+  try {
+    chmodSync(hookPath, 0o755);
+  } catch {
+    // best-effort -- see header comment
+  }
+}
+
+// quality-check.mjs's defaultRunTool spawns
+// `node <cwd>/node_modules/eslint/bin/eslint.js <args>` (and prettier's
+// equivalent) by literal path -- it never resolves through PATH. 1R
+// junction-symlinked this checkout's own installed node_modules at that
+// path, which works when this test file runs directly against a real
+// checkout, but NOT when it runs the way `npm test` actually runs it: via
+// isolated-suite-runner.mjs's `git clone` (HYK-208), where REPO_ROOT
+// resolves to that ephemeral clone -- and `git clone` never carries
+// node_modules (gitignored, untracked), so the junction pointed at nothing
+// and every commit's quality-check step crashed with MODULE_NOT_FOUND.
+// quality-check.test.mjs itself never spawns a real eslint/prettier
+// binary for exactly this reason (it injects a fake `runTool`); this file
+// takes the same approach at the process-spawn boundary instead: two
+// trivial stub CLIs that always exit 0, so quality-check's own lint/format
+// steps stay in the chain (still literally invoked, not skipped) while
+// this file's actual target -- the NEW Step 4 -- is what a violating file
+// gets caught by, deterministically and without any node_modules
+// dependency at all.
+const NOOP_TOOL_STUB = "process.exit(0);\n";
+
 // Builds a disposable git repo that carries everything the REAL
-// hooks/pre-commit needs to run to completion (not a stub): gitleaks (found
-// on PATH, same as a real dev machine), a real eslint.config.mjs + a
-// node_modules JUNCTION into this checkout's own installed eslint/prettier
-// (so quality-check.mjs's lint/format steps run for real instead of
-// synthetically passing), and the three check scripts pre-commit actually
-// invokes. `preCommitContent` lets a mutation test swap in an edited copy
-// while every other file (including the guard script itself) stays real.
+// hooks/pre-commit needs to run to completion: gitleaks (found on PATH,
+// same as a real dev machine), a real eslint.config.mjs, no-op eslint/
+// prettier stubs (see NOOP_TOOL_STUB header), and the three check scripts
+// pre-commit actually invokes. `preCommitContent` lets a mutation test
+// install an edited copy while every other file (including the guard
+// script itself) stays real. The hook is installed into
+// `.git/hooks/pre-commit` BEFORE the base commit (not after) -- so even
+// that first commit runs through the real, installed hook, exactly like a
+// developer who installed the hook before ever touching the repo.
 function buildFixtureRepo(dir, { preCommitContent } = {}) {
   git(dir, ["init", "-q"]);
   git(dir, ["config", "user.email", "a@a"]);
   git(dir, ["config", "user.name", "a"]);
-  mkdirSync(join(dir, "hooks"), { recursive: true });
   mkdirSync(join(dir, "scripts", "check"), { recursive: true });
-  writeFileSync(
-    join(dir, "hooks", "pre-commit"),
-    preCommitContent ?? readFileSync(PRE_COMMIT_PATH, "utf8"),
-    "utf8",
-  );
   for (const f of [
     "quality-check.mjs",
     "live-harness-scratch-guard.mjs",
@@ -98,29 +171,46 @@ function buildFixtureRepo(dir, { preCommitContent } = {}) {
     JSON.stringify({ type: "module" }, null, 2) + "\n",
     "utf8",
   );
+  mkdirSync(join(dir, "node_modules", "eslint", "bin"), { recursive: true });
+  mkdirSync(join(dir, "node_modules", "prettier", "bin"), {
+    recursive: true,
+  });
+  writeFileSync(
+    join(dir, "node_modules", "eslint", "bin", "eslint.js"),
+    NOOP_TOOL_STUB,
+    "utf8",
+  );
+  writeFileSync(
+    join(dir, "node_modules", "prettier", "bin", "prettier.cjs"),
+    NOOP_TOOL_STUB,
+    "utf8",
+  );
   writeFileSync(join(dir, ".gitignore"), "node_modules/\n", "utf8");
   writeFileSync(join(dir, "base.mjs"), "export const base = 1;\n", "utf8");
+  installHook(dir, preCommitContent ?? readFileSync(PRE_COMMIT_PATH, "utf8"));
   git(dir, [
     "add",
     ".gitignore",
     "base.mjs",
-    "hooks",
     "scripts",
     "eslint.config.mjs",
     "package.json",
   ]);
-  git(dir, ["commit", "-q", "-m", "base"]);
-  // Junction, not a copy -- real eslint/prettier binaries, zero disk
-  // duplication. .gitignore above keeps `git add` from ever walking into it.
-  symlinkSync(
-    join(REPO_ROOT, "node_modules"),
-    join(dir, "node_modules"),
-    "junction",
+  const baseCommit = commitStaged(dir, "base");
+  assert.equal(
+    baseCommit.status,
+    0,
+    `fixture setup itself must not be blocked by the installed hook (base.mjs is clean): ${baseCommit.stderr}`,
   );
 }
 
-function runPreCommit(dir) {
-  return spawnSync("sh", [join(dir, "hooks", "pre-commit")], {
+// A REAL `git commit` -- git resolves and spawns the installed
+// `.git/hooks/pre-commit` itself via its own internal hook-execution path
+// (git for Windows ships its own sh, invoked without any PATH lookup by
+// this test). Nothing here calls "sh" or any shell directly -- that is the
+// whole P1 fix.
+function commitStaged(dir, message) {
+  return spawnSync("git", ["commit", "-q", "-m", message], {
     cwd: dir,
     encoding: "utf8",
     env: process.env,
@@ -138,16 +228,19 @@ function withFixtureRepo(opts, fn) {
 }
 
 // ---------------------------------------------------------------------------
-// WHO/WHEN, real end-to-end: `sh hooks/pre-commit` (git's actual local
-// invocation shape) against the REAL, unmodified hooks/pre-commit and the
-// REAL live-harness-scratch-guard.mjs.
+// WHO/WHEN, real end-to-end: a REAL `git commit` against a REAL git repo
+// whose `.git/hooks/pre-commit` is the REAL, unmodified, INSTALLED
+// hooks/pre-commit -- no `sh` spawned directly by this test file, git does
+// that internally. This is what distinguishes an installed hook from a
+// merely-committed one (P2-1) without depending on a shell being on PATH
+// (P1).
 // ---------------------------------------------------------------------------
 
-test("real hooks/pre-commit BLOCKS a real staged HYK-394-test-leak-3-shaped violation (WHO=git pre-commit hook, WHEN=git commit time)", () => {
+test("real installed .git/hooks/pre-commit BLOCKS a real `git commit` staging a HYK-394-test-leak-3-shaped violation (WHO=git pre-commit hook, WHEN=git commit time)", () => {
   withFixtureRepo({}, (dir) => {
     writeFileSync(join(dir, "leaky.test.mjs"), VIOLATING_CONTENT, "utf8");
     git(dir, ["add", "leaky.test.mjs"]);
-    const r = runPreCommit(dir);
+    const r = commitStaged(dir, "add leaky.test.mjs");
     assert.notEqual(
       r.status,
       0,
@@ -159,10 +252,16 @@ test("real hooks/pre-commit BLOCKS a real staged HYK-394-test-leak-3-shaped viol
       "the guard's own reason string must appear -- not just 'something failed'",
     );
     assert.match(r.stderr, /leaky\.test\.mjs/);
+    const log = git(dir, ["log", "--format=%s"]);
+    assert.doesNotMatch(
+      log,
+      /add leaky\.test\.mjs/,
+      "the blocked commit must never have actually landed",
+    );
   });
 });
 
-test("real hooks/pre-commit control: a clean staged .mjs file (no leak pattern) passes -- the new step introduces zero false positives", () => {
+test("real installed .git/hooks/pre-commit control: a real `git commit` with a clean staged .mjs file (no leak pattern) succeeds -- the new step introduces zero false positives", () => {
   withFixtureRepo({}, (dir) => {
     writeFileSync(
       join(dir, "clean.test.mjs"),
@@ -170,11 +269,17 @@ test("real hooks/pre-commit control: a clean staged .mjs file (no leak pattern) 
       "utf8",
     );
     git(dir, ["add", "clean.test.mjs"]);
-    const r = runPreCommit(dir);
+    const r = commitStaged(dir, "add clean.test.mjs");
     assert.equal(
       r.status,
       0,
-      `expected the commit to pass, got exit ${r.status}. stdout=${r.stdout} stderr=${r.stderr}`,
+      `expected the commit to succeed, got exit ${r.status}. stdout=${r.stdout} stderr=${r.stderr}`,
+    );
+    const log = git(dir, ["log", "--format=%s"]);
+    assert.match(
+      log,
+      /add clean\.test\.mjs/,
+      "the passing commit must actually land",
     );
   });
 });
@@ -212,11 +317,17 @@ test("mutation (필수): removing hooks/pre-commit's Step 4 block -> the same le
   withFixtureRepo({ preCommitContent: mutated }, (dir) => {
     writeFileSync(join(dir, "leaky.test.mjs"), VIOLATING_CONTENT, "utf8");
     git(dir, ["add", "leaky.test.mjs"]);
-    const r = runPreCommit(dir);
+    const r = commitStaged(dir, "add leaky.test.mjs (mutated hook)");
     assert.equal(
       r.status,
       0,
       `RED expected (mutated hook has no wiring left to block this): got exit ${r.status}. stdout=${r.stdout} stderr=${r.stderr}`,
+    );
+    const log = git(dir, ["log", "--format=%s"]);
+    assert.match(
+      log,
+      /add leaky\.test\.mjs \(mutated hook\)/,
+      "RED: with Step 4 removed from the INSTALLED hook, the leak-shaped commit must actually land",
     );
   });
 
