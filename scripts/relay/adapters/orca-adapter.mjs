@@ -1068,14 +1068,28 @@ export const SEAT_LIVENESS_OBSERVATION_REASON = Object.freeze({
   SHOW_QUERY_FAILED: "SEAT_LIVENESS_OBSERVATION_SHOW_QUERY_FAILED",
   AMBIGUOUS: "SEAT_LIVENESS_OBSERVATION_AMBIGUOUS",
   MALFORMED: "SEAT_LIVENESS_OBSERVATION_MALFORMED",
-  // HYK-408-seat-decide (coder-task.md §2(1)/§3-완료조건2): 장부(dispatch
-  // 기록) 조회는 성공했지만 이 하네스 라벨+워크트리에 맞는 dispatched
-  // 항목 자체가 없다 -- "기록이 없다"는 확정 사실이라 화면으로 짐작하지
-  // 않고 fail-closed로 멈춘다(orch-stall-detect.mjs의
-  // resolveObservationWithDeliveredSeatFallback 참조). 장부 조회가
-  // "실패"한 것(LIST_QUERY_FAILED류)과는 다른 사유다 -- 그 경우는 여전히
-  // 화면 후보 나열로 물러난다(record 부재 ≠ 조회 실패).
+  // HYK-408-seat-decide 1R (coder-task.md §2(1)/§3-완료조건2): 장부
+  // (dispatch 기록) 조회는 성공했지만 이 하네스 라벨+워크트리에 맞는
+  // dispatched 항목 자체가 없다 -- "기록이 없다"는 확정 사실이라 화면으로
+  // 짐작하지 않고 fail-closed로 멈춘다(orch-stall-detect.mjs의
+  // resolveObservationWithDeliveredSeatFallback 참조).
   NO_DELIVERY_RECORD: "SEAT_LIVENESS_OBSERVATION_NO_DELIVERY_RECORD",
+  // HYK-408-seat-decide 2R (검토 P1 수리 -- coder-task.md §1/§2⑴): 장부가
+  // "기록이 없다"가 아니라 "기록은 있는데 지금 이 배달과 상관이
+  // 성립하지 않는다"고 답한 경우(stale pane key -- 그 좌석이 지금 살아
+  // 있는 후보 목록에 없음, 실제 후보의 pane key와 불일치, task-list/
+  // dispatch-show 응답이 모호함 등 상관 실패 전부) -- 이것도 "장부가
+  // 답했다"는 점에서 NO_DELIVERY_RECORD(기록 자체가 없음)와는 구별되는
+  // 사유이지만, 결론은 같다: 화면으로 짐작하지 않고 fail-closed로
+  // 멈춘다. 1R은 이 갈래를 화면 폴백으로 잘못 흘려보내 stale/불일치
+  // pane key가 단일 CODER-seat 후보와 함께 있으면 JUDGED로 새는 fail-open
+  // 이었다(검토 P1, coder-task.md §1 원문 인용). 어느 orca-adapter.mjs
+  // 상관 실패 사유가 여기로 접히는지는 orch-stall-detect.mjs의
+  // LEDGER_QUERY_INFRA_FAILURE_REASONS(허용목록, 그 밖은 전부 이 사유로
+  // 기본 닫힘) 정의를 참조 -- 새 상관 실패 사유가 추가돼도 그 목록에
+  // 명시로 올리지 않는 한 자동으로 이쪽(닫힘)으로 떨어진다.
+  DELIVERY_RECORD_NO_MATCH:
+    "SEAT_LIVENESS_OBSERVATION_DELIVERY_RECORD_NO_MATCH",
 });
 
 function denySeatLivenessObservation(observationReason, detail) {

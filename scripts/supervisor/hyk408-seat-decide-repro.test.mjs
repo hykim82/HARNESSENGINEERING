@@ -20,6 +20,10 @@
 // 쓰지 않는다).
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync, writeFileSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   classifySeatPreview,
   SEAT_PREVIEW_CLASSIFICATION,
@@ -34,6 +38,8 @@ import {
   SEAT_LIVENESS_WIRE_STATUS,
   DISPATCH_START_WIRE_STATUS,
 } from "./orch-stall-detect.mjs";
+
+const THIS_DIR = dirname(fileURLToPath(import.meta.url));
 
 // ---------------------------------------------------------------------------
 // ⓐ 실측 표본: 2026-08-30 22:32~22:33 KST, 같은 좌석을 4회 연속 조회한
@@ -380,4 +386,235 @@ test("HYK-408 대조군: harnessLabel이 없으면(장부를 볼 근거가 없�
   );
   assert.equal(r.status, SEAT_LIVENESS_WIRE_STATUS.JUDGED);
   assert.equal(r.correlation, undefined);
+});
+
+// ---------------------------------------------------------------------------
+// ⓓ HYK-408-seat-decide 2R (검토 P1 수리) -- stale pane key와 불일치
+// pane key. 검토자가 지정한 정확한 재현 조건 그대로: **단일 [CODER seat]
+// 후보가 살아있는 상태**에서 장부의 assignee_pane_key가 그 후보와
+// 대조되지 않는다. 1R은 이 두 경우 다 (NO_CANDIDATE_TASK가 아니므로)
+// 화면 폴백으로 흘려보내 화면 쪽 단일 AGENT 후보가 그대로 JUDGED로
+// 새는 fail-open이었다(검토 P1 원문). ⛔둘 다 orca-adapter.mjs 층에서는
+// 같은 사유 코드(NO_LIVE_SEAT_MATCH)로 관측된다 -- "그 좌석이 원래
+// 없었다"(stale)와 "다른 좌석이 그 자리를 차지했다"(불일치)를 그 층이
+// 구조적으로 구분할 근거가 없기 때문이다(위 orca-adapter.mjs 주석
+// 참조). 그래서 이 시험도 같은 코드 경로를 확인하지만, 검토가 명시로
+// 요구한 두 실물 시나리오를 각각 별도 표본으로 고정한다(우연히 하나만
+// 막고 다른 하나는 안 막는 일이 없도록).
+// ---------------------------------------------------------------------------
+const SINGLE_CODER_SEAT = {
+  handle: "term_hyk408_single_coder",
+  worktreePath: WORKTREE,
+  tabId: "eeeeeeee-0000-0000-0000-000000000005",
+  leafId: "ffffffff-0000-0000-0000-000000000006",
+};
+// 지금 이 순간 이 워크트리에 붙은 후보는 이 하나뿐이다(검토자 재현 조건
+// "단일 [CODER seat] 후보" 그대로) -- preview는 실 배너 문자열이라
+// 화면 경로로 물러났다면 손쉽게 AGENT 확정 -> JUDGED가 나올 상황이다.
+function fakeExecFnWithSingleCoderSeat(assigneePaneKey) {
+  const taskListTasks = [
+    {
+      id: "task_hyk408_repro_d",
+      spec: `role: CODER\nharness_label: ${HARNESS_LABEL}\nworktree: ${WORKTREE.replace(/\//g, "\\")}\ntask_file: .harness/coder-task.md`,
+    },
+  ];
+  const dispatchShowByTaskId = {
+    task_hyk408_repro_d: {
+      id: "dispatch_hyk408_repro_d",
+      task_id: "task_hyk408_repro_d",
+      assignee_handle: "term_hyk408_gone_or_wrong",
+      assignee_pane_key: assigneePaneKey,
+      status: "dispatched",
+    },
+  };
+  return function execFn(argv) {
+    if (argv[0] === "terminal" && argv[1] === "list") {
+      return terminalListResponse([SINGLE_CODER_SEAT]);
+    }
+    if (argv[0] === "terminal" && argv[1] === "show") {
+      const handle = argv[argv.indexOf("--terminal") + 1];
+      if (handle === SINGLE_CODER_SEAT.handle) {
+        return showResponseFor(SINGLE_CODER_SEAT, REAL_LAUNCHER_BANNER);
+      }
+      throw new Error(`unexpected handle ${handle}`);
+    }
+    if (argv[0] === "orchestration" && argv[1] === "task-list") {
+      return taskListResponse(taskListTasks);
+    }
+    if (argv[0] === "orchestration" && argv[1] === "dispatch-show") {
+      return dispatchShowResponse(argv, dispatchShowByTaskId);
+    }
+    throw new Error(
+      `fakeExecFnWithSingleCoderSeat: unexpected argv ${JSON.stringify(argv)}`,
+    );
+  };
+}
+
+// stale: 이 라벨로 배달된 좌석이 예전엔 살아 있었지만, 그 뒤 좌석이
+// 재시작돼(예: 죽었다가 다시 뜸) 지금은 그 pane key를 가진 터미널이
+// 아예 존재하지 않는다 -- 장부에는 여전히 옛 값이 박혀 있다.
+const STALE_ASSIGNEE_PANE_KEY =
+  "99999999-dead-dead-dead-000000000009:88888888-dead-dead-dead-000000000008";
+
+test("HYK-408 ⓓ-1 fail-closed(stale pane key): 장부의 pane key를 가진 터미널이 지금 하나도 없다(단일 [CODER seat] 후보만 살아있음) -- 화면으로 물러나지 않고 COLLECTION_FAILED", () => {
+  const r = judgeSeatLivenessForRepo(
+    { repoRoot: WORKTREE, droppedTaskFiles: ACTIVE_WITH_LABEL, now: NOW },
+    { execFn: fakeExecFnWithSingleCoderSeat(STALE_ASSIGNEE_PANE_KEY) },
+  );
+  assert.equal(r.status, SEAT_LIVENESS_WIRE_STATUS.COLLECTION_FAILED);
+  assert.equal(
+    r.observationReason,
+    SEAT_LIVENESS_OBSERVATION_REASON.DELIVERY_RECORD_NO_MATCH,
+  );
+  assert.notEqual(
+    r.observationReason,
+    SEAT_LIVENESS_OBSERVATION_REASON.NO_DELIVERY_RECORD,
+    "stale must stay distinguishable from absence in the reason code (coder-task.md §2⑴)",
+  );
+  assert.equal(r.correlation.ok, false);
+  assert.equal(
+    r.correlation.reasonCode,
+    DELIVERED_SEAT_REASON.NO_LIVE_SEAT_MATCH,
+  );
+});
+
+test("HYK-408 ⓓ-1 fail-closed(stale pane key): dispatchStart 축도 동일하게 거부한다", () => {
+  const r = judgeDispatchStartForRepo(
+    { repoRoot: WORKTREE, droppedTaskFiles: ACTIVE_WITH_LABEL, now: NOW },
+    {
+      execFn: fakeExecFnWithSingleCoderSeat(STALE_ASSIGNEE_PANE_KEY),
+      ...fakeDispatchStartStore(),
+    },
+  );
+  assert.equal(r.status, DISPATCH_START_WIRE_STATUS.COLLECTION_FAILED);
+  assert.equal(
+    r.observationReason,
+    SEAT_LIVENESS_OBSERVATION_REASON.DELIVERY_RECORD_NO_MATCH,
+  );
+  assert.equal(r.correlation.ok, false);
+  assert.equal(
+    r.correlation.reasonCode,
+    DELIVERED_SEAT_REASON.NO_LIVE_SEAT_MATCH,
+  );
+});
+
+// 불일치: 장부의 pane key가 애초에 이 좌석의 것이었던 적이 없다(다른
+// 워크트리/다른 배달의 좌석 것 -- 예를 들어 §ⓑ의 실 배너 예시에 쓴
+// 진짜 관측 pane key `a5251fad-...:8b05257a-...`를 그대로 재사용해도
+// 이 워크트리의 SINGLE_CODER_SEAT과는 다른 값이다). stale과 orca-adapter
+// 층 사유 코드는 같지만(위 헤더 주석 참조) 실물 시나리오가 다르므로
+// 검토자 요구대로 별도 표본으로 고정한다.
+const MISMATCHED_ASSIGNEE_PANE_KEY =
+  "a5251fad-2366-40e4-88da-db749b913c28:8b05257a-d323-41d8-87ae-98b45c4d77bb";
+
+test("HYK-408 ⓓ-2 fail-closed(불일치 pane key): 장부의 pane key가 살아있는 유일한 후보의 것과 다르다(단일 [CODER seat] 후보만 살아있음) -- 화면으로 물러나지 않고 COLLECTION_FAILED", () => {
+  assert.notEqual(
+    MISMATCHED_ASSIGNEE_PANE_KEY,
+    `${SINGLE_CODER_SEAT.tabId}:${SINGLE_CODER_SEAT.leafId}`,
+    "fixture sanity: the mismatched key must actually differ from the live candidate's real key",
+  );
+  const r = judgeSeatLivenessForRepo(
+    { repoRoot: WORKTREE, droppedTaskFiles: ACTIVE_WITH_LABEL, now: NOW },
+    { execFn: fakeExecFnWithSingleCoderSeat(MISMATCHED_ASSIGNEE_PANE_KEY) },
+  );
+  assert.equal(r.status, SEAT_LIVENESS_WIRE_STATUS.COLLECTION_FAILED);
+  assert.equal(
+    r.observationReason,
+    SEAT_LIVENESS_OBSERVATION_REASON.DELIVERY_RECORD_NO_MATCH,
+  );
+  assert.equal(r.correlation.ok, false);
+  assert.equal(
+    r.correlation.reasonCode,
+    DELIVERED_SEAT_REASON.NO_LIVE_SEAT_MATCH,
+  );
+});
+
+test("HYK-408 ⓓ-2 fail-closed(불일치 pane key): dispatchStart 축도 동일하게 거부한다", () => {
+  const r = judgeDispatchStartForRepo(
+    { repoRoot: WORKTREE, droppedTaskFiles: ACTIVE_WITH_LABEL, now: NOW },
+    {
+      execFn: fakeExecFnWithSingleCoderSeat(MISMATCHED_ASSIGNEE_PANE_KEY),
+      ...fakeDispatchStartStore(),
+    },
+  );
+  assert.equal(r.status, DISPATCH_START_WIRE_STATUS.COLLECTION_FAILED);
+  assert.equal(
+    r.observationReason,
+    SEAT_LIVENESS_OBSERVATION_REASON.DELIVERY_RECORD_NO_MATCH,
+  );
+  assert.equal(r.correlation.ok, false);
+  assert.equal(
+    r.correlation.reasonCode,
+    DELIVERED_SEAT_REASON.NO_LIVE_SEAT_MATCH,
+  );
+});
+
+// ---------------------------------------------------------------------------
+// ⓓ-3 되돌림 변이(§3 필수): "닫는 분기를 끊으면 다시 JUDGED로 새는가"를
+// 직접 확인한다 -- orch-stall-detect.mjs의 실제 소스 문자열을 변조해
+// LEDGER_QUERY_INFRA_FAILURE_REASONS 허용목록 검사를 무조건 참으로
+// 바꾼(=모든 상관 실패가 다시 화면 폴백으로 새는) 변이체를 만들고, 위
+// stale 표본을 그 변이체에 넣으면 다시 JUDGED가 나오는지 본다(RED
+// 신호 -- 이 가드가 실제로 결과를 좌우한다는 증거). seat-liveness-wire.
+// test.mjs/dispatch-start-wire.test.mjs가 이미 쓰는 것과 동일한 패턴
+// (문자열 정확히 1회 치환 -> 상대경로를 절대경로로 재작성 -> 임시
+// 파일로 저장 -> 동적 import)을 재사용한다(재구현 아님).
+// ---------------------------------------------------------------------------
+const LIVE_SRC_PATH = join(THIS_DIR, "orch-stall-detect.mjs");
+const LIVE_SRC = readFileSync(LIVE_SRC_PATH, "utf8");
+
+function applyMutation(src, find, replacement) {
+  const count = src.split(find).length - 1;
+  assert.equal(
+    count,
+    1,
+    `mutation target string must match exactly once in the source, got ${count} -- stale or ambiguous target`,
+  );
+  return src.replace(find, replacement);
+}
+
+function rewriteRelativeImportsToAbsolute(src, baseDir) {
+  return src.replace(
+    /from\s+(["'])(\.\.?\/[^"']+)\1/g,
+    (whole, quote, relPath) => {
+      const absPath = join(baseDir, relPath).replace(/\\/g, "/");
+      return `from ${quote}file://${absPath}${quote}`;
+    },
+  );
+}
+
+async function importMutatedSibling(mutate, label) {
+  const rewritten = rewriteRelativeImportsToAbsolute(
+    mutate(LIVE_SRC),
+    THIS_DIR,
+  );
+  const mutantDir = mkdtempSync(join(tmpdir(), `hyk408-2r-mutant-${label}-`));
+  const mutantPath = join(mutantDir, "orch-stall-detect.mutant.mjs");
+  writeFileSync(mutantPath, rewritten, "utf8");
+  try {
+    return await import(`file://${mutantPath.replace(/\\/g, "/")}`);
+  } finally {
+    rmSync(mutantDir, { recursive: true, force: true });
+  }
+}
+
+test("HYK-408 ⓓ-3 되돌림 변이(필수): LEDGER_QUERY_INFRA_FAILURE_REASONS 허용목록 검사를 무력화(항상 화면 폴백 허용) -> RED (stale pane key + 단일 CODER-seat 후보가 다시 JUDGED로 샌다 -- 이 가드가 실제로 막고 있었다는 증거)", async () => {
+  const mutant = await importMutatedSibling(
+    (src) =>
+      applyMutation(
+        src,
+        "  if (LEDGER_QUERY_INFRA_FAILURE_REASONS.has(resolved.reasonCode)) {",
+        "  if (true) {",
+      ),
+    "1",
+  );
+  const r = mutant.judgeSeatLivenessForRepo(
+    { repoRoot: WORKTREE, droppedTaskFiles: ACTIVE_WITH_LABEL, now: NOW },
+    { execFn: fakeExecFnWithSingleCoderSeat(STALE_ASSIGNEE_PANE_KEY) },
+  );
+  assert.equal(
+    r.status,
+    "SEAT_LIVENESS_JUDGED",
+    "mutant must regress to the exact P1 fail-open (stale pane key + single CODER-seat candidate -> JUDGED) -- RED signal proving the closed-by-default branch is load-bearing in the real code",
+  );
 });
