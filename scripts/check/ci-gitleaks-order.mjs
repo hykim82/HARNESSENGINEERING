@@ -43,7 +43,7 @@
 // that function's own comment for the documented line-scanner limitation.
 import {
   decodeYamlScalar,
-  matchesExactRunnerInvocation,
+  isRecognizedSuiteInvocation,
 } from "./selfcheck-inventory.mjs";
 
 // Parses a GitHub Actions workflow's FIRST `jobs.<job>.steps:` sequence into
@@ -199,7 +199,7 @@ export function judgeGitleaksOrder(workflowText) {
     GITLEAKS_SCAN_RE.test(run.trim()),
   );
   const suiteIdx = findStepIndex(steps, (run) =>
-    matchesExactRunnerInvocation(run, RUNNER_SCRIPT_REL_PATH),
+    isRecognizedSuiteInvocation(run, RUNNER_SCRIPT_REL_PATH),
   );
 
   const reasons = [];

@@ -127,6 +127,17 @@ export function runIsolatedSuite({
     const result = spawn(process.execPath, ["--test", ...files], {
       cwd: cloneDir,
       stdio: "inherit",
+      // HYK-403: marks this run as having gone through a canonical entry
+      // point, so canonical-suite-entrypoint.test.mjs (scripts/check, swept
+      // up by any construction of the four-directory glob, including a
+      // hand-built one) can tell a real `npm test` / CI run apart from
+      // someone hand-typing `node --test <glob>` directly against a live
+      // checkout -- the exact shape that leaked into the control room on
+      // 2026-08-30.
+      env: {
+        ...process.env,
+        HYK403_CANONICAL_SUITE_ENTRYPOINT: "isolated-suite-runner",
+      },
     });
     return result.status ?? 1;
   } finally {

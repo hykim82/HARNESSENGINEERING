@@ -143,13 +143,30 @@ const THIS_FILE_BASENAME = basename(fileURLToPath(import.meta.url));
 // "⛔selfcheck-smoke 손대기 0(별건)"). Shrinking this list (removing an
 // entry) only makes the sweep below stricter -- never a way to hide a
 // regression.
-const EXCEPTIONS = new Set(["selfcheck-smoke.test.mjs"]);
+// HYK-403: canonical-suite-entrypoint.test.mjs asserts a DIFFERENT
+// invariant (was this sweep launched via a canonical entry point --
+// npm test / full-sweep-local.mjs -- vs a hand-built `node --test <glob>`),
+// unrelated to this file's ambient-ledger-env concern. This sweep's whole
+// point is to raw-spawn `node --test` directly, bypassing both canonical
+// entry points on purpose (see runProductionSweep/buildNestedSweepArgs
+// below) -- that guard file would fail here every time, for a reason that
+// has nothing to do with ADMISSION_LEDGER_PATH/ADMISSION_LOCK_PATH/
+// DISPATCH_RECEIPT_PATH isolation. Excluding it here does not weaken this
+// file's own protection; a real ambient-env regression in any other file
+// still goes red.
+const EXCEPTIONS = new Set([
+  "selfcheck-smoke.test.mjs",
+  "canonical-suite-entrypoint.test.mjs",
+]);
 // HYK-371 2R (불변식 A): pin the MEMBER(S), not just the count -- bump this
 // the SAME diff you add/remove/rename an EXCEPTIONS entry in. Swapping
 // "selfcheck-smoke.test.mjs" for a different existing file name here (and
 // nowhere else) is exactly the silent-swap this array must catch: same
 // `.size`, different actual protected-set membership.
-const EXPECTED_EXCEPTIONS = ["selfcheck-smoke.test.mjs"];
+const EXPECTED_EXCEPTIONS = [
+  "selfcheck-smoke.test.mjs",
+  "canonical-suite-entrypoint.test.mjs",
+];
 
 function repoRoot() {
   return execFileSync("git", ["rev-parse", "--show-toplevel"], {
