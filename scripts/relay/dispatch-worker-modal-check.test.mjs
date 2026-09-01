@@ -18,10 +18,15 @@ import { join } from "node:path";
 import {
   runModalCheck,
   MODAL_MARKERS,
+  MODAL_TAIL_COMBO,
   VERDICT,
   CHECK_REASON,
 } from "./dispatch-worker-modal-check.mjs";
 import { SAMPLES } from "./hyk271-axis-preview-marker-synthetic.test.mjs";
+import {
+  REAL_INCIDENT_SAMPLES,
+  FALSE_POSITIVE_SAMPLES,
+} from "./hyk271-marker-catalog-real-corpus.test.mjs";
 
 function withTempDir(fn) {
   const dir = mkdtempSync(join(tmpdir(), "dispatch-worker-modal-check-test-"));
@@ -219,14 +224,61 @@ test("runModalCheck: missing --terminal-show argument fails closed with exit 2 (
   assert.equal(result.reasonCode, CHECK_REASON.ARGS_MISSING);
 });
 
-// HYK-271-marker-catalog-1 (2R): deliberately widened from the 1R list (4
-// command-approval markers only) to add "Enter to select" -- the 1R catalog
-// measurably let both real incident samples (founding + today, see
-// hyk271-marker-catalog-real-corpus.test.mjs) through as NON_MODAL because
-// neither is a command-approval modal, both are numbered selection menus.
-// This pin is updated intentionally, not silently -- see that file for the
-// false-positive measurement against 14 real live-seat previews that backs
-// the new entry.
+// ---------------------------------------------------------------------------
+// HYK-271-marker-catalog-3 (2R repair): end-to-end confidence check -- the
+// real-corpus test file has its own local classify() helper (a thin
+// reimplementation of runModalCheck's own three-stage check, for test
+// convenience). This test drives the SAME real-incident and false-positive
+// samples through the actual PRODUCTION entry point (runModalCheck, via
+// real file I/O) instead, so a divergence between the test helper and the
+// real wiring cannot hide a defect.
+// ---------------------------------------------------------------------------
+test("runModalCheck (production entry point, not the test helper): real incident samples MODAL, false-positive samples (including the self-edit-screen quote) NON_MODAL", () => {
+  withTempDir((dir) => {
+    const mismatches = [];
+    REAL_INCIDENT_SAMPLES.forEach((s, i) => {
+      const path = writeTerminalShow(dir, `real-incident-${i}.json`, s.preview);
+      const result = runModalCheck(["--terminal-show", path]);
+      if (result.verdict !== VERDICT.MODAL) {
+        mismatches.push({
+          label: s.label,
+          expected: "MODAL",
+          got: result.verdict,
+        });
+      }
+    });
+    FALSE_POSITIVE_SAMPLES.forEach((s, i) => {
+      const path = writeTerminalShow(
+        dir,
+        `false-positive-${i}.json`,
+        s.preview,
+      );
+      const result = runModalCheck(["--terminal-show", path]);
+      if (result.verdict !== VERDICT.NON_MODAL) {
+        mismatches.push({
+          label: s.label,
+          expected: "NON_MODAL",
+          got: result.verdict,
+        });
+      }
+    });
+    assert.deepEqual(
+      mismatches,
+      [],
+      `runModalCheck disagreed with the real-corpus expectation on: ${JSON.stringify(mismatches)}`,
+    );
+  });
+});
+
+// HYK-271-marker-catalog-3 (2R repair): HYK-271-marker-catalog-2 (2R widen)
+// had added "Enter to select" to this list as a standalone entry, but
+// review proved that false-positives on ordinary prose (and on this file's
+// own diff -- coder-task.md §1). It is removed from here and replaced by
+// MODAL_TAIL_COMBO below (a proximity-combo check, not a standalone
+// substring) -- so this list is intentionally back to the original 1R
+// 4-entry catalog, not a silent revert of the 2R widen (the widen's intent
+// -- catching the two real incident menus -- is preserved by the combo,
+// see hyk271-marker-catalog-real-corpus.test.mjs).
 test("MODAL_MARKERS: the sidecar's catalog is bit-for-bit the same list this round measured (single source, no drift)", () => {
   const fromAxisSamples = SAMPLES.filter((s) => s.expectModal).length;
   assert.ok(fromAxisSamples > 0, "sanity: axis proof must have modal samples");
@@ -235,6 +287,17 @@ test("MODAL_MARKERS: the sidecar's catalog is bit-for-bit the same list this rou
     "Yes, and don't ask again",
     "No, and tell Claude what to do differently",
     "Allow command?",
-    "Enter to select",
   ]);
+});
+
+// HYK-271-marker-catalog-3 (2R repair): byte-pin the combo's shape too, so
+// a future round can't silently widen maxGapChars (which would widen the
+// false-positive surface this round narrowed) without this test turning
+// red and forcing an intentional update.
+test("MODAL_TAIL_COMBO: shape is bit-for-bit the combo this round measured (single source, no drift)", () => {
+  assert.deepEqual(MODAL_TAIL_COMBO, {
+    primary: "Enter to select",
+    companions: ["to navigate", "Esc to cancel", "Esc to back"],
+    maxGapChars: 15,
+  });
 });

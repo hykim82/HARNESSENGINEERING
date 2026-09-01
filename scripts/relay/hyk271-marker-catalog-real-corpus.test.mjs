@@ -1,8 +1,17 @@
-// HYK-271-marker-catalog-1 (2R widen): proof that the widened MODAL_MARKERS
-// catalog (dispatch-worker-modal-check.mjs) closes the gap that opened this
-// issue -- the 1R catalog (4 command-approval markers) measurably let both
-// real incident samples below through as NON_MODAL, because neither is a
-// command-approval modal; both are numbered SELECTION MENUS.
+// HYK-271-marker-catalog-1 (2R widen) added "Enter to select" to
+// MODAL_MARKERS as a STANDALONE substring to catch the two real selection-
+// menu incidents cited below. HYK-271-marker-catalog-3 (2R repair) replaces
+// that standalone entry with two mechanisms in dispatch-worker-modal-
+// check.mjs: MODAL_TAIL_COMBO (a proximity-combo check) and
+// stripSelfCatalogSourceQuotes (strips JS-source-literal quotes of the
+// catalog's own strings before matching). Review proved the standalone form
+// false-positived on ordinary prose (P1-1); building the required
+// self-edit-screen regression sample (ⓒ3 below) additionally surfaced that
+// the exact §1 screen also collides via "Allow command?" (an ORIGINAL 1R
+// marker, unrelated to "Enter to select") when it appears in JS-literal
+// form -- hence the second mechanism. This file measures both against the
+// same positive/negative corpora, plus the adversarial false-positive
+// samples each mechanism must reject.
 //
 // This file is deliberately separate from hyk271-axis-preview-marker-
 // synthetic.test.mjs. That file's own header draws an explicit honesty line
@@ -10,49 +19,43 @@
 // citation of this repository's own prior incident transcript") -- mixing
 // real incident text and real live-seat previews into that file would
 // silently erase that line. This file exists precisely because that line no
-// longer holds for the two samples below: they ARE real incident
-// transcripts, cited by source.
-//
-// Marker choice and why narrower candidates were rejected (coder-task.md §2
-// ⑴ "표지 선택은 네가 정하고 근거를 대라"):
-//   - "Enter to select" is the one substring present, verbatim, on the tail
-//     line of BOTH real incident samples (A and B below) -- see each
-//     sample's citation for the exact source line.
-//   - "❯" was rejected: it is also how Claude Code renders its OWN input
-//     prompt (coder-task.md §2⑴ ORCH observation, 2026-09-01 22:01 seat
-//     render), so using it as a marker risks blocking a normal, non-modal
-//     seat. Not measured further here because the risk is structural, not
-//     something a false-positive count would catch (a normal seat's prompt
-//     line is exactly the failure mode, and this corpus's 14 live previews
-//     happen not to include one -- that would prove nothing either way).
-//   - "to navigate" was rejected without measurement: it is prose-shaped
-//     enough that an adversarial non-modal sample (e.g. text instructing a
-//     user how to navigate a menu) could plausibly contain it, and it adds
-//     no coverage beyond "Enter to select" for the two samples this round
-//     must catch (both already match on "Enter to select" alone).
-//   - "Esc to cancel" / "Esc to back" were rejected as redundant: both are
-//     already implied whenever "Enter to select" fires on these two
-//     samples' menu tail lines, so adding them widens surface area (more
-//     substrings that could someday false-positive) without closing any
-//     additional gap this round's completion criteria require.
-// A single, narrowly-justified marker keeps the catalog's total
-// false-positive surface as small as the completion criteria allow.
+// longer holds for the two real-incident samples below: they ARE real
+// incident transcripts, cited by source.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   normalizePreview,
   previewContainsMarker,
 } from "./adapters/orca-adapter.mjs";
-import { MODAL_MARKERS } from "./dispatch-worker-modal-check.mjs";
+import {
+  MODAL_MARKERS,
+  MODAL_TAIL_COMBO,
+  previewMatchesTailCombo,
+  stripSelfCatalogSourceQuotes,
+} from "./dispatch-worker-modal-check.mjs";
 
-function classify(preview, markers = MODAL_MARKERS) {
-  return markers.some((marker) => previewContainsMarker(preview, marker));
+// Mirrors runModalCheck's own three-stage check (strip self-catalog source
+// quotes, then standalone markers, then the tail combo) without re-deriving
+// any of it -- all primitives are imported unmodified. `markers`/`combo`/
+// `skipStrip` are overridable for the mutation tests below, same test-seam
+// shape as runModalCheck's opts.markers/opts.tailCombo/
+// opts.skipSelfCatalogStrip.
+function classify(
+  preview,
+  markers = MODAL_MARKERS,
+  combo = MODAL_TAIL_COMBO,
+  skipStrip = false,
+) {
+  const cleaned = skipStrip ? preview : stripSelfCatalogSourceQuotes(preview);
+  return (
+    markers.some((marker) => previewContainsMarker(cleaned, marker)) ||
+    previewMatchesTailCombo(cleaned, combo)
+  );
 }
 
 // ---------------------------------------------------------------------------
 // Positive corpus -- the two real incident samples coder-task.md §1 cites
-// (verbatim, not paraphrased). Both must classify MODAL under the widened
-// catalog.
+// (verbatim, not paraphrased). Both must classify MODAL under the combo.
 // ---------------------------------------------------------------------------
 export const REAL_INCIDENT_SAMPLES = [
   {
@@ -67,8 +70,8 @@ export const REAL_INCIDENT_SAMPLES = [
     label: "real-incident-B-today-hyk415-worker-block",
     // Source: an HYK-415 worker seat, observed stuck for 20 minutes on
     // 2026-09-01 20:0x (coder-task.md §1, "양성 표본 B -- 오늘 표본"). This
-    // is the same class of gap recurring in production, on the day this
-    // round was scoped.
+    // is the same class of gap recurring in production, on the day the
+    // widen round was scoped.
     preview:
       "npm test (전체 러너)가 백그라운드에서 아직 실행 중입니다(8분 타임아웃 초과).\n완료 알림을 기다릴까요, 아니면 지금 상태를 확인할까요?\n❯ 1. 완료 알림 기다리기 (권장)\n  2. 지금 중간 출력 확인\n  3. Type something.\nEnter to select · ↑/↓ to navigate · Esc to cancel",
   },
@@ -76,11 +79,10 @@ export const REAL_INCIDENT_SAMPLES = [
 
 // ---------------------------------------------------------------------------
 // Negative corpus -- all 14 live, non-stuck seat previews ORCH measured with
-// `orca terminal list --json` on 2026-09-01 22:05 (coder-task.md §3),
-// reproduced verbatim (including truncation, redraw noise, and mixed
-// encoding -- coder-task.md §3 "요약·정리 금지, 재그림 잡음과 잘린 앞머리가
-// 이 표본의 값이다"). None of these seats were blocked; every one must
-// classify NON_MODAL under the widened catalog.
+// `orca terminal list --json` on 2026-09-01 22:05 (coder-task.md §3 of the
+// widen round), reproduced verbatim (including truncation, redraw noise,
+// and mixed encoding). None of these seats were blocked; every one must
+// classify NON_MODAL.
 // ---------------------------------------------------------------------------
 export const LIVE_SEAT_SAMPLES = [
   {
@@ -149,16 +151,49 @@ export const LIVE_SEAT_SAMPLES = [
   },
   {
     label:
-      "14-hyk415-canonical-sync-1-coder-seat-banner-plus-clear-prompt (WARNING: contains '[CODER seat]' delivery banner, see coder-task.md §3 -- if a marker matched this, every delivery would self-block)",
+      "14-hyk415-canonical-sync-1-coder-seat-banner-plus-clear-prompt (WARNING: contains '[CODER seat]' delivery banner -- if a marker matched this, every delivery would self-block)",
     preview:
       "or\\Documents\\HARNESSENGINEERING\\.git\\hooks) match versioned hooks/. 좌석 기동 가능.\n[CODER seat] worktree=C:\\Users\\Administrator\\orca\\workspaces\\HARNESSENGINEERING\\hyk415-canonical-sync-1  pane=fdf2c90b-df3d-4750-ab1c-37ced862e214:0ea3f96c-103a-41fe-b612-f9dd64c077d0\nnew task? /clear to save 417.2k tokens",
   },
 ];
 
-// WHAT SHOULD TURN RED: if the widened catalog stops matching either real
-// incident sample (e.g. someone edits "Enter to select" out of
-// MODAL_MARKERS, or its text drifts), this test turns red.
-test("widened MODAL_MARKERS: both real incident samples (founding + today) classify MODAL", () => {
+// ---------------------------------------------------------------------------
+// New false-positive corpus (HYK-271-marker-catalog-3, review P1-1 + the §1
+// self-edit observation). All three must classify NON_MODAL.
+// ---------------------------------------------------------------------------
+export const FALSE_POSITIVE_SAMPLES = [
+  {
+    label: "false-positive-ordinary-menu-prose",
+    // A normal explanatory sentence about keyboard shortcuts -- exactly the
+    // shape review P1-1 flagged the standalone "Enter to select" substring
+    // as blocking. "Enter to select" and "to navigate" both appear, but far
+    // apart (well beyond MODAL_TAIL_COMBO.maxGapChars=15), unlike a
+    // rendered hint bar where they sit right next to each other.
+    preview:
+      "To use this interactive menu, press Enter to select the highlighted item. You can also use the arrow keys to navigate between the available options, or press Escape at any time to cancel.",
+  },
+  {
+    label: "false-positive-ordinary-documentation-prose",
+    // A README/help-doc style paragraph mentioning the phrase in passing,
+    // not rendering an actual hint bar.
+    preview:
+      "## Keyboard shortcuts\n\nMost of this tool's interactive prompts follow the same convention: hit Enter to select whatever option is currently highlighted. Full documentation for all supported keybindings lives in docs/keybindings.md.",
+  },
+  {
+    label: "false-positive-self-edit-screen (coder-task.md §1 exact quote)",
+    // Source: coder-task.md §1 -- ORCH's direct observation of the CODER
+    // seat's own screen while it was mid-diff editing MODAL_MARKERS in the
+    // 2R widen round. This is the incident that forced this repair: a
+    // marker that blocks the seat editing its own source is self-defeating.
+    preview:
+      '      237      "Allow command?",\n      238 +    "Enter to select",\n      239    ]);',
+  },
+];
+
+// WHAT SHOULD TURN RED: if the combo stops matching either real incident
+// sample (e.g. maxGapChars shrinks below the measured gap, or the primary/
+// companion text drifts), this test turns red.
+test("MODAL_TAIL_COMBO: both real incident samples (founding + today) classify MODAL", () => {
   const mismatches = REAL_INCIDENT_SAMPLES.filter((s) => !classify(s.preview));
   assert.deepEqual(
     mismatches.map((s) => s.label),
@@ -167,10 +202,11 @@ test("widened MODAL_MARKERS: both real incident samples (founding + today) class
   );
 });
 
-// WHAT SHOULD TURN RED: if a future marker addition ever makes any of these
-// 14 real, non-stuck live-seat previews classify MODAL, this test turns red
-// (that would mean every delivery to that seat now false-positives).
-test("widened MODAL_MARKERS: all 14 real live-seat previews (none blocked) classify NON_MODAL -- measured false positives, not asserted", () => {
+// WHAT SHOULD TURN RED: if a future change to the combo ever makes any of
+// these 14 real, non-stuck live-seat previews classify MODAL, this test
+// turns red (that would mean every delivery to that seat now
+// false-positives).
+test("MODAL_TAIL_COMBO: all 14 real live-seat previews (none blocked) classify NON_MODAL -- measured false positives, not asserted", () => {
   const falsePositives = LIVE_SEAT_SAMPLES.filter((s) => classify(s.preview));
   assert.deepEqual(
     falsePositives.map((s) => s.label),
@@ -179,46 +215,120 @@ test("widened MODAL_MARKERS: all 14 real live-seat previews (none blocked) class
   );
 });
 
-// ---------------------------------------------------------------------------
-// Reversal mutation (coder-task.md §2⑶): prove "Enter to select" is
-// load-bearing for BOTH real incident samples by removing only that entry
-// (via the opts.markers test seam -- same pattern as
-// dispatch-worker-modal-check.test.mjs's existing ⓓ mutation test) and
-// confirming both samples leak back to NON_MODAL. This never edits the
-// source file, so there is nothing to restore -- MODAL_MARKERS itself is
-// asserted unchanged before and after.
-// ---------------------------------------------------------------------------
-test("mutation (되돌림 변이): removing 'Enter to select' from the catalog lets BOTH real incident samples leak back to NON_MODAL -- proves the new marker, not something else, is what catches them", () => {
-  const before = MODAL_MARKERS.slice();
-
-  const withCatalog = REAL_INCIDENT_SAMPLES.map((s) => classify(s.preview));
+// WHAT SHOULD TURN RED: this is the regression review P1-1 forced -- if the
+// combo's proximity constraint is ever loosened back toward a standalone
+// substring match, one or more of these three turns MODAL again.
+test("MODAL_TAIL_COMBO: ordinary prose, documentation, and this file's own past self-edit screen all classify NON_MODAL (the false positives review P1-1 proved)", () => {
+  const falsePositives = FALSE_POSITIVE_SAMPLES.filter((s) =>
+    classify(s.preview),
+  );
   assert.deepEqual(
-    withCatalog,
-    [true, true],
-    "sanity: unmutated catalog must classify both real incident samples MODAL",
+    falsePositives.map((s) => s.label),
+    [],
+    `expected zero false positives on the adversarial corpus, but these matched: ${JSON.stringify(falsePositives.map((s) => s.label))}`,
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Reversal mutation ⓐ (coder-task.md §2⑵ⓓ, "ⓒ가 다시 MODAL로 새는지"):
+// simulate the OLD HYK-271-marker-catalog-2 (2R widen) rule -- "Enter to
+// select" as a STANDALONE marker (presence anywhere, no proximity to a
+// companion required) -- by adding it back to the markers list passed to
+// classify(), and confirm the two prose/documentation false-positive
+// samples leak back to MODAL. The self-edit-screen sample is deliberately
+// excluded from this specific mutation's expectation: its false positive
+// came from a DIFFERENT, unrelated marker ("Allow command?", see mutation
+// ⓒ below), and the self-catalog-quote strip step still removes that
+// marker's literal text here regardless of this mutation -- proving the two
+// fixes are independent, not that this mutation failed to reproduce
+// anything.
+// ---------------------------------------------------------------------------
+test("mutation ⓐ (되돌림 변이, regression reproduction): reverting 'Enter to select' to a standalone marker (old 2R-widen rule) makes the prose/documentation false positives MODAL again", () => {
+  const oldStandaloneMarkers = [...MODAL_MARKERS, MODAL_TAIL_COMBO.primary];
+
+  const withFix = FALSE_POSITIVE_SAMPLES.map((s) => classify(s.preview));
+  assert.deepEqual(
+    withFix,
+    [false, false, false],
+    "sanity: unmutated catalog must classify all three false-positive samples NON_MODAL",
   );
 
-  const withoutNewMarker = MODAL_MARKERS.filter((m) => m !== "Enter to select");
+  const withoutFix = FALSE_POSITIVE_SAMPLES.map((s) =>
+    classify(s.preview, oldStandaloneMarkers),
+  );
+  assert.deepEqual(
+    withoutFix,
+    [true, true, false],
+    "reverting to a standalone 'Enter to select' marker must reproduce the 2R-widen false positive on the prose/documentation samples (the self-edit-screen sample stays NON_MODAL here because its cause -- 'Allow command?' quoted in source form -- is a separate mechanism, see mutation ⓒ)",
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Reversal mutation ⓒ (coder-task.md §2⑵ⓓ, other half of "ⓒ가 다시 MODAL로
+// 새는지"): disable the self-catalog-quote strip (opts.skipSelfCatalogStrip
+// in runModalCheck, skipStrip here) and confirm the self-edit-screen sample
+// leaks back to MODAL via "Allow command?" -- proving the strip step, not
+// the combo, is what fixes that specific sample.
+// ---------------------------------------------------------------------------
+test("mutation ⓒ (되돌림 변이): disabling the self-catalog-quote strip makes the self-edit-screen sample MODAL again (via the unrelated pre-existing 'Allow command?' marker)", () => {
+  const selfEditSample = FALSE_POSITIVE_SAMPLES.find((s) =>
+    s.label.startsWith("false-positive-self-edit-screen"),
+  );
+  assert.ok(selfEditSample, "expected the self-edit-screen sample to exist");
+
+  const withStrip = classify(selfEditSample.preview);
   assert.equal(
-    withoutNewMarker.length,
-    MODAL_MARKERS.length - 1,
-    "sanity: the filter must remove exactly one entry",
+    withStrip,
+    false,
+    "sanity: unmutated (strip applied) must classify the self-edit-screen sample NON_MODAL",
   );
-  const withoutMarker = REAL_INCIDENT_SAMPLES.map((s) =>
-    classify(s.preview, withoutNewMarker),
+
+  const withoutStrip = classify(
+    selfEditSample.preview,
+    MODAL_MARKERS,
+    MODAL_TAIL_COMBO,
+    /* skipStrip */ true,
+  );
+  assert.equal(
+    withoutStrip,
+    true,
+    "disabling the strip must reproduce the self-edit-screen false positive via the unrelated 'Allow command?' marker",
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Reversal mutation ⓑ (coder-task.md §2⑵ⓓ, "ⓐ가 NON_MODAL로 새는지"):
+// disable the tail combo entirely and confirm both real incident samples
+// leak back to NON_MODAL. This proves the combo, not something else (e.g.
+// one of the original 4 MODAL_MARKERS), is what catches them. This never
+// edits the source file -- MODAL_TAIL_COMBO is asserted byte-identical
+// before and after.
+// ---------------------------------------------------------------------------
+test("mutation ⓑ (되돌림 변이): disabling MODAL_TAIL_COMBO entirely lets BOTH real incident samples leak back to NON_MODAL -- proves the combo, not the original 4 markers, is what catches them", () => {
+  const before = JSON.stringify(MODAL_TAIL_COMBO);
+
+  const withCombo = REAL_INCIDENT_SAMPLES.map((s) => classify(s.preview));
+  assert.deepEqual(
+    withCombo,
+    [true, true],
+    "sanity: unmutated combo must classify both real incident samples MODAL",
+  );
+
+  const withoutCombo = REAL_INCIDENT_SAMPLES.map((s) =>
+    classify(s.preview, MODAL_MARKERS, null),
   );
   assert.deepEqual(
-    withoutMarker,
+    withoutCombo,
     [false, false],
-    "removing 'Enter to select' must let both real incident samples leak back to NON_MODAL",
+    "disabling the tail combo must let both real incident samples leak back to NON_MODAL",
   );
 
   // byte-identical restoration check: this test never mutated the source
-  // module's export, only a local filtered copy -- confirm that holds.
-  assert.deepEqual(
-    MODAL_MARKERS.slice(),
+  // module's export, only passed a local override -- confirm that holds.
+  assert.equal(
+    JSON.stringify(MODAL_TAIL_COMBO),
     before,
-    "MODAL_MARKERS must be byte-identical to what it was before this test ran",
+    "MODAL_TAIL_COMBO must be byte-identical to what it was before this test ran",
   );
 });
 
