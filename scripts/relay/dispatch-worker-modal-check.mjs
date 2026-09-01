@@ -20,11 +20,23 @@
 // itself has exactly one source (design doc §1-b: the catalog is a
 // hand-authored, unverified-against-real-modals literal list -- carrying it
 // in two places would risk them silently drifting apart).
+//
+// HYK-271-marker-catalog-1 (2R widen): the four markers above are all
+// command-approval-modal text and measurably miss the screen that actually
+// opened this issue -- a numbered SELECTION MENU (claude-in-chrome tool
+// menu / npm-test-background-wait menu), which never renders any of them.
+// "Enter to select" is added below because it is the one substring both
+// real incident samples share on their tail line, and it is measured
+// (scripts/relay/hyk271-marker-catalog-real-corpus.test.mjs) against 14
+// real live-seat previews with zero false positives. Broader candidates
+// ("to navigate", "Esc to cancel"/"Esc to back", "❯") were considered and
+// rejected -- see that file's header comment for why.
 export const MODAL_MARKERS = Object.freeze([
   "Do you want to proceed?",
   "Yes, and don't ask again",
   "No, and tell Claude what to do differently",
   "Allow command?",
+  "Enter to select",
 ]);
 
 import { readFileSync } from "node:fs";

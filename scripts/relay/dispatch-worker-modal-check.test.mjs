@@ -219,7 +219,15 @@ test("runModalCheck: missing --terminal-show argument fails closed with exit 2 (
   assert.equal(result.reasonCode, CHECK_REASON.ARGS_MISSING);
 });
 
-test("MODAL_MARKERS: the sidecar's catalog is bit-for-bit the same list the axis proof measured (single source, no drift)", () => {
+// HYK-271-marker-catalog-1 (2R): deliberately widened from the 1R list (4
+// command-approval markers only) to add "Enter to select" -- the 1R catalog
+// measurably let both real incident samples (founding + today, see
+// hyk271-marker-catalog-real-corpus.test.mjs) through as NON_MODAL because
+// neither is a command-approval modal, both are numbered selection menus.
+// This pin is updated intentionally, not silently -- see that file for the
+// false-positive measurement against 14 real live-seat previews that backs
+// the new entry.
+test("MODAL_MARKERS: the sidecar's catalog is bit-for-bit the same list this round measured (single source, no drift)", () => {
   const fromAxisSamples = SAMPLES.filter((s) => s.expectModal).length;
   assert.ok(fromAxisSamples > 0, "sanity: axis proof must have modal samples");
   assert.deepEqual(MODAL_MARKERS, [
@@ -227,5 +235,6 @@ test("MODAL_MARKERS: the sidecar's catalog is bit-for-bit the same list the axis
     "Yes, and don't ask again",
     "No, and tell Claude what to do differently",
     "Allow command?",
+    "Enter to select",
   ]);
 });
