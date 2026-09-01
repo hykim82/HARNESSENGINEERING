@@ -409,6 +409,14 @@ test("ⓒ-6 변이 RED: removing the persistentFallbackAllowed() guard from unco
       readFileSync(join(CHECK_DIR, "ledger-pointer-shared.mjs"), "utf8"),
       "utf8",
     );
+    // HYK-398 §2-⑶: the adapter now also statically imports
+    // "./retirement-record-core.mjs" (a zero-import core) -- same sibling
+    // requirement as above.
+    writeFileSync(
+      join(checkDir, "retirement-record-core.mjs"),
+      readFileSync(join(CHECK_DIR, "retirement-record-core.mjs"), "utf8"),
+      "utf8",
+    );
     writeFileSync(mutatedFilePath, mutated, "utf8");
 
     const mod = await import(`file://${mutatedFilePath}?t=${Math.random()}`);
@@ -488,6 +496,14 @@ test("ⓓ 변이 RED: removing the persistent-fallback branch from autoCompleteA
     writeFileSync(
       join(checkDir, "ledger-pointer-shared.mjs"),
       readFileSync(join(CHECK_DIR, "ledger-pointer-shared.mjs"), "utf8"),
+      "utf8",
+    );
+    // HYK-398 §2-⑶: the adapter now also statically imports
+    // "./retirement-record-core.mjs" (a zero-import core) -- same sibling
+    // requirement as above.
+    writeFileSync(
+      join(checkDir, "retirement-record-core.mjs"),
+      readFileSync(join(CHECK_DIR, "retirement-record-core.mjs"), "utf8"),
       "utf8",
     );
     const ledger = join(ledgerDir, "l.json");
@@ -689,6 +705,14 @@ test("ⓕ 변이 RED: narrowing persistentFallbackAllowed() to 'always reject' (
     writeFileSync(
       join(checkDir, "ledger-pointer-shared.mjs"),
       readFileSync(join(CHECK_DIR, "ledger-pointer-shared.mjs"), "utf8"),
+      "utf8",
+    );
+    // HYK-398 §2-⑶: the adapter now also statically imports
+    // "./retirement-record-core.mjs" (a zero-import core) -- same sibling
+    // requirement as above.
+    writeFileSync(
+      join(checkDir, "retirement-record-core.mjs"),
+      readFileSync(join(CHECK_DIR, "retirement-record-core.mjs"), "utf8"),
       "utf8",
     );
     const ledger = join(ledgerDir, "l.json");

@@ -126,15 +126,30 @@
 //       정직하게 구조화됐다면 판정이 안전측"이라는 것뿐이다(abort-record-
 //       core.mjs §5-b와 동일한 한계).
 
+// HYK-398 §2-⑵: DONE_PREDATES_DROPPED_AT 추가 -- "DONE이 파싱은 되는데
+// dropped_at보다 과거"(=relay-handshake.mjs의 기존 stale 거부 사유와
+// 동일한 사실)인 라운드도 영구히 소비 불가하다는 점은
+// DONE_TIMESTAMP_NOT_PARSEABLE과 같다(둘 다 "정상 소비 경로가 절대 다시
+// 통과할 수 없는, 기계로 재확인 가능한 사실"). 임의 문자열이 아니라 이
+// 닫힌 집합에 값을 하나 더하는 형태를 유지한다(§3-2 요구 그대로).
 export const RETIREMENT_BLOCK_REASON = Object.freeze({
   DONE_TIMESTAMP_NOT_PARSEABLE: "DONE_TIMESTAMP_NOT_PARSEABLE",
+  DONE_PREDATES_DROPPED_AT: "DONE_PREDATES_DROPPED_AT",
   DONE_REWRITE_LOCKED: "DONE_REWRITE_LOCKED",
   TASK_CONTRACT_PROHIBITS_REPAIR: "TASK_CONTRACT_PROHIBITS_REPAIR",
 });
 
 // §3-4 -- 이 부분집합만 어댑터가 live 파일에서 독립 재확인한다.
+// HYK-398: DONE_PREDATES_DROPPED_AT도 기계로 독립 재확인 가능하다(어댑터가
+// live 결과 파일의 DONE과 live task 파일의 dropped_at을 각각 다시 읽어
+// 재파싱하고 doneAt < droppedAt을 스스로 다시 유도한다) -- 그래서
+// DONE_TIMESTAMP_NOT_PARSEABLE과 같은 집합에 넣는다(§3-4 원칙 그대로,
+// "ORCH가 그렇다고 했다"만으로는 통과 못 한다).
 export const MECHANICALLY_CONFIRMABLE_BLOCK_REASONS = Object.freeze(
-  new Set([RETIREMENT_BLOCK_REASON.DONE_TIMESTAMP_NOT_PARSEABLE]),
+  new Set([
+    RETIREMENT_BLOCK_REASON.DONE_TIMESTAMP_NOT_PARSEABLE,
+    RETIREMENT_BLOCK_REASON.DONE_PREDATES_DROPPED_AT,
+  ]),
 );
 
 export const RETIREMENT_RECORD_STATE = Object.freeze({

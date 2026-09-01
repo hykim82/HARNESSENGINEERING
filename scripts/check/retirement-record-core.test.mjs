@@ -269,6 +269,61 @@ test("RED: role 또는 harnessTaskLabel이 없으면 -> NO_RECORD(적용 대상 
 // 대조군: 혼합 후보(다른 라운드 것들이 섞여 있어도 정확히 하나만 매치되면 RETIRED).
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// HYK-398: DONE_PREDATES_DROPPED_AT -- 두 번째 기계-확인-가능 사유. 집합
+// 멤버십·GREEN(재확인됨)·RED(재확인 안 됨/false/null) 셋 다 DONE_TIMESTAMP_
+// NOT_PARSEABLE과 대칭으로 고정한다.
+// ---------------------------------------------------------------------------
+
+test("HYK-398: DONE_PREDATES_DROPPED_AT은 기계로 확인 가능한 사유 집합의 원소다", () => {
+  assert.equal(
+    MECHANICALLY_CONFIRMABLE_BLOCK_REASONS.has(
+      RETIREMENT_BLOCK_REASON.DONE_PREDATES_DROPPED_AT,
+    ),
+    true,
+  );
+});
+
+test("HYK-398 GREEN: DONE_PREDATES_DROPPED_AT + blockReasonConfirmed:true -> RETIRED", () => {
+  const r = checkRetirementRecord({
+    role: "CODER",
+    harnessTaskLabel: RECORD.harnessTaskLabel,
+    candidates: [
+      candidateOf({
+        blockReasonCode: RETIREMENT_BLOCK_REASON.DONE_PREDATES_DROPPED_AT,
+      }),
+    ],
+  });
+  assert.equal(r.state, RETIREMENT_RECORD_STATE.RETIRED);
+  assert.equal(r.ok, true);
+});
+
+test("HYK-398 RED: DONE_PREDATES_DROPPED_AT인데 blockReasonConfirmed가 true가 아님 -> BLOCK_REASON_UNCONFIRMED, 거부", () => {
+  const r = checkRetirementRecord({
+    role: "CODER",
+    harnessTaskLabel: RECORD.harnessTaskLabel,
+    candidates: [
+      candidateOf(
+        { blockReasonCode: RETIREMENT_BLOCK_REASON.DONE_PREDATES_DROPPED_AT },
+        { blockReasonConfirmed: false },
+      ),
+    ],
+  });
+  assert.equal(r.state, RETIREMENT_RECORD_STATE.BLOCK_REASON_UNCONFIRMED);
+
+  const r2 = checkRetirementRecord({
+    role: "CODER",
+    harnessTaskLabel: RECORD.harnessTaskLabel,
+    candidates: [
+      candidateOf(
+        { blockReasonCode: RETIREMENT_BLOCK_REASON.DONE_PREDATES_DROPPED_AT },
+        { blockReasonConfirmed: null },
+      ),
+    ],
+  });
+  assert.equal(r2.state, RETIREMENT_RECORD_STATE.BLOCK_REASON_UNCONFIRMED);
+});
+
 test("대조군: 다른 라운드의 후보들이 섞여 있어도 role+label이 일치하는 것은 정확히 하나 -> RETIRED", () => {
   const r = checkRetirementRecord({
     role: "CODER",

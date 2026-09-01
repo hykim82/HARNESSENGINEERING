@@ -42,14 +42,47 @@
 // when BOTH are absent, the adapter is still the exact same documented
 // no-op (`attempted:false`) it always was; that branch's behavior and
 // message text are UNCHANGED by this round (HYK-227 2R §3 항1 요구).
-import { appendFileSync, mkdirSync, existsSync, readFileSync } from "node:fs";
+import {
+  appendFileSync,
+  mkdirSync,
+  existsSync,
+  readFileSync,
+  readdirSync,
+} from "node:fs";
 import { execSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { dirname, join } from "node:path";
 import {
   completeReservation,
   COMPLETION_REASON,
 } from "../supervisor/admission-ledger-core.mjs";
 import { withLedgerLock } from "../supervisor/admission-ledger-store.mjs";
+// HYK-398 §2-⑶ (책임자에게 위임된 설계 판단, 이 라운드의 결정과 근거):
+// 이 파일 헤더(위 §2-A 이하)는 "무겁게 참조되는 모듈(dispatch-gate-
+// decision.mjs 등)을 끌어들이지 않기 위해 작은 것들은 복제한다"는 원칙을
+// 세워 두었고, retirement-record-core.mjs를 정적 import하지 «않는» 것은
+// 지금까지 그 원칙의 결과가 아니라 단지 "아직 이 축을 쓰는 완료 사유가
+// 없었다"는 사실의 반영이었을 뿐이다(§1 실측: 이 회차 전까지 완료 사유는
+// BLOCKED_TERMINATION_RELEASED 하나뿐). retirement-record-core.mjs 자신은
+// §2(모듈 헤더)가 명시하는 "zero-import 코어"다 -- node 내장도, 이 저장소의
+// 다른 파일도 import하지 않는다(직접 확인: 이 파일 맨 위에 import 문이
+// 하나도 없다). 이미 이 파일이 정적 import하는 admission-ledger-core.mjs·
+// admission-ledger-store.mjs·ledger-pointer-shared.mjs와 정확히 같은
+// 무게(0)다 -- dispatch-gate-decision.mjs를 끌어들일 때와 같은 위험(그
+// 파일의 전체 의존성 트리, 이 어댑터를 격리 픽스처에 스폰하는 여러
+// mutation 시험의 고정 파일 목록 붕괴)이 전혀 없다. 그래서 이 회차는 그
+// 의도를 "바꾼다": zero-import 코어는 정적으로 들여오고, retirement-
+// record-core.mjs가 스스로 읽지 않는 사실들(은퇴 기록 후보 로딩·아카이브
+// 사본 위치/지문 대조·기계로 확인 가능한 사유 재확인)만 이 파일이 직접
+// 재현한다(아래 헬퍼들) -- dispatch-gate-decision.mjs의 동명 로직과
+// «같은 계약»이되, 이 파일 자신의 신뢰 경계(캐치되지 않는 무거운 import
+// 0)를 지킨다.
+import {
+  checkRetirementRecord,
+  RETIREMENT_RECORD_STATE,
+  RETIREMENT_BLOCK_REASON,
+  MECHANICALLY_CONFIRMABLE_BLOCK_REASONS,
+} from "./retirement-record-core.mjs";
 // HYK-302/355 §2-A: single-source these two (previously duplicated here and
 // in orch-stall-detect.mjs / relay-handshake.mjs respectively) -- see
 // ledger-pointer-shared.mjs's own header for why this is now imported
@@ -277,6 +310,7 @@ function buildCompletionRejectionReason(reservationId, complete) {
 // Reservation 참조) -- 이 집합은 "완료 사유를 명시하는" 값만 닫는다.
 const KNOWN_COMPLETION_REASONS = new Set([
   COMPLETION_REASON.BLOCKED_TERMINATION_RELEASED,
+  COMPLETION_REASON.RETIREMENT_RELEASED,
 ]);
 
 // HYK-342 2R P1-1 / 3R §0/§2 -- «회수 표식의 생산자 권한» 검증. 검토자가
@@ -349,12 +383,286 @@ function verifyBlockedTerminationEvidence({
   return { ok: true };
 }
 
+// HYK-398 §2-⑶: RETIREMENT_RELEASED 증거 확인. resultPath 재읽기는
+// verifyBlockedTerminationEvidence와 같은 사유(독립 재검증, 호출자를
+// 신뢰하지 않음)로 여기서도 다시 한다 -- reservationId를 그대로 믿지
+// 않고, harnessDir/role이 가리키는 실제 파일들에서 다시 유도한다.
+//
+// dispatch-gate-decision.mjs의 evaluateRetirementDecision와 «같은 계약»
+// (같은 다섯 관문 -- role+harnessTaskLabel 일치·아카이브 존재·지문 대조
+// (아카이브+live 둘 다)·사유 코드 유효성/기계 재확인·후속 이름표)을
+// checkRetirementRecord(코어, 정적 import)에 위임해 재현한다. 이 파일이
+// 스스로 하는 일은 오직 "그 코어가 요구하는 사실들을 harnessDir 아래
+// 실제 파일에서 다시 읽어 구조화하는 것"뿐이다(§2 zero-import 코어
+// 계약과 동일한 분업, 위 import 헤더 참조).
+const RETIREMENT_TASK_ID_RE_G = /^task_id:\s*(\S+)/gim;
+const RETIREMENT_DROPPED_AT_RE = /^dropped_at:\s*(.+)$/im;
+const RETIREMENT_ARCHIVE_ENVELOPE_HEADER_RE =
+  /^<!-- envelope-archive: role=\S+ archived_at=.*? -->\n/;
+
+// computeResultFingerprint(relay-handshake.mjs)/computeConsumptionResultFingerprint
+// (dispatch-gate-decision.mjs)와 바이트 동일(sha256 hex of utf8 text) --
+// 이 파일 헤더가 이미 설명한 "작은 것은 복제한다" 원칙 그대로.
+function computeRetirementFingerprint(content) {
+  return createHash("sha256").update(content, "utf8").digest("hex");
+}
+
+function stripRetirementArchiveEnvelopeHeader(content) {
+  const match = content.match(RETIREMENT_ARCHIVE_ENVELOPE_HEADER_RE);
+  return match ? content.slice(match[0].length) : content;
+}
+
+// dispatch-gate-decision.mjs의 readRetirementRecordFiles와 동일한 계약:
+// 디렉터리 부재 -> []. 손상/파싱 실패한 개별 파일은 건너뛴다(치명적이지
+// 않음, 코어가 후보 필터링을 맡는다).
+function readRetirementRecordFilesForAdapter(harnessDir, role) {
+  const retirementsDir = join(harnessDir, "retirements");
+  let names;
+  try {
+    names = readdirSync(retirementsDir);
+  } catch {
+    return [];
+  }
+  const pattern = new RegExp(`^${role}-retire-r\\d+\\.json$`, "i");
+  const records = [];
+  for (const name of names) {
+    if (!pattern.test(name)) continue;
+    try {
+      records.push(
+        JSON.parse(readFileSync(join(retirementsDir, name), "utf8")),
+      );
+    } catch {
+      continue;
+    }
+  }
+  return records;
+}
+
+// dispatch-gate-decision.mjs의 resolveRetirementArchiveCandidate와 동일한
+// 계약: `.harness/rounds/<role>-r<N>.md` 중 봉투 헤더를 벗긴 뒤 자신의
+// task_id 에코가 harnessTaskLabel과 일치하는 사본을 찾는다(record.archivePath
+// 를 그대로 믿지 않는다 -- 내용으로 찾는다). 정확히 하나면 그 지문을
+// claimedFingerprint와 대조, 0개면 ARCHIVE_MISSING으로 이어지는
+// exists:false, 2개 이상이면 안전측 기본값(exists:true, fingerprintMatches:false).
+function resolveRetirementArchiveCandidateForAdapter(
+  harnessDir,
+  role,
+  harnessTaskLabel,
+  claimedFingerprint,
+) {
+  const roundsDir = join(harnessDir, "rounds");
+  let names;
+  try {
+    names = readdirSync(roundsDir);
+  } catch {
+    return { exists: false, fingerprintMatches: false };
+  }
+  const pattern = new RegExp(`^${role}-r\\d+\\.md$`, "i");
+  const matches = [];
+  for (const name of names) {
+    if (!pattern.test(name)) continue;
+    let raw;
+    try {
+      raw = readFileSync(join(roundsDir, name), "utf8");
+    } catch {
+      continue;
+    }
+    const stripped = stripRetirementArchiveEnvelopeHeader(raw);
+    const idMatches = [...stripped.matchAll(RETIREMENT_TASK_ID_RE_G)];
+    if (idMatches.length !== 1 || idMatches[0][1] !== harnessTaskLabel) {
+      continue;
+    }
+    matches.push({ fingerprint: computeRetirementFingerprint(stripped) });
+  }
+  if (matches.length === 0) {
+    return { exists: false, fingerprintMatches: false };
+  }
+  if (matches.length > 1) {
+    return { exists: true, fingerprintMatches: false };
+  }
+  return {
+    exists: true,
+    fingerprintMatches: matches[0].fingerprint === claimedFingerprint,
+  };
+}
+
+function parseRetirementKstToMs(str) {
+  if (typeof str !== "string") return null;
+  const cleaned = str.trim().replace(/\s*KST\s*$/i, "");
+  const match = cleaned.match(
+    /^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}(?::\d{2})?)$/,
+  );
+  if (!match) return null;
+  const date = new Date(`${match[1]}T${match[2]}+09:00`);
+  return Number.isNaN(date.getTime()) ? null : date.getTime();
+}
+
+// dispatch-gate-decision.mjs의 confirmRetirementBlockReason와 동일한
+// 계약(같은 두 기계-확인-가능 사유, 같은 판정 규칙) -- 여기서는 resultContent
+// 자신에서 DONE을, taskContent에서 dropped_at을 각각 재추출/재파싱한다
+// (retirement-record-core.mjs §3-4 "ORCH가 그렇다고 했다만으로는 통과 못
+// 한다" 원칙 그대로, 이 파일 자신의 신뢰 경계 안에서 다시 구현).
+function confirmRetirementBlockReasonForAdapter(
+  record,
+  resultContent,
+  droppedAtRaw,
+) {
+  if (!MECHANICALLY_CONFIRMABLE_BLOCK_REASONS.has(record?.blockReasonCode)) {
+    return null;
+  }
+  const doneMatches = [
+    ...resultContent.matchAll(/^>>>\s*DONE:.*@\s*(.+?)\s*$/gim),
+  ];
+  const doneAtRaw = doneMatches.length === 1 ? doneMatches[0][1] : null;
+  if (
+    record.blockReasonCode ===
+    RETIREMENT_BLOCK_REASON.DONE_TIMESTAMP_NOT_PARSEABLE
+  ) {
+    return (
+      isNonEmptyString(doneAtRaw) && parseRetirementKstToMs(doneAtRaw) === null
+    );
+  }
+  if (
+    record.blockReasonCode === RETIREMENT_BLOCK_REASON.DONE_PREDATES_DROPPED_AT
+  ) {
+    const doneAtMs = parseRetirementKstToMs(doneAtRaw);
+    const droppedAtMs = parseRetirementKstToMs(droppedAtRaw);
+    return doneAtMs !== null && droppedAtMs !== null && doneAtMs < droppedAtMs;
+  }
+  return null;
+}
+
+// verifyRetirementEvidence -- RETIREMENT_RELEASED의 진입점. reservationId를
+// harnessTaskLabel로 삼아 harnessDir 아래 실제 파일에서 독립적으로 다시
+// 사실을 유도하고, checkRetirementRecord(코어)에 그대로 넘긴다. RETIRED가
+// 아니면 어떤 상태든(NO_RECORD/AMBIGUOUS/ARCHIVE_MISSING/FINGERPRINT_
+// MISMATCH/INVALID_REASON_CODE/BLOCK_REASON_UNCONFIRMED/SUCCESSOR_LABEL_
+// MISSING) 거부(fail-closed) -- verdict.reason을 그대로 실어 사람이 읽을
+// 수 있게 한다(§4 완료조건 2 "증거가 하나라도 빠지면 거부" 요구 그대로).
+function verifyRetirementEvidence({ harnessDir, role, reservationId }) {
+  if (!isNonEmptyString(harnessDir) || !isNonEmptyString(role)) {
+    return {
+      ok: false,
+      reason: `admission-completion-adapter: RETIREMENT_RELEASED 요청에 harnessDir/role이 없음 -- 증거를 확인할 대상 자체를 특정할 수 없음, 거부(안전측 기본값)`,
+    };
+  }
+  const resultPath = join(harnessDir, `${String(role).toLowerCase()}.md`);
+  let resultContent;
+  try {
+    resultContent = readFileSync(resultPath, "utf8");
+  } catch (err) {
+    return {
+      ok: false,
+      reason: `admission-completion-adapter: RETIREMENT_RELEASED 증거 확인 실패 -- 결과 파일을 읽을 수 없음('${resultPath}': ${err.message}), 거부(안전측 기본값)`,
+    };
+  }
+  const taskIdResolved = resolveEchoedTaskId(resultContent);
+  if (!taskIdResolved.ok || taskIdResolved.id !== reservationId) {
+    return {
+      ok: false,
+      reason: `admission-completion-adapter: RETIREMENT_RELEASED 증거 확인 실패 -- 결과 파일('${resultPath}')의 task_id 에코가 reservationId('${reservationId}')와 일치하지 않거나 확정되지 않음(${taskIdResolved.ok ? `실제: ${taskIdResolved.id}` : `task_id 줄 ${taskIdResolved.count}개`}), 거부(안전측 기본값)`,
+    };
+  }
+  const taskPath = join(harnessDir, `${String(role).toLowerCase()}-task.md`);
+  let droppedAtRaw = null;
+  try {
+    const taskContent = readFileSync(taskPath, "utf8");
+    const droppedMatch = taskContent.match(RETIREMENT_DROPPED_AT_RE);
+    droppedAtRaw = droppedMatch ? droppedMatch[1].trim() : null;
+  } catch {
+    droppedAtRaw = null;
+  }
+  const roleUpper = String(role).toUpperCase();
+  const records = readRetirementRecordFilesForAdapter(harnessDir, roleUpper);
+  const liveFingerprint = computeRetirementFingerprint(resultContent);
+  const candidates = records.map((record) => {
+    const archiveInfo = resolveRetirementArchiveCandidateForAdapter(
+      harnessDir,
+      roleUpper,
+      reservationId,
+      record?.archiveFingerprintClaimed,
+    );
+    return {
+      record,
+      archiveExists: archiveInfo.exists,
+      archiveFingerprintMatches: archiveInfo.fingerprintMatches,
+      liveFingerprintMatches:
+        liveFingerprint === record?.archiveFingerprintClaimed,
+      blockReasonConfirmed: confirmRetirementBlockReasonForAdapter(
+        record,
+        resultContent,
+        droppedAtRaw,
+      ),
+    };
+  });
+  const verdict = checkRetirementRecord({
+    role: roleUpper,
+    harnessTaskLabel: reservationId,
+    candidates,
+  });
+  if (verdict.state !== RETIREMENT_RECORD_STATE.RETIRED) {
+    return {
+      ok: false,
+      reason: `admission-completion-adapter: RETIREMENT_RELEASED 증거 확인 실패 -- ${verdict.reason}`,
+    };
+  }
+  return { ok: true };
+}
+
 // HYK-342/HYK-249: `reason` is a NEW, optional field threaded straight
 // through to completeReservation's own `args.reason` (admission-ledger-
 // core.mjs) -- see that function's header for the stamping contract. Every
 // pre-existing caller (the ok:true completion path) omits it, so this
 // function's behavior for them is byte-identical to before this round.
 //
+// HYK-398 §2-⑶: quality-check max-lines-per-function 상한을 지키려고
+// completeAdmissionReservation 몸통에서 뽑았다(HYK-244-receipt-core-1b
+// 선례와 동일한 이유, 판정/사유 문구는 조금도 바뀌지 않는다) -- reason별
+// evidence 확인 두 갈래(BLOCKED_TERMINATION_RELEASED/RETIREMENT_RELEASED)
+// 를 하나로 묶는다. 통과(evidence 불필요 포함)면 null, 실패면 그
+// completeAdmissionReservation이 즉시 돌려줄 {ok:false, reasonCode, reason}.
+function checkCompletionReasonEvidence({
+  reason,
+  harnessDir,
+  role,
+  reservationId,
+  receiptPath,
+}) {
+  if (reason === COMPLETION_REASON.BLOCKED_TERMINATION_RELEASED) {
+    const evidence = verifyBlockedTerminationEvidence({
+      harnessDir,
+      role,
+      reservationId,
+      receiptPath: resolveReceiptPathForVerification(receiptPath, process.env),
+    });
+    if (!evidence.ok) {
+      return {
+        ok: false,
+        reasonCode: "BLOCKED_TERMINATION_EVIDENCE_MISSING",
+        reason: `${evidence.reason} -- reservation '${reservationId}' NOT released`,
+      };
+    }
+  }
+  // HYK-398 §2-⑶: RETIREMENT_RELEASED도 같은 fail-closed 원칙 -- evidence
+  // 확인이 완료 호출(completeReservation) 자체보다 먼저 실행되고, 실패하면
+  // 완료는 아예 시도되지 않는다(이 축이 새로 만드는 유일한 완료 통로).
+  if (reason === COMPLETION_REASON.RETIREMENT_RELEASED) {
+    const evidence = verifyRetirementEvidence({
+      harnessDir,
+      role,
+      reservationId,
+    });
+    if (!evidence.ok) {
+      return {
+        ok: false,
+        reasonCode: "RETIREMENT_EVIDENCE_MISSING",
+        reason: `${evidence.reason} -- reservation '${reservationId}' NOT released`,
+      };
+    }
+  }
+  return null;
+}
+
 // HYK-342 2R P1-1: `reason` is no longer trusted at face value -- a non-
 // empty value MUST be one of KNOWN_COMPLETION_REASONS (closed set), and
 // BLOCKED_TERMINATION_RELEASED specifically requires `harnessDir`/`role`
@@ -379,21 +687,14 @@ export function completeAdmissionReservation({
       reason: `admission-completion-adapter: 알 수 없는 completion reason('${reason}') -- 닫힌 집합(${[...KNOWN_COMPLETION_REASONS].join(", ")}) 밖의 값은 거부(안전측 기본값, HYK-342 2R P1-1) -- reservation '${reservationId}' NOT released`,
     };
   }
-  if (reason === COMPLETION_REASON.BLOCKED_TERMINATION_RELEASED) {
-    const evidence = verifyBlockedTerminationEvidence({
-      harnessDir,
-      role,
-      reservationId,
-      receiptPath: resolveReceiptPathForVerification(receiptPath, process.env),
-    });
-    if (!evidence.ok) {
-      return {
-        ok: false,
-        reasonCode: "BLOCKED_TERMINATION_EVIDENCE_MISSING",
-        reason: `${evidence.reason} -- reservation '${reservationId}' NOT released`,
-      };
-    }
-  }
+  const evidenceFailure = checkCompletionReasonEvidence({
+    reason,
+    harnessDir,
+    role,
+    reservationId,
+    receiptPath,
+  });
+  if (evidenceFailure) return evidenceFailure;
   const outcome = withLedgerLock(ledgerPath, lockPath, (readResult) => {
     if (!readResult.ok) {
       return {

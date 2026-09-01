@@ -11,6 +11,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   autoCompleteAdmission,
   completeAdmissionReservation,
@@ -375,6 +376,369 @@ test("HYK-342 2R P1-1: an unknown completion reason string is refused (closed en
       "ACTIVE",
     );
   } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// HYK-398: RETIREMENT_RELEASED -- a third, distinct completion reason for a
+// VALID-labeled round whose retirement record independently reconfirms
+// RETIRED (retirement-record-core.mjs's checkRetirementRecord, imported
+// directly -- see this adapter's own header for why that import is safe
+// here). Mirrors the BLOCKED_TERMINATION_RELEASED tests above: a genuine
+// success path (real archive + real retirement record + real dropped_at)
+// and forgery/incompleteness rejections, each distinguishable.
+// ---------------------------------------------------------------------------
+
+const RETIREMENT_TASK_HEADER =
+  "task_id: HYK-398-r-1\ndropped_at: 2026-08-08 21:00 KST\n";
+const RETIREMENT_STALE_RESULT =
+  "task_id: HYK-398-r-1\n\n>>> DONE: CODER @ 2026-08-08 20:00:00 KST\n";
+
+function fingerprintOf(content) {
+  return createHash("sha256").update(content, "utf8").digest("hex");
+}
+
+function seedRetirementFixture(dir, { blockReasonCode, successorLabel } = {}) {
+  writeFileSync(join(dir, "coder-task.md"), RETIREMENT_TASK_HEADER, "utf8");
+  writeFileSync(join(dir, "coder.md"), RETIREMENT_STALE_RESULT, "utf8");
+  mkdirSync(join(dir, "rounds"), { recursive: true });
+  writeFileSync(
+    join(dir, "rounds", "coder-r1.md"),
+    RETIREMENT_STALE_RESULT,
+    "utf8",
+  );
+  mkdirSync(join(dir, "retirements"), { recursive: true });
+  writeFileSync(
+    join(dir, "retirements", "coder-retire-r1.json"),
+    JSON.stringify({
+      role: "CODER",
+      harnessTaskLabel: "HYK-398-r-1",
+      archivePath: "rounds/coder-r1.md",
+      archiveFingerprintClaimed: fingerprintOf(RETIREMENT_STALE_RESULT),
+      blockReasonCode: blockReasonCode ?? "DONE_PREDATES_DROPPED_AT",
+      successorLabel: successorLabel ?? "HYK-398-r-2",
+      recordedAt: "2026-08-08 22:00:00 KST",
+      evidence: { source: "test" },
+    }),
+    "utf8",
+  );
+}
+
+test("HYK-398: autoCompleteAdmission with reason=RETIREMENT_RELEASED releases a genuinely-retired reservation and stamps completion_reason distinctly from SUSPECT_TIMEOUT_RECOVERED/BLOCKED_TERMINATION_RELEASED", () => {
+  const { dir, ledger, lock } = tmpPaths();
+  const savedLedger = process.env.ADMISSION_LEDGER_PATH;
+  const savedLock = process.env.ADMISSION_LOCK_PATH;
+  try {
+    runAdmissionCli([
+      "init-cutover",
+      "--ledger",
+      ledger,
+      "--lock",
+      lock,
+      "--live-seats",
+      "[]",
+    ]);
+    runAdmissionCli([
+      "admit",
+      "--ledger",
+      ledger,
+      "--lock",
+      lock,
+      "--reservation-id",
+      "HYK-398-r-1",
+      "--cap",
+      "1",
+    ]);
+    seedRetirementFixture(dir);
+
+    process.env.ADMISSION_LEDGER_PATH = ledger;
+    process.env.ADMISSION_LOCK_PATH = lock;
+    const outcome = autoCompleteAdmission({
+      reservationId: "HYK-398-r-1",
+      reason: "RETIREMENT_RELEASED",
+      harnessDir: dir,
+      role: "CODER",
+    });
+    assert.equal(outcome.attempted, true);
+    assert.equal(outcome.ok, true, outcome.reason);
+
+    const written = JSON.parse(readFileSync(ledger, "utf8"));
+    assert.equal(written.reservations["HYK-398-r-1"].status, "COMPLETED");
+    assert.equal(
+      written.reservations["HYK-398-r-1"].completion_reason,
+      "RETIREMENT_RELEASED",
+    );
+  } finally {
+    if (savedLedger !== undefined)
+      process.env.ADMISSION_LEDGER_PATH = savedLedger;
+    else delete process.env.ADMISSION_LEDGER_PATH;
+    if (savedLock !== undefined) process.env.ADMISSION_LOCK_PATH = savedLock;
+    else delete process.env.ADMISSION_LOCK_PATH;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("HYK-398: RETIREMENT_RELEASED with no retirement record at all is refused (RETIREMENT_EVIDENCE_MISSING), reservation stays ACTIVE", () => {
+  const { dir, ledger, lock } = tmpPaths();
+  const savedLedger = process.env.ADMISSION_LEDGER_PATH;
+  const savedLock = process.env.ADMISSION_LOCK_PATH;
+  try {
+    runAdmissionCli([
+      "init-cutover",
+      "--ledger",
+      ledger,
+      "--lock",
+      lock,
+      "--live-seats",
+      "[]",
+    ]);
+    runAdmissionCli([
+      "admit",
+      "--ledger",
+      ledger,
+      "--lock",
+      lock,
+      "--reservation-id",
+      "HYK-398-r-2",
+      "--cap",
+      "1",
+    ]);
+    // ⛔은퇴 기록도, 아카이브 사본도 만들지 않는다 -- 가장 흔한 경우(아직
+    // ORCH가 은퇴를 선언하지 않음).
+    writeFileSync(join(dir, "coder-task.md"), RETIREMENT_TASK_HEADER, "utf8");
+    writeFileSync(
+      join(dir, "coder.md"),
+      "task_id: HYK-398-r-2\n\n>>> DONE: CODER @ 2026-08-08 20:00:00 KST\n",
+      "utf8",
+    );
+
+    process.env.ADMISSION_LEDGER_PATH = ledger;
+    process.env.ADMISSION_LOCK_PATH = lock;
+    const outcome = autoCompleteAdmission({
+      reservationId: "HYK-398-r-2",
+      reason: "RETIREMENT_RELEASED",
+      harnessDir: dir,
+      role: "CODER",
+    });
+    assert.equal(outcome.attempted, true);
+    assert.equal(outcome.ok, false);
+    assert.equal(outcome.reasonCode, "RETIREMENT_EVIDENCE_MISSING");
+
+    const written = JSON.parse(readFileSync(ledger, "utf8"));
+    assert.equal(written.reservations["HYK-398-r-2"].status, "ACTIVE");
+  } finally {
+    if (savedLedger !== undefined)
+      process.env.ADMISSION_LEDGER_PATH = savedLedger;
+    else delete process.env.ADMISSION_LEDGER_PATH;
+    if (savedLock !== undefined) process.env.ADMISSION_LOCK_PATH = savedLock;
+    else delete process.env.ADMISSION_LOCK_PATH;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("HYK-398: RETIREMENT_RELEASED with a worker-forged task_id (no matching live result) is refused, reservation stays ACTIVE", () => {
+  const { dir, ledger, lock } = tmpPaths();
+  const savedLedger = process.env.ADMISSION_LEDGER_PATH;
+  const savedLock = process.env.ADMISSION_LOCK_PATH;
+  try {
+    runAdmissionCli([
+      "init-cutover",
+      "--ledger",
+      ledger,
+      "--lock",
+      lock,
+      "--live-seats",
+      "[]",
+    ]);
+    runAdmissionCli([
+      "admit",
+      "--ledger",
+      ledger,
+      "--lock",
+      lock,
+      "--reservation-id",
+      "HYK-398-r-forged",
+      "--cap",
+      "1",
+    ]);
+    // ⛔결과 파일 자체를 아예 만들지 않는다(검토자의 BLOCKED_TERMINATION_
+    // RELEASED 공격 재현과 같은 형태 -- 증거 없이 어댑터를 직접 실행).
+
+    process.env.ADMISSION_LEDGER_PATH = ledger;
+    process.env.ADMISSION_LOCK_PATH = lock;
+    const outcome = autoCompleteAdmission({
+      reservationId: "HYK-398-r-forged",
+      reason: "RETIREMENT_RELEASED",
+      harnessDir: dir,
+      role: "CODER",
+    });
+    assert.equal(outcome.attempted, true);
+    assert.equal(outcome.ok, false);
+    assert.equal(outcome.reasonCode, "RETIREMENT_EVIDENCE_MISSING");
+
+    const written = JSON.parse(readFileSync(ledger, "utf8"));
+    assert.equal(written.reservations["HYK-398-r-forged"].status, "ACTIVE");
+  } finally {
+    if (savedLedger !== undefined)
+      process.env.ADMISSION_LEDGER_PATH = savedLedger;
+    else delete process.env.ADMISSION_LEDGER_PATH;
+    if (savedLock !== undefined) process.env.ADMISSION_LOCK_PATH = savedLock;
+    else delete process.env.ADMISSION_LOCK_PATH;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("HYK-398: RETIREMENT_RELEASED with a fingerprint-mismatched archive is refused (forged/stale archive claim), reservation stays ACTIVE", () => {
+  const { dir, ledger, lock } = tmpPaths();
+  const savedLedger = process.env.ADMISSION_LEDGER_PATH;
+  const savedLock = process.env.ADMISSION_LOCK_PATH;
+  try {
+    runAdmissionCli([
+      "init-cutover",
+      "--ledger",
+      ledger,
+      "--lock",
+      lock,
+      "--live-seats",
+      "[]",
+    ]);
+    runAdmissionCli([
+      "admit",
+      "--ledger",
+      ledger,
+      "--lock",
+      lock,
+      "--reservation-id",
+      "HYK-398-r-3",
+      "--cap",
+      "1",
+    ]);
+    writeFileSync(join(dir, "coder-task.md"), RETIREMENT_TASK_HEADER, "utf8");
+    writeFileSync(
+      join(dir, "coder.md"),
+      "task_id: HYK-398-r-3\n\n>>> DONE: CODER @ 2026-08-08 20:00:00 KST\n",
+      "utf8",
+    );
+    mkdirSync(join(dir, "rounds"), { recursive: true });
+    writeFileSync(
+      join(dir, "rounds", "coder-r1.md"),
+      "task_id: HYK-398-r-3\n\n>>> DONE: CODER @ 2026-08-08 20:00:00 KST\n",
+      "utf8",
+    );
+    mkdirSync(join(dir, "retirements"), { recursive: true });
+    writeFileSync(
+      join(dir, "retirements", "coder-retire-r1.json"),
+      JSON.stringify({
+        role: "CODER",
+        harnessTaskLabel: "HYK-398-r-3",
+        archivePath: "rounds/coder-r1.md",
+        archiveFingerprintClaimed: "sha256-does-not-match-anything",
+        blockReasonCode: "DONE_PREDATES_DROPPED_AT",
+        successorLabel: "HYK-398-r-4",
+        recordedAt: "2026-08-08 22:00:00 KST",
+        evidence: { source: "test" },
+      }),
+      "utf8",
+    );
+
+    process.env.ADMISSION_LEDGER_PATH = ledger;
+    process.env.ADMISSION_LOCK_PATH = lock;
+    const outcome = autoCompleteAdmission({
+      reservationId: "HYK-398-r-3",
+      reason: "RETIREMENT_RELEASED",
+      harnessDir: dir,
+      role: "CODER",
+    });
+    assert.equal(outcome.attempted, true);
+    assert.equal(outcome.ok, false);
+    assert.equal(outcome.reasonCode, "RETIREMENT_EVIDENCE_MISSING");
+    assert.match(outcome.reason, /지문 대조 실패/);
+
+    const written = JSON.parse(readFileSync(ledger, "utf8"));
+    assert.equal(written.reservations["HYK-398-r-3"].status, "ACTIVE");
+  } finally {
+    if (savedLedger !== undefined)
+      process.env.ADMISSION_LEDGER_PATH = savedLedger;
+    else delete process.env.ADMISSION_LEDGER_PATH;
+    if (savedLock !== undefined) process.env.ADMISSION_LOCK_PATH = savedLock;
+    else delete process.env.ADMISSION_LOCK_PATH;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("HYK-398: RETIREMENT_RELEASED with successorLabel missing is refused (SUCCESSOR_LABEL_MISSING), reservation stays ACTIVE", () => {
+  const { dir, ledger, lock } = tmpPaths();
+  const savedLedger = process.env.ADMISSION_LEDGER_PATH;
+  const savedLock = process.env.ADMISSION_LOCK_PATH;
+  try {
+    runAdmissionCli([
+      "init-cutover",
+      "--ledger",
+      ledger,
+      "--lock",
+      lock,
+      "--live-seats",
+      "[]",
+    ]);
+    runAdmissionCli([
+      "admit",
+      "--ledger",
+      ledger,
+      "--lock",
+      lock,
+      "--reservation-id",
+      "HYK-398-r-4",
+      "--cap",
+      "1",
+    ]);
+    writeFileSync(join(dir, "coder-task.md"), RETIREMENT_TASK_HEADER, "utf8");
+    writeFileSync(
+      join(dir, "coder.md"),
+      "task_id: HYK-398-r-4\n\n>>> DONE: CODER @ 2026-08-08 20:00:00 KST\n",
+      "utf8",
+    );
+    mkdirSync(join(dir, "rounds"), { recursive: true });
+    const content =
+      "task_id: HYK-398-r-4\n\n>>> DONE: CODER @ 2026-08-08 20:00:00 KST\n";
+    writeFileSync(join(dir, "rounds", "coder-r1.md"), content, "utf8");
+    mkdirSync(join(dir, "retirements"), { recursive: true });
+    writeFileSync(
+      join(dir, "retirements", "coder-retire-r1.json"),
+      JSON.stringify({
+        role: "CODER",
+        harnessTaskLabel: "HYK-398-r-4",
+        archivePath: "rounds/coder-r1.md",
+        archiveFingerprintClaimed: fingerprintOf(content),
+        blockReasonCode: "DONE_PREDATES_DROPPED_AT",
+        // ⛔successorLabel 자체를 뺀다.
+        recordedAt: "2026-08-08 22:00:00 KST",
+        evidence: { source: "test" },
+      }),
+      "utf8",
+    );
+
+    process.env.ADMISSION_LEDGER_PATH = ledger;
+    process.env.ADMISSION_LOCK_PATH = lock;
+    const outcome = autoCompleteAdmission({
+      reservationId: "HYK-398-r-4",
+      reason: "RETIREMENT_RELEASED",
+      harnessDir: dir,
+      role: "CODER",
+    });
+    assert.equal(outcome.attempted, true);
+    assert.equal(outcome.ok, false);
+    assert.equal(outcome.reasonCode, "RETIREMENT_EVIDENCE_MISSING");
+    assert.match(outcome.reason, /후속 이름표\(successorLabel\)가 없음/);
+
+    const written = JSON.parse(readFileSync(ledger, "utf8"));
+    assert.equal(written.reservations["HYK-398-r-4"].status, "ACTIVE");
+  } finally {
+    if (savedLedger !== undefined)
+      process.env.ADMISSION_LEDGER_PATH = savedLedger;
+    else delete process.env.ADMISSION_LEDGER_PATH;
+    if (savedLock !== undefined) process.env.ADMISSION_LOCK_PATH = savedLock;
+    else delete process.env.ADMISSION_LOCK_PATH;
     rmSync(dir, { recursive: true, force: true });
   }
 });
