@@ -35,16 +35,12 @@ import {
   normalizePreview,
   previewContainsMarker,
 } from "./adapters/orca-adapter.mjs";
-
-// Candidate marker catalog for a pre-dispatch modal check. Kept narrow and
-// literal (no regex) -- same normalize-then-partial-match contract
-// previewContainsMarker already uses for delivery-confirmation (2단 §3).
-export const MODAL_MARKERS = Object.freeze([
-  "Do you want to proceed?",
-  "Yes, and don't ask again",
-  "No, and tell Claude what to do differently",
-  "Allow command?",
-]);
+// HYK-271-wire-1: MODAL_MARKERS now lives in dispatch-worker-modal-check.mjs
+// (the production sidecar this axis got wired into) -- imported back here
+// rather than kept as a second copy, so the catalog has exactly one source
+// (design doc §1-b: this list is unverified against real modal text, and
+// two copies would risk silently drifting apart).
+import { MODAL_MARKERS } from "./dispatch-worker-modal-check.mjs";
 
 function classifyPreviewForModal(preview, markers = MODAL_MARKERS) {
   return markers.some((marker) => previewContainsMarker(preview, marker));
@@ -56,7 +52,10 @@ function classifyPreviewForModal(preview, markers = MODAL_MARKERS) {
 // weakness (mid-redraw marker split across a shell-predictive-echo
 // boundary) -- MUST classify NOT modal, and that failure is the point of
 // the sample, not a bug in the test.
-const SAMPLES = [
+// HYK-271-wire-1: exported so dispatch-worker-modal-check.test.mjs can
+// reuse these exact samples (coder-task.md §2⑵ "합성 표본은 기존 ...의
+// 표본을 재사용하라(새로 지어내지 마라)") instead of re-authoring them.
+export const SAMPLES = [
   {
     label: "idle-shell-prompt",
     preview: "PS C:\\Users\\Administrator\\worktree> ",
