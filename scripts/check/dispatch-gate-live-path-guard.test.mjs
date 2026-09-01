@@ -58,51 +58,20 @@ import { execFileSync } from "node:child_process";
 import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
-import { createHash } from "node:crypto";
 import { writeLedger } from "./reject-streak.mjs";
+// HYK-404-race-1: repoRootFromHere/fingerprintDir moved to this shared,
+// non-test module so dispatch-gate-live-path-guard-concurrent-race.test.mjs
+// can drive the exact real fingerprinting logic without importing a
+// `*.test.mjs` file's top-level `test(...)` registrations into its own
+// process (node's test runner isolates each test file into its own child
+// process by default; importing another test file's module would silently
+// re-register and re-run that file's tests a second time).
+import {
+  repoRootFromHere,
+  fingerprintDir,
+} from "./live-harness-fingerprint.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-
-function repoRootFromHere() {
-  return execFileSync("git", ["-C", HERE, "rev-parse", "--show-toplevel"], {
-    encoding: "utf8",
-  }).trim();
-}
-
-// ---------------------------------------------------------------------------
-// Q3 (HYK-394 §3): 이 파일의 시험들이 라이브 `.harness/`에 어떤 흔적도
-// 남기지 않는다는 것을 "주장"이 아니라 "시험"으로 고정한다 -- 지문 =
-// 파일 목록 + 각 파일의 내용 해시. 실물 `.harness/`는 라운드마다 파일
-// 구성이 다르므로(coder-task.md만 있는 워크트리도, 4-role이 공존하는
-// 공유 워크트리도 있다) 이 파일 스위트 실행 "전후"의 지문이 바이트
-// 동일해야 한다는 것만 단언한다 -- 이 스위트가 무엇을 만드는지는 전혀
-// 가정하지 않는다(만들지 않아야 한다는 것만 가정한다).
-// ---------------------------------------------------------------------------
-function fingerprintDir(dir) {
-  const entries = [];
-  function walk(sub) {
-    let names;
-    try {
-      names = readdirSync(join(dir, sub), { withFileTypes: true });
-    } catch {
-      return;
-    }
-    for (const ent of names) {
-      const rel = sub ? `${sub}/${ent.name}` : ent.name;
-      if (ent.isDirectory()) {
-        walk(rel);
-      } else if (ent.isFile()) {
-        const hash = createHash("sha256")
-          .update(readFileSync(join(dir, rel)))
-          .digest("hex");
-        entries.push(`${rel.replace(/\\/g, "/")}:${hash}`);
-      }
-    }
-  }
-  walk("");
-  entries.sort();
-  return entries.join("\n");
-}
 
 let liveHarnessDir;
 let fingerprintBefore;
