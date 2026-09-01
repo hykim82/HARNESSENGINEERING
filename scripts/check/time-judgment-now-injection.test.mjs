@@ -16,9 +16,8 @@
 //       실제로 다시 위험으로 잡는지.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import { globSync } from "node:fs";
-import { join, dirname } from "node:path";
+import { readFileSync, readdirSync } from "node:fs";
+import { join, dirname, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   TIME_JUDGMENT_ENTRY_POINTS,
@@ -34,13 +33,64 @@ function loadBaseline() {
   return JSON.parse(readFileSync(BASELINE_PATH, "utf8"));
 }
 
+// HYK-414 2R -- `fs.globSync` (used here in 1R) does not exist in Node 20,
+// the version `.github/workflows/enforce.yml` pins CI to (this machine runs
+// v26.2.0, which is why 1R was green everywhere except CI: importing a
+// named export that a module doesn't provide is a module-load-time
+// SyntaxError, so this whole file registered ZERO tests under CI's Node --
+// exactly the "1 test(s) failed ... time-judgment-now-injection.test.mjs:1:1"
+// shape hyk359-ambient-env-regression.test.mjs's CI-canonical sweep caught
+// (coder-task.md §1). Not a floating-ambient-env-specific bug at all --
+// `globSync` fails under Node 20 unconditionally; the sweep just happened to
+// be the CI path that surfaced it (the outer canonical run hit the same
+// failure independently, matching CI's reported "fail 2"). Fixed by
+// replacing it with the SAME `readdirSync(dir, { recursive: true,
+// withFileTypes: true })` pattern relay-handshake.test.mjs's HYK-344 3R
+// `listMjsFilesRecursive` already uses -- that one is part of this same
+// CI-canonical suite and passes under Node 20 today, so this pattern is
+// proven on the pinned version, unlike `globSync`.
+function listFilesRecursive(rootDir, filterFn) {
+  const out = [];
+  for (const entry of readdirSync(rootDir, {
+    recursive: true,
+    withFileTypes: true,
+  })) {
+    if (!entry.isFile() || !filterFn(entry.name)) continue;
+    // entry.parentPath (Node 20.12+) / entry.path (older) -- both give the
+    // directory containing this entry; fall back defensively (same
+    // reasoning as relay-handshake.test.mjs's listMjsFilesRecursive).
+    const parentDir = entry.parentPath ?? entry.path ?? rootDir;
+    const abs = join(parentDir, entry.name);
+    out.push(relative(rootDir, abs).split(sep).join("/"));
+  }
+  return out;
+}
+
+// HYK-414 2R §2-2: whichever enumeration this scanner uses must never be
+// able to fail silently into "found 0 files -> 0 risky calls -> pass" --
+// that shape is exactly "격리에서 검사가 무력화되면 조용히 통과" the task
+// forbids. A real `scripts/` checkout has ~300+ `.test.mjs` files (326 at
+// HYK-414 1R) and ~150+ non-test `.mjs` files; a near-zero count means the
+// walk itself is broken (wrong root, unreadable directory, wrong recursive
+// option support), not that the repo genuinely shrank that much.
+function assertNonTrivialFileCount(files, minCount, label) {
+  assert.ok(
+    files.length >= minCount,
+    `sanity: recursive walk under scripts/ found only ${files.length} ${label} file(s), expected at least ${minCount} -- a near-zero count would let this scanner's checks pass vacuously instead of catching real risk (HYK-414 2R §2-2, "격리에서 검사가 무력화되면 조용히 통과 금지")`,
+  );
+}
+
 function scanRepo() {
-  const files = globSync("scripts/**/*.test.mjs", { cwd: REPO_ROOT });
+  const scriptsRoot = join(REPO_ROOT, "scripts");
+  const files = listFilesRecursive(scriptsRoot, (name) =>
+    name.endsWith(".test.mjs"),
+  );
+  assertNonTrivialFileCount(files, 100, ".test.mjs");
   const results = [];
   for (const relPath of files) {
-    const abs = join(REPO_ROOT, relPath);
+    const posixPath = `scripts/${relPath}`;
+    const abs = join(scriptsRoot, relPath);
     const src = readFileSync(abs, "utf8");
-    const posixPath = relPath.replace(/\\/g, "/");
     results.push(...scanTestFileForRiskyCalls(posixPath, src));
   }
   return results;
@@ -63,12 +113,15 @@ function groupCounts(riskyList) {
 // 강제한다.
 // ---------------------------------------------------------------------------
 test("(tj-0) REGISTERED_CHECK: TIME_JUDGMENT_ENTRY_POINTS가 실측(grep)과 정확히 일치한다 -- 새 now=Date.now() 진입점이 등록 없이 생기면 RED", () => {
-  const libFiles = globSync("scripts/**/*.mjs", { cwd: REPO_ROOT }).filter(
-    (f) => !f.endsWith(".test.mjs"),
+  const scriptsRoot = join(REPO_ROOT, "scripts");
+  const libFiles = listFilesRecursive(
+    scriptsRoot,
+    (name) => name.endsWith(".mjs") && !name.endsWith(".test.mjs"),
   );
+  assertNonTrivialFileCount(libFiles, 50, "non-test .mjs");
   const foundByFile = new Map(); // "relFile::fn" -> true
   for (const relPath of libFiles) {
-    const abs = join(REPO_ROOT, relPath);
+    const abs = join(scriptsRoot, relPath);
     const src = readFileSync(abs, "utf8");
     const baseName = relPath
       .split(/[\\/]/)
@@ -151,6 +204,58 @@ test("(tj-2) 회귀 고정: 이 라운드가 고친 relay-handshake-runner-recei
     stillRisky,
     [],
     `수리 대상 파일이 여전히 위험으로 잡힌다(now 주입이 빠졌거나 되돌아갔다): ${JSON.stringify(stillRisky)}`,
+  );
+});
+
+// ---------------------------------------------------------------------------
+// (tj-node20) HYK-414 2R 회귀 고정: `fs.globSync`(Node 22+ 전용, CI가 고정한
+// Node 20에는 없다 -- coder-task.md §1)이 이 탐지기의 두 파일 중 어디에도
+// 다시 들어오지 않는지 정적으로 고정한다.
+//
+// ★정직 한계(이 시험 자체의): 이건 "Node 20에서 실제로 통과하는지"를
+// 증명하지 않는다(이 기계는 v26.2.0뿐이라 실제로 Node 20을 실행할 수
+// 없다). 대신 그 실패로 이어지는 «원인»(globSync 참조 자체)의 재발을
+// 막는다. 실제 되돌림 변이는 이 세션에서 수동으로 한 번 확인했다(결과
+// 파일 §2-1에 기록): `node:fs`가 globSync를 안 내보내도록(Node 20을
+// 흉내) 커스텀 ESM 로더 훅으로 만든 뒤, globSync를 쓰는 (되돌린) 버전은
+// 정확히 CI가 본 것과 같은 모양(`tests 1/fail 1`, 위치 `:1:1`, 서브테스트
+// 0개 등록)으로 깨졌고, 지금 커밋된 버전은 그 흉내낸 환경에서도
+// 4/4 그대로 통과했다. 그 로더는 일회성 조사 도구라 커밋하지 않았다
+// (실험적 module.register API에 CI 스위트 전체를 계속 의존시키고 싶지
+// 않았다) -- 그래서 그 결과를 CI에서 매번 재확인하는 대신, 여기서는
+// 훨씬 값싸고 안전한 정적 재발 방지로 대체한다: globSync 문자열 자체가
+// 두 파일에 다시 나타나면 그 자체로 RED.
+test("(tj-node20)★ 되돌림 변이 고정: globSync -- Node 20에 없음, HYK-414 2R 원인 -- 가 이 탐지기의 두 파일 중 어디에도 다시 쓰이지 않는다", () => {
+  const libSrc = readFileSync(
+    join(HERE, "time-judgment-now-injection.mjs"),
+    "utf8",
+  );
+  const testSrc = readFileSync(
+    join(HERE, "time-judgment-now-injection.test.mjs"),
+    "utf8",
+  );
+  // ⚠️일부러 주석을 벗겨내지 않는다: relay-handshake.test.mjs류의
+  // stripCommentsBestEffort(정규식 기반)를 이 파일 자기 자신에 적용하면,
+  // 이 시험이 검사에 쓰는 정규식 리터럴 자체(`/\*...\*\//` 같은 문자
+  // 나열)를 "블록 주석"으로 오인해 소스 중간을 잘라먹는다(직접 겪음 --
+  // 그 상태로 실행하면 이 시험 자신의 코드 일부가 검사 대상 문자열에
+  // 그대로 노출돼 자기 자신을 오탐으로 잡았다). 대신 아래 두 패턴은
+  // «실제 참조 모양»(import 절 또는 호출 괄호)만 좁게 짚도록 만들어
+  // 주석 벗기기 없이 원본 그대로 돌려도 이 파일 자신의 설명 산문과는
+  // 절대 안 겹친다(코드로 checkRelayHandshake -- 산문에서는 "globSync"
+  // 뒤에 괄호나 import 구문이 바로 오지 않는다).
+  const referencesGlobSync = (src) =>
+    /\bglobSync\s*\(/.test(src) ||
+    /\{[^}]*\bglobSync\b[^}]*}\s*from\s*["']node:fs["']/.test(src);
+  assert.equal(
+    referencesGlobSync(libSrc),
+    false,
+    "time-judgment-now-injection.mjs가 globSync를 다시 참조한다 -- Node 20(CI 고정 버전)에 없는 API라 HYK-414 2R와 같은 모양으로 CI에서만 깨진다",
+  );
+  assert.equal(
+    referencesGlobSync(testSrc),
+    false,
+    "time-judgment-now-injection.test.mjs가 globSync를 다시 참조한다 -- Node 20(CI 고정 버전)에 없는 API라 HYK-414 2R와 같은 모양으로 CI에서만 깨진다",
   );
 });
 
