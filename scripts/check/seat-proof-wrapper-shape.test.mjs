@@ -293,10 +293,26 @@ for (const form of BYPASS_FORMS) {
   });
 }
 
-test("종합: 정본 문면은 모양 진단도 OK이고 verdict도 OK", async () => {
+// HYK-415-canonical-sync-2 (2026-09-01): since the HYK-271 modal-check wire
+// landed in the canonical body, the diagnostic (never the verdict
+// authority -- module header) now reads a known false positive here:
+// `& node (...dispatch-worker-modal-check.mjs) ... | ForEach-Object {
+// Write-Host ... }` is a SAFE discard-and-log pattern (nothing escapes to
+// the function's return value -- ForEach-Object's scriptblock only calls
+// Write-Host, never Write-Output), but findUncapturedGateCall's
+// SAFE_DISCARD_SUFFIX_RE only recognizes `| Out-Null`, not this notation --
+// exactly the class of "diagnostic can't keep up with every safe notation"
+// limitation the module header already documents (review r2/r3 history).
+// Per coder-task.md (HYK-415-canonical-sync-2 round) §2, the diagnostic
+// regex itself is out of scope to loosen (that's a verdict-adjacent change
+// requiring its own review, not a canonical-text sync); this test instead
+// records the CURRENT accurate expectation so it stops asserting something
+// no longer true of the real pinned body.
+test("종합: 정본 문면은 verdict OK -- 모양 진단은 알려진 오탐(UNCAPTURED_GATE_OUTPUT, HYK-271 모달체크 호출을 | ForEach-Object { Write-Host } 폐기로 인식 못함)", async () => {
   const combined = await judgeSeatProofWrapper(FIXED_FUNCTION_TEXT, CANONICAL);
   assert.equal(combined.verdict, "OK");
-  assert.equal(combined.diagnostic.verdict, "OK");
+  assert.equal(combined.diagnostic.verdict, "BROKEN");
+  assert.equal(combined.diagnostic.reasonCode, "UNCAPTURED_GATE_OUTPUT");
 });
 
 // ---------------------------------------------------------------------

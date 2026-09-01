@@ -5,11 +5,16 @@
 // counterexamples are provably the SAME text, not two hand-copied lists
 // that could silently drift apart.
 //
-// FIXED_FUNCTION_TEXT is the live control room `Invoke-SeatProofGate` body
-// as of the wrapper-shape-1/2/3 rounds (measured 2026-08-19, see
-// seat-proof-wrapper-canonical.json). It is a curated snapshot, not a live
-// read of the control room file -- see seat-proof-wrapper-shape.test.mjs's
-// "실물" test for the actual live-file comparison.
+// FIXED_FUNCTION_TEXT is the live control room `Invoke-SeatProofGate` body.
+// HYK-415-canonical-sync-2 (2026-09-01): re-synced to the post-HYK-271
+// body (the sidecar modal-check wire, see
+// docs/control-room-patches/HYK-271-wire-modal-check.md) -- copied
+// verbatim from scripts/check/fixtures/control-room-dispatch-worker-2026-09-01-
+// hyk271-wire-applied.ps1.txt, the same repo-tracked fixture
+// seat-proof-wrapper-canonical.json's sha256 was re-measured from. It is a
+// curated snapshot, not a live read of the control room file -- see
+// seat-proof-wrapper-shape.test.mjs's "실물" test for the actual live-file
+// comparison.
 
 export const FIXED_FUNCTION_TEXT = [
   "function Invoke-SeatProofGate([string]$dispatchId) {",
@@ -42,6 +47,14 @@ export const FIXED_FUNCTION_TEXT = [
   "  $gateOut = & node $gateCliPath --dispatch-show $dsShowPath --terminal-show $tsShowPath --harness-task-id $label --runtime-task-id $Task --dispatch-id $dispatchId --worktree-id $seatProofWorktreeId --worktree-path (Norm $Worktree) 2>&1",
   "  $gateExit = $LASTEXITCODE",
   '  foreach ($line in @($gateOut)) { Write-Host "      $line" }',
+  "  # HYK-271(2026-09-01, HYK-271-wire-1 -- docs/control-room-patches/HYK-271-preflight-preview-marker.md",
+  "  # §2/§2-a): 좌석 증명 게이트가 이미 통과했을 때만(先행 게이트가 이미",
+  "  # 비0이면 그대로 그 사유로 거부되므로 여기서 또 돌 이유가 없다), 같은",
+  "  # $tsShowPath로 사이드카 모달 검사기를 부른다 -- 추가 orca 조회 0, 기존",
+  "  # $gateExit 하나에 그대로 접는다(새 exit 코드·새 분기 없음, design doc",
+  '  # "두 게이트 중 하나라도 비0이면 기존 SEAT_PROOF_REJECTED 분기에 그대로',
+  '  # 올라탄다" 그대로).',
+  '  if ($gateExit -eq 0) { & node (Join-Path $Worktree "scripts/relay/dispatch-worker-modal-check.mjs") --terminal-show $tsShowPath 2>&1 | ForEach-Object { Write-Host "      $_" }; $gateExit = $LASTEXITCODE }',
   "  return $gateExit",
   "}",
 ].join("\n");
