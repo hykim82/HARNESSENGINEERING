@@ -21,9 +21,19 @@
 // it tested, so nobody is left wondering why an uncommitted fix "didn't
 // show up."
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdtempSync, readdirSync, realpathSync, rmSync } from "node:fs";
+import {
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import {
+  parseTapSummaryCounts,
+  writeRunnerReceipt,
+} from "./runner-receipt-writer.mjs";
 
 // Windows can hand back an 8.3 short-name form of %TEMP% (e.g.
 // "ADMINI~1"). At least one existing test (hyk171-cycle3a-mutation.test.mjs
@@ -94,6 +104,101 @@ function repoRootOf(cwd, execFile) {
   }).trim();
 }
 
+// HYK-411 §2-1: the runner writes its OWN observed exit code to a receipt
+// file -- a downstream pipe (`npm test | tail`) can rewrite what the shell
+// sees as ITS exit code, but it cannot reach back into this process and
+// change what this process writes to its own file. Deliberately
+// unconditional on runnerExit === 0 (§2-1 "실패했다고 영수증을 안 쓰면
+// 안 된다" -- a red run must leave a receipt too, or this fix only ever
+// proves the case nobody needed proving). Never throws: a failure to read
+// the tap summary or write the receipt must never be mistaken for -- and
+// must never suppress -- the suite's own real exit code (same "never
+// throws past this point" posture as consumption-receipt-writer.mjs's
+// writeConsumptionReceipt).
+function emitRunnerReceipt({
+  root,
+  sha,
+  runnerExit,
+  tapPath,
+  readFile,
+  writeReceipt,
+  nowMs,
+  log,
+}) {
+  let counts = { tests: null, pass: null, fail: null, skip: null };
+  try {
+    counts = parseTapSummaryCounts(readFile(tapPath, "utf8"));
+  } catch (err) {
+    log(
+      `[isolated-suite-runner] WARNING: could not read tap summary at ${tapPath} (${err.message}) -- receipt will carry null counts`,
+    );
+  }
+  try {
+    const { path } = writeReceipt({
+      harnessDir: join(root, ".harness"),
+      runnerExit,
+      counts,
+      headCommit: sha,
+      finishedAtMs: nowMs(),
+    });
+    log(`[isolated-suite-runner] runner receipt written -> ${path}`);
+  } catch (err) {
+    log(
+      `[isolated-suite-runner] WARNING: failed to write runner receipt (${err.message}) -- consumption-side fail-closed gate (relay-handshake.mjs) will treat this as a missing receipt`,
+    );
+  }
+}
+
+// Builds the argv for the in-clone `node --test` invocation. A second,
+// machine-readable tap reporter destination rides alongside the human-facing
+// spec reporter (HYK-411) -- `node --test` supports repeated
+// --test-reporter/--test-reporter-destination pairs, so both fire from one
+// process without disturbing the real-time inherited stdio a human watches.
+function buildNodeTestArgs(files, tapPath) {
+  return [
+    "--test",
+    "--test-reporter=spec",
+    "--test-reporter-destination=stdout",
+    "--test-reporter=tap",
+    `--test-reporter-destination=${tapPath}`,
+    ...files,
+  ];
+}
+
+// Runs the suite inside the already-prepared clone and returns its exit
+// code. Isolated into its own function so runIsolatedSuite's own branching
+// stays low (max-lines-per-function/complexity gate, coder-task.md quality
+// bar) -- this is the only place `result.status`'s absence (signal-killed
+// child) is normalized to a non-zero exit.
+function spawnSuiteInClone({ spawn, cloneDir, files, tapPath }) {
+  const result = spawn(process.execPath, buildNodeTestArgs(files, tapPath), {
+    cwd: cloneDir,
+    stdio: "inherit",
+    // HYK-403: marks this run as having gone through a canonical entry
+    // point, so canonical-suite-entrypoint.test.mjs (scripts/check, swept up
+    // by any construction of the four-directory glob, including a
+    // hand-built one) can tell a real `npm test` / CI run apart from someone
+    // hand-typing `node --test <glob>` directly against a live checkout --
+    // the exact shape that leaked into the control room on 2026-08-30.
+    env: {
+      ...process.env,
+      HYK403_CANONICAL_SUITE_ENTRYPOINT: "isolated-suite-runner",
+    },
+  });
+  return result.status ?? 1;
+}
+
+// Removes the two scratch directories this run made. Isolated so the
+// `keep` branch doesn't count against runIsolatedSuite's own complexity.
+function cleanupRunDirs({ keep, log, cloneDir, tapDir }) {
+  rmSync(tapDir, { recursive: true, force: true });
+  if (keep) {
+    log(`[isolated-suite-runner] --keep set: leaving clone at ${cloneDir}`);
+    return;
+  }
+  rmSync(cloneDir, { recursive: true, force: true });
+}
+
 // Orchestrates one full run: clone committed HEAD -> run the suite in the
 // clone -> report -> always clean up (unless `keep`). Returns the child
 // process's exit code so the CLI entry point can propagate it verbatim.
@@ -104,6 +209,10 @@ export function runIsolatedSuite({
   spawn = spawnSync,
   log = console.log,
   collectFiles = collectTestFiles,
+  mkdtemp = mkdtempSync,
+  readFile = readFileSync,
+  writeReceipt = writeRunnerReceipt,
+  nowMs = Date.now,
 } = {}) {
   const root = sourceRoot ?? repoRootOf(process.cwd(), execFile);
   const sha = execFile("git", ["rev-parse", "HEAD"], {
@@ -117,6 +226,13 @@ export function runIsolatedSuite({
   const dirty = porcelain.trim().length > 0;
 
   const cloneDir = mkdtempSync(join(longFormTmpdir(), "hyk208-isolated-"));
+  // HYK-411: this tap destination lives OUTSIDE cloneDir on purpose --
+  // writing it inside cloneDir would add an untracked file to the very
+  // checkout the 34 git-status-porcelain safety-net tests (see this file's
+  // own header) snapshot from inside, turning this runner's own
+  // instrumentation into a false positive for those tests.
+  const tapDir = mkdtemp(join(longFormTmpdir(), "hyk411-tap-"));
+  const tapPath = join(tapDir, "runner-output.tap");
   try {
     execFile("git", ["clone", "--quiet", root, cloneDir], { encoding: "utf8" });
     const files = collectFiles(cloneDir);
@@ -124,28 +240,22 @@ export function runIsolatedSuite({
     log(
       `[isolated-suite-runner] clone: ${cloneDir} (${files.length} test file(s))`,
     );
-    const result = spawn(process.execPath, ["--test", ...files], {
-      cwd: cloneDir,
-      stdio: "inherit",
-      // HYK-403: marks this run as having gone through a canonical entry
-      // point, so canonical-suite-entrypoint.test.mjs (scripts/check, swept
-      // up by any construction of the four-directory glob, including a
-      // hand-built one) can tell a real `npm test` / CI run apart from
-      // someone hand-typing `node --test <glob>` directly against a live
-      // checkout -- the exact shape that leaked into the control room on
-      // 2026-08-30.
-      env: {
-        ...process.env,
-        HYK403_CANONICAL_SUITE_ENTRYPOINT: "isolated-suite-runner",
-      },
+    const runnerExit = spawnSuiteInClone({ spawn, cloneDir, files, tapPath });
+
+    emitRunnerReceipt({
+      root,
+      sha,
+      runnerExit,
+      tapPath,
+      readFile,
+      writeReceipt,
+      nowMs,
+      log,
     });
-    return result.status ?? 1;
+
+    return runnerExit;
   } finally {
-    if (keep) {
-      log(`[isolated-suite-runner] --keep set: leaving clone at ${cloneDir}`);
-    } else {
-      rmSync(cloneDir, { recursive: true, force: true });
-    }
+    cleanupRunDirs({ keep, log, cloneDir, tapDir });
   }
 }
 

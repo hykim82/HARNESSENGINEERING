@@ -1320,6 +1320,138 @@ export function resolveHeadCommitBinding({
   return { ok: true, sha: resultHead.sha };
 }
 
+// HYK-411: 2026-09-01 실측(coder-task.md §1 원문) -- `npm test 2>&1 | tail`
+// 형태의 파이프는 **마지막 명령(tail)의** 종료코드를 셸에 보여준다. 실패한
+// 러너가 파이프 뒤에서 exit 0으로 보인다(독립 재현: `sh -c 'exit 7' 2>&1 |
+// tail -n 1` -> 파이프라인 exit 0). 실피해(HYK-408 1R): 워커가 낡은 수치
+// (이전 베이스라인 그대로)를 "검증"으로 보고했고, 사람이 총계 불일치를
+// 이상히 여겨 되물어서만 잡혔다 -- 기계가 막은 것이 아니었다.
+//
+// 이 축의 설계(coder-task.md §2-2 "주장 조건부"): 결과 파일이 "전체 러너
+// 결과"를 주장할 때만 작동한다. 판별 표지 = coder-task.md 1b_exec_line이
+// 지정하는 표준 실행 관용구 `npm test; echo "exit=$?"`가 남기는 칼럼 0의
+// 단독 `exit=<정수>` 줄 -- 이 관용구를 쓰지 않은(=주장하지 않은) 라운드는
+// 이 축을 완전히 건너뛰어 그대로 소비된다(§2-2 "주장하지 않은 라운드는
+// 영향 0", 과차단 금지 -- 살아 있는 레인을 막지 않는다는 요구).
+//
+// 주장이 있으면 `<harnessDir>/runner-receipt.json`(isolated-suite-runner.mjs
+// 가 스스로 쓰는 영수증, HYK-411 1R runner-receipt-writer.mjs)을 요구한다:
+//   - 영수증 없음                        -> MISSING (fail-closed)
+//   - JSON이 아니거나 필수 필드 결여      -> INVALID (fail-closed)
+//   - runner_exit !== 0                  -> RED (파이프가 숨긴 빨간 실행)
+//   - head_commit이 이 워크트리의 실제 HEAD와 다름 -> STALE (낡은 수치 재사용,
+//     HYK-408 실피해의 정확한 형태)
+// 네 사유를 서로 다른 code로 구별한다(HYK-413 "유휴/과차단 미구별" 재발
+// 방지와 같은 규율 -- resolveDispatchRecordExistence의 LOOKUP_FAILED/
+// ABSENT 구분과 동일 정신).
+//
+// ⛔zero-import 유지: relay-handshake.mjs를 고정 sidecar 파일목록으로
+// 격리 clone하는 다수의 mutation 시험(hyk186-time-authority-mutation.
+// test.mjs 등)이 이미 존재한다 -- 이 축에 새 모듈을 정적 import하면 그
+// 시험들 전부의 고정 목록이 이 파일도 알아야 하는 광범위한 파급이 생긴다
+// (admission-completion-adapter.mjs가 spawn으로만 불리는 것과 동일 근거,
+// 이 파일 아래 wasAdmissionCompletionAttempted 주석 참조). runner-receipt-
+// writer.mjs(생산자)는 이 파일을 전혀 모르고, 이 함수도 그 생산자를 전혀
+// import하지 않는다 -- 오직 fs.readFileSync + JSON.parse로 그 결과물만
+// 읽는다.
+export const RUNNER_RECEIPT_FILENAME = "runner-receipt.json";
+
+export const RUNNER_RECEIPT_REJECT_REASON = Object.freeze({
+  MISSING: "RUNNER_RECEIPT_MISSING",
+  RED: "RUNNER_RECEIPT_RED",
+  STALE: "RUNNER_RECEIPT_STALE",
+  INVALID: "RUNNER_RECEIPT_INVALID",
+});
+
+// coder-task.md 1b_exec_line 그대로: `npm test; echo "exit=$?"`. 표지는
+// 콜론 뒤 인용이 표지로 오인된 과거 함정(HEAD_COMMIT_RE_G 주석 참조)을
+// 반복하지 않도록 칼럼 0의 단독 줄만 인정한다.
+const RUNNER_EXIT_CLAIM_RE = /^exit=\d+[ \t]*$/m;
+
+export function resultClaimsRunnerResults(resultContent) {
+  return (
+    typeof resultContent === "string" &&
+    RUNNER_EXIT_CLAIM_RE.test(resultContent)
+  );
+}
+
+function readRunnerReceiptFile(harnessDir) {
+  const path = join(harnessDir, RUNNER_RECEIPT_FILENAME);
+  let raw;
+  try {
+    raw = readFileSync(path, "utf8");
+  } catch {
+    return { present: false, path };
+  }
+  try {
+    return { present: true, path, receipt: JSON.parse(raw) };
+  } catch (err) {
+    return { present: true, path, parseError: err.message };
+  }
+}
+
+export function resolveRunnerReceiptVerdict({ resultContent, harnessDir }) {
+  if (!resultClaimsRunnerResults(resultContent)) {
+    return { ok: true, skipped: true };
+  }
+
+  // 축 ⓑ(실물 대조)와 같은 함수 재사용: 워커의 자기 진술이 아니라 이
+  // 워크트리의 실제 HEAD를 기계가 직접 읽는다 -- 영수증의 head_commit을
+  // 대조할 기준값 자체가 위조 가능하면 이 축 전체가 무의미해진다.
+  const actualHead = readActualWorktreeHeadCommit(harnessDir);
+  if (!actualHead.ok) {
+    return {
+      ok: false,
+      code: RUNNER_RECEIPT_REJECT_REASON.INVALID,
+      reason: `runner receipt gate (HYK-411): cannot resolve this worktree's actual HEAD to compare against the receipt -- ${actualHead.reason}`,
+    };
+  }
+
+  const found = readRunnerReceiptFile(harnessDir);
+  if (!found.present) {
+    return {
+      ok: false,
+      code: RUNNER_RECEIPT_REJECT_REASON.MISSING,
+      reason: `runner receipt gate (HYK-411): result claims full runner results (standalone 'exit=<n>' line) but ${RUNNER_RECEIPT_FILENAME} is missing at '${found.path}' -- fail-closed, refusing to consume an unverifiable runner claim`,
+    };
+  }
+  if (found.parseError) {
+    return {
+      ok: false,
+      code: RUNNER_RECEIPT_REJECT_REASON.INVALID,
+      reason: `runner receipt gate (HYK-411): ${found.path} is not valid JSON (${found.parseError}) -- fail-closed`,
+    };
+  }
+  const receipt = found.receipt;
+  if (
+    typeof receipt !== "object" ||
+    receipt === null ||
+    typeof receipt.runner_exit !== "number" ||
+    typeof receipt.head_commit !== "string"
+  ) {
+    return {
+      ok: false,
+      code: RUNNER_RECEIPT_REJECT_REASON.INVALID,
+      reason: `runner receipt gate (HYK-411): ${found.path} missing required fields (runner_exit: number, head_commit: string) -- fail-closed`,
+    };
+  }
+  if (receipt.runner_exit !== 0) {
+    return {
+      ok: false,
+      code: RUNNER_RECEIPT_REJECT_REASON.RED,
+      reason: `runner receipt gate (HYK-411): runner receipt at ${found.path} reports runner_exit=${receipt.runner_exit} (non-zero) -- the runner itself observed a failed run, refusing to consume a result claiming green (파이프가 숨긴 빨간 실행 차단)`,
+    };
+  }
+  if (receipt.head_commit.toLowerCase() !== actualHead.sha) {
+    return {
+      ok: false,
+      code: RUNNER_RECEIPT_REJECT_REASON.STALE,
+      reason: `runner receipt gate (HYK-411): runner receipt at ${found.path} head_commit '${receipt.head_commit}' does not match this worktree's actual HEAD '${actualHead.sha}' -- refusing to consume a stale/reused runner result (HYK-408 1R 실피해 재발 방지)`,
+    };
+  }
+  return { ok: true };
+}
+
 // HYK-387: 2026-08-29 실사고 -- ORCH가 태스크 문안을 좌석에 배달했으나
 // 배정(dispatch) 기록 생성이 `agent_prompt_stalled`로 실패했다. 문안은
 // 도착했고 워커는 그대로 라운드를 시작해 커밋까지 만들었다. 런타임
@@ -2202,6 +2334,17 @@ export function checkRelayHandshake({
     harnessDir,
   });
   if (!headCommitVerdict.ok) return headCommitVerdict;
+
+  // HYK-411: headCommitVerdict와 같은 자리 원칙(§4 무회귀) -- role 무관(이번
+  // 실사고 HYK-408 1R도 CODER 라운드였다, resolveDispatchRecordExistence와
+  // 동일 논거). resultContent가 "전체 러너 결과"를 주장하지 않으면 즉시
+  // ok:true(skipped)로 빠져 나가 이 축이 존재하기 전과 완전히 동일하게
+  // 움직인다(과차단 금지).
+  const runnerReceiptVerdict = resolveRunnerReceiptVerdict({
+    resultContent,
+    harnessDir,
+  });
+  if (!runnerReceiptVerdict.ok) return runnerReceiptVerdict;
 
   // HYK-387: headCommitVerdict와 같은 자리 원칙(§4 무회귀) -- REVIEW 한정
   // 아님(오늘의 실사고는 CODER 라운드였다, coder-task.md §1 원문).
