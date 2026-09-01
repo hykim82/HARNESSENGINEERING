@@ -1,0 +1,70 @@
+{
+  "schema_version": 1,
+  "note": "HYK-412 1R -- machine-readable inventory of what evidence actually survives for a NEVER-CONSUMED round (a round for which .harness/rounds/<ROLE>-r<N>.md was never created, because that file is only written AT consumption time -- the chicken-and-egg problem this issue exists to solve). Grounded against the real specimen HYK-271-evidence-3 (admission-ledger.json reservation: status=ACTIVE, role=CODER, admitted_at=2026-08-30T03:10:07.624Z, completed_at=null) wherever a concrete check was possible in this round; items whose sample_check is null were not independently re-verified this round (do not treat as confirmed). This is an INTEGRITY list (format/required-fields/no-duplicates), not a closure mechanism -- see docs/HYK-412-stuck-retire-design.md for the design this inventory feeds. Read/validated by scripts/check/hyk412-stuck-retire-inventory.test.mjs. Do not hand-edit a `sample_check` value without re-running the citation against the live file -- a stale claim is worse than no claim.",
+  "items": [
+    {
+      "id": "admission-ledger-reservation",
+      "path": "D:\\문서관리\\하네스-관제실\\admission-ledger.json (reservations.<harness_task_label>)",
+      "confidence": "확실",
+      "machine_independently_reconfirmable": true,
+      "sample_check": "실측(2026-09-01, 이 라운드): reservations['HYK-271-evidence-3'] = {status:'ACTIVE', role:'CODER', seat_key:'2d2c223e-...', admitted_at:'2026-08-30T03:10:07.624Z', completed_at:null, suspect_at:null, flagged_unjudgeable_at:null, source:'admission'} -- JSON.parse로 직접 확인, ORCH/워커 진술에 의존하지 않음",
+      "caveat": "이 파일은 harnessDir(워크트리) 범위 밖의 전역 경로다. 현재 dispatch-gate-decision.mjs/admission-completion-adapter.mjs의 어댑터는 이 경로를 전혀 읽지 않는다(zero-import 코어 원칙상 어댑터가 '사실을 이미 읽어 인자로 넘기는' 구조인데, 지금까지 그 사실 목록에 admission-ledger가 없었다) -- 이 축을 쓰려면 새 결합(coupling)을 여는 설계 결정이 필요하다(§2 설계안 참조)."
+    },
+    {
+      "id": "dispatch-receipt-entry",
+      "path": "D:\\문서관리\\하네스-관제실\\dispatch-receipts.jsonl (harness_task_label 매칭 라인)",
+      "confidence": "확실",
+      "machine_independently_reconfirmable": true,
+      "sample_check": "실측: 554줄 중 harness_task_label='HYK-271-evidence-3' 매칭 정확히 1건 -- {recorded_at, runtime_task_id:'task_3d90a273bccb', dispatch_id:'ctx_f1073c7d173c', assignee_pane_key:'2d2c223e-...', dispatch_timestamp_utc:'2026-08-30 03:10:07', role:'CODER'}. seat_key가 admission-ledger 항목과 정확히 일치.",
+      "caveat": "append-only jsonl로 보이나, 이 라운드는 그 append-only성을 강제하는 파일 잠금/서명/해시체인이 있는지 확인하지 않았다(미확인) -- 파일시스템 쓰기 권한을 가진 주체가 라인을 삭제/편집해도 이 축은 그 변조를 스스로 탐지하지 못한다."
+    },
+    {
+      "id": "control-room-task-preservation-copy",
+      "path": ".harness/rounds/<role>-task-r<N>.md (관제실 아카이브 보존 사본, task 파일 쪽)",
+      "confidence": "확실",
+      "machine_independently_reconfirmable": true,
+      "sample_check": "실측: 아카이브\\2026-08-30-HYK271-산출물\\hyk271-review-open-1\\rounds\\coder-task-r1.md 존재, 봉투헤더 dropped_at='2026-08-30 12:10 KST'(=admitted_at UTC를 KST로 환산한 값과 초 단위까지 일치), task_id: HYK-271-evidence-3 -- 이 워크트리가 그 admission이 배정됐던 실제 워크트리임을 강하게 뒷받침.",
+      "caveat": "task 보존본은 다음 라운드가 드롭될 때(즉 다음 라운드가 실제로 시작될 때)만 생긴다 -- '다음 라운드가 아예 없었던' 케이스(정말로 아무도 재시도하지 않은 채 영원히 방치된 라운드)에는 이 사본도 없을 수 있다(정직 한계, §4)."
+    },
+    {
+      "id": "control-room-result-archive-copy",
+      "path": ".harness/rounds/<ROLE>-r<N>.md (관제실 아카이브 보존 사본, 결과 파일 쪽 -- 소비 시점에만 생성)",
+      "confidence": "확실",
+      "machine_independently_reconfirmable": true,
+      "sample_check": "실측(부재 확인): 아카이브\\2026-08-30-HYK271-산출물\\hyk271-review-open-1\\rounds\\ 안에는 coder-task-r1.md/coder-task-r2.md/REVIEW-r1.md/review-task-r1.md만 있고 CODER-r1.md(evidence-3 라벨의 결과 보존본)는 0건 -- 문제 진술(§1) '결과 보존본 0건'이 이 표본에서 그대로 확인됨.",
+      "caveat": "이 항목이 바로 이 이슈의 급소다 -- resolveRetirementArchiveCandidate/ForAdapter 두 함수 모두 이 파일이 있어야만 exists:true를 낼 수 있는데, 소비된 적 없는 라운드에는 정의상 이 파일이 없다(닭-달걀). 이 이슈의 설계는 '이 항목이 없어도' 다른 항목들로 은퇴를 인정할 조건을 세우는 것이다."
+    },
+    {
+      "id": "live-worktree-full-snapshot-copy",
+      "path": "(비정형) 관제실 안에 사람/ORCH이 사고 조사를 위해 수동으로 통째로 복사해 둔 워크트리 전체 사본 -- 예: 아카이브\\2026-08-30-HYK271-산출물\\hyk271-review-open-1\\ (coder.md/coder-task.md/coder-done-first-observation.jsonl 원본 그대로)",
+      "confidence": "추론",
+      "machine_independently_reconfirmable": true,
+      "sample_check": "실측: 이 표본에는 실제로 존재한다 -- coder.md에 task_id_from_dispatch:'task_3d90a273bccb'(=dispatch-receipt의 runtime_task_id와 일치) · task_id:'HYK-271-evidence-3', coder-done-first-observation.jsonl에 taskId='HYK-271-evidence-3' 1건, manifest-md5.txt로 MD5 무결성까지 남아 있다. 하지만 이 디렉터리명('HYK271-산출물')과 주변 문서(REVIEW-r1.md 본문이 HYK-394/396/398 사고조사를 언급)로 보아 -- 이 사본은 '모든 은퇴 대상 라운드에 대해 시스템이 자동으로 만드는 것'이 아니라 HYK-271 특정 사고 조사를 위해 사람이 그때그때 통째로 복사해 둔 것으로 보인다.",
+      "caveat": "★일반화 불가(정직 의무) -- 이 축이 이번 표본에서 우연히 존재한다고 해서 미래의 다른 stuck 라운드에도 존재하리라 가정하면 안 된다. 이 축을 '증거'로 설계에 넣으면, 실제로는 '사람이 그때 마침 백업해 뒀는가'라는 운에 좌우되는 문이 된다 -- 닫힌 집합 조건으로 못 쓴다(§2 설계안에서 이 축을 '있으면 강한 보강, 없어도 되는 조건으로는 쓰지 않는다'로 명시)."
+    },
+    {
+      "id": "done-first-observation-record",
+      "path": "<harnessDir>/<role>-done-first-observation.jsonl (해당 라운드 라이브 워크트리 자체, 소비 이전 원본 위치)",
+      "confidence": "미확인",
+      "machine_independently_reconfirmable": true,
+      "sample_check": "이 표본(HYK-271-evidence-3)의 원 라이브 워크트리는 이미 정리됨(§1 확정사실) -- 원본 위치에서는 재확인 불가. 다만 위 live-worktree-full-snapshot-copy 축(우연한 백업)에서 taskId 일치 1건을 발견했다: {taskId:'HYK-271-evidence-3', droppedAt:'2026-08-30 12:10 KST', resultFingerprint:'8737aa75...', doneLineRaw:'>>> DONE: CODER @ 2026-08-30 03:23:24 KST'}. ★이 doneLineRaw가 dropped_at보다 시계상 '과거'로 보이는데(03:23:24 < 12:10) -- 이는 retirement-record-core.mjs가 이미 아는 사유 코드 DONE_PREDATES_DROPPED_AT과 정확히 같은 모양의 사실이다(단, 이 라운드는 이 표본이 실제로 그 사유였다고 결론 내리지 않는다 -- [내 주장] 등급, 검토 확인 전).",
+      "caveat": "이 파일은 원래 라이브 워크트리 안에서만 생기며, 통상적인 정리 절차(worktree rm)로 함께 사라진다 -- 백업이 없었다면 이 축 자체가 통째로 소멸했을 것이다. '소비 부재'와 '증거 결여'를 가르는 데 가장 중요한 축이지만 가장 휘발성이 크다(§2 설계안 핵심 문제)."
+    },
+    {
+      "id": "consumption-attempt-rejection-record",
+      "path": "(없음 -- 조사 결과)",
+      "confidence": "확실",
+      "machine_independently_reconfirmable": false,
+      "sample_check": "grep 실측: scripts/ 전체에서 게이트 결정을 지속 저장(writeFileSync/appendFileSync)하는 코드를 찾지 못함 -- dispatch-gate-decision.mjs/admission-completion-adapter.mjs는 매 호출 시 판정을 '계산해 반환'만 하고 디스크에 로그를 남기지 않는다(3169/3199줄의 유이한 writeFileSync는 task 파일 갱신용, 게이트 결정 로그가 아님).",
+      "caveat": "'소비를 여러 번 시도했으나 매번 거부됐다'는 사실 자체를 지속 기록하는 메커니즘이 이 코드베이스에 없다 -- 즉 '시도가 있었는가 없었는가'를 사후에 기계로 재구성할 방법이 원천적으로 없다. 지어내지 말라는 지시(coder-task.md §2-1)에 따라 정직하게 '없다'로 기재한다."
+    },
+    {
+      "id": "duplicate-gate-implementation-pair",
+      "path": "scripts/check/dispatch-gate-decision.mjs:2031 resolveRetirementArchiveCandidate() ↔ scripts/check/admission-completion-adapter.mjs:441 resolveRetirementArchiveCandidateForAdapter()",
+      "confidence": "확실",
+      "machine_independently_reconfirmable": true,
+      "sample_check": "실측: 두 함수 모두 `.harness/rounds/<role>-r<N>.md`를 readdir하고, envelope 헤더를 벗긴 뒤 task_id 에코가 harnessTaskLabel과 일치하는 사본을 찾아 sha256 지문을 대조하는 동일 로직 -- 코드 자체를 직접 읽어 확인(진술 아님). 0개/2개 이상일 때의 반환 모양도 동일.",
+      "caveat": "이건 '증거'가 아니라 '설계가 반드시 답해야 하는 구조적 사실'이다 -- 이 라운드는 이 사실을 인벤토리에 넣어 설계안(§2-2)이 이 쌍을 어떻게 다룰지 명시적으로 답하게 강제한다."
+    }
+  ]
+}
