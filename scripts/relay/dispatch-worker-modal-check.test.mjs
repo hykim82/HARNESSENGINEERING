@@ -26,6 +26,8 @@ import { SAMPLES } from "./hyk271-axis-preview-marker-synthetic.test.mjs";
 import {
   REAL_INCIDENT_SAMPLES,
   FALSE_POSITIVE_SAMPLES,
+  KNOWN_OVER_BLOCK_SAMPLES,
+  REVIEWER_FALSE_NEGATIVE_SAMPLE,
 } from "./hyk271-marker-catalog-real-corpus.test.mjs";
 
 function withTempDir(fn) {
@@ -225,15 +227,17 @@ test("runModalCheck: missing --terminal-show argument fails closed with exit 2 (
 });
 
 // ---------------------------------------------------------------------------
-// HYK-271-marker-catalog-3 (2R repair): end-to-end confidence check -- the
-// real-corpus test file has its own local classify() helper (a thin
-// reimplementation of runModalCheck's own three-stage check, for test
-// convenience). This test drives the SAME real-incident and false-positive
-// samples through the actual PRODUCTION entry point (runModalCheck, via
-// real file I/O) instead, so a divergence between the test helper and the
-// real wiring cannot hide a defect.
+// HYK-271-marker-catalog-4 (3R criterion-correction repair, coder-task.md
+// §2⑵ⓓ "검토가 뚫었던 표본을 시험으로 못 박아라 ... 재구현 분류기로만 확인하지
+// 마라"): end-to-end confidence check -- the real-corpus test file has its
+// own local classify() helper (a thin reimplementation of runModalCheck's
+// own two-stage check, for test convenience). This test drives the SAME
+// real-incident, false-positive, known-over-block, AND the reviewer's exact
+// false-negative-reproduction samples through the actual PRODUCTION entry
+// point (runModalCheck, via real file I/O) instead, so a divergence between
+// the test helper and the real wiring cannot hide a defect.
 // ---------------------------------------------------------------------------
-test("runModalCheck (production entry point, not the test helper): real incident samples MODAL, false-positive samples (including the self-edit-screen quote) NON_MODAL", () => {
+test("runModalCheck (production entry point, not the test helper): real incident + known-over-block + reviewer's false-negative-repro samples MODAL, false-positive samples NON_MODAL", () => {
   withTempDir((dir) => {
     const mismatches = [];
     REAL_INCIDENT_SAMPLES.forEach((s, i) => {
@@ -247,6 +251,36 @@ test("runModalCheck (production entry point, not the test helper): real incident
         });
       }
     });
+    KNOWN_OVER_BLOCK_SAMPLES.forEach((s, i) => {
+      const path = writeTerminalShow(
+        dir,
+        `known-over-block-${i}.json`,
+        s.preview,
+      );
+      const result = runModalCheck(["--terminal-show", path]);
+      if (result.verdict !== VERDICT.MODAL) {
+        mismatches.push({
+          label: s.label,
+          expected: "MODAL",
+          got: result.verdict,
+        });
+      }
+    });
+    {
+      const path = writeTerminalShow(
+        dir,
+        "reviewer-false-negative-repro.json",
+        REVIEWER_FALSE_NEGATIVE_SAMPLE.preview,
+      );
+      const result = runModalCheck(["--terminal-show", path]);
+      if (result.verdict !== VERDICT.MODAL) {
+        mismatches.push({
+          label: REVIEWER_FALSE_NEGATIVE_SAMPLE.label,
+          expected: "MODAL",
+          got: result.verdict,
+        });
+      }
+    }
     FALSE_POSITIVE_SAMPLES.forEach((s, i) => {
       const path = writeTerminalShow(
         dir,

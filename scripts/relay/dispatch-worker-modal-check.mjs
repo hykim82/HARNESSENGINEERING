@@ -51,13 +51,25 @@ export const MODAL_MARKERS = Object.freeze([
 // sentence that mentions two hint names ("press Enter to select, and use
 // the arrow keys to navigate between options" -- gap far exceeds 15).
 //
-// Residual risk (documented, not hidden -- coder-task.md §3-4): a document
-// that quotes a real tail line VERBATIM, with its original " · " spacing,
-// still matches -- this fix narrows the false-positive surface, it does
-// not eliminate every way to construct one. See
-// scripts/relay/hyk271-marker-catalog-real-corpus.test.mjs for the measured
-// false-positive samples (ordinary prose, documentation, and this file's
-// own diff) this fix was built against.
+// Residual risks (documented, not hidden -- HYK-271-marker-catalog-4,
+// coder-task.md §3-5, maxGapChars is NOT to be widened to close either of
+// these -- doing so would just reopen the false-positive surface this
+// combo was built to close):
+//   - False positive: a document that quotes a real tail line VERBATIM,
+//     with its original " · " spacing, still matches -- this fix narrows
+//     the false-positive surface, it does not eliminate every way to
+//     construct one. Includes this catalog's OWN source/diff form quoting
+//     "Enter to select" next to a companion word -- an accepted,
+//     documented over-block, see hyk271-marker-catalog-real-corpus.test.mjs's
+//     "KNOWN OVER-BLOCK" sample.
+//   - False negative: if the noise between "Enter to select" and its
+//     nearest companion exceeds maxGapChars=15 (a redraw artifact, extra
+//     wrapping, etc.), the combo misses it -- measured real-incident gaps
+//     were 3 and 7 chars, so this is headroom, not a tight fit, but it is
+//     not a proof that no real menu ever exceeds 15.
+// See scripts/relay/hyk271-marker-catalog-real-corpus.test.mjs for the
+// measured false-positive samples (ordinary prose, documentation, and this
+// file's own diff) this combo was built against.
 export const MODAL_TAIL_COMBO = Object.freeze({
   primary: "Enter to select",
   companions: Object.freeze(["to navigate", "Esc to cancel", "Esc to back"]),
@@ -86,49 +98,6 @@ export function previewMatchesTailCombo(preview, combo) {
         : primaryIndex - companionEnd;
     return gap >= 0 && gap <= combo.maxGapChars;
   });
-}
-
-// HYK-271-marker-catalog-3 (2R repair, found while building the ⓒ3
-// self-edit-screen regression sample required by coder-task.md §2⑵): the
-// self-blocking risk in coder-task.md §1 is not unique to "Enter to
-// select". The exact screen §1 quotes --
-//   `      237      "Allow command?",`
-//   `      238 +    "Enter to select",`
-// -- also contains `"Allow command?",`, one of the ORIGINAL four 1R
-// markers, as unchanged diff context. A real rendered modal never wraps its
-// own prompt text in an escaped double-quote immediately followed by a
-// comma -- that exact shape is JS array-literal syntax, i.e. THIS FILE's
-// own source (or a diff of it). So: before matching anything, strip every
-// exact `"<catalog literal>",` occurrence, for every string this catalog
-// currently owns (both MODAL_MARKERS and the tail combo's primary/
-// companions), so a source-code quote of the catalog can never be mistaken
-// for the catalog's own target text. This generalizes the §1 fix to all
-// current and future catalog entries, not just "Enter to select" -- the
-// same class of self-edit collision would otherwise resurface the next
-// time any marker is added or edited here.
-//
-// Residual risk (documented, not hidden -- coder-task.md §3-4): this only
-// strips the EXACT `"<literal>",` shape (double-quote, then the literal
-// text unchanged, then a comma) -- a diff/editor rendering the same literal
-// with single quotes, backticks, a different trailing character (e.g. the
-// array's closing entry, which has no trailing comma), or with the literal
-// text itself edited mid-keystroke, would not be stripped and could still
-// self-block. This narrows the specific collision §1 observed; it does not
-// make every rendering of this file's own source immune.
-const SELF_CATALOG_LITERALS = [
-  ...MODAL_MARKERS,
-  MODAL_TAIL_COMBO.primary,
-  ...MODAL_TAIL_COMBO.companions,
-];
-function escapeRegExpLiteral(text) {
-  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-export function stripSelfCatalogSourceQuotes(preview) {
-  if (typeof preview !== "string") return preview;
-  return SELF_CATALOG_LITERALS.reduce((text, literal) => {
-    const pattern = new RegExp(`"${escapeRegExpLiteral(literal)}",`, "g");
-    return text.replace(pattern, "");
-  }, preview);
 }
 
 import { readFileSync } from "node:fs";
@@ -242,17 +211,9 @@ export function runModalCheck(argv, opts = {}) {
     };
   }
 
-  // opts.skipSelfCatalogStrip is a TEST SEAM ONLY (default: strip applied)
-  // -- lets the ⓐ mutation test reproduce the self-edit-screen false
-  // positive by disabling this step, same pattern as opts.markers/
-  // opts.tailCombo below.
-  const cleanedPreview = opts.skipSelfCatalogStrip
-    ? preview
-    : stripSelfCatalogSourceQuotes(preview);
-
   const markers = Array.isArray(opts.markers) ? opts.markers : MODAL_MARKERS;
   const matched = markers.find((marker) =>
-    previewContainsMarker(cleanedPreview, marker),
+    previewContainsMarker(preview, marker),
   );
   if (matched) {
     return {
@@ -269,7 +230,7 @@ export function runModalCheck(argv, opts = {}) {
   // `null` disables the combo check entirely without adding a new branch or
   // exit code.
   const tailCombo = "tailCombo" in opts ? opts.tailCombo : MODAL_TAIL_COMBO;
-  if (previewMatchesTailCombo(cleanedPreview, tailCombo)) {
+  if (previewMatchesTailCombo(preview, tailCombo)) {
     return {
       ok: false,
       exitCode: 2,
