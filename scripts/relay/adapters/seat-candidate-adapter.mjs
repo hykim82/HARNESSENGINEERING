@@ -266,13 +266,18 @@ const DEAD_SHELL_PROMPT_RE = /^PS [A-Za-z]:\\.*>\s*$/;
 // documents that these are UNVERIFIED/opt-in-only and known to differ from
 // the canonical set; exporting them for a lock/pin test does not change that
 // status or wire them into any production decision path.
+// HYK-408-seat-decide (coder-task.md §2(2)): 실제 런처 배너가
+// `[<Role> seat]`(orca-adapter.mjs의 AGENT_MARKER_RE 주석 참조)라 이
+// 사본도 같이 고친다(어긋난 채로 두면 다음 사람이 어느 쪽이 맞는지
+// 다시 실측해야 한다 -- seat-marker-divergence.contract.test.mjs가 두
+// 사본의 의식적 동기화를 강제한다).
 export const CLAUDE_AGENT_MARKERS = [
   "Sonnet",
   "Opus",
   "Haiku",
-  "[CODER]",
-  "[REVIEW]",
-  "[VERIFY]",
+  "[CODER seat]",
+  "[REVIEW seat]",
+  "[VERIFY seat]",
   "bypass permissions",
 ];
 export const CODEX_AGENT_MARKERS = ["gpt-5.6", "codex"];

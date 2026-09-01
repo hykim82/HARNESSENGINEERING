@@ -134,12 +134,19 @@ export default [
     // enforced separately by orca-cli-boundary.mjs/G9). Same shape as the
     // exceptions above: a production entry point wiring an already-merged
     // relay port, not a reopening of the general dependency direction.
+    // HYK-408-seat-decide (coder-task.md §3 완료조건3): same shape one
+    // more time -- hyk408-seat-decide-repro.test.mjs exercises
+    // classifySeatPreview/collectSeatLivenessObservation/AGENT_MARKER_RE/
+    // DELIVERED_SEAT_REASON directly (read-only adapter ports) against
+    // real-measured strings to pin the ledger-primary/screen-fallback
+    // repro, same pattern as hyk185-seat-multi-repro.test.mjs above.
     files: [
       "scripts/supervisor/orch-stall-detect.mjs",
       "scripts/supervisor/seat-liveness-wire.test.mjs",
       "scripts/supervisor/seat-idle-wire.test.mjs",
       "scripts/supervisor/dispatch-start-wire.test.mjs",
       "scripts/supervisor/hyk185-seat-multi-repro.test.mjs",
+      "scripts/supervisor/hyk408-seat-decide-repro.test.mjs",
       "scripts/supervisor/watch-run.mjs",
       "scripts/supervisor/escalation-axis-wire.test.mjs",
       "scripts/supervisor/reach-report-core.mjs",

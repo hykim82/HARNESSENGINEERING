@@ -41,10 +41,16 @@ function splitRegexAlternation(re) {
   return re.source.split("|").map((token) => token.replace(/\\(.)/g, "$1"));
 }
 
+// HYK-408-seat-decide: 두 마커 소스 다 `[CODER]`/`[REVIEW]`에서
+// `[CODER seat]`/`[REVIEW seat]`(+ 사본은 `[VERIFY seat]`도)로 갱신됐다 --
+// 실제 런처 배너(`[$Role seat] worktree=...`, orca-adapter.mjs
+// AGENT_MARKER_RE 주석 참조)와 글자 그대로 일치시키는 수리다(그 전에는
+// 한 번도 일치한 적이 없었다). 아래 두 pin은 "지금 그대로"를 새 정본으로
+// 다시 고정한다.
 test("HYK-350 계약 ⓐ (pin, 운영본): AGENT_MARKER_RE의 소스 문자열이 지금 그대로다 -- 바뀌면 이 시험이 먼저 빨강이 된다(계약 문서화)", () => {
   assert.equal(
     AGENT_MARKER_RE.source,
-    "gpt-5\\.6|Sonnet|Opus|\\[CODER\\]|\\[REVIEW\\]|bypass permissions|MCP startup|weekly \\d",
+    "gpt-5\\.6|Sonnet|Opus|\\[CODER seat\\]|\\[REVIEW seat\\]|bypass permissions|MCP startup|weekly \\d",
   );
 });
 
@@ -53,9 +59,9 @@ test("HYK-350 계약 ⓑ (pin, 사본): CLAUDE_AGENT_MARKERS/CODEX_AGENT_MARKERS
     "Sonnet",
     "Opus",
     "Haiku",
-    "[CODER]",
-    "[REVIEW]",
-    "[VERIFY]",
+    "[CODER seat]",
+    "[REVIEW seat]",
+    "[VERIFY seat]",
     "bypass permissions",
   ]);
   assert.deepEqual(CODEX_AGENT_MARKERS, ["gpt-5.6", "codex"]);
@@ -78,7 +84,7 @@ test("HYK-350 계약 ⓒ (divergence pin, 핵심): 두 정의의 차이 집합�
   );
   assert.deepEqual(
     localOnly,
-    ["Haiku", "[VERIFY]", "codex"],
+    ["Haiku", "[VERIFY seat]", "codex"],
     "사본에만 있고 운영본에는 없는 마커 -- 이 목록이 바뀌면 누군가 한쪽만 고쳤다는 뜻",
   );
 });

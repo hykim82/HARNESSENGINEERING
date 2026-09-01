@@ -3233,18 +3233,33 @@ test("previewShowsBusySignal: unit -- recognizes both known busy signals, reject
 // 86~93) -- same marker set, same D15 dead-shell-wins-over-old-markers
 // ordering. Unit-tested independently of collectSeatLivenessObservation's
 // wiring (same convention as previewShowsBusySignal above).
+//
+// HYK-408-seat-decide (dead-marker fix): the bracket markers below are
+// `[CODER seat]`/`[REVIEW seat]`, not `[CODER]`/`[REVIEW]` -- the real
+// launcher banner (`D:\문서관리\하네스-관제실\orca-worker-seat.ps1:19`,
+// `Write-Host "[$Role seat] worktree=..."`) always appends " seat" after
+// the role. The old bracket-only markers never matched anything real (see
+// orca-adapter.mjs's AGENT_MARKER_RE header comment).
 test("previewLooksLikeAgent: unit -- recognizes each ported agent marker, rejects a blank/plain shell", () => {
   assert.equal(previewLooksLikeAgent("gpt-5.6\n? for shortcuts\n"), true);
   assert.equal(previewLooksLikeAgent("Sonnet 4.5\n"), true);
   assert.equal(previewLooksLikeAgent("Opus 4.1\n"), true);
-  assert.equal(previewLooksLikeAgent("[CODER] working on HYK-345\n"), true);
-  assert.equal(previewLooksLikeAgent("[REVIEW] checking diff\n"), true);
+  assert.equal(
+    previewLooksLikeAgent("[CODER seat] working on HYK-345\n"),
+    true,
+  );
+  assert.equal(previewLooksLikeAgent("[REVIEW seat] checking diff\n"), true);
   assert.equal(previewLooksLikeAgent("bypass permissions on\n"), true);
   assert.equal(previewLooksLikeAgent("MCP startup complete\n"), true);
   assert.equal(previewLooksLikeAgent("weekly 3 summary\n"), true);
   assert.equal(previewLooksLikeAgent(""), false);
   assert.equal(previewLooksLikeAgent("PS C:\\Users\\Administrator>"), false);
   assert.equal(previewLooksLikeAgent("just a normal shell prompt"), false);
+  // HYK-408-seat-decide RED-before-fix repro: the old, never-matching
+  // bracket form no longer counts as an agent marker on its own (it isn't
+  // what the real launcher prints) -- this pins the fix so the old bug
+  // form can't quietly come back.
+  assert.equal(previewLooksLikeAgent("[CODER] working on HYK-345\n"), false);
 });
 
 // D15 비타협 (§3): 죽은 셸(마지막 프레임이 살아있는 PS 프롬프트로 끝남)은
@@ -3253,7 +3268,7 @@ test("previewLooksLikeAgent: unit -- recognizes each ported agent marker, reject
 // 된다(mutation coverage).
 test("previewLooksLikeAgent: D15 -- a dead shell whose scrollback still contains an old agent marker is still classified as NOT an agent (dead-shell check wins)", () => {
   const preview =
-    "Sonnet 4.5\n[CODER] finished, agent exited\nPS C:\\Users\\Administrator\\orca\\workspaces\\foo>";
+    "Sonnet 4.5\n[CODER seat] finished, agent exited\nPS C:\\Users\\Administrator\\orca\\workspaces\\foo>";
   assert.equal(previewLooksLikeAgent(preview), false);
 });
 
