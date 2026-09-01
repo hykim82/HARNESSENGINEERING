@@ -1,4 +1,4 @@
-import { readFileSync, existsSync, statSync } from "node:fs";
+import { readFileSync, existsSync, statSync, readdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execSync, execFileSync } from "node:child_process";
@@ -1652,13 +1652,184 @@ function checkRewriteAndStaleness({
   }
 
   if (doneAt < droppedAt) {
+    // HYK-398: `state` is a NEW field on this branch (previously absent --
+    // only `ok`/`reason` existed here). Additive only: every existing
+    // caller/test that reads `.ok`/`.reason` off this exact shape is
+    // unaffected (no field was renamed or removed). checkRelayHandshake
+    // uses this new `state` (below) to decide whether to attempt the
+    // retirement-release side effect -- see
+    // runRetirementSideEffectsIfApplicable's own header for why this exact
+    // state, and only this one, triggers it.
     return {
       ok: false,
+      state: "STALE_DONE_PREDATES_DROP",
       reason: `stale result: DONE (${doneMatch[1].trim()}) predates task drop (${droppedMatch[1].trim()})`,
     };
   }
 
   return null;
+}
+
+// HYK-398 §2-⑶ (책임자에게 위임된 설계 판단, 이 라운드의 결정과 근거): 원장
+// 자리 반납을 어디에 붙일지는 두 후보(관제실 지시서: 소비 경로 relay-
+// handshake.mjs 쪽 / 어댑터 admission-completion-adapter.mjs 쪽) 중
+// relay-handshake.mjs를 골랐다 -- 이유: (1) dispatch-gate-decision.mjs의
+// evaluateRetirementDecision은 «배달 게이트»(다음 라운드를 보낼지 결정)
+// 축이라 «이 라운드가 끝났을 때 자리를 반납한다»는 소비측 사건과 자리가
+// 다르다(관제실 지시서 §2-⑶이 이미 두 후보에서 그 축을 제외했다). (2)
+// spawnAdmissionAbortProcess(바로 위)가 BLOCKED_TERMINATION_RELEASED에
+// 대해 이미 증명한 자리 -- "checkRelayHandshake가 이 라운드를 최종
+// 판정한 바로 그 순간, 서브프로세스로 스폰해 반납을 시도한다"는 완전히
+// 같은 모양을 STALE에도 그대로 재사용한다(세 번째 문 신설 금지 -- 이미
+// 있는 문 두 개의 배선만 잇는다). 실제 위조 방지 검증(다섯 관문)은 이
+// 함수가 아니라 스폰되는 admission-completion-adapter.mjs의
+// verifyRetirementEvidence가 «독립 프로세스 경계에서» 다시 한다(호출자
+// 신뢰 금지, BLOCKED_TERMINATION_RELEASED와 동일한 신뢰 경계) -- 그래서
+// 이 함수는 은퇴 기록의 존재/유효성을 스스로 확인하지 않는다: 은퇴
+// 기록이 아직 없으면(가장 흔한 경우 -- 이 폴링은 매번 반복된다) 스폰은
+// RETIREMENT_EVIDENCE_MISSING으로 그냥 실패하고 아무 것도 바뀌지
+// 않는다(예약은 ACTIVE로 남는다) -- best-effort, non-fatal, 이 라운드
+// 자신의 ok:false/state/reason은 조금도 바뀌지 않는다(S11 동일 원칙).
+//
+// ⛔state가 정확히 "STALE_DONE_PREDATES_DROP"일 때만 실행한다 -- 다른
+// ok:false 상태(BLOCKED/NEEDS_INPUT/PENDING/AMBIGUOUS_BLOCKED/
+// MALFORMED_BLOCKED/그 외 시간권한 위반)는 이 축의 대상이 아니다(관제실
+// 지시서 §1 표: 은퇴 축은 "이름표는 VALID인데 영원히 소비 불가"한
+// 라운드 전용이고, 그 첫 실사례가 바로 이 stale 모양이다).
+// HYK-398: archiveRoundEnvelope(envelope-archive.mjs) 자신은 동일-내용
+// 중복 방지가 없다(archiveRoundTaskFileIfNew와 달리 매 호출마다 무조건
+// 다음 번호로 새 사본을 만든다 -- envelope-archive.mjs 자신의 코드로
+// 직접 확인, 이 저장소의 기존 계약이라 이 라운드에서 바꾸지 않는다).
+// STALE 라운드는 watch-result.mjs가 반복 폴링하므로(첫 폴링에서 정지로
+// 판정된 뒤에도 계속) 그 무조건 신규 생성이 여기서는 실제 문제가
+// 된다 -- 아카이브 사본이 매 폴링마다 하나씩 늘면 resolveRetirement
+// ArchiveCandidateForAdapter(admission-completion-adapter.mjs)의 "정확히
+// 하나만 인정" 규칙이 두 번째 폴링부터 영원히 AMBIGUOUS(그 코어가
+// FINGERPRINT_MISMATCH로 접는다)로 떨어져 은퇴가 «영원히» 성립할 수 없게
+// 된다. 그래서 이 축의 호출 지점에서만(archiveRoundEnvelope 자신은
+// 무변경) "이 task_id의 사본이 rounds/에 이미 있으면 다시 만들지
+// 않는다"는 별도 방어를 하나 추가한다.
+function hasArchivedRoundCopyForTaskId(harnessDir, role, taskId) {
+  const roundsDir = join(harnessDir, "rounds");
+  let names;
+  try {
+    names = readdirSync(roundsDir);
+  } catch {
+    return false;
+  }
+  const pattern = new RegExp(`^${role}-r\\d+\\.md$`, "i");
+  for (const name of names) {
+    if (!pattern.test(name)) continue;
+    let raw;
+    try {
+      raw = readFileSync(join(roundsDir, name), "utf8");
+    } catch {
+      continue;
+    }
+    const stripped = raw.replace(/^<!-- envelope-archive:[^\n]*-->\n/, "");
+    const match = stripped.match(/^task_id:\s*(\S+)/m);
+    if (match && match[1] === taskId) return true;
+  }
+  return false;
+}
+
+function runRetirementSideEffectsIfApplicable({
+  state,
+  role,
+  harnessDir,
+  taskId,
+  taskContent,
+  resultContent,
+}) {
+  if (state !== "STALE_DONE_PREDATES_DROP") return;
+  runRetirementSideEffects({
+    role,
+    harnessDir,
+    taskId,
+    taskContent,
+    resultContent,
+  });
+}
+
+// HYK-398: quality-check max-lines-per-function 상한을 지키려고
+// checkRelayHandshake 몸통에서 뽑았다(HYK-244-receipt-core-1b 선례와
+// 동일한 이유, 판정/사유/부수효과는 조금도 바뀌지 않는다) -- HYK-342/
+// HYK-249: BLOCKED/NEEDS_INPUT termination side-effects run here, AFTER
+// doneResolved's own verdict/reason/state are already fixed -- this call
+// never changes `doneResolved` (returned byte-identical), it only adds
+// best-effort bookkeeping (see runBlockedTerminationSideEffectsIfApplicable's
+// own header for why it's scoped to exactly these two states).
+function returnDoneResolvedVerdict({
+  doneResolved,
+  role,
+  harnessDir,
+  taskId,
+  taskContent,
+  resultContent,
+  droppedMatch,
+  dispatchId,
+  resultPath,
+  now,
+}) {
+  runBlockedTerminationSideEffectsIfApplicable({
+    state: doneResolved.state,
+    role,
+    harnessDir,
+    taskId,
+    taskContent,
+    resultContent,
+    droppedMatch,
+    dispatchId,
+    resultPath,
+    now,
+  });
+  return doneResolved;
+}
+
+// HYK-398: quality-check max-lines-per-function 상한을 지키려고
+// checkRelayHandshake 몸통에서 뽑았다(HYK-244-receipt-core-1b 선례와
+// 동일한 이유, 판정/사유/부수효과는 조금도 바뀌지 않는다) -- 이 호출은
+// `rewriteOrStaleVerdict`를 조금도 바꾸지 않는다(byte-identical 반환),
+// runBlockedTerminationSideEffectsIfApplicable이 doneResolved 검증 직후
+// 불리는 것과 정확히 같은 자리 원칙.
+function returnRewriteOrStaleVerdict({
+  rewriteOrStaleVerdict,
+  role,
+  harnessDir,
+  taskId,
+  taskContent,
+  resultContent,
+}) {
+  runRetirementSideEffectsIfApplicable({
+    state: rewriteOrStaleVerdict.state,
+    role,
+    harnessDir,
+    taskId,
+    taskContent,
+    resultContent,
+  });
+  return rewriteOrStaleVerdict;
+}
+
+function runRetirementSideEffects({
+  role,
+  harnessDir,
+  taskId,
+  taskContent,
+  resultContent,
+}) {
+  // BLOCKED_TERMINATION_RELEASED와 같은 이유로 봉투 2종을 먼저 보관한다
+  // (runBlockedTerminationSideEffectsIfApplicable 참조) -- 은퇴 기록의
+  // 아카이브 요구(`.harness/rounds/<role>-r<N>.md`가 실제로 존재하고
+  // 지문이 일치)가 성립하려면 그 사본이 먼저 있어야 한다. hasArchivedRound
+  // CopyForTaskId(바로 위)가 이미 이 task_id의 사본을 찾으면 건너뛴다
+  // (반복 폴링에도 사본이 하나로 유지된다, 위 헤더 참조).
+  if (!hasArchivedRoundCopyForTaskId(harnessDir, role, taskId)) {
+    autoArchiveRoundEnvelope({ role, harnessDir, resultContent });
+    autoArchiveRoundTaskFile({ role, harnessDir, taskContent });
+  }
+
+  spawnAdmissionRetirementReleaseProcess(taskId, harnessDir, role);
 }
 
 // HYK-257-done-stamp-lint-1: extracted from checkRelayHandshake (same
@@ -1887,25 +2058,54 @@ function runBlockedTerminationSideEffectsIfApplicable({
 // side-effect call, every comment explaining WHY a step exists, is
 // unchanged and runs in the exact same order as before. Only the "which
 // function's stack frame it runs in" changed.
-export function checkRelayHandshake({
-  role,
-  harnessDir = join(repoRoot(), ".harness"),
-  now = Date.now(),
-  dispatchId,
-  dispatchLedgerPath,
-}) {
+// HYK-398: quality-check max-lines-per-function 상한을 지키려고
+// checkRelayHandshake 몸통에서 뽑았다(HYK-244-receipt-core-1b 선례와
+// 동일한 이유, 판정/사유/순서는 조금도 바뀌지 않는다) -- 파일 해석·
+// task_id 결속·dropped_at 해석 세 단계를 하나로 묶는다(각각 실패하면
+// 그 단계 자신의 verdict를 그대로 돌려준다, ok:false 지름길 순서 불변).
+function resolveHandshakePrereqs(role, harnessDir, now) {
   const filesResolved = resolveTaskAndResultFiles(role, harnessDir);
-  if (!filesResolved.ok) return filesResolved;
+  if (!filesResolved.ok) return { ok: false, verdict: filesResolved };
   const { taskContent, resultContent, resultMtimeMs, resultPath } =
     filesResolved;
 
   const idResolved = resolveMatchedTaskId(taskContent, resultContent);
-  if (!idResolved.ok) return idResolved;
+  if (!idResolved.ok) return { ok: false, verdict: idResolved };
   const { taskId } = idResolved;
 
   const droppedResolved = resolveDroppedAt(taskContent, now);
-  if (!droppedResolved.ok) return droppedResolved;
+  if (!droppedResolved.ok) return { ok: false, verdict: droppedResolved };
   const { droppedAt, droppedMatch } = droppedResolved;
+
+  return {
+    ok: true,
+    taskContent,
+    resultContent,
+    resultMtimeMs,
+    resultPath,
+    taskId,
+    droppedAt,
+    droppedMatch,
+  };
+}
+
+// HYK-398: quality-check max-lines-per-function 상한을 지키려고
+// checkRelayHandshake 몸통에서 뽑았다(HYK-244-receipt-core-1b 선례와
+// 동일한 이유, 판정/사유/부수효과/순서는 조금도 바뀌지 않는다) --
+// resolveHandshakePrereqs에 이어 DONE 해석까지 묶어, ok:false면 (부수효과
+// 포함) 그 verdict를, ok:true면 이후 단계가 필요로 하는 값 전부를 돌려준다.
+function resolveHandshakeCore({ role, harnessDir, now, dispatchId }) {
+  const prereqs = resolveHandshakePrereqs(role, harnessDir, now);
+  if (!prereqs.ok) return { ok: false, verdict: prereqs.verdict };
+  const {
+    taskContent,
+    resultContent,
+    resultMtimeMs,
+    resultPath,
+    taskId,
+    droppedAt,
+    droppedMatch,
+  } = prereqs;
 
   const doneResolved = resolveDoneAt(resultContent, now, {
     taskId,
@@ -1915,26 +2115,56 @@ export function checkRelayHandshake({
     resultMtimeMs,
   });
   if (!doneResolved.ok) {
-    // HYK-342/HYK-249: BLOCKED/NEEDS_INPUT termination side-effects run
-    // here, AFTER doneResolved's own verdict/reason/state are already fixed
-    // -- this call never changes `doneResolved` (returned byte-identical
-    // right below), it only adds best-effort bookkeeping (see the function's
-    // own header for why it's scoped to exactly these two states).
-    runBlockedTerminationSideEffectsIfApplicable({
-      state: doneResolved.state,
-      role,
-      harnessDir,
-      taskId,
-      taskContent,
-      resultContent,
-      droppedMatch,
-      dispatchId,
-      resultPath,
-      now,
-    });
-    return doneResolved;
+    return {
+      ok: false,
+      verdict: returnDoneResolvedVerdict({
+        doneResolved,
+        role,
+        harnessDir,
+        taskId,
+        taskContent,
+        resultContent,
+        droppedMatch,
+        dispatchId,
+        resultPath,
+        now,
+      }),
+    };
   }
   const { doneAt, doneMatch, observation } = doneResolved;
+  return {
+    ok: true,
+    taskContent,
+    resultContent,
+    resultPath,
+    taskId,
+    droppedAt,
+    droppedMatch,
+    doneAt,
+    doneMatch,
+    observation,
+  };
+}
+
+export function checkRelayHandshake({
+  role,
+  harnessDir = join(repoRoot(), ".harness"),
+  now = Date.now(),
+  dispatchId,
+  dispatchLedgerPath,
+}) {
+  const core = resolveHandshakeCore({ role, harnessDir, now, dispatchId });
+  if (!core.ok) return core.verdict;
+  const {
+    taskContent,
+    resultContent,
+    taskId,
+    droppedAt,
+    droppedMatch,
+    doneAt,
+    doneMatch,
+    observation,
+  } = core;
 
   // HYK-325 §2-3 (탐지, 거부 아님): a format-valid DONE line that finalize-
   // done.mjs did NOT stamp (no `done_stamped_by: finalize-done` marker
@@ -1951,15 +2181,20 @@ export function checkRelayHandshake({
     doneMatch,
     droppedMatch,
   });
-  if (rewriteOrStaleVerdict) return rewriteOrStaleVerdict;
+  if (rewriteOrStaleVerdict) {
+    return returnRewriteOrStaleVerdict({
+      rewriteOrStaleVerdict,
+      role,
+      harnessDir,
+      taskId,
+      taskContent,
+      resultContent,
+    });
+  }
 
-  // HYK-383: 이 라운드가 완료로 판정되기 «직전», 다른 모든 사유별 검사
-  // (task_id 결속·dropped_at/DONE 파싱·시간대 착오·미래-시각·staleness·
-  // 중간수정)가 이미 통과한 뒤에 건다 -- 그래야 이 축이 없던 시절부터
-  // 있던, 다른 구체적 거부 사유(예: future-skew의 "ahead of authority
-  // now")를 가리키는 기존 시험들이 여전히 그 사유를 그대로 본다(§4
-  // 무회귀). REVIEW 계열이 아니면 즉시 통과(resolveHeadCommitBinding 자체
-  // 헤더 참조).
+  // HYK-383: 다른 모든 사유별 검사가 이미 통과한 뒤, 완료 판정 직전에 건다
+  // (§4 무회귀 -- 기존 구체적 거부 사유가 가려지지 않는다). 비REVIEW는
+  // 즉시 통과(resolveHeadCommitBinding 자체 헤더 참조).
   const headCommitVerdict = resolveHeadCommitBinding({
     role,
     taskContent,
@@ -1968,11 +2203,8 @@ export function checkRelayHandshake({
   });
   if (!headCommitVerdict.ok) return headCommitVerdict;
 
-  // HYK-387: 다른 모든 사유별 검사가 통과한 뒤, 이 라운드가 완료로
-  // 판정되기 «직전»에 건다(headCommitVerdict와 같은 자리 -- 그래야 이
-  // 축이 없던 시절부터 있던 다른 구체적 거부 사유를 가리키는 기존 시험이
-  // 여전히 그 사유를 그대로 본다, §4 무회귀). REVIEW 계열 한정이 아니다
-  // -- 오늘의 실사고는 CODER 라운드였다(coder-task.md §1 원문).
+  // HYK-387: headCommitVerdict와 같은 자리 원칙(§4 무회귀) -- REVIEW 한정
+  // 아님(오늘의 실사고는 CODER 라운드였다, coder-task.md §1 원문).
   const dispatchRecordVerdict = resolveDispatchRecordExistence({
     role,
     taskId,
@@ -2210,6 +2442,41 @@ function spawnAdmissionAbortProcess(taskId, harnessDir, role) {
   } catch (err) {
     console.error(
       `relay-handshake: admission-abort spawn skipped/failed (non-fatal to this handshake's own exit code, HYK-342/HYK-249): ${err.stderr ?? err.message}`,
+    );
+    return false;
+  }
+}
+
+// HYK-398 §2-⑶: spawnAdmissionAbortProcess(위)를 그대로 거울처럼 따른다 --
+// 같은 서브프로세스-스폰(정적 import 아님) 계약, 같은 try/catch/never-
+// throws 계약, 같은 wasAdmissionCompletionAttempted stdout 판독. 유일한
+// 차이는 완료 사유(`RETIREMENT_RELEASED`, admission-ledger-core.mjs의
+// COMPLETION_REASON -- SUSPECT_TIMEOUT_RECOVERED·BLOCKED_TERMINATION_
+// RELEASED와 구별되는 세 번째 값)뿐이다. receiptPath(6번째 위치 인자)는
+// 넘기지 않는다 -- RETIREMENT_RELEASED는 admission-completion-adapter.mjs
+// 자신의 verifyRetirementEvidence가 은퇴 기록의 아카이브+지문 이중 대조로
+// 이미 워커-위조 표면을 닫으므로(관제실 지시서 §1 표: 은퇴 기록 자체는
+// ORCH가 쓰는 파일, 워커가 쓸 수 있는 결과 파일이 아니다), 배달 영수증
+// 대조(BLOCKED_TERMINATION_RELEASED 전용 3R 방어, verifyBlockedTermination
+// Evidence 자신의 헤더 참조)까지 요구하지 않는다.
+function spawnAdmissionRetirementReleaseProcess(taskId, harnessDir, role) {
+  try {
+    const adapterPath = join(
+      dirname(fileURLToPath(new URL(import.meta.url))),
+      "admission-completion-adapter.mjs",
+    );
+    const args = harnessDir
+      ? [adapterPath, taskId, harnessDir, "RETIREMENT_RELEASED", role]
+      : [adapterPath, taskId];
+    const out = execFileSync("node", args, {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    console.log(out.trim());
+    return wasAdmissionCompletionAttempted(out);
+  } catch (err) {
+    console.error(
+      `relay-handshake: admission-retirement-release spawn skipped/failed (non-fatal to this handshake's own exit code, HYK-398): ${err.stderr ?? err.message}`,
     );
     return false;
   }

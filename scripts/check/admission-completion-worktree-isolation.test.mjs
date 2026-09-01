@@ -380,6 +380,39 @@ test("ⓓ HYK-312: NODE_TEST_CONTEXT still blocks the persistent fallback the ex
 // 문자열 치환 + 동적 import), 원복 증명 포함.
 // ---------------------------------------------------------------------------
 
+// HYK-398 §2-⑶: quality-check max-lines-per-function 상한을 지키려고 이
+// 시험 몸통에서 뽑았다(HYK-244-receipt-core-1b 선례와 동일한 이유, 시험
+// 대상/단언은 조금도 바뀌지 않는다) -- admission-completion-adapter.mjs가
+// 정적 import하는 형제 파일(admission-ledger-core.mjs·admission-ledger-
+// store.mjs·ledger-pointer-shared.mjs·retirement-record-core.mjs)을
+// 격리 픽스처 안에 그대로 복사한다.
+function stageAdapterSiblingDeps(checkDir, supervisorDir) {
+  mkdirSync(checkDir, { recursive: true });
+  mkdirSync(supervisorDir, { recursive: true });
+  for (const name of [
+    "admission-ledger-core.mjs",
+    "admission-ledger-store.mjs",
+  ]) {
+    writeFileSync(
+      join(supervisorDir, name),
+      readFileSync(join(CHECK_DIR, "..", "supervisor", name), "utf8"),
+      "utf8",
+    );
+  }
+  // HYK-302/355 §2-A dedup / HYK-398 §2-⑶: the adapter now also statically
+  // imports these two.
+  for (const name of [
+    "ledger-pointer-shared.mjs",
+    "retirement-record-core.mjs",
+  ]) {
+    writeFileSync(
+      join(checkDir, name),
+      readFileSync(join(CHECK_DIR, name), "utf8"),
+      "utf8",
+    );
+  }
+}
+
 test("RED 변이: removing the harnessDir isolation gate from autoCompleteAdmission -> ⓐ's blocked case goes RED (mutates the real global ledger's synthetic stand-in), and the real source is provably untouched", async () => {
   const src = readFileSync(ADAPTER_PATH, "utf8");
   const target = `  if (
@@ -411,25 +444,7 @@ test("RED 변이: removing the harnessDir isolation gate from autoCompleteAdmiss
   const supervisorDir = join(repoDir, "scripts", "supervisor");
   const mutatedFilePath = join(checkDir, "admission-completion-adapter.mjs");
   try {
-    mkdirSync(checkDir, { recursive: true });
-    mkdirSync(supervisorDir, { recursive: true });
-    for (const name of [
-      "admission-ledger-core.mjs",
-      "admission-ledger-store.mjs",
-    ]) {
-      writeFileSync(
-        join(supervisorDir, name),
-        readFileSync(join(CHECK_DIR, "..", "supervisor", name), "utf8"),
-        "utf8",
-      );
-    }
-    // HYK-302/355 §2-A dedup: the adapter now also statically imports
-    // "./ledger-pointer-shared.mjs" -- same sibling requirement as above.
-    writeFileSync(
-      join(checkDir, "ledger-pointer-shared.mjs"),
-      readFileSync(join(CHECK_DIR, "ledger-pointer-shared.mjs"), "utf8"),
-      "utf8",
-    );
+    stageAdapterSiblingDeps(checkDir, supervisorDir);
     const ledger = join(ledgerDir, "l.json");
     const lock = join(ledgerDir, "l.lock");
     initAndAdmit(ledger, lock, "HYK-312-RED-MUTANT");

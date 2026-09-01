@@ -264,6 +264,9 @@ function stageIsolatedRelayHandshakeDeps(rootDir) {
     // relay-handshake.mjs (staged elsewhere in this test) now statically
     // import this shared module.
     "ledger-pointer-shared.mjs",
+    // HYK-398 §2-⑶: admission-completion-adapter.mjs now also statically
+    // imports this zero-import core.
+    "retirement-record-core.mjs",
   ]) {
     writeFileSync(
       join(checkDir, name),

@@ -224,6 +224,9 @@ test("③ ★RED: NOT_BLOCKED 흔적 호출을 제거한 변이는 ①의 입력
         // HYK-302/355 §2-A dedup: admission-completion-adapter.mjs now
         // statically imports this shared module.
         "ledger-pointer-shared.mjs",
+        // HYK-398 §2-⑶: admission-completion-adapter.mjs now also
+        // statically imports this zero-import core.
+        "retirement-record-core.mjs",
         "consumption-receipt-writer.mjs",
         "consumption-receipt-core.mjs",
       ]) {

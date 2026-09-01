@@ -267,7 +267,7 @@ test("mutation 3 (필수): finalize-done.mjs's callerSuppliedAt rejection remove
 test("mutation 4 (필수): stale-result (doneAt < droppedAt) guard removed from relay-handshake.mjs -> a DONE predating the drop passes -> RED", () => {
   const src = readFileSync(RELAY_HANDSHAKE_PATH, "utf8");
   const target =
-    "  if (doneAt < droppedAt) {\n    return {\n      ok: false,\n      reason: `stale result: DONE (${doneMatch[1].trim()}) predates task drop (${droppedMatch[1].trim()})`,\n    };\n  }\n\n";
+    '  if (doneAt < droppedAt) {\n    // HYK-398: `state` is a NEW field on this branch (previously absent --\n    // only `ok`/`reason` existed here). Additive only: every existing\n    // caller/test that reads `.ok`/`.reason` off this exact shape is\n    // unaffected (no field was renamed or removed). checkRelayHandshake\n    // uses this new `state` (below) to decide whether to attempt the\n    // retirement-release side effect -- see\n    // runRetirementSideEffectsIfApplicable\'s own header for why this exact\n    // state, and only this one, triggers it.\n    return {\n      ok: false,\n      state: "STALE_DONE_PREDATES_DROP",\n      reason: `stale result: DONE (${doneMatch[1].trim()}) predates task drop (${droppedMatch[1].trim()})`,\n    };\n  }\n\n';
   assertExactlyOneMatch(src, target, "stale-result doneAt < droppedAt guard");
   const mutated = src.replace(target, "");
 

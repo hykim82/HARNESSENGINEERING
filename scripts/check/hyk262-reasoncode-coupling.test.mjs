@@ -46,6 +46,9 @@ const SIBLING_DEPS = [
   // only ever spawned as a child that already tolerates MODULE_NOT_FOUND)
   // now statically imports this shared module -- its own load must succeed.
   "ledger-pointer-shared.mjs",
+  // HYK-398 §2-⑶: admission-completion-adapter.mjs now also statically
+  // imports this zero-import core.
+  "retirement-record-core.mjs",
 ];
 
 function tmpDir(prefix) {

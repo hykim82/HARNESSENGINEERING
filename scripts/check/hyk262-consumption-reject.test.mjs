@@ -289,6 +289,9 @@ test("(c)★ RED: HYK-262 차단 코드를 제거한 변이는 (a)와 같은 입
         // HYK-302/355 §2-A dedup: admission-completion-adapter.mjs now
         // statically imports this shared module.
         "ledger-pointer-shared.mjs",
+        // HYK-398 §2-⑶: admission-completion-adapter.mjs now also
+        // statically imports this zero-import core.
+        "retirement-record-core.mjs",
         "consumption-receipt-writer.mjs",
         "consumption-receipt-core.mjs",
       ]) {
