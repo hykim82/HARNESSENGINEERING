@@ -93,6 +93,29 @@ export function runWrapperBehavior(
     const gatePath = join(relayDir, "dispatch-worker-seat-proof-gate.mjs");
     writeFileSync(gatePath, gateFlavorScript, "utf8");
 
+    // HYK-415-canonical-sync-2: the post-HYK-271 canonical body (and any
+    // candidate text that copies its modal-check call) reaches a second
+    // script, scripts/relay/dispatch-worker-modal-check.mjs, at the same
+    // $Worktree-relative path the real wrapper joins. This harness stands
+    // in a stub that always reports NON_MODAL/exit 0 -- same role as
+    // FAKE_GATE_PROVEN_SCRIPT above (a fixture stand-in, not the
+    // production script), so a candidate function's PASS/REJECT reading of
+    // *its own* gate call stays what this harness actually tests; the
+    // modal-check axis's own detection logic is covered separately by
+    // dispatch-worker-modal-check.test.mjs, not here. Written
+    // unconditionally: candidate texts that never call this path (all the
+    // synthetic BYPASS_FORMS/SAFE_FORMS bodies, which predate HYK-271)
+    // simply never touch this file.
+    const modalCheckPath = join(relayDir, "dispatch-worker-modal-check.mjs");
+    writeFileSync(
+      modalCheckPath,
+      [
+        'console.log("dispatch-worker-modal-check: NON_MODAL (fake, always clean)");',
+        "process.exit(0);",
+      ].join("\n"),
+      "utf8",
+    );
+
     const dsShowPath = join(dir, "ds-show.json");
     const tsShowPath = join(dir, "ts-show.json");
     writeFileSync(dsShowPath, "{}", "utf8");
