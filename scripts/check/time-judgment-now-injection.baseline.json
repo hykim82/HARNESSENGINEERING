@@ -1,0 +1,190 @@
+{
+  "generated_by": "HYK-414 1R",
+  "generated_at": "2026-09-01 15:40 KST",
+  "note": "재발 방지 원장(ratchet). scanTestFileForRiskyCalls()가 찾은, «절대시각 픽스처 + now 없이 호출»인 기존 호출부의 (파일, 함수) 쌍별 개수 상한이다. 이 라운드(HYK-414)의 실제 수리 대상은 relay-handshake-runner-receipt.test.mjs 하나뿐이었다(§2-1 일괄치환 금지) -- 이 baseline은 그 외 나머지를 '기존에 이미 있던 위험'으로 grandfather하여, npm test가 이 라운드에서 손대지 않은 파일들 때문에 실패하지 않게 하면서도, 앞으로 같은 모양의 «새» 호출이 추가되면(개수 초과 또는 새 파일 등장) time-judgment-now-injection.test.mjs가 RED를 낸다.",
+  "reasons": {
+    "pre-existing-not-audited": "HYK-414 1R 스캐너가 기계로 찾았을 뿐, 각 호출부가 실제로 '오늘'과 충돌하는 절대시각을 쓰는지는 개별 감사하지 않았다([내 주장] 등급). 관찰: 이 라운드에서 실측된 실제 사고(relay-handshake-runner-receipt.test.mjs)는 픽스처가 '오늘 날짜'였던 경우였고, 여기 grandfather된 항목들은 대부분 이미 지나간 과거 날짜(예: 2026-08-14)를 픽스처로 쓰고 있어 당장 충돌 위험은 낮아 보이지만, 이는 관찰이지 보증이 아니다. 이 raw entry들을 하나씩 now-주입으로 옮기는 작업은 이 라운드의 좁은 수리 범위(§0-B) 밖이라 별도 라운드가 필요하다."
+  },
+  "entries": [
+    {
+      "file": "scripts/supervisor/admission-sweep-wire.test.mjs",
+      "fn": "runWatchOnce",
+      "count": 1,
+      "reason": "pre-existing-not-audited"
+    },
+    {
+      "file": "scripts/supervisor/escalation-axis-wire.test.mjs",
+      "fn": "runWatchOnce",
+      "count": 1,
+      "reason": "pre-existing-not-audited"
+    },
+    {
+      "file": "scripts/supervisor/partial-count-wire.test.mjs",
+      "fn": "runReachOnce",
+      "count": 2,
+      "reason": "pre-existing-not-audited"
+    },
+    {
+      "file": "scripts/supervisor/task-drop-core.test.mjs",
+      "fn": "checkRelayHandshake",
+      "count": 1,
+      "reason": "pre-existing-not-audited"
+    },
+    {
+      "file": "scripts/supervisor/unconsumed-receipt-worktree-wire.test.mjs",
+      "fn": "runWatchOnce",
+      "count": 3,
+      "reason": "pre-existing-not-audited"
+    },
+    {
+      "file": "scripts/supervisor/unconsumed-vanish-wire.test.mjs",
+      "fn": "runWatchOnce",
+      "count": 1,
+      "reason": "pre-existing-not-audited"
+    },
+    {
+      "file": "scripts/relay/go-wait-pilot.test.mjs",
+      "fn": "checkRelayHandshake",
+      "count": 1,
+      "reason": "pre-existing-not-audited"
+    },
+    {
+      "file": "scripts/relay/launch-seam.test.mjs",
+      "fn": "checkRelayHandshake",
+      "count": 2,
+      "reason": "pre-existing-not-audited"
+    },
+    {
+      "file": "scripts/check/consumption-receipt-wire.test.mjs",
+      "fn": "checkRelayHandshake",
+      "count": 4,
+      "reason": "pre-existing-not-audited"
+    },
+    {
+      "file": "scripts/check/controlroom-fresh.test.mjs",
+      "fn": "checkControlRoomFresh",
+      "count": 2,
+      "reason": "pre-existing-not-audited"
+    },
+    {
+      "file": "scripts/check/dispatch-gate-consumption-wire.test.mjs",
+      "fn": "checkRelayHandshake",
+      "count": 2,
+      "reason": "pre-existing-not-audited"
+    },
+    {
+      "file": "scripts/check/dispatch-gate-dropped-at-stamp.test.mjs",
+      "fn": "checkRelayHandshake",
+      "count": 2,
+      "reason": "pre-existing-not-audited"
+    },
+    {
+      "file": "scripts/check/envelope-archive-mutation.test.mjs",
+      "fn": "checkRelayHandshake",
+      "count": 4,
+      "reason": "pre-existing-not-audited"
+    },
+    {
+      "file": "scripts/check/envelope-archive.test.mjs",
+      "fn": "checkRelayHandshake",
+      "count": 8,
+      "reason": "pre-existing-not-audited"
+    },
+    {
+      "file": "scripts/check/hyk241-task-archive-mutation.test.mjs",
+      "fn": "checkRelayHandshake",
+      "count": 4,
+      "reason": "pre-existing-not-audited"
+    },
+    {
+      "file": "scripts/check/hyk387-dispatch-record-required.test.mjs",
+      "fn": "checkRelayHandshake",
+      "count": 4,
+      "reason": "pre-existing-not-audited"
+    },
+    {
+      "file": "scripts/check/nc-relay-handshake.test.mjs",
+      "fn": "checkRelayHandshake",
+      "count": 11,
+      "reason": "pre-existing-not-audited"
+    },
+    {
+      "file": "scripts/check/relay-handshake-blocked-near-miss.test.mjs",
+      "fn": "checkRelayHandshake",
+      "count": 9,
+      "reason": "pre-existing-not-audited"
+    },
+    {
+      "file": "scripts/check/relay-handshake-blocked-termination.test.mjs",
+      "fn": "checkRelayHandshake",
+      "count": 5,
+      "reason": "pre-existing-not-audited"
+    },
+    {
+      "file": "scripts/check/relay-handshake-completion-wire.test.mjs",
+      "fn": "checkRelayHandshake",
+      "count": 6,
+      "reason": "pre-existing-not-audited"
+    },
+    {
+      "file": "scripts/check/relay-handshake-head-commit.test.mjs",
+      "fn": "checkRelayHandshake",
+      "count": 3,
+      "reason": "pre-existing-not-audited"
+    },
+    {
+      "file": "scripts/check/relay-handshake-retirement-mutation.test.mjs",
+      "fn": "checkRelayHandshake",
+      "count": 1,
+      "reason": "pre-existing-not-audited"
+    },
+    {
+      "file": "scripts/check/relay-handshake-retirement.test.mjs",
+      "fn": "checkRelayHandshake",
+      "count": 5,
+      "reason": "pre-existing-not-audited"
+    },
+    {
+      "file": "scripts/check/relay-handshake.test.mjs",
+      "fn": "checkRelayHandshake",
+      "count": 43,
+      "reason": "pre-existing-not-audited"
+    },
+    {
+      "file": "scripts/check/selfcheck-freshness.test.mjs",
+      "fn": "checkSelfcheckFreshness",
+      "count": 4,
+      "reason": "pre-existing-not-audited"
+    },
+    {
+      "file": "scripts/check/selfcheck-inventory.test.mjs",
+      "fn": "checkCanaryReceipt",
+      "count": 6,
+      "reason": "pre-existing-not-audited"
+    },
+    {
+      "file": "scripts/check/selfcheck-inventory.test.mjs",
+      "fn": "judgeEntry",
+      "count": 9,
+      "reason": "pre-existing-not-audited"
+    },
+    {
+      "file": "scripts/check/selfcheck-inventory.test.mjs",
+      "fn": "checkHookWiringRegistered",
+      "count": 5,
+      "reason": "pre-existing-not-audited"
+    },
+    {
+      "file": "scripts/check/selfcheck-inventory.test.mjs",
+      "fn": "runInventory",
+      "count": 4,
+      "reason": "pre-existing-not-audited"
+    },
+    {
+      "file": "scripts/check/selfcheck.test.mjs",
+      "fn": "runSelfcheck",
+      "count": 1,
+      "reason": "pre-existing-not-audited"
+    }
+  ]
+}

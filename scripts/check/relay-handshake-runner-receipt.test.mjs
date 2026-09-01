@@ -23,7 +23,20 @@ import {
   resolveRunnerReceiptVerdict,
   resultClaimsRunnerResults,
   RUNNER_RECEIPT_REJECT_REASON,
+  parseKstTimestamp,
 } from "./relay-handshake.mjs";
+
+// HYK-414 1R -- 이 파일의 모든 픽스처는 절대시각(dropped_at 06:00 /
+// finished_at 06:09:00 / DONE 06:10:00, 전부 2026-09-01 KST)을 쓴다.
+// checkRelayHandshake의 `now`를 기본값(Date.now(), 진짜 시계)에 맡기면
+// checkTimezoneMislabel 가드가 "값이 지금과 정확히 9시간 차 ±10분"일 때
+// 합성 픽스처를 실제 UTC/KST 오라벨로 오판한다 -- 즉 이 시험은 하루 중
+// 그 창(대략 15:00~15:30 KST 부근, 시스템 로컬 시간대에 따라 달라짐)에
+// 도는 순간에만 실패했다(coder-task.md §1, 실측: 15:09/15:12 fail,
+// 15:22 pass, 코드 변경 0으로 시계만 이동). 고정하는 `now`는 픽스처의
+// 마지막 절대시각(DONE 06:10:00)보다 살짝 뒤인 06:15:00으로 둬 시계
+// 의존을 0으로 만든다 -- 어느 시각에 돌려도 이 값은 바뀌지 않는다.
+const FIXED_NOW_MS = parseKstTimestamp("2026-09-01 06:15:00 KST").getTime();
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const RELAY_HANDSHAKE_PATH = join(HERE, "relay-handshake.mjs");
@@ -142,7 +155,11 @@ test("(rr-0c) resultClaimsRunnerResults: 'exit=' 줄이 아예 없으면 false",
 test("(rr-d) ★주장 없는 라운드는 영수증이 전혀 없어도 정상 소비된다(과차단 아님을 증명)", () => {
   withFixtureDir("hyk411-no-claim-", (dir) => {
     writeCoderRound(dir, { resultBody: "verdict: approved" });
-    const result = checkRelayHandshake({ role: "coder", harnessDir: dir });
+    const result = checkRelayHandshake({
+      role: "coder",
+      harnessDir: dir,
+      now: FIXED_NOW_MS,
+    });
     assert.equal(
       result.ok,
       true,
@@ -166,7 +183,11 @@ test("(rr-c) ⓒ 영수증 없음 + 러너 결과 주장 -> 소비 거부(MISSIN
   withFixtureDir("hyk411-missing-", (dir) => {
     ensureGitHeadCommit(dir);
     writeCoderRound(dir, { resultBody: 'npm test; echo "exit=$?"\nexit=0' });
-    const result = checkRelayHandshake({ role: "coder", harnessDir: dir });
+    const result = checkRelayHandshake({
+      role: "coder",
+      harnessDir: dir,
+      now: FIXED_NOW_MS,
+    });
     assert.equal(result.ok, false);
     assert.equal(result.code, RUNNER_RECEIPT_REJECT_REASON.MISSING);
     assert.match(result.reason, /runner-receipt\.json is missing/);
@@ -184,7 +205,11 @@ test("(rr-a)★ ⓐ 파이프로 숨긴 빨간 실행: exit=0으로 보고했지
     // 담고 있다.
     writeCoderRound(dir, { resultBody: 'npm test; echo "exit=$?"\nexit=0' });
     writeReceipt(dir, baseReceipt(sha, { runner_exit: 1, fail: 3, pass: 7 }));
-    const result = checkRelayHandshake({ role: "coder", harnessDir: dir });
+    const result = checkRelayHandshake({
+      role: "coder",
+      harnessDir: dir,
+      now: FIXED_NOW_MS,
+    });
     assert.equal(result.ok, false);
     assert.equal(result.code, RUNNER_RECEIPT_REJECT_REASON.RED);
     assert.match(result.reason, /runner_exit=1/);
@@ -204,7 +229,11 @@ test("(rr-b)★ ⓑ 낡은 head_commit 영수증: 영수증이 이전 커밋의 
     );
     writeCoderRound(dir, { resultBody: 'npm test; echo "exit=$?"\nexit=0' });
     writeReceipt(dir, baseReceipt(oldSha)); // 낡은 커밋 값 그대로.
-    const result = checkRelayHandshake({ role: "coder", harnessDir: dir });
+    const result = checkRelayHandshake({
+      role: "coder",
+      harnessDir: dir,
+      now: FIXED_NOW_MS,
+    });
     assert.equal(result.ok, false);
     assert.equal(result.code, RUNNER_RECEIPT_REJECT_REASON.STALE);
     assert.match(result.reason, /does not match this worktree's actual HEAD/);
@@ -219,8 +248,81 @@ test("(rr-ok) 정상 경로: runner_exit=0 + head_commit이 실제 HEAD와 일�
     const sha = ensureGitHeadCommit(dir);
     writeCoderRound(dir, { resultBody: 'npm test; echo "exit=$?"\nexit=0' });
     writeReceipt(dir, baseReceipt(sha));
-    const result = checkRelayHandshake({ role: "coder", harnessDir: dir });
+    const result = checkRelayHandshake({
+      role: "coder",
+      harnessDir: dir,
+      now: FIXED_NOW_MS,
+    });
     assert.equal(result.ok, true, `expected clean pass: ${result.reason}`);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// (rr-clock-sweep) ★HYK-414 1R -- 이 결함의 직접적 반증. `now`를 24시간
+// 전부에 걸쳐 훑어, (a) 결함이 실재했음(now를 벽시계에 맡겼다면 픽스처
+// 날짜의 특정 시간대에서만 떨어졌을 것)을 같은 (rr-ok) 픽스처로 재현하고,
+// (b) 이 파일의 실제 프로덕션 호출(위 모든 checkRelayHandshake 호출)은
+// `now: FIXED_NOW_MS`만 쓰고 있어 그 결함이 있는 시간대에 도달할 길이
+// 없음을 함께 못박는다.
+// ---------------------------------------------------------------------------
+test("(rr-clock-sweep)★ now를 하루 24시간에 걸쳐 훑는다: (a) now를 벽시계에 맡겼다면 걸렸을 시간대(픽스처+9h 부근)가 실제로 있고, (b) 이 파일이 실제로 쓰는 FIXED_NOW_MS는 그 시간대 밖이라 안전하다", () => {
+  withFixtureDir("hyk411-sweep-", (dir) => {
+    const sha = ensureGitHeadCommit(dir);
+    writeCoderRound(dir, { resultBody: 'npm test; echo "exit=$?"\nexit=0' });
+    writeReceipt(dir, baseReceipt(sha));
+
+    // (a) 결함 재현: droppedAt(06:00)/doneAt(06:10:00)의 정확히 +9h인
+    // 14~15시대는 checkTimezoneMislabel의 "값이 지금과 정확히 9시간 차
+    // ±10분"(TZ_MISLABEL_TOLERANCE_MS=10분) 창에 들어 소비가 거부된다 --
+    // 이게 `now`를 안 넘겼을 때(=Date.now() 기본값) 실제 관측된 실패
+    // (coder-task.md §1: 15:09/15:12 fail, 15:22 pass)의 원인 그 자체다.
+    const hourlyResults = [];
+    for (let hour = 0; hour < 24; hour++) {
+      const hourMs = parseKstTimestamp(
+        `2026-09-01 ${String(hour).padStart(2, "0")}:00:00 KST`,
+      ).getTime();
+      const result = checkRelayHandshake({
+        role: "coder",
+        harnessDir: dir,
+        now: hourMs,
+      });
+      hourlyResults.push({
+        hour,
+        ok: result.ok,
+        state: result.ok ? null : result.state,
+      });
+    }
+
+    // 시간대 0~6시(=droppedAt 06:00 이전)는 droppedAt이 now보다 "미래"로
+    // 보여 별개 축(checkFutureSkew, 진짜 미래 시각 거부)이 정당하게
+    // 걸린다 -- 이 축(TZ 오라벨)과 무관하니 여기서는 걸러내고, 오직
+    // "TZ 오라벨로 의심" 상태만 이 시험의 관심사로 본다.
+    const tzMislabelHours = hourlyResults
+      .filter((r) => !r.ok && /TZ_MISLABEL/.test(String(r.state)))
+      .map((r) => r.hour);
+    assert.ok(
+      tzMislabelHours.length > 0,
+      `기대: now를 벽시계에 맡기면 TZ 오라벨로 의심돼 걸리는 시간대가 있어야 결함 재현이다(발견된 시간대 없음 -- sweep이 결함을 못 잡고 있다는 뜻일 수 있어 확인 필요): ${JSON.stringify(hourlyResults)}`,
+    );
+    assert.ok(
+      tzMislabelHours.every((h) => h >= 14 && h <= 15),
+      `기대: TZ 오라벨 거부는 픽스처(06:00/06:10:00)+9h 부근(14~15시)에만 몰려야 한다(그 밖에서 나오면 이 축과 무관한 별개 결함): ${JSON.stringify(hourlyResults)}`,
+    );
+
+    // (b) 수리 확인: 이 파일의 실제 프로덕션 호출은 전부 FIXED_NOW_MS를
+    // 쓴다 -- 그 값이 위에서 재현한 위험 시간대(14~15시) 밖에 있어야
+    // "수리가 위험을 실제로 피했다"고 말할 수 있다.
+    const fixedHour = new Date(FIXED_NOW_MS).getUTCHours(); // UTC로 봐도 되는 이유: 아래는 danger set과의 상대 비교가 아니라 절대 시각 재계산이라서 무관 -- 대신 실제 판정으로 직접 확인한다.
+    const fixedResult = checkRelayHandshake({
+      role: "coder",
+      harnessDir: dir,
+      now: FIXED_NOW_MS,
+    });
+    assert.equal(
+      fixedResult.ok,
+      true,
+      `FIXED_NOW_MS(${new Date(FIXED_NOW_MS).toISOString()}, hour=${fixedHour} UTC)가 위험 시간대에 걸렸다 -- 상수를 다시 골라야 한다: ${fixedResult.reason}`,
+    );
   });
 });
 
@@ -232,7 +334,11 @@ test("(rr-invalid-json) 영수증이 유효한 JSON이 아니다 -> 소비 거�
     ensureGitHeadCommit(dir);
     writeCoderRound(dir, { resultBody: 'npm test; echo "exit=$?"\nexit=0' });
     writeFileSync(join(dir, "runner-receipt.json"), "{ not json", "utf8");
-    const result = checkRelayHandshake({ role: "coder", harnessDir: dir });
+    const result = checkRelayHandshake({
+      role: "coder",
+      harnessDir: dir,
+      now: FIXED_NOW_MS,
+    });
     assert.equal(result.ok, false);
     assert.equal(result.code, RUNNER_RECEIPT_REJECT_REASON.INVALID);
   });
@@ -247,7 +353,11 @@ test("(rr-invalid-fields) 영수증에 필수 필드(runner_exit/head_commit)가
       JSON.stringify({ schema_version: 1 }),
       "utf8",
     );
-    const result = checkRelayHandshake({ role: "coder", harnessDir: dir });
+    const result = checkRelayHandshake({
+      role: "coder",
+      harnessDir: dir,
+      now: FIXED_NOW_MS,
+    });
     assert.equal(result.ok, false);
     assert.equal(result.code, RUNNER_RECEIPT_REJECT_REASON.INVALID);
   });
@@ -313,6 +423,7 @@ test("(rr-e1)★ 되돌림 변이: 소비 축(checkRelayHandshake 결선) 자체
       const result = mod.checkRelayHandshake({
         role: "coder",
         harnessDir: dir,
+        now: FIXED_NOW_MS,
       });
       assert.equal(
         result.ok,
@@ -351,6 +462,7 @@ test("(rr-e2)★ 되돌림 변이: runner_exit 대조를 제거하면 -- (rr-a) 
       const result = mod.checkRelayHandshake({
         role: "coder",
         harnessDir: dir,
+        now: FIXED_NOW_MS,
       });
       assert.equal(
         result.ok,
@@ -389,6 +501,7 @@ test("(rr-e3)★ 되돌림 변이: head_commit 대조를 제거하면 -- (rr-b) 
       const result = mod.checkRelayHandshake({
         role: "coder",
         harnessDir: dir,
+        now: FIXED_NOW_MS,
       });
       assert.equal(
         result.ok,
