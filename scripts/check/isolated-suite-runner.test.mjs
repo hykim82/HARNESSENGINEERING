@@ -90,6 +90,17 @@ test("formatBanner: a dirty source checkout gets an explicit extra NOTE line, no
   assert.match(dirty, /NOTE: the source checkout has uncommitted changes/);
 });
 
+// HYK-411: every test below that doesn't specifically exercise receipt
+// writing passes a no-op writeReceipt/readFile so this suite never touches
+// the real filesystem outside its own mkdtemp'd cloneDir/tapDir (the mocked
+// `root` values here, like "/src", are not real directories -- letting the
+// real writer run against them would either throw noisily or, worse,
+// actually create a stray ".harness" next to the filesystem root).
+const noopWriteReceipt = () => ({ path: "(stubbed)", receipt: {} });
+const throwingReadFile = () => {
+  throw new Error("stubbed: no tap file in this test");
+};
+
 test("runIsolatedSuite: clones from repoRoot (not cwd), runs node --test in the clone's cwd, and propagates the child's exit code", () => {
   const calls = [];
   const execFile = (cmd, args, opts) => {
@@ -112,6 +123,8 @@ test("runIsolatedSuite: clones from repoRoot (not cwd), runs node --test in the 
     spawn,
     log: (m) => logs.push(m),
     collectFiles: () => ["scripts/check/a.test.mjs"],
+    readFile: throwingReadFile,
+    writeReceipt: noopWriteReceipt,
   });
   assert.equal(exitCode, 7);
   const cloneCall = calls.find((c) => c.args[0] === "clone");
@@ -138,12 +151,130 @@ test("runIsolatedSuite: a dirty source repo's uncommitted changes surface in the
     spawn,
     log: (m) => logs.push(m),
     collectFiles: () => [],
+    readFile: throwingReadFile,
+    writeReceipt: noopWriteReceipt,
   });
   assert.ok(
     logs.some((l) =>
       l.includes("NOTE: the source checkout has uncommitted changes"),
     ),
   );
+});
+
+// HYK-411 §2-1: the runner writes its own observed exit code (plus the
+// tap-parsed counts and the head commit it tested) to a receipt -- this is
+// the actual fix (a downstream pipe cannot reach back and rewrite what this
+// function itself writes, unlike the shell-visible exit code it also
+// returns).
+function execFileForReceiptTests() {
+  return (cmd, args) => {
+    if (args[0] === "rev-parse" && args[1] === "--show-toplevel")
+      return "/src\n";
+    if (args[0] === "rev-parse" && args[1] === "HEAD") return "deadbeef\n";
+    if (args[0] === "status") return "";
+    if (args[0] === "clone") return "";
+    throw new Error(`unexpected execFile: ${cmd} ${args.join(" ")}`);
+  };
+}
+
+test("runIsolatedSuite: a RED run (non-zero exit) still gets a receipt written -- §2-1 explicitly forbids skipping the receipt on failure", () => {
+  const receipts = [];
+  const exitCode = runIsolatedSuite({
+    execFile: execFileForReceiptTests(),
+    spawn: () => ({ status: 1 }),
+    log: () => {},
+    collectFiles: () => [],
+    readFile: throwingReadFile,
+    writeReceipt: (payload) => {
+      receipts.push(payload);
+      return { path: "(stubbed)", receipt: {} };
+    },
+  });
+  assert.equal(exitCode, 1);
+  assert.equal(receipts.length, 1);
+  assert.equal(receipts[0].runnerExit, 1);
+  assert.equal(receipts[0].headCommit, "deadbeef");
+});
+
+test("runIsolatedSuite: receipt's headCommit is the runner's OWN `git rev-parse HEAD` reading of the source root, not something spawn/collectFiles could influence", () => {
+  const receipts = [];
+  runIsolatedSuite({
+    execFile: execFileForReceiptTests(),
+    spawn: () => ({ status: 0 }),
+    log: () => {},
+    collectFiles: () => [],
+    readFile: throwingReadFile,
+    writeReceipt: (payload) => {
+      receipts.push(payload);
+      return { path: "(stubbed)", receipt: {} };
+    },
+  });
+  assert.equal(receipts[0].headCommit, "deadbeef");
+  assert.equal(receipts[0].runnerExit, 0);
+});
+
+test("runIsolatedSuite: tap summary counts are parsed from the tap-reporter destination file and threaded into the receipt payload", () => {
+  const tap = ["# tests 12", "# pass 10", "# fail 2", "# skipped 0", ""].join(
+    "\n",
+  );
+  const receipts = [];
+  runIsolatedSuite({
+    execFile: execFileForReceiptTests(),
+    spawn: () => ({ status: 1 }),
+    log: () => {},
+    collectFiles: () => [],
+    readFile: () => tap,
+    writeReceipt: (payload) => {
+      receipts.push(payload);
+      return { path: "(stubbed)", receipt: {} };
+    },
+  });
+  assert.deepEqual(receipts[0].counts, {
+    tests: 12,
+    pass: 10,
+    fail: 2,
+    skip: 0,
+  });
+});
+
+test("runIsolatedSuite: an unreadable tap file degrades to null counts (not a crash, not a fabricated count)", () => {
+  const receipts = [];
+  const logs = [];
+  const exitCode = runIsolatedSuite({
+    execFile: execFileForReceiptTests(),
+    spawn: () => ({ status: 0 }),
+    log: (m) => logs.push(m),
+    collectFiles: () => [],
+    readFile: throwingReadFile,
+    writeReceipt: (payload) => {
+      receipts.push(payload);
+      return { path: "(stubbed)", receipt: {} };
+    },
+  });
+  assert.equal(exitCode, 0);
+  assert.deepEqual(receipts[0].counts, {
+    tests: null,
+    pass: null,
+    fail: null,
+    skip: null,
+  });
+  assert.ok(logs.some((l) => l.includes("WARNING")));
+});
+
+test("runIsolatedSuite: a receipt-write failure is swallowed (logged, not thrown) and the real exit code still propagates -- writing a receipt must never mask the suite's own result", () => {
+  const logs = [];
+  const exitCode = runIsolatedSuite({
+    execFile: execFileForReceiptTests(),
+    spawn: () => ({ status: 3 }),
+    log: (m) => logs.push(m),
+    collectFiles: () => [],
+    readFile: throwingReadFile,
+    writeReceipt: () => {
+      throw new Error("disk full");
+    },
+  });
+  assert.equal(exitCode, 3);
+  assert.ok(logs.some((l) => l.includes("WARNING") && l.includes("disk full")));
 });
 
 test("runIsolatedSuite: a fail-closed collectFiles throw propagates out (never swallowed into a green run), and cleanup still runs", () => {
