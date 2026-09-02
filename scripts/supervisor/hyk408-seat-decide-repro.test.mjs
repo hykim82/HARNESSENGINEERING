@@ -306,11 +306,20 @@ test("HYK-408 ⓑ AFTER: classifySeatPreview도 같은 실 배너 문자열을 A
 
 // ---------------------------------------------------------------------------
 // ⓒ 장부 기록이 없을 때 fail-closed -- task-list 조회는 성공했지만 이
-// 하네스 라벨+워크트리에 맞는 dispatched 항목이 없다
-// (DELIVERED_SEAT_REASON.NO_CANDIDATE_TASK). 화면 쪽은 깨끗한 단일
-// AGENT 후보(실 배너 문자열)라 화면으로 넘어가면 쉽게 JUDGED가
-// 나올 상황인데도, 장부가 "기록 없음"을 확정했으므로 화면으로
-// 물러나지 않고 여기서 멈춘다(§2(1)/§3-완료조건2 비타협).
+// 하네스 라벨+워크트리에 맞는 dispatched 항목이 없다. 화면 쪽은 깨끗한
+// 단일 AGENT 후보(실 배너 문자열)라 화면으로 넘어가면 쉽게 JUDGED가
+// 나올 상황인데도, 화면으로 물러나지 않고 여기서 멈춘다(§2(1)/
+// §3-완료조건2 비타협).
+//
+// HYK-413-seat-binding-2 (2R 수리, 검토 P2-1): 이 표본은 WORKTREE 아래
+// `.harness/dispatch-receipt-path.txt` 포인터를 두지 않으므로(원장 경로
+// 자체가 미해결) 원장 조회가 인프라 실패(RECEIPT_PATH_UNSET)로 spec
+// 폴백까지 간 뒤 그 spec(task-list)도 0건이다 -- 이건 "원장이 직접
+// 답했는데 기록이 없다"(ⓐ, NO_CANDIDATE_TASK/NO_DELIVERY_RECORD)가
+// 아니라 "원장은 못 물어봤고 그 대안도 못 찾았다"(ⓑ,
+// SPEC_FALLBACK_NO_CANDIDATE_TASK/SPEC_FALLBACK_NO_MATCH)다 -- 2R
+// 이전엔 이 둘이 같은 코드였다(검토가 지적한 결함 그 자체). fail-closed
+// 판정(COLLECTION_FAILED) 자체는 전혀 안 바뀐다.
 // ---------------------------------------------------------------------------
 function fakeExecFnNoDeliveryRecord() {
   const singleClearAgentSeat = { ...AGENT_SEAT };
@@ -349,12 +358,12 @@ test("HYK-408 ⓒ fail-closed: 장부에 이 배달 기록이 없다(task-list �
   assert.equal(r.status, SEAT_LIVENESS_WIRE_STATUS.COLLECTION_FAILED);
   assert.equal(
     r.observationReason,
-    SEAT_LIVENESS_OBSERVATION_REASON.NO_DELIVERY_RECORD,
+    SEAT_LIVENESS_OBSERVATION_REASON.SPEC_FALLBACK_NO_MATCH,
   );
   assert.equal(r.correlation.ok, false);
   assert.equal(
     r.correlation.reasonCode,
-    DELIVERED_SEAT_REASON.NO_CANDIDATE_TASK,
+    DELIVERED_SEAT_REASON.SPEC_FALLBACK_NO_CANDIDATE_TASK,
   );
 });
 
@@ -366,12 +375,12 @@ test("HYK-408 ⓒ fail-closed: dispatchStart 축도 동일하게 장부 기록 �
   assert.equal(r.status, DISPATCH_START_WIRE_STATUS.COLLECTION_FAILED);
   assert.equal(
     r.observationReason,
-    SEAT_LIVENESS_OBSERVATION_REASON.NO_DELIVERY_RECORD,
+    SEAT_LIVENESS_OBSERVATION_REASON.SPEC_FALLBACK_NO_MATCH,
   );
   assert.equal(r.correlation.ok, false);
   assert.equal(
     r.correlation.reasonCode,
-    DELIVERED_SEAT_REASON.NO_CANDIDATE_TASK,
+    DELIVERED_SEAT_REASON.SPEC_FALLBACK_NO_CANDIDATE_TASK,
   );
 });
 

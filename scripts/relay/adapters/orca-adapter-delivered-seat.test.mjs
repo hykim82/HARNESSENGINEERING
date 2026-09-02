@@ -12,6 +12,19 @@
 // dispatch-show의 result.dispatch 필드는 여전히 scripts/relay/
 // hyk171-cycle4b2c-fixtures.mjs의 rawDispatchShowP2()와 동일 키 집합
 // (이번 라운드에서 안 바뀜, 이 부분은 반려 대상이 아니었다).
+//
+// HYK-413-seat-binding-2 (2R 수리, 검토 P2-1): 이 파일의 모든 시험은
+// dispatchLedgerPath/harnessDir을 넘기지 않는다 -- 즉 원장 조회는 항상
+// RECEIPT_PATH_UNSET(인프라 실패)으로 빠지고, 이 파일이 검증해 온 옛
+// "task-list --status dispatched의 spec 매칭"은 이제 그 인프라 폴백
+// 경로(resolveCandidateDispatchTaskViaSpec)로만 도달한다. 그 경로의
+// "후보 0개/2개+" 사유 코드가 원장 자신의 동명 사유(ⓐ 원장에 기록 자체가
+// 없음)와 구별되도록 SPEC_FALLBACK_NO_CANDIDATE_TASK/
+// SPEC_FALLBACK_AMBIGUOUS_CANDIDATE_TASK로 개명됐다(검토가 지적한 감사
+// 구분 결함의 수리) -- 이 파일의 기존 `NO_CANDIDATE_TASK`/
+// `AMBIGUOUS_CANDIDATE_TASK` 단언은 이름만 이 두 코드로 바뀌었을 뿐
+// **판정(ok:false) 자체는 전혀 안 바뀌었다**(회귀 0, 아래 단언들 그대로
+// 확인).
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -266,7 +279,10 @@ test("resolveDeliveredSeat: REVIEW's exact counter-example -- worktree line with
     { execFn },
   );
   assert.equal(r.ok, false);
-  assert.equal(r.reasonCode, DELIVERED_SEAT_REASON.NO_CANDIDATE_TASK);
+  assert.equal(
+    r.reasonCode,
+    DELIVERED_SEAT_REASON.SPEC_FALLBACK_NO_CANDIDATE_TASK,
+  );
 });
 
 test("resolveDeliveredSeat: branch tail with an EMPTY name '(branch )' must NOT be stripped (non-empty name required)", () => {
@@ -287,7 +303,10 @@ test("resolveDeliveredSeat: branch tail with an EMPTY name '(branch )' must NOT 
     { execFn },
   );
   assert.equal(r.ok, false);
-  assert.equal(r.reasonCode, DELIVERED_SEAT_REASON.NO_CANDIDATE_TASK);
+  assert.equal(
+    r.reasonCode,
+    DELIVERED_SEAT_REASON.SPEC_FALLBACK_NO_CANDIDATE_TASK,
+  );
 });
 
 test("resolveDeliveredSeat: a DOUBLE branch tail '(branch a) (branch b)' only strips the outermost, leaving the inner tail attached -- still not a candidate", () => {
@@ -311,7 +330,10 @@ test("resolveDeliveredSeat: a DOUBLE branch tail '(branch a) (branch b)' only st
     { execFn },
   );
   assert.equal(r.ok, false);
-  assert.equal(r.reasonCode, DELIVERED_SEAT_REASON.NO_CANDIDATE_TASK);
+  assert.equal(
+    r.reasonCode,
+    DELIVERED_SEAT_REASON.SPEC_FALLBACK_NO_CANDIDATE_TASK,
+  );
 });
 
 test("resolveDeliveredSeat: branch tail with a SPACE-ONLY name '(branch   )' must NOT match (whitespace is not in the allowed name charset)", () => {
@@ -332,7 +354,10 @@ test("resolveDeliveredSeat: branch tail with a SPACE-ONLY name '(branch   )' mus
     { execFn },
   );
   assert.equal(r.ok, false);
-  assert.equal(r.reasonCode, DELIVERED_SEAT_REASON.NO_CANDIDATE_TASK);
+  assert.equal(
+    r.reasonCode,
+    DELIVERED_SEAT_REASON.SPEC_FALLBACK_NO_CANDIDATE_TASK,
+  );
 });
 
 // ---- HYK-185-seat-corr-4 (§R4 "추가 권고" -- 문법 방식이면 이런 변형도
@@ -355,7 +380,10 @@ test("resolveDeliveredSeat: a TAB (not a space) before '(branch ...)' must NOT m
     { execFn },
   );
   assert.equal(r.ok, false);
-  assert.equal(r.reasonCode, DELIVERED_SEAT_REASON.NO_CANDIDATE_TASK);
+  assert.equal(
+    r.reasonCode,
+    DELIVERED_SEAT_REASON.SPEC_FALLBACK_NO_CANDIDATE_TASK,
+  );
 });
 
 test("resolveDeliveredSeat: a U+00A0 NO-BREAK SPACE before '(branch ...)' must NOT match (only a literal ASCII U+0020 space qualifies, not any Unicode whitespace)", () => {
@@ -376,7 +404,10 @@ test("resolveDeliveredSeat: a U+00A0 NO-BREAK SPACE before '(branch ...)' must N
     { execFn },
   );
   assert.equal(r.ok, false);
-  assert.equal(r.reasonCode, DELIVERED_SEAT_REASON.NO_CANDIDATE_TASK);
+  assert.equal(
+    r.reasonCode,
+    DELIVERED_SEAT_REASON.SPEC_FALLBACK_NO_CANDIDATE_TASK,
+  );
 });
 
 test("resolveDeliveredSeat: a branch name containing a git-forbidden special char (e.g. '~') must NOT match (charset is a conservative subset, not full git ref-name validation)", () => {
@@ -397,7 +428,10 @@ test("resolveDeliveredSeat: a branch name containing a git-forbidden special cha
     { execFn },
   );
   assert.equal(r.ok, false);
-  assert.equal(r.reasonCode, DELIVERED_SEAT_REASON.NO_CANDIDATE_TASK);
+  assert.equal(
+    r.reasonCode,
+    DELIVERED_SEAT_REASON.SPEC_FALLBACK_NO_CANDIDATE_TASK,
+  );
 });
 
 // ---- HYK-192-seat-corr-5 (§4 -- 헤더 주장 ↔ 시험 대조표 작성 중 발견한
@@ -426,7 +460,10 @@ test("resolveDeliveredSeat: an UNCLOSED branch tail (missing the closing ')') mu
     { execFn },
   );
   assert.equal(r.ok, false);
-  assert.equal(r.reasonCode, DELIVERED_SEAT_REASON.NO_CANDIDATE_TASK);
+  assert.equal(
+    r.reasonCode,
+    DELIVERED_SEAT_REASON.SPEC_FALLBACK_NO_CANDIDATE_TASK,
+  );
 });
 
 test("resolveDeliveredSeat: an EMBEDDED NEWLINE inside what would otherwise be the branch tail must NOT match -- the spec is split into lines before parsing, so the tail's closing part becomes a separate, unrelated line", () => {
@@ -451,7 +488,10 @@ test("resolveDeliveredSeat: an EMBEDDED NEWLINE inside what would otherwise be t
     { execFn },
   );
   assert.equal(r.ok, false);
-  assert.equal(r.reasonCode, DELIVERED_SEAT_REASON.NO_CANDIDATE_TASK);
+  assert.equal(
+    r.reasonCode,
+    DELIVERED_SEAT_REASON.SPEC_FALLBACK_NO_CANDIDATE_TASK,
+  );
 });
 
 // ---- HYK-185-seat-corr-4 (§3-c): 문법 자체(앵커·비되돌아가기·문자
@@ -599,7 +639,10 @@ for (const [label, badName] of [
       { execFn },
     );
     assert.equal(r.ok, false);
-    assert.equal(r.reasonCode, DELIVERED_SEAT_REASON.NO_CANDIDATE_TASK);
+    assert.equal(
+      r.reasonCode,
+      DELIVERED_SEAT_REASON.SPEC_FALLBACK_NO_CANDIDATE_TASK,
+    );
   });
 }
 
@@ -671,7 +714,10 @@ test("resolveDeliveredSeat: 'topic@{prior}' is rejected via the charset layer al
     { execFn },
   );
   assert.equal(r.ok, false);
-  assert.equal(r.reasonCode, DELIVERED_SEAT_REASON.NO_CANDIDATE_TASK);
+  assert.equal(
+    r.reasonCode,
+    DELIVERED_SEAT_REASON.SPEC_FALLBACK_NO_CANDIDATE_TASK,
+  );
 });
 
 // ---- HYK-192-seat-corr-5 (§3-3, coder-task.md 요구 3): 경로 "안"의
@@ -730,7 +776,10 @@ test("resolveDeliveredSeat: harness_label line present but VALUE differs from th
     { execFn },
   );
   assert.equal(r.ok, false);
-  assert.equal(r.reasonCode, DELIVERED_SEAT_REASON.NO_CANDIDATE_TASK);
+  assert.equal(
+    r.reasonCode,
+    DELIVERED_SEAT_REASON.SPEC_FALLBACK_NO_CANDIDATE_TASK,
+  );
 });
 
 // ---- HYK-185-seat-corr-2 (§3-a): 오늘 실측 raw로 상관이 실제로 성공한다
@@ -891,7 +940,10 @@ test("resolveDeliveredSeat: correlation-failure (1/3) -- ZERO task-list candidat
     { execFn },
   );
   assert.equal(r.ok, false);
-  assert.equal(r.reasonCode, DELIVERED_SEAT_REASON.NO_CANDIDATE_TASK);
+  assert.equal(
+    r.reasonCode,
+    DELIVERED_SEAT_REASON.SPEC_FALLBACK_NO_CANDIDATE_TASK,
+  );
 });
 
 test("resolveDeliveredSeat: correlation-failure (2/3) -- TWO OR MORE task-list candidates match label+worktree -> loud failure, never picks one", () => {
@@ -921,7 +973,10 @@ test("resolveDeliveredSeat: correlation-failure (2/3) -- TWO OR MORE task-list c
     { execFn },
   );
   assert.equal(r.ok, false);
-  assert.equal(r.reasonCode, DELIVERED_SEAT_REASON.AMBIGUOUS_CANDIDATE_TASK);
+  assert.equal(
+    r.reasonCode,
+    DELIVERED_SEAT_REASON.SPEC_FALLBACK_AMBIGUOUS_CANDIDATE_TASK,
+  );
 });
 
 test("resolveDeliveredSeat: correlation-failure (3/3) -- dispatch record's pane key matches NO live seat (dead-seat-only, ORCH-measured: 6/6 sampled dispatched records pointed at dead seats) -> loud failure, never trusts the record alone", () => {
@@ -978,7 +1033,10 @@ test("resolveDeliveredSeat: candidate label matches but worktree path in spec po
     { execFn },
   );
   assert.equal(r.ok, false);
-  assert.equal(r.reasonCode, DELIVERED_SEAT_REASON.NO_CANDIDATE_TASK);
+  assert.equal(
+    r.reasonCode,
+    DELIVERED_SEAT_REASON.SPEC_FALLBACK_NO_CANDIDATE_TASK,
+  );
 });
 
 test("resolveDeliveredSeat: a live seat in a DIFFERENT worktree sharing no pane key coincidence is not considered (worktree-scoped candidate filter, same principle as resolveSeatLivenessCandidate)", () => {
