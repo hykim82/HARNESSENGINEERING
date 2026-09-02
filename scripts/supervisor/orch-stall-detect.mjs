@@ -787,6 +787,11 @@ function observationReasonForClosedCorrelation(reasonCode) {
 // 없음) 예전 그대로 화면 전용이다(correlation: null) -- 이건 위 ⓐ/ⓑ
 // 갈림 밖이다: 장부에 물어볼 질문 자체를 만들 수 없었을 뿐, 장부가
 // 답했거나 조회가 실패한 것이 아니다.
+// HYK-413-seat-binding-1: harnessDir(=<worktreePath>/.harness)를 넘기면
+// resolveDeliveredSeat의 ①단이 배달 영수증 원장(dispatch-receipts.jsonl,
+// <harnessDir>/dispatch-receipt-path.txt 포인터로 찾는다)을 1차로 쓴다 --
+// 포인터 파일이 없으면(구성 안 됨) 자동으로 옛 spec 매칭 경로로 물러나므로
+// (resolveDeliveredSeat 자신의 헤더 참조) 이 호출 자체는 회귀 위험이 없다.
 function resolveObservationWithDeliveredSeatFallback({
   worktreePath,
   harnessLabel,
@@ -804,7 +809,11 @@ function resolveObservationWithDeliveredSeatFallback({
     };
   }
   const resolved = resolveDeliveredSeat(
-    { harnessLabel, worktreePath },
+    {
+      harnessLabel,
+      worktreePath,
+      harnessDir: path.join(worktreePath, ".harness"),
+    },
     { execFn },
   );
   if (resolved.ok) {

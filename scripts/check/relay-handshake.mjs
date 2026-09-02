@@ -1593,7 +1593,12 @@ function readDispatchReceiptPointerFile(harnessDir) {
   }
 }
 
-function resolveDispatchLedgerPath(explicit, harnessDir) {
+// HYK-413-seat-binding §2⑴: exported so orca-adapter.mjs's seat-resolution
+// axis can reuse the exact same ledger-path resolution (explicit path arg,
+// else `<harnessDir>/dispatch-receipt-path.txt` pointer file, else
+// undefined/skip) that this file's own HYK-387 3R already hardened -- no
+// second implementation of "where is the receipt ledger" is created.
+export function resolveDispatchLedgerPath(explicit, harnessDir) {
   if (explicit !== undefined) return explicit;
   return readDispatchReceiptPointerFile(harnessDir);
 }
@@ -1602,7 +1607,13 @@ function resolveDispatchLedgerPath(explicit, harnessDir) {
 // 형식)을 읽어 파싱 가능한 레코드 배열을 돌려준다. 파일이 아예 없으면
 // "0건 확정"(ABSENT로 이어짐)과 "읽기 자체 실패"(LOOKUP_FAILED로 이어짐)을
 // 여기서 갈라 반환한다 -- 호출자가 이 둘을 절대 같은 코드로 섞지 않도록.
-function readDispatchLedgerRecords(ledgerPath) {
+// HYK-413-seat-binding §2⑴: exported alongside resolveDispatchLedgerPath
+// above, same reuse rationale -- ABSENT-vs-LOOKUP_FAILED (ENOENT vs a real
+// read error) and all-lines-corrupt-vs-partial-corruption are exactly the
+// distinctions the new seat-resolution axis also needs, and re-deriving
+// them separately would risk drifting out of sync with this file's own
+// fail-closed rules.
+export function readDispatchLedgerRecords(ledgerPath) {
   let raw;
   try {
     raw = readFileSync(ledgerPath, "utf8");

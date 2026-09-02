@@ -39,6 +39,14 @@ import {
   normalizeDispatchShow,
 } from "./dispatch-correlation-adapter.mjs";
 import { judgeDispatchPostcheck } from "./dispatch-postcheck-core.mjs";
+// HYK-413-seat-binding §2⑴: reuse relay-handshake.mjs's own
+// receipt-ledger-path resolution and JSONL reader (HYK-387 3R hardened
+// ABSENT-vs-LOOKUP_FAILED, ENOENT-vs-real-error) instead of re-deriving
+// them here -- see resolveCandidateFromReceiptLedger below.
+import {
+  resolveDispatchLedgerPath,
+  readDispatchLedgerRecords,
+} from "../../check/relay-handshake.mjs";
 
 // HYK-169-coder-1: 어댑터 B v1 -- `orca` CLI를 실제로 부르는(spawn) 코드는
 // **이 파일에만** 있다(G9). 코어(relay-core.mjs)·CLI(run-step.mjs)는 이 파일이
@@ -83,6 +91,17 @@ import { judgeDispatchPostcheck } from "./dispatch-postcheck-core.mjs";
 // 실패 하나에 한해서만 이 대조를 시도하는 재시도 경로로 얹는다(다른
 // 실패 사유는 "좌석이 여럿이라 못 골랐다"는 문제가 아니므로 재시도하지
 // 않는다 -- 회귀 방지).
+//
+// HYK-413-seat-binding-1 (coder-task.md §1-§2, 위 ①단만 갱신): ①단의 1차
+// 경로가 "ORCH가 손으로 쓰는 spec 산문"에서 "배달 시점에 기계가 쓰는
+// dispatch-receipts.jsonl"로 옮겨졌다 -- 그 원장은 이미 harness_task_label
+// -> runtime_task_id를 자유 텍스트 파싱 없이 직접 잇는다(dispatch-receipt-
+// cli.mjs). spec 매칭(옛 ①단)은 원장 조회 "자체"가 인프라 사유로 실패했을
+// 때만(경로 미해결/읽기 실패) 물러나 쓰는 보조 경로로 강등됐다 -- 원장이
+// 답했는데 이 라벨과 안 맞으면(0건/2건+/손상) 그대로 실패로 드러내고
+// spec으로 넘어가지 않는다(fail-open 금지). ②③단은 이 라운드에서 손대지
+// 않았다. 상세는 resolveCandidateFromReceiptLedger/
+// resolveCandidateDispatchTask 헤더 참조.
 //
 // ⚠️벤더 형식 의존(코더-task.md "pane key 형식 의존"): `assignee_pane_key`
 // (dispatch-show)는 `${tabId}:${leafId}`(terminal show, paneKeyFromShow)와
@@ -1484,6 +1503,18 @@ export const DELIVERED_SEAT_REASON = Object.freeze({
   // 요구한다.
   NO_LIVE_SEAT_MATCH: "DELIVERED_SEAT_NO_LIVE_SEAT_MATCH",
   AMBIGUOUS_LIVE_SEAT_MATCH: "DELIVERED_SEAT_AMBIGUOUS_LIVE_SEAT_MATCH",
+  // HYK-413-seat-binding §2⑴ (신규): 배달 영수증 원장(dispatch-receipts.jsonl)
+  // 조회 "자체"가 안 됐다(경로 미해결/읽기 실패) -- 이 둘만 spec 매칭
+  // 폴백을 허용한다(아래 resolveCandidateFromReceiptLedger의 infra:true,
+  // resolveCandidateDispatchTask 참조). 원장이 «답은 했는데 못 찾음»
+  // (NO_CANDIDATE_TASK/AMBIGUOUS_CANDIDATE_TASK 재사용/MALFORMED_RECEIPT_RECORD)
+  // 은 폴백하지 않는다 -- 그러면 fail-open이 된다(coder-task.md §2⑵).
+  RECEIPT_PATH_UNSET: "DELIVERED_SEAT_RECEIPT_PATH_UNSET",
+  RECEIPT_READ_FAILED: "DELIVERED_SEAT_RECEIPT_READ_FAILED",
+  // 라벨과 일치하는 영수증이 정확히 1건 있지만 그 레코드 자체가 손상됐다
+  // (필수 필드 runtime_task_id 결손) -- "기록 없음"과 다른 사유로
+  // 구별한다(coder-task.md §2⑶ "손상"도 fail-closed로 명시).
+  MALFORMED_RECEIPT_RECORD: "DELIVERED_SEAT_MALFORMED_RECEIPT_RECORD",
 });
 
 export function buildTaskListDispatchedCommand() {
@@ -1652,9 +1683,120 @@ function specMatchesDeliveryTarget(specText, harnessLabel, worktreePath) {
   );
 }
 
-// §2 step①: task-list --status dispatched에서 라벨+워크트리 경로가 spec에
-// 함께 있는 후보를 정확히 하나로 좁힌다. 0개/2개+는 고르지 않고 실패.
-function resolveCandidateDispatchTask({ harnessLabel, worktreePath }, opts) {
+// HYK-413-seat-binding §2⑴ (1차 경로, 신규): 하네스 라벨로 배달 영수증
+// 원장(dispatch-receipts.jsonl, dispatch-receipt-cli.mjs가 배달 시점에
+// 기계가 쓰는 append-only 로그)에서 runtime_task_id를 읽는다. spec 자유
+// 텍스트는 전혀 보지 않는다 -- ORCH가 그 두 줄(harness_label:/worktree:)을
+// 손으로 잊어도 이 경로는 흔들리지 않는다.
+//
+// 경로 해석: 호출자가 dispatchLedgerPath를 명시로 주면 그 값, 아니면
+// harnessDir(=<워크트리>/.harness)의 dispatch-receipt-path.txt 포인터
+// 파일(HYK-387 3R -- env DISPATCH_RECEIPT_PATH는 ambient-leak 위험 때문에
+// 의도적으로 안 쓴다, resolveDispatchLedgerPath 자신의 헤더 참조). 둘 다
+// 없으면 "조회 자체를 시작할 수 없다"는 인프라 실패(RECEIPT_PATH_UNSET)로
+// 반환하고, 호출부(resolveCandidateDispatchTask)가 그 경우에만 §2⑵ spec
+// 폴백으로 넘어간다.
+//
+// ⛔fail-open 경계(coder-task.md §2⑵ 비타협): 원장 조회 자체는 성공했는데
+// 이 라벨과 일치하는 레코드가 0건/2건 이상이거나, 정확히 1건이지만
+// runtime_task_id 필드가 없으면(손상) -- 이 세 경우는 전부 infra:false로
+// 반환해 spec 폴백을 절대 시도하지 않는다("장부가 답했는데 못 찾음"을
+// 폴백으로 넘기면 그 자체가 fail-open이라는 지적, coder-task.md §2⑵ 원문).
+//
+// ⚠️정직 한계(coder-task.md §3 완료조건6, HYK-390): 이 함수는 원장 레코드의
+// "존재"만 보고 "진위"는 보지 않는다 -- 같은 권한의 프로세스가 영수증
+// 파일에 가짜 줄 하나를 추가하면(정상 append와 구별 불가) 이 축은 그
+// 위조를 믿는다. 위조 탐지는 별도 이슈(HYK-390)의 몫이며, 이 라운드는
+// "사람이 spec에 두 줄을 잊지 않아야 하는" 의존을 없애는 것이지 그
+// 이상을 주장하지 않는다.
+function resolveCandidateFromReceiptLedger({
+  harnessLabel,
+  dispatchLedgerPath,
+  harnessDir,
+}) {
+  const ledgerPath = resolveDispatchLedgerPath(dispatchLedgerPath, harnessDir);
+  if (!ledgerPath) {
+    return {
+      ok: false,
+      infra: true,
+      reasonCode: DELIVERED_SEAT_REASON.RECEIPT_PATH_UNSET,
+      reason:
+        "orca-adapter: resolveDeliveredSeat -- dispatch receipt ledger path unresolved (no dispatchLedgerPath and no <harnessDir>/dispatch-receipt-path.txt pointer), falling back to spec matching",
+    };
+  }
+  const ledger = readDispatchLedgerRecords(ledgerPath);
+  if (!ledger.ok) {
+    return {
+      ok: false,
+      infra: true,
+      reasonCode: DELIVERED_SEAT_REASON.RECEIPT_READ_FAILED,
+      reason: `orca-adapter: resolveDeliveredSeat -- ${ledger.reason}, falling back to spec matching`,
+    };
+  }
+  const matches = ledger.records.filter(
+    (r) => isPlainObject(r) && r.harness_task_label === harnessLabel,
+  );
+  if (matches.length === 0) {
+    return {
+      infra: false,
+      ...denyDeliveredSeat(
+        DELIVERED_SEAT_REASON.NO_CANDIDATE_TASK,
+        `orca-adapter: resolveDeliveredSeat -- no dispatch receipt in ledger '${ledgerPath}' matches harness_task_label '${harnessLabel}'`,
+      ),
+    };
+  }
+  if (matches.length > 1) {
+    return {
+      infra: false,
+      ...denyDeliveredSeat(
+        DELIVERED_SEAT_REASON.AMBIGUOUS_CANDIDATE_TASK,
+        `orca-adapter: resolveDeliveredSeat -- ${matches.length} dispatch receipts match harness_task_label '${harnessLabel}' in ledger '${ledgerPath}', refusing to guess`,
+      ),
+    };
+  }
+  const record = matches[0];
+  if (!isNonEmptyString(record.runtime_task_id)) {
+    return {
+      infra: false,
+      ...denyDeliveredSeat(
+        DELIVERED_SEAT_REASON.MALFORMED_RECEIPT_RECORD,
+        `orca-adapter: resolveDeliveredSeat -- the matching dispatch receipt for '${harnessLabel}' in ledger '${ledgerPath}' has no runtime_task_id field (damaged/incomplete record)`,
+      ),
+    };
+  }
+  return { ok: true, runtimeTaskId: record.runtime_task_id };
+}
+
+// §2 step①: 1차는 위 resolveCandidateFromReceiptLedger(원장) -- 그 조회
+// 자체가 인프라 사유로 실패했을 때만(infra:true) task-list --status
+// dispatched의 spec 자유 텍스트 매칭으로 물러난다(HYK-408 2R이 세운
+// "인프라 실패에만 폴백" 경계와 같은 모양, coder-task.md §2⑵). 원장이
+// 답했지만 못 찾은 경우(infra:false)는 그대로 실패를 반환한다.
+function resolveCandidateDispatchTask(
+  { harnessLabel, worktreePath, dispatchLedgerPath, harnessDir },
+  opts,
+) {
+  const viaReceipt = resolveCandidateFromReceiptLedger({
+    harnessLabel,
+    dispatchLedgerPath,
+    harnessDir,
+  });
+  if (viaReceipt.ok || !viaReceipt.infra) return viaReceipt;
+  return resolveCandidateDispatchTaskViaSpec(
+    { harnessLabel, worktreePath },
+    opts,
+  );
+}
+
+// §2⑵ 폴백 경로(구 1차, 이제는 보조): task-list --status dispatched에서
+// 라벨+워크트리 경로가 spec에 함께 있는 후보를 정확히 하나로 좁힌다.
+// 0개/2개+는 고르지 않고 실패. 원장 조회 자체가 실패했을 때만 불린다
+// (위 resolveCandidateDispatchTask 참조) -- 로직 자체는 HYK-185-seat-corr
+// 이래 바뀌지 않았다.
+function resolveCandidateDispatchTaskViaSpec(
+  { harnessLabel, worktreePath },
+  opts,
+) {
   let response;
   try {
     response = opts.execFn(buildTaskListDispatchedCommand());
@@ -1866,12 +2008,18 @@ function resolveLiveSeatByPaneKey({ worktreePath, assigneePaneKey }, opts) {
   };
 }
 
-// ctx: { harnessLabel, worktreePath } -- opts: { execFn }. 순수 조합(§2
-// step①②③ 순서 그대로). execFn 호출은 task-list 1 + dispatch-show 1 +
-// terminal-list 1 + 이 워크트리의 살아있는 좌석 수만큼의 terminal-show --
-// 전부 읽기 전용, dispatch/send/close/worktree 계열 호출 0.
+// ctx: { harnessLabel, worktreePath, dispatchLedgerPath?, harnessDir? } --
+// opts: { execFn }. 순수 조합(§2 step①②③ 순서 그대로, HYK-413-seat-binding
+// 으로 step①의 1차 경로만 원장 조회로 바뀌었다). dispatchLedgerPath/
+// harnessDir 둘 다 선택(옵션) -- 둘 다 생략하면 원장 경로를 해석할 수
+// 없어 자동으로 §2⑵ spec 폴백으로 물러난다(호출자가 아직 배선하지 않은
+// 구버전 호출부와도 100% 호환, 회귀 없음). execFn 호출은 (원장 폴백이
+// 발동했을 때만) task-list 1 + dispatch-show 1 + terminal-list 1 + 이
+// 워크트리의 살아있는 좌석 수만큼의 terminal-show -- 전부 읽기 전용,
+// dispatch/send/close/worktree 계열 호출 0.
 export function resolveDeliveredSeat(ctx = {}, opts = {}) {
-  const { harnessLabel, worktreePath } = isPlainObject(ctx) ? ctx : {};
+  const { harnessLabel, worktreePath, dispatchLedgerPath, harnessDir } =
+    isPlainObject(ctx) ? ctx : {};
   if (!isNonEmptyString(harnessLabel) || !isNonEmptyString(worktreePath)) {
     return denyDeliveredSeat(
       DELIVERED_SEAT_REASON.INPUT_INVALID,
@@ -1885,7 +2033,7 @@ export function resolveDeliveredSeat(ctx = {}, opts = {}) {
     );
   }
   const candidate = resolveCandidateDispatchTask(
-    { harnessLabel, worktreePath },
+    { harnessLabel, worktreePath, dispatchLedgerPath, harnessDir },
     opts,
   );
   if (!candidate.ok) return candidate;
