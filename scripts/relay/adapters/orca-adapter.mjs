@@ -1109,6 +1109,15 @@ export const SEAT_LIVENESS_OBSERVATION_REASON = Object.freeze({
   // 명시로 올리지 않는 한 자동으로 이쪽(닫힘)으로 떨어진다.
   DELIVERY_RECORD_NO_MATCH:
     "SEAT_LIVENESS_OBSERVATION_DELIVERY_RECORD_NO_MATCH",
+  // HYK-413-seat-binding-2 (2R 수리, 검토 P2-1): 원장 조회가 인프라 사유로
+  // 실패해 spec 폴백까지 갔는데 그 spec 도 못 찾은 경우(orca-adapter.mjs
+  // DELIVERED_SEAT_REASON.SPEC_FALLBACK_NO_CANDIDATE_TASK) -- "원장에
+  // 기록 자체가 없다"(NO_DELIVERY_RECORD)와는 다른 사유다: 이쪽은 원장에
+  // 물어보지도 못했고, 그 대안(spec)도 이 배달을 못 찾았다는 뜻이다.
+  // 이 값이 없으면 orch-stall-detect.mjs의 observationReasonForClosedCorrelation
+  // 이 두 사유를 다시 하나로(DELIVERY_RECORD_NO_MATCH) 접어 감사에서
+  // 구별이 안 된다 -- 그 함수가 이 값을 명시로 골라내야 한다.
+  SPEC_FALLBACK_NO_MATCH: "SEAT_LIVENESS_OBSERVATION_SPEC_FALLBACK_NO_MATCH",
 });
 
 function denySeatLivenessObservation(observationReason, detail) {
@@ -1515,6 +1524,20 @@ export const DELIVERED_SEAT_REASON = Object.freeze({
   // (필수 필드 runtime_task_id 결손) -- "기록 없음"과 다른 사유로
   // 구별한다(coder-task.md §2⑶ "손상"도 fail-closed로 명시).
   MALFORMED_RECEIPT_RECORD: "DELIVERED_SEAT_MALFORMED_RECEIPT_RECORD",
+  // HYK-413-seat-binding-2 (2R 수리, 검토 P2-1 원문): resolveCandidateFromReceiptLedger
+  // 의 "원장이 직접 답했는데 이 라벨 항목이 0건/2건+"(위 NO_CANDIDATE_TASK/
+  // AMBIGUOUS_CANDIDATE_TASK, ⓐ)와 resolveCandidateDispatchTaskViaSpec의
+  // "원장 조회가 인프라로 실패해 spec으로 물러났는데 spec도 0건/2건+"
+  // (ⓑ)는 서로 다른 사유다 -- 전자는 «장부에 이 배달의 기록 자체가
+  // 없다», 후자는 «장부는 못 물어봤고 물어본 대안(spec)도 못 찾았다».
+  // 옛 코드는 resolveCandidateDispatchTaskViaSpec이 같은 NO_CANDIDATE_TASK/
+  // AMBIGUOUS_CANDIDATE_TASK 코드를 재사용해 이 둘이 감사에서 구별되지
+  // 않았다(검토 원문: "원장 기록 부재와 같은 코드가 됩니다"). 폴백 정책·
+  // fail-closed 판정 자체는 전혀 안 바뀐다 -- 사유 코드만 갈린다.
+  SPEC_FALLBACK_NO_CANDIDATE_TASK:
+    "DELIVERED_SEAT_SPEC_FALLBACK_NO_CANDIDATE_TASK",
+  SPEC_FALLBACK_AMBIGUOUS_CANDIDATE_TASK:
+    "DELIVERED_SEAT_SPEC_FALLBACK_AMBIGUOUS_CANDIDATE_TASK",
 });
 
 export function buildTaskListDispatchedCommand() {
@@ -1829,14 +1852,14 @@ function resolveCandidateDispatchTaskViaSpec(
   );
   if (candidates.length === 0) {
     return denyDeliveredSeat(
-      DELIVERED_SEAT_REASON.NO_CANDIDATE_TASK,
-      `orca-adapter: resolveDeliveredSeat -- no dispatched task-list entry's spec matches label '${harnessLabel}' + worktree '${worktreePath}'`,
+      DELIVERED_SEAT_REASON.SPEC_FALLBACK_NO_CANDIDATE_TASK,
+      `orca-adapter: resolveDeliveredSeat -- ledger query failed for an infra reason and fell back to spec matching, but no dispatched task-list entry's spec matches label '${harnessLabel}' + worktree '${worktreePath}' either`,
     );
   }
   if (candidates.length > 1) {
     return denyDeliveredSeat(
-      DELIVERED_SEAT_REASON.AMBIGUOUS_CANDIDATE_TASK,
-      `orca-adapter: resolveDeliveredSeat -- ${candidates.length} dispatched task-list entries match label '${harnessLabel}' + worktree '${worktreePath}', refusing to guess`,
+      DELIVERED_SEAT_REASON.SPEC_FALLBACK_AMBIGUOUS_CANDIDATE_TASK,
+      `orca-adapter: resolveDeliveredSeat -- ledger query failed for an infra reason and fell back to spec matching, and ${candidates.length} dispatched task-list entries match label '${harnessLabel}' + worktree '${worktreePath}', refusing to guess`,
     );
   }
   return { ok: true, runtimeTaskId: candidates[0].id };

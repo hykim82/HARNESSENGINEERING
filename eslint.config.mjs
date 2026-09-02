@@ -140,6 +140,14 @@ export default [
     // DELIVERED_SEAT_REASON directly (read-only adapter ports) against
     // real-measured strings to pin the ledger-primary/screen-fallback
     // repro, same pattern as hyk185-seat-multi-repro.test.mjs above.
+    // HYK-413-seat-binding-2 (coder-task.md §2⑴ "투영 지점까지 확인하라"):
+    // same shape one more time -- hyk413-seat-reason-projection.test.mjs
+    // drives judgeSeatLivenessForRepo (production entry point) directly to
+    // confirm the adapter's split reason codes survive the supervisor's
+    // own observationReasonForClosedCorrelation projection, importing only
+    // read-only ports (SEAT_LIVENESS_OBSERVATION_REASON/DELIVERED_SEAT_REASON)
+    // from orca-adapter.mjs, same pattern as hyk408-seat-decide-repro.test.mjs
+    // above.
     files: [
       "scripts/supervisor/orch-stall-detect.mjs",
       "scripts/supervisor/seat-liveness-wire.test.mjs",
@@ -147,6 +155,7 @@ export default [
       "scripts/supervisor/dispatch-start-wire.test.mjs",
       "scripts/supervisor/hyk185-seat-multi-repro.test.mjs",
       "scripts/supervisor/hyk408-seat-decide-repro.test.mjs",
+      "scripts/supervisor/hyk413-seat-reason-projection.test.mjs",
       "scripts/supervisor/watch-run.mjs",
       "scripts/supervisor/escalation-axis-wire.test.mjs",
       "scripts/supervisor/reach-report-core.mjs",

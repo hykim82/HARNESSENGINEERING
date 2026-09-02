@@ -777,10 +777,26 @@ const LEDGER_QUERY_INFRA_FAILURE_REASONS = new Set([
 // 구분할 근거가 없기 때문이다)는 correlation.reasonCode에 그대로 실려
 // 감사 기록에서 여전히 보인다 -- 이 함수는 그 위에 "부재 vs 그 밖의 상관
 // 실패"라는 두 갈래 요약만 얹는다.
+// HYK-413-seat-binding-2 (2R 수리, 검토 P2-1 원문): 예전엔 이 함수가
+// NO_CANDIDATE_TASK 하나만 걸러내고 "그 밖은 전부" DELIVERY_RECORD_NO_MATCH
+// 로 접었다 -- 그런데 orca-adapter.mjs가 이제 ⓐ(원장이 직접 답했는데
+// 없음, NO_CANDIDATE_TASK)와 ⓑ(원장 조회가 인프라로 실패해 spec 폴백까지
+// 갔는데 spec도 못 찾음, SPEC_FALLBACK_NO_CANDIDATE_TASK)를 서로 다른
+// 코드로 낸다 -- 이 함수가 그 둘을 각각 자기 사유로 골라내지 않으면
+// "어댑터에서만 갈라 놓고 상위에서 다시 하나로 접힌다"(검토 P2-1이
+// 지적한 바로 그 결함)가 재발한다. ⓒ(NO_LIVE_SEAT_MATCH/
+// AMBIGUOUS_LIVE_SEAT_MATCH 등 -- 좌석 죽음·회전·모호)와 그 밖의 상관
+// 실패는 여전히 DELIVERY_RECORD_NO_MATCH 하나로 묶는다(§2⑴ 요구는 "최소
+// 세 갈래"이지 전수 분리가 아니다 -- 이 묶음 안의 개별 reasonCode는
+// correlation.reasonCode에 그대로 실려 이미 보존된다, 아래 주석 참조).
 function observationReasonForClosedCorrelation(reasonCode) {
-  return reasonCode === DELIVERED_SEAT_REASON.NO_CANDIDATE_TASK
-    ? SEAT_LIVENESS_OBSERVATION_REASON.NO_DELIVERY_RECORD
-    : SEAT_LIVENESS_OBSERVATION_REASON.DELIVERY_RECORD_NO_MATCH;
+  if (reasonCode === DELIVERED_SEAT_REASON.NO_CANDIDATE_TASK) {
+    return SEAT_LIVENESS_OBSERVATION_REASON.NO_DELIVERY_RECORD;
+  }
+  if (reasonCode === DELIVERED_SEAT_REASON.SPEC_FALLBACK_NO_CANDIDATE_TASK) {
+    return SEAT_LIVENESS_OBSERVATION_REASON.SPEC_FALLBACK_NO_MATCH;
+  }
+  return SEAT_LIVENESS_OBSERVATION_REASON.DELIVERY_RECORD_NO_MATCH;
 }
 
 // harnessLabel 자체가 없으면(활성 배달에 라벨이 없어 장부를 조회할 근거가

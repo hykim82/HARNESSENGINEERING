@@ -12,14 +12,22 @@
 // 워크트리 자신의 라이브 .harness/ 아래는 절대 쓰지 않는다).
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
-import { join } from "node:path";
+import {
+  mkdtempSync,
+  mkdirSync,
+  writeFileSync,
+  readFileSync,
+  rmSync,
+} from "node:fs";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import {
   resolveDeliveredSeat,
   DELIVERED_SEAT_REASON,
 } from "./orca-adapter.mjs";
 
+const HERE = dirname(fileURLToPath(import.meta.url));
 const SCRATCH_ROOT = join(tmpdir(), "hyk413-seat-binding-scratch");
 
 function withFixtureDir(prefix, fn) {
@@ -190,9 +198,17 @@ test("resolveDeliveredSeat: RECEIPT LEDGER PRIMARY -- realistic ORCH prose WITHO
 
 // CONTRAST (수리 "전" 동작의 직접 재현): 같은 realistic no-worktree spec을
 // task-list가 돌려주고, 원장은 아예 구성되지 않은(harnessDir 자체를 안
-// 넘긴) 상태 -- 이 경우엔 spec 매칭(폴백)만 있으므로 여전히
-// NO_CANDIDATE_TASK다. 위 "PRIMARY" 시험과 대조하면 "무엇이 이 라운드가
-// 고친 것인가"가 시험만으로 드러난다.
+// 넘긴) 상태 -- 이 경우엔 spec 매칭(폴백)만 있으므로 여전히 실패한다.
+// 위 "PRIMARY" 시험과 대조하면 "무엇이 이 라운드가 고친 것인가"가
+// 시험만으로 드러난다.
+//
+// HYK-413-seat-binding-2 (2R 수리, 검토 P2-1): 사유 코드는
+// `SPEC_FALLBACK_NO_CANDIDATE_TASK`다(원장 자신의 "기록 없음"과 이름부터
+// 다르다) -- 이 CONTRAST 자체가 실은 «인프라 실패(경로 미설정)로 spec
+// 폴백까지 갔는데 그 spec도 못 찾음»(ⓑ)의 실물 표본이다. 참고: 이
+// CONTRAST는 검토가 "되돌림 변이가 아니다"라고 정확히 지적한 대상이다
+// (런타임 설정만 다를 뿐 코드를 끊지 않았다) -- 진짜 되돌림 변이는 아래
+// "★MUTATION" 시험이 별도로 담당한다.
 test("resolveDeliveredSeat: CONTRAST -- same no-worktree-line spec but NO receipt ledger configured falls back to spec matching and still fails (proves the ledger, not a relaxed spec grammar, is what fixed test above)", () => {
   const execFn = makeExecFn({
     tasks: [{ id: "task_1", spec: realisticSpecWithoutWorktreeLine(LABEL) }],
@@ -204,7 +220,10 @@ test("resolveDeliveredSeat: CONTRAST -- same no-worktree-line spec but NO receip
     { execFn },
   );
   assert.equal(r.ok, false);
-  assert.equal(r.reasonCode, DELIVERED_SEAT_REASON.NO_CANDIDATE_TASK);
+  assert.equal(
+    r.reasonCode,
+    DELIVERED_SEAT_REASON.SPEC_FALLBACK_NO_CANDIDATE_TASK,
+  );
 });
 
 // ---- ★재현 시험 필수 ⓑ: 영수증이 아예 없는 표본(원장은 있지만 이
@@ -425,4 +444,196 @@ test("resolveDeliveredSeat: unlisted-failure-defaults-closed -- only RECEIPT_PAT
     );
   }
   assert.equal(INFRA_FALLBACK_ALLOWED.size, 2);
+});
+
+// ==== HYK-413-seat-binding-2 (2R 수리, 검토 P2-1/P2-2) ====
+//
+// P2-1: 원장 자신의 "기록 없음"(ⓐ, NO_CANDIDATE_TASK)과 인프라 실패로
+// spec 폴백까지 갔는데 spec도 못 찾은 경우(ⓑ, SPEC_FALLBACK_NO_CANDIDATE_TASK)
+// 가 예전엔 같은 코드였다 -- 위 CONTRAST 시험(이제 SPEC_FALLBACK_NO_CANDIDATE_TASK
+// 를 단언하도록 갱신됨)이 이미 ⓑ 표본이다. 여기서는 ⓐ/ⓑ 두 사유
+// **문자열 자체가 다르다**는 것을 직접 대조하고, AMBIGUOUS 짝(2건+)도
+// 같은 방식으로 갈린다는 것을 재현한다.
+
+test("resolveDeliveredSeat: reproduction ⓐ vs ⓑ -- ledger-absent (NO_CANDIDATE_TASK) and infra-fallback-spec-also-absent (SPEC_FALLBACK_NO_CANDIDATE_TASK) are DIFFERENT reasonCode strings (audit distinguishability, adapter level)", () => {
+  // ⓐ: 원장이 직접 답했는데 이 라벨 항목이 0건(재현 ⓑ 시험과 이름이
+  // 겹치지만 그건 orch-stall-detect 투영 쪽 명명 -- 여기서는 이 라운드
+  // 지시서 §2⑴의 ⓐ/ⓑ 문자 그대로 쓴다).
+  const withA = withFixtureDir("dist-a-", (dir) => {
+    const harnessDir = join(dir, ".harness");
+    const ledgerPath = join(dir, "dispatch-receipts.jsonl");
+    writeFileSync(
+      ledgerPath,
+      receiptLine({
+        runtimeTaskId: "task_other",
+        assigneePaneKey: paneKeyOf(CODER_SEAT),
+        harnessTaskLabel: "HYK-413-fixture-UNRELATED",
+      }),
+      "utf8",
+    );
+    writePointer(harnessDir, ledgerPath);
+    const execFn = makeExecFn({ forbidTaskList: true });
+    return resolveDeliveredSeat(
+      { harnessLabel: LABEL, worktreePath: WORKTREE, harnessDir },
+      { execFn },
+    );
+  });
+  // ⓑ: 원장 경로 자체가 미설정(인프라 실패) -> spec 폴백 -> spec도
+  // 이 라벨+워크트리를 못 찾음.
+  const withB = resolveDeliveredSeat(
+    { harnessLabel: LABEL, worktreePath: WORKTREE },
+    {
+      execFn: makeExecFn({
+        tasks: [
+          { id: "task_1", spec: realisticSpecWithoutWorktreeLine(LABEL) },
+        ],
+        dispatchByTaskId: {},
+        seats: [CODER_SEAT],
+      }),
+    },
+  );
+  assert.equal(withA.ok, false);
+  assert.equal(withB.ok, false);
+  assert.equal(withA.reasonCode, DELIVERED_SEAT_REASON.NO_CANDIDATE_TASK);
+  assert.equal(
+    withB.reasonCode,
+    DELIVERED_SEAT_REASON.SPEC_FALLBACK_NO_CANDIDATE_TASK,
+  );
+  assert.notEqual(
+    withA.reasonCode,
+    withB.reasonCode,
+    "ⓐ(원장 기록 없음)와 ⓑ(인프라 폴백 후 spec도 못 찾음)는 서로 다른 reasonCode여야 한다",
+  );
+});
+
+// AMBIGUOUS 짝: 원장이 인프라 실패로 spec 폴백까지 갔는데, spec 매칭이
+// 2건 이상 걸림 -- SPEC_FALLBACK_AMBIGUOUS_CANDIDATE_TASK(원장 자신의
+// AMBIGUOUS_CANDIDATE_TASK와 다른 이름).
+test("resolveDeliveredSeat: infra-fallback spec matching TWO OR MORE candidates -> SPEC_FALLBACK_AMBIGUOUS_CANDIDATE_TASK (distinct from the ledger's own AMBIGUOUS_CANDIDATE_TASK)", () => {
+  const spec = `role: CODER\nharness_label: ${LABEL}\nworktree: ${WORKTREE}\ntask_file: .harness/coder-task.md\n요지: (시험용 축약).`;
+  const execFn = makeExecFn({
+    tasks: [
+      { id: "task_1", spec },
+      { id: "task_2", spec },
+    ],
+    dispatchByTaskId: {},
+    seats: [CODER_SEAT],
+  });
+  const r = resolveDeliveredSeat(
+    { harnessLabel: LABEL, worktreePath: WORKTREE },
+    { execFn },
+  );
+  assert.equal(r.ok, false);
+  assert.equal(
+    r.reasonCode,
+    DELIVERED_SEAT_REASON.SPEC_FALLBACK_AMBIGUOUS_CANDIDATE_TASK,
+  );
+  assert.notEqual(r.reasonCode, DELIVERED_SEAT_REASON.AMBIGUOUS_CANDIDATE_TASK);
+});
+
+// ---- ★MUTATION (coder-task.md §2⑵, 검토 P2-2 원문 그대로 수리): 검토가
+// "원장 미설정 호출은 되돌림 변이가 아니다"라고 정확히 지적했다 -- 그건
+// 런타임 설정을 바꿨을 뿐 코드를 끊지 않았다. 이 시험은 REAL 소스
+// (orca-adapter.mjs)를 실제로 코드 변이시켜 새 원장-primary 축의 인과를
+// 증명한다. HYK-412-stuck-retire-2가 이미 굳힌 관례
+// (hyk412-never-consumed-retire-core.test.mjs)를 그대로 따른다: 실
+// 소스를 읽기 전용으로만 열어(readFileSync) 마커 한 줄을 잘라낸
+// 문자열을 **같은 디렉터리**(scripts/relay/adapters/ -- orca-adapter.mjs
+// 의 상대 import들이 그대로 풀리려면 같은 깊이여야 한다, 원본 파일의
+// import 목록 참조)의 새 파일에 써서(writeFileSync) 동적 import한다 --
+// 실 파일은 이 시험 도중 단 한 번도 쓰기로 열리지 않으므로 원복은
+// "구성상" 보장된다(끝에서 재확인한다).
+//
+// 자르는 줄(resolveCandidateDispatchTask 안, 원장 조회 결과를 실제로
+// 반영하는 단 한 줄): 이걸 지우면 원장 조회는 여전히 실행되지만 그
+// 결과는 버려지고 함수가 **항상** spec 매칭으로 떨어진다 -- "원장-primary
+// 축을 코드에서 끊는다"의 가장 직접적인 형태다.
+const ADAPTER_PATH = join(HERE, "orca-adapter.mjs");
+const PRIMARY_AXIS_MARKER =
+  "if (viaReceipt.ok || !viaReceipt.infra) return viaReceipt;";
+
+test("★MUTATION: cutting the receipt-ledger-primary line makes the SAME no-worktree-line spec sample fail again (RED without the new axis) -- proves the axis is causally load-bearing, then byte-identical restore of the REAL source", async () => {
+  const src = readFileSync(ADAPTER_PATH, "utf8");
+  const occurrences = src.split(PRIMARY_AXIS_MARKER).length - 1;
+  assert.equal(
+    occurrences,
+    1,
+    `mutation marker not found exactly once in current source (found ${occurrences}): ${PRIMARY_AXIS_MARKER}`,
+  );
+  const markerStart = src.indexOf(PRIMARY_AXIS_MARKER);
+  const lineEnd = src.indexOf("\n", markerStart);
+  assert.ok(lineEnd >= 0, "mutation marker's line must end with a newline");
+  const mutated = src.slice(0, markerStart) + src.slice(lineEnd + 1);
+  assert.notEqual(mutated, src, "mutation must actually change the source");
+
+  const mutantPath = join(
+    HERE,
+    `orca-adapter.hyk413-2r-mutant-${process.pid}.mjs`,
+  );
+  try {
+    writeFileSync(mutantPath, mutated, "utf8");
+    const mutantModule = await import(
+      `file://${mutantPath}?t=${Date.now()}-${Math.random()}`
+    );
+
+    // Same fixture shape as the "PRIMARY" test above (valid ledger receipt
+    // + a spec with NO worktree: line) -- with the primary axis's result
+    // discarded, the function now always falls through to spec matching,
+    // which requires a worktree: line and must therefore fail.
+    withFixtureDir("mutation-", (dir) => {
+      const harnessDir = join(dir, ".harness");
+      const ledgerPath = join(dir, "dispatch-receipts.jsonl");
+      writeFileSync(
+        ledgerPath,
+        receiptLine({
+          runtimeTaskId: "task_1",
+          assigneePaneKey: paneKeyOf(CODER_SEAT),
+        }),
+        "utf8",
+      );
+      writePointer(harnessDir, ledgerPath);
+      // forbidTaskList intentionally OMITTED -- task-list WILL be called
+      // now that the primary axis's result is discarded.
+      const execFn = makeExecFn({
+        tasks: [
+          { id: "task_1", spec: realisticSpecWithoutWorktreeLine(LABEL) },
+        ],
+        dispatchByTaskId: {
+          task_1: {
+            id: "dispatch_1",
+            task_id: "task_1",
+            assignee_handle: CODER_SEAT.handle,
+            assignee_pane_key: paneKeyOf(CODER_SEAT),
+            status: "dispatched",
+          },
+        },
+        seats: [CODER_SEAT],
+      });
+      const r = mutantModule.resolveDeliveredSeat(
+        { harnessLabel: LABEL, worktreePath: WORKTREE, harnessDir },
+        { execFn },
+      );
+      assert.equal(
+        r.ok,
+        false,
+        "RED expected: with the ledger-primary axis's result discarded, the no-worktree-line spec sample must fail again",
+      );
+      assert.equal(
+        r.reasonCode,
+        mutantModule.DELIVERED_SEAT_REASON.SPEC_FALLBACK_NO_CANDIDATE_TASK,
+      );
+    });
+  } finally {
+    rmSync(mutantPath, { force: true });
+  }
+
+  // Restoration proof: the real source file was only ever opened for
+  // reading in this test, never for writing -- byte-identical by
+  // construction (same posture as hyk412-never-consumed-retire-core.test.mjs).
+  const after = readFileSync(ADAPTER_PATH, "utf8");
+  assert.equal(
+    after,
+    src,
+    "원복 증명 실패: 실제 orca-adapter.mjs가 이 시험 도중 바뀌었다",
+  );
 });
