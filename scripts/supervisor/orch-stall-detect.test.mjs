@@ -912,11 +912,76 @@ test("static: orch-stall-detect.mjs never fetches over the network (no fetch/git
   assert.equal(/["']pull["']/.test(codeOnly), false);
 });
 
-// no production (non-test) file imports this module -- only its own
-// .test.mjs wire tests do, each with its own "why excluded" comment
-// inline in OWN_TEST_FILE_SUFFIXES below (HYK-340-vanished-unresolved
-// moved this explanation there when the exclusion list became an array).
-test("static: no PRODUCTION code imports orch-stall-detect.mjs yet (h -- can be called is not the same as is being called; only its own .test.mjs files do)", () => {
+// HYK-413-seat-binding-3 (§2ⓒ, 책임자 게이트 2 판정 A): 아래 두 항목
+// (허용 목록·grep 헬퍼)을 모듈 스코프로 끌어올렸다 -- 이번 라운드가 새로
+// 추가하는 드리프트-봉인 시험(아래 "static: eslint.config.mjs's supervisor
+// relay-import exception...")이 **같은 배열/같은 grep 호출**을 재사용해야
+// 하기 때문이다(값을 복사하면 그 복사본 자체가 또 다른 "두 번째 목록"이
+// 되어 이번 반려의 원인을 그대로 재현한다). 로직·값은 원문과 동일, 스코프만
+// 옮겼다.
+//
+// HYK-340-vanished-unresolved (eslint complexity 상한 준수 수리): 이
+// 목록이 늘어날수록 아래 filter의 `&&` 체인 길이가 그대로 eslint
+// complexity 분기 수가 되어(ESLint complexity.js 실측, orch-stall-
+// detect.mjs의 REASON_BY_SIGNAL_KIND 등과 동일 계열 실측) 새 wire 시험
+// 파일 하나를 추가할 때마다 상한을 넘길 위험이 커진다. 그래서 배열 +
+// `.some()`로 바꾼다 -- 각 항목의 "왜 제외되는가" 설명은 그대로
+// 보존한다(판단 로직·값은 원문과 동일, 표현 형태만 바꾼다).
+const OWN_TEST_FILE_SUFFIXES = [
+  "orch-stall-detect.mjs",
+  "orch-stall-detect.test.mjs",
+  "seat-liveness-wire.test.mjs",
+  "seat-idle-wire.test.mjs",
+  "dispatch-start-wire.test.mjs",
+  "hyk185-seat-multi-repro.test.mjs",
+  // HYK-185-unconsumed-1: unconsumed-wire.test.mjs exercises the same
+  // production entry point for the "unconsumed" axis
+  // (judgeUnconsumedForRepo/judgeUnconsumedAcrossWorktrees). Excluded
+  // on the same "own .test.mjs" basis as the files above.
+  "unconsumed-wire.test.mjs",
+  // HYK-340-vanished-unresolved: unconsumed-receipt-signal.test.mjs is
+  // the same shape once more -- it exercises the real production entry
+  // point (judgeUnconsumedForRepo/collectUnconsumedCandidates) for the
+  // new consumption-receipt signal on the existing "unconsumed" axis.
+  // Excluded on the identical "own .test.mjs" basis as
+  // unconsumed-wire.test.mjs above.
+  "unconsumed-receipt-signal.test.mjs",
+  // HYK-173-push-wire: escalation-axis-wire.test.mjs exercises the real
+  // production entry point (runOrchStallDetect) for the escalation
+  // axis. Excluded on the identical "own .test.mjs" basis.
+  "escalation-axis-wire.test.mjs",
+  // HYK-212-postcheck-1: dispatch-postcheck-wire.test.mjs/dispatch-
+  // postcheck-axis-wire.test.mjs are the same shape once more for the
+  // dispatch-postcheck axis. Excluded on the identical "own .test.mjs"
+  // basis.
+  "dispatch-postcheck-wire.test.mjs",
+  "dispatch-postcheck-axis-wire.test.mjs",
+  // HYK-239-chain-wire-2: dispatch-chain-wire.test.mjs/dispatch-chain-
+  // axis-wire.test.mjs are the same shape once more for the chain(원장
+  // 해시체인 위조 탐지) axis. Excluded on the identical "own .test.mjs"
+  // basis.
+  "dispatch-chain-wire.test.mjs",
+  "dispatch-chain-axis-wire.test.mjs",
+  // HYK-408-seat-decide: hyk408-seat-decide-repro.test.mjs is the same
+  // shape once more -- it exercises judgeSeatLivenessForRepo/
+  // judgeDispatchStartForRepo directly (same read-only production entry
+  // points as hyk185-seat-multi-repro.test.mjs above) to pin the
+  // ledger-primary/screen-fallback repro. Excluded on the identical
+  // "own .test.mjs" basis.
+  "hyk408-seat-decide-repro.test.mjs",
+  // HYK-413-seat-binding-2: hyk413-seat-reason-projection.test.mjs is the
+  // same shape once more -- it drives judgeSeatLivenessForRepo directly
+  // (same production entry point as hyk408-seat-decide-repro.test.mjs
+  // above) to confirm the adapter's split reason codes survive the
+  // supervisor projection. Excluded on the identical "own .test.mjs"
+  // basis. (HYK-413-seat-binding-3 3R repair: this line was missing from
+  // this array in the 2R commit even though the matching eslint.config.mjs
+  // exception was added -- exactly the drift the new test below now
+  // seals.)
+  "hyk413-seat-reason-projection.test.mjs",
+];
+
+function findOrchStallDetectImporters(root) {
   let grepOut;
   try {
     grepOut = execFileSync(
@@ -934,74 +999,95 @@ test("static: no PRODUCTION code imports orch-stall-detect.mjs yet (h -- can be 
         "*.yml",
         "*.yaml",
       ],
-      { cwd: ROOT, encoding: "utf8" },
+      { cwd: root, encoding: "utf8" },
     );
   } catch (err) {
     // git grep exits 1 when there are zero matches -- that is the
     // "nothing wires this in yet" outcome this test expects, not a failure.
-    if (err.status === 1) grepOut = "";
-    else throw err;
+    if (err.status === 1) return [];
+    throw err;
   }
-  // HYK-340-vanished-unresolved (eslint complexity 상한 준수 수리): 이
-  // 목록이 늘어날수록 아래 filter의 `&&` 체인 길이가 그대로 eslint
-  // complexity 분기 수가 되어(ESLint complexity.js 실측, orch-stall-
-  // detect.mjs의 REASON_BY_SIGNAL_KIND 등과 동일 계열 실측) 새 wire 시험
-  // 파일 하나를 추가할 때마다 상한을 넘길 위험이 커진다. 그래서 배열 +
-  // `.some()`로 바꾼다 -- 각 항목의 "왜 제외되는가" 설명은 그대로
-  // 보존한다(판단 로직·값은 원문과 동일, 표현 형태만 바꾼다).
-  const OWN_TEST_FILE_SUFFIXES = [
-    "orch-stall-detect.mjs",
-    "orch-stall-detect.test.mjs",
-    "seat-liveness-wire.test.mjs",
-    "seat-idle-wire.test.mjs",
-    "dispatch-start-wire.test.mjs",
-    "hyk185-seat-multi-repro.test.mjs",
-    // HYK-185-unconsumed-1: unconsumed-wire.test.mjs exercises the same
-    // production entry point for the "unconsumed" axis
-    // (judgeUnconsumedForRepo/judgeUnconsumedAcrossWorktrees). Excluded
-    // on the same "own .test.mjs" basis as the files above.
-    "unconsumed-wire.test.mjs",
-    // HYK-340-vanished-unresolved: unconsumed-receipt-signal.test.mjs is
-    // the same shape once more -- it exercises the real production entry
-    // point (judgeUnconsumedForRepo/collectUnconsumedCandidates) for the
-    // new consumption-receipt signal on the existing "unconsumed" axis.
-    // Excluded on the identical "own .test.mjs" basis as
-    // unconsumed-wire.test.mjs above.
-    "unconsumed-receipt-signal.test.mjs",
-    // HYK-173-push-wire: escalation-axis-wire.test.mjs exercises the real
-    // production entry point (runOrchStallDetect) for the escalation
-    // axis. Excluded on the identical "own .test.mjs" basis.
-    "escalation-axis-wire.test.mjs",
-    // HYK-212-postcheck-1: dispatch-postcheck-wire.test.mjs/dispatch-
-    // postcheck-axis-wire.test.mjs are the same shape once more for the
-    // dispatch-postcheck axis. Excluded on the identical "own .test.mjs"
-    // basis.
-    "dispatch-postcheck-wire.test.mjs",
-    "dispatch-postcheck-axis-wire.test.mjs",
-    // HYK-239-chain-wire-2: dispatch-chain-wire.test.mjs/dispatch-chain-
-    // axis-wire.test.mjs are the same shape once more for the chain(원장
-    // 해시체인 위조 탐지) axis. Excluded on the identical "own .test.mjs"
-    // basis.
-    "dispatch-chain-wire.test.mjs",
-    "dispatch-chain-axis-wire.test.mjs",
-    // HYK-408-seat-decide: hyk408-seat-decide-repro.test.mjs is the same
-    // shape once more -- it exercises judgeSeatLivenessForRepo/
-    // judgeDispatchStartForRepo directly (same read-only production entry
-    // points as hyk185-seat-multi-repro.test.mjs above) to pin the
-    // ledger-primary/screen-fallback repro. Excluded on the identical
-    // "own .test.mjs" basis.
-    "hyk408-seat-decide-repro.test.mjs",
-  ];
-  const importers = grepOut
-    .split(/\r?\n/)
-    .filter(Boolean)
-    .filter(
-      (f) => !OWN_TEST_FILE_SUFFIXES.some((suffix) => f.endsWith(suffix)),
-    );
+  return grepOut.split(/\r?\n/).filter(Boolean);
+}
+
+// no production (non-test) file imports this module -- only its own
+// .test.mjs wire tests do, each with its own "why excluded" comment
+// inline in OWN_TEST_FILE_SUFFIXES above (HYK-340-vanished-unresolved
+// moved this explanation there when the exclusion list became an array).
+test("static: no PRODUCTION code imports orch-stall-detect.mjs yet (h -- can be called is not the same as is being called; only its own .test.mjs files do)", () => {
+  const importers = findOrchStallDetectImporters(ROOT).filter(
+    (f) => !OWN_TEST_FILE_SUFFIXES.some((suffix) => f.endsWith(suffix)),
+  );
   assert.deepEqual(
     importers,
     [],
     `unexpected wiring found in: ${importers.join(", ")}`,
+  );
+});
+
+// HYK-413-seat-binding-3 (§2ⓒ, 책임자 게이트 2 판정 A -- "두 목록 드리프트
+// 봉인, 가능 범위"): 이번 반려의 진짜 원인은 같은 사실("이 새 wire 시험
+// 파일은 scripts/relay/*도, orch-stall-detect.mjs도 정당하게 import한다")
+// 을 두 목록(eslint.config.mjs의 scripts/supervisor no-restricted-imports
+// 예외 · 이 파일의 OWN_TEST_FILE_SUFFIXES)이 따로 들고 있었는데 2R이 그중
+// 하나만 갱신했다는 것이다. 두 목록을 하나로 합치지는 않는다(서로 다른
+// 축 -- eslint 목록은 scripts/relay/* import 허용 전체를 다루고, 이
+// 목록은 orch-stall-detect.mjs import 허용만 다룬다 -- 완전히 같은
+// 집합이 아니다: 예를 들어 watch-run.mjs는 eslint 목록에만, unconsumed-
+// wire.test.mjs는 이 목록에만 있다). 대신 **교집합**(두 허용 모두 실제로
+// 필요한 파일 -- 즉 실제로 orch-stall-detect.mjs를 import«하면서» 동시에
+// eslint의 scripts/supervisor 예외 블록에도 올라 있는 파일)에서만 어긋남을
+// 검사한다: 그 교집합의 모든 원소는 반드시 OWN_TEST_FILE_SUFFIXES에도
+// 있어야 한다 -- 없으면 이번 반려와 정확히 같은 모양(eslint만 갱신하고
+// 런타임 허용 목록을 잊음)이 재발한 것이다.
+// HYK-413-seat-binding-3 (3R repair, 자체 발견): 처음엔 이 함수가
+// `import(pathToFileURL(...))`로 eslint.config.mjs를 직접 실행했다 --
+// 그런데 이 저장소 러너(isolated-suite-runner.mjs)가 커밋된 HEAD를
+// node_modules 없는 격리 clone에 복제해 돈다(§0 완료 도장·러너 규칙,
+// 이번 반려의 뿌리 그 자체)는 사실을 놓쳐, eslint.config.mjs 자신의
+// `import eslintJs from "@eslint/js"`가 그 clone 안에서
+// `ERR_MODULE_NOT_FOUND`로 죽는 걸 커밋 뒤 재실행에서 실측했다(§0-1
+// 실사고 -- "정본 시험을 초록으로 되돌린다"는 라운드 자신이 새 격리-clone
+// 실패를 하나 더 심을 뻔했다). 수리: **모듈로 실행하지 않고 텍스트로만
+// 읽는다** -- `files: [...]` 배열을 정규식으로 추출한다(이 배열은 문자열
+// 리터럴과 줄 주석만 담고 중첩 배열이 없으므로 비탐욕 매치로 안전하게
+// 닫는 `]`를 찾는다). node_modules를 전혀 건드리지 않으므로 격리 clone
+// 안에서도 항상 돈다.
+function extractEslintSupervisorExceptionFiles(root) {
+  const configText = fs.readFileSync(join(root, "eslint.config.mjs"), "utf8");
+  const anchor = '"scripts/supervisor/orch-stall-detect.mjs"';
+  const anchorIdx = configText.indexOf(anchor);
+  assert.ok(
+    anchorIdx >= 0,
+    `eslint.config.mjs: anchor string not found (looking for ${anchor} inside a 'files: [...]' array) -- has that block been renamed or restructured? this drift-seal test needs updating to match.`,
+  );
+  const filesKeywordIdx = configText.lastIndexOf("files: [", anchorIdx);
+  assert.ok(
+    filesKeywordIdx >= 0,
+    "eslint.config.mjs: 'files: [' not found before the anchor -- block structure changed?",
+  );
+  const rest = configText.slice(filesKeywordIdx);
+  const arrayMatch = rest.match(/^files:\s*\[([\s\S]*?)\]/);
+  assert.ok(
+    arrayMatch,
+    "eslint.config.mjs: could not extract the files: [...] array body (non-greedy match found no closing ']') -- did a comment or entry start containing ']'?",
+  );
+  return [...arrayMatch[1].matchAll(/"([^"]+)"/g)].map((m) => m[1]);
+}
+
+test("static: eslint.config.mjs's scripts/supervisor relay-import exception list and this file's OWN_TEST_FILE_SUFFIXES allowlist don't silently drift apart for files that need BOTH exceptions (HYK-413-seat-binding-3 §2ⓒ -- seals the exact 2R incident shape)", () => {
+  const supervisorBlockFiles = extractEslintSupervisorExceptionFiles(ROOT);
+  const actualImporters = new Set(findOrchStallDetectImporters(ROOT));
+  const needsBothExceptions = supervisorBlockFiles.filter((f) =>
+    actualImporters.has(f),
+  );
+  const missingFromOwnList = needsBothExceptions.filter(
+    (f) => !OWN_TEST_FILE_SUFFIXES.some((suffix) => f.endsWith(suffix)),
+  );
+  assert.deepEqual(
+    missingFromOwnList,
+    [],
+    `these file(s) are exempted in eslint.config.mjs's scripts/supervisor block AND actually import orch-stall-detect.mjs, but are missing from this file's own OWN_TEST_FILE_SUFFIXES allowlist above -- add them there too (this is the exact HYK-413-seat-binding-2 2R incident shape): ${missingFromOwnList.join(", ")}`,
   );
 });
 
