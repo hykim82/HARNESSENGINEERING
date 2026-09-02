@@ -16,8 +16,15 @@
 // 두고 `harnessDir/rounds/linked.md` 심볼릭 링크로 그 파일을 가리키게
 // 한 뒤, 링크 대상의 진짜 SHA-256과 과거 KST 시각을 넣어 기본(진짜
 // fs/crypto) 경로로 호출했더니 `AUTHORIZED_DRAFT`가 나왔다(§4-b "★검토
-// 심볼릭 표본 재현"이 이 표본을 문자 그대로 재현한다). 되돌림 변이는
-// 이제 정확히 **9건**(2R의 8건 + realpath 재확인 관문 제거 변이 1건).
+// 심볼릭 표본 재현"이 이 표본을 문자 그대로 재현한다).
+//
+// ★4R (검토 P1-1 재반려 반영): 정상 경로 fixture의 `recordedAt`이
+// `"2020-01-01 00:00:00 KST"` 절대 시각으로 하드코딩돼 있었다 -- 지금
+// 실행에서는 우연히 과거라 통과했을 뿐, "과거임을 요구하는 시험"이라는
+// 증거가 되지 못했다(완료조건 §⑾ⓗ 미충족, 검토 원문). `pastRecordedAt()`
+// 이 `Date.now()`에서 파생된 상대값(30분 전)을 매 호출마다 계산하도록
+// 고쳤다. 되돌림 변이는 정확히 **10건**(2R의 8건 + 3R의 realpath 관문
+// 변이 1건 + 4R의 fixture 상대화 변이 1건).
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
@@ -79,8 +86,34 @@ function writeRealArchive(harnessDir, relPath, content) {
 
 const REAL_ARCHIVE_REL_PATH = "rounds/coder-task-r1.md";
 const REAL_ARCHIVE_CONTENT = "task_id: HYK-999-never-touched-1\n";
-// 확실히 과거인 시각(테스트 실행 시점의 실제 시계와 무관하게 항상 과거).
-const PAST_RECORDED_AT = "2020-01-01 00:00:00 KST";
+
+// ★4R (검토 P1-1 재반려 반영): 절대 시각 상수 대신 "지금"에서 파생된
+// 상대값을 쓴다 -- retirement-auto-author-core.mjs가 스스로 파싱하는
+// 것과 같은 KST(UTC+9) 오프셋으로, 로캘/실행 환경 시간대와 무관하게
+// 항상 같은 문자열을 만든다(getUTC* 계열만 사용, 로컬 타임존 API 없음).
+const KST_OFFSET_MS_FOR_FIXTURES = 9 * 60 * 60 * 1000;
+
+function formatKstTimestamp(utcMs) {
+  const shifted = new Date(utcMs + KST_OFFSET_MS_FOR_FIXTURES);
+  const pad = (n) => String(n).padStart(2, "0");
+  return (
+    `${shifted.getUTCFullYear()}-${pad(shifted.getUTCMonth() + 1)}-${pad(shifted.getUTCDate())} ` +
+    `${pad(shifted.getUTCHours())}:${pad(shifted.getUTCMinutes())}:${pad(shifted.getUTCSeconds())} KST`
+  );
+}
+
+// ★4R: 되돌림 변이 10/10 대상 -- 이 30분을 상수 절대 시각으로 되돌리면
+// "지금에서 파생됐는가"를 잡는 시험이 RED가 된다. 30분은 checkTimezone
+// Mislabel의 오탐 대역(정확히 9시간=540분 ±10분, 즉 530~550분 근처)과
+// 충분히 멀다(30분은 그 대역에서 500분 이상 떨어져 있다) -- 그 대역
+// 언저리를 스치지 않는 짧은 과거 값이라는 근거를 여기 명시로 남긴다.
+const PAST_MINUTES_AGO_FOR_FIXTURES = 30;
+
+function pastRecordedAt() {
+  return formatKstTimestamp(
+    Date.now() - PAST_MINUTES_AGO_FOR_FIXTURES * 60 * 1000,
+  );
+}
 
 function openFacts(harnessDir, fingerprint, overrides = {}) {
   return {
@@ -101,7 +134,7 @@ function openFacts(harnessDir, fingerprint, overrides = {}) {
     harnessDir,
     ownTaskArchivePath: REAL_ARCHIVE_REL_PATH,
     ownTaskArchiveFingerprint: fingerprint,
-    recordedAt: PAST_RECORDED_AT,
+    recordedAt: pastRecordedAt(),
     ...overrides,
   };
 }
@@ -265,6 +298,11 @@ test("ARCHIVE_UNREADABLE: 파일은 존재하지만 읽기 자체가 실패하�
   });
 });
 
+// ★4R §2⑵ 훑기: 이 값은 «절대 시각 하드코딩» 대역 밖이다 -- 2월 30일은
+// 어느 해에도 존재하지 않는 달력 날짜라서 "지금 기준 과거/미래"라는
+// 개념 자체가 성립하지 않는다(달력 검증 실패를 시험하는 것이지 시간
+// 경과를 시험하는 게 아니다) -- 그래서 상대값으로 바꾸지 않고 그대로
+// 둔다.
 test("RECORDED_AT_INVALID: 존재하지 않는 달력 날짜(2026-02-30)도 거부(정규식만으로는 못 잡는 값)", () => {
   withHarness((harnessDir, fp) => {
     const r = evaluateAutoAuthorAuthorization(
@@ -274,6 +312,11 @@ test("RECORDED_AT_INVALID: 존재하지 않는 달력 날짜(2026-02-30)도 거�
   });
 });
 
+// ★4R §2⑵ 훑기: 이 값도 그대로 둔다 -- "미래 시각 거부"를 고정하기
+// «위해 일부러» 박은 절대 시각이다(검토 반려문이 명시적으로 예시로 든
+// 제외 사유). 2099년은 이 시험이 계속 존재할 것으로 예상되는 기간
+// 동안 "지금"이 될 수 없으므로, 상대값으로 바꿀 이유도 없고 바꾸면
+// 오히려 "미래"라는 조건 자체를 흐린다.
 test("RECORDED_AT_INVALID: 미래 시각은 형식이 멀쩡해도 거부", () => {
   withHarness((harnessDir, fp) => {
     const r = evaluateAutoAuthorAuthorization(
@@ -539,7 +582,7 @@ test("통합: 사람이 blockReasonCode를 채우면 구조적으로 RETIRED까�
 });
 
 // ---------------------------------------------------------------------------
-// 7. 되돌림 변이(mutation) -- 정확히 9건, 문서(설계 문서 §7)의 숫자와 일치.
+// 7. 되돌림 변이(mutation) -- 정확히 10건, 문서(설계 문서 §7)의 숫자와 일치.
 // 소스는 메모리에서만 읽어 고친 사본을 임시 디렉터리에 써서 동적 임포트
 // 한다 -- 실 저장소 파일은 쓰기 대상이 아니므로 바이트 동일 복원이
 // 구조적으로 보장된다(원복 증명은 그래도 각 시험 안에서 재확인한다).
@@ -580,7 +623,7 @@ function assertOriginalUnchanged(src) {
   );
 }
 
-test("되돌림 변이 1/9: 게이트-닫힘 검사 제거 -> CLOSED facts도 AUTHORIZED_DRAFT로 잘못 열린다(RED), 원복 확인", async () => {
+test("되돌림 변이 1/10: 게이트-닫힘 검사 제거 -> CLOSED facts도 AUTHORIZED_DRAFT로 잘못 열린다(RED), 원복 확인", async () => {
   const src = readFileSync(CORE_PATH, "utf8");
   const target = `  if (gate.state !== NEVER_CONSUMED_RETIRE_STATE.OPEN) {
     return {
@@ -608,7 +651,7 @@ test("되돌림 변이 1/9: 게이트-닫힘 검사 제거 -> CLOSED facts도 AU
   }
 });
 
-test("되돌림 변이 2/9: 앵커-미완성(존재 확인) 검사 제거 -> 문자열이 아닌 harnessDir이 조용히 넘어가 예외로 새어 나간다(RED, 크래시 방지 목적이 실제로 이 관문임을 증명), 원복 확인", async () => {
+test("되돌림 변이 2/10: 앵커-미완성(존재 확인) 검사 제거 -> 문자열이 아닌 harnessDir이 조용히 넘어가 예외로 새어 나간다(RED, 크래시 방지 목적이 실제로 이 관문임을 증명), 원복 확인", async () => {
   const src = readFileSync(CORE_PATH, "utf8");
   const target = `  const anchorFailure = checkMachineAnchorFacts({
     harnessDir,
@@ -641,7 +684,7 @@ test("되돌림 변이 2/9: 앵커-미완성(존재 확인) 검사 제거 -> 문
   }
 });
 
-test("되돌림 변이 3/9: blockReasonCode 하드코딩 제거 -> 위조된 사유 코드가 draftRecord로 새어 나간다(RED), 원복 확인", async () => {
+test("되돌림 변이 3/10: blockReasonCode 하드코딩 제거 -> 위조된 사유 코드가 draftRecord로 새어 나간다(RED), 원복 확인", async () => {
   const src = readFileSync(CORE_PATH, "utf8");
   const target = "      blockReasonCode: null,";
   assertMutationTargetUnique(src, target, "mutation 3");
@@ -665,7 +708,7 @@ test("되돌림 변이 3/9: blockReasonCode 하드코딩 제거 -> 위조된 사
   }
 });
 
-test("되돌림 변이 4/9: resolveSafeArchivePath의 경로 탈출 방어 두 겹(문자열 휴리스틱 + resolve 결과 포함관계 재확인)을 통째로 제거하면 -> ★3R 이후에도 harnessDir 밖의 «실재하는» 파일은 realpath 재확인(mutation 6이 지키는 관문)이 독립적으로 여전히 막는다(AUTHORIZED_DRAFT로 새지 않는다, 이중 방어가 실제로 작동) -- 그러나 «부재»(존재하지 않는 탈출 경로)의 사유 코드가 ARCHIVE_PATH_TRAVERSAL에서 ARCHIVE_PATH_NOT_FOUND로 바뀐다(RED, 이 관문이 «올바른 사유 코드를 즉시 주는 것»에 인과적으로 기여한다는 증거), 원복 확인", async () => {
+test("되돌림 변이 4/10: resolveSafeArchivePath의 경로 탈출 방어 두 겹(문자열 휴리스틱 + resolve 결과 포함관계 재확인)을 통째로 제거하면 -> ★3R 이후에도 harnessDir 밖의 «실재하는» 파일은 realpath 재확인(mutation 6이 지키는 관문)이 독립적으로 여전히 막는다(AUTHORIZED_DRAFT로 새지 않는다, 이중 방어가 실제로 작동) -- 그러나 «부재»(존재하지 않는 탈출 경로)의 사유 코드가 ARCHIVE_PATH_TRAVERSAL에서 ARCHIVE_PATH_NOT_FOUND로 바뀐다(RED, 이 관문이 «올바른 사유 코드를 즉시 주는 것»에 인과적으로 기여한다는 증거), 원복 확인", async () => {
   const src = readFileSync(CORE_PATH, "utf8");
   const target = `  if (looksLikeTraversal(relPath)) return null;
   const base = resolve(harnessDir);
@@ -710,7 +753,7 @@ test("되돌림 변이 4/9: resolveSafeArchivePath의 경로 탈출 방어 두 �
   }
 });
 
-test("되돌림 변이 5/9: 존재 확인 관문 제거 -> 'rounds/DOES-NOT-EXIST.md'(검토 원문)가 realpath 확인 단계로 새어 나간다(RED), 원복 확인", async () => {
+test("되돌림 변이 5/10: 존재 확인 관문 제거 -> 'rounds/DOES-NOT-EXIST.md'(검토 원문)가 realpath 확인 단계로 새어 나간다(RED), 원복 확인", async () => {
   const src = readFileSync(CORE_PATH, "utf8");
   const target = `  if (existsFn(full) !== true) {
     return {
@@ -742,7 +785,7 @@ test("되돌림 변이 5/9: 존재 확인 관문 제거 -> 'rounds/DOES-NOT-EXIS
   }
 });
 
-test("되돌림 변이 6/9 (★3R 신설): realpath 재확인 관문 제거 -> 검토의 심볼릭 표본(harnessDir 밖 실파일 + rounds/linked.md 링크 + 링크 대상 진짜 지문)이 그대로 AUTHORIZED_DRAFT까지 새어 나간다(RED, 이번 반려의 핵심 원인을 직접 증명), 원복 확인 -- symlink 생성이 이 환경에서 실패하면 skip", async (t) => {
+test("되돌림 변이 6/10 (★3R 신설): realpath 재확인 관문 제거 -> 검토의 심볼릭 표본(harnessDir 밖 실파일 + rounds/linked.md 링크 + 링크 대상 진짜 지문)이 그대로 AUTHORIZED_DRAFT까지 새어 나간다(RED, 이번 반려의 핵심 원인을 직접 증명), 원복 확인 -- symlink 생성이 이 환경에서 실패하면 skip", async (t) => {
   const src = readFileSync(CORE_PATH, "utf8");
   const target = `  const realpathFailure = verifyRealpathContainment(
     harnessDir,
@@ -765,7 +808,7 @@ test("되돌림 변이 6/9 (★3R 신설): realpath 재확인 관문 제거 -> �
     const symlinkAttempt = trySymlink(outsidePath, linkPath);
     if (!symlinkAttempt.ok) {
       console.error(
-        `되돌림 변이 6/9: symlinkSync 실패(${symlinkAttempt.err.code ?? symlinkAttempt.err.message}) -- skip`,
+        `되돌림 변이 6/10: symlinkSync 실패(${symlinkAttempt.err.code ?? symlinkAttempt.err.message}) -- skip`,
       );
       t.skip(
         `symlinkSync unavailable: ${symlinkAttempt.err.code ?? symlinkAttempt.err.message}`,
@@ -790,7 +833,7 @@ test("되돌림 변이 6/9 (★3R 신설): realpath 재확인 관문 제거 -> �
   }
 });
 
-test("되돌림 변이 7/9: 지문 검사 제거 -> 'FORGED-FINGERPRINT'(검토 원문)가 그대로 AUTHORIZED_DRAFT까지 새어 나간다(RED), 원복 확인", async () => {
+test("되돌림 변이 7/10: 지문 검사 제거 -> 'FORGED-FINGERPRINT'(검토 원문)가 그대로 AUTHORIZED_DRAFT까지 새어 나간다(RED), 원복 확인", async () => {
   const src = readFileSync(CORE_PATH, "utf8");
   const target = `  const fingerprintFailure = checkFingerprint({
     harnessDir,
@@ -821,7 +864,7 @@ test("되돌림 변이 7/9: 지문 검사 제거 -> 'FORGED-FINGERPRINT'(검토 
   }
 });
 
-test("되돌림 변이 8/9: 기록시각 검사 제거 -> 'not-a-time'(검토 원문)이 그대로 AUTHORIZED_DRAFT까지 새어 나간다(RED), 원복 확인", async () => {
+test("되돌림 변이 8/10: 기록시각 검사 제거 -> 'not-a-time'(검토 원문)이 그대로 AUTHORIZED_DRAFT까지 새어 나간다(RED), 원복 확인", async () => {
   const src = readFileSync(CORE_PATH, "utf8");
   const target = `  const recordedAtFailure = checkRecordedAt({ recordedAt, nowFn });
   if (recordedAtFailure) return recordedAtFailure;
@@ -844,7 +887,7 @@ test("되돌림 변이 8/9: 기록시각 검사 제거 -> 'not-a-time'(검토 �
   }
 });
 
-test("되돌림 변이 9/9: 후속 이름표 문법 검사 제거 -> '../../not-a-real-successor'(검토 원문)가 그대로 AUTHORIZED_DRAFT까지 새어 나간다(RED), 원복 확인", async () => {
+test("되돌림 변이 9/10: 후속 이름표 문법 검사 제거 -> '../../not-a-real-successor'(검토 원문)가 그대로 AUTHORIZED_DRAFT까지 새어 나간다(RED), 원복 확인", async () => {
   const src = readFileSync(CORE_PATH, "utf8");
   const target = `  const successorGrammarFailure = checkSuccessorLabelGrammar(
     successorLabelForRecord,
@@ -869,4 +912,70 @@ test("되돌림 변이 9/9: 후속 이름표 문법 검사 제거 -> '../../not-
     rmSync(dir, { recursive: true, force: true });
     assertOriginalUnchanged(src);
   }
+});
+
+// ---------------------------------------------------------------------------
+// 8. ★4R fixture 위생 -- pastRecordedAt()이 실제로 "지금"에서 파생되는지
+// 이 시험 파일 자신의 소스를 정적으로 검사한다(검토 P1-1 재반려: 절대
+// 시각 상수가 다시 스며들면 이 검사가 잡아야 한다). 되돌림 변이 10/10이
+// 이 검사기 자체의 인과 기여를 증명한다.
+// ---------------------------------------------------------------------------
+
+// pastRecordedAt() 함수 본문에 Date.now()가 실제로 있는지만 본다 -- "지금"
+// 에서 파생되는가"라는 요구를 그대로 코드로 옮긴 최소 검사기다. 함수를
+// 못 찾으면(이름이 바뀌는 등) 안전측으로 위반 처리한다.
+function fixtureUsesAbsoluteTimestamp(sourceText) {
+  const m = /function pastRecordedAt\(\) \{([\s\S]*?)\n\}/.exec(sourceText);
+  if (!m) return true;
+  return !/Date\.now\(\)/.test(m[1]);
+}
+
+test("★4R 정적 검사: 이 시험 파일 자신의 pastRecordedAt()가 Date.now()에서 파생됨을 소스에서 직접 확인(절대 시각 하드코딩 회귀 감지기의 GREEN 대조군)", () => {
+  const selfSrc = readFileSync(fileURLToPath(import.meta.url), "utf8");
+  assert.equal(
+    fixtureUsesAbsoluteTimestamp(selfSrc),
+    false,
+    "pastRecordedAt()가 Date.now()를 참조하지 않는다 -- 절대 시각 상수로 되돌아갔을 가능성",
+  );
+});
+
+test("되돌림 변이 10/10 (★4R 신설): pastRecordedAt()을 절대 시각 상수로 되돌리면 -> 위 정적 검사기가 위반으로 잡는다(RED, 검사기 자신의 인과 기여 증명), 원복 확인(이 파일 자신은 시험 도중 쓰기 대상이 아니었다)", () => {
+  const selfSrc = readFileSync(fileURLToPath(import.meta.url), "utf8");
+  const target = `const PAST_MINUTES_AGO_FOR_FIXTURES = 30;
+
+function pastRecordedAt() {
+  return formatKstTimestamp(
+    Date.now() - PAST_MINUTES_AGO_FOR_FIXTURES * 60 * 1000,
+  );
+}`;
+  // ⚠️이 시험은 자기참조적이다 -- target 문자열 자체가 이 시험의 소스
+  // 코드 안에도(바로 위 template literal로) 그대로 등장하므로, 파일
+  // 전체에서 "정확히 1회"를 요구하는 일반 assertMutationTargetUnique는
+  // 이 경우 구조적으로 항상 2를 낸다(실제 정의 1 + 이 인용문 1, 실측
+  // 확인됨). 그래서 이 시험 «자신이 시작되는 지점 이전»의 접두 구간
+  // 에서만 유일성을 확인한다 -- 그 접두 구간에는 진짜 정의만 있고
+  // 이 인용문은 없다. `String.prototype.replace`는 첫 매치만 바꾸므로,
+  // 접두 구간에서 유일함이 확인되면 아래 replace가 진짜 정의를
+  // 정확히 겨냥한다는 것이 보장된다.
+  const selfTestStart = selfSrc.indexOf('test("되돌림 변이 10/10');
+  const prefix = selfSrc.slice(0, selfTestStart);
+  assertMutationTargetUnique(prefix, target, "mutation 10 (prefix)");
+  const mutated = selfSrc.replace(
+    target,
+    `const PAST_MINUTES_AGO_FOR_FIXTURES = 30;
+
+function pastRecordedAt() {
+  return "2020-01-01 00:00:00 KST";
+}`,
+  );
+  assert.equal(
+    fixtureUsesAbsoluteTimestamp(mutated),
+    true,
+    "RED: pastRecordedAt()을 상수로 되돌리면 정적 검사기가 위반을 잡아야 한다 -- 못 잡으면 검사기 자체가 무의미하다",
+  );
+  assert.equal(
+    readFileSync(fileURLToPath(import.meta.url), "utf8"),
+    selfSrc,
+    "원복 증명 실패: 이 시험 파일 자신이 시험 도중 바뀌었다",
+  );
 });
