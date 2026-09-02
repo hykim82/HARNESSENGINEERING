@@ -328,7 +328,13 @@ test("REAL repo: every docs/control-room-patches/*.md that mentions Invoke-SeatP
       f.reasonCode !== REASON.OK_NOT_APPLICABLE &&
       f.functionName !== "(mention-registry)",
   );
-  assert.equal(checkedRealDocs.length, 2);
+  // HYK-422-dispatch-run-boundary.md (a patch doc for a DIFFERENT function,
+  // Invoke-Dispatch) mentions Invoke-SeatProofGate only in its own §모양
+  // 고정 scope-investigation prose -- that mention makes it a 3rd doc this
+  // sweep judges (resolves OK_UNCHANGED, see control-room-patch-apply-
+  // hyk422-canonical-scope.test.mjs), alongside the pre-existing
+  // HYK-271-wire-modal-check.md and HYK-327-wire-two-checkers.md.
+  assert.equal(checkedRealDocs.length, 3);
 });
 
 test("REAL repo: mention registry has 0 UNREGISTERED_MENTION findings (every git-tracked file naming Invoke-SeatProofGate is classified)", () => {
