@@ -1975,6 +1975,55 @@ function runRetirementSideEffects({
   spawnAdmissionRetirementReleaseProcess(taskId, harnessDir, role);
 }
 
+// HYK-419-wire-1 (coder-task.md §2⑵) -- «그림자» 결선. retirement-auto-
+// author-core.mjs가 병합된 뒤에도(#247) 아무 코드도 그 코어를 부르지
+// 않는다는 실측(ORCH grep)에 대한 첫 응답 -- 이 함수가 그 코어를 부르는
+// «저장소 안의 첫 실호출자»다. ★비타협: 이 함수는 자신을 호출한
+// runCompletionSideEffects의 반환값(따라서 checkRelayHandshake 전체의
+// ok:true/exit code)을 조금도 바꾸지 않는다 -- 판정 결과는 표준출력 한
+// 줄로만 나간다(coder-task.md §2⑵ 접두어 고정 요구).
+//
+// ★서브프로세스 스폰, 정적 import 아님 -- spawnAbortRecordWriter/
+// spawnAdmissionCompletionProcess와 완전히 같은 이유(그 두 함수 바로 위
+// 주석 참조): 이 파일은 24개 격리 픽스처 시험(admission-completion-
+// spawn.test.mjs 등, "relay-handshake.mjs + time-authority/reject-streak/
+// envelope-archive만" 복사해 서브프로세스로 도는 시험)이 의존하는 정적
+// import 그래프의 일부다 -- 5번째 정적 import를 추가하면 그 시험 전부가
+// LOAD 시점에 MODULE_NOT_FOUND로 깨진다(실측: 첫 시도에서 npm test 60건
+// 실패). retirement-auto-author-shadow-cli.mjs를 스폰만 하면 그 파일이
+// 격리 픽스처에 없어도 실패는 CALL 시점(child_process 에러)으로 미뤄지고,
+// 아래 try/catch가 흡수한다.
+export function runRetireAuthorShadowObservation({
+  role,
+  harnessDir,
+  taskId,
+  doneAt,
+  execFileFn = execFileSync,
+  logFn = console.log,
+}) {
+  try {
+    const cliPath = join(
+      dirname(fileURLToPath(new URL(import.meta.url))),
+      "retirement-auto-author-shadow-cli.mjs",
+    );
+    const args = harnessDir
+      ? [cliPath, role, taskId, harnessDir, doneAt]
+      : [cliPath, role, taskId];
+    const out = execFileFn("node", args, {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    logFn(out.trim());
+  } catch (err) {
+    // Missing CLI file (isolated test fixture), non-zero exit, or any other
+    // spawn failure -- all logged, none fatal to the handshake's own
+    // verdict/exit code (mirrors spawnAdmissionCompletionProcess's catch).
+    logFn(
+      `retire-author-shadow: OBSERVATION_ERROR reason=${String(err.stderr ?? err.message).trim()} label=${taskId} (shadow -- 아무것도 차단하지 않음)`,
+    );
+  }
+}
+
 // HYK-257-done-stamp-lint-1: extracted from checkRelayHandshake (same
 // ESLint-limit reason as above) -- runs every completion side-effect for a
 // round that has passed every check above (consumed-observation tombstone,
@@ -2108,6 +2157,16 @@ function runCompletionSideEffects({
     taskArchived,
     admissionReturned,
     recordOutcome,
+  });
+
+  // HYK-419-wire-1 §2⑵: 모든 완료 후속효과의 결과가 나온 뒤, 그리고 이
+  // 함수가 null(=판정 불변)을 돌려주기 직전 -- 되돌림 변이 ⓐ의 대상(이
+  // 호출 한 줄을 지우면 grep으로 찾는 "그 줄이 찍힌다" 시험이 빨개진다).
+  runRetireAuthorShadowObservation({
+    role,
+    harnessDir,
+    taskId,
+    doneAt: doneMatch[1].trim(),
   });
 
   return null;
