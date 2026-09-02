@@ -62,9 +62,11 @@
 // | LEDGER_RECORD_LABEL_MISMATCH | 예약은 있으나 그 예약이 기록한 라벨이 요청한 라벨과 다름(라벨↔admission 불일치, §2⑶) |
 // | LEDGER_NOT_ACTIVE | 예약이 ACTIVE가 아니거나 completedAt이 이미 찍혀 있음(이미 끝난 걸 "미소비"로 재주장하는 위조 방지) |
 // | DISPATCH_RECEIPT_NOT_EXACTLY_ONE | dispatch-receipts 매칭이 0건 또는 2건 이상 |
-// | RESULT_ARCHIVE_ALREADY_EXISTS | 결과 아카이브가 이미 있음 -- 애초에 이 축을 적용할 대상(never-consumed)이 아니다 |
+// | RESULT_ARCHIVE_ALREADY_EXISTS | 결과 아카이브가 이미 있음(resultArchiveExists === true) -- 애초에 이 축을 적용할 대상(never-consumed)이 아니다 |
+// | RESULT_ARCHIVE_UNJUDGABLE | resultArchiveExists가 true도 false도 아님(3R 수리, 검토 P1) -- "없다"로 조용히 접지 않고 판정 불능으로 거부 |
 // | OWN_TASK_ARCHIVE_MISSING | 이 라운드 자신의 task-r<N>.md조차 없음 -- 실제로 배달된 라운드라면 구조적으로 불가능(§0), 안전측 거부 |
-// | SUCCESSOR_ROUND_EXISTS | task-r<N+1>.md가 존재 -- 다음 라운드가 실제로 드롭됐다(재시도 흔적), 이 축은 case B로 넘긴다 |
+// | SUCCESSOR_ROUND_EXISTS | task-r<N+1>.md가 존재(hasLaterRoundArchive === true) -- 다음 라운드가 실제로 드롭됐다(재시도 흔적), 이 축은 case B로 넘긴다 |
+// | SUCCESSOR_ROUND_ARCHIVE_UNJUDGABLE | hasLaterRoundArchive가 true도 false도 아님(3R 수리, 검토 P1) -- "없다"로 조용히 접지 않고 판정 불능으로 거부 |
 // | TOO_RECENT | 아직 stall-watch 임계치를 넘기지 않음(진행 중인 정상 라운드를 성급히 은퇴시키지 않는다) |
 // | SUCCESSOR_LABEL_MISSING | 은퇴 기록에 쓸 후속 이름표가 없음 |
 // | OPEN | 위 전부 통과 -- "다음 라운드가 한 번도 드롭된 적 없는, 완전히 방치된 라운드"로 기계 판정, 은퇴 기록 «작성 절차»(사람이 retirement-record-writer.mjs를 실행)로 넘어갈 수 있다. 이 함수 자신은 파일을 쓰지 않는다. |
@@ -80,6 +82,17 @@
 //   (c) SUCCESSOR_ROUND_EXISTS로 닫힌 case(B)는 이 코어가 «영원히» 못 연다
 //       -- 그게 설계 의도다(§1). B를 열려면 사람 서명 경로가 필요하고,
 //       이 코어는 그 경로에 관여하지 않는다.
+//   (d) HYK-412-stuck-retire-3(§2ⓐ 요구): 이 코어는 boolean 필드의 «타입»
+//       위조(문자열/숫자/undefined를 넣어 truthy-fold를 유발하는 것)는
+//       막지만, 사실 «수집기»(어댑터, 이 라운드 범위 밖) 자체가 진짜
+//       boolean 값 `true`/`false`를 정확한 타입으로 넣으면서도 그 값
+//       자체가 거짓인 경우(예: 파일이 실제로는 있는데 수집기가 버그로
+//       `false`를 넘김)는 이 코어가 원리적으로 탐지할 수 없다 -- 이 코어는
+//       "받은 사실이 정직하게 구조화됐다면 판정이 안전측"이라는 것만
+//       보장한다(retirement-record-core.mjs §5-d와 동일한 한계, S8
+//       zero-import 코어의 근본적 범위). 수집기 자체의 정확성은 그
+//       어댑터의 시험(이 라운드 범위 밖, docs/HYK-412-stuck-retire-
+//       design.md §6 참조)이 별도로 증명해야 한다.
 
 export const NEVER_CONSUMED_RETIRE_STATE = Object.freeze({
   OPEN: "OPEN",
@@ -89,8 +102,10 @@ export const NEVER_CONSUMED_RETIRE_STATE = Object.freeze({
   LEDGER_NOT_ACTIVE: "LEDGER_NOT_ACTIVE",
   DISPATCH_RECEIPT_NOT_EXACTLY_ONE: "DISPATCH_RECEIPT_NOT_EXACTLY_ONE",
   RESULT_ARCHIVE_ALREADY_EXISTS: "RESULT_ARCHIVE_ALREADY_EXISTS",
+  RESULT_ARCHIVE_UNJUDGABLE: "RESULT_ARCHIVE_UNJUDGABLE",
   OWN_TASK_ARCHIVE_MISSING: "OWN_TASK_ARCHIVE_MISSING",
   SUCCESSOR_ROUND_EXISTS: "SUCCESSOR_ROUND_EXISTS",
+  SUCCESSOR_ROUND_ARCHIVE_UNJUDGABLE: "SUCCESSOR_ROUND_ARCHIVE_UNJUDGABLE",
   TOO_RECENT: "TOO_RECENT",
   SUCCESSOR_LABEL_MISSING: "SUCCESSOR_LABEL_MISSING",
 });
@@ -101,6 +116,50 @@ function isNonEmptyString(value) {
 
 function reject(state, reason) {
   return { state, ok: false, reason: `hyk412-never-consumed: ${reason}` };
+}
+
+// HYK-412-stuck-retire-3 (3R 수리, 게이트 2 판정 A -- 검토 P1): 음성 사실
+// (부재 주장) 필드는 이전엔 `=== true`로만 "존재한다"를 판정했다 -- 그
+// 말은 즉 `"UNKNOWN_FAILURE_CODE"`나 `1`이나 `undefined`처럼 boolean이
+// 아닌 어떤 값이 들어와도 `=== true`가 false가 되어 "존재하지 않는다"로
+// 조용히 접혀(truthy-fold) 문이 열렸다 -- 1R/2R과 같은 계열의 결함("부재를
+// 확인 없이 가정한다").
+//
+// 수리 방향(★근거, coder-task.md §2ⓐ의 두 선택지 중 택한 쪽): "그 외 모든
+// 값은 UNJUDGABLE로 거부"(⑵)를 골랐다 -- "명시적 false만 인정"(⑴)만으로는
+// value가 true인지 단순 garbage인지 판정 근거가 사라져 로그/시험에서
+// 구별이 안 된다. 이 코어는 이미 상태를 최대한 세분화해 "판정 불가"가
+// 조용히 정상으로 접히지 않게 하는 것을 원칙으로 삼아 왔다
+// (retirement-record-core.mjs §4 선례, 이 파일 §3 표) -- ⑴만 골라 두
+// 케이스(진짜 true / 알 수 없는 값)를 같은 사유 코드로 뭉개면 그 원칙과
+// 어긋난다. 그래서 세 갈래(참/거짓/그 외) 전부를 명시적으로 다룬다: 값이
+// 정확히 `true`면 그 사실이 확정적으로 막힌 것으로 기존 사유 코드로 거부,
+// 정확히 `false`면(그리고 오직 그때만) "없다"로 인정해 통과, 그 외 어떤
+// 값이든(문자열·숫자·`undefined`·`null`·객체 등) 전용 UNJUDGABLE 상태로
+// 거부한다 -- 미열거 기본값이 "값 하나 더 열거"가 아니라 이 세 갈래 구조
+// 자체로 닫힌다(완료 조건 2).
+function describeUnjudgableValue(value) {
+  const serialized = JSON.stringify(value);
+  return `typeof=${typeof value} value=${serialized === undefined ? String(value) : serialized}`;
+}
+
+function checkExplicitNegativeFact({
+  value,
+  trueState,
+  trueReason,
+  unjudgableState,
+  unjudgableReason,
+}) {
+  if (value === true) {
+    return reject(trueState, trueReason);
+  }
+  if (value !== false) {
+    return reject(
+      unjudgableState,
+      `${unjudgableReason} (받은 값: ${describeUnjudgableValue(value)})`,
+    );
+  }
+  return null;
 }
 
 // eslint complexity 상한 회피(retirement-record-core.mjs의 checkArchiveFacts/
@@ -140,24 +199,36 @@ function checkArchiveShapeFacts({
   hasLaterRoundArchive,
   staleEnoughSinceAdmission,
 }) {
-  if (resultArchiveExists === true) {
-    return reject(
-      NEVER_CONSUMED_RETIRE_STATE.RESULT_ARCHIVE_ALREADY_EXISTS,
+  const resultArchiveFailure = checkExplicitNegativeFact({
+    value: resultArchiveExists,
+    trueState: NEVER_CONSUMED_RETIRE_STATE.RESULT_ARCHIVE_ALREADY_EXISTS,
+    trueReason:
       "결과 아카이브가 이미 존재함 -> 이 라운드는 애초에 never-consumed가 아니다(이 축을 적용할 대상이 아님), 거부",
-    );
-  }
+    unjudgableState: NEVER_CONSUMED_RETIRE_STATE.RESULT_ARCHIVE_UNJUDGABLE,
+    unjudgableReason:
+      "resultArchiveExists가 boolean이 아님 -> '없다'로 조용히 접지 않고 판정 불능으로 거부(검토 P1 재발 방지, 안전측 기본값)",
+  });
+  if (resultArchiveFailure) return resultArchiveFailure;
+
   if (ownTaskArchiveExists !== true) {
     return reject(
       NEVER_CONSUMED_RETIRE_STATE.OWN_TASK_ARCHIVE_MISSING,
       "이 라운드 자신의 task 보존 사본(rounds/<role>-task-r<N>.md)조차 없음 -> 실제로 배달된 라운드라면 구조적으로 불가능한 모양(게이트가 배달 직전 항상 스냅숏한다), 거부(안전측 기본값)",
     );
   }
-  if (hasLaterRoundArchive === true) {
-    return reject(
-      NEVER_CONSUMED_RETIRE_STATE.SUCCESSOR_ROUND_EXISTS,
+
+  const successorRoundFailure = checkExplicitNegativeFact({
+    value: hasLaterRoundArchive,
+    trueState: NEVER_CONSUMED_RETIRE_STATE.SUCCESSOR_ROUND_EXISTS,
+    trueReason:
       "다음 순번 task 보존 사본(rounds/<role>-task-r<N+1>.md)이 존재함 -> 이후 라운드가 실제로 드롭됐다(재시도 흔적), '한 번도 안 건드려짐'을 이 축으로는 증명 못 함 -> case B(사람 서명 경로)로 넘김, 거부",
-    );
-  }
+    unjudgableState:
+      NEVER_CONSUMED_RETIRE_STATE.SUCCESSOR_ROUND_ARCHIVE_UNJUDGABLE,
+    unjudgableReason:
+      "hasLaterRoundArchive가 boolean이 아님 -> '없다'로 조용히 접지 않고 판정 불능으로 거부(검토 P1 재발 방지, 안전측 기본값)",
+  });
+  if (successorRoundFailure) return successorRoundFailure;
+
   if (staleEnoughSinceAdmission !== true) {
     return reject(
       NEVER_CONSUMED_RETIRE_STATE.TOO_RECENT,

@@ -1,4 +1,10 @@
-# HYK-412 — 소비된 적 없는 라운드의 정당 종결 경로 설계안 (2R — 구별축 재건)
+# HYK-412 — 소비된 적 없는 라운드의 정당 종결 경로 설계안 (3R — truthy-fold 수리)
+
+이 문서는 2R을 갱신한다(2R/1R 본문은 git 이력에 남아 있다 — `git log -p -- docs/HYK-412-stuck-retire-design.md`).
+3R은 2R의 구별축 자체는 유지하되(§0~§1, 회귀 0), 검토 게이트 2가 잡은 **P1 truthy-fold**
+결함을 §2-2에서 수리한다: `resultArchiveExists`/`hasLaterRoundArchive`가 boolean이 아닌
+값(문자열·숫자·`undefined` 등)일 때 `=== true` 비교가 거짓이 되어 "없다"로 조용히
+접히던 것을, 세 갈래(참/거짓/그 외)를 전부 명시적으로 다루는 구조로 닫았다.
 
 이 문서는 1R을 대체한다(1R 본문은 git 이력에 남아 있다 — `git log -p -- docs/HYK-412-stuck-retire-design.md`).
 1R은 검토에서 **P1 헛시험(vacuous-pass)** 판정을 받았다: "task 보존 사본
@@ -37,7 +43,7 @@ task 내용을 `.harness/rounds/<role>-task-r<N>.md`로 스냅숏한다(`envelop
 2. 소비 시도 거부의 지속 기록이 코드베이스에 없다(§3-A에서 정면으로 다룬다).
 3. 되돌림 변이는 7종인데 1R 문서는 8종이라 적었다 — 2R은 변이 개수와 문서 숫자를 코드로
    강제 일치시킨다(`hyk412-never-consumed-retire-core.test.mjs`의
-   `assert.equal(MUTATION_CASES.length, 10, ...)`, §5).
+   `assert.equal(MUTATION_CASES.length, 11, ...)`, §5. 3R에서 10→11로 갱신 — §2-2 참조).
 
 ## 1. A(앞으로)와 B(이미 갇힌 것)를 분리한다
 
@@ -66,15 +72,18 @@ task 내용을 `.harness/rounds/<role>-task-r<N>.md`로 스냅숏한다(`envelop
    라운드를 "미소비"로 재주장하는 위조 방지).
 4. **dispatch-receipts.jsonl 매칭이 정확히 1건** (`DISPATCH_RECEIPT_NOT_EXACTLY_ONE` —
    0건이면 배달된 적 없는 라벨, 2건 이상이면 라벨 재사용/모호).
-5. **결과 아카이브(`rounds/<ROLE>-r<N>.md`)가 없음** (`RESULT_ARCHIVE_ALREADY_EXISTS` —
-   있으면 애초에 이 축을 적용할 대상이 아니다).
+5. **결과 아카이브(`rounds/<ROLE>-r<N>.md`)가 «명시적으로» 없음** — `resultArchiveExists`가
+   정확히 `true`면 `RESULT_ARCHIVE_ALREADY_EXISTS`(있으면 애초에 이 축을 적용할 대상이
+   아니다), 정확히 `false`일 때만 통과, **그 외 어떤 값이든**(문자열·숫자·`undefined`·
+   `null`·객체 등) `RESULT_ARCHIVE_UNJUDGABLE`로 거부한다(★3R 수리, §2-2).
 6. **이 라운드 자신의 task 보존 사본(`rounds/<role>-task-r<N>.md`)이 있음**
    (`OWN_TASK_ARCHIVE_MISSING` — §0에 따라 실제로 배달된 라운드라면 구조적으로 항상
    참이어야 한다. 없다면 이 표본 자체가 "실제 배달 모양"이 아니라는 신호이므로
-   안전측 거부).
-7. **다음 순번 task 보존 사본(`rounds/<role>-task-r<N+1>.md`)이 없음**
-   (`SUCCESSOR_ROUND_EXISTS` — ★1R의 오류를 고친 지점. 있으면 재시도 흔적이 실재하는
-   것이므로 case B로 넘긴다).
+   안전측 거부. 이 필드는 `!== true`로 이미 안전한 방향이라 3R 수리 대상이 아니다).
+7. **다음 순번 task 보존 사본(`rounds/<role>-task-r<N+1>.md`)이 «명시적으로» 없음** —
+   `hasLaterRoundArchive`가 정확히 `true`면 `SUCCESSOR_ROUND_EXISTS`(★1R의 오류를 고친
+   지점. 있으면 재시도 흔적이 실재하는 것이므로 case B로 넘긴다), 정확히 `false`일 때만
+   통과, 그 외 값은 `SUCCESSOR_ROUND_ARCHIVE_UNJUDGABLE`로 거부한다(★3R 수리, §2-2).
 8. **admitted_at으로부터 충분히 오래 지남**(`TOO_RECENT` — 임계값 자체는 이 라운드가
    발명하지 않는다, 어댑터가 관제실 기존 stall-watch 상수를 재사용해야 한다는 1R의
    결론을 그대로 물려받는다. [내 주장, 미확정 — 구체 상수는 검토 대상]).
@@ -97,6 +106,50 @@ task 내용을 `.harness/rounds/<role>-task-r<N>.md`로 스냅숏한다(`envelop
 
 이 두 상태가 **같은 아카이버 호출**로 실제로 갈린다 — 1R처럼 "이론상 가능"이 아니라
 `archiveRoundTaskFile`을 두 번째 호출하기 전/후로 관측 가능한 파일 diff가 실제로 존재한다.
+
+★3R 수리: 2R 최초 버전의 두 REAL SHAPE 시험은 이 파일 diff를 만들면서도 `hasLaterRoundArchive`
+값 자체는 **시험 코드가 손으로 타이핑**했다(`hasLaterRoundArchive: false` / `true`
+리터럴) — 검토 P2가 정확히 이 간극을 짚었다: "실제 아카이버 호출은 있으나 boolean
+계산 자체는 시험 증거가 약하다." 3R은 `deriveArchiveShapeFactsFromRealDirectory`
+(테스트 파일 내 헬퍼)로 `rounds/` 디렉터리를 **실제로 `readdirSync`해서** 세 boolean을
+계산하도록 고쳤다 — `evaluateNeverConsumedRetirement`에 넘기는 `hasLaterRoundArchive`/
+`ownTaskArchiveExists`/`resultArchiveExists` 값이 이제 "아카이버가 실제로 만든 파일
+목록을 읽은 결과"이지 "시험 작성자의 주장"이 아니다.
+
+### 2-2. ★3R 수리 — truthy-fold를 닫는다 (검토 게이트 2 P1)
+
+**검토가 실측으로 증명한 결함**: `resultArchiveExists === true`만 거부하는 관문은,
+`resultArchiveExists`에 `"UNKNOWN_FAILURE_CODE"`(문자열)·`1`(숫자)·`undefined`를 넣으면
+셋 다 `=== true`가 거짓이 되어 **"결과 아카이브가 없다"로 조용히 접혀 통과**했다 —
+`hasLaterRoundArchive === true`도 같은 결함이 있어서 `"coder-task-r99.md"`나 `undefined`
+로 `SUCCESSOR_ROUND_EXISTS`를 우회할 수 있었다. 검토는 이 두 입력을 다른 정상 facts와
+함께 직접 주입해 `state: OPEN, ok: true`를 실제로 재현했다(coder-task.md §1 원문 인용).
+이건 1R("도달 불가 조건")·2R 최초 버전("부재를 확인 없이 가정")과 **같은 계열의 결함**이다.
+
+**수리 방향 (★근거, coder-task.md §2ⓐ가 제시한 두 선택지 중 택한 쪽)**: "그 외 모든
+값은 UNJUDGABLE로 거부"를 골랐다(⑵) — "명시적 false만 인정"만으로는(⑴) "값이 true인가
+단순 garbage인가"를 구별할 근거가 사라져 로그·시험에서 원인 규명이 안 된다. 이 코어는
+이미 "판정 불가가 조용히 정상으로 접히지 않는다"를 원칙으로 세분화된 상태 집합을 써왔다
+(retirement-record-core.mjs §4 선례, 이 문서 §2 표) — ⑴만 골라 "진짜 true"와 "알 수
+없는 값"을 같은 사유 코드로 뭉개면 그 원칙과 어긋난다. 그래서 세 갈래(참/거짓/그 외)를
+전부 명시적으로 다룬다: `scripts/check/hyk412-never-consumed-retire-core.mjs`의
+`checkExplicitNegativeFact` 공용 헬퍼가 `value === true`(기존 사유로 거부) →
+`value !== false`(그 외 전부 `*_UNJUDGABLE`로 거부) → 그 외(=`false`, 유일한 통과)
+순서로 판정한다. 새 상태 두 개(`RESULT_ARCHIVE_UNJUDGABLE`,
+`SUCCESSOR_ROUND_ARCHIVE_UNJUDGABLE`)를 §2 표에 추가했다(위 관문 5·7).
+
+**시험 고정**: 검토가 주입한 **정확히 그 네 값**을 리터럴로 못박았다 —
+`resultArchiveExists`에 `"UNKNOWN_FAILURE_CODE"`·`1`·`undefined`, `hasLaterRoundArchive`
+에 `"coder-task-r99.md"`, 넷 다 각각 대응하는 `*_UNJUDGABLE` 상태로 닫힘을
+`CLOSED:` 시험으로 확인한다(완료 조건 1). 추가로 이 라운드가 새로 지어낸 값(빈 객체
+`{ nested: true }`와 `NaN`)도 같은 상태로 닫히는지 확인해, "미열거 기본값 = 닫힘"이
+"값을 하나 더 열거한 것"이 아니라 **세 갈래 구조 자체**에서 나온다는 걸 보였다(완료
+조건 2). 같은 필드 스캔에서 **다른 truthy-fold 자리는 없었다** — `ledgerReservation?.exists
+!== true`·`ownTaskArchiveExists !== true`·`staleEnoughSinceAdmission !== true`는 전부
+"정확히 `true`여야 통과"(반대 극성, 이미 안전) 구조이고, `status !== "ACTIVE"`·
+`completedAt !== null`·`dispatchReceiptMatchCount !== 1`은 문자열/숫자/`null`의 엄격
+동등 비교라 boolean 강제변환(coercion) 자체가 없다. 파일 전체를 `grep -n "=== true\|!==
+true\|!== false\|=== false"`로 훑어 확인했다(실측).
 
 ## 3. B — 이미 갇힌 라운드의 사람 서명 경로
 
@@ -178,7 +231,14 @@ task 파일의 라벨과 원장 예약이 어긋나는 경우), **둘 중 어느
    그 계산을 재현하지 않는다 — 어댑터의 몫.
 4. 위 넷 외의 경로로는 `evaluateNeverConsumedRetirement`가 절대 `OPEN`에 도달할 수
    없다 — 함수 자체가 순차적 AND-체인이고 마지막 줄 외에는 전부 거부다. 이건
-   코드 구조 자체가 증거다(마지막 return 앞에 9개의 조기 반환, 전부 reject).
+   코드 구조 자체가 증거다(마지막 return 앞에 조기 반환, 전부 reject).
+5. **(★3R 추가) 타입 위조** — 2까지의 위조 표면 열거는 "값이 정확히 무엇인가"를
+   전제하지만, 2R 최초 버전은 "값의 «타입»이 boolean이 아니면 어떻게 되는가"를
+   놓쳤다(§2-2, 검토 게이트 2 P1). 3R이 이 표면을 닫았다 — `resultArchiveExists`/
+   `hasLaterRoundArchive`에 boolean이 아닌 값이 들어오면 이제 `*_UNJUDGABLE`로
+   거부한다. ★이 수리는 "2 항목(rounds/ 디렉터리 위조)" 자체를 닫지는 못한다 —
+   디렉터리에 진짜로 존재하지 않는 파일을 존재한다고 속이는 것과, 존재 여부를
+   boolean이 아닌 값으로 표현해 타입 체크를 우회하는 것은 서로 다른 공격면이다.
 
 ## 6. 범위 판단: 이번 라운드는 어디까지인가
 
@@ -215,6 +275,18 @@ task 파일의 라벨과 원장 예약이 어긋나는 경우), **둘 중 어느
   (i) §3-3 가/나 중 어느 쪽을 택할지, (ii) 택한다면 §3-2의 `NEVER_CONSUMED_NO_ARCHIVE`
   분기를 누가·언제 `retirement-record-core.mjs`에 결선할지(별도 코더 라운드, 사람 승인
   필요).
+- **(★3R 추가) 이 축이 여전히 못 막는 위조 — 사실 수집기 자체가 거짓말할 때**: 3R의
+  수리는 "값의 «타입»이 boolean이 아니면 거부한다"까지다. 만약 미래의 어댑터(§6 범위
+  밖, 아직 없음)가 `hasLaterRoundArchive`에 **정확히 타입은 맞는** `false`를 넣으면서
+  그 값 자체가 사실과 다른 경우 — 예를 들어 `rounds/coder-task-r2.md`가 실제로
+  존재하는데 수집기 버그로(혹은 악의로) `false`를 코어에 넘기면 — 이 코어는 그 거짓을
+  **원리적으로 탐지할 수 없다**. zero-import 코어의 계약(§0, S8 원칙) 자체가 "호출자가
+  이미 읽어 넘긴 사실을 믿는다"는 전제 위에 서 있기 때문이다 — retirement-record-
+  core.mjs §5-(d)("이 코어가 보장하는 것은 «주어진 사실이 정직하게 구조화됐다면
+  판정이 안전측»이라는 것뿐")와 정확히 같은 한계를 이 코어도 물려받는다. 이 한계를
+  닫으려면 수집기 자체의 정확성을 독립적으로 검증하는 시험(예: 실제 디렉터리 상태와
+  수집기 출력을 대조하는 어댑터 시험)이 필요하고, 그건 어댑터가 생길 때(§6 범위 밖)
+  그 라운드의 몫이다.
 
 ## 8. 1R 축을 왜 버렸는가 / 새 축이 왜 vacuous하지 않은가
 
@@ -244,3 +316,26 @@ task 파일의 라벨과 원장 예약이 어긋나는 경우), **둘 중 어느
   스냅숏이 항상 존재한다는 사실)를 검증하지 않은 채 넘어갔다. 검토가 코드를 직접 읽고
   나서야 이 간극이 드러났다 — "설계 문서가 자기모순 없이 일관돼 보인다"는 것과
   "그 조건이 실물에서 참이 될 수 있다"는 것은 별개의 검증이라는 교훈으로 남긴다.
+
+## 10. 안 한 것 / 이상하다고 느낀 관측 (3R)
+
+- **안 한 것**: `retirement-record-core.mjs`/`retirement-record-writer.mjs`/
+  `dispatch-gate-decision.mjs`/`admission-completion-adapter.mjs` 어느 것도 수정하지
+  않았다(2R과 동일 — §6 범위 판단 그대로 유지). 변경은 전부
+  `hyk412-never-consumed-retire-core.mjs`/`.test.mjs`와 이 문서 안에서만 일어났다.
+- **안 한 것**: 라이브 admission-ledger.json/.lock에 대한 읽기·쓰기 어떤 시도도 하지
+  않았다. `admission-cli` 호출 0건(2R과 동일).
+- **이상하다고 느낀 관측**: 2R 최초 버전의 두 REAL SHAPE 시험은 실제 아카이버 함수를
+  불렀으면서도 그 결과를 다시 읽지 않고 `hasLaterRoundArchive` 값을 손으로 다시
+  타이핑했다 — "실제 함수를 호출했다"는 사실 자체가 "그 함수의 출력을 실제로
+  검증했다"를 보장하지 않는다는 걸 이번에 다시 확인했다(§0의 관측과 같은 계열: 문서가
+  일관돼 «보이는» 것과 시험이 그 조건을 «실제로 재현»하는 것은 별개다). 이걸 고치고
+  나니 두 REAL SHAPE 시험이 이제 `assert.deepEqual(shape, {...})`로 계산된 세 boolean
+  전체를 명시적으로 확인하게 됐고, 그 결과 §2-1의 서술("파일 diff가 실제로 존재한다")이
+  이제 문자 그대로(코드 레벨에서) 참이 됐다.
+- **같은 접힘을 더 찾았는가**: 그렇다는 뜻으로 찾지는 «못했다» — §2-2에 적은 대로
+  파일 전체를 `grep`으로 훑어 `resultArchiveExists`/`hasLaterRoundArchive` 두 자리
+  외에는 같은 형태(음성 사실을 `=== true`로만 거부하는 반대 극성)의 관문이 없음을
+  확인했다. 이건 "없다는 걸 증명했다"가 아니라 "이 한 파일 안에서 grep 패턴으로
+  찾을 수 있는 형태는 없었다"는 뜻이다 — [실측 기반이지만 이 파일 밖(예: 미래에 추가될
+  어댑터)의 같은 결함까지 보장하지는 않는다].
