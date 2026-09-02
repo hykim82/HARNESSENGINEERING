@@ -27,10 +27,84 @@ export const MODAL_MARKERS = Object.freeze([
   "Allow command?",
 ]);
 
+// HYK-271-marker-catalog-3 (2R repair): HYK-271-marker-catalog-2 (2R widen)
+// added "Enter to select" to MODAL_MARKERS above as a STANDALONE substring
+// to catch the selection-menu screens that opened this issue (a numbered
+// claude-in-chrome tool menu / an npm-test-background-wait menu). Review
+// proved that standalone substring is a false-positive: it fires on
+// ordinary prose that merely discusses menu usage (review P1-1), and --
+// worse, ORCH directly observed it firing on THIS FILE'S OWN diff while a
+// seat was editing it (coder-task.md §1: the line `"Enter to select",`
+// alone, mid-diff, with no companion text) -- a marker that blocks the seat
+// editing its own source is self-defeating.
+//
+// Fix: "Enter to select" is no longer sufficient alone. Both real incident
+// tail lines render it PROXIMATE to one of a small set of companion hint
+// fragments ("to navigate" / "Esc to cancel" / "Esc to back"), separated by
+// a middle-dot " · " and/or arrow glyphs -- a rendering convention ordinary
+// prose does not reproduce compactly. Measured gap between "Enter to
+// select" and the nearest companion, after normalizePreview (only \s+
+// collapsed, "·"/arrows survive): founding sample = 3 chars either
+// direction; today's sample = 7 chars to "to navigate" (21 chars to "Esc to
+// cancel", not relied on). MODAL_TAIL_COMBO.maxGapChars=15 comfortably
+// covers both measured cases while staying far tighter than a written
+// sentence that mentions two hint names ("press Enter to select, and use
+// the arrow keys to navigate between options" -- gap far exceeds 15).
+//
+// Residual risks (documented, not hidden -- HYK-271-marker-catalog-4,
+// coder-task.md §3-5, maxGapChars is NOT to be widened to close either of
+// these -- doing so would just reopen the false-positive surface this
+// combo was built to close):
+//   - False positive: a document that quotes a real tail line VERBATIM,
+//     with its original " · " spacing, still matches -- this fix narrows
+//     the false-positive surface, it does not eliminate every way to
+//     construct one. Includes this catalog's OWN source/diff form quoting
+//     "Enter to select" next to a companion word -- an accepted,
+//     documented over-block, see hyk271-marker-catalog-real-corpus.test.mjs's
+//     "KNOWN OVER-BLOCK" sample.
+//   - False negative: if the noise between "Enter to select" and its
+//     nearest companion exceeds maxGapChars=15 (a redraw artifact, extra
+//     wrapping, etc.), the combo misses it -- measured real-incident gaps
+//     were 3 and 7 chars, so this is headroom, not a tight fit, but it is
+//     not a proof that no real menu ever exceeds 15.
+// See scripts/relay/hyk271-marker-catalog-real-corpus.test.mjs for the
+// measured false-positive samples (ordinary prose, documentation, and this
+// file's own diff) this combo was built against.
+export const MODAL_TAIL_COMBO = Object.freeze({
+  primary: "Enter to select",
+  companions: Object.freeze(["to navigate", "Esc to cancel", "Esc to back"]),
+  maxGapChars: 15,
+});
+
+// Only the FIRST occurrence of `primary` and each companion is checked
+// (indexOf, not a global scan) -- a deliberate simplification, not a
+// re-derivation of the axis: neither real incident sample repeats either
+// phrase, so this is sufficient for what this round measured. A preview
+// with multiple copies of these phrases at different distances is outside
+// this round's measured scope.
+export function previewMatchesTailCombo(preview, combo) {
+  if (!combo) return false;
+  const normalized = normalizePreview(preview);
+  const primaryIndex = normalized.indexOf(combo.primary);
+  if (primaryIndex === -1) return false;
+  const primaryEnd = primaryIndex + combo.primary.length;
+  return combo.companions.some((companion) => {
+    const companionIndex = normalized.indexOf(companion);
+    if (companionIndex === -1) return false;
+    const companionEnd = companionIndex + companion.length;
+    const gap =
+      companionIndex >= primaryEnd
+        ? companionIndex - primaryEnd
+        : primaryIndex - companionEnd;
+    return gap >= 0 && gap <= combo.maxGapChars;
+  });
+}
+
 import { readFileSync } from "node:fs";
 import {
   parseSeatPreview,
   previewContainsMarker,
+  normalizePreview,
 } from "./adapters/orca-adapter.mjs";
 
 // 이 검사기는 modal/non-modal 2분류만 반환한다(design doc §2-a "modal/
@@ -148,6 +222,21 @@ export function runModalCheck(argv, opts = {}) {
       verdict: VERDICT.MODAL,
       reasonCode: CHECK_REASON.MARKER_MATCH,
       detail: matched,
+    };
+  }
+
+  // opts.tailCombo is a TEST SEAM ONLY (default MODAL_TAIL_COMBO) -- same
+  // reason as opts.markers above (되돌림 변이, coder-task.md §2⑵ⓓ). Passing
+  // `null` disables the combo check entirely without adding a new branch or
+  // exit code.
+  const tailCombo = "tailCombo" in opts ? opts.tailCombo : MODAL_TAIL_COMBO;
+  if (previewMatchesTailCombo(preview, tailCombo)) {
+    return {
+      ok: false,
+      exitCode: 2,
+      verdict: VERDICT.MODAL,
+      reasonCode: CHECK_REASON.MARKER_MATCH,
+      detail: `${tailCombo.primary} (tail combo)`,
     };
   }
 

@@ -18,10 +18,17 @@ import { join } from "node:path";
 import {
   runModalCheck,
   MODAL_MARKERS,
+  MODAL_TAIL_COMBO,
   VERDICT,
   CHECK_REASON,
 } from "./dispatch-worker-modal-check.mjs";
 import { SAMPLES } from "./hyk271-axis-preview-marker-synthetic.test.mjs";
+import {
+  REAL_INCIDENT_SAMPLES,
+  FALSE_POSITIVE_SAMPLES,
+  KNOWN_OVER_BLOCK_SAMPLES,
+  REVIEWER_FALSE_NEGATIVE_SAMPLE,
+} from "./hyk271-marker-catalog-real-corpus.test.mjs";
 
 function withTempDir(fn) {
   const dir = mkdtempSync(join(tmpdir(), "dispatch-worker-modal-check-test-"));
@@ -219,7 +226,94 @@ test("runModalCheck: missing --terminal-show argument fails closed with exit 2 (
   assert.equal(result.reasonCode, CHECK_REASON.ARGS_MISSING);
 });
 
-test("MODAL_MARKERS: the sidecar's catalog is bit-for-bit the same list the axis proof measured (single source, no drift)", () => {
+// ---------------------------------------------------------------------------
+// HYK-271-marker-catalog-4 (3R criterion-correction repair, coder-task.md
+// §2⑵ⓓ "검토가 뚫었던 표본을 시험으로 못 박아라 ... 재구현 분류기로만 확인하지
+// 마라"): end-to-end confidence check -- the real-corpus test file has its
+// own local classify() helper (a thin reimplementation of runModalCheck's
+// own two-stage check, for test convenience). This test drives the SAME
+// real-incident, false-positive, known-over-block, AND the reviewer's exact
+// false-negative-reproduction samples through the actual PRODUCTION entry
+// point (runModalCheck, via real file I/O) instead, so a divergence between
+// the test helper and the real wiring cannot hide a defect.
+// ---------------------------------------------------------------------------
+test("runModalCheck (production entry point, not the test helper): real incident + known-over-block + reviewer's false-negative-repro samples MODAL, false-positive samples NON_MODAL", () => {
+  withTempDir((dir) => {
+    const mismatches = [];
+    REAL_INCIDENT_SAMPLES.forEach((s, i) => {
+      const path = writeTerminalShow(dir, `real-incident-${i}.json`, s.preview);
+      const result = runModalCheck(["--terminal-show", path]);
+      if (result.verdict !== VERDICT.MODAL) {
+        mismatches.push({
+          label: s.label,
+          expected: "MODAL",
+          got: result.verdict,
+        });
+      }
+    });
+    KNOWN_OVER_BLOCK_SAMPLES.forEach((s, i) => {
+      const path = writeTerminalShow(
+        dir,
+        `known-over-block-${i}.json`,
+        s.preview,
+      );
+      const result = runModalCheck(["--terminal-show", path]);
+      if (result.verdict !== VERDICT.MODAL) {
+        mismatches.push({
+          label: s.label,
+          expected: "MODAL",
+          got: result.verdict,
+        });
+      }
+    });
+    {
+      const path = writeTerminalShow(
+        dir,
+        "reviewer-false-negative-repro.json",
+        REVIEWER_FALSE_NEGATIVE_SAMPLE.preview,
+      );
+      const result = runModalCheck(["--terminal-show", path]);
+      if (result.verdict !== VERDICT.MODAL) {
+        mismatches.push({
+          label: REVIEWER_FALSE_NEGATIVE_SAMPLE.label,
+          expected: "MODAL",
+          got: result.verdict,
+        });
+      }
+    }
+    FALSE_POSITIVE_SAMPLES.forEach((s, i) => {
+      const path = writeTerminalShow(
+        dir,
+        `false-positive-${i}.json`,
+        s.preview,
+      );
+      const result = runModalCheck(["--terminal-show", path]);
+      if (result.verdict !== VERDICT.NON_MODAL) {
+        mismatches.push({
+          label: s.label,
+          expected: "NON_MODAL",
+          got: result.verdict,
+        });
+      }
+    });
+    assert.deepEqual(
+      mismatches,
+      [],
+      `runModalCheck disagreed with the real-corpus expectation on: ${JSON.stringify(mismatches)}`,
+    );
+  });
+});
+
+// HYK-271-marker-catalog-3 (2R repair): HYK-271-marker-catalog-2 (2R widen)
+// had added "Enter to select" to this list as a standalone entry, but
+// review proved that false-positives on ordinary prose (and on this file's
+// own diff -- coder-task.md §1). It is removed from here and replaced by
+// MODAL_TAIL_COMBO below (a proximity-combo check, not a standalone
+// substring) -- so this list is intentionally back to the original 1R
+// 4-entry catalog, not a silent revert of the 2R widen (the widen's intent
+// -- catching the two real incident menus -- is preserved by the combo,
+// see hyk271-marker-catalog-real-corpus.test.mjs).
+test("MODAL_MARKERS: the sidecar's catalog is bit-for-bit the same list this round measured (single source, no drift)", () => {
   const fromAxisSamples = SAMPLES.filter((s) => s.expectModal).length;
   assert.ok(fromAxisSamples > 0, "sanity: axis proof must have modal samples");
   assert.deepEqual(MODAL_MARKERS, [
@@ -228,4 +322,16 @@ test("MODAL_MARKERS: the sidecar's catalog is bit-for-bit the same list the axis
     "No, and tell Claude what to do differently",
     "Allow command?",
   ]);
+});
+
+// HYK-271-marker-catalog-3 (2R repair): byte-pin the combo's shape too, so
+// a future round can't silently widen maxGapChars (which would widen the
+// false-positive surface this round narrowed) without this test turning
+// red and forcing an intentional update.
+test("MODAL_TAIL_COMBO: shape is bit-for-bit the combo this round measured (single source, no drift)", () => {
+  assert.deepEqual(MODAL_TAIL_COMBO, {
+    primary: "Enter to select",
+    companions: ["to navigate", "Esc to cancel", "Esc to back"],
+    maxGapChars: 15,
+  });
 });
