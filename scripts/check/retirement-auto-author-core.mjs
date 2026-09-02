@@ -1,23 +1,33 @@
-// HYK-419-retire-author-1 (coder-task.md) -- "누가 은퇴 기록을 자동으로
-// 쓸 수 있는가"의 판정/자동화 코어. zero-import 원칙(S8, retirement-record-
-// core.mjs·hyk412-never-consumed-retire-core.mjs와 동일 계약)은 딱 한 곳만
-// 예외다: 이 파일은 hyk412-never-consumed-retire-core.mjs의
-// evaluateNeverConsumedRetirement를 **그대로 재사용**한다(coder-task.md
-// §2⑶ "새 판정 축을 만들지 마라" 요구 그 자체) -- 그 외에는 파일을 스스로
-// 읽지 않고, fs/child_process 등 어떤 I/O 모듈도 import하지 않는다.
+// HYK-419-retire-author-1/2 (coder-task.md) -- "누가 은퇴 기록을 자동으로
+// 쓸 수 있는가"의 판정/자동화 코어.
+//
+// ★HYK-419-retire-author-2 (2R 수리, 검토 P1-1 반영): 1R은 이 파일의 zero-
+// import 원칙(S8)을 "hyk412 게이트 재사용" 한 곳만 예외로 허용했었다 --
+// 그 결과 기계 앵커(경로/지문/기록시각) 검사가 "문자열이 비어 있지 않다"
+// 밖으로 나가지 못했고, 검토가 그 틈에 존재하지 않는 경로·형식만 그럴듯한
+// 가짜 지문·파싱 불가능한 시각을 주입해 AUTHORIZED_DRAFT를 뽑아냈다
+// (docs/HYK-419-retire-author-design.md §7 2R 정정 절 참조). 이 라운드는
+// 그 틈을 닫기 위해 zero-import 원칙을 **의도적으로 넓힌다** -- 이 파일은
+// 이제 `node:fs`/`node:crypto`/`node:path`를 직접 import해서 앵커를
+// «실물»로 검증한다(파일 존재·SHA-256 재계산·시각 파싱). 이건 실수가
+// 아니라 이번 계약이 명시적으로 요구한 것이다(coder-task.md §2⑴ "«비어
+// 있지 않다» 류 검사로 때우지 마라").
+//
+// 판정 축(hyk412 게이트 재사용)은 1R 그대로다 -- 이 라운드가 넓힌 것은
+// "기계 앵커가 실물과 일치하는가"를 확인하는 새로운 검증 계층이지, 게이트
+// 자체의 OPEN/CLOSED 판정 로직이 아니다(새 판정 축 0, coder-task.md §2⑶
+// 원칙은 그대로 지킨다 -- 아래 evaluateAutoAuthorAuthorization은 여전히
+// evaluateNeverConsumedRetirement의 출력을 그대로 위임할 뿐 재구현하지
+// 않는다).
 //
 // ⛔이 모듈은 어떤 배달 게이트·라이브 원장에도 결선되지 않는다
 // (retirement-record-writer.mjs와 동일한 원칙, docs/HYK-412-stuck-retire-
 // design.md §3-1 "저자 경계"를 그대로 물려받는다) -- 사람(또는 대리인
 // ORCH)이 이 함수의 결과를 손으로 확인하고, 그 다음 손으로
-// retirement-record-writer.mjs를 호출해야만 실제 기록이 생긴다. 이 라운드는
-// 그 두 단계를 자동으로 잇는 접착 코드조차 만들지 않는다(coder-task.md §0
-// "라이브 결선 금지" · 이 라운드 note: HYK-413이 옮긴 seat 결선 검증용
-// 첫 실물 점검이므로 범위를 최대한 좁게 지킨다).
+// retirement-record-writer.mjs를 호출해야만 실제 기록이 생긴다.
 //
-// 자세한 설계 근거(§1 "누가 쓰는가", §2 필드별 기계-유도 가능성, §4 위조
-// 표면, §5 되돌림 변이, §6 정직 한계)는 docs/HYK-419-retire-author-design.md
-// 참조 -- 이 헤더는 코드 옆의 요약만 남긴다.
+// 자세한 설계 근거는 docs/HYK-419-retire-author-design.md 참조 -- 이 헤더는
+// 코드 옆의 요약만 남긴다.
 //
 // §A 이 코어가 답하는 질문: "hyk412 게이트가 이미 OPEN이라고 판정한
 // 라운드에 대해, «사람 서술 없이 기계 기록만으로» 완전한 은퇴 기록 초안을
@@ -32,6 +42,9 @@
 // 뒤집지 않는다). 그래서 이 코어는 blockReasonCode를 **절대로 채우지
 // 않는다**(호출자가 그 필드를 넘겨도 무시한다, 아래 §C) -- 그 자리를
 // "사람 손이 남는 자리"로 명시적으로 비워 둔다.
+import { existsSync, readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { resolve, sep } from "node:path";
 import {
   evaluateNeverConsumedRetirement,
   NEVER_CONSUMED_RETIRE_STATE,
@@ -41,6 +54,12 @@ export const AUTO_AUTHOR_STATE = Object.freeze({
   AUTHORIZED_DRAFT: "AUTHORIZED_DRAFT",
   GATE_CLOSED: "GATE_CLOSED",
   MACHINE_ANCHOR_INCOMPLETE: "MACHINE_ANCHOR_INCOMPLETE",
+  ARCHIVE_PATH_TRAVERSAL: "ARCHIVE_PATH_TRAVERSAL",
+  ARCHIVE_PATH_NOT_FOUND: "ARCHIVE_PATH_NOT_FOUND",
+  ARCHIVE_UNREADABLE: "ARCHIVE_UNREADABLE",
+  FINGERPRINT_INVALID: "FINGERPRINT_INVALID",
+  RECORDED_AT_INVALID: "RECORDED_AT_INVALID",
+  SUCCESSOR_LABEL_GRAMMAR_INVALID: "SUCCESSOR_LABEL_GRAMMAR_INVALID",
 });
 
 // 이 코어가 조립하는 초안에서 사람 결정이 반드시 남는 필드(§A). 배열
@@ -49,25 +68,41 @@ export const AUTO_AUTHOR_STATE = Object.freeze({
 // 않는다 -- draftRecord.blockReasonCode는 항상 하드코딩된 null이다).
 export const HUMAN_REQUIRED_FIELDS = Object.freeze(["blockReasonCode"]);
 
+// SHA-256 hex는 이 코어 자신의 기본 hashFn(defaultSha256Hex)이 만드는
+// 형태와 정확히 같은 소문자 64자만 인정한다(§2⑶ 미열거 기본값 닫힘 --
+// 대문자 hex·짧은 문자열·해시가 아닌 임의 문자열 전부 이 정규식 하나로
+// 닫힌다).
+const SHA256_HEX_RE = /^[0-9a-f]{64}$/;
+// `retirement-record-writer.mjs`/기존 라벨 관례("HYK-<숫자>-slug-<라운드>")
+// 를 그대로 문법으로 삼는다 -- 슬래시/점 두 개 연속(`..`)이 문법 자체에
+// 없으므로 경로 조각("../../not-a-real-successor")은 이 정규식 하나로
+// 구조적으로 막힌다(새 예외 목록을 만들지 않는다).
+const SUCCESSOR_LABEL_GRAMMAR_RE = /^HYK-\d+(-[A-Za-z0-9]+)*$/;
+const RECORDED_AT_FORMAT_RE =
+  /^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2}) KST$/;
+const KST_OFFSET_MS = 9 * 60 * 60 * 1000;
+
 function isNonEmptyString(value) {
   return typeof value === "string" && value.trim().length > 0;
 }
 
-// §B 기계 앵커 세 필드(ownTaskArchivePath/ownTaskArchiveFingerprint/
-// recordedAt) -- 셋 다 "호출자가 이미 관측한 기계 사실"이어야 한다(파일
-// 경로 문자열, SHA-256 지문 문자열, 시계 판독 문자열). 이 코어는 그 값을
-// 스스로 계산하지 않는다(S8 zero-import 계약, hyk412 코어의 staleEnough
-// SinceAdmission과 동일한 "어댑터가 계산해 넘긴다" 원칙) -- 셋 중 하나라도
-// 비어 있거나 문자열이 아니면 "기계 근거가 아직 다 안 모였다"로 안전측
-// 거부한다(빈 문자열/undefined/숫자 등 어떤 타입이 와도 truthy-fold 없이
-// 거부 -- hyk412 3R의 checkExplicitNegativeFact와 같은 정신, 다만 여기는
-// "부재 확인"이 아니라 "존재 확인"이므로 훨씬 단순한 술어 하나로 충분하다).
+function defaultSha256Hex(buffer) {
+  return createHash("sha256").update(buffer).digest("hex");
+}
+
+// §B 기계 앵커 필드 넷(harnessDir/ownTaskArchivePath/
+// ownTaskArchiveFingerprint/recordedAt) -- 이 단계는 "값이 존재하는가"만
+// 본다(형식·실물 검증은 아래 각 전용 관문 몫). 하나라도 비어 있거나
+// 문자열이 아니면 "기계 근거가 아직 다 안 모였다"로 안전측 거부한다
+// (빈 문자열/undefined/숫자 등 어떤 타입이 와도 truthy-fold 없이 거부).
 function checkMachineAnchorFacts({
+  harnessDir,
   ownTaskArchivePath,
   ownTaskArchiveFingerprint,
   recordedAt,
 }) {
   const missing = [];
+  if (!isNonEmptyString(harnessDir)) missing.push("harnessDir");
   if (!isNonEmptyString(ownTaskArchivePath)) missing.push("ownTaskArchivePath");
   if (!isNonEmptyString(ownTaskArchiveFingerprint))
     missing.push("ownTaskArchiveFingerprint");
@@ -80,19 +115,253 @@ function checkMachineAnchorFacts({
   };
 }
 
+// ★2R: ownTaskArchivePath가 harnessDir 밖을 가리키지 않는지 문자열
+// 구조로 먼저 거부한다(파일시스템에 닿기 전 -- 절대경로·`..` 세그먼트·
+// 드라이브 표기 전부 닫는다). 이후 resolveSafeArchivePath가 실제 resolve
+// 결과로 한 번 더 재확인한다(문자열 검사만으로 놓칠 수 있는 경로를
+// defense-in-depth로 이중 차단).
+function looksLikeTraversal(relPath) {
+  if (relPath.startsWith("/") || relPath.startsWith("\\")) return true;
+  if (/^[A-Za-z]:[\\/]/.test(relPath)) return true;
+  return relPath.split(/[\\/]+/).includes("..");
+}
+
+// 되돌림 변이 4/8 대상: 이 함수 본문의 두 관문(문자열 휴리스틱 +
+// resolve 결과 포함관계 재확인)을 통째로 지우면 harnessDir 밖의 실재
+// 파일까지 그대로 resolve돼 존재/지문 확인 단계로 새어 나간다. resolve
+// 결과가 정말 harnessDir 하위인지까지 재확인하고, 그렇지 않으면
+// null(거부)을 반환한다. 통과하면 실제 절대경로 문자열을 돌려준다.
+function resolveSafeArchivePath(harnessDir, relPath) {
+  if (looksLikeTraversal(relPath)) return null;
+  const base = resolve(harnessDir);
+  const full = resolve(base, relPath);
+  if (full !== base && !full.startsWith(base + sep)) return null;
+  return full;
+}
+
+// resolveSafeArchivePath가 null을 돌려주면(경로 탈출) 어떤 호출자도 그
+// null을 실제 fs 호출(existsFn/readFileFn)에 그대로 넘기지 않는다 --
+// 이 한 함수가 "탈출이면 즉시 ARCHIVE_PATH_TRAVERSAL"이라는 공통 판정을
+// 담당한다(checkArchiveExists/checkFingerprint 양쪽이 재사용, 중복 정의
+// 없음).
+function rejectIfPathTraversal(harnessDir, ownTaskArchivePath) {
+  if (resolveSafeArchivePath(harnessDir, ownTaskArchivePath) !== null)
+    return null;
+  return {
+    state: AUTO_AUTHOR_STATE.ARCHIVE_PATH_TRAVERSAL,
+    ok: false,
+    reason: `retirement-auto-author: ownTaskArchivePath('${ownTaskArchivePath}')가 harnessDir 밖을 가리키거나 절대/드라이브 경로다 -> 경로 탈출 의심, 거부(안전측 기본값)`,
+  };
+}
+
+// 되돌림 변이 5/8 대상: 이 관문을 지우면 검토가 실제로 주입한
+// `"rounds/DOES-NOT-EXIST.md"`(실존하지 않는 아카이브 경로)도
+// AUTHORIZED_DRAFT까지 새어 나간다. 경로 탈출 판정(rejectIfPathTraversal)
+// 도 이 함수를 통해서만 fs에 닿으므로 같은 관문이 두 사유(탈출/부재)를
+// 함께 지킨다.
+function checkArchiveExists({ harnessDir, ownTaskArchivePath, existsFn }) {
+  const traversalFailure = rejectIfPathTraversal(
+    harnessDir,
+    ownTaskArchivePath,
+  );
+  if (traversalFailure) return traversalFailure;
+  const full = resolveSafeArchivePath(harnessDir, ownTaskArchivePath);
+  if (existsFn(full) === true) return null;
+  return {
+    state: AUTO_AUTHOR_STATE.ARCHIVE_PATH_NOT_FOUND,
+    ok: false,
+    reason: `retirement-auto-author: ownTaskArchivePath('${ownTaskArchivePath}')가 가리키는 아카이브 사본이 실제로 존재하지 않음(${full}) -> 거부(안전측 기본값)`,
+  };
+}
+
+// 되돌림 변이 6/8 대상: 이 관문을 지우면 형식만 흉내 낸 지문
+// (`"FORGED-FINGERPRINT"`)도, 형식은 맞지만 실제 파일과 다른 지문도
+// AUTHORIZED_DRAFT까지 새어 나간다. 지문 «형식»(소문자 hex 64자)과
+// «실값 일치»(실제 파일을 다시 해싱) 둘 다 이 한 관문이 함께 확인한다 --
+// 형식이 아예 다르면 파일을 읽지 않고도 즉시 거부하고(무의미한 I/O
+// 생략), 형식이 맞으면 반드시 실제로 다시 해싱해서 비교한다(문자열
+// 비교만으로 "그럴듯한 값"에 속지 않는다). checkArchiveExists가 이미
+// 정상 실행 경로에서 앞서 통과했더라도, 이 함수는 스스로 다시
+// rejectIfPathTraversal을 거친다(같은 자격으로 단독 호출되는 미래
+// 호출자를 대비한 방어적 중복, existsFn(null)/readFileFn(null) 같은
+// 무의미한 fs 호출을 이 함수 자신도 만들지 않기 위해서다).
+function checkFingerprint({
+  harnessDir,
+  ownTaskArchivePath,
+  ownTaskArchiveFingerprint,
+  readFileFn,
+  hashFn,
+}) {
+  const traversalFailure = rejectIfPathTraversal(
+    harnessDir,
+    ownTaskArchivePath,
+  );
+  if (traversalFailure) return traversalFailure;
+  if (!SHA256_HEX_RE.test(ownTaskArchiveFingerprint)) {
+    return {
+      state: AUTO_AUTHOR_STATE.FINGERPRINT_INVALID,
+      ok: false,
+      reason: `retirement-auto-author: ownTaskArchiveFingerprint('${ownTaskArchiveFingerprint}')가 SHA-256 hex 형식(소문자 64자)이 아님 -> 거부(안전측 기본값)`,
+    };
+  }
+  const full = resolveSafeArchivePath(harnessDir, ownTaskArchivePath);
+  let content;
+  try {
+    content = readFileFn(full);
+  } catch (err) {
+    return {
+      state: AUTO_AUTHOR_STATE.ARCHIVE_UNREADABLE,
+      ok: false,
+      reason: `retirement-auto-author: ownTaskArchivePath('${ownTaskArchivePath}')를 읽을 수 없음(${err.message}) -> 거부(안전측 기본값)`,
+    };
+  }
+  const recomputed = hashFn(content);
+  if (recomputed !== ownTaskArchiveFingerprint) {
+    return {
+      state: AUTO_AUTHOR_STATE.FINGERPRINT_INVALID,
+      ok: false,
+      reason: `retirement-auto-author: ownTaskArchiveFingerprint('${ownTaskArchiveFingerprint}')가 실제 파일을 다시 해싱한 값('${recomputed}')과 다름 -> 위조 의심, 거부(안전측 기본값)`,
+    };
+  }
+  return null;
+}
+
+// KST 문자열을 UTC ms로 파싱한다. 형식이 다르거나(§2⑶: "not-a-time" 등
+// 임의 문자열) 달력상 존재하지 않는 날짜(예: 2026-02-30)면 null -- 형식
+// 정규식만으로는 못 잡는 값을 Date.UTC 왕복 검증으로 한 번 더 닫는다.
+function parseKstTimestampToUtcMs(value) {
+  const m = RECORDED_AT_FORMAT_RE.exec(value);
+  if (!m) return null;
+  const [, yStr, moStr, dStr, hStr, miStr, sStr] = m;
+  const y = Number(yStr);
+  const mo = Number(moStr);
+  const d = Number(dStr);
+  const h = Number(hStr);
+  const mi = Number(miStr);
+  const s = Number(sStr);
+  const asIfUtc = Date.UTC(y, mo - 1, d, h, mi, s);
+  const roundTrip = new Date(asIfUtc);
+  const calendarValid =
+    roundTrip.getUTCFullYear() === y &&
+    roundTrip.getUTCMonth() === mo - 1 &&
+    roundTrip.getUTCDate() === d &&
+    roundTrip.getUTCHours() === h &&
+    roundTrip.getUTCMinutes() === mi &&
+    roundTrip.getUTCSeconds() === s;
+  if (!calendarValid) return null;
+  return asIfUtc - KST_OFFSET_MS;
+}
+
+// 되돌림 변이 7/8 대상: 이 관문을 지우면 `"not-a-time"`(파싱 불가) 뿐
+// 아니라 미래 시각(아직 오지 않은 recordedAt)도 AUTHORIZED_DRAFT까지
+// 새어 나간다 -- 형식 파싱과 미래-거부를 한 관문으로 묶는다(검토가 지목한
+// 값은 형식 위반 하나였지만, coder-task.md §2⑴ⓒ가 "미래가 아님"까지
+// 명시적으로 요구했으므로 같은 관문에서 함께 닫는다).
+function checkRecordedAt({ recordedAt, nowFn }) {
+  const utcMs = parseKstTimestampToUtcMs(recordedAt);
+  if (utcMs === null) {
+    return {
+      state: AUTO_AUTHOR_STATE.RECORDED_AT_INVALID,
+      ok: false,
+      reason: `retirement-auto-author: recordedAt('${recordedAt}')이 'YYYY-MM-DD HH:MM:SS KST' 형식으로 파싱되지 않음(형식 위반 또는 존재하지 않는 달력 날짜) -> 거부(안전측 기본값)`,
+    };
+  }
+  if (utcMs > nowFn().getTime()) {
+    return {
+      state: AUTO_AUTHOR_STATE.RECORDED_AT_INVALID,
+      ok: false,
+      reason: `retirement-auto-author: recordedAt('${recordedAt}')이 미래 시각임 -> 거부(안전측 기본값)`,
+    };
+  }
+  return null;
+}
+
+// 되돌림 변이 8/8 대상: 이 관문을 지우면 `"../../not-a-real-successor"`
+// 처럼 경로 조각을 흉내 낸 후속 이름표도 AUTHORIZED_DRAFT까지 새어
+// 나간다. 문법(HYK-<숫자>[-슬러그...])을 벗어나는 값은 전부 이 정규식
+// 하나로 닫힌다(예외 목록이 아니라 허용 목록 구조 자체가 방어선).
+function checkSuccessorLabelGrammar(successorLabelForRecord) {
+  if (SUCCESSOR_LABEL_GRAMMAR_RE.test(successorLabelForRecord)) return null;
+  return {
+    state: AUTO_AUTHOR_STATE.SUCCESSOR_LABEL_GRAMMAR_INVALID,
+    ok: false,
+    reason: `retirement-auto-author: successorLabelForRecord('${successorLabelForRecord}')가 라벨 문법(HYK-<숫자>[-슬러그...])에 맞지 않음 -> 경로 조각/임의 문자열 의심, 거부(안전측 기본값)`,
+  };
+}
+
+// eslint complexity/length 상한 회피(retirement-record-core.mjs의
+// checkArchiveFacts/checkReasonAndSuccessorFacts 선례와 동일한 이유 --
+// 판정/문구는 조금도 바뀌지 않는다, 몸통만 쪼갠다). 앵커 존재→경로 탈출/
+// 실존→지문→기록시각→후속이름표 다섯 관문을 순서대로 통과해야 null(계속
+// 진행), 실패하면 그 사유의 {state, ok:false, reason, ...}를 그대로
+// 반환한다.
+function checkMachineAnchorsAgainstReality(
+  {
+    harnessDir,
+    ownTaskArchivePath,
+    ownTaskArchiveFingerprint,
+    recordedAt,
+    successorLabelForRecord,
+  },
+  { existsFn, readFileFn, hashFn, nowFn },
+) {
+  const anchorFailure = checkMachineAnchorFacts({
+    harnessDir,
+    ownTaskArchivePath,
+    ownTaskArchiveFingerprint,
+    recordedAt,
+  });
+  if (anchorFailure) return anchorFailure;
+
+  const existsFailure = checkArchiveExists({
+    harnessDir,
+    ownTaskArchivePath,
+    existsFn,
+  });
+  if (existsFailure) return existsFailure;
+
+  const fingerprintFailure = checkFingerprint({
+    harnessDir,
+    ownTaskArchivePath,
+    ownTaskArchiveFingerprint,
+    readFileFn,
+    hashFn,
+  });
+  if (fingerprintFailure) return fingerprintFailure;
+
+  const recordedAtFailure = checkRecordedAt({ recordedAt, nowFn });
+  if (recordedAtFailure) return recordedAtFailure;
+
+  const successorGrammarFailure = checkSuccessorLabelGrammar(
+    successorLabelForRecord,
+  );
+  if (successorGrammarFailure) return successorGrammarFailure;
+
+  return null;
+}
+
 // The one function this module exists to provide.
 //
 // facts: hyk412-never-consumed-retire-core.mjs의 evaluateNeverConsumedRetirement
-// 가 받는 것과 정확히 같은 필드 전부(role/harnessTaskLabel/ledgerReservation/
-// dispatchReceiptMatchCount/resultArchiveExists/ownTaskArchiveExists/
-// hasLaterRoundArchive/staleEnoughSinceAdmission/successorLabelForRecord)
-// **그대로 위임**한다(§2⑶ "새 판정 축 금지") + 이 코어가 추가로 요구하는
-// 세 기계 앵커 필드(ownTaskArchivePath/ownTaskArchiveFingerprint/
-// recordedAt, §B).
+// 가 받는 것과 정확히 같은 필드 전부 **그대로 위임**한다(§2⑶ "새 판정 축
+// 금지") + 이 코어가 추가로 요구하는 기계 앵커 필드(harnessDir/
+// ownTaskArchivePath/ownTaskArchiveFingerprint/recordedAt, §B).
+//
+// deps: 실물 검증에 쓰는 I/O seam -- 시험은 주입하고, 실 호출자는 전부
+// 기본값(진짜 파일시스템/진짜 해시/진짜 시계)을 쓴다(coder-task.md §2⑴
+// "기본값은 실제 파일시스템이어야 한다").
 //
 // ⛔blockReasonCode를 facts에 넣어도 무시한다 -- 이 함수의 시그니처 자체가
 // 그 값을 읽지 않는다(구조적으로 닫힌 표면, §C 아래 참조).
-export function evaluateAutoAuthorAuthorization(facts = {}) {
+export function evaluateAutoAuthorAuthorization(
+  facts = {},
+  {
+    existsFn = existsSync,
+    readFileFn = readFileSync,
+    hashFn = defaultSha256Hex,
+    nowFn = () => new Date(),
+  } = {},
+) {
   const {
     role,
     harnessTaskLabel,
@@ -103,6 +372,7 @@ export function evaluateAutoAuthorAuthorization(facts = {}) {
     hasLaterRoundArchive,
     staleEnoughSinceAdmission,
     successorLabelForRecord,
+    harnessDir,
     ownTaskArchivePath,
     ownTaskArchiveFingerprint,
     recordedAt,
@@ -129,12 +399,17 @@ export function evaluateAutoAuthorAuthorization(facts = {}) {
     };
   }
 
-  const anchorFailure = checkMachineAnchorFacts({
-    ownTaskArchivePath,
-    ownTaskArchiveFingerprint,
-    recordedAt,
-  });
-  if (anchorFailure) return anchorFailure;
+  const realityFailure = checkMachineAnchorsAgainstReality(
+    {
+      harnessDir,
+      ownTaskArchivePath,
+      ownTaskArchiveFingerprint,
+      recordedAt,
+      successorLabelForRecord,
+    },
+    { existsFn, readFileFn, hashFn, nowFn },
+  );
+  if (realityFailure) return realityFailure;
 
   // §C blockReasonCode는 항상 null로 하드코딩한다 -- facts.blockReasonCode를
   // 읽는 코드 자체가 이 함수 안에 없다(위조하려면 이 파일의 소스 자체를
@@ -153,6 +428,6 @@ export function evaluateAutoAuthorAuthorization(facts = {}) {
       evidence: { source: "hyk412-never-consumed", gateState: gate.state },
     },
     humanRequiredFields: HUMAN_REQUIRED_FIELDS,
-    reason: `retirement-auto-author: hyk412 게이트 OPEN + 아카이브 경로/지문/기록시각 세 기계 앵커 확보 -> 은퇴 기록 초안 조립 가능. blockReasonCode는 닫힌 사유 집합(retirement-record-core.mjs의 RETIREMENT_BLOCK_REASON)에 "미소비 방치"를 뜻하는 값이 아직 없어 기계로 못 채움 -> null로 남김(사람 결정 필요, docs/HYK-419-retire-author-design.md §2 참조). 이 초안은 blockReasonCode가 채워지기 전에는 retirement-record-core.mjs의 checkRetirementRecord를 통과하지 못한다(INVALID_REASON_CODE로 거부됨 -- 사람 손이 빠지면 구조적으로 완성되지 않는다).`,
+    reason: `retirement-auto-author: hyk412 게이트 OPEN + 아카이브 실물 검증(경로 탈출 없음+실존+지문 재계산 일치)+기록시각(형식+미래아님)+후속이름표(문법) 전부 통과 -> 은퇴 기록 초안 조립 가능. blockReasonCode는 닫힌 사유 집합(retirement-record-core.mjs의 RETIREMENT_BLOCK_REASON)에 "미소비 방치"를 뜻하는 값이 아직 없어 기계로 못 채움 -> null로 남김(사람 결정 필요, docs/HYK-419-retire-author-design.md §3 참조). 이 초안은 blockReasonCode가 채워지기 전에는 retirement-record-core.mjs의 checkRetirementRecord를 통과하지 못한다(INVALID_REASON_CODE로 거부됨 -- 사람 손이 빠지면 구조적으로 완성되지 않는다).`,
   };
 }

@@ -1,9 +1,19 @@
-# HYK-419 — "은퇴 기록을 누가 쓰는가": 작성 권한 경계 + 자동화 코어 설계 (1R)
+# HYK-419 — "은퇴 기록을 누가 쓰는가": 작성 권한 경계 + 자동화 코어 설계 (2R 수리)
 
 이 문서는 docs/HYK-412-stuck-retire-design.md §3("B — 이미 갇힌 라운드의 사람 서명
 경로")이 이미 남긴 저자 경계 분석을 **전제로 삼아** 그 위에 "자동 작성 코어"를
 설계한다. 412 문서가 확정한 사실은 다시 쓰지 않고 링크만 남긴다 — 이 문서는 그
 위에 새로 얹는 부분만 다룬다.
+
+## 2R 수리 요약 (검토 P1-1 반영)
+
+1R은 기계 앵커(경로/지문/기록시각) 검사를 "문자열이 비어 있지 않은가"로만
+했다. 검토가 정상 OPEN facts에 `ownTaskArchivePath: "rounds/DOES-NOT-
+EXIST.md"` / `ownTaskArchiveFingerprint: "FORGED-FINGERPRINT"` /
+`recordedAt: "not-a-time"` / `successorLabelForRecord:
+"../../not-a-real-successor"`를 주입해 `AUTHORIZED_DRAFT`를 뽑아냈다(P1-1,
+1b_shown 위반). 이 라운드는 §1-2②를 "실물 검증"으로 다시 쓰고(§4·§5),
+아래 §7에 "이제 무엇을 확인하고 무엇을 여전히 못 하는지"를 정정한다.
 
 ## 0. 이 라운드의 범위 (coder-task.md §0/§2⑹)
 
@@ -47,12 +57,18 @@ retire-design.md §3-1이 이미 정직하게 적었다:
    **재사용**한다(새 판정 축 0, coder-task.md §2⑶). 그 게이트가 받는 사실은
    전부 admission-ledger/dispatch-receipts/`.harness/rounds/` 세 출처에서 온
    구조적 사실이지 사람의 "이 라운드는 죽었다"는 주장이 아니다.
-2. **이 코어가 추가하는 세 필드(§B, 기계 앵커)도 전부 기계 사실이다** —
-   `ownTaskArchivePath`(관례로 고정된 경로 문자열), `ownTaskArchiveFingerprint`
-   (파일 SHA-256, caller가 실제 파일을 해시해 넘김), `recordedAt`(시계 판독).
-   이 코어 자신은 그 값을 계산하지 않는다(S8 zero-import 계약 유지) — 그러나
-   셋 다 "사람이 지어낸 문장"이 들어올 자리가 구조적으로 없다(문자열 존재
-   여부만 검사한다, 내용의 진실성은 §6 정직 한계로 남긴다).
+2. **이 코어가 추가하는 기계 앵커 필드(§B)도 전부 기계 사실이고, ★2R부터는
+   그 값이 «실물»과 일치하는지까지 이 코어가 직접 재확인한다** —
+   `harnessDir`+`ownTaskArchivePath`(경로 탈출 없이 harnessDir 하위에
+   실제로 존재하는 파일이어야 함), `ownTaskArchiveFingerprint`(SHA-256 hex
+   형식이어야 하고, 그 파일을 이 코어가 직접 다시 읽어 재해싱한 값과
+   일치해야 함), `recordedAt`(`YYYY-MM-DD HH:MM:SS KST` 형식으로 파싱되고
+   미래가 아니어야 함). 이걸 위해 이 라운드는 S8 zero-import 원칙을
+   **의도적으로 넓혔다** — `node:fs`/`node:crypto`/`node:path`를 직접
+   import한다(1R은 "hyk412 게이트 재사용" 한 곳만 예외였다). 판정 축
+   자체(hyk412 게이트)는 그대로 위임한다 — 넓어진 것은 "기계 앵커가
+   실물과 일치하는가"를 확인하는 새 검증 계층이지 OPEN/CLOSED 판정
+   로직이 아니다.
 3. **blockReasonCode는 아예 입력받지 않는다** — 이 함수의 시그니처는
    `facts.blockReasonCode`를 **읽지도 않는다**. 호출자가 그 필드에 무엇을
    채워 넣든(`checkMachineAnchorFacts`를 통과할 필요조차 없는, 아예 무시되는
@@ -108,10 +124,16 @@ retire-design.md §3-1이 이미 정직하게 적었다:
 
 `scripts/check/retirement-auto-author-core.mjs`:
 
-- `evaluateAutoAuthorAuthorization(facts)` — hyk412 게이트를 그대로 호출해
-  `OPEN`이 아니면 `GATE_CLOSED`(게이트의 실제 state를 그대로 실어 나름).
-  `OPEN`이면 세 기계 앵커 필드의 존재를 확인(`MACHINE_ANCHOR_INCOMPLETE`
-  없으면 거부) 후 `AUTHORIZED_DRAFT`로 `draftRecord`를 조립한다.
+- `evaluateAutoAuthorAuthorization(facts, deps)` — hyk412 게이트를 그대로
+  호출해 `OPEN`이 아니면 `GATE_CLOSED`(게이트의 실제 state를 그대로 실어
+  나름). `OPEN`이면 순서대로: ①앵커 필드 존재(`MACHINE_ANCHOR_INCOMPLETE`)
+  ②경로 탈출 없음+실제 존재(`ARCHIVE_PATH_TRAVERSAL`/`ARCHIVE_PATH_NOT_
+FOUND`) ③지문 형식+재해싱 일치(`FINGERPRINT_INVALID`, 읽기 자체 실패는
+  `ARCHIVE_UNREADABLE`) ④기록시각 형식+미래아님(`RECORDED_AT_INVALID`)
+  ⑤후속 이름표 문법(`SUCCESSOR_LABEL_GRAMMAR_INVALID`) 다섯 관문을 전부
+  통과해야 `AUTHORIZED_DRAFT`로 `draftRecord`를 조립한다. `deps`는 파일
+  읽기/해싱/시계 seam(`existsFn`/`readFileFn`/`hashFn`/`nowFn`) — 시험은
+  주입하고, 실 호출자는 전부 기본값(진짜 `fs`/`crypto`/`Date`)을 쓴다.
 - `draftRecord`는 `retirement-record-core.mjs`가 기대하는 `record` 모양과
   100% 호환된다(같은 필드 이름) — 단 `blockReasonCode`는 항상 `null`.
 - 새 판정 축 0: 이 코어는 OPEN/CLOSED를 스스로 재판정하지 않는다, 오직
@@ -144,60 +166,150 @@ retire-design.md §3-1이 이미 정직하게 적었다:
    타입 위조)을 **그대로 물려받는다** — 이 코어는 그 표면을 다시 열지도,
    다시 닫지도 않는다(위임). `retirement-auto-author-core.test.mjs`의 세
    `CLOSED: hyk412 게이트가 ...` 시험이 위임이 실제로 작동함을 직접 증명한다.
-2. **ownTaskArchivePath/ownTaskArchiveFingerprint/recordedAt** — 빈 문자열,
-   `undefined`, 숫자(타입 위조) 아홉 조합(3필드 × 3변종)이 전부
-   `MACHINE_ANCHOR_INCOMPLETE`로 닫힌다(시험으로 고정).
-3. **blockReasonCode 주입** — facts에 유효해 보이는 값을 넣어도 draftRecord에
+2. **harnessDir/ownTaskArchivePath/ownTaskArchiveFingerprint/recordedAt
+   «타입» 위조** — 빈 문자열, `undefined`, `null`, 객체(`{}`), 숫자 등
+   12조합(4필드 × 3변종)이 전부 `MACHINE_ANCHOR_INCOMPLETE`로 닫힌다
+   (시험으로 고정).
+3. **★2R — ownTaskArchivePath 경로 탈출** — `..` 세그먼트·절대경로
+   (`/etc/passwd`)·윈도우 드라이브 표기(`C:\Windows\...`) 전부
+   `ARCHIVE_PATH_TRAVERSAL`로 닫힌다. 문자열 휴리스틱(`looksLikeTraversal`)
+   과 `resolve()` 결과의 포함관계 재확인(`resolveSafeArchivePath`) 두 겹
+   방어라서, 문자열 휴리스틱이 못 잡는 경로 표현이 있어도 두 번째 겹이
+   최종 관문 역할을 한다(되돌림 변이 4/8이 «두 겹을 함께» 지워야만 실제로
+   경계 밖 실재 파일이 새어 나간다는 것을 증명 — 어느 한 겹만 지운
+   1차 시도는 나머지 한 겹이 여전히 막아서 통과하지 못했다, 정직하게
+   기록해 둔다).
+4. **★2R — ownTaskArchivePath 실존 여부** — 검토 원문 `"rounds/DOES-NOT-
+EXIST.md"`가 `ARCHIVE_PATH_NOT_FOUND`로 닫힌다(시험 "★검토 원문 재현 ⓐ").
+5. **★2R — ownTaskArchiveFingerprint 형식+실값** — 검토 원문
+   `"FORGED-FINGERPRINT"`(형식 자체가 SHA-256 hex 아님)와, 형식은 맞지만
+   실제 파일과 다른 64자 hex 둘 다 `FINGERPRINT_INVALID`로 닫힌다 —
+   전자는 파일을 읽지도 않고 즉시 거부, 후자는 실제로 다시 해싱해서
+   비교한 뒤 거부(문자열 비교가 아니다). 대문자 hex(형식 다름)도 별도
+   표본으로 닫힘을 고정했다.
+6. **★2R — recordedAt 형식+달력+미래** — 검토 원문 `"not-a-time"`, 존재
+   하지 않는 달력 날짜(`2026-02-30`), 미래 시각(`2099-01-01 ...`) 셋 다
+   `RECORDED_AT_INVALID`로 닫힌다(Date.UTC 왕복 검증으로 형식 정규식만
+   으로는 못 잡는 달력 위반까지 닫는다).
+7. **★2R — successorLabelForRecord 라벨 문법** — 검토 원문
+   `"../../not-a-real-successor"`와 슬래시가 섞인 다른 변형(`"HYK-1/../2"`)
+   둘 다 `SUCCESSOR_LABEL_GRAMMAR_INVALID`로 닫힌다. ⚠️숫자/객체 등
+   비문자열 값은 이 관문이 아니라 **hyk412 게이트 자신**이 먼저
+   `SUCCESSOR_LABEL_MISSING`으로 닫는다(게이트가 `isNonEmptyString`으로
+   먼저 걸러내므로 이 코어까지 도달하지 못한다 — 이중 방어가 아니라
+   더 앞선 관문이 이미 있다는 뜻, 시험으로 그 경로까지 확인했다).
+8. **blockReasonCode 주입** — facts에 유효해 보이는 값을 넣어도 draftRecord에
    반영되지 않는다(시험으로 고정) — 이 표면은 "코드가 그 필드를 아예 읽지
    않는다"는 구조로 닫혀 있다, 검사 분기가 아니라 부재 자체가 방어선이다.
-4. **위 셋 외의 어떤 필드 조작도** `evaluateAutoAuthorAuthorization`의
-   상태 전이 표(`GATE_CLOSED`/`MACHINE_ANCHOR_INCOMPLETE`/`AUTHORIZED_DRAFT`)
-   에 없는 경로로 `AUTHORIZED_DRAFT`에 도달할 수 없다 — 마지막 return 앞에
-   조기 반환 두 개뿐인 단순 구조 자체가 증거다.
+9. **위 항목들 외의 어떤 필드 조작도** `evaluateAutoAuthorAuthorization`의
+   순차적 관문 여덟 개(§4 참조)에 없는 경로로 `AUTHORIZED_DRAFT`에 도달할
+   수 없다 — 마지막 return 앞은 전부 조기 반환이라는 단순 구조 자체가
+   증거다.
 
 ## 6. 되돌림 변이 (완료 조건 4)
 
-`retirement-auto-author-core.test.mjs`에 정확히 **3건**, 문서(이 절)의 숫자와
-일치한다. 각각 원본 소스 파일을 메모리에서 읽어 대상 문자열이 정확히 1회
-등장함을 확인한 뒤 그 부분을 제거/변형한 사본을 임시 디렉터리에 써서
-동적 임포트한다 — 실제 저장소 파일은 한 번도 쓰기 대상이 아니므로 시험
-전후 바이트 동일이 구조적으로 보장된다(원복 증명은 그래도 시험 안에서
-재확인한다, relay-handshake-retirement-mutation.test.mjs 선례와 동일 규율).
+`retirement-auto-author-core.test.mjs`에 정확히 **8건**(1R의 3건 + 2R이
+새로 넓힌 실물 검증 다섯 관문 각각의 되돌림 변이 5건 = 8), 문서(이 절)의
+숫자와 일치한다. 각각 원본 소스 파일을
+메모리에서 읽어 대상 문자열이 정확히 1회 등장함을 확인한 뒤 그 부분을
+제거/변형한 사본을 임시 디렉터리에 써서 동적 임포트한다 — 실제 저장소
+파일은 한 번도 쓰기 대상이 아니므로 시험 전후 바이트 동일이 구조적으로
+보장된다(원복 증명은 그래도 시험 안에서 재확인한다, relay-handshake-
+retirement-mutation.test.mjs 선례와 동일 규율).
 
 1. 게이트-닫힘 조기 반환 제거 → CLOSED facts가 AUTHORIZED_DRAFT로 잘못 열림.
-2. 앵커-미완성 조기 반환 제거 → 텅 빈 앵커가 AUTHORIZED_DRAFT로 잘못 열림.
+2. 앵커-미완성(존재 확인) 조기 반환 제거 → 문자열이 아닌 harnessDir이
+   구조화된 거부 대신 `TypeError`로 새어 나간다(★2R: 실물 검증이 생기고
+   나니 이 관문의 실제 역할이 "위조가 열린다"가 아니라 "크래시를 막는다"
+   로 바뀌었다 — 나머지 세 필드의 타입 위조는 어차피 하류의 형식 검사가
+   문자열로 강제 변환(`RegExp#test`/`#exec`)해서 안전하게 닫지만, harnessDir
+   은 `path.resolve()`가 비-문자열 인자에 즉시 예외를 던지므로 이 관문이
+   없으면 안전한 거부 대신 처리되지 않은 예외가 호출자에게 그대로
+   전파된다 — 이것도 방어해야 할 회귀이므로 계속 시험으로 고정한다).
 3. `blockReasonCode: null` 하드코딩을 `facts.blockReasonCode ?? null`로
-   바꿈 → 위조된 사유 코드가 draftRecord로 새어 나감(§5-3이 "왜 구조적
-   방어가 필요한가"를 주장하는 근거를 직접 시험으로 보여준다 — 이 변이가
-   없으면 §5-3의 "부재 자체가 방어선"이라는 주장은 검증되지 않은 채 남는다).
+   바꿈 → 위조된 사유 코드가 draftRecord로 새어 나감.
+4. ★2R `resolveSafeArchivePath`의 경로 탈출 방어 두 겹(문자열 휴리스틱 +
+   resolve 포함관계 재확인)을 통째로 제거 → harnessDir 밖의 «실재하는»
+   decoy 파일(진짜 내용 + 진짜 지문으로 시험이 직접 만든다)까지
+   AUTHORIZED_DRAFT로 조립됨 — 실물로 만든 이유는 "그 경로가 어차피
+   존재하지 않아서 존재 확인 단계가 대신 막아 준다"는 반론을 차단하기
+   위해서다.
+5. ★2R 존재 확인 관문(`checkArchiveExists` 호출) 제거 → 검토 원문
+   `"rounds/DOES-NOT-EXIST.md"`가 지문 확인 단계로 넘어가 다른 사유
+   (`ARCHIVE_UNREADABLE`, 실제 `readFileSync`가 ENOENT로 던짐)로 거부된다
+   — 여전히 닫히지만 검토가 지목한 그 사유 코드로는 더 이상 안 닫힌다는
+   점을 증명한다.
+6. ★2R 지문 확인 관문(`checkFingerprint` 호출) 제거 → 검토 원문
+   `"FORGED-FINGERPRINT"`가 그대로 `AUTHORIZED_DRAFT`까지 새어 나감.
+7. ★2R 기록시각 확인 관문(`checkRecordedAt` 호출) 제거 → 검토 원문
+   `"not-a-time"`이 그대로 `AUTHORIZED_DRAFT`까지 새어 나감.
+8. ★2R 후속 이름표 문법 확인 관문(`checkSuccessorLabelGrammar` 호출) 제거
+   → 검토 원문 `"../../not-a-real-successor"`가 그대로 `AUTHORIZED_DRAFT`
+   까지 새어 나감.
 
-## 7. ⚠️ 정직 한계 (완료 조건 6)
+## 7. ⚠️ 정직 한계 (완료 조건 6) — ★2R 정정
 
-**이 설계로도 남는 사람 손:**
+1R은 이 절에서 "`ownTaskArchiveFingerprint`/`ownTaskArchivePath`/
+`recordedAt`이 caller가 주장하는 값과 실제로 일치하는지는 이 코어가
+검증하지 않는다"고 적었다. **검토(P1-1)가 옳게 지적했듯, 그 문장은
+정직했지만 문을 닫지 않았다** — 이 라운드는 그 문장을 아래처럼
+**"이제 무엇을 확인하고, 무엇을 여전히 확인하지 못하는가"로 다시 쓴다**
+(⛔과장 없이, 실제로 남는 한계는 그대로 남겨 둔다).
+
+### 지금 확인하는 것 (2R이 새로 닫은 것)
+
+- **경로**: `ownTaskArchivePath`가 `harnessDir` 밖을 가리키면(`..`·절대
+  경로·드라이브 표기) `ARCHIVE_PATH_TRAVERSAL`로 거부하고, 그 경로가
+  가리키는 파일이 실제로 `harnessDir` 하위에 **존재하는지** `existsFn`
+  (기본값 `fs.existsSync`)으로 직접 확인한다.
+- **지문**: `ownTaskArchiveFingerprint`가 SHA-256 hex 형식인지 정규식으로
+  거르고, 그 파일을 `readFileFn`(기본값 `fs.readFileSync`)으로 실제로 다시
+  읽어 `hashFn`(기본값 `crypto.createHash("sha256")`)으로 재계산한 값과
+  **바이트 단위로 비교**한다 — 문자열이 그럴듯해 보이는 것만으로는
+  통과하지 못한다.
+- **기록시각**: `recordedAt`이 `YYYY-MM-DD HH:MM:SS KST` 형식으로 파싱
+  되고(달력상 실재하는 날짜인지 `Date.UTC` 왕복 검증까지), `nowFn`
+  (기본값 진짜 시계)이 가리키는 지금 시각보다 미래가 아닌지 확인한다.
+- **후속 이름표**: `successorLabelForRecord`가 라벨 문법
+  (`HYK-<숫자>[-슬러그...]`)에 맞는지 확인한다 — 경로 조각·임의 문자열은
+  이 문법 밖이라 구조적으로 닫힌다.
+
+### 그래도 여전히 남는 사람 손
 
 - `blockReasonCode`는 영원히 사람이 채운다(§3) — 이 코어는 그 결정을
-  절대 대신하지 않는다(그렇게 설계했다, §1-2③).
-- `ownTaskArchiveFingerprint`/`ownTaskArchivePath`/`recordedAt`이 caller가
-  주장하는 값과 실제로 일치하는지는 이 코어가 검증하지 않는다 — S8
-  zero-import 계약상 파일을 스스로 읽지 않기 때문이다. 이 거짓을 잡는 것은
-  (만약 나중에 결선된다면) `retirement-record-core.mjs`의 `checkArchiveFacts`
-  몫이다(아카이브 존재+지문 재대조, 그 코어가 이미 하는 일) — 이 라운드는
-  그 결선을 하지 않았으므로 **오늘 이 코어 하나만 놓고 보면 거짓 앵커를
-  가려내지 못한다**, 숨기지 않는다.
-- `successorLabel`이 "진짜 다음 라운드로 이어지는 올바른 라벨"인지는 이
-  코어도, hyk412 게이트도, retirement-record-core도 검증하지 않는다 — 존재
-  여부만 본다(412 설계 문서의 기존 한계를 그대로 물려받는다).
+  절대 대신하지 않는다(그렇게 설계했다, §1-2③). 2R의 실물 검증은 이
+  판단에 아무것도 더하지 않는다 — 애초에 이 코어가 그 필드를 읽지도
+  않기 때문이다.
+- `successorLabel`이 문법에 맞더라도 **"진짜 다음 라운드로 이어지는
+  올바른 라벨"인지**는 이 코어도, hyk412 게이트도, retirement-record-core
+  도 검증하지 않는다 — 문법만 본다(412 설계 문서의 기존 한계를 그대로
+  물려받는다, 2R이 새로 닫은 것은 아니다).
 
-**이 축이 못 막는 위조:**
+### ★2R이 새로 여는 정직 한계 — «그래도 여전히 못 막는 위조»
 
-- `.harness/rounds/` 디렉터리 자체의 위조(§5 항목 1이 물려받은 412의 caveat)
-  — 워크트리 쓰기 권한을 가진 주체가 "다음 라운드가 없다"고 파일 배치로
-  거짓말하면, 게이트도 이 코어도 그 거짓을 원리적으로 탐지 못한다.
-- 이 코어의 소스 파일 자체를 몰래 패치하는 공격(예: §6-3 변이가 실제로
-  일어나는 것) — 이 라운드가 만든 "부재 자체가 방어선"은 소스 코드 무결성이
-  전제다, 코드 서명이나 배포 검증 같은 별도 계층이 필요하고 이 라운드
-  범위 밖이다.
+- **워크트리 자체를 완전히 조작하는 공격은 못 막는다** — 워크트리 쓰기
+  권한을 가진 주체가 `harnessDir` 하위에 «가짜 아카이브 파일을 진짜로»
+  만들어 두면(예: `rounds/coder-task-r1.md`에 조작된 내용을 실제로 써
+  넣고 그 파일의 진짜 지문을 계산해 넘김), 이 코어는 "파일이 실제로
+  존재하고 지문이 실제로 일치한다"까지만 확인할 뿐 **그 파일 내용
+  자체가 정말로 이 라운드의 진짜 산출물인지**는 검증하지 않는다 — 이건
+  hyk412 게이트가 이미 §5 항목 2에서 밝힌 "rounds/ 디렉터리 위조" caveat
+  과 정확히 같은 근본 한계이고, 2R은 그 한계를 닫지 못한다(오히려
+  "실물 검증"이 그 위조된 실물까지도 «진짜»로 인정하게 됐다는 점에서,
+  1R의 "빈 문자열만 거른다"보다 위조 진입장벽은 훨씬 높아졌지만 —
+  «실물을 만들 수 있는 주체»에게는 여전히 열려 있다).
+- **이 코어의 소스 파일 자체를 몰래 패치하는 공격**은 못 막는다(예: §6의
+  8개 되돌림 변이 중 하나가 실제로 소스에 반영되는 것) — "부재 자체가
+  방어선"이라는 §1-2③의 구조적 방어는 소스 코드 무결성이 전제다, 코드
+  서명이나 배포 검증 같은 별도 계층이 필요하고 이 라운드 범위 밖이다.
 - `RETIREMENT_BLOCK_REASON`이 커버하지 않는 사유로 실제 방치가 일어난
   경우(§3-2가 이미 지적한, "사유가 사실인가"를 기계로 재현할 수 없는
   근본적 한계) — 이 라운드가 새로 만든 구멍이 아니라 retirement-record-
   core.mjs §3-4/§5-b가 이미 문서화한 한계를 그대로 물려받는다.
+- **decoy 파일 시험(§6-4)이 증명한 것의 정확한 범위**: 그 시험은
+  "harnessDir 밖의 실재 파일도 가리킬 수 있다면 통과한다"만 보인다 —
+  즉 이 코어의 안전은 "caller가 넘긴 `harnessDir`이 실제로 이 라운드의
+  워크트리 harnessDir이다"라는 전제 위에 서 있다. 그 전제 자체가
+  거짓이면(예: 호출자가 다른 워크트리의 harnessDir을 실수로/의도적으로
+  넘기면) 이 코어는 그 안에서는 여전히 "정상"으로 판정한다 — caller
+  신뢰 경계는 이 라운드가 좁히지 못했다.
