@@ -1,173 +1,246 @@
-# HYK-412 — 소비된 적 없는 라운드의 정당 종결 경로 설계안 (1R · 구현 금지)
+# HYK-412 — 소비된 적 없는 라운드의 정당 종결 경로 설계안 (2R — 구별축 재건)
 
-이 문서는 **제안**이다. 구현은 하지 않는다(coder-task.md §0-A). 근거는
-`scripts/check/hyk412-stuck-retire-inventory.json`(§2-1을 기계 판독 형태로 고정한 것)과
-그 시험 `scripts/check/hyk412-stuck-retire-inventory.test.mjs`, 그리고 실물 표본
-`HYK-271-evidence-3`(admission-ledger.json 실측)이다.
+이 문서는 1R을 대체한다(1R 본문은 git 이력에 남아 있다 — `git log -p -- docs/HYK-412-stuck-retire-design.md`).
+1R은 검토에서 **P1 헛시험(vacuous-pass)** 판정을 받았다: "task 보존 사본
+(`.harness/rounds/<role>-task-r<N>.md`) 개수 0건"을 "다음 라운드가 드롭된 적 없음"의
+증거로 썼는데, 실측 결과 그 파일은 **이 라운드 자신이 배달되는 순간** 게이트가
+스냅숏하는 것이지 "다음 라운드가 드롭될 때" 생기는 게 아니었다(아래 §0). 그래서 배달된
+모든 라운드는 항상 자기 자신의 task-r<N>.md를 최소 1건 가지며, "0건" 조건은 실제
+배달 경로에서 결코 참이 될 수 없었다.
 
-## 0. 문제의 정확한 모양 (재확인)
+이 라운드(2R)는 그 오류를 **바닥부터 다시 세운다**: 1R 설계를 방어하지 않고, off-by-one을
+바로잡은 새 축을 실물 아카이버로 만든 표본에서 시험으로 고정한다.
 
-기존 은퇴(retirement) 메커니즘(HYK-311/HYK-398, `retirement-record-core.mjs`)은 **"한 번은 소비됐다가
-사후에 영구히 재소비 불가로 판정된" 라운드**를 구제한다 — 그 설계는 처음부터 아카이브 사본
-(`.harness/rounds/<ROLE>-r<N>.md`)이 존재한다는 것을 전제로 지문을 대조한다. 이 아카이브 사본은
-**소비가 실제로 일어날 때만** 생긴다.
+## 0. 정정: 무엇이 실제로 언제 생기는가 (검토 원문 재확인)
 
-HYK-412가 다루는 라운드는 그 전제 자체가 성립하지 않는다: **소비 시도 자체가 한 번도 성공하지 못한**
-라운드다. 그래서 아카이브 사본이 원리적으로 없다 — retirement 축을 그대로 재사용하면 언제나
-`ARCHIVE_MISSING`으로 떨어진다(닭-달걀). 이 설계는 **retirement 축을 완화하지 않고**, 그 축이 요구하는
-증거(아카이브+지문)를 **대신할 수 있는 다른 증거 조합**이 있는지, 있다면 그 조건을 얼마나 좁게(닫힌
-집합으로) 세울 수 있는지를 다룬다.
+`scripts/check/dispatch-gate-decision.mjs`의 `bestEffortStampDroppedAt` →
+`bestEffortSnapshotRoundTaskFile` → `envelope-archive.mjs`의 `archiveRoundTaskFileIfNew`
+경로는, **이 CLI가 배달 직전(`dispatch-worker.ps1:171`이 실제 `orca orchestration
+dispatch`를 부르기 전) 매번 실행**되면서, **지금 배달하려는 바로 이 라운드**의 최종
+task 내용을 `.harness/rounds/<role>-task-r<N>.md`로 스냅숏한다(`envelope-archive.mjs:140-205`).
+즉:
 
-## 1. 증거 실사 결론 (인벤토리 요약)
+- `<role>-task-r<N>.md` = **라운드 N 자신의** task 스냅숏, **라운드 N이 배달되는 순간** 생김.
+- `<role>-task-r<N+1>.md` = **라운드 N+1의** task 스냅숏, **라운드 N+1이 배달될 때만** 생김 —
+  이건 "라운드 N이 끝난 뒤 누군가 다음 라운드를 실제로 드롭했다"는 사실이 있어야만
+  존재하는 파일이다.
 
-`hyk412-stuck-retire-inventory.json`의 8개 항목을 신뢰도·독립재확인가능성 기준으로 다시 정렬하면:
+1R은 이 둘을 혼동해 라운드 N 자신의 스냅숏 개수를 "다음 라운드가 드롭됐는가"의 대리
+지표로 썼다 — 실제로는 **라운드 N+1의** 스냅숏 존재 여부가 그 질문에 대한 답이다.
+이 하나의 off-by-one이 1R을 vacuous하게 만들었다. 2R의 새 축은 이 인덱스를 고친 것이다
+(§2).
 
-| 축                                              | 확실성                             | 기계 독립 재확인 | 상시 존재?                                                                               |
-| ----------------------------------------------- | ---------------------------------- | ---------------- | ---------------------------------------------------------------------------------------- |
-| admission-ledger 예약                           | 확실                               | 가능             | ★상시(정의상 — 이게 없으면 애초에 "은퇴시킬 대상"이 없다)                                |
-| dispatch-receipts.jsonl 항목                    | 확실                               | 가능             | ★상시(admission이 있으면 반드시 그 직전에 dispatch가 있었다)                             |
-| task 보존 사본(`rounds/<role>-task-r<N>.md`)    | 확실                               | 가능             | 조건부(다음 라운드가 실제로 드롭돼야 생긴다)                                             |
-| **결과 아카이브 사본(`rounds/<ROLE>-r<N>.md`)** | 확실(부재 확인)                    | 가능             | **never — 이 축이 이 이슈의 정의 자체다**                                                |
-| 라이브 워크트리 전체 백업                       | 추론                               | 가능(있으면)     | ★비상시적 — 사람이 그때그때 수동으로 만든 사고조사용 사본일 뿐, 시스템이 보장하지 않는다 |
-| `*-done-first-observation.jsonl`                | 미확인(원본 소멸, 백업에서만 확인) | 가능(있으면)     | 원본은 워크트리 정리와 함께 소멸                                                         |
-| 소비 시도 거부 기록                             | 확실히 없음                        | **불가능**       | 없음(이 코드베이스는 게이트 판정을 지속 저장하지 않는다)                                 |
-| 관문 로직 사본 2개                              | 확실(구조적 사실)                  | 가능             | N/A — 증거가 아니라 설계 제약                                                            |
+검토가 함께 확정한 사실 3건은 그대로 유효하다(coder-task.md §1):
 
-**가장 중요한 사실**: 이 표의 위 두 줄(admission-ledger·dispatch-receipts)만이 "소비된 적 없는 라운드"에
-대해 **항상, 예외 없이** 남아 있다고 이 라운드가 자신 있게 말할 수 있는 증거다. 나머지는 전부 조건부이거나
-운(사람이 백업해 뒀는가)에 좌우된다. ⇒ **설계는 이 두 축을 최소 필수 조건의 뼈대로 삼아야 한다.**
+1. `evidence-3b` 라벨은 task 보존 사본에 있으나 admission-ledger 예약은 없다 — 라벨↔admission
+   1:1 전제가 표본에서 이미 깨져 있다(§4에서 fail-closed로 다룬다).
+2. 소비 시도 거부의 지속 기록이 코드베이스에 없다(§3-A에서 정면으로 다룬다).
+3. 되돌림 변이는 7종인데 1R 문서는 8종이라 적었다 — 2R은 변이 개수와 문서 숫자를 코드로
+   강제 일치시킨다(`hyk412-never-consumed-retire-core.test.mjs`의
+   `assert.equal(MUTATION_CASES.length, 10, ...)`, §5).
 
-## 2. 설계안
+## 1. A(앞으로)와 B(이미 갇힌 것)를 분리한다
 
-### 2-1. "대체 아카이브"로 무엇을 인정할 것인가 — 닫힌 조건 집합
+이 라운드가 가장 먼저 고친 것은 **두 문제를 하나의 축으로 풀려 한 1R의 구조 자체**다.
 
-기존 retirement 축이 요구하는 것과 **동등한 강도**(아카이브 존재 + 지문 대조 + 사유 코드 + 후속 이름표)를
-유지하되, "아카이브 존재+지문"을 아래 **AND 전부**로 대체한다(하나라도 빠지면 거부 — 미열거 기본값은
-닫힘):
+- **A — 앞으로 생길 라운드**: "다음 라운드가 한 번도 드롭된 적 없는, 완전히 방치된
+  라운드"인지를 **지금 이미 있는 증거만으로** 기계가 판정할 수 있는가? → **그렇다** —
+  §2의 새 축은 새 지속 기록을 요구하지 않는다.
+- **B — 이미 갇힌 것**(`HYK-271-evidence-3` 등, task 보존 사본이 이미 2건 이상이라
+  "재시도가 있었다"는 사실 자체가 기록된 표본): 이런 표본은 §2의 축으로 **영원히** 열리지
+  않는다(설계 의도, §2 마지막 관문 `SUCCESSOR_ROUND_EXISTS`). 이 라운드는 이 경우를
+  억지로 열 새 기계 축을 만들지 않는다 — 대신 §3에서 **사람 서명 경로**의 모양을 적는다.
 
-1. **admission-ledger 예약이 실제로 존재하고 `status: "ACTIVE"`, `completed_at: null`** (거짓 은퇴 방지 —
-   이미 COMPLETED된 것을 "미소비"라고 다시 주장하는 위조를 막는다).
-2. **dispatch-receipts.jsonl에 그 예약의 `harness_task_label`과 정확히 일치하는 항목이 정확히 1건**
-   (0건이면 애초에 배달된 적 없는 라벨을 은퇴시키려는 것 — 거부. 2건 이상이면 라벨 재사용/모호 — 거부,
-   retirement 코어의 `AMBIGUOUS` 선례와 동일 원칙).
-3. **그 admission의 `admitted_at`으로부터 "충분히 긴" 시간이 지났음**(예: 관제실의 기존 stall-watch
-   임계치를 재사용 — 새 임계치를 발명하지 않는다). 이는 "아직 진행 중인 정상 라운드"를 성급하게
-   은퇴시키는 것을 막는 안전장치다. ⚠️[내 주장] — 구체적 임계값과 재사용 대상 상수는 이 라운드가
-   확정하지 않는다(검토가 필요한 부분).
-4. **"소비 시도가 전혀 없었다"는 사실 자체를 독립적으로 증명할 수 있어야 한다** — 아래 2-2 참조. 이게
-   가장 어려운 관문이다.
-5. **닫힌 사유 코드 집합에 새 값 하나 추가**: `RETIREMENT_BLOCK_REASON.NEVER_CONSUMED_NO_ARCHIVE`
-   (기존 `DONE_TIMESTAMP_NOT_PARSEABLE`/`DONE_PREDATES_DROPPED_AT`과 나란히). 이 사유는
-   `MECHANICALLY_CONFIRMABLE_BLOCK_REASONS`에 넣지 않는다 — "정말로 소비 시도가 없었다"를 기계가
-   재현할 방법이 없기 때문(아래 2-2, 3의 정직 한계).
-6. **후속 이름표(successorLabel) 필수** — 기존 원칙 그대로.
+## 2. A의 새 구별축 — `evaluateNeverConsumedRetirement`
 
-이 다섯/여섯 관문 중 하나라도 빠지면 `RETIREMENT_RECORD_STATE`에 **새 상태**를 추가해야 한다(기존 여덟
-상태 표에 자연스럽게 이어지는 형태): 예를 들어 `LEDGER_RESERVATION_NOT_ACTIVE` ·
-`DISPATCH_RECEIPT_AMBIGUOUS` · `TOO_RECENT_TO_RETIRE`. **"판정 불가"를 조용히 "정상"으로 접지 않는다는
-원칙(§4 표의 선례)을 그대로 물려받는다.**
+새 코어: `scripts/check/hyk412-never-consumed-retire-core.mjs`
+(`evaluateNeverConsumedRetirement`, zero-import, retirement-record-core.mjs와 동일한 S8
+계약). 아래 **AND 전부**를 통과해야 `OPEN`(=은퇴 기록을 "작성할 자격"이 있다는 기계
+판정, 은퇴 자체가 아니다):
 
-### 2-2. "소비 부재"와 "증거 결여"를 어떻게 구별하는가 (가장 어려운 부분)
+1. **role/harnessTaskLabel 존재** (`LABEL_MISSING`).
+2. **admission-ledger 예약이 실제로 존재**하고, **그 예약이 기록한 라벨이 요청한
+   라벨과 정확히 같음** (`LEDGER_RECORD_MISSING` / `LEDGER_RECORD_LABEL_MISMATCH` —
+   이게 검토 사실 1을 정면으로 다루는 관문이다, §4).
+3. **status === "ACTIVE" && completedAt === null** (`LEDGER_NOT_ACTIVE` — 이미 끝난
+   라운드를 "미소비"로 재주장하는 위조 방지).
+4. **dispatch-receipts.jsonl 매칭이 정확히 1건** (`DISPATCH_RECEIPT_NOT_EXACTLY_ONE` —
+   0건이면 배달된 적 없는 라벨, 2건 이상이면 라벨 재사용/모호).
+5. **결과 아카이브(`rounds/<ROLE>-r<N>.md`)가 없음** (`RESULT_ARCHIVE_ALREADY_EXISTS` —
+   있으면 애초에 이 축을 적용할 대상이 아니다).
+6. **이 라운드 자신의 task 보존 사본(`rounds/<role>-task-r<N>.md`)이 있음**
+   (`OWN_TASK_ARCHIVE_MISSING` — §0에 따라 실제로 배달된 라운드라면 구조적으로 항상
+   참이어야 한다. 없다면 이 표본 자체가 "실제 배달 모양"이 아니라는 신호이므로
+   안전측 거부).
+7. **다음 순번 task 보존 사본(`rounds/<role>-task-r<N+1>.md`)이 없음**
+   (`SUCCESSOR_ROUND_EXISTS` — ★1R의 오류를 고친 지점. 있으면 재시도 흔적이 실재하는
+   것이므로 case B로 넘긴다).
+8. **admitted_at으로부터 충분히 오래 지남**(`TOO_RECENT` — 임계값 자체는 이 라운드가
+   발명하지 않는다, 어댑터가 관제실 기존 stall-watch 상수를 재사용해야 한다는 1R의
+   결론을 그대로 물려받는다. [내 주장, 미확정 — 구체 상수는 검토 대상]).
+9. **후속 이름표(successorLabelForRecord) 존재** (`SUCCESSOR_LABEL_MISSING`).
 
-이게 이 설계의 급소다. 인벤토리가 확인했듯 **"소비를 시도했으나 매번 거부됐다"를 지속 기록하는 메커니즘이
-이 코드베이스에 없다.** 즉 다음 두 가지가 **똑같이 "결과 아카이브 사본 0건"으로 보인다**:
+전부 통과하면 `OPEN`. 미열거 상태는 없다 — 함수의 마지막 return 외에는 전부 거부이므로
+"판정 불가"가 조용히 "허용"으로 새는 경로가 없다(coder-task.md §2⑷ 요구).
 
-- (a) 정말로 그 라운드가 한 번도 소비 시도조차 되지 않은 경우(예: ORCH이 애초에 다음 라운드를
-  드롭하지 않고 방치)
-- (b) 소비 시도가 있었으나(다음 라운드가 여러 번 드롭됐으나) 매번 어떤 이유로 거부된 경우
+### 2-1. 이 축이 실제 배달 라운드 모양에서 참이 될 수 있다는 증거 (완료 조건 1)
 
-**둘을 가짜로 구별하지 않는다.** 이 설계가 제안하는 유일한 정직한 구별 신호는 **task 보존 사본
-(`rounds/<role>-task-r<N>.md`)의 개수**다:
+`hyk412-never-consumed-retire-core.test.mjs`의 두 "REAL SHAPE" 시험이 **실제 아카이버**
+(`envelope-archive.mjs`의 `archiveRoundTaskFile`, 합성이 아니라 프로덕션이 쓰는 바로 그
+함수)로 만든 표본에서 이걸 증명한다:
 
-- task 보존 사본이 **0건**이면 → (a) 확정("다음 라운드가 드롭된 적도 없다" — 이건 기계로 확인
-  가능하다, readdir 한 번). 이 경우 "소비 시도가 없었다"는 주장은 **참으로 검증된다**(부정 존재
-  증명이 아니라, "드롭 자체가 없었다"는 긍정 사실의 확인이다).
-- task 보존 사본이 **1건 이상**이면 → (b) 가능성이 있다. 이 경우 **이 설계는 닫는 문을 열지
-  않는다** — 어떤 이유로 여러 번 시도됐는데도 결과 아카이브가 한 번도 안 생겼다는 것은, 매번 다른
-  이유로 막혔을 수도 있고(각기 다른 버그), 위조 시도의 흔적일 수도 있다. **이 라운드는 그 구별을
-  기계로 할 방법을 찾지 못했다** — 정직하게 이 경우를 3-b(설계로도 못 여는 경우)로 넘긴다.
+- 라운드 1만 배달하고 멈추면 → `archiveRoundTaskFile`이 진짜로 `coder-task-r1.md`만
+  만들고 `coder-task-r2.md`는 없다 → 새 축은 `OPEN`.
+- 그 뒤 라운드 2를 실제로 배달하면(`evidence-3` → `evidence-3b`의 실물 모양 그대로
+  재현) → `coder-task-r2.md`가 진짜로 생김 → 같은 라벨(`evidence-3`)에 대한 판정은
+  `SUCCESSOR_ROUND_EXISTS`로 뒤집힘.
 
-⇒ 이 축이 여는 문은 **"다음 라운드가 정말 한 번도 드롭된 적 없는, 완전히 방치된 라운드"** 하나로
-좁아진다. HYK-271-evidence-3 표본 자체는 이 조건을 만족하지 **않는다**(task 보존 사본이 최소 1건 —
-`evidence-3b`로의 재시도 흔적이 있다) — 즉 **이 설계로는 그 실물 표본조차 곧바로 열 수 없다**는 것을
-숨기지 않고 밝힌다(§4).
+이 두 상태가 **같은 아카이버 호출**로 실제로 갈린다 — 1R처럼 "이론상 가능"이 아니라
+`archiveRoundTaskFile`을 두 번째 호출하기 전/후로 관측 가능한 파일 diff가 실제로 존재한다.
 
-### 2-3. 두 사본(`dispatch-gate-decision.mjs` ↔ `admission-completion-adapter.mjs`)을 어떻게 다룰 것인가
+## 3. B — 이미 갇힌 라운드의 사람 서명 경로
 
-**선택: 코어 로직을 하나로 뽑고(`retirement-record-core.mjs`처럼 zero-import 코어에 새 판정 함수를
-추가), 두 어댑터가 각각 "사실을 읽어 인자로 넘기는" 얇은 래퍼로 계속 분리 존재한다.** 이유:
+`evidence-3` 같은 표본(§2⑦에서 `SUCCESSOR_ROUND_EXISTS`로 닫힌 것)은 §2의 축으로
+기계가 못 연다. 이 라운드는 억지 축을 만드는 대신, 이미 존재하는 은퇴 메커니즘의
+**저자 모델을 그대로 재사용**하는 경로를 적는다 — coder-task.md §6이 인용한 실물 사례
+(HYK-271 마커 라운드, `DONE_PREDATES_DROPPED_AT`)가 이미 이 모델로 풀렸다:
 
-- 기존 `resolveRetirementArchiveCandidate`/`ForAdapter` 두 함수는 이미 **로직은 완전히 동일**하고
-  **호출 컨텍스트(무엇을 zero-import 코어에 넘기는가)만 다르다** — 이건 "작은 것은 복제한다"는 이
-  저장소의 기존 관례(`admission-completion-adapter.mjs:405` 주석)가 이미 답한 문제다. 그 관례를
-  뒤집어 억지로 단일 모듈 import로 합치면, 두 파일의 "이 어댑터는 자기 신뢰 경계 안에서 독립적으로
-  다시 구현한다"는 기존 anti-forgery 설계 의도(§3-4 주석)를 깨는 것이다.
-- 새로 여는 축(2-1의 admission-ledger·dispatch-receipts 읽기)은 **둘 다에** 똑같이 추가해야 한다 —
-  하나만 고치면 "완화된 쪽 어댑터로 위조를 몰아가는" 새 공격면이 열린다(coder-task.md §2가 경고한
-  정확히 그 위험). 이 라운드는 **두 파일 모두에 동일한 새 사실 인자(ledgerReservation,
-  dispatchReceiptCount, taskArchiveCount)를 추가**하는 것을 2R 구현 범위로 명시한다.
+### 3-1. 이미 있는 저자 경계 (실측)
 
-### 2-4. 거부돼야 하는 변형 (미리 열거)
+`scripts/check/retirement-record-writer.mjs`는 **배달 게이트에 결선돼 있지 않다**
+(파일 자신의 주석: "이 모듈은 배달 게이트에 결선되지 않는다"). `writeRetirementRecord`를
+부르는 것은 항상 **사람(또는 그 대리인 ORCH)이 CLI를 손으로 실행하는 행위**다 — 워커는
+이 경로를 알지도, 부를 자동 트리거도 없다. 이게 이미 있는 anti-forgery anchor다:
+**"이 기록이 존재한다"는 사실 자체가 사람이 관여했다는 절차적 증거**다(암호서명은
+아니다 — 아래 §5-(d) 정직 한계).
 
-- **증거 일부만 있는 경우**: admission-ledger 예약은 있으나 dispatch-receipts 항목이 없음(또는 반대) →
-  거부. 두 축이 서로 다른 사실을 가리키면 "둘 다 맞다"고 조용히 인정하지 않는다.
-  ★★이 변형은 원리적으로 **일어날 수 없어야 정상**이다(admission이 있으면 반드시 그 직전에 dispatch가
-  있어야 하는 시스템 불변식) — 만약 실제로 이 불일치가 관측되면, 그건 이 축의 버그가 아니라 **더 상위
-  시스템(admission-ledger-core.mjs 또는 dispatch 배선)의 무결성이 깨졌다는 신호**로 다뤄야 한다.
-- **재구성된 디렉터리**: 누군가 `.harness/rounds/`에 그럴듯한 이름의 `CODER-r1.md`를 손으로 만들어
-  넣는 경우 → 기존 지문 대조 관문이 이미 이걸 막는다(claimedFingerprint와 실제 내용의 sha256이 달라야
-  통과 못 함). 이 설계는 이 관문을 조금도 완화하지 않는다.
-- **라벨만 맞는 경우**: dispatch-receipts에 같은 `harness_task_label`이 재사용된 서로 다른 admission이
-  여러 건 있는 경우 → 2-1-②의 "정확히 1건" 요구가 이걸 `AMBIGUOUS`류 상태로 거부한다.
-- **task 보존 사본을 몰래 지워 "0건"으로 위장**: 관제실 파일시스템에 쓰기 권한이 있는 주체가
-  `rounds/coder-task-r1.md`를 지우면 2-2의 구별이 거짓으로 (a)로 떨어진다. ★이 설계는 이 위조를 막지
-  못한다 — 인벤토리의 `dispatch-receipt-entry` 항목 caveat과 동일한 한계(파일시스템 신뢰 경계 밖).
-  §3-4 정직 한계에 명시한다.
+⚠️ 이 anchor는 **기술적 강제가 아니라 절차적 관례**다: 제어실 파일시스템에 쓰기 권한을
+가진 어떤 프로세스든 이론적으로 `writeRetirementRecord`를 호출할 수 있다. 오늘의
+실제 방어는 "워커 seat에는 그 경로로 갈 자동화가 없다 + 정책(coder-task.md §0)이
+워커의 라이브 원장 쓰기를 명시적으로 금지한다"는 것뿐이다 — 코드로 물리적으로
+막혀 있지는 않다(§5-(d)).
 
-### 2-5. ⛔기각하는 안
+### 3-2. B를 위한 새 사유 코드 (닫힌 집합에 추가 제안, 이 라운드는 구현하지 않음)
 
-- **아카이브 관문 자체를 완화**(예: 지문 대조를 생략하거나 "라벨만 맞으면 통과") — coder-task.md §3에서
-  명시적으로 기각. 이 설계는 그 관문을 건드리지 않는다.
-- **`abort-record-writer.mjs`를 재사용** — coder-task.md §3에서 명시적으로 기각(그 문은 `SUSPECT_
-TIMEOUT_RECOVERED` 회수 표식을 요구하며, 결과가 실제로 존재하는 라운드에 그 표식을 쓰는 것은 "일어나지
-  않은 회수를 원장에 적는" 위조가 된다).
+`retirement-record-core.mjs`의 `RETIREMENT_BLOCK_REASON`에 새 값을 추가하는 안:
 
-## 3. 이 설계로도 못 여는 경우 (정직 의무)
+```
+NEVER_CONSUMED_NO_ARCHIVE: "NEVER_CONSUMED_NO_ARCHIVE"
+```
 
-1. **task 보존 사본이 1건 이상인 stuck 라운드**(§2-2) — 즉 재시도는 있었으나 결과 아카이브가 끝내 한
-   번도 안 생긴 경우. **이 설계는 이 경우를 영원히 열지 못한다.** HYK-271-evidence-3 표본 자체가 바로
-   이 경우에 해당한다(evidence-3b로의 재시도 흔적 존재) — 이 설계를 그대로 2R에서 구현해도 **이 실물
-   표본은 여전히 갇힌 채로 남는다**. 이걸 열려면 "매번 왜 거부됐는가"를 사후에 재구성할 새로운 지속
-   기록 메커니즘(예: 게이트가 거부할 때마다 이유를 append-only로 남기는 축)이 **먼저** 있어야 하고,
-   그건 이 이슈의 범위 밖(생산 결선이 필요한 별도 이슈)이다.
-2. **admission-ledger 자체가 삭제되었거나 손상된 경우** — 이 설계의 최소 필수 조건(2-1-①)조차 확인할
-   수 없다. 정답은 "영원히 못 연다"이고, 이건 정직하게 그렇다.
-3. **task 보존 사본은 0건이지만 그 사이에 dispatch-receipts.jsonl 자체가 로테이션/삭제되어 해당 항목이
-   유실된 경우** — 이 라운드는 그 파일의 보존 기간 정책을 확인하지 않았다(미확인). 만약 유실된다면
-   2-1-②를 만족하지 못해 역시 영원히 못 연다.
+**이 사유는 `MECHANICALLY_CONFIRMABLE_BLOCK_REASONS`에 넣지 않는다** — "정말로 소비
+시도가 없었는데도 재시도(evidence-3b)가 있었다"는 사실 자체를 기계가 재현할 방법이
+없기 때문이다(coder-task.md §1이 인용한 검토 사실 2, 소비 거부 지속 기록 부재). 이
+사유를 쓰는 은퇴 기록은 **아카이브 존재+지문 관문(retirement-record-core.mjs §3-1)을
+통과하지 못한다** — 정의상 아카이브가 없는 경우이므로. 즉 이 사유를 실제로 "소비
+완료로 인정"하려면 `retirement-record-core.mjs`의 `checkArchiveFacts`에 **이 사유
+코드일 때만 archiveExists 요구를 건너뛰는 새 분기**가 필요하다 — 이건 기존 소비 축의
+검증 로직을 바꾸는 것이므로 **이 라운드는 구현하지 않는다**(§6 범위 판단).
 
-## 4. 안 한 것 / 이상하다고 느낀 관측
+### 3-3. 사람이 무엇을 판단해야 하는가 (선택지, 결정은 사람 몫)
 
-- **안 한 것**: `HYK-271-evidence-3`를 실제로 반납하거나 은퇴시키는 어떤 조작도 하지 않았다(읽기만).
-  admission-ledger.json/dispatch-receipts.jsonl에 대해 `admission-cli`나 다른 쓰기 도구를 호출하지
-  않았다.
-- **안 한 것**: 두 사본 함수의 실제 코드 통합(리팩터)은 시도하지 않았다 — 2R 구현 범위로 남긴다.
-- **이상하다고 느낀 관측 ①**: `HYK-271-evidence-3`의 워크트리가 "이미 정리됨"이라는 확정 사실(coder-
-  task.md §1)에도 불구하고, 관제실 아카이브(`아카이브\2026-08-30-HYK271-산출물\hyk271-review-open-1\`)
-  에 **그 워크트리의 완전한 사본**(coder.md·coder-task.md·coder-done-first-observation.jsonl·
-  manifest-md5.txt 포함)이 남아 있었다. 이건 시스템이 보장하는 것이 아니라 HYK-271 사고조사를 위해
-  사람이 그때그때 수동으로 백업해 둔 것으로 보인다(인벤토리 `live-worktree-full-snapshot-copy` 항목,
-  confidence: 추론) — **일반화하면 안 되는 우연**이다.
-- **이상하다고 느낀 관측 ②**: 그 백업 안의 `coder-done-first-observation.jsonl`에 기록된
-  `doneLineRaw`(`>>> DONE: CODER @ 2026-08-30 03:23:24 KST`)가 같은 백업 안 `coder-task-r1.md`의
-  `dropped_at`(`2026-08-30 12:10 KST`)보다 시계상 앞선다 — `retirement-record-core.mjs`가 이미 아는
-  `DONE_PREDATES_DROPPED_AT` 사유와 정확히 같은 모양의 사실이다. [내 주장, 검토 확인 전] — 이 라운드는
-  이 관측이 이 표본이 실제로 갇힌 **원인**이라고 결론 내리지 않는다(인과를 확정할 추가 조사가 필요하다);
-  다만 이 관측 자체는 이미 있는 사유 코드 체계와 맞아떨어진다는 점에서 2R 설계에 참고할 가치가 있다고
-  판단해 남긴다.
-- **이상하다고 느낀 관측 ③**: 관제실 아카이브에는 "HYK-271-evidence-3b"라는 라벨의 admission-ledger
-  예약 자체가 **없다**(원장 전체를 grep해도 안 나온다) — task 보존 사본에는 그 라벨이 등장하는데
-  ledger에는 없다. 이건 "재시도 라운드가 admission을 새로 받지 않고 같은 admission 아래 라벨만 바꿔
-  진행됐을 가능성"을 시사한다 — 만약 그렇다면 2-1-②(dispatch-receipts 1건 매칭)의 "라벨"이 admission
-  라이프사이클과 항상 1:1이라는 이 설계의 암묵적 가정이 깨질 수 있다. [내 주장, 미확인] — 2R 착수 전에
-  admission↔라벨 관계를 명시적으로 확인해야 한다.
+- **선택지 가**: `NEVER_CONSUMED_NO_ARCHIVE`를 추가하고 `checkArchiveFacts`에 예외
+  분기를 만든다 — 얻는 것: B도 결국 기계 검증(사유는 사람이 주장, 나머지 관문은
+  여전히 기계)으로 닫힌다. 포기하는 것: 아카이브+지문이라는 기존 retirement 축의
+  "가장 강한 보증"(위조하려면 아카이브 파일까지 지문이 맞아야 함)이 이 사유에서는
+  구조적으로 없다 — 사람의 주장을 더 신뢰해야 한다.
+- **선택지 나**: 새 사유를 추가하지 않고, B는 **retirement 메커니즘 밖에서** 사람이
+  직접 admission-ledger를 조작해 반납한다(현재 HYK-398 자동 반납이 우회 없이 거부하는
+  상태를 그대로 유지) — 얻는 것: retirement 코어의 계약을 조금도 바꾸지 않는다. 포기
+  하는 것: B가 반복될 때마다 사람이 매번 수동 개입해야 한다(HYK-419가 추적 중인 바로
+  그 공백).
+- 이 라운드는 **가/나 중 하나를 확정하지 않는다** — coder-task.md §2⑴B의 요구대로
+  "판단은 사람이 한다"에 따라 여기서 멈춘다.
+
+## 4. 라벨↔admission 1:1 붕괴의 fail-closed 거동
+
+§2의 관문 2(`LEDGER_RECORD_LABEL_MISMATCH`)가 이걸 직접 담당한다: admission-ledger
+예약이 **존재는 하되 그 예약이 기록한 라벨이 요청한 라벨과 다르면**(`evidence-3b`처럼
+task 파일의 라벨과 원장 예약이 어긋나는 경우), **둘 중 어느 쪽도 정본으로 삼지 않고
+거부**한다. `hyk412-never-consumed-retire-core.test.mjs`의 `CLOSED: LEDGER_RECORD_LABEL_MISMATCH`
+와 그 mutation 짝이 이걸 시험으로 고정한다.
+
+## 5. 위조 표면 열거 (미열거 기본값 닫힘)
+
+`hyk412-never-consumed-retire-core.mjs` 파일 헤더 §2에 그대로 코드 주석으로도 남겼다.
+요약:
+
+1. **ledgerReservation / dispatchReceiptMatchCount** — admission-ledger.json과
+   dispatch-receipts.jsonl은 어떤 워크트리의 harnessDir 안에도 없다(제어실 전역 경로).
+   워커가 forge할 수 있는 표면이 **아니다**(구조적 격리 — 워커의 워크트리 쓰기 권한이
+   이 파일에 닿지 않는다).
+2. **hasLaterRoundArchive / ownTaskArchiveExists / resultArchiveExists** — 이 셋은
+   `.harness/rounds/`(워크트리 내부)에서 읽는다. 워크트리에 쓰기 권한을 가진 주체는
+   이 디렉터리를 조작해 위장할 수 있다 — **1R §2-4가 이미 밝힌 caveat을 그대로
+   물려받는다, 이 라운드가 새로 발견한 구멍이 아니다.** 이 코어는 이 위조를 막지
+   못한다(정직 한계, §6).
+3. **staleEnoughSinceAdmission** — 호출자(어댑터)가 계산해 넘긴다. 이 코어 자신은
+   그 계산을 재현하지 않는다 — 어댑터의 몫.
+4. 위 넷 외의 경로로는 `evaluateNeverConsumedRetirement`가 절대 `OPEN`에 도달할 수
+   없다 — 함수 자체가 순차적 AND-체인이고 마지막 줄 외에는 전부 거부다. 이건
+   코드 구조 자체가 증거다(마지막 return 앞에 9개의 조기 반환, 전부 reject).
+
+## 6. 범위 판단: 이번 라운드는 어디까지인가
+
+**설계 + 코어 판정 함수 + 시험까지.** 관제실의 실제 배달기(`dispatch-worker.ps1`)나
+라이브 admission-ledger.json/dispatch-receipts.jsonl을 읽어 위 `facts`를 실제로
+조립하는 **어댑터**(예: `dispatch-gate-decision.mjs`에 새 함수 추가)는 **이 라운드
+범위 밖**이다. 근거:
+
+- 이 코어(`evaluateNeverConsumedRetirement`)가 참조하는 두 원격 사실(admission-ledger
+  예약, dispatch-receipts 매칭 수)은 라이브 제어실 파일에서만 읽을 수 있다 — 이
+  라운드는 `admission-ledger.json`/`.lock`을 **읽기만도** 하지 않았다(coder-task.md
+  §0의 최상위 금지선). 그 파일들을 실제로 읽어 `facts`로 변환하는 어댑터 코드를
+  "저장소 안 코어"로 정직하게 완성하려면 최소한 그 스키마를 검증할 표본이 필요한데,
+  이 라운드는 그 표본을 라이브에서 뜰 권한이 없다(§0 정책).
+- `checkArchiveFacts`에 `NEVER_CONSUMED_NO_ARCHIVE` 예외 분기를 넣는 것(§3-2)은 기존
+  소비 축(consumption-receipt-core.mjs가 이미 통과시키는 정상 경로)의 검증 로직을
+  바꾸는 결선이다 — 사람 승인 없이 라이브 소비 경로의 관문을 넓히는 변경이라
+  coder-task.md §2⑹의 "라이브 배달기를 건드리는 결선은 범위 밖" 원칙에 정확히 해당한다.
+- §3의 선택지 가/나는 사람이 정할 몫이라고 §3-3에서 이미 명시했다 — 코더가 먼저
+  구현해 버리면 그 판단을 사실상 대신 내리는 셈이 된다.
+
+## 7. 정직 한계
+
+- **이 설계가 여전히 못 여는 경우**: (1) case B 전체(§2⑦로 닫힌, 재시도 흔적이 있는
+  모든 표본) — §3의 사람 서명 경로가 결정되고 구현되기 전까지는 영원히 못 연다.
+  (2) admission-ledger 자체가 삭제/손상된 경우 — §2 관문 2조차 확인할 수 없다,
+  1R §3-2와 동일한 한계. (3) §5 항목 2의 워크트리 파일 위조 — 이 코어는 그 위조를
+  탐지하지 못한다. (4) dispatch-receipts.jsonl의 보존 기간 정책을 이 라운드는
+  확인하지 않았다(미확인, 1R §3-3과 동일).
+- **이 설계가 새로 요구하는 것(사람 손 · 새 기록)**: A(§2)는 **새 기록을 요구하지
+  않는다** — 이게 1R 대비 2R의 핵심 절약이다(off-by-one만 고치면 기존 아카이버가
+  이미 충분한 증거를 남기고 있었다). B(§3)는 새 기록을 요구하지 않지만(기존
+  retirement-record-writer.mjs 재사용), **사람의 두 가지 결정**을 새로 요구한다:
+  (i) §3-3 가/나 중 어느 쪽을 택할지, (ii) 택한다면 §3-2의 `NEVER_CONSUMED_NO_ARCHIVE`
+  분기를 누가·언제 `retirement-record-core.mjs`에 결선할지(별도 코더 라운드, 사람 승인
+  필요).
+
+## 8. 1R 축을 왜 버렸는가 / 새 축이 왜 vacuous하지 않은가
+
+1R 축("이 라운드 자신의 task 보존 사본 개수 == 0")은 실제 배달 경로에서 그 개수가
+**항상 ≥1**이므로(§0, 게이트가 배달 직전 매번 스냅숏함) 그 조건이 참이 되는 실물
+라운드가 **존재할 수 없었다** — 열리는 문이 이론적으로만 있고 실물로는 결코 도달
+불가능했다.
+
+2R 축("다음 순번(N+1)의 task 보존 사본이 없음")은 **같은 아카이버 함수를 두 번째로
+부르느냐 마느냐**에 따라 실제로 값이 갈린다 — §2-1의 두 REAL SHAPE 시험이 정확히
+같은 함수(`archiveRoundTaskFile`) 호출 1회 vs 2회로 그 갈림을 재현한다. "다음 라운드가
+드롭됐는가"라는 질문에 대해 이 축이 내놓는 참/거짓이 실제 관측 가능한 파일 diff와
+1:1로 대응한다 — 이게 vacuous하지 않다는 것의 시험적 증거다.
+
+## 9. 안 한 것 / 이상하다고 느낀 관측 (2R)
+
+- **안 한 것**: 라이브 admission-ledger.json/.lock에 대한 읽기·쓰기 어떤 시도도 하지
+  않았다. `admission-cli` 호출 0건.
+- **안 한 것**: `retirement-record-core.mjs`/`retirement-record-writer.mjs`를 수정하지
+  않았다(§3-2의 예외 분기는 제안일 뿐 구현하지 않았다) — 기존 소비 축의 동작은 이
+  라운드 전후로 바이트 단위 동일하다.
+- **안 한 것**: `dispatch-gate-decision.mjs`/`admission-completion-adapter.mjs`에 새
+  어댑터를 추가하지 않았다(§6 범위 판단).
+- **이상하다고 느낀 관측**: 1R 문서(§2-2)는 이미 "task 보존 사본이 1건 이상이면 이
+  설계는 열지 않는다"고 명시적으로 적어 두었었다 — 즉 1R 저자 자신도 "0건이 아니면
+  못 연다"는 조건을 세워 두고도, 그 0건이 실제로 도달 가능한지(=이 라운드 자신의
+  스냅숏이 항상 존재한다는 사실)를 검증하지 않은 채 넘어갔다. 검토가 코드를 직접 읽고
+  나서야 이 간극이 드러났다 — "설계 문서가 자기모순 없이 일관돼 보인다"는 것과
+  "그 조건이 실물에서 참이 될 수 있다"는 것은 별개의 검증이라는 교훈으로 남긴다.
