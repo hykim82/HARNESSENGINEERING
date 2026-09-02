@@ -177,3 +177,92 @@ retire-author-shadow: <state> reason=<code> label=<harnessTaskLabel> (shadow -- 
    아직 관찰되지 않았다 — 그림자이므로 이 라운드 범위에서는 요구되지
    않는다(coder-task.md §1b_shown: "사람이 한 줄을 눈으로 읽는다"가
    완료 조건의 전부).
+
+## 6. HYK-419-wire-2 (2R 수리) — «멈추지 않게» + «침묵하지 않게»
+
+1R 리뷰가 실측으로 반증한 두 결함(§0 재확인):
+
+- **P1-1**: `runRetireAuthorShadowObservation`의 `execFileSync` 호출에 시간
+  제한이 없었다 — 격리 표적으로 1.5초 지연 자식을 실제로 실행해 부모
+  probe timeout(300ms)에서 `ETIMEDOUT`/`SIGTERM`을 재현했다. 소비 경로
+  안에서 동기 실행되는 호출이 시간 제한 없이 걸리면 "무엇을 하든 소비
+  동작·종료코드 불변"이 깨진다.
+- **P1-2**: catch의 `String(err.stderr ?? err.message).trim()`을 reason에
+  원문 그대로 삽입해, 격리 자식의 stderr(2줄)·CLI 부재 Node 오류(18~19줄)·
+  throw 오류(12줄)가 각각 그만큼의 물리 줄로 새어 나갔다. 게다가 **exit
+  0으로 stderr만 쓴 자식**은 `out.trim()`이 빈 문자열이 되어
+  `retire-author-shadow:` 줄 자체가 사라졌다(0줄 — 이 라운드의 비타협
+  "침묵 0" 위반).
+
+### 6-1. 시간 제한 (§2⑴)
+
+`SHADOW_CLI_TIMEOUT_MS = 2000`(ms). 근거: 정상 조립+판정(rounds/ 파일
+몇 개 읽기)은 이 저장소의 실측(retirement-auto-author-shadow-cli.test.mjs)에서
+100ms를 넘지 않았다 — 2000ms는 정상 왕복의 20배 이상 여유를 두면서도
+"무제한 대기"라는 P1-1의 실제 결함은 구조적으로 막는다(2000ms 뒤에는
+반드시 끊긴다). `execFileSync`의 `timeout`/`killSignal: 'SIGKILL'` 옵션을
+그대로 쓴다 — Node가 그 옵션의 시간 초과를 `err.code === 'ETIMEDOUT'`로
+알려준다는 것을 이 워크트리에서 직접 재현해 확인했다(`isTimeoutError`).
+`killSignal`을 기본값 `SIGTERM`이 아니라 `SIGKILL`로 명시한 이유: SIGTERM은
+자식이 무시/트랩할 수 있어 "멈추지 않는다"는 비타협을 끝까지 보장하지
+못한다 — SIGKILL은 무시할 수 없다.
+
+**시간 초과도 차단 0으로 흡수한다**: catch 블록이 `isTimeoutError(err)`로
+분기해 `state=TIMEOUT`인 한 줄을 만들고, 소비는 그대로 성공한다
+(relay-handshake-retire-author-shadow-wire.test.mjs (E)가 **진짜 3000ms
+지연 자식**을 200ms 시간 제한으로 실제로 죽여 이를 증명한다 — 흉내가
+아니라 실 child_process 타이밍이다).
+
+**좀비/핸들 정직 한계**: `execFileSync`는 동기 함수라 Node가 내부적으로
+자식의 종료(정상이든 kill이든)를 확인한 뒤에만 반환한다 — 별도의 좀비
+방지 코드를 이 함수가 추가로 둘 필요가 없다(호출이 반환됐다는 것 자체가
+자식이 이미 죽었다는 뜻). 이 워크트리는 Windows이고, Windows에는 POSIX
+시그널이 없어 Node가 `SIGKILL`을 내부적으로 `TerminateProcess`로
+매핑한다 — 이 라운드는 그 매핑을 직접 관찰(실측)했을 뿐, POSIX 플랫폼에서
+동일 옵션이 정말 좀비를 안 남기는지는 별도로 확인하지 않았다(정직 한계,
+Node 문서상 spawnSync 계열은 두 플랫폼 모두 동기 대기를 보장한다고
+명시하지만 이 라운드가 그 문서 이상을 검증하지는 않았다).
+
+### 6-2. «정확히 한 줄» 계약 (§2⑵)
+
+**부모(`relay-handshake.mjs`)가 보장한다**, 자식(CLI)이 아니다 — 자식의
+계약이 미래에 깨지더라도(다른 도구가 실수로 stdout에 경고를 흘리는 등)
+부모 쪽 한 겹이 그 사실 자체를 흡수한다.
+
+- `toOneLine(text)`: 모든 개행(`\r\n`/`\r`/`\n`)을 공백으로 접고,
+  `SHADOW_LOG_MAX_LEN = 300`자를 넘으면 잘라내고 말줄임(`…(truncated)`)을
+  붙인다(자른 사실 자체를 숨기지 않는다).
+- `normalizeChildStdout(out, taskId)`: 자식 stdout의 첫 줄이
+  `retire-author-shadow: `로 시작하면 그 줄을 `toOneLine`으로 한 번 더
+  정규화해 그대로 쓰고, 아니면(빈 문자열 포함) 부모가 `MALFORMED_OUTPUT`
+  한 줄을 직접 만든다 — **줄이 0개인 경우를 구조적으로 없앤다**
+  (relay-handshake-retire-author-shadow-wire.test.mjs (I)가 "exit 0 +
+  빈 stdout" 정확히 그 실사고 모양을 재현해 증명한다).
+- catch 분기(`OBSERVATION_ERROR`/`TIMEOUT`)도 `shadowLine(state, reason,
+taskId)`를 통해 같은 `toOneLine`을 거친다 — stderr 폭주(50줄 합성
+  픽스처, (F-2))도 물리적으로 정확히 한 줄, 길이 상한 안으로 접힌다.
+
+**"정확히 한 줄"은 `console.log` 호출 횟수가 아니라 물리적 개행 개수로
+잰다** — 시험은 `countPhysicalLines(str) = str.split(/\r\n|\r|\n/).length`로
+직접 센다(P1-2가 실측한 결함은 "호출은 1번인데 그 안에 개행이 여러 개"인
+모양이었으므로, 호출 횟수만 세면 이 결함을 놓친다).
+
+### 6-3. 회귀 0 확인
+
+1R의 통과분(정적 import 0 · 라이브 무접촉 · 픽스처 시각 대역 밖 ·
+20개 시험 · 되돌림 변이 4건)을 이 라운드 시작 전/끝 모두 실행해 재확인했다
+— 4건 전부 여전히 실제로 RED → 바이트 동일 복원(md5 대조)됨을 이 라운드가
+직접 재현했다. 20개 시험도 코드 변경 후 전부 그대로 통과한다.
+
+### 6-4. 되돌림 변이 (이 라운드 신설 2건, 총 6건)
+
+- ⓔ(2R) `execFileFn` 호출 옵션에서 `timeout`/`killSignal`을 지운다 →
+  (E) RED(진짜 3000ms 지연 자식을 끝까지 기다려 elapsed 단언이 깨지고,
+  `state`도 `TIMEOUT`이 아니게 된다).
+- ⓕ(2R) `normalizeChildStdout`/catch의 `shadowLine` 정규화를 지우고 1R의
+  raw 삽입으로 되돌린다 → (F-2)/(G)/(I) 전부 RED(stderr 50줄이 원문 그대로
+  삽입돼 물리 줄 수가 1을 넘거나, 빈 stdout이 그대로 빈 문자열로 남아
+  `retire-author-shadow:` 접두어 자체가 사라진다).
+
+전부 실제로 적용 → RED 확인(md5로 사전 스냅숏) → 원본으로 복원 →
+md5 재대조로 바이트 동일 확인.

@@ -24,7 +24,7 @@ import {
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
-import { spawnSync } from "node:child_process";
+import { spawnSync, execFileSync } from "node:child_process";
 import { runAdmissionCli } from "../supervisor/admission-cli.mjs";
 import {
   checkRelayHandshake,
@@ -131,6 +131,24 @@ function receiptsIn(harnessDir) {
   } catch {
     return [];
   }
+}
+
+// HYK-419-wire-2 §3-2 -- "정확히 한 줄"은 console.log 호출 횟수가 아니라
+// «물리적 개행 개수»로 잰다(한 번의 console.log(다중행문자열) 호출도
+// 실제 터미널에는 여러 줄로 찍힌다 -- P1-2가 지적한 결함이 바로 이
+// 모양이었다). 개행 문자가 하나도 없어야 "1줄"이다.
+function countPhysicalLines(str) {
+  return String(str).split(/\r\n|\r|\n/).length;
+}
+
+function writeSlowChildScript(dir, delayMs, tailLine) {
+  const p = join(dir, "slow-child.mjs");
+  writeFileSync(
+    p,
+    `await new Promise((r) => setTimeout(r, ${delayMs}));\nconsole.log(${JSON.stringify(tailLine)});\n`,
+    "utf8",
+  );
+  return p;
 }
 
 // ---------------------------------------------------------------------------
@@ -290,6 +308,16 @@ test("(B-2) 회귀 고정: retirement-auto-author-shadow-cli.mjs 등 그림자 �
       0,
       `isolated CLI should still exit 0: stdout=${res.stdout} stderr=${res.stderr}`,
     );
+    // HYK-419-wire-2 §3-2: 파일 부재 경우도 "정확히 한 줄"이어야 한다 --
+    // 프로덕션 배선 그대로(정적 import 0) 실제로 잰다.
+    const shadowLines = res.stdout
+      .split(/\r\n|\r|\n/)
+      .filter((l) => l.startsWith("retire-author-shadow: "));
+    assert.equal(
+      shadowLines.length,
+      1,
+      `파일 부재 경우도 정확히 한 줄이어야 한다, 실제 stdout: ${JSON.stringify(res.stdout)}`,
+    );
   } finally {
     rmSync(isolatedDir, { recursive: true, force: true });
     rmSync(harnessDir, { recursive: true, force: true });
@@ -337,4 +365,186 @@ test("(D) execFileFn이 성공하면 그 stdout을 그대로 로그로 넘긴다
     lines[0],
     "retire-author-shadow: JUDGED reason=GATE_CLOSED label=HYK-419-SHADOW-D-1 (shadow -- 아무것도 차단하지 않음)",
   );
+});
+
+// ---------------------------------------------------------------------------
+// HYK-419-wire-2 (2R 수리, 검토 P1-1/P1-2) -- 완료조건 §3-1/§3-2가 요구하는
+// «다섯 경우 전부»(비정상 종료·stderr 폭주·파일 부재·지연·예외)에서
+// (a) 소비 동작·종료코드 불변 (b) retire-author-shadow: 가 정확히 1줄임을
+// 각각 직접 고정한다.
+// ---------------------------------------------------------------------------
+
+// (E) 지연(시간 초과) -- ★실제 지연 자식(진짜 child_process, 3000ms)을
+// 진짜 timeout(테스트에서는 200ms로 짧게)으로 죽인다. 되돌림 변이 ⓐ(2R)의
+// 대상: execFileFn 호출의 timeout 옵션을 지우면 이 시험이 빨개진다(느린
+// 자식이 끝까지 실행돼 elapsed 단언과 state=TIMEOUT 단언 둘 다 깨진다).
+test("(E)★ 실제 지연 자식(3000ms)을 진짜 timeout(200ms)으로 죽여도 소비는 멈추지 않고 정확히 한 줄, state=TIMEOUT", () => {
+  const dir = tmpDir("hyk419-shadow-wire-e-");
+  try {
+    const slowPath = writeSlowChildScript(
+      dir,
+      3000,
+      "retire-author-shadow: JUDGED reason=SHOULD_NOT_ARRIVE label=late (shadow -- 아무것도 차단하지 않음)",
+    );
+    const lines = [];
+    const startedAt = Date.now();
+    assert.doesNotThrow(() => {
+      runRetireAuthorShadowObservation({
+        role: "coder",
+        harnessDir: "unused",
+        taskId: "HYK-419-SHADOW-E-1",
+        doneAt: "x",
+        timeoutMs: 200,
+        execFileFn: (_cmd, _args, opts) =>
+          execFileSync(process.execPath, [slowPath], opts),
+        logFn: (line) => lines.push(line),
+      });
+    });
+    const elapsedMs = Date.now() - startedAt;
+    assert.ok(
+      elapsedMs < 2500,
+      `실제로 timeout 근처(200ms)에서 끊겨야 한다(느린 자식 3000ms 전부를 기다리면 «멈춘다»는 뜻) -- 실측: ${elapsedMs}ms`,
+    );
+    assert.equal(
+      lines.length,
+      1,
+      `logFn 호출은 정확히 1번, 실제: ${JSON.stringify(lines)}`,
+    );
+    assert.equal(
+      countPhysicalLines(lines[0]),
+      1,
+      `물리적으로 정확히 한 줄이어야 한다: ${JSON.stringify(lines[0])}`,
+    );
+    assert.match(lines[0], /^retire-author-shadow: TIMEOUT /);
+    assert.match(lines[0], /label=HYK-419-SHADOW-E-1/);
+    assert.match(lines[0], /\(shadow -- 아무것도 차단하지 않음\)$/);
+    assert.doesNotMatch(
+      lines[0],
+      /SHOULD_NOT_ARRIVE/,
+      "느린 자식의 늦은 출력이 새어 나오면 안 된다 -- 죽은 뒤의 값이다",
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// (F-1) 비정상 종료 -- 짧은 stderr 한 줄 + nonzero exit.
+test("(F-1) 비정상 종료(짧은 stderr, nonzero exit)에도 정확히 한 줄, state=OBSERVATION_ERROR", () => {
+  const lines = [];
+  runRetireAuthorShadowObservation({
+    role: "coder",
+    harnessDir: "unused",
+    taskId: "HYK-419-SHADOW-F1-1",
+    doneAt: "x",
+    execFileFn: () => {
+      const err = new Error("Command failed");
+      err.status = 1;
+      err.stderr = "boom: something went wrong\n";
+      throw err;
+    },
+    logFn: (line) => lines.push(line),
+  });
+  assert.equal(lines.length, 1);
+  assert.equal(countPhysicalLines(lines[0]), 1);
+  assert.match(lines[0], /^retire-author-shadow: OBSERVATION_ERROR /);
+  assert.match(lines[0], /\(shadow -- 아무것도 차단하지 않음\)$/);
+});
+
+// (F-2) stderr 폭주 -- 되돌림 변이 ⓑ(2R)의 대상: normalizeChildStdout/
+// shadowLine의 개행 정규화(toOneLine)를 지우면 이 시험이 빨개진다(원문
+// stderr의 개행이 그대로 살아남아 물리적으로 여러 줄이 된다, P1-2가
+// 실측한 결함 그대로).
+test("(F-2)★ stderr 폭주(50줄)에도 정확히 한 줄(개행 전부 제거), 길이 상한 안", () => {
+  const lines = [];
+  const floodedStderr =
+    Array.from(
+      { length: 50 },
+      (_, i) => `line ${i}: some diagnostic noise here`,
+    ).join("\n") + "\n";
+  runRetireAuthorShadowObservation({
+    role: "coder",
+    harnessDir: "unused",
+    taskId: "HYK-419-SHADOW-F2-1",
+    doneAt: "x",
+    execFileFn: () => {
+      const err = new Error("Command failed");
+      err.status = 1;
+      err.stderr = floodedStderr;
+      throw err;
+    },
+    logFn: (line) => lines.push(line),
+  });
+  assert.equal(lines.length, 1);
+  assert.equal(
+    countPhysicalLines(lines[0]),
+    1,
+    `stderr 50줄이 원문 그대로 삽입되면 이 단언이 깨진다: 실제 물리행수=${countPhysicalLines(lines[0])}`,
+  );
+  assert.match(lines[0], /^retire-author-shadow: OBSERVATION_ERROR /);
+  assert.ok(
+    lines[0].length < 500,
+    `길이 상한이 걸려야 한다(50줄 원문을 그대로 넣으면 1500자를 넘는다), 실제 길이: ${lines[0].length}`,
+  );
+});
+
+// (G) 파일 부재 -- 진짜 존재하지 않는 경로에 진짜 execFileSync를 건다
+// (ENOENT/MODULE_NOT_FOUND 실물 에러 형태, 흉내가 아니다). (B-2)는 실
+// 프로덕션 배선(정적 import 0)을 증명하고, 이 시험은 그 파일-부재 경우도
+// "정확히 한 줄"임을 직접 잰다.
+test("(G) 파일 부재(진짜 존재하지 않는 경로)에도 정확히 한 줄, state=OBSERVATION_ERROR", () => {
+  const lines = [];
+  runRetireAuthorShadowObservation({
+    role: "coder",
+    harnessDir: "unused",
+    taskId: "HYK-419-SHADOW-G-1",
+    doneAt: "x",
+    execFileFn: (_cmd, _args, opts) =>
+      execFileSync(
+        process.execPath,
+        ["C:/definitely/not/a/real/shadow-cli-path.mjs"],
+        opts,
+      ),
+    logFn: (line) => lines.push(line),
+  });
+  assert.equal(lines.length, 1);
+  assert.equal(countPhysicalLines(lines[0]), 1);
+  assert.match(lines[0], /^retire-author-shadow: OBSERVATION_ERROR /);
+  assert.match(lines[0], /label=HYK-419-SHADOW-G-1/);
+});
+
+// (H) 예외 -- (C)를 "정확히 한 줄" 관점에서 다시 고정(개행 없는 단순
+// Error.message도 물리적으로 정확히 1줄임을 명시 단언).
+test("(H) execFileFn이 강제로 던지는 예외에도 물리적으로 정확히 한 줄", () => {
+  const lines = [];
+  runRetireAuthorShadowObservation({
+    role: "coder",
+    harnessDir: "unused",
+    taskId: "HYK-419-SHADOW-H-1",
+    doneAt: "x",
+    execFileFn: () => {
+      throw new TypeError("forced exception (test injection)");
+    },
+    logFn: (line) => lines.push(line),
+  });
+  assert.equal(lines.length, 1);
+  assert.equal(countPhysicalLines(lines[0]), 1);
+  assert.match(lines[0], /^retire-author-shadow: OBSERVATION_ERROR /);
+});
+
+// (I) 자식이 exit 0인데 stdout이 비어 있음(P1-2 실측 재현) -- 부모가 직접
+// 한 줄을 만들어 남긴다.
+test("(I) 자식이 exit 0인데 stdout이 비어 있어도 줄이 0개가 되지 않는다(부모가 대신 만든다)", () => {
+  const lines = [];
+  runRetireAuthorShadowObservation({
+    role: "coder",
+    harnessDir: "unused",
+    taskId: "HYK-419-SHADOW-I-1",
+    doneAt: "x",
+    execFileFn: () => "",
+    logFn: (line) => lines.push(line),
+  });
+  assert.equal(lines.length, 1);
+  assert.equal(countPhysicalLines(lines[0]), 1);
+  assert.match(lines[0], /^retire-author-shadow: MALFORMED_OUTPUT /);
+  assert.match(lines[0], /\(shadow -- 아무것도 차단하지 않음\)$/);
 });
