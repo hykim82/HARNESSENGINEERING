@@ -9,6 +9,14 @@ import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
 import { finalizeDone, FINALIZE_DONE_REASON } from "./finalize-done.mjs";
 import { observeDoneLine } from "../check/first-observation.mjs";
+// HYK-359 (2R ext, ORCH-53): never let an ambient ADMISSION_LEDGER_PATH/
+// ADMISSION_LOCK_PATH/DISPATCH_RECEIPT_PATH leaked from the invoking shell
+// (or, in the ambient-env sweep's case, deliberately floated by a prior
+// test in the same process) reach a relay-handshake.mjs child this file
+// spawns -- see admission-ledger-env-isolation.mjs's own header, and
+// relay-handshake.test.mjs's runCli for the same repo-wide idiom reused
+// here rather than reinvented.
+import { isolatedChildEnv } from "../check/admission-ledger-env-isolation.mjs";
 
 const CLI_PATH = join(
   dirname(fileURLToPath(import.meta.url)),
@@ -37,6 +45,9 @@ function runCli(args, opts = {}) {
   const res = spawnSync(process.execPath, [CLI_PATH, ...args], {
     encoding: "utf8",
     ...opts,
+    // HYK-359 (2R ext, ORCH-53): strip any ambient admission-ledger env
+    // before it reaches this child -- see the import above.
+    env: isolatedChildEnv(opts.env),
   });
   assert.equal(res.error, undefined);
   assert.notEqual(res.status, null);
@@ -558,6 +569,16 @@ test("CLI: --at (or any --at=... form) is refused on sight, before any file is t
 function runHandshakeCli(args) {
   const res = spawnSync(process.execPath, [HANDSHAKE_CLI_PATH, ...args], {
     encoding: "utf8",
+    // HYK-359 (2R ext, ORCH-53): the fixtures this file spawns
+    // relay-handshake.mjs against never intend to exercise the admission-
+    // completion side effect -- an ambient ADMISSION_LEDGER_PATH (real
+    // shell leftover, or deliberately floated by hyk359-ambient-env-
+    // regression.test.mjs's own sweep) made checkRelayHandshake attempt a
+    // real completion against a ledger with no matching reservation
+    // (RESERVATION_NOT_FOUND), tripping HYK-344's exit 3 instead of the 0
+    // this file's own round-trip test expects -- not a marker-contract
+    // failure, an environment-isolation gap in the spawn itself.
+    env: isolatedChildEnv(),
   });
   assert.equal(res.error, undefined);
   assert.notEqual(res.status, null);
