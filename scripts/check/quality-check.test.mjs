@@ -302,3 +302,109 @@ test("CLI: empty-scope run prints a distinct [quality-check:empty] marker on std
     assert.match(out, /\[quality-check:empty\]/);
   });
 });
+
+// --- HYK-393 2R: value-axis contract (REVIEW P1-1). Table: flag x value
+// situation x expected outcome. Situations covered: (a) normal value ->
+// accepted, (b) EOF (nothing after the flag) -> rejected, (c) next token is
+// a KNOWN flag -> rejected, (d) next token is an UNKNOWN flag-shaped token
+// -> rejected, (e) explicit empty-string value -> rejected. Exclusion rule:
+// values that merely CONTAIN "--" but do not START with it (e.g. a sha or
+// path with "--" in the middle) are out of scope for this table -- the
+// contract (see quality-check.mjs's readFlagValue comment) only rejects
+// values that START with "--", so a value like "abc--def" is case (a), not
+// tested separately here since it is not a new code path.
+
+test("parseCliArgs value-axis (b/EOF): --base-sha at end of args -> ok:false, fail-closed", () => {
+  const result = parseCliArgs(["--base-sha"]);
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /requires a value but none was given/);
+});
+
+test("parseCliArgs value-axis (c/known-flag-as-value): --base-sha --mode -> ok:false, does not swallow --mode as the value", () => {
+  const result = parseCliArgs(["--base-sha", "--mode"]);
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /looks like a flag, not a value/);
+});
+
+test("parseCliArgs value-axis (d/unknown-flag-as-value): --base-sha --foo -> ok:false", () => {
+  const result = parseCliArgs(["--base-sha", "--foo"]);
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /looks like a flag, not a value/);
+});
+
+test("parseCliArgs value-axis (e/empty string): --base-sha '' -> ok:false", () => {
+  const result = parseCliArgs(["--base-sha", ""]);
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /empty string as its value/);
+});
+
+test("parseCliArgs value-axis (a/normal value): --base-sha <sha> --mode ci --cwd <dir> -> ok:true, all three parsed", () => {
+  const result = parseCliArgs([
+    "--base-sha",
+    "abc123",
+    "--mode",
+    "ci",
+    "--cwd",
+    "/some/dir",
+  ]);
+  assert.equal(result.ok, true);
+  assert.equal(result.baseSha, "abc123");
+  assert.equal(result.mode, "ci");
+  assert.equal(result.cwd, "/some/dir");
+});
+
+test("parseCliArgs value-axis: --mode at EOF -> ok:false", () => {
+  const result = parseCliArgs(["--mode"]);
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /requires a value but none was given/);
+});
+
+test("parseCliArgs value-axis: --cwd at EOF -> ok:false (was a Node ERR_INVALID_ARG_TYPE crash before this round -- now a designed rejection at parse time, before it ever reaches execFileSync)", () => {
+  const result = parseCliArgs(["--cwd"]);
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /requires a value but none was given/);
+});
+
+test("CLI value-axis: node scripts/check/quality-check.mjs --base-sha (EOF, REVIEW's exact P1-1 reproduction #1) exits non-zero, not a vacuous green", () => {
+  withFixtureRepo((dir) => {
+    assert.throws(() => {
+      execFileSync(
+        process.execPath,
+        [QUALITY_CHECK_PATH, "--cwd", dir, "--base-sha"],
+        {
+          encoding: "utf8",
+        },
+      );
+    }, /Command failed/);
+  });
+});
+
+test("CLI value-axis: node scripts/check/quality-check.mjs --base-sha --mode (swallowed-flag, REVIEW's exact P1-1 reproduction #2) exits non-zero, not a vacuous green", () => {
+  withFixtureRepo((dir) => {
+    assert.throws(() => {
+      execFileSync(
+        process.execPath,
+        [QUALITY_CHECK_PATH, "--cwd", dir, "--base-sha", "--mode"],
+        { encoding: "utf8" },
+      );
+    }, /Command failed/);
+  });
+});
+
+// --- HYK-393 2R: name-axis regression guard (must still be non-zero after
+// the value-axis change -- these were already fixed in 1R, re-asserted
+// here directly against the CLI so a future edit to readFlagValue/
+// parseCliArgs cannot accidentally reopen the name axis).
+for (const badFlag of ["--base", "--baseSha", "-base-sha", "--Mode"]) {
+  test(`CLI name-axis regression: ${badFlag} still exits non-zero (2R must not regress 1R's fix)`, () => {
+    withFixtureRepo((dir) => {
+      assert.throws(() => {
+        execFileSync(
+          process.execPath,
+          [QUALITY_CHECK_PATH, "--cwd", dir, badFlag, "x"],
+          { encoding: "utf8" },
+        );
+      }, /Command failed/);
+    });
+  });
+}

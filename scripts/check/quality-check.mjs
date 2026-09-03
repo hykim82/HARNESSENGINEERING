@@ -189,8 +189,55 @@ export function runQualityCheck({
 // a "quality clean" both the author and reviewer accepted at face value).
 const KNOWN_FLAGS = new Set(["--mode", "--base-sha", "--cwd"]);
 
+// Value-axis contract for the three flags above, all of which take a
+// value (HYK-393 2R -- name-axis rejection alone still let a *valueless*
+// `--base-sha` fall through: EOF left `baseSha` `undefined`, and
+// `--base-sha --mode` silently ate the next flag's own name as its value,
+// both landing on mode:"staged"'s default and printing an empty-scope
+// green instead of failing closed). A value is accepted only if it exists,
+// is non-empty, and does not itself look like a flag:
+//   - EOF (nothing left in argv)              -> reject
+//   - empty string (an explicit `""` token)    -> reject
+//   - starts with "--" (known OR unknown flag) -> reject, whether or not
+//     that token is itself in KNOWN_FLAGS -- a git SHA, a mode name
+//     ("ci"/"staged"), and a directory path are never expected to start
+//     with "--" in real use, so treating any "--"-shaped token as "this
+//     flag's value looks like it swallowed the next flag" is a stricter,
+//     simpler rule than special-casing "known flag" vs "unknown flag"
+//     separately, at the cost of rejecting the (unsupported) theoretical
+//     case of a --cwd path that is itself named "--something".
+function readFlagValue(args, i, flag) {
+  const value = args[i + 1];
+  if (value === undefined) {
+    return {
+      ok: false,
+      reason: `quality-check: ${flag} requires a value but none was given (end of arguments) -- fail-closed rather than falling back to a default.`,
+    };
+  }
+  if (value === "") {
+    return {
+      ok: false,
+      reason: `quality-check: ${flag} was given an empty string as its value -- fail-closed rather than falling back to a default.`,
+    };
+  }
+  if (value.startsWith("--")) {
+    return {
+      ok: false,
+      reason: `quality-check: ${flag}'s value ${JSON.stringify(value)} looks like a flag, not a value (it was likely swallowed from the next argument) -- fail-closed rather than silently consuming it.`,
+    };
+  }
+  return { ok: true, value };
+}
+
 export function parseCliArgs(args) {
   let mode = "staged";
+  // QUALITY_BASE_SHA is read unconditionally here, but resolveChangedFiles's
+  // "staged" branch (mode's default, and the only mode `npm run
+  // quality:check` -- no args -- ever runs in) never reads `baseSha` at
+  // all; the env var only has any effect when `--mode ci` is also given.
+  // Setting QUALITY_BASE_SHA before a bare `npm run quality:check` does NOT
+  // make it behave like a CI run (HYK-393 2R correction of the 1R result
+  // file, which described this as "used instead of --base-sha").
   let baseSha = process.env.QUALITY_BASE_SHA;
   let cwd = repoRoot();
   for (let i = 0; i < args.length; i++) {
@@ -204,9 +251,12 @@ export function parseCliArgs(args) {
           `with an unknown flag rather than silently falling back to defaults.`,
       };
     }
-    if (flag === "--mode") mode = args[++i];
-    else if (flag === "--base-sha") baseSha = args[++i];
-    else if (flag === "--cwd") cwd = args[++i];
+    const read = readFlagValue(args, i, flag);
+    if (!read.ok) return read;
+    if (flag === "--mode") mode = read.value;
+    else if (flag === "--base-sha") baseSha = read.value;
+    else if (flag === "--cwd") cwd = read.value;
+    i++;
   }
   return { ok: true, mode, baseSha, cwd };
 }
