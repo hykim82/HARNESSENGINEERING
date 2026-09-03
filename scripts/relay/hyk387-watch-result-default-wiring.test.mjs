@@ -82,7 +82,7 @@ function writeCoderRound(dir, { taskId = "HYK-387-WR-T" } = {}) {
   );
   writeFileSync(
     join(dir, "coder.md"),
-    `task_id: ${taskId}\n\n>>> DONE: CODER @ ${formatKst(now - 10 * 60 * 1000, { seconds: true })}\n`,
+    `task_id: ${taskId}\n\n>>> DONE: CODER @ ${formatKst(now - 10 * 60 * 1000, { seconds: true })}\ndone_stamped_by: finalize-done\n`,
     "utf8",
   );
 }

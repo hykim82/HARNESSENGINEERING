@@ -253,7 +253,7 @@ test("(c)★ 소비 경로 실측: 급소 2 재현 입력을 실제 checkRelayHa
       );
       writeFileSync(
         join(harnessDir, "review.md"),
-        `task_id: HYK-9705-review-1\nfor: HYK-357-coder-1\nverdict: rejected\nrole: REVIEW-CODEX\nhead_commit: ${headCommit}\n\n>>> DONE: REVIEW-CODEX @ 2026-08-25 20:10:00 KST\n`,
+        `task_id: HYK-9705-review-1\nfor: HYK-357-coder-1\nverdict: rejected\nrole: REVIEW-CODEX\nhead_commit: ${headCommit}\n\n>>> DONE: REVIEW-CODEX @ 2026-08-25 20:10:00 KST\ndone_stamped_by: finalize-done\n`,
         "utf8",
       );
 

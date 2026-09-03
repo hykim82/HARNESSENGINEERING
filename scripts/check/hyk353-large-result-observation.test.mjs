@@ -44,7 +44,10 @@ test("HYK-353: 큰 결과 파일(실사고보다 뚜렷이 큰 합성 패딩)도
   // 실제 결과 파일을 흉내낸다. 특정 임계값을 겨냥하지 않는다(플랫폼마다
   // 실제 argv 한계가 다르다는 것이 이 라운드의 근거).
   const padding = "x".repeat(200_000);
-  const resultContent = `task_id: ${taskId}\n${padding}\n${doneLineRaw}\n`;
+  // HYK-418 §2-1: relay-handshake now rejects a well-formed DONE line
+  // with no finalize-done marker (fail-closed) -- carry the marker so
+  // this fixture reaches the large-payload observation axis unmasked.
+  const resultContent = `task_id: ${taskId}\n${padding}\n${doneLineRaw}\ndone_stamped_by: finalize-done\n`;
   writeFileSync(join(harnessDir, `${role}.md`), resultContent, "utf8");
 
   const now = kstToMs("2026-08-17 09:05:05");

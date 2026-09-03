@@ -84,7 +84,7 @@ function withFixture(
     if (withResult) {
       writeFileSync(
         join(harnessDir, "spike.md"),
-        "task_id: SPIKE-SYN-1\n>>> DONE: spike @ 2026-07-19 02:05:00 KST\n",
+        "task_id: SPIKE-SYN-1\n>>> DONE: spike @ 2026-07-19 02:05:00 KST\ndone_stamped_by: finalize-done\n",
         "utf8",
       );
     }

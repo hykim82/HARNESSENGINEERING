@@ -69,7 +69,11 @@ function writeFixture(dir, role, taskId, droppedAt, doneAt, taskBody = "") {
   );
   writeFileSync(
     join(dir, `${role}.md`),
-    `task_id: ${taskId}\n\n>>> DONE: ${role.toUpperCase()} @ ${doneAt}\n`,
+    // HYK-418 §2-1: relay-handshake now rejects a well-formed DONE line
+    // with no finalize-done marker (fail-closed) -- this file's own
+    // subject is task-archive mutation coverage, not the marker gate, so
+    // carry the marker to reach that axis unmasked.
+    `task_id: ${taskId}\n\n>>> DONE: ${role.toUpperCase()} @ ${doneAt}\ndone_stamped_by: finalize-done\n`,
     "utf8",
   );
 }

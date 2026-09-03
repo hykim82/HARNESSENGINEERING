@@ -132,7 +132,7 @@ function writeDoubleForFixture(harnessDir, { taskId, droppedAt, doneAt }) {
   // 것이 최종인지 결정할 수 없는 AMBIGUOUS-count 표지 줄 계약 위반.
   writeFileSync(
     join(harnessDir, "review.md"),
-    `task_id: ${taskId}\nfor: ${taskId}\nfor: ORCH\nverdict: rejected\nrole: REVIEW-CODEX\nhead_commit: ${headCommit}\n\n>>> DONE: REVIEW-CODEX @ ${doneAt} KST\n`,
+    `task_id: ${taskId}\nfor: ${taskId}\nfor: ORCH\nverdict: rejected\nrole: REVIEW-CODEX\nhead_commit: ${headCommit}\n\n>>> DONE: REVIEW-CODEX @ ${doneAt} KST\ndone_stamped_by: finalize-done\n`,
     "utf8",
   );
 }
@@ -147,7 +147,7 @@ function writeNormalRejectFixture(harnessDir, { taskId, droppedAt, doneAt }) {
   );
   writeFileSync(
     join(harnessDir, "review.md"),
-    `task_id: ${taskId}\nfor: ${taskId}\nverdict: rejected\nrole: REVIEW-CODEX\nhead_commit: ${headCommit}\n\n>>> DONE: REVIEW-CODEX @ ${doneAt} KST\n`,
+    `task_id: ${taskId}\nfor: ${taskId}\nverdict: rejected\nrole: REVIEW-CODEX\nhead_commit: ${headCommit}\n\n>>> DONE: REVIEW-CODEX @ ${doneAt} KST\ndone_stamped_by: finalize-done\n`,
     "utf8",
   );
 }
@@ -384,7 +384,7 @@ test("(e) role 대조군: CODER 핸드셰이크는 이 축과 무관하게 정�
       );
       writeFileSync(
         join(harnessDir, "coder.md"),
-        "task_id: HYK-9604-coder-1\n\n>>> DONE: CODER @ 2026-08-14 20:10:00 KST\n",
+        "task_id: HYK-9604-coder-1\n\n>>> DONE: CODER @ 2026-08-14 20:10:00 KST\ndone_stamped_by: finalize-done\n",
         "utf8",
       );
       const result = runRelayHandshakeCli(

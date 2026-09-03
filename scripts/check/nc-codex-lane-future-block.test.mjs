@@ -100,7 +100,11 @@ function writeCodexReviewFixture(dir, { droppedAt, doneAt }) {
   );
   writeFileSync(
     join(dir, "review.md"),
-    `task_id: HYK-9186-codex\nhead_commit: ${headCommit}\n\n>>> DONE: REVIEW-CODEX @ ${doneAt}\n`,
+    // HYK-418 §2-1: relay-handshake now rejects a well-formed DONE line
+    // with no finalize-done marker (fail-closed) -- this file's own
+    // subject is the future-skew block parity across engines, not the
+    // marker gate, so carry the marker to reach that axis unmasked.
+    `task_id: HYK-9186-codex\nhead_commit: ${headCommit}\n\n>>> DONE: REVIEW-CODEX @ ${doneAt}\ndone_stamped_by: finalize-done\n`,
     "utf8",
   );
 }
@@ -146,7 +150,7 @@ test("codex VERIFY lane, production CLI: same future-block fires for role=verify
     );
     writeFileSync(
       join(dir, "verify.md"),
-      "task_id: HYK-9186-codex-v\n\n>>> DONE: VERIFY-CODEX @ 2099-01-01 00:00:00 KST\n",
+      "task_id: HYK-9186-codex-v\n\n>>> DONE: VERIFY-CODEX @ 2099-01-01 00:00:00 KST\ndone_stamped_by: finalize-done\n",
       "utf8",
     );
     const res = runCli(RELAY_HANDSHAKE_CLI, ["verify", dir]);
