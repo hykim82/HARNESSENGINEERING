@@ -114,7 +114,7 @@ test("HYK-333 (4) 줄 중간의 '... BLOCKED: ...' (column 0 아님, >>> 없음)
     writeResult(
       dir,
       "coder",
-      "task_id: HYK-1\n\nstatus note: currently BLOCKED: not a real marker, just prose\n\n>>> DONE: CODER @ 2026-08-08 21:30:00 KST\n",
+      "task_id: HYK-1\n\nstatus note: currently BLOCKED: not a real marker, just prose\n\n>>> DONE: CODER @ 2026-08-08 21:30:00 KST\ndone_stamped_by: finalize-done\n",
     );
     const result = checkRelayHandshake({ role: "coder", harnessDir: dir });
     assert.equal(

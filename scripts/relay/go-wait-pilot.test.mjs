@@ -262,7 +262,7 @@ async function scenarioS1(tally) {
     // A finishes immediately; B is still pending when the loop starts, then finishes on tick 1.
     writeFileSync(
       join(dirA, "coder.md"),
-      "task_id: HYK-142-pilot-A\n\n>>> DONE: CODER @ 2026-07-14 21:05:00 KST\n",
+      "task_id: HYK-142-pilot-A\n\n>>> DONE: CODER @ 2026-07-14 21:05:00 KST\ndone_stamped_by: finalize-done\n",
       "utf8",
     );
 
@@ -288,7 +288,7 @@ async function scenarioS1(tally) {
             if (bTicks === 1)
               writeFileSync(
                 join(dirB, "review.md"),
-                `task_id: HYK-142-pilot-B\nhead_commit: ${headCommitB}\n\n>>> DONE: REVIEW @ 2026-07-14 21:06:00 KST\n`,
+                `task_id: HYK-142-pilot-B\nhead_commit: ${headCommitB}\n\n>>> DONE: REVIEW @ 2026-07-14 21:06:00 KST\ndone_stamped_by: finalize-done\n`,
                 "utf8",
               );
           },

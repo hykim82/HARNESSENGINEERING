@@ -866,7 +866,7 @@ test("E2E (§6 1-B + 완료조건5 receipt): real CLI, real fixture, future DONE
     );
     writeFileSync(
       join(dir, "coder.md"),
-      "task_id: HYK-9186-1\n\n>>> DONE: CODER @ 2099-01-01 00:00:00 KST\n",
+      "task_id: HYK-9186-1\n\n>>> DONE: CODER @ 2099-01-01 00:00:00 KST\ndone_stamped_by: finalize-done\n",
       "utf8",
     );
     const res = spawnSync(

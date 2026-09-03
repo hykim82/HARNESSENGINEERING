@@ -263,7 +263,10 @@ export function smokeRelayHandshake({ scriptPath }) {
     );
     writeFileSync(
       join(dir, "coder.md"),
-      "task_id: SMOKE-1\n>>> DONE: CODER @ 2026-07-13 01:00:00 KST\n",
+      // HYK-418 §2-1: relay-handshake now rejects a well-formed DONE line
+      // with no finalize-done marker (fail-closed) -- this "good" variant
+      // must reach genuine success, so it carries the marker.
+      "task_id: SMOKE-1\n>>> DONE: CODER @ 2026-07-13 01:00:00 KST\ndone_stamped_by: finalize-done\n",
       "utf8",
     ); // postdates drop, HYK-244: seconds required
     // HYK-344 3R (진짜 회귀 수리): 이 "good" 변형은 relay-handshake.mjs의

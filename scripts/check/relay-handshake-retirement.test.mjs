@@ -56,7 +56,7 @@ function fingerprintOf(content) {
 
 const TASK_HEADER = "task_id: HYK-1\ndropped_at: 2026-08-08 21:00 KST\n";
 const STALE_RESULT =
-  "task_id: HYK-1\n\n>>> DONE: CODER @ 2026-08-08 20:00:00 KST\n";
+  "task_id: HYK-1\n\n>>> DONE: CODER @ 2026-08-08 20:00:00 KST\ndone_stamped_by: finalize-done\n";
 
 function setupLedger(dir) {
   let ledger = createEmptyLedger("2026-08-08T00:00:00.000Z");

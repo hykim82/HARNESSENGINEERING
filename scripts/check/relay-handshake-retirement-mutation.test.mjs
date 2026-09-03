@@ -115,7 +115,7 @@ function stageIsolatedRelayHandshakeDeps(rootDir) {
 
 function writeEvidencedRetirementSample(harnessDir, taskId, droppedAt, doneAt) {
   const taskContent = `task_id: ${taskId}\ndropped_at: ${droppedAt}\n`;
-  const resultContent = `task_id: ${taskId}\n\n>>> DONE: CODER @ ${doneAt}\n`;
+  const resultContent = `task_id: ${taskId}\n\n>>> DONE: CODER @ ${doneAt}\ndone_stamped_by: finalize-done\n`;
   writeFileSync(join(harnessDir, "coder-task.md"), taskContent, "utf8");
   writeFileSync(join(harnessDir, "coder.md"), resultContent, "utf8");
   mkdirSync(join(harnessDir, "rounds"), { recursive: true });

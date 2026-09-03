@@ -62,7 +62,7 @@ test("NC-2 relay-handshake/attack: DONE timestamp predates dropped_at (stale res
     writeResult(
       dir,
       "coder",
-      "task_id: HYK-9001-x\n>>> DONE: stale replay @ 2026-07-31 09:59:00 KST\n",
+      "task_id: HYK-9001-x\n>>> DONE: stale replay @ 2026-07-31 09:59:00 KST\ndone_stamped_by: finalize-done\n",
     );
     const result = checkRelayHandshake({ role: "coder", harnessDir: dir });
     assert.equal(
@@ -87,7 +87,7 @@ test("NC-2 relay-handshake/fixed(HYK-186): DONE timestamp 10 years in the future
     writeResult(
       dir,
       "coder",
-      "task_id: HYK-9001-x\n>>> DONE: future replay @ 2036-07-31 10:05:00 KST\n",
+      "task_id: HYK-9001-x\n>>> DONE: future replay @ 2036-07-31 10:05:00 KST\ndone_stamped_by: finalize-done\n",
     );
     const result = checkRelayHandshake({ role: "coder", harnessDir: dir });
     assert.equal(
@@ -260,7 +260,7 @@ test("NC-2 relay-handshake/gap: self-reported DONE time is never cross-checked a
     writeResult(
       dir,
       "coder",
-      "task_id: HYK-9001-x\n>>> DONE: backdated but freshly written @ 2026-07-31 10:05:00 KST\n",
+      "task_id: HYK-9001-x\n>>> DONE: backdated but freshly written @ 2026-07-31 10:05:00 KST\ndone_stamped_by: finalize-done\n",
     );
     const result = checkRelayHandshake({ role: "coder", harnessDir: dir });
     assert.equal(

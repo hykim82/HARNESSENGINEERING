@@ -119,7 +119,7 @@ function writeReviewFixture(
   );
   writeFileSync(
     join(harnessDir, "review.md"),
-    `task_id: ${taskId}\nfor: ${taskId}\nverdict: ${verdict}\nrole: REVIEW-CODEX\n${headCommitLine}\n>>> DONE: REVIEW-CODEX @ ${doneAt} KST\n`,
+    `task_id: ${taskId}\nfor: ${taskId}\nverdict: ${verdict}\nrole: REVIEW-CODEX\n${headCommitLine}\n>>> DONE: REVIEW-CODEX @ ${doneAt} KST\ndone_stamped_by: finalize-done\n`,
     "utf8",
   );
 }

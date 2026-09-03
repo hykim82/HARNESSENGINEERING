@@ -40,7 +40,11 @@ function writeFixture(harnessDir, role, taskId, droppedAt, doneAt) {
   );
   writeFileSync(
     join(harnessDir, `${role}.md`),
-    `task_id: ${taskId}\n\n>>> DONE: ${role.toUpperCase()} @ ${doneAt}\n`,
+    // HYK-418 §2-1: relay-handshake now rejects a well-formed DONE line
+    // with no finalize-done marker (fail-closed) -- carry the marker so
+    // this shared fixture keeps exercising the completion-wire mechanics
+    // under test, not this promotion's rejection.
+    `task_id: ${taskId}\n\n>>> DONE: ${role.toUpperCase()} @ ${doneAt}\ndone_stamped_by: finalize-done\n`,
     "utf8",
   );
 }

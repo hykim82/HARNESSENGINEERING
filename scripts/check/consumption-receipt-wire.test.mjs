@@ -47,7 +47,11 @@ function writeFixture(
   );
   writeFileSync(
     join(harnessDir, `${role}.md`),
-    `task_id: ${taskId}\n\n>>> DONE: ${role.toUpperCase()} @ ${doneAt}\n`,
+    // HYK-418 §2-1: relay-handshake now rejects a well-formed DONE line
+    // with no finalize-done marker (fail-closed) -- this file's own
+    // subject is the consumption-receipt wiring, not the marker gate, so
+    // carry the marker to reach that axis unmasked.
+    `task_id: ${taskId}\n\n>>> DONE: ${role.toUpperCase()} @ ${doneAt}\ndone_stamped_by: finalize-done\n`,
     "utf8",
   );
 }
@@ -282,7 +286,7 @@ test("§4-4 (표적: REVIEW ledgerRecorded 실패): verdict 줄이 없는 REVIEW
     // attempted:true, ok:false로 떨어지는 REVIEW 계열 입력.
     writeFileSync(
       join(harnessDir, "review.md"),
-      `task_id: ${taskId}\nhead_commit: ${headCommit}\n\nno verdict line here\n\n>>> DONE: REVIEW @ 2026-08-01 09:12:41 KST\n`,
+      `task_id: ${taskId}\nhead_commit: ${headCommit}\n\nno verdict line here\n\n>>> DONE: REVIEW @ 2026-08-01 09:12:41 KST\ndone_stamped_by: finalize-done\n`,
       "utf8",
     );
 

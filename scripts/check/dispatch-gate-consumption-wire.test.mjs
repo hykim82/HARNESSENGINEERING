@@ -396,7 +396,7 @@ function produceRealReceiptForPriorRound(dir, prevTaskId) {
     // 맞춘다 -- 아니면 이 시험이 실물 소비 완료(ALLOW)가 아니라
     // PREDATES_RECEIPTS 면제(다른 사유의 ALLOW)로 우연히 통과해 버려
     // 헛시험이 된다.
-    `task_id: ${prevTaskId}\n\n>>> DONE: CODER @ 2026-08-14 09:10:05 KST\n`,
+    `task_id: ${prevTaskId}\n\n>>> DONE: CODER @ 2026-08-14 09:10:05 KST\ndone_stamped_by: finalize-done\n`,
     "utf8",
   );
   try {
@@ -526,7 +526,7 @@ test("HYK-269 §3 실물 사고 fixture: 소문자 role 인자('coder')로 소�
     );
     writeFileSync(
       join(dir, "coder.md"),
-      `task_id: ${prevTaskId}\n\n>>> DONE: CODER @ 2026-08-16 09:10:05 KST\n`,
+      `task_id: ${prevTaskId}\n\n>>> DONE: CODER @ 2026-08-16 09:10:05 KST\ndone_stamped_by: finalize-done\n`,
       "utf8",
     );
 

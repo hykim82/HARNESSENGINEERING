@@ -9,6 +9,14 @@ import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
 import { finalizeDone, FINALIZE_DONE_REASON } from "./finalize-done.mjs";
 import { observeDoneLine } from "../check/first-observation.mjs";
+// HYK-359 (2R ext, ORCH-53): never let an ambient ADMISSION_LEDGER_PATH/
+// ADMISSION_LOCK_PATH/DISPATCH_RECEIPT_PATH leaked from the invoking shell
+// (or, in the ambient-env sweep's case, deliberately floated by a prior
+// test in the same process) reach a relay-handshake.mjs child this file
+// spawns -- see admission-ledger-env-isolation.mjs's own header, and
+// relay-handshake.test.mjs's runCli for the same repo-wide idiom reused
+// here rather than reinvented.
+import { isolatedChildEnv } from "../check/admission-ledger-env-isolation.mjs";
 
 const CLI_PATH = join(
   dirname(fileURLToPath(import.meta.url)),
@@ -37,6 +45,9 @@ function runCli(args, opts = {}) {
   const res = spawnSync(process.execPath, [CLI_PATH, ...args], {
     encoding: "utf8",
     ...opts,
+    // HYK-359 (2R ext, ORCH-53): strip any ambient admission-ledger env
+    // before it reaches this child -- see the import above.
+    env: isolatedChildEnv(opts.env),
   });
   assert.equal(res.error, undefined);
   assert.notEqual(res.status, null);
@@ -87,11 +98,15 @@ test("finalizeDone: normal call (no callerSuppliedAt) writes a DONE line stamped
   });
 });
 
-test("finalizeDone: already has a DONE line -> refuses, never overwrites", () => {
+// HYK-418 §2-3: this is now the ALREADY_FINALIZED case -- well-formed AND
+// already marker-stamped (i.e. genuinely produced by finalize-done once
+// before). A well-formed-but-UNMARKED line is a DIFFERENT, now-replaceable
+// case -- see the next test.
+test("finalizeDone: already has a marked DONE line -> refuses, never overwrites", () => {
   withDir((dir) => {
     writeFileSync(
       join(dir, "coder.md"),
-      "task_id: HYK-1\n\n>>> DONE: CODER @ 2026-08-01 00:00:00 KST\n",
+      `task_id: HYK-1\n\n>>> DONE: CODER @ 2026-08-01 00:00:00 KST\n${"done_stamped_by: finalize-done"}\n`,
       "utf8",
     );
     const result = finalizeDone({ role: "coder", harnessDir: dir });
@@ -103,6 +118,42 @@ test("finalizeDone: already has a DONE line -> refuses, never overwrites", () =>
       /2026-08-01 00:00:00 KST/,
       "original line must survive untouched",
     );
+  });
+});
+
+// HYK-418 §2-3 (deadlock recovery path, coder-task.md §1 요구4): a
+// well-formed but UNMARKED DONE line (the exact shape relay-handshake.mjs
+// now rejects, HYK-418 §2-1) must be replaceable exactly once -- otherwise
+// promoting the consumer side to fail-closed creates a round with no way
+// out (HYK-423's real lockup).
+test("finalizeDone: well-formed but unmarked DONE line -> replaced once (REPLACED_UNMARKED), original preserved as superseded_done:", () => {
+  withDir((dir) => {
+    writeFileSync(
+      join(dir, "coder.md"),
+      "task_id: HYK-1\n\n>>> DONE: CODER @ 2026-08-01 00:00:00 KST\n",
+      "utf8",
+    );
+    const fixedMs = Date.parse("2026-08-09T05:00:00Z"); // 2026-08-09 14:00 KST
+    const result = finalizeDone({
+      role: "coder",
+      harnessDir: dir,
+      nowFn: () => fixedMs,
+    });
+    assert.equal(result.ok, true);
+    assert.equal(result.reasonCode, FINALIZE_DONE_REASON.REPLACED_UNMARKED);
+    const content = readFileSync(join(dir, "coder.md"), "utf8");
+    assert.match(
+      content,
+      /superseded_done: >>> DONE: CODER @ 2026-08-01 00:00:00 KST/,
+      "original unmarked line preserved verbatim as superseded_done:",
+    );
+    assert.match(content, />>> DONE: CODER @ 2026-08-09 14:00:00 KST/);
+    assert.match(content, /^done_stamped_by: finalize-done$/m);
+
+    // §2-1 (2회째 교체 금지) co-exists: a second call must NOT replace again.
+    const second = finalizeDone({ role: "coder", harnessDir: dir });
+    assert.equal(second.ok, false);
+    assert.equal(second.reasonCode, FINALIZE_DONE_REASON.ALREADY_REPLACED);
   });
 });
 
@@ -518,6 +569,16 @@ test("CLI: --at (or any --at=... form) is refused on sight, before any file is t
 function runHandshakeCli(args) {
   const res = spawnSync(process.execPath, [HANDSHAKE_CLI_PATH, ...args], {
     encoding: "utf8",
+    // HYK-359 (2R ext, ORCH-53): the fixtures this file spawns
+    // relay-handshake.mjs against never intend to exercise the admission-
+    // completion side effect -- an ambient ADMISSION_LEDGER_PATH (real
+    // shell leftover, or deliberately floated by hyk359-ambient-env-
+    // regression.test.mjs's own sweep) made checkRelayHandshake attempt a
+    // real completion against a ledger with no matching reservation
+    // (RESERVATION_NOT_FOUND), tripping HYK-344's exit 3 instead of the 0
+    // this file's own round-trip test expects -- not a marker-contract
+    // failure, an environment-isolation gap in the spawn itself.
+    env: isolatedChildEnv(),
   });
   assert.equal(res.error, undefined);
   assert.notEqual(res.status, null);
@@ -553,6 +614,60 @@ test("production entry point (검토자 실측 입력): relay-handshake CLI anno
     assert.match(
       content,
       /^superseded_done: >>> DONE: CODER @ 2026-99-99 23:19:01 KST$/m,
+    );
+  });
+});
+
+// HYK-418 §2-1/§2-3 (deadlock recovery, round-trip): promoting relay-
+// handshake.mjs's missing-marker check from a warning to a fail-closed
+// rejection (coder-task.md §1 요구4's whole point) would be a dead end on
+// its own -- finalize-done used to treat ANY format-valid DONE line as
+// ALREADY_FINALIZED, so a round stamped by hand had no way out. This locks
+// the full CLI-to-CLI recovery loop, same production-entry-point
+// convention as the test directly above: (1) relay-handshake CLI rejects
+// the unmarked DONE and names the exact recovery command, (2) finalize-
+// done CLI performs the one-time REPLACED_UNMARKED replace, (3) relay-
+// handshake CLI, run again against the SAME round, now accepts it.
+test("HYK-418 §2-3 production entry point: relay-handshake CLI rejects an unmarked well-formed DONE and names the recovery command; finalize-done CLI's one-time REPLACED_UNMARKED clears it; relay-handshake CLI then accepts the SAME round", () => {
+  withDir((dir) => {
+    writeFileSync(
+      join(dir, "coder-task.md"),
+      "task_id: HYK-1\ndropped_at: 2026-08-19 05:00 KST\n",
+      "utf8",
+    );
+    writeFileSync(
+      join(dir, "coder.md"),
+      "task_id: HYK-1\n\nbody\n\n>>> DONE: CODER @ 2026-08-19 05:10:00 KST\n",
+      "utf8",
+    );
+
+    const before = runHandshakeCli(["CODER", dir]);
+    assert.notEqual(
+      before.exit,
+      0,
+      "unmarked (hand-typed) DONE must not be consumed",
+    );
+    assert.match(before.stderr, /no finalize-done marker/);
+    assert.match(
+      before.stderr,
+      /node scripts\/relay\/finalize-done\.mjs CODER/,
+    );
+
+    const finalize = runCli(["coder", dir]);
+    assert.equal(finalize.exit, 0);
+    assert.match(finalize.stdout, /^REPLACED_UNMARKED: >>> DONE: CODER @ /);
+    const content = readFileSync(join(dir, "coder.md"), "utf8");
+    assert.match(
+      content,
+      /^superseded_done: >>> DONE: CODER @ 2026-08-19 05:10:00 KST$/m,
+    );
+    assert.match(content, /^done_stamped_by: finalize-done$/m);
+
+    const after = runHandshakeCli(["CODER", dir]);
+    assert.equal(
+      after.exit,
+      0,
+      "after the one-time machine re-stamp, the SAME round must now be consumable -- otherwise the promotion in coder-task.md §1 요구4 creates a dead end, not a recovery",
     );
   });
 });

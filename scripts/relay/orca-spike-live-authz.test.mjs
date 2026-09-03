@@ -56,7 +56,11 @@ function goodHandlers() {
 function writeResultFile(resultPath, taskId, doneAtKst) {
   writeFileSync(
     resultPath,
-    `task_id: ${taskId}\n\n>>> DONE: spike @ ${doneAtKst}\n`,
+    // HYK-418 §2-1: relay-handshake now rejects a well-formed DONE line
+    // with no finalize-done marker (fail-closed) -- this file's own
+    // subject is the orca-spike authz wiring, not the marker gate, so
+    // carry the marker to reach that axis unmasked.
+    `task_id: ${taskId}\n\n>>> DONE: spike @ ${doneAtKst}\ndone_stamped_by: finalize-done\n`,
     "utf8",
   );
 }
