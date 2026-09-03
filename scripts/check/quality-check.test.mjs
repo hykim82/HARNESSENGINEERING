@@ -4,7 +4,16 @@ import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { execFileSync } from "node:child_process";
-import { resolveChangedFiles, runQualityCheck } from "./quality-check.mjs";
+import {
+  resolveChangedFiles,
+  runQualityCheck,
+  parseCliArgs,
+} from "./quality-check.mjs";
+
+const QUALITY_CHECK_PATH = new URL(
+  "./quality-check.mjs",
+  import.meta.url,
+).pathname.replace(/^\/([A-Za-z]:)/, "$1");
 
 function git(cwd, args) {
   return execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
@@ -210,5 +219,86 @@ test("runQualityCheck: ci mode propagates the fail-closed reason from resolveCha
     });
     assert.equal(result.ok, false);
     assert.match(result.reason, /fail-closed/);
+  });
+});
+
+// --- HYK-393: unknown-flag rejection (fail-open ⓐ) ---
+
+test("parseCliArgs: an unrecognized flag (e.g. --base instead of --base-sha) -> ok:false, does not fall back to defaults", () => {
+  const result = parseCliArgs(["--base", "deadbeef"]);
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /unrecognized argument/);
+  assert.match(result.reason, /"--base"/);
+});
+
+test("parseCliArgs: known flags (--mode, --base-sha, --cwd) parse normally", () => {
+  const result = parseCliArgs(["--mode", "ci", "--base-sha", "abc123"]);
+  assert.equal(result.ok, true);
+  assert.equal(result.mode, "ci");
+  assert.equal(result.baseSha, "abc123");
+});
+
+test("CLI: an unrecognized flag exits non-zero instead of silently defaulting to an empty-scope green (HYK-270 1R regression)", () => {
+  withFixtureRepo((dir) => {
+    assert.throws(() => {
+      execFileSync(
+        process.execPath,
+        [QUALITY_CHECK_PATH, "--base", "deadbeef", "--cwd", dir],
+        { encoding: "utf8" },
+      );
+    }, /Command failed/);
+  });
+});
+
+test("CLI: the canonical CI invocation (--mode ci --base-sha <sha>) still exits 0 (no regression from the unknown-flag guard)", () => {
+  // Deliberately no new in-scope file committed after baseSha: this proves
+  // known-flag parsing still reaches runQualityCheck and exits 0 without
+  // spawning the real eslint/prettier binaries (which don't exist relative
+  // to this throwaway fixture repo's cwd) -- the "checked" (tool-invoking)
+  // path is covered separately via injected runTool above.
+  withFixtureRepo((dir, baseSha) => {
+    const out = execFileSync(
+      process.execPath,
+      [QUALITY_CHECK_PATH, "--mode", "ci", "--base-sha", baseSha, "--cwd", dir],
+      { encoding: "utf8" },
+    );
+    assert.match(out, /\[quality-check:empty\]/);
+  });
+});
+
+// --- HYK-393: "0 targets" mechanically distinguished from "checked and
+// passed" (fail-open ⓑ). Design choice: an empty scope still exits 0 (a
+// docs-only or out-of-scope-extension change must not become a red build --
+// see quality-check.mjs's KNOWN_FLAGS comment / coder.md §3 for the cost of
+// the alternative), but `result.scope` and the CLI's stdout prefix now tag
+// the two cases distinctly so a caller does not have to parse prose to tell
+// "nothing to check" apart from "checked and clean."
+
+test("runQualityCheck: empty scope is tagged scope:'empty', a real pass is tagged scope:'checked' -- mechanically distinguishable", () => {
+  withFixtureRepo((dir) => {
+    const empty = runQualityCheck({ cwd: dir, mode: "staged" });
+    assert.equal(empty.ok, true);
+    assert.equal(empty.scope, "empty");
+
+    writeFileSync(join(dir, "clean.mjs"), "export const ok = 1;\n", "utf8");
+    git(dir, ["add", "clean.mjs"]);
+    const checked = runQualityCheck({
+      cwd: dir,
+      mode: "staged",
+      runTool: () => ({ exitCode: 0, output: "" }),
+    });
+    assert.equal(checked.ok, true);
+    assert.equal(checked.scope, "checked");
+  });
+});
+
+test("CLI: empty-scope run prints a distinct [quality-check:empty] marker on stdout", () => {
+  withFixtureRepo((dir) => {
+    const out = execFileSync(
+      process.execPath,
+      [QUALITY_CHECK_PATH, "--mode", "staged", "--cwd", dir],
+      { encoding: "utf8" },
+    );
+    assert.match(out, /\[quality-check:empty\]/);
   });
 });

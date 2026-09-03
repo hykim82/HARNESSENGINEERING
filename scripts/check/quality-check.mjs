@@ -141,6 +141,7 @@ export function runQualityCheck({
   if (lintTargets.length === 0 && fmtTargets.length === 0) {
     return {
       ok: true,
+      scope: "empty",
       reason:
         "quality-check: no changed files in scope (.mjs/.js/.json/.md) -- vacuously green",
     };
@@ -174,8 +175,40 @@ export function runQualityCheck({
 
   return {
     ok: true,
+    scope: "checked",
     reason: `quality-check: ${lintTargets.length} file(s) linted, ${fmtTargets.length} file(s) format-checked -- all clean`,
   };
+}
+
+// Flags this CLI actually understands. An unrecognized flag (a typo such as
+// `--base` for `--base-sha`) must abort loudly rather than being silently
+// dropped -- a dropped `--base-sha` falls back to `mode: "staged"`'s
+// default, which diffs the index against HEAD and is empty outside a
+// pre-commit context, so the run prints a vacuous green instead of the
+// intended CI-mode result (HYK-270 1R, 2026-08-29: this exact typo produced
+// a "quality clean" both the author and reviewer accepted at face value).
+const KNOWN_FLAGS = new Set(["--mode", "--base-sha", "--cwd"]);
+
+export function parseCliArgs(args) {
+  let mode = "staged";
+  let baseSha = process.env.QUALITY_BASE_SHA;
+  let cwd = repoRoot();
+  for (let i = 0; i < args.length; i++) {
+    const flag = args[i];
+    if (!KNOWN_FLAGS.has(flag)) {
+      return {
+        ok: false,
+        reason:
+          `quality-check: unrecognized argument ${JSON.stringify(flag)} -- ` +
+          `known flags are ${[...KNOWN_FLAGS].join(", ")}. Refusing to run ` +
+          `with an unknown flag rather than silently falling back to defaults.`,
+      };
+    }
+    if (flag === "--mode") mode = args[++i];
+    else if (flag === "--base-sha") baseSha = args[++i];
+    else if (flag === "--cwd") cwd = args[++i];
+  }
+  return { ok: true, mode, baseSha, cwd };
 }
 
 const invokedDirectly =
@@ -184,18 +217,22 @@ const invokedDirectly =
     .replace(/\\/g, "/")
     .endsWith("scripts/check/quality-check.mjs");
 if (invokedDirectly) {
-  const args = process.argv.slice(2);
-  let mode = "staged";
-  let baseSha = process.env.QUALITY_BASE_SHA;
-  let cwd = repoRoot();
-  for (let i = 0; i < args.length; i++) {
-    if (args[i] === "--mode") mode = args[++i];
-    else if (args[i] === "--base-sha") baseSha = args[++i];
-    else if (args[i] === "--cwd") cwd = args[++i];
+  const parsed = parseCliArgs(process.argv.slice(2));
+  if (!parsed.ok) {
+    console.error(parsed.reason);
+    process.exit(1);
   }
+  const { mode, baseSha, cwd } = parsed;
   const result = runQualityCheck({ cwd, mode, baseSha });
   if (result.ok) {
-    console.log(result.reason);
+    // `scope: "empty"` (no files in the changed set were in-scope) and
+    // `scope: "checked"` (files were actually run through eslint/prettier)
+    // are both a green exit code -- CI must not turn an empty diff (e.g. a
+    // docs-only or out-of-scope-extension change) into a failure -- but the
+    // two are tagged distinctly on stdout so a log reader (human or script)
+    // can tell "nothing to check" apart from "checked and clean" without
+    // parsing prose.
+    console.log(`[quality-check:${result.scope}] ${result.reason}`);
     process.exit(0);
   } else {
     console.error(result.reason);
