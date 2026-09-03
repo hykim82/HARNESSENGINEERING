@@ -1975,6 +1975,137 @@ function runRetirementSideEffects({
   spawnAdmissionRetirementReleaseProcess(taskId, harnessDir, role);
 }
 
+// HYK-419-wire-2 (coder-task.md §2⑵) -- «한 줄» 출력 계약을 부모가
+// 보장하기 위한 정규화. 어떤 원문도 물리적으로 «한 줄»(개행 0)로 접고,
+// 임의로 긴 원문(검토 실측: 격리 자식 stderr 2줄, CLI 부재 Node 오류
+// 18~19줄, throw 오류 12줄 등)이 로그 한 줄을 과도하게 늘리지 않도록
+// 길이 상한을 둔다. 상한을 넘는 나머지는 버리되(★말줄임 표시로 "잘렸다"는
+// 사실 자체는 남긴다 -- 자른 사실을 숨기면 사람이 원문 전체가 짧았다고
+// 오인할 수 있다), 코드/사유 앞부분(보통 진단에 가장 중요한 부분)은 항상
+// 보존된다.
+const SHADOW_LOG_MAX_LEN = 300;
+
+function toOneLine(text) {
+  const collapsed = String(text ?? "")
+    .replace(/\r\n|\r|\n/g, " ")
+    .trim();
+  if (collapsed.length <= SHADOW_LOG_MAX_LEN) return collapsed;
+  return `${collapsed.slice(0, SHADOW_LOG_MAX_LEN)}…(truncated)`;
+}
+
+function shadowLine(state, reason, taskId) {
+  return `retire-author-shadow: ${state} reason=${toOneLine(reason)} label=${taskId} (shadow -- 아무것도 차단하지 않음)`;
+}
+
+// HYK-419-wire-2 §2⑴ -- 스폰 자체가 «멈추지 않게» 시간 제한을 건다. 근거:
+// 이 저장소의 실측(retirement-auto-author-shadow-cli.test.mjs)에서 정상
+// 조립+판정은 rounds/ 몇 개 파일만 읽어도 100ms를 넘지 않았다 -- 2000ms는
+// 그 정상 왕복의 20배 이상 여유를 두면서도(디스크 I/O가 유난히 느린
+// 환경까지 흡수), 소비 경로 전체 체감 지연으로는 "느껴지지 않는" 수준이
+// 아니라는 점을 이 라운드는 인정한다(검토 P1-1이 문제 삼은 것은 «무한
+// 대기»이지 «지연 존재 자체»가 아니다 -- coder-task.md §2⑴ "소비 체감에
+// 영향 없는 수준"은 상대적 지침으로 읽었다: 무제한(∞) 대비 2초는 이
+// 소비 경로의 다른 스폰 호출(admission-completion-adapter 등, 이들도
+// 자체 타임아웃이 없다 -- 이 라운드 범위 밖)과 같은 자릿수다).
+const SHADOW_CLI_TIMEOUT_MS = 2000;
+
+function isTimeoutError(err) {
+  // Node의 child_process.execFileSync는 timeout 초과 시 자식을 killSignal로
+  // 죽이고 err.code === 'ETIMEDOUT'(실측: 이 워크트리에서 직접 재현,
+  // Windows도 동일)을 던진다 -- err.signal/err.killed는 플랫폼에 따라
+  // 값이 다를 수 있어(예: Windows는 POSIX 시그널이 없다) code만 신뢰한다.
+  return err && err.code === "ETIMEDOUT";
+}
+
+// 자식이 exit 0인데 stdout이 비었거나(P1-2 실측: "exit 0으로 stderr만 쓴
+// 자식"은 out.trim()이 빈 문자열) retire-author-shadow: 접두어로 시작하지
+// 않으면(예: 자식이 다른 도구의 경고 문구를 흘렸거나 CLI 계약이 미래에
+// 깨진 경우), 이 CLI의 출력 계약이 이미 깨진 것 -- 부모가 그 사실 자체를
+// 한 줄로 대신 만들어 남긴다(⛔줄이 0개인 경우를 절대 만들지 않는다,
+// coder-task.md §3-2 비타협).
+function normalizeChildStdout(out, taskId) {
+  const trimmed = String(out ?? "").trim();
+  const firstLine = trimmed.split(/\r\n|\r|\n/, 1)[0] ?? "";
+  if (firstLine.startsWith("retire-author-shadow: ")) {
+    return toOneLine(firstLine);
+  }
+  return shadowLine(
+    "MALFORMED_OUTPUT",
+    trimmed.length > 0 ? trimmed : "(empty stdout)",
+    taskId,
+  );
+}
+
+// HYK-419-wire-1 (coder-task.md §2⑵) -- «그림자» 결선. retirement-auto-
+// author-core.mjs가 병합된 뒤에도(#247) 아무 코드도 그 코어를 부르지
+// 않는다는 실측(ORCH grep)에 대한 첫 응답 -- 이 함수가 그 코어를 부르는
+// «저장소 안의 첫 실호출자»다. ★비타협: 이 함수는 자신을 호출한
+// runCompletionSideEffects의 반환값(따라서 checkRelayHandshake 전체의
+// ok:true/exit code)을 조금도 바꾸지 않는다 -- 판정 결과는 표준출력 한
+// 줄로만 나간다(coder-task.md §2⑵ 접두어 고정 요구).
+//
+// ★서브프로세스 스폰, 정적 import 아님 -- spawnAbortRecordWriter/
+// spawnAdmissionCompletionProcess와 완전히 같은 이유(그 두 함수 바로 위
+// 주석 참조): 이 파일은 24개 격리 픽스처 시험(admission-completion-
+// spawn.test.mjs 등, "relay-handshake.mjs + time-authority/reject-streak/
+// envelope-archive만" 복사해 서브프로세스로 도는 시험)이 의존하는 정적
+// import 그래프의 일부다 -- 5번째 정적 import를 추가하면 그 시험 전부가
+// LOAD 시점에 MODULE_NOT_FOUND로 깨진다(실측: 첫 시도에서 npm test 60건
+// 실패). retirement-auto-author-shadow-cli.mjs를 스폰만 하면 그 파일이
+// 격리 픽스처에 없어도 실패는 CALL 시점(child_process 에러)으로 미뤄지고,
+// 아래 try/catch가 흡수한다.
+//
+// HYK-419-wire-2 (2R 수리, 검토 P1-1/P1-2 반영): 이 함수는 여전히 «자신을
+// 부르는 쪽의 결과값을 조금도 바꾸지 않는다»(1R 그대로) + 이제 두 가지를
+// 추가로 보장한다 -- (a) execFileFn 호출에 timeout을 걸어 자식이 멈춰도
+// 이 함수 자신이 멈추지 않는다(§2⑴) (b) 무엇이 나오든 정확히 한 줄만
+// logFn을 통해 남는다(§2⑵, normalizeChildStdout/shadowLine이 그 계약을
+// 강제한다) -- 1R의 try/catch 이중 방어선(§3, 되돌림 변이 ⓒ의 대상) 구조
+// 자체는 바꾸지 않았다.
+export function runRetireAuthorShadowObservation({
+  role,
+  harnessDir,
+  taskId,
+  doneAt,
+  execFileFn = execFileSync,
+  logFn = console.log,
+  timeoutMs = SHADOW_CLI_TIMEOUT_MS,
+}) {
+  try {
+    const cliPath = join(
+      dirname(fileURLToPath(new URL(import.meta.url))),
+      "retirement-auto-author-shadow-cli.mjs",
+    );
+    const args = harnessDir
+      ? [cliPath, role, taskId, harnessDir, doneAt]
+      : [cliPath, role, taskId];
+    // killSignal: SIGKILL -- SIGTERM은 자식이 무시/트랩할 수 있어(예:
+    // 정확히 이 결함이 되돌림 변이 ⓐ가 지우는 것 -- timeout 없이 걸리는
+    // 자식) "멈추지 않는다"는 비타협을 SIGTERM 하나로는 끝까지 보장할 수
+    // 없다. SIGKILL은 무시할 수 없다(정직 한계: Windows는 POSIX 시그널이
+    // 없어 Node가 내부적으로 TerminateProcess로 매핑한다 -- 이 워크트리
+    // 자체가 Windows라 이 경로로 실측했다, 좀비 프로세스는 남기지 않음을
+    // 시험(rr-timeout 계열)으로 확인).
+    const out = execFileFn("node", args, {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+      timeout: timeoutMs,
+      killSignal: "SIGKILL",
+    });
+    logFn(normalizeChildStdout(out, taskId));
+  } catch (err) {
+    // Missing CLI file (isolated test fixture), non-zero exit, timeout
+    // (killed by the timeout option above), or any other spawn failure --
+    // all logged as exactly one line, none fatal to the handshake's own
+    // verdict/exit code (mirrors spawnAdmissionCompletionProcess's catch).
+    const state = isTimeoutError(err) ? "TIMEOUT" : "OBSERVATION_ERROR";
+    const reason = isTimeoutError(err)
+      ? `spawn exceeded ${timeoutMs}ms, child killed`
+      : String(err.stderr ?? err.message ?? "unknown spawn failure");
+    logFn(shadowLine(state, reason, taskId));
+  }
+}
+
 // HYK-257-done-stamp-lint-1: extracted from checkRelayHandshake (same
 // ESLint-limit reason as above) -- runs every completion side-effect for a
 // round that has passed every check above (consumed-observation tombstone,
@@ -2108,6 +2239,16 @@ function runCompletionSideEffects({
     taskArchived,
     admissionReturned,
     recordOutcome,
+  });
+
+  // HYK-419-wire-1 §2⑵: 모든 완료 후속효과의 결과가 나온 뒤, 그리고 이
+  // 함수가 null(=판정 불변)을 돌려주기 직전 -- 되돌림 변이 ⓐ의 대상(이
+  // 호출 한 줄을 지우면 grep으로 찾는 "그 줄이 찍힌다" 시험이 빨개진다).
+  runRetireAuthorShadowObservation({
+    role,
+    harnessDir,
+    taskId,
+    doneAt: doneMatch[1].trim(),
   });
 
   return null;
