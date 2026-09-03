@@ -73,6 +73,47 @@ function cleanupLinkedWorktreeFixture({ mainRepoDir, workerDir }) {
   rmSync(mainRepoDir, { recursive: true, force: true });
 }
 
+// HYK-412 2R (검토 P1-1 반려 픽스처와 같은 모양, coder-task.md §9 원문의
+// 재현 명령 그대로) -- bare 저장소(`git init --bare`) 하나를 만들고, 그
+// bare에 커밋 하나를 올린 뒤(별도 seed 워킹카피에서 커밋 -> push, bare
+// 저장소 자신은 워킹트리가 없어 직접 커밋할 수 없다), 그 bare에서
+// `git worktree add`로 링크드 워크트리를 뽑는다. 이 워크트리의 `.git`
+// 파일은 `gitdir: <bare>/worktrees/<이름>`을 가리킨다(일반 링크드
+// 워크트리의 `<메인>/.git/worktrees/<이름>`과 달리 `.git` 세그먼트가
+// 없다 -- 검토자가 실측한 바로 그 모양).
+function makeBareRepoLinkedWorktreeFixture(prefix) {
+  const bareHolderDir = tmpDir(`${prefix}-bare-holder-`);
+  const bareDir = join(bareHolderDir, `${prefix}-bare.git`);
+  execFileSync("git", ["init", "-q", "--bare", bareDir]);
+  const seedDir = tmpDir(`${prefix}-seed-`);
+  execFileSync("git", ["init", "-q", "-b", "main", seedDir]);
+  execFileSync("git", ["commit", "-q", "--allow-empty", "-m", "init"], {
+    cwd: seedDir,
+    env: {
+      ...process.env,
+      GIT_AUTHOR_NAME: "t",
+      GIT_AUTHOR_EMAIL: "t@t.test",
+      GIT_COMMITTER_NAME: "t",
+      GIT_COMMITTER_EMAIL: "t@t.test",
+    },
+  });
+  execFileSync("git", ["remote", "add", "origin", bareDir], { cwd: seedDir });
+  execFileSync("git", ["push", "-q", "origin", "main"], { cwd: seedDir });
+  const workerDir = join(tmpDir(`${prefix}-holder-`), "worker");
+  execFileSync("git", ["worktree", "add", "-q", workerDir, "main"], {
+    cwd: bareDir,
+  });
+  const harnessDir = join(workerDir, ".harness");
+  mkdirSync(join(harnessDir, "rounds"), { recursive: true });
+  return { bareDir, seedDir, workerDir, harnessDir };
+}
+
+function cleanupBareRepoLinkedWorktreeFixture({ bareDir, seedDir, workerDir }) {
+  rmSync(dirname(workerDir), { recursive: true, force: true });
+  rmSync(dirname(bareDir), { recursive: true, force: true });
+  rmSync(seedDir, { recursive: true, force: true });
+}
+
 function withoutShadowEnv(fn) {
   const prior = {
     ADMISSION_LEDGER_PATH: process.env.ADMISSION_LEDGER_PATH,
@@ -336,6 +377,150 @@ test("HYK-412: env가 있으면 여전히 최우선(포인터 파일보다 env�
       `env가 있으면 그 값으로 조립이 성공해야 한다(잘못된 포인터 파일 값을 쓰면 실패한다), 실제: ${line}`,
     );
     rmSync(wrongLedgerDir, { recursive: true, force: true });
+  } finally {
+    rmSync(sideDir, { recursive: true, force: true });
+    cleanupLinkedWorktreeFixture(fixture);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// HYK-412 2R (검토 P1-1 반려 -- coder-task.md §9 원문) -- bare 저장소 기반
+// 링크드 워크트리 배치를 격리 픽스처로 직접 구동한다. 검토자가 실측한
+// 것과 같은 모양(`gitdir: <bare>/worktrees/<이름>`, `.git` 세그먼트
+// 없음)을 재현하고, 완료조건 2ⓐ(판정 도달)를 시험으로 고정한다.
+// ---------------------------------------------------------------------------
+
+test("HYK-412 2R: bare 저장소 기반 링크드 워크트리에서도 env 없이 JUDGED에 도달한다(P1-1 수리)", () => {
+  const fixture = makeBareRepoLinkedWorktreeFixture("hyk412-bare");
+  const sideDir = tmpDir("hyk412-bare-side-");
+  try {
+    // 검토자 실측 모양 재확인: .git 파일이 "<bare>/worktrees/<이름>"을
+    // 가리키고, 그 경로에 ".git" 세그먼트가 없다.
+    const dotGit = execFileSync(
+      "git",
+      ["rev-parse", "--path-format=absolute", "--git-dir"],
+      {
+        cwd: fixture.workerDir,
+        encoding: "utf8",
+      },
+    ).trim();
+    assert.match(
+      dotGit,
+      /worktrees[\\/][^\\/]+$/,
+      "픽스처가 실제로 링크드 워크트리 모양인지 사전 확인",
+    );
+
+    const ledgerPath = join(sideDir, "ledger.json");
+    const receiptPath = join(sideDir, "receipts.jsonl");
+    writeLedgerFixture(ledgerPath);
+    writeFileSync(receiptPath, "", "utf8");
+    mkdirSync(join(fixture.bareDir, ".harness"), { recursive: true });
+    writeFileSync(
+      join(fixture.bareDir, ".harness", "admission-ledger-path.json"),
+      JSON.stringify({ ledgerPath }),
+      "utf8",
+    );
+    writeFileSync(
+      join(fixture.harnessDir, "dispatch-receipt-path.txt"),
+      receiptPath,
+      "utf8",
+    );
+
+    const line = withoutShadowEnv(() =>
+      buildShadowLine({
+        role: "coder",
+        taskId: "HYK-412-BARE-1",
+        harnessDir: fixture.harnessDir,
+        doneAt: "2026-09-03 20:00:00 KST",
+      }),
+    );
+    assert.match(
+      line,
+      /^retire-author-shadow: JUDGED reason=\S+ label=HYK-412-BARE-1 \(shadow -- 아무것도 차단하지 않음\)$/,
+      `bare 저장소 기반 링크드 워크트리에서도 조립이 판정까지 도달해야 한다, 실제: ${line}`,
+    );
+  } finally {
+    rmSync(sideDir, { recursive: true, force: true });
+    cleanupBareRepoLinkedWorktreeFixture(fixture);
+  }
+});
+
+test("HYK-412 2R: bare 배치에서도 포인터 파일이 진짜 없으면 여전히 LEDGER_PATH_UNRESOLVABLE(경계 명시, fail-closed 유지)", () => {
+  const fixture = makeBareRepoLinkedWorktreeFixture("hyk412-bare-unresolvable");
+  try {
+    const line = withoutShadowEnv(() =>
+      buildShadowLine({
+        role: "coder",
+        taskId: "HYK-412-BARE-UNRESOLVABLE-1",
+        harnessDir: fixture.harnessDir,
+        doneAt: "2026-09-03 20:00:00 KST",
+      }),
+    );
+    assert.match(
+      line,
+      /^retire-author-shadow: ASSEMBLE_FAILED reason=LEDGER_PATH_UNRESOLVABLE label=HYK-412-BARE-UNRESOLVABLE-1/,
+      `bare 배치라도 포인터 파일 자체가 없으면 "경로를 못 찾음"이어야 한다, 실제: ${line}`,
+    );
+  } finally {
+    cleanupBareRepoLinkedWorktreeFixture(fixture);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// HYK-412 2R -- 다른 CWD(검토자 실측: cwd=C:/Windows/Temp)에서도 판정에
+// 도달하는지 CLI 서브프로세스로 직접 구동한다(1R 성과 불변 확인, 완료
+// 조건 3). 이 CLI는 harnessDir을 인자로 받을 뿐 process.cwd()를 참조하지
+// 않는다 -- os.tmpdir()을 "관련 없는 다른 cwd"로 써서 이식성 있게
+// 재현한다(검토자의 C:/Windows/Temp와 같은 성질: 픽스처 트리 밖의,
+// 항상 존재가 보장된 디렉터리).
+// ---------------------------------------------------------------------------
+
+test("HYK-412 2R: 다른 CWD(os.tmpdir() 자신)에서 CLI를 실행해도 JUDGED에 도달한다(1R 성과 불변)", () => {
+  const fixture = makeLinkedWorktreeFixture("hyk412-other-cwd");
+  const sideDir = tmpDir("hyk412-other-cwd-side-");
+  try {
+    const ledgerPath = join(sideDir, "ledger.json");
+    const receiptPath = join(sideDir, "receipts.jsonl");
+    writeLedgerFixture(ledgerPath);
+    writeFileSync(receiptPath, "", "utf8");
+    mkdirSync(join(fixture.mainRepoDir, ".harness"), { recursive: true });
+    writeFileSync(
+      join(fixture.mainRepoDir, ".harness", "admission-ledger-path.json"),
+      JSON.stringify({ ledgerPath }),
+      "utf8",
+    );
+    writeFileSync(
+      join(fixture.harnessDir, "dispatch-receipt-path.txt"),
+      receiptPath,
+      "utf8",
+    );
+
+    const res = spawnSync(
+      process.execPath,
+      [
+        CLI_PATH,
+        "coder",
+        "HYK-412-OTHER-CWD-1",
+        fixture.harnessDir,
+        "2026-09-03 20:00:00 KST",
+      ],
+      {
+        encoding: "utf8",
+        cwd: tmpdir(),
+        env: (() => {
+          const env = { ...process.env };
+          delete env.ADMISSION_LEDGER_PATH;
+          delete env.DISPATCH_RECEIPT_PATH;
+          return env;
+        })(),
+      },
+    );
+    assert.equal(res.status, 0, `stderr: ${res.stderr}`);
+    assert.match(
+      res.stdout.trim(),
+      /^retire-author-shadow: JUDGED reason=\S+ label=HYK-412-OTHER-CWD-1 \(shadow -- 아무것도 차단하지 않음\)$/,
+      `다른 cwd에서도 판정까지 도달해야 한다, 실제: ${res.stdout}`,
+    );
   } finally {
     rmSync(sideDir, { recursive: true, force: true });
     cleanupLinkedWorktreeFixture(fixture);

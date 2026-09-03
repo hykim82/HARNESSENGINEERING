@@ -37,11 +37,22 @@ import { PERSISTENT_LEDGER_POINTER_FILENAME } from "./ledger-pointer-shared.mjs"
 // 매번 undefined -> LEDGER_UNREADABLE로 죽었다(실측 5건, coder-task.md
 // §1). 아래 두 resolve* 함수는 admission-completion-adapter.mjs의
 // resolvePersistentLedgerPaths()(포인터 파일 `.harness/admission-ledger-
-// path.json`, mainRepoRoot 기준 -- 모든 워크트리에서 같은 파일로
-// 수렴한다)와 relay-handshake.mjs 자신의 resolveDispatchLedgerPath()
-// (포인터 파일 `<harnessDir>/dispatch-receipt-path.txt`)와 **같은 개념**
-// 이다 -- coder-task.md §2⑵ "이미 있는 관용구를 재사용하라, 새 방식을
-// 발명하지 마라"에 따라 새로 지어내지 않았다. relay-handshake.mjs를
+// path.json`, mainRepoRoot 기준)와 relay-handshake.mjs 자신의
+// resolveDispatchLedgerPath()(포인터 파일 `<harnessDir>/dispatch-receipt-
+// path.txt`)와 **같은 개념**이다 -- coder-task.md §2⑵ "이미 있는 관용구를
+// 재사용하라, 새 방식을 발명하지 마라"에 따라 새로 지어내지 않았다.
+// ★2R 문면 정정(coder-task.md §2⑶, 2R 검토 P1-1이 지적한 실사고): 1R은
+// 여기서 mainRepoRoot가 "모든 워크트리에서 같은 파일로 수렴한다"고
+// 적었었는데, 그 문장은 1R이 실제로 검증한 것보다 넓었다(bare 저장소
+// 기반 워크트리에서는 수렴하지 않았다, 아래 §HYK-412 2R P1-1 참조 --
+// 지금은 2R 수리로 그 배치도 수렴하지만, 이 CLI가 "지원한다"고 말할 수
+// 있는 배치는 여전히 **직접 격리 픽스처로 실측한 것만**이다: 일반 링크드
+// 워크트리 · bare 저장소 기반 링크드 워크트리 · 메인 저장소 자신(비-
+// 워크트리, `.git`이 디렉터리인 경우). retirement-auto-author-shadow-
+// cli.test.mjs가 이 세 모양 + 다른 CWD 축을 직접 구동해 고정한다 -- 그
+// 밖의 모양(예: git이 내부 포맷을 바꾸거나, `.git` 파일이 예상 밖 형식일
+// 때)은 지원 선언 밖이며, 그때는 §정직 한계에 적은 대로 안전측
+// (LEDGER_PATH_UNRESOLVABLE)으로 접힌다. relay-handshake.mjs를
 // 정적 import하지 않고 로직만 재현한 이유는 이 파일 자신의 헤더(위)가
 // 이미 밝힌 것과 같다: 이 CLI가 relay-handshake.mjs의 전체 import
 // 그래프(reject-streak/envelope-archive/time-authority 등)에 묶이면,
@@ -57,15 +68,50 @@ import { PERSISTENT_LEDGER_POINTER_FILENAME } from "./ledger-pointer-shared.mjs"
 // 자신도 이미 이 CLI를 스폰한다, 3단 프로세스), harnessDir을 cwd로 git을
 // 또 스폰하면 Windows에서 그 디렉터리가 곧이어 rmSync되는 시험 20개가
 // EPERM(디렉터리 사용 중)으로 무더기 실패했다 -- npm test 재실행 실측,
-// 이 라운드 자신의 1차 커밋에서 발견. git 서브프로세스가 필요한 진짜
-// 이유는 "링크드 워크트리의 .git이 디렉터리가 아니라 상위 저장소를
-// 가리키는 포인터 파일"이라는 사실 하나뿐이고, 그 사실은 git 바이너리 없이
+// 1R 자신의 1차 커밋에서 발견. git 서브프로세스가 필요한 진짜 이유는
+// "링크드 워크트리의 .git이 디렉터리가 아니라 상위 저장소를 가리키는
+// 포인터 파일"이라는 사실 하나뿐이고, 그 사실은 git 바이너리 없이
 // 파일시스템만으로도 그대로 읽을 수 있다(git 자신의 온디스크 규약 --
 // `.git`가 파일이면 그 내용이 정확히 `gitdir: <메인>/.git/worktrees/
 // <이름>`이다, 이 워크트리 자신의 `.git` 파일로 직접 확인). 아래는 그
 // 파싱을 재현한 것 -- "git-common-dir을 구한다"는 목적은 그대로이고
 // (같은 관용구, 다른 실행 수단), 서브프로세스 스폰 0이라 위 회귀 자체가
 // 구조적으로 없다.
+//
+// HYK-412 2R P1-1(검토 반려, coder-task.md §1): bare 저장소 기반 링크드
+// 워크트리에서 `.git` 파일은 `gitdir: <bare>/worktrees/<이름>`을
+// 가리킨다(일반 저장소의 `<메인>/.git/worktrees/<이름>`과 달리 `.git`
+// 세그먼트가 없다 -- bare 저장소 디렉터리 자신이 곧 git 디렉터리이기
+// 때문). 1R의 fs 구현은 `/worktrees/<이름>` 접미어를 제거한 뒤 **무조건
+// `dirname()`을 한 번 더** 적용했는데, 이건 "메인 저장소는 항상
+// `<루트>/.git/worktrees/<이름>` 모양이다"를 암묵적으로 가정한 것이고
+// bare에서는 거짓이다(그 경우 접미어 제거 결과가 이미 저장소 루트
+// 자신이다, 한 단계 더 올라가면 그 부모로 새 버린다).
+//
+// ★§1⑴-b 실측 판정(coder-task.md가 요구): 이 버그는 "서브프로세스를
+// 버리고 fs 파싱으로 바꾼 결정" 자체의 결과가 **아니다** -- 직접 확인:
+// admission-completion-adapter.mjs가 실제로 쓰는 git-서브프로세스 버전
+// (`git rev-parse --git-common-dir`의 결과 문자열에 정규식
+// `/[\\/]\.git$/`으로 "끝이 정확히 '/.git'이면만" 조건부로 그 접미어를
+// 벗기는 방식)을 이 워크트리에서 직접 재현해 같은 bare 픽스처에 돌려
+//봤더니 **처음부터 정확한 bare 루트를 그대로 돌려줬다**(bare 디렉터리
+// 경로는 보통 "*.git"으로 끝나긴 해도 그 앞에 경로 구분자가 오는 위치가
+// 아니라 정규식이 매치하지 않는다 -- 실측: `.../bare-repo.git`이 그대로
+// 나옴, 벗겨지지 않음). 즉 원래 관용구는 "무조건 한 단계 위로"가 아니라
+// "정확히 '/.git'로 끝날 때만 벗긴다"는 **조건부** 로직이었는데, 1R의 fs
+// 포팅 과정에서 그 조건을 놓치고 무조건 `dirname()`으로 옮겨 적은 것이
+// 이번 회귀의 실제 원인이다(내 포팅 실수, EPERM 회피 결정과는 무관).
+//
+// 수리: 조건부 스트립을 되살리되, dispatch-gate-decision.mjs의
+// resolveRepoRoot가 이미 정확한 신호로 쓰는 "이 디렉터리가 bare
+// 저장소인가"를 **그 파일과 같은 개념**(`--is-bare-repository`가 내부적
+// 으로 읽는 신호, git의 config 파일 `core.bare`)으로 판별한다 -- 정규식
+// 접미어 매칭(admission-completion-adapter.mjs 버전)보다 더 정확하다
+// (bare 저장소 디렉터리 이름이 우연히 정확히 ".git"으로 끝나는 극단
+// 사례까지 올바르게 구별한다, §정직 한계 참조). 여기서도 서브프로세스는
+// 스폰하지 않는다 -- `config` 파일 자체를 읽어 `bare = true` 줄이
+// 있는지만 본다(git이 `--is-bare-repository`를 판정할 때 참조하는 바로
+// 그 값).
 function isNonEmptyString(v) {
   return typeof v === "string" && v.length > 0;
 }
@@ -82,6 +128,21 @@ function findGitEntry(startDir) {
 }
 
 const WORKTREE_GITDIR_SUFFIX_RE = /[\\/]worktrees[\\/][^\\/]+[\\/]?$/;
+const BARE_CONFIG_RE = /^[ \t]*bare[ \t]*=[ \t]*true[ \t]*$/im;
+
+// gitDir이 bare 저장소 자신인지 -- git이 `core.bare`를 판정하는 것과 같은
+// 신호(그 디렉터리의 `config` 파일)를 서브프로세스 없이 직접 읽는다.
+// 확인 불가(파일 없음/못 읽음)면 null("모른다") -- 호출자는 이를 "아니다"
+// 취급해 기존 non-bare 경로(무조건 dirname 한 단계)로 안전하게 접는다
+// (1R이 이미 하던 동작과 동일, 새 실패 모드를 얹지 않는다).
+function isBareGitDirectory(gitDir) {
+  try {
+    const configText = readFileSync(join(gitDir, "config"), "utf8");
+    return BARE_CONFIG_RE.test(configText);
+  } catch {
+    return null;
+  }
+}
 
 function mainRepoRoot(startDir) {
   if (!isNonEmptyString(startDir)) return startDir;
@@ -98,7 +159,8 @@ function mainRepoRoot(startDir) {
     return dirname(gitPath);
   }
   // 링크드 워크트리 -- .git은 "gitdir: <메인>/.git/worktrees/<이름>"
-  // 한 줄짜리 파일이다(git 자신의 온디스크 규약).
+  // (일반) 또는 "gitdir: <bare>/worktrees/<이름>"(bare) 한 줄짜리 파일
+  // 이다(git 자신의 온디스크 규약).
   try {
     const raw = readFileSync(gitPath, "utf8").trim();
     const m = raw.match(/^gitdir:\s*(.+)$/);
@@ -106,7 +168,10 @@ function mainRepoRoot(startDir) {
     const worktreeGitDir = m[1].trim();
     if (!WORKTREE_GITDIR_SUFFIX_RE.test(worktreeGitDir)) return startDir;
     const mainGitDir = worktreeGitDir.replace(WORKTREE_GITDIR_SUFFIX_RE, "");
-    return dirname(mainGitDir);
+    // bare면 mainGitDir 자신이 이미 저장소 루트(포인터 파일이 그 아래
+    // .harness/에 있다) -- 한 단계 더 올라가면 안 된다. non-bare(또는
+    // 판별 불가)면 기존 그대로 그 부모가 루트(mainGitDir은 "<루트>/.git").
+    return isBareGitDirectory(mainGitDir) ? mainGitDir : dirname(mainGitDir);
   } catch {
     return startDir;
   }
