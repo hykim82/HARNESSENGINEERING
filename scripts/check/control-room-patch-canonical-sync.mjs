@@ -282,6 +282,33 @@ export const MENTION_BASELINE = Object.freeze([
     reason:
       "patch doc with units -- already checked by judgeDocAgainstPinnedFunction (doc-vs-copies), not itself a standalone copy",
   },
+  {
+    relPath: "docs/control-room-patches/HYK-422-dispatch-run-boundary.md",
+    role: "reference",
+    reason:
+      "patch doc whose own control-room-patch-unit targets Invoke-Dispatch (a different function) -- mentions Invoke-SeatProofGate only in its own §모양 고정 scope-investigation prose, quoting seat-proof-wrapper-shape.mjs/control-room-patch-canonical-sync.mjs to show that axis is untouched by this patch; already checked by judgeDocAgainstPinnedFunction (doc-vs-copies sweep, resolves OK_UNCHANGED since the patch never edits Invoke-SeatProofGate's body), not itself a standalone copy",
+  },
+  {
+    relPath:
+      "scripts/check/control-room-patch-apply-hyk422-canonical-scope.test.mjs",
+    role: "reference",
+    reason:
+      "test file for HYK-422's own §모양 고정 investigation -- mentions Invoke-SeatProofGate in comments/module header describing why that axis is untouched, does not embed a body copy",
+  },
+  {
+    relPath:
+      "scripts/check/fixtures/control-room-dispatch-worker-2026-09-03-hyk422-dispatch-run-boundary-before.ps1.txt",
+    role: "reference",
+    reason:
+      "frozen full-file snapshot for HYK-422's own patch-apply byte-identity tests (target function is Invoke-Dispatch, not Invoke-SeatProofGate) -- incidentally contains the live Invoke-SeatProofGate body verbatim because it is a whole-file copy, but no test compares that portion against canonical",
+  },
+  {
+    relPath:
+      "scripts/check/fixtures/control-room-dispatch-worker-2026-09-03-hyk422-dispatch-run-boundary-applied.ps1.txt",
+    role: "reference",
+    reason:
+      "frozen full-file snapshot for HYK-422's own patch-apply byte-identity tests (target function is Invoke-Dispatch, not Invoke-SeatProofGate) -- incidentally contains the live Invoke-SeatProofGate body verbatim because it is a whole-file copy, but no test compares that portion against canonical",
+  },
   // -- frozen historical / unrelated-patch fixtures: confirmed (this
   // round, by running every seat-proof-wrapper-canonical-comparing test
   // file and grepping for "seat-proof-wrapper-canonical" importers) that
