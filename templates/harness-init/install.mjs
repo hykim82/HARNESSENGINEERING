@@ -773,8 +773,12 @@ Repo: ${params.githubRepo}
 // synthetic-install repro: the installed copy still carried this repo's
 // own path because `content.replace` found and rewrote the FIRST match,
 // which was the comment, not the declaration).
+// No longer captures the quotes -- HYK-309 2R (REVIEW P1): the value is
+// now re-embedded via JSON.stringify (see substitutePmGuardControlRoom),
+// which already produces its own quoted, escaped literal, so nothing here
+// needs to reuse pieces of the original quoted string.
 const PM_GUARD_CONTROL_ROOM_LINE_RE =
-  /^(export const CONTROL_ROOM_ROOT = ")([^"]*)(";)$/m;
+  /^export const CONTROL_ROOM_ROOT = "[^"]*";$/m;
 
 // team-local has no control room (validateParams never requires
 // controlRoomPath for it). isControlRoomPath does
@@ -800,7 +804,30 @@ function substitutePmGuardControlRoom(content, params) {
     params.profile === "solo-full"
       ? toPosixPath(params.controlRoomPath)
       : TEAM_LOCAL_CONTROL_ROOM_SENTINEL;
-  return content.replace(PM_GUARD_CONTROL_ROOM_LINE_RE, `$1${value}$3`);
+  // HYK-309 2R (REVIEW P1, install.mjs:803 pre-fix): a plain string
+  // replacement (`` `$1${value}$3` ``) is re-scanned by String.replace for
+  // ITS OWN special patterns ($$, $&, $`, $', $<n>) -- a controlRoomPath
+  // containing e.g. "$&" got the ENTIRE MATCHED LINE spliced into the
+  // installed value instead of the literal characters "$&" (reviewer's
+  // exact repro: `control-$&-room` -> `control-export const
+  // CONTROL_ROOM_ROOT = "...";-room`). A replacer FUNCTION's return value
+  // is inserted verbatim, with no such reinterpretation -- switching to one
+  // removes the entire bug class instead of escaping just "$&".
+  //
+  // Separately, and more severely: the value also has to survive being
+  // embedded inside a JS double-quoted string literal. A raw `"` in the
+  // value would terminate the string literal early and splice arbitrary
+  // trailing text in as JS source (a real code-injection shape, not just a
+  // display glitch); a raw `\` could form an unintended escape sequence or
+  // swallow the closing quote; a raw newline is a SyntaxError inside a
+  // plain (non-template) string literal. JSON.stringify's output is a
+  // spec-valid JS string literal (its escaping rules are a strict subset of
+  // JS's), so it closes all three at once instead of hand-escaping each.
+  const literal = JSON.stringify(value);
+  return content.replace(
+    PM_GUARD_CONTROL_ROOM_LINE_RE,
+    () => `export const CONTROL_ROOM_ROOT = ${literal};`,
+  );
 }
 
 function installPmGuard(params, targetRepoPath, { dryRun }) {

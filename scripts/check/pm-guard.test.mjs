@@ -1,6 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { checkPmGuard, CONTROL_ROOM_ROOT } from "./pm-guard.mjs";
+import {
+  checkPmGuard,
+  CONTROL_ROOM_ROOT,
+  isControlRoomPath,
+} from "./pm-guard.mjs";
+import { normalizeAbsolute } from "./path-normalize.mjs";
 
 // HYK-309: every control-room fixture below is derived from the live
 // CONTROL_ROOM_ROOT export instead of a second, independently hardcoded
@@ -218,4 +223,45 @@ test("(15) a path that merely starts with the control room name as a sibling dir
     filePath: `${CONTROL_ROOM_ROOT}-아닌곳/file.md`,
   });
   assert.equal(result.ok, false);
+});
+
+// HYK-309 2R (REVIEW P2, judged worth closing rather than left as-is):
+// (11)-(13) above are necessarily skip-only for team-local -- there is no
+// control room to test writing into when CONTROL_ROOM_ROOT is the
+// non-path sentinel, and that's correct, not a bug. But it also silently
+// drops team-local's coverage of the WSL/git-bash/backslash
+// format-equivalence property itself. These three always run, regardless
+// of profile/DRIVE_MATCH, by calling the real allow-list logic
+// (isControlRoomPath, now exported with an optional root override) against
+// a synthetic root fully independent of whatever CONTROL_ROOM_ROOT this
+// install actually carries -- restoring that generic coverage without
+// pretending team-local has a control room to write into.
+const SYNTHETIC_DRIVE_ROOT = "Z:/hyk309-synthetic-drive-root";
+
+test("(16) WSL-style form of a synthetic root is recognized as that root, independent of profile/CONTROL_ROOM_ROOT", () => {
+  const normalized = normalizeAbsolute(
+    "/mnt/z/hyk309-synthetic-drive-root/STATUS.md",
+  );
+  assert.equal(isControlRoomPath(normalized, SYNTHETIC_DRIVE_ROOT), true);
+});
+
+test("(17) Git-Bash-style form of a synthetic root is recognized as that root, independent of profile/CONTROL_ROOM_ROOT", () => {
+  const normalized = normalizeAbsolute(
+    "/z/hyk309-synthetic-drive-root/STATUS.md",
+  );
+  assert.equal(isControlRoomPath(normalized, SYNTHETIC_DRIVE_ROOT), true);
+});
+
+test("(18) backslash form of a synthetic root is recognized as that root, independent of profile/CONTROL_ROOM_ROOT", () => {
+  const normalized = normalizeAbsolute(
+    `${SYNTHETIC_DRIVE_ROOT.replace(/\//g, "\\")}\\PM\\relay\\pm-task.md`,
+  );
+  assert.equal(isControlRoomPath(normalized, SYNTHETIC_DRIVE_ROOT), true);
+});
+
+test("(19) a synthetic root's sibling-name path is still correctly rejected, independent of profile/CONTROL_ROOM_ROOT", () => {
+  const normalized = normalizeAbsolute(
+    `${SYNTHETIC_DRIVE_ROOT}-not-it/file.md`,
+  );
+  assert.equal(isControlRoomPath(normalized, SYNTHETIC_DRIVE_ROOT), false);
 });

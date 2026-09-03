@@ -39,9 +39,19 @@ const LINEAR_WRITE_TOOL_RE =
 export const CONTROL_ROOM_ROOT = "D:/문서관리/하네스-관제실";
 const SCRATCHPAD_MARKER = "appdata/local/temp/claude/";
 
-function isControlRoomPath(normalized) {
+// HYK-309 2R (REVIEW P2): exported with an optional `root` override (default
+// preserves checkPmGuard's exact prior behavior, which always calls this
+// with one argument) so pm-guard.test.mjs can exercise the WSL/git-bash/
+// backslash-form recognition property against a synthetic root fully
+// independent of whatever CONTROL_ROOM_ROOT this install happens to carry
+// (a real control-room path for solo-full, a non-path sentinel for
+// team-local) -- team-local's install has no control room to test writes
+// into, but the format-equivalence property itself is generic and
+// shouldn't silently lose coverage just because that particular profile
+// has nothing configured to test it against.
+export function isControlRoomPath(normalized, root = CONTROL_ROOM_ROOT) {
   const lower = normalized.toLowerCase();
-  const rootLower = CONTROL_ROOM_ROOT.toLowerCase();
+  const rootLower = root.toLowerCase();
   return lower === rootLower || lower.startsWith(`${rootLower}/`);
 }
 
