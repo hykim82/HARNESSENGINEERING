@@ -26,7 +26,17 @@ const LINEAR_WRITE_TOOL_RE =
 // Fixed control-room root (PM's lane, outside every repo). Not configurable
 // per-invocation: pm-guard is installed once, in the control room's own
 // settings.local.json, and always regulates against this one root.
-const CONTROL_ROOM_ROOT = "D:/문서관리/하네스-관제실";
+//
+// HYK-309: this literal is THIS repo's own live solo-full control-room
+// path -- correct for this repo's own instance, but install.mjs used to
+// `copyRawFile` this module byte-for-byte into every target it installs,
+// so every other install silently inherited this machine's own path
+// instead of the target's. install.mjs now rewrites this exact
+// `const CONTROL_ROOM_ROOT = "...";` line at install time (see
+// substitutePmGuardControlRoom there) -- exported so pm-guard.test.mjs can
+// derive its fixtures from whatever value is actually live, in this repo
+// or an installed copy, instead of duplicating the literal a second time.
+export const CONTROL_ROOM_ROOT = "D:/문서관리/하네스-관제실";
 const SCRATCHPAD_MARKER = "appdata/local/temp/claude/";
 
 function isControlRoomPath(normalized) {
