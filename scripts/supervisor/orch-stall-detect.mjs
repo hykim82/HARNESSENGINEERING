@@ -1005,6 +1005,40 @@ export const SEAT_LIVENESS_SCAN_SEVERITY = Object.freeze({
   SUSPECTED_UNRESPONSIVE: 3, // 가장 나쁨 -- 무응답 의심
 });
 
+// HYK-421 1R (결함 2 -- 요약 대표값, coder-task.md §1/§2 요구2): 위
+// SEAT_LIVENESS_SCAN_SEVERITY는 그대로 둔다(⛔"가장 나쁜 것을 고른다"는
+// 기존 계약을 깨지 않는다) -- 대신 "실제로 판정까지 간(JUDGED) 워크트리가
+// 몇 개고 그중 가장 나쁜 verdict가 뭔지"를 별도로 계산해 반환값에
+// 얹는다. worstSeverity가 NORMAL(0)로 묶이면(①NOT_APPLICABLE/②NO_SEAT와
+// ④JUDGED+RESPONSIVE가 동률) `worstEntries[0]`(목록 순서상 첫 항목)이
+// 대표로 뽑히므로, "대상 없음"과 "정상"이 우연한 목록 순서로 뒤바뀌어
+// 보일 수 있다(51회차 실사고, coder-task.md §1). 이 필드는 그 동률과
+// 무관하게 "이 스캔이 실제로 하나 이상의 활성 배달을 판정했는가"를
+// 직접 답한다.
+const JUDGED_VERDICT_SEVERITY = Object.freeze({
+  [SEAT_LIVENESS_VERDICT.RESPONSIVE]: 0,
+  [SEAT_LIVENESS_VERDICT.UNDECIDABLE]: 1,
+  [SEAT_LIVENESS_VERDICT.SUSPECTED_UNRESPONSIVE]: 2,
+});
+
+// JUDGED 상태인 워크트리만 걸러 그 verdict 중 가장 나쁜 것을 고른다.
+// JUDGED가 하나도 없으면 { judgedCount: 0, verdict: null }(무대상).
+function summarizeLiveDispatchVerdict(worktrees) {
+  let judgedCount = 0;
+  let worst = null;
+  for (const w of worktrees) {
+    if (w.status !== SEAT_LIVENESS_WIRE_STATUS.JUDGED) continue;
+    judgedCount += 1;
+    if (
+      worst === null ||
+      JUDGED_VERDICT_SEVERITY[w.verdict] > JUDGED_VERDICT_SEVERITY[worst]
+    ) {
+      worst = w.verdict;
+    }
+  }
+  return { judgedCount, verdict: worst };
+}
+
 function severityOf(entry) {
   if (
     entry.status === SEAT_LIVENESS_SCAN_FAILURE.WORKTREE_LIST_FAILED ||
@@ -1072,6 +1106,7 @@ export function judgeSeatLivenessAcrossWorktrees({ repoRoot, now }, opts = {}) {
   );
   const worstEntries = worktrees.filter((w) => severityOf(w) === worstSeverity);
   const worst = worstEntries[0] ?? null;
+  const liveDispatch = summarizeLiveDispatchVerdict(worktrees);
   return {
     status: worst ? worst.status : SEAT_LIVENESS_WIRE_STATUS.NOT_APPLICABLE,
     verdict: worst ? worst.verdict : undefined,
@@ -1087,6 +1122,12 @@ export function judgeSeatLivenessAcrossWorktrees({ repoRoot, now }, opts = {}) {
     worktrees,
     totalWorktrees: worktrees.length,
     worstCount: worstEntries.length,
+    // HYK-421 1R (결함 2): "가장 나쁜 것" 대표값(status/verdict, 위)과는
+    // 독립적으로 "실제로 활성 배달을 판정한 건수·그중 최악 verdict"를
+    // 함께 낸다 -- worst-wins 계약은 그대로 두고 요약이 더 많이 말하게
+    // 하는 방향(coder-task.md §2 요구2 "등급표를 흔들지 마라").
+    liveDispatchJudgedCount: liveDispatch.judgedCount,
+    liveDispatchVerdict: liveDispatch.verdict,
   };
 }
 
