@@ -1,23 +1,31 @@
-// HYK-423 2R -- 1R(«거부 사유의 종류»로 관측 release를 결속)이 검토에서
-// P1으로 반려됐다: release 대상 두 게이트(head_commit/runner_receipt)는
-// 둘 다 «워커가 스스로 거부를 만들어낼 수 있는» 축이었다 -- 워커가 일부러
-// 그 거부를 유도해 관측을 tombstone시킨 뒤 DONE/결과를 통째로 바꿔치기하면
-// rewrite 가드를 완전히 우회했다(검토자 실측 재현, coder-task.md §9 원문).
+// HYK-423 3R -- 두 번의 반려가 같은 뿌리를 가리켰다: «관측 지문이 보호하는
+// 범위»와 «각 검사기가 실제로 읽는 범위»가 서로 달랐다.
 //
-// 2R은 1R의 게이트-이름 결속 축을 «폐기»한다(coder.md §1⑶). 대신: 관측
-// 지문(fingerprint)의 범위를 «`>>> DONE:` 줄이 끝나는 지점까지»로 좁힌다
-// (relay-handshake.mjs의 resolveDoneAt, `protectedScope` 참조) -- 이 축은
-// 어느 게이트가 거부했는지와 완전히 무관하다(게이트 이름을 참조하지 않는다
-// -- 워커가 특정 게이트를 일부러 거부시켜도 얻는 것이 없다). DONE 줄
-// 자신은 여전히, 그리고 이 지문 축과 별도로, checkIntermediateRewrite가
-// 문자열로 직접 비교한다(first-observation.mjs, 1R 이전부터 있던 기존
-// 메커니즘 -- 이번 라운드가 새로 만들지 않았다) -- 그래서 DONE 줄이
-// 바뀌는 순간(B/B′ 둘 다의 실제 공격 형태) 게이트 무관하게 항상 거부된다.
-// 이 축이 완화하는 것은 오직 DONE 줄 «뒤»의 후기(postscript)뿐이다 --
-// 2026-09-03 실물 사고("결과 파일에 덧붙임")가 정확히 그 모양이었다.
+// 1R: 관측 해제를 «어느 게이트가 거부했는가»(게이트 이름)에 결속 -> 그
+// 두 게이트가 정확히 «워커가 스스로 만들 수 있는» 축이라 거부를 유도해
+// 관측을 지우고 바꿔치기 가능했다.
+// 2R: 축을 «관측 지문의 범위를 DONE 줄까지로 축소»로 갈아탔다 -> 1R
+// 우회는 닫혔지만, `resolveHeadCommitBinding`(HYK-383)은 여전히
+// resultContent «전체»를 다시 스캔했다 -- 지문 밖(DONE 줄 뒤)에 올바른
+// head_commit: 을 새로 덧붙이면 지문은 그대로인 채 그 게이트만 통과했다
+// (2R 검토자 실측 재현, coder-task.md §9 원문. 이 시나리오를 B″로
+// 부른다).
+//
+// 3R은 이 공통 뿌리를 정면으로 다룬다: `resolveDoneAt`이 계산하는
+// `judgedRegion`(resultContent를 `>>> DONE:` 줄이 끝나는 지점까지 자른
+// 것)을 ⓐ 관측 지문과 ⓑ resultContent의 «값»을 읽는 모든 게이트
+// (headCommitVerdict/runnerReceiptVerdict의 claim 확인)에 «같은 값»으로
+// 넘긴다 -- 지문이 보호하는 범위와 게이트가 읽는 범위를 하나로 통일해,
+// "어느 게이트가 거부했는가"·"지문 범위를 얼마나 좁히는가"와 무관하게
+// 이 범위-불일치 자체가 구조적으로 성립하지 않게 만든다. DONE 줄 자신은
+// 여전히, 그리고 이 축과 별도로, checkIntermediateRewrite가 문자열로
+// 직접 비교한다(first-observation.mjs, 1R 이전부터 있던 기존 메커니즘 --
+// 이번에도 손대지 않았다).
 //
 // ⛔실물 원장·곁파일 무접촉: 모든 fixture는 mkdtempSync(tmpdir())로 만든
-// 격리 사본이다(coder-task.md §0).
+// 격리 사본이다(coder-task.md §0). ★★HYK-428 재발 방지: REVIEW-family
+// fixture는 반드시 «독립 git init» 워크트리 안에서만 만든다 -- 이
+// 워크트리 자신이나 그 파생 임시 워크트리를 가리키게 하지 않는다.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
@@ -30,7 +38,7 @@ import {
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import {
   checkRelayHandshake,
   resolveRunnerReceiptVerdict,
@@ -38,6 +46,7 @@ import {
   parseKstTimestamp,
   TIME_AUTHORITY_STATE,
 } from "./relay-handshake.mjs";
+import { isolatedChildEnv } from "./admission-ledger-env-isolation.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const RELAY_HANDSHAKE_PATH = join(HERE, "relay-handshake.mjs");
@@ -130,6 +139,74 @@ function writeCoderRound(
     `task_id: ${taskId}\n${preBody}\n>>> DONE: CODER @ ${doneAt}\ndone_stamped_by: finalize-done\n${postBody}`,
     "utf8",
   );
+}
+
+// HYK-423 3R B″ fixture: REVIEW-family(headCommitVerdict가 적용되는 유일한
+// role 계열)용. `headCommitLineBefore`는 DONE 줄보다 «앞»(judgedRegion
+// 안), `headCommitLineAfter`는 DONE 줄보다 «뒤»(judgedRegion 밖, 2R
+// 검토자가 정확히 이 자리에 붙여 우회를 재현했다)에 놓인다. task-task.md
+// 의 head_commit은 항상 실제 HEAD(sha)와 같게 둬 축 ⓐ(지정 대조)가 저절로
+// 통과하게 만든다 -- 이 시험이 확인하려는 것은 축 ⓑ/스캔 범위이지 축 ⓐ가
+// 아니다.
+// ⛔★실사고 재발 방지(HYK-428과 같은 계열, 이번엔 이 시험 자신이 냈다):
+// REVIEW round가 ok:true로 소비되면 relay-handshake.mjs의
+// autoRecordRejectStreak가 reject-streak.json에 기록을 «시도»한다 -- 그
+// 파일의 경로는 harnessDir가 아니라 mainRepoRoot()(=이 테스트 «프로세스
+// 자신»의 cwd에서 git으로 거슬러 올라간 결과)로 정해진다. 이 fixture가
+// 이 워크트리 안에서 in-process로 checkRelayHandshake를 직접 부르면,
+// mainRepoRoot()는 (이 워크트리가 linked worktree이므로) 실제 메인
+// 클론을 가리켜 그 «라이브» reject-streak.json에 가짜 줄을 쓴다(실측
+// 확인: HYK-423 streak가 13까지 오염됨, 2026-09-04). 그래서 REVIEW-family
+// 검증은 반드시 `runReviewCli`로 «별도 프로세스를 이 fixture 디렉터리
+// 자신을 cwd로» 스폰한다 -- mainRepoRoot()가 그 프로세스 자신의 cwd(=
+// dir, 독립 git init)로 자기완결적으로 좁혀지므로 실물 원장을 건드릴
+// 경로 자체가 없다. `.harness/`를 미리 만들어 두는 것도 이 이유(쓰기
+// 자체가 성공해 자기 안에서 끝나야 한다, ENOENT로 죽으면 안 된다).
+function writeReviewRound(
+  dir,
+  taskId,
+  sha,
+  {
+    headCommitLineBefore = "",
+    doneAt = DONE_AT_TEXT,
+    headCommitLineAfter = "",
+  },
+) {
+  mkdirSync(join(dir, ".harness"), { recursive: true });
+  writeFileSync(
+    join(dir, "review-task.md"),
+    `task_id: ${taskId}\ndropped_at: ${DROPPED_AT_TEXT}\nhead_commit: ${sha}\n`,
+    "utf8",
+  );
+  writeFileSync(
+    join(dir, "review.md"),
+    `task_id: ${taskId}\nverdict: rejected\n${headCommitLineBefore}\n>>> DONE: REVIEW @ ${doneAt}\ndone_stamped_by: finalize-done\n${headCommitLineAfter}`,
+    "utf8",
+  );
+}
+
+// runReviewCli: spawns relay-handshake.mjs's own CLI entry point with
+// `cwd: dir` set explicitly -- see writeReviewRound's header for why this,
+// not an in-process call, is the only safe way to exercise a REVIEW-family
+// round in this file. `scriptPath` lets (mut-3) point this at a mutated
+// clone instead of the real relay-handshake.mjs.
+function runReviewCli(scriptPath, dir) {
+  const res = spawnSync(process.execPath, [scriptPath, "review", dir], {
+    cwd: dir,
+    encoding: "utf8",
+    env: isolatedChildEnv(),
+  });
+  assert.equal(
+    res.error,
+    undefined,
+    `spawn must succeed: ${res.error?.message}`,
+  );
+  assert.notEqual(res.status, null, "process must not be signal-killed");
+  return {
+    exit: res.status,
+    stdout: res.stdout ?? "",
+    stderr: res.stderr ?? "",
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -330,6 +407,77 @@ test("(B′2) 시나리오 B′ 변형: RED(러너 exit 조작)로 거부 유도
 });
 
 // ---------------------------------------------------------------------------
+// 시나리오 B″(3R 신설, 2R P1의 직접 재현): 워커가 «거부를 유도»(head_commit
+// 누락) -> 관측은 손대지 않고 DONE «뒤»에 표지를 덧붙여 다른 검사기만
+// 통과시키려는 시도 -> 여전히 거부돼야 한다. ★검토자가 쓴 것과 같은 모양
+// (첫 poll에서 head_commit 누락 -> 거부 -> DONE 뒤에 올바른 head_commit
+// 추가 -> 둘째 poll)이 반드시 표본에 포함된다.
+// ---------------------------------------------------------------------------
+test("(B″1)★★★ 시나리오 B″ (2R 검토자 재현과 동일 모양): head_commit 누락으로 거부 유도 -> DONE 뒤에 올바른 head_commit을 덧붙임 -> 여전히 거부(judgedRegion 밖이라 검사기가 못 본다)", () => {
+  withFixtureDir("hyk423-bdprime1-", (dir) => {
+    const sha = ensureGitHeadCommit(dir);
+    const taskId = "HYK-423-BDPRIME-1";
+
+    // Poll #1: head_commit 표지를 아예 쓰지 않는다(워커가 «스스로» 만들
+    // 수 있는 거부 -- 그냥 그 줄을 안 쓰면 된다). DONE은 그대로 06:10:00.
+    writeReviewRound(dir, taskId, sha, { doneAt: DONE_AT_TEXT });
+    const poll1 = runReviewCli(RELAY_HANDSHAKE_PATH, dir);
+    assert.notEqual(
+      poll1.exit,
+      0,
+      "poll1 must be rejected by the head_commit gate",
+    );
+    assert.match(poll1.stderr, /missing head_commit header/);
+
+    // 바꿔치기 시도: DONE 줄·그 앞 본문은 «전혀 손대지 않는다»(관측 지문도
+    // 그대로) -- DONE «뒤»에 올바른 head_commit: 표지만 새로 덧붙인다.
+    // 수리 전(2R) 코드에서는 headCommitVerdict가 resultContent 전체를
+    // 다시 스캔해 이 표지를 찾아내 통과시켰다(2R 검토 재현, ok:true).
+    writeReviewRound(dir, taskId, sha, {
+      doneAt: DONE_AT_TEXT,
+      headCommitLineAfter: `head_commit: ${sha}\n`,
+    });
+    const poll2 = runReviewCli(RELAY_HANDSHAKE_PATH, dir);
+    assert.notEqual(
+      poll2.exit,
+      0,
+      `B″ 우회가 다시 열리면 안 된다(수리 전 2R 검토 재현: exit 0이었다): ${JSON.stringify(
+        poll2,
+      )}`,
+    );
+    assert.match(
+      poll2.stderr,
+      /missing head_commit header/,
+      `judgedRegion 밖(DONE 뒤)의 head_commit은 게이트가 아예 보지 못해야 한다 -- 여전히 «누락» 사유여야 한다: ${JSON.stringify(
+        poll2,
+      )}`,
+    );
+  });
+});
+
+test("(B″2) 대조군: head_commit을 DONE «앞»(judgedRegion 안)에 정당하게 두면 -- 정상 소비 성공(A가 이 축에서도 살아 있음을 확인)", () => {
+  // ⚠️head_commit 게이트 자체가 judgedRegion «안»의 값은 여전히 정상
+  // 인식한다는 것만 독립적으로 확인하는 단일 poll 대조군이다(B″1의
+  // "누락 -> 거부 -> DONE 뒤 추가 -> 여전히 거부" 시퀀스와 달리, 첫 poll
+  // 부터 정상 값을 준다 -- 첫 관측이 곧 이 값이므로 rewritten이 아예
+  // 성립하지 않는다).
+  withFixtureDir("hyk423-bdprime2-", (dir) => {
+    const sha = ensureGitHeadCommit(dir);
+    const taskId = "HYK-423-BDPRIME-2";
+    writeReviewRound(dir, taskId, sha, {
+      doneAt: DONE_AT_TEXT,
+      headCommitLineBefore: `head_commit: ${sha}\n`,
+    });
+    const poll = runReviewCli(RELAY_HANDSHAKE_PATH, dir);
+    assert.equal(
+      poll.exit,
+      0,
+      `judgedRegion 안(DONE 앞)의 head_commit은 정상 인식돼야 한다: ${JSON.stringify(poll)}`,
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
 // (mut) 되돌림 변이 -- B′를 지키는 코드(관측-후-재판정 시 DONE 줄 자체를
 // 비교하는 rewritten 가드)를 걷어내면 B′1이 다시 (잘못) 통과함을 증명한다.
 // relay-handshake-runner-receipt.test.mjs의 (rr-e*) 되돌림 변이와 동일
@@ -445,7 +593,7 @@ test("(mut-1)★★ 되돌림 변이: rewritten 가드(checkRewriteAndStaleness�
 });
 
 const PROTECTED_SCOPE_TARGET =
-  "  const protectedScope = resultContent.slice(\n" +
+  "  const judgedRegion = resultContent.slice(\n" +
   "    0,\n" +
   "    doneMatch.index + doneMatch[0].length,\n" +
   "  );\n" +
@@ -456,11 +604,18 @@ const PROTECTED_SCOPE_TARGET =
   "          droppedAt: droppedAtRaw,\n" +
   "          role,\n" +
   "          harnessDir,\n" +
-  "          resultContent: protectedScope,\n" +
+  "          resultContent: judgedRegion,\n" +
   "          doneLineRaw: doneMatch[0],\n" +
   "        })\n" +
   "      : { rewritten: false };\n";
+// ⚠️단순 삭제가 아니라 `judgedRegion = resultContent`(전체, 자르지 않음)로
+// 대체한다 -- `judgedRegion`은 이 블록 «뒤»(resolveDoneAt의 return문, 그리고
+// mut-3이 겨냥하는 headCommitVerdict/runnerReceiptVerdict 호출부)에서도
+// 참조되므로, 선언 자체를 지우면 그 참조들이 ReferenceError로 죽어 "지문만
+// 원복" 대신 "모듈 자체가 깨짐"이 된다 -- 이 변이가 겨냥하는 축(지문 범위)
+// 하나만 정확히 되돌리기 위한 선택이다.
 const PROTECTED_SCOPE_REPLACEMENT =
+  "  const judgedRegion = resultContent;\n" +
   "  const observation =\n" +
   "    taskId && droppedAtRaw\n" +
   "      ? spawnObserveDoneLine({\n" +
@@ -468,7 +623,7 @@ const PROTECTED_SCOPE_REPLACEMENT =
   "          droppedAt: droppedAtRaw,\n" +
   "          role,\n" +
   "          harnessDir,\n" +
-  "          resultContent,\n" +
+  "          resultContent: judgedRegion,\n" +
   "          doneLineRaw: doneMatch[0],\n" +
   "        })\n" +
   "      : { rewritten: false };\n";
@@ -545,6 +700,97 @@ test("(mut-2)★ 되돌림 변이: 관측 지문 범위를 DONE 줄 «전체 파
     poll2.state,
     TIME_AUTHORITY_STATE.DONE_REWRITTEN_AFTER_FIRST_OBSERVATION,
   );
+
+  const after = readFileSync(RELAY_HANDSHAKE_PATH, "utf8");
+  assert.equal(
+    after,
+    src,
+    "원본 relay-handshake.mjs는 한 바이트도 변경되지 않았다",
+  );
+});
+
+// ---------------------------------------------------------------------------
+// (mut-3, 3R 신설) 되돌림 변이 -- B″를 지키는 코드(headCommitVerdict가
+// judgedRegion만 읽게 만든 축소)를 걷어내고 resultContent 전체를 다시
+// 스캔하게 되돌리면, (B″1)의 DONE-뒤 head_commit 바꿔치기가 다시 (잘못)
+// 통과함을 증명한다 -- coder-task.md §3-7이 요구하는 "B″를 지키는 코드를
+// 되돌리면 B″ 시험이 RED" 변이.
+// ---------------------------------------------------------------------------
+const HEAD_COMMIT_JUDGED_REGION_TARGET =
+  "  const headCommitVerdict = resolveHeadCommitBinding({\n" +
+  "    role,\n" +
+  "    taskContent,\n" +
+  "    resultContent: judgedRegion,\n" +
+  "    harnessDir,\n" +
+  "  });\n" +
+  "  if (!headCommitVerdict.ok) return headCommitVerdict;\n";
+const HEAD_COMMIT_JUDGED_REGION_REPLACEMENT =
+  "  const headCommitVerdict = resolveHeadCommitBinding({\n" +
+  "    role,\n" +
+  "    taskContent,\n" +
+  "    resultContent,\n" +
+  "    harnessDir,\n" +
+  "  });\n" +
+  "  if (!headCommitVerdict.ok) return headCommitVerdict;\n";
+
+test("(mut-3)★★★ 되돌림 변이: headCommitVerdict가 다시 resultContent 전체를 스캔하게 되돌리면 -- (B″1)의 DONE-뒤 head_commit 바꿔치기가 다시 (잘못) 통과한다(RED, judgedRegion 통일이 이 코드에 실제로 걸려 있다는 증거)", async () => {
+  const src = readFileSync(RELAY_HANDSHAKE_PATH, "utf8");
+  assertExactlyOneMatch(
+    src,
+    HEAD_COMMIT_JUDGED_REGION_TARGET,
+    "headCommitVerdict judgedRegion call site",
+  );
+  const mutated = src.replace(
+    HEAD_COMMIT_JUDGED_REGION_TARGET,
+    HEAD_COMMIT_JUDGED_REGION_REPLACEMENT,
+  );
+  assert.notEqual(mutated, src);
+
+  // HYK-423 3R (실사고 재발 방지, writeReviewRound 헤더 참조): REVIEW round
+  // 검증은 in-process import+호출이 아니라 CLI 스폰으로 한다 -- mut-1/mut-2
+  // (CODER, autoRecordRejectStreak를 타지 않는다)와 달리 이 변이는 poll2가
+  // (의도적으로) ok:true까지 가므로 reject-streak 기록을 시도한다;
+  // in-process였다면 mainRepoRoot()가 이 테스트 프로세스의 cwd(=실제
+  // 메인 클론)로 풀려 라이브 원장에 다시 쓴다. `importMutatedRelayHandshake`
+  // 는 쓰지 않는다(그 헬퍼의 ESM import는 이 시나리오에 필요 없다) --
+  // mutDir만 직접 만들고 그 안의 파일 경로를 CLI 스크립트로 스폰한다.
+  const dir = mkdtempSync(join(tmpdir(), "hyk423-mut3-fixture-"));
+  const mutDir = mkdtempSync(join(tmpdir(), "hyk423-mut-3-"));
+  try {
+    const sha = ensureGitHeadCommit(dir);
+    const taskId = "HYK-423-MUT3";
+    writeReviewRound(dir, taskId, sha, { doneAt: DONE_AT_TEXT });
+
+    const scriptsCheckDir = join(mutDir, "scripts", "check");
+    mkdirSync(scriptsCheckDir, { recursive: true });
+    for (const dep of SIBLING_DEPS) {
+      writeFileSync(
+        join(scriptsCheckDir, dep),
+        readFileSync(join(HERE, dep), "utf8"),
+        "utf8",
+      );
+    }
+    const mutPath = join(scriptsCheckDir, "relay-handshake.mjs");
+    writeFileSync(mutPath, mutated, "utf8");
+
+    const poll1 = runReviewCli(mutPath, dir);
+    assert.notEqual(poll1.exit, 0);
+    assert.match(poll1.stderr, /missing head_commit header/);
+
+    writeReviewRound(dir, taskId, sha, {
+      doneAt: DONE_AT_TEXT,
+      headCommitLineAfter: `head_commit: ${sha}\n`,
+    });
+    const poll2 = runReviewCli(mutPath, dir);
+    assert.equal(
+      poll2.exit,
+      0,
+      "RED: headCommitVerdict가 resultContent 전체를 다시 스캔하면 DONE 뒤 head_commit도 (잘못) 채택돼 통과해야 한다 -- judgedRegion 통일이 B″를 실제로 막고 있다는 증거",
+    );
+  } finally {
+    rmSync(mutDir, { recursive: true, force: true });
+    rmSync(dir, { recursive: true, force: true });
+  }
 
   const after = readFileSync(RELAY_HANDSHAKE_PATH, "utf8");
   assert.equal(

@@ -412,8 +412,16 @@ async function importMutatedRelayHandshake(mutatedSrc, label) {
 
 test("(rr-e1)★ 되돌림 변이: 소비 축(checkRelayHandshake 결선) 자체를 제거하면 -- (rr-a)의 파이프 은폐 빨간 실행 표본이 다시 통과한다(RED, load-bearing 증명)", async () => {
   const src = readFileSync(RELAY_HANDSHAKE_PATH, "utf8");
+  // HYK-423 3R §2: call-site text updated -- `resultContent` is now
+  // `resultContent: judgedRegion` (the same DONE-line-bounded region the
+  // observation fingerprint uses, coder.md ⑵) so this gate can no longer be
+  // fed content placed after the DONE line. The wiring this mutation proves
+  // load-bearing (resolveRunnerReceiptVerdict + the ok:false return) is
+  // unchanged, only its input's scope narrowed; deleting this whole block
+  // still removes both the gate AND that scoping, so the RED assertion
+  // below still proves the gate itself is load-bearing.
   const target =
-    "  const runnerReceiptVerdict = resolveRunnerReceiptVerdict({\n    resultContent,\n    harnessDir,\n  });\n  if (!runnerReceiptVerdict.ok) return runnerReceiptVerdict;\n\n";
+    "  const runnerReceiptVerdict = resolveRunnerReceiptVerdict({\n    resultContent: judgedRegion,\n    harnessDir,\n  });\n  if (!runnerReceiptVerdict.ok) return runnerReceiptVerdict;\n\n";
   assertExactlyOneMatch(src, target, "runner receipt wiring block");
   const mutated = src.replace(target, "");
   assert.equal(mutated.length, src.length - target.length);

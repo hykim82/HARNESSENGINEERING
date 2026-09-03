@@ -294,11 +294,19 @@ test("HYK-355 (b) 정당한 실물 기록 회귀 0: harnessDir가 실제로 링�
 // 증명한다(defense-in-depth) -- 그래서 GATE_TARGET과 함께 axis ⓑ의
 // checkRelayHandshake 호출부도 걷어내 원래 HYK-355가 겨냥했던 정확히 그
 // 격리 조건을 재현한다.
+// HYK-423 3R §2: call-site text updated -- `resultContent` is now
+// `resultContent: judgedRegion` (the DONE-line-bounded region the
+// observation fingerprint uses, coder.md ⑵) so this axis can no longer be
+// fed a head_commit: line placed after the DONE line (2R's exact reject
+// shape). The axis this isolation targets (resolveHeadCommitBinding + the
+// ok:false return) is unchanged, only its input's scope narrowed; removing
+// this whole block still removes both the axis AND that scoping, so this
+// test's isolation intent is unaffected.
 const HEAD_COMMIT_AXIS_CALL_TARGET =
   "  const headCommitVerdict = resolveHeadCommitBinding({\n" +
   "    role,\n" +
   "    taskContent,\n" +
-  "    resultContent,\n" +
+  "    resultContent: judgedRegion,\n" +
   "    harnessDir,\n" +
   "  });\n" +
   "  if (!headCommitVerdict.ok) return headCommitVerdict;\n";
