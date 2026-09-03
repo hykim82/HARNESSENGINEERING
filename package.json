@@ -2,6 +2,9 @@
   "name": "harnessengineering",
   "private": true,
   "type": "module",
+  "engines": {
+    "node": "20.x"
+  },
   "scripts": {
     "test": "node scripts/check/isolated-suite-runner.mjs",
     "quality:check": "node scripts/check/quality-check.mjs"
