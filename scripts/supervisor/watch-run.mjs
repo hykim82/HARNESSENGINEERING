@@ -167,6 +167,19 @@ function extractSeatLivenessFields(seatLiveness) {
       "observationReason",
     ),
     seatLivenessReason: pickString(seatLiveness, "reason"),
+    // HYK-421 1R (결함 2): "가장 나쁜 것" 대표값과 독립적인 "실제로
+    // 판정까지 간 활성 배달이 있었는가" 요약(orch-stall-detect.mjs
+    // summarizeLiveDispatchVerdict 참조) -- 대표 status/verdict가
+    // NOT_APPLICABLE/NO_SEAT여도 이 값으로 "정상 판정된 배달이 실제로
+    // 있었는지"를 구별할 수 있다.
+    seatLivenessLiveDispatchJudgedCount: pickNumber(
+      seatLiveness,
+      "liveDispatchJudgedCount",
+    ),
+    seatLivenessLiveDispatchVerdict: pickString(
+      seatLiveness,
+      "liveDispatchVerdict",
+    ),
   };
 }
 
@@ -346,6 +359,8 @@ function emptyDetectorFields() {
     seatLivenessPartialFailures: [],
     seatLivenessObservationReason: null,
     seatLivenessReason: null,
+    seatLivenessLiveDispatchJudgedCount: null,
+    seatLivenessLiveDispatchVerdict: null,
     seatIdleStatus: null,
     seatIdleVerdict: null,
     seatIdleWorstCount: null,
@@ -586,6 +601,20 @@ function failureLogSegment(prefix, failures) {
   const detail =
     omitted > 0 ? `${shown.join("|")}|+${omitted}_more` : shown.join("|");
   return `${prefix}_partial_failures=${failures.length} ${prefix}_partial_failure_detail=${detail}`;
+}
+
+// HYK-421 1R (결함 2, coder-task.md §5 "결과 파일 규약" 완료 조건3) --
+// 대표(worst-wins) status/verdict와 별도로 "실제로 판정된 활성 배달이
+// 있었는가"를 로그 줄에 싣는다. judgedCount가 없으면(=orch-stall-
+// detect.mjs가 아직 이 필드를 안 주는 옛 stdout -- 파싱 실패든 이
+// 라운드 전 stdout이든) null을 돌려 filter(Boolean)로 걸러진다 --
+// 기존 로그 줄 형식(byte-identical 회귀 시험, watch-run.test.mjs)을
+// 건드리지 않는다.
+function seatLiveDispatchLogSegment(detectorResult) {
+  const judgedCount = detectorResult.seatLivenessLiveDispatchJudgedCount;
+  if (judgedCount === null || judgedCount === undefined) return null;
+  const verdict = detectorResult.seatLivenessLiveDispatchVerdict ?? "NONE";
+  return `seat_live_judged_count=${judgedCount} seat_live_verdict=${verdict}`;
 }
 
 // HYK-265-observe-split-1 (coder-task.md §3-1 항2, §4 완료조건2): 이 축이
@@ -1395,6 +1424,12 @@ export function buildLogLine({
     // unconsumedVanishedDetail은 null -> filter(Boolean)로 로그 줄이
     // 한 글자도 달라지지 않는다.
     segments.unconsumedVanishedDetail,
+    // HYK-421 1R (결함 2): 이 축도 지금 이 시점의 맨 끝이다 -- 앞선 모든
+    // 세그먼트의 필드·순서·값은 이 라운드가 손대지 않았다. 기존 호출자가
+    // 이 필드를 안 주는 detectorResult를 넘기면(과거 stdout 등)
+    // seatLiveDispatchLogSegment가 null을 돌려주므로(filter(Boolean))
+    // 로그 줄이 한 글자도 달라지지 않는다.
+    seatLiveDispatchLogSegment(detectorResult),
   ]
     .filter(Boolean)
     .join(" ");

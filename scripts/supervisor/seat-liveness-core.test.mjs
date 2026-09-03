@@ -17,6 +17,7 @@ import {
   SEAT_LIVENESS_VERDICT,
   SEAT_LIVENESS_REASON,
   DEFAULT_MAX_NO_OUTPUT_SECONDS,
+  DEFAULT_OBSERVATION_CLOCK_SKEW_TOLERANCE_MS,
 } from "./seat-liveness-core.mjs";
 
 function repoRoot() {
@@ -367,14 +368,18 @@ test("missing/malformed/reversed-order/future observations never leak into SUSPE
       observation: { observedAtMs: d.dispatchedAtMs + 1000 },
       now: d.dispatchedAtMs + 1000,
     },
-    // 형식 위반: lastOutputAt이 관측 시각보다 미래(구조적 모순).
+    // 형식 위반: lastOutputAt이 관측 시각보다 «허용치를 훨씬 넘겨»
+    // 미래(구조적 모순) -- HYK-421 1R로 바쁜 좌석의 정상 왕복(수백 ms)은
+    // DEFAULT_OBSERVATION_CLOCK_SKEW_TOLERANCE_MS(5000ms) 이내로 통과하므로
+    // 이 표본은 그 허용치를 자릿수로 넘는 10분 뒤로 둬 "진짜 malformed"임을
+    // 분명히 한다(coder-task.md §2 요구3 ⓑ).
     {
       dispatch: d,
       observation: {
         observedAtMs: d.dispatchedAtMs + 1000,
-        lastOutputAt: d.dispatchedAtMs + 5000,
+        lastOutputAt: d.dispatchedAtMs + 1000 + 600_000,
       },
-      now: d.dispatchedAtMs + 5000,
+      now: d.dispatchedAtMs + 1000 + 600_000,
     },
     // 순서 역전: 관측이 배달보다 이르다(위 (d) 테스트와 다른 각도).
     {
@@ -428,6 +433,130 @@ test("default threshold: DEFAULT_MAX_NO_OUTPUT_SECONDS is a positive finite numb
     // thresholds 생략.
   });
   assert.equal(result.verdict, SEAT_LIVENESS_VERDICT.RESPONSIVE);
+});
+
+// ---------------------------------------------------------------------------
+// HYK-421 1R (결함 1 -- 시계 선후, coder-task.md §2 요구3): 합성 표본
+// 4종이 서로 다른 결과를 내야 한다 -- ⓐ바쁜 좌석(정상 판정) ⓑ진짜
+// malformed(여전히 거부) ⓒ정상 유휴(정상) ⓓ대상 없음(무대상, 이 파일
+// 수준에서는 dispatch 자체가 없는 것과 동형이라 여기서는 다루지 않는다
+// -- ⓓ는 orch-stall-detect.mjs의 NOT_APPLICABLE 경로, 결함 2 시험에서
+// 다룬다).
+// ---------------------------------------------------------------------------
+test("HYK-421 1R ⓐ 바쁜 좌석: lastOutputAt이 observedAtMs보다 실측 왕복시간(170~264ms) 만큼 뒤여도 UNDECIDABLE이 아니라 정상 판정된다 (수리 전 실사고 재현: 재현 3/3, +170/+192/+264ms)", () => {
+  const d = dispatch();
+  const busySamplesMs = [170, 192, 264];
+  for (const gapMs of busySamplesMs) {
+    const observedAtMs = d.dispatchedAtMs + 1000;
+    const result = judgeSeatLiveness({
+      dispatch: d,
+      observation: {
+        observedAtMs,
+        lastOutputAt: observedAtMs + gapMs,
+      },
+      now: observedAtMs + gapMs, // 판정 시각도 왕복 뒤로 자연스럽게 흘러간다.
+    });
+    assert.notEqual(
+      result.verdict,
+      SEAT_LIVENESS_VERDICT.UNDECIDABLE,
+      `busy-seat gap ${gapMs}ms must not be misjudged as UNDECIDABLE`,
+    );
+    assert.equal(
+      result.verdict,
+      SEAT_LIVENESS_VERDICT.RESPONSIVE,
+      `busy-seat gap ${gapMs}ms is well within threshold -- must be RESPONSIVE`,
+    );
+    assert.notEqual(
+      result.reasonCode,
+      SEAT_LIVENESS_REASON.OBSERVATION_MALFORMED,
+      `busy-seat gap ${gapMs}ms must not trip the structural-order guard`,
+    );
+  }
+});
+
+test("HYK-421 1R ⓑ 진짜 malformed: 허용치(DEFAULT_OBSERVATION_CLOCK_SKEW_TOLERANCE_MS)를 자릿수로 넘는 시각 역전은 여전히 OBSERVATION_MALFORMED로 거부된다 (구조 검사 생존 증명)", () => {
+  const d = dispatch();
+  const observedAtMs = d.dispatchedAtMs + 1000;
+  const genuinelyMalformedGapMs =
+    DEFAULT_OBSERVATION_CLOCK_SKEW_TOLERANCE_MS + 10 * 60 * 1000; // 허용치 + 10분.
+  const result = judgeSeatLiveness({
+    dispatch: d,
+    observation: {
+      observedAtMs,
+      lastOutputAt: observedAtMs + genuinelyMalformedGapMs,
+    },
+    now: observedAtMs + genuinelyMalformedGapMs,
+  });
+  assert.equal(result.verdict, SEAT_LIVENESS_VERDICT.UNDECIDABLE);
+  assert.equal(result.reasonCode, SEAT_LIVENESS_REASON.OBSERVATION_MALFORMED);
+});
+
+test("HYK-421 1R: 허용치 경계값 -- 정확히 허용치만큼 뒤는 통과(<=), 허용치+1ms는 거부", () => {
+  const d = dispatch();
+  const observedAtMs = d.dispatchedAtMs + 1000;
+  const atBoundary = judgeSeatLiveness({
+    dispatch: d,
+    observation: {
+      observedAtMs,
+      lastOutputAt: observedAtMs + DEFAULT_OBSERVATION_CLOCK_SKEW_TOLERANCE_MS,
+    },
+    now: observedAtMs + DEFAULT_OBSERVATION_CLOCK_SKEW_TOLERANCE_MS,
+  });
+  assert.notEqual(
+    atBoundary.reasonCode,
+    SEAT_LIVENESS_REASON.OBSERVATION_MALFORMED,
+  );
+
+  const overBoundary = judgeSeatLiveness({
+    dispatch: d,
+    observation: {
+      observedAtMs,
+      lastOutputAt:
+        observedAtMs + DEFAULT_OBSERVATION_CLOCK_SKEW_TOLERANCE_MS + 1,
+    },
+    now: observedAtMs + DEFAULT_OBSERVATION_CLOCK_SKEW_TOLERANCE_MS + 1,
+  });
+  assert.equal(
+    overBoundary.reasonCode,
+    SEAT_LIVENESS_REASON.OBSERVATION_MALFORMED,
+  );
+});
+
+test("HYK-421 1R: thresholds.observationClockSkewToleranceMs를 명시적으로 넘기면 그 값을 쓴다 (0으로 좁히면 예전 동작 -- 왕복 264ms도 다시 MALFORMED)", () => {
+  const d = dispatch();
+  const observedAtMs = d.dispatchedAtMs + 1000;
+  const result = judgeSeatLiveness({
+    dispatch: d,
+    observation: {
+      observedAtMs,
+      lastOutputAt: observedAtMs + 264,
+    },
+    now: observedAtMs + 264,
+    thresholds: {
+      maxNoOutputSeconds: THRESHOLD_S,
+      observationClockSkewToleranceMs: 0,
+    },
+  });
+  assert.equal(result.verdict, SEAT_LIVENESS_VERDICT.UNDECIDABLE);
+  assert.equal(result.reasonCode, SEAT_LIVENESS_REASON.OBSERVATION_MALFORMED);
+});
+
+test("HYK-421 1R: 음수 observationClockSkewToleranceMs는 THRESHOLD_INVALID로 거부된다 (예외가 아니라 UNDECIDABLE)", () => {
+  const d = dispatch();
+  const result = judgeSeatLiveness({
+    dispatch: d,
+    observation: {
+      observedAtMs: d.dispatchedAtMs + 1000,
+      lastOutputAt: d.dispatchedAtMs + 1000,
+    },
+    now: d.dispatchedAtMs + 1000,
+    thresholds: {
+      maxNoOutputSeconds: THRESHOLD_S,
+      observationClockSkewToleranceMs: -1,
+    },
+  });
+  assert.equal(result.verdict, SEAT_LIVENESS_VERDICT.UNDECIDABLE);
+  assert.equal(result.reasonCode, SEAT_LIVENESS_REASON.THRESHOLD_INVALID);
 });
 
 // ---------------------------------------------------------------------------

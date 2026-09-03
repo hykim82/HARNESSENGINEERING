@@ -92,6 +92,27 @@ export const SEAT_LIVENESS_REASON = Object.freeze({
 
 export const DEFAULT_MAX_NO_OUTPUT_SECONDS = 1200;
 
+// HYK-421 1R (결함 1 -- 시계 선후, coder-task.md §2 안 ⓑ): 관측을 만드는
+// 호출부(orca-adapter.mjs fetchSeatLivenessShow)는 `observedAtMs`를
+// terminal show 조회 "전"에 찍고, `lastOutputAt`은 그 조회의 "응답"(왕복
+// 후)에서 온다 -- 그 왕복 사이에도 좌석이 계속 출력하는 "바쁜 좌석"이면
+// `lastOutputAt`이 `observedAtMs`보다 몇백 ms 뒤일 수 있다(재현 3/3 --
+// +170/+192/+264ms, coder-task.md §1 결함1). 이걸 그대로 구조 모순
+// (`OBSERVATION_MALFORMED`)으로 닫으면 "바쁠수록 판정 불가"가 된다.
+// ★ⓐ(관측 시각을 조회 후로 옮김)를 고르지 않은 이유: 그러면
+// `observedAtMs`가 더 이상 "관측을 시작한 시각"이 아니라 "조회가 끝난
+// 시각"이 되어 왕복시간 자체가 관측에서 사라진다 -- 그 시간 동안의
+// 침묵/출력을 구분할 수 없게 되고, 이 어댑터 함수를 쓰는 다른 축
+// (dispatch-start 등, 헤더 주석 참조)의 "관측 시각" 의미도 함께 바뀐다.
+// 대신 ⓑ(왕복시간 허용치)를 고른다 -- 판정 축(이 코어)에만 국한된 좁은
+// 수리다.
+// ★이 값의 함정(coder-task.md §2 요구): 이 허용치보다 짧은 시간 안에
+// "진짜" 시계 역전(예: 시스템 시계 보정·NTP 조정)이 일어나면 그것도
+// 조용히 통과시킨다 -- 하지만 그 창이 5초로 좁고, 실측 왕복시간
+// (170~264ms)의 19~29배 여유를 두면서도 §3-⑶이 요구하는 "진짜 malformed"
+// 합성 표본(수 분 단위로 어긋난 시각)과는 자릿수가 갈려 여전히 거부된다.
+export const DEFAULT_OBSERVATION_CLOCK_SKEW_TOLERANCE_MS = 5000;
+
 function isPlainObject(v) {
   return v !== null && typeof v === "object" && !Array.isArray(v);
 }
@@ -101,8 +122,24 @@ function isFiniteNumber(v) {
 function isPositiveFiniteNumber(v) {
   return isFiniteNumber(v) && v > 0;
 }
+function isNonNegativeFiniteNumber(v) {
+  return isFiniteNumber(v) && v >= 0;
+}
 function isNonEmptyString(v) {
   return typeof v === "string" && v.length > 0;
+}
+
+// HYK-421 1R: judgeSeatLiveness의 eslint complexity 상한(12) 준수를 위해
+// "생략 시 낙하값" 분기를 별도 함수로 뽑는다(maxNoOutputSeconds와 동일
+// 패턴, 동작 변경 없음).
+function resolveClockSkewToleranceMs(thresholds) {
+  if (thresholds === undefined || thresholds === null) {
+    return DEFAULT_OBSERVATION_CLOCK_SKEW_TOLERANCE_MS;
+  }
+  if (thresholds.observationClockSkewToleranceMs === undefined) {
+    return DEFAULT_OBSERVATION_CLOCK_SKEW_TOLERANCE_MS;
+  }
+  return thresholds.observationClockSkewToleranceMs;
 }
 
 function undecidable(reasonCode) {
@@ -124,22 +161,29 @@ function isWellFormedDispatch(dispatch) {
 // `reasonHint`(화면 문자열 사유 후보)가 실려 와도 이 함수는 그 값을
 // 읽어 구조를 검사하지 않는다 -- 존재 여부·형식 무관, 오직 통과시켜
 // 호출부에서 details에 그대로 옮길 뿐이다(§2-2 비타협).
-function isWellFormedObservation(entry) {
+function isWellFormedObservation(entry, clockSkewToleranceMs) {
   if (!isPlainObject(entry)) return false;
   if (!isFiniteNumber(entry.observedAtMs)) return false;
   if (!isFiniteNumber(entry.lastOutputAt)) return false;
-  // 출력 시각이 그 출력을 관측한 시각보다 나중일 수 없다(구조적 모순).
-  return entry.lastOutputAt <= entry.observedAtMs;
+  // 출력 시각이 그 출력을 관측한 시각보다 왕복시간 허용치를 넘어
+  // 나중일 수 없다(구조적 모순) -- 허용치 이내는 바쁜 좌석의 정상
+  // 왕복(위 DEFAULT_OBSERVATION_CLOCK_SKEW_TOLERANCE_MS 주석 참조)이다.
+  return entry.lastOutputAt <= entry.observedAtMs + clockSkewToleranceMs;
 }
 
 // 관측 하나의 구조·순서·미래시각을 검사한다(dispatch-start-core.mjs의
 // firstObservationProblem과 같은 형태로, 관측이 1건뿐이라는 점만 다르다).
 // 문제가 있으면 그 사유 코드를, 전부 온전하면 `null`을 돌려준다.
-function observationProblem(observation, dispatchedAtMs, now) {
+function observationProblem(
+  observation,
+  dispatchedAtMs,
+  now,
+  clockSkewToleranceMs,
+) {
   if (!isPlainObject(observation)) {
     return SEAT_LIVENESS_REASON.OBSERVATION_INVALID;
   }
-  if (!isWellFormedObservation(observation)) {
+  if (!isWellFormedObservation(observation, clockSkewToleranceMs)) {
     return SEAT_LIVENESS_REASON.OBSERVATION_MALFORMED;
   }
   if (observation.observedAtMs > now) {
@@ -164,6 +208,9 @@ function observationProblem(observation, dispatchedAtMs, now) {
 // - `now` = 판정 시각(epoch ms, 인자로만 받는다).
 // - `thresholds.maxNoOutputSeconds` = 생략 시
 //   `DEFAULT_MAX_NO_OUTPUT_SECONDS`.
+// - `thresholds.observationClockSkewToleranceMs`(HYK-421 1R) = 생략 시
+//   `DEFAULT_OBSERVATION_CLOCK_SKEW_TOLERANCE_MS` -- `lastOutputAt`이
+//   `observedAtMs`를 이 허용치만큼 넘어서도 구조 모순으로 닫지 않는다.
 export function judgeSeatLiveness(args) {
   if (!isPlainObject(args)) {
     return undecidable(SEAT_LIVENESS_REASON.ARGS_INVALID);
@@ -183,6 +230,14 @@ export function judgeSeatLiveness(args) {
   }
   const thresholdMs = maxNoOutputSeconds * 1000;
 
+  // HYK-421 1R (결함 1): thresholds가 생략되면(원래 계약 그대로) 기본
+  // 허용치를 쓰고, 명시적으로 넘기면 그 값을 쓴다 -- maxNoOutputSeconds와
+  // 동일한 "생략 시 낙하값" 형태.
+  const clockSkewToleranceMs = resolveClockSkewToleranceMs(thresholds);
+  if (!isNonNegativeFiniteNumber(clockSkewToleranceMs)) {
+    return undecidable(SEAT_LIVENESS_REASON.THRESHOLD_INVALID);
+  }
+
   if (!isWellFormedDispatch(dispatch)) {
     return undecidable(SEAT_LIVENESS_REASON.DISPATCH_INVALID);
   }
@@ -191,7 +246,12 @@ export function judgeSeatLiveness(args) {
     return undecidable(SEAT_LIVENESS_REASON.DISPATCH_IN_FUTURE);
   }
 
-  const problem = observationProblem(observation, dispatchedAtMs, now);
+  const problem = observationProblem(
+    observation,
+    dispatchedAtMs,
+    now,
+    clockSkewToleranceMs,
+  );
   if (problem) return undecidable(problem);
   const { lastOutputAt, reasonHint } = observation;
 

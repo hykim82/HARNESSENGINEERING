@@ -85,6 +85,20 @@ export const SEAT_IDLE_REASON = Object.freeze({
 
 export const DEFAULT_MAX_ABANDONED_SECONDS = 14400; // 4시간, 근거는 위 헤더 주석.
 
+// HYK-421 1R (coder-task.md §2 요구6 -- seat-idle-core.mjs도 같이
+// 고치기로 판단한 근거): 이 코어의 관측은 seat-liveness-core.mjs와 똑같은
+// 어댑터 함수(collectSeatLivenessObservation/fetchSeatLivenessShow)가
+// 만든다 -- `observedAtMs`는 조회 "전", `lastOutputAt`은 조회 "후"
+// 응답에서 온다. 그래서 바쁜 좌석이면 이 축에서도 seat-liveness 축과
+// 동일하게 `lastOutputAt > observedAtMs`가 되어 구조 모순으로
+// `UNDECIDABLE`이 될 수 있다 -- "같은 형태"가 아니라 "같은 원인의 같은
+// 결함"이다. 두 축 다 orch-stall-detect.mjs에 실제로 결선돼 있어(§1의
+// judgeSeatIdleForRepo) 하나만 고치면 이 축은 여전히 "바쁠수록 판정
+// 불가"로 남는다 -- 그래서 seat-liveness-core.mjs와 대칭으로 함께
+// 고친다(근거·값·주석은 그 파일과 동일, 코드 중복은 두 코어가 원래도
+// 독립 파일로 나뉘어 있는 기존 구조를 따른 것뿐이다).
+export const DEFAULT_OBSERVATION_CLOCK_SKEW_TOLERANCE_MS = 5000;
+
 function isPlainObject(v) {
   return v !== null && typeof v === "object" && !Array.isArray(v);
 }
@@ -93,6 +107,22 @@ function isFiniteNumber(v) {
 }
 function isPositiveFiniteNumber(v) {
   return isFiniteNumber(v) && v > 0;
+}
+function isNonNegativeFiniteNumber(v) {
+  return isFiniteNumber(v) && v >= 0;
+}
+
+// HYK-421 1R: judgeSeatIdle의 eslint complexity 상한(12) 준수를 위해
+// "생략 시 낙하값" 분기를 별도 함수로 뽑는다(seat-liveness-core.mjs와
+// 동일 패턴, 동작 변경 없음).
+function resolveClockSkewToleranceMs(thresholds) {
+  if (thresholds === undefined || thresholds === null) {
+    return DEFAULT_OBSERVATION_CLOCK_SKEW_TOLERANCE_MS;
+  }
+  if (thresholds.observationClockSkewToleranceMs === undefined) {
+    return DEFAULT_OBSERVATION_CLOCK_SKEW_TOLERANCE_MS;
+  }
+  return thresholds.observationClockSkewToleranceMs;
 }
 
 function undecidable(reasonCode) {
@@ -109,19 +139,20 @@ function undecidable(reasonCode) {
 // 읽어 구조를 검사하지 않는다 -- 존재 여부·형식 무관, 오직 통과시켜
 // 호출부에서 details에 그대로 옮길 뿐이다(seat-liveness-core.mjs와
 // 동일 원칙).
-function isWellFormedObservation(entry) {
+function isWellFormedObservation(entry, clockSkewToleranceMs) {
   if (!isPlainObject(entry)) return false;
   if (!isFiniteNumber(entry.observedAtMs)) return false;
   if (!isFiniteNumber(entry.lastOutputAt)) return false;
-  // 출력 시각이 그 출력을 관측한 시각보다 나중일 수 없다(구조적 모순).
-  return entry.lastOutputAt <= entry.observedAtMs;
+  // 출력 시각이 그 출력을 관측한 시각보다 왕복시간 허용치를 넘어
+  // 나중일 수 없다(구조적 모순) -- seat-liveness-core.mjs와 동일 원칙.
+  return entry.lastOutputAt <= entry.observedAtMs + clockSkewToleranceMs;
 }
 
-function observationProblem(observation, now) {
+function observationProblem(observation, now, clockSkewToleranceMs) {
   if (!isPlainObject(observation)) {
     return SEAT_IDLE_REASON.OBSERVATION_INVALID;
   }
-  if (!isWellFormedObservation(observation)) {
+  if (!isWellFormedObservation(observation, clockSkewToleranceMs)) {
     return SEAT_IDLE_REASON.OBSERVATION_MALFORMED;
   }
   if (observation.observedAtMs > now) {
@@ -139,6 +170,8 @@ function observationProblem(observation, now) {
 // - `now` = 판정 시각(epoch ms, 인자로만 받는다).
 // - `thresholds.maxAbandonedSeconds` = 생략 시
 //   `DEFAULT_MAX_ABANDONED_SECONDS`.
+// - `thresholds.observationClockSkewToleranceMs`(HYK-421 1R) = 생략 시
+//   `DEFAULT_OBSERVATION_CLOCK_SKEW_TOLERANCE_MS`.
 //
 // ★이 코어는 "활성 배달이 있는지"를 모른다 -- 호출부가 그 판정(§2-3
 // (b))을 이미 마치고 "이 좌석은 이 축의 대상이다"라는 것을 전제로 이
@@ -162,7 +195,12 @@ export function judgeSeatIdle(args) {
   }
   const thresholdMs = maxAbandonedSeconds * 1000;
 
-  const problem = observationProblem(observation, now);
+  const clockSkewToleranceMs = resolveClockSkewToleranceMs(thresholds);
+  if (!isNonNegativeFiniteNumber(clockSkewToleranceMs)) {
+    return undecidable(SEAT_IDLE_REASON.THRESHOLD_INVALID);
+  }
+
+  const problem = observationProblem(observation, now, clockSkewToleranceMs);
   if (problem) return undecidable(problem);
   const { lastOutputAt, reasonHint } = observation;
 

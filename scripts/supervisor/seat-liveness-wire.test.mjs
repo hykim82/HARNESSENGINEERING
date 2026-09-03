@@ -657,6 +657,117 @@ test("§2-2 여러 건 동시 무응답: 두 워크트리가 동시에 SUSPECTED
 });
 
 // ---------------------------------------------------------------------------
+// HYK-421 1R (결함 2 -- 요약 대표값, coder-task.md §1/§2 요구2/완료조건3):
+// worst-wins 대표(status/verdict)와 독립적으로 "실제로 판정된 활성
+// 배달이 있었는가"를 별도 필드로 낸다. ★51회차 실사고 재현: NOT_APPLICABLE
+// (대상 없음)과 JUDGED+RESPONSIVE(정상)가 severity 0으로 동률이면 목록
+// 순서상 첫 항목이 대표로 뽑혀 "정상"이 "대상 없음"으로 보일 수 있다 --
+// 이 필드는 그 동률과 무관하게 참을 답한다.
+// ---------------------------------------------------------------------------
+test("HYK-421 1R ⑵ 정상 vs 무대상 구별: 한 워크트리는 활성 배달 없음(NOT_APPLICABLE), 다른 워크트리는 활성 배달 + 정상 응답 좌석(RESPONSIVE) -- severity 동률(0)이라 대표 status는 목록 순서에 좌우되지만, liveDispatchJudgedCount/liveDispatchVerdict는 항상 '실제로 정상 판정된 배달이 있었다'를 말한다", () => {
+  withTempDir("hyk421-live-vs-none-", (mainDir) => {
+    initPlainGitRepo(mainDir);
+    // mainDir: 활성 배달 없음(.harness/coder-task.md 자체가 없음) -> NOT_APPLICABLE.
+    const linkedDir = addLinkedWorktree(mainDir);
+    try {
+      writeTaskFile(linkedDir, {
+        taskId: "HYK-421-live-b",
+        droppedAt: "2026-08-04 11:00",
+      });
+      const [, linkedPath] = listWorktreePaths(mainDir);
+      const dispatchedAt = Date.parse("2026-08-04T11:00:00+09:00");
+      const now = dispatchedAt + 5000; // 정상 범위 내(임계 이내).
+      const execFn = fakeOrcaExecFn({
+        terminals: [{ handle: "term_b", worktreePath: linkedPath }],
+        showsByHandle: {
+          term_b: {
+            ok: true,
+            result: { terminal: { lastOutputAt: now, title: "CODER" } },
+          },
+        },
+      });
+      const r = judgeSeatLivenessAcrossWorktrees(
+        { repoRoot: mainDir, now },
+        { execFn },
+      );
+      assert.equal(r.totalWorktrees, 2);
+      // 대표 status는 동률(둘 다 severity 0)이라 목록 첫 항목("main")일 수
+      // 있다 -- 이 시험은 그 값 자체를 단언하지 않는다(구현의 목록 순서에
+      // 결합하지 않는다, coder-task.md §2 요구2 "등급표를 흔들지 마라").
+      // 대신 새 필드가 "실제로 정상 판정된 배달이 있었다"를 대표값과
+      // 무관하게 정확히 말하는지만 본다.
+      assert.equal(r.liveDispatchJudgedCount, 1);
+      assert.equal(r.liveDispatchVerdict, SEAT_LIVENESS_VERDICT.RESPONSIVE);
+    } finally {
+      rmSync(linkedDir, { recursive: true, force: true });
+    }
+  });
+});
+
+test("HYK-421 1R ⑵ 완전 무대상: 어느 워크트리도 활성 배달이 없음 -> liveDispatchJudgedCount=0, liveDispatchVerdict=null (대상 없음과 정상을 뒤섞지 않는다)", () => {
+  withTempDir("hyk421-no-active-", (mainDir) => {
+    initPlainGitRepo(mainDir);
+    const now = Date.parse("2026-08-04T11:00:00+09:00");
+    const r = judgeSeatLivenessAcrossWorktrees(
+      { repoRoot: mainDir, now },
+      { execFn: throwingExecFn() },
+    );
+    assert.equal(r.status, SEAT_LIVENESS_WIRE_STATUS.NOT_APPLICABLE);
+    assert.equal(r.liveDispatchJudgedCount, 0);
+    assert.equal(r.liveDispatchVerdict, null);
+  });
+});
+
+test("HYK-421 1R ⑵ worst-wins 계약 무회귀: SUSPECTED_UNRESPONSIVE가 하나라도 있으면 대표 verdict는 여전히 그것이다(등급표를 흔들지 않았다는 증명) -- liveDispatchVerdict도 같은 최악을 반영한다", () => {
+  withTempDir("hyk421-worst-wins-", (mainDir) => {
+    initPlainGitRepo(mainDir);
+    writeTaskFile(mainDir, {
+      taskId: "HYK-421-worst-a",
+      droppedAt: "2026-08-04 11:00",
+    });
+    const linkedDir = addLinkedWorktree(mainDir);
+    try {
+      writeTaskFile(linkedDir, {
+        taskId: "HYK-421-worst-b",
+        droppedAt: "2026-08-04 11:00",
+      });
+      const [mainPath, linkedPath] = listWorktreePaths(mainDir);
+      const dispatchedAt = Date.parse("2026-08-04T11:00:00+09:00");
+      const now = dispatchedAt + 60 * 60 * 1000; // 배달 1시간 뒤(임계 20분 초과).
+      const stale = dispatchedAt; // 배달 시각 이후로 출력이 없었다(무응답 의심).
+      const execFn = fakeOrcaExecFn({
+        terminals: [
+          { handle: "term_a", worktreePath: mainPath },
+          { handle: "term_b", worktreePath: linkedPath },
+        ],
+        showsByHandle: {
+          term_a: {
+            ok: true,
+            result: { terminal: { lastOutputAt: now, title: "CODER" } }, // 정상.
+          },
+          term_b: {
+            ok: true,
+            result: { terminal: { lastOutputAt: stale, title: "REVIEW" } }, // 무응답 의심.
+          },
+        },
+      });
+      const r = judgeSeatLivenessAcrossWorktrees(
+        { repoRoot: mainDir, now },
+        { execFn },
+      );
+      assert.equal(r.verdict, SEAT_LIVENESS_VERDICT.SUSPECTED_UNRESPONSIVE);
+      assert.equal(r.liveDispatchJudgedCount, 2);
+      assert.equal(
+        r.liveDispatchVerdict,
+        SEAT_LIVENESS_VERDICT.SUSPECTED_UNRESPONSIVE,
+      );
+    } finally {
+      rmSync(linkedDir, { recursive: true, force: true });
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
 // 필수 mutation 6종(coder-task.md §3-f) -- 매 실행마다 사본으로 RED를
 // 자동 확인한다. 디스크의 현재 orch-stall-detect.mjs를 읽어 상대 import
 // (`./orch-progress-core.mjs` 등)를 그 실제 파일의 **절대 `file://`

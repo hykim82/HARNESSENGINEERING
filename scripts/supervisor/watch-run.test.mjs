@@ -600,6 +600,70 @@ test("HYK-210-human-log-1: runWatchOnce with a synthetic multi-seat detector std
 });
 
 // ---------------------------------------------------------------------------
+// HYK-421 1R (결함 2, coder-task.md §5 완료조건5 "결선 확인") -- 위 시험과
+// 동일 형태로, orch-stall-detect.mjs stdout 모양에 liveDispatchJudgedCount/
+// liveDispatchVerdict가 실려 오면 buildLogLine이 실제로 watch.log 끝에
+// seat_live_* 토큰을 싣는지 결선 그 자체를 증명한다(헛시험 방지 -- 이
+// 시험은 시험 helper가 아니라 runWatchOnce의 실 경로를 그대로 탄다).
+// ---------------------------------------------------------------------------
+test("HYK-421 1R ⑵: runWatchOnce -- detector stdout의 seatLiveness.liveDispatchJudgedCount/liveDispatchVerdict가 watch.log 끝에 seat_live_judged_count=/seat_live_verdict= 토큰으로 실제로 실린다 (결선 증명)", () => {
+  const watchDir = tmpWatchDir();
+  try {
+    const result = runWatchOnce({
+      repoRoot: ROOT,
+      watchDir,
+      now: NOW_MS,
+      execFn: () =>
+        JSON.stringify({
+          verdict: "PROGRESSING",
+          reasonCode: "OK",
+          seatLiveness: {
+            status: "SEAT_LIVENESS_NOT_APPLICABLE", // 대표는 무대상이어도(동률),
+            worstCount: 1,
+            totalWorktrees: 2,
+            worktrees: [],
+            liveDispatchJudgedCount: 1, // 실제로는 정상 판정된 배달이 있었다.
+            liveDispatchVerdict: "RESPONSIVE",
+          },
+          seatIdle: { status: "SEAT_IDLE_NOT_APPLICABLE" },
+          dispatchStart: { status: "DISPATCH_START_NOT_APPLICABLE" },
+        }),
+    });
+    const logText = fs.readFileSync(result.logPath, "utf8");
+    assert.match(
+      logText,
+      /seat_live_judged_count=1 seat_live_verdict=RESPONSIVE/,
+    );
+  } finally {
+    fs.rmSync(watchDir, { recursive: true, force: true });
+  }
+});
+
+test("HYK-421 1R ⑵: detector stdout에 liveDispatchJudgedCount 필드가 아예 없으면(옛 stdout 모양) seat_live_* 토큰이 로그 줄에 전혀 붙지 않는다 (byte-identical 회귀 0 -- filter(Boolean) 경로 증명)", () => {
+  const watchDir = tmpWatchDir();
+  try {
+    const result = runWatchOnce({
+      repoRoot: ROOT,
+      watchDir,
+      now: NOW_MS,
+      execFn: () =>
+        JSON.stringify({
+          verdict: "PROGRESSING",
+          reasonCode: "OK",
+          seatLiveness: { status: "SEAT_LIVENESS_NOT_APPLICABLE" },
+          seatIdle: { status: "SEAT_IDLE_NOT_APPLICABLE" },
+          dispatchStart: { status: "DISPATCH_START_NOT_APPLICABLE" },
+        }),
+    });
+    const logText = fs.readFileSync(result.logPath, "utf8");
+    assert.doesNotMatch(logText, /seat_live_judged_count=/);
+    assert.doesNotMatch(logText, /seat_live_verdict=/);
+  } finally {
+    fs.rmSync(watchDir, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
 // 원상복구 단언(coder-task.md §2 비타협 #6·#7) -- mkdtemp만 썼다.
 // ---------------------------------------------------------------------------
 after(() => {

@@ -18,6 +18,7 @@ import {
   SEAT_IDLE_VERDICT,
   SEAT_IDLE_REASON,
   DEFAULT_MAX_ABANDONED_SECONDS,
+  DEFAULT_OBSERVATION_CLOCK_SKEW_TOLERANCE_MS,
 } from "./seat-idle-core.mjs";
 
 function repoRoot() {
@@ -266,8 +267,15 @@ test("(c) missing/malformed/future observations never leak into SUSPECTED_ABANDO
     { observation: undefined, now: 1000 },
     // 형식 위반: lastOutputAt 결손.
     { observation: { observedAtMs: 1000 }, now: 1000 },
-    // 형식 위반: lastOutputAt이 관측 시각보다 미래(구조적 모순).
-    { observation: { observedAtMs: 1000, lastOutputAt: 5000 }, now: 5000 },
+    // 형식 위반: lastOutputAt이 관측 시각보다 «허용치를 훨씬 넘겨»
+    // 미래(구조적 모순) -- HYK-421 1R로 바쁜 좌석의 정상 왕복(수백 ms)은
+    // DEFAULT_OBSERVATION_CLOCK_SKEW_TOLERANCE_MS(5000ms) 이내로 통과하므로
+    // 이 표본은 그 허용치를 자릿수로 넘는 10분 뒤로 둬 "진짜 malformed"임을
+    // 분명히 한다(seat-liveness-core.test.mjs와 동일 이유).
+    {
+      observation: { observedAtMs: 1000, lastOutputAt: 1000 + 600_000 },
+      now: 1000 + 600_000,
+    },
     // 미래 시각: 관측 시각이 now보다 나중.
     { observation: { observedAtMs: 10_000, lastOutputAt: 10_000 }, now: 1000 },
   ];
@@ -279,6 +287,46 @@ test("(c) missing/malformed/future observations never leak into SUSPECTED_ABANDO
       `expected UNDECIDABLE for ${JSON.stringify(c)}, got ${result.verdict}`,
     );
   }
+});
+
+// ---------------------------------------------------------------------------
+// HYK-421 1R (결함 1 -- seat-liveness-core.mjs와 같은 원인의 같은 결함,
+// coder-task.md §2 요구6): 이 축의 관측도 같은 어댑터 함수가 만드므로
+// 바쁜 좌석 왕복시간이 그대로 새어 들어온다. 대칭 시험.
+// ---------------------------------------------------------------------------
+test("HYK-421 1R ⓐ 바쁜 좌석: lastOutputAt이 observedAtMs보다 실측 왕복시간(170~264ms) 만큼 뒤여도 UNDECIDABLE이 아니라 정상 판정된다", () => {
+  const busySamplesMs = [170, 192, 264];
+  for (const gapMs of busySamplesMs) {
+    const observedAtMs = 1_000_000;
+    const result = judgeSeatIdle({
+      observation: {
+        observedAtMs,
+        lastOutputAt: observedAtMs + gapMs,
+      },
+      now: observedAtMs + gapMs,
+    });
+    assert.notEqual(
+      result.verdict,
+      SEAT_IDLE_VERDICT.UNDECIDABLE,
+      `busy-seat gap ${gapMs}ms must not be misjudged as UNDECIDABLE`,
+    );
+    assert.equal(result.verdict, SEAT_IDLE_VERDICT.IDLE_OK);
+  }
+});
+
+test("HYK-421 1R ⓑ 진짜 malformed: 허용치를 자릿수로 넘는 시각 역전은 여전히 OBSERVATION_MALFORMED로 거부된다", () => {
+  const observedAtMs = 1_000_000;
+  const genuinelyMalformedGapMs =
+    DEFAULT_OBSERVATION_CLOCK_SKEW_TOLERANCE_MS + 10 * 60 * 1000;
+  const result = judgeSeatIdle({
+    observation: {
+      observedAtMs,
+      lastOutputAt: observedAtMs + genuinelyMalformedGapMs,
+    },
+    now: observedAtMs + genuinelyMalformedGapMs,
+  });
+  assert.equal(result.verdict, SEAT_IDLE_VERDICT.UNDECIDABLE);
+  assert.equal(result.reasonCode, SEAT_IDLE_REASON.OBSERVATION_MALFORMED);
 });
 
 // ---------------------------------------------------------------------------
