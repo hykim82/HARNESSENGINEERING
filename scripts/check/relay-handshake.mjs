@@ -110,24 +110,13 @@ const BLOCKED_ANYWHERE_RE = />>>\s*(BLOCKED|NEEDS_INPUT)\b/gi;
 // ⛔BLOCKED_RE(엄격 채택 기준, 채택에는 사유 필수)는 이 상수와 무관하게
 // 그대로다 -- 건드리지 않는다.
 const BLOCKED_BARE_COLUMN0_RE = /^(BLOCKED|NEEDS_INPUT):/gim;
-// HYK-325 §2-3: the non-column-0 meta line finalize-done.mjs appends right
-// after a `>>> DONE:` line it wrote itself (see that file's own
-// FINALIZE_DONE_MARKER_LINE). Presence is only ever used for a warning
-// (see warnIfMissingFinalizeDoneMarker below) -- absence never blocks
-// consumption.
+// HYK-325 §2-3 (승격: HYK-418 §2-1): the non-column-0 meta line finalize-
+// done.mjs appends right after a `>>> DONE:` line it wrote itself (see that
+// file's own FINALIZE_DONE_MARKER_LINE). Absence used to only trigger a
+// console warning (warnIfMissingFinalizeDoneMarker, removed by HYK-418 --
+// see resolveDoneAt's own HYK-418 §2-1 comment for where this regex is now
+// used to fail closed instead).
 const DONE_STAMPED_BY_MARKER_RE = /^done_stamped_by:\s*finalize-done\s*$/im;
-
-// HYK-325 §2-3: best-effort, non-fatal, console-only -- deliberately does
-// NOT return a verdict (unlike every other resolve*/check* helper in this
-// file) because this signal must never change checkRelayHandshake's own
-// ok/reject decision (승격은 이번 범위 밖, coder-task.md §2-3).
-function warnIfMissingFinalizeDoneMarker(resultContent) {
-  if (!DONE_STAMPED_BY_MARKER_RE.test(resultContent)) {
-    console.error(
-      "relay-handshake: warning: DONE line has no finalize-done marker -- 손기입 가능성(HYK-325)",
-    );
-  }
-}
 
 function repoRoot() {
   try {
@@ -1020,6 +1009,31 @@ function resolveDoneAt(
     return {
       ok: false,
       reason: `result DONE timestamp is minute-precision, seconds required: '${doneMatch[1].trim()}' (need YYYY-MM-DD HH:MM:SS KST -- HYK-244 2R-a: minute precision cannot distinguish same-minute rounds, and the "분 단위 거부" contract is fixed, not relaxable. 앞으로는 ${fixToolHintFor(TIME_FIELD.RESULT_DONE_AT)} 로 찍어라)`,
+    };
+  }
+
+  // HYK-418 §2-1 (승격: 경고 -> fail-closed 거부): same axis, same position,
+  // same early-return-before-spawnObserveDoneLine technique as the two
+  // format-validity checks directly above -- NOT a new post-observation
+  // gate (coder-task.md §2-2's "새 축을 만들지 말고 그 축을 재사용하라").
+  // A format-VALID '>>> DONE:' line with no `done_stamped_by: finalize-
+  // done` marker anywhere in the file is very likely hand-typed (HYK-325's
+  // own diagnosis, formerly only a console warning via
+  // warnIfMissingFinalizeDoneMarker -- see that function's now-updated
+  // header). Being positioned here, before spawnObserveDoneLine, means
+  // first-observation is never recorded for a value this function is about
+  // to reject anyway (완료조건2 -- 첫 관측을 박지 않는다), the exact same
+  // guarantee the two checks above already provide for malformed/minute-
+  // precision values. The reason string below names the literal recovery
+  // command (finalize-done.mjs's REPLACED_UNMARKED path, HYK-418 §2-3) so
+  // this rejection is not a dead end.
+  if (!DONE_STAMPED_BY_MARKER_RE.test(resultContent)) {
+    console.error(
+      `relay-handshake: first-observation skipped: DONE line has no finalize-done marker (likely hand-typed, HYK-325) -- 복구: node scripts/relay/finalize-done.mjs ${role}`,
+    );
+    return {
+      ok: false,
+      reason: `result '>>> DONE:' line has no 'done_stamped_by: finalize-done' marker -- likely hand-typed (HYK-325), not accepted. Recovery: node scripts/relay/finalize-done.mjs ${role}`,
     };
   }
 
@@ -2450,13 +2464,16 @@ export function checkRelayHandshake({
     observation,
   } = core;
 
-  // HYK-325 §2-3 (탐지, 거부 아님): a format-valid DONE line that finalize-
-  // done.mjs did NOT stamp (no `done_stamped_by: finalize-done` marker
-  // line) is very likely a hand-typed one -- warn so an operator watching
-  // the log has a signal, but do NOT block consumption on it (existing
-  // manual-edit / no-marker rounds must keep working; escalating this to a
-  // reject is a separate, out-of-scope decision -- see coder-task.md §2-3).
-  warnIfMissingFinalizeDoneMarker(resultContent);
+  // HYK-325 §2-3 승격 (HYK-418 §2-1): the missing-marker check used to live
+  // here as a console-only warning (warnIfMissingFinalizeDoneMarker, non-
+  // fatal, never affected the verdict). It is now a fail-closed rejection
+  // inside resolveDoneAt (above resolveHandshakeCore in this file), on the
+  // same axis as the malformed/minute-precision checks -- see that
+  // function's own HYK-418 §2-1 comment. By the time execution reaches
+  // this point, `core.ok` was already true, which means resolveDoneAt's
+  // marker check already passed -- there is nothing left to warn about
+  // here, so this call site is deliberately gone rather than kept as dead
+  // code that always no-ops.
 
   const rewriteOrStaleVerdict = checkRewriteAndStaleness({
     observation,

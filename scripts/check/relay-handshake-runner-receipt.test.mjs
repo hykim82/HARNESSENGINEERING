@@ -100,7 +100,11 @@ function writeCoderRound(dir, { resultBody }) {
   );
   writeFileSync(
     join(dir, "coder.md"),
-    `task_id: HYK-411-T\n${resultBody}\n>>> DONE: CODER @ 2026-09-01 06:10:00 KST\n`,
+    // HYK-418 §2-1: relay-handshake now rejects a well-formed DONE line
+    // with no finalize-done marker (fail-closed) -- carry the marker so
+    // this shared fixture keeps exercising the runner-receipt wiring under
+    // test, not this promotion's rejection.
+    `task_id: HYK-411-T\n${resultBody}\n>>> DONE: CODER @ 2026-09-01 06:10:00 KST\ndone_stamped_by: finalize-done\n`,
     "utf8",
   );
 }

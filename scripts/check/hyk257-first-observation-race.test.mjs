@@ -50,7 +50,7 @@ test("실사례 #1 재현: 첫 관측(05:44:12, future) -> 자기정정 후 최�
   // observed-at instant (05:37:23.998 KST) from the incident.
   writeFileSync(
     join(harnessDir, `${role}.md`),
-    `task_id: ${taskId}\n\n>>> DONE: CODER @ 2026-08-17 05:44:12 KST\n`,
+    `task_id: ${taskId}\n\n>>> DONE: CODER @ 2026-08-17 05:44:12 KST\ndone_stamped_by: finalize-done\n`,
     "utf8",
   );
   const poll1Now = kstToMs("2026-08-17 05:37:23.998");
@@ -67,7 +67,7 @@ test("실사례 #1 재현: 첫 관측(05:44:12, future) -> 자기정정 후 최�
   // `now` advanced accordingly.
   writeFileSync(
     join(harnessDir, `${role}.md`),
-    `task_id: ${taskId}\n\n>>> DONE: CODER @ 2026-08-17 05:37:54 KST\n`,
+    `task_id: ${taskId}\n\n>>> DONE: CODER @ 2026-08-17 05:37:54 KST\ndone_stamped_by: finalize-done\n`,
     "utf8",
   );
   const poll2Now = kstToMs("2026-08-17 05:38:10");
@@ -94,7 +94,7 @@ test("정상 라운드(단일 관측, 최종본과 동일값) -- 오탐 0: 이 �
   );
   writeFileSync(
     join(harnessDir, `${role}.md`),
-    `task_id: ${taskId}\n\n>>> DONE: CODER @ 2026-08-17 09:05:00 KST\n`,
+    `task_id: ${taskId}\n\n>>> DONE: CODER @ 2026-08-17 09:05:00 KST\ndone_stamped_by: finalize-done\n`,
     "utf8",
   );
   const now = kstToMs("2026-08-17 09:05:05");
@@ -145,7 +145,7 @@ test("HYK-257-done-stamp-3: 같은 task_id의 정상 1R -> 2R 연속 소비 -- 2
   );
   writeFileSync(
     join(harnessDir, `${role}.md`),
-    `task_id: ${taskId}\n\n>>> DONE: CODER @ 2026-08-17 08:05:00 KST\n`,
+    `task_id: ${taskId}\n\n>>> DONE: CODER @ 2026-08-17 08:05:00 KST\ndone_stamped_by: finalize-done\n`,
     "utf8",
   );
   const round1Now = kstToMs("2026-08-17 08:05:05");
@@ -163,7 +163,7 @@ test("HYK-257-done-stamp-3: 같은 task_id의 정상 1R -> 2R 연속 소비 -- 2
   );
   writeFileSync(
     join(harnessDir, `${role}.md`),
-    `task_id: ${taskId}\n\n>>> DONE: CODER @ 2026-08-17 08:35:00 KST\n`,
+    `task_id: ${taskId}\n\n>>> DONE: CODER @ 2026-08-17 08:35:00 KST\ndone_stamped_by: finalize-done\n`,
     "utf8",
   );
   const round2Now = kstToMs("2026-08-17 08:35:05");

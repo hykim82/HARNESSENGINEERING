@@ -175,7 +175,7 @@ test("mutation 1 (필수): time-authority.mjs's RESULT_DONE_AT registry row remo
     writeResult(
       dir,
       "coder",
-      "task_id: HYK-1\n\n>>> DONE: CODER @ 2026-07-05 06:10:00 KST\n",
+      "task_id: HYK-1\n\n>>> DONE: CODER @ 2026-07-05 06:10:00 KST\ndone_stamped_by: finalize-done\n",
     );
     const res = runCli(relayHandshakePath, ["coder", dir]);
     assert.notEqual(
@@ -211,7 +211,7 @@ test("mutation 2 (필수, ★PM 실측): DONE-side future-skew check call remove
     writeResult(
       dir,
       "coder",
-      "task_id: FUTURE-1\n\n>>> DONE: CODER @ 2099-01-01 00:00:00 KST\n",
+      "task_id: FUTURE-1\n\n>>> DONE: CODER @ 2099-01-01 00:00:00 KST\ndone_stamped_by: finalize-done\n",
     );
     const res = runCli(relayHandshakePath, ["coder", dir]);
     assert.equal(
@@ -284,7 +284,7 @@ test("mutation 4 (필수): stale-result (doneAt < droppedAt) guard removed from 
     writeResult(
       dir,
       "coder",
-      "task_id: HYK-1\n\n>>> DONE: CODER @ 2026-07-05 05:00:00 KST\n",
+      "task_id: HYK-1\n\n>>> DONE: CODER @ 2026-07-05 05:00:00 KST\ndone_stamped_by: finalize-done\n",
     );
     const res = runCli(relayHandshakePath, ["coder", dir]);
     assert.equal(

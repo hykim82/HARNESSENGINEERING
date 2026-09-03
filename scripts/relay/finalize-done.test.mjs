@@ -87,11 +87,15 @@ test("finalizeDone: normal call (no callerSuppliedAt) writes a DONE line stamped
   });
 });
 
-test("finalizeDone: already has a DONE line -> refuses, never overwrites", () => {
+// HYK-418 §2-3: this is now the ALREADY_FINALIZED case -- well-formed AND
+// already marker-stamped (i.e. genuinely produced by finalize-done once
+// before). A well-formed-but-UNMARKED line is a DIFFERENT, now-replaceable
+// case -- see the next test.
+test("finalizeDone: already has a marked DONE line -> refuses, never overwrites", () => {
   withDir((dir) => {
     writeFileSync(
       join(dir, "coder.md"),
-      "task_id: HYK-1\n\n>>> DONE: CODER @ 2026-08-01 00:00:00 KST\n",
+      `task_id: HYK-1\n\n>>> DONE: CODER @ 2026-08-01 00:00:00 KST\n${"done_stamped_by: finalize-done"}\n`,
       "utf8",
     );
     const result = finalizeDone({ role: "coder", harnessDir: dir });
@@ -103,6 +107,42 @@ test("finalizeDone: already has a DONE line -> refuses, never overwrites", () =>
       /2026-08-01 00:00:00 KST/,
       "original line must survive untouched",
     );
+  });
+});
+
+// HYK-418 §2-3 (deadlock recovery path, coder-task.md §1 요구4): a
+// well-formed but UNMARKED DONE line (the exact shape relay-handshake.mjs
+// now rejects, HYK-418 §2-1) must be replaceable exactly once -- otherwise
+// promoting the consumer side to fail-closed creates a round with no way
+// out (HYK-423's real lockup).
+test("finalizeDone: well-formed but unmarked DONE line -> replaced once (REPLACED_UNMARKED), original preserved as superseded_done:", () => {
+  withDir((dir) => {
+    writeFileSync(
+      join(dir, "coder.md"),
+      "task_id: HYK-1\n\n>>> DONE: CODER @ 2026-08-01 00:00:00 KST\n",
+      "utf8",
+    );
+    const fixedMs = Date.parse("2026-08-09T05:00:00Z"); // 2026-08-09 14:00 KST
+    const result = finalizeDone({
+      role: "coder",
+      harnessDir: dir,
+      nowFn: () => fixedMs,
+    });
+    assert.equal(result.ok, true);
+    assert.equal(result.reasonCode, FINALIZE_DONE_REASON.REPLACED_UNMARKED);
+    const content = readFileSync(join(dir, "coder.md"), "utf8");
+    assert.match(
+      content,
+      /superseded_done: >>> DONE: CODER @ 2026-08-01 00:00:00 KST/,
+      "original unmarked line preserved verbatim as superseded_done:",
+    );
+    assert.match(content, />>> DONE: CODER @ 2026-08-09 14:00:00 KST/);
+    assert.match(content, /^done_stamped_by: finalize-done$/m);
+
+    // §2-1 (2회째 교체 금지) co-exists: a second call must NOT replace again.
+    const second = finalizeDone({ role: "coder", harnessDir: dir });
+    assert.equal(second.ok, false);
+    assert.equal(second.reasonCode, FINALIZE_DONE_REASON.ALREADY_REPLACED);
   });
 });
 
@@ -553,6 +593,60 @@ test("production entry point (검토자 실측 입력): relay-handshake CLI anno
     assert.match(
       content,
       /^superseded_done: >>> DONE: CODER @ 2026-99-99 23:19:01 KST$/m,
+    );
+  });
+});
+
+// HYK-418 §2-1/§2-3 (deadlock recovery, round-trip): promoting relay-
+// handshake.mjs's missing-marker check from a warning to a fail-closed
+// rejection (coder-task.md §1 요구4's whole point) would be a dead end on
+// its own -- finalize-done used to treat ANY format-valid DONE line as
+// ALREADY_FINALIZED, so a round stamped by hand had no way out. This locks
+// the full CLI-to-CLI recovery loop, same production-entry-point
+// convention as the test directly above: (1) relay-handshake CLI rejects
+// the unmarked DONE and names the exact recovery command, (2) finalize-
+// done CLI performs the one-time REPLACED_UNMARKED replace, (3) relay-
+// handshake CLI, run again against the SAME round, now accepts it.
+test("HYK-418 §2-3 production entry point: relay-handshake CLI rejects an unmarked well-formed DONE and names the recovery command; finalize-done CLI's one-time REPLACED_UNMARKED clears it; relay-handshake CLI then accepts the SAME round", () => {
+  withDir((dir) => {
+    writeFileSync(
+      join(dir, "coder-task.md"),
+      "task_id: HYK-1\ndropped_at: 2026-08-19 05:00 KST\n",
+      "utf8",
+    );
+    writeFileSync(
+      join(dir, "coder.md"),
+      "task_id: HYK-1\n\nbody\n\n>>> DONE: CODER @ 2026-08-19 05:10:00 KST\n",
+      "utf8",
+    );
+
+    const before = runHandshakeCli(["CODER", dir]);
+    assert.notEqual(
+      before.exit,
+      0,
+      "unmarked (hand-typed) DONE must not be consumed",
+    );
+    assert.match(before.stderr, /no finalize-done marker/);
+    assert.match(
+      before.stderr,
+      /node scripts\/relay\/finalize-done\.mjs CODER/,
+    );
+
+    const finalize = runCli(["coder", dir]);
+    assert.equal(finalize.exit, 0);
+    assert.match(finalize.stdout, /^REPLACED_UNMARKED: >>> DONE: CODER @ /);
+    const content = readFileSync(join(dir, "coder.md"), "utf8");
+    assert.match(
+      content,
+      /^superseded_done: >>> DONE: CODER @ 2026-08-19 05:10:00 KST$/m,
+    );
+    assert.match(content, /^done_stamped_by: finalize-done$/m);
+
+    const after = runHandshakeCli(["CODER", dir]);
+    assert.equal(
+      after.exit,
+      0,
+      "after the one-time machine re-stamp, the SAME round must now be consumable -- otherwise the promotion in coder-task.md §1 요구4 creates a dead end, not a recovery",
     );
   });
 });

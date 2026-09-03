@@ -61,7 +61,7 @@ test("HYK-257 (실사례 재현): DONE labeled KST but actually UTC (9h behind, 
     writeResult(
       dir,
       "coder",
-      `task_id: HYK-265\n\n>>> DONE: CODER @ ${utcAsKstLabel}\n`,
+      `task_id: HYK-265\n\n>>> DONE: CODER @ ${utcAsKstLabel}\ndone_stamped_by: finalize-done\n`,
     );
     const result = checkRelayHandshake({
       role: "coder",
@@ -90,7 +90,7 @@ test("HYK-257: dropped_at 9h mislabel (minute precision) is also caught, state=S
     writeResult(
       dir,
       "coder",
-      `task_id: HYK-1\n\n>>> DONE: CODER @ ${isoKst(FIXED_NOW)}\n`,
+      `task_id: HYK-1\n\n>>> DONE: CODER @ ${isoKst(FIXED_NOW)}\ndone_stamped_by: finalize-done\n`,
     );
     const result = checkRelayHandshake({
       role: "coder",
@@ -129,7 +129,7 @@ test("HYK-257 (오탐 0): normal control battery near typical completion offsets
       writeResult(
         dir,
         "coder",
-        `task_id: HYK-1\n\n>>> DONE: CODER @ ${isoKst(FIXED_NOW + sample.doneOffsetMs)}\n`,
+        `task_id: HYK-1\n\n>>> DONE: CODER @ ${isoKst(FIXED_NOW + sample.doneOffsetMs)}\ndone_stamped_by: finalize-done\n`,
       );
       const result = checkRelayHandshake({
         role: "coder",
@@ -198,7 +198,7 @@ test("HYK-257 ⓒ: future-skew rejection (non-9h-shaped) also carries a fix hint
     writeResult(
       dir,
       "coder",
-      `task_id: HYK-1\n\n>>> DONE: CODER @ ${isoKst(FIXED_NOW + 20 * 60 * 1000)}\n`,
+      `task_id: HYK-1\n\n>>> DONE: CODER @ ${isoKst(FIXED_NOW + 20 * 60 * 1000)}\ndone_stamped_by: finalize-done\n`,
     );
     const result = checkRelayHandshake({
       role: "coder",

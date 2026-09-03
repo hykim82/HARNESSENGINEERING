@@ -65,12 +65,24 @@ const SUPERSEDED_DONE_RE = /^superseded_done:/im;
 // this producer writes (both the normal path and the malformed-replace
 // path) -- a non-column-0 meta line, so it is never mistaken for the
 // '>>> DONE:' line itself by any parser (DONE_LINE_RE/DONE_RE both anchor
-// on '>>>' at column 0). relay-handshake.mjs's warnIfMissingFinalizeDoneMarker
-// reads this same literal text -- keep the two in sync.
+// on '>>>' at column 0). relay-handshake.mjs's DONE_STAMPED_BY_MARKER_RE
+// (HYK-418 §2-1: now a fail-closed rejection, not just a warning) reads
+// this same literal text -- keep the two in sync.
 export const FINALIZE_DONE_MARKER_LINE = "done_stamped_by: finalize-done";
 
 function pad(n) {
   return String(n).padStart(2, "0");
+}
+
+// HYK-418 §2-3: presence check for FINALIZE_DONE_MARKER_LINE (defined just
+// above), reading it back from this file's OWN exported constant rather
+// than a second regex copy -- see resolveExistingDoneLine's
+// unmarkedWellFormedSingle comment for why this isn't a cross-import of
+// relay-handshake.mjs's DONE_STAMPED_BY_MARKER_RE instead.
+function hasFinalizeDoneMarker(content) {
+  return content
+    .split("\n")
+    .some((rawLine) => rawLine.trim() === FINALIZE_DONE_MARKER_LINE);
 }
 
 // KST has no DST -- a fixed +9h offset from UTC is exact and stable, unlike
@@ -97,6 +109,16 @@ export const FINALIZE_DONE_REASON = Object.freeze({
   // HYK-325 §2-1: a malformed line was already replaced once before --
   // refuses to replace again (no infinite re-issue).
   ALREADY_REPLACED: "ALREADY_REPLACED",
+  // HYK-418 §2-3: a single format-VALID '>>> DONE:' line with no
+  // `done_stamped_by: finalize-done` marker -- very likely hand-typed
+  // (HYK-325's own diagnosis). Now that relay-handshake.mjs's consumer side
+  // rejects exactly this shape (fail-closed, coder-task.md §2-1), a round
+  // stamped this way had NO recovery path before this reason code existed
+  // (finalize-done used to treat a format-valid line as ALREADY_FINALIZED
+  // unconditionally -- the deadlock coder-task.md §1 요구4 names). Replaced
+  // exactly once, same one-shot discipline as REPLACED_MALFORMED (guarded
+  // by the same SUPERSEDED_DONE_RE check below -- see ALREADY_REPLACED).
+  REPLACED_UNMARKED: "REPLACED_UNMARKED",
   // HYK-353 2R §1 (P1-2): a well-formed DONE line for this exact
   // (taskId, droppedAt) round was already recorded by the first-observation
   // channel (HYK-257-done-stamp-2) and has not yet been consumed -- the
@@ -270,8 +292,24 @@ function resolveExistingDoneLine({
   const doneMatches = [...existing.matchAll(DONE_RE)];
   const malformedSingle =
     doneMatches.length === 1 && !isWellFormedDoneTimestamp(doneMatches[0][1]);
+  // HYK-418 §2-3: the other half of the deadlock coder-task.md §1 요구4
+  // names -- a single line that IS format-valid but was never stamped
+  // through this producer (no FINALIZE_DONE_MARKER_LINE anywhere in the
+  // file). Reuses this same file's own exported marker-line constant
+  // (hasFinalizeDoneMarker below) rather than duplicating the literal a
+  // third time -- relay-handshake.mjs already keeps its own copy of this
+  // regex in manual sync (see that file's DONE_STAMPED_BY_MARKER_RE
+  // comment); a real cross-import here would be circular (relay-handshake
+  // -> finalize-done -> relay-handshake, since finalize-done already
+  // imports DONE_RE/isWellFormedDoneTimestamp/etc. FROM relay-handshake),
+  // so this file instead re-derives presence from ITS OWN already-exported
+  // constant, which cannot drift because there is nothing to keep in sync.
+  const unmarkedWellFormedSingle =
+    doneMatches.length === 1 &&
+    isWellFormedDoneTimestamp(doneMatches[0][1]) &&
+    !hasFinalizeDoneMarker(existing);
 
-  if (!malformedSingle) {
+  if (!malformedSingle && !unmarkedWellFormedSingle) {
     return {
       ok: false,
       reasonCode: FINALIZE_DONE_REASON.ALREADY_FINALIZED,
@@ -279,11 +317,14 @@ function resolveExistingDoneLine({
     };
   }
 
-  // HYK-353 2R §1 (P1-2): this line looks malformed-and-replaceable, but if
+  // HYK-353 2R §1 (P1-2, widened HYK-418 §2-3): this line looks
+  // replaceable -- either malformed, or format-valid but unmarked -- but if
   // an active (not-yet-consumed) first observation already exists for this
-  // exact round, the malformed shape is itself suspicious (the file was
-  // rewritten AFTER a well-formed value was already seen) -- refuse the
-  // replace instead of quietly producing a fresh, never-observed value.
+  // exact round, that shape is itself suspicious (the file was rewritten
+  // AFTER a well-formed value was already seen) -- refuse the replace
+  // instead of quietly producing a fresh, never-observed value. Same gate,
+  // both callers: an unmarked hand-typed DONE overwriting an observed
+  // machine-stamped one is exactly as suspicious as a malformed rewrite.
   const activeObservation = resolveActiveObservation({
     existing,
     role,
@@ -293,21 +334,21 @@ function resolveExistingDoneLine({
     return {
       ok: false,
       reasonCode: FINALIZE_DONE_REASON.OBSERVATION_LOG_UNDECIDABLE,
-      reason: `finalize-done refuses to replace a malformed '>>> DONE:' line: the observation log for taskId='${activeObservation.taskId}' droppedAt='${activeObservation.droppedAt}' (first-observation.mjs) contains at least one line that failed to parse -- whether this round has an active observation cannot be determined, and "모름" must not be silently treated as "없음" (${resultPath})`,
+      reason: `finalize-done refuses to replace this '>>> DONE:' line: the observation log for taskId='${activeObservation.taskId}' droppedAt='${activeObservation.droppedAt}' (first-observation.mjs) contains at least one line that failed to parse -- whether this round has an active observation cannot be determined, and "모름" must not be silently treated as "없음" (${resultPath})`,
     };
   }
   if (activeObservation) {
     return {
       ok: false,
       reasonCode: FINALIZE_DONE_REASON.ACTIVE_OBSERVATION_BLOCKED,
-      reason: `finalize-done refuses to replace a malformed '>>> DONE:' line: an active (not yet consumed) first observation already exists for taskId='${activeObservation.taskId}' droppedAt='${activeObservation.droppedAt}' (first-observation.mjs) -- replacing it now would launder a suspicious post-observation rewrite instead of letting checkRelayHandshake's own intermediate-rewrite rejection see it (${resultPath})`,
+      reason: `finalize-done refuses to replace this '>>> DONE:' line: an active (not yet consumed) first observation already exists for taskId='${activeObservation.taskId}' droppedAt='${activeObservation.droppedAt}' (first-observation.mjs) -- replacing it now would launder a suspicious post-observation rewrite instead of letting checkRelayHandshake's own intermediate-rewrite rejection see it (${resultPath})`,
     };
   }
 
   const supersededLine = doneMatches[0][0];
   const nowMs = nowFn();
   const line = `>>> DONE: ${role.toUpperCase()} @ ${formatKst(nowMs)}`;
-  // Preserve the original malformed line verbatim as a non-column-0
+  // Preserve the original line verbatim as a non-column-0
   // `superseded_done:` body line (never counted as a '>>> DONE:' cover
   // line by any parser -- DONE_LINE_RE/DONE_RE both anchor on '>>>' at
   // column 0, and this replacement text starts with 'superseded_done:')
@@ -323,14 +364,29 @@ function resolveExistingDoneLine({
     "utf8",
   );
 
-  return {
-    ok: true,
-    reasonCode: FINALIZE_DONE_REASON.REPLACED_MALFORMED,
-    reason: `replaced malformed '>>> DONE:' line ('${supersededLine}') with machine-stamped '${line}' in ${resultPath} (original preserved as 'superseded_done:')`,
-    line,
-    supersededLine,
-    nowMs,
-  };
+  // HYK-418 §2-3: malformedSingle and unmarkedWellFormedSingle are mutually
+  // exclusive (a malformed timestamp can never also be
+  // isWellFormedDoneTimestamp), so exactly one of these two branches ran to
+  // reach this point -- reasonCode/reason distinguish which recovery this
+  // was for the caller/CLI (see the CLI's REPLACED_MALFORMED-vs-default
+  // branch and the new REPLACED_UNMARKED branch below).
+  return malformedSingle
+    ? {
+        ok: true,
+        reasonCode: FINALIZE_DONE_REASON.REPLACED_MALFORMED,
+        reason: `replaced malformed '>>> DONE:' line ('${supersededLine}') with machine-stamped '${line}' in ${resultPath} (original preserved as 'superseded_done:')`,
+        line,
+        supersededLine,
+        nowMs,
+      }
+    : {
+        ok: true,
+        reasonCode: FINALIZE_DONE_REASON.REPLACED_UNMARKED,
+        reason: `replaced unmarked (likely hand-typed) '>>> DONE:' line ('${supersededLine}') with machine-stamped '${line}' in ${resultPath} (original preserved as 'superseded_done:')`,
+        line,
+        supersededLine,
+        nowMs,
+      };
 }
 
 // finalizeDone({ role, harnessDir, callerSuppliedAt, nowFn }) ->
@@ -442,12 +498,17 @@ if (invokedDirectly) {
   const harnessDir = harnessDirArg ?? join(process.cwd(), ".harness");
   const result = finalizeDone({ role, harnessDir });
   if (result.ok) {
-    // HYK-324/HYK-325 §2-1: distinguish "replaced a malformed stamp" from
-    // a plain first-time finalize on stdout, so a caller/operator watching
-    // the log can tell a replace happened without inspecting the file.
+    // HYK-324/HYK-325 §2-1 (widened HYK-418 §2-3): distinguish "replaced a
+    // malformed stamp" and "replaced an unmarked (hand-typed) stamp" from a
+    // plain first-time finalize on stdout, so a caller/operator watching
+    // the log can tell which happened without inspecting the file.
     if (result.reasonCode === FINALIZE_DONE_REASON.REPLACED_MALFORMED) {
       console.log(
         `REPLACED_MALFORMED: ${result.line} (superseded: ${result.supersededLine})`,
+      );
+    } else if (result.reasonCode === FINALIZE_DONE_REASON.REPLACED_UNMARKED) {
+      console.log(
+        `REPLACED_UNMARKED: ${result.line} (superseded: ${result.supersededLine})`,
       );
     } else {
       console.log(`FINALIZED: ${result.line}`);

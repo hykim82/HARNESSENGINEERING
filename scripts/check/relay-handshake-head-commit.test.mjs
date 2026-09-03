@@ -85,7 +85,11 @@ function writeReviewRound(
   );
   writeFileSync(
     join(dir, "review.md"),
-    `task_id: HYK-383-T\n${resultHeadCommit ?? ""}${extra}\n>>> DONE: REVIEW @ 2026-08-28 06:10:00 KST\n`,
+    // HYK-418 §2-1: relay-handshake now rejects a well-formed DONE line
+    // with no finalize-done marker (fail-closed) -- carry the marker so
+    // this shared fixture keeps exercising the head-commit binding
+    // mechanics under test, not this promotion's rejection.
+    `task_id: HYK-383-T\n${resultHeadCommit ?? ""}${extra}\n>>> DONE: REVIEW @ 2026-08-28 06:10:00 KST\ndone_stamped_by: finalize-done\n`,
     "utf8",
   );
 }
@@ -203,7 +207,7 @@ test("(head-4) 완료조건6 위조ⓑ: head_commit:을 문장 중간에 숨기�
     );
     writeFileSync(
       join(dir, "review.md"),
-      `task_id: HYK-383-T\nnote: this round's head_commit: ${sha} is embedded mid sentence\n\n>>> DONE: REVIEW @ 2026-08-28 06:10:00 KST\n`,
+      `task_id: HYK-383-T\nnote: this round's head_commit: ${sha} is embedded mid sentence\n\n>>> DONE: REVIEW @ 2026-08-28 06:10:00 KST\ndone_stamped_by: finalize-done\n`,
       "utf8",
     );
     const res = runCli(["review", dir]);
@@ -230,7 +234,7 @@ test("(head-5a) fail-closed: result에 head_commit 표지 자체가 없다 -> �
     );
     writeFileSync(
       join(dir, "review.md"),
-      `task_id: HYK-383-T\n\n>>> DONE: REVIEW @ 2026-08-28 06:10:00 KST\n`,
+      `task_id: HYK-383-T\n\n>>> DONE: REVIEW @ 2026-08-28 06:10:00 KST\ndone_stamped_by: finalize-done\n`,
       "utf8",
     );
     const res = runCli(["review", dir]);
@@ -250,7 +254,7 @@ test("(head-5b) fail-closed: head_commit 값이 40-hex가 아니다(형식 위�
     writeFileSync(
       join(dir, "review.md"),
       // 39자(한 자리 부족) -- 40-hex SHA 계약 위반.
-      `task_id: HYK-383-T\nhead_commit: ${sha.slice(0, 39)}\n\n>>> DONE: REVIEW @ 2026-08-28 06:10:00 KST\n`,
+      `task_id: HYK-383-T\nhead_commit: ${sha.slice(0, 39)}\n\n>>> DONE: REVIEW @ 2026-08-28 06:10:00 KST\ndone_stamped_by: finalize-done\n`,
       "utf8",
     );
     const res = runCli(["review", dir]);
@@ -272,7 +276,7 @@ test("(head-5c) fail-closed: task 파일에 지정 커밋 자체가 없다 -> �
     );
     writeFileSync(
       join(dir, "review.md"),
-      `task_id: HYK-383-T\nhead_commit: ${sha}\n\n>>> DONE: REVIEW @ 2026-08-28 06:10:00 KST\n`,
+      `task_id: HYK-383-T\nhead_commit: ${sha}\n\n>>> DONE: REVIEW @ 2026-08-28 06:10:00 KST\ndone_stamped_by: finalize-done\n`,
       "utf8",
     );
     const res = runCli(["review", dir]);
@@ -292,7 +296,7 @@ test("(head-5d) fail-closed: harnessDir가 애초에 git 워크트리가 아니�
     );
     writeFileSync(
       join(dir, "review.md"),
-      `task_id: HYK-383-T\nhead_commit: ${sha}\n\n>>> DONE: REVIEW @ 2026-08-28 06:10:00 KST\n`,
+      `task_id: HYK-383-T\nhead_commit: ${sha}\n\n>>> DONE: REVIEW @ 2026-08-28 06:10:00 KST\ndone_stamped_by: finalize-done\n`,
       "utf8",
     );
     const res = runCli(["review", dir]);
@@ -319,7 +323,7 @@ test("(head-6) AMBIGUOUS: result에 head_commit: 줄이 2개 -> 거부, 둘 중 
     );
     writeFileSync(
       join(dir, "review.md"),
-      `task_id: HYK-383-T\nhead_commit: ${sha}\nhead_commit: ${sha}\n\n>>> DONE: REVIEW @ 2026-08-28 06:10:00 KST\n`,
+      `task_id: HYK-383-T\nhead_commit: ${sha}\nhead_commit: ${sha}\n\n>>> DONE: REVIEW @ 2026-08-28 06:10:00 KST\ndone_stamped_by: finalize-done\n`,
       "utf8",
     );
     const res = runCli(["review", dir]);
@@ -345,7 +349,7 @@ test("(head-6b)★ 대소문자 신원: 대문자 HEAD_COMMIT:(column-0, 유효 
     );
     writeFileSync(
       join(dir, "review.md"),
-      `task_id: HYK-383-T\nHEAD_COMMIT: ${sha}\n\n>>> DONE: REVIEW @ 2026-08-28 06:10:00 KST\n`,
+      `task_id: HYK-383-T\nHEAD_COMMIT: ${sha}\n\n>>> DONE: REVIEW @ 2026-08-28 06:10:00 KST\ndone_stamped_by: finalize-done\n`,
       "utf8",
     );
     const res = runCli(["review", dir]);
@@ -373,7 +377,7 @@ test("(head-7) 범위 확인: CODER 결과는 head_commit 축 밖 -- 표지가 �
     );
     writeFileSync(
       join(dir, "coder.md"),
-      "task_id: HYK-383-C\n\n>>> DONE: CODER @ 2026-08-28 06:10:00 KST\n",
+      "task_id: HYK-383-C\n\n>>> DONE: CODER @ 2026-08-28 06:10:00 KST\ndone_stamped_by: finalize-done\n",
       "utf8",
     );
     const result = checkRelayHandshake({ role: "coder", harnessDir: dir });
@@ -510,7 +514,7 @@ test("(head-9) 순서 회귀 0: head_commit이 아예 없어도, 이미 future-s
     );
     writeFileSync(
       join(dir, "review.md"),
-      "task_id: HYK-383-T\n\n>>> DONE: REVIEW @ 2099-01-01 00:00:00 KST\n",
+      "task_id: HYK-383-T\n\n>>> DONE: REVIEW @ 2099-01-01 00:00:00 KST\ndone_stamped_by: finalize-done\n",
       "utf8",
     );
     const res = runCli(["review", dir]);
