@@ -930,20 +930,7 @@ function spawnObserveDoneLine({
 // Best-effort, non-fatal -- mirrors spawnObserveDoneLine's own house style
 // exactly: a failure here must never change checkRelayHandshake's own
 // verdict (the round is already judged complete by this point regardless).
-// HYK-423 §2: `reason` is optional and forwarded verbatim to
-// markObservationConsumed's own new `reason` field (see that function's
-// header) -- omitted by this function's original caller
-// (runCompletionSideEffects, "round completed" case), passed by the new
-// reject-and-release call sites added below (checkRelayHandshake's own
-// content-dependent gates) so the append-only log keeps saying WHY a
-// generation closed.
-function spawnMarkObservationConsumed({
-  taskId,
-  droppedAt,
-  role,
-  harnessDir,
-  reason,
-}) {
+function spawnMarkObservationConsumed({ taskId, droppedAt, role, harnessDir }) {
   try {
     const scriptPath = join(
       dirname(fileURLToPath(new URL(import.meta.url))),
@@ -954,7 +941,6 @@ function spawnMarkObservationConsumed({
       droppedAt,
       role,
       action: "markConsumed",
-      reason,
     });
     // HYK-353: same stdin transport as spawnObserveDoneLine above (this
     // payload is always small -- no resultContent -- but kept consistent so
@@ -1077,6 +1063,27 @@ function resolveDoneAt(
   // 소비 완료되면 그 세대는 tombstone으로 닫히고, 다음 라운드가 같은
   // 키를 재사용해도 이전 세대의 값과 비교되지 않고 새로 관측을
   // 시작한다.
+  // HYK-423 2R §2⑵ (결속 축 -- 1R의 «어느 게이트가 거부했는가» 축을
+  // 폐기하고 이 축으로 다시 짠다, coder.md 참조): 관측 지문은 이제
+  // resultContent 전체가 아니라 «`>>> DONE:` 줄 자신이 끝나는 지점까지»만
+  // 잡는다(아래 protectedScope). ⛔이 축은 «어느 게이트가 거부했는가»와
+  // 완전히 무관하다 -- 게이트 이름을 참조하지 않으므로 워커가 특정
+  // 게이트를 «일부러» 거부시켜 보호를 풀 방법이 구조적으로 없다(2R P1이
+  // 정확히 그 형태로 1R의 게이트-이름 결속 설계를 반증했다). 대신
+  // doneLineRaw 자체(위 doneMatch[0])는 여전히, 그리고 이 지문 축과
+  // «별도로», checkIntermediateRewrite에서 직접 문자열 비교된다(first-
+  // observation.mjs 자신의 코드 참조) -- 즉 DONE 줄 자신은 이 축이 생기기
+  // 전과 완전히 동일하게, 무조건 보호된다. 이 축이 완화하는 것은 오직
+  // «DONE 줄 «뒤»에 덧붙는 후기(postscript)»뿐이다: 2026-09-03 실물
+  // 사고(coder-task.md §1-2)의 정정("결과 파일에 덧붙임")이 바로 이
+  // 모양이었다 -- DONE은 그대로 두고 그 뒤에 재실행 결과를 적었다. DONE
+  // «앞»(head_commit:/verdict:/본문 전체)은 여전히 지문에 포함되므로
+  // 어느 게이트가 거부했든 그 앞 내용을 고치면 여전히 rewritten으로
+  // 잡힌다 -- 오직 딱 그 실물 사고의 모양(DONE 뒤 후기)만 열어준다.
+  const protectedScope = resultContent.slice(
+    0,
+    doneMatch.index + doneMatch[0].length,
+  );
   const observation =
     taskId && droppedAtRaw
       ? spawnObserveDoneLine({
@@ -1084,7 +1091,7 @@ function resolveDoneAt(
           droppedAt: droppedAtRaw,
           role,
           harnessDir,
-          resultContent,
+          resultContent: protectedScope,
           doneLineRaw: doneMatch[0],
         })
       : { rewritten: false };
@@ -2458,42 +2465,6 @@ function resolveHandshakeCore({ role, harnessDir, now, dispatchId }) {
   };
 }
 
-// HYK-423 §2 (이 라운드의 설계 판단, 근거는 coder.md에 적는다): checkRelayHandshake
-// 안의 headCommitVerdict/runnerReceiptVerdict 두 게이트 전용 -- 둘 다
-// «관측된 DONE 값 자체가 틀렸다»가 아니라 «결과 파일이 진술하는 내용(echo된
-// head_commit / 러너 영수증)이 틀렸다»는 이유로 거부한다. 정당한 정정은
-// 반드시 결과 파일 «본문»을 고쳐 다시 제출하는 것이고, 그 정정은
-// 지문(resultFingerprint)을 바꾼다. 이 두 게이트가 거부하면서도 첫 관측을
-// 그대로 pin해 두면, 그 정당한 정정 자체가 다음 폴에서
-// DONE_REWRITTEN_AFTER_FIRST_OBSERVATION에 걸려 영구 거부된다(2026-09-03
-// 실물, coder-task.md §1-2) -- 거부된 적도 없는데 소비도 못 하는 상태로
-// 세대가 갇힌다. 그래서 이 두 게이트가 거부하는 바로 그 순간, 이 세대를
-// tombstone해 다음 폴이 깨끗한 새 세대로 다시 관측을 시작하게 한다.
-// ⛔이 목록에 없는 다른 게이트(TZ 오라벨·미래시각·STALE·dispatch 원장)는
-// 의도적으로 그대로 pin된 채 둔다(그 게이트 자신의 호출부에서 이 함수를
-// 쓰지 않는다) -- 그 축들의 "정당한 정정"은 DONE 줄 자체를 다시 찍거나(TZ/
-// 미래시각, HYK-257의 원래 손기입 억제 대상 그대로) 아예 새 droppedAt으로
-// 재배달되거나(STALE, 원장 자리 반납이 이미 이 축을 별도로 닫는다) 또는
-// 결과 파일을 전혀 고치지 않고 다시 기다리기만 하면 되는 축(dispatch 원장
-// 전파 지연)이라 pin을 풀 필요도, 근거도 없다 -- §2의 "한쪽만 보고 고치면
-// 다른 쪽이 깨진다"는 요구를 지키기 위해 딱 이 둘만 고른다.
-function releaseObservationOnReject(
-  verdict,
-  gateName,
-  { taskId, droppedMatch, role, harnessDir },
-) {
-  if (!verdict.ok) {
-    spawnMarkObservationConsumed({
-      taskId,
-      droppedAt: droppedMatch[1].trim(),
-      role,
-      harnessDir,
-      reason: `round_rejected:${gateName}`,
-    });
-  }
-  return verdict;
-}
-
 export function checkRelayHandshake({
   role,
   harnessDir = join(repoRoot(), ".harness"),
@@ -2545,18 +2516,13 @@ export function checkRelayHandshake({
 
   // HYK-383: 다른 모든 사유별 검사가 이미 통과한 뒤, 완료 판정 직전에 건다
   // (§4 무회귀 -- 기존 구체적 거부 사유가 가려지지 않는다). 비REVIEW는
-  // 즉시 통과(resolveHeadCommitBinding 자체 헤더 참조). HYK-423 §2: 거부
-  // 시 첫 관측을 release한다 -- 이 함수 자신의 header 참조.
-  const headCommitVerdict = releaseObservationOnReject(
-    resolveHeadCommitBinding({
-      role,
-      taskContent,
-      resultContent,
-      harnessDir,
-    }),
-    "head_commit",
-    { taskId, droppedMatch, role, harnessDir },
-  );
+  // 즉시 통과(resolveHeadCommitBinding 자체 헤더 참조).
+  const headCommitVerdict = resolveHeadCommitBinding({
+    role,
+    taskContent,
+    resultContent,
+    harnessDir,
+  });
   if (!headCommitVerdict.ok) return headCommitVerdict;
 
   // HYK-411: headCommitVerdict와 같은 자리 원칙(§4 무회귀) -- role 무관(이번
@@ -2564,14 +2530,10 @@ export function checkRelayHandshake({
   // 동일 논거). resultContent가 "전체 러너 결과"를 주장하지 않으면 즉시
   // ok:true(skipped)로 빠져 나가 이 축이 존재하기 전과 완전히 동일하게
   // 움직인다(과차단 금지).
-  const runnerReceiptVerdict = releaseObservationOnReject(
-    resolveRunnerReceiptVerdict({
-      resultContent,
-      harnessDir,
-    }),
-    "runner_receipt",
-    { taskId, droppedMatch, role, harnessDir },
-  );
+  const runnerReceiptVerdict = resolveRunnerReceiptVerdict({
+    resultContent,
+    harnessDir,
+  });
   if (!runnerReceiptVerdict.ok) return runnerReceiptVerdict;
 
   // HYK-387: headCommitVerdict와 같은 자리 원칙(§4 무회귀) -- REVIEW 한정

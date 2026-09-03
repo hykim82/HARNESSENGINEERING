@@ -412,16 +412,8 @@ async function importMutatedRelayHandshake(mutatedSrc, label) {
 
 test("(rr-e1)★ 되돌림 변이: 소비 축(checkRelayHandshake 결선) 자체를 제거하면 -- (rr-a)의 파이프 은폐 빨간 실행 표본이 다시 통과한다(RED, load-bearing 증명)", async () => {
   const src = readFileSync(RELAY_HANDSHAKE_PATH, "utf8");
-  // HYK-423 §2: call-site text updated to match relay-handshake.mjs's new
-  // releaseObservationOnReject wrapper (added so a runner-receipt rejection
-  // releases the first-observation pin instead of permanently blocking a
-  // legitimate correction, coder-task.md §1-2) -- the wiring this mutation
-  // proves load-bearing (resolveRunnerReceiptVerdict + the ok:false return)
-  // is unchanged, only wrapped; deleting this whole block still removes both
-  // the gate AND the release call, so the RED assertion below still proves
-  // the gate itself (not the release wrapper) is load-bearing.
   const target =
-    '  const runnerReceiptVerdict = releaseObservationOnReject(\n    resolveRunnerReceiptVerdict({\n      resultContent,\n      harnessDir,\n    }),\n    "runner_receipt",\n    { taskId, droppedMatch, role, harnessDir },\n  );\n  if (!runnerReceiptVerdict.ok) return runnerReceiptVerdict;\n\n';
+    "  const runnerReceiptVerdict = resolveRunnerReceiptVerdict({\n    resultContent,\n    harnessDir,\n  });\n  if (!runnerReceiptVerdict.ok) return runnerReceiptVerdict;\n\n";
   assertExactlyOneMatch(src, target, "runner receipt wiring block");
   const mutated = src.replace(target, "");
   assert.equal(mutated.length, src.length - target.length);
