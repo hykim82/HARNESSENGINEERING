@@ -294,13 +294,24 @@ test("HYK-355 (b) 정당한 실물 기록 회귀 0: harnessDir가 실제로 링�
 // 증명한다(defense-in-depth) -- 그래서 GATE_TARGET과 함께 axis ⓑ의
 // checkRelayHandshake 호출부도 걷어내 원래 HYK-355가 겨냥했던 정확히 그
 // 격리 조건을 재현한다.
+// HYK-423 §2: call-site text updated to match relay-handshake.mjs's new
+// releaseObservationOnReject wrapper (added so a head-commit rejection
+// releases the first-observation pin instead of permanently blocking a
+// legitimate correction, coder-task.md §1-2) -- the axis this isolation
+// targets (resolveHeadCommitBinding + the ok:false return) is unchanged,
+// only wrapped; removing this whole block still removes both the axis AND
+// the release call, so this test's isolation intent is unaffected.
 const HEAD_COMMIT_AXIS_CALL_TARGET =
-  "  const headCommitVerdict = resolveHeadCommitBinding({\n" +
-  "    role,\n" +
-  "    taskContent,\n" +
-  "    resultContent,\n" +
-  "    harnessDir,\n" +
-  "  });\n" +
+  "  const headCommitVerdict = releaseObservationOnReject(\n" +
+  "    resolveHeadCommitBinding({\n" +
+  "      role,\n" +
+  "      taskContent,\n" +
+  "      resultContent,\n" +
+  "      harnessDir,\n" +
+  "    }),\n" +
+  '    "head_commit",\n' +
+  "    { taskId, droppedMatch, role, harnessDir },\n" +
+  "  );\n" +
   "  if (!headCommitVerdict.ok) return headCommitVerdict;\n";
 
 test("HYK-355 (c) 변이 검사 ① (axis ⓑ를 격리한 채로): 게이트를 디스크에서 실제로 지우면 -> probe 시나리오가 (합성) 원장에 기록된다 (RED, HYK-355 게이트 자신이 defense-in-depth로 여전히 올바르다는 증거)", () => {

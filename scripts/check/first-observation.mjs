@@ -186,15 +186,30 @@ export function recordFirstDoneObservation({
 // 소비된 라운드의 값이 다음 라운드를 오염시키지 않는다. Best-effort,
 // 항상 append만 한다(append-only 계약 유지, 기존 줄을 지우거나 고치지
 // 않는다).
+// HYK-423 §2: `reason` is an OPTIONAL audit-trail field, additive only (every
+// existing caller/test that omits it, or reads the entry shape without it,
+// is unaffected -- append-only log, no field renamed or removed). Before
+// this change every call site meant exactly one thing ("this round finished
+// judgment as ok:true, close the generation" -- runCompletionSideEffects'
+// own call, still the only caller that omits `reason`). HYK-423 adds a
+// SECOND, distinct call site (checkRelayHandshake's own reject-and-release
+// gates, see that file's own header) that closes a generation because a
+// content-dependent gate REJECTED it, not because it completed -- `reason`
+// records which gate did it (e.g. "round_rejected:runner_receipt") so a
+// human reading the raw JSONL log can still tell the two apart, even though
+// findFirstObservation itself treats both shapes identically (`consumed
+// === true` alone ends the generation, regardless of why).
 export function markObservationConsumed({
   taskId,
   droppedAt,
   role,
   harnessDir,
   consumedAtMs = Date.now(),
+  reason,
 }) {
   try {
     const entry = { taskId, droppedAt, consumed: true, consumedAtMs };
+    if (reason) entry.reason = reason;
     appendFileSync(
       logPath(role, harnessDir),
       `${JSON.stringify(entry)}\n`,
@@ -373,6 +388,7 @@ if (
           droppedAt: payload.droppedAt,
           role: payload.role,
           harnessDir,
+          reason: payload.reason,
         })
       : observeDoneLine({
           taskId: payload.taskId,
