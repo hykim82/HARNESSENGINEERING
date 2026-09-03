@@ -335,7 +335,7 @@ test("parseCliArgs value-axis (d/unknown-flag-as-value): --base-sha --foo -> ok:
 test("parseCliArgs value-axis (e/empty string): --base-sha '' -> ok:false", () => {
   const result = parseCliArgs(["--base-sha", ""]);
   assert.equal(result.ok, false);
-  assert.match(result.reason, /empty string as its value/);
+  assert.match(result.reason, /empty or whitespace-only value/);
 });
 
 test("parseCliArgs value-axis (a/normal value): --base-sha <sha> --mode ci --cwd <dir> -> ok:true, all three parsed", () => {
@@ -404,6 +404,118 @@ for (const badFlag of ["--base", "--baseSha", "-base-sha", "--Mode"]) {
           [QUALITY_CHECK_PATH, "--cwd", dir, badFlag, "x"],
           { encoding: "utf8" },
         );
+      }, /Command failed/);
+    });
+  });
+}
+
+// --- HYK-393 3R: value-ACCEPTANCE contract, derived from the partition in
+// readFlagValue's own header comment, not hand-listed from REVIEW's two
+// specific repros. The three cases below (ABSENT is already covered by the
+// EOF tests above) are generated from several DISTINCT representatives per
+// partition class -- the point is that any string in a class is rejected
+// for the SAME reason (the class membership), not that these particular
+// strings were separately discovered as bugs.
+
+// Case (1): whitespace-only (trim() === ""). REVIEW 2R's P1-1 repro
+// (`--base-sha "   "`) is one member of this infinite class; the others
+// below are different representatives of the same class, not separate bugs.
+for (const ws of ["", " ", "   ", "\t", "\n", " \t \n "]) {
+  test(`parseCliArgs value-partition (1/whitespace-only): --base-sha ${JSON.stringify(ws)} -> ok:false`, () => {
+    const result = parseCliArgs(["--base-sha", ws]);
+    assert.equal(result.ok, false);
+    assert.match(result.reason, /empty or whitespace-only value/);
+  });
+}
+
+// Case (2): dash-leading (trim().startsWith("-")). REVIEW 2R's P1-2 repro
+// (`--base-sha -`) is one member; `--`, `-x`, `---`, and a
+// whitespace-padded flag-looking string are other members of the same
+// class.
+for (const dashy of ["-", "--", "-x", "---", "--anything", "  --mode  "]) {
+  test(`parseCliArgs value-partition (2/dash-leading): --base-sha ${JSON.stringify(dashy)} -> ok:false`, () => {
+    const result = parseCliArgs(["--base-sha", dashy]);
+    assert.equal(result.ok, false);
+    assert.match(result.reason, /looks like a flag, not a value/);
+  });
+}
+
+// Case (3): everything else -- accepted. Several distinct representatives
+// (a real-shaped SHA, a mode name, a Windows path, a value with internal
+// but non-leading whitespace, a value containing "-" in the middle) all
+// land in the same "neither whitespace-only nor dash-leading" class.
+for (const good of [
+  "3ca5d7f3f027771aa5dd37b9863acd8a8c022c77",
+  "ci",
+  "C:\\Users\\x\\repo",
+  "ab c",
+  "abc-def",
+]) {
+  test(`parseCliArgs value-partition (3/accepted): --base-sha ${JSON.stringify(good)} -> ok:true`, () => {
+    const result = parseCliArgs(["--base-sha", good]);
+    assert.equal(result.ok, true);
+    assert.equal(result.baseSha, good);
+  });
+}
+
+// REVIEW 2R's exact two P1 repros, pinned directly (both at the unit level
+// and end-to-end through the real CLI subprocess).
+test("parseCliArgs: REVIEW 2R P1-1 exact repro (--base-sha '   ') -> ok:false", () => {
+  const result = parseCliArgs(["--base-sha", "   "]);
+  assert.equal(result.ok, false);
+});
+
+test("parseCliArgs: REVIEW 2R P1-2 exact repro (--base-sha -) -> ok:false", () => {
+  const result = parseCliArgs(["--base-sha", "-"]);
+  assert.equal(result.ok, false);
+});
+
+test("CLI: REVIEW 2R P1-1 exact repro (node quality-check.mjs --base-sha '   ') exits non-zero, not a vacuous green", () => {
+  withFixtureRepo((dir) => {
+    assert.throws(() => {
+      execFileSync(
+        process.execPath,
+        [QUALITY_CHECK_PATH, "--cwd", dir, "--base-sha", "   "],
+        { encoding: "utf8" },
+      );
+    }, /Command failed/);
+  });
+});
+
+test("CLI: REVIEW 2R P1-2 exact repro (node quality-check.mjs --base-sha -) exits non-zero, not a vacuous green", () => {
+  withFixtureRepo((dir) => {
+    assert.throws(() => {
+      execFileSync(
+        process.execPath,
+        [QUALITY_CHECK_PATH, "--cwd", dir, "--base-sha", "-"],
+        { encoding: "utf8" },
+      );
+    }, /Command failed/);
+  });
+});
+
+// --- HYK-393 3R: value-axis regression guard -- the 7 inputs REVIEW 2R
+// already measured as exit 1 (§1-2 of the 3R task file: "these are a
+// regression guard, not a rediscovery target"). Re-asserted directly
+// against the CLI so a future edit to readFlagValue cannot silently reopen
+// any of them.
+const VALUE_AXIS_REGRESSION_GUARD = [
+  ["--base-sha", "--"],
+  ["--base-sha", "--foo"],
+  ["--mode", "bogus"],
+  ["--mode"],
+  ["--cwd"],
+  ["--cwd", ""],
+  ["--mode", "   "],
+];
+for (const args of VALUE_AXIS_REGRESSION_GUARD) {
+  test(`CLI value-axis regression guard: ${JSON.stringify(args)} still exits non-zero`, () => {
+    withFixtureRepo((dir) => {
+      const fullArgs = args[0] === "--cwd" ? args : ["--cwd", dir, ...args];
+      assert.throws(() => {
+        execFileSync(process.execPath, [QUALITY_CHECK_PATH, ...fullArgs], {
+          encoding: "utf8",
+        });
       }, /Command failed/);
     });
   });

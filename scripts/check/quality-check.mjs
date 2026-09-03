@@ -189,44 +189,65 @@ export function runQualityCheck({
 // a "quality clean" both the author and reviewer accepted at face value).
 const KNOWN_FLAGS = new Set(["--mode", "--base-sha", "--cwd"]);
 
-// Value-axis contract for the three flags above, all of which take a
-// value (HYK-393 2R -- name-axis rejection alone still let a *valueless*
-// `--base-sha` fall through: EOF left `baseSha` `undefined`, and
-// `--base-sha --mode` silently ate the next flag's own name as its value,
-// both landing on mode:"staged"'s default and printing an empty-scope
-// green instead of failing closed). A value is accepted only if it exists,
-// is non-empty, and does not itself look like a flag:
-//   - EOF (nothing left in argv)              -> reject
-//   - empty string (an explicit `""` token)    -> reject
-//   - starts with "--" (known OR unknown flag) -> reject, whether or not
-//     that token is itself in KNOWN_FLAGS -- a git SHA, a mode name
-//     ("ci"/"staged"), and a directory path are never expected to start
-//     with "--" in real use, so treating any "--"-shaped token as "this
-//     flag's value looks like it swallowed the next flag" is a stricter,
-//     simpler rule than special-casing "known flag" vs "unknown flag"
-//     separately, at the cost of rejecting the (unsupported) theoretical
-//     case of a --cwd path that is itself named "--something".
+// Value-acceptance contract for the three flags above, all of which take a
+// value. HYK-393 2R closed the *name* axis (an unrecognized flag) and part
+// of the *value* axis (EOF, empty string, a value starting with "--"), but
+// REVIEW 2R found the value axis was still closed by ENUMERATING rejected
+// shapes rather than by a rule -- and enumeration missed whitespace-only
+// values (`--base-sha "   "`) and a bare single dash (`--base-sha -`),
+// both of which fell through to mode:"staged"'s default and printed an
+// empty-scope green (1R's P1 shape, twice more).
+//
+// HYK-393 3R replaces the enumeration with a total, two-predicate
+// PARTITION of every possible argv token, so "did I miss a case" stops
+// being a question the reader has to trust and becomes something they can
+// verify by case analysis instead of by trusting a sample list:
+//
+//   A token position is exactly one of:
+//     (0) ABSENT           -- there is no next token at all (EOF)
+//   ...and if a token IS present, its content is exactly one of:
+//     (1) ALL WHITESPACE   -- `token.trim() === ""` (this includes the
+//         empty string "" itself, since trim("") === "")
+//     (2) DASH-LEADING     -- `token.trim()` starts with "-" (covers a
+//         bare "-", "--", "-x", "--mode", "--anything" -- one or two
+//         leading dashes are the ONLY way a token can look like a flag
+//         rather than a value, so this single check subsumes both "looks
+//         like a known flag" and "looks like an unknown flag")
+//     (3) EVERYTHING ELSE  -- accepted as the value
+//
+// This is a proof by exhaustive case split on the FIRST non-whitespace
+// character of the token (or its absence), not a list of specific bad
+// inputs -- cases (1)+(2)+(3) cover 100% of the string domain by
+// construction, so there is no "case we forgot to enumerate" the way
+// "reject these seven specific strings" always leaves one open. A git SHA,
+// a mode name ("ci"/"staged"), and a real directory path are never
+// whitespace-only and never start with "-" in ordinary use, so nothing
+// legitimate is expected to fall into (1) or (2) -- see this round's
+// coder.md §5 for the one acknowledged cost (a --cwd path that itself
+// starts with "-" is unsupported; this is not new in 3R, 2R already made
+// the same call for "--"-leading paths and REVIEW 2R accepted it as P2).
 function readFlagValue(args, i, flag) {
-  const value = args[i + 1];
-  if (value === undefined) {
+  const raw = args[i + 1];
+  if (raw === undefined) {
     return {
       ok: false,
       reason: `quality-check: ${flag} requires a value but none was given (end of arguments) -- fail-closed rather than falling back to a default.`,
     };
   }
-  if (value === "") {
+  const trimmed = raw.trim();
+  if (trimmed === "") {
     return {
       ok: false,
-      reason: `quality-check: ${flag} was given an empty string as its value -- fail-closed rather than falling back to a default.`,
+      reason: `quality-check: ${flag} was given an empty or whitespace-only value (${JSON.stringify(raw)}) -- fail-closed rather than falling back to a default.`,
     };
   }
-  if (value.startsWith("--")) {
+  if (trimmed.startsWith("-")) {
     return {
       ok: false,
-      reason: `quality-check: ${flag}'s value ${JSON.stringify(value)} looks like a flag, not a value (it was likely swallowed from the next argument) -- fail-closed rather than silently consuming it.`,
+      reason: `quality-check: ${flag}'s value ${JSON.stringify(raw)} looks like a flag, not a value (it was likely swallowed from the next argument) -- fail-closed rather than silently consuming it.`,
     };
   }
-  return { ok: true, value };
+  return { ok: true, value: raw };
 }
 
 export function parseCliArgs(args) {
