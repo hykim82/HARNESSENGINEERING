@@ -123,7 +123,11 @@ function writeValidFixture(dir, role, taskId) {
   );
   writeFileSync(
     join(dir, `${role}.md`),
-    `task_id: ${taskId}\n${headCommitLine}\n>>> DONE: ${role.toUpperCase()} @ 2026-08-03 06:10:00 KST\n`,
+    // HYK-418 §2-1: relay-handshake now rejects a well-formed DONE line
+    // with no finalize-done marker (fail-closed) -- this shared fixture
+    // builder must carry the marker so every CLI/ok:true test that reuses
+    // it keeps exercising ITS OWN feature, not this promotion's rejection.
+    `task_id: ${taskId}\n${headCommitLine}\n>>> DONE: ${role.toUpperCase()} @ 2026-08-03 06:10:00 KST\ndone_stamped_by: finalize-done\n`,
     "utf8",
   );
 }
@@ -164,7 +168,7 @@ test("(a) task_id matches + DONE after dropped_at -> ok", () => {
     writeResult(
       dir,
       "coder",
-      "task_id: HYK-1\n\nsome report body\n\n>>> DONE: CODER @ 2026-07-05 06:10:00 KST\n",
+      "task_id: HYK-1\n\nsome report body\n\n>>> DONE: CODER @ 2026-07-05 06:10:00 KST\ndone_stamped_by: finalize-done\n",
     );
     const result = checkRelayHandshake({ role: "coder", harnessDir: dir });
     assert.equal(result.ok, true);
@@ -257,7 +261,7 @@ test("(g) stale: DONE timestamp predates dropped_at -> blocked", () => {
     writeResult(
       dir,
       "coder",
-      "task_id: HYK-1\n\n>>> DONE: CODER @ 2026-07-05 06:00:00 KST\n",
+      "task_id: HYK-1\n\n>>> DONE: CODER @ 2026-07-05 06:00:00 KST\ndone_stamped_by: finalize-done\n",
     );
     const result = checkRelayHandshake({ role: "coder", harnessDir: dir });
     assert.equal(result.ok, false);
@@ -345,7 +349,7 @@ test("(l) frozen: dropped_at with HH:MM:SS form -> ok", () => {
     writeResult(
       dir,
       "coder",
-      "task_id: HYK-1\n\n>>> DONE: CODER @ 2026-07-05 06:10:00 KST\n",
+      "task_id: HYK-1\n\n>>> DONE: CODER @ 2026-07-05 06:10:00 KST\ndone_stamped_by: finalize-done\n",
     );
     const result = checkRelayHandshake({ role: "coder", harnessDir: dir });
     assert.equal(result.ok, true);
@@ -362,7 +366,7 @@ test("(m) frozen: DONE with HH:MM:SS form -> ok", () => {
     writeResult(
       dir,
       "coder",
-      "task_id: HYK-1\n\n>>> DONE: CODER @ 2026-07-05 06:10:45 KST\n",
+      "task_id: HYK-1\n\n>>> DONE: CODER @ 2026-07-05 06:10:45 KST\ndone_stamped_by: finalize-done\n",
     );
     const result = checkRelayHandshake({ role: "coder", harnessDir: dir });
     assert.equal(result.ok, true);
@@ -379,7 +383,7 @@ test("(n) frozen: both dropped_at and DONE carry HH:MM:SS -> ok, and seconds are
     writeResult(
       dir,
       "coder",
-      "task_id: HYK-1\n\n>>> DONE: CODER @ 2026-07-05 06:10:29 KST\n",
+      "task_id: HYK-1\n\n>>> DONE: CODER @ 2026-07-05 06:10:29 KST\ndone_stamped_by: finalize-done\n",
     );
     const result = checkRelayHandshake({ role: "coder", harnessDir: dir });
     assert.equal(result.ok, false);
@@ -442,7 +446,7 @@ test("HYK-244 (초단위 정상통과, 오탐 0) DONE with seconds precision -> 
     writeResult(
       dir,
       "coder",
-      "task_id: HYK-1\n\n>>> DONE: CODER @ 2026-07-05 06:10:07 KST\n",
+      "task_id: HYK-1\n\n>>> DONE: CODER @ 2026-07-05 06:10:07 KST\ndone_stamped_by: finalize-done\n",
     );
     const result = checkRelayHandshake({ role: "coder", harnessDir: dir });
     assert.equal(result.ok, true);
@@ -499,7 +503,7 @@ test("(q) paired good: same content, task_id moved to a standalone column-0 line
     writeResult(
       dir,
       "review",
-      `dispatch_verified: yes\ntask_id_from_dispatch: HYK-167-review-2\npane_match: 일치\ntask_id: HYK-167-review-2\nhead_commit: ${headCommit}\n\nfor: HYK-167 / role: REVIEW-CODEX\n\n>>> DONE: REVIEW-CODEX @ 2026-07-05 06:10:00 KST\n`,
+      `dispatch_verified: yes\ntask_id_from_dispatch: HYK-167-review-2\npane_match: 일치\ntask_id: HYK-167-review-2\nhead_commit: ${headCommit}\n\nfor: HYK-167 / role: REVIEW-CODEX\n\n>>> DONE: REVIEW-CODEX @ 2026-07-05 06:10:00 KST\ndone_stamped_by: finalize-done\n`,
     );
     const result = checkRelayHandshake({ role: "review", harnessDir: dir });
     assert.equal(result.ok, true);
@@ -673,7 +677,7 @@ test("HYK-173-escalation-1 (y) regression: a normal DONE result with an incident
     writeResult(
       dir,
       "coder",
-      "task_id: HYK-1\n\nearlier round note: >>> BLOCKED: old, resolved already\n\n>>> DONE: CODER @ 2026-07-05 06:10:00 KST\n",
+      "task_id: HYK-1\n\nearlier round note: >>> BLOCKED: old, resolved already\n\n>>> DONE: CODER @ 2026-07-05 06:10:00 KST\ndone_stamped_by: finalize-done\n",
     );
     const result = checkRelayHandshake({ role: "coder", harnessDir: dir });
     assert.equal(result.ok, true);
@@ -1423,7 +1427,7 @@ test("HYK-186 (경계) DONE exactly AT now+skew -> still ok (boundary itself is 
     writeResult(
       dir,
       "coder",
-      `task_id: HYK-1\n\n>>> DONE: CODER @ ${isoKst(FIXED_NOW + MAX_FUTURE_SKEW_MS)}\n`,
+      `task_id: HYK-1\n\n>>> DONE: CODER @ ${isoKst(FIXED_NOW + MAX_FUTURE_SKEW_MS)}\ndone_stamped_by: finalize-done\n`,
     );
     const result = checkRelayHandshake({
       role: "coder",
@@ -1444,7 +1448,7 @@ test("HYK-186 (경계, ★반례) DONE one unit (1 minute, the header's own prec
     writeResult(
       dir,
       "coder",
-      `task_id: HYK-1\n\n>>> DONE: CODER @ ${isoKst(FIXED_NOW + MAX_FUTURE_SKEW_MS + 60_000)}\n`,
+      `task_id: HYK-1\n\n>>> DONE: CODER @ ${isoKst(FIXED_NOW + MAX_FUTURE_SKEW_MS + 60_000)}\ndone_stamped_by: finalize-done\n`,
     );
     const result = checkRelayHandshake({
       role: "coder",
@@ -1489,7 +1493,7 @@ test("HYK-186 (★PM 실측 in-process repro): dropped_at=2026-07-31 03:00 / DON
     writeResult(
       dir,
       "coder",
-      "task_id: FUTURE-1\n\n>>> DONE: CODER @ 2099-01-01 00:00:00 KST\n",
+      "task_id: FUTURE-1\n\n>>> DONE: CODER @ 2099-01-01 00:00:00 KST\ndone_stamped_by: finalize-done\n",
     );
     const result = checkRelayHandshake({
       role: "coder",
@@ -1535,7 +1539,7 @@ test(`HYK-186 완료조건6: normal control battery, N=${NORMAL_CONTROL_SAMPLES.
       writeResult(
         dir,
         "coder",
-        `task_id: HYK-1\n\n>>> DONE: CODER @ ${isoKst(FIXED_NOW + sample.doneOffsetMs)}\n`,
+        `task_id: HYK-1\n\n>>> DONE: CODER @ ${isoKst(FIXED_NOW + sample.doneOffsetMs)}\ndone_stamped_by: finalize-done\n`,
       );
       const result = checkRelayHandshake({
         role: "coder",
@@ -1773,7 +1777,7 @@ test("HYK-313 (d) 정상 소비 회귀 -- DONE 이 제대로 있으면 결과 �
     writeResult(
       dir,
       "coder",
-      "task_id: HYK-1\n\nsome report body\n\n>>> DONE: CODER @ 2026-08-19 04:10:00 KST\n",
+      "task_id: HYK-1\n\nsome report body\n\n>>> DONE: CODER @ 2026-08-19 04:10:00 KST\ndone_stamped_by: finalize-done\n",
     );
     backdateResultMtime(dir, "coder", PENDING_STALL_THRESHOLD_MS + 60_000);
     const result = checkRelayHandshake({ role: "coder", harnessDir: dir });

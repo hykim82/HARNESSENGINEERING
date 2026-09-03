@@ -118,7 +118,7 @@ function writeDoubleForFixture(harnessDir, { taskId, droppedAt, doneAt }) {
   );
   writeFileSync(
     join(harnessDir, "review.md"),
-    `task_id: ${taskId}\nfor: ${taskId}\nfor: ORCH\nverdict: rejected\nrole: REVIEW-CODEX\nhead_commit: ${headCommit}\n\n>>> DONE: REVIEW-CODEX @ ${doneAt} KST\n`,
+    `task_id: ${taskId}\nfor: ${taskId}\nfor: ORCH\nverdict: rejected\nrole: REVIEW-CODEX\nhead_commit: ${headCommit}\n\n>>> DONE: REVIEW-CODEX @ ${doneAt} KST\ndone_stamped_by: finalize-done\n`,
     "utf8",
   );
 }

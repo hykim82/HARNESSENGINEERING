@@ -70,9 +70,13 @@ function writeCoderRound(dir, { taskId = "HYK-387-3R-T" } = {}) {
   );
   writeFileSync(
     join(dir, "coder.md"),
+    // HYK-418 §2-1: relay-handshake now rejects a well-formed DONE line
+    // with no finalize-done marker (fail-closed) -- this file's own
+    // subject is the receipt-pointer wiring, not the marker gate, so
+    // carry the marker to reach that axis unmasked.
     `task_id: ${taskId}\n\n>>> DONE: CODER @ ${kstStamp(now - 10 * 60 * 1000, {
       seconds: true,
-    })}\n`,
+    })}\ndone_stamped_by: finalize-done\n`,
     "utf8",
   );
 }

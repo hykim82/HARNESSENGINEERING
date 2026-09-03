@@ -96,7 +96,7 @@ function writeNoVerdictFixture(harnessDir, { taskId, droppedAt, doneAt }) {
   // 판정 줄이 0개 -- NO_VERDICT_LINE.
   writeFileSync(
     join(harnessDir, "review.md"),
-    `task_id: ${taskId}\nfor: ${taskId}\nrole: REVIEW-CODEX\nhead_commit: ${headCommit}\n\n>>> DONE: REVIEW-CODEX @ ${doneAt} KST\n`,
+    `task_id: ${taskId}\nfor: ${taskId}\nrole: REVIEW-CODEX\nhead_commit: ${headCommit}\n\n>>> DONE: REVIEW-CODEX @ ${doneAt} KST\ndone_stamped_by: finalize-done\n`,
     "utf8",
   );
 }
@@ -111,7 +111,7 @@ function writeNormalRejectFixture(harnessDir, { taskId, droppedAt, doneAt }) {
   );
   writeFileSync(
     join(harnessDir, "review.md"),
-    `task_id: ${taskId}\nfor: ${taskId}\nverdict: rejected\nrole: REVIEW-CODEX\nhead_commit: ${headCommit}\n\n>>> DONE: REVIEW-CODEX @ ${doneAt} KST\n`,
+    `task_id: ${taskId}\nfor: ${taskId}\nverdict: rejected\nrole: REVIEW-CODEX\nhead_commit: ${headCommit}\n\n>>> DONE: REVIEW-CODEX @ ${doneAt} KST\ndone_stamped_by: finalize-done\n`,
     "utf8",
   );
 }

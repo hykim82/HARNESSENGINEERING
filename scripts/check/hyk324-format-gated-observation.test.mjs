@@ -1,5 +1,8 @@
 // HYK-324 §2-2 (관측은 형식 검사 이후에만) + HYK-325 §2-3 (finalize-done
-// 마커 경고, 거부 아님) -- coder-task.md §3 시험 6/7/9.
+// 마커 검사, 원래는 경고-only) -- coder-task.md §3 시험 6/7/9.
+// HYK-418 §2-1: HYK-325 §2-3의 마커 검사를 경고에서 fail-closed 거부로
+// 승격했다 -- 시험9(과 그 대조군)는 그 승격을 반영해 재작성했다(원래
+// 제목/단언은 주석으로 보존, 아래 각 시험 자신의 헤더 참조).
 //
 // 시험 8(★경합 보호 회귀: 형식 유효값을 관측한 뒤 그 값이 바뀌면 여전히
 // 거부되는가)은 이 라운드가 새로 만들 필요가 없다 -- 이미
@@ -51,7 +54,12 @@ test("시험6: 형식 유효 DONE -> 첫 관측이 기록된다(기존 동작 �
   );
   writeFileSync(
     join(harnessDir, `${role}.md`),
-    `task_id: ${taskId}\n\n>>> DONE: CODER @ 2026-08-19 19:01:11 KST\n`,
+    // HYK-418 §2-1: this test's own subject is the observation contract for
+    // a format-VALID DONE line, not the marker gate -- carry the marker so
+    // it reaches that contract instead of being intercepted by the (now
+    // fail-closed) marker check first. See 시험9 below for the marker gate's
+    // own dedicated test.
+    `task_id: ${taskId}\n\n>>> DONE: CODER @ 2026-08-19 19:01:11 KST\ndone_stamped_by: finalize-done\n`,
     "utf8",
   );
 
@@ -114,10 +122,16 @@ test("시험7: 형식 불량(오늘 실제 문면, 분 단위) DONE -> 관측 �
   );
 });
 
-test("시험9: finalize-done 마커 없는 (형식은 유효한) DONE -> 경고만, 소비는 성공", () => {
+// HYK-418 §2-1: this test used to lock down HYK-325 §2-3's warn-only
+// contract ("no marker must never block consumption"). That contract is
+// exactly what this round promotes to fail-closed (coder-task.md §1 요구4)
+// -- rewritten to assert the NEW contract instead of the old one. The old
+// title/assertion is preserved here as a comment so the history of what
+// changed and why stays visible in the diff, not just in a commit message.
+test("시험9 (HYK-418 §2-1로 재작성): finalize-done 마커 없는 (형식은 유효한) DONE -> 거부(더 이상 경고만이 아니다), 사유에 복구 명령이 담긴다", () => {
   const harnessDir = freshHarnessDir();
   const role = "coder";
-  const taskId = "task_hyk324_no_marker_warns";
+  const taskId = "task_hyk324_no_marker_rejected";
 
   writeFileSync(
     join(harnessDir, `${role}-task.md`),
@@ -138,21 +152,40 @@ test("시험9: finalize-done 마커 없는 (형식은 유효한) DONE -> 경고�
       harnessDir,
       now: kstToMs("2026-08-19 19:01:15"),
     });
-    assert.equal(result.ok, true, "no marker must never block consumption");
+    assert.equal(
+      result.ok,
+      false,
+      "HYK-418 §2-1: an unmarked (likely hand-typed) DONE line must now be rejected, not just warned about",
+    );
+    assert.match(
+      result.reason,
+      /has no 'done_stamped_by: finalize-done' marker/,
+    );
+    assert.match(
+      result.reason,
+      /node scripts\/relay\/finalize-done\.mjs coder/,
+    );
   });
 
   assert.ok(
     messages.some(
-      (m) => m.includes("warning") && m.includes("finalize-done marker"),
+      (m) => m.includes("first-observation skipped") && m.includes("marker"),
     ),
-    `expected a no-marker warning, got: ${JSON.stringify(messages)}`,
+    `expected a first-observation-skipped message naming the marker, got: ${JSON.stringify(messages)}`,
+  );
+
+  const logPath = observationLogPath(harnessDir, role);
+  assert.equal(
+    existsSync(logPath),
+    false,
+    "HYK-418 §2-2: a value this function rejects must never be recorded as first-observed",
   );
 });
 
-test("시험9 대조군: finalize-done 마커가 있으면 경고가 없다", () => {
+test("시험9 대조군: finalize-done 마커가 있으면 거부되지 않는다", () => {
   const harnessDir = freshHarnessDir();
   const role = "coder";
-  const taskId = "task_hyk324_marker_present_no_warning";
+  const taskId = "task_hyk324_marker_present_no_rejection";
 
   writeFileSync(
     join(harnessDir, `${role}-task.md`),
@@ -175,9 +208,7 @@ test("시험9 대조군: finalize-done 마커가 있으면 경고가 없다", ()
   });
 
   assert.ok(
-    !messages.some(
-      (m) => m.includes("warning") && m.includes("finalize-done marker"),
-    ),
-    `expected no marker warning when marker is present, got: ${JSON.stringify(messages)}`,
+    !messages.some((m) => m.includes("no finalize-done marker")),
+    `expected no marker-rejection message when the marker is present, got: ${JSON.stringify(messages)}`,
   );
 });

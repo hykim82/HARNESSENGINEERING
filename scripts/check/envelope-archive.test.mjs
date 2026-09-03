@@ -380,7 +380,11 @@ function writeTask(dir, role, taskId, droppedAt, headCommit = "") {
 function writeResult(dir, role, taskId, doneAt, extra = "", headCommit = "") {
   writeFileSync(
     join(dir, `${role}.md`),
-    `task_id: ${taskId}\n${headCommit ? `head_commit: ${headCommit}\n` : ""}${extra}\n>>> DONE: ${role.toUpperCase()} @ ${doneAt}\n`,
+    // HYK-418 §2-1: relay-handshake now rejects a well-formed DONE line
+    // with no finalize-done marker (fail-closed) -- this file's own
+    // subject is envelope archiving, not the marker gate, so carry the
+    // marker to reach that axis unmasked.
+    `task_id: ${taskId}\n${headCommit ? `head_commit: ${headCommit}\n` : ""}${extra}\n>>> DONE: ${role.toUpperCase()} @ ${doneAt}\ndone_stamped_by: finalize-done\n`,
     "utf8",
   );
 }

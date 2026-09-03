@@ -97,7 +97,11 @@ function writeCoderFixture(harnessDir, taskId) {
   );
   writeFileSync(
     join(harnessDir, "coder.md"),
-    `task_id: ${taskId}\n\n>>> DONE: CODER @ 2026-08-19 06:10:00 KST\n`,
+    // HYK-418 §2-1: relay-handshake now rejects a well-formed DONE line
+    // with no finalize-done marker (fail-closed) -- carry the marker so
+    // this shared fixture keeps exercising the admission-completion
+    // worktree-isolation wiring under test, not this promotion's rejection.
+    `task_id: ${taskId}\n\n>>> DONE: CODER @ 2026-08-19 06:10:00 KST\ndone_stamped_by: finalize-done\n`,
     "utf8",
   );
 }

@@ -116,7 +116,11 @@ function writeReviewFixture(
   );
   writeFileSync(
     join(harnessDir, "review.md"),
-    `task_id: ${taskId}\nfor: ${taskId}\nverdict: ${verdict}\nrole: REVIEW-CODEX\nhead_commit: ${headCommit}\n\n>>> DONE: REVIEW-CODEX @ ${doneAt} KST\n`,
+    // HYK-418 §2-1: relay-handshake now rejects a well-formed DONE line
+    // with no finalize-done marker (fail-closed) -- this file's own
+    // subject is the reject-streak recording axis, not the marker gate,
+    // so carry the marker to reach that axis unmasked.
+    `task_id: ${taskId}\nfor: ${taskId}\nverdict: ${verdict}\nrole: REVIEW-CODEX\nhead_commit: ${headCommit}\n\n>>> DONE: REVIEW-CODEX @ ${doneAt} KST\ndone_stamped_by: finalize-done\n`,
     "utf8",
   );
 }
@@ -383,7 +387,7 @@ test("(d) 실패 가시성: a REVIEW result file with no 'verdict:' line still c
       );
       writeFileSync(
         join(harnessDir, "review.md"),
-        `task_id: HYK-9505-review-1\nhead_commit: ${headCommit}\n\n>>> DONE: REVIEW-CODEX @ 2026-08-04 21:10:00 KST\n`,
+        `task_id: HYK-9505-review-1\nhead_commit: ${headCommit}\n\n>>> DONE: REVIEW-CODEX @ 2026-08-04 21:10:00 KST\ndone_stamped_by: finalize-done\n`,
         "utf8",
       );
       const result = runRelayHandshakeCli(
@@ -418,7 +422,7 @@ test("role scoping: a CODER handshake (no verdict possible) never touches the le
       );
       writeFileSync(
         join(harnessDir, "coder.md"),
-        "task_id: HYK-9506\n\n>>> DONE: CODER @ 2026-08-04 21:10:00 KST\n",
+        "task_id: HYK-9506\n\n>>> DONE: CODER @ 2026-08-04 21:10:00 KST\ndone_stamped_by: finalize-done\n",
         "utf8",
       );
       const result = runRelayHandshakeCli(

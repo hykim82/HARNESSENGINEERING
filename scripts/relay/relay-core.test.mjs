@@ -117,7 +117,11 @@ function dropResultFile(
 ) {
   writeFileSync(
     join(harnessDir, `${rolePrefix}.md`),
-    `task_id: ${taskId}\n\nsummary\n\n>>> DONE: CODER @ ${doneAt} KST\n`,
+    // HYK-418 §2-1: relay-handshake now rejects a well-formed DONE line
+    // with no finalize-done marker (fail-closed) -- this file's own
+    // subject is relay-core wiring, not the marker gate, so carry the
+    // marker to reach that axis unmasked.
+    `task_id: ${taskId}\n\nsummary\n\n>>> DONE: CODER @ ${doneAt} KST\ndone_stamped_by: finalize-done\n`,
     "utf8",
   );
 }
