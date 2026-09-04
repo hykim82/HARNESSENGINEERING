@@ -118,13 +118,19 @@ const BLOCKED_BARE_COLUMN0_RE = /^(BLOCKED|NEEDS_INPUT):/gim;
 // used to fail closed instead).
 const DONE_STAMPED_BY_MARKER_RE = /^done_stamped_by:\s*finalize-done\s*$/im;
 
-function repoRoot() {
+// HYK-428 §2⑴: `cwd` is optional/back-compat -- callers that omit it (every
+// pre-HYK-428 caller) get the exact unchanged process.cwd()-derived
+// behavior. Threading an explicit `cwd` (see mainRepoRoot below) is what
+// lets the resolved path track the SAME directory an isolation gate already
+// validated, instead of an unrelated, ambient process.cwd().
+function repoRoot(cwd) {
   try {
-    return execSync("git rev-parse --show-toplevel", {
-      encoding: "utf8",
-    }).trim();
+    return execSync(
+      "git rev-parse --show-toplevel",
+      cwd ? { encoding: "utf8", cwd } : { encoding: "utf8" },
+    ).trim();
   } catch {
-    return process.cwd();
+    return cwd ?? process.cwd();
   }
 }
 
@@ -141,8 +147,21 @@ function repoRoot() {
 // hook's script) can resolve the SAME centralized ledger location when it
 // records an approval -- see that module's own header for why the approval
 // path needs this at all.
-export function mainRepoRoot() {
-  const root = repoRoot();
+// HYK-428 §2⑴: `startDir` is optional/back-compat (review-gate.mjs's own
+// call site below omits it -- a commit-msg hook always runs with
+// process.cwd() already equal to the worktree being committed in, so there
+// is no separate "checked" directory to align to there). When a caller DOES
+// pass `startDir` (autoRecordRejectStreak below), every git call in this
+// resolution chain runs anchored at THAT directory, not at this process's
+// own ambient cwd -- this is what makes the resolved ledger path track the
+// exact same directory isInsideGitWorktree(harnessDir) already validated,
+// closing the gap the header comment above (HYK-355 §2-B) describes: before
+// this round, mainRepoRoot() ignored harnessDir entirely, so an isolated
+// fixture (which legitimately passes isInsideGitWorktree, since it IS some
+// git worktree) still resolved to whatever repo this process's cwd
+// happened to be in when invoked in-process (coder-task.md §1-1 원문).
+export function mainRepoRoot(startDir) {
+  const root = repoRoot(startDir);
   try {
     const commonDir = execSync("git rev-parse --git-common-dir", {
       encoding: "utf8",
@@ -503,11 +522,43 @@ function autoRecordRejectStreak({ role, resultContent, harnessDir }) {
     console.error(blocked.reason);
     return blocked;
   }
-  const autoRecord = recordRejectStreakFromResultText({
-    role,
-    resultText: resultContent,
-    ledgerPath: join(mainRepoRoot(), ".harness", "reject-streak.json"),
-  });
+  // HYK-428 §2⑴: anchor at `harnessDir` (the exact directory the gate above
+  // just validated with isInsideGitWorktree), not the bare no-arg
+  // mainRepoRoot() this line used before -- that old call resolved off this
+  // PROCESS's own ambient cwd, a value completely decoupled from
+  // harnessDir, which is how the gate above could pass (harnessDir
+  // genuinely is some git worktree, e.g. an isolated fixture's own
+  // `git init`) while the write still landed in whatever repo the caller's
+  // cwd happened to be -- see mainRepoRoot's own header for the closed gap.
+  // HYK-428: wrapped in try/catch (was bare) -- once the gate above passes,
+  // mainRepoRoot(harnessDir) can still resolve to a directory whose
+  // `.harness/` subdir does not exist (harnessDir is `isInsideGitWorktree`
+  // but git itself failed to resolve a common-dir for some other reason),
+  // and writeLedger has no parent-directory guard of its own -- this must
+  // degrade to a logged, visible failure (mirrors every other side-effect
+  // in this file, e.g. autoArchiveRoundEnvelope's own try/catch boundary),
+  // never an uncaught crash that takes the whole handshake process down.
+  let autoRecord;
+  try {
+    autoRecord = recordRejectStreakFromResultText({
+      role,
+      resultText: resultContent,
+      ledgerPath: join(
+        mainRepoRoot(harnessDir),
+        ".harness",
+        "reject-streak.json",
+      ),
+    });
+  } catch (err) {
+    const reason = `reject-streak auto-record: ledger write failed unexpectedly (${err.message}) -- ledger NOT updated, round completion not blocked`;
+    console.error(reason);
+    return {
+      attempted: true,
+      ok: false,
+      reasonCode: "LEDGER_WRITE_ERROR",
+      reason,
+    };
+  }
   if (!autoRecord.attempted) return { attempted: false, ok: false };
   if (autoRecord.ok) {
     console.log(autoRecord.reason);
