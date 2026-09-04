@@ -339,22 +339,51 @@ test("ⓐ 되돌림: --permission 격리를 끄면 같은 대상이 실제로 �
   }
 });
 
-test("ⓑ 무한 top-level await(이벤트 루프를 살려 둔 채): 제한시간 안에 거부된다", async () => {
+// HYK-430 2R(검토 반려 P1-2 §2⑵ⓐ 전수 열거 대상) -- 이 시험의
+// `elapsedMs < 5000`도 relay-handshake-retire-author-shadow-wire.test.mjs
+// (E)와 «같은 형태»(재시도로 늘어난 실측 시간 vs 독립적으로 고른 절대
+// 값)였다. 아직 실측으로 깨지지는 않았지만(800ms×2회=1600ms 나름의
+// 여유), REVIEW가 재현한 2572ms/400ms(6.4배) 비율을 그대로 적용하면
+// 1600ms×6.4≈10240ms로 5000ms를 넘을 수 있어 ★같은 종류의 잠재
+// 결함이다 -- 지금 고친다. 결정적 호출-횟수 스파이(부하 무관)를
+// 주 증거로 삼고, 벽시계 상한은 "무한정 대기하지 않는다"는 느슨한
+// 안전망으로만 남긴다(REVIEW 실측 배율 6.4배에 5배 이상 여유를 얹은
+// 배율로 timeoutMs*시도횟수에서 파생 -- 독립 절대값이 아니다).
+const WORST_CASE_OVERHEAD_MULTIPLIER = 40; // REVIEW 실측 6.4배 + 넉넉한 여유.
+
+test("ⓑ 무한 top-level await(이벤트 루프를 살려 둔 채): 제한시간 안에 거부된다, 재시도 정확히 1회(호출 횟수로 결정적 증명)", async () => {
   const worktree = tmpWorktree("hyk400-hostile-hang-worktree-");
   try {
     seedReceiptCli(worktree, "hyk400-hostile-hang.mjs.txt");
+    const timeoutMs = 800;
+    let spawnCalls = 0;
     const startedAt = Date.now();
     const result = await checkReceiptCliFlagSupport({
       worktree,
       deliveryArgs: deliveryArgsFor(worktree),
-      timeoutMs: 800,
+      timeoutMs,
+      // detectPermissionFlag도 같은 execFileSyncFn을 통해 플래그
+      // 탐지용 프로브(`-e "process.exit(0)"`)를 한 번 스폰한다 --
+      // 그건 이 시험이 재는 "무응답 자식에 대한 재시도"가 아니므로
+      // 스파이에서 제외한다(그 프로브 인자는 언제나 -e를 포함한다).
+      execFileSyncFn: (...args) => {
+        const cliArgs = args[1] ?? [];
+        if (!cliArgs.includes("-e")) spawnCalls += 1;
+        return execFileSync(...args);
+      },
     });
     const elapsedMs = Date.now() - startedAt;
     assert.equal(result.supported, false);
     assert.match(result.reason, /RECEIVER_CLI_PROBE_TIMEOUT/);
+    assert.equal(
+      spawnCalls,
+      2,
+      `무응답 자식은 재시도 1회를 포함해 정확히 2번 스폰돼야 한다 -- 실측: ${spawnCalls}`,
+    );
+    const looseCeilingMs = timeoutMs * 2 * WORST_CASE_OVERHEAD_MULTIPLIER;
     assert.ok(
-      elapsedMs < 5000,
-      `타임아웃이 제한시간(800ms) 근처에서 걸려야 하는데 ${elapsedMs}ms 걸렸다`,
+      elapsedMs < looseCeilingMs,
+      `2회 시도(각 ${timeoutMs}ms) 대비 ${WORST_CASE_OVERHEAD_MULTIPLIER}배 여유(${looseCeilingMs}ms)를 넘으면 타임아웃 메커니즘 자체가 소실된 회귀로 본다 -- 실측: ${elapsedMs}ms`,
     );
   } finally {
     rmSync(worktree, { recursive: true, force: true });
@@ -368,16 +397,26 @@ test("ⓑ 무한 top-level await(이벤트 루프를 살려 둔 채): 제한시�
 // 재시도가 실제로 «두 번째 자식 프로세스를 다시 스폰»했다는 것도
 // 경과시간으로 증명한다(1회 시도만 했다면 elapsedMs가 timeoutMs 근처에
 // 머물렀을 것 -- 2회 시도했으므로 timeoutMs의 배 이상 걸려야 한다).
-test("★음성 대조: 재시도(1회) 뒤에도 진짜 무응답 자식은 여전히 거부된다 -- 탐지력이 재시도로 사라지지 않는다", async () => {
+test("★음성 대조: 재시도(1회) 뒤에도 진짜 무응답 자식은 여전히 거부된다 -- 탐지력이 재시도로 사라지지 않는다(호출 횟수로 결정적 증명)", async () => {
   const worktree = tmpWorktree("hyk400-hostile-hang-retry-worktree-");
   try {
     seedReceiptCli(worktree, "hyk400-hostile-hang.mjs.txt");
     const timeoutMs = 500;
+    let spawnCalls = 0;
     const startedAt = Date.now();
     const result = await checkReceiptCliFlagSupport({
       worktree,
       deliveryArgs: deliveryArgsFor(worktree),
       timeoutMs,
+      // detectPermissionFlag도 같은 execFileSyncFn을 통해 플래그
+      // 탐지용 프로브(`-e "process.exit(0)"`)를 한 번 스폰한다 --
+      // 그건 이 시험이 재는 "무응답 자식에 대한 재시도"가 아니므로
+      // 스파이에서 제외한다(그 프로브 인자는 언제나 -e를 포함한다).
+      execFileSyncFn: (...args) => {
+        const cliArgs = args[1] ?? [];
+        if (!cliArgs.includes("-e")) spawnCalls += 1;
+        return execFileSync(...args);
+      },
     });
     const elapsedMs = Date.now() - startedAt;
     assert.equal(
@@ -386,6 +425,15 @@ test("★음성 대조: 재시도(1회) 뒤에도 진짜 무응답 자식은 여
       "재시도 예산을 다 써도 결론은 여전히 미지원(거부)이어야 한다 -- 탐지력 보존",
     );
     assert.match(result.reason, /RECEIVER_CLI_PROBE_TIMEOUT/);
+    // 결정적 증명(부하 무관) -- 벽시계보다 우선한다.
+    assert.equal(
+      spawnCalls,
+      2,
+      `재시도 1회를 포함해 정확히 2번 스폰돼야 한다 -- 실측: ${spawnCalls}`,
+    );
+    // 보조 확인(부하에 영향받는 느슨한 하한 -- 벽시계가 극단적으로
+    // 빨라도 최소한 순차적인 두 시도였다는 감각을 남긴다. 상한은
+    // 걸지 않는다 -- 위 ⓑ 시험이 그 축을 이미 담당한다).
     assert.ok(
       elapsedMs >= timeoutMs * 1.5,
       `1회 재시도가 실제로 자식을 다시 스폰했다면 경과시간이 timeoutMs(${timeoutMs}ms)의 1.5배 이상이어야 한다(1회 시도만 했다면 이 시험이 실패해야 한다) -- 실측: ${elapsedMs}ms`,

@@ -3,7 +3,6 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execSync, execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { freemem } from "node:os";
 import {
   recordRejectStreakFromResultText,
   isReviewFamilyRole,
@@ -2100,62 +2099,57 @@ function shadowLine(state, reason, taskId) {
 // 영향 없는 수준"은 상대적 지침으로 읽었다: 무제한(∞) 대비 2초는 이
 // 소비 경로의 다른 스폰 호출(admission-completion-adapter 등, 이들도
 // 자체 타임아웃이 없다 -- 이 라운드 범위 밖)과 같은 자릿수다).
-// HYK-430 1R: 이 기준값(부하 0 가정)도 이제 공통 정책(child-probe-
-// timeout-policy.mjs, coder-task.md §2⑶)이 그 시점 가용 메모리로 넓힌다.
-// ⚠️정직 한계 -- 이 파일은 그 모듈을 «정적 import하지 않는다»: 이
-// 함수 바로 위 기존 주석(HYK-419-wire-2)이 이미 설명하듯,
-// relay-handshake.mjs는 24개 이상의 격리 픽스처 시험(예:
-// admission-completion-spawn.test.mjs)이 "relay-handshake.mjs +
-// time-authority/reject-streak/envelope-archive 4개 형제 파일만" 복사해
-// 서브프로세스로 도는 정적 import 그래프의 일부다 -- 5번째 정적
-// import를 추가하면 그 시험 31개 전부가 LOAD 시점에 MODULE_NOT_FOUND로
-// 깨진다(실측 반복 -- retirement-auto-author-shadow-cli.mjs를 스폰만
-// 하고 정적 import하지 않는 이 파일의 기존 설계와 같은 이유). 그래서
-// 아래 두 함수(loadMultiplierLocal/withTimeoutRetryLocal)는
-// child-probe-timeout-policy.mjs와 «같은 공식을 의도적으로 복제»한다
-// (node:os만 참조 -- builtin이라 격리 픽스처에도 항상 있다). 드리프트
-// 방지: relay-handshake-timeout-policy-parity.test.mjs가 두 구현이
-// 넓은 입력 범위에서 정확히 같은 값을 내는지 직접 대조한다 -- 여기 값을
-// 고치면서 child-probe-timeout-policy.mjs를 안 고치면(또는 반대) 그
-// 시험이 즉시 빨개진다.
-const SHADOW_CLI_REFERENCE_FREE_MEM_BYTES = 4 * 1024 * 1024 * 1024; // 4GB
-const SHADOW_CLI_MIN_MULTIPLIER = 1;
-const SHADOW_CLI_MAX_MULTIPLIER = 3;
-const SHADOW_CLI_RETRY_ON_TIMEOUT = 1;
-
-export function loadMultiplierLocal(freeMemBytes = freemem()) {
-  if (!Number.isFinite(freeMemBytes) || freeMemBytes <= 0) {
-    return SHADOW_CLI_MAX_MULTIPLIER;
-  }
-  const ratio = SHADOW_CLI_REFERENCE_FREE_MEM_BYTES / freeMemBytes;
-  return Math.min(
-    Math.max(ratio, SHADOW_CLI_MIN_MULTIPLIER),
-    SHADOW_CLI_MAX_MULTIPLIER,
-  );
+// HYK-430 2R (검토 반려 P1-1 수리 -- 로컬 복제를 없앤다, ⛔parity
+// 시험만 키우는 것은 답이 아니다): 이 기준값(부하 0 가정)은 공통
+// 정책(child-probe-timeout-policy.mjs, coder-task.md §2⑶)에서만
+// 나온다. ⚠️격리 픽스처 제약(1R에서 실측, 2R에서 재검증 -- 아래)은
+// 여전히 실재한다: relay-handshake.mjs는 24개 이상의 격리 픽스처
+// 시험(예: admission-completion-spawn.test.mjs)이 "relay-handshake.mjs
+// + time-authority/reject-streak/envelope-archive 4개 형제 파일만"
+// 복사해 서브프로세스로 도는 정적 import 그래프의 일부라, 5번째
+// 정적 import를 추가하면 그 시험 전부가 LOAD 시점에 MODULE_NOT_FOUND로
+// 깨진다(1R·2R 둘 다 재현). ★수리(1R과 다른 점): "정적 import 불가
+// -> 로컬 복제"가 아니라 "정적 import 불가 -> top-level await로 옵션
+// dynamic import, 실패하면 null"로 바꾼다. 이러면:
+//   - 프로덕션 경로(이 저장소 자신)는 항상 이 형제 파일을 갖고 있으므로
+//     매번 성공 -- 실제 동작은 100% 공통 정책이 결정한다(단일 소스,
+//     완료조건1 충족).
+//   - 격리 픽스처(위 24개+)만 import 실패 -> null로 남는다. 이때
+//     fallback은 «정책 공식을 다시 베끼지 않는다»(그러면 P1-1이
+//     그대로 재발한다) -- 그냥 «적응·재시도 없이 기준값 그대로 1회
+//     시도»로 물러난다(=이 조각 이전의 원래 동작과 동일). ★탐지력은
+//     이 축소 경로에서도 그대로다: execFileFn의 timeout 옵션 자체가
+//     이미 자식을 죽인다 -- 재시도·적응이 없다고 "영원히 안 끝남"이
+//     되지는 않는다(§2⑶ⓐ). 이 폴백은 격리 픽스처가 «의도적으로»
+//     이 형제 파일을 지운 경우에만 발동하며, 그런 시험들은 애초에
+//     이 값(적응 배율)을 검증 대상으로 삼지 않는다(관측 대상은 다른
+//     축 -- admission 정리, ledger 등).
+// 드리프트 개념 자체가 사라진다(복제본이 없으므로 "둘이 갈린다"는
+// 상태가 존재하지 않는다) -- 대신 아래 두 시험이 «진짜 단일 소스»를
+// 직접 증명한다: (a) 정본 모듈만 변이해도 이 파일의 실제 산출(로그
+// 문구의 timeoutMs)이 그 변이를 반영한다 (b) 정본 모듈이 격리
+// 픽스처에서 빠지면 폴백 경로로 물러나되 조용히 죽지 않는다(exit 0
+// 유지, 회귀 없음) -- relay-handshake-canonical-policy-wiring.test.mjs.
+let childProbeTimeoutPolicy;
+try {
+  childProbeTimeoutPolicy = await import("./child-probe-timeout-policy.mjs");
+} catch {
+  childProbeTimeoutPolicy = null;
 }
 
-function resolveShadowCliTimeoutMs(baseTimeoutMs, freeMemBytes = freemem()) {
-  return Math.round(baseTimeoutMs * loadMultiplierLocal(freeMemBytes));
+function resolveShadowCliTimeoutMs(baseTimeoutMs) {
+  if (!childProbeTimeoutPolicy) return baseTimeoutMs;
+  return childProbeTimeoutPolicy.resolveChildProbeTimeoutMs(baseTimeoutMs);
 }
 
-// §2⑶ "재시도 1회" -- 무응답(ETIMEDOUT)만 정확히 1회 재시도한다. 진짜로
-// 계속 응답하지 않는 자식은 재시도해도 다시 타임아웃이므로 탐지력은
-// 그대로다(§2⑷ 음성 대조: (E) 시험이 실제 지연 자식으로 이를 고정한다).
-function withTimeoutRetryLocal(
-  fn,
-  isTimeout,
-  retries = SHADOW_CLI_RETRY_ON_TIMEOUT,
-) {
-  let lastErr;
-  for (let attempt = 0; attempt <= retries; attempt += 1) {
-    try {
-      return fn(attempt);
-    } catch (err) {
-      lastErr = err;
-      if (!isTimeout(err)) throw err;
-    }
-  }
-  throw lastErr;
+// §2⑶ "재시도 1회" -- 무응답(ETIMEDOUT)만, 공통 정책이 로드됐을 때만
+// 정확히 1회 재시도한다(RETRY_ON_TIMEOUT은 child-probe-timeout-
+// policy.mjs가 유일한 정의처다). 정책이 없으면(격리 픽스처) 재시도
+// 없이 1회만 시도한다 -- §2⑷ 음성 대조: (E) 시험이 정책 로드 상태에서
+// 실제 지연 자식으로 재시도까지 고정한다.
+function withTimeoutRetryIfAvailable(fn, isTimeout) {
+  if (!childProbeTimeoutPolicy) return fn(0);
+  return childProbeTimeoutPolicy.withTimeoutRetry(fn, { isTimeout });
 }
 
 const SHADOW_CLI_TIMEOUT_MS = 2000;
@@ -2237,10 +2231,11 @@ export function runRetireAuthorShadowObservation({
     // 없어 Node가 내부적으로 TerminateProcess로 매핑한다 -- 이 워크트리
     // 자체가 Windows라 이 경로로 실측했다, 좀비 프로세스는 남기지 않음을
     // 시험(rr-timeout 계열)으로 확인).
-    // HYK-430 1R: 무응답(TIMEOUT)만 정확히 1회 재시도한다(§2⑶, 위
-    // withTimeoutRetryLocal 주석). 진짜 무응답 자식은 재시도해도 다시
-    // 타임아웃되므로 탐지력은 보존된다(§2⑷ 음성 대조 (E)).
-    const out = withTimeoutRetryLocal(
+    // HYK-430 2R: 무응답(TIMEOUT)만, 공통 정책이 로드됐을 때 정확히
+    // 1회 재시도한다(§2⑶, 위 withTimeoutRetryIfAvailable 주석). 진짜
+    // 무응답 자식은 재시도해도 다시 타임아웃되므로 탐지력은 보존된다
+    // (§2⑷ 음성 대조 (E)).
+    const out = withTimeoutRetryIfAvailable(
       () =>
         execFileFn("node", args, {
           encoding: "utf8",

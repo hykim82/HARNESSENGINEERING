@@ -81,6 +81,25 @@ test("resolveChildProbeTimeoutMs: 단일 타임아웃은 응답 배율 하나만
   assert.equal(ms, 4000);
 });
 
+// HYK-430 2R §2⑶ⓑ -- "정책에 상한이 있는가"(부하가 극단적일 때 제한
+// 시간이 무한히 늘면 「고부하=무탐지」가 된다). resolveChildProbeTimeoutMs
+// 는 hyk400-receiver-guard.mjs·relay-handshake.mjs 둘 다 실제로 쓰는
+// 단일-타임아웃 경로다 -- 이 경로에도 MAX_MULTIPLIER 상한이 실제로
+// 걸리는지 극단적 저메모리로 직접 확인한다(resolveChildProbeBudget과는
+// 별개 함수라 따로 확인이 필요하다).
+test("resolveChildProbeTimeoutMs: 극단적 저메모리에서도 MAX_MULTIPLIER 상한 안에서 멎는다(무한히 늘지 않는다)", () => {
+  const ms1 = resolveChildProbeTimeoutMs(2000, { freeMemBytes: 1 });
+  const ms2 = resolveChildProbeTimeoutMs(2000, {
+    freeMemBytes: 1 / 1_000_000,
+  });
+  assert.equal(ms1, 2000 * MAX_MULTIPLIER);
+  assert.equal(
+    ms2,
+    2000 * MAX_MULTIPLIER,
+    "freeMemBytes가 더 작아져도(더 극단적이어도) 값이 더 커지지 않아야 한다 -- 상한에서 멎었다는 증거",
+  );
+});
+
 // ---------------------------------------------------------------------------
 // withTimeoutRetry
 // ---------------------------------------------------------------------------
