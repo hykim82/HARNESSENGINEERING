@@ -215,6 +215,50 @@ test("§2⑴ 반례: completedAt이 미래(nowMs보다 뒤) -- DISPATCH_COMPLETE
   assert.equal(r.reason, SEAT_REASON.DISPATCH_COMPLETED_AT_FUTURE);
 });
 
+// ---- §2⑴ P1-1 반례 4건(REVIEW 3R 재현, coder-task.md §3-3) ----
+// 검토자 재현 명령(§9 원문)을 그대로 시험 형태로 옮긴다 -- protectedSeats가
+// 배열"이기만" 하면 통과하던 2R의 구멍(원소 타입 미검증)이 3R
+// PROTECTED_SEATS_SCHEMA(TArrayOf(TNonEmptyString()))로 닫혔는지 직접 본다.
+
+test("§2⑴ P1-1 반례: protectedSeats=[null] -- 원소가 null이면 목록 전체 무효, 회수 금지", () => {
+  const r = judge({}, { protectedSeats: [null], minIdleMs: 0 });
+  assert.equal(r.eligibility, SEAT_ELIGIBILITY.PROTECTED);
+  assert.equal(r.reclaimEligible, false);
+  assert.equal(r.reason, SEAT_REASON.PROTECTED_LIST_INVALID);
+});
+
+test("§2⑴ P1-1 반례: protectedSeats=[1] -- 원소가 숫자면 목록 전체 무효, 회수 금지", () => {
+  const r = judge({}, { protectedSeats: [1], minIdleMs: 0 });
+  assert.equal(r.eligibility, SEAT_ELIGIBILITY.PROTECTED);
+  assert.equal(r.reclaimEligible, false);
+  assert.equal(r.reason, SEAT_REASON.PROTECTED_LIST_INVALID);
+});
+
+test("§2⑴ P1-1 반례: protectedSeats=[{}] -- 원소가 객체면 목록 전체 무효, 회수 금지", () => {
+  const r = judge({}, { protectedSeats: [{}], minIdleMs: 0 });
+  assert.equal(r.eligibility, SEAT_ELIGIBILITY.PROTECTED);
+  assert.equal(r.reclaimEligible, false);
+  assert.equal(r.reason, SEAT_REASON.PROTECTED_LIST_INVALID);
+});
+
+test("§2⑴ P1-1 반례: protectedSeats=['other', null] -- 원소 하나만 무효여도 목록 전체 무효, 회수 금지", () => {
+  const r = judge({}, { protectedSeats: ["other", null], minIdleMs: 0 });
+  assert.equal(r.eligibility, SEAT_ELIGIBILITY.PROTECTED);
+  assert.equal(r.reclaimEligible, false);
+  assert.equal(r.reason, SEAT_REASON.PROTECTED_LIST_INVALID);
+});
+
+test("§2⑴ P1-1 경계: protectedSeats=[] -- 빈 배열은 원소 검사 vacuously 통과, 여전히 비보호(회수 가능 축은 열려 있다)", () => {
+  const r = judge({}, { protectedSeats: [], minIdleMs: 0 });
+  assert.notEqual(r.eligibility, SEAT_ELIGIBILITY.PROTECTED);
+});
+
+test("§2⑴ P1-1 경계: protectedSeats=['pane-1'] -- 유효한 원소만 있는 목록은 정상 동작(exact match)", () => {
+  const r = judge({}, { protectedSeats: ["pane-1"], minIdleMs: 0 });
+  assert.equal(r.eligibility, SEAT_ELIGIBILITY.PROTECTED);
+  assert.equal(r.reason, SEAT_REASON.PROTECTED_SEAT);
+});
+
 // ---- §2⑶(P1-2) 반례 2건: null 인자는 throw 대신 판정 ----
 
 test("§2⑶ 반례: judgeSeatReclaim(null) -- throw 없이 회수 금지 판정", () => {

@@ -62,36 +62,75 @@
 //     → 통과)에 맡기지 않고, idle 시간을 "모른다"로 명시 처리해 유예
 //     구간으로 접는다(WITHIN_GRACE_PERIOD, fail-closed).
 //
-// ---- §2⑵ 이 정의가 "전수"임을 무엇으로 보증하는가 ----
+// ---- §2⑴(3R) 축을 올린다: 입력 계약을 "선언"하고 검증기를 거기서
+//      "파생"시킨다 (REVIEW 1R P1-1 반려 원인 제거) ----
 //
-// 이 코어는 배차 상태를 **문자열 목록으로 열거하지 않는다**(예:
-// "succeeded"|"failed"|"cancelled"|... 를 나열하고 그 목록에 있으면
-// 끝난 것으로 치는 방식은 채택하지 않았다). 문자열 목록은 새 상태값이
-// 벤더 쪽에서 추가되는 순간 조용히 구멍이 난다 -- 그 구멍은 "표본을
-// 더 많이 모은다"고 메워지지 않는다(정의상 아직 안 본 미래 값이므로).
+// 2R은 위 다섯 파생 검사를 필드마다 손으로 짠 `isValidXField` 함수로
+// 적용했다. REVIEW가 잡은 P1-1: `policy.protectedSeats`는 "배열인가"만
+// 보고 "배열의 **원소**가 자기 타입 범위 안에 있는가"는 안 봤다 --
+// `[null]`·`[1]`·`[{}]`·`['other', null]`이 전부 "정상 목록"으로
+// 통과해 RECLAIM_ELIGIBLE로 샜다(fail-open). ★이건 §2⑴ 규칙이 틀려서가
+// 아니다 -- 그 규칙을 "배열 자체"에는 적용하면서 "배열 원소"에는 적용을
+// 빼먹은, **적용 누락**이다(coder-task.md §1-1). 1R→2R→REVIEW가 "같은
+// 형태, 한 겹씩 안쪽"으로 반려된 것도 이 때문이다: 손으로 필드를 훑는
+// 방식은 훑는 손이 안 닿는 겹(중첩)을 매번 하나씩 남긴다.
 //
-// 대신 이 코어가 보는 축은 `dispatch.completedAt`이라는 **nullable
-// 타임스탬프 하나**뿐이다. "전수"의 근거는 여전히 표본 수가 아니라
-// **분기 구조 자체가 닫혀 있다는 것**이지만, 2R은 그 근거를 한 단계
-// 더 강화한다: 위 §2⑴ 규칙이 "필드마다 개별로" 검증되는 게 아니라
-// "이 필드가 값으로 쓰이려면 자기 타입 범위 안에 있어야 한다"는 **한
-// 문장짜리 불변식**에서 각 필드 검사가 파생되므로, 새 필드가 이 코어에
-// 추가돼도(예: 미래에 회수 조건이 하나 더 생겨도) 같은 불변식을 그
-// 필드에 적용하면 되고 "그 필드의 반례 목록"을 따로 수집할 필요가
-// 없다. 되돌림 변이(§9 재현)로 각 guard가 load-bearing임을, 그리고
-// §5 신규 시험으로 8개 반례가 계약 필드 값을 직접 검사해 닫혔음을 함께
-// 보증한다(표본 근거 + 구조 근거의 결합, 표본 단독이 아니다).
+// 3R은 손으로 훑는 방식 자체를 버린다. 아래 TNull/TBoolean/TExact/
+// TNonEmptyString/TParsableTimestamp/TNonNegativeFiniteNumber/TUnion/
+// TArrayOf/TObject 조합자로 §2⑴ 규칙("채워진 값은 자기 타입의 유효
+// 범위 안에 있어야 '채워졌다'로 센다")을 **한 번만 선언**하고,
+// `SEAT_INVENTORY_SCHEMA`·`PROTECTED_SEATS_SCHEMA`는 그 선언의
+// 인스턴스일 뿐이다 -- `isValidSeatInventoryShape`와 `classifyProtection`의
+// 검사 로직은 이제 그 선언을 구동하기만 한다(따로 로직을 갖지 않는다).
+// 조합자는 외부 스키마 라이브러리(zod 등)를 쓰지 않는다(zero-import
+// 순수 코어 관례) -- 이 코어가 실제로 필요로 하는 형태(원자값/합집합/
+// 배열/객체)로만 표현력을 최소화했다.
 //
-// 이 보증이 못 덮는 것(정직하게, §2⑵ 질문 답): `completedAt`을 채우는
-// 쪽(호출자/어댑터)이 실제로 배차가 끝났을 때만 그 필드를 채운다는
-// **상위 계약**은 이 코어가 강제할 수 없다 -- 그 계약이 깨지면(예:
-// 아직 안 끝난 배차에 실수로 "과거의" completedAt이 채워짐 -- "미래"가
-// 아니므로 이 코어의 미래-거부 guard로도 못 잡는다) 이 코어는 정직하게
-// 속는다. ★이 구멍은 P1급으로 보지 않는다 -- 그런 오기입은 이 코어
-// 밖의 어댑터 코드 결함이고, 이 코어가 검증할 수 있는 것은 "값 자체가
-// 자기 타입 범위 안에 있는가"까지다("그 값이 사실과 일치하는가"는 순수
-// 함수의 권한 밖이다, 다른 코어들도 동일 경계를 갖는다 -- 예:
-// wake-decide-core.mjs도 `nowMs`가 진짜 현재 시각인지는 검증하지 않는다).
+// ---- §2⑵ 이 계약이 "중첩된 값"에도 적용됨을 무엇으로 보증하는가 ----
+//
+// 보증의 실체는 **재귀**다: `TArrayOf(elementSchema)`는 배열 "그릇"이
+// 아니라 배열의 **모든 원소**에 `elementSchema.check`를 적용하고,
+// `TObject(fieldSchemas)`는 선언된 각 속성 "값"에 그 속성의 스키마를
+// 적용한다. 원소나 속성 자체가 다시 TObject/TArrayOf이면(예: 이 코어가
+// 미래에 "배차 목록의 배열"을 받게 되어도) 같은 두 함수가 그대로 한
+// 겹 더 재귀한다 -- "중첩 k겹"을 손으로 k번 더 짤 필요가 없다. 이
+// 재귀가 정확히 P1-1을 막는다: `PROTECTED_SEATS_SCHEMA =
+// TArrayOf(TNonEmptyString())`는 배열 자체가 배열인지(`Array.isArray`)
+// **그리고** 모든 원소가 비어있지 않은 문자열인지를 한 선언으로 동시에
+// 요구하므로, `[null]`·`[1]`·`[{}]`처럼 "그릇은 배열, 내용물은 무효"인
+// 입력이 더는 통과하지 못한다(원소 하나라도 실패하면 `.every`가
+// false를 내고 배열 전체가 무효로 접힌다).
+//
+// "전수"의 근거는 여전히 표본 수가 아니라 **분기 구조가 닫혀 있다는
+// 것**이지만, 3R은 그 구조를 "필드마다 개별로 짠 함수 여러 개"에서
+// "선언 하나 + 그 선언을 그대로 구동하는 재귀 조합자 두 개"로 좁혔다 --
+// 새 필드/새 중첩이 추가돼도 §2⑴ 규칙을 그 자리에 조합자로 한 번
+// 선언하면 되고, "그 필드의 반례 목록"을 손으로 다시 수집할 필요가
+// 없다. 되돌림 변이(§9 재현)로 각 guard가 load-bearing임을, §5 신규
+// 시험으로 12개 반례(8개 기존 + P1-1의 4개)가 계약 필드 값을 직접
+// 검사해 닫혔음을 함께 보증한다(표본 근거 + 구조 근거의 결합, 표본
+// 단독이 아니다).
+//
+// ★이 보증이 "못 덮는 것"(정직하게, §2⑵ 질문 답 -- 등급 포함):
+//   1) [P2급] **스키마가 닫혀 있지 않다** -- `TObject`는 선언된 키만
+//      검사하고 여분의 키를 거부하지 않는다(예: `seat`에 알 수 없는
+//      속성이 더 있어도 통과). 이 코어는 선언된 필드만 읽으므로 현재
+//      harm path는 없지만, "여분 필드가 있으면 무효로 본다"는 요구가
+//      생기면 별도 조합자(`TExactObject` 류)가 필요하다 -- 이번 라운드
+//      범위 밖(§0 범위 확대 금지)이라 추가하지 않는다.
+//   2) [P3급] **원소 간 상호 제약은 표현하지 않는다** -- 예:
+//      "protectedSeats에 중복 원소가 없어야 한다"는 이 조합자로 못
+//      막는다(원소 각각의 타입만 본다, 원소 간 관계는 못 본다). 현재
+//      요구사항에 그런 제약이 없으므로 harm path 없음.
+//   3) [P1급으로 보지 않음, 1R/2R부터 이어지는 기존 정직 한계] `completedAt`을
+//      채우는 쪽(호출자/어댑터)이 실제로 배차가 끝났을 때만 그 필드를
+//      채운다는 **상위 계약**은 이 코어가 강제할 수 없다 -- 그 계약이
+//      깨지면(예: 아직 안 끝난 배차에 실수로 "과거의" completedAt이
+//      채워짐) 이 코어는 정직하게 속는다. 이건 "값이 자기 타입 범위
+//      안에 있는가"를 넘어 "그 값이 사실과 일치하는가"를 요구하므로
+//      어떤 스키마 조합자로도 원리적으로 못 닫는다(다른 코어도 동일
+//      경계 -- wake-decide-core.mjs도 `nowMs`가 진짜 현재 시각인지는
+//      검증하지 않는다).
 //
 // ---- §2⑶ 회수 "누락"이 이상으로 열리는가 ----
 // judgeReclaimAnomaly가 별도 축을 낸다(아래) -- 좌석 "개수" 단독 임계는
@@ -184,9 +223,6 @@ function isPlainObject(v) {
 function isNonEmptyString(v) {
   return typeof v === "string" && v.length > 0;
 }
-function isNullableString(v) {
-  return v === null || isNonEmptyString(v);
-}
 // §2⑴ 규칙의 첫 파생: "채워진 값"은 자기 타입 범위 안에 있어야 한다 --
 // 타임스탬프 문자열의 유효 범위는 "null 아니면 Date.parse가 유한수를
 // 내는 문자열"이다(파싱 불가 문자열은 "채워지지 않은 것"과 동급).
@@ -194,37 +230,86 @@ function isParsableTimestamp(v) {
   return isNonEmptyString(v) && Number.isFinite(Date.parse(v));
 }
 
-function isValidSeatField(seat) {
-  return isPlainObject(seat) && isNullableString(seat.paneKey);
+// ---- §2⑴(3R) 최소 스키마 조합자 -- 위 §2⑴/§2⑵ 주석이 "왜"를 설명한다.
+// 각 T* 는 `{ check(v): boolean }`을 반환하는 순수 함수다. 부작용 0,
+// 예외 0(check는 어떤 v에도 boolean만 낸다) -- 이 코어의 나머지 함수와
+// 같은 관례.
+function TNull() {
+  return { check: (v) => v === null };
 }
-function isValidDispatchField(dispatch) {
-  return (
-    isPlainObject(dispatch) &&
-    (dispatch.completedAt === null ||
-      isParsableTimestamp(dispatch.completedAt)) &&
-    typeof dispatch.observable === "boolean"
-  );
+function TBoolean() {
+  return { check: (v) => typeof v === "boolean" };
 }
-function isValidActivityField(activity) {
-  return (
-    isPlainObject(activity) &&
-    (activity.idleMs === null ||
-      (Number.isFinite(activity.idleMs) && activity.idleMs >= 0)) &&
-    typeof activity.observable === "boolean"
-  );
+function TExact(value) {
+  return { check: (v) => v === value };
 }
+function TNonEmptyString() {
+  return { check: isNonEmptyString };
+}
+function TParsableTimestamp() {
+  return { check: isParsableTimestamp };
+}
+function TNonNegativeFiniteNumber() {
+  return { check: (v) => Number.isFinite(v) && v >= 0 };
+}
+// 합집합 -- 여러 스키마 중 하나만 만족하면 된다(예: "null 또는 파싱
+// 가능한 타임스탬프"). 순서는 판정에 영향 없다(각 check가 순수 술어).
+function TUnion(...schemas) {
+  return { check: (v) => schemas.some((s) => s.check(v)) };
+}
+// 배열 원소 계약 -- ★P1-1을 닫는 조합자. 배열 "그릇"만이 아니라
+// **모든 원소**에 elementSchema를 적용한다(빈 배열은 vacuously 통과 --
+// "목록이 비어 있다"는 유효 상태이지 무효 상태가 아니다).
+function TArrayOf(elementSchema) {
+  return {
+    check: (v) => Array.isArray(v) && v.every((el) => elementSchema.check(el)),
+  };
+}
+// 객체 속성 계약 -- 선언된 각 키의 값에 그 키의 스키마를 재귀 적용한다
+// (속성 값이 다시 TObject/TArrayOf여도 그대로 한 겹 더 재귀). 선언되지
+// 않은 여분의 키는 검사하지 않는다(§2⑵ "못 덮는 것" ①에 기록).
+function TObject(fieldSchemas) {
+  return {
+    check(v) {
+      if (!isPlainObject(v)) return false;
+      return Object.keys(fieldSchemas).every((k) =>
+        fieldSchemas[k].check(v[k]),
+      );
+    },
+  };
+}
+
+// ---- §2⑴(3R) 이 코어가 받는 입력의 "선언된" 계약 -------------------
+// inventory 봉투 전체를 한 번에 선언한다. 각 필드의 유효 범위는 위
+// §2⑴ 목록과 동일하되, 이제 TObject 중첩으로 "선언"이다 --
+// isValidSeatInventoryShape는 이 선언을 그대로 구동만 한다.
+const SEAT_INVENTORY_SCHEMA = TObject({
+  schemaVersion: TExact(SEAT_RECLAIM_SCHEMA_VERSION),
+  seat: TObject({ paneKey: TUnion(TNull(), TNonEmptyString()) }),
+  dispatch: TObject({
+    completedAt: TUnion(TNull(), TParsableTimestamp()),
+    observable: TBoolean(),
+  }),
+  activity: TObject({
+    idleMs: TUnion(TNull(), TNonNegativeFiniteNumber()),
+    observable: TBoolean(),
+  }),
+});
+
+// policy.protectedSeats의 선언 -- ★P1-1이 발생했던 자리. 2R은 여기를
+// `Array.isArray(p.protectedSeats)`로만 짰다(그릇만 보고 내용물은 안
+// 봄). 3R은 원소 타입을 TArrayOf(TNonEmptyString())로 선언한다 --
+// `[null]`·`[1]`·`[{}]`·`['other', null]`은 원소 중 하나라도
+// TNonEmptyString을 통과 못 하면 배열 전체가 무효가 되어 fail-closed
+// PROTECTED_LIST_INVALID로 접힌다.
+const PROTECTED_SEATS_SCHEMA = TArrayOf(TNonEmptyString());
 
 // 스키마 결손/타입 오류를 여기서 전부 잡는다(fail-closed 진입점) -- 이
 // 함수가 false를 내면 judgeSeatReclaim은 나머지 로직을 평가하지 않고
 // 곧장 UNOBSERVABLE을 반환한다(teardown-core.mjs의 isValidInventoryShape와
 // 동형 원칙).
 function isValidSeatInventoryShape(inventory) {
-  if (!isPlainObject(inventory)) return false;
-  if (inventory.schemaVersion !== SEAT_RECLAIM_SCHEMA_VERSION) return false;
-  if (!isValidSeatField(inventory.seat)) return false;
-  if (!isValidDispatchField(inventory.dispatch)) return false;
-  if (!isValidActivityField(inventory.activity)) return false;
-  return true;
+  return SEAT_INVENTORY_SCHEMA.check(inventory);
 }
 
 function buildSeatEvidence(inventory, ruleId, extra = {}) {
@@ -236,14 +321,16 @@ function buildSeatEvidence(inventory, ruleId, extra = {}) {
   };
 }
 
-// classifyProtection -- §2⑴ 규칙의 두 번째 파생: `protectedSeats`가
-// 배열이 아니면(결손·문자열·기타 타입) "보호 목록을 못 읽는다"는
-// 뜻이므로 "보호 목록이 비어 있다"(=열려 있다)로 조용히 바꿔치기하지
-// 않는다 -- 못 읽으면 안전측인 PROTECTED로 접는다. 배열이면(빈 배열
+// classifyProtection -- §2⑴ 규칙의 두 번째 파생, 3R에서 PROTECTED_SEATS_SCHEMA
+// 선언으로 이관: `protectedSeats`가 배열이 아니거나(결손·문자열·기타
+// 타입) 배열이어도 **원소 중 하나라도** 비어있지 않은 문자열이 아니면
+// (P1-1: `[null]`·`[1]`·`[{}]` 등) "보호 목록을 못 읽는다"는 뜻이므로
+// "보호 목록이 비어 있다"(=열려 있다)로 조용히 바꿔치기하지 않는다 --
+// 못 읽으면 안전측인 PROTECTED로 접는다. 스키마를 통과하면(빈 배열
 // 포함) exact match만 본다(부분일치·정규식 금지 -- teardown-core.mjs
 // isProtectedTarget과 동일 정책).
 function classifyProtection(inventory, p) {
-  if (!Array.isArray(p.protectedSeats)) {
+  if (!PROTECTED_SEATS_SCHEMA.check(p.protectedSeats)) {
     return {
       eligibility: SEAT_ELIGIBILITY.PROTECTED,
       reason: SEAT_REASON.PROTECTED_LIST_INVALID,
