@@ -1,4 +1,4 @@
-// HYK-431 1R (coder-task.md §2) -- "끝난 레인의 좌석" 회수 판정 순수 코어.
+// HYK-431 1R/2R (coder-task.md §2) -- "끝난 레인의 좌석" 회수 판정 순수 코어.
 // 부작용 0 · 시각/랜덤/fs/network 0(teardown-core.mjs와 동일 원칙, G9와
 // 동형: 이 파일은 `orca` 문자열도 pane key/PID 원문도 모른다 -- 그런 것은
 // 호출자가 만드는 inventory 봉투 안 값일 뿐이다). 이 파일이 내는 판정은
@@ -8,18 +8,59 @@
 //
 // ---- §2⑴ 회수 대상의 "정의" (사례 나열이 아니라 규칙) ----
 //
-// 좌석은 다음 네 조건을 **모두** 만족할 때만 RECLAIM_ELIGIBLE이다:
-//   1) 그 좌석에 배정된 배차(dispatch)의 `completedAt`이 null이 아니다
-//      (= 배차가 끝났다는 구조적 신호. "status 문자열이 무엇이든" 상관
-//      없다 -- 아래 §2⑵에서 이 선택의 이유를 설명한다).
+// 좌석은 다음 다섯 조건을 **모두** 만족할 때만 RECLAIM_ELIGIBLE이다:
+//   1) 그 좌석에 식별 가능한 대상(`seat.paneKey`)이 있다(null이 아니다).
 //   2) 그 좌석이 `policy.protectedSeats`에 정확히(exact match) 나열돼
-//      있지 않다.
-//   3) 배차 관측과 활동(activity) 관측이 둘 다 `observable:true`다.
-//   4) 배차가 끝난 뒤 흐른 시간(`activity.idleMs`)이
-//      `policy.minIdleMs` 이상이다(유예 구간 -- §2⑸에서 이유 설명).
-// 위 네 조건 중 하나라도 거짓이면 결과는 RECLAIM_ELIGIBLE이 **아니다**
+//      있지 않다 -- 그리고 그 판단 자체가 가능해야 한다(아래 "입력 공간"
+//      규칙 참조).
+//   3) 그 좌석에 배정된 배차(dispatch)의 `completedAt`이 null이 아니고,
+//      **파싱 가능하며 `nowMs`를 넘지 않는다**(= 배차가 끝났다는 구조적
+//      신호가 "미래도 쓰레기값도 아니다". "status 문자열이 무엇이든"은
+//      여전히 상관 없다 -- 아래 §2⑵에서 이 선택의 이유를 설명한다).
+//   4) 배차 관측과 활동(activity) 관측이 둘 다 `observable:true`고,
+//      활동의 idle 시간(`activity.idleMs`)이 **알려져 있다**(null이 아니다).
+//   5) 배차가 끝난 뒤 흐른 시간이 `policy.minIdleMs` 이상이다(유예 구간
+//      -- §2⑸에서 이유 설명).
+// 위 다섯 조건 중 하나라도 거짓이면 결과는 RECLAIM_ELIGIBLE이 **아니다**
 // (실패 방향은 언제나 "회수하지 않는다" 쪽 -- coder-task.md §1-2
 // fail-closed 비타협).
+//
+// ---- §2⑴ "입력 공간"을 닫는 규칙(2R -- 반례를 하나씩 막지 않는다) ----
+//
+// 1R의 결함은 "분기는 닫혔는데 입력은 안 닫혔다"였다 -- `completedAt`이
+// null/non-null 이분(binary) 축이라는 것은 맞았지만, "non-null 문자열"
+// 이라는 조건이 **그 문자열이 실제로 무엇을 뜻하는지는 검사하지 않았다**.
+// 2R은 하나의 일반 규칙으로 그 구멍을 닫는다:
+//
+//   ★규칙: "이 필드가 채워져 있다는 사실 자체가 판정에 쓰일 값이면,
+//   그 값은 **자기 타입의 유효한 값 범위 안**에 있어야만 '채워졌다'로
+//   센다. 범위 밖 값(파싱 불가 문자열, 미래 시각, 배열이어야 하는데
+//   아닌 값, null 식별자, "관측 가능한데 값은 모른다"는 모순)은 전부
+//   '채워지지 않은 것'과 같은 취급(fail-closed 분기)을 받는다."
+//
+// 이 규칙에서 아래 다섯 파생 검사가 **나온다**(발견된 반례를 보고 나중에
+// 추가한 게 아니라, 규칙을 필드마다 적용한 결과다):
+//   - `dispatch.completedAt`: "non-null 문자열"이 아니라 "null 또는
+//     **파싱 가능한(`Date.parse`가 유한수를 내는) 문자열**"이 유효 범위다.
+//     `'not-a-date'`·`'2026-99-99'`·공백 문자열은 파싱 불가이므로 스키마
+//     경계에서 걸러진다(SCHEMA_INVALID) -- "미래/과거"를 몰라도 파싱
+//     가능성만으로 세 반례가 동시에 닫힌다.
+//   - `dispatch.completedAt`이 파싱은 되지만 **`nowMs`보다 미래**면, 그
+//     "배차가 끝났다"는 신호를 신뢰하지 않는다(아래 §2⑷에서 `nowMs`를
+//     누가 대는지 설명) -- 이것만은 스키마(순수 형태) 검사로 못 닫는다,
+//     "지금이 언제인지"가 필요하기 때문이다.
+//   - `seat.paneKey`가 null이면 "회수 대상 자체가 없다" -- 무엇을
+//     회수하라는 것인지 식별할 수 없으므로 다른 모든 guard보다 먼저
+//     TARGET_UNIDENTIFIED로 막는다.
+//   - `policy.protectedSeats`가 배열이 아니면(결손·문자열·기타) "보호
+//     목록을 읽을 수 없다"는 뜻이지 "보호 목록이 비어 있다"는 뜻이
+//     아니다 -- 전자를 후자로 조용히 바꿔치기하지 않는다(1R의 실제 결함).
+//     읽을 수 없으면 안전측으로 접어 PROTECTED 취급(회수 금지)한다.
+//   - `activity.idleMs`가 null인데 `activity.observable`이 true인 것은
+//     모순 입력이다("관측 가능한데 값을 모른다") -- 이 모순을 0 유예
+//     정책에서의 숫자 비교(`null < 0` → JS coercion으로 `0 < 0` → false
+//     → 통과)에 맡기지 않고, idle 시간을 "모른다"로 명시 처리해 유예
+//     구간으로 접는다(WITHIN_GRACE_PERIOD, fail-closed).
 //
 // ---- §2⑵ 이 정의가 "전수"임을 무엇으로 보증하는가 ----
 //
@@ -30,23 +71,27 @@
 // 더 많이 모은다"고 메워지지 않는다(정의상 아직 안 본 미래 값이므로).
 //
 // 대신 이 코어가 보는 축은 `dispatch.completedAt`이라는 **nullable
-// 타임스탬프 하나**뿐이다. 이 필드의 가능한 형태는 논리적으로 정확히
-// 두 가지뿐이다 -- "null"(아직 안 끝났다) 또는 "non-null 문자열"(끝났다,
-// 그 값이 무엇이든). 이건 상태 문자열의 open set이 아니라 **닫힌
-// 이분(binary) 축**이다: 코드는 `!== null` 하나만 검사하고, 그 분기가
-// 아닌 모든 입력(null, undefined, 스키마 결손, 관측 실패)은 전부
-// DISPATCH_ACTIVE 아니면 UNOBSERVABLE로 떨어진다(else 분기가 없다 --
-// `isValidSeatInventoryShape`가 거르지 못한 값은 아래 판정 사슬의 마지막
-// guard까지 전부 통과해야만 ELIGIBLE에 닿는다). 즉 "전수"의 근거는
-// 표본 수가 아니라 **분기 구조 자체가 닫혀 있다는 것**이다 -- 새 배차
-// 상태 문자열이 미래에 추가돼도 completedAt의 null/non-null 이분법은
-// 바뀌지 않으므로 이 코어를 고칠 필요가 없다.
+// 타임스탬프 하나**뿐이다. "전수"의 근거는 여전히 표본 수가 아니라
+// **분기 구조 자체가 닫혀 있다는 것**이지만, 2R은 그 근거를 한 단계
+// 더 강화한다: 위 §2⑴ 규칙이 "필드마다 개별로" 검증되는 게 아니라
+// "이 필드가 값으로 쓰이려면 자기 타입 범위 안에 있어야 한다"는 **한
+// 문장짜리 불변식**에서 각 필드 검사가 파생되므로, 새 필드가 이 코어에
+// 추가돼도(예: 미래에 회수 조건이 하나 더 생겨도) 같은 불변식을 그
+// 필드에 적용하면 되고 "그 필드의 반례 목록"을 따로 수집할 필요가
+// 없다. 되돌림 변이(§9 재현)로 각 guard가 load-bearing임을, 그리고
+// §5 신규 시험으로 8개 반례가 계약 필드 값을 직접 검사해 닫혔음을 함께
+// 보증한다(표본 근거 + 구조 근거의 결합, 표본 단독이 아니다).
 //
-// 이 보증이 못 덮는 것(정직하게): `completedAt`을 채우는 쪽(호출자/
-// 어댑터)이 실제로 배차가 끝났을 때만 그 필드를 채운다는 **상위 계약**은
-// 이 코어가 강제할 수 없다 -- 그 계약이 깨지면(예: 아직 안 끝난 배차에
-// 실수로 completedAt이 채워짐) 이 코어는 정직하게 속는다. 그 계약은
-// 어댑터/§4 실행 경계의 책임이다.
+// 이 보증이 못 덮는 것(정직하게, §2⑵ 질문 답): `completedAt`을 채우는
+// 쪽(호출자/어댑터)이 실제로 배차가 끝났을 때만 그 필드를 채운다는
+// **상위 계약**은 이 코어가 강제할 수 없다 -- 그 계약이 깨지면(예:
+// 아직 안 끝난 배차에 실수로 "과거의" completedAt이 채워짐 -- "미래"가
+// 아니므로 이 코어의 미래-거부 guard로도 못 잡는다) 이 코어는 정직하게
+// 속는다. ★이 구멍은 P1급으로 보지 않는다 -- 그런 오기입은 이 코어
+// 밖의 어댑터 코드 결함이고, 이 코어가 검증할 수 있는 것은 "값 자체가
+// 자기 타입 범위 안에 있는가"까지다("그 값이 사실과 일치하는가"는 순수
+// 함수의 권한 밖이다, 다른 코어들도 동일 경계를 갖는다 -- 예:
+// wake-decide-core.mjs도 `nowMs`가 진짜 현재 시각인지는 검증하지 않는다).
 //
 // ---- §2⑶ 회수 "누락"이 이상으로 열리는가 ----
 // judgeReclaimAnomaly가 별도 축을 낸다(아래) -- 좌석 "개수" 단독 임계는
@@ -55,7 +100,23 @@
 // "회수 못 한 좌석이 있다" AND "가용 메모리가 바닥"(또는 메모리 자체를
 // 관측 못 함 -- 아래 이유) 둘 다일 때만 뜬다.
 //
-// ---- §2⑷ 실행은 누가 하는가 ----
+// ---- §2⑷ "미래 시각"은 누구 몫인가 ----
+// 미래 여부는 호출자가 주입한 기준시각 없이는 순수 코어에서 결정할 수
+// 없다(검토자 지적, coder-task.md §2⑷). 이 저장소의 기존 코어 관례가
+// 이미 이 질문에 답을 냈다 -- `wake-decide-core.mjs`(§3-A)는 `nowMs`를
+// **인자로만** 받고 `Date.now()`를 스스로 부르지 않는다("현재 시각은
+// `nowMs` 인자로만 받는다"). 이 코어도 같은 관례를 따른다:
+// `judgeSeatReclaim({inventory, policy, nowMs})`. `nowMs`가 유한수가
+// 아니면(결손·NaN·문자열) "미래 여부를 판단할 재료가 없다"는 뜻이므로
+// SCHEMA_INVALID로 fail-closed 접는다(회수 금지) -- `wake-decide-core.mjs`가
+// `nowMs`가 유한수가 아니면 UNDECIDABLE로 접는 것과 동형 원칙, 다만 이
+// 코어는 verdict 어휘가 아니라 기존 SCHEMA_INVALID 버킷을 재사용한다(§1-3
+// 비타협: 새 반환 형태를 발명하지 않는다).
+// 대가: 호출자(어댑터)가 진짜 "지금"이 아닌 시각을 `nowMs`로 주입하면
+// 이 코어는 정직하게 속는다 -- 그 신뢰는 이 코어 밖(어댑터가
+// `Date.now()`를 정확히 한 번, 판정 직전에 호출하는가)의 책임이다.
+//
+// ---- §2⑸ 실행은 누가 하는가 ----
 // 이 파일은 판정까지다. `terminal close`류 실행 호출은 이 저장소의 다른
 // 어떤 스크립트도 이 라운드에서 만들지 않는다(§0 합성 표적 규율) --
 // 그 호출은 이 저장소 밖 관제실(control room)의 "실행 한 줄"만 맡는다
@@ -65,6 +126,17 @@
 // 자체는 이 저장소가 검사할 수 없으므로(CI 앵커가 이 저장소 밖에 없다),
 // 이 코어가 보증하는 것은 "판정이 맞다"까지이지 "관제실이 그 판정을
 // 실제로 따랐다"까지가 아니다(정직 한계).
+//
+// ---- §2⑶(P1-2) 두 export 모두 어떤 인자에도 throw하지 않는다 ----
+// 이 저장소의 순수 코어 관례(unconsumed-core.mjs 헤더가 정본, §1-3
+// 정문 인용)를 그대로 따른다: "throw로 판정을 대신하지 않는다 -- 인자가
+// 무엇이든 예외 없이 `{ok/reclaimEligible, ...}`류 판정 객체를 반환한다."
+// `judgeSeatReclaim(null)`·`judgeReclaimAnomaly(null)`도 destructuring을
+// 인자 자체에 직접 걸지 않고(`{a,b} = arg` 형태는 `arg`가 명시적 null이면
+// 기본값이 적용되지 않아 던진다) `isPlainObject(arg) ? arg : {}`로 먼저
+// 안전하게 감싼 뒤에만 필드를 꺼낸다 -- 그 결과 스키마 검사에서 자연스럽게
+// SCHEMA_INVALID/INPUT_INVALID(둘 다 fail-closed/fail-open 각자의 비대칭
+// 방향)로 떨어진다.
 
 export const SEAT_RECLAIM_SCHEMA_VERSION = 1;
 
@@ -73,15 +145,20 @@ export const SEAT_ELIGIBILITY = Object.freeze({
   UNOBSERVABLE: "UNOBSERVABLE",
   DISPATCH_ACTIVE: "DISPATCH_ACTIVE",
   WITHIN_GRACE_PERIOD: "WITHIN_GRACE_PERIOD",
+  TARGET_UNIDENTIFIED: "TARGET_UNIDENTIFIED",
   RECLAIM_ELIGIBLE: "RECLAIM_ELIGIBLE",
 });
 
 export const SEAT_REASON = Object.freeze({
   SCHEMA_INVALID: "SEAT_RECLAIM_SCHEMA_INVALID",
+  TARGET_UNIDENTIFIED: "SEAT_RECLAIM_TARGET_UNIDENTIFIED",
+  PROTECTED_LIST_INVALID: "SEAT_RECLAIM_PROTECTED_LIST_INVALID",
   PROTECTED_SEAT: "SEAT_RECLAIM_PROTECTED_SEAT",
   DISPATCH_UNOBSERVABLE: "SEAT_RECLAIM_DISPATCH_UNOBSERVABLE",
   DISPATCH_ACTIVE: "SEAT_RECLAIM_DISPATCH_ACTIVE",
+  DISPATCH_COMPLETED_AT_FUTURE: "SEAT_RECLAIM_DISPATCH_COMPLETED_AT_FUTURE",
   ACTIVITY_UNOBSERVABLE: "SEAT_RECLAIM_ACTIVITY_UNOBSERVABLE",
+  ACTIVITY_IDLE_UNKNOWN: "SEAT_RECLAIM_ACTIVITY_IDLE_UNKNOWN",
   WITHIN_GRACE_PERIOD: "SEAT_RECLAIM_WITHIN_GRACE_PERIOD",
   ELIGIBLE: "SEAT_RECLAIM_ELIGIBLE",
 });
@@ -110,6 +187,12 @@ function isNonEmptyString(v) {
 function isNullableString(v) {
   return v === null || isNonEmptyString(v);
 }
+// §2⑴ 규칙의 첫 파생: "채워진 값"은 자기 타입 범위 안에 있어야 한다 --
+// 타임스탬프 문자열의 유효 범위는 "null 아니면 Date.parse가 유한수를
+// 내는 문자열"이다(파싱 불가 문자열은 "채워지지 않은 것"과 동급).
+function isParsableTimestamp(v) {
+  return isNonEmptyString(v) && Number.isFinite(Date.parse(v));
+}
 
 function isValidSeatField(seat) {
   return isPlainObject(seat) && isNullableString(seat.paneKey);
@@ -117,7 +200,8 @@ function isValidSeatField(seat) {
 function isValidDispatchField(dispatch) {
   return (
     isPlainObject(dispatch) &&
-    isNullableString(dispatch.completedAt) &&
+    (dispatch.completedAt === null ||
+      isParsableTimestamp(dispatch.completedAt)) &&
     typeof dispatch.observable === "boolean"
   );
 }
@@ -143,18 +227,6 @@ function isValidSeatInventoryShape(inventory) {
   return true;
 }
 
-function isProtectedSeat(inventory, policy) {
-  const list = Array.isArray(policy.protectedSeats)
-    ? policy.protectedSeats
-    : [];
-  // exact 대조만(부분일치·정규식 금지 -- teardown-core.mjs isProtectedTarget과
-  // 동일 정책, coder-task.md §2⑸: 부분일치를 허용하면 "살아 있어야 할
-  // 좌석"이 잘못 걸릴 대가가 새로 생긴다).
-  return isNonEmptyString(inventory.seat.paneKey)
-    ? list.includes(inventory.seat.paneKey)
-    : false;
-}
-
 function buildSeatEvidence(inventory, ruleId, extra = {}) {
   return {
     ruleId,
@@ -164,21 +236,43 @@ function buildSeatEvidence(inventory, ruleId, extra = {}) {
   };
 }
 
-// classifySeatEligibility -- judgeSeatReclaim에서 분리(quality-check
-// 복잡도 상한 12 준수, teardown-core.mjs의 classifyEligibility와 동형
-// 분리 원칙). 스키마 검사는 호출자(judgeSeatReclaim)가 이미 통과시킨
-// 뒤에만 이 함수가 불린다 -- 여기서는 inventory 필드 존재를 가정한다.
-function classifySeatEligibility(inventory, p) {
-  if (isProtectedSeat(inventory, p)) {
+// classifyProtection -- §2⑴ 규칙의 두 번째 파생: `protectedSeats`가
+// 배열이 아니면(결손·문자열·기타 타입) "보호 목록을 못 읽는다"는
+// 뜻이므로 "보호 목록이 비어 있다"(=열려 있다)로 조용히 바꿔치기하지
+// 않는다 -- 못 읽으면 안전측인 PROTECTED로 접는다. 배열이면(빈 배열
+// 포함) exact match만 본다(부분일치·정규식 금지 -- teardown-core.mjs
+// isProtectedTarget과 동일 정책).
+function classifyProtection(inventory, p) {
+  if (!Array.isArray(p.protectedSeats)) {
+    return {
+      eligibility: SEAT_ELIGIBILITY.PROTECTED,
+      reason: SEAT_REASON.PROTECTED_LIST_INVALID,
+      evidence: buildSeatEvidence(
+        inventory,
+        SEAT_REASON.PROTECTED_LIST_INVALID,
+        { protectedSeats: p.protectedSeats ?? null },
+      ),
+    };
+  }
+  if (p.protectedSeats.includes(inventory.seat.paneKey)) {
     return {
       eligibility: SEAT_ELIGIBILITY.PROTECTED,
       reason: SEAT_REASON.PROTECTED_SEAT,
       evidence: buildSeatEvidence(inventory, SEAT_REASON.PROTECTED_SEAT, {
-        protectedSeats: p.protectedSeats ?? [],
+        protectedSeats: p.protectedSeats,
       }),
     };
   }
+  return null;
+}
 
+// classifyDispatchStage -- §2⑵ 이분 축 + §2⑴/§2⑷ 파생: completedAt이
+// null이면 "아직 안 끝났다"(그 값이 무엇이든 하나로 접힌다, status
+// 문자열은 아예 안 본다). null이 아니면 이 시점에서 이미
+// isValidDispatchField가 "파싱 가능"함을 보장했으므로, 남은 유일한
+// 검사는 "그 시각이 `nowMs`를 넘지 않는가"뿐이다(미래 completedAt은
+// "끝났다"는 증거로 신뢰하지 않는다).
+function classifyDispatchStage(inventory, nowMs) {
   if (inventory.dispatch.observable !== true) {
     return {
       eligibility: SEAT_ELIGIBILITY.UNOBSERVABLE,
@@ -186,9 +280,6 @@ function classifySeatEligibility(inventory, p) {
       evidence: buildSeatEvidence(inventory, SEAT_REASON.DISPATCH_UNOBSERVABLE),
     };
   }
-
-  // §2⑵ 이분 축: completedAt이 null이면 "아직 안 끝났다" -- 그 값이 무엇
-  // 이든(어떤 상태 문자열이든) 전부 이 분기 하나로 접힌다.
   if (inventory.dispatch.completedAt === null) {
     return {
       eligibility: SEAT_ELIGIBILITY.DISPATCH_ACTIVE,
@@ -196,7 +287,25 @@ function classifySeatEligibility(inventory, p) {
       evidence: buildSeatEvidence(inventory, SEAT_REASON.DISPATCH_ACTIVE),
     };
   }
+  if (Date.parse(inventory.dispatch.completedAt) > nowMs) {
+    return {
+      eligibility: SEAT_ELIGIBILITY.DISPATCH_ACTIVE,
+      reason: SEAT_REASON.DISPATCH_COMPLETED_AT_FUTURE,
+      evidence: buildSeatEvidence(
+        inventory,
+        SEAT_REASON.DISPATCH_COMPLETED_AT_FUTURE,
+        { nowMs },
+      ),
+    };
+  }
+  return null;
+}
 
+// classifyActivityStage -- §2⑴ 파생: `idleMs === null`인데
+// `observable === true`인 것은 모순 입력("관측 가능한데 값을 모른다")
+// 이므로, 그 모순을 숫자 비교의 암묵적 coercion에 맡기지 않고 "idle
+// 시간을 모른다"를 명시적으로 유예 구간(fail-closed)에 접는다.
+function classifyActivityStage(inventory, p) {
   if (inventory.activity.observable !== true) {
     return {
       eligibility: SEAT_ELIGIBILITY.UNOBSERVABLE,
@@ -204,7 +313,13 @@ function classifySeatEligibility(inventory, p) {
       evidence: buildSeatEvidence(inventory, SEAT_REASON.ACTIVITY_UNOBSERVABLE),
     };
   }
-
+  if (inventory.activity.idleMs === null) {
+    return {
+      eligibility: SEAT_ELIGIBILITY.WITHIN_GRACE_PERIOD,
+      reason: SEAT_REASON.ACTIVITY_IDLE_UNKNOWN,
+      evidence: buildSeatEvidence(inventory, SEAT_REASON.ACTIVITY_IDLE_UNKNOWN),
+    };
+  }
   // 유예 구간(§2⑸): worker_done 뒤에도 사용자가 이 터미널에 직접 새 일을
   // 시킬 수 있다(이 좌석 자신의 시스템 프롬프트 "AFTER YOU SEND
   // worker_done" 절 참조) -- 배차가 끝났다는 사실만으로 곧장 회수하면 그
@@ -221,6 +336,33 @@ function classifySeatEligibility(inventory, p) {
       }),
     };
   }
+  return null;
+}
+
+// classifySeatEligibility -- judgeSeatReclaim에서 분리(quality-check
+// 복잡도 상한 12 준수, teardown-core.mjs의 classifyEligibility와 동형
+// 분리 원칙). 스키마 검사는 호출자(judgeSeatReclaim)가 이미 통과시킨
+// 뒤에만 이 함수가 불린다 -- 여기서는 inventory 필드 존재를 가정한다.
+// 단계별 분리(classifyProtection/classifyDispatchStage/
+// classifyActivityStage)는 §2⑴ 규칙의 필드별 파생을 그대로 함수 경계로
+// 옮긴 것뿐이다 -- 검토자가 낸 반례를 하나씩 막으려고 나눈 게 아니다.
+function classifySeatEligibility(inventory, p, nowMs) {
+  if (inventory.seat.paneKey === null) {
+    return {
+      eligibility: SEAT_ELIGIBILITY.TARGET_UNIDENTIFIED,
+      reason: SEAT_REASON.TARGET_UNIDENTIFIED,
+      evidence: buildSeatEvidence(inventory, SEAT_REASON.TARGET_UNIDENTIFIED),
+    };
+  }
+
+  const protection = classifyProtection(inventory, p);
+  if (protection) return protection;
+
+  const dispatchStage = classifyDispatchStage(inventory, nowMs);
+  if (dispatchStage) return dispatchStage;
+
+  const activityStage = classifyActivityStage(inventory, p);
+  if (activityStage) return activityStage;
 
   return {
     eligibility: SEAT_ELIGIBILITY.RECLAIM_ELIGIBLE,
@@ -229,13 +371,15 @@ function classifySeatEligibility(inventory, p) {
   };
 }
 
-// judgeSeatReclaim({ inventory, policy }) -- policy: { protectedSeats:
-// string[], minIdleMs: number }. 순수 판정, 부작용 0. 반환:
+// judgeSeatReclaim({ inventory, policy, nowMs }) -- policy: { protectedSeats:
+// string[], minIdleMs: number }. `nowMs`: 판정 기준 시각(호출자가 주입,
+// §2⑷). 순수 판정, 부작용 0, 어떤 인자에도 throw하지 않는다(§1-3). 반환:
 // { eligibility, reclaimEligible, reason, evidence }.
-export function judgeSeatReclaim({ inventory, policy } = {}) {
+export function judgeSeatReclaim(args) {
+  const { inventory, policy, nowMs } = isPlainObject(args) ? args : {};
   const p = isPlainObject(policy) ? policy : {};
 
-  if (!isValidSeatInventoryShape(inventory)) {
+  if (!isValidSeatInventoryShape(inventory) || !Number.isFinite(nowMs)) {
     return {
       eligibility: SEAT_ELIGIBILITY.UNOBSERVABLE,
       reclaimEligible: false,
@@ -243,6 +387,7 @@ export function judgeSeatReclaim({ inventory, policy } = {}) {
       evidence: {
         ruleId: SEAT_REASON.SCHEMA_INVALID,
         inventory: inventory ?? null,
+        nowMs: Number.isFinite(nowMs) ? nowMs : null,
       },
     };
   }
@@ -250,6 +395,7 @@ export function judgeSeatReclaim({ inventory, policy } = {}) {
   const { eligibility, reason, evidence } = classifySeatEligibility(
     inventory,
     p,
+    nowMs,
   );
   return {
     eligibility,
@@ -283,7 +429,8 @@ function isValidAnomalyInput(eligibleUnreclaimedCount, systemPressure, policy) {
 
 // judgeReclaimAnomaly({ eligibleUnreclaimedCount, systemPressure }, policy)
 // -- coder-task.md §2⑶: "회수 누락이 이상으로 열리는가"의 관측 축.
-// policy: { memoryFloorBytes: number }. 순수 판정, 부작용 0.
+// policy: { memoryFloorBytes: number }. 순수 판정, 부작용 0, 어떤 인자에도
+// throw하지 않는다(§1-3).
 //
 // 좌석 "개수" 단독으로는 절대 ANOMALY까지 올라가지 않는다(비타협, §2⑶) --
 // count>0은 최대 WATCH까지만 올린다. ANOMALY는 반드시 가용 메모리 축이
@@ -296,11 +443,12 @@ function isValidAnomalyInput(eligibleUnreclaimedCount, systemPressure, policy) {
 // 행위가 아니다. 잘못 띄운 ANOMALY의 대가는 사람이 30초 들여다보고
 // 마는 것이고, 조용히 숨긴 ANOMALY의 대가는 §1 실측 그대로 -- 밤새 러너
 // 46% 빨강·1.5시간 손실이다. 두 대가가 비대칭이므로 관측 실패는 침묵이
-// 아니라 신호 쪽으로 접는다).
-export function judgeReclaimAnomaly(
-  { eligibleUnreclaimedCount, systemPressure } = {},
-  policy = {},
-) {
+// 아니라 신호 쪽으로 접는다). 이 비대칭은 2R에서도 그대로 유지한다
+// (coder-task.md §3-4 비타협).
+export function judgeReclaimAnomaly(args, policy) {
+  const { eligibleUnreclaimedCount, systemPressure } = isPlainObject(args)
+    ? args
+    : {};
   const p = isPlainObject(policy) ? policy : {};
   if (!isValidAnomalyInput(eligibleUnreclaimedCount, systemPressure, p)) {
     return {
