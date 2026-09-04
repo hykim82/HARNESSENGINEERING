@@ -1,6 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { toDriveStyle, normalizeAbsolute, normalizeToRepoRelative } from "./path-normalize.mjs";
+import {
+  toDriveStyle,
+  normalizeAbsolute,
+  normalizeToRepoRelative,
+} from "./path-normalize.mjs";
 
 test("(1) toDriveStyle maps a WSL-style path to drive-letter form", () => {
   assert.equal(toDriveStyle("/mnt/c/Users/foo"), "C:/Users/foo");
@@ -19,19 +23,33 @@ test("(4) toDriveStyle leaves an unrelated absolute POSIX path unchanged", () =>
 });
 
 test("(5) normalizeAbsolute converts backslashes to forward slashes", () => {
-  assert.equal(normalizeAbsolute("C:\\Users\\foo\\bar.md"), "C:/Users/foo/bar.md");
+  assert.equal(
+    normalizeAbsolute("C:\\Users\\foo\\bar.md"),
+    "C:/Users/foo/bar.md",
+  );
 });
 
 test("(6) normalizeAbsolute resolves '..' traversal", () => {
   assert.equal(normalizeAbsolute("C:/Users/foo/../bar.md"), "C:/Users/bar.md");
 });
 
+// HYK-309: these two fixtures used to spell out this repo's own live
+// control-room path -- unrelated to what the test actually exercises
+// (WSL/git-bash drive-letter normalization is generic), so a generic
+// example path removes the incidental machine-path leak without weakening
+// the assertion.
 test("(7) normalizeAbsolute resolves a WSL-style path the same as its drive-letter equivalent", () => {
-  assert.equal(normalizeAbsolute("/mnt/d/문서관리/하네스-관제실/STATUS.md"), normalizeAbsolute("D:/문서관리/하네스-관제실/STATUS.md"));
+  assert.equal(
+    normalizeAbsolute("/mnt/d/example-root/example-dir/STATUS.md"),
+    normalizeAbsolute("D:/example-root/example-dir/STATUS.md"),
+  );
 });
 
 test("(8) normalizeAbsolute resolves a Git-Bash-style path the same as its drive-letter equivalent", () => {
-  assert.equal(normalizeAbsolute("/d/문서관리/하네스-관제실/STATUS.md"), normalizeAbsolute("D:/문서관리/하네스-관제실/STATUS.md"));
+  assert.equal(
+    normalizeAbsolute("/d/example-root/example-dir/STATUS.md"),
+    normalizeAbsolute("D:/example-root/example-dir/STATUS.md"),
+  );
 });
 
 test("(9) normalizeAbsolute resolves a relative path against a base", () => {
@@ -44,7 +62,10 @@ test("(10) normalizeAbsolute with no base returns a normalized relative path as-
 
 test("(11) normalizeToRepoRelative resolves an in-repo relative path", () => {
   const result = normalizeToRepoRelative(".harness/coder-task.md", "/repo");
-  assert.deepEqual(result, { relative: ".harness/coder-task.md", insideRepo: true });
+  assert.deepEqual(result, {
+    relative: ".harness/coder-task.md",
+    insideRepo: true,
+  });
 });
 
 test("(12) normalizeToRepoRelative reports a path outside the repo root", () => {
@@ -60,5 +81,8 @@ test("(13) normalizeToRepoRelative treats the repo root itself as relative=''", 
 
 test("(14) normalizeToRepoRelative resolves '..' traversal before comparing", () => {
   const result = normalizeToRepoRelative(".harness/foo/../review.md", "/repo");
-  assert.deepEqual(result, { relative: ".harness/review.md", insideRepo: true });
+  assert.deepEqual(result, {
+    relative: ".harness/review.md",
+    insideRepo: true,
+  });
 });
