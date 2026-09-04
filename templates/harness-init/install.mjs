@@ -752,11 +752,124 @@ Repo: ${params.githubRepo}
 `;
 }
 
+// HYK-309: pm-guard.mjs hardcodes THIS repo's own live control-room path
+// (`const CONTROL_ROOM_ROOT = "...";`) because it doubles as this repo's
+// own working enforcement script (see installEnforcementScripts' header
+// comment -- scripts/check/*.mjs is read live, not from a frozen
+// templates/ copy, precisely so it never drifts from the real
+// implementation). `copyRawFile` used to ship that literal unchanged into
+// every target, so every non-solo-full-on-this-machine install silently
+// pointed pm-guard at a control room that isn't its own (synthetic-install
+// repro: coder.md §1). This rewrites just that one constant's value at
+// install time, the same "substitute a known token for this install's own
+// value" idea `substitute()`/placeholderMap already apply to templates --
+// applied here via a targeted regex instead of a `<TOKEN>` placeholder,
+// because the source line must stay a real working literal for this
+// repo's own live use, not a token nothing ever fills in for it.
+// Anchored to line-start + the real declaration keyword ("export const"),
+// not a bare `const CONTROL_ROOM_ROOT = "` substring -- a first cut of this
+// regex matched the code-quoted mention of that same shape inside this
+// very comment block instead of the real line below it (caught by the
+// synthetic-install repro: the installed copy still carried this repo's
+// own path because `content.replace` found and rewrote the FIRST match,
+// which was the comment, not the declaration).
+// No longer captures the quotes -- HYK-309 2R (REVIEW P1): the value is
+// now re-embedded via JSON.stringify (see substitutePmGuardControlRoom),
+// which already produces its own quoted, escaped literal, so nothing here
+// needs to reuse pieces of the original quoted string.
+const PM_GUARD_CONTROL_ROOM_LINE_RE =
+  /^export const CONTROL_ROOM_ROOT = "[^"]*";$/m;
+
+// team-local has no control room (validateParams never requires
+// controlRoomPath for it). isControlRoomPath does
+// `normalized.startsWith(rootLower + "/")` / `=== rootLower` -- an empty
+// string would make `.startsWith("")` true for every path, i.e. pm-guard
+// would allow a PM to write anywhere. This sentinel can never equal or
+// prefix a real normalized filesystem path, so pm-guard stays fail-closed
+// (blocks all PM writes outside scratchpad) on a profile that has no
+// control room to allow-list in the first place.
+const TEAM_LOCAL_CONTROL_ROOM_SENTINEL = "<NO_CONTROL_ROOM_TEAM_LOCAL_PROFILE>";
+
+function substitutePmGuardControlRoom(content, params) {
+  if (!PM_GUARD_CONTROL_ROOM_LINE_RE.test(content)) {
+    throw new Error(
+      "pm-guard.mjs: CONTROL_ROOM_ROOT constant not found at its expected " +
+        'shape (const CONTROL_ROOM_ROOT = "...";) -- refusing to install a ' +
+        "copy that would silently keep this machine's own control-room " +
+        "path (source/installer have drifted; fix substitutePmGuardControlRoom " +
+        "or the source constant together)",
+    );
+  }
+  const value =
+    params.profile === "solo-full"
+      ? toPosixPath(params.controlRoomPath)
+      : TEAM_LOCAL_CONTROL_ROOM_SENTINEL;
+  // HYK-309 2R (REVIEW P1, install.mjs:803 pre-fix): a plain string
+  // replacement (`` `$1${value}$3` ``) is re-scanned by String.replace for
+  // ITS OWN special patterns ($$, $&, $`, $', $<n>) -- a controlRoomPath
+  // containing e.g. "$&" got the ENTIRE MATCHED LINE spliced into the
+  // installed value instead of the literal characters "$&" (reviewer's
+  // exact repro: `control-$&-room` -> `control-export const
+  // CONTROL_ROOM_ROOT = "...";-room`). A replacer FUNCTION's return value
+  // is inserted verbatim, with no such reinterpretation -- switching to one
+  // removes the entire bug class instead of escaping just "$&".
+  //
+  // Separately, and more severely: the value also has to survive being
+  // embedded inside a JS double-quoted string literal. A raw `"` in the
+  // value would terminate the string literal early and splice arbitrary
+  // trailing text in as JS source (a real code-injection shape, not just a
+  // display glitch); a raw `\` could form an unintended escape sequence or
+  // swallow the closing quote; a raw newline is a SyntaxError inside a
+  // plain (non-template) string literal. JSON.stringify's output is a
+  // spec-valid JS string literal (its escaping rules are a strict subset of
+  // JS's), so it closes all three at once instead of hand-escaping each.
+  const literal = JSON.stringify(value);
+  return content.replace(
+    PM_GUARD_CONTROL_ROOM_LINE_RE,
+    () => `export const CONTROL_ROOM_ROOT = ${literal};`,
+  );
+}
+
+function installPmGuard(params, targetRepoPath, { dryRun }) {
+  const srcPath = path.join(REPO_ROOT, "scripts", "check", "pm-guard.mjs");
+  const destPath = path.join(
+    targetRepoPath,
+    "scripts",
+    "check",
+    "pm-guard.mjs",
+  );
+  // Same missing-source convention as copyRawFile (warn-skip, never throw)
+  // -- e.g. nc-install-hook-wiring.test.mjs's mutation fixture runs a copy
+  // of install.mjs from outside this repo, so REPO_ROOT doesn't resolve to
+  // a real checkout and this source legitimately doesn't exist there.
+  if (!existsSync(srcPath)) {
+    console.warn(`source missing, skipping: ${srcPath}`);
+    return;
+  }
+  if (existsSync(destPath)) {
+    skipped.push(destPath);
+    console.warn(`skip (already exists): ${destPath}`);
+    return;
+  }
+  const content = substitutePmGuardControlRoom(
+    readFileSync(srcPath, "utf8"),
+    params,
+  );
+  if (!dryRun) {
+    ensureParentDir(destPath);
+    writeFileSync(destPath, content, "utf8");
+  }
+  installed.push(destPath);
+  console.log(
+    `${dryRun ? "[dry-run] would install" : "installed"}: ${destPath} (CONTROL_ROOM_ROOT substituted for this target)`,
+  );
+}
+
 // Extracted from main() (quality-check: keeps main()'s own line-count/
 // complexity under the repo's ESLint ceiling) -- copies the local git hooks
 // plus every scripts/check/scripts/relay file that hook wiring depends on.
 // Both profiles get these; they are local-only (no server dependency).
-function installEnforcementScripts(targetRepoPath, { dryRun }) {
+function installEnforcementScripts(params, targetRepoPath, { dryRun }) {
   copyRawFile(
     path.join(REPO_ROOT, "hooks", "commit-msg"),
     path.join(targetRepoPath, "hooks", "commit-msg"),
@@ -797,7 +910,8 @@ function installEnforcementScripts(targetRepoPath, { dryRun }) {
     "controlroom-fresh.test.mjs",
     "path-normalize.mjs",
     "path-normalize.test.mjs",
-    "pm-guard.mjs",
+    // pm-guard.mjs is NOT copied raw here -- installPmGuard below rewrites
+    // its CONTROL_ROOM_ROOT constant for this target first (HYK-309).
     "pm-guard.test.mjs",
     "packet-gate.mjs",
     "packet-gate.test.mjs",
@@ -810,6 +924,7 @@ function installEnforcementScripts(targetRepoPath, { dryRun }) {
       { dryRun, executable: false },
     );
   }
+  installPmGuard(params, targetRepoPath, { dryRun });
   // HYK-186 3R P1-1: done-line-write-guard.mjs's whole purpose is to point
   // a blocked worker at `node scripts/relay/finalize-done.mjs <role>
   // .harness` -- that target must exist on the installed repo too, or the
@@ -1132,7 +1247,7 @@ function main() {
   // Local enforcement hooks + check scripts: both profiles get these —
   // they are local-only (no server dependency) and useful whether or not
   // a server-side gate exists on top.
-  installEnforcementScripts(targetRepoPath, { dryRun });
+  installEnforcementScripts(params, targetRepoPath, { dryRun });
 
   // .git/hooks/ (per-clone, real install) and .claude/settings.local.json
   // (Claude Code hook pre-wiring) -- both profiles, both one-shot
