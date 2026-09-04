@@ -10,6 +10,10 @@ import { tmpdir } from "node:os";
 import { dirname, join, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
+import {
+  resolveChildProbeTimeoutMs,
+  withTimeoutRetry,
+} from "./child-probe-timeout-policy.mjs";
 
 // HYK-400 5R 위협 모델(책임자 판단 2026-08-31, 제안 A 승인 -- 1R~4R
 // 4연속 반려가 하드스톱에 걸린 뒤 확정됐다): 이 판정기는 «낡음(stale)
@@ -122,7 +126,13 @@ const RUNNER_PATH = fileURLToPath(
   new URL("./hyk400-receiver-probe-runner.mjs", import.meta.url),
 );
 const RUNNER_DIR = dirname(RUNNER_PATH);
+// HYK-430 1R: 이 기본값 자체는 "부하 0" 기준값이다. 실제로 쓰이는 예산은
+// resolveChildProbeTimeoutMs가 그 시점의 가용 메모리로 넓힌 값이다
+// (child-probe-timeout-policy.mjs 참조, coder-task.md §2⑶). 호출자가
+// timeoutMs를 명시하면(예: 시험) 그 값을 그대로 쓴다 -- 배율은 "기본값"
+// 에만 적용된다.
 const DEFAULT_PROBE_TIMEOUT_MS = 5000;
+const PERMISSION_FLAG_PROBE_BASE_TIMEOUT_MS = 5000;
 // I-ENV(6R): 하드코딩된 버전 분기 대신 실제로 통하는 플래그를 probe로
 // 확인한다(위 헤더 주석 참조). execPath 문자열이 아니라 execFileSyncFn
 // «함수 자체»로 캐시한다(WeakMap) -- production은 항상 같은
@@ -241,7 +251,9 @@ function detectPermissionFlag(execFileSyncFn) {
   for (const flag of PERMISSION_FLAG_CANDIDATES) {
     try {
       execFileSyncFn(process.execPath, [flag, "-e", "process.exit(0)"], {
-        timeout: 5000,
+        timeout: resolveChildProbeTimeoutMs(
+          PERMISSION_FLAG_PROBE_BASE_TIMEOUT_MS,
+        ),
         stdio: "ignore",
       });
       detected = flag;
@@ -287,30 +299,42 @@ function spawnIsolatedChild({
     }),
   ).toString("base64");
 
+  const isSpawnTimeout = (err) =>
+    err.signal === "SIGKILL" || err.code === "ETIMEDOUT";
+
   try {
-    execFileSyncFn(
-      process.execPath,
-      [
-        permissionFlag,
-        `--allow-fs-read=${RUNNER_DIR}`,
-        `--allow-fs-read=${worktreeReal}`,
-        `--allow-fs-write=${responseDir}`,
-        RUNNER_PATH,
-        payload,
-      ],
-      {
-        cwd: worktreeReal,
-        encoding: "utf8",
-        timeout: timeoutMs,
-        killSignal: "SIGKILL",
-        maxBuffer: 1024 * 1024,
-      },
+    // HYK-430 1R (coder-task.md §2⑶): "무응답"만 정확히 1회 재시도한다
+    // (child-probe-timeout-policy.mjs). 진짜로 계속 응답하지 않는 자식은
+    // 재시도해도 다시 같은 이유로 타임아웃되므로 탐지력은 그대로 --
+    // 재시도가 지워 주는 건 단발성 지연뿐이다(§2⑷ 음성 대조가 이를
+    // 직접 고정한다, hyk400-receiver-guard.test.mjs (I)).
+    withTimeoutRetry(
+      () =>
+        execFileSyncFn(
+          process.execPath,
+          [
+            permissionFlag,
+            `--allow-fs-read=${RUNNER_DIR}`,
+            `--allow-fs-read=${worktreeReal}`,
+            `--allow-fs-write=${responseDir}`,
+            RUNNER_PATH,
+            payload,
+          ],
+          {
+            cwd: worktreeReal,
+            encoding: "utf8",
+            timeout: timeoutMs,
+            killSignal: "SIGKILL",
+            maxBuffer: 1024 * 1024,
+          },
+        ),
+      { isTimeout: isSpawnTimeout },
     );
     return { ok: true };
   } catch (err) {
-    if (err.signal === "SIGKILL" || err.code === "ETIMEDOUT") {
+    if (isSpawnTimeout(err)) {
       return rejected(
-        "RECEIVER_CLI_PROBE_TIMEOUT: 격리 프로세스가 제한시간 내 응답하지 않았다(무한 대기/무한 루프 의심)",
+        "RECEIVER_CLI_PROBE_TIMEOUT: 격리 프로세스가 제한시간 내 응답하지 않았다(무한 대기/무한 루프 의심, 1회 재시도 포함)",
       );
     }
     // execFileSync가 정상 반환하는 유일한 경로가 종료코드 0·시그널
@@ -468,7 +492,7 @@ export async function checkReceiptCliFlagSupport({
   worktree,
   deliveryArgs,
   execFileSyncFn = defaultExecFileSyncFn,
-  timeoutMs = DEFAULT_PROBE_TIMEOUT_MS,
+  timeoutMs = resolveChildProbeTimeoutMs(DEFAULT_PROBE_TIMEOUT_MS),
 }) {
   const derived = deriveOptionalFlags(deliveryArgs);
   if (!derived.ok) {

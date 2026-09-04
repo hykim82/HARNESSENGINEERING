@@ -3,6 +3,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execSync, execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
+import { freemem } from "node:os";
 import {
   recordRejectStreakFromResultText,
   isReviewFamilyRole,
@@ -2099,6 +2100,64 @@ function shadowLine(state, reason, taskId) {
 // 영향 없는 수준"은 상대적 지침으로 읽었다: 무제한(∞) 대비 2초는 이
 // 소비 경로의 다른 스폰 호출(admission-completion-adapter 등, 이들도
 // 자체 타임아웃이 없다 -- 이 라운드 범위 밖)과 같은 자릿수다).
+// HYK-430 1R: 이 기준값(부하 0 가정)도 이제 공통 정책(child-probe-
+// timeout-policy.mjs, coder-task.md §2⑶)이 그 시점 가용 메모리로 넓힌다.
+// ⚠️정직 한계 -- 이 파일은 그 모듈을 «정적 import하지 않는다»: 이
+// 함수 바로 위 기존 주석(HYK-419-wire-2)이 이미 설명하듯,
+// relay-handshake.mjs는 24개 이상의 격리 픽스처 시험(예:
+// admission-completion-spawn.test.mjs)이 "relay-handshake.mjs +
+// time-authority/reject-streak/envelope-archive 4개 형제 파일만" 복사해
+// 서브프로세스로 도는 정적 import 그래프의 일부다 -- 5번째 정적
+// import를 추가하면 그 시험 31개 전부가 LOAD 시점에 MODULE_NOT_FOUND로
+// 깨진다(실측 반복 -- retirement-auto-author-shadow-cli.mjs를 스폰만
+// 하고 정적 import하지 않는 이 파일의 기존 설계와 같은 이유). 그래서
+// 아래 두 함수(loadMultiplierLocal/withTimeoutRetryLocal)는
+// child-probe-timeout-policy.mjs와 «같은 공식을 의도적으로 복제»한다
+// (node:os만 참조 -- builtin이라 격리 픽스처에도 항상 있다). 드리프트
+// 방지: relay-handshake-timeout-policy-parity.test.mjs가 두 구현이
+// 넓은 입력 범위에서 정확히 같은 값을 내는지 직접 대조한다 -- 여기 값을
+// 고치면서 child-probe-timeout-policy.mjs를 안 고치면(또는 반대) 그
+// 시험이 즉시 빨개진다.
+const SHADOW_CLI_REFERENCE_FREE_MEM_BYTES = 4 * 1024 * 1024 * 1024; // 4GB
+const SHADOW_CLI_MIN_MULTIPLIER = 1;
+const SHADOW_CLI_MAX_MULTIPLIER = 3;
+const SHADOW_CLI_RETRY_ON_TIMEOUT = 1;
+
+export function loadMultiplierLocal(freeMemBytes = freemem()) {
+  if (!Number.isFinite(freeMemBytes) || freeMemBytes <= 0) {
+    return SHADOW_CLI_MAX_MULTIPLIER;
+  }
+  const ratio = SHADOW_CLI_REFERENCE_FREE_MEM_BYTES / freeMemBytes;
+  return Math.min(
+    Math.max(ratio, SHADOW_CLI_MIN_MULTIPLIER),
+    SHADOW_CLI_MAX_MULTIPLIER,
+  );
+}
+
+function resolveShadowCliTimeoutMs(baseTimeoutMs, freeMemBytes = freemem()) {
+  return Math.round(baseTimeoutMs * loadMultiplierLocal(freeMemBytes));
+}
+
+// §2⑶ "재시도 1회" -- 무응답(ETIMEDOUT)만 정확히 1회 재시도한다. 진짜로
+// 계속 응답하지 않는 자식은 재시도해도 다시 타임아웃이므로 탐지력은
+// 그대로다(§2⑷ 음성 대조: (E) 시험이 실제 지연 자식으로 이를 고정한다).
+function withTimeoutRetryLocal(
+  fn,
+  isTimeout,
+  retries = SHADOW_CLI_RETRY_ON_TIMEOUT,
+) {
+  let lastErr;
+  for (let attempt = 0; attempt <= retries; attempt += 1) {
+    try {
+      return fn(attempt);
+    } catch (err) {
+      lastErr = err;
+      if (!isTimeout(err)) throw err;
+    }
+  }
+  throw lastErr;
+}
+
 const SHADOW_CLI_TIMEOUT_MS = 2000;
 
 function isTimeoutError(err) {
@@ -2161,7 +2220,7 @@ export function runRetireAuthorShadowObservation({
   doneAt,
   execFileFn = execFileSync,
   logFn = console.log,
-  timeoutMs = SHADOW_CLI_TIMEOUT_MS,
+  timeoutMs = resolveShadowCliTimeoutMs(SHADOW_CLI_TIMEOUT_MS),
 }) {
   try {
     const cliPath = join(
@@ -2178,12 +2237,19 @@ export function runRetireAuthorShadowObservation({
     // 없어 Node가 내부적으로 TerminateProcess로 매핑한다 -- 이 워크트리
     // 자체가 Windows라 이 경로로 실측했다, 좀비 프로세스는 남기지 않음을
     // 시험(rr-timeout 계열)으로 확인).
-    const out = execFileFn("node", args, {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"],
-      timeout: timeoutMs,
-      killSignal: "SIGKILL",
-    });
+    // HYK-430 1R: 무응답(TIMEOUT)만 정확히 1회 재시도한다(§2⑶, 위
+    // withTimeoutRetryLocal 주석). 진짜 무응답 자식은 재시도해도 다시
+    // 타임아웃되므로 탐지력은 보존된다(§2⑷ 음성 대조 (E)).
+    const out = withTimeoutRetryLocal(
+      () =>
+        execFileFn("node", args, {
+          encoding: "utf8",
+          stdio: ["ignore", "pipe", "pipe"],
+          timeout: timeoutMs,
+          killSignal: "SIGKILL",
+        }),
+      isTimeoutError,
+    );
     logFn(normalizeChildStdout(out, taskId));
   } catch (err) {
     // Missing CLI file (isolated test fixture), non-zero exit, timeout
