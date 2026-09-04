@@ -1063,6 +1063,33 @@ function resolveDoneAt(
   // 소비 완료되면 그 세대는 tombstone으로 닫히고, 다음 라운드가 같은
   // 키를 재사용해도 이전 세대의 값과 비교되지 않고 새로 관측을
   // 시작한다.
+  // HYK-423 3R §2 (구조 축 -- 두 반려의 공통 뿌리를 정면으로 다룬다,
+  // coder.md 참조): 2R은 관측 지문의 «보호 범위»를 DONE 줄까지로 좁혔지만,
+  // headCommitVerdict(HYK-383, 아래 checkRelayHandshake)는 그 뒤에도 여전히
+  // resultContent «전체»를 다시 스캔했다 -- 지문이 보호하는 범위와 게이트가
+  // «읽는» 범위가 서로 달라, DONE 줄 뒤에 head_commit: 을 새로 덧붙이면
+  // 지문은 그대로인데 게이트만 통과했다(2R 검토가 실측 재현, 이 라운드의
+  // 반려 사유). 3R은 이 두 범위를 **같은 이름의 같은 값**으로 통일한다:
+  // `judgedRegion`(resultContent를 `>>> DONE:` 줄이 끝나는 지점까지 자른
+  // 것)을 이 함수가 계산해 ⓐ 관측 지문(아래 spawnObserveDoneLine)과 ⓑ
+  // checkRelayHandshake가 이후 호출하는, resultContent의 «값»을 읽는 모든
+  // 게이트(headCommitVerdict/runnerReceiptVerdict의 claim 확인) 양쪽에
+  // 그대로 넘긴다 -- 어느 한쪽만 손대는 방식(1R: 게이트 이름 결속, 2R:
+  // 지문만 축소)을 반복하지 않기 위해서다. doneLineRaw 자체(아래
+  // doneMatch[0])는 이 축과 별개로 checkIntermediateRewrite가 항상 직접
+  // 비교한다(first-observation.mjs, 손대지 않았다) -- DONE 줄 자신은
+  // 무조건 보호된다. 이 축소가 여전히 완화하는 것은 오직 DONE 줄 «뒤»의
+  // 후기(postscript)뿐이다: 2026-09-03 실물 사고(coder-task.md §1-2)의
+  // 정정("결과 파일에 덧붙임")이 그 모양이었다. DONE «앞»은 지문과 모든
+  // judgedRegion 기반 게이트 양쪽에 그대로 포함되므로, 어느 게이트가
+  // 거부했든 그 앞 내용을 고치면 여전히 rewritten으로 잡히고, DONE 뒤에
+  // 무엇을 덧붙여도 judgedRegion 기반 게이트는 그것을 아예 보지 못한다
+  // (coder.md ⑴ 전수표 -- 어느 검사기가 이 region을 쓰는지, 왜 다른
+  // 검사기는 쓰지 않아도 안전한지).
+  const judgedRegion = resultContent.slice(
+    0,
+    doneMatch.index + doneMatch[0].length,
+  );
   const observation =
     taskId && droppedAtRaw
       ? spawnObserveDoneLine({
@@ -1070,7 +1097,7 @@ function resolveDoneAt(
           droppedAt: droppedAtRaw,
           role,
           harnessDir,
-          resultContent,
+          resultContent: judgedRegion,
           doneLineRaw: doneMatch[0],
         })
       : { rewritten: false };
@@ -1088,7 +1115,7 @@ function resolveDoneAt(
     now,
   });
   if (doneFuture) return doneFuture;
-  return { ok: true, doneAt, doneMatch, observation };
+  return { ok: true, doneAt, doneMatch, observation, judgedRegion };
 }
 
 // HYK-244 2R-a §2 조각2: `dispatchId`는 ⛔호출자가 명시적으로 넘긴 값만
@@ -2429,7 +2456,7 @@ function resolveHandshakeCore({ role, harnessDir, now, dispatchId }) {
       }),
     };
   }
-  const { doneAt, doneMatch, observation } = doneResolved;
+  const { doneAt, doneMatch, observation, judgedRegion } = doneResolved;
   return {
     ok: true,
     taskContent,
@@ -2441,6 +2468,7 @@ function resolveHandshakeCore({ role, harnessDir, now, dispatchId }) {
     doneAt,
     doneMatch,
     observation,
+    judgedRegion,
   };
 }
 
@@ -2462,6 +2490,7 @@ export function checkRelayHandshake({
     doneAt,
     doneMatch,
     observation,
+    judgedRegion,
   } = core;
 
   // HYK-325 §2-3 승격 (HYK-418 §2-1): the missing-marker check used to live
@@ -2495,11 +2524,17 @@ export function checkRelayHandshake({
 
   // HYK-383: 다른 모든 사유별 검사가 이미 통과한 뒤, 완료 판정 직전에 건다
   // (§4 무회귀 -- 기존 구체적 거부 사유가 가려지지 않는다). 비REVIEW는
-  // 즉시 통과(resolveHeadCommitBinding 자체 헤더 참조).
+  // 즉시 통과(resolveHeadCommitBinding 자체 헤더 참조). HYK-423 3R §2:
+  // `resultContent` 전체가 아니라 `judgedRegion`(위 resolveDoneAt이 계산한,
+  // 관측 지문과 «같은» 범위)을 넘긴다 -- resolveHeadCommitField가 DONE
+  // 줄 뒤에 새로 나타나는 head_commit: 을 다시 스캔해 채택하는 것이
+  // 2R 반려의 정확한 원인이었다(coder.md ⑴ 전수표). 지문이 보호하는
+  // 범위와 이 게이트가 «읽는» 범위를 같은 값으로 묶어 그 어긋남 자체를
+  // 없앤다.
   const headCommitVerdict = resolveHeadCommitBinding({
     role,
     taskContent,
-    resultContent,
+    resultContent: judgedRegion,
     harnessDir,
   });
   if (!headCommitVerdict.ok) return headCommitVerdict;
@@ -2508,9 +2543,14 @@ export function checkRelayHandshake({
   // 실사고 HYK-408 1R도 CODER 라운드였다, resolveDispatchRecordExistence와
   // 동일 논거). resultContent가 "전체 러너 결과"를 주장하지 않으면 즉시
   // ok:true(skipped)로 빠져 나가 이 축이 존재하기 전과 완전히 동일하게
-  // 움직인다(과차단 금지).
+  // 움직인다(과차단 금지). HYK-423 3R §2: 여기도 `judgedRegion`을 넘긴다
+  // -- resultClaimsRunnerResults 자신은 이번 반려의 재현 대상이 아니었지만
+  // (검토 ⑷: "이번 postscript 경로의 직접 원인은 아니다"), 같은 축(judged
+  // vs 전체) 위에서 같은 종류의 값 확인을 하는 게이트이므로 구조적으로
+  // 같은 범위를 쓰게 맞춘다 -- head_commit 하나만 땜질하지 않는다는
+  // 이 라운드의 원칙(coder.md ⑵) 그대로.
   const runnerReceiptVerdict = resolveRunnerReceiptVerdict({
-    resultContent,
+    resultContent: judgedRegion,
     harnessDir,
   });
   if (!runnerReceiptVerdict.ok) return runnerReceiptVerdict;
