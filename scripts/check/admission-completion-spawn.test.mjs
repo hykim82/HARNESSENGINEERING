@@ -22,6 +22,7 @@ import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { spawnSync, execFileSync } from "node:child_process";
 import { runAdmissionCli } from "../supervisor/admission-cli.mjs";
+import { RELAY_HANDSHAKE_STATIC_SIBLINGS } from "./relay-handshake-fixture-siblings.mjs";
 
 const CHECK_DIR = dirname(fileURLToPath(import.meta.url));
 const RELAY_HANDSHAKE_PATH = join(CHECK_DIR, "relay-handshake.mjs");
@@ -112,9 +113,7 @@ test("relay-handshake CLI still exits 0 when the admission-completion-adapter.mj
     // the isolation shape that broke under the 1R static-import attempt.
     for (const name of [
       "relay-handshake.mjs",
-      "time-authority.mjs",
-      "reject-streak.mjs",
-      "envelope-archive.mjs",
+      ...RELAY_HANDSHAKE_STATIC_SIBLINGS,
     ]) {
       writeFileSync(
         join(isolatedCheckDir, name),

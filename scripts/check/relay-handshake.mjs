@@ -20,6 +20,10 @@ import {
   isBeyondFutureSkew,
   isSuspectedTimezoneMislabel,
 } from "./time-authority.mjs";
+import {
+  resolveChildProbeTimeoutMs,
+  withTimeoutRetry,
+} from "./child-probe-timeout-policy.mjs";
 
 export { TIME_AUTHORITY_STATE, MAX_FUTURE_SKEW_MS };
 
@@ -2089,17 +2093,32 @@ function shadowLine(state, reason, taskId) {
   return `retire-author-shadow: ${state} reason=${toOneLine(reason)} label=${taskId} (shadow -- 아무것도 차단하지 않음)`;
 }
 
-// HYK-419-wire-2 §2⑴ -- 스폰 자체가 «멈추지 않게» 시간 제한을 건다. 근거:
-// 이 저장소의 실측(retirement-auto-author-shadow-cli.test.mjs)에서 정상
-// 조립+판정은 rounds/ 몇 개 파일만 읽어도 100ms를 넘지 않았다 -- 2000ms는
-// 그 정상 왕복의 20배 이상 여유를 두면서도(디스크 I/O가 유난히 느린
-// 환경까지 흡수), 소비 경로 전체 체감 지연으로는 "느껴지지 않는" 수준이
-// 아니라는 점을 이 라운드는 인정한다(검토 P1-1이 문제 삼은 것은 «무한
-// 대기»이지 «지연 존재 자체»가 아니다 -- coder-task.md §2⑴ "소비 체감에
-// 영향 없는 수준"은 상대적 지침으로 읽었다: 무제한(∞) 대비 2초는 이
-// 소비 경로의 다른 스폰 호출(admission-completion-adapter 등, 이들도
-// 자체 타임아웃이 없다 -- 이 라운드 범위 밖)과 같은 자릿수다).
+// HYK-430 5R (§0 재설계 -- 폴백을 «더 잘 만들기»가 아니라 폴백이 필요한
+// 상황 자체를 제거한다): 1R(복제) -> 2R(동적 import + 조용한 폴백) ->
+// 4R(폴백을 모듈-부재 판별식으로 좁힘)까지 세 라운드가 이 자리에서
+// 싸운 이유는 전부 같은 전제 하나였다 -- "격리 픽스처가
+// child-probe-timeout-policy.mjs를 형제로 복사하지 않는다"는 환경
+// 제약. 그 전제 자체를 5R에서 없앤다: relay-handshake.mjs를 격리
+// 임시 디렉터리에 복사해 자식으로 돌리는 모든 시험(list-relay-
+// handshake-isolated-fixtures.mjs가 기계로 세는 그 집합, HYK-430 4R
+// §2⑵)이 이제 child-probe-timeout-policy.mjs도 형제로 함께 복사한다
+// (scripts/check/relay-handshake-fixture-siblings.mjs가 그 복사 목록의
+// 단일 소스). "정책을 못 읽는 경우"가 더 이상 존재하지 않으므로,
+// 그 경우를 처리하던 동적 import·catch·isPolicyModuleAbsent·로컬
+// 2000ms/재시도 0 폴백 경로가 전부 불필요해져 지운다 -- 남는 것은
+// 평범한 정적 import 하나뿐이다.
 const SHADOW_CLI_TIMEOUT_MS = 2000;
+
+function resolveShadowCliTimeoutMs(baseTimeoutMs) {
+  return resolveChildProbeTimeoutMs(baseTimeoutMs);
+}
+
+// §2⑶ "재시도 1회" -- 무응답(ETIMEDOUT)에서만 정확히 1회 재시도한다
+// (RETRY_ON_TIMEOUT은 child-probe-timeout-policy.mjs가 유일한
+// 정의처다).
+function withTimeoutRetryIfAvailable(fn, isTimeout) {
+  return withTimeoutRetry(fn, { isTimeout });
+}
 
 function isTimeoutError(err) {
   // Node의 child_process.execFileSync는 timeout 초과 시 자식을 killSignal로
@@ -2138,9 +2157,11 @@ function normalizeChildStdout(out, taskId) {
 //
 // ★서브프로세스 스폰, 정적 import 아님 -- spawnAbortRecordWriter/
 // spawnAdmissionCompletionProcess와 완전히 같은 이유(그 두 함수 바로 위
-// 주석 참조): 이 파일은 24개 격리 픽스처 시험(admission-completion-
+// 주석 참조): 이 파일은 다수의 격리 픽스처 시험(admission-completion-
 // spawn.test.mjs 등, "relay-handshake.mjs + time-authority/reject-streak/
-// envelope-archive만" 복사해 서브프로세스로 도는 시험)이 의존하는 정적
+// envelope-archive만" 복사해 서브프로세스로 도는 시험 -- 정확한 개수는
+// `node scripts/check/list-relay-handshake-isolated-fixtures.mjs`가
+// 손으로 세지 않고 매번 다시 만든다, HYK-430 4R §2⑵)이 의존하는 정적
 // import 그래프의 일부다 -- 5번째 정적 import를 추가하면 그 시험 전부가
 // LOAD 시점에 MODULE_NOT_FOUND로 깨진다(실측: 첫 시도에서 npm test 60건
 // 실패). retirement-auto-author-shadow-cli.mjs를 스폰만 하면 그 파일이
@@ -2161,7 +2182,7 @@ export function runRetireAuthorShadowObservation({
   doneAt,
   execFileFn = execFileSync,
   logFn = console.log,
-  timeoutMs = SHADOW_CLI_TIMEOUT_MS,
+  timeoutMs = resolveShadowCliTimeoutMs(SHADOW_CLI_TIMEOUT_MS),
 }) {
   try {
     const cliPath = join(
@@ -2178,12 +2199,20 @@ export function runRetireAuthorShadowObservation({
     // 없어 Node가 내부적으로 TerminateProcess로 매핑한다 -- 이 워크트리
     // 자체가 Windows라 이 경로로 실측했다, 좀비 프로세스는 남기지 않음을
     // 시험(rr-timeout 계열)으로 확인).
-    const out = execFileFn("node", args, {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"],
-      timeout: timeoutMs,
-      killSignal: "SIGKILL",
-    });
+    // HYK-430 2R: 무응답(TIMEOUT)만, 공통 정책이 로드됐을 때 정확히
+    // 1회 재시도한다(§2⑶, 위 withTimeoutRetryIfAvailable 주석). 진짜
+    // 무응답 자식은 재시도해도 다시 타임아웃되므로 탐지력은 보존된다
+    // (§2⑷ 음성 대조 (E)).
+    const out = withTimeoutRetryIfAvailable(
+      () =>
+        execFileFn("node", args, {
+          encoding: "utf8",
+          stdio: ["ignore", "pipe", "pipe"],
+          timeout: timeoutMs,
+          killSignal: "SIGKILL",
+        }),
+      isTimeoutError,
+    );
     logFn(normalizeChildStdout(out, taskId));
   } catch (err) {
     // Missing CLI file (isolated test fixture), non-zero exit, timeout

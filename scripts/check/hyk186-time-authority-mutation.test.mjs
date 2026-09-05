@@ -42,6 +42,12 @@ const ENVELOPE_ARCHIVE_PATH = join(CHECK_DIR, "envelope-archive.mjs");
 // mutation 3 below (which stages finalize-done.mjs) fails to even load
 // (ERR_MODULE_NOT_FOUND) regardless of the mutation itself.
 const FIRST_OBSERVATION_PATH = join(CHECK_DIR, "first-observation.mjs");
+// HYK-430 5R: relay-handshake.mjs now also statically imports
+// "./child-probe-timeout-policy.mjs".
+const CHILD_PROBE_TIMEOUT_POLICY_PATH = join(
+  CHECK_DIR,
+  "child-probe-timeout-policy.mjs",
+);
 const WATCH_RESULT_PATH = join(RELAY_DIR, "watch-result.mjs");
 const FINALIZE_DONE_PATH = join(RELAY_DIR, "finalize-done.mjs");
 
@@ -108,6 +114,7 @@ function stageTree({ checkOverrides = {}, relayOverrides = {} } = {}) {
     "reject-streak.mjs": REJECT_STREAK_PATH,
     "envelope-archive.mjs": ENVELOPE_ARCHIVE_PATH,
     "first-observation.mjs": FIRST_OBSERVATION_PATH,
+    "child-probe-timeout-policy.mjs": CHILD_PROBE_TIMEOUT_POLICY_PATH,
   };
   for (const [name, srcPath] of Object.entries(checkFiles)) {
     const content = checkOverrides[name] ?? readFileSync(srcPath, "utf8");

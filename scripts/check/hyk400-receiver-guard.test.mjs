@@ -28,6 +28,21 @@ const GUARD_PATH = fileURLToPath(
 const RUNNER_PATH = fileURLToPath(
   new URL("./hyk400-receiver-probe-runner.mjs", import.meta.url),
 );
+// HYK-430 1R: guard가 이제 이 형제 파일을 정적 import한다
+// (child-probe-timeout-policy.mjs). 격리 mutDir 픽스처(admission-
+// completion-spawn.test.mjs와 같은 관례)는 guard·runner 두 파일만
+// 복사해 왔으므로, 아래 모든 mutDir 시험에도 이 파일을 함께 복사해야
+// MODULE_NOT_FOUND로 깨지지 않는다.
+const POLICY_PATH = fileURLToPath(
+  new URL("./child-probe-timeout-policy.mjs", import.meta.url),
+);
+const originalPolicySrc = readFileSync(POLICY_PATH, "utf8");
+function seedPolicySibling(mutDir) {
+  writeFileSync(
+    join(mutDir, "child-probe-timeout-policy.mjs"),
+    originalPolicySrc,
+  );
+}
 const REPO_ROOT = fileURLToPath(new URL("../../", import.meta.url));
 const FIXTURES_DIR = fileURLToPath(new URL("./fixtures/", import.meta.url));
 
@@ -190,6 +205,7 @@ test("I3 되돌림: 경계 검사를 끄면 같은 심링크가 통과해 버린
       join(mutDir, "hyk400-receiver-probe-runner.mjs"),
       originalRunnerSrc,
     );
+    seedPolicySibling(mutDir);
 
     const relayDir = join(worktree, "scripts/relay");
     mkdirSync(relayDir, { recursive: true });
@@ -269,10 +285,10 @@ test("ⓐ 되돌림: --permission 격리를 끄면 같은 대상이 실제로 �
   const originalRunnerSrc = readFileSync(RUNNER_PATH, "utf8");
 
   const anchor =
-    "        permissionFlag,\n" +
-    "        `--allow-fs-read=${RUNNER_DIR}`,\n" +
-    "        `--allow-fs-read=${worktreeReal}`,\n" +
-    "        `--allow-fs-write=${responseDir}`,\n";
+    "            permissionFlag,\n" +
+    "            `--allow-fs-read=${RUNNER_DIR}`,\n" +
+    "            `--allow-fs-read=${worktreeReal}`,\n" +
+    "            `--allow-fs-write=${responseDir}`,\n";
   assert.ok(
     originalGuardSrc.includes(anchor),
     "mutation anchor not found -- guard source drifted",
@@ -285,7 +301,7 @@ test("ⓐ 되돌림: --permission 격리를 끄면 같은 대상이 실제로 �
   // 평범한 자식이 되어 대상의 최상위 쓰기가 실제로 일어난다.
   const mutatedSrc = originalGuardSrc.replace(
     anchor,
-    "        // I1 mutated off (no --permission/--allow-fs-*)\n",
+    "            // I1 mutated off (no --permission/--allow-fs-*)\n",
   );
   assert.notEqual(mutatedSrc, originalGuardSrc);
 
@@ -297,6 +313,7 @@ test("ⓐ 되돌림: --permission 격리를 끄면 같은 대상이 실제로 �
       join(mutDir, "hyk400-receiver-probe-runner.mjs"),
       originalRunnerSrc,
     );
+    seedPolicySibling(mutDir);
     seedReceiptCli(worktree, "hyk400-hostile-write.mjs.txt");
     const proofPath = join(worktree, "hyk400-hostile-write-proof.txt");
 
@@ -322,22 +339,114 @@ test("ⓐ 되돌림: --permission 격리를 끄면 같은 대상이 실제로 �
   }
 });
 
-test("ⓑ 무한 top-level await(이벤트 루프를 살려 둔 채): 제한시간 안에 거부된다", async () => {
+// HYK-430 2R(검토 반려 P1-2 §2⑵ⓐ 전수 열거 대상) -- 이 시험의
+// `elapsedMs < 5000`도 relay-handshake-retire-author-shadow-wire.test.mjs
+// (E)와 «같은 형태»(재시도로 늘어난 실측 시간 vs 독립적으로 고른 절대
+// 값)였다. 아직 실측으로 깨지지는 않았지만(800ms×2회=1600ms 나름의
+// 여유), REVIEW가 재현한 2572ms/400ms(6.4배) 비율을 그대로 적용하면
+// 1600ms×6.4≈10240ms로 5000ms를 넘을 수 있어 ★같은 종류의 잠재
+// 결함이다 -- 지금 고친다. 결정적 호출-횟수 스파이(부하 무관)를
+// 주 증거로 삼고, 벽시계 상한은 "무한정 대기하지 않는다"는 느슨한
+// 안전망으로만 남긴다(REVIEW 실측 배율 6.4배에 5배 이상 여유를 얹은
+// 배율로 timeoutMs*시도횟수에서 파생 -- 독립 절대값이 아니다).
+const WORST_CASE_OVERHEAD_MULTIPLIER = 40; // REVIEW 실측 6.4배 + 넉넉한 여유.
+
+test("ⓑ 무한 top-level await(이벤트 루프를 살려 둔 채): 제한시간 안에 거부된다, 재시도 정확히 1회(호출 횟수로 결정적 증명)", async () => {
   const worktree = tmpWorktree("hyk400-hostile-hang-worktree-");
   try {
     seedReceiptCli(worktree, "hyk400-hostile-hang.mjs.txt");
+    const timeoutMs = 800;
+    let spawnCalls = 0;
     const startedAt = Date.now();
     const result = await checkReceiptCliFlagSupport({
       worktree,
       deliveryArgs: deliveryArgsFor(worktree),
-      timeoutMs: 800,
+      timeoutMs,
+      // detectPermissionFlag도 같은 execFileSyncFn을 통해 플래그
+      // 탐지용 프로브(`-e "process.exit(0)"`)를 한 번 스폰한다 --
+      // 그건 이 시험이 재는 "무응답 자식에 대한 재시도"가 아니므로
+      // 스파이에서 제외한다(그 프로브 인자는 언제나 -e를 포함한다).
+      execFileSyncFn: (...args) => {
+        const cliArgs = args[1] ?? [];
+        if (!cliArgs.includes("-e")) spawnCalls += 1;
+        return execFileSync(...args);
+      },
     });
     const elapsedMs = Date.now() - startedAt;
     assert.equal(result.supported, false);
     assert.match(result.reason, /RECEIVER_CLI_PROBE_TIMEOUT/);
+    assert.equal(
+      spawnCalls,
+      2,
+      `무응답 자식은 재시도 1회를 포함해 정확히 2번 스폰돼야 한다 -- 실측: ${spawnCalls}`,
+    );
+    const looseCeilingMs = timeoutMs * 2 * WORST_CASE_OVERHEAD_MULTIPLIER;
     assert.ok(
-      elapsedMs < 5000,
-      `타임아웃이 제한시간(800ms) 근처에서 걸려야 하는데 ${elapsedMs}ms 걸렸다`,
+      elapsedMs < looseCeilingMs,
+      `2회 시도(각 ${timeoutMs}ms) 대비 ${WORST_CASE_OVERHEAD_MULTIPLIER}배 여유(${looseCeilingMs}ms)를 넘으면 타임아웃 메커니즘 자체가 소실된 회귀로 본다 -- 실측: ${elapsedMs}ms`,
+    );
+  } finally {
+    rmSync(worktree, { recursive: true, force: true });
+  }
+});
+
+// HYK-430 1R §2⑷ 음성 대조(새로 추가) -- spawnIsolatedChild가 이제
+// withTimeoutRetry로 무응답을 1회 재시도한다(child-probe-timeout-
+// policy.mjs). "재시도가 탐지력을 깎지 않는다"를 이 시험이 직접 잰다:
+// 진짜로 영원히 응답하지 않는 자식은 재시도해도 여전히 거부돼야 하고,
+// 재시도가 실제로 «두 번째 자식 프로세스를 다시 스폰»했다는 것도
+// 경과시간으로 증명한다(1회 시도만 했다면 elapsedMs가 timeoutMs 근처에
+// 머물렀을 것 -- 2회 시도했으므로 timeoutMs의 배 이상 걸려야 한다).
+test("★음성 대조: 재시도(1회) 뒤에도 진짜 무응답 자식은 여전히 거부된다 -- 탐지력이 재시도로 사라지지 않는다(호출 횟수로 결정적 증명)", async () => {
+  const worktree = tmpWorktree("hyk400-hostile-hang-retry-worktree-");
+  try {
+    seedReceiptCli(worktree, "hyk400-hostile-hang.mjs.txt");
+    const timeoutMs = 500;
+    let spawnCalls = 0;
+    const startedAt = Date.now();
+    const result = await checkReceiptCliFlagSupport({
+      worktree,
+      deliveryArgs: deliveryArgsFor(worktree),
+      timeoutMs,
+      // detectPermissionFlag도 같은 execFileSyncFn을 통해 플래그
+      // 탐지용 프로브(`-e "process.exit(0)"`)를 한 번 스폰한다 --
+      // 그건 이 시험이 재는 "무응답 자식에 대한 재시도"가 아니므로
+      // 스파이에서 제외한다(그 프로브 인자는 언제나 -e를 포함한다).
+      execFileSyncFn: (...args) => {
+        const cliArgs = args[1] ?? [];
+        if (!cliArgs.includes("-e")) spawnCalls += 1;
+        return execFileSync(...args);
+      },
+    });
+    const elapsedMs = Date.now() - startedAt;
+    assert.equal(
+      result.supported,
+      false,
+      "재시도 예산을 다 써도 결론은 여전히 미지원(거부)이어야 한다 -- 탐지력 보존",
+    );
+    assert.match(result.reason, /RECEIVER_CLI_PROBE_TIMEOUT/);
+    // 결정적 증명(부하 무관) -- 벽시계보다 우선한다.
+    assert.equal(
+      spawnCalls,
+      2,
+      `재시도 1회를 포함해 정확히 2번 스폰돼야 한다 -- 실측: ${spawnCalls}`,
+    );
+    // HYK-430 4R §2⑶(P2-1 판정, REVIEW 2R) -- ★남기기로 결정한다.
+    // 근거: 이건 «하한»이지 P1-2가 깨졌던 «상한»이 아니다 -- 부하가
+    // 늘면 elapsedMs는 더 커질 뿐이라 이 부등식은 부하가 늘수록 «더
+    // 쉽게» 참이 된다(P1-2와 정반대 방향). 유일하게 이 부등식이
+    // 실패할 수 있는 경우는 "재시도가 실제로 두 번째 스폰을 하지
+    // 않았다"(스파이가 이미 spawnCalls===2로 결정적으로 배제) 또는
+    // "OS의 execFileSync timeout이 요청한 시간보다 실제로 짧게
+    // 끊었다"(타이머 하한 보장이 깨진 것 -- 이건 이 시험이 잡아야
+    // 하는 진짜 회귀다)뿐이다. 상한은 걸지 않는다 -- 위 ⓑ 시험이
+    // 그 축을 이미 담당한다. 즉 이 하한은 spawnCalls의 «보조»이지
+    // «대체 불가한 주 증거»가 아니며, 제거해도 탐지력이 줄지는
+    // 않지만 남겨도 부하에 취약해지지 않으므로(방향이 반대) 굳이
+    // 지울 이유가 없다고 판단했다.
+    assert.ok(
+      elapsedMs >= timeoutMs * 1.5,
+      `1회 재시도가 실제로 자식을 다시 스폰했다면 경과시간이 timeoutMs(${timeoutMs}ms)의 1.5배 이상이어야 한다(1회 시도만 했다면 이 시험이 실패해야 한다) -- 실측: ${elapsedMs}ms`,
     );
   } finally {
     rmSync(worktree, { recursive: true, force: true });
@@ -440,6 +549,7 @@ test("I1′ 되돌림: 종료 상태 검사를 끄면 ⓐⓑⓒ가 다시 통과
       join(mutDir, "hyk400-receiver-probe-runner.mjs"),
       originalRunnerSrc,
     );
+    seedPolicySibling(mutDir);
     const mutatedGuard = await import(
       pathToFileURL(join(mutDir, "hyk400-receiver-guard.mjs")).href
     );
@@ -573,14 +683,15 @@ test("ⓓ I-ROOT: 대상이 러너를 흉내내 stdout에 완벽한 가짜 'supp
 // 만들고, (2) runIsolatedProbe가 readIsolatedResponse(파일) 대신 그
 // stdout의 마지막 줄만 파싱하게 만든다.
 function buildIRootLegacyMutation(originalGuardSrc) {
-  const spawnReturnAnchor = "    execFileSyncFn(\n      process.execPath,";
+  const spawnReturnAnchor =
+    "    withTimeoutRetry(\n      () =>\n        execFileSyncFn(\n          process.execPath,";
   assert.ok(
     originalGuardSrc.includes(spawnReturnAnchor),
     "I-ROOT mutation anchor(spawn) not found -- guard source drifted",
   );
   let mutatedSrc = originalGuardSrc.replace(
     spawnReturnAnchor,
-    "    const capturedStdout = execFileSyncFn(\n      process.execPath,",
+    "    const capturedStdout = withTimeoutRetry(\n      () =>\n        execFileSyncFn(\n          process.execPath,",
   );
 
   const spawnOkAnchor = "    return { ok: true };\n  } catch (err) {";
@@ -648,6 +759,7 @@ test("I-ROOT 되돌림: 채널을 응답 파일에서 다시 stdout으로 되돌
       join(mutDir, "hyk400-receiver-probe-runner.mjs"),
       originalRunnerSrc,
     );
+    seedPolicySibling(mutDir);
     const mutatedGuard = await import(
       pathToFileURL(join(mutDir, "hyk400-receiver-guard.mjs")).href
     );
@@ -738,6 +850,7 @@ test("ⓑ 되돌림: 격리 프로세스 실패(타임아웃 포함)를 거부�
       join(mutDir, "hyk400-receiver-probe-runner.mjs"),
       originalRunnerSrc,
     );
+    seedPolicySibling(mutDir);
     seedReceiptCli(worktree, "hyk400-hostile-hang.mjs.txt");
 
     const mutatedGuard = await import(
@@ -822,6 +935,7 @@ test("ⓒ/ⓔ 되돌림: 의미 대조를 끄면(sentinel 확인 없이 ok:true�
       join(mutDir, "hyk400-receiver-probe-runner.mjs"),
       originalRunnerSrc,
     );
+    seedPolicySibling(mutDir);
     seedReceiptCli(worktreeC, "hyk400-hostile-different-meaning.mjs.txt");
     seedReceiptCli(worktreeE, "hyk400-hostile-string-mention.mjs.txt");
 
@@ -1206,10 +1320,10 @@ test("I-ENV 되돌림: 플래그 자동탐지를 끄고 --permission을 다시 �
   const originalRunnerSrc = readFileSync(RUNNER_PATH, "utf8");
 
   const anchor =
-    "        permissionFlag,\n" +
-    "        `--allow-fs-read=${RUNNER_DIR}`,\n" +
-    "        `--allow-fs-read=${worktreeReal}`,\n" +
-    "        `--allow-fs-write=${responseDir}`,\n";
+    "            permissionFlag,\n" +
+    "            `--allow-fs-read=${RUNNER_DIR}`,\n" +
+    "            `--allow-fs-read=${worktreeReal}`,\n" +
+    "            `--allow-fs-write=${responseDir}`,\n";
   assert.ok(
     originalGuardSrc.includes(anchor),
     "I-ENV mutation anchor not found -- guard source drifted",
@@ -1219,9 +1333,9 @@ test("I-ENV 되돌림: 플래그 자동탐지를 끄고 --permission을 다시 �
   // 플래그 자체이므로), 이 변이 목적상 부차적이다.
   const mutatedSrc = originalGuardSrc.replace(
     anchor,
-    '        "--permission",\n' +
-      "        `--allow-fs-read=${worktreeReal}`,\n" +
-      "        `--allow-fs-write=${responseDir}`,\n",
+    '            "--permission",\n' +
+      "            `--allow-fs-read=${worktreeReal}`,\n" +
+      "            `--allow-fs-write=${responseDir}`,\n",
   );
   assert.notEqual(mutatedSrc, originalGuardSrc);
 
@@ -1232,6 +1346,7 @@ test("I-ENV 되돌림: 플래그 자동탐지를 끄고 --permission을 다시 �
       join(mutDir, "hyk400-receiver-probe-runner.mjs"),
       originalRunnerSrc,
     );
+    seedPolicySibling(mutDir);
     const mutatedGuard = await import(
       pathToFileURL(join(mutDir, "hyk400-receiver-guard.mjs")).href
     );

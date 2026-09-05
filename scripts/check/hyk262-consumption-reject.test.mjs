@@ -285,6 +285,7 @@ test("(c)★ RED: HYK-262 차단 코드를 제거한 변이는 (a)와 같은 입
         "reject-streak.mjs",
         "envelope-archive.mjs",
         "time-authority.mjs",
+        "child-probe-timeout-policy.mjs",
         "admission-completion-adapter.mjs",
         // HYK-302/355 §2-A dedup: admission-completion-adapter.mjs now
         // statically imports this shared module.

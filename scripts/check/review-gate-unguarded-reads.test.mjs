@@ -49,6 +49,12 @@ const TIME_AUTHORITY_PATH = join(HERE, "time-authority.mjs");
 // (approval<->code-state binding check) -- same MODULE_NOT_FOUND risk as
 // the siblings above, now for a fourth.
 const REVIEW_APPROVAL_BINDING_PATH = join(HERE, "review-approval-binding.mjs");
+// HYK-430 5R: relay-handshake.mjs now also statically imports
+// "./child-probe-timeout-policy.mjs".
+const CHILD_PROBE_TIMEOUT_POLICY_PATH = join(
+  HERE,
+  "child-probe-timeout-policy.mjs",
+);
 
 function git(cwd, args) {
   return execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
@@ -105,6 +111,11 @@ function stageRepo(dir, { reviewGateSrc }) {
   writeFileSync(
     join(scriptsCheckDir, "time-authority.mjs"),
     readFileSync(TIME_AUTHORITY_PATH, "utf8"),
+    "utf8",
+  );
+  writeFileSync(
+    join(scriptsCheckDir, "child-probe-timeout-policy.mjs"),
+    readFileSync(CHILD_PROBE_TIMEOUT_POLICY_PATH, "utf8"),
     "utf8",
   );
   writeFileSync(

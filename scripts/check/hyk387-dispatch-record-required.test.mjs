@@ -295,6 +295,7 @@ const SIBLING_DEPS = [
   "reject-streak.mjs",
   "envelope-archive.mjs",
   "time-authority.mjs",
+  "child-probe-timeout-policy.mjs",
 ];
 
 // HYK-387 3R (자체 발견 결함 수리, 검토자 지목 아님): 1R부터 이 함수는

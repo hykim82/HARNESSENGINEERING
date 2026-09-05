@@ -54,6 +54,10 @@ const TIME_AUTHORITY_SRC = readFileSync(
   join(HERE, "time-authority.mjs"),
   "utf8",
 );
+const CHILD_PROBE_TIMEOUT_POLICY_SRC = readFileSync(
+  join(HERE, "child-probe-timeout-policy.mjs"),
+  "utf8",
+);
 
 function tmpDir(prefix) {
   return mkdtempSync(join(tmpdir(), prefix));
@@ -151,6 +155,11 @@ function writeMutantRelayHandshake(mutatedSrc) {
   writeFileSync(
     join(scriptsCheckDir, "time-authority.mjs"),
     TIME_AUTHORITY_SRC,
+    "utf8",
+  );
+  writeFileSync(
+    join(scriptsCheckDir, "child-probe-timeout-policy.mjs"),
+    CHILD_PROBE_TIMEOUT_POLICY_SRC,
     "utf8",
   );
   return { rootDir, mutantPath };
