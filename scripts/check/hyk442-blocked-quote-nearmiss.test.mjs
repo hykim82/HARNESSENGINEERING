@@ -56,6 +56,12 @@ function writeResult(dir, role, content) {
 }
 
 const TASK_HEADER = "task_id: HYK-1\ndropped_at: 2026-09-05 21:00 KST\n";
+// HYK-414 (time-judgment-now-injection ratchet): this file's fixtures embed
+// absolute timestamps (TASK_HEADER's dropped_at) -- checkRelayHandshake must
+// always be called with an explicit `now` fixed shortly after that value,
+// never the real Date.now() default (coder-task.md's own ratchet catches
+// the omission).
+const FIXED_NOW = Date.parse("2026-09-05T12:05:00Z"); // 2026-09-05 21:05 KST
 
 // coder-437-PRE-EDIT-1758.md 166/177행 구조의 최소 재현: 자기점검 산문 한
 // 줄 안에 백틱으로 감싼 `>>> BLOCKED:` 인용 + 별도 줄의 진짜 well-formed
@@ -76,7 +82,11 @@ test("HYK-442 (1) 백틱 인용 + 진짜 well-formed 표지 1개 공존 -> state
   withFixtureDir((dir) => {
     writeTask(dir, "coder", TASK_HEADER);
     writeResult(dir, "coder", QUOTE_PLUS_REAL_MARKER_BODY);
-    const result = checkRelayHandshake({ role: "coder", harnessDir: dir });
+    const result = checkRelayHandshake({
+      role: "coder",
+      harnessDir: dir,
+      now: FIXED_NOW,
+    });
     assert.equal(result.ok, false);
     assert.equal(
       result.state,
@@ -91,7 +101,11 @@ test("HYK-442 (2) 백틱 인용만 있고 진짜 표지가 없음 -> state=PENDI
   withFixtureDir((dir) => {
     writeTask(dir, "coder", TASK_HEADER);
     writeResult(dir, "coder", QUOTE_ONLY_NO_REAL_MARKER_BODY);
-    const result = checkRelayHandshake({ role: "coder", harnessDir: dir });
+    const result = checkRelayHandshake({
+      role: "coder",
+      harnessDir: dir,
+      now: FIXED_NOW,
+    });
     assert.equal(result.ok, false);
     assert.equal(
       result.state,
@@ -109,7 +123,11 @@ test("HYK-442 (3) §4 회귀 ⓐ: 백틱 없는 앞 공백 마커(' >>> BLOCKED:
       "coder",
       "task_id: HYK-1\n\n >>> BLOCKED: leading space\n",
     );
-    const result = checkRelayHandshake({ role: "coder", harnessDir: dir });
+    const result = checkRelayHandshake({
+      role: "coder",
+      harnessDir: dir,
+      now: FIXED_NOW,
+    });
     assert.equal(result.ok, false);
     assert.equal(result.state, "MALFORMED_BLOCKED");
   });
@@ -119,7 +137,11 @@ test("HYK-442 (4) §4 회귀 ⓑ: 백틱 없는 '>>>' 없는 칼럼0 근접실�
   withFixtureDir((dir) => {
     writeTask(dir, "coder", TASK_HEADER);
     writeResult(dir, "coder", "task_id: HYK-1\n\nBLOCKED: no arrows\n");
-    const result = checkRelayHandshake({ role: "coder", harnessDir: dir });
+    const result = checkRelayHandshake({
+      role: "coder",
+      harnessDir: dir,
+      now: FIXED_NOW,
+    });
     assert.equal(result.ok, false);
     assert.equal(result.state, "MALFORMED_BLOCKED");
   });
@@ -133,7 +155,11 @@ test("HYK-442 (5) §4 회귀 ⓒ: 백틱 없는 진짜 표지 2개 -> 여전히 
       "coder",
       "task_id: HYK-1\n\n>>> BLOCKED: first\n>>> BLOCKED: second\n",
     );
-    const result = checkRelayHandshake({ role: "coder", harnessDir: dir });
+    const result = checkRelayHandshake({
+      role: "coder",
+      harnessDir: dir,
+      now: FIXED_NOW,
+    });
     assert.equal(result.ok, false);
     assert.equal(result.state, "AMBIGUOUS_BLOCKED");
   });
@@ -143,7 +169,11 @@ test("HYK-442 (6) §4 회귀 ⓓ: 표지 0개(백틱도 없음) -> 여전히 PEN
   withFixtureDir((dir) => {
     writeTask(dir, "coder", TASK_HEADER);
     writeResult(dir, "coder", "task_id: HYK-1\n\n작업 진행 중, 표지 없음\n");
-    const result = checkRelayHandshake({ role: "coder", harnessDir: dir });
+    const result = checkRelayHandshake({
+      role: "coder",
+      harnessDir: dir,
+      now: FIXED_NOW,
+    });
     assert.equal(result.ok, false);
     assert.equal(result.state, "PENDING");
   });
@@ -153,7 +183,11 @@ test("HYK-442 (7) §4 회귀 ⓔ: 백틱 없는 콜론 없는 '>>> BLOCKED x' ->
   withFixtureDir((dir) => {
     writeTask(dir, "coder", TASK_HEADER);
     writeResult(dir, "coder", "task_id: HYK-1\n\n>>> BLOCKED no colon here\n");
-    const result = checkRelayHandshake({ role: "coder", harnessDir: dir });
+    const result = checkRelayHandshake({
+      role: "coder",
+      harnessDir: dir,
+      now: FIXED_NOW,
+    });
     assert.equal(result.ok, false);
     assert.equal(result.state, "MALFORMED_BLOCKED");
   });
@@ -211,7 +245,11 @@ test("HYK-442 되돌림 변이: 인라인 코드 스팬 제외 로직을 항등�
     const mod = await import(
       `file://${join(checkDir, "relay-handshake.mjs")}?t=${Date.now()}`
     );
-    const result = mod.checkRelayHandshake({ role: "coder", harnessDir });
+    const result = mod.checkRelayHandshake({
+      role: "coder",
+      harnessDir,
+      now: FIXED_NOW,
+    });
 
     assert.equal(
       result.state,

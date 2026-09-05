@@ -82,6 +82,12 @@ function withoutAmbientReceiptEnv(fn) {
   }
 }
 
+// HYK-414 (time-judgment-now-injection ratchet): this file's fixtures embed
+// absolute timestamps (setupLedgerAndTask's dropped_at) -- checkRelayHandshake
+// must always be called with an explicit `now` fixed shortly after that
+// value, never the real Date.now() default.
+const FIXED_NOW = Date.parse("2026-09-05T12:05:00Z"); // 2026-09-05 21:05 KST
+
 function setupLedgerAndTask(dir, { taskId = "HYK-1" } = {}) {
   writeTask(
     dir,
@@ -136,7 +142,11 @@ test("HYK-443 (1) 포인터 파일만 있고 DISPATCH_RECEIPT_PATH env는 없어
         const prevLedgerEnv = process.env.ADMISSION_LEDGER_PATH;
         process.env.ADMISSION_LEDGER_PATH = ledgerPath;
         try {
-          checkRelayHandshake({ role: "coder", harnessDir: dir });
+          checkRelayHandshake({
+            role: "coder",
+            harnessDir: dir,
+            now: FIXED_NOW,
+          });
         } finally {
           if (prevLedgerEnv === undefined)
             delete process.env.ADMISSION_LEDGER_PATH;
@@ -197,7 +207,11 @@ test("HYK-443 (2) §4 회귀: 배달 영수증에 없는 라벨(위조)로는 �
         const prevLedgerEnv = process.env.ADMISSION_LEDGER_PATH;
         process.env.ADMISSION_LEDGER_PATH = ledgerPath;
         try {
-          checkRelayHandshake({ role: "coder", harnessDir: dir });
+          checkRelayHandshake({
+            role: "coder",
+            harnessDir: dir,
+            now: FIXED_NOW,
+          });
         } finally {
           if (prevLedgerEnv === undefined)
             delete process.env.ADMISSION_LEDGER_PATH;
@@ -229,7 +243,7 @@ test("HYK-443 (3) §4 회귀: 포인터 파일이 없을 때도 안전측 거부
       const prevLedgerEnv = process.env.ADMISSION_LEDGER_PATH;
       process.env.ADMISSION_LEDGER_PATH = ledgerPath;
       try {
-        checkRelayHandshake({ role: "coder", harnessDir: dir });
+        checkRelayHandshake({ role: "coder", harnessDir: dir, now: FIXED_NOW });
       } finally {
         if (prevLedgerEnv === undefined)
           delete process.env.ADMISSION_LEDGER_PATH;
@@ -258,7 +272,7 @@ test("HYK-443 (4) §4 회귀: 포인터 파일이 깨졌을(빈 파일) 때도 �
       const prevLedgerEnv = process.env.ADMISSION_LEDGER_PATH;
       process.env.ADMISSION_LEDGER_PATH = ledgerPath;
       try {
-        checkRelayHandshake({ role: "coder", harnessDir: dir });
+        checkRelayHandshake({ role: "coder", harnessDir: dir, now: FIXED_NOW });
       } finally {
         if (prevLedgerEnv === undefined)
           delete process.env.ADMISSION_LEDGER_PATH;
@@ -370,7 +384,7 @@ async function runRedMutationScenario(checkDir, harnessDir) {
         const mod = await import(
           `file://${join(checkDir, "relay-handshake.mjs")}?t=${Date.now()}`
         );
-        mod.checkRelayHandshake({ role: "coder", harnessDir });
+        mod.checkRelayHandshake({ role: "coder", harnessDir, now: FIXED_NOW });
       } finally {
         if (prevLedgerEnv === undefined)
           delete process.env.ADMISSION_LEDGER_PATH;
