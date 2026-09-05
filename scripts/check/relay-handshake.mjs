@@ -115,81 +115,88 @@ const BLOCKED_ANYWHERE_RE = />>>\s*(BLOCKED|NEEDS_INPUT)\b/gi;
 // 그대로다 -- 건드리지 않는다.
 const BLOCKED_BARE_COLUMN0_RE = /^(BLOCKED|NEEDS_INPUT):/gim;
 
-// HYK-442 4R (검토 1R P1-ⓐ 수리 -- 판별 «근거»를 바꾼다):
-// BLOCKED_ANYWHERE_RE/BLOCKED_BARE_COLUMN0_RE 위 두 정규식은 파일
-// «어디에나» 있는 표지-모양 문자열을 센다(무경계 탐색이 그 존재 이유,
-// 각자의 헤더 참조). 2026-09-05 실사고(coder-task.md §1-1)는 그 대가였다 --
-// 워커가 자기점검 산문에서 표지 문법을 «인용»한 자리까지 근접-미스로 세어
-// 정상 종료를 "유효+깨짐 혼재"로 승격시켜 정지 종결 자체를 막았다(실물
-// 2건: coder-437-PRE-EDIT-1758.md 166행 = 백틱 인용 · coder-laneB-PRE-
-// EDIT.md 50·54행 = 홑따옴표 인용).
+// HYK-442 5R (검토 2R P1-ⓐ 수리 -- ⛔«인용인지 추정하는» 축 자체를 버린다):
 //
-// 이 이슈가 두 번 반복한 실패 모양은 «인용부호 집합을 손대는 것»이었다:
-//   1R -- 백틱 «하나만» 벗김            -> 홑따옴표 인용에 다시 걸림.
-//   2R -- 집합을 3종으로 «넓힘»          -> 검토 1R이 P1으로 뚫음
-//         (`paired-apostrophes-span-marker`): 홑따옴표는 «인용 구분자»와
-//         «단어 속 아포스트로피»라는 두 얼굴을 가진 같은 문자라, 자연어
-//         한 줄에 축약형이 두 번 나오면(don't … can't) 그 사이 구간이
-//         통째로 "인용"으로 스트립돼 ★그 안의 «진짜» 근접-미스 표지가
-//         사라졌다 -- 막아야 할 것을 놓치는 fail-open.
-// ⛔집합을 다시 «좁히는» 것도 답이 아니다(그러면 1R의 사고가 되살아난다).
-// ⇒ 4R은 집합을 그대로 둔 채(백틱·홑따옴표·겹따옴표, 늘리지도 줄이지도
-//   않았다) ★판별 «근거» 자체를 두 축으로 바꾼다.
+// 이 이슈는 같은 실패를 세 번 반복했고, 세 번 다 공통점이 하나였다 --
+// 「이 따옴표가 인용인가」를 문장부호 배치로 «추정»한 것이다:
+//   1R -- 인용부호를 백틱 «한 원소»로 좁힘  -> 홑따옴표 인용에 다시 걸림
+//         (정당한 정지 종결을 막는 «과차단»).
+//   2R -- 집합을 3종으로 «넓힘»             -> 자연어 축약형 두 개(don't …
+//         can't) 사이의 «진짜» 근접-미스가 통째로 스트립됨(«누락»).
+//   4R -- 여는-자리 규칙(축 A) + 줄-선두 불가침(축 B)로 «배치»를 정교화
+//         -> 검토 2R이 여섯 입력으로 뚫음: `'tis`/`'26`/문장-시작 홑따옴표는
+//         여는 자리로 오인되고(축 A), BOM·제로폭 문자가 줄 앞에 오면
+//         줄-선두 보호가 아예 작동하지 않았다(축 B).
+// 추정 축은 «공격자가 입력을 정하는 한» 수렴하지 않는다. 그래서 5R은
+// 인용부호를 ⛔한 글자도 다루지 않는다 -- 스트립 함수 자체가 사라졌다.
 //
-// ── 축 A: «문자 동일성»이 아니라 «구분자 역할»로 판별한다 ──────────────
-// 집합의 세 문자 중 «두 번째 어휘 역할»을 가진 것은 홑따옴표뿐이다: 영어
-// 축약형/소유격의 아포스트로피(don't, workers'). 그 두 번째 역할은 항상
-// «앞이 단어 문자»라는 위치로 나타난다 -- 이것이 표준 활자 규칙(여는
-// 인용부호는 단어 문자 바로 뒤에 오지 않는다)이고, 여는 자리 판별에
-// 그 규칙 하나를 그대로 쓴다. 백틱·겹따옴표에는 두 번째 역할이 없으므로
-// 같은 가드를 걸 이유가 없다(걸면 정당한 인용만 놓칠 뿐 구별되는 것이
-// 없다) -- ⛔이것은 «아포스트로피 예외 목록»이 아니다. 사례를 하나씩
-// 더하는 것이 아니라, 집합의 각 원소가 «구분자로 기능하는가»를 묻는
-// 하나의 규칙이다.
+// ── 대신 «근접-미스»의 정의를 구조로 고정한다 ─────────────────────────
+// 표지는 «줄 단위» 구성물이다 -- 엄격 채택 BLOCKED_RE 자신이 `^>>>`(줄 맨
+// 앞)를 요구한다. 그러므로 «표지를 쓰려다 실패한 흔적»은 언제나 «줄 머리»에
+// 온다: 실제로 관측된 근접-미스 다섯 형태(선행 공백 · `>>>` 없는 칼럼0 ·
+// 콜론 없음 · 표지 2개 · 표지 0개)가 전부 그렇고, 워커 규칙 §3-b가 가르치는
+// 형식("줄 맨 앞에 `>>>`를 붙여서") 자체가 그렇다. 반대로 «앞에 산문이 있는»
+// 표지 모양은 그 줄의 «문장 일부»이지 표지 시도가 아니다.
+// ⇒ 5R의 정의: ★표지 모양 앞에 «글자도 숫자도 하나도 없는» 줄만 근접-미스
+//   시도로 센다(아래 PROSE_CHAR_RE). 인용부호는 글자도 숫자도 아니므로
+//   판정에 관여하지 않는다 -- 백틱이든 홑따옴표든 겹따옴표든, 유니코드
+//   유사 따옴표든, 괄호든, 짝이 맞든 안 맞든 «묻지 않는다». 「인용인가」라는
+//   질문이 사라졌으므로 그 질문을 속이는 입력도 존재할 수 없다.
 //
-// ── 축 B: 줄-선두 표지 시도는 무엇으로도 가려지지 않는다 ───────────────
-// 표지는 «줄 단위» 구성물이다(엄격 채택 BLOCKED_RE 자신이 `^>>>`를
-// 요구한다). 그래서 어떤 줄이 (선행 공백만 두고) 표지 모양으로 «시작»하면
-// 그 줄은 «표지를 쓰려는 시도»이지 산문 속 언급이 아니다 -- 그런 줄은
-// 인용 스트립 대상에서 아예 제외한다. 이 축은 축 A가 어떤 문장부호에서
-// 틀리더라도 ★"줄 앞에서 시작한 진짜 시도는 절대 삼켜지지 않는다"는
-// 바닥을 깔아 준다(같은 P1이 다른 구두점으로 다시 나타나는 경로를 닫는다).
+// 왜 이것이 여섯 공격을 «구조적으로» 닫는가: 공격의 공통 수법은 «진짜 표지
+// 시도를 인용 스팬 안에 숨겨 지우는 것»이었다. 이제 지우는 단계가 없다.
+// 줄 머리에서 시작한 시도 앞에는 (공백·글머리표·⛔ 같은 기호·BOM·제로폭
+// 문자 등) 무엇이 와도 «글자/숫자»가 아니면 그대로 세어진다 -- 보이지 않는
+// 문자는 애초에 `\p{L}`/`\p{N}`이 아니므로 «예외 목록 한 줄도 없이» 자동으로
+// 덮인다(BOM·제로폭·word joiner·결합 문자 전부).
 //
-// ⛔BLOCKED_RE(엄격 채택)는 건드리지 않는다 -- 그 정규식은 이미 줄
-// «전체»가 `>>>`로 시작할 것을 요구하므로 어떤 인용부호로 시작하는 줄에도
-// 애초에 매치하지 않는다.
+// ⚠️이 정의가 «좁히는» 것(정직 한계 -- coder.md에 등급과 함께 기재):
+// 줄 중간에, 앞에 산문을 두고 나타나는 표지 모양은 이제 근접-미스가 아니다.
+// 그것이 이 라운드가 «과차단»(원래 사고: 인용 언급 때문에 정상 종료가 막힘)과
+// «누락»(검토가 뚫은 fail-open)을 동시에 없애는 유일한 길이었다 -- 두 실물
+// 사고 파일의 인용 언급(coder-437-PRE-EDIT-1758.md 166행 · coder-laneB-PRE-
+// EDIT.md 50·54행)과 HYK-333 (6)의 `status: >>> BLOCKED: midline`은 «인용부호
+// 유무»를 빼면 구조가 완전히 같아서, 인용부호를 보지 않고 둘을 가르는 규칙은
+// 원리적으로 존재하지 않는다(coder.md §2-1 증명).
 //
-// 왜 회귀가 없는가: 실사고의 근접-미스 재현 다섯(leading-space,
-// `>>>`-less column-0, 콜론 없음, 진짜 표지 2개, 표지 0개)은 전부 인용부호
-// 없이 «그대로 노출된» 줄-선두 텍스트다 -- 축 B가 그 줄들을 스트립 대상에서
-// 먼저 빼고, 축 A는 여는 자리 판별만 좁히므로 어느 축도 이 다섯의 매치
-// 개수를 바꾸지 않는다. 인용 스팬은 한 줄 안에서만 성립한다고 본다(여러
-// 줄에 걸친 짝은 마크다운 산문에서도 인용 스팬이 아니다).
+// ⛔BLOCKED_RE(엄격 채택)는 건드리지 않는다 -- 이 파일의 어떤 근접-미스
+// 판정도 표지를 «수락»하는 경로에는 관여하지 않는다.
 
-// 인용 스팬 = 짝이 맞는 인용부호 쌍. 집합은 2R 그대로(백틱·홑따옴표·
-// 겹따옴표)이고, 바뀐 것은 홑따옴표의 «여는 자리» 판별뿐이다(축 A) --
-// 여는 홑따옴표는 단어 문자(글자/숫자) 바로 뒤에 올 수 없다.
-const NEAR_MISS_QUOTED_SPAN_RE =
-  /`[^`\n]*`|"[^"\n]*"|(?<![\p{L}\p{N}])'[^'\n]*'/gu;
+// 표지 모양 «앞»에 산문이 있는가를 묻는 유일한 문자 부류. 글자(\p{L})와
+// 숫자(\p{N}) 둘뿐이다 -- 인용부호·괄호·글머리표·화살표·보이지 않는 문자는
+// 전부 여기에 해당하지 않으므로 판정에 영향을 주지 않는다.
+const PROSE_CHAR_RE = /[\p{L}\p{N}]/u;
 
-// 축 B: (선행 공백만 두고) 표지 모양으로 시작하는 줄 = 표지를 «쓰려는
-// 시도». BLOCKED_ANYWHERE_RE/BLOCKED_BARE_COLUMN0_RE 두 모양을 그대로
-// 합쳐 쓴다(새 표지 문법을 여기서 발명하지 않는다).
-const NEAR_MISS_LINE_LEADING_ATTEMPT_RE =
-  /^[ \t]*(?:>>>\s*(?:BLOCKED|NEEDS_INPUT)\b|(?:BLOCKED|NEEDS_INPUT):)/i;
+// 보이지 않는 형식 문자(BOM U+FEFF · 제로폭 U+200B~200F · word joiner
+// U+2060~2064 · soft hyphen …)는 «있으나 없으나 같은 줄»이다. 칼럼0 고정인
+// BLOCKED_BARE_COLUMN0_RE만 이 정규화가 필요하다(그 하나는 위치로 판정하므로
+// 줄 앞에 보이지 않는 문자가 끼면 밀려난다). ⛔문자를 하나씩 열거한 예외
+// 목록이 아니라 유니코드 «형식 문자» 부류 하나다.
+const INVISIBLE_FORMAT_CHAR_RE = /\p{Cf}/gu;
 
-function stripQuotedSpansForNearMissScan(resultContent) {
-  // 카운트 전용 스캔이라 오프셋/길이 보존이 필요 없다 -- 스팬 전체를 빈
-  // 문자열로 치환해 매치 대상에서 완전히 제거한다. 줄 단위로 도는 이유는
-  // 축 B 때문이다: 표지 시도로 «시작»하는 줄은 통째로 원문 그대로 남긴다.
-  return resultContent
-    .split("\n")
-    .map((line) =>
-      NEAR_MISS_LINE_LEADING_ATTEMPT_RE.test(line)
-        ? line
-        : line.replace(NEAR_MISS_QUOTED_SPAN_RE, ""),
-    )
-    .join("\n");
+// 근접-미스 «시도»의 개수. 두 표지 모양 모두 «그 매치가 시작한 줄»을 기준으로
+// 판정한다:
+//   ⓐ 화살표 모양(BLOCKED_ANYWHERE_RE) -- 매치 시작 위치와 그 줄의 머리
+//      사이에 글자/숫자가 하나도 없을 것. ⛔줄 «전체»를 보지 않고 «앞»만
+//      보는 이유: 이 정규식의 `\s*`는 의도적으로 개행을 건널 수 있고(줄이
+//      쪼개진 표지 흔적을 잡는 지점, 그 상수 자신의 헤더 참조) 그 성질을
+//      이 라운드가 없애지 않기 때문이다.
+//   ⓑ `>>>` 없는 칼럼0 모양(BLOCKED_BARE_COLUMN0_RE) -- 이미 «칼럼 0»이라는
+//      가장 엄격한 형태의 같은 규칙이다(HYK-333 §3-2 요구 4가 정한 경계를
+//      이 라운드는 넓히지도 좁히지도 않는다).
+// 두 모양은 겹치지 않는다(ⓑ는 `>>>`로 시작하는 줄에 매치하지 않는다) --
+// 그래서 합계는 어떤 근접-미스도 두 번 세지 않는다(HYK-333 주석 그대로).
+function countNearMissMarkerShapes(resultContent) {
+  // 계수 전용 스캔이라 오프셋 보존이 필요 없다 -- 보이지 않는 형식 문자를
+  // 먼저 지운다(줄 구조는 그대로: `\n`은 \p{Cf}가 아니다).
+  const scan = resultContent.replace(INVISIBLE_FORMAT_CHAR_RE, "");
+  let count = 0;
+  for (const m of scan.matchAll(BLOCKED_ANYWHERE_RE)) {
+    const lineStart = scan.lastIndexOf("\n", m.index - 1) + 1;
+    if (!PROSE_CHAR_RE.test(scan.slice(lineStart, m.index))) count += 1;
+  }
+  count += [...scan.matchAll(BLOCKED_BARE_COLUMN0_RE)].length;
+  return count;
 }
 // HYK-325 §2-3 (승격: HYK-418 §2-1): the non-column-0 meta line finalize-
 // done.mjs appends right after a `>>> DONE:` line it wrote itself (see that
@@ -394,24 +401,13 @@ function resolveResultBlockedState(resultContent) {
   // well-formed one(s) already counted above -- a valid line coexisting
   // with a broken one, previously swallowed silently into the single valid
   // match.
-  // HYK-442 4R: near-miss counting scans the quoted-span-stripped text (see
-  // stripQuotedSpansForNearMissScan's own header for the two axes) -- a
-  // genuinely quoted mention of the marker syntax in explanatory prose is
-  // not itself scanned, while a line that STARTS with a marker attempt is
-  // never stripped no matter what punctuation surrounds it. The strict
-  // `matches` count just above is computed on the ORIGINAL resultContent
-  // (unaffected, untouched by this fix).
-  const nearMissScanContent = stripQuotedSpansForNearMissScan(resultContent);
-  const anywhereCount = [...nearMissScanContent.matchAll(BLOCKED_ANYWHERE_RE)]
-    .length;
-  // HYK-333: BLOCKED_BARE_COLUMN0_RE matches lines that never start with
-  // `>>>` (it anchors on the keyword itself), so it can never overlap with
-  // anywhereCount's `>>>`-anchored matches -- summing the two counts every
-  // near-miss shape exactly once, no double counting.
-  const bareColumn0Count = [
-    ...nearMissScanContent.matchAll(BLOCKED_BARE_COLUMN0_RE),
-  ].length;
-  const nearMissCount = anywhereCount + bareColumn0Count;
+  // HYK-442 5R: near-miss counting is LINE-based and never asks whether
+  // something is quoted (see countNearMissMarkerShapes' own header for why
+  // the quote axis was dropped entirely) -- a marker shape with prose
+  // before it on its line is part of that sentence, not an attempt at the
+  // marker. The strict `matches` count just above is computed on the
+  // ORIGINAL resultContent (unaffected, untouched by this fix).
+  const nearMissCount = countNearMissMarkerShapes(resultContent);
   if (matches.length === 1) {
     if (nearMissCount > matches.length) {
       return {

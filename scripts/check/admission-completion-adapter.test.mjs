@@ -157,6 +157,11 @@ test("autoCompleteAdmission with `reason` stamps completion_reason on the releas
       "--live-seats",
       "[]",
     ]);
+    // HYK-443 5R: 예약은 «어느 좌석에 배정됐는지»를 스스로 기록하고
+    // (`--seat-key` -> reservations[...].seat_key), 반납 검증은 영수증의
+    // `assignee_pane_key`를 «그 값»과 대조한다(호출자 env가 아니라) --
+    // 진짜 성공 경로 재현이므로 둘을 같은 값으로 세운다.
+    const seatPaneKey = "tab-hyk342blocked:leaf-hyk342blocked";
     runAdmissionCli([
       "admit",
       "--ledger",
@@ -167,16 +172,16 @@ test("autoCompleteAdmission with `reason` stamps completion_reason on the releas
       "HYK-342-blocked-1",
       "--cap",
       "1",
+      "--seat-key",
+      seatPaneKey,
     ]);
     writeFileSync(
       join(dir, "coder.md"),
       "task_id: HYK-342-blocked-1\n\n>>> BLOCKED: 시험용 정지\n",
       "utf8",
     );
-    // HYK-443 4R: 영수증 줄은 이제 «어느 좌석에 배달됐는가»(assignee_pane_
-    // key)도 담고, 검증은 그것을 지금 좌석(`ORCA_PANE_KEY`)과 대조한다 --
-    // 진짜 성공 경로 재현이므로 둘을 같은 값으로 세운다.
-    const seatPaneKey = "tab-hyk342blocked:leaf-hyk342blocked";
+    // 영수증 줄은 «어느 좌석에 배달됐는가»(assignee_pane_key)를 담는다 --
+    // 위 admit의 --seat-key와 같은 값(진짜 배달 재현).
     const receiptPath = join(dir, "dispatch-receipts.jsonl");
     writeFileSync(
       receiptPath,

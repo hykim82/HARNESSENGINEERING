@@ -149,60 +149,80 @@ function hasWellFormedBlockedMarker(resultContent) {
 // -- P1-1 때 relay-handshake.mjs를 정적 import했다가 실측으로 확인한 것과
 // 동일한 위험).
 //
-// ★HYK-443 4R (검토 1R P1-ⓑ): 위 셋(role·label·영수증 실재)만으로는
+// ★HYK-443 5R (검토 2R P1-ⓑ): 위 셋(role·label·영수증 실재)만으로는
 // «좌석 혼동»이 남는다 -- 검토자 실측 재현(`other-seat-same-label`): 같은
 // 라벨·같은 role로 «다른 좌석»에 배달된 영수증 한 줄만 있으면 이 함수가
 // true를 돌려주어 그 좌석의 자리가 반납됐다(fail-open). 배달 영수증은
 // 라벨당 한 줄이 아니다(dispatch-receipt-cli.mjs의 append-only 원장) --
 // 재배달·다른 워크트리·라벨 재사용이면 같은 (role,label)로 여러 좌석 줄이
-// 공존한다. 그래서 4R은 네 번째 조건을 건다: 그 줄의 `assignee_pane_key`가
-// ★지금 이 좌석의 pane key와 정확히 일치할 것.
+// 공존한다. 그래서 네 번째 조건을 건다: 그 줄의 `assignee_pane_key`가
+// ★이 예약이 배정됐던 좌석의 pane key와 정확히 일치할 것.
 //
-// 왜 pane key인가(회전하지 않는 값 고르기, coder-task.md §2-2): 좌석
-// handle(`term_…`)은 재접속마다 재발급된다 -- ⓐ벤더 규정 ⓑ워커 기동 규칙
-// §1("handle 비교는 쓰지 않는다") ⓒ2026-08-17 실측 재현(같은 `tabId:leafId`
-// 인데 handle만 바뀜). 그 세 겹의 근거로 HYK-294가 판정에서 handle 축을
-// 빼고 pane key(`${tabId}:${leafId}`) 하나만 남겼다(scripts/relay/
-// dispatch-bound-seat-proof.mjs 헤더). 배달 영수증이 기록하는 것도 정확히
-// 그 값(buildReceiptRecord의 `assignee_pane_key`)이고, 좌석이 자기 pane
-// key를 아는 통로도 벤더가 좌석 프로세스에 넣어 주는 `ORCA_PANE_KEY`
-// 하나다 -- 즉 새 신원 개념을 발명하지 않고 이미 있는 결속점을 그대로
-// 재사용한다.
+// ⛔4R은 그 대조 상대를 «지금 이 프로세스의 `ORCA_PANE_KEY`»로 잡았고, 그것이
+// 검토 2R이 P1으로 재현한 «가용성 회귀»였다: 좌석 «밖»에서 도는 프로세스
+// (ORCH 터미널 -- 2026-09-05 HYK-437의 반납이 실제로 탄 경로)는 그 좌석의
+// pane key를 갖지 않으므로 정당한 반납이 전부 거부되고 예약이 ACTIVE로 남아
+// cap을 점유했다. 즉 4R의 축은 «증거»를 «호출자»에 묶었다 -- 호출자가 누구든
+// 증거의 진위는 달라지지 않는데도.
 //
-// ⛔대조할 값이 없으면 «통과»가 아니라 «거부»다(fail-closed): pane key를
-// 모르면(`ORCA_PANE_KEY` 미설정) 어느 좌석인지 확정할 수 없으므로 반납을
-// 거부한다. 영수증 줄에 `assignee_pane_key`가 아예 없는 경우도 같다 --
-// "확인 못 함"은 "확인됨"이 아니다.
+// ⇒ 5R: 대조 상대를 «호출자»가 아니라 ★«반납 대상 예약 자신»으로 옮긴다.
+// 원장(admission-ledger)의 각 예약은 배정 시점에 그 좌석을 스스로 기록한다
+// (`reservations[<label>].seat_key` -- admitReservation의 `seat_key`, 관제실
+// 배달측이 `admission-cli admit --seat-key`로 넣는 값이고 실측상 그 값은
+// 정확히 pane key `${tabId}:${leafId}`다). 그래서 이 대조는
+//   «이 라벨이 실제로 배달된 좌석»(영수증 줄의 assignee_pane_key)
+//   == «이 예약이 배정된 좌석»(원장의 seat_key)
+// 라는, 양쪽 다 ★배달측이 쓴 두 기록 사이의 대조가 된다.
 //
-// 한 영수증 줄이 «이 좌석의 이 라운드»인가 (ESLint complexity 상한 회피용
-// 추출, 판정 문면은 그대로).
+// 왜 위조에 강한가: 두 값 중 어느 쪽도 워커가 쓰지 않는다 -- 영수증은
+// dispatch 응답 봉투에서 뽑아 배달 순간에 append되고(dispatch-receipt-cli),
+// seat_key는 배정 순간에 관제실이 원장에 적는다. 워커가 결과 파일에 무엇을
+// 적든 이 두 기록은 바뀌지 않는다. 그리고 남의 좌석에 배달된 영수증 줄은
+// 이 예약의 seat_key와 다르므로 `other-seat-same-label`은 계속 거부된다.
+// 반대로 «누가 반납을 실행하는가»는 판정에서 완전히 빠졌으므로, 좌석 밖
+// ORCH 프로세스가 남의 `.harness/`를 대상으로 도는 정당한 경로가 되살아난다.
+//
+// 왜 pane key라는 값인가(회전하지 않는 값 고르기): 좌석 handle(`term_…`)은
+// 재접속마다 재발급된다 -- ⓐ벤더 규정 ⓑ워커 기동 규칙 §1("handle 비교는
+// 쓰지 않는다") ⓒ2026-08-17 실측 재현. 그 근거로 HYK-294가 판정에서 handle
+// 축을 빼고 pane key만 남겼다(scripts/relay/dispatch-bound-seat-proof.mjs
+// 헤더). 영수증과 원장이 이미 «같은 그 값»을 각자 기록하고 있으므로, 새
+// 신원 개념도 새 파일 형식도 발명하지 않는다.
+//
+// ⛔대조할 값이 없으면 «통과»가 아니라 «거부»다(fail-closed): 예약에
+// seat_key가 없거나(구 cutover 시드 항목 -- 실측 724건 중 20건, 전부 옛
+// 항목), 영수증 줄에 `assignee_pane_key`가 없으면 어느 좌석인지 확정할 수
+// 없으므로 반납을 거부한다 -- "확인 못 함"은 "확인됨"이 아니다.
+//
+// 한 영수증 줄이 «이 예약의 좌석·이 라운드»인가 (ESLint complexity 상한
+// 회피용 추출, 판정 문면은 그대로).
 function receiptRecordMatchesThisSeatRound(
   rec,
   role,
   harnessTaskLabel,
-  currentSeatPaneKey,
+  reservationSeatKey,
 ) {
   if (typeof rec.role !== "string") return false;
   if (rec.role.toUpperCase() !== role.toUpperCase()) return false;
   if (rec.harness_task_label !== harnessTaskLabel) return false;
-  // HYK-443 4R: 좌석 신원 대조. 값이 없거나 다르면 이 줄은 «이 좌석의
-  // 배달»이 아니다 -- 라벨/role이 같아도 남의 영수증으로는 반납하지
+  // HYK-443 5R: 좌석 신원 대조. 값이 없거나 다르면 이 줄은 «이 예약의
+  // 배달»이 아니다 -- 라벨/role이 같아도 남의 좌석 영수증으로는 반납하지
   // 않는다(pane key는 대소문자 정규화 대상이 아니다: 벤더가 만든
   // uuid 쌍 문자열이라 사람이 섞어 쓰는 관용이 존재하지 않는다).
   if (!isNonEmptyString(rec.assignee_pane_key)) return false;
-  return rec.assignee_pane_key === currentSeatPaneKey;
+  return rec.assignee_pane_key === reservationSeatKey;
 }
 
 function hasDispatchReceiptForRound(
   role,
   harnessTaskLabel,
   receiptPath,
-  currentSeatPaneKey,
+  reservationSeatKey,
 ) {
   if (
     !isNonEmptyString(receiptPath) ||
     !isNonEmptyString(harnessTaskLabel) ||
-    !isNonEmptyString(currentSeatPaneKey)
+    !isNonEmptyString(reservationSeatKey)
   ) {
     return false;
   }
@@ -227,7 +247,7 @@ function hasDispatchReceiptForRound(
         rec,
         role,
         harnessTaskLabel,
-        currentSeatPaneKey,
+        reservationSeatKey,
       )
     ) {
       found = true;
@@ -262,16 +282,28 @@ function resolveReceiptPathForVerification(receiptPathArg, env) {
   return null;
 }
 
-// HYK-443 4R: «지금 이 좌석»의 pane key. resolveReceiptPathForVerification
-// (바로 위)와 같은 관례를 그대로 따른다 -- 새 관례 발명 0, 새 파일 형식
-// 0. 출처는 벤더(Orca)가 좌석 프로세스에 넣어 주는 `ORCA_PANE_KEY`
-// 하나이고, 이 어댑터는 relay-handshake.mjs가 자식으로 스폰하므로 그
-// env가 그대로 상속된다(`execFileSync`에 `env` 오버라이드 없음 -- 이
-// 파일 자신의 HYK-289 주석이 이미 같은 상속 경로를 근거로 쓴다).
-// 미설정이면 null -> hasDispatchReceiptForRound가 즉시 false(거부).
-function resolveCurrentSeatPaneKey(env) {
-  if (isNonEmptyString(env?.ORCA_PANE_KEY)) return env.ORCA_PANE_KEY;
-  return null;
+// HYK-443 5R: «이 예약이 배정된 좌석»의 pane key. 출처는 반납 대상 원장
+// 자신(`reservations[<label>].seat_key`)이고, 이 어댑터는 그 원장 경로를
+// 이미 인자로 받고 있다 -- 새 env 축도, 새 파일도 만들지 않는다.
+// ⛔읽기 전용이며 락을 잡지 않는다: 이 값은 배정 시점에 한 번 쓰이고 그
+// 예약이 사는 동안 바뀌지 않는다(admitReservation은 ACTIVE 예약의
+// 재-admit을 idempotent no-op으로 처리해 기존 레코드를 다시 쓰지 않는다).
+// 실제 완료 전이는 그대로 withLedgerLock 안에서 일어난다.
+// 읽을 수 없거나·JSON이 깨졌거나·해당 예약이 없거나·seat_key가 비어 있으면
+// null -> hasDispatchReceiptForRound가 즉시 false(거부, fail-closed).
+function resolveReservationSeatKey(ledgerPath, reservationId) {
+  if (!isNonEmptyString(ledgerPath) || !isNonEmptyString(reservationId)) {
+    return null;
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(readFileSync(ledgerPath, "utf8"));
+  } catch {
+    return null;
+  }
+  const entry = parsed?.reservations?.[reservationId];
+  if (!entry || !isNonEmptyString(entry.seat_key)) return null;
+  return entry.seat_key;
 }
 
 // repoRoot/mainRepoRoot -- duplicated from relay-handshake.mjs's own
@@ -410,7 +442,7 @@ function verifyBlockedTerminationEvidence({
   role,
   reservationId,
   receiptPath,
-  currentSeatPaneKey,
+  reservationSeatKey,
 }) {
   if (!isNonEmptyString(harnessDir) || !isNonEmptyString(role)) {
     return {
@@ -449,12 +481,12 @@ function verifyBlockedTerminationEvidence({
       role,
       reservationId,
       receiptPath,
-      currentSeatPaneKey,
+      reservationSeatKey,
     )
   ) {
     return {
       ok: false,
-      reason: `admission-completion-adapter: BLOCKED_TERMINATION_RELEASED 증거 확인 실패 -- reservationId('${reservationId}')가 role='${role}'로 ★이 좌석(pane key=${currentSeatPaneKey ?? "(ORCA_PANE_KEY 미설정)"})에 실제 배달된 기록이 dispatch-receipts.jsonl(${receiptPath ?? "(경로 미설정)"})에 없음 -- 워커가 지어낸 이름표 또는 «다른 좌석의 영수증»으로 의심, 거부(안전측 기본값, HYK-342 3R §2 / HYK-443 4R 좌석 대조)`,
+      reason: `admission-completion-adapter: BLOCKED_TERMINATION_RELEASED 증거 확인 실패 -- reservationId('${reservationId}')가 role='${role}'로 ★이 예약이 배정된 좌석(pane key=${reservationSeatKey ?? "(원장에 seat_key 없음)"})에 실제 배달된 기록이 dispatch-receipts.jsonl(${receiptPath ?? "(경로 미설정)"})에 없음 -- 워커가 지어낸 이름표 또는 «다른 좌석의 영수증»으로 의심, 거부(안전측 기본값, HYK-342 3R §2 / HYK-443 5R 예약-좌석 대조)`,
     };
   }
   return { ok: true };
@@ -704,6 +736,7 @@ function checkCompletionReasonEvidence({
   role,
   reservationId,
   receiptPath,
+  ledgerPath,
 }) {
   if (reason === COMPLETION_REASON.BLOCKED_TERMINATION_RELEASED) {
     const evidence = verifyBlockedTerminationEvidence({
@@ -711,9 +744,10 @@ function checkCompletionReasonEvidence({
       role,
       reservationId,
       receiptPath: resolveReceiptPathForVerification(receiptPath, process.env),
-      // HYK-443 4R: 좌석 신원도 같은 자리에서 해석한다 -- 이 값이 없으면
-      // verifyBlockedTerminationEvidence가 거부한다(fail-closed).
-      currentSeatPaneKey: resolveCurrentSeatPaneKey(process.env),
+      // HYK-443 5R: 좌석 신원은 «반납 대상 예약 자신»에서 읽는다(호출자의
+      // env가 아니라) -- 이 값이 없으면 verifyBlockedTerminationEvidence가
+      // 거부한다(fail-closed).
+      reservationSeatKey: resolveReservationSeatKey(ledgerPath, reservationId),
     });
     if (!evidence.ok) {
       return {
@@ -773,6 +807,7 @@ export function completeAdmissionReservation({
     role,
     reservationId,
     receiptPath,
+    ledgerPath,
   });
   if (evidenceFailure) return evidenceFailure;
   const outcome = withLedgerLock(ledgerPath, lockPath, (readResult) => {

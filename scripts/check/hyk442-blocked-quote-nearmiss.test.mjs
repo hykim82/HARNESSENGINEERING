@@ -33,22 +33,27 @@
 //      이 fix가 실제로 그 결과를 만드는 원인임을 증명한다. 실 소스는
 //      바이트 동일 복원.
 //
-// HYK-442 4R: 검토 1R이 2R을 P1으로 뚫었다(`paired-apostrophes-span-marker`)
-// -- 인용부호 «집합»을 넓힌 2R 수리가, 홑따옴표의 두 얼굴(인용 구분자 /
-// 단어 속 아포스트로피)을 구별하지 않아 자연어 축약형 두 개 사이에 놓인
-// «진짜» 근접-미스 표지를 통째로 지웠다(막아야 할 것을 놓치는 fail-open).
-// 4R은 집합을 넓히지도 좁히지도 않고 판별 «근거»를 두 축으로 바꾼다 --
-// 축 A(구분자 «역할»로 판별: 여는 홑따옴표는 단어 문자 뒤에 오지 않는다) ·
-// 축 B(줄-선두 표지 시도는 어떤 문장부호로도 가려지지 않는다). 근거 원문은
-// relay-handshake.mjs의 stripQuotedSpansForNearMissScan 헤더.
-// 이 파일이 4R에서 추가로 고정하는 것:
-//   8(4R). 검토자 공격의 재현 -- 아포스트로피에 숨은 진짜 근접-미스가
-//      감지된다(MALFORMED_BLOCKED).
-//   9(4R). ★양방향 동시 성립 -- 원래 사고 파일 2건은 여전히 정상 소비되고
-//      (과차단 0), 같은 판별기가 위 공격은 잡는다(누락 0).
-//   10(4R). 축 B: 줄-선두 표지 시도는 같은 줄의 인용부호에 삼켜지지 않는다.
-//   되돌림 변이 2종(축 A 되돌림 -> 공격 재통과 / 스트립 전체 되돌림 ->
-//      원래 사고 2건 재과차단).
+// HYK-442 4R: 검토 1R이 2R을 P1으로 뚫었고(`paired-apostrophes-span-marker`),
+// 4R은 인용부호 집합을 그대로 둔 채 판별 «근거»를 두 축(여는-자리 역할 ·
+// 줄-선두 불가침)으로 바꿨다. 검토 2R이 그 두 축도 여섯 입력으로 뚫었다
+// (`'tis`/`'26`/문장-시작 홑따옴표/비대칭 닫기/BOM/제로폭).
+//
+// ★HYK-442 5R: 세 번의 실패는 전부 «이 따옴표가 인용인가»를 문장부호로
+// 추정한 데서 왔다. 5R은 그 축 자체를 버렸다 -- 인용부호를 한 글자도 다루지
+// 않고, 근접-미스의 «정의»를 구조로 좁힌다: ★표지 모양 앞에 글자도 숫자도
+// 없는 줄만 «표지를 쓰려는 시도»로 센다. 근거 원문은 relay-handshake.mjs의
+// countNearMissMarkerShapes 헤더(스트립 함수 자체가 사라졌다).
+// ⚠️(1)(1b)(1c)(2)의 «인용 언급» 케이스가 계속 초록인 이유도 이제 인용부호가
+// 아니라 «줄 앞에 산문이 있다»는 사실 하나다.
+// 이 파일이 5R에서 추가로 고정하는 것:
+//   8. 검토 2R 여덟 라벨 전부 MALFORMED_BLOCKED(여섯은 4R HEAD에서 fail-open).
+//   9. ★양방향 동시 성립 -- 원래 사고 파일 2건은 여전히 정상 소비되고
+//      (과차단 0), 같은 판별기가 여덟 공격을 전부 잡는다(누락 0).
+//   10. 보이지 않는 문자 정규화 -- BOM 뒤 칼럼0 표지 시도도 잡힌다.
+//   11. 좁아진 정의의 반대쪽(정직 한계의 시험화) -- 앞에 산문이 있는 줄
+//      중간 표지 모양은 인용부호 유무와 무관하게 근접-미스가 아니다.
+//   되돌림 변이 2종(줄-앞 산문 판별 되돌림 -> 원래 사고 2건 재과차단 /
+//      보이지 않는 문자 정규화 되돌림 -> BOM 뒤 시도 재유실).
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
@@ -156,18 +161,6 @@ const ACCIDENT_LANEB_MARKER_LINES_BODY =
   "✔ HYK-442 (7) §4 회귀 ⓔ: 백틱 없는 콜론 없는 '>>> BLOCKED x' -> 여전히 MALFORMED_BLOCKED\n" +
   "✔ HYK-442 되돌림 변이: 인라인 코드 스팬 제외 로직을 항등함수로 되돌리면 (1)의 백틱 인용이 다시 근접-미스로 세져 MALFORMED_BLOCKED로 떨어진다(RED), 실 소스는 바이트 동일 복원\n\n" +
   ">>> BLOCKED: 완료조건 6(npm test 정본 명령 연속 2회 초록)만 미충족 -- 재실행 여부·시점은 ORCH 판단에 맡기고 정지한다.\n";
-
-// 검토 1R `paired-apostrophes-span-marker` 재현. 축약형 두 개(couldn't /
-// don't)의 아포스트로피가 «진짜» 근접-미스 표지(콜론 없는 화살표 표지)를
-// 사이에 끼고 있다 -- 인용하려는 의도가 조금도 없는 자연어 한 줄이다.
-// 2R HEAD: 그 사이가 통째로 스트립돼 근접-미스가 0개로 세어져 유효 표지
-// 1개만 남은 것으로 판정(state=BLOCKED) = fail-open.
-// 4R: 여는 자리 규칙(축 A)이 두 아포스트로피를 구분자로 인정하지 않으므로
-// 표지가 그대로 세어져 "유효 1 + 근접-미스 1" 혼재(MALFORMED_BLOCKED).
-const APOSTROPHE_HIDDEN_NEAR_MISS_BODY =
-  "task_id: HYK-1\n\n" +
-  "We couldn't finish the runner, so >>> BLOCKED cap reached is what I don't want to lose here.\n\n" +
-  ">>> BLOCKED: 완료조건 미충족, 정지\n";
 
 test("HYK-442 (1) 백틱 인용 + 진짜 well-formed 표지 1개 공존 -> state=BLOCKED (유효+깨짐 혼재로 잘못 승격되지 않는다)", () => {
   withFixtureDir((dir) => {
@@ -318,27 +311,79 @@ test("HYK-442 (7) §4 회귀 ⓔ: 인용부호 없는 콜론 없는 화살표+BL
   });
 });
 
-// --- HYK-442 4R: 검토 1R P1-ⓐ 공격 + «양방향» 동시 성립 -------------------
+// ===========================================================================
+// HYK-442 5R (검토 2R P1-ⓐ): «인용인지 추정하는» 축을 버린 뒤의 계약.
+//
+// 검토 2R은 4R의 두 축(여는-자리 역할 · 줄-선두 불가침)을 여섯 입력으로
+// 뚫었다. 5R은 축을 정교하게 만드는 대신 근접-미스의 «정의»를 구조로 좁혔다:
+//   ★표지 모양 앞에 «글자도 숫자도 없는» 줄만 표지 «시도»로 센다.
+// 인용부호는 글자도 숫자도 아니므로 판정에 관여하지 않는다 -- 백틱·홑따옴표·
+// 겹따옴표·유니코드 유사 따옴표·괄호·BOM·제로폭 문자 중 어느 것도 «묻지
+// 않는다»(근거 원문: relay-handshake.mjs의 countNearMissMarkerShapes 헤더).
+// ===========================================================================
 
-test("HYK-442 4R (8) 검토 1R P1-ⓐ 공격 재현(paired-apostrophes-span-marker): 자연어 축약형 아포스트로피 두 개 사이에 놓인 «진짜» 근접-미스 표지가 이제 감지된다(MALFORMED_BLOCKED)", () => {
-  withFixtureDir((dir) => {
-    writeTask(dir, "coder", TASK_HEADER);
-    writeResult(dir, "coder", APOSTROPHE_HIDDEN_NEAR_MISS_BODY);
-    const result = checkRelayHandshake({
-      role: "coder",
-      harnessDir: dir,
-      now: FIXED_NOW,
+// 검토 2R의 여덟 라벨을 이 라운드의 픽스처로 재현한다. 각 본문은 «정상 종료
+// 한 줄(well-formed)» + «숨긴 표지 시도 한 줄»로 이뤄진다 -- 숨긴 쪽이 세어
+// 지면 MALFORMED_BLOCKED(혼재), 지워지면 BLOCKED(fail-open)로 갈린다.
+// ⚠️각 공격 줄의 표지 시도는 «줄 머리»에서 시작한다(앞에는 인용부호·글머리
+// 표·기호·보이지 않는 문자만 온다) -- 즉 잃어버리면 안 되는 «진짜 정지
+// 신호»다. 이 여덟 픽스처의 4R HEAD/5R 판정 원문은 coder.md §3-1에 붙였다.
+const ATTACK_VALID_TAIL = "\n\n>>> BLOCKED: 완료조건 미충족, 정지\n";
+const attackBody = (line) => `task_id: HYK-1\n\n${line}${ATTACK_VALID_TAIL}`;
+
+const REVIEW_2R_ATTACKS = [
+  // 축 A ⓵ 여는 홑따옴표가 «단어 문자 뒤»가 아니어서 구분자로 오인된다
+  // (`'tis` 축약형이 같은 줄에서 닫는 자리로 쓰인다).
+  ["apostrophe-tis", attackBody("⛔ ' >>> BLOCKED cap reached 'tis over'")],
+  // 축 A ⓶ 연도 축약(`'26`)이 닫는 자리로 오인된다.
+  ["apostrophe-year", attackBody("- ' >>> BLOCKED cap reached in '26 hours'")],
+  // 축 A ⓷ 문장 시작 홑따옴표.
+  ["sentence-start-apostrophe", attackBody("' >>> BLOCKED cap reached'")],
+  // 축 A ⓸ 여는 자리만 제한하고 닫는 자리는 제한하지 않은 비대칭.
+  [
+    "asymmetric-close",
+    attackBody("(' >>> BLOCKED cap reached, the runner don't stop')"),
+  ],
+  // 축 B ⓹ BOM이 줄 앞에 오면 4R의 줄-선두 보호가 작동하지 않았다.
+  ["axis-bom", attackBody("﻿'>>> BLOCKED cap reached'")],
+  // 축 B ⓺ 제로폭 문자도 같다.
+  ["axis-zero-width", attackBody("​'>>> BLOCKED cap reached'")],
+  // 대조군 ⓐ CRLF -- 4R HEAD에서도 잡혔고 5R에서도 잡힌다.
+  [
+    "axis-crlf",
+    "task_id: HYK-1\r\n\r\n >>> BLOCKED cap reached\r\n\r\n>>> BLOCKED: 완료조건 미충족, 정지\r\n",
+  ],
+  // 대조군 ⓑ 유니코드 유사 따옴표(U+2019) -- 4R의 집합 밖이라 잡혔다.
+  ["unicode-lookalike-quotes", attackBody("’ >>> BLOCKED cap reached’")],
+];
+
+test("HYK-442 5R (8) 검토 2R 여덟 라벨 전부 MALFORMED_BLOCKED -- 어떤 문장부호·보이지 않는 문자로 둘러싸도 줄 머리에서 시작한 표지 시도는 사라지지 않는다", () => {
+  const observed = [];
+  for (const [label, body] of REVIEW_2R_ATTACKS) {
+    withFixtureDir((dir) => {
+      writeTask(dir, "coder", TASK_HEADER);
+      writeResult(dir, "coder", body);
+      const result = checkRelayHandshake({
+        role: "coder",
+        harnessDir: dir,
+        now: FIXED_NOW,
+      });
+      observed.push({ label, state: result.state });
     });
-    assert.equal(result.ok, false);
-    assert.equal(
-      result.state,
-      "MALFORMED_BLOCKED",
-      "2R(HEAD)는 여기서 BLOCKED를 돌려줬다 -- 아포스트로피 쌍이 진짜 근접-미스를 삼켜 «막아야 할 것을 놓치는» fail-open(검토 1R 34행)",
-    );
-  });
+  }
+  // 관측 원문을 그대로 남긴다(결과 파일에 붙일 근거).
+  for (const row of observed) console.log(JSON.stringify(row));
+  assert.deepEqual(
+    observed,
+    REVIEW_2R_ATTACKS.map(([label]) => ({
+      label,
+      state: "MALFORMED_BLOCKED",
+    })),
+    "여섯 공격은 4R HEAD에서 BLOCKED(=지워짐, fail-open)였다 -- 검토 2R 4절 원문",
+  );
 });
 
-test("HYK-442 4R (9) ★양방향 동시 성립: 원래 사고 파일 2건은 여전히 정상 소비(BLOCKED)되고, 같은 판별기가 아포스트로피에 숨은 근접-미스는 잡는다", () => {
+test("HYK-442 5R (9) ★양방향 동시 성립: 원래 사고 파일 2건은 여전히 정상 소비(BLOCKED)되고, 같은 판별기가 여덟 공격은 전부 잡는다", () => {
   // ⓐ 과차단 0 -- 이 조각이 애초에 구제하려던 두 파일.
   for (const [label, body, expectedReason] of [
     [
@@ -365,54 +410,65 @@ test("HYK-442 4R (9) ★양방향 동시 성립: 원래 사고 파일 2건은 �
     });
   }
 
-  // ⓑ 누락 0 -- 같은 판별기가, 같은 실행 안에서, 숨긴 근접-미스는 잡는다.
-  withFixtureDir((dir) => {
-    writeTask(dir, "coder", TASK_HEADER);
-    writeResult(dir, "coder", APOSTROPHE_HIDDEN_NEAR_MISS_BODY);
-    const result = checkRelayHandshake({
-      role: "coder",
-      harnessDir: dir,
-      now: FIXED_NOW,
+  // ⓑ 누락 0 -- 같은 판별기가, 같은 실행 안에서, 숨긴 표지 시도는 전부 잡는다.
+  for (const [label, body] of REVIEW_2R_ATTACKS) {
+    withFixtureDir((dir) => {
+      writeTask(dir, "coder", TASK_HEADER);
+      writeResult(dir, "coder", body);
+      assert.equal(
+        checkRelayHandshake({ role: "coder", harnessDir: dir, now: FIXED_NOW })
+          .state,
+        "MALFORMED_BLOCKED",
+        `누락 0(${label}): 이 조각의 값은 정확히 ⓐ와 ⓑ 사이에 있다`,
+      );
     });
-    assert.equal(
-      result.state,
-      "MALFORMED_BLOCKED",
-      "누락 0: 아포스트로피에 둘러싸인 진짜 근접-미스는 놓치지 않는다 -- 이 조각의 값은 정확히 ⓐ와 ⓑ 사이에 있다",
-    );
-  });
+  }
 });
 
-test("HYK-442 4R (10) 축 B(줄-선두 불가침): 줄이 표지 모양으로 «시작»하면 같은 줄 어디에 어떤 인용부호가 있어도 그 줄은 스트립되지 않는다", () => {
+test("HYK-442 5R (10) 보이지 않는 문자 정규화: BOM 뒤의 칼럼0 근접-미스(화살표 없는 형태)도 잡힌다 -- 4R HEAD는 이 입력을 놓쳤다", () => {
   withFixtureDir((dir) => {
     writeTask(dir, "coder", TASK_HEADER);
-    // 선행 공백 근접-미스 표지 한 줄인데, 그 줄 안에 백틱/겹따옴표 인용이
-    // 함께 있다 -- 축 A만 있었다면 인용 처리 순서에 따라 삼켜질 수 있는
-    // 자리다. 축 B는 그런 줄을 아예 스트립 대상에서 뺀다.
     writeResult(
       dir,
       "coder",
-      "task_id: HYK-1\n\n" +
-        ' >>> BLOCKED: `러너` 실패 -- "표본 수집"으로 전환\n',
+      "task_id: HYK-1\n\n﻿BLOCKED: cap reached\n\n>>> BLOCKED: 완료조건 미충족, 정지\n",
     );
-    const result = checkRelayHandshake({
-      role: "coder",
-      harnessDir: dir,
-      now: FIXED_NOW,
-    });
     assert.equal(
-      result.state,
+      checkRelayHandshake({ role: "coder", harnessDir: dir, now: FIXED_NOW })
+        .state,
       "MALFORMED_BLOCKED",
-      "줄-선두 표지 시도는 무엇으로도 가려지지 않는다",
+      "칼럼0 판정은 보이지 않는 형식 문자를 지운 뒤에 한다 -- 안 그러면 BOM 하나로 표지 시도가 사라진다",
     );
   });
 });
 
-// --- 되돌림 변이 (coder-task.md 2R §3 조건4): stripQuotedSpansForNearMissScan을
-// 항등함수로 되돌려 (1)/(1b)가 다시 MALFORMED_BLOCKED로 떨어지는지(RED)
-// 확인하고, 실 소스 파일이 바이트 동일하게 복원됨을 증명한다. 격리 픽스처는
-// relay-handshake.mjs가 정적 import하는 형제 파일을 함께 복사한다(단일 소스
-// RELAY_HANDSHAKE_STATIC_SIBLINGS 재사용, relay-handshake-marker-promotion.
-// test.mjs와 동일한 house style).
+test("HYK-442 5R (11) 좁아진 정의의 «반대쪽»(정직 한계의 시험화): 앞에 산문이 있는 줄 중간 표지 모양은 근접-미스가 아니다 -- 인용부호 유무와 무관하게 동일하다", () => {
+  // ⛔이 시험은 «바람직함»이 아니라 «현재 계약»을 고정한다. 두 입력은 인용
+  // 부호 유무 말고는 구조가 완전히 같다(coder.md §2-1의 불가능성 증명) --
+  // 그래서 둘을 다르게 판정하는 규칙은 반드시 «인용 추정»이 되고, 그 축은
+  // 이 이슈에서 세 번 뚫렸다. 5R은 둘 다 «문장의 일부»로 본다.
+  for (const [label, line] of [
+    ["인용부호 있음(실사고 구조)", "설명: `>>> BLOCKED: 형식`은 이렇게 쓴다"],
+    ["인용부호 없음", "status note: >>> BLOCKED midline prose"],
+  ]) {
+    withFixtureDir((dir) => {
+      writeTask(dir, "coder", TASK_HEADER);
+      writeResult(dir, "coder", attackBody(line));
+      assert.equal(
+        checkRelayHandshake({ role: "coder", harnessDir: dir, now: FIXED_NOW })
+          .state,
+        "BLOCKED",
+        `${label}: 줄 앞에 산문이 있으면 표지 시도가 아니다(좁아진 정의)`,
+      );
+    });
+  }
+});
+
+// --- 되돌림 변이 (coder-task.md §4-5) ---------------------------------------
+// 두 수리 각각에 결함을 주입해 RED를 확인하고, 실 소스가 바이트 동일하게
+// 복원됨을 증명한다. 격리 픽스처는 relay-handshake.mjs가 정적 import하는
+// 형제 파일을 함께 복사한다(단일 소스 RELAY_HANDSHAKE_STATIC_SIBLINGS 재사용,
+// relay-handshake-marker-promotion.test.mjs와 동일한 house style).
 // ---------------------------------------------------------------------------
 
 function stageMinimalRelayHandshakeDeps(rootDir) {
@@ -473,79 +529,66 @@ function assertRelayHandshakeRestored(src) {
   );
 }
 
-// 축 A 되돌림: 여는-자리 규칙을 빼고 2R의 "홑따옴표는 언제나 구분자"로
-// 되돌리면 (8)의 공격이 다시 통과(BLOCKED = fail-open)해야 한다.
-const AXIS_A_TARGET =
-  "const NEAR_MISS_QUOTED_SPAN_RE =\n" +
-  "  /`[^`\\n]*`|\"[^\"\\n]*\"|(?<![\\p{L}\\p{N}])'[^'\\n]*'/gu;\n";
-const AXIS_A_PRE_FIX =
-  "const NEAR_MISS_QUOTED_SPAN_RE = /`[^`\\n]*`|\"[^\"\\n]*\"|'[^'\\n]*'/g;\n";
+// 변이 ①: 줄-앞 산문 판별(이 라운드 수리의 핵심 한 줄)을 빼면 모든 표지 모양이
+// 다시 세어져 «원래 사고»(인용 언급 때문에 정상 종료가 막힘)가 되살아난다.
+const PROSE_GUARD_TARGET =
+  "    if (!PROSE_CHAR_RE.test(scan.slice(lineStart, m.index))) count += 1;\n";
+const PROSE_GUARD_PRE_FIX = "    count += 1;\n";
 
-// 스트립 전체 되돌림: 항등함수로 되돌리면 원래 사고 파일 2건이 다시
-// 과차단(MALFORMED_BLOCKED)돼야 한다.
-const STRIP_BODY_TARGET =
-  "  return resultContent\n" +
-  '    .split("\\n")\n' +
-  "    .map((line) =>\n" +
-  "      NEAR_MISS_LINE_LEADING_ATTEMPT_RE.test(line)\n" +
-  "        ? line\n" +
-  '        : line.replace(NEAR_MISS_QUOTED_SPAN_RE, ""),\n' +
-  "    )\n" +
-  '    .join("\\n");\n';
+// 변이 ②: 보이지 않는 형식 문자 정규화를 빼면 BOM 하나로 칼럼0 표지 시도가
+// 사라진다(누락 방향).
+const INVISIBLE_NORMALIZE_TARGET =
+  '  const scan = resultContent.replace(INVISIBLE_FORMAT_CHAR_RE, "");\n';
+const INVISIBLE_NORMALIZE_PRE_FIX = "  const scan = resultContent;\n";
 
-test("HYK-442 4R 되돌림 변이 ①(축 A): 여는-자리 규칙을 2R의 무조건 구분자로 되돌리면 (8) 아포스트로피 공격이 다시 삼켜져 BLOCKED로 통과한다(RED), 실 소스는 바이트 동일 복원", async () => {
+test("HYK-442 5R 되돌림 변이 ①(줄-앞 산문 판별): 그 한 줄을 빼면 원래 사고 파일 2건이 다시 MALFORMED_BLOCKED로 과차단된다(RED), 실 소스는 바이트 동일 복원", async () => {
   const src = readFileSync(RELAY_HANDSHAKE_PATH, "utf8");
   const mutated = mutateExactlyOnce(
     src,
-    AXIS_A_TARGET,
-    AXIS_A_PRE_FIX,
-    "NEAR_MISS_QUOTED_SPAN_RE (축 A)",
+    PROSE_GUARD_TARGET,
+    PROSE_GUARD_PRE_FIX,
+    "countNearMissMarkerShapes prose guard",
   );
   try {
+    for (const [tag, label, body] of [
+      ["a1", "coder-437-PRE-EDIT-1758.md", ACCIDENT_437_MARKER_LINES_BODY],
+      ["a2", "coder-laneB-PRE-EDIT.md", ACCIDENT_LANEB_MARKER_LINES_BODY],
+      ["a3", "(1) 백틱 최소 재현", QUOTE_PLUS_REAL_MARKER_BODY],
+      ["a4", "(1b) 홑따옴표 최소 재현", SINGLE_QUOTE_PLUS_REAL_MARKER_BODY],
+    ]) {
+      assert.equal(
+        await stateUnderMutatedSource(mutated, body, tag),
+        "MALFORMED_BLOCKED",
+        `RED(${label}): 줄-앞 산문 판별 없이는 산문 속 언급이 다시 근접-미스로 세져 유효+깨짐 혼재로 잘못 승격된다`,
+      );
+    }
+    // 같은 변이가 «공격 쪽»은 바꾸지 않는다 -- 변이가 정확히 한 방향만
+    // 바꿈을 고정(줄 머리 시도는 두 소스 모두에서 잡힌다).
     assert.equal(
-      await stateUnderMutatedSource(
-        mutated,
-        APOSTROPHE_HIDDEN_NEAR_MISS_BODY,
-        "a",
-      ),
-      "BLOCKED",
-      "RED: 축 A 없이는 축약형 아포스트로피 쌍이 진짜 근접-미스를 다시 삼킨다 -- 이 규칙이 P1-ⓐ를 닫는 원인임을 증명",
-    );
-    assert.equal(
-      await stateUnderMutatedSource(
-        mutated,
-        ACCIDENT_LANEB_MARKER_LINES_BODY,
-        "a2",
-      ),
-      "BLOCKED",
-      "축 A 되돌림은 «과차단» 쪽은 건드리지 않는다(원래 사고 파일은 두 소스 모두에서 정상 소비) -- 변이가 정확히 한 방향만 바꿈을 고정",
+      await stateUnderMutatedSource(mutated, REVIEW_2R_ATTACKS[0][1], "a5"),
+      "MALFORMED_BLOCKED",
     );
   } finally {
     assertRelayHandshakeRestored(src);
   }
 });
 
-test("HYK-442 4R 되돌림 변이 ②(스트립 전체): 인용 제외를 항등함수로 되돌리면 원래 사고 파일 2건이 다시 MALFORMED_BLOCKED로 과차단된다(RED), 실 소스는 바이트 동일 복원", async () => {
+test("HYK-442 5R 되돌림 변이 ②(보이지 않는 문자 정규화): 정규화를 빼면 BOM 뒤 칼럼0 표지 시도가 다시 사라진다(RED), 실 소스는 바이트 동일 복원", async () => {
   const src = readFileSync(RELAY_HANDSHAKE_PATH, "utf8");
   const mutated = mutateExactlyOnce(
     src,
-    STRIP_BODY_TARGET,
-    "  return resultContent;\n",
-    "stripQuotedSpansForNearMissScan body",
+    INVISIBLE_NORMALIZE_TARGET,
+    INVISIBLE_NORMALIZE_PRE_FIX,
+    "countNearMissMarkerShapes invisible-format normalization",
   );
+  const bomBareBody =
+    "task_id: HYK-1\n\n﻿BLOCKED: cap reached\n\n>>> BLOCKED: 완료조건 미충족, 정지\n";
   try {
-    for (const [tag, label, body] of [
-      ["b1", "coder-437-PRE-EDIT-1758.md", ACCIDENT_437_MARKER_LINES_BODY],
-      ["b2", "coder-laneB-PRE-EDIT.md", ACCIDENT_LANEB_MARKER_LINES_BODY],
-      ["b3", "(1) 백틱 최소 재현", QUOTE_PLUS_REAL_MARKER_BODY],
-      ["b4", "(1b) 홑따옴표 최소 재현", SINGLE_QUOTE_PLUS_REAL_MARKER_BODY],
-    ]) {
-      assert.equal(
-        await stateUnderMutatedSource(mutated, body, tag),
-        "MALFORMED_BLOCKED",
-        `RED(${label}): 인용 제외 없이는 인용 언급이 다시 근접-미스로 세져 유효+깨짐 혼재로 잘못 승격된다`,
-      );
-    }
+    assert.equal(
+      await stateUnderMutatedSource(mutated, bomBareBody, "b1"),
+      "BLOCKED",
+      "RED: 정규화가 없으면 BOM 한 글자로 칼럼0 표지 시도가 판정에서 사라진다",
+    );
   } finally {
     assertRelayHandshakeRestored(src);
   }
