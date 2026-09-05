@@ -115,34 +115,55 @@ const BLOCKED_ANYWHERE_RE = />>>\s*(BLOCKED|NEEDS_INPUT)\b/gi;
 // 그대로다 -- 건드리지 않는다.
 const BLOCKED_BARE_COLUMN0_RE = /^(BLOCKED|NEEDS_INPUT):/gim;
 
-// HYK-442: BLOCKED_ANYWHERE_RE/BLOCKED_BARE_COLUMN0_RE above deliberately
-// have no context awareness -- they exist to catch a broken marker ANYWHERE
-// it might appear (that is their whole job, see their own headers). The
-// 2026-09-05 실사고(coder-task.md §1-1)는 이 무경계 탐색의 대가다: 워커가
-// 자기점검 산문에서 표지 문법을 «인용»하려고 인라인 코드 표기(백틱)를 쓴
-// 자리("`>>> BLOCKED:` 한 줄")까지 "근접-미스 표지 흔적"으로 세어, 정상
-// 종료(well-formed 1개)를 "유효+깨짐 혼재"로 승격시켜 소비를 막았다(실물
-// 재현: coder-437-PRE-EDIT-1758.md 166행). 판별 기준: 인라인 코드 스팬
-// (백틱 쌍) 안쪽은 "표지 문법을 설명/인용하는 산문"이지 "표지를 쓰려는
-// 시도"가 아니다 -- 같은 이유로 사람도 그 자리를 표지로 읽지 않는다(백틱은
-// 정확히 "이건 코드/리터럴 표기다"라는 신호). 그래서 근접-미스 계수 «만»
-// 인라인 코드 스팬을 제외한 텍스트에서 센다. ⛔BLOCKED_RE(엄격 채택)는
-// 건드리지 않는다 -- 그 정규식은 이미 줄 «전체»가 `>>>`로 시작할 것을
-// 요구하므로(`^>>>...`), 백틱으로 감싼 인용은애초에 그 자리에 매치하지
-// 않는다(줄이 백틱으로 시작하면 `^`가 `>` 대신 백틱을 만난다) -- 이 fix가
-// 필요한 것은 오직 무경계 근접-미스 탐색 쪽뿐이다.
+// HYK-442 2R (설계 축 ⓒ, 책임자 지시 coder-task.md §2 -- "인용부호 목록을
+// 늘리는 방향으로 도망치지 마라" 요구에 대한 답): BLOCKED_ANYWHERE_RE/
+// BLOCKED_BARE_COLUMN0_RE 위 두 정규식은 파일 «어디에나» 있는 표지-모양
+// 문자열을 센다(무경계 탐색이 그 존재 이유, 각자의 헤더 참조). 2026-09-05
+// 실사고(coder-task.md §1-1)는 그 대가였다 -- 워커가 자기점검 산문에서
+// 표지 문법을 «인용»하려고 인라인 코드 표기(백틱)를 쓴 자리까지 근접-미스로
+// 세어 정상 종료를 "유효+깨짐 혼재"로 승격시켰다(실물: coder-437-PRE-EDIT-
+// 1758.md 166행). 1R은 백틱 «하나만» 벗겼는데, 그 직후 같은 보고서 자신이
+// «작은따옴표»로 인용한 두 줄(coder-task.md 2R §1-1 실측, 50·54행)에
+// 똑같이 걸려 정지 종결 자체가 다시 막혔다 -- 1R의 결함은 "백틱을 안
+// 벗겼다"가 아니라 ★**"인용부호"라는 category를 백틱 «한 원소»로만
+// 좁게 정의했다**는 것이다.
 //
-// 왜 안전한가(§4 회귀 ⓐ-ⓔ 무회귀): 실사고의 두 근접-미스 재현
-// (leading-space ` >>> BLOCKED: x` · `>>>`-less column-0 `BLOCKED: x` ·
-// 콜론 없는 `>>> BLOCKED x`)는 전부 백틱 없이 «그대로 노출된» 텍스트다 --
-// 이 스트립은 백틱으로 감싸인 부분만 지우므로 이 셋의 매치 개수는 조금도
-// 바뀌지 않는다. 인라인 코드 스팬은 한 줄 안에서만 성립한다고 본다(여러
-// 줄에 걸친 백틱 쌍은 마크다운 자체에서도 인라인 스팬이 아니다) --
-// `[^`\n]*`로 개행을 건너뛰지 않게 고정.
-function stripInlineCodeSpansForNearMissScan(resultContent) {
+// 2R 수리: 인용부호 category를 그 표준 3종(백틱·홑따옴표·겹따옴표) «전부»
+// 한 번에 닫는다 -- 이번에 발견된 홑따옴표 하나만 추가하는 것이 아니라,
+// 다음에 나올 수 있는 겹따옴표까지 미리 닫아 둔다. 책임자가 경계한 "괄호·
+// 표 셀이 다음 차례로 나온다"는 시나리오에 대한 이 라운드의 입장: 괄호·표
+// 셀은 «인용부호»라는 언어학적 카테고리 자체가 아니라 구획 기호이므로
+// 이 함수의 범위 밖으로 명시적으로 남긴다(정직 한계 절 참조) -- "인용"을
+// 잡는 함수가 "모든 구두점"을 잡는 함수로 무한히 넓어지는 것을 막는
+// 경계선을 여기 긋는다.
+//
+// ⛔BLOCKED_RE(엄격 채택)는 건드리지 않는다 -- 그 정규식은 이미 줄
+// «전체»가 `>>>`로 시작할 것을 요구하므로(`^>>>...`), 어떤 인용부호로
+// 시작하는 줄에도 애초에 매치하지 않는다 -- 이 fix가 필요한 것은 오직
+// 무경계 근접-미스 탐색 쪽뿐이다.
+//
+// 왜 안전한가(§4 회귀 ⓐ-ⓔ 무회귀, coder-task.md 2R §3 조건2): 실사고의
+// 근접-미스 재현 다섯(leading-space, `>>>`-less column-0, 콜론 없음, 진짜
+// 표지 2개, 표지 0개)은 전부 인용부호 없이 «그대로 노출된» 텍스트다 -- 이
+// 스트립은 인용부호로 감싸인 부분만 지우므로 이 다섯의 매치 개수는 조금도
+// 바뀌지 않는다. 인용 스팬은 한 줄 안에서만 성립한다고 본다(여러 줄에
+// 걸친 짝은 마크다운 산문에서도 인용 스팬이 아니다) -- 각 문자 클래스가
+// 개행을 건너뛰지 않게 고정.
+//
+// ⚠️정직 한계(알려진 잔여 위험, 의도적으로 감수): 홑따옴표는 영어 축약형
+// (예: "don't")의 아포스트로피와 같은 문자다 -- 한 줄 안에 아포스트로피가
+// 짝수 개 있으면 그 사이 구간이 "인용"으로 잘못 스트립될 수 있다(과다
+// 스트립 방향의 오류, 즉 근접-미스를 놓칠 수 있다는 뜻 -- 위조 표지를
+// 잘못 «수락»하는 방향이 아니다, BLOCKED_RE 엄격 채택은 무관하기 때문).
+// 이 저장소의 결과 파일은 대부분 한국어 산문이라 실무 발생 빈도가 낮다고
+// 판단해 감수한다.
+function stripQuotedSpansForNearMissScan(resultContent) {
   // 카운트 전용 스캔이라 오프셋/길이 보존이 필요 없다 -- 스팬 전체를 빈
-  // 문자열로 치환해 매치 대상에서 완전히 제거한다.
-  return resultContent.replace(/`[^`\n]*`/g, "");
+  // 문자열로 치환해 매치 대상에서 완전히 제거한다. 세 인용부호 종류를
+  // 한 정규식(교대, alternation)으로 동시에 처리 -- 순서 의존성이나
+  // 다회 패스로 인한 교차-종류 간섭이 없다(각 대안이 자기 종류의 짝만
+  // 찾고, 다른 종류의 문자는 `[^X\n]*` 안에서 그냥 일반 문자로 통과한다).
+  return resultContent.replace(/`[^`\n]*`|'[^'\n]*'|"[^"\n]*"/g, "");
 }
 // HYK-325 §2-3 (승격: HYK-418 §2-1): the non-column-0 meta line finalize-
 // done.mjs appends right after a `>>> DONE:` line it wrote itself (see that
@@ -347,13 +368,12 @@ function resolveResultBlockedState(resultContent) {
   // well-formed one(s) already counted above -- a valid line coexisting
   // with a broken one, previously swallowed silently into the single valid
   // match.
-  // HYK-442: near-miss counting scans the inline-code-span-stripped text
-  // (see stripInlineCodeSpansForNearMissScan's own header) -- a backtick-
-  // quoted mention of the marker syntax in explanatory prose is not itself
-  // scanned. The strict `matches` count just above is computed on the
-  // ORIGINAL resultContent (unaffected, untouched by this fix).
-  const nearMissScanContent =
-    stripInlineCodeSpansForNearMissScan(resultContent);
+  // HYK-442 2R: near-miss counting scans the quoted-span-stripped text (see
+  // stripQuotedSpansForNearMissScan's own header) -- a backtick-, single-,
+  // or double-quoted mention of the marker syntax in explanatory prose is
+  // not itself scanned. The strict `matches` count just above is computed
+  // on the ORIGINAL resultContent (unaffected, untouched by this fix).
+  const nearMissScanContent = stripQuotedSpansForNearMissScan(resultContent);
   const anywhereCount = [...nearMissScanContent.matchAll(BLOCKED_ANYWHERE_RE)]
     .length;
   // HYK-333: BLOCKED_BARE_COLUMN0_RE matches lines that never start with
