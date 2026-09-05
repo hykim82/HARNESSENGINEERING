@@ -1,0 +1,102 @@
+{
+  "schemaVersion": 1,
+  "issue": "HYK-436",
+  "round": "HYK-431-seat-reclaim-4R",
+  "description": "검증·스키마 코드가 입력 객체 자신의 메서드(every/includes/some/...)를 호출하는 곳의 저장소 전체 열거. 이런 호출은 입력이 Array 등을 상속해 해당 메서드를 재정의하면 판정을 뒤집을 수 있다(HYK-436 실증: TArrayOf의 v.every, classifyProtection의 p.protectedSeats.includes). 열거는 저장소 전체, 수리는 scripts/relay/ 안으로만(scripts/check/는 다른 레인 소유 -- 목록에만 적고 손대지 않음).",
+  "methodology": {
+    "grepCommands": [
+      "grep -nE '\\.(every|some|includes|indexOf|find|filter|map|join|reduce|forEach|slice|concat|flat|sort|toString|valueOf)\\(' -r scripts --include='*.mjs' | grep -v '\\.test\\.mjs'",
+      "grep -nE '\\.(every|some|includes|indexOf|find|filter|map|join|reduce|forEach|slice|concat|flat|sort|toString|valueOf)\\(' -r scripts/relay scripts/check --include='*.mjs' | grep -v '\\.test\\.mjs' | grep -v 'Array.prototype\\|String.prototype\\|Object.prototype'",
+      "grep -nE '\\b(policy|delegation|envelope|record|inventory|request|req|input|payload|args|opts|options|config|params|grant|receipt|manifest)\\.[A-Za-z_]+\\.(every|some|includes|indexOf|find|filter|map|join|forEach)\\(' -r scripts --include='*.mjs' | grep -v '\\.test\\.mjs'"
+    ],
+    "scope": "저장소 전체 grep 스윕 + scripts/relay//scripts/check/ 우선 수기 판독. 890여개 원시 grep 히트 중 시각 검토는 scripts/relay/·scripts/check/ 중심(다른 디렉터리는 부분 점검만) -- 완전 열거를 증명하지 않는다(§ '없다'를 증명하지 않음).",
+    "notCovered": "scripts/supervisor/·templates/ 등은 가벼운 표본 점검만 했고 전수는 아니다. 로컬 리터럴/신뢰 상수 배열(예: KNOWN_ROLES.includes(role))에 대한 호출은 수신자가 입력이 아니므로 제외했다."
+  },
+  "confidenceLevels": {
+    "확실": "입력(호출자 인자 또는 그 하위 필드)이 보안 관련 boolean 판정에 자기 메서드로 직접 관여함을 호출 체인까지 확인함",
+    "추론": "패턴은 일치하고 수신자가 함수의 입력 인자(또는 그 하위 필드)로 보이나, 그 값이 실제로 신뢰 불가능한 외부 데이터로까지 이어지는 전체 호출 체인은 끝까지 추적하지 못함",
+    "미확인": "grep 패턴은 일치하나 검증 로직인지, 수신자가 입력인지조차 불확실함"
+  },
+  "findings": [
+    {
+      "id": "hyk436-relay-seat-reclaim-core-tarrayof-every",
+      "file": "scripts/relay/seat-reclaim-core.mjs",
+      "lineAtDiscovery": 265,
+      "snippet": "v.every((el) => elementSchema.check(el))",
+      "confidence": "확실",
+      "status": "fixed",
+      "reasoning": "REVIEW 4R가 격리 자식 프로세스로 실증(every 재정의 [null] -> RECLAIM_ELIGIBLE). 이번 라운드 본체 수리 대상.",
+      "fix": "Array.prototype.every.call(v, ...)로 교체"
+    },
+    {
+      "id": "hyk436-relay-seat-reclaim-core-classifyprotection-includes",
+      "file": "scripts/relay/seat-reclaim-core.mjs",
+      "lineAtDiscovery": 344,
+      "snippet": "p.protectedSeats.includes(inventory.seat.paneKey)",
+      "confidence": "확실",
+      "status": "fixed",
+      "reasoning": "REVIEW 4R가 격리 자식 프로세스로 실증(includes 재정의 ['pane-1'] -> 보호 상실). 이번 라운드 본체 수리 대상.",
+      "fix": "Array.prototype.includes.call(p.protectedSeats, ...)로 교체"
+    },
+    {
+      "id": "hyk436-relay-teardown-core-isprotectedtarget-includes",
+      "file": "scripts/relay/teardown-core.mjs",
+      "lineAtDiscovery": 154,
+      "snippet": "list.includes(inventory.target.canonicalPathDigest)  // list === policy.protectedTargets (호출자 입력, 복사 없음)",
+      "confidence": "확실",
+      "status": "fixed",
+      "reasoning": "judgeTeardown({inventory, policy})의 policy.protectedTargets가 그대로 list에 담기며(Array.isArray만 확인, 원소/인스턴스 재검증 없음) 그 인스턴스의 own includes를 부른다 -- HYK-436과 완전 동형 패턴. scripts/relay/ 소속이라 이번 라운드에서 함께 수리.",
+      "fix": "Array.prototype.includes.call(list, ...)로 교체, 회귀 시험 1건 추가(teardown-core.test.mjs)"
+    },
+    {
+      "id": "hyk436-relay-grant-issuer-delegation-every",
+      "file": "scripts/relay/grant-issuer.mjs",
+      "lineAtDiscovery": 142,
+      "snippet": "delegation.allowed_task_hashes.every(isNonEmptyString)",
+      "confidence": "추론",
+      "status": "not_fixed",
+      "reasoning": "delegation은 validateDelegation/issueSubGrant의 입력 인자이고 Array.isArray만 확인 후 그 배열 자신의 every를 부른다 -- 패턴은 일치. 다만 delegation이 실제로 신뢰 불가 외부 형태(예: Array 상속 인스턴스)로 도달할 수 있는지 호출 체인 끝까지 추적하지 못했다(예: JSON.parse 산출물이면 항상 순정 Array라 해당 없음).",
+      "fix": "이번 라운드 범위 밖(§0 scripts/relay/ 안이라도 미확인 등급은 스코프 확대 없이 목록에만 기재 -- 되돌림 검증 없이 손대면 새 리스크). 후속 라운드에서 호출 체인 확인 후 판단 권장."
+    },
+    {
+      "id": "hyk436-relay-orca-adapter-branch-grammar",
+      "file": "scripts/relay/adapters/orca-adapter.mjs",
+      "lineAtDiscovery": 1659,
+      "snippet": "name.includes(\"..\") / name.split(\"/\").some((c) => c.endsWith(\".lock\"))",
+      "confidence": "추론",
+      "status": "not_fixed",
+      "reasoning": "name은 isValidBranchNameGrammar의 입력 인자이며 문자열 프로토타입 메서드를 직접 호출한다. 다만 String은 원시값이면 메서드 재정의가 불가능하다(재정의하려면 String 객체 래퍼나 커스텀 객체가 필요) -- 실제 호출부가 항상 원시 문자열만 넘기는지 끝까지 추적하지 못했다.",
+      "fix": "이번 라운드 범위 밖. 문자열 원시값 한정이면 harm path 없음 -- 호출부 타입 보증 확인 후 판단 권장."
+    },
+    {
+      "id": "hyk436-check-hyk400-receiver-guard-deriveoptionalflags-includes",
+      "file": "scripts/check/hyk400-receiver-guard.mjs",
+      "lineAtDiscovery": 178,
+      "snippet": "deliveryArgs.includes(f)",
+      "confidence": "추론",
+      "status": "not_fixed_out_of_scope",
+      "reasoning": "scripts/check/ 소속 -- 다른 레인이 동시 작업 중이라 이번 라운드에서 손대지 않는다(§0 절대 경계). 목록에만 기재.",
+      "fix": "범위 밖(scripts/check/ 소유 레인 몫)"
+    },
+    {
+      "id": "hyk436-check-dispatch-gate-decision-core-combine",
+      "file": "scripts/check/dispatch-gate-decision-core.mjs",
+      "lineAtDiscovery": 539,
+      "snippet": "list.every((d) => d?.allow === true)",
+      "confidence": "미확인",
+      "status": "not_fixed_out_of_scope",
+      "reasoning": "scripts/check/ 소속(범위 밖). 게다가 list는 저장소 내부에서 생성한 게이트 결정 객체로 보여 외부 입력인지도 불확실.",
+      "fix": "범위 밖(scripts/check/ 소유 레인 몫)"
+    },
+    {
+      "id": "hyk436-check-dispatch-arg-contract-core-satisfied",
+      "file": "scripts/check/dispatch-arg-contract-core.mjs",
+      "lineAtDiscovery": 246,
+      "snippet": "req.flags.some((f) => presentFlags.has(f))",
+      "confidence": "미확인",
+      "status": "not_fixed_out_of_scope",
+      "reasoning": "scripts/check/ 소속(범위 밖). req는 저장소 내부 레지스트리(dispatch-arg-contract-registry.mjs)에서 온 것으로 보여 신뢰 데이터일 가능성이 높다.",
+      "fix": "범위 밖(scripts/check/ 소유 레인 몫)"
+    }
+  ]
+}

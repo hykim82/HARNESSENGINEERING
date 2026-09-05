@@ -151,7 +151,13 @@ function isProtectedTarget(inventory, policy) {
     ? policy.protectedTargets
     : [];
   // exact 대조만(부분일치·정규식 금지, coder-task.md §2-B 비타협).
-  return list.includes(inventory.target.canonicalPathDigest);
+  // HYK-436과 동형: list는 policy.protectedTargets 그 자체(호출자 입력)일
+  // 수 있다 -- list 자신의 includes를 부르면 Array 상속 서브클래스가
+  // 재정의해 보호를 우회할 수 있으므로 원형의 원본 includes를 빌려 쓴다.
+  return Array.prototype.includes.call(
+    list,
+    inventory.target.canonicalPathDigest,
+  );
 }
 
 function buildEvidence(inventory, ruleId, extra = {}) {

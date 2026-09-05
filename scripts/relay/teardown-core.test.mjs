@@ -71,6 +71,24 @@ test("judgeTeardown: protected target wins over an otherwise-eligible consistent
   assert.equal(r.evidence.ruleId, REASON.PROTECTED_TARGET);
 });
 
+test("HYK-436 반례: policy.protectedTargets가 includes()를 항상 false로 재정의한 Array 서브클래스 -- 보호 대조가 여전히 원본 includes로 동작, PROTECTED 유지", () => {
+  class IncludesBypassArray extends Array {
+    includes() {
+      return false;
+    }
+  }
+  const inv = baseInventory();
+  const protectedTargets = new IncludesBypassArray();
+  protectedTargets.push(inv.target.canonicalPathDigest);
+  const r = judgeTeardown({
+    inventory: inv,
+    policy: { protectedTargets },
+  });
+  assert.equal(r.eligibility, ELIGIBILITY.PROTECTED);
+  assert.equal(r.allowSink, false);
+  assert.equal(r.reason, REASON.PROTECTED_TARGET);
+});
+
 test("judgeTeardown: active reference (count>0) blocks even with all layers present", () => {
   const inv = baseInventory({
     activeReferences: { count: 1, tokens: ["tok-1"], observable: true },

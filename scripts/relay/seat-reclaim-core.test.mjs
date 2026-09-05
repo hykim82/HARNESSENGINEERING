@@ -139,10 +139,35 @@ test("judgeSeatReclaim: inventory 자체가 undefined여도 던지지 않고 회
   assert.equal(r.reason, SEAT_REASON.SCHEMA_INVALID);
 });
 
-test("judgeSeatReclaim: nowMs가 유한수가 아니면(결손) 회수 금지로 떨어진다(§2⑷ fail-closed)", () => {
+test("judgeSeatReclaim: nowMs가 유한수가 아니면(결손) 회수 금지로 떨어진다(§2⑷ fail-closed) -- reason은 SCHEMA_INVALID와 구별되는 NOW_MS_INVALID(HYK-431 잔여 축 B)", () => {
   const r = judgeSeatReclaim({ inventory: baseSeatInventory(), policy: {} });
   assert.equal(r.reclaimEligible, false);
-  assert.equal(r.reason, SEAT_REASON.SCHEMA_INVALID);
+  assert.equal(r.reason, SEAT_REASON.NOW_MS_INVALID);
+});
+
+// ---- HYK-431 잔여 축 B: inventory 형상 실패와 nowMs 결손이 서로 다른
+// reason으로 구별되는지 직접 대조한다(이전엔 둘 다 SCHEMA_INVALID 하나로
+// 접혀 "무엇이 왜 걸렸는지"가 안 보였다). fail-closed 판정 자체(둘 다
+// UNOBSERVABLE/reclaimEligible:false)는 바뀌지 않는다.
+
+test("HYK-431 잔여 축 B: inventory 형상 실패와 nowMs 결손은 reason이 서로 다르다(관측성)", () => {
+  const shapeInvalid = judgeSeatReclaim({
+    inventory: { not: "a valid inventory" },
+    policy: { protectedSeats: [], minIdleMs: 0 },
+    nowMs: NOW,
+  });
+  const nowMsInvalid = judgeSeatReclaim({
+    inventory: baseSeatInventory(),
+    policy: { protectedSeats: [], minIdleMs: 0 },
+    nowMs: "not-a-number",
+  });
+  assert.equal(shapeInvalid.reason, SEAT_REASON.SCHEMA_INVALID);
+  assert.equal(nowMsInvalid.reason, SEAT_REASON.NOW_MS_INVALID);
+  assert.notEqual(shapeInvalid.reason, nowMsInvalid.reason);
+  assert.equal(shapeInvalid.reclaimEligible, false);
+  assert.equal(nowMsInvalid.reclaimEligible, false);
+  assert.equal(shapeInvalid.eligibility, SEAT_ELIGIBILITY.UNOBSERVABLE);
+  assert.equal(nowMsInvalid.eligibility, SEAT_ELIGIBILITY.UNOBSERVABLE);
 });
 
 // ---- §2⑴ 반례 6건(REVIEW 1R P1-1 재현, coder-task.md §3-1) ----
@@ -256,6 +281,41 @@ test("§2⑴ P1-1 경계: protectedSeats=[] -- 빈 배열은 원소 검사 vacuo
 test("§2⑴ P1-1 경계: protectedSeats=['pane-1'] -- 유효한 원소만 있는 목록은 정상 동작(exact match)", () => {
   const r = judge({}, { protectedSeats: ["pane-1"], minIdleMs: 0 });
   assert.equal(r.eligibility, SEAT_ELIGIBILITY.PROTECTED);
+  assert.equal(r.reason, SEAT_REASON.PROTECTED_SEAT);
+});
+
+// ---- HYK-436 반례 2건(REVIEW 4R P1 재현): 검사가 입력 자신의 메서드를
+// 부르면 입력이 그 메서드를 재정의해 판정을 뒤집을 수 있다. Array를
+// 상속하며 every/includes를 재정의한 인스턴스로 재현한다 -- 수리 전에는
+// 둘 다 회수 허용/보호 상실로 새어(REVIEW 4R 원문), 수리 후에는 원형의
+// 원본 메서드를 빌려 써서(Array.prototype.X.call) 재정의가 무력화된다.
+
+class EveryBypassArray extends Array {
+  every() {
+    return true;
+  }
+}
+class IncludesBypassArray extends Array {
+  includes() {
+    return false;
+  }
+}
+
+test("HYK-436 반례: protectedSeats가 every()를 항상 true로 재정의한 Array 서브클래스([null]) -- 형상 검사가 여전히 무효로 판정, 회수 금지", () => {
+  const protectedSeats = new EveryBypassArray();
+  protectedSeats.push(null);
+  const r = judge({}, { protectedSeats, minIdleMs: 0 });
+  assert.equal(r.eligibility, SEAT_ELIGIBILITY.PROTECTED);
+  assert.equal(r.reclaimEligible, false);
+  assert.equal(r.reason, SEAT_REASON.PROTECTED_LIST_INVALID);
+});
+
+test("HYK-436 반례: protectedSeats가 includes()를 항상 false로 재정의한 Array 서브클래스(['pane-1']) -- 보호 대조가 여전히 원본 includes로 동작, 회수 금지", () => {
+  const protectedSeats = new IncludesBypassArray();
+  protectedSeats.push("pane-1");
+  const r = judge({}, { protectedSeats, minIdleMs: 0 });
+  assert.equal(r.eligibility, SEAT_ELIGIBILITY.PROTECTED);
+  assert.equal(r.reclaimEligible, false);
   assert.equal(r.reason, SEAT_REASON.PROTECTED_SEAT);
 });
 

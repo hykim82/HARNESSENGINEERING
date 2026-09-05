@@ -190,6 +190,11 @@ export const SEAT_ELIGIBILITY = Object.freeze({
 
 export const SEAT_REASON = Object.freeze({
   SCHEMA_INVALID: "SEAT_RECLAIM_SCHEMA_INVALID",
+  // HYK-431 잔여 축 B: inventory 형상 실패와 nowMs 결손은 원인이 다른데
+  // 4R 이전에는 둘 다 SCHEMA_INVALID 하나로 접혀 "무엇이 왜 걸렸는지"가
+  // 안 보였다. fail-closed 판정(eligibility/reclaimEligible)은 그대로
+  // 두고 reason만 원인별로 가른다(judgeSeatReclaim 진입 가드 참조).
+  NOW_MS_INVALID: "SEAT_RECLAIM_NOW_MS_INVALID",
   TARGET_UNIDENTIFIED: "SEAT_RECLAIM_TARGET_UNIDENTIFIED",
   PROTECTED_LIST_INVALID: "SEAT_RECLAIM_PROTECTED_LIST_INVALID",
   PROTECTED_SEAT: "SEAT_RECLAIM_PROTECTED_SEAT",
@@ -262,7 +267,14 @@ function TUnion(...schemas) {
 // "목록이 비어 있다"는 유효 상태이지 무효 상태가 아니다).
 function TArrayOf(elementSchema) {
   return {
-    check: (v) => Array.isArray(v) && v.every((el) => elementSchema.check(el)),
+    // HYK-436: `v.every(...)`는 v 자신의 메서드를 부른다 -- v가 Array를
+    // 상속하며 every를 재정의하면 검사 자체가 입력에 의해 조종된다
+    // (검토 4R 실증: EveryBypass -> [null]이 형상 검사를 통과). 원형의
+    // 원본 every를 v에 "빌려" 호출하면(Function.prototype.call) v의
+    // 자체 오버라이드는 조회되지 않는다 -- v는 순회 대상 데이터일 뿐이다.
+    check: (v) =>
+      Array.isArray(v) &&
+      Array.prototype.every.call(v, (el) => elementSchema.check(el)),
   };
 }
 // 객체 속성 계약 -- 선언된 각 키의 값에 그 키의 스키마를 재귀 적용한다
@@ -341,7 +353,10 @@ function classifyProtection(inventory, p) {
       ),
     };
   }
-  if (p.protectedSeats.includes(inventory.seat.paneKey)) {
+  // HYK-436: 위 TArrayOf와 동형 -- p.protectedSeats 자신의 includes를
+  // 부르지 않는다(재정의되면 보호가 사라진다, 검토 4R 실증: IncludesBypass
+  // -> ['pane-1']이 보호 대조를 우회). 원형의 원본 includes를 빌려 쓴다.
+  if (Array.prototype.includes.call(p.protectedSeats, inventory.seat.paneKey)) {
     return {
       eligibility: SEAT_ELIGIBILITY.PROTECTED,
       reason: SEAT_REASON.PROTECTED_SEAT,
@@ -466,7 +481,7 @@ export function judgeSeatReclaim(args) {
   const { inventory, policy, nowMs } = isPlainObject(args) ? args : {};
   const p = isPlainObject(policy) ? policy : {};
 
-  if (!isValidSeatInventoryShape(inventory) || !Number.isFinite(nowMs)) {
+  if (!isValidSeatInventoryShape(inventory)) {
     return {
       eligibility: SEAT_ELIGIBILITY.UNOBSERVABLE,
       reclaimEligible: false,
@@ -475,6 +490,18 @@ export function judgeSeatReclaim(args) {
         ruleId: SEAT_REASON.SCHEMA_INVALID,
         inventory: inventory ?? null,
         nowMs: Number.isFinite(nowMs) ? nowMs : null,
+      },
+    };
+  }
+  if (!Number.isFinite(nowMs)) {
+    return {
+      eligibility: SEAT_ELIGIBILITY.UNOBSERVABLE,
+      reclaimEligible: false,
+      reason: SEAT_REASON.NOW_MS_INVALID,
+      evidence: {
+        ruleId: SEAT_REASON.NOW_MS_INVALID,
+        inventory: inventory ?? null,
+        nowMs: null,
       },
     };
   }
