@@ -2116,6 +2116,21 @@ function listMjsFilesRecursive(rootDir) {
   return out;
 }
 
+// (c) HYK-430 4R -- 의도적 예외 목록(⛔조용히 넓히지 마라, 새 항목을
+// 추가할 때마다 «왜 스폰 호출자가 아닌지»를 한 줄로 밝힌다). 이
+// 시험이 잡으려는 것은 "relay-handshake.mjs CLI를 자식 프로세스로
+// 실행하는 새 프로덕션 호출자"다 -- 아래 파일은 그 반대(파일명
+// 문자열을 «검색 대상»으로만 쓰는 정적 분석 도구, 자식 프로세스
+// 실행 0건)이므로 이 시험의 관심사 밖이다.
+const KNOWN_NON_SPAWN_LITERAL_REFERENCES = [
+  // list-relay-handshake-isolated-fixtures.mjs: "얼마나 많은 시험이
+  // relay-handshake.mjs를 격리 복사하는가"를 세는 정적 스캐너다 --
+  // content.includes("relay-handshake.mjs")로 다른 파일의 텍스트
+  // 안에서 이 이름을 찾을 뿐, 이 파일 자신은 relay-handshake.mjs를
+  // spawn/import 둘 다 하지 않는다(HYK-430 4R §2⑵).
+  "scripts/check/list-relay-handshake-isolated-fixtures.mjs",
+];
+
 test("HYK-344 3R: relay-handshake.mjs CLI를 실제로 실행(spawn)하는 프로덕션 호출자는 이 저장소 안에 0건 -- «지금은 사람이 유일한 호출자»가 시험으로 고정된다", () => {
   const scriptsRoot = join(
     dirname(fileURLToPath(new URL(import.meta.url))),
@@ -2135,6 +2150,13 @@ test("HYK-344 3R: relay-handshake.mjs CLI를 실제로 실행(spawn)하는 프�
     const normalized = filePath.replace(/\\/g, "/");
     if (normalized.endsWith("/relay-handshake.mjs")) continue; // (a) self
     if (normalized.endsWith(".test.mjs")) continue; // (b) test callers
+    if (
+      KNOWN_NON_SPAWN_LITERAL_REFERENCES.some((allowed) =>
+        normalized.endsWith(`/${allowed}`),
+      )
+    ) {
+      continue; // (c) known non-spawn static-analysis tool, see above
+    }
     const stripped = stripRelayHandshakeImportSpecifiers(
       stripCommentsBestEffort(readFileSync(filePath, "utf8")),
     );

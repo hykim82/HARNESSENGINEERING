@@ -8,12 +8,18 @@
 //       relay-handshake.mjs가 참조할 곳은 정본 하나뿐이다) 격리
 //       픽스처 안에서 relay-handshake.mjs의 «실제 산출값»(로그에 찍힌
 //       timeoutMs)이 그 변이를 그대로 반영한다.
-//   (b) 정직한 폴백: 정본 모듈 자체가 격리 픽스처에 없으면(기존 24개+
-//       시험과 같은 모양) import가 실패하고, relay-handshake.mjs는
-//       "적응·재시도 없이 기준값 그대로 1회 시도"로 물러난다 -- 조용히
-//       죽지 않고(exit 0 유지), 재시도가 실제로 0회임을 호출 횟수로
-//       직접 증명한다(⛔"복제해서 그럴듯하게 계속 재시도하는 척"이
-//       아니라는 것을 기계로 고정).
+//   (b) 정직한 폴백: 정본 모듈 자체가 격리 픽스처에 없으면(다수의
+//       기존 시험과 같은 모양 -- 정확한 개수는
+//       list-relay-handshake-isolated-fixtures.mjs가 손으로 세지 않고
+//       매번 다시 만든다, HYK-430 4R §2⑵) import가 실패하고,
+//       relay-handshake.mjs는 "적응·재시도 없이 기준값 그대로 1회
+//       시도"로 물러난다 -- 조용히 죽지 않고(exit 0 유지), 재시도가
+//       실제로 0회임을 호출 횟수로 직접 증명한다(⛔"복제해서
+//       그럴듯하게 계속 재시도하는 척"이 아니라는 것을 기계로 고정).
+//   (c)/(d)/(e) HYK-430 4R (검토 반려 P1-1 재수리): «모듈 부재»와
+//       «모듈이 있는데 망가졌다»(top-level throw·문법 오류·의존성
+//       누락)를 코드가 실제로 가른다 -- 부재가 아니면 조용히 폴백하지
+//       않고 모듈 로드 자체가 거부된다(시끄러운 실패).
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
@@ -202,11 +208,11 @@ test("(a-2) 단일 소스 증명(값 대조): 정본 resolveChildProbeTimeoutMs�
 });
 
 // ---------------------------------------------------------------------------
-// (b) 정직한 폴백 -- 정본 모듈이 격리 픽스처에 없으면(기존 24개+ 시험과
+// (b) 정직한 폴백 -- 정본 모듈이 격리 픽스처에 없으면(다수의 기존 시험과
 // 같은 모양) 재시도 없이 1회만 시도하고, 조용히 죽지 않는다.
 // ---------------------------------------------------------------------------
 
-test("(b) 폴백 증명: 정본 모듈이 격리 픽스처에 없으면(기존 24개+ 시험과 동일 모양) 재시도 없이 정확히 1회만 시도하고 예외 없이 TIMEOUT을 기록한다", async () => {
+test("(b) 폴백 증명: 정본 모듈이 격리 픽스처에 없으면(다수의 기존 시험과 동일 모양(정확한 개수는 list-relay-handshake-isolated-fixtures.mjs 참조)) 재시도 없이 정확히 1회만 시도하고 예외 없이 TIMEOUT을 기록한다", async () => {
   const { isolatedDir, isolatedCheckDir } = seedIsolatedCheckDir({
     includeCanonicalPolicy: false,
   });
@@ -242,6 +248,115 @@ test("(b) 폴백 증명: 정본 모듈이 격리 픽스처에 없으면(기존 2
     );
     assert.equal(lines.length, 1);
     assert.match(lines[0], /^retire-author-shadow: TIMEOUT /);
+    // §2⑴ⓑ 관측 가능성 -- 폴백 사용이 로그에 남는지 직접 확인한다.
+    assert.match(
+      lines[0],
+      /reason=policy=fallback /,
+      `폴백 경로임이 로그에 관측 가능해야 한다: ${lines[0]}`,
+    );
+  } finally {
+    rmSync(isolatedDir, { recursive: true, force: true });
+  }
+});
+
+test("(b-3) 정직한 관측: 정본 모듈이 «있으면» 로그에 policy=canonical이 찍힌다(폴백과 구별)", async () => {
+  const { isolatedDir, isolatedCheckDir } = seedIsolatedCheckDir({
+    includeCanonicalPolicy: true,
+  });
+  try {
+    const isolatedRelayHandshake = pathToFileURL(
+      join(isolatedCheckDir, "relay-handshake.mjs"),
+    ).href;
+    const { runRetireAuthorShadowObservation } = await import(
+      isolatedRelayHandshake
+    );
+    const lines = [];
+    runRetireAuthorShadowObservation({
+      role: "coder",
+      harnessDir: "unused",
+      taskId: "HYK-430-2R-WIRING-B3-1",
+      doneAt: "x",
+      timeoutMs: 200,
+      execFileFn: () => {
+        const err = new Error("forced timeout (test injection)");
+        err.code = "ETIMEDOUT";
+        throw err;
+      },
+      logFn: (line) => lines.push(line),
+    });
+    assert.equal(lines.length, 1);
+    assert.match(
+      lines[0],
+      /reason=policy=canonical /,
+      `정본 로드 경로임이 로그에 관측 가능해야 한다(폴백과 다른 문구): ${lines[0]}`,
+    );
+  } finally {
+    rmSync(isolatedDir, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// (c)/(d)/(e) HYK-430 4R (검토 반려 P1-1 재수리) -- "모듈 부재"와
+// "모듈이 있는데 망가졌다"를 코드가 실제로 가른다는 것을 REVIEW의
+// 재현 절차 그대로(정책 모듈에 예외 주입) 확인한다. 2R까지는 셋 다
+// 조용히 {"calls":1,"timeouts":[2000]}로 위장됐다 -- 이제는 이 세
+// 형태 전부에서 relay-handshake.mjs 자신의 모듈 로드(top-level
+// await)가 거부되어야 한다(rethrow, isPolicyModuleAbsent가 false를
+// 내는 경우).
+// ---------------------------------------------------------------------------
+
+test("(c)★ REVIEW 재현: 정본 모듈이 top-level에서 throw하면(문법은 정상, 초기화 실패) 조용한 폴백이 아니라 모듈 로드 자체가 거부된다(시끄러운 실패)", async () => {
+  const { isolatedDir, isolatedCheckDir } = seedIsolatedCheckDir({
+    includeCanonicalPolicy: true,
+    mutateCanonicalPolicy: () => 'throw new Error("policy load exploded");\n',
+  });
+  try {
+    const isolatedRelayHandshake = pathToFileURL(
+      join(isolatedCheckDir, "relay-handshake.mjs"),
+    ).href;
+    await assert.rejects(
+      () => import(isolatedRelayHandshake),
+      /policy load exploded/,
+      "정본 모듈이 망가졌으면(부재가 아니라 초기화 실패) 이 파일을 import하는 것 자체가 실패해야 한다 -- 2R까지는 여기서 조용히 {calls:1,timeouts:[2000]}로 위장됐다(REVIEW 실증)",
+    );
+  } finally {
+    rmSync(isolatedDir, { recursive: true, force: true });
+  }
+});
+
+test("(d) 문법 오류(SyntaxError)도 조용히 삼켜지지 않고 모듈 로드가 거부된다", async () => {
+  const { isolatedDir, isolatedCheckDir } = seedIsolatedCheckDir({
+    includeCanonicalPolicy: true,
+    mutateCanonicalPolicy: () => "export function broken( {\n",
+  });
+  try {
+    const isolatedRelayHandshake = pathToFileURL(
+      join(isolatedCheckDir, "relay-handshake.mjs"),
+    ).href;
+    await assert.rejects(
+      () => import(isolatedRelayHandshake),
+      "문법 오류가 있는 정본 모듈은 '부재'가 아니므로 조용히 폴백하면 안 된다",
+    );
+  } finally {
+    rmSync(isolatedDir, { recursive: true, force: true });
+  }
+});
+
+test("(e) 의존성 누락(정본 파일 자신은 있지만 그 파일이 import하는 다른 파일이 없음)도 조용히 삼켜지지 않는다", async () => {
+  const { isolatedDir, isolatedCheckDir } = seedIsolatedCheckDir({
+    includeCanonicalPolicy: true,
+    mutateCanonicalPolicy: (src) =>
+      `import { nothingHere } from "./this-file-does-not-exist.mjs";\n${src}`,
+  });
+  try {
+    const isolatedRelayHandshake = pathToFileURL(
+      join(isolatedCheckDir, "relay-handshake.mjs"),
+    ).href;
+    await assert.rejects(
+      () => import(isolatedRelayHandshake),
+      /this-file-does-not-exist\.mjs/,
+      "정본 파일 자신이 아니라 «그 파일의 의존성»이 없는 경우도 '정본 부재'와 다르다 -- 조용히 폴백하면 안 된다(REVIEW P1-1 지적: 의존성 오류가 정상 폴백으로 위장되면 안 된다)",
+    );
   } finally {
     rmSync(isolatedDir, { recursive: true, force: true });
   }
@@ -250,13 +365,30 @@ test("(b) 폴백 증명: 정본 모듈이 격리 픽스처에 없으면(기존 2
 // (b-2) 폴백 상태에서도 실제 지연 자식(진짜 child_process)을 실제
 // timeout으로 죽인다 -- 정본 부재가 "타임아웃 메커니즘 자체"까지
 // 지우지는 않는다는 것을 실제 스폰으로 증명(탐지력 보존, §2⑶ⓐ).
-test("(b-2) 폴백 상태에서도 실제 지연 자식(3000ms)을 실제 timeout(200ms)으로 죽인다 -- 정본 부재가 탐지력을 지우지 않는다", async () => {
+//
+// HYK-430 4R §2 실측 발견(자체 재현, 이 라운드 러너 회차 사이에
+// 표적 시험을 단독으로 다시 돌리다가 잡음) -- 원래 이 시험은 자식
+// 지연을 3000ms로, 상한도 3000ms로 «똑같이» 두었다(margin 0). 이건
+// P1-2가 이미 고친 (E) 시험의 실수를 이 시험에서 «다시» 저지른
+// 것이다. 실측: 부하가 있는 조건에서 timeoutMs=200·재시도 0회인데도
+// elapsedMs가 3215ms까지 늘어나 `< 3000` 단언이 그대로 깨졌다(exit
+// 1, 실측 3215ms > 3000ms). ★수리: (E) 시험과 같은 패턴 --
+// 비교 기준을 독립적인 작은 절대값이 아니라 이 시험이 설계하는 자식
+// 지연 자체에서 파생시키고, 그 자식 지연을 넉넉히 크게 잡는다
+// (200ms 나름의 오버헤드가 3215ms까지 관측된 표본 기준으로 5배 이상
+// 여유).
+const FALLBACK_SLOW_CHILD_DELAY_MS = 20000;
+
+test("(b-2) 폴백 상태에서도 실제 지연 자식을 실제 timeout(200ms)으로 죽인다 -- 정본 부재가 탐지력을 지우지 않는다", async () => {
   const { isolatedDir, isolatedCheckDir } = seedIsolatedCheckDir({
     includeCanonicalPolicy: false,
   });
   const slowChildDir = tmpDir("hyk430-2r-wiring-slowchild-");
   try {
-    const slowPath = writeSlowChildScript(slowChildDir, 3000);
+    const slowPath = writeSlowChildScript(
+      slowChildDir,
+      FALLBACK_SLOW_CHILD_DELAY_MS,
+    );
     const isolatedRelayHandshake = pathToFileURL(
       join(isolatedCheckDir, "relay-handshake.mjs"),
     ).href;
@@ -279,13 +411,14 @@ test("(b-2) 폴백 상태에서도 실제 지연 자식(3000ms)을 실제 timeou
     assert.equal(lines.length, 1);
     assert.match(lines[0], /^retire-author-shadow: TIMEOUT /);
     // 폴백 = 재시도 0회이므로 1회 시도(약 200ms) 근처에서 끝나야 한다
-    // -- 슬로우 자식의 전체 지연(3000ms)에는 한참 못 미친다는 것만
-    // 느슨하게 확인한다(§2⑵에서 다루는 "고정 임계"류의 정밀 타이밍
-    // 계약이 아니라, "죽이지 않고 3000ms를 다 기다렸다"는 회귀만 잡는
-    // 느슨한 안전망).
+    // -- 슬로우 자식의 전체 지연에는 한참 못 미친다는 것만 느슨하게
+    // 확인한다(§2⑵에서 다루는 "고정 임계"류의 정밀 타이밍 계약이
+    // 아니라, "죽이지 않고 전체 지연을 다 기다렸다"는 회귀만 잡는
+    // 느슨한 안전망 -- 비교 기준 자체가 이 시험이 설계한 자식 지연에서
+    // 파생된다, 독립 절대값이 아니다).
     assert.ok(
-      elapsedMs < 3000,
-      `재시도 0회 폴백이면 자식의 전체 지연(3000ms)을 다 기다리지 않아야 한다 -- 실측: ${elapsedMs}ms`,
+      elapsedMs < FALLBACK_SLOW_CHILD_DELAY_MS,
+      `재시도 0회 폴백이면 자식의 전체 지연(${FALLBACK_SLOW_CHILD_DELAY_MS}ms)을 다 기다리지 않아야 한다 -- 실측: ${elapsedMs}ms`,
     );
   } finally {
     rmSync(isolatedDir, { recursive: true, force: true });

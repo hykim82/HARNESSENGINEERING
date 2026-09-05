@@ -2102,11 +2102,14 @@ function shadowLine(state, reason, taskId) {
 // HYK-430 2R (검토 반려 P1-1 수리 -- 로컬 복제를 없앤다, ⛔parity
 // 시험만 키우는 것은 답이 아니다): 이 기준값(부하 0 가정)은 공통
 // 정책(child-probe-timeout-policy.mjs, coder-task.md §2⑶)에서만
-// 나온다. ⚠️격리 픽스처 제약(1R에서 실측, 2R에서 재검증 -- 아래)은
-// 여전히 실재한다: relay-handshake.mjs는 24개 이상의 격리 픽스처
-// 시험(예: admission-completion-spawn.test.mjs)이 "relay-handshake.mjs
-// + time-authority/reject-streak/envelope-archive 4개 형제 파일만"
-// 복사해 서브프로세스로 도는 정적 import 그래프의 일부라, 5번째
+// 나온다. ⚠️격리 픽스처 제약(1R에서 실측, 2R·4R에서 재검증 -- 아래)은
+// 여전히 실재한다: relay-handshake.mjs는 (정확한 개수는 손으로 세지
+// 않는다 -- `node scripts/check/list-relay-handshake-isolated-
+// fixtures.mjs`가 매번 다시 세어 낸다, HYK-430 4R §2⑵) 다수의 격리
+// 픽스처 시험(예: admission-completion-spawn.test.mjs)이 "relay-
+// handshake.mjs + time-authority/reject-streak/envelope-archive 4개
+// 형제 파일만" 복사해 서브프로세스로 도는 정적 import 그래프의
+// 일부라, 5번째
 // 정적 import를 추가하면 그 시험 전부가 LOAD 시점에 MODULE_NOT_FOUND로
 // 깨진다(1R·2R 둘 다 재현). ★수리(1R과 다른 점): "정적 import 불가
 // -> 로컬 복제"가 아니라 "정적 import 불가 -> top-level await로 옵션
@@ -2114,7 +2117,8 @@ function shadowLine(state, reason, taskId) {
 //   - 프로덕션 경로(이 저장소 자신)는 항상 이 형제 파일을 갖고 있으므로
 //     매번 성공 -- 실제 동작은 100% 공통 정책이 결정한다(단일 소스,
 //     완료조건1 충족).
-//   - 격리 픽스처(위 24개+)만 import 실패 -> null로 남는다. 이때
+//   - 격리 픽스처(위, 개수는 list-relay-handshake-isolated-fixtures.mjs가
+//     매번 다시 셈)만 import 실패 -> null로 남는다. 이때
 //     fallback은 «정책 공식을 다시 베끼지 않는다»(그러면 P1-1이
 //     그대로 재발한다) -- 그냥 «적응·재시도 없이 기준값 그대로 1회
 //     시도»로 물러난다(=이 조각 이전의 원래 동작과 동일). ★탐지력은
@@ -2130,17 +2134,73 @@ function shadowLine(state, reason, taskId) {
 // 문구의 timeoutMs)이 그 변이를 반영한다 (b) 정본 모듈이 격리
 // 픽스처에서 빠지면 폴백 경로로 물러나되 조용히 죽지 않는다(exit 0
 // 유지, 회귀 없음) -- relay-handshake-canonical-policy-wiring.test.mjs.
+//
+// HYK-430 4R (검토 반려 P1-1 재수리 -- "폴백이 숨은 두 번째 정책이다"):
+// 2R의 `catch { childProbeTimeoutPolicy = null; }`는 «모듈이 없다»와
+// «모듈이 있는데 망가졌다»(문법 오류·초기화 실패·의존성 오류·정책
+// 파일 자신의 top-level throw)를 구별하지 않고 «전부» 조용한 2000ms/
+// 재시도-0회 폴백으로 삼켰다 -- 검토자가 정책 모듈에
+// `throw new Error(...)`를 주입해 `{"calls":1,"timeouts":[2000]}`로
+// 실증했다. ★수리: «의도된 폴백은 모듈 부재 하나뿐»이라는 계약을
+// 코드로 강제한다 -- Node의 동적 import는 대상 파일 자체가 없을 때
+// `err.code === "ERR_MODULE_NOT_FOUND"`이면서 메시지가 "Cannot find
+// module '<이 파일 자신의 절대경로>'"를 낸다(직접 실측 확인, 아래
+// POLICY_MODULE_PATH 대조). 이것과 다른 모든 에러(문법 오류는
+// `SyntaxError`+`code:undefined`, top-level throw는 평범한
+// `Error`+`code:undefined`, «의존성»이 없는 경우는 code는 같은
+// ERR_MODULE_NOT_FOUND이지만 메시지가 «다른 파일 이름»을 지목함 --
+// 셋 다 직접 실측 확인)는 ★**삼키지 않고 다시 던진다**(rethrow) --
+// 이 파일의 top-level await 자체가 거부되어, 이 모듈을 import하는
+// 모든 소비자(프로덕션 경로 포함)의 로드가 함께 실패한다. «시끄러운
+// 실패»를 이 형태로 정의한 이유: 조용한 마커나 로그 한 줄은 아무도
+// 안 보면 그만이지만, 모듈 로드 자체의 실패는 무시할 수 없다(호출자가
+// 존재를 몰랐던 예외를 강제로 마주친다) -- 이 저장소의 다른 곳들이
+// 이미 쓰는 "fail-closed, 조용한 통과 금지" 기조와 같은 선택이다.
+const POLICY_MODULE_PATH = fileURLToPath(
+  new URL("./child-probe-timeout-policy.mjs", import.meta.url),
+);
+
+function isPolicyModuleAbsent(err) {
+  return (
+    err &&
+    err.code === "ERR_MODULE_NOT_FOUND" &&
+    typeof err.message === "string" &&
+    err.message.includes(`Cannot find module '${POLICY_MODULE_PATH}'`)
+  );
+}
+
 let childProbeTimeoutPolicy;
 try {
   childProbeTimeoutPolicy = await import("./child-probe-timeout-policy.mjs");
-} catch {
+} catch (err) {
+  if (!isPolicyModuleAbsent(err)) throw err;
   childProbeTimeoutPolicy = null;
 }
+
+// §2⑴ⓑ "폴백 사용이 관측 가능한가" -- 정책이 없을 때(격리 픽스처의
+// 의도된 모양)와 있을 때를 로그에서 구별할 수 있게 태그를 붙인다.
+// TIMEOUT/OBSERVATION_ERROR 두 상태에만 붙인다(§2⑵의 재시도/timeoutMs
+// 계산이 실제로 갈리는 지점이 이 둘뿐이기 때문 -- 정상 완주는 자식이
+// 낸 자기 출력을 그대로 통과시키므로 부모가 태그를 끼워 넣을 자리가
+// 없다).
+const POLICY_MODE_TAG = childProbeTimeoutPolicy
+  ? "policy=canonical"
+  : "policy=fallback";
 
 function resolveShadowCliTimeoutMs(baseTimeoutMs) {
   if (!childProbeTimeoutPolicy) return baseTimeoutMs;
   return childProbeTimeoutPolicy.resolveChildProbeTimeoutMs(baseTimeoutMs);
 }
+
+// §2⑶ⓒ "폴백 값(2000ms·재시도 0회)이 정책과 다르다는 사실을 어떻게
+// 다루는가" -- 폴백을 정책에서 파생시키지 않는다(못 한다: 정책
+// 모듈이 없다는 것이 폴백의 전제조건이므로, 그 모듈의 함수를 부를
+// 방법 자체가 없다). ★대가: 격리 픽스처 경로에서는 부하-적응·재시도
+// 여유가 없다(기준값 그대로 1회 시도) -- 그러나 그 픽스처들은
+// 애초에 이 적응 배율을 검증 대상으로 삼지 않고(admission 정리·
+// ledger 등 다른 축을 본다), 탐지력(execFileFn의 timeout 옵션 자체가
+// 자식을 죽인다)은 재시도 유무와 무관하게 유지된다(§2⑷).
+const SHADOW_CLI_TIMEOUT_MS = 2000;
 
 // §2⑶ "재시도 1회" -- 무응답(ETIMEDOUT)만, 공통 정책이 로드됐을 때만
 // 정확히 1회 재시도한다(RETRY_ON_TIMEOUT은 child-probe-timeout-
@@ -2151,8 +2211,6 @@ function withTimeoutRetryIfAvailable(fn, isTimeout) {
   if (!childProbeTimeoutPolicy) return fn(0);
   return childProbeTimeoutPolicy.withTimeoutRetry(fn, { isTimeout });
 }
-
-const SHADOW_CLI_TIMEOUT_MS = 2000;
 
 function isTimeoutError(err) {
   // Node의 child_process.execFileSync는 timeout 초과 시 자식을 killSignal로
@@ -2191,9 +2249,11 @@ function normalizeChildStdout(out, taskId) {
 //
 // ★서브프로세스 스폰, 정적 import 아님 -- spawnAbortRecordWriter/
 // spawnAdmissionCompletionProcess와 완전히 같은 이유(그 두 함수 바로 위
-// 주석 참조): 이 파일은 24개 격리 픽스처 시험(admission-completion-
+// 주석 참조): 이 파일은 다수의 격리 픽스처 시험(admission-completion-
 // spawn.test.mjs 등, "relay-handshake.mjs + time-authority/reject-streak/
-// envelope-archive만" 복사해 서브프로세스로 도는 시험)이 의존하는 정적
+// envelope-archive만" 복사해 서브프로세스로 도는 시험 -- 정확한 개수는
+// `node scripts/check/list-relay-handshake-isolated-fixtures.mjs`가
+// 손으로 세지 않고 매번 다시 만든다, HYK-430 4R §2⑵)이 의존하는 정적
 // import 그래프의 일부다 -- 5번째 정적 import를 추가하면 그 시험 전부가
 // LOAD 시점에 MODULE_NOT_FOUND로 깨진다(실측: 첫 시도에서 npm test 60건
 // 실패). retirement-auto-author-shadow-cli.mjs를 스폰만 하면 그 파일이
@@ -2252,9 +2312,14 @@ export function runRetireAuthorShadowObservation({
     // all logged as exactly one line, none fatal to the handshake's own
     // verdict/exit code (mirrors spawnAdmissionCompletionProcess's catch).
     const state = isTimeoutError(err) ? "TIMEOUT" : "OBSERVATION_ERROR";
-    const reason = isTimeoutError(err)
+    const baseReason = isTimeoutError(err)
       ? `spawn exceeded ${timeoutMs}ms, child killed`
       : String(err.stderr ?? err.message ?? "unknown spawn failure");
+    // §2⑴ⓑ 관측 가능성 -- 이 두 상태(TIMEOUT/OBSERVATION_ERROR)에서만
+    // POLICY_MODE_TAG를 붙인다(위 정의 참조): timeoutMs가 정책에서
+    // 나왔는지(canonical), 정책 부재로 기준값 그대로인지(fallback)를
+    // 로그 한 줄 안에서 구별할 수 있게 한다.
+    const reason = `${POLICY_MODE_TAG} ${baseReason}`;
     logFn(shadowLine(state, reason, taskId));
   }
 }

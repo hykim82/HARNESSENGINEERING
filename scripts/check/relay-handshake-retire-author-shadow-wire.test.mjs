@@ -265,9 +265,11 @@ test("(B) 차단 0: 그림자 조립이 실제로 실패해도(DISPATCH_RECEIPT_
 // time-authority/reject-streak/envelope-archive만" 모양) handshake는
 // 여전히 exit 0이다. 이 시험이 바로 이 라운드가 처음에 놓쳤던 것 --
 // retirement-auto-author-facts.mjs/-core.mjs를 relay-handshake.mjs에
-// 정적 import했다가 이 정확한 격리 픽스처 24개가 MODULE_NOT_FOUND로
-// 깨졌었다(실측, 1차 시도). 스폰 방식으로 바꾼 뒤 이 시험이 그 회귀를
-// 고정한다.
+// 정적 import했다가 이런 모양의 격리 픽스처 다수가 MODULE_NOT_FOUND로
+// 깨졌었다(실측, 1차 시도 -- 당시 손으로 센 개수는 이후 라운드들에서
+// 서로 어긋났다, HYK-430 4R §2⑵ 참조 -- 지금은
+// list-relay-handshake-isolated-fixtures.mjs가 그 수를 매번 다시
+// 만든다). 스폰 방식으로 바꾼 뒤 이 시험이 그 회귀를 고정한다.
 // ---------------------------------------------------------------------------
 
 test("(B-2) 회귀 고정: retirement-auto-author-shadow-cli.mjs 등 그림자 결선 형제 파일이 격리 픽스처에 없어도 relay-handshake CLI는 exit 0이다", () => {
