@@ -20,6 +20,10 @@ import {
   isBeyondFutureSkew,
   isSuspectedTimezoneMislabel,
 } from "./time-authority.mjs";
+import {
+  resolveChildProbeTimeoutMs,
+  withTimeoutRetry,
+} from "./child-probe-timeout-policy.mjs";
 
 export { TIME_AUTHORITY_STATE, MAX_FUTURE_SKEW_MS };
 
@@ -2089,127 +2093,31 @@ function shadowLine(state, reason, taskId) {
   return `retire-author-shadow: ${state} reason=${toOneLine(reason)} label=${taskId} (shadow -- 아무것도 차단하지 않음)`;
 }
 
-// HYK-419-wire-2 §2⑴ -- 스폰 자체가 «멈추지 않게» 시간 제한을 건다. 근거:
-// 이 저장소의 실측(retirement-auto-author-shadow-cli.test.mjs)에서 정상
-// 조립+판정은 rounds/ 몇 개 파일만 읽어도 100ms를 넘지 않았다 -- 2000ms는
-// 그 정상 왕복의 20배 이상 여유를 두면서도(디스크 I/O가 유난히 느린
-// 환경까지 흡수), 소비 경로 전체 체감 지연으로는 "느껴지지 않는" 수준이
-// 아니라는 점을 이 라운드는 인정한다(검토 P1-1이 문제 삼은 것은 «무한
-// 대기»이지 «지연 존재 자체»가 아니다 -- coder-task.md §2⑴ "소비 체감에
-// 영향 없는 수준"은 상대적 지침으로 읽었다: 무제한(∞) 대비 2초는 이
-// 소비 경로의 다른 스폰 호출(admission-completion-adapter 등, 이들도
-// 자체 타임아웃이 없다 -- 이 라운드 범위 밖)과 같은 자릿수다).
-// HYK-430 2R (검토 반려 P1-1 수리 -- 로컬 복제를 없앤다, ⛔parity
-// 시험만 키우는 것은 답이 아니다): 이 기준값(부하 0 가정)은 공통
-// 정책(child-probe-timeout-policy.mjs, coder-task.md §2⑶)에서만
-// 나온다. ⚠️격리 픽스처 제약(1R에서 실측, 2R·4R에서 재검증 -- 아래)은
-// 여전히 실재한다: relay-handshake.mjs는 (정확한 개수는 손으로 세지
-// 않는다 -- `node scripts/check/list-relay-handshake-isolated-
-// fixtures.mjs`가 매번 다시 세어 낸다, HYK-430 4R §2⑵) 다수의 격리
-// 픽스처 시험(예: admission-completion-spawn.test.mjs)이 "relay-
-// handshake.mjs + time-authority/reject-streak/envelope-archive 4개
-// 형제 파일만" 복사해 서브프로세스로 도는 정적 import 그래프의
-// 일부라, 5번째
-// 정적 import를 추가하면 그 시험 전부가 LOAD 시점에 MODULE_NOT_FOUND로
-// 깨진다(1R·2R 둘 다 재현). ★수리(1R과 다른 점): "정적 import 불가
-// -> 로컬 복제"가 아니라 "정적 import 불가 -> top-level await로 옵션
-// dynamic import, 실패하면 null"로 바꾼다. 이러면:
-//   - 프로덕션 경로(이 저장소 자신)는 항상 이 형제 파일을 갖고 있으므로
-//     매번 성공 -- 실제 동작은 100% 공통 정책이 결정한다(단일 소스,
-//     완료조건1 충족).
-//   - 격리 픽스처(위, 개수는 list-relay-handshake-isolated-fixtures.mjs가
-//     매번 다시 셈)만 import 실패 -> null로 남는다. 이때
-//     fallback은 «정책 공식을 다시 베끼지 않는다»(그러면 P1-1이
-//     그대로 재발한다) -- 그냥 «적응·재시도 없이 기준값 그대로 1회
-//     시도»로 물러난다(=이 조각 이전의 원래 동작과 동일). ★탐지력은
-//     이 축소 경로에서도 그대로다: execFileFn의 timeout 옵션 자체가
-//     이미 자식을 죽인다 -- 재시도·적응이 없다고 "영원히 안 끝남"이
-//     되지는 않는다(§2⑶ⓐ). 이 폴백은 격리 픽스처가 «의도적으로»
-//     이 형제 파일을 지운 경우에만 발동하며, 그런 시험들은 애초에
-//     이 값(적응 배율)을 검증 대상으로 삼지 않는다(관측 대상은 다른
-//     축 -- admission 정리, ledger 등).
-// 드리프트 개념 자체가 사라진다(복제본이 없으므로 "둘이 갈린다"는
-// 상태가 존재하지 않는다) -- 대신 아래 두 시험이 «진짜 단일 소스»를
-// 직접 증명한다: (a) 정본 모듈만 변이해도 이 파일의 실제 산출(로그
-// 문구의 timeoutMs)이 그 변이를 반영한다 (b) 정본 모듈이 격리
-// 픽스처에서 빠지면 폴백 경로로 물러나되 조용히 죽지 않는다(exit 0
-// 유지, 회귀 없음) -- relay-handshake-canonical-policy-wiring.test.mjs.
-//
-// HYK-430 4R (검토 반려 P1-1 재수리 -- "폴백이 숨은 두 번째 정책이다"):
-// 2R의 `catch { childProbeTimeoutPolicy = null; }`는 «모듈이 없다»와
-// «모듈이 있는데 망가졌다»(문법 오류·초기화 실패·의존성 오류·정책
-// 파일 자신의 top-level throw)를 구별하지 않고 «전부» 조용한 2000ms/
-// 재시도-0회 폴백으로 삼켰다 -- 검토자가 정책 모듈에
-// `throw new Error(...)`를 주입해 `{"calls":1,"timeouts":[2000]}`로
-// 실증했다. ★수리: «의도된 폴백은 모듈 부재 하나뿐»이라는 계약을
-// 코드로 강제한다 -- Node의 동적 import는 대상 파일 자체가 없을 때
-// `err.code === "ERR_MODULE_NOT_FOUND"`이면서 메시지가 "Cannot find
-// module '<이 파일 자신의 절대경로>'"를 낸다(직접 실측 확인, 아래
-// POLICY_MODULE_PATH 대조). 이것과 다른 모든 에러(문법 오류는
-// `SyntaxError`+`code:undefined`, top-level throw는 평범한
-// `Error`+`code:undefined`, «의존성»이 없는 경우는 code는 같은
-// ERR_MODULE_NOT_FOUND이지만 메시지가 «다른 파일 이름»을 지목함 --
-// 셋 다 직접 실측 확인)는 ★**삼키지 않고 다시 던진다**(rethrow) --
-// 이 파일의 top-level await 자체가 거부되어, 이 모듈을 import하는
-// 모든 소비자(프로덕션 경로 포함)의 로드가 함께 실패한다. «시끄러운
-// 실패»를 이 형태로 정의한 이유: 조용한 마커나 로그 한 줄은 아무도
-// 안 보면 그만이지만, 모듈 로드 자체의 실패는 무시할 수 없다(호출자가
-// 존재를 몰랐던 예외를 강제로 마주친다) -- 이 저장소의 다른 곳들이
-// 이미 쓰는 "fail-closed, 조용한 통과 금지" 기조와 같은 선택이다.
-const POLICY_MODULE_PATH = fileURLToPath(
-  new URL("./child-probe-timeout-policy.mjs", import.meta.url),
-);
-
-function isPolicyModuleAbsent(err) {
-  return (
-    err &&
-    err.code === "ERR_MODULE_NOT_FOUND" &&
-    typeof err.message === "string" &&
-    err.message.includes(`Cannot find module '${POLICY_MODULE_PATH}'`)
-  );
-}
-
-let childProbeTimeoutPolicy;
-try {
-  childProbeTimeoutPolicy = await import("./child-probe-timeout-policy.mjs");
-} catch (err) {
-  if (!isPolicyModuleAbsent(err)) throw err;
-  childProbeTimeoutPolicy = null;
-}
-
-// §2⑴ⓑ "폴백 사용이 관측 가능한가" -- 정책이 없을 때(격리 픽스처의
-// 의도된 모양)와 있을 때를 로그에서 구별할 수 있게 태그를 붙인다.
-// TIMEOUT/OBSERVATION_ERROR 두 상태에만 붙인다(§2⑵의 재시도/timeoutMs
-// 계산이 실제로 갈리는 지점이 이 둘뿐이기 때문 -- 정상 완주는 자식이
-// 낸 자기 출력을 그대로 통과시키므로 부모가 태그를 끼워 넣을 자리가
-// 없다).
-const POLICY_MODE_TAG = childProbeTimeoutPolicy
-  ? "policy=canonical"
-  : "policy=fallback";
-
-function resolveShadowCliTimeoutMs(baseTimeoutMs) {
-  if (!childProbeTimeoutPolicy) return baseTimeoutMs;
-  return childProbeTimeoutPolicy.resolveChildProbeTimeoutMs(baseTimeoutMs);
-}
-
-// §2⑶ⓒ "폴백 값(2000ms·재시도 0회)이 정책과 다르다는 사실을 어떻게
-// 다루는가" -- 폴백을 정책에서 파생시키지 않는다(못 한다: 정책
-// 모듈이 없다는 것이 폴백의 전제조건이므로, 그 모듈의 함수를 부를
-// 방법 자체가 없다). ★대가: 격리 픽스처 경로에서는 부하-적응·재시도
-// 여유가 없다(기준값 그대로 1회 시도) -- 그러나 그 픽스처들은
-// 애초에 이 적응 배율을 검증 대상으로 삼지 않고(admission 정리·
-// ledger 등 다른 축을 본다), 탐지력(execFileFn의 timeout 옵션 자체가
-// 자식을 죽인다)은 재시도 유무와 무관하게 유지된다(§2⑷).
+// HYK-430 5R (§0 재설계 -- 폴백을 «더 잘 만들기»가 아니라 폴백이 필요한
+// 상황 자체를 제거한다): 1R(복제) -> 2R(동적 import + 조용한 폴백) ->
+// 4R(폴백을 모듈-부재 판별식으로 좁힘)까지 세 라운드가 이 자리에서
+// 싸운 이유는 전부 같은 전제 하나였다 -- "격리 픽스처가
+// child-probe-timeout-policy.mjs를 형제로 복사하지 않는다"는 환경
+// 제약. 그 전제 자체를 5R에서 없앤다: relay-handshake.mjs를 격리
+// 임시 디렉터리에 복사해 자식으로 돌리는 모든 시험(list-relay-
+// handshake-isolated-fixtures.mjs가 기계로 세는 그 집합, HYK-430 4R
+// §2⑵)이 이제 child-probe-timeout-policy.mjs도 형제로 함께 복사한다
+// (scripts/check/relay-handshake-fixture-siblings.mjs가 그 복사 목록의
+// 단일 소스). "정책을 못 읽는 경우"가 더 이상 존재하지 않으므로,
+// 그 경우를 처리하던 동적 import·catch·isPolicyModuleAbsent·로컬
+// 2000ms/재시도 0 폴백 경로가 전부 불필요해져 지운다 -- 남는 것은
+// 평범한 정적 import 하나뿐이다.
 const SHADOW_CLI_TIMEOUT_MS = 2000;
 
-// §2⑶ "재시도 1회" -- 무응답(ETIMEDOUT)만, 공통 정책이 로드됐을 때만
-// 정확히 1회 재시도한다(RETRY_ON_TIMEOUT은 child-probe-timeout-
-// policy.mjs가 유일한 정의처다). 정책이 없으면(격리 픽스처) 재시도
-// 없이 1회만 시도한다 -- §2⑷ 음성 대조: (E) 시험이 정책 로드 상태에서
-// 실제 지연 자식으로 재시도까지 고정한다.
+function resolveShadowCliTimeoutMs(baseTimeoutMs) {
+  return resolveChildProbeTimeoutMs(baseTimeoutMs);
+}
+
+// §2⑶ "재시도 1회" -- 무응답(ETIMEDOUT)에서만 정확히 1회 재시도한다
+// (RETRY_ON_TIMEOUT은 child-probe-timeout-policy.mjs가 유일한
+// 정의처다).
 function withTimeoutRetryIfAvailable(fn, isTimeout) {
-  if (!childProbeTimeoutPolicy) return fn(0);
-  return childProbeTimeoutPolicy.withTimeoutRetry(fn, { isTimeout });
+  return withTimeoutRetry(fn, { isTimeout });
 }
 
 function isTimeoutError(err) {
@@ -2312,14 +2220,9 @@ export function runRetireAuthorShadowObservation({
     // all logged as exactly one line, none fatal to the handshake's own
     // verdict/exit code (mirrors spawnAdmissionCompletionProcess's catch).
     const state = isTimeoutError(err) ? "TIMEOUT" : "OBSERVATION_ERROR";
-    const baseReason = isTimeoutError(err)
+    const reason = isTimeoutError(err)
       ? `spawn exceeded ${timeoutMs}ms, child killed`
       : String(err.stderr ?? err.message ?? "unknown spawn failure");
-    // §2⑴ⓑ 관측 가능성 -- 이 두 상태(TIMEOUT/OBSERVATION_ERROR)에서만
-    // POLICY_MODE_TAG를 붙인다(위 정의 참조): timeoutMs가 정책에서
-    // 나왔는지(canonical), 정책 부재로 기준값 그대로인지(fallback)를
-    // 로그 한 줄 안에서 구별할 수 있게 한다.
-    const reason = `${POLICY_MODE_TAG} ${baseReason}`;
     logFn(shadowLine(state, reason, taskId));
   }
 }

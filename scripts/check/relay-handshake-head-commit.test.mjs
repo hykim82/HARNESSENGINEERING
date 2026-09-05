@@ -22,14 +22,11 @@ import {
   resolveHeadCommitBinding,
 } from "./relay-handshake.mjs";
 import { isolatedChildEnv } from "./admission-ledger-env-isolation.mjs";
+import { RELAY_HANDSHAKE_STATIC_SIBLINGS } from "./relay-handshake-fixture-siblings.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const CLI_PATH = join(HERE, "relay-handshake.mjs");
-const SIBLING_DEPS = [
-  "reject-streak.mjs",
-  "envelope-archive.mjs",
-  "time-authority.mjs",
-];
+const SIBLING_DEPS = RELAY_HANDSHAKE_STATIC_SIBLINGS;
 
 function withFixtureDir(prefix, fn) {
   const dir = mkdtempSync(join(tmpdir(), prefix));

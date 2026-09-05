@@ -80,13 +80,25 @@ export function findIsolatedCopyTests({ repoRoot = REPO_ROOT } = {}) {
   return files.sort();
 }
 
-// 3) 2)의 부분집합 중 child-probe-timeout-policy.mjs를 함께 복사하지
-// «않는» 시험 -- relay-handshake.mjs의 동적 import가 실제로
-// ERR_MODULE_NOT_FOUND(정책 부재) 폴백을 타는 시험 목록.
+// 3) HYK-430 5R: 폴백이 제거되고 relay-handshake.mjs가
+// child-probe-timeout-policy.mjs를 정적 import하게 되면서, 이 부분집합의
+// 의미가 "정책 부재 폴백을 타는 시험"에서 "정책 파일을 형제로 복사하지
+// 않아 MODULE_NOT_FOUND로 즉시 깨지는 시험"으로 바뀌었다(함수 이름은
+// 4R 이후 여러 곳에서 참조되어 그대로 둔다). 리터럴 "child-probe-timeout-
+// policy"를 자기 파일 안에 직접 갖고 있거나(개별 복사), 5R이 만든 단일
+// 소스 scripts/check/relay-handshake-fixture-siblings.mjs를 import해서
+// RELAY_HANDSHAKE_STATIC_SIBLINGS/RELAY_HANDSHAKE_FIXTURE_FILES로
+// 간접 복사하면(대부분의 격리 픽스처가 5R부터 이 방식이다) 둘 다
+// "복사함"으로 인정한다 -- 그렇지 않으면 소스를 한 곳으로 모은 파일들이
+// 리터럴이 없다는 이유만으로 이 목록에 거짓으로 다시 나타난다.
 export function findFallbackExercisingTests({ repoRoot = REPO_ROOT } = {}) {
   return findIsolatedCopyTests({ repoRoot }).filter((relPath) => {
     const content = readFileSync(join(repoRoot, relPath), "utf8");
-    return !content.includes("child-probe-timeout-policy");
+    const copiesDirectly = content.includes("child-probe-timeout-policy");
+    const copiesViaSharedSiblingsModule =
+      content.includes("relay-handshake-fixture-siblings.mjs") &&
+      /RELAY_HANDSHAKE_(STATIC_SIBLINGS|FIXTURE_FILES)/.test(content);
+    return !copiesDirectly && !copiesViaSharedSiblingsModule;
   });
 }
 

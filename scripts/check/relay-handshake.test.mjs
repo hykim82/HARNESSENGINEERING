@@ -35,6 +35,7 @@ import {
   isolatedChildEnv,
   isolatedChildEnvWithLedger,
 } from "./admission-ledger-env-isolation.mjs";
+import { RELAY_HANDSHAKE_STATIC_SIBLINGS } from "./relay-handshake-fixture-siblings.mjs";
 
 // import.meta.url is resolved relative to this file's own location, not the
 // process cwd -- unaffected by the cwd axis (repo root vs scripts/check),
@@ -974,6 +975,16 @@ const TIME_AUTHORITY_SRC = execFileSync(
   { encoding: "utf8" },
 );
 
+// HYK-430 5R: relay-handshake.mjs now also statically imports
+// "./child-probe-timeout-policy.mjs" (the polled-fallback removal) -- same
+// MODULE_NOT_FOUND risk the three siblings above already document, now for
+// a fourth.
+const CHILD_PROBE_TIMEOUT_POLICY_SRC = execFileSync(
+  "git",
+  ["show", "HEAD:scripts/check/child-probe-timeout-policy.mjs"],
+  { encoding: "utf8" },
+);
+
 function writeMutantCli(mutatedSrc) {
   const rootDir = mkdtempSync(join(tmpdir(), "relay-handshake-mutant-"));
   const scriptsCheckDir = join(rootDir, "scripts", "check");
@@ -993,6 +1004,11 @@ function writeMutantCli(mutatedSrc) {
   writeFileSync(
     join(scriptsCheckDir, "time-authority.mjs"),
     TIME_AUTHORITY_SRC,
+    "utf8",
+  );
+  writeFileSync(
+    join(scriptsCheckDir, "child-probe-timeout-policy.mjs"),
+    CHILD_PROBE_TIMEOUT_POLICY_SRC,
     "utf8",
   );
   return { rootDir, mutantPath };
@@ -1619,17 +1635,13 @@ test("HYK-244 2R-ci-1 RED(변이, 필수): 경로 조립에서 소문자화를 �
 
   const mutDir = mkdtempSync(join(tmpdir(), "relay-handshake-ci-mut-"));
   try {
-    // relay-handshake.mjs 자신이 3개 형제 모듈(reject-streak.mjs·
-    // envelope-archive.mjs·time-authority.mjs)을 정적 import하므로, 동적
-    // import가 module resolution에서 성공하려면 그 사본도 같은
-    // 디렉터리에 함께 있어야 한다(이 저장소의 다른 mutation 격리
-    // 픽스처들과 동일한 관례).
+    // relay-handshake.mjs 자신이 형제 모듈(reject-streak.mjs·
+    // envelope-archive.mjs·time-authority.mjs·child-probe-timeout-
+    // policy.mjs)을 정적 import하므로, 동적 import가 module resolution에서
+    // 성공하려면 그 사본도 같은 디렉터리에 함께 있어야 한다(이 저장소의
+    // 다른 mutation 격리 픽스처들과 동일한 관례).
     const here = dirname(fileURLToPath(import.meta.url));
-    for (const dep of [
-      "reject-streak.mjs",
-      "envelope-archive.mjs",
-      "time-authority.mjs",
-    ]) {
+    for (const dep of RELAY_HANDSHAKE_STATIC_SIBLINGS) {
       writeFileSync(
         join(mutDir, dep),
         readFileSync(join(here, dep), "utf8"),
@@ -2129,6 +2141,11 @@ const KNOWN_NON_SPAWN_LITERAL_REFERENCES = [
   // 안에서 이 이름을 찾을 뿐, 이 파일 자신은 relay-handshake.mjs를
   // spawn/import 둘 다 하지 않는다(HYK-430 4R §2⑵).
   "scripts/check/list-relay-handshake-isolated-fixtures.mjs",
+  // relay-handshake-fixture-siblings.mjs: HYK-430 5R -- 격리 픽스처가
+  // 복사해야 할 형제 파일 이름 목록의 단일 소스(§2⑵). 배열 리터럴
+  // 안에 "relay-handshake.mjs" 문자열이 있을 뿐, 이 파일 자신은
+  // relay-handshake.mjs를 spawn/import 둘 다 하지 않는다.
+  "scripts/check/relay-handshake-fixture-siblings.mjs",
 ];
 
 test("HYK-344 3R: relay-handshake.mjs CLI를 실제로 실행(spawn)하는 프로덕션 호출자는 이 저장소 안에 0건 -- «지금은 사람이 유일한 호출자»가 시험으로 고정된다", () => {

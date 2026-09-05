@@ -31,6 +31,7 @@ import {
   runRetireAuthorShadowObservation,
   parseKstTimestamp,
 } from "./relay-handshake.mjs";
+import { RELAY_HANDSHAKE_STATIC_SIBLINGS } from "./relay-handshake-fixture-siblings.mjs";
 
 const CHECK_DIR = dirname(fileURLToPath(import.meta.url));
 // HYK-414 1R (time-judgment-now-injection.test.mjs) -- checkRelayHandshake를
@@ -282,9 +283,7 @@ test("(B-2) 회귀 고정: retirement-auto-author-shadow-cli.mjs 등 그림자 �
     // 복사한다(의도적으로 retirement-auto-author-*.mjs 없음).
     for (const name of [
       "relay-handshake.mjs",
-      "time-authority.mjs",
-      "reject-streak.mjs",
-      "envelope-archive.mjs",
+      ...RELAY_HANDSHAKE_STATIC_SIBLINGS,
     ]) {
       writeFileSync(
         join(isolatedCheckDir, name),

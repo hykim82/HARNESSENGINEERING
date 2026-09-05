@@ -46,6 +46,12 @@ const ENVELOPE_ARCHIVE_PATH = join(HERE, "envelope-archive.mjs");
 const TIME_AUTHORITY_PATH = join(HERE, "time-authority.mjs");
 // HYK-240: review-gate.mjs now also imports "./review-approval-binding.mjs".
 const REVIEW_APPROVAL_BINDING_PATH = join(HERE, "review-approval-binding.mjs");
+// HYK-430 5R: relay-handshake.mjs now also statically imports
+// "./child-probe-timeout-policy.mjs".
+const CHILD_PROBE_TIMEOUT_POLICY_PATH = join(
+  HERE,
+  "child-probe-timeout-policy.mjs",
+);
 
 function tmpDir(prefix) {
   return mkdtempSync(join(tmpdir(), prefix));
@@ -211,6 +217,11 @@ test("mutation 축B (필수): review-gate.mjs's recordApprovalToLedger call remo
     writeFileSync(
       join(scriptsCheckDir, "time-authority.mjs"),
       readFileSync(TIME_AUTHORITY_PATH, "utf8"),
+      "utf8",
+    );
+    writeFileSync(
+      join(scriptsCheckDir, "child-probe-timeout-policy.mjs"),
+      readFileSync(CHILD_PROBE_TIMEOUT_POLICY_PATH, "utf8"),
       "utf8",
     );
     writeFileSync(

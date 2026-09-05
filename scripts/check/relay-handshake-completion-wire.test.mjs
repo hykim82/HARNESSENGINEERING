@@ -24,6 +24,7 @@ import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
 import { runAdmissionCli } from "../supervisor/admission-cli.mjs";
 import { checkRelayHandshake } from "./relay-handshake.mjs";
+import { RELAY_HANDSHAKE_STATIC_SIBLINGS } from "./relay-handshake-fixture-siblings.mjs";
 
 const CHECK_DIR = dirname(fileURLToPath(import.meta.url));
 const RELAY_HANDSHAKE_PATH = join(CHECK_DIR, "relay-handshake.mjs");
@@ -260,9 +261,7 @@ function stageIsolatedRelayHandshakeDeps(rootDir) {
   mkdirSync(checkDir, { recursive: true });
   mkdirSync(supervisorDir, { recursive: true });
   for (const name of [
-    "time-authority.mjs",
-    "reject-streak.mjs",
-    "envelope-archive.mjs",
+    ...RELAY_HANDSHAKE_STATIC_SIBLINGS,
     "admission-completion-adapter.mjs",
     // HYK-302/355 §2-A dedup: both admission-completion-adapter.mjs and
     // relay-handshake.mjs (staged elsewhere in this test) now statically

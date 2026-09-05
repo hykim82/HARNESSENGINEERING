@@ -214,6 +214,7 @@ test("(hyk387-3r-6)★ 되돌림 변이: 포인터 파일 fallback(readDispatchR
       "reject-streak.mjs",
       "envelope-archive.mjs",
       "time-authority.mjs",
+      "child-probe-timeout-policy.mjs",
     ]) {
       writeFileSync(
         join(nestedDir, dep),

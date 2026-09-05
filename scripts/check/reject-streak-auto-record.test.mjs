@@ -478,6 +478,12 @@ const TIME_AUTHORITY_SRC_HEAD = readFileSync(
   join(ROOT, "scripts", "check", "time-authority.mjs"),
   "utf8",
 );
+// HYK-430 5R: relay-handshake.mjs now also statically imports
+// "./child-probe-timeout-policy.mjs" -- same transitive-sibling risk.
+const CHILD_PROBE_TIMEOUT_POLICY_SRC_HEAD = readFileSync(
+  join(ROOT, "scripts", "check", "child-probe-timeout-policy.mjs"),
+  "utf8",
+);
 
 function assertExactlyOneMatch(src, target, label) {
   const count = src.split(target).length - 1;
@@ -501,6 +507,11 @@ function writeMutantPair(rootDir, { relaySrc, streakSrc }) {
   writeFileSync(
     join(scriptsCheckDir, "time-authority.mjs"),
     TIME_AUTHORITY_SRC_HEAD,
+    "utf8",
+  );
+  writeFileSync(
+    join(scriptsCheckDir, "child-probe-timeout-policy.mjs"),
+    CHILD_PROBE_TIMEOUT_POLICY_SRC_HEAD,
     "utf8",
   );
   return join(scriptsCheckDir, "relay-handshake.mjs");

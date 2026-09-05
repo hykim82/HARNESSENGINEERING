@@ -38,6 +38,7 @@ const REJECT_STREAK_SRC = readFileSync(join(HERE, "reject-streak.mjs"), "utf8");
 const SIBLING_DEPS = [
   "envelope-archive.mjs",
   "time-authority.mjs",
+  "child-probe-timeout-policy.mjs",
   "admission-completion-adapter.mjs",
   "consumption-receipt-writer.mjs",
   "consumption-receipt-core.mjs",
