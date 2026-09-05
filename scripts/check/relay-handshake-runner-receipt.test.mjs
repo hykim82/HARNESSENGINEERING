@@ -25,6 +25,7 @@ import {
   RUNNER_RECEIPT_REJECT_REASON,
   parseKstTimestamp,
 } from "./relay-handshake.mjs";
+import { RELAY_HANDSHAKE_STATIC_SIBLINGS } from "./relay-handshake-fixture-siblings.mjs";
 
 // HYK-414 1R -- 이 파일의 모든 픽스처는 절대시각(dropped_at 06:00 /
 // finished_at 06:09:00 / DONE 06:10:00, 전부 2026-09-01 KST)을 쓴다.
@@ -40,15 +41,11 @@ const FIXED_NOW_MS = parseKstTimestamp("2026-09-01 06:15:00 KST").getTime();
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const RELAY_HANDSHAKE_PATH = join(HERE, "relay-handshake.mjs");
-// relay-handshake.mjs's real static sibling dependency list (grep-verified,
-// same list relay-handshake-head-commit.test.mjs's mutation harness uses) --
-// the mutated copy below is written to a FRESH tmpdir with no other files,
-// so its relative imports resolve only if these are copied alongside it.
-const SIBLING_DEPS = [
-  "reject-streak.mjs",
-  "envelope-archive.mjs",
-  "time-authority.mjs",
-];
+// relay-handshake.mjs's real static sibling dependency list (single source,
+// scripts/check/relay-handshake-fixture-siblings.mjs) -- the mutated copy
+// below is written to a FRESH tmpdir with no other files, so its relative
+// imports resolve only if these are copied alongside it.
+const SIBLING_DEPS = RELAY_HANDSHAKE_STATIC_SIBLINGS;
 
 function withFixtureDir(prefix, fn) {
   const dir = mkdtempSync(join(tmpdir(), prefix));
@@ -412,8 +409,16 @@ async function importMutatedRelayHandshake(mutatedSrc, label) {
 
 test("(rr-e1)★ 되돌림 변이: 소비 축(checkRelayHandshake 결선) 자체를 제거하면 -- (rr-a)의 파이프 은폐 빨간 실행 표본이 다시 통과한다(RED, load-bearing 증명)", async () => {
   const src = readFileSync(RELAY_HANDSHAKE_PATH, "utf8");
+  // HYK-423 3R §2: call-site text updated -- `resultContent` is now
+  // `resultContent: judgedRegion` (the same DONE-line-bounded region the
+  // observation fingerprint uses, coder.md ⑵) so this gate can no longer be
+  // fed content placed after the DONE line. The wiring this mutation proves
+  // load-bearing (resolveRunnerReceiptVerdict + the ok:false return) is
+  // unchanged, only its input's scope narrowed; deleting this whole block
+  // still removes both the gate AND that scoping, so the RED assertion
+  // below still proves the gate itself is load-bearing.
   const target =
-    "  const runnerReceiptVerdict = resolveRunnerReceiptVerdict({\n    resultContent,\n    harnessDir,\n  });\n  if (!runnerReceiptVerdict.ok) return runnerReceiptVerdict;\n\n";
+    "  const runnerReceiptVerdict = resolveRunnerReceiptVerdict({\n    resultContent: judgedRegion,\n    harnessDir,\n  });\n  if (!runnerReceiptVerdict.ok) return runnerReceiptVerdict;\n\n";
   assertExactlyOneMatch(src, target, "runner receipt wiring block");
   const mutated = src.replace(target, "");
   assert.equal(mutated.length, src.length - target.length);

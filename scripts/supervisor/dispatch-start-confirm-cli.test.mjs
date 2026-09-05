@@ -19,6 +19,7 @@ import {
   DISPATCH_START_CONFIRM_EXIT_CODE,
 } from "./dispatch-start-confirm-cli.mjs";
 import { MAX_EFFECTIVE_STALL_THRESHOLD_MS } from "./dispatch-start-size-core.mjs";
+import { resolveChildProbeBudget } from "../check/child-probe-timeout-policy.mjs";
 
 function withTempDir(prefix, fn) {
   const dir = mkdtempSync(join(tmpdir(), prefix));
@@ -559,8 +560,25 @@ test("CLI end-to-end(spawn): NOT_STARTED면 종료코드 1 + notifyDir에 «재�
 // 늘려 여유를 키운다(수학적 보장은 아니다 -- §2-3 정정 문구와 동일한
 // 정직 한계, 극단적 부하면 여전히 이론상 깨질 수 있다 -- 다만 실측
 // 표본으로 그 여유가 실전에서 충분함을 보인다, 아래 반복 실행 실측).
-const GROWTH_WINDOW_MS = 4000; // 부하 아래 자식 spawn 지연에 대한 실측 기반 여유(위 주석).
+// HYK-430 1R (coder-task.md §2⑶): 이 900ms->4000ms 실측 보정 자체가
+// "이 표면 하나만 숫자를 키운" HYK-329의 원형이었다 -- 이제 그 기준값을
+// 공통 정책(child-probe-timeout-policy.mjs)의 "부하 0" 입력으로 삼고,
+// 그 시점 가용 메모리가 낮으면(=바로 이 반복 실행 자체가 만드는 부하,
+// §1-1 관측 문서 참조) 정책이 자동으로 더 넓혀준다 -- 이 표면이 다시
+// 따로 숫자를 올릴 필요가 없다는 것이 §3 항3("실제로 거친다")의 증거다.
+const BASE_GROWTH_WINDOW_MS = 4000; // 부하 0 기준값(위 실측 근거 그대로).
+const BASE_CLI_TIMEOUT_MS = 15000; // 부하 0 기준값(아래 스폰 인자 참고).
+const PROBE_BUDGET = resolveChildProbeBudget({
+  baseStartupMs: BASE_GROWTH_WINDOW_MS,
+  baseResponseMs: BASE_CLI_TIMEOUT_MS,
+});
+// 성장창·stall-threshold는 "자식이 기동해 관측 가능한 상태가 될 때까지"
+// 쪽이므로 시작 배율(startupMs)을 쓴다 -- --timeout-ms는 전체 왕복
+// 예산이므로 응답 배율(responseMs)을 쓴다.
+const GROWTH_WINDOW_MS = PROBE_BUDGET.startupMs;
 const GROWTH_TICK_MS = 20;
+const STALL_THRESHOLD_MS = PROBE_BUDGET.startupMs;
+const CLI_TIMEOUT_MS = PROBE_BUDGET.responseMs;
 
 // ★HYK-329 수리 -- 원인 기전(결과 파일 §1에 실측 기록): 이전 버전은
 // `elapsed += tickMs`로 "틱이 몇 번 불렸는가"만 셌다. setInterval의 콜백
@@ -654,9 +672,9 @@ async function runStalledAfterStartOnce({ label }) {
             // 만큼 stall-threshold·timeout도 같이 늘려 자식 spawn 지연
             // 여유를 유지한다.
             "--timeout-ms",
-            "15000",
+            String(CLI_TIMEOUT_MS),
             "--stall-threshold-ms",
-            "4000",
+            String(STALL_THRESHOLD_MS),
             "--poll-interval-ms",
             "40",
           ],
@@ -810,9 +828,9 @@ test("CLI end-to-end(spawn): --claude-home·--baseline-bytes 인자가 실제로
             // ★HYK-329 2차 원인 수리(위 GROWTH_WINDOW_MS 주석 참조) -- 이
             // 값들은 growth 창(4000ms)과 짝을 맞춘다.
             "--timeout-ms",
-            "15000",
+            String(CLI_TIMEOUT_MS),
             "--stall-threshold-ms",
-            "4000",
+            String(STALL_THRESHOLD_MS),
             "--poll-interval-ms",
             "40",
           ],
@@ -890,9 +908,9 @@ test("CLI end-to-end(spawn): --claude-home에 codex류 폴더를 넘겨도 동�
             // ★HYK-329 2차 원인 수리(위 GROWTH_WINDOW_MS 주석 참조) -- 이
             // 값들은 growth 창(4000ms)과 짝을 맞춘다.
             "--timeout-ms",
-            "15000",
+            String(CLI_TIMEOUT_MS),
             "--stall-threshold-ms",
-            "4000",
+            String(STALL_THRESHOLD_MS),
             "--poll-interval-ms",
             "40",
           ],

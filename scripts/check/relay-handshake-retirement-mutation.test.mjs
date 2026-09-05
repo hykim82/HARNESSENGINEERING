@@ -23,6 +23,7 @@ import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { createHash } from "node:crypto";
 import { runAdmissionCli } from "../supervisor/admission-cli.mjs";
+import { RELAY_HANDSHAKE_STATIC_SIBLINGS } from "./relay-handshake-fixture-siblings.mjs";
 
 const CHECK_DIR = dirname(fileURLToPath(import.meta.url));
 const RELAY_HANDSHAKE_PATH = join(CHECK_DIR, "relay-handshake.mjs");
@@ -87,9 +88,7 @@ function stageIsolatedRelayHandshakeDeps(rootDir) {
   mkdirSync(checkDir, { recursive: true });
   mkdirSync(supervisorDir, { recursive: true });
   for (const name of [
-    "time-authority.mjs",
-    "reject-streak.mjs",
-    "envelope-archive.mjs",
+    ...RELAY_HANDSHAKE_STATIC_SIBLINGS,
     "admission-completion-adapter.mjs",
     "ledger-pointer-shared.mjs",
     "retirement-record-core.mjs",

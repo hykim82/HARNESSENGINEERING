@@ -56,6 +56,10 @@ const TIME_AUTHORITY_SRC = readFileSync(
   join(HERE, "time-authority.mjs"),
   "utf8",
 );
+const CHILD_PROBE_TIMEOUT_POLICY_SRC = readFileSync(
+  join(HERE, "child-probe-timeout-policy.mjs"),
+  "utf8",
+);
 
 function tmpDir(prefix) {
   return mkdtempSync(join(tmpdir(), prefix));
@@ -170,6 +174,11 @@ function writeMutantRelayHandshake(mutatedSrc) {
   writeFileSync(
     join(scriptsCheckDir, "time-authority.mjs"),
     TIME_AUTHORITY_SRC,
+    "utf8",
+  );
+  writeFileSync(
+    join(scriptsCheckDir, "child-probe-timeout-policy.mjs"),
+    CHILD_PROBE_TIMEOUT_POLICY_SRC,
     "utf8",
   );
   return { rootDir, mutantPath };
@@ -294,16 +303,36 @@ test("HYK-355 (b) 정당한 실물 기록 회귀 0: harnessDir가 실제로 링�
 // 증명한다(defense-in-depth) -- 그래서 GATE_TARGET과 함께 axis ⓑ의
 // checkRelayHandshake 호출부도 걷어내 원래 HYK-355가 겨냥했던 정확히 그
 // 격리 조건을 재현한다.
+// HYK-423 3R §2: call-site text updated -- `resultContent` is now
+// `resultContent: judgedRegion` (the DONE-line-bounded region the
+// observation fingerprint uses, coder.md ⑵) so this axis can no longer be
+// fed a head_commit: line placed after the DONE line (2R's exact reject
+// shape). The axis this isolation targets (resolveHeadCommitBinding + the
+// ok:false return) is unchanged, only its input's scope narrowed; removing
+// this whole block still removes both the axis AND that scoping, so this
+// test's isolation intent is unaffected.
 const HEAD_COMMIT_AXIS_CALL_TARGET =
   "  const headCommitVerdict = resolveHeadCommitBinding({\n" +
   "    role,\n" +
   "    taskContent,\n" +
-  "    resultContent,\n" +
+  "    resultContent: judgedRegion,\n" +
   "    harnessDir,\n" +
   "  });\n" +
   "  if (!headCommitVerdict.ok) return headCommitVerdict;\n";
 
-test("HYK-355 (c) 변이 검사 ① (axis ⓑ를 격리한 채로): 게이트를 디스크에서 실제로 지우면 -> probe 시나리오가 (합성) 원장에 기록된다 (RED, HYK-355 게이트 자신이 defense-in-depth로 여전히 올바르다는 증거)", () => {
+// HYK-428 갱신: 이 시험의 원래 RED 기대("게이트를 지우면 probe의 조작 항목이
+// cwd 저장소(mainDir)에 «착지한다»")는 HYK-428 이전 세계에서만 성립했다 --
+// 그 세계의 ledgerPath는 언제나 mainRepoRoot()(무인자, cwd 기반)로 풀렸으므로
+// harnessDir가 무엇이든 cwd 저장소가 «착지점»이었다. HYK-428은 그 자체를
+// 구조적으로 없앴다: ledgerPath는 이제 harnessDir 자신을 기준으로만 풀린다
+// (mainRepoRoot(harnessDir), relay-handshake.mjs 자신의 헤더 참조) -- 그
+// 결과 이 게이트(HYK-355)를 «물리적으로 지워도», probeDir(git 저장소조차
+// 아님)를 기준으로는 애초에 그 어떤 저장소로도 풀리지 않으므로(fail-closed,
+// HYK-428의 try/catch가 uncaught 크래시 대신 LEDGER_WRITE_ERROR로 접는다)
+// cwd 저장소(mainDir)에도 착지하지 않는다. 즉 HYK-428은 HYK-355의 게이트가
+// 지워진 상태에서도 여전히 막는 **세 번째, 더 깊은** 방어선이다 -- 이 시험은
+// 이제 그 사실(RED가 더 이상 재현되지 않는다는 것 자체)을 고정한다.
+test("HYK-355 (c)★ HYK-428 갱신: 게이트(+axis ⓑ)를 디스크에서 실제로 지워도 -> HYK-428의 harnessDir-anchored 경로 해석 자체가 여전히 막는다 (probe 조작 항목은 cwd 저장소에도, probeDir에도 착지하지 않는다)", () => {
   assertExactlyOneMatch(
     RELAY_HANDSHAKE_LIVE_SRC,
     GATE_TARGET,
@@ -333,10 +362,20 @@ test("HYK-355 (c) 변이 검사 ① (axis ⓑ를 격리한 채로): 게이트를
       cwd: mainDir,
     });
     assert.equal(result.exit, 0, `mutant handshake: ${result.stderr}`);
-    const ledger = readMainLedger(mainDir);
-    assert.ok(
-      ledger && ledger.issues["HYK-9702"],
-      "RED: with the gate physically removed, the probe's fabricated entry DOES land in the cwd-resolved ledger -- the live gate (test (a) above), not chance, is what protects it",
+    assert.match(
+      result.stderr,
+      /reject-streak auto-record: ledger write failed unexpectedly/,
+      "HYK-428's try/catch must degrade this to a logged failure, not an uncaught crash",
+    );
+    assert.equal(
+      readMainLedger(mainDir),
+      null,
+      "GREEN (HYK-428): even with HYK-355's own gate+axis both physically removed, the probe's fabricated entry must NOT land in the cwd-resolved ledger -- ledgerPath is no longer cwd-derived at all",
+    );
+    assert.equal(
+      existsSync(join(probeDir, ".harness", "reject-streak.json")),
+      false,
+      "probeDir itself is not a git repo either, so harnessDir-anchored resolution has nowhere safe to write -- fails closed, nothing fabricated anywhere",
     );
   } finally {
     rmSync(rootDir, { recursive: true, force: true });

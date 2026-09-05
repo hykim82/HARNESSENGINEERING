@@ -141,6 +141,7 @@ export function runQualityCheck({
   if (lintTargets.length === 0 && fmtTargets.length === 0) {
     return {
       ok: true,
+      scope: "empty",
       reason:
         "quality-check: no changed files in scope (.mjs/.js/.json/.md) -- vacuously green",
     };
@@ -174,8 +175,111 @@ export function runQualityCheck({
 
   return {
     ok: true,
+    scope: "checked",
     reason: `quality-check: ${lintTargets.length} file(s) linted, ${fmtTargets.length} file(s) format-checked -- all clean`,
   };
+}
+
+// Flags this CLI actually understands. An unrecognized flag (a typo such as
+// `--base` for `--base-sha`) must abort loudly rather than being silently
+// dropped -- a dropped `--base-sha` falls back to `mode: "staged"`'s
+// default, which diffs the index against HEAD and is empty outside a
+// pre-commit context, so the run prints a vacuous green instead of the
+// intended CI-mode result (HYK-270 1R, 2026-08-29: this exact typo produced
+// a "quality clean" both the author and reviewer accepted at face value).
+const KNOWN_FLAGS = new Set(["--mode", "--base-sha", "--cwd"]);
+
+// Value-acceptance contract for the three flags above, all of which take a
+// value. HYK-393 2R closed the *name* axis (an unrecognized flag) and part
+// of the *value* axis (EOF, empty string, a value starting with "--"), but
+// REVIEW 2R found the value axis was still closed by ENUMERATING rejected
+// shapes rather than by a rule -- and enumeration missed whitespace-only
+// values (`--base-sha "   "`) and a bare single dash (`--base-sha -`),
+// both of which fell through to mode:"staged"'s default and printed an
+// empty-scope green (1R's P1 shape, twice more).
+//
+// HYK-393 3R replaces the enumeration with a total, two-predicate
+// PARTITION of every possible argv token, so "did I miss a case" stops
+// being a question the reader has to trust and becomes something they can
+// verify by case analysis instead of by trusting a sample list:
+//
+//   A token position is exactly one of:
+//     (0) ABSENT           -- there is no next token at all (EOF)
+//   ...and if a token IS present, its content is exactly one of:
+//     (1) ALL WHITESPACE   -- `token.trim() === ""` (this includes the
+//         empty string "" itself, since trim("") === "")
+//     (2) DASH-LEADING     -- `token.trim()` starts with "-" (covers a
+//         bare "-", "--", "-x", "--mode", "--anything" -- one or two
+//         leading dashes are the ONLY way a token can look like a flag
+//         rather than a value, so this single check subsumes both "looks
+//         like a known flag" and "looks like an unknown flag")
+//     (3) EVERYTHING ELSE  -- accepted as the value
+//
+// This is a proof by exhaustive case split on the FIRST non-whitespace
+// character of the token (or its absence), not a list of specific bad
+// inputs -- cases (1)+(2)+(3) cover 100% of the string domain by
+// construction, so there is no "case we forgot to enumerate" the way
+// "reject these seven specific strings" always leaves one open. A git SHA,
+// a mode name ("ci"/"staged"), and a real directory path are never
+// whitespace-only and never start with "-" in ordinary use, so nothing
+// legitimate is expected to fall into (1) or (2) -- see this round's
+// coder.md §5 for the one acknowledged cost (a --cwd path that itself
+// starts with "-" is unsupported; this is not new in 3R, 2R already made
+// the same call for "--"-leading paths and REVIEW 2R accepted it as P2).
+function readFlagValue(args, i, flag) {
+  const raw = args[i + 1];
+  if (raw === undefined) {
+    return {
+      ok: false,
+      reason: `quality-check: ${flag} requires a value but none was given (end of arguments) -- fail-closed rather than falling back to a default.`,
+    };
+  }
+  const trimmed = raw.trim();
+  if (trimmed === "") {
+    return {
+      ok: false,
+      reason: `quality-check: ${flag} was given an empty or whitespace-only value (${JSON.stringify(raw)}) -- fail-closed rather than falling back to a default.`,
+    };
+  }
+  if (trimmed.startsWith("-")) {
+    return {
+      ok: false,
+      reason: `quality-check: ${flag}'s value ${JSON.stringify(raw)} looks like a flag, not a value (it was likely swallowed from the next argument) -- fail-closed rather than silently consuming it.`,
+    };
+  }
+  return { ok: true, value: raw };
+}
+
+export function parseCliArgs(args) {
+  let mode = "staged";
+  // QUALITY_BASE_SHA is read unconditionally here, but resolveChangedFiles's
+  // "staged" branch (mode's default, and the only mode `npm run
+  // quality:check` -- no args -- ever runs in) never reads `baseSha` at
+  // all; the env var only has any effect when `--mode ci` is also given.
+  // Setting QUALITY_BASE_SHA before a bare `npm run quality:check` does NOT
+  // make it behave like a CI run (HYK-393 2R correction of the 1R result
+  // file, which described this as "used instead of --base-sha").
+  let baseSha = process.env.QUALITY_BASE_SHA;
+  let cwd = repoRoot();
+  for (let i = 0; i < args.length; i++) {
+    const flag = args[i];
+    if (!KNOWN_FLAGS.has(flag)) {
+      return {
+        ok: false,
+        reason:
+          `quality-check: unrecognized argument ${JSON.stringify(flag)} -- ` +
+          `known flags are ${[...KNOWN_FLAGS].join(", ")}. Refusing to run ` +
+          `with an unknown flag rather than silently falling back to defaults.`,
+      };
+    }
+    const read = readFlagValue(args, i, flag);
+    if (!read.ok) return read;
+    if (flag === "--mode") mode = read.value;
+    else if (flag === "--base-sha") baseSha = read.value;
+    else if (flag === "--cwd") cwd = read.value;
+    i++;
+  }
+  return { ok: true, mode, baseSha, cwd };
 }
 
 const invokedDirectly =
@@ -184,18 +288,22 @@ const invokedDirectly =
     .replace(/\\/g, "/")
     .endsWith("scripts/check/quality-check.mjs");
 if (invokedDirectly) {
-  const args = process.argv.slice(2);
-  let mode = "staged";
-  let baseSha = process.env.QUALITY_BASE_SHA;
-  let cwd = repoRoot();
-  for (let i = 0; i < args.length; i++) {
-    if (args[i] === "--mode") mode = args[++i];
-    else if (args[i] === "--base-sha") baseSha = args[++i];
-    else if (args[i] === "--cwd") cwd = args[++i];
+  const parsed = parseCliArgs(process.argv.slice(2));
+  if (!parsed.ok) {
+    console.error(parsed.reason);
+    process.exit(1);
   }
+  const { mode, baseSha, cwd } = parsed;
   const result = runQualityCheck({ cwd, mode, baseSha });
   if (result.ok) {
-    console.log(result.reason);
+    // `scope: "empty"` (no files in the changed set were in-scope) and
+    // `scope: "checked"` (files were actually run through eslint/prettier)
+    // are both a green exit code -- CI must not turn an empty diff (e.g. a
+    // docs-only or out-of-scope-extension change) into a failure -- but the
+    // two are tagged distinctly on stdout so a log reader (human or script)
+    // can tell "nothing to check" apart from "checked and clean" without
+    // parsing prose.
+    console.log(`[quality-check:${result.scope}] ${result.reason}`);
     process.exit(0);
   } else {
     console.error(result.reason);

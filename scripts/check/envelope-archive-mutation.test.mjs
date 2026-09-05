@@ -24,6 +24,12 @@ const RELAY_HANDSHAKE_PATH = join(HERE, "relay-handshake.mjs");
 const REJECT_STREAK_PATH = join(HERE, "reject-streak.mjs");
 // HYK-186: relay-handshake.mjs now also imports "./time-authority.mjs".
 const TIME_AUTHORITY_PATH = join(HERE, "time-authority.mjs");
+// HYK-430 5R: relay-handshake.mjs now also statically imports
+// "./child-probe-timeout-policy.mjs".
+const CHILD_PROBE_TIMEOUT_POLICY_PATH = join(
+  HERE,
+  "child-probe-timeout-policy.mjs",
+);
 
 function tmpDir(prefix) {
   return mkdtempSync(join(tmpdir(), prefix));
@@ -59,6 +65,10 @@ function stageScriptsCheckDir(rootDir, overrides) {
     "reject-streak.mjs": readFileSync(REJECT_STREAK_PATH, "utf8"),
     "envelope-archive.mjs": readFileSync(ENVELOPE_ARCHIVE_PATH, "utf8"),
     "time-authority.mjs": readFileSync(TIME_AUTHORITY_PATH, "utf8"),
+    "child-probe-timeout-policy.mjs": readFileSync(
+      CHILD_PROBE_TIMEOUT_POLICY_PATH,
+      "utf8",
+    ),
     ...overrides,
   };
   for (const [name, content] of Object.entries(files)) {

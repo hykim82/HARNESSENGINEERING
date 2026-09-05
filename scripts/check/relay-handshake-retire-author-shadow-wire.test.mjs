@@ -31,6 +31,7 @@ import {
   runRetireAuthorShadowObservation,
   parseKstTimestamp,
 } from "./relay-handshake.mjs";
+import { RELAY_HANDSHAKE_STATIC_SIBLINGS } from "./relay-handshake-fixture-siblings.mjs";
 
 const CHECK_DIR = dirname(fileURLToPath(import.meta.url));
 // HYK-414 1R (time-judgment-now-injection.test.mjs) -- checkRelayHandshake를
@@ -265,9 +266,11 @@ test("(B) 차단 0: 그림자 조립이 실제로 실패해도(DISPATCH_RECEIPT_
 // time-authority/reject-streak/envelope-archive만" 모양) handshake는
 // 여전히 exit 0이다. 이 시험이 바로 이 라운드가 처음에 놓쳤던 것 --
 // retirement-auto-author-facts.mjs/-core.mjs를 relay-handshake.mjs에
-// 정적 import했다가 이 정확한 격리 픽스처 24개가 MODULE_NOT_FOUND로
-// 깨졌었다(실측, 1차 시도). 스폰 방식으로 바꾼 뒤 이 시험이 그 회귀를
-// 고정한다.
+// 정적 import했다가 이런 모양의 격리 픽스처 다수가 MODULE_NOT_FOUND로
+// 깨졌었다(실측, 1차 시도 -- 당시 손으로 센 개수는 이후 라운드들에서
+// 서로 어긋났다, HYK-430 4R §2⑵ 참조 -- 지금은
+// list-relay-handshake-isolated-fixtures.mjs가 그 수를 매번 다시
+// 만든다). 스폰 방식으로 바꾼 뒤 이 시험이 그 회귀를 고정한다.
 // ---------------------------------------------------------------------------
 
 test("(B-2) 회귀 고정: retirement-auto-author-shadow-cli.mjs 등 그림자 결선 형제 파일이 격리 픽스처에 없어도 relay-handshake CLI는 exit 0이다", () => {
@@ -280,9 +283,7 @@ test("(B-2) 회귀 고정: retirement-auto-author-shadow-cli.mjs 등 그림자 �
     // 복사한다(의도적으로 retirement-auto-author-*.mjs 없음).
     for (const name of [
       "relay-handshake.mjs",
-      "time-authority.mjs",
-      "reject-streak.mjs",
-      "envelope-archive.mjs",
+      ...RELAY_HANDSHAKE_STATIC_SIBLINGS,
     ]) {
       writeFileSync(
         join(isolatedCheckDir, name),
@@ -378,19 +379,42 @@ test("(D) execFileFn이 성공하면 그 stdout을 그대로 로그로 넘긴다
 // 각각 직접 고정한다.
 // ---------------------------------------------------------------------------
 
-// (E) 지연(시간 초과) -- ★실제 지연 자식(진짜 child_process, 3000ms)을
-// 진짜 timeout(테스트에서는 200ms로 짧게)으로 죽인다. 되돌림 변이 ⓐ(2R)의
+// (E) 지연(시간 초과) -- ★실제 지연 자식(진짜 child_process)을 진짜
+// timeout(테스트에서는 200ms로 짧게)으로 죽인다. 되돌림 변이 ⓐ(2R)의
 // 대상: execFileFn 호출의 timeout 옵션을 지우면 이 시험이 빨개진다(느린
 // 자식이 끝까지 실행돼 elapsed 단언과 state=TIMEOUT 단언 둘 다 깨진다).
-test("(E)★ 실제 지연 자식(3000ms)을 진짜 timeout(200ms)으로 죽여도 소비는 멈추지 않고 정확히 한 줄, state=TIMEOUT", () => {
+//
+// HYK-430 2R(검토 반려 P1-2 수리) -- 1R은 이 자리에 `elapsedMs < 2500`
+// 이라는 «고정 임계»를 남겼고, 재시도(1회)가 실제 스폰/kill 오버헤드를
+// 만나 총 2572ms까지 늘어나며 그 자체가 깨졌다(REVIEW 실측). 같은 형태
+// (「재시도로 늘어난 실측 시간」 vs 「독립적으로 고른 작은 절대값」)를
+// 다시 만들지 않기 위해 두 가지로 바꾼다:
+//   (1) 정밀도가 필요한 부분(정확히 재시도 1회가 일어났는가)은
+//       ★결정적인 호출 횟수 스파이로 증명한다(벽시계 무관, 부하 무관).
+//   (2) 벽시계 검사는 «정밀 타이밍 계약»이 아니라 «자식의 전체 지연을
+//       다 기다리지 않았다»는 느슨한 안전망으로만 남긴다 -- 그 기준을
+//       느슨한 절대값(2500) 대신 ★이 시험 자신이 설계한 자식 지연
+//       (SLOW_CHILD_DELAY_MS)에서 직접 파생시킨다: 자식 지연을 넉넉히
+//       크게(15000ms) 잡아, 실측 스폰/kill 오버헤드가 REVIEW가 관측한
+//       값(2572ms)의 5배까지 늘어나도 여전히 자식 지연에는 한참
+//       못 미치게 한다. ⛔이건 "숫자를 키운" 것이 아니다 -- 비교
+//       기준값 자체(2500)를 올린 게 아니라, "무엇과 비교하는가"를
+//       독립 상수에서 이 시험이 스스로 설계한 자식 지연으로 바꾼
+//       것이다(그 지연은 얼마든지 늘려도 시험 속도에 영향이 없다 --
+//       자식은 어차피 timeout에 죽으므로 실제로 그 시간만큼 기다리지
+//       않는다).
+const SLOW_CHILD_DELAY_MS = 15000;
+
+test("(E)★ 실제 지연 자식을 진짜 timeout(200ms)으로 죽여도 소비는 멈추지 않고 정확히 한 줄, state=TIMEOUT, 재시도 정확히 1회(호출 횟수로 결정적 증명)", () => {
   const dir = tmpDir("hyk419-shadow-wire-e-");
   try {
     const slowPath = writeSlowChildScript(
       dir,
-      3000,
+      SLOW_CHILD_DELAY_MS,
       "retire-author-shadow: JUDGED reason=SHOULD_NOT_ARRIVE label=late (shadow -- 아무것도 차단하지 않음)",
     );
     const lines = [];
+    let spawnCalls = 0;
     const startedAt = Date.now();
     assert.doesNotThrow(() => {
       runRetireAuthorShadowObservation({
@@ -399,15 +423,27 @@ test("(E)★ 실제 지연 자식(3000ms)을 진짜 timeout(200ms)으로 죽여�
         taskId: "HYK-419-SHADOW-E-1",
         doneAt: "x",
         timeoutMs: 200,
-        execFileFn: (_cmd, _args, opts) =>
-          execFileSync(process.execPath, [slowPath], opts),
+        execFileFn: (_cmd, _args, opts) => {
+          spawnCalls += 1;
+          return execFileSync(process.execPath, [slowPath], opts);
+        },
         logFn: (line) => lines.push(line),
       });
     });
     const elapsedMs = Date.now() - startedAt;
+    // 결정적 증명(부하 무관) -- 정본 정책이 로드된 정상 경로이므로
+    // 재시도 1회가 있어야 한다: 총 시도 = 2.
+    assert.equal(
+      spawnCalls,
+      2,
+      `무응답 자식은 재시도 1회를 포함해 정확히 2번 스폰돼야 한다 -- 실측: ${spawnCalls}`,
+    );
+    // 느슨한 안전망(부하에 영향받되, 실패 방향은 "타임아웃 메커니즘
+    // 자체가 사라졌다"는 회귀만 잡는다) -- 독립 절대값이 아니라 이
+    // 시험이 설계한 자식 지연에서 직접 파생.
     assert.ok(
-      elapsedMs < 2500,
-      `실제로 timeout 근처(200ms)에서 끊겨야 한다(느린 자식 3000ms 전부를 기다리면 «멈춘다»는 뜻) -- 실측: ${elapsedMs}ms`,
+      elapsedMs < SLOW_CHILD_DELAY_MS,
+      `자식의 전체 지연(${SLOW_CHILD_DELAY_MS}ms)을 다 기다리면 안 된다(타임아웃 메커니즘 소실 회귀) -- 실측: ${elapsedMs}ms`,
     );
     assert.equal(
       lines.length,

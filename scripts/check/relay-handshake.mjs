@@ -20,6 +20,10 @@ import {
   isBeyondFutureSkew,
   isSuspectedTimezoneMislabel,
 } from "./time-authority.mjs";
+import {
+  resolveChildProbeTimeoutMs,
+  withTimeoutRetry,
+} from "./child-probe-timeout-policy.mjs";
 
 export { TIME_AUTHORITY_STATE, MAX_FUTURE_SKEW_MS };
 
@@ -118,13 +122,19 @@ const BLOCKED_BARE_COLUMN0_RE = /^(BLOCKED|NEEDS_INPUT):/gim;
 // used to fail closed instead).
 const DONE_STAMPED_BY_MARKER_RE = /^done_stamped_by:\s*finalize-done\s*$/im;
 
-function repoRoot() {
+// HYK-428 §2⑴: `cwd` is optional/back-compat -- callers that omit it (every
+// pre-HYK-428 caller) get the exact unchanged process.cwd()-derived
+// behavior. Threading an explicit `cwd` (see mainRepoRoot below) is what
+// lets the resolved path track the SAME directory an isolation gate already
+// validated, instead of an unrelated, ambient process.cwd().
+function repoRoot(cwd) {
   try {
-    return execSync("git rev-parse --show-toplevel", {
-      encoding: "utf8",
-    }).trim();
+    return execSync(
+      "git rev-parse --show-toplevel",
+      cwd ? { encoding: "utf8", cwd } : { encoding: "utf8" },
+    ).trim();
   } catch {
-    return process.cwd();
+    return cwd ?? process.cwd();
   }
 }
 
@@ -141,8 +151,21 @@ function repoRoot() {
 // hook's script) can resolve the SAME centralized ledger location when it
 // records an approval -- see that module's own header for why the approval
 // path needs this at all.
-export function mainRepoRoot() {
-  const root = repoRoot();
+// HYK-428 §2⑴: `startDir` is optional/back-compat (review-gate.mjs's own
+// call site below omits it -- a commit-msg hook always runs with
+// process.cwd() already equal to the worktree being committed in, so there
+// is no separate "checked" directory to align to there). When a caller DOES
+// pass `startDir` (autoRecordRejectStreak below), every git call in this
+// resolution chain runs anchored at THAT directory, not at this process's
+// own ambient cwd -- this is what makes the resolved ledger path track the
+// exact same directory isInsideGitWorktree(harnessDir) already validated,
+// closing the gap the header comment above (HYK-355 §2-B) describes: before
+// this round, mainRepoRoot() ignored harnessDir entirely, so an isolated
+// fixture (which legitimately passes isInsideGitWorktree, since it IS some
+// git worktree) still resolved to whatever repo this process's cwd
+// happened to be in when invoked in-process (coder-task.md §1-1 원문).
+export function mainRepoRoot(startDir) {
+  const root = repoRoot(startDir);
   try {
     const commonDir = execSync("git rev-parse --git-common-dir", {
       encoding: "utf8",
@@ -503,11 +526,43 @@ function autoRecordRejectStreak({ role, resultContent, harnessDir }) {
     console.error(blocked.reason);
     return blocked;
   }
-  const autoRecord = recordRejectStreakFromResultText({
-    role,
-    resultText: resultContent,
-    ledgerPath: join(mainRepoRoot(), ".harness", "reject-streak.json"),
-  });
+  // HYK-428 §2⑴: anchor at `harnessDir` (the exact directory the gate above
+  // just validated with isInsideGitWorktree), not the bare no-arg
+  // mainRepoRoot() this line used before -- that old call resolved off this
+  // PROCESS's own ambient cwd, a value completely decoupled from
+  // harnessDir, which is how the gate above could pass (harnessDir
+  // genuinely is some git worktree, e.g. an isolated fixture's own
+  // `git init`) while the write still landed in whatever repo the caller's
+  // cwd happened to be -- see mainRepoRoot's own header for the closed gap.
+  // HYK-428: wrapped in try/catch (was bare) -- once the gate above passes,
+  // mainRepoRoot(harnessDir) can still resolve to a directory whose
+  // `.harness/` subdir does not exist (harnessDir is `isInsideGitWorktree`
+  // but git itself failed to resolve a common-dir for some other reason),
+  // and writeLedger has no parent-directory guard of its own -- this must
+  // degrade to a logged, visible failure (mirrors every other side-effect
+  // in this file, e.g. autoArchiveRoundEnvelope's own try/catch boundary),
+  // never an uncaught crash that takes the whole handshake process down.
+  let autoRecord;
+  try {
+    autoRecord = recordRejectStreakFromResultText({
+      role,
+      resultText: resultContent,
+      ledgerPath: join(
+        mainRepoRoot(harnessDir),
+        ".harness",
+        "reject-streak.json",
+      ),
+    });
+  } catch (err) {
+    const reason = `reject-streak auto-record: ledger write failed unexpectedly (${err.message}) -- ledger NOT updated, round completion not blocked`;
+    console.error(reason);
+    return {
+      attempted: true,
+      ok: false,
+      reasonCode: "LEDGER_WRITE_ERROR",
+      reason,
+    };
+  }
   if (!autoRecord.attempted) return { attempted: false, ok: false };
   if (autoRecord.ok) {
     console.log(autoRecord.reason);
@@ -1063,6 +1118,33 @@ function resolveDoneAt(
   // 소비 완료되면 그 세대는 tombstone으로 닫히고, 다음 라운드가 같은
   // 키를 재사용해도 이전 세대의 값과 비교되지 않고 새로 관측을
   // 시작한다.
+  // HYK-423 3R §2 (구조 축 -- 두 반려의 공통 뿌리를 정면으로 다룬다,
+  // coder.md 참조): 2R은 관측 지문의 «보호 범위»를 DONE 줄까지로 좁혔지만,
+  // headCommitVerdict(HYK-383, 아래 checkRelayHandshake)는 그 뒤에도 여전히
+  // resultContent «전체»를 다시 스캔했다 -- 지문이 보호하는 범위와 게이트가
+  // «읽는» 범위가 서로 달라, DONE 줄 뒤에 head_commit: 을 새로 덧붙이면
+  // 지문은 그대로인데 게이트만 통과했다(2R 검토가 실측 재현, 이 라운드의
+  // 반려 사유). 3R은 이 두 범위를 **같은 이름의 같은 값**으로 통일한다:
+  // `judgedRegion`(resultContent를 `>>> DONE:` 줄이 끝나는 지점까지 자른
+  // 것)을 이 함수가 계산해 ⓐ 관측 지문(아래 spawnObserveDoneLine)과 ⓑ
+  // checkRelayHandshake가 이후 호출하는, resultContent의 «값»을 읽는 모든
+  // 게이트(headCommitVerdict/runnerReceiptVerdict의 claim 확인) 양쪽에
+  // 그대로 넘긴다 -- 어느 한쪽만 손대는 방식(1R: 게이트 이름 결속, 2R:
+  // 지문만 축소)을 반복하지 않기 위해서다. doneLineRaw 자체(아래
+  // doneMatch[0])는 이 축과 별개로 checkIntermediateRewrite가 항상 직접
+  // 비교한다(first-observation.mjs, 손대지 않았다) -- DONE 줄 자신은
+  // 무조건 보호된다. 이 축소가 여전히 완화하는 것은 오직 DONE 줄 «뒤»의
+  // 후기(postscript)뿐이다: 2026-09-03 실물 사고(coder-task.md §1-2)의
+  // 정정("결과 파일에 덧붙임")이 그 모양이었다. DONE «앞»은 지문과 모든
+  // judgedRegion 기반 게이트 양쪽에 그대로 포함되므로, 어느 게이트가
+  // 거부했든 그 앞 내용을 고치면 여전히 rewritten으로 잡히고, DONE 뒤에
+  // 무엇을 덧붙여도 judgedRegion 기반 게이트는 그것을 아예 보지 못한다
+  // (coder.md ⑴ 전수표 -- 어느 검사기가 이 region을 쓰는지, 왜 다른
+  // 검사기는 쓰지 않아도 안전한지).
+  const judgedRegion = resultContent.slice(
+    0,
+    doneMatch.index + doneMatch[0].length,
+  );
   const observation =
     taskId && droppedAtRaw
       ? spawnObserveDoneLine({
@@ -1070,7 +1152,7 @@ function resolveDoneAt(
           droppedAt: droppedAtRaw,
           role,
           harnessDir,
-          resultContent,
+          resultContent: judgedRegion,
           doneLineRaw: doneMatch[0],
         })
       : { rewritten: false };
@@ -1088,7 +1170,7 @@ function resolveDoneAt(
     now,
   });
   if (doneFuture) return doneFuture;
-  return { ok: true, doneAt, doneMatch, observation };
+  return { ok: true, doneAt, doneMatch, observation, judgedRegion };
 }
 
 // HYK-244 2R-a §2 조각2: `dispatchId`는 ⛔호출자가 명시적으로 넘긴 값만
@@ -2011,17 +2093,32 @@ function shadowLine(state, reason, taskId) {
   return `retire-author-shadow: ${state} reason=${toOneLine(reason)} label=${taskId} (shadow -- 아무것도 차단하지 않음)`;
 }
 
-// HYK-419-wire-2 §2⑴ -- 스폰 자체가 «멈추지 않게» 시간 제한을 건다. 근거:
-// 이 저장소의 실측(retirement-auto-author-shadow-cli.test.mjs)에서 정상
-// 조립+판정은 rounds/ 몇 개 파일만 읽어도 100ms를 넘지 않았다 -- 2000ms는
-// 그 정상 왕복의 20배 이상 여유를 두면서도(디스크 I/O가 유난히 느린
-// 환경까지 흡수), 소비 경로 전체 체감 지연으로는 "느껴지지 않는" 수준이
-// 아니라는 점을 이 라운드는 인정한다(검토 P1-1이 문제 삼은 것은 «무한
-// 대기»이지 «지연 존재 자체»가 아니다 -- coder-task.md §2⑴ "소비 체감에
-// 영향 없는 수준"은 상대적 지침으로 읽었다: 무제한(∞) 대비 2초는 이
-// 소비 경로의 다른 스폰 호출(admission-completion-adapter 등, 이들도
-// 자체 타임아웃이 없다 -- 이 라운드 범위 밖)과 같은 자릿수다).
+// HYK-430 5R (§0 재설계 -- 폴백을 «더 잘 만들기»가 아니라 폴백이 필요한
+// 상황 자체를 제거한다): 1R(복제) -> 2R(동적 import + 조용한 폴백) ->
+// 4R(폴백을 모듈-부재 판별식으로 좁힘)까지 세 라운드가 이 자리에서
+// 싸운 이유는 전부 같은 전제 하나였다 -- "격리 픽스처가
+// child-probe-timeout-policy.mjs를 형제로 복사하지 않는다"는 환경
+// 제약. 그 전제 자체를 5R에서 없앤다: relay-handshake.mjs를 격리
+// 임시 디렉터리에 복사해 자식으로 돌리는 모든 시험(list-relay-
+// handshake-isolated-fixtures.mjs가 기계로 세는 그 집합, HYK-430 4R
+// §2⑵)이 이제 child-probe-timeout-policy.mjs도 형제로 함께 복사한다
+// (scripts/check/relay-handshake-fixture-siblings.mjs가 그 복사 목록의
+// 단일 소스). "정책을 못 읽는 경우"가 더 이상 존재하지 않으므로,
+// 그 경우를 처리하던 동적 import·catch·isPolicyModuleAbsent·로컬
+// 2000ms/재시도 0 폴백 경로가 전부 불필요해져 지운다 -- 남는 것은
+// 평범한 정적 import 하나뿐이다.
 const SHADOW_CLI_TIMEOUT_MS = 2000;
+
+function resolveShadowCliTimeoutMs(baseTimeoutMs) {
+  return resolveChildProbeTimeoutMs(baseTimeoutMs);
+}
+
+// §2⑶ "재시도 1회" -- 무응답(ETIMEDOUT)에서만 정확히 1회 재시도한다
+// (RETRY_ON_TIMEOUT은 child-probe-timeout-policy.mjs가 유일한
+// 정의처다).
+function withTimeoutRetryIfAvailable(fn, isTimeout) {
+  return withTimeoutRetry(fn, { isTimeout });
+}
 
 function isTimeoutError(err) {
   // Node의 child_process.execFileSync는 timeout 초과 시 자식을 killSignal로
@@ -2060,9 +2157,11 @@ function normalizeChildStdout(out, taskId) {
 //
 // ★서브프로세스 스폰, 정적 import 아님 -- spawnAbortRecordWriter/
 // spawnAdmissionCompletionProcess와 완전히 같은 이유(그 두 함수 바로 위
-// 주석 참조): 이 파일은 24개 격리 픽스처 시험(admission-completion-
+// 주석 참조): 이 파일은 다수의 격리 픽스처 시험(admission-completion-
 // spawn.test.mjs 등, "relay-handshake.mjs + time-authority/reject-streak/
-// envelope-archive만" 복사해 서브프로세스로 도는 시험)이 의존하는 정적
+// envelope-archive만" 복사해 서브프로세스로 도는 시험 -- 정확한 개수는
+// `node scripts/check/list-relay-handshake-isolated-fixtures.mjs`가
+// 손으로 세지 않고 매번 다시 만든다, HYK-430 4R §2⑵)이 의존하는 정적
 // import 그래프의 일부다 -- 5번째 정적 import를 추가하면 그 시험 전부가
 // LOAD 시점에 MODULE_NOT_FOUND로 깨진다(실측: 첫 시도에서 npm test 60건
 // 실패). retirement-auto-author-shadow-cli.mjs를 스폰만 하면 그 파일이
@@ -2083,7 +2182,7 @@ export function runRetireAuthorShadowObservation({
   doneAt,
   execFileFn = execFileSync,
   logFn = console.log,
-  timeoutMs = SHADOW_CLI_TIMEOUT_MS,
+  timeoutMs = resolveShadowCliTimeoutMs(SHADOW_CLI_TIMEOUT_MS),
 }) {
   try {
     const cliPath = join(
@@ -2100,12 +2199,20 @@ export function runRetireAuthorShadowObservation({
     // 없어 Node가 내부적으로 TerminateProcess로 매핑한다 -- 이 워크트리
     // 자체가 Windows라 이 경로로 실측했다, 좀비 프로세스는 남기지 않음을
     // 시험(rr-timeout 계열)으로 확인).
-    const out = execFileFn("node", args, {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"],
-      timeout: timeoutMs,
-      killSignal: "SIGKILL",
-    });
+    // HYK-430 2R: 무응답(TIMEOUT)만, 공통 정책이 로드됐을 때 정확히
+    // 1회 재시도한다(§2⑶, 위 withTimeoutRetryIfAvailable 주석). 진짜
+    // 무응답 자식은 재시도해도 다시 타임아웃되므로 탐지력은 보존된다
+    // (§2⑷ 음성 대조 (E)).
+    const out = withTimeoutRetryIfAvailable(
+      () =>
+        execFileFn("node", args, {
+          encoding: "utf8",
+          stdio: ["ignore", "pipe", "pipe"],
+          timeout: timeoutMs,
+          killSignal: "SIGKILL",
+        }),
+      isTimeoutError,
+    );
     logFn(normalizeChildStdout(out, taskId));
   } catch (err) {
     // Missing CLI file (isolated test fixture), non-zero exit, timeout
@@ -2429,7 +2536,7 @@ function resolveHandshakeCore({ role, harnessDir, now, dispatchId }) {
       }),
     };
   }
-  const { doneAt, doneMatch, observation } = doneResolved;
+  const { doneAt, doneMatch, observation, judgedRegion } = doneResolved;
   return {
     ok: true,
     taskContent,
@@ -2441,6 +2548,7 @@ function resolveHandshakeCore({ role, harnessDir, now, dispatchId }) {
     doneAt,
     doneMatch,
     observation,
+    judgedRegion,
   };
 }
 
@@ -2462,6 +2570,7 @@ export function checkRelayHandshake({
     doneAt,
     doneMatch,
     observation,
+    judgedRegion,
   } = core;
 
   // HYK-325 §2-3 승격 (HYK-418 §2-1): the missing-marker check used to live
@@ -2495,11 +2604,17 @@ export function checkRelayHandshake({
 
   // HYK-383: 다른 모든 사유별 검사가 이미 통과한 뒤, 완료 판정 직전에 건다
   // (§4 무회귀 -- 기존 구체적 거부 사유가 가려지지 않는다). 비REVIEW는
-  // 즉시 통과(resolveHeadCommitBinding 자체 헤더 참조).
+  // 즉시 통과(resolveHeadCommitBinding 자체 헤더 참조). HYK-423 3R §2:
+  // `resultContent` 전체가 아니라 `judgedRegion`(위 resolveDoneAt이 계산한,
+  // 관측 지문과 «같은» 범위)을 넘긴다 -- resolveHeadCommitField가 DONE
+  // 줄 뒤에 새로 나타나는 head_commit: 을 다시 스캔해 채택하는 것이
+  // 2R 반려의 정확한 원인이었다(coder.md ⑴ 전수표). 지문이 보호하는
+  // 범위와 이 게이트가 «읽는» 범위를 같은 값으로 묶어 그 어긋남 자체를
+  // 없앤다.
   const headCommitVerdict = resolveHeadCommitBinding({
     role,
     taskContent,
-    resultContent,
+    resultContent: judgedRegion,
     harnessDir,
   });
   if (!headCommitVerdict.ok) return headCommitVerdict;
@@ -2508,9 +2623,14 @@ export function checkRelayHandshake({
   // 실사고 HYK-408 1R도 CODER 라운드였다, resolveDispatchRecordExistence와
   // 동일 논거). resultContent가 "전체 러너 결과"를 주장하지 않으면 즉시
   // ok:true(skipped)로 빠져 나가 이 축이 존재하기 전과 완전히 동일하게
-  // 움직인다(과차단 금지).
+  // 움직인다(과차단 금지). HYK-423 3R §2: 여기도 `judgedRegion`을 넘긴다
+  // -- resultClaimsRunnerResults 자신은 이번 반려의 재현 대상이 아니었지만
+  // (검토 ⑷: "이번 postscript 경로의 직접 원인은 아니다"), 같은 축(judged
+  // vs 전체) 위에서 같은 종류의 값 확인을 하는 게이트이므로 구조적으로
+  // 같은 범위를 쓰게 맞춘다 -- head_commit 하나만 땜질하지 않는다는
+  // 이 라운드의 원칙(coder.md ⑵) 그대로.
   const runnerReceiptVerdict = resolveRunnerReceiptVerdict({
-    resultContent,
+    resultContent: judgedRegion,
     harnessDir,
   });
   if (!runnerReceiptVerdict.ok) return runnerReceiptVerdict;
