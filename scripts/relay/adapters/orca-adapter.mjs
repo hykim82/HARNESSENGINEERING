@@ -1656,12 +1656,31 @@ const WORKTREE_LINE_BARE_PATH = /^worktree: (.+)$/;
 //   exit 128. 반대로 `a.lockx`/`a/b.lockx/c`(접미사가 ".lock"이
 //   아니라 "lockx")는 git이 통과시킨다(exit 0) -- "포함"이 아니라
 //   "그 구성요소 전체가 정확히 `.lock`으로 끝나는가"가 규칙이다.
+// HYK-431 5R / HYK-436 (§2-1, coder-task.md): 이 함수의 유일한 호출부
+// (parseWorktreeSpecLine, 아래)는 정규식 캡처 그룹만 넘겨 언제나 원시
+// 문자열이지만, 원시 문자열이라는 보장을 이 함수 자신은 강제하지
+// 않았다 -- 문자열을 흉내 내며 includes/startsWith/endsWith/split을
+// 항상 "안전"쪽으로 재정의한 객체가 들어오면(예: 미래의 새 호출부가
+// 검증 안 된 값을 넘기는 경우) 모든 검사를 그대로 통과해버린다. 먼저
+// `typeof name !== "string"`으로 원시 문자열이 아니면 즉시 거부한다 --
+// 원시 문자열은 자기 프로퍼티를 가질 수 없으므로(재정의 불가능) 이
+// 가드 하나로 객체 기반 위장 전부가 원천 차단된다. 그 다음
+// `String.prototype.<method>.call(name, ...)`로 원형 메서드를 빌려
+// 부르는 것은 seat-reclaim-core.mjs/teardown-core.mjs의
+// `Array.prototype.<method>.call` 패턴과 동일한 방어 심층화다(원시
+// 문자열엔 실질적 차이가 없지만, 호출 규약을 저장소 전체에서
+// 통일한다).
 export function isValidBranchNameGrammar(name) {
-  if (name.includes("..")) return false;
-  if (name.startsWith("/")) return false;
-  if (name.endsWith("/")) return false;
-  if (name.includes("//")) return false;
-  if (name.split("/").some((component) => component.endsWith(".lock"))) {
+  if (typeof name !== "string") return false;
+  if (String.prototype.includes.call(name, "..")) return false;
+  if (String.prototype.startsWith.call(name, "/")) return false;
+  if (String.prototype.endsWith.call(name, "/")) return false;
+  if (String.prototype.includes.call(name, "//")) return false;
+  if (
+    String.prototype.split
+      .call(name, "/")
+      .some((component) => String.prototype.endsWith.call(component, ".lock"))
+  ) {
     return false;
   }
   return true;

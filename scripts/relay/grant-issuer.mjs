@@ -134,12 +134,22 @@ function collectDelegationStringProblems(delegation) {
   return problems;
 }
 
+// HYK-431 5R / HYK-436 (§2-1, coder-task.md, 검토자 직접 재현으로 확정된
+// P1): delegation.allowed_task_hashes는 Array.isArray만 통과하면(서브클래스
+// 포함) 그 인스턴스 자신의 every를 그대로 부르고 있었다 -- every를 항상
+// true로 재정의한 Array 서브클래스에 null 원소를 담아 넘기면 이 검증을
+// 통과해 ISSUED까지 도달한다(검토 4R 실증, review.md §3/§4). 원형의
+// every를 `Function.prototype.call`로 빌려 부르면(seat-reclaim-core.mjs
+// TArrayOf와 동일 패턴) 인스턴스가 무엇을 재정의했든 무관해진다.
 function collectDelegationScopeProblems(delegation) {
   const problems = [];
   if (
     !Array.isArray(delegation.allowed_task_hashes) ||
     delegation.allowed_task_hashes.length === 0 ||
-    !delegation.allowed_task_hashes.every(isNonEmptyString)
+    !Array.prototype.every.call(
+      delegation.allowed_task_hashes,
+      isNonEmptyString,
+    )
   ) {
     problems.push(
       "'allowed_task_hashes' must be a non-empty array of non-empty strings",
