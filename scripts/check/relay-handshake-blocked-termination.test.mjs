@@ -181,16 +181,22 @@ test("HYK-342/HYK-249 (5) ADMISSION_LEDGER_PATH가 설정돼 있으면 BLOCKED �
     // role+task_id 조합이 실재하는지 추가로 확인한다(워커가 못 쓰는
     // 파일) -- 이 시험은 진짜 배달을 재현하는 것이므로 그 영수증을
     // 미리 남겨 둔다.
+    // HYK-443 4R: 그 확인은 이제 영수증의 `assignee_pane_key`가 «지금 이
+    // 좌석»(`ORCA_PANE_KEY`)과 같은지도 본다 -- 진짜 배달 재현이므로 둘을
+    // 같은 값으로 세운다(hasDispatchReceiptForRound의 4R 헤더 참조).
+    const seatPaneKey = "tab-hyk342:leaf-hyk342";
     const receiptPath = join(dir, "dispatch-receipts.jsonl");
     writeFileSync(
       receiptPath,
-      `${JSON.stringify({ role: "CODER", harness_task_label: "HYK-1", dispatch_id: "ctx_test" })}\n`,
+      `${JSON.stringify({ role: "CODER", harness_task_label: "HYK-1", dispatch_id: "ctx_test", assignee_pane_key: seatPaneKey })}\n`,
       "utf8",
     );
     const prevEnv = process.env.ADMISSION_LEDGER_PATH;
     const prevReceiptEnv = process.env.DISPATCH_RECEIPT_PATH;
+    const prevPaneEnv = process.env.ORCA_PANE_KEY;
     process.env.ADMISSION_LEDGER_PATH = ledgerPath;
     process.env.DISPATCH_RECEIPT_PATH = receiptPath;
+    process.env.ORCA_PANE_KEY = seatPaneKey;
     try {
       checkRelayHandshake({ role: "coder", harnessDir: dir });
     } finally {
@@ -199,6 +205,8 @@ test("HYK-342/HYK-249 (5) ADMISSION_LEDGER_PATH가 설정돼 있으면 BLOCKED �
       if (prevReceiptEnv === undefined)
         delete process.env.DISPATCH_RECEIPT_PATH;
       else process.env.DISPATCH_RECEIPT_PATH = prevReceiptEnv;
+      if (prevPaneEnv === undefined) delete process.env.ORCA_PANE_KEY;
+      else process.env.ORCA_PANE_KEY = prevPaneEnv;
     }
 
     const after = JSON.parse(readFileSync(ledgerPath, "utf8"));

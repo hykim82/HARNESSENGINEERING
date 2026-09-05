@@ -148,8 +148,62 @@ function hasWellFormedBlockedMarker(resultContent) {
 // 파일이라 그 파일 자체를 끌어들이면 이 파일의 격리 시험들이 다시 깨진다
 // -- P1-1 때 relay-handshake.mjs를 정적 import했다가 실측으로 확인한 것과
 // 동일한 위험).
-function hasDispatchReceiptForRound(role, harnessTaskLabel, receiptPath) {
-  if (!isNonEmptyString(receiptPath) || !isNonEmptyString(harnessTaskLabel)) {
+//
+// ★HYK-443 4R (검토 1R P1-ⓑ): 위 셋(role·label·영수증 실재)만으로는
+// «좌석 혼동»이 남는다 -- 검토자 실측 재현(`other-seat-same-label`): 같은
+// 라벨·같은 role로 «다른 좌석»에 배달된 영수증 한 줄만 있으면 이 함수가
+// true를 돌려주어 그 좌석의 자리가 반납됐다(fail-open). 배달 영수증은
+// 라벨당 한 줄이 아니다(dispatch-receipt-cli.mjs의 append-only 원장) --
+// 재배달·다른 워크트리·라벨 재사용이면 같은 (role,label)로 여러 좌석 줄이
+// 공존한다. 그래서 4R은 네 번째 조건을 건다: 그 줄의 `assignee_pane_key`가
+// ★지금 이 좌석의 pane key와 정확히 일치할 것.
+//
+// 왜 pane key인가(회전하지 않는 값 고르기, coder-task.md §2-2): 좌석
+// handle(`term_…`)은 재접속마다 재발급된다 -- ⓐ벤더 규정 ⓑ워커 기동 규칙
+// §1("handle 비교는 쓰지 않는다") ⓒ2026-08-17 실측 재현(같은 `tabId:leafId`
+// 인데 handle만 바뀜). 그 세 겹의 근거로 HYK-294가 판정에서 handle 축을
+// 빼고 pane key(`${tabId}:${leafId}`) 하나만 남겼다(scripts/relay/
+// dispatch-bound-seat-proof.mjs 헤더). 배달 영수증이 기록하는 것도 정확히
+// 그 값(buildReceiptRecord의 `assignee_pane_key`)이고, 좌석이 자기 pane
+// key를 아는 통로도 벤더가 좌석 프로세스에 넣어 주는 `ORCA_PANE_KEY`
+// 하나다 -- 즉 새 신원 개념을 발명하지 않고 이미 있는 결속점을 그대로
+// 재사용한다.
+//
+// ⛔대조할 값이 없으면 «통과»가 아니라 «거부»다(fail-closed): pane key를
+// 모르면(`ORCA_PANE_KEY` 미설정) 어느 좌석인지 확정할 수 없으므로 반납을
+// 거부한다. 영수증 줄에 `assignee_pane_key`가 아예 없는 경우도 같다 --
+// "확인 못 함"은 "확인됨"이 아니다.
+//
+// 한 영수증 줄이 «이 좌석의 이 라운드»인가 (ESLint complexity 상한 회피용
+// 추출, 판정 문면은 그대로).
+function receiptRecordMatchesThisSeatRound(
+  rec,
+  role,
+  harnessTaskLabel,
+  currentSeatPaneKey,
+) {
+  if (typeof rec.role !== "string") return false;
+  if (rec.role.toUpperCase() !== role.toUpperCase()) return false;
+  if (rec.harness_task_label !== harnessTaskLabel) return false;
+  // HYK-443 4R: 좌석 신원 대조. 값이 없거나 다르면 이 줄은 «이 좌석의
+  // 배달»이 아니다 -- 라벨/role이 같아도 남의 영수증으로는 반납하지
+  // 않는다(pane key는 대소문자 정규화 대상이 아니다: 벤더가 만든
+  // uuid 쌍 문자열이라 사람이 섞어 쓰는 관용이 존재하지 않는다).
+  if (!isNonEmptyString(rec.assignee_pane_key)) return false;
+  return rec.assignee_pane_key === currentSeatPaneKey;
+}
+
+function hasDispatchReceiptForRound(
+  role,
+  harnessTaskLabel,
+  receiptPath,
+  currentSeatPaneKey,
+) {
+  if (
+    !isNonEmptyString(receiptPath) ||
+    !isNonEmptyString(harnessTaskLabel) ||
+    !isNonEmptyString(currentSeatPaneKey)
+  ) {
     return false;
   }
   let raw;
@@ -169,9 +223,12 @@ function hasDispatchReceiptForRound(role, harnessTaskLabel, receiptPath) {
       continue;
     }
     if (
-      typeof rec.role === "string" &&
-      rec.role.toUpperCase() === role.toUpperCase() &&
-      rec.harness_task_label === harnessTaskLabel
+      receiptRecordMatchesThisSeatRound(
+        rec,
+        role,
+        harnessTaskLabel,
+        currentSeatPaneKey,
+      )
     ) {
       found = true;
     }
@@ -202,6 +259,18 @@ function resolveReceiptPathForVerification(receiptPathArg, env) {
   if (isNonEmptyString(env?.DISPATCH_RECEIPT_PATH)) {
     return env.DISPATCH_RECEIPT_PATH;
   }
+  return null;
+}
+
+// HYK-443 4R: «지금 이 좌석»의 pane key. resolveReceiptPathForVerification
+// (바로 위)와 같은 관례를 그대로 따른다 -- 새 관례 발명 0, 새 파일 형식
+// 0. 출처는 벤더(Orca)가 좌석 프로세스에 넣어 주는 `ORCA_PANE_KEY`
+// 하나이고, 이 어댑터는 relay-handshake.mjs가 자식으로 스폰하므로 그
+// env가 그대로 상속된다(`execFileSync`에 `env` 오버라이드 없음 -- 이
+// 파일 자신의 HYK-289 주석이 이미 같은 상속 경로를 근거로 쓴다).
+// 미설정이면 null -> hasDispatchReceiptForRound가 즉시 false(거부).
+function resolveCurrentSeatPaneKey(env) {
+  if (isNonEmptyString(env?.ORCA_PANE_KEY)) return env.ORCA_PANE_KEY;
   return null;
 }
 
@@ -341,6 +410,7 @@ function verifyBlockedTerminationEvidence({
   role,
   reservationId,
   receiptPath,
+  currentSeatPaneKey,
 }) {
   if (!isNonEmptyString(harnessDir) || !isNonEmptyString(role)) {
     return {
@@ -374,10 +444,17 @@ function verifyBlockedTerminationEvidence({
       reason: `admission-completion-adapter: BLOCKED_TERMINATION_RELEASED 증거 확인 실패 -- 결과 파일('${resultPath}')에 유효한 '>>> BLOCKED:'/'>>> NEEDS_INPUT:' 표지가 정확히 하나 있지 않음, 거부(안전측 기본값)`,
     };
   }
-  if (!hasDispatchReceiptForRound(role, reservationId, receiptPath)) {
+  if (
+    !hasDispatchReceiptForRound(
+      role,
+      reservationId,
+      receiptPath,
+      currentSeatPaneKey,
+    )
+  ) {
     return {
       ok: false,
-      reason: `admission-completion-adapter: BLOCKED_TERMINATION_RELEASED 증거 확인 실패 -- reservationId('${reservationId}')가 role='${role}'로 실제 배달된 기록이 dispatch-receipts.jsonl(${receiptPath ?? "(경로 미설정)"})에 없음 -- 워커가 지어낸 이름표로 의심, 거부(안전측 기본값, HYK-342 3R §2)`,
+      reason: `admission-completion-adapter: BLOCKED_TERMINATION_RELEASED 증거 확인 실패 -- reservationId('${reservationId}')가 role='${role}'로 ★이 좌석(pane key=${currentSeatPaneKey ?? "(ORCA_PANE_KEY 미설정)"})에 실제 배달된 기록이 dispatch-receipts.jsonl(${receiptPath ?? "(경로 미설정)"})에 없음 -- 워커가 지어낸 이름표 또는 «다른 좌석의 영수증»으로 의심, 거부(안전측 기본값, HYK-342 3R §2 / HYK-443 4R 좌석 대조)`,
     };
   }
   return { ok: true };
@@ -634,6 +711,9 @@ function checkCompletionReasonEvidence({
       role,
       reservationId,
       receiptPath: resolveReceiptPathForVerification(receiptPath, process.env),
+      // HYK-443 4R: 좌석 신원도 같은 자리에서 해석한다 -- 이 값이 없으면
+      // verifyBlockedTerminationEvidence가 거부한다(fail-closed).
+      currentSeatPaneKey: resolveCurrentSeatPaneKey(process.env),
     });
     if (!evidence.ok) {
       return {

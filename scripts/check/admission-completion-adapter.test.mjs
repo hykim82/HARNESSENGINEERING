@@ -146,6 +146,7 @@ test("autoCompleteAdmission with `reason` stamps completion_reason on the releas
   const { dir, ledger, lock } = tmpPaths();
   const savedLedger = process.env.ADMISSION_LEDGER_PATH;
   const savedLock = process.env.ADMISSION_LOCK_PATH;
+  const savedPane = process.env.ORCA_PANE_KEY;
   try {
     runAdmissionCli([
       "init-cutover",
@@ -172,15 +173,20 @@ test("autoCompleteAdmission with `reason` stamps completion_reason on the releas
       "task_id: HYK-342-blocked-1\n\n>>> BLOCKED: 시험용 정지\n",
       "utf8",
     );
+    // HYK-443 4R: 영수증 줄은 이제 «어느 좌석에 배달됐는가»(assignee_pane_
+    // key)도 담고, 검증은 그것을 지금 좌석(`ORCA_PANE_KEY`)과 대조한다 --
+    // 진짜 성공 경로 재현이므로 둘을 같은 값으로 세운다.
+    const seatPaneKey = "tab-hyk342blocked:leaf-hyk342blocked";
     const receiptPath = join(dir, "dispatch-receipts.jsonl");
     writeFileSync(
       receiptPath,
-      `${JSON.stringify({ role: "CODER", harness_task_label: "HYK-342-blocked-1", dispatch_id: "ctx_test" })}\n`,
+      `${JSON.stringify({ role: "CODER", harness_task_label: "HYK-342-blocked-1", dispatch_id: "ctx_test", assignee_pane_key: seatPaneKey })}\n`,
       "utf8",
     );
 
     process.env.ADMISSION_LEDGER_PATH = ledger;
     process.env.ADMISSION_LOCK_PATH = lock;
+    process.env.ORCA_PANE_KEY = seatPaneKey;
     const outcome = autoCompleteAdmission({
       reservationId: "HYK-342-blocked-1",
       reason: "BLOCKED_TERMINATION_RELEASED",
@@ -202,6 +208,8 @@ test("autoCompleteAdmission with `reason` stamps completion_reason on the releas
     else delete process.env.ADMISSION_LEDGER_PATH;
     if (savedLock !== undefined) process.env.ADMISSION_LOCK_PATH = savedLock;
     else delete process.env.ADMISSION_LOCK_PATH;
+    if (savedPane !== undefined) process.env.ORCA_PANE_KEY = savedPane;
+    else delete process.env.ORCA_PANE_KEY;
     rmSync(dir, { recursive: true, force: true });
   }
 });

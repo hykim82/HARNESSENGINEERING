@@ -23,6 +23,20 @@
 //   5. 되돌림 변이(RED): receiptPath 인자 추가를 되돌리면(pre-fix 5-인자
 //      호출로 복원) env 없이는 다시 실패함을 확인 -- 이 fix가 원인임을
 //      증명. 실 소스는 바이트 동일 복원.
+//
+// HYK-443 4R: 검토 1R이 «좌석 혼동 fail-open»을 P1으로 재현했다 -- 검증이
+// role과 harness_task_label «만» 보고 영수증의 `assignee_pane_key`를 현재
+// 좌석과 대조하지 않아, 같은 라벨로 «다른 좌석»에 배달된 영수증 한 줄로도
+// 자리가 반납됐다(`other-seat-same-label`). 4R은 네 번째 조건(좌석 신원
+// 대조)을 걸고, 대조할 값이 없으면 «거부»한다(fail-closed). 근거 원문은
+// admission-completion-adapter.mjs의 hasDispatchReceiptForRound 헤더.
+// 이 파일이 4R에서 추가로 고정하는 것:
+//   6(4R). 검토자의 5개 라벨 시나리오 -- other-seat-same-label «만» 거부로
+//      바뀌고 나머지 4개는 그대로.
+//   7(4R). ORCA_PANE_KEY 미설정 -> 거부(통과 아님).
+//   8(4R). 영수증 줄에 assignee_pane_key가 없는 구 형식 -> 거부.
+//   9(4R). 되돌림 변이 ②: 좌석 대조를 빼면 다른 좌석 영수증으로 다시
+//      반납된다(RED), 같은 픽스처가 미변이 소스에서는 거부됨(대조군).
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
@@ -82,6 +96,38 @@ function withoutAmbientReceiptEnv(fn) {
   }
 }
 
+// HYK-443 4R (검토 1R P1-ⓑ): 반납 검증은 이제 «지금 이 좌석»의 pane key
+// (`ORCA_PANE_KEY`)와 영수증 줄의 `assignee_pane_key`를 대조한다. 이 시험은
+// 그 env를 언제나 명시적으로 세우거나(성공 축) 명시적으로 지운다(fail-
+// closed 축) -- 실행 환경에 우연히 떠 있는 값에 기대지 않는다(HYK-359와
+// 같은 이유, 바로 위 withoutAmbientReceiptEnv 참조).
+const CURRENT_SEAT_PANE = "tab-current:leaf-current";
+const FOREIGN_SEAT_PANE = "tab-foreign:leaf-foreign";
+
+function withSeatPaneKey(value, fn) {
+  const prev = process.env.ORCA_PANE_KEY;
+  // null/undefined = "이 좌석은 pane key를 모른다" (fail-closed 축 시험용).
+  if (value === undefined || value === null) delete process.env.ORCA_PANE_KEY;
+  else process.env.ORCA_PANE_KEY = value;
+  try {
+    return fn();
+  } finally {
+    if (prev === undefined) delete process.env.ORCA_PANE_KEY;
+    else process.env.ORCA_PANE_KEY = prev;
+  }
+}
+
+// 배달 영수증 한 줄(dispatch-receipt-cli.mjs의 buildReceiptRecord 형태 --
+// 이 시험이 쓰는 4필드만).
+function receiptLine({ role = "CODER", label, pane, dispatchId = "ctx_test" }) {
+  return `${JSON.stringify({
+    role,
+    harness_task_label: label,
+    dispatch_id: dispatchId,
+    assignee_pane_key: pane,
+  })}\n`;
+}
+
 // HYK-414 (time-judgment-now-injection ratchet): this file's fixtures embed
 // absolute timestamps (setupLedgerAndTask's dropped_at) -- checkRelayHandshake
 // must always be called with an explicit `now` fixed shortly after that
@@ -130,7 +176,7 @@ test("HYK-443 (1) 포인터 파일만 있고 DISPATCH_RECEIPT_PATH env는 없어
         const receiptPath = join(receiptDir, "dispatch-receipts.jsonl");
         writeFileSync(
           receiptPath,
-          `${JSON.stringify({ role: "CODER", harness_task_label: taskId, dispatch_id: "ctx_test" })}\n`,
+          receiptLine({ label: taskId, pane: CURRENT_SEAT_PANE }),
           "utf8",
         );
         writeFileSync(
@@ -142,11 +188,13 @@ test("HYK-443 (1) 포인터 파일만 있고 DISPATCH_RECEIPT_PATH env는 없어
         const prevLedgerEnv = process.env.ADMISSION_LEDGER_PATH;
         process.env.ADMISSION_LEDGER_PATH = ledgerPath;
         try {
-          checkRelayHandshake({
-            role: "coder",
-            harnessDir: dir,
-            now: FIXED_NOW,
-          });
+          withSeatPaneKey(CURRENT_SEAT_PANE, () =>
+            checkRelayHandshake({
+              role: "coder",
+              harnessDir: dir,
+              now: FIXED_NOW,
+            }),
+          );
         } finally {
           if (prevLedgerEnv === undefined)
             delete process.env.ADMISSION_LEDGER_PATH;
@@ -195,7 +243,11 @@ test("HYK-443 (2) §4 회귀: 배달 영수증에 없는 라벨(위조)로는 �
         // 실제로 배달된 적이 없다(위조 시나리오).
         writeFileSync(
           receiptPath,
-          `${JSON.stringify({ role: "CODER", harness_task_label: "HYK-OTHER-1", dispatch_id: "ctx_other" })}\n`,
+          receiptLine({
+            label: "HYK-OTHER-1",
+            pane: CURRENT_SEAT_PANE,
+            dispatchId: "ctx_other",
+          }),
           "utf8",
         );
         writeFileSync(
@@ -207,11 +259,13 @@ test("HYK-443 (2) §4 회귀: 배달 영수증에 없는 라벨(위조)로는 �
         const prevLedgerEnv = process.env.ADMISSION_LEDGER_PATH;
         process.env.ADMISSION_LEDGER_PATH = ledgerPath;
         try {
-          checkRelayHandshake({
-            role: "coder",
-            harnessDir: dir,
-            now: FIXED_NOW,
-          });
+          withSeatPaneKey(CURRENT_SEAT_PANE, () =>
+            checkRelayHandshake({
+              role: "coder",
+              harnessDir: dir,
+              now: FIXED_NOW,
+            }),
+          );
         } finally {
           if (prevLedgerEnv === undefined)
             delete process.env.ADMISSION_LEDGER_PATH;
@@ -288,6 +342,140 @@ test("HYK-443 (4) §4 회귀: 포인터 파일이 깨졌을(빈 파일) 때도 �
       assert.equal(after.reservations[taskId].completion_reason, undefined);
     });
   });
+});
+
+// --- HYK-443 4R: 검토 1R P1-ⓑ(좌석 혼동 fail-open) -------------------------
+// 검토자가 격리 원장·격리 영수증으로 돌린 5개 라벨 시나리오를 그대로
+// 재현한다. 기대: `other-seat-same-label` «하나만» 반납됨 -> 거부로 바뀌고
+// 나머지 4개는 그대로.
+// ---------------------------------------------------------------------------
+
+function runReleaseScenario({
+  taskId,
+  receiptRecords = [],
+  writePointer = true,
+  seatPane = CURRENT_SEAT_PANE,
+}) {
+  const dir = mkdtempSync(join(tmpdir(), "hyk443-seat-scn-"));
+  const receiptDir = mkdtempSync(join(tmpdir(), "hyk443-seat-rcpt-"));
+  const prevLedgerEnv = process.env.ADMISSION_LEDGER_PATH;
+  try {
+    const { ledgerPath } = setupLedgerAndTask(dir, { taskId });
+    if (writePointer) {
+      const receiptPath = join(receiptDir, "dispatch-receipts.jsonl");
+      writeFileSync(receiptPath, receiptRecords.join(""), "utf8");
+      writeFileSync(
+        join(dir, "dispatch-receipt-path.txt"),
+        receiptPath,
+        "utf8",
+      );
+    }
+    process.env.ADMISSION_LEDGER_PATH = ledgerPath;
+    withoutAmbientReceiptEnv(() =>
+      withSeatPaneKey(seatPane, () =>
+        checkRelayHandshake({ role: "coder", harnessDir: dir, now: FIXED_NOW }),
+      ),
+    );
+    const after = JSON.parse(readFileSync(ledgerPath, "utf8"));
+    return {
+      activeReservations: countActive(after),
+      completionReason: after.reservations[taskId].completion_reason ?? null,
+    };
+  } finally {
+    if (prevLedgerEnv === undefined) delete process.env.ADMISSION_LEDGER_PATH;
+    else process.env.ADMISSION_LEDGER_PATH = prevLedgerEnv;
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(receiptDir, { recursive: true, force: true });
+  }
+}
+
+const SEAT_SCENARIOS = [
+  // ⓵ 포인터 파일 자체가 없다 -- 조회 경로를 모른다.
+  { label: "pointer-absent", taskId: "HYK-443-SEAT-1", writePointer: false },
+  // ⓶ 이 좌석에 배달됐지만 «다른 라운드» 라벨이다.
+  {
+    label: "other-round",
+    taskId: "HYK-443-SEAT-2",
+    records: [{ label: "HYK-443-SEAT-OTHER-ROUND", pane: FOREIGN_SEAT_PANE }],
+  },
+  // ⓷ 같은 라벨이지만 role이 다르다.
+  {
+    label: "wrong-role-same-label",
+    taskId: "HYK-443-SEAT-3",
+    records: [
+      { role: "REVIEW", label: "HYK-443-SEAT-3", pane: FOREIGN_SEAT_PANE },
+    ],
+  },
+  // ⓸ ★P1: role도 라벨도 같은데 «다른 좌석»에 배달된 영수증이다.
+  {
+    label: "other-seat-same-label",
+    taskId: "HYK-443-SEAT-4",
+    records: [{ label: "HYK-443-SEAT-4", pane: FOREIGN_SEAT_PANE }],
+  },
+  // ⓹ role·라벨·좌석이 전부 이 좌석의 것 -- 정상 반납(살아 있어야 한다).
+  {
+    label: "matching-role-and-label",
+    taskId: "HYK-443-SEAT-5",
+    records: [{ label: "HYK-443-SEAT-5", pane: CURRENT_SEAT_PANE }],
+  },
+];
+
+test("HYK-443 4R: 검토자의 5개 라벨 시나리오 -- other-seat-same-label «만» 반납됨 -> 거부로 바뀌고 나머지 4개는 그대로", () => {
+  const observed = SEAT_SCENARIOS.map((scenario) => ({
+    label: scenario.label,
+    ...runReleaseScenario({
+      taskId: scenario.taskId,
+      writePointer: scenario.writePointer !== false,
+      receiptRecords: (scenario.records ?? []).map((r) => receiptLine(r)),
+    }),
+  }));
+  // 관측 원문을 그대로 남긴다(결과 파일에 붙일 근거).
+  for (const row of observed) console.log(JSON.stringify(row));
+
+  assert.deepEqual(observed, [
+    {
+      label: "pointer-absent",
+      activeReservations: 1,
+      completionReason: null,
+    },
+    { label: "other-round", activeReservations: 1, completionReason: null },
+    {
+      label: "wrong-role-same-label",
+      activeReservations: 1,
+      completionReason: null,
+    },
+    {
+      label: "other-seat-same-label",
+      activeReservations: 1,
+      completionReason: null,
+    },
+    {
+      label: "matching-role-and-label",
+      activeReservations: 0,
+      completionReason: "BLOCKED_TERMINATION_RELEASED",
+    },
+  ]);
+});
+
+test("HYK-443 4R: 대조할 좌석 값이 없으면(ORCA_PANE_KEY 미설정) «통과»가 아니라 «거부»다(fail-closed)", () => {
+  const outcome = runReleaseScenario({
+    taskId: "HYK-443-SEAT-NOENV-1",
+    receiptRecords: [
+      receiptLine({ label: "HYK-443-SEAT-NOENV-1", pane: CURRENT_SEAT_PANE }),
+    ],
+    seatPane: null,
+  });
+  assert.deepEqual(outcome, { activeReservations: 1, completionReason: null });
+});
+
+test('HYK-443 4R: 영수증 줄에 assignee_pane_key가 아예 없으면(구 형식) 거부 -- "확인 못 함"은 "확인됨"이 아니다', () => {
+  const outcome = runReleaseScenario({
+    taskId: "HYK-443-SEAT-NOFIELD-1",
+    receiptRecords: [
+      `${JSON.stringify({ role: "CODER", harness_task_label: "HYK-443-SEAT-NOFIELD-1", dispatch_id: "ctx_legacy" })}\n`,
+    ],
+  });
+  assert.deepEqual(outcome, { activeReservations: 1, completionReason: null });
 });
 
 // --- 되돌림 변이 (coder-task.md §4-5): spawnAdmissionAbortProcess의
@@ -368,7 +556,7 @@ async function runRedMutationScenario(checkDir, harnessDir) {
     const receiptPath = join(receiptDir, "dispatch-receipts.jsonl");
     writeFileSync(
       receiptPath,
-      `${JSON.stringify({ role: "CODER", harness_task_label: taskId, dispatch_id: "ctx_test" })}\n`,
+      receiptLine({ label: taskId, pane: CURRENT_SEAT_PANE }),
       "utf8",
     );
     writeFileSync(
@@ -384,7 +572,15 @@ async function runRedMutationScenario(checkDir, harnessDir) {
         const mod = await import(
           `file://${join(checkDir, "relay-handshake.mjs")}?t=${Date.now()}`
         );
-        mod.checkRelayHandshake({ role: "coder", harnessDir, now: FIXED_NOW });
+        // HYK-443 4R: 좌석 축은 정상으로 세워 둔다 -- 이 RED가 오직
+        // receiptPath 인자 되돌림 «하나»에서 나온 것임을 고정한다.
+        withSeatPaneKey(CURRENT_SEAT_PANE, () =>
+          mod.checkRelayHandshake({
+            role: "coder",
+            harnessDir,
+            now: FIXED_NOW,
+          }),
+        );
       } finally {
         if (prevLedgerEnv === undefined)
           delete process.env.ADMISSION_LEDGER_PATH;
@@ -445,6 +641,90 @@ test("HYK-443 되돌림 변이: receiptPath 인자 추가를 되돌리면(pre-fi
       after,
       src,
       "원복 증명 실패: 실제 relay-handshake.mjs가 이 시험 도중 바뀌었다",
+    );
+  }
+});
+
+// --- HYK-443 4R 되돌림 변이 ②: 좌석 대조를 빼면 «다른 좌석의 영수증»으로
+// 다시 반납된다(검토 1R P1-ⓑ 재현). 변이는 격리 픽스처에 심은 복사본에만
+// 가하고, 실 소스는 읽기만 한다(바이트 동일 확인).
+// ---------------------------------------------------------------------------
+
+const SEAT_CHECK_TARGET = `  if (!isNonEmptyString(rec.assignee_pane_key)) return false;
+  return rec.assignee_pane_key === currentSeatPaneKey;`;
+
+// 격리 checkDir에 심긴 어댑터를 직접 불러 «다른 좌석 영수증»으로 반납을
+// 시도하고, 남은 ACTIVE 수를 돌려준다.
+async function releaseWithForeignReceipt(checkDir, tag) {
+  const harnessDir = mkdtempSync(join(tmpdir(), `hyk443-seatmut-${tag}-`));
+  const receiptDir = mkdtempSync(join(tmpdir(), `hyk443-seatmut-r-${tag}-`));
+  const prevLedgerEnv = process.env.ADMISSION_LEDGER_PATH;
+  try {
+    const taskId = `HYK-443-SEATMUT-${tag}`;
+    const { ledgerPath } = setupLedgerAndTask(harnessDir, { taskId });
+    const receiptPath = join(receiptDir, "dispatch-receipts.jsonl");
+    writeFileSync(
+      receiptPath,
+      receiptLine({ label: taskId, pane: FOREIGN_SEAT_PANE }),
+      "utf8",
+    );
+    process.env.ADMISSION_LEDGER_PATH = ledgerPath;
+    const mod = await import(
+      `file://${join(checkDir, "admission-completion-adapter.mjs")}?t=${Date.now()}-${tag}`
+    );
+    withSeatPaneKey(CURRENT_SEAT_PANE, () =>
+      mod.autoCompleteAdmission({
+        reservationId: taskId,
+        harnessDir,
+        reason: "BLOCKED_TERMINATION_RELEASED",
+        role: "CODER",
+        receiptPath,
+      }),
+    );
+    return countActive(JSON.parse(readFileSync(ledgerPath, "utf8")));
+  } finally {
+    if (prevLedgerEnv === undefined) delete process.env.ADMISSION_LEDGER_PATH;
+    else process.env.ADMISSION_LEDGER_PATH = prevLedgerEnv;
+    rmSync(harnessDir, { recursive: true, force: true });
+    rmSync(receiptDir, { recursive: true, force: true });
+  }
+}
+
+test("HYK-443 4R 되돌림 변이 ②: 좌석 대조 두 줄을 빼면 다른 좌석의 영수증으로 다시 반납된다(RED) -- 같은 픽스처가 미변이 소스에서는 거부됨(대조군), 실 소스는 바이트 동일", async () => {
+  const src = readFileSync(ADMISSION_COMPLETION_ADAPTER_PATH, "utf8");
+  const count = src.split(SEAT_CHECK_TARGET).length - 1;
+  assert.equal(
+    count,
+    1,
+    `mutation target (hasDispatchReceiptForRound seat comparison) must appear exactly once in the current working-tree source (found ${count})`,
+  );
+  const mutated = src.replace(SEAT_CHECK_TARGET, "  return true;");
+
+  const rootDir = mkdtempSync(join(tmpdir(), "hyk443-seatmut-root-"));
+  try {
+    const { checkDir } = stageMinimalRelayHandshakeDeps(rootDir);
+    // 대조군: 방금 스테이징된 «있는 그대로»의 어댑터.
+    assert.equal(
+      await releaseWithForeignReceipt(checkDir, "control"),
+      1,
+      "대조군: 현재 소스에서는 다른 좌석 영수증으로 반납되지 않는다",
+    );
+    writeFileSync(
+      join(checkDir, "admission-completion-adapter.mjs"),
+      mutated,
+      "utf8",
+    );
+    assert.equal(
+      await releaseWithForeignReceipt(checkDir, "red"),
+      0,
+      "RED: 좌석 대조가 없으면 라벨·role만 같아도 남의 영수증으로 자리가 반납된다(검토 1R other-seat-same-label) -- 이 두 줄이 원인임을 증명",
+    );
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+    assert.equal(
+      readFileSync(ADMISSION_COMPLETION_ADAPTER_PATH, "utf8"),
+      src,
+      "원복 증명 실패: 실제 admission-completion-adapter.mjs가 이 시험 도중 바뀌었다",
     );
   }
 });
