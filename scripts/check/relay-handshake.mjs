@@ -114,6 +114,36 @@ const BLOCKED_ANYWHERE_RE = />>>\s*(BLOCKED|NEEDS_INPUT)\b/gi;
 // ⛔BLOCKED_RE(엄격 채택 기준, 채택에는 사유 필수)는 이 상수와 무관하게
 // 그대로다 -- 건드리지 않는다.
 const BLOCKED_BARE_COLUMN0_RE = /^(BLOCKED|NEEDS_INPUT):/gim;
+
+// HYK-442: BLOCKED_ANYWHERE_RE/BLOCKED_BARE_COLUMN0_RE above deliberately
+// have no context awareness -- they exist to catch a broken marker ANYWHERE
+// it might appear (that is their whole job, see their own headers). The
+// 2026-09-05 실사고(coder-task.md §1-1)는 이 무경계 탐색의 대가다: 워커가
+// 자기점검 산문에서 표지 문법을 «인용»하려고 인라인 코드 표기(백틱)를 쓴
+// 자리("`>>> BLOCKED:` 한 줄")까지 "근접-미스 표지 흔적"으로 세어, 정상
+// 종료(well-formed 1개)를 "유효+깨짐 혼재"로 승격시켜 소비를 막았다(실물
+// 재현: coder-437-PRE-EDIT-1758.md 166행). 판별 기준: 인라인 코드 스팬
+// (백틱 쌍) 안쪽은 "표지 문법을 설명/인용하는 산문"이지 "표지를 쓰려는
+// 시도"가 아니다 -- 같은 이유로 사람도 그 자리를 표지로 읽지 않는다(백틱은
+// 정확히 "이건 코드/리터럴 표기다"라는 신호). 그래서 근접-미스 계수 «만»
+// 인라인 코드 스팬을 제외한 텍스트에서 센다. ⛔BLOCKED_RE(엄격 채택)는
+// 건드리지 않는다 -- 그 정규식은 이미 줄 «전체»가 `>>>`로 시작할 것을
+// 요구하므로(`^>>>...`), 백틱으로 감싼 인용은애초에 그 자리에 매치하지
+// 않는다(줄이 백틱으로 시작하면 `^`가 `>` 대신 백틱을 만난다) -- 이 fix가
+// 필요한 것은 오직 무경계 근접-미스 탐색 쪽뿐이다.
+//
+// 왜 안전한가(§4 회귀 ⓐ-ⓔ 무회귀): 실사고의 두 근접-미스 재현
+// (leading-space ` >>> BLOCKED: x` · `>>>`-less column-0 `BLOCKED: x` ·
+// 콜론 없는 `>>> BLOCKED x`)는 전부 백틱 없이 «그대로 노출된» 텍스트다 --
+// 이 스트립은 백틱으로 감싸인 부분만 지우므로 이 셋의 매치 개수는 조금도
+// 바뀌지 않는다. 인라인 코드 스팬은 한 줄 안에서만 성립한다고 본다(여러
+// 줄에 걸친 백틱 쌍은 마크다운 자체에서도 인라인 스팬이 아니다) --
+// `[^`\n]*`로 개행을 건너뛰지 않게 고정.
+function stripInlineCodeSpansForNearMissScan(resultContent) {
+  // 카운트 전용 스캔이라 오프셋/길이 보존이 필요 없다 -- 스팬 전체를 빈
+  // 문자열로 치환해 매치 대상에서 완전히 제거한다.
+  return resultContent.replace(/`[^`\n]*`/g, "");
+}
 // HYK-325 §2-3 (승격: HYK-418 §2-1): the non-column-0 meta line finalize-
 // done.mjs appends right after a `>>> DONE:` line it wrote itself (see that
 // file's own FINALIZE_DONE_MARKER_LINE). Absence used to only trigger a
@@ -317,13 +347,22 @@ function resolveResultBlockedState(resultContent) {
   // well-formed one(s) already counted above -- a valid line coexisting
   // with a broken one, previously swallowed silently into the single valid
   // match.
-  const anywhereCount = [...resultContent.matchAll(BLOCKED_ANYWHERE_RE)].length;
+  // HYK-442: near-miss counting scans the inline-code-span-stripped text
+  // (see stripInlineCodeSpansForNearMissScan's own header) -- a backtick-
+  // quoted mention of the marker syntax in explanatory prose is not itself
+  // scanned. The strict `matches` count just above is computed on the
+  // ORIGINAL resultContent (unaffected, untouched by this fix).
+  const nearMissScanContent =
+    stripInlineCodeSpansForNearMissScan(resultContent);
+  const anywhereCount = [...nearMissScanContent.matchAll(BLOCKED_ANYWHERE_RE)]
+    .length;
   // HYK-333: BLOCKED_BARE_COLUMN0_RE matches lines that never start with
   // `>>>` (it anchors on the keyword itself), so it can never overlap with
   // anywhereCount's `>>>`-anchored matches -- summing the two counts every
   // near-miss shape exactly once, no double counting.
-  const bareColumn0Count = [...resultContent.matchAll(BLOCKED_BARE_COLUMN0_RE)]
-    .length;
+  const bareColumn0Count = [
+    ...nearMissScanContent.matchAll(BLOCKED_BARE_COLUMN0_RE),
+  ].length;
   const nearMissCount = anywhereCount + bareColumn0Count;
   if (matches.length === 1) {
     if (nearMissCount > matches.length) {
@@ -2862,8 +2901,35 @@ function spawnAdmissionAbortProcess(taskId, harnessDir, role) {
       dirname(fileURLToPath(new URL(import.meta.url))),
       "admission-completion-adapter.mjs",
     );
+    // HYK-443: the adapter's verifyBlockedTerminationEvidence (admission-
+    // completion-adapter.mjs) requires a 6th positional arg (receiptPath) to
+    // find dispatch-receipts.jsonl -- this call used to stop at the 5th
+    // (role), so the adapter's own resolveReceiptPathForVerification always
+    // fell through to `DISPATCH_RECEIPT_PATH` env (never set by this repo's
+    // own automated consumption path, only by a manually-run ORCH terminal)
+    // and then to null -- BLOCKED_TERMINATION_RELEASED release therefore
+    // ALWAYS failed with "(경로 미설정)" (coder-task.md §1-2 실물 재현).
+    // ⛔새 관례 발명 금지(coder-task.md §2): this file's own
+    // resolveDispatchLedgerPath (above) already resolves the exact same
+    // pointer-file convention (`<harnessDir>/dispatch-receipt-path.txt`)
+    // that resolveDispatchRecordExistence uses moments earlier in this same
+    // handshake -- reused here unchanged, not re-derived. `undefined` (no
+    // explicit path, no pointer file) resolves to `undefined`, which is
+    // simply omitted from `args` below -- the adapter's own env fallback and
+    // fail-closed null-path rejection are unchanged for that case.
+    const resolvedReceiptPath = resolveDispatchLedgerPath(
+      undefined,
+      harnessDir,
+    );
     const args = harnessDir
-      ? [adapterPath, taskId, harnessDir, "BLOCKED_TERMINATION_RELEASED", role]
+      ? [
+          adapterPath,
+          taskId,
+          harnessDir,
+          "BLOCKED_TERMINATION_RELEASED",
+          role,
+          ...(resolvedReceiptPath !== undefined ? [resolvedReceiptPath] : []),
+        ]
       : [adapterPath, taskId];
     const out = execFileSync("node", args, {
       encoding: "utf8",
