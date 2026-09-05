@@ -9,6 +9,18 @@
 // 단계에서 항상 NOT_ATTEMPTED다(judgePostConditions만 실행 후 사후 관측을
 // SUCCEEDED/FAILED_*로 판정한다).
 
+// ---- HYK-431 6R (coder-task.md §2-2): 관측을 한 번으로 줄인다 ----
+// 검토 6R은 `Array.isArray(proxy)===true`인 Proxy가 `length`를 0으로
+// 보고하게 만들어 policy.protectedTargets를 통째로 숨겼고, 그 결과 보호
+// 표적이 TEARDOWN_ELIGIBLE(allowSink:true)이 됐다. 4R의 원형 메서드
+// 차용(`Array.prototype.includes.call`)은 "로직이 입력에 조종되지 않게"
+// 했을 뿐, 그 로직이 **읽는 값**까지 고정하지는 못한다.
+// 6R은 judgeTeardown/judgePostConditions 진입에서 인자를 단 한 번 읽어
+// 깊게 얼린 평범한 자료로 고정하고, 스키마 검사도 분류도 evidence도 그
+// 고정본만 쓴다 -- 검증기와 소비자가 같은 물건을 본다.
+
+import { snapshotPlainData } from "./plain-snapshot.mjs";
+
 export const TEARDOWN_SCHEMA_VERSION = 1;
 
 export const OBSERVATION = Object.freeze({
@@ -306,17 +318,35 @@ function classifyEligibility(inventory, policy) {
 // judgeTeardown({ inventory, policy }) -- policy: { protectedTargets: string[],
 // requireDurableEvidence?: boolean, expectedWorktreeId?: string,
 // dispatchCorrelationProven?: boolean }. 순수 판정, 부작용 0.
-export function judgeTeardown({ inventory, policy } = {}) {
+function schemaInvalidTeardown(evidence) {
+  return {
+    observation: OBSERVATION.UNOBSERVABLE,
+    eligibility: ELIGIBILITY.EVIDENCE_NOT_DURABLE,
+    execution: EXECUTION.NOT_ATTEMPTED,
+    allowSink: false,
+    reason: REASON.SCHEMA_INVALID,
+    evidence,
+  };
+}
+
+export function judgeTeardown(args = {}) {
+  // ★ 신뢰 경계(6R): 인자를 여기서 단 한 번 읽어 고정한다. 고정에
+  // 실패하면(Proxy·숨긴 원소·자료 아닌 값) fail-closed -- allowSink:false.
+  const fixed = snapshotPlainData(args);
+  if (!fixed.ok) {
+    return schemaInvalidTeardown({
+      ruleId: REASON.SCHEMA_INVALID,
+      inventory: null,
+      snapshotReason: fixed.reason,
+    });
+  }
+  const { inventory, policy } = isPlainObject(fixed.value) ? fixed.value : {};
   const p = isPlainObject(policy) ? policy : {};
   if (!isValidInventoryShape(inventory)) {
-    return {
-      observation: OBSERVATION.UNOBSERVABLE,
-      eligibility: ELIGIBILITY.EVIDENCE_NOT_DURABLE,
-      execution: EXECUTION.NOT_ATTEMPTED,
-      allowSink: false,
-      reason: REASON.SCHEMA_INVALID,
-      evidence: { ruleId: REASON.SCHEMA_INVALID, inventory: inventory ?? null },
-    };
+    return schemaInvalidTeardown({
+      ruleId: REASON.SCHEMA_INVALID,
+      inventory: inventory ?? null,
+    });
   }
 
   const observation = classifyObservation(inventory);
@@ -379,7 +409,15 @@ function layersAllPresent(inv) {
 // 근거가 아니다(mutation #11: cliOk:true + after가 split이면 FAILED_SPLIT).
 // `before`는 이 판정 자체에 쓰이지 않는다(호출자의 로그/증거 보존용으로만
 // 함께 넘어온다) -- 성패는 오직 사후 관측(after)만으로 정해진다.
-export function judgePostConditions({ after } = {}) {
+export function judgePostConditions(args = {}) {
+  // ★ 신뢰 경계(6R): layersAllAbsent/layersAllPresent가 `after.layers.*`를
+  // 각각 한 번씩, 즉 같은 지점을 **두 번** 읽는다 -- 호출마다 다른 값을
+  // 주는 입력이면 "absent도 present도 아니다"를 스스로 만들어낼 수 있다.
+  // 진입에서 한 번 고정해 그 틈을 없앤다. 고정 실패는 성공으로 세지
+  // 않는다(FAILED_SPLIT -- 이 축의 fail-closed 방향).
+  const fixed = snapshotPlainData(args);
+  if (!fixed.ok) return EXECUTION.FAILED_SPLIT;
+  const after = isPlainObject(fixed.value) ? fixed.value.after : undefined;
   if (layersAllAbsent(after)) {
     return EXECUTION.SUCCEEDED;
   }

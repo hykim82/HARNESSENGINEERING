@@ -177,6 +177,29 @@
 // SCHEMA_INVALID/INPUT_INVALID(둘 다 fail-closed/fail-open 각자의 비대칭
 // 방향)로 떨어진다.
 
+// ---- §2⑴(6R) 관측을 한 번으로 줄인다 -- 검증기와 소비자가 같은 물건을
+//      본다 (HYK-431 6R, coder-task.md §2-2) ----
+//
+// 3R~5R은 "검사 로직이 입력에 조종되지 않게" 만들었다(선언적 조합자 +
+// 원형 메서드 차용). 검토 6R은 그 다음 겹을 뚫었다: 로직이 원형 것이어도
+// **그 로직이 읽는 값**은 여전히 입력이 매 호출마다 새로 정한다.
+// `Array.isArray(proxy)===true`인 Proxy가 `length`를 0으로 보고하면
+// PROTECTED_SEATS_SCHEMA도 통과하고(원소가 "없으니" vacuously true)
+// classifyProtection의 exact 대조도 빈 목록을 훑어 -- 보호받는 좌석이
+// RECLAIM_ELIGIBLE이 됐다.
+//
+// 6R의 수리는 검사를 하나 더 붙이는 게 아니라 **읽는 횟수를 1로 만드는**
+// 것이다: judgeSeatReclaim/judgeReclaimAnomaly는 진입 즉시 인자를
+// plain-snapshot.mjs로 한 번 읽어 깊게 얼린 평범한 자료로 고정하고, 그
+// 아래 모든 스키마 검사·분류·evidence는 **그 고정본만** 본다. 원본은 다시
+// 만지지 않는다. 그래서 (a) 호출마다 값을 바꾸는 입력도 판정에 관여할
+// 두 번째 기회가 없고 (b) 스키마가 통과시킨 그 값이 그대로 분류·evidence로
+// 흐르며 (c) 고정본에는 getter/Proxy/프로토타입 재정의가 남지 않는다.
+// 아래 TArrayOf/classifyProtection의 원형 메서드 차용(4R/5R)은 그대로
+// 남긴다 -- 고정본에는 이미 불필요하지만 방어가 줄지 않는다.
+
+import { snapshotPlainData } from "./plain-snapshot.mjs";
+
 export const SEAT_RECLAIM_SCHEMA_VERSION = 1;
 
 export const SEAT_ELIGIBILITY = Object.freeze({
@@ -478,7 +501,25 @@ function classifySeatEligibility(inventory, p, nowMs) {
 // §2⑷). 순수 판정, 부작용 0, 어떤 인자에도 throw하지 않는다(§1-3). 반환:
 // { eligibility, reclaimEligible, reason, evidence }.
 export function judgeSeatReclaim(args) {
-  const { inventory, policy, nowMs } = isPlainObject(args) ? args : {};
+  // ★ 신뢰 경계(6R): 인자를 여기서 단 한 번 읽어 고정한다. 아래는 전부
+  // 그 고정본만 본다.
+  const fixed = snapshotPlainData(args);
+  if (!fixed.ok) {
+    return {
+      eligibility: SEAT_ELIGIBILITY.UNOBSERVABLE,
+      reclaimEligible: false,
+      reason: SEAT_REASON.SCHEMA_INVALID,
+      evidence: {
+        ruleId: SEAT_REASON.SCHEMA_INVALID,
+        inventory: null,
+        nowMs: null,
+        snapshotReason: fixed.reason,
+      },
+    };
+  }
+  const { inventory, policy, nowMs } = isPlainObject(fixed.value)
+    ? fixed.value
+    : {};
   const p = isPlainObject(policy) ? policy : {};
 
   if (!isValidSeatInventoryShape(inventory)) {
@@ -560,10 +601,27 @@ function isValidAnomalyInput(eligibleUnreclaimedCount, systemPressure, policy) {
 // 아니라 신호 쪽으로 접는다). 이 비대칭은 2R에서도 그대로 유지한다
 // (coder-task.md §3-4 비타협).
 export function judgeReclaimAnomaly(args, policy) {
-  const { eligibleUnreclaimedCount, systemPressure } = isPlainObject(args)
-    ? args
+  // ★ 신뢰 경계(6R): 두 인자를 한 번에 고정한다. 고정 자체가 실패하면 이
+  // 축의 비대칭 방향(fail-open -- 아래 근거 주석)에 맞춰 ANOMALY로 접는다.
+  const fixed = snapshotPlainData({ args, policy });
+  if (!fixed.ok) {
+    return {
+      status: ANOMALY_STATUS.ANOMALY,
+      reason: ANOMALY_REASON.INPUT_INVALID,
+      evidence: {
+        ruleId: ANOMALY_REASON.INPUT_INVALID,
+        eligibleUnreclaimedCount: null,
+        systemPressure: null,
+        snapshotReason: fixed.reason,
+      },
+    };
+  }
+  const { eligibleUnreclaimedCount, systemPressure } = isPlainObject(
+    fixed.value.args,
+  )
+    ? fixed.value.args
     : {};
-  const p = isPlainObject(policy) ? policy : {};
+  const p = isPlainObject(fixed.value.policy) ? fixed.value.policy : {};
   if (!isValidAnomalyInput(eligibleUnreclaimedCount, systemPressure, p)) {
     return {
       status: ANOMALY_STATUS.ANOMALY,

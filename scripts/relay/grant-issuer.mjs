@@ -7,6 +7,7 @@ import {
   saveStoreAtomic,
 } from "./arm-state.mjs";
 import { judgeAdmission } from "./admission-core.mjs";
+import { snapshotPlainData } from "./plain-snapshot.mjs";
 import {
   claimIntentTx,
   markIntentIssued,
@@ -134,13 +135,13 @@ function collectDelegationStringProblems(delegation) {
   return problems;
 }
 
-// HYK-431 5R / HYK-436 (§2-1, coder-task.md, 검토자 직접 재현으로 확정된
-// P1): delegation.allowed_task_hashes는 Array.isArray만 통과하면(서브클래스
-// 포함) 그 인스턴스 자신의 every를 그대로 부르고 있었다 -- every를 항상
-// true로 재정의한 Array 서브클래스에 null 원소를 담아 넘기면 이 검증을
-// 통과해 ISSUED까지 도달한다(검토 4R 실증, review.md §3/§4). 원형의
-// every를 `Function.prototype.call`로 빌려 부르면(seat-reclaim-core.mjs
-// TArrayOf와 동일 패턴) 인스턴스가 무엇을 재정의했든 무관해진다.
+// HYK-431 6R (§2-2): 이 함수가 보는 delegation은 **이미 issueSubGrant의
+// 신뢰 경계에서 평범한 자료로 고정된 사본**이다(plain-snapshot.mjs). 즉
+// `allowed_task_hashes`는 순정 배열이고, 아래 taskHashInScope가 나중에
+// 읽는 것도 **같은 그 사본**이다 -- 검증기와 소비자가 같은 물건을 본다.
+// 아래 `Array.prototype.every.call` 차용(5R)은 그대로 남겨 둔다: 고정본에
+// 대해서는 이미 불필요하지만, 이 함수가 다른 경로에서 직접 불릴 경우를
+// 위한 두 번째 층이다(제거하면 방어가 한 겹 줄 뿐 늘지 않는다).
 function collectDelegationScopeProblems(delegation) {
   const problems = [];
   if (
@@ -713,7 +714,26 @@ function consumeAndIssueEnvelope(inp, opts) {
 }
 
 export function issueSubGrant(input, opts) {
-  const inp = isPlainObject(input) ? input : {};
+  // ★ HYK-431 6R (§2-2) 신뢰 경계. 이 한 줄이 이 파일의 유일한 "입력을
+  // 읽는 지점"이다: 요청 봉투 전체를 여기서 **단 한 번** 읽어 깊게 얼린
+  // 평범한 자료로 고정하고, 아래 형식 검증도(validateDelegation) 소비도
+  // (checkDelegationScope/consumeDelegationTx/buildSubGrantFields) 오직 그
+  // 고정본만 쓴다. 그래서 입력이 호출마다 다른 값을 주더라도 판정에
+  // 관여할 두 번째 기회가 없다(⒜), 검증을 통과한 값이 그대로 소비되며
+  // (⒝), 고정본에는 getter·Proxy·프로토타입 재정의가 남지 않는다(⒞).
+  //
+  // `opts`는 고정하지 않는다 -- 그건 신뢰할 수 없는 페이로드가 아니라
+  // 호출자가 주입하는 I/O 함수 묶음(테스트 seam)이고, 함수는 원리적으로
+  // 평범한 자료로 고정할 수 없다. 이 경계는 "판정에 쓰이는 자료"의
+  // 경계이지 "주입된 실행기"의 경계가 아니다(정직 한계 §9에 기록).
+  const fixed = snapshotPlainData(input);
+  if (!fixed.ok) {
+    return deny(
+      REASON.DELEGATION_INVALID,
+      `request could not be fixed as plain data -- ${fixed.reason}`,
+    );
+  }
+  const inp = isPlainObject(fixed.value) ? fixed.value : {};
   const nowMs = Number.isSafeInteger(inp.nowMs) ? inp.nowMs : Date.now();
 
   const formatOrScopeDenied = checkDelegationFormatAndScope(inp, nowMs);
