@@ -485,6 +485,110 @@ test("불변식(teardown) ⑵ 정책 형 강제: 안전장치를 끄는 방향�
   assert.equal(identity.reason, TEARDOWN_REASON.SCHEMA_INVALID);
 });
 
+// ---------------------------------------------------------------------------
+// ★HYK-447 2R -- 검토 1R P1 축: 「보이지 않는 own 속성」.
+// 여기서도 재는 것은 같은 불변식이다 -- «검사기가 관측한 값 == 소비자가 쓴 값».
+// 숨겨진 필드가 있는 입력에서는 그 등식이 **성립할 수 없다**(검사기는 그
+// 필드를 못 보고, 그 값은 산출물에도 없다). 그래서 유일한 정답은 «그런
+// 입력은 통과시키지 않는다»이고, 아래 축이 그것을 프로덕션 export 로 잰다.
+// ⛔이름을 특별 취급하지 않음을 함께 잰다(계약에 없는 지어낸 필드도 같은 결과).
+// ---------------------------------------------------------------------------
+function hiddenProp(obj, key, value) {
+  Object.defineProperty(obj, key, {
+    value,
+    enumerable: false,
+    writable: true,
+    configurable: true,
+  });
+  return obj;
+}
+
+test("불변식(teardown) ⑵ 2R: 숨겨진(비열거) 보호 목록은 사라지지 않는다 -- 파괴가 허가되지 않는다", () => {
+  const policy = hiddenProp(
+    { dispatchCorrelationProven: true },
+    "protectedTargets",
+    ["digest-protected"],
+  );
+  const result = judgeTeardown({ inventory: teardownInventory(), policy });
+  assert.equal(result.allowSink, false);
+  assert.equal(result.reason, TEARDOWN_REASON.SCHEMA_INVALID);
+});
+
+test("불변식(teardown) ⑵ 2R: 숨겨진 requireDurableEvidence(+worktreeId:null)도 파괴가 허가되지 않는다", () => {
+  const policy = hiddenProp(
+    { protectedTargets: [], dispatchCorrelationProven: true },
+    "requireDurableEvidence",
+    true,
+  );
+  const result = judgeTeardown({
+    inventory: teardownInventory({
+      target: {
+        canonicalPathDigest: "digest-x",
+        worktreeId: null,
+        repoId: "repo-1",
+      },
+    }),
+    policy,
+  });
+  assert.equal(result.allowSink, false);
+  assert.equal(result.reason, TEARDOWN_REASON.SCHEMA_INVALID);
+});
+
+test("불변식(teardown) ⑵ 2R: 숨겨진 getter는 호출도 0이고 사라지지도 않는다 · 지어낸 이름의 숨은 필드·심볼 키도 같은 결과(허용 목록 아님)", () => {
+  let calls = 0;
+  const policy = { dispatchCorrelationProven: true };
+  Object.defineProperty(policy, "protectedTargets", {
+    get() {
+      calls += 1;
+      return ["digest-protected"];
+    },
+    enumerable: false,
+    configurable: true,
+  });
+  const getterResult = judgeTeardown({
+    inventory: teardownInventory(),
+    policy,
+  });
+  assert.equal(calls, 0);
+  assert.equal(getterResult.allowSink, false);
+  assert.equal(getterResult.reason, TEARDOWN_REASON.SCHEMA_INVALID);
+
+  const invented = judgeTeardown({
+    inventory: teardownInventory(),
+    policy: hiddenProp(
+      { protectedTargets: [], dispatchCorrelationProven: true },
+      "totallyMadeUpFieldNobodyDeclared",
+      { anything: true },
+    ),
+  });
+  assert.equal(invented.allowSink, false);
+  assert.equal(invented.reason, TEARDOWN_REASON.SCHEMA_INVALID);
+
+  const symbolPolicy = {
+    protectedTargets: [],
+    dispatchCorrelationProven: true,
+  };
+  symbolPolicy[Symbol("hidden-policy")] = ["digest-protected"];
+  const symbolResult = judgeTeardown({
+    inventory: teardownInventory(),
+    policy: symbolPolicy,
+  });
+  assert.equal(symbolResult.allowSink, false);
+  assert.equal(symbolResult.reason, TEARDOWN_REASON.SCHEMA_INVALID);
+});
+
+test("불변식(seat-reclaim) ⑵ 2R: 숨겨진 보호 좌석 목록도 사라지지 않는다 -- 회수가 허가되지 않는다", () => {
+  const policy = hiddenProp({ minIdleMs: 1000 }, "protectedSeats", ["pane-1"]);
+  const result = judgeSeatReclaim({
+    inventory: seatInventory(),
+    policy,
+    nowMs: SEAT_NOW,
+  });
+  assert.equal(result.reclaimEligible, false);
+  assert.equal(result.reason, SEAT_REASON.SCHEMA_INVALID);
+  assert.match(result.evidence.snapshotReason, /non-enumerable own property/);
+});
+
 test("불변식(judgePostConditions) ⑵: 층 값이 접근자면 -- 성공으로 세지 않는다(FAILED_SPLIT), 접근자는 불리지 않는다", () => {
   const layers = { orca: "absent", dir: "absent" };
   const gitLog = volatileAccessor(layers, "git", ["absent", "present"]);

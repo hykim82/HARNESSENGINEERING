@@ -252,6 +252,119 @@ test("plain-snapshot 정직 한계: 배열을 흉내 낸 순정 객체는 경계
   assert.equal(fixed.value["0"], "hidden");
 });
 
+// ---------------------------------------------------------------------------
+// HYK-447 2R -- ★검토 1R P1: 「보이지 않는 own 속성이 조용히 사라진다」.
+// 1R 의 판별은 값의 **종류**에는 미쳤지만 속성의 **가시성**에는 미치지
+// 못했다(`Object.keys` 는 열거 가능한 own 문자열 키만 돈다). 사라진 필드는
+// 「없는 필드」와 구별되지 않으므로, 안전장치를 **숨기는 것만으로** 파괴가
+// 허가됐다. 아래 시험들은 그 소멸이 이제 **거부**임을 고정한다.
+// ⛔이 시험들은 필드 «이름»을 하나도 특별 취급하지 않는다 -- 지어낸 이름도
+// 같은 사유로 거부되는 것을 함께 잰다.
+// ---------------------------------------------------------------------------
+
+function hidden(obj, key, value) {
+  Object.defineProperty(obj, key, {
+    value,
+    enumerable: false,
+    writable: true,
+    configurable: true,
+  });
+  return obj;
+}
+
+test("plain-snapshot ⒜(2R): 비열거 own 속성은 사라지지 않고 거부된다", () => {
+  const fixed = snapshotPlainData(
+    hidden({ visible: "data" }, "protectedTargets", ["digest-protected"]),
+  );
+  assert.equal(fixed.ok, false);
+  assert.match(
+    fixed.reason,
+    /non-enumerable own property \('protectedTargets'\)/,
+  );
+});
+
+test("plain-snapshot ⒜(2R): 이름은 보지 않는다 -- 계약에 없는 지어낸 비열거 필드도 똑같이 거부된다(허용 목록 아님)", () => {
+  const fixed = snapshotPlainData(
+    hidden({ visible: "data" }, "totallyMadeUpFieldNobodyDeclared", { a: 1 }),
+  );
+  assert.equal(fixed.ok, false);
+  assert.match(
+    fixed.reason,
+    /non-enumerable own property \('totallyMadeUpFieldNobodyDeclared'\)/,
+  );
+});
+
+test("plain-snapshot ⒜(2R): 비열거 getter는 「불리지 않는」 대신 사라지지 않는다 -- 거부되고, 호출도 0이다", () => {
+  let calls = 0;
+  const input = { visible: "data" };
+  Object.defineProperty(input, "protectedTargets", {
+    get() {
+      calls += 1;
+      return ["digest-protected"];
+    },
+    enumerable: false,
+    configurable: true,
+  });
+  const fixed = snapshotPlainData(input);
+  assert.equal(fixed.ok, false);
+  // ★사유는 «숨겨졌다»가 맞다 -- 접근자였다는 사실보다 사라진다는 사실이
+  // 이 입력의 위험(검토 1R P1)이다.
+  assert.match(
+    fixed.reason,
+    /non-enumerable own property \('protectedTargets'\)/,
+  );
+  assert.equal(calls, 0);
+});
+
+test("plain-snapshot ⒜(2R): 심볼 키 own 속성도 조용히 버리지 않고 거부한다", () => {
+  const marker = Symbol("policy");
+  const input = { visible: "data" };
+  input[marker] = ["digest-protected"];
+  const fixed = snapshotPlainData(input);
+  assert.equal(fixed.ok, false);
+  assert.match(fixed.reason, /symbol-keyed own property \(Symbol\(policy\)\)/);
+});
+
+test("plain-snapshot ⒜(2R): 배열의 «원소가 아닌» own 속성(숨긴 것·심볼)도 거부된다", () => {
+  const withHidden = hidden(["a"], "hiddenExtra", "digest-protected");
+  const r1 = snapshotPlainData(withHidden);
+  assert.equal(r1.ok, false);
+  assert.match(
+    r1.reason,
+    /own property that is not an element \(hiddenExtra\)/,
+  );
+
+  const withSymbol = ["a"];
+  withSymbol[Symbol("k")] = "hidden";
+  const r2 = snapshotPlainData(withSymbol);
+  assert.equal(r2.ok, false);
+  assert.match(
+    r2.reason,
+    /own property that is not an element \(Symbol\(k\)\)/,
+  );
+
+  const withNonEnumerableElement = ["a", "b"];
+  Object.defineProperty(withNonEnumerableElement, 1, {
+    value: "b",
+    enumerable: false,
+    configurable: true,
+  });
+  const r3 = snapshotPlainData(withNonEnumerableElement);
+  assert.equal(r3.ok, false);
+  assert.match(r3.reason, /non-enumerable own property \('1'\)/);
+});
+
+test("plain-snapshot ⒜(2R) 회귀: 평범한 배열·객체는 그대로 통과한다(배열의 length는 «숨겨진 필드»가 아니다)", () => {
+  const fixed = snapshotPlainData({ list: ["a", "b"], nested: { k: 1 } });
+  assert.equal(fixed.ok, true, fixed.reason);
+  assert.deepEqual(fixed.value.list, ["a", "b"]);
+  assert.equal(fixed.value.nested.k, 1);
+  // 얼린 산출물을 다시 고정해도(소비 경로에서 실제로 일어난다) 통과한다.
+  const again = snapshotPlainData(fixed.value);
+  assert.equal(again.ok, true, again.reason);
+  assert.deepEqual(again.value.list, ["a", "b"]);
+});
+
 test("plain-snapshot: 원시값/undefined/null은 그대로 통과한다", () => {
   for (const v of ["s", 0, -1.5, true, false, null, undefined]) {
     const fixed = snapshotPlainData(v);
