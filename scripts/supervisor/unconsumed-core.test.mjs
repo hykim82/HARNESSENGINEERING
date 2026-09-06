@@ -531,7 +531,7 @@ function judgeFace({ resultMs, nowMs, terminalMarkerCount, roundClosure }) {
   });
 }
 
-test("★HYK-448 형태 A(상시 오탐): 중단으로 끝나 영수증이 0개인 보존 워크트리 -- 수리 전(원장 정보 없음)은 SUSPECTED_UNCONSUMED 로 발화하고, 원장 종결을 넘기면 CONSUMED 로 조용해진다 (RED/GREEN 2/2)", () => {
+test("★HYK-448 형태 A(상시 오탐): 중단으로 끝나 영수증이 0개인 보존 워크트리 -- 수리 전은 SUSPECTED_UNCONSUMED 로 발화하고, 원장 종결을 넘기면 발화가 멈춘다(2R: 그 자리가 CONSUMED 가 아니라 UNDECIDABLE 이다) (RED/GREEN 2/2)", () => {
   // RED: 이 라운드 전의 호출 모양 그대로(새 입력 둘 다 없음) -- 매 주기
   // 발화하던 바로 그 판정이다.
   const before = judgeFace({
@@ -556,14 +556,21 @@ test("★HYK-448 형태 A(상시 오탐): 중단으로 끝나 영수증이 0개�
       completionReason: "BLOCKED_TERMINATION_RELEASED",
     },
   });
+  // ★2R(검토 1R P1): 1R 은 여기서 CONSUMED/CONSUMED_VIA_LEDGER_CLOSURE 를
+  // 냈다. 그것은 «파일시계 < 원장시계»라는 순서 «단정»이 있어야만 가능한
+  // 판정이었고, 두 값의 출처가 다르므로 그 단정 자체가 결함이었다.
+  // 2R 은 그 갈래를 없앴다 -- 이제 여기는 «판정 불가»다.
   assert.equal(
     after.verdict,
-    UNCONSUMED_VERDICT.CONSUMED,
-    "원장이 닫은 라운드는 영수증 파일이 없어도 소비된 것이다 -- 「영수증 없음」은 「미소비」가 아니다",
+    UNCONSUMED_VERDICT.UNDECIDABLE,
+    "서로 다른 시계로는 «결과가 종결보다 앞섰다»를 증명할 수 없다 -- 「소비됐다」고 단정하지 않는다",
   );
-  assert.equal(after.reasonCode, UNCONSUMED_REASON.CONSUMED_VIA_LEDGER_CLOSURE);
-  assert.equal(after.details.consumedAtMs, FACE_A_CLOSED_MS);
-  assert.equal(after.details.completionReason, "BLOCKED_TERMINATION_RELEASED");
+  assert.equal(after.reasonCode, UNCONSUMED_REASON.CLOSURE_ORDER_UNPROVABLE);
+  // ★그리고 그것이 «오탐 부활»이 아님을 같은 자리에서 못 박는다: 발화
+  // 등급(SUSPECTED_UNCONSUMED/MODIFIED_AFTER_CLOSURE)이 아니므로 각성은
+  // 이 워크트리 이름을 싣지 않는다(형태 A 는 여전히 조용하다).
+  assert.notEqual(after.verdict, UNCONSUMED_VERDICT.SUSPECTED_UNCONSUMED);
+  assert.notEqual(after.verdict, UNCONSUMED_VERDICT.MODIFIED_AFTER_CLOSURE);
 });
 
 test("★HYK-448 형태 B(진행 중 오탐): 아직 안 끝난 라운드(종료 표지 0개) -- 수리 전은 SUSPECTED_UNCONSUMED, 표지 개수를 넘기면 UNDECIDABLE/ROUND_NOT_FINISHED 로 조용해진다 (RED/GREEN 2/2)", () => {
@@ -691,6 +698,137 @@ test("★HYK-448 형식 위반은 조용히 무시하지 않는다: roundClosure
   }
 });
 
+// ===========================================================================
+// ★HYK-448 2R -- 검토 1R 의 P1 경계표를 «시험»으로 고정한다.
+//
+// P1: `updatedAtMs > closedAtMs` 단일 분기가 «동률»과 «역순»을 둘 다 침묵
+// (CONSUMED)으로 보냈다. 두 값의 출처가 다른 시계이므로, 종결 뒤 실제 수정이
+// 있었는데 파일시계가 뒤로 보이면 판별기가 조용해진다.
+//
+// ⇒ 2R 계약: ★**시계 비교는 «발화»와 «판정 불가»만 낼 수 있다.**
+//   침묵(CONSUMED)으로 갈 수 있는 입력은 이 갈래에 하나도 없다.
+// ===========================================================================
+
+const CLOSED_MS = Date.parse("2026-09-06T23:08:29+09:00");
+
+function judgeClosureBoundary({ deltaMs, fingerprints }) {
+  return judgeUnconsumed({
+    resultFile: {
+      updatedAtMs: CLOSED_MS + deltaMs,
+      terminalMarkerCount: 1,
+    },
+    signals: [],
+    now: CLOSED_MS + 6 * 60 * 60 * 1000,
+    thresholds: { minUnconsumedSeconds: THRESHOLD_S },
+    roundClosure: { closed: true, closedAtMs: CLOSED_MS },
+    ...(fingerprints === undefined ? {} : { fingerprints }),
+  });
+}
+
+test("★★HYK-448 2R (P1): 순서를 증명할 수 없는 입력은 «어느 것도» 침묵으로 가지 않는다 -- 동률·역순이 CONSUMED 에서 UNDECIDABLE/CLOSURE_ORDER_UNPROVABLE 로 바뀐다 (4/4)", () => {
+  const observed = [];
+  for (const [label, deltaMs] of [
+    ["동률(mtime == completed_at)", 0],
+    ["역순 1ms(파일시계가 1ms 뒤로 보임)", -1],
+    ["역순 30초(형태 A 의 실제 모양)", -30_000],
+    ["역순 2시간(시계가 크게 어긋난 경우)", -2 * 60 * 60 * 1000],
+  ]) {
+    const r = judgeClosureBoundary({ deltaMs });
+    observed.push({ label, verdict: r.verdict, reasonCode: r.reasonCode });
+    assert.notEqual(
+      r.verdict,
+      UNCONSUMED_VERDICT.CONSUMED,
+      `${label}: ⛔침묵으로 가면 안 된다(검토 1R P1 그 자체)`,
+    );
+    assert.equal(r.verdict, UNCONSUMED_VERDICT.UNDECIDABLE);
+    assert.equal(r.reasonCode, UNCONSUMED_REASON.CLOSURE_ORDER_UNPROVABLE);
+  }
+  for (const row of observed) console.log(JSON.stringify(row));
+});
+
+test("★HYK-448 2R: «앞선 것처럼 보이는» 방향은 여전히 발화한다 -- 안전한 실패 방향이므로 남긴다(진짜 양성 보존) (2/2)", () => {
+  for (const [label, deltaMs] of [
+    ["1ms 뒤", 1],
+    ["실측 187초 뒤(어젯밤 진짜 양성)", 187_000],
+  ]) {
+    const r = judgeClosureBoundary({ deltaMs });
+    assert.equal(
+      r.verdict,
+      UNCONSUMED_VERDICT.MODIFIED_AFTER_CLOSURE,
+      `${label}: 종결 후 수정으로 보이면 발화해야 한다`,
+    );
+    assert.equal(r.reasonCode, UNCONSUMED_REASON.RESULT_EDITED_AFTER_CLOSURE);
+  }
+});
+
+test("★★HYK-448 2R: 지문 축은 «시계를 한 번도 보지 않고» 종결 후 수정을 잡는다 -- 파일시계가 뒤로 보여 시계 축이 판정 불가로 떨어지는 바로 그 입력에서 발화한다 (1/1)", () => {
+  // ⛔이것이 P1 2행(«종결 후 수정인데 파일시계가 뒤로 보임»)을 실제로 닫는
+  // 축이다. 시계만으로는 이 입력이 UNDECIDABLE 이 한계인데, 내용 지문이
+  // 갈렸다는 사실은 시계와 무관하게 «바뀌었다»를 직접 말한다.
+  const clockOnly = judgeClosureBoundary({ deltaMs: -30_000 });
+  assert.equal(clockOnly.verdict, UNCONSUMED_VERDICT.UNDECIDABLE);
+
+  const withFingerprints = judgeClosureBoundary({
+    deltaMs: -30_000,
+    fingerprints: {
+      consumed:
+        "a0a8014eaf59b050d57edafce0648139f1456724dabf669056782c24a8ffb6f1",
+      current:
+        "8e711e28d60a06ce9c2c6445d7006bbeaaa514c5f5b1349e75b4d497ad2860a8",
+    },
+  });
+  assert.equal(
+    withFingerprints.verdict,
+    UNCONSUMED_VERDICT.MODIFIED_AFTER_CLOSURE,
+    "지문이 갈렸으면 시계가 무엇을 말하든 종결 후 수정이다",
+  );
+  assert.equal(
+    withFingerprints.reasonCode,
+    UNCONSUMED_REASON.RESULT_FINGERPRINT_DIVERGED,
+  );
+});
+
+test("★★HYK-448 2R: 지문 축은 «발화 전용»이다 -- 지문이 같아도, 비어도, 없어도 «침묵»을 만들지 않는다 (5/5)", () => {
+  // ⛔위조 방어: 영수증은 워커가 쓸 수 있는 워크트리 «안» 파일이다. 지문
+  // 일치를 침묵으로 인정하면 결과를 고친 워커가 영수증 지문도 함께 고쳐
+  // 시계 축이 냈을 발화를 «지울» 수 있다. 아래 ⑴이 그것을 막는다.
+  // ⛔그리고 ORCH 자인 사례(추출이 빈 값 -> 공허하게 참)도 ⑵~⑷가 막는다.
+  const same =
+    "483123128cf712d3f3054e2400b71f3af8449c62fce552213e0902691b62b446";
+  // ⑴ 지문이 «같은데» 시계는 종결 후 수정을 가리킨다 -> 발화가 유지된다.
+  const forgedMatch = judgeClosureBoundary({
+    deltaMs: 187_000,
+    fingerprints: { consumed: same, current: same },
+  });
+  assert.equal(
+    forgedMatch.verdict,
+    UNCONSUMED_VERDICT.MODIFIED_AFTER_CLOSURE,
+    "지문 일치가 시계 축의 발화를 지우면 안 된다(위조로 얻을 것이 없어야 한다)",
+  );
+  // ⑵~⑷ 빈 값·null·필드 누락은 전부 «축 없음»이고, 침묵이 아니다.
+  for (const [label, fingerprints] of [
+    ["둘 다 빈 문자열", { consumed: "", current: "" }],
+    ["consumed 만 있음", { consumed: same }],
+    ["null 쌍", { consumed: null, current: null }],
+  ]) {
+    const r = judgeClosureBoundary({ deltaMs: -30_000, fingerprints });
+    assert.equal(
+      r.verdict,
+      UNCONSUMED_VERDICT.UNDECIDABLE,
+      `${label}: 축이 없으면 시계 축 결과(판정 불가)가 그대로다 -- 침묵이 아니다`,
+    );
+    assert.notEqual(r.verdict, UNCONSUMED_VERDICT.CONSUMED);
+  }
+});
+
+test("★HYK-448 2R: fingerprints 형식 위반은 조용히 무시하지 않는다 -> UNDECIDABLE/FINGERPRINTS_MALFORMED (3/3)", () => {
+  for (const bad of ["x", { consumed: 7 }, { current: [] }]) {
+    const r = judgeClosureBoundary({ deltaMs: 187_000, fingerprints: bad });
+    assert.equal(r.verdict, UNCONSUMED_VERDICT.UNDECIDABLE);
+    assert.equal(r.reasonCode, UNCONSUMED_REASON.FINGERPRINTS_MALFORMED);
+  }
+});
+
 test("NC mutation/unconsumed-core #4 (HYK-448): 원장 종결 갈래를 통째로 제거 -> RED (형태 A 가 다시 상시 발화한다)", async () => {
   const mutant = await importMutatedCopy((src) =>
     applyMutation(
@@ -721,15 +859,11 @@ test("NC mutation/unconsumed-core #4 (HYK-448): 원장 종결 갈래를 통째�
 // unconsumed-mutation-count.test.mjs 의 MUTATION_TEST_NAME_RE 가 그 형태만
 // 세기 때문이다(1R 실측: 앞에 강조 기호를 붙였더니 #5 가 통째로 안 세어져
 // 「1,2,3,4,6 -- 빈틈」으로 러너가 빨갛게 났다). 강조는 이름 «안»에 둔다.
-test("NC mutation/unconsumed-core #5 (★HYK-448 §1-4 비타협): 「닫힌 뒤 변경」 갈래만 제거 -> RED (진짜 1건이 침묵으로 사라진다)", async () => {
-  // ⛔이 변이가 잡아내는 것이 정확히 「원장이 닫았으면 무조건 침묵」이라는
-  // 잘못된 번역이다 -- 그렇게 고쳤다면 이 시험이 빨강으로 죽는다.
+test("NC mutation/unconsumed-core #5 (★HYK-448 §1-4 비타협): 「닫힌 뒤 변경」 갈래만 제거 -> RED (진짜 1건이 발화를 잃는다)", async () => {
+  // ⛔이 변이가 잡아내는 것이 「원장이 닫았으면 그냥 넘긴다」는 잘못된
+  // 번역이다 -- 그렇게 고쳤다면 이 시험이 빨강으로 죽는다.
   const mutant = await importMutatedCopy((src) =>
-    applyMutation(
-      src,
-      "    if (updatedAtMs > closedAtMs) {",
-      "    if (false) {",
-    ),
+    applyMutation(src, "  if (updatedAtMs > closedAtMs) {", "  if (false) {"),
   );
   const judged = mutant.judgeUnconsumed({
     resultFile: { updatedAtMs: FACE_C_RESULT_MS, terminalMarkerCount: 1 },
@@ -738,10 +872,69 @@ test("NC mutation/unconsumed-core #5 (★HYK-448 §1-4 비타협): 「닫힌 뒤
     thresholds: { minUnconsumedSeconds: THRESHOLD_S },
     roundClosure: { closed: true, closedAtMs: FACE_C_CLOSED_MS },
   });
-  assert.equal(
+  assert.notEqual(
     judged.verdict,
-    UNCONSUMED_VERDICT.CONSUMED,
-    "mutant must silently swallow the post-closure edit (RED signal; proves the true-positive branch is load-bearing)",
+    UNCONSUMED_VERDICT.MODIFIED_AFTER_CLOSURE,
+    "mutant must lose the post-closure firing (RED signal; proves the clock-axis firing branch is load-bearing)",
+  );
+});
+
+test("NC mutation/unconsumed-core #7 (★HYK-448 2R -- 검토 1R P1 그 자체): 순서 미증명 갈래를 1R 의 «침묵»으로 되돌리면 -> RED (동률·역순이 다시 CONSUMED 로 조용해진다)", async () => {
+  // ⛔이 변이가 이 라운드의 핵심 판별기다. 1R 의 결함을 «정확히» 되살린다:
+  // 판정 불가 자리를 CONSUMED 로 되돌리면 검토 1R 경계표 1·2행이 그대로
+  // 재현된다.
+  const mutant = await importMutatedCopy((src) =>
+    applyMutation(
+      src,
+      "  return undecidable(UNCONSUMED_REASON.CLOSURE_ORDER_UNPROVABLE);",
+      "  return { ok: true, verdict: UNCONSUMED_VERDICT.CONSUMED, reasonCode: UNCONSUMED_REASON.NO_SIGNAL_PAST_THRESHOLD, details: closureBase };",
+    ),
+  );
+  for (const [label, deltaMs] of [
+    ["동률", 0],
+    ["역순 30초", -30_000],
+  ]) {
+    const judged = mutant.judgeUnconsumed({
+      resultFile: {
+        updatedAtMs: FACE_C_CLOSED_MS + deltaMs,
+        terminalMarkerCount: 1,
+      },
+      signals: [],
+      now: FACE_C_NOW_MS,
+      thresholds: { minUnconsumedSeconds: THRESHOLD_S },
+      roundClosure: { closed: true, closedAtMs: FACE_C_CLOSED_MS },
+    });
+    assert.equal(
+      judged.verdict,
+      UNCONSUMED_VERDICT.CONSUMED,
+      `mutant must fall back to 1R's silence for ${label} (RED signal; proves the unprovable-order branch is what closes P1)`,
+    );
+  }
+});
+
+test("NC mutation/unconsumed-core #8 (HYK-448 2R): 지문 갈래 제거 -> RED (시계가 뒤로 보이는 종결 후 수정을 다시 놓친다)", async () => {
+  const mutant = await importMutatedCopy((src) =>
+    applyMutation(
+      src,
+      "  if (fingerprintsDiverged(fingerprints)) {",
+      "  if (false) {",
+    ),
+  );
+  const judged = mutant.judgeUnconsumed({
+    resultFile: {
+      updatedAtMs: FACE_C_CLOSED_MS - 30_000,
+      terminalMarkerCount: 1,
+    },
+    signals: [],
+    now: FACE_C_NOW_MS,
+    thresholds: { minUnconsumedSeconds: THRESHOLD_S },
+    roundClosure: { closed: true, closedAtMs: FACE_C_CLOSED_MS },
+    fingerprints: { consumed: "a0a8014e", current: "8e711e28" },
+  });
+  assert.notEqual(
+    judged.verdict,
+    UNCONSUMED_VERDICT.MODIFIED_AFTER_CLOSURE,
+    "mutant must lose the clock-free detection (RED signal; proves the fingerprint axis is load-bearing)",
   );
 });
 

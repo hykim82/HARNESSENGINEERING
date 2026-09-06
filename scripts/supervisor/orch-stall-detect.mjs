@@ -113,6 +113,12 @@ import {
   mkdirSync,
 } from "node:fs";
 import { execFileSync } from "node:child_process";
+// ★HYK-448 2R: 소비 영수증의 `resultFingerprint` 와 «지금» 결과 파일의
+// 지문을 대조하려면 같은 해시가 필요하다 -- consumption-receipt-writer.mjs
+// 의 computeResultFingerprint 와 **같은 알고리즘·같은 입력**(결과 파일
+// 내용의 utf8 SHA-256 hex)이어야 하며, 다르면 정상 라운드마다 지문이
+// 갈려 «상시 과발화»가 된다(2R 실측으로 일치 확인, coder.md §3-3).
+import { createHash } from "node:crypto";
 import path from "node:path";
 import {
   judgeOrchProgress,
@@ -2199,6 +2205,136 @@ function readRoundClosureFromLedger(ledgerPath, roundLabel, opts) {
   };
 }
 
+// ★HYK-448 2R: «종결 후 수정»을 시계 비교 없이 판정하기 위한 두 관측.
+//
+// ⓐ 소비 영수증(`.harness/receipts/<role>-receipt-r<N>.json`)의
+//    `binding.resultFingerprint` -- 소비 시점 결과 파일의 SHA-256.
+// ⓑ «지금» 결과 파일의 SHA-256.
+// 둘이 다르면 시계를 한 번도 비교하지 않고 «바뀌었다»를 말할 수 있다.
+//
+// ⛔둘 중 하나라도 못 구하면 `null` 을 넘긴다 -- 코어는 그것을 «축 없음»
+// 으로 보고 시계 축으로 넘어갈 뿐 침묵하지 않는다(코어 헤더 «발화 전용»).
+// ⚠️★중단 종결 라운드는 소비 영수증을 애초에 남기지 않으므로(형태 A) 이
+// 축이 «구조적으로 없다» -- 그 경우도 여기서 자연히 `null` 이 된다.
+// 가장 최신 영수증 파일 하나의 경로(없으면 null). 위 latestReceiptMtimeMs 와
+// 같은 스캔 규약이지만 «무엇을 돌려주는가»가 다르다(시각 vs 경로) -- 그쪽
+// 반환 계약을 건드리면 그것을 쓰는 신호 경로까지 흔들리므로 따로 둔다.
+function statMtimeMsOrNull(fullPath, statFn) {
+  let st;
+  try {
+    st = statFn(fullPath);
+  } catch {
+    return null;
+  }
+  if (st.isDirectory()) return null;
+  return typeof st.mtimeMs === "number" && Number.isFinite(st.mtimeMs)
+    ? st.mtimeMs
+    : null;
+}
+
+function newestReceiptPath(repoRoot, role, opts) {
+  const { readdirFn, statFn, existsFn } = resolveReceiptScanFns(opts);
+  const receiptsDir = path.join(repoRoot, ".harness", "receipts");
+  let names;
+  try {
+    names = readdirFn(receiptsDir);
+  } catch {
+    return null;
+  }
+  const pattern = receiptFileNamePattern(role);
+  let newest = null;
+  for (const name of names) {
+    if (!pattern.test(name)) continue;
+    const full = path.join(receiptsDir, name);
+    if (!existsFn(full)) continue;
+    const mtimeMs = statMtimeMsOrNull(full, statFn);
+    if (mtimeMs === null) continue;
+    if (!newest || mtimeMs > newest.mtimeMs) newest = { path: full, mtimeMs };
+  }
+  return newest ? newest.path : null;
+}
+
+function latestReceiptFingerprint(repoRoot, role, opts) {
+  if (!isNonEmptyReceiptString(role)) return null;
+  const receiptPath = newestReceiptPath(repoRoot, role, opts);
+  if (!receiptPath) return null;
+  const readFileFn =
+    typeof opts.receiptContentReadFn === "function"
+      ? opts.receiptContentReadFn
+      : readFileSync;
+  let parsed;
+  try {
+    parsed = JSON.parse(readFileFn(receiptPath, "utf8"));
+  } catch {
+    return null;
+  }
+  const fp = parsed?.binding?.resultFingerprint;
+  // ★ORCH 가 자인한 실수 형태(추출이 빈 값)를 출처에서 잘라낸다.
+  return isNonEmptyReceiptString(fp) ? fp : null;
+}
+
+function currentResultFingerprint(resultAbsolutePath, opts) {
+  const readFileFn =
+    typeof opts.resultContentReadFn === "function"
+      ? opts.resultContentReadFn
+      : readFileSync;
+  let content;
+  try {
+    content = readFileFn(resultAbsolutePath, "utf8");
+  } catch {
+    return null;
+  }
+  if (typeof content !== "string") return null;
+  return createHash("sha256").update(content, "utf8").digest("hex");
+}
+
+// ★HYK-448 2R: 코어에 넘길 지문 쌍. 둘 다 «못 구하면 null» 이고,
+// 코어는 그것을 «축 없음» 으로 본다(침묵이 아니다).
+function collectResultFingerprints(repoRoot, role, resultAbsolutePath, opts) {
+  return {
+    consumed: latestReceiptFingerprint(repoRoot, role, opts),
+    current: currentResultFingerprint(resultAbsolutePath, opts),
+  };
+}
+
+// ★HYK-448: 코어에 넘길 «종결 축» 관측 셋을 한자리에서 만든다 -- 코어는
+// 여전히 파일도 git도 원장도 읽지 않는다(그 파일의 비타협 «관측은 호출자가
+// 준다»). 셋 다 «모르면 null/생략»이고, 코어는 그것을 침묵이 아니라 종전
+// 동작(또는 판정 불가)으로 번역한다.
+// judgeUnconsumedForRepo 의 eslint max-lines-per-function(80) 을 지키려고
+// 뽑아낸 것이기도 하다 -- 판정 규칙은 한 글자도 여기 있지 않다.
+function buildClosureObservations({
+  repoRoot,
+  targetRole,
+  resultFileInfo,
+  opts,
+}) {
+  const resultAbsolutePath = path.join(repoRoot, resultFileInfo.path);
+  const terminalMarkerCount = countTerminalMarkers(resultAbsolutePath, opts);
+  // 원장에서 종결 상태를 읽으려면 이 결과 파일이 어느 라운드인지 알아야
+  // 한다. 라벨 뽑는 계약은 영수증 축이 이미 쓰는 것을 그대로 재사용한다
+  // (resolveEchoedRoundLabel -- «정확히 하나의 줄머리 task_id:»).
+  const roundLabel = resolveEchoedRoundLabel(resultAbsolutePath, opts);
+  return {
+    resultFile:
+      terminalMarkerCount === null
+        ? { updatedAtMs: resultFileInfo.mtimeMs }
+        : { updatedAtMs: resultFileInfo.mtimeMs, terminalMarkerCount },
+    roundClosure: readRoundClosureFromLedger(
+      resolveAdmissionLedgerPathForUnconsumed(repoRoot, opts),
+      roundLabel,
+      opts,
+    ),
+    // ★2R: 시계를 쓰지 않는 «종결 후 수정» 축의 관측 쌍.
+    fingerprints: collectResultFingerprints(
+      repoRoot,
+      targetRole,
+      resultAbsolutePath,
+      opts,
+    ),
+  };
+}
+
 // ★HYK-448 (coder-task.md §1-3 형태 B): 결과 파일의 «종료 표지» 개수.
 // 0이면 그 라운드는 아직 끝나지 않았다는 뜻이다 -- 판별기가 지금까지 이
 // 사실을 아예 안 봤기 때문에, 진행 중인 라운드가 임계를 넘기면 그대로
@@ -2567,28 +2703,15 @@ export function judgeUnconsumedForRepo(
       resultFile: resultFileInfo,
     };
   }
-  // ★HYK-448: 코어에 넘길 새 관측 둘을 «여기서» 만든다 -- 코어는 여전히
-  // 파일도 git도 원장도 읽지 않는다(그 파일의 비타협 «관측은 호출자가 준다»).
-  // 둘 다 «모르면 null»이고, 코어는 null 을 종전 동작으로 번역한다.
-  const resultAbsolutePath = path.join(repoRoot, resultFileInfo.path);
-  const terminalMarkerCount = countTerminalMarkers(resultAbsolutePath, opts);
-  // 원장에서 종결 상태를 읽으려면 이 결과 파일이 어느 라운드인지 알아야
-  // 한다. 라벨 뽑는 계약은 영수증 축이 이미 쓰는 것을 그대로 재사용한다
-  // (resolveEchoedRoundLabel -- «정확히 하나의 줄머리 task_id:»).
-  const roundLabel = resolveEchoedRoundLabel(resultAbsolutePath, opts);
-  const roundClosure = readRoundClosureFromLedger(
-    resolveAdmissionLedgerPathForUnconsumed(repoRoot, opts),
-    roundLabel,
-    opts,
-  );
   const judged = judgeUnconsumed({
-    resultFile:
-      terminalMarkerCount === null
-        ? { updatedAtMs: resultFileInfo.mtimeMs }
-        : { updatedAtMs: resultFileInfo.mtimeMs, terminalMarkerCount },
+    ...buildClosureObservations({
+      repoRoot,
+      targetRole,
+      resultFileInfo,
+      opts,
+    }),
     signals: signalsResult.signals,
     now,
-    roundClosure,
   });
   return {
     status: UNCONSUMED_WIRE_STATUS.JUDGED,

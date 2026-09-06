@@ -21,14 +21,17 @@ import {
   mkdtempSync,
   mkdirSync,
   writeFileSync,
+  readFileSync,
   rmSync,
   utimesSync,
 } from "node:fs";
+import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 import {
   judgeUnconsumedForRepo,
+  judgeUnconsumedAcrossWorktrees,
   collectUnconsumedCandidates,
   UNCONSUMED_WIRE_STATUS,
 } from "./orch-stall-detect.mjs";
@@ -97,6 +100,27 @@ function writeResultFile(dir, { taskId, mtimeIso, terminal }) {
   setMtime(p, mtimeIso);
 }
 
+// ★HYK-448 2R: 소비 영수증의 실물 모양 중 이 축이 읽는 필드 하나만 재현한다
+// (consumption-receipt-writer.mjs 의 binding.resultFingerprint).
+function writeReceipt(
+  dir,
+  { role = "CODER", round = 1, fingerprint, mtimeIso },
+) {
+  const receiptsDir = join(dir, ".harness", "receipts");
+  mkdirSync(receiptsDir, { recursive: true });
+  const p = join(receiptsDir, `${role}-receipt-r${round}.json`);
+  writeFileSync(
+    p,
+    JSON.stringify({
+      binding: { resultFingerprint: fingerprint },
+      effects: {},
+    }),
+    "utf8",
+  );
+  setMtime(p, mtimeIso);
+  return p;
+}
+
 // admission-ledger-core.mjs 의 completeReservation 이 «닫을 때» 적는 세
 // 필드(status/completed_at/completion_reason)만 재현한다.
 function writeAdmissionLedger(dir, reservations) {
@@ -130,7 +154,7 @@ const FACE_C_RESULT_ISO = "2026-09-06T23:11:36+09:00"; // ★그 뒤 워커가 �
 const NOW_ISO = "2026-09-07T02:48:00+09:00"; // 각성이 실제로 발화한 시점대
 const NOW_MS = new Date(NOW_ISO).getTime();
 
-test("★HYK-448 배선/형태 A: 중단으로 끝나 영수증이 0개인 워크트리 -- 원장이 닫았다고 말하면 결선 경로가 CONSUMED/CONSUMED_VIA_LEDGER_CLOSURE 로 조용해진다 (RED/GREEN 2/2)", () => {
+test("★HYK-448 2R 배선/형태 A: 중단 종결 워크트리는 여전히 «발화하지 않는다» -- 다만 판정 이름은 CONSUMED 가 아니라 UNDECIDABLE/CLOSURE_ORDER_UNPROVABLE 다 (RED/GREEN 2/2)", () => {
   withTempDir("hyk448-face-a-", (dir) => {
     initPlainGitRepo(dir);
     const label = "HYK-437-admission-anchor-1";
@@ -165,19 +189,25 @@ test("★HYK-448 배선/형태 A: 중단으로 끝나 영수증이 0개인 워�
       },
     });
     const after = judgeFor(dir, NOW_MS, { admissionLedgerPath: ledgerPath });
+    // ★2R(검토 1R P1): 1R 은 여기서 CONSUMED 를 냈다. 그러려면
+    // «파일시계 < 원장시계»라는 순서 단정이 필요한데, 두 값의 출처가
+    // 다르므로 그 단정 자체가 결함이었다. 이제는 판정 불가다.
     assert.equal(
       after.verdict,
-      UNCONSUMED_VERDICT.CONSUMED,
-      "원장이 닫은 라운드는 영수증 파일이 없어도 소비된 것이다",
+      UNCONSUMED_VERDICT.UNDECIDABLE,
+      "서로 다른 시계로는 «결과가 종결보다 앞섬»을 증명할 수 없다",
     );
-    assert.equal(
-      after.reasonCode,
-      UNCONSUMED_REASON.CONSUMED_VIA_LEDGER_CLOSURE,
+    assert.equal(after.reasonCode, UNCONSUMED_REASON.CLOSURE_ORDER_UNPROVABLE);
+    // ★★그리고 그것이 «상시 오탐 부활»이 아님을 결선 수준에서
+    // 직접 보인다: 각성이 워크트리 이름을 실는 자리가 비어 있어야 한다.
+    const scan = judgeUnconsumedAcrossWorktrees(
+      { repoRoot: dir, now: NOW_MS },
+      { admissionLedgerPath: ledgerPath },
     );
-    assert.equal(
-      after.details.completionReason,
-      "BLOCKED_TERMINATION_RELEASED",
-      "왜 닫혔는지가 판정에 실려 사람이 사유를 볼 수 있어야 한다",
+    assert.deepEqual(
+      scan.worstWorktreePaths,
+      [],
+      "UNDECIDABLE 은 발화 등급이 아니므로 각성은 이 워크트리를 지목하지 않는다(형태 A 침묵 유지)",
     );
   });
 });
@@ -293,4 +323,117 @@ test("★HYK-448 배선/fail-closed: 원장 항목이 있어도 «닫히지 않�
       );
     });
   }
+});
+
+// ===========================================================================
+// ★HYK-448 2R -- 시계를 «전혀» 비교하지 않는 축이 결선 경로에서 실제로 도는가.
+// 검토 1R P1 경계표 2행(«종결 후 수정인데 파일시계가 뒤로 보임»)은 시계만으로
+// 닫을 수 없다. 이 축이 그 자리를 닫는다.
+// ===========================================================================
+
+test("★★HYK-448 2R 배선/지문 축: 파일시계가 «뒤로» 보여 시계 축이 판정 불가인 입력에서도, 영수증 지문이 갈리면 결선 경로가 MODIFIED_AFTER_CLOSURE 로 발화한다 (RED/GREEN 2/2)", () => {
+  withTempDir("hyk448-fp-wire-", (dir) => {
+    initPlainGitRepo(dir);
+    const label = "HYK-449-marker-count-fence-1";
+    writeTaskFile(dir, {
+      taskId: label,
+      mtimeIso: "2026-09-06T20:10:00+09:00",
+    });
+    // ★결과 파일의 mtime 을 «종결보다 이르게» 둔다 -- 시계 축만으로는
+    // 판정 불가가 한계인 바로 그 입력이다.
+    writeResultFile(dir, {
+      taskId: label,
+      mtimeIso: "2026-09-06T23:07:59+09:00",
+      terminal: ">>> DONE: CODER @ 2026-09-06 23:05:00 KST",
+    });
+    const ledgerPath = writeAdmissionLedger(dir, {
+      [label]: {
+        status: "COMPLETED",
+        completed_at: FACE_C_CLOSED_ISO,
+        completion_reason: "OK",
+      },
+    });
+
+    // RED -- 지문 축이 없으면(영수증 없음) 시계 축의 한계 그대로 판정 불가.
+    const noReceipt = judgeFor(dir, NOW_MS, {
+      admissionLedgerPath: ledgerPath,
+    });
+    assert.equal(
+      noReceipt.verdict,
+      UNCONSUMED_VERDICT.UNDECIDABLE,
+      "시계만으로는 «앞선 것처럼 보이는» 이 입력을 종결 후 수정으로 단정할 수 없다",
+    );
+    assert.equal(
+      noReceipt.reasonCode,
+      UNCONSUMED_REASON.CLOSURE_ORDER_UNPROVABLE,
+    );
+
+    // GREEN -- 소비 시점 지문이 «지금» 파일과 다르다 = 종결 후 수정.
+    writeReceipt(dir, {
+      fingerprint:
+        "a0a8014eaf59b050d57edafce0648139f1456724dabf669056782c24a8ffb6f1",
+      mtimeIso: "2026-09-06T23:00:00+09:00",
+    });
+    const diverged = judgeFor(dir, NOW_MS, {
+      admissionLedgerPath: ledgerPath,
+    });
+    assert.equal(
+      diverged.verdict,
+      UNCONSUMED_VERDICT.MODIFIED_AFTER_CLOSURE,
+      "★시계를 한 번도 비교하지 않고 «바뀌었다»를 말한다",
+    );
+    assert.equal(
+      diverged.reasonCode,
+      UNCONSUMED_REASON.RESULT_FINGERPRINT_DIVERGED,
+    );
+    // 각성이 이 워크트리를 실제로 지목하는지까지 확인한다(발화 등급).
+    const scan = judgeUnconsumedAcrossWorktrees(
+      { repoRoot: dir, now: NOW_MS },
+      { admissionLedgerPath: ledgerPath },
+    );
+    assert.deepEqual(scan.worstWorktreePaths.length, 1);
+  });
+});
+
+test("★★HYK-448 2R 배선/지문 축은 «발화 전용»: 영수증 지문이 실제 파일과 «일치»해도 침묵으로 가지 않는다 -- 위조로 발화를 지울 수 없다 (2/2)", () => {
+  withTempDir("hyk448-fp-forge-", (dir) => {
+    initPlainGitRepo(dir);
+    const label = "HYK-449-marker-count-fence-1";
+    writeTaskFile(dir, {
+      taskId: label,
+      mtimeIso: "2026-09-06T20:10:00+09:00",
+    });
+    writeResultFile(dir, {
+      taskId: label,
+      mtimeIso: FACE_C_RESULT_ISO, // 종결 «뒤» -- 시계 축이 발화하는 입력.
+      terminal: ">>> DONE: CODER @ 2026-09-06 23:05:00 KST",
+    });
+    const ledgerPath = writeAdmissionLedger(dir, {
+      [label]: {
+        status: "COMPLETED",
+        completed_at: FACE_C_CLOSED_ISO,
+        completion_reason: "OK",
+      },
+    });
+    // ★워커가 결과를 고친 뒤 영수증 지문도 «현재 파일에 맞춰» 고쳐 넣은 상황.
+    const actual = createHash("sha256")
+      .update(readFileSync(join(dir, ".harness", "coder.md"), "utf8"), "utf8")
+      .digest("hex");
+    writeReceipt(dir, {
+      fingerprint: actual,
+      mtimeIso: "2026-09-06T23:00:00+09:00",
+    });
+
+    const judged = judgeFor(dir, NOW_MS, { admissionLedgerPath: ledgerPath });
+    assert.equal(
+      judged.verdict,
+      UNCONSUMED_VERDICT.MODIFIED_AFTER_CLOSURE,
+      "지문 일치가 시계 축의 발화를 지우면 안 된다(발화 전용 계약)",
+    );
+    assert.equal(
+      judged.reasonCode,
+      UNCONSUMED_REASON.RESULT_EDITED_AFTER_CLOSURE,
+      "지문이 같으면 그 축은 «없는 것»이고 시계 축 결과가 그대로 나온다",
+    );
+  });
 });
