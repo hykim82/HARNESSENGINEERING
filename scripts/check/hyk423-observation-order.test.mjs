@@ -47,13 +47,12 @@ import {
   TIME_AUTHORITY_STATE,
 } from "./relay-handshake.mjs";
 import { isolatedChildEnv } from "./admission-ledger-env-isolation.mjs";
+import { RELAY_HANDSHAKE_STATIC_SIBLINGS } from "./relay-handshake-fixture-siblings.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const RELAY_HANDSHAKE_PATH = join(HERE, "relay-handshake.mjs");
 const SIBLING_DEPS = [
-  "reject-streak.mjs",
-  "envelope-archive.mjs",
-  "time-authority.mjs",
+  ...RELAY_HANDSHAKE_STATIC_SIBLINGS,
   // HYK-423 2R: unlike the 1R-era mutation harnesses this file borrows the
   // pattern from, these mutants must exercise the REAL observation channel
   // across two polls (spawnObserveDoneLine execFileSync-spawns this file as

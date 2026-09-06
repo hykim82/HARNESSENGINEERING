@@ -1,0 +1,134 @@
+{
+  "schemaVersion": 1,
+  "issue": "HYK-436",
+  "round": "HYK-431-seat-reclaim-6R",
+  "description": "검증·스키마 코드가 입력 객체 자신의 메서드(every/includes/some/...)를 호출하는 곳의 저장소 전체 열거. 이런 호출은 입력이 Array 등을 상속해 해당 메서드를 재정의하면 판정을 뒤집을 수 있다(HYK-436 실증: TArrayOf의 v.every, classifyProtection의 p.protectedSeats.includes). 열거는 저장소 전체, 수리는 scripts/relay/ 안으로만(scripts/check/는 다른 레인 소유 -- 목록에만 적고 손대지 않음). [6R 개정] 4R/5R은 이 목록의 relay 항목들을 `fixed`로 적었지만, 검토 6R이 length를 위조한 Proxy로 grant-issuer(ISSUED)·seat-reclaim-core(RECLAIM_ELIGIBLE)·teardown-core(TEARDOWN_ELIGIBLE)를 다시 열었다. 즉 그 `fixed` 표기는 «그 형태에 대해서만» 참이었고 목록으로서는 거짓을 말했다. 6R은 호출부별 수리를 그만두고 신뢰 경계에서 입력을 평범한 자료로 고정하는 방식(scripts/relay/plain-snapshot.mjs)으로 바꿨다 -- 아래 relay 항목들의 reopenedBy/closedBy 필드가 그 이력이다.",
+  "methodology": {
+    "grepCommands": [
+      "grep -nE '\\.(every|some|includes|indexOf|find|filter|map|join|reduce|forEach|slice|concat|flat|sort|toString|valueOf)\\(' -r scripts --include='*.mjs' | grep -v '\\.test\\.mjs'",
+      "grep -nE '\\.(every|some|includes|indexOf|find|filter|map|join|reduce|forEach|slice|concat|flat|sort|toString|valueOf)\\(' -r scripts/relay scripts/check --include='*.mjs' | grep -v '\\.test\\.mjs' | grep -v 'Array.prototype\\|String.prototype\\|Object.prototype'",
+      "grep -nE '\\b(policy|delegation|envelope|record|inventory|request|req|input|payload|args|opts|options|config|params|grant|receipt|manifest)\\.[A-Za-z_]+\\.(every|some|includes|indexOf|find|filter|map|join|forEach)\\(' -r scripts --include='*.mjs' | grep -v '\\.test\\.mjs'"
+    ],
+    "scope": "저장소 전체 grep 스윕 + scripts/relay//scripts/check/ 우선 수기 판독. 890여개 원시 grep 히트 중 시각 검토는 scripts/relay/·scripts/check/ 중심(다른 디렉터리는 부분 점검만) -- 완전 열거를 증명하지 않는다(§ '없다'를 증명하지 않음).",
+    "notCovered": "scripts/supervisor/·templates/ 등은 가벼운 표본 점검만 했고 전수는 아니다. 로컬 리터럴/신뢰 상수 배열(예: KNOWN_ROLES.includes(role))에 대한 호출은 수신자가 입력이 아니므로 제외했다."
+  },
+  "confidenceLevels": {
+    "확실": "입력(호출자 인자 또는 그 하위 필드)이 보안 관련 boolean 판정에 자기 메서드로 직접 관여함을 호출 체인까지 확인함",
+    "추론": "패턴은 일치하고 수신자가 함수의 입력 인자(또는 그 하위 필드)로 보이나, 그 값이 실제로 신뢰 불가능한 외부 데이터로까지 이어지는 전체 호출 체인은 끝까지 추적하지 못함",
+    "미확인": "grep 패턴은 일치하나 검증 로직인지, 수신자가 입력인지조차 불확실함"
+  },
+  "findings": [
+    {
+      "id": "hyk436-relay-seat-reclaim-core-tarrayof-every",
+      "file": "scripts/relay/seat-reclaim-core.mjs",
+      "lineAtDiscovery": 265,
+      "snippet": "v.every((el) => elementSchema.check(el))",
+      "confidence": "확실",
+      "status": "fixed",
+      "reasoning": "REVIEW 4R가 격리 자식 프로세스로 실증(every 재정의 [null] -> RECLAIM_ELIGIBLE). 이번 라운드 본체 수리 대상.",
+      "fix": "Array.prototype.every.call(v, ...)로 교체 [6R] 위 차용은 두 번째 층으로 남기고, 실제 닫힘은 진입점의 snapshotPlainData가 만든다. 실증: .harness/attack-proxy-hidden-length.mjs (RED->GREEN), 구조 불변식 시험: scripts/relay/hyk431-input-snapshot-invariant.test.mjs.",
+      "reopenedBy": "HYK-431 검토 6R (review-r1.md §3-3/§3-4) -- length 위조 Proxy",
+      "reopenNote": "PROTECTED_SEATS_SCHEMA가 위조된 length 0을 읽어 원소를 vacuously 통과시켰다(검토 6R §3-4, RECLAIM_ELIGIBLE 재현).",
+      "closedBy": "HYK-431 6R: scripts/relay/plain-snapshot.mjs (신뢰 경계에서 단 한 번 읽어 깊게 얼린 평범한 자료로 고정 + Proxy 명시적 거부). 검증기와 소비자가 같은 고정본만 본다."
+    },
+    {
+      "id": "hyk436-relay-seat-reclaim-core-classifyprotection-includes",
+      "file": "scripts/relay/seat-reclaim-core.mjs",
+      "lineAtDiscovery": 344,
+      "snippet": "p.protectedSeats.includes(inventory.seat.paneKey)",
+      "confidence": "확실",
+      "status": "fixed",
+      "reasoning": "REVIEW 4R가 격리 자식 프로세스로 실증(includes 재정의 ['pane-1'] -> 보호 상실). 이번 라운드 본체 수리 대상.",
+      "fix": "Array.prototype.includes.call(p.protectedSeats, ...)로 교체 [6R] 위 차용은 두 번째 층으로 남기고, 실제 닫힘은 진입점의 snapshotPlainData가 만든다. 실증: .harness/attack-proxy-hidden-length.mjs (RED->GREEN), 구조 불변식 시험: scripts/relay/hyk431-input-snapshot-invariant.test.mjs.",
+      "reopenedBy": "HYK-431 검토 6R (review-r1.md §3-3/§3-4) -- length 위조 Proxy",
+      "reopenNote": "원형 includes를 빌려 써도 그 순회가 읽는 length가 위조되면 보호 목록이 통째로 비어 보인다(검토 6R §3-4).",
+      "closedBy": "HYK-431 6R: scripts/relay/plain-snapshot.mjs (신뢰 경계에서 단 한 번 읽어 깊게 얼린 평범한 자료로 고정 + Proxy 명시적 거부). 검증기와 소비자가 같은 고정본만 본다."
+    },
+    {
+      "id": "hyk436-relay-teardown-core-isprotectedtarget-includes",
+      "file": "scripts/relay/teardown-core.mjs",
+      "lineAtDiscovery": 154,
+      "snippet": "list.includes(inventory.target.canonicalPathDigest)  // list === policy.protectedTargets (호출자 입력, 복사 없음)",
+      "confidence": "확실",
+      "status": "fixed",
+      "reasoning": "judgeTeardown({inventory, policy})의 policy.protectedTargets가 그대로 list에 담기며(Array.isArray만 확인, 원소/인스턴스 재검증 없음) 그 인스턴스의 own includes를 부른다 -- HYK-436과 완전 동형 패턴. scripts/relay/ 소속이라 이번 라운드에서 함께 수리.",
+      "fix": "Array.prototype.includes.call(list, ...)로 교체, 회귀 시험 1건 추가(teardown-core.test.mjs) [6R] 위 차용은 두 번째 층으로 남기고, 실제 닫힘은 진입점의 snapshotPlainData가 만든다. 실증: .harness/attack-proxy-hidden-length.mjs (RED->GREEN), 구조 불변식 시험: scripts/relay/hyk431-input-snapshot-invariant.test.mjs.",
+      "reopenedBy": "HYK-431 검토 6R (review-r1.md §3-3/§3-4) -- length 위조 Proxy",
+      "reopenNote": "같은 형태로 protectedTargets가 비어 보여 보호 표적이 allowSink:true까지 갔다(검토 6R §3-4).",
+      "closedBy": "HYK-431 6R: scripts/relay/plain-snapshot.mjs (신뢰 경계에서 단 한 번 읽어 깊게 얼린 평범한 자료로 고정 + Proxy 명시적 거부). 검증기와 소비자가 같은 고정본만 본다."
+    },
+    {
+      "id": "hyk436-relay-grant-issuer-delegation-every",
+      "file": "scripts/relay/grant-issuer.mjs",
+      "lineAtDiscovery": 142,
+      "snippet": "delegation.allowed_task_hashes.every(isNonEmptyString)",
+      "confidence": "확실",
+      "status": "fixed",
+      "reasoning": "REVIEW 5R(2026-09-06)가 issueSubGrant 실 생산 경로 전체(admission/intent/consumption/publish)를 거치는 직접 재현으로 확정: every를 항상 true로 재정의한 Array 서브클래스에 null 원소를 담아 넘기면 result.ok=true/issued=true/reason=ISSUED까지 도달했다(child_exit=0, review.md §3/§4). 이번 라운드 본체 수리 대상.",
+      "fix": "Array.prototype.every.call(delegation.allowed_task_hashes, isNonEmptyString)로 교체. RED->GREEN 실증: .harness/review-attack-grant-issuer.mjs. [6R] 위 차용은 두 번째 층으로 남기고, 실제 닫힘은 진입점의 snapshotPlainData가 만든다. 실증: .harness/attack-proxy-hidden-length.mjs (RED->GREEN), 구조 불변식 시험: scripts/relay/hyk431-input-snapshot-invariant.test.mjs.",
+      "reopenedBy": "HYK-431 검토 6R (review-r1.md §3-3/§3-4) -- length 위조 Proxy",
+      "reopenNote": "Array.prototype.every.call은 인스턴스 메서드 재정의만 무력화한다 -- length가 1로 위조되면 무효 원소(null)가 검증기에게서 숨겨져 ISSUED까지 갔다(검토 6R §3-3).",
+      "closedBy": "HYK-431 6R: scripts/relay/plain-snapshot.mjs (신뢰 경계에서 단 한 번 읽어 깊게 얼린 평범한 자료로 고정 + Proxy 명시적 거부). 검증기와 소비자가 같은 고정본만 본다."
+    },
+    {
+      "id": "hyk436-relay-orca-adapter-branch-grammar",
+      "file": "scripts/relay/adapters/orca-adapter.mjs",
+      "lineAtDiscovery": 1659,
+      "snippet": "name.includes(\"..\") / name.split(\"/\").some((c) => c.endsWith(\".lock\"))",
+      "confidence": "확실",
+      "status": "fixed",
+      "reasoning": "유일한 호출부(parseWorktreeSpecLine)는 정규식 캡처 그룹만 넘겨 지금은 항상 원시 문자열이지만, isValidBranchNameGrammar 자신은 그 보장을 강제하지 않았다 -- 문자열을 흉내 내며 includes/startsWith/endsWith/split을 항상 안전 쪽으로 재정의한 객체가 미래 호출부에서 들어오면 검사를 전부 우회할 수 있다(패턴은 grant-issuer/seat-reclaim-core와 동형). typeof 가드 부재가 실제 결함.",
+      "fix": "typeof name !== 'string' 가드 추가 + String.prototype.<method>.call(name, ...)로 원형 메서드 차용. RED->GREEN 실증: .harness/review-attack-orca-adapter-branch-grammar.mjs(문자열 위장 객체로 재현)."
+    },
+    {
+      "id": "hyk436-check-hyk400-receiver-guard-deriveoptionalflags-includes",
+      "file": "scripts/check/hyk400-receiver-guard.mjs",
+      "lineAtDiscovery": 178,
+      "snippet": "deliveryArgs.includes(f)",
+      "confidence": "추론",
+      "status": "not_fixed_out_of_scope",
+      "reasoning": "scripts/check/ 소속 -- 다른 레인이 동시 작업 중이라 이번 라운드에서 손대지 않는다(§0 절대 경계). 목록에만 기재.",
+      "fix": "범위 밖(scripts/check/ 소유 레인 몫)"
+    },
+    {
+      "id": "hyk436-check-dispatch-gate-decision-core-combine",
+      "file": "scripts/check/dispatch-gate-decision-core.mjs",
+      "lineAtDiscovery": 539,
+      "snippet": "list.every((d) => d?.allow === true)",
+      "confidence": "미확인",
+      "status": "not_fixed_out_of_scope",
+      "reasoning": "scripts/check/ 소속(범위 밖). 게다가 list는 저장소 내부에서 생성한 게이트 결정 객체로 보여 외부 입력인지도 불확실.",
+      "fix": "범위 밖(scripts/check/ 소유 레인 몫)"
+    },
+    {
+      "id": "hyk436-check-dispatch-arg-contract-core-satisfied",
+      "file": "scripts/check/dispatch-arg-contract-core.mjs",
+      "lineAtDiscovery": 246,
+      "snippet": "req.flags.some((f) => presentFlags.has(f))",
+      "confidence": "미확인",
+      "status": "not_fixed_out_of_scope",
+      "reasoning": "scripts/check/ 소속(범위 밖). req는 저장소 내부 레지스트리(dispatch-arg-contract-registry.mjs)에서 온 것으로 보여 신뢰 데이터일 가능성이 높다.",
+      "fix": "범위 밖(scripts/check/ 소유 레인 몫)"
+    },
+    {
+      "id": "hyk436-relay-trust-boundary-shared-mutable-input",
+      "file": "scripts/relay/plain-snapshot.mjs",
+      "lineAtDiscovery": 0,
+      "snippet": "(근본 원인 항목) 검증기와 소비자가 신뢰할 수 없는 «같은 객체»를 각자 따로 읽는다",
+      "confidence": "확실",
+      "status": "fixed",
+      "reasoning": "1R~5R이 닫은 다섯 형태(값 형상·배열 원소·검사 조종·메서드 재정의·Proxy)의 공통 뿌리. 호출부마다 원형 메서드를 빌려도, 그 로직이 «읽는 값»은 입력이 매 호출마다 새로 정한다. 검토 6R이 이 뿌리를 직접 찔렀다.",
+      "fix": "grant-issuer.issueSubGrant / seat-reclaim-core.judgeSeatReclaim·judgeReclaimAnomaly / teardown-core.judgeTeardown·judgePostConditions 진입에서 snapshotPlainData로 입력을 단 한 번 읽어 고정. 관측 1회(TOCTOU 소멸) · 검증기==소비자 · 고정본에 getter/Proxy/프로토타입 재정의 없음."
+    },
+    {
+      "id": "hyk436-relay-orca-adapter-execfn-injected-arrays",
+      "file": "scripts/relay/adapters/orca-adapter.mjs",
+      "lineAtDiscovery": 339,
+      "snippet": "parseWorktreeList: list.some(...) / resolveCandidateDispatchTaskViaSpec: tasks.filter(...) -- opts.execFn 반환값을 복사 없이 그대로 순회",
+      "confidence": "추론",
+      "status": "not_fixed",
+      "reasoning": "검토 6R §6이 직접 probe로 확인: 기본 createOrcaExecFn 경로는 JSON.parse 산출물이라 순정 배열이지만, opts.execFn 주입 경로는 반환 배열을 재구성하지 않는다. 이 라운드의 범위는 «실제로 뚫린 3곳»(grant-issuer·seat-reclaim-core·teardown-core)으로 한정됐으므로(coder-task.md §2-3) 여기는 손대지 않았다 -- 목록에 열린 채로 남긴다.",
+      "fix": "범위 밖(다음 라운드). 같은 방식(진입점 snapshotPlainData)이 그대로 적용될 자리다."
+    }
+  ]
+}

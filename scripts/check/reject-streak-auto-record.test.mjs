@@ -478,6 +478,12 @@ const TIME_AUTHORITY_SRC_HEAD = readFileSync(
   join(ROOT, "scripts", "check", "time-authority.mjs"),
   "utf8",
 );
+// HYK-430 5R: relay-handshake.mjs now also statically imports
+// "./child-probe-timeout-policy.mjs" -- same transitive-sibling risk.
+const CHILD_PROBE_TIMEOUT_POLICY_SRC_HEAD = readFileSync(
+  join(ROOT, "scripts", "check", "child-probe-timeout-policy.mjs"),
+  "utf8",
+);
 
 function assertExactlyOneMatch(src, target, label) {
   const count = src.split(target).length - 1;
@@ -501,6 +507,11 @@ function writeMutantPair(rootDir, { relaySrc, streakSrc }) {
   writeFileSync(
     join(scriptsCheckDir, "time-authority.mjs"),
     TIME_AUTHORITY_SRC_HEAD,
+    "utf8",
+  );
+  writeFileSync(
+    join(scriptsCheckDir, "child-probe-timeout-policy.mjs"),
+    CHILD_PROBE_TIMEOUT_POLICY_SRC_HEAD,
     "utf8",
   );
   return join(scriptsCheckDir, "relay-handshake.mjs");
@@ -601,12 +612,20 @@ test("(f) mutation #2 (필수): isReviewFamilyRole always returns false -> a REV
 });
 
 test("(f) mutation #3 (필수): mainRepoRoot's --git-common-dir resolution reverted to plain repoRoot() -> the ledger lands in the WORKTREE-LOCAL .harness instead of the main repo's -> RED", () => {
+  // HYK-428: mainRepoRoot now takes an optional `startDir` (threaded into
+  // repoRoot below) so autoRecordRejectStreak's own ledgerPath resolution
+  // can be anchored at harnessDir instead of this process's ambient cwd --
+  // see relay-handshake.mjs's own header on mainRepoRoot for why. The
+  // mutation target below is updated to match that signature; the mutant
+  // body itself still collapses to plain repoRoot() (dropping the
+  // --git-common-dir walk-up entirely), the exact same RED shape this test
+  // has always pinned.
   const target =
-    'export function mainRepoRoot() {\n  const root = repoRoot();\n  try {\n    const commonDir = execSync("git rev-parse --git-common-dir", {\n      encoding: "utf8",\n      cwd: root,\n    }).trim();\n    const absCommonDir = /^([A-Za-z]:[\\\\/]|\\/)/.test(commonDir)\n      ? commonDir\n      : join(root, commonDir);\n    return absCommonDir.replace(/[\\\\/]\\.git$/, "");\n  } catch {\n    return root;\n  }\n}';
+    'export function mainRepoRoot(startDir) {\n  const root = repoRoot(startDir);\n  try {\n    const commonDir = execSync("git rev-parse --git-common-dir", {\n      encoding: "utf8",\n      cwd: root,\n    }).trim();\n    const absCommonDir = /^([A-Za-z]:[\\\\/]|\\/)/.test(commonDir)\n      ? commonDir\n      : join(root, commonDir);\n    return absCommonDir.replace(/[\\\\/]\\.git$/, "");\n  } catch {\n    return root;\n  }\n}';
   assertExactlyOneMatch(RELAY_HANDSHAKE_SRC_HEAD, target, "mainRepoRoot body");
   const mutatedRelay = RELAY_HANDSHAKE_SRC_HEAD.replace(
     target,
-    "export function mainRepoRoot() {\n  return repoRoot();\n}",
+    "export function mainRepoRoot(startDir) {\n  return repoRoot(startDir);\n}",
   );
 
   withTempDir("hyk183-mutant-", (rootDir) => {

@@ -165,8 +165,12 @@ function fakeExecFn(responses) {
   return fn;
 }
 
-function managedWorktreeStub(path = VALID_WORKTREE) {
-  return { ok: true, result: { worktrees: [{ path }] } };
+function managedWorktreeStub(path = VALID_WORKTREE, id = "wt-0") {
+  // 실 CLI 의 `worktree list` 는 경로와 함께 등록 id 를 준다
+  // (hyk171-cycle4b1-fixtures.mjs 의 managedWorktreeStub 과 같은 shape).
+  // HYK-431 8R: 그 id 가 teardown 판정의 「표적 결속」 축 근거이므로, 이
+  // stub 도 실제 shape 대로 id 를 준다.
+  return { ok: true, result: { worktrees: [{ path, id }] } };
 }
 
 // HYK-170 사이클2 (A-1): `terminal list` 응답 fixture 빌더 -- 실측 shape
@@ -2239,7 +2243,15 @@ test("A5: teardownSeat -- NOT_FOUND seat resolution issues zero close/rm/task-up
       worktreePath: VALID_WORKTREE,
       taskId: "task_rt1",
       armed: true,
-      policy: { protectedTargets: [], dispatchCorrelationProven: true },
+      // HYK-431 8R: 「파괴해도 된다」는 판정이 기대는 축마다 근거가 주어져야
+      // 한다(teardown-core.mjs ELIGIBILITY_PREMISES) -- 적격 흐름을 재는
+      // 픽스처이므로 완전 정책을 넘긴다.
+      policy: {
+        protectedTargets: [],
+        expectedWorktreeId: "wt-0",
+        requireDurableEvidence: false,
+        dispatchCorrelationProven: true,
+      },
     },
     { execFn, gitFn, existsFn },
   );
@@ -2290,7 +2302,15 @@ test("A5: teardownSeat -- AMBIGUOUS seat resolution issues zero close/rm/task-up
       worktreePath: VALID_WORKTREE,
       taskId: "task_rt1",
       armed: true,
-      policy: { protectedTargets: [], dispatchCorrelationProven: true },
+      // HYK-431 8R: 「파괴해도 된다」는 판정이 기대는 축마다 근거가 주어져야
+      // 한다(teardown-core.mjs ELIGIBILITY_PREMISES) -- 적격 흐름을 재는
+      // 픽스처이므로 완전 정책을 넘긴다.
+      policy: {
+        protectedTargets: [],
+        expectedWorktreeId: "wt-0",
+        requireDurableEvidence: false,
+        dispatchCorrelationProven: true,
+      },
     },
     { execFn, gitFn, existsFn },
   );
@@ -3888,7 +3908,15 @@ function teardownArmedCtx(overrides = {}) {
     worktreePath: VALID_WORKTREE,
     taskId: "task_rt1",
     armed: true,
-    policy: { protectedTargets: [], dispatchCorrelationProven: true },
+    // HYK-431 8R: 「파괴해도 된다」는 판정이 기대는 축마다 근거가 주어져야
+    // 한다(teardown-core.mjs ELIGIBILITY_PREMISES) -- 적격 흐름을 재는
+    // 픽스처이므로 완전 정책을 넘긴다.
+    policy: {
+      protectedTargets: [],
+      expectedWorktreeId: "wt-0",
+      requireDurableEvidence: false,
+      dispatchCorrelationProven: true,
+    },
     ...overrides,
   };
 }

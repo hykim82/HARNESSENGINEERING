@@ -100,7 +100,17 @@ export function eligibleTeardownCtx(overrides = {}) {
     worktreePath: VALID_WORKTREE,
     taskId: "task_4b1",
     armed: true,
-    policy: { protectedTargets: [], dispatchCorrelationProven: true },
+    // HYK-431 8R: 「파괴해도 된다」는 판정은 그것이 기대는 축마다 근거가
+    // 주어졌을 때만 나온다(teardown-core.mjs ELIGIBILITY_PREMISES) --
+    // 부재는 통과가 아니라 판정 불가다. 이 기준선은 「적격한 흐름」을 재는
+    // 픽스처이므로 그 근거를 모두 갖춘 완전 정책을 쓴다.
+    // `expectedWorktreeId`는 managedWorktreeStub이 첫 경로에 붙이는 id다.
+    policy: {
+      protectedTargets: [],
+      expectedWorktreeId: "wt-0",
+      requireDurableEvidence: false,
+      dispatchCorrelationProven: true,
+    },
     ...overrides,
   };
 }

@@ -26,6 +26,7 @@ import {
   computeFingerprint,
   formatBindingBlock,
 } from "./review-approval-binding.mjs";
+import { RELAY_HANDSHAKE_STATIC_SIBLINGS } from "./relay-handshake-fixture-siblings.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = dirname(dirname(HERE));
@@ -268,10 +269,8 @@ function stageScriptsCheck(mainDir) {
   mkdirSync(scriptsCheckDir, { recursive: true });
   for (const name of [
     "review-gate.mjs",
-    "reject-streak.mjs",
     "relay-handshake.mjs",
-    "envelope-archive.mjs",
-    "time-authority.mjs",
+    ...RELAY_HANDSHAKE_STATIC_SIBLINGS,
     "review-approval-binding.mjs",
   ]) {
     writeFileSync(
@@ -413,10 +412,8 @@ test("mutation (필수): review-gate.mjs's checkApprovalBinding call removed fro
     mkdirSync(scriptsCheckDir, { recursive: true });
     writeFileSync(join(scriptsCheckDir, "review-gate.mjs"), mutated, "utf8");
     for (const sibling of [
-      "reject-streak.mjs",
       "relay-handshake.mjs",
-      "envelope-archive.mjs",
-      "time-authority.mjs",
+      ...RELAY_HANDSHAKE_STATIC_SIBLINGS,
       "review-approval-binding.mjs",
     ]) {
       writeFileSync(

@@ -323,6 +323,11 @@ const TIME_AUTHORITY_SRC = readCommittedOrWorkingTree(
 const REVIEW_APPROVAL_BINDING_SRC = readCommittedOrWorkingTree(
   "scripts/check/review-approval-binding.mjs",
 );
+// HYK-430 5R: relay-handshake.mjs now also statically imports
+// "./child-probe-timeout-policy.mjs".
+const CHILD_PROBE_TIMEOUT_POLICY_SRC = readCommittedOrWorkingTree(
+  "scripts/check/child-probe-timeout-policy.mjs",
+);
 
 // HYK-183 (§10 2R fix, ORCH ruling): mutation #1/#4 below target the
 // `resolveVerdict` function's exact shape. `REVIEW_GATE_SRC` is deliberately
@@ -358,6 +363,11 @@ async function importMutatedCopy(mutate) {
     "utf8",
   );
   writeFileSync(join(dir, "time-authority.mjs"), TIME_AUTHORITY_SRC, "utf8");
+  writeFileSync(
+    join(dir, "child-probe-timeout-policy.mjs"),
+    CHILD_PROBE_TIMEOUT_POLICY_SRC,
+    "utf8",
+  );
   writeFileSync(
     join(dir, "review-approval-binding.mjs"),
     REVIEW_APPROVAL_BINDING_SRC,

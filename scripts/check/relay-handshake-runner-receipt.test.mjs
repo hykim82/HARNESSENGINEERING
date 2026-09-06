@@ -25,6 +25,7 @@ import {
   RUNNER_RECEIPT_REJECT_REASON,
   parseKstTimestamp,
 } from "./relay-handshake.mjs";
+import { RELAY_HANDSHAKE_STATIC_SIBLINGS } from "./relay-handshake-fixture-siblings.mjs";
 
 // HYK-414 1R -- 이 파일의 모든 픽스처는 절대시각(dropped_at 06:00 /
 // finished_at 06:09:00 / DONE 06:10:00, 전부 2026-09-01 KST)을 쓴다.
@@ -40,15 +41,11 @@ const FIXED_NOW_MS = parseKstTimestamp("2026-09-01 06:15:00 KST").getTime();
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const RELAY_HANDSHAKE_PATH = join(HERE, "relay-handshake.mjs");
-// relay-handshake.mjs's real static sibling dependency list (grep-verified,
-// same list relay-handshake-head-commit.test.mjs's mutation harness uses) --
-// the mutated copy below is written to a FRESH tmpdir with no other files,
-// so its relative imports resolve only if these are copied alongside it.
-const SIBLING_DEPS = [
-  "reject-streak.mjs",
-  "envelope-archive.mjs",
-  "time-authority.mjs",
-];
+// relay-handshake.mjs's real static sibling dependency list (single source,
+// scripts/check/relay-handshake-fixture-siblings.mjs) -- the mutated copy
+// below is written to a FRESH tmpdir with no other files, so its relative
+// imports resolve only if these are copied alongside it.
+const SIBLING_DEPS = RELAY_HANDSHAKE_STATIC_SIBLINGS;
 
 function withFixtureDir(prefix, fn) {
   const dir = mkdtempSync(join(tmpdir(), prefix));

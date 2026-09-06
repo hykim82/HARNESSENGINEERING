@@ -146,6 +146,7 @@ test("autoCompleteAdmission with `reason` stamps completion_reason on the releas
   const { dir, ledger, lock } = tmpPaths();
   const savedLedger = process.env.ADMISSION_LEDGER_PATH;
   const savedLock = process.env.ADMISSION_LOCK_PATH;
+  const savedPane = process.env.ORCA_PANE_KEY;
   try {
     runAdmissionCli([
       "init-cutover",
@@ -156,6 +157,11 @@ test("autoCompleteAdmission with `reason` stamps completion_reason on the releas
       "--live-seats",
       "[]",
     ]);
+    // HYK-443 5R: 예약은 «어느 좌석에 배정됐는지»를 스스로 기록하고
+    // (`--seat-key` -> reservations[...].seat_key), 반납 검증은 영수증의
+    // `assignee_pane_key`를 «그 값»과 대조한다(호출자 env가 아니라) --
+    // 진짜 성공 경로 재현이므로 둘을 같은 값으로 세운다.
+    const seatPaneKey = "tab-hyk342blocked:leaf-hyk342blocked";
     runAdmissionCli([
       "admit",
       "--ledger",
@@ -166,21 +172,26 @@ test("autoCompleteAdmission with `reason` stamps completion_reason on the releas
       "HYK-342-blocked-1",
       "--cap",
       "1",
+      "--seat-key",
+      seatPaneKey,
     ]);
     writeFileSync(
       join(dir, "coder.md"),
       "task_id: HYK-342-blocked-1\n\n>>> BLOCKED: 시험용 정지\n",
       "utf8",
     );
+    // 영수증 줄은 «어느 좌석에 배달됐는가»(assignee_pane_key)를 담는다 --
+    // 위 admit의 --seat-key와 같은 값(진짜 배달 재현).
     const receiptPath = join(dir, "dispatch-receipts.jsonl");
     writeFileSync(
       receiptPath,
-      `${JSON.stringify({ role: "CODER", harness_task_label: "HYK-342-blocked-1", dispatch_id: "ctx_test" })}\n`,
+      `${JSON.stringify({ role: "CODER", harness_task_label: "HYK-342-blocked-1", dispatch_id: "ctx_test", assignee_pane_key: seatPaneKey })}\n`,
       "utf8",
     );
 
     process.env.ADMISSION_LEDGER_PATH = ledger;
     process.env.ADMISSION_LOCK_PATH = lock;
+    process.env.ORCA_PANE_KEY = seatPaneKey;
     const outcome = autoCompleteAdmission({
       reservationId: "HYK-342-blocked-1",
       reason: "BLOCKED_TERMINATION_RELEASED",
@@ -202,6 +213,8 @@ test("autoCompleteAdmission with `reason` stamps completion_reason on the releas
     else delete process.env.ADMISSION_LEDGER_PATH;
     if (savedLock !== undefined) process.env.ADMISSION_LOCK_PATH = savedLock;
     else delete process.env.ADMISSION_LOCK_PATH;
+    if (savedPane !== undefined) process.env.ORCA_PANE_KEY = savedPane;
+    else delete process.env.ORCA_PANE_KEY;
     rmSync(dir, { recursive: true, force: true });
   }
 });

@@ -31,6 +31,10 @@ const RELAY_HANDSHAKE_PATH = RELAY_HANDSHAKE_CLI;
 const TIME_AUTHORITY_PATH = join(HERE, "time-authority.mjs");
 const REJECT_STREAK_PATH = join(HERE, "reject-streak.mjs");
 const ENVELOPE_ARCHIVE_PATH = join(HERE, "envelope-archive.mjs");
+const CHILD_PROBE_TIMEOUT_POLICY_PATH = join(
+  HERE,
+  "child-probe-timeout-policy.mjs",
+);
 
 function withDir(fn) {
   const dir = mkdtempSync(join(tmpdir(), "nc-codex-lane-"));
@@ -213,6 +217,11 @@ function stageMutantTree(mutatedRelaySrc) {
   writeFileSync(
     join(checkDir, "envelope-archive.mjs"),
     readFileSync(ENVELOPE_ARCHIVE_PATH, "utf8"),
+    "utf8",
+  );
+  writeFileSync(
+    join(checkDir, "child-probe-timeout-policy.mjs"),
+    readFileSync(CHILD_PROBE_TIMEOUT_POLICY_PATH, "utf8"),
     "utf8",
   );
   return join(checkDir, "relay-handshake.mjs");

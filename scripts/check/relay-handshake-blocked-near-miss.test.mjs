@@ -135,7 +135,25 @@ test("HYK-333 (5) regression: 표지가 정말 없는 결과 -> 여전히 state=
   });
 });
 
-test("HYK-333 (6) regression: 유효 '>>> BLOCKED:' 한 줄 + 줄중간 깨진 마커 공존 -> 여전히 MALFORMED_BLOCKED (기존 valid+malformed 혼재 경로 회귀 0)", () => {
+// ⛔HYK-442 5R에서 «계약이 바뀐» 유일한 시험이다(회귀 0을 지키지 못한 한 건 --
+// coder.md §2-1에 등급과 불가능성 증명과 함께 기재). 원래 기대는
+// MALFORMED_BLOCKED였다: "유효 표지 한 줄 + 줄 중간 깨진 마커"를 혼재로 본다.
+//
+// 왜 바뀌었나: 이 입력의 둘째 줄(`status: >>> BLOCKED: midline`)은 2026-09-05
+// 실사고의 두 결과 파일이 «인용»한 줄(coder-437-PRE-EDIT-1758.md 166행 ·
+// coder-laneB-PRE-EDIT.md 50/54행)과 구조가 완전히 같다 -- 둘 다 «줄 앞에
+// 산문이 있고 줄 중간에 표지 모양이 나오는» 줄이고, 다른 점은 오직 표지
+// 모양을 인용부호가 감싸고 있느냐뿐이다. 그래서 이 둘을 다르게 판정하려면
+// 반드시 «인용인지 추정»해야 하고, 그 축은 이 이슈에서 세 번(1R 좁힘 · 2R
+// 넓힘 · 4R 배치 규칙) 뚫렸다(검토 1R/2R 실측). 책임자 지시(coder-task.md 5R
+// §2-1)가 그 축을 버리고 근접-미스의 «정의»를 구조로 좁히라고 요구했고, 그
+// 정의 아래에서 «줄 중간·앞에 산문»은 표지 «시도»가 아니라 문장의 일부다.
+//
+// 안전 방향: 표지를 «수락»하는 경로(BLOCKED_RE, column-0 한 줄)는 조금도
+// 바뀌지 않았다 -- 이 변화는 «유효 표지 하나만 있는 파일을 혼재로 보지
+// 않는다»는 것뿐이고, 잃어버릴 수 있는 정지 신호는 «줄 머리에서 시작한
+// 시도»뿐인데 그쪽은 이 라운드가 오히려 넓혔다(BOM·제로폭·기호 접두 전부).
+test("HYK-442 5R (구 HYK-333 (6), 계약 변경): 유효 '>>> BLOCKED:' 한 줄 + «앞에 산문이 있는» 줄중간 표지 모양 -> BLOCKED (줄 중간 언급은 표지 시도가 아니다)", () => {
   withFixtureDir((dir) => {
     writeTask(dir, "coder", TASK_HEADER);
     writeResult(
@@ -145,7 +163,36 @@ test("HYK-333 (6) regression: 유효 '>>> BLOCKED:' 한 줄 + 줄중간 깨진 �
     );
     const result = checkRelayHandshake({ role: "coder", harnessDir: dir });
     assert.equal(result.ok, false);
-    assert.equal(result.state, "MALFORMED_BLOCKED");
+    assert.equal(result.state, "BLOCKED");
+    assert.match(
+      result.reason,
+      /valid/,
+      "유효 표지 한 줄의 사유가 그대로 채택된다",
+    );
+  });
+});
+
+test("HYK-442 5R (구 HYK-333 (6)의 안전 축은 유지): 같은 파일에서 둘째 표지가 «줄 머리»에서 시작하면(앞에 산문 없음) 여전히 MALFORMED_BLOCKED", () => {
+  withFixtureDir((dir) => {
+    writeTask(dir, "coder", TASK_HEADER);
+    writeResult(
+      dir,
+      "coder",
+      "task_id: HYK-1\n\n>>> BLOCKED: valid\n- >>> BLOCKED: broken attempt\n",
+    );
+    const result = checkRelayHandshake({
+      role: "coder",
+      harnessDir: dir,
+      // HYK-414 래칫: 새로 추가하는 호출은 now를 명시한다(이 파일 픽스처의
+      // dropped_at 2026-08-08 21:00 KST 직후로 고정).
+      now: Date.parse("2026-08-08T12:05:00Z"),
+    });
+    assert.equal(result.ok, false);
+    assert.equal(
+      result.state,
+      "MALFORMED_BLOCKED",
+      "혼재 판정 자체는 살아 있다 -- 사라진 것은 «줄 중간 언급»뿐이고, 글머리표·기호가 앞에 붙은 진짜 시도는 계속 잡힌다",
+    );
   });
 });
 

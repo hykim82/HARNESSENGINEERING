@@ -20,6 +20,10 @@ import {
   isBeyondFutureSkew,
   isSuspectedTimezoneMislabel,
 } from "./time-authority.mjs";
+import {
+  resolveChildProbeTimeoutMs,
+  withTimeoutRetry,
+} from "./child-probe-timeout-policy.mjs";
 
 export { TIME_AUTHORITY_STATE, MAX_FUTURE_SKEW_MS };
 
@@ -110,6 +114,124 @@ const BLOCKED_ANYWHERE_RE = />>>\s*(BLOCKED|NEEDS_INPUT)\b/gi;
 // ⛔BLOCKED_RE(엄격 채택 기준, 채택에는 사유 필수)는 이 상수와 무관하게
 // 그대로다 -- 건드리지 않는다.
 const BLOCKED_BARE_COLUMN0_RE = /^(BLOCKED|NEEDS_INPUT):/gim;
+
+// HYK-442 5R (검토 2R P1-ⓐ 수리 -- ⛔«인용인지 추정하는» 축 자체를 버린다):
+//
+// 이 이슈는 같은 실패를 세 번 반복했고, 세 번 다 공통점이 하나였다 --
+// 「이 따옴표가 인용인가」를 문장부호 배치로 «추정»한 것이다:
+//   1R -- 인용부호를 백틱 «한 원소»로 좁힘  -> 홑따옴표 인용에 다시 걸림
+//         (정당한 정지 종결을 막는 «과차단»).
+//   2R -- 집합을 3종으로 «넓힘»             -> 자연어 축약형 두 개(don't …
+//         can't) 사이의 «진짜» 근접-미스가 통째로 스트립됨(«누락»).
+//   4R -- 여는-자리 규칙(축 A) + 줄-선두 불가침(축 B)로 «배치»를 정교화
+//         -> 검토 2R이 여섯 입력으로 뚫음: `'tis`/`'26`/문장-시작 홑따옴표는
+//         여는 자리로 오인되고(축 A), BOM·제로폭 문자가 줄 앞에 오면
+//         줄-선두 보호가 아예 작동하지 않았다(축 B).
+// 추정 축은 «공격자가 입력을 정하는 한» 수렴하지 않는다. 그래서 5R은
+// 인용부호를 ⛔한 글자도 다루지 않는다 -- 스트립 함수 자체가 사라졌다.
+//
+// ── 대신 «근접-미스»의 정의를 구조로 고정한다 ─────────────────────────
+// 표지는 «줄 단위» 구성물이다 -- 엄격 채택 BLOCKED_RE 자신이 `^>>>`(줄 맨
+// 앞)를 요구한다. 그러므로 «표지를 쓰려다 실패한 흔적»은 언제나 «줄 머리»에
+// 온다: 실제로 관측된 근접-미스 다섯 형태(선행 공백 · `>>>` 없는 칼럼0 ·
+// 콜론 없음 · 표지 2개 · 표지 0개)가 전부 그렇고, 워커 규칙 §3-b가 가르치는
+// 형식("줄 맨 앞에 `>>>`를 붙여서") 자체가 그렇다. 반대로 «앞에 산문이 있는»
+// 표지 모양은 그 줄의 «문장 일부»이지 표지 시도가 아니다.
+// ⇒ 5R의 정의: ★표지 모양 앞에 «글자도 숫자도 하나도 없는» 줄만 근접-미스
+//   시도로 센다(아래 PROSE_CHAR_RE). 인용부호는 글자도 숫자도 아니므로
+//   판정에 관여하지 않는다 -- 백틱이든 홑따옴표든 겹따옴표든, 유니코드
+//   유사 따옴표든, 괄호든, 짝이 맞든 안 맞든 «묻지 않는다». 「인용인가」라는
+//   질문이 사라졌으므로 그 질문을 속이는 입력도 존재할 수 없다.
+//
+// 왜 이것이 여섯 공격을 «구조적으로» 닫는가: 공격의 공통 수법은 «진짜 표지
+// 시도를 인용 스팬 안에 숨겨 지우는 것»이었다. 이제 지우는 단계가 없다.
+// 줄 머리에서 시작한 시도 앞에는 (공백·글머리표·⛔ 같은 기호·BOM·제로폭
+// 문자 등) 무엇이 와도 «글자/숫자»가 아니면 그대로 세어진다 -- 보이지 않는
+// 문자는 애초에 `\p{L}`/`\p{N}`이 아니므로 «예외 목록 한 줄도 없이» 자동으로
+// 덮인다(BOM·제로폭·word joiner·결합 문자 전부).
+//
+// ⚠️이 정의가 «좁히는» 것(정직 한계 -- coder.md에 등급과 함께 기재):
+// 줄 중간에, 앞에 산문을 두고 나타나는 표지 모양은 이제 근접-미스가 아니다.
+// 그것이 이 라운드가 «과차단»(원래 사고: 인용 언급 때문에 정상 종료가 막힘)과
+// «누락»(검토가 뚫은 fail-open)을 동시에 없애는 유일한 길이었다 -- 두 실물
+// 사고 파일의 인용 언급(coder-437-PRE-EDIT-1758.md 166행 · coder-laneB-PRE-
+// EDIT.md 50·54행)과 HYK-333 (6)의 `status: >>> BLOCKED: midline`은 «인용부호
+// 유무»를 빼면 구조가 완전히 같아서, 인용부호를 보지 않고 둘을 가르는 규칙은
+// 원리적으로 존재하지 않는다(coder.md §2-1 증명).
+//
+// ⛔BLOCKED_RE(엄격 채택)는 건드리지 않는다 -- 이 파일의 어떤 근접-미스
+// 판정도 표지를 «수락»하는 경로에는 관여하지 않는다.
+
+// 표지 모양 «앞»에 산문이 있는가를 묻는 유일한 문자 부류. 글자(\p{L})와
+// 숫자(\p{N}) 둘뿐이다 -- 인용부호·괄호·글머리표·화살표·보이지 않는 문자는
+// 전부 여기에 해당하지 않으므로 판정에 영향을 주지 않는다.
+const PROSE_CHAR_RE = /[\p{L}\p{N}]/u;
+
+// 보이지 않는 형식 문자(BOM U+FEFF · 제로폭 U+200B~200F · word joiner
+// U+2060~2064 · soft hyphen …)는 «있으나 없으나 같은 줄»이다. 칼럼0 고정인
+// BLOCKED_BARE_COLUMN0_RE만 이 정규화가 필요하다(그 하나는 위치로 판정하므로
+// 줄 앞에 보이지 않는 문자가 끼면 밀려난다). ⛔문자를 하나씩 열거한 예외
+// 목록이 아니라 유니코드 «형식 문자» 부류 하나다.
+const INVISIBLE_FORMAT_CHAR_RE = /\p{Cf}/gu;
+
+// HYK-442 6R (검토 3R P1 -- 유일한 반려 사유): 5R의 판별 «축»(표지 모양 앞에
+// 글자도 숫자도 없는 줄만 시도로 센다)은 검토의 여덟 공격을 전부 버텼다.
+// 뚫린 곳은 축이 아니라 그 축이 서는 «자리» -- 줄 머리를 `lastIndexOf("\n")`
+// 하나로 구한 탓에, LF가 «아닌» 줄 경계 뒤에 온 표지 시도는 앞줄 산문이
+// 그대로 딸려 들어와 PROSE_CHAR_RE가 참이 되고 «시도가 아니다»로 사라졌다
+// (검토 3R 실측: CR 단독·U+2028·U+2029·폼피드 네 경계 각각에서, 유효한 정지
+// 결과가 함께 있을 때만 드러나는 fail-open).
+// ⇒ 줄 경계를 «부류 하나»로 고친다. ⛔축은 한 글자도 바뀌지 않는다 --
+// PROSE_CHAR_RE도, "앞에 산문이 없으면 시도"라는 규칙도 그대로다.
+// 이 집합은 임의가 아니라 «줄을 끝내는 문자»의 표준 집합이다: JS 정규식이
+// `m` 플래그에서 줄 종결자로 인정하는 넷(LF·CR·U+2028·U+2029 -- 그래서
+// BLOCKED_RE/BLOCKED_BARE_COLUMN0_RE의 `^`가 이미 그 넷을 줄 머리로 본다)에,
+// 유니코드가 줄 경계로 규정하지만 JS 정규식만 빼놓는 폼피드(U+000C)를 더한
+// 것이다. 즉 이 상수는 «칼럼0 모양이 이미 쓰고 있던 줄 개념»을 화살표 모양
+// 쪽에도 같게 맞추는 일이지, 새 경계를 발명하는 것이 아니다.
+const LINE_BOUNDARY_CHAR_RE = /[\n\r\u2028\u2029\f]/u;
+
+// 「`matchIndex`가 있는 줄은 어디서 시작하는가」. 뒤에서부터 «처음 만나는»
+// 줄 경계 문자 바로 다음이 줄 머리다.
+// ⚠️★CRLF가 «한 개»의 줄 경계로 남는 이유가 바로 이 «뒤에서부터»다: \r\n
+// 앞에서 뒤로 훑으면 먼저 만나는 것이 LF이므로 줄 머리는 LF 다음 --
+// LF만 쓰던 5R 계산과 CRLF 입력에서 «값이 같다». (경계를 앞에서부터 세거나
+// \r과 \n을 각각 한 줄로 쪼개면 둘 사이에 빈 줄이 생겨, 그 뒤의 표지 모양이
+// 「앞에 산문이 없는 줄」로 잘못 승격된다 -- 회귀 시험 (13)이 LF판·CRLF판의
+// 판정을 네 방향으로 대조해 이 성질을 고정한다.)
+function lineStartOffset(scan, matchIndex) {
+  for (let i = matchIndex - 1; i >= 0; i -= 1) {
+    if (LINE_BOUNDARY_CHAR_RE.test(scan[i])) return i + 1;
+  }
+  return 0;
+}
+
+// 근접-미스 «시도»의 개수. 두 표지 모양 모두 «그 매치가 시작한 줄»을 기준으로
+// 판정한다:
+//   ⓐ 화살표 모양(BLOCKED_ANYWHERE_RE) -- 매치 시작 위치와 그 줄의 머리
+//      사이에 글자/숫자가 하나도 없을 것(그 «줄의 머리»는 lineStartOffset이
+//      정한다 -- HYK-442 6R 전에는 LF 하나로만 구해서, LF가 아닌 줄 경계
+//      뒤의 시도를 앞줄 산문에 가려 놓쳤다). ⛔줄 «전체»를 보지 않고 «앞»만
+//      보는 이유: 이 정규식의 `\s*`는 의도적으로 개행을 건널 수 있고(줄이
+//      쪼개진 표지 흔적을 잡는 지점, 그 상수 자신의 헤더 참조) 그 성질을
+//      이 라운드가 없애지 않기 때문이다.
+//   ⓑ `>>>` 없는 칼럼0 모양(BLOCKED_BARE_COLUMN0_RE) -- 이미 «칼럼 0»이라는
+//      가장 엄격한 형태의 같은 규칙이다(HYK-333 §3-2 요구 4가 정한 경계를
+//      이 라운드는 넓히지도 좁히지도 않는다).
+// 두 모양은 겹치지 않는다(ⓑ는 `>>>`로 시작하는 줄에 매치하지 않는다) --
+// 그래서 합계는 어떤 근접-미스도 두 번 세지 않는다(HYK-333 주석 그대로).
+function countNearMissMarkerShapes(resultContent) {
+  // 계수 전용 스캔이라 오프셋 보존이 필요 없다 -- 보이지 않는 형식 문자를
+  // 먼저 지운다(줄 구조는 그대로: `\n`은 \p{Cf}가 아니다).
+  const scan = resultContent.replace(INVISIBLE_FORMAT_CHAR_RE, "");
+  let count = 0;
+  for (const m of scan.matchAll(BLOCKED_ANYWHERE_RE)) {
+    const lineStart = lineStartOffset(scan, m.index);
+    if (!PROSE_CHAR_RE.test(scan.slice(lineStart, m.index))) count += 1;
+  }
+  count += [...scan.matchAll(BLOCKED_BARE_COLUMN0_RE)].length;
+  return count;
+}
 // HYK-325 §2-3 (승격: HYK-418 §2-1): the non-column-0 meta line finalize-
 // done.mjs appends right after a `>>> DONE:` line it wrote itself (see that
 // file's own FINALIZE_DONE_MARKER_LINE). Absence used to only trigger a
@@ -118,13 +240,19 @@ const BLOCKED_BARE_COLUMN0_RE = /^(BLOCKED|NEEDS_INPUT):/gim;
 // used to fail closed instead).
 const DONE_STAMPED_BY_MARKER_RE = /^done_stamped_by:\s*finalize-done\s*$/im;
 
-function repoRoot() {
+// HYK-428 §2⑴: `cwd` is optional/back-compat -- callers that omit it (every
+// pre-HYK-428 caller) get the exact unchanged process.cwd()-derived
+// behavior. Threading an explicit `cwd` (see mainRepoRoot below) is what
+// lets the resolved path track the SAME directory an isolation gate already
+// validated, instead of an unrelated, ambient process.cwd().
+function repoRoot(cwd) {
   try {
-    return execSync("git rev-parse --show-toplevel", {
-      encoding: "utf8",
-    }).trim();
+    return execSync(
+      "git rev-parse --show-toplevel",
+      cwd ? { encoding: "utf8", cwd } : { encoding: "utf8" },
+    ).trim();
   } catch {
-    return process.cwd();
+    return cwd ?? process.cwd();
   }
 }
 
@@ -141,8 +269,21 @@ function repoRoot() {
 // hook's script) can resolve the SAME centralized ledger location when it
 // records an approval -- see that module's own header for why the approval
 // path needs this at all.
-export function mainRepoRoot() {
-  const root = repoRoot();
+// HYK-428 §2⑴: `startDir` is optional/back-compat (review-gate.mjs's own
+// call site below omits it -- a commit-msg hook always runs with
+// process.cwd() already equal to the worktree being committed in, so there
+// is no separate "checked" directory to align to there). When a caller DOES
+// pass `startDir` (autoRecordRejectStreak below), every git call in this
+// resolution chain runs anchored at THAT directory, not at this process's
+// own ambient cwd -- this is what makes the resolved ledger path track the
+// exact same directory isInsideGitWorktree(harnessDir) already validated,
+// closing the gap the header comment above (HYK-355 §2-B) describes: before
+// this round, mainRepoRoot() ignored harnessDir entirely, so an isolated
+// fixture (which legitimately passes isInsideGitWorktree, since it IS some
+// git worktree) still resolved to whatever repo this process's cwd
+// happened to be in when invoked in-process (coder-task.md §1-1 원문).
+export function mainRepoRoot(startDir) {
+  const root = repoRoot(startDir);
   try {
     const commonDir = execSync("git rev-parse --git-common-dir", {
       encoding: "utf8",
@@ -294,14 +435,13 @@ function resolveResultBlockedState(resultContent) {
   // well-formed one(s) already counted above -- a valid line coexisting
   // with a broken one, previously swallowed silently into the single valid
   // match.
-  const anywhereCount = [...resultContent.matchAll(BLOCKED_ANYWHERE_RE)].length;
-  // HYK-333: BLOCKED_BARE_COLUMN0_RE matches lines that never start with
-  // `>>>` (it anchors on the keyword itself), so it can never overlap with
-  // anywhereCount's `>>>`-anchored matches -- summing the two counts every
-  // near-miss shape exactly once, no double counting.
-  const bareColumn0Count = [...resultContent.matchAll(BLOCKED_BARE_COLUMN0_RE)]
-    .length;
-  const nearMissCount = anywhereCount + bareColumn0Count;
+  // HYK-442 5R: near-miss counting is LINE-based and never asks whether
+  // something is quoted (see countNearMissMarkerShapes' own header for why
+  // the quote axis was dropped entirely) -- a marker shape with prose
+  // before it on its line is part of that sentence, not an attempt at the
+  // marker. The strict `matches` count just above is computed on the
+  // ORIGINAL resultContent (unaffected, untouched by this fix).
+  const nearMissCount = countNearMissMarkerShapes(resultContent);
   if (matches.length === 1) {
     if (nearMissCount > matches.length) {
       return {
@@ -503,11 +643,43 @@ function autoRecordRejectStreak({ role, resultContent, harnessDir }) {
     console.error(blocked.reason);
     return blocked;
   }
-  const autoRecord = recordRejectStreakFromResultText({
-    role,
-    resultText: resultContent,
-    ledgerPath: join(mainRepoRoot(), ".harness", "reject-streak.json"),
-  });
+  // HYK-428 §2⑴: anchor at `harnessDir` (the exact directory the gate above
+  // just validated with isInsideGitWorktree), not the bare no-arg
+  // mainRepoRoot() this line used before -- that old call resolved off this
+  // PROCESS's own ambient cwd, a value completely decoupled from
+  // harnessDir, which is how the gate above could pass (harnessDir
+  // genuinely is some git worktree, e.g. an isolated fixture's own
+  // `git init`) while the write still landed in whatever repo the caller's
+  // cwd happened to be -- see mainRepoRoot's own header for the closed gap.
+  // HYK-428: wrapped in try/catch (was bare) -- once the gate above passes,
+  // mainRepoRoot(harnessDir) can still resolve to a directory whose
+  // `.harness/` subdir does not exist (harnessDir is `isInsideGitWorktree`
+  // but git itself failed to resolve a common-dir for some other reason),
+  // and writeLedger has no parent-directory guard of its own -- this must
+  // degrade to a logged, visible failure (mirrors every other side-effect
+  // in this file, e.g. autoArchiveRoundEnvelope's own try/catch boundary),
+  // never an uncaught crash that takes the whole handshake process down.
+  let autoRecord;
+  try {
+    autoRecord = recordRejectStreakFromResultText({
+      role,
+      resultText: resultContent,
+      ledgerPath: join(
+        mainRepoRoot(harnessDir),
+        ".harness",
+        "reject-streak.json",
+      ),
+    });
+  } catch (err) {
+    const reason = `reject-streak auto-record: ledger write failed unexpectedly (${err.message}) -- ledger NOT updated, round completion not blocked`;
+    console.error(reason);
+    return {
+      attempted: true,
+      ok: false,
+      reasonCode: "LEDGER_WRITE_ERROR",
+      reason,
+    };
+  }
   if (!autoRecord.attempted) return { attempted: false, ok: false };
   if (autoRecord.ok) {
     console.log(autoRecord.reason);
@@ -2038,17 +2210,32 @@ function shadowLine(state, reason, taskId) {
   return `retire-author-shadow: ${state} reason=${toOneLine(reason)} label=${taskId} (shadow -- 아무것도 차단하지 않음)`;
 }
 
-// HYK-419-wire-2 §2⑴ -- 스폰 자체가 «멈추지 않게» 시간 제한을 건다. 근거:
-// 이 저장소의 실측(retirement-auto-author-shadow-cli.test.mjs)에서 정상
-// 조립+판정은 rounds/ 몇 개 파일만 읽어도 100ms를 넘지 않았다 -- 2000ms는
-// 그 정상 왕복의 20배 이상 여유를 두면서도(디스크 I/O가 유난히 느린
-// 환경까지 흡수), 소비 경로 전체 체감 지연으로는 "느껴지지 않는" 수준이
-// 아니라는 점을 이 라운드는 인정한다(검토 P1-1이 문제 삼은 것은 «무한
-// 대기»이지 «지연 존재 자체»가 아니다 -- coder-task.md §2⑴ "소비 체감에
-// 영향 없는 수준"은 상대적 지침으로 읽었다: 무제한(∞) 대비 2초는 이
-// 소비 경로의 다른 스폰 호출(admission-completion-adapter 등, 이들도
-// 자체 타임아웃이 없다 -- 이 라운드 범위 밖)과 같은 자릿수다).
+// HYK-430 5R (§0 재설계 -- 폴백을 «더 잘 만들기»가 아니라 폴백이 필요한
+// 상황 자체를 제거한다): 1R(복제) -> 2R(동적 import + 조용한 폴백) ->
+// 4R(폴백을 모듈-부재 판별식으로 좁힘)까지 세 라운드가 이 자리에서
+// 싸운 이유는 전부 같은 전제 하나였다 -- "격리 픽스처가
+// child-probe-timeout-policy.mjs를 형제로 복사하지 않는다"는 환경
+// 제약. 그 전제 자체를 5R에서 없앤다: relay-handshake.mjs를 격리
+// 임시 디렉터리에 복사해 자식으로 돌리는 모든 시험(list-relay-
+// handshake-isolated-fixtures.mjs가 기계로 세는 그 집합, HYK-430 4R
+// §2⑵)이 이제 child-probe-timeout-policy.mjs도 형제로 함께 복사한다
+// (scripts/check/relay-handshake-fixture-siblings.mjs가 그 복사 목록의
+// 단일 소스). "정책을 못 읽는 경우"가 더 이상 존재하지 않으므로,
+// 그 경우를 처리하던 동적 import·catch·isPolicyModuleAbsent·로컬
+// 2000ms/재시도 0 폴백 경로가 전부 불필요해져 지운다 -- 남는 것은
+// 평범한 정적 import 하나뿐이다.
 const SHADOW_CLI_TIMEOUT_MS = 2000;
+
+function resolveShadowCliTimeoutMs(baseTimeoutMs) {
+  return resolveChildProbeTimeoutMs(baseTimeoutMs);
+}
+
+// §2⑶ "재시도 1회" -- 무응답(ETIMEDOUT)에서만 정확히 1회 재시도한다
+// (RETRY_ON_TIMEOUT은 child-probe-timeout-policy.mjs가 유일한
+// 정의처다).
+function withTimeoutRetryIfAvailable(fn, isTimeout) {
+  return withTimeoutRetry(fn, { isTimeout });
+}
 
 function isTimeoutError(err) {
   // Node의 child_process.execFileSync는 timeout 초과 시 자식을 killSignal로
@@ -2087,9 +2274,11 @@ function normalizeChildStdout(out, taskId) {
 //
 // ★서브프로세스 스폰, 정적 import 아님 -- spawnAbortRecordWriter/
 // spawnAdmissionCompletionProcess와 완전히 같은 이유(그 두 함수 바로 위
-// 주석 참조): 이 파일은 24개 격리 픽스처 시험(admission-completion-
+// 주석 참조): 이 파일은 다수의 격리 픽스처 시험(admission-completion-
 // spawn.test.mjs 등, "relay-handshake.mjs + time-authority/reject-streak/
-// envelope-archive만" 복사해 서브프로세스로 도는 시험)이 의존하는 정적
+// envelope-archive만" 복사해 서브프로세스로 도는 시험 -- 정확한 개수는
+// `node scripts/check/list-relay-handshake-isolated-fixtures.mjs`가
+// 손으로 세지 않고 매번 다시 만든다, HYK-430 4R §2⑵)이 의존하는 정적
 // import 그래프의 일부다 -- 5번째 정적 import를 추가하면 그 시험 전부가
 // LOAD 시점에 MODULE_NOT_FOUND로 깨진다(실측: 첫 시도에서 npm test 60건
 // 실패). retirement-auto-author-shadow-cli.mjs를 스폰만 하면 그 파일이
@@ -2110,7 +2299,7 @@ export function runRetireAuthorShadowObservation({
   doneAt,
   execFileFn = execFileSync,
   logFn = console.log,
-  timeoutMs = SHADOW_CLI_TIMEOUT_MS,
+  timeoutMs = resolveShadowCliTimeoutMs(SHADOW_CLI_TIMEOUT_MS),
 }) {
   try {
     const cliPath = join(
@@ -2127,12 +2316,20 @@ export function runRetireAuthorShadowObservation({
     // 없어 Node가 내부적으로 TerminateProcess로 매핑한다 -- 이 워크트리
     // 자체가 Windows라 이 경로로 실측했다, 좀비 프로세스는 남기지 않음을
     // 시험(rr-timeout 계열)으로 확인).
-    const out = execFileFn("node", args, {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"],
-      timeout: timeoutMs,
-      killSignal: "SIGKILL",
-    });
+    // HYK-430 2R: 무응답(TIMEOUT)만, 공통 정책이 로드됐을 때 정확히
+    // 1회 재시도한다(§2⑶, 위 withTimeoutRetryIfAvailable 주석). 진짜
+    // 무응답 자식은 재시도해도 다시 타임아웃되므로 탐지력은 보존된다
+    // (§2⑷ 음성 대조 (E)).
+    const out = withTimeoutRetryIfAvailable(
+      () =>
+        execFileFn("node", args, {
+          encoding: "utf8",
+          stdio: ["ignore", "pipe", "pipe"],
+          timeout: timeoutMs,
+          killSignal: "SIGKILL",
+        }),
+      isTimeoutError,
+    );
     logFn(normalizeChildStdout(out, taskId));
   } catch (err) {
     // Missing CLI file (isolated test fixture), non-zero exit, timeout
@@ -2782,8 +2979,35 @@ function spawnAdmissionAbortProcess(taskId, harnessDir, role) {
       dirname(fileURLToPath(new URL(import.meta.url))),
       "admission-completion-adapter.mjs",
     );
+    // HYK-443: the adapter's verifyBlockedTerminationEvidence (admission-
+    // completion-adapter.mjs) requires a 6th positional arg (receiptPath) to
+    // find dispatch-receipts.jsonl -- this call used to stop at the 5th
+    // (role), so the adapter's own resolveReceiptPathForVerification always
+    // fell through to `DISPATCH_RECEIPT_PATH` env (never set by this repo's
+    // own automated consumption path, only by a manually-run ORCH terminal)
+    // and then to null -- BLOCKED_TERMINATION_RELEASED release therefore
+    // ALWAYS failed with "(경로 미설정)" (coder-task.md §1-2 실물 재현).
+    // ⛔새 관례 발명 금지(coder-task.md §2): this file's own
+    // resolveDispatchLedgerPath (above) already resolves the exact same
+    // pointer-file convention (`<harnessDir>/dispatch-receipt-path.txt`)
+    // that resolveDispatchRecordExistence uses moments earlier in this same
+    // handshake -- reused here unchanged, not re-derived. `undefined` (no
+    // explicit path, no pointer file) resolves to `undefined`, which is
+    // simply omitted from `args` below -- the adapter's own env fallback and
+    // fail-closed null-path rejection are unchanged for that case.
+    const resolvedReceiptPath = resolveDispatchLedgerPath(
+      undefined,
+      harnessDir,
+    );
     const args = harnessDir
-      ? [adapterPath, taskId, harnessDir, "BLOCKED_TERMINATION_RELEASED", role]
+      ? [
+          adapterPath,
+          taskId,
+          harnessDir,
+          "BLOCKED_TERMINATION_RELEASED",
+          role,
+          ...(resolvedReceiptPath !== undefined ? [resolvedReceiptPath] : []),
+        ]
       : [adapterPath, taskId];
     const out = execFileSync("node", args, {
       encoding: "utf8",

@@ -31,6 +31,7 @@ import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { checkRelayHandshake } from "./relay-handshake.mjs";
 import { findFirstObservation } from "./first-observation.mjs";
+import { RELAY_HANDSHAKE_STATIC_SIBLINGS } from "./relay-handshake-fixture-siblings.mjs";
 // HYK-148 A3 inventory (no-restricted-imports): scripts/check/* must never
 // import scripts/relay/* -- real dependency direction is relay -> check
 // only. The round-trip (finalize-done CLI actually clearing this
@@ -156,11 +157,7 @@ test("HYK-418 §2-2 (완료조건2 -- 첫 관측을 박지 않는다): the unmar
 function stageMinimalRelayHandshakeDeps(rootDir) {
   const checkDir = join(rootDir, "scripts", "check");
   mkdirSync(checkDir, { recursive: true });
-  for (const name of [
-    "time-authority.mjs",
-    "reject-streak.mjs",
-    "envelope-archive.mjs",
-  ]) {
+  for (const name of RELAY_HANDSHAKE_STATIC_SIBLINGS) {
     writeFileSync(
       join(checkDir, name),
       readFileSync(join(CHECK_DIR, name), "utf8"),

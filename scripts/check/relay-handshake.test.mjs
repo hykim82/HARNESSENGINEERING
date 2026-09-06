@@ -35,6 +35,7 @@ import {
   isolatedChildEnv,
   isolatedChildEnvWithLedger,
 } from "./admission-ledger-env-isolation.mjs";
+import { RELAY_HANDSHAKE_STATIC_SIBLINGS } from "./relay-handshake-fixture-siblings.mjs";
 
 // import.meta.url is resolved relative to this file's own location, not the
 // process cwd -- unaffected by the cwd axis (repo root vs scripts/check),
@@ -612,7 +613,21 @@ test("HYK-173-escalation-1 (u) no DONE and no BLOCKED/NEEDS_INPUT marker -> stat
   });
 });
 
-test("HYK-173-escalation-1 (v) malformed blocked marker (mid-line, not column-0) -> state=MALFORMED_BLOCKED, fail-closed (NOT silently folded into PENDING or accepted as ok)", () => {
+// HYK-414 래칫(time-judgment-now-injection): 이 라운드가 «새로 추가하는»
+// checkRelayHandshake 호출은 실제 시계에 기대지 않는다 -- 이 파일 픽스처의
+// dropped_at(2026-08-08 21:00 KST) 직후로 고정한 값을 명시적으로 넘긴다.
+const HYK442_5R_FIXED_NOW = Date.parse("2026-08-08T12:05:00Z");
+
+// ⛔HYK-442 5R: this test's contract CHANGED (see coder.md §2-1 for the
+// impossibility proof and the responsible party's 5R instruction). A marker
+// shape with PROSE before it on its line is no longer counted as a near-miss
+// attempt: it is structurally indistinguishable from the quoted mentions that
+// blocked two legitimate stop terminations on 2026-09-05, and every attempt to
+// tell the two apart (three rounds: narrowing, widening, delimiter-position
+// rules) was broken by review with attacker-chosen input. What survives -- and
+// what this test now pins in BOTH directions -- is the line-based definition:
+// an attempt begins its line (modulo whitespace/punctuation/invisible chars).
+test("HYK-442 5R (구 HYK-173-escalation-1 (v), 계약 변경): 줄 «중간»(앞에 산문) 표지 모양만 있는 결과 -> PENDING · 같은 문장을 «줄 머리»에서 시작하면 여전히 MALFORMED_BLOCKED", () => {
   withFixtureDir((dir) => {
     writeTask(
       dir,
@@ -624,13 +639,27 @@ test("HYK-173-escalation-1 (v) malformed blocked marker (mid-line, not column-0)
       "coder",
       "task_id: HYK-1\n\nstatus note: >>> BLOCKED: mid-line, not a standalone marker\n",
     );
-    const result = checkRelayHandshake({ role: "coder", harnessDir: dir });
-    assert.equal(result.ok, false);
-    assert.equal(result.state, "MALFORMED_BLOCKED");
-    assert.notEqual(
-      result.state,
+    assert.equal(
+      checkRelayHandshake({ role: "coder", harnessDir: dir }).state,
       "PENDING",
-      "a malformed blocked marker must not silently fall back to plain pending",
+    );
+    // 안전 축(잃어버리면 안 되는 쪽)은 그대로다 -- 줄 머리에서 시작한
+    // 시도는 어떤 접두 기호가 붙어도 계속 fail-closed로 잡힌다.
+    writeResult(
+      dir,
+      "coder",
+      "task_id: HYK-1\n\n⛔ >>> BLOCKED: mid-line, not a standalone marker\n",
+    );
+    const attempt = checkRelayHandshake({
+      role: "coder",
+      harnessDir: dir,
+      now: HYK442_5R_FIXED_NOW,
+    });
+    assert.equal(attempt.ok, false);
+    assert.equal(
+      attempt.state,
+      "MALFORMED_BLOCKED",
+      "a malformed blocked marker ATTEMPT must not silently fall back to plain pending",
     );
   });
 });
@@ -735,7 +764,10 @@ test("HYK-173-escalation-2 (z2) REVIEW repro: newline right after the colon (rea
   });
 });
 
-test("HYK-173-escalation-2 (z3) REVIEW repro: a well-formed BLOCKED line coexists with a separate malformed (mid-line) one -> MALFORMED_BLOCKED, not silently resolved to the well-formed match", () => {
+// ⛔HYK-442 5R: 계약 변경(위 (v)와 같은 이유·같은 증명). «유효 표지 한 줄 +
+// 별도의 깨진 시도»를 혼재로 보는 축 자체는 살아 있고(둘째 assert), 사라진
+// 것은 «줄 중간·앞에 산문» 하나뿐이다.
+test("HYK-442 5R (구 HYK-173-escalation-2 (z3), 계약 변경): 유효 표지 + 줄 «중간» 표지 모양 -> BLOCKED · 유효 표지 + «줄 머리» 깨진 시도 -> 여전히 MALFORMED_BLOCKED", () => {
   withFixtureDir((dir) => {
     writeTask(
       dir,
@@ -747,18 +779,30 @@ test("HYK-173-escalation-2 (z3) REVIEW repro: a well-formed BLOCKED line coexist
       "coder",
       "task_id: HYK-1\n\n>>> BLOCKED: valid\nstatus: >>> BLOCKED: midline\n",
     );
-    const result = checkRelayHandshake({ role: "coder", harnessDir: dir });
-    assert.equal(result.ok, false);
-    assert.equal(result.state, "MALFORMED_BLOCKED");
-    assert.notEqual(
-      result.state,
+    assert.equal(
+      checkRelayHandshake({ role: "coder", harnessDir: dir }).state,
       "BLOCKED",
+    );
+    writeResult(
+      dir,
+      "coder",
+      "task_id: HYK-1\n\n>>> BLOCKED: valid\n  >>> BLOCKED: broken attempt\n",
+    );
+    const mixed = checkRelayHandshake({
+      role: "coder",
+      harnessDir: dir,
+      now: HYK442_5R_FIXED_NOW,
+    });
+    assert.equal(mixed.ok, false);
+    assert.equal(
+      mixed.state,
+      "MALFORMED_BLOCKED",
       "the pre-repair code stopped looking for near-misses the moment it found one strict match, so the separate broken line was silently ignored",
     );
   });
 });
 
-test("HYK-173-escalation-2 (z4) REVIEW repro: mid-line marker only (no column-0 marker at all) -> MALFORMED_BLOCKED (re-pinned here alongside the other 3 repros; already covered by 1R's (v))", () => {
+test("HYK-442 5R (구 HYK-173-escalation-2 (z4), 계약 변경): 줄 중간 표지 모양만 있는 결과 -> PENDING (위 (v)와 같은 입력·같은 계약, 여기서도 다시 고정)", () => {
   withFixtureDir((dir) => {
     writeTask(
       dir,
@@ -772,7 +816,7 @@ test("HYK-173-escalation-2 (z4) REVIEW repro: mid-line marker only (no column-0 
     );
     const result = checkRelayHandshake({ role: "coder", harnessDir: dir });
     assert.equal(result.ok, false);
-    assert.equal(result.state, "MALFORMED_BLOCKED");
+    assert.equal(result.state, "PENDING");
   });
 });
 
@@ -974,6 +1018,16 @@ const TIME_AUTHORITY_SRC = execFileSync(
   { encoding: "utf8" },
 );
 
+// HYK-430 5R: relay-handshake.mjs now also statically imports
+// "./child-probe-timeout-policy.mjs" (the polled-fallback removal) -- same
+// MODULE_NOT_FOUND risk the three siblings above already document, now for
+// a fourth.
+const CHILD_PROBE_TIMEOUT_POLICY_SRC = execFileSync(
+  "git",
+  ["show", "HEAD:scripts/check/child-probe-timeout-policy.mjs"],
+  { encoding: "utf8" },
+);
+
 function writeMutantCli(mutatedSrc) {
   const rootDir = mkdtempSync(join(tmpdir(), "relay-handshake-mutant-"));
   const scriptsCheckDir = join(rootDir, "scripts", "check");
@@ -993,6 +1047,11 @@ function writeMutantCli(mutatedSrc) {
   writeFileSync(
     join(scriptsCheckDir, "time-authority.mjs"),
     TIME_AUTHORITY_SRC,
+    "utf8",
+  );
+  writeFileSync(
+    join(scriptsCheckDir, "child-probe-timeout-policy.mjs"),
+    CHILD_PROBE_TIMEOUT_POLICY_SRC,
     "utf8",
   );
   return { rootDir, mutantPath };
@@ -1619,17 +1678,13 @@ test("HYK-244 2R-ci-1 RED(변이, 필수): 경로 조립에서 소문자화를 �
 
   const mutDir = mkdtempSync(join(tmpdir(), "relay-handshake-ci-mut-"));
   try {
-    // relay-handshake.mjs 자신이 3개 형제 모듈(reject-streak.mjs·
-    // envelope-archive.mjs·time-authority.mjs)을 정적 import하므로, 동적
-    // import가 module resolution에서 성공하려면 그 사본도 같은
-    // 디렉터리에 함께 있어야 한다(이 저장소의 다른 mutation 격리
-    // 픽스처들과 동일한 관례).
+    // relay-handshake.mjs 자신이 형제 모듈(reject-streak.mjs·
+    // envelope-archive.mjs·time-authority.mjs·child-probe-timeout-
+    // policy.mjs)을 정적 import하므로, 동적 import가 module resolution에서
+    // 성공하려면 그 사본도 같은 디렉터리에 함께 있어야 한다(이 저장소의
+    // 다른 mutation 격리 픽스처들과 동일한 관례).
     const here = dirname(fileURLToPath(import.meta.url));
-    for (const dep of [
-      "reject-streak.mjs",
-      "envelope-archive.mjs",
-      "time-authority.mjs",
-    ]) {
+    for (const dep of RELAY_HANDSHAKE_STATIC_SIBLINGS) {
       writeFileSync(
         join(mutDir, dep),
         readFileSync(join(here, dep), "utf8"),
@@ -2116,6 +2171,26 @@ function listMjsFilesRecursive(rootDir) {
   return out;
 }
 
+// (c) HYK-430 4R -- 의도적 예외 목록(⛔조용히 넓히지 마라, 새 항목을
+// 추가할 때마다 «왜 스폰 호출자가 아닌지»를 한 줄로 밝힌다). 이
+// 시험이 잡으려는 것은 "relay-handshake.mjs CLI를 자식 프로세스로
+// 실행하는 새 프로덕션 호출자"다 -- 아래 파일은 그 반대(파일명
+// 문자열을 «검색 대상»으로만 쓰는 정적 분석 도구, 자식 프로세스
+// 실행 0건)이므로 이 시험의 관심사 밖이다.
+const KNOWN_NON_SPAWN_LITERAL_REFERENCES = [
+  // list-relay-handshake-isolated-fixtures.mjs: "얼마나 많은 시험이
+  // relay-handshake.mjs를 격리 복사하는가"를 세는 정적 스캐너다 --
+  // content.includes("relay-handshake.mjs")로 다른 파일의 텍스트
+  // 안에서 이 이름을 찾을 뿐, 이 파일 자신은 relay-handshake.mjs를
+  // spawn/import 둘 다 하지 않는다(HYK-430 4R §2⑵).
+  "scripts/check/list-relay-handshake-isolated-fixtures.mjs",
+  // relay-handshake-fixture-siblings.mjs: HYK-430 5R -- 격리 픽스처가
+  // 복사해야 할 형제 파일 이름 목록의 단일 소스(§2⑵). 배열 리터럴
+  // 안에 "relay-handshake.mjs" 문자열이 있을 뿐, 이 파일 자신은
+  // relay-handshake.mjs를 spawn/import 둘 다 하지 않는다.
+  "scripts/check/relay-handshake-fixture-siblings.mjs",
+];
+
 test("HYK-344 3R: relay-handshake.mjs CLI를 실제로 실행(spawn)하는 프로덕션 호출자는 이 저장소 안에 0건 -- «지금은 사람이 유일한 호출자»가 시험으로 고정된다", () => {
   const scriptsRoot = join(
     dirname(fileURLToPath(new URL(import.meta.url))),
@@ -2135,6 +2210,13 @@ test("HYK-344 3R: relay-handshake.mjs CLI를 실제로 실행(spawn)하는 프�
     const normalized = filePath.replace(/\\/g, "/");
     if (normalized.endsWith("/relay-handshake.mjs")) continue; // (a) self
     if (normalized.endsWith(".test.mjs")) continue; // (b) test callers
+    if (
+      KNOWN_NON_SPAWN_LITERAL_REFERENCES.some((allowed) =>
+        normalized.endsWith(`/${allowed}`),
+      )
+    ) {
+      continue; // (c) known non-spawn static-analysis tool, see above
+    }
     const stripped = stripRelayHandshakeImportSpecifiers(
       stripCommentsBestEffort(readFileSync(filePath, "utf8")),
     );
