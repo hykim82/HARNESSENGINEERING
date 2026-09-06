@@ -54,6 +54,11 @@ export const REASON = Object.freeze({
   DIRTY_WORKING_TREE: "TEARDOWN_DIRTY_WORKING_TREE",
   UNMERGED_WORKING_TREE: "TEARDOWN_UNMERGED_WORKING_TREE",
   EVIDENCE_NOT_DURABLE: "TEARDOWN_EVIDENCE_NOT_DURABLE",
+  // HYK-431 8R: 막을 사유는 못 찾았지만 「파괴해도 된다」를 뒷받침할 근거가
+  // 갖춰지지 않았다는 뜻이다(부재 = 판정 불가). EVIDENCE_NOT_DURABLE 과
+  // 버킷(eligibility)은 같고 사유만 구별한다 -- 「증거가 약하다」와
+  // 「판정할 근거가 아예 없다」는 사람에게 다른 이야기이기 때문이다.
+  PREMISE_UNPROVEN: "TEARDOWN_PREMISE_UNPROVEN",
   TARGET_IDENTITY_MISMATCH: "TEARDOWN_TARGET_IDENTITY_MISMATCH",
   DISPATCH_CORRELATION_UNPROVEN: "TEARDOWN_DISPATCH_CORRELATION_UNPROVEN",
   UNOBSERVABLE_LAYER: "TEARDOWN_UNOBSERVABLE_LAYER",
@@ -282,6 +287,89 @@ function checkDispatchCorrelationProven(inventory, policy) {
   };
 }
 
+// ---- HYK-431 8R: 「부재」는 「통과」가 아니라 「판정 불가」다 ----
+//
+// 검토 8R 이 통과시킨 입력: 형태가 유효한 inventory + 깨끗한 작업 트리 +
+// `target.worktreeId: null` + `target.repoId: null` + 정책
+// `{ dispatchCorrelationProven: true }` -> `allowSink: true`. 즉 안전장치를
+// **숨긴** 것도 위조한 것도 아니고 **아예 주지 않은** 것만으로 파괴가
+// 허가됐다. 원인은 이 함수가 「주어진 값이 안전한가」만 보기 때문이다 --
+// 값이 없으면 그 값을 보는 guard 를 **아예 타지 않으므로** 통과한다.
+//
+// ★그래서 판정의 성질을 하나 바꾼다: 이 함수의 마지막 `ELIGIBLE` 은
+// 「막을 사유를 못 찾았다」가 아니라 「파괴해도 된다는 결론」이다. 적극적인
+// 결론은 그것이 기대는 **축마다 근거가 실제로 주어졌을 때만** 낼 수 있다.
+// 근거가 없는 축은 「통과」가 아니라 「판정 불가」이고, 판정 불가가 하나라도
+// 있으면 결론은 ELIGIBLE 이 아니다(fail-closed).
+//
+// ⛔이것은 「세 이름을 특별히 챙기는 허용 목록」이 아니다(HYK-447 이 같은
+// 함정을 겪었다). 아래 목록의 각 항은 **이 함수가 실제로 기대는 축 그 자체**
+// 이며 같은 파일 안의 guard 와 1:1 로 대응한다:
+//   - protectedTargets      <-> isProtectedTarget       (보호 대상인가)
+//   - expectedWorktreeId    <-> checkTargetIdentity     (그 표적이 맞는가)
+//   - requireDurableEvidence<-> 아래 requireDurableEvidence guard (증거를 요구하는가)
+// 판정이 기대지 않는 필드는 **이름이 무엇이든 요구하지 않는다** -- 계약에
+// 없는 새 이름을 넣어도 판정은 달라지지 않고, 반대로 위 축 중 하나가 비면
+// 다른 무엇을 채워 넣어도 통과하지 않는다(coder-task.md §4-4 가 요구한
+// 자기 증명).
+//
+// ⚠️`dispatchCorrelationProven` 은 이 목록에 없다 -- 그 축은 이미
+// `checkDispatchCorrelationProven` 이 **부재를 곧 차단**으로 다루고 있어서
+// (armed strict) 여기까지 오지 못한다. 즉 그 축은 이 라운드가 세우려는
+// 성질을 **이미 갖춘 선례**이고, 이 목록은 나머지 축을 그 선례와 같은
+// 성질로 맞추는 것이다.
+const ELIGIBILITY_PREMISES = Object.freeze([
+  Object.freeze({
+    axis: "protectedTargets",
+    why: "보호 목록이 주어지지 않으면 이 표적이 보호 대상이 아니라고 판정할 수 없다",
+  }),
+  Object.freeze({
+    axis: "expectedWorktreeId",
+    why: "기대 식별자가 주어지지 않으면 관측된 표적이 지우려던 그 표적인지 결속할 수 없다",
+  }),
+  Object.freeze({
+    axis: "requireDurableEvidence",
+    why: "내구 증거를 요구하는지 주어지지 않으면 그 축을 판정할 수 없다",
+  }),
+]);
+
+function isSupplied(v) {
+  return v !== undefined && v !== null;
+}
+
+// 근거가 갖춰지지 않은 축이 하나라도 있으면 판정 불가(fail-closed)를 낸다.
+// 형태(타입) 검사는 isValidPolicyShape가 이미 했으므로 여기서는 「주어졌는가」
+// 만 본다 -- 두 검사는 서로 다른 질문이다(형태가 틀렸다 vs 아예 없다).
+function checkEligibilityPremises(inventory, policy) {
+  const unproven = ELIGIBILITY_PREMISES.filter(
+    (premise) => !isSupplied(policy[premise.axis]),
+  );
+  if (unproven.length === 0) return null;
+  return {
+    eligibility: ELIGIBILITY.EVIDENCE_NOT_DURABLE,
+    reason: REASON.PREMISE_UNPROVEN,
+    evidence: buildEvidence(inventory, REASON.PREMISE_UNPROVEN, {
+      unprovenPremises: unproven.map((premise) => premise.axis),
+      why: unproven.map((premise) => premise.why),
+    }),
+  };
+}
+
+// mutation #6 축을 이웃 guard(checkTargetIdentity·checkDispatchCorrelationProven)
+// 와 같은 형태로 옮겼다 -- 로직은 그대로이고, classifyEligibility 가 8R 의
+// 전제 확인을 한 줄 더 갖게 되면서 복잡도 상한(12)을 지키기 위한 분리다.
+function checkDurableEvidence(inventory, policy) {
+  if (policy.requireDurableEvidence !== true) return null;
+  if (isNonEmptyString(inventory.target.worktreeId)) return null;
+  return {
+    eligibility: ELIGIBILITY.EVIDENCE_NOT_DURABLE,
+    reason: REASON.EVIDENCE_NOT_DURABLE,
+    evidence: buildEvidence(inventory, REASON.EVIDENCE_NOT_DURABLE, {
+      worktreeId: inventory.target.worktreeId,
+    }),
+  };
+}
+
 function classifyEligibility(inventory, policy) {
   if (isProtectedTarget(inventory, policy)) {
     return {
@@ -347,18 +435,12 @@ function classifyEligibility(inventory, policy) {
   // 별개 축이다(observation이 이미 CONSISTENT_PRESENT라도, orca가 그
   // 표적에 자기 id를 못 붙였다면 "path 문자열 일치"만으로 삭제를 허가하지
   // 않는다는 추가 안전판).
-  if (
-    policy.requireDurableEvidence === true &&
-    !isNonEmptyString(inventory.target.worktreeId)
-  ) {
-    return {
-      eligibility: ELIGIBILITY.EVIDENCE_NOT_DURABLE,
-      reason: REASON.EVIDENCE_NOT_DURABLE,
-      evidence: buildEvidence(inventory, REASON.EVIDENCE_NOT_DURABLE, {
-        worktreeId: inventory.target.worktreeId,
-      }),
-    };
-  }
+  const durableEvidenceBlocked = checkDurableEvidence(inventory, policy);
+  if (durableEvidenceBlocked) return durableEvidenceBlocked;
+  // ★HYK-431 8R: 여기까지 왔다는 것은 «막을 사유를 찾지 못했다»는 뜻일 뿐,
+  // «파괴해도 된다»가 증명된 것이 아니다. 그 둘을 구별한다(아래 주석 참조).
+  const unproven = checkEligibilityPremises(inventory, policy);
+  if (unproven) return unproven;
   return {
     eligibility: ELIGIBILITY.ELIGIBLE,
     reason: REASON.ELIGIBLE,

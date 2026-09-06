@@ -600,6 +600,22 @@ function isValidAnomalyInput(eligibleUnreclaimedCount, systemPressure, policy) {
 // 46% 빨강·1.5시간 손실이다. 두 대가가 비대칭이므로 관측 실패는 침묵이
 // 아니라 신호 쪽으로 접는다). 이 비대칭은 2R에서도 그대로 유지한다
 // (coder-task.md §3-4 비타협).
+// HYK-431 8R: 「측정값이 없다」를 「정상」이 아니라 「관측 못 함」으로 낸다
+// (judgeReclaimAnomaly 의 줄 수 상한을 지키려고 분리했다 -- 근거는 호출부
+// 주석에 있다).
+function unmeasuredMemoryAnomaly(eligibleUnreclaimedCount, p) {
+  return {
+    status: ANOMALY_STATUS.ANOMALY,
+    reason: ANOMALY_REASON.BACKLOG_MEMORY_UNOBSERVABLE,
+    evidence: {
+      ruleId: ANOMALY_REASON.BACKLOG_MEMORY_UNOBSERVABLE,
+      eligibleUnreclaimedCount,
+      availableMemoryBytes: null,
+      memoryFloorBytes: p.memoryFloorBytes,
+    },
+  };
+}
+
 export function judgeReclaimAnomaly(args, policy) {
   // ★ 신뢰 경계(6R): 두 인자를 한 번에 고정한다. 고정 자체가 실패하면 이
   // 축의 비대칭 방향(fail-open -- 아래 근거 주석)에 맞춰 ANOMALY로 접는다.
@@ -653,6 +669,19 @@ export function judgeReclaimAnomaly(args, policy) {
     };
   }
 
+  // ★HYK-431 8R (검토 8R P2 · ⓐ와 같은 뿌리): `observable: true` 인데
+  // `availableMemoryBytes: null` 은 「측정값이 없다」는 뜻이다. 그런데 아래
+  // 숫자 비교에 그대로 넘기면 `null`이 0으로 강제되어, 바닥값이 0일 때
+  // `0 < 0`이 거짓이 되면서 **측정한 적도 없는 메모리가 「정상」으로** 읽혔다
+  // (WATCH/BACKLOG_MEMORY_OK). 「값이 없는데 정상으로 읽는」 것은 teardown 의
+  // 「필드가 없는데 통과로 읽는」 것과 같은 형태다 -- 부재는 판정 불가다.
+  // 이 축의 방향은 fail-open(침묵보다 신호)이므로 판정 불가는 ANOMALY 쪽으로
+  // 접는다. 바닥값이 양수일 때도 status 는 ANOMALY 그대로이고, 사유만
+  // 「바닥 아래」가 아니라 「관측 못 함」으로 정확해진다(실제로 측정된 값이
+  // 바닥 아래인 경우는 종전대로 BACKLOG_MEMORY_BELOW_FLOOR 다).
+  if (systemPressure.availableMemoryBytes === null) {
+    return unmeasuredMemoryAnomaly(eligibleUnreclaimedCount, p);
+  }
   if (systemPressure.availableMemoryBytes < p.memoryFloorBytes) {
     return {
       status: ANOMALY_STATUS.ANOMALY,

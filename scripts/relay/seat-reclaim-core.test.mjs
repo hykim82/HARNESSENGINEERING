@@ -457,3 +457,69 @@ test("judgeSeatReclaim: dispatch.status/state 필드가 무엇이든 결과가 �
   );
   assert.deepEqual(results, [true, true, true]);
 });
+
+// ---------------------------------------------------------------------------
+// HYK-431 8R (검토 8R P2 · teardown 쪽 P1과 같은 뿌리): 「측정값이 없는데
+// 정상으로 읽는」 자리. observable:true 인데 availableMemoryBytes:null 이면
+// 그것은 「메모리가 넉넉하다」가 아니라 「재지 못했다」이다. 예전에는 바닥값이
+// 0일 때 null 이 0으로 강제돼(0 < 0 = false) WATCH/BACKLOG_MEMORY_OK 가 났다.
+// 이 축의 방향은 fail-open(침묵보다 신호)이므로 판정 불가는 ANOMALY 다.
+// ---------------------------------------------------------------------------
+
+test("HYK-431 8R: observable:true + availableMemoryBytes:null + 바닥 0 -- 정상으로 읽지 않고 ANOMALY(관측 못 함)", () => {
+  const r = judgeReclaimAnomaly(
+    {
+      eligibleUnreclaimedCount: 3,
+      systemPressure: { availableMemoryBytes: null, observable: true },
+    },
+    { memoryFloorBytes: 0 },
+  );
+  assert.equal(r.status, ANOMALY_STATUS.ANOMALY);
+  assert.equal(r.reason, ANOMALY_REASON.BACKLOG_MEMORY_UNOBSERVABLE);
+  assert.equal(r.evidence.availableMemoryBytes, null);
+});
+
+test("HYK-431 8R: 같은 입력에 양수 바닥값이어도 status 는 ANOMALY 그대로다(사유만 「관측 못 함」으로 정확해진다)", () => {
+  const r = judgeReclaimAnomaly(
+    {
+      eligibleUnreclaimedCount: 3,
+      systemPressure: { availableMemoryBytes: null, observable: true },
+    },
+    { memoryFloorBytes: 4 * 1024 ** 3 },
+  );
+  assert.equal(r.status, ANOMALY_STATUS.ANOMALY);
+  assert.equal(r.reason, ANOMALY_REASON.BACKLOG_MEMORY_UNOBSERVABLE);
+});
+
+test("HYK-431 8R 회귀: 실제로 측정된 값은 종전 그대로 판정된다(바닥 아래 = BELOW_FLOOR · 넉넉 = WATCH)", () => {
+  const below = judgeReclaimAnomaly(
+    {
+      eligibleUnreclaimedCount: 3,
+      systemPressure: { availableMemoryBytes: 100, observable: true },
+    },
+    { memoryFloorBytes: 1000 },
+  );
+  assert.equal(below.status, ANOMALY_STATUS.ANOMALY);
+  assert.equal(below.reason, ANOMALY_REASON.BACKLOG_MEMORY_BELOW_FLOOR);
+
+  const ok = judgeReclaimAnomaly(
+    {
+      eligibleUnreclaimedCount: 3,
+      systemPressure: { availableMemoryBytes: 999_999_999, observable: true },
+    },
+    { memoryFloorBytes: 1000 },
+  );
+  assert.equal(ok.status, ANOMALY_STATUS.WATCH);
+  assert.equal(ok.reason, ANOMALY_REASON.BACKLOG_MEMORY_OK);
+
+  // 바닥 0 + 실제 측정 0 은 여전히 「정상」이다(측정은 됐다).
+  const zeroMeasured = judgeReclaimAnomaly(
+    {
+      eligibleUnreclaimedCount: 3,
+      systemPressure: { availableMemoryBytes: 0, observable: true },
+    },
+    { memoryFloorBytes: 0 },
+  );
+  assert.equal(zeroMeasured.status, ANOMALY_STATUS.WATCH);
+  assert.equal(zeroMeasured.reason, ANOMALY_REASON.BACKLOG_MEMORY_OK);
+});
