@@ -593,3 +593,164 @@ test("HYK-442 5R 되돌림 변이 ②(보이지 않는 문자 정규화): 정규
     assertRelayHandshakeRestored(src);
   }
 });
+
+// 변이 ③(6R): 줄 머리 계산을 5R의 «LF 하나»로 되돌리면 LF가 아닌 네 경계
+// 뒤의 표지 시도가 다시 사라진다 -- 검토 3R P1의 정확한 재현이다.
+const LINE_BOUNDARY_TARGET =
+  "    if (LINE_BOUNDARY_CHAR_RE.test(scan[i])) return i + 1;\n";
+const LINE_BOUNDARY_PRE_FIX = '    if (scan[i] === "\\n") return i + 1;\n';
+
+test("HYK-442 6R 되돌림 변이 ③(줄 경계 부류): 줄 머리 계산을 LF 하나로 되돌리면 네 경계 뒤의 정지 시도가 다시 유실된다(RED), 실 소스는 바이트 동일 복원", async () => {
+  const src = readFileSync(RELAY_HANDSHAKE_PATH, "utf8");
+  const mutated = mutateExactlyOnce(
+    src,
+    LINE_BOUNDARY_TARGET,
+    LINE_BOUNDARY_PRE_FIX,
+    "lineStartOffset line-boundary class",
+  );
+  try {
+    for (const [i, [label, boundary]] of NON_LF_LINE_BOUNDARIES.entries()) {
+      assert.equal(
+        await stateUnderMutatedSource(
+          mutated,
+          boundaryAttackBody(boundary),
+          `c${i}`,
+        ),
+        "BLOCKED",
+        `RED(${label}): LF만 보면 앞줄 산문이 딸려 들어와 깨진 시도가 «시도가 아니다»로 사라진다(fail-open) -- 검토 3R 실측과 같은 상태`,
+      );
+    }
+    // 같은 변이가 «LF 경계»는 바꾸지 않는다 -- 변이가 정확히 이 한 축만
+    // 되돌림을 고정한다(줄 머리 시도는 두 소스 모두에서 잡힌다).
+    assert.equal(
+      await stateUnderMutatedSource(
+        mutated,
+        attackBody("⛔ >>> BLOCKED cap reached"),
+        "c9",
+      ),
+      "MALFORMED_BLOCKED",
+    );
+  } finally {
+    assertRelayHandshakeRestored(src);
+  }
+});
+
+// ===========================================================================
+// HYK-442 6R (검토 3R P1 -- 유일한 반려 사유).
+//
+// 5R의 «판별 축»(표지 모양 앞에 글자도 숫자도 없는 줄만 시도로 센다)은
+// 검토 3R의 여덟 공격을 전부 버텼다. 뚫린 곳은 축이 아니라 그 축이 서는
+// 자리 -- ★«그 줄이 어디서 시작하는가»의 계산이었다. 5R은 줄 머리를
+// `lastIndexOf("\n")` 하나로 구했고, 그래서 LF가 «아닌» 줄 경계 뒤에 온 표지
+// 시도는 앞줄 산문이 그대로 딸려 들어와 «시도가 아니다»로 판정됐다.
+//
+// 검토 3R 실측(네 경계 각각): «깨진 시도 + 유효한 정지 결과»를 함께 두면
+// 네 경우 모두 BLOCKED(=시도를 놓침, fail-open). 유효 표지를 빼면 PENDING --
+// 즉 ★유효 표지가 있을 때만 드러나는 fail-open이다. 아래 (12)가 그 두
+// 방향을 «같은 픽스처»로 함께 고정한다.
+// ===========================================================================
+
+// 최소 집합(coder-task.md 6R §2-1): LF · CR 단독 · CRLF · U+2028 · U+2029 ·
+// 폼피드. CRLF는 (13)에서 «한 개의» 경계임을 따로 고정하고, LF는 이 파일의
+// 나머지 전부가 이미 고정하므로, 여기서는 5R이 놓쳤던 «네 경계»만 센다.
+const NON_LF_LINE_BOUNDARIES = [
+  ["cr-only", "\r"],
+  ["u2028-line-separator", "\u2028"],
+  ["u2029-paragraph-separator", "\u2029"],
+  ["form-feed", "\f"],
+];
+
+// 앞줄에 산문을 두고, 그 산문과 «깨진 표지 시도» 사이에 LF가 아닌 줄 경계
+// 하나만 넣는다. 시도 자체는 5R 계약 그대로 «줄 머리»에서 시작한다(앞에는
+// 공백뿐) -- 그러므로 이것은 잃어버리면 안 되는 진짜 정지 신호다.
+const boundaryAttackLine = (boundary) =>
+  `앞 줄에 산문이 있다${boundary} >>> BLOCKED cap reached`;
+const boundaryAttackBody = (boundary) =>
+  `task_id: HYK-1\n\n${boundaryAttackLine(boundary)}${ATTACK_VALID_TAIL}`;
+// 같은 픽스처에서 «유효한 정지 결과»만 뺀 것 -- 검토 3R이 PENDING을 관측한
+// 대조군이다(시도를 놓쳤다는 사실 자체는 이쪽에서도 드러난다).
+const boundaryAttackBodyNoValidMarker = (boundary) =>
+  `task_id: HYK-1\n\n${boundaryAttackLine(boundary)}\n`;
+
+test("HYK-442 6R (12) LF가 아닌 줄 경계 네 가지(CR 단독·U+2028·U+2029·폼피드) 뒤의 깨진 정지 시도도 근접-미스로 세어진다 -- 유효한 정지 결과가 함께 있어도 놓치지 않는다", () => {
+  const observed = [];
+  for (const [label, boundary] of NON_LF_LINE_BOUNDARIES) {
+    for (const [variant, body] of [
+      ["with-valid-marker", boundaryAttackBody(boundary)],
+      ["no-valid-marker", boundaryAttackBodyNoValidMarker(boundary)],
+    ]) {
+      withFixtureDir((dir) => {
+        writeTask(dir, "coder", TASK_HEADER);
+        writeResult(dir, "coder", body);
+        const result = checkRelayHandshake({
+          role: "coder",
+          harnessDir: dir,
+          now: FIXED_NOW,
+        });
+        observed.push({ label, variant, state: result.state });
+      });
+    }
+  }
+  // 관측 원문을 그대로 남긴다(결과 파일에 붙일 근거).
+  for (const row of observed) console.log(JSON.stringify(row));
+  assert.deepEqual(
+    observed,
+    NON_LF_LINE_BOUNDARIES.flatMap(([label]) => [
+      // 유효 표지와 «혼재» -- 5R HEAD(50f85d9)에서는 BLOCKED였다(fail-open).
+      { label, variant: "with-valid-marker", state: "MALFORMED_BLOCKED" },
+      // 유효 표지 없이 깨진 시도 하나뿐 -- 5R HEAD에서는 PENDING이었다.
+      { label, variant: "no-valid-marker", state: "MALFORMED_BLOCKED" },
+    ]),
+    "줄 머리를 LF만으로 계산하면 이 네 경계 뒤의 시도는 앞줄 산문에 가려 사라진다(검토 3R P1 원문)",
+  );
+});
+
+test("HYK-442 6R (13) CRLF는 «한 개»의 줄 경계다 -- 같은 본문의 LF판과 CRLF판이 모든 방향에서 동일하게 판정된다(빈 줄이 생기지 않는다)", () => {
+  // ⛔이 시험이 막는 것: 줄 경계를 «문자 부류»로 넓히면서 \r과 \n을 각각
+  // 하나씩 세면 CRLF 사이에 빈 줄이 생겨, 그 빈 줄 뒤에 온 표지 모양이
+  // «앞에 산문이 없는 줄»로 잘못 승격될 수 있다. 네 방향(과차단·누락·
+  // 칼럼0·정상)을 한꺼번에 대조한다.
+  const CASES = [
+    ["과차단 0(원래 사고 파일)", ACCIDENT_437_MARKER_LINES_BODY, "BLOCKED"],
+    [
+      "누락 0(줄 머리 시도)",
+      attackBody("⛔ >>> BLOCKED cap reached"),
+      "MALFORMED_BLOCKED",
+    ],
+    [
+      "줄 중간 표지 모양(5R 정의상 시도 아님)",
+      attackBody("status note: >>> BLOCKED midline prose"),
+      "BLOCKED",
+    ],
+    [
+      "칼럼0 화살표 없는 시도",
+      `task_id: HYK-1\n\nBLOCKED: no arrows${ATTACK_VALID_TAIL}`,
+      "MALFORMED_BLOCKED",
+    ],
+  ];
+  const observed = [];
+  for (const [label, lfBody, expected] of CASES) {
+    const crlfBody = lfBody.replace(/\n/g, "\r\n");
+    const states = ["lf", "crlf"].map((eol) => {
+      let state;
+      withFixtureDir((dir) => {
+        writeTask(dir, "coder", TASK_HEADER);
+        writeResult(dir, "coder", eol === "lf" ? lfBody : crlfBody);
+        state = checkRelayHandshake({
+          role: "coder",
+          harnessDir: dir,
+          now: FIXED_NOW,
+        }).state;
+      });
+      return state;
+    });
+    observed.push({ label, lf: states[0], crlf: states[1] });
+    assert.equal(states[0], expected, `${label}: LF판 기준선`);
+    assert.equal(
+      states[1],
+      expected,
+      `${label}: CRLF판이 LF판과 달라지면 \r\n을 두 개의 줄 경계로 센 것이다`,
+    );
+  }
+  for (const row of observed) console.log(JSON.stringify(row));
+});

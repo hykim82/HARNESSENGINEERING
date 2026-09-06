@@ -174,10 +174,44 @@ const PROSE_CHAR_RE = /[\p{L}\p{N}]/u;
 // 목록이 아니라 유니코드 «형식 문자» 부류 하나다.
 const INVISIBLE_FORMAT_CHAR_RE = /\p{Cf}/gu;
 
+// HYK-442 6R (검토 3R P1 -- 유일한 반려 사유): 5R의 판별 «축»(표지 모양 앞에
+// 글자도 숫자도 없는 줄만 시도로 센다)은 검토의 여덟 공격을 전부 버텼다.
+// 뚫린 곳은 축이 아니라 그 축이 서는 «자리» -- 줄 머리를 `lastIndexOf("\n")`
+// 하나로 구한 탓에, LF가 «아닌» 줄 경계 뒤에 온 표지 시도는 앞줄 산문이
+// 그대로 딸려 들어와 PROSE_CHAR_RE가 참이 되고 «시도가 아니다»로 사라졌다
+// (검토 3R 실측: CR 단독·U+2028·U+2029·폼피드 네 경계 각각에서, 유효한 정지
+// 결과가 함께 있을 때만 드러나는 fail-open).
+// ⇒ 줄 경계를 «부류 하나»로 고친다. ⛔축은 한 글자도 바뀌지 않는다 --
+// PROSE_CHAR_RE도, "앞에 산문이 없으면 시도"라는 규칙도 그대로다.
+// 이 집합은 임의가 아니라 «줄을 끝내는 문자»의 표준 집합이다: JS 정규식이
+// `m` 플래그에서 줄 종결자로 인정하는 넷(LF·CR·U+2028·U+2029 -- 그래서
+// BLOCKED_RE/BLOCKED_BARE_COLUMN0_RE의 `^`가 이미 그 넷을 줄 머리로 본다)에,
+// 유니코드가 줄 경계로 규정하지만 JS 정규식만 빼놓는 폼피드(U+000C)를 더한
+// 것이다. 즉 이 상수는 «칼럼0 모양이 이미 쓰고 있던 줄 개념»을 화살표 모양
+// 쪽에도 같게 맞추는 일이지, 새 경계를 발명하는 것이 아니다.
+const LINE_BOUNDARY_CHAR_RE = /[\n\r\u2028\u2029\f]/u;
+
+// 「`matchIndex`가 있는 줄은 어디서 시작하는가」. 뒤에서부터 «처음 만나는»
+// 줄 경계 문자 바로 다음이 줄 머리다.
+// ⚠️★CRLF가 «한 개»의 줄 경계로 남는 이유가 바로 이 «뒤에서부터»다: \r\n
+// 앞에서 뒤로 훑으면 먼저 만나는 것이 LF이므로 줄 머리는 LF 다음 --
+// LF만 쓰던 5R 계산과 CRLF 입력에서 «값이 같다». (경계를 앞에서부터 세거나
+// \r과 \n을 각각 한 줄로 쪼개면 둘 사이에 빈 줄이 생겨, 그 뒤의 표지 모양이
+// 「앞에 산문이 없는 줄」로 잘못 승격된다 -- 회귀 시험 (13)이 LF판·CRLF판의
+// 판정을 네 방향으로 대조해 이 성질을 고정한다.)
+function lineStartOffset(scan, matchIndex) {
+  for (let i = matchIndex - 1; i >= 0; i -= 1) {
+    if (LINE_BOUNDARY_CHAR_RE.test(scan[i])) return i + 1;
+  }
+  return 0;
+}
+
 // 근접-미스 «시도»의 개수. 두 표지 모양 모두 «그 매치가 시작한 줄»을 기준으로
 // 판정한다:
 //   ⓐ 화살표 모양(BLOCKED_ANYWHERE_RE) -- 매치 시작 위치와 그 줄의 머리
-//      사이에 글자/숫자가 하나도 없을 것. ⛔줄 «전체»를 보지 않고 «앞»만
+//      사이에 글자/숫자가 하나도 없을 것(그 «줄의 머리»는 lineStartOffset이
+//      정한다 -- HYK-442 6R 전에는 LF 하나로만 구해서, LF가 아닌 줄 경계
+//      뒤의 시도를 앞줄 산문에 가려 놓쳤다). ⛔줄 «전체»를 보지 않고 «앞»만
 //      보는 이유: 이 정규식의 `\s*`는 의도적으로 개행을 건널 수 있고(줄이
 //      쪼개진 표지 흔적을 잡는 지점, 그 상수 자신의 헤더 참조) 그 성질을
 //      이 라운드가 없애지 않기 때문이다.
@@ -192,7 +226,7 @@ function countNearMissMarkerShapes(resultContent) {
   const scan = resultContent.replace(INVISIBLE_FORMAT_CHAR_RE, "");
   let count = 0;
   for (const m of scan.matchAll(BLOCKED_ANYWHERE_RE)) {
-    const lineStart = scan.lastIndexOf("\n", m.index - 1) + 1;
+    const lineStart = lineStartOffset(scan, m.index);
     if (!PROSE_CHAR_RE.test(scan.slice(lineStart, m.index))) count += 1;
   }
   count += [...scan.matchAll(BLOCKED_BARE_COLUMN0_RE)].length;
