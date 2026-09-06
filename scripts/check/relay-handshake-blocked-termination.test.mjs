@@ -163,13 +163,16 @@ test("HYK-342/HYK-249 (5) ADMISSION_LEDGER_PATH가 설정돼 있으면 BLOCKED �
       "task_id: HYK-1\n\n>>> BLOCKED: 원장 반납 시험\n",
     );
 
+    // HYK-443 5R: 예약이 «어느 좌석에 배정됐는지»가 판정의 한쪽 축이다 --
+    // 아래 영수증의 assignee_pane_key와 같은 값으로 세운다(진짜 배달 재현).
+    const seatPaneKey = "tab-hyk342:leaf-hyk342";
     let ledger = createEmptyLedger("2026-08-08T00:00:00.000Z");
     const admit = admitReservation(ledger, {
       reservationId: "HYK-1",
       cap: 1,
       now: "2026-08-08T00:00:00.000Z",
       role: "CODER",
-      seatKey: "seat-x",
+      seatKey: seatPaneKey,
     });
     assert.equal(admit.decision, "ADMITTED");
     ledger = admit.ledger;
@@ -181,16 +184,23 @@ test("HYK-342/HYK-249 (5) ADMISSION_LEDGER_PATH가 설정돼 있으면 BLOCKED �
     // role+task_id 조합이 실재하는지 추가로 확인한다(워커가 못 쓰는
     // 파일) -- 이 시험은 진짜 배달을 재현하는 것이므로 그 영수증을
     // 미리 남겨 둔다.
+    // HYK-443 5R: 그 확인은 영수증의 `assignee_pane_key`가 «이 예약이 배정된
+    // 좌석»(원장 seat_key, 위)과 같은지도 본다 -- 반납을 «실행하는» 프로세스의
+    // ORCA_PANE_KEY는 판정에 관여하지 않는다(hasDispatchReceiptForRound의 5R
+    // 헤더 참조). 아래에서 그 env를 세우는 것은 이 시험이 그 값에 의존하지
+    // «않음»을 남겨 두기 위한 것이다.
     const receiptPath = join(dir, "dispatch-receipts.jsonl");
     writeFileSync(
       receiptPath,
-      `${JSON.stringify({ role: "CODER", harness_task_label: "HYK-1", dispatch_id: "ctx_test" })}\n`,
+      `${JSON.stringify({ role: "CODER", harness_task_label: "HYK-1", dispatch_id: "ctx_test", assignee_pane_key: seatPaneKey })}\n`,
       "utf8",
     );
     const prevEnv = process.env.ADMISSION_LEDGER_PATH;
     const prevReceiptEnv = process.env.DISPATCH_RECEIPT_PATH;
+    const prevPaneEnv = process.env.ORCA_PANE_KEY;
     process.env.ADMISSION_LEDGER_PATH = ledgerPath;
     process.env.DISPATCH_RECEIPT_PATH = receiptPath;
+    process.env.ORCA_PANE_KEY = seatPaneKey;
     try {
       checkRelayHandshake({ role: "coder", harnessDir: dir });
     } finally {
@@ -199,6 +209,8 @@ test("HYK-342/HYK-249 (5) ADMISSION_LEDGER_PATH가 설정돼 있으면 BLOCKED �
       if (prevReceiptEnv === undefined)
         delete process.env.DISPATCH_RECEIPT_PATH;
       else process.env.DISPATCH_RECEIPT_PATH = prevReceiptEnv;
+      if (prevPaneEnv === undefined) delete process.env.ORCA_PANE_KEY;
+      else process.env.ORCA_PANE_KEY = prevPaneEnv;
     }
 
     const after = JSON.parse(readFileSync(ledgerPath, "utf8"));
