@@ -139,6 +139,9 @@ import {
   judgeUnconsumed,
   UNCONSUMED_VERDICT,
   UNCONSUMED_SIGNAL_KIND,
+  // ★HYK-448 3R: 심각도를 «판정 이름»이 아니라 «사유»로 가르기 위해 필요하다
+  // (unconsumedSeverityOf 참조 -- UNDECIDABLE 전체를 올리면 형태 B 가 부활한다).
+  UNCONSUMED_REASON,
 } from "./unconsumed-core.mjs";
 import { judgeHeaderTimeProjection } from "./header-time-projection-core.mjs";
 import {
@@ -2232,20 +2235,21 @@ function statMtimeMsOrNull(fullPath, statFn) {
     : null;
 }
 
-function newestReceiptPath(repoRoot, role, opts) {
+// 주어진 폴더에서 패턴에 맞는 «가장 최신» 파일 하나의 경로(없으면 null).
+// ★HYK-448 3R: 영수증·중단기록 두 출처가 같은 스캔 규약을 쓰므로
+// 한 군데로 모은다(둘을 따로 두면 같은 루프가 두 번 생기고 복잡도 상한에도 걸렸다).
+function newestMatchingFilePath(dirPath, pattern, opts) {
   const { readdirFn, statFn, existsFn } = resolveReceiptScanFns(opts);
-  const receiptsDir = path.join(repoRoot, ".harness", "receipts");
   let names;
   try {
-    names = readdirFn(receiptsDir);
+    names = readdirFn(dirPath);
   } catch {
     return null;
   }
-  const pattern = receiptFileNamePattern(role);
   let newest = null;
   for (const name of names) {
     if (!pattern.test(name)) continue;
-    const full = path.join(receiptsDir, name);
+    const full = path.join(dirPath, name);
     if (!existsFn(full)) continue;
     const mtimeMs = statMtimeMsOrNull(full, statFn);
     if (mtimeMs === null) continue;
@@ -2256,7 +2260,11 @@ function newestReceiptPath(repoRoot, role, opts) {
 
 function latestReceiptFingerprint(repoRoot, role, opts) {
   if (!isNonEmptyReceiptString(role)) return null;
-  const receiptPath = newestReceiptPath(repoRoot, role, opts);
+  const receiptPath = newestMatchingFilePath(
+    path.join(repoRoot, ".harness", "receipts"),
+    receiptFileNamePattern(role),
+    opts,
+  );
   if (!receiptPath) return null;
   const readFileFn =
     typeof opts.receiptContentReadFn === "function"
@@ -2288,11 +2296,60 @@ function currentResultFingerprint(resultAbsolutePath, opts) {
   return createHash("sha256").update(content, "utf8").digest("hex");
 }
 
-// ★HYK-448 2R: 코어에 넘길 지문 쌍. 둘 다 «못 구하면 null» 이고,
-// 코어는 그것을 «축 없음» 으로 본다(침묵이 아니다).
+// ★HYK-448 3R (§1-3 ⑴): «종결 시점 지문»의 **두 번째 출처** -- 중단 기록.
+//
+// 2R 까지 두 라운드가 공유한 전제는 *«중단 종결은 소비 영수증을 남기지 않으니
+// 지문 축이 부재»* 였는데, ORCH 실측이 그것을 뒤집었다: 중단 종결 경로
+// (relay-handshake.mjs 의 runBlockedTerminationSideEffectsIfApplicable)는
+// `aborts/<ROLE>-abort-r<N>.json` 에 ★`leftoverFingerprint` 를 남긴다 --
+// 그 값은 종결 시점 결과 파일의 SHA-256 이고(computeResultFingerprint,
+// 소비 영수증의 resultFingerprint 와 **같은 함수·같은 입력**), 그래서 소비
+// 영수증과 완전히 같은 자격으로 이 축에 쓸 수 있다.
+//
+// ⇒ 이것이 형태 A 의 침묵 근거를 «순서를 몰라서» 에서 ★«증거로 안 바뀐 걸
+//   알아서» 로 바꾼다. 그 위에서만 UNDECIDABLE 승격(아래 severity)이 안전하다.
+//
+// ⛔읽기 전용이다 -- 이 축은 중단 기록을 **절대 쓰지 않는다.**
+function latestAbortFingerprint(repoRoot, role, opts) {
+  if (!isNonEmptyReceiptString(role)) return null;
+  // abort-record-writer.mjs 의 nextAbortFileName 관례(대소문자 무관).
+  const pattern = new RegExp(
+    `^${String(role).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}-abort-r\\d+\\.json$`,
+    "i",
+  );
+  const abortPath = newestMatchingFilePath(
+    path.join(repoRoot, ".harness", "aborts"),
+    pattern,
+    opts,
+  );
+  if (!abortPath) return null;
+  const readFileFn =
+    typeof opts.abortContentReadFn === "function"
+      ? opts.abortContentReadFn
+      : readFileSync;
+  let parsed;
+  try {
+    parsed = JSON.parse(readFileFn(abortPath, "utf8"));
+  } catch {
+    return null;
+  }
+  // ⛔빈 값은 «없음»으로 접는다 -- 빈 값끼리 «일치»해서 침묵이 되는 사고를
+  // 원천 차단한다(ORCH 가 자기 프로브에서 실제로 겪은 실수 형태).
+  const fp = parsed?.leftoverFingerprint;
+  return isNonEmptyReceiptString(fp) ? fp : null;
+}
+
+// ★HYK-448 2R/3R: 코어에 넘길 지문 쌍. 둘 다 «못 구하면 null» 이고,
+// 코어는 그것을 «축 없음» 으로 본다.
+// ★3R: 「종결 시점 지문」의 출처가 둘이다 -- 소비 영수증(정상 종결)과
+// 중단 기록(중단 종결). 소비 영수증을 먼저 보고, 없으면 중단 기록을 본다
+// (한 라운드가 둘 다 남기는 경우는 없다: 정상 종결은 영수증만, 중단 종결은
+// 중단 기록만 남긴다 -- relay-handshake.mjs 의 두 갈래가 배타적이다).
 function collectResultFingerprints(repoRoot, role, resultAbsolutePath, opts) {
   return {
-    consumed: latestReceiptFingerprint(repoRoot, role, opts),
+    consumed:
+      latestReceiptFingerprint(repoRoot, role, opts) ??
+      latestAbortFingerprint(repoRoot, role, opts),
     current: currentResultFingerprint(resultAbsolutePath, opts),
   };
 }
@@ -2749,6 +2806,14 @@ export const UNCONSUMED_SCAN_SEVERITY = Object.freeze({
   UNDECIDABLE: 1, // JUDGED이지만 verdict가 UNDECIDABLE.
   COLLECTION_FAILURE: 2, // 워크트리 열거·harness 읽기·git log 실패.
   SUSPECTED_UNCONSUMED: 3,
+  // ★HYK-448 3R (검토 2R P1 해소): «순서를 증명할 수 없는 종결»은 이제
+  // 사람에게 도달해야 한다. ⛔단 «UNDECIDABLE 이라는 판정 전체»를 올리는
+  // 것이 아니다 -- 그 판정은 ROUND_NOT_FINISHED(형태 B)·NO_SIGNAL_TOO_EARLY
+  // (아직 이른 정상 상태)·인자 형식 위반까지 **열 가지 넘는 사유**가 함께
+  // 쓰는 값이라, 통째로 올리면 형태 B 와 «아직 이른 라운드»가 매 주기
+  // 발화한다(= HYK-448 이 없애려던 것의 부활). 그래서 ★사유 하나
+  // (CLOSURE_ORDER_UNPROVABLE)만 콕 집어 올린다 -- 아래 unconsumedSeverityOf.
+  CLOSURE_ORDER_UNPROVABLE: 5,
   // ★HYK-448: 「원장이 닫은 라운드의 결과 파일이 그 뒤에 바뀌었다」.
   // ⛔SUSPECTED_UNCONSUMED «위»에 두는 것은 임의 선택이 아니다: 이 축의
   // 대표값(worst)은 하나뿐인데, 만성적으로 하나씩 떠 있는 미소비 의심이
@@ -2765,6 +2830,10 @@ export const UNCONSUMED_SCAN_SEVERITY = Object.freeze({
 const UNCONSUMED_FIRING_SEVERITIES = new Set([
   UNCONSUMED_SCAN_SEVERITY.SUSPECTED_UNCONSUMED,
   UNCONSUMED_SCAN_SEVERITY.MODIFIED_AFTER_CLOSURE,
+  // ★HYK-448 3R: 검토 2R P1 의 해소 지점. «순서를 증명할 수 없는
+  // 종결» 이 이제 사람에게 도달한다. ⛔이것이 안전한 것은 오직
+  // 상위 «지문 일치 -> 침묵» 갈래가 먼저 들어왔기 때문이다(순서 핵심).
+  UNCONSUMED_SCAN_SEVERITY.CLOSURE_ORDER_UNPROVABLE,
 ]);
 
 function unconsumedSeverityOf(entry) {
@@ -2784,7 +2853,13 @@ function unconsumedSeverityOf(entry) {
       return UNCONSUMED_SCAN_SEVERITY.SUSPECTED_UNCONSUMED;
     }
     if (entry.verdict === UNCONSUMED_VERDICT.UNDECIDABLE) {
-      return UNCONSUMED_SCAN_SEVERITY.UNDECIDABLE;
+      // ★HYK-448 3R: «UNDECIDABLE» 은 열 가지 넘는 사유가 함꿠 쓰는 값이라
+      // 판정 이름만 보고 올리면 형태 B(ROUND_NOT_FINISHED)와 «아직 이른
+      // 라운드»(NO_SIGNAL_TOO_EARLY)까지 매 주기 발화한다. ★그래서
+      // «순서 미증명» 사유 하나만 발화 등급으로 올린다.
+      return entry.reasonCode === UNCONSUMED_REASON.CLOSURE_ORDER_UNPROVABLE
+        ? UNCONSUMED_SCAN_SEVERITY.CLOSURE_ORDER_UNPROVABLE
+        : UNCONSUMED_SCAN_SEVERITY.UNDECIDABLE;
     }
   }
   return UNCONSUMED_SCAN_SEVERITY.NORMAL;

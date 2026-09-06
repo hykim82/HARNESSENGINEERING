@@ -227,6 +227,10 @@ export const UNCONSUMED_REASON = Object.freeze({
   CLOSURE_ORDER_UNPROVABLE: "CLOSURE_ORDER_UNPROVABLE",
   // ★2R 신설. 시계를 한 번도 비교하지 않고 얻은 «종결 후 수정»의 직접 증거.
   RESULT_FINGERPRINT_DIVERGED: "RESULT_FINGERPRINT_DIVERGED",
+  // ★3R 신설. 그 반대쪽 -- «종결 이후 안 바뀌었다»의 직접 증거.
+  // ⛔이 파일에서 «침묵»(CONSUMED)을 낼 수 있는 종결-축 사유는 이것 하나뿐이며,
+  // 그래서 침묵에는 반드시 지문이라는 증거가 붙는다(3R 계약).
+  CONSUMED_VIA_FINGERPRINT_MATCH: "CONSUMED_VIA_FINGERPRINT_MATCH",
   FINGERPRINTS_MALFORMED: "FINGERPRINTS_MALFORMED",
   // 넘어온 종결 정보 자체가 형식 위반이면 조용히 무시하지 않는다 -- 무시하면
   // 「원장이 이상한데 아무 일 없었던 것처럼」 판정이 나간다(이 파일의 기존
@@ -358,9 +362,29 @@ function fingerprintsDiverged(fingerprints) {
   return consumed !== current;
 }
 
-// ★HYK-448 2R: 원장이 «닫았다»고 말하는 라운드의 판정. ⛔이 함수는
-// `CONSUMED` 를 절대 내지 않는다 -- 낼 수 있는 것은 MODIFIED_AFTER_CLOSURE
-// (발화) 또는 UNDECIDABLE(판정 불가)뿐이다(헤더 참조).
+// 지문 두 값이 «둘 다 실재하고 서로 같은가». ★3R 신설 -- 이것이 «종결 이후
+// 내용이 바뀌지 않았다»의 직접 증거이며, 시계를 한 번도 보지 않는다.
+function fingerprintsMatch(fingerprints) {
+  if (!isPlainObject(fingerprints)) return false;
+  const { consumed, current } = fingerprints;
+  if (!isNonEmptyString(consumed) || !isNonEmptyString(current)) return false;
+  return consumed === current;
+}
+
+// ★HYK-448 원장이 «닫았다»고 말하는 라운드의 판정.
+//
+// ★★3R 의 규칙 (검토 2R P1 + 책임자 게이트2): ⛔**침묵은 «증거»가 있을 때만
+// 나온다.** 2R 은 침묵을 아예 없앴는데(«순서를 모른다»를 UNDECIDABLE 로),
+// 그러자 검토 2R 이 소비자 결선에서 그 UNDECIDABLE 이 사람에게 도달하지
+// 않는다는 것을 실측했다 -- 이름만 바뀌고 경보는 여전히 안 갔다.
+// 그래서 3R 은 두 가지를 «이 순서로» 한다:
+//   ⑴ 지문 축의 출처를 넓힌다 -- 소비 영수증뿐 아니라 ★중단 기록의
+//      `leftoverFingerprint` 도 «종결 시점 지문»으로 인정한다(호출자 몫).
+//      ⇒ 형태 A 의 침묵 근거가 «순서를 몰라서» → ★«증거로 안 바뀐 걸 알아서»
+//      로 바뀐다.
+//   ⑵ 그 «다음에» 남는 진짜 판정 불가(CLOSURE_ORDER_UNPROVABLE)를 발화
+//      등급으로 올린다(orch-stall-detect.mjs). ⛔⑴ 없이 ⑵ 만 하면 형태 A 가
+//      부활한다 -- ORCH 가 11개 워크트리 실측으로 확인한 사실이다.
 function judgeClosedRoundIntegrity({
   base,
   updatedAtMs,
@@ -385,7 +409,28 @@ function judgeClosedRoundIntegrity({
     };
   }
 
-  // ⓑ 시계 축 -- ★«앞선 것처럼 보인다»는 안전한 방향이므로 발화로 닫는다.
+  // ⓑ ★3R 신설 -- «종결 시점 지문»과 «지금 지문»이 같다. 종결 이후 내용이
+  // 바뀌지 않았다는 «증거»다. 시계를 한 번도 보지 않고 침묵할 수 있는 유일한
+  // 자리이며, ★형태 A(중단 종결)가 여기서 조용해진다.
+  // ⚠️2R 은 이 축을 «발화 전용»으로 두어 일치해도 침묵시키지 않았다. 그
+  // 결정의 근거(영수증은 워커가 쓸 수 있다)는 지금도 사실이지만, 그 대가가
+  // ★«형태 A 를 «몰라서» 조용히 두는 것»이었고 검토 2R 이 그 침묵이 사람에게
+  // 도달하지 않는다는 것을 실측했다. 3R 은 침묵의 근거를 «무지»에서 «증거»로
+  // 바꾸는 쪽을 택한다 -- 위조 잔여 위험은 coder.md 정직 한계에 적는다.
+  if (fingerprintsMatch(fingerprints)) {
+    return {
+      ok: true,
+      verdict: UNCONSUMED_VERDICT.CONSUMED,
+      reasonCode: UNCONSUMED_REASON.CONSUMED_VIA_FINGERPRINT_MATCH,
+      details: {
+        ...closureBase,
+        consumedAtMs: closedAtMs,
+        matchedFingerprint: fingerprints.current,
+      },
+    };
+  }
+
+  // ⓒ 시계 축 -- ★«앞선 것처럼 보인다»는 안전한 방향이므로 발화로 닫는다.
   if (updatedAtMs > closedAtMs) {
     return {
       ok: true,

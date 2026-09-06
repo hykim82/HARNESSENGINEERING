@@ -26,6 +26,10 @@ import {
   utimesSync,
 } from "node:fs";
 import { createHash } from "node:crypto";
+import { dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const THIS_DIR_WIRE = dirname(fileURLToPath(import.meta.url));
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
@@ -33,7 +37,6 @@ import {
   judgeUnconsumedForRepo,
   judgeUnconsumedAcrossWorktrees,
   collectUnconsumedCandidates,
-  UNCONSUMED_WIRE_STATUS,
 } from "./orch-stall-detect.mjs";
 import { UNCONSUMED_VERDICT, UNCONSUMED_REASON } from "./unconsumed-core.mjs";
 
@@ -121,6 +124,28 @@ function writeReceipt(
   return p;
 }
 
+// ★HYK-448 3R: 중단 기록의 실물 모양 중 이 축이 읽는 필드만 재현한다
+// (relay-handshake.mjs 가 spawnAbortRecordWriter 로 남기는 leftoverFingerprint).
+function writeAbortRecord(
+  dir,
+  { role = "CODER", round = 1, leftoverFingerprint, mtimeIso },
+) {
+  const abortsDir = join(dir, ".harness", "aborts");
+  mkdirSync(abortsDir, { recursive: true });
+  const p = join(abortsDir, `${role}-abort-r${round}.json`);
+  writeFileSync(
+    p,
+    JSON.stringify({
+      role,
+      leftoverFingerprint,
+      leftoverPath: ".harness\\coder.md",
+    }),
+    "utf8",
+  );
+  setMtime(p, mtimeIso);
+  return p;
+}
+
 // admission-ledger-core.mjs 의 completeReservation 이 «닫을 때» 적는 세
 // 필드(status/completed_at/completion_reason)만 재현한다.
 function writeAdmissionLedger(dir, reservations) {
@@ -154,33 +179,20 @@ const FACE_C_RESULT_ISO = "2026-09-06T23:11:36+09:00"; // ★그 뒤 워커가 �
 const NOW_ISO = "2026-09-07T02:48:00+09:00"; // 각성이 실제로 발화한 시점대
 const NOW_MS = new Date(NOW_ISO).getTime();
 
-test("★HYK-448 2R 배선/형태 A: 중단 종결 워크트리는 여전히 «발화하지 않는다» -- 다만 판정 이름은 CONSUMED 가 아니라 UNDECIDABLE/CLOSURE_ORDER_UNPROVABLE 다 (RED/GREEN 2/2)", () => {
-  withTempDir("hyk448-face-a-", (dir) => {
+test("★★HYK-448 3R 배선/형태 A ① «증거로» 조용해진다: 중단 기록의 leftoverFingerprint 가 현재 파일과 일치하면 CONSUMED_VIA_FINGERPRINT_MATCH (RED/GREEN 2/2)", () => {
+  withTempDir("hyk448-face-a-evidence-", (dir) => {
     initPlainGitRepo(dir);
     const label = "HYK-437-admission-anchor-1";
     writeTaskFile(dir, {
       taskId: label,
       mtimeIso: "2026-09-05T17:00:00+09:00",
     });
-    // ⛔영수증 디렉터리를 «만들지 않는다» -- 중단 종결 경로가 설계상
-    // 영수증을 안 남기는 바로 그 상태를 그대로 재현한다.
+    // ⛔소비 영수증은 «없다» -- 중단 종결의 실제 모양이다.
     writeResultFile(dir, {
       taskId: label,
       mtimeIso: FACE_A_RESULT_ISO,
       terminal: ">>> BLOCKED: 러너 초록 미충족, 정지",
     });
-
-    // RED -- 원장을 못 읽는 상태(경로 미주입 == 실 운용에서 env 미설정과 동형).
-    // 이것이 «매 주기» 발화하던 판정이다.
-    const before = judgeFor(dir, NOW_MS, {});
-    assert.equal(before.status, UNCONSUMED_WIRE_STATUS.JUDGED);
-    assert.equal(
-      before.verdict,
-      UNCONSUMED_VERDICT.SUSPECTED_UNCONSUMED,
-      "수리 전(원장 없음) 재현: 영수증이 없다는 이유만으로 미소비로 발화",
-    );
-
-    // GREEN -- 원장이 그 라운드를 BLOCKED_TERMINATION_RELEASED 로 닫았다.
     const ledgerPath = writeAdmissionLedger(dir, {
       [label]: {
         status: "COMPLETED",
@@ -188,18 +200,49 @@ test("★HYK-448 2R 배선/형태 A: 중단 종결 워크트리는 여전히 «�
         completion_reason: "BLOCKED_TERMINATION_RELEASED",
       },
     });
-    const after = judgeFor(dir, NOW_MS, { admissionLedgerPath: ledgerPath });
-    // ★2R(검토 1R P1): 1R 은 여기서 CONSUMED 를 냈다. 그러려면
-    // «파일시계 < 원장시계»라는 순서 단정이 필요한데, 두 값의 출처가
-    // 다르므로 그 단정 자체가 결함이었다. 이제는 판정 불가다.
+
+    // RED -- 중단 기록이 없으면 증거가 없어 «순서 미증명» 이고,
+    // ★5R 승격 덕분에 그것은 이제 «발화»다(사람에게 도달한다).
+    const noEvidence = judgeFor(dir, NOW_MS, {
+      admissionLedgerPath: ledgerPath,
+    });
     assert.equal(
-      after.verdict,
-      UNCONSUMED_VERDICT.UNDECIDABLE,
-      "서로 다른 시계로는 «결과가 종결보다 앞섬»을 증명할 수 없다",
+      noEvidence.reasonCode,
+      UNCONSUMED_REASON.CLOSURE_ORDER_UNPROVABLE,
+      "증거가 없으면 침묵하지 않는다",
     );
-    assert.equal(after.reasonCode, UNCONSUMED_REASON.CLOSURE_ORDER_UNPROVABLE);
-    // ★★그리고 그것이 «상시 오탐 부활»이 아님을 결선 수준에서
-    // 직접 보인다: 각성이 워크트리 이름을 실는 자리가 비어 있어야 한다.
+    const noEvidenceScan = judgeUnconsumedAcrossWorktrees(
+      { repoRoot: dir, now: NOW_MS },
+      { admissionLedgerPath: ledgerPath },
+    );
+    assert.equal(
+      noEvidenceScan.worstWorktreePaths.length,
+      1,
+      "★증거 없는 «순서 미증명» 은 이제 사람에게 도달한다(검토 2R P1 해소)",
+    );
+
+    // GREEN -- 중단 기록의 지문을 «현재 파일 그대로» 넣는다
+    // (= 종결 이후 안 바뀜다는 증거). ★이것이 실물 형태 A 다.
+    const liveFingerprint = createHash("sha256")
+      .update(readFileSync(join(dir, ".harness", "coder.md"), "utf8"), "utf8")
+      .digest("hex");
+    writeAbortRecord(dir, {
+      leftoverFingerprint: liveFingerprint,
+      mtimeIso: FACE_A_CLOSED_ISO,
+    });
+
+    const withEvidence = judgeFor(dir, NOW_MS, {
+      admissionLedgerPath: ledgerPath,
+    });
+    assert.equal(
+      withEvidence.verdict,
+      UNCONSUMED_VERDICT.CONSUMED,
+      "★중단 종결도 지문을 남긴다 -- «지문 축이 부재»라는 두 라운드의 전제가 틀렸다",
+    );
+    assert.equal(
+      withEvidence.reasonCode,
+      UNCONSUMED_REASON.CONSUMED_VIA_FINGERPRINT_MATCH,
+    );
     const scan = judgeUnconsumedAcrossWorktrees(
       { repoRoot: dir, now: NOW_MS },
       { admissionLedgerPath: ledgerPath },
@@ -207,7 +250,7 @@ test("★HYK-448 2R 배선/형태 A: 중단 종결 워크트리는 여전히 «�
     assert.deepEqual(
       scan.worstWorktreePaths,
       [],
-      "UNDECIDABLE 은 발화 등급이 아니므로 각성은 이 워크트리를 지목하지 않는다(형태 A 침묵 유지)",
+      "★증거가 생기면 형태 A 는 다시 조용해진다 -- 그리고 이번엔 «몰라서»가 아니다",
     );
   });
 });
@@ -395,8 +438,14 @@ test("★★HYK-448 2R 배선/지문 축: 파일시계가 «뒤로» 보여 시�
   });
 });
 
-test("★★HYK-448 2R 배선/지문 축은 «발화 전용»: 영수증 지문이 실제 파일과 «일치»해도 침묵으로 가지 않는다 -- 위조로 발화를 지울 수 없다 (2/2)", () => {
-  withTempDir("hyk448-fp-forge-", (dir) => {
+test("★★HYK-448 3R 배선: 영수증 지문이 현재 파일과 일치하면 침묵한다 -- 그리고 그것이 «위조로 발화를 지우는 길»이기도 하다는 사실을 그대로 고정한다 (2/2)", () => {
+  // ⚠️★이 시험은 «바람직함»이 아니라 «현재 계약»을 고정한다.
+  // 3R 은 침묵의 근거를 «증거»로 바꿈으므로, 지문이 일치하면 시계가
+  // 무엇을 말하든 침묵한다. ⇒ 결과를 고친 뒤 지문까지 함께 고치면
+  // 시계 축이 냈을 발화를 지울 수 있다. ⛔그것이 이 라운드가 지불한
+  // 대가이며 coder.md 정직 한계에 명시한다(자산은 오직 워커가 쓸 수
+  // 없는 자리에 지문을 두는 것 -- HYK-452 의 단조 이벤트 출처).
+  withTempDir("hyk448-fp-match-", (dir) => {
     initPlainGitRepo(dir);
     const label = "HYK-449-marker-count-fence-1";
     writeTaskFile(dir, {
@@ -405,7 +454,7 @@ test("★★HYK-448 2R 배선/지문 축은 «발화 전용»: 영수증 지문�
     });
     writeResultFile(dir, {
       taskId: label,
-      mtimeIso: FACE_C_RESULT_ISO, // 종결 «뒤» -- 시계 축이 발화하는 입력.
+      mtimeIso: FACE_C_RESULT_ISO, // 종결 «뒤» -- 시계 축만이라면 발화한다.
       terminal: ">>> DONE: CODER @ 2026-09-06 23:05:00 KST",
     });
     const ledgerPath = writeAdmissionLedger(dir, {
@@ -415,7 +464,6 @@ test("★★HYK-448 2R 배선/지문 축은 «발화 전용»: 영수증 지문�
         completion_reason: "OK",
       },
     });
-    // ★워커가 결과를 고친 뒤 영수증 지문도 «현재 파일에 맞춰» 고쳐 넣은 상황.
     const actual = createHash("sha256")
       .update(readFileSync(join(dir, ".harness", "coder.md"), "utf8"), "utf8")
       .digest("hex");
@@ -427,13 +475,215 @@ test("★★HYK-448 2R 배선/지문 축은 «발화 전용»: 영수증 지문�
     const judged = judgeFor(dir, NOW_MS, { admissionLedgerPath: ledgerPath });
     assert.equal(
       judged.verdict,
-      UNCONSUMED_VERDICT.MODIFIED_AFTER_CLOSURE,
-      "지문 일치가 시계 축의 발화를 지우면 안 된다(발화 전용 계약)",
+      UNCONSUMED_VERDICT.CONSUMED,
+      "지문이 일치하면 내용이 안 바뀜 것이므로 침묵한다(3R 계약)",
     );
     assert.equal(
       judged.reasonCode,
-      UNCONSUMED_REASON.RESULT_EDITED_AFTER_CLOSURE,
-      "지문이 같으면 그 축은 «없는 것»이고 시계 축 결과가 그대로 나온다",
+      UNCONSUMED_REASON.CONSUMED_VIA_FINGERPRINT_MATCH,
     );
+  });
+});
+
+test("★★HYK-448 3R: 지문이 갈리면 여전히 발화한다 -- 진짜 양성(어젠밤 실물 형태)이 이 라운드에서 죽지 않았다 (1/1)", () => {
+  withTempDir("hyk448-fp-diverge-", (dir) => {
+    initPlainGitRepo(dir);
+    const label = "HYK-449-marker-count-fence-1";
+    writeTaskFile(dir, {
+      taskId: label,
+      mtimeIso: "2026-09-06T20:10:00+09:00",
+    });
+    writeResultFile(dir, {
+      taskId: label,
+      mtimeIso: "2026-09-06T23:07:59+09:00", // 시계는 «앞선 것처럼» 보인다.
+      terminal: ">>> DONE: CODER @ 2026-09-06 23:05:00 KST",
+    });
+    const ledgerPath = writeAdmissionLedger(dir, {
+      [label]: {
+        status: "COMPLETED",
+        completed_at: FACE_C_CLOSED_ISO,
+        completion_reason: "OK",
+      },
+    });
+    writeReceipt(dir, {
+      fingerprint:
+        "a0a8014eaf59b050d57edafce0648139f1456724dabf669056782c24a8ffb6f1",
+      mtimeIso: "2026-09-06T23:00:00+09:00",
+    });
+    const judged = judgeFor(dir, NOW_MS, { admissionLedgerPath: ledgerPath });
+    assert.equal(
+      judged.verdict,
+      UNCONSUMED_VERDICT.MODIFIED_AFTER_CLOSURE,
+      "시계를 한 번도 비교하지 않고 «바뀜다»를 말한다",
+    );
+    assert.equal(
+      judged.reasonCode,
+      UNCONSUMED_REASON.RESULT_FINGERPRINT_DIVERGED,
+    );
+    const scan = judgeUnconsumedAcrossWorktrees(
+      { repoRoot: dir, now: NOW_MS },
+      { admissionLedgerPath: ledgerPath },
+    );
+    assert.equal(scan.worstWorktreePaths.length, 1);
+  });
+});
+
+// ===========================================================================
+// ★★HYK-448 3R -- 승격의 «범위»가 좁다는 것을 결선에서 고정한다.
+// `UNDECIDABLE` 은 열 가지 넘는 사유가 함께 쓰는 판정 이름이다. 판정 이름만
+// 보고 발화 등급으로 올리면 ⛔형태 B(ROUND_NOT_FINISHED)와 «아직 이른
+// 라운드»(NO_SIGNAL_TOO_EARLY)까지 매 주기 발화한다 = HYK-448 이 없애려던
+// 것의 부활. 그래서 «순서 미증명» 사유 하나만 올렸고, 아래가 그 경계다.
+// ===========================================================================
+
+test("★★HYK-448 3R: 승격은 «사유 하나»에만 적용된다 -- 형태 B(아직 안 끝난 라운드)는 UNDECIDABLE 이어도 여전히 각성에 도달하지 않는다 (2/2)", () => {
+  withTempDir("hyk448-scope-", (dir) => {
+    initPlainGitRepo(dir);
+    const label = "HYK-449-marker-count-fence-1";
+    writeTaskFile(dir, {
+      taskId: label,
+      mtimeIso: "2026-09-06T20:10:00+09:00",
+    });
+    // 종료 표지 0개 = 아직 안 끝난 라운드(형태 B).
+    writeResultFile(dir, {
+      taskId: label,
+      mtimeIso: "2026-09-06T21:00:32+09:00",
+      terminal: null,
+    });
+    const now = new Date("2026-09-06T21:29:00+09:00").getTime();
+
+    const judged = judgeFor(dir, now, {});
+    assert.equal(judged.verdict, UNCONSUMED_VERDICT.UNDECIDABLE);
+    assert.equal(
+      judged.reasonCode,
+      UNCONSUMED_REASON.ROUND_NOT_FINISHED,
+      "같은 «UNDECIDABLE» 이지만 사유가 다르다",
+    );
+    const scan = judgeUnconsumedAcrossWorktrees({ repoRoot: dir, now }, {});
+    assert.deepEqual(
+      scan.worstWorktreePaths,
+      [],
+      "★형태 B 는 승격 대상이 아니다 -- 여기가 비지 않으면 1R 이 없앤 오탐이 부활한 것이다",
+    );
+  });
+});
+
+// ===========================================================================
+// ★HYK-448 3R -- 소비자 결선(심각도) 쪽 변이 2종. 코어 변이(#9)는
+// unconsumed-core.test.mjs 에 있고, 여기서는 «사람에게 도달하는가»를 만드는
+// 두 줄이 실제로 하중을 받는지 본다.
+// ⛔코어 변이와 달리 이쪽은 모듈 상수를 바꾸는 것이라 소스 복사본을 만들어
+// import 한다(같은 관용구, 실 소스는 건드리지 않는다).
+// ===========================================================================
+
+const DETECT_PATH = join(THIS_DIR_WIRE, "orch-stall-detect.mjs");
+
+async function importMutatedDetector(find, replacement) {
+  const src = readFileSync(DETECT_PATH, "utf8");
+  const count = src.split(find).length - 1;
+  assert.equal(
+    count,
+    1,
+    `mutation target must appear exactly once, got ${count}`,
+  );
+  const dir = mkdtempSync(join(tmpdir(), "hyk448-detect-mutant-"));
+  const filePath = join(dir, "orch-stall-detect.mutant.mjs");
+  // 형제 모듈은 원래 자리에서 import 되어야 하므로 상대 경로를 절대 경로로 고친다.
+  // ★절대경로 import 지정자는 Windows 에서 file:// URL 이어야 한다.
+  const dirPosix = "file:///" + THIS_DIR_WIRE.split("\\").join("/");
+  const rewritten = src
+    .split('from "./')
+    .join(`from "${dirPosix}/`)
+    .split('from "../')
+    .join(`from "${dirPosix}/../`)
+    .replace(find, replacement);
+  writeFileSync(filePath, rewritten, "utf8");
+  try {
+    const url = "file://" + filePath.split("\\").join("/");
+    return await import(`${url}?t=${Date.now()}`);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+function faceAFixture(dir, { withEvidence }) {
+  initPlainGitRepo(dir);
+  const label = "HYK-437-admission-anchor-1";
+  writeTaskFile(dir, { taskId: label, mtimeIso: "2026-09-05T17:00:00+09:00" });
+  writeResultFile(dir, {
+    taskId: label,
+    mtimeIso: FACE_A_RESULT_ISO,
+    terminal: ">>> BLOCKED: 러너 초록 미충족, 정지",
+  });
+  if (withEvidence) {
+    writeAbortRecord(dir, {
+      leftoverFingerprint: createHash("sha256")
+        .update(readFileSync(join(dir, ".harness", "coder.md"), "utf8"), "utf8")
+        .digest("hex"),
+      mtimeIso: FACE_A_CLOSED_ISO,
+    });
+  }
+  return writeAdmissionLedger(dir, {
+    [label]: {
+      status: "COMPLETED",
+      completed_at: FACE_A_CLOSED_ISO,
+      completion_reason: "BLOCKED_TERMINATION_RELEASED",
+    },
+  });
+}
+
+test("★★NC mutation/detector #1 (HYK-448 3R): 승격을 되돌리면(발화 집합에서 «순서 미증명» 제거) -> RED (검토 2R 의 P1 이 그대로 되살아난다: 판정은 나오는데 사람에게 안 간다)", async () => {
+  const mutant = await importMutatedDetector(
+    "  UNCONSUMED_SCAN_SEVERITY.CLOSURE_ORDER_UNPROVABLE,\n]);",
+    "]);",
+  );
+  await new Promise((resolve) => {
+    withTempDir("hyk448-mut-promote-", (dir) => {
+      const ledgerPath = faceAFixture(dir, { withEvidence: false });
+      const scan = mutant.judgeUnconsumedAcrossWorktrees(
+        { repoRoot: dir, now: NOW_MS },
+        { admissionLedgerPath: ledgerPath },
+      );
+      assert.deepEqual(
+        scan.worstWorktreePaths,
+        [],
+        "mutant must stop surfacing the unprovable closure (RED signal; proves the promotion is what closes review 2R's P1)",
+      );
+      resolve();
+    });
+  });
+});
+
+test("★★NC mutation/detector #2 (HYK-448 3R): 승격을 «판정 이름 전체»로 넓히면 -> RED (형태 B 까지 발화해 1R 의 성과가 무너진다)", async () => {
+  // ⛔이 변이가 잡아내는 것이 «UNDECIDABLE 을 통째로 올린다»는 손쉬운 오답이다.
+  const mutant = await importMutatedDetector(
+    "      return entry.reasonCode ===",
+    "      return true ||\n        entry.reasonCode ===",
+  );
+  await new Promise((resolve) => {
+    withTempDir("hyk448-mut-scope-", (dir) => {
+      initPlainGitRepo(dir);
+      const label = "HYK-449-marker-count-fence-1";
+      writeTaskFile(dir, {
+        taskId: label,
+        mtimeIso: "2026-09-06T20:10:00+09:00",
+      });
+      writeResultFile(dir, {
+        taskId: label,
+        mtimeIso: "2026-09-06T21:00:32+09:00",
+        terminal: null, // 형태 B.
+      });
+      const now = new Date("2026-09-06T21:29:00+09:00").getTime();
+      const scan = mutant.judgeUnconsumedAcrossWorktrees(
+        { repoRoot: dir, now },
+        {},
+      );
+      assert.equal(
+        scan.worstWorktreePaths.length,
+        1,
+        "mutant must surface the in-flight round too (RED signal; proves the promotion is deliberately scoped to ONE reason)",
+      );
+      resolve();
+    });
   });
 });

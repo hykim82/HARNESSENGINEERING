@@ -788,24 +788,31 @@ test("★★HYK-448 2R: 지문 축은 «시계를 한 번도 보지 않고» 종
   );
 });
 
-test("★★HYK-448 2R: 지문 축은 «발화 전용»이다 -- 지문이 같아도, 비어도, 없어도 «침묵»을 만들지 않는다 (5/5)", () => {
-  // ⛔위조 방어: 영수증은 워커가 쓸 수 있는 워크트리 «안» 파일이다. 지문
-  // 일치를 침묵으로 인정하면 결과를 고친 워커가 영수증 지문도 함께 고쳐
-  // 시계 축이 냈을 발화를 «지울» 수 있다. 아래 ⑴이 그것을 막는다.
-  // ⛔그리고 ORCH 자인 사례(추출이 빈 값 -> 공허하게 참)도 ⑵~⑷가 막는다.
+test("★★HYK-448 3R: 침묵은 «증거»가 있을 때만 나온다 -- 지문이 일치하면 CONSUMED_VIA_FINGERPRINT_MATCH, 비거나 없으면 침묵이 아니다 (4/4)", () => {
+  // ⚠️★계약 역전을 명시해 둔다: 2R 은 이 축을 «발화 전용»으로 두어
+  // 지문이 일치해도 침묵시키지 않았다(영수증을 워커가 쓸 수 있다는 이유).
+  // 그 대가가 ★«형태 A 를 ‹몰라서› 조용히 두는 것»이었고, 검토 2R 은 그
+  // 침묵이 사람에게 도달하지 않는다는 것을 결선에서 실측해 P1 로 잡았다.
+  // ⇒ 3R 은 침묵의 근거를 «무지»에서 «증거»로 바꿈다. 위조 잔여 위험은
+  // coder.md 정직 한계에 적는다(지문을 같이 고치면 침묵을 살 수 있다).
   const same =
     "483123128cf712d3f3054e2400b71f3af8449c62fce552213e0902691b62b446";
-  // ⑴ 지문이 «같은데» 시계는 종결 후 수정을 가리킨다 -> 발화가 유지된다.
-  const forgedMatch = judgeClosureBoundary({
-    deltaMs: 187_000,
+
+  // ① 지문 일치 = «종결 이후 안 바뀜다»의 직접 증거 -> 침묵.
+  const matched = judgeClosureBoundary({
+    deltaMs: -30_000,
     fingerprints: { consumed: same, current: same },
   });
+  assert.equal(matched.verdict, UNCONSUMED_VERDICT.CONSUMED);
   assert.equal(
-    forgedMatch.verdict,
-    UNCONSUMED_VERDICT.MODIFIED_AFTER_CLOSURE,
-    "지문 일치가 시계 축의 발화를 지우면 안 된다(위조로 얻을 것이 없어야 한다)",
+    matched.reasonCode,
+    UNCONSUMED_REASON.CONSUMED_VIA_FINGERPRINT_MATCH,
+    "침묵에는 반드시 지문이라는 증거가 붙어야 한다",
   );
-  // ⑵~⑷ 빈 값·null·필드 누락은 전부 «축 없음»이고, 침묵이 아니다.
+
+  // ②~④ 빈 값·누락·null 은 전부 «축 없음»이고 ⛔침묵이 아니다.
+  // ★ORCH 가 자인한 실수 형태(추출이 빈 값 -> 공허하게 참)가 침묵을
+  // 만들지 못하게 하는 자리다.
   for (const [label, fingerprints] of [
     ["둘 다 빈 문자열", { consumed: "", current: "" }],
     ["consumed 만 있음", { consumed: same }],
@@ -815,7 +822,7 @@ test("★★HYK-448 2R: 지문 축은 «발화 전용»이다 -- 지문이 같�
     assert.equal(
       r.verdict,
       UNCONSUMED_VERDICT.UNDECIDABLE,
-      `${label}: 축이 없으면 시계 축 결과(판정 불가)가 그대로다 -- 침묵이 아니다`,
+      `${label}: 증거가 없으면 침묵하지 않는다`,
     );
     assert.notEqual(r.verdict, UNCONSUMED_VERDICT.CONSUMED);
   }
@@ -957,6 +964,38 @@ test("NC mutation/unconsumed-core #6 (HYK-448): 「아직 안 끝난 라운드�
     UNCONSUMED_VERDICT.SUSPECTED_UNCONSUMED,
     "mutant must go back to firing on an unfinished round (RED signal; proves the in-flight branch is load-bearing)",
   );
+});
+
+test("NC mutation/unconsumed-core #9 (★HYK-448 3R): «지문 일치 -> 침묵» 갈래 제거 -> RED (형태 A 가 증거를 가지고도 다시 «순서 미증명» 으로 떨어진다)", async () => {
+  // ⛔이 변이가 잡아내는 것: 3R 의 ①번을 빼고 ②번(승격)만 하는 경우.
+  // 그러면 형태 A 가 발화하며 부활한다 -- ORCH 가 11개 워크트리 실측으로
+  // 경고한 바로 그 사고다.
+  const mutant = await importMutatedCopy((src) =>
+    applyMutation(
+      src,
+      "  if (fingerprintsMatch(fingerprints)) {",
+      "  if (false) {",
+    ),
+  );
+  const same =
+    "07e2d30768f3d24112dcb7cadc3029befdd8c7b5f6745cf5646ae45ac21ca693";
+  const judged = mutant.judgeUnconsumed({
+    resultFile: {
+      updatedAtMs: FACE_C_CLOSED_MS - 30_000,
+      terminalMarkerCount: 1,
+    },
+    signals: [],
+    now: FACE_C_NOW_MS,
+    thresholds: { minUnconsumedSeconds: THRESHOLD_S },
+    roundClosure: { closed: true, closedAtMs: FACE_C_CLOSED_MS },
+    fingerprints: { consumed: same, current: same },
+  });
+  assert.notEqual(
+    judged.verdict,
+    UNCONSUMED_VERDICT.CONSUMED,
+    "mutant must lose evidence-based silence (RED signal; proves Face A's quiet is EVIDENCE, not ignorance)",
+  );
+  assert.equal(judged.reasonCode, UNCONSUMED_REASON.CLOSURE_ORDER_UNPROVABLE);
 });
 
 after(() => {
