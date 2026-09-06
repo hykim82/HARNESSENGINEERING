@@ -403,7 +403,24 @@ function underConsumeMutex(
 // -> exactly-once 소비. consumptionDir은 호출자 trusted config(그룹1
 // 계약과 동일한 이유로 delegation/task 필드에서 유도 금지).
 export function consumeDelegationTx(input, opts) {
-  const inp = isPlainObject(input) ? input : {};
+  // ★ HYK-447 1R (완료조건 5): 이 export도 신뢰 경계를 거친다. 6R은
+  // issueSubGrant만 고정했고, 검토 7R이 "모든 export 진입점"이라는 설명이
+  // 문자 그대로는 참이 아니라고 지적했다(consumeDelegationTx는 경계 밖).
+  // 내부 호출(consumeAndIssueEnvelope)은 이미 고정본을 넘기므로 여기서의
+  // 재고정은 얼린 평범한 자료를 한 번 더 복사할 뿐이고, 외부 호출자에게는
+  // 이 자리가 유일한 입력 지점이 된다. `opts`는 주입된 I/O 함수 묶음이라
+  // 고정 대상이 아니다(issueSubGrant와 동일 근거).
+  const fixedInput = snapshotPlainData(input);
+  if (!fixedInput.ok) {
+    return {
+      ok: false,
+      claimed: false,
+      reason:
+        "grant-issuer: consume input could not be fixed as plain data -- " +
+        fixedInput.reason,
+    };
+  }
+  const inp = isPlainObject(fixedInput.value) ? fixedInput.value : {};
   const { consumptionDir, delegationId, taskHash, role, at } = inp;
   if (!isNonEmptyString(consumptionDir)) {
     return {

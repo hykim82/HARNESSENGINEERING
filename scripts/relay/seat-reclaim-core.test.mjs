@@ -287,8 +287,11 @@ test("§2⑴ P1-1 경계: protectedSeats=['pane-1'] -- 유효한 원소만 있�
 // ---- HYK-436 반례 2건(REVIEW 4R P1 재현): 검사가 입력 자신의 메서드를
 // 부르면 입력이 그 메서드를 재정의해 판정을 뒤집을 수 있다. Array를
 // 상속하며 every/includes를 재정의한 인스턴스로 재현한다 -- 수리 전에는
-// 둘 다 회수 허용/보호 상실로 새어(REVIEW 4R 원문), 수리 후에는 원형의
-// 원본 메서드를 빌려 써서(Array.prototype.X.call) 재정의가 무력화된다.
+// 둘 다 회수 허용/보호 상실로 샜다(REVIEW 4R 원문).
+// ★HYK-447 1R 계약 변경: 이제 이 두 입력은 판정 로직에 닿기도 전에 신뢰
+// 경계에서 거부된다(Array 서브클래스 인스턴스는 평범한 자료가 아니다) --
+// 회수 금지라는 결론은 같고 사유만 SCHEMA_INVALID로 앞당겨진다. 4R/5R의
+// 원형 메서드 차용(Array.prototype.X.call)은 두 번째 층으로 남아 있다.
 
 class EveryBypassArray extends Array {
   every() {
@@ -301,22 +304,22 @@ class IncludesBypassArray extends Array {
   }
 }
 
-test("HYK-436 반례: protectedSeats가 every()를 항상 true로 재정의한 Array 서브클래스([null]) -- 형상 검사가 여전히 무효로 판정, 회수 금지", () => {
+test("HYK-436 반례: protectedSeats가 every()를 항상 true로 재정의한 Array 서브클래스([null]) -- 신뢰 경계가 먼저 거부, 회수 금지", () => {
   const protectedSeats = new EveryBypassArray();
   protectedSeats.push(null);
   const r = judge({}, { protectedSeats, minIdleMs: 0 });
-  assert.equal(r.eligibility, SEAT_ELIGIBILITY.PROTECTED);
+  assert.equal(r.eligibility, SEAT_ELIGIBILITY.UNOBSERVABLE);
   assert.equal(r.reclaimEligible, false);
-  assert.equal(r.reason, SEAT_REASON.PROTECTED_LIST_INVALID);
+  assert.equal(r.reason, SEAT_REASON.SCHEMA_INVALID);
 });
 
-test("HYK-436 반례: protectedSeats가 includes()를 항상 false로 재정의한 Array 서브클래스(['pane-1']) -- 보호 대조가 여전히 원본 includes로 동작, 회수 금지", () => {
+test("HYK-436 반례: protectedSeats가 includes()를 항상 false로 재정의한 Array 서브클래스(['pane-1']) -- 신뢰 경계가 먼저 거부, 회수 금지", () => {
   const protectedSeats = new IncludesBypassArray();
   protectedSeats.push("pane-1");
   const r = judge({}, { protectedSeats, minIdleMs: 0 });
-  assert.equal(r.eligibility, SEAT_ELIGIBILITY.PROTECTED);
+  assert.equal(r.eligibility, SEAT_ELIGIBILITY.UNOBSERVABLE);
   assert.equal(r.reclaimEligible, false);
-  assert.equal(r.reason, SEAT_REASON.PROTECTED_SEAT);
+  assert.equal(r.reason, SEAT_REASON.SCHEMA_INVALID);
 });
 
 // ---- §2⑶(P1-2) 반례 2건: null 인자는 throw 대신 판정 ----

@@ -124,6 +124,56 @@ function isValidWorkingTree(wt) {
   );
 }
 
+// ---- HYK-447 1R: 정책도 스키마로 fail-closed 한다 ----
+// 검토 7R P1-ⓐ의 실제 harm path는 경계 하나가 아니라 **경계 + 여기**였다:
+// `new Set([...])`/`new Date(...)`/`{"0":"x","length":0}`을 정책으로 주면
+// (경계가 거부하기 전 6R에서는 `{}`로 접혔고) `isProtectedTarget`의
+// 비-array fallback `[]`가 그 값을 "보호 목록이 비어 있다"로 읽어
+// `allowSink:true`까지 갔다. 경계가 표현형을 거부하게 됐어도 **순정 객체로
+// 배열을 흉내 낸 값**(`{"0":"x","length":0}`)은 이미 "그 평범한 자료 자체"
+// 라 경계가 구별할 수 없다(plain-snapshot.mjs 정직 한계) -- 그러니 "보호
+// 목록을 읽을 수 없다"를 "보호 목록이 비어 있다"로 조용히 바꿔치기하는
+// fallback 자체를 없앤다. 읽을 수 없으면 판정하지 않는다(SCHEMA_INVALID,
+// allowSink:false). seat-reclaim-core.mjs의 classifyProtection이 이미 같은
+// 원칙을 쓴다(그쪽은 PROTECTED로, 여기는 SCHEMA_INVALID로 접는다 -- 두
+// 방향 모두 "파괴하지 않는다" 쪽이다).
+function isArrayOfNonEmptyStrings(v) {
+  return (
+    Array.isArray(v) &&
+    Array.prototype.every.call(v, (el) => isNonEmptyString(el))
+  );
+}
+function isValidPolicyShape(policy) {
+  if (policy === undefined || policy === null) return true; // 정책 미제공은
+  // 유효하다 -- 그 경우 dispatchCorrelationProven이 없어 어차피 차단된다.
+  if (!isPlainObject(policy)) return false;
+  if (
+    policy.protectedTargets !== undefined &&
+    !isArrayOfNonEmptyStrings(policy.protectedTargets)
+  ) {
+    return false;
+  }
+  if (
+    policy.requireDurableEvidence !== undefined &&
+    typeof policy.requireDurableEvidence !== "boolean"
+  ) {
+    return false;
+  }
+  if (
+    policy.expectedWorktreeId !== undefined &&
+    !isNonEmptyString(policy.expectedWorktreeId)
+  ) {
+    return false;
+  }
+  // `dispatchCorrelationProven`은 여기서 형을 따지지 않는다 -- 그 필드는
+  // armed strict(`=== true`)라 값이 무엇이든 틀리면 **그 자체로 차단**되고
+  // (DISPATCH_CORRELATION_UNPROVEN), 그 구분된 사유가 이 코어의 기존 결정을
+  // 설명한다. 위 세 필드는 반대다: 형이 틀리면 안전장치가 **꺼진다**
+  // (목록을 못 읽는데 비었다고 보거나, 요구했는데 요구가 사라진다) --
+  // 그래서 그 셋만 형을 강제한다.
+  return true;
+}
+
 // 스키마/필드 결손/타입 오류를 전부 여기서 잡는다(fail-closed 진입점) --
 // 이 함수가 false를 내면 judgeTeardown은 나머지 로직을 전혀 평가하지 않고
 // 곧장 UNOBSERVABLE + allowSink:false를 반환한다. 각 하위 검사는 위
@@ -159,9 +209,10 @@ function classifyObservation(inventory) {
 }
 
 function isProtectedTarget(inventory, policy) {
-  const list = Array.isArray(policy.protectedTargets)
-    ? policy.protectedTargets
-    : [];
+  // isValidPolicyShape가 이미 "배열이 아니면 판정 자체를 하지 않는다"로
+  // 접었으므로, 여기 도달한 값은 문자열 배열이거나 미제공(빈 목록)뿐이다 --
+  // 6R까지 있던 "비-array면 빈 목록으로 본다" fallback은 사라졌다.
+  const list = policy.protectedTargets ?? [];
   // exact 대조만(부분일치·정규식 금지, coder-task.md §2-B 비타협).
   // HYK-436과 동형: list는 policy.protectedTargets 그 자체(호출자 입력)일
   // 수 있다 -- list 자신의 includes를 부르면 Array 상속 서브클래스가
@@ -329,6 +380,28 @@ function schemaInvalidTeardown(evidence) {
   };
 }
 
+// 두 스키마 관문을 한 자리에 모은다(inventory 형상 · 정책 형상) -- 둘 다
+// fail-closed 방향이 같고(판정하지 않는다), judgeTeardown의 복잡도 상한 12를
+// 지키기 위한 분리이기도 하다.
+function checkSchemas(inventory, policy) {
+  if (!isValidInventoryShape(inventory)) {
+    return schemaInvalidTeardown({
+      ruleId: REASON.SCHEMA_INVALID,
+      inventory: inventory ?? null,
+    });
+  }
+  // HYK-447 1R: 정책을 읽을 수 없으면 판정하지 않는다(isValidPolicyShape
+  // 주석 -- "못 읽는다"를 "비어 있다"로 바꿔치기하지 않는다).
+  if (!isValidPolicyShape(policy)) {
+    return schemaInvalidTeardown({
+      ruleId: REASON.SCHEMA_INVALID,
+      inventory,
+      policyShapeInvalid: true,
+    });
+  }
+  return null;
+}
+
 export function judgeTeardown(args = {}) {
   // ★ 신뢰 경계(6R): 인자를 여기서 단 한 번 읽어 고정한다. 고정에
   // 실패하면(Proxy·숨긴 원소·자료 아닌 값) fail-closed -- allowSink:false.
@@ -341,13 +414,9 @@ export function judgeTeardown(args = {}) {
     });
   }
   const { inventory, policy } = isPlainObject(fixed.value) ? fixed.value : {};
+  const schemaDenied = checkSchemas(inventory, policy);
+  if (schemaDenied) return schemaDenied;
   const p = isPlainObject(policy) ? policy : {};
-  if (!isValidInventoryShape(inventory)) {
-    return schemaInvalidTeardown({
-      ruleId: REASON.SCHEMA_INVALID,
-      inventory: inventory ?? null,
-    });
-  }
 
   const observation = classifyObservation(inventory);
   const {

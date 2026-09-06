@@ -71,7 +71,10 @@ test("judgeTeardown: protected target wins over an otherwise-eligible consistent
   assert.equal(r.evidence.ruleId, REASON.PROTECTED_TARGET);
 });
 
-test("HYK-436 반례: policy.protectedTargets가 includes()를 항상 false로 재정의한 Array 서브클래스 -- 보호 대조가 여전히 원본 includes로 동작, PROTECTED 유지", () => {
+// ★HYK-447 1R 계약 변경: Array 서브클래스 인스턴스는 평범한 자료가 아니라
+// 신뢰 경계에서 거부된다 -- 파괴 금지라는 결론은 같고 사유만 SCHEMA_INVALID로
+// 앞당겨진다(원형 메서드 차용은 두 번째 층으로 남아 있다).
+test("HYK-436 반례: policy.protectedTargets가 includes()를 항상 false로 재정의한 Array 서브클래스 -- 신뢰 경계가 먼저 거부, 파괴 금지", () => {
   class IncludesBypassArray extends Array {
     includes() {
       return false;
@@ -84,9 +87,8 @@ test("HYK-436 반례: policy.protectedTargets가 includes()를 항상 false로 �
     inventory: inv,
     policy: { protectedTargets },
   });
-  assert.equal(r.eligibility, ELIGIBILITY.PROTECTED);
   assert.equal(r.allowSink, false);
-  assert.equal(r.reason, REASON.PROTECTED_TARGET);
+  assert.equal(r.reason, REASON.SCHEMA_INVALID);
 });
 
 test("judgeTeardown: active reference (count>0) blocks even with all layers present", () => {

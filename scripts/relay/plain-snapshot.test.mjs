@@ -2,13 +2,18 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { snapshotPlainData } from "./plain-snapshot.mjs";
 
-// HYK-431 6R -- 신뢰 경계 고정기(plain-snapshot.mjs)의 단위 계약.
-// 여기서 재는 것은 세 성질뿐이다(coder-task.md §2-2 ⒜⒝⒞):
-//   ⒜ 입력의 각 지점을 정확히 한 번만 읽는다
-//   ⒝ 산출물은 원본과 분리된 자료다(원본이 나중에 변해도 안 따라간다)
-//   ⒞ 산출물에는 흔들 수 있는 것(getter/Proxy/프로토타입 재정의)이 없다
+// HYK-447 1R (HYK-431 6R 계승) -- 신뢰 경계 고정기(plain-snapshot.mjs)의
+// 단위 계약. 여기서 재는 것은 세 성질이다(coder-task.md §2-1 ⒜⒝⒞):
+//   ⒜ 평범한 자료가 아닌 값은 접히지 않고 **거부**된다(fail-closed)
+//   ⒝ 관찰은 입력 **전체**에 대해 한 시점이다 -- 순회 도중 입력의 코드가
+//      돌 수 없으므로 형제를 바꿔치기할 틈이 없다
+//   ⒞ 산출물은 원본과 분리돼 깊게 얼어 있다
+//
+// ⚠️ 6R과 달라진 점: 접근자(getter)는 "정확히 한 번 읽는" 대상이 아니라
+// **거부** 대상이다. 한 번이라도 부르면 그 한 번 안에서 형제가 바뀌기
+// 때문이다(검토 7R P1-ⓑ가 정확히 그렇게 뚫었다).
 
-test("plain-snapshot ⒜: 값이 호출마다 바뀌는 getter도 정확히 한 번만 읽는다", () => {
+test("plain-snapshot ⒜: 접근자(getter)를 가진 입력은 거부된다 -- 그리고 그 getter는 **한 번도** 불리지 않는다", () => {
   let reads = 0;
   const input = {
     get volatile() {
@@ -17,16 +22,12 @@ test("plain-snapshot ⒜: 값이 호출마다 바뀌는 getter도 정확히 한 
     },
   };
   const fixed = snapshotPlainData(input);
-  assert.equal(fixed.ok, true, fixed.reason);
-  assert.equal(reads, 1, "getter는 정확히 한 번만 불려야 한다");
-  assert.equal(fixed.value.volatile, "read-1");
-  // 고정본을 몇 번을 읽어도 그 값은 더 안 변한다(원본은 계속 변할 텐데도).
-  assert.equal(fixed.value.volatile, "read-1");
-  assert.equal(fixed.value.volatile, "read-1");
-  assert.equal(reads, 1);
+  assert.equal(fixed.ok, false);
+  assert.match(fixed.reason, /accessor property \('volatile'\)/);
+  assert.equal(reads, 0, "거부는 값을 꺼내기 전에 일어나야 한다");
 });
 
-test("plain-snapshot ⒜: 배열 원소 getter도 원소당 정확히 한 번만 읽는다", () => {
+test("plain-snapshot ⒜: 배열 원소가 접근자여도 거부되고 불리지 않는다", () => {
   let reads = 0;
   const arr = ["placeholder"];
   Object.defineProperty(arr, 0, {
@@ -38,9 +39,76 @@ test("plain-snapshot ⒜: 배열 원소 getter도 원소당 정확히 한 번만
     configurable: true,
   });
   const fixed = snapshotPlainData({ arr });
-  assert.equal(fixed.ok, true, fixed.reason);
-  assert.equal(reads, 1);
-  assert.deepEqual(fixed.value.arr, ["el-1"]);
+  assert.equal(fixed.ok, false);
+  assert.match(fixed.reason, /accessor property \('0'\)/);
+  assert.equal(reads, 0);
+});
+
+// ★⒝의 핵심 시험 -- 검토 7R P1-ⓑ 그 자체다. getter가 읽히는 순간 아직
+// 읽지 않은 **형제**를 비우는 입력을 넣는다. 6R 경계는 이것을 성실히
+// 실행해 "비워진 뒤의 형제"를 고정했다(보호 목록이 사라졌다). 지금은
+// getter를 부르지 않으므로 형제가 바뀔 수 없고, 입력 전체가 거부된다.
+test("plain-snapshot ⒝: 굳히는 도중 형제를 비우는 입력 -- 형제는 그대로이고 입력은 거부된다", () => {
+  const input = {
+    policy: { protectedSeats: ["pane-1"] },
+    inventory: {},
+  };
+  Object.defineProperty(input.inventory, "paneKey", {
+    get() {
+      input.policy.protectedSeats.length = 0; // 형제를 비운다
+      return "pane-1";
+    },
+    enumerable: true,
+    configurable: true,
+  });
+
+  const fixed = snapshotPlainData(input);
+  assert.equal(fixed.ok, false);
+  assert.match(fixed.reason, /accessor property \('paneKey'\)/);
+  assert.deepEqual(
+    input.policy.protectedSeats,
+    ["pane-1"],
+    "순회가 입력의 코드를 전혀 돌리지 않으므로 형제는 변할 수 없다",
+  );
+});
+
+test("plain-snapshot ⒜: 평범한 자료가 아닌 값은 {}로 접히지 않고 거부된다(Date/Map/Set/RegExp/Error/클래스 인스턴스)", () => {
+  class Custom {
+    constructor() {
+      this.x = 1;
+    }
+  }
+  const cases = [
+    new Date("2026-09-06T00:00:00.000Z"),
+    new Map([["k", "v"]]),
+    new Set(["a"]),
+    /re/g,
+    new Error("boom"),
+    new Custom(),
+  ];
+  for (const bad of cases) {
+    const top = snapshotPlainData(bad);
+    assert.equal(top.ok, false, String(bad));
+    assert.match(top.reason, /not plain data|prototype/);
+    // 정책 자리(중첩)에 들어가도 마찬가지다 -- 이게 7R P1-ⓐ의 harm path다.
+    const nested = snapshotPlainData({ policy: { protectedTargets: bad } });
+    assert.equal(nested.ok, false, String(bad));
+  }
+});
+
+test("plain-snapshot ⒜: null 프로토타입 객체는 평범한 자료다(통과), 임의 프로토타입 객체는 아니다(거부)", () => {
+  const bare = Object.create(null);
+  bare.k = "v";
+  const okFixed = snapshotPlainData(bare);
+  assert.equal(okFixed.ok, true, okFixed.reason);
+  assert.equal(okFixed.value.k, "v");
+  assert.equal(Object.getPrototypeOf(okFixed.value), Object.prototype);
+
+  const weird = Object.create({ inherited: true });
+  weird.k = "v";
+  const blocked = snapshotPlainData(weird);
+  assert.equal(blocked.ok, false);
+  assert.match(blocked.reason, /prototype/);
 });
 
 test("plain-snapshot ⒝: 산출물은 원본과 분리된다 -- 고정 뒤 원본을 바꿔도 따라가지 않는다", () => {
@@ -63,7 +131,12 @@ test("plain-snapshot ⒞: 산출물은 깊게 얼어 있고 프로토타입은 �
   assert.equal(Object.getPrototypeOf(fixed.value.a), Array.prototype);
 });
 
-test("plain-snapshot ⒞: Array 서브클래스의 own 메서드 재정의는 고정본에 남지 않는다", () => {
+// HYK-447 1R 계약 변경: 6R은 Array 서브클래스를 받아 "재정의가 남지 않은
+// 순정 배열"로 복사했다(그때의 시험이 그 사실을 쟀다). 이제는 받지 않는다 --
+// 서브클래스 인스턴스는 평범한 자료가 아니고, 그 안에는 언제든 접근자·
+// Symbol.species·getter를 심을 수 있다. "무엇이든 자료로 만들어 준다"를
+// 그만두고 "이미 자료인 것만 받는다"로 방향을 뒤집은 결과다(⒜).
+test("plain-snapshot ⒜: Array 서브클래스 인스턴스는 순정 배열로 복사되지 않고 거부된다", () => {
   class EveryBypass extends Array {
     every() {
       return true;
@@ -75,15 +148,11 @@ test("plain-snapshot ⒞: Array 서브클래스의 own 메서드 재정의는 �
   const forged = new EveryBypass();
   forged.push("ok", null);
   const fixed = snapshotPlainData({ forged });
-  assert.equal(fixed.ok, true, fixed.reason);
-  const out = fixed.value.forged;
-  assert.equal(Object.getPrototypeOf(out), Array.prototype);
-  // 고정본의 every/includes는 순정 것이다 -- 재정의는 사라졌다.
-  assert.equal(
-    out.every((el) => typeof el === "string"),
-    false,
+  assert.equal(fixed.ok, false);
+  assert.match(
+    fixed.reason,
+    /Array subclass|prototype is not Array\.prototype/,
   );
-  assert.equal(out.includes("ok"), true);
 });
 
 test("plain-snapshot ⒞: '__proto__' 키는 산출물의 프로토타입을 바꾸지 못하고 평범한 own 속성이 된다", () => {
@@ -157,15 +226,30 @@ test("plain-snapshot: 순환 참조와 과도한 깊이는 예산으로 접힌�
   assert.match(deep.reason, /nests deeper/);
 });
 
-test("plain-snapshot: 던지는 getter는 예외가 아니라 실패 사유로 돌아온다", () => {
+test("plain-snapshot: 던지는 getter는 애초에 불리지 않는다 -- 예외 없이 거부 사유로 돌아온다", () => {
+  let called = false;
   const input = {
     get boom() {
+      called = true;
       throw new Error("nope");
     },
   };
   const fixed = snapshotPlainData(input);
   assert.equal(fixed.ok, false);
-  assert.match(fixed.reason, /reading the input threw \(nope\)/);
+  assert.match(fixed.reason, /accessor property \('boom'\)/);
+  assert.equal(called, false);
+});
+
+// ⚠️ 경계가 **못 잡는 것**을 시험으로 못박아 둔다(정직 한계): 순정 객체로
+// 배열을 흉내 낸 값은 이미 "그 평범한 자료 자체"이므로 여기서는 통과한다.
+// 그것을 "보호 목록이 비어 있다"로 읽지 않는 책임은 소비자 스키마에 있다
+// (teardown-core.mjs의 isValidPolicyShape -- 그쪽 시험이 그 자리를 잰다).
+test("plain-snapshot 정직 한계: 배열을 흉내 낸 순정 객체는 경계가 구별하지 못한다(통과) -- 거부는 소비자 스키마 몫이다", () => {
+  const fixed = snapshotPlainData({ 0: "hidden", length: 0 });
+  assert.equal(fixed.ok, true, fixed.reason);
+  assert.equal(Array.isArray(fixed.value), false);
+  assert.equal(fixed.value.length, 0);
+  assert.equal(fixed.value["0"], "hidden");
 });
 
 test("plain-snapshot: 원시값/undefined/null은 그대로 통과한다", () => {
