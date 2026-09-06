@@ -31,6 +31,102 @@ export { TIME_AUTHORITY_STATE, MAX_FUTURE_SKEW_MS };
 // 없으므로 조용히 하나를 고르지 않고 판정 불가로 멈춘다(2026-07-31 거짓
 // 기록 사고). TASK_ID_RE(과거: 첫 매치 채택)와 DONE_RE(과거: 마지막 매치
 // 채택)가 서로 반대 방향을 조용히 골랐던 것이 이 수리의 대상이다.
+// ---- HYK-449: 「인용된 표지」는 표지가 아니다 -----------------------------
+//
+// 2026-09-06 실사고: 검토자가 러너 영수증 **원문**을 코드블록(```)에 그대로
+// 붙였고, 그 안의 `head_commit:` 줄이 칼럼 0 이라 이 파일이 **표지로 세었다**.
+// 두 줄의 값은 완전히 동일했는데도 "어느 것이 최종인지 결정할 수 없다"로
+// 거부됐고, 첫 관측이 이미 고정된 뒤라 고칠 수도 없어 라운드 하나가 양방향
+// 교착에 빠졌다(HYK-449 등재문).
+//
+// ★수리의 단위는 **원소가 아니라 범주**다 -- HYK-442 1R 이 정확히 그 실수로
+// 반려됐다(백틱 «하나만» 벗겼다가 같은 보고서의 홑따옴표 인용에 다시 뚫렸다).
+// 그래서 여기서는 「무엇을 벗길까」가 아니라 **「이 문서가 «주장하는» 텍스트는
+// 무엇인가」**를 정의한다:
+//
+//   ★판별식 -- 표지는 **문서 자신이 말하는 줄**일 때만 표지다. 문서가
+//   「보여주기만 하는」 영역과 「꺼 둔」 영역의 글자는 표지가 아니다.
+//     ⑴ **펜스 코드블록**(보여주는 영역) -- ``` 와 ~~~ **둘 다**, 3개 이상
+//        **임의 길이**, CommonMark 대로 최대 3칸 들여쓴 펜스까지, 정보
+//        문자열(```text 등) 유무 무관. 닫는 펜스는 **같은 문자로 여는 펜스
+//        이상 길이**여야 한다(그래서 ````` 블록 안의 ``` 는 닫지 못한다).
+//     ⑵ **HTML 주석**(꺼 둔 영역) `<!-- … -->` -- 이 저장소의 결과 파일이
+//        실제로 쓰는 형태다(라운드 보존 블록의 `<!-- envelope-archive: … -->`).
+//
+// ⛔여기 **넣지 않은 것**과 그 근거(추측이 아니라 시험으로 고정했다 --
+//   hyk449-quoted-marker-count.test.mjs 의 「범주 밖」 시험군):
+//     - 인용 블록(`> `) · 들여쓴 코드블록(4칸) · 인라인 코드(`…`)는 그 줄이
+//       애초에 **칼럼 0 이 아니다**. 이 파일의 표지 정규식은 전부 `^` 앵커라
+//       원래 매치하지 못한다 -- 「범주에서 빠뜨린 자리」가 **아니라 이미 닫혀
+//       있는 자리**다.
+// ⛔**`>>> BLOCKED:` / `NEEDS_INPUT:` 축에는 이 마스킹을 적용하지 않는다.**
+//   그 축의 「어디에 있든 센다」는 **의도된 fail-closed 설계**이고(HYK-333 ·
+//   HYK-442), 거기에 인용 제외를 넣는 것은 안전 성질을 약화시키는 회귀다.
+//
+// ⚠️마스킹은 **길이를 보존**한다(개행만 남기고 나머지 글자를 공백으로 바꾼다)
+//   -- 호출자가 매치의 `.index` 로 **원문**을 자르기 때문이다(judgedRegion).
+//   그래서 마스킹된 사본에서 얻은 오프셋이 원문에서 그대로 유효하다.
+// ⚠️닫히지 않은 펜스/주석은 **문서 끝까지** 마스킹한다 -- 그 방향은
+//   fail-closed 다(표지가 「사라져」 missing/pending 으로 떨어지지, 없는 표지가
+//   생기지 않는다).
+const FENCE_OPEN_RE = /^ {0,3}(`{3,}|~{3,})/;
+
+function blankKeepingNewlines(text) {
+  return text.replace(/[^\n]/g, " ");
+}
+
+function maskFencedBlocks(content) {
+  let fence = null;
+  return content
+    .split("\n")
+    .map((line) => {
+      if (fence === null) {
+        const opened = FENCE_OPEN_RE.exec(line);
+        if (!opened) return line;
+        fence = { char: opened[1][0], len: opened[1].length };
+        return blankKeepingNewlines(line);
+      }
+      // ⚠️`\r` 를 반드시 허용해야 한다: 이 저장소의 결과 파일은 실제로
+      // **CRLF** 다(Windows 좌석). 줄을 `\n` 으로 가르면 각 줄 끝에 `\r` 가
+      // 남는데, 그것을 허용하지 않으면 **닫는 펜스를 영영 못 알아본다** --
+      // 그러면 첫 펜스가 문서 끝까지 인용으로 삼켜 «표지가 사라진» 것처럼
+      // 되고 라운드가 PENDING 으로 막힌다(HYK-449 1R 에서 내 결과 파일이
+      // 실제로 그렇게 막혔다). 다른 축들이 CRLF 에서 멀쩡한 이유는 그쪽
+      // 정규식이 `m` 플래그를 써 `$` 가 `\r` 앞에서도 맞기 때문이고, 여기는
+      // 줄 단위로 직접 대조하므로 그 도움을 받지 못한다.
+      const closer = new RegExp(
+        `^ {0,3}\\${fence.char}{${fence.len},}[ \t\r]*$`,
+      );
+      if (closer.test(line)) fence = null;
+      return blankKeepingNewlines(line);
+    })
+    .join("\n");
+}
+
+function maskHtmlComments(content) {
+  let out = content;
+  let from = 0;
+  for (;;) {
+    const start = out.indexOf("<!--", from);
+    if (start === -1) return out;
+    const closeAt = out.indexOf("-->", start + 4);
+    const end = closeAt === -1 ? out.length : closeAt + 3;
+    out =
+      out.slice(0, start) +
+      blankKeepingNewlines(out.slice(start, end)) +
+      out.slice(end);
+    from = end;
+  }
+}
+
+// 표지를 세는 축들이 보는 「문서 자신이 말한 것」. ⛔BLOCKED 축은 이것을
+// 쓰지 않는다(위 주석). 내보내는 이유는 시험이 판별식 자체를 직접 재기
+// 위해서다 -- 축마다 각자 복사본을 만들면 조용히 어긋난다(이 파일이
+// DONE_RE/TASK_ID_RE_G 를 내보내는 것과 같은 재사용 규율).
+export function maskQuotedMarkerRegions(content) {
+  return maskHtmlComments(maskFencedBlocks(content));
+}
+
 const TASK_ID_RE = /^task_id:\s*(\S+)/im;
 const TASK_ID_RE_G = /^task_id:\s*(\S+)/gim;
 // HYK-180 사이클1: the anchored TASK_ID_RE only matches a standalone
@@ -354,7 +450,9 @@ function isInsideGitWorktree(dir) {
 // ever read `.ok`/`.reason`) and lets a caller branch on the failure
 // shape (missing/ambiguous/mid-line) without string-matching `.reason`.
 export function resolveResultTaskId(resultContent) {
-  const resultIdMatches = [...resultContent.matchAll(TASK_ID_RE_G)];
+  // HYK-449: 인용된(코드블록·HTML 주석) 줄은 이 문서가 «말한» 것이 아니다.
+  const scan = maskQuotedMarkerRegions(resultContent);
+  const resultIdMatches = [...scan.matchAll(TASK_ID_RE_G)];
   if (resultIdMatches.length > 1) {
     return {
       ok: false,
@@ -365,7 +463,7 @@ export function resolveResultTaskId(resultContent) {
   if (resultIdMatches.length === 1) {
     return { ok: true, id: resultIdMatches[0][1] };
   }
-  if (TASK_ID_ANYWHERE_RE.test(resultContent)) {
+  if (TASK_ID_ANYWHERE_RE.test(scan)) {
     return {
       ok: false,
       kind: "MID_LINE",
@@ -385,7 +483,12 @@ export function resolveResultTaskId(resultContent) {
 // the result file's '>>> DONE:' line into either a single match or an
 // explicit ambiguity/absence reason, never a silently-chosen one.
 function resolveResultDoneMatch(resultContent) {
-  const doneMatches = [...resultContent.matchAll(DONE_RE)];
+  // HYK-449: 같은 이유로 인용된 `>>> DONE:` 줄은 세지 않는다. 마스킹이
+  // 길이를 보존하므로 여기서 돌려주는 매치의 .index 는 «원문» 기준으로
+  // 그대로 유효하다(호출자가 judgedRegion 을 그 오프셋으로 자른다).
+  const doneMatches = [
+    ...maskQuotedMarkerRegions(resultContent).matchAll(DONE_RE),
+  ];
   if (doneMatches.length > 1) {
     return {
       ok: false,
@@ -1429,7 +1532,10 @@ const HEAD_COMMIT_RE_G = /^head_commit:[ \t]*([0-9a-fA-F]{40})[ \t]*$/gm;
 const HEAD_COMMIT_ANYWHERE_RE = /head_commit:\s*(\S+)/i;
 
 function resolveHeadCommitField(content, { label }) {
-  const matches = [...content.matchAll(HEAD_COMMIT_RE_G)];
+  // ★HYK-449 가 실제로 교착시킨 자리 -- 영수증을 코드블록에 인용한 것만으로
+  // 「표지 2개」가 됐다(값은 동일했다).
+  const scan = maskQuotedMarkerRegions(content);
+  const matches = [...scan.matchAll(HEAD_COMMIT_RE_G)];
   if (matches.length > 1) {
     return {
       ok: false,
@@ -1439,7 +1545,7 @@ function resolveHeadCommitField(content, { label }) {
   if (matches.length === 1) {
     return { ok: true, sha: matches[0][1].toLowerCase() };
   }
-  if (HEAD_COMMIT_ANYWHERE_RE.test(content)) {
+  if (HEAD_COMMIT_ANYWHERE_RE.test(scan)) {
     return {
       ok: false,
       reason: `${label} head_commit not a standalone column-0 'head_commit: <40-hex sha>' line (found mid-line, or value is not a full 40-hex git SHA, HYK-383)`,
@@ -3081,8 +3187,12 @@ function computeResultFingerprint(resultContent) {
 // itself).
 const VERDICT_LINE_RE_G = /^verdict:\s*(approved|rejected)\s*$/gim;
 
-function countVerdictLines(resultContent) {
-  return [...resultContent.matchAll(VERDICT_LINE_RE_G)].length;
+// HYK-449: 내보낸다 -- 시험/probe 가 이 축을 «생산 코드 그대로» 잴 수 있게
+// (축마다 시험이 자기 복사본 정규식을 만들면 조용히 어긋난다).
+export function countVerdictLines(resultContent) {
+  // HYK-449: 인용된 `verdict:` 줄은 세지 않는다(위 maskQuotedMarkerRegions).
+  return [...maskQuotedMarkerRegions(resultContent).matchAll(VERDICT_LINE_RE_G)]
+    .length;
 }
 
 // HYK-244 2R-a §2 조각2: builds the consumption-receipt-core.mjs candidate
