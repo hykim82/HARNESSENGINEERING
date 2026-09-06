@@ -717,7 +717,11 @@ test("NC mutation/unconsumed-core #4 (HYK-448): 원장 종결 갈래를 통째�
   );
 });
 
-test("★★NC mutation/unconsumed-core #5 (HYK-448 §1-4 비타협): 「닫힌 뒤 변경」 갈래만 제거 -> RED (진짜 1건이 침묵으로 사라진다)", async () => {
+// ⛔이 시험의 이름은 반드시 `"NC mutation/<suite> #<n>` 로 «시작»해야 한다 --
+// unconsumed-mutation-count.test.mjs 의 MUTATION_TEST_NAME_RE 가 그 형태만
+// 세기 때문이다(1R 실측: 앞에 강조 기호를 붙였더니 #5 가 통째로 안 세어져
+// 「1,2,3,4,6 -- 빈틈」으로 러너가 빨갛게 났다). 강조는 이름 «안»에 둔다.
+test("NC mutation/unconsumed-core #5 (★HYK-448 §1-4 비타협): 「닫힌 뒤 변경」 갈래만 제거 -> RED (진짜 1건이 침묵으로 사라진다)", async () => {
   // ⛔이 변이가 잡아내는 것이 정확히 「원장이 닫았으면 무조건 침묵」이라는
   // 잘못된 번역이다 -- 그렇게 고쳤다면 이 시험이 빨강으로 죽는다.
   const mutant = await importMutatedCopy((src) =>
