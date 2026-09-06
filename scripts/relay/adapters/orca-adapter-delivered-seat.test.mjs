@@ -596,6 +596,34 @@ test("isValidBranchNameGrammar: independent review's 2 NEW counter-examples (fou
   assert.equal(isValidBranchNameGrammar("a/b.lockx/c"), true);
 });
 
+// HYK-431 5R / HYK-436 (§2-1/§2-2, coder-task.md): isValidBranchNameGrammar
+// 자신은 name이 원시 문자열이라는 보장을 강제하지 않았다 -- 문자열을
+// 흉내 내며 includes/startsWith/endsWith/split을 항상 "안전" 쪽으로
+// 재정의한 객체가 들어오면 위 두 시험이 확인한 6개 반례와 동일한
+// 위험한 배치(".."·".lock"으로 끝나는 구성요소)를 담고 있어도 전부
+// 통과해버린다(재현 픽스처: .harness/review-attack-orca-adapter-branch-grammar.mjs).
+// typeof 가드가 이 클래스의 위장을 원천 차단한다(원시 문자열은 자기
+// 프로퍼티를 가질 수 없어 재정의가 애초에 불가능).
+test("isValidBranchNameGrammar: an object impersonating a string (own includes/startsWith/endsWith/split all rigged to look safe) is rejected outright, not evaluated by its own methods", () => {
+  class ForgedBranchName {
+    includes() {
+      return false;
+    }
+    startsWith() {
+      return false;
+    }
+    endsWith() {
+      return false;
+    }
+    split() {
+      return ["safe-component"];
+    }
+  }
+  assert.equal(isValidBranchNameGrammar(new ForgedBranchName()), false);
+  // 원시 문자열은 그대로 정상 동작(회귀 0).
+  assert.equal(isValidBranchNameGrammar("feature/sub-name"), true);
+});
+
 // 같은 6개(기존 4 + 신규 2)를 resolveDeliveredSeat 레벨에서도 확인한다
 // (§1 요구 3: "헬퍼만 부르는 시험으로 끝내지 마라" -- 가짜 task-list/
 // dispatch-show/live-seat 응답으로 실제 프로덕션 경로를 직접 호출한다,

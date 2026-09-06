@@ -95,6 +95,44 @@ test("issueSubGrant: fully valid delegation + in-scope request + admission ALLOW
   }
 });
 
+// HYK-431 5R / HYK-436 (§2-1/§2-2, coder-task.md, REVIEW 4R 직접 재현으로
+// 확정된 P1): allowed_task_hashes가 every를 항상 true로 재정의한 Array
+// 서브클래스이고 null 원소를 담고 있으면, 원래 코드는 그 인스턴스 자신의
+// (재정의된) every를 그대로 불러 검증을 우회했다 -- ISSUED까지 도달했다
+// (재현 픽스처: .harness/review-attack-grant-issuer.mjs). 원형의 every를
+// Array.prototype.every.call로 빌려 부르면 인스턴스가 무엇을 재정의했든
+// 무관해진다.
+test("issueSubGrant: allowed_task_hashes as an Array subclass with every() rigged to always return true and a null element -> DENY DELEGATION_INVALID, 0 issued (P1, review-4 exact repro)", () => {
+  const consumptionDir = freshDir();
+  const outDir = freshDir();
+  try {
+    withFullPipelineRequest({ consumptionDir, outDir }, (request) => {
+      class EveryBypass extends Array {
+        every() {
+          return true;
+        }
+      }
+      const forgedHashes = new EveryBypass();
+      forgedHashes.push(DELEGATION_TASK_HASH, null);
+      const forgedRequest = {
+        ...request,
+        delegation: {
+          ...request.delegation,
+          allowed_task_hashes: forgedHashes,
+        },
+      };
+      const result = issueSubGrant(forgedRequest);
+      assert.equal(result.ok, false, JSON.stringify(result));
+      assert.equal(result.issued, false);
+      assert.equal(result.reason, REASON.DELEGATION_INVALID);
+      assert.equal(countSubGrantFiles(outDir), 0);
+    });
+  } finally {
+    cleanup(consumptionDir);
+    cleanup(outDir);
+  }
+});
+
 // ---- §6 mutation #8: 서명범위 이탈(task hash/role/budget 밖) -> grant 0 ----
 test("issueSubGrant: task_hash outside delegation.allowed_task_hashes -> DENY, 0 issued (mutation #8 a)", () => {
   const consumptionDir = freshDir();

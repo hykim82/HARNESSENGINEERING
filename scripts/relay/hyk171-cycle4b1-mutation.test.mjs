@@ -454,7 +454,12 @@ for (const [label, value] of [
 test("required#4b: dispatchCorrelationProven === true passes that guard (does not by itself force allowSink true -- other axes still apply)", () => {
   const opts = staticEligibleOpts();
   const ctx = eligibleTeardownCtx({
-    policy: { protectedTargets: [], dispatchCorrelationProven: true },
+    policy: {
+      protectedTargets: [],
+      expectedWorktreeId: "wt-0",
+      requireDurableEvidence: false,
+      dispatchCorrelationProven: true,
+    },
   });
   const r = teardownSeat(ctx, opts);
   assert.notEqual(
