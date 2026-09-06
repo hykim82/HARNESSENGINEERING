@@ -480,6 +480,288 @@ test("NC mutation/unconsumed-core #3 (필수): 신호 형식 검사(isWellFormed
   );
 });
 
+// ===========================================================================
+// ★HYK-448 -- ORCH-60 이 어젯밤(2026-09-06 21:00~03:00) 각성 4회를 건별로
+// 판정해 남긴 «세 얼굴»을 그대로 픽스처로 고정한다.
+// 원문 = .harness/evidence-448/ORCH-measured-awakening-faces.txt
+//
+//   형태 A(상시 오탐)  -- 중단 종결 라운드. 영수증 0개. 침묵해야 한다.
+//   형태 B(진행 중 오탐) -- 아직 안 끝난 라운드. 종료 표지 0개. 침묵해야 한다.
+//   진짜 1건(살려야 함) -- 소비가 끝난 «뒤» 결과 파일이 다시 바뀌었다.
+//
+// ⛔이 세 픽스처의 값(시각·개수)은 위 실측 원문에서 그대로 옮긴 것이지
+// 지어낸 것이 아니다. 각 상수 옆에 출처를 적어 둔다.
+// ===========================================================================
+
+// FACE 1 -- worktree hyk437-admission-anchor-1, 결과 파일 mtime 17:58:29.
+// 그 라운드는 «중단»으로 정상 종결됐고 원장은 그것을 닫았다(중단 종결의
+// completion_reason = BLOCKED_TERMINATION_RELEASED).
+const FACE_A_RESULT_MS = Date.parse("2026-09-05T17:58:29+09:00");
+// 원장은 결과 파일이 쓰인 «뒤»에 그 결과를 보고 닫는다(어댑터가 결과 파일의
+// 표지·task_id 에코를 확인한 다음 완료를 찍는다) -- 그래서 닫힌 시각이 결과
+// 파일보다 나중이다. 여기서는 30초 뒤로 둔다.
+const FACE_A_CLOSED_MS = FACE_A_RESULT_MS + 30_000;
+// 각성이 실제로 이 워크트리를 «매 주기» 지목한 시점대(다음날 새벽).
+const FACE_A_NOW_MS = Date.parse("2026-09-07T02:48:00+09:00");
+
+// FACE 2 -- worktree hyk431-seat-reclaim-1, HYK-449 가 아직 돌던 21:29 관측.
+// coder.md mtime 21:00:32, ★종료 표지 0개, 세 소비 흔적은 전부 결과 파일보다
+// 이르다(그래서 신호가 하나도 서지 않는다).
+const FACE_B_RESULT_MS = Date.parse("2026-09-06T21:00:32+09:00");
+const FACE_B_NOW_MS = Date.parse("2026-09-06T21:29:00+09:00");
+
+// FACE 3(진짜) -- 같은 워크트리, 소비가 «끝난 뒤». 영수증 r10 23:08:29 로
+// 소비 확정 -> 워커가 23:11:36 에 그 결과 파일을 다시 고쳤다.
+const FACE_C_CLOSED_MS = Date.parse("2026-09-06T23:08:29+09:00");
+const FACE_C_RESULT_MS = Date.parse("2026-09-06T23:11:36+09:00");
+const FACE_C_NOW_MS = Date.parse("2026-09-07T02:48:00+09:00");
+
+// 세 얼굴 모두 «신호 0건 + 임계 초과» 라는 같은 자리에서 갈린다 -- 그래서
+// 이 헬퍼 하나로 세 픽스처를 만든다(차이는 오직 새 입력 둘뿐임을 드러낸다).
+function judgeFace({ resultMs, nowMs, terminalMarkerCount, roundClosure }) {
+  return judgeUnconsumed({
+    resultFile:
+      terminalMarkerCount === undefined
+        ? { updatedAtMs: resultMs }
+        : { updatedAtMs: resultMs, terminalMarkerCount },
+    signals: [],
+    now: nowMs,
+    thresholds: { minUnconsumedSeconds: THRESHOLD_S },
+    ...(roundClosure === undefined ? {} : { roundClosure }),
+  });
+}
+
+test("★HYK-448 형태 A(상시 오탐): 중단으로 끝나 영수증이 0개인 보존 워크트리 -- 수리 전(원장 정보 없음)은 SUSPECTED_UNCONSUMED 로 발화하고, 원장 종결을 넘기면 CONSUMED 로 조용해진다 (RED/GREEN 2/2)", () => {
+  // RED: 이 라운드 전의 호출 모양 그대로(새 입력 둘 다 없음) -- 매 주기
+  // 발화하던 바로 그 판정이다.
+  const before = judgeFace({
+    resultMs: FACE_A_RESULT_MS,
+    nowMs: FACE_A_NOW_MS,
+  });
+  assert.equal(
+    before.verdict,
+    UNCONSUMED_VERDICT.SUSPECTED_UNCONSUMED,
+    "수리 전 재현: 영수증이 없다는 이유만으로 미소비로 발화했다(이것이 등재된 결함)",
+  );
+  assert.equal(before.reasonCode, UNCONSUMED_REASON.NO_SIGNAL_PAST_THRESHOLD);
+
+  // GREEN: 원장이 「닫았다」고 말한다. 결과 파일은 닫힌 시각보다 이르다.
+  const after = judgeFace({
+    resultMs: FACE_A_RESULT_MS,
+    nowMs: FACE_A_NOW_MS,
+    terminalMarkerCount: 1, // 중단 표지 1개로 끝난 파일.
+    roundClosure: {
+      closed: true,
+      closedAtMs: FACE_A_CLOSED_MS,
+      completionReason: "BLOCKED_TERMINATION_RELEASED",
+    },
+  });
+  assert.equal(
+    after.verdict,
+    UNCONSUMED_VERDICT.CONSUMED,
+    "원장이 닫은 라운드는 영수증 파일이 없어도 소비된 것이다 -- 「영수증 없음」은 「미소비」가 아니다",
+  );
+  assert.equal(after.reasonCode, UNCONSUMED_REASON.CONSUMED_VIA_LEDGER_CLOSURE);
+  assert.equal(after.details.consumedAtMs, FACE_A_CLOSED_MS);
+  assert.equal(after.details.completionReason, "BLOCKED_TERMINATION_RELEASED");
+});
+
+test("★HYK-448 형태 B(진행 중 오탐): 아직 안 끝난 라운드(종료 표지 0개) -- 수리 전은 SUSPECTED_UNCONSUMED, 표지 개수를 넘기면 UNDECIDABLE/ROUND_NOT_FINISHED 로 조용해진다 (RED/GREEN 2/2)", () => {
+  const before = judgeFace({
+    resultMs: FACE_B_RESULT_MS,
+    nowMs: FACE_B_NOW_MS,
+  });
+  assert.equal(
+    before.verdict,
+    UNCONSUMED_VERDICT.SUSPECTED_UNCONSUMED,
+    "수리 전 재현: 판별기가 「종료 표지가 있는가」를 아예 안 봤다",
+  );
+
+  const after = judgeFace({
+    resultMs: FACE_B_RESULT_MS,
+    nowMs: FACE_B_NOW_MS,
+    terminalMarkerCount: 0, // ★실측: 종료 표지가 하나도 없었다.
+  });
+  assert.equal(
+    after.verdict,
+    UNCONSUMED_VERDICT.UNDECIDABLE,
+    "끝나지 않은 라운드에는 소비할 결과 자체가 없다 -- 「미소비」로도 「소비」로도 새지 않는다",
+  );
+  assert.equal(after.reasonCode, UNCONSUMED_REASON.ROUND_NOT_FINISHED);
+});
+
+test("★★HYK-448 진짜 1건(§1-4)은 살아 있다: 원장이 «닫은» 라운드라도 결과 파일이 닫힌 뒤에 바뀌었으면 MODIFIED_AFTER_CLOSURE 로 발화한다 -- 「원장이 닫았으면 침묵」으로 번역하지 않았다는 증거 (1/1)", () => {
+  const judged = judgeFace({
+    resultMs: FACE_C_RESULT_MS,
+    nowMs: FACE_C_NOW_MS,
+    terminalMarkerCount: 1, // DONE 으로 끝난 파일이었다(그 «뒤»에 절이 붙었다).
+    roundClosure: {
+      closed: true,
+      closedAtMs: FACE_C_CLOSED_MS,
+      completionReason: "OK",
+    },
+  });
+  assert.equal(
+    judged.verdict,
+    UNCONSUMED_VERDICT.MODIFIED_AFTER_CLOSURE,
+    "★이 발화가 사라지면 ORCH 는 「소비 후 편집」과 새 커밋을 영영 몰랐을 것이다(실측 원문)",
+  );
+  assert.equal(
+    judged.reasonCode,
+    UNCONSUMED_REASON.RESULT_EDITED_AFTER_CLOSURE,
+  );
+  assert.equal(judged.details.closedAtMs, FACE_C_CLOSED_MS);
+  // 실측된 편집 지연(23:08:29 -> 23:11:36 = 187초)이 그대로 실린다.
+  assert.equal(judged.details.editedAfterClosureMs, 187_000);
+  // ⛔그리고 「미소비」와 «다른 이름»이어야 한다 -- 사람이 취할 조치가 다르다.
+  assert.notEqual(judged.verdict, UNCONSUMED_VERDICT.SUSPECTED_UNCONSUMED);
+});
+
+test("★★HYK-448 요구2(헛수리 방지): 진짜 미소비는 여전히 발화한다 -- 원장이 «안 닫았고» 종료 표지도 있는 라운드는 새 입력을 다 줘도 SUSPECTED_UNCONSUMED 다 (3/3)", () => {
+  // ⛔이 시험이 없으면 「전부 침묵」으로 통과시킨 헛수리가 된다.
+  for (const [label, roundClosure] of [
+    ["원장이 ACTIVE 로 안다(closed:false)", { closed: false }],
+    ["원장을 못 읽었다(null)", null],
+    ["원장 정보를 아예 안 넘겼다(undefined)", undefined],
+  ]) {
+    const judged = judgeFace({
+      resultMs: FACE_A_RESULT_MS,
+      nowMs: FACE_A_NOW_MS,
+      terminalMarkerCount: 1, // 끝난 라운드다(형태 B 로 새지 않는다).
+      roundClosure,
+    });
+    assert.equal(
+      judged.verdict,
+      UNCONSUMED_VERDICT.SUSPECTED_UNCONSUMED,
+      `${label}: 닫혔다는 근거가 없으면 종전대로 발화해야 한다(모르면 침묵이 아니다)`,
+    );
+    assert.equal(judged.reasonCode, UNCONSUMED_REASON.NO_SIGNAL_PAST_THRESHOLD);
+  }
+});
+
+test("★HYK-448 회귀 0: 새 입력을 넘겨도 «신호가 있으면» 즉시 CONSUMED 이고 «임계 이내»면 NO_SIGNAL_TOO_EARLY 다 -- 이 라운드는 발화 자리 한 곳만 넓혔다 (2/2)", () => {
+  const consumed = judgeUnconsumed({
+    resultFile: { updatedAtMs: FACE_A_RESULT_MS, terminalMarkerCount: 0 },
+    signals: [
+      {
+        kind: UNCONSUMED_SIGNAL_KIND.TASK_FILE_DROPPED_AFTER,
+        atMs: FACE_A_RESULT_MS + 60_000,
+      },
+    ],
+    now: FACE_A_NOW_MS,
+    thresholds: { minUnconsumedSeconds: THRESHOLD_S },
+    // 닫혔다고 말해도 «신호» 경로가 먼저다 -- 종전 판정이 그대로 유지된다.
+    roundClosure: { closed: true, closedAtMs: FACE_A_CLOSED_MS },
+  });
+  assert.equal(consumed.verdict, UNCONSUMED_VERDICT.CONSUMED);
+  assert.equal(consumed.reasonCode, UNCONSUMED_REASON.CONSUMED_VIA_TASK_DROP);
+
+  const tooEarly = judgeFace({
+    resultMs: FACE_B_RESULT_MS,
+    nowMs: FACE_B_RESULT_MS + 10_000, // 임계(300초) 이내.
+    terminalMarkerCount: 0,
+  });
+  assert.equal(tooEarly.verdict, UNCONSUMED_VERDICT.UNDECIDABLE);
+  assert.equal(tooEarly.reasonCode, UNCONSUMED_REASON.NO_SIGNAL_TOO_EARLY);
+});
+
+test("★HYK-448 형식 위반은 조용히 무시하지 않는다: roundClosure 가 깨졌으면 CLOSURE_MALFORMED, terminalMarkerCount 가 깨졌으면 RESULT_FILE_INVALID (6/6)", () => {
+  for (const bad of [
+    { closed: "yes" }, // boolean 아님
+    { closed: true }, // closedAtMs 없음
+    { closed: true, closedAtMs: "23:08" }, // 유한수 아님
+    { closed: true, closedAtMs: FACE_A_CLOSED_MS, completionReason: 7 },
+  ]) {
+    const judged = judgeFace({
+      resultMs: FACE_A_RESULT_MS,
+      nowMs: FACE_A_NOW_MS,
+      roundClosure: bad,
+    });
+    assert.equal(judged.verdict, UNCONSUMED_VERDICT.UNDECIDABLE);
+    assert.equal(judged.reasonCode, UNCONSUMED_REASON.CLOSURE_MALFORMED);
+  }
+  for (const badCount of [-1, 1.5]) {
+    const judged = judgeFace({
+      resultMs: FACE_A_RESULT_MS,
+      nowMs: FACE_A_NOW_MS,
+      terminalMarkerCount: badCount,
+    });
+    assert.equal(judged.verdict, UNCONSUMED_VERDICT.UNDECIDABLE);
+    assert.equal(judged.reasonCode, UNCONSUMED_REASON.RESULT_FILE_INVALID);
+  }
+});
+
+test("NC mutation/unconsumed-core #4 (HYK-448): 원장 종결 갈래를 통째로 제거 -> RED (형태 A 가 다시 상시 발화한다)", async () => {
+  const mutant = await importMutatedCopy((src) =>
+    applyMutation(
+      src,
+      "  if (roundClosure && roundClosure.closed) {",
+      "  if (false) {",
+    ),
+  );
+  const judged = mutant.judgeUnconsumed({
+    resultFile: { updatedAtMs: FACE_A_RESULT_MS, terminalMarkerCount: 1 },
+    signals: [],
+    now: FACE_A_NOW_MS,
+    thresholds: { minUnconsumedSeconds: THRESHOLD_S },
+    roundClosure: {
+      closed: true,
+      closedAtMs: FACE_A_CLOSED_MS,
+      completionReason: "BLOCKED_TERMINATION_RELEASED",
+    },
+  });
+  assert.equal(
+    judged.verdict,
+    UNCONSUMED_VERDICT.SUSPECTED_UNCONSUMED,
+    "mutant must go back to firing on a ledger-closed round (RED signal; proves the closure branch is load-bearing)",
+  );
+});
+
+test("★★NC mutation/unconsumed-core #5 (HYK-448 §1-4 비타협): 「닫힌 뒤 변경」 갈래만 제거 -> RED (진짜 1건이 침묵으로 사라진다)", async () => {
+  // ⛔이 변이가 잡아내는 것이 정확히 「원장이 닫았으면 무조건 침묵」이라는
+  // 잘못된 번역이다 -- 그렇게 고쳤다면 이 시험이 빨강으로 죽는다.
+  const mutant = await importMutatedCopy((src) =>
+    applyMutation(
+      src,
+      "    if (updatedAtMs > closedAtMs) {",
+      "    if (false) {",
+    ),
+  );
+  const judged = mutant.judgeUnconsumed({
+    resultFile: { updatedAtMs: FACE_C_RESULT_MS, terminalMarkerCount: 1 },
+    signals: [],
+    now: FACE_C_NOW_MS,
+    thresholds: { minUnconsumedSeconds: THRESHOLD_S },
+    roundClosure: { closed: true, closedAtMs: FACE_C_CLOSED_MS },
+  });
+  assert.equal(
+    judged.verdict,
+    UNCONSUMED_VERDICT.CONSUMED,
+    "mutant must silently swallow the post-closure edit (RED signal; proves the true-positive branch is load-bearing)",
+  );
+});
+
+test("NC mutation/unconsumed-core #6 (HYK-448): 「아직 안 끝난 라운드」 갈래 제거 -> RED (형태 B 가 다시 발화한다)", async () => {
+  const mutant = await importMutatedCopy((src) =>
+    applyMutation(
+      src,
+      "  if (terminalMarkerCount === 0) {\n    return undecidable(UNCONSUMED_REASON.ROUND_NOT_FINISHED);\n  }\n",
+      "",
+    ),
+  );
+  const judged = mutant.judgeUnconsumed({
+    resultFile: { updatedAtMs: FACE_B_RESULT_MS, terminalMarkerCount: 0 },
+    signals: [],
+    now: FACE_B_NOW_MS,
+    thresholds: { minUnconsumedSeconds: THRESHOLD_S },
+  });
+  assert.equal(
+    judged.verdict,
+    UNCONSUMED_VERDICT.SUSPECTED_UNCONSUMED,
+    "mutant must go back to firing on an unfinished round (RED signal; proves the in-flight branch is load-bearing)",
+  );
+});
+
 after(() => {
   const postStatus = execFileSync("git", ["status", "--porcelain"], {
     cwd: ROOT,

@@ -2155,6 +2155,78 @@ function isReservationCompletedForRound(ledgerPath, roundLabel, opts) {
   return ledger?.reservations?.[roundLabel]?.status === "COMPLETED";
 }
 
+// ★HYK-448 (coder-task.md §1-2): 이 축의 판정 근거를 «영수증 파일이 있는가»
+// 라는 대리 지표에서 «원장이 이 라운드를 닫았는가»로 옮기기 위해, 원장
+// 항목에서 종결 사실 셋을 읽는다 -- `status`·`completed_at`·
+// `completion_reason`(admission-ledger-core.mjs completeReservation이 닫을
+// 때 적는 바로 그 세 필드다).
+//
+// ⛔위 isReservationCompletedForRound와 «다른 함수»로 두는 이유: 그쪽은
+// 「영수증 신호를 세워도 되는가」를 묻는 boolean 게이트고(4중 검증의 한
+// 갈래), 이쪽은 「언제 닫혔는가」라는 값을 가져온다. 한 함수로 합치면
+// boolean 게이트 쪽 계약이 바뀌어 그 4중 검증의 의미가 흔들린다.
+//
+// ★반환 계약(fail-closed): 못 읽거나·항목이 없거나·COMPLETED가 아니거나·
+// `completed_at`이 시각으로 파싱되지 않으면 ⇒ `null`(= 「모른다」).
+// 코어는 「모른다」를 **침묵이 아니라 종전대로 발화**로 번역한다(코어 헤더
+// 참조) -- 원장을 못 읽었다는 이유로 진짜 미소비를 잃지 않기 위해서다.
+function readRoundClosureFromLedger(ledgerPath, roundLabel, opts) {
+  if (
+    !isNonEmptyReceiptString(ledgerPath) ||
+    !isNonEmptyReceiptString(roundLabel)
+  ) {
+    return null;
+  }
+  const readFileFn =
+    typeof opts.ledgerReadFn === "function" ? opts.ledgerReadFn : readFileSync;
+  let ledger;
+  try {
+    ledger = JSON.parse(readFileFn(ledgerPath, "utf8"));
+  } catch {
+    return null;
+  }
+  const entry = ledger?.reservations?.[roundLabel];
+  if (!entry || entry.status !== "COMPLETED") return null;
+  const closedAtMs = Date.parse(entry.completed_at);
+  if (!Number.isFinite(closedAtMs)) return null;
+  return {
+    closed: true,
+    closedAtMs,
+    completionReason:
+      typeof entry.completion_reason === "string"
+        ? entry.completion_reason
+        : null,
+  };
+}
+
+// ★HYK-448 (coder-task.md §1-3 형태 B): 결과 파일의 «종료 표지» 개수.
+// 0이면 그 라운드는 아직 끝나지 않았다는 뜻이다 -- 판별기가 지금까지 이
+// 사실을 아예 안 봤기 때문에, 진행 중인 라운드가 임계를 넘기면 그대로
+// 미소비로 발화했다(ORCH-60 실측 형태 B).
+//
+// 세는 대상은 relay-handshake.mjs의 엄격 채택 표지와 같은 «칼럼 0 · 화살표
+// 셋 · 콜론» 모양 셋이다(완료 1종 + 정지 2종). ⛔여기서는 «형식이 올바른
+// 표지»를 세는 것이 목적이 아니라 «라운드가 끝났다고 주장하는 흔적이 하나라도
+// 있는가»만 보므로, 사유 유무 같은 세부 형식은 묻지 않는다 -- 그 판정은
+// 소비 게이트(relay-handshake.mjs)의 몫이고 이 축이 흉내 내면 두 곳이
+// 어긋난다.
+// 반환: 개수(0 이상) 또는 못 읽었으면 `null`(= 「모른다」, 종전 동작 유지).
+const TERMINAL_MARKER_RE_G = /^>>>[ \t]*(DONE|BLOCKED|NEEDS_INPUT)\b/gim;
+
+function countTerminalMarkers(resultAbsolutePath, opts) {
+  const readFileFn =
+    typeof opts.resultContentReadFn === "function"
+      ? opts.resultContentReadFn
+      : readFileSync;
+  let content;
+  try {
+    content = readFileFn(resultAbsolutePath, "utf8");
+  } catch {
+    return null;
+  }
+  return [...content.matchAll(TERMINAL_MARKER_RE_G)].length;
+}
+
 // HYK-356 (기전 확정: ORCH 실측 2026-08-25 헛울림 2건 -- .harness/coder-
 // task.md §0/§1): 경로 계약 자체는 아래 HYK-347 주석 그대로다(인자 ->
 // env(`DISPATCH_RECEIPT_PATH`) -> 없으면 null, fail-closed). ★그런데
@@ -2495,10 +2567,28 @@ export function judgeUnconsumedForRepo(
       resultFile: resultFileInfo,
     };
   }
+  // ★HYK-448: 코어에 넘길 새 관측 둘을 «여기서» 만든다 -- 코어는 여전히
+  // 파일도 git도 원장도 읽지 않는다(그 파일의 비타협 «관측은 호출자가 준다»).
+  // 둘 다 «모르면 null»이고, 코어는 null 을 종전 동작으로 번역한다.
+  const resultAbsolutePath = path.join(repoRoot, resultFileInfo.path);
+  const terminalMarkerCount = countTerminalMarkers(resultAbsolutePath, opts);
+  // 원장에서 종결 상태를 읽으려면 이 결과 파일이 어느 라운드인지 알아야
+  // 한다. 라벨 뽑는 계약은 영수증 축이 이미 쓰는 것을 그대로 재사용한다
+  // (resolveEchoedRoundLabel -- «정확히 하나의 줄머리 task_id:»).
+  const roundLabel = resolveEchoedRoundLabel(resultAbsolutePath, opts);
+  const roundClosure = readRoundClosureFromLedger(
+    resolveAdmissionLedgerPathForUnconsumed(repoRoot, opts),
+    roundLabel,
+    opts,
+  );
   const judged = judgeUnconsumed({
-    resultFile: { updatedAtMs: resultFileInfo.mtimeMs },
+    resultFile:
+      terminalMarkerCount === null
+        ? { updatedAtMs: resultFileInfo.mtimeMs }
+        : { updatedAtMs: resultFileInfo.mtimeMs, terminalMarkerCount },
     signals: signalsResult.signals,
     now,
+    roundClosure,
   });
   return {
     status: UNCONSUMED_WIRE_STATUS.JUDGED,
@@ -2535,8 +2625,24 @@ export const UNCONSUMED_SCAN_SEVERITY = Object.freeze({
   NORMAL: 0, // NOT_APPLICABLE/JUDGED+CONSUMED/JUDGED+UNDECIDABLE 미만 대기.
   UNDECIDABLE: 1, // JUDGED이지만 verdict가 UNDECIDABLE.
   COLLECTION_FAILURE: 2, // 워크트리 열거·harness 읽기·git log 실패.
-  SUSPECTED_UNCONSUMED: 3, // 가장 나쁨.
+  SUSPECTED_UNCONSUMED: 3,
+  // ★HYK-448: 「원장이 닫은 라운드의 결과 파일이 그 뒤에 바뀌었다」.
+  // ⛔SUSPECTED_UNCONSUMED «위»에 두는 것은 임의 선택이 아니다: 이 축의
+  // 대표값(worst)은 하나뿐인데, 만성적으로 하나씩 떠 있는 미소비 의심이
+  // 대표 자리를 차지하면 이 드문 사실이 그 뒤에 가려진다 -- 그것이 바로 이
+  // 이슈가 고치려는 «늑대소년» 실패의 다른 얼굴이다. 또한 성격도 다르다:
+  // 미소비는 «ORCH 가 멈췄나»(가용성)이고, 이쪽은 «이미 확정된 기록이
+  // 흔들렸다»(정합성)라서 조치가 더 급하다.
+  MODIFIED_AFTER_CLOSURE: 4,
 });
+
+// 이 축이 «사람을 깨울 등급»으로 보는 심각도들 -- 아래 worstWorktreePaths가
+// 이름을 채우는 기준이기도 하다(둘이 어긋나면 발화는 하는데 어느 워크트리인지
+// 안 실리는 구멍이 생긴다).
+const UNCONSUMED_FIRING_SEVERITIES = new Set([
+  UNCONSUMED_SCAN_SEVERITY.SUSPECTED_UNCONSUMED,
+  UNCONSUMED_SCAN_SEVERITY.MODIFIED_AFTER_CLOSURE,
+]);
 
 function unconsumedSeverityOf(entry) {
   if (
@@ -2548,6 +2654,9 @@ function unconsumedSeverityOf(entry) {
     return UNCONSUMED_SCAN_SEVERITY.COLLECTION_FAILURE;
   }
   if (entry.status === UNCONSUMED_WIRE_STATUS.JUDGED) {
+    if (entry.verdict === UNCONSUMED_VERDICT.MODIFIED_AFTER_CLOSURE) {
+      return UNCONSUMED_SCAN_SEVERITY.MODIFIED_AFTER_CLOSURE;
+    }
     if (entry.verdict === UNCONSUMED_VERDICT.SUSPECTED_UNCONSUMED) {
       return UNCONSUMED_SCAN_SEVERITY.SUSPECTED_UNCONSUMED;
     }
@@ -2593,12 +2702,14 @@ export function judgeUnconsumedAcrossWorktrees({ repoRoot, now }, opts = {}) {
   // 의심 워크트리 이름"이라는 이 필드의 의미상 그 등급에서 채울 이름이
   // 없다(watch-run.mjs 쪽 시험 요구사항 "CONSUMED일 때도 필드는 존재하되
   // 값은 비어 있다"와 합치).
-  const worstWorktreePaths =
-    worstSeverity === UNCONSUMED_SCAN_SEVERITY.SUSPECTED_UNCONSUMED
-      ? worstEntries
-          .map((w) => w.worktreePath)
-          .filter((p) => typeof p === "string" && p.length > 0)
-      : [];
+  // ★HYK-448: 기준을 «SUSPECTED 일 때만»에서 «깨울 등급이면»으로 넓힌다 --
+  // 새 축도 발화 등급이므로, 안 넓히면 발화는 하는데 어느 워크트리인지가
+  // 빈 배열로 나가는 구멍이 생긴다(위 UNCONSUMED_FIRING_SEVERITIES 참조).
+  const worstWorktreePaths = UNCONSUMED_FIRING_SEVERITIES.has(worstSeverity)
+    ? worstEntries
+        .map((w) => w.worktreePath)
+        .filter((p) => typeof p === "string" && p.length > 0)
+    : [];
   return {
     status: worst ? worst.status : UNCONSUMED_WIRE_STATUS.NOT_APPLICABLE,
     verdict: worst ? worst.verdict : undefined,
