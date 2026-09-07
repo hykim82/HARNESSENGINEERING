@@ -456,7 +456,9 @@ test("ⓓ 변이 RED: removing the persistent-fallback branch from autoCompleteA
   const src = readFileSync(ADAPTER_PATH, "utf8");
   const target = `  let persistentLockPath = null;
   if (!ledgerPath && persistentFallbackAllowed()) {
-    const persistent = resolvePersistentLedgerPaths();
+    // HYK-437 §2⑵: anchor at harnessDir (already isInsideGitWorktree-
+    // validated above), not the bare no-arg call -- see resolvePersistentLedgerPaths's header.
+    const persistent = resolvePersistentLedgerPaths(harnessDir);
     if (persistent) {
       ledgerPath = persistent.ledgerPath;
       persistentLockPath = persistent.lockPath;
