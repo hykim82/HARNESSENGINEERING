@@ -417,6 +417,17 @@ function stageAdapterSiblingDeps(checkDir, supervisorDir) {
   }
 }
 
+// HYK-437 §2⑵ 갱신: 이 시험은 이 라운드 이전에는 harnessDir 자체가
+// mainRepoRoot() 해석에 전혀 관여하지 않았으므로(스폰 cwd=repoDir가 항상
+// 이겼다), scratchHarness에 포인터 파일이 없어도 게이트만 지우면 repoDir의
+// 포인터로 새는 것으로 충분히 재현됐다. HYK-437이 그 ambient-cwd 경로
+// 자체를 막았으므로(resolvePersistentLedgerPaths가 이제 harnessDir을
+// 앵커로 삼는다), 같은 변이(게이트 제거)로 ⓐ가 다시 새려면 scratchHarness
+// «자신»이 (2026-08-19 사고의 실제 모양 -- `.harness` 통째 복사본이 우연히
+// 예전 포인터 파일까지 함께 담고 있던 경우처럼) 자기 포인터 파일을 갖고
+// 있어야 한다. 이 갱신은 게이트가 여전히 독자적으로 부담을 지는(load-
+// bearing) 시나리오를 정확히 다시 만든다 -- 게이트 없이는 그 카피 안의
+// 포인터가 카피 자신의 ledger를 새로 가리키는 경우까지 막을 길이 없다.
 test("RED 변이: removing the harnessDir isolation gate from autoCompleteAdmission -> ⓐ's blocked case goes RED (mutates the real global ledger's synthetic stand-in), and the real source is provably untouched", async () => {
   const src = readFileSync(ADAPTER_PATH, "utf8");
   const target = `  if (
@@ -453,6 +464,13 @@ test("RED 변이: removing the harnessDir isolation gate from autoCompleteAdmiss
     const lock = join(ledgerDir, "l.lock");
     initAndAdmit(ledger, lock, "HYK-312-RED-MUTANT");
     writePointerFile(repoDir, ledger, lock);
+    // HYK-437 §2⑵: scratchHarness now also carries its OWN copy of the
+    // pointer file (mirrors the 2026-08-19 incident's actual shape -- a
+    // wholesale `.harness` copy) so that, once the anchor fix resolves
+    // mainRepoRoot() off harnessDir itself, this copy is what the isolation
+    // gate alone still has to block.
+    mkdirSync(join(scratchHarness, ".harness"), { recursive: true });
+    writePointerFile(scratchHarness, ledger, lock);
     writeFileSync(mutatedFilePath, mutated, "utf8");
 
     const { exit, stdout } = runChild(
@@ -476,6 +494,198 @@ test("RED 변이: removing the harnessDir isolation gate from autoCompleteAdmiss
     rmSync(repoDir, { recursive: true, force: true });
     rmSync(ledgerDir, { recursive: true, force: true });
     rmSync(scratchHarness, { recursive: true, force: true });
+    const after = readFileSync(ADAPTER_PATH, "utf8");
+    assert.equal(
+      after,
+      src,
+      "원복 증명: the real admission-completion-adapter.mjs must be byte-identical before/after this test",
+    );
+  }
+});
+
+// ---------------------------------------------------------------------------
+// ⓔ HYK-437 §2⑴/⑵ -- «검사는 B를 보고 쓰기는 A로 간다». harnessDir이 (ⓐ와
+// 달리) 진짜 git worktree일 때도 새는 잔존 축: `isInsideGitWorktree(harnessDir)`
+// 는 harnessDir 자체가 어떤 worktree인지만 확인하고, 그 뒤
+// resolvePersistentLedgerPaths()가 실제로 어느 저장소의 포인터 파일을
+// 읽는지는 확인하지 않았다 -- HYK-437 이전에는 `mainRepoRoot()`가 인자
+// 없이 이 프로세스 자신의(=스폰 호출부의 ambient cwd) 저장소로 풀렸다.
+// 독립 재현: 서로 다른 두 합성 `git init` 저장소 A(스폰 cwd)·B(harnessDir),
+// 각자 자기 포인터 파일 + 자기 원장(같은 reservationId 로 admit)을 가진다.
+// ---------------------------------------------------------------------------
+
+test("ⓔ HYK-437: two independent git worktrees (A=spawn cwd, B=harnessDir) each with their own pointer+ledger -- completion must land in B's ledger (the one actually consumed), A's must stay byte-identical", () => {
+  const repoA = buildSyntheticRepo("hyk437-e-repoA-");
+  const repoB = buildSyntheticRepo("hyk437-e-repoB-");
+  const ledgerDirA = tmpDir("hyk437-e-ledgerA-");
+  const ledgerDirB = tmpDir("hyk437-e-ledgerB-");
+  try {
+    const ledgerA = join(ledgerDirA, "l.json");
+    const lockA = join(ledgerDirA, "l.lock");
+    const ledgerB = join(ledgerDirB, "l.json");
+    const lockB = join(ledgerDirB, "l.lock");
+    // Same reservationId admitted in BOTH ledgers -- this is what makes a
+    // silent wrong-ledger write undetectable by exit code/stdout alone: both
+    // releases "succeed", only the WHICH ledger changed differs.
+    initAndAdmit(ledgerA, lockA, "HYK-437-E-CROSS");
+    initAndAdmit(ledgerB, lockB, "HYK-437-E-CROSS");
+    writePointerFile(repoA, ledgerA, lockA);
+    writePointerFile(repoB, ledgerB, lockB);
+    const beforeA = readFileSync(ledgerA, "utf8");
+
+    const { exit, stdout } = runAdapterCli(["HYK-437-E-CROSS", repoB], {
+      cwd: repoA,
+      env: envWithoutNodeTestContext(),
+    });
+
+    assert.equal(exit, 0, `release should succeed: ${stdout}`);
+    assert.match(stdout, /released/);
+    assert.equal(
+      readStatus(ledgerB, "HYK-437-E-CROSS"),
+      "COMPLETED",
+      "B's ledger (the harnessDir actually consumed) must be the one released",
+    );
+    assert.equal(
+      readStatus(ledgerA, "HYK-437-E-CROSS"),
+      "ACTIVE",
+      "A's ledger (an unrelated worktree that merely happened to be the spawn cwd) must stay untouched",
+    );
+    assert.equal(
+      readFileSync(ledgerA, "utf8"),
+      beforeA,
+      "byte-identical -- zero mutation of the unrelated worktree's ledger",
+    );
+  } finally {
+    rmSync(repoA, { recursive: true, force: true });
+    rmSync(repoB, { recursive: true, force: true });
+    rmSync(ledgerDirA, { recursive: true, force: true });
+    rmSync(ledgerDirB, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// ⓔ-2 HYK-437 §3 완료조건4 -- 정상 경로가 산다: 진짜 linked worktree
+// (`git worktree add`)의 정당한 admission 기록은, 스폰 프로세스의 ambient
+// cwd가 그 worktree와 무관한(포인터도 없는) 별개 디렉터리여도 여전히
+// main 저장소의 중앙 원장에 남는다 -- mainRepoRoot(harnessDir)가
+// `git rev-parse --git-common-dir`로 linked worktree에서도 올바른 main
+// 저장소를 찾아내는지 확인한다(단순 `--show-toplevel`이었다면 linked
+// worktree 자신의 디렉터리를 잘못 반환했을 것).
+// ---------------------------------------------------------------------------
+
+test("ⓔ-2 HYK-437: a real linked worktree's admission release still reaches the MAIN repo's pointer/ledger, even when the spawn process's own ambient cwd is a plain unrelated directory", () => {
+  const mainRepo = buildSyntheticRepo("hyk437-e2-main-");
+  const ledgerDir = tmpDir("hyk437-e2-ledger-");
+  const unrelatedCwd = tmpDir("hyk437-e2-unrelated-cwd-");
+  let linkedDir;
+  try {
+    const ledger = join(ledgerDir, "l.json");
+    const lock = join(ledgerDir, "l.lock");
+    initAndAdmit(ledger, lock, "HYK-437-E2-LINKED");
+    writePointerFile(mainRepo, ledger, lock);
+
+    const branch = `hyk437-e2-${process.pid}-${Date.now()}`;
+    linkedDir = tmpDir("hyk437-e2-linked-");
+    rmSync(linkedDir, { recursive: true, force: true });
+    execSync(`git worktree add -q -b ${branch} "${linkedDir}"`, {
+      cwd: mainRepo,
+    });
+    mkdirSync(join(linkedDir, ".harness"), { recursive: true });
+
+    // `unrelatedCwd` is a PLAIN (non-git) directory -- proves resolution is
+    // anchored at harnessDir (the linked worktree), never at the spawning
+    // process's own ambient cwd.
+    const { exit, stdout } = runAdapterCli(["HYK-437-E2-LINKED", linkedDir], {
+      cwd: unrelatedCwd,
+      env: envWithoutNodeTestContext(),
+    });
+
+    assert.equal(exit, 0, `release should succeed: ${stdout}`);
+    assert.equal(
+      readStatus(ledger, "HYK-437-E2-LINKED"),
+      "COMPLETED",
+      "a genuine linked worktree must still reach the main repo's central ledger via its pointer file",
+    );
+  } finally {
+    if (linkedDir) {
+      try {
+        execSync(`git worktree remove --force "${linkedDir}"`, {
+          cwd: mainRepo,
+        });
+      } catch {
+        rmSync(linkedDir, { recursive: true, force: true });
+      }
+    }
+    rmSync(mainRepo, { recursive: true, force: true });
+    rmSync(ledgerDir, { recursive: true, force: true });
+    rmSync(unrelatedCwd, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// ⓔ-RED HYK-437 -- ⓔ가 실제로 이 라운드의 수정에 걸려 있음을 소스 치환
+// 변이로 증명한다: `resolvePersistentLedgerPaths(harnessDir)` 호출부를
+// 무인자 호출로 되돌리면 ⓔ의 관측(정확히 B가 풀린다)이 다시 A로 샌다.
+// 원복 증명은 실제 파일이 시험 전후 바이트 동일한지로 한다(이 파일의
+// 앞선 RED 시험과 동일한 방식).
+// ---------------------------------------------------------------------------
+
+test("ⓔ-RED HYK-437: reverting the resolvePersistentLedgerPaths(harnessDir) call site to the no-arg form makes ⓔ's observation go RED (release lands back in A, the ambient-cwd repo, not B), and the real source is provably untouched", () => {
+  const src = readFileSync(ADAPTER_PATH, "utf8");
+  const target =
+    "    const persistent = resolvePersistentLedgerPaths(harnessDir);";
+  const count = src.split(target).length - 1;
+  assert.equal(
+    count,
+    1,
+    `mutation target "resolvePersistentLedgerPaths(harnessDir) call site" must appear exactly once in the current working-tree source (found ${count})`,
+  );
+  const mutated = src.replace(
+    target,
+    "    const persistent = resolvePersistentLedgerPaths();",
+  );
+
+  const repoA = buildSyntheticRepo("hyk437-ered-repoA-");
+  const repoB = buildSyntheticRepo("hyk437-ered-repoB-");
+  const ledgerDirA = tmpDir("hyk437-ered-ledgerA-");
+  const ledgerDirB = tmpDir("hyk437-ered-ledgerB-");
+  const checkDir = join(repoA, "scripts", "check");
+  const supervisorDir = join(repoA, "scripts", "supervisor");
+  const mutatedFilePath = join(checkDir, "admission-completion-adapter.mjs");
+  try {
+    stageAdapterSiblingDeps(checkDir, supervisorDir);
+    const ledgerA = join(ledgerDirA, "l.json");
+    const lockA = join(ledgerDirA, "l.lock");
+    const ledgerB = join(ledgerDirB, "l.json");
+    const lockB = join(ledgerDirB, "l.lock");
+    initAndAdmit(ledgerA, lockA, "HYK-437-ERED-CROSS");
+    initAndAdmit(ledgerB, lockB, "HYK-437-ERED-CROSS");
+    writePointerFile(repoA, ledgerA, lockA);
+    writePointerFile(repoB, ledgerB, lockB);
+    writeFileSync(mutatedFilePath, mutated, "utf8");
+
+    const { exit, stdout } = runChild(
+      mutatedFilePath,
+      ["HYK-437-ERED-CROSS", repoB],
+      { cwd: repoA, env: envWithoutNodeTestContext() },
+    );
+
+    assert.equal(exit, 0, `release should succeed: ${stdout}`);
+    assert.equal(
+      readStatus(ledgerA, "HYK-437-ERED-CROSS"),
+      "COMPLETED",
+      "RED: with the harnessDir anchor reverted, the mutant resolves off the spawn process's ambient cwd (repoA) again -- the exact 2026-09-04 regression this obligation must catch",
+    );
+    assert.equal(
+      readStatus(ledgerB, "HYK-437-ERED-CROSS"),
+      "ACTIVE",
+      "RED corroboration: B's ledger (the harnessDir actually consumed) never gets released",
+    );
+  } finally {
+    rmSync(repoA, { recursive: true, force: true });
+    rmSync(repoB, { recursive: true, force: true });
+    rmSync(ledgerDirA, { recursive: true, force: true });
+    rmSync(ledgerDirB, { recursive: true, force: true });
     const after = readFileSync(ADAPTER_PATH, "utf8");
     assert.equal(
       after,
