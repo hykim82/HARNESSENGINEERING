@@ -73,8 +73,36 @@ import {
 } from "node:fs";
 import { dirname } from "node:path";
 
+// HYK-346 §1-2 (기전 규명, 실측): 위 3R 주석이 «폴백 제거로 닫았다»고 적은
+// TOCTOU 는 ★pid-less 갈래에서만 닫혔고, «pid 를 죽었다고 확인한» 갈래에는
+// 그대로 남아 있었다. 판정(readLockOwner)과 행동(unlinkSync)이 여전히 별개의
+// 비원자적 두 단계이고, 그 사이에 «지금 지우려는 파일이 아까 판정한 그
+// 파일인가»를 다시 확인하지 않는다.
+//
+// 실측(n=24, hold=300ms, 합성 픽스처): reclaim 2회 · 락 보유 구간이 겹친 쌍
+// 3 · 잃어버린 갱신 3 · `release_failed: ENOENT` 2. 추적 원문에서 reclaim 이
+// 두 획득 «사이»에 끼어 있었다 --
+//   pid 25768 획득(…2749) → 다른 프로세스가 «이미 죽은» pid 23512 를 근거로
+//   reclaim 결정 → unlink(…2752) → 그 unlink 가 지운 것은 23512 의 락이
+//   아니라 ★25768 의 «살아 있는» 락 → pid 6156 이 wx 로 새로 획득(…2754)
+//   ⇒ 두 프로세스가 동시에 임계구역 → 뒤에 쓴 쪽이 앞의 갱신을 덮는다.
+// 그리고 25768 이 나중에 자기 락을 지우려 할 때 파일은 이미 남의 것이거나
+// 사라져 있다(ENOENT) -- 그것이 관측된 release 실패의 정체다.
+//
+// ⇒ 수리의 불변식: ★**자기 것이 아닌 락 파일은 절대 지우지 않는다.**
+// 락 내용에 획득마다 새로 만드는 `token` 을 넣고, 지우는 두 자리(해제·
+// reclaim)에서 «지금 이 파일이 내가 지우려던 바로 그 파일인가»를 토큰으로
+// 확인한 뒤에만 unlink 한다. 이 확인이 있으면 reclaim 이 살아 있는 락을
+// 지울 수 없다: 살아 있는 락은 언제나 «다른» 토큰을 갖기 때문이다.
+// (죽은 소유자의 락은 여전히 즉시 회수된다 -- «영구 누수 없음» 성질 유지.)
 export const STORE_REASON = Object.freeze({
   LOCK_TIMEOUT: "LOCK_TIMEOUT",
+  // HYK-346 §1-3 ⑴: `EEXIST` 가 아닌 OS 오류(Windows `EPERM` 등)로 한도까지
+  // 못 잡은 경우. ⛔`LOCK_TIMEOUT` 과 «구별되는 이름»이어야 한다 -- 그쪽은
+  // 「남이 오래 쥐고 있다」이고 이쪽은 「파일 시스템이 계속 거절한다」라서
+  // 사람이 취할 조치가 다르다(전자는 기다림/조사, 후자는 안티바이러스·
+  // 인덱서·핸들 점유 같은 환경 요인).
+  LOCK_OS_CONTENTION: "LOCK_OS_CONTENTION",
   LOCK_PIDLESS_MANUAL_RELEASE_REQUIRED: "LOCK_PIDLESS_MANUAL_RELEASE_REQUIRED",
   LEDGER_MISSING: "LEDGER_MISSING",
   LEDGER_UNREADABLE: "LEDGER_UNREADABLE",
@@ -128,6 +156,10 @@ function readLockOwner(lockPath) {
     return { exists: false };
   }
   let pid = null;
+  // HYK-346: 수리의 핵심 식별자. 획득할 때마다 새로 만들어 넣으므로,
+  // «같은 경로의 다른 락 파일»을 구별하는 유일한 근거다(pid 는 재사용될 수
+  // 있고, mtime 은 이 프로젝트가 반복해 데인 시각 기반 판정이다).
+  let token = null;
   try {
     const parsed = JSON.parse(raw);
     if (
@@ -137,10 +169,37 @@ function readLockOwner(lockPath) {
     ) {
       pid = parsed.pid;
     }
+    if (typeof parsed.token === "string" && parsed.token.length > 0) {
+      token = parsed.token;
+    }
   } catch {
     // Malformed content -- pid stays null, age-based fallback below.
   }
-  return { exists: true, pid, mtimeMs };
+  return { exists: true, pid, token, mtimeMs };
+}
+
+// HYK-346: «지금 이 경로에 있는 락 파일이 내가 지우려던 바로 그 파일인가».
+// ⛔토큰이 없는 락(구버전 형식·손상)은 «아니다»로 본다 -- 확인할 수 없는
+// 대상을 지우지 않는 쪽이 이 모듈의 fail-closed 관례와 맞는다.
+function lockFileStillHasToken(lockPath, token) {
+  if (typeof token !== "string" || token.length === 0) return false;
+  const owner = readLockOwner(lockPath);
+  return owner.exists && owner.token === token;
+}
+
+// HYK-346: 해제 경로 전용의 «보수적» 반대 질문. ⛔여기서 위 함수를 그대로
+// 쓰면 안 된다 -- 읽기가 일시적으로 실패했을 때 «내 것이 아니다»로 접혀
+// unlink 를 건너뛰고, 그러면 ★내 락이 영영 안 지워져 원장이 막힌다(새 누수).
+// 그래서 «읽어서 토큰이 확실히 다를 때»만 true 다 -- 없거나 못 읽으면
+// false 를 돌려 종전대로 지우게 둔다(동작 변화 0).
+function lockFileHasDifferentToken(lockPath, token) {
+  if (typeof token !== "string" || token.length === 0) return false;
+  const owner = readLockOwner(lockPath);
+  if (!owner.exists) return false;
+  if (typeof owner.token !== "string" || owner.token.length === 0) {
+    return false;
+  }
+  return owner.token !== token;
 }
 
 // shouldReclaim -- the load-bearing decision both 2R and 3R fix. A pid we
@@ -174,14 +233,21 @@ function shouldReclaim(owner) {
 // by "wx" itself: only the process that wins the create ever writes).
 function tryClaimLock(lockPath) {
   let fd;
+  const token = `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
   try {
     fd = openSync(lockPath, "wx");
   } catch (err) {
     if (err.code === "EEXIST") return { ok: false, contended: true };
+    // ★HYK-346 §1-3 ❵ (확정 B 수리): `EEXIST` 가 아닌 오류를
+    // «시간초과»로 부르지 않는다. Windows 에서 `EPERM`/`EBUSY`/`EACCES` 는
+    // «삭제 대기 중인 락 파일 열기»·«공유 위반» -- 즉 경합 증상이지
+    // 시간이 다 됐다는 뜻이 아니다. ⛔즉시 닫지 말고 한도까지 재시도한다.
+    // (실측: 한도 10000ms 인데 635ms 에 «LOCK_TIMEOUT» 이 났다.)
     return {
       ok: false,
-      contended: false,
-      reasonCode: STORE_REASON.LOCK_TIMEOUT,
+      contended: true,
+      transient: true,
+      code: err.code,
       detail: err.message,
     };
   }
@@ -190,13 +256,14 @@ function tryClaimLock(lockPath) {
       fd,
       JSON.stringify({
         pid: process.pid,
+        token,
         acquired_at: new Date().toISOString(),
       }),
     );
   } finally {
     closeSync(fd);
   }
-  return { ok: true };
+  return { ok: true, token };
 }
 
 // timeoutDecision -- what acquireLock reports once its deadline passes,
@@ -234,33 +301,54 @@ function timeoutDecision(owner, lockPath, timeoutMs) {
 // check does.
 function acquireLock(lockPath, { timeoutMs, pollMs }) {
   const deadline = Date.now() + timeoutMs;
+  // ★HYK-346: 마지막으로 본 `EEXIST` 아닌 OS 오류. 한도까지 못 잡았을 때
+  // «남이 오래 쥐고 있음»과 «파일시스템이 계속 거절함»을 가르는 근거가 된다.
+  let lastTransient = null;
   for (;;) {
     const claimed = tryClaimLock(lockPath);
-    if (claimed.ok) return { ok: true };
-    if (!claimed.contended) {
-      return {
-        ok: false,
-        reasonCode: claimed.reasonCode,
-        detail: claimed.detail,
-      };
-    }
+    if (claimed.ok) return { ok: true, token: claimed.token };
+    if (claimed.transient) lastTransient = claimed;
     const owner = readLockOwner(lockPath);
     if (shouldReclaim(owner)) {
-      try {
-        unlinkSync(lockPath);
-      } catch {
-        // Another waiter already cleared it -- loop and retry wx.
+      // ★HYK-346 §1-3 ❶ (확정 A 수리 · 기전 ⓓ): 판정과 삭제 사이에
+      // «지금 이 파일이 아까 죽었다고 판정한 바로 그 파일인가»를 다시
+      // 확인한다. ⛔이 한 줄이 없으면 reclaim 이 «살아 있는» 락을 지우고,
+      // 그 즐시 다른 프로세스가 wx 로 새로 획득해 «둘이 동시에 임계구역»에
+      // 들어간다(모듈 머리의 실측 추적 참조).
+      // 토큰이 같으면 그것은 여전히 «죽은 소유자의 락» 이므로 지우는 것이
+      // 안전하고, 다르면(= 그 사이에 누군가 새로 잡았다) 지우지 않고 기다린다.
+      if (lockFileStillHasToken(lockPath, owner.token)) {
+        try {
+          unlinkSync(lockPath);
+        } catch {
+          // Another waiter already cleared it -- loop and retry wx.
+        }
+        continue;
       }
-      continue;
+      // 토큰이 없거나(구버전·손상) 바뀜다 -- 지우지 않는다(fail-closed).
     }
     if (Date.now() >= deadline) {
+      if (lastTransient) {
+        return {
+          ok: false,
+          reasonCode: STORE_REASON.LOCK_OS_CONTENTION,
+          detail: `lock could not be created within ${timeoutMs}ms because the filesystem kept rejecting the exclusive create (last error ${lastTransient.code}). This is NOT an ordinary hold-timeout: another process may have the lock file open (delete-pending/sharing violation), or an external agent (indexer, antivirus, backup) is touching it: ${lockPath} -- last OS error: ${lastTransient.detail}`,
+        };
+      }
       return timeoutDecision(owner, lockPath, timeoutMs);
     }
     sleepSync(pollMs);
   }
 }
 
-function releaseLock(lockPath) {
+// ★HYK-346: «자기 것이 아닌 락은 지우지 않는다» 불변식의 나머지 절반.
+// 이 프로세스가 잡을 때 썼 토큰이 아직 그 파일에 남아 있을 때만 지운다.
+// ⛔토큰이 다르면 그 락은 «내 것»이 아니다(누군가 벌써 회수해 새로 잡았다)
+// -- 그걸 지우면 살아 있는 보유자를 그대로 벗기는 것이라 같은 결함을 반복한다.
+// `token` 이 없으면(이론상 구버전 호출자) 종전대로 무조건 지운다 --
+// 하위 호환을 깨지 않기 위해서이고, 이 모듈 안의 유일한 호출자는 항상 토큰을 넘긴다.
+function releaseLock(lockPath, token) {
+  if (lockFileHasDifferentToken(lockPath, token)) return;
   try {
     unlinkSync(lockPath);
   } catch {
@@ -392,7 +480,7 @@ export function withLedgerLock(
     }
     return { ok: true, result };
   } finally {
-    releaseLock(lockPath);
+    releaseLock(lockPath, lockResult.token);
   }
 }
 
