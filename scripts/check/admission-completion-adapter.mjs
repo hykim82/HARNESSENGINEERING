@@ -315,18 +315,46 @@ function resolveReservationSeatKey(ledgerPath, reservationId) {
 // import graph (relay-handshake.mjs alone pulls in reject-streak.mjs,
 // envelope-archive.mjs, time-authority.mjs -- none of which this adapter
 // needs).
-function repoRoot() {
+// HYK-437 §2⑵ (mirrors HYK-428's identical fix in relay-handshake.mjs's own
+// repoRoot/mainRepoRoot, coder-task.md §1 원문): `cwd` is optional/back-
+// compat -- callers that omit it get the exact unchanged process.cwd()-
+// derived behavior (e.g. this file's own module-load-time no-arg shape, and
+// any caller that genuinely has no other directory to anchor to). Threading
+// an explicit `cwd` (see mainRepoRoot below) is what lets the resolved path
+// track the SAME directory isInsideGitWorktree(harnessDir) already
+// validated (autoCompleteAdmission's gate above), instead of an unrelated,
+// ambient process.cwd() -- see mainRepoRoot's own header for the exact gap
+// this closes.
+function repoRoot(cwd) {
   try {
-    return execSync("git rev-parse --show-toplevel", {
-      encoding: "utf8",
-    }).trim();
+    return execSync(
+      "git rev-parse --show-toplevel",
+      cwd ? { encoding: "utf8", cwd } : { encoding: "utf8" },
+    ).trim();
   } catch {
-    return process.cwd();
+    return cwd ?? process.cwd();
   }
 }
 
-function mainRepoRoot() {
-  const root = repoRoot();
+// HYK-437 §2⑵: `startDir` is optional/back-compat (same reasoning as
+// repoRoot above). Before this round, mainRepoRoot() ignored harnessDir
+// entirely -- when this adapter runs as a spawned CHILD PROCESS (the
+// documented design, see this file's own header on why relay-handshake.mjs
+// spawns rather than imports), the child's cwd is whatever the PARENT
+// process's cwd happened to be (execFileSync in relay-handshake.mjs's
+// spawnAdmissionCompletionProcess never sets a `cwd` override) -- completely
+// decoupled from harnessDir, the round directory actually being consumed.
+// So resolvePersistentLedgerPaths() below could read (and
+// completeAdmissionReservation could then mutate) a DIFFERENT worktree's
+// pointer file/ledger than the one isInsideGitWorktree(harnessDir) just
+// validated -- independently reproduced (coder.md §2⑴): two synthetic git
+// repos A (spawn cwd) and B (harnessDir), each with its own pointer file and
+// its own ledger admitting the SAME reservation id; spawning the adapter
+// with cwd=A, harnessDir=B released A's reservation and left B's untouched.
+// Passing `harnessDir` through to mainRepoRoot() below closes that gap by
+// anchoring every git call in this resolution chain at harnessDir itself.
+function mainRepoRoot(startDir) {
+  const root = repoRoot(startDir);
   try {
     const commonDir = execSync("git rev-parse --git-common-dir", {
       encoding: "utf8",
@@ -346,9 +374,15 @@ function mainRepoRoot() {
 // error shape (file absent, unreadable, malformed JSON, missing/blank
 // `ledgerPath` field) -- treated identically to "nothing configured here",
 // never a new failure mode layered on top of the pre-existing no-op.
-function resolvePersistentLedgerPaths() {
+//
+// HYK-437 §2⑵/§2⑶: `startDir` (optional/back-compat, forwarded to
+// mainRepoRoot above) anchors BOTH the pointer-file lookup below AND (since
+// mainRepoRoot is the one shared resolution chain) the ledger path it names
+// -- there is no separate "pointer axis" that resolves differently from the
+// ledger axis in this file; they are the same call.
+function resolvePersistentLedgerPaths(startDir) {
   const pointerPath = join(
-    mainRepoRoot(),
+    mainRepoRoot(startDir),
     ".harness",
     PERSISTENT_LEDGER_POINTER_FILENAME,
   );
@@ -1050,7 +1084,9 @@ export function autoCompleteAdmission({
   }
   let persistentLockPath = null;
   if (!ledgerPath && persistentFallbackAllowed()) {
-    const persistent = resolvePersistentLedgerPaths();
+    // HYK-437 §2⑵: anchor at harnessDir (already isInsideGitWorktree-
+    // validated above), not the bare no-arg call -- see resolvePersistentLedgerPaths's header.
+    const persistent = resolvePersistentLedgerPaths(harnessDir);
     if (persistent) {
       ledgerPath = persistent.ledgerPath;
       persistentLockPath = persistent.lockPath;
