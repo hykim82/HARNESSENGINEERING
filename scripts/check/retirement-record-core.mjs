@@ -132,11 +132,36 @@
 // DONE_TIMESTAMP_NOT_PARSEABLE과 같다(둘 다 "정상 소비 경로가 절대 다시
 // 통과할 수 없는, 기계로 재확인 가능한 사실"). 임의 문자열이 아니라 이
 // 닫힌 집합에 값을 하나 더하는 형태를 유지한다(§3-2 요구 그대로).
+//
+// HYK-455 §2: RUNNER_GREEN_UNREACHABLE_AT_HEAD 추가 -- 검토 라운드는
+// verdict=approved인데 소비 게이트의 전체 러너가 그 커밋에서 구조적으로
+// 빨강(예: 그 뒤 master에서 지워진 단정에 걸림)이라 정상 소비 영수증
+// 체인으로 영원히 통과할 수 없는 경우. 앞의 두 사유("DONE 타임스탬프"
+// 계열)와 사실의 축이 다르지만("그 라운드 자신의 DONE 줄"이 아니라
+// "그 라운드가 커밋한 시점의 전체 러너 결과") 같은 원칙을 따른다: 임의
+// 문자열이 아니라 닫힌 집합에 값을 하나 더하고(§3-2), 기계로 확인
+// 가능하므로 MECHANICALLY_CONFIRMABLE_BLOCK_REASONS에 넣는다(§3-4 아래).
+// 이 사유는 다른 둘과 달리 어댑터가 재확인할 사실이 live 결과/task 파일
+// 안에 이미 있지 않다(러너 실행 결과는 별도 영수증 파일이다) -- 그래서
+// 이 사유를 쓰는 은퇴 기록만 record.evidenceReceiptPath(근거 영수증
+// 경로)를 요구한다: 어댑터(dispatch-gate-decision.mjs의
+// confirmRunnerGreenUnreachableAtHead)가 그 경로의 러너 영수증
+// (runner-receipt-writer.mjs 스키마)을 실제로 다시 읽어 그 안의
+// head_commit이 이 라운드 결과 파일 자신의 head_commit: 줄과 같고
+// runner_exit이 0이 아님을 독립적으로 재확인해야만
+// blockReasonConfirmed:true가 된다 -- 이 코어 자신은 evidenceReceiptPath
+// 필드를 스스로 검사하지 않는다(§5-a 그대로, zero-import 코어는 파일을
+// 읽지 않는다); 그 필드가 없거나 가리키는 영수증이 못 읽히거나 커밋이
+// 다르거나 runner_exit이 0(=그 커밋에서 실제로는 초록)이면 어댑터가
+// blockReasonConfirmed:false/null을 넘기고, 이 코어는 그 값을 보고
+// BLOCK_REASON_UNCONFIRMED로 거부한다(닫힌 사유 코드 이름을 새로 짓는
+// 것만으로는 통과하지 못한다).
 export const RETIREMENT_BLOCK_REASON = Object.freeze({
   DONE_TIMESTAMP_NOT_PARSEABLE: "DONE_TIMESTAMP_NOT_PARSEABLE",
   DONE_PREDATES_DROPPED_AT: "DONE_PREDATES_DROPPED_AT",
   DONE_REWRITE_LOCKED: "DONE_REWRITE_LOCKED",
   TASK_CONTRACT_PROHIBITS_REPAIR: "TASK_CONTRACT_PROHIBITS_REPAIR",
+  RUNNER_GREEN_UNREACHABLE_AT_HEAD: "RUNNER_GREEN_UNREACHABLE_AT_HEAD",
 });
 
 // §3-4 -- 이 부분집합만 어댑터가 live 파일에서 독립 재확인한다.
@@ -145,10 +170,14 @@ export const RETIREMENT_BLOCK_REASON = Object.freeze({
 // 재파싱하고 doneAt < droppedAt을 스스로 다시 유도한다) -- 그래서
 // DONE_TIMESTAMP_NOT_PARSEABLE과 같은 집합에 넣는다(§3-4 원칙 그대로,
 // "ORCH가 그렇다고 했다"만으로는 통과 못 한다).
+// HYK-455: RUNNER_GREEN_UNREACHABLE_AT_HEAD도 기계로 독립 재확인
+// 가능하다(위 RETIREMENT_BLOCK_REASON 주석의 evidenceReceiptPath 결선
+// 참조) -- 같은 집합에 넣는다.
 export const MECHANICALLY_CONFIRMABLE_BLOCK_REASONS = Object.freeze(
   new Set([
     RETIREMENT_BLOCK_REASON.DONE_TIMESTAMP_NOT_PARSEABLE,
     RETIREMENT_BLOCK_REASON.DONE_PREDATES_DROPPED_AT,
+    RETIREMENT_BLOCK_REASON.RUNNER_GREEN_UNREACHABLE_AT_HEAD,
   ]),
 );
 

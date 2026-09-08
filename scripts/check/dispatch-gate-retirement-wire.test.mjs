@@ -322,6 +322,248 @@ test("§A2 (HYK-398) RED: DONE_PREDATES_DROPPED_AT라고 «거짓 주장»(실�
 });
 
 // ---------------------------------------------------------------------------
+// §A3 (HYK-455) -- 세 번째 기계-확인-가능 사유(RUNNER_GREEN_UNREACHABLE_
+// AT_HEAD): 검토 라운드는 승인됐지만 그 커밋에서 전체 러너가 구조적으로
+// 빨강이라 정상 소비 영수증 체인으로 영원히 통과할 수 없는, HYK-346 실물
+// 표적과 같은 모양의 «합성» 표적(coder-task.md §0 요구 -- 실물 hyk447-
+// review-1은 절대 만지지 않는다). 이 사유는 record.evidenceReceiptPath가
+// 가리키는 러너 영수증(runner-receipt-writer.mjs 스키마)을 어댑터가
+// harnessDir 기준으로 실제로 다시 읽어 head_commit·runner_exit을
+// 재확인해야만 GREEN이 된다 -- 그 재확인이 실제로 배선됐는지와, 거짓
+// 사유(그 커밋에서 러너가 실제로 초록인데 은퇴 시도)가 기계로 거부되는지
+// 둘 다 이 묶음이 증명한다.
+// ---------------------------------------------------------------------------
+
+const RUNNER_GREEN_UNREACHABLE_HEAD_SHA = "d".repeat(40);
+
+function buildRunnerGreenUnreachableFixture(dir) {
+  const role = "coder";
+  const harnessTaskLabel = "HYK-9455-retire-runner-red-round";
+  const resultContent = `task_id: ${harnessTaskLabel}\nhead_commit: ${RUNNER_GREEN_UNREACHABLE_HEAD_SHA}\n>>> DONE: CODER @ 2026-09-08 10:00:00 KST\n`;
+  writeFileSync(join(dir, `${role}.md`), resultContent, "utf8");
+
+  const taskPath = writeNextTaskFile(
+    dir,
+    role,
+    "HYK-9455-retire-runner-red-round-next",
+    "2026-09-08 10:00:00 KST",
+  );
+
+  const ledgerPath = join(dir, "reject-streak.json");
+  writeLedger(ledgerPath, { schema_version: 1, issues: {} });
+
+  const admissionLedgerPath = join(dir, "admission-ledger.json");
+  writeFileSync(
+    admissionLedgerPath,
+    JSON.stringify(createEmptyLedger("2026-09-08T00:00:00.000Z")) + "\n",
+    "utf8",
+  );
+
+  return {
+    role,
+    dir,
+    taskPath,
+    harnessTaskLabel,
+    resultContent,
+    ledgerPath,
+    admissionLedgerPath,
+  };
+}
+
+// runner-receipt-writer.mjs가 실제로 남기는 것과 같은 모양의 JSON을
+// harnessDir 아래 임의의 상대경로에 심는다(§C-4/5가 그 경로 자체를 흔든다).
+function writeRunnerReceiptFixture(dir, relPath, receipt) {
+  const fullPath = join(dir, relPath);
+  mkdirSync(dirname(fullPath), { recursive: true });
+  writeFileSync(fullPath, JSON.stringify(receipt, null, 2) + "\n", "utf8");
+}
+
+test("§A3 (HYK-455) GREEN: RUNNER_GREEN_UNREACHABLE_AT_HEAD -- 그 커밋에서 러너 영수증이 실제로 runner_exit!=0 + 근거 영수증 경로 결속(head_commit 일치) -> 다음 배달 ALLOW", () => {
+  withFixtureDir((dir) => {
+    const fixture = buildRunnerGreenUnreachableFixture(dir);
+    writeArchivedRoundCopy(dir, fixture.role, fixture.resultContent);
+
+    const evidenceReceiptPath = "runner-receipts/hyk9455-r1.json";
+    writeRunnerReceiptFixture(dir, evidenceReceiptPath, {
+      schema_version: 1,
+      runner_exit: 1,
+      tests: 10,
+      pass: 8,
+      fail: 2,
+      skip: 0,
+      head_commit: RUNNER_GREEN_UNREACHABLE_HEAD_SHA,
+      finished_at: "2026-09-08 09:55:00 KST",
+    });
+
+    const write = writeRetirementRecord({
+      role: fixture.role.toUpperCase(),
+      harnessDir: fixture.dir,
+      harnessTaskLabel: fixture.harnessTaskLabel,
+      archivePath: "rounds/CODER-r1.md",
+      archiveFingerprintClaimed: computeFingerprint(fixture.resultContent),
+      blockReasonCode: "RUNNER_GREEN_UNREACHABLE_AT_HEAD",
+      successorLabel: "HYK-9455-retire-runner-red-round-next",
+      recordedAt: "2026-09-08 10:05:00 KST",
+      evidence: "그 커밋에서 러너 영수증이 실제로 runner_exit=1(구조적 빨강)",
+      evidenceReceiptPath,
+    });
+    assert.equal(write.ok, true, write.reason);
+
+    const r = runGate(fixture);
+    assert.equal(r.status, 0, `ALLOW 기대, 실제 stderr: ${r.stderr}`);
+    assert.match(r.stdout, /ALLOW/);
+    assert.match(r.stderr, /RETIRED|은퇴 처리/);
+  });
+});
+
+test("§A3 (HYK-455) RED «거짓 사유»(등재 완료조건 2 · 책임자 승인 조건): 그 커밋에서 러너가 실제로는 초록(runner_exit=0)인데 RUNNER_GREEN_UNREACHABLE_AT_HEAD로 은퇴 시도 -> BLOCK_REASON_UNCONFIRMED, REJECT", () => {
+  withFixtureDir((dir) => {
+    const fixture = buildRunnerGreenUnreachableFixture(dir);
+    writeArchivedRoundCopy(dir, fixture.role, fixture.resultContent);
+
+    const evidenceReceiptPath = "runner-receipts/hyk9455-fake-green-r1.json";
+    writeRunnerReceiptFixture(dir, evidenceReceiptPath, {
+      schema_version: 1,
+      runner_exit: 0,
+      tests: 10,
+      pass: 10,
+      fail: 0,
+      skip: 0,
+      head_commit: RUNNER_GREEN_UNREACHABLE_HEAD_SHA,
+      finished_at: "2026-09-08 09:55:00 KST",
+    });
+
+    const write = writeRetirementRecord({
+      role: fixture.role.toUpperCase(),
+      harnessDir: fixture.dir,
+      harnessTaskLabel: fixture.harnessTaskLabel,
+      archivePath: "rounds/CODER-r1.md",
+      archiveFingerprintClaimed: computeFingerprint(fixture.resultContent),
+      blockReasonCode: "RUNNER_GREEN_UNREACHABLE_AT_HEAD",
+      successorLabel: "HYK-9455-retire-runner-red-round-next",
+      recordedAt: "2026-09-08 10:05:00 KST",
+      evidence: "거짓 주장 -- 실제로는 그 커밋에서 초록",
+      evidenceReceiptPath,
+    });
+    assert.equal(write.ok, true, write.reason);
+
+    const r = runGate(fixture);
+    assert.notEqual(r.status, 0, `REJECT 기대, 실제 stdout: ${r.stdout}`);
+    assert.match(
+      r.stderr,
+      /독립적으로 재확인되지 않음/,
+      "기계로 확인 가능한 사유가 재확인 실패했다는 사유가 찍혀야 한다(BLOCK_REASON_UNCONFIRMED)",
+    );
+  });
+});
+
+test("§A3-b (HYK-455) RED: evidenceReceiptPath 자체가 없음(근거 영수증 경로 결속 없이 위조 시도) -> BLOCK_REASON_UNCONFIRMED, REJECT", () => {
+  withFixtureDir((dir) => {
+    const fixture = buildRunnerGreenUnreachableFixture(dir);
+    writeArchivedRoundCopy(dir, fixture.role, fixture.resultContent);
+
+    const write = writeRetirementRecord({
+      role: fixture.role.toUpperCase(),
+      harnessDir: fixture.dir,
+      harnessTaskLabel: fixture.harnessTaskLabel,
+      archivePath: "rounds/CODER-r1.md",
+      archiveFingerprintClaimed: computeFingerprint(fixture.resultContent),
+      blockReasonCode: "RUNNER_GREEN_UNREACHABLE_AT_HEAD",
+      successorLabel: "HYK-9455-retire-runner-red-round-next",
+      recordedAt: "2026-09-08 10:05:00 KST",
+      evidence: "근거 영수증 경로 없이 위조 시도",
+      // ⛔evidenceReceiptPath 자체를 아예 안 넘긴다(undefined).
+    });
+    assert.equal(write.ok, true, write.reason);
+
+    const r = runGate(fixture);
+    assert.notEqual(
+      r.status,
+      0,
+      "근거 영수증 경로 없는 은퇴 기록은 거부돼야 한다",
+    );
+    assert.match(r.stderr, /독립적으로 재확인되지 않음/);
+  });
+});
+
+test("§A3-c (HYK-455) RED: 근거 영수증의 head_commit이 이 라운드 결과 파일 자신의 head_commit과 다름(다른 커밋의 영수증을 갖다 붙임) -> BLOCK_REASON_UNCONFIRMED, REJECT", () => {
+  withFixtureDir((dir) => {
+    const fixture = buildRunnerGreenUnreachableFixture(dir);
+    writeArchivedRoundCopy(dir, fixture.role, fixture.resultContent);
+
+    const evidenceReceiptPath = "runner-receipts/hyk9455-wrong-commit-r1.json";
+    writeRunnerReceiptFixture(dir, evidenceReceiptPath, {
+      schema_version: 1,
+      runner_exit: 1,
+      head_commit: "e".repeat(40), // ⛔이 라운드의 head_commit과 다르다.
+      finished_at: "2026-09-08 09:55:00 KST",
+    });
+
+    const write = writeRetirementRecord({
+      role: fixture.role.toUpperCase(),
+      harnessDir: fixture.dir,
+      harnessTaskLabel: fixture.harnessTaskLabel,
+      archivePath: "rounds/CODER-r1.md",
+      archiveFingerprintClaimed: computeFingerprint(fixture.resultContent),
+      blockReasonCode: "RUNNER_GREEN_UNREACHABLE_AT_HEAD",
+      successorLabel: "HYK-9455-retire-runner-red-round-next",
+      recordedAt: "2026-09-08 10:05:00 KST",
+      evidence: "다른 커밋의 영수증을 갖다 붙이는 위조 시도",
+      evidenceReceiptPath,
+    });
+    assert.equal(write.ok, true, write.reason);
+
+    const r = runGate(fixture);
+    assert.notEqual(r.status, 0, "커밋이 다른 영수증은 거부돼야 한다");
+    assert.match(r.stderr, /독립적으로 재확인되지 않음/);
+  });
+});
+
+test("§A3-d (HYK-455) RED: evidenceReceiptPath가 harnessDir을 벗어나려는 경로 탈출 시도(`..`) -> BLOCK_REASON_UNCONFIRMED, REJECT", () => {
+  withFixtureDir((dir) => {
+    const fixture = buildRunnerGreenUnreachableFixture(dir);
+    writeArchivedRoundCopy(dir, fixture.role, fixture.resultContent);
+
+    // harnessDir 밖(임시 폴더의 형제 파일)에 진짜 초록 러너 영수증을 심고,
+    // `..`로 그 경로를 가리키려 시도한다 -- 관문은 harnessDir 밖 파일을
+    // 절대 읽지 않아야 한다(파일이 실제로 존재해도).
+    const outsidePath = join(dir, "..", "outside-runner-receipt.json");
+    writeFileSync(
+      outsidePath,
+      JSON.stringify({
+        schema_version: 1,
+        runner_exit: 1,
+        head_commit: RUNNER_GREEN_UNREACHABLE_HEAD_SHA,
+        finished_at: "2026-09-08 09:55:00 KST",
+      }) + "\n",
+      "utf8",
+    );
+
+    const write = writeRetirementRecord({
+      role: fixture.role.toUpperCase(),
+      harnessDir: fixture.dir,
+      harnessTaskLabel: fixture.harnessTaskLabel,
+      archivePath: "rounds/CODER-r1.md",
+      archiveFingerprintClaimed: computeFingerprint(fixture.resultContent),
+      blockReasonCode: "RUNNER_GREEN_UNREACHABLE_AT_HEAD",
+      successorLabel: "HYK-9455-retire-runner-red-round-next",
+      recordedAt: "2026-09-08 10:05:00 KST",
+      evidence: "경로 탈출 위조 시도",
+      evidenceReceiptPath: "../outside-runner-receipt.json",
+    });
+    assert.equal(write.ok, true, write.reason);
+
+    try {
+      const r = runGate(fixture);
+      assert.notEqual(r.status, 0, "harnessDir을 벗어난 경로는 거부돼야 한다");
+      assert.match(r.stderr, /독립적으로 재확인되지 않음/);
+    } finally {
+      rmSync(outsidePath, { force: true });
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
 // §B -- REGRESSION(가장 중요): 정상 회수 가능 미소비는 은퇴 기록이 없으면
 // 여전히 REJECT돼야 한다(기존 소비 게이트를 이 축이 조금도 약화시키지
 // 않는다는 증거).

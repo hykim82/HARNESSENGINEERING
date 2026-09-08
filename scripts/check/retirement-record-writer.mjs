@@ -66,6 +66,7 @@ export function writeRetirementRecord({
   successorLabel,
   recordedAt,
   evidence,
+  evidenceReceiptPath,
   readdirFn = readdirSync,
   mkdirFn = mkdirSync,
   writeFileFn = writeFileSync,
@@ -106,6 +107,12 @@ export function writeRetirementRecord({
       successorLabel,
       recordedAt,
       evidence,
+      // HYK-455 §2 설계 조건 2 -- MECHANICALLY_CONFIRMABLE_BLOCK_REASONS의
+      // RUNNER_GREEN_UNREACHABLE_AT_HEAD만 이 필드를 요구한다(어댑터가
+      // 없으면 blockReasonConfirmed:false로 떨어뜨려 사실상 필수 필드로
+      // 만든다, retirement-record-core.mjs 헤더 주석 참조) -- 나머지
+      // 사유는 이 필드를 그냥 무시한다(undefined로 기록돼도 무해).
+      evidenceReceiptPath,
     };
     writeFileFn(destPath, JSON.stringify(record, null, 2) + "\n", "utf8");
     return {
