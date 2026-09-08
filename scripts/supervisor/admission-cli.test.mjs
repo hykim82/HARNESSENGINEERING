@@ -1,6 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync, utimesSync } from "node:fs";
+import {
+  mkdtempSync,
+  rmSync,
+  writeFileSync,
+  utimesSync,
+  readFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -456,6 +462,46 @@ test("HYK-224-2R §1: reviewer's exact repro (short staleLockMs + long critical 
 // 영구 정지 원인이 된다). 실제 자식 프로세스를 띄워 임계구역 안에서
 // SIGKILL로 죽이고(락 파일에 그 pid가 남는다), 이후 admit 이 그 pid가
 // 죽었음을 확인해 staleLockMs를 기다리지 않고 즉시 회수하는지 측정한다.
+// ---- HYK-453: 이 두 상수의 «관계»가 증명이다(값 자체가 아니라) ----------
+// staleLockMs 를 CLI 자신의 lockTimeoutMs 보다 압도적으로 크게 두면, 나이
+// 기반 회수는 이 시험이 도는 동안 «원리적으로» 불가능해진다 -- 그래서
+// admit 이 성공했다면 그것은 죽음 확인 회수일 수밖에 없다. 시간을 재지
+// 않으므로 부하에도, HYK-346 이 회수 경로에 일을 더하는 것에도 흔들리지
+// 않는다.
+const HUGE_STALE_LOCK_MS = 1_000_000;
+const SHORT_LOCK_TIMEOUT_MS = 5_000;
+// «행»(무한 대기) 회귀가 러너 전체를 멈추지 않게 하는 안전망. ⛔판정
+// 기준이 아니다 -- 이 값에 걸리면 그건 «느려서 실패»가 아니라 «CLI 가
+// 자기 lockTimeoutMs 계약조차 못 지켰다»는 뜻이다.
+const HANG_BACKSTOP_MS = 120_000;
+
+// ---- HYK-453: «시간이 흐르길 기다리기» 대신 «사건이 일어났음을 기다리기» --
+// 이 두 시험은 소유자가 «락을 실제로 잡은 뒤»에 다음 단계로 가야 한다.
+// 예전엔 setTimeout(200) 이었는데, 부하가 걸리면 200ms 안에 못 잡는다 --
+// 그러면 ⓐ 죽음 회수 시험은 «잡은 적 없는 락»을 회수하는 약한 시험이 되고
+// ⓑ 음성 대조 시험은 경쟁자가 «빈 락»을 정당하게 가져가 위양성 빨강이 된다
+// (이 수리 도중 부하 384 에서 6회 중 2회 실제로 그렇게 빨갛게 났다).
+// ⇒ 락 파일에 소유자 pid 가 실제로 적힐 때까지 «사건»을 기다린다. 부하가
+//   얼마나 크든 조건이 같으므로 흔들리지 않는다. 상한은 판정이 아니라
+//   «영영 안 잡힌다»를 끊는 안전망이다.
+async function waitForLockHeldBy(lockPath, pid) {
+  const deadline = Date.now() + HANG_BACKSTOP_MS;
+  for (;;) {
+    try {
+      const raw = readFileSync(lockPath, "utf8");
+      if (JSON.parse(raw).pid === pid) return;
+    } catch {
+      // 아직 없음/쓰는 중/부분 기록 -- 다시 본다.
+    }
+    if (Date.now() > deadline) {
+      throw new Error(
+        `lock file never recorded owner pid=${pid} within the hang backstop (${HANG_BACKSTOP_MS}ms): ${lockPath}`,
+      );
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
 test("HYK-224-2R §1: a genuinely dead process's lock IS reclaimed (not wedged forever)", async () => {
   const { dir, ledger, lock } = tmpPaths();
   try {
@@ -485,14 +531,131 @@ test("HYK-224-2R §1: a genuinely dead process's lock IS reclaimed (not wedged f
       "--stale-lock-ms",
       "1000000",
     ]);
-    // Give it time to actually acquire the lock (write its pid into the
-    // lock file) before killing it mid-critical-section.
-    await new Promise((resolve) => setTimeout(resolve, 200));
+    // HYK-453: 「200ms 쯤이면 잡았겠지」가 아니라 «락 파일에 그 pid 가
+    // 적혔다»는 사건을 기다린다 -- 안 그러면 부하에서 «잡은 적 없는 락»을
+    // 회수하는 시험이 되어 증명이 조용히 약해진다.
+    // ★HYK-453: 종료 약속은 «죽이기 전에» 잡는다. 죽인 «뒤»에 리스너를
+    // 붙이면, 그 사이에 이미 exit 이 발생한 경우 이벤트가 다시 오지 않아
+    // 영영 풀리지 않는다 -- 이 라운드에서 변이 하네스가 정확히 그 형태로
+    // 68분 멈춰 섰다(coder.md §4-1). 약속은 한 번 정해지면 계속 정해진
+    // 상태라, 이미 끝났든 이제 끝나든 똑같이 풀린다.
+    const doomedExited = new Promise((resolve) => doomed.on("exit", resolve));
+    await waitForLockHeldBy(lock, doomed.pid);
     doomed.kill("SIGKILL");
-    await new Promise((resolve) => doomed.on("exit", resolve));
+    await doomedExited;
 
-    const before = Date.now();
-    const result = await execFileAsync("node", [
+    const result = await execFileAsync(
+      "node",
+      [
+        CLI_PATH,
+        "admit",
+        "--ledger",
+        ledger,
+        "--lock",
+        lock,
+        "--reservation-id",
+        "recovered",
+        "--cap",
+        "1",
+        "--stale-lock-ms",
+        String(HUGE_STALE_LOCK_MS),
+        "--lock-timeout-ms",
+        String(SHORT_LOCK_TIMEOUT_MS),
+      ],
+      // ⚠️안전망일 뿐 판정 기준이 아니다(아래 HYK-453 주석) -- 회수 경로가
+      // 정말로 «행» 이면 이 상한이 러너 전체를 멈추지 않게 끊어 준다.
+      { timeout: HANG_BACKSTOP_MS },
+    );
+    // ---- HYK-453: 이 자리는 원래 «벽시계 상한»(elapsedMs < 4000)이었다 ----
+    // 그것이 오늘 실물로 깨졌다: 같은 커밋이 3회차 fail(4173ms) → 4회차
+    // pass(코드 변경 0). 부하가 걸리면 «자식 spawn + node 기동 + FS»가
+    // 늘어나 4초를 넘지만, 그때도 CLI 자신은 자기 계약(lockTimeoutMs)을
+    // 지키고 정상 회수했다 -- 즉 그 단정은 «판정»이 아니라 «측정 노이즈»를
+    // 재고 있었다(부하 합성 재현: 5854·10111·9484ms).
+    //
+    // ★대신 시간에 «의존하지 않는» 판정으로 바꾼다. 이 시험이 증명하려는
+    // 것은 「회수가 나이(staleLockMs) 만료가 아니라 «죽음 확인»으로 일어났다」
+    // 하나다. 그것은 두 인자의 «관계»만으로 이미 강제된다:
+    //   - staleLockMs = 1000초 (나이 기반 회수는 이 시험이 도는 동안 원리적으로 불가능)
+    //   - lockTimeoutMs = 5초 (그 전에 CLI 는 스스로 LOCK_TIMEOUT 으로 포기한다)
+    //   ⇒ 그러므로 CAP_ADMITTED 가 «나왔다»는 사실 자체가 죽음 확인 회수의
+    //     증거다. 나이 기반이었다면 CLI 는 admit 하지 못하고 포기했을 것이다.
+    // 그 관계를 시험 안에서 «단정»으로 고정해, 나중에 누가 상수를 바꾸면
+    // 증명이 조용히 사라지지 않게 한다.
+    // ⚠️이 판정은 회수 경로가 «얼마나 걸리는지»를 전혀 묻지 않으므로,
+    // HYK-346 이 그 경로에 소유권 확인 일을 더해도 그대로 성립한다(§1-4).
+    assert.ok(
+      HUGE_STALE_LOCK_MS > SHORT_LOCK_TIMEOUT_MS * 100,
+      `이 시험의 증명은 staleLockMs(${HUGE_STALE_LOCK_MS}) ≫ lockTimeoutMs(${SHORT_LOCK_TIMEOUT_MS}) 관계에 기댄다 -- 그 관계가 깨지면 "나이로 회수됐을 수도 있다"가 되어 증명이 성립하지 않는다`,
+    );
+    assert.match(
+      result.stdout,
+      /CAP_ADMITTED/,
+      `dead process's lock should be reclaimed via confirmed death (age-based reclaim is impossible here: staleLockMs=${HUGE_STALE_LOCK_MS}ms ≫ lockTimeoutMs=${SHORT_LOCK_TIMEOUT_MS}ms): ${result.stdout}`,
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ---- HYK-453 음성 대조(완료조건 3) ------------------------------------
+// 위 시험에서 벽시계 단정을 뺐으므로, 「그 단정이 하던 탐지를 무엇이
+// 대신하는가」를 여기서 직접 잰다. 같은 배치에서 소유자를 «죽이지 않으면»
+// (=죽음 확인이 불가능하면) 회수는 일어나면 «안 된다» -- 그리고 나이
+// 기반 회수도 staleLockMs 때문에 불가능하므로, CLI 는 자기 lockTimeoutMs
+// 안에 스스로 포기해야 한다.
+// ⇒ 이 시험이 초록인 한, 위 시험의 CAP_ADMITTED 는 «죽음 확인» 말고는
+//   설명이 없다. 즉 탐지력은 시간이 아니라 이 대조에 실려 있다.
+// ⚠️진짜 «행»(회수 경로가 영원히 안 끝남)도 여기서 잡힌다: 그러면 CLI 가
+//   자기 계약 시간 안에 끝나지 못해 안전망(HANG_BACKSTOP_MS)에 걸리고,
+//   그건 아래 «스스로 포기했다»(비0 종료 + 안전망 미도달) 단정을 깨뜨린다.
+// 살아 있는 소유자의 락을 훔치려는 경쟁자 -- 성공하면 안 된다.
+async function contendForLock(ledger, lock) {
+  try {
+    const r = await execFileAsync(
+      "node",
+      [
+        CLI_PATH,
+        "admit",
+        "--ledger",
+        ledger,
+        "--lock",
+        lock,
+        "--reservation-id",
+        "must-not-steal",
+        "--cap",
+        "1",
+        "--stale-lock-ms",
+        String(HUGE_STALE_LOCK_MS),
+        "--lock-timeout-ms",
+        String(SHORT_LOCK_TIMEOUT_MS),
+      ],
+      { timeout: HANG_BACKSTOP_MS },
+    );
+    return { threw: null, stdout: r.stdout };
+  } catch (err) {
+    return { threw: err, stdout: err.stdout ?? "" };
+  }
+}
+
+test("HYK-453 음성 대조: 소유자가 «살아 있으면» 회수되지 않는다 -- CLI 는 자기 lockTimeoutMs 안에 스스로 포기한다", async () => {
+  const { dir, ledger, lock } = tmpPaths();
+  let holder = null;
+  let holderExited = null;
+  try {
+    await execFileAsync("node", [
+      CLI_PATH,
+      "init-cutover",
+      "--ledger",
+      ledger,
+      "--lock",
+      lock,
+      "--live-seats",
+      "[]",
+    ]);
+    // 임계구역을 오래 잡고 «살아 있는» 소유자. 위 시험의 doomed 와 같은
+    // 배치이고, 다른 것은 «죽이지 않는다»는 것 하나뿐이다.
+    holder = spawn("node", [
       CLI_PATH,
       "admit",
       "--ledger",
@@ -500,28 +663,39 @@ test("HYK-224-2R §1: a genuinely dead process's lock IS reclaimed (not wedged f
       "--lock",
       lock,
       "--reservation-id",
-      "recovered",
+      "alive-holder",
       "--cap",
       "1",
+      "--debug-delay-ms",
+      "60000",
       "--stale-lock-ms",
-      "1000000",
-      "--lock-timeout-ms",
-      "5000",
+      String(HUGE_STALE_LOCK_MS),
     ]);
-    const elapsedMs = Date.now() - before;
-    assert.match(
-      result.stdout,
-      /CAP_ADMITTED/,
-      `dead process's lock should be reclaimed: ${result.stdout}`,
-    );
-    // Reclaim was via confirmed death, not the (deliberately huge)
-    // staleLockMs age fallback -- must complete quickly, not after a long
-    // age-based wait.
+    // ★위와 같은 이유(그리고 이 자리가 실제로 위양성을 냈다).
+    holderExited = new Promise((resolve) => holder.on("exit", resolve));
+    await waitForLockHeldBy(lock, holder.pid);
+
+    const { threw, stdout } = await contendForLock(ledger, lock);
     assert.ok(
-      elapsedMs < 4000,
-      `reclaim should be fast (pid-death-based, not age-based): took ${elapsedMs}ms`,
+      threw,
+      `살아 있는 소유자의 락을 훔치면 안 된다 -- 그런데 admit 이 성공했다: ${stdout}`,
+    );
+    assert.equal(
+      threw.signal,
+      null,
+      "스스로(자기 lockTimeoutMs 로) 포기해야 한다 -- 안전망에 강제 종료됐다면 회수 경로가 «행»이라는 뜻이다",
+    );
+    assert.doesNotMatch(
+      stdout,
+      /CAP_ADMITTED/,
+      `살아 있는 소유자의 락은 회수 대상이 아니다: ${stdout}`,
     );
   } finally {
+    if (holder) {
+      holder.kill("SIGKILL");
+      // ⛔여기서 리스너를 «새로» 붙이지 않는다(위 주석의 그 함정).
+      if (holderExited) await holderExited;
+    }
     rmSync(dir, { recursive: true, force: true });
   }
 });
