@@ -979,6 +979,16 @@ const OWN_TEST_FILE_SUFFIXES = [
   // exception was added -- exactly the drift the new test below now
   // seals.)
   "hyk413-seat-reason-projection.test.mjs",
+  // ★HYK-448: unconsumed-ledger-closure-wire.test.mjs is the same shape once
+  // more -- it drives judgeUnconsumedForRepo/collectUnconsumedCandidates (the
+  // same read-only production entry points as unconsumed-receipt-signal.
+  // test.mjs above) to pin that the "unconsumed" axis now decides on LEDGER
+  // CLOSURE instead of receipt-file presence, and that a post-closure edit
+  // still fires. Excluded on the identical "own .test.mjs" basis.
+  // ⚠️no eslint.config.mjs counterpart is needed here (unlike the hyk413
+  // line above): that list governs orca-adapter.mjs imports, and this file
+  // imports none -- same as the two unconsumed-*.test.mjs entries above.
+  "unconsumed-ledger-closure-wire.test.mjs",
 ];
 
 function findOrchStallDetectImporters(root) {
