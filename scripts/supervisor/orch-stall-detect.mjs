@@ -113,6 +113,12 @@ import {
   mkdirSync,
 } from "node:fs";
 import { execFileSync } from "node:child_process";
+// ★HYK-448 2R: 소비 영수증의 `resultFingerprint` 와 «지금» 결과 파일의
+// 지문을 대조하려면 같은 해시가 필요하다 -- consumption-receipt-writer.mjs
+// 의 computeResultFingerprint 와 **같은 알고리즘·같은 입력**(결과 파일
+// 내용의 utf8 SHA-256 hex)이어야 하며, 다르면 정상 라운드마다 지문이
+// 갈려 «상시 과발화»가 된다(2R 실측으로 일치 확인, coder.md §3-3).
+import { createHash } from "node:crypto";
 import path from "node:path";
 import {
   judgeOrchProgress,
@@ -133,6 +139,9 @@ import {
   judgeUnconsumed,
   UNCONSUMED_VERDICT,
   UNCONSUMED_SIGNAL_KIND,
+  // ★HYK-448 3R: 심각도를 «판정 이름»이 아니라 «사유»로 가르기 위해 필요하다
+  // (unconsumedSeverityOf 참조 -- UNDECIDABLE 전체를 올리면 형태 B 가 부활한다).
+  UNCONSUMED_REASON,
 } from "./unconsumed-core.mjs";
 import { judgeHeaderTimeProjection } from "./header-time-projection-core.mjs";
 import {
@@ -2155,6 +2164,262 @@ function isReservationCompletedForRound(ledgerPath, roundLabel, opts) {
   return ledger?.reservations?.[roundLabel]?.status === "COMPLETED";
 }
 
+// ★HYK-448 (coder-task.md §1-2): 이 축의 판정 근거를 «영수증 파일이 있는가»
+// 라는 대리 지표에서 «원장이 이 라운드를 닫았는가»로 옮기기 위해, 원장
+// 항목에서 종결 사실 셋을 읽는다 -- `status`·`completed_at`·
+// `completion_reason`(admission-ledger-core.mjs completeReservation이 닫을
+// 때 적는 바로 그 세 필드다).
+//
+// ⛔위 isReservationCompletedForRound와 «다른 함수»로 두는 이유: 그쪽은
+// 「영수증 신호를 세워도 되는가」를 묻는 boolean 게이트고(4중 검증의 한
+// 갈래), 이쪽은 「언제 닫혔는가」라는 값을 가져온다. 한 함수로 합치면
+// boolean 게이트 쪽 계약이 바뀌어 그 4중 검증의 의미가 흔들린다.
+//
+// ★반환 계약(fail-closed): 못 읽거나·항목이 없거나·COMPLETED가 아니거나·
+// `completed_at`이 시각으로 파싱되지 않으면 ⇒ `null`(= 「모른다」).
+// 코어는 「모른다」를 **침묵이 아니라 종전대로 발화**로 번역한다(코어 헤더
+// 참조) -- 원장을 못 읽었다는 이유로 진짜 미소비를 잃지 않기 위해서다.
+function readRoundClosureFromLedger(ledgerPath, roundLabel, opts) {
+  if (
+    !isNonEmptyReceiptString(ledgerPath) ||
+    !isNonEmptyReceiptString(roundLabel)
+  ) {
+    return null;
+  }
+  const readFileFn =
+    typeof opts.ledgerReadFn === "function" ? opts.ledgerReadFn : readFileSync;
+  let ledger;
+  try {
+    ledger = JSON.parse(readFileFn(ledgerPath, "utf8"));
+  } catch {
+    return null;
+  }
+  const entry = ledger?.reservations?.[roundLabel];
+  if (!entry || entry.status !== "COMPLETED") return null;
+  const closedAtMs = Date.parse(entry.completed_at);
+  if (!Number.isFinite(closedAtMs)) return null;
+  return {
+    closed: true,
+    closedAtMs,
+    completionReason:
+      typeof entry.completion_reason === "string"
+        ? entry.completion_reason
+        : null,
+  };
+}
+
+// ★HYK-448 2R: «종결 후 수정»을 시계 비교 없이 판정하기 위한 두 관측.
+//
+// ⓐ 소비 영수증(`.harness/receipts/<role>-receipt-r<N>.json`)의
+//    `binding.resultFingerprint` -- 소비 시점 결과 파일의 SHA-256.
+// ⓑ «지금» 결과 파일의 SHA-256.
+// 둘이 다르면 시계를 한 번도 비교하지 않고 «바뀌었다»를 말할 수 있다.
+//
+// ⛔둘 중 하나라도 못 구하면 `null` 을 넘긴다 -- 코어는 그것을 «축 없음»
+// 으로 보고 시계 축으로 넘어갈 뿐 침묵하지 않는다(코어 헤더 «발화 전용»).
+// ⚠️★중단 종결 라운드는 소비 영수증을 애초에 남기지 않으므로(형태 A) 이
+// 축이 «구조적으로 없다» -- 그 경우도 여기서 자연히 `null` 이 된다.
+// 가장 최신 영수증 파일 하나의 경로(없으면 null). 위 latestReceiptMtimeMs 와
+// 같은 스캔 규약이지만 «무엇을 돌려주는가»가 다르다(시각 vs 경로) -- 그쪽
+// 반환 계약을 건드리면 그것을 쓰는 신호 경로까지 흔들리므로 따로 둔다.
+function statMtimeMsOrNull(fullPath, statFn) {
+  let st;
+  try {
+    st = statFn(fullPath);
+  } catch {
+    return null;
+  }
+  if (st.isDirectory()) return null;
+  return typeof st.mtimeMs === "number" && Number.isFinite(st.mtimeMs)
+    ? st.mtimeMs
+    : null;
+}
+
+// 주어진 폴더에서 패턴에 맞는 «가장 최신» 파일 하나의 경로(없으면 null).
+// ★HYK-448 3R: 영수증·중단기록 두 출처가 같은 스캔 규약을 쓰므로
+// 한 군데로 모은다(둘을 따로 두면 같은 루프가 두 번 생기고 복잡도 상한에도 걸렸다).
+function newestMatchingFilePath(dirPath, pattern, opts) {
+  const { readdirFn, statFn, existsFn } = resolveReceiptScanFns(opts);
+  let names;
+  try {
+    names = readdirFn(dirPath);
+  } catch {
+    return null;
+  }
+  let newest = null;
+  for (const name of names) {
+    if (!pattern.test(name)) continue;
+    const full = path.join(dirPath, name);
+    if (!existsFn(full)) continue;
+    const mtimeMs = statMtimeMsOrNull(full, statFn);
+    if (mtimeMs === null) continue;
+    if (!newest || mtimeMs > newest.mtimeMs) newest = { path: full, mtimeMs };
+  }
+  return newest ? newest.path : null;
+}
+
+function latestReceiptFingerprint(repoRoot, role, opts) {
+  if (!isNonEmptyReceiptString(role)) return null;
+  const receiptPath = newestMatchingFilePath(
+    path.join(repoRoot, ".harness", "receipts"),
+    receiptFileNamePattern(role),
+    opts,
+  );
+  if (!receiptPath) return null;
+  const readFileFn =
+    typeof opts.receiptContentReadFn === "function"
+      ? opts.receiptContentReadFn
+      : readFileSync;
+  let parsed;
+  try {
+    parsed = JSON.parse(readFileFn(receiptPath, "utf8"));
+  } catch {
+    return null;
+  }
+  const fp = parsed?.binding?.resultFingerprint;
+  // ★ORCH 가 자인한 실수 형태(추출이 빈 값)를 출처에서 잘라낸다.
+  return isNonEmptyReceiptString(fp) ? fp : null;
+}
+
+function currentResultFingerprint(resultAbsolutePath, opts) {
+  const readFileFn =
+    typeof opts.resultContentReadFn === "function"
+      ? opts.resultContentReadFn
+      : readFileSync;
+  let content;
+  try {
+    content = readFileFn(resultAbsolutePath, "utf8");
+  } catch {
+    return null;
+  }
+  if (typeof content !== "string") return null;
+  return createHash("sha256").update(content, "utf8").digest("hex");
+}
+
+// ★HYK-448 3R (§1-3 ⑴): «종결 시점 지문»의 **두 번째 출처** -- 중단 기록.
+//
+// 2R 까지 두 라운드가 공유한 전제는 *«중단 종결은 소비 영수증을 남기지 않으니
+// 지문 축이 부재»* 였는데, ORCH 실측이 그것을 뒤집었다: 중단 종결 경로
+// (relay-handshake.mjs 의 runBlockedTerminationSideEffectsIfApplicable)는
+// `aborts/<ROLE>-abort-r<N>.json` 에 ★`leftoverFingerprint` 를 남긴다 --
+// 그 값은 종결 시점 결과 파일의 SHA-256 이고(computeResultFingerprint,
+// 소비 영수증의 resultFingerprint 와 **같은 함수·같은 입력**), 그래서 소비
+// 영수증과 완전히 같은 자격으로 이 축에 쓸 수 있다.
+//
+// ⇒ 이것이 형태 A 의 침묵 근거를 «순서를 몰라서» 에서 ★«증거로 안 바뀐 걸
+//   알아서» 로 바꾼다. 그 위에서만 UNDECIDABLE 승격(아래 severity)이 안전하다.
+//
+// ⛔읽기 전용이다 -- 이 축은 중단 기록을 **절대 쓰지 않는다.**
+function latestAbortFingerprint(repoRoot, role, opts) {
+  if (!isNonEmptyReceiptString(role)) return null;
+  // abort-record-writer.mjs 의 nextAbortFileName 관례(대소문자 무관).
+  const pattern = new RegExp(
+    `^${String(role).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}-abort-r\\d+\\.json$`,
+    "i",
+  );
+  const abortPath = newestMatchingFilePath(
+    path.join(repoRoot, ".harness", "aborts"),
+    pattern,
+    opts,
+  );
+  if (!abortPath) return null;
+  const readFileFn =
+    typeof opts.abortContentReadFn === "function"
+      ? opts.abortContentReadFn
+      : readFileSync;
+  let parsed;
+  try {
+    parsed = JSON.parse(readFileFn(abortPath, "utf8"));
+  } catch {
+    return null;
+  }
+  // ⛔빈 값은 «없음»으로 접는다 -- 빈 값끼리 «일치»해서 침묵이 되는 사고를
+  // 원천 차단한다(ORCH 가 자기 프로브에서 실제로 겪은 실수 형태).
+  const fp = parsed?.leftoverFingerprint;
+  return isNonEmptyReceiptString(fp) ? fp : null;
+}
+
+// ★HYK-448 2R/3R: 코어에 넘길 지문 쌍. 둘 다 «못 구하면 null» 이고,
+// 코어는 그것을 «축 없음» 으로 본다.
+// ★3R: 「종결 시점 지문」의 출처가 둘이다 -- 소비 영수증(정상 종결)과
+// 중단 기록(중단 종결). 소비 영수증을 먼저 보고, 없으면 중단 기록을 본다
+// (한 라운드가 둘 다 남기는 경우는 없다: 정상 종결은 영수증만, 중단 종결은
+// 중단 기록만 남긴다 -- relay-handshake.mjs 의 두 갈래가 배타적이다).
+function collectResultFingerprints(repoRoot, role, resultAbsolutePath, opts) {
+  return {
+    consumed:
+      latestReceiptFingerprint(repoRoot, role, opts) ??
+      latestAbortFingerprint(repoRoot, role, opts),
+    current: currentResultFingerprint(resultAbsolutePath, opts),
+  };
+}
+
+// ★HYK-448: 코어에 넘길 «종결 축» 관측 셋을 한자리에서 만든다 -- 코어는
+// 여전히 파일도 git도 원장도 읽지 않는다(그 파일의 비타협 «관측은 호출자가
+// 준다»). 셋 다 «모르면 null/생략»이고, 코어는 그것을 침묵이 아니라 종전
+// 동작(또는 판정 불가)으로 번역한다.
+// judgeUnconsumedForRepo 의 eslint max-lines-per-function(80) 을 지키려고
+// 뽑아낸 것이기도 하다 -- 판정 규칙은 한 글자도 여기 있지 않다.
+function buildClosureObservations({
+  repoRoot,
+  targetRole,
+  resultFileInfo,
+  opts,
+}) {
+  const resultAbsolutePath = path.join(repoRoot, resultFileInfo.path);
+  const terminalMarkerCount = countTerminalMarkers(resultAbsolutePath, opts);
+  // 원장에서 종결 상태를 읽으려면 이 결과 파일이 어느 라운드인지 알아야
+  // 한다. 라벨 뽑는 계약은 영수증 축이 이미 쓰는 것을 그대로 재사용한다
+  // (resolveEchoedRoundLabel -- «정확히 하나의 줄머리 task_id:»).
+  const roundLabel = resolveEchoedRoundLabel(resultAbsolutePath, opts);
+  return {
+    resultFile:
+      terminalMarkerCount === null
+        ? { updatedAtMs: resultFileInfo.mtimeMs }
+        : { updatedAtMs: resultFileInfo.mtimeMs, terminalMarkerCount },
+    roundClosure: readRoundClosureFromLedger(
+      resolveAdmissionLedgerPathForUnconsumed(repoRoot, opts),
+      roundLabel,
+      opts,
+    ),
+    // ★2R: 시계를 쓰지 않는 «종결 후 수정» 축의 관측 쌍.
+    fingerprints: collectResultFingerprints(
+      repoRoot,
+      targetRole,
+      resultAbsolutePath,
+      opts,
+    ),
+  };
+}
+
+// ★HYK-448 (coder-task.md §1-3 형태 B): 결과 파일의 «종료 표지» 개수.
+// 0이면 그 라운드는 아직 끝나지 않았다는 뜻이다 -- 판별기가 지금까지 이
+// 사실을 아예 안 봤기 때문에, 진행 중인 라운드가 임계를 넘기면 그대로
+// 미소비로 발화했다(ORCH-60 실측 형태 B).
+//
+// 세는 대상은 relay-handshake.mjs의 엄격 채택 표지와 같은 «칼럼 0 · 화살표
+// 셋 · 콜론» 모양 셋이다(완료 1종 + 정지 2종). ⛔여기서는 «형식이 올바른
+// 표지»를 세는 것이 목적이 아니라 «라운드가 끝났다고 주장하는 흔적이 하나라도
+// 있는가»만 보므로, 사유 유무 같은 세부 형식은 묻지 않는다 -- 그 판정은
+// 소비 게이트(relay-handshake.mjs)의 몫이고 이 축이 흉내 내면 두 곳이
+// 어긋난다.
+// 반환: 개수(0 이상) 또는 못 읽었으면 `null`(= 「모른다」, 종전 동작 유지).
+const TERMINAL_MARKER_RE_G = /^>>>[ \t]*(DONE|BLOCKED|NEEDS_INPUT)\b/gim;
+
+function countTerminalMarkers(resultAbsolutePath, opts) {
+  const readFileFn =
+    typeof opts.resultContentReadFn === "function"
+      ? opts.resultContentReadFn
+      : readFileSync;
+  let content;
+  try {
+    content = readFileFn(resultAbsolutePath, "utf8");
+  } catch {
+    return null;
+  }
+  return [...content.matchAll(TERMINAL_MARKER_RE_G)].length;
+}
+
 // HYK-356 (기전 확정: ORCH 실측 2026-08-25 헛울림 2건 -- .harness/coder-
 // task.md §0/§1): 경로 계약 자체는 아래 HYK-347 주석 그대로다(인자 ->
 // env(`DISPATCH_RECEIPT_PATH`) -> 없으면 null, fail-closed). ★그런데
@@ -2496,7 +2761,12 @@ export function judgeUnconsumedForRepo(
     };
   }
   const judged = judgeUnconsumed({
-    resultFile: { updatedAtMs: resultFileInfo.mtimeMs },
+    ...buildClosureObservations({
+      repoRoot,
+      targetRole,
+      resultFileInfo,
+      opts,
+    }),
     signals: signalsResult.signals,
     now,
   });
@@ -2535,8 +2805,36 @@ export const UNCONSUMED_SCAN_SEVERITY = Object.freeze({
   NORMAL: 0, // NOT_APPLICABLE/JUDGED+CONSUMED/JUDGED+UNDECIDABLE 미만 대기.
   UNDECIDABLE: 1, // JUDGED이지만 verdict가 UNDECIDABLE.
   COLLECTION_FAILURE: 2, // 워크트리 열거·harness 읽기·git log 실패.
-  SUSPECTED_UNCONSUMED: 3, // 가장 나쁨.
+  SUSPECTED_UNCONSUMED: 3,
+  // ★HYK-448 3R (검토 2R P1 해소): «순서를 증명할 수 없는 종결»은 이제
+  // 사람에게 도달해야 한다. ⛔단 «UNDECIDABLE 이라는 판정 전체»를 올리는
+  // 것이 아니다 -- 그 판정은 ROUND_NOT_FINISHED(형태 B)·NO_SIGNAL_TOO_EARLY
+  // (아직 이른 정상 상태)·인자 형식 위반까지 **열 가지 넘는 사유**가 함께
+  // 쓰는 값이라, 통째로 올리면 형태 B 와 «아직 이른 라운드»가 매 주기
+  // 발화한다(= HYK-448 이 없애려던 것의 부활). 그래서 ★사유 하나
+  // (CLOSURE_ORDER_UNPROVABLE)만 콕 집어 올린다 -- 아래 unconsumedSeverityOf.
+  CLOSURE_ORDER_UNPROVABLE: 5,
+  // ★HYK-448: 「원장이 닫은 라운드의 결과 파일이 그 뒤에 바뀌었다」.
+  // ⛔SUSPECTED_UNCONSUMED «위»에 두는 것은 임의 선택이 아니다: 이 축의
+  // 대표값(worst)은 하나뿐인데, 만성적으로 하나씩 떠 있는 미소비 의심이
+  // 대표 자리를 차지하면 이 드문 사실이 그 뒤에 가려진다 -- 그것이 바로 이
+  // 이슈가 고치려는 «늑대소년» 실패의 다른 얼굴이다. 또한 성격도 다르다:
+  // 미소비는 «ORCH 가 멈췄나»(가용성)이고, 이쪽은 «이미 확정된 기록이
+  // 흔들렸다»(정합성)라서 조치가 더 급하다.
+  MODIFIED_AFTER_CLOSURE: 4,
 });
+
+// 이 축이 «사람을 깨울 등급»으로 보는 심각도들 -- 아래 worstWorktreePaths가
+// 이름을 채우는 기준이기도 하다(둘이 어긋나면 발화는 하는데 어느 워크트리인지
+// 안 실리는 구멍이 생긴다).
+const UNCONSUMED_FIRING_SEVERITIES = new Set([
+  UNCONSUMED_SCAN_SEVERITY.SUSPECTED_UNCONSUMED,
+  UNCONSUMED_SCAN_SEVERITY.MODIFIED_AFTER_CLOSURE,
+  // ★HYK-448 3R: 검토 2R P1 의 해소 지점. «순서를 증명할 수 없는
+  // 종결» 이 이제 사람에게 도달한다. ⛔이것이 안전한 것은 오직
+  // 상위 «지문 일치 -> 침묵» 갈래가 먼저 들어왔기 때문이다(순서 핵심).
+  UNCONSUMED_SCAN_SEVERITY.CLOSURE_ORDER_UNPROVABLE,
+]);
 
 function unconsumedSeverityOf(entry) {
   if (
@@ -2548,11 +2846,20 @@ function unconsumedSeverityOf(entry) {
     return UNCONSUMED_SCAN_SEVERITY.COLLECTION_FAILURE;
   }
   if (entry.status === UNCONSUMED_WIRE_STATUS.JUDGED) {
+    if (entry.verdict === UNCONSUMED_VERDICT.MODIFIED_AFTER_CLOSURE) {
+      return UNCONSUMED_SCAN_SEVERITY.MODIFIED_AFTER_CLOSURE;
+    }
     if (entry.verdict === UNCONSUMED_VERDICT.SUSPECTED_UNCONSUMED) {
       return UNCONSUMED_SCAN_SEVERITY.SUSPECTED_UNCONSUMED;
     }
     if (entry.verdict === UNCONSUMED_VERDICT.UNDECIDABLE) {
-      return UNCONSUMED_SCAN_SEVERITY.UNDECIDABLE;
+      // ★HYK-448 3R: «UNDECIDABLE» 은 열 가지 넘는 사유가 함꿠 쓰는 값이라
+      // 판정 이름만 보고 올리면 형태 B(ROUND_NOT_FINISHED)와 «아직 이른
+      // 라운드»(NO_SIGNAL_TOO_EARLY)까지 매 주기 발화한다. ★그래서
+      // «순서 미증명» 사유 하나만 발화 등급으로 올린다.
+      return entry.reasonCode === UNCONSUMED_REASON.CLOSURE_ORDER_UNPROVABLE
+        ? UNCONSUMED_SCAN_SEVERITY.CLOSURE_ORDER_UNPROVABLE
+        : UNCONSUMED_SCAN_SEVERITY.UNDECIDABLE;
     }
   }
   return UNCONSUMED_SCAN_SEVERITY.NORMAL;
@@ -2593,12 +2900,14 @@ export function judgeUnconsumedAcrossWorktrees({ repoRoot, now }, opts = {}) {
   // 의심 워크트리 이름"이라는 이 필드의 의미상 그 등급에서 채울 이름이
   // 없다(watch-run.mjs 쪽 시험 요구사항 "CONSUMED일 때도 필드는 존재하되
   // 값은 비어 있다"와 합치).
-  const worstWorktreePaths =
-    worstSeverity === UNCONSUMED_SCAN_SEVERITY.SUSPECTED_UNCONSUMED
-      ? worstEntries
-          .map((w) => w.worktreePath)
-          .filter((p) => typeof p === "string" && p.length > 0)
-      : [];
+  // ★HYK-448: 기준을 «SUSPECTED 일 때만»에서 «깨울 등급이면»으로 넓힌다 --
+  // 새 축도 발화 등급이므로, 안 넓히면 발화는 하는데 어느 워크트리인지가
+  // 빈 배열로 나가는 구멍이 생긴다(위 UNCONSUMED_FIRING_SEVERITIES 참조).
+  const worstWorktreePaths = UNCONSUMED_FIRING_SEVERITIES.has(worstSeverity)
+    ? worstEntries
+        .map((w) => w.worktreePath)
+        .filter((p) => typeof p === "string" && p.length > 0)
+    : [];
   return {
     status: worst ? worst.status : UNCONSUMED_WIRE_STATUS.NOT_APPLICABLE,
     verdict: worst ? worst.verdict : undefined,

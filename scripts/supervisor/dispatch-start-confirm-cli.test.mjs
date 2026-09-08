@@ -209,6 +209,16 @@ test("★HYK-378 4R 불변식 K: 여섯 인자(dispatchedAtMs·timeoutMs·stallT
   );
 });
 
+// ---- HYK-453: «행 안전망»과 «판정 임계»를 가른다 ------------------------
+// 이 값은 «얼마나 빨라야 하는가»가 아니라 «영영 안 끝나는 것을 언제 끊을
+// 것인가»다. 탐지(4R 회귀 = 인자 검증 전에 매달림)는 이 값이 아니라
+// 「스스로 exit 했는가(signal === null) + 기대한 코드/문구/기록이 나왔는가」가
+// 한다 -- 무한 대기는 이 상한이 얼마든 반드시 걸리므로, 값을 키워도 탐지력은
+// 그대로다. 반대로 값이 작으면 «부하로 느린 것»과 «행»을 혼동한다:
+// 부하 합성 384 에서 10초 안전망이 실제로 그렇게 오작동했다(8회 중 3회,
+// 12.5~13.4초에 SIGTERM -- CLI 는 멀쩡했는데 시험이 빨갛게 났다).
+const HANG_BACKSTOP_MS = 120_000;
+
 // ★CLI 실 프로세스 실행(완료조건 1 요구 "실제 CLI 실행으로 확인") --
 // 검토자의 정확한 재현 인자 그대로: `--stall-threshold-ms NaN
 // --timeout-ms 1 --poll-interval-ms 1`. 수리 전엔 1초 안에
@@ -246,7 +256,7 @@ test("★HYK-378 4R P1-1 CLI 실행 재현+수리: --stall-threshold-ms NaN --ti
           "--poll-interval-ms",
           "1",
         ],
-        { encoding: "utf8", timeout: 10_000 }, // 안전망일 뿐(위 헤더 주석).
+        { encoding: "utf8", timeout: HANG_BACKSTOP_MS }, // ⛔판정 아님(위 상수 주석).
       );
     } catch (err) {
       threw = err;
@@ -261,10 +271,25 @@ test("★HYK-378 4R P1-1 CLI 실행 재현+수리: --stall-threshold-ms NaN --ti
     );
     assert.equal(threw.code, 4);
     assert.match(stderr, /INVALID_ARGS/);
-    assert.ok(
-      elapsedMs < 5000,
-      `1초 타임아웃/1ms 폴링 간격과 무관하게 즉시 끝나야 한다 -- 실제 ${elapsedMs}ms`,
-    );
+    // ---- HYK-453: 여기 있던 «벽시계 상한»(elapsedMs < 5000)을 뺐다 -------
+    // 그 줄은 오늘 실물로 반복해 깨졌다(부하 합성 재현: 9145·5974·5584ms).
+    // 그런데 그 회차들에서도 CLI 는 «스스로» 정상 종료했다 -- 즉 그 단정은
+    // 이 시험이 증명하려는 성질이 아니라 «자식 spawn + node 기동»이 부하로
+    // 얼마나 밀렸는지를 재고 있었다(위양성).
+    //
+    // ★탐지력은 한 줄도 잃지 않는다. 이 시험이 잡아야 하는 회귀 두 가지는
+    // 이미 «시간이 아닌» 단정이 각각 잡고 있다:
+    //   ⓐ 4R 의 실제 결함(인자 검증 전에 폴링 루프로 들어가 매달림)
+    //      -> 위 `threw.signal === null`. 매달리면 execFileAsync 의 안전망
+    //         (timeout: HANG_BACKSTOP_MS)이 SIGTERM 으로 죽이므로 signal 이
+    //         이 단정이 깨진다. ★즉 «행»은 여전히 잡힌다 -- 다만 «느림»과
+    //         «행»을 이제 혼동하지 않는다.
+    //   ⓑ 검증을 통과해 폴링/타임아웃 경로로 샜다
+    //      -> `code === 4` + stderr `INVALID_ARGS`(그 경로는 다른 코드/문구를
+    //         낸다). 아래 notifyDir 기록 단정이 한 번 더 못박는다.
+    // ⚠️위 HANG_BACKSTOP_MS 는 «판정 임계»가 아니라 행 안전망이다 -- 이 시험은
+    // 그 값보다 빨랐는지를 묻지 않고, 그 안에서 «스스로» 끝났는지만 묻는다.
+    void elapsedMs; // 진단 메시지용으로만 남긴다(단정 아님).
     // ★HYK-378 5R(REVIEW P1-2 저장소 쪽 절반, 불변식 O "관측 가능성") --
     // 4R까지는 stderr 한 줄뿐이었다(검토자 지적: 호출부가 그 줄을 안
     // 읽으면 신호가 통째로 유실된다). 이제 저장소 안(notifyDir)에 실제
@@ -369,7 +394,7 @@ test("★HYK-378 6R P1 재현+수리(불변식 P): notifyDir를 파일로 만들
           "--poll-interval-ms",
           "1",
         ],
-        { encoding: "utf8", timeout: 10_000 }, // 안전망일 뿐.
+        { encoding: "utf8", timeout: HANG_BACKSTOP_MS }, // ⛔판정 아님.
       );
     } catch (err) {
       threw = err;
