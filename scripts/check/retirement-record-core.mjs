@@ -181,11 +181,22 @@ export const MECHANICALLY_CONFIRMABLE_BLOCK_REASONS = Object.freeze(
   ]),
 );
 
+// HYK-455 §1 확대 라운드: 다섯 번째 상태 -- 아카이브 사본 자체는
+// 존재하지만(archiveExists) 그 사본이 스스로 주장하는 원문 결속
+// 필드(content_sha256, envelope-archive.mjs의 archiveUnconsumedRoundEnvelope
+// 가 새기는 값)가 없거나 몸통과 일치하지 않는 경우. FINGERPRINT_MISMATCH
+// (기록이 주장하는 지문과의 대조)와는 다른 축이다 -- 이쪽은 "아카이브
+// 파일 자신의 내부 자기무결성"을 묻는다("이 사본이 기계가 만든 것이라고
+// 주장하는데, 그 주장 자체가 사실인가"). 옛 방식(소비 성공 시 생성,
+// content_sha256 필드 없음) 아카이브와 이 필드를 아예 선언하지 않는
+// 사본은 이 축의 적용 대상이 아니다(§3-1 아래 checkArchiveFacts 참조,
+// 회귀 0 유지).
 export const RETIREMENT_RECORD_STATE = Object.freeze({
   RETIRED: "RETIRED",
   NO_RECORD: "NO_RECORD",
   AMBIGUOUS: "AMBIGUOUS",
   ARCHIVE_MISSING: "ARCHIVE_MISSING",
+  ARCHIVE_ENVELOPE_BINDING_INVALID: "ARCHIVE_ENVELOPE_BINDING_INVALID",
   FINGERPRINT_MISMATCH: "FINGERPRINT_MISMATCH",
   INVALID_REASON_CODE: "INVALID_REASON_CODE",
   BLOCK_REASON_UNCONFIRMED: "BLOCK_REASON_UNCONFIRMED",
@@ -283,6 +294,21 @@ function checkArchiveFacts(candidate, record) {
       reason: `retirement-record: 은퇴 기록(${describeRecord(record)})이 가리키는 아카이브 사본(.harness/rounds/)이 존재하지 않음 -> 거부(안전측 기본값)`,
     };
   }
+  // HYK-455 §1 확대 라운드: envelopeBindingValid는 세 값(true/false/null)을
+  // 갖는다 -- null(구형 소비-성공 아카이브·이 필드를 아예 선언하지 않는
+  // 사본)은 이 축의 적용 대상이 아니므로 통과시킨다(회귀 0, 어댑터
+  // resolveEnvelopeBindingValidity 헤더 참조). false만 거부한다 -- 사본이
+  // "기계가 만든 미소비-아카이브(kind=unconsumed_result)"라고 스스로
+  // 선언했는데 원문 결속 필드(content_sha256)가 없거나 몸통과 다르다는
+  // 뜻이라, 손 사본(또는 손상된 사본)으로 의심해 거부한다(안전측 기본값,
+  // §2 완료조건4 음성 시험 ⓐⓑ).
+  if (candidate.envelopeBindingValid === false) {
+    return {
+      state: RETIREMENT_RECORD_STATE.ARCHIVE_ENVELOPE_BINDING_INVALID,
+      ok: false,
+      reason: `retirement-record: 은퇴 기록(${describeRecord(record)})이 가리키는 아카이브 사본이 스스로 미소비-아카이브(kind=unconsumed_result)라고 선언했지만 원문 결속 필드(content_sha256)가 없거나 몸통과 일치하지 않음 -> 기계가 만든 사본이 아니거나 손상됨(손 사본 의심), 거부(안전측 기본값)`,
+    };
+  }
   if (
     candidate.archiveFingerprintMatches !== true ||
     candidate.liveFingerprintMatches === false
@@ -347,6 +373,7 @@ function checkReasonAndSuccessorFacts(candidate, record) {
 //                                      blockReasonCode, successorLabel,
 //                                      recordedAt, evidence },
 //                            archiveExists: boolean,
+//                            envelopeBindingValid: boolean | null,
 //                            archiveFingerprintMatches: boolean,
 //                            liveFingerprintMatches: boolean | null,
 //                            blockReasonConfirmed: boolean | null }

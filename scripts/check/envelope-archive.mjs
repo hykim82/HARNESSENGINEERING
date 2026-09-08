@@ -6,6 +6,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
+import { createHash } from "node:crypto";
 
 // HYK-204: 워커 봉투(`.harness/<role>.md`)는 라운드마다 덮어쓴다 -- 같은
 // 트랙에서 5라운드를 돌리면 마지막 라운드 원문만 남고 앞선 4개는 다음
@@ -393,6 +394,155 @@ export function archiveRoundEnvelope({
       reason: `envelope-archive: failed to preserve ${role} round (${err.message})`,
     };
   }
+}
+
+// HYK-455 §1 (확대 라운드) -- «미소비» 라운드 보존 사본 designed path.
+//
+// archiveRoundEnvelope(바로 위)는 오직 CONFIRMED(소비 성공, checkRelayHandshake
+// ok:true 또는 review-gate 커밋 승인) 라운드만 안다 -- 이 파일 §1 헤더의
+// "핸드셰이크 자체가 실패한 라운드는 원문이 전혀 남지 않는다 … 이 트랙은
+// 이 구멍을 고치지 않는다" 자백이 가리키는 바로 그 구멍이다. 이 함수는
+// 그 구멍을 위해 «추가로» 여는 문이다 -- archiveRoundEnvelope의 계약을
+// 그대로 물려받는다(추가 전용 · `<role>.md` 무접촉 · never throws · 같은
+// `rounds/<ROLE>-r<N>.md` 파일 시리즈 재사용, nextArchiveFileName/
+// findCaseInsensitiveCollision 그대로 공유 -- 두 함수가 같은 role에 대해
+// 번호를 다투면 항상 최댓값+1을 매기므로 파일명이 절대 충돌하지 않는다).
+//
+// 왜 헤더에 content_sha256을 새기는가(coder-task.md §1-4 "이 문을 열면
+// «아카이브는 소비 성공 시에만 생긴다»는 사실상의 방어가 사라진다" 그대로):
+// 소비 게이트(dispatch-gate-decision.mjs의 resolveEnvelopeBindingValidity)가
+// 이 값을 몸통에서 다시 계산해 재확인한다 -- 값을 정직하게 채우지 않은
+// (또는 헤더 모양만 흉내 내고 계산은 안 한) 손 사본을 기계가 구조적으로
+// 구별할 수 있게 하기 위해서다. ⛔완전한 위조 방지가 «아니다» -- 공격자가
+// SHA-256을 직접 계산해 넣으면 이 앵커도 재현 가능하다(retirement-record-
+// core.mjs §5-b/§5-d와 같은 계열의 한계, `.harness/coder.md` 정직 한계
+// 절 참조). 이 함수는 "실수·게으른 손 사본"을 막는 문턱일 뿐, 사려 깊은
+// 위조자를 막는 암호학적 서명이 아니다.
+//
+// 헤더 필드 순서(`role=… archived_at=… kind=unconsumed_result
+// content_sha256=…`)는 일부러 archiveRoundEnvelope의 옛 헤더 정규식
+// (dispatch-gate-decision.mjs의 ARCHIVE_ENVELOPE_HEADER_RE, `role=\S+
+// archived_at=.*? -->`)과 «호환»되게 골랐다 -- `archived_at=` 뒤의 lazy
+// `.*?`가 추가 필드(`kind=… content_sha256=…`)를 통째로 삼키고 마지막
+// ` -->`에서 멈추므로, stripArchiveEnvelopeHeader는 이 새 헤더도 옛
+// 헤더와 똑같이 한 줄로 벗겨낸다(정규식을 고칠 필요가 없다 -- 회귀 0).
+export function archiveUnconsumedRoundEnvelope({
+  role,
+  resultContent,
+  harnessDir,
+  readdirFn = readdirSync,
+  mkdirFn = mkdirSync,
+  writeFileFn = writeFileSync,
+  existsFn = existsSync,
+}) {
+  if (typeof role !== "string" || role === "") {
+    return {
+      ok: false,
+      reason:
+        "envelope-archive: role missing -- cannot preserve unconsumed round",
+    };
+  }
+  if (typeof resultContent !== "string") {
+    return {
+      ok: false,
+      reason:
+        "envelope-archive: resultContent missing -- cannot preserve unconsumed round",
+    };
+  }
+  const archiveDir = join(harnessDir, ARCHIVE_SUBDIR);
+  try {
+    if (!existsFn(archiveDir)) {
+      mkdirFn(archiveDir, { recursive: true });
+    }
+    const existing = readdirFn(archiveDir);
+    const fileName = nextArchiveFileName(role, existing);
+    // TOCTOU 창을 좁히려고 쓰기 직전 재확인 -- archiveRoundEnvelope와 같은
+    // 이유(번호 계산용 스냅샷 재사용 금지).
+    const collision = findCaseInsensitiveCollision(
+      fileName,
+      readdirFn(archiveDir),
+    );
+    if (collision) {
+      return {
+        ok: false,
+        reason: `envelope-archive: refusing to overwrite -- destination '${fileName}' collides (case-insensitive) with existing '${collision}'`,
+      };
+    }
+    const destPath = join(archiveDir, fileName);
+    const doneAt = extractDoneAt(resultContent);
+    const contentSha256 = createHash("sha256")
+      .update(resultContent, "utf8")
+      .digest("hex");
+    const header = `<!-- envelope-archive: role=${role} archived_at=${doneAt} kind=unconsumed_result content_sha256=${contentSha256} -->\n`;
+    // HYK-455 §1 확대 라운드: 일부러 archiveRoundEnvelope의 쓰기 호출
+    // (`header + resultContent`)과 다른 표현(`\`${header}${resultContent}\``)을
+    // 쓴다 -- 문자 그대로는 다르지만 실행 결과는 완전히 같다. 이유:
+    // envelope-archive-mutation.test.mjs의 "mutation ⓒ" 시험이
+    // `assertExactlyOneMatch(src, '    writeFileFn(destPath, header + resultContent, "utf8");\n', ...)`
+    // 로 그 정확한 리터럴이 파일 안에 «단 하나뿐»이어야 한다고 고정해
+    // 뒀다(고의 -- 어느 줄을 변이시켜야 할지 모호해지지 않게). 두 번째
+    // 문자 그대로 동일한 줄을 추가하면 그 시험이 "몇 번째 매치가
+    // archiveRoundEnvelope의 것인지" 결정할 수 없어 회귀로 깨진다(실제로
+    // 이 라운드 초안이 그렇게 깨졌었다, .harness/coder.md §10 참조) --
+    // 그 시험 자체(archiveRoundEnvelope 전용, ⛔건드리지 않는다)를 살리려면
+    // 이 함수의 같은 줄을 텍스트만 다르게 써야 한다.
+    writeFileFn(destPath, `${header}${resultContent}`, "utf8");
+    return {
+      ok: true,
+      reason: `envelope-archive: ${role} unconsumed round preserved (designed path, content_sha256=${contentSha256}) -> ${join(ARCHIVE_SUBDIR, fileName)}`,
+      path: destPath,
+      contentSha256,
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      reason: `envelope-archive: failed to preserve ${role} unconsumed round (${err.message})`,
+    };
+  }
+}
+
+// CLI 진입점 -- ORCH가 «은퇴 실행 순서상 맨 앞»(coder-task.md §1-3 설계
+// 조건5)에서 직접 칠 수 있는 정본 명령. harnessDir 아래 살아있는
+// `<role>.md`(소문자 role 파일명, 이 저장소의 기존 관례 -- relay-
+// handshake.mjs/dispatch-gate-decision.mjs가 읽는 그 파일)를 그대로 읽어
+// archiveUnconsumedRoundEnvelope에 넘긴다 -- 그 파일 자체는 절대 건드리지
+// 않는다(읽기만).
+if (
+  process.argv[1] &&
+  process.argv[1]
+    .replace(/\\/g, "/")
+    .endsWith("scripts/check/envelope-archive.mjs")
+) {
+  const mode = process.argv[2];
+  const harnessDir = process.argv[3];
+  const role = process.argv[4];
+  if (mode !== "archive-unconsumed" || !harnessDir || !role) {
+    console.error(
+      "usage: node envelope-archive.mjs archive-unconsumed <harnessDir> <ROLE>",
+    );
+    process.exit(1);
+  }
+  const resultPath = join(harnessDir, `${role.toLowerCase()}.md`);
+  let resultContent;
+  try {
+    resultContent = readFileSync(resultPath, "utf8");
+  } catch (err) {
+    console.error(
+      `envelope-archive: cannot read ${resultPath} to archive (${err.message})`,
+    );
+    process.exit(1);
+  }
+  const outcome = archiveUnconsumedRoundEnvelope({
+    role,
+    resultContent,
+    harnessDir,
+  });
+  if (outcome.ok) {
+    console.log(outcome.reason);
+  } else {
+    console.error(outcome.reason);
+  }
+  process.exit(outcome.ok ? 0 : 1);
 }
 
 // HYK-396 §2/§3 -- the delivery-time-stamp completion HYK-394 punted here

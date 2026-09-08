@@ -797,3 +797,263 @@ test("§D 회귀: 이름표 없이 죽은 라운드(abort-record 축, MISSING �
     assert.match(r.stderr, /abort-record:/);
   });
 });
+
+// ---------------------------------------------------------------------------
+// §E (HYK-455 확대 라운드 · 잠금 2) -- 「미소비 라운드의 보존 사본」
+// designed path(envelope-archive.mjs의 archiveUnconsumedRoundEnvelope)가
+// 실제 배달 게이트까지 결선됐는지, 그리고 그 사본의 원문 결속 필드
+// (content_sha256)가 없거나 어긋난 «손 사본»이 기계로 거부되는지를
+// 증명한다. §E-GREEN은 세 CLI를 실제 자식 프로세스로 «순서대로» 돌린다
+// (⑴ envelope-archive.mjs archive-unconsumed -> ⑵ retirement-record-
+// writer.mjs -> ⑶ dispatch-gate-decision.mjs) -- coder-task.md §2
+// 완료조건5 "ORCH가 실제로 칠 명령을 순서대로"와 정확히 같은 세 명령이다.
+// ---------------------------------------------------------------------------
+
+const ENVELOPE_ARCHIVE_SCRIPT_PATH = join(HERE, "envelope-archive.mjs");
+const RETIREMENT_WRITER_SCRIPT_PATH = join(
+  HERE,
+  "retirement-record-writer.mjs",
+);
+
+function runArchiveUnconsumedCli(harnessDir, role) {
+  return runCli(ENVELOPE_ARCHIVE_SCRIPT_PATH, [
+    "archive-unconsumed",
+    harnessDir,
+    role,
+  ]);
+}
+
+function runRetirementWriterCli(harnessDir, payload) {
+  return runCli(RETIREMENT_WRITER_SCRIPT_PATH, [
+    harnessDir,
+    JSON.stringify(payload),
+  ]);
+}
+
+// §A3(HYK-455 1R)의 합성 표적과 같은 모양(검토는 승인됐다고 치되, 그
+// 커밋의 전체 러너가 구조적으로 빨강)이지만, 이번엔 «정상 소비 영수증
+// 체인으로도, 아카이브로도 아직 한 번도 회수된 적 없는» 새 라벨을 쓴다
+// -- coder-task.md §1-1이 실측한 실물 문제(hyk447-review-1)의 최소 재현:
+// `.harness/rounds/`에 이 라운드의 사본이 «아예 없던» 상태에서 시작한다.
+function buildNeverArchivedFixture(dir) {
+  const role = "coder";
+  const harnessTaskLabel = "HYK-9455x2-retire-envelope-round";
+  const headCommit = "f".repeat(40);
+  const resultContent = `task_id: ${harnessTaskLabel}\nhead_commit: ${headCommit}\n>>> DONE: CODER @ 2026-09-08 12:20:00 KST\n`;
+  writeFileSync(join(dir, `${role}.md`), resultContent, "utf8");
+
+  const taskPath = writeNextTaskFile(
+    dir,
+    role,
+    "HYK-9455x2-retire-envelope-round-next",
+    "2026-09-08 12:00:00 KST",
+  );
+  const ledgerPath = join(dir, "reject-streak.json");
+  writeLedger(ledgerPath, { schema_version: 1, issues: {} });
+  const admissionLedgerPath = join(dir, "admission-ledger.json");
+  writeFileSync(
+    admissionLedgerPath,
+    JSON.stringify(createEmptyLedger("2026-09-08T00:00:00.000Z")) + "\n",
+    "utf8",
+  );
+
+  return {
+    role,
+    dir,
+    taskPath,
+    harnessTaskLabel,
+    resultContent,
+    headCommit,
+    ledgerPath,
+    admissionLedgerPath,
+  };
+}
+
+function writeRunnerReceiptFixtureE(dir, relPath, receipt) {
+  const fullPath = join(dir, relPath);
+  mkdirSync(dirname(fullPath), { recursive: true });
+  writeFileSync(fullPath, JSON.stringify(receipt, null, 2) + "\n", "utf8");
+}
+
+test("§E GREEN (HYK-455 확대 · 끝에서 끝까지): designed path로 «보존 사본이 없던» 미소비 라운드를 아카이브 -> 은퇴 기록(RUNNER_GREEN_UNREACHABLE_AT_HEAD) -> 관문 RETIRED -> 다음 배달 ALLOW (세 CLI 전부 실제 자식 프로세스)", () => {
+  withFixtureDir((dir) => {
+    const fixture = buildNeverArchivedFixture(dir);
+
+    // .harness/rounds/ 자체가 아직 없다 -- 이 라운드가 열기 전까지는
+    // 이 라벨의 사본이 생길 designed path가 없었다(coder-task.md §1-1).
+    assert.throws(() => readdirSync(join(dir, "rounds")));
+
+    // ⑴ designed path -- 은퇴 실행 순서상 «맨 앞»(설계조건5).
+    const archived = runArchiveUnconsumedCli(fixture.dir, "CODER");
+    assert.equal(archived.status, 0, `아카이브 실패: ${archived.stderr}`);
+    const shaMatch = archived.stdout.match(/content_sha256=([0-9a-f]{64})/);
+    assert.ok(
+      shaMatch,
+      `아카이브 CLI 출력에 content_sha256이 없음: ${archived.stdout}`,
+    );
+    const contentSha256 = shaMatch[1];
+    assert.equal(contentSha256, computeFingerprint(fixture.resultContent));
+    assert.deepEqual(readdirSync(join(dir, "rounds")), ["CODER-r1.md"]);
+
+    // ⑵ 근거 영수증(앞 라운드 사유) + 은퇴 기록 CLI. archiveFingerprintClaimed
+    // 는 ⑴ 아카이브 CLI가 방금 찍어 준 content_sha256을 그대로 옮겨
+    // 적는다(같은 SHA-256 알고리즘, 같은 원문 -- ORCH가 손으로 다시
+    // 계산할 필요가 없다).
+    const evidenceReceiptPath = "runner-receipts/hyk9455x2-r1.json";
+    writeRunnerReceiptFixtureE(dir, evidenceReceiptPath, {
+      schema_version: 1,
+      runner_exit: 1,
+      head_commit: fixture.headCommit,
+      finished_at: "2026-09-08 12:25:00 KST",
+    });
+    const write = runRetirementWriterCli(fixture.dir, {
+      role: "CODER",
+      harnessTaskLabel: fixture.harnessTaskLabel,
+      archivePath: "rounds/CODER-r1.md",
+      archiveFingerprintClaimed: contentSha256,
+      blockReasonCode: "RUNNER_GREEN_UNREACHABLE_AT_HEAD",
+      successorLabel: "HYK-9455x2-retire-envelope-round-next",
+      recordedAt: "2026-09-08 12:30:00 KST",
+      evidence:
+        "designed path로 만든 미소비-아카이브(잠금2) + 러너 영수증(잠금1)",
+      evidenceReceiptPath,
+    });
+    assert.equal(write.status, 0, `은퇴 기록 작성 실패: ${write.stderr}`);
+
+    // ⑶ 소비 게이트 -- 다음 배달이 실제로 ALLOW로 바뀐다.
+    const r = runGate(fixture);
+    assert.equal(r.status, 0, `ALLOW 기대, 실제 stderr: ${r.stderr}`);
+    assert.match(r.stdout, /ALLOW/);
+    assert.match(r.stderr, /RETIRED|은퇴 처리/);
+  });
+});
+
+test("§E-a RED «손 사본»(등재 완료조건4 ⓐ): 원문과 결속이 어긋난 content_sha256(몸통 재계산과 다름) -> ARCHIVE_ENVELOPE_BINDING_INVALID, REJECT", () => {
+  withFixtureDir((dir) => {
+    const fixture = buildNeverArchivedFixture(dir);
+    const wrongSha = "0".repeat(64);
+    // designed path 헤더 모양을 흉내는 냈지만(kind=unconsumed_result),
+    // 값은 계산하지 않고 지어냈다 -- 몸통은 진짜 원문 그대로다.
+    mkdirSync(join(dir, "rounds"), { recursive: true });
+    writeFileSync(
+      join(dir, "rounds", "CODER-r1.md"),
+      `<!-- envelope-archive: role=CODER archived_at=unknown kind=unconsumed_result content_sha256=${wrongSha} -->\n${fixture.resultContent}`,
+      "utf8",
+    );
+
+    const evidenceReceiptPath = "runner-receipts/hyk9455x2-fake-a.json";
+    writeRunnerReceiptFixtureE(dir, evidenceReceiptPath, {
+      schema_version: 1,
+      runner_exit: 1,
+      head_commit: fixture.headCommit,
+      finished_at: "2026-09-08 12:25:00 KST",
+    });
+    const write = runRetirementWriterCli(fixture.dir, {
+      role: "CODER",
+      harnessTaskLabel: fixture.harnessTaskLabel,
+      archivePath: "rounds/CODER-r1.md",
+      // ⛔claimed 값은 «진짜» 몸통 지문(archiveFingerprintMatches/
+      // liveFingerprintMatches는 둘 다 통과시켜, 이 시험이 정말로
+      // envelopeBindingValid 하나 때문에 거부되는지를 격리한다).
+      archiveFingerprintClaimed: computeFingerprint(fixture.resultContent),
+      blockReasonCode: "RUNNER_GREEN_UNREACHABLE_AT_HEAD",
+      successorLabel: "HYK-9455x2-retire-envelope-round-next",
+      recordedAt: "2026-09-08 12:30:00 KST",
+      evidence: "손 사본 위조 시도 -- content_sha256을 지어냄",
+      evidenceReceiptPath,
+    });
+    assert.equal(write.status, 0, write.stderr);
+
+    const r = runGate(fixture);
+    assert.notEqual(r.status, 0, `REJECT 기대, 실제 stdout: ${r.stdout}`);
+    assert.match(
+      r.stderr,
+      /ARCHIVE_ENVELOPE_BINDING_INVALID|원문 결속/,
+      "몸통과 어긋난 content_sha256은 ARCHIVE_ENVELOPE_BINDING_INVALID로 거부돼야 한다",
+    );
+  });
+});
+
+test("§E-b RED «손 사본»(등재 완료조건4 ⓑ): 결속 필드(content_sha256) 자체가 없음 -> ARCHIVE_ENVELOPE_BINDING_INVALID, REJECT", () => {
+  withFixtureDir((dir) => {
+    const fixture = buildNeverArchivedFixture(dir);
+    // kind=unconsumed_result는 선언했지만(designed path인 척) 결속 필드
+    // 자체를 아예 안 붙였다 -- 헤더 모양만 흉내 낸 손 사본.
+    mkdirSync(join(dir, "rounds"), { recursive: true });
+    writeFileSync(
+      join(dir, "rounds", "CODER-r1.md"),
+      `<!-- envelope-archive: role=CODER archived_at=unknown kind=unconsumed_result -->\n${fixture.resultContent}`,
+      "utf8",
+    );
+
+    const evidenceReceiptPath = "runner-receipts/hyk9455x2-fake-b.json";
+    writeRunnerReceiptFixtureE(dir, evidenceReceiptPath, {
+      schema_version: 1,
+      runner_exit: 1,
+      head_commit: fixture.headCommit,
+      finished_at: "2026-09-08 12:25:00 KST",
+    });
+    const write = runRetirementWriterCli(fixture.dir, {
+      role: "CODER",
+      harnessTaskLabel: fixture.harnessTaskLabel,
+      archivePath: "rounds/CODER-r1.md",
+      archiveFingerprintClaimed: computeFingerprint(fixture.resultContent),
+      blockReasonCode: "RUNNER_GREEN_UNREACHABLE_AT_HEAD",
+      successorLabel: "HYK-9455x2-retire-envelope-round-next",
+      recordedAt: "2026-09-08 12:30:00 KST",
+      evidence: "손 사본 위조 시도 -- content_sha256 필드 자체를 뺌",
+      evidenceReceiptPath,
+    });
+    assert.equal(write.status, 0, write.stderr);
+
+    const r = runGate(fixture);
+    assert.notEqual(r.status, 0, `REJECT 기대, 실제 stdout: ${r.stdout}`);
+    assert.match(
+      r.stderr,
+      /ARCHIVE_ENVELOPE_BINDING_INVALID|원문 결속/,
+      "결속 필드 자체가 없으면 ARCHIVE_ENVELOPE_BINDING_INVALID로 거부돼야 한다",
+    );
+  });
+});
+
+test("§E-회귀 (정직 한계 실증): kind=unconsumed_result 를 «아예 선언하지 않는» 순수 손 사본(헤더 자체가 없음)은 이 새 축을 건드리지 않고 옛 지문 대조 경로로 그대로 흐른다 -- 몸통·지문이 실제로 맞으면 여전히 ALLOW(회귀 0), 이 새 문이 닫지 못하는 자리(coder-task.md §1-4/§10 정직 한계)를 실행으로 보여준다", () => {
+  withFixtureDir((dir) => {
+    const fixture = buildNeverArchivedFixture(dir);
+    // 헤더가 아예 없는 raw 사본 -- §A/§A2/§A3가 늘 써 온 것과 같은 모양
+    // (기존 시험 픽스처와 동일한 관례), 이 축이 적용되지 않는다(null).
+    mkdirSync(join(dir, "rounds"), { recursive: true });
+    writeFileSync(
+      join(dir, "rounds", "CODER-r1.md"),
+      fixture.resultContent,
+      "utf8",
+    );
+
+    const evidenceReceiptPath = "runner-receipts/hyk9455x2-raw.json";
+    writeRunnerReceiptFixtureE(dir, evidenceReceiptPath, {
+      schema_version: 1,
+      runner_exit: 1,
+      head_commit: fixture.headCommit,
+      finished_at: "2026-09-08 12:25:00 KST",
+    });
+    const write = runRetirementWriterCli(fixture.dir, {
+      role: "CODER",
+      harnessTaskLabel: fixture.harnessTaskLabel,
+      archivePath: "rounds/CODER-r1.md",
+      archiveFingerprintClaimed: computeFingerprint(fixture.resultContent),
+      blockReasonCode: "RUNNER_GREEN_UNREACHABLE_AT_HEAD",
+      successorLabel: "HYK-9455x2-retire-envelope-round-next",
+      recordedAt: "2026-09-08 12:30:00 KST",
+      evidence: "회귀 대조군 -- 헤더 없는 raw 사본(기존 시험 관례와 동일)",
+      evidenceReceiptPath,
+    });
+    assert.equal(write.status, 0, write.stderr);
+
+    const r = runGate(fixture);
+    assert.equal(
+      r.status,
+      0,
+      `이 축은 kind=unconsumed_result를 선언하지 않은 사본에 적용되지 않아야 한다(회귀 0) -- 실제 stderr: ${r.stderr}`,
+    );
+    assert.match(r.stdout, /ALLOW/);
+  });
+});
