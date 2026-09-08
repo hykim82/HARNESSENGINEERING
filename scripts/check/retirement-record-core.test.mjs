@@ -324,6 +324,70 @@ test("HYK-398 RED: DONE_PREDATES_DROPPED_AT인데 blockReasonConfirmed가 true�
   assert.equal(r2.state, RETIREMENT_RECORD_STATE.BLOCK_REASON_UNCONFIRMED);
 });
 
+// ---------------------------------------------------------------------------
+// HYK-455: RUNNER_GREEN_UNREACHABLE_AT_HEAD -- 세 번째 기계-확인-가능
+// 사유. 집합 멤버십·GREEN(재확인됨)·RED(재확인 안 됨/false/null) 셋 다
+// 앞의 두 사유와 대칭으로 고정한다(이 코어 자신은 evidenceReceiptPath를
+// 스스로 읽지 않는다 -- 재확인 자체는 어댑터 몫, 여기서는 이미 재확인된
+// blockReasonConfirmed 값이 판정에 실제로 반영되는지만 증명한다).
+// ---------------------------------------------------------------------------
+
+test("HYK-455: RUNNER_GREEN_UNREACHABLE_AT_HEAD은 기계로 확인 가능한 사유 집합의 원소다", () => {
+  assert.equal(
+    MECHANICALLY_CONFIRMABLE_BLOCK_REASONS.has(
+      RETIREMENT_BLOCK_REASON.RUNNER_GREEN_UNREACHABLE_AT_HEAD,
+    ),
+    true,
+  );
+});
+
+test("HYK-455 GREEN: RUNNER_GREEN_UNREACHABLE_AT_HEAD + blockReasonConfirmed:true -> RETIRED", () => {
+  const r = checkRetirementRecord({
+    role: "CODER",
+    harnessTaskLabel: RECORD.harnessTaskLabel,
+    candidates: [
+      candidateOf({
+        blockReasonCode:
+          RETIREMENT_BLOCK_REASON.RUNNER_GREEN_UNREACHABLE_AT_HEAD,
+      }),
+    ],
+  });
+  assert.equal(r.state, RETIREMENT_RECORD_STATE.RETIRED);
+  assert.equal(r.ok, true);
+});
+
+test("HYK-455 RED: RUNNER_GREEN_UNREACHABLE_AT_HEAD인데 blockReasonConfirmed가 true가 아님(어댑터가 러너 영수증을 재확인 못함/ORCH 주장만) -> BLOCK_REASON_UNCONFIRMED, 거부", () => {
+  const r = checkRetirementRecord({
+    role: "CODER",
+    harnessTaskLabel: RECORD.harnessTaskLabel,
+    candidates: [
+      candidateOf(
+        {
+          blockReasonCode:
+            RETIREMENT_BLOCK_REASON.RUNNER_GREEN_UNREACHABLE_AT_HEAD,
+        },
+        { blockReasonConfirmed: false },
+      ),
+    ],
+  });
+  assert.equal(r.state, RETIREMENT_RECORD_STATE.BLOCK_REASON_UNCONFIRMED);
+
+  const r2 = checkRetirementRecord({
+    role: "CODER",
+    harnessTaskLabel: RECORD.harnessTaskLabel,
+    candidates: [
+      candidateOf(
+        {
+          blockReasonCode:
+            RETIREMENT_BLOCK_REASON.RUNNER_GREEN_UNREACHABLE_AT_HEAD,
+        },
+        { blockReasonConfirmed: null },
+      ),
+    ],
+  });
+  assert.equal(r2.state, RETIREMENT_RECORD_STATE.BLOCK_REASON_UNCONFIRMED);
+});
+
 test("대조군: 다른 라운드의 후보들이 섞여 있어도 role+label이 일치하는 것은 정확히 하나 -> RETIRED", () => {
   const r = checkRetirementRecord({
     role: "CODER",
