@@ -21,6 +21,15 @@ import {
   createEmptyLedger,
   admitReservation,
 } from "./admission-ledger-core.mjs";
+// HYK-359 ambient-env regression (coder-task.md §2): the child probes this
+// file forks below took ledgerPath/lockPath via argv but no explicit `env`
+// option, so they silently inherited a floating ADMISSION_LEDGER_PATH/
+// ADMISSION_LOCK_PATH/DISPATCH_RECEIPT_PATH from the invoking shell.
+// admission-ledger-store.mjs/admission-ledger-core.mjs never read those
+// three keys from process.env (grepped -- zero hits), so the child does
+// not need any of them re-set explicitly; isolatedChildEnv() (strip-only,
+// no isolatedChildEnvWithLedger) is the correct choice here.
+import { isolatedChildEnv } from "../check/admission-ledger-env-isolation.mjs";
 
 function tmpPaths() {
   const dir = mkdtempSync(join(tmpdir(), "admission-ledger-store-test-"));
@@ -278,7 +287,10 @@ async function runWave({
     const c = fork(
       child,
       [ledgerPath, lockPath, String(holdMs), String(timeoutMs)],
-      { stdio: ["ignore", "ignore", "ignore", "ipc"] },
+      {
+        stdio: ["ignore", "ignore", "ignore", "ipc"],
+        env: isolatedChildEnv(),
+      },
     );
     kids.push(c);
     readyP.push(new Promise((res) => c.once("message", res)));
