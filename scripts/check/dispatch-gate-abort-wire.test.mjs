@@ -47,6 +47,13 @@ const ABORT_RECORD_CORE_PATH = join(HERE, "abort-record-core.mjs");
 // zero-import retirement-record core) -- same MODULE_NOT_FOUND reasoning as
 // ABORT_RECORD_CORE_PATH immediately above.
 const RETIREMENT_RECORD_CORE_PATH = join(HERE, "retirement-record-core.mjs");
+// HYK-457 §3-A: dispatch-gate-decision.mjs now also statically
+// imports this (confirmRetirementBlockReason dedup) -- same
+// MODULE_NOT_FOUND reasoning as the other *_PATH additions above.
+const RETIREMENT_BLOCK_REASON_SHARED_PATH = join(
+  HERE,
+  "retirement-block-reason-shared.mjs",
+);
 // HYK-307-order-1 §1: dispatch-gate-decision.mjs now statically imports
 // scripts/check/envelope-archive.mjs (the delivery-time round-task
 // snapshot, archiveRoundTaskFileIfNew) -- same MODULE_NOT_FOUND reasoning
@@ -906,6 +913,10 @@ function stageScriptsCheckDir(rootDir, overrides) {
     "abort-record-core.mjs": readFileSync(ABORT_RECORD_CORE_PATH, "utf8"),
     "retirement-record-core.mjs": readFileSync(
       RETIREMENT_RECORD_CORE_PATH,
+      "utf8",
+    ),
+    "retirement-block-reason-shared.mjs": readFileSync(
+      RETIREMENT_BLOCK_REASON_SHARED_PATH,
       "utf8",
     ),
     "envelope-archive.mjs": readFileSync(ENVELOPE_ARCHIVE_PATH, "utf8"),
