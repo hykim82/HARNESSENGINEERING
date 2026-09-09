@@ -26,6 +26,7 @@ import {
   formatNowLocal,
   ALLOWED_CAUSES,
   ALLOWED_ACTIONS,
+  REJECT_STREAK_REASON_CODE,
 } from "./reject-streak.mjs";
 
 const SCRIPT_PATH = fileURLToPath(
@@ -1569,4 +1570,81 @@ test("(73) HYK-221 축3 양방향 실증 -- record(쓰기, --ledger 생략, reje
     assert.match(gateResult.stderr, /streak=2/);
     assert.match(gateResult.stderr, /REJECT/);
   });
+});
+
+// ---------------------------------------------------------------------------
+// HYK-450 ② -- 표지 계수는 «문서가 주장한 줄»만 센다.
+//
+// 결함(실물 계열): 영수증·로그를 코드블록에 그대로 인용한 정직한 보고서가
+// «판정 줄이 2개라 어느 것이 최종인지 결정할 수 없다»로 판정 불능이 됐다 --
+// 연속 반려 안전장치가 거짓 근거로 잠기는 데이터 손실(HYK-438·HYK-449 계열).
+// ⛔완화가 아니다: «진짜» 중복은 여전히 거부해야 한다(아래 두 번째 시험).
+// ⚠️이 시험군에는 표지 문자열이 문자 그대로 들어간다 -- 시험 파일이므로
+// 정상이다(coder-task.md §0.7 ⓒ).
+// ---------------------------------------------------------------------------
+
+const HYK450_FENCE = "```";
+
+test("(HYK-450 ②) 인용된 'verdict:' 한 줄은 세지 않는다 -- 판정 불능이 되지 않는다", () => {
+  const text = [
+    "for: HYK-450-TARGET-1",
+    "verdict: approved",
+    "",
+    `${HYK450_FENCE}text`,
+    "verdict: rejected",
+    HYK450_FENCE,
+    "",
+  ].join("\n");
+  const r = parseReviewOutcome(text);
+  assert.equal(r.ok, true, r.reason ?? "");
+  assert.equal(r.verdict, "approved");
+  assert.equal(r.issueId, "HYK-450");
+});
+
+test("(HYK-450 ②) 인용된 'for:'/'task_id:' 줄도 세지 않는다", () => {
+  const text = [
+    "for: HYK-450-TARGET-1",
+    "verdict: rejected",
+    "",
+    `${HYK450_FENCE}text`,
+    "for: HYK-000-QUOTED-9",
+    "task_id: HYK-000-QUOTED-9",
+    HYK450_FENCE,
+    "",
+    "<!-- 보존 블록: task_id: HYK-000-COMMENTED-8 -->",
+  ].join("\n");
+  const r = parseReviewOutcome(text);
+  assert.equal(r.ok, true, r.reason ?? "");
+  assert.equal(r.taskId, "HYK-450-TARGET-1");
+  assert.equal(r.verdict, "rejected");
+});
+
+test("(HYK-450 ②) ⛔완화 0: «진짜» 중복 줄은 여전히 판정 불능으로 거부된다", () => {
+  const twoVerdicts = parseReviewOutcome(
+    [
+      "for: HYK-450-TARGET-1",
+      "verdict: approved",
+      "verdict: rejected",
+      "",
+    ].join("\n"),
+  );
+  assert.equal(twoVerdicts.ok, false);
+  assert.equal(
+    twoVerdicts.reasonCode,
+    REJECT_STREAK_REASON_CODE.AMBIGUOUS_VERDICT_LINE,
+  );
+
+  const twoFors = parseReviewOutcome(
+    [
+      "for: HYK-450-TARGET-1",
+      "for: HYK-450-TARGET-2",
+      "verdict: approved",
+      "",
+    ].join("\n"),
+  );
+  assert.equal(twoFors.ok, false);
+  assert.equal(
+    twoFors.reasonCode,
+    REJECT_STREAK_REASON_CODE.AMBIGUOUS_FOR_LINE,
+  );
 });
