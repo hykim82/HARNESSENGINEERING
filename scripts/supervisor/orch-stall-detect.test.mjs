@@ -21,6 +21,11 @@ import {
   collectPledgeDerivationEvidence,
   runOrchStallDetect,
   EXIT_CODE_BY_VERDICT,
+  unconsumedNoticeKeyOf,
+  decideUnconsumedFiring,
+  readUnconsumedNoticeState,
+  writeUnconsumedNoticeState,
+  selectFiringWorst,
 } from "./orch-stall-detect.mjs";
 import { ARTIFACT_KIND, ORCH_PROGRESS_VERDICT } from "./orch-progress-core.mjs";
 import { PLEDGE_SOURCE } from "./pledge-derive-core.mjs";
@@ -1098,6 +1103,198 @@ test("static: eslint.config.mjs's scripts/supervisor relay-import exception list
     missingFromOwnList,
     [],
     `these file(s) are exempted in eslint.config.mjs's scripts/supervisor block AND actually import orch-stall-detect.mjs, but are missing from this file's own OWN_TEST_FILE_SUFFIXES allowlist above -- add them there too (this is the exact HYK-413-seat-binding-2 2R incident shape): ${missingFromOwnList.join(", ")}`,
+  );
+});
+
+// ---------------------------------------------------------------------------
+// ★HYK-452 «억제» 층 (coder-task.md §1-3) -- 처리된 진짜 양성이 80분마다
+// 영원히 다시 깨우는 것을 멈춘다. ⛔판정은 건드리지 않는다.
+//
+// 표본: 아래 각 test 이름에 분모를 적는다. 전부 순수 함수 + mkdtemp 안에서만.
+// ---------------------------------------------------------------------------
+
+// 09-06 23:11 실측 사건과 같은 «모양»의 합성 항목(그 사건의 값 자체가
+// 아니다 -- 이 시험은 실제 워크트리를 읽지 않는다).
+function modifiedAfterClosureEntry(overrides = {}) {
+  return {
+    worktreePath: "C:/synthetic/wt-a",
+    status: "UNCONSUMED_JUDGED",
+    verdict: "MODIFIED_AFTER_CLOSURE",
+    reasonCode: "RESULT_EDITED_AFTER_CLOSURE",
+    resultFile: { path: ".harness/coder.md", mtimeMs: 1_757_000_000_000 },
+    details: { closedAtMs: 1_756_999_000_000 },
+    ...overrides,
+  };
+}
+
+test("HYK-452 ⓐ 새 사건은 즉시 발화한다 -- 기억이 비어 있으면 억제 0 (양성 픽스처, 1/1)", () => {
+  const entry = modifiedAfterClosureEntry();
+  const r = decideUnconsumedFiring({ entries: [entry], previouslyNoticed: [] });
+  assert.equal(r.firing.length, 1, "새 관측은 사람에게 도달해야 한다");
+  assert.equal(r.suppressed.length, 0);
+  // 다음 실행에 넘길 기억에는 방금 내보낸 열쇠가 들어 있다.
+  assert.deepEqual(r.nextNoticed, [unconsumedNoticeKeyOf(entry)]);
+});
+
+test("HYK-452 ⓑ 같은 관측이 다시 오면 억제된다 -- 그러나 판정(verdict)은 그대로다 (1/1)", () => {
+  const entry = modifiedAfterClosureEntry();
+  const first = decideUnconsumedFiring({
+    entries: [entry],
+    previouslyNoticed: [],
+  });
+  const second = decideUnconsumedFiring({
+    entries: [entry],
+    previouslyNoticed: first.nextNoticed,
+  });
+  assert.equal(second.firing.length, 0, "두 번째 주기에 다시 깨우지 않는다");
+  assert.equal(second.suppressed.length, 1);
+  // ★억제는 «판정을 바꾸는 것»이 아니다 -- 그 항목은 원래 verdict 를 그대로
+  // 달고 억제 목록에 있다(기록은 남고 깨우지만 않는다).
+  assert.equal(second.suppressed[0].verdict, "MODIFIED_AFTER_CLOSURE");
+  // 기억은 계속 유지된다(세 번째 주기도 조용하다).
+  assert.deepEqual(second.nextNoticed, first.nextNoticed);
+});
+
+test("HYK-452 ⓒ 관측이 조금이라도 달라지면 즉시 다시 발화한다 -- mtime/verdict/지문 각각 (3/3)", () => {
+  const base = modifiedAfterClosureEntry();
+  const memory = decideUnconsumedFiring({
+    entries: [base],
+    previouslyNoticed: [],
+  }).nextNoticed;
+  const changed = [
+    modifiedAfterClosureEntry({
+      resultFile: { path: ".harness/coder.md", mtimeMs: 1_757_000_000_001 },
+    }),
+    modifiedAfterClosureEntry({ verdict: "SUSPECTED_UNCONSUMED" }),
+    modifiedAfterClosureEntry({
+      details: {
+        closedAtMs: 1_756_999_000_000,
+        currentFingerprint: "deadbeef",
+      },
+    }),
+  ];
+  for (const entry of changed) {
+    const r = decideUnconsumedFiring({
+      entries: [entry],
+      previouslyNoticed: memory,
+    });
+    assert.equal(
+      r.firing.length,
+      1,
+      `관측값이 달라졌으면 새 사건이다: ${JSON.stringify(entry)}`,
+    );
+  }
+});
+
+test("HYK-452 ⓓ 기억이 없거나 손상되면 아무것도 억제하지 않는다 (fail-open, 4/4)", () => {
+  const entry = modifiedAfterClosureEntry();
+  for (const broken of [undefined, null, "not-an-array", { noticed: [] }]) {
+    const r = decideUnconsumedFiring({
+      entries: [entry],
+      previouslyNoticed: broken,
+    });
+    assert.equal(
+      r.firing.length,
+      1,
+      `손상된 기억(${JSON.stringify(broken)})이 침묵을 만들면 안 된다`,
+    );
+  }
+});
+
+test("HYK-452 ⓔ 사라졌다가 다시 나타난 사실은 다시 발화한다 -- 기억은 «지금 서 있는 것»만 담는다 (1/1)", () => {
+  const entry = modifiedAfterClosureEntry();
+  const seen = decideUnconsumedFiring({
+    entries: [entry],
+    previouslyNoticed: [],
+  }).nextNoticed;
+  // 사실이 사라진 주기: 발화 등급 항목이 없으므로 기억이 비워진다.
+  const empty = decideUnconsumedFiring({
+    entries: [],
+    previouslyNoticed: seen,
+  });
+  assert.deepEqual(empty.nextNoticed, []);
+  // 다시 나타나면 새 사건으로 발화한다(무한 침묵이 생기지 않는다).
+  const again = decideUnconsumedFiring({
+    entries: [entry],
+    previouslyNoticed: empty.nextNoticed,
+  });
+  assert.equal(again.firing.length, 1);
+});
+
+test("HYK-452 ⓕ-1 결선: 억제된 항목은 «깨우는 대표값»에서 빠지지만 판정 목록에는 그대로 남는다 (2/2)", () => {
+  const entry = modifiedAfterClosureEntry();
+  const quiet = {
+    worktreePath: "C:/synthetic/wt-b",
+    status: "UNCONSUMED_NOT_APPLICABLE",
+  };
+  const first = selectFiringWorst({
+    worktrees: [entry, quiet],
+    previouslyNoticed: [],
+  });
+  // ⓐ 첫 관측: 발화 등급이 대표값이다.
+  assert.equal(first.worstSeverity, 4, "MODIFIED_AFTER_CLOSURE 는 발화 등급");
+  assert.deepEqual(first.worstEntries, [entry]);
+  // ⓑ 같은 관측이 다시 오면 대표값이 NORMAL 로 내려가 아무도 깨우지 않는다.
+  const second = selectFiringWorst({
+    worktrees: [entry, quiet],
+    previouslyNoticed: first.nextNoticed,
+  });
+  assert.equal(second.worstSeverity, 0, "이미 내보낸 관측은 깨우지 않는다");
+  assert.equal(second.suppressed.length, 1);
+  // ★그러나 판정은 지워지지 않았다 -- 그 항목의 verdict 는 그대로다.
+  assert.equal(entry.verdict, "MODIFIED_AFTER_CLOSURE");
+});
+
+test("HYK-452 ⓕ 지문에는 «관측값»만 들어간다 -- 형태가 어긋나면 열쇠가 없고, 열쇠가 없으면 억제 대상이 아니다 (2/2)", () => {
+  assert.equal(unconsumedNoticeKeyOf(null), null);
+  assert.equal(unconsumedNoticeKeyOf({ status: "UNCONSUMED_JUDGED" }), null);
+});
+
+test("HYK-452 ⓖ 발신 기억 파일: 왕복 + 손상 파일은 null (억제 없음) (3/3)", () => {
+  const dir = fs.mkdtempSync(join(tmpdir(), "hyk452-notice-"));
+  const statePath = join(dir, "unconsumed-notice-state.json");
+  assert.equal(readUnconsumedNoticeState(statePath), null, "없는 파일 -> null");
+  assert.equal(writeUnconsumedNoticeState(statePath, ["k1", "k2"]), true);
+  assert.deepEqual(readUnconsumedNoticeState(statePath), ["k1", "k2"]);
+  fs.writeFileSync(statePath, "{ not json", "utf8");
+  assert.equal(
+    readUnconsumedNoticeState(statePath),
+    null,
+    "손상된 기억은 침묵을 만들 수 없다",
+  );
+});
+
+test("HYK-452 ⓗ 결선: --unconsumed-notice-state 를 주면 기억 파일이 실제로 쓰인다, 안 주면 안 쓰인다 (2/2)", () => {
+  assert.equal(
+    parseArgs(["--unconsumed-notice-state", "X"]).unconsumedNoticeStatePath,
+    "X",
+  );
+  // 합성 저장소 -- 커밋이 하나는 있어야 pledge 수집이 실패로 조기 반환하지
+  // 않고 미소비 축까지 도달한다(실측으로 확인한 최소 조건).
+  const dir = fs.mkdtempSync(join(tmpdir(), "hyk452-wire-"));
+  const git = (...args) =>
+    execFileSync(
+      "git",
+      ["-c", "user.email=t@t", "-c", "user.name=t", ...args],
+      { cwd: dir, stdio: "ignore" },
+    );
+  git("init", "-q");
+  fs.writeFileSync(join(dir, "README.md"), "hyk452\n", "utf8");
+  git("add", "-A");
+  git("commit", "-qm", "init");
+  const statePath = join(dir, "notice.json");
+  runOrchStallDetect(["--repo-root", dir, "--json"]);
+  assert.equal(fs.existsSync(statePath), false, "플래그 없이는 쓰지 않는다");
+  runOrchStallDetect([
+    "--repo-root",
+    dir,
+    "--json",
+    "--unconsumed-notice-state",
+    statePath,
+  ]);
+  assert.equal(fs.existsSync(statePath), true, "플래그를 주면 기억을 남긴다");
+  assert.ok(
+    Array.isArray(JSON.parse(fs.readFileSync(statePath, "utf8")).noticed),
   );
 });
 
