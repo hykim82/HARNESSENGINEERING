@@ -1154,7 +1154,11 @@ test("NC mutation/unconsumed-wire #1 (필수): 결선 제거(코어를 부르지
     (src) =>
       applyMutation(
         src,
-        "  const unconsumed = judgeUnconsumedAcrossWorktrees({ repoRoot, now }, opts);",
+        // ★HYK-452: 이 자리는 이제 «발신 기억»을 읽고/쓰는 얇은 감싸개를
+        // 부른다(judgeUnconsumedWithMemory -- 경로를 안 주면 예전과 같은
+        // 호출로 떨어진다). 변이의 뜻은 그대로다: «코어를 아예 부르지
+        // 않으면 빨개지는가».
+        "  const unconsumed = judgeUnconsumedWithMemory({ repoRoot, now, cli, opts });",
         "  const unconsumed = { status: UNCONSUMED_WIRE_STATUS.NOT_APPLICABLE };",
       ),
     "1",

@@ -211,6 +211,9 @@ export function parseArgs(argv) {
     thresholdSeconds: undefined,
     json: false,
     repoRoot: null,
+    // ★HYK-452 «억제» 층 -- 감시기 자신의 «발신 기억» 파일. ⛔주지 않으면
+    // 억제는 아예 돌지 않는다(기존 호출자 회귀 0).
+    unconsumedNoticeStatePath: null,
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -223,8 +226,39 @@ export function parseArgs(argv) {
     // gap#61 증거 수집(.harness 스캔·git 조회)을 실제 워크트리에서
     // 격리하는 용도(coder-task.md §9 비타협 #5 "시험은 mkdtemp 안에서만").
     else if (a === "--repo-root") parsed.repoRoot = argv[++i] ?? null;
+    else if (a === "--unconsumed-notice-state")
+      parsed.unconsumedNoticeStatePath = argv[++i] ?? null;
   }
   return parsed;
+}
+
+// ★HYK-452 -- 발신 기억 읽기/쓰기. ⛔읽기 실패·형식 오류는 «억제 없음»
+// (null)으로 떨어진다: 손상된 기억이 침묵을 만들 수 없다(fail-open).
+export function readUnconsumedNoticeState(statePath, readFn) {
+  if (typeof statePath !== "string" || statePath.length === 0) return null;
+  try {
+    const raw = (readFn ?? ((p) => readFileSync(p, "utf8")))(statePath);
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed?.noticed) ? parsed.noticed : null;
+  } catch {
+    return null;
+  }
+}
+
+// 쓰기 실패는 삼킨다 -- 감지 자체(이 프로세스의 계약)를 깨지 않는다.
+// ⛔실패의 방향이 안전하다: 기억이 안 써지면 다음 실행은 «억제 없음»이
+// 되어 **다시 발화**한다(침묵이 아니라 소음 쪽으로 샌다).
+export function writeUnconsumedNoticeState(statePath, noticed, writeFn) {
+  if (typeof statePath !== "string" || statePath.length === 0) return false;
+  try {
+    (writeFn ?? ((p, text) => writeFileSync(p, text, "utf8")))(
+      statePath,
+      JSON.stringify({ noticed: Array.isArray(noticed) ? noticed : [] }),
+    );
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function resolveRepoPath(repoRoot, relOrAbsPath) {
@@ -2865,6 +2899,150 @@ function unconsumedSeverityOf(entry) {
   return UNCONSUMED_SCAN_SEVERITY.NORMAL;
 }
 
+// ═══════════════════════════════════════════════════════════════════════
+// ★HYK-452 -- «억제» 층. HYK-448 은 «무엇이 이상인가»(판별)를 고쳤고, 이
+// 절은 «이미 사람에게 도달한 그 이상을 다시 깨울 것인가»(억제)만 다룬다.
+//
+// ⛔실측 문제(등재문): 09-06 23:11 «종결 후 결과 파일 수정»을 각성이
+// 정확히 잡았고(진짜 양성) ORCH 가 전부 처리했는데, `mtime`(23:11)이
+// 영수증(23:08)보다 «영구히» 새것이라 04:14·05:33 … 약 80분 주기로
+// 같은 건이 영원히 다시 발화했다. 판정은 옳다 -- 그 파일은 정말로 종결
+// 뒤에 바뀌었고 그 사실은 사라지지 않는다. 틀린 것은 «매번 다시 깨우는
+// 것»이다.
+//
+// ★★§0.1 정합 논증 -- «ORCH 자기 신고를 근거로 삼지 마라»와 어떻게
+// 양립하는가(unconsumed-core.mjs 헤더 원칙):
+//   ⑴ 그 원칙이 금지하는 것은 **판정의 근거**로 «심판받는 쪽»의 자기
+//      진술을 쓰는 것이다("소비했다"고 ORCH 가 스스로 적은 기록으로
+//      CONSUMED 를 내는 것). ★이 절은 **판정을 한 글자도 바꾸지
+//      않는다** -- verdict/reasonCode/details 는 그대로 나가고,
+//      `worktrees` 전체 목록에도 그대로 남는다. 바뀌는 것은 오직
+//      «대표값(worst)으로 올려 사람을 깨우는가»뿐이다.
+//   ⑵ 억제의 근거는 자기 신고가 아니라 ★**감시기 자신의 발신 기억**
+//      이다: "이 «관측»을 나는 이미 내보냈다". 그 기억의 열쇠는 전부
+//      **관측값**(워크트리 경로·결과 파일 경로·mtime·verdict·reasonCode
+//      ·종결 시각·내용 지문)이며 ⛔**누구의 주장도 들어가지 않는다.**
+//      "처리됐다"는 주장을 믿는 것이 아니라 "같은 것을 또 말하지
+//      않는다"일 뿐이다.
+//   ⑶ 그래서 위조 이득이 없다: 열쇠의 어느 성분이든 달라지면 즉시 새
+//      사건으로 발화한다. 위조로 «침묵»을 사려면 결과 파일을 종결
+//      시점 상태로 되돌려야 하는데, 그건 이 축이 잡으려던 훼손 자체를
+//      원상복구하는 것이다.
+//   ⑷ 기억이 없거나·못 읽거나·형식이 깨지면 ★**아무것도 억제하지
+//      않는다**(fail-open to noise). unconsumed-core.mjs 헤더의
+//      «모르면 침묵이 아니라 종전대로 발화»를 그대로 따른다.
+//
+// ⚠️★**무엇을 못 보게 되는가**(억제는 본질적으로 탐지를 줄인다):
+//   사람이 첫 발화를 보고 **아무것도 하지 않아도 다시 알리지 않는다.**
+//   재알림(reminder)이 필요하면 그건 이 축이 아니라 별도 «미결 추적»의
+//   몫이다 -- 이 조각은 그것을 만들지 않았다. 다만 사실 자체는 지워지지
+//   않는다: `worktrees[]` 의 그 항목은 verdict 를 그대로 달고 있고,
+//   억제된 건수·경로는 `suppressedCount`/`suppressedWorktreePaths` 로
+//   같은 출력에 실린다(= «기록은 남기고 깨우지만 않는다»).
+//
+// ⛔선택지 ⓑ(재발화하되 «N회째·최초 M시각»을 문면에 싣기)를 고르지
+//   않은 이유: 그건 **소음의 크기를 그대로 두고 이름표만 붙인다.** 이
+//   실패의 해악은 «사람이 구별을 못 해서»가 아니라 «80분마다 깨워서
+//   각성 자체가 무시되기 시작하는 것»(늑대소년)이다. 이름표는 깨우는
+//   횟수를 하나도 줄이지 않는다. ⇒ ⓐ 를 고르되, ⓑ 의 값싼 이점은
+//   버리지 않는다: 억제된 것도 «몇 건이 조용히 서 있는지»가 위 두
+//   필드로 남는다.
+// ═══════════════════════════════════════════════════════════════════════
+
+// 관측 지문 -- ⛔전부 «관측된 값»이고 누구의 자기 신고도 들어가지 않는다.
+// 하나라도 달라지면 다른 열쇠가 되어 즉시 새 사건으로 발화한다.
+// 판정 불가(형태가 어긋남)면 null -- 열쇠가 없으면 억제 대상이 아니다
+// (= 발화한다, fail-open).
+const noticeText = (v) => (typeof v === "string" ? v : "");
+const noticeNum = (v) => (typeof v === "number" ? String(v) : "");
+const noticeObj = (v) => (v && typeof v === "object" ? v : {});
+
+export function unconsumedNoticeKeyOf(entry) {
+  const worktreePath = noticeText(noticeObj(entry).worktreePath);
+  if (worktreePath.length === 0) return null;
+  const details = noticeObj(noticeObj(entry).details);
+  const resultFile = noticeObj(noticeObj(entry).resultFile);
+  return [
+    worktreePath,
+    noticeText(resultFile.path),
+    noticeNum(resultFile.mtimeMs),
+    noticeText(entry.verdict),
+    noticeText(entry.reasonCode),
+    noticeNum(details.closedAtMs),
+    noticeText(details.currentFingerprint),
+  ].join("|");
+}
+
+// 감시기 자신의 «발신 기억»을 정규화한다. ⛔배열이 아니거나 원소가
+// 문자열이 아니면 그 원소를 버린다 -- 손상된 기억으로 «침묵»을 만들지
+// 않는다(위 ⑷).
+function normalizeNoticeMemory(previouslyNoticed) {
+  if (!Array.isArray(previouslyNoticed)) return null;
+  return new Set(
+    previouslyNoticed.filter((k) => typeof k === "string" && k.length > 0),
+  );
+}
+
+// decideUnconsumedFiring({entries, previouslyNoticed}) -- 순수 함수.
+// entries = «깨울 등급»으로 판정된 항목들(호출자가 걸러 준다).
+// previouslyNoticed = 지난 실행에서 내보낸 열쇠 목록(없으면 null/undefined).
+// ⇒ {firing, suppressed, nextNoticed}
+//   firing     = 이번에 사람에게 도달해야 하는 항목(새것 또는 달라진 것)
+//   suppressed = 열쇠가 같아 이미 도달한 항목(기록은 남고 깨우지 않는다)
+//   nextNoticed= 다음 실행에 넘길 기억 = ★«지금 서 있는» 발화 등급 항목의
+//                열쇠 전부. 사라졌다가 다시 나타난 사실은 그 사이에 기억이
+//                지워지므로 **다시 발화한다**(무한 침묵이 생기지 않는다).
+export function decideUnconsumedFiring({ entries, previouslyNoticed }) {
+  const list = Array.isArray(entries) ? entries : [];
+  const memory = normalizeNoticeMemory(previouslyNoticed);
+  const firing = [];
+  const suppressed = [];
+  const nextNoticed = [];
+  for (const entry of list) {
+    const key = unconsumedNoticeKeyOf(entry);
+    if (key !== null) nextNoticed.push(key);
+    // 기억이 없으면(=억제 꺼짐) 무엇도 억제하지 않는다.
+    if (memory !== null && key !== null && memory.has(key)) {
+      suppressed.push(entry);
+      continue;
+    }
+    firing.push(entry);
+  }
+  return { firing, suppressed, nextNoticed };
+}
+
+// selectFiringWorst({worktrees, previouslyNoticed}) -- ★HYK-452 결선 지점.
+// 판정된 워크트리 목록에서 «이번에 사람을 깨울 대표값»을 고른다.
+// ⛔억제된 항목의 verdict 는 손대지 않는다 -- «대표로 올려 깨우는
+// 자리»에서만 NORMAL 로 본다(그 항목은 worktrees[] 에 원래 판정 그대로
+// 남아 있고, 억제 사실은 suppressedCount/suppressedWorktreePaths 로 같은
+// 출력에 실린다). previouslyNoticed 를 주지 않는 호출자는 이 라운드 전과
+// **바이트 단위로 같은 결과**를 받는다(억제 0).
+export function selectFiringWorst({ worktrees, previouslyNoticed }) {
+  const list = Array.isArray(worktrees) ? worktrees : [];
+  const { suppressed, nextNoticed } = decideUnconsumedFiring({
+    entries: list.filter((w) =>
+      UNCONSUMED_FIRING_SEVERITIES.has(unconsumedSeverityOf(w)),
+    ),
+    previouslyNoticed,
+  });
+  const suppressedSet = new Set(suppressed);
+  const firingSeverityOf = (w) =>
+    suppressedSet.has(w)
+      ? UNCONSUMED_SCAN_SEVERITY.NORMAL
+      : unconsumedSeverityOf(w);
+  const worstSeverity = list.reduce(
+    (acc, w) => Math.max(acc, firingSeverityOf(w)),
+    UNCONSUMED_SCAN_SEVERITY.NORMAL,
+  );
+  return {
+    worstSeverity,
+    worstEntries: list.filter((w) => firingSeverityOf(w) === worstSeverity),
+    suppressed,
+    nextNoticed,
+  };
+}
+
 // judgeUnconsumedAcrossWorktrees({repoRoot, now}, opts) -- 다른 세 축과
 // 대칭(워크트리 전부 열거 후 각각 개별 판정, 가장 나쁜 항목을 대표값으로
 // 상위에 싣고 전체 목록·건수도 함께 낸다). 새 워크트리 열거 로직을 만들지
@@ -2883,13 +3061,11 @@ export function judgeUnconsumedAcrossWorktrees({ repoRoot, now }, opts = {}) {
   const worktrees = list.worktrees.map((wt) =>
     judgeUnconsumedForWorktree(wt, now, opts),
   );
-  const worstSeverity = worktrees.reduce(
-    (acc, w) => Math.max(acc, unconsumedSeverityOf(w)),
-    UNCONSUMED_SCAN_SEVERITY.NORMAL,
-  );
-  const worstEntries = worktrees.filter(
-    (w) => unconsumedSeverityOf(w) === worstSeverity,
-  );
+  const { worstSeverity, worstEntries, suppressed, nextNoticed } =
+    selectFiringWorst({
+      worktrees,
+      previouslyNoticed: opts.previouslyNoticedUnconsumed,
+    });
   const worst = worstEntries[0] ?? null;
   // HYK-328-receipt-name-1 (coder-task.md §3) -- worstCount가 1보다 클 수
   // 있는데(오늘 실측: 2) `worktreePath`(위)는 그 중 첫 번째 하나만 담아
@@ -2925,6 +3101,14 @@ export function judgeUnconsumedAcrossWorktrees({ repoRoot, now }, opts = {}) {
     worktrees,
     totalWorktrees: worktrees.length,
     worstCount: worstEntries.length,
+    // ★HYK-452: «깨우지 않았다»는 것을 «없었다»로 만들지 않기 위한 기록.
+    // 억제가 꺼져 있으면(기억 미제공) 둘 다 0/빈 배열이다.
+    suppressedCount: suppressed.length,
+    suppressedWorktreePaths: suppressed
+      .map((w) => w.worktreePath)
+      .filter((p) => typeof p === "string" && p.length > 0),
+    // 다음 실행에 넘길 발신 기억(호출자가 저장한다 -- 이 함수는 쓰지 않는다).
+    noticeFingerprints: nextNoticed,
   };
 }
 
@@ -3832,6 +4016,32 @@ function resolveDeclaredPledges(cli) {
   return { ok: true, pledges: loaded.pledges };
 }
 
+// ★HYK-452: 발신 기억을 «판정 전»에 읽어 넘기고, «판정 후»에 갱신한다.
+// ⛔경로를 안 주면 previouslyNoticedUnconsumed 자체를 넘기지 않는다 --
+// 억제 0, 즉 이 라운드 전과 같은 동작이다.
+function judgeUnconsumedWithMemory({ repoRoot, now, cli, opts }) {
+  const noticeStatePath = cli.unconsumedNoticeStatePath;
+  if (!noticeStatePath) {
+    return judgeUnconsumedAcrossWorktrees({ repoRoot, now }, opts);
+  }
+  const unconsumed = judgeUnconsumedAcrossWorktrees(
+    { repoRoot, now },
+    {
+      ...opts,
+      previouslyNoticedUnconsumed: readUnconsumedNoticeState(
+        noticeStatePath,
+        opts.noticeStateReadFn,
+      ),
+    },
+  );
+  writeUnconsumedNoticeState(
+    noticeStatePath,
+    unconsumed.noticeFingerprints,
+    opts.noticeStateWriteFn,
+  );
+  return unconsumed;
+}
+
 export function runOrchStallDetect(argv, opts = {}) {
   const cli = parseArgs(argv);
   const declaredResult = resolveDeclaredPledges(cli);
@@ -3893,7 +4103,7 @@ export function runOrchStallDetect(argv, opts = {}) {
   // HYK-185-unconsumed-1: «워커 결과가 갱신됐는데 소비되지 않았다» 판정도
   // 같은 워크트리 전부에 걸쳐 부른다. ★이 축은 좌석 관측이 아니라 파일/
   // git 관측만 쓰므로 computeSeatAxes(좌석 축 전용) 밖에 별도로 둔다.
-  const unconsumed = judgeUnconsumedAcrossWorktrees({ repoRoot, now }, opts);
+  const unconsumed = judgeUnconsumedWithMemory({ repoRoot, now, cli, opts });
   // HYK-173-push-wire: escalation 축도 같은 진입점에서 실호출된다(§5-E --
   // 이 파일이 축의 조립 자리, watch-run.mjs는 옮겨 적기만 한다).
   const escalation = judgeEscalationForRepo({ repoRoot, now }, opts);
