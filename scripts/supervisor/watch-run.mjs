@@ -449,11 +449,21 @@ function parseDetectorStdout(stdout) {
 // 감지기를 감싸 실행한다(§2-3 -- 고치지 않고 감싼다). 감지기 자신의
 // 실패(STALLED/UNDECIDABLE 등)와 러너 자신의 실패(스폰 자체 실패, 예:
 // node 경로가 잘못됨)를 구별한다 -- 후자는 `runnerFailure: true`.
-function runDetector({ execFn, nodePath, detectorPath, repoRoot }) {
+// ★HYK-452 «억제» 층: 감지기에 자신의 «발신 기억» 파일 경로를 넘긴다
+// (watchDir 안, unconsumed-vanish-state.json 과 나란히 -- 같은 side-channel
+// 관례). ⛔이 파일은 감지기가 «자기 발신 기록»으로만 쓰며 판정 근거가
+// 아니다(orch-stall-detect.mjs 의 §0.1 정합 논증 주석 참조).
+function runDetector({ execFn, nodePath, detectorPath, repoRoot, watchDir }) {
+  const noticeStateArgs = watchDir
+    ? [
+        "--unconsumed-notice-state",
+        path.join(watchDir, "unconsumed-notice-state.json"),
+      ]
+    : [];
   try {
     const stdout = execFn(
       nodePath,
-      [detectorPath, "--repo-root", repoRoot, "--json"],
+      [detectorPath, "--repo-root", repoRoot, "--json", ...noticeStateArgs],
       {
         cwd: repoRoot,
       },
@@ -2192,6 +2202,7 @@ function runWatchOnceCore({
     nodePath,
     detectorPath,
     repoRoot,
+    watchDir,
   });
   const capResult = computeCapResult({ repoRoot, capPath, capReadFn });
   const { escalationDedupe, unconsumedVanish } = computePreLogDedupeSteps({

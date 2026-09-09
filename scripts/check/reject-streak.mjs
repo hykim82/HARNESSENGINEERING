@@ -1,4 +1,11 @@
 import { readFileSync, existsSync, writeFileSync } from "node:fs";
+// HYK-450 ②: 표지 계수는 «문서가 주장한 줄»만 세어야 한다. 인용(펜스
+// 코드블록·HTML 주석) 안의 표지 모양을 함께 세면, 영수증 한 줄을 인용한
+// 정직한 보고서가 «표지 2개 -- 어느 것이 최종인지 결정할 수 없다»로
+// 판정 불능이 된다 -- 연속 반려 안전장치가 «거짓 근거로 잠기는» 계열의
+// 데이터 손실이다(HYK-438·HYK-449 와 같은 형태).
+// ⛔새 마스킹을 여기서 다시 짜지 않는다 -- 판별식 «한 벌»이 아래에 있고
+// relay-handshake.mjs 는 그것을 import 해 re-export 한다.
 import { join, dirname } from "node:path";
 import { execSync, execFileSync } from "node:child_process";
 
@@ -13,6 +20,123 @@ import { execSync, execFileSync } from "node:child_process";
 // keyed by issue id, surviving every relay-slot overwrite) and a gate that
 // blocks a same-spot re-drop once the streak reaches 2 unless the next task
 // file carries an escalation envelope (cause + at least one ORCH action).
+
+// ---- HYK-450 ②: 이 판별식이 «왜 이 파일에» 있는가 -------------------------
+// 원래 relay-handshake.mjs 안에 있었다. HYK-450 이 reject-streak.mjs 에서도
+// 같은 함수를 써야 해서 옮겼는데, 옮길 자리가 두 번 바뀌었다 -- 그 과정을
+// 남겨 둔다(다음 사람이 같은 자리를 다시 시도하지 않도록):
+//   ⓐ reject-streak → relay-handshake 로 «직접 import» : ⛔불가.
+//      relay-handshake 는 이미 reject-streak 을 import 하고 그 const 를 자기
+//      최상위에서 읽으므로(AMBIGUOUS_COVER_REASON_CODES), 반대 방향을 더하면
+//      순환이 되고 reject-streak 이 진입 모듈일 때 TDZ 로 «적재 시점»에 터진다.
+//   ⓑ 제3의 모듈(quoted-marker-mask.mjs)로 분리 : ⛔실측 결과 불가.
+//      이 저장소의 격리 시험들은 reject-streak.mjs 를 임시 루트로 복사할 때
+//      «각자 손으로 적은 파일 목록»을 쓴다(9개 파일이 그렇다). 새 모듈은 그
+//      목록에 없으므로 모듈 없음으로 죽는다 -- 전체 러너에서 80건이 그렇게
+//      실패했다. 그 목록들을 전부 고치는 것은 이 조각의 범위(최소 변경)를
+//      넘고, 하나라도 빠뜨리면 같은 실패가 반복된다.
+//   ⇒ ⓒ **relay-handshake 가 «이미» 의존하고 모든 격리 픽스처가 «이미»
+//      복사하는 이 파일**에 둔다. 복제본은 만들지 않는다(그것이 이 결함의
+//      원인이었다) -- relay-handshake.mjs 는 여기서 import 해 re-export 하므로
+//      기존 호출자·시험은 한 줄도 바뀌지 않는다.
+// ⚠️의미상 이 파일의 주제(연속 반려 원장)와 딱 맞는 자리는 아니다. 그 대가로
+// «모든 소비자가 도달할 수 있는 한 벌»을 얻었다 -- 그 교환을 여기 적어 둔다.
+
+// ---- HYK-449: 「인용된 표지」는 표지가 아니다 -----------------------------
+//
+// 2026-09-06 실사고: 검토자가 러너 영수증 **원문**을 코드블록(```)에 그대로
+// 붙였고, 그 안의 `head_commit:` 줄이 칼럼 0 이라 이 파일이 **표지로 세었다**.
+// 두 줄의 값은 완전히 동일했는데도 "어느 것이 최종인지 결정할 수 없다"로
+// 거부됐고, 첫 관측이 이미 고정된 뒤라 고칠 수도 없어 라운드 하나가 양방향
+// 교착에 빠졌다(HYK-449 등재문).
+//
+// ★수리의 단위는 **원소가 아니라 범주**다 -- HYK-442 1R 이 정확히 그 실수로
+// 반려됐다(백틱 «하나만» 벗겼다가 같은 보고서의 홑따옴표 인용에 다시 뚫렸다).
+// 그래서 여기서는 「무엇을 벗길까」가 아니라 **「이 문서가 «주장하는» 텍스트는
+// 무엇인가」**를 정의한다:
+//
+//   ★판별식 -- 표지는 **문서 자신이 말하는 줄**일 때만 표지다. 문서가
+//   「보여주기만 하는」 영역과 「꺼 둔」 영역의 글자는 표지가 아니다.
+//     ⑴ **펜스 코드블록**(보여주는 영역) -- ``` 와 ~~~ **둘 다**, 3개 이상
+//        **임의 길이**, CommonMark 대로 최대 3칸 들여쓴 펜스까지, 정보
+//        문자열(```text 등) 유무 무관. 닫는 펜스는 **같은 문자로 여는 펜스
+//        이상 길이**여야 한다(그래서 ````` 블록 안의 ``` 는 닫지 못한다).
+//     ⑵ **HTML 주석**(꺼 둔 영역) `<!-- … -->` -- 이 저장소의 결과 파일이
+//        실제로 쓰는 형태다(라운드 보존 블록의 `<!-- envelope-archive: … -->`).
+//
+// ⛔여기 **넣지 않은 것**과 그 근거(추측이 아니라 시험으로 고정했다 --
+//   hyk449-quoted-marker-count.test.mjs 의 「범주 밖」 시험군):
+//     - 인용 블록(`> `) · 들여쓴 코드블록(4칸) · 인라인 코드(`…`)는 그 줄이
+//       애초에 **칼럼 0 이 아니다**. 이 파일의 표지 정규식은 전부 `^` 앵커라
+//       원래 매치하지 못한다 -- 「범주에서 빠뜨린 자리」가 **아니라 이미 닫혀
+//       있는 자리**다.
+// ⛔**`>>> BLOCKED:` / `NEEDS_INPUT:` 축에는 이 마스킹을 적용하지 않는다.**
+//   그 축의 「어디에 있든 센다」는 **의도된 fail-closed 설계**이고(HYK-333 ·
+//   HYK-442), 거기에 인용 제외를 넣는 것은 안전 성질을 약화시키는 회귀다.
+//
+// ⚠️마스킹은 **길이를 보존**한다(개행만 남기고 나머지 글자를 공백으로 바꾼다)
+//   -- 호출자가 매치의 `.index` 로 **원문**을 자르기 때문이다(judgedRegion).
+//   그래서 마스킹된 사본에서 얻은 오프셋이 원문에서 그대로 유효하다.
+// ⚠️닫히지 않은 펜스/주석은 **문서 끝까지** 마스킹한다 -- 그 방향은
+//   fail-closed 다(표지가 「사라져」 missing/pending 으로 떨어지지, 없는 표지가
+//   생기지 않는다).
+const FENCE_OPEN_RE = /^ {0,3}(`{3,}|~{3,})/;
+
+function blankKeepingNewlines(text) {
+  return text.replace(/[^\n]/g, " ");
+}
+
+function maskFencedBlocks(content) {
+  let fence = null;
+  return content
+    .split("\n")
+    .map((line) => {
+      if (fence === null) {
+        const opened = FENCE_OPEN_RE.exec(line);
+        if (!opened) return line;
+        fence = { char: opened[1][0], len: opened[1].length };
+        return blankKeepingNewlines(line);
+      }
+      // ⚠️`\r` 를 반드시 허용해야 한다: 이 저장소의 결과 파일은 실제로
+      // **CRLF** 다(Windows 좌석). 줄을 `\n` 으로 가르면 각 줄 끝에 `\r` 가
+      // 남는데, 그것을 허용하지 않으면 **닫는 펜스를 영영 못 알아본다** --
+      // 그러면 첫 펜스가 문서 끝까지 인용으로 삼켜 «표지가 사라진» 것처럼
+      // 되고 라운드가 PENDING 으로 막힌다(HYK-449 1R 에서 내 결과 파일이
+      // 실제로 그렇게 막혔다). 다른 축들이 CRLF 에서 멀쩡한 이유는 그쪽
+      // 정규식이 `m` 플래그를 써 `$` 가 `\r` 앞에서도 맞기 때문이고, 여기는
+      // 줄 단위로 직접 대조하므로 그 도움을 받지 못한다.
+      const closer = new RegExp(
+        `^ {0,3}\\${fence.char}{${fence.len},}[ \t\r]*$`,
+      );
+      if (closer.test(line)) fence = null;
+      return blankKeepingNewlines(line);
+    })
+    .join("\n");
+}
+
+function maskHtmlComments(content) {
+  let out = content;
+  let from = 0;
+  for (;;) {
+    const start = out.indexOf("<!--", from);
+    if (start === -1) return out;
+    const closeAt = out.indexOf("-->", start + 4);
+    const end = closeAt === -1 ? out.length : closeAt + 3;
+    out =
+      out.slice(0, start) +
+      blankKeepingNewlines(out.slice(start, end)) +
+      out.slice(end);
+    from = end;
+  }
+}
+
+// 표지를 세는 축들이 보는 「문서 자신이 말한 것」. ⛔BLOCKED 축은 이것을
+// 쓰지 않는다(위 주석). 내보내는 이유는 시험이 판별식 자체를 직접 재기
+// 위해서다 -- 축마다 각자 복사본을 만들면 조용히 어긋난다(이 파일이
+// DONE_RE/TASK_ID_RE_G 를 내보내는 것과 같은 재사용 규율).
+export function maskQuotedMarkerRegions(content) {
+  return maskHtmlComments(maskFencedBlocks(content));
+}
 
 const ISSUE_ID_RE = /^(HYK-\d+)/;
 // HYK-183: 결과 파일에 이 표지가 2개 이상이면 어느 것이 최종인지 결정할 수
@@ -256,8 +380,12 @@ function crossIssueNote(rawTaskIdFromForLine, issueId, taskIdMatches) {
 // never a crash.
 export function parseReviewOutcome(reviewText) {
   const text = normalizeNewlines(reviewText);
-  const forMatches = [...text.matchAll(FOR_LINE_RE_G)];
-  const taskIdMatches = [...text.matchAll(TASK_ID_LINE_RE_G)];
+  // HYK-450 ②: 세는 것은 «주장된» 표지뿐이다(위 import 주석). 값을 뽑는
+  // 것도 같은 사본에서 한다 -- 세는 텍스트와 읽는 텍스트가 다르면 그
+  // 자체가 HYK-431 계열의 결함이다.
+  const asserted = maskQuotedMarkerRegions(text);
+  const forMatches = [...asserted.matchAll(FOR_LINE_RE_G)];
+  const taskIdMatches = [...asserted.matchAll(TASK_ID_LINE_RE_G)];
 
   let rawTaskId = null;
   let rawTaskIdFromForLine = false;
@@ -302,7 +430,7 @@ export function parseReviewOutcome(reviewText) {
       reason: `reject-streak record: task id '${rawTaskId}' does not start with HYK-<digits> -- cannot derive issue id`,
     };
   }
-  const verdictMatches = [...text.matchAll(VERDICT_LINE_RE_G)];
+  const verdictMatches = [...asserted.matchAll(VERDICT_LINE_RE_G)];
   if (verdictMatches.length > 1) {
     return {
       ok: false,
@@ -323,7 +451,11 @@ export function parseReviewOutcome(reviewText) {
   // 않는다(§0-B 표지 정직성과 같은 원칙); null이면 isDuplicate 판정이
   // task_id+verdict만 보던 예전 동작으로 그대로 되돌아갈 뿐, 판정 자체가
   // 막히지는 않는다.
-  const doneMatches = [...text.matchAll(DONE_LINE_RE_G)];
+  // HYK-450 ②: 같은 함수 안에서 한 계수만 원문을 보면 그 자체가 «조용한
+  // 어긋남»이다 -- DONE 줄도 «주장된» 사본에서 센다. 이 축은 부가 식별자라
+  // 방향도 안전하다(인용을 빼면 doneAt 이 오히려 더 자주 «하나»로 확정돼
+  // 중복 판정이 정확해진다).
+  const doneMatches = [...asserted.matchAll(DONE_LINE_RE_G)];
   const doneAt = doneMatches.length === 1 ? doneMatches[0][1] : null;
   const note = crossIssueNote(rawTaskIdFromForLine, issueId, taskIdMatches);
   return {
