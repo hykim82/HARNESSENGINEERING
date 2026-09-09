@@ -7,6 +7,7 @@ import {
   recordRejectStreakFromResultText,
   isReviewFamilyRole,
   REJECT_STREAK_REASON_CODE,
+  maskQuotedMarkerRegions,
 } from "./reject-streak.mjs";
 import {
   archiveRoundEnvelope,
@@ -31,101 +32,16 @@ export { TIME_AUTHORITY_STATE, MAX_FUTURE_SKEW_MS };
 // 없으므로 조용히 하나를 고르지 않고 판정 불가로 멈춘다(2026-07-31 거짓
 // 기록 사고). TASK_ID_RE(과거: 첫 매치 채택)와 DONE_RE(과거: 마지막 매치
 // 채택)가 서로 반대 방향을 조용히 골랐던 것이 이 수리의 대상이다.
-// ---- HYK-449: 「인용된 표지」는 표지가 아니다 -----------------------------
-//
-// 2026-09-06 실사고: 검토자가 러너 영수증 **원문**을 코드블록(```)에 그대로
-// 붙였고, 그 안의 `head_commit:` 줄이 칼럼 0 이라 이 파일이 **표지로 세었다**.
-// 두 줄의 값은 완전히 동일했는데도 "어느 것이 최종인지 결정할 수 없다"로
-// 거부됐고, 첫 관측이 이미 고정된 뒤라 고칠 수도 없어 라운드 하나가 양방향
-// 교착에 빠졌다(HYK-449 등재문).
-//
-// ★수리의 단위는 **원소가 아니라 범주**다 -- HYK-442 1R 이 정확히 그 실수로
-// 반려됐다(백틱 «하나만» 벗겼다가 같은 보고서의 홑따옴표 인용에 다시 뚫렸다).
-// 그래서 여기서는 「무엇을 벗길까」가 아니라 **「이 문서가 «주장하는» 텍스트는
-// 무엇인가」**를 정의한다:
-//
-//   ★판별식 -- 표지는 **문서 자신이 말하는 줄**일 때만 표지다. 문서가
-//   「보여주기만 하는」 영역과 「꺼 둔」 영역의 글자는 표지가 아니다.
-//     ⑴ **펜스 코드블록**(보여주는 영역) -- ``` 와 ~~~ **둘 다**, 3개 이상
-//        **임의 길이**, CommonMark 대로 최대 3칸 들여쓴 펜스까지, 정보
-//        문자열(```text 등) 유무 무관. 닫는 펜스는 **같은 문자로 여는 펜스
-//        이상 길이**여야 한다(그래서 ````` 블록 안의 ``` 는 닫지 못한다).
-//     ⑵ **HTML 주석**(꺼 둔 영역) `<!-- … -->` -- 이 저장소의 결과 파일이
-//        실제로 쓰는 형태다(라운드 보존 블록의 `<!-- envelope-archive: … -->`).
-//
-// ⛔여기 **넣지 않은 것**과 그 근거(추측이 아니라 시험으로 고정했다 --
-//   hyk449-quoted-marker-count.test.mjs 의 「범주 밖」 시험군):
-//     - 인용 블록(`> `) · 들여쓴 코드블록(4칸) · 인라인 코드(`…`)는 그 줄이
-//       애초에 **칼럼 0 이 아니다**. 이 파일의 표지 정규식은 전부 `^` 앵커라
-//       원래 매치하지 못한다 -- 「범주에서 빠뜨린 자리」가 **아니라 이미 닫혀
-//       있는 자리**다.
-// ⛔**`>>> BLOCKED:` / `NEEDS_INPUT:` 축에는 이 마스킹을 적용하지 않는다.**
-//   그 축의 「어디에 있든 센다」는 **의도된 fail-closed 설계**이고(HYK-333 ·
-//   HYK-442), 거기에 인용 제외를 넣는 것은 안전 성질을 약화시키는 회귀다.
-//
-// ⚠️마스킹은 **길이를 보존**한다(개행만 남기고 나머지 글자를 공백으로 바꾼다)
-//   -- 호출자가 매치의 `.index` 로 **원문**을 자르기 때문이다(judgedRegion).
-//   그래서 마스킹된 사본에서 얻은 오프셋이 원문에서 그대로 유효하다.
-// ⚠️닫히지 않은 펜스/주석은 **문서 끝까지** 마스킹한다 -- 그 방향은
-//   fail-closed 다(표지가 「사라져」 missing/pending 으로 떨어지지, 없는 표지가
-//   생기지 않는다).
-const FENCE_OPEN_RE = /^ {0,3}(`{3,}|~{3,})/;
-
-function blankKeepingNewlines(text) {
-  return text.replace(/[^\n]/g, " ");
-}
-
-function maskFencedBlocks(content) {
-  let fence = null;
-  return content
-    .split("\n")
-    .map((line) => {
-      if (fence === null) {
-        const opened = FENCE_OPEN_RE.exec(line);
-        if (!opened) return line;
-        fence = { char: opened[1][0], len: opened[1].length };
-        return blankKeepingNewlines(line);
-      }
-      // ⚠️`\r` 를 반드시 허용해야 한다: 이 저장소의 결과 파일은 실제로
-      // **CRLF** 다(Windows 좌석). 줄을 `\n` 으로 가르면 각 줄 끝에 `\r` 가
-      // 남는데, 그것을 허용하지 않으면 **닫는 펜스를 영영 못 알아본다** --
-      // 그러면 첫 펜스가 문서 끝까지 인용으로 삼켜 «표지가 사라진» 것처럼
-      // 되고 라운드가 PENDING 으로 막힌다(HYK-449 1R 에서 내 결과 파일이
-      // 실제로 그렇게 막혔다). 다른 축들이 CRLF 에서 멀쩡한 이유는 그쪽
-      // 정규식이 `m` 플래그를 써 `$` 가 `\r` 앞에서도 맞기 때문이고, 여기는
-      // 줄 단위로 직접 대조하므로 그 도움을 받지 못한다.
-      const closer = new RegExp(
-        `^ {0,3}\\${fence.char}{${fence.len},}[ \t\r]*$`,
-      );
-      if (closer.test(line)) fence = null;
-      return blankKeepingNewlines(line);
-    })
-    .join("\n");
-}
-
-function maskHtmlComments(content) {
-  let out = content;
-  let from = 0;
-  for (;;) {
-    const start = out.indexOf("<!--", from);
-    if (start === -1) return out;
-    const closeAt = out.indexOf("-->", start + 4);
-    const end = closeAt === -1 ? out.length : closeAt + 3;
-    out =
-      out.slice(0, start) +
-      blankKeepingNewlines(out.slice(start, end)) +
-      out.slice(end);
-    from = end;
-  }
-}
-
-// 표지를 세는 축들이 보는 「문서 자신이 말한 것」. ⛔BLOCKED 축은 이것을
-// 쓰지 않는다(위 주석). 내보내는 이유는 시험이 판별식 자체를 직접 재기
-// 위해서다 -- 축마다 각자 복사본을 만들면 조용히 어긋난다(이 파일이
-// DONE_RE/TASK_ID_RE_G 를 내보내는 것과 같은 재사용 규율).
-export function maskQuotedMarkerRegions(content) {
-  return maskHtmlComments(maskFencedBlocks(content));
-}
+// ---- HYK-449 / HYK-450: 「인용된 표지」는 표지가 아니다 ------------------
+// 판별식 본체는 ./reject-streak.mjs 로 옮겼다(HYK-450 -- 그 파일 머리에
+// «왜 하필 거기인가»가 실측과 함께 있다: 제3의 모듈로 빼면 격리 픽스처
+// 9곳의 손으로 적은 복사 목록에서 빠져 80건이 죽는다). ⛔여기서 다시
+// 정의하지 마라 -- 복제본이 이 결함의 원인이다.
+// ⛔이 마스킹은 «정지 표지 2종» 축에는 적용되지 않는다(그 축의 「어디에 있든
+// 센다」는 의도된 fail-closed 다) -- 그 축의 인용 처리는 아래
+// countNearMissMarkerShapes 의 «명시적 인용 선언»(HYK-450 ①)이 맡는다.
+// 기존 호출자(hyk449 시험 등)가 이 파일에서 가져다 쓰던 이름을 그대로 둔다.
+export { maskQuotedMarkerRegions };
 
 const TASK_ID_RE = /^task_id:\s*(\S+)/im;
 const TASK_ID_RE_G = /^task_id:\s*(\S+)/gim;
@@ -302,6 +218,67 @@ function lineStartOffset(scan, matchIndex) {
   return 0;
 }
 
+// ---- HYK-450 ①: 「문서가 «주장»한 표지」와 「문서가 «인용»한 표지」 -------
+//
+// 실물: HYK-449 워커의 결과 파일이 이 축을 **설명하다가** 소비를 거부당했다.
+// 그 파일 92행은 표지 모양을 백틱으로 감싸 문장 첫머리에 두었는데, 이 축의
+// 근접-미스 규칙(표지 모양 «앞»에 글자/숫자가 없으면 시도로 센다)에서
+// 백틱은 글자도 숫자도 아니므로 «시도»로 세어졌다. 즉 ★이 축을 정직하게
+// 설명하는 보고서는 그 사실만으로 소비 불능이 된다.
+//
+// ⛔단순 완화(«이 축에도 인용 마스킹을 켠다»)는 하지 않는다. 「어디에 있든
+// 센다」가 이 축의 안전 성질 그 자체이고, 인용 여부를 «문장부호로 추정»하는
+// 축은 HYK-442 가 1R·2R·4R 세 번 반려로 «수렴하지 않는다»를 증명했다(그
+// 판단의 원문은 위 PROSE_CHAR_RE 머리 주석에 그대로 있다).
+//
+// ⇒ ★그래서 이 라운드는 추정하지 않는다 -- **선언을 받는다.** 작성자가
+//   «여기부터 여기까지는 인용이다»라고 명시적으로 선언한 구간 안에서만,
+//   그리고 **깨진 표지 흔적(근접-미스)에 한해서만** 면제한다. 선언 형식은
+//   자기 이름을 스스로 말하는 한 쌍의 HTML 주석이다(begin/end).
+//
+// ★이 설계가 fail-closed 를 «어떻게» 보존하는가 (셋 다 시험으로 고정):
+//   ⑴ **선언은 «진짜 정지»를 숨길 수 없다.** 엄격 채택 경로(BLOCKED_RE)는
+//      한 글자도 바뀌지 않았다 -- 형식이 온전한 정지 표지는 선언 구간
+//      «안»에 있어도 여전히 그대로 채택된다. 그래서 「인용인 척 감싸서 정지
+//      신호를 지우기」가 원리적으로 불가능하다.
+//   ⑵ **선언이 없으면 동작이 예전과 같다.** 면제는 오직 «작성자가 직접 쓴
+//      선언»에만 붙는다 -- 우연히 생길 수 없는 문자열이고, 표지를 쓰려다
+//      형식을 틀린 워커의 파일에는 존재하지 않는다.
+//   ⑶ **선언이 조금이라도 깨져 있으면 면제는 «전부» 사라진다**(짝 없는
+//      begin/end · 중첩). 「반쯤 열린 선언」이 파일 뒷부분을 통째로 면제하는
+//      길을 막는다 -- 방향이 언제나 «더 세는» 쪽이다.
+//
+// ⚠️정직 한계: ⑵의 「우연히 생길 수 없다」는 «작성자가 스스로 자기 정지
+// 신호를 감추려 드는 경우»까지 막지 못한다. 다만 그 사람은 애초에 표지를
+// «안 쓰면» 그만이므로 이 선언이 새로 여는 문은 없다 -- 이 축의 위협 모형은
+// HYK-333 의 «규칙을 지켰는데 조용히 유실됨»이지 «작성자의 고의 은폐»가
+// 아니다.
+const QUOTE_REGION_BEGIN_RE =
+  /^[ \t]*<!--[ \t]*quoted-stop-marker:[ \t]*begin[ \t]*-->[ \t\r]*$/;
+const QUOTE_REGION_END_RE =
+  /^[ \t]*<!--[ \t]*quoted-stop-marker:[ \t]*end[ \t]*-->[ \t\r]*$/;
+
+// 선언된 인용 구간의 [시작, 끝) 오프셋 목록. ⛔선언 구조가 깨져 있으면
+// `null`을 낸다 -- 호출자는 그것을 「면제 0」으로 다룬다(위 ⑶).
+function declaredQuotationRegions(scan) {
+  const regions = [];
+  let openAt = null;
+  let offset = 0;
+  for (const line of scan.split("\n")) {
+    const lineEnd = offset + line.length;
+    if (QUOTE_REGION_BEGIN_RE.test(line)) {
+      if (openAt !== null) return null;
+      openAt = lineEnd;
+    } else if (QUOTE_REGION_END_RE.test(line)) {
+      if (openAt === null) return null;
+      regions.push([openAt, offset]);
+      openAt = null;
+    }
+    offset = lineEnd + 1;
+  }
+  return openAt === null ? regions : null;
+}
+
 // 근접-미스 «시도»의 개수. 두 표지 모양 모두 «그 매치가 시작한 줄»을 기준으로
 // 판정한다:
 //   ⓐ 화살표 모양(BLOCKED_ANYWHERE_RE) -- 매치 시작 위치와 그 줄의 머리
@@ -320,12 +297,21 @@ function countNearMissMarkerShapes(resultContent) {
   // 계수 전용 스캔이라 오프셋 보존이 필요 없다 -- 보이지 않는 형식 문자를
   // 먼저 지운다(줄 구조는 그대로: `\n`은 \p{Cf}가 아니다).
   const scan = resultContent.replace(INVISIBLE_FORMAT_CHAR_RE, "");
+  // HYK-450 ①: «작성자가 선언한» 인용 구간만 면제한다(위 설계 주석).
+  // 선언이 없거나 깨져 있으면 예전과 «완전히 같은» 계수가 나온다.
+  const regions = declaredQuotationRegions(scan);
+  const isDeclaredQuotation = (index) =>
+    regions !== null &&
+    regions.some(([from, to]) => index >= from && index < to);
   let count = 0;
   for (const m of scan.matchAll(BLOCKED_ANYWHERE_RE)) {
+    if (isDeclaredQuotation(m.index)) continue;
     const lineStart = lineStartOffset(scan, m.index);
     if (!PROSE_CHAR_RE.test(scan.slice(lineStart, m.index))) count += 1;
   }
-  count += [...scan.matchAll(BLOCKED_BARE_COLUMN0_RE)].length;
+  for (const m of scan.matchAll(BLOCKED_BARE_COLUMN0_RE)) {
+    if (!isDeclaredQuotation(m.index)) count += 1;
+  }
   return count;
 }
 // HYK-325 §2-3 (승격: HYK-418 §2-1): the non-column-0 meta line finalize-
@@ -523,7 +509,11 @@ export const RESULT_BLOCK_STATE = Object.freeze({
   NONE: "NONE",
 });
 
-function resolveResultBlockedState(resultContent) {
+// HYK-450 ①: 내보낸다 -- 시험이 이 축의 판정을 «생산 코드 그대로» 재기
+// 위해서다(축마다 시험이 자기 복사본을 만들면 조용히 어긋난다 -- 이 파일이
+// DONE_RE/countVerdictLines 를 내보내는 것과 같은 재사용 규율).
+// ⛔판정 로직은 이 export 로 한 글자도 바뀌지 않는다.
+export function resolveResultBlockedState(resultContent) {
   const matches = [...resultContent.matchAll(BLOCKED_RE)];
   if (matches.length > 1) {
     return {
