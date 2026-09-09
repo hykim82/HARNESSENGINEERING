@@ -756,6 +756,161 @@ test("HYK-398: RETIREMENT_RELEASED with successorLabel missing is refused (SUCCE
   }
 });
 
+// ---------------------------------------------------------------------------
+// HYK-457 §4 완료조건 1: RUNNER_GREEN_UNREACHABLE_AT_HEAD -- the third
+// mechanically-confirmable reason (HYK-455) that admission-completion-
+// adapter.mjs's OWN copy of this confirm logic never wired a branch for,
+// fail-closing every real retirement using it (2026-09-08 ORCH-63 isolated
+// measurement, coder-task.md §1/§2). These tests reproduce that exact shape
+// against the fixed code: one success case with every piece of evidence
+// present, then the same fixture with each piece of evidence removed one at
+// a time -- each must independently refuse and leave the reservation ACTIVE.
+// ---------------------------------------------------------------------------
+
+const RUNNER_GREEN_HEAD_COMMIT = "b".repeat(40);
+
+function seedRunnerGreenFixture(
+  dir,
+  {
+    reservationId,
+    includeEvidenceReceiptPath = true,
+    receiptExists = true,
+    receiptHeadCommit = RUNNER_GREEN_HEAD_COMMIT,
+    receiptRunnerExit = 1,
+  } = {},
+) {
+  const taskHeader = `task_id: ${reservationId}\ndropped_at: 2026-09-08 20:00 KST\n`;
+  const resultContent =
+    `task_id: ${reservationId}\nhead_commit: ${RUNNER_GREEN_HEAD_COMMIT}\n\n` +
+    `>>> DONE: CODER @ 2026-09-08 20:03:19 KST\n`;
+  writeFileSync(join(dir, "coder-task.md"), taskHeader, "utf8");
+  writeFileSync(join(dir, "coder.md"), resultContent, "utf8");
+  mkdirSync(join(dir, "rounds"), { recursive: true });
+  writeFileSync(join(dir, "rounds", "coder-r1.md"), resultContent, "utf8");
+  mkdirSync(join(dir, "retirements"), { recursive: true });
+  writeFileSync(
+    join(dir, "retirements", "coder-retire-r1.json"),
+    JSON.stringify({
+      role: "CODER",
+      harnessTaskLabel: reservationId,
+      archivePath: "rounds/coder-r1.md",
+      archiveFingerprintClaimed: fingerprintOf(resultContent),
+      blockReasonCode: "RUNNER_GREEN_UNREACHABLE_AT_HEAD",
+      successorLabel: `${reservationId}-successor`,
+      recordedAt: "2026-09-08 20:03:19 KST",
+      evidence: { source: "test" },
+      ...(includeEvidenceReceiptPath
+        ? { evidenceReceiptPath: "runner-receipt.json" }
+        : {}),
+    }),
+    "utf8",
+  );
+  if (receiptExists) {
+    writeFileSync(
+      join(dir, "runner-receipt.json"),
+      JSON.stringify({
+        head_commit: receiptHeadCommit,
+        runner_exit: receiptRunnerExit,
+      }),
+      "utf8",
+    );
+  }
+}
+
+function runRunnerGreenCase(reservationId, seedOpts) {
+  const { dir, ledger, lock } = tmpPaths();
+  const savedLedger = process.env.ADMISSION_LEDGER_PATH;
+  const savedLock = process.env.ADMISSION_LOCK_PATH;
+  try {
+    runAdmissionCli([
+      "init-cutover",
+      "--ledger",
+      ledger,
+      "--lock",
+      lock,
+      "--live-seats",
+      "[]",
+    ]);
+    runAdmissionCli([
+      "admit",
+      "--ledger",
+      ledger,
+      "--lock",
+      lock,
+      "--reservation-id",
+      reservationId,
+      "--cap",
+      "1",
+    ]);
+    seedRunnerGreenFixture(dir, { reservationId, ...seedOpts });
+
+    process.env.ADMISSION_LEDGER_PATH = ledger;
+    process.env.ADMISSION_LOCK_PATH = lock;
+    const outcome = autoCompleteAdmission({
+      reservationId,
+      reason: "RETIREMENT_RELEASED",
+      harnessDir: dir,
+      role: "CODER",
+    });
+    const written = JSON.parse(readFileSync(ledger, "utf8"));
+    return { outcome, status: written.reservations[reservationId].status };
+  } finally {
+    if (savedLedger !== undefined)
+      process.env.ADMISSION_LEDGER_PATH = savedLedger;
+    else delete process.env.ADMISSION_LEDGER_PATH;
+    if (savedLock !== undefined) process.env.ADMISSION_LOCK_PATH = savedLock;
+    else delete process.env.ADMISSION_LOCK_PATH;
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+test("HYK-457: RETIREMENT_RELEASED for a RUNNER_GREEN_UNREACHABLE_AT_HEAD retirement with every piece of evidence present succeeds (released, changed=true) -- this is exactly the case HYK-457's fix wires", () => {
+  const { outcome, status } = runRunnerGreenCase("HYK-457-rg-1", {});
+  assert.equal(outcome.attempted, true);
+  assert.equal(outcome.ok, true, outcome.reason);
+  assert.equal(status, "COMPLETED");
+});
+
+test("HYK-457: RUNNER_GREEN_UNREACHABLE_AT_HEAD retirement is refused when evidenceReceiptPath itself is missing from the retirement record", () => {
+  const { outcome, status } = runRunnerGreenCase("HYK-457-rg-2", {
+    includeEvidenceReceiptPath: false,
+  });
+  assert.equal(outcome.attempted, true);
+  assert.equal(outcome.ok, false);
+  assert.match(outcome.reason, /재확인되지 않음/);
+  assert.equal(status, "ACTIVE");
+});
+
+test("HYK-457: RUNNER_GREEN_UNREACHABLE_AT_HEAD retirement is refused when the runner receipt file the record points to does not exist", () => {
+  const { outcome, status } = runRunnerGreenCase("HYK-457-rg-3", {
+    receiptExists: false,
+  });
+  assert.equal(outcome.attempted, true);
+  assert.equal(outcome.ok, false);
+  assert.match(outcome.reason, /재확인되지 않음/);
+  assert.equal(status, "ACTIVE");
+});
+
+test("HYK-457: RUNNER_GREEN_UNREACHABLE_AT_HEAD retirement is refused when the runner receipt's head_commit does not match the live result's head_commit (fingerprint mismatch on the runner-green axis)", () => {
+  const { outcome, status } = runRunnerGreenCase("HYK-457-rg-4", {
+    receiptHeadCommit: "c".repeat(40),
+  });
+  assert.equal(outcome.attempted, true);
+  assert.equal(outcome.ok, false);
+  assert.match(outcome.reason, /재확인되지 않음/);
+  assert.equal(status, "ACTIVE");
+});
+
+test("HYK-457: RUNNER_GREEN_UNREACHABLE_AT_HEAD retirement is refused when the runner receipt says runner_exit=0 (the commit is actually green -- retiring for this reason would be a lie)", () => {
+  const { outcome, status } = runRunnerGreenCase("HYK-457-rg-5", {
+    receiptRunnerExit: 0,
+  });
+  assert.equal(outcome.attempted, true);
+  assert.equal(outcome.ok, false);
+  assert.match(outcome.reason, /재확인되지 않음/);
+  assert.equal(status, "ACTIVE");
+});
+
 test("completeAdmissionReservation without `reason` leaves completion_reason unset (byte-identical to the pre-HYK-342 ok:true path)", () => {
   const { dir, ledger, lock } = tmpPaths();
   try {

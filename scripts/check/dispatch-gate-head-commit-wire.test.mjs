@@ -42,6 +42,9 @@ const SIBLING_FILES = [
   "abort-record-core.mjs",
   "retirement-record-core.mjs",
   "envelope-archive.mjs",
+  // HYK-457 §3-A: dispatch-gate-decision.mjs now also statically imports
+  // this (confirmRetirementBlockReason dedup).
+  "retirement-block-reason-shared.mjs",
 ];
 
 function stageScriptsCheckDir(rootDir, overrides) {

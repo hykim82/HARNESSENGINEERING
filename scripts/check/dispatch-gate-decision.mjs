@@ -18,7 +18,7 @@ import {
   rmSync,
 } from "node:fs";
 import { createHash } from "node:crypto";
-import { join, dirname, resolve, relative, isAbsolute } from "node:path";
+import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import {
@@ -89,9 +89,12 @@ import { checkAbortRecord, ABORT_RECORD_STATE } from "./abort-record-core.mjs";
 import {
   checkRetirementRecord,
   RETIREMENT_RECORD_STATE,
-  RETIREMENT_BLOCK_REASON,
-  MECHANICALLY_CONFIRMABLE_BLOCK_REASONS,
 } from "./retirement-record-core.mjs";
+// HYK-457 §3-A: confirmRetirementBlockReason (and its
+// RUNNER_GREEN_UNREACHABLE_AT_HEAD-only helper) used to be defined in this
+// file, with a byte-drifted twin in admission-completion-adapter.mjs -- see
+// retirement-block-reason-shared.mjs's header for the merge rationale.
+import { confirmRetirementBlockReason } from "./retirement-block-reason-shared.mjs";
 // HYK-307-order-1 §1: the delivery-time round-task snapshot (§ bestEffortSnapshotRoundTaskFile
 // below) reuses this existing, already-tested preservation primitive
 // (envelope-archive.mjs, HYK-204/HYK-241) rather than inventing a second
@@ -671,13 +674,9 @@ function deriveRoleFromTaskPath(taskPath) {
 const CONSUMPTION_TASK_ID_RE_G = /^task_id:[ \t]*(\S+)/gim;
 const CONSUMPTION_DROPPED_AT_RE = /^dropped_at:\s*(.+)$/im;
 const CONSUMPTION_DONE_RE_G = /^>>>\s*DONE:.*@\s*(.+?)\s*$/gim;
-// HYK-455 §2 -- RUNNER_GREEN_UNREACHABLE_AT_HEAD 재확인 전용: 이 라운드
-// 자신의 결과 파일이 주장하는 head_commit(그 러너가 실제로 돈 커밋)을
-// 뽑는다. `head_commit:` 소문자 표지만 인정한다(위 DISPATCH_HEAD_COMMIT_RE_G
-// 와 같은 관례, 대문자 `HEAD_COMMIT:`는 다른 축의 옛 표지다) -- 값은
-// 40자 hex(sha)로 고정해 위조 문자열이 아무 값이나 채워 넣지 못하게 한다.
-const CONSUMPTION_HEAD_COMMIT_RE_G =
-  /^head_commit:[ \t]*([0-9a-fA-F]{40})[ \t]*$/gm;
+// HYK-457: CONSUMPTION_HEAD_COMMIT_RE_G used to live here, for the sole use
+// of confirmRunnerGreenUnreachableAtHead -- both moved to
+// retirement-block-reason-shared.mjs (see that file's own copy/header).
 
 // relay-handshake.mjs의 resolveResultTaskId/resolveResultDoneMatch와
 // 동일한 "유일한 매치 하나만 채택, 0개·2개 이상이면 지어내지 않고
@@ -2124,119 +2123,20 @@ function resolveRetirementArchiveCandidate(
   };
 }
 
-// HYK-455 §2: evidenceReceiptPath는 harnessDir 기준 상대경로만 허용한다
-// (그 밖의 아무 파일이나 읽어 위조하는 경로 탈출을 막는다). `..`로
-// harnessDir을 벗어나거나 다른 드라이브/절대경로로 튀는 값은 전부
-// null(=거부)로 떨어진다 -- 어떤 예외도 던지지 않는다(호출자가 catch 없이
-// 곧바로 진위 판정에 쓴다).
-function resolveEvidenceReceiptPathWithinHarnessDir(
-  harnessDir,
-  evidenceReceiptPath,
-) {
-  if (!isNonEmptyAbortString(evidenceReceiptPath)) return null;
-  const resolvedHarnessDir = resolve(harnessDir);
-  const resolvedPath = resolve(harnessDir, evidenceReceiptPath);
-  const rel = relative(resolvedHarnessDir, resolvedPath);
-  if (
-    rel === "" ||
-    rel === ".." ||
-    rel.startsWith("../") ||
-    rel.startsWith("..\\")
-  ) {
-    return null;
-  }
-  if (isAbsolute(rel)) return null;
-  return resolvedPath;
-}
-
-// HYK-455 §2 설계 조건 1·2: 세 번째 기계-확인-가능 사유
-// (RUNNER_GREEN_UNREACHABLE_AT_HEAD) 전용 재확인. 이 사유는 다른 둘과
-// 달리 live 결과/task 파일 안에 재확인할 사실이 없다(러너 결과는 별도
-// 영수증 파일) -- 그래서 record.evidenceReceiptPath(근거 영수증 경로,
-// §설계 조건 2)가 가리키는 러너 영수증(runner-receipt-writer.mjs 스키마,
-// HYK-411)을 harnessDir 기준으로 실제로 다시 읽어, 그 안의 head_commit이
-// 이 라운드 결과 파일 자신의 head_commit: 줄(위 CONSUMPTION_HEAD_COMMIT_RE_G)
-// 과 같고 runner_exit이 0이 아님을 독립적으로 재유도한다. 경로가 없거나·
-// harnessDir을 벗어나거나·파일을 못 읽거나·JSON이 아니거나·head_commit이
-// 다르거나·runner_exit이 0(=그 커밋에서 실제로는 초록)이면 false --
-// "ORCH가 그렇다고 했다"만으로는 통과하지 못한다(§3-4 원칙 그대로, 그리고
-// 이 마지막 분기가 정확히 등재문 완료조건 2의 음성 시험이 요구하는 사실:
-// 실제로 초록인데 은퇴를 시도하면 기계가 거부한다).
-function confirmRunnerGreenUnreachableAtHead(record, harnessDir, resultText) {
-  const resultHeadCommit = extractSoleMatch(
-    resultText,
-    CONSUMPTION_HEAD_COMMIT_RE_G,
-  );
-  if (!isNonEmptyAbortString(resultHeadCommit)) return false;
-  const resolvedPath = resolveEvidenceReceiptPathWithinHarnessDir(
-    harnessDir,
-    record?.evidenceReceiptPath,
-  );
-  if (resolvedPath === null) return false;
-  let receipt;
-  try {
-    receipt = JSON.parse(readFileSync(resolvedPath, "utf8"));
-  } catch {
-    return false;
-  }
-  return (
-    receipt?.head_commit === resultHeadCommit &&
-    typeof receipt?.runner_exit === "number" &&
-    receipt.runner_exit !== 0
-  );
-}
-
-// §3-4 (retirement-record-core.mjs 헤더): 기계로 확인 가능한 사유(현재
-// 셋 -- DONE_TIMESTAMP_NOT_PARSEABLE · HYK-398이 추가한
-// DONE_PREDATES_DROPPED_AT · HYK-455가 추가한
-// RUNNER_GREEN_UNREACHABLE_AT_HEAD)만 독립 재확인한다. DONE_TIMESTAMP_NOT_
-// PARSEABLE: live 결과 파일 자신에 `>>> DONE:` 원문이 실제로 있고(그렇지
-// 않으면 "파싱 불가"가 아니라 "애초에 없음"이라는 다른 사실이므로 이
-// 사유가 주장하는 바가 아니다), 그 값이 parseKstToMs로 파싱되지 않을
-// 때만 true. DONE_PREDATES_DROPPED_AT(HYK-398): live 결과 파일의
-// `>>> DONE:`과 `droppedAt`(호출자가 이미 아카이브 사본에서 독립적으로
-// 뽑아 온 값, buildCurrentBinding 참조) 둘 다 파싱되고, doneAt이
-// droppedAt보다 «엄격히» 과거일 때만 true -- relay-handshake.mjs의 기존
-// stale 판정(`doneAt < droppedAt`)과 정확히 같은 사실을 이 축에서
-// 독립적으로 다시 유도한다(§3-4 "ORCH가 그렇다고 했다만으로는 통과 못
-// 한다" 원칙 그대로). RUNNER_GREEN_UNREACHABLE_AT_HEAD(HYK-455): 위
-// confirmRunnerGreenUnreachableAtHead 참조. 나머지 사유(DONE_REWRITE_LOCKED ·
-// TASK_CONTRACT_PROHIBITS_REPAIR)는 이 코드베이스가 기계로 재현할 수 없는
-// 계약 텍스트 질문이므로 null을 돌려준다(가짜 확인을 만들지 않는다 --
-// null은 코어가 "이 사유는 이 축에서 재확인 대상이 아니다"로 이미
-// 처리한다, MECHANICALLY_CONFIRMABLE_BLOCK_REASONS 확인).
-function confirmRetirementBlockReason(
-  record,
-  resultText,
-  droppedAt,
-  harnessDir,
-) {
-  if (!MECHANICALLY_CONFIRMABLE_BLOCK_REASONS.has(record?.blockReasonCode)) {
-    return null;
-  }
-  if (
-    record.blockReasonCode ===
-    RETIREMENT_BLOCK_REASON.DONE_TIMESTAMP_NOT_PARSEABLE
-  ) {
-    const doneAt = extractSoleMatch(resultText, CONSUMPTION_DONE_RE_G);
-    return isNonEmptyAbortString(doneAt) && parseKstToMs(doneAt) === null;
-  }
-  if (
-    record.blockReasonCode === RETIREMENT_BLOCK_REASON.DONE_PREDATES_DROPPED_AT
-  ) {
-    const doneAt = extractSoleMatch(resultText, CONSUMPTION_DONE_RE_G);
-    const doneAtMs = parseKstToMs(doneAt);
-    const droppedAtMs = parseKstToMs(droppedAt);
-    return doneAtMs !== null && droppedAtMs !== null && doneAtMs < droppedAtMs;
-  }
-  if (
-    record.blockReasonCode ===
-    RETIREMENT_BLOCK_REASON.RUNNER_GREEN_UNREACHABLE_AT_HEAD
-  ) {
-    return confirmRunnerGreenUnreachableAtHead(record, harnessDir, resultText);
-  }
-  return null;
-}
+// HYK-457: this function (and its RUNNER_GREEN_UNREACHABLE_AT_HEAD-only
+// helper confirmRunnerGreenUnreachableAtHead, and the evidence-receipt-path
+// resolver it needed) used to live here as its own copy, with a byte-drifted
+// twin in admission-completion-adapter.mjs -- HYK-455 added the third
+// mechanically-confirmable reason to this copy only, and the adapter's
+// unpatched twin fail-closed every RUNNER_GREEN_UNREACHABLE_AT_HEAD
+// retirement release for real (2026-09-08 ORCH-63 isolated measurement).
+// Both copies are now retirement-block-reason-shared.mjs (see its header
+// for the full contract and the "why not just import dispatch-gate-
+// decision.mjs from the adapter" answer, and the import near the top of
+// this file next to retirement-record-core.mjs). This file is the heavy
+// one, so unlike the adapter it is never copied into an isolated mutation
+// fixture -- tests spawn it at its real repo path instead -- so no
+// sibling-list update was needed on this side.
 
 // 이 축의 메인 진입점. checkRetirementRecord(코어)의 판정을 그대로
 // 내놓는다(RETIRED면 null=ALLOW, 아니면 {state, allow:false, reason}) --
