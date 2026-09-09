@@ -50,6 +50,9 @@ const SIBLING_DEPS = [
   // HYK-398 §2-⑶: admission-completion-adapter.mjs now also statically
   // imports this zero-import core.
   "retirement-record-core.mjs",
+  // HYK-457 §3-A: admission-completion-adapter.mjs now also statically
+  // imports this (confirmRetirementBlockReason dedup).
+  "retirement-block-reason-shared.mjs",
 ];
 
 function tmpDir(prefix) {

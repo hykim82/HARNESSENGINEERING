@@ -358,6 +358,9 @@ test("(d)★ RED: HYK-357 값-위반 차단 코드를 제거한 변이는 (a)와
         // HYK-398 §2-⑶: admission-completion-adapter.mjs now also
         // statically imports this zero-import core.
         "retirement-record-core.mjs",
+        // HYK-457 §3-A: admission-completion-adapter.mjs now also
+        // statically imports this (confirmRetirementBlockReason dedup).
+        "retirement-block-reason-shared.mjs",
         "consumption-receipt-writer.mjs",
         "consumption-receipt-core.mjs",
       ]) {

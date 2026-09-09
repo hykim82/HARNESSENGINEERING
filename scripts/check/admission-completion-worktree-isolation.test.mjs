@@ -404,10 +404,12 @@ function stageAdapterSiblingDeps(checkDir, supervisorDir) {
     );
   }
   // HYK-302/355 §2-A dedup / HYK-398 §2-⑶: the adapter now also statically
-  // imports these two.
+  // imports these two. HYK-457 §3-A: and now also retirement-block-reason-
+  // shared.mjs (confirmRetirementBlockReason dedup).
   for (const name of [
     "ledger-pointer-shared.mjs",
     "retirement-record-core.mjs",
+    "retirement-block-reason-shared.mjs",
   ]) {
     writeFileSync(
       join(checkDir, name),

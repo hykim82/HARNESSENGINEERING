@@ -228,6 +228,9 @@ test("③ ★RED: NOT_BLOCKED 흔적 호출을 제거한 변이는 ①의 입력
         // HYK-398 §2-⑶: admission-completion-adapter.mjs now also
         // statically imports this zero-import core.
         "retirement-record-core.mjs",
+        // HYK-457 §3-A: admission-completion-adapter.mjs now also
+        // statically imports this (confirmRetirementBlockReason dedup).
+        "retirement-block-reason-shared.mjs",
         "consumption-receipt-writer.mjs",
         "consumption-receipt-core.mjs",
       ]) {

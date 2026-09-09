@@ -43,6 +43,29 @@ function buildSyntheticRepo(prefix) {
   return dir;
 }
 
+// HYK-398 §2-⑶ dedup / HYK-457 §3-A: the adapter statically imports these
+// three siblings (ledger-pointer-shared.mjs, retirement-record-core.mjs,
+// retirement-block-reason-shared.mjs) -- extracted to a helper (same
+// max-lines-per-function reason as the ⓒ-6/ⓓ/ⓕ mutation tests below cite)
+// so each mutation test's own body stays under the quality-check limit.
+function stageAdapterCoreSiblings(checkDir) {
+  writeFileSync(
+    join(checkDir, "ledger-pointer-shared.mjs"),
+    readFileSync(join(CHECK_DIR, "ledger-pointer-shared.mjs"), "utf8"),
+    "utf8",
+  );
+  writeFileSync(
+    join(checkDir, "retirement-record-core.mjs"),
+    readFileSync(join(CHECK_DIR, "retirement-record-core.mjs"), "utf8"),
+    "utf8",
+  );
+  writeFileSync(
+    join(checkDir, "retirement-block-reason-shared.mjs"),
+    readFileSync(join(CHECK_DIR, "retirement-block-reason-shared.mjs"), "utf8"),
+    "utf8",
+  );
+}
+
 function writePointerFile(repoDir, ledgerPath, lockPath) {
   const body = { ledgerPath };
   if (lockPath !== undefined) body.lockPath = lockPath;
@@ -404,19 +427,7 @@ test("ⓒ-6 변이 RED: removing the persistentFallbackAllowed() guard from unco
         "utf8",
       );
     }
-    writeFileSync(
-      join(checkDir, "ledger-pointer-shared.mjs"),
-      readFileSync(join(CHECK_DIR, "ledger-pointer-shared.mjs"), "utf8"),
-      "utf8",
-    );
-    // HYK-398 §2-⑶: the adapter now also statically imports
-    // "./retirement-record-core.mjs" (a zero-import core) -- same sibling
-    // requirement as above.
-    writeFileSync(
-      join(checkDir, "retirement-record-core.mjs"),
-      readFileSync(join(CHECK_DIR, "retirement-record-core.mjs"), "utf8"),
-      "utf8",
-    );
+    stageAdapterCoreSiblings(checkDir);
     writeFileSync(mutatedFilePath, mutated, "utf8");
 
     const mod = await import(`file://${mutatedFilePath}?t=${Math.random()}`);
@@ -495,19 +506,7 @@ test("ⓓ 변이 RED: removing the persistent-fallback branch from autoCompleteA
         "utf8",
       );
     }
-    writeFileSync(
-      join(checkDir, "ledger-pointer-shared.mjs"),
-      readFileSync(join(CHECK_DIR, "ledger-pointer-shared.mjs"), "utf8"),
-      "utf8",
-    );
-    // HYK-398 §2-⑶: the adapter now also statically imports
-    // "./retirement-record-core.mjs" (a zero-import core) -- same sibling
-    // requirement as above.
-    writeFileSync(
-      join(checkDir, "retirement-record-core.mjs"),
-      readFileSync(join(CHECK_DIR, "retirement-record-core.mjs"), "utf8"),
-      "utf8",
-    );
+    stageAdapterCoreSiblings(checkDir);
     const ledger = join(ledgerDir, "l.json");
     const lock = join(ledgerDir, "l.lock");
     initAndAdmit(ledger, lock, "HYK-227-D-MUTANT");
@@ -704,19 +703,7 @@ test("ⓕ 변이 RED: narrowing persistentFallbackAllowed() to 'always reject' (
         "utf8",
       );
     }
-    writeFileSync(
-      join(checkDir, "ledger-pointer-shared.mjs"),
-      readFileSync(join(CHECK_DIR, "ledger-pointer-shared.mjs"), "utf8"),
-      "utf8",
-    );
-    // HYK-398 §2-⑶: the adapter now also statically imports
-    // "./retirement-record-core.mjs" (a zero-import core) -- same sibling
-    // requirement as above.
-    writeFileSync(
-      join(checkDir, "retirement-record-core.mjs"),
-      readFileSync(join(CHECK_DIR, "retirement-record-core.mjs"), "utf8"),
-      "utf8",
-    );
+    stageAdapterCoreSiblings(checkDir);
     const ledger = join(ledgerDir, "l.json");
     const lock = join(ledgerDir, "l.lock");
     initAndAdmit(ledger, lock, "HYK-289-2R-F-MUTANT");

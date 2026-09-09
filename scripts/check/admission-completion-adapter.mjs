@@ -80,8 +80,6 @@ import { withLedgerLock } from "../supervisor/admission-ledger-store.mjs";
 import {
   checkRetirementRecord,
   RETIREMENT_RECORD_STATE,
-  RETIREMENT_BLOCK_REASON,
-  MECHANICALLY_CONFIRMABLE_BLOCK_REASONS,
 } from "./retirement-record-core.mjs";
 // HYK-302/355 §2-A: single-source these two (previously duplicated here and
 // in orch-stall-detect.mjs / relay-handshake.mjs respectively) -- see
@@ -92,6 +90,11 @@ import {
   PERSISTENT_LEDGER_POINTER_FILENAME,
   isInsideGitWorktree,
 } from "./ledger-pointer-shared.mjs";
+// HYK-457 §3-A: single-source confirmRetirementBlockReason (previously
+// duplicated here as confirmRetirementBlockReasonForAdapter and in
+// dispatch-gate-decision.mjs) -- see retirement-block-reason-shared.mjs's
+// own header, and coder.md for the fixture sibling lists this round updated.
+import { confirmRetirementBlockReason } from "./retirement-block-reason-shared.mjs";
 // HYK-342 2R P1-1 (검토 원문 "회수 표식의 생산자 권한이 검증되지 않는다"):
 // ⛔처음에는 relay-handshake.mjs에서 resolveResultTaskId/
 // resolveResultBlockedState를 static import했으나, 실측 결과 이 파일을
@@ -629,51 +632,16 @@ function resolveRetirementArchiveCandidateForAdapter(
   };
 }
 
-function parseRetirementKstToMs(str) {
-  if (typeof str !== "string") return null;
-  const cleaned = str.trim().replace(/\s*KST\s*$/i, "");
-  const match = cleaned.match(
-    /^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}(?::\d{2})?)$/,
-  );
-  if (!match) return null;
-  const date = new Date(`${match[1]}T${match[2]}+09:00`);
-  return Number.isNaN(date.getTime()) ? null : date.getTime();
-}
-
-// dispatch-gate-decision.mjs의 confirmRetirementBlockReason와 동일한
-// 계약(같은 두 기계-확인-가능 사유, 같은 판정 규칙) -- 여기서는 resultContent
-// 자신에서 DONE을, taskContent에서 dropped_at을 각각 재추출/재파싱한다
-// (retirement-record-core.mjs §3-4 "ORCH가 그렇다고 했다만으로는 통과 못
-// 한다" 원칙 그대로, 이 파일 자신의 신뢰 경계 안에서 다시 구현).
-function confirmRetirementBlockReasonForAdapter(
-  record,
-  resultContent,
-  droppedAtRaw,
-) {
-  if (!MECHANICALLY_CONFIRMABLE_BLOCK_REASONS.has(record?.blockReasonCode)) {
-    return null;
-  }
-  const doneMatches = [
-    ...resultContent.matchAll(/^>>>\s*DONE:.*@\s*(.+?)\s*$/gim),
-  ];
-  const doneAtRaw = doneMatches.length === 1 ? doneMatches[0][1] : null;
-  if (
-    record.blockReasonCode ===
-    RETIREMENT_BLOCK_REASON.DONE_TIMESTAMP_NOT_PARSEABLE
-  ) {
-    return (
-      isNonEmptyString(doneAtRaw) && parseRetirementKstToMs(doneAtRaw) === null
-    );
-  }
-  if (
-    record.blockReasonCode === RETIREMENT_BLOCK_REASON.DONE_PREDATES_DROPPED_AT
-  ) {
-    const doneAtMs = parseRetirementKstToMs(doneAtRaw);
-    const droppedAtMs = parseRetirementKstToMs(droppedAtRaw);
-    return doneAtMs !== null && droppedAtMs !== null && doneAtMs < droppedAtMs;
-  }
-  return null;
-}
+// HYK-457: parseRetirementKstToMs and confirmRetirementBlockReasonForAdapter
+// used to live here as this file's own copy of dispatch-gate-decision.mjs's
+// confirmRetirementBlockReason contract -- HYK-455 added a third
+// mechanically-confirmable reason (RUNNER_GREEN_UNREACHABLE_AT_HEAD) to the
+// dispatch-gate-decision.mjs copy only, leaving this copy fail-closed for
+// every retirement using that reason (2026-09-08 ORCH-63 isolated
+// measurement; §2 of coder-task.md). Both copies are now
+// retirement-block-reason-shared.mjs (see that file's header for the merge
+// rationale and why it stays import-light like ledger-pointer-shared.mjs,
+// and this file's own top import block for the actual import statement).
 
 // verifyRetirementEvidence -- RETIREMENT_RELEASED의 진입점. reservationId를
 // harnessTaskLabel로 삼아 harnessDir 아래 실제 파일에서 독립적으로 다시
@@ -731,10 +699,11 @@ function verifyRetirementEvidence({ harnessDir, role, reservationId }) {
       archiveFingerprintMatches: archiveInfo.fingerprintMatches,
       liveFingerprintMatches:
         liveFingerprint === record?.archiveFingerprintClaimed,
-      blockReasonConfirmed: confirmRetirementBlockReasonForAdapter(
+      blockReasonConfirmed: confirmRetirementBlockReason(
         record,
         resultContent,
         droppedAtRaw,
+        harnessDir,
       ),
     };
   });
