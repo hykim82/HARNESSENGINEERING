@@ -696,6 +696,21 @@ async function runStalledAfterStartOnce({ label }) {
             // GROWTH_WINDOW_MS 주석 참조) -- growth 창을 4000ms로 늘린
             // 만큼 stall-threshold·timeout도 같이 늘려 자식 spawn 지연
             // 여유를 유지한다.
+            // ★HYK-457(coder-task.md §1-2/§2 항1) -- 실측 재현: 부하가 크면
+            // 자식 프로세스의 «첫 실관측» 자체가 growContinuously의 성장
+            // 창(GROWTH_WINDOW_MS)보다 늦게 일어날 수 있다(spawn·node 기동
+            // 지연). baselineBytes 없이는 그 순간 이미 다 자라 있는 값만
+            // 보여 "이번 실행 안에서 늘어난 적이 없다"(4R 알려진 한계,
+            // 위 §798 주석 참조)로 오판해 NOT_STARTED(종료코드 1)가 된다
+            // -- 재현 실측: 18140ms(:886 자리, exit 1), :1001 자리 5회 중
+            // 2회차. ★수리는 시간 예산을 키우는 것이 아니라 배달 시점
+            // 기준선(0바이트, logPath를 방금 빈 파일로 썼으므로 정확하다)
+            // 을 심어(HYK-280이 정확히 이 시나리오를 위해 만든 인자) 첫
+            // 실관측이 언제 일어나든(부하로 아무리 늦어지든) 기준선 대비
+            // 증가가 항상 관측되게 한다 -- «스폰이 성장 창을 이긴다»는
+            // 시계 경쟁을 아예 없앤다(기전 판정으로 전환).
+            "--baseline-bytes",
+            "0",
             "--timeout-ms",
             String(CLI_TIMEOUT_MS),
             "--stall-threshold-ms",
@@ -930,6 +945,13 @@ test("CLI end-to-end(spawn): --claude-home에 codex류 폴더를 넘겨도 동�
             "HYK-TEST-codexhome",
             "--claude-home",
             codexHomeDir,
+            // ★HYK-457(coder-task.md §1-2/§2 항1) -- 실측 재현: 이 자리가
+            // 부하 아래 18140ms로 NOT_STARTED(종료코드 1)로 샜다(claudehome
+            // 시험은 이미 --baseline-bytes를 넘겨 안 샜다 -- 그 차이가
+            // 원인이었다). 위 runStalledAfterStartOnce와 동일한 이유로
+            // 배달 시점 기준선(0바이트)을 심는다(기전 판정으로 전환).
+            "--baseline-bytes",
+            "0",
             // ★HYK-329 2차 원인 수리(위 GROWTH_WINDOW_MS 주석 참조) -- 이
             // 값들은 growth 창(4000ms)과 짝을 맞춘다.
             "--timeout-ms",

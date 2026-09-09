@@ -19,8 +19,10 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { execFileSync, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   archiveRoundEnvelope,
+  archiveUnconsumedRoundEnvelope,
   nextArchiveFileName,
   archiveRoundTaskFile,
   nextTaskArchiveFileName,
@@ -315,6 +317,116 @@ test("archiveRoundEnvelope: <role>.md itself is never touched -- preservation is
       harnessDir: dir,
     });
     assert.equal(readFileSync(resultPath, "utf8"), content);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// HYK-455 §1 확대 라운드: archiveUnconsumedRoundEnvelope -- «미소비» 라운드
+// 보존 사본 designed path. archiveRoundEnvelope와 같은 계약(추가 전용 ·
+// `<role>.md` 무접촉 · never throws · 같은 rounds/<ROLE>-r<N>.md 파일
+// 시리즈 공유)에 원문 결속 필드(content_sha256)만 더한다.
+// ---------------------------------------------------------------------------
+
+function sha256Hex(text) {
+  return createHash("sha256").update(text, "utf8").digest("hex");
+}
+
+test("archiveUnconsumedRoundEnvelope: writes a verbatim copy under <harnessDir>/rounds/<role>-r1.md with a self-consistent content_sha256 header field", () => {
+  withFixtureDir("envelope-archive-unconsumed-", (dir) => {
+    const content =
+      "task_id: HYK-9455x2-unit\nhead_commit: " + "a".repeat(40) + "\n";
+    const result = archiveUnconsumedRoundEnvelope({
+      role: "CODER",
+      resultContent: content,
+      harnessDir: dir,
+    });
+    assert.equal(result.ok, true, result.reason);
+    assert.equal(result.contentSha256, sha256Hex(content));
+    const written = readFileSync(join(dir, "rounds", "CODER-r1.md"), "utf8");
+    assert.match(
+      written,
+      /^<!-- envelope-archive: role=CODER archived_at=\S+ kind=unconsumed_result content_sha256=[0-9a-f]{64} -->\n/,
+    );
+    assert.match(
+      written,
+      new RegExp(`content_sha256=${result.contentSha256}\\b`),
+    );
+    // 헤더 한 줄을 벗기면 원문과 바이트 동일해야 한다(추가 전용 계약).
+    const stripped = written.replace(/^<!-- envelope-archive:[^\n]*-->\n/, "");
+    assert.equal(stripped, content);
+  });
+});
+
+test("archiveUnconsumedRoundEnvelope: <role>.md itself is never touched -- preservation is additive only", () => {
+  withFixtureDir("envelope-archive-unconsumed-contract-", (dir) => {
+    const resultPath = join(dir, "coder.md");
+    const content =
+      "task_id: HYK-9455x2-unit2\n>>> DONE: CODER @ 이것은-파싱될-수-없는-시각\n";
+    writeFileSync(resultPath, content, "utf8");
+    archiveUnconsumedRoundEnvelope({
+      role: "CODER",
+      resultContent: content,
+      harnessDir: dir,
+    });
+    assert.equal(readFileSync(resultPath, "utf8"), content);
+  });
+});
+
+test("archiveUnconsumedRoundEnvelope: role/resultContent missing -> ok:false, never throws", () => {
+  withFixtureDir("envelope-archive-unconsumed-missing-", (dir) => {
+    assert.equal(
+      archiveUnconsumedRoundEnvelope({ resultContent: "x", harnessDir: dir })
+        .ok,
+      false,
+    );
+    assert.equal(
+      archiveUnconsumedRoundEnvelope({ role: "coder", harnessDir: dir }).ok,
+      false,
+    );
+  });
+});
+
+test("archiveUnconsumedRoundEnvelope: two rounds for the same role -> BOTH original texts survive, each in its own file, each with its own correct content_sha256", () => {
+  withFixtureDir("envelope-archive-unconsumed-two-rounds-", (dir) => {
+    const round1 = "task_id: HYK-9455x2-r1\n라운드1 미소비 원문\n";
+    const round2 = "task_id: HYK-9455x2-r1\n라운드2 미소비 원문\n";
+    const r1 = archiveUnconsumedRoundEnvelope({
+      role: "CODER",
+      resultContent: round1,
+      harnessDir: dir,
+    });
+    const r2 = archiveUnconsumedRoundEnvelope({
+      role: "CODER",
+      resultContent: round2,
+      harnessDir: dir,
+    });
+    assert.equal(r1.ok, true);
+    assert.equal(r2.ok, true);
+    assert.notEqual(r1.path, r2.path);
+    assert.notEqual(r1.contentSha256, r2.contentSha256);
+    const names = readdirSync(join(dir, "rounds")).sort();
+    assert.deepEqual(names, ["CODER-r1.md", "CODER-r2.md"]);
+  });
+});
+
+test("archiveUnconsumedRoundEnvelope: shares the SAME rounds/<ROLE>-r<N>.md numbering series as archiveRoundEnvelope -- never collides regardless of call order", () => {
+  withFixtureDir("envelope-archive-unconsumed-shared-series-", (dir) => {
+    const consumed = archiveRoundEnvelope({
+      role: "CODER",
+      resultContent:
+        "task_id: HYK-9455x2-shared\n>>> DONE: CODER @ 2026-09-08 12:00:00 KST\n",
+      harnessDir: dir,
+    });
+    assert.equal(consumed.ok, true);
+    const unconsumed = archiveUnconsumedRoundEnvelope({
+      role: "CODER",
+      resultContent:
+        "task_id: HYK-9455x2-shared\nhead_commit: " + "b".repeat(40) + "\n",
+      harnessDir: dir,
+    });
+    assert.equal(unconsumed.ok, true);
+    const names = readdirSync(join(dir, "rounds")).sort();
+    assert.deepEqual(names, ["CODER-r1.md", "CODER-r2.md"]);
   });
 });
 

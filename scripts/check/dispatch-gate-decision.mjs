@@ -18,7 +18,7 @@ import {
   rmSync,
 } from "node:fs";
 import { createHash } from "node:crypto";
-import { join, dirname } from "node:path";
+import { join, dirname, resolve, relative, isAbsolute } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import {
@@ -671,6 +671,13 @@ function deriveRoleFromTaskPath(taskPath) {
 const CONSUMPTION_TASK_ID_RE_G = /^task_id:[ \t]*(\S+)/gim;
 const CONSUMPTION_DROPPED_AT_RE = /^dropped_at:\s*(.+)$/im;
 const CONSUMPTION_DONE_RE_G = /^>>>\s*DONE:.*@\s*(.+?)\s*$/gim;
+// HYK-455 §2 -- RUNNER_GREEN_UNREACHABLE_AT_HEAD 재확인 전용: 이 라운드
+// 자신의 결과 파일이 주장하는 head_commit(그 러너가 실제로 돈 커밋)을
+// 뽑는다. `head_commit:` 소문자 표지만 인정한다(위 DISPATCH_HEAD_COMMIT_RE_G
+// 와 같은 관례, 대문자 `HEAD_COMMIT:`는 다른 축의 옛 표지다) -- 값은
+// 40자 hex(sha)로 고정해 위조 문자열이 아무 값이나 채워 넣지 못하게 한다.
+const CONSUMPTION_HEAD_COMMIT_RE_G =
+  /^head_commit:[ \t]*([0-9a-fA-F]{40})[ \t]*$/gm;
 
 // relay-handshake.mjs의 resolveResultTaskId/resolveResultDoneMatch와
 // 동일한 "유일한 매치 하나만 채택, 0개·2개 이상이면 지어내지 않고
@@ -2028,6 +2035,41 @@ function readRetirementRecordFiles(harnessDir, role) {
 // 위조 변종 c1(아카이브 자체가 없음)과 c2(아카이브는 있으나 지문이 다름)
 // 를 서로 다른 상태로 구별하기 위해서다(요구서 §c 세 위조 변종이 구별되는
 // 사유로 거부돼야 한다는 요구).
+// HYK-455 §1 확대 라운드: envelope-archive.mjs의 archiveUnconsumedRoundEnvelope
+// 가 새기는 원문 결속 필드(content_sha256, kind=unconsumed_result 헤더
+// 라인 전용)를 몸통에서 다시 계산해 재확인한다. raw(스트립 전) 원문에서
+// 그 헤더 한 줄만 뽑아 두 필드(kind/content_sha256)를 읽는다 -- 본문
+// 텍스트가 우연히 같은 패턴의 문자열을 담고 있어도 헤더 밖은 절대
+// 읽지 않는다.
+//   - 헤더 자체가 없음(구 소비-성공 아카이브 · 이 필드를 아예 선언하지
+//     않는 시험 픽스처) -> null(이 축이 적용될 대상이 아니다, 회귀 0 --
+//     기존 archiveFingerprintMatches/liveFingerprintMatches 대조만 그대로
+//     적용된다).
+//   - kind=unconsumed_result 를 선언하지 않음 -> 마찬가지로 null(다른
+//     kind의 헤더는 이 축의 관심사가 아니다).
+//   - kind=unconsumed_result 는 선언했는데 content_sha256 필드가 없음 ->
+//     false(§2 완료조건4 음성 시험 ⓑ: 결속 필드가 아예 없는 사본).
+//   - content_sha256 필드는 있는데 몸통 재계산 값과 다름 -> false(§2
+//     완료조건4 음성 시험 ⓐ: 원문과 결속이 어긋난 손 사본).
+//   - 필드가 있고 몸통과 일치 -> true.
+const ARCHIVE_ENVELOPE_HEADER_LINE_ANY_RE =
+  /^<!-- envelope-archive:[^\n]*-->\n/;
+const ARCHIVE_ENVELOPE_KIND_RE = /[ \t]kind=(\S+)/;
+const ARCHIVE_ENVELOPE_CONTENT_SHA256_RE =
+  /[ \t]content_sha256=([0-9a-fA-F]{64})\b/;
+
+function resolveEnvelopeBindingValidity(raw, strippedBody) {
+  const headerMatch = raw.match(ARCHIVE_ENVELOPE_HEADER_LINE_ANY_RE);
+  if (!headerMatch) return null;
+  const headerLine = headerMatch[0];
+  const kindMatch = headerLine.match(ARCHIVE_ENVELOPE_KIND_RE);
+  if (!kindMatch || kindMatch[1] !== "unconsumed_result") return null;
+  const shaMatch = headerLine.match(ARCHIVE_ENVELOPE_CONTENT_SHA256_RE);
+  if (!shaMatch) return false;
+  const claimed = shaMatch[1].toLowerCase();
+  return claimed === computeConsumptionResultFingerprint(strippedBody);
+}
+
 function resolveRetirementArchiveCandidate(
   harnessDir,
   role,
@@ -2059,6 +2101,7 @@ function resolveRetirementArchiveCandidate(
     matches.push({
       path: join("rounds", name),
       fingerprint: computeConsumptionResultFingerprint(stripped),
+      envelopeBindingValid: resolveEnvelopeBindingValidity(raw, stripped),
     });
   }
   if (matches.length === 0) return { exists: false, fingerprintMatches: false };
@@ -2076,13 +2119,77 @@ function resolveRetirementArchiveCandidate(
   return {
     exists: true,
     fingerprintMatches: matches[0].fingerprint === claimedFingerprint,
+    envelopeBindingValid: matches[0].envelopeBindingValid,
     path: matches[0].path,
   };
 }
 
+// HYK-455 §2: evidenceReceiptPath는 harnessDir 기준 상대경로만 허용한다
+// (그 밖의 아무 파일이나 읽어 위조하는 경로 탈출을 막는다). `..`로
+// harnessDir을 벗어나거나 다른 드라이브/절대경로로 튀는 값은 전부
+// null(=거부)로 떨어진다 -- 어떤 예외도 던지지 않는다(호출자가 catch 없이
+// 곧바로 진위 판정에 쓴다).
+function resolveEvidenceReceiptPathWithinHarnessDir(
+  harnessDir,
+  evidenceReceiptPath,
+) {
+  if (!isNonEmptyAbortString(evidenceReceiptPath)) return null;
+  const resolvedHarnessDir = resolve(harnessDir);
+  const resolvedPath = resolve(harnessDir, evidenceReceiptPath);
+  const rel = relative(resolvedHarnessDir, resolvedPath);
+  if (
+    rel === "" ||
+    rel === ".." ||
+    rel.startsWith("../") ||
+    rel.startsWith("..\\")
+  ) {
+    return null;
+  }
+  if (isAbsolute(rel)) return null;
+  return resolvedPath;
+}
+
+// HYK-455 §2 설계 조건 1·2: 세 번째 기계-확인-가능 사유
+// (RUNNER_GREEN_UNREACHABLE_AT_HEAD) 전용 재확인. 이 사유는 다른 둘과
+// 달리 live 결과/task 파일 안에 재확인할 사실이 없다(러너 결과는 별도
+// 영수증 파일) -- 그래서 record.evidenceReceiptPath(근거 영수증 경로,
+// §설계 조건 2)가 가리키는 러너 영수증(runner-receipt-writer.mjs 스키마,
+// HYK-411)을 harnessDir 기준으로 실제로 다시 읽어, 그 안의 head_commit이
+// 이 라운드 결과 파일 자신의 head_commit: 줄(위 CONSUMPTION_HEAD_COMMIT_RE_G)
+// 과 같고 runner_exit이 0이 아님을 독립적으로 재유도한다. 경로가 없거나·
+// harnessDir을 벗어나거나·파일을 못 읽거나·JSON이 아니거나·head_commit이
+// 다르거나·runner_exit이 0(=그 커밋에서 실제로는 초록)이면 false --
+// "ORCH가 그렇다고 했다"만으로는 통과하지 못한다(§3-4 원칙 그대로, 그리고
+// 이 마지막 분기가 정확히 등재문 완료조건 2의 음성 시험이 요구하는 사실:
+// 실제로 초록인데 은퇴를 시도하면 기계가 거부한다).
+function confirmRunnerGreenUnreachableAtHead(record, harnessDir, resultText) {
+  const resultHeadCommit = extractSoleMatch(
+    resultText,
+    CONSUMPTION_HEAD_COMMIT_RE_G,
+  );
+  if (!isNonEmptyAbortString(resultHeadCommit)) return false;
+  const resolvedPath = resolveEvidenceReceiptPathWithinHarnessDir(
+    harnessDir,
+    record?.evidenceReceiptPath,
+  );
+  if (resolvedPath === null) return false;
+  let receipt;
+  try {
+    receipt = JSON.parse(readFileSync(resolvedPath, "utf8"));
+  } catch {
+    return false;
+  }
+  return (
+    receipt?.head_commit === resultHeadCommit &&
+    typeof receipt?.runner_exit === "number" &&
+    receipt.runner_exit !== 0
+  );
+}
+
 // §3-4 (retirement-record-core.mjs 헤더): 기계로 확인 가능한 사유(현재
-// 둘 -- DONE_TIMESTAMP_NOT_PARSEABLE · HYK-398이 추가한
-// DONE_PREDATES_DROPPED_AT)만 독립 재확인한다. DONE_TIMESTAMP_NOT_
+// 셋 -- DONE_TIMESTAMP_NOT_PARSEABLE · HYK-398이 추가한
+// DONE_PREDATES_DROPPED_AT · HYK-455가 추가한
+// RUNNER_GREEN_UNREACHABLE_AT_HEAD)만 독립 재확인한다. DONE_TIMESTAMP_NOT_
 // PARSEABLE: live 결과 파일 자신에 `>>> DONE:` 원문이 실제로 있고(그렇지
 // 않으면 "파싱 불가"가 아니라 "애초에 없음"이라는 다른 사실이므로 이
 // 사유가 주장하는 바가 아니다), 그 값이 parseKstToMs로 파싱되지 않을
@@ -2092,12 +2199,18 @@ function resolveRetirementArchiveCandidate(
 // droppedAt보다 «엄격히» 과거일 때만 true -- relay-handshake.mjs의 기존
 // stale 판정(`doneAt < droppedAt`)과 정확히 같은 사실을 이 축에서
 // 독립적으로 다시 유도한다(§3-4 "ORCH가 그렇다고 했다만으로는 통과 못
-// 한다" 원칙 그대로). 나머지 사유(DONE_REWRITE_LOCKED ·
+// 한다" 원칙 그대로). RUNNER_GREEN_UNREACHABLE_AT_HEAD(HYK-455): 위
+// confirmRunnerGreenUnreachableAtHead 참조. 나머지 사유(DONE_REWRITE_LOCKED ·
 // TASK_CONTRACT_PROHIBITS_REPAIR)는 이 코드베이스가 기계로 재현할 수 없는
 // 계약 텍스트 질문이므로 null을 돌려준다(가짜 확인을 만들지 않는다 --
 // null은 코어가 "이 사유는 이 축에서 재확인 대상이 아니다"로 이미
 // 처리한다, MECHANICALLY_CONFIRMABLE_BLOCK_REASONS 확인).
-function confirmRetirementBlockReason(record, resultText, droppedAt) {
+function confirmRetirementBlockReason(
+  record,
+  resultText,
+  droppedAt,
+  harnessDir,
+) {
   if (!MECHANICALLY_CONFIRMABLE_BLOCK_REASONS.has(record?.blockReasonCode)) {
     return null;
   }
@@ -2115,6 +2228,12 @@ function confirmRetirementBlockReason(record, resultText, droppedAt) {
     const doneAtMs = parseKstToMs(doneAt);
     const droppedAtMs = parseKstToMs(droppedAt);
     return doneAtMs !== null && droppedAtMs !== null && doneAtMs < droppedAtMs;
+  }
+  if (
+    record.blockReasonCode ===
+    RETIREMENT_BLOCK_REASON.RUNNER_GREEN_UNREACHABLE_AT_HEAD
+  ) {
+    return confirmRunnerGreenUnreachableAtHead(record, harnessDir, resultText);
   }
   return null;
 }
@@ -2142,6 +2261,13 @@ function evaluateRetirementDecision({
     return {
       record,
       archiveExists: archiveInfo.exists,
+      // HYK-455 §1 확대 라운드: resolveRetirementArchiveCandidate가 이미
+      // 계산한 값을 그대로 옮긴다(true/false/null) -- ambiguousCount 분기
+      // (2개 이상 매치)는 이 필드를 아예 채우지 않으므로 undefined가 되고,
+      // checkArchiveFacts는 undefined를 null과 동일하게(=== false가
+      // 아니므로 통과) 취급한다 -- 그 분기는 이미 fingerprintMatches:false
+      // 로 FINGERPRINT_MISMATCH에 떨어지므로 이 축이 앞지를 필요가 없다.
+      envelopeBindingValid: archiveInfo.envelopeBindingValid,
       archiveFingerprintMatches: archiveInfo.fingerprintMatches,
       // §3-1(c): 오늘의 실제 호출 경로는 liveFingerprint가 항상 계산
       // 가능한 시점에서만 이 축을 시도한다(resultText가 이미 읽혀
@@ -2158,6 +2284,7 @@ function evaluateRetirementDecision({
         record,
         resultText,
         droppedAt,
+        harnessDir,
       ),
     };
   });
