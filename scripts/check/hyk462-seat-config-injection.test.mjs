@@ -452,37 +452,143 @@ test("★역할 훅 실효 (양성 대조): CODER writing an ordinary repo file 
   );
 });
 
-test("★역할 훅 실효: the exact hook command string this module injects, when actually run through a POSIX shell with $CLAUDE_PROJECT_DIR resolved, invokes role-guard.mjs and rejects the same violation", (t) => {
+// ---------------------------------------------------------------------------
+// HYK-462 2R (coder-task.md §1-1 "이것이 초록이었는데 실물은 빨갛다"): the 1R
+// version of this test drove `bash -c ROLE_GUARD_HOOK_COMMAND` with
+// CLAUDE_PROJECT_DIR set to `fileURLToPath(...)`'s native (backslash-on-
+// Windows) form and treated a green result as proof the wired command
+// works on a real seat. It doesn't -- that form was never independently
+// verified against what Claude Code's own hook runner actually injects.
+//
+// 2R measured the real value live, three separate ways (coder.md 2R §1):
+//  1. a nested `claude -p` session with a throwaway `.claude/settings.local.json`
+//     hook in an ordinary (non-worktree) directory,
+//  2. the same, but with cwd = this actual linked git worktree (the
+//     structural case a real seat runs in), delivered via `--settings`,
+//  3. the same worktree, using the exact unmodified (pre-hardening)
+//     ROLE_GUARD_HOOK_COMMAND wired as the real PreToolUse hook, firing a
+//     genuine role violation (Write to .harness/review.md) through Claude
+//     Code itself and observing the real rejection.
+// All three independently returned CLAUDE_PROJECT_DIR as a **forward-slash,
+// drive-lettered Windows path** (e.g.
+// "C:/Users/Administrator/orca/workspaces/HARNESSENGINEERING/hyk442-blocked-door-1"),
+// never empty -- and HARNESS_ROLE was present and correct ("CODER") in the
+// same subprocess environment, both confirming ㄹ (coder-task.md §2-ㄹ:
+// HARNESS_ROLE. IS. propagated to the real hook subprocess -- the ORCH
+// fail-open concern there did not materialize in any of the three probes).
+// That measured value is what MEASURED_REAL_CLAUDE_PROJECT_DIR_FORM below
+// reproduces -- this is "그 형식" (coder-task.md §2-ㄷ), not a guess.
+//
+// Below we can't spawn a real interactive `claude` seat inside this test
+// file (no TTY available to a dispatched worker session, and even
+// print-mode nested sessions require network/API access unsuitable for a
+// fast, deterministic CI unit test) -- so the FAST regression re-drives
+// role-guard.mjs through the same POSIX-shell mechanism Claude Code's own
+// hook runner uses (confirmed live above), with the measured-real value
+// form, not a guessed one. The full live end-to-end probe (measurement #3
+// above) is documented with literal terminal output in coder.md 2R §1 as
+// the one-time manual verification coder-task.md §1b_reach_path asks for.
+// ---------------------------------------------------------------------------
+
+const MEASURED_REAL_CLAUDE_PROJECT_DIR_FORM =
+  "C:/Users/Administrator/orca/workspaces/HARNESSENGINEERING/hyk442-blocked-door-1";
+
+function resolveBashPath(t) {
   const bashProbe = spawnSync("where", ["bash"], { encoding: "utf8" });
   if (bashProbe.status !== 0) {
     t.skip(
       "SKIP_REASON: no `bash` executable found on PATH -- Claude Code's own hook runner resolves $VAR-style commands through a POSIX shell, which this test emulates; layer-1 string checks above already cover the command's literal contents on any platform",
     );
-    return;
+    return null;
   }
-  const bashPath = bashProbe.stdout
+  return bashProbe.stdout
     .split(/\r?\n/)
     .map((l) => l.trim())
     .filter(Boolean)[0];
-  const repoRoot = fileURLToPath(new URL("../../", import.meta.url)).replace(
-    /\/$/,
-    "",
-  );
-  const proc = spawnSync(bashPath, ["-c", ROLE_GUARD_HOOK_COMMAND], {
+}
+
+function runHookCommand({
+  command,
+  bashPath,
+  env,
+  filePath = ".harness/review.md",
+}) {
+  return spawnSync(bashPath, ["-c", command], {
     input: JSON.stringify({
       tool_name: "Write",
-      tool_input: { file_path: ".harness/review.md" },
+      tool_input: { file_path: filePath },
     }),
     encoding: "utf8",
+    env: { ...process.env, ...env },
+  });
+}
+
+test("★역할 훅 실효: the exact (hardened) hook command string this module injects, driven with the LIVE-MEASURED real CLAUDE_PROJECT_DIR form (coder-task.md 2R §1, not fileURLToPath's guessed form), invokes role-guard.mjs and rejects the same violation", (t) => {
+  const bashPath = resolveBashPath(t);
+  if (!bashPath) return;
+  const proc = runHookCommand({
+    command: ROLE_GUARD_HOOK_COMMAND,
+    bashPath,
     env: {
-      ...process.env,
       HARNESS_ROLE: "CODER",
-      CLAUDE_PROJECT_DIR: repoRoot,
+      CLAUDE_PROJECT_DIR: MEASURED_REAL_CLAUDE_PROJECT_DIR_FORM,
     },
   });
   assert.equal(
     proc.status,
     2,
-    `wired command must reject the violation end-to-end; got ${proc.status}, stderr=${proc.stderr}`,
+    `wired command must reject the violation end-to-end using the measured real path form; got ${proc.status}, stderr=${proc.stderr}`,
   );
+});
+
+test("★역할 훅 실효 (부가 확인): the same command also still works with fileURLToPath's native (backslash) form -- documents that 1R's path FORM was never actually the fault, so this test isn't quietly reintroducing the same false assumption", (t) => {
+  const bashPath = resolveBashPath(t);
+  if (!bashPath) return;
+  const backslashRoot = fileURLToPath(
+    new URL("../../", import.meta.url),
+  ).replace(/[\\/]$/, "");
+  const proc = runHookCommand({
+    command: ROLE_GUARD_HOOK_COMMAND,
+    bashPath,
+    env: { HARNESS_ROLE: "CODER", CLAUDE_PROJECT_DIR: backslashRoot },
+  });
+  assert.equal(
+    proc.status,
+    2,
+    `backslash-form CLAUDE_PROJECT_DIR must also resolve correctly; got ${proc.status}, stderr=${proc.stderr}`,
+  );
+});
+
+test("★HYK-462 2R 회귀 시험 (핵심): when $CLAUDE_PROJECT_DIR is empty/unset -- the exact precondition consistent with the original 1R rejection report (\"Cannot find module '/scripts/check/role-guard.mjs'\", exit 1) -- the HARDENED command fails CLOSED at exit 2, not node's ambiguous exit 1", (t) => {
+  const bashPath = resolveBashPath(t);
+  if (!bashPath) return;
+  const proc = runHookCommand({
+    command: ROLE_GUARD_HOOK_COMMAND,
+    bashPath,
+    env: { HARNESS_ROLE: "CODER", CLAUDE_PROJECT_DIR: "" },
+  });
+  assert.equal(
+    proc.status,
+    2,
+    `empty CLAUDE_PROJECT_DIR must fail closed at exit 2 (not exit 1); got ${proc.status}, stderr=${proc.stderr}`,
+  );
+  assert.match(proc.stderr, /CLAUDE_PROJECT_DIR is unset\/empty/);
+});
+
+test("★HYK-462 2R 회귀 시험 (되돌림 대조 -- 이 시험이 헛것이 아님을 증명): the OLD (pre-hardening, 1R) bare command, under the exact same empty-$CLAUDE_PROJECT_DIR precondition, reproduces the original bug -- exit 1, 'Cannot find module', NOT exit 2. Fed directly to Claude Code's real PreToolUse contract (exit 2 = block, any other non-zero = non-blocking hook error), that means the pre-2R command silently failed OPEN exactly when the guard mattered most.", (t) => {
+  const bashPath = resolveBashPath(t);
+  if (!bashPath) return;
+  const OLD_UNHARDENED_COMMAND =
+    'node "$CLAUDE_PROJECT_DIR/scripts/check/role-guard.mjs"';
+  const proc = runHookCommand({
+    command: OLD_UNHARDENED_COMMAND,
+    bashPath,
+    env: { HARNESS_ROLE: "CODER", CLAUDE_PROJECT_DIR: "" },
+  });
+  assert.notEqual(
+    proc.status,
+    2,
+    `sanity check: the OLD command must NOT already fail closed here (status=${proc.status}) -- if it does, this mutation-style contrast test is vacuous and the hardening above isn't proven to matter`,
+  );
+  assert.match(proc.stderr, /Cannot find module/);
 });

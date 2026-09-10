@@ -134,6 +134,55 @@ mode: replace
 - **CI 는 리눅스 + Node 20, 이 CODER는 윈도우 + Node 26에서 돈다** — 로컬 초록은 "이 환경에서 통과했다"까지만 주장한다. CI도 초록일 것이라고 이 문서는 주장하지 않는다.
 - **`reasoning_effort=$codexReasoningEffort`가 실제로 codex CLI에 먹히는지는 문자열 계약까지만 확인**했다(§시험 참고) — HYK-379 선례가 `codex doctor --all`로 `check_for_update_on_startup`을 실측 확인한 것과 달리, `codex doctor`에는 `reasoning_effort`를 되비추는 진단 필드가 없어(이 라운드가 `codex doctor --all` 출력에서 직접 확인) 그 값이 실제로 codex 내부 추론 강도를 바꾸는지는 이 라운드가 재확인하지 못했다 — 공식 CLI 플래그 문서(`-c <key>=<value>`가 임의 config override라는 것)에 대한 신뢰다.
 
+## 5-1. §2R 수리 — 주입되는 역할 훅 명령의 fail-open 경로 (2026-09-10)
+
+**반려 사유(원문 요지)**: `ROLE_GUARD_HOOK_COMMAND`(`node "$CLAUDE_PROJECT_DIR/scripts/check/role-guard.mjs"`)를 실제 Windows 좌석 경로로 돌리면 기대한 `exit 2`가 아니라 `Cannot find module '/scripts/check/role-guard.mjs'` + `exit 1`이 나왔다 — `$CLAUDE_PROJECT_DIR`가 빈 값으로 치환된 것과만 일치하는 증상.
+
+**실측(coder-task.md 2R §2-ㄱ, "먼저 재라")** — 이 라운드는 세 가지 독립 경로로 실제 PreToolUse 훅을 살아 있는 Claude Code 세션에서 직접 발화시켜 `$CLAUDE_PROJECT_DIR`·`HARNESS_ROLE`를 값으로 찍었다(coder.md 2R §1에 원문 전체):
+
+1. 임시 디렉터리(git 저장소 아님) + 기본 설정 파일 탐색(`.claude/settings.local.json`) 경로.
+2. **이 실제 git 워크트리 자체**(`hyk442-blocked-door-1`)를 cwd로, `--settings` 플래그로 진단 훅 전달.
+3. 같은 워크트리에서 **미수정 `ROLE_GUARD_HOOK_COMMAND` 원문 그대로**를 실제 PreToolUse 훅으로 걸고, `.harness/review.md`에 대한 진짜 위반(Write)을 발화 — Claude Code가 실제로 차단했다(`role-guard: CODER may not write '.harness/review.md' (owned by another role or ORCH)`).
+
+세 경로 모두 `$CLAUDE_PROJECT_DIR`는 **한 번도 빈 값이 아니었다** — 항상 드라이브 문자+슬래시 형식(`C:/Users/Administrator/orca/workspaces/HARNESSENGINEERING/hyk442-blocked-door-1`)으로 채워졌고, `HARNESS_ROLE`도 항상 `CODER`로 정확히 전달됐다(coder-task.md 2R §2-ㄹ의 "HARNESS_ROLE 미전달로 fail-open" 우려는 세 실측 모두에서 재현되지 않았다 — §5-2에 재확인 원문).
+
+★**이 CODER는 반려가 보고한 정확한 실패(대화형 좌석 콘솔 안에서의 발화)를 이 디스패치 좌석 안에서 재현하지 못했다** — 실제 대화형 TTY 콘솔을 이 좌석에서 새로 할당할 수단이 없다(§5-3 정직 한계). 하지만 별도로, `bash -c`에 `CLAUDE_PROJECT_DIR=""`(빈 문자열)를 직접 넣으면 반려 원문과 사실상 동일한 증상(`Cannot find module`, `exit 1`)이 **항상** 재현된다 — 즉 "빈 값이면 이렇게 깨진다"는 인과 자체는 확정적으로 확인됐고, 그 트리거(왜 대화형 좌석에서 빈 값이 됐는가)만 미확인이다.
+
+**이 라운드가 실제로 고친 것**: 트리거를 재현하지 못했더라도, **`exit 1`이라는 결과 자체가 독립적으로 위험하다** — Claude Code의 PreToolUse 계약은 `exit 2`만 "차단"으로 취급하고 그 밖의 0이 아닌 종료 코드는 "훅이 비정상 종료했다"는 **비차단 오류**로 다룬다(공식 계약). 즉 `$CLAUDE_PROJECT_DIR`가 어떤 이유로든(이 런처의 미래 드리프트·Claude Code 자체의 회귀·다른 방식으로 뜬 좌석 등) 비어 있게 되면, 옛 명령은 **조용히 fail-open**한다 — 이 이슈 전체의 목표(fail-closed)와 정면으로 어긋난다.
+
+⇒ `ROLE_GUARD_HOOK_COMMAND`를 다음으로 경화했다(`seat-config-inject.mjs`):
+
+```sh
+if [ -z "$CLAUDE_PROJECT_DIR" ]; then echo "role-guard: CLAUDE_PROJECT_DIR is unset/empty -- refusing to fail-open (HYK-462 2R hardening)" >&2; exit 2; fi; node "$CLAUDE_PROJECT_DIR/scripts/check/role-guard.mjs"
+```
+
+`$CLAUDE_PROJECT_DIR`가 비어 있으면 이제 node의 모호한 `exit 1` 대신 **명시적 `exit 2`**로 항상 차단한다. 실측(§5-2)으로 확인: 정상 값일 때 여전히 진짜 위반을 `exit 2`로 막고(회귀 없음), 빈 값일 때도 이제 `exit 2`로 막힌다(신규 방어).
+
+이 명령은 `orca-worker-seat.ps1` 패치 단위(§3) 밖이다 — `seat-config-inject.mjs`가 실행 시점에 생성하는 문자열이라, 이 문서의 패치 단위·fixture SHA-256(§헤더)는 이 수리로 바뀌지 않는다.
+
+## 5-2. §2R 실측 원문 (요약 — 전체는 coder.md 2R §1)
+
+```json
+{
+  "CLAUDE_PROJECT_DIR": "C:/Users/Administrator/orca/workspaces/HARNESSENGINEERING/hyk442-blocked-door-1",
+  "HARNESS_ROLE": "CODER"
+}
+```
+
+(측정 #2, 실제 워크트리 cwd + `--settings` 전달, 진단 훅이 실제 PreToolUse로 발화됨)
+
+```
+role-guard: CODER may not write '.harness/review.md' (owned by another role or ORCH)
+```
+
+(측정 #3, 미수정 `ROLE_GUARD_HOOK_COMMAND` 원문 그대로를 실제 PreToolUse 훅으로 걸고 진짜 위반을 발화 — Claude Code가 실제로 차단)
+
+## 5-3. §2R 정직 한계
+
+- **대화형 TTY 좌석 재현 불가**: 이 CODER는 디스패치된 워커 좌석 안에서 동작하며 새 대화형 콘솔(PTY)을 할당할 수단이 없다 — 반려가 관찰한 정확한 기동 형태(pwsh `-NoExit` 콘솔 안에서 `claude ... --dangerously-skip-permissions --append-system-prompt $rule`, `-p` 없음)를 재현하지 못했다. `-p`(헤드리스)·`--settings`(파일 전달) 두 경로는 모두 반려의 미묘한 인과와 무관하게 정상 동작했다.
+- **`$CLAUDE_PROJECT_DIR`가 실제로 언제 비게 되는지는 여전히 미확인**이다. 이 경화는 "빈 값이면 무조건 차단"으로 결과를 바꿀 뿐, 애초에 비게 되는 원인을 제거하지 않는다 — 원인이 실재하고 반복된다면 좌석은 (전보다 안전하게, 하지만) 계속 뜨지 못할 것이다.
+- 되돌림 변이 2종(경화 되돌리기·`exit 2`→`exit 1`)이 모두 `hyk462-seat-config-injection.test.mjs`의 새 2R 회귀 시험을 RED로 뒤집는 것을 확인 후 바이트 동일 복원했다(coder.md 2R §3).
+
 ## 6. §적용 절차
 
 1. `node scripts/check/control-room-patch-apply.mjs --doc <이 문서> --source <라이브 사본> --out <적용본>` — ⛔라이브 파일에 직접 쓰지 않는다.
@@ -143,6 +192,6 @@ mode: replace
 
 ## 7. §시험 — 무엇을 어떻게 고정했는가
 
-- `scripts/check/hyk462-seat-config-injection.test.mjs` — `seat-config-inject.mjs`의 단위/CLI 행동(양성·음성·역할 훅 실효) 15개.
+- `scripts/check/hyk462-seat-config-injection.test.mjs` — `seat-config-inject.mjs`의 단위/CLI 행동(양성·음성·역할 훅 실효) 20개(2R: §5-1의 실측-실형 hook-runner 재현 시험 2개 + fail-open 회귀 시험 2개 추가, 헛시험이던 옛 `bash -c`/`fileURLToPath` 단일 시험 1개는 교체됨).
 - `scripts/check/control-room-patch-apply-hyk462-collect.test.mjs` — 이 문서의 5개 단위가 before-fixture에 적용되어 applied-fixture와 바이트 동일함을 고정 + 되돌림 변이 2종(앵커 훼손 → `ANCHOR_NOT_FOUND`, CONTENT 삭제 → 바이트 불일치).
 - `scripts/check/control-room-patch-apply-hyk462-effect.test.mjs` — 적용본 텍스트가 실제로 (a) 새 게이트 줄을 포함하는지, (b) `gpt-5.6-terra`+`reasoning_effort=xhigh` 문자열 계약을 지키는지, (c) `seat-config-inject.mjs`를 실제로 구동해 실패 시 게이트가 `exit $LASTEXITCODE`로 좌석을 막는 pwsh 동작까지 실측.
