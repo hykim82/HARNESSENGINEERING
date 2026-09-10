@@ -10,3 +10,10 @@
 # `Get-FileHash`).
 scripts/check/fixtures/control-room-orca-worker-seat-2026-08-29-hyk379-update-suppress-before.ps1.txt -text
 scripts/check/fixtures/control-room-orca-worker-seat-2026-08-29-hyk379-update-suppress-applied.ps1.txt -text
+
+# HYK-462: same reasoning as the HYK-379 entry above -- byte-for-byte
+# CRLF/LF-mixed copies of the live orca-worker-seat.ps1, hashed and
+# byte-compared in docs/control-room-patches/HYK-462-seat-config-injection.md
+# and its collect test.
+scripts/check/fixtures/control-room-orca-worker-seat-2026-09-10-hyk462-seat-config-injection-before.ps1.txt -text
+scripts/check/fixtures/control-room-orca-worker-seat-2026-09-10-hyk462-seat-config-injection-applied.ps1.txt -text
