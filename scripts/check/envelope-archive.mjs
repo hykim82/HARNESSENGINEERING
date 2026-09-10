@@ -411,15 +411,61 @@ export function archiveRoundEnvelope({
 // name collision, write failure) so a receipt-preservation problem never
 // blocks or fails the round-copy write that is this function's real job.
 const RUNNER_RECEIPT_LIVE_FILENAME = "runner-receipt.json";
+// 이 라운드 결과 본문(및 러너 영수증 JSON)의 head_commit 결속 대조용
+// (retirement-block-reason-shared.mjs의 CONSUMPTION_HEAD_COMMIT_RE_G와
+// 바이트 동일한 계약 -- 40자 hex, 줄머리 `head_commit:` 표지만 인정).
+const RESULT_HEAD_COMMIT_RE_G = /^head_commit:[ \t]*([0-9a-fA-F]{40})[ \t]*$/gm;
 
 function roundRunnerReceiptFileName(roundFileName) {
   return roundFileName.replace(/\.md$/i, "-runner-receipt.json");
+}
+
+function extractSoleHeadCommit(text) {
+  const m = [...text.matchAll(RESULT_HEAD_COMMIT_RE_G)];
+  return m.length === 1 ? m[0][1].toLowerCase() : null;
+}
+
+// HYK-461 2R §2-C (검토 P2, 채택 = 옵션 1 «대조하고 불일치면 건너뛰고 사유
+// 남김»): 보존하려는 영수증의 `head_commit`이 이 라운드 결과 본문의
+// `head_commit:`과 대조된다. 근거: 이 영수증은 나중에 RUNNER_GREEN_
+// UNREACHABLE_AT_HEAD 은퇴의 evidenceReceiptPath로 쓰일 수 있고, 그 재확인
+// (confirmRunnerGreenUnreachableAtHead)은 «영수증 head == 결과 head»를
+// 요구한다. 만약 라운드 사본을 남기는 순간 live 슬롯에 «다른 라운드»의
+// 영수증이 앉아 있으면(러너가 이 라운드에서 아직 안 돌았거나 다음 라운드가
+// 먼저 덮음), 그 엉뚱한 영수증을 이 라운드 사본에 결속해 두는 것은 미래
+// 은퇴를 조용히 오도한다. ⇒ 대조가 «불일치»면 보존을 건너뛰고 그 사실을
+// reason에 남긴다(⛔조용히 넘어가지 않는다). 옵션 2(불일치면 실패)를 쓰지
+// 않은 이유: 이 함수는 best-effort/추가 전용이고, 영수증 결속 문제로 라운드
+// «사본»(본업) 보존까지 막는 것은 과하다. 대조가 «불가»(본문에 head_commit이
+// 없거나 여럿·영수증 JSON이 깨짐·head_commit 없음)면 «확정 불일치»가 아니므로
+// 보존하되 reason에 「대조 불가」를 남긴다(그 영수증을 실제로 쓰는 재확인
+// 단계가 어차피 head 대조를 다시 하므로 안전측 거부로 수렴한다).
+function classifyReceiptHeadBinding(receiptRaw, resultContent) {
+  const resultHead = extractSoleHeadCommit(resultContent);
+  let receiptHead = null;
+  try {
+    const parsed = JSON.parse(receiptRaw);
+    if (typeof parsed?.head_commit === "string") {
+      receiptHead = parsed.head_commit.toLowerCase();
+    }
+  } catch {
+    receiptHead = null;
+  }
+  if (resultHead === null || receiptHead === null) {
+    return { verdict: "unverifiable", resultHead, receiptHead };
+  }
+  return {
+    verdict: resultHead === receiptHead ? "match" : "mismatch",
+    resultHead,
+    receiptHead,
+  };
 }
 
 function preserveRoundRunnerReceipt({
   fileName,
   harnessDir,
   archiveDir,
+  resultContent,
   readFileFn,
   writeFileFn,
   existsFn,
@@ -434,6 +480,14 @@ function preserveRoundRunnerReceipt({
     return {
       path: null,
       reason: "no live runner-receipt.json to preserve (skipped)",
+    };
+  }
+  // HYK-461 2R §2-C: head_commit 결속 대조 -- 확정 불일치면 보존 건너뜀.
+  const binding = classifyReceiptHeadBinding(receiptRaw, resultContent);
+  if (binding.verdict === "mismatch") {
+    return {
+      path: null,
+      reason: `runner receipt head_commit (${binding.receiptHead}) != this round result head_commit (${binding.resultHead}) -- live runner-receipt.json belongs to a DIFFERENT round, refusing to bind a wrong receipt to this round (skipped, HYK-461 2R §2-C)`,
     };
   }
   const receiptName = roundRunnerReceiptFileName(fileName);
@@ -455,9 +509,13 @@ function preserveRoundRunnerReceipt({
       reason: `failed to preserve runner receipt (${err.message})`,
     };
   }
+  const bindingNote =
+    binding.verdict === "unverifiable"
+      ? " (head_commit 대조 불가 -- 본문/영수증 head_commit 부재·모호, 그대로 보존)"
+      : "";
   return {
     path: join(ARCHIVE_SUBDIR, receiptName),
-    reason: `runner receipt preserved -> ${join(ARCHIVE_SUBDIR, receiptName)}`,
+    reason: `runner receipt preserved -> ${join(ARCHIVE_SUBDIR, receiptName)}${bindingNote}`,
   };
 }
 
@@ -619,6 +677,7 @@ export function archiveUnconsumedRoundEnvelope({
       fileName,
       harnessDir,
       archiveDir,
+      resultContent,
       readFileFn,
       writeFileFn,
       existsFn,

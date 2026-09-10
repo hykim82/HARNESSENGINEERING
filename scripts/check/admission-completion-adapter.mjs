@@ -659,20 +659,40 @@ function resolveRetirementArchiveCandidateForAdapter(
   };
 }
 
-// HYK-461 §4-B: live `<role>.md`가 다음 라운드로 덮여 task_id 에코가 어긋난
-// 경우의 «대체 증거 원문». rounds/<role>-r<N>.md 중 (봉투 헤더를 벗긴)
-// 본문의 task_id 에코가 정확히 reservationId(harnessTaskLabel)와 일치하고,
-// 그 사본의 봉투 결속이 유효한(resolveEnvelopeBindingValidity === true) 것을
-// 찾아 그 stripped 본문을 돌려준다. 정확히 하나일 때만 인정한다 -- 0개(사본
-// 없음)·2개 이상(모호)·결속 무효/미선언(true가 아님)은 전부 null(대체 증거
-// 없음 -> 호출자가 거부).
+// HYK-461 2R §2-B: 대체 증거 승격이 실패한 «구별되는» 사유(검토 P1-2:
+// 넷을 하나의 일반 사유로 뭉개지 마라). verifyRetirementEvidence가 이
+// 코드를 그대로 사람이 읽는 사유 문자열에 실어 시험이 사유별로 고정할 수
+// 있게 한다.
+const ARCHIVE_SUBSTITUTE_REASON = Object.freeze({
+  // 이름표가 reservationId와 일치하는 보존 사본이 아예 없음(사본 자체가
+  // 없거나 이름표가 다름) -- 표 ⓒ.
+  LABEL_MISMATCH: "ARCHIVE_SUBSTITUTE_LABEL_MISMATCH",
+  // 이름표는 일치하는데 봉투 결속이 false(kind=unconsumed_result인데
+  // content_sha256이 몸통과 불일치/부재) -- 손 사본 의심, 표 ⓐ.
+  BINDING_INVALID: "ARCHIVE_SUBSTITUTE_BINDING_INVALID",
+  // 이름표는 일치하는데 결속 헤더 자체가 부재(null -- 봉투 헤더 없음 또는
+  // kind!=unconsumed_result인 구형 사본) -- 표 ⓑ.
+  BINDING_ABSENT: "ARCHIVE_SUBSTITUTE_BINDING_ABSENT",
+  // 결속이 유효한(true) 이름표 일치 사본이 «2개 이상» -- 어느 것을 증거로
+  // 쓸지 조용히 고르지 않는다, 표 ⓓ.
+  AMBIGUOUS: "ARCHIVE_SUBSTITUTE_AMBIGUOUS",
+});
+
+// HYK-461 §4-B / 2R §2-B: live `<role>.md`가 다음 라운드로 덮여 task_id
+// 에코가 어긋난 경우의 «대체 증거 원문» 선택. rounds/<role>-r<N>.md 중
+// (봉투 헤더를 벗긴) 본문의 task_id 에코가 정확히 reservationId와 일치하는
+// 사본들을 모으고, 그 중 봉투 결속이 유효한(resolveEnvelopeBindingValidity
+// === true) 것이 «정확히 하나»일 때만 그 stripped 본문을 대체 증거로
+// 승격한다. 그 외에는 ★왜 실패했는지를 «구별되는» reasonCode로 돌려준다
+// (검토 P1-2). 반환:
+//   { ok: true, evidenceText }
+//   { ok: false, reasonCode, detail }
 //
 // ⛔이 함수 자체가 이미 «위조 면»을 지킨다(범위 3): 결속이 어긋난 사본
-// (false)·결속을 선언하지 않은 사본(null)·이름표가 다른 사본은 여기서
-// 대체 증거로 승격되지 않는다. 즉 "표식까지 위조하지 않은 손 사본"은
-// 승격 자체가 안 되고, checkRetirementRecord의 최종 판정(지문·사유·후속
-// 이름표)도 그대로 거쳐야 한다 -- live 축을 «없애는» 것이 아니라 결속이
-// 검증된 보존 사본을 «더하는» 것이다(§4-B "더하는 것이다" 그대로).
+// (false)·결속을 선언하지 않은 사본(null)·이름표가 다른 사본은 대체
+// 증거로 승격되지 않고, 결속 유효 사본이 여럿이면 조용히 하나를 고르지
+// 않고 거부한다(안전측). live 축을 «없애는» 것이 아니라 결속이 검증된
+// 보존 사본을 «더하는» 것이다(§4-B).
 function resolveArchivedRetirementEvidenceText(
   harnessDir,
   role,
@@ -683,10 +703,11 @@ function resolveArchivedRetirementEvidenceText(
   try {
     names = readdirSync(roundsDir);
   } catch {
-    return null;
+    return { ok: false, reasonCode: ARCHIVE_SUBSTITUTE_REASON.LABEL_MISMATCH };
   }
   const pattern = new RegExp(`^${role}-r\\d+\\.md$`, "i");
-  const matches = [];
+  // 이름표가 일치하는 사본만 모은다(각각의 결속 상태 true/false/null 보존).
+  const labelMatched = [];
   for (const name of names) {
     if (!pattern.test(name)) continue;
     let raw;
@@ -700,10 +721,30 @@ function resolveArchivedRetirementEvidenceText(
     if (idMatches.length !== 1 || idMatches[0][1] !== harnessTaskLabel) {
       continue;
     }
-    if (resolveEnvelopeBindingValidity(raw, stripped) !== true) continue;
-    matches.push(stripped);
+    labelMatched.push({
+      stripped,
+      binding: resolveEnvelopeBindingValidity(raw, stripped),
+    });
   }
-  return matches.length === 1 ? matches[0] : null;
+  const valid = labelMatched.filter((c) => c.binding === true);
+  if (valid.length === 1) return { ok: true, evidenceText: valid[0].stripped };
+  if (valid.length >= 2) {
+    return {
+      ok: false,
+      reasonCode: ARCHIVE_SUBSTITUTE_REASON.AMBIGUOUS,
+      detail: `결속 유효 사본 ${valid.length}개`,
+    };
+  }
+  // valid.length === 0: 이름표 일치 사본이 아예 없거나(=사본 없음/이름표
+  // 다름), 있어도 전부 결속 false/부재. false를 부재보다 «더 의심»으로 본다
+  // (손 사본은 헤더를 흉내 냈으나 sha가 어긋나는 쪽이 더 적극적 위조 시도).
+  if (labelMatched.length === 0) {
+    return { ok: false, reasonCode: ARCHIVE_SUBSTITUTE_REASON.LABEL_MISMATCH };
+  }
+  if (labelMatched.some((c) => c.binding === false)) {
+    return { ok: false, reasonCode: ARCHIVE_SUBSTITUTE_REASON.BINDING_INVALID };
+  }
+  return { ok: false, reasonCode: ARCHIVE_SUBSTITUTE_REASON.BINDING_ABSENT };
 }
 
 // HYK-457: parseRetirementKstToMs and confirmRetirementBlockReasonForAdapter
@@ -742,20 +783,29 @@ function resolveRetirementEvidenceText({
 }) {
   const liveTaskId = resolveEchoedTaskId(liveContent);
   if (liveTaskId.ok && liveTaskId.id === reservationId) {
-    return { ok: true, evidenceText: liveContent };
+    // HYK-461 2R §2-A: live 축은 «독립» 경로다 -- live task_id 에코가
+    // reservationId와 일치하면 보존 사본의 결속 상태와 무관하게 live 본문을
+    // 증거로 쓴다(source:"live"). 결속 검사는 대체 증거 경로에서만
+    // 적용된다(verifyRetirementEvidence의 candidate 빌드 참조).
+    return { ok: true, evidenceText: liveContent, source: "live" };
   }
-  const archivedText = resolveArchivedRetirementEvidenceText(
+  const archived = resolveArchivedRetirementEvidenceText(
     harnessDir,
     roleUpper,
     reservationId,
   );
-  if (archivedText === null) {
+  if (!archived.ok) {
+    const liveDetail = liveTaskId.ok
+      ? `실제: ${liveTaskId.id}`
+      : `task_id 줄 ${liveTaskId.count}개`;
     return {
       ok: false,
-      reason: `admission-completion-adapter: RETIREMENT_RELEASED 증거 확인 실패 -- 결과 파일('${resultPath}')의 task_id 에코가 reservationId('${reservationId}')와 일치하지 않거나 확정되지 않음(${liveTaskId.ok ? `실제: ${liveTaskId.id}` : `task_id 줄 ${liveTaskId.count}개`}), 그리고 이를 대체할 «결속이 유효한 보존 사본»(rounds/${roleUpper}-r<N>.md, envelopeBindingValid===true, 이름표 일치, 유일)도 없음 -- 다음 라운드가 live 파일을 덮었더라도 위조 저항 있는 보존 사본이 있어야 반납한다(HYK-461 §4-B), 거부(안전측 기본값)`,
+      // HYK-461 2R §2-B: 구별되는 reasonCode를 그대로 실어 시험이 사유별로
+      // 고정할 수 있게 한다(검토 P1-2: 넷을 하나로 뭉개지 마라).
+      reason: `admission-completion-adapter: RETIREMENT_RELEASED 증거 확인 실패 [${archived.reasonCode}${archived.detail ? `: ${archived.detail}` : ""}] -- 결과 파일('${resultPath}')의 task_id 에코가 reservationId('${reservationId}')와 일치하지 않거나 확정되지 않고(${liveDetail}), 이를 대체할 «결속이 유효한·이름표 일치·유일한 보존 사본»(rounds/${roleUpper}-r<N>.md)도 확정할 수 없음, 거부(안전측 기본값, HYK-461 §4-B)`,
     };
   }
-  return { ok: true, evidenceText: archivedText };
+  return { ok: true, evidenceText: archived.evidenceText, source: "archive" };
 }
 
 function verifyRetirementEvidence({ harnessDir, role, reservationId }) {
@@ -787,6 +837,18 @@ function verifyRetirementEvidence({ harnessDir, role, reservationId }) {
   });
   if (!evidence.ok) return evidence;
   const evidenceText = evidence.evidenceText;
+  // HYK-461 2R §2-A (검토 P1-1): the envelope-binding self-consistency check
+  // gates the ARCHIVE SUBSTITUTE path ONLY. When live is the evidence source,
+  // the live file's own fingerprint is independently checked below
+  // (liveFingerprintMatches), so a sibling preserved copy's broken
+  // self-binding must NOT block an otherwise-valid live retirement -- 1R made
+  // it a mandatory axis that could reject a valid live retirement, which
+  // violated §2-A ("live 에코가 맞으면 보존 사본 상태와 무관하게 성립"). The
+  // check is NOT removed -- resolveArchivedRetirementEvidenceText already
+  // enforced envelopeBindingValid===true to even PROMOTE a copy to substitute
+  // evidence (forgery defense intact); here we merely stop re-imposing it on
+  // the live path.
+  const fromArchive = evidence.source === "archive";
   const taskPath = join(harnessDir, `${String(role).toLowerCase()}-task.md`);
   let droppedAtRaw = null;
   try {
@@ -813,8 +875,14 @@ function verifyRetirementEvidence({ harnessDir, role, reservationId }) {
     return {
       record,
       archiveExists: archiveInfo.exists,
-      // HYK-461 §4-A: 이제 정본과 동일하게 채워 넘긴다(종전 undefined).
-      envelopeBindingValid: archiveInfo.envelopeBindingValid,
+      // HYK-461 §4-A + 2R §2-A: 결속 검사는 «대체 증거 경로»에서만 적용한다.
+      // archive 소스면 정본과 동일하게 실제 값을 넘겨 코어의
+      // ARCHIVE_ENVELOPE_BINDING_INVALID 방어가 살아 있게 하고, live 소스면
+      // null을 넘겨(코어의 `=== false` 비교에 걸리지 않음) live 축이 사본
+      // 결속에 종속되지 않게 한다(검토 P1-1).
+      envelopeBindingValid: fromArchive
+        ? archiveInfo.envelopeBindingValid
+        : null,
       archiveFingerprintMatches: archiveInfo.fingerprintMatches,
       liveFingerprintMatches:
         evidenceFingerprint === record?.archiveFingerprintClaimed,
