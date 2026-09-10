@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   mkdtempSync,
+  mkdirSync,
   rmSync,
   writeFileSync,
   readFileSync,
@@ -260,6 +261,7 @@ async function runWave({
   holdMs,
   timeoutMs = 10_000,
   seedDeadOwnerLock = false,
+  env: extraEnv = {},
 }) {
   const ledgerPath = join(dir, "ledger.json");
   const lockPath = join(dir, "ledger.lock");
@@ -289,7 +291,7 @@ async function runWave({
       [ledgerPath, lockPath, String(holdMs), String(timeoutMs)],
       {
         stdio: ["ignore", "ignore", "ignore", "ipc"],
-        env: isolatedChildEnv(),
+        env: isolatedChildEnv(extraEnv),
       },
     );
     kids.push(c);
@@ -347,6 +349,244 @@ function writeMutatedStore(dir, find, replacement) {
   return pathToFileURL(p).href;
 }
 
+// ===========================================================================
+// ★HYK-463 -- HYK-346 ①의 대조 경합을 «부하»가 아니라 «IPC 체크포인트»로
+// 결정적으로 만든다. CI 실증(PR #271 attempt 3): n=24 난사에서
+// {lostUpdates:0,duplicateSeen:[],okCount:24} -- 24개 전원 성공, 즉 경합
+// 자체가 한 번도 안 일어났다(CPU 기아로 사실상 직렬 실행됨). 난사로 «경합이
+// 일어나길 기다리는» 구조 대신, 자식 2개를 정확한 교차 지점(reclaim 판정
+// 직후)까지 파일 기반 체크포인트로 몰아 놓고 부모가 순서를 강제한다.
+//
+// 기전(admission-ledger-store.mjs § HYK-346 헤더 실측 기록과 동일):
+//   자식A, 자식B 모두 «죽은 소유자» 락(씨앗)을 보고 회수를 결정한다
+//   (owner 스냅샷은 아직 둘 다 그 죽은 락 그대로) -> A 를 먼저 풀어준다 ->
+//   A 가 unlink+wx 로 「살아 있는」 새 락을 얻어 임계구역에 들어간다(CP2
+//   도달로 확인) -> 그제서야 B 를 풀어준다 -> ⛔변이(토큰 재확인 제거)는
+//   B 가 «자기가 봤던 죽은 락 스냅샷»만 근거로 A 의 «살아 있는» 락을
+//   무조건 지운다 -> 둘 다 같은 seen 을 읽고 동시에 임계구역 -> 갱신 유실.
+//   정상 구현은 B 가 지우기 직전 토큰을 다시 확인해 「지금 이 파일은
+//   내가 봤던 그 죽은 락이 아니다」를 보고 지우지 않는다 -> B 는 정상
+//   대기열로 돌아가 A 가 끝난 뒤에야 잡는다 -> 갱신 유실 0.
+//
+// ⛔격리: 체크포인트 훅은 `HYK463_CKPT_DIR` 환경변수가 있을 때만 동작한다
+// (기본 없음 = no-op). 실 파일(admission-ledger-store.mjs) 은 건드리지
+// 않는다 -- 매번 mkdtemp 안 사본에만 문자열 삽입한다(기존 writeMutatedStore
+// 와 같은 원칙).
+// ===========================================================================
+
+// writeRaceFixtureStore -- admission-ledger-store.mjs 의 사본을 만들되,
+// (선택) 변이 치환을 적용하고, «reclaim 판정 직후» 지점에 항상 체크포인트
+// 훅을 심는다. 훅은 HYK463_CKPT_DIR 이 안 잡혀 있으면 즉시 반환(no-op) --
+// 그래서 기존 24개 wave 시험(§HYK-346 ⑴⑵)에는 아무 영향이 없다.
+function writeRaceFixtureStore(
+  dir,
+  filename,
+  { mutationFind, mutationReplace } = {},
+) {
+  let src = readFileSync(join(THIS_DIR, "admission-ledger-store.mjs"), "utf8");
+  if (mutationFind !== undefined) {
+    const count = src.split(mutationFind).length - 1;
+    assert.equal(
+      count,
+      1,
+      `mutation target must appear exactly once in the real source, got ${count}`,
+    );
+    src = src.split(mutationFind).join(mutationReplace);
+  }
+  const anchor = "    if (shouldReclaim(owner)) {";
+  const anchorCount = src.split(anchor).length - 1;
+  assert.equal(
+    anchorCount,
+    1,
+    `checkpoint anchor must appear exactly once, got ${anchorCount}`,
+  );
+  src = src
+    .split(anchor)
+    .join(`${anchor}\n      __HYK463_reclaimCheckpoint__(lockPath, owner);`);
+  src = src.replace(
+    'import { dirname } from "node:path";',
+    'import { dirname, join } from "node:path";',
+  );
+  src = src.replace(
+    '  mkdirSync,\n} from "node:fs";',
+    '  mkdirSync,\n  existsSync,\n  appendFileSync,\n} from "node:fs";',
+  );
+  src +=
+    "\n\n" +
+    [
+      "// HYK-463: test-only instrumentation, no-op for every real caller",
+      "// (dispatch-worker.ps1 never sets either env var). Two independent",
+      "// gates behind two different env vars so the deterministic crossover",
+      "// harness and the probabilistic wave harness can each opt in alone.",
+      "function __HYK463_reclaimCheckpoint__(lockPath, owner) {",
+      "  const logPath = process.env.HYK463_RECLAIM_LOG;",
+      "  if (logPath) {",
+      "    try { appendFileSync(logPath, `${process.pid}\\n`); } catch {}",
+      "  }",
+      "  const ckptDir = process.env.HYK463_CKPT_DIR;",
+      "  if (!ckptDir) return;",
+      "  writeFileSync(join(ckptDir, `reclaim-ready-${process.pid}.txt`), String(Date.now()));",
+      "  const goFile = join(ckptDir, `reclaim-go-${process.pid}.txt`);",
+      "  while (!existsSync(goFile)) {",
+      "    // synchronous busy-poll -- this module's public API is",
+      "    // deliberately synchronous (see sleepSync above), so a test",
+      "    // checkpoint pause must be too (an async IPC wait would never",
+      "    // be observed while this call stack is still running).",
+      "  }",
+      "}",
+      "",
+    ].join("\n");
+  const dirUrl = pathToFileURL(THIS_DIR + "/").href;
+  src = src
+    .split('from "./')
+    .join('from "' + dirUrl)
+    .split('from "../')
+    .join('from "' + dirUrl + "../");
+  const p = join(dir, filename);
+  writeFileSync(p, src, "utf8");
+  return pathToFileURL(p).href;
+}
+
+// writeCrossoverChildScript -- like writeChildScript, but reports reaching
+// the in-critical-section point (CP2) via a marker file so the parent can
+// tell WHEN this child actually holds the (fresh) lock, instead of guessing
+// from wall-clock time.
+function writeCrossoverChildScript(dir, storeUrl) {
+  const p = join(dir, "child-crossover.mjs");
+  writeFileSync(
+    p,
+    [
+      "import { withLedgerLock } from " + JSON.stringify(storeUrl) + ";",
+      'import { writeFileSync } from "node:fs";',
+      'import { join } from "node:path";',
+      "const [ledgerPath, lockPath, holdMs, timeoutMs] = process.argv.slice(2);",
+      "const ckptDir = process.env.HYK463_CKPT_DIR;",
+      "process.send({ ready: true });",
+      'await new Promise((res) => process.on("message", (m) => m && m.go && res()));',
+      "let seen = null;",
+      "const r = withLedgerLock(",
+      "  ledgerPath,",
+      "  lockPath,",
+      "  (read) => {",
+      "    const led = read.ledger ?? { counter: 0 };",
+      "    seen = led.counter ?? 0;",
+      "    if (ckptDir) {",
+      "      writeFileSync(join(ckptDir, `cs-ready-${process.pid}.txt`), String(Date.now()));",
+      "    }",
+      "    const until = Date.now() + Number(holdMs);",
+      "    while (Date.now() < until) {}",
+      "    return { result: { seen }, nextLedger: { ...led, counter: seen + 1 } };",
+      "  },",
+      "  { lockTimeoutMs: Number(timeoutMs) },",
+      ");",
+      "process.send({",
+      "  done: true,",
+      "  ok: r.ok,",
+      "  reasonCode: r.reasonCode ?? null,",
+      "  seen,",
+      "});",
+      "process.exit(0);",
+    ].join("\n"),
+    "utf8",
+  );
+  return p;
+}
+
+async function waitForFiles(paths, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    if (paths.every((p) => existsSync(p))) return;
+    if (Date.now() > deadline) {
+      throw new Error(
+        `checkpoint files not observed in time: ${paths.join(", ")}`,
+      );
+    }
+    await new Promise((res) => setTimeout(res, 10));
+  }
+}
+
+// runCrossoverRace -- the deterministic replacement for "throw 24 processes
+// at it and hope". Exactly 2 children, herded via file-checkpoints to the
+// EXACT crossing point HYK-346's header names (a reclaim decision racing a
+// fresh live acquire), released in a controlled order so the interleaving
+// happens every time, independent of CPU load.
+async function runCrossoverRace({
+  dir,
+  storeUrl,
+  holdMs = 300,
+  timeoutMs = 5000,
+}) {
+  const ledgerPath = join(dir, "ledger.json");
+  const lockPath = join(dir, "ledger.lock");
+  const ckptDir = join(dir, "ckpt");
+  mkdirSync(ckptDir, { recursive: true });
+  writeFileSync(ledgerPath, JSON.stringify({ counter: 0 }), "utf8");
+  // ★HYK-346 씨앗: 죽은 소유자의 락. 두 자식 모두 이걸 보고 회수를 결정한다.
+  writeFileSync(
+    lockPath,
+    JSON.stringify({
+      pid: 999_999_999,
+      token: "seeded-dead-owner",
+      acquired_at: new Date().toISOString(),
+    }),
+    "utf8",
+  );
+  const child = writeCrossoverChildScript(dir, storeUrl);
+  const env = { ...isolatedChildEnv(), HYK463_CKPT_DIR: ckptDir };
+  const kids = [];
+  const readyP = [];
+  const doneP = [];
+  const results = [];
+  for (let i = 0; i < 2; i += 1) {
+    const c = fork(
+      child,
+      [ledgerPath, lockPath, String(holdMs), String(timeoutMs)],
+      {
+        stdio: ["ignore", "ignore", "ignore", "ipc"],
+        env,
+      },
+    );
+    kids.push(c);
+    readyP.push(new Promise((res) => c.once("message", res)));
+    doneP.push(
+      new Promise((res) =>
+        c.on("message", (m) => {
+          if (m && m.done) {
+            results.push(m);
+            res();
+          }
+        }),
+      ),
+    );
+  }
+  await Promise.all(readyP); // 배리어: 둘 다 준비될 때까지 출발 안 함
+  for (const c of kids) c.send({ go: true });
+  // ★교차 지점으로 몰기: 둘 다 「죽은 소유자」 스냅샷을 보고 회수를 결정한
+  // 시점(reclaim 체크포인트)까지 기다린다 -- 아직 아무도 지우지 않았다.
+  await waitForFiles(
+    kids.map((c) => join(ckptDir, `reclaim-ready-${c.pid}.txt`)),
+    timeoutMs,
+  );
+  const [a, b] = kids;
+  // A 를 먼저 풀어준다: unlink+wx 로 「살아 있는」 새 락을 얻고 임계구역으로.
+  writeFileSync(join(ckptDir, `reclaim-go-${a.pid}.txt`), "go");
+  await waitForFiles([join(ckptDir, `cs-ready-${a.pid}.txt`)], timeoutMs);
+  // A 가 임계구역 안(=새 락이 파일에 기록된 뒤)임을 확인한 뒤에만 B 를 푼다.
+  writeFileSync(join(ckptDir, `reclaim-go-${b.pid}.txt`), "go");
+  await Promise.all(doneP);
+  const finalCounter = JSON.parse(readFileSync(ledgerPath, "utf8")).counter;
+  const okRs = results.filter((r) => r.ok);
+  const seenCounts = {};
+  for (const r of okRs) seenCounts[r.seen] = (seenCounts[r.seen] ?? 0) + 1;
+  return {
+    results,
+    okCount: okRs.length,
+    finalCounter,
+    lostUpdates: okRs.length - finalCounter,
+    duplicateSeen: Object.entries(seenCounts).filter(([, c]) => c > 1),
+  };
+}
+
 test("★HYK-346 ⑴ 음성 대조 -- 낮은 부하(n=8, hold=50ms)에서는 잃어버린 갱신이 0 이다(이 시험이 무조건 빨간 것이 아님을 먼저 증명한다)", async () => {
   const { dir } = tmpPaths();
   try {
@@ -379,31 +619,122 @@ test("★★HYK-346 ⑵ 상호배제 -- 중부하(n=24, hold=300ms)에서 잃어
   }
 });
 
-test("★★HYK-346 변이 ① -- reclaim 의 «토큰 재확인»을 빼면 RED (죽은 소유자를 근거로 판정한 뒤 살아 있는 락을 지워 잃어버린 갱신이 되살아난다)", async () => {
+// HYK-463 §2-A: 결정적 교차 재현. 부하(24 난사) 없이, IPC 체크포인트로
+// 정확한 교차 지점을 강제한다 -- «부하와 무관하게 난다»는 완료조건 1의
+// 증거는 이 시험이다(3회 연속).
+for (let attempt = 1; attempt <= 3; attempt += 1) {
+  test(`★★★HYK-463 결정적 교차 재현 #${attempt} -- 변이 ① 은 부하와 무관하게 RED (2개 자식을 reclaim 판정 직후까지 몰아 A 를 먼저 임계구역에 넣은 뒤 B 를 푼다)`, async () => {
+    const { dir } = tmpPaths();
+    try {
+      const mutantUrl = writeRaceFixtureStore(
+        dir,
+        "mutant-crossover-store.mjs",
+        {
+          mutationFind:
+            "      if (lockFileStillHasToken(lockPath, owner.token)) {",
+          mutationReplace: "      if (true) {",
+        },
+      );
+      const w = await runCrossoverRace({
+        dir,
+        storeUrl: mutantUrl,
+        holdMs: 300,
+      });
+      assert.ok(
+        w.lostUpdates > 0 || w.duplicateSeen.length > 0,
+        `mutant must lose updates (RED signal), deterministically -- not a load artifact. got ${JSON.stringify(
+          {
+            lostUpdates: w.lostUpdates,
+            duplicateSeen: w.duplicateSeen,
+            okCount: w.okCount,
+          },
+        )}`,
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+}
+
+// HYK-463 §3 완료조건 2 (L-7 반대 방향): 같은 결정적 교차를 정상 구현으로
+// 돌리면 GREEN 이어야 한다 -- 이 시험이 「항상 빨간 시험」이 아님을 보인다.
+// 정상 코드는 B 가 지우기 직전 토큰을 다시 확인해 A 의 살아 있는 락을 보고
+// 지우지 않는다 -- B 는 정상 대기열로 돌아가 A 가 끝난 뒤에야 잡는다.
+test("★★★HYK-463 결정적 교차 -- 정상 구현(무변이)은 같은 교차 지점에서 GREEN 이다", async () => {
   const { dir } = tmpPaths();
   try {
-    const mutantUrl = writeMutatedStore(
+    const realUrl = writeRaceFixtureStore(dir, "real-crossover-store.mjs");
+    const w = await runCrossoverRace({
       dir,
-      "      if (lockFileStillHasToken(lockPath, owner.token)) {",
-      "      if (true) {",
-    );
-    const w = await runWave({
-      dir,
-      storeUrl: mutantUrl,
-      n: 24,
-      holdMs: 300,
-      seedDeadOwnerLock: true,
+      storeUrl: realUrl,
+      holdMs: 200,
+      timeoutMs: 5000,
     });
-    assert.ok(
-      w.lostUpdates > 0 || w.duplicateSeen.length > 0,
-      `mutant must lose updates (RED signal). got ${JSON.stringify({
-        lostUpdates: w.lostUpdates,
-        duplicateSeen: w.duplicateSeen,
-        okCount: w.okCount,
-      })}`,
-    );
+    assert.equal(w.lostUpdates, 0, JSON.stringify(w));
+    assert.deepEqual(w.duplicateSeen, []);
+    assert.equal(w.okCount, 2, "both children must still eventually succeed");
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// HYK-463 §2-B/§2-C: «경합이 실제로 일어났는가»를 판정과 분리한다. 24개
+// 난사(원래 §HYK-346 변이① 시험)는 부하 민감이라 CPU 기아 아래서는 경합
+// 자체가 안 일어날 수 있다(CI 실증: okCount:24, lostUpdates:0). 그 경우
+// ⛔「변이 미검출」과 같은 문장으로 실패하면 안 된다 -- reclaim 시도 횟수
+// (HYK463_RECLAIM_LOG 로 실측)와 타임아웃 등 reasonCode 를 축으로 두 상황을
+// 구별하고, 몇 차례 재시도해도 경합이 안 잡히면 「측정 불능」이라고 명시적
+// 으로, 다른 문장으로 실패한다(조용히 통과시키지 않는다 -- L-7).
+test("★★HYK-346 변이 ① (부하 난사, 24개) -- 경합이 실제로 관측될 때만 RED 로 판정하고, 경합 0 이면 «측정 불능»으로 별개 실패를 낸다", async () => {
+  const MAX_ATTEMPTS = 5;
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
+    const { dir } = tmpPaths();
+    const reclaimLog = join(dir, "reclaim-attempts.log");
+    try {
+      writeFileSync(reclaimLog, "", "utf8");
+      const mutantUrl = writeRaceFixtureStore(dir, "mutant-wave-store.mjs", {
+        mutationFind:
+          "      if (lockFileStillHasToken(lockPath, owner.token)) {",
+        mutationReplace: "      if (true) {",
+      });
+      const w = await runWave({
+        dir,
+        storeUrl: mutantUrl,
+        n: 24,
+        holdMs: 300,
+        seedDeadOwnerLock: true,
+        env: { HYK463_RECLAIM_LOG: reclaimLog },
+      });
+      const reclaimAttempts = readFileSync(reclaimLog, "utf8")
+        .split("\n")
+        .filter((line) => line.trim().length > 0).length;
+      // ★HYK-463 §2-C: 잔여 축. LOCK_TIMEOUT 등 ok:false 가 섞여 있으면
+      // 이번 실패 원인은 아니어도(§1-1) 측정을 흐린다 -- 측정 불능 쪽으로.
+      const anyMeasurementNoise = w.results.some((r) => r.ok === false);
+      const contentionObserved = reclaimAttempts >= 2 && !anyMeasurementNoise;
+      if (!contentionObserved) {
+        if (attempt < MAX_ATTEMPTS) continue; // 재시도 -- 조용히 넘기지 않는다
+        assert.fail(
+          `측정 불능(MEASUREMENT_INCONCLUSIVE): ${MAX_ATTEMPTS}회 재시도에도 경합이 관측되지 않았다 ` +
+            `(reclaim 시도=${reclaimAttempts}, ok:false 존재=${anyMeasurementNoise}) -- ` +
+            `이것은 «변이 미검출»이 아니라 «이번 실행에서 부하가 경합을 못 만들었다»는 뜻이다. ` +
+            `결정적 증거는 별도의 «HYK-463 결정적 교차 재현» 시험을 보라.`,
+        );
+      }
+      assert.ok(
+        w.lostUpdates > 0 || w.duplicateSeen.length > 0,
+        `contention WAS observed (reclaim attempts=${reclaimAttempts}) but the mutant still did not lose updates -- this IS a real mutation-not-detected RED signal, distinct from measurement-inconclusive. got ${JSON.stringify(
+          {
+            lostUpdates: w.lostUpdates,
+            duplicateSeen: w.duplicateSeen,
+            okCount: w.okCount,
+          },
+        )}`,
+      );
+      return; // 관측 성공 + 판정 완료
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   }
 });
 
