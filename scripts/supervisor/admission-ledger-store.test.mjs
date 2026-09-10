@@ -374,10 +374,64 @@ function writeMutatedStore(dir, find, replacement) {
 // 와 같은 원칙).
 // ===========================================================================
 
+// replaceAnchorOnce -- string-surgery helper shared by writeRaceFixtureStore
+// and writeMutatedStore's spirit: asserts `anchor` appears exactly once (so
+// a future edit to admission-ledger-store.mjs that moves/removes it fails
+// loudly here instead of silently no-op'ing the instrumentation) and splices
+// `replacement` in its place.
+function replaceAnchorOnce(src, anchor, replacement, label) {
+  const count = src.split(anchor).length - 1;
+  assert.equal(
+    count,
+    1,
+    `${label} anchor must appear exactly once, got ${count}`,
+  );
+  return src.split(anchor).join(replacement);
+}
+
+// HYK-463: test-only instrumentation appended to every fixture copy, no-op
+// for every real caller (dispatch-worker.ps1 never sets these env vars).
+// __HYK463_reclaimCheckpoint__ is the IPC-checkpoint pause the deterministic
+// crossover harness uses. __HYK463_reclaimWinCheckpoint__ is the 2R
+// "sufficient contention" signal: how many DISTINCT processes actually WON
+// the lock immediately after taking the reclaim branch. Two or more such
+// wins is a direct, mechanism-grounded proof of double critical-section
+// entry (the module header's documented TOCTOU, observed directly) -- not a
+// proxy count of how many merely glimpsed the same stale snapshot (1R's
+// rejected metric). A re-read-right-before-unlink alternative was ALSO
+// measured and rejected (coder.md §2-1): it misses losses when several
+// processes still share the same not-yet-replaced dead snapshot at unlink
+// time.
+const HYK463_INSTRUMENTATION_FOOTER = [
+  "function __HYK463_reclaimCheckpoint__(lockPath, owner) {",
+  "  const logPath = process.env.HYK463_RECLAIM_LOG;",
+  "  if (logPath) {",
+  "    try { appendFileSync(logPath, `${process.pid}\\n`); } catch {}",
+  "  }",
+  "  const ckptDir = process.env.HYK463_CKPT_DIR;",
+  "  if (!ckptDir) return;",
+  "  writeFileSync(join(ckptDir, `reclaim-ready-${process.pid}.txt`), String(Date.now()));",
+  "  const goFile = join(ckptDir, `reclaim-go-${process.pid}.txt`);",
+  "  while (!existsSync(goFile)) {",
+  "    // synchronous busy-poll -- this module's public API is",
+  "    // deliberately synchronous, so a checkpoint pause must be too.",
+  "  }",
+  "}",
+  "",
+  "function __HYK463_reclaimWinCheckpoint__(attemptedReclaim) {",
+  "  if (!attemptedReclaim) return;",
+  "  const logPath = process.env.HYK463_RECLAIM_WIN_LOG;",
+  "  if (!logPath) return;",
+  "  try { appendFileSync(logPath, `${process.pid}\\n`); } catch {}",
+  "}",
+  "",
+].join("\n");
+
 // writeRaceFixtureStore -- admission-ledger-store.mjs 의 사본을 만들되,
-// (선택) 변이 치환을 적용하고, «reclaim 판정 직후» 지점에 항상 체크포인트
-// 훅을 심는다. 훅은 HYK463_CKPT_DIR 이 안 잡혀 있으면 즉시 반환(no-op) --
-// 그래서 기존 24개 wave 시험(§HYK-346 ⑴⑵)에는 아무 영향이 없다.
+// (선택) 변이 치환을 적용하고, «reclaim 판정 직후»·«reclaim 승리 직후»
+// 지점에 항상 체크포인트 훅을 심는다. 훅은 대응하는 env var 가 안 잡혀
+// 있으면 즉시 반환(no-op) -- 그래서 기존 24개 wave 시험(§HYK-346 ⑴⑵)에는
+// 아무 영향이 없다.
 function writeRaceFixtureStore(
   dir,
   filename,
@@ -385,24 +439,39 @@ function writeRaceFixtureStore(
 ) {
   let src = readFileSync(join(THIS_DIR, "admission-ledger-store.mjs"), "utf8");
   if (mutationFind !== undefined) {
-    const count = src.split(mutationFind).length - 1;
-    assert.equal(
-      count,
-      1,
-      `mutation target must appear exactly once in the real source, got ${count}`,
-    );
-    src = src.split(mutationFind).join(mutationReplace);
+    src = replaceAnchorOnce(src, mutationFind, mutationReplace, "mutation");
   }
-  const anchor = "    if (shouldReclaim(owner)) {";
-  const anchorCount = src.split(anchor).length - 1;
-  assert.equal(
-    anchorCount,
-    1,
-    `checkpoint anchor must appear exactly once, got ${anchorCount}`,
+  src = replaceAnchorOnce(
+    src,
+    "    if (shouldReclaim(owner)) {",
+    "    if (shouldReclaim(owner)) {\n      __HYK463_reclaimCheckpoint__(lockPath, owner);",
+    "checkpoint",
   );
-  src = src
-    .split(anchor)
-    .join(`${anchor}\n      __HYK463_reclaimCheckpoint__(lockPath, owner);`);
+  src = replaceAnchorOnce(
+    src,
+    "  let lastTransient = null;",
+    "  let lastTransient = null;\n  let __hyk463CameFromReclaim = false;",
+    "lastTransient",
+  );
+  src = replaceAnchorOnce(
+    src,
+    "    const claimed = tryClaimLock(lockPath);\n" +
+      "    if (claimed.ok) return { ok: true, token: claimed.token };",
+    "    const __hyk463AttemptedReclaim = __hyk463CameFromReclaim;\n" +
+      "    __hyk463CameFromReclaim = false;\n" +
+      "    const claimed = tryClaimLock(lockPath);\n" +
+      "    if (claimed.ok) {\n" +
+      "      __HYK463_reclaimWinCheckpoint__(__hyk463AttemptedReclaim);\n" +
+      "      return { ok: true, token: claimed.token };\n" +
+      "    }",
+    "claim",
+  );
+  src = replaceAnchorOnce(
+    src,
+    "        continue;",
+    "        __hyk463CameFromReclaim = true;\n        continue;",
+    "continue",
+  );
   src = src.replace(
     'import { dirname } from "node:path";',
     'import { dirname, join } from "node:path";',
@@ -411,31 +480,7 @@ function writeRaceFixtureStore(
     '  mkdirSync,\n} from "node:fs";',
     '  mkdirSync,\n  existsSync,\n  appendFileSync,\n} from "node:fs";',
   );
-  src +=
-    "\n\n" +
-    [
-      "// HYK-463: test-only instrumentation, no-op for every real caller",
-      "// (dispatch-worker.ps1 never sets either env var). Two independent",
-      "// gates behind two different env vars so the deterministic crossover",
-      "// harness and the probabilistic wave harness can each opt in alone.",
-      "function __HYK463_reclaimCheckpoint__(lockPath, owner) {",
-      "  const logPath = process.env.HYK463_RECLAIM_LOG;",
-      "  if (logPath) {",
-      "    try { appendFileSync(logPath, `${process.pid}\\n`); } catch {}",
-      "  }",
-      "  const ckptDir = process.env.HYK463_CKPT_DIR;",
-      "  if (!ckptDir) return;",
-      "  writeFileSync(join(ckptDir, `reclaim-ready-${process.pid}.txt`), String(Date.now()));",
-      "  const goFile = join(ckptDir, `reclaim-go-${process.pid}.txt`);",
-      "  while (!existsSync(goFile)) {",
-      "    // synchronous busy-poll -- this module's public API is",
-      "    // deliberately synchronous (see sleepSync above), so a test",
-      "    // checkpoint pause must be too (an async IPC wait would never",
-      "    // be observed while this call stack is still running).",
-      "  }",
-      "}",
-      "",
-    ].join("\n");
+  src += "\n\n" + HYK463_INSTRUMENTATION_FOOTER;
   const dirUrl = pathToFileURL(THIS_DIR + "/").href;
   src = src
     .split('from "./')
@@ -678,20 +723,35 @@ test("★★★HYK-463 결정적 교차 -- 정상 구현(무변이)은 같은 �
   }
 });
 
-// HYK-463 §2-B/§2-C: «경합이 실제로 일어났는가»를 판정과 분리한다. 24개
-// 난사(원래 §HYK-346 변이① 시험)는 부하 민감이라 CPU 기아 아래서는 경합
-// 자체가 안 일어날 수 있다(CI 실증: okCount:24, lostUpdates:0). 그 경우
-// ⛔「변이 미검출」과 같은 문장으로 실패하면 안 된다 -- reclaim 시도 횟수
-// (HYK463_RECLAIM_LOG 로 실측)와 타임아웃 등 reasonCode 를 축으로 두 상황을
-// 구별하고, 몇 차례 재시도해도 경합이 안 잡히면 「측정 불능」이라고 명시적
-// 으로, 다른 문장으로 실패한다(조용히 통과시키지 않는다 -- L-7).
-test("★★HYK-346 변이 ① (부하 난사, 24개) -- 경합이 실제로 관측될 때만 RED 로 판정하고, 경합 0 이면 «측정 불능»으로 별개 실패를 낸다", async () => {
+// HYK-463 2R (§1-1/§2-1): CI 실증 -- `reclaim 시도=4`(≥2 는 통과)인데도
+// 유실이 없었다. 1R 의 «누적 reclaim 시도 횟수 ≥ 2» 문턱은 «몇 명이 죽은
+// 락의 스냅샷을 봤는가»만 잰다 -- ORCH §2-1 이 지적한 대로, 그건 «경합
+// «기회»의 인원수»일 뿐 «실제 교차가 일어났는가»가 아니다.
+//
+// ★측정으로 1차 대안(raceWindowHits: unlink 직전 재확인)도 기각했다
+// (coder.md §2-1 표) -- n=4 저부하 실험에서 raceWindowHits=0 인데도
+// lostUpdates>0 인 사례가 다수 나왔다. 원인: 여러 프로세스가 «아직 아무도
+// 안 지운» 같은 죽은 스냅샷을 거의 동시에 보고 있으면, unlink 직전 재확인
+// 시점에도 파일 내용이 아직 안 바뀌어 있어(=아직 아무도 안 지웠으므로)
+// 「달라짐」이 안 잡힌다 -- 그런데도 그 직후 여러 프로세스가 거의 동시에
+// unlink+wx 를 실행해 둘 다 임계구역에 들어갈 수 있다.
+//
+// ★정본 신호: reclaim 분기를 거쳐 unlink 한 «바로 다음 시도»에서
+// tryClaimLock 이 성공한 횟수(`reclaimPathWins`). 이것이 ≥2 라는 것은 —
+// «서로 다른 두 프로세스가 각자 «나 혼자 락을 얻었다»고 믿는 상태가 실제로
+// 성립했다»는 것 그 자체다(모듈 헤더가 적은 TOCTOU 의 정의 그대로) --
+// 파일 내용의 스냅샷 비교가 아니라 «누가 실제로 문을 통과했는가»를 직접
+// 센다. §3-메타-변이에서 반복 측정으로 검증했다: n=4/8/24 전 구간에서
+// `reclaimPathWins>=2` ⇔ `lostUpdates>0` (24/24 일치, coder.md §2-1 표).
+test("★★HYK-346 변이 ① (부하 난사, 24개) -- «충분 경합»(reclaimPathWins≥2)이 실제로 관측될 때만 RED 로 판정하고, 그 미만이면 «측정 불능»으로 별개 실패를 낸다", async () => {
   const MAX_ATTEMPTS = 5;
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
     const { dir } = tmpPaths();
     const reclaimLog = join(dir, "reclaim-attempts.log");
+    const reclaimWinLog = join(dir, "reclaim-wins.log");
     try {
       writeFileSync(reclaimLog, "", "utf8");
+      writeFileSync(reclaimWinLog, "", "utf8");
       const mutantUrl = writeRaceFixtureStore(dir, "mutant-wave-store.mjs", {
         mutationFind:
           "      if (lockFileStillHasToken(lockPath, owner.token)) {",
@@ -703,27 +763,37 @@ test("★★HYK-346 변이 ① (부하 난사, 24개) -- 경합이 실제로 관
         n: 24,
         holdMs: 300,
         seedDeadOwnerLock: true,
-        env: { HYK463_RECLAIM_LOG: reclaimLog },
+        env: {
+          HYK463_RECLAIM_LOG: reclaimLog,
+          HYK463_RECLAIM_WIN_LOG: reclaimWinLog,
+        },
       });
+      // ★HYK-463 2R -- reclaimAttempts 는 이제 진단용 보조 수치로만 결과
+      // 파일에 인용한다(문턱이 아니다 -- 1R 의 기각된 신호).
       const reclaimAttempts = readFileSync(reclaimLog, "utf8")
+        .split("\n")
+        .filter((line) => line.trim().length > 0).length;
+      // ★HYK-463 2R -- «충분 경합»의 정본 신호.
+      const reclaimPathWins = readFileSync(reclaimWinLog, "utf8")
         .split("\n")
         .filter((line) => line.trim().length > 0).length;
       // ★HYK-463 §2-C: 잔여 축. LOCK_TIMEOUT 등 ok:false 가 섞여 있으면
       // 이번 실패 원인은 아니어도(§1-1) 측정을 흐린다 -- 측정 불능 쪽으로.
       const anyMeasurementNoise = w.results.some((r) => r.ok === false);
-      const contentionObserved = reclaimAttempts >= 2 && !anyMeasurementNoise;
+      const contentionObserved = reclaimPathWins >= 2 && !anyMeasurementNoise;
       if (!contentionObserved) {
         if (attempt < MAX_ATTEMPTS) continue; // 재시도 -- 조용히 넘기지 않는다
         assert.fail(
-          `측정 불능(MEASUREMENT_INCONCLUSIVE): ${MAX_ATTEMPTS}회 재시도에도 경합이 관측되지 않았다 ` +
-            `(reclaim 시도=${reclaimAttempts}, ok:false 존재=${anyMeasurementNoise}) -- ` +
-            `이것은 «변이 미검출»이 아니라 «이번 실행에서 부하가 경합을 못 만들었다»는 뜻이다. ` +
+          `측정 불능(MEASUREMENT_INCONCLUSIVE): ${MAX_ATTEMPTS}회 재시도에도 «충분 경합»이 관측되지 않았다 ` +
+            `(reclaimPathWins=${reclaimPathWins}, reclaim 시도=${reclaimAttempts}[진단용], ok:false 존재=${anyMeasurementNoise}) -- ` +
+            `이것은 «변이 미검출»이 아니라 «이번 실행에서 두 프로세스가 동시에 락을 얻지 못했다»는 뜻이다(누적 reclaim 시도는 ` +
+            `≥2 여도 실제 이중 획득이 없을 수 있다 -- CI 실증: 시도=4, reclaimPathWins=0~1). ` +
             `결정적 증거는 별도의 «HYK-463 결정적 교차 재현» 시험을 보라.`,
         );
       }
       assert.ok(
         w.lostUpdates > 0 || w.duplicateSeen.length > 0,
-        `contention WAS observed (reclaim attempts=${reclaimAttempts}) but the mutant still did not lose updates -- this IS a real mutation-not-detected RED signal, distinct from measurement-inconclusive. got ${JSON.stringify(
+        `sufficient contention WAS observed (reclaimPathWins=${reclaimPathWins}, reclaim 시도=${reclaimAttempts}) but the mutant still did not lose updates -- this IS a real mutation-not-detected RED signal, distinct from measurement-inconclusive. got ${JSON.stringify(
           {
             lostUpdates: w.lostUpdates,
             duplicateSeen: w.duplicateSeen,
