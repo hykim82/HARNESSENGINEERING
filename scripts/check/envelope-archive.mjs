@@ -396,6 +396,123 @@ export function archiveRoundEnvelope({
   }
 }
 
+// HYK-461 §4-C: this round's runner receipt, preserved next to the round
+// copy. Naming: `<role>-r<N>-runner-receipt.json`, co-located under `rounds/`
+// with the round copy and sharing its round number N (derived from the round
+// copy's own filename) -- deliberately NOT `receipts/<role>-receipt-r<N>.json`,
+// which is a DIFFERENT schema (the consumption receipt, consumption-receipt-
+// writer.mjs) living under a different directory (coder-task.md §4-C 요구:
+// 기존 소비 영수증 관례와 충돌 금지). The live source is `<harnessDir>/
+// runner-receipt.json` (runner-receipt-writer.mjs's RUNNER_RECEIPT_FILENAME --
+// the literal is duplicated here rather than imported, to keep this module's
+// zero-repo-import closure intact so it stays cheap to stage into the ~14
+// isolated fixtures that already copy it, coder.md §4-A). Best-effort:
+// returns {path:null} on any failure shape (no live receipt, unreadable,
+// name collision, write failure) so a receipt-preservation problem never
+// blocks or fails the round-copy write that is this function's real job.
+const RUNNER_RECEIPT_LIVE_FILENAME = "runner-receipt.json";
+
+function roundRunnerReceiptFileName(roundFileName) {
+  return roundFileName.replace(/\.md$/i, "-runner-receipt.json");
+}
+
+function preserveRoundRunnerReceipt({
+  fileName,
+  harnessDir,
+  archiveDir,
+  readFileFn,
+  writeFileFn,
+  existsFn,
+}) {
+  let receiptRaw;
+  try {
+    receiptRaw = readFileFn(
+      join(harnessDir, RUNNER_RECEIPT_LIVE_FILENAME),
+      "utf8",
+    );
+  } catch {
+    return {
+      path: null,
+      reason: "no live runner-receipt.json to preserve (skipped)",
+    };
+  }
+  const receiptName = roundRunnerReceiptFileName(fileName);
+  const destPath = join(archiveDir, receiptName);
+  // 라운드 사본 번호(N)를 그대로 물려받으므로 정상 흐름에서 이 이름은
+  // 새 것이지만, 동일 이름이 이미 있으면(경합·재실행) 절대 조용히 덮지
+  // 않는다 -- 보존은 언제나 "추가"다(archiveRoundEnvelope와 같은 계약).
+  if (existsFn(destPath)) {
+    return {
+      path: null,
+      reason: `runner receipt '${receiptName}' already exists -- not overwriting (skipped)`,
+    };
+  }
+  try {
+    writeFileFn(destPath, receiptRaw, "utf8");
+  } catch (err) {
+    return {
+      path: null,
+      reason: `failed to preserve runner receipt (${err.message})`,
+    };
+  }
+  return {
+    path: join(ARCHIVE_SUBDIR, receiptName),
+    reason: `runner receipt preserved -> ${join(ARCHIVE_SUBDIR, receiptName)}`,
+  };
+}
+
+// HYK-461 §4-A: single source of truth for the envelope-binding READ-BACK
+// validator -- the inverse of archiveUnconsumedRoundEnvelope's write-side
+// (which stamps `kind=unconsumed_result content_sha256=<sha>` into the header
+// below). It lived as a copy in dispatch-gate-decision.mjs (canonical
+// consumption gate) with NO copy at all in admission-completion-adapter.mjs's
+// resolveRetirementArchiveCandidateForAdapter -- so the adapter passed
+// envelopeBindingValid===undefined and the core's `=== false` guard never
+// fired on the adapter's retirement-release path (HYK-456 §5-1's reported
+// wiring gap: a forged/hand copy header sailed through the second consumer).
+//
+// Why HOME it here in the producer module rather than a new *-shared.mjs
+// sibling (the ledger-pointer-shared.mjs / retirement-block-reason-shared.mjs
+// convention): (1) the validator's contract IS the exact header format this
+// file writes -- keeping the reader beside the writer is the tightest
+// single-source and the drift this dedup exists to kill can only happen if
+// the two are apart; (2) this module is ALREADY a staged sibling in every
+// isolated fixture that copies dispatch-gate-decision.mjs (HYK-307) or
+// relay-handshake.mjs (relay-handshake-fixture-siblings.mjs), so deduping
+// here adds ZERO staging churn on those ~14 sites -- only the small set of
+// fixtures that stage a synthetic admission-completion-adapter.mjs needs this
+// file added to their sibling list (the exact HYK-457 MODULE_NOT_FOUND-17
+// hazard, avoided by choosing an already-staged home). A dedicated new
+// *-shared.mjs would have re-opened that hazard on ~15 sites for no gain.
+//
+// Returns true | false | null:
+//   null  -- no envelope header, or a header whose kind != unconsumed_result
+//            (old consumption-success archives, or fixtures that never declare
+//            the field): this axis does not apply -> regression 0.
+//   false -- kind=unconsumed_result IS declared but content_sha256 is absent,
+//            or present-but-mismatched against the recomputed body sha (hand
+//            copy or damaged copy).
+//   true  -- field present and matches the header-stripped body's sha256.
+const ARCHIVE_ENVELOPE_HEADER_LINE_ANY_RE =
+  /^<!-- envelope-archive:[^\n]*-->\n/;
+const ARCHIVE_ENVELOPE_KIND_RE = /[ \t]kind=(\S+)/;
+const ARCHIVE_ENVELOPE_CONTENT_SHA256_RE =
+  /[ \t]content_sha256=([0-9a-fA-F]{64})\b/;
+
+export function resolveEnvelopeBindingValidity(raw, strippedBody) {
+  const headerMatch = raw.match(ARCHIVE_ENVELOPE_HEADER_LINE_ANY_RE);
+  if (!headerMatch) return null;
+  const headerLine = headerMatch[0];
+  const kindMatch = headerLine.match(ARCHIVE_ENVELOPE_KIND_RE);
+  if (!kindMatch || kindMatch[1] !== "unconsumed_result") return null;
+  const shaMatch = headerLine.match(ARCHIVE_ENVELOPE_CONTENT_SHA256_RE);
+  if (!shaMatch) return false;
+  const claimed = shaMatch[1].toLowerCase();
+  return (
+    claimed === createHash("sha256").update(strippedBody, "utf8").digest("hex")
+  );
+}
+
 // HYK-455 §1 (확대 라운드) -- «미소비» 라운드 보존 사본 designed path.
 //
 // archiveRoundEnvelope(바로 위)는 오직 CONFIRMED(소비 성공, checkRelayHandshake
@@ -434,6 +551,7 @@ export function archiveUnconsumedRoundEnvelope({
   mkdirFn = mkdirSync,
   writeFileFn = writeFileSync,
   existsFn = existsSync,
+  readFileFn = readFileSync,
 }) {
   if (typeof role !== "string" || role === "") {
     return {
@@ -487,11 +605,36 @@ export function archiveUnconsumedRoundEnvelope({
     // 그 시험 자체(archiveRoundEnvelope 전용, ⛔건드리지 않는다)를 살리려면
     // 이 함수의 같은 줄을 텍스트만 다르게 써야 한다.
     writeFileFn(destPath, `${header}${resultContent}`, "utf8");
+    // HYK-461 §4-C: preserve THIS round's runner receipt alongside the round
+    // copy, keyed to the same round number, so a later retirement's
+    // record.evidenceReceiptPath can point at a copy the NEXT round's
+    // runner-receipt.json overwrite cannot clobber -- the exact availability
+    // failure HYK-456 §1-3/§3-3 measured (a RUNNER_GREEN_UNREACHABLE_AT_HEAD
+    // retirement whose evidence receipt was overwritten by a later round so
+    // confirmRunnerGreenUnreachableAtHead could never re-derive the fact).
+    // Best-effort / additive / never throws (same contract as the round-copy
+    // write above): no live receipt -> skip, and the receipt-preservation
+    // outcome never turns this ok:true into ok:false. See preserveRoundRunnerReceipt.
+    const receipt = preserveRoundRunnerReceipt({
+      fileName,
+      harnessDir,
+      archiveDir,
+      readFileFn,
+      writeFileFn,
+      existsFn,
+    });
     return {
       ok: true,
-      reason: `envelope-archive: ${role} unconsumed round preserved (designed path, content_sha256=${contentSha256}) -> ${join(ARCHIVE_SUBDIR, fileName)}`,
+      // preserveRoundRunnerReceipt always returns a non-empty reason on every
+      // path, so no ternary is needed here (keeps this function under the
+      // complexity cap).
+      reason: `envelope-archive: ${role} unconsumed round preserved (designed path, content_sha256=${contentSha256}) -> ${join(
+        ARCHIVE_SUBDIR,
+        fileName,
+      )} | ${receipt.reason}`,
       path: destPath,
       contentSha256,
+      runnerReceiptPath: receipt.path,
     };
   } catch (err) {
     return {

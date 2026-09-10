@@ -64,6 +64,14 @@ function stageAdapterCoreSiblings(checkDir) {
     readFileSync(join(CHECK_DIR, "retirement-block-reason-shared.mjs"), "utf8"),
     "utf8",
   );
+  // HYK-461 §4-A: the adapter now also statically imports envelope-archive.mjs
+  // (resolveEnvelopeBindingValidity, single-sourced in its producer module) --
+  // same MODULE_NOT_FOUND reasoning as the three siblings above.
+  writeFileSync(
+    join(checkDir, "envelope-archive.mjs"),
+    readFileSync(join(CHECK_DIR, "envelope-archive.mjs"), "utf8"),
+    "utf8",
+  );
 }
 
 function writePointerFile(repoDir, ledgerPath, lockPath) {

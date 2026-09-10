@@ -95,6 +95,20 @@ import {
 // dispatch-gate-decision.mjs) -- see retirement-block-reason-shared.mjs's
 // own header, and coder.md for the fixture sibling lists this round updated.
 import { confirmRetirementBlockReason } from "./retirement-block-reason-shared.mjs";
+// HYK-461 §4-A: the envelope-binding read-back validator, single-sourced in
+// its producer module (envelope-archive.mjs's resolveEnvelopeBindingValidity).
+// HYK-456 §5-1 measured this exact gap: resolveRetirementArchiveCandidateForAdapter
+// below computed NO envelopeBindingValid, so it reached checkRetirementRecord
+// as `undefined`, the core's `=== false` guard never fired, and a forged/hand
+// copy header passed through the adapter's RETIREMENT_RELEASED path even
+// though the canonical gate (dispatch-gate-decision.mjs) already rejected it.
+// envelope-archive.mjs imports nothing from this repo (node:fs/path/crypto
+// only), so adding it to this adapter's isolated-fixture sibling closure is
+// cheap -- unlike dragging in dispatch-gate-decision.mjs, whose full import
+// graph is exactly what this file's header (§ P1-1) forbids. The fixture
+// sibling lists that stage a synthetic copy of THIS file were all updated
+// this round to also stage envelope-archive.mjs (coder.md §4-A 전수 점검).
+import { resolveEnvelopeBindingValidity } from "./envelope-archive.mjs";
 // HYK-342 2R P1-1 (검토 원문 "회수 표식의 생산자 권한이 검증되지 않는다"):
 // ⛔처음에는 relay-handshake.mjs에서 resolveResultTaskId/
 // resolveResultBlockedState를 static import했으나, 실측 결과 이 파일을
@@ -618,18 +632,78 @@ function resolveRetirementArchiveCandidateForAdapter(
     if (idMatches.length !== 1 || idMatches[0][1] !== harnessTaskLabel) {
       continue;
     }
-    matches.push({ fingerprint: computeRetirementFingerprint(stripped) });
+    matches.push({
+      fingerprint: computeRetirementFingerprint(stripped),
+      // HYK-461 §4-A: compute the SAME envelopeBindingValid the canonical gate
+      // computes (resolveEnvelopeBindingValidity from the producer module) so
+      // the core's ARCHIVE_ENVELOPE_BINDING_INVALID guard fires on this
+      // consumer too -- previously never populated here (HYK-456 §5-1).
+      envelopeBindingValid: resolveEnvelopeBindingValidity(raw, stripped),
+    });
   }
   if (matches.length === 0) {
     return { exists: false, fingerprintMatches: false };
   }
   if (matches.length > 1) {
+    // 라벨이 일치하는 사본이 2개 이상 -- 어느 것을 대조할지 조용히 고르지
+    // 않는다. envelopeBindingValid는 채우지 않으므로 undefined가 되고,
+    // 코어의 `=== false` 비교에 걸리지 않는다(정본 resolveRetirementArchiveCandidate의
+    // ambiguousCount 분기와 동일 계약) -- 이미 fingerprintMatches:false로
+    // FINGERPRINT_MISMATCH에 떨어진다.
     return { exists: true, fingerprintMatches: false };
   }
   return {
     exists: true,
     fingerprintMatches: matches[0].fingerprint === claimedFingerprint,
+    envelopeBindingValid: matches[0].envelopeBindingValid,
   };
+}
+
+// HYK-461 §4-B: live `<role>.md`가 다음 라운드로 덮여 task_id 에코가 어긋난
+// 경우의 «대체 증거 원문». rounds/<role>-r<N>.md 중 (봉투 헤더를 벗긴)
+// 본문의 task_id 에코가 정확히 reservationId(harnessTaskLabel)와 일치하고,
+// 그 사본의 봉투 결속이 유효한(resolveEnvelopeBindingValidity === true) 것을
+// 찾아 그 stripped 본문을 돌려준다. 정확히 하나일 때만 인정한다 -- 0개(사본
+// 없음)·2개 이상(모호)·결속 무효/미선언(true가 아님)은 전부 null(대체 증거
+// 없음 -> 호출자가 거부).
+//
+// ⛔이 함수 자체가 이미 «위조 면»을 지킨다(범위 3): 결속이 어긋난 사본
+// (false)·결속을 선언하지 않은 사본(null)·이름표가 다른 사본은 여기서
+// 대체 증거로 승격되지 않는다. 즉 "표식까지 위조하지 않은 손 사본"은
+// 승격 자체가 안 되고, checkRetirementRecord의 최종 판정(지문·사유·후속
+// 이름표)도 그대로 거쳐야 한다 -- live 축을 «없애는» 것이 아니라 결속이
+// 검증된 보존 사본을 «더하는» 것이다(§4-B "더하는 것이다" 그대로).
+function resolveArchivedRetirementEvidenceText(
+  harnessDir,
+  role,
+  harnessTaskLabel,
+) {
+  const roundsDir = join(harnessDir, "rounds");
+  let names;
+  try {
+    names = readdirSync(roundsDir);
+  } catch {
+    return null;
+  }
+  const pattern = new RegExp(`^${role}-r\\d+\\.md$`, "i");
+  const matches = [];
+  for (const name of names) {
+    if (!pattern.test(name)) continue;
+    let raw;
+    try {
+      raw = readFileSync(join(roundsDir, name), "utf8");
+    } catch {
+      continue;
+    }
+    const stripped = stripRetirementArchiveEnvelopeHeader(raw);
+    const idMatches = [...stripped.matchAll(RETIREMENT_TASK_ID_RE_G)];
+    if (idMatches.length !== 1 || idMatches[0][1] !== harnessTaskLabel) {
+      continue;
+    }
+    if (resolveEnvelopeBindingValidity(raw, stripped) !== true) continue;
+    matches.push(stripped);
+  }
+  return matches.length === 1 ? matches[0] : null;
 }
 
 // HYK-457: parseRetirementKstToMs and confirmRetirementBlockReasonForAdapter
@@ -650,6 +724,40 @@ function resolveRetirementArchiveCandidateForAdapter(
 // MISMATCH/INVALID_REASON_CODE/BLOCK_REASON_UNCONFIRMED/SUCCESSOR_LABEL_
 // MISSING) 거부(fail-closed) -- verdict.reason을 그대로 실어 사람이 읽을
 // 수 있게 한다(§4 완료조건 2 "증거가 하나라도 빠지면 거부" 요구 그대로).
+// HYK-461 §4-B: 채택 증거 원문 결정(verifyRetirementEvidence의 max-lines-
+// per-function 상한 회피용 추출, 판정/문면은 그대로). live 축은 그대로
+// 우선한다 -- live `<role>.md`의 task_id 에코가 reservationId와 맞으면 그
+// 원문을 증거로 쓴다. 다음 라운드가 그 파일을 덮어(1-3/HYK-346 실물)
+// 에코가 어긋나면, ★결속이 유효한 보존 사본(envelopeBindingValid===true,
+// 이름표 일치, 유일)이 있을 때만 그 사본 자신의 stripped 본문을 «대체
+// 증거»로 승격한다. 대체 증거가 없으면(사본 없음·결속 무효·이름표 다름·
+// 모호) 거부한다(위조 면 보존, §4-B/범위3). 통과면 {ok:true, evidenceText},
+// 실패면 verifyRetirementEvidence가 즉시 돌려줄 {ok:false, reason}.
+function resolveRetirementEvidenceText({
+  liveContent,
+  resultPath,
+  harnessDir,
+  roleUpper,
+  reservationId,
+}) {
+  const liveTaskId = resolveEchoedTaskId(liveContent);
+  if (liveTaskId.ok && liveTaskId.id === reservationId) {
+    return { ok: true, evidenceText: liveContent };
+  }
+  const archivedText = resolveArchivedRetirementEvidenceText(
+    harnessDir,
+    roleUpper,
+    reservationId,
+  );
+  if (archivedText === null) {
+    return {
+      ok: false,
+      reason: `admission-completion-adapter: RETIREMENT_RELEASED 증거 확인 실패 -- 결과 파일('${resultPath}')의 task_id 에코가 reservationId('${reservationId}')와 일치하지 않거나 확정되지 않음(${liveTaskId.ok ? `실제: ${liveTaskId.id}` : `task_id 줄 ${liveTaskId.count}개`}), 그리고 이를 대체할 «결속이 유효한 보존 사본»(rounds/${roleUpper}-r<N>.md, envelopeBindingValid===true, 이름표 일치, 유일)도 없음 -- 다음 라운드가 live 파일을 덮었더라도 위조 저항 있는 보존 사본이 있어야 반납한다(HYK-461 §4-B), 거부(안전측 기본값)`,
+    };
+  }
+  return { ok: true, evidenceText: archivedText };
+}
+
 function verifyRetirementEvidence({ harnessDir, role, reservationId }) {
   if (!isNonEmptyString(harnessDir) || !isNonEmptyString(role)) {
     return {
@@ -658,22 +766,27 @@ function verifyRetirementEvidence({ harnessDir, role, reservationId }) {
     };
   }
   const resultPath = join(harnessDir, `${String(role).toLowerCase()}.md`);
-  let resultContent;
+  const roleUpper = String(role).toUpperCase();
+  let liveContent;
   try {
-    resultContent = readFileSync(resultPath, "utf8");
+    liveContent = readFileSync(resultPath, "utf8");
   } catch (err) {
     return {
       ok: false,
       reason: `admission-completion-adapter: RETIREMENT_RELEASED 증거 확인 실패 -- 결과 파일을 읽을 수 없음('${resultPath}': ${err.message}), 거부(안전측 기본값)`,
     };
   }
-  const taskIdResolved = resolveEchoedTaskId(resultContent);
-  if (!taskIdResolved.ok || taskIdResolved.id !== reservationId) {
-    return {
-      ok: false,
-      reason: `admission-completion-adapter: RETIREMENT_RELEASED 증거 확인 실패 -- 결과 파일('${resultPath}')의 task_id 에코가 reservationId('${reservationId}')와 일치하지 않거나 확정되지 않음(${taskIdResolved.ok ? `실제: ${taskIdResolved.id}` : `task_id 줄 ${taskIdResolved.count}개`}), 거부(안전측 기본값)`,
-    };
-  }
+  // HYK-461 §4-B: 채택할 증거 원문을 정한다(live 우선, 없으면 결속 유효
+  // 보존 사본으로 대체) -- 아래 헬퍼 참조.
+  const evidence = resolveRetirementEvidenceText({
+    liveContent,
+    resultPath,
+    harnessDir,
+    roleUpper,
+    reservationId,
+  });
+  if (!evidence.ok) return evidence;
+  const evidenceText = evidence.evidenceText;
   const taskPath = join(harnessDir, `${String(role).toLowerCase()}-task.md`);
   let droppedAtRaw = null;
   try {
@@ -683,9 +796,13 @@ function verifyRetirementEvidence({ harnessDir, role, reservationId }) {
   } catch {
     droppedAtRaw = null;
   }
-  const roleUpper = String(role).toUpperCase();
   const records = readRetirementRecordFilesForAdapter(harnessDir, roleUpper);
-  const liveFingerprint = computeRetirementFingerprint(resultContent);
+  // HYK-461 §4-B: 지문·사유 재확인은 모두 «채택된 증거 원문»(evidenceText)
+  // 기준으로 유도한다. 대체 증거 경로에서는 evidenceText가 보존 사본의
+  // stripped 본문이므로, evidenceFingerprint는 곧 그 사본의 content_sha256
+  // (=record.archiveFingerprintClaimed)과 같아지고, blockReason 재확인도
+  // 그 사본이 주장하는 head_commit(덮인 live가 아니라)에 대해 이뤄진다.
+  const evidenceFingerprint = computeRetirementFingerprint(evidenceText);
   const candidates = records.map((record) => {
     const archiveInfo = resolveRetirementArchiveCandidateForAdapter(
       harnessDir,
@@ -696,12 +813,14 @@ function verifyRetirementEvidence({ harnessDir, role, reservationId }) {
     return {
       record,
       archiveExists: archiveInfo.exists,
+      // HYK-461 §4-A: 이제 정본과 동일하게 채워 넘긴다(종전 undefined).
+      envelopeBindingValid: archiveInfo.envelopeBindingValid,
       archiveFingerprintMatches: archiveInfo.fingerprintMatches,
       liveFingerprintMatches:
-        liveFingerprint === record?.archiveFingerprintClaimed,
+        evidenceFingerprint === record?.archiveFingerprintClaimed,
       blockReasonConfirmed: confirmRetirementBlockReason(
         record,
-        resultContent,
+        evidenceText,
         droppedAtRaw,
         harnessDir,
       ),
