@@ -18,7 +18,7 @@
 // inherits this isolated default for free, with zero changes to
 // relay-handshake.mjs or admission-completion-adapter.mjs's call sites.
 import "./sweep-ledger-isolation.mjs";
-import { spawnSync, execSync } from "node:child_process";
+import { spawnSync, execSync, execFileSync } from "node:child_process";
 import {
   mkdtempSync,
   writeFileSync,
@@ -443,20 +443,42 @@ export function smokeLinearSync() {
   return results;
 }
 
-// G8: OS temp only, zero diff against the real repo/control room. Callers
-// pass the *real* repoRoot purely so this can snapshot `git status --short`
-// before/after -- no smoke* function above is ever given that path to write
-// into.
-export function captureGitStatus(repoRoot) {
+// HYK-466 (coder-task.md §3-ㄱ): the paths this smoke suite's code actually
+// touches in the REAL repo -- not "written to" (every smoke* function above
+// writes only into its own withTmpDir fixture, outside repoRoot entirely;
+// G8 already guarantees that), but "read from / spawned out of": the five
+// scripts scriptOf() below resolves under scripts/check, and
+// smokeRelayHandshake's runAdmissionCli import pulls in scripts/supervisor.
+// This is a WHITELIST derived from the suite's own import/spawn graph, not
+// an ignore-list of noisy paths (coder-task.md §3-ㄱ draws that line
+// explicitly: "이 시험의 책임 범위를 정의하는 것"과 "불편한 신호를 지우는
+// 것"은 다르다). Anything outside these two directories -- a concurrent
+// actor's edit to docs/, an unrelated dirty checkout entry, a sibling test
+// file's leak elsewhere in a shared isolated-suite-runner.mjs clone -- is
+// not this suite's responsibility and must not flip its verdict.
+export const SMOKE_TOUCHED_PATHSPECS = ["scripts/check", "scripts/supervisor"];
+
+// G8: OS temp only, zero diff against the real repo/control room -- within
+// `pathspecs`. Callers pass the *real* repoRoot purely so this can snapshot
+// `git status --short` before/after; no smoke* function above is ever given
+// that path to write into. `pathspecs` defaults to the whole repo ("."),
+// preserving this function's original unscoped behavior for any caller that
+// doesn't pass one (e.g. selfcheck-smoke.test.mjs's direct captureGitStatus
+// smoke tests (8)/(9)) -- only runSmokeSuite below opts into the narrower
+// scope.
+export function captureGitStatus(repoRoot, pathspecs = ["."]) {
   try {
-    return execSync("git status --short", { cwd: repoRoot, encoding: "utf8" });
+    return execFileSync("git", ["status", "--short", "--", ...pathspecs], {
+      cwd: repoRoot,
+      encoding: "utf8",
+    });
   } catch {
     return null;
   }
 }
 
 export function runSmokeSuite({ repoRoot }) {
-  const before = captureGitStatus(repoRoot);
+  const before = captureGitStatus(repoRoot, SMOKE_TOUCHED_PATHSPECS);
 
   const scriptOf = (id) => join(repoRoot, "scripts", "check", `${id}.mjs`);
   const cases = [
@@ -469,7 +491,7 @@ export function runSmokeSuite({ repoRoot }) {
     ...smokeLinearSync(),
   ];
 
-  const after = captureGitStatus(repoRoot);
+  const after = captureGitStatus(repoRoot, SMOKE_TOUCHED_PATHSPECS);
   const zeroDiff = before === after;
 
   return { cases, zeroDiff, before, after };
