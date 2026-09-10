@@ -103,6 +103,12 @@ import { confirmRetirementBlockReason } from "./retirement-block-reason-shared.m
 import {
   archiveRoundTaskFileIfNew,
   classifyArchivedDispatchId,
+  // HYK-461 §4-A: the envelope-binding read-back validator is now single-
+  // sourced in its producer module (see that function's header) rather than
+  // copied here -- this file and admission-completion-adapter.mjs both import
+  // the one definition, killing the copy that HYK-456 §5-1 found the adapter
+  // was missing entirely.
+  resolveEnvelopeBindingValidity,
 } from "./envelope-archive.mjs";
 // HYK-239: reject-streak-chain.mjs's tamper-detection engine has existed
 // since HYK-218 with zero production callers (§0 실측). This is the wiring
@@ -2051,23 +2057,14 @@ function readRetirementRecordFiles(harnessDir, role) {
 //   - content_sha256 필드는 있는데 몸통 재계산 값과 다름 -> false(§2
 //     완료조건4 음성 시험 ⓐ: 원문과 결속이 어긋난 손 사본).
 //   - 필드가 있고 몸통과 일치 -> true.
-const ARCHIVE_ENVELOPE_HEADER_LINE_ANY_RE =
-  /^<!-- envelope-archive:[^\n]*-->\n/;
-const ARCHIVE_ENVELOPE_KIND_RE = /[ \t]kind=(\S+)/;
-const ARCHIVE_ENVELOPE_CONTENT_SHA256_RE =
-  /[ \t]content_sha256=([0-9a-fA-F]{64})\b/;
-
-function resolveEnvelopeBindingValidity(raw, strippedBody) {
-  const headerMatch = raw.match(ARCHIVE_ENVELOPE_HEADER_LINE_ANY_RE);
-  if (!headerMatch) return null;
-  const headerLine = headerMatch[0];
-  const kindMatch = headerLine.match(ARCHIVE_ENVELOPE_KIND_RE);
-  if (!kindMatch || kindMatch[1] !== "unconsumed_result") return null;
-  const shaMatch = headerLine.match(ARCHIVE_ENVELOPE_CONTENT_SHA256_RE);
-  if (!shaMatch) return false;
-  const claimed = shaMatch[1].toLowerCase();
-  return claimed === computeConsumptionResultFingerprint(strippedBody);
-}
+// HYK-461 §4-A: resolveEnvelopeBindingValidity (and its three header regexes)
+// used to live here as this file's own copy -- now imported from
+// envelope-archive.mjs, the producer of the very header it reads back (see
+// that function's header for the single-source rationale and why the adapter
+// side, not this side, was the one silently missing it). Byte-for-byte the
+// same contract: the shared version recomputes the body sha256 with the same
+// createHash("sha256").update(body,"utf8").digest("hex") this file's
+// computeConsumptionResultFingerprint uses.
 
 function resolveRetirementArchiveCandidate(
   harnessDir,

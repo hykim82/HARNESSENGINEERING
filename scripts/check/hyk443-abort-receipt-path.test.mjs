@@ -570,6 +570,14 @@ function stageMinimalRelayHandshakeDeps(rootDir) {
     readFileSync(join(CHECK_DIR, "retirement-block-reason-shared.mjs"), "utf8"),
     "utf8",
   );
+  // HYK-461 §4-A: admission-completion-adapter.mjs now also statically imports
+  // envelope-archive.mjs (resolveEnvelopeBindingValidity, single-sourced in
+  // its producer module) -- same MODULE_NOT_FOUND reasoning as the siblings above.
+  writeFileSync(
+    join(checkDir, "envelope-archive.mjs"),
+    readFileSync(join(CHECK_DIR, "envelope-archive.mjs"), "utf8"),
+    "utf8",
+  );
   // spawnAbortRecordWriter (relay-handshake.mjs) also spawns this sibling as
   // a child process on the same BLOCKED-termination path -- staging it keeps
   // this RED fixture's console output clean of an unrelated
