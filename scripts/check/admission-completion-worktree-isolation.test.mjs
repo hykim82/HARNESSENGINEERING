@@ -406,10 +406,14 @@ function stageAdapterSiblingDeps(checkDir, supervisorDir) {
   // HYK-302/355 §2-A dedup / HYK-398 §2-⑶: the adapter now also statically
   // imports these two. HYK-457 §3-A: and now also retirement-block-reason-
   // shared.mjs (confirmRetirementBlockReason dedup).
+  // HYK-461 §4-A: envelope-archive.mjs added -- the adapter now statically
+  // imports resolveEnvelopeBindingValidity from it (single-sourced in its
+  // producer module).
   for (const name of [
     "ledger-pointer-shared.mjs",
     "retirement-record-core.mjs",
     "retirement-block-reason-shared.mjs",
+    "envelope-archive.mjs",
   ]) {
     writeFileSync(
       join(checkDir, name),
