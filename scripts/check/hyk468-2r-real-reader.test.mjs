@@ -61,6 +61,18 @@ test("ⓑ 반대 방향 유지 (실제 exported 함수): 선언 0개 -> 여전�
   assert.equal(result.kind, "MISSING");
 });
 
+test("ⓑ HYK-183 회귀 방지(실제 exported 함수, ★2R 초안이 실제로 깬 축): 빈 줄로 나뉜 두 개의 «진짜» 블록(옛 라운드 유지 + 새 라운드 추가, 산문 없음) -> 여전히 AMBIGUOUS로 거부, 스테일 값으로 조용히 확정되지 않는다", () => {
+  const content =
+    "task_id: HYK-0000-stale-round\n" +
+    ">>> DONE: old round @ 2026-07-30 09:00 KST\n" +
+    "\n" +
+    "task_id: HYK-9001-x\n" +
+    ">>> DONE: new round @ 2026-07-31 10:05 KST\n";
+  const result = resolveResultTaskId(content);
+  assert.equal(result.ok, false);
+  assert.equal(result.kind, "AMBIGUOUS");
+});
+
 test("ⓒ 갇힌 실물: hyk442-blocked-door-1/.harness/coder.md(열0 task_id 2개, 읽기 전용)를 실제 exported 함수가 HYK-465-467-channel-loss-1로 확정한다", () => {
   const stuckContent = readFileSync(STUCK_FILE_PATH, "utf8");
   // 실물 확인: 이 파일이 정말로 그 실사고 모양(열 0 task_id: 2개)인지
@@ -80,15 +92,16 @@ test("ⓒ 갇힌 실물: hyk442-blocked-door-1/.harness/coder.md(열0 task_id 2�
   });
 });
 
-// 되돌림 변이(필수, 완료조건 §4-2): relay-handshake.mjs의 header-block
-// 한정(headerBlockOf 적용)을 제거하고 옛 전체-스캔 동작으로 되돌린
-// «격리 tmp 사본»을 동적 import해, ⓐ의 같은 입력이 다시 AMBIGUOUS로
-// 새는지 확인한다. 실 소스 파일은 이 시험 과정에서 단 한 번도 변이되지
-// 않는다(mutant는 tmp 사본에만 씀) -- 시험 끝에 바이트 동일까지 재확인.
-test("RED(변이, 필수): relay-handshake.mjs의 header-block 한정을 제거하면 ⓐ가 다시 AMBIGUOUS로 샌다", async () => {
+// 되돌림 변이(필수, 완료조건 §4-2): relay-handshake.mjs의 구조적 선행
+// 맥락 검사(hasStructuralPredecessor 적용)를 제거하고 옛 전체-스캔
+// 동작으로 되돌린 «격리 tmp 사본»을 동적 import해, ⓐ의 같은 입력이
+// 다시 AMBIGUOUS로 새는지 확인한다. 실 소스 파일은 이 시험 과정에서
+// 단 한 번도 변이되지 않는다(mutant는 tmp 사본에만 씀) -- 시험 끝에
+// 바이트 동일까지 재확인.
+test("RED(변이, 필수): relay-handshake.mjs의 구조적 선행 맥락 검사를 제거하면 ⓐ가 다시 AMBIGUOUS로 샌다", async () => {
   const realSource = readFileSync(RELAY_HANDSHAKE_PATH, "utf8");
   const target =
-    '  const scan = maskQuotedMarkerRegions(resultContent);\n  // HYK-468 2R (검토자 P1 반려, 정당함): 마스킹은 펜스/HTML 주석 «안»만\n  // 가린다 -- 코드펜스 «없이» 본문에 그대로 인용한 예시(예: "예를 들어\n  // 다음과 같은 줄이 주입된다: task_id: HYK-...")는 마스킹을 안 받고\n  // 열 0에 그대로 남아 진짜 선언과 충돌해 AMBIGUOUS로 거부됐다(실사고\n  // 재현: hyk442-blocked-door-1/.harness/coder.md류 결과 파일). 헤더\n  // 블록(첫 빈 줄 이전)으로 한 번 더 좁혀 이 축을 닫는다 -- 마스킹된\n  // 펜스/주석 줄은 공백으로만 채워지므로(blankKeepingNewlines) 빈 줄과\n  // 똑같이 "헤더 끝"으로 잡힌다(HYK-449 fixture들이 실제로 이 모양 --\n  // 별도 회귀 없음, 아래 시험으로 확인됨).\n  const header = headerBlockOf(scan);\n  const resultIdMatches = [...header.matchAll(TASK_ID_RE_G)];';
+    '  const lines = scan.replace(/\\r\\n/g, "\\n").split("\\n");\n  const resultIdMatches = [];\n  for (let i = 0; i < lines.length; i++) {\n    const m = lines[i].match(/^task_id:\\s*(\\S+)/i);\n    if (!m) continue;\n    if (!hasStructuralPredecessor(lines, i)) continue;\n    resultIdMatches.push(m);\n  }';
   assert.equal(
     [...realSource.matchAll(new RegExp(escapeRegExp(target), "g"))].length,
     1,
@@ -96,7 +109,7 @@ test("RED(변이, 필수): relay-handshake.mjs의 header-block 한정을 제거�
   );
   const mutatedSource = realSource.replace(
     target,
-    "  const scan = maskQuotedMarkerRegions(resultContent);\n  // MUTATED: header-block scoping removed, reverted to whole-file scan.\n  const resultIdMatches = [...scan.matchAll(TASK_ID_RE_G)];",
+    "  // MUTATED: structural-predecessor check removed, reverted to whole-file scan.\n  const resultIdMatches = [...scan.matchAll(/^task_id:\\s*(\\S+)/gim)];",
   );
 
   const dir = mkdtempSync(join(tmpdir(), "hyk468-2r-relay-handshake-red-"));

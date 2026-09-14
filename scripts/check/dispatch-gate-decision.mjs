@@ -31,7 +31,11 @@ import {
   checkHeadCommitPrecondition,
   DISPATCH_GATE_STATE,
 } from "./dispatch-gate-decision-core.mjs";
-import { loadLedger, writeLedger } from "./reject-streak.mjs";
+import {
+  loadLedger,
+  writeLedger,
+  maskQuotedMarkerRegions,
+} from "./reject-streak.mjs";
 // HYK-257-done-stamp-2 §2 범위2 ⓑ: the ONE real, already-production-wired
 // anchor for a machine dropped_at stamp -- 관제실 dispatch-worker.ps1
 // (읽기 전용, 이 저장소 밖 실측 원문, 아래 bestEffortStampDroppedAt 헤더
@@ -704,23 +708,58 @@ function extractSoleMatch(text, reG) {
 // 복제 + header-task-id-shared.mjs 정본)이 갈라지면 회귀이므로 고칠 때는
 // 반드시 서로 대조하라.
 //
-// task_id: 선언은 파일 머리의 헤더 블록(첫 빈 줄 이전)에서만 읽는다 --
-// round-archive 파일(rounds/<role>-r<N>.md 등) 본문에 나중에 인용된
-// `task_id:` 줄이 진짜 선언과 충돌해 "2개"로 잘못 세는 사고를 막는다
-// (실사고: hyk442-blocked-door-1/.harness/coder.md 1행 실선언 + 24행
-// 인용 예시 -- CONSUMPTION_TASK_ID_RE_G를 whole-file로 돌리던 이 파일의
-// 세 round-archive 라벨 매처가 전부 이 결함을 그대로 물려받고 있었다).
-function headerBlockOf(content) {
-  const normalized = (content ?? "").replace(/\r\n/g, "\n");
-  const blankLineIdx = normalized.search(/\n[ \t]*\n/);
-  return blankLineIdx === -1 ? normalized : normalized.slice(0, blankLineIdx);
+// task_id: 선언은 «구조적 선행 맥락»이 있는 줄에서만 읽는다 -- 그
+// 바로 앞(빈 줄은 건너뛰고) 줄이 다른 헤더 줄(`key:` 형태)이거나
+// `>>>` 표지이거나 파일 맨 앞이면 «진짜», 산문이 선행하면 «인용/예시»로
+// 본다. round-archive 파일(rounds/<role>-r<N>.md 등) 본문에 산문으로
+// 소개된 뒤 그대로 인용된 `task_id:` 줄이 진짜 선언과 충돌해 "2개"로
+// 잘못 세는 사고를 막는다(실사고 재현: 검토자가 실제 exported
+// resolveResultTaskId에 이 모양을 주입해 AMBIGUOUS를 재현했다).
+//
+// ⚠️1R 초안(첫 빈 줄 이전만 보는 "헤더 블록" 한정)은 실제로 회귀였다 --
+// 빈 줄로 나뉜 두 개의 «진짜» task_id: 블록(옛 라운드 유지 + 새 라운드
+// 추가, 산문 없음, HYK-183과 같은 사고 모양)을 헤더 블록 밖이라는 이유로
+// 못 보고 스테일 값으로 조용히 확정해 버렸다(전체 러너 실측:
+// nc-relay-handshake.test.mjs의 NC-2 RED). 빈 줄 위치만으로는 그 둘을
+// 가를 수 없다 -- 자세한 이유와 두 사고 모양의 대조는
+// header-task-id-shared.mjs 헤더 주석 참조(그 파일이 이 로직의 정본).
+//
+// ⚠️두 번째 실측 회귀(같은 라운드): envelope-archive.mjs가 아카이브
+// 사본(rounds/<role>-task-r<N>.md 등)에 붙이는 `<!-- envelope-archive:
+// ... -->` 헤더는 "그 앞 줄이 구조적인가"만 볼 때는 실선언을 가로막고,
+// "`<!--`로 시작하면 무조건 구조적"으로 볼 때는 반대로 hyk396-dispatch-
+// stamp.test.mjs (o)가 합성한 «일부러 깨진» 다줄 주석(닫는 `-->`가
+// 다음 줄로 밀려난 모양, 검토자 실증 재현)까지 구조적으로 봐 버려 그
+// 시험이 지키려는 "손상은 정말로 손상으로 보여야 한다"는 축이 사라진다.
+// 올바른 축은 «주석 자체를 지우고 남는가»다 -- reject-streak.mjs의
+// maskQuotedMarkerRegions(HYK-449, 펜스·HTML 주석을 여러 줄에 걸쳐
+// 정확히 인식해 공백으로 지운다)를 이 검사 «이전»에 먼저 돌리면, 정상
+// 주석이든 깨진 다줄 주석이든 전부 공백 줄이 되어 "빈 줄과 똑같이
+// 건너뛴다"(아래 hasStructuralPredecessor의 `lines[i].trim() === ""`가
+// 이미 그렇게 처리한다) -- 그래서 정상 주석 뒤의 실선언은 살고, 깨진
+// 주석은 애초에 이 축에 걸리지 않아 classifyArchivedDispatchId 등 그
+// 손상을 실제로 겨눈 검사가 여전히 REJECT를 낸다.
+function hasStructuralPredecessor(lines, idx) {
+  for (let i = idx - 1; i >= 0; i--) {
+    if (lines[i].trim() === "") continue;
+    return /^[A-Za-z_][\w-]*:|^>>>/.test(lines[i]);
+  }
+  return true;
 }
 
 function resolveHeaderTaskId(content) {
-  const header = headerBlockOf(content);
-  const matches = [...header.matchAll(/^task_id:[ \t]*(\S+)/gim)];
-  if (matches.length !== 1) return { ok: false, count: matches.length };
-  return { ok: true, id: matches[0][1] };
+  const lines = maskQuotedMarkerRegions(
+    (content ?? "").replace(/\r\n/g, "\n"),
+  ).split("\n");
+  const candidates = [];
+  for (let i = 0; i < lines.length; i++) {
+    const m = lines[i].match(/^task_id:[ \t]*(\S+)/i);
+    if (!m) continue;
+    if (!hasStructuralPredecessor(lines, i)) continue;
+    candidates.push(m[1]);
+  }
+  if (candidates.length !== 1) return { ok: false, count: candidates.length };
+  return { ok: true, id: candidates[0] };
 }
 
 // HYK-298-abort-record-2 §2-1 -- ★공통 문장("없는 것"과 "깨진 것"은
@@ -740,9 +779,11 @@ function resolveHeaderTaskId(content) {
 // 출현이 여러 건 생긴다 -- 그 출현은 전부 줄 시작이 아니다(어떤 문장이
 // "task_id:"로 시작하는 경우가 없는 한). 그런데도 2R 규칙은 그 정상
 // 라운드를 BROKEN으로 오분류해 다음 배달을 영구 차단했다(오늘 실측,
-// coder-task.md §1 표). 3R은 그 오분류를 없앴다 -- 판정은 «줄머리»
-// (TASK_ID_LOOSE_LINE_RE)로 시작하는 줄의 개수와, 그 줄 안에서의 유효값
-// 개수(CONSUMPTION_TASK_ID_RE_G)를 먼저 본다. **`looseLines === 1 &&
+// coder-task.md §1 표). 3R은 그 오분류를 없앴다 -- 판정은 «줄머리»로
+// 시작하는 줄의 개수(HYK-468 2R부터는 classifyTaskIdLabel 본문의 인라인
+// `/^task_id:.*$/i` 줄별 검사, 예전 이름 TASK_ID_LOOSE_LINE_RE)와, 그
+// 줄 안에서의 유효값 개수(CONSUMPTION_TASK_ID_RE_G)를 먼저 본다.
+// **`looseLines === 1 &&
 // strictCount === 1`(=`VALID`)은 이 질문에 도달조차 하지 않는다** --
 // 정상 봉투(오늘 실물 2개: 줄머리 1 + 원시 3·11)는 항상 이 분기에서
 // 먼저 걸러진다(HYK-298-label-boundary-5 §2 항ⓐ 요구 "과차단이 재발하지
@@ -768,8 +809,9 @@ function resolveHeaderTaskId(content) {
 // 원시 출현 3·11건이어도 여전히 VALID인 이유 -- 이 재질문에 도달하지
 // 않는다).
 //
-// - TASK_ID_LOOSE_LINE_RE: 줄 시작(`^`)에 "task_id:"로 시작하는 줄이
-//   몇 개인지(값의 유효성은 무관, ⓐ·ⓑ 대응) 센다.
+// - looseLineIdxs(줄별 `/^task_id:.*$/i` 검사, 옛 이름 TASK_ID_LOOSE_LINE_RE):
+//   줄 시작(`^`)에 "task_id:"로 시작하는 줄이 몇 개인지(값의 유효성은
+//   무관, ⓐ·ⓑ 대응) 센다.
 // - TASK_ID_ANY_RE: 줄 시작 여부와 무관하게 "task_id:"가 파일 어디에나
 //   등장하는지 센다 -- `looseLines === 0`일 때만 이 질문을 쓴다(위 설명).
 // - CONSUMPTION_TASK_ID_RE_G(위, 같은 줄로 한정됨): 값이 같은 줄 안에
@@ -780,7 +822,6 @@ function resolveHeaderTaskId(content) {
 // looseLines === 1 && strictCount === 1 -> VALID(원시 출현 개수와 무관).
 // 나머지 전부(줄머리 2개 이상·줄머리는 1개인데 같은 줄 값이 비었거나
 // 크로스라인으로 새는 경우) -> BROKEN. fail-closed 기본은 그대로다.
-const TASK_ID_LOOSE_LINE_RE = /^task_id:.*$/gim;
 const TASK_ID_ANY_RE = /task_id:/gi;
 
 // HYK-468 2R (검토자 P1 반려, 정당함): 아래 세 카운트를 전부 resultText
@@ -794,16 +835,26 @@ const TASK_ID_ANY_RE = /task_id:/gi;
 // 철학(위 HYK-298-label-classify-3 주석)을 "그리고 «헤더 블록 안»의
 // 줄머리다"로 한 번 더 좁힌 것뿐, 새 철학이 아니다.
 function classifyTaskIdLabel(resultText) {
-  const header = headerBlockOf(resultText);
-  const looseLines = [...header.matchAll(TASK_ID_LOOSE_LINE_RE)].length;
+  const lines = maskQuotedMarkerRegions(
+    (resultText ?? "").replace(/\r\n/g, "\n"),
+  ).split("\n");
+  const looseLineIdxs = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (!/^task_id:.*$/i.test(lines[i])) continue;
+    if (!hasStructuralPredecessor(lines, i)) continue;
+    looseLineIdxs.push(i);
+  }
+  const looseLines = looseLineIdxs.length;
   if (looseLines === 0) {
-    const anyCount = [...header.matchAll(TASK_ID_ANY_RE)].length;
+    const anyCount = [...resultText.matchAll(TASK_ID_ANY_RE)].length;
     if (anyCount === 0) {
       return { kind: "MISSING", looseLines: 0, strictCount: 0 };
     }
     return { kind: "BROKEN", looseLines: 0, strictCount: 0, anyCount };
   }
-  const strictMatches = [...header.matchAll(CONSUMPTION_TASK_ID_RE_G)];
+  const strictMatches = looseLineIdxs
+    .map((i) => lines[i].match(/^task_id:[ \t]*(\S+)/i))
+    .filter(Boolean);
   const strictCount = strictMatches.length;
   if (looseLines === 1 && strictCount === 1) {
     return {

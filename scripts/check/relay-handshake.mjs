@@ -44,7 +44,6 @@ export { TIME_AUTHORITY_STATE, MAX_FUTURE_SKEW_MS };
 export { maskQuotedMarkerRegions };
 
 const TASK_ID_RE = /^task_id:\s*(\S+)/im;
-const TASK_ID_RE_G = /^task_id:\s*(\S+)/gim;
 // HYK-180 사이클1: the anchored TASK_ID_RE only matches a standalone
 // `task_id: <id>` line at column 0. When it fails to match, this
 // unanchored variant tells apart two very different failure shapes: no
@@ -54,25 +53,47 @@ const TASK_ID_RE_G = /^task_id:\s*(\S+)/gim;
 // amount of waiting fixes). Never used to accept a match; only to produce
 // a distinct diagnosis for the latter case.
 const TASK_ID_ANYWHERE_RE = /task_id:\s*(\S+)/i;
-// HYK-468 2R: header-task-id-shared.mjs의 headerBlockOf와 **로직 동일**
-// (이 파일도 admission-completion-adapter.mjs/dispatch-gate-decision.mjs와
-// 같은 이유로 로컬 복제다 -- 이 파일 자신의 헤더가 이미 설명하듯
-// hyk186-time-authority-mutation.test.mjs 등 다수의 mutation 시험이 이
-// 파일을 고정 sidecar 목록으로 격리 clone하므로, 새 정적 import를 추가하면
-// 그 시험들 전부가 깨진다, 실측 확인 없이도 이 파일 자신의 기존 주석이
-// 이미 그 위험을 경고한다). 네 곳(이 함수 + admission-completion-
-// adapter.mjs 로컬 사본 + dispatch-gate-decision.mjs 로컬 사본 +
-// header-task-id-shared.mjs 정본)이 갈라지면 회귀이므로 고칠 때는 반드시
-// 서로 대조하라.
+// HYK-468 2R: header-task-id-shared.mjs의 STRUCTURAL_LINE_RE/
+// hasStructuralPredecessor와 **로직 동일** (이 파일도 admission-
+// completion-adapter.mjs/dispatch-gate-decision.mjs와 같은 이유로 로컬
+// 복제다 -- 이 파일 자신의 헤더가 이미 설명하듯 hyk186-time-authority-
+// mutation.test.mjs 등 다수의 mutation 시험이 이 파일을 고정 sidecar
+// 목록으로 격리 clone하므로, 새 정적 import를 추가하면 그 시험들 전부가
+// 깨진다, 실측 확인 없이도 이 파일 자신의 기존 주석이 이미 그 위험을
+// 경고한다). 네 곳(이 함수 + admission-completion-adapter.mjs 로컬 사본 +
+// dispatch-gate-decision.mjs 로컬 사본 + header-task-id-shared.mjs
+// 정본)이 갈라지면 회귀이므로 고칠 때는 반드시 서로 대조하라.
 //
-// 마스킹된(펜스/HTML 주석 «안») 문자열을 받아, 첫 빈 줄 이전(=헤더 블록)
-// 만 반환한다. \r\n을 \n으로 정규화한 뒤 검색한다 -- 이 저장소의 결과
-// 파일은 실제로 CRLF이고(위 maskFencedBlocks 주석 참조), 정규화 없이는
-// `\n[ \t]*\n`이 `\r\n\r\n` 형태의 진짜 빈 줄을 못 알아본다.
-function headerBlockOf(maskedContent) {
-  const normalized = maskedContent.replace(/\r\n/g, "\n");
-  const blankLineIdx = normalized.search(/\n[ \t]*\n/);
-  return blankLineIdx === -1 ? normalized : normalized.slice(0, blankLineIdx);
+// ⚠️1R 초안(첫 빈 줄 이전만 보는 "헤더 블록" 한정)은 실제로 회귀였다 --
+// nc-relay-handshake.test.mjs의 NC-2(HYK-183): 결과 파일이 옛 라운드의
+// task_id:+>>> DONE: 블록을 그대로 두고 빈 줄 뒤에 새 라운드 블록을
+// «추가»한 경우(산문 없음, 진짜 사고), 헤더 블록만 보면 새 블록이
+// 통째로 시야 밖으로 나가 조용히 옛(스테일) 값으로 확정돼 버렸다(전체
+// 러너 실측: NC-2 RED). 빈 줄 위치만으로는 "진짜 축적된 두 번째 선언"과
+// "산문으로 소개된 인용"을 가를 수 없다 -- 둘 다 두 번째 등장 앞에 빈
+// 줄이 있다.
+//
+// 실제로 가르는 것은 그 바로 «앞» 줄이다: NC-2는 두 번째 task_id: 앞의
+// 가장 가까운 비어있지 않은 줄이 `>>> DONE: ...`(구조적 표지)이고,
+// 검토자의 반려 재현은 그 앞이 순수 산문("예를 들어 다음과 같은 줄이
+// 주입된다:")이다. 그래서 어떤 열0 `task_id:` 줄이든, 그 바로 앞(빈 줄은
+// 건너뛰고) 줄이 구조적(`key:` 형태 또는 `>>>`)이거나 파일 맨 앞이면
+// «진짜»로 세고, 산문이 선행하면 «인용/예시»로 보아 세지 않는다.
+// 마스킹(펜스/HTML 주석 «안»)은 이 검사 «이전»에 이미 공백으로 지워지므로
+// (blankKeepingNewlines) 펜스 안 인용은 이 축에 도달하지도 않는다 --
+// 별도로 다룰 필요 없다.
+// `<!--`도 구조적으로 본다 -- envelope-archive.mjs가 아카이브 사본에
+// 붙이는 한 줄짜리 `<!-- envelope-archive: ... -->` 헤더가 실선언 바로
+// 앞에 오는 경우가 있다(header-task-id-shared.mjs 헤더 참조, 실측
+// 회귀: findArchivedRoundMeta 픽스처).
+const STRUCTURAL_LINE_RE = /^[A-Za-z_][\w-]*:|^>>>|^<!--/;
+
+function hasStructuralPredecessor(lines, idx) {
+  for (let i = idx - 1; i >= 0; i--) {
+    if (lines[i].trim() === "") continue;
+    return STRUCTURAL_LINE_RE.test(lines[i]);
+  }
+  return true;
 }
 // HYK-353 2R §1 (P1-2): exported so finalize-done.mjs can resolve the exact
 // same `dropped_at:` raw text this file itself uses when it composes the
@@ -462,13 +483,16 @@ export function resolveResultTaskId(resultContent) {
   // 가린다 -- 코드펜스 «없이» 본문에 그대로 인용한 예시(예: "예를 들어
   // 다음과 같은 줄이 주입된다: task_id: HYK-...")는 마스킹을 안 받고
   // 열 0에 그대로 남아 진짜 선언과 충돌해 AMBIGUOUS로 거부됐다(실사고
-  // 재현: hyk442-blocked-door-1/.harness/coder.md류 결과 파일). 헤더
-  // 블록(첫 빈 줄 이전)으로 한 번 더 좁혀 이 축을 닫는다 -- 마스킹된
-  // 펜스/주석 줄은 공백으로만 채워지므로(blankKeepingNewlines) 빈 줄과
-  // 똑같이 "헤더 끝"으로 잡힌다(HYK-449 fixture들이 실제로 이 모양 --
-  // 별도 회귀 없음, 아래 시험으로 확인됨).
-  const header = headerBlockOf(scan);
-  const resultIdMatches = [...header.matchAll(TASK_ID_RE_G)];
+  // 재현). 구조적 선행 맥락 검사(위 hasStructuralPredecessor)로 이 축을
+  // 닫는다 -- 자세한 이유는 그 함수 정의 위 주석 참조.
+  const lines = scan.replace(/\r\n/g, "\n").split("\n");
+  const resultIdMatches = [];
+  for (let i = 0; i < lines.length; i++) {
+    const m = lines[i].match(/^task_id:\s*(\S+)/i);
+    if (!m) continue;
+    if (!hasStructuralPredecessor(lines, i)) continue;
+    resultIdMatches.push(m);
+  }
   if (resultIdMatches.length > 1) {
     return {
       ok: false,
