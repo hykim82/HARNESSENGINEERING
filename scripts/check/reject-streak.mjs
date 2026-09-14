@@ -69,7 +69,11 @@ import { execSync, execFileSync } from "node:child_process";
 //     - 인용 블록(`> `) · 들여쓴 코드블록(4칸) · 인라인 코드(`…`)는 그 줄이
 //       애초에 **칼럼 0 이 아니다**. 이 파일의 표지 정규식은 전부 `^` 앵커라
 //       원래 매치하지 못한다 -- 「범주에서 빠뜨린 자리」가 **아니라 이미 닫혀
-//       있는 자리**다.
+//       있는 자리」다. ★단 HYK-469: 이건 「그 줄 전체가 표지로 세어지지
+//       않는다」는 뜻이지 「인라인 코드 안의 <!--/--> 글자가 주석 스캐너에
+//       안 보인다」는 뜻은 아니었다 -- `maskHtmlComments` 는 줄 앵커가 아니라
+//       문자열 전체를 훑으므로 인라인 코드 «안」의 <!--/--> 도 그대로
+//       읽혔다. 아래 `maskHtmlComments`(HYK-469 갱신분)가 그 구멍을 막는다.
 // ⛔**`>>> BLOCKED:` / `NEEDS_INPUT:` 축에는 이 마스킹을 적용하지 않는다.**
 //   그 축의 「어디에 있든 센다」는 **의도된 fail-closed 설계**이고(HYK-333 ·
 //   HYK-442), 거기에 인용 제외를 넣는 것은 안전 성질을 약화시키는 회귀다.
@@ -114,13 +118,61 @@ function maskFencedBlocks(content) {
     .join("\n");
 }
 
+// HYK-469: 백틱 1개로 감싼 인라인 코드 구간(줄을 못 건넌다 -- CommonMark
+// 그대로) 안의 `<!--`/`-->` 글자는 «주석 표지 후보」로 세지 않는다. 실사고
+// (2026-09-13, HYK-468-unblock-2 결과 파일 53행): 산문 한 줄에 인라인 코드로
+// 감싼 여는 표지가 «두 번», 닫는 표지가 «한 번» 있었다. 옛 구현은 backtick 을
+// 전혀 모르고 문자열 전체에서 순서대로 <!-- 다음 --> 를 찾았으므로, 첫 쌍을
+// (우연히) 다 인라인 코드 안에서 소비한 뒤 «짝 없는 두 번째 여는 표지」를
+// 진짜 열린 주석으로 보고 그 뒤 fail-closed 규칙(문서 끝까지 마스킹)을 적용해
+// 완료 표지 줄까지 통째로 지웠다.
+//
+// ★고친 방식 -- 인라인 코드 «구간 자체를 지우지 않는다.» 대신 <!--/--> 를
+// 찾을 때 그 위치가 인라인 코드 구간 «안」이면 후보에서 제외하고 다음 실제
+// 위치를 계속 찾는다. 그래서:
+//   ⓐ 인라인 코드 밖 텍스트(예: 이 함수 자신의 문서용 예시 `QUOTED-INLINE`)는
+//      한 글자도 안 바뀐다 -- HYK-449 범주 밖 시험이 그 불변을 이미 고정한다.
+//   ⓑ 진짜 여는 표지가 «인라인 코드 밖」에 있으면, 그 닫는 짝을 찾을 때도
+//      인라인 코드 «안」의 --> 는 후보에서 제외한다 -- 그래야 인라인 코드로
+//      감싼 --> 를 끼워 넣어 진짜 주석을 조기에 «풀어버리는» 위조를 막는다.
+//   ⓒ 인라인 코드는 줄을 못 건너므로(정규식 [^`\n]*), 인라인 코드 안에 갇힌
+//      «짝 없는» 여는 표지는 애초에 그 줄을 벗어나 문서 끝까지 삼킬 길이
+//      없다 -- §2 가 요구한 「줄 단위로 닫히게」는 이 성질로 자동 성립한다.
+// ⛔진짜(인라인 코드 밖) 여는 표지가 문서 안에서 끝내 못 닫히면 여전히 문서
+// 끝까지 마스킹한다(fail-closed, 바뀌지 않음) -- HYK-449 원래 방향 그대로.
+const INLINE_CODE_SPAN_RE = /`[^`\n]*`/g;
+
+function inlineCodeRanges(content) {
+  const ranges = [];
+  for (const m of content.matchAll(INLINE_CODE_SPAN_RE)) {
+    ranges.push([m.index, m.index + m[0].length]);
+  }
+  return ranges;
+}
+
+function isInsideAnyRange(ranges, pos) {
+  return ranges.some(([start, end]) => pos >= start && pos < end);
+}
+
+function findOutsideInlineCode(content, needle, from, ranges) {
+  let at = content.indexOf(needle, from);
+  while (at !== -1 && isInsideAnyRange(ranges, at)) {
+    at = content.indexOf(needle, at + 1);
+  }
+  return at;
+}
+
 function maskHtmlComments(content) {
+  // ⚠️구간은 «원문»(마스킹 전) 기준으로 한 번만 계산한다 -- 아래 루프의
+  // 블랭크는 길이를 보존하므로(blankKeepingNewlines) 오프셋이 반복 내내
+  // 그대로 유효하다.
+  const codeRanges = inlineCodeRanges(content);
   let out = content;
   let from = 0;
   for (;;) {
-    const start = out.indexOf("<!--", from);
+    const start = findOutsideInlineCode(out, "<!--", from, codeRanges);
     if (start === -1) return out;
-    const closeAt = out.indexOf("-->", start + 4);
+    const closeAt = findOutsideInlineCode(out, "-->", start + 4, codeRanges);
     const end = closeAt === -1 ? out.length : closeAt + 3;
     out =
       out.slice(0, start) +
