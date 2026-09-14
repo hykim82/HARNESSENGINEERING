@@ -18,6 +18,15 @@
 // 관례를 따른다: 코어는 이미 파싱된 값만 받고, 어댑터(fetchCheckRuns/
 // pollCiStatus)가 실제 fetch를 수행해 코어에 구조화된 값을 넘긴다.
 
+// HYK-467 (coder-task.md §B-3): shared cross-process probe-budget tracker
+// -- see probe-budget.mjs's own header for why a shared file (not a
+// per-call in-memory counter) is required to actually enforce a COMBINED
+// cap across multiple independent watcher invocations.
+import { tmpdir } from "node:os";
+import { join, dirname } from "node:path";
+import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
+import { recordProbe, DEFAULT_CAP_PER_HOUR } from "./probe-budget.mjs";
+
 // ---- 코어: 순수 판정 함수 --------------------------------------------------
 
 // 판정은 닫힌 4갈래(coder-task.md §3-2) -- 이 밖은 없다.
@@ -54,6 +63,14 @@ export const CI_EXIT_CODE = Object.freeze({
 // 그대로 지킨다.
 export const CI_REASON_CODE = Object.freeze({
   RATE_LIMIT_EXHAUSTED: "RATE_LIMIT_EXHAUSTED",
+  // HYK-467 (coder-task.md §B-3): distinct from RATE_LIMIT_EXHAUSTED above
+  // on purpose -- that code means "GitHub itself told us (403 +
+  // X-RateLimit-Remaining:0)". This one means "this tool's OWN shared,
+  // cross-process probe-budget tracker (probe-budget.mjs) says the
+  // combined probe count across every watcher pointed at the same budget
+  // file already hit the cap, so this call was never even attempted."
+  // Conflating the two would hide which layer actually stopped the call.
+  LOCAL_PROBE_BUDGET_EXHAUSTED: "LOCAL_PROBE_BUDGET_EXHAUSTED",
 });
 
 // total_count: 0(체크가 하나도 안 붙음)의 처리 -- coder-task.md §3-2
@@ -344,6 +361,22 @@ function readHeader(res, name) {
   return typeof value === "string" ? value : null;
 }
 
+// HYK-467 (coder-task.md §B-3) -- 2026-09-10 실사고: 감시기 여러 개가
+// 각자 자기 호출만 세는 개별 예산을 지켰는데도 합계가 GitHub 무인증
+// 한도(시간당 60회)를 넘겼다. 기본 경로는 OS 임시 디렉터리(머신 전역,
+// 워크트리별이 아니다) -- 이 한도는 IP 기반이라 같은 머신의 어떤
+// 워크트리·어떤 프로세스에서 부르든 «같은» 한도를 공유하기 때문에,
+// 워크트리 안(.harness/ 등)에 두면 서로 다른 워크트리가 각자 다른
+// 카운터를 보게 되어 이 수리의 목적(합산)이 무의미해진다. ⛔환경변수로는
+// 재정의하지 않는다(process.env 참조 0 -- 이 모듈의 무인증 계약, 아래
+// "소스에 토큰/자격증명 참조가 없다" 시험이 고정) -- 다른 경로/상한이
+// 필요한 호출자(시험 포함)는 `fetchCheckRuns`/`pollCiStatus`의
+// `probeBudgetPath`/`capPerHour` 인자로 직접 넘긴다.
+const DEFAULT_PROBE_BUDGET_PATH = join(
+  tmpdir(),
+  "harness-ci-status-probe-budget.json",
+);
+
 // ⛔토큰 참조 0 -- Authorization 헤더를 세팅하지 않는다(공개 API 무인증
 // 읽기, coder-task.md §3-1). 이 함수 본문 전체에 토큰/자격증명 변수가
 // 없다는 사실 자체가 3-4-6 시험이 고정하는 계약이다.
@@ -352,7 +385,31 @@ export async function fetchCheckRuns({
   repo,
   sha,
   fetchFn = fetch,
+  probeBudgetPath = DEFAULT_PROBE_BUDGET_PATH,
+  now = Date.now(),
+  capPerHour = DEFAULT_CAP_PER_HOUR,
+  recordProbeFn = recordProbe,
 } = {}) {
+  // 실제 네트워크 호출«보다 먼저» 예산을 확인한다 -- 예산이 이미
+  // 소진됐으면 이 호출 자체를 시도하지 않는다(그래서 이 프로브는 공유
+  // 카운터에도 추가되지 않는다, probe-budget.mjs 자신의 계약).
+  const budget = recordProbeFn({
+    budgetPath: probeBudgetPath,
+    nowMs: now,
+    capPerHour,
+    readFn: readFileSync,
+    writeFn: writeFileSync,
+    mkdirFn: mkdirSync,
+    existsFn: existsSync,
+    dirnameFn: dirname,
+  });
+  if (!budget.ok) {
+    return {
+      verdict: CI_VERDICT.UNKNOWN,
+      reasonCode: CI_REASON_CODE.LOCAL_PROBE_BUDGET_EXHAUSTED,
+      reason: `공유 프로브 예산 소진(합계 ${budget.countInWindow}/${budget.capPerHour}, 시간당, 이 도구를 부르는 모든 감시기 합산) -- 실제 GitHub 요청을 시도하지 않았다(확인 불가, 예산 회복 뒤 재시도)`,
+    };
+  }
   const url = `${GITHUB_API_BASE}/repos/${owner}/${repo}/commits/${sha}/check-runs`;
   let res;
   try {
@@ -434,8 +491,17 @@ export async function pollCiStatus({
   maxAttempts = 60,
   sleepFn = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   onAttempt,
+  // HYK-467 (coder-task.md §B-3): threaded straight through to every
+  // fetchCheckRuns call this poller makes -- a single poll loop can itself
+  // be one of the "여러 감시기" sharing the combined budget, and every
+  // attempt in the loop must consult (and count against) the SAME shared
+  // file, not silently fall back to the real default on attempt 2+.
+  probeBudgetPath,
+  capPerHour,
+  recordProbeFn,
 } = {}) {
-  let last = await fetchCheckRuns({ owner, repo, sha, fetchFn });
+  const probeArgs = { probeBudgetPath, capPerHour, recordProbeFn };
+  let last = await fetchCheckRuns({ owner, repo, sha, fetchFn, ...probeArgs });
   if (last.verdict === CI_VERDICT.UNKNOWN) {
     // "도구가 살아 있다"는 확인 자체가 실패 -- 대기에 들어가지 않는다.
     return { ...last, attempts: 1 };
@@ -444,7 +510,7 @@ export async function pollCiStatus({
   if (typeof onAttempt === "function") onAttempt(attempts, last);
   while (last.verdict === CI_VERDICT.PENDING && attempts < maxAttempts) {
     await sleepFn(intervalMs);
-    last = await fetchCheckRuns({ owner, repo, sha, fetchFn });
+    last = await fetchCheckRuns({ owner, repo, sha, fetchFn, ...probeArgs });
     attempts += 1;
     if (typeof onAttempt === "function") onAttempt(attempts, last);
     if (last.verdict === CI_VERDICT.UNKNOWN) {

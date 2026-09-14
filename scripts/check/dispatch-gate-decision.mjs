@@ -18,7 +18,7 @@ import {
   rmSync,
 } from "node:fs";
 import { createHash } from "node:crypto";
-import { join, dirname } from "node:path";
+import { join, dirname, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import {
@@ -3232,6 +3232,58 @@ function bestEffortStampDroppedAt(taskPath, args) {
   }
 }
 
+// HYK-465 (coder-task.md §A): 2026-09-10 P1 반려의 실제 원인 -- `.harness/`
+// 는 git-ignore라 작성자 결과(`<role>.md`)·러너 영수증이 커밋 diff에
+// 절대 나오지 않는데, 지시서 자체가 그 절대경로를 안 적었다. 검토자는
+// "볼 수 있는 표면을 전수 조사하고 없다"고 정직하게 반려했다 -- 사람이
+// 매번 손으로 그 경로를 기억해 적는 방식은 이미 실패로 증명됐다(그날
+// 안 적혔다). ⇒ 이 가게이트가 배달 직전 항상 거치는 자리라는 점(HYK-217
+// 앵커, dispatch-worker.ps1:256)을 이용해, bestEffortStampDroppedAt과
+// 같은 best-effort/비파괴 스타일로 그 경로들을 task 파일에 기계로
+// 박아 넣는다. 이미 박혀 있으면(RESULT_FILE_LINE_RE 매치) 다시 넣지
+// 않는다(idempotent -- 재실행/재게이트에서 중복 삽입 없음).
+const RESULT_FILE_LINE_RE = /^result_file:\s*.+$/im;
+
+function bestEffortInjectResultPaths(taskPath, args) {
+  guardAgainstLiveTaskPathStamp(taskPath, args);
+  const role = deriveRoleFromTaskPath(taskPath);
+  if (!role) return;
+  try {
+    const original = readFileSync(taskPath, "utf8");
+    if (RESULT_FILE_LINE_RE.test(original)) {
+      return; // already injected -- idempotent no-op, never duplicates
+    }
+    const taskIdLineMatch = original.match(TASK_ID_LINE_FOR_INSERT_RE);
+    if (!taskIdLineMatch) {
+      console.log(
+        `dispatch-gate-decision: result-path injection skipped (no 'task_id:' line in ${taskPath} -- not shaped like a round task file, this round does not invent one)`,
+      );
+      return;
+    }
+    const harnessDir = resolve(dirname(taskPath));
+    const resultFile = join(harnessDir, `${role.toLowerCase()}.md`);
+    const receiptFile = join(harnessDir, "runner-receipt.json");
+    // HYK-465 §A-3 (책임자 지시): 같은 주입 경로로 워크트리 이동 금지
+    // 규율도 함께 박는다 -- 손 주입은 다음 라운드에서 사라진다.
+    const block =
+      `\nresult_file: ${resultFile}` +
+      `\nrunner_receipt_file: ${receiptFile}` +
+      `\nharness_gitignore_note: .harness/ 는 git-ignore라 커밋 diff에 절대 안 나온다 -- 검토는 위 절대경로 파일을 직접 열어 확인하라(HYK-465 기계 주입, 손 기억 의존 금지).` +
+      `\nworktree_discipline: 작업/검토가 끝나면 DONE 을 찍기 «전»에 워크트리를 작업/검토한 커밋에 둔 채로 두라 -- 뒷정리로 HEAD 를 옮기면 소비가 막힌다(HYK-465 기계 주입).`;
+    const insertAt = taskIdLineMatch.index + taskIdLineMatch[0].length;
+    const inserted =
+      original.slice(0, insertAt) + block + original.slice(insertAt);
+    writeFileSync(taskPath, inserted, "utf8");
+    console.log(
+      `dispatch-gate-decision: result-path block machine-injected (HYK-465) -- ${taskPath} -> result_file=${resultFile}, runner_receipt_file=${receiptFile}`,
+    );
+  } catch (err) {
+    console.error(
+      `dispatch-gate-decision: result-path injection best-effort failed (non-fatal to this CLI's own exit code): ${err.message}`,
+    );
+  }
+}
+
 export function runDispatchGateDecision(argv) {
   const args = parseArgs(argv);
   const taskPath = args._[0];
@@ -3262,6 +3314,15 @@ export function runDispatchGateDecision(argv) {
     // HYK-257-done-stamp-2 §2 범위2 ⓑ: as early as possible once the file's
     // existence is confirmed, before any gate decision runs -- best-effort,
     // never blocks/changes what follows.
+    // HYK-465 (coder-task.md §A-2): runs BEFORE bestEffortStampDroppedAt,
+    // not after -- bestEffortStampDroppedAt's own round-snapshot call
+    // (bestEffortSnapshotRoundTaskFile) assumes it is always the LAST
+    // rewrite before anything reads "this round's final text"
+    // (dispatch-gate-round-snapshot.test.mjs's whole contract). Running
+    // this injection first means dropped_at stamping still runs last and
+    // its snapshot captures the fully-final content, exactly like before
+    // this round existed.
+    bestEffortInjectResultPaths(taskPath, args);
     bestEffortStampDroppedAt(taskPath, args);
     const ledgerResolution = resolveLedgerPath(args, taskPath);
     const pathDecision = checkLedgerPathResolution(ledgerResolution);
