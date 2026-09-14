@@ -366,7 +366,7 @@ function stageScriptsCheckDir(rootDir, overrides) {
 test("RED(변이, 필수, 3R §2-1/2-2): classifyTaskIdLabel을 2R의 옛 anyCount 비교(줄머리 전체를 anyCount와 비교)로 되돌리면 오늘 실제로 막힌 두 봉투가 다시 BROKEN으로 새어 차단이 재현된다", () => {
   const src = readFileSync(SCRIPT_PATH, "utf8");
   const target =
-    'const TASK_ID_LOOSE_LINE_RE = /^task_id:.*$/gim;\nconst TASK_ID_ANY_RE = /task_id:/gi;\n\nfunction classifyTaskIdLabel(resultText) {\n  const looseLines = [...resultText.matchAll(TASK_ID_LOOSE_LINE_RE)].length;\n  if (looseLines === 0) {\n    const anyCount = [...resultText.matchAll(TASK_ID_ANY_RE)].length;\n    if (anyCount === 0) {\n      return { kind: "MISSING", looseLines: 0, strictCount: 0 };\n    }\n    return { kind: "BROKEN", looseLines: 0, strictCount: 0, anyCount };\n  }\n  const strictMatches = [...resultText.matchAll(CONSUMPTION_TASK_ID_RE_G)];\n  const strictCount = strictMatches.length;\n  if (looseLines === 1 && strictCount === 1) {\n    return {\n      kind: "VALID",\n      value: strictMatches[0][1].trim(),\n      looseLines,\n      strictCount,\n    };\n  }\n  return { kind: "BROKEN", looseLines, strictCount };\n}';
+    'function classifyTaskIdLabel(resultText) {\n  const header = headerBlockOf(resultText);\n  const looseLines = [...header.matchAll(TASK_ID_LOOSE_LINE_RE)].length;\n  if (looseLines === 0) {\n    const anyCount = [...header.matchAll(TASK_ID_ANY_RE)].length;\n    if (anyCount === 0) {\n      return { kind: "MISSING", looseLines: 0, strictCount: 0 };\n    }\n    return { kind: "BROKEN", looseLines: 0, strictCount: 0, anyCount };\n  }\n  const strictMatches = [...header.matchAll(CONSUMPTION_TASK_ID_RE_G)];\n  const strictCount = strictMatches.length;\n  if (looseLines === 1 && strictCount === 1) {\n    return {\n      kind: "VALID",\n      value: strictMatches[0][1].trim(),\n      looseLines,\n      strictCount,\n    };\n  }\n  return { kind: "BROKEN", looseLines, strictCount };\n}';
   assertExactlyOneMatch(
     src,
     target,
@@ -376,9 +376,12 @@ test("RED(변이, 필수, 3R §2-1/2-2): classifyTaskIdLabel을 2R의 옛 anyCou
   // 5R 이전(2R)의 버그: looseLines===0일 때만이 아니라 VALID 판정
   // 자체를 anyCount===looseLines 비교로 가로막는다 -- 오늘 실물 2봉투
   // (줄머리 1 + 원시 3·11)가 이 비교에서 다시 BROKEN으로 떨어진다.
+  // (HYK-468 2R: 이 되돌림은 header-scoping «이전»의 2R 코드 모양을
+  // 재현하는 것이 목적이라, resultText를 그대로 쓴다 -- headerBlockOf로
+  // 다시 좁히면 이 시험이 재현하려는 옛 결함 자체가 사라진다.)
   const mutated = src.replace(
     target,
-    'const TASK_ID_LOOSE_LINE_RE = /^task_id:.*$/gim;\nconst TASK_ID_ANY_RE = /task_id:/gi;\n\nfunction classifyTaskIdLabel(resultText) {\n  const anyCount = [...resultText.matchAll(TASK_ID_ANY_RE)].length;\n  if (anyCount === 0) {\n    return { kind: "MISSING", looseLines: 0, strictCount: 0 };\n  }\n  const looseLines = [...resultText.matchAll(TASK_ID_LOOSE_LINE_RE)].length;\n  const strictMatches = [...resultText.matchAll(CONSUMPTION_TASK_ID_RE_G)];\n  const strictCount = strictMatches.length;\n  if (anyCount === looseLines && looseLines === 1 && strictCount === 1) {\n    return {\n      kind: "VALID",\n      value: strictMatches[0][1].trim(),\n      looseLines,\n      strictCount,\n    };\n  }\n  return { kind: "BROKEN", looseLines, strictCount };\n}',
+    'function classifyTaskIdLabel(resultText) {\n  const anyCount = [...resultText.matchAll(TASK_ID_ANY_RE)].length;\n  if (anyCount === 0) {\n    return { kind: "MISSING", looseLines: 0, strictCount: 0 };\n  }\n  const looseLines = [...resultText.matchAll(TASK_ID_LOOSE_LINE_RE)].length;\n  const strictMatches = [...resultText.matchAll(CONSUMPTION_TASK_ID_RE_G)];\n  const strictCount = strictMatches.length;\n  if (anyCount === looseLines && looseLines === 1 && strictCount === 1) {\n    return {\n      kind: "VALID",\n      value: strictMatches[0][1].trim(),\n      looseLines,\n      strictCount,\n    };\n  }\n  return { kind: "BROKEN", looseLines, strictCount };\n}',
   );
 
   withFixtureDir((dir) => {

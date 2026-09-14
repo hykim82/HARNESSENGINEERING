@@ -54,6 +54,26 @@ const TASK_ID_RE_G = /^task_id:\s*(\S+)/gim;
 // amount of waiting fixes). Never used to accept a match; only to produce
 // a distinct diagnosis for the latter case.
 const TASK_ID_ANYWHERE_RE = /task_id:\s*(\S+)/i;
+// HYK-468 2R: header-task-id-shared.mjs의 headerBlockOf와 **로직 동일**
+// (이 파일도 admission-completion-adapter.mjs/dispatch-gate-decision.mjs와
+// 같은 이유로 로컬 복제다 -- 이 파일 자신의 헤더가 이미 설명하듯
+// hyk186-time-authority-mutation.test.mjs 등 다수의 mutation 시험이 이
+// 파일을 고정 sidecar 목록으로 격리 clone하므로, 새 정적 import를 추가하면
+// 그 시험들 전부가 깨진다, 실측 확인 없이도 이 파일 자신의 기존 주석이
+// 이미 그 위험을 경고한다). 네 곳(이 함수 + admission-completion-
+// adapter.mjs 로컬 사본 + dispatch-gate-decision.mjs 로컬 사본 +
+// header-task-id-shared.mjs 정본)이 갈라지면 회귀이므로 고칠 때는 반드시
+// 서로 대조하라.
+//
+// 마스킹된(펜스/HTML 주석 «안») 문자열을 받아, 첫 빈 줄 이전(=헤더 블록)
+// 만 반환한다. \r\n을 \n으로 정규화한 뒤 검색한다 -- 이 저장소의 결과
+// 파일은 실제로 CRLF이고(위 maskFencedBlocks 주석 참조), 정규화 없이는
+// `\n[ \t]*\n`이 `\r\n\r\n` 형태의 진짜 빈 줄을 못 알아본다.
+function headerBlockOf(maskedContent) {
+  const normalized = maskedContent.replace(/\r\n/g, "\n");
+  const blankLineIdx = normalized.search(/\n[ \t]*\n/);
+  return blankLineIdx === -1 ? normalized : normalized.slice(0, blankLineIdx);
+}
 // HYK-353 2R §1 (P1-2): exported so finalize-done.mjs can resolve the exact
 // same `dropped_at:` raw text this file itself uses when it composes the
 // (taskId, droppedAt) key it hands to first-observation.mjs's
@@ -438,7 +458,17 @@ function isInsideGitWorktree(dir) {
 export function resolveResultTaskId(resultContent) {
   // HYK-449: 인용된(코드블록·HTML 주석) 줄은 이 문서가 «말한» 것이 아니다.
   const scan = maskQuotedMarkerRegions(resultContent);
-  const resultIdMatches = [...scan.matchAll(TASK_ID_RE_G)];
+  // HYK-468 2R (검토자 P1 반려, 정당함): 마스킹은 펜스/HTML 주석 «안»만
+  // 가린다 -- 코드펜스 «없이» 본문에 그대로 인용한 예시(예: "예를 들어
+  // 다음과 같은 줄이 주입된다: task_id: HYK-...")는 마스킹을 안 받고
+  // 열 0에 그대로 남아 진짜 선언과 충돌해 AMBIGUOUS로 거부됐다(실사고
+  // 재현: hyk442-blocked-door-1/.harness/coder.md류 결과 파일). 헤더
+  // 블록(첫 빈 줄 이전)으로 한 번 더 좁혀 이 축을 닫는다 -- 마스킹된
+  // 펜스/주석 줄은 공백으로만 채워지므로(blankKeepingNewlines) 빈 줄과
+  // 똑같이 "헤더 끝"으로 잡힌다(HYK-449 fixture들이 실제로 이 모양 --
+  // 별도 회귀 없음, 아래 시험으로 확인됨).
+  const header = headerBlockOf(scan);
+  const resultIdMatches = [...header.matchAll(TASK_ID_RE_G)];
   if (resultIdMatches.length > 1) {
     return {
       ok: false,

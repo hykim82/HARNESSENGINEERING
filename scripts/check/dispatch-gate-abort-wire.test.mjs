@@ -764,7 +764,7 @@ test("§D-5 대조군(회귀 0): 1R §A(진짜 「이름표 없음」)는 이번
 test("RED(변이, 필수, 5R §2 ⓓ): classifyTaskIdLabel의 looseLines===0 원시 출현 재질문을 제거하면(4R 이전 동작으로 되돌리면), middle_of_line + 완전히 유효한 중단 기록이 다시 ALLOW로 샌다", () => {
   const srcBefore = readFileSync(SCRIPT_PATH, "utf8");
   const target =
-    'function classifyTaskIdLabel(resultText) {\n  const looseLines = [...resultText.matchAll(TASK_ID_LOOSE_LINE_RE)].length;\n  if (looseLines === 0) {\n    const anyCount = [...resultText.matchAll(TASK_ID_ANY_RE)].length;\n    if (anyCount === 0) {\n      return { kind: "MISSING", looseLines: 0, strictCount: 0 };\n    }\n    return { kind: "BROKEN", looseLines: 0, strictCount: 0, anyCount };\n  }\n  const strictMatches = [...resultText.matchAll(CONSUMPTION_TASK_ID_RE_G)];';
+    'function classifyTaskIdLabel(resultText) {\n  const header = headerBlockOf(resultText);\n  const looseLines = [...header.matchAll(TASK_ID_LOOSE_LINE_RE)].length;\n  if (looseLines === 0) {\n    const anyCount = [...header.matchAll(TASK_ID_ANY_RE)].length;\n    if (anyCount === 0) {\n      return { kind: "MISSING", looseLines: 0, strictCount: 0 };\n    }\n    return { kind: "BROKEN", looseLines: 0, strictCount: 0, anyCount };\n  }\n  const strictMatches = [...header.matchAll(CONSUMPTION_TASK_ID_RE_G)];';
   assertExactlyOneMatch(
     srcBefore,
     target,
@@ -772,7 +772,7 @@ test("RED(변이, 필수, 5R §2 ⓓ): classifyTaskIdLabel의 looseLines===0 원
   );
   const mutated = srcBefore.replace(
     target,
-    'function classifyTaskIdLabel(resultText) {\n  const looseLines = [...resultText.matchAll(TASK_ID_LOOSE_LINE_RE)].length;\n  if (looseLines === 0) {\n    return { kind: "MISSING", looseLines: 0, strictCount: 0 };\n  }\n  const strictMatches = [...resultText.matchAll(CONSUMPTION_TASK_ID_RE_G)];',
+    'function classifyTaskIdLabel(resultText) {\n  const header = headerBlockOf(resultText);\n  const looseLines = [...header.matchAll(TASK_ID_LOOSE_LINE_RE)].length;\n  if (looseLines === 0) {\n    return { kind: "MISSING", looseLines: 0, strictCount: 0 };\n  }\n  const strictMatches = [...header.matchAll(CONSUMPTION_TASK_ID_RE_G)];',
   );
 
   withFixtureDir((dir) => {

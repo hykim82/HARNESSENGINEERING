@@ -710,11 +710,14 @@ function extractSoleMatch(text, reG) {
 // (실사고: hyk442-blocked-door-1/.harness/coder.md 1행 실선언 + 24행
 // 인용 예시 -- CONSUMPTION_TASK_ID_RE_G를 whole-file로 돌리던 이 파일의
 // 세 round-archive 라벨 매처가 전부 이 결함을 그대로 물려받고 있었다).
-function resolveHeaderTaskId(content) {
+function headerBlockOf(content) {
   const normalized = (content ?? "").replace(/\r\n/g, "\n");
   const blankLineIdx = normalized.search(/\n[ \t]*\n/);
-  const header =
-    blankLineIdx === -1 ? normalized : normalized.slice(0, blankLineIdx);
+  return blankLineIdx === -1 ? normalized : normalized.slice(0, blankLineIdx);
+}
+
+function resolveHeaderTaskId(content) {
+  const header = headerBlockOf(content);
   const matches = [...header.matchAll(/^task_id:[ \t]*(\S+)/gim)];
   if (matches.length !== 1) return { ok: false, count: matches.length };
   return { ok: true, id: matches[0][1] };
@@ -780,16 +783,27 @@ function resolveHeaderTaskId(content) {
 const TASK_ID_LOOSE_LINE_RE = /^task_id:.*$/gim;
 const TASK_ID_ANY_RE = /task_id:/gi;
 
+// HYK-468 2R (검토자 P1 반려, 정당함): 아래 세 카운트를 전부 resultText
+// «전체»가 아니라 그 헤더 블록(첫 빈 줄 이전, 위 headerBlockOf)으로
+// 한정한다 -- 코드펜스로 감싸지 않은 채 본문에 그대로 인용한 예시(예:
+// "예를 들어 다음과 같은 줄이 주입된다: task_id: HYK-...")가 옛 로직
+// 에서는 looseLines를 2로 세어 진짜 선언과 구별되지 않고 BROKEN으로
+// 떨어졌다(실사고 재현, admission-completion-adapter.mjs/relay-
+// handshake.mjs와 같은 결함 계열). 헤더 블록 밖의 언급은 이 축의 관심사가
+// 아니다 -- "표지는 «줄머리»에 있는 것이다"라는 이 함수 자신의 기존
+// 철학(위 HYK-298-label-classify-3 주석)을 "그리고 «헤더 블록 안»의
+// 줄머리다"로 한 번 더 좁힌 것뿐, 새 철학이 아니다.
 function classifyTaskIdLabel(resultText) {
-  const looseLines = [...resultText.matchAll(TASK_ID_LOOSE_LINE_RE)].length;
+  const header = headerBlockOf(resultText);
+  const looseLines = [...header.matchAll(TASK_ID_LOOSE_LINE_RE)].length;
   if (looseLines === 0) {
-    const anyCount = [...resultText.matchAll(TASK_ID_ANY_RE)].length;
+    const anyCount = [...header.matchAll(TASK_ID_ANY_RE)].length;
     if (anyCount === 0) {
       return { kind: "MISSING", looseLines: 0, strictCount: 0 };
     }
     return { kind: "BROKEN", looseLines: 0, strictCount: 0, anyCount };
   }
-  const strictMatches = [...resultText.matchAll(CONSUMPTION_TASK_ID_RE_G)];
+  const strictMatches = [...header.matchAll(CONSUMPTION_TASK_ID_RE_G)];
   const strictCount = strictMatches.length;
   if (looseLines === 1 && strictCount === 1) {
     return {
