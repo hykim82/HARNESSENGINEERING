@@ -82,11 +82,27 @@ const TASK_ID_ANYWHERE_RE = /task_id:\s*(\S+)/i;
 // 마스킹(펜스/HTML 주석 «안»)은 이 검사 «이전»에 이미 공백으로 지워지므로
 // (blankKeepingNewlines) 펜스 안 인용은 이 축에 도달하지도 않는다 --
 // 별도로 다룰 필요 없다.
-// `<!--`도 구조적으로 본다 -- envelope-archive.mjs가 아카이브 사본에
-// 붙이는 한 줄짜리 `<!-- envelope-archive: ... -->` 헤더가 실선언 바로
-// 앞에 오는 경우가 있다(header-task-id-shared.mjs 헤더 참조, 실측
-// 회귀: findArchivedRoundMeta 픽스처).
-const STRUCTURAL_LINE_RE = /^[A-Za-z_][\w-]*:|^>>>|^<!--/;
+// HYK-468 3R (P1-2, 검토자 반려 재수리): 2R은 여기에 `|^<!--`를 정본에
+// 없는 «대안 하나»로 더 얹었다(envelope-archive.mjs가 붙이는 한 줄짜리
+// `<!-- envelope-archive: ... -->` 헤더를 실선언 바로 앞에서 구조적으로
+// 보이게 하려던 의도) -- 그런데 정본 header-task-id-shared.mjs 헤더가
+// 이미 설명하듯, 올바른 축은 "`<!--`로 시작하면 무조건 구조적"이 아니라
+// «주석 자체를 마스킹으로 지우고 남는가»다: maskQuotedMarkerRegions
+// (위 import, HYK-449)가 정상 한 줄 주석이든 hyk396-dispatch-
+// stamp.test.mjs (o)가 합성한 «일부러 깨진» 다줄 주석(닫는 `-->`가
+// 다음 줄로 밀려난 모양)이든 이 검사 «이전»에 이미 처리한다 -- 정상
+// 주석은 통째로 공백이 되어 빈 줄과 똑같이 건너뛰므로(아래
+// hasStructuralPredecessor가 그 앞줄까지 마저 보아 «파일 맨 앞»이면
+// 구조적으로 확정한다) 실선언은 여전히 산다. 깨진 다줄 주석은 닫히지
+// 않은 채 문서 끝까지 마스킹되어(reject-streak.mjs의 FENCE_OPEN_RE와
+// 같은 fail-closed 방향) 그 안에 있던 무엇이든 이 축에 도달하지 않고,
+// classifyArchivedDispatchId 같은 손상 전담 검사가 여전히 REJECT를
+// 낸다. `|^<!--`를 STRUCTURAL_LINE_RE에 직접 넣으면 이 구분이 사라져
+// «깨진» 다줄 주석까지 무조건 구조적으로 보여, 그 검사가 지키려는 축을
+// 가려버린다(검토자 실측 지적, P1-2 표적 2) -- 그래서 정본과 바이트
+// 동일하게 되돌린다(scripts/check/hyk468-3r-copy-drift.test.mjs가 이
+// 동일성을 기계로 단정).
+const STRUCTURAL_LINE_RE = /^[A-Za-z_][\w-]*:|^>>>/;
 
 function hasStructuralPredecessor(lines, idx) {
   for (let i = idx - 1; i >= 0; i--) {

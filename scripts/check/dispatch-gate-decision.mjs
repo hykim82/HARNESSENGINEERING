@@ -739,10 +739,19 @@ function extractSoleMatch(text, reG) {
 // 이미 그렇게 처리한다) -- 그래서 정상 주석 뒤의 실선언은 살고, 깨진
 // 주석은 애초에 이 축에 걸리지 않아 classifyArchivedDispatchId 등 그
 // 손상을 실제로 겨눈 검사가 여전히 REJECT를 낸다.
+//
+// HYK-468 3R (P1-2 표적 2, 검토자 반려 재수리): 이 정규식을 인라인으로
+// 두면 정본 header-task-id-shared.mjs와 "바이트 동일"함을 기계로 대조할
+// 자리가 없다. STRUCTURAL_LINE_RE라는 이름의 별도 상수로 뽑아 정본과
+// 정확히 같은 텍스트로 둔다(scripts/check/hyk468-3r-copy-drift.test.mjs가
+// 이 상수와 hasStructuralPredecessor 본문 둘 다 정본과 바이트 동일함을
+// 단정한다) -- 판정 자체는 조금도 바뀌지 않는다.
+const STRUCTURAL_LINE_RE = /^[A-Za-z_][\w-]*:|^>>>/;
+
 function hasStructuralPredecessor(lines, idx) {
   for (let i = idx - 1; i >= 0; i--) {
     if (lines[i].trim() === "") continue;
-    return /^[A-Za-z_][\w-]*:|^>>>/.test(lines[i]);
+    return STRUCTURAL_LINE_RE.test(lines[i]);
   }
   return true;
 }
@@ -834,7 +843,14 @@ const TASK_ID_ANY_RE = /task_id:/gi;
 // 아니다 -- "표지는 «줄머리»에 있는 것이다"라는 이 함수 자신의 기존
 // 철학(위 HYK-298-label-classify-3 주석)을 "그리고 «헤더 블록 안»의
 // 줄머리다"로 한 번 더 좁힌 것뿐, 새 철학이 아니다.
-function classifyTaskIdLabel(resultText) {
+// HYK-468 3R §3: 2R 검토자는 이 함수가 공개 export가 아니어서 메모리
+// 전용 probe로 우회해야 했다(REVIEW-r27.md "정직 한계"). coder-task.md
+// §3의 "export하는 편이 낫다고 판단하면 그렇게 하라"에 따라 이 라운드는
+// 테스트 전용으로 export한다 -- classifyTaskIdLabel 자신의 판정 로직은
+// 한 글자도 바뀌지 않는다(`export` 키워드만 추가). 이 파일이 이미
+// DISPATCH_RECEIPT_LOOKUP_REASON(아래) 등을 시험이 직접 값을 대조할 수
+// 있게 export하는 것과 같은 관례다.
+export function classifyTaskIdLabel(resultText) {
   const lines = maskQuotedMarkerRegions(
     (resultText ?? "").replace(/\r\n/g, "\n"),
   ).split("\n");

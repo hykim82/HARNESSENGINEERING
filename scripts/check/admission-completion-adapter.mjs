@@ -127,35 +127,132 @@ import { resolveEnvelopeBindingValidity } from "./envelope-archive.mjs";
 // 강제되는 계약 -- 기계 강제는 이번 범위 밖).
 const BLOCKED_RE = /^>>>[ \t]*(BLOCKED|NEEDS_INPUT):[ \t]*(\S.*?)[ \t]*$/gim;
 
-// HYK-468: header-task-id-shared.mjs의 resolveHeaderTaskId와 **로직 동일**
-// (이 파일이 위 헤더에서 이미 설명한 "무거운/많이 참조되는 모듈을 끌어들
-// 이지 않기 위해 작은 것들은 복제한다" 원칙 그대로 -- 새 import를 추가하면
+// HYK-468 3R (P1-1, 검토자 반려 재수리): 2R은 이 함수를 "첫 빈 줄 앞만
+// 읽는" 방식으로 두고 "이미 1R에서 고쳤다"고 잘못 전제했다 -- 실은 그
+// "첫 빈 줄" 방식 자체가 1R의 틀린 초안이었고(아래 참조), 2R 지시서가
+// 세 번째 독자(이 파일)에는 그 사실을 반영하라고 말하지 않아 여기만 옛
+// 방식에 머물렀다(ORCH 스펙 오류, coder-task.md §1 표 참조). 검토자가
+// NC-2 입력(빈 줄로 갈린 «구조적» 선언 2개)을 직접 주입해, relay·dispatch는
+// 거부하는데 이 함수만 「옛 값」을 확정함을 실측으로 잡았다 -- 실제 소비
+// 경로의 fail-closed 보장을 깨는 P1.
+//
+// header-task-id-shared.mjs(정본)의 STRUCTURAL_LINE_RE/
+// hasStructuralPredecessor/resolveHeaderTaskId와 **로직 동일**(이 파일이
+// 위 헤더에서 이미 설명한 "무거운/많이 참조되는 모듈을 끌어들이지 않기
+// 위해 작은 것들은 복제한다" 원칙 그대로 -- 새 import를 추가하면
 // admission-completion-worktree-isolation.test.mjs/admission-completion-
 // persistent-source.test.mjs의 고정 sibling 파일 목록이 이 파일을 더는
-// 못 찾아 MODULE_NOT_FOUND로 깨진다, 실측 확인). 두 곳이 갈라지면 회귀이므
-// 로 이 함수를 고칠 때는 반드시 header-task-id-shared.mjs와 대조하라.
+// 못 찾아 MODULE_NOT_FOUND로 깨진다, 실측 확인. maskQuotedMarkerRegions도
+// 같은 이유로 reject-streak.mjs에서 import하지 않고 아래에 로컬 복제한다).
+// 네 곳(이 함수 + relay-handshake.mjs 로컬 사본 + dispatch-gate-
+// decision.mjs 로컬 사본 + header-task-id-shared.mjs 정본)이 갈라지면
+// 회귀이므로 고칠 때는 반드시 서로 대조하라(scripts/check/hyk468-3r-copy-
+// drift.test.mjs가 STRUCTURAL_LINE_RE와 hasStructuralPredecessor 본문의
+// 바이트 동일성을 기계로 단정한다).
 //
-// task_id: 선언은 파일 머리의 헤더 블록(첫 빈 줄 이전)에서만 읽는다 --
-// 예전에는 resultContent 전체를 훑어, 본문에 나중에 인용된
-// `task_id:` 줄(예: 이 어댑터가 주입한 결과를 그대로 인용해 보여주는
-// coder.md의 코드펜스)이 진짜 선언과 충돌해 "2개"로 잘못 셌다(실사고:
-// hyk442-blocked-door-1/.harness/coder.md 1행 실선언 + 24행 인용 예시).
+// task_id: 선언은 정확히 하나의 «구조적 선행 맥락»이 있는 열0 줄에서만
+// 읽는다 -- 그 바로 앞(빈 줄/마스킹된 줄은 건너뛰고) 줄이 다른 헤더 줄
+// (`key:` 형태)이거나 `>>>` 표지이거나 파일 맨 앞이면 «진짜», 산문이
+// 선행하면 «인용/예시»로 본다(2R이 고친 hyk442-blocked-door-1/.harness/
+// coder.md 1행 실선언 + 24행 인용 예시 실사고는 여전히 막는다).
+// ⚠️1R의 "첫 빈 줄 앞만" 방식, 2R의 그 방식 유지는 둘 다 회귀였다 --
+// 빈 줄로 나뉜 두 개의 «진짜» 구조적 task_id: 선언(옛 라운드 유지 + 새
+// 라운드 추가, 산문 없음, HYK-183 NC-2 모양)을 헤더 블록 밖이라는 이유로
+// 못 보고 스테일 값(matches[0])으로 조용히 확정해 버렸다(검토자 실측:
+// admission만 `ok:true,id:"HYK-468-old"`, relay/dispatch는 거부).
+// 자세한 이유는 header-task-id-shared.mjs 헤더 주석 참조(이 로직의 정본).
+const STRUCTURAL_LINE_RE = /^[A-Za-z_][\w-]*:|^>>>/;
+
+function hasStructuralPredecessor(lines, idx) {
+  for (let i = idx - 1; i >= 0; i--) {
+    if (lines[i].trim() === "") continue;
+    return STRUCTURAL_LINE_RE.test(lines[i]);
+  }
+  return true;
+}
+
+// reject-streak.mjs의 maskQuotedMarkerRegions와 **바이트 동일 로직**의
+// 로컬 복제 -- 이 함수 자체는 위 hasStructuralPredecessor의 바이트 동일성
+// 계약(드리프트 시험 대상) 밖이다: 드리프트 시험은 STRUCTURAL_LINE_RE
+// 정규식과 hasStructuralPredecessor 본문만 대조한다(coder-task.md §2-2).
+// import하지 않고 복제하는 이유는 위 resolveHeaderTaskId 주석과 동일
+// (고정 sibling 파일 목록 MODULE_NOT_FOUND 실측).
+const FENCE_OPEN_RE = /^ {0,3}(`{3,}|~{3,})/;
+
+function blankKeepingNewlines(text) {
+  return text.replace(/[^\n]/g, " ");
+}
+
+function maskFencedBlocks(content) {
+  let fence = null;
+  return content
+    .split("\n")
+    .map((line) => {
+      if (fence === null) {
+        const opened = FENCE_OPEN_RE.exec(line);
+        if (!opened) return line;
+        fence = { char: opened[1][0], len: opened[1].length };
+        return blankKeepingNewlines(line);
+      }
+      const closer = new RegExp(
+        `^ {0,3}\\${fence.char}{${fence.len},}[ \t\r]*$`,
+      );
+      if (closer.test(line)) fence = null;
+      return blankKeepingNewlines(line);
+    })
+    .join("\n");
+}
+
+function maskHtmlComments(content) {
+  let out = content;
+  let from = 0;
+  for (;;) {
+    const start = out.indexOf("<!--", from);
+    if (start === -1) return out;
+    const closeAt = out.indexOf("-->", start + 4);
+    const end = closeAt === -1 ? out.length : closeAt + 3;
+    out =
+      out.slice(0, start) +
+      blankKeepingNewlines(out.slice(start, end)) +
+      out.slice(end);
+    from = end;
+  }
+}
+
+function maskQuotedMarkerRegionsLocal(content) {
+  return maskHtmlComments(maskFencedBlocks(content));
+}
+
 function resolveHeaderTaskId(content) {
-  const normalized = (content ?? "").replace(/\r\n/g, "\n");
-  const blankLineIdx = normalized.search(/\n[ \t]*\n/);
-  const header =
-    blankLineIdx === -1 ? normalized : normalized.slice(0, blankLineIdx);
-  const matches = [...header.matchAll(/^task_id:[ \t]*(\S+)/gim)];
-  if (matches.length !== 1) return { ok: false, count: matches.length };
-  return { ok: true, id: matches[0][1] };
+  const lines = maskQuotedMarkerRegionsLocal(
+    (content ?? "").replace(/\r\n/g, "\n"),
+  ).split("\n");
+  const candidates = [];
+  for (let i = 0; i < lines.length; i++) {
+    const m = lines[i].match(/^task_id:[ \t]*(\S+)/i);
+    if (!m) continue;
+    if (!hasStructuralPredecessor(lines, i)) continue;
+    candidates.push(m[1]);
+  }
+  if (candidates.length !== 1) return { ok: false, count: candidates.length };
+  return { ok: true, id: candidates[0] };
 }
 
 // resolveResultTaskId(relay-handshake.mjs)의 최소 재현 -- "정확히 하나의
-// 줄머리 task_id: 값만 인정, 0개/2개 이상은 확정하지 않는다"는 동일 계약
-// (단, HYK-468부터는 위 resolveHeaderTaskId를 통해 헤더 블록으로 한정).
+// 구조적 선행 맥락이 있는 열머리 task_id: 값만 인정, 0개/2개 이상은
+// 확정하지 않는다"는 동일 계약(위 resolveHeaderTaskId를 통해).
 function resolveEchoedTaskId(resultContent) {
   return resolveHeaderTaskId(resultContent);
 }
+
+// HYK-468 3R §3: 이 파일의 판정 함수는 공개 export가 아니었다(2R 검토자가
+// 그래서 메모리 전용 probe로 우회해야 했다 -- REVIEW-r27.md "정직 한계").
+// 이 라운드는 "export하는 편이 낫다고 판단하면 그렇게 하고 사유를 적어라"
+// (coder-task.md §3) 조건에 따라 테스트 전용으로 export한다 -- 이 파일이
+// 이미 DONE_RE/FOR_LINE_RE_G 등을 같은 이유(시험이 정의 자체를 직접 재기
+// 위해, 축마다 복사본을 만들면 조용히 어긋난다)로 export하는 관례와 같다.
+// 원본 판정 로직은 한 글자도 바뀌지 않는다 -- `export` 키워드만 추가.
+export { resolveHeaderTaskId as __probeResolveHeaderTaskId };
 
 // resolveResultBlockedState(relay-handshake.mjs)의 최소 재현 -- "정확히
 // 하나의 well-formed '>>> BLOCKED:'/'>>> NEEDS_INPUT:' 줄만 인정"은 그대로
