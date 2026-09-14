@@ -694,6 +694,32 @@ function extractSoleMatch(text, reG) {
   return matches.length === 1 ? matches[0][1].trim() : undefined;
 }
 
+// HYK-468: header-task-id-shared.mjs의 resolveHeaderTaskId와 **로직 동일**
+// (이 파일도 admission-completion-adapter.mjs와 같은 이유로 로컬 복제다 --
+// dispatch-gate-abort-wire.test.mjs·dispatch-gate-consumption-wire.test.mjs·
+// hyk263-archive-doneat.test.mjs·hyk298-3r-envelope-fixtures.test.mjs·
+// hyk396-open-axis.test.mjs 등 이 파일 소스를 고정 파일 목록으로 격리
+// 스테이징하는 mutation 시험이 다수 있어, 새 import를 추가하면
+// MODULE_NOT_FOUND로 깨진다, 실측 확인). 세 곳(이 함수 + adapter의 로컬
+// 복제 + header-task-id-shared.mjs 정본)이 갈라지면 회귀이므로 고칠 때는
+// 반드시 서로 대조하라.
+//
+// task_id: 선언은 파일 머리의 헤더 블록(첫 빈 줄 이전)에서만 읽는다 --
+// round-archive 파일(rounds/<role>-r<N>.md 등) 본문에 나중에 인용된
+// `task_id:` 줄이 진짜 선언과 충돌해 "2개"로 잘못 세는 사고를 막는다
+// (실사고: hyk442-blocked-door-1/.harness/coder.md 1행 실선언 + 24행
+// 인용 예시 -- CONSUMPTION_TASK_ID_RE_G를 whole-file로 돌리던 이 파일의
+// 세 round-archive 라벨 매처가 전부 이 결함을 그대로 물려받고 있었다).
+function resolveHeaderTaskId(content) {
+  const normalized = (content ?? "").replace(/\r\n/g, "\n");
+  const blankLineIdx = normalized.search(/\n[ \t]*\n/);
+  const header =
+    blankLineIdx === -1 ? normalized : normalized.slice(0, blankLineIdx);
+  const matches = [...header.matchAll(/^task_id:[ \t]*(\S+)/gim)];
+  if (matches.length !== 1) return { ok: false, count: matches.length };
+  return { ok: true, id: matches[0][1] };
+}
+
 // HYK-298-abort-record-2 §2-1 -- ★공통 문장("없는 것"과 "깨진 것"은
 // 다르다) 그대로: `harnessTaskLabel === undefined`(위 extractSoleMatch)
 // 하나만으로는 "이름표가 진짜로 하나도 없음"과 "있지만 복수/빈값/줄
@@ -1163,10 +1189,11 @@ function findArchivedRoundMeta(
     } catch {
       continue;
     }
-    if (
-      extractSoleMatch(content, CONSUMPTION_TASK_ID_RE_G) !== harnessTaskLabel
-    )
-      continue;
+    // HYK-468: header-block-scoped (see header-task-id-shared.mjs) --
+    // a whole-file column-0 scan collided with a task_id: line quoted
+    // verbatim later in this archive file's own body.
+    const archivedTaskId = resolveHeaderTaskId(content);
+    if (!archivedTaskId.ok || archivedTaskId.id !== harnessTaskLabel) continue;
     const droppedMatch = content.match(CONSUMPTION_DROPPED_AT_RE);
     if (!droppedMatch) continue;
     matches.push({
@@ -1622,10 +1649,8 @@ function findArchivedResultFingerprint(
       continue;
     }
     const stripped = stripArchiveEnvelopeHeader(raw);
-    if (
-      extractSoleMatch(stripped, CONSUMPTION_TASK_ID_RE_G) !== harnessTaskLabel
-    )
-      continue;
+    const strippedTaskId = resolveHeaderTaskId(stripped);
+    if (!strippedTaskId.ok || strippedTaskId.id !== harnessTaskLabel) continue;
     labelMatches.push({
       path: join("rounds", name),
       fingerprint: computeConsumptionResultFingerprint(stripped),
@@ -2090,10 +2115,8 @@ function resolveRetirementArchiveCandidate(
       continue;
     }
     const stripped = stripArchiveEnvelopeHeader(raw);
-    if (
-      extractSoleMatch(stripped, CONSUMPTION_TASK_ID_RE_G) !== harnessTaskLabel
-    )
-      continue;
+    const strippedTaskId = resolveHeaderTaskId(stripped);
+    if (!strippedTaskId.ok || strippedTaskId.id !== harnessTaskLabel) continue;
     matches.push({
       path: join("rounds", name),
       fingerprint: computeConsumptionResultFingerprint(stripped),

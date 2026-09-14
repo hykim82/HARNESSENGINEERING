@@ -119,21 +119,42 @@ import { resolveEnvelopeBindingValidity } from "./envelope-archive.mjs";
 // repoRoot/mainRepoRoot 주석)에서 이미 설명한 그 원칙("무거운/많이 참조되는
 // 모듈을 끌어들이지 않기 위해 작은 것들은 복제한다") 그대로, task_id 에코·
 // BLOCKED/NEEDS_INPUT 표지 판정에 필요한 최소 조각만 아래에 복제한다 --
-// relay-handshake.mjs의 TASK_ID_RE_G/BLOCKED_RE와 **바이트 동일**(그 파일
-// 자신의 정의를 그대로 인용) -- "새로 발명"이 아니라 "같은 계약을 옮겨
-// 적은 것"이다. 이 두 파일이 갈라지면(예: 근접-미스 처리가 relay-
-// handshake.mjs에서 갱신되는데 여기가 안 따라가면) 그 자체가 회귀이므로,
-// 이 상수들을 고칠 때는 반드시 relay-handshake.mjs의 동명 상수와
-// 대조하라(주석으로만 강제되는 계약 -- 기계 강제는 이번 범위 밖).
-const TASK_ID_RE_G = /^task_id:\s*(\S+)/gim;
+// relay-handshake.mjs의 BLOCKED_RE와 **바이트 동일**(그 파일 자신의
+// 정의를 그대로 인용) -- "새로 발명"이 아니라 "같은 계약을 옮겨 적은
+// 것"이다. 이 두 파일이 갈라지면(예: 근접-미스 처리가 relay-handshake.mjs
+// 에서 갱신되는데 여기가 안 따라가면) 그 자체가 회귀이므로, 이 상수를
+// 고칠 때는 반드시 relay-handshake.mjs의 동명 상수와 대조하라(주석으로만
+// 강제되는 계약 -- 기계 강제는 이번 범위 밖).
 const BLOCKED_RE = /^>>>[ \t]*(BLOCKED|NEEDS_INPUT):[ \t]*(\S.*?)[ \t]*$/gim;
 
-// resolveResultTaskId(relay-handshake.mjs)의 최소 재현 -- "정확히 하나의
-// 줄머리 task_id: 값만 인정, 0개/2개 이상은 확정하지 않는다"는 동일 계약.
-function resolveEchoedTaskId(resultContent) {
-  const matches = [...resultContent.matchAll(TASK_ID_RE_G)];
+// HYK-468: header-task-id-shared.mjs의 resolveHeaderTaskId와 **로직 동일**
+// (이 파일이 위 헤더에서 이미 설명한 "무거운/많이 참조되는 모듈을 끌어들
+// 이지 않기 위해 작은 것들은 복제한다" 원칙 그대로 -- 새 import를 추가하면
+// admission-completion-worktree-isolation.test.mjs/admission-completion-
+// persistent-source.test.mjs의 고정 sibling 파일 목록이 이 파일을 더는
+// 못 찾아 MODULE_NOT_FOUND로 깨진다, 실측 확인). 두 곳이 갈라지면 회귀이므
+// 로 이 함수를 고칠 때는 반드시 header-task-id-shared.mjs와 대조하라.
+//
+// task_id: 선언은 파일 머리의 헤더 블록(첫 빈 줄 이전)에서만 읽는다 --
+// 예전에는 resultContent 전체를 훑어, 본문에 나중에 인용된
+// `task_id:` 줄(예: 이 어댑터가 주입한 결과를 그대로 인용해 보여주는
+// coder.md의 코드펜스)이 진짜 선언과 충돌해 "2개"로 잘못 셌다(실사고:
+// hyk442-blocked-door-1/.harness/coder.md 1행 실선언 + 24행 인용 예시).
+function resolveHeaderTaskId(content) {
+  const normalized = (content ?? "").replace(/\r\n/g, "\n");
+  const blankLineIdx = normalized.search(/\n[ \t]*\n/);
+  const header =
+    blankLineIdx === -1 ? normalized : normalized.slice(0, blankLineIdx);
+  const matches = [...header.matchAll(/^task_id:[ \t]*(\S+)/gim)];
   if (matches.length !== 1) return { ok: false, count: matches.length };
   return { ok: true, id: matches[0][1] };
+}
+
+// resolveResultTaskId(relay-handshake.mjs)의 최소 재현 -- "정확히 하나의
+// 줄머리 task_id: 값만 인정, 0개/2개 이상은 확정하지 않는다"는 동일 계약
+// (단, HYK-468부터는 위 resolveHeaderTaskId를 통해 헤더 블록으로 한정).
+function resolveEchoedTaskId(resultContent) {
+  return resolveHeaderTaskId(resultContent);
 }
 
 // resolveResultBlockedState(relay-handshake.mjs)의 최소 재현 -- "정확히
@@ -555,7 +576,6 @@ function verifyBlockedTerminationEvidence({
 // 스스로 하는 일은 오직 "그 코어가 요구하는 사실들을 harnessDir 아래
 // 실제 파일에서 다시 읽어 구조화하는 것"뿐이다(§2 zero-import 코어
 // 계약과 동일한 분업, 위 import 헤더 참조).
-const RETIREMENT_TASK_ID_RE_G = /^task_id:\s*(\S+)/gim;
 const RETIREMENT_DROPPED_AT_RE = /^dropped_at:\s*(.+)$/im;
 const RETIREMENT_ARCHIVE_ENVELOPE_HEADER_RE =
   /^<!-- envelope-archive: role=\S+ archived_at=.*? -->\n/;
@@ -628,8 +648,8 @@ function resolveRetirementArchiveCandidateForAdapter(
       continue;
     }
     const stripped = stripRetirementArchiveEnvelopeHeader(raw);
-    const idMatches = [...stripped.matchAll(RETIREMENT_TASK_ID_RE_G)];
-    if (idMatches.length !== 1 || idMatches[0][1] !== harnessTaskLabel) {
+    const idResolved = resolveHeaderTaskId(stripped);
+    if (!idResolved.ok || idResolved.id !== harnessTaskLabel) {
       continue;
     }
     matches.push({
@@ -717,8 +737,8 @@ function resolveArchivedRetirementEvidenceText(
       continue;
     }
     const stripped = stripRetirementArchiveEnvelopeHeader(raw);
-    const idMatches = [...stripped.matchAll(RETIREMENT_TASK_ID_RE_G)];
-    if (idMatches.length !== 1 || idMatches[0][1] !== harnessTaskLabel) {
+    const idResolved = resolveHeaderTaskId(stripped);
+    if (!idResolved.ok || idResolved.id !== harnessTaskLabel) {
       continue;
     }
     labelMatched.push({
