@@ -763,8 +763,17 @@ test("§D-5 대조군(회귀 0): 1R §A(진짜 「이름표 없음」)는 이번
 
 test("RED(변이, 필수, 5R §2 ⓓ): classifyTaskIdLabel의 looseLines===0 원시 출현 재질문을 제거하면(4R 이전 동작으로 되돌리면), middle_of_line + 완전히 유효한 중단 기록이 다시 ALLOW로 샌다", () => {
   const srcBefore = readFileSync(SCRIPT_PATH, "utf8");
+  // HYK-468 6R (5R이 값으로 확인한 반려 사유 수리): 이 앵커는 원래
+  // classifyTaskIdLabel의 절반 가까이를 통째로(strictMatches의 인라인
+  // task_id 정규식 줄까지 포함해) 문자열로 박아 두고 있었다 -- 그런데
+  // 이 시험이 실제로 검증하는 변이는 looseLines===0 분기 하나뿐이고,
+  // strictMatches 줄은 그 변이와 무관하다. 4R이 그 무관한 줄의 정규식을
+  // 이름 있는 TASK_ID_LINE_RE 상수 참조로 바꾸자 앵커 전체가 깨졌다 --
+  // 책임자 조건 1(앵커를 «이름」으로 잡아라)의 더 강한 형태로, 앵커
+  // 범위를 실제 변이 대상(looseLines===0 분기)만으로 좁혀 task_id 정규식
+  // 표현(리터럴이든 이름이든)에 대한 의존 자체를 없앤다.
   const target =
-    'function classifyTaskIdLabel(resultText) {\n  const lines = maskQuotedMarkerRegions(\n    (resultText ?? "").replace(/\\r\\n/g, "\\n"),\n  ).split("\\n");\n  const looseLineIdxs = [];\n  for (let i = 0; i < lines.length; i++) {\n    if (!/^task_id:.*$/i.test(lines[i])) continue;\n    if (!hasStructuralPredecessor(lines, i)) continue;\n    looseLineIdxs.push(i);\n  }\n  const looseLines = looseLineIdxs.length;\n  if (looseLines === 0) {\n    const anyCount = [...resultText.matchAll(TASK_ID_ANY_RE)].length;\n    if (anyCount === 0) {\n      return { kind: "MISSING", looseLines: 0, strictCount: 0 };\n    }\n    return { kind: "BROKEN", looseLines: 0, strictCount: 0, anyCount };\n  }\n  const strictMatches = looseLineIdxs\n    .map((i) => lines[i].match(/^task_id:[ \\t]*(\\S+)/i))\n    .filter(Boolean);';
+    '  if (looseLines === 0) {\n    const anyCount = [...resultText.matchAll(TASK_ID_ANY_RE)].length;\n    if (anyCount === 0) {\n      return { kind: "MISSING", looseLines: 0, strictCount: 0 };\n    }\n    return { kind: "BROKEN", looseLines: 0, strictCount: 0, anyCount };\n  }';
   assertExactlyOneMatch(
     srcBefore,
     target,
@@ -772,7 +781,7 @@ test("RED(변이, 필수, 5R §2 ⓓ): classifyTaskIdLabel의 looseLines===0 원
   );
   const mutated = srcBefore.replace(
     target,
-    'function classifyTaskIdLabel(resultText) {\n  const lines = maskQuotedMarkerRegions(\n    (resultText ?? "").replace(/\\r\\n/g, "\\n"),\n  ).split("\\n");\n  const looseLineIdxs = [];\n  for (let i = 0; i < lines.length; i++) {\n    if (!/^task_id:.*$/i.test(lines[i])) continue;\n    if (!hasStructuralPredecessor(lines, i)) continue;\n    looseLineIdxs.push(i);\n  }\n  const looseLines = looseLineIdxs.length;\n  if (looseLines === 0) {\n    return { kind: "MISSING", looseLines: 0, strictCount: 0 };\n  }\n  const strictMatches = looseLineIdxs\n    .map((i) => lines[i].match(/^task_id:[ \\t]*(\\S+)/i))\n    .filter(Boolean);',
+    '  if (looseLines === 0) {\n    return { kind: "MISSING", looseLines: 0, strictCount: 0 };\n  }',
   );
 
   withFixtureDir((dir) => {

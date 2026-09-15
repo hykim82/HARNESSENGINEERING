@@ -100,8 +100,15 @@ test("ⓒ 갇힌 실물: hyk442-blocked-door-1/.harness/coder.md(열0 task_id 2�
 // 바이트 동일까지 재확인.
 test("RED(변이, 필수): relay-handshake.mjs의 구조적 선행 맥락 검사를 제거하면 ⓐ가 다시 AMBIGUOUS로 샌다", async () => {
   const realSource = readFileSync(RELAY_HANDSHAKE_PATH, "utf8");
+  // HYK-468 6R (5R이 값으로 확인한 반려 사유 수리): 4R이 이 루프의 인라인
+  // 정규식을 이름 있는 TASK_ID_LINE_RE 상수 참조로 바꾸면서 이 앵커의
+  // 옛 글자 모양(`/^task_id:\s*(\S+)/i`)이 실 소스에서 사라졌다 -- 책임자
+  // 조건 1(앵커를 «이름»으로 잡아라)에 따라, 정규식 리터럴 대신 정본
+  // header-task-id-shared.mjs의 RULE_CONSTANTS.TASK_ID_LINE_RE와 같은
+  // 이름(`TASK_ID_LINE_RE`)을 앵커에 직접 박는다 -- 그 상수의 "값"이
+  // 앞으로 또 바뀌어도(이름이 그대로인 한) 이 앵커는 깨지지 않는다.
   const target =
-    '  const lines = scan.replace(/\\r\\n/g, "\\n").split("\\n");\n  const resultIdMatches = [];\n  for (let i = 0; i < lines.length; i++) {\n    const m = lines[i].match(/^task_id:\\s*(\\S+)/i);\n    if (!m) continue;\n    if (!hasStructuralPredecessor(lines, i)) continue;\n    resultIdMatches.push(m);\n  }';
+    '  const lines = scan.replace(/\\r\\n/g, "\\n").split("\\n");\n  const resultIdMatches = [];\n  for (let i = 0; i < lines.length; i++) {\n    const m = lines[i].match(TASK_ID_LINE_RE);\n    if (!m) continue;\n    if (!hasStructuralPredecessor(lines, i)) continue;\n    resultIdMatches.push(m);\n  }';
   assert.equal(
     [...realSource.matchAll(new RegExp(escapeRegExp(target), "g"))].length,
     1,

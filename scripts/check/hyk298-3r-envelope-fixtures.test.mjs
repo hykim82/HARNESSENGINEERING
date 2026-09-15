@@ -365,8 +365,13 @@ function stageScriptsCheckDir(rootDir, overrides) {
 
 test("RED(변이, 필수, 3R §2-1/2-2): classifyTaskIdLabel을 2R의 옛 anyCount 비교(줄머리 전체를 anyCount와 비교)로 되돌리면 오늘 실제로 막힌 두 봉투가 다시 BROKEN으로 새어 차단이 재현된다", () => {
   const src = readFileSync(SCRIPT_PATH, "utf8");
+  // HYK-468 6R (5R이 값으로 확인한 반려 사유 수리): 4R이 strictMatches의
+  // 인라인 정규식을 이름 있는 TASK_ID_LINE_RE 상수 참조로 바꾸면서 이
+  // 앵커가 실 소스에서 못 찾는 글자 모양이 됐다 -- 책임자 조건 1(앵커를
+  // «이름»으로 잡아라)에 따라 정규식 리터럴 대신 이름(`TASK_ID_LINE_RE`)을
+  // 앵커에 직접 박는다.
   const target =
-    'function classifyTaskIdLabel(resultText) {\n  const lines = maskQuotedMarkerRegions(\n    (resultText ?? "").replace(/\\r\\n/g, "\\n"),\n  ).split("\\n");\n  const looseLineIdxs = [];\n  for (let i = 0; i < lines.length; i++) {\n    if (!/^task_id:.*$/i.test(lines[i])) continue;\n    if (!hasStructuralPredecessor(lines, i)) continue;\n    looseLineIdxs.push(i);\n  }\n  const looseLines = looseLineIdxs.length;\n  if (looseLines === 0) {\n    const anyCount = [...resultText.matchAll(TASK_ID_ANY_RE)].length;\n    if (anyCount === 0) {\n      return { kind: "MISSING", looseLines: 0, strictCount: 0 };\n    }\n    return { kind: "BROKEN", looseLines: 0, strictCount: 0, anyCount };\n  }\n  const strictMatches = looseLineIdxs\n    .map((i) => lines[i].match(/^task_id:[ \\t]*(\\S+)/i))\n    .filter(Boolean);\n  const strictCount = strictMatches.length;\n  if (looseLines === 1 && strictCount === 1) {\n    return {\n      kind: "VALID",\n      value: strictMatches[0][1].trim(),\n      looseLines,\n      strictCount,\n    };\n  }\n  return { kind: "BROKEN", looseLines, strictCount };\n}';
+    'function classifyTaskIdLabel(resultText) {\n  const lines = maskQuotedMarkerRegions(\n    (resultText ?? "").replace(/\\r\\n/g, "\\n"),\n  ).split("\\n");\n  const looseLineIdxs = [];\n  for (let i = 0; i < lines.length; i++) {\n    if (!/^task_id:.*$/i.test(lines[i])) continue;\n    if (!hasStructuralPredecessor(lines, i)) continue;\n    looseLineIdxs.push(i);\n  }\n  const looseLines = looseLineIdxs.length;\n  if (looseLines === 0) {\n    const anyCount = [...resultText.matchAll(TASK_ID_ANY_RE)].length;\n    if (anyCount === 0) {\n      return { kind: "MISSING", looseLines: 0, strictCount: 0 };\n    }\n    return { kind: "BROKEN", looseLines: 0, strictCount: 0, anyCount };\n  }\n  const strictMatches = looseLineIdxs\n    .map((i) => lines[i].match(TASK_ID_LINE_RE))\n    .filter(Boolean);\n  const strictCount = strictMatches.length;\n  if (looseLines === 1 && strictCount === 1) {\n    return {\n      kind: "VALID",\n      value: strictMatches[0][1].trim(),\n      looseLines,\n      strictCount,\n    };\n  }\n  return { kind: "BROKEN", looseLines, strictCount };\n}';
   assertExactlyOneMatch(
     src,
     target,
