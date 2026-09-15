@@ -933,7 +933,68 @@ function resolveRetirementEvidenceText({
   return { ok: true, evidenceText: archived.evidenceText, source: "archive" };
 }
 
-function verifyRetirementEvidence({ harnessDir, role, reservationId }) {
+// verifyRetirementEvidence의 quality-check max-lines-per-function 상한
+// 회피용 추출(HYK-398 §2-⑶/HYK-244 2R-b3 선례와 동일한 이유, 판정/문면은
+// 조금도 바뀌지 않는다) -- 후보별 다섯 사실(아카이브 존재·결속·지문 대조
+// 둘·기계 재확인)을 조립하는 몸통만 뽑는다. HYK-461 §4-B: 지문·사유
+// 재확인은 모두 «채택된 증거 원문»(evidenceText) 기준으로 유도한다. 대체
+// 증거 경로에서는 evidenceText가 보존 사본의 stripped 본문이므로,
+// evidenceFingerprint는 곧 그 사본의 content_sha256(=record.
+// archiveFingerprintClaimed)과 같아지고, blockReason 재확인도 그 사본이
+// 주장하는 head_commit(덮인 live가 아니라)에 대해 이뤄진다.
+// HYK-478: ledgerPath는 그대로 confirmRetirementBlockReason에 전달된다 --
+// AUTHOR_SEAT_LOST_BEFORE_STAMP 재확인에만 쓰인다(그 함수 헤더 참조).
+function buildRetirementCandidatesForAdapter(
+  records,
+  {
+    harnessDir,
+    roleUpper,
+    reservationId,
+    evidenceText,
+    fromArchive,
+    droppedAtRaw,
+    ledgerPath,
+  },
+) {
+  const evidenceFingerprint = computeRetirementFingerprint(evidenceText);
+  return records.map((record) => {
+    const archiveInfo = resolveRetirementArchiveCandidateForAdapter(
+      harnessDir,
+      roleUpper,
+      reservationId,
+      record?.archiveFingerprintClaimed,
+    );
+    return {
+      record,
+      archiveExists: archiveInfo.exists,
+      // HYK-461 §4-A + 2R §2-A: 결속 검사는 «대체 증거 경로»에서만 적용한다.
+      // archive 소스면 정본과 동일하게 실제 값을 넘겨 코어의
+      // ARCHIVE_ENVELOPE_BINDING_INVALID 방어가 살아 있게 하고, live 소스면
+      // null을 넘겨(코어의 `=== false` 비교에 걸리지 않음) live 축이 사본
+      // 결속에 종속되지 않게 한다(검토 P1-1).
+      envelopeBindingValid: fromArchive
+        ? archiveInfo.envelopeBindingValid
+        : null,
+      archiveFingerprintMatches: archiveInfo.fingerprintMatches,
+      liveFingerprintMatches:
+        evidenceFingerprint === record?.archiveFingerprintClaimed,
+      blockReasonConfirmed: confirmRetirementBlockReason(
+        record,
+        evidenceText,
+        droppedAtRaw,
+        harnessDir,
+        ledgerPath,
+      ),
+    };
+  });
+}
+
+function verifyRetirementEvidence({
+  harnessDir,
+  role,
+  reservationId,
+  ledgerPath,
+}) {
   if (!isNonEmptyString(harnessDir) || !isNonEmptyString(role)) {
     return {
       ok: false,
@@ -975,7 +1036,12 @@ function verifyRetirementEvidence({ harnessDir, role, reservationId }) {
   // the live path.
   const fromArchive = evidence.source === "archive";
   const taskPath = join(harnessDir, `${String(role).toLowerCase()}-task.md`);
-  let droppedAtRaw = null;
+  // HYK-478: 초기값 없이 선언한다 -- try/catch 두 갈래가 모두 무조건
+  // 재할당하므로(성공하면 파싱값, 실패하면 null) 선언 시점의 `= null`은
+  // 도달 전에 항상 덮여써져 죽은 대입이었다(이 추출이 클로저 밖으로
+  // 꺼내면서 eslint의 흐름 분석이 그 사실을 새로 증명해냈다 -- no-useless-
+  // assignment, 동작은 바이트 하나 안 바뀐다).
+  let droppedAtRaw;
   try {
     const taskContent = readFileSync(taskPath, "utf8");
     const droppedMatch = taskContent.match(RETIREMENT_DROPPED_AT_RE);
@@ -984,40 +1050,14 @@ function verifyRetirementEvidence({ harnessDir, role, reservationId }) {
     droppedAtRaw = null;
   }
   const records = readRetirementRecordFilesForAdapter(harnessDir, roleUpper);
-  // HYK-461 §4-B: 지문·사유 재확인은 모두 «채택된 증거 원문»(evidenceText)
-  // 기준으로 유도한다. 대체 증거 경로에서는 evidenceText가 보존 사본의
-  // stripped 본문이므로, evidenceFingerprint는 곧 그 사본의 content_sha256
-  // (=record.archiveFingerprintClaimed)과 같아지고, blockReason 재확인도
-  // 그 사본이 주장하는 head_commit(덮인 live가 아니라)에 대해 이뤄진다.
-  const evidenceFingerprint = computeRetirementFingerprint(evidenceText);
-  const candidates = records.map((record) => {
-    const archiveInfo = resolveRetirementArchiveCandidateForAdapter(
-      harnessDir,
-      roleUpper,
-      reservationId,
-      record?.archiveFingerprintClaimed,
-    );
-    return {
-      record,
-      archiveExists: archiveInfo.exists,
-      // HYK-461 §4-A + 2R §2-A: 결속 검사는 «대체 증거 경로»에서만 적용한다.
-      // archive 소스면 정본과 동일하게 실제 값을 넘겨 코어의
-      // ARCHIVE_ENVELOPE_BINDING_INVALID 방어가 살아 있게 하고, live 소스면
-      // null을 넘겨(코어의 `=== false` 비교에 걸리지 않음) live 축이 사본
-      // 결속에 종속되지 않게 한다(검토 P1-1).
-      envelopeBindingValid: fromArchive
-        ? archiveInfo.envelopeBindingValid
-        : null,
-      archiveFingerprintMatches: archiveInfo.fingerprintMatches,
-      liveFingerprintMatches:
-        evidenceFingerprint === record?.archiveFingerprintClaimed,
-      blockReasonConfirmed: confirmRetirementBlockReason(
-        record,
-        evidenceText,
-        droppedAtRaw,
-        harnessDir,
-      ),
-    };
+  const candidates = buildRetirementCandidatesForAdapter(records, {
+    harnessDir,
+    roleUpper,
+    reservationId,
+    evidenceText,
+    fromArchive,
+    droppedAtRaw,
+    ledgerPath,
   });
   const verdict = checkRetirementRecord({
     role: roleUpper,
@@ -1080,6 +1120,10 @@ function checkCompletionReasonEvidence({
       harnessDir,
       role,
       reservationId,
+      // HYK-478: AUTHOR_SEAT_LOST_BEFORE_STAMP 재확인에 필요한 admission
+      // 원장 경로 -- 이 함수는 이미 그 경로를 인자로 받고 있다(위
+      // completeAdmissionReservation 호출부 참조), 새 인자를 만들지 않는다.
+      ledgerPath,
     });
     if (!evidence.ok) {
       return {

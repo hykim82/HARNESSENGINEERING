@@ -17,6 +17,11 @@ import {
   completeAdmissionReservation,
 } from "./admission-completion-adapter.mjs";
 import { runAdmissionCli } from "../supervisor/admission-cli.mjs";
+import {
+  createEmptyLedger,
+  admitReservation,
+  sweepAndRecover,
+} from "../supervisor/admission-ledger-core.mjs";
 
 function tmpPaths() {
   const dir = mkdtempSync(join(tmpdir(), "admission-completion-adapter-test-"));
@@ -904,6 +909,147 @@ test("HYK-457: RUNNER_GREEN_UNREACHABLE_AT_HEAD retirement is refused when the r
 test("HYK-457: RUNNER_GREEN_UNREACHABLE_AT_HEAD retirement is refused when the runner receipt says runner_exit=0 (the commit is actually green -- retiring for this reason would be a lie)", () => {
   const { outcome, status } = runRunnerGreenCase("HYK-457-rg-5", {
     receiptRunnerExit: 0,
+  });
+  assert.equal(outcome.attempted, true);
+  assert.equal(outcome.ok, false);
+  assert.match(outcome.reason, /재확인되지 않음/);
+  assert.equal(status, "ACTIVE");
+});
+
+// ---------------------------------------------------------------------------
+// HYK-478 §1-1/§1-2: AUTHOR_SEAT_LOST_BEFORE_STAMP -- 작성자 좌석이 완료
+// 표지를 남기기 «전»에 소실된(2026-09-15 20:36 윈도우 업데이트 재부팅
+// 실물, coder-task.md §0) 라운드. 두 독립 사실 «둘 다» 참이어야 released
+// 된다: ⓐ 완료 표지 0개 ⓑ admission 원장 예약이 더는 ACTIVE가 아님
+// (SUSPECT). admission-ledger-core.mjs의 실제 함수(admit ->
+// sweepAndRecover)를 직접 돌려 SUSPECT/ACTIVE 원장을 만든다(합성 JSON을
+// 손으로 짜지 않는다, dispatch-gate-retirement-wire.test.mjs의
+// buildRealRecoveredLedger와 동일한 이유) -- runAdmissionCli의 admit을 쓰지
+// 않는 것은 그 경로가 admitted_at을 실제 벽시계로 찍어 sweep 판정에
+// 시간-기반 불확실성을 들이기 때문이다(이 파일도 결정적 ISO 문자열만 쓴다).
+// ---------------------------------------------------------------------------
+
+function buildSeatLostAdapterLedger(reservationId) {
+  let ledger = createEmptyLedger("2026-09-16T00:00:00.000Z");
+  const admit = admitReservation(ledger, {
+    reservationId,
+    cap: 1,
+    now: "2026-09-16T00:00:00.000Z",
+    role: "CODER",
+    seatKey: "seat-that-died",
+  });
+  assert.equal(admit.decision, "ADMITTED");
+  const swept = sweepAndRecover(admit.ledger, {
+    now: "2026-09-16T00:10:01.000Z",
+    liveSeatKeys: [],
+    staleAfterMs: 5 * 60 * 1000,
+    recoveryGraceMs: 10 * 60 * 1000,
+  });
+  assert.equal(swept.ok, true);
+  assert.equal(swept.ledger.reservations[reservationId].status, "SUSPECT");
+  return swept.ledger;
+}
+
+function buildSeatAliveAdapterLedger(reservationId) {
+  let ledger = createEmptyLedger("2026-09-16T00:00:00.000Z");
+  const admit = admitReservation(ledger, {
+    reservationId,
+    cap: 1,
+    now: "2026-09-16T00:00:00.000Z",
+    role: "CODER",
+    seatKey: "seat-still-alive",
+  });
+  assert.equal(admit.decision, "ADMITTED");
+  assert.equal(admit.ledger.reservations[reservationId].status, "ACTIVE");
+  return admit.ledger;
+}
+
+function seedSeatLostFixture(dir, { reservationId, withDoneStamp = false }) {
+  const taskHeader = `task_id: ${reservationId}\ndropped_at: 2026-09-16 08:00 KST\n`;
+  // ⛔완료 표지 자체가 없다(윈도우 재부팅으로 표지를 쓰던 중 좌석이 죽은
+  // 실물 형태 -- 열 0 `>>> DONE:` 줄이 하나도 없다). withDoneStamp가
+  // 참이면(ⓐ 위반 시험) 반대로 «실제로 있는» 표지를 남긴다.
+  const resultContent = withDoneStamp
+    ? `task_id: ${reservationId}\n>>> DONE: CODER @ 2026-09-16 08:03:19 KST\n`
+    : `task_id: ${reservationId}\n`;
+  writeFileSync(join(dir, "coder-task.md"), taskHeader, "utf8");
+  writeFileSync(join(dir, "coder.md"), resultContent, "utf8");
+  mkdirSync(join(dir, "rounds"), { recursive: true });
+  writeFileSync(join(dir, "rounds", "coder-r1.md"), resultContent, "utf8");
+  mkdirSync(join(dir, "retirements"), { recursive: true });
+  writeFileSync(
+    join(dir, "retirements", "coder-retire-r1.json"),
+    JSON.stringify({
+      role: "CODER",
+      harnessTaskLabel: reservationId,
+      archivePath: "rounds/coder-r1.md",
+      archiveFingerprintClaimed: fingerprintOf(resultContent),
+      blockReasonCode: "AUTHOR_SEAT_LOST_BEFORE_STAMP",
+      successorLabel: `${reservationId}-successor`,
+      recordedAt: "2026-09-16 08:05:19 KST",
+      evidence: { source: "test" },
+    }),
+    "utf8",
+  );
+}
+
+function runSeatLostCase(
+  reservationId,
+  { withDoneStamp = false, seatAlive = false } = {},
+) {
+  const { dir, ledger, lock } = tmpPaths();
+  const savedLedger = process.env.ADMISSION_LEDGER_PATH;
+  const savedLock = process.env.ADMISSION_LOCK_PATH;
+  try {
+    const ledgerSnapshot = seatAlive
+      ? buildSeatAliveAdapterLedger(reservationId)
+      : buildSeatLostAdapterLedger(reservationId);
+    writeFileSync(ledger, JSON.stringify(ledgerSnapshot) + "\n", "utf8");
+    seedSeatLostFixture(dir, { reservationId, withDoneStamp });
+
+    process.env.ADMISSION_LEDGER_PATH = ledger;
+    process.env.ADMISSION_LOCK_PATH = lock;
+    const outcome = autoCompleteAdmission({
+      reservationId,
+      reason: "RETIREMENT_RELEASED",
+      harnessDir: dir,
+      role: "CODER",
+    });
+    const written = JSON.parse(readFileSync(ledger, "utf8"));
+    return { outcome, status: written.reservations[reservationId].status };
+  } finally {
+    if (savedLedger !== undefined)
+      process.env.ADMISSION_LEDGER_PATH = savedLedger;
+    else delete process.env.ADMISSION_LEDGER_PATH;
+    if (savedLock !== undefined) process.env.ADMISSION_LOCK_PATH = savedLock;
+    else delete process.env.ADMISSION_LOCK_PATH;
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+test("HYK-478: RETIREMENT_RELEASED for an AUTHOR_SEAT_LOST_BEFORE_STAMP retirement with both facts confirmed (0 완료 표지 + admission 원장 SUSPECT) succeeds (released, changed=true)", () => {
+  const { outcome, status } = runSeatLostCase("HYK-478-sl-1");
+  assert.equal(outcome.attempted, true);
+  assert.equal(outcome.ok, true, outcome.reason);
+  assert.equal(status, "COMPLETED");
+});
+
+test("HYK-478: AUTHOR_SEAT_LOST_BEFORE_STAMP retirement is refused when a completion stamp is actually present (ⓐ 위반 -- 표지가 있으면서 좌석 소실만 참이어도 거부)", () => {
+  const { outcome, status } = runSeatLostCase("HYK-478-sl-2", {
+    withDoneStamp: true,
+  });
+  assert.equal(outcome.attempted, true);
+  assert.equal(outcome.ok, false);
+  assert.match(outcome.reason, /재확인되지 않음/);
+  // ⛔ⓑ(좌석 소실)는 이 시험에서 참이므로 원장은 SUSPECT다(admission
+  // 원장 자체는 이 거부와 무관하게 sweep이 이미 새긴 상태를 유지한다) --
+  // "여전히 COMPLETED로 바뀌지 않았다"가 이 시험이 실제로 증명하는 것.
+  assert.equal(status, "SUSPECT");
+});
+
+test("HYK-478: AUTHOR_SEAT_LOST_BEFORE_STAMP retirement is refused when the admission ledger still shows the reservation ACTIVE (ⓑ 위반 -- 좌석이 아직 살아 있을 수도 있으면 표지가 없어도 거부)", () => {
+  const { outcome, status } = runSeatLostCase("HYK-478-sl-3", {
+    seatAlive: true,
   });
   assert.equal(outcome.attempted, true);
   assert.equal(outcome.ok, false);

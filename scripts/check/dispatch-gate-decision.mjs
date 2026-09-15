@@ -2257,6 +2257,7 @@ function evaluateRetirementDecision({
   resultText,
   harnessTaskLabel,
   droppedAt,
+  admissionLedgerPath,
 }) {
   const records = readRetirementRecordFiles(harnessDir, role);
   const liveFingerprint = computeConsumptionResultFingerprint(resultText);
@@ -2289,11 +2290,14 @@ function evaluateRetirementDecision({
       // HYK-398: droppedAt(호출자가 아카이브 사본에서 뽑아 온 값,
       // buildCurrentBinding.droppedAt) 전달 -- DONE_PREDATES_DROPPED_AT
       // 재확인에만 쓰인다(위 confirmRetirementBlockReason 헤더 참조).
+      // HYK-478: admissionLedgerPath 전달 -- AUTHOR_SEAT_LOST_BEFORE_STAMP
+      // 재확인에만 쓰인다(위 confirmRetirementBlockReason 헤더 참조).
       blockReasonConfirmed: confirmRetirementBlockReason(
         record,
         resultText,
         droppedAt,
         harnessDir,
+        admissionLedgerPath,
       ),
     };
   });
@@ -2320,6 +2324,7 @@ function resolveRetirementOutcome({
   resultText,
   harnessTaskLabel,
   droppedAt,
+  admissionLedgerPath,
 }) {
   const retirementDecision = evaluateRetirementDecision({
     role,
@@ -2327,6 +2332,7 @@ function resolveRetirementOutcome({
     resultText,
     harnessTaskLabel,
     droppedAt,
+    admissionLedgerPath,
   });
   if (retirementDecision === null) return { done: true, result: null };
   if (retirementDecision.state !== RETIREMENT_RECORD_STATE.NO_RECORD) {
@@ -2345,6 +2351,7 @@ function maybeResolveRetirementForValidLabel({
   resultText,
   harnessTaskLabel,
   droppedAt,
+  admissionLedgerPath,
 }) {
   if (labelInfo.kind !== "VALID") return { done: false };
   return resolveRetirementOutcome({
@@ -2353,6 +2360,7 @@ function maybeResolveRetirementForValidLabel({
     resultText,
     harnessTaskLabel,
     droppedAt,
+    admissionLedgerPath,
   });
 }
 
@@ -3078,6 +3086,11 @@ function evaluateConsumptionDecision(taskPath, args, env = process.env) {
     // archivedRoundMeta.droppedAt(직전 라운드가 보존한 task 파일 사본에서
     // 뽑은 원문)으로 채워져 있다(이 함수 위 buildCurrentBinding 참조).
     droppedAt: currentBinding.droppedAt,
+    // HYK-478: AUTHOR_SEAT_LOST_BEFORE_STAMP 재확인에 필요한 admission
+    // 원장 경로 -- abort-record 축(resolveAdmissionLedgerPathForAbort)이
+    // 이미 쓰는 같은 arg-with-env-fallback 리졸버를 그대로 재사용한다
+    // (새 CLI 플래그·새 env 축을 만들지 않는다).
+    admissionLedgerPath: resolveAdmissionLedgerPathForAbort(args, env),
   });
   if (retirementOutcome.done) return retirementOutcome.result;
 

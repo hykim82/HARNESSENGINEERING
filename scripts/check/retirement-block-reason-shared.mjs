@@ -54,6 +54,15 @@ function extractSoleMatch(text, reG) {
   return matches.length === 1 ? matches[0][1].trim() : undefined;
 }
 
+// HYK-478 §1-2 ⓐ: AUTHOR_SEAT_LOST_BEFORE_STAMP 전용 -- extractSoleMatch와
+// 달리 «값»이 아니라 «개수»가 증거다(표지가 정확히 0개여야 "완료를 선언한
+// 적이 없다"는 사실이 선다). 같은 CONSUMPTION_DONE_RE_G를 재사용한다(이
+// 저장소가 이미 "DONE 표지"로 인정하는 유일한 모양 -- 새 정규식을 만들지
+// 않는다).
+function countConsumptionDoneMarkers(text) {
+  return [...text.matchAll(CONSUMPTION_DONE_RE_G)].length;
+}
+
 function parseKstToMs(str) {
   if (typeof str !== "string") return null;
   const cleaned = str.trim().replace(/\s*KST\s*$/i, "");
@@ -119,25 +128,73 @@ function confirmRunnerGreenUnreachableAtHead(record, harnessDir, resultText) {
   );
 }
 
+// HYK-478 §1-2 ⓑ: AUTHOR_SEAT_LOST_BEFORE_STAMP 전용 -- 이 라운드
+// (record.harnessTaskLabel로 admit된 예약)가 admission 원장에서 더는
+// ACTIVE가 아님을 원장 파일을 다시 읽어 독립적으로 재확인한다.
+// dispatch-gate-decision.mjs의 verifyAbortRecordRecoveryMarker와 같은
+// 신뢰 축(sweepAndRecover가 이미 원장에 새긴 사실을 다시 읽을 뿐, 좌석
+// 목록을 이 함수가 다시 조회하지 않는다 -- retirement-record-core.mjs의
+// RETIREMENT_BLOCK_REASON 주석 §정직 한계 참조)이다. admission-ledger-
+// core.mjs를 import하지 않는다(§S8 zero-heavy-import 원칙, 이 파일 헤더
+// 그대로) -- RESERVATION_STATUS.SUSPECT/COMPLETED와
+// COMPLETION_REASON.SUSPECT_TIMEOUT_RECOVERED의 리터럴 값만 그대로
+// 복제한다(dispatch-gate-decision.mjs의 RECOVERY_MARKER_ALLOWED_REASONS와
+// 동일한 기존 관례).
+//
+// ledgerPath가 없거나·못 읽거나·JSON이 아니거나·그 harnessTaskLabel의
+// 예약 항목이 원장에 아예 없거나·그 항목이 여전히 ACTIVE면 false(안전측
+// 기본값 -- "아직 안 죽었을 수도 있다"를 거부로 접는다).
+function confirmReservationSeatLost(harnessTaskLabel, ledgerPath) {
+  if (!isNonEmptyString(harnessTaskLabel) || !isNonEmptyString(ledgerPath)) {
+    return false;
+  }
+  let ledger;
+  try {
+    ledger = JSON.parse(readFileSync(ledgerPath, "utf8"));
+  } catch {
+    return false;
+  }
+  const entry = ledger?.reservations?.[harnessTaskLabel];
+  if (!entry) return false;
+  if (entry.status === "SUSPECT") return true;
+  return (
+    entry.status === "COMPLETED" &&
+    entry.completion_reason === "SUSPECT_TIMEOUT_RECOVERED"
+  );
+}
+
+// HYK-478 §1-2: 두 독립 사실(ⓐ 완료 표지 0개 · ⓑ 원장이 이미 ACTIVE가
+// 아님을 새김) «둘 다» 참이어야 true다 -- DONE_PREDATES_DROPPED_AT이 이미
+// "두 사실을 하나의 confirm 함수 안에서 && 로 묶는다"는 같은 모양을 쓰고
+// 있다(위 참조).
+function confirmAuthorSeatLostBeforeStamp(record, resultText, ledgerPath) {
+  if (countConsumptionDoneMarkers(resultText) !== 0) return false;
+  return confirmReservationSeatLost(record?.harnessTaskLabel, ledgerPath);
+}
+
 // §3-4 (retirement-record-core.mjs 헤더): 기계로 확인 가능한 사유(현재
-// 셋 -- DONE_TIMESTAMP_NOT_PARSEABLE · DONE_PREDATES_DROPPED_AT ·
-// RUNNER_GREEN_UNREACHABLE_AT_HEAD)만 독립 재확인한다. 나머지 사유
-// (DONE_REWRITE_LOCKED · TASK_CONTRACT_PROHIBITS_REPAIR)는 이 코드베이스가
-// 기계로 재현할 수 없는 계약 텍스트 질문이므로 null을 돌려준다(가짜
-// 확인을 만들지 않는다 -- null은 코어가 "이 사유는 이 축에서 재확인
-// 대상이 아니다"로 이미 처리한다, MECHANICALLY_CONFIRMABLE_BLOCK_REASONS
-// 확인).
+// 넷 -- DONE_TIMESTAMP_NOT_PARSEABLE · DONE_PREDATES_DROPPED_AT ·
+// RUNNER_GREEN_UNREACHABLE_AT_HEAD · AUTHOR_SEAT_LOST_BEFORE_STAMP)만
+// 독립 재확인한다. 나머지 사유(DONE_REWRITE_LOCKED ·
+// TASK_CONTRACT_PROHIBITS_REPAIR)는 이 코드베이스가 기계로 재현할 수
+// 없는 계약 텍스트 질문이므로 null을 돌려준다(가짜 확인을 만들지 않는다
+// -- null은 코어가 "이 사유는 이 축에서 재확인 대상이 아니다"로 이미
+// 처리한다, MECHANICALLY_CONFIRMABLE_BLOCK_REASONS 확인).
 //
 // harnessDir은 필수다: RUNNER_GREEN_UNREACHABLE_AT_HEAD 가지가 러너
 // 영수증을 harnessDir 기준 상대 경로로 다시 읽어야 하기 때문이다(위
 // confirmRunnerGreenUnreachableAtHead 참조) -- 이 인자가 없던 옛
 // admission-completion-adapter.mjs 사본이 정확히 이 가지를 결선하지
 // 못해 fail-closed로 떨어졌던 결함(HYK-457 §2)이다.
+// ledgerPath(HYK-478 §1-2 신규 인자, 5번째)는 AUTHOR_SEAT_LOST_BEFORE_STAMP
+// 가지 전용이다 -- 나머지 가지는 이 인자를 전혀 읽지 않는다(undefined로
+// 호출해도 무해, 이 함수의 기존 네 인자 계약은 바이트 하나 안 바뀐다).
 export function confirmRetirementBlockReason(
   record,
   resultText,
   droppedAt,
   harnessDir,
+  ledgerPath,
 ) {
   if (!MECHANICALLY_CONFIRMABLE_BLOCK_REASONS.has(record?.blockReasonCode)) {
     return null;
@@ -162,6 +219,12 @@ export function confirmRetirementBlockReason(
     RETIREMENT_BLOCK_REASON.RUNNER_GREEN_UNREACHABLE_AT_HEAD
   ) {
     return confirmRunnerGreenUnreachableAtHead(record, harnessDir, resultText);
+  }
+  if (
+    record.blockReasonCode ===
+    RETIREMENT_BLOCK_REASON.AUTHOR_SEAT_LOST_BEFORE_STAMP
+  ) {
+    return confirmAuthorSeatLostBeforeStamp(record, resultText, ledgerPath);
   }
   return null;
 }
