@@ -44,7 +44,6 @@ export { TIME_AUTHORITY_STATE, MAX_FUTURE_SKEW_MS };
 export { maskQuotedMarkerRegions };
 
 const TASK_ID_RE = /^task_id:\s*(\S+)/im;
-const TASK_ID_RE_G = /^task_id:\s*(\S+)/gim;
 // HYK-180 사이클1: the anchored TASK_ID_RE only matches a standalone
 // `task_id: <id>` line at column 0. When it fails to match, this
 // unanchored variant tells apart two very different failure shapes: no
@@ -54,6 +53,74 @@ const TASK_ID_RE_G = /^task_id:\s*(\S+)/gim;
 // amount of waiting fixes). Never used to accept a match; only to produce
 // a distinct diagnosis for the latter case.
 const TASK_ID_ANYWHERE_RE = /task_id:\s*(\S+)/i;
+// HYK-468 2R: header-task-id-shared.mjs의 STRUCTURAL_LINE_RE/
+// hasStructuralPredecessor와 **로직 동일** (이 파일도 admission-
+// completion-adapter.mjs/dispatch-gate-decision.mjs와 같은 이유로 로컬
+// 복제다 -- 이 파일 자신의 헤더가 이미 설명하듯 hyk186-time-authority-
+// mutation.test.mjs 등 다수의 mutation 시험이 이 파일을 고정 sidecar
+// 목록으로 격리 clone하므로, 새 정적 import를 추가하면 그 시험들 전부가
+// 깨진다, 실측 확인 없이도 이 파일 자신의 기존 주석이 이미 그 위험을
+// 경고한다). 네 곳(이 함수 + admission-completion-adapter.mjs 로컬 사본 +
+// dispatch-gate-decision.mjs 로컬 사본 + header-task-id-shared.mjs
+// 정본)이 갈라지면 회귀이므로 고칠 때는 반드시 서로 대조하라.
+//
+// ⚠️1R 초안(첫 빈 줄 이전만 보는 "헤더 블록" 한정)은 실제로 회귀였다 --
+// nc-relay-handshake.test.mjs의 NC-2(HYK-183): 결과 파일이 옛 라운드의
+// task_id:+>>> DONE: 블록을 그대로 두고 빈 줄 뒤에 새 라운드 블록을
+// «추가»한 경우(산문 없음, 진짜 사고), 헤더 블록만 보면 새 블록이
+// 통째로 시야 밖으로 나가 조용히 옛(스테일) 값으로 확정돼 버렸다(전체
+// 러너 실측: NC-2 RED). 빈 줄 위치만으로는 "진짜 축적된 두 번째 선언"과
+// "산문으로 소개된 인용"을 가를 수 없다 -- 둘 다 두 번째 등장 앞에 빈
+// 줄이 있다.
+//
+// 실제로 가르는 것은 그 바로 «앞» 줄이다: NC-2는 두 번째 task_id: 앞의
+// 가장 가까운 비어있지 않은 줄이 `>>> DONE: ...`(구조적 표지)이고,
+// 검토자의 반려 재현은 그 앞이 순수 산문("예를 들어 다음과 같은 줄이
+// 주입된다:")이다. 그래서 어떤 열0 `task_id:` 줄이든, 그 바로 앞(빈 줄은
+// 건너뛰고) 줄이 구조적(`key:` 형태 또는 `>>>`)이거나 파일 맨 앞이면
+// «진짜»로 세고, 산문이 선행하면 «인용/예시»로 보아 세지 않는다.
+// 마스킹(펜스/HTML 주석 «안»)은 이 검사 «이전»에 이미 공백으로 지워지므로
+// (blankKeepingNewlines) 펜스 안 인용은 이 축에 도달하지도 않는다 --
+// 별도로 다룰 필요 없다.
+// HYK-468 3R (P1-2, 검토자 반려 재수리): 2R은 여기에 `|^<!--`를 정본에
+// 없는 «대안 하나»로 더 얹었다(envelope-archive.mjs가 붙이는 한 줄짜리
+// `<!-- envelope-archive: ... -->` 헤더를 실선언 바로 앞에서 구조적으로
+// 보이게 하려던 의도) -- 그런데 정본 header-task-id-shared.mjs 헤더가
+// 이미 설명하듯, 올바른 축은 "`<!--`로 시작하면 무조건 구조적"이 아니라
+// «주석 자체를 마스킹으로 지우고 남는가»다: maskQuotedMarkerRegions
+// (위 import, HYK-449)가 정상 한 줄 주석이든 hyk396-dispatch-
+// stamp.test.mjs (o)가 합성한 «일부러 깨진» 다줄 주석(닫는 `-->`가
+// 다음 줄로 밀려난 모양)이든 이 검사 «이전»에 이미 처리한다 -- 정상
+// 주석은 통째로 공백이 되어 빈 줄과 똑같이 건너뛰므로(아래
+// hasStructuralPredecessor가 그 앞줄까지 마저 보아 «파일 맨 앞»이면
+// 구조적으로 확정한다) 실선언은 여전히 산다. 깨진 다줄 주석은 닫히지
+// 않은 채 문서 끝까지 마스킹되어(reject-streak.mjs의 FENCE_OPEN_RE와
+// 같은 fail-closed 방향) 그 안에 있던 무엇이든 이 축에 도달하지 않고,
+// classifyArchivedDispatchId 같은 손상 전담 검사가 여전히 REJECT를
+// 낸다. `|^<!--`를 STRUCTURAL_LINE_RE에 직접 넣으면 이 구분이 사라져
+// «깨진» 다줄 주석까지 무조건 구조적으로 보여, 그 검사가 지키려는 축을
+// 가려버린다(검토자 실측 지적, P1-2 표적 2) -- 그래서 정본과 바이트
+// 동일하게 되돌린다(scripts/check/hyk468-3r-copy-drift.test.mjs가 이
+// 동일성을 기계로 단정).
+// HYK-468 4R (P1, 검토자 반려 재수리): the loop below used to inline this
+// regex at its match call site instead of naming it -- exactly why the
+// drift test's hand-picked comparison list never had a slot for it, and
+// why it was free to drift to `\s*` (matches NBSP/U+3000/EM-space/VT/FF,
+// none of which the canonical `[ \t]` character class accepts) without
+// anything noticing (검토자 REVIEW-r28.md 반려 표적). Named to match
+// header-task-id-shared.mjs's exported RULE_CONSTANTS.TASK_ID_LINE_RE
+// byte-for-byte, so hyk468-3r-copy-drift.test.mjs's generic by-name
+// enumeration actually has something to find here.
+const TASK_ID_LINE_RE = /^task_id:[ \t]*(\S+)/i;
+const STRUCTURAL_LINE_RE = /^[A-Za-z_][\w-]*:|^>>>/;
+
+function hasStructuralPredecessor(lines, idx) {
+  for (let i = idx - 1; i >= 0; i--) {
+    if (lines[i].trim() === "") continue;
+    return STRUCTURAL_LINE_RE.test(lines[i]);
+  }
+  return true;
+}
 // HYK-353 2R §1 (P1-2): exported so finalize-done.mjs can resolve the exact
 // same `dropped_at:` raw text this file itself uses when it composes the
 // (taskId, droppedAt) key it hands to first-observation.mjs's
@@ -438,7 +505,20 @@ function isInsideGitWorktree(dir) {
 export function resolveResultTaskId(resultContent) {
   // HYK-449: 인용된(코드블록·HTML 주석) 줄은 이 문서가 «말한» 것이 아니다.
   const scan = maskQuotedMarkerRegions(resultContent);
-  const resultIdMatches = [...scan.matchAll(TASK_ID_RE_G)];
+  // HYK-468 2R (검토자 P1 반려, 정당함): 마스킹은 펜스/HTML 주석 «안»만
+  // 가린다 -- 코드펜스 «없이» 본문에 그대로 인용한 예시(예: "예를 들어
+  // 다음과 같은 줄이 주입된다: task_id: HYK-...")는 마스킹을 안 받고
+  // 열 0에 그대로 남아 진짜 선언과 충돌해 AMBIGUOUS로 거부됐다(실사고
+  // 재현). 구조적 선행 맥락 검사(위 hasStructuralPredecessor)로 이 축을
+  // 닫는다 -- 자세한 이유는 그 함수 정의 위 주석 참조.
+  const lines = scan.replace(/\r\n/g, "\n").split("\n");
+  const resultIdMatches = [];
+  for (let i = 0; i < lines.length; i++) {
+    const m = lines[i].match(TASK_ID_LINE_RE);
+    if (!m) continue;
+    if (!hasStructuralPredecessor(lines, i)) continue;
+    resultIdMatches.push(m);
+  }
   if (resultIdMatches.length > 1) {
     return {
       ok: false,

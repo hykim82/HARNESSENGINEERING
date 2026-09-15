@@ -409,6 +409,26 @@ function emptyDetectorFields() {
   };
 }
 
+// HYK-467 (coder-task.md §B) -- 2026-09-10 ORCH 자인: GitHub check_runs
+// API가 한도 소진으로 키 자체를 안 주는데 `rs = d.get('check_runs') or []`
+// 로 접으면 "아직 안 뜸"(NO_RUNS_YET)으로 조용히 둔갑한다. 같은 병이 이
+// 감시기에도 있다 -- 검토 실측: `runDetector`가 감지기 서브프로세스가
+// «떴지만 비정상 종료»했을 때(execFn이 numeric err.status로 던짐) 그
+// stdout(대개 빈 문자열이거나 스택트레이스 조각)을 그대로
+// `parseDetectorStdout`에 넘기고, 그게 파싱 실패하면 이 함수가 조용히
+// `emptyDetectorFields()`(verdict:null)를 돌려줬다 -- buildLogLine의
+// `detectorResult.verdict ?? "UNKNOWN"` 이 그 null을 "UNKNOWN"으로 접어,
+// 실제 감지기 크래시가 이 감시기가 정상적으로 판단할 수 있는 다른
+// 상태들과 구별 안 되는 문자열로 뭉개졌다(orch-stall-detect.mjs의 진짜
+// verdict 어휘 -- PROGRESSING/WAITING_HUMAN_GATE/UNDECIDABLE/STALLED --
+// 에는 "UNKNOWN"이 없다는 것 자체는 검토 확인했지만, reasonCode 쪽은
+// 둘 다 "NONE"으로 겹쳐 사람이 grep으로 구별할 수 없었다).
+// ⛔이 상수를 REASON_CODE.NONE("정상, 사유 없음")과 절대 겹치지 않게
+// 고른다 -- 겹치면 이 수리가 고치려는 바로 그 혼동을 다른 이름으로
+// 재생산한다.
+export const DETECTOR_STDOUT_UNPARSEABLE_VERDICT =
+  "DETECTOR_STDOUT_UNPARSEABLE";
+
 function parseDetectorStdout(stdout) {
   try {
     const parsed = JSON.parse(String(stdout).trim());
@@ -442,7 +462,14 @@ function parseDetectorStdout(stdout) {
       ...extractBindingFields(binding),
     };
   } catch {
-    return emptyDetectorFields();
+    // HYK-467: distinct from every real verdict this detector can emit,
+    // and distinct from the "NONE" reasonCode used for genuinely
+    // nothing-to-report ticks -- see the constant's own header comment.
+    return {
+      ...emptyDetectorFields(),
+      verdict: DETECTOR_STDOUT_UNPARSEABLE_VERDICT,
+      reasonCode: DETECTOR_STDOUT_UNPARSEABLE_VERDICT,
+    };
   }
 }
 
