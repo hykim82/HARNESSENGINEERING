@@ -14,7 +14,12 @@ import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { runWatchOnce, buildLogLine, MAX_LOG_LINES } from "./watch-run.mjs";
+import {
+  runWatchOnce,
+  buildLogLine,
+  MAX_LOG_LINES,
+  DETECTOR_STDOUT_UNPARSEABLE_VERDICT,
+} from "./watch-run.mjs";
 
 function repoRoot() {
   return execFileSync("git", ["rev-parse", "--show-toplevel"], {
@@ -124,6 +129,96 @@ test("detector exit code (execFileSync-style thrown error with .status) is captu
     assert.equal(result.detectorResult.runnerFailure, false);
     assert.equal(result.detectorResult.exitCode, 2);
     assert.equal(result.detectorResult.verdict, "STALLED");
+  } finally {
+    fs.rmSync(watchDir, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// HYK-467 (coder-task.md §B): 좌석 조회(감지기) 실패가 «조용히» 정상 판정과
+// 같은 문자열로 접히는지 -- 접힌다면 좌석 조회 실패가 «유휴»와 구별 안
+// 된다(2026-09-10 ORCH 자인 `or []` 병과 같은 형태). 이 축은 실제 GitHub
+// API가 아니라 로컬 서브프로세스(orch-stall-detect.mjs)라 4갈래
+// 분류(한도초과/기타 API 오류/응답형태 다름/파싱불가)를 그대로 이식하지
+// 않는다 -- 이 감시기가 실제로 겪을 수 있는 실패 모양(감지기가 «떴지만»
+// 알아들을 수 없는 stdout을 냄, exit code와 무관하게)에 맞춘 단일하지만
+// 명확히 구별되는 신호를 요구한다.
+// ---------------------------------------------------------------------------
+test("HYK-467: 감지기가 비정상 종료(exit!=0)하면서 stdout이 파싱 불가(빈 문자열)이면, 정상 판정 어휘(PROGRESSING/STALLED/...)나 일반 'UNKNOWN'이 아닌 구별되는 오류 신호로 발화한다 -- 유휴/정상과 다른 문장 (1/1)", () => {
+  const watchDir = tmpWatchDir();
+  try {
+    const err = new Error("Command failed");
+    err.status = 1;
+    err.stdout = ""; // 감지기가 크래시해 stdout이 비었다 -- 실물 실패 모양.
+    const result = runWatchOnce({
+      repoRoot: ROOT,
+      watchDir,
+      now: NOW_MS,
+      execFn: () => {
+        throw err;
+      },
+    });
+    assert.equal(
+      result.detectorResult.runnerFailure,
+      false,
+      "이건 스폰 자체 실패가 아니다 -- 감지기 프로세스는 떴다(§ runnerFailure=true 케이스와 다른 신호)",
+    );
+    assert.equal(result.detectorResult.exitCode, 1);
+    assert.equal(
+      result.detectorResult.verdict,
+      DETECTOR_STDOUT_UNPARSEABLE_VERDICT,
+    );
+    assert.notEqual(result.detectorResult.verdict, "UNKNOWN");
+    assert.equal(
+      result.detectorResult.reasonCode,
+      DETECTOR_STDOUT_UNPARSEABLE_VERDICT,
+    );
+    assert.notEqual(
+      result.detectorResult.reasonCode,
+      "NONE",
+      "'NONE'은 '정상, 사유 없음'과 '감지기 크래시'를 grep으로 구별 못 하게 만든다",
+    );
+    const logText = fs.readFileSync(result.logPath, "utf8");
+    assert.match(
+      logText,
+      new RegExp(`verdict=${DETECTOR_STDOUT_UNPARSEABLE_VERDICT}`),
+    );
+  } finally {
+    fs.rmSync(watchDir, { recursive: true, force: true });
+  }
+});
+
+test("HYK-467 회귀: 감지기가 exit 0(정상)이지만 stdout이 파싱 불가(빈 문자열)여도 -- 우연히 조용한 성공으로 보이지 않는다, 동일한 구별 신호 (1/1)", () => {
+  const watchDir = tmpWatchDir();
+  try {
+    const result = runWatchOnce({
+      repoRoot: ROOT,
+      watchDir,
+      now: NOW_MS,
+      execFn: () => "",
+    });
+    assert.equal(result.detectorResult.exitCode, 0);
+    assert.equal(
+      result.detectorResult.verdict,
+      DETECTOR_STDOUT_UNPARSEABLE_VERDICT,
+      "exit 0이라도 stdout을 못 읽으면 여전히 '정상'과 구별되는 신호여야 한다",
+    );
+  } finally {
+    fs.rmSync(watchDir, { recursive: true, force: true });
+  }
+});
+
+test("HYK-467 대조(회귀 0): 감지기가 정상 종료 + 유효 JSON을 내면 여전히 기존 verdict 어휘 그대로다 -- 이 수리가 정상 경로를 건드리지 않았다 (1/1)", () => {
+  const watchDir = tmpWatchDir();
+  try {
+    const result = runWatchOnce({
+      repoRoot: ROOT,
+      watchDir,
+      now: NOW_MS,
+      execFn: () => progressingExec(),
+    });
+    assert.equal(result.detectorResult.verdict, "PROGRESSING");
+    assert.equal(result.detectorResult.reasonCode, "OK");
   } finally {
     fs.rmSync(watchDir, { recursive: true, force: true });
   }

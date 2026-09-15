@@ -68,7 +68,10 @@ const DROPPED_AT_RE = /^dropped_at:\s*(.+)$/im;
 test("(a) existing dropped_at: line is rewritten to a fresh machine-stamped value, rest of file byte-identical", () => {
   withFixtureDir((dir) => {
     const taskPath = join(dir, "coder-task.md");
-    const original = `task_id: HYK-9101-stamp-1\ndropped_at: 2020-01-01 00:00 KST\nrole: CODER\nsome body line\n${ONE_B_BLOCK}`;
+    // HYK-465: this fixture pre-seeds a result_file: line so the OTHER
+    // best-effort injection (bestEffortInjectResultPaths) is a no-op here
+    // -- this test's only concern is dropped_at rewriting in isolation.
+    const original = `task_id: HYK-9101-stamp-1\ndropped_at: 2020-01-01 00:00 KST\nresult_file: (pre-seeded, HYK-465 injection must not touch this fixture)\nrole: CODER\nsome body line\n${ONE_B_BLOCK}`;
     writeFileSync(taskPath, original, "utf8");
     const ledgerPath = join(dir, "reject-streak.json");
     writeLedger(ledgerPath, { schema_version: 1, issues: {} });
@@ -122,7 +125,8 @@ test("(a) existing dropped_at: line is rewritten to a fresh machine-stamped valu
 test("(b) HYK-316-dropped-stamp-1: no dropped_at: line but task_id: IS present -- a machine dropped_at is INSERTED right after task_id:, ALLOW unaffected", () => {
   withFixtureDir((dir) => {
     const taskPath = join(dir, "coder-task.md");
-    const original = `task_id: HYK-9102-nodropped-1\nrole: CODER\n${ONE_B_BLOCK}`;
+    // HYK-465: pre-seeded result_file: line, same reason as test (a) above.
+    const original = `task_id: HYK-9102-nodropped-1\nresult_file: (pre-seeded, HYK-465 injection must not touch this fixture)\nrole: CODER\n${ONE_B_BLOCK}`;
     writeFileSync(taskPath, original, "utf8");
     const ledgerPath = join(dir, "reject-streak.json");
     writeLedger(ledgerPath, { schema_version: 1, issues: {} });

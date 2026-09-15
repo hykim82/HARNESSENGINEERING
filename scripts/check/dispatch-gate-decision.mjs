@@ -18,7 +18,7 @@ import {
   rmSync,
 } from "node:fs";
 import { createHash } from "node:crypto";
-import { join, dirname } from "node:path";
+import { join, dirname, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import {
@@ -31,7 +31,11 @@ import {
   checkHeadCommitPrecondition,
   DISPATCH_GATE_STATE,
 } from "./dispatch-gate-decision-core.mjs";
-import { loadLedger, writeLedger } from "./reject-streak.mjs";
+import {
+  loadLedger,
+  writeLedger,
+  maskQuotedMarkerRegions,
+} from "./reject-streak.mjs";
 // HYK-257-done-stamp-2 §2 범위2 ⓑ: the ONE real, already-production-wired
 // anchor for a machine dropped_at stamp -- 관제실 dispatch-worker.ps1
 // (읽기 전용, 이 저장소 밖 실측 원문, 아래 bestEffortStampDroppedAt 헤더
@@ -694,6 +698,87 @@ function extractSoleMatch(text, reG) {
   return matches.length === 1 ? matches[0][1].trim() : undefined;
 }
 
+// HYK-468: header-task-id-shared.mjs의 resolveHeaderTaskId와 **로직 동일**
+// (이 파일도 admission-completion-adapter.mjs와 같은 이유로 로컬 복제다 --
+// dispatch-gate-abort-wire.test.mjs·dispatch-gate-consumption-wire.test.mjs·
+// hyk263-archive-doneat.test.mjs·hyk298-3r-envelope-fixtures.test.mjs·
+// hyk396-open-axis.test.mjs 등 이 파일 소스를 고정 파일 목록으로 격리
+// 스테이징하는 mutation 시험이 다수 있어, 새 import를 추가하면
+// MODULE_NOT_FOUND로 깨진다, 실측 확인). 세 곳(이 함수 + adapter의 로컬
+// 복제 + header-task-id-shared.mjs 정본)이 갈라지면 회귀이므로 고칠 때는
+// 반드시 서로 대조하라.
+//
+// task_id: 선언은 «구조적 선행 맥락»이 있는 줄에서만 읽는다 -- 그
+// 바로 앞(빈 줄은 건너뛰고) 줄이 다른 헤더 줄(`key:` 형태)이거나
+// `>>>` 표지이거나 파일 맨 앞이면 «진짜», 산문이 선행하면 «인용/예시»로
+// 본다. round-archive 파일(rounds/<role>-r<N>.md 등) 본문에 산문으로
+// 소개된 뒤 그대로 인용된 `task_id:` 줄이 진짜 선언과 충돌해 "2개"로
+// 잘못 세는 사고를 막는다(실사고 재현: 검토자가 실제 exported
+// resolveResultTaskId에 이 모양을 주입해 AMBIGUOUS를 재현했다).
+//
+// ⚠️1R 초안(첫 빈 줄 이전만 보는 "헤더 블록" 한정)은 실제로 회귀였다 --
+// 빈 줄로 나뉜 두 개의 «진짜» task_id: 블록(옛 라운드 유지 + 새 라운드
+// 추가, 산문 없음, HYK-183과 같은 사고 모양)을 헤더 블록 밖이라는 이유로
+// 못 보고 스테일 값으로 조용히 확정해 버렸다(전체 러너 실측:
+// nc-relay-handshake.test.mjs의 NC-2 RED). 빈 줄 위치만으로는 그 둘을
+// 가를 수 없다 -- 자세한 이유와 두 사고 모양의 대조는
+// header-task-id-shared.mjs 헤더 주석 참조(그 파일이 이 로직의 정본).
+//
+// ⚠️두 번째 실측 회귀(같은 라운드): envelope-archive.mjs가 아카이브
+// 사본(rounds/<role>-task-r<N>.md 등)에 붙이는 `<!-- envelope-archive:
+// ... -->` 헤더는 "그 앞 줄이 구조적인가"만 볼 때는 실선언을 가로막고,
+// "`<!--`로 시작하면 무조건 구조적"으로 볼 때는 반대로 hyk396-dispatch-
+// stamp.test.mjs (o)가 합성한 «일부러 깨진» 다줄 주석(닫는 `-->`가
+// 다음 줄로 밀려난 모양, 검토자 실증 재현)까지 구조적으로 봐 버려 그
+// 시험이 지키려는 "손상은 정말로 손상으로 보여야 한다"는 축이 사라진다.
+// 올바른 축은 «주석 자체를 지우고 남는가»다 -- reject-streak.mjs의
+// maskQuotedMarkerRegions(HYK-449, 펜스·HTML 주석을 여러 줄에 걸쳐
+// 정확히 인식해 공백으로 지운다)를 이 검사 «이전»에 먼저 돌리면, 정상
+// 주석이든 깨진 다줄 주석이든 전부 공백 줄이 되어 "빈 줄과 똑같이
+// 건너뛴다"(아래 hasStructuralPredecessor의 `lines[i].trim() === ""`가
+// 이미 그렇게 처리한다) -- 그래서 정상 주석 뒤의 실선언은 살고, 깨진
+// 주석은 애초에 이 축에 걸리지 않아 classifyArchivedDispatchId 등 그
+// 손상을 실제로 겨눈 검사가 여전히 REJECT를 낸다.
+//
+// HYK-468 3R (P1-2 표적 2, 검토자 반려 재수리): 이 정규식을 인라인으로
+// 두면 정본 header-task-id-shared.mjs와 "바이트 동일"함을 기계로 대조할
+// 자리가 없다. STRUCTURAL_LINE_RE라는 이름의 별도 상수로 뽑아 정본과
+// 정확히 같은 텍스트로 둔다(scripts/check/hyk468-3r-copy-drift.test.mjs가
+// 이 상수와 hasStructuralPredecessor 본문 둘 다 정본과 바이트 동일함을
+// 단정한다) -- 판정 자체는 조금도 바뀌지 않는다.
+// HYK-468 4R (P1, 검토자 반려 재수리): 같은 이유로 아래 두 곳
+// (resolveHeaderTaskId 본문 + classifyTaskIdLabel의 strictMatches, 검토자
+// REVIEW-r28.md가 인용한 872행)이 각자 이 정규식을 인라인으로 반복하고
+// 있었다 -- STRUCTURAL_LINE_RE처럼 이름 붙은 상수가 아니라서 드리프트
+// 시험의 손으로 고른 비교 목록에 오를 자리가 없었다. 정본
+// header-task-id-shared.mjs의 RULE_CONSTANTS.TASK_ID_LINE_RE와 바이트
+// 동일하게 이름을 맞추고, 두 호출부 모두 이 하나의 상수를 쓴다.
+const TASK_ID_LINE_RE = /^task_id:[ \t]*(\S+)/i;
+const STRUCTURAL_LINE_RE = /^[A-Za-z_][\w-]*:|^>>>/;
+
+function hasStructuralPredecessor(lines, idx) {
+  for (let i = idx - 1; i >= 0; i--) {
+    if (lines[i].trim() === "") continue;
+    return STRUCTURAL_LINE_RE.test(lines[i]);
+  }
+  return true;
+}
+
+function resolveHeaderTaskId(content) {
+  const lines = maskQuotedMarkerRegions(
+    (content ?? "").replace(/\r\n/g, "\n"),
+  ).split("\n");
+  const candidates = [];
+  for (let i = 0; i < lines.length; i++) {
+    const m = lines[i].match(TASK_ID_LINE_RE);
+    if (!m) continue;
+    if (!hasStructuralPredecessor(lines, i)) continue;
+    candidates.push(m[1]);
+  }
+  if (candidates.length !== 1) return { ok: false, count: candidates.length };
+  return { ok: true, id: candidates[0] };
+}
+
 // HYK-298-abort-record-2 §2-1 -- ★공통 문장("없는 것"과 "깨진 것"은
 // 다르다) 그대로: `harnessTaskLabel === undefined`(위 extractSoleMatch)
 // 하나만으로는 "이름표가 진짜로 하나도 없음"과 "있지만 복수/빈값/줄
@@ -711,9 +796,11 @@ function extractSoleMatch(text, reG) {
 // 출현이 여러 건 생긴다 -- 그 출현은 전부 줄 시작이 아니다(어떤 문장이
 // "task_id:"로 시작하는 경우가 없는 한). 그런데도 2R 규칙은 그 정상
 // 라운드를 BROKEN으로 오분류해 다음 배달을 영구 차단했다(오늘 실측,
-// coder-task.md §1 표). 3R은 그 오분류를 없앴다 -- 판정은 «줄머리»
-// (TASK_ID_LOOSE_LINE_RE)로 시작하는 줄의 개수와, 그 줄 안에서의 유효값
-// 개수(CONSUMPTION_TASK_ID_RE_G)를 먼저 본다. **`looseLines === 1 &&
+// coder-task.md §1 표). 3R은 그 오분류를 없앴다 -- 판정은 «줄머리»로
+// 시작하는 줄의 개수(HYK-468 2R부터는 classifyTaskIdLabel 본문의 인라인
+// `/^task_id:.*$/i` 줄별 검사, 예전 이름 TASK_ID_LOOSE_LINE_RE)와, 그
+// 줄 안에서의 유효값 개수(CONSUMPTION_TASK_ID_RE_G)를 먼저 본다.
+// **`looseLines === 1 &&
 // strictCount === 1`(=`VALID`)은 이 질문에 도달조차 하지 않는다** --
 // 정상 봉투(오늘 실물 2개: 줄머리 1 + 원시 3·11)는 항상 이 분기에서
 // 먼저 걸러진다(HYK-298-label-boundary-5 §2 항ⓐ 요구 "과차단이 재발하지
@@ -739,8 +826,9 @@ function extractSoleMatch(text, reG) {
 // 원시 출현 3·11건이어도 여전히 VALID인 이유 -- 이 재질문에 도달하지
 // 않는다).
 //
-// - TASK_ID_LOOSE_LINE_RE: 줄 시작(`^`)에 "task_id:"로 시작하는 줄이
-//   몇 개인지(값의 유효성은 무관, ⓐ·ⓑ 대응) 센다.
+// - looseLineIdxs(줄별 `/^task_id:.*$/i` 검사, 옛 이름 TASK_ID_LOOSE_LINE_RE):
+//   줄 시작(`^`)에 "task_id:"로 시작하는 줄이 몇 개인지(값의 유효성은
+//   무관, ⓐ·ⓑ 대응) 센다.
 // - TASK_ID_ANY_RE: 줄 시작 여부와 무관하게 "task_id:"가 파일 어디에나
 //   등장하는지 센다 -- `looseLines === 0`일 때만 이 질문을 쓴다(위 설명).
 // - CONSUMPTION_TASK_ID_RE_G(위, 같은 줄로 한정됨): 값이 같은 줄 안에
@@ -751,11 +839,36 @@ function extractSoleMatch(text, reG) {
 // looseLines === 1 && strictCount === 1 -> VALID(원시 출현 개수와 무관).
 // 나머지 전부(줄머리 2개 이상·줄머리는 1개인데 같은 줄 값이 비었거나
 // 크로스라인으로 새는 경우) -> BROKEN. fail-closed 기본은 그대로다.
-const TASK_ID_LOOSE_LINE_RE = /^task_id:.*$/gim;
 const TASK_ID_ANY_RE = /task_id:/gi;
 
-function classifyTaskIdLabel(resultText) {
-  const looseLines = [...resultText.matchAll(TASK_ID_LOOSE_LINE_RE)].length;
+// HYK-468 2R (검토자 P1 반려, 정당함): 아래 세 카운트를 전부 resultText
+// «전체»가 아니라 그 헤더 블록(첫 빈 줄 이전, 위 headerBlockOf)으로
+// 한정한다 -- 코드펜스로 감싸지 않은 채 본문에 그대로 인용한 예시(예:
+// "예를 들어 다음과 같은 줄이 주입된다: task_id: HYK-...")가 옛 로직
+// 에서는 looseLines를 2로 세어 진짜 선언과 구별되지 않고 BROKEN으로
+// 떨어졌다(실사고 재현, admission-completion-adapter.mjs/relay-
+// handshake.mjs와 같은 결함 계열). 헤더 블록 밖의 언급은 이 축의 관심사가
+// 아니다 -- "표지는 «줄머리»에 있는 것이다"라는 이 함수 자신의 기존
+// 철학(위 HYK-298-label-classify-3 주석)을 "그리고 «헤더 블록 안»의
+// 줄머리다"로 한 번 더 좁힌 것뿐, 새 철학이 아니다.
+// HYK-468 3R §3: 2R 검토자는 이 함수가 공개 export가 아니어서 메모리
+// 전용 probe로 우회해야 했다(REVIEW-r27.md "정직 한계"). coder-task.md
+// §3의 "export하는 편이 낫다고 판단하면 그렇게 하라"에 따라 이 라운드는
+// 테스트 전용으로 export한다 -- classifyTaskIdLabel 자신의 판정 로직은
+// 한 글자도 바뀌지 않는다(`export` 키워드만 추가). 이 파일이 이미
+// DISPATCH_RECEIPT_LOOKUP_REASON(아래) 등을 시험이 직접 값을 대조할 수
+// 있게 export하는 것과 같은 관례다.
+export function classifyTaskIdLabel(resultText) {
+  const lines = maskQuotedMarkerRegions(
+    (resultText ?? "").replace(/\r\n/g, "\n"),
+  ).split("\n");
+  const looseLineIdxs = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (!/^task_id:.*$/i.test(lines[i])) continue;
+    if (!hasStructuralPredecessor(lines, i)) continue;
+    looseLineIdxs.push(i);
+  }
+  const looseLines = looseLineIdxs.length;
   if (looseLines === 0) {
     const anyCount = [...resultText.matchAll(TASK_ID_ANY_RE)].length;
     if (anyCount === 0) {
@@ -763,7 +876,9 @@ function classifyTaskIdLabel(resultText) {
     }
     return { kind: "BROKEN", looseLines: 0, strictCount: 0, anyCount };
   }
-  const strictMatches = [...resultText.matchAll(CONSUMPTION_TASK_ID_RE_G)];
+  const strictMatches = looseLineIdxs
+    .map((i) => lines[i].match(TASK_ID_LINE_RE))
+    .filter(Boolean);
   const strictCount = strictMatches.length;
   if (looseLines === 1 && strictCount === 1) {
     return {
@@ -1163,10 +1278,11 @@ function findArchivedRoundMeta(
     } catch {
       continue;
     }
-    if (
-      extractSoleMatch(content, CONSUMPTION_TASK_ID_RE_G) !== harnessTaskLabel
-    )
-      continue;
+    // HYK-468: header-block-scoped (see header-task-id-shared.mjs) --
+    // a whole-file column-0 scan collided with a task_id: line quoted
+    // verbatim later in this archive file's own body.
+    const archivedTaskId = resolveHeaderTaskId(content);
+    if (!archivedTaskId.ok || archivedTaskId.id !== harnessTaskLabel) continue;
     const droppedMatch = content.match(CONSUMPTION_DROPPED_AT_RE);
     if (!droppedMatch) continue;
     matches.push({
@@ -1622,10 +1738,8 @@ function findArchivedResultFingerprint(
       continue;
     }
     const stripped = stripArchiveEnvelopeHeader(raw);
-    if (
-      extractSoleMatch(stripped, CONSUMPTION_TASK_ID_RE_G) !== harnessTaskLabel
-    )
-      continue;
+    const strippedTaskId = resolveHeaderTaskId(stripped);
+    if (!strippedTaskId.ok || strippedTaskId.id !== harnessTaskLabel) continue;
     labelMatches.push({
       path: join("rounds", name),
       fingerprint: computeConsumptionResultFingerprint(stripped),
@@ -2090,10 +2204,8 @@ function resolveRetirementArchiveCandidate(
       continue;
     }
     const stripped = stripArchiveEnvelopeHeader(raw);
-    if (
-      extractSoleMatch(stripped, CONSUMPTION_TASK_ID_RE_G) !== harnessTaskLabel
-    )
-      continue;
+    const strippedTaskId = resolveHeaderTaskId(stripped);
+    if (!strippedTaskId.ok || strippedTaskId.id !== harnessTaskLabel) continue;
     matches.push({
       path: join("rounds", name),
       fingerprint: computeConsumptionResultFingerprint(stripped),
@@ -3232,6 +3344,58 @@ function bestEffortStampDroppedAt(taskPath, args) {
   }
 }
 
+// HYK-465 (coder-task.md §A): 2026-09-10 P1 반려의 실제 원인 -- `.harness/`
+// 는 git-ignore라 작성자 결과(`<role>.md`)·러너 영수증이 커밋 diff에
+// 절대 나오지 않는데, 지시서 자체가 그 절대경로를 안 적었다. 검토자는
+// "볼 수 있는 표면을 전수 조사하고 없다"고 정직하게 반려했다 -- 사람이
+// 매번 손으로 그 경로를 기억해 적는 방식은 이미 실패로 증명됐다(그날
+// 안 적혔다). ⇒ 이 가게이트가 배달 직전 항상 거치는 자리라는 점(HYK-217
+// 앵커, dispatch-worker.ps1:256)을 이용해, bestEffortStampDroppedAt과
+// 같은 best-effort/비파괴 스타일로 그 경로들을 task 파일에 기계로
+// 박아 넣는다. 이미 박혀 있으면(RESULT_FILE_LINE_RE 매치) 다시 넣지
+// 않는다(idempotent -- 재실행/재게이트에서 중복 삽입 없음).
+const RESULT_FILE_LINE_RE = /^result_file:\s*.+$/im;
+
+function bestEffortInjectResultPaths(taskPath, args) {
+  guardAgainstLiveTaskPathStamp(taskPath, args);
+  const role = deriveRoleFromTaskPath(taskPath);
+  if (!role) return;
+  try {
+    const original = readFileSync(taskPath, "utf8");
+    if (RESULT_FILE_LINE_RE.test(original)) {
+      return; // already injected -- idempotent no-op, never duplicates
+    }
+    const taskIdLineMatch = original.match(TASK_ID_LINE_FOR_INSERT_RE);
+    if (!taskIdLineMatch) {
+      console.log(
+        `dispatch-gate-decision: result-path injection skipped (no 'task_id:' line in ${taskPath} -- not shaped like a round task file, this round does not invent one)`,
+      );
+      return;
+    }
+    const harnessDir = resolve(dirname(taskPath));
+    const resultFile = join(harnessDir, `${role.toLowerCase()}.md`);
+    const receiptFile = join(harnessDir, "runner-receipt.json");
+    // HYK-465 §A-3 (책임자 지시): 같은 주입 경로로 워크트리 이동 금지
+    // 규율도 함께 박는다 -- 손 주입은 다음 라운드에서 사라진다.
+    const block =
+      `\nresult_file: ${resultFile}` +
+      `\nrunner_receipt_file: ${receiptFile}` +
+      `\nharness_gitignore_note: .harness/ 는 git-ignore라 커밋 diff에 절대 안 나온다 -- 검토는 위 절대경로 파일을 직접 열어 확인하라(HYK-465 기계 주입, 손 기억 의존 금지).` +
+      `\nworktree_discipline: 작업/검토가 끝나면 DONE 을 찍기 «전»에 워크트리를 작업/검토한 커밋에 둔 채로 두라 -- 뒷정리로 HEAD 를 옮기면 소비가 막힌다(HYK-465 기계 주입).`;
+    const insertAt = taskIdLineMatch.index + taskIdLineMatch[0].length;
+    const inserted =
+      original.slice(0, insertAt) + block + original.slice(insertAt);
+    writeFileSync(taskPath, inserted, "utf8");
+    console.log(
+      `dispatch-gate-decision: result-path block machine-injected (HYK-465) -- ${taskPath} -> result_file=${resultFile}, runner_receipt_file=${receiptFile}`,
+    );
+  } catch (err) {
+    console.error(
+      `dispatch-gate-decision: result-path injection best-effort failed (non-fatal to this CLI's own exit code): ${err.message}`,
+    );
+  }
+}
+
 export function runDispatchGateDecision(argv) {
   const args = parseArgs(argv);
   const taskPath = args._[0];
@@ -3262,6 +3426,15 @@ export function runDispatchGateDecision(argv) {
     // HYK-257-done-stamp-2 §2 범위2 ⓑ: as early as possible once the file's
     // existence is confirmed, before any gate decision runs -- best-effort,
     // never blocks/changes what follows.
+    // HYK-465 (coder-task.md §A-2): runs BEFORE bestEffortStampDroppedAt,
+    // not after -- bestEffortStampDroppedAt's own round-snapshot call
+    // (bestEffortSnapshotRoundTaskFile) assumes it is always the LAST
+    // rewrite before anything reads "this round's final text"
+    // (dispatch-gate-round-snapshot.test.mjs's whole contract). Running
+    // this injection first means dropped_at stamping still runs last and
+    // its snapshot captures the fully-final content, exactly like before
+    // this round existed.
+    bestEffortInjectResultPaths(taskPath, args);
     bestEffortStampDroppedAt(taskPath, args);
     const ledgerResolution = resolveLedgerPath(args, taskPath);
     const pathDecision = checkLedgerPathResolution(ledgerResolution);
