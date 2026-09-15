@@ -28,9 +28,10 @@ import {
   realpathSync,
   rmSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
+import { cpus, tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  RUNNER_STATUS,
   parseTapSummaryCounts,
   writeRunnerReceipt,
 } from "./runner-receipt-writer.mjs";
@@ -89,6 +90,58 @@ export function collectTestFiles(
   return files;
 }
 
+// HYK-473 §2-1: `node --test` with no `--test-concurrency` defaults to one
+// worker per CPU core (this file previously passed zero concurrency flags
+// at all -- 0 hits on `--test-concurrency` grep, confirmed before this
+// round). Each worker is its own child process with its own V8 heap, so on
+// a machine already under memory pressure from unrelated processes,
+// core-count-wide concurrency is exactly the shape HYK-468 4R traced its 3
+// consecutive forced-kill runs to (dropped_at evidence: ~3.6-3.8GB/16.7GB
+// free, steady across all 3 attempts -- not a spike this runner caused).
+// Halving the core count keeps real parallelism (this suite has ~50+ test
+// files; concurrency 1 would serialize all of them) while roughly halving
+// the peak number of concurrent heaps; max(1, floor(...)) keeps 1-2 core
+// machines from resolving to a 0 or negative concurrency.
+export function resolveConcurrency({ cpuCount = cpus().length } = {}) {
+  return Math.max(1, Math.floor(cpuCount / 2));
+}
+
+// §2-1 "상한 값이 러너 로그 첫 줄에 값으로 찍히게 하라": this is logged
+// before formatBanner's line in runIsolatedSuite, making it the literal
+// first line a human watching the run sees.
+export function formatConcurrencyBanner({ concurrency, reason }) {
+  return `[isolated-suite-runner] test-concurrency=${concurrency} (${reason})`;
+}
+
+const DEFAULT_CONCURRENCY_REASON =
+  "default: max(1, floor(cpu-count/2)) -- bounds peak concurrent node --test child heaps after HYK-468 4R's 3 consecutive OOM kills, traced to unbounded (core-count-wide) concurrency";
+const OVERRIDE_CONCURRENCY_REASON = "explicit --concurrency override";
+
+// HYK-473 §2-2: distinguishes "the suite ran to completion and node --test
+// itself reported a result" from "no result was ever produced" -- the
+// latter must never be recorded as TESTS_FAILED, because that is a
+// different fact (§1 of coder-task.md: a downstream reader must be able to
+// tell "fail 0 but not green" apart from a real red run). Decided
+// structurally on spawnSync's own signal/status/error fields, in that
+// order -- never by matching any message/log text (HYK-262: a one-
+// character wording change must not silently flip a judgment). Empirically
+// verified (this round, Windows, node -- spawnSync with timeout+SIGKILL):
+// a forced kill sets result.signal (e.g. "SIGKILL") and usually also
+// result.error (e.g. ETIMEDOUT) with result.status left null; a real
+// non-zero exit sets only result.status, leaving signal/error null/absent.
+export function classifySpawnOutcome(result) {
+  if (result.signal) {
+    return { status: RUNNER_STATUS.MEASUREMENT_UNAVAILABLE_OOM, exitCode: 1 };
+  }
+  if (result.error) {
+    return { status: RUNNER_STATUS.MEASUREMENT_UNAVAILABLE_OOM, exitCode: 1 };
+  }
+  if (result.status === 0) {
+    return { status: RUNNER_STATUS.OK, exitCode: 0 };
+  }
+  return { status: RUNNER_STATUS.TESTS_FAILED, exitCode: result.status ?? 1 };
+}
+
 // The one-line disclosure required by task §3-4: which commit was tested,
 // and an explicit statement that uncommitted content was not.
 export function formatBanner({ sha, dirty }) {
@@ -119,6 +172,7 @@ function emitRunnerReceipt({
   root,
   sha,
   runnerExit,
+  runnerStatus,
   tapPath,
   readFile,
   writeReceipt,
@@ -137,6 +191,7 @@ function emitRunnerReceipt({
     const { path } = writeReceipt({
       harnessDir: join(root, ".harness"),
       runnerExit,
+      runnerStatus,
       counts,
       headCommit: sha,
       finishedAtMs: nowMs(),
@@ -154,9 +209,10 @@ function emitRunnerReceipt({
 // spec reporter (HYK-411) -- `node --test` supports repeated
 // --test-reporter/--test-reporter-destination pairs, so both fire from one
 // process without disturbing the real-time inherited stdio a human watches.
-function buildNodeTestArgs(files, tapPath) {
+function buildNodeTestArgs(files, tapPath, concurrency) {
   return [
     "--test",
+    `--test-concurrency=${concurrency}`,
     "--test-reporter=spec",
     "--test-reporter-destination=stdout",
     "--test-reporter=tap",
@@ -165,27 +221,32 @@ function buildNodeTestArgs(files, tapPath) {
   ];
 }
 
-// Runs the suite inside the already-prepared clone and returns its exit
-// code. Isolated into its own function so runIsolatedSuite's own branching
-// stays low (max-lines-per-function/complexity gate, coder-task.md quality
-// bar) -- this is the only place `result.status`'s absence (signal-killed
-// child) is normalized to a non-zero exit.
-function spawnSuiteInClone({ spawn, cloneDir, files, tapPath }) {
-  const result = spawn(process.execPath, buildNodeTestArgs(files, tapPath), {
-    cwd: cloneDir,
-    stdio: "inherit",
-    // HYK-403: marks this run as having gone through a canonical entry
-    // point, so canonical-suite-entrypoint.test.mjs (scripts/check, swept up
-    // by any construction of the four-directory glob, including a
-    // hand-built one) can tell a real `npm test` / CI run apart from someone
-    // hand-typing `node --test <glob>` directly against a live checkout --
-    // the exact shape that leaked into the control room on 2026-08-30.
-    env: {
-      ...process.env,
-      HYK403_CANONICAL_SUITE_ENTRYPOINT: "isolated-suite-runner",
+// Runs the suite inside the already-prepared clone and returns its
+// classified outcome (§2-2: {status, exitCode}, never a bare exit code --
+// see classifySpawnOutcome). Isolated into its own function so
+// runIsolatedSuite's own branching stays low (max-lines-per-function/
+// complexity gate, coder-task.md quality bar).
+function spawnSuiteInClone({ spawn, cloneDir, files, tapPath, concurrency }) {
+  const result = spawn(
+    process.execPath,
+    buildNodeTestArgs(files, tapPath, concurrency),
+    {
+      cwd: cloneDir,
+      stdio: "inherit",
+      // HYK-403: marks this run as having gone through a canonical entry
+      // point, so canonical-suite-entrypoint.test.mjs (scripts/check, swept
+      // up by any construction of the four-directory glob, including a
+      // hand-built one) can tell a real `npm test` / CI run apart from
+      // someone hand-typing `node --test <glob>` directly against a live
+      // checkout -- the exact shape that leaked into the control room on
+      // 2026-08-30.
+      env: {
+        ...process.env,
+        HYK403_CANONICAL_SUITE_ENTRYPOINT: "isolated-suite-runner",
+      },
     },
-  });
-  return result.status ?? 1;
+  );
+  return classifySpawnOutcome(result);
 }
 
 // Removes the two scratch directories this run made. Isolated so the
@@ -199,12 +260,27 @@ function cleanupRunDirs({ keep, log, cloneDir, tapDir }) {
   rmSync(cloneDir, { recursive: true, force: true });
 }
 
+// Resolves the concurrency cap and logs it as the run's first line (§2-1
+// "첫 줄"). Isolated so its branching doesn't count against
+// runIsolatedSuite's own complexity gate.
+function resolveAndLogConcurrency({ concurrency, resolveConcurrencyFn, log }) {
+  const resolveFn = resolveConcurrencyFn ?? resolveConcurrency;
+  const resolvedConcurrency = concurrency ?? resolveFn();
+  const reason =
+    concurrency != null
+      ? OVERRIDE_CONCURRENCY_REASON
+      : DEFAULT_CONCURRENCY_REASON;
+  log(formatConcurrencyBanner({ concurrency: resolvedConcurrency, reason }));
+  return resolvedConcurrency;
+}
+
 // Orchestrates one full run: clone committed HEAD -> run the suite in the
 // clone -> report -> always clean up (unless `keep`). Returns the child
 // process's exit code so the CLI entry point can propagate it verbatim.
 export function runIsolatedSuite({
   sourceRoot,
   keep = false,
+  concurrency,
   execFile = execFileSync,
   spawn = spawnSync,
   log = console.log,
@@ -213,7 +289,13 @@ export function runIsolatedSuite({
   readFile = readFileSync,
   writeReceipt = writeRunnerReceipt,
   nowMs = Date.now,
+  resolveConcurrencyFn,
 } = {}) {
+  const resolvedConcurrency = resolveAndLogConcurrency({
+    concurrency,
+    resolveConcurrencyFn,
+    log,
+  });
   const root = sourceRoot ?? repoRootOf(process.cwd(), execFile);
   const sha = execFile("git", ["rev-parse", "HEAD"], {
     cwd: root,
@@ -240,12 +322,19 @@ export function runIsolatedSuite({
     log(
       `[isolated-suite-runner] clone: ${cloneDir} (${files.length} test file(s))`,
     );
-    const runnerExit = spawnSuiteInClone({ spawn, cloneDir, files, tapPath });
+    const outcome = spawnSuiteInClone({
+      spawn,
+      cloneDir,
+      files,
+      tapPath,
+      concurrency: resolvedConcurrency,
+    });
 
     emitRunnerReceipt({
       root,
       sha,
-      runnerExit,
+      runnerExit: outcome.exitCode,
+      runnerStatus: outcome.status,
       tapPath,
       readFile,
       writeReceipt,
@@ -253,7 +342,7 @@ export function runIsolatedSuite({
       log,
     });
 
-    return runnerExit;
+    return outcome.exitCode;
   } finally {
     cleanupRunDirs({ keep, log, cloneDir, tapDir });
   }
@@ -268,6 +357,7 @@ if (invokedDirectly) {
   const args = process.argv.slice(2);
   let sourceRoot;
   let keep = false;
+  let concurrency;
   const unrecognized = [];
   for (let i = 0; i < args.length; i++) {
     if (args[i] === "--repo-root") {
@@ -278,6 +368,20 @@ if (invokedDirectly) {
       }
     } else if (args[i] === "--keep") {
       keep = true;
+    } else if (args[i] === "--concurrency") {
+      if (i + 1 >= args.length) {
+        unrecognized.push(args[i]);
+      } else {
+        const raw = args[++i];
+        const n = Number(raw);
+        if (!Number.isInteger(n) || n < 1) {
+          console.error(
+            `[isolated-suite-runner] --concurrency must be a positive integer, got: ${raw} -- refusing to silently fall back to a default that could mask an operator's intended cap`,
+          );
+          process.exit(1);
+        }
+        concurrency = n;
+      }
     } else {
       unrecognized.push(args[i]);
     }
@@ -288,6 +392,6 @@ if (invokedDirectly) {
     );
     process.exit(1);
   }
-  const exitCode = runIsolatedSuite({ sourceRoot, keep });
+  const exitCode = runIsolatedSuite({ sourceRoot, keep, concurrency });
   process.exit(exitCode);
 }

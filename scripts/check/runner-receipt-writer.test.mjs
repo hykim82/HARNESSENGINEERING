@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   RUNNER_RECEIPT_FILENAME,
   RUNNER_RECEIPT_SCHEMA_VERSION,
+  RUNNER_STATUS,
   buildRunnerReceipt,
   formatKst,
   parseTapSummaryCounts,
@@ -66,6 +67,7 @@ test("parseTapSummaryCounts: does not confuse the default reporter's 'ℹ pass N
 test("buildRunnerReceipt: shape has all §2-1-required fields, schema_version pinned, finished_at is KST text (not epoch, not UTC)", () => {
   const receipt = buildRunnerReceipt({
     runnerExit: 0,
+    runnerStatus: RUNNER_STATUS.OK,
     counts: { tests: 5, pass: 5, fail: 0, skip: 0 },
     headCommit: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
     finishedAtMs: Date.parse("2026-01-01T00:00:00.000Z"),
@@ -73,6 +75,7 @@ test("buildRunnerReceipt: shape has all §2-1-required fields, schema_version pi
   assert.deepEqual(receipt, {
     schema_version: RUNNER_RECEIPT_SCHEMA_VERSION,
     runner_exit: 0,
+    runner_status: RUNNER_STATUS.OK,
     tests: 5,
     pass: 5,
     fail: 0,
@@ -88,6 +91,7 @@ test("buildRunnerReceipt: shape has all §2-1-required fields, schema_version pi
 test("buildRunnerReceipt: a non-zero runner_exit is preserved verbatim, not clamped/normalized to 1 -- the exact observed code matters", () => {
   const receipt = buildRunnerReceipt({
     runnerExit: 7,
+    runnerStatus: RUNNER_STATUS.TESTS_FAILED,
     counts: null,
     headCommit: "abc",
     finishedAtMs: 0,
@@ -104,12 +108,49 @@ test("buildRunnerReceipt: a non-zero runner_exit is preserved verbatim, not clam
   );
 });
 
+// HYK-473 §2-2: when a caller doesn't classify the spawn outcome itself
+// (schema v1 callers, this file's own pre-HYK-473 call shape), a zero exit
+// still reads as OK and any non-zero exit still reads as TESTS_FAILED --
+// the old behavior is a default, not silently dropped.
+test("buildRunnerReceipt: runnerStatus omitted -> derived from runnerExit (0 -> OK, non-zero -> TESTS_FAILED), never MEASUREMENT_UNAVAILABLE_OOM by default", () => {
+  const ok = buildRunnerReceipt({
+    runnerExit: 0,
+    counts: null,
+    headCommit: "abc",
+    finishedAtMs: 0,
+  });
+  assert.equal(ok.runner_status, RUNNER_STATUS.OK);
+  const failed = buildRunnerReceipt({
+    runnerExit: 1,
+    counts: null,
+    headCommit: "abc",
+    finishedAtMs: 0,
+  });
+  assert.equal(failed.runner_status, RUNNER_STATUS.TESTS_FAILED);
+});
+
+test("buildRunnerReceipt: an explicit MEASUREMENT_UNAVAILABLE_OOM runnerStatus is preserved verbatim, not overridden by the runnerExit-derived default", () => {
+  const receipt = buildRunnerReceipt({
+    runnerExit: 1,
+    runnerStatus: RUNNER_STATUS.MEASUREMENT_UNAVAILABLE_OOM,
+    counts: null,
+    headCommit: "abc",
+    finishedAtMs: 0,
+  });
+  assert.equal(
+    receipt.runner_status,
+    RUNNER_STATUS.MEASUREMENT_UNAVAILABLE_OOM,
+  );
+  assert.notEqual(receipt.runner_status, RUNNER_STATUS.TESTS_FAILED);
+});
+
 test("writeRunnerReceipt: creates harnessDir if missing, writes valid JSON matching buildRunnerReceipt, and returns the path written", () => {
   let mkdirArgs;
   let writeArgs;
   const { path, receipt } = writeRunnerReceipt({
     harnessDir: "/fake/.harness",
     runnerExit: 0,
+    runnerStatus: RUNNER_STATUS.OK,
     counts: { tests: 1, pass: 1, fail: 0, skip: 0 },
     headCommit: "cafef00d",
     finishedAtMs: Date.parse("2026-01-01T00:00:00.000Z"),
@@ -129,6 +170,7 @@ test("writeRunnerReceipt: creates harnessDir if missing, writes valid JSON match
   const written = JSON.parse(writeArgs[1]);
   assert.deepEqual(written, receipt);
   assert.equal(written.runner_exit, 0);
+  assert.equal(written.runner_status, RUNNER_STATUS.OK);
   assert.equal(written.head_commit, "cafef00d");
   assert.equal(writeArgs[2], "utf8");
 });

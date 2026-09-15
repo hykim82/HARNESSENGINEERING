@@ -19,8 +19,32 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-export const RUNNER_RECEIPT_SCHEMA_VERSION = 1;
+export const RUNNER_RECEIPT_SCHEMA_VERSION = 2;
 export const RUNNER_RECEIPT_FILENAME = "runner-receipt.json";
+
+// HYK-473 §2-2: a receipt must be able to say "no measurement happened"
+// as a DIFFERENT fact from "the tests failed" -- a forced kill (OOM,
+// signal) means node --test never produced a real result, so a downstream
+// reader (human or relay-handshake.mjs's fail-closed gate) that only ever
+// saw runner_exit!=0 could not tell the two apart. TESTS_FAILED/OK cover
+// the two cases where the child actually ran to completion and reported
+// its own exit code; MEASUREMENT_UNAVAILABLE_OOM covers every case where
+// it did not (isolated-suite-runner.mjs's classifySpawnOutcome is the only
+// producer of this value, and it decides structurally on spawnSync's own
+// signal/status/error fields -- never by matching message text, HYK-262).
+export const RUNNER_STATUS = Object.freeze({
+  OK: "OK",
+  TESTS_FAILED: "TESTS_FAILED",
+  MEASUREMENT_UNAVAILABLE_OOM: "MEASUREMENT_UNAVAILABLE_OOM",
+});
+
+// Callers that don't classify a spawn outcome themselves (this file's own
+// pre-HYK-473 tests, e.g.) still get a sane runner_status: zero exit reads
+// as OK, anything else as TESTS_FAILED -- the old (schema v1) behavior,
+// preserved as a default rather than silently dropped.
+function deriveRunnerStatus(runnerExit) {
+  return runnerExit === 0 ? RUNNER_STATUS.OK : RUNNER_STATUS.TESTS_FAILED;
+}
 
 function pad(n) {
   return String(n).padStart(2, "0");
@@ -60,6 +84,7 @@ export function parseTapSummaryCounts(tapText) {
 
 export function buildRunnerReceipt({
   runnerExit,
+  runnerStatus,
   counts,
   headCommit,
   finishedAtMs,
@@ -67,6 +92,7 @@ export function buildRunnerReceipt({
   return {
     schema_version: RUNNER_RECEIPT_SCHEMA_VERSION,
     runner_exit: runnerExit,
+    runner_status: runnerStatus ?? deriveRunnerStatus(runnerExit),
     tests: counts?.tests ?? null,
     pass: counts?.pass ?? null,
     fail: counts?.fail ?? null,
@@ -86,6 +112,7 @@ export function buildRunnerReceipt({
 export function writeRunnerReceipt({
   harnessDir,
   runnerExit,
+  runnerStatus,
   counts,
   headCommit,
   finishedAtMs,
@@ -96,6 +123,7 @@ export function writeRunnerReceipt({
   mkdirFn(dir, { recursive: true });
   const receipt = buildRunnerReceipt({
     runnerExit,
+    runnerStatus,
     counts,
     headCommit,
     finishedAtMs,
