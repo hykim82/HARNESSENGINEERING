@@ -190,6 +190,25 @@ export function maskQuotedMarkerRegions(content) {
   return maskHtmlComments(maskFencedBlocks(content));
 }
 
+// HYK-469 3R §2 (책임자 조건 1, HYK-468 4R과 같은 원리): 468 3R이 만든
+// admission-completion-adapter.mjs 로컬 복제(고정 sibling 목록 때문에
+// import 불가 -- 그 파일 헤더 주석 참조)가 이 인라인 코드 마스킹 규칙
+// «전체»에서 정본과 바이트 동일한지, «손으로 고른 목록»이 아니라 이 묶음을
+// 순회해서 기계로 단정하기 위한 export다. 정본이 이 묶음에 이름을 하나
+// 더 추가하면(가짜든 진짜든) hyk468-3r-copy-drift.test.mjs는 코드 수정
+// 없이 그 이름도 자동으로 admission 사본과 대조한다(같은 이름이 사본에
+// 없으면 예외 0으로 통과가 아니라 실패). 이름은 admission 사본과 정확히
+// 같아야 한다 -- maskQuotedMarkerRegions 자신은 admission에서 의도적으로
+// 다른 이름(maskQuotedMarkerRegionsLocal)으로 복제돼 있으므로 이 묶음에
+// 넣지 않는다(넣으면 정당한 이름 차이가 "예외 0" 계약을 깬다).
+export const RULE_FUNCTIONS = {
+  INLINE_CODE_SPAN_RE,
+  inlineCodeRanges,
+  isInsideAnyRange,
+  findOutsideInlineCode,
+  maskHtmlComments,
+};
+
 const ISSUE_ID_RE = /^(HYK-\d+)/;
 // HYK-183: 결과 파일에 이 표지가 2개 이상이면 어느 것이 최종인지 결정할 수
 // 없으므로 조용히 하나를 고르지 않고 판정 불가로 멈춘다(2026-07-31 거짓
