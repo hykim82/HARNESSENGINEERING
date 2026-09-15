@@ -746,6 +746,14 @@ function extractSoleMatch(text, reG) {
 // 정확히 같은 텍스트로 둔다(scripts/check/hyk468-3r-copy-drift.test.mjs가
 // 이 상수와 hasStructuralPredecessor 본문 둘 다 정본과 바이트 동일함을
 // 단정한다) -- 판정 자체는 조금도 바뀌지 않는다.
+// HYK-468 4R (P1, 검토자 반려 재수리): 같은 이유로 아래 두 곳
+// (resolveHeaderTaskId 본문 + classifyTaskIdLabel의 strictMatches, 검토자
+// REVIEW-r28.md가 인용한 872행)이 각자 이 정규식을 인라인으로 반복하고
+// 있었다 -- STRUCTURAL_LINE_RE처럼 이름 붙은 상수가 아니라서 드리프트
+// 시험의 손으로 고른 비교 목록에 오를 자리가 없었다. 정본
+// header-task-id-shared.mjs의 RULE_CONSTANTS.TASK_ID_LINE_RE와 바이트
+// 동일하게 이름을 맞추고, 두 호출부 모두 이 하나의 상수를 쓴다.
+const TASK_ID_LINE_RE = /^task_id:[ \t]*(\S+)/i;
 const STRUCTURAL_LINE_RE = /^[A-Za-z_][\w-]*:|^>>>/;
 
 function hasStructuralPredecessor(lines, idx) {
@@ -762,7 +770,7 @@ function resolveHeaderTaskId(content) {
   ).split("\n");
   const candidates = [];
   for (let i = 0; i < lines.length; i++) {
-    const m = lines[i].match(/^task_id:[ \t]*(\S+)/i);
+    const m = lines[i].match(TASK_ID_LINE_RE);
     if (!m) continue;
     if (!hasStructuralPredecessor(lines, i)) continue;
     candidates.push(m[1]);
@@ -869,7 +877,7 @@ export function classifyTaskIdLabel(resultText) {
     return { kind: "BROKEN", looseLines: 0, strictCount: 0, anyCount };
   }
   const strictMatches = looseLineIdxs
-    .map((i) => lines[i].match(/^task_id:[ \t]*(\S+)/i))
+    .map((i) => lines[i].match(TASK_ID_LINE_RE))
     .filter(Boolean);
   const strictCount = strictMatches.length;
   if (looseLines === 1 && strictCount === 1) {

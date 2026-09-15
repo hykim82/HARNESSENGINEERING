@@ -80,6 +80,25 @@ import { maskQuotedMarkerRegions } from "./reject-streak.mjs";
 const TASK_ID_LINE_RE = /^task_id:[ \t]*(\S+)/i;
 const STRUCTURAL_LINE_RE = /^[A-Za-z_][\w-]*:|^>>>/;
 
+// HYK-468 4R §2-1 (P1 rejection: "비교 목록의 구멍" -- the drift test used
+// to compare a hand-picked list of names, so a copy that quietly diverged
+// on a rule this list never named -- exactly what happened to relay-
+// handshake.mjs's inline TASK_ID_LINE_RE, which was never a named
+// constant there and so was never on anyone's list -- went undetected.
+// This object is the actual fix: every rule constant this canonical file
+// defines lives here by name, and hyk468-3r-copy-drift.test.mjs iterates
+// `Object.entries` of THIS object rather than a list it maintains itself.
+// Adding a new rule constant to this file means adding it here too (one
+// line) -- from that point on the drift test compares it in all three
+// readers automatically, with no edit to the test file. The three real
+// readers (admission-completion-adapter.mjs, dispatch-gate-decision.mjs,
+// relay-handshake.mjs) each now also carry a same-named `const
+// TASK_ID_LINE_RE` / `const STRUCTURAL_LINE_RE` (previously
+// TASK_ID_LINE_RE was only ever inlined at each reader's match call site
+// -- exactly the shape that let it drift unnoticed) so the by-name lookup
+// in the drift test actually finds something to compare.
+export const RULE_CONSTANTS = { TASK_ID_LINE_RE, STRUCTURAL_LINE_RE };
+
 // True if the nearest non-blank line before `lines[idx]` is itself
 // structural, or if there is no such line (start of file). A masked
 // (all-whitespace) line -- a fence or HTML comment blanked by

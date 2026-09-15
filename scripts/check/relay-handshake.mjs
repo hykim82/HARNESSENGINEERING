@@ -102,6 +102,16 @@ const TASK_ID_ANYWHERE_RE = /task_id:\s*(\S+)/i;
 // 가려버린다(검토자 실측 지적, P1-2 표적 2) -- 그래서 정본과 바이트
 // 동일하게 되돌린다(scripts/check/hyk468-3r-copy-drift.test.mjs가 이
 // 동일성을 기계로 단정).
+// HYK-468 4R (P1, 검토자 반려 재수리): the loop below used to inline this
+// regex at its match call site instead of naming it -- exactly why the
+// drift test's hand-picked comparison list never had a slot for it, and
+// why it was free to drift to `\s*` (matches NBSP/U+3000/EM-space/VT/FF,
+// none of which the canonical `[ \t]` character class accepts) without
+// anything noticing (검토자 REVIEW-r28.md 반려 표적). Named to match
+// header-task-id-shared.mjs's exported RULE_CONSTANTS.TASK_ID_LINE_RE
+// byte-for-byte, so hyk468-3r-copy-drift.test.mjs's generic by-name
+// enumeration actually has something to find here.
+const TASK_ID_LINE_RE = /^task_id:[ \t]*(\S+)/i;
 const STRUCTURAL_LINE_RE = /^[A-Za-z_][\w-]*:|^>>>/;
 
 function hasStructuralPredecessor(lines, idx) {
@@ -504,7 +514,7 @@ export function resolveResultTaskId(resultContent) {
   const lines = scan.replace(/\r\n/g, "\n").split("\n");
   const resultIdMatches = [];
   for (let i = 0; i < lines.length; i++) {
-    const m = lines[i].match(/^task_id:\s*(\S+)/i);
+    const m = lines[i].match(TASK_ID_LINE_RE);
     if (!m) continue;
     if (!hasStructuralPredecessor(lines, i)) continue;
     resultIdMatches.push(m);

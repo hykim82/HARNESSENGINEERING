@@ -161,6 +161,14 @@ const BLOCKED_RE = /^>>>[ \t]*(BLOCKED|NEEDS_INPUT):[ \t]*(\S.*?)[ \t]*$/gim;
 // 못 보고 스테일 값(matches[0])으로 조용히 확정해 버렸다(검토자 실측:
 // admission만 `ok:true,id:"HYK-468-old"`, relay/dispatch는 거부).
 // 자세한 이유는 header-task-id-shared.mjs 헤더 주석 참조(이 로직의 정본).
+// HYK-468 4R (P1, 검토자 반려 재수리): 아래 resolveHeaderTaskId 본문은
+// 이 정규식을 인라인으로 두고 있었다 -- STRUCTURAL_LINE_RE는 이미 이름을
+// 가져서 드리프트 시험이 볼 수 있었지만, 이 상수는 이름이 없어 시험의
+// 손으로 고른 비교 목록에 애초에 오를 자리가 없었다(정본과 다르게 갈라진
+// 것은 relay였지만, 그 갈라짐이 안 잡힌 진짜 이유는 "목록에 없어서"다).
+// 정본 header-task-id-shared.mjs가 export하는 RULE_CONSTANTS.
+// TASK_ID_LINE_RE와 바이트 동일하게 이름을 맞춘다.
+const TASK_ID_LINE_RE = /^task_id:[ \t]*(\S+)/i;
 const STRUCTURAL_LINE_RE = /^[A-Za-z_][\w-]*:|^>>>/;
 
 function hasStructuralPredecessor(lines, idx) {
@@ -229,7 +237,7 @@ function resolveHeaderTaskId(content) {
   ).split("\n");
   const candidates = [];
   for (let i = 0; i < lines.length; i++) {
-    const m = lines[i].match(/^task_id:[ \t]*(\S+)/i);
+    const m = lines[i].match(TASK_ID_LINE_RE);
     if (!m) continue;
     if (!hasStructuralPredecessor(lines, i)) continue;
     candidates.push(m[1]);
