@@ -8,7 +8,13 @@
 // 주입해 ok:false -> ok:true로 뒤집히는 것을 증명한다.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync, writeFileSync, mkdtempSync, rmSync } from "node:fs";
+import {
+  readFileSync,
+  writeFileSync,
+  mkdtempSync,
+  rmSync,
+  existsSync,
+} from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { pathToFileURL, fileURLToPath } from "node:url";
@@ -27,8 +33,24 @@ const RELAY_HANDSHAKE_SIBLINGS = [
   "time-authority.mjs",
   "child-probe-timeout-policy.mjs",
 ];
-const STUCK_FILE_PATH =
-  "C:\\Users\\Administrator\\orca\\workspaces\\HARNESSENGINEERING\\hyk442-blocked-door-1\\.harness\\coder.md";
+// HYK-468 7R (CI Linux ENOENT 수리, PR #275 실패 확정): 이 상수는 이
+// 워크트리에만 있는 절대경로였다 -- CI(Linux) 러너에는 그 경로가 없어
+// ENOENT로 죽었다(로컬이 초록이었던 건 코드가 옳아서가 아니라 이 기계에
+// 우연히 그 파일이 있었기 때문). 저장소 «안»에 동결한 바이트 동일
+// 사본(아래 FROZEN_FIXTURE_PATH)이 이제 기본 대상이다 -- 실물과의 대조는
+// LIVE_FIXTURE_ENV_VAR가 설정됐을 때만, 그리고 그 값 자체를 통해서만
+// 이뤄진다(이 파일에는 이제 저장소 밖 머신 절대경로 리터럴이 없다).
+const FROZEN_FIXTURE_PATH = join(
+  HERE,
+  "fixtures",
+  "hyk442-blocked-door-1-coder-frozen.md.txt",
+);
+// 값 자체가 라이브 절대경로다 -- 이 파일 소스에는 그 값을 하드코딩하지
+// 않는다. 설정 안 되면(기본) 라이브 대조는 "조용한 통과"가 아니라
+// 구별되는 skip 사유로 남는다(HYK-467 규율: 진짜로 안 돈 것을 pass처럼
+// 보이게 접지 않는다). 설정됐는데 그 경로에 파일이 없으면 그때는 실패다.
+const LIVE_FIXTURE_ENV_VAR = "HYK442_LIVE_CODER_MD_PATH";
+const liveFixturePath = process.env[LIVE_FIXTURE_ENV_VAR];
 
 // 검토자가 반려문에서 직접 쓴 그 합성 입력 형태: 코드펜스로 감싸지 «않은»
 // 채(마스킹 대상이 아님) 본문에 그대로 인용한 task_id: 예시.
@@ -73,16 +95,17 @@ test("ⓑ HYK-183 회귀 방지(실제 exported 함수, ★2R 초안이 실제�
   assert.equal(result.kind, "AMBIGUOUS");
 });
 
-test("ⓒ 갇힌 실물: hyk442-blocked-door-1/.harness/coder.md(열0 task_id 2개, 읽기 전용)를 실제 exported 함수가 HYK-465-467-channel-loss-1로 확정한다", () => {
-  const stuckContent = readFileSync(STUCK_FILE_PATH, "utf8");
-  // 실물 확인: 이 파일이 정말로 그 실사고 모양(열 0 task_id: 2개)인지
-  // 먼저 확인한다 -- 그렇지 않으면 아래 확정 단언이 무엇을 증명하는지
-  // 불분명해진다(헛통과 방지).
+test("ⓒ 갇힌 실물(동결 픽스처): hyk442-blocked-door-1/.harness/coder.md의 저장소 안 바이트 동일 사본(열0 task_id 2개, 헤더 선언 모양 그대로)을 실제 exported 함수가 HYK-465-467-channel-loss-1로 확정한다", () => {
+  const stuckContent = readFileSync(FROZEN_FIXTURE_PATH, "utf8");
+  // 실물 확인: 이 사본이 정말로 그 실사고 모양(열 0 task_id: 2개)을
+  // 그대로 보존했는지 먼저 확인한다 -- 그렇지 않으면 아래 확정 단언이
+  // 무엇을 증명하는지 불분명해진다(헛통과 방지). 모양이 바뀌면 이
+  // 시험은 아무것도 증명하지 않는다.
   const columnZeroCount = [...stuckContent.matchAll(/^task_id:/gim)].length;
   assert.equal(
     columnZeroCount,
     2,
-    "이 시험은 갇힌 파일이 실제로 열0 task_id: 2개인 그 모양일 때만 의미가 있다",
+    "이 시험은 동결 사본이 실물과 같은 열0 task_id: 2개 모양일 때만 의미가 있다",
   );
 
   const result = resolveResultTaskId(stuckContent);
@@ -91,6 +114,41 @@ test("ⓒ 갇힌 실물: hyk442-blocked-door-1/.harness/coder.md(열0 task_id 2�
     id: "HYK-465-467-channel-loss-1",
   });
 });
+
+// HYK-468 7R §3: 라이브 실물과의 대조는 환경변수(LIVE_FIXTURE_ENV_VAR)가
+// 설정됐을 때만 돈다. 설정 안 되면(기본, CI 포함) node:test의 `skip`
+// 옵션으로 명시적으로 건너뛰고 그 사유를 남긴다 -- "돌았는데 우연히
+// 통과"와 "안 돌았다"를 TAP 출력에서 구별할 수 있어야 한다(HYK-467
+// 규율). 설정은 됐는데 그 경로에 파일이 없으면(예: 오타·워크트리 삭제)
+// 그건 "조용히 넘길 일"이 아니라 실패다 -- 그래서 skip 여부는 오직
+// "환경변수 자체의 존재"로만 결정하고, "파일 존재"는 스킵 조건에
+// 넣지 않는다(넣으면 그 두 실패 모양이 다시 뭉개진다).
+test(
+  `ⓒ-live 갇힌 실물(라이브 대조, ${LIVE_FIXTURE_ENV_VAR} 설정 시에만): 동결 픽스처와 별개로 실제 라이브 파일도 여전히 같은 모양·같은 확정값인지 직접 확인한다`,
+  {
+    skip: liveFixturePath
+      ? false
+      : `skip: live fixture absent (set ${LIVE_FIXTURE_ENV_VAR}=<hyk442-blocked-door-1/.harness/coder.md의 절대경로> to enable)`,
+  },
+  () => {
+    assert.ok(
+      existsSync(liveFixturePath),
+      `${LIVE_FIXTURE_ENV_VAR}='${liveFixturePath}'로 설정됐지만 그 경로에 파일이 없다 -- 있다고 했는데 없는 것은 조용히 넘길 일이 아니다`,
+    );
+    const stuckContent = readFileSync(liveFixturePath, "utf8");
+    const columnZeroCount = [...stuckContent.matchAll(/^task_id:/gim)].length;
+    assert.equal(
+      columnZeroCount,
+      2,
+      "이 시험은 라이브 실물이 실제로 열0 task_id: 2개인 그 모양일 때만 의미가 있다",
+    );
+    const result = resolveResultTaskId(stuckContent);
+    assert.deepEqual(result, {
+      ok: true,
+      id: "HYK-465-467-channel-loss-1",
+    });
+  },
+);
 
 // 되돌림 변이(필수, 완료조건 §4-2): relay-handshake.mjs의 구조적 선행
 // 맥락 검사(hasStructuralPredecessor 적용)를 제거하고 옛 전체-스캔
