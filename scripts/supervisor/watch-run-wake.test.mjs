@@ -317,9 +317,14 @@ test("wake 원장 미설정: --admission-sweep-ledger 없이 --wake만 주면 ac
 
 // ---------------------------------------------------------------------------
 // admissionSweep 게이트 완화 회귀 -- ledger만 주고 lock을 안 주면
-// runSweepStep은 여전히 notRun(실 orca 호출 0, watch-run.mjs 주석 참조).
+// runSweepStep은 여전히 notRun(실 orca 호출을 만드는 sweep 트리거는 돌지
+// 않는다, watch-run.mjs 주석 참조) -- 하지만 HYK-481부터는 이 조합이
+// "아무것도 설정 안 함"과 같은 문장으로 남지 않는다: 로그 한 줄과
+// last-run.json 양쪽에 SWEEP_CONFIGURED_WITHOUT_LOCK 사유 코드가 값으로
+// 찍힌다(2026-08-12~09-16 실사고 -- 예약 작업이 lock 플래그를 빠뜨려도
+// `ran:false`만 보여서 sweep이 죽은 것을 한 달 넘게 아무도 못 봤다).
 // ---------------------------------------------------------------------------
-test("admission-sweep-ledger만 주고 admission-sweep-lock을 안 주면: sweep 세그먼트는 로그에 없다(sweep 트리거가 돌지 않는다 -- 실 orca 호출 0 유지) (1/1)", () => {
+test("admission-sweep-ledger만 주고 admission-sweep-lock을 안 주면: sweep 트리거는 여전히 안 돌지만(실 orca 호출 0), 로그와 last-run.json 양쪽에 SWEEP_CONFIGURED_WITHOUT_LOCK이 '미설정'과 다른 값으로 찍힌다 (1/1)", () => {
   const watchDir = tmpDir("hyk285-always-sweepgate-");
   try {
     const ledgerPath = join(watchDir, "ledger.json");
@@ -337,10 +342,89 @@ test("admission-sweep-ledger만 주고 admission-sweep-lock을 안 주면: sweep
     assert.equal(r.status, 0, r.stderr);
     const line = lastWatchLogLine(watchDir);
     assert.equal(
+      line.includes(
+        "sweep_status=NOT_RUN sweep_reason=SWEEP_CONFIGURED_WITHOUT_LOCK sweep_recovered=NONE",
+      ),
+      true,
+      `expected the ledger-without-lock reason code in watch.log, got: ${line}`,
+    );
+    const lastRun = JSON.parse(
+      readFileSync(join(watchDir, "last-run.json"), "utf8"),
+    );
+    assert.equal(lastRun.sweep.ran, false);
+    assert.equal(lastRun.sweep.reasonCode, "SWEEP_CONFIGURED_WITHOUT_LOCK");
+  } finally {
+    rmSync(watchDir, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// HYK-481 회귀 -- admissionSweep을 아예 안 주면(기존 계약) 세그먼트도
+// reasonCode도 여전히 0이다("미설정"은 그대로 조용하다, §2 회귀 0).
+// ---------------------------------------------------------------------------
+test("admission-sweep-ledger/lock을 둘 다 안 주면: sweep 세그먼트도 last-run.json의 reasonCode도 없다(순수 미설정은 지금 그대로 조용하다) (1/1)", () => {
+  const watchDir = tmpDir("hyk481-sweep-unconfigured-");
+  try {
+    const r = runWatchRun([
+      "--repo-root",
+      ROOT,
+      "--watch-dir",
+      watchDir,
+      "--no-reach",
+      "--no-partial-count",
+    ]);
+    assert.equal(r.status, 0, r.stderr);
+    const line = lastWatchLogLine(watchDir);
+    assert.equal(
       line.includes("sweep_status="),
       false,
-      `sweep segment leaked into watch.log with ledger-only (no lock) config: ${line}`,
+      `sweep segment leaked into watch.log with nothing configured: ${line}`,
     );
+    const lastRun = JSON.parse(
+      readFileSync(join(watchDir, "last-run.json"), "utf8"),
+    );
+    assert.equal(lastRun.sweep.ran, false);
+    assert.equal("reasonCode" in lastRun.sweep, false);
+  } finally {
+    rmSync(watchDir, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// HYK-481 회귀 -- ledger + lock을 둘 다 주면(정상 실행) sweep이 실제로
+// 돌아 ran:true를 남긴다 -- 세 갈래(미설정/ledger만/ledger+lock)가 서로
+// 다른 값으로 구별된다는 것을 이 시험 파일 안에서 값으로 완결한다.
+// ---------------------------------------------------------------------------
+test("admission-sweep-ledger + admission-sweep-lock을 둘 다 주면: sweep이 실제로 돌아 last-run.json에 ran:true가 찍힌다(세 갈래 중 정상 실행) (1/1)", () => {
+  const watchDir = tmpDir("hyk481-sweep-full-config-");
+  try {
+    const ledgerPath = join(watchDir, "ledger.json");
+    const lockPath = join(watchDir, "ledger.lock");
+    writeFileSync(ledgerPath, ledgerWithOneActive(), "utf8");
+    const r = runWatchRun([
+      "--repo-root",
+      ROOT,
+      "--watch-dir",
+      watchDir,
+      "--no-reach",
+      "--no-partial-count",
+      "--admission-sweep-ledger",
+      ledgerPath,
+      "--admission-sweep-lock",
+      lockPath,
+    ]);
+    assert.equal(r.status, 0, r.stderr);
+    const line = lastWatchLogLine(watchDir);
+    assert.equal(
+      /sweep_status=\S+ sweep_reason=\S+ sweep_recovered=\S+/.test(line),
+      true,
+      `expected a real sweep segment in watch.log, got: ${line}`,
+    );
+    assert.equal(line.includes("sweep_status=NOT_RUN"), false);
+    const lastRun = JSON.parse(
+      readFileSync(join(watchDir, "last-run.json"), "utf8"),
+    );
+    assert.equal(lastRun.sweep.ran, true);
   } finally {
     rmSync(watchDir, { recursive: true, force: true });
   }

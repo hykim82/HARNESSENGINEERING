@@ -1702,19 +1702,35 @@ export async function runPartialCountStep({
   return runPartialCountStepCore({ now, logPath, ...resolved });
 }
 
+// HYK-481 (coder-task.md §2) -- "ledger는 있는데 lock이 없다"를 가리키는
+// 명시 사유 코드. "미설정"(admissionSweep 자체가 없음)과 값으로 구별
+// 되는 것이 이 라운드의 목적이므로 별도 상수로 뽑는다.
+const SWEEP_SKIP_REASON_CONFIGURED_WITHOUT_LOCK =
+  "SWEEP_CONFIGURED_WITHOUT_LOCK";
+
 // runSweepStep -- admission sweep 트리거 단계(coder-task §2 항1). 이
 // 단계 자신의 실패가 이 러너의 계약(로그 한 줄 + 생존 기록)을 깨서는
 // 안 된다(runReachStep/computeCapResult와 동일 원칙 -- v1은 로그만).
-// `admissionSweep`이 없으면(기본값, 대부분의 호출자) 아예 실행하지
-// 않고 `{notRun:true}`를 돌려준다 -- 로그 줄에 아무 세그먼트도 더하지
-// 않는다(회귀 0).
+// `admissionSweep`이 아예 없으면(기본값, 대부분의 호출자) 실행하지 않고
+// `{notRun:true}`를 돌려준다 -- 로그 줄에 아무 세그먼트도 더하지 않는다
+// (회귀 0, HYK-481 범위 밖 -- 이 케이스는 손대지 않는다).
+//
+// HYK-481 (coder-task.md §2) -- `ledgerPath`는 있는데 `lockPath`가
+// 없는 조합(§2-B가 의도적으로 여는 "sweep은 끄고 wake의 원장 읽기만
+// 켠다" 조합, 아래 CLI 조립부 주석 참조)은 위 "아예 미설정"과 같은
+// `{notRun:true}`로 뭉뚱그리지 않는다 -- `skipReason`을 함께 실어
+// sweepLogSegment/sweepRecordField가 "미설정"과 다른 문장을 남기게
+// 한다(2026-08-12~09-16 사고: 예약 작업이 lock 플래그를 빠뜨려도
+// `ran:false`가 "정상 미설정"과 똑같아 보여 한 달 넘게 아무도 못 봤다).
 function runSweepStep({ admissionSweep, sweepExecFn, now }) {
-  if (
-    !admissionSweep ||
-    !admissionSweep.ledgerPath ||
-    !admissionSweep.lockPath
-  ) {
+  if (!admissionSweep || !admissionSweep.ledgerPath) {
     return { notRun: true };
+  }
+  if (!admissionSweep.lockPath) {
+    return {
+      notRun: true,
+      skipReason: SWEEP_SKIP_REASON_CONFIGURED_WITHOUT_LOCK,
+    };
   }
   try {
     const result = runAdmissionSweepTrigger({
@@ -1847,8 +1863,17 @@ function blockedTerminationLogSegment(result) {
   return `blocked_termination_status=${status} blocked_termination_count=${count} blocked_termination_source=harness/aborts`;
 }
 
+// HYK-481 (coder-task.md §2/§3 항1) -- "미설정"(skipReason 없음)은
+// 그대로 null(세그먼트 0, 회귀 0). "ledger만 주고 lock 없음"
+// (skipReason 있음)은 새 세그먼트를 한 줄 더한다 -- sweep이 실제로
+// 돈 케이스와 같은 `sweep_status=`/`sweep_reason=` 접두를 쓰되 값은
+// `NOT_RUN`/명시 사유 코드로 값 자체가 구별되게 한다.
 function sweepLogSegment(sweepResult) {
-  if (!sweepResult || sweepResult.notRun) return null;
+  if (!sweepResult) return null;
+  if (sweepResult.notRun) {
+    if (!sweepResult.skipReason) return null;
+    return `sweep_status=NOT_RUN sweep_reason=${sweepResult.skipReason} sweep_recovered=NONE`;
+  }
   const status = sweepResult.status ?? "NONE";
   const reason = sweepResult.reasonCode ?? "NONE";
   const recovered = Array.isArray(sweepResult.changed)
@@ -1874,8 +1899,17 @@ function sweepLogSegment(sweepResult) {
 // ok:false는 수거 자체의 실패, ok:true + 아래 changedCount:0은 "할 일이
 // 없어 조용히 0건"과 구별하지 않는다 -- 그 구별은 이미 sweepResult.changed
 // 자체가 갖고 있으므로 이 필드는 changedCount도 함께 싣는다).
+//
+// HYK-481 -- 위 `{ran:false}` 두 케이스("아예 미설정" vs "ledger만 주고
+// lock 없음") 자체도 지금까지는 값으로 구별이 안 됐다(같은 `{ran:false}`).
+// skipReason이 있을 때만 `reasonCode`를 얹는다 -- `ran`은 그대로 `false`로
+// 둔다(judgeAdmissionSweepFreshness는 `sweep.ran !== true`면 무조건
+// ALIVE 패스스루라 이 추가 필드는 그 판정에 영향 0, §7-A 회귀 0).
 function sweepRecordField(sweepResult) {
   if (!sweepResult || sweepResult.notRun) {
+    if (sweepResult && sweepResult.skipReason) {
+      return { ran: false, reasonCode: sweepResult.skipReason };
+    }
     return { ran: false };
   }
   return {
@@ -2433,6 +2467,14 @@ if (invokedDirectly) {
   // 여는 것은 딱 하나 -- ledger 경로만 주고 lock은 안 줘서 "sweep은
   // 끄고 wake의 activeRoundCount 읽기만 켠다"는 조합(실 orca 호출을
   // 만드는 sweep 트리거를 켜지 않고도 원장을 읽을 수 있어야 한다, §2-B).
+  // HYK-481 실사고(2026-08-12~09-16): 이 "의도된" 조합이 예약 작업
+  // 등록에서 lock 플래그가 실수로 빠졌을 때도 똑같이 만들어져,
+  // `last-run.json`의 `sweep:{ran:false}`가 "아무것도 설정 안 함"과
+  // 구별되지 않아 sweep이 한 달 넘게 죽어 있었던 것을 아무도 못 봤다.
+  // 의도(이 조합 자체를 계속 여는 것)는 그대로 두고, runSweepStep이
+  // 이제 이 조합에 `skipReason`을 실어 로그/last-run.json 양쪽에서
+  // "미설정"과 다른 문장으로 남긴다(sweepLogSegment/sweepRecordField
+  // 참조).
   const admissionSweep = admissionSweepLedger
     ? { ledgerPath: admissionSweepLedger, lockPath: admissionSweepLock }
     : null;
