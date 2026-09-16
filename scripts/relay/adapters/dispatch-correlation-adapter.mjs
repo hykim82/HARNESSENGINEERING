@@ -88,6 +88,13 @@ export function normalizeDispatchShow(rawResponse) {
     assigneeHandle: isNonEmptyString(dispatch.assignee_handle)
       ? dispatch.assignee_handle
       : undefined,
+    // HYK-464-followup-1 축B: dispatch 자신의 status(예: "dispatched")도
+    // assigneeHandle과 같은 원칙으로 진단용 별도 필드에만 싣는다 --
+    // judgeDispatchCorrelation 코어 시그니처엔 없다. orca-adapter.mjs의
+    // resolveDeliveredSeat이 "이 배달이 이미 퇴역했는가"(반납된 예약의
+    // 옛 assignee_pane_key를 좇다 좌석을 못 찾는 것과, 아직 살아있는
+    // 배달인데 좌석이 죽은 것을 구별)를 가리는 데 이 값을 쓴다.
+    status: isNonEmptyString(dispatch.status) ? dispatch.status : undefined,
   };
 }
 

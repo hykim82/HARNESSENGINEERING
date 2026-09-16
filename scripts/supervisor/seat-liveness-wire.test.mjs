@@ -873,6 +873,17 @@ test("NC mutation/seat-wire #2 (필수): 수집 실패를 «조용함»(NO_SEAT)
       applyMutation(
         src,
         `  if (!observed.ok) {
+    // HYK-464-followup-1 축B ⓐ: "측정 불가"가 아니라 "해당 없음"(이
+    // 배달은 이미 퇴역했다 -- 좌석 부재가 정상)일 때는 다른 값으로 접는다.
+    if (observed.retired === true) {
+      return {
+        status: SEAT_LIVENESS_WIRE_STATUS.DISPATCH_RETIRED,
+        observationReason: observed.observationReason,
+        reason: observed.reason,
+        dispatch,
+        ...(correlation ? { correlation } : {}),
+      };
+    }
     return {
       status: SEAT_LIVENESS_WIRE_STATUS.COLLECTION_FAILED,
       observationReason: observed.observationReason,

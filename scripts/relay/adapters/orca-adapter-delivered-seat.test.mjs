@@ -1039,6 +1039,85 @@ test("resolveDeliveredSeat: correlation-failure (3/3) -- dispatch record's pane 
   );
   assert.equal(r.ok, false);
   assert.equal(r.reasonCode, DELIVERED_SEAT_REASON.NO_LIVE_SEAT_MATCH);
+  // HYK-464-followup-1 축B ⓑ: status가 "dispatched"(이 시험의 표본 그대로)면
+  // -- 이 배달은 여전히 활성이라 좌석 부재는 진짜 이상이다. dispatchRetired
+  // 는 세우지 않는다(호출부가 이걸 COLLECTION_FAILED로 계속 잡아야 한다).
+  assert.equal(r.dispatchRetired, false);
+});
+
+// HYK-464-followup-1 축B (coder-task.md §1 축B): 위 3/3과 완전히 같은
+// 모양(단일 dead pane key -- 실측 6/6 표본과 동일 구조)이지만, 그 dispatch
+// 자신의 status가 "dispatched"가 아니다(이미 퇴역함, dispatch-show 자신이
+// 답한 값) -- 이번엔 "진짜 이상"이 아니라 "예약이 반납됐다"다.
+// dispatchRetired:true가 서야 호출부(orch-stall-detect.mjs)가 이걸
+// COLLECTION_FAILED(측정 불가)가 아니라 별도 값으로 접을 수 있다.
+test("resolveDeliveredSeat: HYK-464-followup-1 축B ⓐ -- dead pane key BUT dispatch.status is no longer 'dispatched' (retired) -> still NO_LIVE_SEAT_MATCH, but dispatchRetired:true (absence of a live seat is expected)", () => {
+  const execFn = makeExecFn({
+    tasks: [
+      {
+        id: "task_1",
+        spec: realSpec(
+          "CODER",
+          LABEL,
+          "C:\\Users\\Administrator\\orca\\workspaces\\HARNESSENGINEERING\\hyk185-gap83-3",
+        ),
+      },
+    ],
+    dispatchByTaskId: {
+      task_1: {
+        id: "dispatch_1",
+        task_id: "task_1",
+        assignee_handle: "term_long_retired",
+        assignee_pane_key: "dead-tab-uuid:dead-leaf-uuid",
+        status: "completed",
+      },
+    },
+    seats: [CODER_SEAT, REVIEW_SEAT],
+  });
+  const r = resolveDeliveredSeat(
+    { harnessLabel: LABEL, worktreePath: WORKTREE },
+    { execFn },
+  );
+  assert.equal(r.ok, false);
+  assert.equal(r.reasonCode, DELIVERED_SEAT_REASON.NO_LIVE_SEAT_MATCH);
+  assert.equal(r.dispatchRetired, true);
+  assert.match(r.reason, /retired/);
+});
+
+// ⛔변이 RED: dispatch.status를 아예 안 주면(구버전 dispatch-show 응답
+// 모양 등) "모른다"를 "퇴역했다"로 지어내지 않는다 -- 예전 그대로
+// dispatchRetired는 서지 않아야 한다(§요구 ⓑ 안전판 -- 알 수 없을 때
+// 과묵보다 침묵을 택하지 않는다, fail-closed 유지).
+test("resolveDeliveredSeat: HYK-464-followup-1 축B 안전판 -- dispatch.status가 아예 없으면(알 수 없음) dispatchRetired를 지어내지 않는다(false로 남는다)", () => {
+  const execFn = makeExecFn({
+    tasks: [
+      {
+        id: "task_1",
+        spec: realSpec(
+          "CODER",
+          LABEL,
+          "C:\\Users\\Administrator\\orca\\workspaces\\HARNESSENGINEERING\\hyk185-gap83-3",
+        ),
+      },
+    ],
+    dispatchByTaskId: {
+      task_1: {
+        id: "dispatch_1",
+        task_id: "task_1",
+        assignee_handle: "term_long_dead",
+        assignee_pane_key: "dead-tab-uuid:dead-leaf-uuid",
+        // status 필드 자체가 없다.
+      },
+    },
+    seats: [CODER_SEAT, REVIEW_SEAT],
+  });
+  const r = resolveDeliveredSeat(
+    { harnessLabel: LABEL, worktreePath: WORKTREE },
+    { execFn },
+  );
+  assert.equal(r.ok, false);
+  assert.equal(r.reasonCode, DELIVERED_SEAT_REASON.NO_LIVE_SEAT_MATCH);
+  assert.equal(r.dispatchRetired, false);
 });
 
 test("resolveDeliveredSeat: candidate label matches but worktree path in spec points elsewhere -- not a candidate (label alone is not enough)", () => {

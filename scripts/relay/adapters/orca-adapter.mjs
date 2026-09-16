@@ -1904,8 +1904,25 @@ function resolveAssigneePaneKey(runtimeTaskId, opts) {
       `orca-adapter: resolveDeliveredSeat -- dispatch-show normalize failed (reasonCode=${normalized.reasonCode})`,
     );
   }
-  return { ok: true, assigneePaneKey: normalized.assigneePaneKey };
+  // HYK-464-followup-1 축B: status도 함께 실어 올린다(resolveLiveSeatByPaneKey
+  // 가 "이 배달이 퇴역했는가"를 가리는 데 쓴다, 아래 참조). 값이 없으면
+  // (normalizeDispatchShow가 undefined를 낸 경우) null -- "모른다"를
+  // "퇴역했다"로 지어내지 않는다.
+  return {
+    ok: true,
+    assigneePaneKey: normalized.assigneePaneKey,
+    dispatchStatus: normalized.status ?? null,
+  };
 }
+
+// HYK-464-followup-1 축B: dispatch-show가 지금까지 실측으로 확인해 준
+// 유일한 "이 배달이 아직 살아 활성 진행 중"이라는 값(2026-09-16
+// task_061c7ce307da 실측, `orca orchestration dispatch-show --json` ->
+// `status: "dispatched"`). 다른 어떤 문자열이든(completed/failed/그 밖에
+// 우리가 아직 실측하지 못한 값 전부) 이 값과 다르면 "더 이상 활성이
+// 아니다"로 본다 -- 퇴역 후 상태값의 전체 어휘를 추측해 나열하지 않는다
+// (정직 한계: 안다고 확신하는 건 "dispatched"뿐이다).
+const ACTIVE_DISPATCH_STATUS = "dispatched";
 
 // §2 step③: 이 워크트리의 살아 있는 좌석(terminal list, 고아 제외 +
 // worktreePath 정규화 일치 -- resolveSeatLivenessCandidate와 동일 후보
@@ -1996,7 +2013,10 @@ function fetchPaneKeyFromShow(candidateHandle, opts) {
   return { ok: true, paneKeyFromShow: `${tabId}:${leafId}` };
 }
 
-function resolveLiveSeatByPaneKey({ worktreePath, assigneePaneKey }, opts) {
+function resolveLiveSeatByPaneKey(
+  { worktreePath, assigneePaneKey, dispatchStatus },
+  opts,
+) {
   const resolved = resolveLiveSeatCandidatesForCorrelation(worktreePath, opts);
   if (!resolved.ok) return resolved;
   const matches = [];
@@ -2025,10 +2045,26 @@ function resolveLiveSeatByPaneKey({ worktreePath, assigneePaneKey }, opts) {
     );
   }
   if (matches.length === 0) {
-    return denyDeliveredSeat(
-      DELIVERED_SEAT_REASON.NO_LIVE_SEAT_MATCH,
-      `orca-adapter: resolveDeliveredSeat -- assignee_pane_key matches no live seat in worktree '${worktreePath}' (dead seat or rotated -- refusing to guess)`,
-    );
+    // HYK-464-followup-1 축B ⓐⓑ: 예약이 이미 반납됐다면(=이 배달의
+    // dispatch-show status가 확실히 "dispatched"가 아니다) 살아있는
+    // 좌석이 없는 게 정상이다 -- «측정 불가»가 아니라 «이 배달은 퇴역함»
+    // 으로 구별해 호출부(judgeSeatLivenessForRepo 등)가 그 사실을
+    // COLLECTION_FAILED와 다른 값으로 표면화할 수 있게 dispatchRetired를
+    // 얹는다. status를 모르면(null -- dispatch-show 응답에 없었거나 조회
+    // 자체가 이 단계 이전에 실패) "퇴역했다"고 지어내지 않는다 -- 예전
+    // 그대로 fail-closed 유지(ⓑ "진짜 이상은 여전히 잡는다").
+    const dispatchRetired =
+      typeof dispatchStatus === "string" &&
+      dispatchStatus !== ACTIVE_DISPATCH_STATUS;
+    return {
+      ...denyDeliveredSeat(
+        DELIVERED_SEAT_REASON.NO_LIVE_SEAT_MATCH,
+        dispatchRetired
+          ? `orca-adapter: resolveDeliveredSeat -- assignee_pane_key matches no live seat in worktree '${worktreePath}' (dispatch status='${dispatchStatus}', not '${ACTIVE_DISPATCH_STATUS}' -- this dispatch is retired, absence of a live seat is expected)`
+          : `orca-adapter: resolveDeliveredSeat -- assignee_pane_key matches no live seat in worktree '${worktreePath}' (dead seat or rotated -- refusing to guess)`,
+      ),
+      dispatchRetired,
+    };
   }
   if (matches.length > 1) {
     return denyDeliveredSeat(
@@ -2082,7 +2118,11 @@ export function resolveDeliveredSeat(ctx = {}, opts = {}) {
   const paneKeyResult = resolveAssigneePaneKey(candidate.runtimeTaskId, opts);
   if (!paneKeyResult.ok) return paneKeyResult;
   const seatResult = resolveLiveSeatByPaneKey(
-    { worktreePath, assigneePaneKey: paneKeyResult.assigneePaneKey },
+    {
+      worktreePath,
+      assigneePaneKey: paneKeyResult.assigneePaneKey,
+      dispatchStatus: paneKeyResult.dispatchStatus,
+    },
     opts,
   );
   if (!seatResult.ok) return seatResult;

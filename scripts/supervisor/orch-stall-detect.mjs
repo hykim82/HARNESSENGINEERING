@@ -690,6 +690,15 @@ export const SEAT_LIVENESS_WIRE_STATUS = Object.freeze({
   // ★관측 수집 자체가 실패했다 -- "무응답"으로 접지 않고 여기서 멈춘다
   // (§2-2 비타협, gap#61 재발 방지와 동일 원칙).
   COLLECTION_FAILED: "SEAT_LIVENESS_COLLECTION_FAILED",
+  // HYK-464-followup-1 축B: 배달 기록은 있다(장부가 답했다) -- 그런데 그
+  // 기록이 가리키는 배달 자신이 이미 퇴역했다(orca-adapter.mjs의
+  // resolveDeliveredSeat이 dispatch-show status로 확인, dispatchRetired).
+  // 이 워크트리의 로컬 task 파일은 아직 DONE 표지가 없어 "활성"으로
+  // 보이지만(§로컬 판단), orca 원장은 이미 이 배달을 끝난 것으로 안다 --
+  // 좌석이 안 보이는 게 정상이므로 COLLECTION_FAILED(측정 불가)가 아니라
+  // 여기서 따로 접는다. NOT_APPLICABLE(로컬에 애초에 활성 배달이 없음)과
+  // 원인이 다르므로 같은 값으로 접지 않는다(§2-1-1 "구별되는 이름").
+  DISPATCH_RETIRED: "SEAT_LIVENESS_DISPATCH_RETIRED",
 });
 
 // HYK-201(coder-task.md §1-§2) -- "활성 배달"의 정본 판정. 예전에는
@@ -912,9 +921,16 @@ function resolveObservationWithDeliveredSeatFallback({
   // ⓐ(기본값): 위 허용목록에 없는 모든 상관 실패 -- 장부가 실제로
   // 답했는데(또는 답할 수 있었는데 우리 쪽 입력이 잘못됐는데) 이 배달과
   // 상관이 성립하지 않았다는 뜻이다. 화면으로 물러나지 않는다.
+  //
+  // HYK-464-followup-1 축B: 그 상관 실패 중에서도 resolved.dispatchRetired
+  // (orca-adapter.mjs resolveLiveSeatByPaneKey가 dispatch-show status로
+  // 확인한 값)가 true면 -- 좌석이 안 보이는 게 이 배달이 퇴역했기 때문인
+  // 정상 상태다. `retired` 플래그를 얹어 호출부가 COLLECTION_FAILED
+  // (측정 불가)와 구별해 처리할 수 있게 한다.
   return {
     observed: {
       ok: false,
+      retired: resolved.dispatchRetired === true,
       observationReason: observationReasonForClosedCorrelation(
         resolved.reasonCode,
       ),
@@ -952,6 +968,17 @@ export function judgeSeatLivenessForRepo(
     },
   );
   if (!observed.ok) {
+    // HYK-464-followup-1 축B ⓐ: "측정 불가"가 아니라 "해당 없음"(이
+    // 배달은 이미 퇴역했다 -- 좌석 부재가 정상)일 때는 다른 값으로 접는다.
+    if (observed.retired === true) {
+      return {
+        status: SEAT_LIVENESS_WIRE_STATUS.DISPATCH_RETIRED,
+        observationReason: observed.observationReason,
+        reason: observed.reason,
+        dispatch,
+        ...(correlation ? { correlation } : {}),
+      };
+    }
     return {
       status: SEAT_LIVENESS_WIRE_STATUS.COLLECTION_FAILED,
       observationReason: observed.observationReason,
@@ -1475,6 +1502,10 @@ export const DISPATCH_START_WIRE_STATUS = Object.freeze({
   // 관측 히스토리 store 읽기/쓰기가 실패했다 -- 이번 실행의 관측 1건만
   // 으로는 진행 여부를 판정할 근거가 없으므로 판정을 아예 보류한다.
   STORE_FAILED: "DISPATCH_START_STORE_FAILED",
+  // HYK-464-followup-1 축B: seat-liveness 축의 DISPATCH_RETIRED와 동일
+  // 원인·동일 원칙(resolveObservationWithDeliveredSeatFallback을 두 축이
+  // 공유한다) -- 배달 기록은 있지만 그 배달 자신이 이미 퇴역했다.
+  DISPATCH_RETIRED: "DISPATCH_START_DISPATCH_RETIRED",
 });
 
 export const DISPATCH_START_SCAN_FAILURE = Object.freeze({
@@ -1655,6 +1686,18 @@ export function judgeDispatchStartForRepo(
     },
   );
   if (!observed.ok) {
+    // HYK-464-followup-1 축B ⓐ: judgeSeatLivenessForRepo와 대칭(같은
+    // resolveObservationWithDeliveredSeatFallback을 공유하므로 같은
+    // retired 플래그가 붙는다).
+    if (observed.retired === true) {
+      return {
+        status: DISPATCH_START_WIRE_STATUS.DISPATCH_RETIRED,
+        observationReason: observed.observationReason,
+        reason: observed.reason,
+        dispatch,
+        ...(correlation ? { correlation } : {}),
+      };
+    }
     return {
       status: DISPATCH_START_WIRE_STATUS.COLLECTION_FAILED,
       observationReason: observed.observationReason,

@@ -420,7 +420,11 @@ const SINGLE_CODER_SEAT = {
 // 지금 이 순간 이 워크트리에 붙은 후보는 이 하나뿐이다(검토자 재현 조건
 // "단일 [CODER seat] 후보" 그대로) -- preview는 실 배너 문자열이라
 // 화면 경로로 물러났다면 손쉽게 AGENT 확정 -> JUDGED가 나올 상황이다.
-function fakeExecFnWithSingleCoderSeat(assigneePaneKey) {
+// HYK-464-followup-1 축B: status 인자를 추가(기본값 "dispatched" -- 기존
+// 호출자 전부 byte-identical, 회귀 0). "dispatched"가 아닌 값을 넘기면
+// 이 배달은 퇴역했다는 신호가 된다(orca-adapter.mjs ACTIVE_DISPATCH_STATUS
+// 참조).
+function fakeExecFnWithSingleCoderSeat(assigneePaneKey, status = "dispatched") {
   const taskListTasks = [
     {
       id: "task_hyk408_repro_d",
@@ -433,7 +437,7 @@ function fakeExecFnWithSingleCoderSeat(assigneePaneKey) {
       task_id: "task_hyk408_repro_d",
       assignee_handle: "term_hyk408_gone_or_wrong",
       assignee_pane_key: assigneePaneKey,
-      status: "dispatched",
+      status,
     },
   };
   return function execFn(argv) {
@@ -625,5 +629,96 @@ test("HYK-408 ⓓ-3 되돌림 변이(필수): LEDGER_QUERY_INFRA_FAILURE_REASONS
     r.status,
     "SEAT_LIVENESS_JUDGED",
     "mutant must regress to the exact P1 fail-open (stale pane key + single CODER-seat candidate -> JUDGED) -- RED signal proving the closed-by-default branch is load-bearing in the real code",
+  );
+});
+
+// ---------------------------------------------------------------------------
+// HYK-464-followup-1 축B (coder-task.md §1 축B) -- 반납된 라운드의 옛
+// 배달 기록: 위 ⓓ-1(stale pane key)과 정확히 같은 표본 모양이지만, 이번엔
+// dispatch-show가 그 배달의 status로 "dispatched"가 아닌 값(퇴역함)을
+// 답한다. 좌석이 안 보이는 게 정상인 이 경우, judgeSeatLivenessForRepo/
+// judgeDispatchStartForRepo는 COLLECTION_FAILED(측정 불가)가 아니라
+// DISPATCH_RETIRED(해당 없음)로 접어야 한다 -- ⓑ(dispatch 자신이 여전히
+// "dispatched"인 위 ⓓ-1)와는 반드시 구별돼야 한다(§요구 ⓑ "진짜 이상은
+// 여전히 잡는다" -- 그 시험이 이미 COLLECTION_FAILED로 고정돼 있다).
+// ---------------------------------------------------------------------------
+const RETIRED_ASSIGNEE_PANE_KEY = STALE_ASSIGNEE_PANE_KEY;
+
+test("HYK-464-followup-1 축B ⓐ: seatLiveness -- 예약이 반납된(status != 'dispatched') 옛 배달의 pane key는 살아있는 좌석이 없어도 COLLECTION_FAILED가 아니라 DISPATCH_RETIRED(해당 없음)다", () => {
+  const r = judgeSeatLivenessForRepo(
+    { repoRoot: WORKTREE, droppedTaskFiles: ACTIVE_WITH_LABEL, now: NOW },
+    {
+      execFn: fakeExecFnWithSingleCoderSeat(
+        RETIRED_ASSIGNEE_PANE_KEY,
+        "completed",
+      ),
+    },
+  );
+  assert.equal(r.status, SEAT_LIVENESS_WIRE_STATUS.DISPATCH_RETIRED);
+  assert.notEqual(r.status, SEAT_LIVENESS_WIRE_STATUS.COLLECTION_FAILED);
+  assert.equal(r.correlation.ok, false);
+  assert.equal(
+    r.correlation.reasonCode,
+    DELIVERED_SEAT_REASON.NO_LIVE_SEAT_MATCH,
+    "the underlying orca-adapter reasonCode is unchanged -- only the wire status splits",
+  );
+});
+
+test("HYK-464-followup-1 축B ⓐ: dispatchStart 축도 동일하게 DISPATCH_RETIRED로 접는다", () => {
+  const r = judgeDispatchStartForRepo(
+    { repoRoot: WORKTREE, droppedTaskFiles: ACTIVE_WITH_LABEL, now: NOW },
+    {
+      execFn: fakeExecFnWithSingleCoderSeat(
+        RETIRED_ASSIGNEE_PANE_KEY,
+        "completed",
+      ),
+      ...fakeDispatchStartStore(),
+    },
+  );
+  assert.equal(r.status, DISPATCH_START_WIRE_STATUS.DISPATCH_RETIRED);
+  assert.notEqual(r.status, DISPATCH_START_WIRE_STATUS.COLLECTION_FAILED);
+});
+
+test("HYK-464-followup-1 축B ⓑ (대조, 회귀 고정): 같은 dead pane key라도 status가 여전히 'dispatched'면(ⓓ-1과 동일 표본) 예전 그대로 COLLECTION_FAILED다 -- 진짜 이상은 여전히 잡는다", () => {
+  const r = judgeSeatLivenessForRepo(
+    { repoRoot: WORKTREE, droppedTaskFiles: ACTIVE_WITH_LABEL, now: NOW },
+    {
+      execFn: fakeExecFnWithSingleCoderSeat(
+        RETIRED_ASSIGNEE_PANE_KEY,
+        "dispatched",
+      ),
+    },
+  );
+  assert.equal(r.status, SEAT_LIVENESS_WIRE_STATUS.COLLECTION_FAILED);
+  assert.notEqual(r.status, SEAT_LIVENESS_WIRE_STATUS.DISPATCH_RETIRED);
+});
+
+// 되돌림 변이(§2 필수): judgeSeatLivenessForRepo의 retired 분기를 무력화
+// (`observed.retired === true`를 항상 거짓으로)하면, 위 ⓐ 표본(퇴역한
+// 배달)이 다시 COLLECTION_FAILED로 떨어져야 한다 -- 이 분기가 실제로
+// 결과를 좌우한다는 RED 증거.
+test("HYK-464-followup-1 축B 되돌림 변이(필수): observed.retired 분기를 무력화 -> RED (퇴역한 배달 표본이 다시 COLLECTION_FAILED로 샌다 -- 이 분기가 실제로 결과를 가른다는 증거)", async () => {
+  const mutant = await importMutatedSibling(
+    (src) =>
+      applyMutation(
+        src,
+        "    if (observed.retired === true) {\n      return {\n        status: SEAT_LIVENESS_WIRE_STATUS.DISPATCH_RETIRED,",
+        "    if (false) {\n      return {\n        status: SEAT_LIVENESS_WIRE_STATUS.DISPATCH_RETIRED,",
+      ),
+    "seat-retired",
+  );
+  const r = mutant.judgeSeatLivenessForRepo(
+    { repoRoot: WORKTREE, droppedTaskFiles: ACTIVE_WITH_LABEL, now: NOW },
+    {
+      execFn: fakeExecFnWithSingleCoderSeat(
+        RETIRED_ASSIGNEE_PANE_KEY,
+        "completed",
+      ),
+    },
+  );
+  assert.equal(
+    r.status,
+    "SEAT_LIVENESS_COLLECTION_FAILED",
+    "mutant must regress to COLLECTION_FAILED for a retired dispatch -- RED signal proving the DISPATCH_RETIRED branch is load-bearing in the real code",
   );
 });
