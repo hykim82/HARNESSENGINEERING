@@ -3367,7 +3367,132 @@ function bestEffortStampDroppedAt(taskPath, args) {
 // 같은 best-effort/비파괴 스타일로 그 경로들을 task 파일에 기계로
 // 박아 넣는다. 이미 박혀 있으면(RESULT_FILE_LINE_RE 매치) 다시 넣지
 // 않는다(idempotent -- 재실행/재게이트에서 중복 삽입 없음).
-const RESULT_FILE_LINE_RE = /^result_file:\s*.+$/im;
+//
+// HYK-480 §1 (책임자 실측 재현): 옛 `/^result_file:\s*.+$/im`의 `\s*`가
+// 개행을 삼켰다 -- 입력 "task_id: X\nresult_file:\nrunner_receipt_file:\n"
+// 에서 이 정규식은 "result_file:\nrunner_receipt_file:"를 통째로 매치해
+// «빈 키 + 다음 줄»을 «이미 주입됨»으로 잘못 읽었다(478 1R 게이트
+// 스냅샷 실물 증거: 네 키가 빈 값으로 그대로 있었는데도 주입 시도 자체가
+// 없었다). `[ \t]*`(수평 공백만) + `\S`(같은 줄 안에 실제 값이 있어야
+// 함)로 좁힌다 -- 이 파일의 다른 header 정규식들(DISPATCH_HEAD_COMMIT_RE_G·
+// CONSUMPTION_TASK_ID_RE_G)이 이미 쓰는 같은 관례, 개행 비포함.
+// HYK-480 §3 ⓓ: exported ONLY so the mutation-regression test can compare
+// this (fixed) regex's behavior against a literal copy of the pre-fix
+// regex side-by-side on the SAME fixture text -- same "export for
+// test-only comparison, zero logic change" convention this file already
+// uses for classifyTaskIdLabel/DISPATCH_RECEIPT_LOOKUP_REASON (see that
+// function's own header comment).
+export const RESULT_FILE_LINE_RE = /^result_file:[ \t]*\S.*$/im;
+
+const HARNESS_GITIGNORE_NOTE_TEXT =
+  ".harness/ 는 git-ignore라 커밋 diff에 절대 안 나온다 -- 검토는 위 절대경로 파일을 직접 열어 확인하라(HYK-465 기계 주입, 손 기억 의존 금지).";
+const WORKTREE_DISCIPLINE_TEXT =
+  "작업/검토가 끝나면 DONE 을 찍기 «전»에 워크트리를 작업/검토한 커밋에 둔 채로 두라 -- 뒷정리로 HEAD 를 옮기면 소비가 막힌다(HYK-465 기계 주입).";
+
+// HYK-480 §2-1 (책임자 실사고 근거, 오늘 이 라운드 자신의 §0-1): 기계
+// 주입하는 점검표 문면 «자체»가 "계수 줄을 열 0에서 완료 표지 모양으로
+// 시작하지 않는 서식"을 명시해야 한다 -- 이 문장이 그것이다.
+const COUNT_LINE_FORMAT_HINT =
+  "계수 줄은 열 0 에서 완료 표지 모양으로 시작하지 마라(예: '- 완료 표지 개수: 1', ⛔'>>> 완료 표지 개수: 1' 아님)";
+
+// HYK-480 §5: "결과 파일 필수 머리줄 점검표" -- 지금까지 ORCH가 매 라운드
+// task 파일 §0에 손으로 옮겨 적던 바로 그 표(이 라운드 자신의
+// coder-task.md §0이 그 실물, 근거: 478 검토 1R -- head_commit 단독 줄
+// 요구가 손 지시서에서 빠져 DONE_REWRITE_LOCKED 은퇴)를 이제 이 CLI가
+// 기계로 박는다. ⛔각 줄은 "result_header_checklist_<field>:"로 시작한다
+// (단일 key:value 줄 관례 유지) -- 그리고 필드 이름 뒤에 실제 헤더
+// 콜론("role:"·"task_id:"·"for:"·"verdict:"·"head_commit:")을 다시
+// 쓰지 않는다(Korean "필드"로 대체) -- 이 점검표 문면 자체가, 예를 들어
+// REVIEW 역할에서 DISPATCH_HEAD_COMMIT_ANYWHERE_RE(근사매치 진단, 위 171행)
+// 같은 이 파일 자신의 다른 축을 우연히 건드리지 않기 위함이다(점검표가
+// 표지를 위조하면 안 된다는 §0-2/§2-1 요구 그대로).
+// ⚠️실측으로 잡힌 함정(구현 중 발견, dispatch-gate-head-commit-wire.test.mjs
+// 회귀로 드러남): 키 이름 자체를 "result_header_checklist_head_commit:"로
+// 지었더니 그 문자열 안에 "head_commit:"가 «부분 문자열»로 그대로 들어있어
+// DISPATCH_HEAD_COMMIT_ANYWHERE_RE(경계 없는 `/head_commit:\s*(\S+)/i`)가
+// 그 키 이름 자체를 근사매치로 오인했다(REJECT_HEAD_COMMIT_MISSING이
+// REJECT_HEAD_COMMIT_NEAR_MISS로 둔갑). ⇒ 아래 키는 "head_commit"을
+// 밑줄 없는 "headcommit"으로 써서 그 부분 문자열 충돌 자체를 없앤다 --
+// 값 텍스트(사람이 읽는 설명)는 여전히 "head_commit 필드"라고 쓰되, 뒤에
+// 콜론을 붙이지 않는다(마찬가지로 충돌 없음, "head_commit " 뒤는 공백).
+function buildResultHeaderChecklistLines(role) {
+  const upperRole = role.toUpperCase();
+  const isReview = /^review/i.test(role);
+  const reviewOnlySpec = (whenReview) =>
+    isReview ? whenReview : "검토 전용 -- 이 역할엔 0개";
+  return [
+    `result_header_checklist_note: ⛔결과 파일 필수 머리줄 점검표(HYK-480 기계 주입, 손 기억 의존 금지 -- HYK-465 와 같은 판정선) -- ${COUNT_LINE_FORMAT_HINT}`,
+    `result_header_checklist_role: role 필드는 '${upperRole}' 값으로 정확히 1개`,
+    "result_header_checklist_task_id: task_id 필드는 이 라운드 harness_label 값으로 정확히 1개",
+    `result_header_checklist_for: for 필드는 ${reviewOnlySpec("판정 대상 CODER 라운드 harness_label 값으로 정확히 1개")}`,
+    `result_header_checklist_verdict: verdict 필드는 ${reviewOnlySpec("approved 또는 rejected 중 하나만, 정확히 1개")}`,
+    `result_header_checklist_headcommit: head_commit 필드는 ${reviewOnlySpec("단독 40-hex 줄(HYK-383) 정확히 1개")}`,
+    `result_header_checklist_done: 완료 표지(>>> DONE 또는 node scripts/relay/finalize-done.mjs ${upperRole})는 정확히 1개 -- 손기입 금지`,
+  ];
+}
+
+// HYK-480 §1: 옛 4키(result_file·runner_receipt_file·harness_gitignore_note·
+// worktree_discipline)의 실제 값. 점검표(위)는 이 값들과 별개로 항상
+// 새로 덧붙는 텍스트라 "빈 키"로 사전 존재할 수 없다(이 라운드에 처음
+// 생겼으므로) -- 그래서 아래 두 헬퍼는 이 옛 4키만을 "빈 키일 수 있는"
+// 대상으로 다룬다.
+function computeLegacyInjectionValues(role, harnessDir) {
+  return {
+    result_file: join(harnessDir, `${role.toLowerCase()}.md`),
+    runner_receipt_file: join(harnessDir, "runner-receipt.json"),
+    harness_gitignore_note: HARNESS_GITIGNORE_NOTE_TEXT,
+    worktree_discipline: WORKTREE_DISCIPLINE_TEXT,
+  };
+}
+
+// HYK-480 §1 (범위 1): "빈 키가 있으면 그 자리의 빈 키 4줄을 채우거나
+// (제자리 교체) ... 중복 키 금지". 각 옛 키가 "값 없이"(같은 줄에 결측)
+// 이미 존재하면 그 줄을 제자리에서 값 있는 줄로 교체한다 -- 새 줄을
+// 추가하지 않으므로 중복이 생길 수 없다.
+function fillEmptyLegacyKeysInPlace(text, legacyValues) {
+  let rewritten = text;
+  const filledKeys = [];
+  for (const key of Object.keys(legacyValues)) {
+    const emptyKeyRe = new RegExp(`^${key}:[ \\t]*$`, "im");
+    if (emptyKeyRe.test(rewritten)) {
+      rewritten = rewritten.replace(emptyKeyRe, `${key}: ${legacyValues[key]}`);
+      filledKeys.push(key);
+    }
+  }
+  return { rewritten, filledKeys };
+}
+
+// HYK-480 §1/§5: 빈 키 제자리 교체 뒤, (a) 아예 존재하지 않는 옛 키가
+// 있으면(부분 템플릿) 그것도 채워 넣고, (b) 이 라운드가 처음 도입하는
+// 점검표 7줄을 «같은 주입 블록»으로 그 바로 뒤에 덧붙인다(범위 5: 같은
+// 주입 블록에 점검표를 박는다) -- 중복 키를 만들지 않도록 이미 (값이든
+// 빈 키로든) 존재하는 옛 키는 다시 추가하지 않는다.
+function appendMissingLegacyKeysAndChecklist(
+  rewrittenAfterFill,
+  filledKeys,
+  legacyValues,
+  checklistLines,
+) {
+  const legacyKeys = Object.keys(legacyValues);
+  const missingKeys = legacyKeys.filter(
+    (key) => !new RegExp(`^${key}:`, "im").test(rewrittenAfterFill),
+  );
+  const tailBlock = [
+    ...missingKeys.map((key) => `${key}: ${legacyValues[key]}`),
+    ...checklistLines,
+  ]
+    .map((line) => `\n${line}`)
+    .join("");
+  const lastFilledKey = filledKeys[filledKeys.length - 1];
+  const lastFilledLineRe = new RegExp(`^${lastFilledKey}:.*$`, "im");
+  const lastFilledMatch = rewrittenAfterFill.match(lastFilledLineRe);
+  const insertAt = lastFilledMatch.index + lastFilledMatch[0].length;
+  return (
+    rewrittenAfterFill.slice(0, insertAt) +
+    tailBlock +
+    rewrittenAfterFill.slice(insertAt)
+  );
+}
 
 function bestEffortInjectResultPaths(taskPath, args) {
   guardAgainstLiveTaskPathStamp(taskPath, args);
@@ -3375,9 +3500,38 @@ function bestEffortInjectResultPaths(taskPath, args) {
   if (!role) return;
   try {
     const original = readFileSync(taskPath, "utf8");
-    if (RESULT_FILE_LINE_RE.test(original)) {
-      return; // already injected -- idempotent no-op, never duplicates
+    const existingMatch = original.match(RESULT_FILE_LINE_RE);
+    if (existingMatch) {
+      // HYK-480 §2: 조용한 no-op 제거 -- 매치된 줄 자체를 로그에 남긴다
+      // (task_id 부재 건너뛰기 로그와 같은 관례, §1 실사고의 "로그 없이
+      // return"을 닫는다).
+      console.log(
+        `dispatch-gate-decision: result-path injection skipped (already injected -- matched line: '${existingMatch[0].trim()}') -- ${taskPath}`,
+      );
+      return;
     }
+    const harnessDir = resolve(dirname(taskPath));
+    const legacyValues = computeLegacyInjectionValues(role, harnessDir);
+    const checklistLines = buildResultHeaderChecklistLines(role);
+
+    const { rewritten: afterFill, filledKeys } = fillEmptyLegacyKeysInPlace(
+      original,
+      legacyValues,
+    );
+    if (filledKeys.length > 0) {
+      const finalText = appendMissingLegacyKeysAndChecklist(
+        afterFill,
+        filledKeys,
+        legacyValues,
+        checklistLines,
+      );
+      writeFileSync(taskPath, finalText, "utf8");
+      console.log(
+        `dispatch-gate-decision: result-path block machine-injected (HYK-480, in-place fill of empty template keys: ${filledKeys.join(", ")}) -- ${taskPath} -> result_file=${legacyValues.result_file}, runner_receipt_file=${legacyValues.runner_receipt_file}`,
+      );
+      return;
+    }
+
     const taskIdLineMatch = original.match(TASK_ID_LINE_FOR_INSERT_RE);
     if (!taskIdLineMatch) {
       console.log(
@@ -3385,22 +3539,22 @@ function bestEffortInjectResultPaths(taskPath, args) {
       );
       return;
     }
-    const harnessDir = resolve(dirname(taskPath));
-    const resultFile = join(harnessDir, `${role.toLowerCase()}.md`);
-    const receiptFile = join(harnessDir, "runner-receipt.json");
     // HYK-465 §A-3 (책임자 지시): 같은 주입 경로로 워크트리 이동 금지
     // 규율도 함께 박는다 -- 손 주입은 다음 라운드에서 사라진다.
-    const block =
-      `\nresult_file: ${resultFile}` +
-      `\nrunner_receipt_file: ${receiptFile}` +
-      `\nharness_gitignore_note: .harness/ 는 git-ignore라 커밋 diff에 절대 안 나온다 -- 검토는 위 절대경로 파일을 직접 열어 확인하라(HYK-465 기계 주입, 손 기억 의존 금지).` +
-      `\nworktree_discipline: 작업/검토가 끝나면 DONE 을 찍기 «전»에 워크트리를 작업/검토한 커밋에 둔 채로 두라 -- 뒷정리로 HEAD 를 옮기면 소비가 막힌다(HYK-465 기계 주입).`;
+    // HYK-480 §5: 옛 4줄 뒤에 결과 파일 필수 머리줄 점검표 7줄도 같은
+    // 블록으로 덧붙인다.
+    const block = [
+      ...Object.entries(legacyValues).map(([key, value]) => `${key}: ${value}`),
+      ...checklistLines,
+    ]
+      .map((line) => `\n${line}`)
+      .join("");
     const insertAt = taskIdLineMatch.index + taskIdLineMatch[0].length;
     const inserted =
       original.slice(0, insertAt) + block + original.slice(insertAt);
     writeFileSync(taskPath, inserted, "utf8");
     console.log(
-      `dispatch-gate-decision: result-path block machine-injected (HYK-465) -- ${taskPath} -> result_file=${resultFile}, runner_receipt_file=${receiptFile}`,
+      `dispatch-gate-decision: result-path block machine-injected (HYK-465/HYK-480) -- ${taskPath} -> result_file=${legacyValues.result_file}, runner_receipt_file=${legacyValues.runner_receipt_file}`,
     );
   } catch (err) {
     console.error(
