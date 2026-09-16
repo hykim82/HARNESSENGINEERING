@@ -404,3 +404,135 @@ test("RED(변이 3/4, 필수, P1-1 실증): admission을 옛 blankLineIdx 방식
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// -----------------------------------------------------------------------
+// HYK-469 3R §0/§1 -- 이번 라운드가 반려된 «합친 결과»를 그대로 재현한다.
+// coder-task.md §0 원문: 같은 인라인 코드 마스킹 함수가 두 벌인데
+// (reject-streak.mjs:165 = 469 2R이 고친 정본, admission-completion-
+// adapter.mjs:214 = 468 3R이 만든 로컬 복제) 2R은 정본만 고쳤다. 그 결과
+// 병합 후 relay=AMBIGUOUS · dispatch=BROKEN · admission 만 ok:true로
+// «옛 값»을 확정하는 fail-open이 났다. 아래 fixture는 그 모양을 정확히
+// 만든다:
+//   - 열머리 task_id: 선언이 둘(HYK-0000-OLD, HYK-9001-NEW), 각자
+//     구조적 선행 맥락을 가진다(하나는 파일 맨 앞, 다른 하나는 바로 앞
+//     "note:" 헤더 줄).
+//   - 그 사이 "note:" 줄 안에 HYK-449 ⓐ 실사고와 «같은 모양»(백틱으로
+//     감싼 여는 표지 2개 + 닫는 표지 1개, 순서: 여는·닫는·여는)이 있다.
+//   - 옛(순수 indexOf) 마스커는 첫 쌍을 note 줄 안에서 다 소비한 뒤 짝
+//     없는 두 번째 여는 표지를 문서 끝까지 마스킹해 그 뒤의 두 번째
+//     task_id: 줄 자체를 지운다 -- 그래서 옛 admission은 후보 1개
+//     (HYK-0000-OLD)만 보고 그 스테일 값을 조용히 확정한다.
+//   - 고친(469 2R+3R) 마스커는 인라인 코드 밖으로 못 나가므로 note 줄
+//     «안»에서 닫힌다 -- 두 번째 task_id: 줄이 살아남아 후보 2개가 되고,
+//     canonical/relay/dispatch/admission 넷 다 fail-closed(AMBIGUOUS류)로
+//     일치한다.
+// -----------------------------------------------------------------------
+const INLINE_MASK_ACCIDENT_CONTENT =
+  "task_id: HYK-0000-OLD\n" +
+  "for: HYK-469\n" +
+  "role: CODER\n" +
+  "note: prose with `<!--` and `-->` then another `<!--` inline\n" +
+  "task_id: HYK-9001-NEW\n" +
+  ">>> DONE: CODER @ 2026-09-15 20:00:00 KST\n";
+
+test("HYK-469 3R ★네 독자 일치(AFTER, 필수): 469 2R+3R 이식 뒤에는 canonical/relay/dispatch/admission 넷 다 이 실사고 모양 입력에서 fail-closed로 일치한다 -- admission 단독 fail-open(옛 값 확정)이 더는 없다", async () => {
+  const { maskQuotedMarkerRegions } = await import("./reject-streak.mjs");
+  const canonicalMasked = maskQuotedMarkerRegions(INLINE_MASK_ACCIDENT_CONTENT);
+  assert.match(
+    canonicalMasked,
+    /task_id: HYK-9001-NEW/,
+    "canonical: 두 번째 task_id 줄이 인라인 코드 사고로 지워지면 안 된다",
+  );
+
+  const relay = resolveResultTaskId(INLINE_MASK_ACCIDENT_CONTENT);
+  const dispatch = classifyTaskIdLabel(INLINE_MASK_ACCIDENT_CONTENT);
+  const admission = __probeResolveHeaderTaskId(INLINE_MASK_ACCIDENT_CONTENT);
+  console.log(
+    "HYK-469 3R 네 독자 일치(AFTER) 원문:",
+    JSON.stringify({ relay, dispatch, admission }, null, 2),
+  );
+
+  assert.equal(relay.ok, false);
+  assert.equal(relay.kind, "AMBIGUOUS");
+  assert.equal(dispatch.kind, "BROKEN");
+  assert.equal(dispatch.strictCount, 2);
+  assert.deepEqual(
+    admission,
+    { ok: false, count: 2 },
+    "admission이 이제 relay/dispatch와 같은 fail-closed(count 2)로 일치해야 한다 -- 2R만 있던 이전에는 여기가 { ok:true, id:'HYK-0000-OLD' }였다(아래 되돌림 변이 시험이 그 옛 판정을 라이브로 재현한다)",
+  );
+});
+
+// -----------------------------------------------------------------------
+// 되돌림 변이(필수, HYK-469 3R §1 "되돌림 변이 RED" 요구 + P0 실증): admission
+// 의 이식분(정규식 + 세 헬퍼 + maskHtmlComments의 findOutsideInlineCode 호출)
+// 을 «순수 indexOf» 옛 형태로 되돌리면, 위와 같은 입력에서 admission
+// 단독으로 다시 옛 값(HYK-0000-OLD)을 fail-open 확정한다 -- 이번 반려
+// 사유(coder-task.md §0) 그 자체의 기계 재현.
+// -----------------------------------------------------------------------
+test("HYK-469 3R RED(되돌림 변이, 필수, 반려 재현): admission의 이식분을 순수 indexOf로 되돌리면 admission 단독 fail-open(옛 값 확정)이 다시 난다", async () => {
+  const realSource = readFileSync(ADMISSION_PATH, "utf8");
+  const target =
+    'function maskHtmlComments(content) {\n  // ⚠️구간은 «원문»(마스킹 전) 기준으로 한 번만 계산한다 -- 아래 루프의\n  // 블랭크는 길이를 보존하므로(blankKeepingNewlines) 오프셋이 반복 내내\n  // 그대로 유효하다.\n  const codeRanges = inlineCodeRanges(content);\n  let out = content;\n  let from = 0;\n  for (;;) {\n    const start = findOutsideInlineCode(out, "<!--", from, codeRanges);\n    if (start === -1) return out;\n    const closeAt = findOutsideInlineCode(out, "-->", start + 4, codeRanges);\n    const end = closeAt === -1 ? out.length : closeAt + 3;\n    out =\n      out.slice(0, start) +\n      blankKeepingNewlines(out.slice(start, end)) +\n      out.slice(end);\n    from = end;\n  }\n}';
+  assertExactlyOneMatch(
+    realSource,
+    target,
+    "admission maskHtmlComments(이식 후)",
+  );
+  const mutatedSource = realSource.replace(
+    target,
+    '// MUTATED(HYK-469 3R RED, 반려 재현): reverted to the pre-3R pure-indexOf shape -- the two ported findOutsideInlineCode calls become raw indexOf again (helpers/regex above are left unused, only the call sites regress).\nfunction maskHtmlComments(content) {\n  let out = content;\n  let from = 0;\n  for (;;) {\n    const start = out.indexOf("<!--", from);\n    if (start === -1) return out;\n    const closeAt = out.indexOf("-->", start + 4);\n    const end = closeAt === -1 ? out.length : closeAt + 3;\n    out =\n      out.slice(0, start) +\n      blankKeepingNewlines(out.slice(start, end)) +\n      out.slice(end);\n    from = end;\n  }\n}',
+  );
+
+  const dir = mkdtempSync(join(tmpdir(), "hyk469-3r-admission-mask-red-"));
+  try {
+    stageSiblings(
+      dir,
+      ["scripts", "supervisor"],
+      ADMISSION_SUPERVISOR_SIBLINGS,
+      join(HERE, "..", "supervisor"),
+    );
+    const scriptsCheckDir = stageSiblings(
+      dir,
+      ["scripts", "check"],
+      ADMISSION_CHECK_SIBLINGS,
+      HERE,
+    );
+    const mutantPath = join(
+      scriptsCheckDir,
+      "admission-completion-adapter.mjs",
+    );
+    writeFileSync(mutantPath, mutatedSource, "utf8");
+    const mutant = await import(pathToFileURL(mutantPath).href);
+    const result = mutant.__probeResolveHeaderTaskId(
+      INLINE_MASK_ACCIDENT_CONTENT,
+    );
+    assert.deepEqual(
+      result,
+      { ok: true, id: "HYK-0000-OLD" },
+      "RED: 순수 indexOf로 되돌리면 admission이 다시 두 번째 task_id 줄을 통째로 못 보고 옛 값을 확정해야 한다 -- 이번 반려 사유(coder-task.md §0)의 정확한 재현",
+    );
+
+    const beforeSha = createHash("sha256")
+      .update(realSource, "utf8")
+      .digest("hex");
+    const afterSource = readFileSync(ADMISSION_PATH, "utf8");
+    const afterSha = createHash("sha256")
+      .update(afterSource, "utf8")
+      .digest("hex");
+    console.log(
+      "HYK-469 3R 되돌림 변이 원복 sha256:",
+      beforeSha,
+      "==",
+      afterSha,
+    );
+    assert.equal(
+      afterSource,
+      realSource,
+      "원복 증명: 실 소스 파일은 바이트 동일해야 한다(변이는 메모리 문자열에만 적용됐다)",
+    );
+    assert.equal(beforeSha, afterSha);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
