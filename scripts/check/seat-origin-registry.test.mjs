@@ -9,6 +9,7 @@ import {
   buildLaunchRecord,
   appendLaunchRecord,
   readRegistry,
+  readRegistryDiagnostics,
   isPaneRegistered,
   runSeatOriginRegistryCli,
 } from "./seat-origin-registry.mjs";
@@ -81,6 +82,35 @@ test("readRegistry: skips corrupted/truncated lines without failing the whole re
     const rows = readRegistry(registryPath);
     assert.equal(rows.length, 1);
     assert.equal(rows[0].paneKey, "good:1");
+  });
+});
+
+// HYK-464 §3 (P2-1): 등록 실패(손상된 줄)가 조용히 사라지지 않고 개수로
+// 드러난다 -- readRegistry는 하위호환을 위해 records만 돌려주지만,
+// readRegistryDiagnostics를 쓰는 호출부(seat-census.mjs)는 이 개수를
+// 얻어 출력에 표시할 수 있다.
+test("readRegistryDiagnostics: reports corruptedLineCount alongside the surviving records (P2-1)", () => {
+  withTempDir((dir) => {
+    const registryPath = join(dir, "reg.jsonl");
+    writeFileSync(
+      registryPath,
+      '{"paneKey":"good:1","role":"CODER"}\n{not json\n{"paneKey":"good:2","role":"CODER"}\nalso not json\n',
+      "utf8",
+    );
+    const { records, corruptedLineCount } =
+      readRegistryDiagnostics(registryPath);
+    assert.equal(records.length, 2);
+    assert.equal(corruptedLineCount, 2);
+  });
+});
+
+test("readRegistryDiagnostics: missing file -> empty records, zero corrupted (cold start is not corruption)", () => {
+  withTempDir((dir) => {
+    const { records, corruptedLineCount } = readRegistryDiagnostics(
+      join(dir, "nope.jsonl"),
+    );
+    assert.deepEqual(records, []);
+    assert.equal(corruptedLineCount, 0);
   });
 });
 

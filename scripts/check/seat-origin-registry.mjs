@@ -62,22 +62,35 @@ export function appendLaunchRecord(registryPath, record) {
 // 있다(재시작·재배달). 조회는 "이 pane key가 등록부에 한 번이라도
 // 등장했는가"만 본다(존재 확인이지 최신값 병합이 아니다 -- 고아 판별에
 // 필요한 것은 그것뿐이므로 범위를 늘리지 않는다).
-export function readRegistry(registryPath) {
-  if (!existsSync(registryPath)) return [];
+//
+// HYK-464 추기 수리(P2-1: 등록 실패의 조용한 통과를 막는다) -- 손상된
+// 줄(append 중 강제종료로 잘린 마지막 줄 등)은 여전히 건너뛴다(fail-closed로
+// 전체 조회를 중단시키지 않는다, 이 파일은 감사 로그이지 트랜잭션
+// 저장소가 아니다), 그러나 이제 "몇 줄을 건너뛰었는지"를 함께 돌려준다 --
+// 예전에는 그 개수가 어디에도 남지 않아 손상이 있어도 호출부가 알 길이
+// 없었다(조용한 통과). readRegistry는 하위호환을 위해 records 배열만
+// 돌려주는 얇은 래퍼로 남긴다.
+export function readRegistryDiagnostics(registryPath) {
+  if (!existsSync(registryPath)) {
+    return { records: [], corruptedLineCount: 0 };
+  }
   const raw = readFileSync(registryPath, "utf8");
   const records = [];
+  let corruptedLineCount = 0;
   for (const line of raw.split(/\r?\n/)) {
     const trimmed = line.trim();
     if (!trimmed) continue;
     try {
       records.push(JSON.parse(trimmed));
     } catch {
-      // 손상된 줄은 건너뛴다(append 중 강제종료로 잘린 마지막 줄 등) --
-      // fail-closed로 전체 조회를 중단시키지 않는다, 이 파일은 감사
-      // 로그이지 트랜잭션 저장소가 아니다.
+      corruptedLineCount += 1;
     }
   }
-  return records;
+  return { records, corruptedLineCount };
+}
+
+export function readRegistry(registryPath) {
+  return readRegistryDiagnostics(registryPath).records;
 }
 
 export function isPaneRegistered(registryPath, paneKey) {

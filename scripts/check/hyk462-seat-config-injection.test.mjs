@@ -476,28 +476,47 @@ test("★역할 훅 실효 (양성 대조): CODER writing an ordinary repo file 
 // same subprocess environment, both confirming ㄹ (coder-task.md §2-ㄹ:
 // HARNESS_ROLE. IS. propagated to the real hook subprocess -- the ORCH
 // fail-open concern there did not materialize in any of the three probes).
-// That measured value is what MEASURED_REAL_CLAUDE_PROJECT_DIR_FORM below
-// reproduces -- this is "그 형식" (coder-task.md §2-ㄷ), not a guess.
 //
-// Below we can't spawn a real interactive `claude` seat inside this test
-// file (no TTY available to a dispatched worker session, and even
-// print-mode nested sessions require network/API access unsuitable for a
-// fast, deterministic CI unit test) -- so the FAST regression re-drives
-// role-guard.mjs through the same POSIX-shell mechanism Claude Code's own
-// hook runner uses (confirmed live above), with the measured-real value
-// form, not a guessed one. The full live end-to-end probe (measurement #3
-// above) is documented with literal terminal output in coder.md 2R §1 as
-// the one-time manual verification coder-task.md §1b_reach_path asks for.
+// HYK-464 2R (coder-task.md §2): the literal worktree path above
+// ("hyk442-blocked-door-1") was hard-pinned to a specific machine's specific
+// worktree. Once that worktree was cleaned up (2026-09-16), this test's
+// `bash -c` line actually spawns role-guard.mjs from inside that now-missing
+// directory, which fails with "Cannot find module" (exit 1, not the
+// expected exit 2) -- a false red unrelated to any real regression. The
+// *shape* MEASURED_REAL_CLAUDE_PROJECT_DIR_FORM must keep is the format
+// (forward-slash, drive-lettered Windows path) Claude Code's hook runner
+// was measured to actually inject -- not any specific directory. Below,
+// that shape is reproduced against THIS worktree (the one running the
+// test, guaranteed to exist for the duration of the run) instead of a
+// separately-provisioned one, so the test never again depends on a sibling
+// worktree's lifecycle.
 // ---------------------------------------------------------------------------
 
-const MEASURED_REAL_CLAUDE_PROJECT_DIR_FORM =
-  "C:/Users/Administrator/orca/workspaces/HARNESSENGINEERING/hyk442-blocked-door-1";
+const MEASURED_REAL_CLAUDE_PROJECT_DIR_FORM = fileURLToPath(
+  new URL("../../", import.meta.url),
+)
+  .replace(/[\\/]$/, "")
+  .replace(/\\/g, "/");
+
+// HYK-464 2R (coder-task.md §2-1-2): `where` (Windows) has no Linux
+// equivalent, so a `where`-only probe always fails on CI's Linux runners and
+// silently t.skip()s these tests there forever -- CI has never actually run
+// this file's live bash probes. `which` is the POSIX/Linux equivalent; try
+// `where` first (this repo's primary dev platform is Windows, where `which`
+// is not guaranteed to exist) and fall back to `which` so the same probe
+// resolves bash on both platforms instead of only detecting one.
+function probeBash(command) {
+  return spawnSync(command, ["bash"], { encoding: "utf8" });
+}
 
 function resolveBashPath(t) {
-  const bashProbe = spawnSync("where", ["bash"], { encoding: "utf8" });
+  let bashProbe = probeBash("where");
+  if (bashProbe.status !== 0) {
+    bashProbe = probeBash("which");
+  }
   if (bashProbe.status !== 0) {
     t.skip(
-      "SKIP_REASON: no `bash` executable found on PATH -- Claude Code's own hook runner resolves $VAR-style commands through a POSIX shell, which this test emulates; layer-1 string checks above already cover the command's literal contents on any platform",
+      "SKIP_REASON: no `bash` executable found on PATH via `where` or `which` -- Claude Code's own hook runner resolves $VAR-style commands through a POSIX shell, which this test emulates; layer-1 string checks above already cover the command's literal contents on any platform",
     );
     return null;
   }
