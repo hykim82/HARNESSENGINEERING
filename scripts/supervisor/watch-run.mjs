@@ -105,17 +105,19 @@ import { countActive, isWellFormedLedger } from "./admission-ledger-core.mjs";
 // 쓰인다 -- orca 문자열 리터럴 spawn은 이 adapter 안에서만 일어난다(G9).
 import { createOrcaExecFn } from "../relay/adapters/orca-adapter.mjs";
 // HYK-464-followup-1 축C (coder-task.md §1 축C) -- 자원 잔재 «보고» 축이
-// 재사용하는 기존 함수. 재구현하지 않는다(§재사용):
-//   - collectGitWorktrees/collectDroppedTaskFileEvidence -- seatLiveness/
-//     seatIdle/dispatchStart 세 축이 이미 "이 워크트리가 활성 배달의
-//     증거를 갖고 있는가"를 판별하는 데 쓰는 바로 그 신호. 순환 의존
-//     없음(orch-stall-detect.mjs는 watch-run.mjs를 import하지 않는다).
-//   - detectOrphans -- 좌석 "배정 0" 후보를 이미 판별하는 도구(HYK-464
-//     이전 라운드 산출물). 판정 로직을 다시 쓰지 않고 그대로 부른다.
-import {
-  collectGitWorktrees,
-  collectDroppedTaskFileEvidence,
-} from "./orch-stall-detect.mjs";
+// 재사용하는 기존 함수. detectOrphans는 재구현하지 않는다(§재사용) --
+// 좌석 "배정 0" 후보를 이미 판별하는 도구(HYK-464 이전 라운드 산출물).
+// ⚠️collectGitWorktrees/collectDroppedTaskFileEvidence(orch-stall-
+// detect.mjs)는 «재사용하지 않는다» -- 처음엔 그럴 계획이었으나 실
+// 러너(1R run1, coder.md §시험)가 orch-stall-detect.test.mjs의 기존
+// 경계 시험 2건("static: no PRODUCTION code imports orch-stall-
+// detect.mjs yet" 등)을 RED로 되돌리는 걸 실측했다: 이 저장소는 이미
+// "watch-run.mjs는 orch-stall-detect.mjs를 자식 프로세스로만 부르고
+// 절대 import하지 않는다"는 아키텍처 경계를 세워 뒀다(이 파일 상단
+// "왜 새로 만들었나" 주석과 대칭 -- runDetector가 정본 결합 지점).
+// 그래서 아래 두 함수(워크트리 열거·dropped_at 헤더 검사)는 작고
+// 자기완결적인 로직만 로컬로 다시 짠다(각 15줄 안팎) -- 그 경계를
+// 깨는 비용이 이 정도 중복보다 크다는 판단.
 import { detectOrphans } from "../check/seat-orphan-detect.mjs";
 
 export const MAX_LOG_LINES = 5000;
@@ -1907,14 +1909,15 @@ function blockedTerminationLogSegment(result) {
 // ⓐ 사유 파일 없는 워크트리. "사유 파일"의 정의(coder-task.md §1 축C:
 // "형식은 네가 정하고 근거를 적어라"): 이 저장소가 이미 "이 워크트리가
 // 배달 대상이었다"는 증거로 인정하는 유일한 기계 신호는
-// `.harness/*-task.md`의 `dropped_at:` 헤더다(collectDroppedTaskFileEvidence
-// 가 이미 그 헤더가 있는 파일만 golden으로 남긴다 -- seatLiveness/seatIdle/
-// dispatchStart 세 축이 "활성 배달"의 근거로 쓰는 바로 그 신호를 그대로
-// 재사용). 그 헤더가 있는 `*-task.md`가 하나도 없으면(그리고 `.harness`
-// 자체가 읽기 실패도 아니면) 이 워크트리가 왜 존재하는지를 이 저장소
-// 안에서 설명할 근거가 없다 -- NO_REASON_FILE로 보고한다. `.harness` 읽기
-// 자체가 실패하면(권한 등) 거짓 확신을 만들지 않고 UNDETERMINED로 보고
-// 한다(§요구 "없으면 «판별 불가»로 두고 거짓 확신 금지").
+// `.harness/*-task.md`의 `dropped_at:` 헤더다(seatLiveness/seatIdle/
+// dispatchStart 세 축이 orch-stall-detect.mjs 안에서 "활성 배달"의
+// 근거로 쓰는 바로 그 신호와 같은 판별 기준 -- 다만 이 파일은 그 함수를
+// import하지 않는다, 위 import 블록의 "왜 로컬로 다시 짜는가" 참고).
+// 그 헤더가 있는 `*-task.md`가 하나도 없으면(그리고 `.harness` 자체가
+// 읽기 실패도 아니면) 이 워크트리가 왜 존재하는지를 이 저장소 안에서
+// 설명할 근거가 없다 -- NO_REASON_FILE로 보고한다. `.harness` 읽기 자체가
+// 실패하면(권한 등) 거짓 확신을 만들지 않고 UNDETERMINED로 보고한다
+// (§요구 "없으면 «판별 불가»로 두고 거짓 확신 금지").
 function classifyWorktreeReasonFile(worktreePath, collectEvidenceFn) {
   const evidence = collectEvidenceFn(worktreePath);
   if (evidence.failed) {
@@ -1937,6 +1940,68 @@ export function computeWorktreeReasonResidue({
     noReasonFile: entries.filter((e) => e.status === "NO_REASON_FILE"),
     undetermined: entries.filter((e) => e.status === "UNDETERMINED"),
   };
+}
+
+// HYK-464-followup-1 축C 로컬 재구현(위 import 블록 "왜 로컬로 다시
+// 짜는가" 참고) -- orch-stall-detect.mjs의 DROPPED_AT_RE와 동일 정규식
+// (`^dropped_at:\s*\d{4}-\d{2}-\d{2} \d{2}:\d{2} KST\s*$`)을 그대로
+// 옮겨 쓴다. 이 함수는 "그런 헤더가 하나라도 있는가"만 답한다(collect
+// EvidenceFn 계약: `{items, failed}` -- items는 있음/없음만 신호하는
+// 자리표시자, dropped_at 값 자체는 이 축이 쓰지 않는다).
+const RESIDUE_DROPPED_AT_RE =
+  /^dropped_at:\s*\d{4}-\d{2}-\d{2} \d{2}:\d{2} KST\s*$/im;
+
+function collectDroppedAtTaskFileEvidenceLocal(worktreePath) {
+  const harnessDir = path.join(worktreePath, ".harness");
+  let names;
+  try {
+    names = readdirSync(harnessDir).filter((n) => n.endsWith("-task.md"));
+  } catch (err) {
+    if (err && err.code === "ENOENT") return { items: [], failed: false };
+    return { items: [], failed: true };
+  }
+  const items = [];
+  for (const name of names) {
+    let text;
+    try {
+      text = readFileSync(path.join(harnessDir, name), "utf8");
+    } catch {
+      return { items: [], failed: true };
+    }
+    if (RESIDUE_DROPPED_AT_RE.test(text)) {
+      items.push({ path: `.harness/${name}` });
+    }
+  }
+  return { items, failed: false };
+}
+
+// orch-stall-detect.mjs의 parseWorktreeListPorcelain/collectGitWorktrees와
+// 동일한 파싱(`git worktree list --porcelain`의 `worktree <path>` 줄만
+// 뽑는다) -- 위 import 블록 주석과 같은 이유로 로컬 재구현.
+function parseGitWorktreeListPorcelainLocal(stdout) {
+  const paths = [];
+  for (const line of String(stdout).split(/\r?\n/)) {
+    const m = line.match(/^worktree\s+(.+)$/);
+    if (m) paths.push(m[1].trim());
+  }
+  return paths;
+}
+
+function collectGitWorktreesLocal(repoRoot) {
+  try {
+    const stdout = execFileSync("git", ["worktree", "list", "--porcelain"], {
+      cwd: repoRoot,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    return { ok: true, worktrees: parseGitWorktreeListPorcelainLocal(stdout) };
+  } catch (err) {
+    return {
+      ok: false,
+      worktrees: [],
+      detail: err && err.message ? err.message : String(err),
+    };
+  }
 }
 
 // ⓑ 배정 0인 유휴 좌석 -- seat-orphan-detect.mjs의 detectOrphans를
@@ -2012,9 +2077,10 @@ function defaultListNodeProcessRows(execFn) {
 // runResourceResidueStep에서 분리(§6 eslint complexity/max-lines-per-function
 // 상한 준수 -- 세 잔재 종류 각각을 독립 함수로 뽑는다, 로직·값은 그대로).
 function collectWorktreeResidueStep({ resourceResidue, repoRoot }) {
-  const worktreeListFn = resourceResidue.worktreeListFn ?? collectGitWorktrees;
+  const worktreeListFn =
+    resourceResidue.worktreeListFn ?? collectGitWorktreesLocal;
   const collectEvidenceFn =
-    resourceResidue.collectEvidenceFn ?? collectDroppedTaskFileEvidence;
+    resourceResidue.collectEvidenceFn ?? collectDroppedAtTaskFileEvidenceLocal;
   const worktreeList = worktreeListFn(repoRoot, {});
   return worktreeList.ok
     ? computeWorktreeReasonResidue({
