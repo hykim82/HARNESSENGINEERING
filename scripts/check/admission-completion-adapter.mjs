@@ -181,10 +181,42 @@ function hasStructuralPredecessor(lines, idx) {
 
 // reject-streak.mjs의 maskQuotedMarkerRegions와 **바이트 동일 로직**의
 // 로컬 복제 -- 이 함수 자체는 위 hasStructuralPredecessor의 바이트 동일성
-// 계약(드리프트 시험 대상) 밖이다: 드리프트 시험은 STRUCTURAL_LINE_RE
-// 정규식과 hasStructuralPredecessor 본문만 대조한다(coder-task.md §2-2).
-// import하지 않고 복제하는 이유는 위 resolveHeaderTaskId 주석과 동일
-// (고정 sibling 파일 목록 MODULE_NOT_FOUND 실측).
+// 계약(드리프트 시험 대상) 밖이다: 함수 본문 축 드리프트 시험은
+// STRUCTURAL_LINE_RE 정규식과 hasStructuralPredecessor 본문만 대조한다
+// (coder-task.md §2-2). import하지 않고 복제하는 이유는 위
+// resolveHeaderTaskId 주석과 동일(고정 sibling 파일 목록 MODULE_NOT_FOUND
+// 실측).
+// HYK-469 3R §1 (책임자 조건 1): 아래 인라인 코드 구간 정규식 +
+// inlineCodeRanges/isInsideAnyRange/findOutsideInlineCode 세 헬퍼와
+// maskHtmlComments 본문은 reject-streak.mjs가 2R에서 export한
+// RULE_FUNCTIONS 묶음과 «바이트 동일하게» 이식됐다(로직 창작 0) --
+// hyk468-3r-copy-drift.test.mjs가 그 묶음을 순회하며 이 사본을 기계로
+// 대조한다(§2, "순회 계약"으로 확장, 손으로 고른 목록이 아니다). 2R까지는
+// 이 로컬 복제가 옛(순수 indexOf) 형태에 멈춰 있어, 병합 후 admission만
+// 인라인 코드로 감싼 <!--/--> 후보를 진짜 주석으로 오판해 옛 판정을
+// fail-open으로 확정했다(469 3R coder-task.md §0 반려 사유 그대로).
+const INLINE_CODE_SPAN_RE = /`[^`\n]*`/g;
+
+function inlineCodeRanges(content) {
+  const ranges = [];
+  for (const m of content.matchAll(INLINE_CODE_SPAN_RE)) {
+    ranges.push([m.index, m.index + m[0].length]);
+  }
+  return ranges;
+}
+
+function isInsideAnyRange(ranges, pos) {
+  return ranges.some(([start, end]) => pos >= start && pos < end);
+}
+
+function findOutsideInlineCode(content, needle, from, ranges) {
+  let at = content.indexOf(needle, from);
+  while (at !== -1 && isInsideAnyRange(ranges, at)) {
+    at = content.indexOf(needle, at + 1);
+  }
+  return at;
+}
+
 const FENCE_OPEN_RE = /^ {0,3}(`{3,}|~{3,})/;
 
 function blankKeepingNewlines(text) {
@@ -212,12 +244,16 @@ function maskFencedBlocks(content) {
 }
 
 function maskHtmlComments(content) {
+  // ⚠️구간은 «원문»(마스킹 전) 기준으로 한 번만 계산한다 -- 아래 루프의
+  // 블랭크는 길이를 보존하므로(blankKeepingNewlines) 오프셋이 반복 내내
+  // 그대로 유효하다.
+  const codeRanges = inlineCodeRanges(content);
   let out = content;
   let from = 0;
   for (;;) {
-    const start = out.indexOf("<!--", from);
+    const start = findOutsideInlineCode(out, "<!--", from, codeRanges);
     if (start === -1) return out;
-    const closeAt = out.indexOf("-->", start + 4);
+    const closeAt = findOutsideInlineCode(out, "-->", start + 4, codeRanges);
     const end = closeAt === -1 ? out.length : closeAt + 3;
     out =
       out.slice(0, start) +
@@ -261,6 +297,12 @@ function resolveEchoedTaskId(resultContent) {
 // 위해, 축마다 복사본을 만들면 조용히 어긋난다)로 export하는 관례와 같다.
 // 원본 판정 로직은 한 글자도 바뀌지 않는다 -- `export` 키워드만 추가.
 export { resolveHeaderTaskId as __probeResolveHeaderTaskId };
+
+// HYK-469 3R §1: 위와 같은 이유(테스트 전용 export, 원본 로직 한 글자도
+// 안 바뀜) -- 네 독자(정본·relay·dispatch·admission)가 같은 입력에 같은
+// 판정을 내리는지 직접 비교하려면 이 로컬 복제 자체를 시험이 호출할 수
+// 있어야 한다.
+export { maskQuotedMarkerRegionsLocal as __probeMaskQuotedMarkerRegionsLocal };
 
 // resolveResultBlockedState(relay-handshake.mjs)의 최소 재현 -- "정확히
 // 하나의 well-formed '>>> BLOCKED:'/'>>> NEEDS_INPUT:' 줄만 인정"은 그대로

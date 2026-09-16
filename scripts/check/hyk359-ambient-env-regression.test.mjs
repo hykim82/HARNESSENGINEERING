@@ -175,6 +175,30 @@ function repoRoot() {
   }).trim();
 }
 
+// HYK-466 1R (저장소 쓰기 무결성, coder-task.md §2): 이 파일은 이미 CI-canonical
+// 묶음을 디스크 발견(collectTestFiles)으로 전량 재실행하는 유일한 자산이다 --
+// «떠도는 환경변수 아래서도 fail 0»(HYK-359 원래 목적)과 «그 재실행 동안
+// 추적 대상 경로가 바이트 동일한가»(HYK-466 새 목적)는 서로 다른 축이지만
+// 정확히 같은 스윕(같은 root · 같은 swept · 같은 spawn)을 관찰 대상으로
+// 삼으므로, 새 파일이나 새 디스크 발견 로직을 만드는 대신 아래 완료조건4
+// 시험 하나를 넓힌다(coder-task.md §2 "겹치면 새로 만들지 말고 그 시험을
+// 넓히는 쪽" 그대로 채택 -- 스윕을 두 번(축마다 한 번씩) 돌리는 대신 한
+// 번의 실행에 두 불변식을 함께 얹어 CI 시간·리소스도 배가되지 않는다).
+//
+// 방법: `runProductionSweep` 호출 직전/직후 대상 checkout(`root`)의 `git
+// status --porcelain=v1 --untracked-files=all` 스냅샷을 뜨고 완전히
+// 동일한지 비교한다. 시작 시점의 청결(clean)을 요구하지 않는다 -- 그
+// 기준선(beforeStatus, 정당한 미커밋 변경을 포함할 수 있음) 위에 스윕
+// 자체가 «추가로» 무엇을 바꿨는지만 보므로, 로컬에서 작업 중인 워크트리
+// (미커밋 변경이 있는 상태)에서 돌려도 오탐하지 않는다.
+function snapshotRepoStatus(root) {
+  return execFileSync(
+    "git",
+    ["status", "--porcelain=v1", "--untracked-files=all"],
+    { cwd: root, encoding: "utf8" },
+  );
+}
+
 // HYK-371 2R (불변식 B) / 3R (층 1·층 2 공용): the ONE place that builds
 // the nested sweep's `node --test` argv -- the real CI-canonical sweep
 // below AND both layer tests further down call this SAME function, so a
@@ -1081,7 +1105,7 @@ test("HYK-377 완료조건⑤ 열거ⓓ (swept 빈 배열 무협조 방어): swe
   }
 });
 
-test("HYK-359 완료조건4 (3R): CI-canonical 시험 디렉토리 전체(예외 목록 제외, 정확한 개수)가 떠도는 ADMISSION_LEDGER_PATH/ADMISSION_LOCK_PATH/DISPATCH_RECEIPT_PATH 아래에서도 fail 0 -- 보호 대상이 목록 없이 디스크에서 직접 발견되고, 예외 더하기·목록 잘라내기 어느 쪽도 조용히 통과하지 못한다", () => {
+test("HYK-359 완료조건4 (3R) + HYK-466 1R (저장소 쓰기 무결성): CI-canonical 시험 디렉토리 전체(예외 목록 제외, 정확한 개수)가 떠도는 ADMISSION_LEDGER_PATH/ADMISSION_LOCK_PATH/DISPATCH_RECEIPT_PATH 아래에서도 fail 0이고, 같은 스윕이 도는 동안 대상 checkout의 추적 대상 경로가 바이트 동일하게 유지된다 -- 보호 대상이 목록 없이 디스크에서 직접 발견되고, 예외 더하기·목록 잘라내기·저장소에 몰래 쓰기 어느 쪽도 조용히 통과하지 못한다", () => {
   const root = repoRoot();
   const allFiles = collectTestFiles(root); // relative paths, e.g. "scripts/check/foo.test.mjs"
 
@@ -1129,7 +1153,19 @@ test("HYK-359 완료조건4 (3R): CI-canonical 시험 디렉토리 전체(예외
   // the only place the failing subtest's full context survived, exactly
   // the mistake this round is fixing. Only a genuine pass reaches the
   // cleanup below.
+  const beforeStatus = snapshotRepoStatus(root);
   runProductionSweep({ root, swept, dir });
+  const afterStatus = snapshotRepoStatus(root);
+  // HYK-466 1R (저장소 쓰기 무결성, coder-task.md §2/§7): A=0("저장소에
+  // 쓰는 시험 0건")을 사람이 한 번 센 값이 아니라 매 실행마다 기계로
+  // 지킨다 -- 시작 시점 상태(beforeStatus)를 기준선으로 삼아 스윕
+  // 자체가 그 위에 무엇을 «추가로» 바꿨는지만 비교하므로, 미커밋
+  // 변경이 있는 워크트리에서 돌려도 오탐하지 않는다.
+  assert.equal(
+    afterStatus,
+    beforeStatus,
+    `CI-canonical 스윕이 도는 동안 저장소(${JSON.stringify(root)})의 추적 대상 경로가 바뀌었다 -- 스윕 전 상태:\n${beforeStatus || "(clean)"}\n스윕 후 상태:\n${afterStatus || "(clean)"}\n이 시험은 A=0(저장소에 쓰는 시험 0건)을 매 실행마다 기계로 지키기 위한 것이다(coder-task.md §2/§7) -- 새로 나타난 항목이 있다면 그 시험이 저장소에 쓴 것이다`,
+  );
   rmSync(dir, { recursive: true, force: true });
 });
 

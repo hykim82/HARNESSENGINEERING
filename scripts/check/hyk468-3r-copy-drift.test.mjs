@@ -35,8 +35,10 @@ import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { RULE_CONSTANTS } from "./header-task-id-shared.mjs";
+import { RULE_FUNCTIONS } from "./reject-streak.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
+const ADMISSION_MASK_COPY_PATH = join(HERE, "admission-completion-adapter.mjs");
 
 // 정본을 첫 자리에 -- 함수 본문 축(아래 GREEN 두 번째 시험)은 여전히
 // "네 벌(정본 포함) 소스 텍스트를 서로 대조"하는 3R 방식 그대로다(정본이
@@ -81,6 +83,18 @@ const READER_PATHS = [
 // <상수 이름>" 꼴 문자열을 추가하고 사유를 반드시 주석으로 남겨라).
 const MISSING_COPY_EXCEPTIONS = new Set([]);
 
+// HYK-469 3R §2 (책임자 조건 1) -- reject-streak.mjs가 export하는
+// RULE_FUNCTIONS(인라인 코드 마스킹 규칙) 묶음 전용 예외 목록. §2 요구
+// 그대로 "예외 0" -- 묶음에 든 이름 다섯(INLINE_CODE_SPAN_RE/
+// inlineCodeRanges/isInsideAnyRange/findOutsideInlineCode/
+// maskHtmlComments) 전부 admission-completion-adapter.mjs 로컬 복제에
+// 같은 이름으로 이식됐다(이 라운드 §1). ⚠️maskQuotedMarkerRegions 자신은
+// admission에서 의도적으로 다른 이름(maskQuotedMarkerRegionsLocal)이라
+// 애초에 이 묶음에 들어있지 않다(reject-streak.mjs의 RULE_FUNCTIONS export
+// 옆 주석 참고) -- "이름 차이"가 아니라 "이름이 애초에 다른 게 계약"이라
+// 예외로 다룰 대상조차 아니다.
+const MISSING_COPY_EXCEPTIONS_FUNCTIONS = new Set([]);
+
 // `const <name> = <값>;` 선언의 우변을 그대로 뽑는다 -- 파일마다 그 앞뒤
 // 주석/줄번호가 달라도, 그리고 상수 «이름»이 달라도 이 한 함수로 어느
 // 이름이든 뽑는다(3R의 extractStructuralLineRe를 이름 파라미터화한 것 --
@@ -113,6 +127,76 @@ function extractHasStructuralPredecessor(src) {
     }
   }
   return src.slice(start, i);
+}
+
+// HYK-469 3R §2 (책임자 조건 1, 468 4R과 같은 원리를 함수 묶음으로 확장):
+// 위 extractHasStructuralPredecessor를 이름 파라미터화한 것 -- 어느 함수
+// 이름이든 «function <이름>(...) { ... }» 선언을 중괄호 균형으로 정확히
+// 뽑는다. 정본의 RULE_FUNCTIONS 묶음에는 함수만이 아니라 정규식 상수
+// (INLINE_CODE_SPAN_RE)도 하나 섞여 있으므로, 이 함수는 먼저
+// extractNamedConst로 `const <이름> = ...;` 형태를 찾고 없으면 함수
+// 선언으로 넘어간다(extractNamedRuleFunctionCopy).
+function extractNamedFunction(src, name) {
+  const marker = `function ${name}(`;
+  const atStart = src.startsWith(marker);
+  const idx = atStart ? -1 : src.indexOf(`\n${marker}`);
+  if (!atStart && idx === -1) return null;
+  const start = atStart ? 0 : idx + 1;
+  let depth = 0;
+  let i = start;
+  let seenOpen = false;
+  for (; i < src.length; i++) {
+    if (src[i] === "{") {
+      depth++;
+      seenOpen = true;
+    } else if (src[i] === "}") {
+      depth--;
+      if (seenOpen && depth === 0) {
+        i++;
+        break;
+      }
+    }
+  }
+  return src.slice(start, i);
+}
+
+function extractNamedRuleFunctionCopy(src, name) {
+  const asConst = extractNamedConst(src, name);
+  if (asConst !== null) return asConst;
+  return extractNamedFunction(src, name);
+}
+
+// HYK-469 3R §2 규칙 «함수» 묶음 순회 축의 판정 지점 -- §2-1의
+// assertRuleConstantsAcrossReaders(여러 독자, 상수 전용)와 같은 원칙을
+// «사본 하나 + 함수/정규식 혼합»으로 넓힌 것. GREEN 시험과 아래 "순회
+// 증명(합성)" RED 시험이 «같은» 이 함수를 쓴다(판정 로직 자체가 시험
+// 대상이므로 GREEN·RED가 공유해야 증거가 된다). `ruleFunctions`는
+// { 이름: 함수|정규식 } -- 이름을 하드코딩하지 않고 `Object.entries`로
+// 순회하는 것이 "목록이 아니라 순회"의 실물이다.
+function assertRuleFunctionsAgainstCopy(ruleFunctions, copy, exceptions) {
+  const report = {};
+  for (const [name, canonicalValue] of Object.entries(ruleFunctions)) {
+    const canonicalText = canonicalValue.toString();
+    const exceptionKey = `${copy.name}::${name}`;
+    const copyText = extractNamedRuleFunctionCopy(copy.src, name);
+    if (copyText === null) {
+      assert.ok(
+        exceptions.has(exceptionKey),
+        `${copy.name}에 정본 규칙 함수 ${name}과 같은 이름이 없다 -- ` +
+          `없음은 통과가 아니라 실패다(예외가 정당하면 이 시험의 예외 ` +
+          `목록에 "${exceptionKey}"를 사유와 함께 명시적으로 올려라)`,
+      );
+      report[name] = "(exempted: no same-named declaration)";
+      continue;
+    }
+    assert.equal(
+      copyText,
+      canonicalText,
+      `${copy.name}의 ${name}이 정본과 다르다: "${copyText}" !== "${canonicalText}"`,
+    );
+    report[name] = copyText;
+  }
+  return report;
 }
 
 // GREEN·RED 양쪽이 «같은» 대조 함수를 쓴다 -- 이 함수 자체가 시험의
@@ -416,5 +500,93 @@ test("RED(변이, 필수): 사본 한 벌의 hasStructuralPredecessor 본문 한
     afterSource,
     dispatch.src,
     "원복 증명: 실 소스 파일은 바이트 동일하다(애초에 쓰지 않았다)",
+  );
+});
+
+// =============================================================================
+// HYK-469 3R §2 (책임자 조건 1, 비타협) -- "마스킹 헬퍼를 손으로 목록에
+// 추가"하는 대신, 468 4R과 «같은 원리»로 정본(reject-streak.mjs)이 규칙
+// 함수 묶음(RULE_FUNCTIONS)을 export하고 이 시험이 그 묶음을 «순회»한다.
+// 정본에 규칙 함수가 하나 더 생기면(가짜든 진짜든) 이 시험 파일을 코드
+// 수정 없이도 그 이름이 자동으로 admission-completion-adapter.mjs 로컬
+// 복제와 대조된다 -- 468 3R이 저지른 실패(2R이 고친 정본을 admission
+// 사본에 옮기는 것을 아무 시험도 강제하지 않아 병합 fail-open이 남)를
+// 이 순회 계약이 기계로 막는다.
+// =============================================================================
+
+test("GREEN(순회, 함수 묶음): 정본(reject-streak.mjs)이 export하는 RULE_FUNCTIONS의 모든 항목을 순회해 admission-completion-adapter.mjs 로컬 복제에서 같은 이름의 선언(함수/정규식)을 찾아 소스 본문이 바이트 동일함을 확인한다 -- 정본에 규칙 함수가 하나 더 생기면 이 시험은 코드 수정 없이 그것도 자동으로 대조한다", () => {
+  const admissionSrc = readFileSync(ADMISSION_MASK_COPY_PATH, "utf8");
+  const ruleNames = Object.keys(RULE_FUNCTIONS);
+  assert.ok(
+    ruleNames.length >= 3,
+    "정본이 export하는 규칙 함수가 예상보다 적다 -- 시험 앵커 자체가 깨졌다",
+  );
+  const report = assertRuleFunctionsAgainstCopy(
+    RULE_FUNCTIONS,
+    { name: "admission-completion-adapter.mjs", src: admissionSrc },
+    MISSING_COPY_EXCEPTIONS_FUNCTIONS,
+  );
+  console.log(
+    "HYK-469 3R §2 규칙 함수 순회 대조(정본 RULE_FUNCTIONS 전 항목):",
+    JSON.stringify(report, null, 2),
+  );
+});
+
+// -----------------------------------------------------------------------
+// 순회 증명(합성, 필수 -- §2 요구2가 요구하는 "목록이 아니라 순회"의
+// 유일한 증거를 영구 자동 시험으로 고정). 실 파일도, 정본의 진짜
+// RULE_FUNCTIONS도 손대지 않는다. 대신 GREEN 시험과 «같은» 판정 함수
+// (assertRuleFunctionsAgainstCopy)에 «이 시험만의» 합성 규칙 함수 묶음을
+// 넣는다: 실제 RULE_FUNCTIONS에 없는 새 이름(fakeRuleHelper) 하나로 두
+// 갈래를 본다 -- 사본에 그 이름이 «아예 없는» 경우(예외 0이므로 실패)와
+// 이름은 있지만 본문이 «다른» 경우(값 불일치로 실패). 판정 함수 자신은
+// 이 이름을 어디에도 하드코딩하지 않으므로(Object.entries로만 순회), 이
+// 시험이 RED가 되는 것은 "정본이 함수를 하나 더 만들면 자동으로 그것도
+// 대조된다"는 성질이 실제로 이 판정 로직에 있다는 증거다 -- 목록
+// (하드코딩된 이름 배열)이었다면 이 새 이름은 애초에 대조되지 않았을
+// 것이다.
+// -----------------------------------------------------------------------
+test("RED(순회 증명, 필수, 함수 묶음): 합성 규칙 함수 묶음에 실 RULE_FUNCTIONS에 없는 새 이름을 추가하면, 시험 코드를 전혀 고치지 않은 같은 순회 판정 함수가 (이름 없음/본문 다름 두 갈래 모두) RED가 된다", () => {
+  const FAKE_NAME = "fakeRuleHelper";
+  assert.ok(
+    !(FAKE_NAME in RULE_FUNCTIONS),
+    "합성 이름이 실제 RULE_FUNCTIONS와 우연히 겹친다 -- 시험 전제가 깨졌다",
+  );
+  function fakeRuleHelper() {
+    return "synthetic-drift-proof-only";
+  }
+  const syntheticRuleFunctions = { [FAKE_NAME]: fakeRuleHelper };
+
+  const syntheticCopyMissing = {
+    name: "synthetic-copy-missing.mjs (DIVERGED)",
+    src: "// no fakeRuleHelper here at all\n",
+  };
+  assert.throws(
+    () =>
+      assertRuleFunctionsAgainstCopy(
+        syntheticRuleFunctions,
+        syntheticCopyMissing,
+        new Set(),
+      ),
+    /synthetic-copy-missing\.mjs \(DIVERGED\)에 정본 규칙 함수 fakeRuleHelper과 같은 이름이 없다/,
+    "RED(이름 없음 갈래): 실 RULE_FUNCTIONS에 없던 새 이름을 하나 추가하고 사본에 그 이름이 아예 없으면, 시험 파일을 고치지 않은 같은 순회 판정이 던져야 한다",
+  );
+
+  const syntheticCopyDiverged = {
+    name: "synthetic-copy-diverged.mjs (DIVERGED)",
+    src:
+      "function fakeRuleHelper() {\n" +
+      '  return "synthetic-drift-proof-only-DIVERGED";\n' +
+      "}\n",
+  };
+  assert.throws(
+    () =>
+      assertRuleFunctionsAgainstCopy(
+        syntheticRuleFunctions,
+        syntheticCopyDiverged,
+        new Set(),
+      ),
+    /synthetic-copy-diverged\.mjs \(DIVERGED\)의 fakeRuleHelper이 정본과 다르다/,
+    "RED(본문 다름 갈래): 사본에 같은 이름이 있어도 본문이 한 글자라도 다르면 순회 판정이 던져야 한다",
   );
 });
