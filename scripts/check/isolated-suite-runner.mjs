@@ -32,7 +32,9 @@ import { cpus, tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   RUNNER_STATUS,
+  allocateRunSlot,
   parseTapSummaryCounts,
+  writeNumberedRunnerReceipt,
   writeRunnerReceipt,
 } from "./runner-receipt-writer.mjs";
 
@@ -129,6 +131,20 @@ const OVERRIDE_CONCURRENCY_REASON = "explicit --concurrency override";
 // a forced kill sets result.signal (e.g. "SIGKILL") and usually also
 // result.error (e.g. ETIMEDOUT) with result.status left null; a real
 // non-zero exit sets only result.status, leaving signal/error null/absent.
+//
+// HYK-477 §2-3 (검토자 지적, 2026-09-16): 마지막 분기가 원래
+// `result.status ?? 1`로 TESTS_FAILED를 내고 있었다 -- 그런데
+// `result.status === null`이면서 signal/error도 둘 다 falsy인 경우(위
+// 실측 주석의 "usually" -- 강제 종료가 signal/error 없이 status만 null로
+// 남는 드문 조합)는 node --test가 애초에 실제 완료 결과를 낸 적이
+// 없다는 뜻이다. 그걸 "실제로 어떤 코드로 실패했다"(TESTS_FAILED)로
+// 접으면 §2-2가 없애려는 바로 그 사실 왜곡(측정 불능 -> 시험 실패)이
+// 이 분류기 안에서 재발한다. status가 null/undefined인 경우만 따로
+// MEASUREMENT_UNAVAILABLE_OOM으로 분리하고, 진짜 숫자 status(0이 아닌
+// 실제 종료 코드)만 TESTS_FAILED로 남긴다 -- exitCode도 이제
+// `result.status`를 그대로 쓴다(그 시점에는 null일 수 없으므로 `?? 1`
+// 폴백이 더 이상 필요 없다, 의미 없는 폴백을 남겨두면 "왜 1인가"를
+// 다시 헷갈리게 한다).
 export function classifySpawnOutcome(result) {
   if (result.signal) {
     return { status: RUNNER_STATUS.MEASUREMENT_UNAVAILABLE_OOM, exitCode: 1 };
@@ -139,7 +155,10 @@ export function classifySpawnOutcome(result) {
   if (result.status === 0) {
     return { status: RUNNER_STATUS.OK, exitCode: 0 };
   }
-  return { status: RUNNER_STATUS.TESTS_FAILED, exitCode: result.status ?? 1 };
+  if (result.status == null) {
+    return { status: RUNNER_STATUS.MEASUREMENT_UNAVAILABLE_OOM, exitCode: 1 };
+  }
+  return { status: RUNNER_STATUS.TESTS_FAILED, exitCode: result.status };
 }
 
 // The one-line disclosure required by task §3-4: which commit was tested,
@@ -168,14 +187,27 @@ function repoRootOf(cwd, execFile) {
 // must never suppress -- the suite's own real exit code (same "never
 // throws past this point" posture as consumption-receipt-writer.mjs's
 // writeConsumptionReceipt).
+//
+// HYK-485 §2-1: also writes a run-scoped numbered copy (allocateRunSlot's
+// receiptPath, computed BEFORE spawn so its sibling logPath can ride node
+// --test's own argv -- see runIsolatedSuite/spawnSuiteInClone) alongside
+// the unconditionally-preserved "latest" write above. Both writes share the
+// SAME counts/finishedAtMs (computed once here) so the numbered copy is a
+// byte-for-byte-except-path snapshot of the same run, not two independently
+// timed observations of it. Guarded in its OWN try/catch, separate from the
+// latest-file write above: a numbered-copy failure must not affect (and
+// must not be masked by) the latest write's own success/failure, and
+// neither may ever affect the suite's real exit code.
 function emitRunnerReceipt({
   root,
   sha,
   runnerExit,
   runnerStatus,
   tapPath,
+  runSlot,
   readFile,
   writeReceipt,
+  writeNumberedReceipt = writeNumberedRunnerReceipt,
   nowMs,
   log,
 }) {
@@ -187,6 +219,7 @@ function emitRunnerReceipt({
       `[isolated-suite-runner] WARNING: could not read tap summary at ${tapPath} (${err.message}) -- receipt will carry null counts`,
     );
   }
+  const finishedAtMs = nowMs();
   try {
     const { path } = writeReceipt({
       harnessDir: join(root, ".harness"),
@@ -194,12 +227,28 @@ function emitRunnerReceipt({
       runnerStatus,
       counts,
       headCommit: sha,
-      finishedAtMs: nowMs(),
+      finishedAtMs,
     });
     log(`[isolated-suite-runner] runner receipt written -> ${path}`);
   } catch (err) {
     log(
       `[isolated-suite-runner] WARNING: failed to write runner receipt (${err.message}) -- consumption-side fail-closed gate (relay-handshake.mjs) will treat this as a missing receipt`,
+    );
+  }
+  if (!runSlot.receiptPath) return;
+  try {
+    const { path } = writeNumberedReceipt({
+      receiptPath: runSlot.receiptPath,
+      runnerExit,
+      runnerStatus,
+      counts,
+      headCommit: sha,
+      finishedAtMs,
+    });
+    log(`[isolated-suite-runner] per-run numbered receipt written -> ${path}`);
+  } catch (err) {
+    log(
+      `[isolated-suite-runner] WARNING: failed to write numbered receipt run${runSlot.runNumber} (${err.message}) -- HYK-485 §2-2's per-round comparison will see this run's evidence as missing, i.e. measurement-unavailable, not as a fabricated pass`,
     );
   }
 }
@@ -209,16 +258,34 @@ function emitRunnerReceipt({
 // spec reporter (HYK-411) -- `node --test` supports repeated
 // --test-reporter/--test-reporter-destination pairs, so both fire from one
 // process without disturbing the real-time inherited stdio a human watches.
-function buildNodeTestArgs(files, tapPath, concurrency) {
-  return [
+//
+// HYK-485 §2-1: a THIRD reporter pair (spec -> logPath, when logPath is
+// given) rides the same mechanism to produce the persistent "러너 stdout
+// 로그" (full-runner-<N>.log) -- same format as what the human sees live on
+// stdout, written directly by node --test itself to a durable file. This
+// was chosen deliberately over capturing/teeing the child's stdio in this
+// process: switching spawnSuiteInClone's stdio away from "inherit" (e.g. to
+// "pipe" + manual re-emit) would buffer output until the child exits,
+// losing the real-time view a human watches during a run that can take
+// minutes -- a regression this task's scope does not ask for and §5 does
+// not authorize. Adding a reporter destination changes nothing about
+// stdio/spawn semantics at all: node --test writes it as a plain side
+// effect of its own three-reporter fan-out, `stdio: "inherit"` below is
+// completely untouched.
+function buildNodeTestArgs(files, tapPath, concurrency, logPath) {
+  const args = [
     "--test",
     `--test-concurrency=${concurrency}`,
     "--test-reporter=spec",
     "--test-reporter-destination=stdout",
     "--test-reporter=tap",
     `--test-reporter-destination=${tapPath}`,
-    ...files,
   ];
+  if (logPath) {
+    args.push("--test-reporter=spec", `--test-reporter-destination=${logPath}`);
+  }
+  args.push(...files);
+  return args;
 }
 
 // Runs the suite inside the already-prepared clone and returns its
@@ -226,10 +293,17 @@ function buildNodeTestArgs(files, tapPath, concurrency) {
 // see classifySpawnOutcome). Isolated into its own function so
 // runIsolatedSuite's own branching stays low (max-lines-per-function/
 // complexity gate, coder-task.md quality bar).
-function spawnSuiteInClone({ spawn, cloneDir, files, tapPath, concurrency }) {
+function spawnSuiteInClone({
+  spawn,
+  cloneDir,
+  files,
+  tapPath,
+  concurrency,
+  logPath,
+}) {
   const result = spawn(
     process.execPath,
-    buildNodeTestArgs(files, tapPath, concurrency),
+    buildNodeTestArgs(files, tapPath, concurrency, logPath),
     {
       cwd: cloneDir,
       stdio: "inherit",
@@ -274,6 +348,43 @@ function resolveAndLogConcurrency({ concurrency, resolveConcurrencyFn, log }) {
   return resolvedConcurrency;
 }
 
+// No numbered artifacts this run (allocation failed, or nothing asked for
+// them) -- a real object with null fields rather than a bare `null` so
+// call sites read `runSlot.logPath`/`runSlot.receiptPath` directly instead
+// of needing optional-chaining at every use (keeps runIsolatedSuite's own
+// branch count down; each `?.` is itself a branch for the complexity gate).
+const NO_RUN_SLOT = Object.freeze({
+  runNumber: null,
+  receiptPath: null,
+  logPath: null,
+});
+
+// HYK-485 §2-1: allocates this run's numbered-artifact slot BEFORE spawn
+// (its logPath must ride node --test's own argv, see buildNodeTestArgs) --
+// isolated into its own function so a failure here degrades gracefully
+// instead of crashing the whole run before the real suite ever starts.
+// Never throws: allocation infra (mkdir/exclusive-create) is not the thing
+// this runner exists to prove green or red -- a failure here just means
+// this run won't have numbered artifacts (the "latest" runner-receipt.json
+// is written separately, unaffected either way).
+function resolveRunSlot({
+  harnessDir,
+  allocateRunSlotFn = allocateRunSlot,
+  log,
+}) {
+  try {
+    // a stub/test double is allowed to signal "no slot" with a bare
+    // `null`/`undefined` return -- normalize it to the real sentinel so
+    // every downstream reader can rely on `runSlot.logPath` existing.
+    return allocateRunSlotFn({ harnessDir }) ?? NO_RUN_SLOT;
+  } catch (err) {
+    log(
+      `[isolated-suite-runner] WARNING: failed to allocate a per-run artifact slot (${err.message}) -- this run will not produce numbered runner-receipt-run<N>.json/full-runner-<N>.log artifacts; the latest runner-receipt.json is unaffected`,
+    );
+    return NO_RUN_SLOT;
+  }
+}
+
 // Orchestrates one full run: clone committed HEAD -> run the suite in the
 // clone -> report -> always clean up (unless `keep`). Returns the child
 // process's exit code so the CLI entry point can propagate it verbatim.
@@ -288,6 +399,8 @@ export function runIsolatedSuite({
   mkdtemp = mkdtempSync,
   readFile = readFileSync,
   writeReceipt = writeRunnerReceipt,
+  allocateRunSlotFn,
+  writeNumberedReceipt,
   nowMs = Date.now,
   resolveConcurrencyFn,
 } = {}) {
@@ -315,6 +428,8 @@ export function runIsolatedSuite({
   // instrumentation into a false positive for those tests.
   const tapDir = mkdtemp(join(longFormTmpdir(), "hyk411-tap-"));
   const tapPath = join(tapDir, "runner-output.tap");
+  const harnessDir = join(root, ".harness");
+  const runSlot = resolveRunSlot({ harnessDir, allocateRunSlotFn, log });
   try {
     execFile("git", ["clone", "--quiet", root, cloneDir], { encoding: "utf8" });
     const files = collectFiles(cloneDir);
@@ -328,6 +443,7 @@ export function runIsolatedSuite({
       files,
       tapPath,
       concurrency: resolvedConcurrency,
+      logPath: runSlot.logPath,
     });
 
     emitRunnerReceipt({
@@ -336,8 +452,10 @@ export function runIsolatedSuite({
       runnerExit: outcome.exitCode,
       runnerStatus: outcome.status,
       tapPath,
+      runSlot,
       readFile,
       writeReceipt,
+      writeNumberedReceipt,
       nowMs,
       log,
     });

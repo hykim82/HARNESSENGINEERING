@@ -109,6 +109,11 @@ export function buildRunnerReceipt({
 // (runIsolatedSuite)는 이 쓰기가 실패해도 러너 자신의 exit code 전파를
 // 절대 막지 않는다(그 쪽은 try/catch로 감싼다 -- 영수증을 못 쓰는 것이
 // 시험 결과 자체를 감춰서는 안 된다).
+//
+// ⛔이 파일은 "최신본" 하나만 이 경로에 쓴다 -- 회차별(run-scoped) 사본은
+// 별개 함수(allocateRunSlot/writeNumberedRunnerReceipt, 아래)가 맡는다.
+// HYK-485 §2-1: 기존 이 함수의 시그니처/동작을 한 글자도 바꾸지 않는 것
+// 자체가 "기존 runner-receipt.json 독자 무영향" 요구의 증명이다.
 export function writeRunnerReceipt({
   harnessDir,
   runnerExit,
@@ -131,4 +136,82 @@ export function writeRunnerReceipt({
   const path = join(dir, RUNNER_RECEIPT_FILENAME);
   writeFileFn(path, JSON.stringify(receipt, null, 2) + "\n", "utf8");
   return { path, receipt };
+}
+
+// HYK-485 §1 실측(HYK-480 1R): 러너를 정직하게 2회 돌려도, 영수증 경로가
+// `.harness/runner-receipt.json` 하나뿐이라 2회차가 1회차를 같은 경로에
+// 덮어썼다 -- 배달 후 남은 기계 증거는 "2회차 영수증 하나"뿐이었고, 1회차는
+// 산문 주장으로만 존재했다. 이 두 export는 회차별(run-scoped) 사본
+// (`runner-receipt-run<N>.json` · `full-runner-<N>.log`)을 "기계로" 남겨
+// 그 병을 없앤다.
+export const RUNNER_RECEIPT_RUN_PREFIX = "runner-receipt-run";
+export const RUNNER_LOG_PREFIX = "full-runner-";
+const RUN_SLOT_MAX_ATTEMPTS = 10000;
+
+// §2-1 "회차 번호 <N>을 무엇으로 정할지" 근거: 기존 파일 개수를 세어
+// 정하는 방식은 "세기"와 "쓰기" 사이에 다른 프로세스가 끼어들 수 있는
+// TOCTOU 경쟁을 안고 있다(두 실행이 같은 카운트를 보고 같은 N을 고를 수
+// 있다) -- 그게 바로 이 이슈가 고치려는 병(경로 하나 공유)의 재판이다.
+// 대신 각 N의 영수증 자리를 배타적 생성("wx" == O_CREAT|O_EXCL, POSIX와
+// Windows(CreateFile CREATE_NEW) 양쪽에서 원자적)으로 "먼저 차지한 쪽만
+// 그 N을 갖는다"로 만든다 -- 경쟁에서 진 프로세스는 EEXIST를 받고 다음
+// N을 시도한다. 이 루프 자체가 "동시 실행에서 충돌하지 않는다"는 근거다
+// (coder-task.md §8 ⓐ 정직 한계: 이 파일이 사는 harnessDir 자체가 서로
+// 다른 워크트리마다 별개이므로, 여기서 막는 경쟁은 "같은 워크트리 안에서"
+// 겹치는 경우로 범위가 한정된다 -- 그 범위 안에서는 이 방식이 정말로
+// 막는다, 단순 카운팅은 그 범위 안에서도 못 막는다).
+export function allocateRunSlot({
+  harnessDir,
+  mkdirFn = mkdirSync,
+  writeFileFn = writeFileSync,
+  maxAttempts = RUN_SLOT_MAX_ATTEMPTS,
+}) {
+  mkdirFn(harnessDir, { recursive: true });
+  for (let n = 1; n <= maxAttempts; n++) {
+    const receiptPath = join(
+      harnessDir,
+      `${RUNNER_RECEIPT_RUN_PREFIX}${n}.json`,
+    );
+    try {
+      // 빈 자리표시자 -- 이 wx 생성의 성공 자체가 "이 프로세스가 N을
+      // 차지했다"는 증명이다. 실제 내용은 run이 끝난 뒤
+      // writeNumberedRunnerReceipt가 덮어쓴다.
+      writeFileFn(receiptPath, "", { flag: "wx" });
+      return {
+        runNumber: n,
+        receiptPath,
+        logPath: join(harnessDir, `${RUNNER_LOG_PREFIX}${n}.log`),
+      };
+    } catch (err) {
+      if (err.code !== "EEXIST") throw err;
+      // 경쟁에서 졌다 -- 다음 N으로.
+    }
+  }
+  throw new Error(
+    `allocateRunSlot: exhausted ${maxAttempts} attempts under ${harnessDir} -- refusing to loop forever`,
+  );
+}
+
+// allocateRunSlot이 예약한 자리표시자를 실제 영수증 내용으로 덮어쓴다.
+// writeRunnerReceipt와 같은 payload 모양(buildRunnerReceipt 재사용)이지만
+// 대상 경로가 고정 RUNNER_RECEIPT_FILENAME이 아니라 호출자가 이미
+// allocateRunSlot에서 받은 receiptPath다.
+export function writeNumberedRunnerReceipt({
+  receiptPath,
+  runnerExit,
+  runnerStatus,
+  counts,
+  headCommit,
+  finishedAtMs,
+  writeFileFn = writeFileSync,
+}) {
+  const receipt = buildRunnerReceipt({
+    runnerExit,
+    runnerStatus,
+    counts,
+    headCommit,
+    finishedAtMs,
+  });
+  writeFileFn(receiptPath, JSON.stringify(receipt, null, 2) + "\n", "utf8");
+  return { path: receiptPath, receipt };
 }

@@ -1745,12 +1745,29 @@ export function resolveHeadCommitBinding({
 // 읽는다.
 export const RUNNER_RECEIPT_FILENAME = "runner-receipt.json";
 
+// HYK-477 §2-4: MEASUREMENT_UNAVAILABLE은 RED/STALE/INVALID와 다른 사실을
+// 가리킨다 -- "러너가 정말로 실패했다"가 아니라 "강제 종료(OOM/signal)로
+// node --test가 애초에 완료 결과를 낸 적이 없다"는 뜻이다(HYK-467 규율:
+// 측정 실패 ≠ 결과 없음/시험 실패). 다섯 코드는 전부 서로 다르다(아래
+// (rr-codes-distinct) 시험이 그대로 이 사실을 지킨다).
 export const RUNNER_RECEIPT_REJECT_REASON = Object.freeze({
   MISSING: "RUNNER_RECEIPT_MISSING",
   RED: "RUNNER_RECEIPT_RED",
   STALE: "RUNNER_RECEIPT_STALE",
   INVALID: "RUNNER_RECEIPT_INVALID",
+  MEASUREMENT_UNAVAILABLE: "RUNNER_RECEIPT_MEASUREMENT_UNAVAILABLE",
 });
+
+// HYK-477 §2-4: runner-receipt-writer.mjs(생산자)의 RUNNER_STATUS.
+// MEASUREMENT_UNAVAILABLE_OOM과 같은 문자열 리터럴이다. 이 파일은 그
+// 모듈을 import하지 않는다(위 §2-3 헤더 "⛔zero-import 유지" 원칙 --
+// 정적 import 하나가 고정 sidecar 목록을 쓰는 다수의 mutation 시험 전부에
+// 파급된다) -- 그래서 여기서도 리터럴로 따로 든다. 두 자리가 갈라지면 이
+// 비교가 조용히 항상 false가 되어 이 축이 죽는다; 드리프트는 아래 이
+// 파일 자신의 mutation 시험이 이 리터럴 자체를 대상으로 잡는다(생산자
+// 쪽 시험이 잡을 수 있는 종류의 드리프트가 아니다 -- 두 문자열이 이
+// 파일과 그 파일에서 «각자» 정의된다는 것 자체가 이 드리프트의 근원).
+const MEASUREMENT_UNAVAILABLE_OOM_STATUS = "MEASUREMENT_UNAVAILABLE_OOM";
 
 // coder-task.md 1b_exec_line 그대로: `npm test; echo "exit=$?"`. 표지는
 // 콜론 뒤 인용이 표지로 오인된 과거 함정(HEAD_COMMIT_RE_G 주석 참조)을
@@ -1762,6 +1779,24 @@ export function resultClaimsRunnerResults(resultContent) {
     typeof resultContent === "string" &&
     RUNNER_EXIT_CLAIM_RE.test(resultContent)
   );
+}
+
+// HYK-485 §2-2: "「2회 연속 초록」을 요구하는 라운드"를 새 규약으로
+// 만들지 않고, 위 표준 관용구가 몇 번 나타나는지를 센다 -- coder-task.md
+// §5가 요구하는 "2회 연속 초록 · 분리 프로세스로"는 정확히 그 관용구를
+// 회차마다 반복해 남기는 방식이다(1b_exec_line 재확인). 0/1회는 이 축의
+// 영향 밖(과차단 금지) -- 0회는 resolveRunnerReceiptVerdict가 이미
+// skip하고, 1회는 그 축이 latest 영수증 하나로 이미 검증한다. 새 정규식이
+// 아니라 같은 RUNNER_EXIT_CLAIM_RE를 global로만 다시 쓴다.
+const RUNNER_EXIT_CLAIM_RE_GLOBAL = new RegExp(
+  RUNNER_EXIT_CLAIM_RE.source,
+  "gm",
+);
+
+export function countRunnerExitClaims(resultContent) {
+  if (typeof resultContent !== "string") return 0;
+  const matches = resultContent.match(RUNNER_EXIT_CLAIM_RE_GLOBAL);
+  return matches ? matches.length : 0;
 }
 
 function readRunnerReceiptFile(harnessDir) {
@@ -1824,6 +1859,21 @@ export function resolveRunnerReceiptVerdict({ resultContent, harnessDir }) {
       reason: `runner receipt gate (HYK-411): ${found.path} missing required fields (runner_exit: number, head_commit: string) -- fail-closed`,
     };
   }
+  // HYK-477 §2-4: runner_status는 schema v2부터 있는 필드다 -- v1 영수증
+  // (필드 자체가 undefined)은 이 비교가 항상 false가 되어 자연히 통과하고
+  // 아래 runner_exit 검사로 넘어간다(무회귀). 이 검사를 runner_exit 검사
+  // "앞"에 두는 순서가 핵심이다: classifySpawnOutcome은
+  // MEASUREMENT_UNAVAILABLE_OOM도 exitCode 1(0이 아님)로 남기므로, 순서가
+  // 바뀌면 이 값이 먼저 RED로 접혀 이 분기에 영영 도달하지 못한다 --
+  // §2-3이 분류기 안에서 고친 바로 그 왜곡이 소비 쪽에서 재발하는 것과
+  // 같은 형태다.
+  if (receipt.runner_status === MEASUREMENT_UNAVAILABLE_OOM_STATUS) {
+    return {
+      ok: false,
+      code: RUNNER_RECEIPT_REJECT_REASON.MEASUREMENT_UNAVAILABLE,
+      reason: `runner receipt gate (HYK-477): runner receipt at ${found.path} reports runner_status=${MEASUREMENT_UNAVAILABLE_OOM_STATUS} -- 측정 불능(measurement unavailable), NOT a test failure: the runner was forcibly killed (OOM/signal) before node --test produced a real result (HYK-467 규율) -- fail-closed all the same (소비는 여전히 거부한다), but reported with a distinct code/문장 so a reader cannot mistake this for "the tests failed"`,
+    };
+  }
   if (receipt.runner_exit !== 0) {
     return {
       ok: false,
@@ -1838,6 +1888,153 @@ export function resolveRunnerReceiptVerdict({ resultContent, harnessDir }) {
       reason: `runner receipt gate (HYK-411): runner receipt at ${found.path} head_commit '${receipt.head_commit}' does not match this worktree's actual HEAD '${actualHead.sha}' -- refusing to consume a stale/reused runner result (HYK-408 1R 실피해 재발 방지)`,
     };
   }
+  return { ok: true };
+}
+
+// HYK-485 §2-2: "2회 연속 초록"을 요구하는 라운드의 증거가 지금까지는
+// 구조적으로 1회분만 남았다(coder-task.md §1 실측, HYK-480 1R 실사고) --
+// 워커가 정직하게 러너를 두 번 돌리고 값도 정직하게 적었어도(finished_at
+// 14:16:27 -> 14:23:06, 둘 다 runner_exit 0), 배달 후 남은 기계 증거는
+// "2회차 영수증 하나"뿐이었다(1회차 영수증도, 러너 로그도, 사본도, reflog
+// 흔적도 0개). 앞 두 라운드가 회차별 사본을 남긴 것은 규율이 아니라
+// "워커 재량"이었다 -- 그래서 "2회 연속 초록" 계약의 증거가 "워커가
+// 똑똑했는지"에 달려 있었다.
+//
+// 이 축은 isolated-suite-runner.mjs가 이제 기계로 남기는
+// runner-receipt-run<N>.json(runner-receipt-writer.mjs의
+// allocateRunSlot/writeNumberedRunnerReceipt, HYK-485 §2-1)을 읽어 그
+// "워커 재량" 의존을 없앤다. resolveRunnerReceiptVerdict와 마찬가지로
+// zero-import(readFileSync + JSON.parse만 쓴다, 생산자 모듈을 전혀 모른다)
+// -- 위 §2-3 헤더의 근거와 동일.
+export const RUNNER_RECEIPT_RUN_PREFIX = "runner-receipt-run";
+const NUMBERED_RECEIPT_NAME_RE = /^runner-receipt-run(\d+)\.json$/;
+
+function listNumberedRunnerReceiptEntries(harnessDir) {
+  let names;
+  try {
+    names = readdirSync(harnessDir);
+  } catch {
+    return [];
+  }
+  return names
+    .map((name) => {
+      const m = NUMBERED_RECEIPT_NAME_RE.exec(name);
+      return m ? { name, n: Number(m[1]) } : null;
+    })
+    .filter(Boolean)
+    .sort((a, b) => a.n - b.n);
+}
+
+function readNumberedRunnerReceipt(harnessDir, name) {
+  const path = join(harnessDir, name);
+  let raw;
+  try {
+    raw = readFileSync(path, "utf8");
+  } catch (err) {
+    return { path, err: `unreadable (${err.message})` };
+  }
+  let receipt;
+  try {
+    receipt = JSON.parse(raw);
+  } catch (err) {
+    return { path, err: `not valid JSON (${err.message})` };
+  }
+  if (
+    typeof receipt !== "object" ||
+    receipt === null ||
+    typeof receipt.runner_exit !== "number" ||
+    typeof receipt.head_commit !== "string" ||
+    typeof receipt.finished_at !== "string"
+  ) {
+    return {
+      path,
+      err: "missing required fields (runner_exit: number, head_commit: string, finished_at: string)",
+    };
+  }
+  return { path, receipt };
+}
+
+// §2-2 요구 3가지를 한 쌍(가장 최근 두 회차)에 대해 대조한다 -- (같은
+// harnessDir에 이전 라운드의 낡은 runner-receipt-run*.json이 남아 있는
+// 드문 경우까지 대비해 "가장 최근" 두 개만 본다, 오래된 파일이 섞여 들어와
+// 이 축을 오염시키지 않도록). ⓐ finished_at 서로 다름 ⓑ head_commit 실제
+// HEAD와 동일(둘 다) ⓒ fail 0(=runner_exit 0, 둘 다) -- 하나라도 어긋나면
+// 그 사유로 거부, 1개뿐이면 §2-2가 명시한 "측정 불능" 문장(다른 이유들과
+// 다른 code, RED/TESTS_FAILED로 접지 않는다, HYK-467 규율).
+export function resolveConsecutiveRunnerReceiptsVerdict({
+  resultContent,
+  harnessDir,
+}) {
+  const claimCount = countRunnerExitClaims(resultContent);
+  if (claimCount < 2) {
+    return { ok: true, skipped: true };
+  }
+
+  const actualHead = readActualWorktreeHeadCommit(harnessDir);
+  if (!actualHead.ok) {
+    return {
+      ok: false,
+      code: RUNNER_RECEIPT_REJECT_REASON.INVALID,
+      reason: `consecutive runner receipt gate (HYK-485): cannot resolve this worktree's actual HEAD to compare against the numbered receipts -- ${actualHead.reason}`,
+    };
+  }
+
+  const entries = listNumberedRunnerReceiptEntries(harnessDir);
+  if (entries.length < 2) {
+    return {
+      ok: false,
+      code: RUNNER_RECEIPT_REJECT_REASON.MEASUREMENT_UNAVAILABLE,
+      reason: `consecutive runner receipt gate (HYK-485): result content claims ${claimCount} separate runner executions (standalone 'exit=<n>' line appears ${claimCount} times) but only ${entries.length} numbered receipt(s) (${RUNNER_RECEIPT_RUN_PREFIX}<N>.json) exist under ${harnessDir} -- 측정 불능(measurement unavailable), NOT a test failure: this does not mean the tests failed, it means the machine cannot verify a second run actually happened (HYK-467 규율, HYK-480 1R 실사고 재발 방지) -- "2회 초록"으로 조용히 통과시키지 않는다`,
+    };
+  }
+
+  const lastTwo = entries.slice(-2);
+  const read = lastTwo.map((e) =>
+    readNumberedRunnerReceipt(harnessDir, e.name),
+  );
+  for (const r of read) {
+    if (r.err) {
+      return {
+        ok: false,
+        code: RUNNER_RECEIPT_REJECT_REASON.INVALID,
+        reason: `consecutive runner receipt gate (HYK-485): ${r.path} ${r.err} -- fail-closed`,
+      };
+    }
+  }
+
+  for (const { path, receipt } of read) {
+    if (receipt.runner_status === MEASUREMENT_UNAVAILABLE_OOM_STATUS) {
+      return {
+        ok: false,
+        code: RUNNER_RECEIPT_REJECT_REASON.MEASUREMENT_UNAVAILABLE,
+        reason: `consecutive runner receipt gate (HYK-485): ${path} reports runner_status=${MEASUREMENT_UNAVAILABLE_OOM_STATUS} -- 측정 불능(measurement unavailable), NOT a test failure: one of the two claimed runs was forcibly killed before producing a real result`,
+      };
+    }
+    if (receipt.runner_exit !== 0) {
+      return {
+        ok: false,
+        code: RUNNER_RECEIPT_REJECT_REASON.RED,
+        reason: `consecutive runner receipt gate (HYK-485): ${path} reports runner_exit=${receipt.runner_exit} (non-zero) -- refusing to consume a claimed 2-consecutive-green result when one of the two runs was not green`,
+      };
+    }
+    if (receipt.head_commit.toLowerCase() !== actualHead.sha) {
+      return {
+        ok: false,
+        code: RUNNER_RECEIPT_REJECT_REASON.STALE,
+        reason: `consecutive runner receipt gate (HYK-485): ${path} head_commit '${receipt.head_commit}' does not match this worktree's actual HEAD '${actualHead.sha}'`,
+      };
+    }
+  }
+
+  const [a, b] = read;
+  if (a.receipt.finished_at === b.receipt.finished_at) {
+    return {
+      ok: false,
+      code: RUNNER_RECEIPT_REJECT_REASON.INVALID,
+      reason: `consecutive runner receipt gate (HYK-485): ${a.path} and ${b.path} share the same finished_at ('${a.receipt.finished_at}') -- two receipts claiming to be from two separate runs cannot share a timestamp`,
+    };
+  }
+
   return { ok: true };
 }
 
@@ -2927,6 +3124,17 @@ export function checkRelayHandshake({
     harnessDir,
   });
   if (!runnerReceiptVerdict.ok) return runnerReceiptVerdict;
+
+  // HYK-485 §2-2: runnerReceiptVerdict와 같은 자리 원칙(§4 무회귀) -- 같은
+  // judgedRegion/harnessDir을 넘긴다. 0/1회 주장 라운드는 skip으로 빠져
+  // 나가 이 축이 존재하기 전과 완전히 동일하게 움직인다(과차단 금지).
+  const consecutiveRunnerReceiptsVerdict =
+    resolveConsecutiveRunnerReceiptsVerdict({
+      resultContent: judgedRegion,
+      harnessDir,
+    });
+  if (!consecutiveRunnerReceiptsVerdict.ok)
+    return consecutiveRunnerReceiptsVerdict;
 
   // HYK-387: headCommitVerdict와 같은 자리 원칙(§4 무회귀) -- REVIEW 한정
   // 아님(오늘의 실사고는 CODER 라운드였다, coder-task.md §1 원문).

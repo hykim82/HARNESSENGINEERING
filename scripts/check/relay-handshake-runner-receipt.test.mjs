@@ -21,8 +21,11 @@ import { execFileSync } from "node:child_process";
 import {
   checkRelayHandshake,
   resolveRunnerReceiptVerdict,
+  resolveConsecutiveRunnerReceiptsVerdict,
+  countRunnerExitClaims,
   resultClaimsRunnerResults,
   RUNNER_RECEIPT_REJECT_REASON,
+  RUNNER_RECEIPT_RUN_PREFIX,
   parseKstTimestamp,
 } from "./relay-handshake.mjs";
 import { RELAY_HANDSHAKE_STATIC_SIBLINGS } from "./relay-handshake-fixture-siblings.mjs";
@@ -113,6 +116,22 @@ function writeReceipt(dir, receipt) {
     "utf8",
   );
 }
+
+// HYK-485 §2-2: 회차별(run-scoped) 사본 -- isolated-suite-runner.mjs가
+// allocateRunSlot/writeNumberedRunnerReceipt로 기계로 남기는 파일과 같은
+// 이름 규약.
+function writeNumberedReceipt(dir, n, receipt) {
+  writeFileSync(
+    join(dir, `${RUNNER_RECEIPT_RUN_PREFIX}${n}.json`),
+    JSON.stringify(receipt, null, 2),
+    "utf8",
+  );
+}
+
+// 두 번(이상) 러너를 돌렸다는 표준 관용구 주장 -- coder-task.md §5 "2회
+// 연속 초록 · 분리 프로세스로"가 남기는 그대로(회차마다 exit=<n> 줄 반복).
+const TWO_RUN_CLAIM_BODY =
+  'npm test; echo "exit=$?"\nexit=0\nnpm test; echo "exit=$?"\nexit=0';
 
 function baseReceipt(headCommit, overrides = {}) {
   return {
@@ -516,6 +535,399 @@ test("(rr-e3)★ 되돌림 변이: head_commit 대조를 제거하면 -- (rr-b) 
         result.ok,
         true,
         "RED: with the head_commit comparison removed, a stale receipt is wrongly consumed as success",
+      );
+    } finally {
+      rmSync(mutDir, { recursive: true, force: true });
+    }
+  });
+
+  const after = readFileSync(RELAY_HANDSHAKE_PATH, "utf8");
+  assert.equal(
+    after,
+    src,
+    "원본 relay-handshake.mjs는 한 바이트도 변경되지 않았다",
+  );
+});
+
+// ===========================================================================
+// HYK-485 §2-2: resolveConsecutiveRunnerReceiptsVerdict -- 회차별 영수증
+// 2개를 기계로 대조한다. 1개뿐이면 «측정 불능»(HYK-480 1R 실사고의 정확한
+// 형태: 정직하게 두 번 돌렸지만 기계 증거는 2회차 영수증 하나뿐이었다).
+// ===========================================================================
+
+test("(cr-0) countRunnerExitClaims: 0/1/2/3회 -- 같은 표준 관용구를 세기만 한다(새 정규식 아님)", () => {
+  assert.equal(countRunnerExitClaims("verdict: approved"), 0);
+  assert.equal(countRunnerExitClaims('npm test; echo "exit=$?"\nexit=0'), 1);
+  assert.equal(countRunnerExitClaims(TWO_RUN_CLAIM_BODY), 2);
+  assert.equal(
+    countRunnerExitClaims(
+      `${TWO_RUN_CLAIM_BODY}\nnpm test; echo "exit=$?"\nexit=1`,
+    ),
+    3,
+  );
+});
+
+test("(cr-skip) resolveConsecutiveRunnerReceiptsVerdict 직접 확인: 0/1회 주장은 이 축의 영향 밖(과차단 금지) -- 즉시 {ok:true, skipped:true}", () => {
+  assert.deepEqual(
+    resolveConsecutiveRunnerReceiptsVerdict({
+      resultContent: "verdict: approved",
+      harnessDir: "/does/not/matter",
+    }),
+    { ok: true, skipped: true },
+  );
+  assert.deepEqual(
+    resolveConsecutiveRunnerReceiptsVerdict({
+      resultContent: 'npm test; echo "exit=$?"\nexit=0',
+      harnessDir: "/does/not/matter",
+    }),
+    { ok: true, skipped: true },
+  );
+});
+
+test("(cr-1)★ 2회 주장 + 회차별 영수증 0개 -> 소비 거부(MEASUREMENT_UNAVAILABLE, NOT RED/TESTS_FAILED)", () => {
+  withFixtureDir("hyk485-cr1-", (dir) => {
+    ensureGitHeadCommit(dir);
+    const r = resolveConsecutiveRunnerReceiptsVerdict({
+      resultContent: TWO_RUN_CLAIM_BODY,
+      harnessDir: dir,
+    });
+    assert.equal(r.ok, false);
+    assert.equal(r.code, RUNNER_RECEIPT_REJECT_REASON.MEASUREMENT_UNAVAILABLE);
+    assert.match(r.reason, /측정 불능/);
+  });
+});
+
+test("(cr-2)★ HYK-480 1R 실사고의 정확한 형태 재현: 2회 주장 + 회차별 영수증 1개뿐(2회차만 남고 1회차가 덮어써진 모양) -> 소비 거부(MEASUREMENT_UNAVAILABLE)", () => {
+  withFixtureDir("hyk485-cr2-", (dir) => {
+    const sha = ensureGitHeadCommit(dir);
+    writeNumberedReceipt(
+      dir,
+      2,
+      baseReceipt(sha, { finished_at: "2026-09-01 06:09:00 KST" }),
+    );
+    const r = resolveConsecutiveRunnerReceiptsVerdict({
+      resultContent: TWO_RUN_CLAIM_BODY,
+      harnessDir: dir,
+    });
+    assert.equal(r.ok, false);
+    assert.equal(r.code, RUNNER_RECEIPT_REJECT_REASON.MEASUREMENT_UNAVAILABLE);
+    assert.match(r.reason, /only 1 numbered receipt/);
+  });
+});
+
+test("(cr-3) 2회 주장 + 회차별 영수증 2개, 그중 하나 runner_exit != 0 -> 소비 거부(RED)", () => {
+  withFixtureDir("hyk485-cr3-", (dir) => {
+    const sha = ensureGitHeadCommit(dir);
+    writeNumberedReceipt(
+      dir,
+      1,
+      baseReceipt(sha, { finished_at: "2026-09-01 06:08:00 KST" }),
+    );
+    writeNumberedReceipt(
+      dir,
+      2,
+      baseReceipt(sha, {
+        runner_exit: 1,
+        fail: 1,
+        finished_at: "2026-09-01 06:09:00 KST",
+      }),
+    );
+    const r = resolveConsecutiveRunnerReceiptsVerdict({
+      resultContent: TWO_RUN_CLAIM_BODY,
+      harnessDir: dir,
+    });
+    assert.equal(r.ok, false);
+    assert.equal(r.code, RUNNER_RECEIPT_REJECT_REASON.RED);
+  });
+});
+
+test("(cr-4) 2회 주장 + 회차별 영수증 2개, 그중 하나 head_commit 낡음 -> 소비 거부(STALE)", () => {
+  withFixtureDir("hyk485-cr4-", (dir) => {
+    const oldSha = ensureGitHeadCommit(dir);
+    execFileSync("git", ["commit", "-q", "--allow-empty", "-m", "moved on"], {
+      cwd: dir,
+    });
+    const sha = execFileSync("git", ["rev-parse", "HEAD"], {
+      cwd: dir,
+      encoding: "utf8",
+    }).trim();
+    writeNumberedReceipt(
+      dir,
+      1,
+      baseReceipt(oldSha, { finished_at: "2026-09-01 06:08:00 KST" }),
+    );
+    writeNumberedReceipt(
+      dir,
+      2,
+      baseReceipt(sha, { finished_at: "2026-09-01 06:09:00 KST" }),
+    );
+    const r = resolveConsecutiveRunnerReceiptsVerdict({
+      resultContent: TWO_RUN_CLAIM_BODY,
+      harnessDir: dir,
+    });
+    assert.equal(r.ok, false);
+    assert.equal(r.code, RUNNER_RECEIPT_REJECT_REASON.STALE);
+  });
+});
+
+test("(cr-5) 2회 주장 + 회차별 영수증 2개, finished_at 서로 같음(같은 실행을 두 번 셈한 모양) -> 소비 거부(INVALID)", () => {
+  withFixtureDir("hyk485-cr5-", (dir) => {
+    const sha = ensureGitHeadCommit(dir);
+    const same = "2026-09-01 06:09:00 KST";
+    writeNumberedReceipt(dir, 1, baseReceipt(sha, { finished_at: same }));
+    writeNumberedReceipt(dir, 2, baseReceipt(sha, { finished_at: same }));
+    const r = resolveConsecutiveRunnerReceiptsVerdict({
+      resultContent: TWO_RUN_CLAIM_BODY,
+      harnessDir: dir,
+    });
+    assert.equal(r.ok, false);
+    assert.equal(r.code, RUNNER_RECEIPT_REJECT_REASON.INVALID);
+    assert.match(r.reason, /same finished_at/);
+  });
+});
+
+test("(cr-6) 2회 주장 + 회차별 영수증 2개, 그중 하나 runner_status=MEASUREMENT_UNAVAILABLE_OOM -> 소비 거부(MEASUREMENT_UNAVAILABLE, RED 아님)", () => {
+  withFixtureDir("hyk485-cr6-", (dir) => {
+    const sha = ensureGitHeadCommit(dir);
+    writeNumberedReceipt(
+      dir,
+      1,
+      baseReceipt(sha, { finished_at: "2026-09-01 06:08:00 KST" }),
+    );
+    writeNumberedReceipt(
+      dir,
+      2,
+      baseReceipt(sha, {
+        runner_exit: 1,
+        runner_status: "MEASUREMENT_UNAVAILABLE_OOM",
+        finished_at: "2026-09-01 06:09:00 KST",
+      }),
+    );
+    const r = resolveConsecutiveRunnerReceiptsVerdict({
+      resultContent: TWO_RUN_CLAIM_BODY,
+      harnessDir: dir,
+    });
+    assert.equal(r.ok, false);
+    assert.equal(r.code, RUNNER_RECEIPT_REJECT_REASON.MEASUREMENT_UNAVAILABLE);
+  });
+});
+
+test("(cr-ok)★ 정상 경로: 2회 주장 + 회차별 영수증 2개 -- finished_at 서로 다름 · head_commit 동일 · 둘 다 fail 0 -> 정상 소비 성공", () => {
+  withFixtureDir("hyk485-cr-ok-", (dir) => {
+    const sha = ensureGitHeadCommit(dir);
+    writeNumberedReceipt(
+      dir,
+      1,
+      baseReceipt(sha, { finished_at: "2026-09-01 06:08:00 KST" }),
+    );
+    writeNumberedReceipt(
+      dir,
+      2,
+      baseReceipt(sha, { finished_at: "2026-09-01 06:09:00 KST" }),
+    );
+    const r = resolveConsecutiveRunnerReceiptsVerdict({
+      resultContent: TWO_RUN_CLAIM_BODY,
+      harnessDir: dir,
+    });
+    assert.equal(r.ok, true, `expected clean pass: ${r.reason}`);
+  });
+});
+
+test("(cr-pipeline)★ HYK-480 1R 실사고 재발 방지, checkRelayHandshake 전체 파이프라인: 2회 러너를 주장하는 라운드에서 회차별 영수증이 1개(2회차)뿐이면 -- «2회 초록»으로 조용히 통과하지 않고 MEASUREMENT_UNAVAILABLE로 거부된다", () => {
+  withFixtureDir("hyk485-cr-pipeline-", (dir) => {
+    const sha = ensureGitHeadCommit(dir);
+    writeCoderRound(dir, { resultBody: TWO_RUN_CLAIM_BODY });
+    writeReceipt(dir, baseReceipt(sha)); // "latest" -- 2회차 값 그대로 남는다.
+    writeNumberedReceipt(dir, 2, baseReceipt(sha)); // 1회차 사본은 없다(실사고 재현).
+    const result = checkRelayHandshake({
+      role: "coder",
+      harnessDir: dir,
+      now: FIXED_NOW_MS,
+    });
+    assert.equal(result.ok, false);
+    assert.equal(
+      result.code,
+      RUNNER_RECEIPT_REJECT_REASON.MEASUREMENT_UNAVAILABLE,
+    );
+  });
+});
+
+test("(cr-pipeline-ok) checkRelayHandshake 전체 파이프라인: 2회 러너를 주장하고 회차별 영수증 2개가 모두 갖춰지면 정상 소비된다", () => {
+  withFixtureDir("hyk485-cr-pipeline-ok-", (dir) => {
+    const sha = ensureGitHeadCommit(dir);
+    writeCoderRound(dir, { resultBody: TWO_RUN_CLAIM_BODY });
+    writeReceipt(dir, baseReceipt(sha));
+    writeNumberedReceipt(
+      dir,
+      1,
+      baseReceipt(sha, { finished_at: "2026-09-01 06:08:00 KST" }),
+    );
+    writeNumberedReceipt(
+      dir,
+      2,
+      baseReceipt(sha, { finished_at: "2026-09-01 06:09:00 KST" }),
+    );
+    const result = checkRelayHandshake({
+      role: "coder",
+      harnessDir: dir,
+      now: FIXED_NOW_MS,
+    });
+    assert.equal(result.ok, true, `expected clean pass: ${result.reason}`);
+  });
+});
+
+test("(cr-e1)★ 되돌림 변이: consecutiveRunnerReceiptsVerdict 결선 자체를 제거하면 -- (cr-pipeline)의 HYK-480 재현 표본이 다시 통과한다(RED, load-bearing 증명)", async () => {
+  const src = readFileSync(RELAY_HANDSHAKE_PATH, "utf8");
+  const target =
+    "\n  // HYK-485 §2-2: runnerReceiptVerdict와 같은 자리 원칙(§4 무회귀) -- 같은\n  // judgedRegion/harnessDir을 넘긴다. 0/1회 주장 라운드는 skip으로 빠져\n  // 나가 이 축이 존재하기 전과 완전히 동일하게 움직인다(과차단 금지).\n  const consecutiveRunnerReceiptsVerdict =\n    resolveConsecutiveRunnerReceiptsVerdict({\n      resultContent: judgedRegion,\n      harnessDir,\n    });\n  if (!consecutiveRunnerReceiptsVerdict.ok)\n    return consecutiveRunnerReceiptsVerdict;\n";
+  assertExactlyOneMatch(src, target, "consecutive runner receipt wiring block");
+  const mutated = src.replace(target, "");
+
+  await withFixtureDirAsync("hyk485-mut-cr-e1-", async (dir) => {
+    const sha = ensureGitHeadCommit(dir);
+    writeCoderRound(dir, { resultBody: TWO_RUN_CLAIM_BODY });
+    writeReceipt(dir, baseReceipt(sha));
+    writeNumberedReceipt(dir, 2, baseReceipt(sha)); // 1회차 사본 없음.
+    const { mod, mutDir } = await importMutatedRelayHandshake(mutated, "cr-e1");
+    try {
+      const result = mod.checkRelayHandshake({
+        role: "coder",
+        harnessDir: dir,
+        now: FIXED_NOW_MS,
+      });
+      assert.equal(
+        result.ok,
+        true,
+        "RED: with the wiring removed, a 2-run claim backed by only 1 numbered receipt is wrongly consumed as success",
+      );
+    } finally {
+      rmSync(mutDir, { recursive: true, force: true });
+    }
+  });
+
+  const after = readFileSync(RELAY_HANDSHAKE_PATH, "utf8");
+  assert.equal(
+    after,
+    src,
+    "원본 relay-handshake.mjs는 한 바이트도 변경되지 않았다",
+  );
+});
+
+// ===========================================================================
+// HYK-477 §2-4: runner_status 소비자 -- MEASUREMENT_UNAVAILABLE_OOM은
+// runner_exit도 0이 아니므로(classifySpawnOutcome, exitCode:1), 이 검사가
+// 없으면 RED(「시험 실패」)로 조용히 접힌다. 이 축은 그 접힘을 막는다.
+// ===========================================================================
+
+test("(rs-1)★ resolveRunnerReceiptVerdict 직접 확인: runner_status=MEASUREMENT_UNAVAILABLE_OOM인 영수증 -> 소비 거부(MEASUREMENT_UNAVAILABLE, RED 아님)", () => {
+  withFixtureDir("hyk477-rs1-", (dir) => {
+    const sha = ensureGitHeadCommit(dir);
+    writeReceipt(
+      dir,
+      baseReceipt(sha, {
+        schema_version: 2,
+        runner_exit: 1,
+        runner_status: "MEASUREMENT_UNAVAILABLE_OOM",
+        fail: null,
+      }),
+    );
+    const r = resolveRunnerReceiptVerdict({
+      resultContent: 'npm test; echo "exit=$?"\nexit=1',
+      harnessDir: dir,
+    });
+    assert.equal(r.ok, false);
+    assert.equal(r.code, RUNNER_RECEIPT_REJECT_REASON.MEASUREMENT_UNAVAILABLE);
+    assert.notEqual(r.code, RUNNER_RECEIPT_REJECT_REASON.RED);
+    assert.match(r.reason, /측정 불능/);
+  });
+});
+
+test("(rs-2) schema v1 영수증(runner_status 필드 자체가 없음)은 이 새 축의 영향을 받지 않는다(무회귀) -- runner_exit != 0이면 그대로 RED", () => {
+  withFixtureDir("hyk477-rs2-", (dir) => {
+    const sha = ensureGitHeadCommit(dir);
+    writeReceipt(dir, baseReceipt(sha, { runner_exit: 1, fail: 1 })); // v1, no runner_status
+    const r = resolveRunnerReceiptVerdict({
+      resultContent: 'npm test; echo "exit=$?"\nexit=1',
+      harnessDir: dir,
+    });
+    assert.equal(r.ok, false);
+    assert.equal(r.code, RUNNER_RECEIPT_REJECT_REASON.RED);
+  });
+});
+
+test("(rs-pipeline)★ checkRelayHandshake 전체 파이프라인: runner_status=MEASUREMENT_UNAVAILABLE_OOM -> 거부 문장이 RED('시험 실패' 어휘)가 아니라 '측정 불능'이다", () => {
+  withFixtureDir("hyk477-rs-pipeline-", (dir) => {
+    const sha = ensureGitHeadCommit(dir);
+    writeCoderRound(dir, { resultBody: 'npm test; echo "exit=$?"\nexit=1' });
+    writeReceipt(
+      dir,
+      baseReceipt(sha, {
+        schema_version: 2,
+        runner_exit: 1,
+        runner_status: "MEASUREMENT_UNAVAILABLE_OOM",
+        fail: null,
+      }),
+    );
+    const result = checkRelayHandshake({
+      role: "coder",
+      harnessDir: dir,
+      now: FIXED_NOW_MS,
+    });
+    assert.equal(result.ok, false);
+    assert.equal(
+      result.code,
+      RUNNER_RECEIPT_REJECT_REASON.MEASUREMENT_UNAVAILABLE,
+    );
+    // RED's wording ("the runner itself observed a failed run") must NOT
+    // appear -- this is the concrete "다른 문장" §2-4 asks for, not just a
+    // different code.
+    assert.doesNotMatch(
+      result.reason,
+      /the runner itself observed a failed run/,
+    );
+    assert.match(result.reason, /측정 불능/);
+  });
+});
+
+test("(rs-e1)★ 되돌림 변이: runner_status 검사를 제거하면 -- (rs-1)의 측정 불능 표본이 RED로 (문장이) 접힌다(측정 불능 구별이 load-bearing임을 증명)", async () => {
+  const src = readFileSync(RELAY_HANDSHAKE_PATH, "utf8");
+  const target =
+    '  // HYK-477 §2-4: runner_status는 schema v2부터 있는 필드다 -- v1 영수증\n  // (필드 자체가 undefined)은 이 비교가 항상 false가 되어 자연히 통과하고\n  // 아래 runner_exit 검사로 넘어간다(무회귀). 이 검사를 runner_exit 검사\n  // "앞"에 두는 순서가 핵심이다: classifySpawnOutcome은\n  // MEASUREMENT_UNAVAILABLE_OOM도 exitCode 1(0이 아님)로 남기므로, 순서가\n  // 바뀌면 이 값이 먼저 RED로 접혀 이 분기에 영영 도달하지 못한다 --\n  // §2-3이 분류기 안에서 고친 바로 그 왜곡이 소비 쪽에서 재발하는 것과\n  // 같은 형태다.\n  if (receipt.runner_status === MEASUREMENT_UNAVAILABLE_OOM_STATUS) {\n    return {\n      ok: false,\n      code: RUNNER_RECEIPT_REJECT_REASON.MEASUREMENT_UNAVAILABLE,\n      reason: `runner receipt gate (HYK-477): runner receipt at ${found.path} reports runner_status=${MEASUREMENT_UNAVAILABLE_OOM_STATUS} -- 측정 불능(measurement unavailable), NOT a test failure: the runner was forcibly killed (OOM/signal) before node --test produced a real result (HYK-467 규율) -- fail-closed all the same (소비는 여전히 거부한다), but reported with a distinct code/문장 so a reader cannot mistake this for "the tests failed"`,\n    };\n  }\n';
+  assertExactlyOneMatch(
+    src,
+    target,
+    "runner_status MEASUREMENT_UNAVAILABLE check",
+  );
+  const mutated = src.replace(target, "");
+
+  await withFixtureDirAsync("hyk477-mut-rs-e1-", async (dir) => {
+    const sha = ensureGitHeadCommit(dir);
+    writeCoderRound(dir, { resultBody: 'npm test; echo "exit=$?"\nexit=1' });
+    writeReceipt(
+      dir,
+      baseReceipt(sha, {
+        schema_version: 2,
+        runner_exit: 1,
+        runner_status: "MEASUREMENT_UNAVAILABLE_OOM",
+        fail: null,
+      }),
+    );
+    const { mod, mutDir } = await importMutatedRelayHandshake(mutated, "rs-e1");
+    try {
+      const result = mod.checkRelayHandshake({
+        role: "coder",
+        harnessDir: dir,
+        now: FIXED_NOW_MS,
+      });
+      assert.equal(
+        result.ok,
+        false,
+        "still rejected either way (fail-closed 유지)",
+      );
+      assert.equal(
+        result.code,
+        RUNNER_RECEIPT_REJECT_REASON.RED,
+        "RED: with the runner_status check removed, an OOM receipt collapses into the generic RED code/문장 -- exactly the §2-4 problem this check exists to prevent",
       );
     } finally {
       rmSync(mutDir, { recursive: true, force: true });
