@@ -1,0 +1,260 @@
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+import {
+  classifySeatText,
+  classifySeat,
+  censusSeats,
+  formatCensus,
+  SEAT_KIND,
+  runSeatCensusCli,
+} from "./seat-census.mjs";
+
+const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
+const SCRIPT_PATH = join(REPO_ROOT, "scripts", "check", "seat-census.mjs");
+
+// 실측 표본(2026-09-16, 이 라운드 자신의 워크트리 관측, orca terminal
+// list --json 그대로): 빈 pwsh(D12 자동 생성분)의 preview는 프롬프트
+// 한 줄뿐이다.
+const REAL_EMPTY_SHELL_PREVIEW =
+  "PS C:\\Users\\Administrator\\orca\\workspaces\\HARNESSENGINEERING\\hyk485-477-runner-receipt-1>";
+
+// 실측: 방금 뜬 CODER 좌석의 preview 그대로(orca terminal list --json,
+// 2026-09-16) -- "[CODER seat]"는 orca-worker-seat.ps1이 찍는 문구이지
+// AGENT_BANNER_MARKERS의 "[CODER]"(codex 쪽 go 텍스트 마커, 대괄호 안이
+// "seat" 없이 역할명만)와 다른 문자열이라 매치하지 않는다. 진행 중인
+// 실제 에이전트인데도 이 스냅샷 하나만 보면 확정 마커가 없다 -- 그래서
+// 이 값은 "확실한 에이전트" 픽스처가 아니라 "미상(ambiguous)" 픽스처로
+// 쓴다(아래 대로).
+const REAL_MIDTURN_PREVIEW_NO_MARKER =
+  "sers\\Administrator\\...) match versioned hooks/. 좌석 기동 가능.\n" +
+  "[CODER seat] worktree=C:\\...  pane=...\n✢ Percolating…";
+
+// 확정 마커 픽스처(원 Looks-Like-Agent 마커 집합 그대로 재현) -- claude는
+// --dangerously-skip-permissions 기동 시 "bypass permissions" 문구를,
+// codex는 goText가 "[REVIEW]"를 화면에 남긴다(관제실 dispatch-worker.ps1
+// 583-588행 goText 조립 -- $Role을 [ ] 안에 역할명만 넣어 보낸다, "seat"
+// 접미어 없음 -- orca-worker-seat.ps1의 "[$Role seat]" 문구와는 다른 값).
+const CONFIRMED_CLAUDE_AGENT_PREVIEW =
+  "✻ Welcome to Claude Code!\n  bypass permissions on\n";
+const CONFIRMED_CODEX_AGENT_PREVIEW =
+  "너는 하네스 릴레이 [REVIEW] 워커다. D:\\...worker-dispatch-rule.md를 읽고...";
+
+// 실측: ORCH 좌석(오래 실행됨) -- 배너 마커가 스크롤백 밖으로 밀려나
+// 이번 관측의 preview 꼬리에는 하나도 안 남아 있었다(이 라운드 §정직
+// 한계 근거 원문 그대로 사용).
+const REAL_LONG_RUNNING_AGENT_PREVIEW =
+  "❯ 사소한 문구 확인 1건:         지시에    «점검표(481    병합   전이라    손  기입   유지)»라    하셨는데     점검표    기계   주입은    480(미병합)이고";
+
+test("classifySeatText: bare single-line prompt -> empty_shell (D12 auto-created blank tab)", () => {
+  assert.equal(
+    classifySeatText(REAL_EMPTY_SHELL_PREVIEW),
+    SEAT_KIND.EMPTY_SHELL,
+  );
+});
+
+test("classifySeatText: empty string -> empty_shell (never produced output)", () => {
+  assert.equal(classifySeatText(""), SEAT_KIND.EMPTY_SHELL);
+  assert.equal(classifySeatText("   "), SEAT_KIND.EMPTY_SHELL);
+});
+
+test("classifySeatText: fresh agent seat with recognizable banner -> agent", () => {
+  assert.equal(
+    classifySeatText(CONFIRMED_CLAUDE_AGENT_PREVIEW),
+    SEAT_KIND.AGENT,
+  );
+  assert.equal(
+    classifySeatText(CONFIRMED_CODEX_AGENT_PREVIEW),
+    SEAT_KIND.AGENT,
+  );
+});
+
+test("classifySeatText: explicit engine banner substrings -> agent", () => {
+  assert.equal(
+    classifySeatText("model: gpt-5.6-terra\nWeekly limit: 97% left"),
+    SEAT_KIND.AGENT,
+  );
+  assert.equal(
+    classifySeatText("Opus 5 · claude-opus-5\nbypass permissions on"),
+    SEAT_KIND.AGENT,
+  );
+});
+
+test("classifySeatText: long-running agent whose banner scrolled out of view -> ambiguous, NOT empty_shell", () => {
+  // 이 케이스가 이 모듈을 새로 만든 이유다: 낡은 Looks-Like-Agent를 그대로
+  // 재사용해 "마커 없으면 빈 셸"로 이분류했다면 실제로 일하고 있는 ORCH
+  // 좌석이 "빈 셸"로 오분류됐을 것이다.
+  assert.equal(
+    classifySeatText(REAL_LONG_RUNNING_AGENT_PREVIEW),
+    SEAT_KIND.AMBIGUOUS,
+  );
+});
+
+test("classifySeatText: mid-turn CODER seat banner (orca-worker-seat.ps1's own log line) -> ambiguous, not a false empty_shell", () => {
+  // [CODER seat] != AGENT_BANNER_MARKERS의 [CODER] (다른 문자열, 위 정의
+  // 주석 참고) -- 이 라운드 자신을 띄운 실제 좌석의 실측 preview.
+  assert.equal(
+    classifySeatText(REAL_MIDTURN_PREVIEW_NO_MARKER),
+    SEAT_KIND.AMBIGUOUS,
+  );
+});
+
+test("classifySeatText: multi-line but non-prompt, non-banner content -> ambiguous (honest unknown, not forced into a bucket)", () => {
+  assert.equal(
+    classifySeatText("some random shell output\nline two\nline three"),
+    SEAT_KIND.AMBIGUOUS,
+  );
+});
+
+test("classifySeat: reads .preview off a terminal object", () => {
+  assert.equal(
+    classifySeat({ preview: REAL_EMPTY_SHELL_PREVIEW }),
+    SEAT_KIND.EMPTY_SHELL,
+  );
+  assert.equal(
+    classifySeat({ preview: CONFIRMED_CLAUDE_AGENT_PREVIEW }),
+    SEAT_KIND.AGENT,
+  );
+});
+
+test("censusSeats: counts agent/empty_shell/ambiguous and totals match the real 5-seat sample", () => {
+  const terminals = [
+    {
+      handle: "term_a",
+      worktreePath: "wt1",
+      title: "t1",
+      tabId: "ta",
+      leafId: "la",
+      preview: CONFIRMED_CLAUDE_AGENT_PREVIEW,
+    },
+    {
+      handle: "term_b",
+      worktreePath: "wt1",
+      title: "t2",
+      tabId: "tb",
+      leafId: "lb",
+      preview: REAL_EMPTY_SHELL_PREVIEW,
+    },
+    {
+      handle: "term_c",
+      worktreePath: "wt2",
+      title: "t3",
+      tabId: "tc",
+      leafId: "lc",
+      preview: CONFIRMED_CODEX_AGENT_PREVIEW,
+    },
+    {
+      handle: "term_d",
+      worktreePath: "wt2",
+      title: "t4",
+      tabId: "td",
+      leafId: "ld",
+      preview: REAL_EMPTY_SHELL_PREVIEW,
+    },
+    {
+      handle: "term_e",
+      worktreePath: "wt3",
+      title: "t5",
+      tabId: "te",
+      leafId: "le",
+      preview: REAL_LONG_RUNNING_AGENT_PREVIEW,
+    },
+  ];
+  const census = censusSeats(terminals);
+  assert.equal(census.total, 5);
+  assert.equal(census.agentCount, 2);
+  assert.equal(census.emptyShellCount, 2);
+  assert.equal(census.ambiguousCount, 1);
+  assert.equal(census.rows[0].paneKey, "ta:la");
+});
+
+test("formatCensus: human-readable summary line names what was counted", () => {
+  const census = censusSeats([
+    {
+      handle: "term_a",
+      preview: CONFIRMED_CLAUDE_AGENT_PREVIEW,
+      tabId: "ta",
+      leafId: "la",
+    },
+  ]);
+  const text = formatCensus(census);
+  assert.match(text, /좌석 수\(정본\): 전체=1/);
+  assert.match(text, /에이전트=1/);
+});
+
+function withTempDir(fn) {
+  const dir = mkdtempSync(join(tmpdir(), "seat-census-test-"));
+  try {
+    return fn(dir);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+test("runSeatCensusCli: --terminal-list-file reads orca terminal list --json shape offline (no live orca needed, CI-safe)", () => {
+  withTempDir((dir) => {
+    const file = join(dir, "terminals.json");
+    writeFileSync(
+      file,
+      JSON.stringify({
+        result: {
+          terminals: [
+            {
+              handle: "term_a",
+              preview: CONFIRMED_CLAUDE_AGENT_PREVIEW,
+              tabId: "ta",
+              leafId: "la",
+            },
+            {
+              handle: "term_b",
+              preview: REAL_EMPTY_SHELL_PREVIEW,
+              tabId: "tb",
+              leafId: "lb",
+            },
+          ],
+        },
+      }),
+      "utf8",
+    );
+    const outcome = runSeatCensusCli(["--terminal-list-file", file]);
+    assert.equal(outcome.ok, true);
+    assert.equal(outcome.census.total, 2);
+    assert.equal(outcome.census.agentCount, 1);
+    assert.equal(outcome.census.emptyShellCount, 1);
+  });
+});
+
+test("runSeatCensusCli: rejects a JSON shape without .result.terminals[]", () => {
+  withTempDir((dir) => {
+    const file = join(dir, "bad.json");
+    writeFileSync(file, JSON.stringify({ nope: true }), "utf8");
+    assert.throws(() => runSeatCensusCli(["--terminal-list-file", file]));
+  });
+});
+
+test("CLI end-to-end: --json prints machine-readable census", () => {
+  withTempDir((dir) => {
+    const file = join(dir, "terminals.json");
+    writeFileSync(
+      file,
+      JSON.stringify({
+        result: {
+          terminals: [{ handle: "term_a", preview: REAL_EMPTY_SHELL_PREVIEW }],
+        },
+      }),
+      "utf8",
+    );
+    const stdout = execFileSync(
+      process.execPath,
+      [SCRIPT_PATH, "--terminal-list-file", file, "--json"],
+      { encoding: "utf8" },
+    );
+    const parsed = JSON.parse(stdout.trim());
+    assert.equal(parsed.total, 1);
+    assert.equal(parsed.emptyShellCount, 1);
+  });
+});
