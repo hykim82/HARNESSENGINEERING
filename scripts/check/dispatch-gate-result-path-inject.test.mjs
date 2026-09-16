@@ -76,7 +76,7 @@ test("(a) fresh coder-task.md gets result_file/runner_receipt_file/gitignore-not
     assert.match(r.stdout, /ALLOW/);
     assert.match(
       r.stdout,
-      /result-path block machine-injected \(HYK-465\)/,
+      /result-path block machine-injected \(HYK-465\/HYK-480\)/,
       "insertion must be visible in the delivery-time stdout (조용히 고치지 말 것, dropped_at 관례와 동일)",
     );
 
@@ -100,6 +100,15 @@ test("(a) fresh coder-task.md gets result_file/runner_receipt_file/gitignore-not
       /worktree_discipline:.*HEAD/,
       "the '검토 뒤 워크트리를 옮기지 마라' discipline line (책임자 §A-3) must also be machine-injected",
     );
+    // HYK-480 §5: 결과 파일 필수 머리줄 점검표(role/task_id/for/verdict/
+    // head_commit/완료 표지) 7줄도 같은 블록으로 기계 주입되어야 한다.
+    assert.match(after, /^result_header_checklist_note:.*완료 표지 모양/im);
+    assert.match(after, /^result_header_checklist_role:.*'CODER'/im);
+    assert.match(after, /^result_header_checklist_task_id:/im);
+    assert.match(after, /^result_header_checklist_for:.*검토 전용/im);
+    assert.match(after, /^result_header_checklist_verdict:.*검토 전용/im);
+    assert.match(after, /^result_header_checklist_headcommit:.*검토 전용/im);
+    assert.match(after, /^result_header_checklist_done:.*손기입 금지/im);
 
     // Lines must sit immediately after task_id: (this injection runs
     // BEFORE bestEffortStampDroppedAt -- dispatch-gate-decision.mjs's call
@@ -112,7 +121,14 @@ test("(a) fresh coder-task.md gets result_file/runner_receipt_file/gitignore-not
     assert.match(lines[3], /^runner_receipt_file:/);
     assert.match(lines[4], /^harness_gitignore_note:/);
     assert.match(lines[5], /^worktree_discipline:/);
-    assert.equal(lines[6], "role: CODER");
+    assert.match(lines[6], /^result_header_checklist_note:/);
+    assert.match(lines[7], /^result_header_checklist_role:/);
+    assert.match(lines[8], /^result_header_checklist_task_id:/);
+    assert.match(lines[9], /^result_header_checklist_for:/);
+    assert.match(lines[10], /^result_header_checklist_verdict:/);
+    assert.match(lines[11], /^result_header_checklist_headcommit:/);
+    assert.match(lines[12], /^result_header_checklist_done:/);
+    assert.equal(lines[13], "role: CODER");
   });
 });
 
