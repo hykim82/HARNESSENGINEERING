@@ -1057,3 +1057,195 @@ test("§E-회귀 (정직 한계 실증): kind=unconsumed_result 를 «아예 선
     assert.match(r.stdout, /ALLOW/);
   });
 });
+
+// ---------------------------------------------------------------------------
+// §F (HYK-478) -- 네 번째 기계-확인-가능 사유(AUTHOR_SEAT_LOST_BEFORE_STAMP):
+// 작성자 좌석이 완료 표지(`>>> DONE:`)를 남기기 «전»에 소실된(2026-09-15
+// 20:36 윈도우 업데이트 재부팅 실물, coder-task.md §0) 라운드. 이 사유는
+// «두 개의 독립 사실»이 동시에 성립해야 confirmed:true다(retirement-
+// block-reason-shared.mjs의 confirmAuthorSeatLostBeforeStamp 참조) --
+// ⓐ 결과 파일의 열 0 완료 표지가 정확히 0개 ⓑ 그 라운드의 admission
+// 원장 예약이 더는 ACTIVE가 아님(SUSPECT, sweepAndRecover가 liveSeatKeys
+// 부재를 근거로 이미 원장에 새긴 사실). §F-a/§F-b가 ⓐ/ⓑ 각각 하나만
+// 거짓일 때도 거부되는 것을 «두 방향 모두» 실행으로 보인다(coder-task.md
+// §2 완료조건2 비타협).
+// ---------------------------------------------------------------------------
+
+// admission-ledger-core.mjs의 실제 함수(admit -> sweepAndRecover)를 그대로
+// 돌려 SUSPECT 상태를 진짜로 만든다(합성 JSON을 손으로 짜지 않는다, §D의
+// buildRealRecoveredLedger와 동일한 이유).
+function buildSeatLostLedgerSnapshot(harnessTaskLabel) {
+  let ledger = createEmptyLedger("2026-09-16T00:00:00.000Z");
+  const admit = admitReservation(ledger, {
+    reservationId: harnessTaskLabel,
+    cap: 1,
+    now: "2026-09-16T00:00:00.000Z",
+    role: "CODER",
+    seatKey: "seat-that-died",
+  });
+  assert.equal(admit.decision, "ADMITTED");
+  ledger = admit.ledger;
+
+  const staleAfterMs = 5 * 60 * 1000;
+  const recoveryGraceMs = 10 * 60 * 1000;
+  const toSuspect = sweepAndRecover(ledger, {
+    now: "2026-09-16T00:10:01.000Z",
+    liveSeatKeys: [],
+    staleAfterMs,
+    recoveryGraceMs,
+  });
+  assert.equal(toSuspect.ok, true);
+  assert.equal(
+    toSuspect.ledger.reservations[harnessTaskLabel].status,
+    "SUSPECT",
+  );
+  return toSuspect.ledger;
+}
+
+// §F-b 전용: sweep을 아예 돌리지 않은, 여전히 ACTIVE인 원장(ⓑ 거짓 -- "좌석이
+// 아직 살아 있을 수도 있다").
+function buildSeatAliveLedgerSnapshot(harnessTaskLabel) {
+  let ledger = createEmptyLedger("2026-09-16T00:00:00.000Z");
+  const admit = admitReservation(ledger, {
+    reservationId: harnessTaskLabel,
+    cap: 1,
+    now: "2026-09-16T00:00:00.000Z",
+    role: "CODER",
+    seatKey: "seat-still-alive",
+  });
+  assert.equal(admit.decision, "ADMITTED");
+  assert.equal(admit.ledger.reservations[harnessTaskLabel].status, "ACTIVE");
+  return admit.ledger;
+}
+
+function buildSeatLostFixture(dir, { withDoneStamp = false } = {}) {
+  const role = "coder";
+  const harnessTaskLabel = withDoneStamp
+    ? "HYK-9478-retire-seatlost-fake-a-round"
+    : "HYK-9478-retire-seatlost-round";
+  // ⛔완료 표지 자체가 없다(윈도우 재부팅으로 표지를 쓰던 중 좌석이 죽은
+  // 실물 형태 -- 열 0 `>>> DONE:` 줄이 하나도 없다) -- withDoneStamp가
+  // 참이면(§F-a) 반대로 «실제로 있는» 표지를 남겨 ⓐ를 거짓으로 만든다.
+  const resultContent = withDoneStamp
+    ? `task_id: ${harnessTaskLabel}\n>>> DONE: CODER @ 2026-09-16 08:03:00 KST\n`
+    : `task_id: ${harnessTaskLabel}\n`;
+  writeFileSync(join(dir, `${role}.md`), resultContent, "utf8");
+
+  const taskPath = writeNextTaskFile(
+    dir,
+    role,
+    `${harnessTaskLabel}-next`,
+    "2026-09-16 08:00:00 KST",
+  );
+
+  const ledgerPath = join(dir, "reject-streak.json");
+  writeLedger(ledgerPath, { schema_version: 1, issues: {} });
+
+  return { role, dir, taskPath, harnessTaskLabel, resultContent, ledgerPath };
+}
+
+function writeAdmissionLedgerFixture(dir, ledgerSnapshot) {
+  const admissionLedgerPath = join(dir, "admission-ledger.json");
+  writeFileSync(
+    admissionLedgerPath,
+    JSON.stringify(ledgerSnapshot) + "\n",
+    "utf8",
+  );
+  return admissionLedgerPath;
+}
+
+test("§F GREEN (HYK-478): AUTHOR_SEAT_LOST_BEFORE_STAMP -- 완료 표지 0개 + admission 원장이 이미 SUSPECT로 새김(작성자 좌석 소실) + 검증 가능한 은퇴 기록 -> 다음 배달 ALLOW", () => {
+  withFixtureDir((dir) => {
+    const fixture = buildSeatLostFixture(dir);
+    fixture.admissionLedgerPath = writeAdmissionLedgerFixture(
+      dir,
+      buildSeatLostLedgerSnapshot(fixture.harnessTaskLabel),
+    );
+    writeArchivedRoundCopy(dir, fixture.role, fixture.resultContent);
+
+    const write = writeRetirementRecord({
+      role: fixture.role.toUpperCase(),
+      harnessDir: fixture.dir,
+      harnessTaskLabel: fixture.harnessTaskLabel,
+      archivePath: "rounds/CODER-r1.md",
+      archiveFingerprintClaimed: computeFingerprint(fixture.resultContent),
+      blockReasonCode: "AUTHOR_SEAT_LOST_BEFORE_STAMP",
+      successorLabel: `${fixture.harnessTaskLabel}-next`,
+      recordedAt: "2026-09-16 08:05:00 KST",
+      evidence:
+        "완료 표지 0개 + admission 원장 SUSPECT(윈도우 재부팅으로 좌석 소실, coder-task.md §0 실물과 같은 모양)",
+    });
+    assert.equal(write.ok, true, write.reason);
+
+    const r = runGate(fixture);
+    assert.equal(r.status, 0, `ALLOW 기대, 실제 stderr: ${r.stderr}`);
+    assert.match(r.stdout, /ALLOW/);
+    assert.match(r.stderr, /RETIRED|은퇴 처리/);
+  });
+});
+
+test("§F-a (HYK-478) RED «거짓 사유»(ⓐ 위반 · 등재 완료조건 2): 완료 표지가 실제로 «있는»데(ⓑ는 참이어도) AUTHOR_SEAT_LOST_BEFORE_STAMP로 은퇴 시도 -> BLOCK_REASON_UNCONFIRMED, REJECT", () => {
+  withFixtureDir((dir) => {
+    const fixture = buildSeatLostFixture(dir, { withDoneStamp: true });
+    fixture.admissionLedgerPath = writeAdmissionLedgerFixture(
+      dir,
+      // ⓑ는 참으로 둔다(진짜 SUSPECT) -- 이 시험이 격리하려는 것은 ⓐ 하나뿐.
+      buildSeatLostLedgerSnapshot(fixture.harnessTaskLabel),
+    );
+    writeArchivedRoundCopy(dir, fixture.role, fixture.resultContent);
+
+    const write = writeRetirementRecord({
+      role: fixture.role.toUpperCase(),
+      harnessDir: fixture.dir,
+      harnessTaskLabel: fixture.harnessTaskLabel,
+      archivePath: "rounds/CODER-r1.md",
+      archiveFingerprintClaimed: computeFingerprint(fixture.resultContent),
+      blockReasonCode: "AUTHOR_SEAT_LOST_BEFORE_STAMP",
+      successorLabel: `${fixture.harnessTaskLabel}-next`,
+      recordedAt: "2026-09-16 08:05:00 KST",
+      evidence: "거짓 주장 -- 실제로는 완료 표지가 남아 있다",
+    });
+    assert.equal(write.ok, true, write.reason);
+
+    const r = runGate(fixture);
+    assert.notEqual(r.status, 0, `REJECT 기대, 실제 stdout: ${r.stdout}`);
+    assert.match(
+      r.stderr,
+      /독립적으로 재확인되지 않음/,
+      "기계로 확인 가능한 사유가 재확인 실패했다는 사유가 찍혀야 한다(BLOCK_REASON_UNCONFIRMED)",
+    );
+  });
+});
+
+test("§F-b (HYK-478) RED «거짓 사유»(ⓑ 위반 · 등재 완료조건 2): admission 원장이 여전히 ACTIVE인데(좌석이 아직 살아 있을 수도 있다는 뜻, ⓐ는 참이어도) AUTHOR_SEAT_LOST_BEFORE_STAMP로 은퇴 시도 -> BLOCK_REASON_UNCONFIRMED, REJECT", () => {
+  withFixtureDir((dir) => {
+    const fixture = buildSeatLostFixture(dir); // ⓐ는 참으로 둔다(표지 0개).
+    fixture.admissionLedgerPath = writeAdmissionLedgerFixture(
+      dir,
+      // ⛔sweep을 아예 돌리지 않는다 -- 이 시험이 격리하려는 것은 ⓑ 하나뿐.
+      buildSeatAliveLedgerSnapshot(fixture.harnessTaskLabel),
+    );
+    writeArchivedRoundCopy(dir, fixture.role, fixture.resultContent);
+
+    const write = writeRetirementRecord({
+      role: fixture.role.toUpperCase(),
+      harnessDir: fixture.dir,
+      harnessTaskLabel: fixture.harnessTaskLabel,
+      archivePath: "rounds/CODER-r1.md",
+      archiveFingerprintClaimed: computeFingerprint(fixture.resultContent),
+      blockReasonCode: "AUTHOR_SEAT_LOST_BEFORE_STAMP",
+      successorLabel: `${fixture.harnessTaskLabel}-next`,
+      recordedAt: "2026-09-16 08:05:00 KST",
+      evidence: "거짓 주장 -- 실제로는 좌석이 아직 ACTIVE(살아 있음)",
+    });
+    assert.equal(write.ok, true, write.reason);
+
+    const r = runGate(fixture);
+    assert.notEqual(r.status, 0, `REJECT 기대, 실제 stdout: ${r.stdout}`);
+    assert.match(
+      r.stderr,
+      /독립적으로 재확인되지 않음/,
+      "기계로 확인 가능한 사유가 재확인 실패했다는 사유가 찍혀야 한다(BLOCK_REASON_UNCONFIRMED)",
+    );
+  });
+});

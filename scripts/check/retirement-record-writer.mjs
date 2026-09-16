@@ -112,6 +112,12 @@ export function writeRetirementRecord({
       // 없으면 blockReasonConfirmed:false로 떨어뜨려 사실상 필수 필드로
       // 만든다, retirement-record-core.mjs 헤더 주석 참조) -- 나머지
       // 사유는 이 필드를 그냥 무시한다(undefined로 기록돼도 무해).
+      // HYK-478: AUTHOR_SEAT_LOST_BEFORE_STAMP는 이 필드도, 어떤 새 필드도
+      // 요구하지 않는다 -- 그 사유의 재확인(ⓐ 완료 표지 개수 · ⓑ admission
+      // 원장 상태)은 이미 존재하는 값(role/harnessTaskLabel과 어댑터가
+      // 별도로 이미 갖고 있는 admission 원장 경로)만으로 끝난다, 이 writer
+      // 는 그 사유든 어떤 사유든 blockReasonCode를 그대로 옮겨 적을 뿐이다
+      // (이 파일 헤더의 "무엇도 미리 참이라고 가정하지 않는다" 원칙 그대로).
       evidenceReceiptPath,
     };
     writeFileFn(destPath, JSON.stringify(record, null, 2) + "\n", "utf8");

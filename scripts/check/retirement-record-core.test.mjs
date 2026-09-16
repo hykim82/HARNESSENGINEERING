@@ -388,6 +388,69 @@ test("HYK-455 RED: RUNNER_GREEN_UNREACHABLE_AT_HEAD인데 blockReasonConfirmed�
   assert.equal(r2.state, RETIREMENT_RECORD_STATE.BLOCK_REASON_UNCONFIRMED);
 });
 
+// ---------------------------------------------------------------------------
+// HYK-478 §1-1/§1-2 -- AUTHOR_SEAT_LOST_BEFORE_STAMP(작성자 좌석이 완료
+// 표지를 남기기 전에 소실됨). 앞의 셋과 동일한 형태로 고정한다(이 코어
+// 자신은 ⓐ완료 표지 개수 ·ⓑadmission 원장 상태를 스스로 읽지 않는다 --
+// 재확인 자체는 어댑터/공유 confirm 함수 몫, 여기서는 이미 재확인된
+// blockReasonConfirmed 값이 판정에 실제로 반영되는지만 증명한다).
+// ---------------------------------------------------------------------------
+
+test("HYK-478: AUTHOR_SEAT_LOST_BEFORE_STAMP는 기계로 확인 가능한 사유 집합의 원소다", () => {
+  assert.equal(
+    MECHANICALLY_CONFIRMABLE_BLOCK_REASONS.has(
+      RETIREMENT_BLOCK_REASON.AUTHOR_SEAT_LOST_BEFORE_STAMP,
+    ),
+    true,
+  );
+});
+
+test("HYK-478 GREEN: AUTHOR_SEAT_LOST_BEFORE_STAMP + blockReasonConfirmed:true -> RETIRED", () => {
+  const r = checkRetirementRecord({
+    role: "CODER",
+    harnessTaskLabel: RECORD.harnessTaskLabel,
+    candidates: [
+      candidateOf({
+        blockReasonCode: RETIREMENT_BLOCK_REASON.AUTHOR_SEAT_LOST_BEFORE_STAMP,
+      }),
+    ],
+  });
+  assert.equal(r.state, RETIREMENT_RECORD_STATE.RETIRED);
+  assert.equal(r.ok, true);
+});
+
+test("HYK-478 RED: AUTHOR_SEAT_LOST_BEFORE_STAMP인데 blockReasonConfirmed가 true가 아님(ⓐ완료 표지·ⓑ좌석 소실 중 하나라도 어댑터가 재확인 못함/ORCH 주장만) -> BLOCK_REASON_UNCONFIRMED, 거부", () => {
+  const r = checkRetirementRecord({
+    role: "CODER",
+    harnessTaskLabel: RECORD.harnessTaskLabel,
+    candidates: [
+      candidateOf(
+        {
+          blockReasonCode:
+            RETIREMENT_BLOCK_REASON.AUTHOR_SEAT_LOST_BEFORE_STAMP,
+        },
+        { blockReasonConfirmed: false },
+      ),
+    ],
+  });
+  assert.equal(r.state, RETIREMENT_RECORD_STATE.BLOCK_REASON_UNCONFIRMED);
+
+  const r2 = checkRetirementRecord({
+    role: "CODER",
+    harnessTaskLabel: RECORD.harnessTaskLabel,
+    candidates: [
+      candidateOf(
+        {
+          blockReasonCode:
+            RETIREMENT_BLOCK_REASON.AUTHOR_SEAT_LOST_BEFORE_STAMP,
+        },
+        { blockReasonConfirmed: null },
+      ),
+    ],
+  });
+  assert.equal(r2.state, RETIREMENT_RECORD_STATE.BLOCK_REASON_UNCONFIRMED);
+});
+
 test("대조군: 다른 라운드의 후보들이 섞여 있어도 role+label이 일치하는 것은 정확히 하나 -> RETIRED", () => {
   const r = checkRetirementRecord({
     role: "CODER",

@@ -79,9 +79,46 @@ const FIXTURE_BUILDERS = {
       expected: true,
     };
   },
+  // HYK-478 §1-2: AUTHOR_SEAT_LOST_BEFORE_STAMP -- GREEN 표본은 ⓐ완료
+  // 표지 0개(resultText에 `>>> DONE:` 줄이 아예 없음) + ⓑ admission
+  // 원장에서 그 harnessTaskLabel의 예약이 SUSPECT(sweepAndRecover가 이미
+  // liveSeatKeys 부재를 근거로 새겨 둔 상태)여야 둘 다 참이다.
+  [RETIREMENT_BLOCK_REASON.AUTHOR_SEAT_LOST_BEFORE_STAMP]: () => {
+    const harnessDir = tmpDir("hyk478-table-seatlost-");
+    const harnessTaskLabel = "HYK-478-table-seatlost-round";
+    const ledgerPath = join(harnessDir, "admission-ledger.json");
+    writeFileSync(
+      ledgerPath,
+      JSON.stringify({
+        schema_version: "admission-ledger/v1",
+        reservations: {
+          [harnessTaskLabel]: {
+            status: "SUSPECT",
+            admitted_at: "2026-09-16T00:00:00.000Z",
+            completed_at: null,
+            suspect_at: "2026-09-16T00:10:01.000Z",
+            role: "CODER",
+            seat_key: "seat-that-died",
+          },
+        },
+      }),
+      "utf8",
+    );
+    return {
+      record: {
+        blockReasonCode: RETIREMENT_BLOCK_REASON.AUTHOR_SEAT_LOST_BEFORE_STAMP,
+        harnessTaskLabel,
+      },
+      resultText: `task_id: ${harnessTaskLabel}\n`,
+      droppedAt: null,
+      harnessDir,
+      ledgerPath,
+      expected: true,
+    };
+  },
 };
 
-test("HYK-457 §3-C: MECHANICALLY_CONFIRMABLE_BLOCK_REASONS's known three reasons still have a FIXTURE_BUILDERS entry (sanity floor for the loop below)", () => {
+test("HYK-457 §3-C (HYK-478 확대): MECHANICALLY_CONFIRMABLE_BLOCK_REASONS's known reasons still each have a FIXTURE_BUILDERS entry (sanity floor for the loop below)", () => {
   assert.deepEqual(
     new Set(Object.keys(FIXTURE_BUILDERS)),
     new Set([...MECHANICALLY_CONFIRMABLE_BLOCK_REASONS]),
@@ -96,12 +133,14 @@ test("HYK-457 §3-C: every MECHANICALLY_CONFIRMABLE_BLOCK_REASONS member reaches
       builder,
       `MECHANICALLY_CONFIRMABLE_BLOCK_REASONS grew a new reason ('${reason}') with no FIXTURE_BUILDERS entry in this regression test -- this IS the HYK-457 drift shape: a reason can be "in the closed set" while nothing confirms it. Add a builder here.`,
     );
-    const { record, resultText, droppedAt, harnessDir, expected } = builder();
+    const { record, resultText, droppedAt, harnessDir, ledgerPath, expected } =
+      builder();
     const actual = confirmRetirementBlockReason(
       record,
       resultText,
       droppedAt,
       harnessDir,
+      ledgerPath,
     );
     assert.equal(
       typeof actual,
@@ -154,6 +193,44 @@ test("HYK-457 §3-C negative: the same three reasons return false (not null, not
       `head_commit: ${headCommit}\n`,
       null,
       harnessDir,
+    ),
+    false,
+  );
+  // HYK-478 §1-2 negative (ⓐ 위반): 완료 표지가 실제로 «있는»데(1개)
+  // AUTHOR_SEAT_LOST_BEFORE_STAMP를 대는 경우 -- ⓑ(원장 SUSPECT)는 참이어도
+  // 전체는 거짓이어야 한다(§2 완료조건2 "하나라도 거짓이면 거부").
+  const seatLostHarnessTaskLabel = "HYK-478-table-neg-seatlost-round";
+  const seatLostLedgerPath = join(
+    tmpDir("hyk478-table-neg-seatlost-"),
+    "admission-ledger.json",
+  );
+  writeFileSync(
+    seatLostLedgerPath,
+    JSON.stringify({
+      schema_version: "admission-ledger/v1",
+      reservations: {
+        [seatLostHarnessTaskLabel]: {
+          status: "SUSPECT",
+          admitted_at: "2026-09-16T00:00:00.000Z",
+          completed_at: null,
+          suspect_at: "2026-09-16T00:10:01.000Z",
+          role: "CODER",
+          seat_key: "seat-that-died",
+        },
+      },
+    }),
+    "utf8",
+  );
+  assert.equal(
+    confirmRetirementBlockReason(
+      {
+        blockReasonCode: RETIREMENT_BLOCK_REASON.AUTHOR_SEAT_LOST_BEFORE_STAMP,
+        harnessTaskLabel: seatLostHarnessTaskLabel,
+      },
+      `task_id: ${seatLostHarnessTaskLabel}\n>>> DONE: CODER @ 2026-09-16 00:20:00 KST\n`,
+      null,
+      tmpDir("hyk478-table-neg-seatlost-harnessdir-"),
+      seatLostLedgerPath,
     ),
     false,
   );

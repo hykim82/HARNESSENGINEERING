@@ -156,12 +156,62 @@
 // blockReasonConfirmed:false/null을 넘기고, 이 코어는 그 값을 보고
 // BLOCK_REASON_UNCONFIRMED로 거부한다(닫힌 사유 코드 이름을 새로 짓는
 // 것만으로는 통과하지 못한다).
+// HYK-478 §1-1/§1-2 (coder-task.md §0 실물: 2026-09-15 20:36 윈도우 업데이트
+// 재부팅으로 워커 좌석이 전멸 -- 3R 작성자는 코드·러너 2회 초록까지 끝낸
+// 뒤 완료 표지를 쓰던 중 죽었다): AUTHOR_SEAT_LOST_BEFORE_STAMP 추가 --
+// 작성자 좌석이 완료 표지(`>>> DONE:`)를 남기기 «전»에 소실된 라운드.
+// 앞의 넷과 또 사실의 축이 다르다("그 라운드 자신의 DONE 줄"도, "커밋
+// 시점의 전체 러너 결과"도 아니라 "그 라운드를 돌리던 좌석 자체가 더는
+// 없다"는 사실) -- 같은 원칙을 따른다: 임의 문자열이 아니라 닫힌 집합에
+// 값을 하나 더하고(§3-2), 기계로 확인 가능하므로 MECHANICALLY_CONFIRMABLE_
+// BLOCK_REASONS에 넣는다(§3-4 아래).
+//
+// 이 사유는 «두 개의 독립 사실»이 동시에 성립해야 confirmed:true다
+// (retirement-block-reason-shared.mjs의 confirmAuthorSeatLostBeforeStamp
+// 참조, coder-task.md §1-2 "증거는 둘 다 기계 재확인 가능해야 한다"):
+//   ⓐ 결과 파일의 열 0 완료 표지(`>>> DONE:`)가 정확히 0개 -- 완료를
+//      선언한 적이 없다(CONSUMPTION_DONE_RE_G로 «개수»를 센다 -- 1개 이상
+//      이면, 표지가 있는데도 이 사유를 대는 것이므로 거짓).
+//   ⓑ 그 라운드의 admission 원장(scripts/supervisor/admission-ledger-
+//      core.mjs) 예약 항목이 더는 ACTIVE가 아니다(SUSPECT, 또는
+//      COMPLETED이면서 completion_reason이 SUSPECT_TIMEOUT_RECOVERED) --
+//      sweepAndRecover가 liveSeatKeys 부재를 근거로 이미 독립적으로 원장에
+//      새긴 사실을 다시 읽을 뿐이다(dispatch-gate-decision.mjs의
+//      verifyAbortRecordRecoveryMarker가 이미 같은 축을 읽는 선례).
+// 둘 중 하나라도 거짓이면 false(§2 완료조건 2 "하나라도 거짓이면 거부"
+// 그대로) -- ⓑ만 참이고 표지가 이미 있으면(ⓐ 위반) "좌석은 죽었지만
+// 표지는 남겼다"는 뜻이라 이 사유가 아니라 DONE_TIMESTAMP_NOT_PARSEABLE/
+// DONE_PREDATES_DROPPED_AT 계열의 몫이고, ⓐ만 참이고 좌석이 아직
+// ACTIVE(ⓑ 위반)면 "아직 안 죽었을 수도 있다"는 뜻이라 은퇴를 허용하면
+// 안 된다.
+//
+// ★정직 한계(coder-task.md §1-2 "저장소 밖 명령에 의존해야만 한다면
+// 정직하게 적어라"): 이 축이 궁극적으로 딛는 근거(liveSeatKeys, 즉 실제
+// 좌석 목록)는 이 저장소 밖(orca 런타임)에서 나온다 -- 그러나 이 사유의
+// confirm 함수 자신은 그 밖의 세계를 다시 조회하지 않는다.
+// sweepAndRecover(그리고 그것을 주기적으로 부르는 별도 sweep 프로세스)가
+// 그 사실을 이미 «원장 파일에» 독립적으로 새겨 두었고, 이 함수는 그
+// 파일을 다시 읽을 뿐이다 -- RUNNER_GREEN_UNREACHABLE_AT_HEAD가 러너
+// 영수증 파일을 다시 읽을 뿐 러너를 다시 돌리지는 않는 것과 같은 신뢰
+// 모형이다. 못 덮는 구멍 셋:
+//   (a) sweep이 아직 한 번도 안 돌았거나 오래전에 멈췄으면 원장은 여전히
+//       ACTIVE로 남아 있어 이 축은 «과소»동작한다(seat가 실제로는 죽었어도
+//       미확인 -- 위조를 여는 방향이 아니라 안전측(거부) 방향의 한계다).
+//   (b) seat_key가 null인 예약(구형 컷오버 항목·--seat-key 없이 admit된
+//       항목)은 sweepNullSeatKeyEntry가 절대 SUSPECT로 전이시키지 않으므로
+//       (HYK-224-3R §2, "판단 불가를 정상으로 접지 않는다") 이 축은 그런
+//       라운드에 대해 영원히 confirmed:false다 -- 사람이 다른 사유(계약
+//       텍스트뿐인 DONE_REWRITE_LOCKED 등)로 처리해야 한다.
+//   (c) 원장 파일 자체를 직접 손으로 편집하는 위조는 이 축 혼자 막지
+//       못한다(§5-d의 일반 한계와 동일 -- 이 코드베이스 밖의 사람 개입을
+//       완전히 막는 축은 없다).
 export const RETIREMENT_BLOCK_REASON = Object.freeze({
   DONE_TIMESTAMP_NOT_PARSEABLE: "DONE_TIMESTAMP_NOT_PARSEABLE",
   DONE_PREDATES_DROPPED_AT: "DONE_PREDATES_DROPPED_AT",
   DONE_REWRITE_LOCKED: "DONE_REWRITE_LOCKED",
   TASK_CONTRACT_PROHIBITS_REPAIR: "TASK_CONTRACT_PROHIBITS_REPAIR",
   RUNNER_GREEN_UNREACHABLE_AT_HEAD: "RUNNER_GREEN_UNREACHABLE_AT_HEAD",
+  AUTHOR_SEAT_LOST_BEFORE_STAMP: "AUTHOR_SEAT_LOST_BEFORE_STAMP",
 });
 
 // §3-4 -- 이 부분집합만 어댑터가 live 파일에서 독립 재확인한다.
@@ -173,11 +223,15 @@ export const RETIREMENT_BLOCK_REASON = Object.freeze({
 // HYK-455: RUNNER_GREEN_UNREACHABLE_AT_HEAD도 기계로 독립 재확인
 // 가능하다(위 RETIREMENT_BLOCK_REASON 주석의 evidenceReceiptPath 결선
 // 참조) -- 같은 집합에 넣는다.
+// HYK-478: AUTHOR_SEAT_LOST_BEFORE_STAMP도 기계로 독립 재확인 가능하다
+// (아래 RETIREMENT_BLOCK_REASON 주석의 confirmAuthorSeatLostBeforeStamp
+// 결선 참조) -- 같은 집합에 넣는다.
 export const MECHANICALLY_CONFIRMABLE_BLOCK_REASONS = Object.freeze(
   new Set([
     RETIREMENT_BLOCK_REASON.DONE_TIMESTAMP_NOT_PARSEABLE,
     RETIREMENT_BLOCK_REASON.DONE_PREDATES_DROPPED_AT,
     RETIREMENT_BLOCK_REASON.RUNNER_GREEN_UNREACHABLE_AT_HEAD,
+    RETIREMENT_BLOCK_REASON.AUTHOR_SEAT_LOST_BEFORE_STAMP,
   ]),
 );
 
