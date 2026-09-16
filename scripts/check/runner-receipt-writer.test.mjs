@@ -267,6 +267,38 @@ test("allocateRunSlot: a non-EEXIST error (e.g. permission denied) is NOT swallo
   });
 });
 
+// HYK-485 §2-2 2R (검토 P2-2, rounds/REVIEW-r1.md 재현 그대로): "첫 빈
+// 자리"로 잡으면 중간 파일이 지워진 뒤 재할당이 그 빈 자리를 다시 채운다
+// -- 소비 쪽(relay-handshake.mjs)의 "가장 큰 N이 가장 최근" 가정이 깨지고
+// 실제로 가장 최근인 실행이 조용히 무시된다.
+test("allocateRunSlot: P2-2 재현 -- 4회 할당(1,2,3,4) 후 run2.json을 지우고 다시 할당하면, 그 빈 자리를 재사용하지 않고 5를 받는다(생산자/소비자 'N=가장 최근' 규약 일치)", () => {
+  withTmpDir("hyk485-slot-p2-2-", (dir) => {
+    const nums = [];
+    for (let i = 0; i < 4; i++) {
+      nums.push(allocateRunSlot({ harnessDir: dir }).runNumber);
+    }
+    assert.deepEqual(nums, [1, 2, 3, 4]);
+
+    rmSync(join(dir, `${RUNNER_RECEIPT_RUN_PREFIX}2.json`));
+
+    const after = allocateRunSlot({ harnessDir: dir });
+    assert.equal(
+      after.runNumber,
+      5,
+      `expected the gap NOT to be reused (5, monotonically past the max ever allocated), got ${after.runNumber}`,
+    );
+  });
+});
+
+test("allocateRunSlot: a fresh dir with only NON-numbered/unrelated files present still starts at 1 (nextRunSlotStart only counts files matching the run-receipt name pattern)", () => {
+  withTmpDir("hyk485-slot-unrelated-", (dir) => {
+    realWriteFileSync(join(dir, "runner-receipt.json"), "{}", "utf8");
+    realWriteFileSync(join(dir, "full-runner-3.log"), "not a receipt", "utf8");
+    const slot = allocateRunSlot({ harnessDir: dir });
+    assert.equal(slot.runNumber, 1);
+  });
+});
+
 test("allocateRunSlot: exhausting maxAttempts throws a clear error instead of looping forever", () => {
   const alwaysEexist = () => {
     const err = new Error("EEXIST: simulated");

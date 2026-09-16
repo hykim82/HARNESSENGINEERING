@@ -132,20 +132,26 @@ const OVERRIDE_CONCURRENCY_REASON = "explicit --concurrency override";
 // result.error (e.g. ETIMEDOUT) with result.status left null; a real
 // non-zero exit sets only result.status, leaving signal/error null/absent.
 //
-// HYK-477 §2-3 (검토자 지적, 2026-09-16): 마지막 분기가 원래
-// `result.status ?? 1`로 TESTS_FAILED를 내고 있었다 -- 그런데
-// `result.status === null`이면서 signal/error도 둘 다 falsy인 경우(위
-// 실측 주석의 "usually" -- 강제 종료가 signal/error 없이 status만 null로
-// 남는 드문 조합)는 node --test가 애초에 실제 완료 결과를 낸 적이
-// 없다는 뜻이다. 그걸 "실제로 어떤 코드로 실패했다"(TESTS_FAILED)로
-// 접으면 §2-2가 없애려는 바로 그 사실 왜곡(측정 불능 -> 시험 실패)이
-// 이 분류기 안에서 재발한다. status가 null/undefined인 경우만 따로
-// MEASUREMENT_UNAVAILABLE_OOM으로 분리하고, 진짜 숫자 status(0이 아닌
-// 실제 종료 코드)만 TESTS_FAILED로 남긴다 -- exitCode도 이제
-// `result.status`를 그대로 쓴다(그 시점에는 null일 수 없으므로 `?? 1`
-// 폴백이 더 이상 필요 없다, 의미 없는 폴백을 남겨두면 "왜 1인가"를
-// 다시 헷갈리게 한다).
-export function classifySpawnOutcome(result) {
+// HYK-477 §2-3 2R (검토 P1-1 재반려, 2026-09-16, rounds/REVIEW-r1.md): 이
+// 저장소가 실제로 겪는 강제 종료는 위 `result.status == null` 분기로 잡히지
+// 않는다 -- Windows에는 POSIX 시그널이 없어 spawnSync가 강제 종료를
+// result.signal이 아니라 result.status에 숫자(0xFFFFFFFF 등)로 채워
+// 돌려주기 때문이다(같은 커밋이 스스로 쓴 영수증이 증거:
+// .harness/runner-receipt-run5.json -- runner_exit 4294967295 ·
+// runner_status TESTS_FAILED · tests/pass/fail/skip 전부 null, 짝 로그
+// full-runner-5.log는 요약 줄 없이 끊김). 그래서 "status가 null/undefined
+// 인가"만 보던 분류기는 이 플랫폼의 진짜 강제종료를 하나도 못 잡고
+// TESTS_FAILED로 접었다.
+//
+// 검토 권고 ⓐ(가장 강한 축, 종료코드 목록에 기대지 않는다)로 바꾼다:
+// signal/error도 없고 status도 0이 아닌 경우, "node --test 자신이 tap
+// reporter에 완료 요약 줄(`# tests N`)을 남겼는가"(hasCompletion, 호출자가
+// 실제 tap 파일을 읽어 판단해 넘긴다 -- 아래 hasTapCompletion)로 가른다.
+// 진짜 시험 실패는 개별 테스트가 실패해도 node --test 프로세스 자체는
+// 끝까지 돌아 요약까지 쓰므로(관찰 사실), 이 신호는 "정말 실패했다"와
+// "완료 결과 자체가 없다"를 종료코드의 플랫폼별 모양과 무관하게 가른다 --
+// Windows의 0xFFFFFFFF든 다른 어떤 비정상 코드든 목록을 만들 필요가 없다.
+export function classifySpawnOutcome(result, { hasCompletion = false } = {}) {
   if (result.signal) {
     return { status: RUNNER_STATUS.MEASUREMENT_UNAVAILABLE_OOM, exitCode: 1 };
   }
@@ -155,10 +161,24 @@ export function classifySpawnOutcome(result) {
   if (result.status === 0) {
     return { status: RUNNER_STATUS.OK, exitCode: 0 };
   }
-  if (result.status == null) {
+  if (!hasCompletion) {
     return { status: RUNNER_STATUS.MEASUREMENT_UNAVAILABLE_OOM, exitCode: 1 };
   }
-  return { status: RUNNER_STATUS.TESTS_FAILED, exitCode: result.status };
+  return { status: RUNNER_STATUS.TESTS_FAILED, exitCode: result.status ?? 1 };
+}
+
+// HYK-477 §2-3 2R: the input classifySpawnOutcome's hasCompletion needs --
+// isolated into its own function so a tap-read failure (no file, unreadable,
+// no summary line) degrades to "no completion" rather than throwing and
+// losing the real spawn outcome. Reuses parseTapSummaryCounts (the same
+// parser emitRunnerReceipt uses for the receipt's own counts) so both call
+// sites agree on what "a completion summary" looks like.
+function hasTapCompletion({ tapPath, readFile }) {
+  try {
+    return parseTapSummaryCounts(readFile(tapPath, "utf8")).tests != null;
+  } catch {
+    return false;
+  }
 }
 
 // The one-line disclosure required by task §3-4: which commit was tested,
@@ -300,6 +320,7 @@ function spawnSuiteInClone({
   tapPath,
   concurrency,
   logPath,
+  readFile,
 }) {
   const result = spawn(
     process.execPath,
@@ -320,7 +341,9 @@ function spawnSuiteInClone({
       },
     },
   );
-  return classifySpawnOutcome(result);
+  return classifySpawnOutcome(result, {
+    hasCompletion: hasTapCompletion({ tapPath, readFile }),
+  });
 }
 
 // Removes the two scratch directories this run made. Isolated so the
@@ -444,6 +467,7 @@ export function runIsolatedSuite({
       tapPath,
       concurrency: resolvedConcurrency,
       logPath: runSlot.logPath,
+      readFile,
     });
 
     emitRunnerReceipt({

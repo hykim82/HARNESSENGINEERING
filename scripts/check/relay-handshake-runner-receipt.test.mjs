@@ -814,6 +814,175 @@ test("(cr-e1)★ 되돌림 변이: consecutiveRunnerReceiptsVerdict 결선 자�
 });
 
 // ===========================================================================
+// HYK-485 §2-2 2R (검토 P1-2, rounds/REVIEW-r1.md): 발동 조건이 «워커가
+// 결과 파일에 무엇을 적었는가»(claimCount)에만 달려 있으면, 옛 idiom을
+// 요구하지 않는 실행선을 쓰는 라운드(이 라운드 자신의 coder-task.md §5가
+// 정확히 그 형태)에서 회차별 영수증이 실제로 2개 있어도 이 축이 «한 번도
+// 발동하지 않는다»(검토 재현: countRunnerExitClaims(.harness/coder.md) = 0).
+// 발동 조건에 "이 라운드의 실제 HEAD와 head_commit이 일치하는 회차별
+// 영수증이 2개 이상 실물로 있는가"를 OR로 더해 고친다.
+// ===========================================================================
+
+test("(cr-machine-1)★ P1-2 재현 그 자체: 산문 주장 0회(옛 idiom 없음) + 회차별 영수증 2개가 실물로(실제 HEAD와 일치) 존재 -> 더 이상 skip되지 않고 실제로 대조한다(기계 산출물 축)", () => {
+  withFixtureDir("hyk485-cr-machine-1-", (dir) => {
+    const sha = ensureGitHeadCommit(dir);
+    writeNumberedReceipt(
+      dir,
+      1,
+      baseReceipt(sha, { finished_at: "2026-09-01 06:08:00 KST" }),
+    );
+    writeNumberedReceipt(
+      dir,
+      2,
+      baseReceipt(sha, { finished_at: "2026-09-01 06:09:00 KST" }),
+    );
+    const r = resolveConsecutiveRunnerReceiptsVerdict({
+      resultContent: "verdict: approved -- no 'exit=' idiom anywhere",
+      harnessDir: dir,
+    });
+    assert.equal(countRunnerExitClaims("verdict: approved"), 0);
+    assert.equal(
+      r.ok,
+      true,
+      `expected the machine-evidence leg alone to trigger a real (passing) verdict, not a skip: ${JSON.stringify(r)}`,
+    );
+    assert.notEqual(r.skipped, true);
+  });
+});
+
+test("(cr-machine-2)★ 같은 조건, 그중 하나 runner_exit != 0 -> 산문 주장이 전혀 없어도 실물 영수증만으로 RED 거부된다(산문에 기대지 않는다는 증명)", () => {
+  withFixtureDir("hyk485-cr-machine-2-", (dir) => {
+    const sha = ensureGitHeadCommit(dir);
+    writeNumberedReceipt(
+      dir,
+      1,
+      baseReceipt(sha, { finished_at: "2026-09-01 06:08:00 KST" }),
+    );
+    writeNumberedReceipt(
+      dir,
+      2,
+      baseReceipt(sha, {
+        runner_exit: 1,
+        fail: 1,
+        finished_at: "2026-09-01 06:09:00 KST",
+      }),
+    );
+    const r = resolveConsecutiveRunnerReceiptsVerdict({
+      resultContent: "verdict: approved",
+      harnessDir: dir,
+    });
+    assert.equal(r.ok, false);
+    assert.equal(r.code, RUNNER_RECEIPT_REJECT_REASON.RED);
+  });
+});
+
+test("(cr-machine-skip)★ 검토 P2-3 과발동 방지: 산문 주장 0/1회 + 실제 HEAD와 일치하는 영수증도 0/1개뿐 -> 여전히 skip(러너와 무관한 라운드를 막지 않는다)", () => {
+  withFixtureDir("hyk485-cr-machine-skip-", (dir) => {
+    const sha = ensureGitHeadCommit(dir);
+    // 일치하는 영수증 0개: 디렉터리 자체는 실재하지만 회차별 파일이 없다.
+    assert.deepEqual(
+      resolveConsecutiveRunnerReceiptsVerdict({
+        resultContent: "verdict: approved",
+        harnessDir: dir,
+      }),
+      { ok: true, skipped: true },
+    );
+    // 일치하는 영수증 1개뿐 -- 아직 "2개 이상"이 아니므로 여전히 skip.
+    writeNumberedReceipt(dir, 1, baseReceipt(sha));
+    assert.deepEqual(
+      resolveConsecutiveRunnerReceiptsVerdict({
+        resultContent: "verdict: approved",
+        harnessDir: dir,
+      }),
+      { ok: true, skipped: true },
+    );
+  });
+});
+
+test("(cr-machine-skip-stale)★ 검토 P2-3 과발동 방지, 핵심 시나리오: 다른(낡은) 커밋의 회차별 영수증이 2개 이상 남아 있어도 -- 이번 라운드의 실제 HEAD와 일치하지 않으면 여전히 skip(러너와 무관한 미래 라운드가 이전 라운드의 잔재 때문에 막히지 않는다)", () => {
+  withFixtureDir("hyk485-cr-machine-skip-stale-", (dir) => {
+    const oldSha = ensureGitHeadCommit(dir);
+    execFileSync("git", ["commit", "-q", "--allow-empty", "-m", "moved on"], {
+      cwd: dir,
+    });
+    // 이전 라운드(oldSha)가 남긴 회차별 영수증 2개 -- 이번 라운드는 손대지
+    // 않았다(러너를 다시 돌리지 않은 라운드를 흉내낸다).
+    writeNumberedReceipt(dir, 1, baseReceipt(oldSha));
+    writeNumberedReceipt(dir, 2, baseReceipt(oldSha));
+    const r = resolveConsecutiveRunnerReceiptsVerdict({
+      resultContent: "verdict: approved",
+      harnessDir: dir,
+    });
+    assert.deepEqual(r, { ok: true, skipped: true });
+  });
+});
+
+test("(cr-p2-1)★ 검토 P2-1: 회차별 영수증 자리 중 하나가 0바이트 자리표시자(allocateRunSlot 자신의 예약, 강제 종료로 내용이 덮어써지지 못함) -> INVALID가 아니라 MEASUREMENT_UNAVAILABLE", () => {
+  withFixtureDir("hyk485-cr-p2-1-", (dir) => {
+    const sha = ensureGitHeadCommit(dir);
+    writeNumberedReceipt(dir, 1, baseReceipt(sha));
+    writeFileSync(join(dir, `${RUNNER_RECEIPT_RUN_PREFIX}2.json`), "", "utf8");
+    const r = resolveConsecutiveRunnerReceiptsVerdict({
+      resultContent: TWO_RUN_CLAIM_BODY,
+      harnessDir: dir,
+    });
+    assert.equal(r.ok, false);
+    assert.equal(r.code, RUNNER_RECEIPT_REJECT_REASON.MEASUREMENT_UNAVAILABLE);
+    assert.doesNotMatch(r.reason, /not valid JSON/);
+    assert.match(r.reason, /empty placeholder/);
+  });
+});
+
+test("(cr-machine-e1)★ 되돌림 변이: 실물 축(matchingReceiptCount)을 되돌려 발동 조건을 claimCount만으로 되돌리면 -- (cr-machine-1)의 P1-2 재현 표본이 다시 skip으로 접힌다(RED, load-bearing 증명)", async () => {
+  const src = readFileSync(RELAY_HANDSHAKE_PATH, "utf8");
+  const target =
+    "  const claimCount = countRunnerExitClaims(resultContent);\n  const matchingReceiptCount = actualHead.ok\n    ? countCurrentHeadNumberedReceipts(harnessDir, actualHead.sha)\n    : 0;\n  if (claimCount < 2 && matchingReceiptCount < 2) {\n    return { ok: true, skipped: true };\n  }";
+  assertExactlyOneMatch(src, target, "consecutive gate trigger condition");
+  const mutated = src.replace(
+    target,
+    "  const claimCount = countRunnerExitClaims(resultContent);\n  if (claimCount < 2) {\n    return { ok: true, skipped: true };\n  }",
+  );
+
+  await withFixtureDirAsync("hyk485-mut-cr-machine-e1-", async (dir) => {
+    const sha = ensureGitHeadCommit(dir);
+    writeNumberedReceipt(
+      dir,
+      1,
+      baseReceipt(sha, { finished_at: "2026-09-01 06:08:00 KST" }),
+    );
+    writeNumberedReceipt(
+      dir,
+      2,
+      baseReceipt(sha, { finished_at: "2026-09-01 06:09:00 KST" }),
+    );
+    const { mod, mutDir } = await importMutatedRelayHandshake(
+      mutated,
+      "cr-machine-e1",
+    );
+    try {
+      const r = mod.resolveConsecutiveRunnerReceiptsVerdict({
+        resultContent: "verdict: approved -- no 'exit=' idiom anywhere",
+        harnessDir: dir,
+      });
+      assert.equal(
+        r.skipped,
+        true,
+        "RED: with the trigger reverted to claimCount-only, real 2-receipt machine evidence is wrongly skipped again (the exact P1-2 reproduction)",
+      );
+    } finally {
+      rmSync(mutDir, { recursive: true, force: true });
+    }
+  });
+
+  const after = readFileSync(RELAY_HANDSHAKE_PATH, "utf8");
+  assert.equal(
+    after,
+    src,
+    "원본 relay-handshake.mjs는 한 바이트도 변경되지 않았다",
+  );
+});
+
+// ===========================================================================
 // HYK-477 §2-4: runner_status 소비자 -- MEASUREMENT_UNAVAILABLE_OOM은
 // runner_exit도 0이 아니므로(classifySpawnOutcome, exitCode:1), 이 검사가
 // 없으면 RED(「시험 실패」)로 조용히 접힌다. 이 축은 그 접힘을 막는다.

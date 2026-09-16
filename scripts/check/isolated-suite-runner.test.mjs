@@ -100,6 +100,17 @@ const noopWriteReceipt = () => ({ path: "(stubbed)", receipt: {} });
 const throwingReadFile = () => {
   throw new Error("stubbed: no tap file in this test");
 };
+// HYK-477 §2-3 2R: classifySpawnOutcome's ambiguous branch (non-zero status,
+// no signal, no error) now needs hasCompletion -- computed from whether the
+// tap file parses a completion summary (isolated-suite-runner.mjs's
+// hasTapCompletion). Tests below that assert a specific non-zero exit code
+// propagates verbatim are proving "a real run really failed" (not the
+// measurement-unavailable axis, which has its own dedicated coverage in
+// hyk473-runner-cap.test.mjs) -- they need a readFile that actually reports
+// a completion, or the new axis reclassifies them as MEASUREMENT_UNAVAILABLE_
+// OOM (exitCode forced to 1) instead of propagating the real status.
+const completedTapReadFile = () =>
+  "TAP version 13\n# tests 1\n# pass 0\n# fail 1\n# skipped 0\n";
 
 test("runIsolatedSuite: clones from repoRoot (not cwd), runs node --test in the clone's cwd, and propagates the child's exit code", () => {
   const calls = [];
@@ -123,7 +134,7 @@ test("runIsolatedSuite: clones from repoRoot (not cwd), runs node --test in the 
     spawn,
     log: (m) => logs.push(m),
     collectFiles: () => ["scripts/check/a.test.mjs"],
-    readFile: throwingReadFile,
+    readFile: completedTapReadFile,
     writeReceipt: noopWriteReceipt,
   });
   assert.equal(exitCode, 7);
@@ -179,12 +190,16 @@ function execFileForReceiptTests() {
 
 test("runIsolatedSuite: a RED run (non-zero exit) still gets a receipt written -- §2-1 explicitly forbids skipping the receipt on failure", () => {
   const receipts = [];
+  // HYK-477 §2-3 2R: a real RED run (node --test completed and reported a
+  // real failure) must classify as TESTS_FAILED, not MEASUREMENT_UNAVAILABLE_
+  // OOM -- completedTapReadFile makes that distinction observable here too
+  // (runnerStatus), not just via the coincidentally-matching exitCode.
   const exitCode = runIsolatedSuite({
     execFile: execFileForReceiptTests(),
     spawn: () => ({ status: 1 }),
     log: () => {},
     collectFiles: () => [],
-    readFile: throwingReadFile,
+    readFile: completedTapReadFile,
     writeReceipt: (payload) => {
       receipts.push(payload);
       return { path: "(stubbed)", receipt: {} };
@@ -193,6 +208,7 @@ test("runIsolatedSuite: a RED run (non-zero exit) still gets a receipt written -
   assert.equal(exitCode, 1);
   assert.equal(receipts.length, 1);
   assert.equal(receipts[0].runnerExit, 1);
+  assert.equal(receipts[0].runnerStatus, "TESTS_FAILED");
   assert.equal(receipts[0].headCommit, "deadbeef");
 });
 
@@ -268,7 +284,7 @@ test("runIsolatedSuite: a receipt-write failure is swallowed (logged, not thrown
     spawn: () => ({ status: 3 }),
     log: (m) => logs.push(m),
     collectFiles: () => [],
-    readFile: throwingReadFile,
+    readFile: completedTapReadFile,
     writeReceipt: () => {
       throw new Error("disk full");
     },

@@ -16,7 +16,7 @@
 // admission-completion-adapter.mjs가 정확히 같은 이유로 정적 import되지
 // 않고 이 저장소 전체가 "쓰는 쪽과 읽는 쪽은 별개 모듈" 관행을 쓰는 것과
 // 동일 근거(consumption-receipt-writer.mjs 헤더 참조).
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 export const RUNNER_RECEIPT_SCHEMA_VERSION = 2;
@@ -147,6 +147,37 @@ export function writeRunnerReceipt({
 export const RUNNER_RECEIPT_RUN_PREFIX = "runner-receipt-run";
 export const RUNNER_LOG_PREFIX = "full-runner-";
 const RUN_SLOT_MAX_ATTEMPTS = 10000;
+const RUN_SLOT_NAME_RE = new RegExp(
+  `^${RUNNER_RECEIPT_RUN_PREFIX}(\\d+)\\.json$`,
+);
+
+// HYK-485 §2-2 2R (검토 P2-2, rounds/REVIEW-r1.md): 소비 쪽(relay-
+// handshake.mjs)은 "가장 큰 N이 가장 최근"이라고 가정한다(entries.slice(-2)).
+// 시작점을 항상 1로 두고 "첫 빈 자리"를 wx로 차지하면, 중간 파일이 지워진
+// 뒤의 재할당이 그 빈 자리를 다시 채운다 -- 실제로는 다섯 번째 실행인데
+// 파일 이름은 2번이 된다(검토 재현: run2 삭제 후 재할당 -> 5가 아니라 2).
+// 그러면 소비 쪽의 "가장 큰 N" 가정이 깨져 실제로 가장 최근인 실행이
+// 조용히 무시된다. 시작점을 "지금 있는 가장 큰 N + 1"로 두면(비어 있으면
+// 1) 지워진 자리는 다시 채워지지 않고 번호가 항상 앞으로만 늘어나 그
+// 가정이 다시 참이 된다. 이 읽기와 그 다음 wx 배타 생성 사이에는 여전히
+// 경쟁이 있을 수 있지만(다른 프로세스가 그 사이 같은 N을 먼저 차지),
+// 그 경쟁은 아래 EEXIST 재시도 루프가 그대로 흡수한다 -- 이 함수가 이미
+// "경쟁에서 진 쪽은 다음 N으로"를 보장하므로 시작점이 어디든 유일성은
+// 깨지지 않는다(바뀌는 것은 "재사용 여부"뿐, "경쟁 안전성"은 무영향).
+function nextRunSlotStart(harnessDir, readdirFn) {
+  let names;
+  try {
+    names = readdirFn(harnessDir);
+  } catch {
+    return 1;
+  }
+  let max = 0;
+  for (const name of names) {
+    const m = RUN_SLOT_NAME_RE.exec(name);
+    if (m) max = Math.max(max, Number(m[1]));
+  }
+  return max + 1;
+}
 
 // §2-1 "회차 번호 <N>을 무엇으로 정할지" 근거: 기존 파일 개수를 세어
 // 정하는 방식은 "세기"와 "쓰기" 사이에 다른 프로세스가 끼어들 수 있는
@@ -164,10 +195,12 @@ export function allocateRunSlot({
   harnessDir,
   mkdirFn = mkdirSync,
   writeFileFn = writeFileSync,
+  readdirFn = readdirSync,
   maxAttempts = RUN_SLOT_MAX_ATTEMPTS,
 }) {
   mkdirFn(harnessDir, { recursive: true });
-  for (let n = 1; n <= maxAttempts; n++) {
+  const start = nextRunSlotStart(harnessDir, readdirFn);
+  for (let n = start; n < start + maxAttempts; n++) {
     const receiptPath = join(
       harnessDir,
       `${RUNNER_RECEIPT_RUN_PREFIX}${n}.json`,

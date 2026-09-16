@@ -1933,6 +1933,18 @@ function readNumberedRunnerReceipt(harnessDir, name) {
   } catch (err) {
     return { path, err: `unreadable (${err.message})` };
   }
+  // HYK-485 §2-2 2R (검토 P2-1, rounds/REVIEW-r1.md): allocateRunSlot이
+  // 배타 생성으로 남기는 빈("") 자리표시자 그대로다 -- 강제 종료(OOM)가
+  // 이 회차의 run을 `writeNumberedRunnerReceipt`가 덮어쓰기 «전»에
+  // 끊었다는, 이 코드가 스스로 만든 정직한 증거다(runner-receipt-
+  // writer.mjs:176 주석 "실제 내용은 run이 끝난 뒤 writeNumberedRunnerReceipt
+  // 가 덮어쓴다"). JSON.parse 실패와 같은 코드(INVALID)로 접으면 "파일이
+  // 깨졌다"와 "관측이 아예 없었다"를 같은 사실로 오인하게 된다 -- classify-
+  // SpawnOutcome 안에서 이미 한 번 고친 것과 같은 축의 왜곡(§2-3)이 소비
+  // 쪽에서 재발하는 것과 같은 모양이다.
+  if (raw === "") {
+    return { path, measurementUnavailable: true };
+  }
   let receipt;
   try {
     receipt = JSON.parse(raw);
@@ -1954,45 +1966,47 @@ function readNumberedRunnerReceipt(harnessDir, name) {
   return { path, receipt };
 }
 
-// §2-2 요구 3가지를 한 쌍(가장 최근 두 회차)에 대해 대조한다 -- (같은
-// harnessDir에 이전 라운드의 낡은 runner-receipt-run*.json이 남아 있는
-// 드문 경우까지 대비해 "가장 최근" 두 개만 본다, 오래된 파일이 섞여 들어와
-// 이 축을 오염시키지 않도록). ⓐ finished_at 서로 다름 ⓑ head_commit 실제
-// HEAD와 동일(둘 다) ⓒ fail 0(=runner_exit 0, 둘 다) -- 하나라도 어긋나면
-// 그 사유로 거부, 1개뿐이면 §2-2가 명시한 "측정 불능" 문장(다른 이유들과
-// 다른 code, RED/TESTS_FAILED로 접지 않는다, HYK-467 규율).
-export function resolveConsecutiveRunnerReceiptsVerdict({
-  resultContent,
-  harnessDir,
-}) {
-  const claimCount = countRunnerExitClaims(resultContent);
-  if (claimCount < 2) {
-    return { ok: true, skipped: true };
-  }
+// HYK-485 §2-2 2R (검토 P1-2, rounds/REVIEW-r1.md): 발동 조건이었던
+// claimCount(워커가 결과 파일에 칼럼 0 단독 'exit=<n>' 줄을 몇 번 적었는가)
+// 만으로는 이 라운드 자신의 결과 파일(coder-task.md §5의 실제 실행선)에서
+// «한 번도 발동하지 않는다» -- 옛 idiom(`npm test; echo "exit=$?"`)을
+// 요구하지 않는 실행선을 쓰는 라운드는 회차별 영수증을 실제로 2개 이상
+// 만들어도 그 사실이 결과 파일 산문에 반영되지 않기 때문이다. "기계
+// 산출물에 걸어라"는 권고대로, 이 라운드의 실제 HEAD와 head_commit이
+// 일치하는 회차별 영수증이 실물로 2개 이상 있으면 그 자체로도 발동한다
+// (OR로만 넓힌다 -- claimCount 축은 지우지 않는다: 지우면 옛 idiom을 실제로
+// 쓰는 라운드에서 "2회 주장 + 파일 미달"을 잡던 HYK-480 1R 재발 방지 탐지력
+// 이 사라진다). "이 라운드의 실제 HEAD와 일치"로 한정하는 이유는 회차
+// 번호가 브랜치 전체에서 재사용되지 않고 계속 누적되므로(coder-task.md §5
+// "run1~7 이미 쓰였다, 재사용 금지"), 단순히 "파일이 2개 이상 존재"만
+// 보면 러너와 무관한 미래 라운드에서도 이전 라운드가 남긴 낡은 영수증
+// 때문에 항상 참이 되어 매 라운드 이 축이 발동한다(검토 P2-3이 경고한
+// 과발동 그 자체) -- HEAD 일치로 한정하면 "이번 라운드가 실제로 만든
+// 회차"만 센다. 빈 자리표시자(0바이트, P2-1)는 head_commit을 읽을 수 없어
+// 이 카운트에 들지 않는다(발동 여부에만 영향 -- "안 한 것" 절에 명시).
+function countCurrentHeadNumberedReceipts(harnessDir, actualHeadSha) {
+  return listNumberedRunnerReceiptEntries(harnessDir).filter((e) => {
+    const r = readNumberedRunnerReceipt(harnessDir, e.name);
+    return (
+      !r.err &&
+      !r.measurementUnavailable &&
+      r.receipt.head_commit?.toLowerCase() === actualHeadSha
+    );
+  }).length;
+}
 
-  const actualHead = readActualWorktreeHeadCommit(harnessDir);
-  if (!actualHead.ok) {
-    return {
-      ok: false,
-      code: RUNNER_RECEIPT_REJECT_REASON.INVALID,
-      reason: `consecutive runner receipt gate (HYK-485): cannot resolve this worktree's actual HEAD to compare against the numbered receipts -- ${actualHead.reason}`,
-    };
-  }
-
-  const entries = listNumberedRunnerReceiptEntries(harnessDir);
-  if (entries.length < 2) {
-    return {
-      ok: false,
-      code: RUNNER_RECEIPT_REJECT_REASON.MEASUREMENT_UNAVAILABLE,
-      reason: `consecutive runner receipt gate (HYK-485): result content claims ${claimCount} separate runner executions (standalone 'exit=<n>' line appears ${claimCount} times) but only ${entries.length} numbered receipt(s) (${RUNNER_RECEIPT_RUN_PREFIX}<N>.json) exist under ${harnessDir} -- 측정 불능(measurement unavailable), NOT a test failure: this does not mean the tests failed, it means the machine cannot verify a second run actually happened (HYK-467 규율, HYK-480 1R 실사고 재발 방지) -- "2회 초록"으로 조용히 통과시키지 않는다`,
-    };
-  }
-
-  const lastTwo = entries.slice(-2);
-  const read = lastTwo.map((e) =>
-    readNumberedRunnerReceipt(harnessDir, e.name),
-  );
+// resolveConsecutiveRunnerReceiptsVerdict 자신의 분기 수를 줄이기 위해
+// (eslint complexity 게이트) 분리한 두 순회 -- 각각 "읽기 자체가 됐는가"와
+// "읽은 내용이 유효한가"라는 서로 다른 질문을 한다.
+function firstUnreadableReceiptVerdict(read) {
   for (const r of read) {
+    if (r.measurementUnavailable) {
+      return {
+        ok: false,
+        code: RUNNER_RECEIPT_REJECT_REASON.MEASUREMENT_UNAVAILABLE,
+        reason: `consecutive runner receipt gate (HYK-485): ${r.path} is an empty placeholder (allocateRunSlot's own reservation, HYK-485 §2-1) with no receipt content written yet -- 측정 불능(measurement unavailable), NOT invalid: this run was forcibly killed before it ever produced a result (review P2-1)`,
+      };
+    }
     if (r.err) {
       return {
         ok: false,
@@ -2001,7 +2015,10 @@ export function resolveConsecutiveRunnerReceiptsVerdict({
       };
     }
   }
+  return null;
+}
 
+function firstInvalidReceiptVerdict(read, actualHeadSha) {
   for (const { path, receipt } of read) {
     if (receipt.runner_status === MEASUREMENT_UNAVAILABLE_OOM_STATUS) {
       return {
@@ -2017,14 +2034,75 @@ export function resolveConsecutiveRunnerReceiptsVerdict({
         reason: `consecutive runner receipt gate (HYK-485): ${path} reports runner_exit=${receipt.runner_exit} (non-zero) -- refusing to consume a claimed 2-consecutive-green result when one of the two runs was not green`,
       };
     }
-    if (receipt.head_commit.toLowerCase() !== actualHead.sha) {
+    if (receipt.head_commit.toLowerCase() !== actualHeadSha) {
       return {
         ok: false,
         code: RUNNER_RECEIPT_REJECT_REASON.STALE,
-        reason: `consecutive runner receipt gate (HYK-485): ${path} head_commit '${receipt.head_commit}' does not match this worktree's actual HEAD '${actualHead.sha}'`,
+        reason: `consecutive runner receipt gate (HYK-485): ${path} head_commit '${receipt.head_commit}' does not match this worktree's actual HEAD '${actualHeadSha}'`,
       };
     }
   }
+  return null;
+}
+
+// §2-2 요구 3가지를 한 쌍(가장 최근 두 회차)에 대해 대조한다 -- (같은
+// harnessDir에 이전 라운드의 낡은 runner-receipt-run*.json이 남아 있는
+// 드문 경우까지 대비해 "가장 최근" 두 개만 본다, 오래된 파일이 섞여 들어와
+// 이 축을 오염시키지 않도록). ⓐ finished_at 서로 다름 ⓑ head_commit 실제
+// HEAD와 동일(둘 다) ⓒ fail 0(=runner_exit 0, 둘 다) -- 하나라도 어긋나면
+// 그 사유로 거부, 1개뿐이면 §2-2가 명시한 "측정 불능" 문장(다른 이유들과
+// 다른 code, RED/TESTS_FAILED로 접지 않는다, HYK-467 규율). 회차 번호가
+// 단조 증가만 한다는 전제(runner-receipt-writer.mjs의 allocateRunSlot,
+// HYK-485 §2-2 2R 수리 -- P2-2) 위에서, entries.slice(-2)(가장 큰 N 둘)를
+// 그대로 "가장 최근 두 회차"로 쓴다 -- 그 전제가 깨지면(빈 자리 재사용)
+// "가장 최근"이 조용히 낡은 회차로 바뀐다, 그래서 생산자 쪽에서 그 전제
+// 자체를 보장한다(재사용 금지).
+export function resolveConsecutiveRunnerReceiptsVerdict({
+  resultContent,
+  harnessDir,
+}) {
+  // HEAD is resolved unconditionally (not gated behind claimCount like
+  // resolveRunnerReceiptVerdict's sibling axis) because the receipts-leg
+  // below needs it just to COUNT matching evidence -- but a resolution
+  // failure must not itself reject a round that neither axis actually
+  // implicates (과차단 금지, 무회귀): treat "cannot resolve HEAD" as 0
+  // matching receipts for the skip decision, and only surface it as a
+  // real INVALID once we already know this round is NOT skipping.
+  const actualHead = readActualWorktreeHeadCommit(harnessDir);
+  const claimCount = countRunnerExitClaims(resultContent);
+  const matchingReceiptCount = actualHead.ok
+    ? countCurrentHeadNumberedReceipts(harnessDir, actualHead.sha)
+    : 0;
+  if (claimCount < 2 && matchingReceiptCount < 2) {
+    return { ok: true, skipped: true };
+  }
+
+  if (!actualHead.ok) {
+    return {
+      ok: false,
+      code: RUNNER_RECEIPT_REJECT_REASON.INVALID,
+      reason: `consecutive runner receipt gate (HYK-485): cannot resolve this worktree's actual HEAD to compare against the numbered receipts -- ${actualHead.reason}`,
+    };
+  }
+
+  const entries = listNumberedRunnerReceiptEntries(harnessDir);
+  if (entries.length < 2) {
+    return {
+      ok: false,
+      code: RUNNER_RECEIPT_REJECT_REASON.MEASUREMENT_UNAVAILABLE,
+      reason: `consecutive runner receipt gate (HYK-485): this round shows evidence of a 2-consecutive-green requirement (result content claims ${claimCount} separate runner executions and/or ${matchingReceiptCount} numbered receipt(s) match this worktree's actual HEAD) but only ${entries.length} numbered receipt(s) (${RUNNER_RECEIPT_RUN_PREFIX}<N>.json) exist under ${harnessDir} -- 측정 불능(measurement unavailable), NOT a test failure: this does not mean the tests failed, it means the machine cannot verify a second run actually happened (HYK-467 규율, HYK-480 1R 실사고 재발 방지) -- "2회 초록"으로 조용히 통과시키지 않는다`,
+    };
+  }
+
+  const lastTwo = entries.slice(-2);
+  const read = lastTwo.map((e) =>
+    readNumberedRunnerReceipt(harnessDir, e.name),
+  );
+  const unreadableVerdict = firstUnreadableReceiptVerdict(read);
+  if (unreadableVerdict) return unreadableVerdict;
+
+  const invalidVerdict = firstInvalidReceiptVerdict(read, actualHead.sha);
+  if (invalidVerdict) return invalidVerdict;
 
   const [a, b] = read;
   if (a.receipt.finished_at === b.receipt.finished_at) {

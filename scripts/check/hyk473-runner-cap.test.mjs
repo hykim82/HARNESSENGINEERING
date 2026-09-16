@@ -277,14 +277,42 @@ test("classifySpawnOutcome: status 0, no signal, no error -> OK", () => {
   );
 });
 
-test("classifySpawnOutcome: non-zero status, no signal, no error -> TESTS_FAILED (a real run that really failed)", () => {
+test("classifySpawnOutcome: non-zero status, no signal, no error, node --test reported a completion summary -> TESTS_FAILED (a real run that really failed)", () => {
   assert.deepEqual(
-    classifySpawnOutcome({ status: 3, signal: null, error: null }),
+    classifySpawnOutcome(
+      { status: 3, signal: null, error: null },
+      { hasCompletion: true },
+    ),
     {
       status: RUNNER_STATUS.TESTS_FAILED,
       exitCode: 3,
     },
   );
+});
+
+// HYK-477 §2-3 2R (검토 P1-1 재반려 재현, rounds/REVIEW-r1.md): Windows에는
+// POSIX 시그널이 없어 강제 종료가 result.status에 숫자 0xFFFFFFFF로 들어오고
+// signal/error는 둘 다 비어 있다 -- 이 저장소가 스스로 쓴 영수증
+// (.harness/runner-receipt-run5.json)의 정확한 모양. hasCompletion이 없으면
+// (=tap 요약을 못 읽었으면, 진짜 강제종료가 정확히 이 모양이다) 여전히
+// MEASUREMENT_UNAVAILABLE_OOM이어야 한다 -- status 목록에 기대지 않는 축.
+test("classifySpawnOutcome: the Windows forced-kill shape this repo actually produces (status 0xFFFFFFFF, no signal, no error), no tap completion -> MEASUREMENT_UNAVAILABLE_OOM, NOT TESTS_FAILED (HYK-477 §2-3 2R fix -- previously this fell through to TESTS_FAILED, review P1-1)", () => {
+  const outcome = classifySpawnOutcome({
+    status: 4294967295,
+    signal: null,
+    error: null,
+  });
+  assert.equal(outcome.status, RUNNER_STATUS.MEASUREMENT_UNAVAILABLE_OOM);
+  assert.notEqual(outcome.status, RUNNER_STATUS.TESTS_FAILED);
+});
+
+test("classifySpawnOutcome: the SAME Windows-shaped non-zero status, but node --test DID report a completion summary (a real failing test can exit non-zero on Windows too) -> TESTS_FAILED, detection not lost", () => {
+  const outcome = classifySpawnOutcome(
+    { status: 1, signal: null, error: null },
+    { hasCompletion: true },
+  );
+  assert.equal(outcome.status, RUNNER_STATUS.TESTS_FAILED);
+  assert.notEqual(outcome.status, RUNNER_STATUS.MEASUREMENT_UNAVAILABLE_OOM);
 });
 
 test("classifySpawnOutcome: a signal is set (status null) -> MEASUREMENT_UNAVAILABLE_OOM, never TESTS_FAILED, decided on .signal alone (not on any message text)", () => {
@@ -340,9 +368,16 @@ test("classifySpawnOutcome: a REAL child forcibly killed via spawnSync timeout+S
   assert.notEqual(outcome.status, RUNNER_STATUS.TESTS_FAILED);
 });
 
-test("classifySpawnOutcome: a REAL child that exits non-zero entirely on its own (no kill involved) classifies as TESTS_FAILED -- same-situation contrast proving the two are not conflated", () => {
+test("classifySpawnOutcome: a REAL child that exits non-zero entirely on its own (no kill involved), node --test reported a completion -> classifies as TESTS_FAILED -- same-situation contrast proving the two are not conflated", () => {
   const result = spawnSync(process.execPath, ["-e", "process.exit(3)"]);
-  const outcome = classifySpawnOutcome(result);
+  // this synthetic child is not node --test itself (§3 proof 2 scopes the
+  // REAL-child tests to a trivial one-liner, not the real suite) -- the
+  // signal/no-kill axis is what THIS test proves; hasCompletion:true stands
+  // in for "node --test, in production, would have written a tap summary
+  // for a run that really ran to completion" (that axis is proven on its
+  // own, above, via hasTapCompletion's real tap-file wiring in the
+  // full-pipeline test below).
+  const outcome = classifySpawnOutcome(result, { hasCompletion: true });
   assert.equal(outcome.status, RUNNER_STATUS.TESTS_FAILED);
   assert.notEqual(outcome.status, RUNNER_STATUS.MEASUREMENT_UNAVAILABLE_OOM);
 });
@@ -380,14 +415,26 @@ test("runIsolatedSuite: a REAL synthetically forced-killed child produces a rece
   assert.notEqual(exitCode, 0);
 });
 
-test("runIsolatedSuite: a REAL child failing entirely on its own (same pipeline, no kill) produces a receipt with runnerStatus TESTS_FAILED -- the same-situation contrast at the full-pipeline level", () => {
+// HYK-477 §2-3 2R: unlike the forced-kill test above, this run's outcome now
+// depends on hasCompletion (status=3, no signal, no error is the "ambiguous"
+// branch) -- so this fixture's readFile must actually return a completion
+// summary (a real node --test run that really failed DOES write one), not
+// throwingReadFile. If it still threw here, hasTapCompletion would report
+// "no completion" and this would wrongly classify as MEASUREMENT_UNAVAILABLE
+// instead of TESTS_FAILED -- exactly the mutation this file's M-series
+// (below, isolated-suite-runner.test.mjs) proves RED for.
+const completedTapSummary =
+  "TAP version 13\n# tests 1\n# pass 0\n# fail 1\n# skipped 0\n";
+const tapCompletionReadFile = () => completedTapSummary;
+
+test("runIsolatedSuite: a REAL child failing entirely on its own (same pipeline, no kill), a real tap completion summary present -> produces a receipt with runnerStatus TESTS_FAILED -- the same-situation contrast at the full-pipeline level", () => {
   const receipts = [];
   const exitCode = runIsolatedSuite({
     execFile: execFileStub(),
     spawn: () => spawnSync(process.execPath, ["-e", "process.exit(3)"]),
     log: () => {},
     collectFiles: () => [],
-    readFile: throwingReadFile,
+    readFile: tapCompletionReadFile,
     writeReceipt: (payload) => {
       receipts.push(payload);
       return { path: "(stubbed)", receipt: {} };
@@ -401,6 +448,28 @@ test("runIsolatedSuite: a REAL child failing entirely on its own (same pipeline,
     RUNNER_STATUS.MEASUREMENT_UNAVAILABLE_OOM,
   );
   assert.equal(exitCode, 3);
+});
+
+test("runIsolatedSuite: a REAL child that exits non-zero on its own, but no tap completion summary was ever written (e.g. the Windows 0xFFFFFFFF shape this repo actually produces) -> produces a receipt with runnerStatus MEASUREMENT_UNAVAILABLE_OOM, NOT TESTS_FAILED (review P1-1, full-pipeline level)", () => {
+  const receipts = [];
+  runIsolatedSuite({
+    execFile: execFileStub(),
+    spawn: () => ({ status: 4294967295, signal: null, error: null }),
+    log: () => {},
+    collectFiles: () => [],
+    readFile: throwingReadFile,
+    writeReceipt: (payload) => {
+      receipts.push(payload);
+      return { path: "(stubbed)", receipt: {} };
+    },
+    allocateRunSlotFn: noopAllocateRunSlot,
+    writeNumberedReceipt: noopWriteNumberedReceipt,
+  });
+  assert.equal(
+    receipts[0].runnerStatus,
+    RUNNER_STATUS.MEASUREMENT_UNAVAILABLE_OOM,
+  );
+  assert.notEqual(receipts[0].runnerStatus, RUNNER_STATUS.TESTS_FAILED);
 });
 
 test("runIsolatedSuite: a REAL clean child (status 0) produces a receipt with runnerStatus OK -- the third leg of the same contrast", () => {
