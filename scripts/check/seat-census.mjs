@@ -22,6 +22,7 @@
 
 import { readFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
+import { readRegistryDiagnostics } from "./seat-origin-registry.mjs";
 
 export const AGENT_BANNER_MARKERS =
   /gpt-5\.6|Sonnet|Opus|Fable|\[CODER\]|\[REVIEW\]|bypass permissions|MCP startup|weekly \d/i;
@@ -39,7 +40,16 @@ export const SEAT_KIND = Object.freeze({
 
 export function classifySeatText(text) {
   const trimmed = String(text ?? "").trim();
-  if (trimmed === "") return SEAT_KIND.EMPTY_SHELL;
+  // HYK-464 추기 수리: "증거 없음"(preview가 비었다 -- 아직 못 읽었거나
+  // 스크롤백이 유실됐을 수 있다)과 "빈 셸이라는 증거"(프롬프트 한 줄뿐인
+  // 스크롤백을 실제로 읽었다)는 다르다. 예전 코드는 이 둘을 뭉뚱그려
+  // trimmed===""을 EMPTY_SHELL로 단정했는데, 실측(2026-09-16 ORCH-71)으로
+  // 살아 있는 ORCH 에이전트 좌석의 preview가 비어 있었던 사례가 나왔다 --
+  // 그 좌석을 "빈 셸"로 잘못 접으면 사람이 그 근거로 살아 있는 좌석을
+  // 끌 수 있다(되돌릴 수 없다). 그래서 증거가 전혀 없으면 AMBIGUOUS로
+  // 정직하게 남긴다(아래 fallthrough) -- "빈 셸" 판정은 실제 프롬프트
+  // 텍스트(BARE_PROMPT_LINE)를 읽었을 때만 내린다.
+  if (trimmed === "") return SEAT_KIND.AMBIGUOUS;
   if (AGENT_BANNER_MARKERS.test(trimmed)) return SEAT_KIND.AGENT;
   // "완전히 빈 셸" = 스크롤백 전체가 프롬프트 한 줄뿐(다른 줄 없음). 여러
   // 줄이더라도 전부 빈 프롬프트 반복이면 여전히 미사용 셸이다.
@@ -78,8 +88,9 @@ export function formatCensus(census) {
     `좌석 수(정본): 전체=${census.total} · 에이전트=${census.agentCount} · 빈셸=${census.emptyShellCount} · 미상=${census.ambiguousCount}`,
   ];
   for (const r of census.rows) {
+    const registryTag = r.registryNote ? "  [registry-guard]" : "";
     lines.push(
-      `  - [${r.kind}] ${r.handle}  worktree=${r.worktreePath}  title=${r.title}`,
+      `  - [${r.kind}] ${r.handle}  worktree=${r.worktreePath}  title=${r.title}${registryTag}`,
     );
   }
   if (census.ambiguousCount > 0) {
@@ -89,6 +100,20 @@ export function formatCensus(census) {
         "`orca terminal read --terminal <handle> --limit 400 --json`로 더 " +
         "긴 이력을 읽어 사람이 확인하라. --enrich 플래그로 이 스크립트가 " +
         "직접 그 조회를 하게 할 수도 있다.)",
+    );
+  }
+  if (census.registryOverrideCount > 0) {
+    lines.push(
+      `  (등록부 보강: ${census.registryOverrideCount}건이 빈 셸로 보였지만 ` +
+        "seat-origin-registry에 등록된 pane이라 미상으로 재분류됐다 -- " +
+        "각 행의 [registry-guard] 표시 참고.)",
+    );
+  }
+  if (census.registryCorruptedLineCount > 0) {
+    lines.push(
+      `⛔ 등록부(seat-origin-registry) 손상 줄 ${census.registryCorruptedLineCount}건 ` +
+        "발견 -- 그만큼의 등록 기록이 조회에서 누락됐을 수 있다(P2-1: 등록 " +
+        "실패를 조용히 지나가지 않게 표시한다). 사람이 확인하라.",
     );
   }
   return lines.join("\n");
@@ -159,11 +184,51 @@ function enrichAmbiguous(census, { orcaBin = "orca", limit = 400 } = {}) {
   return recountCensus(census);
 }
 
+// HYK-464 §2 범위 A 항목 2 -- 등록부 교차 보강: seat-origin-registry에
+// 그 pane key가 등록돼 있으면(=정본 런처 orca-worker-seat.ps1이 띄운
+// 좌석이면) 그 좌석은 빈 셸일 수 없다. classifySeatText 단독은 preview
+// 스냅숏 하나만 보므로(§2-1 수리 이후에도), 마침 그 스냅숏이 우연히
+// BARE_PROMPT_LINE 모양이거나(대화형 UI 오버레이라 실제 pty 스크롤백이
+// 프롬프트만 남는 경우, 실측 ORCH-71 원인 정황) --enrich가 긴 스크롤백을
+// 읽고서도 같은 모양으로 재분류하면 여전히 "빈 셸"로 오판될 수 있다 --
+// 그래서 이 보강은 --enrich 뒤에도 적용해 두 경로 다 방어한다(runSeatCensusCli
+// 참고). 등록부에 없다고 "빈 셸"로 단정하지는 않는다(그건 §3 orphan
+// 판별 몫 -- seat-orphan-detect.mjs) -- 이 함수는 EMPTY_SHELL을
+// AMBIGUOUS로 "내리는" 방향으로만 쓴다(fail-closed 강화, 반대 방향 없음).
+export function applyRegistryGuard(census, registryPath) {
+  if (!registryPath) return census;
+  const { records, corruptedLineCount } = readRegistryDiagnostics(registryPath);
+  const registeredPaneKeys = new Set(records.map((r) => r.paneKey));
+  let overrideCount = 0;
+  for (const row of census.rows) {
+    if (
+      row.kind === SEAT_KIND.EMPTY_SHELL &&
+      row.paneKey &&
+      registeredPaneKeys.has(row.paneKey)
+    ) {
+      row.kind = SEAT_KIND.AMBIGUOUS;
+      row.registryNote =
+        "REGISTERED_PANE_CANNOT_BE_EMPTY_SHELL: preview looked like a bare " +
+        "shell prompt, but this pane key appears in seat-origin-registry " +
+        "(launched by orca-worker-seat.ps1) -- downgraded to ambiguous for " +
+        "human check instead of trusting the empty-shell read.";
+      overrideCount += 1;
+    }
+  }
+  recountCensus(census);
+  census.registryOverrideCount = overrideCount;
+  // P2-1: 등록 실패(=손상된 줄)가 조용히 지나가지 않도록 개수를 census에
+  // 실어 formatCensus/--json 양쪽 출력에 드러낸다.
+  census.registryCorruptedLineCount = corruptedLineCount;
+  return census;
+}
+
 function parseArgs(argv) {
   const out = {
     terminalListFile: null,
     enrich: false,
     orcaBin: "orca",
+    registryPath: null,
     json: false,
     help: false,
   };
@@ -173,14 +238,18 @@ function parseArgs(argv) {
     else if (a === "--terminal-list-file") out.terminalListFile = argv[++i];
     else if (a === "--enrich") out.enrich = true;
     else if (a === "--orca-bin") out.orcaBin = argv[++i];
+    else if (a === "--registry-path") out.registryPath = argv[++i];
     else if (a === "--json") out.json = true;
   }
   return out;
 }
 
 const USAGE =
-  "Usage: node seat-census.mjs [--terminal-list-file <path>] [--enrich] [--orca-bin <path>] [--json]\n" +
+  "Usage: node seat-census.mjs [--terminal-list-file <path>] [--enrich] [--orca-bin <path>] [--registry-path <path>] [--json]\n" +
   "Without --terminal-list-file, runs `orca terminal list --json` live.\n" +
+  "--registry-path (optional): cross-check seat-origin-registry -- a pane\n" +
+  "registered there can never be reported empty_shell (downgraded to\n" +
+  "ambiguous instead); a corrupted registry line count is surfaced too.\n" +
   'Classifies every live seat as agent / empty_shell / ambiguous -- single source of truth for "seat count N".';
 
 export function runSeatCensusCli(argv, { orcaBin: defaultOrcaBin } = {}) {
@@ -207,6 +276,9 @@ export function runSeatCensusCli(argv, { orcaBin: defaultOrcaBin } = {}) {
   let census = censusSeats(terminals);
   if (parsed.enrich && !parsed.terminalListFile) {
     census = enrichAmbiguous(census, { orcaBin: parsed.orcaBin });
+  }
+  if (parsed.registryPath) {
+    census = applyRegistryGuard(census, parsed.registryPath);
   }
   return { ok: true, census, json: parsed.json };
 }

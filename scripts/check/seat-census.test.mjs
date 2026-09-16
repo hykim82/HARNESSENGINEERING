@@ -10,9 +10,14 @@ import {
   classifySeat,
   censusSeats,
   formatCensus,
+  applyRegistryGuard,
   SEAT_KIND,
   runSeatCensusCli,
 } from "./seat-census.mjs";
+import {
+  appendLaunchRecord,
+  buildLaunchRecord,
+} from "./seat-origin-registry.mjs";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const SCRIPT_PATH = join(REPO_ROOT, "scripts", "check", "seat-census.mjs");
@@ -57,9 +62,16 @@ test("classifySeatText: bare single-line prompt -> empty_shell (D12 auto-created
   );
 });
 
-test("classifySeatText: empty string -> empty_shell (never produced output)", () => {
-  assert.equal(classifySeatText(""), SEAT_KIND.EMPTY_SHELL);
-  assert.equal(classifySeatText("   "), SEAT_KIND.EMPTY_SHELL);
+// HYK-464 추기 수리(fail-closed 되돌리기): preview가 비었다는 사실은
+// "증거 없음"이지 "빈 셸이라는 증거"가 아니다 -- 실측(2026-09-16
+// ORCH-71)으로 살아 있는 ORCH 에이전트 좌석의 preview가 빈 문자열이었던
+// 사례가 나왔다. 예전 버전은 이 케이스를 EMPTY_SHELL로 단정해 "꺼도
+// 된다"는 거짓 확신을 만들었다(HYK-467 계열 재현) -- 이제 AMBIGUOUS로
+// 정직하게 남긴다.
+test("classifySeatText: empty string -> ambiguous (no evidence, NOT proof of empty shell)", () => {
+  assert.equal(classifySeatText(""), SEAT_KIND.AMBIGUOUS);
+  assert.equal(classifySeatText("   "), SEAT_KIND.AMBIGUOUS);
+  assert.equal(classifySeatText(undefined), SEAT_KIND.AMBIGUOUS);
 });
 
 test("classifySeatText: fresh agent seat with recognizable banner -> agent", () => {
@@ -172,6 +184,91 @@ test("censusSeats: counts agent/empty_shell/ambiguous and totals match the real 
   assert.equal(census.rows[0].paneKey, "ta:la");
 });
 
+// HYK-464 §2 범위 A 항목 2 + 시험 ⓓ: 등록부에 있는 pane key + 빈 셸처럼
+// 보이는 preview -> 에이전트 또는 미상(빈 셸 아님), 근거가 출력에 남는다.
+test("applyRegistryGuard: a registered pane key can never be reported empty_shell (downgraded to ambiguous, reason surfaces)", () => {
+  withTempDir((dir) => {
+    const registryPath = join(dir, "seat-launch-registry.jsonl");
+    appendLaunchRecord(
+      registryPath,
+      buildLaunchRecord({ paneKey: "reg-tab:reg-leaf", role: "ORCH" }),
+    );
+    const census = censusSeats([
+      {
+        handle: "term_registered",
+        worktreePath: "wt1",
+        title: "t1",
+        tabId: "reg-tab",
+        leafId: "reg-leaf",
+        preview: REAL_EMPTY_SHELL_PREVIEW, // looks like a bare shell prompt
+      },
+    ]);
+    assert.equal(census.rows[0].kind, SEAT_KIND.EMPTY_SHELL); // before guard
+    const guarded = applyRegistryGuard(census, registryPath);
+    assert.equal(guarded.rows[0].kind, SEAT_KIND.AMBIGUOUS); // NOT empty_shell
+    assert.equal(guarded.emptyShellCount, 0);
+    assert.equal(guarded.ambiguousCount, 1);
+    assert.match(
+      guarded.rows[0].registryNote,
+      /REGISTERED_PANE_CANNOT_BE_EMPTY_SHELL/,
+    );
+    assert.match(formatCensus(guarded), /registry-guard/); // rationale visible in output
+  });
+});
+
+test("applyRegistryGuard: an unregistered pane key is left alone (no false negative widening) and a null registryPath is a no-op", () => {
+  withTempDir((dir) => {
+    const registryPath = join(dir, "seat-launch-registry.jsonl");
+    appendLaunchRecord(
+      registryPath,
+      buildLaunchRecord({ paneKey: "some-other-pane", role: "CODER" }),
+    );
+    const census = censusSeats([
+      {
+        handle: "term_unregistered",
+        tabId: "ta",
+        leafId: "la",
+        preview: REAL_EMPTY_SHELL_PREVIEW,
+      },
+    ]);
+    const guarded = applyRegistryGuard(census, registryPath);
+    assert.equal(guarded.rows[0].kind, SEAT_KIND.EMPTY_SHELL); // untouched
+    assert.equal(guarded.registryOverrideCount, 0);
+
+    const untouched = applyRegistryGuard(
+      censusSeats([
+        {
+          handle: "term_x",
+          tabId: "tx",
+          leafId: "lx",
+          preview: REAL_EMPTY_SHELL_PREVIEW,
+        },
+      ]),
+      null,
+    );
+    assert.equal(untouched.rows[0].kind, SEAT_KIND.EMPTY_SHELL);
+    assert.equal(untouched.registryOverrideCount, undefined);
+  });
+});
+
+// HYK-464 §3 범위 B (P2-1): 등록 실패(손상된 줄)가 조용히 지나가지 않는다.
+test("applyRegistryGuard: P2-1 -- corrupted registry lines are surfaced, not silently dropped", () => {
+  withTempDir((dir) => {
+    const registryPath = join(dir, "seat-launch-registry.jsonl");
+    writeFileSync(
+      registryPath,
+      '{"paneKey":"good:1","role":"CODER"}\n{not json at all\n',
+      "utf8",
+    );
+    const census = censusSeats([
+      { handle: "term_a", tabId: "ta", leafId: "la", preview: "" },
+    ]);
+    const guarded = applyRegistryGuard(census, registryPath);
+    assert.equal(guarded.registryCorruptedLineCount, 1);
+    assert.match(formatCensus(guarded), /손상 줄 1건/);
+  });
+});
+
 test("formatCensus: human-readable summary line names what was counted", () => {
   const census = censusSeats([
     {
@@ -256,5 +353,51 @@ test("CLI end-to-end: --json prints machine-readable census", () => {
     const parsed = JSON.parse(stdout.trim());
     assert.equal(parsed.total, 1);
     assert.equal(parsed.emptyShellCount, 1);
+  });
+});
+
+// HYK-464 시험 ⓓ, CLI 통합 층: --terminal-list-file + --registry-path를
+// 함께 넘기면(둘 다 오프라인 파일 기반이라 CI-safe) 등록된 pane이 빈
+// 셸로 보고되지 않는다.
+test("CLI end-to-end: --registry-path downgrades a registered-but-bare-looking pane away from empty_shell", () => {
+  withTempDir((dir) => {
+    const terminalsFile = join(dir, "terminals.json");
+    const registryPath = join(dir, "seat-launch-registry.jsonl");
+    writeFileSync(
+      terminalsFile,
+      JSON.stringify({
+        result: {
+          terminals: [
+            {
+              handle: "term_registered",
+              tabId: "rt",
+              leafId: "rl",
+              preview: REAL_EMPTY_SHELL_PREVIEW,
+            },
+          ],
+        },
+      }),
+      "utf8",
+    );
+    appendLaunchRecord(
+      registryPath,
+      buildLaunchRecord({ paneKey: "rt:rl", role: "ORCH" }),
+    );
+    const stdout = execFileSync(
+      process.execPath,
+      [
+        SCRIPT_PATH,
+        "--terminal-list-file",
+        terminalsFile,
+        "--registry-path",
+        registryPath,
+        "--json",
+      ],
+      { encoding: "utf8" },
+    );
+    const parsed = JSON.parse(stdout.trim());
+    assert.equal(parsed.emptyShellCount, 0);
+    assert.equal(parsed.ambiguousCount, 1);
+    assert.equal(parsed.registryOverrideCount, 1);
   });
 });
