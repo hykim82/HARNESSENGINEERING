@@ -32,7 +32,9 @@ import { cpus, tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   RUNNER_STATUS,
+  allocateRunSlot,
   parseTapSummaryCounts,
+  writeNumberedRunnerReceipt,
   writeRunnerReceipt,
 } from "./runner-receipt-writer.mjs";
 
@@ -129,7 +131,27 @@ const OVERRIDE_CONCURRENCY_REASON = "explicit --concurrency override";
 // a forced kill sets result.signal (e.g. "SIGKILL") and usually also
 // result.error (e.g. ETIMEDOUT) with result.status left null; a real
 // non-zero exit sets only result.status, leaving signal/error null/absent.
-export function classifySpawnOutcome(result) {
+//
+// HYK-477 §2-3 2R (검토 P1-1 재반려, 2026-09-16, rounds/REVIEW-r1.md): 이
+// 저장소가 실제로 겪는 강제 종료는 위 `result.status == null` 분기로 잡히지
+// 않는다 -- Windows에는 POSIX 시그널이 없어 spawnSync가 강제 종료를
+// result.signal이 아니라 result.status에 숫자(0xFFFFFFFF 등)로 채워
+// 돌려주기 때문이다(같은 커밋이 스스로 쓴 영수증이 증거:
+// .harness/runner-receipt-run5.json -- runner_exit 4294967295 ·
+// runner_status TESTS_FAILED · tests/pass/fail/skip 전부 null, 짝 로그
+// full-runner-5.log는 요약 줄 없이 끊김). 그래서 "status가 null/undefined
+// 인가"만 보던 분류기는 이 플랫폼의 진짜 강제종료를 하나도 못 잡고
+// TESTS_FAILED로 접었다.
+//
+// 검토 권고 ⓐ(가장 강한 축, 종료코드 목록에 기대지 않는다)로 바꾼다:
+// signal/error도 없고 status도 0이 아닌 경우, "node --test 자신이 tap
+// reporter에 완료 요약 줄(`# tests N`)을 남겼는가"(hasCompletion, 호출자가
+// 실제 tap 파일을 읽어 판단해 넘긴다 -- 아래 hasTapCompletion)로 가른다.
+// 진짜 시험 실패는 개별 테스트가 실패해도 node --test 프로세스 자체는
+// 끝까지 돌아 요약까지 쓰므로(관찰 사실), 이 신호는 "정말 실패했다"와
+// "완료 결과 자체가 없다"를 종료코드의 플랫폼별 모양과 무관하게 가른다 --
+// Windows의 0xFFFFFFFF든 다른 어떤 비정상 코드든 목록을 만들 필요가 없다.
+export function classifySpawnOutcome(result, { hasCompletion = false } = {}) {
   if (result.signal) {
     return { status: RUNNER_STATUS.MEASUREMENT_UNAVAILABLE_OOM, exitCode: 1 };
   }
@@ -139,7 +161,24 @@ export function classifySpawnOutcome(result) {
   if (result.status === 0) {
     return { status: RUNNER_STATUS.OK, exitCode: 0 };
   }
+  if (!hasCompletion) {
+    return { status: RUNNER_STATUS.MEASUREMENT_UNAVAILABLE_OOM, exitCode: 1 };
+  }
   return { status: RUNNER_STATUS.TESTS_FAILED, exitCode: result.status ?? 1 };
+}
+
+// HYK-477 §2-3 2R: the input classifySpawnOutcome's hasCompletion needs --
+// isolated into its own function so a tap-read failure (no file, unreadable,
+// no summary line) degrades to "no completion" rather than throwing and
+// losing the real spawn outcome. Reuses parseTapSummaryCounts (the same
+// parser emitRunnerReceipt uses for the receipt's own counts) so both call
+// sites agree on what "a completion summary" looks like.
+function hasTapCompletion({ tapPath, readFile }) {
+  try {
+    return parseTapSummaryCounts(readFile(tapPath, "utf8")).tests != null;
+  } catch {
+    return false;
+  }
 }
 
 // The one-line disclosure required by task §3-4: which commit was tested,
@@ -168,14 +207,27 @@ function repoRootOf(cwd, execFile) {
 // must never suppress -- the suite's own real exit code (same "never
 // throws past this point" posture as consumption-receipt-writer.mjs's
 // writeConsumptionReceipt).
+//
+// HYK-485 §2-1: also writes a run-scoped numbered copy (allocateRunSlot's
+// receiptPath, computed BEFORE spawn so its sibling logPath can ride node
+// --test's own argv -- see runIsolatedSuite/spawnSuiteInClone) alongside
+// the unconditionally-preserved "latest" write above. Both writes share the
+// SAME counts/finishedAtMs (computed once here) so the numbered copy is a
+// byte-for-byte-except-path snapshot of the same run, not two independently
+// timed observations of it. Guarded in its OWN try/catch, separate from the
+// latest-file write above: a numbered-copy failure must not affect (and
+// must not be masked by) the latest write's own success/failure, and
+// neither may ever affect the suite's real exit code.
 function emitRunnerReceipt({
   root,
   sha,
   runnerExit,
   runnerStatus,
   tapPath,
+  runSlot,
   readFile,
   writeReceipt,
+  writeNumberedReceipt = writeNumberedRunnerReceipt,
   nowMs,
   log,
 }) {
@@ -187,6 +239,7 @@ function emitRunnerReceipt({
       `[isolated-suite-runner] WARNING: could not read tap summary at ${tapPath} (${err.message}) -- receipt will carry null counts`,
     );
   }
+  const finishedAtMs = nowMs();
   try {
     const { path } = writeReceipt({
       harnessDir: join(root, ".harness"),
@@ -194,12 +247,28 @@ function emitRunnerReceipt({
       runnerStatus,
       counts,
       headCommit: sha,
-      finishedAtMs: nowMs(),
+      finishedAtMs,
     });
     log(`[isolated-suite-runner] runner receipt written -> ${path}`);
   } catch (err) {
     log(
       `[isolated-suite-runner] WARNING: failed to write runner receipt (${err.message}) -- consumption-side fail-closed gate (relay-handshake.mjs) will treat this as a missing receipt`,
+    );
+  }
+  if (!runSlot.receiptPath) return;
+  try {
+    const { path } = writeNumberedReceipt({
+      receiptPath: runSlot.receiptPath,
+      runnerExit,
+      runnerStatus,
+      counts,
+      headCommit: sha,
+      finishedAtMs,
+    });
+    log(`[isolated-suite-runner] per-run numbered receipt written -> ${path}`);
+  } catch (err) {
+    log(
+      `[isolated-suite-runner] WARNING: failed to write numbered receipt run${runSlot.runNumber} (${err.message}) -- HYK-485 §2-2's per-round comparison will see this run's evidence as missing, i.e. measurement-unavailable, not as a fabricated pass`,
     );
   }
 }
@@ -209,16 +278,34 @@ function emitRunnerReceipt({
 // spec reporter (HYK-411) -- `node --test` supports repeated
 // --test-reporter/--test-reporter-destination pairs, so both fire from one
 // process without disturbing the real-time inherited stdio a human watches.
-function buildNodeTestArgs(files, tapPath, concurrency) {
-  return [
+//
+// HYK-485 §2-1: a THIRD reporter pair (spec -> logPath, when logPath is
+// given) rides the same mechanism to produce the persistent "러너 stdout
+// 로그" (full-runner-<N>.log) -- same format as what the human sees live on
+// stdout, written directly by node --test itself to a durable file. This
+// was chosen deliberately over capturing/teeing the child's stdio in this
+// process: switching spawnSuiteInClone's stdio away from "inherit" (e.g. to
+// "pipe" + manual re-emit) would buffer output until the child exits,
+// losing the real-time view a human watches during a run that can take
+// minutes -- a regression this task's scope does not ask for and §5 does
+// not authorize. Adding a reporter destination changes nothing about
+// stdio/spawn semantics at all: node --test writes it as a plain side
+// effect of its own three-reporter fan-out, `stdio: "inherit"` below is
+// completely untouched.
+function buildNodeTestArgs(files, tapPath, concurrency, logPath) {
+  const args = [
     "--test",
     `--test-concurrency=${concurrency}`,
     "--test-reporter=spec",
     "--test-reporter-destination=stdout",
     "--test-reporter=tap",
     `--test-reporter-destination=${tapPath}`,
-    ...files,
   ];
+  if (logPath) {
+    args.push("--test-reporter=spec", `--test-reporter-destination=${logPath}`);
+  }
+  args.push(...files);
+  return args;
 }
 
 // Runs the suite inside the already-prepared clone and returns its
@@ -226,10 +313,18 @@ function buildNodeTestArgs(files, tapPath, concurrency) {
 // see classifySpawnOutcome). Isolated into its own function so
 // runIsolatedSuite's own branching stays low (max-lines-per-function/
 // complexity gate, coder-task.md quality bar).
-function spawnSuiteInClone({ spawn, cloneDir, files, tapPath, concurrency }) {
+function spawnSuiteInClone({
+  spawn,
+  cloneDir,
+  files,
+  tapPath,
+  concurrency,
+  logPath,
+  readFile,
+}) {
   const result = spawn(
     process.execPath,
-    buildNodeTestArgs(files, tapPath, concurrency),
+    buildNodeTestArgs(files, tapPath, concurrency, logPath),
     {
       cwd: cloneDir,
       stdio: "inherit",
@@ -246,7 +341,9 @@ function spawnSuiteInClone({ spawn, cloneDir, files, tapPath, concurrency }) {
       },
     },
   );
-  return classifySpawnOutcome(result);
+  return classifySpawnOutcome(result, {
+    hasCompletion: hasTapCompletion({ tapPath, readFile }),
+  });
 }
 
 // Removes the two scratch directories this run made. Isolated so the
@@ -274,6 +371,43 @@ function resolveAndLogConcurrency({ concurrency, resolveConcurrencyFn, log }) {
   return resolvedConcurrency;
 }
 
+// No numbered artifacts this run (allocation failed, or nothing asked for
+// them) -- a real object with null fields rather than a bare `null` so
+// call sites read `runSlot.logPath`/`runSlot.receiptPath` directly instead
+// of needing optional-chaining at every use (keeps runIsolatedSuite's own
+// branch count down; each `?.` is itself a branch for the complexity gate).
+const NO_RUN_SLOT = Object.freeze({
+  runNumber: null,
+  receiptPath: null,
+  logPath: null,
+});
+
+// HYK-485 §2-1: allocates this run's numbered-artifact slot BEFORE spawn
+// (its logPath must ride node --test's own argv, see buildNodeTestArgs) --
+// isolated into its own function so a failure here degrades gracefully
+// instead of crashing the whole run before the real suite ever starts.
+// Never throws: allocation infra (mkdir/exclusive-create) is not the thing
+// this runner exists to prove green or red -- a failure here just means
+// this run won't have numbered artifacts (the "latest" runner-receipt.json
+// is written separately, unaffected either way).
+function resolveRunSlot({
+  harnessDir,
+  allocateRunSlotFn = allocateRunSlot,
+  log,
+}) {
+  try {
+    // a stub/test double is allowed to signal "no slot" with a bare
+    // `null`/`undefined` return -- normalize it to the real sentinel so
+    // every downstream reader can rely on `runSlot.logPath` existing.
+    return allocateRunSlotFn({ harnessDir }) ?? NO_RUN_SLOT;
+  } catch (err) {
+    log(
+      `[isolated-suite-runner] WARNING: failed to allocate a per-run artifact slot (${err.message}) -- this run will not produce numbered runner-receipt-run<N>.json/full-runner-<N>.log artifacts; the latest runner-receipt.json is unaffected`,
+    );
+    return NO_RUN_SLOT;
+  }
+}
+
 // Orchestrates one full run: clone committed HEAD -> run the suite in the
 // clone -> report -> always clean up (unless `keep`). Returns the child
 // process's exit code so the CLI entry point can propagate it verbatim.
@@ -288,6 +422,8 @@ export function runIsolatedSuite({
   mkdtemp = mkdtempSync,
   readFile = readFileSync,
   writeReceipt = writeRunnerReceipt,
+  allocateRunSlotFn,
+  writeNumberedReceipt,
   nowMs = Date.now,
   resolveConcurrencyFn,
 } = {}) {
@@ -315,6 +451,8 @@ export function runIsolatedSuite({
   // instrumentation into a false positive for those tests.
   const tapDir = mkdtemp(join(longFormTmpdir(), "hyk411-tap-"));
   const tapPath = join(tapDir, "runner-output.tap");
+  const harnessDir = join(root, ".harness");
+  const runSlot = resolveRunSlot({ harnessDir, allocateRunSlotFn, log });
   try {
     execFile("git", ["clone", "--quiet", root, cloneDir], { encoding: "utf8" });
     const files = collectFiles(cloneDir);
@@ -328,6 +466,8 @@ export function runIsolatedSuite({
       files,
       tapPath,
       concurrency: resolvedConcurrency,
+      logPath: runSlot.logPath,
+      readFile,
     });
 
     emitRunnerReceipt({
@@ -336,8 +476,10 @@ export function runIsolatedSuite({
       runnerExit: outcome.exitCode,
       runnerStatus: outcome.status,
       tapPath,
+      runSlot,
       readFile,
       writeReceipt,
+      writeNumberedReceipt,
       nowMs,
       log,
     });
