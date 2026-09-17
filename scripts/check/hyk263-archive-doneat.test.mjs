@@ -50,6 +50,7 @@ import { tmpdir } from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { createHash } from "node:crypto";
 import { writeLedger } from "./reject-streak.mjs";
+import { DISPATCH_GATE_DECISION_SIBLINGS } from "./dispatch-gate-decision-deps.mjs";
 import { findTargetFingerprint } from "./dispatch-gate-decision.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -225,8 +226,17 @@ function stageScriptsCheckDir(rootDir, overrides) {
       "utf8",
     ),
     "envelope-archive.mjs": readFileSync(ENVELOPE_ARCHIVE_PATH, "utf8"),
-    ...overrides,
   };
+  // HYK-460-staging-list-fix-3: union in any sibling not already listed
+  // above by hand, read from the single-source-of-truth list -- a future
+  // new static import in dispatch-gate-decision.mjs needs one edit to
+  // dispatch-gate-decision-deps.mjs, not one edit per test file.
+  for (const name of DISPATCH_GATE_DECISION_SIBLINGS) {
+    if (!(name in files)) {
+      files[name] = readFileSync(join(HERE, name), "utf8");
+    }
+  }
+  Object.assign(files, overrides);
   for (const [name, content] of Object.entries(files)) {
     writeFileSync(join(scriptsCheckDir, name), content, "utf8");
   }
