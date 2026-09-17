@@ -699,6 +699,13 @@ export const SEAT_LIVENESS_WIRE_STATUS = Object.freeze({
   // 여기서 따로 접는다. NOT_APPLICABLE(로컬에 애초에 활성 배달이 없음)과
   // 원인이 다르므로 같은 값으로 접지 않는다(§2-1-1 "구별되는 이름").
   DISPATCH_RETIRED: "SEAT_LIVENESS_DISPATCH_RETIRED",
+  // HYK-464-followup-2 축B P2-B-1 (REVIEW-r1.md §2-2): 배달 기록은 있고
+  // 그 status가 `failed`/`circuit_broken`이다(orca-adapter.mjs
+  // FAILED_DISPATCH_STATUSES) -- `completed`(정상 종료)와 달리 배달
+  // 자체가 깨진 것이다. 같은 DISPATCH_RETIRED로 접으면 "라운드가 멈췄고
+  // 아무도 모른다"는 사고가 무음이 된다 -- §2-1-1 원칙 그대로 구별되는
+  // 값으로 낸다.
+  DISPATCH_FAILED: "SEAT_LIVENESS_DISPATCH_FAILED",
 });
 
 // HYK-201(coder-task.md §1-§2) -- "활성 배달"의 정본 판정. 예전에는
@@ -927,10 +934,14 @@ function resolveObservationWithDeliveredSeatFallback({
   // 확인한 값)가 true면 -- 좌석이 안 보이는 게 이 배달이 퇴역했기 때문인
   // 정상 상태다. `retired` 플래그를 얹어 호출부가 COLLECTION_FAILED
   // (측정 불가)와 구별해 처리할 수 있게 한다.
+  // HYK-464-followup-2 축B P2-B-1: resolved.dispatchFailed(같은 층이
+  // failed/circuit_broken일 때 얹는 값)도 나란히 실어, retired(정상 종료)와
+  // failed(깨진 종료)를 호출부가 구별할 수 있게 한다.
   return {
     observed: {
       ok: false,
       retired: resolved.dispatchRetired === true,
+      failed: resolved.dispatchFailed === true,
       observationReason: observationReasonForClosedCorrelation(
         resolved.reasonCode,
       ),
@@ -973,6 +984,18 @@ export function judgeSeatLivenessForRepo(
     if (observed.retired === true) {
       return {
         status: SEAT_LIVENESS_WIRE_STATUS.DISPATCH_RETIRED,
+        observationReason: observed.observationReason,
+        reason: observed.reason,
+        dispatch,
+        ...(correlation ? { correlation } : {}),
+      };
+    }
+    // HYK-464-followup-2 축B P2-B-1: failed/circuit_broken은 retired와
+    // 달리 "정상 종료"가 아니다 -- 별도 값으로 표면화해 badStatuses
+    // (reach-report-core.mjs)를 통해 사람에게 닿게 한다.
+    if (observed.failed === true) {
+      return {
+        status: SEAT_LIVENESS_WIRE_STATUS.DISPATCH_FAILED,
         observationReason: observed.observationReason,
         reason: observed.reason,
         dispatch,
@@ -1506,6 +1529,10 @@ export const DISPATCH_START_WIRE_STATUS = Object.freeze({
   // 원인·동일 원칙(resolveObservationWithDeliveredSeatFallback을 두 축이
   // 공유한다) -- 배달 기록은 있지만 그 배달 자신이 이미 퇴역했다.
   DISPATCH_RETIRED: "DISPATCH_START_DISPATCH_RETIRED",
+  // HYK-464-followup-2 축B P2-B-1: seat-liveness 축의 DISPATCH_FAILED와
+  // 동일 원인·동일 원칙 -- failed/circuit_broken은 completed와 달리
+  // 배달 자체가 깨진 것이다.
+  DISPATCH_FAILED: "DISPATCH_START_DISPATCH_FAILED",
 });
 
 export const DISPATCH_START_SCAN_FAILURE = Object.freeze({
@@ -1692,6 +1719,17 @@ export function judgeDispatchStartForRepo(
     if (observed.retired === true) {
       return {
         status: DISPATCH_START_WIRE_STATUS.DISPATCH_RETIRED,
+        observationReason: observed.observationReason,
+        reason: observed.reason,
+        dispatch,
+        ...(correlation ? { correlation } : {}),
+      };
+    }
+    // HYK-464-followup-2 축B P2-B-1: judgeSeatLivenessForRepo와 대칭
+    // (같은 failed 플래그를 공유한다).
+    if (observed.failed === true) {
+      return {
+        status: DISPATCH_START_WIRE_STATUS.DISPATCH_FAILED,
         observationReason: observed.observationReason,
         reason: observed.reason,
         dispatch,

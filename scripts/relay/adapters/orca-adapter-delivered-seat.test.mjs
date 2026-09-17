@@ -27,7 +27,11 @@
 // 확인).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdtempSync, rmSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { tmpdir } from "node:os";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   resolveDeliveredSeat,
   DELIVERED_SEAT_REASON,
@@ -1081,6 +1085,11 @@ test("resolveDeliveredSeat: HYK-464-followup-1 축B ⓐ -- dead pane key BUT dis
   assert.equal(r.ok, false);
   assert.equal(r.reasonCode, DELIVERED_SEAT_REASON.NO_LIVE_SEAT_MATCH);
   assert.equal(r.dispatchRetired, true);
+  assert.equal(
+    r.dispatchFailed,
+    false,
+    "completed is a normal end, not a broken one -- must not also set dispatchFailed",
+  );
   assert.match(r.reason, /retired/);
 });
 
@@ -1118,7 +1127,95 @@ test("resolveDeliveredSeat: HYK-464-followup-1 축B 안전판 -- dispatch.status
   assert.equal(r.ok, false);
   assert.equal(r.reasonCode, DELIVERED_SEAT_REASON.NO_LIVE_SEAT_MATCH);
   assert.equal(r.dispatchRetired, false);
+  assert.equal(r.dispatchFailed, false);
 });
+
+// HYK-464-followup-2 축B P1-B-1 (REVIEW-r1.md §2-1 반려 수리 -- 6개
+// status 진리표 중 orca 자신이 "활성"으로 보는 두 값): `pending`은
+// orca의 dispatch_contexts 스키마 기본값이자 모든 배달이 거치는 첫
+// 상태다(orca-adapter.mjs ACTIVE_DISPATCH_STATUSES 주석의 근거 ⑴⑵ 그대로).
+// 1R은 이 값을 "dispatched"와 다르다는 이유만으로 dispatchRetired:true로
+// 오접었다 -- 죽은 좌석 + 살아 있는 pending 예약의 음성 확인이 무너지는
+// 정확히 그 지점이다. 이 시험은 그 회귀를 고정한다.
+test("resolveDeliveredSeat: HYK-464-followup-2 축B P1-B-1 -- dispatch.status가 'pending'이면(orca 자신이 활성으로 보는 값) dispatchRetired/dispatchFailed 둘 다 서지 않는다 -- 진짜 이상은 여전히 잡는다", () => {
+  const execFn = makeExecFn({
+    tasks: [
+      {
+        id: "task_1",
+        spec: realSpec(
+          "CODER",
+          LABEL,
+          "C:\\Users\\Administrator\\orca\\workspaces\\HARNESSENGINEERING\\hyk185-gap83-3",
+        ),
+      },
+    ],
+    dispatchByTaskId: {
+      task_1: {
+        id: "dispatch_1",
+        task_id: "task_1",
+        assignee_handle: "term_long_dead",
+        assignee_pane_key: "dead-tab-uuid:dead-leaf-uuid",
+        status: "pending",
+      },
+    },
+    seats: [CODER_SEAT, REVIEW_SEAT],
+  });
+  const r = resolveDeliveredSeat(
+    { harnessLabel: LABEL, worktreePath: WORKTREE },
+    { execFn },
+  );
+  assert.equal(r.ok, false);
+  assert.equal(r.reasonCode, DELIVERED_SEAT_REASON.NO_LIVE_SEAT_MATCH);
+  assert.equal(
+    r.dispatchRetired,
+    false,
+    "pending is active in orca's own dispatch_inactive judgment -- must not be folded into 'retired'",
+  );
+  assert.equal(r.dispatchFailed, false);
+});
+
+// HYK-464-followup-2 축B P2-B-1 (REVIEW-r1.md §2-2): failed/circuit_broken
+// 은 completed와 달리 "정상 종료"가 아니다 -- dispatchRetired가 아니라
+// 구별되는 dispatchFailed로 선다.
+for (const brokenStatus of ["failed", "circuit_broken"]) {
+  test(`resolveDeliveredSeat: HYK-464-followup-2 축B P2-B-1 -- dispatch.status='${brokenStatus}'는 dispatchRetired가 아니라 dispatchFailed로 선다(completed와 구별)`, () => {
+    const execFn = makeExecFn({
+      tasks: [
+        {
+          id: "task_1",
+          spec: realSpec(
+            "CODER",
+            LABEL,
+            "C:\\Users\\Administrator\\orca\\workspaces\\HARNESSENGINEERING\\hyk185-gap83-3",
+          ),
+        },
+      ],
+      dispatchByTaskId: {
+        task_1: {
+          id: "dispatch_1",
+          task_id: "task_1",
+          assignee_handle: "term_long_dead",
+          assignee_pane_key: "dead-tab-uuid:dead-leaf-uuid",
+          status: brokenStatus,
+        },
+      },
+      seats: [CODER_SEAT, REVIEW_SEAT],
+    });
+    const r = resolveDeliveredSeat(
+      { harnessLabel: LABEL, worktreePath: WORKTREE },
+      { execFn },
+    );
+    assert.equal(r.ok, false);
+    assert.equal(r.reasonCode, DELIVERED_SEAT_REASON.NO_LIVE_SEAT_MATCH);
+    assert.equal(r.dispatchFailed, true);
+    assert.equal(
+      r.dispatchRetired,
+      false,
+      "failed/circuit_broken must not be folded into the same 'normal end' bucket as completed",
+    );
+    assert.match(r.reason, /failed, not a normal end/);
+  });
+}
 
 test("resolveDeliveredSeat: candidate label matches but worktree path in spec points elsewhere -- not a candidate (label alone is not enough)", () => {
   const execFn = makeExecFn({
@@ -1492,4 +1589,108 @@ test("resolveDeliveredSeat: HYK-207-multiseat -- ZERO live seats in the worktree
   );
   assert.equal(r.ok, false);
   assert.equal(r.reasonCode, DELIVERED_SEAT_REASON.NO_LIVE_SEAT_MATCH);
+});
+
+// ---------------------------------------------------------------------------
+// HYK-464-followup-2 축B P1-B-1 되돌림 변이(§3 필수, coder-task.md §3 그대로):
+// "집합을 단일 문자열로 되돌리면 pending 시험이 빨강이 되는가"를 실제
+// 소스 문자열 변조로 증명한다. role-bound-seat-select-mutation.test.mjs와
+// 동일 패턴(문자열 정확히 1회 치환 -> 상대경로를 절대경로로 재작성 ->
+// 임시 파일로 저장 -> 동적 import, 재구현 아님)을 재사용한다. 이 파일은
+// 디스크의 실 orca-adapter.mjs를 **읽기만** 한다 -- 변조본은 mkdtemp
+// 임시 디렉터리에만 쓰고 매 시험 뒤 지운다(finally). 그래서 실 소스
+// 파일은 이 시험 실행 전후로 바이트가 같아야 한다 -- 그 사실 자체를
+// sha256으로 값으로 증명한다(§3 "복원 후 sha256 바이트 동일").
+// ---------------------------------------------------------------------------
+const THIS_DIR = dirname(fileURLToPath(import.meta.url));
+const LIVE_SRC_PATH = join(THIS_DIR, "orca-adapter.mjs");
+
+function applyMutation(src, find, replacement) {
+  const count = src.split(find).length - 1;
+  assert.equal(
+    count,
+    1,
+    `mutation target string must match exactly once in the source, got ${count} -- stale or ambiguous target`,
+  );
+  return src.replace(find, replacement);
+}
+
+function rewriteRelativeImportsToAbsolute(src, baseDir) {
+  return src.replace(
+    /from\s+(["'])(\.\.?\/[^"']+)\1/g,
+    (whole, quote, relPath) => {
+      const absPath = join(baseDir, relPath).replace(/\\/g, "/");
+      return `from ${quote}file://${absPath}${quote}`;
+    },
+  );
+}
+
+async function importMutatedSibling(liveSrc, mutate, label) {
+  const rewritten = rewriteRelativeImportsToAbsolute(mutate(liveSrc), THIS_DIR);
+  const mutantDir = mkdtempSync(
+    join(tmpdir(), `hyk464-followup-2-p1b1-mutant-${label}-`),
+  );
+  const mutantPath = join(mutantDir, "orca-adapter.mutant.mjs");
+  writeFileSync(mutantPath, rewritten, "utf8");
+  try {
+    return await import(`file://${mutantPath.replace(/\\/g, "/")}`);
+  } finally {
+    rmSync(mutantDir, { recursive: true, force: true });
+  }
+}
+
+test("HYK-464-followup-2 축B P1-B-1 되돌림 변이(필수): ACTIVE_DISPATCH_STATUSES 집합을 'dispatched' 단일 문자열 비교로 되돌리면 -> RED (pending 표본이 dispatchRetired:true로 다시 샌다 -- 이 집합이 실제로 결과를 가른다는 증거); 실 소스 파일은 이 시험 전후 바이트 동일(sha256)", async () => {
+  const beforeSrc = readFileSync(LIVE_SRC_PATH, "utf8");
+  const beforeHash = createHash("sha256").update(beforeSrc).digest("hex");
+
+  const mutant = await importMutatedSibling(
+    beforeSrc,
+    (src) =>
+      applyMutation(
+        src,
+        "      isKnownInactiveStatus && dispatchStatus === RETIRED_DISPATCH_STATUS,",
+        '      typeof dispatchStatus === "string" && dispatchStatus !== "dispatched",',
+      ),
+    "1r-single-string",
+  );
+
+  const execFn = makeExecFn({
+    tasks: [
+      {
+        id: "task_1",
+        spec: realSpec(
+          "CODER",
+          LABEL,
+          "C:\\Users\\Administrator\\orca\\workspaces\\HARNESSENGINEERING\\hyk185-gap83-3",
+        ),
+      },
+    ],
+    dispatchByTaskId: {
+      task_1: {
+        id: "dispatch_1",
+        task_id: "task_1",
+        assignee_handle: "term_long_dead",
+        assignee_pane_key: "dead-tab-uuid:dead-leaf-uuid",
+        status: "pending",
+      },
+    },
+    seats: [CODER_SEAT, REVIEW_SEAT],
+  });
+  const r = mutant.resolveDeliveredSeat(
+    { harnessLabel: LABEL, worktreePath: WORKTREE },
+    { execFn },
+  );
+  assert.equal(
+    r.dispatchRetired,
+    true,
+    "mutant must regress to folding pending into dispatchRetired:true -- RED signal proving the active-set fix is load-bearing in the real code (REVIEW-r1.md §2-1 P1-B-1)",
+  );
+
+  const afterSrc = readFileSync(LIVE_SRC_PATH, "utf8");
+  const afterHash = createHash("sha256").update(afterSrc).digest("hex");
+  assert.equal(
+    afterHash,
+    beforeHash,
+    "the real orca-adapter.mjs on disk must be byte-identical before and after this mutation test -- the mutant only ever exists in a disposable mkdtemp file",
+  );
 });

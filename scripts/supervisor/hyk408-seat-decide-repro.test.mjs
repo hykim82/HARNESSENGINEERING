@@ -722,3 +722,83 @@ test("HYK-464-followup-1 축B 되돌림 변이(필수): observed.retired 분기�
     "mutant must regress to COLLECTION_FAILED for a retired dispatch -- RED signal proving the DISPATCH_RETIRED branch is load-bearing in the real code",
   );
 });
+
+// ---------------------------------------------------------------------------
+// HYK-464-followup-2 축B (REVIEW-r1.md §2-1/§2-2 반려 수리 -- coder-task.md
+// §3 요구 그대로) -- orca의 dispatch_contexts 스키마가 허용하는 6개
+// status(5종 + 필드 없음) 전체를 진리표로 고정한다. 같은 표본 모양
+// (dead pane key + 단일 살아있는 CODER-seat 후보, 위 ⓓ-1/축B와 동일)에
+// status만 바꿔 가며 두 축(seatLiveness/dispatchStart) 모두 확인한다.
+//   pending/dispatched -> 여전히 «이상»(COLLECTION_FAILED, orca 자신이
+//     "활성"으로 보는 값이므로 좌석 부재는 진짜 이상)
+//   completed -> «해당 없음»(DISPATCH_RETIRED, 정상 종료)
+//   failed/circuit_broken -> 구별되는 값(DISPATCH_FAILED, 배달이 깨졌다)
+//   필드 없음(null) -> 여전히 «이상»(COLLECTION_FAILED, 안전판 유지)
+// ---------------------------------------------------------------------------
+const DISPATCH_STATUS_TRUTH_TABLE = [
+  {
+    status: "pending",
+    label: "pending",
+    seat: SEAT_LIVENESS_WIRE_STATUS.COLLECTION_FAILED,
+    start: DISPATCH_START_WIRE_STATUS.COLLECTION_FAILED,
+  },
+  {
+    status: "dispatched",
+    label: "dispatched",
+    seat: SEAT_LIVENESS_WIRE_STATUS.COLLECTION_FAILED,
+    start: DISPATCH_START_WIRE_STATUS.COLLECTION_FAILED,
+  },
+  {
+    status: "completed",
+    label: "completed",
+    seat: SEAT_LIVENESS_WIRE_STATUS.DISPATCH_RETIRED,
+    start: DISPATCH_START_WIRE_STATUS.DISPATCH_RETIRED,
+  },
+  {
+    status: "failed",
+    label: "failed",
+    seat: SEAT_LIVENESS_WIRE_STATUS.DISPATCH_FAILED,
+    start: DISPATCH_START_WIRE_STATUS.DISPATCH_FAILED,
+  },
+  {
+    status: "circuit_broken",
+    label: "circuit_broken",
+    seat: SEAT_LIVENESS_WIRE_STATUS.DISPATCH_FAILED,
+    start: DISPATCH_START_WIRE_STATUS.DISPATCH_FAILED,
+  },
+  {
+    status: null,
+    label: "필드 없음(null)",
+    seat: SEAT_LIVENESS_WIRE_STATUS.COLLECTION_FAILED,
+    start: DISPATCH_START_WIRE_STATUS.COLLECTION_FAILED,
+  },
+];
+
+for (const { status, label, seat, start } of DISPATCH_STATUS_TRUTH_TABLE) {
+  test(`HYK-464-followup-2 축B 6개 status 진리표: dispatch.status=${label} -> seatLiveness=${seat}`, () => {
+    const r = judgeSeatLivenessForRepo(
+      { repoRoot: WORKTREE, droppedTaskFiles: ACTIVE_WITH_LABEL, now: NOW },
+      {
+        execFn: fakeExecFnWithSingleCoderSeat(
+          RETIRED_ASSIGNEE_PANE_KEY,
+          status,
+        ),
+      },
+    );
+    assert.equal(r.status, seat);
+  });
+
+  test(`HYK-464-followup-2 축B 6개 status 진리표: dispatch.status=${label} -> dispatchStart=${start}`, () => {
+    const r = judgeDispatchStartForRepo(
+      { repoRoot: WORKTREE, droppedTaskFiles: ACTIVE_WITH_LABEL, now: NOW },
+      {
+        execFn: fakeExecFnWithSingleCoderSeat(
+          RETIRED_ASSIGNEE_PANE_KEY,
+          status,
+        ),
+        ...fakeDispatchStartStore(),
+      },
+    );
+    assert.equal(r.status, start);
+  });
+}
