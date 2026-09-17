@@ -690,28 +690,47 @@ test("HYK-477 §1-4 변이 RED: 환경변수 전파(spawnSuiteInClone의 HARNESS
         pathToFileURL(join(dir, "isolated-suite-runner.mjs")).href
       );
       let capturedEnv;
-      mod.runIsolatedSuite({
-        startSampler: () => null,
-        stopSampler: () => null,
-        execFile: execFileStub(),
-        spawn: (cmd, args, opts) => {
-          capturedEnv = opts.env;
-          return { status: 0 };
-        },
-        log: () => {},
-        collectFiles: () => ["scripts/check/a.test.mjs"],
-        concurrency: 3,
-        readFile: () => {
-          throw new Error("no tap file");
-        },
-        writeReceipt: () => ({ path: "(stubbed)", receipt: {} }),
-        allocateRunSlotFn: () => ({
-          runNumber: 1,
-          receiptPath: "(stubbed)",
-          logPath: "(stubbed)",
-        }),
-        writeNumberedReceipt: () => ({ path: "(stubbed)", receipt: {} }),
-      });
+      // HYK-477 2R (live full-suite finding, run1 of coder-task.md §1): the
+      // mutated spawnSuiteInClone still does `env: { ...process.env, ... }`
+      // -- if THIS test process's own ambient process.env already carries
+      // NESTED_CONCURRENCY_ENV_VAR (true whenever this file runs nested
+      // inside a real isolated-suite-runner invocation, which is exactly
+      // what propagates that var down for real -- see this file's own
+      // §1-1 comment), the spread leaks it through regardless of whether
+      // the mutation removed the explicit override line, producing a false
+      // GREEN-looking capturedEnv value that has nothing to do with the
+      // mutation. Save/strip/restore so this test's RED signal reflects the
+      // mutation, not whatever ambient value this process happened to
+      // inherit from its own parent runner.
+      const hadAmbient = NESTED_CONCURRENCY_ENV_VAR in process.env;
+      const ambientValue = process.env[NESTED_CONCURRENCY_ENV_VAR];
+      delete process.env[NESTED_CONCURRENCY_ENV_VAR];
+      try {
+        mod.runIsolatedSuite({
+          startSampler: () => null,
+          stopSampler: () => null,
+          execFile: execFileStub(),
+          spawn: (cmd, args, opts) => {
+            capturedEnv = opts.env;
+            return { status: 0 };
+          },
+          log: () => {},
+          collectFiles: () => ["scripts/check/a.test.mjs"],
+          concurrency: 3,
+          readFile: () => {
+            throw new Error("no tap file");
+          },
+          writeReceipt: () => ({ path: "(stubbed)", receipt: {} }),
+          allocateRunSlotFn: () => ({
+            runNumber: 1,
+            receiptPath: "(stubbed)",
+            logPath: "(stubbed)",
+          }),
+          writeNumberedReceipt: () => ({ path: "(stubbed)", receipt: {} }),
+        });
+      } finally {
+        if (hadAmbient) process.env[NESTED_CONCURRENCY_ENV_VAR] = ambientValue;
+      }
       assert.equal(
         capturedEnv[NESTED_CONCURRENCY_ENV_VAR],
         undefined,
