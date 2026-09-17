@@ -20,15 +20,31 @@
 // "합성으로" forced kill construction task §3 proof 2 asks for, scoped to
 // a single trivial child instead of the real suite.
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
+import {
+  copyFileSync,
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import test from "node:test";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { RUNNER_STATUS } from "./runner-receipt-writer.mjs";
 import {
   classifySpawnOutcome,
   formatConcurrencyBanner,
+  NESTED_CONCURRENCY_ENV_VAR,
   resolveConcurrency,
+  resolveNestedConcurrency,
   runIsolatedSuite,
 } from "./isolated-suite-runner.mjs";
+
+const HERE = dirname(fileURLToPath(import.meta.url));
 
 // -- §2-1: resolveConcurrency ------------------------------------------
 
@@ -85,6 +101,8 @@ function execFileStub() {
 test("runIsolatedSuite: the resolved test-concurrency value is the literal first log() line of the run (coder-task.md §2-1 'first line' requirement)", () => {
   const logs = [];
   runIsolatedSuite({
+    startSampler: () => null,
+    stopSampler: () => null,
     execFile: execFileStub(),
     spawn: () => ({ status: 0 }),
     log: (m) => logs.push(m),
@@ -101,6 +119,8 @@ test("runIsolatedSuite: the resolved test-concurrency value is the literal first
 test("runIsolatedSuite: an explicit --concurrency override is labeled as an override in the same first line, not the default reasoning text", () => {
   const logs = [];
   runIsolatedSuite({
+    startSampler: () => null,
+    stopSampler: () => null,
     execFile: execFileStub(),
     spawn: () => ({ status: 0 }),
     log: (m) => logs.push(m),
@@ -117,6 +137,8 @@ test("runIsolatedSuite: an explicit --concurrency override is labeled as an over
 test("runIsolatedSuite: with no explicit concurrency, the first line carries the default reasoning (cpu-count-derived, not a bare number with no context)", () => {
   const logs = [];
   runIsolatedSuite({
+    startSampler: () => null,
+    stopSampler: () => null,
     execFile: execFileStub(),
     spawn: () => ({ status: 0 }),
     log: (m) => logs.push(m),
@@ -149,6 +171,8 @@ test("runIsolatedSuite: --test-concurrency=<resolved value> is present in the in
     return { status: 0 };
   };
   runIsolatedSuite({
+    startSampler: () => null,
+    stopSampler: () => null,
     execFile: execFileStub(),
     spawn,
     log: () => {},
@@ -174,6 +198,8 @@ test("runIsolatedSuite: when allocateRunSlotFn resolves a slot, a third '--test-
     return { status: 0 };
   };
   runIsolatedSuite({
+    startSampler: () => null,
+    stopSampler: () => null,
     execFile: execFileStub(),
     spawn,
     log: () => {},
@@ -220,6 +246,8 @@ test("runIsolatedSuite: when allocateRunSlotFn yields no slot (null), no third r
     return { status: 0 };
   };
   runIsolatedSuite({
+    startSampler: () => null,
+    stopSampler: () => null,
     execFile: execFileStub(),
     spawn,
     log: () => {},
@@ -240,6 +268,8 @@ test("runIsolatedSuite: when allocateRunSlotFn yields no slot (null), no third r
 test("runIsolatedSuite: allocateRunSlotFn throwing does not crash the run -- it degrades to no numbered artifacts (WARNING logged), the real suite still runs and the real exit code still propagates", () => {
   const logs = [];
   const exitCode = runIsolatedSuite({
+    startSampler: () => null,
+    stopSampler: () => null,
     execFile: execFileStub(),
     spawn: () => ({ status: 0 }),
     log: (m) => logs.push(m),
@@ -390,6 +420,8 @@ test("classifySpawnOutcome: a REAL child that exits non-zero entirely on its own
 test("runIsolatedSuite: a REAL synthetically forced-killed child produces a receipt with runnerStatus MEASUREMENT_UNAVAILABLE_OOM, never TESTS_FAILED, and a non-zero exit code", () => {
   const receipts = [];
   const exitCode = runIsolatedSuite({
+    startSampler: () => null,
+    stopSampler: () => null,
     execFile: execFileStub(),
     spawn: () =>
       spawnSync(process.execPath, ["-e", "setTimeout(() => {}, 60000)"], {
@@ -430,6 +462,8 @@ const tapCompletionReadFile = () => completedTapSummary;
 test("runIsolatedSuite: a REAL child failing entirely on its own (same pipeline, no kill), a real tap completion summary present -> produces a receipt with runnerStatus TESTS_FAILED -- the same-situation contrast at the full-pipeline level", () => {
   const receipts = [];
   const exitCode = runIsolatedSuite({
+    startSampler: () => null,
+    stopSampler: () => null,
     execFile: execFileStub(),
     spawn: () => spawnSync(process.execPath, ["-e", "process.exit(3)"]),
     log: () => {},
@@ -453,6 +487,8 @@ test("runIsolatedSuite: a REAL child failing entirely on its own (same pipeline,
 test("runIsolatedSuite: a REAL child that exits non-zero on its own, but no tap completion summary was ever written (e.g. the Windows 0xFFFFFFFF shape this repo actually produces) -> produces a receipt with runnerStatus MEASUREMENT_UNAVAILABLE_OOM, NOT TESTS_FAILED (review P1-1, full-pipeline level)", () => {
   const receipts = [];
   runIsolatedSuite({
+    startSampler: () => null,
+    stopSampler: () => null,
     execFile: execFileStub(),
     spawn: () => ({ status: 4294967295, signal: null, error: null }),
     log: () => {},
@@ -475,6 +511,8 @@ test("runIsolatedSuite: a REAL child that exits non-zero on its own, but no tap 
 test("runIsolatedSuite: a REAL clean child (status 0) produces a receipt with runnerStatus OK -- the third leg of the same contrast", () => {
   const receipts = [];
   const exitCode = runIsolatedSuite({
+    startSampler: () => null,
+    stopSampler: () => null,
     execFile: execFileStub(),
     spawn: () => spawnSync(process.execPath, ["-e", "process.exit(0)"]),
     log: () => {},
@@ -489,4 +527,237 @@ test("runIsolatedSuite: a REAL clean child (status 0) produces a receipt with ru
   });
   assert.equal(receipts[0].runnerStatus, RUNNER_STATUS.OK);
   assert.equal(exitCode, 0);
+});
+
+// -- HYK-477 §1-1: resolveNestedConcurrency (env-propagated cap) ---------
+
+test("resolveNestedConcurrency: no ambient env var -> returns desired unchanged", () => {
+  assert.equal(resolveNestedConcurrency(4, { env: {} }), 4);
+});
+
+test("resolveNestedConcurrency: ambient cap BELOW desired -> min wins (the cap actually lowers it)", () => {
+  assert.equal(
+    resolveNestedConcurrency(4, { env: { [NESTED_CONCURRENCY_ENV_VAR]: "2" } }),
+    2,
+  );
+});
+
+test("resolveNestedConcurrency: ambient cap ABOVE desired -> desired wins (never raises it, coder-task.md §1-1 '상한을 올리는 방향으로는 쓰이지 않게')", () => {
+  assert.equal(
+    resolveNestedConcurrency(4, {
+      env: { [NESTED_CONCURRENCY_ENV_VAR]: "12" },
+    }),
+    4,
+  );
+});
+
+test("resolveNestedConcurrency: ambient cap EQUAL to desired -> unchanged (min is a no-op at equality)", () => {
+  assert.equal(
+    resolveNestedConcurrency(4, { env: { [NESTED_CONCURRENCY_ENV_VAR]: "4" } }),
+    4,
+  );
+});
+
+test("resolveNestedConcurrency: malformed ambient values (non-numeric, zero, negative, non-integer, empty string) all degrade to desired -- never thrown, never treated as '0 concurrency'", () => {
+  for (const raw of ["not-a-number", "0", "-1", "2.5", ""]) {
+    assert.equal(
+      resolveNestedConcurrency(4, {
+        env: { [NESTED_CONCURRENCY_ENV_VAR]: raw },
+      }),
+      4,
+      `raw value ${JSON.stringify(raw)} should have been ignored, got a different result`,
+    );
+  }
+});
+
+// -- HYK-477 §1-1: the outer runner exports the cap into the in-clone -----
+// child's env, so any nested spawn point inside it (or a test file it
+// runs) can call resolveNestedConcurrency and see it.
+
+test("runIsolatedSuite: the in-clone node --test child's env carries HARNESS_TEST_CONCURRENCY=<resolved concurrency> (§1-1 propagation)", () => {
+  let capturedEnv;
+  const spawn = (cmd, args, opts) => {
+    capturedEnv = opts.env;
+    return { status: 0 };
+  };
+  runIsolatedSuite({
+    startSampler: () => null,
+    stopSampler: () => null,
+    execFile: execFileStub(),
+    spawn,
+    log: () => {},
+    collectFiles: () => ["scripts/check/a.test.mjs"],
+    concurrency: 3,
+    readFile: throwingReadFile,
+    writeReceipt: noopWriteReceipt,
+    allocateRunSlotFn: noopAllocateRunSlot,
+    writeNumberedReceipt: noopWriteNumberedReceipt,
+  });
+  assert.equal(
+    capturedEnv[NESTED_CONCURRENCY_ENV_VAR],
+    "3",
+    `expected the in-clone child's env.${NESTED_CONCURRENCY_ENV_VAR} to be "3" (the resolved concurrency), got: ${JSON.stringify(capturedEnv?.[NESTED_CONCURRENCY_ENV_VAR])}`,
+  );
+});
+
+// -- HYK-477 §1-4: mutation RED (removing the min operation / the env ----
+// export) must fail, and the real source must be byte-identical before and
+// after -- only a disposable, isolated copy is ever mutated (same
+// non-negotiable this repo's other mutation tests follow, e.g.
+// hyk241-oneb-gate-mutation.test.mjs's own header).
+
+const ISOLATED_SUITE_RUNNER_PATH = join(HERE, "isolated-suite-runner.mjs");
+const RUNNER_RECEIPT_WRITER_PATH = join(HERE, "runner-receipt-writer.mjs");
+const MIN_OP_TARGET = "return Math.min(desired, n);";
+
+async function withMutatedIsolatedSuiteRunner(mutate, run) {
+  const originalSource = readFileSync(ISOLATED_SUITE_RUNNER_PATH, "utf8");
+  const dir = mkdtempSync(join(tmpdir(), "hyk477-1r-mutation-"));
+  try {
+    const mutated = mutate(originalSource);
+    assert.notEqual(
+      mutated,
+      originalSource,
+      "the mutation string-replace had no effect -- MIN_OP_TARGET no longer matches the current source, this test would be a no-op",
+    );
+    const mutatedRunnerPath = join(dir, "isolated-suite-runner.mjs");
+    writeFileSync(mutatedRunnerPath, mutated, "utf8");
+    // the mutant's only relative import -- copied UNCHANGED so the mutant
+    // module can load at all (MODULE_NOT_FOUND otherwise), same reasoning
+    // as this repo's other staged-mutant tests (e.g.
+    // hyk241-oneb-gate-mutation.test.mjs's *_PATH copies).
+    const receiptWriterCopyPath = join(dir, "runner-receipt-writer.mjs");
+    copyFileSync(RUNNER_RECEIPT_WRITER_PATH, receiptWriterCopyPath);
+    // HYK-477 CI mutation-tmpdir fix: verify the staged copies actually
+    // landed on disk BEFORE handing the directory to `run` (which does
+    // `await import(...)`) -- surface a clear staging failure here instead
+    // of a bare ENOENT from inside the dynamic import later.
+    assert.ok(
+      existsSync(mutatedRunnerPath),
+      `staged mutant copy missing at ${mutatedRunnerPath} right after writeFileSync -- staging failed before import`,
+    );
+    assert.ok(
+      existsSync(receiptWriterCopyPath),
+      `staged receipt-writer copy missing at ${receiptWriterCopyPath} right after copyFileSync -- staging failed before import`,
+    );
+    // `run` is async (it does `await import(...)`); this function must
+    // itself await it here, inside the try, so the `finally` below (which
+    // rmSync's the staging dir) cannot run until `run`'s import has
+    // actually finished reading the staged files. Previously this returned
+    // the pending promise from a non-async function: `finally` fired
+    // synchronously right after `run(dir)` was *called* (before its
+    // `await import(...)` had a chance to complete), deleting the tmpdir
+    // out from under the in-flight import -- the ENOENT CI saw on Linux,
+    // where dynamic import's fs access is genuinely async enough for the
+    // race to lose; Windows apparently won that race by luck/timing.
+    return await run(dir);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    // The real file was NEVER opened for writing above (only read) -- this
+    // equality is the machine proof that the mutation never touched the
+    // working tree's own copy, required by coder-task.md §1-4.
+    assert.equal(
+      createHash("sha256")
+        .update(readFileSync(ISOLATED_SUITE_RUNNER_PATH))
+        .digest("hex"),
+      createHash("sha256").update(originalSource).digest("hex"),
+      "the real isolated-suite-runner.mjs changed during this test -- the mutation must only ever apply to the disposable staged copy",
+    );
+  }
+}
+
+test("HYK-477 §1-4 사전 확인: MIN_OP_TARGET 문자열이 현재 소스에 정확히 1회 등장한다 (모호한 치환 방지)", () => {
+  const src = readFileSync(ISOLATED_SUITE_RUNNER_PATH, "utf8");
+  const count = src.split(MIN_OP_TARGET).length - 1;
+  assert.equal(
+    count,
+    1,
+    `MIN_OP_TARGET must appear exactly once in the current source (found ${count}) -- ambiguous target, this mutation test would silently change more or fewer lines than intended`,
+  );
+});
+
+test("HYK-477 §1-4 변이 RED: min 연산을 제거(항상 desired 반환)하면 resolveNestedConcurrency가 더 이상 낮은 ambient 값으로 묶이지 않는다 -- 복원 후 원본 소스는 sha256 바이트 동일", async () => {
+  await withMutatedIsolatedSuiteRunner(
+    (src) => src.replace(MIN_OP_TARGET, "return desired;"),
+    async (dir) => {
+      const mod = await import(
+        pathToFileURL(join(dir, "isolated-suite-runner.mjs")).href
+      );
+      const capped = mod.resolveNestedConcurrency(4, {
+        env: { [NESTED_CONCURRENCY_ENV_VAR]: "2" },
+      });
+      assert.equal(
+        capped,
+        4,
+        `RED expected: with the min operation removed, an ambient cap of 2 no longer lowers desired=4 (got ${capped}) -- if this is 2, the mutation didn't actually remove the cap and this test is not proving what it claims`,
+      );
+    },
+  );
+});
+
+test("HYK-477 §1-4 변이 RED: 환경변수 전파(spawnSuiteInClone의 HARNESS_TEST_CONCURRENCY export) 줄을 지우면 in-clone 자식 env에 그 키가 없다 -- 복원 후 원본 소스는 sha256 바이트 동일", async () => {
+  const EXPORT_LINE_TARGET = `[NESTED_CONCURRENCY_ENV_VAR]: String(concurrency),`;
+  await withMutatedIsolatedSuiteRunner(
+    (src) => {
+      const count = src.split(EXPORT_LINE_TARGET).length - 1;
+      assert.equal(
+        count,
+        1,
+        `EXPORT_LINE_TARGET must appear exactly once (found ${count})`,
+      );
+      return src.replace(EXPORT_LINE_TARGET, "");
+    },
+    async (dir) => {
+      const mod = await import(
+        pathToFileURL(join(dir, "isolated-suite-runner.mjs")).href
+      );
+      let capturedEnv;
+      // HYK-477 2R (live full-suite finding, run1 of coder-task.md §1): the
+      // mutated spawnSuiteInClone still does `env: { ...process.env, ... }`
+      // -- if THIS test process's own ambient process.env already carries
+      // NESTED_CONCURRENCY_ENV_VAR (true whenever this file runs nested
+      // inside a real isolated-suite-runner invocation, which is exactly
+      // what propagates that var down for real -- see this file's own
+      // §1-1 comment), the spread leaks it through regardless of whether
+      // the mutation removed the explicit override line, producing a false
+      // GREEN-looking capturedEnv value that has nothing to do with the
+      // mutation. Save/strip/restore so this test's RED signal reflects the
+      // mutation, not whatever ambient value this process happened to
+      // inherit from its own parent runner.
+      const hadAmbient = NESTED_CONCURRENCY_ENV_VAR in process.env;
+      const ambientValue = process.env[NESTED_CONCURRENCY_ENV_VAR];
+      delete process.env[NESTED_CONCURRENCY_ENV_VAR];
+      try {
+        mod.runIsolatedSuite({
+          startSampler: () => null,
+          stopSampler: () => null,
+          execFile: execFileStub(),
+          spawn: (cmd, args, opts) => {
+            capturedEnv = opts.env;
+            return { status: 0 };
+          },
+          log: () => {},
+          collectFiles: () => ["scripts/check/a.test.mjs"],
+          concurrency: 3,
+          readFile: () => {
+            throw new Error("no tap file");
+          },
+          writeReceipt: () => ({ path: "(stubbed)", receipt: {} }),
+          allocateRunSlotFn: () => ({
+            runNumber: 1,
+            receiptPath: "(stubbed)",
+            logPath: "(stubbed)",
+          }),
+          writeNumberedReceipt: () => ({ path: "(stubbed)", receipt: {} }),
+        });
+      } finally {
+        if (hadAmbient) process.env[NESTED_CONCURRENCY_ENV_VAR] = ambientValue;
+      }
+      assert.equal(
+        capturedEnv[NESTED_CONCURRENCY_ENV_VAR],
+        undefined,
+        `RED expected: with the export line removed, ${NESTED_CONCURRENCY_ENV_VAR} must be absent from the in-clone child's env (got ${JSON.stringify(capturedEnv?.[NESTED_CONCURRENCY_ENV_VAR])}) -- if it's still "3", the mutation didn't actually remove the propagation`,
+      );
+    },
+  );
 });

@@ -102,7 +102,10 @@ import {
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { collectTestFiles } from "./isolated-suite-runner.mjs";
+import {
+  collectTestFiles,
+  resolveNestedConcurrency,
+} from "./isolated-suite-runner.mjs";
 
 // HYK-371 2R P1-1 (검토자 실사고, coder-task.md §2 불변식 A): 1R은
 // `EXCEPTIONS`(어떤 파일이 예외인지)와 `EXPECTED_EXCEPTIONS_SIZE`(개수만)를
@@ -312,7 +315,18 @@ function runSweepAndAssert({ root, swept, dir, spawn = spawnSync }) {
   // `maxBuffer`: generous fixed ceiling (HYK-359 4R ①) -- 실측 CI-canonical
   // sweep output was ~1.6MB; 200MB leaves headroom for years of legitimate
   // growth without silently truncating again.
-  const nestedArgs = buildNestedSweepArgs(swept);
+  // HYK-477 §1-1: caps the production concurrency (NESTED_SWEEP_CONCURRENCY)
+  // to whatever the outer runner propagated via HARNESS_TEST_CONCURRENCY
+  // (isolated-suite-runner.mjs's spawnSuiteInClone), min-only -- never
+  // raises it. Applied HERE (the real production call site), not inside
+  // buildNestedSweepArgs's own default parameter, so the layer-1 mechanism
+  // test below (which passes its OWN explicit CAP/HIGH_CONCURRENCY values to
+  // buildNestedSweepArgs directly) stays completely unaffected by whatever
+  // ambient HARNESS_TEST_CONCURRENCY happens to be set in this process.
+  const nestedArgs = buildNestedSweepArgs(
+    swept,
+    resolveNestedConcurrency(NESTED_SWEEP_CONCURRENCY),
+  );
   // HYK-377 5R (불변식 N, coder-task.md §2, 검토자 실사고
   // orch-evidence-REVIEW-r4.md P1): 4R까지의 생산 진입점 real-gate는
   // `.marker` 산출물(대상 파일의 자발적 협조)에 의존했다 -- 검토자가
@@ -1355,15 +1369,92 @@ test("HYK-371 4R 완료조건① (층 2·계약, 관측 지점 = 생산 경로):
       capturedArgs,
       "captureSpawn was never called -- runSweepAndAssert did not reach its executor at all, cannot verify the real argv",
     );
+    // HYK-477 §1-1: compares against the RESOLVED (env-capped) value, not
+    // the raw NESTED_SWEEP_CONCURRENCY constant -- if this process itself
+    // inherited an ambient HARNESS_TEST_CONCURRENCY (e.g. this file is
+    // running as part of a real CI-canonical sweep under
+    // isolated-suite-runner.mjs, which now sets it), the production call
+    // site legitimately emits a smaller value, and the raw constant would
+    // be the wrong expectation here.
+    const expectedConcurrency = resolveNestedConcurrency(
+      NESTED_SWEEP_CONCURRENCY,
+    );
     assert.ok(
-      capturedArgs.includes(`--test-concurrency=${NESTED_SWEEP_CONCURRENCY}`),
-      `the argv runSweepAndAssert ACTUALLY executed does not contain "--test-concurrency=${NESTED_SWEEP_CONCURRENCY}" -- captured args: ${JSON.stringify(capturedArgs)}`,
+      capturedArgs.includes(`--test-concurrency=${expectedConcurrency}`),
+      `the argv runSweepAndAssert ACTUALLY executed does not contain "--test-concurrency=${expectedConcurrency}" -- captured args: ${JSON.stringify(capturedArgs)}`,
     );
     assert.ok(
       NESTED_SWEEP_CONCURRENCY <= MAX_INTENDED_NESTED_SWEEP_CONCURRENCY,
       `NESTED_SWEEP_CONCURRENCY is ${NESTED_SWEEP_CONCURRENCY}, which exceeds the pinned ceiling ${MAX_INTENDED_NESTED_SWEEP_CONCURRENCY} -- this is what "reverted to effectively no cap" looks like on ANY machine (a plain numeric comparison, not an execution-based inference), regardless of what that machine's own default concurrency happens to be`,
     );
   } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// HYK-477 §1-1/§1-4 (coder-task.md §1-4 "★중첩 자식이 바깥 상한 이하인가 --
+// «직접 관측»으로 보여라"): reuses the exact HYK-371 3R technique above
+// (writeIntervalFixture/computeMaxOverlap, no wall-clock threshold) but
+// drives the REAL production call site (`runSweepAndAssert` with the real
+// `spawnSync`, the same function `runProductionSweep` wraps) instead of
+// calling `buildNestedSweepArgs` directly -- so this proves the ACTUAL
+// nested-spawn code path honors an ambient HARNESS_TEST_CONCURRENCY (the
+// env var isolated-suite-runner.mjs's spawnSuiteInClone now exports), not
+// merely that the mechanism CAN cap when told to explicitly.
+test("HYK-477 §1-1 (직접 관측, 기계 무관): ambient HARNESS_TEST_CONCURRENCY가 설정되면 runSweepAndAssert(생산 호출부, 진짜 spawnSync)의 실제 동시 실행 수가 NESTED_SWEEP_CONCURRENCY(4)보다 낮은 그 값 이하로 묶인다 -- env 미설정 시 동일 픽스처가 그 낮은 값을 넘어설 수 있음을 함께 확인해 우연한 '겹치지 않음'이 아님을 증명한다", () => {
+  const dir = mkdtempSync(join(tmpdir(), "hyk477-1r-env-propagation-"));
+  const originalEnvValue = process.env.HARNESS_TEST_CONCURRENCY;
+  try {
+    const SLEEP_MS = 300;
+    const ENV_CAP = 2;
+    assert.ok(
+      ENV_CAP < NESTED_SWEEP_CONCURRENCY,
+      "this test requires ENV_CAP to be strictly below NESTED_SWEEP_CONCURRENCY, or a capped run would be indistinguishable from an uncapped one",
+    );
+
+    // -- run 1: ambient env var set BELOW the production default ---------
+    process.env.HARNESS_TEST_CONCURRENCY = String(ENV_CAP);
+    const capped = Array.from({ length: NESTED_SWEEP_CONCURRENCY }, (_, i) =>
+      writeIntervalFixture(dir, `envcap-${i}`, SLEEP_MS),
+    );
+    runSweepAndAssert({
+      root: dir,
+      swept: capped.map((f) => f.testFile),
+      dir,
+      spawn: spawnSync,
+    });
+    const cappedOverlap = computeMaxOverlap(
+      capped.map((f) => JSON.parse(readFileSync(f.timesPath, "utf8"))),
+    );
+    assert.ok(
+      cappedOverlap <= ENV_CAP,
+      `with ambient HARNESS_TEST_CONCURRENCY=${ENV_CAP}, the real production call path (runSweepAndAssert -> real spawnSync) produced a max observed overlap of ${cappedOverlap} (> ${ENV_CAP}) -- the env propagation is not actually capping the nested child`,
+    );
+
+    // -- run 2: same fixtures/desired concurrency, ambient env var UNSET --
+    // proves ENV_CAP alone (not some other ambient throttle) produced the
+    // lower overlap above.
+    delete process.env.HARNESS_TEST_CONCURRENCY;
+    const uncapped = Array.from({ length: NESTED_SWEEP_CONCURRENCY }, (_, i) =>
+      writeIntervalFixture(dir, `envuncapped-${i}`, SLEEP_MS),
+    );
+    runSweepAndAssert({
+      root: dir,
+      swept: uncapped.map((f) => f.testFile),
+      dir,
+      spawn: spawnSync,
+    });
+    const uncappedOverlap = computeMaxOverlap(
+      uncapped.map((f) => JSON.parse(readFileSync(f.timesPath, "utf8"))),
+    );
+    assert.ok(
+      uncappedOverlap > ENV_CAP,
+      `with no ambient HARNESS_TEST_CONCURRENCY, max observed overlap was only ${uncappedOverlap} (expected > ${ENV_CAP}) -- this fixture set doesn't demonstrate real concurrency beyond ENV_CAP at all on this machine, so run 1's capped assertion above would be vacuous (not evidence the propagation does anything)`,
+    );
+  } finally {
+    if (originalEnvValue === undefined)
+      delete process.env.HARNESS_TEST_CONCURRENCY;
+    else process.env.HARNESS_TEST_CONCURRENCY = originalEnvValue;
     rmSync(dir, { recursive: true, force: true });
   }
 });
