@@ -3140,6 +3140,14 @@ function evaluateConsumptionDecision(taskPath, args, env = process.env) {
 // 이 CLI 자신의 exit code에 영향을 주지 않는다(relay-handshake.mjs의
 // spawnAdmissionCompletion/autoWriteConsumptionReceipt와 동일한 house
 // style -- 실패는 console.error로만 드러난다).
+//
+// HYK-479 §A (469 mask-3 실사고 수리): 이 함수 자신은 여전히 "성공하면
+// 실제로 쓴다"이지만, 이제 그 호출 자리가 runDispatchGateDecision의
+// 게이트 판정(combined.allow) «뒤», ALLOW일 때만이다(아래 호출부
+// 자신의 주석 참조) -- REJECT로 끝날 라운드는 이 함수 자체가 아예
+// 호출되지 않으므로 dropped_at을 포함해 task 파일 바이트가 조금도
+// 바뀌지 않는다. Best-effort/원자성 계약(throw 없음·exit code 불변)은
+// 이 함수 자신은 그대로 유지한다 -- 바뀐 것은 "언제 부르는가"뿐이다.
 const DROPPED_AT_LINE_RE = /^dropped_at:\s*.+$/im;
 
 // HYK-316-dropped-stamp-1: 삽입 지점 판정용 -- 첫 `task_id:` 줄(값 유무·
@@ -3426,7 +3434,17 @@ export function buildResultHeaderChecklistLines(role) {
     "result_header_checklist_task_id: task_id 필드는 이 라운드 harness_label 값으로 정확히 1개",
     `result_header_checklist_for: for 필드는 ${reviewOnlySpec("판정 대상 CODER 라운드 harness_label 값으로 정확히 1개")}`,
     `result_header_checklist_verdict: verdict 필드는 ${reviewOnlySpec("approved 또는 rejected 중 하나만, 정확히 1개")}`,
-    `result_header_checklist_headcommit: head_commit 필드는 ${reviewOnlySpec("단독 40-hex 줄(HYK-383) 정확히 1개")}`,
+    // HYK-479 §B-B: 문면이 "정확히 1개"라고만 말하고 «같은 줄»을 요구
+    // 하지 않아, 검토 결과 파일의 head_commit이 두 줄로(키 한 줄 + 40-hex
+    // 다음 줄) 갈라져 소비 정규식(relay-handshake.mjs의 HEAD_COMMIT_RE_G,
+    // `^head_commit:[ \t]*([0-9a-fA-F]{40})[ \t]*$`)에 매치되지 않은 실사고를
+    // 닫는다 -- 값 텍스트에 "같은 줄" 요구와 예시 형태를 명시로 추가한다.
+    // ⚠️예시 문구도 위 §5 함정(부분 문자열 충돌)을 다시 확인했다: "head_commit"
+    // 뒤에 곧바로 콜론을 붙이지 않는다("다음에 콜론"으로 띄어 쓴다) --
+    // 그래야 DISPATCH_HEAD_COMMIT_ANYWHERE_RE가 이 설명 문장 자체를
+    // 근사매치로 오인하지 않는다(dispatch-gate-decision-hyk480-empty-key-
+    // inject.test.mjs (f)가 이 축을 고정한다).
+    `result_header_checklist_headcommit: head_commit 필드는 ${reviewOnlySpec("단독 40-hex 줄(HYK-383) 정확히 1개 -- 키와 값은 반드시 같은 줄(줄바꿈 금지), 예시 형태: head_commit 다음에 콜론 하나 붙이고 공백만 두고 같은 줄에 곧바로 40자리 16진수 값(콜론 다음에 개행하고 다음 줄에 값만 쓰면 두 줄로 갈라져 표지로 인정되지 않는다)")}`,
     `result_header_checklist_done: 완료 표지(>>> DONE 또는 node scripts/relay/finalize-done.mjs ${upperRole})는 정확히 1개 -- 손기입 금지`,
     // HYK-485 범위3: 전체 러너를 2회 이상 돌릴 때의 회차별 파일명 규약을
     // 같은 주입 블록에 못박는다(러너 영수증/로그 정본은 이 규약과
@@ -3641,17 +3659,11 @@ export function runDispatchGateDecision(argv) {
   } else {
     // HYK-257-done-stamp-2 §2 범위2 ⓑ: as early as possible once the file's
     // existence is confirmed, before any gate decision runs -- best-effort,
-    // never blocks/changes what follows.
-    // HYK-465 (coder-task.md §A-2): runs BEFORE bestEffortStampDroppedAt,
-    // not after -- bestEffortStampDroppedAt's own round-snapshot call
-    // (bestEffortSnapshotRoundTaskFile) assumes it is always the LAST
-    // rewrite before anything reads "this round's final text"
-    // (dispatch-gate-round-snapshot.test.mjs's whole contract). Running
-    // this injection first means dropped_at stamping still runs last and
-    // its snapshot captures the fully-final content, exactly like before
-    // this round existed.
+    // never blocks/changes what follows. HYK-479 §A: dropped_at stamping
+    // itself is deliberately NOT run here any more (see the ALLOW-gated
+    // call further below) -- only the result-path/checklist injection
+    // stays unconditional, since it was never the thing 469 mask-3 broke.
     bestEffortInjectResultPaths(taskPath, args);
-    bestEffortStampDroppedAt(taskPath, args);
     const ledgerResolution = resolveLedgerPath(args, taskPath);
     const pathDecision = checkLedgerPathResolution(ledgerResolution);
     if (pathDecision) {
@@ -3717,6 +3729,19 @@ export function runDispatchGateDecision(argv) {
     }
   }
   const combined = combineGateDecisions(decisions);
+
+  // HYK-479 §A (469 mask-3 실사고 수리): dropped_at은 이제 「게이트가
+  // ALLOW로 «판정한 뒤»에만」 찍는다. combined.allow는 taskPath가 실재할
+  // 때만(위 else 분기) 여기 도달하므로 -- taskPath 부재 분기는 항상
+  // decideFromGateExit({exitCode:1, ...})로 allow:false만 만든다 -- 이
+  // 호출은 파일이 실재하는 ALLOW 라운드에서만 실행된다. REJECT 라운드는
+  // task 파일 바이트를 그대로 둔다(거부하면 아무것도 바뀌지 않는다는
+  // 게이트의 존재 이유 그대로). best-effort/원자성은
+  // bestEffortStampDroppedAt 자신의 house style을 그대로 물려받는다
+  // (throw하지 않고, 이 CLI의 exit code에 영향을 주지 않는다).
+  if (combined.allow) {
+    bestEffortStampDroppedAt(taskPath, args);
+  }
 
   const lines = [...combined.reasons];
   lines.push(

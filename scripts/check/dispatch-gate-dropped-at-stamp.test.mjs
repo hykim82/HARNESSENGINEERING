@@ -14,6 +14,7 @@ import { mkdtempSync, writeFileSync, rmSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
+import { createHash } from "node:crypto";
 import { writeLedger } from "./reject-streak.mjs";
 import { checkRelayHandshake } from "./relay-handshake.mjs";
 
@@ -179,14 +180,18 @@ test("(b2) HYK-316-dropped-stamp-1: neither dropped_at: nor task_id: line presen
   });
 });
 
-test("(c) pre-existing REJECT fixture shape (streak 2, no envelope) still REJECTs -- stamping does not weaken the gate", () => {
+test("(c) HYK-479 §A: pre-existing REJECT fixture shape (streak 2, no envelope) still REJECTs, AND the task file is now byte-for-byte unchanged -- rejecting must not touch dropped_at", () => {
   withFixtureDir((dir) => {
     const taskPath = join(dir, "coder-task.md");
-    writeFileSync(
-      taskPath,
-      `task_id: HYK-9103-reject-1\ndropped_at: 2020-01-01 00:00 KST\n${ONE_B_BLOCK}`,
-      "utf8",
-    );
+    // HYK-465: pre-seed a result_file: line so bestEffortInjectResultPaths
+    // (the OTHER best-effort write, unconditional and out of this round's
+    // scope -- HYK-479 coder-task.md §B explicitly leaves it untouched) is
+    // a no-op here, same convention as tests (a)/(b) above. That isolates
+    // this test's whole-file sha256 comparison to the ONE axis actually in
+    // scope: the dropped_at stamp.
+    const original = `task_id: HYK-9103-reject-1\ndropped_at: 2020-01-01 00:00 KST\nresult_file: (pre-seeded, HYK-465 injection must not touch this fixture)\n${ONE_B_BLOCK}`;
+    writeFileSync(taskPath, original, "utf8");
+    const originalSha256 = createHash("sha256").update(original).digest("hex");
     const ledgerPath = join(dir, "reject-streak.json");
     writeLedger(ledgerPath, {
       schema_version: 1,
@@ -203,13 +208,64 @@ test("(c) pre-existing REJECT fixture shape (streak 2, no envelope) still REJECT
     const r = runCli([taskPath, "--ledger", ledgerPath]);
     assert.equal(r.status, 1);
     assert.match(r.stderr, /REJECT/);
-    // Even though the CLI still rejects, the best-effort stamp step must
-    // still have run (it runs before the gates, unconditionally once the
-    // file exists) -- dropped_at should still have been overwritten.
+    // HYK-479 §A (469 mask-3 실사고 수리): 거부하면 아무것도 바뀌지 않는다
+    // -- dropped_at을 포함해 task 파일이 단 1바이트도 바뀌면 안 된다. 이
+    // 시험은 이전에는 정확히 반대(거부돼도 dropped_at이 덮어써진다)를
+    // 고정했었다 -- 그것이 바로 이 축이 고치는 실사고였다.
     const rewritten = readFileSync(taskPath, "utf8");
-    const match = rewritten.match(DROPPED_AT_RE);
-    assert.ok(match);
-    assert.notEqual(match[1].trim(), "2020-01-01 00:00 KST");
+    assert.equal(
+      rewritten,
+      original,
+      "REJECT 라운드는 task 파일 바이트가 전/후 완전히 동일해야 한다(dropped_at 포함)",
+    );
+    const rewrittenSha256 = createHash("sha256")
+      .update(rewritten)
+      .digest("hex");
+    assert.equal(
+      rewrittenSha256,
+      originalSha256,
+      "sha256 전/후 동일 -- 거부 갈래 ⓐ(연속반려 streak)",
+    );
+  });
+});
+
+test("(c2) HYK-479 §A/§B-1: DIFFERENT reject 갈래(1-B 누락 전제조건 위반)에서도 task 파일 sha256이 전/후 동일하다 -- 갈래를 하나만 보고 일반화하지 않는다", () => {
+  withFixtureDir((dir) => {
+    const taskPath = join(dir, "coder-task.md");
+    // ⛔ONE_B_BLOCK을 일부러 안 넣는다 -- checkOneBPrecondition이 이
+    // 갈래를 REJECT시킨다(reject-streak 서브프로세스 자체가 아니라 이
+    // CLI 안 in-process 전제조건 축이라, (c)의 «연속반려» 갈래와 코드
+    // 경로가 다르다 -- B-1이 요구하는 "«게이트 호출 후» 거부되는 갈래
+    // 최소 2가지"를 서로 다른 두 축으로 충족한다).
+    const original = `task_id: HYK-9104-oneb-reject-1\ndropped_at: 2020-01-01 00:00 KST\nresult_file: (pre-seeded, HYK-465 injection must not touch this fixture)\n`;
+    writeFileSync(taskPath, original, "utf8");
+    const originalSha256 = createHash("sha256").update(original).digest("hex");
+    const ledgerPath = join(dir, "reject-streak.json");
+    writeLedger(ledgerPath, { schema_version: 1, issues: {} });
+
+    const r = runCli([taskPath, "--ledger", ledgerPath]);
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /REJECT/);
+    assert.match(
+      r.stderr,
+      /1b_exec_line|1b_shown|1b_reach_path/,
+      "이 갈래는 (c)와 다른 사유(1-B 누락)로 거부돼야 한다 -- 표본이 실제로 다른 코드 경로를 탔는지 확인",
+    );
+
+    const rewritten = readFileSync(taskPath, "utf8");
+    assert.equal(
+      rewritten,
+      original,
+      "REJECT 라운드는 task 파일 바이트가 전/후 완전히 동일해야 한다(dropped_at 포함) -- 갈래 ⓑ(1-B 누락)",
+    );
+    const rewrittenSha256 = createHash("sha256")
+      .update(rewritten)
+      .digest("hex");
+    assert.equal(
+      rewrittenSha256,
+      originalSha256,
+      "sha256 전/후 동일 -- 거부 갈래 ⓑ(1-B 누락 전제조건 위반)",
+    );
   });
 });
 

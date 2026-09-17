@@ -217,7 +217,15 @@ test("HYK-257-done-stamp-3 §2 범위2: 같은 «자기 저장소 안의» 경�
       harnessDir,
       "zzz-hyk257-3r-guard-probe-prod-shape-task.md",
     );
-    const originalContent = `task_id: HYK-9999-guard-probe-2\ndropped_at: 2026-01-01 00:00 KST\n\nprobe body (production-shaped call).\n`;
+    // HYK-479 §A: dropped_at stamping now only runs when the gate itself
+    // ALLOWs (see dispatch-gate-decision.mjs's combined.allow-gated call) --
+    // so this fixture must actually be shaped to ALLOW (1-B block present +
+    // a confirmably-empty dispatch receipt log), not merely rely on the
+    // stamp running "regardless of whatever the rest of the gate decides"
+    // the way it used to.
+    const ONE_B_BLOCK =
+      "1b_exec_line: node scripts/check/dispatch-gate-decision.mjs <task-path>\n1b_shown: ALLOW 또는 REJECT 한 줄과 사유\n1b_reach_path: CLI 종료코드가 관제실 화면에 즉시 뜬다\n";
+    const originalContent = `task_id: HYK-9999-guard-probe-2\ndropped_at: 2026-01-01 00:00 KST\n\nprobe body (production-shaped call).\n${ONE_B_BLOCK}`;
     writeFileSync(probePath, originalContent, "utf8");
 
     // Isolated ledger (NOT any real reject-streak.json) -- explicit
@@ -230,26 +238,37 @@ test("HYK-257-done-stamp-3 §2 범위2: 같은 «자기 저장소 안의» 경�
     );
     const ledgerPath = join(isolatedLedgerDir, "reject-streak.json");
     writeLedger(ledgerPath, { schema_version: 1, issues: {} });
+    const receiptPath = join(isolatedLedgerDir, "dispatch-receipts.jsonl");
+    writeFileSync(receiptPath, "", "utf8");
 
     // Mirrors dispatch-worker.ps1:171's SHAPE (--expect-repo-root pointing
     // at the SAME repo the running CLI copy lives in, the one shape real
     // production always and only produces) plus an explicit --ledger
-    // override. This call must NOT be refused -- otherwise real dispatch
-    // itself would break (프로덕션 동작 유지 요건).
-    // Wrapped in try/catch, not asserted on exit code -- this test's only
-    // claim is "the stamp step itself still runs in a production-shaped
-    // call" (프로덕션 동작 유지), independent of whatever the REST of the
-    // gate decides for unrelated reasons.
-    let stdout;
-    try {
-      stdout = execFileSync(
-        "node",
-        [cli, probePath, "--expect-repo-root", root, "--ledger", ledgerPath],
-        { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
-      );
-    } catch (err) {
-      stdout = err.stdout ?? "";
-    }
+    // override and a confirmably-empty --dispatch-receipt-path (so the
+    // consumption axis's bootstrap branch is reached instead of its
+    // "receipt path unconfirmed" REJECT branch). This call must ALLOW --
+    // otherwise real dispatch itself would break (프로덕션 동작 유지 요건),
+    // and now (HYK-479) an ALLOW is exactly what's required to observe the
+    // stamp at all.
+    const stdout = execFileSync(
+      "node",
+      [
+        cli,
+        probePath,
+        "--expect-repo-root",
+        root,
+        "--ledger",
+        ledgerPath,
+        "--dispatch-receipt-path",
+        receiptPath,
+      ],
+      { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
+    );
+    assert.match(
+      stdout,
+      /ALLOW/,
+      "this fixture must be shaped to ALLOW -- HYK-479 gates the dropped_at stamp behind combined.allow, so a REJECT here would make the assertion below vacuous",
+    );
     console.log(
       "PRODUCTION-SHAPE probe stdout (truncated):",
       stdout.slice(0, 500),
