@@ -24,6 +24,7 @@ import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import {
   copyFileSync,
+  existsSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -609,7 +610,7 @@ const ISOLATED_SUITE_RUNNER_PATH = join(HERE, "isolated-suite-runner.mjs");
 const RUNNER_RECEIPT_WRITER_PATH = join(HERE, "runner-receipt-writer.mjs");
 const MIN_OP_TARGET = "return Math.min(desired, n);";
 
-function withMutatedIsolatedSuiteRunner(mutate, run) {
+async function withMutatedIsolatedSuiteRunner(mutate, run) {
   const originalSource = readFileSync(ISOLATED_SUITE_RUNNER_PATH, "utf8");
   const dir = mkdtempSync(join(tmpdir(), "hyk477-1r-mutation-"));
   try {
@@ -619,16 +620,37 @@ function withMutatedIsolatedSuiteRunner(mutate, run) {
       originalSource,
       "the mutation string-replace had no effect -- MIN_OP_TARGET no longer matches the current source, this test would be a no-op",
     );
-    writeFileSync(join(dir, "isolated-suite-runner.mjs"), mutated, "utf8");
+    const mutatedRunnerPath = join(dir, "isolated-suite-runner.mjs");
+    writeFileSync(mutatedRunnerPath, mutated, "utf8");
     // the mutant's only relative import -- copied UNCHANGED so the mutant
     // module can load at all (MODULE_NOT_FOUND otherwise), same reasoning
     // as this repo's other staged-mutant tests (e.g.
     // hyk241-oneb-gate-mutation.test.mjs's *_PATH copies).
-    copyFileSync(
-      RUNNER_RECEIPT_WRITER_PATH,
-      join(dir, "runner-receipt-writer.mjs"),
+    const receiptWriterCopyPath = join(dir, "runner-receipt-writer.mjs");
+    copyFileSync(RUNNER_RECEIPT_WRITER_PATH, receiptWriterCopyPath);
+    // HYK-477 CI mutation-tmpdir fix: verify the staged copies actually
+    // landed on disk BEFORE handing the directory to `run` (which does
+    // `await import(...)`) -- surface a clear staging failure here instead
+    // of a bare ENOENT from inside the dynamic import later.
+    assert.ok(
+      existsSync(mutatedRunnerPath),
+      `staged mutant copy missing at ${mutatedRunnerPath} right after writeFileSync -- staging failed before import`,
     );
-    return run(dir);
+    assert.ok(
+      existsSync(receiptWriterCopyPath),
+      `staged receipt-writer copy missing at ${receiptWriterCopyPath} right after copyFileSync -- staging failed before import`,
+    );
+    // `run` is async (it does `await import(...)`); this function must
+    // itself await it here, inside the try, so the `finally` below (which
+    // rmSync's the staging dir) cannot run until `run`'s import has
+    // actually finished reading the staged files. Previously this returned
+    // the pending promise from a non-async function: `finally` fired
+    // synchronously right after `run(dir)` was *called* (before its
+    // `await import(...)` had a chance to complete), deleting the tmpdir
+    // out from under the in-flight import -- the ENOENT CI saw on Linux,
+    // where dynamic import's fs access is genuinely async enough for the
+    // race to lose; Windows apparently won that race by luck/timing.
+    return await run(dir);
   } finally {
     rmSync(dir, { recursive: true, force: true });
     // The real file was NEVER opened for writing above (only read) -- this
