@@ -109,11 +109,20 @@ test("(a) fresh coder-task.md gets result_file/runner_receipt_file/gitignore-not
     assert.match(after, /^result_header_checklist_verdict:.*검토 전용/im);
     assert.match(after, /^result_header_checklist_headcommit:.*검토 전용/im);
     assert.match(after, /^result_header_checklist_done:.*손기입 금지/im);
+    // HYK-485 범위3이 추가한 회차별 러너 파일명 규약 줄도 같은 블록에
+    // 있어야 한다(이 단정이 없으면 이 시험은 그 줄의 존재를 못 잡는다).
+    assert.match(
+      after,
+      /^result_header_checklist_runner_naming:.*runner-receipt-run<N>\.json/im,
+    );
 
     // Lines must sit immediately after task_id: (this injection runs
     // BEFORE bestEffortStampDroppedAt -- dispatch-gate-decision.mjs's call
     // site comment -- so dropped_at's own "insert right after task_id:"
     // ends up running last and lands closer to task_id: than this block).
+    // HYK-486: a6c0809 added result_header_checklist_runner_naming: as an
+    // 8th checklist line, shifting everything after it down by one --
+    // this seal must track the block's real length, not a stale count.
     const lines = after.split("\n");
     assert.equal(lines[0], "task_id: HYK-9201-inject-1");
     assert.match(lines[1], /^dropped_at:/);
@@ -128,7 +137,8 @@ test("(a) fresh coder-task.md gets result_file/runner_receipt_file/gitignore-not
     assert.match(lines[10], /^result_header_checklist_verdict:/);
     assert.match(lines[11], /^result_header_checklist_headcommit:/);
     assert.match(lines[12], /^result_header_checklist_done:/);
-    assert.equal(lines[13], "role: CODER");
+    assert.match(lines[13], /^result_header_checklist_runner_naming:/);
+    assert.equal(lines[14], "role: CODER");
   });
 });
 

@@ -3415,7 +3415,7 @@ const COUNT_LINE_FORMAT_HINT =
 // 밑줄 없는 "headcommit"으로 써서 그 부분 문자열 충돌 자체를 없앤다 --
 // 값 텍스트(사람이 읽는 설명)는 여전히 "head_commit 필드"라고 쓰되, 뒤에
 // 콜론을 붙이지 않는다(마찬가지로 충돌 없음, "head_commit " 뒤는 공백).
-function buildResultHeaderChecklistLines(role) {
+export function buildResultHeaderChecklistLines(role) {
   const upperRole = role.toUpperCase();
   const isReview = /^review/i.test(role);
   const reviewOnlySpec = (whenReview) =>
@@ -3428,6 +3428,13 @@ function buildResultHeaderChecklistLines(role) {
     `result_header_checklist_verdict: verdict 필드는 ${reviewOnlySpec("approved 또는 rejected 중 하나만, 정확히 1개")}`,
     `result_header_checklist_headcommit: head_commit 필드는 ${reviewOnlySpec("단독 40-hex 줄(HYK-383) 정확히 1개")}`,
     `result_header_checklist_done: 완료 표지(>>> DONE 또는 node scripts/relay/finalize-done.mjs ${upperRole})는 정확히 1개 -- 손기입 금지`,
+    // HYK-485 범위3: 전체 러너를 2회 이상 돌릴 때의 회차별 파일명 규약을
+    // 같은 주입 블록에 못박는다(러너 영수증/로그 정본은 이 규약과
+    // 별개로 그대로 둔다 -- RUNNER_RECEIPT_RUN_PREFIX·runner-receipt-writer.mjs
+    // 가 이미 프로덕션에서 구현한 이름과 맞춘다). 키 이름은 이 파일
+    // 자신의 비타협 3가지(head_commit·task_id·verdict·for를 부분
+    // 문자열로도 넣지 않는다)를 지킨다.
+    `result_header_checklist_runner_naming: 전체 러너를 2회 이상 돌릴 때 회차별 영수증은 runner-receipt-run<N>.json, 로그는 full-runner-<N>.log 로 남기고, 정본 runner-receipt.json 은 그대로 둔다`,
   ];
 }
 
@@ -3449,15 +3456,57 @@ function computeLegacyInjectionValues(role, harnessDir) {
 // (제자리 교체) ... 중복 키 금지". 각 옛 키가 "값 없이"(같은 줄에 결측)
 // 이미 존재하면 그 줄을 제자리에서 값 있는 줄로 교체한다 -- 새 줄을
 // 추가하지 않으므로 중복이 생길 수 없다.
-function fillEmptyLegacyKeysInPlace(text, legacyValues) {
-  let rewritten = text;
+//
+// HYK-486 (검토 P2-2 가 값으로 재현한 실사고) 수리:
+// 1) ⛔마스킹 누락 -- 코드펜스/HTML 주석으로 «인용된» 빈 키(예: 본문에
+//    예시로 박힌 `result_file:`)도 "진짜 키"로 오인해 채웠었다. 이제
+//    maskQuotedMarkerRegions(HYK-449, 정본)로 먼저 가린 텍스트에서
+//    후보를 찾는다 -- 마스킹은 blankKeepingNewlines로 길이/오프셋을
+//    보존하므로(reject-streak.mjs 주석), masked 텍스트에서 찾은 match
+//    index를 원문(text) 치환에 그대로 재사용해도 안전하다.
+// 2) ⛔`replace`에 `g` 플래그가 없어 맨 앞 하나만 치환했다(뒤에 있는
+//    진짜 키가 영원히 빈 채로 건너뛰어짐). matchAll로 «모든» 후보를
+//    센다.
+// 3) ★진짜(마스킹 살아남은) 키가 2개 이상이면 -- 어느 것이 "그" 빈
+//    키인지 기계가 결정할 근거가 없으므로 -- 조용히 하나만 고르지
+//    않고 거부한다(reject-streak.mjs의 for:/verdict: 이중 표지를
+//    판정 불가로 멈추는 원칙과 같다, HYK-183).
+// 4) 치환은 문자열 slice로 직접 이어붙인다(정규식 `.replace(re, str)`을
+//    전혀 쓰지 않음) -- 치환 값에 `$&`·`$1` 같은 특수 패턴이 들어 있어도
+//    `.replace()`의 `$` 치환 해석 자체가 개입할 여지가 없다(비타협
+//    "함수형 치환으로 막아라" 요구).
+export function fillEmptyLegacyKeysInPlace(text, legacyValues) {
+  const masked = maskQuotedMarkerRegions(text);
   const filledKeys = [];
+  const replacements = [];
   for (const key of Object.keys(legacyValues)) {
-    const emptyKeyRe = new RegExp(`^${key}:[ \\t]*$`, "im");
-    if (emptyKeyRe.test(rewritten)) {
-      rewritten = rewritten.replace(emptyKeyRe, `${key}: ${legacyValues[key]}`);
-      filledKeys.push(key);
+    const emptyKeyRe = new RegExp(`^${key}:[ \\t]*$`, "gim");
+    const matches = [...masked.matchAll(emptyKeyRe)];
+    if (matches.length === 0) continue;
+    if (matches.length > 1) {
+      throw new Error(
+        `fillEmptyLegacyKeysInPlace: key '${key}' appears as a genuine (non-quoted) empty key ${matches.length} times -- refusing to silently pick one (HYK-486)`,
+      );
     }
+    filledKeys.push(key);
+    replacements.push({
+      index: matches[0].index,
+      length: matches[0][0].length,
+      key,
+    });
+  }
+  // 뒤에서 앞으로 치환해야 앞선 치환이 뒤에 남은 치환의 인덱스를
+  // 어긋나게 하지 않는다. filledKeys는 legacyValues 순서를 그대로
+  // 유지한다(appendMissingLegacyKeysAndChecklist가 "마지막으로 채운
+  // 키"를 legacyValues 순서 기준으로 찾으므로, 파일 내 물리적 위치
+  // 순서와 섞으면 안 된다).
+  const byIndexDesc = [...replacements].sort((a, b) => b.index - a.index);
+  let rewritten = text;
+  for (const { index, length, key } of byIndexDesc) {
+    rewritten =
+      rewritten.slice(0, index) +
+      `${key}: ${legacyValues[key]}` +
+      rewritten.slice(index + length);
   }
   return { rewritten, filledKeys };
 }

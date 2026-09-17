@@ -13,6 +13,16 @@
 // "dispatch-gate-decision*.test.mjs"에 맞춘다 -- coder-task.md §
 // 1b_exec_line(`node --test scripts/check/dispatch-gate-decision*.test.mjs`)
 // 이 이 새 파일도 함께 실행하게 하기 위함.
+//
+// HYK-485(범위3)+HYK-486 번들(이 라운드 coder-task.md): 같은
+// 1b_exec_line이 이 파일을 이미 태우므로, 두 스코프의 새 시험도 같은
+// 파일에 더한다(exec_line이 고정 파일 목록이라 새 파일을 만들면 실행
+// 목록에서 빠진다).
+// - 범위 A(HYK-485): buildResultHeaderChecklistLines가 «회차별 파일명
+//   규약» 한 줄을 더 주입하는지.
+// - 범위 B(HYK-486): fillEmptyLegacyKeysInPlace가 인용된 빈 키를 더 이상
+//   진짜 키로 오인하지 않는지, g 플래그 없이 첫 매치만 치환하던 버그가
+//   고쳐졌는지.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
@@ -20,8 +30,13 @@ import { mkdtempSync, writeFileSync, rmSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
+import { createHash } from "node:crypto";
 import { writeLedger } from "./reject-streak.mjs";
-import { RESULT_FILE_LINE_RE } from "./dispatch-gate-decision.mjs";
+import {
+  RESULT_FILE_LINE_RE,
+  buildResultHeaderChecklistLines,
+  fillEmptyLegacyKeysInPlace,
+} from "./dispatch-gate-decision.mjs";
 // HYK-480 §2-1 (책임자 실사고 근거): 점검표 문면을 그대로 따른 결과
 // 파일이 파서에서 표지 «1개»로 읽히는지는 naive grep이 아니라 실제
 // 생산 파서 함수로 단정해야 한다(HYK-468 2R과 같은 판정선) -- 같은
@@ -188,7 +203,7 @@ test("(b) 값 있는 파일 -- 재게이트해도 무변경(멱등), 건너뛰�
   });
 });
 
-test("(c) 줄 없음 -- 4개 옛 키 + 점검표 7줄, 총 11줄이 task_id: 바로 뒤에 새로 주입된다", () => {
+test("(c) 줄 없음 -- 4개 옛 키 + 점검표 8줄(HYK-485 범위3: runner_naming 줄 포함), 총 12줄이 task_id: 바로 뒤에 새로 주입된다", () => {
   withFixtureDir((dir) => {
     const taskPath = join(dir, "coder-task.md");
     writeFileSync(
@@ -219,6 +234,7 @@ test("(c) 줄 없음 -- 4개 옛 키 + 점검표 7줄, 총 11줄이 task_id: 바
       "result_header_checklist_verdict",
       "result_header_checklist_headcommit",
       "result_header_checklist_done",
+      "result_header_checklist_runner_naming",
     ]) {
       assert.equal(
         countOccurrences(after, new RegExp(`^${prefix}:`, "gim")),
@@ -409,5 +425,332 @@ test("(g) 점검표를 «그대로 따른» 결과 파일이 실제 파서 함�
     noncompliantDoneMatches.length,
     2,
     "§0-1 실사고 재현: 계수 줄을 완료 표지 모양으로 쓰면 실제 파서가 2개로 센다(점검표 안전 서식 경고가 막는 바로 그 함정)",
+  );
+});
+
+// ===========================================================================
+// HYK-485 범위3: 주입 블록에 «회차별 파일명 규약» 한 줄.
+// ===========================================================================
+
+test("(h) HYK-485 범위3: buildResultHeaderChecklistLines가 회차별 파일명 규약 줄을 정확히 1개 더 넣고, 옛 7줄 + 새 1줄 = 8줄이며 키 이름이 비타협 3가지를 지킨다(프로덕션 export 직접 구동)", () => {
+  const lines = buildResultHeaderChecklistLines("CODER");
+  assert.equal(lines.length, 8, "옛 7줄 + 회차별 파일명 규약 1줄 = 8줄");
+
+  const runnerNamingLines = lines.filter((l) =>
+    l.startsWith("result_header_checklist_runner_naming:"),
+  );
+  assert.equal(
+    runnerNamingLines.length,
+    1,
+    "회차별 파일명 규약 줄은 정확히 1개여야 한다",
+  );
+  const [runnerNamingLine] = runnerNamingLines;
+
+  // 내용: 러너 영수증/로그 정본 코드(runner-receipt-writer.mjs·
+  // RUNNER_RECEIPT_RUN_PREFIX)가 이미 프로덕션에서 쓰는 이름과 맞춘다.
+  assert.match(runnerNamingLine, /runner-receipt-run<N>\.json/);
+  assert.match(runnerNamingLine, /full-runner-<N>\.log/);
+  assert.match(runnerNamingLine, /정본 runner-receipt\.json 은 그대로 둔다/);
+
+  // 비타협 3가지(이 라운드 coder-task.md §1): 키 이름에 head_commit·
+  // task_id·verdict·for를 부분 문자열로도 넣지 않는다.
+  const key = runnerNamingLine.slice(0, runnerNamingLine.indexOf(":"));
+  for (const bad of ["head_commit", "task_id", "verdict", "for"]) {
+    assert.equal(
+      key.includes(bad),
+      false,
+      `키 이름 '${key}'는 '${bad}'를 부분 문자열로도 포함하면 안 된다(비타협 3가지 #1)`,
+    );
+  }
+  // 비타협 #2: 열 0에서 완료 표지 모양(>>> ...)으로 시작하지 않는다.
+  assert.equal(runnerNamingLine.startsWith(">>>"), false);
+  // 비타협 #3: 단일 key: value 한 줄 관례(개행 없음).
+  assert.equal(runnerNamingLine.includes("\n"), false);
+});
+
+test("(i) 변이 RED: 회차별 파일명 규약 줄을 빼면(HYK-485 범위3 이전 실물 모양) 8줄 계약과 규약 텍스트가 사라진다", () => {
+  const lines = buildResultHeaderChecklistLines("CODER");
+  const PRE_HYK_485_SCOPE3_LINE_COUNT = 7; // 이 라운드 coder-task.md §1 인용: "7줄을 기계 주입한다"
+  assert.notEqual(
+    lines.length,
+    PRE_HYK_485_SCOPE3_LINE_COUNT,
+    "새 줄이 실제로 추가됐다(지금 길이가 옛 7이 아니다)",
+  );
+
+  // RED 재현: 지금 프로덕션 배열에서 새로 추가된 마지막 줄을 빼면(=이
+  // 라운드 이전 실물 모양) 그 7줄에는 회차별 파일명 규약이 전혀 없었다.
+  const preFixLines = lines.slice(0, PRE_HYK_485_SCOPE3_LINE_COUNT);
+  assert.equal(preFixLines.length, 7);
+  assert.equal(
+    preFixLines.some((l) => l.includes("runner-receipt-run<N>.json")),
+    false,
+    "재현: 옛 7줄에는 회차별 영수증 파일명 규약이 없었다(이 라운드가 메우는 공백)",
+  );
+  assert.equal(
+    lines.some((l) => l.includes("runner-receipt-run<N>.json")),
+    true,
+    "수리 후: 지금 프로덕션 8줄에는 있다",
+  );
+});
+
+test("(j) HYK-485 범위3: 새 규약 줄이 섞여도 실제 파서(resolveResultTaskId/DONE_RE/countVerdictLines)의 표지 개수 판정이 그대로다", () => {
+  const checklistLines = buildResultHeaderChecklistLines("CODER");
+  const resultBody =
+    "role: CODER\n" +
+    "task_id: HYK-9508-runner-naming-1\n" +
+    checklistLines.join("\n") +
+    "\n본문...\n" +
+    ">>> DONE: CODER @ 2026-09-17 10:00:00 KST\n";
+
+  const taskIdVerdict = resolveResultTaskId(resultBody);
+  assert.equal(taskIdVerdict.ok, true);
+  assert.equal(taskIdVerdict.id, "HYK-9508-runner-naming-1");
+
+  const doneMatches = [
+    ...maskQuotedMarkerRegions(resultBody).matchAll(DONE_RE),
+  ];
+  assert.equal(
+    doneMatches.length,
+    1,
+    "점검표 8줄(회차별 파일명 규약 포함)이 섞여도 완료 표지는 여전히 1개로 읽힌다",
+  );
+  assert.equal(
+    countVerdictLines(resultBody),
+    0,
+    "CODER 결과에는 verdict: 가 여전히 0개다",
+  );
+});
+
+// ===========================================================================
+// HYK-486: 인용된 빈 키가 진짜 키를 가로챈다 -- fillEmptyLegacyKeysInPlace
+// 수리 회귀.
+// ===========================================================================
+
+test("(k) HYK-486 ⓐ: 코드펜스로 인용된 빈 result_file: 이 진짜 키보다 앞에 있어도 진짜 키가 채워지고 인용 줄은 그대로다(CLI 프로덕션 경로)", () => {
+  withFixtureDir((dir) => {
+    const taskPath = join(dir, "coder-task.md");
+    const original =
+      `task_id: HYK-9509-quote-hijack-1\n` +
+      `role: CODER\n` +
+      "예시(코드펜스 안, 진짜 키 아님):\n" +
+      "```\n" +
+      "result_file:\n" +
+      "```\n" +
+      `result_file:\n` +
+      `runner_receipt_file:\n` +
+      `harness_gitignore_note:\n` +
+      `worktree_discipline:\n` +
+      `some body\n${ONE_B_BLOCK}`;
+    writeFileSync(taskPath, original, "utf8");
+    const ledgerPath = join(dir, "reject-streak.json");
+    writeLedger(ledgerPath, { schema_version: 1, issues: {} });
+
+    const r = runCli([taskPath, "--ledger", ledgerPath]);
+    assert.equal(r.status, 0);
+    assert.match(r.stdout, /ALLOW/);
+
+    const after = readFileSync(taskPath, "utf8");
+    const resultFile = join(dir, "coder.md");
+
+    assert.match(
+      after,
+      /```\nresult_file:\n```/,
+      "코드펜스 안 인용 빈 키 줄은 손대지 않고 그대로 남아야 한다(HYK-486 실사고가 채웠던 바로 그 줄)",
+    );
+    assert.ok(
+      after.includes(`\nresult_file: ${resultFile}\n`),
+      "진짜(인용 밖) result_file: 이 실제 경로로 채워져야 한다 -- 영원히 건너뛰어지면 안 된다",
+    );
+
+    // 실제 파서(마스킹)로 재확인: 인용 밖에서 값 있는 result_file: 줄이
+    // 정확히 1개.
+    const masked = maskQuotedMarkerRegions(after);
+    assert.equal(
+      [...masked.matchAll(/^result_file:\s*\S.*$/gim)].length,
+      1,
+      "마스킹 후(인용 제외) 값 있는 result_file: 줄이 정확히 1개여야 한다",
+    );
+    // 나머지 3키도 정상 채움(회귀 없음).
+    assert.match(after, /^runner_receipt_file:.*runner-receipt\.json$/im);
+    assert.match(after, /^harness_gitignore_note:.*git-ignore/im);
+    assert.match(after, /^worktree_discipline:.*HEAD/im);
+  });
+});
+
+test("(l) HYK-486 ⓑ: 진짜(인용 아닌) 빈 키가 같은 라운드에 2번 나오면 조용히 하나만 고르지 않고 거부한다(fillEmptyLegacyKeysInPlace 직접 구동)", () => {
+  const text =
+    "task_id: HYK-9510-dup-real-1\n" +
+    "result_file:\n" +
+    "runner_receipt_file:\n" +
+    "harness_gitignore_note:\n" +
+    "worktree_discipline:\n" +
+    "result_file:\n"; // 진짜 키가 실수로 한 번 더 -- 인용이 아니다.
+  const legacyValues = {
+    result_file: "/abs/coder.md",
+    runner_receipt_file: "/abs/runner-receipt.json",
+    harness_gitignore_note: "note",
+    worktree_discipline: "discipline",
+  };
+  assert.throws(
+    () => fillEmptyLegacyKeysInPlace(text, legacyValues),
+    /result_file' appears as a genuine \(non-quoted\) empty key 2 times/,
+    "HYK-486 ⓑ 정책: 전부 채움이 아니라 1개 아니면 거부 -- 조용히 하나만 고르지 않는다",
+  );
+});
+
+test("(m) 값이 이미 있는 파일 재게이트 -- sha256 바이트 동일(완전 멱등)", () => {
+  withFixtureDir((dir) => {
+    const taskPath = join(dir, "coder-task.md");
+    writeFileSync(
+      taskPath,
+      `task_id: HYK-9511-sha256-idempotent-1\n${ONE_B_BLOCK}`,
+      "utf8",
+    );
+    const ledgerPath = join(dir, "reject-streak.json");
+    writeLedger(ledgerPath, { schema_version: 1, issues: {} });
+
+    runCli([taskPath, "--ledger", ledgerPath]);
+    const afterFirst = readFileSync(taskPath);
+    const sha1 = createHash("sha256").update(afterFirst).digest("hex");
+
+    runCli([taskPath, "--ledger", ledgerPath]);
+    const afterSecond = readFileSync(taskPath);
+    const sha2 = createHash("sha256").update(afterSecond).digest("hex");
+
+    assert.equal(
+      sha1,
+      sha2,
+      "값 있는 파일 재게이트는 sha256 바이트 동일이어야 한다(HYK-486 수리가 멱등을 깨지 않았다는 증거)",
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// HYK-486 변이 RED 2종: 이 라운드가 고친 두 축(마스킹 · g 플래그)을 «각각
+// 따로» 되돌렸을 때 지금 프로덕션 정답 동작과 달라짐을 증명한다. 복원(=
+// 지금 프로덕션 코드) 뒤에는 같은 입력에 대해 바이트 동일함도 함께 확인.
+// ---------------------------------------------------------------------------
+
+function mutantNoMasking(text, legacyValues) {
+  // 변이 1: maskQuotedMarkerRegions를 거치지 않는다(그 외 구조는 지금
+  // 프로덕션과 동일 -- g 플래그·거부 정책은 유지).
+  const filledKeys = [];
+  const replacements = [];
+  for (const key of Object.keys(legacyValues)) {
+    const emptyKeyRe = new RegExp(`^${key}:[ \\t]*$`, "gim");
+    const matches = [...text.matchAll(emptyKeyRe)]; // ⛔masked 대신 원문
+    if (matches.length === 0) continue;
+    if (matches.length > 1) {
+      throw new Error(
+        `mutant(no-masking): key '${key}' appears ${matches.length} times`,
+      );
+    }
+    filledKeys.push(key);
+    replacements.push({
+      index: matches[0].index,
+      length: matches[0][0].length,
+      key,
+    });
+  }
+  const byIndexDesc = [...replacements].sort((a, b) => b.index - a.index);
+  let rewritten = text;
+  for (const { index, length, key } of byIndexDesc) {
+    rewritten =
+      rewritten.slice(0, index) +
+      `${key}: ${legacyValues[key]}` +
+      rewritten.slice(index + length);
+  }
+  return { rewritten, filledKeys };
+}
+
+function mutantNoGlobalFlag(text, legacyValues) {
+  // 변이 2: g 플래그 없이 옛 방식(single .test + .replace)으로 되돌린다
+  // (마스킹은 detection에만 쓰이고 치환은 옛 코드 그대로 non-global
+  // `.replace()`를 원문에 직접 건다 -- 실사고 그 자체의 재현).
+  const masked = maskQuotedMarkerRegions(text);
+  let rewritten = text;
+  const filledKeys = [];
+  for (const key of Object.keys(legacyValues)) {
+    const emptyKeyRe = new RegExp(`^${key}:[ \\t]*$`, "im");
+    if (emptyKeyRe.test(masked)) {
+      rewritten = rewritten.replace(emptyKeyRe, `${key}: ${legacyValues[key]}`);
+      filledKeys.push(key);
+    }
+  }
+  return { rewritten, filledKeys };
+}
+
+const QUOTE_HIJACK_FIXTURE =
+  "task_id: HYK-9512-mutation-1\n" +
+  "```\n" +
+  "result_file:\n" +
+  "```\n" +
+  "result_file:\n" +
+  "runner_receipt_file:\n" +
+  "harness_gitignore_note:\n" +
+  "worktree_discipline:\n";
+const QUOTE_HIJACK_LEGACY_VALUES = {
+  result_file: "/abs/coder.md",
+  runner_receipt_file: "/abs/runner-receipt.json",
+  harness_gitignore_note: "note",
+  worktree_discipline: "discipline",
+};
+
+test("(n) 변이 RED (마스킹 제거): 인용 안 빈 키를 «진짜」로도 세어 거부하거나 잘못 채운다 -- 지금 프로덕션(마스킹 있음)은 정상 채운다", () => {
+  // 마스킹 없이 세면 result_file:이 원문에서 2번(인용 1 + 진짜 1) 잡혀
+  // "여러 번" 정책에 걸려 거부된다 -- 지금 프로덕션은 마스킹으로 인용을
+  // 제외해 1번으로 보고 정상 채운다. 같은 입력, 다른 결과 = 마스킹이
+  // 실제로 하는 일의 기계 증거.
+  assert.throws(
+    () => mutantNoMasking(QUOTE_HIJACK_FIXTURE, QUOTE_HIJACK_LEGACY_VALUES),
+    /result_file/,
+    "재현: 마스킹 없이는 인용된 빈 키도 진짜로 세어 '여러 번' 오판한다",
+  );
+
+  const { rewritten: fixed } = fillEmptyLegacyKeysInPlace(
+    QUOTE_HIJACK_FIXTURE,
+    QUOTE_HIJACK_LEGACY_VALUES,
+  );
+  assert.match(
+    fixed,
+    /```\nresult_file:\n```/,
+    "복원(=지금 프로덕션): 인용 줄은 그대로",
+  );
+  assert.ok(
+    fixed.includes("\nresult_file: /abs/coder.md\n"),
+    "복원(=지금 프로덕션): 진짜 키가 채워진다",
+  );
+});
+
+test("(o) 변이 RED (g 플래그 제거): 원문 검색에서 «먼저 나오는» 인용 줄을 채우고 진짜 키는 영원히 빈 채로 남긴다 -- HYK-486 실사고 그 자체", () => {
+  const { rewritten: mutated } = mutantNoGlobalFlag(
+    QUOTE_HIJACK_FIXTURE,
+    QUOTE_HIJACK_LEGACY_VALUES,
+  );
+  // 재현: non-global .replace()가 masked 텍스트가 아니라 원문에서
+  // «맨 처음» 매치(=인용 안 줄)를 채우고, 그 뒤 진짜 줄은 그대로 빈다.
+  assert.match(
+    mutated,
+    /```\nresult_file: \/abs\/coder\.md\n```/,
+    "재현: 인용 줄이 잘못 채워진다(HYK-486 실사고)",
+  );
+  assert.match(
+    mutated,
+    /```\nresult_file:\nrunner_receipt_file:/,
+    "재현: 닫는 펜스 뒤 진짜 result_file: 은 영원히 빈 채로 남는다",
+  );
+
+  // 복원(=지금 프로덕션)은 반대로 인용은 그대로, 진짜만 채운다 -- 바이트
+  // 단위로 재확인.
+  const { rewritten: fixed } = fillEmptyLegacyKeysInPlace(
+    QUOTE_HIJACK_FIXTURE,
+    QUOTE_HIJACK_LEGACY_VALUES,
+  );
+  assert.match(fixed, /```\nresult_file:\n```/);
+  assert.ok(fixed.includes("\nresult_file: /abs/coder.md\n"));
+  assert.notEqual(
+    fixed,
+    mutated,
+    "복원 후 결과는 변이 결과와 바이트 단위로 달라야 한다(수리가 실제로 동작을 바꿨다는 증거)",
   );
 });
