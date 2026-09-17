@@ -33,6 +33,7 @@ import {
   readFileSync,
   readdirSync,
   rmSync,
+  existsSync,
 } from "node:fs";
 import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
@@ -599,42 +600,26 @@ test("ⓕ 회귀: 각인 이전 옛 사본만 있는 경우(dispatch_id 필드 �
 });
 
 // ===========================================================================
-// Q1 실측 확인용 부가 시험: "배달 재시도마다 사본이 한 벌 늘어난다"는 ORCH
-// 해석이 사실인지 -- REJECT로 끝나는 배달 시도조차 dropped_at을 다시
-// 찍고 사본을 한 벌 더 보존하는지 CLI를 두 번 연속 돌려 직접 관찰한다
-// (coder.md Q1 답의 실행 증거, dispatch-gate-decision.mjs의
-// bestEffortStampDroppedAt 호출이 그 어떤 게이트 판정보다도 먼저 무조건
-// 실행된다는 배선 자체를 실증 -- runDispatchGateDecision 안에서
-// checkGatePreconditions/게이트 스폰보다 앞선 자리).
+// Q1 실측 확인용 부가 시험: HYK-479 §A 수리 전에는 "배달 재시도마다 사본이
+// 한 벌 늘어난다"(REJECT로 끝나는 배달 시도조차 dropped_at을 다시 찍고
+// rounds/ 사본을 한 벌 더 보존한다)가 사실이었다 -- 그것이 469 mask-3
+// 실사고 그 자체였다(거부 시각 앞으로 dropped_at이 재기입돼 검사 영수증
+// 시각이 "일을 시키기도 전에 검사가 끝난" 모양으로 뒤집혔다). 이제
+// dispatch-gate-decision.mjs의 bestEffortStampDroppedAt은 게이트가
+// combined.allow일 때만 실행된다(runDispatchGateDecision 자신의 호출부
+// 주석 참조) -- 이 시험은 그 반대(REJECT는 task 파일 바이트를 조금도
+// 바꾸지 않는다)를 고정한다.
 // ===========================================================================
-// HYK-257-done-stamp-2 §2/HYK-307-order-1 §1의 실물 배선(dropped-at-stamp-core.mjs
-// formatKstMinute)은 «분» 단위 정밀도다 -- 같은 초 안에서 두 번 CLI를
-// 돌리면(이 시험처럼) 두 stamp가 같은 분에 찍혀 rewritten===original(값
-// 불변)이 되고, bestEffortSnapshotRoundTaskFile은 그래도 부르지만
-// archiveRoundTaskFileIfNew의 동일-내용 중복 방지가 두 번째 호출을
-// 조용히 skip한다 -- 그래서 "매 CLI 호출마다 사본이 늘어난다"가 아니라
-// "매 호출마다 dropped_at을 다시 찍고(그 결과가 이전과 다르면) 사본을
-// 한 벌 더 보존한다"가 정확한 사실이다(오늘 실측 5벌도 각각 다른 분
-// 18:40/19:13/19:36/19:37/19:45에 찍혔다 -- 실제 ORCH 재시도는 초 단위가
-// 아니라 분 단위 이상 간격이라 이 조건이 항상 성립한다). 이 시험은 그
-// 정확한 사실을 단일 호출로, 시각 흐름에 기대지 않고 증명한다: REJECT로
-// 끝나는 호출 «전에도» dropped_at 재계산·재보존이 일어나는지 관찰한다.
-test("Q1 실측: precondition 단계에서 즉시 REJECT되는 요청(task_id 줄이 없음)도, 배달 거부 여부와 무관하게 dropped_at을 기계로 다시 찍고 rounds/ 사본을 보존한다", () => {
+test("Q1 실측(HYK-479 §A 수리 후): precondition 단계에서 즉시 REJECT되는 요청(task_id 줄이 없음)은 dropped_at을 포함해 task 파일 바이트를 조금도 바꾸지 않고, rounds/ 사본도 만들지 않는다", () => {
   withFixtureDir((dir) => {
     const role = "coder";
     const taskPath = join(dir, `${role}-task.md`);
     const staleDroppedAt = "2026-01-01 00:00 KST"; // 실제 지금과 절대 같은 분일 수 없는, 먼 과거 값.
     // ⛔task_id: 줄이 없다 -- checkGatePreconditions(dispatch-gate-decision-core.mjs)가
     // taskIdMatchCount!==1이면 곧바로 REJECT하는, 게이트가 하나도 스폰되지
-    // 않는 가장 얕은 실패 사례를 고른다(다른 축의 개입 최소화). dropped_at:
-    // 줄만 있으면 bestEffortStampDroppedAt(task_id 유무와 무관하게 동작,
-    // runDispatchGateDecision 안에서 그 어떤 게이트 판정보다도 먼저 호출됨)이
-    // 이 실패보다 먼저 무조건 돈다.
-    writeFileSync(
-      taskPath,
-      `dropped_at: ${staleDroppedAt}\n${ONE_B_BLOCK}`,
-      "utf8",
-    );
+    // 않는 가장 얕은 실패 사례를 고른다(다른 축의 개입 최소화).
+    const original = `dropped_at: ${staleDroppedAt}\n${ONE_B_BLOCK}`;
+    writeFileSync(taskPath, original, "utf8");
     const ledgerPath = join(dir, "reject-streak.json");
     writeLedger(ledgerPath, { schema_version: 1, issues: {} });
 
@@ -642,33 +627,20 @@ test("Q1 실측: precondition 단계에서 즉시 REJECT되는 요청(task_id �
     assert.notEqual(r1.status, 0, "REJECT(task_id 줄 없음) -- 배달은 막힌다");
 
     const rewritten = readFileSync(taskPath, "utf8");
-    assert.doesNotMatch(
+    assert.equal(
       rewritten,
-      new RegExp(
-        `dropped_at:\\s*${staleDroppedAt.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`,
-      ),
-      "Q1: REJECT로 끝난 호출도 taskPath 자신의 dropped_at을 기계로 다시 찍어야 한다(옛 값이 남아 있으면 안 됨)",
-    );
-    assert.match(
-      rewritten,
-      /^dropped_at:\s*\d{4}-\d{2}-\d{2} \d{2}:\d{2} KST\s*$/m,
-      "Q1: 새로 찍힌 dropped_at도 여전히 '분 단위 KST' 모양이어야 한다",
+      original,
+      "HYK-479 §A: REJECT로 끝난 호출은 task 파일 바이트가 전/후 완전히 동일해야 한다(dropped_at 포함, 옛 값이 그대로 남아야 한다)",
     );
 
     const roundsDir = join(dir, "rounds");
-    const preserved = readdirSync(roundsDir).filter((n) =>
-      /^CODER-task-r\d+\.md$/i.test(n),
-    );
+    const preserved = existsSync(roundsDir)
+      ? readdirSync(roundsDir).filter((n) => /^CODER-task-r\d+\.md$/i.test(n))
+      : [];
     assert.equal(
       preserved.length,
-      1,
-      `Q1: REJECT로 끝난 호출도 그 순간의(재스탬프된) task 파일 원문을 rounds/에 한 벌 보존해야 한다(실제: ${preserved.join(", ")})`,
-    );
-    const archivedBody = readFileSync(join(roundsDir, preserved[0]), "utf8");
-    assert.match(
-      archivedBody,
-      /dropped_at=\d{4}-\d{2}-\d{2} \d{2}:\d{2} KST/,
-      "Q1: 보존된 사본의 헤더도 새로 찍힌(옛 값이 아닌) dropped_at을 담고 있어야 한다 -- 매 호출(성공/거부 무관)마다 그 순간의 dropped_at이 그대로 보존된다는 증거(원인=dispatch-gate-decision.mjs의 runDispatchGateDecision이 게이트/전제조건 판정보다 먼저 bestEffortStampDroppedAt을 무조건 호출)",
+      0,
+      `HYK-479 §A: REJECT로 끝난 호출은 스냅숏도 만들지 않아야 한다(stamp 자체가 호출되지 않으므로) -- 실제: ${preserved.join(", ")}`,
     );
   });
 });

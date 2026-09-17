@@ -13,7 +13,8 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, writeFileSync, rmSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { createHash } from "node:crypto";
 import { writeLedger } from "./reject-streak.mjs";
 import { checkRelayHandshake } from "./relay-handshake.mjs";
 
@@ -63,62 +64,139 @@ function runCli(args) {
   }
 }
 
+// HYK-479-486 (m): a `--import` preload module that overrides the global
+// `Date.now` BEFORE dispatch-gate-decision.mjs (and, transitively,
+// dropped-at-stamp-core.mjs's `stampDroppedAt`) ever gets a chance to read
+// it -- this is the ONLY way to inject an arbitrary machine-clock reading
+// into a real subprocess invocation of the actual CLI (no env-var hook
+// exists in production code, and none should be added just for this test --
+// that would be a test-only branch in production logic, exactly what this
+// repo's house style forbids). Reads FAKE_NOW_MS from the environment so a
+// single preload file serves every injected-clock call in this file.
+const FAKE_CLOCK_PRELOAD_PATH = join(
+  mkdtempSync(join(tmpdir(), "dispatch-gate-stamp-test-clock-")),
+  "fake-clock.mjs",
+);
+writeFileSync(
+  FAKE_CLOCK_PRELOAD_PATH,
+  `if (process.env.FAKE_NOW_MS) {\n  const fixed = Number(process.env.FAKE_NOW_MS);\n  Date.now = () => fixed;\n}\n`,
+  "utf8",
+);
+const FAKE_CLOCK_PRELOAD_URL = pathToFileURL(FAKE_CLOCK_PRELOAD_PATH).href;
+
+function runCliWithFakeClock(args, fakeNowMs) {
+  try {
+    const stdout = execFileSync(
+      "node",
+      ["--import", FAKE_CLOCK_PRELOAD_URL, SCRIPT_PATH, ...args],
+      {
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          DISPATCH_RECEIPT_PATH: SHARED_EMPTY_RECEIPT_PATH,
+          FAKE_NOW_MS: String(fakeNowMs),
+        },
+      },
+    );
+    return { status: 0, stdout, stderr: "" };
+  } catch (err) {
+    return {
+      status: err.status,
+      stdout: err.stdout ?? "",
+      stderr: err.stderr ?? "",
+    };
+  }
+}
+
 const DROPPED_AT_RE = /^dropped_at:\s*(.+)$/im;
 
-test("(a) existing dropped_at: line is rewritten to a fresh machine-stamped value, rest of file byte-identical", () => {
+test("(a) HYK-479-486 write-once: existing dropped_at: line is PRESERVED verbatim (re-gate must not overwrite the first-drop timestamp), rest of file byte-identical", () => {
   withFixtureDir((dir) => {
     const taskPath = join(dir, "coder-task.md");
     // HYK-465: this fixture pre-seeds a result_file: line so the OTHER
     // best-effort injection (bestEffortInjectResultPaths) is a no-op here
-    // -- this test's only concern is dropped_at rewriting in isolation.
+    // -- this test's only concern is dropped_at write-once behavior in
+    // isolation.
     const original = `task_id: HYK-9101-stamp-1\ndropped_at: 2020-01-01 00:00 KST\nresult_file: (pre-seeded, HYK-465 injection must not touch this fixture)\nrole: CODER\nsome body line\n${ONE_B_BLOCK}`;
     writeFileSync(taskPath, original, "utf8");
     const ledgerPath = join(dir, "reject-streak.json");
     writeLedger(ledgerPath, { schema_version: 1, issues: {} });
 
-    const before = Date.now();
     const r = runCli([taskPath, "--ledger", ledgerPath]);
-    const after = Date.now();
 
     assert.equal(r.status, 0);
     assert.match(r.stdout, /ALLOW/);
+    assert.match(
+      r.stdout,
+      /dropped_at already present -- write-once/,
+      "write-once skip must be visible in delivery-time stdout",
+    );
 
+    // HYK-479-486: a dropped_at: line that already carries a value must be
+    // byte-for-byte UNCHANGED -- this producer never overwrites a first
+    // drop timestamp on a re-gate. This is the flip of the old (pre-486)
+    // contract, which this same test used to assert (see git history):
+    // that contract silently destroyed the audit value of dropped_at
+    // whenever the same ALLOW round was gated more than once.
     const rewritten = readFileSync(taskPath, "utf8");
-    assert.notEqual(
+    assert.equal(
       rewritten,
       original,
-      "dropped_at line must have been rewritten",
+      "existing dropped_at: value (and everything else in the file) must be untouched",
     );
-
     const match = rewritten.match(DROPPED_AT_RE);
     assert.ok(match, "dropped_at: line must still be present");
-    assert.notEqual(match[1].trim(), "2020-01-01 00:00 KST");
+    assert.equal(match[1].trim(), "2020-01-01 00:00 KST");
+  });
+});
 
-    // The stamped value must be a real machine-clock reading taken during
-    // this CLI invocation (KST, minute precision) -- not an arbitrary
-    // string. Parse it back and confirm it falls within [before, after].
-    const stampedMatch = match[1]
-      .trim()
-      .match(/^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}) KST$/);
-    assert.ok(
-      stampedMatch,
-      `stamped value must match KST minute format: '${match[1]}'`,
-    );
-    const stampedMs = new Date(
-      `${stampedMatch[1]}T${stampedMatch[2]}:00+09:00`,
-    ).getTime();
-    // Minute-precision rounds down -- allow a 60s window on both sides.
-    assert.ok(
-      stampedMs >= before - 60_000 && stampedMs <= after + 60_000,
-      `stamped value ${match[1]} must be within the CLI invocation window`,
+test("(m) HYK-479-486 §4 비타협: 값이 이미 있는 파일을 ALLOW로 재게이트해도 sha256 바이트 동일(완전 멱등) -- 시각원을 인위로 분 경계 넘겨 주입해도 불변", () => {
+  withFixtureDir((dir) => {
+    const taskPath = join(dir, "coder-task.md");
+    const original = `task_id: HYK-9105-idempotent-1\ndropped_at: 2020-01-01 00:00 KST\nresult_file: (pre-seeded, HYK-465 injection must not touch this fixture)\nrole: CODER\n${ONE_B_BLOCK}`;
+    writeFileSync(taskPath, original, "utf8");
+    const originalSha256 = createHash("sha256").update(original).digest("hex");
+    const ledgerPath = join(dir, "reject-streak.json");
+    writeLedger(ledgerPath, { schema_version: 1, issues: {} });
+
+    // Run 1: inject a fixed clock reading (2026-01-01 12:00 KST).
+    const t1Ms = Date.UTC(2026, 0, 1, 3, 0, 0); // 2026-01-01 03:00 UTC = 12:00 KST
+    const r1 = runCliWithFakeClock([taskPath, "--ledger", ledgerPath], t1Ms);
+    assert.equal(r1.status, 0);
+    assert.match(r1.stdout, /ALLOW/);
+    const afterRun1 = readFileSync(taskPath, "utf8");
+    const shaRun1 = createHash("sha256").update(afterRun1).digest("hex");
+    assert.equal(
+      shaRun1,
+      originalSha256,
+      "run1 자체도 write-once이므로 원본과 sha256 동일해야 한다",
     );
 
-    // Everything OUTSIDE the dropped_at line must be byte-identical.
-    const expectedRewritten = original.replace(
-      DROPPED_AT_RE,
-      `dropped_at: ${match[1].trim()}`,
+    // Run 2: inject a clock reading in a DIFFERENT KST minute than run1 --
+    // proves the write-once contract is not merely "happened to land in the
+    // same minute" but structurally ignores the current clock reading
+    // entirely once a value already exists (the exact regression this
+    // round fixes: see the §1 diff-proof in the round's result file, where
+    // an UNPATCHED CLI overwrote 12:00 KST with 12:05 KST across this same
+    // minute-boundary crossing).
+    const t2Ms = Date.UTC(2026, 0, 1, 3, 5, 0); // 5 minutes later, different minute
+    const r2 = runCliWithFakeClock([taskPath, "--ledger", ledgerPath], t2Ms);
+    assert.equal(r2.status, 0);
+    assert.match(r2.stdout, /ALLOW/);
+    assert.match(r2.stdout, /dropped_at already present -- write-once/);
+
+    const afterRun2 = readFileSync(taskPath, "utf8");
+    const shaRun2 = createHash("sha256").update(afterRun2).digest("hex");
+    assert.equal(
+      afterRun2,
+      original,
+      "재게이트 후에도 파일 전체가 원본과 바이트 단위로 동일해야 한다",
     );
-    assert.equal(rewritten, expectedRewritten);
+    assert.equal(
+      shaRun2,
+      originalSha256,
+      "(m) 비타협 단정: sha256 전/후 완전 동일(완전 멱등) -- 분 경계를 인위로 넘겨도 불변",
+    );
   });
 });
 
@@ -179,14 +257,18 @@ test("(b2) HYK-316-dropped-stamp-1: neither dropped_at: nor task_id: line presen
   });
 });
 
-test("(c) pre-existing REJECT fixture shape (streak 2, no envelope) still REJECTs -- stamping does not weaken the gate", () => {
+test("(c) HYK-479 §A: pre-existing REJECT fixture shape (streak 2, no envelope) still REJECTs, AND the task file is now byte-for-byte unchanged -- rejecting must not touch dropped_at", () => {
   withFixtureDir((dir) => {
     const taskPath = join(dir, "coder-task.md");
-    writeFileSync(
-      taskPath,
-      `task_id: HYK-9103-reject-1\ndropped_at: 2020-01-01 00:00 KST\n${ONE_B_BLOCK}`,
-      "utf8",
-    );
+    // HYK-465: pre-seed a result_file: line so bestEffortInjectResultPaths
+    // (the OTHER best-effort write, unconditional and out of this round's
+    // scope -- HYK-479 coder-task.md §B explicitly leaves it untouched) is
+    // a no-op here, same convention as tests (a)/(b) above. That isolates
+    // this test's whole-file sha256 comparison to the ONE axis actually in
+    // scope: the dropped_at stamp.
+    const original = `task_id: HYK-9103-reject-1\ndropped_at: 2020-01-01 00:00 KST\nresult_file: (pre-seeded, HYK-465 injection must not touch this fixture)\n${ONE_B_BLOCK}`;
+    writeFileSync(taskPath, original, "utf8");
+    const originalSha256 = createHash("sha256").update(original).digest("hex");
     const ledgerPath = join(dir, "reject-streak.json");
     writeLedger(ledgerPath, {
       schema_version: 1,
@@ -203,13 +285,64 @@ test("(c) pre-existing REJECT fixture shape (streak 2, no envelope) still REJECT
     const r = runCli([taskPath, "--ledger", ledgerPath]);
     assert.equal(r.status, 1);
     assert.match(r.stderr, /REJECT/);
-    // Even though the CLI still rejects, the best-effort stamp step must
-    // still have run (it runs before the gates, unconditionally once the
-    // file exists) -- dropped_at should still have been overwritten.
+    // HYK-479 §A (469 mask-3 실사고 수리): 거부하면 아무것도 바뀌지 않는다
+    // -- dropped_at을 포함해 task 파일이 단 1바이트도 바뀌면 안 된다. 이
+    // 시험은 이전에는 정확히 반대(거부돼도 dropped_at이 덮어써진다)를
+    // 고정했었다 -- 그것이 바로 이 축이 고치는 실사고였다.
     const rewritten = readFileSync(taskPath, "utf8");
-    const match = rewritten.match(DROPPED_AT_RE);
-    assert.ok(match);
-    assert.notEqual(match[1].trim(), "2020-01-01 00:00 KST");
+    assert.equal(
+      rewritten,
+      original,
+      "REJECT 라운드는 task 파일 바이트가 전/후 완전히 동일해야 한다(dropped_at 포함)",
+    );
+    const rewrittenSha256 = createHash("sha256")
+      .update(rewritten)
+      .digest("hex");
+    assert.equal(
+      rewrittenSha256,
+      originalSha256,
+      "sha256 전/후 동일 -- 거부 갈래 ⓐ(연속반려 streak)",
+    );
+  });
+});
+
+test("(c2) HYK-479 §A/§B-1: DIFFERENT reject 갈래(1-B 누락 전제조건 위반)에서도 task 파일 sha256이 전/후 동일하다 -- 갈래를 하나만 보고 일반화하지 않는다", () => {
+  withFixtureDir((dir) => {
+    const taskPath = join(dir, "coder-task.md");
+    // ⛔ONE_B_BLOCK을 일부러 안 넣는다 -- checkOneBPrecondition이 이
+    // 갈래를 REJECT시킨다(reject-streak 서브프로세스 자체가 아니라 이
+    // CLI 안 in-process 전제조건 축이라, (c)의 «연속반려» 갈래와 코드
+    // 경로가 다르다 -- B-1이 요구하는 "«게이트 호출 후» 거부되는 갈래
+    // 최소 2가지"를 서로 다른 두 축으로 충족한다).
+    const original = `task_id: HYK-9104-oneb-reject-1\ndropped_at: 2020-01-01 00:00 KST\nresult_file: (pre-seeded, HYK-465 injection must not touch this fixture)\n`;
+    writeFileSync(taskPath, original, "utf8");
+    const originalSha256 = createHash("sha256").update(original).digest("hex");
+    const ledgerPath = join(dir, "reject-streak.json");
+    writeLedger(ledgerPath, { schema_version: 1, issues: {} });
+
+    const r = runCli([taskPath, "--ledger", ledgerPath]);
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /REJECT/);
+    assert.match(
+      r.stderr,
+      /1b_exec_line|1b_shown|1b_reach_path/,
+      "이 갈래는 (c)와 다른 사유(1-B 누락)로 거부돼야 한다 -- 표본이 실제로 다른 코드 경로를 탔는지 확인",
+    );
+
+    const rewritten = readFileSync(taskPath, "utf8");
+    assert.equal(
+      rewritten,
+      original,
+      "REJECT 라운드는 task 파일 바이트가 전/후 완전히 동일해야 한다(dropped_at 포함) -- 갈래 ⓑ(1-B 누락)",
+    );
+    const rewrittenSha256 = createHash("sha256")
+      .update(rewritten)
+      .digest("hex");
+    assert.equal(
+      rewrittenSha256,
+      originalSha256,
+      "sha256 전/후 동일 -- 거부 갈래 ⓑ(1-B 누락 전제조건 위반)",
+    );
   });
 });
 

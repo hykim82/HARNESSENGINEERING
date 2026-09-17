@@ -1593,7 +1593,11 @@ function resolveMatchedTaskId(taskContent, resultContent) {
 // HYK-383 2R §2 (검토 1R P2 실측): ⛔`i` 플래그 없음 -- 정확히 소문자
 // `head_commit:`만 표지로 인정한다. 1R은 `gim`(대문자 `HEAD_COMMIT:`도
 // 수락)이었고, 검토자가 직접 probe해 실측했다 -- 신원을 좁힌다.
-const HEAD_COMMIT_RE_G = /^head_commit:[ \t]*([0-9a-fA-F]{40})[ \t]*$/gm;
+// HYK-479 §B-B: exported so dispatch-gate-decision.mjs's checklist-example
+// test can import this PRODUCTION regex directly (재구현 금지 -- 이 파일
+// 밖에서 같은 모양을 다시 짜면 이 정규식이 드리프트해도 그 시험은
+// 깨지지 않는다).
+export const HEAD_COMMIT_RE_G = /^head_commit:[ \t]*([0-9a-fA-F]{40})[ \t]*$/gm;
 // resolveResultTaskId의 TASK_ID_ANYWHERE_RE와 동일한 역할 -- 매치 채택에는
 // 절대 쓰지 않고, "표지 자체가 아예 없다"와 "표지를 쓰려는 흔적은 있는데
 // 줄 시작이 아니거나 값이 40자 hex가 아니거나 대소문자가 다르다"를 가르는
