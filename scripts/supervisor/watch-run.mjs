@@ -104,6 +104,21 @@ import { countActive, isWellFormedLedger } from "./admission-ledger-core.mjs";
 // 실 좌석 전송(운영 --wake-live, 가짜 exec 시험 seam이 없을 때)에만
 // 쓰인다 -- orca 문자열 리터럴 spawn은 이 adapter 안에서만 일어난다(G9).
 import { createOrcaExecFn } from "../relay/adapters/orca-adapter.mjs";
+// HYK-464-followup-1 축C (coder-task.md §1 축C) -- 자원 잔재 «보고» 축이
+// 재사용하는 기존 함수. detectOrphans는 재구현하지 않는다(§재사용) --
+// 좌석 "배정 0" 후보를 이미 판별하는 도구(HYK-464 이전 라운드 산출물).
+// ⚠️collectGitWorktrees/collectDroppedTaskFileEvidence(orch-stall-
+// detect.mjs)는 «재사용하지 않는다» -- 처음엔 그럴 계획이었으나 실
+// 러너(1R run1, coder.md §시험)가 orch-stall-detect.test.mjs의 기존
+// 경계 시험 2건("static: no PRODUCTION code imports orch-stall-
+// detect.mjs yet" 등)을 RED로 되돌리는 걸 실측했다: 이 저장소는 이미
+// "watch-run.mjs는 orch-stall-detect.mjs를 자식 프로세스로만 부르고
+// 절대 import하지 않는다"는 아키텍처 경계를 세워 뒀다(이 파일 상단
+// "왜 새로 만들었나" 주석과 대칭 -- runDetector가 정본 결합 지점).
+// 그래서 아래 두 함수(워크트리 열거·dropped_at 헤더 검사)는 작고
+// 자기완결적인 로직만 로컬로 다시 짠다(각 15줄 안팎) -- 그 경계를
+// 깨는 비용이 이 정도 중복보다 크다는 판단.
+import { detectOrphans } from "../check/seat-orphan-detect.mjs";
 
 export const MAX_LOG_LINES = 5000;
 
@@ -1390,6 +1405,10 @@ export function buildLogLine({
   // vanishedPaths는 빈 배열 -> unconsumedSegment/unconsumedVanishedDetail
   // 둘 다 byte-identical(회귀 0).
   unconsumedVanish,
+  // HYK-464-followup-1 축C: 기존 호출자 전부는 이 인자를 안 주므로
+  // undefined -> resourceResidueLogSegment가 null을 돌려주므로
+  // (filter(Boolean)) 로그 줄이 한 글자도 달라지지 않는다(회귀 0).
+  resourceResidueResult,
 }) {
   if (detectorResult.runnerFailure) {
     return `${nowIso} RUNNER_FAILURE message=${detectorResult.message}`;
@@ -1467,6 +1486,12 @@ export function buildLogLine({
     // seatLiveDispatchLogSegment가 null을 돌려주므로(filter(Boolean))
     // 로그 줄이 한 글자도 달라지지 않는다.
     seatLiveDispatchLogSegment(detectorResult),
+    // HYK-464-followup-1 축C: 이 축도 지금 이 시점의 맨 끝이다 -- 앞선
+    // 모든 세그먼트의 필드·순서·값은 이 라운드가 손대지 않았다.
+    // resourceResidue가 opt-in으로 주어지지 않은 기존 호출자는
+    // resourceResidueLogSegment가 null을 돌려주므로(filter(Boolean)) 로그
+    // 줄이 한 글자도 달라지지 않는다(회귀 0).
+    resourceResidueLogSegment(resourceResidueResult),
   ]
     .filter(Boolean)
     .join(" ");
@@ -1863,6 +1888,282 @@ function blockedTerminationLogSegment(result) {
   return `blocked_termination_status=${status} blocked_termination_count=${count} blocked_termination_source=harness/aborts`;
 }
 
+// ---------------------------------------------------------------------------
+// HYK-464-followup-1 축C (coder-task.md §1 축C) -- 자원 잔재 «보고».
+//
+// 한용 확정 규율(§11-4) = "쓸 일 끝난 워크트리·좌석·node 잔재는 그때
+// 그때 끈다" -- 지금은 문서 규약일 뿐 기계가 안 본다. 이 축은 그 규약을
+// 기계로 «보고»만 한다. ⛔자동 제거·자동 종료 기능은 절대 만들지 않는다
+// (처분은 사람/ORCH 판단 -- seat-orphan-detect.mjs가 이미 세운 것과 동일
+// 원칙, 아래 재사용 부분 참고).
+//
+// opt-in(admissionSweep/wake와 동일 계약, coder-task.md §1 축C 요구):
+// `resourceResidue`를 호출자가 명시적으로 주지 않으면(기본값 null) 이
+// 단계는 아예 실행되지 않는다 -- 기존 호출자(기존 시험 포함) 회귀 0.
+// 이 축은 (idle-seat 판별 시) orca `terminal list`를, (node 잔재 판별
+// 시) OS 프로세스 열거를 부를 수 있어 admissionSweep/wake와 같은 "부가
+// I/O가 있는 opt-in" 계열이다(blockedTerminationScan처럼 로컬 파일만
+// 읽는 "항상 켜짐" 계열과는 다르다).
+// ---------------------------------------------------------------------------
+
+// ⓐ 사유 파일 없는 워크트리. "사유 파일"의 정의(coder-task.md §1 축C:
+// "형식은 네가 정하고 근거를 적어라"): 이 저장소가 이미 "이 워크트리가
+// 배달 대상이었다"는 증거로 인정하는 유일한 기계 신호는
+// `.harness/*-task.md`의 `dropped_at:` 헤더다(seatLiveness/seatIdle/
+// dispatchStart 세 축이 orch-stall-detect.mjs 안에서 "활성 배달"의
+// 근거로 쓰는 바로 그 신호와 같은 판별 기준 -- 다만 이 파일은 그 함수를
+// import하지 않는다, 위 import 블록의 "왜 로컬로 다시 짜는가" 참고).
+// 그 헤더가 있는 `*-task.md`가 하나도 없으면(그리고 `.harness` 자체가
+// 읽기 실패도 아니면) 이 워크트리가 왜 존재하는지를 이 저장소 안에서
+// 설명할 근거가 없다 -- NO_REASON_FILE로 보고한다. `.harness` 읽기 자체가
+// 실패하면(권한 등) 거짓 확신을 만들지 않고 UNDETERMINED로 보고한다
+// (§요구 "없으면 «판별 불가»로 두고 거짓 확신 금지").
+function classifyWorktreeReasonFile(worktreePath, collectEvidenceFn) {
+  const evidence = collectEvidenceFn(worktreePath);
+  if (evidence.failed) {
+    return { worktreePath, status: "UNDETERMINED" };
+  }
+  if (!Array.isArray(evidence.items) || evidence.items.length === 0) {
+    return { worktreePath, status: "NO_REASON_FILE" };
+  }
+  return null; // 사유 있음 -- 잔재 아님, 보고하지 않는다(잔재 0일 때 조용함).
+}
+
+export function computeWorktreeReasonResidue({
+  worktreePaths,
+  collectEvidenceFn,
+}) {
+  const entries = (Array.isArray(worktreePaths) ? worktreePaths : [])
+    .map((wt) => classifyWorktreeReasonFile(wt, collectEvidenceFn))
+    .filter(Boolean);
+  return {
+    noReasonFile: entries.filter((e) => e.status === "NO_REASON_FILE"),
+    undetermined: entries.filter((e) => e.status === "UNDETERMINED"),
+  };
+}
+
+// HYK-464-followup-1 축C 로컬 재구현(위 import 블록 "왜 로컬로 다시
+// 짜는가" 참고) -- orch-stall-detect.mjs의 DROPPED_AT_RE와 동일 정규식
+// (`^dropped_at:\s*\d{4}-\d{2}-\d{2} \d{2}:\d{2} KST\s*$`)을 그대로
+// 옮겨 쓴다. 이 함수는 "그런 헤더가 하나라도 있는가"만 답한다(collect
+// EvidenceFn 계약: `{items, failed}` -- items는 있음/없음만 신호하는
+// 자리표시자, dropped_at 값 자체는 이 축이 쓰지 않는다).
+const RESIDUE_DROPPED_AT_RE =
+  /^dropped_at:\s*\d{4}-\d{2}-\d{2} \d{2}:\d{2} KST\s*$/im;
+
+function collectDroppedAtTaskFileEvidenceLocal(worktreePath) {
+  const harnessDir = path.join(worktreePath, ".harness");
+  let names;
+  try {
+    names = readdirSync(harnessDir).filter((n) => n.endsWith("-task.md"));
+  } catch (err) {
+    if (err && err.code === "ENOENT") return { items: [], failed: false };
+    return { items: [], failed: true };
+  }
+  const items = [];
+  for (const name of names) {
+    let text;
+    try {
+      text = readFileSync(path.join(harnessDir, name), "utf8");
+    } catch {
+      return { items: [], failed: true };
+    }
+    if (RESIDUE_DROPPED_AT_RE.test(text)) {
+      items.push({ path: `.harness/${name}` });
+    }
+  }
+  return { items, failed: false };
+}
+
+// orch-stall-detect.mjs의 parseWorktreeListPorcelain/collectGitWorktrees와
+// 동일한 파싱(`git worktree list --porcelain`의 `worktree <path>` 줄만
+// 뽑는다) -- 위 import 블록 주석과 같은 이유로 로컬 재구현.
+function parseGitWorktreeListPorcelainLocal(stdout) {
+  const paths = [];
+  for (const line of String(stdout).split(/\r?\n/)) {
+    const m = line.match(/^worktree\s+(.+)$/);
+    if (m) paths.push(m[1].trim());
+  }
+  return paths;
+}
+
+function collectGitWorktreesLocal(repoRoot) {
+  try {
+    const stdout = execFileSync("git", ["worktree", "list", "--porcelain"], {
+      cwd: repoRoot,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    return { ok: true, worktrees: parseGitWorktreeListPorcelainLocal(stdout) };
+  } catch (err) {
+    return {
+      ok: false,
+      worktrees: [],
+      detail: err && err.message ? err.message : String(err),
+    };
+  }
+}
+
+// ⓑ 배정 0인 유휴 좌석 -- seat-orphan-detect.mjs의 detectOrphans를
+// 그대로 재사용한다(재구현 0, §재사용). registryPath가 없으면(설정
+// 안 됨) 판별 불가 -- 거짓으로 "0건"이라 단정하지 않는다.
+export function computeIdleSeatResidue({ terminals, registryPath }) {
+  if (!registryPath) {
+    return { status: "UNDETERMINED", orphanCandidates: [] };
+  }
+  const result = detectOrphans({ terminals, registryPath });
+  return { status: "OK", orphanCandidates: result.orphanCandidates };
+}
+
+// ⓒ 러너가 끝났는데 남은 node 잔재. 이 러너 자신(watch-run.mjs)이 감싸
+// 부르는 감지기(orch-stall-detect.mjs)는 execFileSync로 동기 spawn되므로
+// (runDetector) 정상 흐름에서는 이 판정 시점에 그 자식 프로세스가 이미
+// 끝나 있어야 한다 -- 그런데도 같은 감시 스크립트를 가리키는 node
+// 프로세스가(자기 자신의 pid 제외) 살아있다면 그 자체가 잔재(과거 실행이
+// 멈춰 죽지 않은 것)다. 순수 판정(processRows는 이미 수집된 값)과 실제
+// OS 프로세스 열거(아래 defaultListNodeProcessRows)를 분리한다(시험
+// 용이성 -- 다른 축들과 동일한 "collect vs judge" 원칙).
+export const DEFAULT_RESIDUE_SCRIPT_MARKERS = Object.freeze([
+  "orch-stall-detect.mjs",
+  "watch-run.mjs",
+]);
+
+export function computeNodeProcessResidue({
+  processRows,
+  selfPid,
+  scriptMarkers = DEFAULT_RESIDUE_SCRIPT_MARKERS,
+}) {
+  if (!Array.isArray(processRows)) {
+    return { status: "UNDETERMINED", residue: [] };
+  }
+  const residue = processRows.filter((row) => {
+    if (!row || typeof row.commandLine !== "string") return false;
+    if (typeof selfPid === "number" && row.pid === selfPid) return false;
+    return scriptMarkers.some((marker) => row.commandLine.includes(marker));
+  });
+  return { status: "OK", residue };
+}
+
+// 실 OS 프로세스 열거(Windows 전용 -- 이 하네스 전체가 win32에서만
+// 돈다, 시스템 프롬프트 Platform 참조). PowerShell Get-CimInstance로
+// node.exe의 전체 커맨드라인을 얻는다(tasklist는 기본으로 커맨드라인을
+// 안 준다). 조회 자체가 실패하면(PowerShell 없음 등) null을 돌려
+// computeNodeProcessResidue가 UNDETERMINED로 접게 한다 -- "잔재 없음"으로
+// 지어내지 않는다.
+function defaultListNodeProcessRows(execFn) {
+  try {
+    const out = execFn(
+      "powershell",
+      [
+        "-NoProfile",
+        "-Command",
+        "Get-CimInstance Win32_Process -Filter \"Name='node.exe'\" | Select-Object ProcessId,CommandLine | ConvertTo-Json -Compress",
+      ],
+      {},
+    );
+    const parsed = JSON.parse(out && out.trim().length > 0 ? out : "[]");
+    const rows = Array.isArray(parsed) ? parsed : [parsed];
+    return rows
+      .filter((r) => r && typeof r === "object")
+      .map((r) => ({
+        pid: typeof r.ProcessId === "number" ? r.ProcessId : null,
+        commandLine: typeof r.CommandLine === "string" ? r.CommandLine : "",
+      }));
+  } catch {
+    return null;
+  }
+}
+
+// runResourceResidueStep에서 분리(§6 eslint complexity/max-lines-per-function
+// 상한 준수 -- 세 잔재 종류 각각을 독립 함수로 뽑는다, 로직·값은 그대로).
+function collectWorktreeResidueStep({ resourceResidue, repoRoot }) {
+  const worktreeListFn =
+    resourceResidue.worktreeListFn ?? collectGitWorktreesLocal;
+  const collectEvidenceFn =
+    resourceResidue.collectEvidenceFn ?? collectDroppedAtTaskFileEvidenceLocal;
+  const worktreeList = worktreeListFn(repoRoot, {});
+  return worktreeList.ok
+    ? computeWorktreeReasonResidue({
+        worktreePaths: worktreeList.worktrees,
+        collectEvidenceFn,
+      })
+    : { noReasonFile: [], undetermined: [], scanFailed: true };
+}
+
+function collectIdleSeatResidueStep({ resourceResidue }) {
+  if (!resourceResidue.registryPath) {
+    return { status: "UNDETERMINED", orphanCandidates: [] };
+  }
+  const orcaExecFn = resourceResidue.orcaExecFn ?? createOrcaExecFn();
+  try {
+    const listResponse = orcaExecFn(["terminal", "list", "--json"]);
+    if (
+      listResponse &&
+      listResponse.ok === true &&
+      Array.isArray(listResponse.result?.terminals)
+    ) {
+      return computeIdleSeatResidue({
+        terminals: listResponse.result.terminals,
+        registryPath: resourceResidue.registryPath,
+      });
+    }
+  } catch {
+    // 조회 실패 -- UNDETERMINED로 남긴다(거짓 확신 금지, 아래와 동일 원칙).
+  }
+  return { status: "UNDETERMINED", orphanCandidates: [] };
+}
+
+function collectNodeResidueStep({ resourceResidue, execFn }) {
+  const listNodeProcessRowsFn =
+    typeof resourceResidue.listNodeProcessRowsFn === "function"
+      ? resourceResidue.listNodeProcessRowsFn
+      : () => defaultListNodeProcessRows(execFn);
+  return computeNodeProcessResidue({
+    processRows: listNodeProcessRowsFn(),
+    selfPid: process.pid,
+  });
+}
+
+// 세 잔재 종류를 한 회차에 모아 보고한다. opt-in(위 헤더 주석) --
+// `resourceResidue`가 없으면(기본값, 대부분의 호출자) 실행하지 않는다
+// (admissionSweep/wake와 동일 원칙).
+// resourceResidue: { registryPath?, orcaExecFn?, listNodeProcessRowsFn?,
+//   worktreeListFn?, collectEvidenceFn? } -- 뒤 둘은 시험 전용 주입구
+// (실 git/실 fs 대신, 이 저장소 자체를 대상으로도 결정적으로 시험할 수
+// 있게 -- blockedTerminationScan의 harnessDir 오버라이드와 동일 재량).
+function runResourceResidueStep({ resourceResidue, repoRoot, execFn }) {
+  if (!resourceResidue) return { notRun: true };
+  return {
+    notRun: false,
+    worktreeResidue: collectWorktreeResidueStep({ resourceResidue, repoRoot }),
+    idleSeatResidue: collectIdleSeatResidueStep({ resourceResidue }),
+    nodeResidue: collectNodeResidueStep({ resourceResidue, execFn }),
+  };
+}
+
+// resourceResidueLogSegment -- 이 축이 실제로(opt-in) 켜졌을 때만 로그
+// 줄에 한 세그먼트를 더한다(blockedTerminationLogSegment/sweepLogSegment
+// 와 동일한 "사람이 읽는 사유" 원칙). 잔재가 0건이면 값 0으로 조용히
+// 남는다(거짓 양성 0 -- §2 시험 요구 그대로).
+function resourceResidueLogSegment(result) {
+  if (!result || result.notRun) return null;
+  const noReason = result.worktreeResidue.noReasonFile.length;
+  const undetermined = result.worktreeResidue.undetermined.length;
+  const idleSeatStatus = result.idleSeatResidue.status;
+  const idleSeat =
+    idleSeatStatus === "OK"
+      ? result.idleSeatResidue.orphanCandidates.length
+      : "NONE";
+  const nodeStatus = result.nodeResidue.status;
+  const node = nodeStatus === "OK" ? result.nodeResidue.residue.length : "NONE";
+  return (
+    `residue_worktree_no_reason=${noReason} ` +
+    `residue_worktree_undetermined=${undetermined} ` +
+    `residue_idle_seat_status=${idleSeatStatus} residue_idle_seat=${idleSeat} ` +
+    `residue_node_status=${nodeStatus} residue_node=${node}`
+  );
+}
+
 // HYK-481 (coder-task.md §2/§3 항1) -- "미설정"(skipReason 없음)은
 // 그대로 null(세그먼트 0, 회귀 0). "ledger만 주고 lock 없음"
 // (skipReason 있음)은 새 세그먼트를 한 줄 더한다 -- sweep이 실제로
@@ -2073,6 +2374,7 @@ function finalizeWatchOnceCycle({
   wakeResult,
   blockedTerminationResult,
   unconsumedVanish,
+  resourceResidueResult,
 }) {
   const nowIso = new Date(now).toISOString();
   const logPath = path.join(watchDir, "watch.log");
@@ -2086,6 +2388,7 @@ function finalizeWatchOnceCycle({
     wakeResult,
     blockedTerminationResult,
     unconsumedVanish,
+    resourceResidueResult,
   });
   appendLogWithRotation({
     readFn,
@@ -2132,6 +2435,7 @@ function finalizeWatchOnceCycle({
     sweepResult,
     wakeResult,
     blockedTerminationResult,
+    resourceResidueResult,
   });
 }
 
@@ -2156,6 +2460,7 @@ function finalizeWatchOnceTail({
   sweepResult,
   wakeResult,
   blockedTerminationResult,
+  resourceResidueResult,
 }) {
   const reachResult = runReachStep({
     notifyDir,
@@ -2189,6 +2494,7 @@ function finalizeWatchOnceTail({
     sweepResult,
     wakeResult,
     blockedTerminationResult,
+    resourceResidueResult,
   };
 }
 
@@ -2228,35 +2534,150 @@ function computePreLogDedupeSteps({
   return { escalationDedupe, unconsumedVanish };
 }
 
-function runWatchOnceCore({
-  repoRoot,
-  watchDir,
-  nodePath,
-  detectorPath,
-  execFn,
-  now,
-  maxLogLines,
-  readFn,
-  writeFn,
-  renameFn,
-  mkdirFn,
-  existsFn,
-  appendFn,
-  notifyDir,
-  capPath,
-  capReadFn,
+// runWatchOnceCore에서 분리(§6 eslint max-lines-per-function 상한 준수 --
+// HYK-464-followup-1 축C가 resourceResidue 단계를 더하며 넘긴 만큼, 이미
+// 로그 줄 조립 전 단계인 blockedTermination과 나란히 "관측만 하고 부작용은
+// 없는(파괴적 명령 0)" 스캔 두 개를 이 함수 하나로 묶는다 -- 로직·값·순서는
+// 원문 그대로, 자리만 옮겼다).
+// runWatchOnceCore에서 분리(같은 이유 -- §6 상한 준수): sweep/wake 두
+// 단계는 이미 나란히 붙어 있던 "opt-in, 로그 줄 조립 전" 계열이라 하나로
+// 묶는다(로직·값·순서 원문 그대로).
+function runSweepAndWakeSteps({
   admissionSweep,
   sweepExecFn,
+  now,
   wake,
-  // HYK-342 2R P1-3: 더 이상 opt-in이 아니다 -- null이면(기존 호출자
-  // 전부) resolveBlockedTerminationHarnessDir이 `repoRoot`에서 기본
-  // harnessDir(`<repoRoot>/.harness`)을 스스로 파생한다(resolveCapPath와
-  // 같은 자리, cap 축 참조). 시험/재정의가 필요할 때만
-  // `{harnessDir: <다른 경로>}`를 명시로 준다.
-  blockedTerminationScan = null,
+  watchDir,
+  readFn,
+  writeFn,
+  appendFn,
+  existsFn,
+  mkdirFn,
+}) {
+  const sweepResult = runSweepStep({ admissionSweep, sweepExecFn, now });
+  // HYK-285-always-1 (coder-task.md §1/§2): wake도 sweep과 동일한 지점
+  // (로그 줄 조립 *전*)에서 계산한다 -- runWakeStep 헤더 주석 참조("이번
+  // tick이 append되기 전" watch.log를 읽는 설계 선택 이유).
+  const wakeResult = runWakeStep({
+    wake,
+    admissionSweep,
+    watchLogPath: path.join(watchDir, "watch.log"),
+    now,
+    readFn,
+    writeFn,
+    appendFn,
+    existsFn,
+    mkdirFn,
+  });
+  return { sweepResult, wakeResult };
+}
+
+function runVisibilityScanSteps({
+  repoRoot,
+  execFn,
+  blockedTerminationScan,
   blockedTerminationReaddirFn,
   blockedTerminationReadFileFn,
+  resourceResidue,
 }) {
+  const blockedTerminationResult = runBlockedTerminationScanStep({
+    repoRoot,
+    blockedTerminationScan,
+    readdirFn: blockedTerminationReaddirFn,
+    readFileFn: blockedTerminationReadFileFn,
+  });
+  const resourceResidueResult = runResourceResidueStep({
+    resourceResidue,
+    repoRoot,
+    execFn,
+  });
+  return { blockedTerminationResult, resourceResidueResult };
+}
+
+// runWatchOnceCore에서 분리(같은 이유 -- §6 상한 준수): sweep/wake/
+// blockedTermination/resourceResidue 네 opt-in(또는 항상-켜짐) 단계를
+// 한 호출로 묶어 runWatchOnceCore 본문 자체의 줄 수를 줄인다(로직·값·
+// 순서 원문 그대로, runSweepAndWakeSteps/runVisibilityScanSteps 재사용).
+function runOptionalAxisSteps({
+  admissionSweep,
+  sweepExecFn,
+  now,
+  wake,
+  watchDir,
+  readFn,
+  writeFn,
+  appendFn,
+  existsFn,
+  mkdirFn,
+  repoRoot,
+  execFn,
+  blockedTerminationScan,
+  blockedTerminationReaddirFn,
+  blockedTerminationReadFileFn,
+  resourceResidue,
+}) {
+  const { sweepResult, wakeResult } = runSweepAndWakeSteps({
+    admissionSweep,
+    sweepExecFn,
+    now,
+    wake,
+    watchDir,
+    readFn,
+    writeFn,
+    appendFn,
+    existsFn,
+    mkdirFn,
+  });
+  const { blockedTerminationResult, resourceResidueResult } =
+    runVisibilityScanSteps({
+      repoRoot,
+      execFn,
+      blockedTerminationScan,
+      blockedTerminationReaddirFn,
+      blockedTerminationReadFileFn,
+      resourceResidue,
+    });
+  return {
+    sweepResult,
+    wakeResult,
+    blockedTerminationResult,
+    resourceResidueResult,
+  };
+}
+
+// HYK-464-followup-1 축C (§6 eslint max-lines-per-function 상한 준수): 이
+// 함수는 이제 단일 `params` 객체를 받는다(예전에는 그 자리에서 전부
+// 구조분해했다) -- runOptionalAxisSteps로 그 객체를 그대로 넘길 수 있게
+// (필드를 일일이 다시 나열하지 않고) 자리만 옮긴 것뿐, 기본값·순서·값은
+// 원문과 완전히 동일하다(호출부 runWatchOnce도 여전히 명명 인자 객체
+// 하나를 넘기므로 공개 계약 불변).
+function runWatchOnceCore(params) {
+  const {
+    repoRoot,
+    watchDir,
+    nodePath,
+    detectorPath,
+    execFn,
+    now,
+    maxLogLines,
+    readFn,
+    writeFn,
+    renameFn,
+    mkdirFn,
+    existsFn,
+    notifyDir,
+    capPath,
+    capReadFn,
+    // HYK-342 2R P1-3: 더 이상 opt-in이 아니다 -- null이면(기존 호출자
+    // 전부) resolveBlockedTerminationHarnessDir이 `repoRoot`에서 기본
+    // harnessDir(`<repoRoot>/.harness`)을 스스로 파생한다(resolveCapPath와
+    // 같은 자리, cap 축 참조). 시험/재정의가 필요할 때만
+    // `{harnessDir: <다른 경로>}`를 명시로 준다.
+    blockedTerminationScan = null,
+    // HYK-464-followup-1 축C: admissionSweep/wake와 동일한 opt-in 계약 --
+    // 기본값 null이면(기존 호출자 전부) 이 단계는 아예 실행되지 않는다.
+    resourceResidue = null,
+  } = params;
   mkdirFn(watchDir, { recursive: true });
   const detectorResult = runDetector({
     execFn,
@@ -2274,26 +2695,15 @@ function runWatchOnceCore({
     existsFn,
     mkdirFn,
   });
-  const sweepResult = runSweepStep({ admissionSweep, sweepExecFn, now });
-  // HYK-285-always-1 (coder-task.md §1/§2): wake도 sweep과 동일한 지점
-  // (로그 줄 조립 *전*)에서 계산한다 -- runWakeStep 헤더 주석 참조("이번
-  // tick이 append되기 전" watch.log를 읽는 설계 선택 이유).
-  const wakeResult = runWakeStep({
-    wake,
-    admissionSweep,
-    watchLogPath: path.join(watchDir, "watch.log"),
-    now,
-    readFn,
-    writeFn,
-    appendFn,
-    existsFn,
-    mkdirFn,
-  });
-  const blockedTerminationResult = runBlockedTerminationScanStep({
-    repoRoot,
+  const {
+    sweepResult,
+    wakeResult,
+    blockedTerminationResult,
+    resourceResidueResult,
+  } = runOptionalAxisSteps({
+    ...params,
     blockedTerminationScan,
-    readdirFn: blockedTerminationReaddirFn,
-    readFileFn: blockedTerminationReadFileFn,
+    resourceResidue,
   });
   return finalizeWatchOnceCycle({
     repoRoot,
@@ -2313,6 +2723,7 @@ function runWatchOnceCore({
     wakeResult,
     blockedTerminationResult,
     unconsumedVanish,
+    resourceResidueResult,
   });
 }
 
@@ -2355,6 +2766,8 @@ export function runWatchOnce({
   blockedTerminationScan = null,
   blockedTerminationReaddirFn,
   blockedTerminationReadFileFn,
+  // HYK-464-followup-1 축C: admissionSweep/wake와 동일한 opt-in 계약.
+  resourceResidue = null,
 }) {
   const fsFns = resolveWatchOnceFsFns({
     readFn,
@@ -2382,6 +2795,7 @@ export function runWatchOnce({
     blockedTerminationScan,
     blockedTerminationReaddirFn,
     blockedTerminationReadFileFn,
+    resourceResidue,
   });
 }
 
@@ -2433,6 +2847,10 @@ if (invokedDirectly) {
   //하면(기본값) 이 축은 아예 실행되지 않는다(admissionSweep/wake와 동일한
   // opt-in 관례 -- 기존 호출자·기존 시험은 회귀 0).
   let blockedTerminationHarnessDir = null;
+  // HYK-464-followup-1 축C: `--resource-residue-registry-path`를 생략
+  // 하면(기본값) 이 축은 아예 실행되지 않는다(admissionSweep/wake와 동일
+  // opt-in 관례 -- 기존 호출자·기존 시험은 회귀 0).
+  let resourceResidueRegistryPath = null;
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === "--repo-root") repoRoot = argv[++i];
     else if (argv[i] === "--watch-dir") watchDir = argv[++i];
@@ -2455,6 +2873,8 @@ if (invokedDirectly) {
       wakeFakeExecFailSubmit = true;
     else if (argv[i] === "--wake-fake-terminal-list-json")
       wakeFakeTerminalListJson = argv[++i];
+    else if (argv[i] === "--resource-residue-registry-path")
+      resourceResidueRegistryPath = argv[++i];
   }
   if (!repoRoot || !watchDir) {
     console.error("usage: watch-run.mjs --repo-root <path> --watch-dir <path>");
@@ -2530,6 +2950,9 @@ if (invokedDirectly) {
   const blockedTerminationScan = blockedTerminationHarnessDir
     ? { harnessDir: blockedTerminationHarnessDir }
     : null;
+  const resourceResidue = resourceResidueRegistryPath
+    ? { registryPath: resourceResidueRegistryPath }
+    : null;
   const result = runWatchOnce({
     repoRoot,
     watchDir,
@@ -2538,6 +2961,7 @@ if (invokedDirectly) {
     wake,
     now: cliNow,
     blockedTerminationScan,
+    resourceResidue,
   });
   if (!noPartialCount) {
     // HYK-255-watch-wire-1 (coder-task.md §1 항2): 실패는 감시 로그 줄로

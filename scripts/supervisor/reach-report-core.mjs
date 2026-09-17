@@ -57,6 +57,10 @@ export const AXES = Object.freeze([
       "SEAT_LIVENESS_COLLECTION_FAILED",
       "SEAT_LIVENESS_SCAN_WORKTREE_LIST_FAILED",
       "SEAT_LIVENESS_SCAN_HARNESS_READ_FAILED",
+      // HYK-464-followup-2 축B P2-B-1 (REVIEW-r1.md §2-2): 배달이
+      // failed/circuit_broken으로 깨졌다 -- completed(정상 종료, badStatuses
+      // 밖)와 달리 사람에게 닿아야 한다.
+      "SEAT_LIVENESS_DISPATCH_FAILED",
     ]),
   }),
   Object.freeze({
@@ -79,6 +83,8 @@ export const AXES = Object.freeze([
       "DISPATCH_START_COLLECTION_FAILED",
       "DISPATCH_START_SCAN_WORKTREE_LIST_FAILED",
       "DISPATCH_START_SCAN_HARNESS_READ_FAILED",
+      // HYK-464-followup-2 축B P2-B-1: seat 축과 동일 원인·동일 원칙.
+      "DISPATCH_START_DISPATCH_FAILED",
     ]),
   }),
   Object.freeze({

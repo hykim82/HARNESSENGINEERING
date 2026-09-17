@@ -814,6 +814,29 @@ test("NC mutation/start-wire #2 (필수): 수집 실패를 «조용함»(NO_SEAT
       applyMutation(
         src,
         `  if (!observed.ok) {
+    // HYK-464-followup-1 축B ⓐ: judgeSeatLivenessForRepo와 대칭(같은
+    // resolveObservationWithDeliveredSeatFallback을 공유하므로 같은
+    // retired 플래그가 붙는다).
+    if (observed.retired === true) {
+      return {
+        status: DISPATCH_START_WIRE_STATUS.DISPATCH_RETIRED,
+        observationReason: observed.observationReason,
+        reason: observed.reason,
+        dispatch,
+        ...(correlation ? { correlation } : {}),
+      };
+    }
+    // HYK-464-followup-2 축B P2-B-1: judgeSeatLivenessForRepo와 대칭
+    // (같은 failed 플래그를 공유한다).
+    if (observed.failed === true) {
+      return {
+        status: DISPATCH_START_WIRE_STATUS.DISPATCH_FAILED,
+        observationReason: observed.observationReason,
+        reason: observed.reason,
+        dispatch,
+        ...(correlation ? { correlation } : {}),
+      };
+    }
     return {
       status: DISPATCH_START_WIRE_STATUS.COLLECTION_FAILED,
       observationReason: observed.observationReason,

@@ -13,6 +13,7 @@ import {
   applyRegistryGuard,
   SEAT_KIND,
   runSeatCensusCli,
+  LAUNCHER_ORIGIN_MARKER,
 } from "./seat-census.mjs";
 import {
   appendLaunchRecord,
@@ -54,6 +55,43 @@ const CONFIRMED_CODEX_AGENT_PREVIEW =
 // 한계 근거 원문 그대로 사용).
 const REAL_LONG_RUNNING_AGENT_PREVIEW =
   "❯ 사소한 문구 확인 1건:         지시에    «점검표(481    병합   전이라    손  기입   유지)»라    하셨는데     점검표    기계   주입은    480(미병합)이고";
+
+// HYK-464-followup-1 축A 실측(ORCH 2026-09-16 19:16, 좌석 2, coder-task.md
+// §1 축A 원문 그대로): 방금 기동한 CODER 좌석의 preview -- origin-registry
+// RECORDED 줄이 있는데도(구 판정기가 이걸 못 봐서) AGENT_BANNER_MARKERS만
+// 대조하면 미상으로 떨어졌던 그 표본.
+const REAL_LAUNCHER_ORIGIN_PREVIEW =
+  "sers\\Administrator\\...) match versioned hooks/. 좌석 기동 가능.\n" +
+  "[4/4] 엔진 선별: engine=claude source=default role=CODER baseline_mode=off\n" +
+  "[origin-registry] RECORDED paneKey=e6a43258-c71f-425f-97da-f5b1e62a3d1f:178d6f84-27f7-4fd0-9759-b95eeb3ad454 role=CODER engine=claude\n" +
+  "· Hatching…";
+
+test("classifySeatText: launcher's own [origin-registry] RECORDED line -> agent, positively identified (HYK-464-followup-1 축A ⓐ)", () => {
+  assert.equal(classifySeatText(REAL_LAUNCHER_ORIGIN_PREVIEW), SEAT_KIND.AGENT);
+});
+
+test("LAUNCHER_ORIGIN_MARKER: matches seat-origin-registry.mjs's own record stdout shape (RECORDED paneKey=.. role=.. engine=..), mutation RED if the marker regex is dropped/narrowed", () => {
+  assert.match(
+    "RECORDED paneKey=tab:leaf role=REVIEW engine=codex",
+    LAUNCHER_ORIGIN_MARKER,
+  );
+  // ⓑ: 마커의 세 조각(paneKey=/role=/engine=) 중 하나라도 빠지면 더 이상
+  // "런처가 스스로 찍은 줄"이라는 확정 증거가 아니다 -- 그런 부분 일치를
+  // AGENT로 오인하지 않는다(과대 매칭 방지, fail-closed 유지).
+  assert.doesNotMatch("RECORDED paneKey=tab:leaf", LAUNCHER_ORIGIN_MARKER);
+  assert.equal(
+    classifySeatText("RECORDED paneKey=tab:leaf (role missing)"),
+    SEAT_KIND.AMBIGUOUS,
+  );
+});
+
+test("classifySeatText: without the launcher marker, an unrecognized mid-turn preview stays ambiguous, NOT empty_shell or agent (HYK-464-followup-1 축A ⓑ, ⓒ -- no false empty_shell revival)", () => {
+  const withoutMarker = REAL_LAUNCHER_ORIGIN_PREVIEW.replace(
+    /\[origin-registry\] RECORDED[^\n]*\n/,
+    "",
+  );
+  assert.equal(classifySeatText(withoutMarker), SEAT_KIND.AMBIGUOUS);
+});
 
 test("classifySeatText: bare single-line prompt -> empty_shell (D12 auto-created blank tab)", () => {
   assert.equal(

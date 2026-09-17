@@ -27,6 +27,22 @@ import { readRegistryDiagnostics } from "./seat-origin-registry.mjs";
 export const AGENT_BANNER_MARKERS =
   /gpt-5\.6|Sonnet|Opus|Fable|\[CODER\]|\[REVIEW\]|bypass permissions|MCP startup|weekly \d/i;
 
+// HYK-464-followup-1 축A: 정본 런처(orca-worker-seat.ps1)가 뜨는 즉시
+// 스스로 찍는 로그 줄 -- 실측(ORCH 2026-09-16 19:16, 좌석 2): 방금 기동한
+// CODER 좌석의 preview에 "[origin-registry] RECORDED paneKey=... role=CODER
+// engine=claude"가 그대로 찍혀 있었는데도 AGENT_BANNER_MARKERS(에이전트
+// 자신의 배너)만 봐서 «미상»으로 떨어졌다(누적 긍정 식별 0/3). 이 줄은
+// seat-origin-registry.mjs의 record 서브커맨드가 내는 stdout 그대로다
+// (`RECORDED paneKey=${x} role=${y} engine=${z}`, seat-origin-registry.mjs
+// 162행 참조 -- 이 저장소 자신의 코드가 내는 문자열이라 추측이 아니다).
+// 이 줄이 preview에 있으면 «정본 런처가 방금 이 pane을 기동해 등록까지
+// 마쳤다»는 확정 증거이므로 곧바로 AGENT로 긍정 식별한다(요구 ⓐ). 이
+// 줄이 없다고 곧바로 빈 셸로 단정하지 않는다(요구 ⓑ) -- 아래에서 이
+// 마커도 없으면 예전 그대로 AGENT_BANNER_MARKERS/BARE_PROMPT_LINE 판정으로
+// 넘어갈 뿐이다(폴백 순서 변경 없음, --enrich 오분류 되살리지 않음).
+export const LAUNCHER_ORIGIN_MARKER =
+  /RECORDED paneKey=\S+ role=\S+ engine=\S+/;
+
 // 관제실 dispatch-worker.ps1:101의 "죽은 셸" 정규식과 의도적으로 동일하게
 // 맞춘다(D15) -- 프롬프트로 "끝나는" 것이 아니라 이 함수에서는 프리뷰
 // 전체가 "오직" 프롬프트 한 줄뿐인지를 본다(더 엄격 -- 아래 참고).
@@ -50,7 +66,12 @@ export function classifySeatText(text) {
   // 정직하게 남긴다(아래 fallthrough) -- "빈 셸" 판정은 실제 프롬프트
   // 텍스트(BARE_PROMPT_LINE)를 읽었을 때만 내린다.
   if (trimmed === "") return SEAT_KIND.AMBIGUOUS;
-  if (AGENT_BANNER_MARKERS.test(trimmed)) return SEAT_KIND.AGENT;
+  if (
+    AGENT_BANNER_MARKERS.test(trimmed) ||
+    LAUNCHER_ORIGIN_MARKER.test(trimmed)
+  ) {
+    return SEAT_KIND.AGENT;
+  }
   // "완전히 빈 셸" = 스크롤백 전체가 프롬프트 한 줄뿐(다른 줄 없음). 여러
   // 줄이더라도 전부 빈 프롬프트 반복이면 여전히 미사용 셸이다.
   const lines = trimmed.split(/\r?\n/).filter((l) => l.trim() !== "");
