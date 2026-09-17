@@ -1904,8 +1904,44 @@ function resolveAssigneePaneKey(runtimeTaskId, opts) {
       `orca-adapter: resolveDeliveredSeat -- dispatch-show normalize failed (reasonCode=${normalized.reasonCode})`,
     );
   }
-  return { ok: true, assigneePaneKey: normalized.assigneePaneKey };
+  // HYK-464-followup-1 축B: status도 함께 실어 올린다(resolveLiveSeatByPaneKey
+  // 가 "이 배달이 퇴역했는가"를 가리는 데 쓴다, 아래 참조). 값이 없으면
+  // (normalizeDispatchShow가 undefined를 낸 경우) null -- "모른다"를
+  // "퇴역했다"로 지어내지 않는다.
+  return {
+    ok: true,
+    assigneePaneKey: normalized.assigneePaneKey,
+    dispatchStatus: normalized.status ?? null,
+  };
 }
+
+// HYK-464-followup-2 축B P1-B-1 (REVIEW-r1.md §2-1 반려 수리): 1R은
+// "dispatched" 단일 문자열만 활성으로 봤다 -- 그런데 orca 자신은 그렇게
+// 보지 않는다. 직접 조회한 근거 둘:
+//   ⑴ `%APPDATA%/orca/orchestration.db`의 `dispatch_contexts` 스키마 --
+//     `status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending',
+//     'dispatched', 'completed', 'failed', 'circuit_broken'))`. 모든
+//     배달은 `pending`으로 태어나 `dispatched`로 전이한다.
+//   ⑵ orca 번들(app.asar) 자신의 활성 판정문 --
+//     `dispatch.status !== "pending" && dispatch.status !== "dispatched"`
+//     이면 `OrchestrationError("dispatch_inactive")`. 즉 orca는 `pending`과
+//     `dispatched` 둘 다 "활성"으로 본다.
+// 1R처럼 "dispatched" 하나만 활성으로 보면, `pending`(살아 있는 예약)이
+// 좌석 부재를 "퇴역함"(정상)으로 오접어 진짜 이상(죽은 좌석 + 살아 있는
+// 예약)이 무음이 된다. 이제 orca의 판정문을 그대로 옮긴 집합으로 판단한다
+// -- 추측으로 어휘를 나열하지 않고 orca 자신이 "활성"이라 답한 값만 담는다.
+const ACTIVE_DISPATCH_STATUSES = new Set(["pending", "dispatched"]);
+
+// HYK-464-followup-2 축B P2-B-1 (REVIEW-r1.md §2-2): `completed`는 정상
+// 종료(좌석 없음이 당연)지만, `failed`/`circuit_broken`은 배달 자체가
+// 깨진 것이다 -- 같은 "해당 없음"으로 접으면 "라운드가 멈췄고 아무도
+// 모른다"는 사고가 무음이 된다(이 감시기의 존재 이유 그 자체). 그래서
+// 정상 종료(`completed`)와 깨진 종료(`failed`/`circuit_broken`)를
+// 구별되는 값으로 가른다 -- 이 저장소가 이미 지키는 "구별되는 이름"
+// 원칙(orch-stall-detect.mjs SEAT_LIVENESS_WIRE_STATUS.DISPATCH_RETIRED
+// 주석 참조)을 여기에도 적용한다.
+const RETIRED_DISPATCH_STATUS = "completed";
+const FAILED_DISPATCH_STATUSES = new Set(["failed", "circuit_broken"]);
 
 // §2 step③: 이 워크트리의 살아 있는 좌석(terminal list, 고아 제외 +
 // worktreePath 정규화 일치 -- resolveSeatLivenessCandidate와 동일 후보
@@ -1996,7 +2032,44 @@ function fetchPaneKeyFromShow(candidateHandle, opts) {
   return { ok: true, paneKeyFromShow: `${tabId}:${leafId}` };
 }
 
-function resolveLiveSeatByPaneKey({ worktreePath, assigneePaneKey }, opts) {
+// HYK-464-followup-2 축B P1-B-1/P2-B-1 (§3-e max-complexity 상한 준수를
+// 위해 resolveLiveSeatByPaneKey에서 분리 -- 로직은 그대로, 자리만
+// 옮겼다): dispatchStatus 하나를 세 갈래(활성 / 정상 종료(completed) /
+// 깨진 종료(failed·circuit_broken))로 가른다. 판단은 항상
+// ACTIVE_DISPATCH_STATUSES.has()(orca의 dispatch_inactive 판정문 그대로)
+// 를 먼저 거친다 -- "활성이 아닌 값" 안에서만 completed/failed/
+// circuit_broken을 가른다. status를 모르면(null/undefined) 어느 쪽도
+// 지어내지 않는다 -- fail-closed 유지.
+function classifyClosedDispatchStatus(dispatchStatus) {
+  const isKnownInactiveStatus =
+    typeof dispatchStatus === "string" &&
+    !ACTIVE_DISPATCH_STATUSES.has(dispatchStatus);
+  return {
+    dispatchRetired:
+      isKnownInactiveStatus && dispatchStatus === RETIRED_DISPATCH_STATUS,
+    dispatchFailed:
+      isKnownInactiveStatus && FAILED_DISPATCH_STATUSES.has(dispatchStatus),
+  };
+}
+
+function noLiveSeatMatchReason(
+  worktreePath,
+  dispatchStatus,
+  { dispatchRetired, dispatchFailed },
+) {
+  if (dispatchRetired) {
+    return `orca-adapter: resolveDeliveredSeat -- assignee_pane_key matches no live seat in worktree '${worktreePath}' (dispatch status='${dispatchStatus}' -- this dispatch is retired, absence of a live seat is expected)`;
+  }
+  if (dispatchFailed) {
+    return `orca-adapter: resolveDeliveredSeat -- assignee_pane_key matches no live seat in worktree '${worktreePath}' (dispatch status='${dispatchStatus}' -- this dispatch failed, not a normal end)`;
+  }
+  return `orca-adapter: resolveDeliveredSeat -- assignee_pane_key matches no live seat in worktree '${worktreePath}' (dead seat or rotated -- refusing to guess)`;
+}
+
+function resolveLiveSeatByPaneKey(
+  { worktreePath, assigneePaneKey, dispatchStatus },
+  opts,
+) {
   const resolved = resolveLiveSeatCandidatesForCorrelation(worktreePath, opts);
   if (!resolved.ok) return resolved;
   const matches = [];
@@ -2025,10 +2098,24 @@ function resolveLiveSeatByPaneKey({ worktreePath, assigneePaneKey }, opts) {
     );
   }
   if (matches.length === 0) {
-    return denyDeliveredSeat(
-      DELIVERED_SEAT_REASON.NO_LIVE_SEAT_MATCH,
-      `orca-adapter: resolveDeliveredSeat -- assignee_pane_key matches no live seat in worktree '${worktreePath}' (dead seat or rotated -- refusing to guess)`,
-    );
+    // HYK-464-followup-1 축B ⓐⓑ (2R P1-B-1/P2-B-1 수리 -- REVIEW-r1.md
+    // §2-1/§2-2): 예약이 이미 "정상 종료"됐다면(`completed`) 살아있는
+    // 좌석이 없는 게 정상이다 -- «측정 불가»가 아니라 «이 배달은 퇴역함»
+    // 으로 구별해 호출부(judgeSeatLivenessForRepo 등)가 그 사실을
+    // COLLECTION_FAILED와 다른 값으로 표면화할 수 있게 dispatchRetired를
+    // 얹는다. `failed`/`circuit_broken`은 `completed`와 달리 "정상
+    // 종료"가 아니므로 dispatchFailed로 구별해 얹는다(classifyClosedDispatchStatus
+    // 참조). `pending`/`dispatched`(orca 자신이 "활성"으로 보는 값)에서는
+    // 둘 다 서지 않는다 -- 그 값에서 좌석이 안 보이는 것은 진짜 이상이다
+    // (1R의 결함이 정확히 이 구간에서 무너졌었다).
+    const closedStatus = classifyClosedDispatchStatus(dispatchStatus);
+    return {
+      ...denyDeliveredSeat(
+        DELIVERED_SEAT_REASON.NO_LIVE_SEAT_MATCH,
+        noLiveSeatMatchReason(worktreePath, dispatchStatus, closedStatus),
+      ),
+      ...closedStatus,
+    };
   }
   if (matches.length > 1) {
     return denyDeliveredSeat(
@@ -2082,7 +2169,11 @@ export function resolveDeliveredSeat(ctx = {}, opts = {}) {
   const paneKeyResult = resolveAssigneePaneKey(candidate.runtimeTaskId, opts);
   if (!paneKeyResult.ok) return paneKeyResult;
   const seatResult = resolveLiveSeatByPaneKey(
-    { worktreePath, assigneePaneKey: paneKeyResult.assigneePaneKey },
+    {
+      worktreePath,
+      assigneePaneKey: paneKeyResult.assigneePaneKey,
+      dispatchStatus: paneKeyResult.dispatchStatus,
+    },
     opts,
   );
   if (!seatResult.ok) return seatResult;

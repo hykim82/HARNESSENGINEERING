@@ -441,3 +441,49 @@ test("formatDurationKo formats hours+minutes, and sub-hour durations without a '
   assert.equal(formatDurationKo(41.5 * 3_600_000), "41시간 30분");
   assert.equal(formatDurationKo(25 * 60000), "25분");
 });
+
+// HYK-464-followup-2 축B P2-B-1 (REVIEW-r1.md §2-2 반려 수리): 배달이
+// failed/circuit_broken으로 깨진 것(SEAT_LIVENESS_DISPATCH_FAILED/
+// DISPATCH_START_DISPATCH_FAILED, orch-stall-detect.mjs)은 completed의
+// 정상 종료(SEAT_LIVENESS_DISPATCH_RETIRED -- badStatuses 밖, 조용함이
+// 정상)와 달리 사람에게 닿아야 한다 -- 이 시험은 그 신호가 실제로
+// computeOpenMeasurementFailures(reach-notify 축, HYK-321(A)와 동일
+// 재현 경로)까지 흐르는지, 그리고 completed/N/A는 여전히 조용한지를
+// 값으로 대조한다.
+test("HYK-464-followup-2 축B P2-B-1: seat_status=SEAT_LIVENESS_DISPATCH_FAILED / start_status=DISPATCH_START_DISPATCH_FAILED surface via computeOpenMeasurementFailures (배달 붕괴는 사람에게 닿는다), while SEAT_LIVENESS_DISPATCH_RETIRED (정상 종료) stays silent (2/2)", () => {
+  const t0 = Date.parse("2026-09-17T00:00:00.000Z");
+  const failedEntries = parseWatchLog(
+    line({
+      ts: new Date(t0).toISOString(),
+      seatStatus: "SEAT_LIVENESS_DISPATCH_FAILED",
+      startStatus: "DISPATCH_START_DISPATCH_FAILED",
+    }),
+  ).entries;
+  const mfKeys = computeOpenMeasurementFailures(failedEntries, t0)
+    .map((a) => a.axisKey)
+    .sort();
+  assert.deepEqual(
+    mfKeys,
+    ["seat", "start"],
+    "a broken dispatch (failed/circuit_broken) must reach the human-facing measurement-failure section, not stay silent",
+  );
+  // 오탐 0: 이 두 축이 anomaly(badVerdicts) 절에는 뜨지 않는다(verdict가
+  // 애초에 null -- COLLECTION_FAILED류와 동일 원칙).
+  assert.deepEqual(computeOpenAnomalies(failedEntries, t0), []);
+
+  // 대조군: 정상 종료(completed -> DISPATCH_RETIRED)는 badStatuses 밖이라
+  // 여전히 조용하다(§2-2 요구 -- completed와 failed/circuit_broken을
+  // 구별한다는 것은, 전자가 무음으로 «남는다»는 뜻이기도 하다).
+  const retiredEntries = parseWatchLog(
+    line({
+      ts: new Date(t0).toISOString(),
+      seatStatus: "SEAT_LIVENESS_DISPATCH_RETIRED",
+      startStatus: "DISPATCH_START_DISPATCH_RETIRED",
+    }),
+  ).entries;
+  assert.deepEqual(
+    computeOpenMeasurementFailures(retiredEntries, t0).map((a) => a.axisKey),
+    [],
+    "a normal end (completed -> DISPATCH_RETIRED) must NOT surface as a measurement failure -- that would be noise, not the bug this round fixes",
+  );
+});
