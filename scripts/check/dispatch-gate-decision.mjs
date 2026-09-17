@@ -133,6 +133,14 @@ import {
   writeChainLedger,
   checkAppendOnly,
 } from "./reject-streak-chain.mjs";
+// HYK-460 축 C (coder-task.md §C): 미등록 좌석(런처 미경유) 경고 -- 1단계
+// (경고만, 거부 없음). ⛔새 REJECT_* 상태를 만들지 않는다 -- 이 축은
+// `decisions`/`combined.allow`에 참여하지 않고, runDispatchGateDecision이
+// 그 결과 메시지를 `lines`에만 덧붙인다(아래 호출부 주석 참고). 이 파일을
+// 고정 파일 목록으로 격리 clone하는 mutation 시험(hyk241-oneb-gate-
+// mutation.test.mjs 등)의 고정 목록에도 이 import를 추가했다(다른
+// sibling import들과 같은 이유).
+import { evaluateSeatOriginWarningForWorktree } from "./seat-origin-warn.mjs";
 
 const REJECT_STREAK_PATH = join(
   dirname(fileURLToPath(import.meta.url)),
@@ -305,6 +313,11 @@ function parseArgs(argv) {
     // 안전측(레코드 없음 취급)으로 물러날 수 있다).
     else if (argv[i] === "--admission-ledger-path")
       out.admissionLedgerPath = argv[++i];
+    // HYK-460 축 C: arg-with-env-fallback(resolveSeatOriginWarnFacts 아래가
+    // env 폴백을 읽는다) -- --dispatch-receipt-path와 같은 관례.
+    else if (argv[i] === "--pane-key") out.paneKey = argv[++i];
+    else if (argv[i] === "--seat-registry-path")
+      out.seatRegistryPath = argv[++i];
     else out._.push(argv[i]);
   }
   return out;
@@ -937,6 +950,40 @@ function resolveDispatchReceiptPath(args, env) {
   if (isNonEmptyString(env.DISPATCH_RECEIPT_PATH))
     return env.DISPATCH_RECEIPT_PATH;
   return null;
+}
+
+// HYK-460 축 C: same arg-with-env-fallback shape as
+// resolveDispatchReceiptPath immediately above. paneKey falls back to
+// ORCA_PANE_KEY(런처가 이미 매 좌석에 심어 주는 env -- worker-dispatch-
+// rule.md §1이 이 값을 신뢰 근거로 쓰는 바로 그 변수); registryPath falls
+// back to HARNESS_SEAT_REGISTRY_PATH(관제실이 향후 넘길 수 있는 값, 이
+// 저장소는 그 절대경로를 하드코딩하지 않는다 -- seat-origin-registry.mjs
+// 자신의 관례와 동일).
+function resolveSeatOriginWarnFacts(args, taskPath, env) {
+  const paneKey = isNonEmptyString(args.paneKey)
+    ? args.paneKey
+    : isNonEmptyString(env.ORCA_PANE_KEY)
+      ? env.ORCA_PANE_KEY
+      : null;
+  const registryPath = isNonEmptyString(args.seatRegistryPath)
+    ? args.seatRegistryPath
+    : isNonEmptyString(env.HARNESS_SEAT_REGISTRY_PATH)
+      ? env.HARNESS_SEAT_REGISTRY_PATH
+      : null;
+  const worktree = isNonEmptyString(args.expectRepoRoot)
+    ? args.expectRepoRoot
+    : dirname(taskPath);
+  return { paneKey, registryPath, worktree };
+}
+
+// Extracted from runDispatchGateDecision (quality-check: eslint complexity
+// 상한 유지 목적, 동작 변경 없음 -- 같은 이유로 이 파일이 이미 여러 helper를
+// 추출한 관례, 예 resolveMissingResultFileGate/evaluatePrecondition).
+function resolveSeatOriginWarnLine(taskPath, args) {
+  if (!existsSync(taskPath)) return null;
+  const facts = resolveSeatOriginWarnFacts(args, taskPath, process.env);
+  const outcome = evaluateSeatOriginWarningForWorktree(facts);
+  return outcome.warn ? outcome.message : null;
 }
 
 // lookupDispatchId에서 분리(quality-check: eslint complexity 상한 유지
@@ -3722,6 +3769,14 @@ export function runDispatchGateDecision(argv) {
   }
   const combined = combineGateDecisions(decisions);
 
+  // HYK-460 축 C (§C-3, 책임자 확정 «1단계뿐»): 미등록 좌석 경고는 오직
+  // taskPath가 실재할 때만 의미가 있다(seat-override.md는 그 워크트리
+  // 기준으로 찾는다) -- taskPath 부재 분기(위 if(!existsSync)) 는 애초에
+  // 배달 대상 워크트리를 특정할 수 없어 이 축을 건너뛴다. ⛔이 결과는
+  // `decisions`에 들어가지 않는다 -- combined.allow는 이 축과 무관하게
+  // 이미 위에서 확정됐다(경고가 배달을 막지 않는다는 §C-3의 문면 그대로).
+  const seatOriginWarnLine = resolveSeatOriginWarnLine(taskPath, args);
+
   // HYK-479 §A (469 mask-3 실사고 수리): dropped_at은 이제 「게이트가
   // ALLOW로 «판정한 뒤»에만」 찍는다. combined.allow는 taskPath가 실재할
   // 때만(위 else 분기) 여기 도달하므로 -- taskPath 부재 분기는 항상
@@ -3736,6 +3791,7 @@ export function runDispatchGateDecision(argv) {
   }
 
   const lines = [...combined.reasons];
+  if (seatOriginWarnLine) lines.push(seatOriginWarnLine);
   lines.push(
     combined.allow
       ? "dispatch-gate-decision: ALLOW -- 두 게이트 모두 통과, 배달 진행"
