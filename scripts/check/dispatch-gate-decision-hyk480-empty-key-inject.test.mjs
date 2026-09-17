@@ -13,6 +13,16 @@
 // "dispatch-gate-decision*.test.mjs"에 맞춘다 -- coder-task.md §
 // 1b_exec_line(`node --test scripts/check/dispatch-gate-decision*.test.mjs`)
 // 이 이 새 파일도 함께 실행하게 하기 위함.
+//
+// HYK-485(범위3)+HYK-486 번들(이 라운드 coder-task.md): 같은
+// 1b_exec_line이 이 파일을 이미 태우므로, 두 스코프의 새 시험도 같은
+// 파일에 더한다(exec_line이 고정 파일 목록이라 새 파일을 만들면 실행
+// 목록에서 빠진다).
+// - 범위 A(HYK-485): buildResultHeaderChecklistLines가 «회차별 파일명
+//   규약» 한 줄을 더 주입하는지.
+// - 범위 B(HYK-486): fillEmptyLegacyKeysInPlace가 인용된 빈 키를 더 이상
+//   진짜 키로 오인하지 않는지, g 플래그 없이 첫 매치만 치환하던 버그가
+//   고쳐졌는지.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
@@ -21,7 +31,10 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { writeLedger } from "./reject-streak.mjs";
-import { RESULT_FILE_LINE_RE } from "./dispatch-gate-decision.mjs";
+import {
+  RESULT_FILE_LINE_RE,
+  buildResultHeaderChecklistLines,
+} from "./dispatch-gate-decision.mjs";
 // HYK-480 §2-1 (책임자 실사고 근거): 점검표 문면을 그대로 따른 결과
 // 파일이 파서에서 표지 «1개»로 읽히는지는 naive grep이 아니라 실제
 // 생산 파서 함수로 단정해야 한다(HYK-468 2R과 같은 판정선) -- 같은
@@ -188,7 +201,7 @@ test("(b) 값 있는 파일 -- 재게이트해도 무변경(멱등), 건너뛰�
   });
 });
 
-test("(c) 줄 없음 -- 4개 옛 키 + 점검표 7줄, 총 11줄이 task_id: 바로 뒤에 새로 주입된다", () => {
+test("(c) 줄 없음 -- 4개 옛 키 + 점검표 8줄(HYK-485 범위3: runner_naming 줄 포함), 총 12줄이 task_id: 바로 뒤에 새로 주입된다", () => {
   withFixtureDir((dir) => {
     const taskPath = join(dir, "coder-task.md");
     writeFileSync(
@@ -219,6 +232,7 @@ test("(c) 줄 없음 -- 4개 옛 키 + 점검표 7줄, 총 11줄이 task_id: 바
       "result_header_checklist_verdict",
       "result_header_checklist_headcommit",
       "result_header_checklist_done",
+      "result_header_checklist_runner_naming",
     ]) {
       assert.equal(
         countOccurrences(after, new RegExp(`^${prefix}:`, "gim")),
@@ -411,3 +425,98 @@ test("(g) 점검표를 «그대로 따른» 결과 파일이 실제 파서 함�
     "§0-1 실사고 재현: 계수 줄을 완료 표지 모양으로 쓰면 실제 파서가 2개로 센다(점검표 안전 서식 경고가 막는 바로 그 함정)",
   );
 });
+
+// ===========================================================================
+// HYK-485 범위3: 주입 블록에 «회차별 파일명 규약» 한 줄.
+// ===========================================================================
+
+test("(h) HYK-485 범위3: buildResultHeaderChecklistLines가 회차별 파일명 규약 줄을 정확히 1개 더 넣고, 옛 7줄 + 새 1줄 = 8줄이며 키 이름이 비타협 3가지를 지킨다(프로덕션 export 직접 구동)", () => {
+  const lines = buildResultHeaderChecklistLines("CODER");
+  assert.equal(lines.length, 8, "옛 7줄 + 회차별 파일명 규약 1줄 = 8줄");
+
+  const runnerNamingLines = lines.filter((l) =>
+    l.startsWith("result_header_checklist_runner_naming:"),
+  );
+  assert.equal(
+    runnerNamingLines.length,
+    1,
+    "회차별 파일명 규약 줄은 정확히 1개여야 한다",
+  );
+  const [runnerNamingLine] = runnerNamingLines;
+
+  // 내용: 러너 영수증/로그 정본 코드(runner-receipt-writer.mjs·
+  // RUNNER_RECEIPT_RUN_PREFIX)가 이미 프로덕션에서 쓰는 이름과 맞춘다.
+  assert.match(runnerNamingLine, /runner-receipt-run<N>\.json/);
+  assert.match(runnerNamingLine, /full-runner-<N>\.log/);
+  assert.match(runnerNamingLine, /정본 runner-receipt\.json 은 그대로 둔다/);
+
+  // 비타협 3가지(이 라운드 coder-task.md §1): 키 이름에 head_commit·
+  // task_id·verdict·for를 부분 문자열로도 넣지 않는다.
+  const key = runnerNamingLine.slice(0, runnerNamingLine.indexOf(":"));
+  for (const bad of ["head_commit", "task_id", "verdict", "for"]) {
+    assert.equal(
+      key.includes(bad),
+      false,
+      `키 이름 '${key}'는 '${bad}'를 부분 문자열로도 포함하면 안 된다(비타협 3가지 #1)`,
+    );
+  }
+  // 비타협 #2: 열 0에서 완료 표지 모양(>>> ...)으로 시작하지 않는다.
+  assert.equal(runnerNamingLine.startsWith(">>>"), false);
+  // 비타협 #3: 단일 key: value 한 줄 관례(개행 없음).
+  assert.equal(runnerNamingLine.includes("\n"), false);
+});
+
+test("(i) 변이 RED: 회차별 파일명 규약 줄을 빼면(HYK-485 범위3 이전 실물 모양) 8줄 계약과 규약 텍스트가 사라진다", () => {
+  const lines = buildResultHeaderChecklistLines("CODER");
+  const PRE_HYK_485_SCOPE3_LINE_COUNT = 7; // 이 라운드 coder-task.md §1 인용: "7줄을 기계 주입한다"
+  assert.notEqual(
+    lines.length,
+    PRE_HYK_485_SCOPE3_LINE_COUNT,
+    "새 줄이 실제로 추가됐다(지금 길이가 옛 7이 아니다)",
+  );
+
+  // RED 재현: 지금 프로덕션 배열에서 새로 추가된 마지막 줄을 빼면(=이
+  // 라운드 이전 실물 모양) 그 7줄에는 회차별 파일명 규약이 전혀 없었다.
+  const preFixLines = lines.slice(0, PRE_HYK_485_SCOPE3_LINE_COUNT);
+  assert.equal(preFixLines.length, 7);
+  assert.equal(
+    preFixLines.some((l) => l.includes("runner-receipt-run<N>.json")),
+    false,
+    "재현: 옛 7줄에는 회차별 영수증 파일명 규약이 없었다(이 라운드가 메우는 공백)",
+  );
+  assert.equal(
+    lines.some((l) => l.includes("runner-receipt-run<N>.json")),
+    true,
+    "수리 후: 지금 프로덕션 8줄에는 있다",
+  );
+});
+
+test("(j) HYK-485 범위3: 새 규약 줄이 섞여도 실제 파서(resolveResultTaskId/DONE_RE/countVerdictLines)의 표지 개수 판정이 그대로다", () => {
+  const checklistLines = buildResultHeaderChecklistLines("CODER");
+  const resultBody =
+    "role: CODER\n" +
+    "task_id: HYK-9508-runner-naming-1\n" +
+    checklistLines.join("\n") +
+    "\n본문...\n" +
+    ">>> DONE: CODER @ 2026-09-17 10:00:00 KST\n";
+
+  const taskIdVerdict = resolveResultTaskId(resultBody);
+  assert.equal(taskIdVerdict.ok, true);
+  assert.equal(taskIdVerdict.id, "HYK-9508-runner-naming-1");
+
+  const doneMatches = [
+    ...maskQuotedMarkerRegions(resultBody).matchAll(DONE_RE),
+  ];
+  assert.equal(
+    doneMatches.length,
+    1,
+    "점검표 8줄(회차별 파일명 규약 포함)이 섞여도 완료 표지는 여전히 1개로 읽힌다",
+  );
+  assert.equal(
+    countVerdictLines(resultBody),
+    0,
+    "CODER 결과에는 verdict: 가 여전히 0개다",
+  );
+});
+
+// (HYK-486 시험은 다음 커밋에서 더해진다 -- 범위별 커밋 분리, coder-task.md §5)

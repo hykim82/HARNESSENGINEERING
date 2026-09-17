@@ -3415,7 +3415,7 @@ const COUNT_LINE_FORMAT_HINT =
 // 밑줄 없는 "headcommit"으로 써서 그 부분 문자열 충돌 자체를 없앤다 --
 // 값 텍스트(사람이 읽는 설명)는 여전히 "head_commit 필드"라고 쓰되, 뒤에
 // 콜론을 붙이지 않는다(마찬가지로 충돌 없음, "head_commit " 뒤는 공백).
-function buildResultHeaderChecklistLines(role) {
+export function buildResultHeaderChecklistLines(role) {
   const upperRole = role.toUpperCase();
   const isReview = /^review/i.test(role);
   const reviewOnlySpec = (whenReview) =>
@@ -3428,6 +3428,13 @@ function buildResultHeaderChecklistLines(role) {
     `result_header_checklist_verdict: verdict 필드는 ${reviewOnlySpec("approved 또는 rejected 중 하나만, 정확히 1개")}`,
     `result_header_checklist_headcommit: head_commit 필드는 ${reviewOnlySpec("단독 40-hex 줄(HYK-383) 정확히 1개")}`,
     `result_header_checklist_done: 완료 표지(>>> DONE 또는 node scripts/relay/finalize-done.mjs ${upperRole})는 정확히 1개 -- 손기입 금지`,
+    // HYK-485 범위3: 전체 러너를 2회 이상 돌릴 때의 회차별 파일명 규약을
+    // 같은 주입 블록에 못박는다(러너 영수증/로그 정본은 이 규약과
+    // 별개로 그대로 둔다 -- RUNNER_RECEIPT_RUN_PREFIX·runner-receipt-writer.mjs
+    // 가 이미 프로덕션에서 구현한 이름과 맞춘다). 키 이름은 이 파일
+    // 자신의 비타협 3가지(head_commit·task_id·verdict·for를 부분
+    // 문자열로도 넣지 않는다)를 지킨다.
+    `result_header_checklist_runner_naming: 전체 러너를 2회 이상 돌릴 때 회차별 영수증은 runner-receipt-run<N>.json, 로그는 full-runner-<N>.log 로 남기고, 정본 runner-receipt.json 은 그대로 둔다`,
   ];
 }
 
