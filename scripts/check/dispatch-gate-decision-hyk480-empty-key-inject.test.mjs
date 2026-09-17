@@ -48,6 +48,7 @@ import {
   DONE_RE,
   countVerdictLines,
   maskQuotedMarkerRegions,
+  HEAD_COMMIT_RE_G,
 } from "./relay-handshake.mjs";
 
 const SCRIPT_PATH = fileURLToPath(
@@ -353,7 +354,7 @@ test("(f) 점검표 기계 주입: REVIEW 라운드는 for/verdict/head_commit�
     );
     assert.match(
       after,
-      /^result_header_checklist_headcommit:.*단독 40-hex 줄\(HYK-383\) 정확히 1개$/im,
+      /^result_header_checklist_headcommit:.*단독 40-hex 줄\(HYK-383\) 정확히 1개 -- 키와 값은 반드시 같은 줄\(줄바꿈 금지\), 예시 형태: head_commit 다음에 콜론 하나 붙이고 공백만 두고 같은 줄에 곧바로 40자리 16진수 값\(콜론 다음에 개행하고 다음 줄에 값만 쓰면 두 줄로 갈라져 표지로 인정되지 않는다\)$/im,
     );
 
     // ⚠️REVIEW 역할에서 실측으로 잡힌 함정(구현 중 발견): 점검표 키
@@ -752,5 +753,70 @@ test("(o) 변이 RED (g 플래그 제거): 원문 검색에서 «먼저 나오�
     fixed,
     mutated,
     "복원 후 결과는 변이 결과와 바이트 단위로 달라야 한다(수리가 실제로 동작을 바꿨다는 증거)",
+  );
+});
+
+// ===========================================================================
+// HYK-479 §B-B: 점검표 문면이 이제 "키와 값은 같은 줄" + 예시 형태를
+// 명시한다 -- 그 예시를 «그대로 따른» 결과 파일이 실제 소비 정규식
+// (relay-handshake.mjs의 HEAD_COMMIT_RE_G, 재구현 아닌 프로덕션 직접
+// import)에 실제로 매치되는지, 그리고 두 줄로 갈라진 형태는 여전히
+// 매치되지 «않는지»를 단정한다(HYK-357 검토 결과 head_commit 두 줄 분리
+// 실사고를 다시 재현하지 않는다는 증거).
+// ===========================================================================
+
+test("(p) HYK-479 §B-B 양성: 점검표 예시 형태(키·값 같은 줄)를 그대로 따른 결과 파일은 프로덕션 HEAD_COMMIT_RE_G에 정확히 1개로 매치된다", () => {
+  const sameLineResult =
+    "role: REVIEW\n" +
+    "task_id: HYK-9510-headcommit-sameline-1\n" +
+    "for: HYK-9510-coder-1\n" +
+    "verdict: approved\n" +
+    "head_commit: 0123456789abcdef0123456789abcdef01234567\n" +
+    "본문...\n" +
+    ">>> DONE: REVIEW @ 2026-09-17 10:00:00 KST\n";
+  const matches = [...sameLineResult.matchAll(HEAD_COMMIT_RE_G)];
+  assert.equal(
+    matches.length,
+    1,
+    "점검표가 시키는 대로 키와 값을 같은 줄에 쓰면 프로덕션 소비 정규식이 정확히 1개로 읽는다",
+  );
+  assert.equal(matches[0][1], "0123456789abcdef0123456789abcdef01234567");
+});
+
+test("(q) HYK-479 §B-B 음성(HYK-357 실사고 재현): head_commit 키와 40-hex 값이 두 줄로 갈라지면 여전히 매치되지 않는다", () => {
+  const splitAcrossLinesResult =
+    "role: REVIEW\n" +
+    "task_id: HYK-9511-headcommit-split-1\n" +
+    "for: HYK-9511-coder-1\n" +
+    "verdict: approved\n" +
+    "head_commit:\n" +
+    "0123456789abcdef0123456789abcdef01234567\n" +
+    "본문...\n" +
+    ">>> DONE: REVIEW @ 2026-09-17 10:00:00 KST\n";
+  const matches = [...splitAcrossLinesResult.matchAll(HEAD_COMMIT_RE_G)];
+  assert.equal(
+    matches.length,
+    0,
+    "실사고 재현: 키 한 줄 + 값 다음 줄로 갈라지면 프로덕션 정규식은 여전히 매치하지 않는다 -- 이게 이 축의 존재 이유다(dispatch-gate-decision.mjs:HEAD_COMMIT_RE_G 헤더 주석, '[ \\t]*'가 개행을 삼키지 않기 때문)",
+  );
+});
+
+test("(r) HYK-479 §B-B: 점검표 문면 자체가 «같은 줄·줄바꿈 금지» 요구와 예시 형태를 값으로 명시한다(REVIEW 라운드)", () => {
+  const lines = buildResultHeaderChecklistLines("REVIEW");
+  const headCommitLine = lines.find((l) =>
+    l.startsWith("result_header_checklist_headcommit:"),
+  );
+  assert.ok(headCommitLine, "headcommit 점검표 줄이 있어야 한다");
+  assert.match(headCommitLine, /같은 줄/);
+  assert.match(headCommitLine, /줄바꿈 금지/);
+  assert.match(headCommitLine, /예시 형태/);
+  // §5의 비타협(부분 문자열 충돌 금지)이 예시 문구 자신에도 그대로
+  // 적용된다 -- "head_commit:"가 «콜론까지 붙어» 나타나면 안 된다(그
+  // 랬다면 DISPATCH_HEAD_COMMIT_ANYWHERE_RE가 이 설명 문장 자체를
+  // 근사매치로 오인한다, (f) 시험이 그 결과를 이미 고정한다).
+  assert.equal(
+    /head_commit:/.test(headCommitLine),
+    false,
+    "예시 문구도 'head_commit:'를 콜론까지 붙여 쓰면 안 된다(부분 문자열 충돌 금지, §5 비타협)",
   );
 });

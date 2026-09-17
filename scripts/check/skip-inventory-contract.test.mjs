@@ -55,6 +55,7 @@ import {
   resolveRealRepoGuard47,
   resolveRealRepoGuard58,
 } from "./selfcheck-inventory.mjs";
+import { resolveNestedConcurrency } from "./isolated-suite-runner.mjs";
 
 const ROOT = fileURLToPath(new URL("../..", import.meta.url)).replace(
   /[\\/]$/,
@@ -126,6 +127,15 @@ const AFFECTED_FILES = [
   "scripts/check/selfcheck-inventory.test.mjs",
 ];
 
+// HYK-477 §1-1: this spawn previously carried no `--test-concurrency` flag
+// at all, so it fell back to node --test's own default (CPU-core-count-wide
+// fan-out for its 4 files) -- one of the repo-wide nested-spawn sites found
+// while enumerating for coder-task.md §1-2 (see .harness/coder.md for the
+// full list/method). `AFFECTED_FILES.length` is the natural desired value
+// here (never more workers than there are files to run), still subject to
+// the same outer-cap propagation as every other nested spawn point.
+const DESIRED_AFFECTED_FILES_CONCURRENCY = AFFECTED_FILES.length;
+
 function runAffectedFiles() {
   // HYK-359 1R precedent (see this repo's hyk359-ambient-env-regression.test.mjs
   // module header): this file is itself run under `node --test`, so
@@ -137,9 +147,17 @@ function runAffectedFiles() {
   const env = { ...process.env };
   delete env.NODE_TEST_CONTEXT;
   delete env.NODE_TEST_WORKER_ID;
+  const concurrency = resolveNestedConcurrency(
+    DESIRED_AFFECTED_FILES_CONCURRENCY,
+  );
   const res = spawnSync(
     process.execPath,
-    ["--test", "--test-reporter=tap", ...AFFECTED_FILES],
+    [
+      "--test",
+      "--test-reporter=tap",
+      `--test-concurrency=${concurrency}`,
+      ...AFFECTED_FILES,
+    ],
     { cwd: ROOT, encoding: "utf8", env, maxBuffer: 1024 * 1024 * 200 },
   );
   assert.equal(

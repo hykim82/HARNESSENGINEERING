@@ -106,7 +106,47 @@ test("buildRunnerReceipt: shape has all §2-1-required fields, schema_version pi
       40,
     ),
     finished_at: "2026-01-01 09:00:00 KST",
+    max_concurrent_node: null,
   });
+});
+
+// HYK-477 §1-3: maxConcurrentNode rides the receipt as its own field,
+// never coerced/confused with the OK/FAILED axis above -- null (omitted)
+// means "measurement unavailable", a real integer means the sampler
+// actually observed that many `node` processes at once during this run.
+test("buildRunnerReceipt: maxConcurrentNode is carried verbatim as max_concurrent_node when provided, and null when omitted (measurement unavailable is a distinct fact from 0)", () => {
+  const withValue = buildRunnerReceipt({
+    runnerExit: 0,
+    runnerStatus: RUNNER_STATUS.OK,
+    counts: { tests: 1, pass: 1, fail: 0, skip: 0 },
+    headCommit: "abc",
+    finishedAtMs: 0,
+    maxConcurrentNode: 6,
+  });
+  assert.equal(withValue.max_concurrent_node, 6);
+
+  const omitted = buildRunnerReceipt({
+    runnerExit: 0,
+    runnerStatus: RUNNER_STATUS.OK,
+    counts: { tests: 1, pass: 1, fail: 0, skip: 0 },
+    headCommit: "abc",
+    finishedAtMs: 0,
+  });
+  assert.equal(omitted.max_concurrent_node, null);
+
+  const zero = buildRunnerReceipt({
+    runnerExit: 0,
+    runnerStatus: RUNNER_STATUS.OK,
+    counts: { tests: 1, pass: 1, fail: 0, skip: 0 },
+    headCommit: "abc",
+    finishedAtMs: 0,
+    maxConcurrentNode: 0,
+  });
+  assert.equal(
+    zero.max_concurrent_node,
+    0,
+    "an observed max of 0 must not be coerced to null -- 0 is a real (if surprising) measurement",
+  );
 });
 
 test("buildRunnerReceipt: a non-zero runner_exit is preserved verbatim, not clamped/normalized to 1 -- the exact observed code matters", () => {

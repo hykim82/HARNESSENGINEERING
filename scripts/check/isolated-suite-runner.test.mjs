@@ -130,6 +130,8 @@ test("runIsolatedSuite: clones from repoRoot (not cwd), runs node --test in the 
   };
   const logs = [];
   const exitCode = runIsolatedSuite({
+    startSampler: () => null,
+    stopSampler: () => null,
     execFile,
     spawn,
     log: (m) => logs.push(m),
@@ -158,6 +160,8 @@ test("runIsolatedSuite: a dirty source repo's uncommitted changes surface in the
   const spawn = () => ({ status: 0 });
   const logs = [];
   runIsolatedSuite({
+    startSampler: () => null,
+    stopSampler: () => null,
     execFile,
     spawn,
     log: (m) => logs.push(m),
@@ -195,6 +199,8 @@ test("runIsolatedSuite: a RED run (non-zero exit) still gets a receipt written -
   // OOM -- completedTapReadFile makes that distinction observable here too
   // (runnerStatus), not just via the coincidentally-matching exitCode.
   const exitCode = runIsolatedSuite({
+    startSampler: () => null,
+    stopSampler: () => null,
     execFile: execFileForReceiptTests(),
     spawn: () => ({ status: 1 }),
     log: () => {},
@@ -215,6 +221,8 @@ test("runIsolatedSuite: a RED run (non-zero exit) still gets a receipt written -
 test("runIsolatedSuite: receipt's headCommit is the runner's OWN `git rev-parse HEAD` reading of the source root, not something spawn/collectFiles could influence", () => {
   const receipts = [];
   runIsolatedSuite({
+    startSampler: () => null,
+    stopSampler: () => null,
     execFile: execFileForReceiptTests(),
     spawn: () => ({ status: 0 }),
     log: () => {},
@@ -235,6 +243,8 @@ test("runIsolatedSuite: tap summary counts are parsed from the tap-reporter dest
   );
   const receipts = [];
   runIsolatedSuite({
+    startSampler: () => null,
+    stopSampler: () => null,
     execFile: execFileForReceiptTests(),
     spawn: () => ({ status: 1 }),
     log: () => {},
@@ -257,6 +267,8 @@ test("runIsolatedSuite: an unreadable tap file degrades to null counts (not a cr
   const receipts = [];
   const logs = [];
   const exitCode = runIsolatedSuite({
+    startSampler: () => null,
+    stopSampler: () => null,
     execFile: execFileForReceiptTests(),
     spawn: () => ({ status: 0 }),
     log: (m) => logs.push(m),
@@ -280,6 +292,8 @@ test("runIsolatedSuite: an unreadable tap file degrades to null counts (not a cr
 test("runIsolatedSuite: a receipt-write failure is swallowed (logged, not thrown) and the real exit code still propagates -- writing a receipt must never mask the suite's own result", () => {
   const logs = [];
   const exitCode = runIsolatedSuite({
+    startSampler: () => null,
+    stopSampler: () => null,
     execFile: execFileForReceiptTests(),
     spawn: () => ({ status: 3 }),
     log: (m) => logs.push(m),
@@ -310,6 +324,8 @@ test("runIsolatedSuite: a fail-closed collectFiles throw propagates out (never s
   assert.throws(
     () =>
       runIsolatedSuite({
+        startSampler: () => null,
+        stopSampler: () => null,
         execFile,
         spawn,
         log: () => {},
