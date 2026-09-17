@@ -30,10 +30,12 @@ import { mkdtempSync, writeFileSync, rmSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
+import { createHash } from "node:crypto";
 import { writeLedger } from "./reject-streak.mjs";
 import {
   RESULT_FILE_LINE_RE,
   buildResultHeaderChecklistLines,
+  fillEmptyLegacyKeysInPlace,
 } from "./dispatch-gate-decision.mjs";
 // HYK-480 §2-1 (책임자 실사고 근거): 점검표 문면을 그대로 따른 결과
 // 파일이 파서에서 표지 «1개»로 읽히는지는 naive grep이 아니라 실제
@@ -519,4 +521,236 @@ test("(j) HYK-485 범위3: 새 규약 줄이 섞여도 실제 파서(resolveResu
   );
 });
 
-// (HYK-486 시험은 다음 커밋에서 더해진다 -- 범위별 커밋 분리, coder-task.md §5)
+// ===========================================================================
+// HYK-486: 인용된 빈 키가 진짜 키를 가로챈다 -- fillEmptyLegacyKeysInPlace
+// 수리 회귀.
+// ===========================================================================
+
+test("(k) HYK-486 ⓐ: 코드펜스로 인용된 빈 result_file: 이 진짜 키보다 앞에 있어도 진짜 키가 채워지고 인용 줄은 그대로다(CLI 프로덕션 경로)", () => {
+  withFixtureDir((dir) => {
+    const taskPath = join(dir, "coder-task.md");
+    const original =
+      `task_id: HYK-9509-quote-hijack-1\n` +
+      `role: CODER\n` +
+      "예시(코드펜스 안, 진짜 키 아님):\n" +
+      "```\n" +
+      "result_file:\n" +
+      "```\n" +
+      `result_file:\n` +
+      `runner_receipt_file:\n` +
+      `harness_gitignore_note:\n` +
+      `worktree_discipline:\n` +
+      `some body\n${ONE_B_BLOCK}`;
+    writeFileSync(taskPath, original, "utf8");
+    const ledgerPath = join(dir, "reject-streak.json");
+    writeLedger(ledgerPath, { schema_version: 1, issues: {} });
+
+    const r = runCli([taskPath, "--ledger", ledgerPath]);
+    assert.equal(r.status, 0);
+    assert.match(r.stdout, /ALLOW/);
+
+    const after = readFileSync(taskPath, "utf8");
+    const resultFile = join(dir, "coder.md");
+
+    assert.match(
+      after,
+      /```\nresult_file:\n```/,
+      "코드펜스 안 인용 빈 키 줄은 손대지 않고 그대로 남아야 한다(HYK-486 실사고가 채웠던 바로 그 줄)",
+    );
+    assert.ok(
+      after.includes(`\nresult_file: ${resultFile}\n`),
+      "진짜(인용 밖) result_file: 이 실제 경로로 채워져야 한다 -- 영원히 건너뛰어지면 안 된다",
+    );
+
+    // 실제 파서(마스킹)로 재확인: 인용 밖에서 값 있는 result_file: 줄이
+    // 정확히 1개.
+    const masked = maskQuotedMarkerRegions(after);
+    assert.equal(
+      [...masked.matchAll(/^result_file:\s*\S.*$/gim)].length,
+      1,
+      "마스킹 후(인용 제외) 값 있는 result_file: 줄이 정확히 1개여야 한다",
+    );
+    // 나머지 3키도 정상 채움(회귀 없음).
+    assert.match(after, /^runner_receipt_file:.*runner-receipt\.json$/im);
+    assert.match(after, /^harness_gitignore_note:.*git-ignore/im);
+    assert.match(after, /^worktree_discipline:.*HEAD/im);
+  });
+});
+
+test("(l) HYK-486 ⓑ: 진짜(인용 아닌) 빈 키가 같은 라운드에 2번 나오면 조용히 하나만 고르지 않고 거부한다(fillEmptyLegacyKeysInPlace 직접 구동)", () => {
+  const text =
+    "task_id: HYK-9510-dup-real-1\n" +
+    "result_file:\n" +
+    "runner_receipt_file:\n" +
+    "harness_gitignore_note:\n" +
+    "worktree_discipline:\n" +
+    "result_file:\n"; // 진짜 키가 실수로 한 번 더 -- 인용이 아니다.
+  const legacyValues = {
+    result_file: "/abs/coder.md",
+    runner_receipt_file: "/abs/runner-receipt.json",
+    harness_gitignore_note: "note",
+    worktree_discipline: "discipline",
+  };
+  assert.throws(
+    () => fillEmptyLegacyKeysInPlace(text, legacyValues),
+    /result_file' appears as a genuine \(non-quoted\) empty key 2 times/,
+    "HYK-486 ⓑ 정책: 전부 채움이 아니라 1개 아니면 거부 -- 조용히 하나만 고르지 않는다",
+  );
+});
+
+test("(m) 값이 이미 있는 파일 재게이트 -- sha256 바이트 동일(완전 멱등)", () => {
+  withFixtureDir((dir) => {
+    const taskPath = join(dir, "coder-task.md");
+    writeFileSync(
+      taskPath,
+      `task_id: HYK-9511-sha256-idempotent-1\n${ONE_B_BLOCK}`,
+      "utf8",
+    );
+    const ledgerPath = join(dir, "reject-streak.json");
+    writeLedger(ledgerPath, { schema_version: 1, issues: {} });
+
+    runCli([taskPath, "--ledger", ledgerPath]);
+    const afterFirst = readFileSync(taskPath);
+    const sha1 = createHash("sha256").update(afterFirst).digest("hex");
+
+    runCli([taskPath, "--ledger", ledgerPath]);
+    const afterSecond = readFileSync(taskPath);
+    const sha2 = createHash("sha256").update(afterSecond).digest("hex");
+
+    assert.equal(
+      sha1,
+      sha2,
+      "값 있는 파일 재게이트는 sha256 바이트 동일이어야 한다(HYK-486 수리가 멱등을 깨지 않았다는 증거)",
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// HYK-486 변이 RED 2종: 이 라운드가 고친 두 축(마스킹 · g 플래그)을 «각각
+// 따로» 되돌렸을 때 지금 프로덕션 정답 동작과 달라짐을 증명한다. 복원(=
+// 지금 프로덕션 코드) 뒤에는 같은 입력에 대해 바이트 동일함도 함께 확인.
+// ---------------------------------------------------------------------------
+
+function mutantNoMasking(text, legacyValues) {
+  // 변이 1: maskQuotedMarkerRegions를 거치지 않는다(그 외 구조는 지금
+  // 프로덕션과 동일 -- g 플래그·거부 정책은 유지).
+  const filledKeys = [];
+  const replacements = [];
+  for (const key of Object.keys(legacyValues)) {
+    const emptyKeyRe = new RegExp(`^${key}:[ \\t]*$`, "gim");
+    const matches = [...text.matchAll(emptyKeyRe)]; // ⛔masked 대신 원문
+    if (matches.length === 0) continue;
+    if (matches.length > 1) {
+      throw new Error(
+        `mutant(no-masking): key '${key}' appears ${matches.length} times`,
+      );
+    }
+    filledKeys.push(key);
+    replacements.push({
+      index: matches[0].index,
+      length: matches[0][0].length,
+      key,
+    });
+  }
+  const byIndexDesc = [...replacements].sort((a, b) => b.index - a.index);
+  let rewritten = text;
+  for (const { index, length, key } of byIndexDesc) {
+    rewritten =
+      rewritten.slice(0, index) +
+      `${key}: ${legacyValues[key]}` +
+      rewritten.slice(index + length);
+  }
+  return { rewritten, filledKeys };
+}
+
+function mutantNoGlobalFlag(text, legacyValues) {
+  // 변이 2: g 플래그 없이 옛 방식(single .test + .replace)으로 되돌린다
+  // (마스킹은 detection에만 쓰이고 치환은 옛 코드 그대로 non-global
+  // `.replace()`를 원문에 직접 건다 -- 실사고 그 자체의 재현).
+  const masked = maskQuotedMarkerRegions(text);
+  let rewritten = text;
+  const filledKeys = [];
+  for (const key of Object.keys(legacyValues)) {
+    const emptyKeyRe = new RegExp(`^${key}:[ \\t]*$`, "im");
+    if (emptyKeyRe.test(masked)) {
+      rewritten = rewritten.replace(emptyKeyRe, `${key}: ${legacyValues[key]}`);
+      filledKeys.push(key);
+    }
+  }
+  return { rewritten, filledKeys };
+}
+
+const QUOTE_HIJACK_FIXTURE =
+  "task_id: HYK-9512-mutation-1\n" +
+  "```\n" +
+  "result_file:\n" +
+  "```\n" +
+  "result_file:\n" +
+  "runner_receipt_file:\n" +
+  "harness_gitignore_note:\n" +
+  "worktree_discipline:\n";
+const QUOTE_HIJACK_LEGACY_VALUES = {
+  result_file: "/abs/coder.md",
+  runner_receipt_file: "/abs/runner-receipt.json",
+  harness_gitignore_note: "note",
+  worktree_discipline: "discipline",
+};
+
+test("(n) 변이 RED (마스킹 제거): 인용 안 빈 키를 «진짜」로도 세어 거부하거나 잘못 채운다 -- 지금 프로덕션(마스킹 있음)은 정상 채운다", () => {
+  // 마스킹 없이 세면 result_file:이 원문에서 2번(인용 1 + 진짜 1) 잡혀
+  // "여러 번" 정책에 걸려 거부된다 -- 지금 프로덕션은 마스킹으로 인용을
+  // 제외해 1번으로 보고 정상 채운다. 같은 입력, 다른 결과 = 마스킹이
+  // 실제로 하는 일의 기계 증거.
+  assert.throws(
+    () => mutantNoMasking(QUOTE_HIJACK_FIXTURE, QUOTE_HIJACK_LEGACY_VALUES),
+    /result_file/,
+    "재현: 마스킹 없이는 인용된 빈 키도 진짜로 세어 '여러 번' 오판한다",
+  );
+
+  const { rewritten: fixed } = fillEmptyLegacyKeysInPlace(
+    QUOTE_HIJACK_FIXTURE,
+    QUOTE_HIJACK_LEGACY_VALUES,
+  );
+  assert.match(
+    fixed,
+    /```\nresult_file:\n```/,
+    "복원(=지금 프로덕션): 인용 줄은 그대로",
+  );
+  assert.ok(
+    fixed.includes("\nresult_file: /abs/coder.md\n"),
+    "복원(=지금 프로덕션): 진짜 키가 채워진다",
+  );
+});
+
+test("(o) 변이 RED (g 플래그 제거): 원문 검색에서 «먼저 나오는» 인용 줄을 채우고 진짜 키는 영원히 빈 채로 남긴다 -- HYK-486 실사고 그 자체", () => {
+  const { rewritten: mutated } = mutantNoGlobalFlag(
+    QUOTE_HIJACK_FIXTURE,
+    QUOTE_HIJACK_LEGACY_VALUES,
+  );
+  // 재현: non-global .replace()가 masked 텍스트가 아니라 원문에서
+  // «맨 처음» 매치(=인용 안 줄)를 채우고, 그 뒤 진짜 줄은 그대로 빈다.
+  assert.match(
+    mutated,
+    /```\nresult_file: \/abs\/coder\.md\n```/,
+    "재현: 인용 줄이 잘못 채워진다(HYK-486 실사고)",
+  );
+  assert.match(
+    mutated,
+    /```\nresult_file:\nrunner_receipt_file:/,
+    "재현: 닫는 펜스 뒤 진짜 result_file: 은 영원히 빈 채로 남는다",
+  );
+
+  // 복원(=지금 프로덕션)은 반대로 인용은 그대로, 진짜만 채운다 -- 바이트
+  // 단위로 재확인.
+  const { rewritten: fixed } = fillEmptyLegacyKeysInPlace(
+    QUOTE_HIJACK_FIXTURE,
+    QUOTE_HIJACK_LEGACY_VALUES,
+  );
+  assert.match(fixed, /```\nresult_file:\n```/);
+  assert.ok(fixed.includes("\nresult_file: /abs/coder.md\n"));
+  assert.notEqual(
+    fixed,
+    mutated,
+    "복원 후 결과는 변이 결과와 바이트 단위로 달라야 한다(수리가 실제로 동작을 바꿨다는 증거)",
+  );
+});
