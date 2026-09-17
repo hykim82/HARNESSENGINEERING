@@ -20,7 +20,11 @@
 // bug; §3-4 requires this runner to say so on every run, plus which commit
 // it tested, so nobody is left wondering why an uncommitted fix "didn't
 // show up."
-import { execFileSync, spawnSync } from "node:child_process";
+import {
+  execFileSync,
+  spawn as spawnAsync,
+  spawnSync,
+} from "node:child_process";
 import {
   mkdtempSync,
   readdirSync,
@@ -30,6 +34,7 @@ import {
 } from "node:fs";
 import { cpus, tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   RUNNER_STATUS,
   allocateRunSlot,
@@ -106,6 +111,37 @@ export function collectTestFiles(
 // machines from resolving to a 0 or negative concurrency.
 export function resolveConcurrency({ cpuCount = cpus().length } = {}) {
   return Math.max(1, Math.floor(cpuCount / 2));
+}
+
+// HYK-477 §1-1: this runner's own `--test-concurrency` cap only bounds the
+// ONE layer of `node --test` children it spawns directly. ORCH's real
+// observation (coder-task.md §0): some of those files spawn ANOTHER
+// `node --test` from inside themselves (a nested self-sweep,
+// hyk359-ambient-env-regression.test.mjs's runProductionSweep chief among
+// them) -- that grandchild inherits process.env but NOT this runner's
+// `--concurrency` CLI flag, so it fell back to its own hardcoded/default
+// concurrency regardless of how low the outer cap was set, undermining the
+// whole point of lowering it. Exporting the resolved cap as an env var lets
+// any such nested spawn point read it back and clamp itself, without this
+// runner needing to know those spawn points exist.
+export const NESTED_CONCURRENCY_ENV_VAR = "HARNESS_TEST_CONCURRENCY";
+
+// A nested spawn point calls this with the concurrency IT would otherwise
+// use (`desired`) and gets back `desired`, unless an ambient
+// HARNESS_TEST_CONCURRENCY is both a valid positive integer AND smaller --
+// min, never max, so a nested caller can never use this mechanism to raise
+// its own concurrency above what it already intended (coder-task.md §1-1
+// "상한을 올리는 방향으로는 쓰이지 않게 하라"). A missing/empty/invalid env
+// value is silently ignored (falls back to `desired`) rather than thrown --
+// this function runs at the START of a spawn call a real test suite depends
+// on, so a malformed ambient env var must degrade to "no cap propagated",
+// never abort the run.
+export function resolveNestedConcurrency(desired, { env = process.env } = {}) {
+  const raw = env[NESTED_CONCURRENCY_ENV_VAR];
+  if (raw == null || raw === "") return desired;
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < 1) return desired;
+  return Math.min(desired, n);
 }
 
 // §2-1 "상한 값이 러너 로그 첫 줄에 값으로 찍히게 하라": this is logged
@@ -230,6 +266,7 @@ function emitRunnerReceipt({
   writeNumberedReceipt = writeNumberedRunnerReceipt,
   nowMs,
   log,
+  maxConcurrentNode,
 }) {
   let counts = { tests: null, pass: null, fail: null, skip: null };
   try {
@@ -248,6 +285,7 @@ function emitRunnerReceipt({
       counts,
       headCommit: sha,
       finishedAtMs,
+      maxConcurrentNode,
     });
     log(`[isolated-suite-runner] runner receipt written -> ${path}`);
   } catch (err) {
@@ -264,6 +302,7 @@ function emitRunnerReceipt({
       counts,
       headCommit: sha,
       finishedAtMs,
+      maxConcurrentNode,
     });
     log(`[isolated-suite-runner] per-run numbered receipt written -> ${path}`);
   } catch (err) {
@@ -338,6 +377,10 @@ function spawnSuiteInClone({
       env: {
         ...process.env,
         HYK403_CANONICAL_SUITE_ENTRYPOINT: "isolated-suite-runner",
+        // HYK-477 §1-1: propagates the resolved cap to any nested spawn
+        // point this in-clone `node --test` process (or a test file it
+        // runs) creates -- see resolveNestedConcurrency's own comment.
+        [NESTED_CONCURRENCY_ENV_VAR]: String(concurrency),
       },
     },
   );
@@ -408,6 +451,112 @@ function resolveRunSlot({
   }
 }
 
+// HYK-477 §1-3: the sampler script's path, resolved once at module load
+// (mirrors how the rest of this file locates its own sibling modules via
+// static import -- this one is spawned, not imported, so it needs its own
+// file path instead).
+const CONCURRENCY_SAMPLER_PATH = fileURLToPath(
+  new URL("./node-concurrency-sampler.mjs", import.meta.url),
+);
+
+// Starts the background sampler process (see node-concurrency-sampler.mjs's
+// own header for why it must be a SEPARATE process, not an in-process
+// timer). Never throws: a failure to start sampling must not affect the
+// suite run itself -- same "infra failure degrades gracefully" posture as
+// resolveRunSlot above. Returns `null` on failure so stopConcurrencySampler
+// can treat "never started" and "failed to stop" uniformly (both -> no
+// measurement).
+function startConcurrencySampler({
+  spawnFn = spawnAsync,
+  samplerPath = CONCURRENCY_SAMPLER_PATH,
+  outPath,
+  intervalMs = 250,
+  log,
+}) {
+  try {
+    const child = spawnFn(
+      process.execPath,
+      [samplerPath, "--interval-ms", String(intervalMs), "--out", outPath],
+      { stdio: "ignore" },
+    );
+    child.unref?.();
+    return child;
+  } catch (err) {
+    log(
+      `[isolated-suite-runner] WARNING: failed to start node-concurrency sampler (${err.message}) -- receipt's max_concurrent_node will be null`,
+    );
+    return null;
+  }
+}
+
+// Kills the sampler and reads back the max it observed. `child.kill()` on
+// Windows is a forced TerminateProcess with no graceful shutdown -- the
+// sampler mitigates that by persisting its running max on every tick, not
+// only at exit (see its own module header), so this can still read a very
+// recent value even though the process is already gone by the time this
+// function's readFileFn runs.
+function stopConcurrencySampler({
+  child,
+  outPath,
+  readFileFn = readFileSync,
+  log,
+}) {
+  if (!child) return null;
+  try {
+    child.kill();
+  } catch {
+    // best-effort -- a failure to kill an already-dead process must not
+    // affect the run's own result.
+  }
+  try {
+    const data = JSON.parse(readFileFn(outPath, "utf8"));
+    return Number.isInteger(data.max) ? data.max : null;
+  } catch (err) {
+    log(
+      `[isolated-suite-runner] WARNING: could not read node-concurrency sampler output at ${outPath} (${err.message}) -- max_concurrent_node will be null`,
+    );
+    return null;
+  }
+}
+
+// Runs the suite while sampling concurrent `node` process count around it
+// (start sampler -> spawn suite -> stop sampler) and returns both the
+// suite's own outcome and the sampled max together. Isolated into its own
+// function purely to keep runIsolatedSuite's own branch count down (same
+// "keeps runIsolatedSuite's own complexity gate happy" reasoning as
+// resolveAndLogConcurrency/resolveRunSlot above) -- no new behavior, just a
+// named seam around the three sampler-related statements.
+function spawnSuiteWithSampler({
+  spawn,
+  cloneDir,
+  files,
+  tapPath,
+  concurrency,
+  logPath,
+  readFile,
+  samplerOutPath,
+  startSampler = startConcurrencySampler,
+  stopSampler = stopConcurrencySampler,
+  log,
+}) {
+  const samplerChild = startSampler({ outPath: samplerOutPath, log });
+  const outcome = spawnSuiteInClone({
+    spawn,
+    cloneDir,
+    files,
+    tapPath,
+    concurrency,
+    logPath,
+    readFile,
+  });
+  const maxConcurrentNode = stopSampler({
+    child: samplerChild,
+    outPath: samplerOutPath,
+    log,
+  });
+  return { outcome, maxConcurrentNode };
+}
+
 // Orchestrates one full run: clone committed HEAD -> run the suite in the
 // clone -> report -> always clean up (unless `keep`). Returns the child
 // process's exit code so the CLI entry point can propagate it verbatim.
@@ -426,6 +575,8 @@ export function runIsolatedSuite({
   writeNumberedReceipt,
   nowMs = Date.now,
   resolveConcurrencyFn,
+  startSampler,
+  stopSampler,
 } = {}) {
   const resolvedConcurrency = resolveAndLogConcurrency({
     concurrency,
@@ -460,7 +611,7 @@ export function runIsolatedSuite({
     log(
       `[isolated-suite-runner] clone: ${cloneDir} (${files.length} test file(s))`,
     );
-    const outcome = spawnSuiteInClone({
+    const { outcome, maxConcurrentNode } = spawnSuiteWithSampler({
       spawn,
       cloneDir,
       files,
@@ -468,6 +619,10 @@ export function runIsolatedSuite({
       concurrency: resolvedConcurrency,
       logPath: runSlot.logPath,
       readFile,
+      samplerOutPath: join(tapDir, "node-concurrency-sampler.json"),
+      startSampler,
+      stopSampler,
+      log,
     });
 
     emitRunnerReceipt({
@@ -482,6 +637,7 @@ export function runIsolatedSuite({
       writeNumberedReceipt,
       nowMs,
       log,
+      maxConcurrentNode,
     });
 
     return outcome.exitCode;

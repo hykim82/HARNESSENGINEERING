@@ -82,12 +82,20 @@ export function parseTapSummaryCounts(tapText) {
   };
 }
 
+// HYK-477 §1-3: "the run's own max concurrent `node` process count", a
+// machine-observed value (never a human report) so a downstream reader can
+// tell "the concurrency cap actually held" apart from "nobody ever checked"
+// after the fact from the receipt alone. `null` means the measurement
+// itself was unavailable (sampler failed to start/stop cleanly, or this
+// caller predates the field) -- a DIFFERENT fact from "0 processes seen",
+// so it is never coerced to 0.
 export function buildRunnerReceipt({
   runnerExit,
   runnerStatus,
   counts,
   headCommit,
   finishedAtMs,
+  maxConcurrentNode,
 }) {
   return {
     schema_version: RUNNER_RECEIPT_SCHEMA_VERSION,
@@ -99,6 +107,7 @@ export function buildRunnerReceipt({
     skip: counts?.skip ?? null,
     head_commit: headCommit,
     finished_at: formatKst(finishedAtMs),
+    max_concurrent_node: maxConcurrentNode ?? null,
   };
 }
 
@@ -121,6 +130,7 @@ export function writeRunnerReceipt({
   counts,
   headCommit,
   finishedAtMs,
+  maxConcurrentNode,
   mkdirFn = mkdirSync,
   writeFileFn = writeFileSync,
 }) {
@@ -132,6 +142,7 @@ export function writeRunnerReceipt({
     counts,
     headCommit,
     finishedAtMs,
+    maxConcurrentNode,
   });
   const path = join(dir, RUNNER_RECEIPT_FILENAME);
   writeFileFn(path, JSON.stringify(receipt, null, 2) + "\n", "utf8");
@@ -236,6 +247,7 @@ export function writeNumberedRunnerReceipt({
   counts,
   headCommit,
   finishedAtMs,
+  maxConcurrentNode,
   writeFileFn = writeFileSync,
 }) {
   const receipt = buildRunnerReceipt({
@@ -244,6 +256,7 @@ export function writeNumberedRunnerReceipt({
     counts,
     headCommit,
     finishedAtMs,
+    maxConcurrentNode,
   });
   writeFileFn(receiptPath, JSON.stringify(receipt, null, 2) + "\n", "utf8");
   return { path: receiptPath, receipt };

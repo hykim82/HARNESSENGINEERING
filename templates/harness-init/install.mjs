@@ -865,6 +865,216 @@ function installPmGuard(params, targetRepoPath, { dryRun }) {
   );
 }
 
+// HYK-209-frame-repair-1 ⓐ': single source of truth for the
+// scripts/check/*.mjs copy list, exported so a repo test
+// (templates/harness-init/install-copylist-closure.test.mjs) can read the
+// EXACT list this installer copies and statically verify it is
+// import-closed, instead of a hand-maintained list drifting from a
+// regex-scraped guess of it. Do not add a name here without also adding its
+// .test.mjs pair unless that pair does not exist in this repo (a few
+// *-core.mjs / *-registry.mjs files below have no dedicated test file --
+// this mirrors the pre-existing pm-guard.mjs convention of "some names in
+// this list are prod-only").
+//
+// Same sequential-comment sections as the pre-refactor loop -- see git
+// blame / HYK-186 for why time-authority.mjs, done-line-write-guard.mjs
+// exist here; this round (HYK-209-frame-repair-1) adds three more sections:
+// ⓐ (stop-blocking/reject-streak, the third instance of this exact class of
+// gap) and X-1 (the 9 dispatch-worker.ps1 + 3 CI hard-dependencies ORCH-73
+// found missing on a real installed target).
+export const ENFORCEMENT_CHECK_FILES = [
+  "review-gate.mjs",
+  "review-gate.test.mjs",
+  "relay-handshake.mjs",
+  "relay-handshake.test.mjs",
+  // HYK-186 1R: relay-handshake.mjs imports "./time-authority.mjs" (the
+  // future-skew registry) -- without a copy alongside it, an installed
+  // relay-handshake.mjs fails to even load (MODULE_NOT_FOUND) on a fresh
+  // target repo. Never caught before this round because no installer
+  // test had ever actually run the copied file.
+  "time-authority.mjs",
+  "time-authority.test.mjs",
+  "role-guard.mjs",
+  "role-guard.test.mjs",
+  // HYK-186 3R P1-1: the PreToolUse entry above now references this file
+  // -- it must be copied or the wired hook command fails on every
+  // Edit/Write/MultiEdit (MODULE_NOT_FOUND, same class of gap as
+  // time-authority.mjs's above).
+  "done-line-write-guard.mjs",
+  "done-line-write-guard.test.mjs",
+  "context-inject.mjs",
+  "context-inject.test.mjs",
+  "status-fresh.mjs",
+  "status-fresh.test.mjs",
+  "clear-safe-check.mjs",
+  "clear-safe-check.test.mjs",
+  "controlroom-fresh.mjs",
+  "controlroom-fresh.test.mjs",
+  "path-normalize.mjs",
+  "path-normalize.test.mjs",
+  // pm-guard.mjs is NOT copied raw here -- installPmGuard below rewrites
+  // its CONTROL_ROOM_ROOT constant for this target first (HYK-309).
+  "pm-guard.test.mjs",
+  "packet-gate.mjs",
+  "packet-gate.test.mjs",
+  "worker-status-onstart.mjs",
+  "worker-status-onstart.test.mjs",
+  // HYK-209-frame-repair-1 ⓐ: clear-safe-check.mjs and controlroom-fresh.mjs
+  // (both already in this list, above) import "./stop-blocking.mjs";
+  // relay-handshake.mjs's review-gate/finalize-done path imports
+  // "./reject-streak.mjs". Neither was ever copied -- the third occurrence
+  // of the exact "installed relay/gate script MODULE_NOT_FOUND on a fresh
+  // target" class of gap as time-authority.mjs and done-line-write-guard.mjs
+  // above. See install-copylist-closure.test.mjs for the machine check that
+  // is meant to prevent a fourth occurrence.
+  "stop-blocking.mjs",
+  "stop-blocking.test.mjs",
+  "reject-streak.mjs",
+  "reject-streak.test.mjs",
+  // HYK-209-frame-repair-1 X-1: dispatch-worker.ps1 (control-room side,
+  // not touched by this round) requires these 5 (relay-handshake.mjs
+  // above is the dispatch-worker.ps1 dependency already installed; the
+  // other 8 of its 9 were entirely missing per ORCH-73's 2026-09-17
+  // real-target measurement) plus their transitive relative imports.
+  "dispatch-gate-decision.mjs",
+  "dispatch-gate-decision.test.mjs",
+  "dispatch-arg-contract.mjs",
+  "dispatch-arg-contract.test.mjs",
+  "hyk400-receiver-guard.mjs",
+  "hyk400-receiver-guard.test.mjs",
+  "seat-engine-detect.mjs",
+  "seat-engine-detect.test.mjs",
+  "seat-proof-wrapper-shape.mjs",
+  "seat-proof-wrapper-shape.test.mjs",
+  // transitive: dispatch-gate-decision.mjs -> {dropped-at-stamp-core,
+  // consumption-receipt-core, abort-record-core,
+  // retirement-block-reason-shared}.mjs; consumption-receipt-core.test.mjs
+  // -> dispatch-gate-decision-core.mjs; dispatch-arg-contract.mjs ->
+  // dispatch-arg-contract-core.mjs -> dispatch-arg-contract-registry.mjs.
+  "dropped-at-stamp-core.mjs",
+  "consumption-receipt-core.mjs",
+  "consumption-receipt-core.test.mjs",
+  "abort-record-core.mjs",
+  "abort-record-core.test.mjs",
+  "retirement-block-reason-shared.mjs",
+  "retirement-block-reason-shared.test.mjs",
+  "dispatch-gate-decision-core.mjs",
+  "dispatch-gate-decision-core.test.mjs",
+  "dispatch-arg-contract-core.mjs",
+  "dispatch-arg-contract-core.test.mjs",
+  "dispatch-arg-contract-registry.mjs",
+  // HYK-209-frame-repair-1 X-1: CI's enforce.yml calls 3 files directly --
+  // all 3 were missing on a real installed target (ORCH-73). Only 2 of the
+  // 3 are added here (isolated-suite-runner.mjs, quality-check.mjs) --
+  // hook-sync-check.mjs is DELIBERATELY LEFT OUT, see the honesty-limit
+  // block right below for why.
+  "isolated-suite-runner.mjs",
+  "isolated-suite-runner.test.mjs",
+  "quality-check.mjs",
+  "quality-check.test.mjs",
+  // ★정직 한계 (HYK-209-frame-repair-1, discovered live by
+  // harness-init-install-portability.test.mjs going RED when this round
+  // first tried to add hook-sync-check.mjs): hook-sync-check.mjs statically
+  // imports sha256Hex from "./selfcheck-inventory.mjs" (ⓐ' closure
+  // requires it), but selfcheck-inventory.mjs's own invokedDirectly CLI
+  // block hardcodes `process.env.HARNESS_CONTROL_ROOM_PATH || "D:/문서관리/
+  // 하네스-관제실"` (this machine's OWN live control-room path) as its
+  // fallback default -- selfcheck-inventory.mjs is one of the exact files
+  // installUnattendedLayerManifest's own header already names as
+  // intentionally NOT installed by this installer ("scripts/check/{linear-
+  // sync,pm-guard,selfcheck,selfcheck-inventory}.mjs" -- the "unattended
+  // layer", not yet made installer-safe). Adding hook-sync-check.mjs here
+  // would transitively ship that live hardcode into every solo-full
+  // target, exactly the class of leak X-2 (control-room folder/ledger
+  // separation) in THIS SAME round exists to prevent elsewhere -- shipping
+  // it to close a checklist item would be self-defeating. Unlike pm-guard
+  // .mjs (a clean top-level `const CONTROL_ROOM_ROOT = "...";` declaration
+  // substitutePmGuardControlRoom can safely rewrite), selfcheck-
+  // inventory.mjs's hardcode is an inline `||` fallback inside a CLI
+  // argument-parsing block -- giving it the same substitution treatment is
+  // real, additional work this round's task did not scope. So: 2 of the
+  // 3 named CI files are added; hook-sync-check.mjs stays out until either
+  // (a) selfcheck-inventory.mjs's hardcode gets the same install-time
+  // substitution pm-guard.mjs already has, or (b) ORCH accepts shipping it
+  // with the hardcode intact (not recommended). CI (.github/workflows/
+  // enforce.yml) itself already calls hook-sync-check.mjs, so an installed
+  // solo-full target's CI will still red on this specific file until this
+  // is resolved -- a real, known gap, not silently closed.
+  // HYK-209-frame-repair-1 ⓐ': the closure check below found these THREE
+  // pre-existing gaps -- review-gate.mjs imports envelope-archive.mjs and
+  // review-approval-binding.mjs; relay-handshake.test.mjs imports
+  // relay-handshake-fixture-siblings.mjs -- none were ever in the copy list
+  // before this round, despite predating it (this is exactly the class of
+  // gap ⓐ' exists to catch mechanically instead of relying on someone
+  // noticing by hand).
+  "envelope-archive.mjs",
+  "envelope-archive.test.mjs",
+  "review-approval-binding.mjs",
+  "review-approval-binding.test.mjs",
+  "relay-handshake-fixture-siblings.mjs",
+  // HYK-209-frame-repair-1 ⓐ': deeper transitive gaps the closure check's
+  // multi-line-import-aware regex (see install-copylist-closure.test.mjs's
+  // RELATIVE_IMPORT_RE comment) found once run to full transitive fixpoint
+  // -- an earlier, single-line-only version of that regex missed all of
+  // these (they sit inside multi-line `import {...} from "./x.mjs"`
+  // blocks), which is itself the reason this list went through two rounds
+  // of "closed" before actually reaching closure.
+  "child-probe-timeout-policy.mjs",
+  "child-probe-timeout-policy.test.mjs",
+  "admission-ledger-env-isolation.mjs",
+  "admission-ledger-env-isolation.test.mjs",
+  "retirement-record-core.mjs",
+  "retirement-record-core.test.mjs",
+  "reject-streak-chain.mjs",
+  "reject-streak-chain.test.mjs",
+  "seat-proof-wrapper-behavior.mjs",
+  "seat-proof-wrapper-fixtures.mjs",
+  "runner-receipt-writer.mjs",
+  "runner-receipt-writer.test.mjs",
+  // HYK-209-frame-repair-1 ⓐ': cross-directory relative import
+  // ("../check/first-observation.mjs" from scripts/relay/finalize-done.mjs)
+  // -- this round's first single-line-only closure regex also missed
+  // every "../check/..." / "../relay/..." cross-directory specifier, not
+  // just multi-line same-directory ones; see install-copylist-closure
+  // .test.mjs's RELATIVE_IMPORT_RE comment for the final, cross-directory-
+  // aware version.
+  "first-observation.mjs",
+  "first-observation.test.mjs",
+];
+
+// HYK-209-frame-repair-1 X-1: the scripts/relay/*.mjs copy list, same
+// closure-tested single-source-of-truth treatment as ENFORCEMENT_CHECK_FILES
+// above. finalize-done.mjs/.test.mjs were the pre-existing pair (HYK-186 3R
+// P1-1); the three dispatch-worker.ps1 targets below and their one
+// transitive test-fixture dependency are new this round.
+export const ENFORCEMENT_RELAY_FILES = [
+  // HYK-186 3R P1-1: done-line-write-guard.mjs's whole purpose is to point
+  // a blocked worker at `node scripts/relay/finalize-done.mjs <role>
+  // .harness` -- that target must exist on the installed repo too, or the
+  // guard's own redirect instruction is dead on a fresh install (scripts/
+  // relay/ was never copied by this installer at all before this round).
+  "finalize-done.mjs",
+  "finalize-done.test.mjs",
+  "dispatch-receipt-cli.mjs",
+  "dispatch-receipt-cli.test.mjs",
+  "dispatch-worker-modal-check.mjs",
+  "dispatch-worker-modal-check.test.mjs",
+  // transitive: dispatch-worker-modal-check.test.mjs imports SAMPLES from
+  // this fixture-shaped test file (no plain .mjs counterpart -- it is
+  // itself the leaf).
+  "hyk271-axis-preview-marker-synthetic.test.mjs",
+  "dispatch-worker-seat-proof-gate.mjs",
+  "dispatch-worker-seat-proof-gate.test.mjs",
+  // HYK-209-frame-repair-1 ⓐ': transitive closure fixpoint (same story as
+  // ENFORCEMENT_CHECK_FILES's own trailing block above).
+  "hyk271-marker-catalog-real-corpus.test.mjs",
+  "seat-proof-cli.mjs",
+  "seat-proof-cli.test.mjs",
+  "hyk171-cycle4b2c-fixtures.mjs",
+  "dispatch-bound-seat-proof.mjs",
+  "dispatch-bound-seat-proof.test.mjs",
+];
+
 // Extracted from main() (quality-check: keeps main()'s own line-count/
 // complexity under the repo's ESLint ceiling) -- copies the local git hooks
 // plus every scripts/check/scripts/relay file that hook wiring depends on.
@@ -880,44 +1090,7 @@ function installEnforcementScripts(params, targetRepoPath, { dryRun }) {
     path.join(targetRepoPath, "hooks", "pre-commit"),
     { dryRun, executable: true },
   );
-  for (const name of [
-    "review-gate.mjs",
-    "review-gate.test.mjs",
-    "relay-handshake.mjs",
-    "relay-handshake.test.mjs",
-    // HYK-186 1R: relay-handshake.mjs imports "./time-authority.mjs" (the
-    // future-skew registry) -- without a copy alongside it, an installed
-    // relay-handshake.mjs fails to even load (MODULE_NOT_FOUND) on a fresh
-    // target repo. Never caught before this round because no installer
-    // test had ever actually run the copied file.
-    "time-authority.mjs",
-    "time-authority.test.mjs",
-    "role-guard.mjs",
-    "role-guard.test.mjs",
-    // HYK-186 3R P1-1: the PreToolUse entry above now references this file
-    // -- it must be copied or the wired hook command fails on every
-    // Edit/Write/MultiEdit (MODULE_NOT_FOUND, same class of gap as
-    // time-authority.mjs's above).
-    "done-line-write-guard.mjs",
-    "done-line-write-guard.test.mjs",
-    "context-inject.mjs",
-    "context-inject.test.mjs",
-    "status-fresh.mjs",
-    "status-fresh.test.mjs",
-    "clear-safe-check.mjs",
-    "clear-safe-check.test.mjs",
-    "controlroom-fresh.mjs",
-    "controlroom-fresh.test.mjs",
-    "path-normalize.mjs",
-    "path-normalize.test.mjs",
-    // pm-guard.mjs is NOT copied raw here -- installPmGuard below rewrites
-    // its CONTROL_ROOM_ROOT constant for this target first (HYK-309).
-    "pm-guard.test.mjs",
-    "packet-gate.mjs",
-    "packet-gate.test.mjs",
-    "worker-status-onstart.mjs",
-    "worker-status-onstart.test.mjs",
-  ]) {
+  for (const name of ENFORCEMENT_CHECK_FILES) {
     copyRawFile(
       path.join(REPO_ROOT, "scripts", "check", name),
       path.join(targetRepoPath, "scripts", "check", name),
@@ -925,12 +1098,7 @@ function installEnforcementScripts(params, targetRepoPath, { dryRun }) {
     );
   }
   installPmGuard(params, targetRepoPath, { dryRun });
-  // HYK-186 3R P1-1: done-line-write-guard.mjs's whole purpose is to point
-  // a blocked worker at `node scripts/relay/finalize-done.mjs <role>
-  // .harness` -- that target must exist on the installed repo too, or the
-  // guard's own redirect instruction is dead on a fresh install (scripts/
-  // relay/ was never copied by this installer at all before this round).
-  for (const name of ["finalize-done.mjs", "finalize-done.test.mjs"]) {
+  for (const name of ENFORCEMENT_RELAY_FILES) {
     copyRawFile(
       path.join(REPO_ROOT, "scripts", "relay", name),
       path.join(targetRepoPath, "scripts", "relay", name),
@@ -960,6 +1128,30 @@ function installProfileAgnosticCore(params, targetRepoPath, map, { dryRun }) {
     path.join(targetRepoPath, ".harness", "PROJECT-CONTEXT.md"),
     map,
     { dryRun },
+  );
+  // HYK-209-frame-repair-1 ⓑ: context-inject.test.mjs (copied above via
+  // ENFORCEMENT_CHECK_FILES) reads this RAW (unsubstituted) template file
+  // itself via a relative path
+  // ("../../templates/harness-init/project-context.template.md") to test
+  // against the real placeholder shape rather than a hand-copied string
+  // (see that test file's own header comment for why -- it is deliberate:
+  // a regression in the template's placeholder shape must break this test
+  // too). Only the SUBSTITUTED copy above (.harness/PROJECT-CONTEXT.md) was
+  // ever installed before this round, so an installed target had no
+  // templates/ folder at all and that test failed with ENOENT (2 failures,
+  // §ⓑ). Bundling the raw template alongside is the "템플릿 동봉" option
+  // named in this round's task -- it keeps the test's real detection power
+  // (still reads and substitutes the actual template) instead of trading it
+  // away for a skip or a hand-copied fixture string.
+  copyRawFile(
+    path.join(TEMPLATES_DIR, "project-context.template.md"),
+    path.join(
+      targetRepoPath,
+      "templates",
+      "harness-init",
+      "project-context.template.md",
+    ),
+    { dryRun, executable: false },
   );
   writeTemplateFile(
     path.join(TEMPLATES_DIR, "verify.sh.template"),
@@ -1008,6 +1200,107 @@ function installProfileAgnosticCore(params, targetRepoPath, map, { dryRun }) {
   } else {
     console.log(
       "team-local profile: skipping AGENTS.md append (shared team file — not this account's to change).",
+    );
+  }
+}
+
+// installControlRoomFolder -- HYK-209-frame-repair-1 X-2: ORCH-73 measured
+// (2026-09-17, editor repo) that installAdmissionLedgerPointer / install
+// DispatchReceiptPointer below only ever write a POINTER file inside the
+// target repo's .harness/ -- the folder those pointers name
+// (params.controlRoomPath itself) was never created by this installer, and
+// neither were the admission-ledger.json / dispatch-receipts.jsonl files
+// the pointers point at. A freshly-installed target's ledger/receipt
+// therefore point at a directory that does not exist. solo-full only
+// (team-local has no control room -- see validateParams). Idempotent: an
+// existing folder or file is left completely untouched, same
+// skip-if-exists convention as every other install* function here -- never
+// re-initializes a ledger that already has real reservations in it.
+//
+// Separation from this (the harness's own) control room is structural, not
+// a runtime check: every path this function touches is derived from
+// params.controlRoomPath (the target's OWN --control-room-path value) and
+// nothing here ever reads or falls back to this repo's live control room
+// path -- see install-copylist-closure.test.mjs's "control-room folder"
+// group for the test that installs into one temp control-room path
+// alongside an untouched sentinel file standing in for a second (this
+// repo's real) control room, and asserts the sentinel is byte-identical
+// afterward.
+function installControlRoomFolder(params, targetRepoPath, { dryRun }) {
+  const controlRoomPath = params.controlRoomPath;
+  console.log(
+    `${dryRun ? "[dry-run] would create" : "created (or already existed)"}: ${controlRoomPath}`,
+  );
+  // Best-effort, like copyRawFile's own "source missing" warn-skip above --
+  // harness-init-install-portability.test.mjs exercises --control-room-path
+  // values containing characters that are valid to embed as a STRING
+  // LITERAL (its whole point: proving those characters survive intact into
+  // pm-guard.mjs's rewritten source) but are not valid as a real path on
+  // this OS (e.g. a literal `"` on Windows) -- mkdirSync would throw and
+  // abort the entire install over a scenario nothing here can actually fix.
+  // A controlRoomPath a real operator supplies should always be a real,
+  // creatable directory; this catch exists for exactly that synthetic-
+  // string-only test shape, not as a signal that failure here is expected
+  // in production use.
+  let controlRoomFolderReady = dryRun;
+  if (!dryRun) {
+    try {
+      mkdirSync(controlRoomPath, { recursive: true });
+      controlRoomFolderReady = true;
+    } catch (err) {
+      console.warn(
+        `warning: could not create control-room folder '${controlRoomPath}' (${err.message}) -- admission-ledger.json / dispatch-receipts.jsonl will NOT be initialized this run; the two pointer files below are still written`,
+      );
+    }
+  }
+  if (!controlRoomFolderReady) return;
+
+  const ledgerPath = path.join(controlRoomPath, "admission-ledger.json");
+  if (existsSync(ledgerPath)) {
+    skipped.push(ledgerPath);
+    console.warn(`skip (already exists): ${ledgerPath}`);
+  } else {
+    // Local copy of admission-ledger-core.mjs's createEmptyLedger() shape
+    // ({schema_version, epoch, reservations: {}}), NOT a static import of
+    // that file -- same "로컬 복제" convention already used throughout this
+    // repo for admission-completion-adapter.mjs's siblings (see e.g.
+    // reject-streak.mjs / relay-handshake.mjs's own header comments on why
+    // they duplicate rather than import). A static import here would make
+    // install.mjs itself depend on scripts/supervisor/ resolving at
+    // MODULE LOAD time -- nc-install-hook-wiring.test.mjs's mutation test
+    // runs a copy of install.mjs from a throwaway directory with no
+    // scripts/supervisor/ beside it at all, and unlike copyRawFile's
+    // graceful warn-skip for a missing REPO_ROOT source, a missing static
+    // import target throws before main() ever runs. ADMISSION_SCHEMA_
+    // VERSION must match admission-ledger-core.mjs's own constant exactly
+    // -- isWellFormedLedger() there is the reader that would reject a
+    // drifted value.
+    const ledger = {
+      schema_version: "admission-ledger/v1",
+      epoch: new Date().toISOString(),
+      reservations: {},
+    };
+    const content = `${JSON.stringify(ledger, null, 2)}\n`;
+    if (!dryRun) {
+      writeFileSync(ledgerPath, content, "utf8");
+    }
+    installed.push(ledgerPath);
+    console.log(
+      `${dryRun ? "[dry-run] would install" : "installed"}: ${ledgerPath}`,
+    );
+  }
+
+  const receiptPath = path.join(controlRoomPath, "dispatch-receipts.jsonl");
+  if (existsSync(receiptPath)) {
+    skipped.push(receiptPath);
+    console.warn(`skip (already exists): ${receiptPath}`);
+  } else {
+    if (!dryRun) {
+      writeFileSync(receiptPath, "", "utf8");
+    }
+    installed.push(receiptPath);
+    console.log(
+      `${dryRun ? "[dry-run] would install" : "installed"}: ${receiptPath}`,
     );
   }
 }
@@ -1266,6 +1559,13 @@ function main() {
   }
 
   if (params.profile === "solo-full") {
+    // HYK-209-frame-repair-1 X-2: the control-room folder + initial-empty
+    // ledger/receipt files the two pointers below name -- must run BEFORE
+    // the pointers so a human inspecting a fresh install finds a working
+    // ledger, not a pointer to nothing. See installControlRoomFolder's own
+    // header for scope/limits.
+    installControlRoomFolder(params, targetRepoPath, { dryRun });
+
     // HYK-227 2R §3 항2: the persistent admission-ledger pointer file --
     // see installAdmissionLedgerPointer's own header for scope/limits.
     installAdmissionLedgerPointer(params, targetRepoPath, { dryRun });
@@ -1329,4 +1629,18 @@ function main() {
   console.log("");
 }
 
-main();
+// HYK-209-frame-repair-1: guard added so this file can be `import`ed (to
+// read the exported copy-list arrays below for the closure check) without
+// side-effecting a real install. Previously this repo's own tests
+// documented (see nc-install-hook-wiring.test.mjs's runInstallerDryRun
+// comment) that install.mjs "has no invokedDirectly guard, it always runs
+// main() on load" and spawned it as a subprocess specifically to avoid
+// that; this guard makes both usable: `node install.mjs ...` still runs
+// main() (process.argv[1] resolves to this file), while `import` from a
+// test does not.
+if (
+  process.argv[1] &&
+  path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)
+) {
+  main();
+}

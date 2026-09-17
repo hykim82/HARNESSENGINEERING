@@ -69,11 +69,14 @@ function initGitRepo(dir) {
 }
 
 // Runs a real `node <installerPath> --dry-run ...` child process (production
-// entry point, not an imported helper -- install.mjs has no invokedDirectly
-// guard, it always runs main() on load, so importing it would execute a
-// real (if dry-run) install as a side effect of the import itself; spawning
-// is the only way to drive it that mirrors how a human/CI actually invokes
-// this file).
+// entry point, not an imported helper -- spawning is the only way to drive
+// it that mirrors how a human/CI actually invokes this file). HYK-209-
+// frame-repair-1 added an invokedDirectly guard so install.mjs CAN now be
+// `import`ed too (install-copylist-closure.test.mjs does exactly that, to
+// read its exported copy-list arrays) without running a real install as a
+// side effect -- but this suite still spawns on purpose: it is exercising
+// the CLI entry point's actual behavior (argv parsing, --dry-run, printed
+// output), not the exported internals.
 function runInstallerDryRun(installerPath, targetDir) {
   const res = spawnSync(
     process.execPath,
