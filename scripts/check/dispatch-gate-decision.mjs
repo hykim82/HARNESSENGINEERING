@@ -3333,31 +3333,23 @@ function bestEffortStampDroppedAt(taskPath, args) {
       bestEffortSnapshotRoundTaskFile(taskPath, inserted);
       return;
     }
-    const stamped = stampDroppedAt({});
-    if (!stamped.ok) {
-      console.error(
-        `dispatch-gate-decision: dropped_at stamp skipped (stampDroppedAt failed: ${stamped.reason}) -- leaving existing header untouched (손기입 대체값 금지 원칙 유지), existing gate/consumption checks fail closed on whatever was already there`,
-      );
-      return;
-    }
-    const rewritten = original.replace(
-      DROPPED_AT_LINE_RE,
-      `dropped_at: ${stamped.value}`,
-    );
-    if (rewritten === original) {
-      // HYK-307-order-1 §1: value didn't change (re-run against an
-      // already-stamped file), but the content is still this round's final
-      // text -- still worth snapshotting (idempotent via
-      // archiveRoundTaskFileIfNew's content match, see that call's own
-      // header comment above).
-      bestEffortSnapshotRoundTaskFile(taskPath, original);
-      return;
-    }
-    writeFileSync(taskPath, rewritten, "utf8");
+    // HYK-479-486 (write-once 수리): dropped_at: 줄이 «이미 있으면» 다시
+    // 찍지 않는다. 이전에는 여기서 매번 stampDroppedAt({})을 새로 불러
+    // 현재 시각으로 덮어썼는데, 같은 ALLOW 라운드가 재게이트되면(예:
+    // 관제실 재시도) "처음 실제로 떨어뜨린 시각"이 최신 재게이트 시각으로
+    // 조용히 지워졌다 -- dropped_at의 존재 의의(감사용 최초 낙하 시각)와
+    // 정면으로 어긋난다. 값이 이미 있다는 것 자체가 "이 라운드는 이미 한
+    // 번 스탬프됐다"는 증거이므로, 그 값을 그대로 보존하고 아무것도
+    // 쓰지 않는다(스탬프 로직은 여전히 '줄이 없을 때 삽입'하는 위
+    // 분기에서만 stampDroppedAt을 호출한다).
     console.log(
-      `dispatch-gate-decision: dropped_at machine-stamped (HYK-257-done-stamp-2 §2 범위2 ⓑ) -- ${taskPath} -> '${stamped.value}'`,
+      `dispatch-gate-decision: dropped_at already present -- write-once, leaving existing value untouched (HYK-479-486: 재게이트가 최초 낙하 시각을 덮어쓰지 않는다) -- ${taskPath}`,
     );
-    bestEffortSnapshotRoundTaskFile(taskPath, rewritten);
+    // HYK-307-order-1 §1: 값은 안 바뀌었지만 이 내용이 "이 라운드의 최종
+    // 원문"이라는 사실은 그대로이므로, 여전히 스냅숏할 가치가 있다
+    // (idempotent -- archiveRoundTaskFileIfNew의 동일-내용 중복 방지,
+    // 위 header comment 참조).
+    bestEffortSnapshotRoundTaskFile(taskPath, original);
   } catch (err) {
     console.error(
       `dispatch-gate-decision: dropped_at stamp best-effort failed (non-fatal to this CLI's own exit code): ${err.message}`,
