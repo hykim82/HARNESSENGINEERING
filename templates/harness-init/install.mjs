@@ -948,10 +948,19 @@ export const ENFORCEMENT_CHECK_FILES = [
   "seat-proof-wrapper-shape.test.mjs",
   // transitive: dispatch-gate-decision.mjs -> {dropped-at-stamp-core,
   // consumption-receipt-core, abort-record-core,
-  // retirement-block-reason-shared}.mjs; consumption-receipt-core.test.mjs
-  // -> dispatch-gate-decision-core.mjs; dispatch-arg-contract.mjs ->
-  // dispatch-arg-contract-core.mjs -> dispatch-arg-contract-registry.mjs.
+  // retirement-block-reason-shared, seat-origin-warn}.mjs;
+  // consumption-receipt-core.test.mjs -> dispatch-gate-decision-core.mjs;
+  // dispatch-arg-contract.mjs -> dispatch-arg-contract-core.mjs ->
+  // dispatch-arg-contract-registry.mjs. seat-origin-warn.mjs itself ->
+  // seat-origin-registry.mjs (one more hop). Review 1R P1 (HYK-460): this
+  // exact class of gap (a listed file's own import goes uncopied) recurring
+  // an 8th time -- seat-origin-warn.mjs has no .test.mjs sibling (none
+  // exists on disk) so only the .mjs is added for it; seat-origin-registry
+  // .mjs does have one, added as a pair per this list's own convention.
   "dropped-at-stamp-core.mjs",
+  "seat-origin-warn.mjs",
+  "seat-origin-registry.mjs",
+  "seat-origin-registry.test.mjs",
   "consumption-receipt-core.mjs",
   "consumption-receipt-core.test.mjs",
   "abort-record-core.mjs",

@@ -97,6 +97,38 @@ test("§C-5 시험4: override가 필수 3항목 중 하나라도 빠지면 탈�
   assert.equal(r.reason, SEAT_ORIGIN_WARN_REASON.UNREGISTERED_OVERRIDE_INVALID);
 });
 
+// HYK-460 검토 1R P2-2: 위 시험4개는 전부 reason(열거값)만 단정했다 --
+// message(사람이 실제로 읽는 경고 «본문» 문자열)는 아무도 단정하지
+// 않아, 그 내용이 바뀌거나 빠져도 이 파일의 어떤 시험도 잡지 못했다.
+// 여기서는 UNREGISTERED_NO_OVERRIDE(가장 흔한 실사고 경로 -- 런처
+// 미경유)의 message가 ⓐ좌석 식별자(paneKey, 어느 좌석인지 특정 못하면
+// 경고를 봐도 누구 것인지 알 수 없다) ⓑ탈출구 안내(seat-override.md +
+// 세 필수 키 reason:/handle:/author:, 이게 없으면 경고를 본 사람이
+// 무엇을 해야 하는지 알 방법이 없다) 둘 다를 실제로 담고 있는지 값으로
+// 확인한다.
+test("§C-5 시험5(P2-2): UNREGISTERED_NO_OVERRIDE의 message 본문이 좌석 식별자와 탈출구 안내를 담는다", () => {
+  const r = evaluateSeatOriginWarning({
+    paneKey: "tab1:leaf1",
+    registered: false,
+    overridePresent: false,
+    overrideValid: false,
+  });
+  assert.ok(
+    r.message.includes("tab1:leaf1"),
+    `message에 paneKey가 그대로 실려야 한다: ${r.message}`,
+  );
+  assert.ok(
+    r.message.includes("seat-override.md"),
+    `message에 탈출구 파일명이 있어야 한다: ${r.message}`,
+  );
+  assert.ok(
+    r.message.includes("reason:") &&
+      r.message.includes("handle:") &&
+      r.message.includes("author:"),
+    `message에 탈출구 필수 3키 안내가 있어야 한다: ${r.message}`,
+  );
+});
+
 // ---------------------------------------------------------------------------
 // readOverrideFacts -- 빈 파일/부분 필드로 우회 불가
 // ---------------------------------------------------------------------------
@@ -282,6 +314,57 @@ test("결선: 등록부에 있는 pane -> 경고 줄 없음", () => {
     ]);
     assert.equal(allow, true, lines.join("\n"));
     assert.ok(!lines.some((l) => l.startsWith("seat-origin-warn: WARN")));
+  });
+});
+
+// HYK-460 검토 1R P2-3ⓒ: 탈출구(OVERRIDE_VALID)가 실제로 쓰였을 때
+// 배달 로그(runDispatchGateDecision의 lines)에 그 사용 사실이 줄로
+// 남는지 값으로 확인한다. 고치기 전에는 outcome.warn이 false라는 이유로
+// 이 경로가 lines에 아무것도 남기지 않았다(검토자가 지적한 "사용 흔적
+// 0"). 이 시험은 그 회귀를 막는다.
+test("결선(P2-3ⓒ): 탈출구(override valid)가 쓰이면 경고는 아니지만 배달 로그에 사용 사실이 줄로 남는다", () => {
+  withTempDir("seat-origin-warn-wire-", (dir) => {
+    const taskPath = join(dir, "coder-task.md");
+    const { ledgerPath, receiptPath } = seedLedgerAndOneB(
+      dir,
+      taskPath,
+      "HYK-460",
+    );
+    // 등록부에는 없는 pane -- 그러나 워크트리(taskPath의 dirname)에
+    // 필수 3항목을 갖춘 seat-override.md가 있다.
+    const registryPath = join(dir, "seat-launch-registry.jsonl");
+    appendLaunchRecord(
+      registryPath,
+      buildLaunchRecord({ paneKey: "OTHER:pane", role: "CODER" }),
+    );
+    mkdirSync(join(dir, ".harness"), { recursive: true });
+    writeFileSync(
+      join(dir, ".harness", "seat-override.md"),
+      "reason: 시험용 결선 확인\nhandle: term_test\nauthor: tester\n",
+      "utf8",
+    );
+    const { allow, lines } = runDispatchGateDecision([
+      taskPath,
+      "--ledger",
+      ledgerPath,
+      "--dispatch-receipt-path",
+      receiptPath,
+      "--pane-key",
+      "tab9:leaf9",
+      "--seat-registry-path",
+      registryPath,
+    ]);
+    assert.equal(allow, true, lines.join("\n"));
+    assert.ok(
+      !lines.some((l) => l.startsWith("seat-origin-warn: WARN")),
+      `OVERRIDE_VALID는 경고가 아니다 -- WARN 줄이 있으면 안 된다: ${lines.join("\n")}`,
+    );
+    assert.ok(
+      lines.some(
+        (l) => l.startsWith("seat-origin-warn:") && l.includes("경고 생략"),
+      ),
+      `탈출구 사용 사실이 lines에 한 줄로 남아야 한다(감사 축): ${lines.join("\n")}`,
+    );
   });
 });
 

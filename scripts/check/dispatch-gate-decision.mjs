@@ -140,7 +140,10 @@ import {
 // 고정 파일 목록으로 격리 clone하는 mutation 시험(hyk241-oneb-gate-
 // mutation.test.mjs 등)의 고정 목록에도 이 import를 추가했다(다른
 // sibling import들과 같은 이유).
-import { evaluateSeatOriginWarningForWorktree } from "./seat-origin-warn.mjs";
+import {
+  evaluateSeatOriginWarningForWorktree,
+  SEAT_ORIGIN_WARN_REASON,
+} from "./seat-origin-warn.mjs";
 
 const REJECT_STREAK_PATH = join(
   dirname(fileURLToPath(import.meta.url)),
@@ -979,11 +982,21 @@ function resolveSeatOriginWarnFacts(args, taskPath, env) {
 // Extracted from runDispatchGateDecision (quality-check: eslint complexity
 // 상한 유지 목적, 동작 변경 없음 -- 같은 이유로 이 파일이 이미 여러 helper를
 // 추출한 관례, 예 resolveMissingResultFileGate/evaluatePrecondition).
+// HYK-460 검토 1R P2-3ⓑ (책임자 확정): 이전에는 outcome.warn이 false면
+// (OVERRIDE_VALID 포함) 아무 줄도 남기지 않았다 -- 탈출구가 실제로 쓰여도
+// 배달 로그에 흔적이 0이라, 옆문 2문 시험의 ⑴(감사에서 보이는가)이
+// "아니오"였다(검토자 판정). OVERRIDE_VALID는 경고가 아니므로 여전히
+// warn:false지만, "탈출구를 실제로 썼다"는 사실 자체는 이제 별도로 한
+// 줄 남긴다 -- 이게 "감사에서 보이는가"를 "예"로 만드는 유일한 변경.
 function resolveSeatOriginWarnLine(taskPath, args) {
   if (!existsSync(taskPath)) return null;
   const facts = resolveSeatOriginWarnFacts(args, taskPath, process.env);
   const outcome = evaluateSeatOriginWarningForWorktree(facts);
-  return outcome.warn ? outcome.message : null;
+  if (outcome.warn) return outcome.message;
+  if (outcome.reason === SEAT_ORIGIN_WARN_REASON.OVERRIDE_VALID) {
+    return outcome.message;
+  }
+  return null;
 }
 
 // lookupDispatchId에서 분리(quality-check: eslint complexity 상한 유지
