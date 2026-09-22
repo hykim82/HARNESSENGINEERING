@@ -32,13 +32,39 @@ import { writeLedger } from "./reject-streak.mjs";
 const HERE = dirname(fileURLToPath(import.meta.url));
 const SEAT_ORIGIN_WARN_PATH = join(HERE, "seat-origin-warn.mjs");
 
+// HYK-460 CI 수리(§0/§3-1): fn(dir)이 프라미스를 돌려주면(예: 마지막
+// 변이 RED 시험의 dynamic import), 이전 구현의 try/finally는 그 프라미스가
+// 아직 대기 중인데도 즉시 rmSync를 실행해 임시 디렉터리를 지워버렸다 --
+// 시험이 "끝난" 뒤(콜백이 반환된 시점)에도 실제로는 비동기 작업이 계속
+// 그 디렉터리를 읽고 있어 늦게 도착한 접근이 ENOENT로 실패하고, 그 실패가
+// node:test에는 "테스트 종료 후 비동기 활동"으로 잡힌다(CI 로그 3077행).
+// 이제 fn(dir)의 반환값이 thenable이면 그 프라미스가 정착(settle)된
+// "뒤에" 정리하고, 아니면 기존처럼 즉시 정리한다 -- 임시 자원은 그것을
+// 쓰는 모든 비동기 작업이 끝난 뒤에만 지운다.
 function withTempDir(prefix, fn) {
   const dir = mkdtempSync(join(tmpdir(), prefix));
+  const cleanup = () => rmSync(dir, { recursive: true, force: true });
+  let result;
   try {
-    return fn(dir);
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
+    result = fn(dir);
+  } catch (err) {
+    cleanup();
+    throw err;
   }
+  if (result && typeof result.then === "function") {
+    return result.then(
+      (value) => {
+        cleanup();
+        return value;
+      },
+      (err) => {
+        cleanup();
+        throw err;
+      },
+    );
+  }
+  cleanup();
+  return result;
 }
 
 // ---------------------------------------------------------------------------
