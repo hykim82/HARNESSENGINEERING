@@ -339,10 +339,17 @@ function startConfirmBaselineArgs(dir) {
   ];
 }
 
-test("(E-baseline) dispatch-start-confirm-cli: 필수 3개 전부 있으면 usage 오류 없이 판정 루프까지 도달한다(exit 1 NOT_STARTED, 짧은 타임아웃)", () => {
+// ★HYK-280(coder-task.md §3) -- 이 시험의 `dir`(withFixtureDir가 만든
+// 임시 폴더)은 `--claude-home`을 안 넘기므로 기본값(os.homedir()/.claude)
+// 아래에서 세션 기록 폴더를 찾는데, 이 임시 경로로는 그런 세션이 애초에
+// 존재한 적이 없어 그 폴더 자체를 끝까지 못 찾는다 -- §3 재설계 뒤로는
+// 정확히 그 경우가 NOT_STARTED(exit 1)가 아니라 OBSERVATION_UNAVAILABLE
+// (exit 5)로 갈린다. 이 시험의 목적(usage 검증이 폴링 루프 도달을
+// 막지 않는다)은 그대로이므로 기대 종료코드만 갱신한다.
+test("(E-baseline) dispatch-start-confirm-cli: 필수 3개 전부 있으면 usage 오류 없이 판정 루프까지 도달한다(exit 5 OBSERVATION_UNAVAILABLE, 짧은 타임아웃)", () => {
   withFixtureDir("hyk319-confirm-", (dir) => {
     const r = runStartConfirmCli(startConfirmBaselineArgs(dir));
-    assert.equal(r.status, 1);
+    assert.equal(r.status, 5);
     assert.doesNotMatch(r.stderr, /usage:/);
   });
 });
