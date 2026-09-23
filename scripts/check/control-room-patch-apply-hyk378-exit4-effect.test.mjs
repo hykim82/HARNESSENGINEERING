@@ -81,6 +81,24 @@ const SCOPE_HONESTY_SNIPPET =
   "배달 자체는 이미 이뤄졌다(dispatch 완료) -- 이 실행을 성공으로 취급하지 마라.";
 const SUCCESS_NOT_REPORTED_SNIPPET = "이 실행을 성공으로 취급하지 마라";
 
+// ---- ★HYK-280 후속: exit 5(OBSERVATION_UNAVAILABLE) 등재 promise 문자열 ----
+// 이 상수들 각각도 exit4 축과 같은 함정을 조심한다: applied fixture에는
+// 관제실의 UNRELATED, 기존 "exit 5"가 이미 있다(모호한 좌석 선택 실패
+// 경로, applied fixture 137행) -- 그래서 아래 EXIT5_SNIPPET은 그 줄
+// 하나만 정확히 가리키는 여러 줄 조합이다(naive `includes("exit 5")`였다면
+// 엉뚱한 자리를 지우고도 계속 초록으로 남았을 것).
+const OBS_UNAVAILABLE_FLAG_INIT_SNIPPET =
+  "$confirmObservationUnavailable = $false";
+const OBS_UNAVAILABLE_EQ5_BRANCH_SNIPPET = "if ($confirmExit -eq 5) {";
+const OBS_UNAVAILABLE_DIAGNOSTIC_LINE_SNIPPET =
+  "(0=STARTED, 1=NOT_STARTED, 2=COLLECTION_FAILED, 3=STALLED_AFTER_START, 4=INVALID_ARGS, 5=OBSERVATION_UNAVAILABLE)";
+const EXIT5_SNIPPET =
+  'Write-Host "[4/4] 이 스크립트는 5 로 끝난다(0=정상 진행 · 5=착수확인 관측 불가)."\n  exit 5';
+const OBS_UNAVAILABLE_SCOPE_HONESTY_SNIPPET =
+  "배달 자체는 이미 이뤄졌다(dispatch 완료) -- 재배달이 아니라 좌석 화면을 직접 확인하라.";
+const OBS_UNAVAILABLE_NOT_REDISPATCH_SNIPPET =
+  "재배달이 아니라 좌석 화면을 직접 확인하라";
+
 function hasContractFlagPromise(text) {
   return text.includes(CONTRACT_FLAG_INIT_SNIPPET);
 }
@@ -92,6 +110,21 @@ function hasExit4Promise(text) {
 }
 function hasScopeHonestyPromise(text) {
   return text.includes(SCOPE_HONESTY_SNIPPET);
+}
+function hasObsUnavailableFlagInitPromise(text) {
+  return text.includes(OBS_UNAVAILABLE_FLAG_INIT_SNIPPET);
+}
+function hasObsUnavailableEq5BranchPromise(text) {
+  return text.includes(OBS_UNAVAILABLE_EQ5_BRANCH_SNIPPET);
+}
+function hasObsUnavailableDiagnosticLinePromise(text) {
+  return text.includes(OBS_UNAVAILABLE_DIAGNOSTIC_LINE_SNIPPET);
+}
+function hasExit5Promise(text) {
+  return text.includes(EXIT5_SNIPPET);
+}
+function hasObsUnavailableScopeHonestyPromise(text) {
+  return text.includes(OBS_UNAVAILABLE_SCOPE_HONESTY_SNIPPET);
 }
 
 test("claim: applied fixture promises a $confirmContractViolation flag initialized false", () => {
@@ -106,6 +139,28 @@ test("claim: applied fixture actually contains an `exit 4` statement", () => {
 test("claim: applied fixture is honest that this point is AFTER dispatch -- it does not claim to block delivery, only the false-success report", () => {
   assert.equal(hasScopeHonestyPromise(loadApplied()), true);
   assert.equal(loadApplied().includes(SUCCESS_NOT_REPORTED_SNIPPET), true);
+});
+
+// ---- ★HYK-280 후속: exit 5(OBSERVATION_UNAVAILABLE) 등재 promise 검사 -----
+
+test("claim(HYK-280): applied fixture promises a $confirmObservationUnavailable flag initialized false", () => {
+  assert.equal(hasObsUnavailableFlagInitPromise(loadApplied()), true);
+});
+test("claim(HYK-280): applied fixture branches on confirmExit -eq 5 SEPARATELY from the unknown-code elseif (5 is a named, in-contract code -- not lumped with 4/99)", () => {
+  assert.equal(hasObsUnavailableEq5BranchPromise(loadApplied()), true);
+});
+test("claim(HYK-280): the human-readable diagnostic line now names both 4=INVALID_ARGS and 5=OBSERVATION_UNAVAILABLE (coder-task.md §1-2/§1-4 -- the line used to drop both)", () => {
+  assert.equal(hasObsUnavailableDiagnosticLinePromise(loadApplied()), true);
+});
+test("claim(HYK-280): applied fixture actually contains a dedicated `exit 5` statement (distinct from the unrelated pre-existing ambiguous-seat `exit 5` elsewhere in the file)", () => {
+  assert.equal(hasExit5Promise(loadApplied()), true);
+});
+test("claim(HYK-280): applied fixture tells the human this is NOT a redispatch signal for exit 5 -- '재배달이 아니라 좌석 화면을 직접 확인하라' (coder-task.md §1-2 requirement)", () => {
+  assert.equal(hasObsUnavailableScopeHonestyPromise(loadApplied()), true);
+  assert.equal(
+    loadApplied().includes(OBS_UNAVAILABLE_NOT_REDISPATCH_SNIPPET),
+    true,
+  );
 });
 
 // ---- ★anti-vacuity, both directions: RED on deletion, GREEN on restore ----
@@ -136,6 +191,55 @@ test("★anti-vacuity (양방향): deleting the scope-honesty sentence flips RED
   const mutatedRed = original.replace(SCOPE_HONESTY_SNIPPET, "");
   assert.equal(hasScopeHonestyPromise(mutatedRed), false);
   assert.equal(hasScopeHonestyPromise(original), true);
+});
+
+// ---- ★HYK-280 후속: exit 5 promise들의 anti-vacuity(양방향) ---------------
+
+test("★anti-vacuity (양방향, HYK-280): deleting the $confirmObservationUnavailable flag-init promise flips RED, original stays GREEN", () => {
+  const original = loadApplied();
+  const mutatedRed = original.replace(OBS_UNAVAILABLE_FLAG_INIT_SNIPPET, "");
+  assert.equal(hasObsUnavailableFlagInitPromise(mutatedRed), false);
+  assert.equal(hasObsUnavailableFlagInitPromise(original), true);
+});
+
+test("★anti-vacuity (양방향, HYK-280): deleting the `-eq 5` branch promise flips RED, original stays GREEN", () => {
+  const original = loadApplied();
+  const mutatedRed = original.replace(OBS_UNAVAILABLE_EQ5_BRANCH_SNIPPET, "");
+  assert.equal(hasObsUnavailableEq5BranchPromise(mutatedRed), false);
+  assert.equal(hasObsUnavailableEq5BranchPromise(original), true);
+});
+
+test("★anti-vacuity (양방향, HYK-280): deleting the updated diagnostic-line promise (4·5 additions) flips RED, original stays GREEN", () => {
+  const original = loadApplied();
+  const mutatedRed = original.replace(
+    OBS_UNAVAILABLE_DIAGNOSTIC_LINE_SNIPPET,
+    "",
+  );
+  assert.equal(hasObsUnavailableDiagnosticLinePromise(mutatedRed), false);
+  assert.equal(hasObsUnavailableDiagnosticLinePromise(original), true);
+});
+
+test("★anti-vacuity (양방향, HYK-280): deleting the ONLY dedicated `exit 5` statement flips RED, original stays GREEN (does not touch the unrelated pre-existing ambiguous-seat exit 5)", () => {
+  const original = loadApplied();
+  const mutatedRed = original.replace(EXIT5_SNIPPET, "# (removed)");
+  assert.equal(hasExit5Promise(mutatedRed), false);
+  assert.equal(hasExit5Promise(original), true);
+  // ★the unrelated exit 5 (ambiguous seat selection) must survive untouched.
+  assert.equal(
+    (mutatedRed.match(/exit 5/g) || []).length,
+    1,
+    "only the dedicated OBSERVATION_UNAVAILABLE exit 5 should have been removed -- the unrelated ambiguous-seat exit 5 must remain",
+  );
+});
+
+test("★anti-vacuity (양방향, HYK-280): deleting the not-a-redispatch sentence flips RED, original stays GREEN", () => {
+  const original = loadApplied();
+  const mutatedRed = original.replace(
+    OBS_UNAVAILABLE_SCOPE_HONESTY_SNIPPET,
+    "",
+  );
+  assert.equal(hasObsUnavailableScopeHonestyPromise(mutatedRed), false);
+  assert.equal(hasObsUnavailableScopeHonestyPromise(original), true);
 });
 
 // ---------------------------------------------------------------------------
@@ -248,6 +352,13 @@ const NO_PS_SKIP_REASON =
 
 const contractViolationRedirectsToExit4 = [4, 99];
 const contractCompliantCodesStayAtExit0 = [0, 1, 2, 3];
+// ★HYK-280 후속(coder-task.md §2 항1) -- 5(OBSERVATION_UNAVAILABLE)는 기존
+// 두 축 어디에도 안 들어간다: "계약 밖 미지 코드"(4·99, exit 4)와도 다르고
+// "성공"(0-3, exit 0)과도 다르다 -- 이름 있는 코드이지만 "성공"은 아니므로
+// 세 번째 축을 새로 만든다(불변식 P′). exit 코드 자체도 4가 아니라 5로
+// 갈라, 사람이 종료코드만 보고도 "이건 관측 불가지 인자 오류가 아니다"를
+// 구별할 수 있게 한다.
+const observationUnavailableStaysNamedAtExit5 = [5];
 
 for (const exitCode of contractCompliantCodesStayAtExit0) {
   test(`★근본 행동: real applied-fixture tail with confirmExit=${exitCode} (in-contract) -- harness reaches exit 0 (no regression on the 4 known codes); PowerShell 없으면 SKIP_REASON과 함께 skip`, (t) => {
@@ -278,6 +389,37 @@ for (const exitCode of contractViolationRedirectsToExit4) {
     );
   });
 }
+
+for (const exitCode of observationUnavailableStaysNamedAtExit5) {
+  test(`★근본 행동(HYK-280): real applied-fixture tail with confirmExit=${exitCode} (OBSERVATION_UNAVAILABLE -- in-contract but NOT success) -- harness reaches exit 5, NOT exit 0 and NOT exit 4; PowerShell 없으면 SKIP_REASON과 함께 skip`, (t) => {
+    if (!PS_EXE) {
+      t.skip(NO_PS_SKIP_REASON);
+      return;
+    }
+    const result = runSyntheticTarget(exitCode, PS_EXE);
+    assert.equal(
+      result.status,
+      5,
+      `expected exit 5 for confirmExit=${exitCode} (OBSERVATION_UNAVAILABLE), got status=${result.status} stderr=${result.stderr}`,
+    );
+  });
+}
+
+// ★HYK-280 후속(불변식 3 "계약을 넓히지 마라") -- 5 이외의 미지 코드(예: 6)는
+// 여전히 fail-closed(exit 4)로 남아야 한다. 이 테스트가 없으면 "5를 등재"가
+// 실은 "그 밖의 미지 코드도 통과"로 몰래 넓혀졌는지 구별할 수 없다.
+test("★근본 행동(HYK-280, 불변식 3 -- 계약을 넓히지 않는다): confirmExit=6(5도 아니고 기존 4/99도 아닌 새 미지 코드)은 여전히 exit 4로 fail-closed; PowerShell 없으면 SKIP_REASON과 함께 skip", (t) => {
+  if (!PS_EXE) {
+    t.skip(NO_PS_SKIP_REASON);
+    return;
+  }
+  const result = runSyntheticTarget(6, PS_EXE);
+  assert.equal(
+    result.status,
+    4,
+    `unknown code 6 must stay fail-closed at exit 4 (not silently pass, not confused with 5), got status=${result.status} stderr=${result.stderr}`,
+  );
+});
 
 // ---- ★되돌림 변이 (행동 축): reverting the applied fixture's tail to the
 // PRE-PATCH text (the before fixture's equivalent lines) must make exit 4
@@ -316,6 +458,62 @@ test("★되돌림 변이 (행동 축): replacing the applied tail's fail-closed
       result.status,
       0,
       `pre-patch text must let confirmExit=4 fall through to exit 0 (that is exactly the bug this patch fixes) -- got status=${result.status}`,
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ★HYK-280 후속(coder-task.md §2 항3 ⓐ) -- "5를 다시 계약 밖으로 되돌리면"
+// 정확한 사유(계약 밖 미지 코드로 뭉개짐)와 함께 빨개지는가. 여기서는
+// HYK-378까지만 적용됐던(HYK-280 이전) tail -- 즉 5를 "그 밖의 미지 코드"
+// elseif 하나로만 처리하던 옛 문면 -- 을 그대로 재현해, confirmExit=5가
+// exit 5가 아니라 exit 4(계약 밖 취급)로 떨어지는지 확인한다. 이것이
+// 되돌아가면(=이 라운드가 없었다면) 사람은 "관측 불가"를 "인자 계약
+// 위반"으로 오독하게 된다 -- 그 회귀를 이 시험이 잡는다.
+test("★되돌림 변이(행동 축, HYK-280 ⓐ): 5를 다시 '계약 밖 미지 코드' elseif 하나로 되돌리면 confirmExit=5가 exit 5가 아니라 exit 4로 떨어진다(RED for the invariant, proving the exit-5 GREEN result above is not vacuous); PowerShell 없으면 SKIP_REASON과 함께 skip", (t) => {
+  if (!PS_EXE) {
+    t.skip(NO_PS_SKIP_REASON);
+    return;
+  }
+  // HYK-378까지의 tail(HYK-280 이전) -- $confirmObservationUnavailable도
+  // -eq 5 분기도 없다. 5는 그저 "0,1,2,3에 없는 코드"로만 취급된다.
+  const hyk378OnlyTail = [
+    "  $confirmClaudeLast = Confirm-GetClaudeBytes $confirmProjectDir",
+    "  $confirmLastObservationAtMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()",
+    "  if ($confirmClaudeLast.ok) { $confirmLastObservationBytes = [string]$confirmClaudeLast.totalBytes }",
+    "  $confirmContractViolation = $false",
+    "  $confirmExitObserved = $confirmExit",
+    "  if ($confirmExit -notin @(0, 1, 2, 3)) {",
+    '    Write-Warning "dispatch-start-confirm 계약 밖 종료코드=$confirmExit -- 착수 확인 결과를 신뢰할 수 없다"',
+    "    $confirmContractViolation = $true",
+    "  }",
+    '  Write-Host "[4/4] Claude 착수 확인 종료코드=$confirmExit (0=STARTED, 1=NOT_STARTED, 2=COLLECTION_FAILED, 3=STALLED_AFTER_START)"',
+    '  Write-Host "[4/4] 진단: engine=$confirmEngine folder=$confirmProjectDir baseline=$confirmBaselineBytes baseline_at=$confirmBaselineAtMs last_observation=$confirmLastObservationBytes last_observation_at=$confirmLastObservationAtMs"',
+    "}",
+    "if ($confirmContractViolation) {",
+    '  Write-Host "[4/4] 착수 확인이 돌지 못했다 -- 관측된 종료코드=$confirmExitObserved (계약 = 0,1,2,3)"',
+    '  Write-Host "[4/4] 배달 자체는 이미 이뤄졌다(dispatch 완료) -- 이 실행을 성공으로 취급하지 마라."',
+    '  Write-Host "[4/4] 이 스크립트는 4 로 끝난다(0=정상 진행 · 4=착수확인 인자계약 위반)."',
+    "  exit 4",
+    "}",
+  ].join("\n");
+
+  const dir = mkdtempSync(
+    join(tmpdir(), "hyk378-exit4-behavior-revert-hyk280-"),
+  );
+  try {
+    const harnessPath = join(dir, "harness.ps1");
+    writeFileSync(harnessPath, buildHarness(hyk378OnlyTail, 5), "utf8");
+    const result = spawnSync(
+      PS_EXE,
+      ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", harnessPath],
+      { encoding: "utf8" },
+    );
+    assert.equal(
+      result.status,
+      4,
+      `pre-HYK-280 text must let confirmExit=5 fall into the generic contract-violation branch (exit 4), NOT the named exit 5 this round adds -- got status=${result.status}`,
     );
   } finally {
     rmSync(dir, { recursive: true, force: true });
