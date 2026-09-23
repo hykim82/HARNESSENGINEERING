@@ -33,6 +33,36 @@ test("deriveClaudeProjectDirName: 경로 구분자·콜론을 각각 '-'로(병�
   );
 });
 
+// ★HYK-280 RED-먼저 수리(§1) -- ORCH 실측(2026-09-23) 그대로 재현: 옛
+// 구현(경로 구분자·콜론 3글자만 치환)은 한글 워크트리 경로에서 실제
+// `.claude-team/projects/` 폴더 이름과 어긋난다. 실물 폴더 이름
+// `C--Users-Administrator-orca-workspaces------------hyk304-linebreak-1`
+// (C:\Users\Administrator\.claude-team\projects\ 전수 실측, 106개 폴더
+// 대조)을 정답표로 고정한다 -- 한글 10글자가 대시 10개(병합 없음).
+test("★HYK-280 RED-먼저: 한글 워크트리 경로 -- 실물 폴더 이름과 «전수» 일치해야 한다(한글 1글자=대시 1개, 병합 없음)", () => {
+  const absRepoRoot =
+    "C:\\Users\\Administrator\\orca\\workspaces\\모바일마크다운에디터\\hyk304-linebreak-1";
+  assert.equal(
+    deriveClaudeProjectDirName(absRepoRoot),
+    "C--Users-Administrator-orca-workspaces------------hyk304-linebreak-1",
+  );
+});
+
+// ★HYK-280 §1 실측 -- 점(`.`)도 영숫자 아닌 문자로서 이 규칙의 부분집합
+// 이다(별도 취급 아님). 실물 증거: 숨김 하위 폴더
+// `hyk442-blocked-door-1\.harness-tmp-hookprobe`를 접은 실제 폴더 이름이
+// `...hyk442-blocked-door-1--harness-tmp-hookprobe`(대시 2개 연속 =
+// 경로 구분자 `\` + 점 `.`가 병합 없이 각각 치환된 것)였다(2026-09-23
+// `.claude-team/projects/` 실측).
+test("★HYK-280 §1 실측: 점(.)도 대시로 치환되고, 경로 구분자와 병합되지 않는다(연속 대시 2개)", () => {
+  assert.equal(
+    deriveClaudeProjectDirName(
+      "C:\\wt\\hyk442-blocked-door-1\\.harness-tmp-hookprobe",
+    ),
+    "C--wt-hyk442-blocked-door-1--harness-tmp-hookprobe",
+  );
+});
+
 test("collectRateLimitObservation: 세션 로그 디렉터리 자체가 없으면 정상(hitAtMs:null) -- 결손 아님", () => {
   withTempDir("rl-nodir-", (home) => {
     const r = collectRateLimitObservation(

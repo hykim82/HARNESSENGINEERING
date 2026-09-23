@@ -9,6 +9,7 @@ import {
   readFileSync,
   readdirSync,
   writeFileSync,
+  mkdirSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
@@ -68,6 +69,50 @@ test("★사례2(계속 진행): 매 폴링마다 늘어나면, 전체 관측 �
 });
 
 test("★사례1(아예 시작 못 함): 타임아웃까지 계속 0 -> NOT_STARTED", async () => {
+  const collectFn = () => ({ ok: true, totalBytes: 0 });
+  const result = await runDispatchStartConfirm({
+    repoRoot: "C:\\wt",
+    dispatchedAtMs: 0,
+    timeoutMs: 60000,
+    stallThresholdMs: 60000,
+    pollIntervalMs: 15000,
+    now: fakeClock(0, 15000),
+    sleepFn: instantSleep,
+    collectFn,
+  });
+  assert.equal(result.status, DISPATCH_START_CONFIRM_STATUS.NOT_STARTED);
+});
+
+// ★HYK-280(coder-task.md §3) -- collectFn이 매번 observationUnavailable:true
+// 를 실어 보내면(세션 기록 폴더 자체를 못 찾음 -- 폴더 이름 파생 규칙이
+// 실물과 어긋난 경우 등) 타임아웃까지 늘지 않아도 NOT_STARTED가 아니라
+// OBSERVATION_UNAVAILABLE로 확정된다("재배달 필요"와 다른 조치).
+test("★HYK-280: observationUnavailable:true가 계속 실리면 NOT_STARTED가 아니라 OBSERVATION_UNAVAILABLE로 확정된다", async () => {
+  const collectFn = () => ({
+    ok: true,
+    totalBytes: 0,
+    observationUnavailable: true,
+  });
+  const result = await runDispatchStartConfirm({
+    repoRoot: "C:\\wt",
+    dispatchedAtMs: 0,
+    timeoutMs: 60000,
+    stallThresholdMs: 60000,
+    pollIntervalMs: 15000,
+    now: fakeClock(0, 15000),
+    sleepFn: instantSleep,
+    collectFn,
+  });
+  assert.equal(
+    result.status,
+    DISPATCH_START_CONFIRM_STATUS.OBSERVATION_UNAVAILABLE,
+  );
+});
+
+// ★HYK-280 회귀 0 -- totalBytes가 그대로 0이지만 observationUnavailable이
+// 실리지 않으면(=폴더는 찾았는데 안에서 아무것도 안 늘었다) 기존과
+// 동일하게 NOT_STARTED다(위 §3 설계: NOT_STARTED는 없애지 않고 좁힌다).
+test("★HYK-280 회귀 0: observationUnavailable 없이 totalBytes만 0이면 여전히 NOT_STARTED다", async () => {
   const collectFn = () => ({ ok: true, totalBytes: 0 });
   const result = await runDispatchStartConfirm({
     repoRoot: "C:\\wt",
@@ -509,47 +554,71 @@ test("«아예 시작 못 함»과 «시작 후 멈춤»은 종료코드가 다�
   );
 });
 
-test("CLI end-to-end(spawn): NOT_STARTED면 종료코드 1 + notifyDir에 «재배달» 문구 통지 파일이 실제로 생긴다", async () => {
+// ★HYK-280(coder-task.md §3) -- 이 시험은 원래 "프로젝트 폴더 자체가
+// 없는" 경우로 NOT_STARTED("재배달")를 재현했다. §3 재설계 뒤로는 그
+// 정확히 그 시나리오(폴더 자체가 끝까지 없음)가 OBSERVATION_UNAVAILABLE
+// 로 갈린다(위 "CLI end-to-end(spawn): 프로젝트 폴더 자체가 끝까지
+// 없으면..." 시험이 그 갈래를 전담한다) -- 그래서 진짜 NOT_STARTED
+// («폴더는 찾았는데» 안에서 아무것도 안 늚)를 재현하도록 고쳤다: 관측
+// 경로(claudeHomeDir)를 직접 지정하고 그 아래 프로젝트 폴더를 미리
+// 만들어 두되(존재함) .jsonl은 하나도 안 둔다(성장 0).
+test("CLI end-to-end(spawn): 폴더는 있는데 안에서 아무것도 안 늘면 NOT_STARTED(종료코드 1) + notifyDir에 «재배달» 문구 통지 파일이 실제로 생긴다", async () => {
   await withTempDir("dsc-notify-notstarted-", async (notifyDir) => {
-    const { execFileSync } = await import("node:child_process");
-    let threw = null;
-    let stderr = "";
-    try {
-      execFileSync(
-        process.execPath,
-        [
-          CLI_PATH,
-          "--repo-root",
-          "C:\\definitely-not-a-real-worktree-zzz",
-          "--dispatched-at-ms",
-          String(Date.now() - 10 * 60 * 1000),
-          "--notify-dir",
-          notifyDir,
-          "--task-id",
-          "HYK-TEST-e2e",
-          "--timeout-ms",
-          "1",
-          "--stall-threshold-ms",
-          "1",
-          "--poll-interval-ms",
-          "1",
-        ],
-        { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
+    await withTempDir("dsc-notstarted-home-", async (claudeHomeDir) => {
+      const { execFileSync } = await import("node:child_process");
+      const { deriveClaudeProjectDirName } =
+        await import("./rate-limit-stall-adapter.mjs");
+      const repoRoot = "C:\\definitely-not-a-real-worktree-zzz";
+      const projectDir = join(
+        claudeHomeDir,
+        "projects",
+        deriveClaudeProjectDirName(repoRoot),
       );
-    } catch (err) {
-      threw = err;
-      stderr = err.stderr || "";
-    }
-    assert.ok(threw, "NOT_STARTED는 비0 종료코드여야 한다");
-    assert.equal(threw.status, 1);
-    assert.match(stderr, /NOT_STARTED/);
-    assert.match(stderr, /재배달/);
-    const files = readdirSync(notifyDir);
-    assert.equal(files.length, 1);
-    const text = readFileSync(join(notifyDir, files[0]), "utf8");
-    assert.match(text, /아예 시작 못 함/);
-    assert.match(text, /재배달/);
-    assert.match(text, /HYK-TEST-e2e/);
+      // ★폴더 자체는 실재한다(관측 가능) -- 다만 .jsonl이 0개라 총
+      // 바이트 수가 절대 안 늘어난다(진짜 "아예 시작 못 함").
+      mkdirSync(projectDir, { recursive: true });
+
+      let threw = null;
+      let stderr = "";
+      try {
+        execFileSync(
+          process.execPath,
+          [
+            CLI_PATH,
+            "--repo-root",
+            repoRoot,
+            "--dispatched-at-ms",
+            String(Date.now() - 10 * 60 * 1000),
+            "--notify-dir",
+            notifyDir,
+            "--task-id",
+            "HYK-TEST-e2e",
+            "--claude-home",
+            claudeHomeDir,
+            "--timeout-ms",
+            "1",
+            "--stall-threshold-ms",
+            "1",
+            "--poll-interval-ms",
+            "1",
+          ],
+          { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
+        );
+      } catch (err) {
+        threw = err;
+        stderr = err.stderr || "";
+      }
+      assert.ok(threw, "NOT_STARTED는 비0 종료코드여야 한다");
+      assert.equal(threw.status, 1);
+      assert.match(stderr, /NOT_STARTED/);
+      assert.match(stderr, /재배달/);
+      const files = readdirSync(notifyDir);
+      assert.equal(files.length, 1);
+      const text = readFileSync(join(notifyDir, files[0]), "utf8");
+      assert.match(text, /아예 시작 못 함/);
+      assert.match(text, /재배달/);
+      assert.match(text, /HYK-TEST-e2e/);
+    });
   });
 });
 
@@ -887,6 +956,72 @@ test("CLI end-to-end(spawn): --claude-home·--baseline-bytes 인자가 실제로
       assert.match(stderr, /STALLED_AFTER_START/);
       const files = readdirSync(notifyDir);
       assert.equal(files.length, 1);
+    });
+  });
+});
+
+// ★HYK-280(coder-task.md §3, §4) -- 이 CLI가 실제로 관측 경로(claudeHomeDir)
+// 아래에 프로젝트 폴더를 «단 한 번도 만들지 않은» 채로(=진짜 관측 불가
+// 상황, 예: 폴더 이름 파생 규칙이 실물과 어긋나 그 폴더를 못 찾는 경우와
+// 동형) 실제 CLI를 스폰하면, exit 1(NOT_STARTED)이 아니라 exit
+// 5(OBSERVATION_UNAVAILABLE)로 끝나고 stderr·통지 파일 문구 어디에도
+// "재배달"이 없어야 한다(§3 요구 그대로).
+test("CLI end-to-end(spawn): 프로젝트 폴더 자체가 끝까지 없으면 exit 1이 아니라 exit 5(OBSERVATION_UNAVAILABLE)로 끝나고 '재배달' 문구가 없다", async () => {
+  await withTempDir("dsc-notify-obsunavail-", async (notifyDir) => {
+    await withTempDir("dsc-obsunavail-home-", async (claudeHomeDir) => {
+      const { execFile } = await import("node:child_process");
+      const { promisify } = await import("node:util");
+      const execFileAsync = promisify(execFile);
+      const repoRoot = "C:\\wt\\hyk280-obsunavail-demo";
+      // ★의도적으로 claudeHomeDir 아래 아무 폴더도 안 만든다 -- 프로젝트
+      // 폴더가 «끝까지» 없어야 진짜 관측 불가 상황이 재현된다.
+
+      let threw = null;
+      let stderr = "";
+      try {
+        await execFileAsync(
+          process.execPath,
+          [
+            CLI_PATH,
+            "--repo-root",
+            repoRoot,
+            "--dispatched-at-ms",
+            String(Date.now()),
+            "--notify-dir",
+            notifyDir,
+            "--task-id",
+            "HYK-TEST-obsunavail",
+            "--claude-home",
+            claudeHomeDir,
+            "--timeout-ms",
+            String(CLI_TIMEOUT_MS),
+            "--stall-threshold-ms",
+            String(STALL_THRESHOLD_MS),
+            "--poll-interval-ms",
+            "40",
+          ],
+          { encoding: "utf8" },
+        );
+      } catch (err) {
+        threw = err;
+        stderr = err.stderr || "";
+      }
+      assert.ok(threw, "OBSERVATION_UNAVAILABLE도 비0 종료코드여야 한다");
+      assert.equal(threw.code, 5);
+      assert.match(stderr, /OBSERVATION_UNAVAILABLE/);
+      assert.doesNotMatch(
+        stderr,
+        /재배달/,
+        "관측 불가 갈래는 '재배달' 문구를 쓰지 않는다(§3 요구)",
+      );
+      const files = readdirSync(notifyDir);
+      assert.equal(files.length, 1);
+      const noticeText = readFileSync(join(notifyDir, files[0]), "utf8");
+      assert.doesNotMatch(
+        noticeText,
+        /재배달/,
+        "통지 파일 본문에도 '재배달' 문구가 없어야 한다(§3 요구)",
+      );
     });
   });
 });

@@ -36,6 +36,10 @@ test("collectTotalSessionBytes: 디렉터리 없음 -> 정상(totalBytes:0), 결
     totalBytes: 0,
     fileCount: 0,
     excludedSymlinkCount: 0,
+    // ★HYK-280(coder-task.md §3) -- 폴더 부재는 이제 observationUnavailable:
+    // true를 함께 실어 보낸다("아직 시작 안 함"과 "관측 자체가 안 됐다"를
+    // 구별하기 위함 -- 아래 별도 시험이 이 필드의 소비 쪽을 고정한다).
+    observationUnavailable: true,
   });
 });
 
