@@ -11,6 +11,7 @@ import {
   writeFileSync,
   readFileSync,
   rmSync,
+  existsSync,
 } from "node:fs";
 import { createHash } from "node:crypto";
 import { join, dirname } from "node:path";
@@ -411,7 +412,15 @@ test("변이 RED: '경고 판정 항상 통과'로 되돌리면 이 시험이 �
 
   // "미등록+override 무효" WARN 분기를 실제로 되돌린 항상-통과 변이본을
   // 시험한다.
-  withTempDir("seat-origin-warn-mutation-", (dir) => {
+  // HYK-460 CI 수리 라운드 7(§C-2ⓐ): withTempDir(...).then(...) 체인을
+  // 이 test() 콜백이 "반환"하지 않으면, node:test는 콜백이 동기적으로
+  // 끝났다고 보고 다음 시험으로 넘어간다 -- 그 뒤에 이 체인이 만드는
+  // dynamic import()가 실제로 실행되며, 그 시점에 던지는 assertion
+  // 실패는 "시험 실패"가 아니라 "시험 종료 후 unhandledRejection"으로만
+  // 잡혀 이 시험이 실제로는 아무것도 게이트하지 못한다(검토자 실측
+  // probe M1). return을 붙이면 이 체인이 test()의 대기 대상이 되어
+  // 단정이 시험 결과를 직접 뒤집는다(probe M2b).
+  return withTempDir("seat-origin-warn-mutation-", (dir) => {
     // seat-origin-warn.mjs imports ./seat-origin-registry.mjs -- stage a
     // real sibling copy so the mutant module can actually load.
     writeFileSync(
@@ -465,6 +474,31 @@ test("변이 RED: '경고 판정 항상 통과'로 되돌리면 이 시험이 �
       restoredSha,
       originalSha,
       "원본 파일은 이 시험 도중 절대 바뀌지 않아야 한다(합성 표적에서만 변이)",
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// HYK-460 CI 수리 라운드 7(§C-2ⓒ): withTempDir 헬퍼 자체의 계약을 직접
+// 구동하는 상시 가드. 위쪽의 "return" 수리(§C-2ⓐ)는 "이 파일의 시험 하나
+// (변이 RED)가 node:test에 자신의 비동기 값을 반환하는가"를 지키고, 이
+// 가드는 그것과 다른 것을 잡는다 -- "withTempDir이라는 헬퍼 자체가, fn이
+// 반환한 비동기 값이 아직 대기 중인 동안 그 디렉터리를 지우지 않는가"라는
+// 헬퍼의 계약이다. 앞으로 이 파일에 새 시험이 추가되어 withTempDir에
+// 비동기 fn을 넘기더라도(그 시험 쪽에서 return을 빠뜨리는 것과 무관하게),
+// 헬퍼 자신이 퇴행하면(예: 1c6b8d2 이전 구현으로 되돌아가면) 이 가드가
+// 그것을 직접 잡는다 -- ⓐ는 "호출부 실수", ⓒ는 "헬퍼 계약 퇴행"을 겨눈다.
+test("withTempDir: 비동기 fn이 정착하기 전에는 임시 디렉터리를 지우지 않는다", () => {
+  let aliveDuringAsync = null;
+  return withTempDir("guard-async-", (dir) =>
+    Promise.resolve().then(() => {
+      aliveDuringAsync = existsSync(dir);
+    }),
+  ).then(() => {
+    assert.equal(
+      aliveDuringAsync,
+      true,
+      "fn이 아직 대기 중인데 임시 디렉터리가 이미 지워졌다(HYK-460 CI 결함의 원인)",
     );
   });
 });
