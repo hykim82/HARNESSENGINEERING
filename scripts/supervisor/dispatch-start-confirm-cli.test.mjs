@@ -22,13 +22,39 @@ import {
 import { MAX_EFFECTIVE_STALL_THRESHOLD_MS } from "./dispatch-start-size-core.mjs";
 import { resolveChildProbeBudget } from "../check/child-probe-timeout-policy.mjs";
 
+// ★HYK-460 4R 검토 P2-2 수리(HYK-280 H1, scripts/check/hyk460-seat-origin-warn.test.mjs
+// 의 동일 수리와 같은 패턴) -- 옛 구현은 `fn(dir)`이 돌려준 프로미스를
+// 기다리지 않고 `finally`에서 곧바로 `rmSync`했다: `fn`이 async면 첫
+// `await`에서 제어를 넘기는 순간 임시 폴더가 지워져 버려, 그 뒤 콜백
+// 안의 파일 I/O가 이미 지워진 폴더를 상대로 실패하거나(CI에서만 드러나는
+// 비결정적 실패) 아래 "notifyDir를 파일로" 시험처럼 "이 헬퍼를 못 쓴다"
+// 는 회피 주석까지 낳았다. `fn(dir)`의 반환값이 thenable이면 정착
+// (resolve/reject)된 뒤에만 정리하고, 아니면 기존처럼 즉시 정리한다 --
+// 이 파일의 호출부는 전부 `await withTempDir(...)`라 동작이 안 바뀐다.
 function withTempDir(prefix, fn) {
   const dir = mkdtempSync(join(tmpdir(), prefix));
+  const cleanup = () => rmSync(dir, { recursive: true, force: true });
+  let result;
   try {
-    return fn(dir);
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
+    result = fn(dir);
+  } catch (err) {
+    cleanup();
+    throw err;
   }
+  if (result && typeof result.then === "function") {
+    return result.then(
+      (value) => {
+        cleanup();
+        return value;
+      },
+      (err) => {
+        cleanup();
+        throw err;
+      },
+    );
+  }
+  cleanup();
+  return result;
 }
 
 function fakeClock(startMs, stepMs) {
@@ -398,14 +424,15 @@ test("★HYK-378 5R 불변식 O(숫자로): INVALID_ARGS 결과가 나오면 run
 // 실 CLI 재현이 이제 exit 4를 유지하고, stderr에 스택이 아니라 사람이
 // 읽을 문장이 남는지 확인한다.
 test("★HYK-378 6R P1 재현+수리(불변식 P): notifyDir를 파일로 만들어 통지 쓰기를 실패시켜도 exit 4가 유지되고 stderr에 문장이 남는다(스택 아님)", async () => {
-  // ★`withTempDir`(위 정의)은 `fn(dir)`이 반환한 프로미스를 기다리지
-  // 않고 `finally`에서 곧바로 `rmSync`한다 -- 콜백이 첫 `await`에서
-  // 제어를 넘기는 순간 그 임시 폴더가 지워져 버려, "notifyDir 자체를
-  // 파일로 만들어 둔 채 자식 프로세스를 실행"하는 이 시험과는 안
-  // 맞는다(실측: 파일을 미리 만들어도 자식이 실행되기 전에 지워지고
-  // CLI의 `mkdirFn`이 새 빈 디렉터리를 만들어 버려 재현 자체가 안 됨).
-  // 그래서 이 시험만 임시 폴더 수명을 직접 관리한다(비동기 작업이 전부
-  // 끝난 뒤에만 정리).
+  // ★HYK-460 4R 검토 P2-2(HYK-280 H1)로 위 `withTempDir`는 이제
+  // `fn(dir)`이 반환한 프로미스를 정착까지 기다린 뒤에만 정리한다 --
+  // 이 시험이 작성될 당시(수리 전)는 콜백이 첫 `await`에서 제어를
+  // 넘기는 순간 임시 폴더가 지워져, "notifyDir 자체를 파일로 만들어
+  // 둔 채 자식 프로세스를 실행"하는 이 시험과 맞지 않았다(실측: 파일을
+  // 미리 만들어도 자식이 실행되기 전에 지워지고 CLI의 `mkdirFn`이 새
+  // 빈 디렉터리를 만들어 버려 재현 자체가 안 됨). 지금은 `withTempDir`
+  // 로도 재현될 것이나, 이 시험은 여전히 임시 폴더 수명을 직접
+  // 관리한다(위험 0 -- 굳이 바꿀 이유가 없다, 이 라운드 범위 밖).
   const scratchDir = mkdtempSync(join(tmpdir(), "dsc-notify-write-fail-"));
   try {
     // ★검토자 재현 그대로 -- notifyDir 자체를 디렉터리가 아니라 파일로
@@ -798,7 +825,22 @@ async function runStalledAfterStartOnce({ label }) {
       } finally {
         stopGrowing();
       }
-      return { threw, stderr, notifyDir };
+      // ★HYK-280 H1(withTempDir 수리) -- `withTempDir`가 이제 fn(dir)의
+      // thenable을 정착까지 «제대로» 기다린 뒤 정리하므로, 이 콜백이
+      // 반환한 뒤에는 `notifyDir`(바깥 withTempDir의 임시 폴더 자신)가
+      // 곧 지워진다. 옛(버그) 구현에서는 그 정리가 이 비동기 체인보다
+      // «먼저»(동기적으로, 자식 프로세스가 뜨기도 전에) 일어났는데,
+      // 자식 프로세스가 그 자리에 폴더를 다시 만들어(`writeFailureNotice`
+      // 의 `existsFn`/`mkdirFn`) 우연히 가려져 있었을 뿐이다 -- 호출부는
+      // 그 우연에 기대 반환된 뒤에 notifyDir을 읽었다. 이제는 그 경로
+      // 자체가 아니라 «내용»을 이 콜백(=withTempDir 정리 전) 안에서
+      // 미리 읽어 반환한다.
+      const noticeFiles = readdirSync(notifyDir);
+      const noticeText =
+        noticeFiles.length === 1
+          ? readFileSync(join(notifyDir, noticeFiles[0]), "utf8")
+          : null;
+      return { threw, stderr, noticeFiles, noticeText };
     });
   });
 }
@@ -1138,18 +1180,17 @@ test("CLI end-to-end(spawn): --claude-home에 codex류 폴더를 넘겨도 동�
 // 15000, 아래 spawn 인자·위 GROWTH_WINDOW_MS 참고). 아래 반복 실행
 // 시험이 이 시험을 5회 이상 연속 통과시킨다.
 test("CLI end-to-end(spawn, 부하-무관 동기화): 폴링 도중 계속 커지다 멈추면 종료코드 3 + notifyDir에 «좌석 확인» 문구 통지 파일이 실제로 생긴다", async () => {
-  const { threw, stderr, notifyDir } = await runStalledAfterStartOnce({
-    label: "single",
-  });
+  const { threw, stderr, noticeFiles, noticeText } =
+    await runStalledAfterStartOnce({
+      label: "single",
+    });
   assert.ok(threw, "STALLED_AFTER_START도 비0 종료코드여야 한다");
   assert.equal(threw.code, 3);
   assert.match(stderr, /STALLED_AFTER_START/);
   assert.match(stderr, /좌석 확인/);
-  const files = readdirSync(notifyDir);
-  assert.equal(files.length, 1);
-  const text = readFileSync(join(notifyDir, files[0]), "utf8");
-  assert.match(text, /시작 후 멈춤/);
-  assert.match(text, /좌석 상태를 직접 확인/);
+  assert.equal(noticeFiles.length, 1);
+  assert.match(noticeText, /시작 후 멈춤/);
+  assert.match(noticeText, /좌석 상태를 직접 확인/);
 });
 
 // ★4R 완료조건3(coder-task.md §4 항3) -- 같은 시험을 반복 실행해 전건
