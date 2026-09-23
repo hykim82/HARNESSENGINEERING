@@ -44,6 +44,7 @@ import { createHash } from "node:crypto";
 import { resolveResultTaskId } from "./relay-handshake.mjs";
 import { classifyTaskIdLabel } from "./dispatch-gate-decision.mjs";
 import { __probeResolveHeaderTaskId } from "./admission-completion-adapter.mjs";
+import { DISPATCH_GATE_DECISION_SIBLINGS } from "./dispatch-gate-decision-deps.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const RELAY_PATH = join(HERE, "relay-handshake.mjs");
@@ -60,20 +61,16 @@ const RELAY_SIBLINGS = [
   "child-probe-timeout-policy.mjs",
 ];
 
-// dispatch-gate-decision.mjs's own static import graph (dispatch-gate-
-// abort-wire.test.mjs's stageScriptsCheckDir already proves this exact
-// list is sufficient -- reused verbatim here).
-const DISPATCH_SIBLINGS = [
-  "dispatch-gate-decision-core.mjs",
-  "reject-streak.mjs",
-  "reject-streak-chain.mjs",
-  "consumption-receipt-core.mjs",
-  "dropped-at-stamp-core.mjs",
-  "abort-record-core.mjs",
-  "retirement-record-core.mjs",
-  "retirement-block-reason-shared.mjs",
-  "envelope-archive.mjs",
-];
+// dispatch-gate-decision.mjs's own static import graph. HYK-460-staging-
+// list-fix-3: this used to be a hand-maintained local copy (comment
+// preserved below for history) -- it silently fell out of sync when
+// seat-origin-warn.mjs/seat-origin-registry.mjs were added (HYK-460 축 C)
+// and this file wasn't updated. Now imported from the single source of
+// truth instead.
+//
+// (original comment) dispatch-gate-abort-wire.test.mjs's stageScriptsCheckDir
+// already proves this exact list is sufficient -- reused verbatim here.
+const DISPATCH_SIBLINGS = DISPATCH_GATE_DECISION_SIBLINGS;
 
 // admission-completion-adapter.mjs's own static import graph
 // (admission-completion-worktree-isolation.test.mjs's stageAdapterSiblingDeps

@@ -23,29 +23,21 @@ import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { writeLedger } from "./reject-streak.mjs";
+import { DISPATCH_GATE_DECISION_SIBLINGS as SIBLING_FILES } from "./dispatch-gate-decision-deps.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const SCRIPT_PATH = join(HERE, "dispatch-gate-decision.mjs");
 
-// hyk241-oneb-gate-mutation.test.mjs와 동일한 «고정 의존성 목록» 관례
-// (그 파일 헤더 주석 원문) -- dispatch-gate-decision.mjs가 정적 import하는
-// 형제 모듈 전부를 격리 사본 옆에 함께 둬야 mutant 모듈이 MODULE_NOT_FOUND
-// 없이 로드된다. 이 라운드는 새 정적 import를 추가하지 않았으므로(이미
-// import된 dispatch-gate-decision-core.mjs의 새 export 하나만 씀) 이
-// 목록은 그 파일의 것과 동일하다.
-const SIBLING_FILES = [
-  "dispatch-gate-decision-core.mjs",
-  "reject-streak.mjs",
-  "reject-streak-chain.mjs",
-  "consumption-receipt-core.mjs",
-  "dropped-at-stamp-core.mjs",
-  "abort-record-core.mjs",
-  "retirement-record-core.mjs",
-  "envelope-archive.mjs",
-  // HYK-457 §3-A: dispatch-gate-decision.mjs now also statically imports
-  // this (confirmRetirementBlockReason dedup).
-  "retirement-block-reason-shared.mjs",
-];
+// HYK-460-staging-list-fix-3: this used to be a hand-maintained local copy
+// of dispatch-gate-decision.mjs's sibling list (comment preserved below for
+// history) -- it silently fell out of sync when seat-origin-warn.mjs/
+// seat-origin-registry.mjs were added (HYK-460 축 C) and this file wasn't
+// updated. Now imported from the single source of truth instead.
+//
+// (original comment) hyk241-oneb-gate-mutation.test.mjs와 동일한 «고정
+// 의존성 목록» 관례 -- dispatch-gate-decision.mjs가 정적 import하는 형제
+// 모듈 전부를 격리 사본 옆에 함께 둬야 mutant 모듈이 MODULE_NOT_FOUND 없이
+// 로드된다.
 
 function stageScriptsCheckDir(rootDir, overrides) {
   const scriptsCheckDir = join(rootDir, "scripts", "check");

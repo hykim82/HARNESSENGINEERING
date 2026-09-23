@@ -70,6 +70,14 @@ const RETIREMENT_BLOCK_REASON_SHARED_PATH = join(
 // (MODULE_NOT_FOUND), same reasoning as CONSUMPTION_RECEIPT_CORE_PATH/
 // DROPPED_AT_STAMP_CORE_PATH/ABORT_RECORD_CORE_PATH above.
 const ENVELOPE_ARCHIVE_PATH = join(HERE, "envelope-archive.mjs");
+// HYK-460 축 C: dispatch-gate-decision.mjs now also statically imports
+// scripts/check/seat-origin-warn.mjs (the new, non-blocking pane-registry
+// warning axis), which itself imports seat-origin-registry.mjs -- this
+// isolated fixture's staged tree must include both or the mutant module
+// fails to load (MODULE_NOT_FOUND), same reasoning as every other *_PATH
+// addition above.
+const SEAT_ORIGIN_WARN_PATH = join(HERE, "seat-origin-warn.mjs");
+const SEAT_ORIGIN_REGISTRY_PATH = join(HERE, "seat-origin-registry.mjs");
 
 function assertExactlyOneMatch(src, target, label) {
   const count = src.split(target).length - 1;
@@ -121,6 +129,8 @@ function stageScriptsCheckDir(rootDir, overrides) {
       "utf8",
     ),
     "envelope-archive.mjs": readFileSync(ENVELOPE_ARCHIVE_PATH, "utf8"),
+    "seat-origin-warn.mjs": readFileSync(SEAT_ORIGIN_WARN_PATH, "utf8"),
+    "seat-origin-registry.mjs": readFileSync(SEAT_ORIGIN_REGISTRY_PATH, "utf8"),
     ...overrides,
   };
   for (const [name, content] of Object.entries(files)) {
