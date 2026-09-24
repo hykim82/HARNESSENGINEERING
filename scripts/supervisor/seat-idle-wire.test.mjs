@@ -61,13 +61,40 @@ const preDiffStat = execFileSync("git", ["diff", "HEAD", "--stat"], {
 function tmpDir(prefix) {
   return mkdtempSync(join(tmpdir(), prefix));
 }
+// ★HYK-460 4R 검토 P2-2 수리(HYK-280 H1, scripts/check/hyk460-seat-origin-warn.test.mjs
+// 의 동일 수리와 같은 패턴) -- 옛 구현은 `fn(dir)`이 돌려준 프로미스를
+// 기다리지 않고 `finally`에서 곧바로 `rmSync`했다: 이 파일의 "mutant"
+// 시험(async 콜백 + `await withTempDir(...)`)에서 그 콜백이 첫 `await`
+// 에서 제어를 넘기는 순간 임시 폴더가 지워져, 늦게 도착하는 파일 접근이
+// ENOENT로 실패할 수 있었다. `fn(dir)`의 반환값이 thenable이면 정착된
+// 뒤에만 정리하고, 아니면(이 파일의 압도적 다수인 동기 콜백) 기존처럼
+// 즉시 정리한다 -- 동기 호출부(대다수, await 없이 호출)의 동작은 한
+// 글자도 안 바뀐다(naive async/await면 동기 콜백에서의 동기 throw가
+// 미처리 프로미스 거부로 바뀌어 새 회귀를 만든다).
 function withTempDir(prefix, fn) {
   const dir = tmpDir(prefix);
+  const cleanup = () => rmSync(dir, { recursive: true, force: true });
+  let result;
   try {
-    return fn(dir);
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
+    result = fn(dir);
+  } catch (err) {
+    cleanup();
+    throw err;
   }
+  if (result && typeof result.then === "function") {
+    return result.then(
+      (value) => {
+        cleanup();
+        return value;
+      },
+      (err) => {
+        cleanup();
+        throw err;
+      },
+    );
+  }
+  cleanup();
+  return result;
 }
 function git(cwd, args) {
   return execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
