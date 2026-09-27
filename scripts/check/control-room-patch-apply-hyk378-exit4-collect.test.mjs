@@ -3,12 +3,9 @@
 // the committed "applied" fixture when run through
 // control-room-patch-apply.mjs? Mirrors control-room-patch-apply-hyk357-
 // 352-collect.test.mjs's shape (same tool, same byte-identity contract):
-// two units, both `replace` (dispatch-start-confirm-cli.mjs 4=INVALID_ARGS/
-// 5=OBSERVATION_UNAVAILABLE 를 미지의 코드로 취급하던 자리를 계약 위반/관측
-// 불가 플래그로 바꿔치기, and the diagnostic line + exit-4/exit-5 blocks --
-// ★HYK-280 후속: 두 번째 단위는 원래 `insert_after`였으나, 사람이 읽는
-// 진단 줄(앵커 자체) 텍스트를 exit 5 반영해 고쳐야 해서 `replace`로
-// 바뀌었다).
+// two units, one `replace` (dispatch-start-confirm-cli.mjs 4=INVALID_ARGS
+// 를 미지의 코드로 취급하던 자리를 계약 위반 플래그로 바꿔치기) and one
+// `insert_after` (그 플래그가 서면 exit 4로 끝나는 블록을 새로 붙임).
 //
 // If this test goes RED, the document (its two control-room-patch-unit
 // blocks) and the fixture have drifted apart -- see the patch doc's header
@@ -57,12 +54,8 @@ const EXPECTED_PATH = fileURLToPath(
 );
 const SOURCE_SHA256 =
   "c366edd32436942745321ff66c47d532fbbb216eae631e436289c95495bbaea0";
-// ★HYK-280 후속 -- exit 5(OBSERVATION_UNAVAILABLE) 등재로 applied fixture가
-// 바뀌면서 이 값도 재계산됐다(before fixture는 그대로라 SOURCE_SHA256은
-// 안 바뀐다). 이전 값(HYK-378 exit4-only)은
-// a0d40e760f05d139ed9fcdffa1fe99cf6291e21cba6ddc023ec2d3dd66a57dd3 였다.
 const EXPECTED_SHA256 =
-  "629e4672b55a47c0337aa219e426ab7ff19e479faa5ff3684ac0f9520de51fb7";
+  "a0d40e760f05d139ed9fcdffa1fe99cf6291e21cba6ddc023ec2d3dd66a57dd3";
 
 test("source fixture is still the SHA-256 this document's anchors were cut against (self-check before trusting the comparison below)", () => {
   const bytes = readFileSync(SOURCE_PATH);
@@ -77,17 +70,14 @@ test("expected fixture is still the byte-identical value this test was written a
   );
 });
 
-test("HYK-378-ps1-exit4-consume.md declares exactly 2 control-room-patch-unit blocks, both replace (HYK-280 후속: 두 번째도 replace로 바뀜)", () => {
+test("HYK-378-ps1-exit4-consume.md declares exactly 2 control-room-patch-unit blocks: one replace, one insert_after", () => {
   const docText = readFileSync(DOC_PATH, "utf8");
   const parsed = parsePatchDocument(docText);
   assert.equal(parsed.ok, true, parsed.reason);
   assert.equal(parsed.units.length, 2);
   const byId = Object.fromEntries(parsed.units.map((u) => [u.id, u]));
   assert.equal(byId["hyk378-exit4-capture"].mode, "replace");
-  // ★HYK-280 후속 -- 이 단위의 앵커(사람이 읽는 진단 줄)가 exit 5 를
-  // 반영해 텍스트 자체를 바꿔야 했으므로 insert_after로는 표현할 수 없어
-  // replace로 바뀌었다(문서 헤더 "HYK-280 후속" 절 참고).
-  assert.equal(byId["hyk378-exit4-fail-loud"].mode, "replace");
+  assert.equal(byId["hyk378-exit4-fail-loud"].mode, "insert_after");
 });
 
 test("★applying the document's units to the source snapshot reproduces the applied fixture BYTE-FOR-BYTE", () => {
