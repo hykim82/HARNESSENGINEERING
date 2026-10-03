@@ -402,6 +402,20 @@ export const MENTION_BASELINE = Object.freeze([
     reason:
       "SHA-256-pinned by 5 OTHER tests (control-room-patch-apply-hyk286-collect/hyk327-wire, dispatch-arg-contract-hyk327-applied-snapshot/snapshot, codex-snapshot-behavior) -- deliberately left at its original (pre-HYK-271) body; the post-HYK-271-synced copy lives in a separate dedicated file (see copies) so this shared one never has to change",
   },
+  {
+    relPath:
+      "scripts/check/fixtures/control-room-dispatch-worker-2026-09-28-hyk280-exit5-before.ps1.txt",
+    role: "reference",
+    reason:
+      "frozen full-file snapshot (today's real live control-room file, CRLF->LF normalized) for HYK-280's own patch-apply byte-identity tests -- target of this round's patch is confirmExit=5 message handling, a different region than Invoke-SeatProofGate; incidentally contains that function's live body verbatim because it is a whole-file copy, but no test compares that portion against canonical",
+  },
+  {
+    relPath:
+      "scripts/check/fixtures/control-room-dispatch-worker-2026-09-28-hyk280-exit5-applied.ps1.txt",
+    role: "reference",
+    reason:
+      "frozen fixture for HYK-280's own patch-apply byte-identity tests, not compared against seat-proof canonical anywhere",
+  },
 ]);
 
 function validateMentionBaseline(baseline) {
