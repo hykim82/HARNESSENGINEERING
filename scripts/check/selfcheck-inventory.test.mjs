@@ -818,6 +818,54 @@ test("(28v) findPosixShellSafe: no candidate works -> null (this is the honest-s
   assert.equal(found, null);
 });
 
+test("(28x2) findPosixShellSafe: a bare name resolving to a WSL launcher (System32 / WindowsApps) is never handed to the probe (HYK-439 §2-a)", () => {
+  const probedArgs = [];
+  const probe = (c) => {
+    probedArgs.push(c);
+    return false;
+  };
+  const gitBash = "C:\\Program Files\\Git\\usr\\bin\\bash.exe";
+  const found = findPosixShellSafe({
+    probe,
+    gitForWindowsCandidates: [],
+    resolveBareNames: () => [
+      "C:\\Windows\\System32\\bash.exe",
+      "C:\\Users\\Administrator\\AppData\\Local\\Microsoft\\WindowsApps\\bash.exe",
+    ],
+  });
+  assert.equal(found, null);
+  assert.deepEqual(
+    probedArgs,
+    [],
+    "the probe must be called 0 times for WSL launcher paths -- probing spawns them",
+  );
+  // Control: a non-WSL survivor is still probed, so the filter is not a blanket reject.
+  const found2 = findPosixShellSafe({
+    probe: (c) => (probedArgs.push(c), c === gitBash),
+    gitForWindowsCandidates: [],
+    resolveBareNames: () => ["C:\\Windows\\System32\\bash.exe", gitBash],
+  });
+  assert.equal(found2, gitBash);
+  assert.deepEqual(probedArgs, [gitBash]);
+});
+
+test("(28x3) findPosixShellSafe: nothing survives the filter and the probe -> null, with no WSL fallback (HYK-439 §2-b)", () => {
+  const found = findPosixShellSafe({
+    probe: () => false,
+    gitForWindowsCandidates: [],
+    resolveBareNames: () => ["C:\\Windows\\System32\\bash.exe"],
+  });
+  assert.equal(found, null);
+});
+
+test("(28x4) oracle skip wiring: SHELL_SKIP carries the honest skip reason exactly when no POSIX shell resolved, and is false otherwise (HYK-439 §2-b)", () => {
+  if (POSIX_SHELL === null) {
+    assert.match(SHELL_SKIP, /oracle skipped, honestly recorded/);
+  } else {
+    assert.equal(SHELL_SKIP, false);
+  }
+});
+
 test("(28w) oracle shell diagnostic: records which shell the real-Bash oracle used, so 28s/28t running-vs-skipping is auditable", () => {
   // Deliberately NOT an assertion that a shell exists -- a shell-less box keeps
   // the honest skip. This just surfaces the resolved path in the output so a
