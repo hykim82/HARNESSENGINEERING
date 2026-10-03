@@ -69,6 +69,43 @@ const instantSleep = async () => {};
 const THIS_DIR = dirname(fileURLToPath(import.meta.url));
 const CLI_PATH = join(THIS_DIR, "dispatch-start-confirm-cli.mjs");
 
+// ★HYK-280-exit5-reaches-human-1(coder-task.md §1-4 "산문만 뒤처졌다" --
+// 재발 방지 제안): 파일 머리의 종료코드 주석표가 정본
+// `DISPATCH_START_CONFIRM_EXIT_CODE`와 다시 어긋나는 것을 잡는다. 4와
+// 5가 "이 라운드 전부터" 빠져 있었는데도 아무 시험도 그걸 못 잡았던 것이
+// 이 시험의 이유다 -- 완벽한 구조 대조는 아니다(주석은 자유 산문이라
+// 기계로 완전 검증하기 어렵다), 대신 정본이 아는 모든 상태 이름이 머리
+// 주석 블록(첫 import 문 이전)에 리터럴로 등장하는지만 본다 -- 이름 하나가
+// 통째로 빠지는 사고(이번 라운드의 실제 결함 모양)는 이걸로 잡힌다.
+test("★HYK-280-exit5-reaches-human-1 §1-4 재발 방지: 헤더 종료코드 주석이 DISPATCH_START_CONFIRM_EXIT_CODE의 모든 상태 이름을 담고 있다(드리프트 방지)", () => {
+  const source = readFileSync(CLI_PATH, "utf8");
+  const firstImportIdx = source.indexOf("\nimport ");
+  const header = source.slice(0, firstImportIdx);
+  for (const statusName of Object.keys(DISPATCH_START_CONFIRM_STATUS)) {
+    assert.ok(
+      header.includes(statusName),
+      `header comment (before the first import) must mention status name '${statusName}' -- otherwise the exit-code table can silently drift from DISPATCH_START_CONFIRM_EXIT_CODE again (this round's original defect: 4 and 5 were both missing)`,
+    );
+  }
+  for (const code of Object.values(DISPATCH_START_CONFIRM_EXIT_CODE)) {
+    assert.ok(
+      header.includes(`- ${code} = `),
+      `header comment must document exit code ${code} with a "- ${code} = " bullet`,
+    );
+  }
+});
+
+// ★anti-vacuity (양방향): deleting a status name from the header must flip
+// the drift-detection test above RED, proving it is not vacuously true.
+test("★anti-vacuity (양방향, HYK-280 §1-4 재발 방지): 헤더에서 상태 이름 하나를 지우면 드리프트 감지가 빨개진다", () => {
+  const source = readFileSync(CLI_PATH, "utf8");
+  const firstImportIdx = source.indexOf("\nimport ");
+  const header = source.slice(0, firstImportIdx);
+  assert.ok(header.includes("OBSERVATION_UNAVAILABLE"));
+  const mutatedRed = header.replaceAll("OBSERVATION_UNAVAILABLE", "");
+  assert.ok(!mutatedRed.includes("OBSERVATION_UNAVAILABLE"));
+});
+
 test("★사례2(계속 진행): 매 폴링마다 늘어나면, 전체 관측 창 끝까지 폴링한 뒤 STARTED로 확정한다(2R처럼 두 번째 관측에서 조기 종료하지 않는다)", async () => {
   let call = 0;
   const collectFn = () => {
