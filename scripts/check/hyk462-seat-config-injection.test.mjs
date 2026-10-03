@@ -30,6 +30,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { findPosixShellSafe } from "./posix-shell-resolve.mjs";
 import {
   ensureRoleGuardHookSettings,
   ensureSafetyKeys,
@@ -498,32 +499,27 @@ const MEASURED_REAL_CLAUDE_PROJECT_DIR_FORM = fileURLToPath(
   .replace(/[\\/]$/, "")
   .replace(/\\/g, "/");
 
-// HYK-464 2R (coder-task.md §2-1-2): `where` (Windows) has no Linux
-// equivalent, so a `where`-only probe always fails on CI's Linux runners and
-// silently t.skip()s these tests there forever -- CI has never actually run
-// this file's live bash probes. `which` is the POSIX/Linux equivalent; try
-// `where` first (this repo's primary dev platform is Windows, where `which`
-// is not guaranteed to exist) and fall back to `which` so the same probe
-// resolves bash on both platforms instead of only detecting one.
-function probeBash(command) {
-  return spawnSync(command, ["bash"], { encoding: "utf8" });
-}
-
+// HYK-439 2R (coder-task.md §2): this used to take the literal first line of
+// `where bash` / `which bash` output with no Git-for-Windows priority and no
+// functional check (see git history for the prior `probeBash`/
+// `resolveBashPath` shape, HYK-464 2R). On a machine without Git-for-Windows
+// on PATH, that first line is Windows' own WSL launcher shim, and
+// `runHookCommand` below then actually spawned it -- silently waking the WSL
+// virtual machine (vmmem) as a side effect every time this file's tests ran
+// (HYK-439 §0-2). Bash resolution now goes through the shared, WSL-safe
+// resolver (posix-shell-resolve.mjs) instead, which still supports both
+// platforms (`where` on Windows, `which` as the POSIX/Linux CI fallback --
+// HYK-464 2R's original reason for trying both stays true) but never
+// resolves to, or spawns, a WSL launcher.
 function resolveBashPath(t) {
-  let bashProbe = probeBash("where");
-  if (bashProbe.status !== 0) {
-    bashProbe = probeBash("which");
-  }
-  if (bashProbe.status !== 0) {
+  const bashPath = findPosixShellSafe();
+  if (!bashPath) {
     t.skip(
-      "SKIP_REASON: no `bash` executable found on PATH via `where` or `which` -- Claude Code's own hook runner resolves $VAR-style commands through a POSIX shell, which this test emulates; layer-1 string checks above already cover the command's literal contents on any platform",
+      "SKIP_REASON: no functionally-verified, non-WSL POSIX shell found (neither a Git-for-Windows path nor a `where`/`which`-resolved `bash`/`sh` that isn't a WSL launcher) -- Claude Code's own hook runner resolves $VAR-style commands through a POSIX shell, which this test emulates; layer-1 string checks above already cover the command's literal contents on any platform, and falling back to a WSL shell here would reintroduce the exact silent-WSL-wake bug this resolver exists to avoid (HYK-439 §2)",
     );
     return null;
   }
-  return bashProbe.stdout
-    .split(/\r?\n/)
-    .map((l) => l.trim())
-    .filter(Boolean)[0];
+  return bashPath;
 }
 
 function runHookCommand({
