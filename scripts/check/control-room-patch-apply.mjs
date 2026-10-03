@@ -146,7 +146,20 @@ export function parsePatchDocument(docText) {
 function resolveSpans(units, source) {
   const spans = [];
   for (const unit of units) {
-    const first = source.indexOf(unit.anchor);
+    // HYK-472 (2026-10-03): 관제실 live 파일은 CRLF 로 저장돼 있다. 앵커는
+    // LF 로 적히므로 리터럴 매치가 실패하면, 같은 줄들이 CRLF 로 있는지
+    // 한 번 더 찾는다. 리터럴 매치가 성공하는 기존 경로는 한 글자도 안 바뀐다
+    // (LF 원본 fixture 전부, 그리고 CRLF 원본이라도 한 줄 앵커는 그대로 맞는다).
+    let needle = unit.anchor;
+    let crlfMatched = false;
+    if (source.indexOf(needle) === -1 && needle.includes("\n")) {
+      const crlfNeedle = needle.replace(/\n/g, "\r\n");
+      if (source.indexOf(crlfNeedle) !== -1) {
+        needle = crlfNeedle;
+        crlfMatched = true;
+      }
+    }
+    const first = source.indexOf(needle);
     if (first === -1) {
       return {
         ok: false,
@@ -154,7 +167,7 @@ function resolveSpans(units, source) {
         reason: `unit '${unit.id}': anchor text not found in source (source changed, or anchor transcribed incorrectly)`,
       };
     }
-    const second = source.indexOf(unit.anchor, first + 1);
+    const second = source.indexOf(needle, first + 1);
     if (second !== -1) {
       return {
         ok: false,
@@ -162,7 +175,12 @@ function resolveSpans(units, source) {
         reason: `unit '${unit.id}': anchor text matches more than once in source -- cannot apply unambiguously (fail-closed, not "first match wins")`,
       };
     }
-    spans.push({ unit, start: first, end: first + unit.anchor.length });
+    spans.push({
+      unit,
+      start: first,
+      end: first + needle.length,
+      crlfMatched,
+    });
   }
   return { ok: true, spans };
 }
@@ -206,12 +224,16 @@ export function applyPatchUnits(units, source) {
 
   const byStartDesc = [...spans].sort((a, b) => b.start - a.start);
   let result = source;
-  for (const { unit, start, end } of byStartDesc) {
+  for (const { unit, start, end, crlfMatched } of byStartDesc) {
+    // 내용의 줄끝은 매치된 구간의 줄끝을 따른다(CRLF 구간에 LF 내용을 섞지 않는다).
+    const content = crlfMatched
+      ? unit.content.replace(/\n/g, "\r\n")
+      : unit.content;
     if (unit.mode === "insert_after") {
-      result = result.slice(0, end) + unit.content + result.slice(end);
+      result = result.slice(0, end) + content + result.slice(end);
     } else {
       // mode === "replace" (only other value VALID_MODES allows)
-      result = result.slice(0, start) + unit.content + result.slice(end);
+      result = result.slice(0, start) + content + result.slice(end);
     }
   }
 
