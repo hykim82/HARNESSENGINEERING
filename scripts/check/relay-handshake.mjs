@@ -1776,12 +1776,24 @@ const MEASUREMENT_UNAVAILABLE_OOM_STATUS = "MEASUREMENT_UNAVAILABLE_OOM";
 // coder-task.md 1b_exec_line 그대로: `npm test; echo "exit=$?"`. 표지는
 // 콜론 뒤 인용이 표지로 오인된 과거 함정(HEAD_COMMIT_RE_G 주석 참조)을
 // 반복하지 않도록 칼럼 0의 단독 줄만 인정한다.
+//
+// HYK-411 exit-claim-mask: 2026-09-27 실사고 -- 결과 파일이 `sh
+// hooks/pre-commit`의 출력을 펜스 코드블록(```) «안에 인용»했는데, 그
+// 인용문 안의 `exit=0`도 칼럼 0 단독 줄이라 이 정규식이 «주장»으로
+// 오인했다(HYK-449/HYK-450 이 head_commit:/task_id:/verdict: 축에서 이미
+// 고친 것과 같은 모양의 함정, 이 축만 그 마스킹을 빠뜨리고 있었다).
+// resultClaimsRunnerResults/countRunnerExitClaims 둘 다 판정 «직전»에
+// maskQuotedMarkerRegions(펜스 코드블록 + HTML 주석을 길이 보존 공백으로
+// 지운다, 위 §HYK-449 정의)를 거친다 -- 새 정규식을 만들지 않고 이미 이
+// 파일이 import/re-export 하는 같은 판별식 한 벌을 재사용한다(§HYK-450②
+// 복제 금지 규율 그대로). 코드펜스 «밖»의 진짜 칼럼 0 단독 줄은 마스킹이
+// 손대지 않으므로 계속 그대로 잡힌다.
 const RUNNER_EXIT_CLAIM_RE = /^exit=\d+[ \t]*$/m;
 
 export function resultClaimsRunnerResults(resultContent) {
   return (
     typeof resultContent === "string" &&
-    RUNNER_EXIT_CLAIM_RE.test(resultContent)
+    RUNNER_EXIT_CLAIM_RE.test(maskQuotedMarkerRegions(resultContent))
   );
 }
 
@@ -1799,7 +1811,9 @@ const RUNNER_EXIT_CLAIM_RE_GLOBAL = new RegExp(
 
 export function countRunnerExitClaims(resultContent) {
   if (typeof resultContent !== "string") return 0;
-  const matches = resultContent.match(RUNNER_EXIT_CLAIM_RE_GLOBAL);
+  const matches = maskQuotedMarkerRegions(resultContent).match(
+    RUNNER_EXIT_CLAIM_RE_GLOBAL,
+  );
   return matches ? matches.length : 0;
 }
 

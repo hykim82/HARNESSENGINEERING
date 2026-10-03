@@ -169,6 +169,59 @@ test("(rr-0c) resultClaimsRunnerResults: 'exit=' 줄이 아예 없으면 false",
 });
 
 // ---------------------------------------------------------------------------
+// (rr-mask) HYK-411 exit-claim-mask -- 2026-09-27 실사고 고정.
+//
+// 픽스처 원문: D:\문서관리\하네스-관제실\증거\2026-09-27-HYK411-거짓양성-
+// 고정물-coder.md §5-4(그 라운드가 실제로 소비를 막은 정확한 그 문단만
+// 잘랐다 -- 나머지 문단은 이 정규식/마스킹 축과 무관해 픽스처 크기만
+// 키운다). 원문 그대로 인용했다(재구성/요약 아님).
+// ---------------------------------------------------------------------------
+const HYK411_QUOTED_EXIT_FIXTURE =
+  "⚠️ 주의: 이건 **버전관리된 `hooks/pre-commit`을 직접 실행**한 결과다.\n" +
+  "```\n" +
+  "$ sh hooks/pre-commit\n" +
+  "...\n" +
+  "workflow-push-branch-guard: .github/workflows/enforce.yml 의 push 트리거가 기본 가지(main)를 포함한다 (default branch source: git symbolic-ref refs/remotes/origin/HEAD)\n" +
+  "exit=0\n" +
+  "```\n" +
+  "실제 `git commit`이 부르는 `.git/hooks/pre-commit`(설치된 복사본)은 이번 라운드에서 재설치하지 않았다.\n";
+
+test("(rr-mask-a) resultClaimsRunnerResults: 코드펜스 «안»에 인용된 'exit=0'은 주장이 아니다(HYK-411 실사고 고정물, 수리 후 false)", () => {
+  assert.equal(resultClaimsRunnerResults(HYK411_QUOTED_EXIT_FIXTURE), false);
+});
+
+test("(rr-mask-b) 대조군: 같은 문서에 코드펜스 «밖» 칼럼 0 단독 'exit=0'이 하나 더 있으면 여전히 true(약화 아님)", () => {
+  const withRealClaim = `${HYK411_QUOTED_EXIT_FIXTURE}\nexit=0\n`;
+  assert.equal(resultClaimsRunnerResults(withRealClaim), true);
+});
+
+test("(rr-mask-c) countRunnerExitClaims: 인용된 'exit=0'은 0으로 센다(HYK-485 연속 계수 축도 같은 마스킹을 거친다)", () => {
+  assert.equal(countRunnerExitClaims(HYK411_QUOTED_EXIT_FIXTURE), 0);
+});
+
+test("(rr-mask-d) countRunnerExitClaims: 인용된 것 1개 + 진짜 것 2개가 섞이면 진짜 2개만 센다(과차단 아님 + 약화 아님을 같은 표본으로)", () => {
+  const mixed = `${HYK411_QUOTED_EXIT_FIXTURE}\nexit=0\nexit=0\n`;
+  assert.equal(countRunnerExitClaims(mixed), 2);
+});
+
+test("(rr-mask-e) checkRelayHandshake 종단: 인용만 있는 결과 파일은 runner-receipt.json 없이도 정상 소비된다(2026-09-27 실사고의 정확한 재현 -- 이 시험이 수리 «전» 코드에서는 RUNNER_RECEIPT_MISSING으로 실패해야 한다)", () => {
+  withFixtureDir("hyk411-quoted-claim-", (dir) => {
+    ensureGitHeadCommit(dir);
+    writeCoderRound(dir, { resultBody: HYK411_QUOTED_EXIT_FIXTURE });
+    const result = checkRelayHandshake({
+      role: "coder",
+      harnessDir: dir,
+      now: FIXED_NOW_MS,
+    });
+    assert.equal(
+      result.ok,
+      true,
+      `인용된 exit=0만 있는 라운드는 이 축의 영향을 받지 않아야 한다: ${result.reason}`,
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
 // (ⓓ) ★주장 없는 라운드는 영향 0 -- 과차단 금지의 핵심 표본. 영수증이
 // 없어도, runner_exit이 있어도 없어도 정상 소비돼야 한다.
 // ---------------------------------------------------------------------------
