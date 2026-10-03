@@ -416,6 +416,20 @@ export const MENTION_BASELINE = Object.freeze([
     reason:
       "frozen fixture for HYK-280's own patch-apply byte-identity tests, not compared against seat-proof canonical anywhere",
   },
+  {
+    relPath:
+      "scripts/check/fixtures/control-room-dispatch-worker-2026-10-03-hyk378-derive-before.ps1.txt",
+    role: "reference",
+    reason:
+      "frozen full-file snapshot (today's real live control-room file, CRLF->LF normalized) for HYK-378-ps1-derive's own patch-apply byte-identity tests -- target of this round's patch is the project-dir fold at the confirm block (outside Invoke-SeatProofGate); incidentally contains that function's live body verbatim because it is a whole-file copy, but no test compares that portion against canonical",
+  },
+  {
+    relPath:
+      "scripts/check/fixtures/control-room-dispatch-worker-2026-10-03-hyk378-derive-applied.ps1.txt",
+    role: "reference",
+    reason:
+      "frozen fixture for HYK-378-ps1-derive's own patch-apply byte-identity and effect tests, not compared against seat-proof canonical anywhere",
+  },
 ]);
 
 function validateMentionBaseline(baseline) {
