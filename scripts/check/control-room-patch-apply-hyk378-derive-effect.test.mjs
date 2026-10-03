@@ -24,6 +24,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   readFileSync,
+  existsSync,
   mkdtempSync,
   mkdirSync,
   copyFileSync,
@@ -257,9 +258,14 @@ test("B2: ★fail-loud -- the applied block on the spec's worktree literal (whic
   assert.equal(r.status, 0, r.stderr);
   assert.equal(field(r.stdout, "PROJECT_DIR"), "unavailable");
   assert.equal(field(r.stdout, "BASELINE_OK"), "False");
-  assert.ok(
-    String(field(r.stdout, "BASELINE_ERR") ?? "").includes("derive CLI exit="),
-    "the failure reason must name the derive CLI exit (not an empty string)",
+  // Two named arms may fire, depending on the platform's pwsh: the CLI runs and
+  // exits non-zero on Windows ("derive CLI exit="), or Join-Path refuses the
+  // drive-less literal before node is ever reached on Linux ("derive CLI
+  // launch: ..."). Both are NAMED reasons; the contract is "never empty".
+  assert.match(
+    String(field(r.stdout, "BASELINE_ERR") ?? ""),
+    /^derive CLI (exit=|launch: .+)/,
+    "the failure reason must name the derive CLI arm (exit or launch), never an empty string",
   );
   assert.equal(
     String(r.stdout).includes("CONFIRM_CALLED="),
@@ -308,6 +314,63 @@ test("B3: ★fail-loud -- when `node` itself cannot be launched (PATH emptied), 
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+// ★HYK-378 ps1-derive-consume-2 (CI 빨강 수리): Linux pwsh 가 `C:\…` 리터럴을
+// `Join-Path` 에서 「Cannot find drive」로 던진 조건을 Windows 에서 흉내 낸다.
+// 쓰이지 않는 드라이브 문자를 실행 시점에 찾아 워크트리로 준다(하드코딩 금지).
+// 하나도 못 찾으면 조용히 건너뛰지 않고 사유 문자열을 남긴다.
+// ⚠️정직 한계: Windows 에서 재현한 같은 메시지가 리눅스 pwsh 의 같은 원인이라는
+// 보장은 없다 -- 최종 증거는 CI 초록 1회다.
+function freeDriveLetter() {
+  for (let c = 90; c >= 68; c--) {
+    // Z..D, skip A-C (floppy/system)
+    const letter = String.fromCharCode(c);
+    if (!existsSync(`${letter}:\\`)) return letter;
+  }
+  return null;
+}
+
+test("B5: ★fail-loud on a DRIVE-LESS worktree path -- Join-Path throws 'Cannot find drive' (Linux CI shape, emulated on Windows with an unused drive letter found at runtime); the block must catch it on the launch arm, not crash", (t) => {
+  if (!PS_EXE) {
+    t.skip(NO_PS_SKIP_REASON);
+    return;
+  }
+  if (process.platform !== "win32") {
+    t.skip(
+      "SKIP_REASON: drive letters exist only on Windows; the Linux CI itself is the real drive-less condition and B2's literal already exercises it there",
+    );
+    return;
+  }
+  const letter = freeDriveLetter();
+  if (!letter) {
+    t.skip(
+      "SKIP_REASON: no unused drive letter D..Z found on this Windows host, so the drive-less shape cannot be emulated here -- CI is then the only verifier",
+    );
+    return;
+  }
+  const r = runHarness(
+    PS_EXE,
+    harnessFor({
+      block: extractDeriveBlock(applied),
+      worktree: `${letter}:\\hyk378-nodrive\\nocli`,
+      sessionHome: "C:\\synthetic-claude-home",
+    }),
+  );
+  assert.equal(
+    field(r.stdout, "REACHED_END"),
+    "yes",
+    `the block must not kill the harness with an exception: ${r.stderr}`,
+  );
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(field(r.stdout, "PROJECT_DIR"), "unavailable");
+  assert.equal(field(r.stdout, "BASELINE_OK"), "False");
+  assert.match(
+    String(field(r.stdout, "BASELINE_ERR") ?? ""),
+    /^derive CLI launch: .*(drive|ドライブ|드라이브|Cannot find)/i,
+    "the Join-Path refusal must land on the named launch arm",
+  );
+  assert.equal(String(r.stdout).includes("CONFIRM_CALLED="), false);
 });
 
 test("B4: ★discrimination -- the OLD line, run in PowerShell on the same non-ASCII input, yields the non-existent fold and NOT the real folder (so B1 would go RED on the old computation)", (t) => {

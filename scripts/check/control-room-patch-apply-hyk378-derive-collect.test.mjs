@@ -48,7 +48,7 @@ const SOURCE_SHA256 =
   "4a21432dcde7b924031a10ddef546daad54db3f6862bbb7e383f892d4c449091";
 // The applied fixture is the byte-identical result of applying the doc to SOURCE.
 const EXPECTED_SHA256 =
-  "96b8fb4f320a3157e490f8c1018918a840ae8217598b4c43964e68909bd538f4";
+  "a7f5f1404f57f067a64ee20f3de4f09632edb9921b6dc5eaf5738cfa293a533a";
 
 const DOC_TEXT = readFileSync(DOC_PATH, "utf8");
 const SOURCE = readFileSync(SOURCE_PATH, "utf8");

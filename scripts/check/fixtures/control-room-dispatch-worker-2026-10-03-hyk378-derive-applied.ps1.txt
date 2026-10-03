@@ -515,10 +515,11 @@ if ($confirmEngine -eq "claude") {
   # (scripts/supervisor/derive-claude-project-dir-cli.mjs -> deriveClaudeProjectDirName)가 낸다.
   # 옛 자체 치환은 비ASCII 글자를 접지 않아 「없는 폴더」를 가리켰다(거짓 「아예 시작 못 함」 통지).
   # 실패는 조용히 넘기지 않는다: 기준선을 미확인으로 두고 기존 COLLECTION_FAILED(2) 경로로 드러낸다.
-  $deriveCliPath = Join-Path $Worktree "scripts/supervisor/derive-claude-project-dir-cli.mjs"
+  # 경로 조립(Join-Path)도 try 안이다 -- 드라이브가 없는 워크트리 경로에서 던져도 예외로 죽지 않고 같은 실패 경로로 접힌다.
   $confirmProjectName = $null
   $deriveCliError = ""
   try {
+    $deriveCliPath = Join-Path $Worktree "scripts/supervisor/derive-claude-project-dir-cli.mjs"
     $deriveOut = & node $deriveCliPath $Worktree 2>&1
     $deriveExit = $LASTEXITCODE
     if ($deriveExit -eq 0 -and @($deriveOut).Count -eq 1) {

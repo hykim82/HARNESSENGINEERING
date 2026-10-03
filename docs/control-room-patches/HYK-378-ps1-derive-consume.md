@@ -41,6 +41,7 @@
 ## 4. node 가 PATH 에 없을 때 · 성능 (§1 ⓒⓓ)
 
 - **node 부재**: `& node` 가 명령 탐색 실패로 던지면 `catch` 가 받아 §3 경로로 간다(= 조용한 빈 값 아님). 시험 §6-3 이 이 경로를 pwsh 로 직접 구동해 확인한다.
+- **워크트리 경로 조립**(HYK-378 ps1-derive-consume-2 · CI 빨강 수리): `Join-Path $Worktree …` 가 **드라이브가 없는 경로**(예: Linux pwsh 의 `C:\…` 리터럴)에서 `Cannot find drive` 로 던지면 이전 자리는 `try` 밖이라 블록 전체가 예외로 죽었다(그 기계의 착수 확인이 영구 종료코드 1). 이제 `Join-Path` 도 `try` 안에 있어 같은 `catch` 경로(`derive CLI launch: …`)로 접힌다. 성공 팔의 `Join-Path (Join-Path $confirmSessionHome …)` 는 **그대로 둔다** — CLI 가 성공한 뒤에만 도달하고, 입력이 워크트리가 아니라 환경의 고정 세션 홈이라 「드라이브가 없는 워크트리」 축과 다른 입력 부류다(사유).
 - **성능**: 배달마다 node 프로세스가 1개 더 뜬다. 측정치는 결과 파일 §1 ⓓ 에 기록한다(시험 값이 아니라 측정 값).
 
 ## 5. 단위 — 기계 추출 대상 (1개 · `replace`)
@@ -57,10 +58,11 @@ mode: replace
   # (scripts/supervisor/derive-claude-project-dir-cli.mjs -> deriveClaudeProjectDirName)가 낸다.
   # 옛 자체 치환은 비ASCII 글자를 접지 않아 「없는 폴더」를 가리켰다(거짓 「아예 시작 못 함」 통지).
   # 실패는 조용히 넘기지 않는다: 기준선을 미확인으로 두고 기존 COLLECTION_FAILED(2) 경로로 드러낸다.
-  $deriveCliPath = Join-Path $Worktree "scripts/supervisor/derive-claude-project-dir-cli.mjs"
+  # 경로 조립(Join-Path)도 try 안이다 -- 드라이브가 없는 워크트리 경로에서 던져도 예외로 죽지 않고 같은 실패 경로로 접힌다.
   $confirmProjectName = $null
   $deriveCliError = ""
   try {
+    $deriveCliPath = Join-Path $Worktree "scripts/supervisor/derive-claude-project-dir-cli.mjs"
     $deriveOut = & node $deriveCliPath $Worktree 2>&1
     $deriveExit = $LASTEXITCODE
     if ($deriveExit -eq 0 -and @($deriveOut).Count -eq 1) {
