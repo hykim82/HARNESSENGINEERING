@@ -167,6 +167,10 @@ test("self-check: the extraction marker is unique in the applied fixture and sli
 function buildHarness(realTailSnippet, confirmExitValue) {
   return [
     "$ErrorActionPreference = 'Stop'",
+    // HYK-465 구멍①: stdout 단정을 위해 콘솔 출력을 UTF-8 로 고정한다(없으면
+    // 리다이렉트된 pwsh 가 CP949 로 써서 한글 문구가 깨져 읽힌다). 합성 하네스
+    // 전용이며 실물 dispatch-worker.ps1 은 건드리지 않는다.
+    "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8",
     "function Confirm-GetClaudeBytes { param($dir) return @{ ok = $false } }",
     `$confirmExit = ${confirmExitValue}`,
     "$confirmEngine = 'synthetic'",
@@ -274,6 +278,43 @@ test("★근본 행동(이 라운드의 핵심): confirmExit=5 (OBSERVATION_UNAV
     `expected exit 4 for confirmExit=5 (OBSERVATION_UNAVAILABLE stays in the exit-4 bucket by design), got status=${result.status} stderr=${result.stderr}`,
   );
 });
+
+// ★구멍 ①(HYK-465 · 검토자 실측 26/26 초록 건): 위 테스트는 종료코드 축만
+// 본다. 「구별되는 이름 있는 문구」가 실제로 나가는지는 stdout 으로 단정한다 --
+// spawnSync 는 이미 result.stdout 을 돌려준다(옛 「$LASTEXITCODE 로는 stdout 을
+// 못 본다」는 사유는 여기서 닫힌다). 문구는 Write-Host 로 나가므로 stdout 에 온다.
+test("★구멍①(stdout): confirmExit=5 -- 이름 있는 '관측 불가' 문구가 stdout 에 실제로 나간다(라우팅이 틀리면 빨개진다)", (t) => {
+  if (!PS_EXE) {
+    t.skip(NO_PS_SKIP_REASON);
+    return;
+  }
+  const result = runSyntheticTarget(5, PS_EXE);
+  assert.ok(
+    result.stdout.includes(NAMED_EXIT5_REPORT_SNIPPET),
+    `confirmExit=5 must print the named OBSERVATION_UNAVAILABLE report on stdout -- got stdout=${JSON.stringify(result.stdout)}`,
+  );
+});
+
+// confirmExit=4·99 -> 전용 문구가 나가면 안 된다(엉뚱한 코드가 5 전용 문구를
+// 가져가는 오독을 잡는다). 제네릭 문구는 그대로 나가야 한다.
+for (const exitCode of [4, 99]) {
+  test(`★구멍①(stdout): confirmExit=${exitCode} -- 이름 있는 '관측 불가' 문구는 stdout 에 나가지 않고 제네릭 문구가 나간다; PowerShell 없으면 SKIP_REASON과 함께 skip`, (t) => {
+    if (!PS_EXE) {
+      t.skip(NO_PS_SKIP_REASON);
+      return;
+    }
+    const result = runSyntheticTarget(exitCode, PS_EXE);
+    assert.equal(
+      result.stdout.includes(NAMED_EXIT5_REPORT_SNIPPET),
+      false,
+      `confirmExit=${exitCode} must NOT print the exit-5-only named report -- got stdout=${JSON.stringify(result.stdout)}`,
+    );
+    assert.ok(
+      result.stdout.includes(`관측된 종료코드=${exitCode}`),
+      `confirmExit=${exitCode} must print the generic contract-violation report -- got stdout=${JSON.stringify(result.stdout)}`,
+    );
+  });
+}
 
 // ---- ★되돌림 변이 (행동 축): reverting to the pre-this-round tail (HYK-378
 // generic-only, no eq-5 branch) must make confirmExit=5 fall into the
