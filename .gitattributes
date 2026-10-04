@@ -17,3 +17,11 @@ scripts/check/fixtures/control-room-orca-worker-seat-2026-08-29-hyk379-update-su
 # and its collect test.
 scripts/check/fixtures/control-room-orca-worker-seat-2026-09-10-hyk462-seat-config-injection-before.ps1.txt -text
 scripts/check/fixtures/control-room-orca-worker-seat-2026-09-10-hyk462-seat-config-injection-applied.ps1.txt -text
+
+# HYK-472: byte-for-byte CRLF copies of the live D:\문서관리\하네스-관제실\dispatch-worker.ps1
+# (CRLF, 802 lines). The before fixture is the live file itself and the applied
+# fixture is the tool output; their SHA-256 pins (collect test) and the reverse
+# round trip are computed against the CRLF bytes. Same reasoning as HYK-379/HYK-462
+# above: `-text` keeps a checkout from silently rewriting them to LF.
+scripts/check/fixtures/control-room-dispatch-worker-2026-10-03-hyk472-engine-wait-before.ps1.txt -text
+scripts/check/fixtures/control-room-dispatch-worker-2026-10-03-hyk472-engine-wait-applied.ps1.txt -text
