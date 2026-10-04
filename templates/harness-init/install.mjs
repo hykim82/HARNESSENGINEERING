@@ -1084,9 +1084,43 @@ export const ENFORCEMENT_RELAY_FILES = [
   "dispatch-bound-seat-proof.test.mjs",
 ];
 
+// HYK-209-installer-closure-derive-1 (2R): the scripts/supervisor/*.mjs copy
+// list. Closure-tested by install-copylist-closure.test.mjs alongside the two
+// lists above, but copied to scripts/supervisor/<name> -- NOT to
+// scripts/check or scripts/relay -- because derive-claude-project-dir-cli.mjs
+// decides whether it is the real entry point by
+// endsWith("scripts/supervisor/derive-claude-project-dir-cli.mjs"); a wrong
+// install path would make that CLI refuse to run. Exactly these two files:
+// the CLI and its one relative import (rate-limit-stall-adapter.mjs, the
+// canonical deriveClaudeProjectDirName). Any other scripts/supervisor/* file
+// is a separate scope decision, not added here.
+export const ENFORCEMENT_SUPERVISOR_FILES = [
+  "derive-claude-project-dir-cli.mjs",
+  "rate-limit-stall-adapter.mjs",
+];
+
+// Presence requirement, not an import-closure rule: the 관제실 dispatch
+// pipeline (dispatch-worker.ps1, outside this repo) invokes
+// derive-claude-project-dir-cli.mjs BY PATH, and nothing in this repo imports
+// it -- so the import-closure check alone cannot see its absence. Every name
+// here must appear in ENFORCEMENT_SUPERVISOR_FILES.
+export const ENFORCEMENT_SUPERVISOR_REQUIRED = [
+  "derive-claude-project-dir-cli.mjs",
+];
+
+// (repo source, installed destination) pairs for ENFORCEMENT_SUPERVISOR_FILES.
+// Exported so the path contract is testable without running the installer.
+export function supervisorCopyPairs(targetRepoPath) {
+  return ENFORCEMENT_SUPERVISOR_FILES.map((name) => ({
+    src: path.join(REPO_ROOT, "scripts", "supervisor", name),
+    dst: path.join(targetRepoPath, "scripts", "supervisor", name),
+  }));
+}
+
 // Extracted from main() (quality-check: keeps main()'s own line-count/
 // complexity under the repo's ESLint ceiling) -- copies the local git hooks
-// plus every scripts/check/scripts/relay file that hook wiring depends on.
+// plus every scripts/check/scripts/relay/scripts/supervisor file that hook
+// wiring and the supervisor entry point depend on.
 // Both profiles get these; they are local-only (no server dependency).
 function installEnforcementScripts(params, targetRepoPath, { dryRun }) {
   copyRawFile(
@@ -1113,6 +1147,9 @@ function installEnforcementScripts(params, targetRepoPath, { dryRun }) {
       path.join(targetRepoPath, "scripts", "relay", name),
       { dryRun, executable: false },
     );
+  }
+  for (const { src, dst } of supervisorCopyPairs(targetRepoPath)) {
+    copyRawFile(src, dst, { dryRun, executable: false });
   }
 }
 
@@ -1417,11 +1454,15 @@ function installDispatchReceiptPointer(params, targetRepoPath, { dryRun }) {
 // install of the unattended layer itself. None of the files this manifest
 // cites (scripts/supervisor/*, scripts/relay/adapters/orca-adapter.mjs,
 // scripts/check/{linear-sync,pm-guard,selfcheck,selfcheck-inventory}.mjs,
-// scripts/supervisor/approver-allowlist.json) are copied by this
-// installer, in this round or any prior one — a repo installed today with
-// this manifest present still has zero unattended/parallel-layer
-// enforcement. solo-full only: team-local has no control room, no
-// scheduler, no PM lane, so it has no unattended layer for this manifest
+// scripts/supervisor/approver-allowlist.json) is copied by this installer,
+// with ONE exception added by HYK-209-installer-closure-derive-1 (2R): the
+// two files in ENFORCEMENT_SUPERVISOR_FILES (derive-claude-project-dir-cli
+// .mjs and its rate-limit-stall-adapter.mjs import) now are. Everything else
+// this manifest cites is still not copied, so a repo installed today with
+// this manifest present has only those two supervisor files of the
+// unattended/parallel layer, and none of the rest. solo-full only:
+// team-local has no control room, no scheduler, no PM lane, so it has no
+// unattended layer for this manifest
 // to describe.
 // buildSourceHardcodes/buildKnownGaps -- extracted from
 // installUnattendedLayerManifest (ESLint max-lines-per-function ceiling);
@@ -1489,7 +1530,7 @@ function buildKnownGaps() {
       line: 3,
       constant: "global_hard_cap",
       value: 2,
-      gap: "커밋된 값 파일(코드 상수는 아니다, concurrency-cap-adapter.mjs가 fail-closed로 읽음)이지만 install.mjs는 scripts/supervisor/*를 전혀 복사하지 않으므로 이 파일 자체가 이식 대상 밖이다. 값의 출처는 한용(PKT-20260807-SUPERVISOR-CONCURRENCY-ADDENDUM-V1 S-5)이지 이 설치기가 아니다.",
+      gap: "커밋된 값 파일(코드 상수는 아니다, concurrency-cap-adapter.mjs가 fail-closed로 읽음)이지만 install.mjs는 scripts/supervisor/* 중 ENFORCEMENT_SUPERVISOR_FILES 두 개 외에는 복사하지 않으므로 이 파일 자체가 이식 대상 밖이다. 값의 출처는 한용(PKT-20260807-SUPERVISOR-CONCURRENCY-ADDENDUM-V1 S-5)이지 이 설치기가 아니다.",
     },
   ];
 }
@@ -1506,7 +1547,7 @@ function installUnattendedLayerManifest(params, targetRepoPath, { dryRun }) {
     return;
   }
   const manifest = {
-    note: "이 파일이 존재해도 무인·병렬 층(scripts/supervisor/*, scripts/relay/adapters/orca-adapter.mjs 등)은 이 저장소에 설치되지 않았다 -- install.mjs는 그 파일들을 아직 복사하지 않는다(HYK-209 §3 '내용물 조립 0'). 이 값들은 그 조립 단계가 실제로 시작될 때 쓰일 자리표 값의 기록일 뿐이다.",
+    note: "이 파일이 존재해도 무인·병렬 층(scripts/supervisor/* 중 derive-claude-project-dir-cli.mjs·rate-limit-stall-adapter.mjs 두 개를 뺀 나머지, scripts/relay/adapters/orca-adapter.mjs 등)은 이 저장소에 설치되지 않았다 -- install.mjs는 그 나머지 파일들을 아직 복사하지 않는다(HYK-209 §3 '내용물 조립 0'). 이 값들은 그 조립 단계가 실제로 시작될 때 쓰일 자리표 값의 기록일 뿐이다.",
     placeholders: {
       NOTIFY_DIR: params.notifyDir,
       APPROVER_LOGIN: params.approverLogin,
