@@ -204,6 +204,26 @@ test("(rr-mask-d) countRunnerExitClaims: 인용된 것 1개 + 진짜 것 2개가
   assert.equal(countRunnerExitClaims(mixed), 2);
 });
 
+// (rr-unclosed) HYK-411 2차 -- 닫히지 않은 펜스는 «문서 끝까지» 마스킹하면
+// 진짜 주장이 조용히 안 세어진다(fail-open, 극성이 뒤집힌 축). 세 칸을 같은
+// 표본 모양으로 고정한다: ⓐ닫힌 펜스 안 인용(안 센다) ⓑ닫히지 않은 펜스
+// 뒤 진짜 주장(센다) ⓒ펜스 밖 진짜 주장(센다).
+test("(rr-unclosed-a) 닫힌 펜스 안의 인용 'exit=0'은 안 센다(ⓐ)", () => {
+  assert.equal(countRunnerExitClaims("```\nexit=0\n```\n"), 0);
+  assert.equal(resultClaimsRunnerResults("```\nexit=0\n```\n"), false);
+});
+
+test("(rr-unclosed-b) 닫히지 않은 펜스 «뒤»의 진짜 주장 두 개는 센다(ⓑ · 옛 마스킹이면 0 이 된다)", () => {
+  const unclosedThenClaims = "```\n$ sh hooks/pre-commit\nexit=0\nexit=0\n";
+  assert.equal(countRunnerExitClaims(unclosedThenClaims), 2);
+  assert.equal(resultClaimsRunnerResults(unclosedThenClaims), true);
+});
+
+test("(rr-unclosed-c) 펜스 밖의 진짜 주장은 센다(ⓒ)", () => {
+  assert.equal(countRunnerExitClaims("```\nquoted\n```\nexit=0\n"), 1);
+  assert.equal(resultClaimsRunnerResults("```\nquoted\n```\nexit=0\n"), true);
+});
+
 test("(rr-mask-e) checkRelayHandshake 종단: 인용만 있는 결과 파일은 runner-receipt.json 없이도 정상 소비된다(2026-09-27 실사고의 정확한 재현 -- 이 시험이 수리 «전» 코드에서는 RUNNER_RECEIPT_MISSING으로 실패해야 한다)", () => {
   withFixtureDir("hyk411-quoted-claim-", (dir) => {
     ensureGitHeadCommit(dir);

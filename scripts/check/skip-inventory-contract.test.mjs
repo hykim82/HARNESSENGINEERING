@@ -115,16 +115,21 @@ const SETTINGS_LOCAL_PRESENT =
 // own call so a divergence between the two guards' presence checks (a real
 // bug: they should always agree) also goes red.
 
-// Runs exactly the four affected files (never the full 286-file
+// Runs exactly the affected files (HYK-465 ③: five, incl. hyk462) (never the full 286-file
 // CI-canonical set -- this is a narrow, fast, targeted probe, not the
 // isolated-suite-runner this task's coder-task.md §4 gates behind ORCH
 // permission) inside THIS worktree with the TAP reporter pinned (HYK-359 4R
 // precedent: Node's default reporter is version-dependent, TAP is not).
+// HYK-465 구멍③(HYK-439): hyk462 는 POSIX 셸이 없으면 bash 의존 시험 4개를
+// 조용히 skip 한다. 그 skip 이 «새 감시 밖 건너뜀」이 되지 않도록 여기 넣어,
+// 어떤 skip 이든 EXPECTATIONS 에 이름이 없으면 이 계약이 빨개지게 한다(그 상태를
+// 시끄럽게 만든다 -- 허용하는 것이 아니다).
 const AFFECTED_FILES = [
   "scripts/check/nc-githook-install.test.mjs",
   "scripts/check/nc-gitleaks.test.mjs",
   "scripts/check/seat-proof-wrapper-shape.test.mjs",
   "scripts/check/selfcheck-inventory.test.mjs",
+  "scripts/check/hyk462-seat-config-injection.test.mjs",
 ];
 
 // HYK-477 §1-1: this spawn previously carried no `--test-concurrency` flag

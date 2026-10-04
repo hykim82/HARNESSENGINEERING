@@ -39,103 +39,26 @@ import {
 } from "./selfcheck-inventory.mjs";
 import * as selfcheckInventoryModule from "./selfcheck-inventory.mjs";
 import { fileURLToPath } from "node:url";
+import {
+  findPosixShellSafe,
+  functionalShellProbe,
+} from "./posix-shell-resolve.mjs";
 
-// --- POSIX shell discovery (HYK-129 coder-9/10, review-8/9 defect 2/1) ------
-// History: coder-8 hardcoded `sh`; coder-9 added a `-c exit 0` probe with a
-// Git-for-Windows fallback. review-9 found that `-c exit 0` is too weak: in
-// the codex review sandbox it selected `C:\Windows\System32\bash.exe` (WSL),
-// which passes `exit 0` but does NOT share the Windows filesystem semantics
-// the oracle relies on -- the glob didn't expand against the Windows-path
-// fixture and the lingering process made rmSync throw EPERM, so 28s/28t RAN
-// but FAILED (2 failures unseen on the Claude host).
+// --- POSIX shell discovery (HYK-439 §1: the rule lives ONCE, in posix-shell-resolve.mjs) ---
+// HYK-129 coder-9/10 and review-8/9 built this resolver here (a functional probe
+// plus Git-for-Windows priority). HYK-439 §0-2 found the same rule copied into
+// hyk462-seat-config-injection.test.mjs, and PR #293 moved it into the shared
+// helper. This file's copy (the candidate list, the functional probe, the
+// `where` lookup and the resolver) is removed in favour of that single source,
+// so a fix to the rule reaches every consumer and reverting the helper turns the
+// test files that depend on it red together.
 //
-// Fix (coder-10): the probe is now FUNCTIONAL, not existence-only. A candidate
-// is accepted only if, in a throwaway fixture dir, it (1) expands
-// `scripts/check/*.test.mjs` POSIX-style into argv AND (2) releases the cwd so
-// the fixture deletes without EPERM. WSL bash fails both, so it is rejected no
-// matter where it sits on PATH. Candidate order additionally puts the
-// Git-for-Windows shells ahead of a bare PATH `bash` (which on Windows is
-// usually WSL), but ORDER ALONE IS NOT RELIED ON -- the functional probe is
-// the real gate, since another environment could surface a broken shell under
-// a different name. All still-injectable (`probe`/`candidates`) so the unit
-// tests below pin the logic without needing any real shell.
-function whereResults(names) {
-  // Windows `where` (absent on Linux CI -> throws -> []); on ubuntu the PATH
-  // name `sh` already succeeds as candidate 1 so this isn't needed there.
-  const found = [];
-  for (const name of names) {
-    try {
-      const out = execFileSync("where", [name], {
-        encoding: "utf8",
-        stdio: ["ignore", "pipe", "ignore"],
-      });
-      for (const l of out.split(/\r?\n/)) if (l.trim()) found.push(l.trim());
-    } catch {
-      /* `where` missing or no match -> ignore */
-    }
-  }
-  return found;
-}
-
-const GIT_FOR_WINDOWS_SHELLS = [
-  "C:\\Program Files\\Git\\usr\\bin\\sh.exe",
-  "C:\\Program Files\\Git\\bin\\bash.exe",
-  "C:\\Program Files\\Git\\usr\\bin\\bash.exe",
-  "C:\\Program Files (x86)\\Git\\usr\\bin\\sh.exe",
-  "C:\\Program Files (x86)\\Git\\bin\\bash.exe",
-];
-
-// Functional probe (review-9 defect 1): prove the candidate behaves like a
-// POSIX shell on THIS filesystem -- glob expansion + clean cwd release --
-// rather than merely existing. This is exactly what WSL bash fails.
-function functionalShellProbe(cmd) {
-  const dir = mkdtempSync(join(tmpdir(), "shell-probe-"));
-  let ok;
-  try {
-    mkdirSync(join(dir, "scripts", "check"), { recursive: true });
-    for (const f of ["a.test.mjs", "b.test.mjs"])
-      writeFileSync(join(dir, "scripts", "check", f), "//\n", "utf8");
-    // (1) the glob must expand POSIX-style to both fixture files in argv
-    const script = `set -- scripts/check/*.test.mjs\nfor a in "$@"; do echo "ARG:$a"; done`;
-    const out = execFileSync(cmd, ["-c", script], {
-      cwd: dir,
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"],
-    });
-    const argv = out
-      .split("\n")
-      .filter((l) => l.startsWith("ARG:"))
-      .map((l) => l.slice(4));
-    ok = ["a.test.mjs", "b.test.mjs"].every((f) =>
-      argv.some((a) => a.endsWith(f)),
-    );
-  } catch {
-    ok = false; // missing binary, non-shell, or glob machinery threw
-  }
-  // (2) cleanup must succeed without EPERM -- WSL bash keeps a handle on the
-  //     Windows cwd, so this throws and disqualifies the candidate.
-  try {
-    rmSync(dir, { recursive: true, force: true });
-  } catch {
-    ok = false;
-  }
-  return ok;
-}
-
-function findPosixShell({ probe = functionalShellProbe, candidates } = {}) {
-  const list = candidates ?? [
-    "sh",
-    ...GIT_FOR_WINDOWS_SHELLS,
-    "bash",
-    ...whereResults(["sh", "bash"]),
-  ];
-  for (const cand of list) {
-    if (probe(cand)) return cand;
-  }
-  return null;
-}
-
-const POSIX_SHELL = findPosixShell();
+// Ordering and filtering are unchanged in intent: Git-for-Windows paths first
+// (existence-checked, then functionally probed), then bare `sh`/`bash` resolved
+// to absolute paths with WSL-launcher paths dropped BEFORE any probe. A bare name
+// is never spawned directly. There is no WSL fallback: nothing surviving gives
+// `null`, and the oracle skips honestly (SHELL_SKIP below).
+const POSIX_SHELL = findPosixShellSafe();
 const SHELL_SKIP = POSIX_SHELL
   ? false
   : "no functionally-verified POSIX shell (glob-expanding + clean cwd release) found on PATH, via `where`, or at any Git-for-Windows path -- oracle skipped, honestly recorded";
@@ -849,31 +772,98 @@ test(
   },
 );
 
-// --- POSIX shell discovery (review-8 defect 2): findPosixShell must be pinned
+// --- POSIX shell discovery (review-8 defect 2): findPosixShellSafe must be pinned
 // with injected probe/candidates so it is testable without a real shell, and
 // the oracle must report which shell (if any) it resolved -- so a silent skip
-// (coder-8's failure) becomes visible in the test output. ---
+// (coder-8's failure) becomes visible in the test output. The injection surface
+// is now split (fixed Git-for-Windows paths vs bare names resolved later), so
+// "first candidate wins" is pinned on the Git-for-Windows list. ---
 
-test("(28u) findPosixShell: returns the first candidate the probe accepts, and stops probing after it", () => {
+test("(28u) findPosixShellSafe: returns the first Git-for-Windows candidate the probe accepts, and stops probing (bare names are never resolved)", () => {
   const probed = [];
   const probe = (c) => {
     probed.push(c);
     return c === "/opt/git/usr/bin/bash";
   };
-  const found = findPosixShell({
+  let bareResolved = false;
+  const found = findPosixShellSafe({
     probe,
-    candidates: ["sh", "bash", "/opt/git/usr/bin/bash", "never-reached"],
+    gitForWindowsCandidates: [
+      "/opt/git/usr/sh",
+      "/opt/git/usr/bin/bash",
+      "never-reached",
+    ],
+    existsCheck: () => true,
+    resolveBareNames: () => {
+      bareResolved = true;
+      return ["never-reached-bare"];
+    },
   });
   assert.equal(found, "/opt/git/usr/bin/bash");
-  assert.deepEqual(probed, ["sh", "bash", "/opt/git/usr/bin/bash"]);
+  assert.deepEqual(probed, ["/opt/git/usr/sh", "/opt/git/usr/bin/bash"]);
+  assert.equal(
+    bareResolved,
+    false,
+    "bare names must not be resolved once a Git-for-Windows shell wins",
+  );
 });
 
-test("(28v) findPosixShell: no candidate works -> null (this is the honest-skip path, not a crash)", () => {
-  const found = findPosixShell({
+test("(28v) findPosixShellSafe: no candidate works -> null (this is the honest-skip path, not a crash)", () => {
+  const found = findPosixShellSafe({
     probe: () => false,
-    candidates: ["sh", "bash", "C:\\Program Files\\Git\\usr\\bin\\sh.exe"],
+    gitForWindowsCandidates: ["C:\\Program Files\\Git\\usr\\bin\\sh.exe"],
+    existsCheck: () => true,
+    resolveBareNames: () => ["C:\\Program Files\\Git\\usr\\bin\\bash.exe"],
   });
   assert.equal(found, null);
+});
+
+test("(28x2) findPosixShellSafe: a bare name resolving to a WSL launcher (System32 / WindowsApps) is never handed to the probe (HYK-439 §2-a)", () => {
+  const probedArgs = [];
+  const probe = (c) => {
+    probedArgs.push(c);
+    return false;
+  };
+  const gitBash = "C:\\Program Files\\Git\\usr\\bin\\bash.exe";
+  const found = findPosixShellSafe({
+    probe,
+    gitForWindowsCandidates: [],
+    resolveBareNames: () => [
+      "C:\\Windows\\System32\\bash.exe",
+      "C:\\Users\\Administrator\\AppData\\Local\\Microsoft\\WindowsApps\\bash.exe",
+    ],
+  });
+  assert.equal(found, null);
+  assert.deepEqual(
+    probedArgs,
+    [],
+    "the probe must be called 0 times for WSL launcher paths -- probing spawns them",
+  );
+  // Control: a non-WSL survivor is still probed, so the filter is not a blanket reject.
+  const found2 = findPosixShellSafe({
+    probe: (c) => (probedArgs.push(c), c === gitBash),
+    gitForWindowsCandidates: [],
+    resolveBareNames: () => ["C:\\Windows\\System32\\bash.exe", gitBash],
+  });
+  assert.equal(found2, gitBash);
+  assert.deepEqual(probedArgs, [gitBash]);
+});
+
+test("(28x3) findPosixShellSafe: nothing survives the filter and the probe -> null, with no WSL fallback (HYK-439 §2-b)", () => {
+  const found = findPosixShellSafe({
+    probe: () => false,
+    gitForWindowsCandidates: [],
+    resolveBareNames: () => ["C:\\Windows\\System32\\bash.exe"],
+  });
+  assert.equal(found, null);
+});
+
+test("(28x4) oracle skip wiring: SHELL_SKIP carries the honest skip reason exactly when no POSIX shell resolved, and is false otherwise (HYK-439 §2-b)", () => {
+  if (POSIX_SHELL === null) {
+    assert.match(SHELL_SKIP, /oracle skipped, honestly recorded/);
+  } else {
+    assert.equal(SHELL_SKIP, false);
+  }
 });
 
 test("(28w) oracle shell diagnostic: records which shell the real-Bash oracle used, so 28s/28t running-vs-skipping is auditable", () => {
@@ -882,7 +872,7 @@ test("(28w) oracle shell diagnostic: records which shell the real-Bash oracle us
   // reviewer can confirm the oracle actually executed rather than silently
   // skipping (the exact gap review-8 found in coder-8).
   console.log(
-    `[oracle-shell] findPosixShell -> ${POSIX_SHELL ?? "NONE (28s/28t honestly skipped)"}`,
+    `[oracle-shell] findPosixShellSafe -> ${POSIX_SHELL ?? "NONE (28s/28t honestly skipped)"}`,
   );
   if (POSIX_SHELL !== null) assert.equal(typeof POSIX_SHELL, "string");
 });
@@ -901,7 +891,12 @@ test("(28w2) findPosixShell: a WSL-like candidate that fails the functional prob
     probed.push(c);
     return c === gitBash; // only real Git bash passes the functional check
   };
-  const found = findPosixShell({ probe, candidates: [wsl, gitBash, "unused"] });
+  const found = findPosixShellSafe({
+    probe,
+    gitForWindowsCandidates: [wsl, gitBash, "unused"],
+    existsCheck: () => true,
+    resolveBareNames: () => [],
+  });
   assert.equal(
     found,
     gitBash,
