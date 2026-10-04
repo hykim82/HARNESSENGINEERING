@@ -159,7 +159,13 @@ export function findPosixShellSafe({
   for (const candidate of gitForWindowsCandidates) {
     if (existsCheck(candidate) && probe(candidate)) return candidate;
   }
-  for (const candidate of resolveBareNames(bareNames)) {
+  // The WSL-launcher string filter is applied here too, before any probe: the
+  // default resolver already filters, but an injected one must not be able to
+  // route a System32/WindowsApps shim into a spawn (HYK-439 §2-a).
+  const bareCandidates = resolveBareNames(bareNames).filter(
+    (candidate) => !isWslLauncherPath(candidate),
+  );
+  for (const candidate of bareCandidates) {
     if (probe(candidate)) return candidate;
   }
   return null;
