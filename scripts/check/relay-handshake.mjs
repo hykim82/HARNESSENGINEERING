@@ -8,6 +8,7 @@ import {
   isReviewFamilyRole,
   REJECT_STREAK_REASON_CODE,
   maskQuotedMarkerRegions,
+  unclosedFenceOpenLine,
 } from "./reject-streak.mjs";
 import {
   archiveRoundEnvelope,
@@ -1790,10 +1791,25 @@ const MEASUREMENT_UNAVAILABLE_OOM_STATUS = "MEASUREMENT_UNAVAILABLE_OOM";
 // 손대지 않으므로 계속 그대로 잡힌다.
 const RUNNER_EXIT_CLAIM_RE = /^exit=\d+[ \t]*$/m;
 
+// HYK-411 exit-claim-mask 2차 (ⓑ): 닫히지 않은 펜스는 «문서 끝까지」 마스킹하지
+// 않는다 -- 그러면 진짜 주장이 조용히 안 세어지는 fail-open 이 된다(극성이
+// 뒤집힌 축). 대신 펜스가 열린 줄 «이후»는 마스킹하지 않고 주장으로 센다
+// (옛 동작 = 과차단 쪽과 같은 방향, fail-closed). ⓐ(닫히지 않음 = INVALID)를
+// 고르지 않은 근거: 실측 2026-10-03 살아 있는 .harness 결과 51건 중 14건이
+// 닫히지 않은 펜스로 끝난다 -- ⓐ였다면 정상 라운드 14건이 판정 불가로 막힌다.
+// 이 판별은 주장 축 두 곳(resultClaimsRunnerResults · countRunnerExitClaims)
+// 에만 쓰고, 다른 표지 축의 마스킹(maskQuotedMarkerRegions)은 건드리지 않는다.
+function maskExitClaimRegions(content) {
+  const openAt = unclosedFenceOpenLine(content);
+  if (openAt === -1) return maskQuotedMarkerRegions(content);
+  const lines = content.split("\n");
+  return `${maskQuotedMarkerRegions(lines.slice(0, openAt).join("\n"))}\n${lines.slice(openAt).join("\n")}`;
+}
+
 export function resultClaimsRunnerResults(resultContent) {
   return (
     typeof resultContent === "string" &&
-    RUNNER_EXIT_CLAIM_RE.test(maskQuotedMarkerRegions(resultContent))
+    RUNNER_EXIT_CLAIM_RE.test(maskExitClaimRegions(resultContent))
   );
 }
 
@@ -1811,7 +1827,7 @@ const RUNNER_EXIT_CLAIM_RE_GLOBAL = new RegExp(
 
 export function countRunnerExitClaims(resultContent) {
   if (typeof resultContent !== "string") return 0;
-  const matches = maskQuotedMarkerRegions(resultContent).match(
+  const matches = maskExitClaimRegions(resultContent).match(
     RUNNER_EXIT_CLAIM_RE_GLOBAL,
   );
   return matches ? matches.length : 0;

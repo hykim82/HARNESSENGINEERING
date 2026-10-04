@@ -190,6 +190,30 @@ export function maskQuotedMarkerRegions(content) {
   return maskHtmlComments(maskFencedBlocks(content));
 }
 
+// HYK-411 exit-claim-mask 2차: 닫히지 않은 펜스가 «어느 줄에서 열렸는지」를
+// 돌려준다(없으면 -1). maskFencedBlocks 와 같은 열기·닫기 규칙을 그대로
+// 따른다 -- 규칙을 두 벌 만들면 조용히 어긋난다. 호출자는 이 줄 «이후»를
+// 마스킹하지 않는 판정을 고르기 위해 쓴다(relay-handshake.mjs
+// maskExitClaimRegions).
+export function unclosedFenceOpenLine(content) {
+  const lines = content.split("\n");
+  let fence = null;
+  let openedAt = -1;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (fence === null) {
+      const opened = FENCE_OPEN_RE.exec(line);
+      if (!opened) continue;
+      fence = { char: opened[1][0], len: opened[1].length };
+      openedAt = i;
+      continue;
+    }
+    const closer = new RegExp(`^ {0,3}\\${fence.char}{${fence.len},}[ \t\r]*$`);
+    if (closer.test(line)) fence = null;
+  }
+  return fence === null ? -1 : openedAt;
+}
+
 // HYK-469 3R §2 (책임자 조건 1, HYK-468 4R과 같은 원리): 468 3R이 만든
 // admission-completion-adapter.mjs 로컬 복제(고정 sibling 목록 때문에
 // import 불가 -- 그 파일 헤더 주석 참조)가 이 인라인 코드 마스킹 규칙

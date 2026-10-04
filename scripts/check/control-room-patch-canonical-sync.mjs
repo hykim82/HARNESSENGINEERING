@@ -416,6 +416,20 @@ export const MENTION_BASELINE = Object.freeze([
     reason:
       "frozen fixture for HYK-280's own patch-apply byte-identity tests, not compared against seat-proof canonical anywhere",
   },
+  {
+    relPath:
+      "scripts/check/fixtures/control-room-dispatch-worker-2026-10-03-hyk472-engine-wait-before.ps1.txt",
+    role: "reference",
+    reason:
+      "frozen full-file snapshot (byte copy of today's live control-room file, CRLF kept) for HYK-472's own patch-apply byte-identity tests -- target is the engine-detect wait block (~line 192-206), far from Invoke-SeatProofGate (~line 553); incidentally contains that function's live body verbatim because it is a whole-file copy, but no test compares that portion against canonical",
+  },
+  {
+    relPath:
+      "scripts/check/fixtures/control-room-dispatch-worker-2026-10-03-hyk472-engine-wait-applied.ps1.txt",
+    role: "reference",
+    reason:
+      "frozen fixture for HYK-472's own patch-apply byte-identity tests (applied copy of the snapshot above), not compared against seat-proof canonical anywhere",
+  },
 ]);
 
 function validateMentionBaseline(baseline) {
