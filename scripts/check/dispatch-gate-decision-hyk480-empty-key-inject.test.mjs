@@ -26,7 +26,14 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, writeFileSync, rmSync, readFileSync } from "node:fs";
+import {
+  mkdtempSync,
+  writeFileSync,
+  rmSync,
+  readFileSync,
+  readdirSync,
+  statSync,
+} from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -51,6 +58,7 @@ import {
   HEAD_COMMIT_RE_G,
 } from "./relay-handshake.mjs";
 
+const SCRIPTS_ROOT = fileURLToPath(new URL("..", import.meta.url));
 const SCRIPT_PATH = fileURLToPath(
   new URL("./dispatch-gate-decision.mjs", import.meta.url),
 );
@@ -1017,4 +1025,128 @@ test("HYK-209 (h) 변이 RED: 옛 `\\s*` 정규식은 빈 dropped_at: 줄 다음
     null,
     "the repaired regex reads an empty line as no value",
   );
+});
+
+// ── HYK-209 깊이 방어 (2026-10-05, 검토 P2-1 수리) ──
+// 제자리 채움·계수는 인용·펜스 안의 `dropped_at:` 예시를 건드리지 않는다
+// (음성 대조), 칼럼 0의 진짜 빈 줄은 여전히 채워진다(양성 대조), 진짜 빈
+// 줄이 2개면 인용을 빼고 세도 여전히 거부된다(계수 축 대조).
+const DEPTH_FENCE_EXAMPLE = "```\ndropped_at:\n```\n";
+const DEPTH_HTML_EXAMPLE = "<!--\ndropped_at:\n-->\n";
+const DEPTH_STAMP_LINE_RE =
+  /^dropped_at: \d{4}-\d{2}-\d{2} \d{2}:\d{2} KST\r?$/;
+
+function hyk209DepthBody(realLine, extra) {
+  return (
+    `task_id: HYK-9602-depth-fence-1\nrole: CODER\n${realLine}\n` +
+    `some body\n${extra}${ONE_B_BLOCK}`
+  );
+}
+
+test("HYK-209 깊이 (i) 음성 대조: 펜스 안 빈 `dropped_at:` 예시는 바이트 무변경, 진짜 빈 줄(칼럼 0)만 채워진다", () => {
+  const { r, after } = runHyk209Shape(
+    hyk209DepthBody("dropped_at:", DEPTH_FENCE_EXAMPLE),
+  );
+  assert.equal(r.status, 0, `ALLOW expected, got ${r.status}: ${r.stderr}`);
+  assert.match(r.stdout, /machine-filled in place/);
+  assert.ok(
+    after.includes(DEPTH_FENCE_EXAMPLE),
+    "the fenced example must survive byte-for-byte",
+  );
+  const stamped = after.split("\n").filter((l) => DEPTH_STAMP_LINE_RE.test(l));
+  assert.equal(stamped.length, 1, "exactly the one real line is filled");
+  assert.match(
+    after,
+    /^dropped_at: \d{4}-\d{2}-\d{2} \d{2}:\d{2} KST\nsome body\n/m,
+  );
+});
+
+test("HYK-209 깊이 (j) 음성 대조: HTML 주석 안 빈 `dropped_at:` 예시도 바이트 무변경, 진짜 빈 줄만 채워진다", () => {
+  const { r, after } = runHyk209Shape(
+    hyk209DepthBody("dropped_at:", DEPTH_HTML_EXAMPLE),
+  );
+  assert.equal(r.status, 0, `ALLOW expected, got ${r.status}: ${r.stderr}`);
+  assert.ok(
+    after.includes(DEPTH_HTML_EXAMPLE),
+    "the commented-out example must survive byte-for-byte",
+  );
+  const stamped = after.split("\n").filter((l) => DEPTH_STAMP_LINE_RE.test(l));
+  assert.equal(stamped.length, 1);
+});
+
+test("HYK-209 깊이 (k) 계수 축: 칼럼 0의 진짜 빈 줄 2개는 인용을 빼고 세도 여전히 모호로 거부된다(펜스 예시는 무변경)", () => {
+  const body = hyk209DepthBody(
+    "dropped_at:",
+    `dropped_at:\n${DEPTH_FENCE_EXAMPLE}`,
+  );
+  const { r, after } = runHyk209Shape(body);
+  assert.notEqual(r.status, 0, "two genuine empty lines must not ALLOW");
+  // 헤더 점검표 주입(HYK-465/480)은 CLI가 게이트 전에 하므로 바이트 동일 대신
+  // 「빈 줄 3개(진짜 2 + 펜스 1)가 그대로」라는 사실만 본다 -- 아무것도 채워지지 않았다.
+  assert.equal(
+    after.split("\n").filter((l) => l === "dropped_at:").length,
+    3,
+    "no empty line may be filled when the count is ambiguous",
+  );
+  assert.ok(after.includes(DEPTH_FENCE_EXAMPLE), "fenced example untouched");
+});
+
+test("HYK-209 깊이 (l) 양성 대조 CRLF: CRLF 파일의 진짜 빈 줄도 채워지고 줄끝 CR 이 보존된다", () => {
+  const body = hyk209DepthBody("dropped_at:", "").replace(/\n/g, "\r\n");
+  const { r, after } = runHyk209Shape(body);
+  assert.equal(r.status, 0, `ALLOW expected, got ${r.status}: ${r.stderr}`);
+  const stamped = after
+    .split("\r\n")
+    .filter((l) => DEPTH_STAMP_LINE_RE.test(l));
+  assert.equal(stamped.length, 1, "the CRLF line is filled and keeps its CR");
+  assert.equal(
+    after.includes("dropped_at:\r\n"),
+    false,
+    "no empty line survives",
+  );
+});
+
+// ── HYK-209 깊이 방어 (검토 P3-3 대응 · 전수 계수) ──
+// `dropped_at` 정규식 리터럴 9자리가 전부 `\s` 없이 `[ \t]` 로만 좁혀져 있다.
+// 새 자리가 생기면 이 단정이 수를 바꿔 알려야 한다(조용히 `\s*` 가 되살아나지 않게).
+test("HYK-209 깊이 (m) 전수 계수: scripts/ 안 `/^dropped_at:` 정규식 리터럴은 정확히 9자리이고 그 어느 것도 `\\s` 를 쓰지 않는다", () => {
+  const sites = [];
+  const walk = (dir) => {
+    for (const name of readdirSync(dir)) {
+      const full = join(dir, name);
+      if (statSync(full).isDirectory()) walk(full);
+      else if (name.endsWith(".mjs") && !name.endsWith(".test.mjs")) {
+        for (const line of readFileSync(full, "utf8").split("\n")) {
+          if (line.includes("/^dropped_at:")) sites.push({ full, line });
+        }
+      }
+    }
+  };
+  walk(join(SCRIPTS_ROOT));
+  assert.equal(
+    sites.length,
+    9,
+    `expected 9 dropped_at regex sites, got ${sites.length}`,
+  );
+  for (const { full, line } of sites) {
+    assert.doesNotMatch(line, /\\s/, `${full} still uses \\s: ${line.trim()}`);
+  }
+});
+
+test("HYK-209 깊이 (n) 닫히지 않은 펜스 «뒤»의 진짜 빈 줄도 제자리에서 채워진다(삽입으로 줄을 늘리지 않는다)", () => {
+  const body = `task_id: HYK-9603-unclosed-fence-1\nrole: CODER\n${ONE_B_BLOCK}\`\`\`\nsome unclosed example\ndropped_at:\n`;
+  const { r, after } = runHyk209Shape(body);
+  assert.equal(r.status, 0, `ALLOW expected, got ${r.status}: ${r.stderr}`);
+  assert.match(r.stdout, /machine-filled in place/);
+  assert.doesNotMatch(
+    r.stdout,
+    /machine-inserted/,
+    "the empty line must be filled, not joined by a second inserted line",
+  );
+  assert.equal(
+    DROP_LINES(after).length,
+    1,
+    "exactly one dropped_at line after the fill",
+  );
+  assert.equal(after.split("\n").includes("dropped_at:"), false);
 });

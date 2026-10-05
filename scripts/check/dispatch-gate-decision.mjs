@@ -35,6 +35,7 @@ import {
   loadLedger,
   writeLedger,
   maskQuotedMarkerRegions,
+  unclosedFenceOpenLine,
 } from "./reject-streak.mjs";
 // HYK-257-done-stamp-2 §2 범위2 ⓑ: the ONE real, already-production-wired
 // anchor for a machine dropped_at stamp -- 관제실 dispatch-worker.ps1
@@ -520,8 +521,7 @@ function evaluatePrecondition(taskPath, ledgerPath) {
   const precondition = checkGatePreconditions({
     taskIdMatchCount,
     taskIdFormatValid,
-    droppedAtEmptyLineCount: [...taskText.matchAll(EMPTY_DROPPED_AT_LINE_G)]
-      .length,
+    droppedAtEmptyLineCount: findEmptyDroppedAtLines(taskText).length,
     ledgerExists,
     ledgerLoadOk: loaded?.ok ?? false,
     ledgerLoadReason: loaded?.reason,
@@ -700,7 +700,9 @@ function deriveRoleFromTaskPath(taskPath) {
 // doneAt 추출은 이 축(§2-1의 "이름표 없음/깨짐" 판별) 대상이 아니고,
 // 지시서 §2-2가 "다른 축의 기존 동작을 깨뜨리지 마라"고 명시했다.
 const CONSUMPTION_TASK_ID_RE_G = /^task_id:[ \t]*(\S+)/gim;
-const CONSUMPTION_DROPPED_AT_RE = /^dropped_at:\s*(.+)$/im;
+// HYK-209 깊이 방어: `[ \t]*\S` 로 통일(relay-handshake.mjs DROPPED_AT_RE 와 동일).
+// `\s*` 는 개행을 넘어 빈 값 줄의 «다음 줄»을 값으로 읽는다.
+const CONSUMPTION_DROPPED_AT_RE = /^dropped_at:[ \t]*(\S.*)$/im;
 const CONSUMPTION_DONE_RE_G = /^>>>\s*DONE:.*@\s*(.+?)\s*$/gim;
 // HYK-457: CONSUMPTION_HEAD_COMMIT_RE_G used to live here, for the sole use
 // of confirmRunnerGreenUnreachableAtHead -- both moved to
@@ -3219,6 +3221,28 @@ const DROPPED_AT_LINE_RE = /^dropped_at:[ \t]*\S.*$/im;
 // the pre-gate precondition (ambiguous: more than one such line).
 const EMPTY_DROPPED_AT_LINE_G = /^dropped_at:[ \t]*(\r?)$/gm;
 
+// HYK-209 깊이 방어 (검토 P2-1): 빈 줄의 «계수»와 «채움»은 인용·펜스 안의
+// 예시를 세지도 고치지도 않도록 maskQuotedMarkerRegions(HYK-449 정본)로
+// 가린 텍스트에서 찾는다. 마스킹은 길이를 보존하므로(blankKeepingNewlines)
+// 가린 텍스트의 match.index 는 원문의 같은 자리다(HYK-480
+// fillEmptyLegacyKeysInPlace 와 같은 계열). 치환은 항상 원문 기준이다.
+// 닫히지 않은 펜스 «이후»는 마스킹하지 않는다(relay-handshake maskExitClaimRegions
+// 와 같은 정책 -- unclosedFenceOpenLine 주석 참조). 펜스가 문서 끝까지 삼키면
+// 진짜 빈 줄이 안 보여 제자리 채움이 빠지고, 삽입 분기가 줄을 하나 더 끼워
+// 소비가 두 줄을 모호로 본다(HYK-209 깊이 방어 probe 실측).
+function findEmptyDroppedAtLines(text) {
+  const masked = maskQuotedMarkerRegions(text);
+  const openLine = unclosedFenceOpenLine(text);
+  let scan = masked;
+  if (openLine !== -1) {
+    const cut =
+      text.split("\n").slice(0, openLine).join("\n").length +
+      (openLine > 0 ? 1 : 0);
+    scan = masked.slice(0, cut) + text.slice(cut);
+  }
+  return [...scan.matchAll(EMPTY_DROPPED_AT_LINE_G)];
+}
+
 // HYK-316-dropped-stamp-1: 삽입 지점 판정용 -- 첫 `task_id:` 줄(값 유무·
 // 형식 무관, 존재 자체만) 바로 뒤에 dropped_at을 끼워 넣는다. 이 저장소·
 // 관제실 지시서 전부가 `task_id:`를 첫 줄로 쓰는 순서이므로(coder-task.md
@@ -3352,7 +3376,9 @@ function bestEffortSnapshotRoundTaskFile(taskPath, taskContent) {
 // fillEmptyLegacyKeysInPlace 와 같은 계열). 줄을 하나 더 끼우면 봉투·소비가
 // 두 줄을 「모호」로 보므로 끼우지 않는다. 기계 스탬프는 ALLOW 뒤에만 찍힌다
 // (HYK-479 §A) -- 그래서 빈 줄이 남은 채 REJECT 된 라운드는 바이트가 그대로다.
-function fillEmptyDroppedAtLine(taskPath, original) {
+// `match` 는 findEmptyDroppedAtLines 가 가린 텍스트에서 찾은 «유일한» 빈 줄이다
+// (호출부가 개수 1을 확인한다). 그 자리(index)를 원문에서 그대로 치환한다.
+function fillEmptyDroppedAtLine(taskPath, original, match) {
   const stampedForFill = stampDroppedAt({});
   if (!stampedForFill.ok) {
     console.error(
@@ -3360,10 +3386,10 @@ function fillEmptyDroppedAtLine(taskPath, original) {
     );
     return;
   }
-  const filled = original.replace(
-    EMPTY_DROPPED_AT_LINE_G,
-    (_match, cr) => `dropped_at: ${stampedForFill.value}${cr}`,
-  );
+  const filled =
+    original.slice(0, match.index) +
+    `dropped_at: ${stampedForFill.value}${match[1]}` +
+    original.slice(match.index + match[0].length);
   writeFileSync(taskPath, filled, "utf8");
   console.log(
     `dispatch-gate-decision: dropped_at was EMPTY -- machine-filled in place (HYK-209: an empty line is 'no value', not the next line's text) -- ${taskPath} -> 'dropped_at: ${stampedForFill.value}'`,
@@ -3376,8 +3402,8 @@ function bestEffortStampDroppedAt(taskPath, args) {
   try {
     const original = readFileSync(taskPath, "utf8");
     if (!DROPPED_AT_LINE_RE.test(original)) {
-      const emptyLineCount = [...original.matchAll(EMPTY_DROPPED_AT_LINE_G)]
-        .length;
+      const emptyLines = findEmptyDroppedAtLines(original);
+      const emptyLineCount = emptyLines.length;
       if (emptyLineCount > 1) {
         // Ambiguous: refuse to pick one line. The precondition rejects this
         // shape before any gate runs, so this branch is a backstop only.
@@ -3387,7 +3413,7 @@ function bestEffortStampDroppedAt(taskPath, args) {
         return;
       }
       if (emptyLineCount === 1) {
-        fillEmptyDroppedAtLine(taskPath, original);
+        fillEmptyDroppedAtLine(taskPath, original, emptyLines[0]);
         return;
       }
       // HYK-316-dropped-stamp-1: no existing dropped_at: line. Previously

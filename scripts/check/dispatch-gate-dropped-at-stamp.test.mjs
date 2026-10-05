@@ -9,14 +9,21 @@
 // 기존 게이트/exit-code 계약이 전혀 바뀌지 않는지를 증명한다.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { mkdtempSync, writeFileSync, rmSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { createHash } from "node:crypto";
 import { writeLedger } from "./reject-streak.mjs";
-import { checkRelayHandshake } from "./relay-handshake.mjs";
+import {
+  checkRelayHandshake,
+  DROPPED_AT_RE as PROD_DROPPED_AT_RE,
+} from "./relay-handshake.mjs";
+import {
+  stampDroppedAt,
+  STAMP_DROPPED_AT_REASON,
+} from "./dropped-at-stamp-core.mjs";
 
 const SCRIPT_PATH = fileURLToPath(
   new URL("./dispatch-gate-decision.mjs", import.meta.url),
@@ -404,6 +411,81 @@ test("(d) 프로덕션 경로: dropped_at 없이 배달된 지시서가 이 CLI�
       result.reason,
       /missing ">>> DONE:/,
       "dropped_at을 통과했으므로 다음 단계(DONE 줄 판정)에서만 멈춰야 한다",
+    );
+  });
+});
+
+// ── HYK-209 깊이 방어 (검토 P3-3) -- 깨진 시계는 쓰레기 값을 찍지 않는다 ──
+test("HYK-209 P3-3 (u) 깨진 시계(NaN·Infinity·문자열·Date 범위 밖)는 ok:false + CLOCK_INVALID 로 거부되고 값을 만들지 않는다", () => {
+  for (const bad of [NaN, Infinity, -Infinity, "abc", 1e20]) {
+    const r = stampDroppedAt({ nowFn: () => bad });
+    assert.equal(r.ok, false, `${String(bad)} must be refused`);
+    assert.equal(r.reasonCode, STAMP_DROPPED_AT_REASON.CLOCK_INVALID);
+    assert.equal(
+      r.value,
+      undefined,
+      "no value may be produced from a bad clock",
+    );
+  }
+});
+
+test("HYK-209 P3-3 (v) 무회귀: 정상 시계는 수리 전과 같은 KST 값을 낸다", () => {
+  const r = stampDroppedAt({ nowFn: () => 0 });
+  assert.equal(r.ok, true);
+  assert.equal(r.reasonCode, STAMP_DROPPED_AT_REASON.STAMPED);
+  assert.equal(r.value, "1970-01-01 09:00 KST");
+});
+
+test("HYK-209 P3-3 (w) CLI: 시계가 NaN 이면 빈 dropped_at 줄을 채우지 않고 파일 바이트 무변경, NaN 문자열이 파일에 없고 소비측은 여전히 값 없음으로 읽는다", () => {
+  withFixtureDir((dir) => {
+    const taskPath = join(dir, "coder-task.md");
+    const original = `task_id: HYK-9103-nanclock-1\ndropped_at:\nrole: CODER\n${ONE_B_BLOCK}`;
+    writeFileSync(taskPath, original, "utf8");
+    const ledgerPath = join(dir, "reject-streak.json");
+    writeLedger(ledgerPath, { schema_version: 1, issues: {} });
+
+    // runCliWithFakeClock 은 성공(exit 0) 때 stderr 를 버리므로, 거부 사유가
+    // stderr 에 찍히는지 보려고 spawnSync 로 직접 돌린다.
+    const r = spawnSync(
+      "node",
+      [
+        "--import",
+        FAKE_CLOCK_PRELOAD_URL,
+        SCRIPT_PATH,
+        taskPath,
+        "--ledger",
+        ledgerPath,
+      ],
+      {
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          DISPATCH_RECEIPT_PATH: SHARED_EMPTY_RECEIPT_PATH,
+          FAKE_NOW_MS: "NaN",
+        },
+      },
+    );
+    const after = readFileSync(taskPath, "utf8");
+    // 헤더 점검표 주입은 CLI가 게이트 전에 하므로 바이트 동일 대신 「빈 줄이
+    // 그대로 남았다」와 「NaN 이 없다」를 본다.
+    assert.ok(
+      after.split("\n").includes("dropped_at:"),
+      "a refused stamp must leave the empty line as it was",
+    );
+    assert.doesNotMatch(
+      after,
+      /NaN/,
+      "the NaN clock must never reach the file",
+    );
+    assert.match(
+      r.stderr,
+      /dropped_at fill skipped/,
+      "the refusal must be visible",
+    );
+    assert.equal(
+      PROD_DROPPED_AT_RE.exec(after),
+      null,
+      "consumers still read the empty line as no value (fail closed)",
     );
   });
 });

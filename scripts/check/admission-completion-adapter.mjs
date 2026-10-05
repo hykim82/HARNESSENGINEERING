@@ -723,7 +723,8 @@ function verifyBlockedTerminationEvidence({
 // 스스로 하는 일은 오직 "그 코어가 요구하는 사실들을 harnessDir 아래
 // 실제 파일에서 다시 읽어 구조화하는 것"뿐이다(§2 zero-import 코어
 // 계약과 동일한 분업, 위 import 헤더 참조).
-const RETIREMENT_DROPPED_AT_RE = /^dropped_at:\s*(.+)$/im;
+// HYK-209 깊이 방어: `[ \t]*\S` 로 통일(relay-handshake.mjs DROPPED_AT_RE 와 동일).
+const RETIREMENT_DROPPED_AT_RE = /^dropped_at:[ \t]*(\S.*)$/im;
 const RETIREMENT_ARCHIVE_ENVELOPE_HEADER_RE =
   /^<!-- envelope-archive: role=\S+ archived_at=.*? -->\n/;
 

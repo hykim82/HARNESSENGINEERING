@@ -1948,8 +1948,9 @@ export function computeWorktreeReasonResidue({
 // 옮겨 쓴다. 이 함수는 "그런 헤더가 하나라도 있는가"만 답한다(collect
 // EvidenceFn 계약: `{items, failed}` -- items는 있음/없음만 신호하는
 // 자리표시자, dropped_at 값 자체는 이 축이 쓰지 않는다).
+// HYK-209 깊이 방어: `\s*` → `[ \t]*` (orch-stall-detect.mjs DROPPED_AT_RE 와 같은 모양).
 const RESIDUE_DROPPED_AT_RE =
-  /^dropped_at:\s*\d{4}-\d{2}-\d{2} \d{2}:\d{2} KST\s*$/im;
+  /^dropped_at:[ \t]*\d{4}-\d{2}-\d{2} \d{2}:\d{2} KST[ \t]*$/im;
 
 function collectDroppedAtTaskFileEvidenceLocal(worktreePath) {
   const harnessDir = path.join(worktreePath, ".harness");
