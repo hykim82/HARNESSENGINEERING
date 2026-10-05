@@ -5,11 +5,25 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+  mkdtempSync,
+  mkdirSync,
+  writeFileSync,
+  readFileSync,
+  rmSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import {
   resultClaimsRunnerResults,
   countRunnerExitClaims,
+  __probeResolveDroppedAt,
 } from "./relay-handshake.mjs";
+import { __probeFindArchivedRoundMeta } from "./dispatch-gate-decision.mjs";
 import { droppedAtScanText } from "./reject-streak.mjs";
-import { __probeDroppedAtScanTextLocal } from "./admission-completion-adapter.mjs";
+import {
+  __probeDroppedAtScanTextLocal,
+  __probeReadTaskDroppedAtRaw,
+} from "./admission-completion-adapter.mjs";
 
 const RAW_DROPPED_AT_RE = /^dropped_at:[ \t]*(\S.*)$/im;
 const TRUE_AT = "2026-10-06 02:04 KST";
@@ -99,4 +113,54 @@ test("ⓑ GREEN(admission 사본 동치): 정본과 로컬 복제가 같은 입�
       `admission copy diverged on: ${JSON.stringify(text)}`,
     );
   }
+});
+
+// ⓒ 배선 자리 ----------------------------------------------------------------
+// M-A·M-B·M-C 는 「그 자리만 원문 매치로 되돌리면 빨갛다」를 고정한다. 되돌림 변이 셋을
+// 눈으로 재현해(본문 교체 후 sha256 복원) 각 시험이 실제로 빨개지는지 확인했다.
+// 예시 시각(2020)을 진짜 시각(2026-10-06)보다 앞에 둔다 -- 원문 매치는 예시를 집는다.
+
+const WIRING_NOW = Date.parse("2026-10-06T03:00:00+09:00");
+const WIRING_TASK = `\`\`\`\n${EXAMPLE_LINE}\n\`\`\`\n${TRUE_LINE}\n`;
+
+test("M-A GREEN: resolveDroppedAt 은 가림 뒤 첫 매치(진짜 시각)를 읽는다 -- relay-handshake.mjs 배선", () => {
+  const r = __probeResolveDroppedAt(WIRING_TASK, WIRING_NOW);
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.equal(r.droppedMatch[1].trim(), TRUE_AT);
+});
+
+test("M-B GREEN: findArchivedRoundMeta 는 archive 사본의 가림 뒤 첫 매치(진짜 시각)를 읽는다 -- dispatch-gate-decision.mjs 배선", () => {
+  const dir = mkdtempSync(join(tmpdir(), "hyk209-mb-"));
+  try {
+    mkdirSync(join(dir, "rounds"));
+    writeFileSync(
+      join(dir, "rounds", "CODER-task-r1.md"),
+      `task_id: HYK-209-wiring-1\n\n${WIRING_TASK}`,
+    );
+    const meta = __probeFindArchivedRoundMeta(
+      dir,
+      "CODER",
+      "HYK-209-wiring-1",
+      undefined,
+    );
+    assert.equal(meta.droppedAt, TRUE_AT);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("M-C GREEN: 은퇴 판독의 낙하 시각은 가림 뒤 첫 매치다 -- admission-completion-adapter.mjs 헬퍼 본문", () => {
+  assert.equal(__probeReadTaskDroppedAtRaw(WIRING_TASK), TRUE_AT);
+});
+
+test("M-C' GREEN(배선 고정): verifyRetirementEvidence 의 호출 자리는 헬퍼만 부른다 -- 원문 RETIREMENT_DROPPED_AT_RE 직접 호출로 되돌리면 빨갛다", () => {
+  const src = readFileSync(
+    new URL("./admission-completion-adapter.mjs", import.meta.url),
+    "utf8",
+  );
+  assert.match(
+    src,
+    /droppedAtRaw = readTaskDroppedAtRaw\(readFileSync\(taskPath, "utf8"\)\);/,
+    "은퇴 판독 호출 자리가 헬퍼를 거치지 않는다(가림 뒤 첫 매치 배선 이탈)",
+  );
 });

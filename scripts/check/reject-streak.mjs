@@ -140,6 +140,11 @@ function maskFencedBlocks(content) {
 //      없다 -- §2 가 요구한 「줄 단위로 닫히게」는 이 성질로 자동 성립한다.
 // ⛔진짜(인라인 코드 밖) 여는 표지가 문서 안에서 끝내 못 닫히면 여전히 문서
 // 끝까지 마스킹한다(fail-closed, 바뀌지 않음) -- HYK-449 원래 방향 그대로.
+// ⚠️이월(HYK-209 mask-readers 2R · 검토 P3-1, 2026-10-06): 이 구간 모델은 백틱 「쌍」만
+// 보므로 CommonMark(같은 길이 백틱 런)와 다르다 -- 백틱 3연속 뒤의 한 칸 백틱이 그 사이
+// 전부를 인라인 코드로 만든다. 이 정규식은 HYK-449 정본이고 가림 축 전부가 쓰므로 이
+// 라운드에서 바꾸지 않는다(번짐 범위가 이 파일 전체다). 잠복 모양이며 지금까지 어긋남이
+// 실물에서는 「이득」으로만 작동했다(검토 P3-2 두 파일).
 const INLINE_CODE_SPAN_RE = /`[^`\n]*`/g;
 
 function inlineCodeRanges(content) {
@@ -259,8 +264,8 @@ export function unclosedQuoteOpenLine(content) {
 // 번에 하나씩 사라지므로 반드시 끝난다). 인용이 문서 끝까지 삼키면 진짜 빈 줄이 안
 // 보여 제자리 채움이 빠지고, 열린 표지 뒤를 원문 그대로 두면 그 뒤의 「닫힌」 펜스
 // 예시까지 빈 줄로 보여 예시 본문을 채워 버린다(검토 P2-1 · HYK-209 깊이 방어 probe).
-const QUOTE_FENCE_OPENER_RE = /^( {0,3})(`{3,}|~{3,})/;
-function neutralizeQuoteOpenerLine(text, lineIndex) {
+export const QUOTE_FENCE_OPENER_RE = /^( {0,3})(`{3,}|~{3,})/;
+export function neutralizeQuoteOpenerLine(text, lineIndex) {
   const lines = text.split("\n");
   lines[lineIndex] = lines[lineIndex]
     .replace(QUOTE_FENCE_OPENER_RE, (m) => m.replace(/[`~]/g, " "))
@@ -288,12 +293,23 @@ export function droppedAtScanText(text) {
 // 같아야 한다 -- maskQuotedMarkerRegions 자신은 admission에서 의도적으로
 // 다른 이름(maskQuotedMarkerRegionsLocal)으로 복제돼 있으므로 이 묶음에
 // 넣지 않는다(넣으면 정당한 이름 차이가 "예외 0" 계약을 깬다).
+// HYK-209 mask-readers (2026-10-06, 검토 P2-1 수리): 닫히지 않은 인용 판별의
+// 다섯 선언(펜스·주석·인용 줄 판별과 여는 표지 중화·정규식)도 같은 묶음에 넣는다.
+// admission-completion-adapter.mjs 로컬 복제와 이름이 같고 본문이 바이트 동일하다
+// (복제 쪽 droppedAtScanTextLocal 은 이 다섯을 그대로 쓴다). droppedAtScanText 자신은
+// 넣지 않는다 -- 복제 쪽 이름이 droppedAtScanTextLocal 로 달라 「같은 이름 · 같은 본문」
+// 계약에 맞지 않는다(그 1건은 이름 차이가 있어 묶음 바깥에 둔다).
 export const RULE_FUNCTIONS = {
   INLINE_CODE_SPAN_RE,
   inlineCodeRanges,
   isInsideAnyRange,
   findOutsideInlineCode,
   maskHtmlComments,
+  unclosedFenceOpenLine,
+  unclosedCommentOpenLine,
+  unclosedQuoteOpenLine,
+  neutralizeQuoteOpenerLine,
+  QUOTE_FENCE_OPENER_RE,
 };
 
 const ISSUE_ID_RE = /^(HYK-\d+)/;

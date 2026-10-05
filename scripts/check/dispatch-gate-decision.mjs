@@ -1313,6 +1313,8 @@ function selectArchivedRoundByDispatchId(matches, resolvedDispatchId) {
   return null;
 }
 
+// HYK-209 mask-readers: archive 라운드 판독(가림 뒤 첫 매치)을 시험이 직접 재도록 노출한다.
+export { findArchivedRoundMeta as __probeFindArchivedRoundMeta };
 function findArchivedRoundMeta(
   harnessDir,
   role,

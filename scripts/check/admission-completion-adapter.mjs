@@ -789,6 +789,15 @@ function verifyBlockedTerminationEvidence({
 // 계약과 동일한 분업, 위 import 헤더 참조).
 // HYK-209 깊이 방어: `[ \t]*\S` 로 통일(relay-handshake.mjs DROPPED_AT_RE 와 동일).
 const RETIREMENT_DROPPED_AT_RE = /^dropped_at:[ \t]*(\S.*)$/im;
+// HYK-209 mask-readers: 은퇴 판독의 낙하 시각 = 가림 뒤 첫 매치. verifyRetirementEvidence
+// 가 이 함수 하나로만 부른다(호출 배선은 시험 파일의 소스 단정이 고정한다).
+function readTaskDroppedAtRaw(taskContent) {
+  const droppedMatch = droppedAtScanTextLocal(taskContent).match(
+    RETIREMENT_DROPPED_AT_RE,
+  );
+  return droppedMatch ? droppedMatch[1].trim() : null;
+}
+export { readTaskDroppedAtRaw as __probeReadTaskDroppedAtRaw };
 const RETIREMENT_ARCHIVE_ENVELOPE_HEADER_RE =
   /^<!-- envelope-archive: role=\S+ archived_at=.*? -->\n/;
 
@@ -1150,11 +1159,7 @@ function verifyRetirementEvidence({
   // assignment, 동작은 바이트 하나 안 바뀐다).
   let droppedAtRaw;
   try {
-    const taskContent = readFileSync(taskPath, "utf8");
-    const droppedMatch = droppedAtScanTextLocal(taskContent).match(
-      RETIREMENT_DROPPED_AT_RE,
-    );
-    droppedAtRaw = droppedMatch ? droppedMatch[1].trim() : null;
+    droppedAtRaw = readTaskDroppedAtRaw(readFileSync(taskPath, "utf8"));
   } catch {
     droppedAtRaw = null;
   }
