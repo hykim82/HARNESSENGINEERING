@@ -8,7 +8,8 @@ import {
   isReviewFamilyRole,
   REJECT_STREAK_REASON_CODE,
   maskQuotedMarkerRegions,
-  unclosedFenceOpenLine,
+  unclosedQuoteOpenLine,
+  droppedAtScanText,
 } from "./reject-streak.mjs";
 import {
   archiveRoundEnvelope,
@@ -1083,7 +1084,8 @@ function checkFutureSkew({ candidateDate, rawText, field, now }) {
 // into the future is a config-shape problem, independent of whether a
 // result exists yet at all).
 function resolveDroppedAt(taskContent, now) {
-  const droppedMatch = taskContent.match(DROPPED_AT_RE);
+  // HYK-209 ⓑ: 가림 뒤 첫 매치(인용 안 예시 시각을 낙하 시각으로 읽지 않는다).
+  const droppedMatch = droppedAtScanText(taskContent).match(DROPPED_AT_RE);
   if (!droppedMatch) {
     return {
       ok: false,
@@ -1803,7 +1805,7 @@ const RUNNER_EXIT_CLAIM_RE = /^exit=\d+[ \t]*$/m;
 // 이 판별은 주장 축 두 곳(resultClaimsRunnerResults · countRunnerExitClaims)
 // 에만 쓰고, 다른 표지 축의 마스킹(maskQuotedMarkerRegions)은 건드리지 않는다.
 function maskExitClaimRegions(content) {
-  const openAt = unclosedFenceOpenLine(content);
+  const openAt = unclosedQuoteOpenLine(content);
   if (openAt === -1) return maskQuotedMarkerRegions(content);
   const lines = content.split("\n");
   return `${maskQuotedMarkerRegions(lines.slice(0, openAt).join("\n"))}\n${lines.slice(openAt).join("\n")}`;

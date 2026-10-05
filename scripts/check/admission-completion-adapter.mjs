@@ -267,6 +267,69 @@ function maskQuotedMarkerRegionsLocal(content) {
   return maskHtmlComments(maskFencedBlocks(content));
 }
 
+// HYK-209 ⓑ 로컬 복제 -- reject-streak.mjs 의 unclosedFenceOpenLine ·
+// unclosedCommentOpenLine · unclosedQuoteOpenLine · droppedAtScanText 와 같은
+// 로직(고정 sibling 목록 때문에 import 불가 · 이 파일 헤더 참조). 정본과 어긋나면
+// 회귀다 -- 고칠 때는 정본과 대조하라. 시험은 __probeDroppedAtScanTextLocal 로
+// 정본과 같은 입력에 같은 출력을 내는지 직접 비교한다.
+function unclosedFenceOpenLine(content) {
+  const lines = content.split("\n");
+  let fence = null;
+  let openedAt = -1;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (fence === null) {
+      const opened = FENCE_OPEN_RE.exec(line);
+      if (!opened) continue;
+      fence = { char: opened[1][0], len: opened[1].length };
+      openedAt = i;
+      continue;
+    }
+    const closer = new RegExp(`^ {0,3}\\${fence.char}{${fence.len},}[ \t\r]*$`);
+    if (closer.test(line)) fence = null;
+  }
+  return fence === null ? -1 : openedAt;
+}
+
+function unclosedCommentOpenLine(content) {
+  const fenced = maskFencedBlocks(content);
+  const codeRanges = inlineCodeRanges(fenced);
+  let from = 0;
+  for (;;) {
+    const start = findOutsideInlineCode(fenced, "<!--", from, codeRanges);
+    if (start === -1) return -1;
+    const closeAt = findOutsideInlineCode(fenced, "-->", start + 4, codeRanges);
+    if (closeAt === -1) return fenced.slice(0, start).split("\n").length - 1;
+    from = closeAt + 3;
+  }
+}
+
+function unclosedQuoteOpenLine(content) {
+  const fence = unclosedFenceOpenLine(content);
+  const comment = unclosedCommentOpenLine(content);
+  if (fence === -1) return comment;
+  if (comment === -1) return fence;
+  return Math.min(fence, comment);
+}
+
+const QUOTE_FENCE_OPENER_RE = /^( {0,3})(`{3,}|~{3,})/;
+function neutralizeQuoteOpenerLine(text, lineIndex) {
+  const lines = text.split("\n");
+  lines[lineIndex] = lines[lineIndex]
+    .replace(QUOTE_FENCE_OPENER_RE, (m) => m.replace(/[`~]/g, " "))
+    .replace(/<!--/g, "    ");
+  return lines.join("\n");
+}
+
+function droppedAtScanTextLocal(text) {
+  let scan = text;
+  for (;;) {
+    const openLine = unclosedQuoteOpenLine(scan);
+    if (openLine === -1) return maskQuotedMarkerRegionsLocal(scan);
+    scan = neutralizeQuoteOpenerLine(scan, openLine);
+  }
+}
+
 function resolveHeaderTaskId(content) {
   const lines = maskQuotedMarkerRegionsLocal(
     (content ?? "").replace(/\r\n/g, "\n"),
@@ -303,6 +366,7 @@ export { resolveHeaderTaskId as __probeResolveHeaderTaskId };
 // 판정을 내리는지 직접 비교하려면 이 로컬 복제 자체를 시험이 호출할 수
 // 있어야 한다.
 export { maskQuotedMarkerRegionsLocal as __probeMaskQuotedMarkerRegionsLocal };
+export { droppedAtScanTextLocal as __probeDroppedAtScanTextLocal };
 
 // resolveResultBlockedState(relay-handshake.mjs)의 최소 재현 -- "정확히
 // 하나의 well-formed '>>> BLOCKED:'/'>>> NEEDS_INPUT:' 줄만 인정"은 그대로
@@ -1087,7 +1151,9 @@ function verifyRetirementEvidence({
   let droppedAtRaw;
   try {
     const taskContent = readFileSync(taskPath, "utf8");
-    const droppedMatch = taskContent.match(RETIREMENT_DROPPED_AT_RE);
+    const droppedMatch = droppedAtScanTextLocal(taskContent).match(
+      RETIREMENT_DROPPED_AT_RE,
+    );
     droppedAtRaw = droppedMatch ? droppedMatch[1].trim() : null;
   } catch {
     droppedAtRaw = null;

@@ -246,6 +246,37 @@ export function unclosedQuoteOpenLine(content) {
   return Math.min(fence, comment);
 }
 
+// HYK-209 (ⓑ 수리): dropped_at 줄을 「가림 뒤 첫 매치」로 찾는 공용 판별. 인용
+// (펜스·HTML 주석) 안의 예시 줄은 진짜 낙하 시각으로 세지 않고, 닫히지 않은 인용
+// 여는 표지 뒤의 진짜 줄은 계속 보인다(fail-closed, ⓐ와 같은 극성). 이 함수가
+// 정본이다 -- dispatch-gate-decision.mjs 와 relay-handshake.mjs 가 import 하고,
+// admission-completion-adapter.mjs 는 고정 sibling 목록 때문에 로컬 복제한다
+// (그 파일 헤더 참조 · droppedAtScanTextLocal). 길이 보존 마스킹이므로 반환 텍스트의
+// match.index 는 원문의 같은 자리다.
+//
+// 닫히지 않은 인용의 열린 표지는 「평문」으로 본다 -- 그 줄의 표지 글자만 공백으로
+// 바꾸고(길이 보존) 다시 가린다. 열린 표지가 없어질 때까지 반복한다(표지 글자가 한
+// 번에 하나씩 사라지므로 반드시 끝난다). 인용이 문서 끝까지 삼키면 진짜 빈 줄이 안
+// 보여 제자리 채움이 빠지고, 열린 표지 뒤를 원문 그대로 두면 그 뒤의 「닫힌」 펜스
+// 예시까지 빈 줄로 보여 예시 본문을 채워 버린다(검토 P2-1 · HYK-209 깊이 방어 probe).
+const QUOTE_FENCE_OPENER_RE = /^( {0,3})(`{3,}|~{3,})/;
+function neutralizeQuoteOpenerLine(text, lineIndex) {
+  const lines = text.split("\n");
+  lines[lineIndex] = lines[lineIndex]
+    .replace(QUOTE_FENCE_OPENER_RE, (m) => m.replace(/[`~]/g, " "))
+    .replace(/<!--/g, "    ");
+  return lines.join("\n");
+}
+
+export function droppedAtScanText(text) {
+  let scan = text;
+  for (;;) {
+    const openLine = unclosedQuoteOpenLine(scan);
+    if (openLine === -1) return maskQuotedMarkerRegions(scan);
+    scan = neutralizeQuoteOpenerLine(scan, openLine);
+  }
+}
+
 // HYK-469 3R §2 (책임자 조건 1, HYK-468 4R과 같은 원리): 468 3R이 만든
 // admission-completion-adapter.mjs 로컬 복제(고정 sibling 목록 때문에
 // import 불가 -- 그 파일 헤더 주석 참조)가 이 인라인 코드 마스킹 규칙

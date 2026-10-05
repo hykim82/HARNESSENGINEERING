@@ -35,7 +35,7 @@ import {
   loadLedger,
   writeLedger,
   maskQuotedMarkerRegions,
-  unclosedQuoteOpenLine,
+  droppedAtScanText,
 } from "./reject-streak.mjs";
 // HYK-257-done-stamp-2 §2 범위2 ⓑ: the ONE real, already-production-wired
 // anchor for a machine dropped_at stamp -- 관제실 dispatch-worker.ps1
@@ -1347,7 +1347,9 @@ function findArchivedRoundMeta(
     // verbatim later in this archive file's own body.
     const archivedTaskId = resolveHeaderTaskId(content);
     if (!archivedTaskId.ok || archivedTaskId.id !== harnessTaskLabel) continue;
-    const droppedMatch = content.match(CONSUMPTION_DROPPED_AT_RE);
+    const droppedMatch = droppedAtScanText(content).match(
+      CONSUMPTION_DROPPED_AT_RE,
+    );
     if (!droppedMatch) continue;
     matches.push({
       roundNum: Number(m[1]),
@@ -3238,25 +3240,6 @@ const EMPTY_DROPPED_AT_LINE_G = /^dropped_at:[ \t]*(\r?)$/gm;
 // 수리 · 검토 실측): 예전에는 원문 전체에서 찾아서, 인용 안의 「값 있는」 예시가
 // 진짜 빈 줄을 「이미 있음」으로 가렸다. 그러면 빈 줄이 채워지지 않은 채 게이트가
 // ALLOW 로 끝나 소비가 그 예시의 시각을 낙하 시각으로 읽었다.
-function droppedAtScanText(text) {
-  let scan = text;
-  for (;;) {
-    const openLine = unclosedQuoteOpenLine(scan);
-    if (openLine === -1) return maskQuotedMarkerRegions(scan);
-    scan = neutralizeQuoteOpenerLine(scan, openLine);
-  }
-}
-
-// 인용 여는 표지만 지운다(길이 보존): 펜스 여는 줄의 ``` / ~~~ 와 그 줄의 <!--.
-const QUOTE_FENCE_OPENER_RE = /^( {0,3})(`{3,}|~{3,})/;
-function neutralizeQuoteOpenerLine(text, lineIndex) {
-  const lines = text.split("\n");
-  lines[lineIndex] = lines[lineIndex]
-    .replace(QUOTE_FENCE_OPENER_RE, (m) => m.replace(/[`~]/g, " "))
-    .replace(/<!--/g, "    ");
-  return lines.join("\n");
-}
-
 function findEmptyDroppedAtLines(text) {
   return [...droppedAtScanText(text).matchAll(EMPTY_DROPPED_AT_LINE_G)];
 }
