@@ -519,14 +519,12 @@ test("--update-mismatched: a death in the middle of the run leaves a manifest fo
   // installer's own writeFileSync throws (EPERM/EACCES) mid-run and the process
   // exits without reaching the end-of-run summary.
   const dir = mkdtempSync(path.join(tmpdir(), "hyk209-rollback-gaps-"));
+  // The only file this test makes read-only. Cleanup restores exactly that
+  // one: a recursive walk would also chmod directories, and on POSIX a 0o666
+  // directory loses its search bit, so rmSync then fails with EACCES.
+  let readOnly = null;
   t.after(() => {
-    for (const f of readdirSync(dir, { recursive: true }).map(String)) {
-      try {
-        chmodSync(path.join(dir, f), 0o666);
-      } catch {
-        // not a file we made read-only
-      }
-    }
+    if (readOnly) chmodSync(readOnly, 0o666);
     rmSync(dir, { recursive: true, force: true });
   });
   seedTarget(dir);
@@ -540,6 +538,7 @@ test("--update-mismatched: a death in the middle of the run leaves a manifest fo
   );
   const pre = Object.fromEntries(order.map((p) => [p, sha256(p)]));
   chmodSync(second, 0o444);
+  readOnly = second;
   try {
     accessSync(second, constants.W_OK);
     t.skip(
