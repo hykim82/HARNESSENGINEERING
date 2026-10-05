@@ -35,7 +35,7 @@ import {
   loadLedger,
   writeLedger,
   maskQuotedMarkerRegions,
-  unclosedFenceOpenLine,
+  unclosedQuoteOpenLine,
 } from "./reject-streak.mjs";
 // HYK-257-done-stamp-2 §2 범위2 ⓑ: the ONE real, already-production-wired
 // anchor for a machine dropped_at stamp -- 관제실 dispatch-worker.ps1
@@ -3226,21 +3226,39 @@ const EMPTY_DROPPED_AT_LINE_G = /^dropped_at:[ \t]*(\r?)$/gm;
 // 가린 텍스트에서 찾는다. 마스킹은 길이를 보존하므로(blankKeepingNewlines)
 // 가린 텍스트의 match.index 는 원문의 같은 자리다(HYK-480
 // fillEmptyLegacyKeysInPlace 와 같은 계열). 치환은 항상 원문 기준이다.
-// 닫히지 않은 펜스 «이후»는 마스킹하지 않는다(relay-handshake maskExitClaimRegions
-// 와 같은 정책 -- unclosedFenceOpenLine 주석 참조). 펜스가 문서 끝까지 삼키면
-// 진짜 빈 줄이 안 보여 제자리 채움이 빠지고, 삽입 분기가 줄을 하나 더 끼워
-// 소비가 두 줄을 모호로 본다(HYK-209 깊이 방어 probe 실측).
-function findEmptyDroppedAtLines(text) {
-  const masked = maskQuotedMarkerRegions(text);
-  const openLine = unclosedFenceOpenLine(text);
-  let scan = masked;
-  if (openLine !== -1) {
-    const cut =
-      text.split("\n").slice(0, openLine).join("\n").length +
-      (openLine > 0 ? 1 : 0);
-    scan = masked.slice(0, cut) + text.slice(cut);
+// 닫히지 않은 인용 표지(펜스 여는 줄 · HTML 주석 여는 표지)는 「평문」으로 본다 --
+// 그 줄의 표지 글자만 공백으로 바꾸고(길이 보존) 다시 가린다. 열린 표지가 없어질
+// 때까지 반복한다(표지 글자가 한 번에 하나씩 사라지므로 반드시 끝난다). 이렇게
+// 하는 이유: 인용이 문서 끝까지 삼키면 진짜 빈 줄이 안 보여 제자리 채움이 빠지고
+// 삽입 분기가 줄을 하나 더 끼워 소비가 두 줄을 모호로 본다(검토 P2-1 · HYK-209
+// 깊이 방어 probe 실측). 반대로 열린 표지 뒤를 원문 그대로 두면 그 뒤의 「닫힌」
+// 펜스 예시까지 빈 줄로 보여 예시 본문을 채워 버린다(probe 실측: 인용 줄이 고쳐졌다).
+//
+// ★존재 판정(DROPPED_AT_LINE_RE)도 이 가린 텍스트 위에서 한다(HYK-209 선재 구멍
+// 수리 · 검토 실측): 예전에는 원문 전체에서 찾아서, 인용 안의 「값 있는」 예시가
+// 진짜 빈 줄을 「이미 있음」으로 가렸다. 그러면 빈 줄이 채워지지 않은 채 게이트가
+// ALLOW 로 끝나 소비가 그 예시의 시각을 낙하 시각으로 읽었다.
+function droppedAtScanText(text) {
+  let scan = text;
+  for (;;) {
+    const openLine = unclosedQuoteOpenLine(scan);
+    if (openLine === -1) return maskQuotedMarkerRegions(scan);
+    scan = neutralizeQuoteOpenerLine(scan, openLine);
   }
-  return [...scan.matchAll(EMPTY_DROPPED_AT_LINE_G)];
+}
+
+// 인용 여는 표지만 지운다(길이 보존): 펜스 여는 줄의 ``` / ~~~ 와 그 줄의 <!--.
+const QUOTE_FENCE_OPENER_RE = /^( {0,3})(`{3,}|~{3,})/;
+function neutralizeQuoteOpenerLine(text, lineIndex) {
+  const lines = text.split("\n");
+  lines[lineIndex] = lines[lineIndex]
+    .replace(QUOTE_FENCE_OPENER_RE, (m) => m.replace(/[`~]/g, " "))
+    .replace(/<!--/g, "    ");
+  return lines.join("\n");
+}
+
+function findEmptyDroppedAtLines(text) {
+  return [...droppedAtScanText(text).matchAll(EMPTY_DROPPED_AT_LINE_G)];
 }
 
 // HYK-316-dropped-stamp-1: 삽입 지점 판정용 -- 첫 `task_id:` 줄(값 유무·
@@ -3401,7 +3419,8 @@ function bestEffortStampDroppedAt(taskPath, args) {
   guardAgainstLiveTaskPathStamp(taskPath, args);
   try {
     const original = readFileSync(taskPath, "utf8");
-    if (!DROPPED_AT_LINE_RE.test(original)) {
+    // HYK-209 선재 구멍 수리: 존재 판정도 가린 텍스트 위에서(인용 안 예시는 「있음」이 아니다).
+    if (!DROPPED_AT_LINE_RE.test(droppedAtScanText(original))) {
       const emptyLines = findEmptyDroppedAtLines(original);
       const emptyLineCount = emptyLines.length;
       if (emptyLineCount > 1) {
