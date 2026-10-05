@@ -1167,11 +1167,21 @@ export const ENFORCEMENT_RELAY_FILES = [
 // endsWith("scripts/supervisor/derive-claude-project-dir-cli.mjs"); a wrong
 // install path would make that CLI refuse to run. Exactly these two files:
 // the CLI and its one relative import (rate-limit-stall-adapter.mjs, the
-// canonical deriveClaudeProjectDirName). Any other scripts/supervisor/* file
-// is a separate scope decision, not added here.
+// canonical deriveClaudeProjectDirName). HYK-209-installer-admission-closure-1
+// (E7-2 1R-b): admission-cli.mjs is the by-path admission gate the control-room
+// dispatch pipeline calls (docs/control-room-patches/HYK-256-...); without it
+// on the target, delivery is refused (ADMISSION_CLI_MISSING). Its static
+// relative imports are exactly the three below (fixpoint: none of them import
+// another "./X.mjs"). concurrency-cap.json is a VALUE file and is deliberately
+// NOT copied here -- a separate scope decision. Any other scripts/supervisor/*
+// file is still a separate scope decision, not added here.
 export const ENFORCEMENT_SUPERVISOR_FILES = [
   "derive-claude-project-dir-cli.mjs",
   "rate-limit-stall-adapter.mjs",
+  "admission-cli.mjs",
+  "admission-ledger-core.mjs",
+  "admission-ledger-store.mjs",
+  "concurrency-cap-adapter.mjs",
 ];
 
 // Presence requirement, not an import-closure rule: the 관제실 dispatch

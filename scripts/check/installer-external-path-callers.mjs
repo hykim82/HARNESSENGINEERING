@@ -60,17 +60,12 @@ export const COPY_LIST_BY_DIR = {
 
 // Named, reasoned exceptions. Keyed by repo-relative path. An exception is
 // honored only when its reason is non-empty (checked by the test).
-export const KNOWN_EXCEPTIONS = {
-  // HYK-306 documents admission-cli.mjs as the by-path admission gate the
-  // control-room script calls. It is NOT in ENFORCEMENT_SUPERVISOR_FILES, and
-  // install.mjs states that any other scripts/supervisor/* file is "a separate
-  // scope decision, not added here". Adding it is a behaviour change to what
-  // every install copies, which this round does not make. So the gap is named
-  // here and reported, not silently passed. Remove this entry when that scope
-  // decision is made and the file is added to the list.
-  "scripts/supervisor/admission-cli.mjs":
-    "by-path caller (HYK-306) but outside ENFORCEMENT_SUPERVISOR_FILES by an open scope decision; named exception, not silent",
-};
+// HYK-209-installer-admission-closure-1: the admission-cli.mjs entry was
+// removed here once the scope decision landed and the file (with its three
+// relative imports) joined ENFORCEMENT_SUPERVISOR_FILES. Empty on purpose:
+// an empty exception map must not behave as a wildcard (see the test that
+// pins this).
+export const KNOWN_EXCEPTIONS = {};
 
 // Returns [{ rel, file, line }] for every by-path call site in the docs.
 export function extractExternalPathCallers(docsDir = CONTROL_PATCH_DOCS_DIR) {

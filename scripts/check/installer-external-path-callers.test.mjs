@@ -126,3 +126,32 @@ test("축 A: placement -- module and test sit in scripts/check (the runner's col
     "docs must be read from inside the repo, never from the control-room disk",
   );
 });
+
+// HYK-209-installer-admission-closure-1: admission-cli.mjs left KNOWN_EXCEPTIONS
+// once it joined ENFORCEMENT_SUPERVISOR_FILES. Two things are pinned here: the
+// exception is really gone, and an EMPTY exception map still reports a
+// by-path caller that is missing from the copy list (no wildcard behaviour).
+test("축 A: admission-cli.mjs is no longer a named exception (it is in the copy list)", () => {
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(
+      KNOWN_EXCEPTIONS,
+      "scripts/supervisor/admission-cli.mjs",
+    ),
+    false,
+  );
+  assert.ok(COPY_LIST_BY_DIR.supervisor.includes("admission-cli.mjs"));
+});
+
+test("축 A: empty exception map is not a wildcard -- an unlisted by-path caller is still reported", () => {
+  const callers = [
+    { rel: "scripts/supervisor/not-in-list.mjs", file: "probe.md", line: 1 },
+  ];
+  const violations = findCallerViolations(callers, COPY_LIST_BY_DIR, {});
+  assert.deepEqual(violations, [
+    {
+      kind: "NOT_IN_COPY_LIST",
+      rel: "scripts/supervisor/not-in-list.mjs",
+      sites: ["probe.md:1"],
+    },
+  ]);
+});
