@@ -1453,11 +1453,13 @@ function installDispatchReceiptPointer(params, targetRepoPath, { dryRun }) {
 // manifest is a record of what a FUTURE assembly round needs, not an
 // install of the unattended layer itself. None of the files this manifest
 // cites (scripts/supervisor/*, scripts/relay/adapters/orca-adapter.mjs,
-// scripts/check/{linear-sync,pm-guard,selfcheck,selfcheck-inventory}.mjs,
+// scripts/check/{linear-sync,selfcheck,selfcheck-inventory}.mjs,
 // scripts/supervisor/approver-allowlist.json) is copied by this installer,
-// with ONE exception added by HYK-209-installer-closure-derive-1 (2R): the
-// two files in ENFORCEMENT_SUPERVISOR_FILES (derive-claude-project-dir-cli
-// .mjs and its rate-limit-stall-adapter.mjs import) now are. Everything else
+// with two exceptions. The first: the files in ENFORCEMENT_SUPERVISOR_FILES
+// (derive-claude-project-dir-cli.mjs and its rate-limit-stall-adapter.mjs
+// import) now are, added by HYK-209-installer-closure-derive-1 (2R). The
+// second: pm-guard.mjs, which installPmGuard copies separately (control-room
+// path substituted), not through any list above. Everything else
 // this manifest cites is still not copied, so a repo installed today with
 // this manifest present has only those two supervisor files of the
 // unattended/parallel layer, and none of the rest. solo-full only:
