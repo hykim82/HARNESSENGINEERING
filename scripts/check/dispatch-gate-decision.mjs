@@ -520,6 +520,8 @@ function evaluatePrecondition(taskPath, ledgerPath) {
   const precondition = checkGatePreconditions({
     taskIdMatchCount,
     taskIdFormatValid,
+    droppedAtEmptyLineCount: [...taskText.matchAll(EMPTY_DROPPED_AT_LINE_G)]
+      .length,
     ledgerExists,
     ledgerLoadOk: loaded?.ok ?? false,
     ledgerLoadReason: loaded?.reason,
@@ -3208,7 +3210,14 @@ function evaluateConsumptionDecision(taskPath, args, env = process.env) {
 // 호출되지 않으므로 dropped_at을 포함해 task 파일 바이트가 조금도
 // 바뀌지 않는다. Best-effort/원자성 계약(throw 없음·exit code 불변)은
 // 이 함수 자신은 그대로 유지한다 -- 바뀐 것은 "언제 부르는가"뿐이다.
-const DROPPED_AT_LINE_RE = /^dropped_at:\s*.+$/im;
+// HYK-209 (2026-10-05): `[ \t]*\S` -- `\s*` used to cross the newline, so an
+// empty `dropped_at:` line read the NEXT line as its value and the stamp was
+// skipped as "already present". A whitespace-only value is empty too.
+const DROPPED_AT_LINE_RE = /^dropped_at:[ \t]*\S.*$/im;
+// HYK-209: a `dropped_at:` line whose value is empty (or whitespace-only).
+// `\r?` keeps CRLF files working. Used by the stamp (fill in place) and by
+// the pre-gate precondition (ambiguous: more than one such line).
+const EMPTY_DROPPED_AT_LINE_G = /^dropped_at:[ \t]*(\r?)$/gm;
 
 // HYK-316-dropped-stamp-1: 삽입 지점 판정용 -- 첫 `task_id:` 줄(값 유무·
 // 형식 무관, 존재 자체만) 바로 뒤에 dropped_at을 끼워 넣는다. 이 저장소·
@@ -3339,11 +3348,48 @@ function bestEffortSnapshotRoundTaskFile(taskPath, taskContent) {
   }
 }
 
+// HYK-209: 빈 `dropped_at:` 줄 «1개»를 제자리에서 채운다(HYK-480
+// fillEmptyLegacyKeysInPlace 와 같은 계열). 줄을 하나 더 끼우면 봉투·소비가
+// 두 줄을 「모호」로 보므로 끼우지 않는다. 기계 스탬프는 ALLOW 뒤에만 찍힌다
+// (HYK-479 §A) -- 그래서 빈 줄이 남은 채 REJECT 된 라운드는 바이트가 그대로다.
+function fillEmptyDroppedAtLine(taskPath, original) {
+  const stampedForFill = stampDroppedAt({});
+  if (!stampedForFill.ok) {
+    console.error(
+      `dispatch-gate-decision: dropped_at fill skipped (stampDroppedAt failed: ${stampedForFill.reason}) -- leaving the empty line untouched; consumers fail closed on it`,
+    );
+    return;
+  }
+  const filled = original.replace(
+    EMPTY_DROPPED_AT_LINE_G,
+    (_match, cr) => `dropped_at: ${stampedForFill.value}${cr}`,
+  );
+  writeFileSync(taskPath, filled, "utf8");
+  console.log(
+    `dispatch-gate-decision: dropped_at was EMPTY -- machine-filled in place (HYK-209: an empty line is 'no value', not the next line's text) -- ${taskPath} -> 'dropped_at: ${stampedForFill.value}'`,
+  );
+  bestEffortSnapshotRoundTaskFile(taskPath, filled);
+}
+
 function bestEffortStampDroppedAt(taskPath, args) {
   guardAgainstLiveTaskPathStamp(taskPath, args);
   try {
     const original = readFileSync(taskPath, "utf8");
     if (!DROPPED_AT_LINE_RE.test(original)) {
+      const emptyLineCount = [...original.matchAll(EMPTY_DROPPED_AT_LINE_G)]
+        .length;
+      if (emptyLineCount > 1) {
+        // Ambiguous: refuse to pick one line. The precondition rejects this
+        // shape before any gate runs, so this branch is a backstop only.
+        console.error(
+          `dispatch-gate-decision: dropped_at stamp refused (${emptyLineCount} empty 'dropped_at:' lines -- cannot tell which one is this round's; leaving the file untouched)`,
+        );
+        return;
+      }
+      if (emptyLineCount === 1) {
+        fillEmptyDroppedAtLine(taskPath, original);
+        return;
+      }
       // HYK-316-dropped-stamp-1: no existing dropped_at: line. Previously
       // this was an unconditional skip (see git history for the old
       // comment); now it's a skip ONLY when the file also lacks a

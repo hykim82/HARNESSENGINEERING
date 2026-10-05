@@ -127,7 +127,10 @@ function hasStructuralPredecessor(lines, idx) {
 // (taskId, droppedAt) key it hands to first-observation.mjs's
 // findFirstObservation -- same reuse-not-reinvent instruction as DONE_RE/
 // isWellFormedDoneTimestamp above.
-export const DROPPED_AT_RE = /^dropped_at:\s*(.+)$/im;
+// HYK-209 (2026-10-05): `[ \t]*` (not `\s*`) -- `\s*` crosses the newline, so
+// an empty `dropped_at:` line made the NEXT line the value. The value must
+// start on the same line; a whitespace-only value counts as empty (`\S`).
+export const DROPPED_AT_RE = /^dropped_at:[ \t]*(\S.*)$/im;
 // HYK-183: 결과 파일에 이 표지가 2개 이상이면 어느 것이 최종인지 결정할
 // 수 없으므로 조용히 하나를 고르지 않고 판정 불가로 멈춘다 (see the file
 // header above for the fuller rationale this constant shares with

@@ -820,3 +820,201 @@ test("(r) HYK-479 §B-B: 점검표 문면 자체가 «같은 줄·줄바꿈 금�
     "예시 문구도 'head_commit:'를 콜론까지 붙여 쓰면 안 된다(부분 문자열 충돌 금지, §5 비타협)",
   );
 });
+// ── HYK-209 (2026-10-05) -- `dropped_at:` 빈 값이 다음 줄을 값으로 오독하던
+// 실사고 수리. 같은 파일에 두는 이유는 위 헤더와 같다(1b_exec_line 이 이 파일을
+// 고정 목록으로 태운다). 세 모양(ⓐ빈 값 ⓑ값 있음 ⓒ줄 없음) + 음성 대조 +
+// 봉투 축 + 경계(탭 뒤 값·공백만 있는 값) + 모호 거부(빈 줄 2개).
+import {
+  checkGatePreconditions,
+  DISPATCH_GATE_STATE,
+} from "./dispatch-gate-decision-core.mjs";
+import { archiveRoundTaskFile } from "./envelope-archive.mjs";
+import { DROPPED_AT_RE } from "./relay-handshake.mjs";
+
+// dropLine: 문자열(그 줄을 넣는다) | null(dropped_at 줄 자체를 넣지 않는다)
+function hyk209TaskBody(dropLine) {
+  const dropPart = dropLine === null ? "" : `${dropLine}\n`;
+  return (
+    `task_id: HYK-9601-dropped-empty-1\nrole: CODER\n${dropPart}` +
+    `some body\n${ONE_B_BLOCK}`
+  );
+}
+
+function runHyk209Shape(body) {
+  let out;
+  withFixtureDir((dir) => {
+    const taskPath = join(dir, "coder-task.md");
+    writeFileSync(taskPath, body, "utf8");
+    const ledgerPath = join(dir, "reject-streak.json");
+    writeLedger(ledgerPath, { schema_version: 1, issues: {} });
+    const r = runCli([taskPath, "--ledger", ledgerPath]);
+    out = { r, after: readFileSync(taskPath, "utf8") };
+  });
+  return out;
+}
+
+const DROP_LINES = (text) =>
+  text.split("\n").filter((l) => /^dropped_at:/.test(l));
+
+test("HYK-209 (a) ⓐ 빈 값 `dropped_at:` -> 제자리에서 기계 스탬프가 채워지고 줄은 1개(중복 없음), 다음 줄은 무변경", () => {
+  const { r, after } = runHyk209Shape(hyk209TaskBody("dropped_at:"));
+  assert.equal(r.status, 0, `ALLOW expected, got ${r.status}: ${r.stderr}`);
+  assert.match(r.stdout, /machine-filled in place/);
+  const lines = DROP_LINES(after);
+  assert.equal(
+    lines.length,
+    1,
+    "exactly one dropped_at line -- filled in place, never duplicated",
+  );
+  assert.match(lines[0], /^dropped_at: \d{4}-\d{2}-\d{2} \d{2}:\d{2} KST$/);
+  assert.match(
+    after,
+    /^role: CODER$/m,
+    "the line after the empty key stays untouched",
+  );
+  // 소비측 정규식(수리본)이 같은 값을 읽는다 -- 다음 줄 텍스트가 아니다
+  const readBack = DROPPED_AT_RE.exec(after);
+  assert.ok(readBack, "the repaired consumer regex finds the stamped value");
+  assert.equal(readBack[1].trim(), lines[0].slice("dropped_at: ".length));
+});
+
+test("HYK-209 (b) ⓑ 값 있음 `dropped_at: 2026-10-05 09:00 KST` -> write-once 그대로(덮어쓰지 않음, 기존 계약 무변경)", () => {
+  const { r, after } = runHyk209Shape(
+    hyk209TaskBody("dropped_at: 2026-10-05 09:00 KST"),
+  );
+  assert.equal(r.status, 0, `ALLOW expected, got ${r.status}: ${r.stderr}`);
+  assert.match(r.stdout, /already present -- write-once/);
+  assert.deepEqual(DROP_LINES(after), ["dropped_at: 2026-10-05 09:00 KST"]);
+});
+
+test("HYK-209 (c) ⓒ `dropped_at:` 줄 자체가 없음 -> task_id 바로 뒤에 기계 삽입(HYK-316 동작 무변경)", () => {
+  const { r, after } = runHyk209Shape(hyk209TaskBody(null));
+  assert.equal(r.status, 0, `ALLOW expected, got ${r.status}: ${r.stderr}`);
+  assert.match(r.stdout, /machine-inserted right after 'task_id:'/);
+  // 삽입 위치: task_id 바로 다음 줄(뒤에 점검표 블록이 붙으므로 role 줄은 나중에 온다)
+  assert.match(
+    after,
+    /^task_id: HYK-9601-dropped-empty-1\ndropped_at: \d{4}-\d{2}-\d{2} \d{2}:\d{2} KST\n/m,
+  );
+  assert.match(after, /^role: CODER$/m);
+  assert.equal(DROP_LINES(after).length, 1);
+});
+
+test("HYK-209 (d) 경계: 탭 뒤 값(`dropped_at:\\t…`)은 계속 매치되고, 공백만 있는 값은 「빈 값」으로 채워진다", () => {
+  const tabBody = runHyk209Shape(
+    hyk209TaskBody("dropped_at:\t2026-10-05 09:00 KST"),
+  );
+  assert.equal(tabBody.r.status, 0);
+  assert.match(
+    tabBody.r.stdout,
+    /already present -- write-once/,
+    "tab-separated value stays a present value",
+  );
+  assert.equal(
+    DROPPED_AT_RE.exec("dropped_at:\t2026-10-05 09:00 KST")[1].trim(),
+    "2026-10-05 09:00 KST",
+  );
+
+  const spacesBody = runHyk209Shape(hyk209TaskBody("dropped_at:   "));
+  assert.equal(spacesBody.r.status, 0);
+  assert.match(
+    spacesBody.r.stdout,
+    /machine-filled in place/,
+    "whitespace-only value is treated as empty, not as a value",
+  );
+  assert.equal(DROP_LINES(spacesBody.after).length, 1);
+});
+
+test("HYK-209 (e) 모호: 빈 `dropped_at:` 줄이 2개 -> 어느 줄도 채우지 않고, 그 사유가 다른 precondition 사유와 구별되는 문자열로 거부된다", () => {
+  const body = hyk209TaskBody("dropped_at:").replace(
+    "some body\n",
+    "dropped_at:\nsome body\n",
+  );
+  const { r, after } = runHyk209Shape(body);
+  assert.notEqual(r.status, 0, "ambiguous shape must not ALLOW");
+  assert.match(
+    `${r.stdout}${r.stderr}`,
+    /'dropped_at:' 줄이 2개이고 값이 비어 있음/,
+    "the rejection names the shape: the dropped_at line is present but empty",
+  );
+  assert.equal(
+    [...after.matchAll(/^dropped_at:[ \t]*$/gm)].length,
+    2,
+    "no stamp written into either ambiguous line",
+  );
+});
+
+test("HYK-209 (f) 코어 단독: REJECT_DROPPED_AT_EMPTY_AMBIGUOUS 는 빈 줄 2개에서만 나고, 0·1개는 기존 계약 그대로(null)", () => {
+  const base = {
+    taskIdMatchCount: 1,
+    taskIdFormatValid: true,
+    ledgerExists: true,
+    ledgerLoadOk: true,
+    ledgerEntryShapeValid: true,
+  };
+  assert.equal(
+    checkGatePreconditions(base),
+    null,
+    "no empty line -> unchanged contract",
+  );
+  assert.equal(
+    checkGatePreconditions({ ...base, droppedAtEmptyLineCount: 1 }),
+    null,
+    "one empty line -> the stamp fills it in place",
+  );
+  const two = checkGatePreconditions({ ...base, droppedAtEmptyLineCount: 2 });
+  assert.equal(
+    two.state,
+    DISPATCH_GATE_STATE.REJECT_DROPPED_AT_EMPTY_AMBIGUOUS,
+  );
+  assert.equal(two.allow, false);
+  // 기존 여섯 precondition 사유와 서로 다른 문자열이어야 한다(P1-B 축)
+  const taskIdNotUnique = checkGatePreconditions({
+    ...base,
+    taskIdMatchCount: 0,
+  });
+  assert.notEqual(two.reason, taskIdNotUnique.reason);
+});
+
+test("HYK-209 (g) 봉투 축: 빈 값 task 는 봉투 머리줄에 `dropped_at=unknown`(오독 없음), 값 있는 task 는 그 값이 기록된다", () => {
+  withFixtureDir((dir) => {
+    const empty = archiveRoundTaskFile({
+      role: "CODER",
+      taskContent: "task_id: HYK-9602-env-1\ndropped_at:\nrole: CODER\n",
+      harnessDir: join(dir, "h1"),
+    });
+    assert.equal(empty.ok, true, empty.reason);
+    const emptyHeader = readFileSync(empty.path, "utf8").split("\n")[0];
+    assert.match(emptyHeader, /dropped_at=unknown /);
+    assert.doesNotMatch(
+      emptyHeader,
+      /dropped_at=role/,
+      "the next line's text must never become the value",
+    );
+
+    const filled = archiveRoundTaskFile({
+      role: "CODER",
+      taskContent:
+        "task_id: HYK-9602-env-2\ndropped_at: 2026-10-05 09:00 KST\nrole: CODER\n",
+      harnessDir: join(dir, "h2"),
+    });
+    assert.equal(filled.ok, true, filled.reason);
+    const filledHeader = readFileSync(filled.path, "utf8").split("\n")[0];
+    assert.match(filledHeader, /dropped_at=2026-10-05 09:00 KST /);
+  });
+});
+
+test("HYK-209 (h) 변이 RED: 옛 `\\s*` 정규식은 빈 dropped_at: 줄 다음 줄을 값으로 읽는다 -- 수리본은 그러지 않는다", () => {
+  const OLD_DROPPED_AT_RE = /^dropped_at:\s*(.+)$/im;
+  const body = "task_id: HYK-9603-red-1\ndropped_at:\nrole: CODER\n";
+  assert.equal(
+    OLD_DROPPED_AT_RE.exec(body)[1],
+    "role: CODER",
+    "the old regex misreads the next line (실사고 모양)",
+  );
+  assert.equal(
+    DROPPED_AT_RE.exec(body),
+    null,
+    "the repaired regex reads an empty line as no value",
+  );
+});
