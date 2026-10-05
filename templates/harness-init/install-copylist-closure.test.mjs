@@ -24,12 +24,26 @@ import { fileURLToPath } from "node:url";
 import {
   ENFORCEMENT_CHECK_FILES,
   ENFORCEMENT_RELAY_FILES,
+  ENFORCEMENT_SUPERVISOR_FILES,
+  ENFORCEMENT_SUPERVISOR_REQUIRED,
+  supervisorCopyPairs,
 } from "./install.mjs";
 
 const THIS_DIR = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(THIS_DIR, "..", "..");
 const CHECK_DIR = path.join(REPO_ROOT, "scripts", "check");
 const RELAY_DIR = path.join(REPO_ROOT, "scripts", "relay");
+const SUPERVISOR_DIR = path.join(REPO_ROOT, "scripts", "supervisor");
+
+// The real lists, all three axes plus the presence requirement. Every call
+// below spreads this and overrides only the one list it is probing, so no
+// call can silently drop an axis.
+const REAL_LISTS = {
+  check: ENFORCEMENT_CHECK_FILES,
+  relay: ENFORCEMENT_RELAY_FILES,
+  supervisor: ENFORCEMENT_SUPERVISOR_FILES,
+  supervisorRequired: ENFORCEMENT_SUPERVISOR_REQUIRED,
+};
 
 // Static-only, on purpose (★정직 한계, restated in the result file too):
 // this regex finds `import`/`export ... from "<spec>"` relative
@@ -47,8 +61,13 @@ const RELAY_DIR = path.join(REPO_ROOT, "scripts", "relay");
 // "../supervisor/X.mjs" (scripts/relay/adapters/* and scripts/supervisor/*
 // are this repo's still-unassembled "unattended layer" --
 // installUnattendedLayerManifest's own header in install.mjs already
-// documents that this installer copies none of those files, in this round
-// or any prior one; several ENFORCEMENT_RELAY_FILES entries genuinely
+// documents that this installer copies none of those files except
+// ENFORCEMENT_SUPERVISOR_FILES (HYK-209-installer-closure-derive-1 2R: the
+// derive CLI and its one import, rate-limit-stall-adapter.mjs). The
+// supervisor axis IS closure-checked, but only for same-directory "./X"
+// imports from files inside scripts/supervisor/; a check/relay file that
+// imports "../supervisor/X.mjs" is still invisible to this regex -- a
+// candidate for a later round, not this one. Several ENFORCEMENT_RELAY_FILES entries genuinely
 // import from scripts/relay/adapters/, so those specific files still
 // MODULE_NOT_FOUND on an installed target -- a real, pre-existing,
 // out-of-scope gap this round does not close).
@@ -104,21 +123,37 @@ function extractRelativeRefs(absPath, ownDirKey) {
 // copy in place.
 const EXEMPT_FROM_CLOSURE = new Set(["pm-guard.mjs"]);
 
-const DIRS = { check: CHECK_DIR, relay: RELAY_DIR };
-// Returns a list of {file, missing} violations across BOTH lists at once:
-// a file in `lists.check`/`lists.relay` statically imports another file
-// (same directory, or explicitly "../check/"/"../relay/" cross-directory),
-// but that target name is not itself present in the list for ITS
-// directory. Files that don't exist on disk are silently skipped -- a
-// different, already-covered failure (copyRawFile's own "source missing"
-// warning), not a closure gap.
+const DIRS = { check: CHECK_DIR, relay: RELAY_DIR, supervisor: SUPERVISOR_DIR };
+// Returns a list of {file, missing} violations across ALL lists at once:
+// (1) a file in `lists.check`/`lists.relay`/`lists.supervisor` statically
+// imports another file (same directory, or explicitly "../check/"/
+// "../relay/" cross-directory), but that target name is not itself present
+// in the list for ITS directory;
+// (2) HYK-209-installer-closure-derive-1 1-1: a listed name whose source file
+// does NOT exist on disk is a violation, not a silent skip. The old
+// `if (!existsSync(abs)) continue;` made the closure check blind to the
+// list's own contents -- a name could be added or left behind with no
+// source and the check stayed green, so "remove it from the list -> red"
+// could never hold;
+// (3) HYK-209-installer-closure-derive-1 1-2: every name in
+// `lists.supervisorRequired` must be present in `lists.supervisor`.
 function findClosureViolations(lists) {
-  const sets = { check: new Set(lists.check), relay: new Set(lists.relay) };
+  const sets = {
+    check: new Set(lists.check),
+    relay: new Set(lists.relay),
+    supervisor: new Set(lists.supervisor),
+  };
   const violations = [];
-  for (const dirKey of ["check", "relay"]) {
+  for (const dirKey of ["check", "relay", "supervisor"]) {
     for (const name of lists[dirKey]) {
       const abs = path.join(DIRS[dirKey], name);
-      if (!existsSync(abs)) continue;
+      if (!existsSync(abs)) {
+        violations.push({
+          file: `${dirKey}/${name}`,
+          missing: "(listed in the copy list, but the source file is absent)",
+        });
+        continue;
+      }
       for (const ref of extractRelativeRefs(abs, dirKey)) {
         if (
           !sets[ref.dirKey].has(ref.name) &&
@@ -132,19 +167,107 @@ function findClosureViolations(lists) {
       }
     }
   }
+  for (const name of lists.supervisorRequired) {
+    if (!sets.supervisor.has(name)) {
+      violations.push({
+        file: "supervisor (copy list)",
+        missing: `supervisor/${name} (required entry point, absent from the list)`,
+      });
+    }
+  }
   return violations;
 }
 
 describe("ⓐ' install copy-list closure (real lists, real files, cross-directory aware)", () => {
-  test("ENFORCEMENT_CHECK_FILES + ENFORCEMENT_RELAY_FILES are jointly import-closed", () => {
-    const violations = findClosureViolations({
-      check: ENFORCEMENT_CHECK_FILES,
-      relay: ENFORCEMENT_RELAY_FILES,
-    });
+  test("ENFORCEMENT_CHECK_FILES + ENFORCEMENT_RELAY_FILES + ENFORCEMENT_SUPERVISOR_FILES are jointly import-closed, present, and carry their required entry points", () => {
+    const violations = findClosureViolations(REAL_LISTS);
     assert.deepEqual(
       violations,
       [],
       `copy lists are missing (or would MODULE_NOT_FOUND on install): ${JSON.stringify(violations, null, 2)}`,
+    );
+  });
+});
+
+// HYK-209-installer-closure-derive-1 1-1 regression: a listed name with NO
+// source file on disk must go RED (it was green before -- the silent skip).
+describe("1-1 listed-but-absent source is a violation (no silent skip)", () => {
+  test("a nonexistent name added to the check list goes RED", () => {
+    const violations = findClosureViolations({
+      ...REAL_LISTS,
+      check: [...ENFORCEMENT_CHECK_FILES, "zz-no-such-file.mjs"],
+    });
+    assert.ok(
+      violations.some(
+        (v) =>
+          v.file === "check/zz-no-such-file.mjs" && /absent/.test(v.missing),
+      ),
+      `expected a violation naming the absent listed file; got ${JSON.stringify(violations)}`,
+    );
+  });
+});
+
+// HYK-209-installer-closure-derive-1 1-2 / 1-3: the scripts/supervisor axis.
+describe("1-2 / 1-3 scripts/supervisor copy axis", () => {
+  test("removing derive-claude-project-dir-cli.mjs from the supervisor list goes RED (required entry point)", () => {
+    const reduced = ENFORCEMENT_SUPERVISOR_FILES.filter(
+      (n) => n !== "derive-claude-project-dir-cli.mjs",
+    );
+    const violations = findClosureViolations({
+      ...REAL_LISTS,
+      supervisor: reduced,
+    });
+    assert.ok(
+      violations.some(
+        (v) =>
+          v.missing ===
+          "supervisor/derive-claude-project-dir-cli.mjs (required entry point, absent from the list)",
+      ),
+      `expected removing derive-claude-project-dir-cli.mjs to surface a violation naming it; got ${JSON.stringify(violations)}`,
+    );
+  });
+
+  test("removing rate-limit-stall-adapter.mjs (the CLI's relative import) goes RED via import closure", () => {
+    const reduced = ENFORCEMENT_SUPERVISOR_FILES.filter(
+      (n) => n !== "rate-limit-stall-adapter.mjs",
+    );
+    const violations = findClosureViolations({
+      ...REAL_LISTS,
+      supervisor: reduced,
+    });
+    assert.ok(
+      violations.some(
+        (v) =>
+          v.file === "supervisor/derive-claude-project-dir-cli.mjs" &&
+          v.missing === "supervisor/rate-limit-stall-adapter.mjs",
+      ),
+      `expected derive CLI's import of rate-limit-stall-adapter.mjs to surface a violation; got ${JSON.stringify(violations)}`,
+    );
+  });
+
+  test("installed destination is scripts/supervisor/<name> (the CLI's endsWith entry-point contract)", () => {
+    const target = path.join(REPO_ROOT, "__target__");
+    const pairs = supervisorCopyPairs(target);
+    assert.equal(pairs.length, ENFORCEMENT_SUPERVISOR_FILES.length);
+    for (const { src, dst } of pairs) {
+      const name = path.basename(src);
+      assert.equal(dst, path.join(target, "scripts", "supervisor", name));
+      assert.equal(src, path.join(SUPERVISOR_DIR, name));
+      assert.ok(
+        dst.split(path.sep).join("/").endsWith(`scripts/supervisor/${name}`),
+        `destination for ${name} must end with scripts/supervisor/${name}; got ${dst}`,
+      );
+    }
+    const cli = pairs.find(
+      (p) => path.basename(p.src) === "derive-claude-project-dir-cli.mjs",
+    );
+    assert.ok(cli, "derive CLI must be among the copied pairs");
+    assert.ok(
+      cli.dst
+        .split(path.sep)
+        .join("/")
+        .endsWith("scripts/supervisor/derive-claude-project-dir-cli.mjs"),
+      "the CLI's own run-detection endsWith() string must match its installed path",
     );
   });
 });
@@ -208,8 +331,8 @@ describe("음성 대조 + 과거 사고 회귀 증명 (in-memory list reduction,
         `${removed} must actually be present in the real list for this control to mean anything`,
       );
       const violations = findClosureViolations({
+        ...REAL_LISTS,
         check: reduced,
-        relay: ENFORCEMENT_RELAY_FILES,
       });
       assert.ok(
         violations.some((v) => v.missing === `check/${removed}`),
@@ -223,8 +346,8 @@ describe("음성 대조 + 과거 사고 회귀 증명 (in-memory list reduction,
       (n) => n !== "done-line-write-guard.mjs",
     );
     const violations = findClosureViolations({
+      ...REAL_LISTS,
       check: reduced,
-      relay: ENFORCEMENT_RELAY_FILES,
     });
     assert.ok(
       violations.some(
@@ -247,8 +370,8 @@ describe("음성 대조 + 과거 사고 회귀 증명 (in-memory list reduction,
       (n) => n !== "review-gate.test.mjs",
     );
     const violations = findClosureViolations({
+      ...REAL_LISTS,
       check: listWithoutItsOwnTest,
-      relay: ENFORCEMENT_RELAY_FILES,
     });
     assert.ok(
       !violations.some((v) => v.file === hookOnlyFile),
