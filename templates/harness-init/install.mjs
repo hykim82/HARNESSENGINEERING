@@ -223,15 +223,42 @@ function substitute(content, map) {
 
 const installed = [];
 const skipped = [];
+// HYK-209-installer-mismatch-report-1 축 B: the subset of `skipped` whose
+// existing file differs from what this installer would write. Reporting only:
+// a differing file is still NOT overwritten (update policy is a separate
+// decision), and `skipped` keeps its old meaning (every skip, identical or not).
+const differing = [];
 
 function ensureParentDir(filePath) {
   mkdirSync(path.dirname(filePath), { recursive: true });
 }
 
+// Every skip-if-exists branch in the copy axes (copyRawFile, writeTemplateFile,
+// installPmGuard) funnels here. `expected` is the bytes this install would have
+// written (a Buffer/string, or a thunk producing one). If computing it or
+// reading the existing file fails, the file is NOT reported as differing: an
+// unverifiable file is not claimed to be stale.
+function noteSkippedExisting(destPath, expected) {
+  skipped.push(destPath);
+  console.warn(`skip (already exists): ${destPath}`);
+  let same;
+  try {
+    const want = typeof expected === "function" ? expected() : expected;
+    same = readFileSync(destPath).equals(Buffer.from(want));
+  } catch {
+    return;
+  }
+  if (!same) {
+    differing.push(destPath);
+    console.warn(`  ↳ 있지만 내용이 다름 — 갱신하지 않음: ${destPath}`);
+  }
+}
+
 function writeTemplateFile(srcPath, destPath, map, { dryRun, executable }) {
   if (existsSync(destPath)) {
-    skipped.push(destPath);
-    console.warn(`skip (already exists): ${destPath}`);
+    noteSkippedExisting(destPath, () =>
+      substitute(readFileSync(srcPath, "utf8"), map),
+    );
     return;
   }
   const content = substitute(readFileSync(srcPath, "utf8"), map);
@@ -258,8 +285,7 @@ function copyRawFile(srcPath, destPath, { dryRun, executable }) {
     return;
   }
   if (existsSync(destPath)) {
-    skipped.push(destPath);
-    console.warn(`skip (already exists): ${destPath}`);
+    noteSkippedExisting(destPath, () => readFileSync(srcPath));
     return;
   }
   if (!dryRun) {
@@ -847,8 +873,9 @@ function installPmGuard(params, targetRepoPath, { dryRun }) {
     return;
   }
   if (existsSync(destPath)) {
-    skipped.push(destPath);
-    console.warn(`skip (already exists): ${destPath}`);
+    noteSkippedExisting(destPath, () =>
+      substitutePmGuardControlRoom(readFileSync(srcPath, "utf8"), params),
+    );
     return;
   }
   const content = substitutePmGuardControlRoom(
@@ -1678,6 +1705,10 @@ function main() {
   for (const f of installed) console.log(`  + ${f}`);
   console.log(`skipped, already existed (${skipped.length}):`);
   for (const f of skipped) console.log(`  = ${f}`);
+  // HYK-209-installer-mismatch-report-1 축 B: the stale-file report. Printed on
+  // dry-run too, so a human sees what is out of date before the install.
+  console.log(`있지만 내용이 다름 — 갱신하지 않음 (${differing.length}):`);
+  for (const f of differing) console.log(`  ! ${f}`);
   console.log("");
 }
 
