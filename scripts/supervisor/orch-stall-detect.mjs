@@ -190,8 +190,10 @@ export const EXIT_CODE_BY_VERDICT = Object.freeze({
   [ORCH_PROGRESS_VERDICT.UNDECIDABLE]: 3,
 });
 
+// HYK-209 깊이 방어: `\s*` → `[ \t]*` (개행을 넘어 다음 줄을 읽지 않는다).
+// 줄 끝 `$` 는 m 플래그에서 `\r` 앞에서도 맞으므로 CRLF 파일도 그대로 된다.
 const DROPPED_AT_RE =
-  /^dropped_at:\s*(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}) KST\s*$/im;
+  /^dropped_at:[ \t]*(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}) KST[ \t]*$/im;
 const TASK_ID_RE = /^task_id:\s*(\S.*?)\s*$/im;
 // HYK-185-startcheck-wire 2R(coder-task.md §R2, REVIEW P1 반려 수리) --
 // 완료의 정본은 결과 파일의 **존재**가 아니라 그 안의 칼럼-0 `>>> DONE:`
