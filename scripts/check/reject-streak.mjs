@@ -214,6 +214,38 @@ export function unclosedFenceOpenLine(content) {
   return fence === null ? -1 : openedAt;
 }
 
+// HYK-209 (2026-10-05, 검토 P2-1 수리): 닫히지 않은 HTML 주석의 여는 줄(없으면
+// -1). maskHtmlComments 는 닫히지 않은 <!-- 를 문서 끝까지 가린다(fail-closed)
+// -- 그 뒤의 진짜 빈 dropped_at: 줄이 가려지는 것이 바로 그 자리다. 이 함수는
+// 「가림을 어느 줄에서 끊을지」만 알려준다. 가림 자체(maskQuotedMarkerRegions)는
+// 바꾸지 않는다 -- 그래서 HYK-449 정본을 쓰는 다른 축들은 한 글자도 안 바뀐다.
+// 판정 규칙은 maskQuotedMarkerRegions 와 같은 순서(펜스 먼저 · 인라인 코드
+// 구간 제외)를 그대로 따른다 -- 같은 헬퍼를 이 파일 안에서 재사용한다.
+export function unclosedCommentOpenLine(content) {
+  const fenced = maskFencedBlocks(content);
+  const codeRanges = inlineCodeRanges(fenced);
+  let from = 0;
+  for (;;) {
+    const start = findOutsideInlineCode(fenced, "<!--", from, codeRanges);
+    if (start === -1) return -1;
+    const closeAt = findOutsideInlineCode(fenced, "-->", start + 4, codeRanges);
+    if (closeAt === -1) return fenced.slice(0, start).split("\n").length - 1;
+    from = closeAt + 3;
+  }
+}
+
+// HYK-209: 닫히지 않은 «인용 구간»(펜스 ∪ HTML 주석)의 여는 줄 중 먼저 오는
+// 것(없으면 -1). 빈 dropped_at: 줄 판정이 이 줄 «이후»를 가리지 않도록 쓴다
+// (dispatch-gate-decision.mjs droppedAtScanText). 펜스만 보던 예전 판정
+// (unclosedFenceOpenLine)은 주석이 여전히 진짜 빈 줄을 삼키는 구멍을 남겼다.
+export function unclosedQuoteOpenLine(content) {
+  const fence = unclosedFenceOpenLine(content);
+  const comment = unclosedCommentOpenLine(content);
+  if (fence === -1) return comment;
+  if (comment === -1) return fence;
+  return Math.min(fence, comment);
+}
+
 // HYK-469 3R §2 (책임자 조건 1, HYK-468 4R과 같은 원리): 468 3R이 만든
 // admission-completion-adapter.mjs 로컬 복제(고정 sibling 목록 때문에
 // import 불가 -- 그 파일 헤더 주석 참조)가 이 인라인 코드 마스킹 규칙

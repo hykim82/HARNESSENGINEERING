@@ -202,6 +202,32 @@ test("collect TASK_FILE_DROPPED_AFTER: task file with a well-formed dropped_at h
   });
 });
 
+// HYK-209 사이트 7 (자기 축 행동 시험 · 검토 M4): 빈 `dropped_at:` 줄 바로 다음 줄이
+// 맨 KST 시각이면, 지연 판정은 그 다음 줄을 낙하 시각으로 읽으면 안 된다. 좁힌 뒤의
+// 새 답은 「수집 실패(collected:false)」다 -- 가짜 시각을 만들지 않는다(행동 불변이
+// 아니라 새 답을 단정한다: base 는 가짜 시각을 줬고, head 는 실패로 닫는다).
+test("HYK-209 사이트 7: 빈 dropped_at: 줄 + 다음 줄의 KST 시각 -> 지연 판정은 가짜 시각을 쓰지 않고 수집 실패로 닫는다 (collected:false)", () => {
+  withTempDir("orch-stall-collect-", (dir) => {
+    fs.mkdirSync(join(dir, ".harness"));
+    fs.writeFileSync(
+      join(dir, ".harness", "coder-task.md"),
+      "task_id: HYK-000-empty\ndropped_at:\n2026-08-01 10:00 KST\n\n본문\n",
+      "utf8",
+    );
+    const entry = collectObservationForPledge(dir, {
+      expectedArtifact: {
+        kind: ARTIFACT_KIND.TASK_FILE_DROPPED_AFTER,
+        path: ".harness/coder-task.md",
+      },
+    });
+    assert.deepEqual(
+      entry,
+      { collected: false },
+      "the next line's clock must never become this round's drop time",
+    );
+  });
+});
+
 test("collect TASK_FILE_DROPPED_AFTER: task file exists but dropped_at header missing -> {collected:false} (fail-closed, not a fabricated timestamp)", () => {
   withTempDir("orch-stall-collect-", (dir) => {
     fs.mkdirSync(join(dir, ".harness"));
