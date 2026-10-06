@@ -12,7 +12,17 @@ env:
 
 jobs:
   enforce:
-    runs-on: ubuntu-latest
+    # HYK-464: pinned to ubuntu-24.04 instead of ubuntu-latest. Why not
+    # `latest`: on 2026-10-06 the same tree (1f57b66) went green on attempt 1
+    # of run 723 and red on attempt 2 with zero code change, so the runner
+    # image itself changed underneath us. The newer image does not ship
+    # `pwsh`, and the contract tests that spawn pwsh went red (exit null =
+    # executable absent). Runs 725 (cd7c33e) and 727 (fef13c9) are red for
+    # the same reason. Pinning the image makes the runner environment a
+    # reviewed change instead of an invisible drift. Honest limit: an
+    # explicit image is time-limited and will eventually reach end of
+    # support, at which point this pin has to be re-evaluated.
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -23,6 +33,29 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 20
+
+      # HYK-464: environment gate, ahead of every suite. Keep this step
+      # fail-closed like the gitleaks install below: if pwsh is absent we
+      # install it from Microsoft's apt repository, re-check, and fail the
+      # job when it is still missing. Never skip silently -- an absent pwsh
+      # is exactly what turned the pwsh-spawning tests into a silent red
+      # wall before. Major-only pin (7.x): the Microsoft repo signs and
+      # verifies its own packages, so no sha256 pin is kept here.
+      # Success log line to look for: "PowerShell 7." from `pwsh --version`.
+      - name: Setup PowerShell 7 (pwsh) environment gate
+        run: |
+          set -e
+          if pwsh --version; then
+            echo "pwsh already present on runner image -- no install needed"
+          else
+            echo "pwsh missing on runner image -- installing PowerShell 7 from the Microsoft apt repository"
+            curl -sSL -o "$RUNNER_TEMP/packages-microsoft-prod.deb" "https://packages.microsoft.com/config/ubuntu/24.04/packages-microsoft-prod.deb"
+            sudo dpkg -i "$RUNNER_TEMP/packages-microsoft-prod.deb"
+            sudo apt-get update
+            sudo apt-get install -y "powershell=7.*"
+            pwsh --version
+          fi
+          test "$(pwsh -NoProfile -Command '$PSVersionTable.PSVersion.Major')" = "7"
 
       - name: Install pinned quality tooling (eslint/prettier, HYK-148)
         run: npm ci
@@ -52,7 +85,7 @@ jobs:
       # (node scripts/check/isolated-suite-runner.mjs), so CI and a local
       # run are byte-identical. Do not inline the node invocation here
       # again; that duplication is what let CI and local drift silently.
-      - name: check test suites (scripts/check + scripts/relay + scripts/relay/adapters + scripts/supervisor *.test.mjs)
+      - name: check test suites (scripts/check + scripts/relay + scripts/relay/adapters + scripts/supervisor + templates/harness-init *.test.mjs)
         run: npm test
 
       - name: hooks POSIX syntax check
