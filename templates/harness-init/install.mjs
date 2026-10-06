@@ -48,6 +48,7 @@ import {
   chmodSync,
   readdirSync,
   copyFileSync,
+  renameSync,
 } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -265,6 +266,11 @@ const runOpts = {
 const updated = [];
 const mergedFiles = [];
 const UPDATE_MANIFEST_SCHEMA = "installer-update-manifest/1";
+// HYK-209-installer-rollback-gaps-1: manifest header fields, fixed at the first
+// write of a run (see writeUpdateManifest). Reset in startRun.
+let manifestAt = "";
+let manifestInstaller;
+let manifestAnnounced = false;
 
 function ensureParentDir(filePath) {
   mkdirSync(path.dirname(filePath), { recursive: true });
@@ -338,6 +344,10 @@ function noteSkippedExisting(destPath, expected, { replaceable = false } = {}) {
 // go to <target>/.harness/install-backup/<stamp>/<rel> first; before/after
 // sha256 are kept for the manifest (the input --rollback reads). Dry-run records
 // the same entry without touching disk, so the printed set matches a real run.
+// HYK-209-installer-rollback-gaps-1 (숙제 2): the order is backup -> manifest
+// entry -> target write. The entry reaches the manifest BEFORE the target changes,
+// so a death between the two leaves an entry whose current bytes are still the
+// before-value --rollback reports as "already at pre-update value" (no loss).
 function replaceMismatched(destPath, want) {
   const rel = path.relative(runOpts.targetRepoPath, destPath);
   const before = sha256Buffer(readFileSync(destPath));
@@ -346,9 +356,12 @@ function replaceMismatched(destPath, want) {
   if (!runOpts.dryRun) {
     ensureParentDir(backup);
     copyFileSync(destPath, backup);
+    updated.push({ path: destPath, rel, before, after, backup });
+    writeUpdateManifest();
     writeFileSync(destPath, want);
+  } else {
+    updated.push({ path: destPath, rel, before, after, backup });
   }
-  updated.push({ path: destPath, rel, before, after, backup });
   console.log(
     `${runOpts.dryRun ? "[dry-run] would update" : "updated"} (상이 → 틀 값): ${destPath}`,
   );
@@ -1894,26 +1907,37 @@ function printFiveCellReport(transplants) {
   );
 }
 
-// HYK-209-installer-update-flag-1: writes the update manifest (real runs with at
-// least one replacement only). It is the only input --rollback reads.
+// HYK-209-installer-update-flag-1: the update manifest -- the only input --rollback
+// reads. HYK-209-installer-rollback-gaps-1 (숙제 2): it is rewritten after EVERY
+// replacement entry (called from replaceMismatched, before the target changes),
+// so a run that dies mid-way still leaves a manifest for every cell it reached.
+// Each rewrite goes to a temp file and is renamed over the old one, so a death
+// during the write leaves the previous complete manifest, never a torn file.
 function writeUpdateManifest() {
   const file = path.join(
     runOpts.targetRepoPath,
     ".harness",
     `install-update-${runOpts.stamp}.manifest.json`,
   );
-  let installer = null;
-  try {
-    installer = execFileSync("git", ["-C", REPO_ROOT, "rev-parse", "HEAD"], {
-      encoding: "utf8",
-    }).trim();
-  } catch {
-    // best-effort: the installer may run outside a git checkout
+  if (!manifestAt) manifestAt = new Date().toISOString();
+  if (manifestInstaller === undefined) {
+    try {
+      manifestInstaller = execFileSync(
+        "git",
+        ["-C", REPO_ROOT, "rev-parse", "HEAD"],
+        {
+          encoding: "utf8",
+        },
+      ).trim();
+    } catch {
+      // best-effort: the installer may run outside a git checkout
+      manifestInstaller = null;
+    }
   }
   const manifest = {
     schema: UPDATE_MANIFEST_SCHEMA,
-    at: new Date().toISOString(),
-    installer,
+    at: manifestAt,
+    installer: manifestInstaller,
     target: runOpts.targetRepoPath,
     entries: updated.map((u) => ({
       rel: u.rel,
@@ -1924,8 +1948,13 @@ function writeUpdateManifest() {
     })),
   };
   ensureParentDir(file);
-  writeFileSync(file, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
-  console.log(`update manifest: ${file}`);
+  const tmp = `${file}.tmp`;
+  writeFileSync(tmp, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+  renameSync(tmp, file);
+  if (!manifestAnnounced) {
+    console.log(`update manifest: ${file}`);
+    manifestAnnounced = true;
+  }
 }
 
 // HYK-209-installer-update-flag-1: `--rollback <manifest>`. Each entry is
@@ -1997,11 +2026,9 @@ function startRun(params) {
   runOpts.updateMismatched = !!params.updateMismatched;
   runOpts.targetRepoPath = params.repoPath;
   runOpts.stamp = stampNow();
-}
-
-// The manifest is written only by a real run that replaced at least one file.
-function finishRun() {
-  if (!runOpts.dryRun && updated.length) writeUpdateManifest();
+  manifestAt = "";
+  manifestInstaller = undefined;
+  manifestAnnounced = false;
 }
 
 function main() {
@@ -2114,7 +2141,6 @@ function main() {
   console.log(`있지만 내용이 다름 — 갱신하지 않음 (${differing.length}):`);
   for (const f of differing) console.log(`  ! ${f}`);
   printFiveCellReport(scanOutOfListTransplants(targetRepoPath));
-  finishRun();
   console.log("");
 }
 

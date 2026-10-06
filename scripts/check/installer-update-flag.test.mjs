@@ -19,6 +19,9 @@ import {
   writeFileSync,
   existsSync,
   readdirSync,
+  chmodSync,
+  accessSync,
+  constants,
 } from "node:fs";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
@@ -490,5 +493,169 @@ test("value file: the flag never touches concurrency-cap.json, and admit fails c
     existsSync(path.join(probe, "ledger.json")),
     false,
     "no ledger file may be created",
+  );
+});
+
+// ── HYK-209-installer-rollback-gaps-1 ─────────────────────────────────────────
+// 숙제 1 (되돌림 안전장치를 시험으로 고정): G2 = 백업 무결성 게이트 (runRollback),
+// G3 = 복원 뒤 sha256 검증. G1(사람이 고친 칸 거부)은 위 「--rollback refuses」가 잡는다.
+// 숙제 2 (중간 사망 복구): manifest 는 칸마다 교체 「직전」에 적힌다.
+
+// Lists the replacement order the real run will take: the dry-run prints one
+// 「would update」 line per cell in the order it will touch them.
+function dryRunOrder(dir) {
+  const dry = runInstaller(dir, ["--update-mismatched", "--dry-run"]);
+  assert.equal(dry.status, 0, `dry-run must exit 0: ${dry.stderr}`);
+  return [
+    ...dry.stdout.matchAll(
+      /\[dry-run\] would update \(상이 → 틀 값\): (.+)$/gm,
+    ),
+  ].map((m) => path.resolve(m[1].trim()));
+}
+
+test("--update-mismatched: a death in the middle of the run leaves a manifest for every reached cell, and --rollback restores them", (t) => {
+  // A second registered stale cell, so one replacement can succeed before the
+  // death. The death is REAL: the second target is made read-only, so the
+  // installer's own writeFileSync throws (EPERM/EACCES) mid-run and the process
+  // exits without reaching the end-of-run summary.
+  const dir = mkdtempSync(path.join(tmpdir(), "hyk209-rollback-gaps-"));
+  // The only file this test makes read-only. Cleanup restores exactly that
+  // one: a recursive walk would also chmod directories, and on POSIX a 0o666
+  // directory loses its search bit, so rmSync then fails with EACCES.
+  let readOnly = null;
+  t.after(() => {
+    if (readOnly) chmodSync(readOnly, 0o666);
+    rmSync(dir, { recursive: true, force: true });
+  });
+  seedTarget(dir);
+  writeFileSync(path.join(dir, ".gitleaks.toml"), "# stale gitleaks\n", "utf8");
+
+  const order = dryRunOrder(dir);
+  const second = order[1];
+  assert.ok(
+    order.length >= 2 && second,
+    `two cells must be replaceable, got: ${order.join(", ")}`,
+  );
+  const pre = Object.fromEntries(order.map((p) => [p, sha256(p)]));
+  chmodSync(second, 0o444);
+  readOnly = second;
+  try {
+    accessSync(second, constants.W_OK);
+    t.skip(
+      "read-only file is still writable here (root/ACL): death cannot be injected",
+    );
+    return;
+  } catch {
+    // read-only as intended
+  }
+
+  const res = runInstaller(dir, ["--update-mismatched"]);
+  assert.notEqual(res.status, 0, "the second write must kill the run");
+
+  const manifestName = updateFilesIn(dir).find((f) =>
+    f.endsWith(".manifest.json"),
+  );
+  assert.ok(manifestName, "a manifest must exist although the run died");
+  const manifestPath = path.join(dir, ".harness", manifestName);
+  const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+  assert.equal(
+    manifest.entries.length,
+    2,
+    "the manifest must hold the completed cell AND the cell whose write died",
+  );
+  const byPath = (p) =>
+    manifest.entries.find((e) => path.resolve(e.path) === p);
+  const done = byPath(order[0]);
+  const died = byPath(second);
+  assert.ok(done && died, "both reached cells must be named by path");
+  assert.equal(sha256(order[0]), done.after_sha256, "first cell completed");
+  assert.equal(
+    sha256(second),
+    pre[second],
+    "the cell whose write died keeps its pre-update bytes",
+  );
+  assert.equal(died.before_sha256, pre[second], "its before-sha is recorded");
+
+  const rb = spawnSync(
+    process.execPath,
+    [INSTALL_PATH, "--rollback", manifestPath],
+    {
+      encoding: "utf8",
+    },
+  );
+  assert.equal(rb.status, 0, `rollback must exit 0: ${rb.stdout}${rb.stderr}`);
+  assert.ok(
+    rb.stdout.includes("rollback: 2 ok, 0 refused"),
+    `rollback must report both cells ok: ${rb.stdout}`,
+  );
+  assert.equal(sha256(order[0]), pre[order[0]], "completed cell restored");
+  assert.equal(
+    sha256(second),
+    pre[second],
+    "died cell still at pre-update bytes",
+  );
+});
+
+test("--rollback refuses a missing backup and leaves the current bytes untouched", (t) => {
+  const dir = freshTarget(t);
+  runInstaller(dir, ["--update-mismatched"]);
+  const manifestPath = path.join(dir, ".harness", updateFilesIn(dir)[0]);
+  const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+  const entry = manifest.entries.find(
+    (e) => path.resolve(e.path) === path.join(dir, STALE_RAW),
+  );
+  const after = sha256(path.join(dir, STALE_RAW));
+  rmSync(entry.backup, { force: true });
+
+  const res = spawnSync(
+    process.execPath,
+    [INSTALL_PATH, "--rollback", manifestPath],
+    {
+      encoding: "utf8",
+    },
+  );
+  assert.equal(res.status, 1, "a refused entry must exit 1 (fail-closed)");
+  assert.ok(
+    res.stdout.includes("refused (백업이 없거나 원본 sha256 과 다르다)"),
+    `the backup gate must name the refusal: ${res.stdout}${res.stderr}`,
+  );
+  assert.equal(
+    sha256(path.join(dir, STALE_RAW)),
+    after,
+    "a refused cell must keep its updated bytes",
+  );
+});
+
+test("--rollback refuses a tampered backup and never writes its bytes into the target", (t) => {
+  const dir = freshTarget(t);
+  runInstaller(dir, ["--update-mismatched"]);
+  const manifestPath = path.join(dir, ".harness", updateFilesIn(dir)[0]);
+  const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+  const entry = manifest.entries.find(
+    (e) => path.resolve(e.path) === path.join(dir, STALE_RAW),
+  );
+  const after = sha256(path.join(dir, STALE_RAW));
+  writeFileSync(
+    entry.backup,
+    "tampered backup -- not the pre-update bytes\n",
+    "utf8",
+  );
+
+  const res = spawnSync(
+    process.execPath,
+    [INSTALL_PATH, "--rollback", manifestPath],
+    {
+      encoding: "utf8",
+    },
+  );
+  assert.equal(res.status, 1, "a refused entry must exit 1 (fail-closed)");
+  assert.ok(
+    res.stdout.includes("refused (백업이 없거나 원본 sha256 과 다르다)"),
+    `the backup gate must refuse a tampered backup: ${res.stdout}${res.stderr}`,
+  );
+  assert.equal(
+    sha256(path.join(dir, STALE_RAW)),
+    after,
+    "the tampered backup must never be copied over the target",
   );
 });

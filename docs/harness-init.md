@@ -172,8 +172,11 @@ Both profiles (profile-agnostic core):
   (HYK-95) — a _real_, per-clone install of the two git hooks above, on top
   of the tracked copy under `hooks/`. Only runs when `<target>/.git` exists
   as a directory (a fresh, not-yet-`git init`'d target gets a warning
-  instead, no crash); never overwrites an existing installed hook
+  instead, no crash); by default never overwrites an existing installed hook
   (skip + warn, same convention as every other file this installer writes).
+  With `--update-mismatched` a differing installed hook _is_ replaced from the
+  template, with a backup and a manifest (see "`--update-mismatched` and
+  `--rollback`" below).
   A target with no `.git/` at all still gets the tracked `hooks/` copy, for
   a later manual install. **That later install (HYK-196):** prefer
   `node scripts/check/hook-sync-check.mjs --install` over hand-copying —
@@ -548,7 +551,8 @@ one "can't safely do it" fallback:**
    helper at all, so setting one would be inert.
 3. `git config --local credential.helper` is already set to something →
    **not touched.** Same never-overwrite convention as every other file
-   this installer writes; skip + warn + a snippet showing the command to
+   this installer writes by default (`--update-mismatched` does not touch
+   git config); skip + warn + a snippet showing the command to
    run by hand if the existing value turns out to be wrong for this clone.
 4. `gh` is not on `PATH` (checked via `gh --version`) → **not set.**
    Pinning to a helper that can't actually authenticate would break every
@@ -683,12 +687,56 @@ node templates/harness-init/install.mjs \
 
 Parameters may also be supplied via a `harness-init.config.json` placed in
 the target repo (or passed with `--config <path>`); CLI flags override
-matching config-file keys. `install.mjs` never overwrites an existing file
-— an existing path is skipped with a warning, never replaced. `--dry-run`
+matching config-file keys. By default `install.mjs` never overwrites an
+existing file — an existing path is skipped with a warning, never replaced.
+The one exception is the opt-in `--update-mismatched` flag (below). `--dry-run`
 logs every action it would take without writing anything, useful for
 confirming the skip path on a repo that already has the harness installed.
 Run output ends with an installed/skipped file summary, and for
 `solo-full`, the GitHub setup checklist.
+
+### `--update-mismatched` and `--rollback`
+
+`--update-mismatched` replaces a file **only** when all three hold: it already
+exists, its bytes differ from what this installer would write, and the installer
+writes it from a fixed template or raw source (its copy list, including
+`.gitleaks.toml`, the CI workflow, and the two `.git/hooks/` files). Before each
+replacement the original bytes go to `<target>/.harness/install-backup/<stamp>/<rel>`,
+and `<target>/.harness/install-update-<stamp>.manifest.json` records the before and
+after sha256 of every replaced file. `--dry-run` with the flag prints the same set
+and changes nothing.
+
+It never replaces: merge targets (`.gitignore`, `AGENTS.md`,
+`.claude/settings.local.json` — a hooks key is only added where it is absent),
+the `pm-guard.mjs` substituted install, value files such as
+`scripts/supervisor/concurrency-cap.json`, the installer's generated state files
+(`.harness/admission-ledger-path.json`, `.harness/dispatch-receipt-path.json`,
+`.harness/unattended-layer-placeholders.json`, the GitHub setup checklist), and
+anything outside its copy list. Those differing files are still reported by
+name, but **`--update-mismatched` does not bring a stale install fully up to
+date** — the generated state files stay stale under this flag, because they
+are not fixed template bytes the installer can replace.
+
+`--rollback <manifest>` restores each recorded file from its backup and is
+fail-closed per file: a file edited by a person after the update is refused and
+left as it is (exit 1); a backup that is missing or whose sha256 does not match
+the recorded before-value is refused (also exit 1); every restore is verified by
+sha256. A file already at its pre-update bytes is reported and skipped, so a
+second rollback is safe. The manifest is rewritten before each file is changed,
+so a run that dies partway still leaves a manifest covering every file it
+reached, and `--rollback` can restore those.
+
+Known limits, stated plainly:
+
+- A run that dies after writing a backup but before its manifest entry leaves
+  that backup with no manifest entry. The target file is still untouched.
+- Nothing in the installer or in this document says when
+  `.harness/install-backup/` may be deleted. It is left to the operator.
+- The POSIX executable bit is not re-applied when a file is replaced. This was
+  measured only on Windows, not on a POSIX host.
+- The mid-run death behaviour was measured on a synthetic target with one
+  replacement write forced to fail. A process killed at an arbitrary point, or a
+  disk fault, was not measured.
 
 ## Package Contents
 
