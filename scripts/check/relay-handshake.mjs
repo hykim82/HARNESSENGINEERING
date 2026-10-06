@@ -1085,6 +1085,7 @@ function checkFutureSkew({ candidateDate, rawText, field, now }) {
 // result exists yet at all).
 // HYK-209 mask-readers: 시험이 가림 뒤 첫 매치 판독을 직접 행동 시험하도록 노출한다.
 export { resolveDroppedAt as __probeResolveDroppedAt };
+export { resolveResultDoneMatch as __probeResolveResultDoneMatch };
 function resolveDroppedAt(taskContent, now) {
   // HYK-209 ⓑ: 가림 뒤 첫 매치(인용 안 예시 시각을 낙하 시각으로 읽지 않는다).
   const droppedMatch = droppedAtScanText(taskContent).match(DROPPED_AT_RE);
