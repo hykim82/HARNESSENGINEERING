@@ -3584,6 +3584,28 @@ export function buildResultHeaderChecklistLines(role) {
   ];
 }
 
+// HYK-480 실사고 수리 (경로 주입은 건너뛰고 점검표만 누락분 채움): 점검표
+// 줄의 키(`result_header_checklist_<field>:`)가 이미 칼럼 0에 있으면 그 줄은
+// 손글씨든 기계든 무접촉이다 -- ORCH 가 더 강하게 써 둔 문면을 덮지 않는다.
+// 존재 판정은 인용(펜스·HTML 주석) 안의 예시를 세지 않도록 masked 텍스트에서
+// 한다(fillEmptyLegacyKeysInPlace 와 같은 마스킹 관례). 반환은 "빠진 줄"만이고,
+// 그 줄들은 문면일 뿐 값(40-hex head_commit 등)을 담지 않는다.
+function checklistKeyOf(line) {
+  return line.slice(0, line.indexOf(":") + 1);
+}
+
+export function missingChecklistLinesIn(text, checklistLines) {
+  const masked = maskQuotedMarkerRegions(text);
+  const presentKeys = new Set(
+    [...masked.matchAll(/^result_header_checklist_[a-z_]+:/gim)].map((m) =>
+      m[0].toLowerCase(),
+    ),
+  );
+  return checklistLines.filter(
+    (line) => !presentKeys.has(checklistKeyOf(line).toLowerCase()),
+  );
+}
+
 // HYK-480 §1: 옛 4키(result_file·runner_receipt_file·harness_gitignore_note·
 // worktree_discipline)의 실제 값. 점검표(위)는 이 값들과 별개로 항상
 // 새로 덧붙는 텍스트라 "빈 키"로 사전 존재할 수 없다(이 라운드에 처음
@@ -3702,6 +3724,28 @@ function bestEffortInjectResultPaths(taskPath, args) {
       // return"을 닫는다).
       console.log(
         `dispatch-gate-decision: result-path injection skipped (already injected -- matched line: '${existingMatch[0].trim()}') -- ${taskPath}`,
+      );
+      // HYK-480 실사고(라운드 4 · 손으로 쓴 ORCH 지시서): 경로 주입은 건너뛰되,
+      // 점검표는 "누락분만" 채운다. 이 분기가 return 하면 점검표 주입 자체가
+      // 닿지 않아, 손 지시서 대부분에서 점검표가 꺼져 있었다.
+      const missingChecklist = missingChecklistLinesIn(
+        original,
+        buildResultHeaderChecklistLines(role),
+      );
+      if (missingChecklist.length === 0) return;
+      const missingKeys = missingChecklist.map(checklistKeyOf);
+      const fillMarker = `result_header_checklist_fill: HYK-480 기계 주입(누락분만 채움 -- 이미 있는 줄은 무접촉) -- 채운 키: ${missingKeys.map((k) => k.slice("result_header_checklist_".length, -1)).join(", ")}`;
+      const fillBlock = [fillMarker, ...missingChecklist]
+        .map((line) => `\n${line}`)
+        .join("");
+      const fillAt = existingMatch.index + existingMatch[0].length;
+      writeFileSync(
+        taskPath,
+        original.slice(0, fillAt) + fillBlock + original.slice(fillAt),
+        "utf8",
+      );
+      console.log(
+        `dispatch-gate-decision: result-path injection skipped, checklist fill-in-place (HYK-480 기계 주입, missing keys only: ${missingKeys.join(", ")}) -- ${taskPath}`,
       );
       return;
     }
