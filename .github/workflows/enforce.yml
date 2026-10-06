@@ -52,7 +52,7 @@ jobs:
       # (node scripts/check/isolated-suite-runner.mjs), so CI and a local
       # run are byte-identical. Do not inline the node invocation here
       # again; that duplication is what let CI and local drift silently.
-      - name: check test suites (scripts/check + scripts/relay + scripts/relay/adapters + scripts/supervisor *.test.mjs)
+      - name: check test suites (scripts/check + scripts/relay + scripts/relay/adapters + scripts/supervisor + templates/harness-init *.test.mjs)
         run: npm test
 
       - name: hooks POSIX syntax check
