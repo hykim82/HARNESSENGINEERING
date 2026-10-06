@@ -8,7 +8,8 @@ import {
   isReviewFamilyRole,
   REJECT_STREAK_REASON_CODE,
   maskQuotedMarkerRegions,
-  unclosedFenceOpenLine,
+  unclosedQuoteOpenLine,
+  droppedAtScanText,
 } from "./reject-streak.mjs";
 import {
   archiveRoundEnvelope,
@@ -127,7 +128,10 @@ function hasStructuralPredecessor(lines, idx) {
 // (taskId, droppedAt) key it hands to first-observation.mjs's
 // findFirstObservation -- same reuse-not-reinvent instruction as DONE_RE/
 // isWellFormedDoneTimestamp above.
-export const DROPPED_AT_RE = /^dropped_at:\s*(.+)$/im;
+// HYK-209 (2026-10-05): `[ \t]*` (not `\s*`) -- `\s*` crosses the newline, so
+// an empty `dropped_at:` line made the NEXT line the value. The value must
+// start on the same line; a whitespace-only value counts as empty (`\S`).
+export const DROPPED_AT_RE = /^dropped_at:[ \t]*(\S.*)$/im;
 // HYK-183: 결과 파일에 이 표지가 2개 이상이면 어느 것이 최종인지 결정할
 // 수 없으므로 조용히 하나를 고르지 않고 판정 불가로 멈춘다 (see the file
 // header above for the fuller rationale this constant shares with
@@ -1079,8 +1083,11 @@ function checkFutureSkew({ candidateDate, rawText, field, now }) {
 // future-skew check as part of that resolution (a dropped_at that projects
 // into the future is a config-shape problem, independent of whether a
 // result exists yet at all).
+// HYK-209 mask-readers: 시험이 가림 뒤 첫 매치 판독을 직접 행동 시험하도록 노출한다.
+export { resolveDroppedAt as __probeResolveDroppedAt };
 function resolveDroppedAt(taskContent, now) {
-  const droppedMatch = taskContent.match(DROPPED_AT_RE);
+  // HYK-209 ⓑ: 가림 뒤 첫 매치(인용 안 예시 시각을 낙하 시각으로 읽지 않는다).
+  const droppedMatch = droppedAtScanText(taskContent).match(DROPPED_AT_RE);
   if (!droppedMatch) {
     return {
       ok: false,
@@ -1795,12 +1802,22 @@ const RUNNER_EXIT_CLAIM_RE = /^exit=\d+[ \t]*$/m;
 // 않는다 -- 그러면 진짜 주장이 조용히 안 세어지는 fail-open 이 된다(극성이
 // 뒤집힌 축). 대신 펜스가 열린 줄 «이후»는 마스킹하지 않고 주장으로 센다
 // (옛 동작 = 과차단 쪽과 같은 방향, fail-closed). ⓐ(닫히지 않음 = INVALID)를
-// 고르지 않은 근거: 실측 2026-10-03 살아 있는 .harness 결과 51건 중 14건이
-// 닫히지 않은 펜스로 끝난다 -- ⓐ였다면 정상 라운드 14건이 판정 불가로 막힌다.
+// 고르지 않은 근거(2026-10-06 정정): 원 측정 「2026-10-03 살아 있는 .harness 결과
+// 51건 중 14건이 닫히지 않은 펜스로 끝난다」는 모집단이 사라져 재현할 수 없다(검증
+// 불가). 같은 판별(reject-streak.mjs unclosedFenceOpenLine, CRLF→LF 정규화)로 지금
+// 다시 재면 .harness 10곳 · 결과 파일 11건 중 0건이다 -- 모집단이 달라 14/51 과 직접
+// 비교하지 않는다. 재측정 방법: 워크트리마다 .harness/<역할>.md 를 같은 판별로 센다.
+// 설계 선택(ⓑ)은 수치가 아니라 극성에 근거한다 -- ⓐ였다면 정상 라운드를 판정 불가로
+// 막을 수 있다.
+// 정직한 성격(2026-10-06 실측): 닫히지 않은 «주석» 여는 표지 축은 checkRelayHandshake
+// 전체 경로에서 효과 0이다 -- 완료 표지 존재 판정(resolveResultDoneMatch)이 같은 가림을
+// 먼저 쓰므로, 그 라운드는 주장 축에 닿기 전에 「완료 표지 줄 없음」으로 거부된다(A~D
+// 실측: 닫히지 않은 주석 뒤 두 주장 행 D 는 base·head 모두 거부). 이 축은 깊이 방어이고,
+// 거짓 통과를 고친 것이 아니다.
 // 이 판별은 주장 축 두 곳(resultClaimsRunnerResults · countRunnerExitClaims)
 // 에만 쓰고, 다른 표지 축의 마스킹(maskQuotedMarkerRegions)은 건드리지 않는다.
 function maskExitClaimRegions(content) {
-  const openAt = unclosedFenceOpenLine(content);
+  const openAt = unclosedQuoteOpenLine(content);
   if (openAt === -1) return maskQuotedMarkerRegions(content);
   const lines = content.split("\n");
   return `${maskQuotedMarkerRegions(lines.slice(0, openAt).join("\n"))}\n${lines.slice(openAt).join("\n")}`;

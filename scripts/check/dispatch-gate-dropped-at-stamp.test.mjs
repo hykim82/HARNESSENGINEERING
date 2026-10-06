@@ -9,14 +9,21 @@
 // 기존 게이트/exit-code 계약이 전혀 바뀌지 않는지를 증명한다.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { mkdtempSync, writeFileSync, rmSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { createHash } from "node:crypto";
-import { writeLedger } from "./reject-streak.mjs";
-import { checkRelayHandshake } from "./relay-handshake.mjs";
+import { writeLedger, unclosedQuoteOpenLine } from "./reject-streak.mjs";
+import {
+  checkRelayHandshake,
+  DROPPED_AT_RE as PROD_DROPPED_AT_RE,
+} from "./relay-handshake.mjs";
+import {
+  stampDroppedAt,
+  STAMP_DROPPED_AT_REASON,
+} from "./dropped-at-stamp-core.mjs";
 
 const SCRIPT_PATH = fileURLToPath(
   new URL("./dispatch-gate-decision.mjs", import.meta.url),
@@ -404,6 +411,310 @@ test("(d) 프로덕션 경로: dropped_at 없이 배달된 지시서가 이 CLI�
       result.reason,
       /missing ">>> DONE:/,
       "dropped_at을 통과했으므로 다음 단계(DONE 줄 판정)에서만 멈춰야 한다",
+    );
+  });
+});
+
+// ── HYK-209 깊이 방어 (검토 P3-3) -- 깨진 시계는 쓰레기 값을 찍지 않는다 ──
+test("HYK-209 P3-3 (u) 깨진 시계(NaN·Infinity·문자열·Date 범위 밖)는 ok:false + CLOCK_INVALID 로 거부되고 값을 만들지 않는다", () => {
+  for (const bad of [NaN, Infinity, -Infinity, "abc", 1e20]) {
+    const r = stampDroppedAt({ nowFn: () => bad });
+    assert.equal(r.ok, false, `${String(bad)} must be refused`);
+    assert.equal(r.reasonCode, STAMP_DROPPED_AT_REASON.CLOCK_INVALID);
+    assert.equal(
+      r.value,
+      undefined,
+      "no value may be produced from a bad clock",
+    );
+  }
+});
+
+test("HYK-209 P3-3 (v) 무회귀: 정상 시계는 수리 전과 같은 KST 값을 낸다", () => {
+  const r = stampDroppedAt({ nowFn: () => 0 });
+  assert.equal(r.ok, true);
+  assert.equal(r.reasonCode, STAMP_DROPPED_AT_REASON.STAMPED);
+  assert.equal(r.value, "1970-01-01 09:00 KST");
+});
+
+test("HYK-209 P3-3 (w) CLI: 시계가 NaN 이면 빈 dropped_at 줄을 채우지 않고 파일 바이트 무변경, NaN 문자열이 파일에 없고 소비측은 여전히 값 없음으로 읽는다", () => {
+  withFixtureDir((dir) => {
+    const taskPath = join(dir, "coder-task.md");
+    const original = `task_id: HYK-9103-nanclock-1\ndropped_at:\nrole: CODER\n${ONE_B_BLOCK}`;
+    writeFileSync(taskPath, original, "utf8");
+    const ledgerPath = join(dir, "reject-streak.json");
+    writeLedger(ledgerPath, { schema_version: 1, issues: {} });
+
+    // runCliWithFakeClock 은 성공(exit 0) 때 stderr 를 버리므로, 거부 사유가
+    // stderr 에 찍히는지 보려고 spawnSync 로 직접 돌린다.
+    const r = spawnSync(
+      "node",
+      [
+        "--import",
+        FAKE_CLOCK_PRELOAD_URL,
+        SCRIPT_PATH,
+        taskPath,
+        "--ledger",
+        ledgerPath,
+      ],
+      {
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          DISPATCH_RECEIPT_PATH: SHARED_EMPTY_RECEIPT_PATH,
+          FAKE_NOW_MS: "NaN",
+        },
+      },
+    );
+    const after = readFileSync(taskPath, "utf8");
+    // 헤더 점검표 주입은 CLI가 게이트 전에 하므로 바이트 동일 대신 「빈 줄이
+    // 그대로 남았다」와 「NaN 이 없다」를 본다.
+    assert.ok(
+      after.split("\n").includes("dropped_at:"),
+      "a refused stamp must leave the empty line as it was",
+    );
+    assert.doesNotMatch(
+      after,
+      /NaN/,
+      "the NaN clock must never reach the file",
+    );
+    assert.match(
+      r.stderr,
+      /dropped_at fill skipped/,
+      "the refusal must be visible",
+    );
+    assert.equal(
+      PROD_DROPPED_AT_RE.exec(after),
+      null,
+      "consumers still read the empty line as no value (fail closed)",
+    );
+  });
+});
+
+// HYK-209 인용 가림 결선(라운드 coder-task §1): ① 닫히지 않은 인용(펜스 ∪ HTML
+// 주석)이 진짜 빈 줄을 삼키지 않는다 ② 존재 판정은 가린 텍스트 위에서 -- 인용
+// 안 「값 있는」 예시가 진짜 빈 줄을 「이미 있음」으로 가리지 않는다. 모든 시험은
+// 실제 CLI(runCli) 한 번의 ALLOW 경로다 -- 채움·삽입은 ALLOW 뒤에만 일어난다.
+const QUOTE_FIXTURE_HEAD =
+  "result_file: (pre-seeded, HYK-465 injection must not touch this fixture)\n";
+const DROPPED_AT_FILLED_RE =
+  /^dropped_at: \d{4}-\d{2}-\d{2} \d{2}:\d{2} KST\r?$/m;
+
+test("HYK-209 ①-양성 (회귀 수리): 닫히지 않은 HTML 주석 «뒤»의 진짜 빈 dropped_at: 줄이 제자리에서 한 줄로 채워진다 -- 두 줄로 불어나지 않는다", () => {
+  withFixtureDir((dir) => {
+    const taskPath = join(dir, "coder-task.md");
+    const original = `task_id: HYK-9201-quote-1\n${QUOTE_FIXTURE_HEAD}${ONE_B_BLOCK}<!-- 여기서 닫히지 않은 주석\ndropped_at:\nrole: CODER\n`;
+    writeFileSync(taskPath, original, "utf8");
+    const ledgerPath = join(dir, "reject-streak.json");
+    writeLedger(ledgerPath, { schema_version: 1, issues: {} });
+
+    const r = runCli([taskPath, "--ledger", ledgerPath]);
+    const after = readFileSync(taskPath, "utf8");
+
+    assert.equal(r.status, 0);
+    assert.match(r.stdout, /ALLOW/);
+    assert.match(
+      r.stdout,
+      /dropped_at was EMPTY -- machine-filled in place/,
+      "the empty line must be filled in place, not reported as MISSING",
+    );
+    assert.doesNotMatch(r.stdout, /dropped_at MISSING/);
+    assert.equal(
+      after.split("\n").filter((l) => /^dropped_at:/.test(l)).length,
+      1,
+      "exactly one dropped_at: line -- the stamp must not insert a second one",
+    );
+    assert.match(
+      after,
+      DROPPED_AT_FILLED_RE,
+      "the empty line now carries a KST stamp",
+    );
+    assert.ok(
+      after.includes("<!-- 여기서 닫히지 않은 주석\n"),
+      "the unclosed opener itself is left untouched",
+    );
+  });
+});
+
+test("HYK-209 ①-대조 (닫히지 않은 펜스 축은 그대로): 펜스 «뒤»의 진짜 빈 dropped_at: 줄도 제자리에서 채워진다 (앞 라운드 동작 무회귀)", () => {
+  withFixtureDir((dir) => {
+    const taskPath = join(dir, "coder-task.md");
+    const original = `task_id: HYK-9202-quote-1\n${QUOTE_FIXTURE_HEAD}${ONE_B_BLOCK}\`\`\`text\ndropped_at:\nrole: CODER\n`;
+    writeFileSync(taskPath, original, "utf8");
+    const ledgerPath = join(dir, "reject-streak.json");
+    writeLedger(ledgerPath, { schema_version: 1, issues: {} });
+
+    const r = runCli([taskPath, "--ledger", ledgerPath]);
+    const after = readFileSync(taskPath, "utf8");
+
+    assert.equal(r.status, 0);
+    assert.match(r.stdout, /dropped_at was EMPTY -- machine-filled in place/);
+    assert.equal(
+      after.split("\n").filter((l) => /^dropped_at:/.test(l)).length,
+      1,
+    );
+    assert.match(after, DROPPED_AT_FILLED_RE);
+  });
+});
+
+test("HYK-209 ①-대조2 (닫힌 주석 안의 빈 예시는 무변경 · 진짜 빈 줄만 채워진다)", () => {
+  withFixtureDir((dir) => {
+    const taskPath = join(dir, "coder-task.md");
+    const example = "<!-- 예시\ndropped_at:\n-->";
+    const original = `task_id: HYK-9206-quote-1\n${QUOTE_FIXTURE_HEAD}${example}\ndropped_at:\nrole: CODER\n${ONE_B_BLOCK}`;
+    writeFileSync(taskPath, original, "utf8");
+    const ledgerPath = join(dir, "reject-streak.json");
+    writeLedger(ledgerPath, { schema_version: 1, issues: {} });
+
+    const r = runCli([taskPath, "--ledger", ledgerPath]);
+    const after = readFileSync(taskPath, "utf8");
+
+    assert.equal(r.status, 0);
+    assert.match(r.stdout, /dropped_at was EMPTY -- machine-filled in place/);
+    assert.ok(
+      after.includes(example),
+      "the quoted example stays byte-identical",
+    );
+    assert.equal(
+      after.split("\n").filter((l) => /^dropped_at:/.test(l)).length,
+      2,
+      "the example line and the one filled real line -- no insertion",
+    );
+  });
+});
+
+test("HYK-209 ②-양성 (선재 구멍 수리): 펜스 안 「값 있는」 예시 + 진짜 빈 줄 → 진짜 빈 줄이 채워지고, 소비 정본은 예시 시각을 낙하 시각으로 읽지 않는다", () => {
+  withFixtureDir((dir) => {
+    const taskPath = join(dir, "coder-task.md");
+    const example = "```text\ndropped_at: 2020-01-01 00:00 KST\n```";
+    const original = `task_id: HYK-9203-quote-1\ndropped_at:\n${QUOTE_FIXTURE_HEAD}role: CODER\n${ONE_B_BLOCK}예시:\n${example}\n`;
+    writeFileSync(taskPath, original, "utf8");
+    const ledgerPath = join(dir, "reject-streak.json");
+    writeLedger(ledgerPath, { schema_version: 1, issues: {} });
+
+    const r = runCli([taskPath, "--ledger", ledgerPath]);
+    const after = readFileSync(taskPath, "utf8");
+
+    assert.equal(r.status, 0);
+    assert.match(
+      r.stdout,
+      /dropped_at was EMPTY -- machine-filled in place/,
+      "a value-bearing quoted example must not count as 'already present'",
+    );
+    assert.ok(
+      after.includes(example),
+      "the quoted example stays byte-identical",
+    );
+    // 소비 정본(relay-handshake DROPPED_AT_RE)은 첫 매치를 읽는다 -- 헤더의 진짜 줄이
+    // 채워졌으므로 예시(2020)가 아니라 채워진 값이 읽혀야 한다.
+    const consumed = PROD_DROPPED_AT_RE.exec(after);
+    assert.ok(consumed, "the consumer must find a dropped_at value");
+    assert.notEqual(
+      consumed[1].trim(),
+      "2020-01-01 00:00 KST",
+      "the quoted example's time must not be read as this round's drop time",
+    );
+  });
+});
+
+test("HYK-209 ①+② 불변 (write-once 기계 증거): 닫히지 않은 주석 뒤에 「진짜 값 줄」이 있으면 삽입도 덮어쓰기도 일어나지 않는다 -- 바이트 동일", () => {
+  withFixtureDir((dir) => {
+    const taskPath = join(dir, "coder-task.md");
+    const original = `task_id: HYK-9204-quote-1\n${QUOTE_FIXTURE_HEAD}${ONE_B_BLOCK}<!-- 닫히지 않은\ndropped_at: 2020-01-01 00:00 KST\nrole: CODER\n`;
+    writeFileSync(taskPath, original, "utf8");
+    const ledgerPath = join(dir, "reject-streak.json");
+    writeLedger(ledgerPath, { schema_version: 1, issues: {} });
+
+    const r = runCli([taskPath, "--ledger", ledgerPath]);
+    const after = readFileSync(taskPath, "utf8");
+
+    assert.equal(r.status, 0);
+    assert.match(r.stdout, /dropped_at already present -- write-once/);
+    assert.equal(
+      after,
+      original,
+      "a real value line after an unclosed quote is never inserted-around or overwritten",
+    );
+  });
+});
+
+test("HYK-209 ①② 헬퍼 직접 시험: unclosedQuoteOpenLine 은 펜스 ∪ 주석 중 먼저 오는 열린 줄을 준다 (인라인 코드·닫힌 구간은 제외)", () => {
+  assert.equal(unclosedQuoteOpenLine("a\n<!-- x\nb"), 1, "unclosed comment");
+  assert.equal(unclosedQuoteOpenLine("a\n```\nb"), 1, "unclosed fence");
+  assert.equal(
+    unclosedQuoteOpenLine("<!-- x --> y\n```\nz"),
+    1,
+    "comment closed, fence open",
+  );
+  assert.equal(
+    unclosedQuoteOpenLine("<!-- open\n```\nx"),
+    0,
+    "comment opens first -> its line wins",
+  );
+  assert.equal(
+    unclosedQuoteOpenLine("```\nq\n```\n<!-- open\n"),
+    3,
+    "closed fence then open comment",
+  );
+  assert.equal(
+    unclosedQuoteOpenLine("```\n<!-- in fence\n```\nafter"),
+    -1,
+    "comment inside a CLOSED fence is not an opener",
+  );
+  assert.equal(
+    unclosedQuoteOpenLine("`<!--` inline\nok"),
+    -1,
+    "inline-code opener is not an opener",
+  );
+  assert.equal(unclosedQuoteOpenLine("a\nb"), -1, "nothing open");
+});
+
+test("HYK-209 ①-꼬리 (probe 실측 수리): 열린 주석 «뒤»의 닫힌 펜스 예시는 채워지지 않는다 -- 진짜 빈 줄 1개만 채워진다, 예시 바이트 무변경", () => {
+  withFixtureDir((dir) => {
+    const taskPath = join(dir, "coder-task.md");
+    const example = "```\ndropped_at:\n```";
+    const original = `task_id: HYK-9207-tail-1\n${QUOTE_FIXTURE_HEAD}${ONE_B_BLOCK}<!-- 닫히지 않은\n${example}\ndropped_at:\nrole: CODER\n`;
+    writeFileSync(taskPath, original, "utf8");
+    const ledgerPath = join(dir, "reject-streak.json");
+    writeLedger(ledgerPath, { schema_version: 1, issues: {} });
+
+    const r = runCli([taskPath, "--ledger", ledgerPath]);
+    const after = readFileSync(taskPath, "utf8");
+
+    assert.equal(r.status, 0, `ALLOW expected, got ${r.status}: ${r.stderr}`);
+    assert.match(r.stdout, /dropped_at was EMPTY -- machine-filled in place/);
+    assert.ok(
+      after.includes(example),
+      "the closed quoted example stays byte-identical",
+    );
+    assert.equal(
+      after.split("\n").filter((l) => l === "dropped_at:").length,
+      1,
+      "the quoted example's empty line is not the one filled",
+    );
+  });
+});
+
+test("HYK-209 ①-꼬리2 (probe 실측 수리): 열린 주석 뒤에 닫힌 펜스 예시만 있고 진짜 줄이 없으면 예시는 무변경 -- 빈 줄을 예시에서 채우지 않는다(삽입은 task_id 뒤)", () => {
+  withFixtureDir((dir) => {
+    const taskPath = join(dir, "coder-task.md");
+    const example = "```\ndropped_at:\n```";
+    const original = `task_id: HYK-9208-tail-1\n${QUOTE_FIXTURE_HEAD}${ONE_B_BLOCK}<!-- 닫히지 않은\n${example}\nrole: CODER\n`;
+    writeFileSync(taskPath, original, "utf8");
+    const ledgerPath = join(dir, "reject-streak.json");
+    writeLedger(ledgerPath, { schema_version: 1, issues: {} });
+
+    const r = runCli([taskPath, "--ledger", ledgerPath]);
+    const after = readFileSync(taskPath, "utf8");
+
+    assert.equal(r.status, 0, `ALLOW expected, got ${r.status}: ${r.stderr}`);
+    assert.doesNotMatch(
+      r.stdout,
+      /machine-filled in place/,
+      "no empty line exists outside quotes -- nothing may be filled",
+    );
+    assert.ok(
+      after.includes(example),
+      "the closed quoted example stays byte-identical",
     );
   });
 });
