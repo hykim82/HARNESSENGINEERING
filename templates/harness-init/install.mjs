@@ -24,6 +24,14 @@
 //      --workspaces-root <path> --main-repo-path <path>]
 //     [--dry-run]
 //   node install.mjs --config <path-to-harness-init.config.json> [--dry-run]
+//   node install.mjs ... --update-mismatched [--dry-run]
+//       (HYK-209-installer-update-flag-1) 상이 ∩ 틀 등록(고정 틀 바이트로 쓰는
+//       파일)만 틀 값으로 교체한다. 기본값은 교체하지 않는다. 교체 전 원본은
+//       <repo>/.harness/install-backup/<stamp>/ 로 옮기고, 전·후 sha256 을
+//       <repo>/.harness/install-update-<stamp>.manifest.json 에 적는다.
+//   node install.mjs --rollback <manifest.json> [--dry-run]
+//       (HYK-209-installer-update-flag-1) manifest 의 교체 전 값으로 되돌린다.
+//       현재 내용이 교체 직후 값과 다르면 그 칸은 손대지 않고 거부한다(fail-closed).
 //
 // If --config is omitted, the installer also looks for
 // `<repo-path>/harness-init.config.json` (or `./harness-init.config.json`
@@ -39,6 +47,7 @@ import {
   appendFileSync,
   chmodSync,
   readdirSync,
+  copyFileSync,
 } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -59,6 +68,10 @@ function parseArgs(argv) {
     const key = arg.slice(2);
     if (key === "dry-run") {
       out.dryRun = true;
+      continue;
+    }
+    if (key === "update-mismatched") {
+      out.updateMismatched = true;
       continue;
     }
     const value = argv[i + 1];
@@ -108,7 +121,10 @@ const FLAG_TO_KEY = {
 };
 
 function normalizeCliArgs(rawArgs) {
-  const out = { dryRun: !!rawArgs.dryRun };
+  const out = {
+    dryRun: !!rawArgs.dryRun,
+    updateMismatched: !!rawArgs.updateMismatched,
+  };
   for (const [flag, key] of Object.entries(FLAG_TO_KEY)) {
     if (rawArgs[flag] !== undefined) out[key] = rawArgs[flag];
   }
@@ -237,9 +253,33 @@ const unverifiable = [];
 // 치환설치 칸: {path, verdict} for each file whose one line this installer
 // substitutes (pm-guard.mjs), verdict = 신규 | 동일 | 상이 | 검증 불가.
 const substituted = [];
+// HYK-209-installer-update-flag-1: run-scoped options. `updated` = 상이 → 틀
+// 값으로 교체한 칸(--update-mismatched 일 때만 채워진다). `mergedFiles` = 기존
+// 파일에 hooks 만 덧붙인 칸(6번째 칸 「갱신(병합)」).
+const runOpts = {
+  dryRun: false,
+  updateMismatched: false,
+  targetRepoPath: "",
+  stamp: "",
+};
+const updated = [];
+const mergedFiles = [];
+const UPDATE_MANIFEST_SCHEMA = "installer-update-manifest/1";
 
 function ensureParentDir(filePath) {
   mkdirSync(path.dirname(filePath), { recursive: true });
+}
+
+function sha256Buffer(buf) {
+  return createHash("sha256").update(buf).digest("hex");
+}
+
+function stampNow() {
+  return new Date().toISOString().replace(/[:.]/g, "-");
+}
+
+function backupDirOf(stamp) {
+  return path.join(runOpts.targetRepoPath, ".harness", "install-backup", stamp);
 }
 
 // HYK-209-installer-report-axis-1 1-1: the single door for every skip branch.
@@ -271,22 +311,56 @@ function recordSkip(destPath, verdict, reason = "") {
 // unverifiable file is not claimed to be stale, and it is not hidden under
 // 상이 0 either (HYK-209-installer-report-axis-1 1-2: the old `catch { return; }`
 // here was that silence). Returns the verdict.
-function noteSkippedExisting(destPath, expected) {
+//
+// HYK-209-installer-update-flag-1: `replaceable` = the caller writes this file
+// from a fixed template/raw source (writeTemplateFile · copyRawFile only). Only
+// those may be replaced under --update-mismatched. Merge targets (gitignore,
+// AGENTS.md, settings.local.json), pointers, manifest, checklist and pm-guard
+// (치환설치) are never passed `replaceable`, so the flag cannot byte-replace them.
+function noteSkippedExisting(destPath, expected, { replaceable = false } = {}) {
   console.warn(`skip (already exists): ${destPath}`);
+  let want;
   let same;
   try {
-    const want = typeof expected === "function" ? expected() : expected;
-    same = readFileSync(destPath).equals(Buffer.from(want));
+    want = Buffer.from(typeof expected === "function" ? expected() : expected);
+    same = readFileSync(destPath).equals(want);
   } catch (err) {
     return recordSkip(destPath, "검증 불가", err.message);
   }
-  return recordSkip(destPath, same ? "동일" : "상이");
+  if (same) return recordSkip(destPath, "동일");
+  if (replaceable && runOpts.updateMismatched) {
+    return replaceMismatched(destPath, want);
+  }
+  return recordSkip(destPath, "상이");
+}
+
+// HYK-209-installer-update-flag-1: the one replacement door. The original bytes
+// go to <target>/.harness/install-backup/<stamp>/<rel> first; before/after
+// sha256 are kept for the manifest (the input --rollback reads). Dry-run records
+// the same entry without touching disk, so the printed set matches a real run.
+function replaceMismatched(destPath, want) {
+  const rel = path.relative(runOpts.targetRepoPath, destPath);
+  const before = sha256Buffer(readFileSync(destPath));
+  const after = sha256Buffer(want);
+  const backup = path.join(backupDirOf(runOpts.stamp), rel);
+  if (!runOpts.dryRun) {
+    ensureParentDir(backup);
+    copyFileSync(destPath, backup);
+    writeFileSync(destPath, want);
+  }
+  updated.push({ path: destPath, rel, before, after, backup });
+  console.log(
+    `${runOpts.dryRun ? "[dry-run] would update" : "updated"} (상이 → 틀 값): ${destPath}`,
+  );
+  return "갱신";
 }
 
 function writeTemplateFile(srcPath, destPath, map, { dryRun, executable }) {
   if (existsSync(destPath)) {
-    noteSkippedExisting(destPath, () =>
-      substitute(readFileSync(srcPath, "utf8"), map),
+    noteSkippedExisting(
+      destPath,
+      () => substitute(readFileSync(srcPath, "utf8"), map),
+      { replaceable: true },
     );
     return;
   }
@@ -314,7 +388,9 @@ function copyRawFile(srcPath, destPath, { dryRun, executable }) {
     return;
   }
   if (existsSync(destPath)) {
-    noteSkippedExisting(destPath, () => readFileSync(srcPath));
+    noteSkippedExisting(destPath, () => readFileSync(srcPath), {
+      replaceable: true,
+    });
     return;
   }
   if (!dryRun) {
@@ -618,7 +694,13 @@ function installSettingsLocal(params, targetRepoPath, { dryRun }) {
   if (!dryRun) {
     writeFileSync(settingsPath, `${mergedSnippet}\n`, "utf8");
   }
-  installed.push(settingsPath);
+  // HYK-209-installer-update-flag-1 (6번째 칸): a merge into an existing file is
+  // 갱신(병합), not 신규 -- counting it under 신규 was the mixing this round fixes.
+  mergedFiles.push({
+    path: settingsPath,
+    added: ["hooks"],
+    preserved: Object.keys(existingObj),
+  });
   console.log(
     `${dryRun ? "[dry-run] would merge hooks into" : "merged hooks into"}: ${settingsPath} (existing keys preserved)\n${mergedSnippet}\n${restartNote}`,
   );
@@ -1789,21 +1871,148 @@ function printFiveCellReport(transplants) {
     unverifiable.map((u) => `? ${u.path} :: ${u.reason}`),
   );
   section(
+    "갱신(병합)",
+    mergedFiles.map(
+      (m) =>
+        `* ${m.path} :: 추가: ${m.added.join(",")} · 보존 키: ${m.preserved.join(",") || "(없음)"}`,
+    ),
+  );
+  // HYK-209-installer-update-flag-1: printed only when the flag is on, so a
+  // flag-less run carries no extra section.
+  if (runOpts.updateMismatched) {
+    section(
+      `갱신 (--update-mismatched · 상이 → 틀 값${runOpts.dryRun ? " · dry-run: 바이트 불변" : ""})`,
+      updated.map(
+        (u) =>
+          `↻ ${u.path} :: ${u.before.slice(0, 12)} → ${u.after.slice(0, 12)}`,
+      ),
+    );
+  }
+  section(
     "설치기 목록 밖 손이식 — 설치기가 갱신하지 않음",
     transplants.map((t) => `◇ ${t.rel} :: ${t.verdict} · ${t.basis}`),
   );
 }
 
+// HYK-209-installer-update-flag-1: writes the update manifest (real runs with at
+// least one replacement only). It is the only input --rollback reads.
+function writeUpdateManifest() {
+  const file = path.join(
+    runOpts.targetRepoPath,
+    ".harness",
+    `install-update-${runOpts.stamp}.manifest.json`,
+  );
+  let installer = null;
+  try {
+    installer = execFileSync("git", ["-C", REPO_ROOT, "rev-parse", "HEAD"], {
+      encoding: "utf8",
+    }).trim();
+  } catch {
+    // best-effort: the installer may run outside a git checkout
+  }
+  const manifest = {
+    schema: UPDATE_MANIFEST_SCHEMA,
+    at: new Date().toISOString(),
+    installer,
+    target: runOpts.targetRepoPath,
+    entries: updated.map((u) => ({
+      rel: u.rel,
+      path: u.path,
+      before_sha256: u.before,
+      after_sha256: u.after,
+      backup: u.backup,
+    })),
+  };
+  ensureParentDir(file);
+  writeFileSync(file, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+  console.log(`update manifest: ${file}`);
+}
+
+// HYK-209-installer-update-flag-1: `--rollback <manifest>`. Each entry is
+// judged alone and fail-closed: a file whose current bytes are neither the
+// after-value (restore it) nor the before-value (already restored) is refused
+// and left as it is; a restore is verified by sha256 before it is reported.
+// Returns the exit code (1 if any entry was refused).
+function runRollback(manifestPath, { dryRun }) {
+  const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+  if (manifest.schema !== UPDATE_MANIFEST_SCHEMA) {
+    throw new Error(
+      `not an installer update manifest (schema=${manifest.schema ?? "<missing>"}): ${manifestPath}`,
+    );
+  }
+  let refused = 0;
+  for (const e of manifest.entries) {
+    const cur = existsSync(e.path) ? sha256Buffer(readFileSync(e.path)) : null;
+    if (cur === e.before_sha256) {
+      console.log(`already at pre-update value: ${e.path}`);
+      continue;
+    }
+    if (cur !== e.after_sha256) {
+      refused++;
+      console.log(
+        `refused (현재 내용이 갱신 직후 값과 다르다 -- 손대지 않음): ${e.path}`,
+      );
+      continue;
+    }
+    if (!existsSync(e.backup) || sha256Of(e.backup) !== e.before_sha256) {
+      refused++;
+      console.log(`refused (백업이 없거나 원본 sha256 과 다르다): ${e.backup}`);
+      continue;
+    }
+    if (dryRun) {
+      console.log(`[dry-run] would restore: ${e.path}`);
+      continue;
+    }
+    copyFileSync(e.backup, e.path);
+    if (sha256Of(e.path) !== e.before_sha256) {
+      refused++;
+      console.log(`refused (복원 뒤 sha256 검증 실패): ${e.path}`);
+      continue;
+    }
+    console.log(`restored: ${e.path}`);
+  }
+  console.log(
+    `rollback: ${manifest.entries.length - refused} ok, ${refused} refused`,
+  );
+  return refused ? 1 : 0;
+}
+
+// `--rollback <manifest>` replaces the install entirely (no install params
+// needed). Returns true when it handled the run.
+function handleRollback(argv) {
+  const raw = parseArgs(argv);
+  if (!raw.rollback) return false;
+  process.exitCode = runRollback(path.resolve(raw.rollback), {
+    dryRun: !!raw.dryRun,
+  });
+  return true;
+}
+
+// Run-scoped options, set once before any file is touched.
+function startRun(params) {
+  if (!existsSync(params.repoPath)) {
+    throw new Error(`repoPath does not exist: ${params.repoPath}`);
+  }
+  runOpts.dryRun = !!params.dryRun;
+  runOpts.updateMismatched = !!params.updateMismatched;
+  runOpts.targetRepoPath = params.repoPath;
+  runOpts.stamp = stampNow();
+}
+
+// The manifest is written only by a real run that replaced at least one file.
+function finishRun() {
+  if (!runOpts.dryRun && updated.length) writeUpdateManifest();
+}
+
 function main() {
+  if (handleRollback(process.argv.slice(2))) return;
   const params = resolveParams(process.argv.slice(2));
   validateParams(params);
   const map = placeholderMap(params);
   const dryRun = !!params.dryRun;
   const targetRepoPath = params.repoPath;
 
-  if (!existsSync(targetRepoPath)) {
-    throw new Error(`repoPath does not exist: ${targetRepoPath}`);
-  }
+  startRun(params);
 
   console.log(
     `\nharness-init install — profile=${params.profile} target=${targetRepoPath}${dryRun ? " [DRY RUN]" : ""}\n`,
@@ -1905,6 +2114,7 @@ function main() {
   console.log(`있지만 내용이 다름 — 갱신하지 않음 (${differing.length}):`);
   for (const f of differing) console.log(`  ! ${f}`);
   printFiveCellReport(scanOutOfListTransplants(targetRepoPath));
+  finishRun();
   console.log("");
 }
 
