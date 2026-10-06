@@ -38,10 +38,13 @@ import {
   mkdirSync,
   appendFileSync,
   chmodSync,
+  readdirSync,
 } from "node:fs";
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { isDeepStrictEqual } from "node:util";
 
 const TEMPLATES_DIR = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(TEMPLATES_DIR, "..", "..");
@@ -223,15 +226,68 @@ function substitute(content, map) {
 
 const installed = [];
 const skipped = [];
+// HYK-209-installer-mismatch-report-1 축 B: the subset of `skipped` whose
+// existing file differs from what this installer would write. Reporting only:
+// a differing file is still NOT overwritten (update policy is a separate
+// decision), and `skipped` keeps its old meaning (every skip, identical or not).
+const differing = [];
+// HYK-209-installer-report-axis-1 축 C(다섯 칸): {path, reason} for every skip
+// whose existing file could NOT be compared -- neither "same" nor "differing".
+const unverifiable = [];
+// 치환설치 칸: {path, verdict} for each file whose one line this installer
+// substitutes (pm-guard.mjs), verdict = 신규 | 동일 | 상이 | 검증 불가.
+const substituted = [];
 
 function ensureParentDir(filePath) {
   mkdirSync(path.dirname(filePath), { recursive: true });
 }
 
+// HYK-209-installer-report-axis-1 1-1: the single door for every skip branch.
+// Before this round 12 sites pushed to `skipped` directly (gitignore x2,
+// AGENTS.md, settings.local.json x3, ledger, receipts, two pointers, manifest,
+// checklist) and only one helper (noteSkippedExisting) compared bytes. The
+// caller now decides the verdict by ITS OWN stated criterion (see each branch)
+// and this function records it. 동일 is not stored: it is "skipped, and in
+// neither differing nor unverifiable" (computed in printFiveCellReport).
+function recordSkip(destPath, verdict, reason = "") {
+  skipped.push(destPath);
+  if (verdict === "상이") {
+    differing.push(destPath);
+    console.warn(`  ↳ 있지만 내용이 다름 — 갱신하지 않음: ${destPath}`);
+  }
+  if (verdict === "검증 불가") {
+    unverifiable.push({ path: destPath, reason });
+    console.warn(
+      `  ↳ 검증 불가 (같다고도 다르다고도 말하지 않는다 — 갱신 대상 아님): ${destPath} — ${reason}`,
+    );
+  }
+  return verdict;
+}
+
+// Every skip-if-exists branch in the copy axes (copyRawFile, writeTemplateFile,
+// installPmGuard) funnels here. `expected` is the bytes this install would have
+// written (a Buffer/string, or a thunk producing one). If computing it or
+// reading the existing file fails, the file is reported as 검증 불가 -- an
+// unverifiable file is not claimed to be stale, and it is not hidden under
+// 상이 0 either (HYK-209-installer-report-axis-1 1-2: the old `catch { return; }`
+// here was that silence). Returns the verdict.
+function noteSkippedExisting(destPath, expected) {
+  console.warn(`skip (already exists): ${destPath}`);
+  let same;
+  try {
+    const want = typeof expected === "function" ? expected() : expected;
+    same = readFileSync(destPath).equals(Buffer.from(want));
+  } catch (err) {
+    return recordSkip(destPath, "검증 불가", err.message);
+  }
+  return recordSkip(destPath, same ? "동일" : "상이");
+}
+
 function writeTemplateFile(srcPath, destPath, map, { dryRun, executable }) {
   if (existsSync(destPath)) {
-    skipped.push(destPath);
-    console.warn(`skip (already exists): ${destPath}`);
+    noteSkippedExisting(destPath, () =>
+      substitute(readFileSync(srcPath, "utf8"), map),
+    );
     return;
   }
   const content = substitute(readFileSync(srcPath, "utf8"), map);
@@ -258,8 +314,7 @@ function copyRawFile(srcPath, destPath, { dryRun, executable }) {
     return;
   }
   if (existsSync(destPath)) {
-    skipped.push(destPath);
-    console.warn(`skip (already exists): ${destPath}`);
+    noteSkippedExisting(destPath, () => readFileSync(srcPath));
     return;
   }
   if (!dryRun) {
@@ -301,8 +356,12 @@ function appendGitignoreBlock(profile, targetRepoPath, { dryRun }) {
     : "";
   const marker = `# harness-init (${profile})`;
 
+  // 1-1 판정 기준(추가·병합 분기): 동일 = 현재 템플릿의 블록 줄이 전부 이미
+  // 있다(순서·연속성 무관). 상이 = 마커는 있는데 블록 줄이 빠져 있다(옛
+  // 템플릿이거나 손편집). 기대 바이트를 한 값으로 정할 수 없는 append 분기라
+  // 「줄 집합 포함」으로 가른다.
   if (existing.includes(block.trim())) {
-    skipped.push(gitignorePath);
+    recordSkip(gitignorePath, "동일");
     console.warn(`skip (block already present): ${gitignorePath}`);
     return;
   }
@@ -314,16 +373,17 @@ function appendGitignoreBlock(profile, targetRepoPath, { dryRun }) {
   // there (that risks clobbering a hand-edit); skip and print exactly which
   // current-template lines are missing so a human can merge them by hand.
   if (existing.includes(marker)) {
-    skipped.push(gitignorePath);
     const existingLines = new Set(existing.split(/\r?\n/).map((l) => l.trim()));
     const missingLines = block
       .split("\n")
       .filter((line) => !existingLines.has(line.trim()));
     if (missingLines.length === 0) {
+      recordSkip(gitignorePath, "동일");
       console.warn(
         `skip (marker '${marker}' already present, current-template lines already covered): ${gitignorePath}`,
       );
     } else {
+      recordSkip(gitignorePath, "상이");
       console.warn(
         `skip (marker '${marker}' already present, from an older template version -- not auto-upgrading): ${gitignorePath}\n` +
           `Missing lines from the current template -- add these by hand if still wanted:\n${missingLines.map((l) => `  ${l}`).join("\n")}`,
@@ -352,7 +412,12 @@ function appendAgentsFile(targetRepoPath, { dryRun }) {
   if (existsSync(agentsPath)) {
     const existing = readFileSync(agentsPath, "utf8");
     if (existing.includes("Harness Operating Rules")) {
-      skipped.push(agentsPath);
+      // 1-1 판정 기준(추가 분기): 동일 = 현재 스니펫 전문이 파일 안에 그대로
+      // 있다(CRLF/LF 무관). 상이 = 제목만 있고 스니펫 전문은 없다(옛 버전이거나
+      // 손편집) -- 스니펫은 append 전용이라 기대 바이트 한 값이 없다.
+      const normalize = (s) => s.replace(/\r\n/g, "\n");
+      const same = normalize(existing).includes(normalize(snippet).trim());
+      recordSkip(agentsPath, same ? "동일" : "상이");
       console.warn(`skip (equivalent rules already present): ${agentsPath}`);
       return;
     }
@@ -519,10 +584,10 @@ function installSettingsLocal(params, targetRepoPath, { dryRun }) {
   try {
     existingRaw = readFileSync(settingsPath, "utf8");
   } catch (err) {
-    skipped.push(settingsPath);
     console.warn(
       `skip (could not read existing ${settingsPath}: ${err.message}) -- merge this manually:\n${hooksOnlySnippet}`,
     );
+    recordSkip(settingsPath, "검증 불가", `읽기 실패: ${err.message}`);
     return;
   }
 
@@ -530,15 +595,18 @@ function installSettingsLocal(params, targetRepoPath, { dryRun }) {
   try {
     existingObj = existingRaw.trim() ? JSON.parse(existingRaw) : {};
   } catch (err) {
-    skipped.push(settingsPath);
     console.warn(
       `skip (existing ${settingsPath} is not valid JSON: ${err.message}) -- not touched. Merge this manually:\n${hooksOnlySnippet}`,
     );
+    recordSkip(settingsPath, "검증 불가", `JSON 파싱 실패: ${err.message}`);
     return;
   }
 
   if (existingObj.hooks) {
-    skipped.push(settingsPath);
+    // 1-1 판정 기준(병합 분기): 동일 = 기존 hooks 블록이 이 설치기가 쓸 블록과
+    // 구조적으로 같다(키 순서 무관). 상이 = 다르다(사람이 손으로 바꿨을 수 있다).
+    const same = isDeepStrictEqual(existingObj.hooks, hooksBlock);
+    recordSkip(settingsPath, same ? "동일" : "상이");
     console.warn(
       `skip (${settingsPath} already has a "hooks" key -- not touched, auto-merging hook arrays risks misrouting an existing wiring). Merge this manually:\n${hooksOnlySnippet}`,
     );
@@ -790,7 +858,9 @@ const PM_GUARD_CONTROL_ROOM_LINE_RE =
 // control room to allow-list in the first place.
 const TEAM_LOCAL_CONTROL_ROOM_SENTINEL = "<NO_CONTROL_ROOM_TEAM_LOCAL_PROFILE>";
 
-function substitutePmGuardControlRoom(content, params) {
+// Exported (HYK-209-installer-report-axis-1 1-4 ⓑ test) so the installed value
+// can be checked in-process without writing a real control-room path to disk.
+export function substitutePmGuardControlRoom(content, params) {
   if (!PM_GUARD_CONTROL_ROOM_LINE_RE.test(content)) {
     throw new Error(
       "pm-guard.mjs: CONTROL_ROOM_ROOT constant not found at its expected " +
@@ -846,9 +916,13 @@ function installPmGuard(params, targetRepoPath, { dryRun }) {
     console.warn(`source missing, skipping: ${srcPath}`);
     return;
   }
+  // 치환설치 칸: pm-guard is the one file whose substituted line is compared
+  // against the substituted expectation (never against the raw source).
   if (existsSync(destPath)) {
-    skipped.push(destPath);
-    console.warn(`skip (already exists): ${destPath}`);
+    const verdict = noteSkippedExisting(destPath, () =>
+      substitutePmGuardControlRoom(readFileSync(srcPath, "utf8"), params),
+    );
+    substituted.push({ path: destPath, verdict });
     return;
   }
   const content = substitutePmGuardControlRoom(
@@ -859,6 +933,7 @@ function installPmGuard(params, targetRepoPath, { dryRun }) {
     ensureParentDir(destPath);
     writeFileSync(destPath, content, "utf8");
   }
+  substituted.push({ path: destPath, verdict: "신규" });
   installed.push(destPath);
   console.log(
     `${dryRun ? "[dry-run] would install" : "installed"}: ${destPath} (CONTROL_ROOM_ROOT substituted for this target)`,
@@ -1092,11 +1167,21 @@ export const ENFORCEMENT_RELAY_FILES = [
 // endsWith("scripts/supervisor/derive-claude-project-dir-cli.mjs"); a wrong
 // install path would make that CLI refuse to run. Exactly these two files:
 // the CLI and its one relative import (rate-limit-stall-adapter.mjs, the
-// canonical deriveClaudeProjectDirName). Any other scripts/supervisor/* file
-// is a separate scope decision, not added here.
+// canonical deriveClaudeProjectDirName). HYK-209-installer-admission-closure-1
+// (E7-2 1R-b): admission-cli.mjs is the by-path admission gate the control-room
+// dispatch pipeline calls (docs/control-room-patches/HYK-256-...); without it
+// on the target, delivery is refused (ADMISSION_CLI_MISSING). Its static
+// relative imports are exactly the three below (fixpoint: none of them import
+// another "./X.mjs"). concurrency-cap.json is a VALUE file and is deliberately
+// NOT copied here -- a separate scope decision. Any other scripts/supervisor/*
+// file is still a separate scope decision, not added here.
 export const ENFORCEMENT_SUPERVISOR_FILES = [
   "derive-claude-project-dir-cli.mjs",
   "rate-limit-stall-adapter.mjs",
+  "admission-cli.mjs",
+  "admission-ledger-core.mjs",
+  "admission-ledger-store.mjs",
+  "concurrency-cap-adapter.mjs",
 ];
 
 // Presence requirement, not an import-closure rule: the 관제실 dispatch
@@ -1303,8 +1388,15 @@ function installControlRoomFolder(params, targetRepoPath, { dryRun }) {
 
   const ledgerPath = path.join(controlRoomPath, "admission-ledger.json");
   if (existsSync(ledgerPath)) {
-    skipped.push(ledgerPath);
     console.warn(`skip (already exists): ${ledgerPath}`);
+    // 검증 불가: 원장은 예약 상태를 담는 런타임 파일이라 기대 바이트가 한 값이
+    // 아니다(epoch·예약 목록). 「상이」로 부르면 살아 있는 원장이 전부 거짓
+    // 낡음으로 보인다.
+    recordSkip(
+      ledgerPath,
+      "검증 불가",
+      "런타임 원장 -- 예약 상태를 담으므로 기대 바이트가 없다",
+    );
   } else {
     // Local copy of admission-ledger-core.mjs's createEmptyLedger() shape
     // ({schema_version, epoch, reservations: {}}), NOT a static import of
@@ -1338,8 +1430,14 @@ function installControlRoomFolder(params, targetRepoPath, { dryRun }) {
 
   const receiptPath = path.join(controlRoomPath, "dispatch-receipts.jsonl");
   if (existsSync(receiptPath)) {
-    skipped.push(receiptPath);
     console.warn(`skip (already exists): ${receiptPath}`);
+    // 검증 불가: 영수증은 append-only 런타임 로그다 -- 기대 바이트는 빈 파일이
+    // 아니라 「지금까지 쌓인 내용」이라 한 값으로 비교할 수 없다.
+    recordSkip(
+      receiptPath,
+      "검증 불가",
+      "런타임 누적 로그(append-only) -- 기대 바이트가 없다",
+    );
   } else {
     if (!dryRun) {
       writeFileSync(receiptPath, "", "utf8");
@@ -1375,17 +1473,16 @@ function installAdmissionLedgerPointer(params, targetRepoPath, { dryRun }) {
     ".harness",
     "admission-ledger-path.json",
   );
-  if (existsSync(pointerPath)) {
-    skipped.push(pointerPath);
-    console.warn(`skip (already exists): ${pointerPath}`);
-    return;
-  }
   const ledgerPath = joinPosix(params.controlRoomPath, "admission-ledger.json");
   const pointer = {
     ledgerPath,
     lockPath: `${ledgerPath}.lock`,
   };
   const content = `${JSON.stringify(pointer, null, 2)}\n`;
+  if (existsSync(pointerPath)) {
+    noteSkippedExisting(pointerPath, content);
+    return;
+  }
   if (!dryRun) {
     ensureParentDir(pointerPath);
     writeFileSync(pointerPath, content, "utf8");
@@ -1420,17 +1517,16 @@ function installDispatchReceiptPointer(params, targetRepoPath, { dryRun }) {
     ".harness",
     "dispatch-receipt-path.json",
   );
-  if (existsSync(pointerPath)) {
-    skipped.push(pointerPath);
-    console.warn(`skip (already exists): ${pointerPath}`);
-    return;
-  }
   const receiptPath = joinPosix(
     params.controlRoomPath,
     "dispatch-receipts.jsonl",
   );
   const pointer = { receiptPath };
   const content = `${JSON.stringify(pointer, null, 2)}\n`;
+  if (existsSync(pointerPath)) {
+    noteSkippedExisting(pointerPath, content);
+    return;
+  }
   if (!dryRun) {
     ensureParentDir(pointerPath);
     writeFileSync(pointerPath, content, "utf8");
@@ -1453,11 +1549,13 @@ function installDispatchReceiptPointer(params, targetRepoPath, { dryRun }) {
 // manifest is a record of what a FUTURE assembly round needs, not an
 // install of the unattended layer itself. None of the files this manifest
 // cites (scripts/supervisor/*, scripts/relay/adapters/orca-adapter.mjs,
-// scripts/check/{linear-sync,pm-guard,selfcheck,selfcheck-inventory}.mjs,
+// scripts/check/{linear-sync,selfcheck,selfcheck-inventory}.mjs,
 // scripts/supervisor/approver-allowlist.json) is copied by this installer,
-// with ONE exception added by HYK-209-installer-closure-derive-1 (2R): the
-// two files in ENFORCEMENT_SUPERVISOR_FILES (derive-claude-project-dir-cli
-// .mjs and its rate-limit-stall-adapter.mjs import) now are. Everything else
+// with two exceptions. The first: the files in ENFORCEMENT_SUPERVISOR_FILES
+// (derive-claude-project-dir-cli.mjs and its rate-limit-stall-adapter.mjs
+// import) now are, added by HYK-209-installer-closure-derive-1 (2R). The
+// second: pm-guard.mjs, which installPmGuard copies separately (control-room
+// path substituted), not through any list above. Everything else
 // this manifest cites is still not copied, so a repo installed today with
 // this manifest present has only those two supervisor files of the
 // unattended/parallel layer, and none of the rest. solo-full only:
@@ -1541,11 +1639,6 @@ function installUnattendedLayerManifest(params, targetRepoPath, { dryRun }) {
     ".harness",
     "unattended-layer-placeholders.json",
   );
-  if (existsSync(manifestPath)) {
-    skipped.push(manifestPath);
-    console.warn(`skip (already exists): ${manifestPath}`);
-    return;
-  }
   const manifest = {
     note: "이 파일이 존재해도 무인·병렬 층(scripts/supervisor/* 중 derive-claude-project-dir-cli.mjs·rate-limit-stall-adapter.mjs 두 개를 뺀 나머지, scripts/relay/adapters/orca-adapter.mjs 등)은 이 저장소에 설치되지 않았다 -- install.mjs는 그 나머지 파일들을 아직 복사하지 않는다(HYK-209 §3 '내용물 조립 0'). 이 값들은 그 조립 단계가 실제로 시작될 때 쓰일 자리표 값의 기록일 뿐이다.",
     placeholders: {
@@ -1559,6 +1652,10 @@ function installUnattendedLayerManifest(params, targetRepoPath, { dryRun }) {
     knownGaps: buildKnownGaps(),
   };
   const content = `${JSON.stringify(manifest, null, 2)}\n`;
+  if (existsSync(manifestPath)) {
+    noteSkippedExisting(manifestPath, content);
+    return;
+  }
   if (!dryRun) {
     ensureParentDir(manifestPath);
     writeFileSync(manifestPath, content, "utf8");
@@ -1566,6 +1663,134 @@ function installUnattendedLayerManifest(params, targetRepoPath, { dryRun }) {
   installed.push(manifestPath);
   console.log(
     `${dryRun ? "[dry-run] would install" : "installed"}: ${manifestPath}\n${content}`,
+  );
+}
+
+// HYK-209-installer-report-axis-1 축 C (1-3): 「설치기 목록 밖 손이식」 보고.
+// A file this installer does NOT copy (in no list and no branch) that the target
+// tracks under the SAME relative path as this harness's own source -- a byte
+// hand-transplant (승계 규율 12). REPORT ONLY: this scan never writes, and what
+// it finds is never added to a copy list (편입·갱신은 책임자 판정 · 다음 라운드).
+const TRANSPLANT_SCAN_DIRS = [
+  "scripts/check",
+  "scripts/relay",
+  "scripts/supervisor",
+];
+
+// Names this installer covers in each dir (by list or by a dedicated branch).
+function installerCoveredNames(dirRel) {
+  if (dirRel === "scripts/check") {
+    // pm-guard.mjs is written by installPmGuard, not by a list.
+    return new Set([...ENFORCEMENT_CHECK_FILES, "pm-guard.mjs"]);
+  }
+  if (dirRel === "scripts/relay") return new Set(ENFORCEMENT_RELAY_FILES);
+  return new Set(ENFORCEMENT_SUPERVISOR_FILES);
+}
+
+function isKindAt(p, kind) {
+  try {
+    const st = statSync(p);
+    return kind === "file" ? st.isFile() : st.isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+// true / false when git can say whether `rel` is tracked in the target, null
+// when git cannot answer (target has no .git directory, or git is not runnable).
+// null makes the caller fall back to plain file existence and say so.
+function gitTracksFile(targetRepoPath, rel) {
+  if (!isKindAt(path.join(targetRepoPath, ".git"), "dir")) return null;
+  try {
+    const out = execFileSync(
+      "git",
+      ["-C", targetRepoPath, "ls-files", "--", rel],
+      { encoding: "utf8" },
+    );
+    return out.trim() !== "";
+  } catch {
+    return null;
+  }
+}
+
+function sha256Of(file) {
+  return createHash("sha256").update(readFileSync(file)).digest("hex");
+}
+
+function compareWithSource(targetFile, sourceFile) {
+  try {
+    return sha256Of(targetFile) === sha256Of(sourceFile) ? "동일" : "상이";
+  } catch {
+    return "검증 불가";
+  }
+}
+
+// Returns [{ rel, verdict, basis }] -- every tracked-or-present harness-named
+// file in the three scanned dirs that the installer does not cover.
+function scanOutOfListTransplants(targetRepoPath) {
+  const found = [];
+  for (const dirRel of TRANSPLANT_SCAN_DIRS) {
+    const srcDir = path.join(REPO_ROOT, ...dirRel.split("/"));
+    if (!isKindAt(srcDir, "dir")) continue;
+    const covered = installerCoveredNames(dirRel);
+    for (const name of readdirSync(srcDir).sort()) {
+      const rel = `${dirRel}/${name}`;
+      const sourceFile = path.join(srcDir, name);
+      const targetFile = path.join(targetRepoPath, ...rel.split("/"));
+      if (covered.has(name) || !isKindAt(sourceFile, "file")) continue;
+      if (!isKindAt(targetFile, "file")) continue;
+      const tracked = gitTracksFile(targetRepoPath, rel);
+      // Untracked in a git target: a stray local file, not a tracked transplant.
+      if (tracked === false) continue;
+      found.push({
+        rel,
+        verdict: compareWithSource(targetFile, sourceFile),
+        basis:
+          tracked === null
+            ? "실재(git 추적 판정 불가 -- 파일 존재로 대신함)"
+            : "git 추적",
+      });
+    }
+  }
+  return found;
+}
+
+// The 다섯 칸 report (+ the out-of-list block). Pure output: the same call on
+// --dry-run and on a real run prints the same sets. Header strings are part of
+// the contract the installer tests parse -- change them only together with
+// those tests.
+function printFiveCellReport(transplants) {
+  const inDiffering = (p) => differing.includes(p);
+  const inUnverifiable = (p) => unverifiable.some((u) => u.path === p);
+  const same = skipped.filter((p) => !inDiffering(p) && !inUnverifiable(p));
+  const section = (header, lines) => {
+    console.log(`${header} (${lines.length}):`);
+    for (const line of lines) console.log(`  ${line}`);
+  };
+  console.log("\n--- 다섯 칸 보고 (HYK-209-installer-report-axis-1) ---");
+  section(
+    "신규",
+    installed.map((p) => `+ ${p}`),
+  );
+  section(
+    "동일",
+    same.map((p) => `= ${p}`),
+  );
+  section(
+    "상이 — 갱신하지 않음",
+    differing.map((p) => `! ${p}`),
+  );
+  section(
+    "치환설치 (pm-guard 한 줄 치환 후 기대 바이트 기준)",
+    substituted.map((s) => `~ ${s.path} :: ${s.verdict}`),
+  );
+  section(
+    "검증 불가 (같다고도 다르다고도 말하지 않음)",
+    unverifiable.map((u) => `? ${u.path} :: ${u.reason}`),
+  );
+  section(
+    "설치기 목록 밖 손이식 — 설치기가 갱신하지 않음",
+    transplants.map((t) => `◇ ${t.rel} :: ${t.verdict} · ${t.basis}`),
   );
 }
 
@@ -1652,8 +1877,7 @@ function main() {
     );
     const checklist = soloFullChecklist(params);
     if (existsSync(checklistPath)) {
-      skipped.push(checklistPath);
-      console.warn(`skip (already exists): ${checklistPath}`);
+      noteSkippedExisting(checklistPath, checklist);
     } else {
       if (!dryRun) {
         ensureParentDir(checklistPath);
@@ -1676,6 +1900,11 @@ function main() {
   for (const f of installed) console.log(`  + ${f}`);
   console.log(`skipped, already existed (${skipped.length}):`);
   for (const f of skipped) console.log(`  = ${f}`);
+  // HYK-209-installer-mismatch-report-1 축 B: the stale-file report. Printed on
+  // dry-run too, so a human sees what is out of date before the install.
+  console.log(`있지만 내용이 다름 — 갱신하지 않음 (${differing.length}):`);
+  for (const f of differing) console.log(`  ! ${f}`);
+  printFiveCellReport(scanOutOfListTransplants(targetRepoPath));
   console.log("");
 }
 
