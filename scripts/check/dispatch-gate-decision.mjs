@@ -3779,7 +3779,7 @@ function bestEffortInjectResultPaths(taskPath, args) {
     const rawMatchAnywhere = original.match(RESULT_FILE_LINE_RE);
     if (rawMatchAnywhere) {
       console.log(
-        `dispatch-gate-decision: result-path injection REFUSED (fail-closed, HYK-480-2 P2-4) -- first 'result_file:' match is inside a quoted/fenced region (raw match: '${rawMatchAnywhere[0].trim()}') -- not injecting paths, not filling checklist, task file left byte-unchanged -- ${taskPath}`,
+        `dispatch-gate-decision: result-path injection REFUSED (fail-closed, HYK-480-2 P2-4) -- no 'result_file:' line outside a quoted/fenced region (raw match: '${rawMatchAnywhere[0].trim()}') -- not injecting paths, not filling checklist, task file left byte-unchanged -- ${taskPath}`,
       );
       return;
     }

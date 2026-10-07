@@ -880,8 +880,8 @@ test("(s) HYK-480-2 P2-4 수리: 첫 result_file: 매치가 펜스 인용 안에
       );
       assert.match(
         r.stdout,
-        /first 'result_file:' match is inside a quoted\/fenced region/,
-        `call ${call}: refusal reason must name the actual cause`,
+        /no 'result_file:' line outside a quoted\/fenced region/,
+        `call ${call}: refusal reason must name the actual cause (P2-2: 구현 의미는 "모든 매치가 인용 안" -- "첫 매치만" 이 아니다)`,
       );
       assert.doesNotMatch(
         r.stdout,
@@ -953,6 +953,85 @@ test("(t) HYK-480-2 §2 요구1&2 무회귀: 진짜(인용 밖) 값 있는 resul
     );
   });
 });
+
+// ---------------------------------------------------------------------------
+// 검토 #310-r2 P2-1 (HYK-480-checklist-inject-2-review-1 §8): 요구 2(삽입
+// 위치도 가린 텍스트 기준)가 실제로 갈리는 입력은 synthMixed(펜스 인용
+// 예시가 먼저, 펜스 밖 진짜 result_file: 줄이 뒤) 모양뿐이다 -- (s)는
+// 거부 갈래에서 끝나고 (t)는 원문 첫 매치 = 가린 첫 매치인 모양이라 둘
+// 다 이 줄을 보지 않는다. 이 칸이 그 공백을 메운다: 삽입 위치를 원문
+// 기준(RED 재현 M2)으로 되돌리면 synthMixed는 펜스 「안」에 거듭
+// 밀어넣어져 9->18->27->36으로 상한 없이 자란다(검토 §1 실측, 이
+// 라운드 scratch 재현과 같은 수치) -- 지금 프로덕션(가린 텍스트 기준)은
+// 진짜 줄 바로 뒤에 한 번만 채우고 4회 연속 호출해도 더 자라지 않는다.
+// ---------------------------------------------------------------------------
+test("(u) HYK-480-2 P2-1 수리: synthMixed(펜스 예시가 먼저, 진짜 result_file: 줄이 뒤)에서도 가린 텍스트 매치를 따라 진짜 줄 바로 뒤에만 채우고, 4회 연속 호출해도 더 자라지 않으며, 펜스 예시는 바이트 그대로 남는다", () => {
+  withFixtureDir((dir) => {
+    const taskPath = join(dir, "coder-task.md");
+    const resultFile = join(dir, "coder.md");
+    const original =
+      `task_id: HYK-9515-quote-before-real-1\n` +
+      `role: CODER\n` +
+      "본문 설명: 아래는 예시일 뿐이다.\n" +
+      "~~~\n" +
+      `result_file: C:\\example\\not-a-real-path\\coder.md\n` +
+      "~~~\n" +
+      `본문 계속\n` +
+      `result_file: ${resultFile}\n${ONE_B_BLOCK}`;
+    writeFileSync(taskPath, original, "utf8");
+    const ledgerPath = join(dir, "reject-streak.json");
+    writeLedger(ledgerPath, { schema_version: 1, issues: {} });
+
+    let shaAfterCall1;
+    for (let call = 1; call <= 4; call++) {
+      const r = runCli([taskPath, "--ledger", ledgerPath]);
+      assert.equal(r.status, 0, `call ${call}: expected ALLOW`);
+      assert.doesNotMatch(
+        r.stdout,
+        /REFUSED/,
+        `call ${call}: 진짜 줄이 뒤에 있으면 거부로 떨어지면 안 된다(요구 1과 요구 2는 서로 다른 모양을 본다)`,
+      );
+      const after = readFileSync(taskPath, "utf8");
+      const sha = createHash("sha256").update(after).digest("hex");
+
+      if (call === 1) {
+        assert.match(
+          r.stdout,
+          /result-path injection skipped \(already injected -- matched line: 'result_file:.*coder\.md'\)/,
+          "call 1: 가린 텍스트 매치가 진짜(인용 밖) 줄을 '이미 주입됨'으로 잡아야 한다",
+        );
+        // 요구 2가 갈리는 지점: 채움 블록이 펜스 예시 "안"이 아니라
+        // 펜스 밖 진짜 줄 바로 뒤에 와야 한다(원문 기준 매치였다면
+        // 이 블록이 펜스 예시 뒤에 붙어 매번 펜스 안을 거듭 키운다).
+        assert.ok(
+          after.includes(
+            `result_file: ${resultFile}\nresult_header_checklist_fill:`,
+          ),
+          "call 1: 채움 블록은 진짜 result_file: 줄 바로 뒤에 와야 한다(펜스 안이 아님)",
+        );
+        shaAfterCall1 = sha;
+      } else {
+        assert.equal(
+          sha,
+          shaAfterCall1,
+          `call ${call}: 첫 채움 뒤로는 바이트가 1개도 바뀌면 안 된다(완전 멱등) -- 수리 전(M2와 같은 모양)에는 호출마다 +1303B씩 9->18->27->36으로 자랐다`,
+        );
+      }
+
+      assert.match(
+        after,
+        /~~~\nresult_file: C:\\example\\not-a-real-path\\coder\.md\n~~~/,
+        `call ${call}: 펜스 인용 예시는 바이트 그대로 남아야 한다`,
+      );
+      assert.equal(
+        [...after.matchAll(/^result_header_checklist_[a-z_]+:/gim)].length,
+        9,
+        `call ${call}: 점검표 줄 수는 9에서 상한을 넘지 않아야 한다(수리 전/M2 재현: 9->18->27->36으로 무한 성장)`,
+      );
+    }
+  });
+});
+
 // ── HYK-209 (2026-10-05) -- `dropped_at:` 빈 값이 다음 줄을 값으로 오독하던
 // 실사고 수리. 같은 파일에 두는 이유는 위 헤더와 같다(1b_exec_line 이 이 파일을
 // 고정 목록으로 태운다). 세 모양(ⓐ빈 값 ⓑ값 있음 ⓒ줄 없음) + 음성 대조 +
