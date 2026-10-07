@@ -16,6 +16,14 @@ import { tmpdir } from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { createHash } from "node:crypto";
 import { writeLedger, unclosedQuoteOpenLine } from "./reject-streak.mjs";
+import { buildResultHeaderChecklistLines } from "./dispatch-gate-decision.mjs";
+
+// HYK-480: 경로 주입이 건너뛰는 pre-seeded result_file 픽스처에도 이제 점검표 누락분이
+// 채워진다 -- 그래서 픽스처가 완전한 점검표를 미리 갖게 해 dropped_at 축만 바이트로 잰다
+// (점검표 채움 자체의 시험은 dispatch-gate-checklist-fill-in-place.test.mjs).
+const FULL_CHECKLIST_BLOCK = buildResultHeaderChecklistLines("CODER")
+  .map((line) => `${line}\n`)
+  .join("");
 import {
   checkRelayHandshake,
   DROPPED_AT_RE as PROD_DROPPED_AT_RE,
@@ -124,7 +132,7 @@ test("(a) HYK-479-486 write-once: existing dropped_at: line is PRESERVED verbati
     // best-effort injection (bestEffortInjectResultPaths) is a no-op here
     // -- this test's only concern is dropped_at write-once behavior in
     // isolation.
-    const original = `task_id: HYK-9101-stamp-1\ndropped_at: 2020-01-01 00:00 KST\nresult_file: (pre-seeded, HYK-465 injection must not touch this fixture)\nrole: CODER\nsome body line\n${ONE_B_BLOCK}`;
+    const original = `task_id: HYK-9101-stamp-1\ndropped_at: 2020-01-01 00:00 KST\nresult_file: (pre-seeded, HYK-465 injection must not touch this fixture)\n${FULL_CHECKLIST_BLOCK}role: CODER\nsome body line\n${ONE_B_BLOCK}`;
     writeFileSync(taskPath, original, "utf8");
     const ledgerPath = join(dir, "reject-streak.json");
     writeLedger(ledgerPath, { schema_version: 1, issues: {} });
@@ -160,7 +168,7 @@ test("(a) HYK-479-486 write-once: existing dropped_at: line is PRESERVED verbati
 test("(m) HYK-479-486 §4 비타협: 값이 이미 있는 파일을 ALLOW로 재게이트해도 sha256 바이트 동일(완전 멱등) -- 시각원을 인위로 분 경계 넘겨 주입해도 불변", () => {
   withFixtureDir((dir) => {
     const taskPath = join(dir, "coder-task.md");
-    const original = `task_id: HYK-9105-idempotent-1\ndropped_at: 2020-01-01 00:00 KST\nresult_file: (pre-seeded, HYK-465 injection must not touch this fixture)\nrole: CODER\n${ONE_B_BLOCK}`;
+    const original = `task_id: HYK-9105-idempotent-1\ndropped_at: 2020-01-01 00:00 KST\nresult_file: (pre-seeded, HYK-465 injection must not touch this fixture)\n${FULL_CHECKLIST_BLOCK}role: CODER\n${ONE_B_BLOCK}`;
     writeFileSync(taskPath, original, "utf8");
     const originalSha256 = createHash("sha256").update(original).digest("hex");
     const ledgerPath = join(dir, "reject-streak.json");
@@ -211,7 +219,7 @@ test("(b) HYK-316-dropped-stamp-1: no dropped_at: line but task_id: IS present -
   withFixtureDir((dir) => {
     const taskPath = join(dir, "coder-task.md");
     // HYK-465: pre-seeded result_file: line, same reason as test (a) above.
-    const original = `task_id: HYK-9102-nodropped-1\nresult_file: (pre-seeded, HYK-465 injection must not touch this fixture)\nrole: CODER\n${ONE_B_BLOCK}`;
+    const original = `task_id: HYK-9102-nodropped-1\nresult_file: (pre-seeded, HYK-465 injection must not touch this fixture)\n${FULL_CHECKLIST_BLOCK}role: CODER\n${ONE_B_BLOCK}`;
     writeFileSync(taskPath, original, "utf8");
     const ledgerPath = join(dir, "reject-streak.json");
     writeLedger(ledgerPath, { schema_version: 1, issues: {} });
@@ -273,7 +281,7 @@ test("(c) HYK-479 §A: pre-existing REJECT fixture shape (streak 2, no envelope)
     // a no-op here, same convention as tests (a)/(b) above. That isolates
     // this test's whole-file sha256 comparison to the ONE axis actually in
     // scope: the dropped_at stamp.
-    const original = `task_id: HYK-9103-reject-1\ndropped_at: 2020-01-01 00:00 KST\nresult_file: (pre-seeded, HYK-465 injection must not touch this fixture)\n${ONE_B_BLOCK}`;
+    const original = `task_id: HYK-9103-reject-1\ndropped_at: 2020-01-01 00:00 KST\nresult_file: (pre-seeded, HYK-465 injection must not touch this fixture)\n${FULL_CHECKLIST_BLOCK}${ONE_B_BLOCK}`;
     writeFileSync(taskPath, original, "utf8");
     const originalSha256 = createHash("sha256").update(original).digest("hex");
     const ledgerPath = join(dir, "reject-streak.json");
@@ -321,7 +329,7 @@ test("(c2) HYK-479 §A/§B-1: DIFFERENT reject 갈래(1-B 누락 전제조건 �
     // CLI 안 in-process 전제조건 축이라, (c)의 «연속반려» 갈래와 코드
     // 경로가 다르다 -- B-1이 요구하는 "«게이트 호출 후» 거부되는 갈래
     // 최소 2가지"를 서로 다른 두 축으로 충족한다).
-    const original = `task_id: HYK-9104-oneb-reject-1\ndropped_at: 2020-01-01 00:00 KST\nresult_file: (pre-seeded, HYK-465 injection must not touch this fixture)\n`;
+    const original = `task_id: HYK-9104-oneb-reject-1\ndropped_at: 2020-01-01 00:00 KST\nresult_file: (pre-seeded, HYK-465 injection must not touch this fixture)\n${FULL_CHECKLIST_BLOCK}`;
     writeFileSync(taskPath, original, "utf8");
     const originalSha256 = createHash("sha256").update(original).digest("hex");
     const ledgerPath = join(dir, "reject-streak.json");
@@ -495,7 +503,8 @@ test("HYK-209 P3-3 (w) CLI: 시계가 NaN 이면 빈 dropped_at 줄을 채우지
 // 안 「값 있는」 예시가 진짜 빈 줄을 「이미 있음」으로 가리지 않는다. 모든 시험은
 // 실제 CLI(runCli) 한 번의 ALLOW 경로다 -- 채움·삽입은 ALLOW 뒤에만 일어난다.
 const QUOTE_FIXTURE_HEAD =
-  "result_file: (pre-seeded, HYK-465 injection must not touch this fixture)\n";
+  "result_file: (pre-seeded, HYK-465 injection must not touch this fixture)\n" +
+  FULL_CHECKLIST_BLOCK;
 const DROPPED_AT_FILLED_RE =
   /^dropped_at: \d{4}-\d{2}-\d{2} \d{2}:\d{2} KST\r?$/m;
 
