@@ -115,6 +115,15 @@ function countOccurrences(text, keyLinePrefixRe) {
   return [...text.matchAll(keyLinePrefixRe)].length;
 }
 
+// HYK-480-3 §2 요구4(2R 검토 P3-2 권고): (u)의 1회차 로그 단언이 쓰는
+// `.*coder\.md`는 "값 있는 result_file: 줄이면 전부" 매치해, 진짜(인용
+// 밖) 줄의 경로 값과 펜스 예시의 가짜 경로 값(둘 다 "...coder.md"로
+// 끝난다)을 갈라내지 못한다 -- 실제 경로 값을 그대로(escape해서) 박아
+// 넣어야 "그 경로가 바로 이 경로"임을 값으로 증명한다.
+function escapeRegExp(literal) {
+  return literal.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 // HYK-480-3 (v)/(M5)/(M6): 변이한 dispatch-gate-decision.mjs 한 장을 실제
 // 형제 파일들과 함께 임시 디렉터리에 스테이징하고, 그 경로로 CLI를
 // 그대로(child process) 구동한다 -- 같은 스테이징 관례, 참조:
@@ -1049,10 +1058,25 @@ test("(u) HYK-480-2 P2-1 수리: synthMixed(펜스 예시가 먼저, 진짜 resu
       const sha = createHash("sha256").update(after).digest("hex");
 
       if (call === 1) {
+        // HYK-480-3 §2 요구4(P3-2 수리): `.*coder\.md`는 펜스 예시의
+        // 가짜 경로('C:\example\not-a-real-path\coder.md')에도 매치
+        // 하므로, 진짜(인용 밖) 경로 값을 그대로 escape해 끼워 넣어 -- 두
+        // 후보 중 "이 값"이 찍혔다는 것까지 좁혀 단정한다(M2처럼 원문
+        // 기준 매치로 되돌아가 '먼저 나오는' 펜스 예시 줄을 '이미
+        // 주입됨'으로 잘못 잡아도 이 느슨한 정규식으로는 여전히 통과
+        // 했을 자리).
+        const matchedLineRe = new RegExp(
+          `result-path injection skipped \\(already injected -- matched line: 'result_file: ${escapeRegExp(resultFile)}'\\)`,
+        );
         assert.match(
           r.stdout,
-          /result-path injection skipped \(already injected -- matched line: 'result_file:.*coder\.md'\)/,
-          "call 1: 가린 텍스트 매치가 진짜(인용 밖) 줄을 '이미 주입됨'으로 잡아야 한다",
+          matchedLineRe,
+          "call 1: 가린 텍스트 매치가 진짜(인용 밖) 줄의 '그 경로 값'을 '이미 주입됨'으로 잡아야 한다(펜스 예시의 가짜 경로가 아니다)",
+        );
+        assert.doesNotMatch(
+          r.stdout,
+          /matched line: 'result_file: C:\\example\\not-a-real-path\\coder\.md'/,
+          "call 1: 펜스 예시의 가짜 경로가 '이미 주입됨' 매치로 찍히면 안 된다(M2 재발 시 이 축이 레드로 샌다)",
         );
         // 요구 2가 갈리는 지점: 채움 블록이 펜스 예시 "안"이 아니라
         // 펜스 밖 진짜 줄 바로 뒤에 와야 한다(원문 기준 매치였다면
