@@ -28,6 +28,7 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import {
   mkdtempSync,
+  mkdirSync,
   writeFileSync,
   rmSync,
   readFileSync,
@@ -41,9 +42,18 @@ import { createHash } from "node:crypto";
 import { writeLedger } from "./reject-streak.mjs";
 import {
   RESULT_FILE_LINE_RE,
+  RESULT_FILE_EMPTY_KEY_RE,
   buildResultHeaderChecklistLines,
   fillEmptyLegacyKeysInPlace,
 } from "./dispatch-gate-decision.mjs";
+// HYK-480-3 §2-5 (v): bestEffortInjectResultPaths는 export되지 않는 CLI
+// 내부 함수라 (d)/(n)/(o)처럼 순수 함수를 직접 구동할 수 없다 --
+// hyk468-3r-three-readers.test.mjs가 이미 증명한 관례(scripts/check 전체를
+// 임시 디렉터리에 스테이징하고 변이한 dispatch-gate-decision.mjs 한 장만
+// 바꿔 CLI를 그 경로로 그대로 구동)를 그대로 재사용한다. 스테이징 목록은
+// 단일 정본 DISPATCH_GATE_DECISION_SIBLINGS(HYK-460-staging-list-fix-3)를
+// 그대로 쓴다 -- 손으로 목록을 복제하면 그 자체가 새 동기화 공백이 된다.
+import { DISPATCH_GATE_DECISION_SIBLINGS } from "./dispatch-gate-decision-deps.mjs";
 // HYK-480 §2-1 (책임자 실사고 근거): 점검표 문면을 그대로 따른 결과
 // 파일이 파서에서 표지 «1개»로 읽히는지는 naive grep이 아니라 실제
 // 생산 파서 함수로 단정해야 한다(HYK-468 2R과 같은 판정선) -- 같은
@@ -81,9 +91,9 @@ const SHARED_EMPTY_RECEIPT_PATH = join(
 );
 writeFileSync(SHARED_EMPTY_RECEIPT_PATH, "", "utf8");
 
-function runCli(args) {
+function runCliAt(scriptPath, args) {
   try {
-    const stdout = execFileSync("node", [SCRIPT_PATH, ...args], {
+    const stdout = execFileSync("node", [scriptPath, ...args], {
       encoding: "utf8",
       env: { ...process.env, DISPATCH_RECEIPT_PATH: SHARED_EMPTY_RECEIPT_PATH },
     });
@@ -97,8 +107,46 @@ function runCli(args) {
   }
 }
 
+function runCli(args) {
+  return runCliAt(SCRIPT_PATH, args);
+}
+
 function countOccurrences(text, keyLinePrefixRe) {
   return [...text.matchAll(keyLinePrefixRe)].length;
+}
+
+// HYK-480-3 (v)/(M5)/(M6): 변이한 dispatch-gate-decision.mjs 한 장을 실제
+// 형제 파일들과 함께 임시 디렉터리에 스테이징하고, 그 경로로 CLI를
+// 그대로(child process) 구동한다 -- 같은 스테이징 관례, 참조:
+// hyk468-3r-three-readers.test.mjs stageSiblings/dispatch-gate-abort-wire.
+// test.mjs stageScriptsCheckDir.
+const REAL_CHECK_DIR = join(SCRIPTS_ROOT, "check");
+
+function stageMutantDispatchGateDecision(dir, mutatedSource) {
+  const scriptsCheckDir = join(dir, "scripts", "check");
+  mkdirSync(scriptsCheckDir, { recursive: true });
+  writeFileSync(
+    join(scriptsCheckDir, "dispatch-gate-decision.mjs"),
+    mutatedSource,
+    "utf8",
+  );
+  for (const name of DISPATCH_GATE_DECISION_SIBLINGS) {
+    writeFileSync(
+      join(scriptsCheckDir, name),
+      readFileSync(join(REAL_CHECK_DIR, name), "utf8"),
+      "utf8",
+    );
+  }
+  return join(scriptsCheckDir, "dispatch-gate-decision.mjs");
+}
+
+function assertExactlyOneMatch(src, target, label) {
+  const count = src.split(target).length - 1;
+  assert.equal(
+    count,
+    1,
+    `mutation target "${label}" must appear exactly once (found ${count})`,
+  );
 }
 
 test("(a) 빈 키 템플릿(실사고 재현 모양) -- 4개 빈 키가 제자리에서 값 있는 줄로 채워지고, 중복 키는 0개", () => {
@@ -878,10 +926,16 @@ test("(s) HYK-480-2 P2-4 수리: 첫 result_file: 매치가 펜스 인용 안에
         /result-path injection REFUSED \(fail-closed, HYK-480-2 P2-4\)/,
         `call ${call}: refusal must be logged loudly, never a silent no-op`,
       );
+      // HYK-480-3 §2 요구2(P2-1 수리): 옛 문구 "no 'result_file:' line
+      // outside a quoted/fenced region" -> 새 문구 "no non-empty
+      // result_file line outside quoted regions"로 사실화됐다 -- 인용
+      // 밖에 «빈 키»가 있는 모양(P2-1)에서는 이 거부 자체를 타지 않게
+      // 됐으므로(= 아래 (v)), 이 축이 실제로 거부로 떨어지는 모양은
+      // "인용 밖에 값 있는 줄도 빈 키도 하나도 없다"는 뜻이어야 정확하다.
       assert.match(
         r.stdout,
-        /no 'result_file:' line outside a quoted\/fenced region/,
-        `call ${call}: refusal reason must name the actual cause (P2-2: 구현 의미는 "모든 매치가 인용 안" -- "첫 매치만" 이 아니다)`,
+        /no non-empty result_file line outside quoted regions/,
+        `call ${call}: refusal reason must name the actual cause, and must not claim "no result_file: line at all" when an empty key could exist (HYK-480-3 §2 요구2)`,
       );
       assert.doesNotMatch(
         r.stdout,
@@ -1029,6 +1083,257 @@ test("(u) HYK-480-2 P2-1 수리: synthMixed(펜스 예시가 먼저, 진짜 resu
         `call ${call}: 점검표 줄 수는 9에서 상한을 넘지 않아야 한다(수리 전/M2 재현: 9->18->27->36으로 무한 성장)`,
       );
     }
+  });
+});
+
+// ===========================================================================
+// HYK-480-3 §2-5 (v, 필수): 2R 검토 P2-1 가 지목한 네 번째 모양 -- 펜스
+// 「안」 값 있는 result_file: 예시(진짜 줄 아님) + 펜스 「밖」 열 0 빈
+// result_file: 키 + 빈 runner_receipt_file: 키. (s)는 거부 갈래(진짜 줄도
+// 빈 키도 없음)에서 끝나고, (t)/(u)는 인용 밖에 «값 있는» 진짜 줄이 있는
+// 모양이라 둘 다 이 네 번째 모양을 보지 않는다 -- 이 칸이 그 공백을
+// 메운다: §2-1 수리 후에는 이 모양에서 거부가 아니라 빈 키 제자리 채움이
+// 일어나야 한다.
+// ===========================================================================
+const CHECKLIST_KEY_PREFIXES = [
+  "result_header_checklist_note",
+  "result_header_checklist_role",
+  "result_header_checklist_task_id",
+  "result_header_checklist_for",
+  "result_header_checklist_verdict",
+  "result_header_checklist_headcommit",
+  "result_header_checklist_done",
+  "result_header_checklist_runner_naming",
+];
+
+test("(v0) RESULT_FILE_EMPTY_KEY_RE 단독: 값 없는 줄에만 매치하고, 값 있는 줄·개행 삼키는 모양에는 매치하지 않는다(프로덕션 export 직접 구동)", () => {
+  assert.equal(RESULT_FILE_EMPTY_KEY_RE.test("result_file:"), true);
+  assert.equal(RESULT_FILE_EMPTY_KEY_RE.test("result_file:   "), true);
+  assert.equal(
+    RESULT_FILE_EMPTY_KEY_RE.test("result_file: /abs/coder.md"),
+    false,
+    "값이 있으면 매치하지 않는다(그건 RESULT_FILE_LINE_RE의 몫)",
+  );
+  const multiLine = "result_file:\nrunner_receipt_file:";
+  const match = multiLine.match(RESULT_FILE_EMPTY_KEY_RE);
+  assert.ok(match, "빈 result_file: 줄이 있으면 매치한다");
+  assert.equal(
+    match[0],
+    "result_file:",
+    "매치는 그 줄 자신에서 끝난다 -- 다음 줄까지 삼키지 않는다(§1 실사고와 같은 '\\s*' 함정 재발 방지)",
+  );
+});
+
+test("(v) HYK-480-3 §2-1 수리: 펜스 안 값 있는 result_file: 예시 + 펜스 밖 빈 result_file:/runner_receipt_file: 키 모양에서는 거부가 아니라 그 자리에서 빈 키가 채워지고, 점검표 8키가 각각 1번씩, 펜스 예시는 바이트 그대로, 2~4회째는 더 자라지 않는다(CLI 프로덕션 경로)", () => {
+  withFixtureDir((dir) => {
+    const taskPath = join(dir, "coder-task.md");
+    const resultFile = join(dir, "coder.md");
+    const receiptFile = join(dir, "runner-receipt.json");
+    const original =
+      `task_id: HYK-9517-fence-example-then-empty-keys-1\n` +
+      `role: CODER\n` +
+      "본문 설명: 아래는 예시일 뿐이다.\n" +
+      "~~~\n" +
+      `result_file: C:\\example\\not-a-real-path\\coder.md\n` +
+      "~~~\n" +
+      `본문 계속\n` +
+      `result_file:\n` +
+      `runner_receipt_file:\n${ONE_B_BLOCK}`;
+    writeFileSync(taskPath, original, "utf8");
+    const ledgerPath = join(dir, "reject-streak.json");
+    writeLedger(ledgerPath, { schema_version: 1, issues: {} });
+
+    let shaAfterCall1;
+    for (let call = 1; call <= 4; call++) {
+      const r = runCli([taskPath, "--ledger", ledgerPath]);
+      assert.equal(r.status, 0, `call ${call}: expected ALLOW`);
+      // ⓔ 거부 로그가 한 번도 안 찍혔는가.
+      assert.doesNotMatch(
+        r.stdout,
+        /REFUSED/,
+        `call ${call}: 인용 밖에 빈 키가 있으면 값 있는 예시가 펜스 안에만 있어도 거부로 떨어지면 안 된다(§2-1 수리)`,
+      );
+
+      const after = readFileSync(taskPath, "utf8");
+      const sha = createHash("sha256").update(after).digest("hex");
+
+      if (call === 1) {
+        // ⓐ 1회째: 빈 키가 "그 줄 그 자리에서" 채워졌는가(내용 + 줄
+        // 위치까지 -- 개수만 세지 않는다). 펜스 예시 「안」이 아니라
+        // 본문의 두 빈 줄이 있던 자리 그대로다.
+        assert.ok(
+          after.includes(
+            `본문 계속\nresult_file: ${resultFile}\nrunner_receipt_file: ${receiptFile}\n`,
+          ),
+          "call 1: 두 빈 키가 그 줄 그 자리에서(본문 계속 바로 뒤) 채워져야 한다 -- 펜스 예시 안이 아니다",
+        );
+        assert.match(
+          r.stdout,
+          /result-path block machine-injected \(HYK-480, in-place fill of empty template keys: result_file, runner_receipt_file\)/,
+          "call 1: 빈 키 제자리 채움이 실물로 로그에 찍혀야 한다(조용한 no-op 아님)",
+        );
+
+        // ⓑ 점검표 8키가 인용 밖에 각각 정확히 1번인가.
+        for (const prefix of CHECKLIST_KEY_PREFIXES) {
+          assert.equal(
+            countOccurrences(after, new RegExp(`^${prefix}:`, "gim")),
+            1,
+            `call 1: ${prefix}: must appear exactly once`,
+          );
+        }
+        shaAfterCall1 = sha;
+      } else {
+        // ⓓ 2~4회째 sha256 이 1회째 결과와 같은가(완전 멱등 -- 더 자라지
+        // 않는다).
+        assert.equal(
+          sha,
+          shaAfterCall1,
+          `call ${call}: 1회째 채움 뒤로는 바이트가 1개도 바뀌면 안 된다(완전 멱등)`,
+        );
+      }
+
+      // ⓒ 펜스 안 예시가 바이트 그대로인가(부분 문자열 동일, 매 호출).
+      assert.match(
+        after,
+        /~~~\nresult_file: C:\\example\\not-a-real-path\\coder\.md\n~~~/,
+        `call ${call}: 펜스 인용 예시는 바이트 그대로 남아야 한다`,
+      );
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// HYK-480-3 변이 M5 (필수, RED): §2-1 이 더하는 "빈 키 게이트"를 죽이면
+// -- 값은 늘 false 이므로 if (!hasGenuineEmptyResultFileKey) 분기가 항상
+// 타서 -- 위 (v)의 모양이 다시 거부(REFUSED)로 샌다(= ae5cf1b 의 순서로
+// 되돌림). 로그 문구 자체는(M6과 분리) 건드리지 않는다.
+// ---------------------------------------------------------------------------
+test("RED(변이 M5, 필수): 빈 키 게이트를 죽이면(거부 분기가 채움보다 항상 먼저 걸림, = ae5cf1b 순서) (v) 모양이 다시 거부로 샌다", () => {
+  const realSource = readFileSync(SCRIPT_PATH, "utf8");
+  const target =
+    "const hasGenuineEmptyResultFileKey =\n      RESULT_FILE_EMPTY_KEY_RE.test(maskedOriginal);";
+  assertExactlyOneMatch(
+    realSource,
+    target,
+    "hasGenuineEmptyResultFileKey 선언",
+  );
+  const mutated = realSource.replace(
+    target,
+    "const hasGenuineEmptyResultFileKey = false; // MUTATED(HYK-480-3 M5 RED): 게이트를 죽여 거부 분기가 항상 먼저 걸린다(= ae5cf1b 순서로 되돌림)",
+  );
+
+  withFixtureDir((dir) => {
+    const taskPath = join(dir, "coder-task.md");
+    // ⛔1b_* 블록을 일부러 넣지 않는다 -- (s)와 같은 이유(이 파일 자신의
+    // (s) 주석): bestEffortInjectResultPaths는 ALLOW/REJECT 판정과 무관
+    // 하게 항상 먼저 돈다. 1b_*를 채우면 ALLOW로 넘어가 dropped_at
+    // 스탬프(별개 축, ALLOW 게이트 뒤에만 실행)가 끼어들어 "바이트
+    // 무변경" 단정이 이 축(result-path 거부) 하나만을 가리키지 못하게
+    // 된다(entanglement) -- 1R 구현 중 실측으로 드러난 함정, 이 주석이
+    // 그 값을 적어 둔다.
+    const original =
+      `task_id: HYK-9518-m5-mutation-1\n` +
+      `role: CODER\n` +
+      "본문 설명: 아래는 예시일 뿐이다.\n" +
+      "~~~\n" +
+      `result_file: C:\\example\\not-a-real-path\\coder.md\n` +
+      "~~~\n" +
+      `본문 계속\n` +
+      `result_file:\n` +
+      `runner_receipt_file:\n`;
+    writeFileSync(taskPath, original, "utf8");
+    const ledgerPath = join(dir, "reject-streak.json");
+    writeLedger(ledgerPath, { schema_version: 1, issues: {} });
+    const originalSha = createHash("sha256").update(original).digest("hex");
+
+    const mutantDir = mkdtempSync(join(tmpdir(), "dispatch-gate-m5-stage-"));
+    try {
+      const mutantPath = stageMutantDispatchGateDecision(mutantDir, mutated);
+      const r = runCliAt(mutantPath, [taskPath, "--ledger", ledgerPath]);
+      assert.match(
+        r.stdout,
+        /result-path injection REFUSED \(fail-closed, HYK-480-2 P2-4\)/,
+        "RED: 게이트가 죽으면 (v) 모양도 다시 거부로 샌다(이 축이 실제로 결과를 바꾼다는 증거)",
+      );
+      const after = readFileSync(taskPath, "utf8");
+      const afterSha = createHash("sha256").update(after).digest("hex");
+      assert.equal(
+        afterSha,
+        originalSha,
+        "RED: 거부 갈래는 여전히 바이트 무변경이다(이 변이가 바꾸는 건 '거부 여부'뿐, 거부 자체의 무변경성이 아니다)",
+      );
+    } finally {
+      rmSync(mutantDir, { recursive: true, force: true });
+    }
+
+    // 복원 증명: 변이는 임시 스테이징 디렉터리에만 썼다 -- 실 소스 파일은
+    // 전혀 건드리지 않았다.
+    const afterMutationRealSource = readFileSync(SCRIPT_PATH, "utf8");
+    assert.equal(
+      afterMutationRealSource,
+      realSource,
+      "원복 증명: 실 소스 파일은 바이트 동일해야 한다(변이는 임시 사본에만 적용)",
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// HYK-480-3 변이 M6 (필수, RED): §2 요구2가 고친 거부 로그 문구를 옛
+// 문구로 되돌리면, (s)의 새 단언("no non-empty result_file line outside
+// quoted regions")이 더 이상 찾을 수 없는 문자열이 된다 -- 값으로:
+// 되돌린 뒤 실제 찍히는 문구가 옛 문구이고, 새 문구 패턴은 매치되지
+// 않는다는 것을 직접 보인다(= 되돌리면 (s)가 잡아낸다는 증거).
+// ---------------------------------------------------------------------------
+test("RED(변이 M6, 필수): 거부 로그 문구를 옛 문구로 되돌리면 새 문구가 더 이상 찍히지 않는다(값 증거 -- 되돌리면 (s)가 잡아낸다)", () => {
+  const realSource = readFileSync(SCRIPT_PATH, "utf8");
+  const target =
+    "`dispatch-gate-decision: result-path injection REFUSED (fail-closed, HYK-480-2 P2-4) -- no non-empty result_file line outside quoted regions (raw match: '${rawMatchAnywhere[0].trim()}') -- not injecting paths, not filling checklist, task file left byte-unchanged -- ${taskPath}`,";
+  assertExactlyOneMatch(realSource, target, "거부 로그 템플릿 문자열");
+  const mutated = realSource.replace(
+    target,
+    "`dispatch-gate-decision: result-path injection REFUSED (fail-closed, HYK-480-2 P2-4) -- no 'result_file:' line outside a quoted/fenced region (raw match: '${rawMatchAnywhere[0].trim()}') -- not injecting paths, not filling checklist, task file left byte-unchanged -- ${taskPath}`,",
+  );
+
+  withFixtureDir((dir) => {
+    const taskPath = join(dir, "coder-task.md");
+    // (s)와 같은 모양(진짜 줄도 빈 키도 인용 밖에 없음) -- 이 모양에서만
+    // 거부가 일어난다(§2-1 수리 후에도 그대로).
+    const original =
+      `task_id: HYK-9519-m6-mutation-1\n` +
+      `role: CODER\n` +
+      "본문 설명: 예시로 결과 경로 모양을 보여준다.\n" +
+      "~~~\n" +
+      `result_file: C:\\example\\not-a-real-path\\coder.md\n` +
+      "~~~\n" +
+      `본문 계속\n`;
+    writeFileSync(taskPath, original, "utf8");
+    const ledgerPath = join(dir, "reject-streak.json");
+    writeLedger(ledgerPath, { schema_version: 1, issues: {} });
+
+    const mutantDir = mkdtempSync(join(tmpdir(), "dispatch-gate-m6-stage-"));
+    try {
+      const mutantPath = stageMutantDispatchGateDecision(mutantDir, mutated);
+      const r = runCliAt(mutantPath, [taskPath, "--ledger", ledgerPath]);
+      assert.match(
+        r.stdout,
+        /no 'result_file:' line outside a quoted\/fenced region/,
+        "RED: 되돌리면 옛 문구가 실제로 찍힌다",
+      );
+      assert.doesNotMatch(
+        r.stdout,
+        /no non-empty result_file line outside quoted regions/,
+        "값 증거: 되돌리면 (s)가 찾는 새 문구는 더 이상 이 출력에 없다 -- 되돌아가면 (s)가 레드로 샌다는 뜻",
+      );
+    } finally {
+      rmSync(mutantDir, { recursive: true, force: true });
+    }
+
+    const afterMutationRealSource = readFileSync(SCRIPT_PATH, "utf8");
+    assert.equal(
+      afterMutationRealSource,
+      realSource,
+      "원복 증명: 실 소스 파일은 바이트 동일해야 한다(변이는 임시 사본에만 적용)",
+    );
   });
 });
 
