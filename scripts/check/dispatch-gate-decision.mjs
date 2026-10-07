@@ -3711,41 +3711,75 @@ function appendMissingLegacyKeysAndChecklist(
   );
 }
 
+// HYK-480-2 (라인 수 분리, 비타협 "값 생성 금지"와는 무관 -- 이 함수는
+// 이미 있는 사실만 가지고 쓰기/로그만 한다): bestEffortInjectResultPaths
+// 가 ESLint max-lines-per-function을 넘기지 않도록 "이미 주입됨" 분기
+// 전체를 그대로 뽑았다 -- 로직 한 글자도 바뀌지 않음(순수 추출).
+function handleAlreadyInjectedResultFile(
+  taskPath,
+  role,
+  original,
+  existingMatch,
+) {
+  // HYK-480 §2: 조용한 no-op 제거 -- 매치된 줄 자체를 로그에 남긴다
+  // (task_id 부재 건너뛰기 로그와 같은 관례, §1 실사고의 "로그 없이
+  // return"을 닫는다).
+  console.log(
+    `dispatch-gate-decision: result-path injection skipped (already injected -- matched line: '${existingMatch[0].trim()}') -- ${taskPath}`,
+  );
+  // HYK-480 실사고(라운드 4 · 손으로 쓴 ORCH 지시서): 경로 주입은 건너뛰되,
+  // 점검표는 "누락분만" 채운다. 이 분기가 return 하면 점검표 주입 자체가
+  // 닿지 않아, 손 지시서 대부분에서 점검표가 꺼져 있었다.
+  const missingChecklist = missingChecklistLinesIn(
+    original,
+    buildResultHeaderChecklistLines(role),
+  );
+  if (missingChecklist.length === 0) return;
+  const missingKeys = missingChecklist.map(checklistKeyOf);
+  const fillMarker = `result_header_checklist_fill: HYK-480 기계 주입(누락분만 채움 -- 이미 있는 줄은 무접촉) -- 채운 키: ${missingKeys.map((k) => k.slice("result_header_checklist_".length, -1)).join(", ")}`;
+  const fillBlock = [fillMarker, ...missingChecklist]
+    .map((line) => `\n${line}`)
+    .join("");
+  const fillAt = existingMatch.index + existingMatch[0].length;
+  writeFileSync(
+    taskPath,
+    original.slice(0, fillAt) + fillBlock + original.slice(fillAt),
+    "utf8",
+  );
+  console.log(
+    `dispatch-gate-decision: result-path injection skipped, checklist fill-in-place (HYK-480 기계 주입, missing keys only: ${missingKeys.join(", ")}) -- ${taskPath}`,
+  );
+}
+
 function bestEffortInjectResultPaths(taskPath, args) {
   guardAgainstLiveTaskPathStamp(taskPath, args);
   const role = deriveRoleFromTaskPath(taskPath);
   if (!role) return;
   try {
     const original = readFileSync(taskPath, "utf8");
-    const existingMatch = original.match(RESULT_FILE_LINE_RE);
+    // HYK-480-2 §1 (P2-4 수리): 분기 판정·삽입 위치를 모두 masked 텍스트
+    // 기준으로 한다 -- maskQuotedMarkerRegions는 길이를 보존하며 가리므로
+    // (blankKeepingNewlines) masked 텍스트에서 구한 오프셋은 원문에서도
+    // 그대로 유효하다(resolveHeaderTaskId가 이미 이 전제로 동작). 첫
+    // `result_file:` 매치가 인용(펜스/HTML 주석) 밖이면 masked 텍스트에도
+    // 그대로 살아남아 지금까지의 동작과 바이트 하나도 다르지 않다.
+    const maskedOriginal = maskQuotedMarkerRegions(original);
+    const existingMatch = maskedOriginal.match(RESULT_FILE_LINE_RE);
     if (existingMatch) {
-      // HYK-480 §2: 조용한 no-op 제거 -- 매치된 줄 자체를 로그에 남긴다
-      // (task_id 부재 건너뛰기 로그와 같은 관례, §1 실사고의 "로그 없이
-      // return"을 닫는다).
+      handleAlreadyInjectedResultFile(taskPath, role, original, existingMatch);
+      return;
+    }
+    // HYK-480-2 §2 요구1 (fail-closed): masked 텍스트에는 매치가 없는데
+    // 원문(raw)에는 있다면 -- 첫 `result_file:` 이 인용(펜스/HTML 주석)
+    // 안에만 있다는 뜻이다(P2-4 실사고 모양 그 자체). 이 경우 "줄이 아예
+    // 없음"(바로 아래 분기, 전체 블록 주입)으로 떨어지면 매 실행마다
+    // 인용 안에 점검표를 거듭 덧붙이게 된다(수리 전 재현: 9->18->27->36
+    // 줄, 호출당 +1303바이트, 상한 없음) -- 채움 자체를 거부하고 조용하지
+    // 않은 로그만 남긴다(§2 "거부 로그는 조용하지 않아야 한다").
+    const rawMatchAnywhere = original.match(RESULT_FILE_LINE_RE);
+    if (rawMatchAnywhere) {
       console.log(
-        `dispatch-gate-decision: result-path injection skipped (already injected -- matched line: '${existingMatch[0].trim()}') -- ${taskPath}`,
-      );
-      // HYK-480 실사고(라운드 4 · 손으로 쓴 ORCH 지시서): 경로 주입은 건너뛰되,
-      // 점검표는 "누락분만" 채운다. 이 분기가 return 하면 점검표 주입 자체가
-      // 닿지 않아, 손 지시서 대부분에서 점검표가 꺼져 있었다.
-      const missingChecklist = missingChecklistLinesIn(
-        original,
-        buildResultHeaderChecklistLines(role),
-      );
-      if (missingChecklist.length === 0) return;
-      const missingKeys = missingChecklist.map(checklistKeyOf);
-      const fillMarker = `result_header_checklist_fill: HYK-480 기계 주입(누락분만 채움 -- 이미 있는 줄은 무접촉) -- 채운 키: ${missingKeys.map((k) => k.slice("result_header_checklist_".length, -1)).join(", ")}`;
-      const fillBlock = [fillMarker, ...missingChecklist]
-        .map((line) => `\n${line}`)
-        .join("");
-      const fillAt = existingMatch.index + existingMatch[0].length;
-      writeFileSync(
-        taskPath,
-        original.slice(0, fillAt) + fillBlock + original.slice(fillAt),
-        "utf8",
-      );
-      console.log(
-        `dispatch-gate-decision: result-path injection skipped, checklist fill-in-place (HYK-480 기계 주입, missing keys only: ${missingKeys.join(", ")}) -- ${taskPath}`,
+        `dispatch-gate-decision: result-path injection REFUSED (fail-closed, HYK-480-2 P2-4) -- first 'result_file:' match is inside a quoted/fenced region (raw match: '${rawMatchAnywhere[0].trim()}') -- not injecting paths, not filling checklist, task file left byte-unchanged -- ${taskPath}`,
       );
       return;
     }

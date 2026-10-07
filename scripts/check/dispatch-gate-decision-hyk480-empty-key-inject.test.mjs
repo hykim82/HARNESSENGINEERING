@@ -828,6 +828,131 @@ test("(r) HYK-479 §B-B: 점검표 문면 자체가 «같은 줄·줄바꿈 금�
     "예시 문구도 'head_commit:'를 콜론까지 붙여 쓰면 안 된다(부분 문자열 충돌 금지, §5 비타협)",
   );
 });
+
+// ===========================================================================
+// HYK-480-2 P2-4 (검토 #310 approved · P2-4 전문): 첫 `result_file:` 매치가
+// «인용(펜스) 안에만» 있으면(진짜 줄은 아예 없음) 옛 코드는 그걸 "이미
+// 주입됨"으로 오판해, 점검표 채움을 매번 그 펜스 «안으로» 밀어넣었다 --
+// 다음 실행에서도 그 주입분이 마스킹에 가려져 또 "누락"으로 보여 무한히
+// 자랐다(검토자 실측: 9->18->27->36줄, 호출당 +1303바이트, 상한 없음).
+// 수리: 분기 판정(existingMatch)과 삽입 위치(fillAt) 모두 masked 텍스트
+// 기준으로 통일 -- 매치가 masked에서 사라지면(=인용 안에만 있었다는 뜻)
+// 채움 자체를 거부하고 조용하지 않은 로그만 남긴다(fail-closed).
+// ===========================================================================
+
+test("(s) HYK-480-2 P2-4 수리: 첫 result_file: 매치가 펜스 인용 안에만 있으면(진짜 줄 없음) 채움을 거부하고 거부 로그를 남기며, 4회 연속 호출해도 파일이 한 바이트도 자라지 않는다(synthC 재현, CLI 프로덕션 경로)", () => {
+  withFixtureDir((dir) => {
+    const taskPath = join(dir, "coder-task.md");
+    // ⛔1b_* 블록을 일부러 넣지 않는다 -- bestEffortInjectResultPaths는
+    // ALLOW/REJECT 판정과 무관하게 항상 먼저 돈다(이 파일 자신의 호출부
+    // 주석, HYK-479 §A), 그래서 REJECT 라운드로 둬도 이 축을 그대로
+    // 시험할 수 있고, 이 모양이면 dropped_at 스탬프(별도 축, ALLOW
+    // 게이트 뒤에만 실행)가 섞이지 않아 "바이트 하나도 안 바뀐다"는
+    // 단정이 이 축 하나만을 가리키게 된다(entanglement 없음).
+    const original =
+      `task_id: HYK-9513-quote-only-1\n` +
+      `role: CODER\n` +
+      "본문 설명: 예시로 결과 경로 모양을 보여준다.\n" +
+      "~~~\n" +
+      `result_file: C:\\example\\not-a-real-path\\coder.md\n` +
+      "~~~\n" +
+      `본문 계속\n`;
+    writeFileSync(taskPath, original, "utf8");
+    const ledgerPath = join(dir, "reject-streak.json");
+    writeLedger(ledgerPath, { schema_version: 1, issues: {} });
+
+    const originalSha = createHash("sha256").update(original).digest("hex");
+
+    for (let call = 1; call <= 4; call++) {
+      const r = runCli([taskPath, "--ledger", ledgerPath]);
+      // 1b_* 세 줄을 일부러 뺀 고정 모양이라 1-B precondition이 매번
+      // REJECT(exit 1)다 -- 그 판정은 이 축과 무관(아래가 보는 것은
+      // 오직 result-path 주입 함수의 거부/바이트 무변경뿐)이다.
+      assert.equal(
+        r.status,
+        1,
+        `call ${call}: 1-B precondition REJECT is this fixture's own, unrelated exit code`,
+      );
+      assert.match(
+        r.stdout,
+        /result-path injection REFUSED \(fail-closed, HYK-480-2 P2-4\)/,
+        `call ${call}: refusal must be logged loudly, never a silent no-op`,
+      );
+      assert.match(
+        r.stdout,
+        /first 'result_file:' match is inside a quoted\/fenced region/,
+        `call ${call}: refusal reason must name the actual cause`,
+      );
+      assert.doesNotMatch(
+        r.stdout,
+        /result-path block machine-injected|checklist fill-in-place/,
+        `call ${call}: must not fall through to injection or checklist-fill`,
+      );
+
+      const after = readFileSync(taskPath, "utf8");
+      const afterSha = createHash("sha256").update(after).digest("hex");
+      assert.equal(
+        afterSha,
+        originalSha,
+        `call ${call}: task file must be byte-identical to the pristine original -- the bug grew it by +1303 bytes per call`,
+      );
+      assert.equal(
+        [...after.matchAll(/^result_header_checklist_[a-z_]+:/gim)].length,
+        0,
+        `call ${call}: zero checklist lines must ever be injected into the fence`,
+      );
+    }
+  });
+});
+
+test("(t) HYK-480-2 §2 요구1&2 무회귀: 진짜(인용 밖) 값 있는 result_file: 이 뒤쪽 펜스 인용 예시보다 먼저 오면, masked 기준 매치로도 지금까지와 같이 그 진짜 줄을 '이미 주입됨'으로 보고 점검표만 채우며, 인용 예시는 바이트 그대로 남는다", () => {
+  withFixtureDir((dir) => {
+    const taskPath = join(dir, "coder-task.md");
+    const original =
+      `task_id: HYK-9514-real-before-quote-1\n` +
+      `role: CODER\n` +
+      `result_file: ${join(dir, "coder.md")}\n` +
+      "본문 설명: 아래는 예시일 뿐이다.\n" +
+      "~~~\n" +
+      `result_file: C:\\example\\not-a-real-path\\coder.md\n` +
+      "~~~\n" +
+      `본문 계속\n${ONE_B_BLOCK}`;
+    writeFileSync(taskPath, original, "utf8");
+    const ledgerPath = join(dir, "reject-streak.json");
+    writeLedger(ledgerPath, { schema_version: 1, issues: {} });
+
+    const first = runCli([taskPath, "--ledger", ledgerPath]);
+    assert.equal(first.status, 0);
+    assert.match(
+      first.stdout,
+      /result-path injection skipped \(already injected -- matched line: 'result_file:.*coder\.md'\)/,
+      "진짜(인용 밖) 줄이 masked 매치로도 '이미 주입됨'으로 잡혀야 한다(무회귀)",
+    );
+    assert.doesNotMatch(first.stdout, /REFUSED/);
+
+    const afterFirst = readFileSync(taskPath, "utf8");
+    assert.match(
+      afterFirst,
+      /~~~\nresult_file: C:\\example\\not-a-real-path\\coder\.md\n~~~/,
+      "펜스 인용 예시 줄은 바이트 그대로 남아야 한다",
+    );
+    assert.equal(
+      [...afterFirst.matchAll(/^result_header_checklist_role:/gim)].length,
+      1,
+      "첫 실행에서 점검표가 정상적으로 채워져야 한다(무회귀)",
+    );
+
+    // 두 번째 호출 -- 완전 멱등(점검표도 이미 다 있으므로 바이트 무변경).
+    const second = runCli([taskPath, "--ledger", ledgerPath]);
+    assert.equal(second.status, 0);
+    const afterSecond = readFileSync(taskPath, "utf8");
+    assert.equal(
+      afterSecond,
+      afterFirst,
+      "두 번째 호출은 파일을 단 1바이트도 바꾸지 않아야 한다",
+    );
+  });
+});
 // ── HYK-209 (2026-10-05) -- `dropped_at:` 빈 값이 다음 줄을 값으로 오독하던
 // 실사고 수리. 같은 파일에 두는 이유는 위 헤더와 같다(1b_exec_line 이 이 파일을
 // 고정 목록으로 태운다). 세 모양(ⓐ빈 값 ⓑ값 있음 ⓒ줄 없음) + 음성 대조 +
