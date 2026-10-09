@@ -221,17 +221,29 @@ function readReceiptsInDir({ dir, readFn, readdirFn, source, sink }) {
 
 // ③아카이브 재귀 walk -- 포트는 readdirFn 하나뿐(새 경로에서 fs 직접
 // 호출 금지 요건). Dirent/withFileTypes 없이 "readdirFn(path)가 성공하면
-// 디렉터리, 던지면 파일(또는 못 읽음)"로 덕타이핑한다. ⛔정직 한계: 이
-// 덕타이핑은 "파일이라 스킵"과 "권한 없어 못 읽는 디렉터리"를 구분하지
-// 못한다 -- archiveRoot 자신의 읽기 실패(아래 scanArchiveRoot)만 별도로
-// 표면화하고, 더 깊은 단계의 그런 실패는 조용히 "파일"로 취급해 스킵한다
-// (§4 정직 한계 문단에 그대로 적는다).
-function walkForReceiptsDirs({ dir, depth, maxDepth, readdirFn }) {
-  if (depth > maxDepth) return [];
+// 디렉터리, 던지면 파일(또는 못 읽음)"로 덕타이핑한다.
+// HYK-255-consumed-denominator-1 2R 수리 -- catch에서 err.code로 "파일이라
+// 건너뜀"(ENOTDIR)과 "진짜 읽기 실패"(EACCES 등)를 가른다. 같은 readdirFn
+// 포트의 err.code만 쓰므로 새 fs 직접 호출은 없다(기존 포트 제약 그대로).
+// 진짜 실패는 sink.walkDirFailures로 값을 남긴다(0건으로 조용히 접지
+// 않는다 -- §2 요건 1). 깊이 상한에 걸려 더 내려가지 않은 폴더도
+// sink.depthExceededCount로 값을 남긴다(§2 요건 2) -- 그 폴더 아래에 진짜
+// receipts가 있었는지는 원리상 알 수 없으므로(내려가지 않았으니까) "폴더
+// 수"만 센다.
+function walkForReceiptsDirs({ dir, depth, maxDepth, readdirFn, sink }) {
+  if (depth > maxDepth) {
+    sink.depthExceededCount += 1;
+    return [];
+  }
   let names;
   try {
     names = readdirFn(dir);
-  } catch {
+  } catch (err) {
+    if (err && err.code === "ENOTDIR") {
+      // 파일이라 건너뜀(기존 동작) -- 실패로 세지 않는다.
+      return [];
+    }
+    sink.walkDirFailures += 1;
     return [];
   }
   const found = [];
@@ -248,6 +260,7 @@ function walkForReceiptsDirs({ dir, depth, maxDepth, readdirFn }) {
         depth: depth + 1,
         maxDepth,
         readdirFn,
+        sink,
       }),
     );
   }
@@ -256,7 +269,7 @@ function walkForReceiptsDirs({ dir, depth, maxDepth, readdirFn }) {
 
 // archiveRoot 자신의 상태(경로 없음 / 읽기 실패 / 스캔함)는 별도로 값을
 // 남긴다 -- 비타협: "0건"으로 조용히 접지 않는다(§2 요건 4).
-function scanArchiveRoot({ archiveRoot, maxDepth, existsFn, readdirFn }) {
+function scanArchiveRoot({ archiveRoot, maxDepth, existsFn, readdirFn, sink }) {
   if (!existsFn(archiveRoot)) {
     return { root: archiveRoot, status: "경로 없음", dirs: [] };
   }
@@ -279,7 +292,13 @@ function scanArchiveRoot({ archiveRoot, maxDepth, existsFn, readdirFn }) {
       continue;
     }
     dirs.push(
-      ...walkForReceiptsDirs({ dir: full, depth: 1, maxDepth, readdirFn }),
+      ...walkForReceiptsDirs({
+        dir: full,
+        depth: 1,
+        maxDepth,
+        readdirFn,
+        sink,
+      }),
     );
   }
   return { root: archiveRoot, status: "스캔함", dirs };
@@ -417,6 +436,22 @@ function summarizeConsumedRecords({ records, windowStartMs, windowEndMs }) {
   return { labels, livingCount, archiveCount };
 }
 
+// P3-3 수리 -- archiveScanMaxDepth가 비숫자·음수·소수(NaN 포함)면 기본값
+// (DEFAULT_ARCHIVE_SCAN_MAX_DEPTH)으로 되돌린다. CLI 실패 종료(거부) 대신
+// 기본값을 고른 이유(§4 정직 한계에도 적는다): 이 CLI는 watch-run.mjs가
+// 주기적으로 호출하는 읽기 전용 감시 도구다 -- 플래그 오타 하나로 전체
+// 보고가 거부·중단되면 감시 자체가 끊긴다. "상한이 통째로 꺼지는 것"(옛
+// 버그 -- depth > NaN이 항상 false)만 막으면 되므로, 조용히 안전한 기본값
+// 으로 복귀시키는 쪽이 감시 가용성을 깨지 않는다. collectConsumedRounds
+// 하나의 관문에서만 걸어 CLI·options.archiveScanMaxDepth 양쪽을 다 막는다
+// (CLI parseCliArgs와 runPartialCountOnce의 resolveValueOptions는 둘 다
+// 이 함수를 거쳐 이 값을 쓴다).
+function resolveArchiveScanMaxDepth(value) {
+  return Number.isInteger(value) && value >= 0
+    ? value
+    : DEFAULT_ARCHIVE_SCAN_MAX_DEPTH;
+}
+
 export function collectConsumedRounds({
   repoRoot,
   extraRepoRoots = DEFAULT_EXTRA_REPO_ROOTS,
@@ -435,11 +470,16 @@ export function collectConsumedRounds({
   const wl = listGitWorktrees(repoRoot, gitWorktreeListExecFn);
   if (!wl.ok) return buildUnknownConsumedResult({ archiveRoot, wl });
 
+  const effectiveArchiveScanMaxDepth =
+    resolveArchiveScanMaxDepth(archiveScanMaxDepth);
+
   const sink = {
     records: [],
     parseFailures: 0,
     dirFailures: 0,
     unkeyedCount: 0,
+    walkDirFailures: 0,
+    depthExceededCount: 0,
   };
   let scannedLivingWorktrees = scanWorktreesForReceipts({
     worktrees: wl.worktrees,
@@ -467,9 +507,10 @@ export function collectConsumedRounds({
   // 출처로 읽는다.
   const archiveScan = scanArchiveRoot({
     archiveRoot,
-    maxDepth: archiveScanMaxDepth,
+    maxDepth: effectiveArchiveScanMaxDepth,
     existsFn,
     readdirFn,
+    sink,
   });
   for (const dir of archiveScan.dirs) {
     readReceiptsInDir({ dir, readFn, readdirFn, source: "archive", sink });
@@ -487,6 +528,9 @@ export function collectConsumedRounds({
     labels,
     parseFailures: sink.parseFailures + sink.dirFailures,
     unkeyedCount: sink.unkeyedCount,
+    walkDirFailures: sink.walkDirFailures,
+    depthExceededCount: sink.depthExceededCount,
+    archiveScanMaxDepthUsed: effectiveArchiveScanMaxDepth,
     scannedWorktrees: scannedLivingWorktrees,
     scannedArchiveDirs: archiveScan.dirs.length,
     livingCount,
@@ -615,6 +659,18 @@ function buildConsumedFailureDetails(consumedResult) {
   if (consumedResult.unkeyedCount > 0) {
     details.push(
       `라운드 비식별 ${consumedResult.unkeyedCount}건(중복 제거 미적용·그대로 가산)`,
+    );
+  }
+  // HYK-255-consumed-denominator-1 2R -- 깊은 단계 폴더 읽기 실패(ENOTDIR
+  // 제외)와 깊이 상한 초과를 값으로 남긴다(§2 요건 1·2 -- 0건 침묵 금지).
+  if (consumedResult.walkDirFailures > 0) {
+    details.push(
+      `아카이브 하위 폴더 읽기 실패 ${consumedResult.walkDirFailures}곳`,
+    );
+  }
+  if (consumedResult.depthExceededCount > 0) {
+    details.push(
+      `깊이 상한(${consumedResult.archiveScanMaxDepthUsed}) 초과 ${consumedResult.depthExceededCount}곳`,
     );
   }
   for (const st of consumedResult.extraRepoRootsStatus ?? []) {

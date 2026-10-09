@@ -759,3 +759,309 @@ test("ⓕ HYK-255-consumed-denominator-1: 아카이브 루트 없음·추가 저
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+// ---------------------------------------------------------------------------
+// HYK-255-consumed-denominator-1 2R -- §2 요건 5(새 칸 필수, ㉝). 1R 검토
+// P2-1·P2-2·P3-3 수리를 고정한다. 전부 collectConsumedRounds(프로덕션
+// export)를 직접 타거나 runPartialCountOnce의 보고 텍스트로 내용을
+// 단언한다. 합성 실패는 전부 readdirFn 포트를 감싼 합성(실 EACCES 아님) --
+// 실 아카이브·실 에디터 저장소 미접촉.
+// ---------------------------------------------------------------------------
+
+test("ⓖ HYK-255-consumed-denominator-1 2R: 깊은 단계 폴더 readdir가 EACCES를 던지면 detail에 「아카이브 하위 폴더 읽기 실패 N곳」이 찍히고, 그 아래 영수증은 «0건 침묵»이 아니라 흔적을 남기며 사라진다", async () => {
+  const root = tmpDir("nc-pcw-walkfail-");
+  try {
+    const archiveRoot = join(root, "archive");
+    const blockedDir = join(archiveRoot, "2026-08-10-슬러그", "blocked");
+    const hiddenReceiptsDir = join(blockedDir, "receipts");
+    fs.mkdirSync(hiddenReceiptsDir, { recursive: true });
+    fs.writeFileSync(
+      join(hiddenReceiptsDir, "CODER-receipt-r1.json"),
+      JSON.stringify({
+        binding: {
+          taskId: "HYK-15-hidden",
+          role: "CODER",
+          doneAt: formatKst(NOW - HOUR),
+        },
+      }),
+      "utf8",
+    );
+    // 합성 포트 -- blockedDir만 EACCES를 던지고 나머지는 실 fs로 위임한다.
+    const readdirFn = (dir) => {
+      if (dir === blockedDir) {
+        const err = new Error("EACCES: permission denied, scandir (synthetic)");
+        err.code = "EACCES";
+        throw err;
+      }
+      return fs.readdirSync(dir);
+    };
+
+    const direct = collectConsumedRounds({
+      repoRoot: root,
+      extraRepoRoots: [],
+      archiveRoot,
+      readdirFn,
+      windowStartMs: NOW - 24 * HOUR,
+      windowEndMs: NOW,
+      gitWorktreeListExecFn: () => `worktree ${root}\n`,
+    });
+    assert.equal(direct.walkDirFailures, 1);
+    assert.equal(direct.archiveCount, 0);
+    assert.ok(!direct.labels.has("HYK-15-hidden"));
+
+    const dispatchReceiptsPath = join(root, "dispatch-receipts.jsonl");
+    fs.writeFileSync(dispatchReceiptsPath, "", "utf8");
+    const watchLogPath = join(root, "watch.log");
+    fs.writeFileSync(watchLogPath, "", "utf8");
+    const result = await runPartialCountOnce({
+      now: NOW,
+      repoRoot: root,
+      dispatchReceiptsPath,
+      watchLogPath,
+      extraRepoRoots: [],
+      archiveRoot,
+      readdirFn,
+      maxMergeChecks: 0,
+      git: { run: () => ({ code: 0, stdout: "", stderr: "" }) },
+      gitWorktreeListExecFn: () => `worktree ${root}\n`,
+    });
+    assert.ok(result.reportText.includes("아카이브 하위 폴더 읽기 실패 1곳"));
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("ⓗ HYK-255-consumed-denominator-1 2R: 같은 walk에서 ENOTDIR(파일)은 실패로 세지 않는다(양성 대조 — 실패 건수 0)", () => {
+  const root = tmpDir("nc-pcw-walkfile-");
+  try {
+    const archiveRoot = join(root, "archive");
+    const slugDir = join(archiveRoot, "2026-08-10-슬러그");
+    fs.mkdirSync(slugDir, { recursive: true });
+    // "receipts"가 아닌 이름의 평범한 파일 -- walk가 디렉터리인 줄 알고
+    // readdirFn을 걸었다가 실제 Node.js ENOTDIR을 자연히 받는다(합성 아님
+    // -- Windows 실측으로 ENOTDIR 코드를 §4 한계 문단에 직접 확인한다).
+    fs.writeFileSync(join(slugDir, "not-a-dir.txt"), "x", "utf8");
+    // 정상 receipts도 옆에 둬서 ENOTDIR이 다른 정상 스캔을 막지 않는지도
+    // 같은 시험에서 본다.
+    const okReceiptsDir = join(slugDir, "pr1-author", "receipts");
+    fs.mkdirSync(okReceiptsDir, { recursive: true });
+    fs.writeFileSync(
+      join(okReceiptsDir, "CODER-receipt-r1.json"),
+      JSON.stringify({
+        binding: {
+          taskId: "HYK-16-ok",
+          role: "CODER",
+          doneAt: formatKst(NOW - HOUR),
+        },
+      }),
+      "utf8",
+    );
+
+    const result = collectConsumedRounds({
+      repoRoot: root,
+      extraRepoRoots: [],
+      archiveRoot,
+      windowStartMs: NOW - 24 * HOUR,
+      windowEndMs: NOW,
+      gitWorktreeListExecFn: () => `worktree ${root}\n`,
+    });
+    assert.equal(result.walkDirFailures, 0);
+    assert.equal(result.archiveCount, 1);
+    assert.ok(result.labels.has("HYK-16-ok"));
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("ⓘ HYK-255-consumed-denominator-1 2R: 깊이 상한을 초과한 폴더가 있으면 건수가 보인다(상한 바로 다음 단계의 receipts는 못 찾되 흔적은 남는다)", async () => {
+  const root = tmpDir("nc-pcw-depthcap-");
+  try {
+    const archiveRoot = join(root, "archive");
+    // archiveRoot/d1/.../d7/receipts -- d1..d6이 depth 1..6, d7은 depth 7.
+    let deepDir = archiveRoot;
+    for (let i = 1; i <= 7; i++) deepDir = join(deepDir, `d${i}`);
+    const deepReceiptsDir = join(deepDir, "receipts");
+    fs.mkdirSync(deepReceiptsDir, { recursive: true });
+    fs.writeFileSync(
+      join(deepReceiptsDir, "CODER-receipt-r1.json"),
+      JSON.stringify({
+        binding: {
+          taskId: "HYK-17-too-deep",
+          role: "CODER",
+          doneAt: formatKst(NOW - HOUR),
+        },
+      }),
+      "utf8",
+    );
+
+    // 기본 상한(6) -- d7(depth 7)은 못 내려간다.
+    const withDefaultDepth = collectConsumedRounds({
+      repoRoot: root,
+      extraRepoRoots: [],
+      archiveRoot,
+      windowStartMs: NOW - 24 * HOUR,
+      windowEndMs: NOW,
+      gitWorktreeListExecFn: () => `worktree ${root}\n`,
+    });
+    assert.equal(withDefaultDepth.depthExceededCount, 1);
+    assert.equal(withDefaultDepth.archiveCount, 0);
+    assert.ok(!withDefaultDepth.labels.has("HYK-17-too-deep"));
+
+    // 상한을 8로 넓히면(옵션으로 실제 바뀐다는 것도 같이 증명) d7까지
+    // 내려가 receipts를 찾는다.
+    const withDeeperDepth = collectConsumedRounds({
+      repoRoot: root,
+      extraRepoRoots: [],
+      archiveRoot,
+      archiveScanMaxDepth: 8,
+      windowStartMs: NOW - 24 * HOUR,
+      windowEndMs: NOW,
+      gitWorktreeListExecFn: () => `worktree ${root}\n`,
+    });
+    assert.equal(withDeeperDepth.depthExceededCount, 0);
+    assert.equal(withDeeperDepth.archiveCount, 1);
+    assert.ok(withDeeperDepth.labels.has("HYK-17-too-deep"));
+
+    const dispatchReceiptsPath = join(root, "dispatch-receipts.jsonl");
+    fs.writeFileSync(dispatchReceiptsPath, "", "utf8");
+    const watchLogPath = join(root, "watch.log");
+    fs.writeFileSync(watchLogPath, "", "utf8");
+    const result = await runPartialCountOnce({
+      now: NOW,
+      repoRoot: root,
+      dispatchReceiptsPath,
+      watchLogPath,
+      extraRepoRoots: [],
+      archiveRoot,
+      maxMergeChecks: 0,
+      git: { run: () => ({ code: 0, stdout: "", stderr: "" }) },
+      gitWorktreeListExecFn: () => `worktree ${root}\n`,
+    });
+    assert.ok(result.reportText.includes("깊이 상한(6) 초과 1곳"));
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("ⓙ X3 고정 HYK-255-consumed-denominator-1 2R: 추가 저장소(②) 경로가 없으면 보고에 「추가저장소(...) 경로 없음」이 그대로 찍힌다(1R ⓕ의 «열거 실패»와 별개 칸)", async () => {
+  const root = tmpDir("nc-pcw-extramissing-");
+  try {
+    const dispatchReceiptsPath = join(root, "dispatch-receipts.jsonl");
+    fs.writeFileSync(dispatchReceiptsPath, "", "utf8");
+    const watchLogPath = join(root, "watch.log");
+    fs.writeFileSync(watchLogPath, "", "utf8");
+    const missingExtraRoot = join(root, "extra-repo-does-not-exist");
+
+    const result = await runPartialCountOnce({
+      now: NOW,
+      repoRoot: root,
+      dispatchReceiptsPath,
+      watchLogPath,
+      extraRepoRoots: [missingExtraRoot],
+      archiveRoot: join(root, "archive-missing"),
+      maxMergeChecks: 0,
+      git: { run: () => ({ code: 0, stdout: "", stderr: "" }) },
+      gitWorktreeListExecFn: () => `worktree ${root}\n`,
+    });
+    assert.ok(
+      result.reportText.includes(`추가저장소(${missingExtraRoot}) 경로 없음`),
+    );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("ⓚ X4 고정 HYK-255-consumed-denominator-1 2R: 아카이브 루트는 있지만 자신의 readdir가 실패하면 보고에 「아카이브 루트(...) 읽기 실패: ...」가 그대로 찍힌다(1R ⓕ의 «경로 없음»과 별개 칸)", async () => {
+  const root = tmpDir("nc-pcw-archivereadfail-");
+  try {
+    const archiveRoot = join(root, "archive");
+    fs.mkdirSync(archiveRoot, { recursive: true });
+    const dispatchReceiptsPath = join(root, "dispatch-receipts.jsonl");
+    fs.writeFileSync(dispatchReceiptsPath, "", "utf8");
+    const watchLogPath = join(root, "watch.log");
+    fs.writeFileSync(watchLogPath, "", "utf8");
+    const readdirFn = (dir) => {
+      if (dir === archiveRoot) {
+        const err = new Error("EACCES: permission denied, scandir (synthetic)");
+        err.code = "EACCES";
+        throw err;
+      }
+      return fs.readdirSync(dir);
+    };
+
+    const result = await runPartialCountOnce({
+      now: NOW,
+      repoRoot: root,
+      dispatchReceiptsPath,
+      watchLogPath,
+      extraRepoRoots: [],
+      archiveRoot,
+      readdirFn,
+      maxMergeChecks: 0,
+      git: { run: () => ({ code: 0, stdout: "", stderr: "" }) },
+      gitWorktreeListExecFn: () => `worktree ${root}\n`,
+    });
+    assert.ok(
+      result.reportText.includes(
+        `아카이브 루트(${archiveRoot}) 읽기 실패: EACCES: permission denied, scandir (synthetic)`,
+      ),
+    );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("ⓛ P3-3 고정 HYK-255-consumed-denominator-1 2R: archiveScanMaxDepth가 NaN·음수면 기본값(6)으로 복귀하고 상한이 꺼지지 않는다(NaN으로 상한이 꺼지는 경로 0)", () => {
+  const root = tmpDir("nc-pcw-depthnan-");
+  try {
+    const archiveRoot = join(root, "archive");
+    // d1..d7/receipts -- 기본 상한(6)이 꺼지지 않으면 d7(depth 7)은 여전히
+    // 못 찾는다. NaN이 상한을 꺼버리면(depth > NaN이 항상 false) 찾아져
+    // archiveCount가 1이 돼 이 시험이 RED가 된다.
+    let deepDir = archiveRoot;
+    for (let i = 1; i <= 7; i++) deepDir = join(deepDir, `d${i}`);
+    const deepReceiptsDir = join(deepDir, "receipts");
+    fs.mkdirSync(deepReceiptsDir, { recursive: true });
+    fs.writeFileSync(
+      join(deepReceiptsDir, "CODER-receipt-r1.json"),
+      JSON.stringify({
+        binding: {
+          taskId: "HYK-18-nan-depth",
+          role: "CODER",
+          doneAt: formatKst(NOW - HOUR),
+        },
+      }),
+      "utf8",
+    );
+
+    // CLI의 `--archive-scan-max-depth abc` -> Number("abc") = NaN이 그대로
+    // 들어오는 상황을 그대로 재현한다.
+    assert.ok(Number.isNaN(Number("abc")));
+    const withNaN = collectConsumedRounds({
+      repoRoot: root,
+      extraRepoRoots: [],
+      archiveRoot,
+      archiveScanMaxDepth: Number("abc"),
+      windowStartMs: NOW - 24 * HOUR,
+      windowEndMs: NOW,
+      gitWorktreeListExecFn: () => `worktree ${root}\n`,
+    });
+    assert.equal(withNaN.archiveScanMaxDepthUsed, 6);
+    assert.equal(withNaN.depthExceededCount, 1);
+    assert.equal(withNaN.archiveCount, 0);
+
+    const withNegative = collectConsumedRounds({
+      repoRoot: root,
+      extraRepoRoots: [],
+      archiveRoot,
+      archiveScanMaxDepth: -3,
+      windowStartMs: NOW - 24 * HOUR,
+      windowEndMs: NOW,
+      gitWorktreeListExecFn: () => `worktree ${root}\n`,
+    });
+    assert.equal(withNegative.archiveScanMaxDepthUsed, 6);
+    assert.equal(withNegative.archiveCount, 0);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
