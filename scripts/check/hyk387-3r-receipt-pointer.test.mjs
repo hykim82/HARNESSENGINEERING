@@ -61,7 +61,22 @@ function kstStamp(ms, { seconds = false } = {}) {
   return seconds ? `${base}:${p2(d.getUTCSeconds())} KST` : `${base} KST`;
 }
 
-function writeCoderRound(dir, { taskId = "HYK-387-3R-T" } = {}) {
+// HYK-434: relay-handshake.mjs가 dispatchRecordVerdict(존재 검사) 통과
+// 뒤에 G1 3줄을 그 배정 기록(아래 receipt()의 runtime_task_id=RT-3R/
+// assignee_pane_key=pane-3r)과 대조한다 -- "정상 라운드는 통과" 표본
+// (hyk387-3r-2/3/4)이 그 조건에 해당하므로, 기본 G1 블록을 그 값으로
+// 채워 계속 정상이게 유지한다(G1 자체의 거부 경로는 relay-handshake-
+// g1-dispatch-check.test.mjs가 전담한다).
+const PANE_3R =
+  "cccccccc-cccc-cccc-cccc-cccccccccccc:dddddddd-dddd-dddd-dddd-dddddddddddd";
+function defaultG1Lines() {
+  return `dispatch_verified: yes\ntask_id_from_dispatch: RT-3R\npane_match: ${PANE_3R} == ${PANE_3R} ? 일치\n`;
+}
+
+function writeCoderRound(
+  dir,
+  { taskId = "HYK-387-3R-T", g1 = defaultG1Lines() } = {},
+) {
   const now = Date.now();
   writeFileSync(
     join(dir, "coder-task.md"),
@@ -74,9 +89,12 @@ function writeCoderRound(dir, { taskId = "HYK-387-3R-T" } = {}) {
     // with no finalize-done marker (fail-closed) -- this file's own
     // subject is the receipt-pointer wiring, not the marker gate, so
     // carry the marker to reach that axis unmasked.
-    `task_id: ${taskId}\n\n>>> DONE: CODER @ ${kstStamp(now - 10 * 60 * 1000, {
-      seconds: true,
-    })}\ndone_stamped_by: finalize-done\n`,
+    `task_id: ${taskId}\n${g1}\n>>> DONE: CODER @ ${kstStamp(
+      now - 10 * 60 * 1000,
+      {
+        seconds: true,
+      },
+    )}\ndone_stamped_by: finalize-done\n`,
     "utf8",
   );
 }
@@ -90,7 +108,7 @@ function receipt({ role = "coder", taskId = "HYK-387-3R-T" } = {}) {
     recorded_at: new Date(Date.now() - 15 * 60 * 1000).toISOString(),
     runtime_task_id: "RT-3R",
     dispatch_id: "DISPATCH-3R",
-    assignee_pane_key: "pane-3r",
+    assignee_pane_key: PANE_3R,
     role,
     harness_task_label: taskId,
   };
