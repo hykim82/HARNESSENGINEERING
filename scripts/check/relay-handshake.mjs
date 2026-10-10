@@ -2466,10 +2466,226 @@ export function resolveDispatchRecordExistence({
         ).toISOString()}) -- a dispatch record written at or after completion cannot serve as proof of assignment (fail-closed; 같은 밀리초도 "그 전"으로 인정하지 않는다)`,
       };
     }
-    return { ok: true, matches: timely.length };
+    // HYK-434 §2-1 (추가 필드, 기존 호출자 무회귀): `matches`(개수)만으로는
+    // G1 대조가 비교할 실제 레코드(runtime_task_id/assignee_pane_key)에
+    // 닿을 수 없다 -- 그 값들을 복제해서 다시 읽지 않고(§HYK-450② 복제
+    // 금지), 이 함수가 이미 계산한 바로 그 필터 결과를 추가 필드로
+    // 노출한다(기존 `ok`/`matches`/`state` 의미는 전혀 바뀌지 않는다).
+    return { ok: true, matches: timely.length, matchRecords: timely };
   }
 
-  return { ok: true, matches: matches.length };
+  return { ok: true, matches: matches.length, matchRecords: matches };
+}
+
+// ---------------------------------------------------------------------------
+// HYK-434: G1 기계 대조 -- worker-dispatch-rule.md §1이 요구하는 "결과 파일
+// 맨 위 3줄"(dispatch_verified:/task_id_from_dispatch:/pane_match:)이
+// 실제 배달 영수증 원장과 맞는지 기계로 대조한다. 이 세 줄 자체는 워커의
+// 자기진술이라 2026-08-25 HYK-357 inject-3 실물처럼 손으로 빠뜨리거나
+// (ORCH-99 인계서 ⓕ-3) 앞 라운드 결과를 머리만 갈아끼워 위조해도 어떤
+// 게이트도 못 잡았다(coder-task.md §1 원문) -- 이 축이 그 빈칸을 닫는다.
+//
+// ⛔기계는 «대조만»(§23-4-1, 메모리 "기계가 워커 증명값을 채우면 헛시험") --
+// 이 파일(소비기)도, 배달기도 G1 값을 결과 파일에 써 넣지 않는다. 기준값은
+// 오직 배달 영수증 원장(resolveDispatchRecordExistence가 이미 role+
+// harness_task_label로 매칭하고, LATE 축으로 시간 선후까지 확인한 바로 그
+// `matchRecords`)에서만 온다 -- 새 원장 읽기를 만들지 않는다(§HYK-450②
+// 복제 금지 규율).
+//
+// 줄 판독은 head_commit:(HYK-383, resolveHeadCommitField)과 같은 계약이다:
+// column-0 단독 줄만(`[ \t]*`, 개행을 삼키지 않는다), maskQuotedMarkerRegions
+// 로 인용/펜스 밖만 본다(HYK-449/HYK-450과 같은 함정 -- 코드블록 안에 인용된
+// G1 3줄도 "표지"로 오인하지 않는다), 같은 키가 인용 밖에 2번 이상이면
+// AMBIGUOUS로 거부한다(HYK-486 선례 -- 조용히 하나를 고르지 않는다).
+const DISPATCH_VERIFIED_RE_G = /^dispatch_verified:[ \t]*(yes|no)[ \t]*$/gm;
+const DISPATCH_VERIFIED_ANYWHERE_RE = /dispatch_verified:\s*(\S+)/i;
+
+const TASK_ID_FROM_DISPATCH_RE_G =
+  /^task_id_from_dispatch:[ \t]*(\S+)[ \t]*$/gm;
+const TASK_ID_FROM_DISPATCH_ANYWHERE_RE = /task_id_from_dispatch:\s*(\S+)/i;
+
+// pane_match 줄 모양(worker-dispatch-rule.md §1 원문): "<값1> == <값2> ?
+// 일치|불일치". pane key 자신은 공백을 포함하지 않으므로(uuid 두 개를
+// `:`로 이은 값) `\S+`로 안전하게 좁힌다.
+const PANE_MATCH_RE_G =
+  /^pane_match:[ \t]*(\S+)[ \t]*==[ \t]*(\S+)[ \t]*\?[ \t]*(일치|불일치)[ \t]*$/gm;
+const PANE_MATCH_ANYWHERE_RE = /pane_match:\s*(\S.*)/i;
+
+// head_commit:(resolveHeadCommitField)과 같은 세 갈래(AMBIGUOUS/MALFORMED/
+// MISSING)를 일반화한다 -- G1 3줄 모두 같은 column-0 단독 줄 계약을 쓰므로
+// 세 번 복제하지 않고 이 한 함수로 모은다.
+function resolveG1StandaloneLine(content, { reGlobal, reAnywhere, label }) {
+  const scan = maskQuotedMarkerRegions(content);
+  const matches = [...scan.matchAll(reGlobal)];
+  if (matches.length > 1) {
+    return {
+      ok: false,
+      reason: `${label} has ${matches.length} standalone lines -- 어느 것이 최종인지 결정할 수 없다 (ambiguous, cannot resolve, HYK-434)`,
+    };
+  }
+  if (matches.length === 1) return { ok: true, match: matches[0] };
+  if (reAnywhere.test(scan)) {
+    return {
+      ok: false,
+      reason: `${label} present but not a standalone column-0 well-formed line (found mid-line, or value doesn't match the required shape, HYK-434)`,
+    };
+  }
+  return {
+    ok: false,
+    reason: `${label} missing (no standalone column-0 line found, HYK-434)`,
+  };
+}
+
+// HYK-434-lint-2: extracted from resolveG1DispatchVerificationVerdict (same
+// ESLint max-lines-per-function reason as this file's other extractions) --
+// 재배달 2건 이상일 때 recorded_at 기준 가장 최근 레코드를 고른다. 파싱
+// 불가능한 recorded_at은 후보에서 제외한다(resolveDispatchRecordExistence의
+// LATE 축이 이미 "파싱 불가 = 근거 못 됨"을 쓰는 것과 같은 규율).
+function resolveLatestDispatchRecord(records) {
+  return records.reduce((best, r) => {
+    const t = Date.parse(r?.recorded_at);
+    if (!Number.isFinite(t)) return best;
+    const bestT = best ? Date.parse(best.recorded_at) : -Infinity;
+    return t > bestT ? r : best;
+  }, null);
+}
+
+// dispatchRecordVerdict(위 resolveDispatchRecordExistence의 반환값)가 이미
+// ok:true인 뒤에만 불린다 -- 어댑터 A(`dispatchRecordVerdict.skipped`,
+// 원장 포인터 자체가 없음)는 이 축도 건너뛰되, 건너뛴 사실을 한 줄
+// 고지한다(§2-4 "침묵 0"). 포인터는 있는데 ABSENT/LOOKUP_FAILED/LATE면
+// dispatchRecordVerdict 자신이 이미 ok:false로 거부해 호출부
+// (checkRelayHandshake)가 이 함수를 아예 부르지 않는다 -- 그 세 상태의
+// 기존 HYK-387 동작은 이 라운드가 손대지 않는다(§2-4).
+//
+// ⭐DONE 한정(§2-5): 이 함수는 checkRelayHandshake의 doneResolved.ok===true
+// 본문(이미 DONE으로 확정된 경로)에서만 불린다 -- BLOCKED/NEEDS_INPUT은
+// 그 분기에 도달하기 전에 이미 returnDoneResolvedVerdict로 빠져나가므로
+// (resolveHandshakeCore 참조), 이 함수를 그 경로에 새로 결선하지 않는 한
+// BLOCKED/NEEDS_INPUT 라운드는 구조적으로 이 축 밖이다.
+export function resolveG1DispatchVerificationVerdict({
+  resultContent,
+  dispatchRecordVerdict,
+}) {
+  if (dispatchRecordVerdict.skipped) {
+    console.error(
+      "relay-handshake: G1 dispatch-ledger cross-check skipped (어댑터 A -- this round has no dispatch-receipt ledger pointer, HYK-434) -- 'dispatch_verified:'/'task_id_from_dispatch:'/'pane_match:' header lines are NOT cross-checked against the ledger for this round",
+    );
+    return { ok: true, skipped: true };
+  }
+
+  // dispatchRecordVerdict.ok===true && !skipped는 호출부가 이미 ABSENT/
+  // LOOKUP_FAILED/LATE를 걸러냈다는 뜻이라 matchRecords는 정상 경로에서
+  // 항상 1건 이상이다 -- 그래도 조용히 통과시키지 않고 fail-closed한다.
+  const records = dispatchRecordVerdict.matchRecords ?? [];
+  const latest = resolveLatestDispatchRecord(records);
+  if (!latest) {
+    return {
+      ok: false,
+      reason: `G1 cross-check (HYK-434): no usable dispatch ledger record to cross-check against (matchRecords absent or every recorded_at unparseable -- unexpected for an already-ok dispatchRecordVerdict, fail-closed)`,
+    };
+  }
+
+  const dv = resolveG1StandaloneLine(resultContent, {
+    reGlobal: DISPATCH_VERIFIED_RE_G,
+    reAnywhere: DISPATCH_VERIFIED_ANYWHERE_RE,
+    label: "'dispatch_verified:' line",
+  });
+  if (!dv.ok) {
+    return {
+      ok: false,
+      reason: `G1 cross-check failed (HYK-434): ${dv.reason}`,
+    };
+  }
+  if (dv.match[1] !== "yes") {
+    return {
+      ok: false,
+      reason: `G1 cross-check failed (HYK-434): 'dispatch_verified:' line value mismatch -- expected 'yes', found '${dv.match[1]}'`,
+    };
+  }
+
+  const tid = resolveG1StandaloneLine(resultContent, {
+    reGlobal: TASK_ID_FROM_DISPATCH_RE_G,
+    reAnywhere: TASK_ID_FROM_DISPATCH_ANYWHERE_RE,
+    label: "'task_id_from_dispatch:' line",
+  });
+  if (!tid.ok) {
+    return {
+      ok: false,
+      reason: `G1 cross-check failed (HYK-434): ${tid.reason}`,
+    };
+  }
+  if (tid.match[1] !== latest.runtime_task_id) {
+    return {
+      ok: false,
+      reason: `G1 cross-check failed (HYK-434): 'task_id_from_dispatch:' line value mismatch -- expected '${latest.runtime_task_id}' (most recent matching dispatch ledger record, recorded_at=${latest.recorded_at}), found '${tid.match[1]}'`,
+    };
+  }
+
+  const pm = resolveG1StandaloneLine(resultContent, {
+    reGlobal: PANE_MATCH_RE_G,
+    reAnywhere: PANE_MATCH_ANYWHERE_RE,
+    label: "'pane_match:' line",
+  });
+  if (!pm.ok) {
+    return {
+      ok: false,
+      reason: `G1 cross-check failed (HYK-434): ${pm.reason}`,
+    };
+  }
+  const [, leftKey, rightKey, verdict] = pm.match;
+  if (
+    leftKey !== latest.assignee_pane_key ||
+    rightKey !== latest.assignee_pane_key ||
+    verdict !== "일치"
+  ) {
+    return {
+      ok: false,
+      reason: `G1 cross-check failed (HYK-434): 'pane_match:' line mismatch -- expected both pane keys to equal '${latest.assignee_pane_key}' (most recent matching dispatch ledger record, recorded_at=${latest.recorded_at}) with a '일치' verdict, found '${leftKey} == ${rightKey} ? ${verdict}'`,
+    };
+  }
+
+  return { ok: true, usedRecordedAt: latest.recorded_at };
+}
+
+// HYK-434-lint-1: extracted from checkRelayHandshake (same ESLint max-lines-
+// per-function reason as this file's other HYK-257-done-stamp-lint-1/
+// HYK-398 extractions) -- composes the two checks that sit at this exact
+// spot in the pipeline (resolveDispatchRecordExistence then, only if that
+// passed, resolveG1DispatchVerificationVerdict) and returns the ok:false
+// verdict to return immediately, or null when neither rejects (proceed).
+// Order/reasons/behavior are byte-identical to the inline version this
+// replaces -- only moved.
+function resolveDispatchAndG1Verdict({
+  role,
+  taskId,
+  dispatchLedgerPath,
+  doneAt,
+  harnessDir,
+  judgedRegion,
+}) {
+  const dispatchRecordVerdict = resolveDispatchRecordExistence({
+    role,
+    taskId,
+    dispatchLedgerPath,
+    doneAtMs: doneAt.getTime(),
+    harnessDir,
+  });
+  if (!dispatchRecordVerdict.ok) return dispatchRecordVerdict;
+
+  // HYK-434: dispatchRecordVerdict와 같은 자리 원칙(§4 무회귀) -- 원장에
+  // 이 라운드 배정 기록이 있다고 이미 확인된(ok:true) 뒤에만 G1 3줄을 그
+  // 기록과 대조한다. 어댑터 A(dispatchRecordVerdict.skipped)는 이 축도
+  // 건너뛴다(한 줄 고지). DONE 소비 경로에만 결선한다(BLOCKED/NEEDS_INPUT은
+  // 이 분기에 도달하기 전에 이미 빠져나간다, resolveG1DispatchVerificationVerdict
+  // 자신의 헤더 참조).
+  const g1Verdict = resolveG1DispatchVerificationVerdict({
+    resultContent: judgedRegion,
+    dispatchRecordVerdict,
+  });
+  if (!g1Verdict.ok) return g1Verdict;
+
+  return null;
 }
 
 // HYK-257-done-stamp-lint-1: extracted from checkRelayHandshake (same
@@ -3266,16 +3482,19 @@ export function checkRelayHandshake({
   if (!consecutiveRunnerReceiptsVerdict.ok)
     return consecutiveRunnerReceiptsVerdict;
 
-  // HYK-387: headCommitVerdict와 같은 자리 원칙(§4 무회귀) -- REVIEW 한정
-  // 아님(오늘의 실사고는 CODER 라운드였다, coder-task.md §1 원문).
-  const dispatchRecordVerdict = resolveDispatchRecordExistence({
+  // HYK-387/HYK-434: headCommitVerdict와 같은 자리 원칙(§4 무회귀) -- REVIEW
+  // 한정 아님(오늘의 실사고는 CODER 라운드였다, coder-task.md §1 원문).
+  // quality-check max-lines-per-function 상한을 지키려고 checkRewriteAndStaleness
+  // 등과 같은 이유로 뽑았다(판정/사유/순서는 조금도 바뀌지 않는다).
+  const dispatchAndG1Verdict = resolveDispatchAndG1Verdict({
     role,
     taskId,
     dispatchLedgerPath,
-    doneAtMs: doneAt.getTime(),
+    doneAt,
     harnessDir,
+    judgedRegion,
   });
-  if (!dispatchRecordVerdict.ok) return dispatchRecordVerdict;
+  if (dispatchAndG1Verdict) return dispatchAndG1Verdict;
 
   const sideEffectVerdict = runCompletionSideEffects({
     role,

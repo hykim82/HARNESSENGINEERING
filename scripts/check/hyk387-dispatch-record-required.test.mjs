@@ -99,12 +99,29 @@ const NOW_MS = Date.now();
 const DEFAULT_DROPPED_MS = Math.floor((NOW_MS - 20 * 60 * 1000) / 1000) * 1000; // now - 20분
 const DEFAULT_DONE_MS = Math.floor((NOW_MS - 10 * 60 * 1000) / 1000) * 1000; // now - 10분(dropped 뒤, now 앞)
 
+// HYK-434: relay-handshake.mjs가 이제 dispatchRecordVerdict(존재 검사)가
+// 통과한(ok:true, skipped 아님) 뒤에 G1 3줄(dispatch_verified:/task_id_
+// from_dispatch:/pane_match:)을 그 배정 기록과 추가로 대조한다 -- 이
+// 파일의 "정상 라운드는 통과한다" 표본들(hyk387-3/13/15/18/19/20)이
+// 전부 그 조건(실제 매칭 레코드 존재)에 해당하므로, G1 3줄이 없으면 이제
+// 새로 거부된다(HYK-434 이전에는 이 축 자체가 없어 영향 0이었다). 기본
+// G1 블록을 DEFAULT_RUNTIME_ID/DEFAULT_PANE_KEY(아래 validReceipt의
+// runtime_task_id/assignee_pane_key 기본값과 동일)로 채워 "정상 라운드"
+// 표본이 계속 정상이게 유지한다 -- G1 자체의 거부 경로는 별도 전용
+// 파일(relay-handshake-g1-dispatch-check.test.mjs)이 덮는다.
+const DEFAULT_RUNTIME_ID = "RT-1";
+const DEFAULT_PANE_KEY = "pane-1";
+function defaultG1Lines() {
+  return `dispatch_verified: yes\ntask_id_from_dispatch: ${DEFAULT_RUNTIME_ID}\npane_match: ${DEFAULT_PANE_KEY} == ${DEFAULT_PANE_KEY} ? 일치\n`;
+}
+
 function writeCoderRound(
   dir,
   {
     taskId = "HYK-387-T",
     doneAtMs = DEFAULT_DONE_MS,
     droppedAtMs = DEFAULT_DROPPED_MS,
+    g1 = defaultG1Lines(),
   } = {},
 ) {
   writeFileSync(
@@ -118,7 +135,7 @@ function writeCoderRound(
     // with no finalize-done marker (fail-closed) -- this file's own
     // subject is the dispatch-record axis, not the marker gate, so carry
     // the marker to reach that axis unmasked.
-    `task_id: ${taskId}\n\n>>> DONE: CODER @ ${formatKst(doneAtMs, {
+    `task_id: ${taskId}\n${g1}\n>>> DONE: CODER @ ${formatKst(doneAtMs, {
       seconds: true,
     })}\ndone_stamped_by: finalize-done\n`,
     "utf8",
@@ -418,24 +435,31 @@ test("(hyk387-5a) 변이 A(포인터 파일 미설정, 3R 갱신) -- ★뚫린�
 // 변이 B: «존재+시간축»만 증명하는 이 축의 설계상 한계 -- 손으로 지어낸(실제
 // dispatch-receipt-cli.mjs 호출 없이 직접 작성한) 위조 원장 항목도 role+
 // harness_task_label이 맞고 recorded_at이 완료 전으로 그럴듯하면 그대로
-// «존재한다»로 통과시킨다. 이 축은 진위(authenticity, dispatch_id/
-// assignee_pane_key가 실제 dispatch와 대응하는지)를 보지 않는다(그건 G1
-// 축의 몫, HYK-390으로 분리된 P1-2) -- 그래서 이 변이도 뚫린다.
+// «존재한다»로 통과시킨다(이 함수, resolveDispatchRecordExistence 단독의
+// 설계상 한계는 그대로 유효하다 -- 진위(dispatch_id/assignee_pane_key가
+// 실제 dispatch와 대응하는지)는 여전히 이 함수의 범위 밖이다).
 // HYK-387 2R §2 P2 추가 후 좁아진 구멍(정직 기록): recorded_at까지
 // 아무렇게나("forged" 같은 파싱 불가 문자열) 지어내면 2R부터는 시간축
 // 검사가 LATE로 거부한다(파싱 불가 = 근거 못 됨, fail-closed) -- 그래서 이
-// 표본은 recorded_at만은 완료 전 시각으로 «그럴듯하게» 채웠다. 즉 위조자가
-// 뚫으려면 이제 role+taskId+recorded_at(시간 선후) 세 가지를 맞춰야 한다
-// (1R까지는 role+taskId 두 가지). dispatch_id/assignee_pane_key/
-// runtime_task_id는 여전히 전혀 검증되지 않는다 -- 그 세 필드의 진위는
-// 여전히 HYK-390 범위다.
-test("(hyk387-5b) 변이 B(위조 원장 항목, recorded_at만 그럴듯함) -- ★뚫린다: dispatch_id/pane_key가 위조여도 role+taskId+시간선후만 맞으면 «존재»로 통과(진위는 여전히 범위 밖, HYK-390)", () => {
+// 표본은 recorded_at만은 완료 전 시각으로 «그럴듯하게» 채웠다.
+//
+// ★HYK-434 갱신(이 구멍은 이제 닫혔다): 당시엔 "dispatch_id/assignee_
+// pane_key/runtime_task_id는 여전히 전혀 검증되지 않는다 -- 그 진위는
+// G1 축의 몫"이라고 적었다. HYK-434가 바로 그 G1 축(resolveG1
+// DispatchVerificationVerdict)을 relay-handshake.mjs에 결선했다 --
+// 이 함수(존재 검사) «뒤»에 결과 파일의 G1 3줄을 이 레코드의
+// runtime_task_id/assignee_pane_key와 다시 대조한다. writeCoderRound의
+// 기본 G1 3줄(DEFAULT_RUNTIME_ID/DEFAULT_PANE_KEY)은 이 위조 레코드의
+// "forged" 값과 당연히 다르므로, 존재 검사는 여전히 통과하지만(위 설명
+// 그대로) 전체 소비는 이제 G1에서 거부된다 -- 위조 항목의 dispatch_id/
+// pane_key가 실제 배정과 다르면 더 이상 조용히 통과하지 않는다.
+test("(hyk387-5b)★ 변이 B(위조 원장 항목) -- HYK-434로 닫힘: 존재 검사(이 함수)는 여전히 통과하지만, G1이 결과의 dispatch_verified/pane_match 값과 위조 레코드가 다름을 잡아 전체 소비를 거부한다", () => {
   withFixtureDir("mutation-b-", (dir) => {
     writeCoderRound(dir, { taskId: "HYK-387-T" });
     const ledgerPath = join(dir, "dispatch-receipts.jsonl");
     // 실제 dispatch-receipt-cli.mjs를 거치지 않고 손으로 지어낸 항목 --
     // dispatch_id/assignee_pane_key가 전부 조작된 값이라도 role+
-    // harness_task_label+recorded_at(완료 전)만 맞으면 매치된다.
+    // harness_task_label+recorded_at(완료 전)만 맞으면 존재 검사는 매치된다.
     writeFileSync(
       ledgerPath,
       ledgerLine({
@@ -449,11 +473,12 @@ test("(hyk387-5b) 변이 B(위조 원장 항목, recorded_at만 그럴듯함) --
       "utf8",
     );
     const res = runCli(["coder", dir], { ledgerPath });
-    assert.equal(
+    assert.notEqual(
       res.exit,
       0,
-      "정직 기록: 위조 항목도 존재 검사만으로는 통과한다(이 축의 의도된 범위 밖 -- 진위는 G1의 몫)",
+      "HYK-434: 위조 레코드와 결과의 G1 3줄(기본값)이 다르므로 이제 거부돼야 한다",
     );
+    assert.match(res.stderr, /G1 cross-check failed \(HYK-434\)/);
   });
 });
 
