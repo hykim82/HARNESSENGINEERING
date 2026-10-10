@@ -2515,15 +2515,29 @@ const TASK_ID_FROM_DISPATCH_RE_G =
 const TASK_ID_FROM_DISPATCH_ANYWHERE_RE = /task_id_from_dispatch[ \t]*[:：]/i;
 
 // pane_match 줄 모양(worker-dispatch-rule.md §1 원문): "<값1> == <값2> ?
-// 일치|불일치". HYK-434 2R: 구분자(`==`/`=`/`===`/`->`)·`?`(반각/전각)·끝
-// 낱말의 «모양»은 거부 사유가 아니다(책임자 축 ⓐ-3) -- 두 토큰만
-// `\S+`로 뽑고, 구분자는 `={1,3}|->`로 느슨하게, 그 뒤 줄 나머지는
-// 통째로 세 번째 캡처에 담아 "불일치" 선언 여부만 부분 문자열로 본다
-// (끝 낱말 생략·`일치함`·`match`·`(일치)`는 전부 "불일치"를 포함하지
-// 않으므로 그대로 수용된다, 판정 ⓑ).
+// 일치|불일치". HYK-434 3R(책임자 판정 ⓒ "pane key 모양 토큰을 전부
+// 뽑아 전부 = assignee_pane_key · 최소 1개"): 더는 「구분자 앞뒤 두
+// 토큰」 정규식으로 값을 읻지 않는다 -- 2R의 그 구조가 P1-1(공백 없는
+// `==`가 탐욕적 `(\S+)`에 의해 `P=` 로 망가져 거부되는 회귀 + 토큰
+// 1개·화살표 등 구분자 모양 거부)과 P1-2(셋째 토큰이 달라도 소비되는
+// 과관용) 둘 다의 공통 뿌리였다(검토 2R 반려 원문). 이제 키 줄의 콜론
+// 뒤 «값부 전체»(V)를 한 캡처로만 뽑고(§2-1 요구 2 "V를 구분자로
+// 쪼개지 마라"), 구분자·`?`·끝 낱말의 모양은 전혀 보지 않는다 --
+// resolveG1PaneMatchVerdict가 V에서 pane key 모양 토큰을 정규식으로
+// «전부» 추출해 값으로만 판정한다.
 const PANE_MATCH_RE_G =
-  /^[ \t]*(?:[-*][ \t]+)?\*{0,2}pane_match\*{0,2}[ \t]*[:：][ \t]*\*{0,2}[ \t]*(\S+)[ \t]*(?:={1,3}|->)[ \t]*(\S+)(.*)$/gim;
+  /^[ \t]*(?:[-*+][ \t]+|\d+\.[ \t]+)?\*{0,2}pane_match\*{0,2}[ \t]*[:：][ \t]*\*{0,2}[ \t]*(\S.*?)[ \t]*$/gim;
 const PANE_MATCH_ANYWHERE_RE = /pane_match[ \t]*[:：]/i;
+
+// HYK-434 3R §2-1 요구 3: pane key 모양 토큰(uuid:uuid, 대소문자 무시)을
+// V 안에서 «전부» 뽑는다. 앞뒤 경계(lookbehind/lookahead)는 영숫자·`_`·
+// `:`·`-` 가 아닌 자리여야 한다 -- 그래서 `<pane>x`(접미 위조) 같은 값은
+// 토큰으로 잡히지 않는다(§2-1 요구 3 "접미 위조가 접두 일치로 통과하지
+// 않음", 1R 검토 재현 `Px == Px`). 구분자(`==`/`=`/`->`/유니코드 화살표
+// 등)는 그 글자들이 이미 경계 제외 집합 밖이므로 "뽑기"에 아무 영향이
+// 없다 -- 이것이 구분자·공백의 «모양»을 더는 보지 않는 지점이다.
+const PANE_TOKEN_RE_G =
+  /(?<![0-9A-Za-z_:-])[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?![0-9A-Za-z_:-])/gi;
 
 // HYK-434 2R: 캡처된 값 양끝의 따옴표·백틱·굵게 장식을 벗긴다(책임자 축 ⓐ
 // 점2 -- "값 양끝의 따옴표(' ")·백틱·굵게 장식을 벗긴다"). 위 세 정규식이
@@ -2544,7 +2558,12 @@ function stripG1ValueDecoration(raw) {
 // MISSING)를 일반화한다 -- G1 3줄 모두 같은 column-0 단독 줄 계약을 쓰므로
 // 세 번 복제하지 않고 이 한 함수로 모은다.
 function resolveG1StandaloneLine(content, { reGlobal, reAnywhere, label }) {
-  const scan = maskQuotedMarkerRegions(content);
+  // HYK-434 3R(판정 ⓐ · P2-1 수리): G1 판독 경로만 들여쓴 펜스·코드 블록
+  // 마스킹을 켠다(reject-streak.mjs maskQuotedMarkerRegions의
+  // indentedBlocks 옵션) -- G1 키 정규식이 앞 공백을 몇 칸이든 받는 것과
+  // 공용 마스커의 기본 0~3칸 한도가 어긋나 생긴 마스킹 우회를 닫는다.
+  // 다른 11개 호출자는 옵션을 넘기지 않으므로 바이트 단위로 그대로다.
+  const scan = maskQuotedMarkerRegions(content, { indentedBlocks: true });
   const matches = [...scan.matchAll(reGlobal)];
   if (matches.length > 1) {
     return {
@@ -2665,9 +2684,12 @@ export function resolveG1DispatchVerificationVerdict({
 
 // HYK-434-lint-3: extracted from resolveG1DispatchVerificationVerdict (same
 // ESLint max-lines-per-function/complexity reason as this file's other
-// HYK-434-lint-2 extraction) -- pane_match 줄 하나를 읽어 두 토큰 값(대
-// 소문자 무시)과 "불일치" 선언 여부를 판정한다. 사유 문자열·판정 순서는
-// 바이트 단위로 그대로다 -- 오직 위치만 옮겼다.
+// HYK-434-lint-2 extraction) -- pane_match 줄 하나를 읽어 값부(V) 안의
+// pane key 모양 토큰을 «전부» 뽑아 판정한다(§2-1 요구 3~7, 책임자 판정
+// ⓒ "전부 뽑아 전부 = assignee_pane_key · 최소 1개").
+// HYK-434 3R: 사유·판정 순서는 더 이상 2R과 바이트 단위로 같지 않다 --
+// "구분자 앞뒤 두 토큰" 대조에서 "값부 전체에서 뽑은 토큰 전체" 대조로
+// 비교 기준 자체가 바뀌었다(검토 2R P1-2 수리의 핵심, ⓕ 축 기록).
 function resolveG1PaneMatchVerdict({
   resultContent,
   expectedPaneKey,
@@ -2684,23 +2706,32 @@ function resolveG1PaneMatchVerdict({
       reason: `G1 cross-check failed (HYK-434): ${pm.reason}`,
     };
   }
-  // HYK-434 2R(판정 ⓒ/ⓑ): 구분자·`?`·끝 낱말의 «모양»은 보지 않고, 두
-  // 토큰 값(대소문자 무시)과 "불일치" 선언 여부만 값으로 본다. 두 축은
-  // 서로 다른 사유를 낸다(P2-4: 형식 문제가 "value mismatch"로 찍히지
-  // 않아야 한다 -- 여기서는 값 자체가 다른 경우만 "value mismatch"다).
-  const leftKey = stripG1ValueDecoration(pm.match[1]);
-  const rightKey = stripG1ValueDecoration(pm.match[2]);
-  const trailing = pm.match[3] ?? "";
-  if (
-    leftKey.toLowerCase() !== expectedPaneKey.toLowerCase() ||
-    rightKey.toLowerCase() !== expectedPaneKey.toLowerCase()
-  ) {
+  // §2-1 요구 2: V(콜론 뒤 값부 전체)를 구분자로 쪼개지 않는다.
+  const valuePart = pm.match[1];
+  // §2-1 요구 3: pane key 모양 토큰을 전부 뽑는다(원문 그대로 -- 가공
+  // 하지 않는다, §2-1 요구 7 "사유에 캡처 가공 값을 넣지 마라").
+  const tokens = [...valuePart.matchAll(PANE_TOKEN_RE_G)].map((m) => m[0]);
+  // §2-1 요구 4: 토큰 0개 = 형식 거부(값 거부가 아니다).
+  if (tokens.length === 0) {
     return {
       ok: false,
-      reason: `G1 cross-check failed (HYK-434): 'pane_match:' line mismatch -- expected both pane keys to equal '${expectedPaneKey}' (most recent matching dispatch ledger record, recorded_at=${recordedAt}), found '${leftKey} == ${rightKey}'`,
+      reason: `G1 cross-check failed (HYK-434): 'pane_match:' line has no pane key token (HYK-434, line: '${valuePart}')`,
     };
   }
-  if (trailing.includes("불일치")) {
+  // §2-1 요구 5: 뽑은 토큰 전부가 영수증 값과 같아야 한다(대소문자
+  // 무시) -- 하나라도 다르면 값 거부, 사유에 다른 토큰 전부를 원문
+  // 그대로 적는다(여럿이면 전부).
+  const expectedLower = expectedPaneKey.toLowerCase();
+  const mismatched = tokens.filter((t) => t.toLowerCase() !== expectedLower);
+  if (mismatched.length > 0) {
+    return {
+      ok: false,
+      reason: `G1 cross-check failed (HYK-434): 'pane_match:' line value mismatch -- expected '${expectedPaneKey}' (most recent matching dispatch ledger record, recorded_at=${recordedAt}), found '${mismatched.join("', '")}'`,
+    };
+  }
+  // §2-1 요구 6: 전부 같으면 끝으로 "불일치" 선언 여부만 본다(판정 ⓑ).
+  // 끝 낱말 `일치`·`?`의 유무·철자는 보지 않는다.
+  if (valuePart.includes("불일치")) {
     return {
       ok: false,
       reason: `G1 cross-check failed (HYK-434): 'pane_match:' line mismatch -- worker declared 불일치 even though both pane keys equal '${expectedPaneKey}' (HYK-434)`,

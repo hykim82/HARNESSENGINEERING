@@ -67,8 +67,10 @@ function kstStamp(ms, { seconds = false } = {}) {
 // (hyk387-3r-2/3/4)이 그 조건에 해당하므로, 기본 G1 블록을 그 값으로
 // 채워 계속 정상이게 유지한다(G1 자체의 거부 경로는 relay-handshake-
 // g1-dispatch-check.test.mjs가 전담한다).
+const PANE_3R =
+  "cccccccc-cccc-cccc-cccc-cccccccccccc:dddddddd-dddd-dddd-dddd-dddddddddddd";
 function defaultG1Lines() {
-  return "dispatch_verified: yes\ntask_id_from_dispatch: RT-3R\npane_match: pane-3r == pane-3r ? 일치\n";
+  return `dispatch_verified: yes\ntask_id_from_dispatch: RT-3R\npane_match: ${PANE_3R} == ${PANE_3R} ? 일치\n`;
 }
 
 function writeCoderRound(
@@ -106,7 +108,7 @@ function receipt({ role = "coder", taskId = "HYK-387-3R-T" } = {}) {
     recorded_at: new Date(Date.now() - 15 * 60 * 1000).toISOString(),
     runtime_task_id: "RT-3R",
     dispatch_id: "DISPATCH-3R",
-    assignee_pane_key: "pane-3r",
+    assignee_pane_key: PANE_3R,
     role,
     harness_task_label: taskId,
   };

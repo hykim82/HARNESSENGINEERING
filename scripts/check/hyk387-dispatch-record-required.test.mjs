@@ -110,7 +110,8 @@ const DEFAULT_DONE_MS = Math.floor((NOW_MS - 10 * 60 * 1000) / 1000) * 1000; // 
 // 표본이 계속 정상이게 유지한다 -- G1 자체의 거부 경로는 별도 전용
 // 파일(relay-handshake-g1-dispatch-check.test.mjs)이 덮는다.
 const DEFAULT_RUNTIME_ID = "RT-1";
-const DEFAULT_PANE_KEY = "pane-1";
+const DEFAULT_PANE_KEY =
+  "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee:ffffffff-ffff-ffff-ffff-ffffffffffff";
 function defaultG1Lines() {
   return `dispatch_verified: yes\ntask_id_from_dispatch: ${DEFAULT_RUNTIME_ID}\npane_match: ${DEFAULT_PANE_KEY} == ${DEFAULT_PANE_KEY} ? 일치\n`;
 }
@@ -159,7 +160,8 @@ function validReceipt({
     recorded_at: new Date(recordedAtMs).toISOString(),
     runtime_task_id: "RT-1",
     dispatch_id: "DISPATCH-1",
-    assignee_pane_key: "pane-1",
+    assignee_pane_key:
+      "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee:ffffffff-ffff-ffff-ffff-ffffffffffff",
     dispatch_timestamp_utc: new Date(DEFAULT_DROPPED_MS).toISOString(),
     dispatch_timestamp_source: "response.dispatched_at",
     role,

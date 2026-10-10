@@ -71,6 +71,13 @@ const DEFAULT_RECORDED_AT_MS = DEFAULT_DROPPED_MS + 60 * 1000; // dropped 1분 �
 const RUNTIME_TASK_ID = "task_aaaaaaaaaaaa";
 const PANE_KEY =
   "11111111-1111-1111-1111-111111111111:22222222-2222-2222-2222-222222222222";
+// HYK-434 3R §2-4 "다른 pane = Q": 영수증과 «다른» 완전한 uuid:uuid 모양
+// 값. "x" 같은 비-토큰 문자열은 §2-1 토큰 추출 대상이 아니라서(토큰
+// 0개로 처리돼 "최소 1개" 규칙상 그 자리가 그냥 없는 것과 같다) 더 이상
+// 비대칭 거부를 시험하지 못한다 -- 진짜 비대칭 위조를 시험하려면 토큰
+// 모양을 갖춘 «다른» 값이어야 한다(아래 asym 표본들이 이 값을 쓴다).
+const OTHER_PANE_KEY =
+  "99999999-9999-9999-9999-999999999999:88888888-8888-8888-8888-888888888888";
 
 function g1Block({
   dispatchVerified = "yes",
@@ -253,16 +260,18 @@ test("(g1-d)★ dispatch_verified: no -> 거부(값 자체가 통과 조건을 �
 // ---------------------------------------------------------------------------
 test("(g1-e)★ pane_match 줄의 키가 원장의 assignee_pane_key와 다르다 -> 거부", () => {
   withFixtureDir("g1-pane-mismatch-", (dir) => {
-    const wrongPane =
-      "99999999-9999-9999-9999-999999999999:88888888-8888-8888-8888-888888888888";
     writeCoderRound(dir, {
-      g1: g1Block({ paneLeft: wrongPane, paneRight: wrongPane }),
+      g1: g1Block({ paneLeft: OTHER_PANE_KEY, paneRight: OTHER_PANE_KEY }),
     });
     const ledgerPath = withLedger(dir, [validReceipt()]);
     const res = runCli(["coder", dir], { ledgerPath });
     assert.notEqual(res.exit, 0);
-    assert.match(res.stderr, /'pane_match:' line mismatch/);
-    assert.match(res.stderr, new RegExp(`equal '${PANE_KEY}'`));
+    assert.match(res.stderr, /'pane_match:' line value mismatch/);
+    assert.match(res.stderr, new RegExp(`expected '${PANE_KEY}'`));
+    assert.match(
+      res.stderr,
+      new RegExp(`found '${OTHER_PANE_KEY}', '${OTHER_PANE_KEY}'`),
+    );
   });
 });
 
@@ -598,11 +607,11 @@ test("(g1-mut-2)★ 되돌림 변이 G2: 최신 배달 대신 첫 배달 기준�
 test("(g1-mut-3)★ 되돌림 변이 G3: 마스킹을 제거하고 원문에서 직접 판독하면 -- (g1-g)의 펜스-인용 표본이 다시 통과한다(RED)", () => {
   withFixtureDir("g1-mut3-", (dir) => {
     const target =
-      "function resolveG1StandaloneLine(content, { reGlobal, reAnywhere, label }) {\n  const scan = maskQuotedMarkerRegions(content);";
+      "  const scan = maskQuotedMarkerRegions(content, { indentedBlocks: true });";
     const original = readFileSync(CLI_PATH, "utf8");
     assertExactlyOneMatch(original, target, "resolveG1StandaloneLine masking");
     const replacement =
-      "function resolveG1StandaloneLine(content, { reGlobal, reAnywhere, label }) {\n  const scan = content; // HYK-434 되돌림 변이 G3: 마스킹 제거";
+      "  const scan = content; // HYK-434 되돌림 변이 G3: 마스킹 제거";
 
     const stageDir = join(dir, "stage");
     mkdirSync(stageDir);
@@ -948,27 +957,50 @@ test("(g1-absent-pane)★ 부재: pane_match: 줄만 없음 -> 거부, 사유에
 // ⓔ pane 비대칭 2종 -- 한쪽만 영수증과 같음 -> 거부(1R P2-2: 변이 R5가
 // 이 칸이 없어서 생존했다, 아래 (g1-mut-v5)가 다시 빨갛게 만든다).
 // ---------------------------------------------------------------------------
-test("(g1-pane-asym-left)★ pane 비대칭: 왼쪽만 틀림(`x == <정답>`) -> 거부", () => {
+// HYK-434 3R §2-4 표 7(`Q P == P ? 일치`)/책임자 판정 ⓒ "전부": 비대칭
+// 위조는 "x" 같은 비-토큰이 아니라 «다른» 완전한 토큰(Q)으로 시험해야
+// 한다(위 OTHER_PANE_KEY 주석 참조) -- "x"는 토큰 추출 대상이 아니라서
+// 더 이상 거부 사유가 되지 않는다(아래 (g1-nontoken-side) 표본이 그
+// 반대 성질을 고정한다).
+test("(g1-pane-asym-left)★ pane 비대칭: 왼쪽만 다른 토큰(`Q == <정답>`) -> 거부(값, 사유에 Q)", () => {
   withFixtureDir("g1-pane-asym-left-", (dir) => {
+    writeCoderRound(dir, {
+      g1: `dispatch_verified: yes\ntask_id_from_dispatch: ${RUNTIME_TASK_ID}\npane_match: ${OTHER_PANE_KEY} == ${PANE_KEY} ? 일치\n`,
+    });
+    const ledgerPath = withLedger(dir, [validReceipt()]);
+    const res = runCli(["coder", dir], { ledgerPath });
+    assert.notEqual(res.exit, 0);
+    assert.match(res.stderr, /'pane_match:' line value mismatch/);
+    assert.match(res.stderr, new RegExp(`found '${OTHER_PANE_KEY}'`));
+    assert.doesNotMatch(res.stderr, new RegExp(`found '[^']*${PANE_KEY}'`));
+  });
+});
+
+test("(g1-pane-asym-right)★ pane 비대칭: 오른쪽만 다른 토큰(`<정답> == Q`) -> 거부(값, 사유에 Q)", () => {
+  withFixtureDir("g1-pane-asym-right-", (dir) => {
+    writeCoderRound(dir, {
+      g1: `dispatch_verified: yes\ntask_id_from_dispatch: ${RUNTIME_TASK_ID}\npane_match: ${PANE_KEY} == ${OTHER_PANE_KEY} ? 일치\n`,
+    });
+    const ledgerPath = withLedger(dir, [validReceipt()]);
+    const res = runCli(["coder", dir], { ledgerPath });
+    assert.notEqual(res.exit, 0);
+    assert.match(res.stderr, /'pane_match:' line value mismatch/);
+    assert.match(res.stderr, new RegExp(`found '${OTHER_PANE_KEY}'`));
+  });
+});
+
+// HYK-434 3R §2-4 표 8("P ? 일치", 토큰 1개 = 정답) 판정 ⓒ "최소 1개":
+// 반대편이 토큰 모양을 전혀 갖추지 않은 문자열("x")이면 그 자리는
+// "다른 값"이 아니라 "토큰이 없는 자리"로 취급돼, 남은 한 개의 올바른
+// 토큰만으로 소비된다.
+test('(g1-nontoken-side)★ pane_match: 한쪽이 토큰 모양이 아닌 문자열("x")이고 반대쪽이 정답 1개뿐이어도 소비된다(판정 ⓒ "최소 1개")', () => {
+  withFixtureDir("g1-pane-nontoken-", (dir) => {
     writeCoderRound(dir, {
       g1: `dispatch_verified: yes\ntask_id_from_dispatch: ${RUNTIME_TASK_ID}\npane_match: x == ${PANE_KEY} ? 일치\n`,
     });
     const ledgerPath = withLedger(dir, [validReceipt()]);
     const res = runCli(["coder", dir], { ledgerPath });
-    assert.notEqual(res.exit, 0);
-    assert.match(res.stderr, /'pane_match:' line mismatch/);
-  });
-});
-
-test("(g1-pane-asym-right)★ pane 비대칭: 오른쪽만 틀림(`<정답> == x`) -> 거부", () => {
-  withFixtureDir("g1-pane-asym-right-", (dir) => {
-    writeCoderRound(dir, {
-      g1: `dispatch_verified: yes\ntask_id_from_dispatch: ${RUNTIME_TASK_ID}\npane_match: ${PANE_KEY} == x ? 일치\n`,
-    });
-    const ledgerPath = withLedger(dir, [validReceipt()]);
-    const res = runCli(["coder", dir], { ledgerPath });
-    assert.notEqual(res.exit, 0);
-    assert.match(res.stderr, /'pane_match:' line mismatch/);
+    assert.equal(res.exit, 0, `stderr: ${res.stderr}`);
   });
 });
 
@@ -992,18 +1024,16 @@ test("(g1-backtick-tid-diff)★ 백틱 tid인데 값 자체가 다름 -> 'task_i
 
 test("(g1-backtick-pane-diff)★ 백틱 pane인데 값 자체가 다름 -> 'pane_match:' value mismatch로 거부(형식 문제로 오인되지 않는다)", () => {
   withFixtureDir("g1-backtick-pane-diff-", (dir) => {
-    const wrongPane =
-      "99999999-9999-9999-9999-999999999999:88888888-8888-8888-8888-888888888888";
     writeCoderRound(dir, {
-      g1: `dispatch_verified: yes\ntask_id_from_dispatch: ${RUNTIME_TASK_ID}\npane_match: \`${wrongPane}\` == \`${wrongPane}\` ? 일치\n`,
+      g1: `dispatch_verified: yes\ntask_id_from_dispatch: ${RUNTIME_TASK_ID}\npane_match: \`${OTHER_PANE_KEY}\` == \`${OTHER_PANE_KEY}\` ? 일치\n`,
     });
     const ledgerPath = withLedger(dir, [validReceipt()]);
     const res = runCli(["coder", dir], { ledgerPath });
     assert.notEqual(res.exit, 0);
-    assert.match(res.stderr, /'pane_match:' line mismatch/);
+    assert.match(res.stderr, /'pane_match:' line value mismatch/);
     assert.match(
       res.stderr,
-      new RegExp(`found '${wrongPane} == ${wrongPane}'`),
+      new RegExp(`found '${OTHER_PANE_KEY}', '${OTHER_PANE_KEY}'`),
     );
   });
 });
@@ -1059,10 +1089,10 @@ test("(g1-mut-v1)★ 되돌림 변이 V1: stripG1ValueDecoration의 장식 벗�
 // 다시 거부된다(RED).
 test("(g1-mut-v2)★ 되돌림 변이 V2: pane_match 키 대소문자 무시를 제거하면 -- 'Pane_Match:' 키 대소문자 표본이 다시 거부된다(RED)", () => {
   withFixtureDir("g1-mutv2-", (dir) => {
-    const target = "(.*)$/gim;\nconst PANE_MATCH_ANYWHERE_RE";
+    const target = "[ \\t]*$/gim;\nconst PANE_MATCH_ANYWHERE_RE";
     const original = readFileSync(CLI_PATH, "utf8");
     assertExactlyOneMatch(original, target, "PANE_MATCH_RE_G flags");
-    const replacement = "(.*)$/gm;\nconst PANE_MATCH_ANYWHERE_RE";
+    const replacement = "[ \\t]*$/gm;\nconst PANE_MATCH_ANYWHERE_RE";
 
     const stageDir = join(dir, "stage");
     mkdirSync(stageDir);
@@ -1099,7 +1129,7 @@ test("(g1-mut-v2)★ 되돌림 변이 V2: pane_match 키 대소문자 무시를 
 test("(g1-mut-v3)★ 되돌림 변이 V3: pane_match 추출을 1R 정규식(`\\?` 필수)으로 되돌리면 -- `?` 없는 실라운드 모양이 다시 거부된다(RED)", () => {
   withFixtureDir("g1-mutv3-", (dir) => {
     const target =
-      "const PANE_MATCH_RE_G =\n  /^[ \\t]*(?:[-*][ \\t]+)?\\*{0,2}pane_match\\*{0,2}[ \\t]*[:：][ \\t]*\\*{0,2}[ \\t]*(\\S+)[ \\t]*(?:={1,3}|->)[ \\t]*(\\S+)(.*)$/gim;";
+      "const PANE_MATCH_RE_G =\n  /^[ \\t]*(?:[-*+][ \\t]+|\\d+\\.[ \\t]+)?\\*{0,2}pane_match\\*{0,2}[ \\t]*[:：][ \\t]*\\*{0,2}[ \\t]*(\\S.*?)[ \\t]*$/gim;";
     const original = readFileSync(CLI_PATH, "utf8");
     assertExactlyOneMatch(original, target, "PANE_MATCH_RE_G declaration");
     const replacement =
@@ -1190,16 +1220,211 @@ test("(g1-mut-v4)★ 되돌림 변이 V4: missing 사유에서 줄 이름을 제
   });
 });
 
-// V5: pane_match의 오른쪽 pane key 비교를 제거 -> 오른쪽만 틀린 비대칭
-// 표본(ⓔ)이 다시 통과한다(RED, 과관용).
-test("(g1-mut-v5)★ 되돌림 변이 V5: pane_match의 오른쪽 비교를 제거하면 -- 오른쪽만 틀린 비대칭 표본이 다시 통과한다(RED)", () => {
-  withFixtureDir("g1-mutv5-", (dir) => {
+// ===========================================================================
+// HYK-434 3R §2-4 고정 칸(기대값 표) -- pane_match 전부-추출 알고리즘이
+// 실제로 책임자 판정 ⓒ("전부 뽑아 전부 = assignee_pane_key · 최소 1개")를
+// 구현하는지, 표의 나머지 행(5·6·9·10·11·13·14·16·21·22·23·29a·31)을
+// 실 CLI로 직접 구동한다. (행 7·8은 위 asym-left/nontoken-side 전용
+// 시험이 이미 고정한다.)
+// ===========================================================================
+const PANE_FIXED_CELL_TABLE = [
+  [
+    "표5: P == P == Q ? 일치(토큰 3, 하나 다름) -> 거부(값·Q)",
+    () =>
+      `dispatch_verified: yes\ntask_id_from_dispatch: ${RUNTIME_TASK_ID}\npane_match: ${PANE_KEY} == ${PANE_KEY} == ${OTHER_PANE_KEY} ? 일치\n`,
+    { exit: "reject", reasonIncludes: [OTHER_PANE_KEY] },
+  ],
+  [
+    "표6: P == P ? 일치 (Q) -> 거부(값·Q)",
+    () =>
+      `dispatch_verified: yes\ntask_id_from_dispatch: ${RUNTIME_TASK_ID}\npane_match: ${PANE_KEY} == ${PANE_KEY} ? 일치 (${OTHER_PANE_KEY})\n`,
+    { exit: "reject", reasonIncludes: [OTHER_PANE_KEY] },
+  ],
+  [
+    "표9: ? 일치(토큰 0) -> 거부(형식)",
+    () =>
+      `dispatch_verified: yes\ntask_id_from_dispatch: ${RUNTIME_TASK_ID}\npane_match: ? 일치\n`,
+    { exit: "reject", reasonIncludes: ["no pane key token"] },
+  ],
+  [
+    "표10: P==P ? 일치(공백 없음) -> 소비",
+    () =>
+      `dispatch_verified: yes\ntask_id_from_dispatch: ${RUNTIME_TASK_ID}\npane_match: ${PANE_KEY}==${PANE_KEY} ? 일치\n`,
+    { exit: "consume" },
+  ],
+  [
+    "표11: P== P ? 일치 -> 소비",
+    () =>
+      `dispatch_verified: yes\ntask_id_from_dispatch: ${RUNTIME_TASK_ID}\npane_match: ${PANE_KEY}== ${PANE_KEY} ? 일치\n`,
+    { exit: "consume" },
+  ],
+  [
+    "표13: P->P ? 일치(공백 없는 화살표) -> 소비",
+    () =>
+      `dispatch_verified: yes\ntask_id_from_dispatch: ${RUNTIME_TASK_ID}\npane_match: ${PANE_KEY}->${PANE_KEY} ? 일치\n`,
+    { exit: "consume" },
+  ],
+  [
+    "표14: P → P ? 일치(유니코드 화살표) -> 소비",
+    () =>
+      `dispatch_verified: yes\ntask_id_from_dispatch: ${RUNTIME_TASK_ID}\npane_match: ${PANE_KEY} → ${PANE_KEY} ? 일치\n`,
+    { exit: "consume" },
+  ],
+  [
+    "표16: Px == Px(접미 위조, 토큰 경계 침범) -> 거부(토큰 0 = 형식)",
+    () =>
+      `dispatch_verified: yes\ntask_id_from_dispatch: ${RUNTIME_TASK_ID}\npane_match: ${PANE_KEY}x == ${PANE_KEY}x ? 일치\n`,
+    { exit: "reject", reasonIncludes: ["no pane key token"] },
+  ],
+  [
+    "표29a: pane_match 줄이 `+ ` 목록 기호 -> 소비",
+    () =>
+      `dispatch_verified: yes\ntask_id_from_dispatch: ${RUNTIME_TASK_ID}\n+ pane_match: ${PANE_KEY} == ${PANE_KEY} ? 일치\n`,
+    { exit: "consume" },
+  ],
+  [
+    "표29a: pane_match 줄이 `1. ` 번호 목록 기호 -> 소비",
+    () =>
+      `dispatch_verified: yes\ntask_id_from_dispatch: ${RUNTIME_TASK_ID}\n1. pane_match: ${PANE_KEY} == ${PANE_KEY} ? 일치\n`,
+    { exit: "consume" },
+  ],
+  [
+    "표31: pane 자리표시 템플릿(<ORCA_PANE_KEY 값> == …) -> 거부(형식·토큰 0)",
+    () =>
+      `dispatch_verified: yes\ntask_id_from_dispatch: ${RUNTIME_TASK_ID}\npane_match: <ORCA_PANE_KEY 값> == <assignee_pane_key 값> ? 일치|불일치\n`,
+    { exit: "reject", reasonIncludes: ["no pane key token"] },
+  ],
+];
+
+for (const [label, buildG1, expect_] of PANE_FIXED_CELL_TABLE) {
+  test(`(g1-table)★ HYK-434 3R 고정 칸 -- ${label}`, () => {
+    withFixtureDir("g1-table-", (dir) => {
+      writeCoderRound(dir, { g1: buildG1() });
+      const ledgerPath = withLedger(dir, [validReceipt()]);
+      const res = runCli(["coder", dir], { ledgerPath });
+      if (expect_.exit === "consume") {
+        assert.equal(res.exit, 0, `기대: 소비. stderr: ${res.stderr}`);
+      } else {
+        assert.notEqual(res.exit, 0, "기대: 거부");
+        for (const needle of expect_.reasonIncludes ?? []) {
+          assert.ok(
+            res.stderr.includes(needle),
+            `사유에 '${needle}'가 있어야 한다. stderr: ${res.stderr}`,
+          );
+        }
+      }
+    });
+  });
+}
+
+// HYK-434 3R §2-3(P2-1 수리, 판정 ⓐ) -- 들여쓴 펜스·코드 블록도 G1 판독
+// 경로에서는 "인용"으로 가려진다(표21·22·23).
+test("(g1-indented-codeblock)★ 표21: G1 3줄이 4칸 들여쓴 코드 블록 안«에만» 있다 -> 마스킹되어 부재로 거부", () => {
+  withFixtureDir("g1-indented-code-", (dir) => {
+    const indented =
+      "example only, not a real declaration.\n\n" +
+      `    dispatch_verified: yes\n    task_id_from_dispatch: ${RUNTIME_TASK_ID}\n    pane_match: ${PANE_KEY} == ${PANE_KEY} ? 일치\n`;
+    writeCoderRound(dir, { g1: "", extra: indented });
+    const ledgerPath = withLedger(dir, [validReceipt()]);
+    const res = runCli(["coder", dir], { ledgerPath });
+    assert.notEqual(res.exit, 0);
+    assert.match(res.stderr, /missing \(no standalone column-0 line found/);
+  });
+});
+
+test("(g1-indented-fence)★ 표22: 목록 안 4칸 들여쓴 펜스 안«에만» G1 3줄이 있다 -> 마스킹되어 부재로 거부", () => {
+  withFixtureDir("g1-indented-fence-", (dir) => {
+    const indentedFence =
+      "- example:\n\n" +
+      "    ```\n" +
+      `    dispatch_verified: yes\n    task_id_from_dispatch: ${RUNTIME_TASK_ID}\n    pane_match: ${PANE_KEY} == ${PANE_KEY} ? 일치\n` +
+      "    ```\n";
+    writeCoderRound(dir, { g1: "", extra: indentedFence });
+    const ledgerPath = withLedger(dir, [validReceipt()]);
+    const res = runCli(["coder", dir], { ledgerPath });
+    assert.notEqual(res.exit, 0);
+    assert.match(res.stderr, /missing \(no standalone column-0 line found/);
+  });
+});
+
+test("(g1-indented-fence-plus-real)★ 표23: 실제 3줄 + 목록 안 4칸 펜스 예시(dispatch_verified: no) -> 소비(예시는 중복으로 안 센다)", () => {
+  withFixtureDir("g1-indented-fence-real-", (dir) => {
+    const indentedFenceExample =
+      "\n- example of a bad declaration:\n\n" +
+      "    ```\n    dispatch_verified: no\n    ```\n";
+    writeCoderRound(dir, { g1: g1Block(), extra: indentedFenceExample });
+    const ledgerPath = withLedger(dir, [validReceipt()]);
+    const res = runCli(["coder", dir], { ledgerPath });
+    assert.equal(res.exit, 0, `stderr: ${res.stderr}`);
+  });
+});
+
+// ===========================================================================
+// HYK-434 3R §2-5 되돌림 변이 T1~T4 -- 2R에서 V3/V5가 맡던 자리를
+// 대체한다(2R의 "구분자 앞뒤 두 토큰" 구조 자체가 사라졌으므로, 그
+// 구조를 되돌리는 쪽이 이제 더 정확한 회귀 시험이다).
+// ===========================================================================
+
+// T1: 토큰 "전부 추출" 대신 2R의 "구분자 앞뒤 두 토큰" 정규식으로 되돌리면
+// -- 표 5·6·8·10·11·14가 RED여야 한다(책임자 판정 ⓒ "전부"·"최소 1개"를
+// 지탱하는 바로 그 코드).
+test("(g1-mut-t1)★ 되돌림 변이 T1: 토큰 전부 추출을 2R의 '구분자 앞뒤 두 토큰' 정규식으로 되돌리면 -- 표 5·6·8·10·11·14가 RED다", () => {
+  withFixtureDir("g1-mutt1-", (dir) => {
     const target =
-      "  if (\n    leftKey.toLowerCase() !== expectedPaneKey.toLowerCase() ||\n    rightKey.toLowerCase() !== expectedPaneKey.toLowerCase()\n  ) {";
+      "  // §2-1 요구 2: V(콜론 뒤 값부 전체)를 구분자로 쪼개지 않는다.\n  const valuePart = pm.match[1];\n  // §2-1 요구 3: pane key 모양 토큰을 전부 뽑는다(원문 그대로 -- 가공\n  // 하지 않는다, §2-1 요구 7 \"사유에 캡처 가공 값을 넣지 마라\").\n  const tokens = [...valuePart.matchAll(PANE_TOKEN_RE_G)].map((m) => m[0]);\n  // §2-1 요구 4: 토큰 0개 = 형식 거부(값 거부가 아니다).\n  if (tokens.length === 0) {\n    return {\n      ok: false,\n      reason: `G1 cross-check failed (HYK-434): 'pane_match:' line has no pane key token (HYK-434, line: '${valuePart}')`,\n    };\n  }\n  // §2-1 요구 5: 뽑은 토큰 전부가 영수증 값과 같아야 한다(대소문자\n  // 무시) -- 하나라도 다르면 값 거부, 사유에 다른 토큰 전부를 원문\n  // 그대로 적는다(여럿이면 전부).\n  const expectedLower = expectedPaneKey.toLowerCase();\n  const mismatched = tokens.filter((t) => t.toLowerCase() !== expectedLower);\n  if (mismatched.length > 0) {\n    return {\n      ok: false,\n      reason: `G1 cross-check failed (HYK-434): 'pane_match:' line value mismatch -- expected '${expectedPaneKey}' (most recent matching dispatch ledger record, recorded_at=${recordedAt}), found '${mismatched.join(\"', '\")}'`,\n    };\n  }\n  // §2-1 요구 6: 전부 같으면 끝으로 \"불일치\" 선언 여부만 본다(판정 ⓑ).\n  // 끝 낱말 `일치`·`?`의 유무·철자는 보지 않는다.\n  if (valuePart.includes(\"불일치\")) {\n    return {\n      ok: false,\n      reason: `G1 cross-check failed (HYK-434): 'pane_match:' line mismatch -- worker declared 불일치 even though both pane keys equal '${expectedPaneKey}' (HYK-434)`,\n    };\n  }\n  return { ok: true };\n}";
     const original = readFileSync(CLI_PATH, "utf8");
-    assertExactlyOneMatch(original, target, "pane_match left/right comparison");
+    assertExactlyOneMatch(original, target, "resolveG1PaneMatchVerdict body");
     const replacement =
-      "  if (\n    leftKey.toLowerCase() !== expectedPaneKey.toLowerCase() // HYK-434 되돌림 변이 V5: 오른쪽 비교 제거\n  ) {";
+      "  // HYK-434 되돌림 변이 T1: 토큰 전부 추출 대신 \"구분자 앞뒤 두 토큰\"만\n  // 보는 2R 구조로 되돌린다.\n  const twoTokenMatch = pm.match[1].match(\n    /^(\\S+)[ \\t]*(?:={1,3}|->)[ \\t]*(\\S+)(.*)$/,\n  );\n  if (!twoTokenMatch) {\n    return {\n      ok: false,\n      reason: `G1 cross-check failed (HYK-434): 'pane_match:' line has no pane key token (HYK-434, line: '${pm.match[1]}')`,\n    };\n  }\n  const leftKey = twoTokenMatch[1];\n  const rightKey = twoTokenMatch[2];\n  const trailing = twoTokenMatch[3] ?? \"\";\n  if (\n    leftKey.toLowerCase() !== expectedPaneKey.toLowerCase() ||\n    rightKey.toLowerCase() !== expectedPaneKey.toLowerCase()\n  ) {\n    return {\n      ok: false,\n      reason: `G1 cross-check failed (HYK-434): 'pane_match:' line value mismatch -- expected '${expectedPaneKey}', found '${leftKey}', '${rightKey}'`,\n    };\n  }\n  if (trailing.includes(\"불일치\")) {\n    return {\n      ok: false,\n      reason: `G1 cross-check failed (HYK-434): 'pane_match:' line mismatch -- worker declared 불일치 even though both pane keys equal '${expectedPaneKey}' (HYK-434)`,\n    };\n  }\n  return { ok: true };\n}";
+
+    const stageDir = join(dir, "stage");
+    mkdirSync(stageDir);
+    const mutatedCliPath = stageMutatedRelayHandshake(stageDir, (src) =>
+      src.replace(target, replacement),
+    );
+
+    const samples = [
+      ["표5", `${PANE_KEY} == ${PANE_KEY} == ${OTHER_PANE_KEY} ? 일치`],
+      ["표6", `${PANE_KEY} == ${PANE_KEY} ? 일치 (${OTHER_PANE_KEY})`],
+      ["표8", `${PANE_KEY} ? 일치`],
+      ["표10", `${PANE_KEY}==${PANE_KEY} ? 일치`],
+      ["표11", `${PANE_KEY}== ${PANE_KEY} ? 일치`],
+      ["표14", `${PANE_KEY} → ${PANE_KEY} ? 일치`],
+    ];
+    for (const [rowLabel, paneLine] of samples) {
+      const roundDir = join(dir, `round-${rowLabel}`);
+      mkdirSync(roundDir);
+      writeCoderRound(roundDir, {
+        g1: `dispatch_verified: yes\ntask_id_from_dispatch: ${RUNTIME_TASK_ID}\npane_match: ${paneLine}\n`,
+      });
+      const ledgerPath = withLedger(roundDir, [validReceipt()]);
+      writeFileSync(
+        join(roundDir, "dispatch-receipt-path.txt"),
+        ledgerPath,
+        "utf8",
+      );
+
+      const mutRes = runMutatedCli(mutatedCliPath, ["coder", roundDir]);
+      const originalRes = runCli(["coder", roundDir], { ledgerPath });
+      assert.notEqual(
+        mutRes.exit === 0,
+        originalRes.exit === 0,
+        `RED 필수(${rowLabel}): T1 변이는 원본과 다른 판정을 내야 한다. mut exit=${mutRes.exit} stderr=${mutRes.stderr} / original exit=${originalRes.exit} stderr=${originalRes.stderr}`,
+      );
+    }
+  });
+});
+
+// T2: 토큰 경계(lookbehind/lookahead)를 제거하면 -- 표16(접미 위조)이
+// RED다(최소 1개 규칙이 접미 위조까지 "정답"으로 받아들여 버린다).
+test("(g1-mut-t2)★ 되돌림 변이 T2: pane 토큰 경계(lookbehind/lookahead)를 제거하면 -- 표16(접미 위조)이 다시 소비된다(RED)", () => {
+  withFixtureDir("g1-mutt2-", (dir) => {
+    const target =
+      "const PANE_TOKEN_RE_G =\n  /(?<![0-9A-Za-z_:-])[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?![0-9A-Za-z_:-])/gi;";
+    const original = readFileSync(CLI_PATH, "utf8");
+    assertExactlyOneMatch(original, target, "PANE_TOKEN_RE_G declaration");
+    const replacement =
+      "const PANE_TOKEN_RE_G =\n  /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi; // HYK-434 되돌림 변이 T2: 경계 제거";
 
     const stageDir = join(dir, "stage");
     mkdirSync(stageDir);
@@ -1210,7 +1435,7 @@ test("(g1-mut-v5)★ 되돌림 변이 V5: pane_match의 오른쪽 비교를 제�
     const roundDir = join(dir, "round");
     mkdirSync(roundDir);
     writeCoderRound(roundDir, {
-      g1: `dispatch_verified: yes\ntask_id_from_dispatch: ${RUNTIME_TASK_ID}\npane_match: ${PANE_KEY} == x ? 일치\n`,
+      g1: `dispatch_verified: yes\ntask_id_from_dispatch: ${RUNTIME_TASK_ID}\npane_match: ${PANE_KEY}x == ${PANE_KEY}x ? 일치\n`,
     });
     const ledgerPath = withLedger(roundDir, [validReceipt()]);
     writeFileSync(
@@ -1223,7 +1448,7 @@ test("(g1-mut-v5)★ 되돌림 변이 V5: pane_match의 오른쪽 비교를 제�
     assert.equal(
       mutRes.exit,
       0,
-      `RED 필수: 오른쪽 비교가 없으면 오른쪽만 틀린 비대칭 표본이 통과해버려야 한다. stderr: ${mutRes.stderr}`,
+      `RED 필수: 경계가 없으면 접미 위조(표16)가 소비돼야 한다. stderr: ${mutRes.stderr}`,
     );
 
     const originalRes = runCli(["coder", roundDir], { ledgerPath });
@@ -1232,5 +1457,112 @@ test("(g1-mut-v5)★ 되돌림 변이 V5: pane_match의 오른쪽 비교를 제�
       0,
       "원본은 같은 표본을 반드시 거부한다(대조군)",
     );
+  });
+});
+
+// T3: G1 판독의 마스킹 확장(들여쓴 펜스·코드 블록)을 제거하면 -- 표21이
+// RED다(예시가 "진짜"로 읽혀 소비된다, P2-1 회귀).
+test("(g1-mut-t3)★ 되돌림 변이 T3: G1 판독의 마스킹 확장(들여쓴 펜스·코드 블록)을 제거하면 -- 표21의 들여쓴 예시가 다시 소비된다(RED)", () => {
+  withFixtureDir("g1-mutt3-", (dir) => {
+    const target =
+      "  const scan = maskQuotedMarkerRegions(content, { indentedBlocks: true });";
+    const original = readFileSync(CLI_PATH, "utf8");
+    assertExactlyOneMatch(
+      original,
+      target,
+      "resolveG1StandaloneLine masking option",
+    );
+    const replacement =
+      "  const scan = maskQuotedMarkerRegions(content); // HYK-434 되돌림 변이 T3: 들여쓴 블록 마스킹 확장 제거";
+
+    const stageDir = join(dir, "stage");
+    mkdirSync(stageDir);
+    const mutatedCliPath = stageMutatedRelayHandshake(stageDir, (src) =>
+      src.replace(target, replacement),
+    );
+
+    const roundDir = join(dir, "round");
+    mkdirSync(roundDir);
+    const indented =
+      "example only, not a real declaration.\n\n" +
+      `    dispatch_verified: yes\n    task_id_from_dispatch: ${RUNTIME_TASK_ID}\n    pane_match: ${PANE_KEY} == ${PANE_KEY} ? 일치\n`;
+    writeCoderRound(roundDir, { g1: "", extra: indented });
+    const ledgerPath = withLedger(roundDir, [validReceipt()]);
+    writeFileSync(
+      join(roundDir, "dispatch-receipt-path.txt"),
+      ledgerPath,
+      "utf8",
+    );
+
+    const mutRes = runMutatedCli(mutatedCliPath, ["coder", roundDir]);
+    assert.equal(
+      mutRes.exit,
+      0,
+      `RED 필수: 마스킹 확장이 없으면 들여쓴 예시가 진짜로 읽혀 소비돼야 한다. stderr: ${mutRes.stderr}`,
+    );
+
+    const originalRes = runCli(["coder", roundDir], { ledgerPath });
+    assert.notEqual(
+      originalRes.exit,
+      0,
+      "원본은 같은 표본을 부재로 거부한다(대조군)",
+    );
+  });
+});
+
+// T4: 사유 문자열에 캡처 가공 값(망가진 값)을 쓰면 -- 표5·7의 사유 원문
+// 단언이 RED다(§2-1 요구 7 "사유에는 캡처 가공 값을 넣지 마라").
+test("(g1-mut-t4)★ 되돌림 변이 T4: 사유에 가공된(망가진) 값을 쓰면 -- 표5·7의 '원문 그대로' 단언이 RED다", () => {
+  withFixtureDir("g1-mutt4-", (dir) => {
+    const target =
+      "      reason: `G1 cross-check failed (HYK-434): 'pane_match:' line value mismatch -- expected '${expectedPaneKey}' (most recent matching dispatch ledger record, recorded_at=${recordedAt}), found '${mismatched.join(\"', '\")}'`,";
+    const original = readFileSync(CLI_PATH, "utf8");
+    assertExactlyOneMatch(original, target, "pane mismatch reason (raw token)");
+    const replacement =
+      "      reason: `G1 cross-check failed (HYK-434): 'pane_match:' line value mismatch -- expected '${expectedPaneKey}' (most recent matching dispatch ledger record, recorded_at=${recordedAt}), found '${mismatched.map((t) => `${t.slice(0, -1)}=`).join(\"', '\")}'`, // HYK-434 되돌림 변이 T4: 사유에 가공 값";
+
+    const stageDir = join(dir, "stage");
+    mkdirSync(stageDir);
+    const mutatedCliPath = stageMutatedRelayHandshake(stageDir, (src) =>
+      src.replace(target, replacement),
+    );
+
+    const rows = [
+      ["표5", `${PANE_KEY} == ${PANE_KEY} == ${OTHER_PANE_KEY} ? 일치`],
+      ["표7", `${OTHER_PANE_KEY} ${PANE_KEY} == ${PANE_KEY} ? 일치`],
+    ];
+    for (const [rowLabel, paneLine] of rows) {
+      const roundDir = join(dir, `round-${rowLabel}`);
+      mkdirSync(roundDir);
+      writeCoderRound(roundDir, {
+        g1: `dispatch_verified: yes\ntask_id_from_dispatch: ${RUNTIME_TASK_ID}\npane_match: ${paneLine}\n`,
+      });
+      const ledgerPath = withLedger(roundDir, [validReceipt()]);
+      writeFileSync(
+        join(roundDir, "dispatch-receipt-path.txt"),
+        ledgerPath,
+        "utf8",
+      );
+
+      const mutRes = runMutatedCli(mutatedCliPath, ["coder", roundDir]);
+      assert.notEqual(
+        mutRes.exit,
+        0,
+        `${rowLabel}: 여전히 거부돼야 한다(판정 자체는 안 바뀜)`,
+      );
+      assert.doesNotMatch(
+        mutRes.stderr,
+        new RegExp(`found '${OTHER_PANE_KEY}'`),
+        `RED 필수(${rowLabel}): 사유가 가공되면 원문 그대로의 '${OTHER_PANE_KEY}'가 더 이상 보이지 않아야 한다`,
+      );
+
+      const originalRes = runCli(["coder", roundDir], { ledgerPath });
+      assert.notEqual(originalRes.exit, 0);
+      assert.match(
+        originalRes.stderr,
+        new RegExp(`found '${OTHER_PANE_KEY}'`),
+        `${rowLabel}: 원본은 사유에 원문 그대로의 값을 찍는다(대조군)`,
+      );
+    }
   });
 });
