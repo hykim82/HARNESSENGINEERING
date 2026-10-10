@@ -479,6 +479,10 @@ test("(hyk387-5b)★ 변이 B(위조 원장 항목) -- HYK-434로 닫힘: 존재
       "HYK-434: 위조 레코드와 결과의 G1 3줄(기본값)이 다르므로 이제 거부돼야 한다",
     );
     assert.match(res.stderr, /G1 cross-check failed \(HYK-434\)/);
+    // HYK-434 2R(P3-2 수리): 어느 줄 때문에 거부됐는지 고정한다 --
+    // tid/pane 둘 다 "forged"지만 tid가 먼저 대조되므로
+    // 'task_id_from_dispatch:' 값 불일치가 사유여야 한다(순서 회귀 방지).
+    assert.match(res.stderr, /'task_id_from_dispatch:' line value mismatch/);
   });
 });
 

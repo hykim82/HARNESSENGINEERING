@@ -2497,19 +2497,48 @@ export function resolveDispatchRecordExistence({
 // 로 인용/펜스 밖만 본다(HYK-449/HYK-450과 같은 함정 -- 코드블록 안에 인용된
 // G1 3줄도 "표지"로 오인하지 않는다), 같은 키가 인용 밖에 2번 이상이면
 // AMBIGUOUS로 거부한다(HYK-486 선례 -- 조용히 하나를 고르지 않는다).
-const DISPATCH_VERIFIED_RE_G = /^dispatch_verified:[ \t]*(yes|no)[ \t]*$/gm;
-const DISPATCH_VERIFIED_ANYWHERE_RE = /dispatch_verified:\s*(\S+)/i;
+//
+// HYK-434 2R(책임자 축 ⓐ -- 형식→값 대조 좁히기): 줄 앞 공백·목록 기호
+// (`- `/`* `)·키를 감싸는 굵게 장식(`**`)·키 대소문자·반각/전각 콜론은
+// «모양»일 뿐이라 거부 사유가 되지 않는다 -- 아래 세 정규식의
+// `[ \t]*(?:[-*][ \t]+)?\*{0,2}...\*{0,2}[ \t]*[:：][ \t]*`가 그 장식을
+// 구조적으로 흡수한다(대소문자는 `i` 플래그). 값 자체의 따옴표·백틱·
+// 굵게 장식은 stripG1ValueDecoration이 캡처 뒤에 벗긴다(regex는 가능한
+// 만큼만 구조적으로 흡수하고, 나머지는 후처리가 덮는다 -- 두 겹이라도
+// 중복 손실 없음, 아래 함수 주석 참조).
+const DISPATCH_VERIFIED_RE_G =
+  /^[ \t]*(?:[-*][ \t]+)?\*{0,2}dispatch_verified\*{0,2}[ \t]*[:：][ \t]*(\S.*?)[ \t]*$/gim;
+const DISPATCH_VERIFIED_ANYWHERE_RE = /dispatch_verified[ \t]*[:：]/i;
 
 const TASK_ID_FROM_DISPATCH_RE_G =
-  /^task_id_from_dispatch:[ \t]*(\S+)[ \t]*$/gm;
-const TASK_ID_FROM_DISPATCH_ANYWHERE_RE = /task_id_from_dispatch:\s*(\S+)/i;
+  /^[ \t]*(?:[-*][ \t]+)?\*{0,2}task_id_from_dispatch\*{0,2}[ \t]*[:：][ \t]*(\S.*?)[ \t]*$/gim;
+const TASK_ID_FROM_DISPATCH_ANYWHERE_RE = /task_id_from_dispatch[ \t]*[:：]/i;
 
 // pane_match 줄 모양(worker-dispatch-rule.md §1 원문): "<값1> == <값2> ?
-// 일치|불일치". pane key 자신은 공백을 포함하지 않으므로(uuid 두 개를
-// `:`로 이은 값) `\S+`로 안전하게 좁힌다.
+// 일치|불일치". HYK-434 2R: 구분자(`==`/`=`/`===`/`->`)·`?`(반각/전각)·끝
+// 낱말의 «모양»은 거부 사유가 아니다(책임자 축 ⓐ-3) -- 두 토큰만
+// `\S+`로 뽑고, 구분자는 `={1,3}|->`로 느슨하게, 그 뒤 줄 나머지는
+// 통째로 세 번째 캡처에 담아 "불일치" 선언 여부만 부분 문자열로 본다
+// (끝 낱말 생략·`일치함`·`match`·`(일치)`는 전부 "불일치"를 포함하지
+// 않으므로 그대로 수용된다, 판정 ⓑ).
 const PANE_MATCH_RE_G =
-  /^pane_match:[ \t]*(\S+)[ \t]*==[ \t]*(\S+)[ \t]*\?[ \t]*(일치|불일치)[ \t]*$/gm;
-const PANE_MATCH_ANYWHERE_RE = /pane_match:\s*(\S.*)/i;
+  /^[ \t]*(?:[-*][ \t]+)?\*{0,2}pane_match\*{0,2}[ \t]*[:：][ \t]*\*{0,2}[ \t]*(\S+)[ \t]*(?:={1,3}|->)[ \t]*(\S+)(.*)$/gim;
+const PANE_MATCH_ANYWHERE_RE = /pane_match[ \t]*[:：]/i;
+
+// HYK-434 2R: 캡처된 값 양끝의 따옴표·백틱·굵게 장식을 벗긴다(책임자 축 ⓐ
+// 점2 -- "값 양끝의 따옴표(' ")·백틱·굵게 장식을 벗긴다"). 위 세 정규식이
+// 이미 구조적으로 대부분 흡수하지만(키 쪽 `**`), "**key: value**"처럼
+// 값 뒤에 붙는 굵게 닫힘이나 `` `value` ``/`"value"` 같은 값 자체의
+// 장식은 regex가 아니라 여기서 한 번 더 벗긴다 -- 이중 안전망이라도
+// 바이트가 겹쳐 사라지는 일은 없다(trim은 공백만, 장식 문자 제거는
+// 좌우 run 각각 한 번뿐).
+function stripG1ValueDecoration(raw) {
+  return raw
+    .trim()
+    .replace(/^[`'"*]+/, "")
+    .replace(/[`'"*]+$/, "")
+    .trim();
+}
 
 // head_commit:(resolveHeadCommitField)과 같은 세 갈래(AMBIGUOUS/MALFORMED/
 // MISSING)를 일반화한다 -- G1 3줄 모두 같은 column-0 단독 줄 계약을 쓰므로
@@ -2597,10 +2626,11 @@ export function resolveG1DispatchVerificationVerdict({
       reason: `G1 cross-check failed (HYK-434): ${dv.reason}`,
     };
   }
-  if (dv.match[1] !== "yes") {
+  const dvValue = stripG1ValueDecoration(dv.match[1]);
+  if (dvValue.toLowerCase() !== "yes") {
     return {
       ok: false,
-      reason: `G1 cross-check failed (HYK-434): 'dispatch_verified:' line value mismatch -- expected 'yes', found '${dv.match[1]}'`,
+      reason: `G1 cross-check failed (HYK-434): 'dispatch_verified:' line value mismatch -- expected 'yes', found '${dvValue}'`,
     };
   }
 
@@ -2615,13 +2645,34 @@ export function resolveG1DispatchVerificationVerdict({
       reason: `G1 cross-check failed (HYK-434): ${tid.reason}`,
     };
   }
-  if (tid.match[1] !== latest.runtime_task_id) {
+  const tidValue = stripG1ValueDecoration(tid.match[1]);
+  if (tidValue.toLowerCase() !== String(latest.runtime_task_id).toLowerCase()) {
     return {
       ok: false,
-      reason: `G1 cross-check failed (HYK-434): 'task_id_from_dispatch:' line value mismatch -- expected '${latest.runtime_task_id}' (most recent matching dispatch ledger record, recorded_at=${latest.recorded_at}), found '${tid.match[1]}'`,
+      reason: `G1 cross-check failed (HYK-434): 'task_id_from_dispatch:' line value mismatch -- expected '${latest.runtime_task_id}' (most recent matching dispatch ledger record, recorded_at=${latest.recorded_at}), found '${tidValue}'`,
     };
   }
 
+  const paneVerdict = resolveG1PaneMatchVerdict({
+    resultContent,
+    expectedPaneKey: String(latest.assignee_pane_key),
+    recordedAt: latest.recorded_at,
+  });
+  if (!paneVerdict.ok) return paneVerdict;
+
+  return { ok: true, usedRecordedAt: latest.recorded_at };
+}
+
+// HYK-434-lint-3: extracted from resolveG1DispatchVerificationVerdict (same
+// ESLint max-lines-per-function/complexity reason as this file's other
+// HYK-434-lint-2 extraction) -- pane_match 줄 하나를 읽어 두 토큰 값(대
+// 소문자 무시)과 "불일치" 선언 여부를 판정한다. 사유 문자열·판정 순서는
+// 바이트 단위로 그대로다 -- 오직 위치만 옮겼다.
+function resolveG1PaneMatchVerdict({
+  resultContent,
+  expectedPaneKey,
+  recordedAt,
+}) {
   const pm = resolveG1StandaloneLine(resultContent, {
     reGlobal: PANE_MATCH_RE_G,
     reAnywhere: PANE_MATCH_ANYWHERE_RE,
@@ -2633,19 +2684,29 @@ export function resolveG1DispatchVerificationVerdict({
       reason: `G1 cross-check failed (HYK-434): ${pm.reason}`,
     };
   }
-  const [, leftKey, rightKey, verdict] = pm.match;
+  // HYK-434 2R(판정 ⓒ/ⓑ): 구분자·`?`·끝 낱말의 «모양»은 보지 않고, 두
+  // 토큰 값(대소문자 무시)과 "불일치" 선언 여부만 값으로 본다. 두 축은
+  // 서로 다른 사유를 낸다(P2-4: 형식 문제가 "value mismatch"로 찍히지
+  // 않아야 한다 -- 여기서는 값 자체가 다른 경우만 "value mismatch"다).
+  const leftKey = stripG1ValueDecoration(pm.match[1]);
+  const rightKey = stripG1ValueDecoration(pm.match[2]);
+  const trailing = pm.match[3] ?? "";
   if (
-    leftKey !== latest.assignee_pane_key ||
-    rightKey !== latest.assignee_pane_key ||
-    verdict !== "일치"
+    leftKey.toLowerCase() !== expectedPaneKey.toLowerCase() ||
+    rightKey.toLowerCase() !== expectedPaneKey.toLowerCase()
   ) {
     return {
       ok: false,
-      reason: `G1 cross-check failed (HYK-434): 'pane_match:' line mismatch -- expected both pane keys to equal '${latest.assignee_pane_key}' (most recent matching dispatch ledger record, recorded_at=${latest.recorded_at}) with a '일치' verdict, found '${leftKey} == ${rightKey} ? ${verdict}'`,
+      reason: `G1 cross-check failed (HYK-434): 'pane_match:' line mismatch -- expected both pane keys to equal '${expectedPaneKey}' (most recent matching dispatch ledger record, recorded_at=${recordedAt}), found '${leftKey} == ${rightKey}'`,
     };
   }
-
-  return { ok: true, usedRecordedAt: latest.recorded_at };
+  if (trailing.includes("불일치")) {
+    return {
+      ok: false,
+      reason: `G1 cross-check failed (HYK-434): 'pane_match:' line mismatch -- worker declared 불일치 even though both pane keys equal '${expectedPaneKey}' (HYK-434)`,
+    };
+  }
+  return { ok: true };
 }
 
 // HYK-434-lint-1: extracted from checkRelayHandshake (same ESLint max-lines-
