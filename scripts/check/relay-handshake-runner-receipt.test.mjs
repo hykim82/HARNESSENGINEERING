@@ -510,7 +510,7 @@ test("(rr-e1)★ 되돌림 변이: 소비 축(checkRelayHandshake 결선) 자체
   // still removes both the gate AND that scoping, so the RED assertion
   // below still proves the gate itself is load-bearing.
   const target =
-    "  const runnerReceiptVerdict = resolveRunnerReceiptVerdict({\n    resultContent: judgedRegion,\n    harnessDir,\n  });\n  if (!runnerReceiptVerdict.ok) return runnerReceiptVerdict;\n\n";
+    "  const runnerReceiptVerdict = resolveRunnerReceiptVerdict({\n    resultContent,\n    harnessDir,\n    requiredRuns: runnerContractActivation.requiredRuns,\n    contractDirective: runnerContractActivation.directive,\n  });\n  if (!runnerReceiptVerdict.ok) return runnerReceiptVerdict;\n\n";
   assertExactlyOneMatch(src, target, "runner receipt wiring block");
   const mutated = src.replace(target, "");
   assert.equal(mutated.length, src.length - target.length);
@@ -550,7 +550,7 @@ test("(rr-e1)★ 되돌림 변이: 소비 축(checkRelayHandshake 결선) 자체
 test("(rr-e2)★ 되돌림 변이: runner_exit 대조를 제거하면 -- (rr-a) 빨간 실행이 다시 통과한다(RED)", async () => {
   const src = readFileSync(RELAY_HANDSHAKE_PATH, "utf8");
   const target =
-    "  if (receipt.runner_exit !== 0) {\n    return {\n      ok: false,\n      code: RUNNER_RECEIPT_REJECT_REASON.RED,\n      reason: `runner receipt gate (HYK-411): runner receipt at ${found.path} reports runner_exit=${receipt.runner_exit} (non-zero) -- the runner itself observed a failed run, refusing to consume a result claiming green (파이프가 숨긴 빨간 실행 차단)`,\n    };\n  }\n";
+    "  if (receipt.runner_exit !== 0) {\n    return {\n      ok: false,\n      code: RUNNER_RECEIPT_REJECT_REASON.RED,\n      reason: `runner receipt gate (HYK-411): runner receipt at ${found.path} reports runner_exit=${receipt.runner_exit} (non-zero) -- the runner itself observed a failed run, refusing to consume a result claiming green (파이프가 숨긴 빨간 실행 차단)${contractSuffix}`,\n    };\n  }\n";
   assertExactlyOneMatch(src, target, "runner_exit RED comparison");
   const mutated = src.replace(target, "");
 
@@ -586,7 +586,7 @@ test("(rr-e2)★ 되돌림 변이: runner_exit 대조를 제거하면 -- (rr-a) 
 test("(rr-e3)★ 되돌림 변이: head_commit 대조를 제거하면 -- (rr-b) 낡은 영수증이 다시 통과한다(RED, HYK-408 재발 방지 증명)", async () => {
   const src = readFileSync(RELAY_HANDSHAKE_PATH, "utf8");
   const target =
-    "  if (receipt.head_commit.toLowerCase() !== actualHead.sha) {\n    return {\n      ok: false,\n      code: RUNNER_RECEIPT_REJECT_REASON.STALE,\n      reason: `runner receipt gate (HYK-411): runner receipt at ${found.path} head_commit '${receipt.head_commit}' does not match this worktree's actual HEAD '${actualHead.sha}' -- refusing to consume a stale/reused runner result (HYK-408 1R 실피해 재발 방지)`,\n    };\n  }\n";
+    "  if (receipt.head_commit.toLowerCase() !== actualHead.sha) {\n    return {\n      ok: false,\n      code: RUNNER_RECEIPT_REJECT_REASON.STALE,\n      reason: `runner receipt gate (HYK-411): runner receipt at ${found.path} head_commit '${receipt.head_commit}' does not match this worktree's actual HEAD '${actualHead.sha}' -- refusing to consume a stale/reused runner result (HYK-408 1R 실피해 재발 방지)${contractSuffix}`,\n    };\n  }\n";
   assertExactlyOneMatch(src, target, "head_commit STALE comparison");
   const mutated = src.replace(target, "");
 
@@ -852,7 +852,7 @@ test("(cr-pipeline-ok) checkRelayHandshake 전체 파이프라인: 2회 러너�
 test("(cr-e1)★ 되돌림 변이: consecutiveRunnerReceiptsVerdict 결선 자체를 제거하면 -- (cr-pipeline)의 HYK-480 재현 표본이 다시 통과한다(RED, load-bearing 증명)", async () => {
   const src = readFileSync(RELAY_HANDSHAKE_PATH, "utf8");
   const target =
-    "\n  // HYK-485 §2-2: runnerReceiptVerdict와 같은 자리 원칙(§4 무회귀) -- 같은\n  // judgedRegion/harnessDir을 넘긴다. 0/1회 주장 라운드는 skip으로 빠져\n  // 나가 이 축이 존재하기 전과 완전히 동일하게 움직인다(과차단 금지).\n  const consecutiveRunnerReceiptsVerdict =\n    resolveConsecutiveRunnerReceiptsVerdict({\n      resultContent: judgedRegion,\n      harnessDir,\n    });\n  if (!consecutiveRunnerReceiptsVerdict.ok)\n    return consecutiveRunnerReceiptsVerdict;\n";
+    "\n  // HYK-485 §2-2: runnerReceiptVerdict와 같은 자리 원칙(§4 무회귀) -- 같은\n  // resultContent/harnessDir을 넘긴다. 0/1회 주장 라운드는 skip으로 빠져\n  // 나가 이 축이 존재하기 전과 완전히 동일하게 움직인다(과차단 금지).\n  const consecutiveRunnerReceiptsVerdict =\n    resolveConsecutiveRunnerReceiptsVerdict({\n      resultContent,\n      harnessDir,\n      requiredRuns: runnerContractActivation.requiredRuns,\n      contractDirective: runnerContractActivation.directive,\n    });\n  if (!consecutiveRunnerReceiptsVerdict.ok)\n    return consecutiveRunnerReceiptsVerdict;\n";
   assertExactlyOneMatch(src, target, "consecutive runner receipt wiring block");
   const mutated = src.replace(target, "");
 
@@ -1009,7 +1009,7 @@ test("(cr-p2-1)★ 검토 P2-1: 회차별 영수증 자리 중 하나가 0바이
 test("(cr-machine-e1)★ 되돌림 변이: 실물 축(matchingReceiptCount)을 되돌려 발동 조건을 claimCount만으로 되돌리면 -- (cr-machine-1)의 P1-2 재현 표본이 다시 skip으로 접힌다(RED, load-bearing 증명)", async () => {
   const src = readFileSync(RELAY_HANDSHAKE_PATH, "utf8");
   const target =
-    "  const claimCount = countRunnerExitClaims(resultContent);\n  const matchingReceiptCount = actualHead.ok\n    ? countCurrentHeadNumberedReceipts(harnessDir, actualHead.sha)\n    : 0;\n  if (claimCount < 2 && matchingReceiptCount < 2) {\n    return { ok: true, skipped: true };\n  }";
+    '  const claimCount = countRunnerExitClaims(resultContent);\n  const matchingReceiptCount = actualHead.ok\n    ? countCurrentHeadNumberedReceipts(harnessDir, actualHead.sha)\n    : 0;\n  // HYK-425 §2 item2/item3: "요구 회차 = max(계약 N, 주장 개수)" -- `none`/\n  // 계약 줄 없음(requiredRuns=0)에서는 effectiveRequired === claimCount라\n  // 아래 skip 판정이 이 축이 생기기 전과 바이트 하나도 다르지 않다(무회귀).\n  // `full-1x`(requiredRuns=1)는 여기서 effectiveRequired를 최대 1로만\n  // 끌어올리므로 claimCount가 0이어도 이 축(2회 연속)은 계속 skip된다 --\n  // 2회 연속 요구는 `full-2x`에서만 켜진다(§2 item2 "full-2x 이면 ... 회차\n  // 영수증 검사를 요구한다").\n  const effectiveRequired = Math.max(requiredRuns, claimCount);\n  if (effectiveRequired < 2 && matchingReceiptCount < 2) {\n    return { ok: true, skipped: true };\n  }';
   assertExactlyOneMatch(src, target, "consecutive gate trigger condition");
   const mutated = src.replace(
     target,
@@ -1134,7 +1134,7 @@ test("(rs-pipeline)★ checkRelayHandshake 전체 파이프라인: runner_status
 test("(rs-e1)★ 되돌림 변이: runner_status 검사를 제거하면 -- (rs-1)의 측정 불능 표본이 RED로 (문장이) 접힌다(측정 불능 구별이 load-bearing임을 증명)", async () => {
   const src = readFileSync(RELAY_HANDSHAKE_PATH, "utf8");
   const target =
-    '  // HYK-477 §2-4: runner_status는 schema v2부터 있는 필드다 -- v1 영수증\n  // (필드 자체가 undefined)은 이 비교가 항상 false가 되어 자연히 통과하고\n  // 아래 runner_exit 검사로 넘어간다(무회귀). 이 검사를 runner_exit 검사\n  // "앞"에 두는 순서가 핵심이다: classifySpawnOutcome은\n  // MEASUREMENT_UNAVAILABLE_OOM도 exitCode 1(0이 아님)로 남기므로, 순서가\n  // 바뀌면 이 값이 먼저 RED로 접혀 이 분기에 영영 도달하지 못한다 --\n  // §2-3이 분류기 안에서 고친 바로 그 왜곡이 소비 쪽에서 재발하는 것과\n  // 같은 형태다.\n  if (receipt.runner_status === MEASUREMENT_UNAVAILABLE_OOM_STATUS) {\n    return {\n      ok: false,\n      code: RUNNER_RECEIPT_REJECT_REASON.MEASUREMENT_UNAVAILABLE,\n      reason: `runner receipt gate (HYK-477): runner receipt at ${found.path} reports runner_status=${MEASUREMENT_UNAVAILABLE_OOM_STATUS} -- 측정 불능(measurement unavailable), NOT a test failure: the runner was forcibly killed (OOM/signal) before node --test produced a real result (HYK-467 규율) -- fail-closed all the same (소비는 여전히 거부한다), but reported with a distinct code/문장 so a reader cannot mistake this for "the tests failed"`,\n    };\n  }\n';
+    '  // HYK-477 §2-4: runner_status는 schema v2부터 있는 필드다 -- v1 영수증\n  // (필드 자체가 undefined)은 이 비교가 항상 false가 되어 자연히 통과하고\n  // 아래 runner_exit 검사로 넘어간다(무회귀). 이 검사를 runner_exit 검사\n  // "앞"에 두는 순서가 핵심이다: classifySpawnOutcome은\n  // MEASUREMENT_UNAVAILABLE_OOM도 exitCode 1(0이 아님)로 남기므로, 순서가\n  // 바뀌면 이 값이 먼저 RED로 접혀 이 분기에 영영 도달하지 못한다 --\n  // §2-3이 분류기 안에서 고친 바로 그 왜곡이 소비 쪽에서 재발하는 것과\n  // 같은 형태다.\n  if (receipt.runner_status === MEASUREMENT_UNAVAILABLE_OOM_STATUS) {\n    return {\n      ok: false,\n      code: RUNNER_RECEIPT_REJECT_REASON.MEASUREMENT_UNAVAILABLE,\n      reason: `runner receipt gate (HYK-477): runner receipt at ${found.path} reports runner_status=${MEASUREMENT_UNAVAILABLE_OOM_STATUS} -- 측정 불능(measurement unavailable), NOT a test failure: the runner was forcibly killed (OOM/signal) before node --test produced a real result (HYK-467 규율) -- fail-closed all the same (소비는 여전히 거부한다), but reported with a distinct code/문장 so a reader cannot mistake this for "the tests failed"${contractSuffix}`,\n    };\n  }\n';
   assertExactlyOneMatch(
     src,
     target,
