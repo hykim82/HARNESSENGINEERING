@@ -321,6 +321,15 @@ describe("음성 대조 + 과거 사고 회귀 증명 (in-memory list reduction,
       culprit:
         "review-gate.mjs / relay-handshake.mjs / dispatch-gate-decision.test.mjs (this round, ⓐ)",
     },
+    {
+      // HYK-209-install-list-g1-adapter-1 V3: admission-completion-
+      // adapter.mjs (newly added this round, same file) statically imports
+      // "./ledger-pointer-shared.mjs" -- measured live, this was NOT
+      // already covered by any pre-existing list entry's own closure.
+      removed: "ledger-pointer-shared.mjs",
+      culprit:
+        "admission-completion-adapter.mjs (HYK-209-install-list-g1-adapter-1)",
+    },
   ];
 
   for (const { removed, culprit } of PAST_INCIDENTS) {

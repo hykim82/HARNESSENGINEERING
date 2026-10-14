@@ -1219,6 +1219,27 @@ export const ENFORCEMENT_CHECK_FILES = [
   // aware version.
   "first-observation.mjs",
   "first-observation.test.mjs",
+  // HYK-209-install-list-g1-adapter-1: relay-handshake.mjs's own §1 "결과
+  // 파일 맨 위 3줄" G1 machine check (resolveG1DispatchVerificationVerdict)
+  // had no installer-list regression net at all -- relay-handshake-g1-
+  // dispatch-check.test.mjs's own closure (./relay-handshake.mjs,
+  // ./admission-ledger-env-isolation.mjs, ./relay-handshake-fixture-
+  // siblings.mjs) was already fully satisfied by entries already in this
+  // list, so adding its name alone closes that gap. admission-completion-
+  // adapter.mjs (relay-handshake.mjs spawns it by path, not a static
+  // import, so this closure check cannot see that edge -- a known,
+  // documented limit, see this file's own header above) was ALSO entirely
+  // missing; its .test.mjs pair is added per this list's own convention
+  // (pair the test file whenever one exists on disk). Measured live: the
+  // adapter's own closure was NOT already satisfied -- it statically
+  // imports "./ledger-pointer-shared.mjs", which was missing from this
+  // list before this round (added below with its own .test.mjs pair, same
+  // convention).
+  "relay-handshake-g1-dispatch-check.test.mjs",
+  "admission-completion-adapter.mjs",
+  "admission-completion-adapter.test.mjs",
+  "ledger-pointer-shared.mjs",
+  "ledger-pointer-shared.test.mjs",
 ];
 
 // HYK-209-frame-repair-1 X-1: the scripts/relay/*.mjs copy list, same
