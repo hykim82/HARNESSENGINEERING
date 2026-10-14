@@ -219,6 +219,228 @@ test("(rc-0h) 펜스 안에만 있는 계약 줄 -> absent(계약 없음으로 �
 });
 
 // ===========================================================================
+// (rc-nm) HYK-425 2R P1-1/P2-1 -- 근사(장식) 줄은 표준 매치가 0개여도
+// "계약 없음"으로 조용히 접히지 않고 전부 판정 불가(ambiguous)로 거부한다
+// (검토 1R 표 L·O·M·N·P·R·X, coder-task.md 1b_exec_line ⓐ~ⓕ 그대로).
+// ===========================================================================
+
+test("(rc-nm-a) 꼬리 글: 'runner_contract: full-2x — 설명' -> ambiguous(판정 불가, P1-1)", () => {
+  const r = resolveRunnerContractDirective("runner_contract: full-2x — 설명\n");
+  assert.equal(r.state, "ambiguous");
+  assert.match(r.reason, /near-miss/);
+});
+
+test("(rc-nm-b) 빈 값: 'runner_contract:' -> ambiguous(판정 불가, P1-1)", () => {
+  const r = resolveRunnerContractDirective("runner_contract:\n");
+  assert.equal(r.state, "ambiguous");
+  assert.match(r.reason, /near-miss/);
+});
+
+test("(rc-nm-c) 목록 접두: '- runner_contract: full-1x' -> ambiguous(P2-1, G1과 다른 정책)", () => {
+  const r = resolveRunnerContractDirective("- runner_contract: full-1x\n");
+  assert.equal(r.state, "ambiguous");
+});
+
+test("(rc-nm-d) 키 대문자: 'RUNNER_CONTRACT: full-1x' -> ambiguous(P2-1)", () => {
+  const r = resolveRunnerContractDirective("RUNNER_CONTRACT: full-1x\n");
+  assert.equal(r.state, "ambiguous");
+});
+
+test("(rc-nm-e) 전각 콜론: 'runner_contract：full-1x' -> ambiguous(P2-1)", () => {
+  const r = resolveRunnerContractDirective("runner_contract：full-1x\n");
+  assert.equal(r.state, "ambiguous");
+});
+
+test("(rc-nm-f) 굵게: '**runner_contract**: full-1x' -> ambiguous(P2-1)", () => {
+  const r = resolveRunnerContractDirective("**runner_contract**: full-1x\n");
+  assert.equal(r.state, "ambiguous");
+});
+
+test("(rc-nm-indent) 들여쓰기만(목록 접두 없음): '    runner_contract: full-1x' -> ambiguous(P2-1)", () => {
+  const r = resolveRunnerContractDirective("    runner_contract: full-1x\n");
+  assert.equal(r.state, "ambiguous");
+});
+
+test("(rc-nm-coexist) 표준 줄 1개 + 근사 줄 1개 공존 -> ambiguous(조용히 표준만 고르지 마라, HYK-486)", () => {
+  const r = resolveRunnerContractDirective(
+    "runner_contract: full-1x\n- runner_contract: full-2x\n",
+  );
+  assert.equal(r.state, "ambiguous");
+  assert.match(r.reason, /near-miss/);
+});
+
+test("(rc-nm-fenced) 근사 줄이 펜스 안에만 -> absent(계약 없음, 마스킹 범위 밖, 지금 동작 유지)", () => {
+  const r = resolveRunnerContractDirective(
+    "```\n- runner_contract: full-1x\n```\n",
+  );
+  assert.deepEqual(r, { state: "absent" });
+});
+
+test("(rc-nm-regression) 표준 줄만 있고 근사 줄은 전혀 없음 -> 평소처럼 set(무회귀)", () => {
+  assert.deepEqual(
+    resolveRunnerContractDirective("runner_contract: full-2x\n"),
+    { state: "set", value: "full-2x", requiredRuns: 2 },
+  );
+});
+
+// ===========================================================================
+// (rc-p22) HYK-425 2R P2-2 -- 계약으로만 발화하고(claims=false) 결과 파일에
+// exit= 주장이 0일 때 MISSING 사유 앞머리가 "task file declares a runner
+// contract"로 갈라진다(검토 1R 표 A 실측). claims=true일 때는 옛 문구
+// 그대로(주장 발화 경로, 무회귀).
+// ===========================================================================
+
+test("(rc-p22-a)★ full-1x + 주장 0 + 영수증 없음 -> MISSING 사유 앞머리가 'task file declares a runner contract', 'result claims'는 없다", () => {
+  withFixtureDir("hyk425-p22a-", (dir) => {
+    ensureGitHeadCommit(dir);
+    writeCoderRound(dir, {
+      contractLine: "runner_contract: full-1x\n",
+      resultBody: "verdict: n/a (no exit= idiom anywhere)",
+    });
+    const result = checkRelayHandshake({
+      role: "coder",
+      harnessDir: dir,
+      now: FIXED_NOW_MS,
+    });
+    assert.equal(result.ok, false);
+    assert.equal(result.code, RUNNER_RECEIPT_REJECT_REASON.MISSING);
+    assert.match(result.reason, /task file declares a runner contract/);
+    assert.doesNotMatch(result.reason, /result claims/);
+  });
+});
+
+test("(rc-p22-b) full-1x + 주장 1(exit=0) + 영수증 없음 -> MISSING 사유 앞머리는 옛 문구 'result claims ...' 그대로(무회귀, 주장 발화 경로)", () => {
+  withFixtureDir("hyk425-p22b-", (dir) => {
+    ensureGitHeadCommit(dir);
+    writeCoderRound(dir, {
+      contractLine: "runner_contract: full-1x\n",
+      resultBody: 'npm test; echo "exit=$?"\nexit=0',
+    });
+    const result = checkRelayHandshake({
+      role: "coder",
+      harnessDir: dir,
+      now: FIXED_NOW_MS,
+    });
+    assert.equal(result.ok, false);
+    assert.equal(result.code, RUNNER_RECEIPT_REJECT_REASON.MISSING);
+    assert.match(
+      result.reason,
+      /result claims full runner results \(standalone 'exit=<n>' line\)/,
+    );
+  });
+});
+
+// ===========================================================================
+// (rc-r1~r3) HYK-425 2R 되돌림 변이 -- §2 item5. 프로덕션 파일은 건드리지
+// 않는다(치환은 메모리 문자열에서만, 위 M1~M4와 같은 관례).
+// ===========================================================================
+
+test("(rc-r1)★ 되돌림 변이: 근사 매치 분기 전체를 제거하면 -- (rc-nm-a)~(rc-nm-f)가 전부 다시 absent로 접힌다(RED, 근사 매치 거부가 load-bearing임을 증명)", async () => {
+  const src = readFileSync(RELAY_HANDSHAKE_PATH, "utf8");
+  const target =
+    "  // 표준 줄 1개 + 근사 줄 공존도 판정 불가다(조용히 표준만 고르지 마라,\n  // HYK-486) -- standardIndexes에 없는 loose 매치가 하나라도 있으면\n  // (매치 0개뿐이라 전부가 근사 줄인 경우도 포함) 거부한다.\n  const standardIndexes = new Set(matches.map((m) => m.index));\n  const looseMatches = [...scan.matchAll(RUNNER_CONTRACT_LOOSE_RE_G)];\n  const extraLoose = looseMatches.find((m) => !standardIndexes.has(m.index));\n  if (extraLoose) {\n    const lineEnd = scan.indexOf(\"\\n\", extraLoose.index);\n    const lineText = (\n      lineEnd === -1\n        ? scan.slice(extraLoose.index)\n        : scan.slice(extraLoose.index, lineEnd)\n    ).trim();\n    return {\n      state: \"ambiguous\",\n      reason: `task file has a 'runner_contract' line that is not a standalone column-0 'runner_contract: none|full-1x|full-2x' line (near-miss text: '${lineText}') -- 판정 불가 (ambiguous, cannot resolve, HYK-425 2R)`,\n    };\n  }\n";
+  assertExactlyOneMatch(src, target, "runner contract near-miss branch");
+  const mutated = src.replace(
+    target,
+    "  // HYK-425 되돌림 변이 R1: 근사 매치 분기 전체 제거\n",
+  );
+
+  const { mod, mutDir } = await importMutatedRelayHandshake(mutated, "r1");
+  try {
+    const r = mod.resolveRunnerContractDirective(
+      "runner_contract: full-2x — 설명\n",
+    );
+    assert.deepEqual(
+      r,
+      { state: "absent" },
+      "RED: with the near-miss branch removed, a tail-decorated line is wrongly treated as 'no contract' again",
+    );
+  } finally {
+    rmSync(mutDir, { recursive: true, force: true });
+  }
+
+  const after = readFileSync(RELAY_HANDSHAKE_PATH, "utf8");
+  assert.equal(
+    after,
+    src,
+    "원본 relay-handshake.mjs는 한 바이트도 변경되지 않았다",
+  );
+});
+
+test("(rc-r2)★ 되돌림 변이: 공존 판정만 제거(matches.length===0일 때만 근사를 보게 좁히면) -- (rc-nm-coexist)가 다시 (조용히) set으로 접힌다(RED, 공존 판정이 load-bearing임을 증명)", async () => {
+  const src = readFileSync(RELAY_HANDSHAKE_PATH, "utf8");
+  const target = "  if (extraLoose) {\n";
+  assertExactlyOneMatch(src, target, "near-miss coexistence guard");
+  const mutated = src.replace(
+    target,
+    "  if (matches.length === 0 && extraLoose) {\n    // HYK-425 되돌림 변이 R2: 공존 판정 제거(표준 0개일 때만 근사를 본다)\n",
+  );
+
+  const { mod, mutDir } = await importMutatedRelayHandshake(mutated, "r2");
+  try {
+    const r = mod.resolveRunnerContractDirective(
+      "runner_contract: full-1x\n- runner_contract: full-2x\n",
+    );
+    assert.equal(
+      r.state,
+      "set",
+      "RED: with the coexistence guard narrowed to matches.length===0, a standard line coexisting with a near-miss line is silently resolved instead of 판정 불가",
+    );
+  } finally {
+    rmSync(mutDir, { recursive: true, force: true });
+  }
+
+  const after = readFileSync(RELAY_HANDSHAKE_PATH, "utf8");
+  assert.equal(
+    after,
+    src,
+    "원본 relay-handshake.mjs는 한 바이트도 변경되지 않았다",
+  );
+});
+
+test("(rc-r3)★ 되돌림 변이: P2-2 사유 앞머리 갈래를 제거하면 -- (rc-p22-a)가 다시 옛 'result claims ...' 문구로 접힌다(RED, 갈래가 load-bearing임을 증명)", async () => {
+  const src = readFileSync(RELAY_HANDSHAKE_PATH, "utf8");
+  const target =
+    "function missingReceiptReasonHead(claims, contractDirective) {\n  if (claims) {\n    return \"result claims full runner results (standalone 'exit=<n>' line)\";\n  }\n  return `task file declares a runner contract ('runner_contract: ${contractDirective?.value}' line)`;\n}\n";
+  assertExactlyOneMatch(src, target, "P2-2 missing reason head branch");
+  const mutated = src.replace(
+    target,
+    // HYK-425 되돌림 변이 R3: 갈래 제거 -- claims와 무관하게 항상 옛 문구
+    "function missingReceiptReasonHead() {\n  return \"result claims full runner results (standalone 'exit=<n>' line)\";\n}\n",
+  );
+
+  await withFixtureDirAsync("hyk425-mut-r3-", async (dir) => {
+    ensureGitHeadCommit(dir);
+    writeCoderRound(dir, {
+      contractLine: "runner_contract: full-1x\n",
+      resultBody: "verdict: n/a (no exit= idiom anywhere)",
+    });
+    const { mod, mutDir } = await importMutatedRelayHandshake(mutated, "r3");
+    try {
+      const result = mod.checkRelayHandshake({
+        role: "coder",
+        harnessDir: dir,
+        now: FIXED_NOW_MS,
+      });
+      assert.match(
+        result.reason,
+        /result claims full runner results/,
+        "RED: with the head branch removed, a contract-only activation (no exit= claim) wrongly says 'result claims' again",
+      );
+    } finally {
+      rmSync(mutDir, { recursive: true, force: true });
+    }
+  });
+
+  const after = readFileSync(RELAY_HANDSHAKE_PATH, "utf8");
+  assert.equal(
+    after,
+    src,
+    "원본 relay-handshake.mjs는 한 바이트도 변경되지 않았다",
+  );
+});
+
+// ===========================================================================
 // (ⓐ~ⓚ) checkRelayHandshake 종단 -- §3 조건2.
 // ===========================================================================
 

@@ -1863,6 +1863,23 @@ export function countRunnerExitClaims(resultContent) {
 // 바뀌지 않는다.
 export const RUNNER_CONTRACT_RE_G = /^runner_contract:[ \t]*(\S+)[ \t]*$/gm;
 
+// HYK-425 2R P1-1/P2-1 (§2 책임자 판정 ⓐ): 표준 정규식이 매치 0일 때 바로
+// "계약 없음"으로 접기 전에, 근사(장식) 줄이 있는지 먼저 본다 -- 꼬리 글
+// (`runner_contract: full-2x — 설명`) · 빈 값(`runner_contract:`) · 목록
+// 접두(`- runner_contract: ...`)/들여쓰기 · 대소문자(`RUNNER_CONTRACT:`) ·
+// 전각 콜론(`runner_contract：...`) · 굵게(`**runner_contract**:`) 전부
+// 한 줄당 한 번만 매치한다(각 조각은 전부 선택적이라 표준 줄도 이 정규식에
+// 걸린다 -- 그래서 "표준 매치 수보다 근사 매치 수가 많다"로 "표준이 아닌
+// 근사 줄이 따로 있다"를 가린다). head_commit:(HEAD_COMMIT_ANYWHERE_RE)과
+// 같은 "근사 매치로 더 정확한 진단" 정신이지만, 정책은 반대다: G1처럼
+// 장식을 받아주지 않고 «판정 불가»로 거부한다(이 조각은 발화 스위치라
+// 모호하면 멈추는 것이 fail-closed, resolveG1StandaloneLine의 AMBIGUOUS
+// 분기와 같은 정신 -- HYK-486 선례, 조용히 하나를 고르지 않는다). 펜스·
+// HTML 주석 안에만 있는 근사 줄은 maskQuotedMarkerRegions가 이미 지워
+// scan에 안 보인다(=계약 없음, 지금 동작 유지, 마스킹 범위 밖).
+const RUNNER_CONTRACT_LOOSE_RE_G =
+  /^[ \t]*(?:[-*+][ \t]+|\d+\.[ \t]+)?\**[ \t]*runner_contract[ \t]*\**[ \t]*[:：]/gim;
+
 export const RUNNER_CONTRACT_REQUIRED_RUNS = Object.freeze({
   none: 0,
   "full-1x": 1,
@@ -1877,6 +1894,24 @@ export function resolveRunnerContractDirective(taskContent) {
     return {
       state: "ambiguous",
       reason: `task file has ${matches.length} standalone 'runner_contract:' lines -- 어느 것이 최종인지 결정할 수 없다 (ambiguous, cannot resolve, HYK-425)`,
+    };
+  }
+  // 표준 줄 1개 + 근사 줄 공존도 판정 불가다(조용히 표준만 고르지 마라,
+  // HYK-486) -- standardIndexes에 없는 loose 매치가 하나라도 있으면
+  // (매치 0개뿐이라 전부가 근사 줄인 경우도 포함) 거부한다.
+  const standardIndexes = new Set(matches.map((m) => m.index));
+  const looseMatches = [...scan.matchAll(RUNNER_CONTRACT_LOOSE_RE_G)];
+  const extraLoose = looseMatches.find((m) => !standardIndexes.has(m.index));
+  if (extraLoose) {
+    const lineEnd = scan.indexOf("\n", extraLoose.index);
+    const lineText = (
+      lineEnd === -1
+        ? scan.slice(extraLoose.index)
+        : scan.slice(extraLoose.index, lineEnd)
+    ).trim();
+    return {
+      state: "ambiguous",
+      reason: `task file has a 'runner_contract' line that is not a standalone column-0 'runner_contract: none|full-1x|full-2x' line (near-miss text: '${lineText}') -- 판정 불가 (ambiguous, cannot resolve, HYK-425 2R)`,
     };
   }
   if (matches.length === 0) return { state: "absent" };
@@ -1895,10 +1930,17 @@ export function resolveRunnerContractDirective(taskContent) {
 }
 
 // §2 item2 "요구 회차 = max(계약 N, 주장 개수)" · item3 "계약 줄이 기존
-// 주장 기반 요구를 낮추는 경로가 하나도 없어야 한다"(약화 금지) -- 계약과
-// 결과 파일의 실제 주장 개수를 여기서 한 번만 합쳐, 아래 두 소비 함수가
-// 똑같은 합산값을 쓰게 한다(복제 금지). ambiguous 계약은 여기서 바로
-// 거부로 끝난다.
+// 주장 기반 요구를 낮추는 경로가 하나도 없어야 한다"(약화 금지) -- 여기서
+// 계약과 주장을 한 번 합쳐 requiredRuns로 넘긴다. ⚠️HYK-425 2R P3-1(검토
+// 1R M2a 실측 정정): 이 합산이 "유일한 합산 자리"는 아니다 -- 아래 두
+// 소비 함수(resolveRunnerReceiptVerdict의 claims 재확인,
+// resolveConsecutiveRunnerReceiptsVerdict의 `Math.max(requiredRuns,
+// claimCount)`)가 각자 받은 requiredRuns를 다시 자기 쪽 주장 개수와
+// 합친다 -- 즉 합산은 두 겹(이중 방어)이다. 그래서 이 자리의 max()만
+// 제자리 변이로 없애도(M2a) 두 소비 함수가 자기 쪽에서 다시 합치므로 그
+// 변이는 하중이 없다(남는 변이, load-bearing 아님) -- 두 자리 모두를
+// 계약 우선으로 바꾸는 변이(M2)만 하중을 진다. ambiguous 계약은 여기서
+// 바로 거부로 끝난다.
 export function resolveRunnerContractActivation({
   taskContent,
   resultContent,
@@ -1927,6 +1969,19 @@ function runnerContractReasonSuffix(contractDirective) {
   if (!contractDirective || contractDirective.state !== "set") return "";
   if (contractDirective.requiredRuns < 1) return "";
   return ` (activated by task file's 'runner_contract: ${contractDirective.value}' line, HYK-425)`;
+}
+
+// HYK-425 2R P2-2(검토 1R 표 A 실측): 계약으로만 발화하고(claims=false)
+// 결과 파일에 exit= 주장이 0일 때도 MISSING 사유의 앞머리가 "result
+// claims ... 'exit=<n>' line"이라 말해, 사람이 "워커가 exit=를 썼다"고
+// 오독했다. claims가 참일 때는 이 문구를 한 글자도 바꾸지 않는다(주장
+// 발화 경로, 무회귀). eslint complexity 게이트 때문에 분리한다
+// (runnerContractReasonSuffix를 뽑은 것과 같은 이유).
+function missingReceiptReasonHead(claims, contractDirective) {
+  if (claims) {
+    return "result claims full runner results (standalone 'exit=<n>' line)";
+  }
+  return `task file declares a runner contract ('runner_contract: ${contractDirective?.value}' line)`;
 }
 
 // resolveRunnerReceiptVerdict 자신의 분기 수를 줄이기 위해(eslint
@@ -1962,10 +2017,12 @@ export function resolveRunnerReceiptVerdict({
   requiredRuns = 0,
   contractDirective,
 }) {
-  if (!resultClaimsRunnerResults(resultContent) && requiredRuns < 1) {
+  const claims = resultClaimsRunnerResults(resultContent);
+  if (!claims && requiredRuns < 1) {
     return { ok: true, skipped: true };
   }
   const contractSuffix = runnerContractReasonSuffix(contractDirective);
+  const missingReasonHead = missingReceiptReasonHead(claims, contractDirective);
 
   // 축 ⓑ(실물 대조)와 같은 함수 재사용: 워커의 자기 진술이 아니라 이
   // 워크트리의 실제 HEAD를 기계가 직접 읽는다 -- 영수증의 head_commit을
@@ -1984,7 +2041,7 @@ export function resolveRunnerReceiptVerdict({
     return {
       ok: false,
       code: RUNNER_RECEIPT_REJECT_REASON.MISSING,
-      reason: `runner receipt gate (HYK-411): result claims full runner results (standalone 'exit=<n>' line) but ${RUNNER_RECEIPT_FILENAME} is missing at '${found.path}' -- fail-closed, refusing to consume an unverifiable runner claim${contractSuffix}`,
+      reason: `runner receipt gate (HYK-411): ${missingReasonHead} but ${RUNNER_RECEIPT_FILENAME} is missing at '${found.path}' -- fail-closed, refusing to consume an unverifiable runner claim${contractSuffix}`,
     };
   }
   if (found.parseError) {
