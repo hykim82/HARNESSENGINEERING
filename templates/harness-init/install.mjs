@@ -1219,6 +1219,41 @@ export const ENFORCEMENT_CHECK_FILES = [
   // aware version.
   "first-observation.mjs",
   "first-observation.test.mjs",
+  // HYK-209-install-list-g1-adapter-1: relay-handshake.mjs's own §1 "결과
+  // 파일 맨 위 3줄" G1 machine check (resolveG1DispatchVerificationVerdict)
+  // had no installer-list regression net at all -- relay-handshake-g1-
+  // dispatch-check.test.mjs's own closure (./relay-handshake.mjs,
+  // ./admission-ledger-env-isolation.mjs, ./relay-handshake-fixture-
+  // siblings.mjs) was already fully satisfied by entries already in this
+  // list, so adding its name alone closes that gap. admission-completion-
+  // adapter.mjs (relay-handshake.mjs spawns it by path, not a static
+  // import, so this closure check cannot see that edge -- a known,
+  // documented limit, see this file's own header above) was ALSO entirely
+  // missing; its .test.mjs pair is added per this list's own convention
+  // (pair the test file whenever one exists on disk). Measured live: the
+  // adapter's own closure was NOT already satisfied -- it statically
+  // imports "./ledger-pointer-shared.mjs", which was missing from this
+  // list before this round (added below). ledger-pointer-shared.mjs's own
+  // closure (two node builtins only) is satisfied without needing any
+  // further entry.
+  "relay-handshake-g1-dispatch-check.test.mjs",
+  "admission-completion-adapter.mjs",
+  "admission-completion-adapter.test.mjs",
+  "ledger-pointer-shared.mjs",
+  // HYK-209-install-list-g1-adapter-1 2R (review 1R P1-1): deliberate
+  // exception to this list's own "pair the test file whenever one exists
+  // on disk" convention -- ledger-pointer-shared.test.mjs's own module top
+  // level does `readFileSync(join(HERE, "..", "supervisor",
+  // "orch-stall-detect.mjs"), "utf8")`, and orch-stall-detect.mjs is not on
+  // any of this file's three copy-list axes (not installed anywhere). So
+  // installing this .test.mjs alongside ledger-pointer-shared.mjs makes an
+  // installed target's own `node --test` die at module load (ENOENT) --
+  // measured live against an editor-main copy, see install-g1-adapter-
+  // list.test.mjs's "(b)" test below. Not installing it leaves this round's
+  // one true requirement (ledger-pointer-shared.mjs itself, needed for
+  // admission-completion-adapter.mjs's closure, proven by install-copylist
+  // -closure.test.mjs's own PAST_INCIDENTS entry) intact without dragging
+  // in that unrelated load failure.
 ];
 
 // HYK-209-frame-repair-1 X-1: the scripts/relay/*.mjs copy list, same
