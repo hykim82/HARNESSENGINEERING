@@ -1510,6 +1510,288 @@ test("(g1-mut-t3)★ 되돌림 변이 T3: G1 판독의 마스킹 확장(들여�
   });
 });
 
+// ===========================================================================
+// HYK-434 책임자 판정(2026-10-14 11:4x §2 · 2026-10-15 13:41 §5-(2)) --
+// 3R 검토 P2-1이 지적한 "기대값 표 33행 중 11행(4·12·15·17·19·20·24·26·
+// 27·29b·32)에 고정 칸이 없다"를 닫는다. 각 행은 REVIEW-r3.md ⓐ의 HEAD
+// 열 실측(실제 CLI 세 판 대조)을 그대로 옮긴다 -- 새 정규식·새 판정을
+// 발명하지 않고, 이미 HEAD가 실제로 내는 판정을 칸으로 고정할 뿐이다.
+// 표 19만 예외: 3R 기대값은 "부재"였지만 HEAD 실제 행동은 "형식"이다
+// (`>` 인용 접두가 리스트 마커 집합 밖이라 reGlobal이 못 보고,
+// reAnywhere는 보므로 형식 거부로 떨어진다) -- 이 조각은 §2 point1이
+// 지시한 대로 "지금 HEAD 행동(형식 거부)"을 고정하고 그 차이를 여기
+// 주석과 결과 파일에 갈라 적는다(P3-1, 코드 변경 0).
+// ===========================================================================
+const HEAD_FIXED_CELL_TABLE_2 = [
+  [
+    "표4: tid 장식 덩어리 `*'\"tid\"'*`(백틱+별+홑따옴표+겹따옴표 겹침) -> 소비(stripG1ValueDecoration이 좌우 run을 전부 벗긴다, 3R REVIEW-r2 ⓘ)",
+    () =>
+      `dispatch_verified: yes\ntask_id_from_dispatch: \`*'"${RUNTIME_TASK_ID}"'*\`\npane_match: ${PANE_KEY} == ${PANE_KEY} ? 일치\n`,
+    { exit: "consume" },
+  ],
+  [
+    "표12: pane_match: P ==P ? 일치(== 앞만 공백, 뒤는 없음) -> 소비",
+    () =>
+      `dispatch_verified: yes\ntask_id_from_dispatch: ${RUNTIME_TASK_ID}\npane_match: ${PANE_KEY} ==${PANE_KEY} ? 일치\n`,
+    { exit: "consume" },
+  ],
+  [
+    "표15a: tid 접미 위조(task_aaaa…x) -> 거부(값), 사유에 원문 그대로",
+    () =>
+      `dispatch_verified: yes\ntask_id_from_dispatch: ${RUNTIME_TASK_ID}x\npane_match: ${PANE_KEY} == ${PANE_KEY} ? 일치\n`,
+    {
+      exit: "reject",
+      reasonIncludes: [
+        "'task_id_from_dispatch:' line value mismatch",
+        `found '${RUNTIME_TASK_ID}x'`,
+      ],
+    },
+  ],
+  [
+    "표15b: tid 접두 위조(xtask_aaaa…) -> 거부(값), 사유에 원문 그대로",
+    () =>
+      `dispatch_verified: yes\ntask_id_from_dispatch: x${RUNTIME_TASK_ID}\npane_match: ${PANE_KEY} == ${PANE_KEY} ? 일치\n`,
+    {
+      exit: "reject",
+      reasonIncludes: [
+        "'task_id_from_dispatch:' line value mismatch",
+        `found 'x${RUNTIME_TASK_ID}'`,
+      ],
+    },
+  ],
+  [
+    "표17: pane_match: 줄 + Pane_Match: 줄(대소문자만 다름, 둘 다 값은 원장과 같음) -> 거부(모호, 어느 것이 최종인지 결정할 수 없다)",
+    () =>
+      `dispatch_verified: yes\ntask_id_from_dispatch: ${RUNTIME_TASK_ID}\npane_match: ${PANE_KEY} == ${PANE_KEY} ? 일치\nPane_Match: ${PANE_KEY} == ${PANE_KEY} ? 일치\n`,
+    {
+      exit: "reject",
+      reasonIncludes: [
+        "'pane_match:' line has 2 standalone lines",
+        "어느 것이 최종인지 결정할 수 없다",
+      ],
+    },
+  ],
+  [
+    "표19: 인용 `> - dispatch_verified: yes` 만(블록쿼트+목록 겹침) -> 거부(형식) -- ⚠️3R 기대값은 «부재»였으나(P3-1) `>`는 reGlobal의 허용 접두(목록 기호) 밖이라 reAnywhere만 맞아 형식으로 떨어지는 게 HEAD의 실제 행동이다. 이 칸은 그 차이를 그대로 고정한다(코드 변경 0).",
+    () =>
+      `> - dispatch_verified: yes\ntask_id_from_dispatch: ${RUNTIME_TASK_ID}\npane_match: ${PANE_KEY} == ${PANE_KEY} ? 일치\n`,
+    {
+      exit: "reject",
+      reasonIncludes: [
+        "'dispatch_verified:' line present but not a standalone column-0 well-formed line",
+      ],
+    },
+  ],
+  [
+    "표20: 실제 3줄 + 인용 `> dispatch_verified: no`(뒤에 덧붙은 인용 예시) -> 소비(인용 줄은 reGlobal에 안 걸려 표지로 안 셈, 모호도 아니다)",
+    () => g1Block() + "> dispatch_verified: no\n",
+    { exit: "consume" },
+  ],
+  [
+    "표24: 실제 3줄 + 일반 마크다운 펜스(0칸 들여쓰기) 예시 -> 소비(펜스 안 예시는 마스킹돼 중복으로 안 센다)",
+    () => g1Block() + "```\ndispatch_verified: no\n```\n",
+    { exit: "consume" },
+  ],
+  [
+    "표26: dispatch_verified: yes, but…(값 뒤 꼬리 설명) -> 거부(값), 사유에 원문 그대로",
+    () =>
+      `dispatch_verified: yes, but…\ntask_id_from_dispatch: ${RUNTIME_TASK_ID}\npane_match: ${PANE_KEY} == ${PANE_KEY} ? 일치\n`,
+    {
+      exit: "reject",
+      reasonIncludes: [
+        "'dispatch_verified:' line value mismatch",
+        "found 'yes, but…'",
+      ],
+    },
+  ],
+  [
+    "표27a: dispatch_verified: yes (not really) -> 거부(값), 사유에 원문 그대로",
+    () =>
+      `dispatch_verified: yes (not really)\ntask_id_from_dispatch: ${RUNTIME_TASK_ID}\npane_match: ${PANE_KEY} == ${PANE_KEY} ? 일치\n`,
+    {
+      exit: "reject",
+      reasonIncludes: [
+        "'dispatch_verified:' line value mismatch",
+        "found 'yes (not really)'",
+      ],
+    },
+  ],
+  [
+    "표27b: dispatch_verified: yes|no -> 거부(값), 사유에 원문 그대로",
+    () =>
+      `dispatch_verified: yes|no\ntask_id_from_dispatch: ${RUNTIME_TASK_ID}\npane_match: ${PANE_KEY} == ${PANE_KEY} ? 일치\n`,
+    {
+      exit: "reject",
+      reasonIncludes: [
+        "'dispatch_verified:' line value mismatch",
+        "found 'yes|no'",
+      ],
+    },
+  ],
+  [
+    "표29b-dv: `## dispatch_verified: yes`(머리 접두) -> 거부(형식)",
+    () =>
+      `## dispatch_verified: yes\ntask_id_from_dispatch: ${RUNTIME_TASK_ID}\npane_match: ${PANE_KEY} == ${PANE_KEY} ? 일치\n`,
+    {
+      exit: "reject",
+      reasonIncludes: [
+        "'dispatch_verified:' line present but not a standalone column-0 well-formed line",
+      ],
+    },
+  ],
+  [
+    "표29b-pane: `## pane_match: ...`(머리 접두) -> 거부(형식)",
+    () =>
+      `dispatch_verified: yes\ntask_id_from_dispatch: ${RUNTIME_TASK_ID}\n## pane_match: ${PANE_KEY} == ${PANE_KEY} ? 일치\n`,
+    {
+      exit: "reject",
+      reasonIncludes: [
+        "'pane_match:' line present but not a standalone column-0 well-formed line",
+      ],
+    },
+  ],
+  [
+    "표32: tid 뒤 꼬리 주석 `(dispatch-show)` -> 거부(값, 꼬리까지 값부로 캡처됨)",
+    () =>
+      `dispatch_verified: yes\ntask_id_from_dispatch: ${RUNTIME_TASK_ID} (dispatch-show)\npane_match: ${PANE_KEY} == ${PANE_KEY} ? 일치\n`,
+    {
+      exit: "reject",
+      reasonIncludes: [
+        "'task_id_from_dispatch:' line value mismatch",
+        `found '${RUNTIME_TASK_ID} (dispatch-show)'`,
+      ],
+    },
+  ],
+];
+
+for (const [label, buildG1, expect_] of HEAD_FIXED_CELL_TABLE_2) {
+  test(`(g1-table2)★ HYK-434 H2 고정 칸(3R P2-1 수리) -- ${label}`, () => {
+    withFixtureDir("g1-table2-", (dir) => {
+      writeCoderRound(dir, { g1: buildG1() });
+      const ledgerPath = withLedger(dir, [validReceipt()]);
+      const res = runCli(["coder", dir], { ledgerPath });
+      if (expect_.exit === "consume") {
+        assert.equal(res.exit, 0, `기대: 소비. stderr: ${res.stderr}`);
+      } else {
+        assert.notEqual(res.exit, 0, "기대: 거부");
+        for (const needle of expect_.reasonIncludes ?? []) {
+          assert.ok(
+            res.stderr.includes(needle),
+            `사유에 '${needle}'가 있어야 한다. stderr: ${res.stderr}`,
+          );
+        }
+      }
+    });
+  });
+}
+
+// ===========================================================================
+// HYK-434 H2 S4·S5 -- 3R 검토 ⓔ가 찾은 "행동 RED 0"(헛시험) 두 칸을
+// 되돌림 변이로 고정한다(coder-task.md §2 point2). S4/S5 둘 다 프로덕션
+// 판정을 실제로 약화시켜, 지금은 거부되는 표본이 그 약화 아래서만
+// 소비되는지를 본다(대조군은 원본이 여전히 거부함을 확인).
+// ===========================================================================
+
+// S4: task_id_from_dispatch 값 비교를 엄격한 전체 일치(!==)에서 부분
+// 일치(includes)로 완화하면 -- 접미 위조(task_aaaa…x)가 소비된다(RED,
+// 위조 가능).
+test("(g1-mut-s4)★ 되돌림 변이 S4: task_id_from_dispatch 값 비교를 부분 일치(includes)로 완화하면 -- 접미 위조(tid+x) 표본이 소비된다(RED, 위조 가능)", () => {
+  withFixtureDir("g1-muts4-", (dir) => {
+    const target =
+      "  const tidValue = stripG1ValueDecoration(tid.match[1]);\n  if (tidValue.toLowerCase() !== String(latest.runtime_task_id).toLowerCase()) {\n    return {\n      ok: false,\n      reason: `G1 cross-check failed (HYK-434): 'task_id_from_dispatch:' line value mismatch -- expected '${latest.runtime_task_id}' (most recent matching dispatch ledger record, recorded_at=${latest.recorded_at}), found '${tidValue}'`,\n    };\n  }";
+    const original = readFileSync(CLI_PATH, "utf8");
+    assertExactlyOneMatch(
+      original,
+      target,
+      "task_id_from_dispatch exact-equality check",
+    );
+    const replacement =
+      "  const tidValue = stripG1ValueDecoration(tid.match[1]);\n  // HYK-434 되돌림 변이 S4: 전체 일치 대신 부분 일치(includes)로 완화\n  if (!tidValue.toLowerCase().includes(String(latest.runtime_task_id).toLowerCase())) {\n    return {\n      ok: false,\n      reason: `G1 cross-check failed (HYK-434): 'task_id_from_dispatch:' line value mismatch -- expected '${latest.runtime_task_id}' (most recent matching dispatch ledger record, recorded_at=${latest.recorded_at}), found '${tidValue}'`,\n    };\n  }";
+
+    const stageDir = join(dir, "stage");
+    mkdirSync(stageDir);
+    const mutatedCliPath = stageMutatedRelayHandshake(stageDir, (src) =>
+      src.replace(target, replacement),
+    );
+
+    const roundDir = join(dir, "round");
+    mkdirSync(roundDir);
+    writeCoderRound(roundDir, {
+      g1: `dispatch_verified: yes\ntask_id_from_dispatch: ${RUNTIME_TASK_ID}x\npane_match: ${PANE_KEY} == ${PANE_KEY} ? 일치\n`,
+    });
+    const ledgerPath = withLedger(roundDir, [validReceipt()]);
+    writeFileSync(
+      join(roundDir, "dispatch-receipt-path.txt"),
+      ledgerPath,
+      "utf8",
+    );
+
+    const mutRes = runMutatedCli(mutatedCliPath, ["coder", roundDir]);
+    assert.equal(
+      mutRes.exit,
+      0,
+      `RED 필수: 부분 일치로 완화되면 접미 위조(tid+x) 표본이 소비돼야 한다. stderr: ${mutRes.stderr}`,
+    );
+
+    const originalRes = runCli(["coder", roundDir], { ledgerPath });
+    assert.notEqual(
+      originalRes.exit,
+      0,
+      "원본은 같은 표본을 반드시 거부한다(대조군)",
+    );
+  });
+});
+
+// S5: dispatch_verified 키의 허용 접두 집합(목록 기호)에 블록쿼트 `>`를
+// 추가하면 -- 인용된 예시 줄이 "진짜 표지"로 읽혀 소비된다(RED, 인용
+// 배제라는 설계 의도를 정면으로 깬다).
+test("(g1-mut-s5)★ 되돌림 변이 S5: dispatch_verified 키의 접두 허용 집합에 `>`(인용)를 추가하면 -- 인용된 dispatch_verified 줄이 진짜로 읽혀 소비된다(RED)", () => {
+  withFixtureDir("g1-muts5-", (dir) => {
+    const target =
+      "const DISPATCH_VERIFIED_RE_G =\n  /^[ \\t]*(?:[-*+][ \\t]+|\\d+\\.[ \\t]+)?\\*{0,2}dispatch_verified\\*{0,2}[ \\t]*[:：][ \\t]*(\\S.*?)[ \\t]*$/gim;";
+    const original = readFileSync(CLI_PATH, "utf8");
+    assertExactlyOneMatch(
+      original,
+      target,
+      "DISPATCH_VERIFIED_RE_G declaration",
+    );
+    const replacement =
+      "const DISPATCH_VERIFIED_RE_G =\n  /^[ \\t]*(?:[-*+>][ \\t]+|\\d+\\.[ \\t]+)?\\*{0,2}dispatch_verified\\*{0,2}[ \\t]*[:：][ \\t]*(\\S.*?)[ \\t]*$/gim; // HYK-434 되돌림 변이 S5: 인용 `>` 접두 허용";
+
+    const stageDir = join(dir, "stage");
+    mkdirSync(stageDir);
+    const mutatedCliPath = stageMutatedRelayHandshake(stageDir, (src) =>
+      src.replace(target, replacement),
+    );
+
+    const roundDir = join(dir, "round");
+    mkdirSync(roundDir);
+    writeCoderRound(roundDir, {
+      g1: `> dispatch_verified: yes\ntask_id_from_dispatch: ${RUNTIME_TASK_ID}\npane_match: ${PANE_KEY} == ${PANE_KEY} ? 일치\n`,
+    });
+    const ledgerPath = withLedger(roundDir, [validReceipt()]);
+    writeFileSync(
+      join(roundDir, "dispatch-receipt-path.txt"),
+      ledgerPath,
+      "utf8",
+    );
+
+    const mutRes = runMutatedCli(mutatedCliPath, ["coder", roundDir]);
+    assert.equal(
+      mutRes.exit,
+      0,
+      `RED 필수: '>' 접두가 허용되면 인용된 dispatch_verified 줄이 진짜로 읽혀 소비돼야 한다. stderr: ${mutRes.stderr}`,
+    );
+
+    const originalRes = runCli(["coder", roundDir], { ledgerPath });
+    assert.notEqual(
+      originalRes.exit,
+      0,
+      "원본은 같은 표본을 반드시 거부한다(대조군, '>' 는 허용 접두 밖이라 형식 거부)",
+    );
+  });
+});
+
 // T4: 사유 문자열에 캡처 가공 값(망가진 값)을 쓰면 -- 표5·7의 사유 원문
 // 단언이 RED다(§2-1 요구 7 "사유에는 캡처 가공 값을 넣지 마라").
 test("(g1-mut-t4)★ 되돌림 변이 T4: 사유에 가공된(망가진) 값을 쓰면 -- 표5·7의 '원문 그대로' 단언이 RED다", () => {

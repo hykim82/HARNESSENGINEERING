@@ -44,10 +44,7 @@ import {
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import {
-  ENFORCEMENT_CHECK_FILES,
-  ENFORCEMENT_SUPERVISOR_FILES,
-} from "./install.mjs";
+import { ENFORCEMENT_CHECK_FILES } from "./install.mjs";
 
 const REPO_ROOT = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -61,7 +58,6 @@ const INSTALLER_PATH = path.join(
   "install.mjs",
 );
 const CHECK_SRC_DIR = path.join(REPO_ROOT, "scripts", "check");
-const SUPERVISOR_SRC_DIR = path.join(REPO_ROOT, "scripts", "supervisor");
 
 const NAMES = [
   "relay-handshake-g1-dispatch-check.test.mjs",
@@ -200,46 +196,49 @@ test("(c) solo-full synthetic dry-run names both files as would-install targets"
   }
 });
 
-// ⓑ 고정 칸 (2R §2 요구 3, "가능하면"): --dry-run은 아무 파일도 쓰지
-// 않으므로 아무것도 "로드"하지 않는다 -- (c)는 설치기가 설치 "대상"으로
-// 이름을 대는지만 본다. 이 테스트는 그 대신 실제 파일을 날복사로
-// 합성 대상 폴더에 깔아 둔다(목록의 세 축 중 check + supervisor; relay
-// 축은 g1 시험·어댑터 시험 둘 다 끌어들이지 않으므로 뺀다 -- 설치기
-// 로직 자체는 건드리지 않는다, 그냥 fs.copyFileSync다).
-//
-// "로드"만 재는 이유 (풀 테스트 실행이 아님, 의도적): relay-handshake-
-// g1-dispatch-check.test.mjs의 일부 되돌림-변이 시험은 합성 대상이 실제
-// git worktree인지 등 이 파일의 범위를 넘는 실행 맥락에 의존한다
-// (측정 live: 합성 대상에 .git이 없을 때 그런 서브테스트 하나가
-// 거짓맥락으로 실패했다 -- install 목록 결함이 아니라 이 파일이 재려는
-// 축 밖의 일이다). 반면 검토 1R이 실제로 찾은 결함(orch-stall-detect
-// .mjs의 module-top-level readFileSync ENOENT)은 import 시점에, 즉
-// 어떤 테스트 바디가 돌기도 전에 터진다. 그래서 이 테스트는 `node --test`
-// 로 전체를 돌리지 않고, 자식 프로세스에서 `import(그 파일)`만 해서
-// "로드 실패 0"이라는 요구를 정확히, 그리고 테스트 바디 실행 여부와
-// 무관하게 잰다(V1 변이로 직접 다시 확인했다: 이 probe는 두 정상 파일을
-// 그대로 통과시키면서도, 그 되돌림-변이 서브테스트는 돌리지 않는다).
-function stageSyntheticInstall(
-  prefix,
-  {
-    checkList = ENFORCEMENT_CHECK_FILES,
-    supervisorList = ENFORCEMENT_SUPERVISOR_FILES,
-  } = {},
-) {
-  const base = mkdtempSync(path.join(tmpdir(), prefix));
-  const checkDir = path.join(base, "check");
-  const supervisorDir = path.join(base, "supervisor");
-  mkdirSync(checkDir, { recursive: true });
-  mkdirSync(supervisorDir, { recursive: true });
-  for (const name of checkList) {
-    const src = path.join(CHECK_SRC_DIR, name);
-    if (existsSync(src)) copyFileSync(src, path.join(checkDir, name));
-  }
-  for (const name of supervisorList) {
-    const src = path.join(SUPERVISOR_SRC_DIR, name);
-    if (existsSync(src)) copyFileSync(src, path.join(supervisorDir, name));
-  }
-  return { base, checkDir, supervisorDir };
+// ⓑ 고정 칸 -- HYK-434 H2(책임자 판정 2026-10-15 15:39 §3, H3 검토 2R
+// P2-1/P3-1/P3-2 수리): 이전 판(2R)은 "평평한 날복사 + import() 프로브"
+// 였다 -- 그 방식은 설치기(install.mjs) 자신의 복사 로직을 전혀 거치지
+// 않고 이 시험 파일이 직접 재구현한 별도 경로였다(목록이 진짜로
+// 설치되는지가 아니라, 이 시험이 스스로 흉내 낸 로직이 맞는지만
+// 증명했다). 이제 **실제 설치기**(`install.mjs`, `--dry-run` 없이)로
+// 워크트리 밖 빈 `git init` 대상에 실제로 설치하고, 새로 실리는 두
+// `.test.mjs`(g1 시험·어댑터 짝 시험)를 그 설치된 자리에서 `node --test`
+// 로 **실제 실행**해 실패 0을 본다(ⓒ가 이미 쓰는 것과 같은 CLI 인자
+// 모양을 그대로 재사용한다 -- 로직을 새로 발명하지 않는다).
+function installerArgsFor(base, targetRepoPath) {
+  return [
+    "--profile",
+    "solo-full",
+    "--repo-path",
+    targetRepoPath,
+    "--control-room-path",
+    path.join(base, "fake-control-room"),
+    "--github-repo",
+    "someorg/somerepo",
+    "--bot-account",
+    "bot-x",
+    "--verify-cmd",
+    "npm test",
+    "--notify-dir",
+    path.join(base, "notify"),
+    "--approver-login",
+    "approver-x",
+    "--approver-id",
+    "1",
+    "--workspaces-root",
+    path.join(base, "workspaces"),
+    "--main-repo-path",
+    path.join(base, "main-repo"),
+  ];
+}
+
+function runRealInstall(base, targetRepoPath) {
+  return execFileSync(
+    "node",
+    [INSTALLER_PATH, ...installerArgsFor(base, targetRepoPath)],
+    { encoding: "utf8" },
+  );
 }
 
 // HYK-359's admission-ledger-env-isolation.mjs's own AMBIENT_LEDGER_ENV_KEYS
@@ -247,84 +246,130 @@ function stageSyntheticInstall(
 // scripts/check/, this test under templates/harness-init/, and importing
 // across that boundary just to strip three well-known keys is not worth
 // the coupling) so a floating ADMISSION_LEDGER_PATH/ADMISSION_LOCK_PATH/
-// DISPATCH_RECEIPT_PATH in the invoking shell cannot leak into the staged
-// child process's import probe.
+// DISPATCH_RECEIPT_PATH in the invoking shell cannot leak into the child
+// `node --test` process this file now actually runs against the installed
+// target.
 function ledgerIsolatedEnv() {
   const env = { ...process.env };
   delete env.ADMISSION_LEDGER_PATH;
   delete env.ADMISSION_LOCK_PATH;
   delete env.DISPATCH_RECEIPT_PATH;
+  // 측정 live(HYK-434 H2): 이 시험 파일 자신이 `node --test`로 돌 때 node
+  // 자신이 NODE_TEST_CONTEXT/NODE_TEST_WORKER_ID를 이미 환경에 심어 둔다
+  // -- 이걸 그대로 물려주면 아래에서 설치된 대상에 또 거는 "자식"
+  // `node --test`가 "run()이 같은 테스트 파일 안에서 재귀 호출됐다"고
+  // 오인해 파일을 «돌리지도 않고» 조용히 exit 0(tests 0/pass 0)으로
+  // 접는다 -- 실패 0이 아니라 "실행 자체가 0"이 되는 거짓 초록이었다.
+  // 지우지 않으면 (b)/(b-negative) 둘 다 즉시 통과하는 헛시험이 된다.
+  delete env.NODE_TEST_CONTEXT;
+  delete env.NODE_TEST_WORKER_ID;
   return env;
 }
 
-// `node -e "import('./<name>').then(load ok).catch(load error)"` -- runs
-// the staged file's module top level (where the ENOENT in review 1R P1-1
-// actually happens) without letting node:test's own deferred runner
-// execute any test body (process.exit() fires inside the settled
-// import()'s own callback, before that scheduling point).
-function probeLoad(dir, name, timeoutMs = 15000) {
-  const script = `import(${JSON.stringify("./" + name)}).then(() => { process.exit(0); }).catch((e) => { console.error("LOAD_ERROR: " + (e && e.stack ? e.stack : e)); process.exit(1); });`;
-  return spawnSync(process.execPath, ["-e", script], {
-    cwd: dir,
+function runInstalledNodeTest(installedCheckDir, names, timeoutMs = 300000) {
+  return spawnSync(process.execPath, ["--test", ...names], {
+    cwd: installedCheckDir,
     encoding: "utf8",
     env: ledgerIsolatedEnv(),
     timeout: timeoutMs,
   });
 }
 
-test("(b) staged synthetic install target (direct file copy, not --dry-run) loads both newly-listed test files with 0 load failures", () => {
-  const { base, checkDir } = stageSyntheticInstall("hyk209-g1-adapter-stage-");
+test("(b) real installer (not --dry-run) installs into a git-init target outside this worktree, and `node --test` on the two newly-listed test files there has 0 failures", () => {
+  const { base, targetRepo } = makeSyntheticTarget("hyk209-g1-adapter-real-");
   try {
+    runRealInstall(base, targetRepo);
+    const installedCheckDir = path.join(targetRepo, "scripts", "check");
     for (const name of [
       "relay-handshake-g1-dispatch-check.test.mjs",
       "admission-completion-adapter.test.mjs",
     ]) {
-      const result = probeLoad(checkDir, name);
-      assert.equal(
-        result.status,
-        0,
-        `expected ${name} to load with 0 failures in the staged target; stderr:\n${result.stderr}`,
+      assert.ok(
+        existsSync(path.join(installedCheckDir, name)),
+        `expected the real installer to have copied ${name} into the target`,
       );
     }
+    const result = runInstalledNodeTest(installedCheckDir, [
+      "relay-handshake-g1-dispatch-check.test.mjs",
+      "admission-completion-adapter.test.mjs",
+    ]);
+    assert.equal(
+      result.status,
+      0,
+      `expected 0 test failures running the installed files via a real install; stdout:\n${result.stdout}\nstderr:\n${result.stderr}`,
+    );
+    assert.doesNotMatch(
+      result.stdout + result.stderr,
+      /ℹ fail [1-9]/,
+      `expected fail 0 in the node --test summary; stdout:\n${result.stdout}`,
+    );
+    // ★헛시험 방지(HYK-434 H2 측정 live): "실패 0"은 "실행 자체가 0건"
+    // 이어도 참이 된다 -- node:test가 NODE_TEST_CONTEXT를 물려받아
+    // "재귀 호출"로 오인해 파일을 돌리지도 않고 tests 0/pass 0으로
+    // 조용히 접는 실제 사고를 이 라운드가 겪었다(ledgerIsolatedEnv가
+    // 그 축을 지운다). 적어도 100건 이상 실제로 돌았음을 값으로 본다
+    // (설치된 두 파일의 실제 시험 수는 100건을 훨씬 넘는다).
+    const testsMatch = (result.stdout + result.stderr).match(/ℹ tests (\d+)/);
+    assert.ok(
+      testsMatch && Number(testsMatch[1]) >= 100,
+      `expected at least 100 actually-run tests (not a silent 0-test false-green); stdout:\n${result.stdout}`,
+    );
   } finally {
     rmSync(base, { recursive: true, force: true });
   }
 });
 
-// ⓑ 음성 대조 (2R §2 요구 3의 "되돌림에서 RED 가 되는지"): 메모리상
-// 목록에 ledger-pointer-shared.test.mjs를 다시 넣고 같은 방식으로
-// 합성 대상을 깔면, 그 파일만 로드 실패(ENOENT)로 떨어져야 한다 --
-// 검토 1R이 에디터 사본에서 1회성으로 손으로 잰 것과 같은 모양을
-// 영구 회귀 그물로 만든 것이다. orch-stall-detect.mjs는 일부러 복사하지
-// 않는다(어떤 축에도 없는 그 상태 자체가 결함의 조건이다).
-test('(b-negative) re-adding "ledger-pointer-shared.test.mjs" to the (in-memory) list makes a staged synthetic install fail to load it (ENOENT on orch-stall-detect.mjs)', () => {
-  const augmentedCheckList = [
-    ...ENFORCEMENT_CHECK_FILES,
-    "ledger-pointer-shared.test.mjs",
-  ];
+// ⓑ 음성 대조 -- 같은 경로(실제 설치기 + 실제 git 대상)로 재구성한다.
+// 설치기(install.mjs) 자신의 ENFORCEMENT_CHECK_FILES는 이 조각의 범위
+// 밖(product_scope: install.mjs는 주석 줄만)이라 소스를 고쳐 재설치할
+// 수 없다 -- 대신 "메모리상 목록에 ledger-pointer-shared.test.mjs를
+// 다시 넣은 판"을 그 목록이 실제로 하는 것과 똑같은 동작(install.mjs
+// 자신의 installEnforcementScripts가 ENFORCEMENT_CHECK_FILES의 각
+// 항목에 대해 하는 것과 바이트 단위로 같은 `copyFileSync(REPO_ROOT/
+// scripts/check/<name>, targetRepo/scripts/check/<name>)` 한 호출)으로
+// 재현한다 -- 설치 로직을 다시 구현하는 게 아니라 "그 목록에 있었다면
+// 설치기가 했을 바로 그 복사 한 번"을 추가할 뿐이다. orch-stall-
+// detect.mjs는 일부러 복사하지 않는다(어떤 축에도 없는 그 상태 자체가
+// 결함의 조건이다, 검토 1R P1-1).
+test('(b-negative) real installer + one extra copy reproducing "ledger-pointer-shared.test.mjs re-added to the list" fails to load it via `node --test` (ENOENT on orch-stall-detect.mjs)', () => {
   assert.ok(
     !ENFORCEMENT_CHECK_FILES.includes("ledger-pointer-shared.test.mjs"),
     "ledger-pointer-shared.test.mjs must actually be absent from the real list for this control to mean anything",
   );
-  const { base, checkDir } = stageSyntheticInstall("hyk209-g1-ledger-revert-", {
-    checkList: augmentedCheckList,
-  });
+  const { base, targetRepo } = makeSyntheticTarget(
+    "hyk209-g1-ledger-revert-real-",
+  );
   try {
-    const result = probeLoad(checkDir, "ledger-pointer-shared.test.mjs");
+    runRealInstall(base, targetRepo);
+    const installedCheckDir = path.join(targetRepo, "scripts", "check");
+    const name = "ledger-pointer-shared.test.mjs";
+    assert.ok(
+      !existsSync(path.join(installedCheckDir, name)),
+      "expected the real (unaugmented) install to NOT have installed ledger-pointer-shared.test.mjs",
+    );
+    // install.mjs installEnforcementScripts의 for-loop 본문과 바이트
+    // 단위로 같은 한 번의 copyFileSync -- "이 이름이 목록에 있었다면"을
+    // 재현하는 것이지, 설치 로직을 다시 만드는 것이 아니다.
+    copyFileSync(
+      path.join(CHECK_SRC_DIR, name),
+      path.join(installedCheckDir, name),
+    );
+
+    const result = runInstalledNodeTest(installedCheckDir, [name]);
     assert.notEqual(
       result.status,
       0,
-      "expected re-adding ledger-pointer-shared.test.mjs to the list to make the staged target fail to load it (it reads an uninstalled supervisor file at module top level)",
+      "expected re-adding ledger-pointer-shared.test.mjs to the list to make a real install fail to load it (it reads an uninstalled supervisor file at module top level)",
     );
     assert.match(
-      result.stderr,
+      result.stdout + result.stderr,
       /ENOENT/,
-      `expected a module-top-level ENOENT reading orch-stall-detect.mjs; got stderr:\n${result.stderr}`,
+      `expected a module-top-level ENOENT reading orch-stall-detect.mjs; stdout:\n${result.stdout}\nstderr:\n${result.stderr}`,
     );
     assert.match(
-      result.stderr,
+      result.stdout + result.stderr,
       /orch-stall-detect\.mjs/,
-      `expected the ENOENT to name orch-stall-detect.mjs specifically; got stderr:\n${result.stderr}`,
+      `expected the ENOENT to name orch-stall-detect.mjs specifically; stdout:\n${result.stdout}\nstderr:\n${result.stderr}`,
     );
   } finally {
     rmSync(base, { recursive: true, force: true });

@@ -1248,8 +1248,11 @@ export const ENFORCEMENT_CHECK_FILES = [
   // any of this file's three copy-list axes (not installed anywhere). So
   // installing this .test.mjs alongside ledger-pointer-shared.mjs makes an
   // installed target's own `node --test` die at module load (ENOENT) --
-  // measured live against an editor-main copy, see install-g1-adapter-
-  // list.test.mjs's "(b)" test below. Not installing it leaves this round's
+  // measured live via install-g1-adapter-list.test.mjs's "(b-negative)" test
+  // (HYK-434 H2: that test installs through THIS installer, for real, into a
+  // throwaway git-init target outside the worktree, then actually runs
+  // `node --test` there -- not an editor-main copy measured by hand). Not
+  // installing it leaves this round's
   // one true requirement (ledger-pointer-shared.mjs itself, needed for
   // admission-completion-adapter.mjs's closure, proven by install-copylist
   // -closure.test.mjs's own PAST_INCIDENTS entry) intact without dragging
