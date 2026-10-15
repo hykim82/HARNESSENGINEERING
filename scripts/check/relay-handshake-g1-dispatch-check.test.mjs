@@ -33,10 +33,19 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const CLI_PATH = join(HERE, "relay-handshake.mjs");
 const SIBLING_DEPS = RELAY_HANDSHAKE_STATIC_SIBLINGS;
 
-const SCRATCH_ROOT = join(tmpdir(), "hyk434-scratch");
+// HYK-434 2R (full-runner RED, live repro): a fixed literal root here
+// collided with ITSELF under isolated-suite-runner.mjs's full pass -- this
+// exact file runs once directly (as this suite file) AND a second time
+// concurrently as the installed copy inside install-g1-adapter-list
+// .test.mjs's (b) child `node --test` (both resolve the same absolute
+// tmpdir() path regardless of which copy's bytes are executing), so each
+// instance's `after()` rmSync of the shared root could delete the other's
+// still-in-use mkdtemp fixture dir mid-run (observed: "task file not
+// found" for (g1-b)'s own fixture). mkdtemp-ing the root itself up front
+// gives every process instance its own unique root, closing that race.
+const SCRATCH_ROOT = mkdtempSync(join(tmpdir(), "hyk434-scratch-"));
 
 function withFixtureDir(prefix, fn) {
-  mkdirSync(SCRATCH_ROOT, { recursive: true });
   const dir = mkdtempSync(join(SCRATCH_ROOT, prefix));
   try {
     return fn(dir);
@@ -395,7 +404,11 @@ test("(g1-j)★ 범위 확인: G1 3줄이 전혀 없는 BLOCKED 라운드도 BLO
     writeBlockedCoderRound(dir, { reason: "git worktree unreachable" });
     // 원장조차 만들지 않는다 -- BLOCKED 라운드는 이 축에 닿지 않으므로
     // 영향이 없어야 한다.
-    const result = checkRelayHandshake({ role: "coder", harnessDir: dir });
+    const result = checkRelayHandshake({
+      role: "coder",
+      harnessDir: dir,
+      now: NOW_MS,
+    });
     assert.equal(result.ok, false);
     assert.equal(result.state, "BLOCKED");
     assert.match(result.reason, /git worktree unreachable/);

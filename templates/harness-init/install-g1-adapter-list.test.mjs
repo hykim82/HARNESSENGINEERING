@@ -26,11 +26,13 @@
 // that regex-based closure walk -- and orch-stall-detect.mjs is not on any
 // copy-list axis, so an installed copy of that one test file dies at
 // import time (ENOENT) even though the closure test stayed green. (b)
-// below is the machine-checked net for exactly that class of gap: it
-// stages a synthetic install target by directly copying the files named in
-// the real lists (not a `--dry-run`, which never actually loads anything)
-// and then LOADS (not fully runs -- see (b)'s own comment for why) the two
-// newly-listed test files there.
+// below is the machine-checked net for exactly that class of gap: it uses
+// the REAL installer (`install.mjs`, not a `--dry-run`, which never
+// actually loads anything) to install into a real `git init` target
+// outside this worktree, and then actually RUNS (via a child `node --test`
+// against the installed copy, not just an import()/load probe -- see (b)'s
+// own comment for the H2 history of that change) the two newly-listed test
+// files there.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";

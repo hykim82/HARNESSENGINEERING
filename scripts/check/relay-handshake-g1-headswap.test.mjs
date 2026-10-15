@@ -27,10 +27,13 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const CLI_PATH = join(HERE, "relay-handshake.mjs");
 const SIBLING_DEPS = RELAY_HANDSHAKE_STATIC_SIBLINGS;
 
-const SCRATCH_ROOT = join(tmpdir(), "hyk434-headswap-scratch");
+// HYK-434 2R: same per-process-unique-root fix as relay-handshake-g1-
+// dispatch-check.test.mjs's own SCRATCH_ROOT (see its comment) -- a fixed
+// literal name here would collide with itself the same way under any
+// future nested/concurrent re-execution of this file's own bytes.
+const SCRATCH_ROOT = mkdtempSync(join(tmpdir(), "hyk434-headswap-scratch-"));
 
 function withFixtureDir(prefix, fn) {
-  mkdirSync(SCRATCH_ROOT, { recursive: true });
   const dir = mkdtempSync(join(SCRATCH_ROOT, prefix));
   try {
     return fn(dir);
