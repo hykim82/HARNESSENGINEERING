@@ -268,14 +268,130 @@ function ledgerIsolatedEnv() {
   return env;
 }
 
+// HYK-434 H2 3R (책임자 판정 §2, 선례 scripts/check/hyk359-ambient-env-
+// regression.test.mjs 머리 주석 60~90행과 그 파일의 runSweepAndAssert):
+// 로컬(Node 26)과 CI가 고정하는 Node 20은 `node --test`의 기본 리포터를
+// 다르게 고른다 -- Node 26은 파이프 출력이라도 무조건 spec(`ℹ tests N`)을
+// 내고, Node 20은 TTY가 아닌 파이프에서 tap(`# tests N`)을 낸다(이 PC에서
+// 직접 대조: 위 두 reporter 모양, `--test-reporter` 없이 파이프로 받으면
+// 이 PC는 늘 `ℹ tests N`). PR #317 CI run 751/752가 그 차이로 결정론적
+// 빨강이었다(1b_shown). 고침: 자식 리포터를 `tap`으로 명시해 Node 버전과
+// 무관하게 출력 형식을 고정한다. `maxBuffer`도 HYK-359 4R의 같은 교훈(기본
+// 1MB로는 조용히 잘려 "0건"으로 오독될 수 있다)을 그대로 적용해 넉넉히
+// 올린다.
 function runInstalledNodeTest(installedCheckDir, names, timeoutMs = 300000) {
-  return spawnSync(process.execPath, ["--test", ...names], {
-    cwd: installedCheckDir,
-    encoding: "utf8",
-    env: ledgerIsolatedEnv(),
-    timeout: timeoutMs,
-  });
+  return spawnSync(
+    process.execPath,
+    ["--test", "--test-reporter=tap", ...names],
+    {
+      cwd: installedCheckDir,
+      encoding: "utf8",
+      env: ledgerIsolatedEnv(),
+      timeout: timeoutMs,
+      maxBuffer: 64 * 1024 * 1024,
+    },
+  );
 }
+
+// 요약 판독을 이름 있는 함수로 뺀다(책임자 판정 §2 요구 2) -- `# tests N`/
+// `# fail N`(TAP, 위에서 명시 고정한 그 형식) 한 가지만 읽는다. 옛 `ℹ`
+// 정규식과 겸용하지 않는다(두 형식을 동시에 봐주면 "실제로 어느 쪽이
+// 작동했는지"가 다시 애매해진다 -- 이 라운드가 고치는 바로 그 애매함).
+// `fail`의 정규식이 `[1-9]\d*`(1 이상만)인 것은 판정 §2 요구 2 원문 그대로
+// 다 -- `# fail 0` 줄은 이 정규식으로는 "못 찾음"이 되므로, 매치가 없으면
+// fail을 0으로 채워 돌려준다(호출부의 "fail 0" 단언에는 차이가 없다).
+// 요약 줄 자체를 전혀 못 찾으면(`# tests N`이 없음 -- 리포터가 TAP이
+// 아니거나 출력이 잘렸다는 뜻) null을 돌려준다.
+function parseTapSummary(text) {
+  const testsMatch = (text ?? "").match(/^# tests (\d+)/m);
+  if (!testsMatch) return null;
+  const failMatch = (text ?? "").match(/^# fail ([1-9]\d*)/m);
+  return {
+    tests: Number(testsMatch[1]),
+    fail: failMatch ? Number(failMatch[1]) : 0,
+  };
+}
+
+// HYK-434 H2 3R 요구 3: 판독 함수 자체를 Node 20 TAP 출력 모양을 문자열로
+// 박은 합성 표본으로 단위 시험한다 -- (b)/(b-negative)는 실제 설치·실행을
+// 거치므로 "이 PC(Node 26)가 실제로 내는 TAP"만 증명하고, "Node 20이 내는
+// 모양을 이 함수가 제대로 읽는지"는 이 PC에서 Node 20을 못 돌리므로 직접
+// 재현할 수 없다(책임자 판정 §2 요구 3 원문: "Node 20 실행은 이 PC에서 못
+// 한다면 «못 쟀다»"). 대신 Node 20 TAP reporter의 공개된 요약 줄 모양을
+// 문자열로 고정해 넣어 판독만 단위로 본다.
+//
+// 표본 출처 〔전사〕: 요약 줄 모양(`# tests N` / `# pass N` / `# fail N` /
+// `# cancelled N` / `# skipped N` / `# todo N` / `# duration_ms N`)은 이
+// PC의 Node 26에서 `--test-reporter=tap`으로 작은 시험을 돌려 직접 본
+// 원문(위 함수 도입 전 측정, 이 코멘트 작성 시점 재확인: `node --test
+// --test-reporter=tap`을 임시 파일 하나에 돌려 그대로 복사)과 같은 줄
+// 모양이다. 앞의 `TAP version 13`/`# Subtest:`/`ok`/`not ok`/YAML 블록도
+// 실제 TAP 출력에서 그대로 가져왔다. 〔못쟀다〕: 이 PC에 Node 20이 없어
+// "Node 20 자신이 정말 이 모양을 내는지"는 직접 대조하지 못했다 -- 공개된
+// TAP reporter 계약과 이 PC의 Node 26 `--test-reporter=tap` 출력이 같은
+// 모양이라는 점으로 대신한다(coder.md 한계 문단에 그대로 적는다).
+const NODE20_TAP_PASS_SAMPLE = `TAP version 13
+# Subtest: some test
+ok 1 - some test
+  ---
+  duration_ms: 1.234
+  type: 'test'
+  ...
+1..1
+# tests 123
+# suites 0
+# pass 123
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 456.789
+`;
+
+const NODE20_TAP_FAIL_SAMPLE = `TAP version 13
+# Subtest: a failing test
+not ok 1 - a failing test
+  ---
+  duration_ms: 2.5
+  type: 'test'
+  ...
+# tests 10
+# suites 0
+# pass 8
+# fail 2
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 50.0
+`;
+
+const NODE_SPEC_SAMPLE = `ℹ tests 123
+ℹ suites 0
+ℹ pass 123
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 456.789
+`;
+
+test("parseTapSummary reads Node 20 TAP's '# tests N'/'# fail N' summary lines (pass sample, fail 0)", () => {
+  assert.deepEqual(parseTapSummary(NODE20_TAP_PASS_SAMPLE), {
+    tests: 123,
+    fail: 0,
+  });
+});
+
+test("parseTapSummary reads Node 20 TAP's '# tests N'/'# fail N' summary lines (fail sample, fail 2)", () => {
+  assert.deepEqual(parseTapSummary(NODE20_TAP_FAIL_SAMPLE), {
+    tests: 10,
+    fail: 2,
+  });
+});
+
+test("parseTapSummary returns null on the spec-reporter shape (ℹ tests N) -- 두 형식을 겸용하지 않는다, Node 버전과 무관하게 한 형식만 신뢰한다", () => {
+  assert.equal(parseTapSummary(NODE_SPEC_SAMPLE), null);
+});
 
 test("(b) real installer (not --dry-run) installs into a git-init target outside this worktree, and `node --test` on the two newly-listed test files there has 0 failures", () => {
   const { base, targetRepo } = makeSyntheticTarget("hyk209-g1-adapter-real-");
@@ -295,15 +411,29 @@ test("(b) real installer (not --dry-run) installs into a git-init target outside
       "relay-handshake-g1-dispatch-check.test.mjs",
       "admission-completion-adapter.test.mjs",
     ]);
+    // HYK-434 H2 3R (책임자 판정 §2 요구 1, HYK-359 4R ①의 같은 교훈):
+    // spawnSync 자체의 실패(예: maxBuffer를 넘겨 Node가 자식을 죽이면
+    // result.error.code === 'ENOBUFS')는 그 자체로 요란하게 실패해야
+    // 한다 -- 아래 "0건 실행" 판정으로 재해석되면 안 된다.
+    assert.equal(
+      result.error,
+      undefined,
+      `spawnSync itself failed (child may have been killed mid-run, e.g. exceeding maxBuffer) -- error: ${result.error?.message} (code: ${result.error?.code}), signal: ${result.signal}, status: ${result.status}, stdout captured so far: ${(result.stdout ?? "").length} byte(s)`,
+    );
     assert.equal(
       result.status,
       0,
       `expected 0 test failures running the installed files via a real install; stdout:\n${result.stdout}\nstderr:\n${result.stderr}`,
     );
-    assert.doesNotMatch(
-      result.stdout + result.stderr,
-      /ℹ fail [1-9]/,
-      `expected fail 0 in the node --test summary; stdout:\n${result.stdout}`,
+    const summary = parseTapSummary(result.stdout + result.stderr);
+    assert.ok(
+      summary,
+      `could not find TAP's '# tests N' summary line in the child's output at all -- --test-reporter=tap may not have taken effect, or the output was cut off before the summary. stdout:\n${result.stdout}\nstderr:\n${result.stderr}`,
+    );
+    assert.equal(
+      summary.fail,
+      0,
+      `expected fail 0 in the node --test TAP summary; stdout:\n${result.stdout}`,
     );
     // ★헛시험 방지(HYK-434 H2 측정 live): "실패 0"은 "실행 자체가 0건"
     // 이어도 참이 된다 -- node:test가 NODE_TEST_CONTEXT를 물려받아
@@ -311,9 +441,8 @@ test("(b) real installer (not --dry-run) installs into a git-init target outside
     // 조용히 접는 실제 사고를 이 라운드가 겪었다(ledgerIsolatedEnv가
     // 그 축을 지운다). 적어도 100건 이상 실제로 돌았음을 값으로 본다
     // (설치된 두 파일의 실제 시험 수는 100건을 훨씬 넘는다).
-    const testsMatch = (result.stdout + result.stderr).match(/ℹ tests (\d+)/);
     assert.ok(
-      testsMatch && Number(testsMatch[1]) >= 100,
+      summary.tests >= 100,
       `expected at least 100 actually-run tests (not a silent 0-test false-green); stdout:\n${result.stdout}`,
     );
   } finally {
