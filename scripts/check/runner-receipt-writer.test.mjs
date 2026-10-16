@@ -85,6 +85,156 @@ test("parseTapSummaryCounts: does not confuse the default reporter's 'ℹ pass N
   });
 });
 
+// ---------------------------------------------------------------------------
+// HYK-464 2R ⓐ+ⓑ (검토 1R P2-1/P2-3, rounds/REVIEW-r1.md ⓕ/ⓔ-S6~S8): the
+// 1R "첫 일치" parser's actual production failure mode, reproduced as a
+// synthetic sample shaped exactly like the review's own ⓕ-observed real
+// tapPath content (nested child's own `node --test` summary leaks into the
+// parent's tap destination file BEFORE the parent's own real summary).
+// ---------------------------------------------------------------------------
+
+const NESTED_CHILD_LEAK_THEN_REAL_FAILED_SAMPLE = [
+  "TAP version 13",
+  "# tests 7",
+  "# suites 0",
+  "# pass 7",
+  "# fail 0",
+  "# Subtest: prints fake summary-shaped lines to stdout",
+  "ok 1 - prints fake summary-shaped lines to stdout",
+  "not ok 3 - z red",
+  "# tests 999",
+  "1..3",
+  "# tests 3",
+  "# suites 0",
+  "# pass 2",
+  "# fail 1",
+  "# cancelled 0",
+  "# skipped 0",
+  "# todo 0",
+  "# duration_ms 131.8824",
+].join("\n");
+
+test("parseTapSummaryCounts: HYK-464 2R ⓐ -- a nested child's leaked 'tests 7/fail 0' block (not followed by '# suites') does not win over the real, later, complete 8-line block (tests 3/fail 1) -- 1R's first-match reader would have picked the fake 7/0", () => {
+  assert.deepEqual(
+    parseTapSummaryCounts(NESTED_CHILD_LEAK_THEN_REAL_FAILED_SAMPLE),
+    { tests: 3, pass: 2, fail: 1, skip: 0 },
+  );
+});
+
+// S6 (검토 ⓔ 표): 짝 없는 bare '# tests N' 줄이 진짜 블록 바로 앞에 와도,
+// 그 다음 줄이 '# suites'가 아니므로(실제로는 '# tests 300') 이 블록
+// 시도는 거기서 끊긴다 -- 가짜 tests와 진짜 fail이 서로 다른 블록에서
+// 잘못 짝지어지는 1R 결함(S6)이 재현되지 않는다.
+const S6_BARE_ORPHAN_TESTS_BEFORE_REAL_BLOCK = [
+  "1..1",
+  "# tests 7",
+  "# tests 300",
+  "# suites 0",
+  "# pass 298",
+  "# fail 2",
+  "# cancelled 0",
+  "# skipped 1",
+  "# todo 0",
+  "# duration_ms 5.0",
+].join("\n");
+
+test("parseTapSummaryCounts: S6 -- a bare orphan '# tests N' line directly before the real block's own '# tests M' does not get paired with the real block's fail/skip (fixed answer = the real block, 300/2/1)", () => {
+  assert.deepEqual(
+    parseTapSummaryCounts(S6_BARE_ORPHAN_TESTS_BEFORE_REAL_BLOCK),
+    { tests: 300, pass: 298, fail: 2, skip: 1 },
+  );
+});
+
+// S7 (검토 ⓔ 표): 완결된(가짜) 블록 뒤에 "새 tests 줄이 또 나타났지만 끝까지
+// 못 갔다"(잘림) -- 2R 판단: null(판정 불가)이 맞다, 그 앞의 무관한 블록을
+// "진짜인 척" 돌려주면 hasTapCompletion(HYK-477 §2-3)이 거짓 완결로 읽어
+// 진짜 강제종료/OOM을 TESTS_FAILED로 둔갑시킬 위험이 있다(근거: 코드 주석
+// 참조).
+const S7_COMPLETE_FAKE_THEN_TRUNCATED_REAL = [
+  "# tests 7",
+  "# suites 0",
+  "# pass 7",
+  "# fail 0",
+  "# cancelled 0",
+  "# skipped 0",
+  "# todo 0",
+  "# duration_ms 1.0",
+  "# tests 300",
+  "# suites 0",
+  "# pass 298",
+].join("\n");
+
+test("parseTapSummaryCounts: S7 -- a complete fake block followed by a truncated real one (cut off before '# fail') returns null (판정 불가), not the preceding fake block's values", () => {
+  assert.deepEqual(
+    parseTapSummaryCounts(S7_COMPLETE_FAKE_THEN_TRUNCATED_REAL),
+    { tests: null, pass: null, fail: null, skip: null },
+  );
+});
+
+// S8 (검토 ⓔ 표 계열, 2R 설계): 진짜 완결 블록 뒤에 그 블록에 속하지 않는
+// 낱줄 '# fail 999'(예: teardown이 process.on("exit")에서 또 찍은 잔여
+// 노이즈) 하나가 더 붙어도, 그 낱줄은 '# tests'로 시작하지 않아 새 블록
+// 시도를 열지 않으므로 trailing-orphan 판정(= null)을 유발하지 않는다.
+const S8_TRAILING_NON_TESTS_DECOY_AFTER_REAL_BLOCK = [
+  "# tests 300",
+  "# suites 0",
+  "# pass 298",
+  "# fail 2",
+  "# cancelled 0",
+  "# skipped 0",
+  "# todo 0",
+  "# duration_ms 5.0",
+  "# fail 999",
+].join("\n");
+
+test("parseTapSummaryCounts: S8 -- a trailing decoy line that is NOT '# tests ...' after the real complete block does not trigger the trailing-orphan null guard", () => {
+  assert.deepEqual(
+    parseTapSummaryCounts(S8_TRAILING_NON_TESTS_DECOY_AFTER_REAL_BLOCK),
+    { tests: 300, pass: 298, fail: 2, skip: 0 },
+  );
+});
+
+// M3 (검토 ⓔ 표 재현): CRLF 모양(Windows 실측)도 같은 규칙으로 읽는다 --
+// `\r?` 가드가 지워지는 변이는 이 표본을 깨뜨린다.
+test("parseTapSummaryCounts: CRLF line endings (Windows shape) parse identically to LF (M3 mutation guard)", () => {
+  const crlf = NESTED_CHILD_LEAK_THEN_REAL_FAILED_SAMPLE.replace(/\n/g, "\r\n");
+  assert.deepEqual(parseTapSummaryCounts(crlf), {
+    tests: 3,
+    pass: 2,
+    fail: 1,
+    skip: 0,
+  });
+});
+
+// M4 (검토 ⓔ 표): "마지막" 블록을 고르는 것과 "tests 값이 가장 큰" 블록을
+// 고르는 것은 다른 규칙이다 -- 이 표본은 마지막 블록의 tests가 더 작아
+// 그 둘을 가른다. "최대"로 변이하면 이 시험이 RED가 된다.
+const M4_LAST_BLOCK_SMALLER_THAN_EARLIER_BLOCK = [
+  "# tests 300",
+  "# suites 0",
+  "# pass 299",
+  "# fail 1",
+  "# cancelled 0",
+  "# skipped 0",
+  "# todo 0",
+  "# duration_ms 999.0",
+  "# tests 5",
+  "# suites 0",
+  "# pass 5",
+  "# fail 0",
+  "# cancelled 0",
+  "# skipped 0",
+  "# todo 0",
+  "# duration_ms 1.0",
+].join("\n");
+
+test("parseTapSummaryCounts: M4 mutation guard -- picks the LAST block (tests 5), not the one with the largest tests value (tests 300)", () => {
+  assert.deepEqual(
+    parseTapSummaryCounts(M4_LAST_BLOCK_SMALLER_THAN_EARLIER_BLOCK),
+    { tests: 5, pass: 5, fail: 0, skip: 0 },
+  );
+});
+
 test("buildRunnerReceipt: shape has all §2-1-required fields, schema_version pinned, finished_at is KST text (not epoch, not UTC)", () => {
   const receipt = buildRunnerReceipt({
     runnerExit: 0,
@@ -269,6 +419,36 @@ test("writeRunnerReceipt: creates harnessDir if missing, writes valid JSON match
   assert.equal(writeArgs[2], "utf8");
 });
 
+// M5 (검토 ⓔ 표): writeRunnerReceipt/writeNumberedRunnerReceipt가
+// buildRunnerReceipt에 nodeVersion/nodeVersionWarning을 실제로 넘기는가 --
+// 위의 다른 writeRunnerReceipt 시험은 이 두 인자를 아예 주지 않으므로,
+// 호출부의 `nodeVersion,`/`nodeVersionWarning,` 두 줄을 지우는 변이가
+// 생존했다(검토 1R 실측). 디스크에 실제로 쓰인 JSON을 직접 읽어 단언한다
+// (buildRunnerReceipt 자체의 반환값이 아니라, writer가 실제로 쓴 바이트).
+test("writeRunnerReceipt: nodeVersion/nodeVersionWarning actually reach the written JSON on disk (M5 mutation guard -- the writer's own call site, not just buildRunnerReceipt)", () => {
+  let writeArgs;
+  writeRunnerReceipt({
+    harnessDir: "/fake/.harness",
+    runnerExit: 0,
+    runnerStatus: RUNNER_STATUS.OK,
+    counts: { tests: 1, pass: 1, fail: 0, skip: 0 },
+    headCommit: "cafef00d",
+    finishedAtMs: 0,
+    nodeVersion: "v26.2.0",
+    nodeVersionWarning: "MISMATCH: major 26 vs declared 20",
+    mkdirFn: () => {},
+    writeFileFn: (...args) => {
+      writeArgs = args;
+    },
+  });
+  const written = JSON.parse(writeArgs[1]);
+  assert.equal(written.node_version, "v26.2.0");
+  assert.equal(
+    written.node_version_warning,
+    "MISMATCH: major 26 vs declared 20",
+  );
+});
+
 // ---------------------------------------------------------------------------
 // HYK-485 §2-1: allocateRunSlot / writeNumberedRunnerReceipt -- 회차별
 // (run-scoped) 사본을 기계로 남기는 두 함수. §8 정직 한계 ⓐ의 근거를 직접
@@ -409,6 +589,28 @@ test("writeNumberedRunnerReceipt: writes the SAME shape buildRunnerReceipt produ
   assert.deepEqual(written, receipt);
   assert.equal(written.runner_exit, 0);
   assert.equal(writeArgs[2], "utf8");
+});
+
+// M5 (writeNumberedRunnerReceipt 짝): 번호 붙은 사본 쪽도 같은 공백이
+// 있었다 -- 같은 근거로 디스크에 쓰인 JSON을 직접 확인한다.
+test("writeNumberedRunnerReceipt: nodeVersion/nodeVersionWarning actually reach the written JSON on disk (M5 mutation guard)", () => {
+  let writeArgs;
+  writeNumberedRunnerReceipt({
+    receiptPath: "/fake/.harness/runner-receipt-run3.json",
+    runnerExit: 0,
+    runnerStatus: RUNNER_STATUS.OK,
+    counts: { tests: 1, pass: 1, fail: 0, skip: 0 },
+    headCommit: "cafef00d",
+    finishedAtMs: 0,
+    nodeVersion: "v20.11.0",
+    nodeVersionWarning: null,
+    writeFileFn: (...args) => {
+      writeArgs = args;
+    },
+  });
+  const written = JSON.parse(writeArgs[1]);
+  assert.equal(written.node_version, "v20.11.0");
+  assert.equal(written.node_version_warning, null);
 });
 
 test("allocateRunSlot + writeNumberedRunnerReceipt full pipeline (real fs): after two runs, the LATEST runner-receipt.json (written separately via writeRunnerReceipt) is completely unaffected -- byte-identical to what writeRunnerReceipt alone would produce (완료조건3: 기존 독자 무영향)", () => {

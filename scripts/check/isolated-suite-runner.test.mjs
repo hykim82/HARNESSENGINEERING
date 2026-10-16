@@ -147,15 +147,58 @@ test("resolveNodeVersionWarning: nodeVersion itself unparseable -> UNKNOWN/판�
   assert.match(warning, /^UNKNOWN:/);
 });
 
-test("resolveNodeVersionWarning: a range with a trailing larger number (e.g. '>=20 <21') resolves off the FIRST/leading number, not any later one", () => {
-  assert.equal(
-    resolveNodeVersionWarning({
-      nodeVersion: "v20.0.0",
-      enginesNode: ">=20 <21",
-    }),
-    null,
-    "major 20 vs the range's leading '20' should match -- a trailing '21' must not be picked up as the engines major",
-  );
+// HYK-464 2R P2-4 (책임자 판정 2026-10-16 16:4x §1): a range expression's
+// leading number is NOT a reliable "the major" -- this intentionally
+// REPLACES the 1R test that asserted a leading-number match for
+// ">=20 <21" (that old assertion is exactly the behavior P2-4 narrows:
+// a range must resolve to UNKNOWN regardless of what its leading number
+// happens to be, not "match if the leading number happens to agree").
+test("resolveNodeVersionWarning: HYK-464 2R P2-4 -- a range expression ('>=20 <21') is UNKNOWN/판정 불가 even when its leading number would have 'matched' under the old leading-number heuristic", () => {
+  const warning = resolveNodeVersionWarning({
+    nodeVersion: "v20.0.0",
+    enginesNode: ">=20 <21",
+  });
+  assert.match(warning, /^UNKNOWN:/);
+  assert.match(warning, /range expression/);
+});
+
+// coder-task.md §2 ⓔ 칸 2, 사례 1: `>=20`에 실제로는 불일치일 v22를 넣어도
+// (범위식이라) 판정 불가 -- MISMATCH 경고가 아니라 UNKNOWN이어야 한다.
+test("resolveNodeVersionWarning: HYK-464 2R P2-4 cell -- '>=20' (open-ended range) with v22.1.0 is UNKNOWN, never MISMATCH", () => {
+  const warning = resolveNodeVersionWarning({
+    nodeVersion: "v22.1.0",
+    enginesNode: ">=20",
+  });
+  assert.match(warning, /^UNKNOWN:/);
+});
+
+test("resolveNodeVersionWarning: HYK-464 2R P2-4 -- a multi-alternative range ('^20 || ^22') is UNKNOWN, never MISMATCH, even though it names this run's own major", () => {
+  const warning = resolveNodeVersionWarning({
+    nodeVersion: "v22.1.0",
+    enginesNode: "^20 || ^22",
+  });
+  assert.match(warning, /^UNKNOWN:/);
+});
+
+// coder-task.md §2 ⓔ 칸 2, 사례 2: 단일 버전(`20.x`)은 범위식이 아니므로
+// 이 2R 수리 전과 똑같이 MISMATCH로 남아야 한다 -- 무회귀 확인.
+test("resolveNodeVersionWarning: HYK-464 2R P2-4 regression guard -- a single pinned major ('20.x') with v26 is STILL MISMATCH, not UNKNOWN (ranges only)", () => {
+  const warning = resolveNodeVersionWarning({
+    nodeVersion: "v26.2.0",
+    enginesNode: "20.x",
+  });
+  assert.match(warning, /^MISMATCH:/);
+});
+
+// P2-4 변이 1: SINGLE_VERSION_ENGINES_RE가 지워지면(= 범위식도 전부
+// "단일 버전"으로 되돌아가면) 위 '>=20' 칸이 UNKNOWN 대신 MISMATCH로
+// 거짓 매치돼 이 시험이 RED가 된다.
+test("resolveNodeVersionWarning: P2-4 mutation guard -- a dash-range ('20 - 22') is also UNKNOWN, not resolved off either bound", () => {
+  const warning = resolveNodeVersionWarning({
+    nodeVersion: "v21.0.0",
+    enginesNode: "20 - 22",
+  });
+  assert.match(warning, /^UNKNOWN:/);
 });
 
 // HYK-411: every test below that doesn't specifically exercise receipt
@@ -367,7 +410,14 @@ test("runIsolatedSuite: an unreadable tap file degrades to null counts (not a cr
 // runIsolatedSuite's own comment) -- that is what keeps "the resolved
 // concurrency cap is the run's literal first log line"
 // (hyk473-runner-cap.test.mjs) from regressing.
-test("runIsolatedSuite: a real Node-major MISMATCH is logged as the literal first line (ahead of the concurrency banner) and rides the receipt payload", () => {
+// HYK-464 2R P2-6 (책임자 판정 2026-10-16 16:4x §1, 원문 "A"): 1R은 경고를
+// 배너보다 "앞" 줄로 따로 log()했다 -- 그래서 배너가 둘째 줄로 밀렸다
+// (HYK-473 §2-1 "상한 값이 첫 줄" 계약과 충돌, 검토 1R P2-6 지적). 2R은
+// 하나의 첫 줄에 배너 먼저 + 같은 줄 끝에 경고를 붙인다. 경고 토큰도
+// 판정 원문 모양("WARNING: NODE_VERSION_MISMATCH")으로 맞춘다(1R의
+// "WARNING: MISMATCH:" 대체) -- 영수증 필드 자체는 하위 호환을 위해
+// "MISMATCH: ..." 그대로 남긴다(아래 별도 단언).
+test("runIsolatedSuite: HYK-464 2R P2-6 -- a real Node-major MISMATCH lands on the SAME first line as the concurrency banner (banner first, warning appended, token 'WARNING: NODE_VERSION_MISMATCH'), never a separate second line, and still rides the receipt payload (unchanged 'MISMATCH:' token for backward compat)", () => {
   const receipts = [];
   const logs = [];
   runIsolatedSuite({
@@ -385,7 +435,14 @@ test("runIsolatedSuite: a real Node-major MISMATCH is logged as the literal firs
     nodeVersion: "v26.2.0",
     readPackageJsonFn: () => ({ engines: { node: "20.x" } }),
   });
-  assert.match(logs[0], /^\[isolated-suite-runner\] WARNING: MISMATCH:/);
+  assert.match(
+    logs[0],
+    /^\[isolated-suite-runner\] test-concurrency=.* -- WARNING: NODE_VERSION_MISMATCH:/,
+  );
+  assert.ok(
+    !logs.slice(1).some((l) => l.includes("NODE_VERSION_MISMATCH")),
+    `expected the warning to appear ONLY on logs[0], never on a later line; logs: ${JSON.stringify(logs)}`,
+  );
   assert.equal(receipts[0].nodeVersion, "v26.2.0");
   assert.match(receipts[0].nodeVersionWarning, /^MISMATCH:/);
 });
@@ -453,6 +510,88 @@ test("runIsolatedSuite: a receipt-write failure is swallowed (logged, not thrown
   });
   assert.equal(exitCode, 3);
   assert.ok(logs.some((l) => l.includes("WARNING") && l.includes("disk full")));
+});
+
+// M1 (검토 1R ⓔ 표 P2-2): a real MISMATCH must never change the returned
+// exit code -- "report only, exit code/judgement unaffected" is a literal
+// contract (resolveNodeVersionWarning's own string), but 1R had no test
+// asserting it at the runIsolatedSuite level, so a mutation that forced
+// exitCode to 1 on MISMATCH would have survived. Uses exit code 5
+// (deliberately not 1) so a mutation hardcoding "1" on MISMATCH cannot
+// coincidentally pass.
+test("runIsolatedSuite: M1 mutation guard -- a real Node-major MISMATCH alongside a REAL failed spawn (exit 5) still returns the spawn's own exit code verbatim, never forced to 1 by the mismatch", () => {
+  const exitCode = runIsolatedSuite({
+    startSampler: () => null,
+    stopSampler: () => null,
+    execFile: execFileForReceiptTests(),
+    spawn: () => ({ status: 5 }),
+    log: () => {},
+    collectFiles: () => [],
+    readFile: completedTapReadFile,
+    writeReceipt: noopWriteReceipt,
+    nodeVersion: "v26.2.0",
+    readPackageJsonFn: () => ({ engines: { node: "20.x" } }),
+  });
+  assert.equal(exitCode, 5);
+});
+
+// M2 (검토 1R ⓔ 표 P2-2): the in-clone `node --test` child must be spawned
+// via `process.execPath` (this runner's OWN binary -- node_version's whole
+// meaning depends on "the child IS the same binary as the parent", see
+// resolveNodeVersionWarning's own header comment), never a bare "node"
+// string (which could resolve to a DIFFERENT installed Node on PATH).
+test("runIsolatedSuite: M2 mutation guard -- the in-clone node --test child is spawned via process.execPath, not a bare 'node' string", () => {
+  let capturedCmd;
+  runIsolatedSuite({
+    startSampler: () => null,
+    stopSampler: () => null,
+    execFile: execFileForReceiptTests(),
+    spawn: (cmd) => {
+      capturedCmd = cmd;
+      return { status: 0 };
+    },
+    log: () => {},
+    collectFiles: () => [],
+    readFile: completedTapReadFile,
+    writeReceipt: noopWriteReceipt,
+  });
+  assert.equal(capturedCmd, process.execPath);
+  assert.notEqual(capturedCmd, "node");
+});
+
+// HYK-464 2R P2-6 ("repoRootOf가 배너보다 먼저 불리는 순서... 를 «배너가
+// 먼저」로"): a non-git cwd makes root resolution throw BEFORE the
+// concurrency banner can be merged with a node-version warning (there is
+// no `root` yet to read engines.node from) -- but the banner itself never
+// depended on root, so it must still be logged before the throw
+// propagates, not silently dropped (1R's actual prior behavior: zero log
+// lines on this path).
+test("runIsolatedSuite: HYK-464 2R P2-6 -- when root resolution itself throws (non-git cwd), the concurrency banner is still logged before the error propagates (not silently dropped)", () => {
+  const logs = [];
+  const execFile = () => {
+    throw new Error(
+      "fatal: not a git repository (or any of the parent directories): .git",
+    );
+  };
+  assert.throws(
+    () =>
+      runIsolatedSuite({
+        startSampler: () => null,
+        stopSampler: () => null,
+        execFile,
+        spawn: () => {
+          throw new Error("must not be reached");
+        },
+        log: (m) => logs.push(m),
+        collectFiles: () => {
+          throw new Error("must not be reached");
+        },
+        concurrency: 3,
+      }),
+    /not a git repository/,
+  );
+  assert.equal(logs.length, 1);
+  assert.match(logs[0], /^\[isolated-suite-runner\] test-concurrency=3 /);
 });
 
 test("runIsolatedSuite: a fail-closed collectFiles throw propagates out (never swallowed into a green run), and cleanup still runs", () => {

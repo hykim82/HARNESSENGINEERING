@@ -303,11 +303,32 @@ function assertNonEmptySwept(swept, root) {
 // install-g1-adapter-list.test.mjs's parseTapSummary (same rule, duplicated
 // rather than shared -- coder-task.md §2 ⓒ-1 leaves the choice to each file
 // and forbids introducing a new shared production module for it).
+//
+// HYK-464 2R (검토 1R P2-3, rounds/REVIEW-r1.md ⓔ 표 S6/S7/S8): 1R의
+// `(?:#.*\r?\n)*?`(임의의 `#` 줄 건너뛰기)는 짝 없는 bare `# tests N` 줄이
+// 진짜 블록 바로 앞에 오면 그 블록의 fail과 잘못 묶인다(S6). 건너뛸 수
+// 있는 줄을 "다른 요약 필드 이름"으로 좁혀(suites/pass/cancelled/
+// skipped/todo/duration_ms) `# Subtest: ...`도 "또 다른 # tests N"도
+// 건너뛰지 못하게 한다 -- runner-receipt-writer.mjs의
+// parseTapSummaryCounts(프로덕션, HYK-464 2R)와 install-g1-adapter-
+// list.test.mjs의 parseTapSummary와 같은 규칙(세 판독 공통, §2 ⓑ).
+// 마지막 완결 블록 뒤에 짝 없는 `# tests N`이 또 있으면(S7, 잘린 새 블록)
+// null -- 그 앞의 무관한 블록을 "진짜인 척" 돌려주지 않는다(판정 불가).
+const TAP_SKIPPABLE_FIELD_LINE =
+  "(?:# (?:suites|pass|cancelled|skipped|todo) \\d+|# duration_ms [\\d.]+)\\r?\\n";
+const LAST_TAP_SUMMARY_PAIR_RE = new RegExp(
+  "^# tests (\\d+)\\r?\\n" +
+    `(?:${TAP_SKIPPABLE_FIELD_LINE})*?` +
+    "# fail (\\d+)\\r?$",
+  "gm",
+);
 function parseLastTapSummaryPair(stdout) {
-  const pairs = [
-    ...stdout.matchAll(/^# tests (\d+)\r?\n(?:#.*\r?\n)*?# fail (\d+)$/gm),
-  ];
-  return pairs.length > 0 ? pairs[pairs.length - 1] : null;
+  const pairs = [...stdout.matchAll(LAST_TAP_SUMMARY_PAIR_RE)];
+  if (pairs.length === 0) return null;
+  const last = pairs[pairs.length - 1];
+  const tail = stdout.slice(last.index + last[0].length);
+  if (/^# tests \d+/m.test(tail)) return null;
+  return last;
 }
 
 function runSweepAndAssert({ root, swept, dir, spawn = spawnSync }) {
@@ -529,6 +550,95 @@ test("parseLastTapSummaryPair: 중첩 블록의 비0 fail이 진짜(마지막) �
 test("parseLastTapSummaryPair mutation guard (P2-2, `^` 앵커): '# tests N'이 줄의 맨 앞이 아니라 다른 텍스트 바로 뒤에 붙어 있으면(그래도 그 뒤에 진짜 개행 + '# fail N' 줄이 옴) 요약으로 오인하지 않는다 -- 앞쪽 `^` 앵커를 지우는 변이는 이 표본을 거짓으로 매치해 RED가 된다", () => {
   const midline = "xyz-prefix# tests 999\n# fail 999\n";
   assert.equal(parseLastTapSummaryPair(midline), null);
+});
+
+// HYK-464 2R P2-3 (검토 1R ⓔ 표 S6/S7/S8, 세 판독 공통 규칙 -- 다른 두
+// 파일의 같은 표본과 같은 근거).
+test("parseLastTapSummaryPair: S6 -- a bare orphan '# tests N' line directly before the real block's own '# tests M' is not paired with the real block's fail (fixed answer = the real block, 300/2)", () => {
+  const s6 = [
+    "1..1",
+    "# tests 7",
+    "# tests 300",
+    "# suites 0",
+    "# pass 298",
+    "# fail 2",
+    "# cancelled 0",
+    "# skipped 1",
+    "# todo 0",
+    "# duration_ms 5.0",
+  ].join("\n");
+  const last = parseLastTapSummaryPair(s6);
+  assert.ok(last);
+  assert.equal(Number(last[1]), 300);
+  assert.equal(Number(last[2]), 2);
+});
+
+test("parseLastTapSummaryPair: S7 -- a complete fake block followed by a truncated real one (cut off before '# fail') returns null (판정 불가), not the preceding fake block's values", () => {
+  const s7 = [
+    "# tests 7",
+    "# suites 0",
+    "# pass 7",
+    "# fail 0",
+    "# cancelled 0",
+    "# skipped 0",
+    "# todo 0",
+    "# duration_ms 1.0",
+    "# tests 300",
+    "# suites 0",
+    "# pass 298",
+  ].join("\n");
+  assert.equal(parseLastTapSummaryPair(s7), null);
+});
+
+test("parseLastTapSummaryPair: S8 -- a trailing decoy line that is NOT '# tests ...' after the real complete block does not trigger the trailing-orphan null guard", () => {
+  const s8 = [
+    "# tests 300",
+    "# suites 0",
+    "# pass 298",
+    "# fail 2",
+    "# cancelled 0",
+    "# skipped 0",
+    "# todo 0",
+    "# duration_ms 5.0",
+    "# fail 999",
+  ].join("\n");
+  const last = parseLastTapSummaryPair(s8);
+  assert.ok(last);
+  assert.equal(Number(last[1]), 300);
+  assert.equal(Number(last[2]), 2);
+});
+
+test("parseLastTapSummaryPair: CRLF line endings (Windows shape) parse identically to LF (M3 mutation guard)", () => {
+  const crlf = NESTED_CHILD_THEN_REAL_TAP_SAMPLE.replace(/\n/g, "\r\n");
+  const last = parseLastTapSummaryPair(crlf);
+  assert.ok(last);
+  assert.equal(Number(last[1]), 300);
+  assert.equal(Number(last[2]), 2);
+});
+
+test("parseLastTapSummaryPair: M4 mutation guard -- picks the LAST block (tests 5), not the one with the largest tests value (tests 300)", () => {
+  const m4 = [
+    "# tests 300",
+    "# suites 0",
+    "# pass 299",
+    "# fail 1",
+    "# cancelled 0",
+    "# skipped 0",
+    "# todo 0",
+    "# duration_ms 999.0",
+    "# tests 5",
+    "# suites 0",
+    "# pass 5",
+    "# fail 0",
+    "# cancelled 0",
+    "# skipped 0",
+    "# todo 0",
+    "# duration_ms 1.0",
+  ].join("\n");
+  const last = parseLastTapSummaryPair(m4);
+  assert.ok(last);
+  assert.equal(Number(last[1]), 5);
+  assert.equal(Number(last[2]), 0);
 });
 
 // HYK-371 4R (coder-task.md §2, "주입 지점이 우회로가 되면 안 된다"): the

@@ -148,11 +148,41 @@ export function resolveNestedConcurrency(desired, { env = process.env } = {}) {
   return Math.min(desired, n);
 }
 
-// §2-1 "상한 값이 러너 로그 첫 줄에 값으로 찍히게 하라": this is logged
-// before formatBanner's line in runIsolatedSuite, making it the literal
-// first line a human watching the run sees.
+// §2-1 "상한 값이 러너 로그 첫 줄에 값으로 찍히게 하라": this text is the
+// run's literal first log() line in the match/UNKNOWN case (no node-version
+// warning to report). HYK-464 2R P2-6 (책임자 판정 2026-10-16 16:4x §1,
+// 원문 "A"): a real MISMATCH is REPORTABLE, never a block, and §2-1's
+// "첫 줄" contract from HYK-473 must also hold for a mismatched run -- so
+// rather than a mismatch warning getting its OWN separate log() call ahead
+// of this banner (1R's shape, which pushed the banner to the SECOND line,
+// contradicting HYK-473 3칸's "literal first line"), `formatFirstRunnerLine`
+// below appends the warning to the END of THIS SAME banner text -- one
+// log() call, one line, both facts. This function's own text never
+// changes; only whether a caller appends a suffix to it does.
 export function formatConcurrencyBanner({ concurrency, reason }) {
   return `[isolated-suite-runner] test-concurrency=${concurrency} (${reason})`;
+}
+
+// HYK-464 2R P2-6: the single first-line formatter. A match/UNKNOWN warning
+// (null, or a string that does not start with "MISMATCH") appends nothing
+// -- the banner alone is the first line, exactly HYK-473's prior contract,
+// unchanged for every existing caller that never has a real mismatch. A
+// real MISMATCH appends " -- WARNING: NODE_VERSION_MISMATCH: <detail>" to
+// the SAME string (책임자 판정 원문 토큰 "WARNING: NODE_VERSION_MISMATCH" --
+// 1R이 쓴 "WARNING: MISMATCH:" 모양을 이 토큰으로 맞춘다). The receipt's
+// own `node_version_warning` field is NOT re-worded here (still "MISMATCH:
+// ..." as resolveNodeVersionWarning returns it) -- only the human-facing
+// log LINE's token changes; this keeps old receipt consumers/relay-
+// handshake-runner-receipt.test.mjs's fixed-shape assertions unaffected
+// (coder-task.md §2 ⓓ leaves that choice to this round's judgment).
+function formatFirstRunnerLine({ concurrency, reason, nodeVersionWarning }) {
+  const banner = formatConcurrencyBanner({ concurrency, reason });
+  if (!nodeVersionWarning?.startsWith("MISMATCH")) return banner;
+  const detail = nodeVersionWarning.replace(
+    /^MISMATCH:/,
+    "NODE_VERSION_MISMATCH:",
+  );
+  return `${banner} -- WARNING: ${detail}`;
 }
 
 const DEFAULT_CONCURRENCY_REASON =
@@ -251,6 +281,18 @@ function resolveHeadShaAndDirty({ root, execFile }) {
   return { sha, dirty: porcelain.trim().length > 0 };
 }
 
+// HYK-464 2R P2-4 (책임자 판정 2026-10-16 16:4x §1): `engines.node`가 단일
+// 고정 major가 아니라 "범위식"(`>=20`, `^20 || ^22`, `20 - 22`,
+// `>=20 <21` 등)이면 그 범위가 가리키는 major가 하나로 정해지지 않으므로,
+// 문자열에서 아무 숫자나 하나 뽑아 "그 major"로 삼는 비교는 의미가 없다
+// -- 그 비교 자체를 "판정 불가"로 접는다(경고 없음, 영수증 UNKNOWN).
+// 허용하는 "단일 버전" 모양: 선택적 `^`/`~` 접두 + 숫자 + (`.` 숫자|`.x`)를
+// 최대 두 번까지(`20` · `20.x` · `20.11` · `20.11.0` · `^20` · `~20.1`) --
+// 공백·`||`·비교 연산자(`<`/`>`)·`-` 구분자가 하나라도 있으면 범위식으로
+// 본다. 단일 버전 안의 `^`/`~`는 "그 major 하나"를 가리키는 호환 표기일
+// 뿐이라 범위식으로 보지 않는다(기존 "20.x" 취급과 동일 선상).
+const SINGLE_VERSION_ENGINES_RE = /^[\^~]?\d+(?:\.(?:\d+|x)){0,2}$/i;
+
 // HYK-464 §2 ⓐ-2: compares the Node major version this run's `node --test`
 // child actually ran under (see buildNodeTestArgs's caller -- it is spawned
 // via `process.execPath`, i.e. this runner's OWN binary, so `nodeVersion`
@@ -260,10 +302,12 @@ function resolveHeadShaAndDirty({ root, execFile }) {
 // this belongs on the run's loud first line -- a mismatch is reportable,
 // never a block: exit code and pass/fail judgement are both untouched).
 // Anything that makes the comparison itself impossible (process.version
-// doesn't parse, engines.node is undeclared/unparseable) is prefixed
-// "UNKNOWN", never collapsed into "no warning" -- coder-task.md §2 ⓐ-2
-// "engines를 못 읽으면 «판정 불가」를 경고 값으로 (조용히 0 금지)". `null`
-// is returned ONLY when the two majors actually agree.
+// doesn't parse, engines.node is undeclared/unparseable, OR (HYK-464 2R
+// P2-4) engines.node is a range expression rather than a single pinned
+// major) is prefixed "UNKNOWN", never collapsed into "no warning" --
+// coder-task.md §2 ⓐ-2 "engines를 못 읽으면 «판정 불가」를 경고 값으로
+// (조용히 0 금지)". `null` is returned ONLY when the two majors actually
+// agree.
 export function resolveNodeVersionWarning({ nodeVersion, enginesNode }) {
   const nodeMajorMatch = /^v?(\d+)/.exec(nodeVersion ?? "");
   if (!nodeMajorMatch) {
@@ -273,9 +317,13 @@ export function resolveNodeVersionWarning({ nodeVersion, enginesNode }) {
   if (typeof enginesNode !== "string" || enginesNode.trim() === "") {
     return `UNKNOWN: package.json's engines.node could not be read/is not declared -- cannot compare against this run's Node ${nodeVersion}, 판정 불가`;
   }
-  const enginesMajorMatch = /(\d+)/.exec(enginesNode);
+  const trimmedEngines = enginesNode.trim();
+  const enginesMajorMatch = /(\d+)/.exec(trimmedEngines);
   if (!enginesMajorMatch) {
     return `UNKNOWN: package.json engines.node value ${JSON.stringify(enginesNode)} has no parseable major version -- cannot compare against this run's Node ${nodeVersion}, 판정 불가`;
+  }
+  if (!SINGLE_VERSION_ENGINES_RE.test(trimmedEngines)) {
+    return `UNKNOWN: package.json engines.node value ${JSON.stringify(enginesNode)} is a range expression, not a single pinned major -- HYK-464 2R P2-4: comparing a single running Node major against a range is not well-defined, 판정 불가`;
   }
   const enginesMajor = Number(enginesMajorMatch[1]);
   if (nodeMajor === enginesMajor) return null;
@@ -304,27 +352,28 @@ function defaultReadPackageJson(path) {
 // HYK-464 §2 ⓐ-2: isolated into its own function so runIsolatedSuite's own
 // complexity/line-count gate doesn't absorb this -- both the two default
 // parameter values (`nodeVersion`/`readPackageJsonFn`, each a branch under
-// this repo's `complexity` rule) AND the MISMATCH-only logging branch live
-// here instead, same "keeps runIsolatedSuite's own complexity gate happy"
-// reasoning as resolveAndLogConcurrency/resolveRunSlot above. Returns the
-// RESOLVED `nodeVersion` (not the possibly-undefined input) alongside the
-// warning, so the caller's receipt records the version this function
-// actually compared -- production callers never pass `nodeVersion`
-// explicitly, so without this, the receipt would wrongly carry `null`
-// instead of the real `process.version`.
-function resolveAndLogNodeVersionWarning({
+// this repo's `complexity` rule) live here. Returns the RESOLVED
+// `nodeVersion` (not the possibly-undefined input) alongside the warning,
+// so the caller's receipt records the version this function actually
+// compared -- production callers never pass `nodeVersion` explicitly, so
+// without this, the receipt would wrongly carry `null` instead of the real
+// `process.version`.
+//
+// HYK-464 2R P2-6: this function no longer logs anything itself (renamed
+// from resolveAndLogNodeVersionWarning) -- 1R's own log() call here, made
+// BEFORE the concurrency banner's log() call in runIsolatedSuite, is
+// exactly what pushed the banner to the SECOND line on a real mismatch
+// (검토 1R 실측). The caller now merges this result into the ONE first-line
+// log() call via formatFirstRunnerLine above.
+function resolveNodeVersionWarningInfo({
   root,
   nodeVersion = process.version,
   readPackageJsonFn = defaultReadPackageJson,
-  log,
 }) {
   const warning = resolveNodeVersionWarning({
     nodeVersion,
     enginesNode: resolveEnginesNode({ root, readPackageJsonFn }),
   });
-  if (warning?.startsWith("MISMATCH")) {
-    log(`[isolated-suite-runner] WARNING: ${warning}`);
-  }
   return { nodeVersion, warning };
 }
 
@@ -502,18 +551,18 @@ function cleanupRunDirs({ keep, log, cloneDir, tapDir }) {
   rmSync(cloneDir, { recursive: true, force: true });
 }
 
-// Resolves the concurrency cap and logs it as the run's first line (§2-1
-// "첫 줄"). Isolated so its branching doesn't count against
-// runIsolatedSuite's own complexity gate.
-function resolveAndLogConcurrency({ concurrency, resolveConcurrencyFn, log }) {
+// Resolves the concurrency cap (pure, no log -- HYK-464 2R P2-6: this no
+// longer logs itself, see runIsolatedSuite's own call site for why).
+// Isolated so its branching doesn't count against runIsolatedSuite's own
+// complexity gate.
+function resolveConcurrencyValue({ concurrency, resolveConcurrencyFn }) {
   const resolveFn = resolveConcurrencyFn ?? resolveConcurrency;
   const resolvedConcurrency = concurrency ?? resolveFn();
   const reason =
     concurrency != null
       ? OVERRIDE_CONCURRENCY_REASON
       : DEFAULT_CONCURRENCY_REASON;
-  log(formatConcurrencyBanner({ concurrency: resolvedConcurrency, reason }));
-  return resolvedConcurrency;
+  return { resolvedConcurrency, reason };
 }
 
 // No numbered artifacts this run (allocation failed, or nothing asked for
@@ -626,7 +675,7 @@ function stopConcurrencySampler({
 // suite's own outcome and the sampled max together. Isolated into its own
 // function purely to keep runIsolatedSuite's own branch count down (same
 // "keeps runIsolatedSuite's own complexity gate happy" reasoning as
-// resolveAndLogConcurrency/resolveRunSlot above) -- no new behavior, just a
+// resolveConcurrencyValue/resolveRunSlot above) -- no new behavior, just a
 // named seam around the three sampler-related statements.
 function spawnSuiteWithSampler({
   spawn,
@@ -659,6 +708,60 @@ function spawnSuiteWithSampler({
   return { outcome, maxConcurrentNode };
 }
 
+// HYK-464 2R P2-6 (책임자 판정 2026-10-16 16:4x §1, 원문 "A"): the run's
+// first log() line must carry BOTH the concurrency banner (HYK-473 §2-1's
+// still-binding "literal first line" contract) AND, on a real node-major
+// mismatch, the warning -- on the SAME line, never a separate second line.
+// Merging requires knowing the warning BEFORE the single log() call, which
+// requires `root` (resolveNodeVersionWarningInfo reads package.json off
+// it) -- but `root` resolution itself can throw (a non-git cwd). 1R's
+// order (`repoRootOf` first, nothing logged at all if it throws) is
+// corrected here: concurrency is resolved (pure, no log) BEFORE the
+// throwable root resolution, and if root resolution throws, the banner
+// (the one piece that never depended on root) is still logged before the
+// error propagates -- "배너가 먼저" (검토 ⓒ 지적, "repoRootOf가 배너보다
+// 먼저 불리는 순서"를 바로잡는다) now holds even on this failure path, not
+// only on the success path. Isolated into its own function so
+// runIsolatedSuite's own complexity/line-count gate doesn't absorb this
+// (same "keeps runIsolatedSuite's own complexity gate happy" reasoning as
+// every other small extraction in this file).
+function resolveRootAndFirstLine({
+  sourceRoot,
+  execFile,
+  concurrency,
+  resolveConcurrencyFn,
+  nodeVersion,
+  readPackageJsonFn,
+  log,
+}) {
+  const { resolvedConcurrency, reason } = resolveConcurrencyValue({
+    concurrency,
+    resolveConcurrencyFn,
+  });
+  let root;
+  try {
+    root = sourceRoot ?? repoRootOf(process.cwd(), execFile);
+  } catch (err) {
+    log(formatConcurrencyBanner({ concurrency: resolvedConcurrency, reason }));
+    throw err;
+  }
+  // The "UNKNOWN/판정 불가" case deliberately contributes no suffix (see
+  // formatFirstRunnerLine) -- every existing caller that mocks a non-real
+  // `root` (no readable package.json) falls into that case, and §2-1's
+  // prior contract (hyk473-runner-cap.test.mjs) must not regress for any
+  // of them: the first line stays banner-only, byte-for-byte as before.
+  const { nodeVersion: resolvedNodeVersion, warning: nodeVersionWarning } =
+    resolveNodeVersionWarningInfo({ root, nodeVersion, readPackageJsonFn });
+  log(
+    formatFirstRunnerLine({
+      concurrency: resolvedConcurrency,
+      reason,
+      nodeVersionWarning,
+    }),
+  );
+  return { root, resolvedConcurrency, resolvedNodeVersion, nodeVersionWarning };
+}
+
 // Orchestrates one full run: clone committed HEAD -> run the suite in the
 // clone -> report -> always clean up (unless `keep`). Returns the child
 // process's exit code so the CLI entry point can propagate it verbatim.
@@ -682,28 +785,19 @@ export function runIsolatedSuite({
   nodeVersion,
   readPackageJsonFn,
 } = {}) {
-  const root = sourceRoot ?? repoRootOf(process.cwd(), execFile);
-  // HYK-464 §2 ⓐ-2: resolved and (on a real MISMATCH only) logged BEFORE
-  // the concurrency banner below -- a genuine mismatch is the loudest thing
-  // this run can report, so it takes the literal first line. The "UNKNOWN/
-  // 판정 불가" case is deliberately NOT logged (it still rides the receipt
-  // via emitRunnerReceipt) -- every existing caller that mocks a non-real
-  // `root` (no readable package.json) falls into that case, and §2-1's
-  // prior, still-binding contract ("resolved concurrency cap is the run's
-  // literal first log line", hyk473-runner-cap.test.mjs) must not regress
-  // for any of them.
-  const { nodeVersion: resolvedNodeVersion, warning: nodeVersionWarning } =
-    resolveAndLogNodeVersionWarning({
-      root,
+  // HYK-464 2R P2-6: see resolveRootAndFirstLine's own header for why this
+  // single call replaces 1R's separate repoRootOf + resolveAndLogNodeVersion
+  // Warning + resolveAndLogConcurrency sequence.
+  const { root, resolvedConcurrency, resolvedNodeVersion, nodeVersionWarning } =
+    resolveRootAndFirstLine({
+      sourceRoot,
+      execFile,
+      concurrency,
+      resolveConcurrencyFn,
       nodeVersion,
       readPackageJsonFn,
       log,
     });
-  const resolvedConcurrency = resolveAndLogConcurrency({
-    concurrency,
-    resolveConcurrencyFn,
-    log,
-  });
   const { sha, dirty } = resolveHeadShaAndDirty({ root, execFile });
 
   const cloneDir = mkdtempSync(join(longFormTmpdir(), "hyk208-isolated-"));

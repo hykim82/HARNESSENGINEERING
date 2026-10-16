@@ -317,12 +317,39 @@ function runInstalledNodeTest(installedCheckDir, names, timeoutMs = 300000) {
 // 필요 없다. 요약 쌍 자체를 전혀 못 찾으면(`# tests N` 뒤에 짝이 되는 `# fail
 // N`이 전혀 없음 -- 리포터가 TAP이 아니거나 출력이 잘렸다는 뜻) null을
 // 돌려준다.
-const TAP_SUMMARY_PAIR_RE = /^# tests (\d+)\r?\n(?:#.*\r?\n)*?# fail (\d+)$/gm;
+//
+// HYK-464 2R (검토 1R P2-3, rounds/REVIEW-r1.md ⓔ 표 S6/S7/S8): 위 1R
+// 정규식의 `(?:#.*\r?\n)*?`는 "#"로 시작하는 줄이면 무엇이든 건너뛴다 --
+// 그래서 짝 없는 bare `# tests 7` 줄 바로 뒤에 진짜 블록이 오면
+// (`# tests 300\n# suites 0\n...# fail 2`), 가짜 tests(7)와 진짜 fail(2)이
+// 서로 다른 블록에서 잘못 묶인다(S6). 건너뛸 수 있는 줄을 "다른 요약
+// 필드 이름"으로만 좁힌다(suites/pass/cancelled/skipped/todo/duration_ms --
+// 이 함수가 안 읽는 필드들) -- `# Subtest: ...`도 "또 다른 # tests N"도
+// 건너뛸 수 없으므로, 그 경계에서 매치 시도가 멈춘다. runner-receipt-
+// writer.mjs의 parseTapSummaryCounts(프로덕션, HYK-464 2R)와 같은 규칙,
+// 같은 근거 -- 공유 모듈은 두지 않는다(coder-task.md §2 ⓑ, 프로덕션
+// 모듈 신설 금지).
+//
+// 마지막 완결 블록 뒤에 짝 없는 `# tests N`이 또 있으면(S7: 새 블록이
+// 시작됐다가 못 끝났다) null -- 그 앞의(무관할 수 있는) 블록을 "진짜인
+// 척" 돌려주지 않는다(판정 불가, "앞 블록" 아님 -- runner-receipt-
+// writer.mjs의 같은 판단과 같은 근거: hasTapCompletion류 소비자가 잘린
+// 꼬리를 과거 블록으로 메우면 거짓 완결로 읽을 위험).
+const TAP_SKIPPABLE_FIELD_LINE =
+  "(?:# (?:suites|pass|cancelled|skipped|todo) \\d+|# duration_ms [\\d.]+)\\r?\\n";
+const TAP_SUMMARY_PAIR_RE = new RegExp(
+  "^# tests (\\d+)\\r?\\n" +
+    `(?:${TAP_SKIPPABLE_FIELD_LINE})*?` +
+    "# fail (\\d+)\\r?$",
+  "gm",
+);
 function parseTapSummary(text) {
   const t = text ?? "";
   const pairs = [...t.matchAll(TAP_SUMMARY_PAIR_RE)];
   if (pairs.length > 0) {
     const last = pairs[pairs.length - 1];
+    const tail = t.slice(last.index + last[0].length);
+    if (/^# tests \d+/m.test(tail)) return null;
     return { tests: Number(last[1]), fail: Number(last[2]) };
   }
   // No paired "tests...fail" block found at all -- fall back to whether
@@ -495,6 +522,83 @@ test("parseTapSummary: 중첩 블록의 비0 fail이 진짜(마지막) 블록의
 test("parseTapSummary mutation guard (P2-2, `^` 앵커): '# tests N'이 줄의 맨 앞이 아니라 다른 텍스트 바로 뒤에 붙어 있으면(그래도 그 뒤에 진짜 개행 + '# fail N' 줄이 옴) 요약으로 오인하지 않는다 -- 앞쪽 `^` 앵커를 지우는 변이는 이 표본을 거짓으로 매치해 RED가 된다", () => {
   const midline = "xyz-prefix# tests 999\n# fail 999\n";
   assert.equal(parseTapSummary(midline), null);
+});
+
+// HYK-464 2R P2-3 (검토 1R ⓔ 표 S6/S7/S8, runner-receipt-writer.test.mjs의
+// 같은 세 표본과 같은 규칙 -- coder-task.md §2 ⓑ "세 판독 공통 규칙").
+test("parseTapSummary: S6 -- a bare orphan '# tests N' line directly before the real block's own '# tests M' is not paired with the real block's fail (fixed answer = the real block, 300/2)", () => {
+  const s6 = [
+    "1..1",
+    "# tests 7",
+    "# tests 300",
+    "# suites 0",
+    "# pass 298",
+    "# fail 2",
+    "# cancelled 0",
+    "# skipped 1",
+    "# todo 0",
+    "# duration_ms 5.0",
+  ].join("\n");
+  assert.deepEqual(parseTapSummary(s6), { tests: 300, fail: 2 });
+});
+
+test("parseTapSummary: S7 -- a complete fake block followed by a truncated real one (cut off before '# fail') returns null (판정 불가), not the preceding fake block's values", () => {
+  const s7 = [
+    "# tests 7",
+    "# suites 0",
+    "# pass 7",
+    "# fail 0",
+    "# cancelled 0",
+    "# skipped 0",
+    "# todo 0",
+    "# duration_ms 1.0",
+    "# tests 300",
+    "# suites 0",
+    "# pass 298",
+  ].join("\n");
+  assert.equal(parseTapSummary(s7), null);
+});
+
+test("parseTapSummary: S8 -- a trailing decoy line that is NOT '# tests ...' after the real complete block does not trigger the trailing-orphan null guard", () => {
+  const s8 = [
+    "# tests 300",
+    "# suites 0",
+    "# pass 298",
+    "# fail 2",
+    "# cancelled 0",
+    "# skipped 0",
+    "# todo 0",
+    "# duration_ms 5.0",
+    "# fail 999",
+  ].join("\n");
+  assert.deepEqual(parseTapSummary(s8), { tests: 300, fail: 2 });
+});
+
+test("parseTapSummary: CRLF line endings (Windows shape) parse identically to LF (M3 mutation guard)", () => {
+  const crlf = NODE20_TAP_NESTED_CHILD_THEN_REAL_SAMPLE.replace(/\n/g, "\r\n");
+  assert.deepEqual(parseTapSummary(crlf), { tests: 300, fail: 2 });
+});
+
+test("parseTapSummary: M4 mutation guard -- picks the LAST block (tests 5), not the one with the largest tests value (tests 300)", () => {
+  const m4 = [
+    "# tests 300",
+    "# suites 0",
+    "# pass 299",
+    "# fail 1",
+    "# cancelled 0",
+    "# skipped 0",
+    "# todo 0",
+    "# duration_ms 999.0",
+    "# tests 5",
+    "# suites 0",
+    "# pass 5",
+    "# fail 0",
+    "# cancelled 0",
+    "# skipped 0",
+    "# todo 0",
+    "# duration_ms 1.0",
+  ].join("\n");
+  assert.deepEqual(parseTapSummary(m4), { tests: 5, fail: 0 });
 });
 
 test("(b) real installer (not --dry-run) installs into a git-init target outside this worktree, and `node --test` on the two newly-listed test files there has 0 failures", () => {

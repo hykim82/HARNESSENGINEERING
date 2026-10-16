@@ -69,16 +69,67 @@ export function formatKst(nowMs) {
 // `#`로 같은 요약을 찍는다 -- 이 파서는 tap 목적지 파일을 대상으로 하므로
 // `#`만 본다. 못 찾은 필드는 null로 남긴다(추정치로 메우지 않는다 --
 // fail-closed는 소비 쪽 책임이고, 이 함수는 "모른다"를 정직하게 알린다).
+//
+// HYK-464 2R (검토 1R P2-1 실측, rounds/REVIEW-r1.md ⓕ): 이 run의 실제
+// tapPath 파일에 중첩 `node --test` 자식(예: hyk359의 nested self-sweep)의
+// 자기 요약이 부모 프로세스 요약보다 "먼저" `#` 줄로 섞여 들어간다 -- 1R의
+// `new RegExp(...,"m").exec(...)`(g 없음, "첫 일치")는 그 가짜 블록을
+// 집어, 실패한 실행(runner_exit 1)의 영수증이 "fail 0"을 적었다(검토
+// 원문 인용 그대로: runner-receipt-run1.json이 tests 7 · fail 0을 적었는데
+// 실제 runner_status는 TESTS_FAILED였다). 아래 정의가 그 공백을 메운다 --
+// install-g1-adapter-list.test.mjs의 parseTapSummary ·
+// hyk359-ambient-env-regression.test.mjs의 parseLastTapSummaryPair가 같은
+// 규칙을 테스트 파일 안에 중복 정의한다(coder-task.md §2 ⓑ: 프로덕션
+// 모듈 신설 금지 -- 세 곳이 같은 "요약 블록 경계" 규칙을 공유하되 import로
+// 엮이지는 않는다).
+//
+// 경계 규칙: 진짜 node --test tap 요약은 항상 `# tests N` -> (중간에
+// `# suites`/`# cancelled`/`# todo`/`# duration_ms`가 몇 개든 끼어도 됨,
+// 이 필드들은 이 함수가 안 읽으므로 스킵 가능) -> `# pass N` -> (같은 스킵)
+// -> `# fail N` -> (같은 스킵) -> `# skipped N` 순서로 "서로 다른 요약
+// 필드만" 사이에 둔다. `# Subtest: ...`처럼 요약 필드가 아닌 임의의 `#`
+// 줄은 스킵 대상이 아니다 -- 그래서 중첩 자식의 블록이 그 직후의 서브테스트
+// 줄(TAP 구조상 반드시 뒤따른다)에서 매치가 끊겨, 진짜 블록까지 이어붙지
+// 않는다(1R의 버그가 정확히 "임의의 `#.*` 줄은 다 건너뜀"이었다면 이
+// 함수는 그 전철을 밟지 않는다 -- 단, 이 함수는 pick-per-field가 아니라
+// "하나의 블록에서 네 필드를 함께" 뽑으므로 1R과 같은 결함 유형 자체가
+// 없다).
+//
+// 중복 매치가 있으면 "마지막" 블록을 쓴다(검토 ⓑ 실측: 중첩 자식의
+// 블록이 항상 부모 블록보다 먼저 온다). 마지막 완결 블록 "뒤"에 짝 없는
+// `# tests N` 줄이 또 있으면(= 새 블록이 시작됐다가 못 끝났다 -- 잘린
+// 요약) null을 돌려준다, 그 앞의(어쩌면 무관한) 블록 값을 "진짜인 척"
+// 돌려주지 않는다 -- isolated-suite-runner.mjs의 hasTapCompletion은 이
+// 함수의 `tests != null`을 "완결됐다"는 신호로 쓰므로(HYK-477 §2-3,
+// classifySpawnOutcome), 잘린 꼬리를 조용히 과거 블록으로 메우면 진짜
+// 강제종료/OOM을 "완결된 TESTS_FAILED"로 둔갑시킬 위험이 있다(P2-3,
+// 2R 판단 -- 잘린 블록 = «판정 불가», «앞 블록» 아님).
+const TAP_SKIPPABLE_FIELD_LINE =
+  "(?:# (?:suites|cancelled|todo) \\d+|# duration_ms [\\d.]+)\\r?\\n";
+const TAP_SUMMARY_BLOCK_RE = new RegExp(
+  "^# tests (\\d+)\\r?\\n" +
+    `(?:${TAP_SKIPPABLE_FIELD_LINE})*?` +
+    "# pass (\\d+)\\r?\\n" +
+    `(?:${TAP_SKIPPABLE_FIELD_LINE})*?` +
+    "# fail (\\d+)\\r?\\n" +
+    `(?:${TAP_SKIPPABLE_FIELD_LINE})*?` +
+    "# skipped (\\d+)\\r?$",
+  "gm",
+);
+
 export function parseTapSummaryCounts(tapText) {
-  const pick = (label) => {
-    const m = new RegExp(`^# ${label} (\\d+)\\s*$`, "m").exec(tapText ?? "");
-    return m ? Number(m[1]) : null;
-  };
+  const text = tapText ?? "";
+  const empty = { tests: null, pass: null, fail: null, skip: null };
+  const blocks = [...text.matchAll(TAP_SUMMARY_BLOCK_RE)];
+  if (blocks.length === 0) return empty;
+  const last = blocks[blocks.length - 1];
+  const tail = text.slice(last.index + last[0].length);
+  if (/^# tests \d+/m.test(tail)) return empty;
   return {
-    tests: pick("tests"),
-    pass: pick("pass"),
-    fail: pick("fail"),
-    skip: pick("skipped"),
+    tests: Number(last[1]),
+    pass: Number(last[2]),
+    fail: Number(last[3]),
+    skip: Number(last[4]),
   };
 }
 
