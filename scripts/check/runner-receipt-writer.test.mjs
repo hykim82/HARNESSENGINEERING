@@ -107,6 +107,8 @@ test("buildRunnerReceipt: shape has all §2-1-required fields, schema_version pi
     ),
     finished_at: "2026-01-01 09:00:00 KST",
     max_concurrent_node: null,
+    node_version: null,
+    node_version_warning: null,
   });
 });
 
@@ -147,6 +149,37 @@ test("buildRunnerReceipt: maxConcurrentNode is carried verbatim as max_concurren
     0,
     "an observed max of 0 must not be coerced to null -- 0 is a real (if surprising) measurement",
   );
+});
+
+// HYK-464 §2 ⓐ-1/ⓐ-2: node_version is carried verbatim (never parsed/
+// normalized here -- that is isolated-suite-runner.mjs's own
+// resolveNodeVersionWarning's job, this builder just stores what it is
+// given), and node_version_warning defaults to null when omitted (a match,
+// or a caller that never computed one) -- never silently coerced into some
+// other "no warning" sentinel.
+test("buildRunnerReceipt: nodeVersion/nodeVersionWarning are carried verbatim as node_version/node_version_warning, both null when omitted", () => {
+  const withBoth = buildRunnerReceipt({
+    runnerExit: 0,
+    runnerStatus: RUNNER_STATUS.OK,
+    counts: { tests: 1, pass: 1, fail: 0, skip: 0 },
+    headCommit: "abc",
+    finishedAtMs: 0,
+    nodeVersion: "v26.2.0",
+    nodeVersionWarning:
+      'MISMATCH: this run\'s node --test child ran under v26.2.0 (major 26), but package.json declares engines.node "20.x" (major 20) -- report only, exit code/judgement unaffected',
+  });
+  assert.equal(withBoth.node_version, "v26.2.0");
+  assert.match(withBoth.node_version_warning, /^MISMATCH:/);
+
+  const omitted = buildRunnerReceipt({
+    runnerExit: 0,
+    runnerStatus: RUNNER_STATUS.OK,
+    counts: { tests: 1, pass: 1, fail: 0, skip: 0 },
+    headCommit: "abc",
+    finishedAtMs: 0,
+  });
+  assert.equal(omitted.node_version, null);
+  assert.equal(omitted.node_version_warning, null);
 });
 
 test("buildRunnerReceipt: a non-zero runner_exit is preserved verbatim, not clamped/normalized to 1 -- the exact observed code matters", () => {

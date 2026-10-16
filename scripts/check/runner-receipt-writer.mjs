@@ -89,6 +89,30 @@ export function parseTapSummaryCounts(tapText) {
 // itself was unavailable (sampler failed to start/stop cleanly, or this
 // caller predates the field) -- a DIFFERENT fact from "0 processes seen",
 // so it is never coerced to 0.
+// HYK-464 §2 ⓐ-1/ⓐ-2: `node_version` records exactly which Node binary ran
+// this run's `node --test` child (isolated-suite-runner.mjs's
+// spawnSuiteInClone spawns that child via `process.execPath`, i.e. the SAME
+// binary as this runner process itself -- so the parent's own
+// `process.version` IS the child's version, verbatim, with no separate
+// "ask the child" step needed). `node_version_warning` is null when that
+// version's major agrees with package.json's declared `engines.node`
+// major, a descriptive string on a real mismatch, and a DIFFERENT
+// descriptive string (never a silent null) when the comparison itself
+// could not be made (engines.node undeclared/unparseable, or
+// process.version unparseable) -- "판정 불가" must never collapse into
+// "0 경고" (coder-task.md §2 ⓐ-2 "조용히 0 금지"). Never blocks: this
+// field rides the receipt alongside an unaffected runner_exit/runner_status,
+// the same "report, don't gate" posture as max_concurrent_node above.
+// Pulled out of buildRunnerReceipt below so that function's own
+// complexity gate doesn't absorb these four counts fields' `?.`/`??`
+// branches (HYK-464 §2 ⓐ-1: adding node_version/node_version_warning
+// pushed the inline version over the limit) -- no behavior change, this is
+// byte-for-byte the same `counts?.[key] ?? null` four call sites previously
+// wrote out individually.
+function countField(counts, key) {
+  return counts?.[key] ?? null;
+}
+
 export function buildRunnerReceipt({
   runnerExit,
   runnerStatus,
@@ -96,18 +120,22 @@ export function buildRunnerReceipt({
   headCommit,
   finishedAtMs,
   maxConcurrentNode,
+  nodeVersion,
+  nodeVersionWarning,
 }) {
   return {
     schema_version: RUNNER_RECEIPT_SCHEMA_VERSION,
     runner_exit: runnerExit,
     runner_status: runnerStatus ?? deriveRunnerStatus(runnerExit),
-    tests: counts?.tests ?? null,
-    pass: counts?.pass ?? null,
-    fail: counts?.fail ?? null,
-    skip: counts?.skip ?? null,
+    tests: countField(counts, "tests"),
+    pass: countField(counts, "pass"),
+    fail: countField(counts, "fail"),
+    skip: countField(counts, "skip"),
     head_commit: headCommit,
     finished_at: formatKst(finishedAtMs),
     max_concurrent_node: maxConcurrentNode ?? null,
+    node_version: nodeVersion ?? null,
+    node_version_warning: nodeVersionWarning ?? null,
   };
 }
 
@@ -131,6 +159,8 @@ export function writeRunnerReceipt({
   headCommit,
   finishedAtMs,
   maxConcurrentNode,
+  nodeVersion,
+  nodeVersionWarning,
   mkdirFn = mkdirSync,
   writeFileFn = writeFileSync,
 }) {
@@ -143,6 +173,8 @@ export function writeRunnerReceipt({
     headCommit,
     finishedAtMs,
     maxConcurrentNode,
+    nodeVersion,
+    nodeVersionWarning,
   });
   const path = join(dir, RUNNER_RECEIPT_FILENAME);
   writeFileFn(path, JSON.stringify(receipt, null, 2) + "\n", "utf8");
@@ -248,6 +280,8 @@ export function writeNumberedRunnerReceipt({
   headCommit,
   finishedAtMs,
   maxConcurrentNode,
+  nodeVersion,
+  nodeVersionWarning,
   writeFileFn = writeFileSync,
 }) {
   const receipt = buildRunnerReceipt({
@@ -257,6 +291,8 @@ export function writeNumberedRunnerReceipt({
     headCommit,
     finishedAtMs,
     maxConcurrentNode,
+    nodeVersion,
+    nodeVersionWarning,
   });
   writeFileFn(receiptPath, JSON.stringify(receipt, null, 2) + "\n", "utf8");
   return { path: receiptPath, receipt };

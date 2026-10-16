@@ -9,6 +9,7 @@ import {
   TEST_DIRS,
   collectTestFiles,
   formatBanner,
+  resolveNodeVersionWarning,
   runIsolatedSuite,
 } from "./isolated-suite-runner.mjs";
 
@@ -90,6 +91,71 @@ test("formatBanner: a dirty source checkout gets an explicit extra NOTE line, no
   const dirty = formatBanner({ sha: "def456", dirty: true });
   assert.match(dirty, /tested commit def456/);
   assert.match(dirty, /NOTE: the source checkout has uncommitted changes/);
+});
+
+// HYK-464 §2 ⓐ-2: resolveNodeVersionWarning is a pure function (no spawn,
+// no fs) -- unit-tested directly against synthetic version/engines-range
+// strings, the same way node-target-version.test.mjs unit-tests
+// resolveEnginesMajor against synthetic package.json text.
+test("resolveNodeVersionWarning: matching majors -> null (no warning)", () => {
+  assert.equal(
+    resolveNodeVersionWarning({ nodeVersion: "v20.11.0", enginesNode: "20.x" }),
+    null,
+  );
+});
+
+test("resolveNodeVersionWarning: differing majors -> MISMATCH naming both versions, never a block (report-only, no exit-code language)", () => {
+  const warning = resolveNodeVersionWarning({
+    nodeVersion: "v26.2.0",
+    enginesNode: "20.x",
+  });
+  assert.match(warning, /^MISMATCH:/);
+  assert.match(warning, /v26\.2\.0/);
+  assert.match(warning, /20\.x/);
+});
+
+test("resolveNodeVersionWarning: a major-only coincidental substring (Node 12 vs engines '120.x') is NOT treated as a match -- majors are parsed as whole leading numbers, not substrings", () => {
+  const warning = resolveNodeVersionWarning({
+    nodeVersion: "v12.0.0",
+    enginesNode: "120.x",
+  });
+  assert.match(warning, /^MISMATCH:/);
+});
+
+test("resolveNodeVersionWarning: engines.node undeclared (null) -> UNKNOWN/판정 불가, never silently null/0", () => {
+  const warning = resolveNodeVersionWarning({
+    nodeVersion: "v20.11.0",
+    enginesNode: null,
+  });
+  assert.match(warning, /^UNKNOWN:/);
+  assert.match(warning, /판정 불가/);
+});
+
+test("resolveNodeVersionWarning: engines.node present but unparseable (no digits) -> UNKNOWN/판정 불가", () => {
+  const warning = resolveNodeVersionWarning({
+    nodeVersion: "v20.11.0",
+    enginesNode: "latest",
+  });
+  assert.match(warning, /^UNKNOWN:/);
+});
+
+test("resolveNodeVersionWarning: nodeVersion itself unparseable -> UNKNOWN/판정 불가 (not thrown, not a false match)", () => {
+  const warning = resolveNodeVersionWarning({
+    nodeVersion: "garbage",
+    enginesNode: "20.x",
+  });
+  assert.match(warning, /^UNKNOWN:/);
+});
+
+test("resolveNodeVersionWarning: a range with a trailing larger number (e.g. '>=20 <21') resolves off the FIRST/leading number, not any later one", () => {
+  assert.equal(
+    resolveNodeVersionWarning({
+      nodeVersion: "v20.0.0",
+      enginesNode: ">=20 <21",
+    }),
+    null,
+    "major 20 vs the range's leading '20' should match -- a trailing '21' must not be picked up as the engines major",
+  );
 });
 
 // HYK-411: every test below that doesn't specifically exercise receipt
@@ -289,6 +355,86 @@ test("runIsolatedSuite: an unreadable tap file degrades to null counts (not a cr
     skip: null,
   });
   assert.ok(logs.some((l) => l.includes("WARNING")));
+});
+
+// HYK-464 §2 ⓐ-1/ⓐ-2: wiring tests for the node-version receipt field and
+// its first-line warning. These inject `readPackageJsonFn`/`nodeVersion`
+// directly (both default parameters) rather than touching the real fs --
+// every OTHER test in this file (and in hyk473-runner-cap.test.mjs, out of
+// this round's product_scope) relies on the default readPackageJsonFn
+// failing against their fake "/src" root and degrading to the UNKNOWN/
+// 판정 불가 case, which is deliberately never logged (see
+// runIsolatedSuite's own comment) -- that is what keeps "the resolved
+// concurrency cap is the run's literal first log line"
+// (hyk473-runner-cap.test.mjs) from regressing.
+test("runIsolatedSuite: a real Node-major MISMATCH is logged as the literal first line (ahead of the concurrency banner) and rides the receipt payload", () => {
+  const receipts = [];
+  const logs = [];
+  runIsolatedSuite({
+    startSampler: () => null,
+    stopSampler: () => null,
+    execFile: execFileForReceiptTests(),
+    spawn: () => ({ status: 0 }),
+    log: (m) => logs.push(m),
+    collectFiles: () => [],
+    readFile: completedTapReadFile,
+    writeReceipt: (payload) => {
+      receipts.push(payload);
+      return { path: "(stubbed)", receipt: {} };
+    },
+    nodeVersion: "v26.2.0",
+    readPackageJsonFn: () => ({ engines: { node: "20.x" } }),
+  });
+  assert.match(logs[0], /^\[isolated-suite-runner\] WARNING: MISMATCH:/);
+  assert.equal(receipts[0].nodeVersion, "v26.2.0");
+  assert.match(receipts[0].nodeVersionWarning, /^MISMATCH:/);
+});
+
+test("runIsolatedSuite: matching Node majors -> no warning logged, receipt's nodeVersionWarning is null, nodeVersion is still recorded", () => {
+  const receipts = [];
+  const logs = [];
+  runIsolatedSuite({
+    startSampler: () => null,
+    stopSampler: () => null,
+    execFile: execFileForReceiptTests(),
+    spawn: () => ({ status: 0 }),
+    log: (m) => logs.push(m),
+    collectFiles: () => [],
+    readFile: completedTapReadFile,
+    writeReceipt: (payload) => {
+      receipts.push(payload);
+      return { path: "(stubbed)", receipt: {} };
+    },
+    nodeVersion: "v20.11.0",
+    readPackageJsonFn: () => ({ engines: { node: "20.x" } }),
+  });
+  assert.ok(
+    !logs.some((l) => l.includes("MISMATCH") || l.includes("UNKNOWN")),
+    `expected no node-version warning logged on a match; logs: ${JSON.stringify(logs)}`,
+  );
+  assert.equal(receipts[0].nodeVersion, "v20.11.0");
+  assert.equal(receipts[0].nodeVersionWarning, null);
+});
+
+test("runIsolatedSuite: engines.node unreadable (default readPackageJsonFn against a fake root, every other test's shape) -> UNKNOWN/판정 불가 rides the receipt but is NOT logged, and the concurrency banner stays the literal first line (§2-1's prior contract, hyk473-runner-cap.test.mjs, must not regress)", () => {
+  const receipts = [];
+  const logs = [];
+  runIsolatedSuite({
+    startSampler: () => null,
+    stopSampler: () => null,
+    execFile: execFileForReceiptTests(),
+    spawn: () => ({ status: 0 }),
+    log: (m) => logs.push(m),
+    collectFiles: () => [],
+    readFile: completedTapReadFile,
+    writeReceipt: (payload) => {
+      receipts.push(payload);
+      return { path: "(stubbed)", receipt: {} };
+    },
+    nodeVersion: "v26.2.0",
+  });
+  assert.match(logs[0], /^\[isolated-suite-runner\] test-concurrency=/);
+  assert.match(receipts[0].nodeVersionWarning, /^UNKNOWN:/);
 });
 
 test("runIsolatedSuite: a receipt-write failure is swallowed (logged, not thrown) and the real exit code still propagates -- writing a receipt must never mask the suite's own result", () => {

@@ -236,6 +236,98 @@ function repoRootOf(cwd, execFile) {
   }).trim();
 }
 
+// Isolated purely to keep runIsolatedSuite's own line-count gate happy (same
+// reasoning as the other small extractions in this file) -- no behavior
+// change from the two inline execFile calls this replaces.
+function resolveHeadShaAndDirty({ root, execFile }) {
+  const sha = execFile("git", ["rev-parse", "HEAD"], {
+    cwd: root,
+    encoding: "utf8",
+  }).trim();
+  const porcelain = execFile("git", ["status", "--porcelain"], {
+    cwd: root,
+    encoding: "utf8",
+  });
+  return { sha, dirty: porcelain.trim().length > 0 };
+}
+
+// HYK-464 §2 ⓐ-2: compares the Node major version this run's `node --test`
+// child actually ran under (see buildNodeTestArgs's caller -- it is spawned
+// via `process.execPath`, i.e. this runner's OWN binary, so `nodeVersion`
+// here is always that same binary's `process.version`) against
+// package.json's declared `engines.node` major. A genuine mismatch is
+// prefixed "MISMATCH" (the caller below uses that prefix to decide whether
+// this belongs on the run's loud first line -- a mismatch is reportable,
+// never a block: exit code and pass/fail judgement are both untouched).
+// Anything that makes the comparison itself impossible (process.version
+// doesn't parse, engines.node is undeclared/unparseable) is prefixed
+// "UNKNOWN", never collapsed into "no warning" -- coder-task.md §2 ⓐ-2
+// "engines를 못 읽으면 «판정 불가」를 경고 값으로 (조용히 0 금지)". `null`
+// is returned ONLY when the two majors actually agree.
+export function resolveNodeVersionWarning({ nodeVersion, enginesNode }) {
+  const nodeMajorMatch = /^v?(\d+)/.exec(nodeVersion ?? "");
+  if (!nodeMajorMatch) {
+    return `UNKNOWN: could not parse a major version out of this run's own process.version (${JSON.stringify(nodeVersion)}) -- 판정 불가`;
+  }
+  const nodeMajor = Number(nodeMajorMatch[1]);
+  if (typeof enginesNode !== "string" || enginesNode.trim() === "") {
+    return `UNKNOWN: package.json's engines.node could not be read/is not declared -- cannot compare against this run's Node ${nodeVersion}, 판정 불가`;
+  }
+  const enginesMajorMatch = /(\d+)/.exec(enginesNode);
+  if (!enginesMajorMatch) {
+    return `UNKNOWN: package.json engines.node value ${JSON.stringify(enginesNode)} has no parseable major version -- cannot compare against this run's Node ${nodeVersion}, 판정 불가`;
+  }
+  const enginesMajor = Number(enginesMajorMatch[1]);
+  if (nodeMajor === enginesMajor) return null;
+  return `MISMATCH: this run's node --test child ran under ${nodeVersion} (major ${nodeMajor}), but package.json declares engines.node ${JSON.stringify(enginesNode)} (major ${enginesMajor}) -- report only, exit code/judgement unaffected`;
+}
+
+// HYK-464 §2 ⓐ-2: reads `engines.node` off the SOURCE repo's package.json
+// (not the clone's -- the clone is disposable and this is a property of
+// the committed repo state, not of any one run's artifacts). Never throws:
+// an unreadable/malformed package.json degrades to `null`, which
+// resolveNodeVersionWarning above turns into an honest "UNKNOWN/판정 불가"
+// rather than a crash or a silently-skipped comparison.
+function resolveEnginesNode({ root, readPackageJsonFn }) {
+  try {
+    const pkg = readPackageJsonFn(join(root, "package.json"));
+    return typeof pkg?.engines?.node === "string" ? pkg.engines.node : null;
+  } catch {
+    return null;
+  }
+}
+
+function defaultReadPackageJson(path) {
+  return JSON.parse(readFileSync(path, "utf8"));
+}
+
+// HYK-464 §2 ⓐ-2: isolated into its own function so runIsolatedSuite's own
+// complexity/line-count gate doesn't absorb this -- both the two default
+// parameter values (`nodeVersion`/`readPackageJsonFn`, each a branch under
+// this repo's `complexity` rule) AND the MISMATCH-only logging branch live
+// here instead, same "keeps runIsolatedSuite's own complexity gate happy"
+// reasoning as resolveAndLogConcurrency/resolveRunSlot above. Returns the
+// RESOLVED `nodeVersion` (not the possibly-undefined input) alongside the
+// warning, so the caller's receipt records the version this function
+// actually compared -- production callers never pass `nodeVersion`
+// explicitly, so without this, the receipt would wrongly carry `null`
+// instead of the real `process.version`.
+function resolveAndLogNodeVersionWarning({
+  root,
+  nodeVersion = process.version,
+  readPackageJsonFn = defaultReadPackageJson,
+  log,
+}) {
+  const warning = resolveNodeVersionWarning({
+    nodeVersion,
+    enginesNode: resolveEnginesNode({ root, readPackageJsonFn }),
+  });
+  if (warning?.startsWith("MISMATCH")) {
+    log(`[isolated-suite-runner] WARNING: ${warning}`);
+  }
+  return { nodeVersion, warning };
+}
+
 // HYK-411 §2-1: the runner writes its OWN observed exit code to a receipt
 // file -- a downstream pipe (`npm test | tail`) can rewrite what the shell
 // sees as ITS exit code, but it cannot reach back into this process and
@@ -271,6 +363,8 @@ function emitRunnerReceipt({
   nowMs,
   log,
   maxConcurrentNode,
+  nodeVersion,
+  nodeVersionWarning,
 }) {
   let counts = { tests: null, pass: null, fail: null, skip: null };
   try {
@@ -290,6 +384,8 @@ function emitRunnerReceipt({
       headCommit: sha,
       finishedAtMs,
       maxConcurrentNode,
+      nodeVersion,
+      nodeVersionWarning,
     });
     log(`[isolated-suite-runner] runner receipt written -> ${path}`);
   } catch (err) {
@@ -307,6 +403,8 @@ function emitRunnerReceipt({
       headCommit: sha,
       finishedAtMs,
       maxConcurrentNode,
+      nodeVersion,
+      nodeVersionWarning,
     });
     log(`[isolated-suite-runner] per-run numbered receipt written -> ${path}`);
   } catch (err) {
@@ -581,22 +679,32 @@ export function runIsolatedSuite({
   resolveConcurrencyFn,
   startSampler,
   stopSampler,
+  nodeVersion,
+  readPackageJsonFn,
 } = {}) {
+  const root = sourceRoot ?? repoRootOf(process.cwd(), execFile);
+  // HYK-464 §2 ⓐ-2: resolved and (on a real MISMATCH only) logged BEFORE
+  // the concurrency banner below -- a genuine mismatch is the loudest thing
+  // this run can report, so it takes the literal first line. The "UNKNOWN/
+  // 판정 불가" case is deliberately NOT logged (it still rides the receipt
+  // via emitRunnerReceipt) -- every existing caller that mocks a non-real
+  // `root` (no readable package.json) falls into that case, and §2-1's
+  // prior, still-binding contract ("resolved concurrency cap is the run's
+  // literal first log line", hyk473-runner-cap.test.mjs) must not regress
+  // for any of them.
+  const { nodeVersion: resolvedNodeVersion, warning: nodeVersionWarning } =
+    resolveAndLogNodeVersionWarning({
+      root,
+      nodeVersion,
+      readPackageJsonFn,
+      log,
+    });
   const resolvedConcurrency = resolveAndLogConcurrency({
     concurrency,
     resolveConcurrencyFn,
     log,
   });
-  const root = sourceRoot ?? repoRootOf(process.cwd(), execFile);
-  const sha = execFile("git", ["rev-parse", "HEAD"], {
-    cwd: root,
-    encoding: "utf8",
-  }).trim();
-  const porcelain = execFile("git", ["status", "--porcelain"], {
-    cwd: root,
-    encoding: "utf8",
-  });
-  const dirty = porcelain.trim().length > 0;
+  const { sha, dirty } = resolveHeadShaAndDirty({ root, execFile });
 
   const cloneDir = mkdtempSync(join(longFormTmpdir(), "hyk208-isolated-"));
   // HYK-411: this tap destination lives OUTSIDE cloneDir on purpose --
@@ -642,6 +750,8 @@ export function runIsolatedSuite({
       nowMs,
       log,
       maxConcurrentNode,
+      nodeVersion: resolvedNodeVersion,
+      nodeVersionWarning,
     });
 
     return outcome.exitCode;
