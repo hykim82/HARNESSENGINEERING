@@ -464,6 +464,79 @@ test("runIsolatedSuite: HYK-209 R7c real-repro bytes + an ambiguous Windows forc
   });
 });
 
+// HYK-209 2R P1-2 (책임자 판정 2026-10-17 18:4x 판단 1 · REVIEW-r1.md ⓑ K2/K5
+// 표 TAP 원문 그대로): full-pipeline wiring for the two shapes this round's
+// fix closes -- K2 (duration_ms present but implausibly large, no plan line)
+// and K5 (a forged '1..9' plan line that comes out escaped as '# 1..9', no
+// duration_ms at all). Before this round's fix both landed as TESTS_FAILED
+// with the leaked block's fake 9/9/0/0 counts (REVIEW-r1.md ⓑ HEAD column);
+// after the fix both are MEASUREMENT_UNAVAILABLE_OOM with null counts, same
+// as R7c/K1 above.
+const K2_REAL_REPRO_TAP_TEXT =
+  "TAP version 13\n# tests 9\n# suites 0\n# pass 9\n# fail 0\n# cancelled 0\n# skipped 0\n# todo 0\n# duration_ms 999999\n";
+const K5_REAL_REPRO_TAP_TEXT =
+  "TAP version 13\n# 1..9\n# tests 9\n# suites 0\n# pass 9\n# fail 0\n# cancelled 0\n# skipped 0\n";
+
+test("runIsolatedSuite: HYK-209 2R P1-2 K2 (REVIEW-r1.md ⓑ real TAP bytes, duration_ms=999999) -- before this round's fix this misclassified as TESTS_FAILED with fake 9/9/0/0 counts; now it is MEASUREMENT_UNAVAILABLE_OOM with null counts", () => {
+  const receipts = [];
+  let tick = 0;
+  const nowMs = () => (tick++ === 0 ? 0 : 5000);
+  const exitCode = runIsolatedSuite({
+    startSampler: () => null,
+    stopSampler: () => null,
+    execFile: execFileForReceiptTests(),
+    spawn: () => ({ status: 1 }),
+    log: () => {},
+    collectFiles: () => [],
+    readFile: () => K2_REAL_REPRO_TAP_TEXT,
+    writeReceipt: (payload) => {
+      receipts.push(payload);
+      return { path: "(stubbed)", receipt: {} };
+    },
+    nowMs,
+  });
+  assert.equal(exitCode, 1);
+  assert.equal(receipts.length, 1);
+  assert.equal(receipts[0].runnerStatus, "MEASUREMENT_UNAVAILABLE_OOM");
+  assert.notEqual(receipts[0].runnerStatus, "TESTS_FAILED");
+  assert.deepEqual(receipts[0].counts, {
+    tests: null,
+    pass: null,
+    fail: null,
+    skip: null,
+  });
+});
+
+test("runIsolatedSuite: HYK-209 2R P1-2 K5 (REVIEW-r1.md ⓑ real TAP bytes, forged plan line escaped as '# 1..9', no duration_ms) -- before this round's fix this misclassified as TESTS_FAILED with fake 9/9/0/0 counts; now it is MEASUREMENT_UNAVAILABLE_OOM with null counts", () => {
+  const receipts = [];
+  let tick = 0;
+  const nowMs = () => (tick++ === 0 ? 0 : 5000);
+  const exitCode = runIsolatedSuite({
+    startSampler: () => null,
+    stopSampler: () => null,
+    execFile: execFileForReceiptTests(),
+    spawn: () => ({ status: 1 }),
+    log: () => {},
+    collectFiles: () => [],
+    readFile: () => K5_REAL_REPRO_TAP_TEXT,
+    writeReceipt: (payload) => {
+      receipts.push(payload);
+      return { path: "(stubbed)", receipt: {} };
+    },
+    nowMs,
+  });
+  assert.equal(exitCode, 1);
+  assert.equal(receipts.length, 1);
+  assert.equal(receipts[0].runnerStatus, "MEASUREMENT_UNAVAILABLE_OOM");
+  assert.notEqual(receipts[0].runnerStatus, "TESTS_FAILED");
+  assert.deepEqual(receipts[0].counts, {
+    tests: null,
+    pass: null,
+    fail: null,
+    skip: null,
+  });
+});
+
 // HYK-464 §2 ⓐ-1/ⓐ-2: wiring tests for the node-version receipt field and
 // its first-line warning. These inject `readPackageJsonFn`/`nodeVersion`
 // directly (both default parameters) rather than touching the real fs --

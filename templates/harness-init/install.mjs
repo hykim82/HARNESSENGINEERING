@@ -1302,6 +1302,44 @@ export const ENFORCEMENT_CHECK_FILES = [
   // ENOENT anyone would notice. 편입 (install it) rather than leaving the
   // feature silently dead on every solo-full target.
   "abort-record-writer.mjs",
+  // HYK-209-install-closure-1 2R P1-1 (검토 1R 실측 -- ⚠️1R coder.md ⓑ 표의
+  // «relay-handshake.test.mjs의 남는 1건은 live ADMISSION_LEDGER_PATH 미설정
+  // 환경 의존」 서술은 틀렸다): relay-handshake.mjs:4223이 이 파일을 BY PATH로
+  // spawn한다(abort-record-writer.mjs 바로 위와 정확히 같은 종류). 설치
+  // 대상에 없으면 4241행에서 non-fatal로 흡수되고, 그 칸은 자기 원장을
+  // 스스로 만드므로(isolatedLedgerPaths + ledgerEnv) "live 환경이 필요하다"는
+  // 옛 사유는 코드와 맞지 않는다 -- 진짜 원인은 이 파일이 설치 목록에
+  // 없었던 것뿐이다. 실측(이 라운드, probe-rh류 재현): 이 한 줄을 추가하기
+  // 전에는 solo-full 설치 대상에서 relay-handshake.test.mjs가 65/66(소비
+  // 영수증 미기록), 추가 후에는 66/66이다 -- 그래서 아래
+  // INSTALL_NET_CLOSURE_KNOWN_EXCEPTIONS의 그 항목도 이번 라운드에 지운다.
+  "consumption-receipt-writer.mjs",
+  "consumption-receipt-writer.test.mjs",
+  // HYK-209-install-closure-1 2R P1-1 (판정 1 ⓐ 포함 범위): 같은 "경로로
+  // spawn되는 형제" 종류 다섯 중 유일하게 설치 목록에 전혀 없던 나머지 하나
+  // -- relay-handshake.mjs:3294가 BY PATH로 spawn한다(runRetireAuthorShadow
+  // Observation, 자기 자신의 catch가 "Missing CLI file ... non-fatal"로
+  // 흡수 -- consumption-receipt-writer.mjs와 완전히 같은 침묵 degrade 종류).
+  // 이 파일의 정적 import를 끝까지 따라간 전수(이 라운드 실측,
+  // `git grep -n "^import" scripts/check/retirement-auto-author-{shadow-cli,
+  // facts,core}.mjs scripts/check/hyk412-never-consumed-retire-core.mjs`):
+  // retirement-auto-author-shadow-cli.mjs -> {retirement-auto-author-facts,
+  // retirement-auto-author-core,ledger-pointer-shared}.mjs(마지막은 이미
+  // 설치됨, 위 admission-completion-adapter.mjs 섹션) -> retirement-auto-
+  // author-core.mjs -> hyk412-never-consumed-retire-core.mjs(그 자신은
+  // import 0, leaf) -- 넷 다 이전에는 설치 목록에 전혀 없었다. 편입(설치
+  // 안 함으로 두면 이 파일과 똑같이 소리 없이 죽는 shadow-observation
+  // 기능이 모든 solo-full 대상에서 영구히 죽는다 -- consumption-receipt-
+  // writer.mjs 바로 위와 정확히 같은 근거로 "설치 안 함" 대신 편입을
+  // 택했다).
+  "retirement-auto-author-shadow-cli.mjs",
+  "retirement-auto-author-shadow-cli.test.mjs",
+  "retirement-auto-author-facts.mjs",
+  "retirement-auto-author-facts.test.mjs",
+  "retirement-auto-author-core.mjs",
+  "retirement-auto-author-core.test.mjs",
+  "hyk412-never-consumed-retire-core.mjs",
+  "hyk412-never-consumed-retire-core.test.mjs",
 ];
 
 // HYK-209-install-closure-1 §2 ⓑ.2 (coder.md 표): the install-net-closure
@@ -1321,11 +1359,15 @@ export const ENFORCEMENT_CHECK_FILES = [
 // had, see hook-sync-check.mjs's own exclusion comment above) is a separate,
 // later scope decision, not something this already-large round takes on as
 // a side effect of a runner/installer-closure task.
-// relay-handshake.test.mjs's one failure needs a fully-wired live
-// admission ledger (ADMISSION_LEDGER_PATH) this installer's own synthetic
-// smoke-test scope does not set up -- an environmental fixture gap in that
-// test's own assumptions about a "live" system, not a file this installer
-// forgot to copy.
+// HYK-209-install-closure-1 2R P1-1: relay-handshake.test.mjs used to be
+// listed here ("its one failing subtest needs a fully-wired live
+// ADMISSION_LEDGER_PATH environment..."). That reason was WRONG (검토 1R
+// 실측, see ENFORCEMENT_CHECK_FILES's own P1-1 comment above) -- the real
+// cause was a missing installed file (consumption-receipt-writer.mjs), not
+// an environmental fixture gap; that test's own harness already builds an
+// isolated ledger env for itself. Now that the missing file is installed,
+// this test is 66/66 on a fresh solo-full install and no longer needs an
+// exception entry here.
 //
 // 재측정 기록 〔직접〕: pm-guard.test.mjs(15)는 처음 이 라운드의 "조사용"
 // 수동 합성 대상(제어실 경로를 이 세션 자신의 scratchpad 규약
@@ -1346,41 +1388,78 @@ export const ENFORCEMENT_CHECK_FILES = [
 // 목록에는 올리지 않는다 -- 다만 "짧은-이름 경로에서 도는 CI/사용자
 // 환경"이라면 이 결함은 그 바깥에서 그대로 재현될 수 있다(범위 밖 발견,
 // 등재 후보로만 기록).
+// HYK-209-install-closure-1 2R P2-3 (검토 1R 지적 -- 예외가 "파일 단위"면 그
+// 파일 안에서 생기는 새 실패가 안 보인다): 각 항목에 `expectedFailCount`(그
+// 파일이 정확히 몇 개 실패해야 하는가)를 필수로 덧붙이고, 모듈 로드 실패류는
+// `expectedMissingAdapterFile`(ERR_MODULE_NOT_FOUND 메시지가 가리키는 모듈의
+// 맨 파일명 -- 이 라운드 실측, probe-exceptions.mjs, scratchpad; 그 메시지의
+// 경로 구분자는 node 버전·OS마다 그대로(/)거나 두 글자로 이스케이프된(\\\\)
+// 모양이라 디렉터리까지 포함해 고정하면 깨지기 쉽다, 그래서 파일명만)을,
+// 서브테스트
+// 단위 실패류는 `expectedFailingSubtestTitles`(각 부분문자열이 정확히 하나의
+// "not ok" 줄 제목에 나타나야 한다 -- "not ok N"의 N 자체는 앞 서브테스트 수가
+// 바뀌면 같이 밀리는 불안정한 값이라 쓰지 않는다, 실측 probe-reject-
+// streak.mjs)를 함께 덧붙인다. install-net-closure.test.mjs가 이 필드들을
+// 실제로 검증한다 -- 실패 모양이 바뀌면(새 실패 추가/제거, 원인 교체) 예외가
+// 더 이상 안 맞아 RED가 된다.
 export const INSTALL_NET_CLOSURE_KNOWN_EXCEPTIONS = [
   {
     file: "scripts/relay/dispatch-worker-modal-check.test.mjs",
     reason:
       "needs scripts/relay/adapters/orca-adapter.mjs -- unassembled 무인층, out-of-scope (install-copylist-closure.test.mjs header)",
+    expectedFailCount: 1,
+    // 모듈 로드 실패류(ERR_MODULE_NOT_FOUND)의 안정적인 식별자 -- 실측(이
+    // 라운드, probe-exceptions.mjs): "Cannot find module '<머신별 절대경로,
+    // 환경마다 다름>\<이 파일명>'" 모양. install-net-closure.test.mjs는 이
+    // 파일명이 "Cannot find module '...'" 줄 안에 나타나는지만 본다.
+    expectedMissingAdapterFile: "orca-adapter.mjs",
   },
   {
     file: "scripts/relay/dispatch-worker-seat-proof-gate.test.mjs",
     reason:
       "dispatch-worker-seat-proof-gate.mjs -> seat-proof-cli.mjs needs scripts/relay/adapters/terminal-show-adapter.mjs -- same unassembled 무인층",
+    expectedFailCount: 1,
+    expectedMissingAdapterFile: "terminal-show-adapter.mjs",
   },
   {
     file: "scripts/relay/hyk271-axis-preview-marker-synthetic.test.mjs",
     reason:
       "needs scripts/relay/adapters/orca-adapter.mjs -- same unassembled 무인층",
+    expectedFailCount: 1,
+    expectedMissingAdapterFile: "orca-adapter.mjs",
   },
   {
     file: "scripts/relay/hyk271-marker-catalog-real-corpus.test.mjs",
     reason:
       "needs scripts/relay/adapters/orca-adapter.mjs -- same unassembled 무인층",
+    expectedFailCount: 1,
+    expectedMissingAdapterFile: "orca-adapter.mjs",
   },
   {
     file: "scripts/relay/seat-proof-cli.test.mjs",
+    // 실측(이 라운드, probe-exceptions.mjs): seat-proof-cli.mjs 자신이 import
+    // 순서상 먼저 terminal-show-adapter.mjs를 요구해 거기서 멈춘다 --
+    // dispatch-correlation-adapter.mjs는 그 뒤에야 닿을 코드라 이 실패
+    // 텍스트에는 나타나지 않는다(두 어댑터 모두 같은 무인층 소속).
     reason:
-      "needs scripts/relay/adapters/{terminal-show-adapter,dispatch-correlation-adapter}.mjs -- same unassembled 무인층",
-  },
-  {
-    file: "scripts/check/relay-handshake.test.mjs",
-    reason:
-      "its one failing subtest needs a fully-wired live ADMISSION_LEDGER_PATH environment this installer's own smoke-test setup never configures -- an environmental fixture gap in the test's own assumptions, not a missing installed file",
+      "needs scripts/relay/adapters/{terminal-show-adapter,dispatch-correlation-adapter}.mjs -- same unassembled 무인층 (실측: terminal-show-adapter.mjs가 import 순서상 먼저라 그 하나만 에러 텍스트에 나타난다)",
+    expectedFailCount: 1,
+    expectedMissingAdapterFile: "terminal-show-adapter.mjs",
   },
   {
     file: "scripts/check/reject-streak.test.mjs",
+    // 서브테스트 번호(node --test의 "not ok N"의 N)는 앞쪽 서브테스트 수가
+    // 바뀌면 같이 밀리는 불안정한 값이라 쓰지 않는다 -- 실측(이 라운드,
+    // probe-reject-streak.mjs): 지금은 "not ok 65"/"not ok 66"이지만, 그 N은
+    // 안정적인 식별자가 아니다. 안정적인 것은 그 두 서브테스트 자신의 제목
+    // 접두(review가 인용한 바로 그 "(53)"/"(54)")다.
     reason:
-      "its two doc-code-contract subtests (53)/(54) need docs/enforcement-v1.md, which this round tried installing and reverted in the same round -- that doc's own text embeds 10+ worked examples of THIS machine's real control-room path, so copying it verbatim leaked a real portability regression (caught live by harness-init-install-portability.test.mjs (1) during this round's full-runner pass); see install.mjs's reverted call site for the full account",
+      "its two doc-code-contract subtests, exactly (53) and (54), need docs/enforcement-v1.md, which this round tried installing and reverted in the same round -- that doc's own text embeds 10+ worked examples of THIS machine's real control-room path, so copying it verbatim leaked a real portability regression (caught live by harness-init-install-portability.test.mjs (1) during this round's full-runner pass); see install.mjs's reverted call site for the full account.",
+    expectedFailCount: 2,
+    expectedFailingSubtestTitles: [
+      "(53) doc-code contract:",
+      "(54) doc-code contract:",
+    ],
   },
 ];
 
@@ -1719,8 +1798,11 @@ function installControlRoomFolder(params, targetRepoPath, { dryRun }) {
 // 판정으로 이 저장소 한 곳만 손으로 맞춰 둔 값, 근본 수리는 이 라운드):
 // `lockPath`는 더 이상 `${ledgerPath}.lock`(= "...admission-ledger.json.
 // lock")로 파생하지 않는다 -- 실제 배달기가 잡는 잠금 이름(판단 1-C 근거,
-// installer-lockpath-defect.md §1: `dispatch-worker.ps1:189` 근방
-// `Join-Path $PSScriptRoot "admission-ledger.lock"`)과 다른 파일이라, 설치기
+// installer-lockpath-defect.md §1: dispatch-worker.ps1의 `$admissionLockPath
+// = Join-Path $PSScriptRoot "admission-ledger.lock"` 대입문 -- 줄 번호 대신
+// 이 식별자로 인용한다, HYK-209-install-closure-1 2R P3-4: 2026-08-12
+// 문서가 적은 ":189"는 그 이후 파일이 자라며 이미 낡았다, 이 라운드 실측
+// 2026-10-17 현재 실물 줄 번호는 335)와 다른 파일이라, 설치기
 // 생성값 그대로 심으면 자동 반납(`.json.lock`)과 배달기 `admit`
 // (`.lock`)이 서로 다른 잠금을 잡아 같은 원장에 손실 갱신(lost update)이
 // 날 수 있었다(그 문서 §2). 고침: 같은 디렉터리에 리터럴 파일명

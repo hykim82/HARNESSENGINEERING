@@ -58,7 +58,10 @@ import {
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { INSTALL_NET_CLOSURE_KNOWN_EXCEPTIONS } from "./install.mjs";
+import {
+  ENFORCEMENT_CHECK_FILES,
+  INSTALL_NET_CLOSURE_KNOWN_EXCEPTIONS,
+} from "./install.mjs";
 
 const REPO_ROOT = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -233,6 +236,78 @@ test("install-net-closure: every INSTALL_NET_CLOSURE_KNOWN_EXCEPTIONS entry name
   }
 });
 
+// HYK-209-install-closure-1 2R P2-3 (검토 1R 지적 -- 예외가 "파일 단위"면 그
+// 파일 안의 새 실패가 안 보인다): INSTALL_NET_CLOSURE_KNOWN_EXCEPTIONS의 모든
+// 항목이 이제 `expectedFailCount`를 가진다는 것 자체를 강제한다 -- 새 예외를
+// 추가하면서 이 필드를 깜빡하면 그 항목은 다시 "파일 단위" 뒷문이 된다.
+test("install-net-closure: every INSTALL_NET_CLOSURE_KNOWN_EXCEPTIONS entry declares expectedFailCount (no new 'whole-file' exception without a fixed failure count, P2-3)", () => {
+  for (const entry of INSTALL_NET_CLOSURE_KNOWN_EXCEPTIONS) {
+    assert.equal(
+      typeof entry.expectedFailCount,
+      "number",
+      `exception entry '${entry.file}' has no numeric expectedFailCount -- P2-3 requires every exception to fix a failure count, not just a file name`,
+    );
+  }
+});
+
+function parseTapFailCount(tapText) {
+  const m = /^# fail (\d+)\r?$/m.exec(tapText ?? "");
+  return m ? Number(m[1]) : null;
+}
+
+function notOkLines(tapText) {
+  return (tapText ?? "").split(/\r?\n/).filter((l) => /^not ok \d+ /.test(l));
+}
+
+// HYK-209-install-closure-1 2R P2-3: checks one exception entry's own fixed
+// expectations against a real failing run's actual TAP/stderr text. Returns
+// a (possibly empty) array of human-readable mismatch descriptions -- a
+// non-empty result means this exception no longer matches its real shape
+// and must NOT be silently absorbed (extracted out of the main test below
+// purely to keep that test's own complexity/line-count under this repo's
+// quality gate, same reasoning as runIsolatedSuite's own small extractions).
+function exceptionShapeMismatches(entry, result) {
+  const combined = `${result.stdout ?? ""}${result.stderr ?? ""}`;
+  const mismatches = [];
+  const actualFailCount = parseTapFailCount(result.stdout);
+  if (
+    typeof entry.expectedFailCount === "number" &&
+    actualFailCount !== entry.expectedFailCount
+  ) {
+    mismatches.push(
+      `expectedFailCount=${entry.expectedFailCount} but TAP's own '# fail N' line says ${actualFailCount}`,
+    );
+  }
+  if (entry.expectedMissingAdapterFile) {
+    // The ERR_MODULE_NOT_FOUND message's path separator comes out as "/" or
+    // an escaped "\\\\" depending on OS/node version (실측,
+    // probe-exceptions.mjs) -- match on the bare filename inside the
+    // "Cannot find module '...'" line instead of pinning the full path shape.
+    const escaped = entry.expectedMissingAdapterFile.replace(
+      /[.*+?^${}()|[\]\\]/g,
+      "\\$&",
+    );
+    const re = new RegExp(`Cannot find module '[^']*${escaped}'`);
+    if (!re.test(combined)) {
+      mismatches.push(
+        `expectedMissingAdapterFile '${entry.expectedMissingAdapterFile}' not found in a "Cannot find module '...'" line -- the missing module changed`,
+      );
+    }
+  }
+  if (entry.expectedFailingSubtestTitles) {
+    const lines = notOkLines(result.stdout);
+    for (const title of entry.expectedFailingSubtestTitles) {
+      const matchingLines = lines.filter((l) => l.includes(title));
+      if (matchingLines.length !== 1) {
+        mismatches.push(
+          `expected exactly one 'not ok' line containing '${title}', found ${matchingLines.length}`,
+        );
+      }
+    }
+  }
+  return mismatches;
+}
+
 test("install-net-closure: real installer -> real git target -> every installed .test.mjs actually RUNS (not just imports) with 0 failures, except the named, reasoned exceptions", () => {
   const { base, targetRepo } = makeSyntheticTarget("hyk209-install-net-");
   try {
@@ -248,12 +323,15 @@ test("install-net-closure: real installer -> real git target -> every installed 
       `expected at least 40 installed .test.mjs files (sanity floor against a broken collection, got ${files.length}): ${files.join(", ")}`,
     );
 
-    const exceptionReasons = new Map(
-      INSTALL_NET_CLOSURE_KNOWN_EXCEPTIONS.map((e) => [e.file, e.reason]),
+    const exceptionsByFile = new Map(
+      INSTALL_NET_CLOSURE_KNOWN_EXCEPTIONS.map((e) => [e.file, e]),
     );
     const unexpectedFailures = [];
     const exceptionsSeen = new Set();
-
+    // HYK-209-install-closure-1 2R P2-3: a shape mismatch against the
+    // exception's own fixed expectations (fail count changed, a new/missing
+    // subtest, a different missing module) is pushed into unexpectedFailures
+    // too -- it is NOT silently absorbed just because the file name matches.
     for (const rel of files) {
       const result = runOneInstalledTestFile(targetRepo, rel);
       assert.equal(
@@ -263,14 +341,24 @@ test("install-net-closure: real installer -> real git target -> every installed 
       );
       const passed = result.status === 0;
       if (passed) continue;
-      if (exceptionReasons.has(rel)) {
-        exceptionsSeen.add(rel);
+      const entry = exceptionsByFile.get(rel);
+      if (!entry) {
+        unexpectedFailures.push({
+          rel,
+          tail: `${result.stdout ?? ""}${result.stderr ?? ""}`.slice(-1500),
+        });
         continue;
       }
-      unexpectedFailures.push({
-        rel,
-        tail: `${result.stdout ?? ""}${result.stderr ?? ""}`.slice(-1500),
-      });
+      const mismatches = exceptionShapeMismatches(entry, result);
+      if (mismatches.length > 0) {
+        const combined = `${result.stdout ?? ""}${result.stderr ?? ""}`;
+        unexpectedFailures.push({
+          rel,
+          tail: `exception '${rel}' no longer matches its fixed shape (P2-3):\n${mismatches.join("\n")}\n\n${combined.slice(-1500)}`,
+        });
+        continue;
+      }
+      exceptionsSeen.add(rel);
     }
 
     assert.deepEqual(
@@ -360,9 +448,15 @@ test("install-net-closure ⓓ: an archive install (REPO_ROOT not a git checkout)
     const archiveInstallerPath = makeArchiveCopy(base);
     // Confirm the archive copy really is not a git checkout -- otherwise
     // this test would not be exercising the ⓓ code path at all.
+    // HYK-209-install-closure-1 2R P3-1 (검토 1R 지적): `git -C <path>`의
+    // <path>는 디렉터리여야 한다 -- 1R은 여기에 install.mjs "파일 경로"를
+    // 넘겼고, 그러면 git은 그 자체가 디렉터리가 아니라서 "진짜 git
+    // 저장소인가"와 무관하게 항상 비영(非零)으로 끝난다(헛단언, 항상
+    // 통과). archiveInstallerPath의 디렉터리로 바꿔야 실제로 "그 디렉터리가
+    // git 저장소 밖인가"를 검사한다.
     const probe = spawnSync(
       "git",
-      ["-C", archiveInstallerPath, "rev-parse", "HEAD"],
+      ["-C", path.dirname(archiveInstallerPath), "rev-parse", "HEAD"],
       {
         encoding: "utf8",
       },
@@ -434,4 +528,55 @@ test("install-net-closure ⓓ: an archive install (REPO_ROOT not a git checkout)
   } finally {
     rmSync(base, { recursive: true, force: true });
   }
+});
+
+// ---------------------------------------------------------------------------
+// HYK-209-install-closure-1 2R P2-2 (검토 1R 지적 -- relay-handshake.mjs가
+// BY PATH로 spawn하는 형제 파일은 install-copylist-closure.test.mjs의 정적
+// import-closure 정규식이 원래부터 못 보는 종류다; abort-record-writer.mjs
+// 편입을 지키는 칸이 1R에는 전혀 없었다, V5 변이가 그물을 그냥 통과했다):
+// 그 형제 목록을 손으로 적지 않고 relay-handshake.mjs 소스에서 직접 뽑아,
+// ENFORCEMENT_CHECK_FILES에 전부 있는지 단언한다 -- 목록과 코드가 갈라지면
+// (새 BY-PATH spawn이 추가되거나, 이 다섯 중 하나가 install 목록에서
+// 빠지면) 이 칸이 RED가 된다.
+// ---------------------------------------------------------------------------
+
+// relay-handshake.mjs의 모든 BY-PATH spawn 호출이 공유하는 모양(이 파일
+// 안에서 실측 확인, 다섯 곳 전부 동일): `join(dirname(fileURLToPath(new
+// URL(import.meta.url))), "<이름>.mjs")`. 정적 import가 아니라 이 모양으로
+// 조립된 경로만 relay-handshake.mjs 자신이 "스폰되는 형제"로 취급한다.
+const BY_PATH_SIBLING_SPAWN_RE =
+  /join\(\s*dirname\(fileURLToPath\(new URL\(import\.meta\.url\)\)\),\s*\n?\s*["']([A-Za-z0-9_.-]+\.mjs)["'],?\s*\n?\s*\)/g;
+
+function extractByPathSiblings(relayHandshakeSource) {
+  const found = new Set();
+  let m;
+  BY_PATH_SIBLING_SPAWN_RE.lastIndex = 0;
+  while ((m = BY_PATH_SIBLING_SPAWN_RE.exec(relayHandshakeSource))) {
+    found.add(m[1]);
+  }
+  return [...found].sort();
+}
+
+test("install-net-closure P2-2: every sibling file relay-handshake.mjs spawns BY PATH (source-extracted, not a hand-written list) is present in ENFORCEMENT_CHECK_FILES", () => {
+  const src = readFileSync(
+    path.join(REPO_ROOT, "scripts", "check", "relay-handshake.mjs"),
+    "utf8",
+  );
+  const siblings = extractByPathSiblings(src);
+  // Sanity floor (같은 posture as collectInstalledTestFiles above): if the
+  // extraction regex ever stops matching anything (relay-handshake.mjs's own
+  // spawn-path shape changes), this test must fail LOUD, not silently pass
+  // with an empty list.
+  assert.ok(
+    siblings.length >= 5,
+    `expected at least 5 BY-PATH-spawned siblings extracted from relay-handshake.mjs (got ${siblings.length}: ${siblings.join(", ")}) -- the extraction regex may be stale`,
+  );
+  const installed = new Set(ENFORCEMENT_CHECK_FILES);
+  const missing = siblings.filter((name) => !installed.has(name));
+  assert.deepEqual(
+    missing,
+    [],
+    `relay-handshake.mjs spawns these sibling file(s) BY PATH but they are not in ENFORCEMENT_CHECK_FILES: ${missing.join(", ")} -- either install them (편입) or spell out a reasoned exception`,
+  );
 });

@@ -330,12 +330,60 @@ test("hasGenuineTapCompletion: an elapsedMs below the 2s noise floor never secon
   );
 });
 
-test("hasGenuineTapCompletion: a block with no duration_ms field at all (this repo's existing completedTapReadFile-style fixtures) skips the duration cross-check regardless of elapsedMs -- normal execution unchanged", () => {
+test("hasGenuineTapCompletion: a block with no duration_ms field at all, and NO elapsedMs given (this repo's existing completedTapReadFile-style fixtures, today's every non-production caller) skips the duration cross-check -- normal execution unchanged", () => {
+  const noDuration =
+    "TAP version 13\n# tests 1\n# pass 0\n# fail 1\n# skipped 0\n";
+  assert.equal(hasGenuineTapCompletion(noDuration), true);
+});
+
+// HYK-209 2R P1-2 (책임자 판정 2026-10-17 18:4x 판단 1 · REVIEW-r1.md ⓑ K5):
+// ⛔이 표본은 1R이 추가한 같은 모양(duration_ms 없음)에 elapsedMs를 production
+// 경로 값으로 준 바로 그 경우를 다시 쓴 것이다 -- 1R에서는 true(가짜 초록)가
+// 기대값이었다. 이것이 정확히 리뷰가 K5로 잡은 결함(소리 없는 우회로)이므로,
+// 이 라운드의 P1-2 수리로 기대값 자체가 false로 바뀐다(가짜 초록이 아니라
+// "측정 불가"가 맞다) -- 기존 칸을 임의로 고친 것이 아니라, 그 칸이 바로
+// 고치라고 지정된 결함의 재현이다(§2 ⓑ 완료 조건: K5 실물 칸).
+test("hasGenuineTapCompletion: HYK-209 2R P1-2 ⒜ -- the SAME no-duration_ms shape, but with elapsedMs given on the production path (>= noise floor), is NO LONGER genuine (P1-2 fix: 1R's fallback-to-true here was the K5 bypass REVIEW-r1.md found)", () => {
   const noDuration =
     "TAP version 13\n# tests 1\n# pass 0\n# fail 1\n# skipped 0\n";
   assert.equal(
     hasGenuineTapCompletion(noDuration, { elapsedMs: 999999 }),
-    true,
+    false,
+  );
+});
+
+// HYK-209 2R P1-2 ⒝ real-shape regression guards (REVIEW-r1.md ⓑ 표 K2/K5
+// TAP 원문 그대로, elapsedMs는 그 표의 7c607de/HEAD 실측 자릿수에 맞춘 값).
+const K2_IMPLAUSIBLY_LARGE_DURATION_NO_PLAN_LINE =
+  "TAP version 13\n# tests 9\n# suites 0\n# pass 9\n# fail 0\n# cancelled 0\n# skipped 0\n# todo 0\n# duration_ms 999999\n";
+
+test("hasGenuineTapCompletion: HYK-209 2R P1-2 ⒝ K2 (REVIEW-r1.md ⓑ real TAP bytes) -- duration_ms is present and even implausibly LARGE (999999 >= elapsedMs*0.5, so the old ratio-floor check alone would have passed it), but there is no column-0 plan line immediately before the block -- not genuine", () => {
+  assert.equal(
+    hasGenuineTapCompletion(K2_IMPLAUSIBLY_LARGE_DURATION_NO_PLAN_LINE, {
+      elapsedMs: 3350,
+    }),
+    false,
+  );
+});
+
+const K5_FORGED_PLAN_LINE_ESCAPED_NO_DURATION =
+  "TAP version 13\n# 1..9\n# tests 9\n# suites 0\n# pass 9\n# fail 0\n# cancelled 0\n# skipped 0\n";
+
+test("hasGenuineTapCompletion: HYK-209 2R P1-2 ⒝ K5 (REVIEW-r1.md ⓑ real TAP bytes) -- a forged '1..9' plan line leaked by a subtest comes out escaped as '# 1..9' (node's own tap reporter prefixing '#' to any printed line), never a real column-0 plan line, AND duration_ms is entirely absent -- not genuine on the production path", () => {
+  assert.equal(
+    hasGenuineTapCompletion(K5_FORGED_PLAN_LINE_ESCAPED_NO_DURATION, {
+      elapsedMs: 3350,
+    }),
+    false,
+  );
+});
+
+test("hasGenuineTapCompletion: HYK-209 2R P1-2 ⒜ in isolation -- a genuine column-0 plan line immediately precedes the block (⒝ satisfied), but duration_ms is still missing -- the production path still rejects it (⒜ alone, no plan-line gap to hide behind)", () => {
+  const planLineButNoDuration =
+    "TAP version 13\n1..1\n# tests 1\n# pass 0\n# fail 1\n# skipped 0\n";
+  assert.equal(
+    hasGenuineTapCompletion(planLineButNoDuration, { elapsedMs: 999999 }),
+    false,
   );
 });
 
