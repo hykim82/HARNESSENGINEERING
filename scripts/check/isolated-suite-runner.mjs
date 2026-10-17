@@ -38,7 +38,8 @@ import { fileURLToPath } from "node:url";
 import {
   RUNNER_STATUS,
   allocateRunSlot,
-  parseTapSummaryCounts,
+  hasGenuineTapCompletion,
+  parseGenuineTapSummaryCounts,
   writeNumberedRunnerReceipt,
   writeRunnerReceipt,
 } from "./runner-receipt-writer.mjs";
@@ -240,12 +241,21 @@ export function classifySpawnOutcome(result, { hasCompletion = false } = {}) {
 // HYK-477 §2-3 2R: the input classifySpawnOutcome's hasCompletion needs --
 // isolated into its own function so a tap-read failure (no file, unreadable,
 // no summary line) degrades to "no completion" rather than throwing and
-// losing the real spawn outcome. Reuses parseTapSummaryCounts (the same
-// parser emitRunnerReceipt uses for the receipt's own counts) so both call
-// sites agree on what "a completion summary" looks like.
-function hasTapCompletion({ tapPath, readFile }) {
+// losing the real spawn outcome.
+//
+// HYK-209 §2 ⓐ: delegates to hasGenuineTapCompletion (runner-receipt-
+// writer.mjs), not a bare "did parseTapSummaryCounts find a complete
+// block" check -- a complete block that sits inside a subtest's own
+// never-closed `# Subtest:` section (R7c: the parent died before ever
+// writing its own summary) must NOT read as "completed" here, or a forced
+// kill gets misclassified as TESTS_FAILED with the leaked block's fake
+// counts (see hasGenuineTapCompletion's own header for the structural
+// reasoning and evidence). emitRunnerReceipt below applies the same gate
+// to the counts it records, so both call sites agree on what "a completion
+// summary" looks like, exactly as before this round.
+function hasTapCompletion({ tapPath, readFile, elapsedMs }) {
   try {
-    return parseTapSummaryCounts(readFile(tapPath, "utf8")).tests != null;
+    return hasGenuineTapCompletion(readFile(tapPath, "utf8"), { elapsedMs });
   } catch {
     return false;
   }
@@ -414,10 +424,16 @@ function emitRunnerReceipt({
   maxConcurrentNode,
   nodeVersion,
   nodeVersionWarning,
+  elapsedMs,
 }) {
   let counts = { tests: null, pass: null, fail: null, skip: null };
   try {
-    counts = parseTapSummaryCounts(readFile(tapPath, "utf8"));
+    // HYK-209 §2 ⓐ-1: the same genuineness gate hasTapCompletion uses --
+    // a receipt must not carry a leaked subtest's fake counts (coder-
+    // task.md §2 ⓐ-1 "영수증이 ... fail 0 이 되지 않게").
+    counts = parseGenuineTapSummaryCounts(readFile(tapPath, "utf8"), {
+      elapsedMs,
+    });
   } catch (err) {
     log(
       `[isolated-suite-runner] WARNING: could not read tap summary at ${tapPath} (${err.message}) -- receipt will carry null counts`,
@@ -511,7 +527,15 @@ function spawnSuiteInClone({
   concurrency,
   logPath,
   readFile,
+  nowMs = Date.now,
 }) {
+  // HYK-209 §2 ⓐ: the real wall-clock time THIS spawn call actually took --
+  // the duration-plausibility cross-check in hasGenuineTapCompletion
+  // compares a tap block's own self-reported `# duration_ms` against this.
+  // Measured here (around the one real child-process call), not derived
+  // from any tap text, so it cannot be spoofed by anything a test file
+  // prints.
+  const startedAtMs = nowMs();
   const result = spawn(
     process.execPath,
     buildNodeTestArgs(files, tapPath, concurrency, logPath),
@@ -535,9 +559,13 @@ function spawnSuiteInClone({
       },
     },
   );
-  return classifySpawnOutcome(result, {
-    hasCompletion: hasTapCompletion({ tapPath, readFile }),
-  });
+  const elapsedMs = nowMs() - startedAtMs;
+  return {
+    ...classifySpawnOutcome(result, {
+      hasCompletion: hasTapCompletion({ tapPath, readFile, elapsedMs }),
+    }),
+    elapsedMs,
+  };
 }
 
 // Removes the two scratch directories this run made. Isolated so the
@@ -689,6 +717,7 @@ function spawnSuiteWithSampler({
   startSampler = startConcurrencySampler,
   stopSampler = stopConcurrencySampler,
   log,
+  nowMs,
 }) {
   const samplerChild = startSampler({ outPath: samplerOutPath, log });
   const outcome = spawnSuiteInClone({
@@ -699,6 +728,7 @@ function spawnSuiteWithSampler({
     concurrency,
     logPath,
     readFile,
+    nowMs,
   });
   const maxConcurrentNode = stopSampler({
     child: samplerChild,
@@ -829,6 +859,7 @@ export function runIsolatedSuite({
       startSampler,
       stopSampler,
       log,
+      nowMs,
     });
 
     emitRunnerReceipt({
@@ -844,6 +875,7 @@ export function runIsolatedSuite({
       nowMs,
       log,
       maxConcurrentNode,
+      elapsedMs: outcome.elapsedMs,
       nodeVersion: resolvedNodeVersion,
       nodeVersionWarning,
     });

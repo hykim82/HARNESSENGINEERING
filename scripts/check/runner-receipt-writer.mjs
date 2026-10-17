@@ -117,10 +117,18 @@ const TAP_SUMMARY_BLOCK_RE = new RegExp(
   "gm",
 );
 
+// Isolated so hasGenuineTapCompletion below can look at the SAME blocks
+// array parseTapSummaryCounts matched, without a second, possibly-diverging
+// copy of TAP_SUMMARY_BLOCK_RE -- byte-for-byte the same matching this
+// function always did (no behavior change for parseTapSummaryCounts).
+function matchSummaryBlocks(text) {
+  return [...text.matchAll(TAP_SUMMARY_BLOCK_RE)];
+}
+
 export function parseTapSummaryCounts(tapText) {
   const text = tapText ?? "";
   const empty = { tests: null, pass: null, fail: null, skip: null };
-  const blocks = [...text.matchAll(TAP_SUMMARY_BLOCK_RE)];
+  const blocks = matchSummaryBlocks(text);
   if (blocks.length === 0) return empty;
   const last = blocks[blocks.length - 1];
   const tail = text.slice(last.index + last[0].length);
@@ -131,6 +139,120 @@ export function parseTapSummaryCounts(tapText) {
     fail: Number(last[3]),
     skip: Number(last[4]),
   };
+}
+
+// HYK-209 §2 ⓐ (책임자 판정 2026-10-17 14:5x, P2-D 등재 후보 — 근거
+// REVIEW-r2.md §3 P2-D/§2 R7c): parseTapSummaryCounts above answers "what
+// are the counts in the LAST complete block", which is the right question
+// for a run that genuinely finished. It is the WRONG question when the
+// parent (outer `node --test`) itself never produced its own summary at
+// all, and the only complete 4-field block in the file belongs to a
+// SUBTEST's own leaked diagnostic output (a nested child's real tap stream,
+// or -- the simpler, empirically-confirmed real mechanism, REVIEW-r1.md ⓕ
+// -- a subtest printing plain `console.log("tests 7")`/`"pass 7"`/... lines
+// with no leading "#", which node's own tap reporter then writes out
+// verbatim as `# tests 7`/`# pass 7`/... because only a leading "#" in the
+// printed text itself gets escaped). R7c is exactly that shape with nothing
+// else in the file afterward: a forced-kill run whose only "complete" block
+// is that leaked fake one.
+//
+// 구조적 신호(〔직접〕, REVIEW-r1.md ⓕ 실물 원문 대조로 확인): node --test가
+// 실제로 끝까지 가서 찍는 최종 요약은 결코 아직 "닫히지 않은" `# Subtest:
+// <name>` 구간 안에서 나오지 않는다 -- 최종 요약은 모든 서브테스트가 각자
+// 자기 결과줄(`ok N ...`/`not ok N ...`)로 닫힌 "뒤"에만 나온다. 반대로
+// 서브테스트가 흘린 가짜 블록은 그 서브테스트 자신의 진단 구간 "안"에서
+// 나오므로, 부모가 그 결과줄을 찍기 전에 죽으면(R7c) 그 구간은 영원히
+// 닫히지 않는다. 그래서 "마지막으로 고른 블록보다 앞에 열린(닫히지 않은)
+// `# Subtest:` 구간이 하나라도 있는가"가 "이 블록이 진짜 최상위 요약인가"를
+// 가르는 신호가 된다 -- 열림 줄과 닫힘 줄의 "개수"만 비교한다(정확한 짝
+// 추적이 아니라 균형 카운트; 이 저장소의 기존 TAP 표본들(빈 파일 ·
+// completedTapReadFile 류 · M4/S6/S7/S8)은 전부 `# Subtest:` 줄이 0개라
+// 이 신호가 항상 "진짜"로 판정하므로, 이 변경은 그 표본들의 판정을 바꾸지
+// 않는다 -- 정상 실행 무변경 요구를 만족한다〔직접〕).
+//
+// ⛔정직 한계 1/2(〔추론〕): 이 신호는 "서브테스트 구간이 제대로 닫혔는가"만
+// 보는 근사 카운트이고, 여러 서브테스트에 걸쳐 열림/닫힘이 뒤섞인 극단적
+// 교차 배치까지는 추적하지 않는다. 또한 중첩 가짜 블록이 "둘 이상"
+// 연쇄되면서 그중 하나가 우연히 제 구간을 닫는 모양(이 라운드 범위 밖,
+// §2 ⓐ는 "완결 가짜 블록 하나 + 부모 요약 전체 부재"만 요구)까지는
+// 다루지 않는다.
+const TAP_SUBTEST_OPEN_RE = /^# Subtest: .*\r?$/gm;
+const TAP_SUBTEST_CLOSE_RE = /^(?:not )?ok \d+ .*\r?$/gm;
+
+// ⛔정직 한계 2/2(〔직접〕, 이 라운드 실물 재현으로 발견): 위 marker-균형
+// 신호는 "가짜 블록 바로 앞에 다른 서브테스트 출력이 조금이라도 있었던"
+// 모양(REVIEW-r1.md ⓕ의 실제 관측 원문 — `# Subtest:`가 먼저 열리고, 그
+// 열림이 끝까지 안 닫힌 채로 가짜 블록이 나온다)만 잡는다. 더 극단적인
+// 모양 -- 단 하나뿐인 테스트가 가짜 블록을 찍은 "직후", 자기 자신의
+// `# Subtest:` 여는 줄조차 디스크에 flush되기 전에 죽는 경우 -- 는 이
+// 라운드 실제 강제종료 재현(fake.test.mjs, SIGKILL, 합성 저장소)에서
+// 직접 관측됐다: tapPath 전문이 `TAP version 13\n# tests 9\n...`뿐이고
+// `# Subtest:` 자체가 단 한 글자도 없다. 이 모양은 "서브테스트가 하나뿐이고
+// 정상적으로 끝난 진짜 완결"(이 저장소 기존 시험 다수의 completedTapReadFile
+// 류 표본과 바이트 단위로 동일)과 텍스트만으로는 구분 불가능하다 --
+// marker-균형 신호가 여기서는 무력하다(열림 0 · 닫힘 0 → "닫힘 ≥ 열림"이
+// 공허하게 참).
+//
+// 그래서 둘째 신호(아래 isDurationPlausible)를 더한다: 호출자가 실제로
+// 측정한 "이 spawn 호출의 벽시계 경과 시간"(elapsedMs, isolated-suite-
+// runner.mjs의 spawnSuiteInClone이 Date.now() 전후로 잰다)과, 블록이 자기
+// 입으로 주장하는 `# duration_ms`를 맞대어 본다 -- 진짜 최상위 요약의
+// duration_ms는 "그 프로세스가 실제로 산 시간"과 가까워야 한다(node
+// 자신의 시작/종료 오버헤드만큼만 작을 수 있다). 가짜 블록은 그 프로세스가
+// 죽기 전까지 실제로 산 시간과 무관한 값(이 라운드 재현값 "1.0")을 찍는다
+// -- 재현: elapsedMs ≈ 3000(spawnSync timeout) · 블록 duration_ms = 1.0 →
+// 비율 1/3000, 명백히 "그 프로세스가 실제로 산 시간"일 수 없다.
+// `elapsedMs`가 주어지지 않거나(기존 호출자 전부 -- 이 필드를 모른다) 블록에
+// duration_ms가 없으면(이 저장소 기존 TAP 표본 전부 -- grep 0건, 이 라운드
+// 확인) 이 신호는 그냥 "적용 안 함"(진짜로 간주)으로 빠진다 -- 정상 실행
+// 무변경 요구(기존 시험 전부가 elapsedMs/duration_ms 둘 다 없다)를 건드리지
+// 않는다〔직접〕. MIN_ELAPSED_FOR_CHECK_MS 미만(2초)인 아주 짧은 실행에서는
+// 타이밍 잡음/시작 오버헤드가 비율을 지배할 수 있어 이 신호를 쉰다 -- 이
+// 저장소의 실제 전건 러너는 수십 초~분 단위이므로(runner_axis 주석) 그
+// 범위 밖은 이 round의 실제 사용처에 영향이 없다.
+// ⛔정직 한계(〔추론〕): 이 비율 임계값(0.5)은 설계 선택이고, 극단적으로
+// 느린 node 시작 오버헤드를 가진 환경에서는 아주 짧은 진짜 완결을 과잉
+// 거부할 수 있다 -- 그 경우도 "측정 불가"로 접지, "가짜 초록"으로 접지는
+// 않으므로 이 모듈의 "정직 > 완결" 원칙과 같은 방향의 오차다.
+const MIN_ELAPSED_FOR_CHECK_MS = 2000;
+const MIN_DURATION_RATIO = 0.5;
+const TRAILING_DURATION_RE = /^(?:# todo \d+\r?\n)?# duration_ms ([\d.]+)\r?$/m;
+
+function isDurationPlausible({ blockEndIndex, text, elapsedMs }) {
+  if (!Number.isFinite(elapsedMs) || elapsedMs < MIN_ELAPSED_FOR_CHECK_MS) {
+    return true; // not enough signal to second-guess the marker check
+  }
+  const window = text.slice(blockEndIndex, blockEndIndex + 300);
+  const m = TRAILING_DURATION_RE.exec(window);
+  if (!m) return true; // no duration_ms recorded -- nothing to cross-check
+  const blockDurationMs = Number(m[1]);
+  return blockDurationMs >= elapsedMs * MIN_DURATION_RATIO;
+}
+
+export function hasGenuineTapCompletion(tapText, { elapsedMs } = {}) {
+  const text = tapText ?? "";
+  const blocks = matchSummaryBlocks(text);
+  if (blocks.length === 0) return false;
+  const last = blocks[blocks.length - 1];
+  const blockEndIndex = last.index + last[0].length;
+  const tail = text.slice(blockEndIndex);
+  if (/^# tests \d+/m.test(tail)) return false;
+  const before = text.slice(0, last.index);
+  const opens = [...before.matchAll(TAP_SUBTEST_OPEN_RE)].length;
+  const closes = [...before.matchAll(TAP_SUBTEST_CLOSE_RE)].length;
+  if (closes < opens) return false;
+  return isDurationPlausible({ blockEndIndex, text, elapsedMs });
+}
+
+// Combines the above with parseTapSummaryCounts -- the counts a receipt
+// should actually record. When hasGenuineTapCompletion is false, this
+// returns the SAME null-filled shape parseTapSummaryCounts returns for "no
+// summary at all", never the leaked block's fake numbers (coder-task.md §2
+// ⓐ-1: "영수증이 TESTS_FAILED·fail 0 이 되지 않게").
+export function parseGenuineTapSummaryCounts(tapText, { elapsedMs } = {}) {
+  const empty = { tests: null, pass: null, fail: null, skip: null };
+  if (!hasGenuineTapCompletion(tapText, { elapsedMs })) return empty;
+  return parseTapSummaryCounts(tapText);
 }
 
 // HYK-477 §1-3: "the run's own max concurrent `node` process count", a
