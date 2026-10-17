@@ -9,10 +9,18 @@
 // target (coder.md §2 ⓑ 표, 〔직접〕 실측): scripts/check/
 // seat-proof-wrapper-canonical.json, scripts/check/hyk400-receiver-probe-
 // runner.mjs + its scripts/check/fixtures/hyk400-*.mjs.txt siblings,
-// scripts/check/reject-streak-defect-sample.json, docs/enforcement-v1.md,
-// and scripts/check/abort-record-writer.mjs (spawned by relay-handshake.mjs,
-// degrades silently rather than crashing -- see install.mjs's own
-// ENFORCEMENT_CHECK_FILES comment on it).
+// scripts/check/reject-streak-defect-sample.json, and scripts/check/
+// abort-record-writer.mjs (spawned by relay-handshake.mjs, degrades
+// silently rather than crashing -- see install.mjs's own
+// ENFORCEMENT_CHECK_FILES comment on it). docs/enforcement-v1.md was tried
+// too and REVERTED this same round -- copying it verbatim leaks THIS
+// machine's own real control-room path (10+ worked examples embedded in
+// the doc's own text) into every installed target, a real portability
+// regression the full-runner's own CI-canonical sweep caught live
+// (harness-init-install-portability.test.mjs (1)). See install.mjs's own
+// comment at that reverted call site, and reject-streak.test.mjs's entry
+// in INSTALL_NET_CLOSURE_KNOWN_EXCEPTIONS below for why its two doc-code-
+// contract subtests stay unfixed this round.
 //
 // This file is the machine-checked net for that whole class of gap: real
 // installer (not --dry-run) -> real `git init` target outside this

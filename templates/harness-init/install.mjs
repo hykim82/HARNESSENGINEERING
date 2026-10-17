@@ -397,9 +397,9 @@ function writeTemplateFile(srcPath, destPath, map, { dryRun, executable }) {
 
 // HYK-209 §2 ⓑ: tiny seam so main()'s own complexity gate doesn't absorb
 // the "copy this one optional, source-may-not-exist file" branch every
-// additional such file (gitleaksToml, enforcement-v1.md) would otherwise
-// add inline -- copyRawFile itself unchanged, this just skips the call
-// entirely (no warning) when the source is genuinely absent.
+// additional such file (gitleaksToml) would otherwise add inline --
+// copyRawFile itself unchanged, this just skips the call entirely (no
+// warning) when the source is genuinely absent.
 function copyRawFileIfExists(srcPath, destPath, opts) {
   if (existsSync(srcPath)) {
     copyRawFile(srcPath, destPath, opts);
@@ -1377,6 +1377,11 @@ export const INSTALL_NET_CLOSURE_KNOWN_EXCEPTIONS = [
     reason:
       "its one failing subtest needs a fully-wired live ADMISSION_LEDGER_PATH environment this installer's own smoke-test setup never configures -- an environmental fixture gap in the test's own assumptions, not a missing installed file",
   },
+  {
+    file: "scripts/check/reject-streak.test.mjs",
+    reason:
+      "its two doc-code-contract subtests (53)/(54) need docs/enforcement-v1.md, which this round tried installing and reverted in the same round -- that doc's own text embeds 10+ worked examples of THIS machine's real control-room path, so copying it verbatim leaked a real portability regression (caught live by harness-init-install-portability.test.mjs (1) during this round's full-runner pass); see install.mjs's reverted call site for the full account",
+  },
 ];
 
 // HYK-209-frame-repair-1 X-1: the scripts/relay/*.mjs copy list, same
@@ -2293,16 +2298,18 @@ function main() {
       path.join(targetRepoPath, ".gitleaks.toml"),
       { dryRun, executable: false },
     );
-    // HYK-209-install-closure-1 §2 ⓑ: reject-streak.test.mjs's own "doc-code
-    // contract" checks (installed alongside it, ENFORCEMENT_CHECK_FILES
-    // above) read this doc's §G envelope template verbatim -- never copied
-    // before this round, so those two checks ENOENT on every prior
-    // installed target (measured 〔직접〕, install-net-closure.test.mjs).
-    copyRawFileIfExists(
-      path.join(REPO_ROOT, "docs", "enforcement-v1.md"),
-      path.join(targetRepoPath, "docs", "enforcement-v1.md"),
-      { dryRun, executable: false },
-    );
+    // HYK-209-install-closure-1 §2 ⓑ (되돌림 〔직접〕, harness-init-install-
+    // portability.test.mjs (1) 실측): docs/enforcement-v1.md을 그대로
+    // 복사하면 reject-streak.test.mjs의 doc-code-contract 2칸은 고쳐지지만,
+    // 그 문서 자신이 이 머신의 실제 control-room 경로(`D:\문서관리\하네스-
+    // 관제실`)를 10여 곳 worked example 로 박아 두고 있어 모든 solo-full
+    // 설치 대상에 그 경로가 그대로 샌다(HYK-309급 이식성 회귀, 전체 러너
+    // 1회차가 실제로 잡음). 그 문서를 손대는 것(이식 가능한 발췌본 만들기
+    // 등)은 이 라운드 product_scope 밖이라 복사를 보류한다 -- 아래
+    // INSTALL_NET_CLOSURE_KNOWN_EXCEPTIONS의 reject-streak.test.mjs 항목이
+    // 이 결정을 기록한다. ⛔한 글자도 안 쓴 걸로 되돌리지 않는다 -- 이
+    // 흔적(코드 줄 + 등재 결정)을 남겨 다음 라운드가 같은 함정을 다시
+    // 밟지 않게 한다.
     const checklistPath = path.join(
       targetRepoPath,
       ".harness",
