@@ -293,23 +293,73 @@ function runInstalledNodeTest(installedCheckDir, names, timeoutMs = 300000) {
   );
 }
 
-// 요약 판독을 이름 있는 함수로 뺀다(책임자 판정 §2 요구 2) -- `# tests N`/
-// `# fail N`(TAP, 위에서 명시 고정한 그 형식) 한 가지만 읽는다. 옛 `ℹ`
-// 정규식과 겸용하지 않는다(두 형식을 동시에 봐주면 "실제로 어느 쪽이
-// 작동했는지"가 다시 애매해진다 -- 이 라운드가 고치는 바로 그 애매함).
-// `fail`의 정규식이 `[1-9]\d*`(1 이상만)인 것은 판정 §2 요구 2 원문 그대로
-// 다 -- `# fail 0` 줄은 이 정규식으로는 "못 찾음"이 되므로, 매치가 없으면
-// fail을 0으로 채워 돌려준다(호출부의 "fail 0" 단언에는 차이가 없다).
-// 요약 줄 자체를 전혀 못 찾으면(`# tests N`이 없음 -- 리포터가 TAP이
-// 아니거나 출력이 잘렸다는 뜻) null을 돌려준다.
+// HYK-464 §2 ⓒ (책임자 판정 원문): "첫 일치"가 아니라 "마지막 일치 또는
+// 요약 블록"으로 읽는다 -- 자식 출력 중간에 또 다른 `# tests N`/`# fail N`
+// 짝(예: 설치된 시험 파일 자신이 내부적으로 또 다른 `node --test`를 띄우거나,
+// 어떤 서브테스트가 그 모양의 텍스트를 우연히 찍는 경우)이 먼저 나타나면,
+// 첫 일치만 보는 옛 판독은 그 가짜 요약을 집어 진짜 마지막 요약(예: 진짜
+// `# tests 300`/`# fail 2`)을 놓친다(검토 3R P2-1 재현, 합성 표본 300 -> 7).
+//
+// 고침: `# tests N` 줄 바로 뒤(사이에 0개 이상의 다른 `# ...` 줄이 와도 됨)에
+// 오는 가장 "마지막" `# fail N` 줄만 하나의 쌍으로 묶어 읽는다 -- tests와
+// fail을 각자 독립적으로 "마지막 일치"를 구하면, 중간에 끼인 가짜 블록의
+// fail 값과 진짜 마지막 tests 값이 서로 다른 블록에서 와 짝이 깨질 수 있다
+// (예: 가짜 "tests 7/fail 2" 뒤에 진짜 "tests 300/fail 0"이 오면, fail만
+// 독립적으로 "마지막 비0 매치"를 구하는 방식은 가짜 쪽의 2를 고를 수 있다).
+// 이 정규식은 tests와 fail을 "같은 블록"에서 함께 캡처해 그 함정을 막는다.
+// `[\s\S]*?`가 아니라 `(?:#.*\r?\n)*?`로 제한한 것은 TAP의 YAML 본문/서브테스트
+// 줄(`#`로 시작하지 않음)을 건너뛰지 않게 해 "다음 요약 블록 전체를 통째로
+// 삼키는" 과매칭을 막기 위함이다(P2-2 요구: `^` 앵커·문자 클래스가 느슨해지면
+// 변이 시험에서 드러나야 한다).
+//
+// `# fail 0` 줄도 이제 그대로 매치한다(`\d+`, 옛 `[1-9]\d*`와 달리) -- tests와
+// fail을 같은 블록에서 묶어 뽑으므로 "못 찾으면 0으로 채운다"는 옛 우회가 더
+// 필요 없다. 요약 쌍 자체를 전혀 못 찾으면(`# tests N` 뒤에 짝이 되는 `# fail
+// N`이 전혀 없음 -- 리포터가 TAP이 아니거나 출력이 잘렸다는 뜻) null을
+// 돌려준다.
+//
+// HYK-464 2R (검토 1R P2-3, rounds/REVIEW-r1.md ⓔ 표 S6/S7/S8): 위 1R
+// 정규식의 `(?:#.*\r?\n)*?`는 "#"로 시작하는 줄이면 무엇이든 건너뛴다 --
+// 그래서 짝 없는 bare `# tests 7` 줄 바로 뒤에 진짜 블록이 오면
+// (`# tests 300\n# suites 0\n...# fail 2`), 가짜 tests(7)와 진짜 fail(2)이
+// 서로 다른 블록에서 잘못 묶인다(S6). 건너뛸 수 있는 줄을 "다른 요약
+// 필드 이름"으로만 좁힌다(suites/pass/cancelled/skipped/todo/duration_ms --
+// 이 함수가 안 읽는 필드들) -- `# Subtest: ...`도 "또 다른 # tests N"도
+// 건너뛸 수 없으므로, 그 경계에서 매치 시도가 멈춘다. runner-receipt-
+// writer.mjs의 parseTapSummaryCounts(프로덕션, HYK-464 2R)와 같은 규칙,
+// 같은 근거 -- 공유 모듈은 두지 않는다(coder-task.md §2 ⓑ, 프로덕션
+// 모듈 신설 금지).
+//
+// 마지막 완결 블록 뒤에 짝 없는 `# tests N`이 또 있으면(S7: 새 블록이
+// 시작됐다가 못 끝났다) null -- 그 앞의(무관할 수 있는) 블록을 "진짜인
+// 척" 돌려주지 않는다(판정 불가, "앞 블록" 아님 -- runner-receipt-
+// writer.mjs의 같은 판단과 같은 근거: hasTapCompletion류 소비자가 잘린
+// 꼬리를 과거 블록으로 메우면 거짓 완결로 읽을 위험).
+const TAP_SKIPPABLE_FIELD_LINE =
+  "(?:# (?:suites|pass|cancelled|skipped|todo) \\d+|# duration_ms [\\d.]+)\\r?\\n";
+const TAP_SUMMARY_PAIR_RE = new RegExp(
+  "^# tests (\\d+)\\r?\\n" +
+    `(?:${TAP_SKIPPABLE_FIELD_LINE})*?` +
+    "# fail (\\d+)\\r?$",
+  "gm",
+);
 function parseTapSummary(text) {
-  const testsMatch = (text ?? "").match(/^# tests (\d+)/m);
-  if (!testsMatch) return null;
-  const failMatch = (text ?? "").match(/^# fail ([1-9]\d*)/m);
-  return {
-    tests: Number(testsMatch[1]),
-    fail: failMatch ? Number(failMatch[1]) : 0,
-  };
+  const t = text ?? "";
+  const pairs = [...t.matchAll(TAP_SUMMARY_PAIR_RE)];
+  if (pairs.length > 0) {
+    const last = pairs[pairs.length - 1];
+    const tail = t.slice(last.index + last[0].length);
+    if (/^# tests \d+/m.test(tail)) return null;
+    return { tests: Number(last[1]), fail: Number(last[2]) };
+  }
+  // No paired "tests...fail" block found at all -- fall back to whether
+  // ANY bare "# tests N" line exists, so a tests-line-but-no-nearby-fail
+  // shape (malformed/truncated output) is distinguishable from "not TAP at
+  // all" by callers that want that distinction (install-g1-adapter-list's
+  // own (b) test checks `summary` truthiness first, then `summary.fail`).
+  const testsOnly = [...t.matchAll(/^# tests (\d+)$/gm)];
+  if (testsOnly.length === 0) return null;
+  return { tests: Number(testsOnly[testsOnly.length - 1][1]), fail: 0 };
 }
 
 // HYK-434 H2 3R 요구 3: 판독 함수 자체를 Node 20 TAP 출력 모양을 문자열로
@@ -391,6 +441,164 @@ test("parseTapSummary reads Node 20 TAP's '# tests N'/'# fail N' summary lines (
 
 test("parseTapSummary returns null on the spec-reporter shape (ℹ tests N) -- 두 형식을 겸용하지 않는다, Node 버전과 무관하게 한 형식만 신뢰한다", () => {
   assert.equal(parseTapSummary(NODE_SPEC_SAMPLE), null);
+});
+
+// HYK-464 §2 ⓒ-2 (책임자 판정 원문 합성 표본): 자식이 먼저 가짜 요약
+// "# tests 7"/"# fail 0"을 찍고, 그 뒤에 진짜 요약 "# tests 300"/"# fail 2"가
+// 온다 -- 첫 일치만 보던 옛 판독은 7/0을 집어 틀렸다. 이 표본은 실제 node
+// --test tap reporter가 찍는 완전한 요약 블록 모양(NODE20_TAP_*_SAMPLE과
+// 동일한 8줄)을 두 번 반복해, 중첩 자식의 요약이 먼저 끼어든 모양을
+// 재현한다.
+const NODE20_TAP_NESTED_CHILD_THEN_REAL_SAMPLE = `TAP version 13
+# Subtest: nested child sweep (its own node --test summary leaks into this parent's TAP stream)
+# tests 7
+# suites 0
+# pass 7
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 12.3
+ok 1 - nested child sweep
+  ---
+  duration_ms: 20
+  type: 'test'
+  ...
+1..1
+# tests 300
+# suites 0
+# pass 298
+# fail 2
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 4567.89
+`;
+
+test("parseTapSummary 합성 표본 (HYK-464 §2 ⓒ-2, 책임자 판정 원문): 중첩 자식의 가짜 요약 '# tests 7'/'# fail 0'보다 뒤에 오는 진짜 요약 '# tests 300'/'# fail 2'을 읽는다 -- 첫 일치가 아니라 마지막 요약 블록", () => {
+  assert.deepEqual(parseTapSummary(NODE20_TAP_NESTED_CHILD_THEN_REAL_SAMPLE), {
+    tests: 300,
+    fail: 2,
+  });
+});
+
+// 역방향 표본: 중첩 자식 쪽이 fail>0(비정상), 진짜(마지막) 쪽이 fail=0인
+// 경우 -- tests/fail을 "같은 블록"에서 짝으로 뽑지 않고 각자 독립적으로
+// "마지막 일치"만 구했다면, fail은 `[1-9]`류 정규식 때문에 "마지막 비0
+// 매치"인 중첩 쪽의 2를 잘못 고를 위험이 있었다(옛 코드의 "매치 없으면 0"
+// 우회가 바로 이 함정이었다). 짝으로 묶어 뽑으면 진짜 마지막 블록의
+// tests=300/fail=0이 함께 나온다.
+const NODE20_TAP_NESTED_NONZERO_THEN_REAL_ZERO_SAMPLE = `TAP version 13
+# tests 5
+# suites 0
+# pass 3
+# fail 2
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 1.0
+# tests 300
+# suites 0
+# pass 300
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 999.0
+`;
+
+test("parseTapSummary: 중첩 블록의 비0 fail이 진짜(마지막) 블록의 fail=0으로 새지 않는다 -- tests/fail은 같은 블록에서 짝으로 뽑는다, 독립적인 '마지막 일치'가 아니다", () => {
+  assert.deepEqual(
+    parseTapSummary(NODE20_TAP_NESTED_NONZERO_THEN_REAL_ZERO_SAMPLE),
+    { tests: 300, fail: 0 },
+  );
+});
+
+// P2-2 (단위 칸이 `^` 앵커 제거 같은 변이를 잡는가): "# tests 999"가 줄
+// 맨 앞이 아니라 다른 텍스트 중간에 박혀 있으면(실제 TAP 요약 줄이 아니라
+// 사람이 쓴 로그 문장 안의 우연한 문자열) `^` 앵커가 있어야 이를 진짜
+// 요약으로 오인하지 않는다 -- 앵커를 지우는 변이는 이 표본을 거짓으로
+// {tests:999,...}로 읽어 이 시험을 RED로 만든다.
+test("parseTapSummary mutation guard (P2-2, `^` 앵커): '# tests N'이 줄의 맨 앞이 아니라 다른 텍스트 바로 뒤에 붙어 있으면(그래도 그 뒤에 진짜 개행 + '# fail N' 줄이 옴) 요약으로 오인하지 않는다 -- 앞쪽 `^` 앵커를 지우는 변이는 이 표본을 거짓으로 매치해 RED가 된다", () => {
+  const midline = "xyz-prefix# tests 999\n# fail 999\n";
+  assert.equal(parseTapSummary(midline), null);
+});
+
+// HYK-464 2R P2-3 (검토 1R ⓔ 표 S6/S7/S8, runner-receipt-writer.test.mjs의
+// 같은 세 표본과 같은 규칙 -- coder-task.md §2 ⓑ "세 판독 공통 규칙").
+test("parseTapSummary: S6 -- a bare orphan '# tests N' line directly before the real block's own '# tests M' is not paired with the real block's fail (fixed answer = the real block, 300/2)", () => {
+  const s6 = [
+    "1..1",
+    "# tests 7",
+    "# tests 300",
+    "# suites 0",
+    "# pass 298",
+    "# fail 2",
+    "# cancelled 0",
+    "# skipped 1",
+    "# todo 0",
+    "# duration_ms 5.0",
+  ].join("\n");
+  assert.deepEqual(parseTapSummary(s6), { tests: 300, fail: 2 });
+});
+
+test("parseTapSummary: S7 -- a complete fake block followed by a truncated real one (cut off before '# fail') returns null (판정 불가), not the preceding fake block's values", () => {
+  const s7 = [
+    "# tests 7",
+    "# suites 0",
+    "# pass 7",
+    "# fail 0",
+    "# cancelled 0",
+    "# skipped 0",
+    "# todo 0",
+    "# duration_ms 1.0",
+    "# tests 300",
+    "# suites 0",
+    "# pass 298",
+  ].join("\n");
+  assert.equal(parseTapSummary(s7), null);
+});
+
+test("parseTapSummary: S8 -- a trailing decoy line that is NOT '# tests ...' after the real complete block does not trigger the trailing-orphan null guard", () => {
+  const s8 = [
+    "# tests 300",
+    "# suites 0",
+    "# pass 298",
+    "# fail 2",
+    "# cancelled 0",
+    "# skipped 0",
+    "# todo 0",
+    "# duration_ms 5.0",
+    "# fail 999",
+  ].join("\n");
+  assert.deepEqual(parseTapSummary(s8), { tests: 300, fail: 2 });
+});
+
+test("parseTapSummary: CRLF line endings (Windows shape) parse identically to LF (M3 mutation guard)", () => {
+  const crlf = NODE20_TAP_NESTED_CHILD_THEN_REAL_SAMPLE.replace(/\n/g, "\r\n");
+  assert.deepEqual(parseTapSummary(crlf), { tests: 300, fail: 2 });
+});
+
+test("parseTapSummary: M4 mutation guard -- picks the LAST block (tests 5), not the one with the largest tests value (tests 300)", () => {
+  const m4 = [
+    "# tests 300",
+    "# suites 0",
+    "# pass 299",
+    "# fail 1",
+    "# cancelled 0",
+    "# skipped 0",
+    "# todo 0",
+    "# duration_ms 999.0",
+    "# tests 5",
+    "# suites 0",
+    "# pass 5",
+    "# fail 0",
+    "# cancelled 0",
+    "# skipped 0",
+    "# todo 0",
+    "# duration_ms 1.0",
+  ].join("\n");
+  assert.deepEqual(parseTapSummary(m4), { tests: 5, fail: 0 });
 });
 
 test("(b) real installer (not --dry-run) installs into a git-init target outside this worktree, and `node --test` on the two newly-listed test files there has 0 failures", () => {
