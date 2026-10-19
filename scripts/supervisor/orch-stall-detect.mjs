@@ -120,6 +120,7 @@ import { execFileSync } from "node:child_process";
 // 갈려 «상시 과발화»가 된다(2R 실측으로 일치 확인, coder.md §3-3).
 import { createHash } from "node:crypto";
 import path from "node:path";
+import os from "node:os";
 import {
   judgeOrchProgress,
   ARTIFACT_KIND,
@@ -135,6 +136,18 @@ import {
   judgeDispatchStart,
   DISPATCH_START_VERDICT,
 } from "./dispatch-start-core.mjs";
+// HYK-464-watch-collection-1 ⓒ: dispatch-start-size-*.mjs의 판정 의미는
+// 한 글자도 바꾸지 않는다(product_scope 비타협) -- 여기서는 그 코어/
+// 어댑터를 그대로 호출만 한다(재사용, 재구현 0). 이 축(화면 lastOutputAt)
+// 이 NOT_STARTED로 떨어져도 세션 기록 폴더 총 바이트가 최근에 늘었으면
+// (GREW_RECENTLY) "진짜 미착수"가 아니라고 판정을 뒤집는 근거로 쓴다
+// (아래 combineDispatchStartWithSizeEvidence 참조).
+import { collectTotalSessionBytes } from "./dispatch-start-size-adapter.mjs";
+import {
+  judgeDispatchStartBySize,
+  DISPATCH_START_SIZE_VERDICT,
+  DISPATCH_START_SIZE_REASON,
+} from "./dispatch-start-size-core.mjs";
 import {
   judgeUnconsumed,
   UNCONSUMED_VERDICT,
@@ -426,7 +439,88 @@ function computeTaskIdMismatch(repoRoot, taskFileRelPath, taskFileTaskId) {
 // ①seat-liveness/seat-idle/dispatch-start 세 축의 "배달 시각" ②
 // header-time-projection-core.mjs를 쓰는 `scanHeaderTimeProjection`(아래,
 // 헤더-실물 어긋남 탐지 -- 소비와 무관한 별개 신호)만을 위해 남아 있다.
-function buildDroppedTaskFileItem(repoRoot, harnessDir, name, text) {
+// ---- HYK-464-watch-collection-1 ⓑ (coder-task.md §2 ⓑ) -- 배달 영수증
+// 없는 task 파일을 "활성 배달" 후보에서 뺀다, 조용히 말고 보이게 ----
+//
+// 배경(실측, 2026-10-19): 하네스 본체 `.harness/coder-task.md`·
+// `review-task.md`는 2026-08-10에 드롭된 뒤 결과 파일이 끝내 안 생긴
+// 채 두 달 묵었다 -- `dispatch-receipts.jsonl`(전역, 관제실 소유)에
+// 그 role+라벨(HYK-220-ledger-path-2/-review-3) 조합이 **단 한 번도**
+// 없다(orca로 실제 배달된 적이 없다는 뜻 -- 그 2R/3R은 orca 배달 메커니즘
+// 자체가 생기기 전에 사람이 직접 드롭한 레거시 표본이다). 그런데
+// `isDispatchStillActive`는 `resultFile.exists === false`만 보므로 이
+// 파일들을 영원히 "활성 배달"로 고른다 -- `selectActiveDispatch`가 이
+// 항목을 고르면 `judgeSeatLivenessForRepo` 등이 그 라벨로 좌석을
+// 찾으려다 못 찾아 `*_COLLECTION_FAILED`를 낸다(last-run.json 실물,
+// 2026-10-14부터 123시간 연속 관측).
+//
+// 수리: role+taskId로 `dispatch-receipts.jsonl`을 조회해 "이 배달이 실제로
+// 있었는가"를 추가로 본다 -- ⛔새 조회 로직을 발명하지 않는다: 이 파일이
+// 이미 가진 `hasDispatchReceiptForRound`/`resolveDispatchReceiptPathForUnconsumed`
+// (unconsumed 축의 정본, 아래 §340 근방)를 그대로 재사용한다. "정상적으로
+// 없음"(NOT_FOUND, 제외해도 됨)과 "조회 자체가 실패함"(UNRESOLVED, 판정
+// 불가 -- 예: 전역 영수증 경로를 못 구함·그 파일을 못 읽음)을 반드시
+// 구별한다(§11 ㄱ/ㄴ과 동일 원칙) -- 후자를 "없음"으로 섞으면 영수증
+// 경로가 아직 설치 안 된 환경에서 **진짜 활성 배달까지** 전부 제외되는
+// 반대쪽 사고가 난다(ⓓ⑶ 요구). `hasDispatchReceiptForRound` 자신은 읽기
+// 실패를 `false`로 삼키므로(그 함수의 계약, 아래 §2223 근방), 그 구별을
+// 위해 읽기 가능성을 먼저 한 번 따로 확인한다(파싱 로직은 재구현하지
+// 않고 그 함수에 그대로 맡긴다 -- 아래 두 번째 읽기는 순수 I/O 재확인일
+// 뿐, 스캔 로직을 복제하지 않는다).
+export const DELIVERY_RECEIPT_CHECK = Object.freeze({
+  FOUND: "DELIVERY_RECEIPT_FOUND",
+  NOT_FOUND: "DELIVERY_RECEIPT_NOT_FOUND",
+  NOT_APPLICABLE: "DELIVERY_RECEIPT_NOT_APPLICABLE", // taskId/role을 못 뽑음 -- 이 수리의 범위 밖(기존 동작 그대로).
+  UNRESOLVED: "DELIVERY_RECEIPT_UNRESOLVED", // 조회 자체가 실패 -- 판정 불가.
+});
+
+// 파일명 접두(`coder-task.md` -> `CODER`)로 role을 derive한다 -- 이
+// 디렉터리의 관례(역할당 파일 하나, buildDroppedTaskFileItem의
+// `resultName` 유도와 동일 관례)를 그대로 재사용했을 뿐 새 규칙이 아니다.
+function roleFromTaskFileName(name) {
+  const m = /^([A-Za-z0-9_]+)-task\.md$/.exec(name);
+  return m ? m[1].toUpperCase() : null;
+}
+
+function checkDeliveryReceiptCoverage(repoRoot, name, taskId, opts) {
+  if (!isNonEmptyReceiptString(taskId)) {
+    return { status: DELIVERY_RECEIPT_CHECK.NOT_APPLICABLE };
+  }
+  const role = roleFromTaskFileName(name);
+  if (!role) return { status: DELIVERY_RECEIPT_CHECK.NOT_APPLICABLE };
+  const receiptPath = resolveDispatchReceiptPathForUnconsumed(repoRoot, opts);
+  if (!isNonEmptyReceiptString(receiptPath)) {
+    // ★영수증 «경로 자체»가 안 구해지는 것(env도·opts도·영속 포인터
+    // 파일도 없음)은 "이 환경에 영수증 메커니즘이 아직 설치/설정 안 됨"
+    // 이다 -- unconsumed 축이 같은 resolveDispatchReceiptPathForUnconsumed
+    // 에서 이미 이 값을 "판정 불가"가 아니라 "이 신호를 못 켠다"로 접는
+    // 것과 같은 원칙(위 그 축 헤더 §2561 근방). 이 상태는 거의 모든 시험
+    // fixture·파이프라인 설정 전 워크트리의 정상 상태이므로 UNRESOLVED
+    // (수집 실패)로 접으면 제외 수리 자체가 "영수증 경로가 없는 모든
+    // 환경에서 전부 판정 불가"라는 새 사고를 만든다(ⓓ⑶가 막으려는 바로
+    // 그 반대쪽 사고) -- 기존 동작 그대로 NOT_APPLICABLE(제외 안 함).
+    // 경로가 «있는데» 그 파일을 못 읽는 경우만 아래에서 진짜 UNRESOLVED다.
+    return { status: DELIVERY_RECEIPT_CHECK.NOT_APPLICABLE, role };
+  }
+  const readFileFn =
+    typeof opts.dispatchReceiptReadFn === "function"
+      ? opts.dispatchReceiptReadFn
+      : readFileSync;
+  try {
+    readFileFn(receiptPath, "utf8"); // 읽기 가능성만 재확인(위 헤더 참조).
+  } catch {
+    return { status: DELIVERY_RECEIPT_CHECK.UNRESOLVED, role };
+  }
+  const found = hasDispatchReceiptForRound(role, taskId, receiptPath, opts);
+  return {
+    status: found
+      ? DELIVERY_RECEIPT_CHECK.FOUND
+      : DELIVERY_RECEIPT_CHECK.NOT_FOUND,
+    role,
+  };
+}
+
+function buildDroppedTaskFileItem(repoRoot, harnessDir, name, text, opts) {
   const droppedMatch = text.match(DROPPED_AT_RE);
   if (!droppedMatch) return null;
   const relPath = `.harness/${name}`;
@@ -469,6 +563,11 @@ function buildDroppedTaskFileItem(repoRoot, harnessDir, name, text) {
       ? collectResultFileCompletion(repoRoot, resultPath, taskId)
       : null,
     taskIdMismatch: computeTaskIdMismatch(repoRoot, relPath, taskId),
+    // HYK-464-watch-collection-1 ⓑ: 위 헤더 블록 참조 -- `isDispatchStillActive`
+    // 가 이 값으로 "영수증 없는 묵은 task 파일"을 제외한다. `items`에는
+    // 그대로 남으므로(제외해도 통째로 사라지지 않는다) 호출부가 "제외된
+    // 항목·사유"를 그대로 읽을 수 있다(조용한 제외 금지).
+    deliveryReceipt: checkDeliveryReceiptCoverage(repoRoot, name, taskId, opts),
   };
 }
 
@@ -501,10 +600,36 @@ export function collectDroppedTaskFileEvidence(repoRoot, opts = {}) {
     } catch {
       return { items: [], failed: true };
     }
-    const item = buildDroppedTaskFileItem(repoRoot, harnessDir, name, text);
-    if (item) items.push(item);
+    const item = buildDroppedTaskFileItem(
+      repoRoot,
+      harnessDir,
+      name,
+      text,
+      opts,
+    );
+    if (!item) continue;
+    // HYK-464-watch-collection-1 ⓑ: 영수증 조회 자체가 실패했으면(경로를
+    // 못 구함·전역 영수증 파일을 못 읽음) "제외"가 아니라 이 함수의 다른
+    // 모든 읽기 실패와 동일하게 즉시 `failed:true`로 닫는다 -- "정상적으로
+    // 없음"과 "확인 못 함"을 섞지 않는다(위 헤더 블록 참조).
+    if (item.deliveryReceipt.status === DELIVERY_RECEIPT_CHECK.UNRESOLVED) {
+      return { items: [], failed: true };
+    }
+    items.push(item);
   }
-  return { items, failed: false };
+  // HYK-464-watch-collection-1 ⓑ: 뺀 항목을 보이는 값으로 남긴다(조용한
+  // 제외 금지) -- `items`에는 그대로 남아 있으므로(아래는 그 요약일 뿐)
+  // 호출부가 전체 목록에서 다시 걸러낼 수도 있다.
+  const excludedUndeliveredTaskFiles = items
+    .filter(
+      (it) => it.deliveryReceipt.status === DELIVERY_RECEIPT_CHECK.NOT_FOUND,
+    )
+    .map((it) => ({
+      path: it.path,
+      taskId: it.taskId,
+      role: it.deliveryReceipt.role,
+    }));
+  return { items, failed: false, excludedUndeliveredTaskFiles };
 }
 
 // git 호출 하나 -- stdout만 캡처하고 stderr는 항상 삼킨다(★재작업 2R
@@ -728,12 +853,24 @@ export const SEAT_LIVENESS_WIRE_STATUS = Object.freeze({
 // 하나씩 두면(ⓑ) 같은 결함이 세 벌로 늘어날 위험이 있고, 세 축은 애초에
 // "이 배달이 아직 끝나지 않았는가"라는 같은 질문을 던진다(§2 근거 상세는
 // coder.md 참조).
+// HYK-464-watch-collection-1 ⓑ: 배달 영수증이 "정상적으로 없다"고 확인된
+// (DELIVERY_RECEIPT_CHECK.NOT_FOUND) task 파일은 활성 배달 후보에서 뺀다
+// (위 checkDeliveryReceiptCoverage/buildDroppedTaskFileItem 헤더 참조).
+// `item.deliveryReceipt`가 아예 없는 입력(이 조각 이전부터 있던 시험들이
+// 리터럴로 만든 item -- buildDroppedTaskFileItem을 거치지 않음)은 조회를
+// 안 한 것과 동형으로 다뤄 기존 동작을 그대로 유지한다(회귀 0).
 function isDispatchStillActive(item) {
   if (
     !item ||
     typeof item.droppedAtMs !== "number" ||
     !Number.isFinite(item.droppedAtMs) ||
     !item.resultFile
+  ) {
+    return false;
+  }
+  if (
+    item.deliveryReceipt &&
+    item.deliveryReceipt.status === DELIVERY_RECEIPT_CHECK.NOT_FOUND
   ) {
     return false;
   }
@@ -1156,7 +1293,15 @@ function severityOf(entry) {
 // 워크트리 하나를 판정한다 -- ★수집 실패(.harness 읽기 실패)를 "조용함"
 // (NOT_APPLICABLE)으로 접지 않고 별도 상태로 표면화한다(§2-3 확장).
 function judgeSeatLivenessForWorktree(worktreePath, now, opts) {
+  // HYK-464-watch-collection-1 ⓑ: 전체 opts를 넘긴다(readdirFn만은 여전히
+  // `harnessReaddirFn`으로 이름을 바꿔 덮어쓴다 -- 바로 아래 `readdirFn:`
+  // 가 스프레드 뒤에 오므로 옮긴 순서가 이긴다. collectGitWorktrees 쪽
+  // `opts.readdirFn`과 이름이 겹쳐 그 축과 섞이는 것을 막던 기존 관례는
+  // 그대로 유지하면서, 영수증 조회 옵트(dispatchReceiptPath 등)도 시험이
+  // 주입할 수 있게 연다 -- 생산 경로는 이 필드들이 전부 비어 있으므로
+  // env/영속 포인터 낙하값 그대로 동작한다(회귀 0).
   const evidence = collectDroppedTaskFileEvidence(worktreePath, {
+    ...opts,
     readdirFn: opts.harnessReaddirFn,
   });
   if (evidence.failed) {
@@ -1169,7 +1314,11 @@ function judgeSeatLivenessForWorktree(worktreePath, now, opts) {
     { repoRoot: worktreePath, droppedTaskFiles: evidence.items, now },
     opts,
   );
-  return { worktreePath, ...judged };
+  return {
+    worktreePath,
+    ...judged,
+    excludedUndeliveredTaskFiles: evidence.excludedUndeliveredTaskFiles,
+  };
 }
 
 // judgeSeatLivenessAcrossWorktrees({repoRoot, now}, opts) -- HYK-185
@@ -1402,7 +1551,11 @@ function idleSeverityOf(entry) {
 }
 
 function judgeSeatIdleForWorktree(worktreePath, now, opts) {
+  // HYK-464-watch-collection-1 ⓑ: judgeSeatLivenessForWorktree와 동일 이유
+  // (위 그 함수 헤더 참조) -- 전체 opts를 넘기고 readdirFn만 이름을 바꿔
+  // 덮어쓴다.
   const evidence = collectDroppedTaskFileEvidence(worktreePath, {
+    ...opts,
     readdirFn: opts.harnessReaddirFn,
   });
   if (evidence.failed) {
@@ -1415,7 +1568,11 @@ function judgeSeatIdleForWorktree(worktreePath, now, opts) {
     { repoRoot: worktreePath, droppedTaskFiles: evidence.items, now },
     opts,
   );
-  return { worktreePath, ...judged };
+  return {
+    worktreePath,
+    ...judged,
+    excludedUndeliveredTaskFiles: evidence.excludedUndeliveredTaskFiles,
+  };
 }
 
 // judgeSeatIdleAcrossWorktrees({repoRoot, now}, opts) -- seat-liveness
@@ -1624,6 +1781,95 @@ function nextObservationsForDispatch(prevEntry, dispatch, observation) {
     : combined;
 }
 
+// ---- HYK-464-watch-collection-1 ⓒ (coder-task.md §2 ⓒ) -- 착수 축이
+// 화면(lastOutputAt)만이 아니라 배달기(dispatch-start-confirm-cli.mjs)와
+// 같은 근거(작업자 기록 폴더 총 바이트 성장, GREW_RECENTLY)도 받는다 ----
+//
+// 배경(실측, 2026-10-19 13:43): 이 축은 `orca terminal show`의 lastOutputAt
+// 전진만 본다 -- 그런데 그 화면 자신이 76초 넘게 안 갱신되는 구간이 이미
+// 실측됐다(dispatch-start-size-core.mjs 자신의 헤더 주석, "화면은 몇 초
+// 지연이 아니라 무한정 지연될 수 있다"). 배달 직후 "착수" 확인 CLI
+// (dispatch-start-confirm-cli.mjs)는 처음부터 화면을 아예 안 보고 세션
+// 로그 총 바이트 성장만 쓴다 -- 그런데 그 코어(dispatch-start-size-core.mjs/
+// dispatch-start-size-adapter.mjs)를 이 주기 감시 축은 단 한 번도 안
+// import했다(실측: grep). 그래서 화면이 멈춘 순간 이 축은 실제로 일하는
+// 좌석을 NOT_STARTED로 오판한다.
+//
+// 수리: 그 코어/어댑터를 **그대로 호출**(판정 의미 변경 0, product_scope
+// 비타협)해 세션 로그 성장 증거를 추가로 모으고, 화면 판정이 NOT_STARTED
+// 일 때만(그 밖은 손대지 않는다) size 판정이 STARTED/GREW_RECENTLY면
+// 뒤집는다. 뒤집은 결과의 reasonCode는 화면 쪽 값을 재사용하지 않고 새
+// 값을 쓴다(§2-1-1 "구별되는 이름" -- 화면 근거 그대로의 NOT_STARTED와
+// 이 재정의 경로가 같은 값으로 접히면 "왜 STARTED인지"를 잃는다).
+// 반대 방향(ⓓ): 화면도 멈추고 기록 폴더도 안 늘었으면 size 판정이
+// STARTED가 아니므로 그대로 NOT_STARTED로 남는다. 기록 폴더 조회
+// 자체가 실패하면(`sizeCollected.ok !== true`) 이번 회차 관측에
+// `totalBytes`를 안 싣고, size 판정도 그 회차를 못 보므로 "착수"로
+// 새지 않는다(§2 ⓒ "조회 실패는 착수로 접지 말 것").
+export const DISPATCH_START_OVERRIDE_REASON = Object.freeze({
+  SESSION_SIZE_GREW_RECENTLY:
+    "DISPATCH_START_OVERRIDDEN_SESSION_SIZE_GREW_RECENTLY",
+});
+
+function resolveClaudeHomeDir(opts) {
+  return typeof opts.claudeHomeDir === "string" && opts.claudeHomeDir
+    ? opts.claudeHomeDir
+    : path.join(os.homedir(), ".claude");
+}
+
+// collectTotalSessionBytes 자신의 계약(dispatch-start-size-adapter.mjs
+// 헤더)은 `readdirFn`에 기본값을 안 둔다 -- 여기서만 실 readdirSync를
+// 낙하값으로 채운다(그 코어의 판정 로직은 한 글자도 안 바꾼다). 읽기가
+// 예기치 못하게 throw해도(이 코어는 보통 throw 대신 `{ok:false}`를
+// 돌려주지만, 방어적으로) "착수"로 새지 않도록 여기서 삼켜 `ok:false`로
+// 접는다.
+function collectSessionSizeObservation(repoRoot, opts) {
+  const collectFn =
+    typeof opts.collectSessionSizeFn === "function"
+      ? opts.collectSessionSizeFn
+      : (args) =>
+          collectTotalSessionBytes(args, {
+            readdirFn: opts.sessionSizeReaddirFn ?? readdirSync,
+            statFn: opts.sessionSizeStatFn,
+            lstatFn: opts.sessionSizeLstatFn,
+            realpathFn: opts.sessionSizeRealpathFn,
+          });
+  try {
+    return collectFn({ repoRoot, claudeHomeDir: resolveClaudeHomeDir(opts) });
+  } catch (err) {
+    return {
+      ok: false,
+      reasonCode: "DISPATCH_START_SIZE_COLLECT_THREW",
+      detail: err && err.message ? err.message : String(err),
+    };
+  }
+}
+
+// 화면(judgeDispatchStart) 판정이 NOT_STARTED일 때만 size 증거로 뒤집는다
+// -- 그 밖(STARTED/UNDECIDABLE)은 한 글자도 손대지 않는다(위 헤더 참조).
+function combineDispatchStartWithSizeEvidence(screenJudged, sizeJudged) {
+  if (screenJudged.verdict !== DISPATCH_START_VERDICT.NOT_STARTED) {
+    return screenJudged;
+  }
+  if (
+    !sizeJudged ||
+    sizeJudged.ok !== true ||
+    sizeJudged.verdict !== DISPATCH_START_SIZE_VERDICT.STARTED ||
+    sizeJudged.reasonCode !== DISPATCH_START_SIZE_REASON.GREW_RECENTLY
+  ) {
+    return screenJudged;
+  }
+  return {
+    ok: true,
+    verdict: DISPATCH_START_VERDICT.STARTED,
+    reasonCode: DISPATCH_START_OVERRIDE_REASON.SESSION_SIZE_GREW_RECENTLY,
+    details: {
+      screenReasonCode: screenJudged.reasonCode,
+      sizeDetails: sizeJudged.details,
+    },
+  };
+}
+
 // judgeDispatchStartForRepo({repoRoot, droppedTaskFiles, now}, opts) --
 // judgeSeatLivenessForRepo/judgeSeatIdleForRepo와 같은 형태(이미 수집된
 // droppedTaskFiles를 받는다, 이 함수 자신은 .harness를 읽지 않는다) -- 이
@@ -1633,6 +1879,8 @@ function nextObservationsForDispatch(prevEntry, dispatch, observation) {
 // (§3-e max-lines-per-function 상한 준수를 위해 judgeDispatchStartForRepo에서
 // 분리 -- 로직은 그대로, 자리만 옮겼다). correlation은 부가 정보로 그대로
 // 실어 나른다(있을 때만).
+// HYK-464-watch-collection-1 ⓒ: 같은 store에 `totalBytes`도 함께 쌓고(위
+// 헤더 참조), screen 판정과 size 판정을 합친 값을 돌려준다.
 function persistAndJudgeDispatchStart(
   { repoRoot, dispatch, observation, now, correlation },
   opts,
@@ -1647,9 +1895,13 @@ function persistAndJudgeDispatchStart(
       dispatch,
     };
   }
+  const sizeCollected = collectSessionSizeObservation(repoRoot, opts);
   const currentObservation = {
     observedAtMs: now,
     lastOutputAt: observation.lastOutputAt,
+    ...(sizeCollected.ok === true
+      ? { totalBytes: sizeCollected.totalBytes }
+      : {}),
   };
   const nextObservations = nextObservationsForDispatch(
     loaded.store[repoRoot],
@@ -1674,11 +1926,23 @@ function persistAndJudgeDispatchStart(
       dispatch,
     };
   }
-  const judged = judgeDispatchStart({
+  const screenJudged = judgeDispatchStart({
     dispatch,
     observations: nextObservations,
     now,
   });
+  const sizeJudged = judgeDispatchStartBySize({
+    observations: nextObservations
+      .filter((o) => typeof o.totalBytes === "number")
+      .map((o) => ({ observedAtMs: o.observedAtMs, totalBytes: o.totalBytes })),
+    dispatchedAtMs: dispatch.dispatchedAtMs,
+    now,
+    timeoutMs: opts.sessionSizeTimeoutMs,
+    stallThresholdMs: opts.sessionSizeStallThresholdMs,
+    sustainedGrowthBytes: opts.sessionSizeSustainedGrowthBytes,
+    stallGraceMultiplier: opts.sessionSizeStallGraceMultiplier,
+  });
+  const judged = combineDispatchStartWithSizeEvidence(screenJudged, sizeJudged);
   return {
     status: DISPATCH_START_WIRE_STATUS.JUDGED,
     verdict: judged.verdict,
@@ -1760,7 +2024,11 @@ export function judgeDispatchStartForRepo(
 // 별도 상태로 표면화하고, judgeDispatchStartForRepo는 그 뒤(읽기가 이미
 // 성공한 뒤)만 부른다.
 function judgeDispatchStartForWorktree(worktreePath, now, opts) {
+  // HYK-464-watch-collection-1 ⓑ: judgeSeatLivenessForWorktree와 동일 이유
+  // (위 그 함수 헤더 참조) -- 전체 opts를 넘기고 readdirFn만 이름을 바꿔
+  // 덮어쓴다.
   const evidence = collectDroppedTaskFileEvidence(worktreePath, {
+    ...opts,
     readdirFn: opts.harnessReaddirFn,
   });
   if (evidence.failed) {
@@ -1773,7 +2041,11 @@ function judgeDispatchStartForWorktree(worktreePath, now, opts) {
     { repoRoot: worktreePath, droppedTaskFiles: evidence.items, now },
     opts,
   );
-  return { worktreePath, ...judged };
+  return {
+    worktreePath,
+    ...judged,
+    excludedUndeliveredTaskFiles: evidence.excludedUndeliveredTaskFiles,
+  };
 }
 
 export const DISPATCH_START_SCAN_SEVERITY = Object.freeze({

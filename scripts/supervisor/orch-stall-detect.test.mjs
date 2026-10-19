@@ -1020,6 +1020,16 @@ const OWN_TEST_FILE_SUFFIXES = [
   // line above): that list governs orca-adapter.mjs imports, and this file
   // imports none -- same as the two unconsumed-*.test.mjs entries above.
   "unconsumed-ledger-closure-wire.test.mjs",
+  // HYK-464-watch-collection-1: hyk464-watch-collection.test.mjs is the same
+  // shape once more -- it drives collectDroppedTaskFileEvidence/
+  // selectActiveDispatch/judgeDispatchStartForRepo directly (same read-only
+  // production entry points as hyk408-seat-decide-repro.test.mjs above) to
+  // pin the receipt-based exclusion of stale undelivered task files and the
+  // dispatch-start axis's GREW_RECENTLY override. Excluded on the identical
+  // "own .test.mjs" basis. ⚠️no eslint.config.mjs counterpart is needed here
+  // (same reason as the unconsumed-*.test.mjs entries above): this file
+  // imports no orca-adapter.mjs symbol.
+  "hyk464-watch-collection.test.mjs",
 ];
 
 function findOrchStallDetectImporters(root) {
