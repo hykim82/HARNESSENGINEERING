@@ -378,6 +378,32 @@ test("hasGenuineTapCompletion: HYK-209 2R P1-2 ⒝ K5 (REVIEW-r1.md ⓑ real TAP
   );
 });
 
+// HYK-209 H4-2 (⑪, H41-P2-A ⒝ standalone regression guard -- H4-1 검토 2R
+// §3 P2-A 원문, REVIEW-r2.md(H4-1) §2 ⓖ 변이 V1): the K5 fixture above has
+// BOTH no column-0 plan line AND no duration_ms, so ⒜ (missing duration)
+// already blocks it on its own -- loosening PRODUCTION_PLAN_LINE_RE to
+// "anywhere, not just column-0-anchored" (V1: /1\.\.\d+/) does NOT turn K5
+// green, so K5 alone cannot catch that mutation (검토 2R 실측: V1 변이에서
+// runner-receipt-writer 41/41·isolated-suite-runner 38/38 전부 초록으로
+// 생존했다). This fixture (H4-1 검토 2R §2 ⓖ "S2" 원문) isolates ⒝ alone:
+// duration_ms IS present and even implausibly large (999999, so the ratio
+// check alone would pass it, same as K2), AND the forged plan line comes
+// out escaped as "# 1..9" (never real column-0) -- only ⒝'s own
+// column-0-anchor check can reject this standalone. Loosening the anchor
+// (V1) makes this exact fixture wrongly genuine.
+const S2_ESCAPED_PLAN_LINE_WITH_IMPLAUSIBLY_LARGE_DURATION =
+  "TAP version 13\n# 1..9\n# tests 9\n# suites 0\n# pass 9\n# fail 0\n# cancelled 0\n# skipped 0\n# todo 0\n# duration_ms 999999\n";
+
+test("hasGenuineTapCompletion: HYK-209 H4-2 (⑪, H41-P2-A ⒝ mutation guard) -- a forged escaped '# 1..9' plan line with a PRESENT, implausibly-large duration_ms (so ⒜'s duration check alone would pass it, unlike K5) must still be rejected by ⒝'s column-0-anchor check alone", () => {
+  assert.equal(
+    hasGenuineTapCompletion(
+      S2_ESCAPED_PLAN_LINE_WITH_IMPLAUSIBLY_LARGE_DURATION,
+      { elapsedMs: 3350 },
+    ),
+    false,
+  );
+});
+
 test("hasGenuineTapCompletion: HYK-209 2R P1-2 ⒜ in isolation -- a genuine column-0 plan line immediately precedes the block (⒝ satisfied), but duration_ms is still missing -- the production path still rejects it (⒜ alone, no plan-line gap to hide behind)", () => {
   const planLineButNoDuration =
     "TAP version 13\n1..1\n# tests 1\n# pass 0\n# fail 1\n# skipped 0\n";

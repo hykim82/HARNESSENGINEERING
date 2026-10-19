@@ -314,12 +314,27 @@ function assertNonEmptySwept(swept, root) {
 // list.test.mjs의 parseTapSummary와 같은 규칙(세 판독 공통, §2 ⓑ).
 // 마지막 완결 블록 뒤에 짝 없는 `# tests N`이 또 있으면(S7, 잘린 새 블록)
 // null -- 그 앞의 무관한 블록을 "진짜인 척" 돌려주지 않는다(판정 불가).
+// HYK-209 H4-2 (P2-C, REVIEW-r2.md(H5) §2 ⓓ / §3): this 2필드(tests→fail)
+// completeness definition still differs from production's
+// parseTapSummaryCounts (runner-receipt-writer.mjs), which requires
+// tests→pass→fail→skipped (4필드, pass·skipped도 필수 -- suites/cancelled/
+// todo/duration_ms만 건너뛸 수 있음). The gap shows up when a real
+// "# tests 300" is immediately followed by a FAKE "# fail 5" line (no
+// "# pass" between them) with the block's real remaining fields (incl. the
+// real fail 0) after that (1R 원 서술 S8, 검토 2R R8-orig) -- this looser
+// 2필드 판독 reads the fake fail as the block's own and returns 300/5;
+// production returns null (판정 불가). Require pass+skipped too, matching
+// production (공통 모듈 신설 없이 이 파일 안에서만).
 const TAP_SKIPPABLE_FIELD_LINE =
-  "(?:# (?:suites|pass|cancelled|skipped|todo) \\d+|# duration_ms [\\d.]+)\\r?\\n";
+  "(?:# (?:suites|cancelled|todo) \\d+|# duration_ms [\\d.]+)\\r?\\n";
 const LAST_TAP_SUMMARY_PAIR_RE = new RegExp(
   "^# tests (\\d+)\\r?\\n" +
     `(?:${TAP_SKIPPABLE_FIELD_LINE})*?` +
-    "# fail (\\d+)\\r?$",
+    "# pass \\d+\\r?\\n" +
+    `(?:${TAP_SKIPPABLE_FIELD_LINE})*?` +
+    "# fail (\\d+)\\r?\\n" +
+    `(?:${TAP_SKIPPABLE_FIELD_LINE})*?` +
+    "# skipped \\d+\\r?$",
   "gm",
 );
 function parseLastTapSummaryPair(stdout) {
@@ -639,6 +654,72 @@ test("parseLastTapSummaryPair: M4 mutation guard -- picks the LAST block (tests 
   assert.ok(last);
   assert.equal(Number(last[1]), 5);
   assert.equal(Number(last[2]), 0);
+});
+
+// HYK-209 H4-2 (P2-C, REVIEW-r2.md(H5) ⓓ row "R8-orig(1R 원 서술)"): a real
+// "# tests 300" immediately followed by a FAKE "# fail 5" line (no "# pass"
+// between them), then the real remaining fields of that same block
+// (including the real fail 0). The old 2필드 pair regex read the fake
+// "# fail 5" as already a complete block (300/5, wrong -- production is
+// null/판정 불가, REVIEW-r2.md(H5) §2 ⓓ). Requiring pass+skipped (matching
+// production) makes the main pair regex fail to match this shape; the bare
+// "# tests N"-only fallback (if any) is this file's own concern, not
+// re-derived here -- this guard only requires the fake fail value is not
+// returned.
+test("parseLastTapSummaryPair mutation guard (P2-C, R8-orig shape): a fake '# fail N' line sitting directly between a real '# tests N' and that block's own real pass/skipped fields must not be read as the block's fail value", () => {
+  const r8orig = [
+    "# tests 300",
+    "# fail 5",
+    "# suites 0",
+    "# pass 298",
+    "# fail 0",
+    "# cancelled 0",
+    "# skipped 2",
+    "# todo 0",
+    "# duration_ms 999.0",
+  ].join("\n");
+  const last = parseLastTapSummaryPair(r8orig);
+  const gotFail = last ? Number(last[2]) : null;
+  assert.notEqual(
+    gotFail,
+    5,
+    `the fake '# fail 5' line must not be read as this block's fail value -- got ${JSON.stringify(last)}`,
+  );
+});
+
+// HYK-209 H4-2 (⑨, 판정 2245 §4 결정론 단언): a fixed, non-randomized
+// scratch-root call (path-joining the OS temp dir with a hardcoded name,
+// outside mkdtempSync) collides across concurrent runs of this file (or
+// concurrent CI jobs) that reach for the same literal -- every scratch root
+// in this file must instead go through mkdtempSync (which appends a random
+// suffix). This scans this file's OWN source text (not a shared production
+// module) so a future edit that reintroduces a bare literal root is caught
+// here, not just in the 6 other files tracked by the 다음조각후보표
+// ORCH106 13행 ⓕ list. The needle is built from fragments (not written
+// literally in this comment/this test's own strings) so this test does not
+// trip over its own source when it scans itself.
+test("HYK-209 H4-2 정적 금지 단언 (⑨): this file's own source never pairs the OS temp dir with a literal path outside mkdtempSync() -- every scratch root must be randomized", () => {
+  const selfSource = readFileSync(fileURLToPath(import.meta.url), "utf8");
+  const joinWord = "join";
+  const tmpdirCall = "tmpdir()";
+  const BARE_TMPDIR_JOIN_RE = new RegExp(
+    `\\b(?:path\\.)?${joinWord}\\(\\s*${tmpdirCall.replace("(", "\\(").replace(")", "\\)")}\\s*,`,
+    "g",
+  );
+  const offenders = [];
+  let m;
+  while ((m = BARE_TMPDIR_JOIN_RE.exec(selfSource)) !== null) {
+    const before = selfSource.slice(0, m.index).replace(/\s+$/, "");
+    if (!before.endsWith("mkdtempSync(")) {
+      const line = selfSource.slice(0, m.index).split("\n").length;
+      offenders.push(`line ${line}: ${m[0]}`);
+    }
+  }
+  assert.deepEqual(
+    offenders,
+    [],
+    `found a ${joinWord}(${tmpdirCall}, ...) call NOT wrapped in mkdtempSync() -- a fixed, non-randomized scratch root reintroduces the literal-root collision class this round forbids: ${offenders.join("; ")}`,
+  );
 });
 
 // HYK-371 4R (coder-task.md §2, "주입 지점이 우회로가 되면 안 된다"): the

@@ -21,6 +21,7 @@ import {
   mkdirSync,
   readFileSync,
   readdirSync,
+  writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -238,10 +239,62 @@ test("(3) installed pm-guard.test.mjs actually passes against the installed pm-g
         "--test",
         path.join(targetRepo, "scripts", "check", "pm-guard.test.mjs"),
       ],
-      { stdio: "pipe" },
+      { stdio: "pipe", env: envWithoutTestMarkers() },
     );
   } finally {
     rmSync(base, { recursive: true, force: true });
+  }
+});
+
+// HYK-209 H4-2 (S-1): `node --test` sets NODE_TEST_CONTEXT/NODE_TEST_WORKER_ID
+// on ITS OWN process -- and since this whole file is itself run under
+// `node --test`, those two vars are already sitting in process.env by the
+// time test (3) above spawns ITS OWN nested `node --test` child against the
+// installed pm-guard.test.mjs. Left inherited, Node's test runner treats the
+// child as a nested worker and reports results over an IPC channel that does
+// not exist here instead of via its own process exit code -- so a genuinely
+// FAILING installed test comes back exit 0 (a false green masking a real
+// portability regression), the same ambient-env class HYK-359 /
+// install-g1-adapter-list.test.mjs / install-net-closure.test.mjs already
+// guard against for their own child `node --test` spawns. Strip the two vars
+// before spawning so the child's exit code is the real pass/fail signal.
+function envWithoutTestMarkers() {
+  const env = { ...process.env };
+  delete env.NODE_TEST_CONTEXT;
+  delete env.NODE_TEST_WORKER_ID;
+  return env;
+}
+
+test("(3b) S-1 mutation guard -- a genuinely failing installed node --test child must not come back exit 0 just because it inherited this process's own NODE_TEST_CONTEXT/NODE_TEST_WORKER_ID", () => {
+  const scratch = mkdtempSync(path.join(tmpdir(), "hyk209-s1-env-"));
+  try {
+    const failingFile = path.join(scratch, "deliberately-failing.test.mjs");
+    writeFileSync(
+      failingFile,
+      'import { test } from "node:test";\n' +
+        'import assert from "node:assert/strict";\n' +
+        'test("deliberately fails", () => { assert.equal(1, 2); });\n',
+    );
+
+    let isolatedExitCode = 0;
+    try {
+      execFileSync("node", ["--test", failingFile], {
+        stdio: "pipe",
+        env: envWithoutTestMarkers(),
+      });
+    } catch (err) {
+      isolatedExitCode = err.status;
+    }
+    assert.notEqual(
+      isolatedExitCode,
+      0,
+      "with NODE_TEST_CONTEXT/NODE_TEST_WORKER_ID stripped, a genuinely " +
+        "failing node --test child must still exit non-zero -- otherwise " +
+        "the isolation itself would be hiding real failures instead of " +
+        "merely avoiding the ambient-env leak",
+    );
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
   }
 });
 

@@ -250,14 +250,62 @@ test("install-net-closure: every INSTALL_NET_CLOSURE_KNOWN_EXCEPTIONS entry decl
   }
 });
 
+// HYK-209 H4-2 (⑭, H41-P3-c, REVIEW-r2.md(H4-1) §3 P3-c): the old single
+// first-match regex could be hijacked by a subtest printing its own "fail
+// N"-shaped line (which node's tap reporter escapes to column 0 as
+// "# fail N", same leak mechanism as runner-receipt-writer.mjs's
+// parseTapSummaryCounts / this round's ⑦⑧) if one ever appeared before the
+// real top-level summary. Read the LAST complete tests->pass->fail->skipped
+// block instead (same shape as parseTapSummaryCounts, duplicated here --
+// coder-task.md §2 ⑭/⑦ "공통 모듈 신설 없이 각 파일"), with the same
+// truncated-tail guard (a dangling orphan "# tests N" after the last
+// complete block means 판정 불가, not "use the block before it").
+const TAP_SKIPPABLE_FIELD_LINE =
+  "(?:# (?:suites|cancelled|todo) \\d+|# duration_ms [\\d.]+)\\r?\\n";
+const LAST_TAP_FAIL_BLOCK_RE = new RegExp(
+  "^# tests \\d+\\r?\\n" +
+    `(?:${TAP_SKIPPABLE_FIELD_LINE})*?` +
+    "# pass \\d+\\r?\\n" +
+    `(?:${TAP_SKIPPABLE_FIELD_LINE})*?` +
+    "# fail (\\d+)\\r?\\n" +
+    `(?:${TAP_SKIPPABLE_FIELD_LINE})*?` +
+    "# skipped \\d+\\r?$",
+  "gm",
+);
 function parseTapFailCount(tapText) {
-  const m = /^# fail (\d+)\r?$/m.exec(tapText ?? "");
-  return m ? Number(m[1]) : null;
+  const t = tapText ?? "";
+  const blocks = [...t.matchAll(LAST_TAP_FAIL_BLOCK_RE)];
+  if (blocks.length === 0) return null;
+  const last = blocks[blocks.length - 1];
+  const tail = t.slice(last.index + last[0].length);
+  if (/^# tests \d+/m.test(tail)) return null;
+  return Number(last[1]);
 }
 
 function notOkLines(tapText) {
   return (tapText ?? "").split(/\r?\n/).filter((l) => /^not ok \d+ /.test(l));
 }
+
+test("parseTapFailCount mutation guard (⑭, H41-P3-c): a subtest leaking its own 'fail 0'-shaped line (escaped to '# fail 0' by node's tap reporter) before the real top-level summary must not be read as the real fail count", () => {
+  const leakedFakeFailLineFirst =
+    "# Subtest: a prior subtest whose own console output happens to look like a summary\n" +
+    "ok 1 - a prior subtest whose own console output happens to look like a summary\n" +
+    "# fail 0\n" +
+    "1..1\n" +
+    "# tests 1\n" +
+    "# suites 0\n" +
+    "# pass 0\n" +
+    "# fail 1\n" +
+    "# cancelled 0\n" +
+    "# skipped 0\n" +
+    "# todo 0\n" +
+    "# duration_ms 12.3\n";
+  assert.equal(
+    parseTapFailCount(leakedFakeFailLineFirst),
+    1,
+    "expected the LAST complete block's fail count (1, the real failure), not the leaked fake '# fail 0' line that happens to appear earlier in the output",
+  );
+});
 
 // HYK-209-install-closure-1 2R P2-3: checks one exception entry's own fixed
 // expectations against a real failing run's actual TAP/stderr text. Returns
@@ -545,6 +593,12 @@ test("install-net-closure ⓓ: an archive install (REPO_ROOT not a git checkout)
 // 안에서 실측 확인, 다섯 곳 전부 동일): `join(dirname(fileURLToPath(new
 // URL(import.meta.url))), "<이름>.mjs")`. 정적 import가 아니라 이 모양으로
 // 조립된 경로만 relay-handshake.mjs 자신이 "스폰되는 형제"로 취급한다.
+// HYK-209 H4-2 (⑬, H41-P3-b 한계 기록, 동작 변경 0, REVIEW-r2.md(H4-1) §3
+// P3-b): 이 모양 1개·대상 파일 1개(relay-handshake.mjs)로 한정된다 -- 지금은
+// 8/8 경로 조립이 이 모양이라 빠진 것이 0이지만, 앞으로 다른 조립 모양
+// (예: `new URL("./x.mjs", import.meta.url)`)이나 다른 생산 파일에서
+// BY-PATH spawn이 생기면 이 칸은 그것을 보지 못한다(열린 집합 -- 닫혔다고
+// 간주하지 않는다).
 const BY_PATH_SIBLING_SPAWN_RE =
   /join\(\s*dirname\(fileURLToPath\(new URL\(import\.meta\.url\)\)\),\s*\n?\s*["']([A-Za-z0-9_.-]+\.mjs)["'],?\s*\n?\s*\)/g;
 

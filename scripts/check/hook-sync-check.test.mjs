@@ -572,13 +572,29 @@ test("sanity: real hooks/ and .git/hooks/ are never written by this test file", 
 // not inferred from environment, so this holds identically whether the
 // parent process itself is running under CI's tap reporter or a
 // human terminal's spec reporter -- the CHILD's reporter is always fixed.
+// HYK-209 H4-2 (첫 일치 2, #318 규칙과 같은 모양): 위 자식은 이 파일 전체를
+// 다시 돌리므로, 자기보다 앞서 도는 다른 서브테스트가 자기 진단 출력에
+// "pass N"/"fail N"처럼 생긴 줄을 흘리면(어떤 형태든) node의 tap 리포터가
+// 그 줄 앞에 "#"를 붙여 "# pass N"/"# fail N"처럼 보이게 만든다. 첫 일치만
+// 읽으면 그 흘려진(가짜) 블록을 자식의 진짜 최종 요약보다 먼저 집는다 --
+// runner-receipt-writer.mjs의 parseTapSummaryCounts(HYK-464 2R)와 같은
+// 규칙(마지막 완결 블록 · 그 뒤 짝 없는 "# pass N"이면 판정 불가)을 쓰되,
+// 공통 모듈은 신설하지 않고 이 파일 안에서만 쓴다.
+const TAP_SKIPPABLE_FIELD_LINE =
+  "(?:# (?:tests|suites|cancelled|skipped|todo) \\d+|# duration_ms [\\d.]+)\\r?\\n";
+const LAST_TAP_PASS_FAIL_PAIR_RE = new RegExp(
+  "^# pass (\\d+)\\r?\\n" +
+    `(?:${TAP_SKIPPABLE_FIELD_LINE})*?` +
+    "# fail (\\d+)\\r?$",
+  "gm",
+);
 function parseTestSummary(output) {
-  const pass = output.match(/^# pass (\d+)/m);
-  const fail = output.match(/^# fail (\d+)/m);
-  return {
-    pass: pass ? Number(pass[1]) : null,
-    fail: fail ? Number(fail[1]) : null,
-  };
+  const pairs = [...output.matchAll(LAST_TAP_PASS_FAIL_PAIR_RE)];
+  if (pairs.length === 0) return { pass: null, fail: null };
+  const last = pairs[pairs.length - 1];
+  const tail = output.slice(last.index + last[0].length);
+  if (/^# pass \d+/m.test(tail)) return { pass: null, fail: null };
+  return { pass: Number(last[1]), fail: Number(last[2]) };
 }
 
 test("regression: this test file passes identically whether invoked from the repo root or from scripts/ (no process.cwd() dependency, HYK-199)", (t) => {
@@ -638,5 +654,33 @@ test("regression: this test file passes identically whether invoked from the rep
     rootSummary.pass,
     scriptsSummary.pass,
     "both cwds must report the same number of passing tests",
+  );
+});
+
+test("HYK-209 H4-2 mutation guard: parseTestSummary picks the LAST complete pass/fail block, not the first -- a leaked fake block earlier in the output must not be mistaken for the real final summary", () => {
+  const leakedFakeBlockFirst =
+    // Empirically confirmed shape (node --test-reporter=tap): a subtest's
+    // own bare console.log("pass 7") / console.log("fail 0") (no leading
+    // "#") is escaped verbatim to column 0 as "# pass 7" / "# fail 0",
+    // flushed to stdout BEFORE that subtest's own "# Subtest: ..." line --
+    // not nested inside a "---" diagnostic block.
+    "# pass 7\n" +
+    "# fail 0\n" +
+    "# Subtest: a prior subtest whose own console output happens to look like a summary\n" +
+    "ok 1 - a prior subtest whose own console output happens to look like a summary\n" +
+    "1..1\n" +
+    "# tests 1\n" +
+    "# suites 0\n" +
+    "# pass 1\n" +
+    "# fail 0\n" +
+    "# cancelled 0\n" +
+    "# skipped 0\n" +
+    "# todo 0\n" +
+    "# duration_ms 12.3\n";
+  const result = parseTestSummary(leakedFakeBlockFirst);
+  assert.deepEqual(
+    result,
+    { pass: 1, fail: 0 },
+    `expected the LAST complete pass/fail block (1/0, the real final summary), not the leaked fake one (7/0) that happens to appear earlier in the output -- got ${JSON.stringify(result)}`,
   );
 });
