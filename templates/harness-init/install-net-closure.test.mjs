@@ -214,14 +214,60 @@ function collectInstalledTestFiles(targetRepoPath) {
   return files;
 }
 
+// HYK-209-net-closure-timeout-1 ⓐ 실측(이 자식 하나를 node --test로 직접
+// 돌려 쟀다, N=3 한가 / N=5 부하): 한가할 때 38928/38677/39454 ms. 부하
+// 중(isolated-suite-runner.mjs가 이 24코어 머신에서 실제로 쓰는
+// resolveConcurrency() = floor(24/2) = 12와 같은 동시성으로 다른 .test.mjs
+// 12개를 같이 돌리며 측정) 끝까지 완주시킨 두 번은 95975 ms, 139124 ms --
+// 둘 다 지금 고정된 60000 ms보다 길다(나머지 세 번은 90000 ms 외부 래퍼에
+// 막혀 완주 못 함 1회, 59533 ms, 38416 ms -- 부하 lane이 꺼져가던 끝자락).
+// 이 자식(relay-handshake-g1-dispatch-check.test.mjs) 자신은 내부에 node
+// --test 하위 일꾼을 띄우지 않는다(execFileSync로 CLI만 호출, 동시성 값
+// 없음, 소스 확인) -- 그래서 ⓐ 후보(HARNESS_TEST_CONCURRENCY를
+// --test-concurrency로 전달)는 이 호출 모양에서 할 일이 없다: 이 spawnSync는
+// 이미 파일 1개만 돌리므로 node --test에는 병렬화할 형제 파일이 없다.
+// 택한 수리(ⓑ): isolated-suite-runner.mjs가 실제 전체 러너 호출마다
+// 무조건 심어주는 신호(NESTED_CONCURRENCY_ENV_VAR = "HARNESS_TEST_CONCURRENCY",
+// 그 파일 132/558행 -- 이 파일을 포함해 그 러너가 동시에 돌리는 모든 형제
+// 파일의 process.env에 그 가중치 값이 박힌다, 이 파일 자신도 그 TEST_DIRS의
+// "templates/harness-init" 아래라 예외가 아니다)가 있으면 "지금 부하가 걸릴
+// 수 있는 real 전체 러너 안"이라는 뜻이므로 더 긴, 그래도 유한한 시한을
+// 쓴다; 없으면(이 파일을 단독으로 돌릴 때, 위 한가 측정과 같은 모양) 원래
+// 60000 ms를 그대로 쓴다 -- 이 라운드가 문제를 재현하지 못한 경로의 동작은
+// 바꾸지 않는다. 리터럴 "HARNESS_TEST_CONCURRENCY"는 isolated-suite-
+// runner.mjs에서 import하지 않고 그대로 중복 적는다(이 파일 자신의
+// isolatedEnv() 헤더가 이미 쓰는 이 저장소의 consumer/producer 비결합
+// 관례와 같음).
+const STANDALONE_TIMEOUT_MS = 60000;
+// 180000 ms: 실측 최대 완주값(139124 ms)의 1.29배 이상, 한가 평균
+// (~39020 ms)의 4.6배 이상 -- 값을 올렸을 뿐 무한대는 아니다(⛔무한대 금지).
+const UNDER_FULL_RUNNER_TIMEOUT_MS = 180000;
+
+// 부하 신호(HARNESS_TEST_CONCURRENCY)가 유효한 양의 정수로 있으면 더 긴
+// 유한 시한, 없거나 값이 깨졌으면 원래 시한 -- isolated-suite-runner.mjs의
+// resolveNestedConcurrency와 같은 "결정 실패 시 원래 동작으로" 규칙.
+function resolveInstalledTestTimeoutMs(env) {
+  const raw = env.HARNESS_TEST_CONCURRENCY;
+  if (raw == null || raw === "") return STANDALONE_TIMEOUT_MS;
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < 1) return STANDALONE_TIMEOUT_MS;
+  return UNDER_FULL_RUNNER_TIMEOUT_MS;
+}
+
 // One `node --test` child per file -- unambiguous per-file pass/fail
 // attribution (see this file's own header for why over one combined run).
-function runOneInstalledTestFile(targetRepoPath, rel) {
+// `timeoutMs` override: test-only escape hatch (ⓒ 반대 방향 칸이 180000 ms
+// 짜리 진짜 시한을 기다리지 않고도 "시한을 넘으면 ETIMEDOUT으로 잡힌다"는
+// 메커니즘 자체를 빠르게 검증하게 한다) -- 311행의 실제 생산 호출은 이
+// 옵션을 넘기지 않으므로 거기선 항상 resolveInstalledTestTimeoutMs의 실제
+// 판단이 그대로 쓰인다.
+function runOneInstalledTestFile(targetRepoPath, rel, { timeoutMs } = {}) {
+  const env = isolatedEnv();
   return spawnSync(process.execPath, ["--test", "--test-reporter=tap", rel], {
     cwd: targetRepoPath,
     encoding: "utf8",
-    env: isolatedEnv(),
-    timeout: 60000,
+    env,
+    timeout: timeoutMs ?? resolveInstalledTestTimeoutMs(env),
     maxBuffer: 64 * 1024 * 1024,
   });
 }
@@ -378,6 +424,100 @@ test("install-net-closure: real installer -> real git target -> every installed 
         .slice()
         .sort(),
       "every INSTALL_NET_CLOSURE_KNOWN_EXCEPTIONS entry must still actually fail on a fresh install -- an entry that now passes is stale and should be deleted from the list, not kept as a no-op skip",
+    );
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// HYK-209-net-closure-timeout-1 ⓑ: resolveInstalledTestTimeoutMs's own
+// decision table, unit-level (no real spawn -- just the env-reading logic
+// above runOneInstalledTestFile).
+// ---------------------------------------------------------------------------
+test("install-net-closure timeout ⓑ: resolveInstalledTestTimeoutMs returns the original 60000 ms when HARNESS_TEST_CONCURRENCY is absent/empty/invalid (standalone run, unchanged behavior)", () => {
+  assert.equal(resolveInstalledTestTimeoutMs({}), 60000);
+  assert.equal(
+    resolveInstalledTestTimeoutMs({ HARNESS_TEST_CONCURRENCY: "" }),
+    60000,
+  );
+  assert.equal(
+    resolveInstalledTestTimeoutMs({ HARNESS_TEST_CONCURRENCY: "not-a-number" }),
+    60000,
+  );
+  assert.equal(
+    resolveInstalledTestTimeoutMs({ HARNESS_TEST_CONCURRENCY: "0" }),
+    60000,
+  );
+  assert.equal(
+    resolveInstalledTestTimeoutMs({ HARNESS_TEST_CONCURRENCY: "-3" }),
+    60000,
+  );
+});
+
+test("install-net-closure timeout ⓑ: resolveInstalledTestTimeoutMs returns the longer, still-finite 180000 ms when isolated-suite-runner.mjs's own concurrency signal is present (real full-runner shape)", () => {
+  assert.equal(
+    resolveInstalledTestTimeoutMs({ HARNESS_TEST_CONCURRENCY: "12" }),
+    180000,
+  );
+  assert.equal(
+    resolveInstalledTestTimeoutMs({ HARNESS_TEST_CONCURRENCY: "1" }),
+    180000,
+  );
+  assert.ok(
+    Number.isFinite(
+      resolveInstalledTestTimeoutMs({ HARNESS_TEST_CONCURRENCY: "24" }),
+    ),
+  );
+});
+
+// ---------------------------------------------------------------------------
+// HYK-209-net-closure-timeout-1 ⓒ 반대 방향 칸(필수): a synthetic installed
+// test file that never finishes (endless setInterval -- never resolves,
+// never calls node:test's own done/return) must still be caught by
+// runOneInstalledTestFile's real spawnSync timeout path, not silently hang
+// the whole suite. Probed on this platform first (coder.md 증거): Node's
+// spawnSync({timeout}) kill on an infinite-loop child sets
+// result.error.code === "ETIMEDOUT" (result.signal "SIGTERM", result.status
+// null) -- asserted on that structural shape, not on any message text
+// (HYK-262 posture, same as isolated-suite-runner.mjs's own classifier).
+// Uses the `timeoutMs` test-only override (tiny, so this test itself stays
+// fast) -- the mechanism under test (spawnSync's own `timeout` option
+// actually kills a real hung child) is identical regardless of which
+// finite number is passed; only resolveInstalledTestTimeoutMs's own choice
+// of THAT number is covered separately above.
+// ---------------------------------------------------------------------------
+test("install-net-closure ⓒ: a truly-hung installed test file (infinite setInterval) is still caught as ETIMEDOUT by the real runOneInstalledTestFile path after the ⓑ fix (detection not traded away for throughput)", () => {
+  const base = mkdtempSync(
+    path.join(longFormTmpdir(), "hyk209-install-net-hang-"),
+  );
+  try {
+    const checkDir = path.join(base, "scripts", "check");
+    mkdirSync(checkDir, { recursive: true });
+    const hangFile = "scripts/check/hyk209-synthetic-hang.test.mjs";
+    writeFileSync(
+      path.join(base, hangFile),
+      // Never resolves, never lets `node --test` reach a completion line --
+      // the exact "really hung, not just slow" shape ⓓ below also exercises.
+      "setInterval(() => {}, 1000);\n",
+      "utf8",
+    );
+    const startedAtMs = Date.now();
+    const result = runOneInstalledTestFile(base, hangFile, { timeoutMs: 2000 });
+    const elapsedMs = Date.now() - startedAtMs;
+    assert.equal(
+      result.error?.code,
+      "ETIMEDOUT",
+      `expected spawnSync's own timeout kill (result.error.code === "ETIMEDOUT"), got: ${JSON.stringify({ error: result.error && { code: result.error.code, message: result.error.message }, signal: result.signal, status: result.status })}`,
+    );
+    assert.equal(
+      result.status,
+      null,
+      "a timeout-killed spawnSync must not also report a real exit status",
+    );
+    assert.ok(
+      elapsedMs < 10000,
+      `expected the kill to land close to the 2000 ms override, not hang indefinitely (got ${elapsedMs} ms)`,
     );
   } finally {
     rmSync(base, { recursive: true, force: true });
