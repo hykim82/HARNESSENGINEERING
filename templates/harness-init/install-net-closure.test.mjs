@@ -43,9 +43,10 @@
 // 겪은 혼란 -- coder.md 참조) -- 단순함을 시간보다 우선했다.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import {
   cpSync,
+  existsSync,
   mkdtempSync,
   mkdirSync,
   readFileSync,
@@ -176,26 +177,73 @@ function commitInstalledTree(targetRepoPath) {
 // cleanup 자리): `EPERM, Permission denied: rmSync ...\hyk209-install-net-…`
 // -- a one-shot EPERM/EBUSY on an OS that has not yet released a just-closed
 // child process's handle on the temp tree stops this round's own correctly-
-// behaving run cold. `maxRetries`/`retryDelay` are Node's OWN built-in
-// `fs.rmSync` retry mechanism (only consulted when `recursive: true`,
-// per the Node fs docs) -- this wrapper does not reimplement retry logic in
-// JS, it only supplies the two values and delegates. retryDelay=100 ms is
-// Node's own documented default for this option; maxRetries=5 (raised from
-// Node's own default of 0) with Node's linear backoff (retryDelay * attempt
-// number) caps total added wait at 100+200+300+400+500 = 1500 ms -- enough
-// to ride out a transient lock without making a genuinely-stuck cleanup
-// hang for anywhere near the 60s/180s test-file timeout. `rmSyncImpl`
-// defaults to the real `rmSync` import (same test-only-injection shape as
-// `runOneInstalledTestFile`'s own `spawnSync` option above) so the ⓒ
-// cells below can intercept the call without touching the real
-// filesystem or waiting out a real OS-level lock.
+// behaving run cold.
+//
+// HYK-209-net-closure-timeout-1-r4 (review-3R §2 ⓒ⑹, this round's own ⓐ
+// baseline repro against a real open-handle Windows lock, both 〔직접〕):
+// 3R's own premise above -- "`maxRetries`/`retryDelay` are Node's OWN
+// built-in `fs.rmSync` retry mechanism ... delegates" -- is FALSE on Node
+// 26.2.0 (the version this round's own local full-runner actually runs,
+// `runner-receipt.json`'s `node_version`): a real transient lock (open
+// handle released after 600 ms, or 250 ms) still throws `EPERM` in 0 ms
+// with those two options supplied, zero retries. Node 20.20.2 gets the same
+// lock as `EBUSY` and DOES retry through that option -- the built-in
+// mechanism's behavior is version-dependent, which this wrapper can no
+// longer rely on silently. So this wrapper no longer delegates retry to
+// `fs.rmSync` at all: the real `rmSync` call below passes ONLY
+// `recursive`/`force` (no `maxRetries`/`retryDelay` -- those two option
+// keys mean nothing to `fs.rmSync` once it decides not to act on them, per
+// the above). Retry now lives in THIS function, in JS, gated on the error
+// `code`: only `EPERM`/`EBUSY`/`ENOTEMPTY` (the shapes a transient
+// lock/delete-race on Windows actually produces) are retried, up to a
+// finite budget; any other code (e.g. `EACCES` -- a real permission
+// problem, not a transient lock) throws on the very first attempt, and the
+// LAST attempt's failure (whatever its code) is always re-thrown, never
+// swallowed (ⓒ 반대 방향 칸 below, both directions). `maxRetries`/
+// `retryDelay` keep the exact same meaning and default values 3R gave the
+// (then-unused) Node option, now consumed by this function's own loop
+// instead: `retryDelay=100` ms is still Node's own documented default for
+// that option name; `maxRetries=5` is still "5 retries after the first
+// attempt" (6 total attempts, same as Node's own `fs.rmSync` semantics for
+// that option), with the same linear backoff (`retryDelay * attempt
+// number`) Node's own built-in mechanism used, so the worst-case total
+// added wait is the same 100+200+300+400+500 = 1500 ms 3R already
+// justified against the 60s/180s test-file timeouts -- only WHO runs that
+// backoff changed (this function, not `fs.rmSync`), not the budget. The
+// wait itself (`sleepMs` below) uses `Atomics.wait`, not a busy
+// `while (Date.now() < ...)` spin -- Node's main thread permits a
+// synchronous `Atomics.wait` (unlike a browser main thread), and a
+// throwaway `Int32Array`/`SharedArrayBuffer` is all it needs; nothing in
+// this file does other work during that wait, so a spin would only burn
+// CPU for no benefit.
+const CLEANUP_RETRYABLE_CODES = new Set(["EPERM", "EBUSY", "ENOTEMPTY"]);
+
+function sleepMs(ms) {
+  if (!(ms > 0)) return;
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
 function removeSyntheticTarget(
   base,
   { maxRetries = 5, retryDelay = 100, rmSyncImpl = rmSync } = {},
 ) {
-  // ⛔no try/catch here -- a cleanup failure that survives all retries must
-  // still throw and fail the test (ⓒ 반대 방향 칸 below), not be swallowed.
-  rmSyncImpl(base, { recursive: true, force: true, maxRetries, retryDelay });
+  let attempt = 0;
+  for (;;) {
+    try {
+      // Only recursive/force -- no maxRetries/retryDelay forwarded, see
+      // the header comment above on why this wrapper stopped delegating.
+      rmSyncImpl(base, { recursive: true, force: true });
+      return;
+    } catch (err) {
+      attempt += 1;
+      // ⛔not retryable, or retry budget exhausted -- re-throw as-is, never
+      // swallowed (ⓒ 반대 방향 칸 below, both directions).
+      if (!CLEANUP_RETRYABLE_CODES.has(err.code) || attempt > maxRetries) {
+        throw err;
+      }
+      sleepMs(retryDelay * attempt);
+    }
+  }
 }
 
 // Same ambient-env stripping as install-g1-adapter-list.test.mjs's
@@ -684,14 +732,14 @@ test("install-net-closure timeout ⓑ binding (r3): the real production call sit
 });
 
 // ---------------------------------------------------------------------------
-// HYK-209-net-closure-timeout-1-r3 ⓒ: removeSyntheticTarget's own default
-// options (maxRetries/retryDelay above this file's production cleanup
-// calls) must actually reach the underlying rmSync call -- `rmSyncImpl`
-// injection (same shape as `runOneInstalledTestFile`'s `spawnSync` option)
-// lets this cell assert the real production defaults without touching the
-// filesystem.
+// HYK-209-net-closure-timeout-1-r4 ⓑ: removeSyntheticTarget no longer
+// forwards maxRetries/retryDelay to the real rmSync call (r3 did -- see the
+// header comment above on why that stopped meaning anything on Node 26).
+// `rmSyncImpl` injection (same shape as `runOneInstalledTestFile`'s
+// `spawnSync` option) lets this cell assert the real call's options
+// without touching the filesystem.
 // ---------------------------------------------------------------------------
-test("install-net-closure cleanup ⓒ: removeSyntheticTarget wires its maxRetries/retryDelay defaults (and recursive/force) through to rmSync, not just force:true", () => {
+test("install-net-closure cleanup ⓑ: removeSyntheticTarget calls the real rmSync with only recursive/force (no maxRetries/retryDelay -- retry is this wrapper's own JS loop now, not delegated to fs.rmSync)", () => {
   let capturedOpts;
   removeSyntheticTarget("unused-base-path", {
     rmSyncImpl: (_targetPath, opts) => {
@@ -699,25 +747,61 @@ test("install-net-closure cleanup ⓒ: removeSyntheticTarget wires its maxRetrie
     },
   });
   assert.ok(capturedOpts, "rmSyncImpl was never invoked");
-  assert.equal(capturedOpts.recursive, true);
-  assert.equal(capturedOpts.force, true);
-  assert.equal(capturedOpts.maxRetries, 5);
-  assert.equal(capturedOpts.retryDelay, 100);
+  assert.deepEqual(
+    capturedOpts,
+    { recursive: true, force: true },
+    "the underlying rmSync call must receive exactly {recursive, force} -- maxRetries/retryDelay must NOT be forwarded, r4's whole point is that fs.rmSync's own built-in retry is no longer relied on",
+  );
 });
 
 // ---------------------------------------------------------------------------
-// HYK-209-net-closure-timeout-1-r3 ⓒ 반대 방향 칸(필수): a cleanup failure
-// that survives every retry (a permanently-locked target) must still THROW,
-// not be silently absorbed by `removeSyntheticTarget`'s own wrapper code.
-// Uses a fake `rmSyncImpl` that always throws (same reasoning as the
-// ⓒ-hang cell above choosing a fast `timeoutMs` override over waiting out a
-// real OS lock): this proves the wrapper itself has no swallowing try/catch
-// and calls through to Node's own retry mechanism exactly once (Node's
-// `maxRetries` loop lives inside the real `fs.rmSync`, not in this
-// wrapper -- asserting `calls === 1` confirms this wrapper does not
-// reimplement/duplicate that retry loop in JS).
+// HYK-209-net-closure-timeout-1-r4 ⓑ: the JS-level retry actually retries a
+// transient, whitelisted failure (EBUSY here, same posture as the real
+// lock's ⓓ cell below) and succeeds once the underlying call stops failing
+// -- proves the loop is live, not just present in source. retryDelay is
+// overridden small (this cell's own point is "does it retry", not "is the
+// default wait exactly 100ms" -- that is covered by the reverse ⑴ cell
+// below, which uses the true defaults).
 // ---------------------------------------------------------------------------
-test("install-net-closure cleanup ⓒ reverse: a permanently-failing cleanup is still thrown by removeSyntheticTarget, not swallowed", () => {
+test("install-net-closure cleanup ⓑ: removeSyntheticTarget retries a transient EBUSY failure and returns normally once a later attempt succeeds", () => {
+  let calls = 0;
+  const failTwiceThenSucceed = () => {
+    calls += 1;
+    if (calls <= 2) {
+      const err = new Error(
+        "EBUSY, resource busy or locked: synthetic rmSync injection (transient)",
+      );
+      err.code = "EBUSY";
+      throw err;
+    }
+  };
+  removeSyntheticTarget("unused-base-path", {
+    retryDelay: 5,
+    rmSyncImpl: failTwiceThenSucceed,
+  });
+  assert.equal(
+    calls,
+    3,
+    "expected 2 failing attempts followed by 1 succeeding attempt (3 total calls)",
+  );
+});
+
+// ---------------------------------------------------------------------------
+// HYK-209-net-closure-timeout-1-r4 ⓒ 반대 방향 칸 ⑴ (필수, r3의 calls===1
+// 단언을 새 재시도와 맞게 바꿈 -- 바꾼 이유: r3는 "Node의 fs.rmSync 자체
+// maxRetries 루프"가 전부였으므로 이 래퍼는 정확히 1번만 불렸어야 정상이었다
+// (재시도 자체가 Node 내부에 있었다); r4는 재시도 루프 자체가 이 함수 안
+// JS로 옮겨왔으므로, 영구히 재시도-대상 코드로 실패하는 경우 이제 이
+// 함수가 maxRetries+1번(기본값 6회: 최초 1회 + 재시도 5회, Node의 기존
+// maxRetries 옵션과 같은 의미)까지 직접 불러야 정상이다): a cleanup
+// failure that survives every retry (a permanently-locked target, error
+// code EPERM -- still in the retryable set) must still THROW the last
+// failure, not be silently absorbed, AND must have actually exhausted the
+// real default retry budget (maxRetries=5, retryDelay=100 defaults, not
+// overridden here -- this is the one cell that pins those literal default
+// values).
+// ---------------------------------------------------------------------------
+test("install-net-closure cleanup ⓒ reverse ⑴: a permanently-failing, retryable (EPERM) cleanup exhausts the default retry budget (6 calls) then still throws, not swallowed", () => {
   let calls = 0;
   const alwaysThrowingRmSync = () => {
     calls += 1;
@@ -727,6 +811,7 @@ test("install-net-closure cleanup ⓒ reverse: a permanently-failing cleanup is 
     err.code = "EPERM";
     throw err;
   };
+  const startedAtMs = Date.now();
   assert.throws(
     () =>
       removeSyntheticTarget("unused-base-path", {
@@ -735,12 +820,119 @@ test("install-net-closure cleanup ⓒ reverse: a permanently-failing cleanup is 
     /EPERM/,
     "removeSyntheticTarget must propagate a permanent cleanup failure, not swallow it",
   );
+  const elapsedMs = Date.now() - startedAtMs;
+  assert.equal(
+    calls,
+    6,
+    "default maxRetries=5 means 1 initial attempt + 5 retries = 6 total calls to rmSyncImpl before giving up",
+  );
+  assert.ok(
+    elapsedMs >= 1400,
+    `expected the default linear backoff (100+200+300+400+500 = 1500 ms) to have actually elapsed before giving up, got ${elapsedMs} ms`,
+  );
+});
+
+// ---------------------------------------------------------------------------
+// HYK-209-net-closure-timeout-1-r4 ⓒ 반대 방향 칸 ⑵ (필수, 신규): a
+// NON-retryable error code (anything outside EPERM/EBUSY/ENOTEMPTY -- here
+// EACCES, a real/permanent permission problem, not a transient lock) must
+// throw on the very first attempt, with zero retry wait -- retrying a code
+// that retrying can never fix would just add latency for nothing.
+// ---------------------------------------------------------------------------
+test("install-net-closure cleanup ⓒ reverse ⑵: a non-retryable error code (EACCES) throws immediately on the first attempt, no retry", () => {
+  let calls = 0;
+  const alwaysThrowingWrongCode = () => {
+    calls += 1;
+    const err = new Error(
+      "EACCES, permission denied: synthetic rmSync injection (not in the retryable set)",
+    );
+    err.code = "EACCES";
+    throw err;
+  };
+  const startedAtMs = Date.now();
+  assert.throws(
+    () =>
+      removeSyntheticTarget("unused-base-path", {
+        rmSyncImpl: alwaysThrowingWrongCode,
+      }),
+    /EACCES/,
+    "removeSyntheticTarget must propagate a non-retryable failure immediately",
+  );
+  const elapsedMs = Date.now() - startedAtMs;
   assert.equal(
     calls,
     1,
-    "removeSyntheticTarget must call rmSyncImpl exactly once -- retry looping is Node's own fs.rmSync maxRetries option's job, not this wrapper's",
+    "a non-retryable error code must not be retried at all -- exactly 1 call",
+  );
+  assert.ok(
+    elapsedMs < 200,
+    `expected no retry wait for a non-retryable code, got ${elapsedMs} ms`,
   );
 });
+
+// ---------------------------------------------------------------------------
+// HYK-209-net-closure-timeout-1-r4 ⓓ (필수, Windows 전용 실제 잠금 칸,
+// 가짜 rmSync 금지): a REAL open file handle (a live pwsh child holding
+// FileShare.None, same acquisition method as review-3R's own
+// lockprobe.mjs/lockprobe2.mjs, read-only here) held just long enough to
+// require more than one real rmSync attempt, then released well inside the
+// default retry budget (held 400 ms < worst-case 1500 ms budget) -- proves
+// the real production retry loop (real `rmSync`, no injection at all) rides
+// out a real transient Windows lock end to end. Linux/macOS skip, reasoned
+// (open fds there do not block unlink -- this cell would not be exercising
+// real contention, review-3R's own posture for not attempting a portable
+// version of this probe).
+// ---------------------------------------------------------------------------
+function holdRealWindowsFileLock(filePath, holdMs) {
+  const ps = `$f=[System.IO.File]::Open('${filePath}','Open','Read','None'); Write-Output LOCKED; Start-Sleep -Milliseconds ${holdMs}; $f.Close()`;
+  const child = spawn("pwsh", ["-NoProfile", "-Command", ps], {
+    stdio: ["ignore", "pipe", "inherit"],
+  });
+  return new Promise((resolve) => {
+    child.stdout.on("data", (chunk) => {
+      if (String(chunk).includes("LOCKED")) resolve(child);
+    });
+  });
+}
+
+test(
+  "install-net-closure ⓓ (Windows only): removeSyntheticTarget's real rmSync call rides out a real, transient open-handle Windows file lock",
+  {
+    skip:
+      process.platform === "win32"
+        ? false
+        : "실제 파일 잠금은 Windows 전용 의미론(FileShare.None 열린 핸들이 rmSync의 삭제를 막음) -- Linux/macOS 에서는 열린 fd가 있어도 unlink가 막히지 않아 이 칸이 재현하는 경합 자체가 생기지 않는다(review-3R lockprobe 실측과 같은 posture, 이 라운드는 포터블화를 시도하지 않는다)",
+  },
+  async () => {
+    const base = mkdtempSync(
+      path.join(longFormTmpdir(), "hyk209-install-net-lock-"),
+    );
+    const lockedFile = path.join(base, "held.txt");
+    writeFileSync(lockedFile, "x");
+    const lockHolder = await holdRealWindowsFileLock(lockedFile, 400);
+    try {
+      const startedAtMs = Date.now();
+      // No rmSyncImpl override -- this is the real production call shape.
+      removeSyntheticTarget(base);
+      const elapsedMs = Date.now() - startedAtMs;
+      assert.equal(
+        existsSync(base),
+        false,
+        "the locked target must actually be gone once the real retry loop rides out the lock",
+      );
+      assert.ok(
+        elapsedMs >= 250,
+        `expected at least one real retry wait before the 400 ms lock released (not an instant pass-through), got ${elapsedMs} ms`,
+      );
+      assert.ok(
+        elapsedMs < 1500,
+        `expected the lock to be ridden out well inside the default worst-case 1500 ms retry budget, got ${elapsedMs} ms`,
+      );
+    } finally {
+      await new Promise((resolve) => lockHolder.on("exit", resolve));
+    }
+  },
+);
 
 // ---------------------------------------------------------------------------
 // HYK-209 §2 ⓒ: installAdmissionLedgerPointer's lockPath must match the
