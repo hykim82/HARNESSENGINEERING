@@ -237,6 +237,7 @@ test("(3) installed pm-guard.test.mjs actually passes against the installed pm-g
       "node",
       [
         "--test",
+        "--test-reporter=tap",
         path.join(targetRepo, "scripts", "check", "pm-guard.test.mjs"),
       ],
       { stdio: "pipe", env: envWithoutTestMarkers(), encoding: "utf8" },
@@ -252,16 +253,26 @@ test("(3) installed pm-guard.test.mjs actually passes against the installed pm-g
     // Assert the child's own TAP summary actually shows real execution, so
     // a silently-skipped ("ran nothing") child is caught at this, the real
     // repair site -- not just in (3b)'s separate synthetic scratch child.
-    // No `--test-reporter=tap` here -- test (3) never set one (base, 503bc8c),
-    // so this child uses node --test's default "spec" reporter, whose
-    // summary line is `ℹ tests N` (not TAP's `# tests N`, which only
-    // appears with the tap/dot reporters).
+    // HYK-209 H4-2 (P1-1, review-2 §3 P1-1): `node --test`'s default reporter
+    // is NOT stable across Node versions -- this PC's Node 26 defaults to
+    // "spec" (`ℹ tests N`) even over a pipe, but CI's pinned Node 20
+    // (.github/workflows/enforce.yml, package.json engines.node) defaults to
+    // "tap" (`# tests N`) over a pipe (실측, REVIEW-r2.md §2 ⓒ: Node v20.20.2
+    // against this exact child produces a genuine 4/5 pass with a `# tests 5`
+    // summary, which an "ℹ "-only assertion misreads as "no summary line /
+    // isolation failed" even though the child truly ran and truly passed --
+    // a false red, not a caught regression). Fix it the same way this
+    // repo's other child `node --test` spawns already do (install-g1
+    // `runInstalledNodeTest`, hook-sync-check's two spawned children): force
+    // `--test-reporter=tap` on the child's own argv so the summary format is
+    // deterministic regardless of which Node version or TTY-ness the parent
+    // happens to run under.
     assert.match(
       stdout,
-      /^ℹ tests \d+$/m,
+      /^# tests \d+\r?$/m,
       `installed pm-guard.test.mjs produced no test-runner summary line in its stdout -- looks like the NODE_TEST_CONTEXT/NODE_TEST_WORKER_ID isolation did not take effect (nested-worker false green), not a real run. stdout: ${JSON.stringify(stdout.slice(0, 2000))}`,
     );
-    const testsRun = Number(/^ℹ tests (\d+)$/m.exec(stdout)[1]);
+    const testsRun = Number(/^# tests (\d+)\r?$/m.exec(stdout)[1]);
     assert.ok(
       testsRun >= 1,
       `installed pm-guard.test.mjs reported 0 tests run -- a silent skip, not real execution. stdout: ${JSON.stringify(stdout.slice(0, 2000))}`,

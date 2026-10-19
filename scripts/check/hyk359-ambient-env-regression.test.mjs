@@ -721,7 +721,7 @@ test("HYK-209 H4-2 정적 금지 단언 (⑨): this file's own source never pair
     `found a ${joinWord}(${tmpdirCall}, ...) call NOT wrapped in mkdtempSync() -- a fixed, non-randomized scratch root reintroduces the literal-root collision class this round forbids: ${offenders.join("; ")}`,
   );
 });
-// HYK-209 H4-2 (P3-3, REVIEW-r2.md §3 P3-3): this is a textual scan, not a
+// HYK-209 H4-2 (P3-3, REVIEW-r1.md §3 P3-3): this is a textual scan, not a
 // parse, so it is an open set -- it does not catch `os.tmpdir()` (a
 // different identifier than the bare `tmpdir()` this regex expects),
 // `path.resolve(tmpdir(), ...)` (a different join function), or a literal

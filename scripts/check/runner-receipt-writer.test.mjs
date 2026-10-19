@@ -413,7 +413,7 @@ test("hasGenuineTapCompletion: HYK-209 2R P1-2 ⒜ in isolation -- a genuine col
   );
 });
 
-// HYK-209 H4-2 (P3-4, REVIEW-r2.md §3 P3-4, V9): a genuine, unescaped,
+// HYK-209 H4-2 (P3-4, REVIEW-r1.md §3 P3-4, V9): a genuine, unescaped,
 // column-0 "1..N" plan line IS present, and the final block has a present
 // and plausible duration_ms -- but a line sits BETWEEN the plan line and
 // the block (not "바로 앞"/immediately preceding). PRODUCTION_PLAN_LINE_RE's
@@ -803,7 +803,7 @@ test("writeNumberedRunnerReceipt: writes the SAME shape buildRunnerReceipt produ
 
 // M5 (writeNumberedRunnerReceipt 짝): 번호 붙은 사본 쪽도 같은 공백이
 // 있었다 -- 같은 근거로 디스크에 쓰인 JSON을 직접 확인한다.
-// HYK-209 H4-2 (P3-1, REVIEW-r2.md(HYK-209-install-closure-2-review-1) §3
+// HYK-209 H4-2 (P3-1, REVIEW-r1.md §3
 // P3-1, correcting the ⑧/H5-P2-B comment this replaces): this file imports
 // `node:assert/strict` (line 1), so the mechanism is NOT a loose `==`
 // letting `undefined` slide past `null` -- that never applied here.
