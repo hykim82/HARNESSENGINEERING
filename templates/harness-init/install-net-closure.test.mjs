@@ -258,18 +258,34 @@ function resolveInstalledTestTimeoutMs(env) {
 // attribution (see this file's own header for why over one combined run).
 // `timeoutMs` override: test-only escape hatch (ⓒ 반대 방향 칸이 180000 ms
 // 짜리 진짜 시한을 기다리지 않고도 "시한을 넘으면 ETIMEDOUT으로 잡힌다"는
-// 메커니즘 자체를 빠르게 검증하게 한다) -- 311행의 실제 생산 호출은 이
+// 메커니즘 자체를 빠르게 검증하게 한다) -- 382행의 실제 생산 호출은 이
 // 옵션을 넘기지 않으므로 거기선 항상 resolveInstalledTestTimeoutMs의 실제
 // 판단이 그대로 쓰인다.
-function runOneInstalledTestFile(targetRepoPath, rel, { timeoutMs } = {}) {
+// `spawnSync` 옵션(HYK-209-net-closure-timeout-1-r2, 검토 1R P2-1 수리):
+// 마찬가지로 테스트 전용 주입 지점이다 -- 기본값이 진짜 node:child_process의
+// spawnSync라서 382행의 실제 생산 호출(이 옵션도 넘기지 않음)은 동작이 전혀
+// 바뀌지 않는다. 아래 "timeout ⓑ fix" 칸이 이 지점으로 가짜 spawnSync를
+// 꽂아, 실제로 생성되는 자식 프로세스 없이 "우회 인자 없이 부르면 그 호출의
+// timeout 옵션이 resolveInstalledTestTimeoutMs(env)와 같다"는 생산 결선
+// 자체를 구조로 단언한다(env 주입만으로는 결정값 숫자가 맞는지 이 파일이
+// 그 계산을 또 베껴야 해서 대신 호출 인자를 직접 가로챈다).
+function runOneInstalledTestFile(
+  targetRepoPath,
+  rel,
+  { timeoutMs, spawnSync: spawnSyncImpl = spawnSync } = {},
+) {
   const env = isolatedEnv();
-  return spawnSync(process.execPath, ["--test", "--test-reporter=tap", rel], {
-    cwd: targetRepoPath,
-    encoding: "utf8",
-    env,
-    timeout: timeoutMs ?? resolveInstalledTestTimeoutMs(env),
-    maxBuffer: 64 * 1024 * 1024,
-  });
+  return spawnSyncImpl(
+    process.execPath,
+    ["--test", "--test-reporter=tap", rel],
+    {
+      cwd: targetRepoPath,
+      encoding: "utf8",
+      env,
+      timeout: timeoutMs ?? resolveInstalledTestTimeoutMs(env),
+      maxBuffer: 64 * 1024 * 1024,
+    },
+  );
 }
 
 test("install-net-closure: every INSTALL_NET_CLOSURE_KNOWN_EXCEPTIONS entry names a file this installer actually ships (no stale exception for a file that was removed/renamed)", () => {
@@ -522,6 +538,77 @@ test("install-net-closure ⓒ: a truly-hung installed test file (infinite setInt
   } finally {
     rmSync(base, { recursive: true, force: true });
   }
+});
+
+// ---------------------------------------------------------------------------
+// HYK-209-net-closure-timeout-1-r2 (검토 1R P2-1 수리): the ⓒ cell above
+// proves the spawnSync-timeout-kill MECHANISM works, but it calls through
+// the `timeoutMs` test-only bypass -- it never proved that the real
+// production call (382행, no bypass args) actually WIRES that mechanism to
+// resolveInstalledTestTimeoutMs's own decision. Deleting the `??
+// resolveInstalledTestTimeoutMs(env)` expression at runOneInstalledTestFile's
+// own spawnSync call left every cell in this file green (검토 1R §2 ⓒ 표
+// ⑴, reproduced again by this round's own coder.md §2 ⓐ) -- a silent
+// regression would let a real full-runner lane wait the OS/CI's own
+// unbounded default instead of a finite timeout. This cell closes that gap
+// without waiting out a real 60s/180s timer: it injects a fake `spawnSync`
+// (see that option's own comment above) and asserts the INTERCEPTED call's
+// `timeout` option, not a value this test recomputes by hand.
+// ---------------------------------------------------------------------------
+test("install-net-closure timeout ⓑ fix (P2-1): calling runOneInstalledTestFile WITHOUT the timeoutMs bypass (the real 382행 call shape) wires spawnSync's real timeout option to resolveInstalledTestTimeoutMs(env)'s own decision", () => {
+  function captureSpawnOptsUnder(envOverrides) {
+    const priorValues = {};
+    for (const key of Object.keys(envOverrides))
+      priorValues[key] = process.env[key];
+    for (const [key, value] of Object.entries(envOverrides))
+      process.env[key] = value;
+    let capturedOpts;
+    try {
+      const fakeSpawnSync = (_cmd, _args, opts) => {
+        capturedOpts = opts;
+        return { status: 0, error: undefined, stdout: "", stderr: "" };
+      };
+      runOneInstalledTestFile(
+        "unused-targetRepoPath",
+        "scripts/check/does-not-matter.test.mjs",
+        { spawnSync: fakeSpawnSync },
+      );
+    } finally {
+      for (const [key, prior] of Object.entries(priorValues)) {
+        if (prior === undefined) delete process.env[key];
+        else process.env[key] = prior;
+      }
+    }
+    return capturedOpts;
+  }
+
+  const standaloneOpts = captureSpawnOptsUnder({
+    HARNESS_TEST_CONCURRENCY: "",
+  });
+  assert.ok(
+    standaloneOpts,
+    "fakeSpawnSync was never invoked -- runOneInstalledTestFile is not honoring the injected spawnSync option",
+  );
+  assert.equal(
+    standaloneOpts.timeout,
+    resolveInstalledTestTimeoutMs(standaloneOpts.env),
+    "no-bypass call must pass resolveInstalledTestTimeoutMs(env) as spawnSync's own timeout option (HARNESS_TEST_CONCURRENCY absent)",
+  );
+  assert.equal(standaloneOpts.timeout, 60000);
+
+  const fullRunnerOpts = captureSpawnOptsUnder({
+    HARNESS_TEST_CONCURRENCY: "12",
+  });
+  assert.ok(
+    fullRunnerOpts,
+    "fakeSpawnSync was never invoked -- runOneInstalledTestFile is not honoring the injected spawnSync option (full-runner case)",
+  );
+  assert.equal(
+    fullRunnerOpts.timeout,
+    resolveInstalledTestTimeoutMs(fullRunnerOpts.env),
+    "no-bypass call must pass resolveInstalledTestTimeoutMs(env) as spawnSync's own timeout option (HARNESS_TEST_CONCURRENCY=12, full-runner shape)",
+  );
+  assert.equal(fullRunnerOpts.timeout, 180000);
 });
 
 // ---------------------------------------------------------------------------
