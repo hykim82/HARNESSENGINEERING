@@ -176,6 +176,37 @@ test("(a) task_id matches + DONE after dropped_at -> ok", () => {
   });
 });
 
+test("HYK-209-install-closure-3: re-consuming the SAME unchanged result twice (e.g. a retry after an earlier failed consumption) archives the round envelope exactly once, not twice", () => {
+  withFixtureDir((dir) => {
+    writeTask(
+      dir,
+      "coder",
+      "task_id: HYK-209\ndropped_at: 2026-10-16 06:00 KST\n",
+    );
+    writeResult(
+      dir,
+      "coder",
+      "task_id: HYK-209\n\nsame unchanged result body\n\n>>> DONE: CODER @ 2026-10-16 06:10:00 KST\ndone_stamped_by: finalize-done\n",
+    );
+    const first = checkRelayHandshake({ role: "coder", harnessDir: dir });
+    assert.equal(first.ok, true);
+    const second = checkRelayHandshake({ role: "coder", harnessDir: dir });
+    assert.equal(
+      second.ok,
+      true,
+      "re-consuming an unchanged, already-CONFIRMED result must still report ok:true (regression 0 on the handshake verdict itself)",
+    );
+    const archived = readdirSync(join(dir, "rounds")).filter((n) =>
+      /^coder-r\d+\.md$/i.test(n),
+    );
+    assert.deepEqual(
+      archived,
+      ["coder-r1.md"],
+      "the second consumption of the identical result must not create coder-r2.md",
+    );
+  });
+});
+
 test("(b) task_id mismatch -> blocked", () => {
   withFixtureDir((dir) => {
     writeTask(
