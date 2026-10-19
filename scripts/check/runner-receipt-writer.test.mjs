@@ -17,6 +17,8 @@ import {
   allocateRunSlot,
   buildRunnerReceipt,
   formatKst,
+  hasGenuineTapCompletion,
+  parseGenuineTapSummaryCounts,
   parseTapSummaryCounts,
   writeNumberedRunnerReceipt,
   writeRunnerReceipt,
@@ -232,6 +234,163 @@ test("parseTapSummaryCounts: M4 mutation guard -- picks the LAST block (tests 5)
   assert.deepEqual(
     parseTapSummaryCounts(M4_LAST_BLOCK_SMALLER_THAN_EARLIER_BLOCK),
     { tests: 5, pass: 5, fail: 0, skip: 0 },
+  );
+});
+
+// ---------------------------------------------------------------------------
+// HYK-209 §2 ⓐ (책임자 판정 2026-10-17 14:5x, P2-D 등재 후보 -- REVIEW-r2.md
+// §3 P2-D / §2 R7c): hasGenuineTapCompletion/parseGenuineTapSummaryCounts.
+// ---------------------------------------------------------------------------
+
+// REVIEW-r1.md ⓕ's own observed real-production shape (less degenerate --
+// something else ran first, so the leaked fake block sits inside its own
+// still-open `# Subtest:` section). Marker-balance alone catches this one,
+// no elapsedMs needed.
+const R7C_WITH_UNCLOSED_SUBTEST_MARKER = [
+  "TAP version 13",
+  "# Subtest: leaks a fake complete block then the process is killed",
+  "# tests 9",
+  "# suites 0",
+  "# pass 9",
+  "# fail 0",
+  "# cancelled 0",
+  "# skipped 0",
+  "# todo 0",
+  "# duration_ms 1.0",
+].join("\n");
+
+test("hasGenuineTapCompletion: HYK-209 R7c (REVIEW-r1.md ⓕ shape) -- a complete block inside a `# Subtest:` section that never closes with its own ok/not-ok line is NOT genuine, even with no elapsedMs given", () => {
+  assert.equal(
+    hasGenuineTapCompletion(R7C_WITH_UNCLOSED_SUBTEST_MARKER),
+    false,
+  );
+});
+
+test("parseGenuineTapSummaryCounts: same R7c sample -- counts come back null, not the leaked block's fake 9/9/0/0", () => {
+  assert.deepEqual(
+    parseGenuineTapSummaryCounts(R7C_WITH_UNCLOSED_SUBTEST_MARKER),
+    { tests: null, pass: null, fail: null, skip: null },
+  );
+});
+
+// This round's own real-repro finding (coder.md §2 ⓐ-2 실물): the MORE
+// degenerate R7c shape -- the process dies so early that not even its own
+// `# Subtest:` opening marker reaches disk, so marker-balance alone cannot
+// tell this apart from a genuine trivial completion (both are byte-for-byte
+// `TAP version 13\n# tests 9\n...`). This is exactly the real tapPath
+// content a real synthetic-repo SIGKILL repro produced (probe-p2d.mjs,
+// scratchpad) -- not fabricated text.
+const R7C_DEGENERATE_NO_MARKER_AT_ALL = [
+  "TAP version 13",
+  "# tests 9",
+  "# suites 0",
+  "# pass 9",
+  "# fail 0",
+  "# cancelled 0",
+  "# skipped 0",
+  "# todo 0",
+  "# duration_ms 1.0",
+].join("\n");
+
+test("hasGenuineTapCompletion: HYK-209 R7c degenerate shape (no `# Subtest:` marker at all) -- marker-balance alone is fooled (vacuously true), but an elapsedMs far larger than the block's own duration_ms (1.0ms vs 5000ms here; the real SIGKILL repro measured ~1.0ms vs ~3000ms, same order of magnitude) makes it implausible", () => {
+  assert.equal(
+    hasGenuineTapCompletion(R7C_DEGENERATE_NO_MARKER_AT_ALL, {
+      elapsedMs: 5000,
+    }),
+    false,
+  );
+});
+
+test("hasGenuineTapCompletion: the SAME degenerate shape with no elapsedMs given (today's every existing caller) stays genuine -- this is the honest limit (coder.md §2 ⓐ, 정직 한계): without a real wall-clock measurement, this exact byte shape is indistinguishable from a genuine trivial completion", () => {
+  assert.equal(hasGenuineTapCompletion(R7C_DEGENERATE_NO_MARKER_AT_ALL), true);
+});
+
+test("hasGenuineTapCompletion: a genuine run whose own duration_ms IS close to the real elapsedMs (normal case -- some node startup overhead, duration_ms slightly under elapsedMs) is NOT penalized by the duration cross-check", () => {
+  const genuine = [
+    "TAP version 13",
+    "1..1",
+    "# tests 1",
+    "# suites 0",
+    "# pass 0",
+    "# fail 1",
+    "# cancelled 0",
+    "# skipped 0",
+    "# todo 0",
+    "# duration_ms 4800.0",
+  ].join("\n");
+  assert.equal(hasGenuineTapCompletion(genuine, { elapsedMs: 5000 }), true);
+});
+
+test("hasGenuineTapCompletion: an elapsedMs below the 2s noise floor never second-guesses a complete block via the duration check (timing noise/startup overhead dominates short runs)", () => {
+  assert.equal(
+    hasGenuineTapCompletion(R7C_DEGENERATE_NO_MARKER_AT_ALL, {
+      elapsedMs: 500,
+    }),
+    true,
+  );
+});
+
+test("hasGenuineTapCompletion: a block with no duration_ms field at all, and NO elapsedMs given (this repo's existing completedTapReadFile-style fixtures, today's every non-production caller) skips the duration cross-check -- normal execution unchanged", () => {
+  const noDuration =
+    "TAP version 13\n# tests 1\n# pass 0\n# fail 1\n# skipped 0\n";
+  assert.equal(hasGenuineTapCompletion(noDuration), true);
+});
+
+// HYK-209 2R P1-2 (책임자 판정 2026-10-17 18:4x 판단 1 · REVIEW-r1.md ⓑ K5):
+// ⛔이 표본은 1R이 추가한 같은 모양(duration_ms 없음)에 elapsedMs를 production
+// 경로 값으로 준 바로 그 경우를 다시 쓴 것이다 -- 1R에서는 true(가짜 초록)가
+// 기대값이었다. 이것이 정확히 리뷰가 K5로 잡은 결함(소리 없는 우회로)이므로,
+// 이 라운드의 P1-2 수리로 기대값 자체가 false로 바뀐다(가짜 초록이 아니라
+// "측정 불가"가 맞다) -- 기존 칸을 임의로 고친 것이 아니라, 그 칸이 바로
+// 고치라고 지정된 결함의 재현이다(§2 ⓑ 완료 조건: K5 실물 칸).
+test("hasGenuineTapCompletion: HYK-209 2R P1-2 ⒜ -- the SAME no-duration_ms shape, but with elapsedMs given on the production path (>= noise floor), is NO LONGER genuine (P1-2 fix: 1R's fallback-to-true here was the K5 bypass REVIEW-r1.md found)", () => {
+  const noDuration =
+    "TAP version 13\n# tests 1\n# pass 0\n# fail 1\n# skipped 0\n";
+  assert.equal(
+    hasGenuineTapCompletion(noDuration, { elapsedMs: 999999 }),
+    false,
+  );
+});
+
+// HYK-209 2R P1-2 ⒝ real-shape regression guards (REVIEW-r1.md ⓑ 표 K2/K5
+// TAP 원문 그대로, elapsedMs는 그 표의 7c607de/HEAD 실측 자릿수에 맞춘 값).
+const K2_IMPLAUSIBLY_LARGE_DURATION_NO_PLAN_LINE =
+  "TAP version 13\n# tests 9\n# suites 0\n# pass 9\n# fail 0\n# cancelled 0\n# skipped 0\n# todo 0\n# duration_ms 999999\n";
+
+test("hasGenuineTapCompletion: HYK-209 2R P1-2 ⒝ K2 (REVIEW-r1.md ⓑ real TAP bytes) -- duration_ms is present and even implausibly LARGE (999999 >= elapsedMs*0.5, so the old ratio-floor check alone would have passed it), but there is no column-0 plan line immediately before the block -- not genuine", () => {
+  assert.equal(
+    hasGenuineTapCompletion(K2_IMPLAUSIBLY_LARGE_DURATION_NO_PLAN_LINE, {
+      elapsedMs: 3350,
+    }),
+    false,
+  );
+});
+
+const K5_FORGED_PLAN_LINE_ESCAPED_NO_DURATION =
+  "TAP version 13\n# 1..9\n# tests 9\n# suites 0\n# pass 9\n# fail 0\n# cancelled 0\n# skipped 0\n";
+
+test("hasGenuineTapCompletion: HYK-209 2R P1-2 ⒝ K5 (REVIEW-r1.md ⓑ real TAP bytes) -- a forged '1..9' plan line leaked by a subtest comes out escaped as '# 1..9' (node's own tap reporter prefixing '#' to any printed line), never a real column-0 plan line, AND duration_ms is entirely absent -- not genuine on the production path", () => {
+  assert.equal(
+    hasGenuineTapCompletion(K5_FORGED_PLAN_LINE_ESCAPED_NO_DURATION, {
+      elapsedMs: 3350,
+    }),
+    false,
+  );
+});
+
+test("hasGenuineTapCompletion: HYK-209 2R P1-2 ⒜ in isolation -- a genuine column-0 plan line immediately precedes the block (⒝ satisfied), but duration_ms is still missing -- the production path still rejects it (⒜ alone, no plan-line gap to hide behind)", () => {
+  const planLineButNoDuration =
+    "TAP version 13\n1..1\n# tests 1\n# pass 0\n# fail 1\n# skipped 0\n";
+  assert.equal(
+    hasGenuineTapCompletion(planLineButNoDuration, { elapsedMs: 999999 }),
+    false,
+  );
+});
+
+test("hasGenuineTapCompletion: no complete block at all (garbage/empty) is never genuine, elapsedMs or not", () => {
+  assert.equal(
+    hasGenuineTapCompletion("garbage, no summary here", { elapsedMs: 99999 }),
+    false,
   );
 });
 
