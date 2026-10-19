@@ -778,6 +778,14 @@ test("writeNumberedRunnerReceipt: writes the SAME shape buildRunnerReceipt produ
 
 // M5 (writeNumberedRunnerReceipt 짝): 번호 붙은 사본 쪽도 같은 공백이
 // 있었다 -- 같은 근거로 디스크에 쓰인 JSON을 직접 확인한다.
+// HYK-209 H4-2 (⑧, H5-P2-B, REVIEW-r2.md(H5) §3 P2-B, M5d 헛시험 부분):
+// the original fixture used `nodeVersionWarning: null` as input -- if the
+// writer entirely drops the `nodeVersionWarning,` threading (M5d), the
+// written JSON simply omits the key, so `written.node_version_warning` is
+// `undefined`; `assert.equal(undefined, null)` passes anyway (loose `==`),
+// so M5d survived with no observable RED. A non-null input makes the
+// dropped-threading case observably different (`undefined` !== the real
+// string under loose equality too).
 test("writeNumberedRunnerReceipt: nodeVersion/nodeVersionWarning actually reach the written JSON on disk (M5 mutation guard)", () => {
   let writeArgs;
   writeNumberedRunnerReceipt({
@@ -788,14 +796,18 @@ test("writeNumberedRunnerReceipt: nodeVersion/nodeVersionWarning actually reach 
     headCommit: "cafef00d",
     finishedAtMs: 0,
     nodeVersion: "v20.11.0",
-    nodeVersionWarning: null,
+    nodeVersionWarning:
+      "MISMATCH: fixture value (H5-P2-B, must not be dropped)",
     writeFileFn: (...args) => {
       writeArgs = args;
     },
   });
   const written = JSON.parse(writeArgs[1]);
   assert.equal(written.node_version, "v20.11.0");
-  assert.equal(written.node_version_warning, null);
+  assert.equal(
+    written.node_version_warning,
+    "MISMATCH: fixture value (H5-P2-B, must not be dropped)",
+  );
 });
 
 test("allocateRunSlot + writeNumberedRunnerReceipt full pipeline (real fs): after two runs, the LATEST runner-receipt.json (written separately via writeRunnerReceipt) is completely unaffected -- byte-identical to what writeRunnerReceipt alone would produce (완료조건3: 기존 독자 무영향)", () => {
