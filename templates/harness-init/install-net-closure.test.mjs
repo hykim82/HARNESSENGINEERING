@@ -169,6 +169,35 @@ function commitInstalledTree(targetRepoPath) {
   ]);
 }
 
+// HYK-209-net-closure-timeout-1-r3 ⓒ: every cleanup `finally` block below
+// used a bare `rmSync(base, { recursive: true, force: true })` -- `force`
+// only silences ENOENT (target already gone), it does NOT retry a real
+// Windows file lock. HYK-464 작성 1R run3 실측(〔직접〕 coder.md §4, 같은
+// cleanup 자리): `EPERM, Permission denied: rmSync ...\hyk209-install-net-…`
+// -- a one-shot EPERM/EBUSY on an OS that has not yet released a just-closed
+// child process's handle on the temp tree stops this round's own correctly-
+// behaving run cold. `maxRetries`/`retryDelay` are Node's OWN built-in
+// `fs.rmSync` retry mechanism (only consulted when `recursive: true`,
+// per the Node fs docs) -- this wrapper does not reimplement retry logic in
+// JS, it only supplies the two values and delegates. retryDelay=100 ms is
+// Node's own documented default for this option; maxRetries=5 (raised from
+// Node's own default of 0) with Node's linear backoff (retryDelay * attempt
+// number) caps total added wait at 100+200+300+400+500 = 1500 ms -- enough
+// to ride out a transient lock without making a genuinely-stuck cleanup
+// hang for anywhere near the 60s/180s test-file timeout. `rmSyncImpl`
+// defaults to the real `rmSync` import (same test-only-injection shape as
+// `runOneInstalledTestFile`'s own `spawnSync` option above) so the ⓒ
+// cells below can intercept the call without touching the real
+// filesystem or waiting out a real OS-level lock.
+function removeSyntheticTarget(
+  base,
+  { maxRetries = 5, retryDelay = 100, rmSyncImpl = rmSync } = {},
+) {
+  // ⛔no try/catch here -- a cleanup failure that survives all retries must
+  // still throw and fail the test (ⓒ 반대 방향 칸 below), not be swallowed.
+  rmSyncImpl(base, { recursive: true, force: true, maxRetries, retryDelay });
+}
+
 // Same ambient-env stripping as install-g1-adapter-list.test.mjs's
 // ledgerIsolatedEnv (duplicated, same non-coupling convention) -- both the
 // admission-ledger env keys (a floating value from the invoking shell must
@@ -442,7 +471,7 @@ test("install-net-closure: real installer -> real git target -> every installed 
       "every INSTALL_NET_CLOSURE_KNOWN_EXCEPTIONS entry must still actually fail on a fresh install -- an entry that now passes is stale and should be deleted from the list, not kept as a no-op skip",
     );
   } finally {
-    rmSync(base, { recursive: true, force: true });
+    removeSyntheticTarget(base);
   }
 });
 
@@ -536,7 +565,7 @@ test("install-net-closure ⓒ: a truly-hung installed test file (infinite setInt
       `expected the kill to land close to the 2000 ms override, not hang indefinitely (got ${elapsedMs} ms)`,
     );
   } finally {
-    rmSync(base, { recursive: true, force: true });
+    removeSyntheticTarget(base);
   }
 });
 
@@ -612,6 +641,108 @@ test("install-net-closure timeout ⓑ fix (P2-1): calling runOneInstalledTestFil
 });
 
 // ---------------------------------------------------------------------------
+// HYK-209-net-closure-timeout-1-r3 ⓑ: the P2-1 fix cell above proves
+// `runOneInstalledTestFile` WIRES its `timeoutMs`/`spawnSync` bypass
+// options correctly WHEN GIVEN -- but it calls the function directly with
+// its own fabricated args, never through the real production call site
+// inside the main test's loop above (the bare two-positional-arg call, no
+// third argument). Nothing before this round asserted THAT call site
+// itself passes none of those bypass args -- a mutation appending
+// `{ timeoutMs: 0 }` (or an `{ spawnSync: ... }` that strips `timeout` from
+// the options it forwards) there left the whole file 10/10 green (coder.md
+// §1 ⓐ 실측, 복원 sha256 confirmed unchanged after). This cell closes that
+// gap with a source-text assertion: 〔직접〕 the only call written with
+// exactly the two bare positional arguments (target repo path, relative
+// file path) and no trailing options object at all is the production one
+// inside the main loop; every other call in this file is a test's own
+// fabricated args and never matches that exact two-argument shape (the
+// literal call text is deliberately NOT quoted here, nor in the assertion
+// message below, so this comment/message cannot itself become a spurious
+// third match against its own source-text scan).
+// 한계 〔직접〕: this is a source-STRING check, not
+// a runtime one -- it would miss a mutation that keeps the two-arg call
+// site text untouched but changes behavior through an entirely different
+// path (e.g. redefining the imported `runOneInstalledTestFile` binding
+// itself, or editing `resolveInstalledTestTimeoutMs`'s own body). The first
+// of those is covered structurally by the P2-1 fix cell's own spawnSync
+// interception (above); this repo's own `quality-check`/review gates, not
+// this test file, are what stand against an import-rebinding mutation.
+// ---------------------------------------------------------------------------
+test("install-net-closure timeout ⓑ binding (r3): the real production call site passes no timeout-overriding arguments to runOneInstalledTestFile (source-text assertion, P2-1 companion)", () => {
+  const src = readFileSync(fileURLToPath(import.meta.url), "utf8");
+  const callSiteArgs = [
+    ...src.matchAll(/runOneInstalledTestFile\(([^)]*)\)/g),
+  ].map((m) => m[1].trim());
+  const productionCallSites = callSiteArgs.filter(
+    (args) => args === "targetRepo, rel",
+  );
+  assert.equal(
+    productionCallSites.length,
+    1,
+    `expected exactly one production call site calling runOneInstalledTestFile with its two bare positional args and no extra/overriding options object, found ${productionCallSites.length} (all call sites seen: ${JSON.stringify(callSiteArgs)})`,
+  );
+});
+
+// ---------------------------------------------------------------------------
+// HYK-209-net-closure-timeout-1-r3 ⓒ: removeSyntheticTarget's own default
+// options (maxRetries/retryDelay above this file's production cleanup
+// calls) must actually reach the underlying rmSync call -- `rmSyncImpl`
+// injection (same shape as `runOneInstalledTestFile`'s `spawnSync` option)
+// lets this cell assert the real production defaults without touching the
+// filesystem.
+// ---------------------------------------------------------------------------
+test("install-net-closure cleanup ⓒ: removeSyntheticTarget wires its maxRetries/retryDelay defaults (and recursive/force) through to rmSync, not just force:true", () => {
+  let capturedOpts;
+  removeSyntheticTarget("unused-base-path", {
+    rmSyncImpl: (_targetPath, opts) => {
+      capturedOpts = opts;
+    },
+  });
+  assert.ok(capturedOpts, "rmSyncImpl was never invoked");
+  assert.equal(capturedOpts.recursive, true);
+  assert.equal(capturedOpts.force, true);
+  assert.equal(capturedOpts.maxRetries, 5);
+  assert.equal(capturedOpts.retryDelay, 100);
+});
+
+// ---------------------------------------------------------------------------
+// HYK-209-net-closure-timeout-1-r3 ⓒ 반대 방향 칸(필수): a cleanup failure
+// that survives every retry (a permanently-locked target) must still THROW,
+// not be silently absorbed by `removeSyntheticTarget`'s own wrapper code.
+// Uses a fake `rmSyncImpl` that always throws (same reasoning as the
+// ⓒ-hang cell above choosing a fast `timeoutMs` override over waiting out a
+// real OS lock): this proves the wrapper itself has no swallowing try/catch
+// and calls through to Node's own retry mechanism exactly once (Node's
+// `maxRetries` loop lives inside the real `fs.rmSync`, not in this
+// wrapper -- asserting `calls === 1` confirms this wrapper does not
+// reimplement/duplicate that retry loop in JS).
+// ---------------------------------------------------------------------------
+test("install-net-closure cleanup ⓒ reverse: a permanently-failing cleanup is still thrown by removeSyntheticTarget, not swallowed", () => {
+  let calls = 0;
+  const alwaysThrowingRmSync = () => {
+    calls += 1;
+    const err = new Error(
+      "EPERM, Permission denied: synthetic rmSync injection (always fails)",
+    );
+    err.code = "EPERM";
+    throw err;
+  };
+  assert.throws(
+    () =>
+      removeSyntheticTarget("unused-base-path", {
+        rmSyncImpl: alwaysThrowingRmSync,
+      }),
+    /EPERM/,
+    "removeSyntheticTarget must propagate a permanent cleanup failure, not swallow it",
+  );
+  assert.equal(
+    calls,
+    1,
+    "removeSyntheticTarget must call rmSyncImpl exactly once -- retry looping is Node's own fs.rmSync maxRetries option's job, not this wrapper's",
+  );
+});
+
+// ---------------------------------------------------------------------------
 // HYK-209 §2 ⓒ: installAdmissionLedgerPointer's lockPath must match the
 // dispatch pipeline's own live convention (installer-lockpath-defect.md,
 // 2026-08-12), not the `${ledgerPath}.lock` derivation that produced
@@ -638,7 +769,7 @@ test("install-net-closure ⓒ: a real install's admission-ledger-path.json point
       `expected lockPath and ledgerPath to live in the same control-room directory; lockPath=${pointer.lockPath} ledgerPath=${pointer.ledgerPath}`,
     );
   } finally {
-    rmSync(base, { recursive: true, force: true });
+    removeSyntheticTarget(base);
   }
 });
 
@@ -753,7 +884,7 @@ test("install-net-closure ⓓ: an archive install (REPO_ROOT not a git checkout)
       `expected an explicit "미상(...)" string, got: ${JSON.stringify(manifest.installer)}`,
     );
   } finally {
-    rmSync(base, { recursive: true, force: true });
+    removeSyntheticTarget(base);
   }
 });
 
