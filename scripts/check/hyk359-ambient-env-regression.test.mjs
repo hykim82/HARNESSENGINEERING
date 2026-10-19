@@ -721,6 +721,14 @@ test("HYK-209 H4-2 정적 금지 단언 (⑨): this file's own source never pair
     `found a ${joinWord}(${tmpdirCall}, ...) call NOT wrapped in mkdtempSync() -- a fixed, non-randomized scratch root reintroduces the literal-root collision class this round forbids: ${offenders.join("; ")}`,
   );
 });
+// HYK-209 H4-2 (P3-3, REVIEW-r2.md §3 P3-3): this is a textual scan, not a
+// parse, so it is an open set -- it does not catch `os.tmpdir()` (a
+// different identifier than the bare `tmpdir()` this regex expects),
+// `path.resolve(tmpdir(), ...)` (a different join function), or a literal
+// routed through an intermediate variable (`const t = tmpdir(); join(t,
+// lit)`). This file currently has zero such occurrences (both files here
+// import `tmpdir` directly, not `os.tmpdir`), but that is a fact about this
+// file's current source, not a guarantee the scan itself enforces.
 
 // HYK-371 4R (coder-task.md §2, "주입 지점이 우회로가 되면 안 된다"): the
 // single production-facing gateway (HYK-376's pattern, PR #218) -- this is
@@ -1637,7 +1645,8 @@ test("HYK-371 4R 완료조건① (층 2·계약, 관측 지점 = 생산 경로):
         status: 0,
         signal: null,
         error: undefined,
-        stdout: "# tests 1\n# fail 0\n",
+        stdout:
+          "# tests 1\n# suites 0\n# pass 1\n# fail 0\n# cancelled 0\n# skipped 0\n# todo 0\n# duration_ms 1\n",
         stderr: "",
       };
     };

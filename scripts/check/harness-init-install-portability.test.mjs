@@ -233,13 +233,38 @@ test("(3) installed pm-guard.test.mjs actually passes against the installed pm-g
     ]);
 
     // node --test's own exit code is the pass/fail signal here.
-    execFileSync(
+    const stdout = execFileSync(
       "node",
       [
         "--test",
         path.join(targetRepo, "scripts", "check", "pm-guard.test.mjs"),
       ],
-      { stdio: "pipe", env: envWithoutTestMarkers() },
+      { stdio: "pipe", env: envWithoutTestMarkers(), encoding: "utf8" },
+    );
+    // HYK-209 H4-2 (P2-1, review-1 §3 P2-1): an exit code of 0 alone is not
+    // enough -- if NODE_TEST_CONTEXT/NODE_TEST_WORKER_ID were inherited here
+    // (the isolation above missing or applied at the wrong call site), Node
+    // treats this child as a nested test-runner worker and reports over an
+    // IPC channel that does not exist in this process, which comes back as
+    // exit 0 with an EMPTY stdout (실측, REVIEW-r1.md ⓔ "inherited") -- a
+    // false green that would hide a genuinely failing installed pm-guard
+    // even though test (3b) below proves the stripping helper itself works.
+    // Assert the child's own TAP summary actually shows real execution, so
+    // a silently-skipped ("ran nothing") child is caught at this, the real
+    // repair site -- not just in (3b)'s separate synthetic scratch child.
+    // No `--test-reporter=tap` here -- test (3) never set one (base, 503bc8c),
+    // so this child uses node --test's default "spec" reporter, whose
+    // summary line is `ℹ tests N` (not TAP's `# tests N`, which only
+    // appears with the tap/dot reporters).
+    assert.match(
+      stdout,
+      /^ℹ tests \d+$/m,
+      `installed pm-guard.test.mjs produced no test-runner summary line in its stdout -- looks like the NODE_TEST_CONTEXT/NODE_TEST_WORKER_ID isolation did not take effect (nested-worker false green), not a real run. stdout: ${JSON.stringify(stdout.slice(0, 2000))}`,
+    );
+    const testsRun = Number(/^ℹ tests (\d+)$/m.exec(stdout)[1]);
+    assert.ok(
+      testsRun >= 1,
+      `installed pm-guard.test.mjs reported 0 tests run -- a silent skip, not real execution. stdout: ${JSON.stringify(stdout.slice(0, 2000))}`,
     );
   } finally {
     rmSync(base, { recursive: true, force: true });

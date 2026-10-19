@@ -375,6 +375,18 @@ function parseTapSummary(text) {
   if (testsOnly.length === 0) return null;
   return { tests: Number(testsOnly[testsOnly.length - 1][1]), fail: 0 };
 }
+// HYK-209 H4-2 (P3-2, REVIEW-r2.md §3 P3-2): the "생산과 같은 4필드" claim
+// above (line ~347) holds only at the regex level (TAP_SUMMARY_PAIR_RE
+// itself requires the same 4 fields production's parseTapSummaryCounts
+// does). This fallback still means the FUNCTION's returned value differs
+// from production (null) on 3 of 13 REVIEW-r1.md ⓛ samples (R8orig, R12,
+// R7b_noFake) -- all three fail the 4-field regex but still have a bare
+// "# tests N" line, so the fallback reads them as `{ tests: N, fail: 0 }`
+// instead of null. Consumer (b) below asserts `result.status === 0` before
+// ever touching `summary`, so this gap is not a direct false-green path in
+// this file today -- but a future caller that trusts `summary.fail === 0`
+// without that prior status check would not be protected by the 4-field
+// regex alone.
 
 // HYK-434 H2 3R 요구 3: 판독 함수 자체를 Node 20 TAP 출력 모양을 문자열로
 // 박은 합성 표본으로 단위 시험한다 -- (b)/(b-negative)는 실제 설치·실행을
@@ -681,6 +693,14 @@ test("HYK-209 H4-2 정적 금지 단언 (⑨): this file's own source never pair
     `found a ${joinWord}(${tmpdirCall}, ...) call NOT wrapped in mkdtempSync() -- a fixed, non-randomized scratch root reintroduces the literal-root collision class this round forbids: ${offenders.join("; ")}`,
   );
 });
+// HYK-209 H4-2 (P3-3, REVIEW-r2.md §3 P3-3): this is a textual scan, not a
+// parse, so it is an open set -- it does not catch `os.tmpdir()` (a
+// different identifier than the bare `tmpdir()` this regex expects),
+// `path.resolve(tmpdir(), ...)` (a different join function), or a literal
+// routed through an intermediate variable (`const t = tmpdir(); join(t,
+// lit)`). This file currently has zero such occurrences (both files here
+// import `tmpdir` directly, not `os.tmpdir`), but that is a fact about this
+// file's current source, not a guarantee the scan itself enforces.
 
 test("(b) real installer (not --dry-run) installs into a git-init target outside this worktree, and `node --test` on the two newly-listed test files there has 0 failures", () => {
   const { base, targetRepo } = makeSyntheticTarget("hyk209-g1-adapter-real-");
