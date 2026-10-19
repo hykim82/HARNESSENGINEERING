@@ -482,13 +482,39 @@ function roleFromTaskFileName(name) {
   return m ? m[1].toUpperCase() : null;
 }
 
+// ★HYK-464-watch-collection-1 ⓑ P-fix(실측, hyk359-ambient-env-regression.
+// test.mjs 전건 스윕이 직접 발견): 이 호출부는 unconsumed 축과 달리
+// collectDroppedTaskFileEvidence를 공유하는 **세 축 전부**(seat-liveness/
+// seat-idle/dispatch-start)의 자리다 -- `resolveDispatchReceiptPathForUnconsumed`
+// 의 env 계층(`DISPATCH_RECEIPT_PATH`)까지 그대로 재사용하면, 그 env가
+// "떠도는" 환경(그 스윕이 바로 이 떠도는 상태를 흉내낸다) 하나로 세 축의
+// 격리가 전부 깨진다(실측 CI-canonical 54건 적색, dispatch-start-wire.
+// test.mjs 등 이 조각이 손대지 않은 기존 시험 파일까지 포함). env 계층은
+// 애초에 `dispatch-worker.ps1`이 그 배달 프로세스 안에서만 잠깐 채우는
+// 값이고(resolveDispatchReceiptPathForUnconsumed 헤더 §2546 근방), 이
+// 세 축을 도는 장기 실행 `watch-run.mjs` 프로세스 환경에는 생산에서도
+// 애초에 그 값이 없다 -- 그래서 이 계층을 건너뛰어도 생산 동작은 그대로
+// 다(영속 포인터 파일로 이미 똑같이 해결됨, 실측 확인). ⛔새 조회 로직
+// 발명이 아니다 -- 같은 파일의 영속 포인터 단계
+// (resolvePersistentDispatchReceiptPathForUnconsumed)를 그대로 재사용하고,
+// opts 오버라이드만 그 앞에 둔다(env 계층만 뺀다).
+function resolveDispatchReceiptPathForDroppedTaskFiles(repoRoot, opts) {
+  if (isNonEmptyReceiptString(opts.dispatchReceiptPath)) {
+    return opts.dispatchReceiptPath;
+  }
+  return resolvePersistentDispatchReceiptPathForUnconsumed(repoRoot, opts);
+}
+
 function checkDeliveryReceiptCoverage(repoRoot, name, taskId, opts) {
   if (!isNonEmptyReceiptString(taskId)) {
     return { status: DELIVERY_RECEIPT_CHECK.NOT_APPLICABLE };
   }
   const role = roleFromTaskFileName(name);
   if (!role) return { status: DELIVERY_RECEIPT_CHECK.NOT_APPLICABLE };
-  const receiptPath = resolveDispatchReceiptPathForUnconsumed(repoRoot, opts);
+  const receiptPath = resolveDispatchReceiptPathForDroppedTaskFiles(
+    repoRoot,
+    opts,
+  );
   if (!isNonEmptyReceiptString(receiptPath)) {
     // ★영수증 «경로 자체»가 안 구해지는 것(env도·opts도·영속 포인터
     // 파일도 없음)은 "이 환경에 영수증 메커니즘이 아직 설치/설정 안 됨"

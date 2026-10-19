@@ -61,13 +61,35 @@ const THIS_DIR = dirname(fileURLToPath(import.meta.url));
 function tmpDir(prefix) {
   return mkdtempSync(join(tmpdir(), prefix));
 }
+// HYK-460 4R P2-2 (with-temp-dir-thenable-guard.test.mjs 가 전 저장소를
+// 스캔해 강제하는 모양 그대로, dispatch-start-wire.test.mjs 와 동일 재현) --
+// `fn(dir)`가 돌려준 프로미스를 기다리지 않고 `finally`에서 곧바로
+// `rmSync`하면, 이 파일의 async mutation 콜백들이 첫 `await`에서 제어를
+// 넘기는 순간 임시 폴더가 지워진다. thenable이면 정착된 뒤에만 정리한다.
 function withTempDir(prefix, fn) {
   const dir = tmpDir(prefix);
+  const cleanup = () => rmSync(dir, { recursive: true, force: true });
+  let result;
   try {
-    return fn(dir);
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
+    result = fn(dir);
+  } catch (err) {
+    cleanup();
+    throw err;
   }
+  if (result && typeof result.then === "function") {
+    return result.then(
+      (value) => {
+        cleanup();
+        return value;
+      },
+      (err) => {
+        cleanup();
+        throw err;
+      },
+    );
+  }
+  cleanup();
+  return result;
 }
 function git(cwd, args) {
   return execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
