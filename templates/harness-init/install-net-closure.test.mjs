@@ -43,9 +43,10 @@
 // 겪은 혼란 -- coder.md 참조) -- 단순함을 시간보다 우선했다.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import {
   cpSync,
+  existsSync,
   mkdtempSync,
   mkdirSync,
   readFileSync,
@@ -169,6 +170,82 @@ function commitInstalledTree(targetRepoPath) {
   ]);
 }
 
+// HYK-209-net-closure-timeout-1-r3 ⓒ: every cleanup `finally` block below
+// used a bare `rmSync(base, { recursive: true, force: true })` -- `force`
+// only silences ENOENT (target already gone), it does NOT retry a real
+// Windows file lock. HYK-464 작성 1R run3 실측(〔직접〕 coder.md §4, 같은
+// cleanup 자리): `EPERM, Permission denied: rmSync ...\hyk209-install-net-…`
+// -- a one-shot EPERM/EBUSY on an OS that has not yet released a just-closed
+// child process's handle on the temp tree stops this round's own correctly-
+// behaving run cold.
+//
+// HYK-209-net-closure-timeout-1-r4 (review-3R §2 ⓒ⑹, this round's own ⓐ
+// baseline repro against a real open-handle Windows lock, both 〔직접〕):
+// 3R's own premise above -- "`maxRetries`/`retryDelay` are Node's OWN
+// built-in `fs.rmSync` retry mechanism ... delegates" -- is FALSE on Node
+// 26.2.0 (the version this round's own local full-runner actually runs,
+// `runner-receipt.json`'s `node_version`): a real transient lock (open
+// handle released after 600 ms, or 250 ms) still throws `EPERM` in 0 ms
+// with those two options supplied, zero retries. Node 20.20.2 gets the same
+// lock as `EBUSY` and DOES retry through that option -- the built-in
+// mechanism's behavior is version-dependent, which this wrapper can no
+// longer rely on silently. So this wrapper no longer delegates retry to
+// `fs.rmSync` at all: the real `rmSync` call below passes ONLY
+// `recursive`/`force` (no `maxRetries`/`retryDelay` -- those two option
+// keys mean nothing to `fs.rmSync` once it decides not to act on them, per
+// the above). Retry now lives in THIS function, in JS, gated on the error
+// `code`: only `EPERM`/`EBUSY`/`ENOTEMPTY` (the shapes a transient
+// lock/delete-race on Windows actually produces) are retried, up to a
+// finite budget; any other code (e.g. `EACCES` -- a real permission
+// problem, not a transient lock) throws on the very first attempt, and the
+// LAST attempt's failure (whatever its code) is always re-thrown, never
+// swallowed (ⓒ 반대 방향 칸 below, both directions). `maxRetries`/
+// `retryDelay` keep the exact same meaning and default values 3R gave the
+// (then-unused) Node option, now consumed by this function's own loop
+// instead: `retryDelay=100` ms is still Node's own documented default for
+// that option name; `maxRetries=5` is still "5 retries after the first
+// attempt" (6 total attempts, same as Node's own `fs.rmSync` semantics for
+// that option), with the same linear backoff (`retryDelay * attempt
+// number`) Node's own built-in mechanism used, so the worst-case total
+// added wait is the same 100+200+300+400+500 = 1500 ms 3R already
+// justified against the 60s/180s test-file timeouts -- only WHO runs that
+// backoff changed (this function, not `fs.rmSync`), not the budget. The
+// wait itself (`sleepMs` below) uses `Atomics.wait`, not a busy
+// `while (Date.now() < ...)` spin -- Node's main thread permits a
+// synchronous `Atomics.wait` (unlike a browser main thread), and a
+// throwaway `Int32Array`/`SharedArrayBuffer` is all it needs; nothing in
+// this file does other work during that wait, so a spin would only burn
+// CPU for no benefit.
+const CLEANUP_RETRYABLE_CODES = new Set(["EPERM", "EBUSY", "ENOTEMPTY"]);
+
+function sleepMs(ms) {
+  if (!(ms > 0)) return;
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+function removeSyntheticTarget(
+  base,
+  { maxRetries = 5, retryDelay = 100, rmSyncImpl = rmSync } = {},
+) {
+  let attempt = 0;
+  for (;;) {
+    try {
+      // Only recursive/force -- no maxRetries/retryDelay forwarded, see
+      // the header comment above on why this wrapper stopped delegating.
+      rmSyncImpl(base, { recursive: true, force: true });
+      return;
+    } catch (err) {
+      attempt += 1;
+      // ⛔not retryable, or retry budget exhausted -- re-throw as-is, never
+      // swallowed (ⓒ 반대 방향 칸 below, both directions).
+      if (!CLEANUP_RETRYABLE_CODES.has(err.code) || attempt > maxRetries) {
+        throw err;
+      }
+      sleepMs(retryDelay * attempt);
+    }
+  }
+}
+
 // Same ambient-env stripping as install-g1-adapter-list.test.mjs's
 // ledgerIsolatedEnv (duplicated, same non-coupling convention) -- both the
 // admission-ledger env keys (a floating value from the invoking shell must
@@ -214,16 +291,78 @@ function collectInstalledTestFiles(targetRepoPath) {
   return files;
 }
 
+// HYK-209-net-closure-timeout-1 ⓐ 실측(이 자식 하나를 node --test로 직접
+// 돌려 쟀다, N=3 한가 / N=5 부하): 한가할 때 38928/38677/39454 ms. 부하
+// 중(isolated-suite-runner.mjs가 이 24코어 머신에서 실제로 쓰는
+// resolveConcurrency() = floor(24/2) = 12와 같은 동시성으로 다른 .test.mjs
+// 12개를 같이 돌리며 측정) 끝까지 완주시킨 두 번은 95975 ms, 139124 ms --
+// 둘 다 지금 고정된 60000 ms보다 길다(나머지 세 번은 90000 ms 외부 래퍼에
+// 막혀 완주 못 함 1회, 59533 ms, 38416 ms -- 부하 lane이 꺼져가던 끝자락).
+// 이 자식(relay-handshake-g1-dispatch-check.test.mjs) 자신은 내부에 node
+// --test 하위 일꾼을 띄우지 않는다(execFileSync로 CLI만 호출, 동시성 값
+// 없음, 소스 확인) -- 그래서 ⓐ 후보(HARNESS_TEST_CONCURRENCY를
+// --test-concurrency로 전달)는 이 호출 모양에서 할 일이 없다: 이 spawnSync는
+// 이미 파일 1개만 돌리므로 node --test에는 병렬화할 형제 파일이 없다.
+// 택한 수리(ⓑ): isolated-suite-runner.mjs가 실제 전체 러너 호출마다
+// 무조건 심어주는 신호(NESTED_CONCURRENCY_ENV_VAR = "HARNESS_TEST_CONCURRENCY",
+// 그 파일 132/558행 -- 이 파일을 포함해 그 러너가 동시에 돌리는 모든 형제
+// 파일의 process.env에 그 가중치 값이 박힌다, 이 파일 자신도 그 TEST_DIRS의
+// "templates/harness-init" 아래라 예외가 아니다)가 있으면 "지금 부하가 걸릴
+// 수 있는 real 전체 러너 안"이라는 뜻이므로 더 긴, 그래도 유한한 시한을
+// 쓴다; 없으면(이 파일을 단독으로 돌릴 때, 위 한가 측정과 같은 모양) 원래
+// 60000 ms를 그대로 쓴다 -- 이 라운드가 문제를 재현하지 못한 경로의 동작은
+// 바꾸지 않는다. 리터럴 "HARNESS_TEST_CONCURRENCY"는 isolated-suite-
+// runner.mjs에서 import하지 않고 그대로 중복 적는다(이 파일 자신의
+// isolatedEnv() 헤더가 이미 쓰는 이 저장소의 consumer/producer 비결합
+// 관례와 같음).
+const STANDALONE_TIMEOUT_MS = 60000;
+// 180000 ms: 실측 최대 완주값(139124 ms)의 1.29배 이상, 한가 평균
+// (~39020 ms)의 4.6배 이상 -- 값을 올렸을 뿐 무한대는 아니다(⛔무한대 금지).
+const UNDER_FULL_RUNNER_TIMEOUT_MS = 180000;
+
+// 부하 신호(HARNESS_TEST_CONCURRENCY)가 유효한 양의 정수로 있으면 더 긴
+// 유한 시한, 없거나 값이 깨졌으면 원래 시한 -- isolated-suite-runner.mjs의
+// resolveNestedConcurrency와 같은 "결정 실패 시 원래 동작으로" 규칙.
+function resolveInstalledTestTimeoutMs(env) {
+  const raw = env.HARNESS_TEST_CONCURRENCY;
+  if (raw == null || raw === "") return STANDALONE_TIMEOUT_MS;
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < 1) return STANDALONE_TIMEOUT_MS;
+  return UNDER_FULL_RUNNER_TIMEOUT_MS;
+}
+
 // One `node --test` child per file -- unambiguous per-file pass/fail
 // attribution (see this file's own header for why over one combined run).
-function runOneInstalledTestFile(targetRepoPath, rel) {
-  return spawnSync(process.execPath, ["--test", "--test-reporter=tap", rel], {
-    cwd: targetRepoPath,
-    encoding: "utf8",
-    env: isolatedEnv(),
-    timeout: 60000,
-    maxBuffer: 64 * 1024 * 1024,
-  });
+// `timeoutMs` override: test-only escape hatch (ⓒ 반대 방향 칸이 180000 ms
+// 짜리 진짜 시한을 기다리지 않고도 "시한을 넘으면 ETIMEDOUT으로 잡힌다"는
+// 메커니즘 자체를 빠르게 검증하게 한다) -- 382행의 실제 생산 호출은 이
+// 옵션을 넘기지 않으므로 거기선 항상 resolveInstalledTestTimeoutMs의 실제
+// 판단이 그대로 쓰인다.
+// `spawnSync` 옵션(HYK-209-net-closure-timeout-1-r2, 검토 1R P2-1 수리):
+// 마찬가지로 테스트 전용 주입 지점이다 -- 기본값이 진짜 node:child_process의
+// spawnSync라서 382행의 실제 생산 호출(이 옵션도 넘기지 않음)은 동작이 전혀
+// 바뀌지 않는다. 아래 "timeout ⓑ fix" 칸이 이 지점으로 가짜 spawnSync를
+// 꽂아, 실제로 생성되는 자식 프로세스 없이 "우회 인자 없이 부르면 그 호출의
+// timeout 옵션이 resolveInstalledTestTimeoutMs(env)와 같다"는 생산 결선
+// 자체를 구조로 단언한다(env 주입만으로는 결정값 숫자가 맞는지 이 파일이
+// 그 계산을 또 베껴야 해서 대신 호출 인자를 직접 가로챈다).
+function runOneInstalledTestFile(
+  targetRepoPath,
+  rel,
+  { timeoutMs, spawnSync: spawnSyncImpl = spawnSync } = {},
+) {
+  const env = isolatedEnv();
+  return spawnSyncImpl(
+    process.execPath,
+    ["--test", "--test-reporter=tap", rel],
+    {
+      cwd: targetRepoPath,
+      encoding: "utf8",
+      env,
+      timeout: timeoutMs ?? resolveInstalledTestTimeoutMs(env),
+      maxBuffer: 64 * 1024 * 1024,
+    },
+  );
 }
 
 test("install-net-closure: every INSTALL_NET_CLOSURE_KNOWN_EXCEPTIONS entry names a file this installer actually ships (no stale exception for a file that was removed/renamed)", () => {
@@ -428,9 +567,434 @@ test("install-net-closure: real installer -> real git target -> every installed 
       "every INSTALL_NET_CLOSURE_KNOWN_EXCEPTIONS entry must still actually fail on a fresh install -- an entry that now passes is stale and should be deleted from the list, not kept as a no-op skip",
     );
   } finally {
-    rmSync(base, { recursive: true, force: true });
+    removeSyntheticTarget(base);
   }
 });
+
+// ---------------------------------------------------------------------------
+// HYK-209-net-closure-timeout-1 ⓑ: resolveInstalledTestTimeoutMs's own
+// decision table, unit-level (no real spawn -- just the env-reading logic
+// above runOneInstalledTestFile).
+// ---------------------------------------------------------------------------
+test("install-net-closure timeout ⓑ: resolveInstalledTestTimeoutMs returns the original 60000 ms when HARNESS_TEST_CONCURRENCY is absent/empty/invalid (standalone run, unchanged behavior)", () => {
+  assert.equal(resolveInstalledTestTimeoutMs({}), 60000);
+  assert.equal(
+    resolveInstalledTestTimeoutMs({ HARNESS_TEST_CONCURRENCY: "" }),
+    60000,
+  );
+  assert.equal(
+    resolveInstalledTestTimeoutMs({ HARNESS_TEST_CONCURRENCY: "not-a-number" }),
+    60000,
+  );
+  assert.equal(
+    resolveInstalledTestTimeoutMs({ HARNESS_TEST_CONCURRENCY: "0" }),
+    60000,
+  );
+  assert.equal(
+    resolveInstalledTestTimeoutMs({ HARNESS_TEST_CONCURRENCY: "-3" }),
+    60000,
+  );
+});
+
+test("install-net-closure timeout ⓑ: resolveInstalledTestTimeoutMs returns the longer, still-finite 180000 ms when isolated-suite-runner.mjs's own concurrency signal is present (real full-runner shape)", () => {
+  assert.equal(
+    resolveInstalledTestTimeoutMs({ HARNESS_TEST_CONCURRENCY: "12" }),
+    180000,
+  );
+  assert.equal(
+    resolveInstalledTestTimeoutMs({ HARNESS_TEST_CONCURRENCY: "1" }),
+    180000,
+  );
+  assert.ok(
+    Number.isFinite(
+      resolveInstalledTestTimeoutMs({ HARNESS_TEST_CONCURRENCY: "24" }),
+    ),
+  );
+});
+
+// ---------------------------------------------------------------------------
+// HYK-209-net-closure-timeout-1 ⓒ 반대 방향 칸(필수): a synthetic installed
+// test file that never finishes (endless setInterval -- never resolves,
+// never calls node:test's own done/return) must still be caught by
+// runOneInstalledTestFile's real spawnSync timeout path, not silently hang
+// the whole suite. Probed on this platform first (coder.md 증거): Node's
+// spawnSync({timeout}) kill on an infinite-loop child sets
+// result.error.code === "ETIMEDOUT" (result.signal "SIGTERM", result.status
+// null) -- asserted on that structural shape, not on any message text
+// (HYK-262 posture, same as isolated-suite-runner.mjs's own classifier).
+// Uses the `timeoutMs` test-only override (tiny, so this test itself stays
+// fast) -- the mechanism under test (spawnSync's own `timeout` option
+// actually kills a real hung child) is identical regardless of which
+// finite number is passed; only resolveInstalledTestTimeoutMs's own choice
+// of THAT number is covered separately above.
+// ---------------------------------------------------------------------------
+test("install-net-closure ⓒ: a truly-hung installed test file (infinite setInterval) is still caught as ETIMEDOUT by the real runOneInstalledTestFile path after the ⓑ fix (detection not traded away for throughput)", () => {
+  const base = mkdtempSync(
+    path.join(longFormTmpdir(), "hyk209-install-net-hang-"),
+  );
+  try {
+    const checkDir = path.join(base, "scripts", "check");
+    mkdirSync(checkDir, { recursive: true });
+    const hangFile = "scripts/check/hyk209-synthetic-hang.test.mjs";
+    writeFileSync(
+      path.join(base, hangFile),
+      // Never resolves, never lets `node --test` reach a completion line --
+      // the exact "really hung, not just slow" shape ⓓ below also exercises.
+      "setInterval(() => {}, 1000);\n",
+      "utf8",
+    );
+    const startedAtMs = Date.now();
+    const result = runOneInstalledTestFile(base, hangFile, { timeoutMs: 2000 });
+    const elapsedMs = Date.now() - startedAtMs;
+    assert.equal(
+      result.error?.code,
+      "ETIMEDOUT",
+      `expected spawnSync's own timeout kill (result.error.code === "ETIMEDOUT"), got: ${JSON.stringify({ error: result.error && { code: result.error.code, message: result.error.message }, signal: result.signal, status: result.status })}`,
+    );
+    // HYK-209-net-closure-timeout-1-r5: `status` itself is platform-shaped,
+    // not a fixed value -- on Windows a timeout-killed spawnSync reports
+    // status === null (verified on this platform, this round's coder.md
+    // §2 ⓐ). On Linux (CI, run 765 log, 책임자 판독), spawnSync's own
+    // `timeout` kill sends SIGTERM to the immediate child (`node --test`)
+    // only; that child's process then reports back to ITS parent with a
+    // real POSIX exit status (observed: 1) instead of null. Both shapes are
+    // "this spawnSync call did not report a clean exit" -- accept either,
+    // without branching on process.platform: a clean `status === 0` would
+    // mean the child actually finished normally, which contradicts a real
+    // timeout kill on any OS, so excluding exactly that value (rather than
+    // allow-listing POSIX exit codes under a platform check) is both
+    // simpler and already covers the "ETIMEDOUT + 0" regression ⑶ below on
+    // every platform, not just POSIX ones.
+    assert.ok(
+      result.status === null ||
+        (typeof result.status === "number" && result.status !== 0),
+      `expected a timeout-killed spawnSync to report status === null or a non-zero exit code, not a clean 0 (platform: ${process.platform}, status: ${JSON.stringify(result.status)}, signal: ${JSON.stringify(result.signal)}, killed: ${JSON.stringify(result.killed)})`,
+    );
+    assert.ok(
+      elapsedMs < 10000,
+      `expected the kill to land close to the 2000 ms override, not hang indefinitely (got ${elapsedMs} ms)`,
+    );
+  } finally {
+    removeSyntheticTarget(base);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// HYK-209-net-closure-timeout-1-r2 (검토 1R P2-1 수리): the ⓒ cell above
+// proves the spawnSync-timeout-kill MECHANISM works, but it calls through
+// the `timeoutMs` test-only bypass -- it never proved that the real
+// production call (382행, no bypass args) actually WIRES that mechanism to
+// resolveInstalledTestTimeoutMs's own decision. Deleting the `??
+// resolveInstalledTestTimeoutMs(env)` expression at runOneInstalledTestFile's
+// own spawnSync call left every cell in this file green (검토 1R §2 ⓒ 표
+// ⑴, reproduced again by this round's own coder.md §2 ⓐ) -- a silent
+// regression would let a real full-runner lane wait the OS/CI's own
+// unbounded default instead of a finite timeout. This cell closes that gap
+// without waiting out a real 60s/180s timer: it injects a fake `spawnSync`
+// (see that option's own comment above) and asserts the INTERCEPTED call's
+// `timeout` option, not a value this test recomputes by hand.
+// ---------------------------------------------------------------------------
+test("install-net-closure timeout ⓑ fix (P2-1): calling runOneInstalledTestFile WITHOUT the timeoutMs bypass (the real 382행 call shape) wires spawnSync's real timeout option to resolveInstalledTestTimeoutMs(env)'s own decision", () => {
+  function captureSpawnOptsUnder(envOverrides) {
+    const priorValues = {};
+    for (const key of Object.keys(envOverrides))
+      priorValues[key] = process.env[key];
+    for (const [key, value] of Object.entries(envOverrides))
+      process.env[key] = value;
+    let capturedOpts;
+    try {
+      const fakeSpawnSync = (_cmd, _args, opts) => {
+        capturedOpts = opts;
+        return { status: 0, error: undefined, stdout: "", stderr: "" };
+      };
+      runOneInstalledTestFile(
+        "unused-targetRepoPath",
+        "scripts/check/does-not-matter.test.mjs",
+        { spawnSync: fakeSpawnSync },
+      );
+    } finally {
+      for (const [key, prior] of Object.entries(priorValues)) {
+        if (prior === undefined) delete process.env[key];
+        else process.env[key] = prior;
+      }
+    }
+    return capturedOpts;
+  }
+
+  const standaloneOpts = captureSpawnOptsUnder({
+    HARNESS_TEST_CONCURRENCY: "",
+  });
+  assert.ok(
+    standaloneOpts,
+    "fakeSpawnSync was never invoked -- runOneInstalledTestFile is not honoring the injected spawnSync option",
+  );
+  assert.equal(
+    standaloneOpts.timeout,
+    resolveInstalledTestTimeoutMs(standaloneOpts.env),
+    "no-bypass call must pass resolveInstalledTestTimeoutMs(env) as spawnSync's own timeout option (HARNESS_TEST_CONCURRENCY absent)",
+  );
+  assert.equal(standaloneOpts.timeout, 60000);
+
+  const fullRunnerOpts = captureSpawnOptsUnder({
+    HARNESS_TEST_CONCURRENCY: "12",
+  });
+  assert.ok(
+    fullRunnerOpts,
+    "fakeSpawnSync was never invoked -- runOneInstalledTestFile is not honoring the injected spawnSync option (full-runner case)",
+  );
+  assert.equal(
+    fullRunnerOpts.timeout,
+    resolveInstalledTestTimeoutMs(fullRunnerOpts.env),
+    "no-bypass call must pass resolveInstalledTestTimeoutMs(env) as spawnSync's own timeout option (HARNESS_TEST_CONCURRENCY=12, full-runner shape)",
+  );
+  assert.equal(fullRunnerOpts.timeout, 180000);
+});
+
+// ---------------------------------------------------------------------------
+// HYK-209-net-closure-timeout-1-r3 ⓑ: the P2-1 fix cell above proves
+// `runOneInstalledTestFile` WIRES its `timeoutMs`/`spawnSync` bypass
+// options correctly WHEN GIVEN -- but it calls the function directly with
+// its own fabricated args, never through the real production call site
+// inside the main test's loop above (the bare two-positional-arg call, no
+// third argument). Nothing before this round asserted THAT call site
+// itself passes none of those bypass args -- a mutation appending
+// `{ timeoutMs: 0 }` (or an `{ spawnSync: ... }` that strips `timeout` from
+// the options it forwards) there left the whole file 10/10 green (coder.md
+// §1 ⓐ 실측, 복원 sha256 confirmed unchanged after). This cell closes that
+// gap with a source-text assertion: 〔직접〕 the only call written with
+// exactly the two bare positional arguments (target repo path, relative
+// file path) and no trailing options object at all is the production one
+// inside the main loop; every other call in this file is a test's own
+// fabricated args and never matches that exact two-argument shape (the
+// literal call text is deliberately NOT quoted here, nor in the assertion
+// message below, so this comment/message cannot itself become a spurious
+// third match against its own source-text scan).
+// 한계 〔직접〕: this is a source-STRING check, not
+// a runtime one -- it would miss a mutation that keeps the two-arg call
+// site text untouched but changes behavior through an entirely different
+// path (e.g. redefining the imported `runOneInstalledTestFile` binding
+// itself, or editing `resolveInstalledTestTimeoutMs`'s own body). The first
+// of those is covered structurally by the P2-1 fix cell's own spawnSync
+// interception (above); this repo's own `quality-check`/review gates, not
+// this test file, are what stand against an import-rebinding mutation.
+// ---------------------------------------------------------------------------
+test("install-net-closure timeout ⓑ binding (r3): the real production call site passes no timeout-overriding arguments to runOneInstalledTestFile (source-text assertion, P2-1 companion)", () => {
+  const src = readFileSync(fileURLToPath(import.meta.url), "utf8");
+  const callSiteArgs = [
+    ...src.matchAll(/runOneInstalledTestFile\(([^)]*)\)/g),
+  ].map((m) => m[1].trim());
+  const productionCallSites = callSiteArgs.filter(
+    (args) => args === "targetRepo, rel",
+  );
+  assert.equal(
+    productionCallSites.length,
+    1,
+    `expected exactly one production call site calling runOneInstalledTestFile with its two bare positional args and no extra/overriding options object, found ${productionCallSites.length} (all call sites seen: ${JSON.stringify(callSiteArgs)})`,
+  );
+});
+
+// ---------------------------------------------------------------------------
+// HYK-209-net-closure-timeout-1-r4 ⓑ: removeSyntheticTarget no longer
+// forwards maxRetries/retryDelay to the real rmSync call (r3 did -- see the
+// header comment above on why that stopped meaning anything on Node 26).
+// `rmSyncImpl` injection (same shape as `runOneInstalledTestFile`'s
+// `spawnSync` option) lets this cell assert the real call's options
+// without touching the filesystem.
+// ---------------------------------------------------------------------------
+test("install-net-closure cleanup ⓑ: removeSyntheticTarget calls the real rmSync with only recursive/force (no maxRetries/retryDelay -- retry is this wrapper's own JS loop now, not delegated to fs.rmSync)", () => {
+  let capturedOpts;
+  removeSyntheticTarget("unused-base-path", {
+    rmSyncImpl: (_targetPath, opts) => {
+      capturedOpts = opts;
+    },
+  });
+  assert.ok(capturedOpts, "rmSyncImpl was never invoked");
+  assert.deepEqual(
+    capturedOpts,
+    { recursive: true, force: true },
+    "the underlying rmSync call must receive exactly {recursive, force} -- maxRetries/retryDelay must NOT be forwarded, r4's whole point is that fs.rmSync's own built-in retry is no longer relied on",
+  );
+});
+
+// ---------------------------------------------------------------------------
+// HYK-209-net-closure-timeout-1-r4 ⓑ: the JS-level retry actually retries a
+// transient, whitelisted failure (EBUSY here, same posture as the real
+// lock's ⓓ cell below) and succeeds once the underlying call stops failing
+// -- proves the loop is live, not just present in source. retryDelay is
+// overridden small (this cell's own point is "does it retry", not "is the
+// default wait exactly 100ms" -- that is covered by the reverse ⑴ cell
+// below, which uses the true defaults).
+// ---------------------------------------------------------------------------
+test("install-net-closure cleanup ⓑ: removeSyntheticTarget retries a transient EBUSY failure and returns normally once a later attempt succeeds", () => {
+  let calls = 0;
+  const failTwiceThenSucceed = () => {
+    calls += 1;
+    if (calls <= 2) {
+      const err = new Error(
+        "EBUSY, resource busy or locked: synthetic rmSync injection (transient)",
+      );
+      err.code = "EBUSY";
+      throw err;
+    }
+  };
+  removeSyntheticTarget("unused-base-path", {
+    retryDelay: 5,
+    rmSyncImpl: failTwiceThenSucceed,
+  });
+  assert.equal(
+    calls,
+    3,
+    "expected 2 failing attempts followed by 1 succeeding attempt (3 total calls)",
+  );
+});
+
+// ---------------------------------------------------------------------------
+// HYK-209-net-closure-timeout-1-r4 ⓒ 반대 방향 칸 ⑴ (필수, r3의 calls===1
+// 단언을 새 재시도와 맞게 바꿈 -- 바꾼 이유: r3는 "Node의 fs.rmSync 자체
+// maxRetries 루프"가 전부였으므로 이 래퍼는 정확히 1번만 불렸어야 정상이었다
+// (재시도 자체가 Node 내부에 있었다); r4는 재시도 루프 자체가 이 함수 안
+// JS로 옮겨왔으므로, 영구히 재시도-대상 코드로 실패하는 경우 이제 이
+// 함수가 maxRetries+1번(기본값 6회: 최초 1회 + 재시도 5회, Node의 기존
+// maxRetries 옵션과 같은 의미)까지 직접 불러야 정상이다): a cleanup
+// failure that survives every retry (a permanently-locked target, error
+// code EPERM -- still in the retryable set) must still THROW the last
+// failure, not be silently absorbed, AND must have actually exhausted the
+// real default retry budget (maxRetries=5, retryDelay=100 defaults, not
+// overridden here -- this is the one cell that pins those literal default
+// values).
+// ---------------------------------------------------------------------------
+test("install-net-closure cleanup ⓒ reverse ⑴: a permanently-failing, retryable (EPERM) cleanup exhausts the default retry budget (6 calls) then still throws, not swallowed", () => {
+  let calls = 0;
+  const alwaysThrowingRmSync = () => {
+    calls += 1;
+    const err = new Error(
+      "EPERM, Permission denied: synthetic rmSync injection (always fails)",
+    );
+    err.code = "EPERM";
+    throw err;
+  };
+  const startedAtMs = Date.now();
+  assert.throws(
+    () =>
+      removeSyntheticTarget("unused-base-path", {
+        rmSyncImpl: alwaysThrowingRmSync,
+      }),
+    /EPERM/,
+    "removeSyntheticTarget must propagate a permanent cleanup failure, not swallow it",
+  );
+  const elapsedMs = Date.now() - startedAtMs;
+  assert.equal(
+    calls,
+    6,
+    "default maxRetries=5 means 1 initial attempt + 5 retries = 6 total calls to rmSyncImpl before giving up",
+  );
+  assert.ok(
+    elapsedMs >= 1400,
+    `expected the default linear backoff (100+200+300+400+500 = 1500 ms) to have actually elapsed before giving up, got ${elapsedMs} ms`,
+  );
+});
+
+// ---------------------------------------------------------------------------
+// HYK-209-net-closure-timeout-1-r4 ⓒ 반대 방향 칸 ⑵ (필수, 신규): a
+// NON-retryable error code (anything outside EPERM/EBUSY/ENOTEMPTY -- here
+// EACCES, a real/permanent permission problem, not a transient lock) must
+// throw on the very first attempt, with zero retry wait -- retrying a code
+// that retrying can never fix would just add latency for nothing.
+// ---------------------------------------------------------------------------
+test("install-net-closure cleanup ⓒ reverse ⑵: a non-retryable error code (EACCES) throws immediately on the first attempt, no retry", () => {
+  let calls = 0;
+  const alwaysThrowingWrongCode = () => {
+    calls += 1;
+    const err = new Error(
+      "EACCES, permission denied: synthetic rmSync injection (not in the retryable set)",
+    );
+    err.code = "EACCES";
+    throw err;
+  };
+  const startedAtMs = Date.now();
+  assert.throws(
+    () =>
+      removeSyntheticTarget("unused-base-path", {
+        rmSyncImpl: alwaysThrowingWrongCode,
+      }),
+    /EACCES/,
+    "removeSyntheticTarget must propagate a non-retryable failure immediately",
+  );
+  const elapsedMs = Date.now() - startedAtMs;
+  assert.equal(
+    calls,
+    1,
+    "a non-retryable error code must not be retried at all -- exactly 1 call",
+  );
+  assert.ok(
+    elapsedMs < 200,
+    `expected no retry wait for a non-retryable code, got ${elapsedMs} ms`,
+  );
+});
+
+// ---------------------------------------------------------------------------
+// HYK-209-net-closure-timeout-1-r4 ⓓ (필수, Windows 전용 실제 잠금 칸,
+// 가짜 rmSync 금지): a REAL open file handle (a live pwsh child holding
+// FileShare.None, same acquisition method as review-3R's own
+// lockprobe.mjs/lockprobe2.mjs, read-only here) held just long enough to
+// require more than one real rmSync attempt, then released well inside the
+// default retry budget (held 400 ms < worst-case 1500 ms budget) -- proves
+// the real production retry loop (real `rmSync`, no injection at all) rides
+// out a real transient Windows lock end to end. Linux/macOS skip, reasoned
+// (open fds there do not block unlink -- this cell would not be exercising
+// real contention, review-3R's own posture for not attempting a portable
+// version of this probe).
+// ---------------------------------------------------------------------------
+function holdRealWindowsFileLock(filePath, holdMs) {
+  const ps = `$f=[System.IO.File]::Open('${filePath}','Open','Read','None'); Write-Output LOCKED; Start-Sleep -Milliseconds ${holdMs}; $f.Close()`;
+  const child = spawn("pwsh", ["-NoProfile", "-Command", ps], {
+    stdio: ["ignore", "pipe", "inherit"],
+  });
+  return new Promise((resolve) => {
+    child.stdout.on("data", (chunk) => {
+      if (String(chunk).includes("LOCKED")) resolve(child);
+    });
+  });
+}
+
+test(
+  "install-net-closure ⓓ (Windows only): removeSyntheticTarget's real rmSync call rides out a real, transient open-handle Windows file lock",
+  {
+    skip:
+      process.platform === "win32"
+        ? false
+        : "실제 파일 잠금은 Windows 전용 의미론(FileShare.None 열린 핸들이 rmSync의 삭제를 막음) -- Linux/macOS 에서는 열린 fd가 있어도 unlink가 막히지 않아 이 칸이 재현하는 경합 자체가 생기지 않는다(review-3R lockprobe 실측과 같은 posture, 이 라운드는 포터블화를 시도하지 않는다)",
+  },
+  async () => {
+    const base = mkdtempSync(
+      path.join(longFormTmpdir(), "hyk209-install-net-lock-"),
+    );
+    const lockedFile = path.join(base, "held.txt");
+    writeFileSync(lockedFile, "x");
+    const lockHolder = await holdRealWindowsFileLock(lockedFile, 400);
+    try {
+      const startedAtMs = Date.now();
+      // No rmSyncImpl override -- this is the real production call shape.
+      removeSyntheticTarget(base);
+      const elapsedMs = Date.now() - startedAtMs;
+      assert.equal(
+        existsSync(base),
+        false,
+        "the locked target must actually be gone once the real retry loop rides out the lock",
+      );
+      assert.ok(
+        elapsedMs >= 250,
+        `expected at least one real retry wait before the 400 ms lock released (not an instant pass-through), got ${elapsedMs} ms`,
+      );
+      assert.ok(
+        elapsedMs < 1500,
+        `expected the lock to be ridden out well inside the default worst-case 1500 ms retry budget, got ${elapsedMs} ms`,
+      );
+    } finally {
+      await new Promise((resolve) => lockHolder.on("exit", resolve));
+    }
+  },
+);
 
 // ---------------------------------------------------------------------------
 // HYK-209 §2 ⓒ: installAdmissionLedgerPointer's lockPath must match the
@@ -459,7 +1023,7 @@ test("install-net-closure ⓒ: a real install's admission-ledger-path.json point
       `expected lockPath and ledgerPath to live in the same control-room directory; lockPath=${pointer.lockPath} ledgerPath=${pointer.ledgerPath}`,
     );
   } finally {
-    rmSync(base, { recursive: true, force: true });
+    removeSyntheticTarget(base);
   }
 });
 
@@ -574,7 +1138,7 @@ test("install-net-closure ⓓ: an archive install (REPO_ROOT not a git checkout)
       `expected an explicit "미상(...)" string, got: ${JSON.stringify(manifest.installer)}`,
     );
   } finally {
-    rmSync(base, { recursive: true, force: true });
+    removeSyntheticTarget(base);
   }
 });
 
