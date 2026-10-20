@@ -550,6 +550,31 @@ async function waitForFiles(paths, timeoutMs) {
   }
 }
 
+// ★HYK-346-ci-determinism-1-r2 (coder-task §2 ⓐⓓ): waitForFiles 하나만으로는
+// "자식이 임계구역에 못 들어갔다"와 "체크포인트 자체가 막혔다"를 못 가른다
+// -- 어떤 자식이 (예: 한도를 이미 넘긴 상태로) `withLedgerLock`에서 실패해
+// 돌아오면, 그 자식은 cs-ready 파일을 영영 안 쓰지만(콜백이 호출되지
+// 않았다) IPC `done` 메시지는 정상적으로 보낸다. cs-ready 파일 또는 그
+// 자식의 done(IPC) 둘 중 먼저 오는 쪽을 받아야, "정당하게 ok:false 로
+// 끝난 자식"과 "진짜로 아무 신호도 안 오는(체크포인트 막힘)" 자식을
+// 가를 수 있다.
+async function waitForCsReadyOrDone(csReadyPath, donePromise, timeoutMs) {
+  let doneArrived = false;
+  donePromise.then(() => {
+    doneArrived = true;
+  });
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    if (existsSync(csReadyPath) || doneArrived) return;
+    if (Date.now() > deadline) {
+      throw new Error(
+        `neither cs-ready nor a done IPC message was observed in time: ${csReadyPath}`,
+      );
+    }
+    await new Promise((res) => setTimeout(res, 10));
+  }
+}
+
 // runCrossoverRace -- the deterministic replacement for "throw 24 processes
 // at it and hope". Exactly 2 children, herded via file-checkpoints to the
 // EXACT crossing point HYK-346's header names (a reclaim decision racing a
@@ -743,68 +768,557 @@ test("★★★HYK-463 결정적 교차 -- 정상 구현(무변이)은 같은 �
 // 파일 내용의 스냅샷 비교가 아니라 «누가 실제로 문을 통과했는가»를 직접
 // 센다. §3-메타-변이에서 반복 측정으로 검증했다: n=4/8/24 전 구간에서
 // `reclaimPathWins>=2` ⇔ `lostUpdates>0` (24/24 일치, coder.md §2-1 표).
-test("★★HYK-346 변이 ① (부하 난사, 24개) -- «충분 경합»(reclaimPathWins≥2)이 실제로 관측될 때만 RED 로 판정하고, 그 미만이면 «측정 불능»으로 별개 실패를 낸다", async () => {
-  const MAX_ATTEMPTS = 5;
-  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
-    const { dir } = tmpPaths();
-    const reclaimLog = join(dir, "reclaim-attempts.log");
-    const reclaimWinLog = join(dir, "reclaim-wins.log");
+//
+// HYK-346-ci-determinism-1 (coder-task.md §2): 위 표의 전제 자체가 이
+// 칸의 유일한 남은 결함이었다 -- 24개를 그냥 풀어놓고 «몇 명이 실제로
+// 교차했는지»를 세는 구조는, 교차가 «일어나길» CPU 스케줄링 운에 맡긴다.
+// CI 의 1~2 코어 러너에서는 그 운이 거의 항상 나오지 않는다(759 초록 ·
+// 760 빨강, 동일 트리 -- coder.md §1 ORCH 구조 사실). 아래
+// `runGatedReclaimChain` 은 HYK-463 이 이미 만든 같은 파일 체크포인트
+// (`__HYK463_reclaimCheckpoint__`)로 24개 «전원»을 reclaim 판정 직후에
+// 멈춰 세운다(죽은 씨앗을 전원이 보고 있으므로 아무도 몰래 지나칠 수
+// 없다) -- 그 다음 한 명씩만 풀어 매번 «바로 앞 당첨자»와의 교차를
+// 강제한다. 동시에 다 풀면 24 난사와 같은 운 문제가 그대로 돌아오므로
+// ⛔순차 해제가 핵심이다(동시 해제는 기각 -- 위 코드 리딩으로 확인:
+// 동시 해제 시 다수가 동시에 unlink+wx 를 다시 경합해 «몇 명이 이겼는가»
+// 가 다시 스케줄링 운이 된다).
+//
+// ★겹침 고지(coder-task.md §2 ⓑ): 메커니즘은 HYK-463 의
+// `runCrossoverRace`(체크포인트로 2개를 정확한 교차 지점에 몬다)와
+// 같다 -- 새 체크포인트를 만들지 않았다. 다만 이 칸은 그 메커니즘을
+// `runCrossoverRace` 전용 2-프로세스 집계기가 아니라, ⑴⑵(635·651행)
+// 음성 대조가 쓰는 것과 «같은» `runWave` 류 24-wide
+// ok/lostUpdates/duplicateSeen 집계 구조(`runGatedReclaimChain`, 아래)로
+// 통과시킨다 -- 그래서 이 칸이 새로 지키는 것은 «그 공유 집계 하네스 자체가
+// 24-wide 교차에서도 결함을 올바르게 RED 로 뒤집는가»이다. 또한 ORCH
+// §1 "정본 신호"가 가리키는 reclaimAttempts/reclaimPathWins 진단 카운터를
+// 그대로 보존한다. 반대로, 예전 몸통의 5회 재시도형 MEASUREMENT_INCONCLUSIVE
+// 탈출구는 더 이상 없다 -- 전원이 끝까지 게이팅되므로 «이번엔 운이
+// 없었다»로 재시도할 대상 자체가 사라졌다(ⓓ: 남은 assert.fail 은 체크포인트
+// 파일 입출력이 정말로 막혔을 때만 발화하는 구조적 안전망이다).
+// ★HYK-346-ci-determinism-1-r2: runGatedReclaimChain 이 "체크포인트가
+// 막혔다"고 판단했을 때 공유하는 구조화된 신호 하나. 두 자리(ready 배리어·
+// go 사슬)가 같은 모양으로 돌려줘서 judgeGatedReclaimChain 이 어디서
+// 막혔는지(stuckPhase)와 무관하게 똑같이 MEASUREMENT_INCONCLUSIVE 로
+// 판정할 수 있게 한다.
+function buildStuckResult(stuckPhase, err, results) {
+  return {
+    checkpointStuck: true,
+    stuckPhase,
+    stuckError: err.message,
+    results,
+    okCount: results.filter((r) => r.ok).length,
+    finalCounter: null,
+    lostUpdates: 0,
+    duplicateSeen: [],
+  };
+}
+
+// ★전원이 reclaim 판정 직후 체크포인트에서 멈춘다 -- 아무도 아직 지우지
+// 않은 같은 죽은 씨앗을 전원이 보고 있으므로, 이 지점을 몰래 지나칠 수
+// 있는 자식은 없다(ⓐ 전제였던 «운»이 구조적으로 제거된다). 던지지 않고
+// null(성공) 또는 buildStuckResult(실패)를 돌려준다 -- coder-task §2 ⓑⓓ.
+async function awaitAllReadyOrStuck(kids, ckptDir, ckptWaitMs, results) {
+  try {
+    await waitForFiles(
+      kids.map((c) => join(ckptDir, `reclaim-ready-${c.pid}.txt`)),
+      ckptWaitMs,
+    );
+    return null;
+  } catch (err) {
+    for (const k of kids) k.kill();
+    return buildStuckResult("ready", err, results);
+  }
+}
+
+// ★한 명씩만 풀어 매번 «바로 앞 당첨자»와의 교차를 강제한다(순차 해제 --
+// 동시 해제는 모듈 주석의 겹침 고지에서 기각한 대로 운 문제를 되살린다).
+// ⛔releaseCount<n(기본값 아님)일 때만: i>=releaseCount 인 자식에게는 go
+// 파일을 끝까지 안 쓴다 -- 그 자식은 체크포인트 busy-wait 에서 영영 못
+// 빠져나온다(반대 방향 칸 전용, coder-task §2 ⓓ). cs-ready 파일 또는 그
+// 자식의 done IPC 둘 중 먼저 오는 쪽을 기다린다(waitForCsReadyOrDone) --
+// 이래야 "정당하게 ok:false 로 끝난 자식"(cs-ready 는 영영 안 쓰지만
+// done 은 보낸다)과 "진짜 체크포인트 막힘"(둘 다 영영 안 온다)을 가를 수
+// 있다.
+async function releaseChainOrStuck({
+  kids,
+  n,
+  releaseCount,
+  ckptDir,
+  doneP,
+  ckptWaitMs,
+  results,
+}) {
+  for (let i = 0; i < n; i += 1) {
+    const c = kids[i];
+    if (i < releaseCount) {
+      writeFileSync(join(ckptDir, `reclaim-go-${c.pid}.txt`), "go");
+    }
     try {
-      writeFileSync(reclaimLog, "", "utf8");
-      writeFileSync(reclaimWinLog, "", "utf8");
-      const mutantUrl = writeRaceFixtureStore(dir, "mutant-wave-store.mjs", {
+      await waitForCsReadyOrDone(
+        join(ckptDir, `cs-ready-${c.pid}.txt`),
+        doneP[i],
+        ckptWaitMs,
+      );
+    } catch (err) {
+      for (const k of kids) k.kill();
+      return buildStuckResult("go", err, results);
+    }
+  }
+  return null;
+}
+
+// ★사슬을 이룰 자식 n 개를 포크하고, 각자의 ready/done IPC 프라미스를
+// 만들어 돌려준다(runGatedReclaimChain 에서 떼어냈다 -- 줄 수/복잡도 예산).
+// `results` 는 호출자가 만든 배열을 그대로 채운다(참조 공유 -- 호출자가
+// 이어서 읽는다).
+function spawnChainKids({
+  child,
+  n,
+  ledgerPath,
+  lockPath,
+  holdMs,
+  timeoutMs,
+  env,
+  results,
+}) {
+  const kids = [];
+  const readyP = [];
+  const doneP = [];
+  for (let i = 0; i < n; i += 1) {
+    const c = fork(
+      child,
+      [ledgerPath, lockPath, String(holdMs), String(timeoutMs)],
+      { stdio: ["ignore", "ignore", "ignore", "ipc"], env },
+    );
+    kids.push(c);
+    readyP.push(new Promise((res) => c.once("message", res)));
+    doneP.push(
+      new Promise((res) =>
+        c.on("message", (m) => {
+          if (m && m.done) {
+            results.push(m);
+            res();
+          }
+        }),
+      ),
+    );
+  }
+  return { kids, readyP, doneP };
+}
+
+// ★HYK-346-ci-determinism-1-r2 (coder-task §2 ⓒ): 예전엔 고정 10_000ms --
+// 사슬의 맨 뒤로 풀리는 자식은 자기 체크포인트 대기(busy-wait) 동안에도
+// 자기 acquireLock 데드라인이 그대로 돌고 있다(그 데드라인은 함수 진입
+// 시점에 한 번 잡히고, busy-wait 는 그 데드라인 검사 코드보다 앞에 있다
+// -- admission-ledger-store.mjs 의 `if (shouldReclaim(owner)) { checkpoint;
+// ... } if (Date.now() >= deadline) {...}` 순서 그대로). 그래서 맨 뒤
+// 자식의 최악 대기는 대략 (n-1)*holdMs(앞선 전원이 순차로 다 끝날 때까지)
+// + holdMs(마지막 홀더 하나 더) 다. 고정 10_000ms 는 n=24·holdMs=300
+// (이론치 7200ms)에 호스트 부하 지터가 겹치면 부족해질 수 있었다 --
+// 1R run2(§9, free≈1460MB 극단 압박)가 바로 그 증상(anyMeasurementNoise)
+// 이었다고 보인다(추론). 그래서 n·holdMs 에 정비례한 유한 값(⛔무한 아님)
+// + 5000ms 여유(포크·IPC·파일 폴링 오버헤드 몫)로 바꾼다.
+async function runGatedReclaimChain({
+  dir,
+  storeUrl,
+  n,
+  holdMs,
+  timeoutMs = n * holdMs + 5_000,
+  // ★같은 조각: 하네스 자신이 체크포인트 파일(ready/cs-ready)을 기다리는
+  // 예산은 자식의 잠금 한도(timeoutMs)와 별도로 받는다 -- 기본은 같은
+  // 값이지만, 반대 방향 칸(체크포인트가 «진짜로» 영영 안 풀리는 경우)은
+  // 훨씬 짧은 값을 따로 줘서 유한 시간 안에 막힘을 감지하게 한다.
+  ckptWaitMs = timeoutMs,
+  reclaimLog,
+  reclaimWinLog,
+  // ★반대 방향 칸 전용 손잡이(coder-task §2 ⓓ): n 보다 작으면
+  // releaseCount..n-1 번째 자식은 reclaim-go 신호를 끝까지 못 받는다 --
+  // 체크포인트가 "진짜로" 영영 안 풀린 상태를 결정적으로 모사한다. 기본값
+  // (n, 즉 전원 해제)에서는 이 분기가 전혀 안 밟힌다 -- 기존 동작 그대로.
+  releaseCount = n,
+}) {
+  const ledgerPath = join(dir, "ledger.json");
+  const lockPath = join(dir, "ledger.lock");
+  const ckptDir = join(dir, "ckpt");
+  mkdirSync(ckptDir, { recursive: true });
+  writeFileSync(ledgerPath, JSON.stringify({ counter: 0 }), "utf8");
+  // ★HYK-346 씨앗: 죽은 소유자의 락 -- 24개 전원이 이걸 보고 회수를 결정한다.
+  writeFileSync(
+    lockPath,
+    JSON.stringify({
+      pid: 999_999_999,
+      token: "seeded-dead-owner",
+      acquired_at: new Date().toISOString(),
+    }),
+    "utf8",
+  );
+  const child = writeCrossoverChildScript(dir, storeUrl);
+  const env = isolatedChildEnv({
+    HYK463_CKPT_DIR: ckptDir,
+    HYK463_RECLAIM_LOG: reclaimLog,
+    HYK463_RECLAIM_WIN_LOG: reclaimWinLog,
+  });
+  const results = [];
+  const { kids, readyP, doneP } = spawnChainKids({
+    child,
+    n,
+    ledgerPath,
+    lockPath,
+    holdMs,
+    timeoutMs,
+    env,
+    results,
+  });
+  await Promise.all(readyP); // IPC 배리어: 전원 준비될 때까지 출발 안 함
+  for (const c of kids) c.send({ go: true });
+  const readyStuck = await awaitAllReadyOrStuck(
+    kids,
+    ckptDir,
+    ckptWaitMs,
+    results,
+  );
+  if (readyStuck) return readyStuck;
+  const releaseStuck = await releaseChainOrStuck({
+    kids,
+    n,
+    releaseCount,
+    ckptDir,
+    doneP,
+    ckptWaitMs,
+    results,
+  });
+  if (releaseStuck) return releaseStuck;
+  await Promise.all(doneP);
+  const finalCounter = JSON.parse(readFileSync(ledgerPath, "utf8")).counter;
+  const okRs = results.filter((r) => r.ok);
+  const seenCounts = {};
+  for (const r of okRs) seenCounts[r.seen] = (seenCounts[r.seen] ?? 0) + 1;
+  return {
+    checkpointStuck: false,
+    results,
+    okCount: okRs.length,
+    finalCounter,
+    lostUpdates: okRs.length - finalCounter,
+    duplicateSeen: Object.entries(seenCounts).filter(([, c]) => c > 1),
+  };
+}
+
+// ★HYK-346-ci-determinism-1-r2 (coder-task §2 ⓐ): ok:false 자식이 몇 번
+// 어떤 reasonCode 로 끝났는지 -- 실패 문구/진단 출력에 그대로 찍을 breakdown.
+function failedReasonBreakdown(results) {
+  const reasonCounts = {};
+  for (const r of results) {
+    if (r.ok !== false) continue;
+    const code = r.reasonCode ?? "UNKNOWN";
+    reasonCounts[code] = (reasonCounts[code] ?? 0) + 1;
+  }
+  return reasonCounts;
+}
+
+function buildInconclusiveMessage(w, ctx) {
+  const { reclaimPathWins, reclaimAttempts, dir, minOkForDetection } = ctx;
+  const cause = w.checkpointStuck
+    ? `체크포인트 파일 체계(${join(dir, "ckpt")}) 자체가 막혔다(단계=${w.stuckPhase ?? "?"}, ${w.stuckError ?? ""}). `
+    : `전원을 체크포인트로 게이팅하고 순차 해제했는데도 «충분 경합»이 ` +
+      `관측되지 않았다(reclaimPathWins=${reclaimPathWins}, reclaim 시도=${reclaimAttempts}[진단용]). `;
+  return (
+    `측정 불능(MEASUREMENT_INCONCLUSIVE): ` +
+    cause +
+    `okCount=${w.okCount}(탐지 최소 ${minOkForDetection} 미달=${w.okCount < minOkForDetection}), ` +
+    `ok:false 자식 ${ctx.failedCount}명의 reasonCode 분포=${ctx.reasonBreakdown} -- ` +
+    `더 이상 부하 운의 문제가 아니므로, 체크포인트 파일 체계 자체가 막혔거나 ` +
+    `경합 자체가 구조적으로 안 섰다는 뜻이다.`
+  );
+}
+
+function buildRedMessage(
+  w,
+  { reclaimPathWins, reclaimAttempts, reasonBreakdown, redOk },
+) {
+  const verdict = redOk
+    ? `and the mutant correctly lost updates -- real mutation-detected RED signal.`
+    : `but the mutant still did not lose updates -- this IS a real ` +
+      `mutation-not-detected RED signal, distinct from measurement-inconclusive.`;
+  return (
+    `sufficient contention WAS observed (reclaimPathWins=${reclaimPathWins}, ` +
+    `reclaim 시도=${reclaimAttempts}, okCount=${w.okCount}, ok:false 자식 ` +
+    `reasonCode 분포=${reasonBreakdown}) ` +
+    verdict +
+    ` got ${JSON.stringify({ lostUpdates: w.lostUpdates, duplicateSeen: w.duplicateSeen, okCount: w.okCount })}`
+  );
+}
+
+// ★HYK-346-ci-determinism-1-r2 (coder-task §2 ⓐⓑ): mutation ① 칸과 반대
+// 방향 칸(아래)이 공유하는 단 하나의 판정 로직. 1R(§9)의 공백을 두 갈래로
+// 좁힌다 -- ⑴ `ok:false` 자식이 있어도(okCount 로 따로 세고, reasonCode
+// 분포를 breakdown 으로 진단 문구에 찍는다) 그 자체로는 더 이상 측정을
+// 무효화하지 않는다(`lostUpdates`/`duplicateSeen` 은 runGatedReclaimChain
+// 이 이미 ok 자식만으로 계산해 돌려준다) ⑵ 측정 불능은 "결정적 경합 자체가
+// 안 섰을 때"(checkpointStuck 이거나 reclaimPathWins<2) 또는 "유실을 셀
+// 수조차 없을 때"(okCount<minOkForDetection, 탐지 최소)로만 좁힌다.
+function judgeGatedReclaimChain(
+  w,
+  { reclaimPathWins, reclaimAttempts, dir, minOkForDetection = 2 },
+) {
+  const reasonBreakdown = JSON.stringify(failedReasonBreakdown(w.results));
+  const failedCount = w.results.filter((r) => r.ok === false).length;
+  const contentionStructurallyFailed =
+    w.checkpointStuck === true || reclaimPathWins < 2;
+  const detectionFloorMet = w.okCount >= minOkForDetection;
+  if (contentionStructurallyFailed || !detectionFloorMet) {
+    return {
+      inconclusive: true,
+      message: buildInconclusiveMessage(w, {
+        reclaimPathWins,
+        reclaimAttempts,
+        dir,
+        minOkForDetection,
+        failedCount,
+        reasonBreakdown,
+      }),
+    };
+  }
+  const redOk = w.lostUpdates > 0 || w.duplicateSeen.length > 0;
+  return {
+    inconclusive: false,
+    redOk,
+    message: buildRedMessage(w, {
+      reclaimPathWins,
+      reclaimAttempts,
+      reasonBreakdown,
+      redOk,
+    }),
+  };
+}
+
+test("★★HYK-346 변이 ① (24개, 전원 체크포인트 게이팅 순차 해제) -- «충분 경합»(reclaimPathWins≥2)을 부하 운에 맡기지 않고 시험이 직접 강제해 RED 로 판정한다", async () => {
+  const { dir } = tmpPaths();
+  const reclaimLog = join(dir, "reclaim-attempts.log");
+  const reclaimWinLog = join(dir, "reclaim-wins.log");
+  try {
+    writeFileSync(reclaimLog, "", "utf8");
+    writeFileSync(reclaimWinLog, "", "utf8");
+    const mutantUrl = writeRaceFixtureStore(dir, "mutant-wave-store.mjs", {
+      mutationFind: "      if (lockFileStillHasToken(lockPath, owner.token)) {",
+      mutationReplace: "      if (true) {",
+    });
+    const w = await runGatedReclaimChain({
+      dir,
+      storeUrl: mutantUrl,
+      n: 24,
+      holdMs: 300,
+      reclaimLog,
+      reclaimWinLog,
+    });
+    // ★HYK-463 2R 유산 -- reclaimAttempts 는 진단용 보조 수치로만 결과
+    // 파일에 인용한다(문턱이 아니다 -- 1R 의 기각된 신호).
+    const reclaimAttempts = readFileSync(reclaimLog, "utf8")
+      .split("\n")
+      .filter((line) => line.trim().length > 0).length;
+    // ★HYK-463 2R 유산 -- «충분 경합»의 정본 신호. 전원 게이팅 뒤에는
+    // 항상 ≥2(사실상 n-1 근처)여야 한다 -- 운이 아니라 구조로 보장된다.
+    const reclaimPathWins = readFileSync(reclaimWinLog, "utf8")
+      .split("\n")
+      .filter((line) => line.trim().length > 0).length;
+    // ★HYK-346-ci-determinism-1-r2 (coder-task §2 ⓑ): 판정을
+    // judgeGatedReclaimChain 에 맡긴다 -- ok:false 자식이 있어도(그 자체는
+    // 더 이상 측정을 무효화하지 않는다) reclaimPathWins<2 이거나
+    // checkpointStuck 일 때만, 또는 okCount<2(탐지 최소 미달)일 때만
+    // MEASUREMENT_INCONCLUSIVE 로 떨어진다.
+    const judged = judgeGatedReclaimChain(w, {
+      reclaimPathWins,
+      reclaimAttempts,
+      dir,
+    });
+    if (judged.inconclusive) {
+      assert.fail(judged.message);
+    }
+    assert.ok(judged.redOk, judged.message);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("★★HYK-346-ci-determinism-1-r2 ⑴ ok:false 자식의 reasonCode 가 IPC done 메시지로 그대로 올라온다 -- 강제 주입(방식 근거: 존재하지 않는 폴더 밑 락 경로로 LOCK_OS_CONTENTION 을 타이밍과 무관하게 결정적으로 강제한다, ★★HYK-346 ⑶ 시험과 같은 기법)", async () => {
+  const { dir } = tmpPaths();
+  try {
+    const ledgerPath = join(dir, "ledger.json");
+    writeFileSync(ledgerPath, JSON.stringify({ counter: 0 }), "utf8");
+    // 부모 폴더가 없는 락 경로 -> wx 가 ENOENT(=EEXIST 아님)로 실패 ->
+    // LOCK_OS_CONTENTION. 재시도할 "남이 쥔 락"이 없으므로 자식은 1회차
+    // 폴링 안에 결정적으로 그 reasonCode 로 끝난다.
+    const brokenLockPath = join(dir, "no-such-dir", "ledger.lock");
+    const storeUrl = pathToFileURL(
+      join(THIS_DIR, "admission-ledger-store.mjs"),
+    ).href;
+    const child = writeCrossoverChildScript(dir, storeUrl);
+    const c = fork(child, [ledgerPath, brokenLockPath, "0", "300"], {
+      stdio: ["ignore", "ignore", "ignore", "ipc"],
+      env: isolatedChildEnv(),
+    });
+    const msg = await new Promise((resolve) => {
+      c.once("message", () => c.send({ go: true }));
+      c.on("message", (m) => {
+        if (m && m.done) resolve(m);
+      });
+    });
+    assert.equal(
+      msg.ok,
+      false,
+      `강제 주입이 실제로 ok:false 를 냈는지 자가 점검: ${JSON.stringify(msg)}`,
+    );
+    assert.equal(
+      msg.reasonCode,
+      STORE_REASON.LOCK_OS_CONTENTION,
+      `ok:false 자식의 reasonCode 가 IPC done 메시지로 안 올라오면(runGatedReclaimChain/` +
+        `judgeGatedReclaimChain 이 읽는 바로 그 필드) 그 자식이 왜 실패했는지 진단 출력에 ` +
+        `영영 안 찍힌다(1R §9 run2 의 공백 그대로) -- 받은 메시지 ${JSON.stringify(msg)}`,
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("★★HYK-346-ci-determinism-1-r2 ⑷ 완화가 탐지를 깎지 않음 -- 변이①실측 결과에 ok:false 노이즈 2개를 섞어도 okCount≥2·reclaimPathWins≥2 면 RED 유지", async () => {
+  const { dir } = tmpPaths();
+  const reclaimLog = join(dir, "reclaim-attempts.log");
+  const reclaimWinLog = join(dir, "reclaim-wins.log");
+  try {
+    writeFileSync(reclaimLog, "", "utf8");
+    writeFileSync(reclaimWinLog, "", "utf8");
+    const mutantUrl = writeRaceFixtureStore(
+      dir,
+      "mutant-wave-store-noise.mjs",
+      {
         mutationFind:
           "      if (lockFileStillHasToken(lockPath, owner.token)) {",
         mutationReplace: "      if (true) {",
-      });
-      const w = await runWave({
-        dir,
-        storeUrl: mutantUrl,
-        n: 24,
-        holdMs: 300,
-        seedDeadOwnerLock: true,
-        env: {
-          HYK463_RECLAIM_LOG: reclaimLog,
-          HYK463_RECLAIM_WIN_LOG: reclaimWinLog,
-        },
-      });
-      // ★HYK-463 2R -- reclaimAttempts 는 이제 진단용 보조 수치로만 결과
-      // 파일에 인용한다(문턱이 아니다 -- 1R 의 기각된 신호).
-      const reclaimAttempts = readFileSync(reclaimLog, "utf8")
-        .split("\n")
-        .filter((line) => line.trim().length > 0).length;
-      // ★HYK-463 2R -- «충분 경합»의 정본 신호.
-      const reclaimPathWins = readFileSync(reclaimWinLog, "utf8")
-        .split("\n")
-        .filter((line) => line.trim().length > 0).length;
-      // ★HYK-463 §2-C: 잔여 축. LOCK_TIMEOUT 등 ok:false 가 섞여 있으면
-      // 이번 실패 원인은 아니어도(§1-1) 측정을 흐린다 -- 측정 불능 쪽으로.
-      const anyMeasurementNoise = w.results.some((r) => r.ok === false);
-      const contentionObserved = reclaimPathWins >= 2 && !anyMeasurementNoise;
-      if (!contentionObserved) {
-        if (attempt < MAX_ATTEMPTS) continue; // 재시도 -- 조용히 넘기지 않는다
-        assert.fail(
-          `측정 불능(MEASUREMENT_INCONCLUSIVE): ${MAX_ATTEMPTS}회 재시도에도 «충분 경합»이 관측되지 않았다 ` +
-            `(reclaimPathWins=${reclaimPathWins}, reclaim 시도=${reclaimAttempts}[진단용], ok:false 존재=${anyMeasurementNoise}) -- ` +
-            `이것은 «변이 미검출»이 아니라 «이번 실행에서 두 프로세스가 동시에 락을 얻지 못했다»는 뜻이다(누적 reclaim 시도는 ` +
-            `≥2 여도 실제 이중 획득이 없을 수 있다 -- CI 실증: 시도=4, reclaimPathWins=0~1). ` +
-            `결정적 증거는 별도의 «HYK-463 결정적 교차 재현» 시험을 보라.`,
-        );
-      }
-      assert.ok(
-        w.lostUpdates > 0 || w.duplicateSeen.length > 0,
-        `sufficient contention WAS observed (reclaimPathWins=${reclaimPathWins}, reclaim 시도=${reclaimAttempts}) but the mutant still did not lose updates -- this IS a real mutation-not-detected RED signal, distinct from measurement-inconclusive. got ${JSON.stringify(
-          {
-            lostUpdates: w.lostUpdates,
-            duplicateSeen: w.duplicateSeen,
-            okCount: w.okCount,
-          },
-        )}`,
-      );
-      return; // 관측 성공 + 판정 완료
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
+      },
+    );
+    const w = await runGatedReclaimChain({
+      dir,
+      storeUrl: mutantUrl,
+      n: 24,
+      holdMs: 300,
+      reclaimLog,
+      reclaimWinLog,
+    });
+    const reclaimAttempts = readFileSync(reclaimLog, "utf8")
+      .split("\n")
+      .filter((line) => line.trim().length > 0).length;
+    const reclaimPathWins = readFileSync(reclaimWinLog, "utf8")
+      .split("\n")
+      .filter((line) => line.trim().length > 0).length;
+    // ★방식 근거(〔직접〕실측, scratchpad 확인): 변이①의 "steal"(if(true))
+    // 은 토큰 재확인을 건너뛰고 unlink 뒤 즉시 재시도(continue)로 돌아가며,
+    // 그 재시도가 성공하면 deadline 검사 코드 자체에 도달하기 전에 ok:true
+    // 로 반환한다 -- 그래서 자식의 개별 lockTimeoutMs 를 아무리 줄여도
+    // (예: 30ms, holdMs=200 인 사슬에서 늦게 풀린 자식에게 줘 봄) 실패하지
+    // 않았다(항상 ok:true, n=4 재현). 자연 발생 ok:false 를 결정적으로
+    // 강제할 손잡이가 이 메커니즘 안에는 없다 -- 그래서 이 확인은 실측
+    // w.results 에 ok:false 2개(서로 다른 reasonCode)를 합성으로 섞고
+    // okCount/lostUpdates 를 "ok 자식만"으로 다시 계산해(judgeGatedReclaimChain
+    // 과 완전히 같은 방식) 판정 로직이 그래도 RED 를 지키는지만 단위
+    // 수준으로 확인한다. 못쟀다: 라이브 포크 자식의 "자연" ok:false 를
+    // 실제로 섞은 변이 실행.
+    const noisyResults = [
+      ...w.results,
+      { done: true, ok: false, reasonCode: "LOCK_TIMEOUT", seen: null },
+      { done: true, ok: false, reasonCode: "LOCK_OS_CONTENTION", seen: null },
+    ];
+    const okRs = noisyResults.filter((r) => r.ok);
+    const noisyW = {
+      checkpointStuck: false,
+      results: noisyResults,
+      okCount: okRs.length,
+      finalCounter: w.finalCounter,
+      lostUpdates: okRs.length - w.finalCounter,
+      duplicateSeen: w.duplicateSeen,
+    };
+    assert.ok(
+      noisyW.okCount >= 2,
+      `합성이 의도대로 됐는지 자가 점검(okCount>=2 여야 "탐지 최소는 넘지만 노이즈는 있는" ` +
+        `시나리오가 된다): okCount=${noisyW.okCount}`,
+    );
+    const judged = judgeGatedReclaimChain(noisyW, {
+      reclaimPathWins,
+      reclaimAttempts,
+      dir,
+    });
+    assert.equal(
+      judged.inconclusive,
+      false,
+      `okCount(${noisyW.okCount})>=2 이고 reclaimPathWins(${reclaimPathWins})>=2 인데 ` +
+        `노이즈 2개 때문에 불능으로 잘못 떨어지면 완화가 탐지력을 깎은 것이다: ${judged.message}`,
+    );
+    assert.ok(
+      judged.redOk,
+      `노이즈가 섞여도 변이①은 여전히 RED 로 잡혀야 한다: ${judged.message}`,
+    );
+    assert.ok(
+      judged.message.includes("LOCK_TIMEOUT") &&
+        judged.message.includes("LOCK_OS_CONTENTION"),
+      `ok:false 자식들의 reasonCode 가 진단 문구에 찍혀야 한다(ⓐ): ${judged.message}`,
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("★★HYK-346-ci-determinism-1-r2 반대 방향 -- 진짜로 체크포인트가 영영 안 풀리면(일부 자식이 go 신호를 끝까지 못 받음) 유한 시간 안에 정확히 MEASUREMENT_INCONCLUSIVE 로 판정된다(다른 종류의 실패/행 아님)", async () => {
+  const { dir } = tmpPaths();
+  const reclaimLog = join(dir, "reclaim-attempts.log");
+  const reclaimWinLog = join(dir, "reclaim-wins.log");
+  try {
+    writeFileSync(reclaimLog, "", "utf8");
+    writeFileSync(reclaimWinLog, "", "utf8");
+    // ★진짜(변이 없는) 코드로 돌린다 -- 체크포인트 막힘은 변이와 무관하게
+    // 일어날 수 있는 구조적 안전망이어야 한다(coder-task §2 ⓓ "반대 방향").
+    const storeUrl = writeRaceFixtureStore(dir, "stuck-wave-store.mjs", {});
+    const startedAt = Date.now();
+    const w = await runGatedReclaimChain({
+      dir,
+      storeUrl,
+      n: 4,
+      holdMs: 50,
+      releaseCount: 2, // ★뒤 2명은 go 신호를 끝까지 못 받는다(진짜 체크포인트 막힘, 결정적 모사)
+      ckptWaitMs: 1_500, // ★기본(n*holdMs+5000)과 분리된, 막힘을 빨리 잡는 짧은 예산
+      reclaimLog,
+      reclaimWinLog,
+    });
+    const elapsedMs = Date.now() - startedAt;
+    assert.ok(
+      w.checkpointStuck,
+      `체크포인트가 영영 안 풀리면 runGatedReclaimChain은 무한정 걸리거나 막연한 예외를 ` +
+        `던지지 않고 구조화된 checkpointStuck 신호를 돌려줘야 한다: ${JSON.stringify(w)}`,
+    );
+    assert.ok(
+      elapsedMs < 10_000,
+      `반대 방향 칸은 유한 시간 안에 끝나야 한다(ckptWaitMs=1500 대비 실측 ${elapsedMs}ms)`,
+    );
+    const reclaimPathWins = readFileSync(reclaimWinLog, "utf8")
+      .split("\n")
+      .filter((line) => line.trim().length > 0).length;
+    const reclaimAttempts = readFileSync(reclaimLog, "utf8")
+      .split("\n")
+      .filter((line) => line.trim().length > 0).length;
+    const judged = judgeGatedReclaimChain(w, {
+      reclaimPathWins,
+      reclaimAttempts,
+      dir,
+    });
+    assert.ok(
+      judged.inconclusive,
+      `체크포인트가 막힌 상태는 반드시 측정-불능 분기로만 가야 한다(ok:false 노이즈 류의 ` +
+        `"그냥 통과"가 아니다): ${judged.message}`,
+    );
+    assert.ok(
+      judged.message.includes("MEASUREMENT_INCONCLUSIVE"),
+      `실패 문구가 정확히 MEASUREMENT_INCONCLUSIVE 를 담아야 한다: ${judged.message}`,
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 });
 
