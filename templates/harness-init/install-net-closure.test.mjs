@@ -603,10 +603,24 @@ test("install-net-closure ⓒ: a truly-hung installed test file (infinite setInt
       "ETIMEDOUT",
       `expected spawnSync's own timeout kill (result.error.code === "ETIMEDOUT"), got: ${JSON.stringify({ error: result.error && { code: result.error.code, message: result.error.message }, signal: result.signal, status: result.status })}`,
     );
-    assert.equal(
-      result.status,
-      null,
-      "a timeout-killed spawnSync must not also report a real exit status",
+    // HYK-209-net-closure-timeout-1-r5: `status` itself is platform-shaped,
+    // not a fixed value -- on Windows a timeout-killed spawnSync reports
+    // status === null (verified on this platform, this round's coder.md
+    // §2 ⓐ). On Linux (CI, run 765 log, 책임자 판독), spawnSync's own
+    // `timeout` kill sends SIGTERM to the immediate child (`node --test`)
+    // only; that child's process then reports back to ITS parent with a
+    // real POSIX exit status (observed: 1) instead of null. Both shapes are
+    // "this spawnSync call did not report a clean exit" -- accept either,
+    // without branching on process.platform: a clean `status === 0` would
+    // mean the child actually finished normally, which contradicts a real
+    // timeout kill on any OS, so excluding exactly that value (rather than
+    // allow-listing POSIX exit codes under a platform check) is both
+    // simpler and already covers the "ETIMEDOUT + 0" regression ⑶ below on
+    // every platform, not just POSIX ones.
+    assert.ok(
+      result.status === null ||
+        (typeof result.status === "number" && result.status !== 0),
+      `expected a timeout-killed spawnSync to report status === null or a non-zero exit code, not a clean 0 (platform: ${process.platform}, status: ${JSON.stringify(result.status)}, signal: ${JSON.stringify(result.signal)}, killed: ${JSON.stringify(result.killed)})`,
     );
     assert.ok(
       elapsedMs < 10000,
