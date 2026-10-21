@@ -42,6 +42,7 @@ import {
   mkdirSync,
   copyFileSync,
   existsSync,
+  readFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -335,12 +336,25 @@ function runInstalledNodeTest(installedCheckDir, names, timeoutMs = 300000) {
 // 척" 돌려주지 않는다(판정 불가, "앞 블록" 아님 -- runner-receipt-
 // writer.mjs의 같은 판단과 같은 근거: hasTapCompletion류 소비자가 잘린
 // 꼬리를 과거 블록으로 메우면 거짓 완결로 읽을 위험).
+// HYK-209 H4-2 (P2-C, REVIEW-r2.md §2 ⓓ / §3): 위 2R 고침까지도 "완결 블록"을
+// tests→fail 2필드만으로 정의했다 -- 생산 parseTapSummaryCounts
+// (runner-receipt-writer.mjs)는 tests→pass→fail→skipped 4필드(pass·skipped도
+// 필수, suites/cancelled/todo/duration_ms만 건너뛸 수 있음)를 요구한다. 그
+// 차이 때문에, 진짜 "# tests 300" 바로 뒤에 가짜 "# fail 5"가 끼고 그 뒤에
+// 진짜 나머지 필드(진짜 fail 0 포함)가 오는 모양(1R 원 서술 S8, 검토 2R
+// R8-orig)에서 이 2필드 판독은 가짜 쪽을 "완결"로 오인해 300/5를 돌려줬다
+// (생산은 null -- 판정 불가). pass·skipped를 skippable에서 빼 필수로 올려
+// 생산과 같은 4필드 요구로 좁힌다(공통 모듈 신설 없이 이 파일 안에서만).
 const TAP_SKIPPABLE_FIELD_LINE =
-  "(?:# (?:suites|pass|cancelled|skipped|todo) \\d+|# duration_ms [\\d.]+)\\r?\\n";
+  "(?:# (?:suites|cancelled|todo) \\d+|# duration_ms [\\d.]+)\\r?\\n";
 const TAP_SUMMARY_PAIR_RE = new RegExp(
   "^# tests (\\d+)\\r?\\n" +
     `(?:${TAP_SKIPPABLE_FIELD_LINE})*?` +
-    "# fail (\\d+)\\r?$",
+    "# pass \\d+\\r?\\n" +
+    `(?:${TAP_SKIPPABLE_FIELD_LINE})*?` +
+    "# fail (\\d+)\\r?\\n" +
+    `(?:${TAP_SKIPPABLE_FIELD_LINE})*?` +
+    "# skipped \\d+\\r?$",
   "gm",
 );
 function parseTapSummary(text) {
@@ -361,6 +375,18 @@ function parseTapSummary(text) {
   if (testsOnly.length === 0) return null;
   return { tests: Number(testsOnly[testsOnly.length - 1][1]), fail: 0 };
 }
+// HYK-209 H4-2 (P3-2, REVIEW-r1.md §3 P3-2): the "생산과 같은 4필드" claim
+// above (line ~347) holds only at the regex level (TAP_SUMMARY_PAIR_RE
+// itself requires the same 4 fields production's parseTapSummaryCounts
+// does). This fallback still means the FUNCTION's returned value differs
+// from production (null) on 3 of 13 REVIEW-r1.md ⓛ samples (R8orig, R12,
+// R7b_noFake) -- all three fail the 4-field regex but still have a bare
+// "# tests N" line, so the fallback reads them as `{ tests: N, fail: 0 }`
+// instead of null. Consumer (b) below asserts `result.status === 0` before
+// ever touching `summary`, so this gap is not a direct false-green path in
+// this file today -- but a future caller that trusts `summary.fail === 0`
+// without that prior status check would not be protected by the 4-field
+// regex alone.
 
 // HYK-434 H2 3R 요구 3: 판독 함수 자체를 Node 20 TAP 출력 모양을 문자열로
 // 박은 합성 표본으로 단위 시험한다 -- (b)/(b-negative)는 실제 설치·실행을
@@ -600,6 +626,81 @@ test("parseTapSummary: M4 mutation guard -- picks the LAST block (tests 5), not 
   ].join("\n");
   assert.deepEqual(parseTapSummary(m4), { tests: 5, fail: 0 });
 });
+
+// HYK-209 H4-2 (P2-C, REVIEW-r2.md ⓓ row "R8-orig(1R 원 서술)"): a real
+// "# tests 300" immediately followed by a FAKE "# fail 5" line (no "# pass"
+// between them), then the real remaining fields of that same block
+// (including the real fail 0). The old 2-field pair regex treated the fake
+// "# fail 5" as already a complete block and returned {tests:300, fail:5}
+// (wrong -- production's parseTapSummaryCounts returns null/판정 불가 for
+// this exact shape, REVIEW-r2.md §2 ⓓ). Requiring pass+skipped (4 fields,
+// matching production) makes the main pair regex fail to match this shape
+// at all; the bare "# tests N"-only fallback below still returns a non-null
+// {tests:300, fail:0} rather than true null (REVIEW-r2.md §3 P2-C: a
+// test-helper-only residual gap, not production-path -- documented here,
+// not closed further by this round).
+test("parseTapSummary mutation guard (P2-C, R8-orig shape): a fake '# fail N' line sitting directly between a real '# tests N' and that block's own real pass/skipped fields must not be read as the block's fail value", () => {
+  const r8orig = [
+    "# tests 300",
+    "# fail 5",
+    "# suites 0",
+    "# pass 298",
+    "# fail 0",
+    "# cancelled 0",
+    "# skipped 2",
+    "# todo 0",
+    "# duration_ms 999.0",
+  ].join("\n");
+  const result = parseTapSummary(r8orig);
+  assert.notDeepEqual(
+    result,
+    { tests: 300, fail: 5 },
+    `the fake '# fail 5' line must not be read as this block's fail value -- got ${JSON.stringify(result)}`,
+  );
+});
+
+// HYK-209 H4-2 (⑨, 판정 2245 §4 결정론 단언): a fixed, non-randomized
+// scratch-root call (path-joining the OS temp dir with a hardcoded name,
+// outside mkdtempSync) collides across concurrent runs of this file (or
+// concurrent CI jobs) that reach for the same literal -- every scratch root
+// in this file must instead go through mkdtempSync (which appends a random
+// suffix). This scans this file's OWN source text (not a shared production
+// module) so a future edit that reintroduces a bare literal root is caught
+// here, not just in the 6 other files tracked by the 다음조각후보표
+// ORCH106 13행 ⓕ list. The needle is built from fragments (not written
+// literally in this comment/this test's own strings) so this test does not
+// trip over its own source when it scans itself.
+test("HYK-209 H4-2 정적 금지 단언 (⑨): this file's own source never pairs the OS temp dir with a literal path outside mkdtempSync() -- every scratch root must be randomized", () => {
+  const selfSource = readFileSync(fileURLToPath(import.meta.url), "utf8");
+  const joinWord = "join";
+  const tmpdirCall = "tmpdir()";
+  const BARE_TMPDIR_JOIN_RE = new RegExp(
+    `\\b(?:path\\.)?${joinWord}\\(\\s*${tmpdirCall.replace("(", "\\(").replace(")", "\\)")}\\s*,`,
+    "g",
+  );
+  const offenders = [];
+  let m;
+  while ((m = BARE_TMPDIR_JOIN_RE.exec(selfSource)) !== null) {
+    const before = selfSource.slice(0, m.index).replace(/\s+$/, "");
+    if (!before.endsWith("mkdtempSync(")) {
+      const line = selfSource.slice(0, m.index).split("\n").length;
+      offenders.push(`line ${line}: ${m[0]}`);
+    }
+  }
+  assert.deepEqual(
+    offenders,
+    [],
+    `found a ${joinWord}(${tmpdirCall}, ...) call NOT wrapped in mkdtempSync() -- a fixed, non-randomized scratch root reintroduces the literal-root collision class this round forbids: ${offenders.join("; ")}`,
+  );
+});
+// HYK-209 H4-2 (P3-3, REVIEW-r1.md §3 P3-3): this is a textual scan, not a
+// parse, so it is an open set -- it does not catch `os.tmpdir()` (a
+// different identifier than the bare `tmpdir()` this regex expects),
+// `path.resolve(tmpdir(), ...)` (a different join function), or a literal
+// routed through an intermediate variable (`const t = tmpdir(); join(t,
+// lit)`). This file currently has zero such occurrences (both files here
+// import `tmpdir` directly, not `os.tmpdir`), but that is a fact about this
+// file's current source, not a guarantee the scan itself enforces.
 
 test("(b) real installer (not --dry-run) installs into a git-init target outside this worktree, and `node --test` on the two newly-listed test files there has 0 failures", () => {
   const { base, targetRepo } = makeSyntheticTarget("hyk209-g1-adapter-real-");

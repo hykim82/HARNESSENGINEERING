@@ -21,6 +21,7 @@ import {
   mkdirSync,
   readFileSync,
   readdirSync,
+  writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -232,16 +233,104 @@ test("(3) installed pm-guard.test.mjs actually passes against the installed pm-g
     ]);
 
     // node --test's own exit code is the pass/fail signal here.
-    execFileSync(
+    const stdout = execFileSync(
       "node",
       [
         "--test",
+        "--test-reporter=tap",
         path.join(targetRepo, "scripts", "check", "pm-guard.test.mjs"),
       ],
-      { stdio: "pipe" },
+      { stdio: "pipe", env: envWithoutTestMarkers(), encoding: "utf8" },
+    );
+    // HYK-209 H4-2 (P2-1, review-1 §3 P2-1): an exit code of 0 alone is not
+    // enough -- if NODE_TEST_CONTEXT/NODE_TEST_WORKER_ID were inherited here
+    // (the isolation above missing or applied at the wrong call site), Node
+    // treats this child as a nested test-runner worker and reports over an
+    // IPC channel that does not exist in this process, which comes back as
+    // exit 0 with an EMPTY stdout (실측, REVIEW-r1.md ⓔ "inherited") -- a
+    // false green that would hide a genuinely failing installed pm-guard
+    // even though test (3b) below proves the stripping helper itself works.
+    // Assert the child's own TAP summary actually shows real execution, so
+    // a silently-skipped ("ran nothing") child is caught at this, the real
+    // repair site -- not just in (3b)'s separate synthetic scratch child.
+    // HYK-209 H4-2 (P1-1, review-2 §3 P1-1): `node --test`'s default reporter
+    // is NOT stable across Node versions -- this PC's Node 26 defaults to
+    // "spec" (`ℹ tests N`) even over a pipe, but CI's pinned Node 20
+    // (.github/workflows/enforce.yml, package.json engines.node) defaults to
+    // "tap" (`# tests N`) over a pipe (실측, REVIEW-r2.md §2 ⓒ: Node v20.20.2
+    // against this exact child produces a genuine 4/5 pass with a `# tests 5`
+    // summary, which an "ℹ "-only assertion misreads as "no summary line /
+    // isolation failed" even though the child truly ran and truly passed --
+    // a false red, not a caught regression). Fix it the same way this
+    // repo's other child `node --test` spawns already do (install-g1
+    // `runInstalledNodeTest`, hook-sync-check's two spawned children): force
+    // `--test-reporter=tap` on the child's own argv so the summary format is
+    // deterministic regardless of which Node version or TTY-ness the parent
+    // happens to run under.
+    assert.match(
+      stdout,
+      /^# tests \d+\r?$/m,
+      `installed pm-guard.test.mjs produced no test-runner summary line in its stdout -- looks like the NODE_TEST_CONTEXT/NODE_TEST_WORKER_ID isolation did not take effect (nested-worker false green), not a real run. stdout: ${JSON.stringify(stdout.slice(0, 2000))}`,
+    );
+    const testsRun = Number(/^# tests (\d+)\r?$/m.exec(stdout)[1]);
+    assert.ok(
+      testsRun >= 1,
+      `installed pm-guard.test.mjs reported 0 tests run -- a silent skip, not real execution. stdout: ${JSON.stringify(stdout.slice(0, 2000))}`,
     );
   } finally {
     rmSync(base, { recursive: true, force: true });
+  }
+});
+
+// HYK-209 H4-2 (S-1): `node --test` sets NODE_TEST_CONTEXT/NODE_TEST_WORKER_ID
+// on ITS OWN process -- and since this whole file is itself run under
+// `node --test`, those two vars are already sitting in process.env by the
+// time test (3) above spawns ITS OWN nested `node --test` child against the
+// installed pm-guard.test.mjs. Left inherited, Node's test runner treats the
+// child as a nested worker and reports results over an IPC channel that does
+// not exist here instead of via its own process exit code -- so a genuinely
+// FAILING installed test comes back exit 0 (a false green masking a real
+// portability regression), the same ambient-env class HYK-359 /
+// install-g1-adapter-list.test.mjs / install-net-closure.test.mjs already
+// guard against for their own child `node --test` spawns. Strip the two vars
+// before spawning so the child's exit code is the real pass/fail signal.
+function envWithoutTestMarkers() {
+  const env = { ...process.env };
+  delete env.NODE_TEST_CONTEXT;
+  delete env.NODE_TEST_WORKER_ID;
+  return env;
+}
+
+test("(3b) S-1 mutation guard -- a genuinely failing installed node --test child must not come back exit 0 just because it inherited this process's own NODE_TEST_CONTEXT/NODE_TEST_WORKER_ID", () => {
+  const scratch = mkdtempSync(path.join(tmpdir(), "hyk209-s1-env-"));
+  try {
+    const failingFile = path.join(scratch, "deliberately-failing.test.mjs");
+    writeFileSync(
+      failingFile,
+      'import { test } from "node:test";\n' +
+        'import assert from "node:assert/strict";\n' +
+        'test("deliberately fails", () => { assert.equal(1, 2); });\n',
+    );
+
+    let isolatedExitCode = 0;
+    try {
+      execFileSync("node", ["--test", failingFile], {
+        stdio: "pipe",
+        env: envWithoutTestMarkers(),
+      });
+    } catch (err) {
+      isolatedExitCode = err.status;
+    }
+    assert.notEqual(
+      isolatedExitCode,
+      0,
+      "with NODE_TEST_CONTEXT/NODE_TEST_WORKER_ID stripped, a genuinely " +
+        "failing node --test child must still exit non-zero -- otherwise " +
+        "the isolation itself would be hiding real failures instead of " +
+        "merely avoiding the ambient-env leak",
+    );
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
   }
 });
 
