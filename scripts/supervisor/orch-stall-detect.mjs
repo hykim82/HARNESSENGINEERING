@@ -532,12 +532,24 @@ function checkDeliveryReceiptCoverage(repoRoot, name, taskId, opts) {
     typeof opts.dispatchReceiptReadFn === "function"
       ? opts.dispatchReceiptReadFn
       : readFileSync;
+  let content;
   try {
-    readFileFn(receiptPath, "utf8"); // 읽기 가능성만 재확인(위 헤더 참조).
+    content = readFileFn(receiptPath, "utf8");
   } catch {
     return { status: DELIVERY_RECEIPT_CHECK.UNRESOLVED, role };
   }
-  const found = hasDispatchReceiptForRound(role, taskId, receiptPath, opts);
+  // ★HYK-464-watch-collection-1 3R P2-2(검토 1R §2 ⓑ⑷ TOCTOU 수리): 위에서
+  // 이미 읽은 content를 그대로 hasDispatchReceiptForRound에 넘긴다(한 번만
+  // 읽음) -- 고치기 전에는 이 함수가 "읽을 수 있는지" 확인하려고 한 번
+  // 읽고, hasDispatchReceiptForRound가 자기 낙하값(readFileSync)으로 다시
+  // 한 번 읽었다. 그 두 읽기 사이에(예: 배달기가 같은 순간 append 중인
+  // Windows 파일 잠금) 두 번째 읽기만 실패하면 `false`로 삼켜져 진짜
+  // 배달이 그 회차에 "제외"로 보이는 좁은 창이 있었다 -- 재구현 없이
+  // 같은 함수에 이미 읽은 내용을 주입해 닫는다.
+  const found = hasDispatchReceiptForRound(role, taskId, receiptPath, {
+    ...opts,
+    dispatchReceiptReadFn: () => content,
+  });
   return {
     status: found
       ? DELIVERY_RECEIPT_CHECK.FOUND
@@ -1835,12 +1847,40 @@ function nextObservationsForDispatch(prevEntry, dispatch, observation) {
 export const DISPATCH_START_OVERRIDE_REASON = Object.freeze({
   SESSION_SIZE_GREW_RECENTLY:
     "DISPATCH_START_OVERRIDDEN_SESSION_SIZE_GREW_RECENTLY",
+  // ★신규(3R, 판정 §1 ⑷/상신 수용 P2-1) -- 화면은 멈췄고(NOT_STARTED)
+  // 최근 성장도 없지만, 배달 이후 누적 바이트는 한 번 이상 늘었다가
+  // 멈췄다(size-core 자신의 STALLED_AFTER_START, dispatch-start-size-
+  // core.mjs:49 "시작은 했다" 전제). 이 좌석을 진짜 미착수(바이트 0,
+  // NO_GROWTH_PAST_TIMEOUT)와 같은 사유 코드로 재배달 후보에 올리면
+  // "시작했다가 멈춘 좌석"(사람 조치=좌석 확인)과 "시작도 못한 좌석"
+  // (사람 조치=재배달)이 구별되지 않는다 -- 값을 공유하지 않는다
+  // (§2-1-1 "구별되는 이름" 비타협).
+  SESSION_SIZE_STARTED_THEN_STALLED:
+    "DISPATCH_START_OVERRIDDEN_SESSION_SIZE_STARTED_THEN_STALLED",
 });
 
+// ★HYK-464-watch-collection-1 3R P1-1(검토 1R §2 ⓒ 실측): 배달기
+// (관제실 dispatch-worker.ps1 `$confirmClaudeHome`/`--claude-home`, 그 값은
+// 런처 orca-worker-seat.ps1의 `$env:CLAUDE_CONFIG_DIR` 줄을 읽어 덮어쓰고
+// 없으면 `C:\Users\Administrator\.claude-team`로 낙하한다)가 워커 좌석의
+// 세션 기록을 실제로 쓰는 집은 `os.homedir()/.claude`가 아니라
+// `os.homedir()/.claude-team`다 -- 실측(좌석 2곳): `.claude` 아래는 0바이트
+// (`projects` 폴더조차 없음), `.claude-team` 아래에 3,691,627B /
+// 4,161,914B(이 좌석 자신의 CLAUDE_CONFIG_DIR도 동일값, §0 자리 확인
+// 참조). 기본 경로가 `.claude`를 보는 한, 화면이 멈춘 순간 이 축은 실제로
+// 일하는 좌석을 영원히 NOT_STARTED로 오판한다(수리 자체는 무의미해짐) --
+// 1450 13:43 실표본이 그 증거(검토 §2 ⓒ 종단 재현: 같은 878,488B 성장을
+// `.claude-team`에 두면 수리 뒤에도 NOT_STARTED).
+// `os.homedir()`는 opts.osHomedirFn으로만 바꿀 수 있게 열어 둔다(실 환경
+// 값은 그대로, 시험만 주입 -- claudeHomeDir 전체 주입과 별개로 "기본
+// 경로 자체"를 시험이 지나가게 하는 유일한 통로).
 function resolveClaudeHomeDir(opts) {
-  return typeof opts.claudeHomeDir === "string" && opts.claudeHomeDir
-    ? opts.claudeHomeDir
-    : path.join(os.homedir(), ".claude");
+  if (typeof opts.claudeHomeDir === "string" && opts.claudeHomeDir) {
+    return opts.claudeHomeDir;
+  }
+  const homedirFn =
+    typeof opts.osHomedirFn === "function" ? opts.osHomedirFn : os.homedir;
+  return path.join(homedirFn(), ".claude-team");
 }
 
 // collectTotalSessionBytes 자신의 계약(dispatch-start-size-adapter.mjs
@@ -1860,8 +1900,12 @@ function collectSessionSizeObservation(repoRoot, opts) {
             lstatFn: opts.sessionSizeLstatFn,
             realpathFn: opts.sessionSizeRealpathFn,
           });
+  let collected;
   try {
-    return collectFn({ repoRoot, claudeHomeDir: resolveClaudeHomeDir(opts) });
+    collected = collectFn({
+      repoRoot,
+      claudeHomeDir: resolveClaudeHomeDir(opts),
+    });
   } catch (err) {
     return {
       ok: false,
@@ -1869,6 +1913,35 @@ function collectSessionSizeObservation(repoRoot, opts) {
       detail: err && err.message ? err.message : String(err),
     };
   }
+  // ★HYK-464-watch-collection-1 3R P1-1(판정 §1 ⑴ "observationUnavailable을
+  // '성장 없음'으로 접지 않음"): collectTotalSessionBytes가 claudeHomeDir
+  // 아래 projects 폴더 자체를 못 찾으면(아직 세션이 없거나 집을 잘못
+  // 짚음) `ok:true, totalBytes:0, observationUnavailable:true`를 돌려준다
+  // (dispatch-start-size-adapter.mjs 헤더 참조). 이걸 그대로
+  // `{totalBytes:0}`로 관측 히스토리에 쌓으면, size-core(judgeFromGrowthHistory)
+  // 는 이를 "실제로 관측했는데 0에서 안 늘었다"로 접어
+  // NO_GROWTH_PAST_TIMEOUT/NOT_STARTED를 확정한다 -- "관측 자체가
+  // 안 됐다"와 "봤는데 안 늘었다"를 섞는 사고(검토 1R §2 ⓔ⑷가 지적한
+  // 반대쪽 구멍). 이번 회차는 애초에 "조회 실패"와 같은 자리
+  // (ok:false)로 접어 totalBytes를 저장하지 않는다 -- 이러면
+  // combineDispatchStartWithSizeEvidence는 사이즈 증거가 없는 회차로
+  // 보고 화면 판정(screenJudged)을 그대로 쓴다(코드 줄: persistAndJudge
+  // DispatchStart의 `sizeCollected.ok === true ? {totalBytes:...} : {}`,
+  // 아래). 즉 observationUnavailable 회차는 화면 쪽 reasonCode를 덮어쓰지
+  // 않는다 -- "성장 없음이 확정됐다"가 아니라 "이번 회차는 못 봤다"로
+  // 남는다.
+  if (
+    collected &&
+    collected.ok === true &&
+    collected.observationUnavailable === true
+  ) {
+    return {
+      ok: false,
+      reasonCode: "DISPATCH_START_SIZE_OBSERVATION_UNAVAILABLE",
+      observationUnavailable: true,
+    };
+  }
+  return collected;
 }
 
 // 화면(judgeDispatchStart) 판정이 NOT_STARTED일 때만 size 증거로 뒤집는다
@@ -1877,23 +1950,47 @@ function combineDispatchStartWithSizeEvidence(screenJudged, sizeJudged) {
   if (screenJudged.verdict !== DISPATCH_START_VERDICT.NOT_STARTED) {
     return screenJudged;
   }
-  if (
-    !sizeJudged ||
-    sizeJudged.ok !== true ||
-    sizeJudged.verdict !== DISPATCH_START_SIZE_VERDICT.STARTED ||
-    sizeJudged.reasonCode !== DISPATCH_START_SIZE_REASON.GREW_RECENTLY
-  ) {
+  if (!sizeJudged || sizeJudged.ok !== true) {
     return screenJudged;
   }
-  return {
-    ok: true,
-    verdict: DISPATCH_START_VERDICT.STARTED,
-    reasonCode: DISPATCH_START_OVERRIDE_REASON.SESSION_SIZE_GREW_RECENTLY,
-    details: {
-      screenReasonCode: screenJudged.reasonCode,
-      sizeDetails: sizeJudged.details,
-    },
-  };
+  if (
+    sizeJudged.verdict === DISPATCH_START_SIZE_VERDICT.STARTED &&
+    sizeJudged.reasonCode === DISPATCH_START_SIZE_REASON.GREW_RECENTLY
+  ) {
+    return {
+      ok: true,
+      verdict: DISPATCH_START_VERDICT.STARTED,
+      reasonCode: DISPATCH_START_OVERRIDE_REASON.SESSION_SIZE_GREW_RECENTLY,
+      details: {
+        screenReasonCode: screenJudged.reasonCode,
+        sizeDetails: sizeJudged.details,
+      },
+    };
+  }
+  // ★HYK-464-watch-collection-1 3R P2-1(판정 §1 ⑷ 상신 수용): 화면은
+  // NOT_STARTED, 최근 성장도 없지만(GREW_RECENTLY 아님) 배달 이후 누적
+  // 바이트는 양수로 늘었다가 멈췄다(size-core의 STALLED_AFTER_START --
+  // "시작은 했다" 전제, 위 헤더 참조). 진짜 미착수(바이트 0 그대로,
+  // size-core가 NOT_STARTED/NO_GROWTH_PAST_TIMEOUT을 내거나 관측 자체가
+  // 없음)는 이 분기를 타지 않고 그대로 아래 return screenJudged로 빠져
+  // NOT_STARTED로 남는다(반대 방향 불변). verdict는 STARTED를 재사용한다
+  // (severity: dispatchStartSeverityOf는 verdict===NOT_STARTED일 때만
+  // SUSPECTED_NOT_STARTED 최악 등급을 매기므로, 이 분기로 STARTED가 되면
+  // "재배달이 필요한 좌석" 취급에서 빠진다 -- 판정 결과 자체는 그대로
+  // "미착수 아님"이고, reasonCode만 GREW_RECENTLY와 구별된다).
+  if (sizeJudged.verdict === DISPATCH_START_SIZE_VERDICT.STALLED_AFTER_START) {
+    return {
+      ok: true,
+      verdict: DISPATCH_START_VERDICT.STARTED,
+      reasonCode:
+        DISPATCH_START_OVERRIDE_REASON.SESSION_SIZE_STARTED_THEN_STALLED,
+      details: {
+        screenReasonCode: screenJudged.reasonCode,
+        sizeDetails: sizeJudged.details,
+      },
+    };
+  }
+  return screenJudged;
 }
 
 // judgeDispatchStartForRepo({repoRoot, droppedTaskFiles, now}, opts) --

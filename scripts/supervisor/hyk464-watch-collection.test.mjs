@@ -40,6 +40,7 @@ import {
   writeFileSync,
   mkdirSync,
   readFileSync,
+  existsSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { createHash } from "node:crypto";
@@ -53,8 +54,13 @@ import {
   judgeDispatchStartForRepo,
   DISPATCH_START_WIRE_STATUS,
   DISPATCH_START_OVERRIDE_REASON,
+  judgeSeatLivenessAcrossWorktrees,
+  judgeSeatIdleAcrossWorktrees,
+  judgeDispatchStartAcrossWorktrees,
 } from "./orch-stall-detect.mjs";
 import { DISPATCH_START_VERDICT } from "./dispatch-start-core.mjs";
+import { deriveClaudeProjectDirName } from "./rate-limit-stall-adapter.mjs";
+import { runWatchOnce } from "./watch-run.mjs";
 
 const THIS_DIR = dirname(fileURLToPath(import.meta.url));
 
@@ -323,40 +329,158 @@ test("ⓑ 비타협: 영수증 경로는 구해지는데 그 파일을 못 읽�
   });
 });
 
-test("ⓖ 본체 실물 읽기 대조(읽기 전용): 실 .harness의 두 묵은 task 파일이 실 dispatch-receipts.jsonl 대조로 '제외됨'으로 나온다", () => {
-  const mainRepoRoot = "C:/Users/Administrator/Documents/HARNESSENGINEERING";
-  const realReceiptPath = "D:/문서관리/하네스-관제실/dispatch-receipts.jsonl";
-  const before = createHash("sha256")
-    .update(readFileSync(realReceiptPath))
-    .digest("hex");
-  const evidence = collectDroppedTaskFileEvidence(mainRepoRoot, {
-    dispatchReceiptPath: realReceiptPath,
+// ★HYK-464-watch-collection-1 3R P1-2(검토 1R §2 ⓗ 실측): 이 칸은 아래
+// `mainRepoRoot`/`realReceiptPath`를 건너뛰기 가드 없이 바로 readFileSync
+// 한다 -- 이 두 경로는 이 워크트리가 올라앉은 특정 Windows 기계에만 있는
+// 실물(하네스 본체 워크트리·관제실)이라, 그 경로가 없는 환경(예: CI
+// `ubuntu-24.04`, enforce.yml의 `npm test`가 이 파일도 돈다)에서는
+// `readFileSync`가 ENOENT로 던져 이 칸이 거짓 빨강이 된다(검토자 실측:
+// 그 경로들을 제자리로 "없는 경로"로 흉내 내자 `not ok 5 … code: 'ENOENT'`).
+// 수리: 실경로가 "없을 때만" 건너뛴다(사유를 TAP 출력에 남기는 node:test
+// 의 `skip` 옵션 -- 조용한 초록이 아니라 눈에 보이는 SKIP, §2 "조용한
+// 제외 금지"와 같은 원칙). 실경로가 있는 이 기계(지금 이 라운드)에서는
+// `ggPathsPresent`가 true라 전혀 건너뛰지 않고 그대로 실행된다(회귀 0).
+const mainRepoRoot = "C:/Users/Administrator/Documents/HARNESSENGINEERING";
+const realReceiptPath = "D:/문서관리/하네스-관제실/dispatch-receipts.jsonl";
+const ggPathsPresent = existsSync(mainRepoRoot) && existsSync(realReceiptPath);
+const ggSkipReason = `실경로 부재(mainRepoRoot=${mainRepoRoot} realReceiptPath=${realReceiptPath}) -- 이 환경(예: Linux CI)에는 하네스 본체 워크트리·관제실이 없다`;
+
+test(
+  "ⓖ 본체 실물 읽기 대조(읽기 전용): 실 .harness의 두 묵은 task 파일이 실 dispatch-receipts.jsonl 대조로 '제외됨'으로 나온다",
+  { skip: ggPathsPresent ? false : ggSkipReason },
+  () => {
+    const before = createHash("sha256")
+      .update(readFileSync(realReceiptPath))
+      .digest("hex");
+    const evidence = collectDroppedTaskFileEvidence(mainRepoRoot, {
+      dispatchReceiptPath: realReceiptPath,
+    });
+    const after = createHash("sha256")
+      .update(readFileSync(realReceiptPath))
+      .digest("hex");
+    assert.equal(
+      before,
+      after,
+      "읽기 전용 -- 실 관제실 영수증 파일이 바뀌면 안 된다",
+    );
+    assert.equal(evidence.failed, false);
+    const excludedLabels = evidence.excludedUndeliveredTaskFiles.map(
+      (e) => e.taskId,
+    );
+    assert.ok(
+      excludedLabels.includes("HYK-220-ledger-path-2"),
+      `expected HYK-220-ledger-path-2 excluded, got ${JSON.stringify(excludedLabels)}`,
+    );
+    assert.ok(
+      excludedLabels.includes("HYK-220-ledger-path-review-3"),
+      `expected HYK-220-ledger-path-review-3 excluded, got ${JSON.stringify(excludedLabels)}`,
+    );
+    assert.equal(selectActiveDispatch(evidence.items), null);
+    console.log(
+      "HYK-464-watch-collection-1 ⓖ quote: excludedUndeliveredTaskFiles =",
+      JSON.stringify(evidence.excludedUndeliveredTaskFiles),
+    );
+  },
+);
+
+// ===========================================================================
+// 3R P1-3 -- excludedUndeliveredTaskFiles를 watch-run.mjs의 last-run.json·
+// watch.log까지: 결선 칸(mkdtemp 합성 대상 · 생산 관제실 인자 실행 0).
+// orch-stall-detect.mjs 쪽 세 축(judgeSeat*AcrossWorktrees/
+// judgeDispatchStartAcrossWorktrees)은 실제로 부른다(공개 함수) -- 이
+// 칸은 그 세 축의 실제 결과가 watch-run.mjs의 extractor/record/로그
+// 조립을 실제로 지나는지만 본다("감지기 서브프로세스 자체"는 watch-run.
+// mjs가 execFn으로 감싸는 경계라, 이 축은 그 경계 바로 밖에서 실제
+// 값을 만들어 넣는다 -- 이 파일 머리 "보장하지 않는 것" 5 참조).
+// ===========================================================================
+
+test("3R P1-3 결선: orch-stall-detect의 세 축(seat/idle/start)이 실제로 내는 excludedUndeliveredTaskFiles가 watch-run.mjs의 last-run.json·watch.log까지 실제로 닿는다", () => {
+  withTempDir("hyk464-p13-wiring-", (dir) => {
+    initPlainGitRepo(dir);
+    writeTaskFile(dir, {
+      taskId: "HYK-464-p13-excluded-1",
+      droppedAt: "2026-10-19 15:14",
+    });
+    const receiptPath = writeReceiptsFile(dir, [
+      { role: "CODER", harness_task_label: "HYK-OTHER-2" },
+    ]);
+    const worktreePath = gitWorktreeSelfPath(dir);
+    const now = Date.parse("2026-10-19T15:30:00+09:00");
+    const opts = { dispatchReceiptPath: receiptPath };
+    // 세 축 전부 실제 공개 함수를 그대로 부른다(fabricate 0) -- 1R이
+    // 이미 보장한 "제외 1건" 결과를 여기서 재확인한다(아래 결선이
+    // 그 값을 그대로 옮기는지가 이 칸의 실제 관심사).
+    const seatLiveness = judgeSeatLivenessAcrossWorktrees(
+      { repoRoot: worktreePath, now },
+      opts,
+    );
+    const seatIdle = judgeSeatIdleAcrossWorktrees(
+      { repoRoot: worktreePath, now },
+      opts,
+    );
+    const dispatchStart = judgeDispatchStartAcrossWorktrees(
+      { repoRoot: worktreePath, now },
+      opts,
+    );
+    assert.equal(
+      seatLiveness.worktrees[0].excludedUndeliveredTaskFiles.length,
+      1,
+    );
+    assert.equal(seatIdle.worktrees[0].excludedUndeliveredTaskFiles.length, 1);
+    assert.equal(
+      dispatchStart.worktrees[0].excludedUndeliveredTaskFiles.length,
+      1,
+    );
+
+    const watchDir = mkdtempSync(join(tmpdir(), "hyk464-p13-watchdir-"));
+    try {
+      // ★CLI 자신의 실제 stdout 모양(printResult, orch-stall-detect.mjs
+      // "console.log(JSON.stringify(result))")과 동일한 봉투 -- 세 축의
+      // 실제 값만 손으로 조립한다(생산 관제실 인자로 서브프로세스를
+      // 실행하지 않는다, product_scope 비타협).
+      const stdout = JSON.stringify({
+        verdict: "PROGRESSING",
+        reasonCode: "OK",
+        seatLiveness,
+        seatIdle,
+        dispatchStart,
+      });
+      const result = runWatchOnce({
+        repoRoot: worktreePath,
+        watchDir,
+        now,
+        execFn: () => stdout,
+      });
+      const record = JSON.parse(readFileSync(result.aliveRecordPath, "utf8"));
+      assert.equal(record.seatLivenessExcludedUndeliveredTaskFiles.length, 1);
+      assert.equal(
+        record.seatLivenessExcludedUndeliveredTaskFiles[0].taskId,
+        "HYK-464-p13-excluded-1",
+      );
+      assert.equal(record.seatIdleExcludedUndeliveredTaskFiles.length, 1);
+      assert.equal(record.startExcludedUndeliveredTaskFiles.length, 1);
+
+      const logText = readFileSync(result.logPath, "utf8");
+      assert.match(
+        logText,
+        /seat_excluded_undelivered=1 seat_excluded_undelivered_detail=HYK-464-p13-excluded-1:CODER/,
+      );
+      assert.match(
+        logText,
+        /idle_excluded_undelivered=1 idle_excluded_undelivered_detail=HYK-464-p13-excluded-1:CODER/,
+      );
+      assert.match(
+        logText,
+        /start_excluded_undelivered=1 start_excluded_undelivered_detail=HYK-464-p13-excluded-1:CODER/,
+      );
+      console.log(
+        "HYK-464-watch-collection-1 3R P1-3 quote: watch.log line =",
+        logText.trim(),
+      );
+    } finally {
+      rmSync(watchDir, { recursive: true, force: true });
+    }
   });
-  const after = createHash("sha256")
-    .update(readFileSync(realReceiptPath))
-    .digest("hex");
-  assert.equal(
-    before,
-    after,
-    "읽기 전용 -- 실 관제실 영수증 파일이 바뀌면 안 된다",
-  );
-  assert.equal(evidence.failed, false);
-  const excludedLabels = evidence.excludedUndeliveredTaskFiles.map(
-    (e) => e.taskId,
-  );
-  assert.ok(
-    excludedLabels.includes("HYK-220-ledger-path-2"),
-    `expected HYK-220-ledger-path-2 excluded, got ${JSON.stringify(excludedLabels)}`,
-  );
-  assert.ok(
-    excludedLabels.includes("HYK-220-ledger-path-review-3"),
-    `expected HYK-220-ledger-path-review-3 excluded, got ${JSON.stringify(excludedLabels)}`,
-  );
-  assert.equal(selectActiveDispatch(evidence.items), null);
-  console.log(
-    "HYK-464-watch-collection-1 ⓖ quote: excludedUndeliveredTaskFiles =",
-    JSON.stringify(evidence.excludedUndeliveredTaskFiles),
-  );
 });
 
 // ===========================================================================
@@ -597,6 +721,281 @@ test("ⓒ 회귀 0: 화면이 이미 정상 진전이면(STARTED) size 증거가
 });
 
 // ===========================================================================
+// 3R P1-1 -- 착수 축 세션 기록 집을 배달기와 같은 출처(.claude-team)로:
+// 기본 경로 칸(주입 없이 생산 결선을 지남) + observationUnavailable을
+// '성장 없음'으로 접지 않음.
+// ===========================================================================
+
+test("3R P1-1 기본 경로: claudeHomeDir·collectSessionSizeFn 둘 다 주입하지 않아도(osHomedirFn만 주입해 기본 경로 자체를 지나감) 기본 집 .claude-team 아래 실 세션 파일 성장이 착수 축을 STARTED로 뒤집는다", () => {
+  withTempDir("hyk464-defaulthome-", (dir) => {
+    initPlainGitRepo(dir);
+    writeTaskFile(dir, {
+      taskId: "HYK-464-defaulthome-1",
+      droppedAt: "2026-10-19 13:00",
+    });
+    const dispatchedAtMs = Date.parse("2026-10-19T13:00:00+09:00");
+    const tick1At = dispatchedAtMs + 30_000;
+    const tick2At = Date.parse("2026-10-19T13:43:00+09:00");
+    const store = fakeDispatchStartStore();
+    const worktreePath = gitWorktreeSelfPath(dir);
+    const showStub = {
+      ok: true,
+      result: { terminal: { lastOutputAt: dispatchedAtMs, title: "CODER" } },
+    };
+    const execFn = fakeOrcaExecFn({
+      terminals: [{ handle: "term_x", worktreePath }],
+      showsByHandle: { term_x: showStub },
+    });
+    return withTempDir("hyk464-fakehome-", (fakeHome) => {
+      // ★osHomedirFn만 주입한다(claudeHomeDir/collectSessionSizeFn은 안
+      // 준다) -- resolveClaudeHomeDir의 "기본값" 분기(opts.claudeHomeDir
+      // 없을 때 os.homedir()+".claude-team"을 쓰는 자리)와
+      // collectSessionSizeObservation의 "기본 collectFn"(실 readdirSync로
+      // collectTotalSessionBytes를 직접 부르는 자리)을 둘 다 실제로
+      // 지나간다 -- 기존 ⓐ⑵/ⓒ/ⓓ 다섯 칸은 전부 collectSessionSizeFn을
+      // 주입해 이 결선 값(집 선택) 자체를 한 번도 안 지났다(검토 1R §2
+      // ⓒ 실측, "집 선택을 고정하는 시험 0").
+      const osHomedirFn = () => fakeHome;
+      const projectDir = join(
+        fakeHome,
+        ".claude-team",
+        "projects",
+        deriveClaudeProjectDirName(worktreePath),
+      );
+      mkdirSync(projectDir, { recursive: true });
+      writeFileSync(
+        join(projectDir, "session.jsonl"),
+        "x".repeat(1_000),
+        "utf8",
+      );
+      judgeDispatchStartForRepo(
+        {
+          repoRoot: worktreePath,
+          droppedTaskFiles: evidenceItems(worktreePath),
+          now: tick1At,
+        },
+        { execFn, osHomedirFn, ...store },
+      );
+      // 두 번째 틱 전에 실 파일을 키운다(진짜 fs 성장 -- fakeSessionSize
+      // 흉내가 아니라 collectTotalSessionBytes가 실제로 읽는다).
+      writeFileSync(
+        join(projectDir, "session.jsonl"),
+        "x".repeat(51_000),
+        "utf8",
+      );
+      const r = judgeDispatchStartForRepo(
+        {
+          repoRoot: worktreePath,
+          droppedTaskFiles: evidenceItems(worktreePath),
+          now: tick2At,
+        },
+        { execFn, osHomedirFn, ...store },
+      );
+      assert.equal(
+        r.verdict,
+        DISPATCH_START_VERDICT.STARTED,
+        "기본 경로(.claude-team)를 실제로 지나야 이 성장을 본다 -- M5(집을 .claude로 바꾸면)는 이 칸이 RED가 된다",
+      );
+      assert.equal(
+        r.reasonCode,
+        DISPATCH_START_OVERRIDE_REASON.SESSION_SIZE_GREW_RECENTLY,
+      );
+    });
+  });
+});
+
+test("3R P1-1 observationUnavailable: 세션 기록 폴더 자체를 못 찾으면(ok:true,totalBytes:0,observationUnavailable:true) '성장 없음 확정'으로 접지 않는다 -- 화면 쪽 사유가 그대로 남고, 저장된 관측에 totalBytes가 안 실린다", () => {
+  withTempDir("hyk464-obsunavail-", (dir) => {
+    initPlainGitRepo(dir);
+    writeTaskFile(dir, {
+      taskId: "HYK-464-obsunavail-1",
+      droppedAt: "2026-10-19 13:00",
+    });
+    const dispatchedAtMs = Date.parse("2026-10-19T13:00:00+09:00");
+    const tick1At = dispatchedAtMs + 30_000;
+    const tick2At = Date.parse("2026-10-19T13:43:00+09:00");
+    const store = fakeDispatchStartStore();
+    const worktreePath = gitWorktreeSelfPath(dir);
+    const showStub = {
+      ok: true,
+      result: { terminal: { lastOutputAt: dispatchedAtMs, title: "CODER" } },
+    };
+    const execFn = fakeOrcaExecFn({
+      terminals: [{ handle: "term_x", worktreePath }],
+      showsByHandle: { term_x: showStub },
+    });
+    // 집은 (어느 값이든) "못 찾았다"만 흉내낸다 -- dispatch-start-size-
+    // adapter.mjs의 실 collectTotalSessionBytes가 projects 폴더 부재일 때
+    // 실제로 내는 모양 그대로(observationUnavailable:true).
+    const collectSessionSizeFn = () => ({
+      ok: true,
+      totalBytes: 0,
+      fileCount: 0,
+      excludedSymlinkCount: 0,
+      observationUnavailable: true,
+    });
+    judgeDispatchStartForRepo(
+      {
+        repoRoot: worktreePath,
+        droppedTaskFiles: evidenceItems(worktreePath),
+        now: tick1At,
+      },
+      { execFn, collectSessionSizeFn, ...store },
+    );
+    const r = judgeDispatchStartForRepo(
+      {
+        repoRoot: worktreePath,
+        droppedTaskFiles: evidenceItems(worktreePath),
+        now: tick2At,
+      },
+      { execFn, collectSessionSizeFn, ...store },
+    );
+    assert.equal(r.verdict, DISPATCH_START_VERDICT.NOT_STARTED);
+    assert.equal(
+      r.reasonCode,
+      "NO_PROGRESS_PAST_THRESHOLD",
+      "observationUnavailable이 '성장 없음 확정' 코드로 덮지 않고 화면 쪽 사유 그대로 남는다",
+    );
+    const stored = store.peek();
+    for (const obs of stored[worktreePath].observations) {
+      assert.equal(
+        Object.prototype.hasOwnProperty.call(obs, "totalBytes"),
+        false,
+        "observationUnavailable 회차는 totalBytes를 관측 히스토리에 싣지 않는다(조회 실패와 동일하게 접힘)",
+      );
+    }
+  });
+});
+
+// ===========================================================================
+// 3R P2-1(상신 수용) -- "착수 뒤 정지"는 미착수와 다른 사유 코드로:
+// 배달 이후 누적 증가 > 0인데 최근 무증가면, 진짜 미착수(누적 0)와 같은
+// 사유로 재배달 후보에 올리지 않는다.
+// ===========================================================================
+
+test("3R P2-1: 화면 정체 + 배달 이후 누적 증가(한 번 자란 뒤 멈춤) -- STARTED로 남고, GREW_RECENTLY와도 진짜 미착수와도 다른 사유 코드", () => {
+  withTempDir("hyk464-startedthenstalled-", (dir) => {
+    initPlainGitRepo(dir);
+    writeTaskFile(dir, {
+      taskId: "HYK-464-startedthenstalled-1",
+      droppedAt: "2026-10-19 13:00",
+    });
+    const dispatchedAtMs = Date.parse("2026-10-19T13:00:00+09:00");
+    // 16:28Z 표본 모양(판정 §1 ⑷) -- 화면 출력 시각 고정 + 최근 창
+    // 기록 폴더 무증가 + 배달 이후 누적 증가: t1에서 적게 자란 뒤
+    // t2(+5분)에 크게 자라고(=배달 뒤 누적 증가), t3(+38분, t2로부터
+    // 3분 stall 임계를 한참 넘겨)에는 더 안 늘어(=최근 창 무증가).
+    const tick1At = dispatchedAtMs + 30_000; // +30s
+    const tick2At = dispatchedAtMs + 5 * 60_000; // +5min, 실제로 자람.
+    const tick3At = Date.parse("2026-10-19T13:43:00+09:00"); // +43min, t2로부터 38분 무증가.
+    const store = fakeDispatchStartStore();
+    const worktreePath = gitWorktreeSelfPath(dir);
+    const showStub = {
+      ok: true,
+      result: { terminal: { lastOutputAt: dispatchedAtMs, title: "CODER" } },
+    };
+    const execFn = fakeOrcaExecFn({
+      terminals: [{ handle: "term_x", worktreePath }],
+      showsByHandle: { term_x: showStub },
+    });
+    const collectSessionSizeFn = fakeSessionSize([1_000, 500_000, 500_000]);
+    judgeDispatchStartForRepo(
+      {
+        repoRoot: worktreePath,
+        droppedTaskFiles: evidenceItems(worktreePath),
+        now: tick1At,
+      },
+      { execFn, collectSessionSizeFn, ...store },
+    );
+    judgeDispatchStartForRepo(
+      {
+        repoRoot: worktreePath,
+        droppedTaskFiles: evidenceItems(worktreePath),
+        now: tick2At,
+      },
+      { execFn, collectSessionSizeFn, ...store },
+    );
+    const r = judgeDispatchStartForRepo(
+      {
+        repoRoot: worktreePath,
+        droppedTaskFiles: evidenceItems(worktreePath),
+        now: tick3At,
+      },
+      { execFn, collectSessionSizeFn, ...store },
+    );
+    assert.equal(
+      r.verdict,
+      DISPATCH_START_VERDICT.STARTED,
+      "배달 이후 누적 증가가 있었던 좌석은 재배달 후보(SUSPECTED_NOT_STARTED)에 안 올라간다",
+    );
+    assert.equal(
+      r.reasonCode,
+      DISPATCH_START_OVERRIDE_REASON.SESSION_SIZE_STARTED_THEN_STALLED,
+    );
+    assert.notEqual(
+      r.reasonCode,
+      DISPATCH_START_OVERRIDE_REASON.SESSION_SIZE_GREW_RECENTLY,
+      "방금 자라는 중(GREW_RECENTLY)과 자랐다가 멈춤(STARTED_THEN_STALLED)은 같은 사유 코드를 공유하지 않는다",
+    );
+    console.log(
+      "HYK-464-watch-collection-1 3R P2-1 quote: result =",
+      JSON.stringify({ verdict: r.verdict, reasonCode: r.reasonCode }),
+    );
+  });
+});
+
+test("3R P2-1 반대 방향(불변): 진짜 미착수(누적 0, 두 틱 모두 안 자람)는 여전히 NOT_STARTED/NO_PROGRESS_PAST_THRESHOLD -- 새 사유 코드로 안 샌다", () => {
+  withTempDir("hyk464-trulynotstarted-", (dir) => {
+    initPlainGitRepo(dir);
+    writeTaskFile(dir, {
+      taskId: "HYK-464-trulynotstarted-1",
+      droppedAt: "2026-10-19 13:00",
+    });
+    const dispatchedAtMs = Date.parse("2026-10-19T13:00:00+09:00");
+    const tick1At = dispatchedAtMs + 30_000;
+    const tick2At = dispatchedAtMs + 5 * 60_000;
+    const tick3At = Date.parse("2026-10-19T13:43:00+09:00");
+    const store = fakeDispatchStartStore();
+    const worktreePath = gitWorktreeSelfPath(dir);
+    const showStub = {
+      ok: true,
+      result: { terminal: { lastOutputAt: dispatchedAtMs, title: "CODER" } },
+    };
+    const execFn = fakeOrcaExecFn({
+      terminals: [{ handle: "term_x", worktreePath }],
+      showsByHandle: { term_x: showStub },
+    });
+    const collectSessionSizeFn = fakeSessionSize([0, 0, 0]); // 누적 0 -- 한 번도 안 자람.
+    judgeDispatchStartForRepo(
+      {
+        repoRoot: worktreePath,
+        droppedTaskFiles: evidenceItems(worktreePath),
+        now: tick1At,
+      },
+      { execFn, collectSessionSizeFn, ...store },
+    );
+    judgeDispatchStartForRepo(
+      {
+        repoRoot: worktreePath,
+        droppedTaskFiles: evidenceItems(worktreePath),
+        now: tick2At,
+      },
+      { execFn, collectSessionSizeFn, ...store },
+    );
+    const r = judgeDispatchStartForRepo(
+      {
+        repoRoot: worktreePath,
+        droppedTaskFiles: evidenceItems(worktreePath),
+        now: tick3At,
+      },
+      { execFn, collectSessionSizeFn, ...store },
+    );
+    assert.equal(r.verdict, DISPATCH_START_VERDICT.NOT_STARTED);
+    assert.equal(r.reasonCode, "NO_PROGRESS_PAST_THRESHOLD");
+  });
+});
+
+// ===========================================================================
 // ⓔ 변이(제자리 · 커밋 뒤와 동일 소스, 복원 불필요 -- mkdtemp 사본만 변이).
 // ===========================================================================
 
@@ -740,13 +1139,15 @@ test("NC mutation/hyk464 #4 (필수, ⓓ⑶): 영수증 파일 읽기 실패를 
     (src) =>
       applyMutation(
         src,
-        `  try {
-    readFileFn(receiptPath, "utf8"); // 읽기 가능성만 재확인(위 헤더 참조).
+        `  let content;
+  try {
+    content = readFileFn(receiptPath, "utf8");
   } catch {
     return { status: DELIVERY_RECEIPT_CHECK.UNRESOLVED, role };
   }`,
-        `  try {
-    readFileFn(receiptPath, "utf8");
+        `  let content;
+  try {
+    content = readFileFn(receiptPath, "utf8");
   } catch {
     return { status: DELIVERY_RECEIPT_CHECK.NOT_FOUND, role };
   }`,
