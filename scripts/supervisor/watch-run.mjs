@@ -152,6 +152,29 @@ function collectPartialFailures(axisRaw) {
   return collected;
 }
 
+// ★HYK-464-watch-collection-1 3R P1-3(판정 §1 ⑶ · 검토 1R §2 ⓑ⑵ "조용한
+// 제외 금지"는 last-run.json·watch.log까지 닿아야 성립): collectPartialFailures
+// 와 동일한 평탄화 관례 -- orch-stall-detect.mjs의 judgeSeatLivenessFor
+// Worktree/judgeSeatIdleForWorktree/judgeDispatchStartForWorktree(세 축
+// 전부, 그 함수들 헤더 참조)가 이미 워크트리별로 싣는
+// `excludedUndeliveredTaskFiles`를 전체 워크트리에서 모아 평탄화한다.
+// 축 자체가 COLLECTION_FAILED 등으로 `worktrees`가 없으면 조용히 빈
+// 배열([])을 낸다(collectPartialFailures와 동일 원칙 -- 이 부가 정보
+// 추출 실패가 로그 줄 조립 전체를 막아서는 안 된다).
+function collectExcludedUndeliveredTaskFiles(axisRaw) {
+  if (!isPlainObject(axisRaw) || !Array.isArray(axisRaw.worktrees)) return [];
+  const collected = [];
+  for (const wt of axisRaw.worktrees) {
+    if (!isPlainObject(wt) || !Array.isArray(wt.excludedUndeliveredTaskFiles)) {
+      continue;
+    }
+    for (const item of wt.excludedUndeliveredTaskFiles) {
+      if (isPlainObject(item)) collected.push(item);
+    }
+  }
+  return collected;
+}
+
 // orch-stall-detect.mjs의 stdout(JSON 한 줄)을 파싱한다. 파싱 실패는
 // "판정 불가"이지 예외가 아니다(§5-A와 같은 원칙 재사용).
 //
@@ -195,6 +218,11 @@ function extractSeatLivenessFields(seatLiveness) {
       seatLiveness,
       "liveDispatchVerdict",
     ),
+    // HYK-464-watch-collection-1 3R P1-3: collectPartialFailures와 동일
+    // 이유로 이 축의 excludedUndeliveredTaskFiles도 로그 줄·last-run.json
+    // 까지 옮긴다(위 collectExcludedUndeliveredTaskFiles 헤더 참조).
+    seatLivenessExcludedUndeliveredTaskFiles:
+      collectExcludedUndeliveredTaskFiles(seatLiveness),
   };
 }
 
@@ -210,6 +238,9 @@ function extractSeatIdleFields(seatIdle) {
     // HYK-265-observe-split-1: seatLiveness와 동일 이유(§3-1 항2).
     seatIdleObservationReason: pickString(seatIdle, "observationReason"),
     seatIdleReason: pickString(seatIdle, "reason"),
+    // HYK-464-watch-collection-1 3R P1-3: seatLiveness와 동일 이유.
+    seatIdleExcludedUndeliveredTaskFiles:
+      collectExcludedUndeliveredTaskFiles(seatIdle),
   };
 }
 
@@ -231,6 +262,9 @@ function extractDispatchStartFields(dispatchStart) {
     // HYK-265-observe-split-1: seatLiveness와 동일 이유(§3-1 항2).
     startObservationReason: pickString(dispatchStart, "observationReason"),
     startReason: pickString(dispatchStart, "reason"),
+    // HYK-464-watch-collection-1 3R P1-3: seatLiveness와 동일 이유.
+    startExcludedUndeliveredTaskFiles:
+      collectExcludedUndeliveredTaskFiles(dispatchStart),
   };
 }
 
@@ -376,12 +410,14 @@ function emptyDetectorFields() {
     seatLivenessReason: null,
     seatLivenessLiveDispatchJudgedCount: null,
     seatLivenessLiveDispatchVerdict: null,
+    seatLivenessExcludedUndeliveredTaskFiles: [],
     seatIdleStatus: null,
     seatIdleVerdict: null,
     seatIdleWorstCount: null,
     seatIdleTotalWorktrees: null,
     seatIdleObservationReason: null,
     seatIdleReason: null,
+    seatIdleExcludedUndeliveredTaskFiles: [],
     startStatus: null,
     startVerdict: null,
     startWorstCount: null,
@@ -389,6 +425,7 @@ function emptyDetectorFields() {
     startPartialFailures: [],
     startObservationReason: null,
     startReason: null,
+    startExcludedUndeliveredTaskFiles: [],
     unconsumedStatus: null,
     unconsumedVerdict: null,
     unconsumedWorstCount: null,
@@ -653,6 +690,32 @@ function failureLogSegment(prefix, failures) {
   const detail =
     omitted > 0 ? `${shown.join("|")}|+${omitted}_more` : shown.join("|");
   return `${prefix}_partial_failures=${failures.length} ${prefix}_partial_failure_detail=${detail}`;
+}
+
+// HYK-464-watch-collection-1 3R P1-3: failureLogSegment와 동일한 "상한 +
+// N_more" 관례(§4 요구6류, 새 형식 발명 금지) -- 제외된 항목이 없으면
+// (가장 흔한 경우) 이 축의 로그 줄에 아무 것도 더하지 않는다(null).
+function formatExcludedUndeliveredEntry(item) {
+  const taskId = sanitizeFailureToken(
+    isPlainObject(item) ? item.taskId : null,
+    "unknown_task",
+  );
+  const role = sanitizeFailureToken(
+    isPlainObject(item) ? item.role : null,
+    "unknown_role",
+  );
+  return `${taskId}:${role}`;
+}
+
+function excludedUndeliveredLogSegment(prefix, items) {
+  if (!Array.isArray(items) || items.length === 0) return null;
+  const shown = items
+    .slice(0, MAX_PARTIAL_FAILURE_ITEMS)
+    .map(formatExcludedUndeliveredEntry);
+  const omitted = items.length - shown.length;
+  const detail =
+    omitted > 0 ? `${shown.join("|")}|+${omitted}_more` : shown.join("|");
+  return `${prefix}_excluded_undelivered=${items.length} ${prefix}_excluded_undelivered_detail=${detail}`;
 }
 
 // HYK-421 1R (결함 2, coder-task.md §5 "결과 파일 규약" 완료 조건3) --
@@ -1157,12 +1220,25 @@ function buildSeatIdleSegments(detectorResult) {
       reason: detectorResult.seatIdleReason,
     },
   );
+  // HYK-464-watch-collection-1 3R P1-3: 같은 두 축(seat/idle)의 제외 상세도
+  // 여기서 함께 조립한다(위 excludedUndeliveredLogSegment 헤더 참조) --
+  // 새 축이 아니라 기존 두 축에 상세 세그먼트를 하나 더하는 것뿐이다.
+  const seatExcludedUndeliveredDetail = excludedUndeliveredLogSegment(
+    "seat",
+    detectorResult.seatLivenessExcludedUndeliveredTaskFiles,
+  );
+  const idleExcludedUndeliveredDetail = excludedUndeliveredLogSegment(
+    "idle",
+    detectorResult.seatIdleExcludedUndeliveredTaskFiles,
+  );
   return {
     seatSegment,
     seatFailureSegment,
     seatReasonDetail,
+    seatExcludedUndeliveredDetail,
     idleSegment,
     idleReasonDetail,
+    idleExcludedUndeliveredDetail,
   };
 }
 
@@ -1236,10 +1312,17 @@ function buildStartUnconsumedSegments(detectorResult, unconsumedVanish) {
     detectorResult.unconsumedWorstWorktrees,
   );
   const unconsumedVanishedDetail = unconsumedVanishedSegment(vanishedPaths);
+  // HYK-464-watch-collection-1 3R P1-3: start 축의 제외 상세도 여기서
+  // 함께 조립한다(seat/idle과 동일 이유, buildSeatIdleSegments 참조).
+  const startExcludedUndeliveredDetail = excludedUndeliveredLogSegment(
+    "start",
+    detectorResult.startExcludedUndeliveredTaskFiles,
+  );
   return {
     startSegment,
     startFailureSegment,
     startReasonDetail,
+    startExcludedUndeliveredDetail,
     unconsumedSegment,
     unconsumedReasonDetail,
     unconsumedWorstDetail,
@@ -1312,11 +1395,14 @@ function buildAxisLogSegments(
     seatSegment,
     seatFailureSegment,
     seatReasonDetail,
+    seatExcludedUndeliveredDetail,
     idleSegment,
     idleReasonDetail,
+    idleExcludedUndeliveredDetail,
     startSegment,
     startFailureSegment,
     startReasonDetail,
+    startExcludedUndeliveredDetail,
     unconsumedSegment,
     unconsumedReasonDetail,
     unconsumedWorstDetail,
@@ -1358,11 +1444,14 @@ function buildAxisLogSegments(
     seatSegment,
     seatFailureSegment,
     seatReasonDetail,
+    seatExcludedUndeliveredDetail,
     idleSegment,
     idleReasonDetail,
+    idleExcludedUndeliveredDetail,
     startSegment,
     startFailureSegment,
     startReasonDetail,
+    startExcludedUndeliveredDetail,
     unconsumedSegment,
     unconsumedReasonDetail,
     unconsumedWorstDetail,
@@ -1492,6 +1581,14 @@ export function buildLogLine({
     // resourceResidueLogSegment가 null을 돌려주므로(filter(Boolean)) 로그
     // 줄이 한 글자도 달라지지 않는다(회귀 0).
     resourceResidueLogSegment(resourceResidueResult),
+    // HYK-464-watch-collection-1 3R P1-3(판정 §1 ⑶): 이 세 세그먼트도
+    // 지금 이 시점의 맨 끝이다 -- 앞선 모든 세그먼트의 필드·순서·값은
+    // 이 라운드가 손대지 않았다. 제외된 항목이 없는(가장 흔한) 호출자는
+    // excludedUndeliveredLogSegment가 null을 돌려주므로(filter(Boolean))
+    // 로그 줄이 한 글자도 달라지지 않는다(회귀 0).
+    segments.seatExcludedUndeliveredDetail,
+    segments.idleExcludedUndeliveredDetail,
+    segments.startExcludedUndeliveredDetail,
   ]
     .filter(Boolean)
     .join(" ");
