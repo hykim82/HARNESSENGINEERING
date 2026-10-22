@@ -3,7 +3,7 @@ import { join, dirname } from "node:path";
 import { execSync } from "node:child_process";
 import { recordRejectStreakFromResultText } from "./reject-streak.mjs";
 import { mainRepoRoot } from "./relay-handshake.mjs";
-import { archiveRoundEnvelope } from "./envelope-archive.mjs";
+import { archiveRoundEnvelopeIfNew } from "./envelope-archive.mjs";
 import { checkApprovalBinding } from "./review-approval-binding.mjs";
 
 // HYK-183: 결과 파일에 이 표지가 2개 이상이면 어느 것이 최종인지 결정할 수
@@ -343,10 +343,16 @@ function cacheApprovedEvidenceShared(reviewPath, message) {
   }
 }
 
+// HYK-209-install-closure-4: reuse H4-3's identical-snapshot skip
+// (archiveRoundEnvelopeIfNew) instead of calling archiveRoundEnvelope
+// directly -- a second approval-hook firing for the SAME unchanged
+// review.md (e.g. a retry after admission-completion failed post-archive,
+// same incident shape as HYK-209-install-closure-3's TASK-file axis) no
+// longer writes a second byte-identical rounds/review-r<N>.md.
 function archiveApprovedRound(reviewPath) {
   try {
     const reviewText = readFileSync(reviewPath, "utf8");
-    const outcome = archiveRoundEnvelope({
+    const outcome = archiveRoundEnvelopeIfNew({
       role: "review",
       resultContent: reviewText,
       harnessDir: dirname(reviewPath),
