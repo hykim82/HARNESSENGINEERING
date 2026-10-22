@@ -10,15 +10,18 @@
 // 워커가 스스로 계산한, 현재 작업트리와 실제로 일치하는 binding-fingerprint를
 // 직접 기록)를 가하고 같은 커밋 메시지로 review-gate.mjs CLI를 돌려 종료
 // 코드를 비교한다. review-approval-binding.mjs/reject-streak.mjs/
-// envelope-archive.mjs/relay-handshake.mjs/time-authority.mjs는 (HYK-332 2R)
-// 두 판 모두 ba0eb54 시점 스냅숏(`git show <PRE_FIX_SHA>:scripts/check/<f>`)
-// 에서 그대로 심어진다 -- HEAD에서 이 저장소가 그 5개 파일을 실제로 어떻게
-// 바꾸든(예: HYK-332 1R의 relay-handshake.mjs/reject-streak.mjs export 추가)
-// 상관없이 두 판이 항상 같은 고정 내용을 공유하도록 **구성으로 보장**한다 --
-// 그래서 두 판을 가르는 유일한 변수는 review-gate.mjs 자신이다. (예전에는
-// 디스크의 현재 사본을 심고 "ba0eb54와 HEAD 사이 0줄"임을 별도로 단언했으나,
-// 그 단언은 review-gate.mjs와 무관한 편집에도 무조건 깨지는 구조라 폐기했다
-// -- 아래 ★확인 문단 참조.)
+// envelope-archive.mjs/relay-handshake.mjs/time-authority.mjs/
+// child-probe-timeout-policy.mjs는 (HYK-209-install-closure-4 2R) 두 판 모두
+// `SHARED_DEPS_SHA`(adf352d, review-gate.mjs의 자기 고정점 `PRE_FIX_SHA`와는
+// 별개) 시점 스냅숏(`git show <SHARED_DEPS_SHA>:scripts/check/<f>`)에서 그대로
+// 심어진다 -- HEAD에서 이 저장소가 그 6개 파일을 실제로 어떻게 바꾸든 상관없이
+// 두 판이 항상 같은 고정 내용을 공유하도록 **구성으로 보장**한다 --
+// ⭐불변식(변수 = review-gate.mjs 하나): PRE-FIX와 POST-FIX 사이에서 실제로
+// 달라지는 파일은 review-gate.mjs 자신뿐이고, 그 외 6개 의존 파일은 양쪽 모두
+// SHARED_DEPS_SHA 고정 스냅숏을 공유한다 -- 이 시험이 성립하는 유일한 전제다.
+// (예전에는 디스크의 현재 사본을 심고 "ba0eb54와 HEAD 사이 0줄"임을 별도로
+// 단언했으나, 그 단언은 review-gate.mjs와 무관한 편집에도 무조건 깨지는
+// 구조라 폐기했다 -- 아래 ★확인 문단 참조.)
 //
 // 결과(아래 시험이 고정): **두 판 모두 이 위조를 통과시킨다**(exit 0) --
 // `hasIndependentReviewer = /role:\s*REVIEW/i.test(content)`는 서명이 아니라
@@ -51,31 +54,52 @@ const REPO_ROOT = execFileSync("git", ["rev-parse", "--show-toplevel"], {
   encoding: "utf8",
 }).trim();
 const PRE_FIX_SHA = "ba0eb54242b569d0414bf3f9f07c4f25c66894b9";
+// HYK-209-install-closure-4 2R: dependency-pin SHA, deliberately SEPARATE from
+// PRE_FIX_SHA above -- PRE_FIX_SHA anchors "the historical review-gate.mjs
+// that predates HYK-314-binding-1" and must never move (that fixed point IS
+// the test's subject). SHARED_DEPS_SHA only needs to be new enough that every
+// name review-gate.mjs (PRE *or* POST) imports from these files still exists
+// -- adf352d (the #324 merge this track's own H4-3/H4-4 work landed on)
+// satisfies that for both the 4 names ba0eb54's review-gate.mjs imports
+// (recordRejectStreakFromResultText/mainRepoRoot/archiveRoundEnvelope/
+// checkApprovalBinding) and the 1 new name POST-FIX adds
+// (archiveRoundEnvelopeIfNew, HYK-209-install-closure-4 1R) -- verified by
+// `git show adf352d:scripts/check/<f> | grep "^export function"` on each.
+const SHARED_DEPS_SHA = "adf352d2e1345984a46ec251d85116cce19f509d";
 const SHARED_DEPS = [
   "relay-handshake.mjs",
   "envelope-archive.mjs",
   "reject-streak.mjs",
   "review-approval-binding.mjs",
   "time-authority.mjs",
+  // HYK-430 5R (already true at SHARED_DEPS_SHA): relay-handshake.mjs itself
+  // imports resolveChildProbeTimeoutMs/withTimeoutRetry from this file -- the
+  // staged repo's own module graph needs it as a 6th sibling, exactly the gap
+  // review-gate-archive-safety.test.mjs's stageRepo already closed for the
+  // same reason.
+  "child-probe-timeout-policy.mjs",
 ];
 
-// ★확인 (이 시험 파일이 성립하는 전제, HYK-332 2R 재작성): 이 시험의 핵심
-// 불변식은 "PRE-FIX 판과 POST-FIX 판을 가르는 유일한 변수는 review-gate.mjs
-// 자신이다" -- 즉 5개 의존 파일(SHARED_DEPS)이 두 판 사이에서 동일해야
-// 한다는 것이다. 1R은 이를 "디스크의 현재 사본을 두 판 모두에 심고, HEAD가
-// ba0eb54와 바이트동일한지 별도로 assert한다"는 방식으로 확보했었다 -- 그
-// assert는 review-gate.mjs와 무관한 이유로 그 5개 파일 중 하나가 조금이라도
-// 바뀌면(HYK-332의 resolveResultTaskId export 등, 순수 additive 변경이라도)
-// 무조건 실패하는 외부 사실 주장이었다(2026-08-20 실사고, ORCH 판정). 2R은
-// stageRepo() 아래에서 SHARED_DEPS를 디스크가 아니라 항상
-// `git show <PRE_FIX_SHA>:scripts/check/<f>`로 읽어 pre/post 양쪽에 똑같이
-// 심는다 -- PRE_FIX_SHA 이후 이 저장소가 그 5개 파일을 어떻게 바꾸든
-// (이 시험이 실행되는 그 순간의 디스크 상태와 무관하게) 두 판은 항상 같은
-// 고정 스냅숏을 공유하므로, 그 불변식은 이제 "그러기를 바라는 주장"이 아니라
-// "그렇게 구성되어 있다는 사실"이다. 잃는 것: 5개 의존 파일이 ba0eb54 이후
-// 실제로 바뀌었다는 사실 자체를 이 시험이 (부수적으로) 알려주던 효과는
-// 사라진다 -- 그러나 그건 이 시험의 임무가 아니었고, 알려주는 방식도
-// "무조건 실패"였을 뿐 "무엇이 왜 바뀌었는지"를 측정하지 않았다.
+// ★확인 (이 시험 파일이 성립하는 전제, HYK-209-install-closure-4 2R 재작성):
+// ⭐불변식(1줄): PRE-FIX와 POST-FIX 두 판을 가르는 유일한 변수는
+// review-gate.mjs 자신이다 -- 그 외 6개 의존 파일(SHARED_DEPS)은 두 판
+// 사이에서 항상 동일해야 한다.
+// 1R(HYK-332 2R)은 이를 SHARED_DEPS도 PRE_FIX_SHA(ba0eb54)에서 읽어
+// 확보했었다 -- 그런데 HYK-209-install-closure-4 1R이 review-gate.mjs의
+// import를 `archiveRoundEnvelope`에서 (H4-3이 추가한) `archiveRoundEnvelopeIfNew`로
+// 바꾸자, ba0eb54 시점 envelope-archive.mjs에는 그 이름이 아직 없어서
+// POST-FIX 스테이징이 모듈 로드 자체에서 SyntaxError로 깨졌다(2026-10-22
+// 실사고, .harness/rounds/CODER-r1.md 1R NEEDS_INPUT 그대로). 이 불변식
+// 자체는 "review-gate.mjs가 두 판 사이 유일한 변수"이지 "의존 파일이
+// PRE_FIX_SHA 시점이어야 한다"가 아니므로, SHARED_DEPS의 소스를
+// PRE_FIX_SHA에서 분리된 `SHARED_DEPS_SHA`(adf352d)로 옮겨도 불변식은
+// 그대로 지켜진다 -- PRE_FIX_SHA(review-gate.mjs 자신의 고정점, "ba0eb54
+// 이전 한계"라는 의미)는 손대지 않는다. stageRepo() 아래에서 SHARED_DEPS를
+// 디스크가 아니라 항상 `git show <SHARED_DEPS_SHA>:scripts/check/<f>`로
+// 읽어 pre/post 양쪽에 똑같이 심는다 -- SHARED_DEPS_SHA 이후 이 저장소가
+// 그 6개 파일을 어떻게 바꾸든(이 시험이 실행되는 그 순간의 디스크 상태와
+// 무관하게) 두 판은 항상 같은 고정 스냅숏을 공유하므로, 그 불변식은
+// "그러기를 바라는 주장"이 아니라 "그렇게 구성되어 있다는 사실"이다.
 
 const PRE_FIX_REVIEW_GATE_SRC = execFileSync(
   "git",
@@ -95,14 +119,16 @@ function tmpDir(prefix) {
   return mkdtempSync(join(tmpdir(), prefix));
 }
 
-// HYK-332 2R: SHARED_DEPS content, pinned to PRE_FIX_SHA -- read once, reused
-// for every stageRepo() call (both pre-fix and post-fix), so the two staged
-// repos share byte-identical dependency files BY CONSTRUCTION, never by an
-// assumption about the current disk/HEAD state (see the ★확인 comment above).
+// HYK-209-install-closure-4 2R: SHARED_DEPS content, pinned to
+// SHARED_DEPS_SHA (not PRE_FIX_SHA -- see the constant's own header above) --
+// read once, reused for every stageRepo() call (both pre-fix and post-fix),
+// so the two staged repos share byte-identical dependency files BY
+// CONSTRUCTION, never by an assumption about the current disk/HEAD state
+// (see the ★확인 comment above).
 const SHARED_DEP_SRC = Object.fromEntries(
   SHARED_DEPS.map((f) => [
     f,
-    execFileSync("git", ["show", `${PRE_FIX_SHA}:scripts/check/${f}`], {
+    execFileSync("git", ["show", `${SHARED_DEPS_SHA}:scripts/check/${f}`], {
       cwd: REPO_ROOT,
       encoding: "utf8",
     }),
@@ -110,7 +136,7 @@ const SHARED_DEP_SRC = Object.fromEntries(
 );
 
 // Stages a synthetic repo with the given review-gate.mjs source + the
-// (byte-identical pre/post, PRE_FIX_SHA-pinned) shared deps, commits it so
+// (byte-identical pre/post, SHARED_DEPS_SHA-pinned) shared deps, commits it so
 // the worktree starts CLEAN (a clean worktree binds to HEAD sha per
 // HYK-281 -- this mirrors review-r1-원문.md's own probe exactly, no code
 // diff needed to reproduce the forgery).
