@@ -175,6 +175,31 @@ function collectExcludedUndeliveredTaskFiles(axisRaw) {
   return collected;
 }
 
+// ★HYK-464-watch-start-axis-1 ⓒ(판정 §1 ⑷/§2 ⓒ, P3-2): start 축의
+// 워크트리별 판정(orch-stall-detect.mjs persistAndJudgeDispatchStart)이
+// 이번 회차 "집 관측 불가"(sizeObservationReasonCode, 예:
+// DISPATCH_START_SIZE_OBSERVATION_UNAVAILABLE)를 실으면 그 사실을 모아
+// 산출물(watch.log/last-run.json)까지 올린다 -- collectExcludedUndeliveredTaskFiles
+// 와 동일한 평탄화 관례(축 자체가 worktrees 배열을 안 주면 조용히 빈
+// 배열, 이 부가 정보 추출 실패가 로그 줄 조립 전체를 막지 않는다).
+function collectSizeObservationUnavailable(axisRaw) {
+  if (!isPlainObject(axisRaw) || !Array.isArray(axisRaw.worktrees)) return [];
+  const collected = [];
+  for (const wt of axisRaw.worktrees) {
+    if (!isPlainObject(wt)) continue;
+    if (
+      typeof wt.sizeObservationReasonCode === "string" &&
+      wt.sizeObservationReasonCode.trim().length > 0
+    ) {
+      collected.push({
+        worktreePath: wt.worktreePath ?? null,
+        reasonCode: wt.sizeObservationReasonCode,
+      });
+    }
+  }
+  return collected;
+}
+
 // orch-stall-detect.mjs의 stdout(JSON 한 줄)을 파싱한다. 파싱 실패는
 // "판정 불가"이지 예외가 아니다(§5-A와 같은 원칙 재사용).
 //
@@ -265,6 +290,10 @@ function extractDispatchStartFields(dispatchStart) {
     // HYK-464-watch-collection-1 3R P1-3: seatLiveness와 동일 이유.
     startExcludedUndeliveredTaskFiles:
       collectExcludedUndeliveredTaskFiles(dispatchStart),
+    // HYK-464-watch-start-axis-1 ⓒ: 위 collectSizeObservationUnavailable
+    // 헤더 참조 -- "관측 불가 회차"를 산출물까지 옮긴다.
+    startSizeObservationUnavailable:
+      collectSizeObservationUnavailable(dispatchStart),
   };
 }
 
@@ -1318,11 +1347,18 @@ function buildStartUnconsumedSegments(detectorResult, unconsumedVanish) {
     "start",
     detectorResult.startExcludedUndeliveredTaskFiles,
   );
+  // HYK-464-watch-start-axis-1 ⓒ: 위 sizeObservationUnavailableLogSegment
+  // 헤더 참조 -- start 축에만 붙는 새 상세(관측 불가 사유 코드).
+  const startSizeObservationUnavailableDetail =
+    sizeObservationUnavailableLogSegment(
+      detectorResult.startSizeObservationUnavailable,
+    );
   return {
     startSegment,
     startFailureSegment,
     startReasonDetail,
     startExcludedUndeliveredDetail,
+    startSizeObservationUnavailableDetail,
     unconsumedSegment,
     unconsumedReasonDetail,
     unconsumedWorstDetail,
@@ -1375,6 +1411,31 @@ function worktreeShortName(rawPath) {
   return parts.length > 0 ? parts[parts.length - 1] : token;
 }
 
+// ★HYK-464-watch-start-axis-1 ⓒ: excludedUndeliveredLogSegment와 동일한
+// "상한 + N_more" 관례(새 형식 발명 0) -- 관측 불가 항목이 없으면(가장
+// 흔한 정상 회차) 이 축의 로그 줄에 아무 것도 더하지 않는다(null).
+function formatSizeObservationUnavailableEntry(item) {
+  const worktree = worktreeShortName(
+    isPlainObject(item) ? item.worktreePath : null,
+  );
+  const code = sanitizeFailureToken(
+    isPlainObject(item) ? item.reasonCode : null,
+    "unknown_reason",
+  );
+  return `${worktree}:${code}`;
+}
+
+function sizeObservationUnavailableLogSegment(items) {
+  if (!Array.isArray(items) || items.length === 0) return null;
+  const shown = items
+    .slice(0, MAX_PARTIAL_FAILURE_ITEMS)
+    .map(formatSizeObservationUnavailableEntry);
+  const omitted = items.length - shown.length;
+  const detail =
+    omitted > 0 ? `${shown.join("|")}|+${omitted}_more` : shown.join("|");
+  return `start_size_observation_unavailable=${items.length} start_size_observation_unavailable_detail=${detail}`;
+}
+
 function buildSeatIdleStartUnconsumedSegments(
   detectorResult,
   unconsumedVanish,
@@ -1403,6 +1464,7 @@ function buildAxisLogSegments(
     startFailureSegment,
     startReasonDetail,
     startExcludedUndeliveredDetail,
+    startSizeObservationUnavailableDetail,
     unconsumedSegment,
     unconsumedReasonDetail,
     unconsumedWorstDetail,
@@ -1452,6 +1514,7 @@ function buildAxisLogSegments(
     startFailureSegment,
     startReasonDetail,
     startExcludedUndeliveredDetail,
+    startSizeObservationUnavailableDetail,
     unconsumedSegment,
     unconsumedReasonDetail,
     unconsumedWorstDetail,
@@ -1589,6 +1652,12 @@ export function buildLogLine({
     segments.seatExcludedUndeliveredDetail,
     segments.idleExcludedUndeliveredDetail,
     segments.startExcludedUndeliveredDetail,
+    // HYK-464-watch-start-axis-1 ⓒ: 이 세그먼트도 지금 이 시점의 맨 끝이다
+    // -- 앞선 모든 세그먼트의 필드·순서·값은 이 라운드가 손대지 않았다.
+    // 관측 불가 항목이 없는(가장 흔한) 호출자는
+    // sizeObservationUnavailableLogSegment가 null을 돌려주므로
+    // (filter(Boolean)) 로그 줄이 한 글자도 달라지지 않는다(회귀 0).
+    segments.startSizeObservationUnavailableDetail,
   ]
     .filter(Boolean)
     .join(" ");

@@ -1806,6 +1806,24 @@ function saveDispatchStartStore(storePath, store, opts) {
 // 같은 배달(dispatchId 동일)이면 저장된 관측 뒤에 이번 관측을 이어붙이고,
 // 배달이 바뀌었으면(새 태스크가 드롭됨) 히스토리를 새로 시작한다 -- 지난
 // 배달의 관측이 이번 배달의 "전진" 판정에 섞이지 않게 한다.
+//
+// ★HYK-464-watch-start-axis-1 ⓐ(판정 §1 ⑴/§2 ⓐ, P2-1): 수리 전에는
+// 길이가 MAX_STORED_DISPATCH_START_OBSERVATIONS를 넘으면 그냥 "가장 최근
+// N개"만 남겼다 -- 그러면 "배달 뒤 첫 관측"(기준점, totalBytes가 실제로
+// 늘기 시작한 그 시점)이 창 밖으로 밀려날 수 있다. judgeDispatchStartBySize
+// (dispatch-start-size-core.mjs computeLastGrowthAtMs/computeSustainedAtMs)
+// 는 둘 다 "정렬된 관측열의 첫 항목"을 성장의 기준선(runningMax 시작값)
+// 으로 쓴다 -- 기준점이 빠지면 창에 남은 나머지가 전부 같은(이미 자란)
+// 값이라 "그 뒤로 전혀 안 늘었다"로 보여, STALLED_AFTER_START(시작은
+// 했다가 멈춤)가 NOT_STARTED/NO_GROWTH_PAST_TIMEOUT(애초에 시작도 못 함)
+// 과 같은 사유로 재배달 후보에 오른다 -- 사람 조치가 다른 두 상태(§2
+// 항4, dispatch-start-size-core.mjs:45-48)가 창이 잘리는 순간 구별
+// 불가능해진다(coder-task.md §1 1b_shown, "관측 창이 잘려도 '착수 뒤
+// 정지' 판정이 진짜 미착수로 되돌아가지 않아야" 요구).
+//
+// 수리: 자를 때 맨 앞(= 이번 배달의 첫 관측, 기준점)은 항상 보존하고,
+// 나머지 자리(N-1개)만 "가장 최근 것"으로 채운다. 창이 아직 다 안 찼으면
+// (길이 <= N) 기존과 완전히 동일(byte-identical, 자르기 자체가 안 일어남).
 function nextObservationsForDispatch(prevEntry, dispatch, observation) {
   const sameDispatch =
     prevEntry && prevEntry.dispatchId === dispatch.dispatchId;
@@ -1814,9 +1832,13 @@ function nextObservationsForDispatch(prevEntry, dispatch, observation) {
       ? prevEntry.observations
       : [];
   const combined = [...prevObservations, observation];
-  return combined.length > MAX_STORED_DISPATCH_START_OBSERVATIONS
-    ? combined.slice(combined.length - MAX_STORED_DISPATCH_START_OBSERVATIONS)
-    : combined;
+  if (combined.length <= MAX_STORED_DISPATCH_START_OBSERVATIONS) {
+    return combined;
+  }
+  const baseline = combined[0];
+  const recentSlotCount = MAX_STORED_DISPATCH_START_OBSERVATIONS - 1;
+  const recent = combined.slice(combined.length - recentSlotCount);
+  return [baseline, ...recent];
 }
 
 // ---- HYK-464-watch-collection-1 ⓒ (coder-task.md §2 ⓒ) -- 착수 축이
@@ -1874,13 +1896,55 @@ export const DISPATCH_START_OVERRIDE_REASON = Object.freeze({
 // `os.homedir()`는 opts.osHomedirFn으로만 바꿀 수 있게 열어 둔다(실 환경
 // 값은 그대로, 시험만 주입 -- claudeHomeDir 전체 주입과 별개로 "기본
 // 경로 자체"를 시험이 지나가게 하는 유일한 통로).
-function resolveClaudeHomeDir(opts) {
+//
+// ★HYK-464-watch-start-axis-1 ⓑ(판정 §1 ⑶/§2 ⓑ, P3-1): 이 함수는
+// 지금까지 엔진과 무관하게 항상 `.claude-team`을 돌려줬다 -- codex 좌석
+// 워크트리를 관측할 때도 claude 좌석의 집을 본 것과 같다(관측 자체가
+// 틀린 폴더를 본다, 조회가 "성공"해도 틀렸다).
+//
+// 배달기 쪽 출처(읽기만, 한 글자도 안 바꿈. D:\문서관리\하네스-관제실\
+// orca-worker-seat.ps1 -- 이 경로는 관제실 고정 위치이며 이 축이 이미
+// 읽는 DEFAULT_DISPATCH_START_STORE_PATH와 같은 "저장소 밖" 성격이다):
+//   :56 `$Engine = if ($Role -eq "REVIEW" -or $Role -eq "PM") { "codex" } else { "claude" }`
+//   :79 (codex 분기) `$env:CODEX_HOME = $env:ORCA_CODEX_HOME`
+//   :95 (claude 분기, 기존 분기 그대로) `$env:CLAUDE_CONFIG_DIR = "C:\Users\Administrator\.claude-team"`
+// 이 세 줄과 "같은 규칙"을 그대로 쓴다(새 규칙 0) -- role→engine 매핑도
+// 배달기의 기본값 그대로, codex의 집도 배달기가 읽는 그 env var 이름
+// (`ORCA_CODEX_HOME`) 그대로다. ⛔한계(정직 한계, universal_claim_discipline):
+// 배달기는 `-Engine` 인자로 이 기본값을 덮어쓸 수 있다(HYK-472) -- 이
+// 축은 그 덮어쓰기를 볼 방법이 없다(새 orca 호출 0 제약, §2-3 그대로
+// 승계). role 기본값과 실제 엔진이 갈리면(예: CODER를 -Engine codex로
+// 띄움) 이 축은 틀린 집을 본다 -- 조용히 틀린 값을 내는 게 아니라
+// "그 집에서 못 찾음"(observationUnavailable)으로 떨어질 뿐이지,
+// 적극적으로 옳은 집을 찾아내지는 못한다(알려진 한계로 남긴다).
+function resolveSeatEngineHint(role) {
+  const upper = typeof role === "string" ? role.toUpperCase() : "";
+  return upper === "REVIEW" || upper === "PM" ? "codex" : "claude";
+}
+
+// resolveClaudeHomeDir(opts, engineHint) -> {ok:true, homeDir} |
+// {ok:false} -- claude는 기존과 완전히 동일한 분기(byte-identical, 이름도
+// 안 바꿈: 호출부가 이미 opts.claudeHomeDir로 이 함수 전체를 우회할 수
+// 있다는 계약을 그대로 지킨다). codex는 `ORCA_CODEX_HOME`을 읽고, 그
+// 값이 없으면(미설정) `ok:false`로 "못 읽음"을 드러낸다 -- 조용히
+// `.claude-team`으로 낙하하지 않는다(§2 ⓑ "조용한 낙하 금지").
+function resolveClaudeHomeDir(opts, engineHint) {
   if (typeof opts.claudeHomeDir === "string" && opts.claudeHomeDir) {
-    return opts.claudeHomeDir;
+    return { ok: true, homeDir: opts.claudeHomeDir };
+  }
+  if (engineHint === "codex") {
+    const codexHomeEnvFn =
+      typeof opts.codexHomeEnvFn === "function"
+        ? opts.codexHomeEnvFn
+        : () => process.env.ORCA_CODEX_HOME;
+    const codexHome = codexHomeEnvFn();
+    return typeof codexHome === "string" && codexHome.length > 0
+      ? { ok: true, homeDir: codexHome }
+      : { ok: false };
   }
   const homedirFn =
     typeof opts.osHomedirFn === "function" ? opts.osHomedirFn : os.homedir;
-  return path.join(homedirFn(), ".claude-team");
+  return { ok: true, homeDir: path.join(homedirFn(), ".claude-team") };
 }
 
 // collectTotalSessionBytes 자신의 계약(dispatch-start-size-adapter.mjs
@@ -1889,7 +1953,7 @@ function resolveClaudeHomeDir(opts) {
 // 예기치 못하게 throw해도(이 코어는 보통 throw 대신 `{ok:false}`를
 // 돌려주지만, 방어적으로) "착수"로 새지 않도록 여기서 삼켜 `ok:false`로
 // 접는다.
-function collectSessionSizeObservation(repoRoot, opts) {
+function collectSessionSizeObservation(repoRoot, engineHint, opts) {
   const collectFn =
     typeof opts.collectSessionSizeFn === "function"
       ? opts.collectSessionSizeFn
@@ -1900,11 +1964,24 @@ function collectSessionSizeObservation(repoRoot, opts) {
             lstatFn: opts.sessionSizeLstatFn,
             realpathFn: opts.sessionSizeRealpathFn,
           });
+  // ★HYK-464-watch-start-axis-1 ⓑ: 집 출처를 못 읽으면(codex 좌석인데
+  // ORCA_CODEX_HOME 미설정) collectFn을 아예 부르지 않고 바로
+  // observationUnavailable로 접는다(§2 ⓑ "조용한 낙하 금지") -- 이 자리는
+  // 기존 ⓒ(아래) 구멍과 정확히 같은 모양이므로 같은 reasonCode를
+  // 재사용한다(새 사유 코드 0).
+  const resolvedHome = resolveClaudeHomeDir(opts, engineHint);
+  if (!resolvedHome.ok) {
+    return {
+      ok: false,
+      reasonCode: "DISPATCH_START_SIZE_OBSERVATION_UNAVAILABLE",
+      observationUnavailable: true,
+    };
+  }
   let collected;
   try {
     collected = collectFn({
       repoRoot,
-      claudeHomeDir: resolveClaudeHomeDir(opts),
+      claudeHomeDir: resolvedHome.homeDir,
     });
   } catch (err) {
     return {
@@ -2018,7 +2095,14 @@ function persistAndJudgeDispatchStart(
       dispatch,
     };
   }
-  const sizeCollected = collectSessionSizeObservation(repoRoot, opts);
+  // ★HYK-464-watch-start-axis-1 ⓑ: dispatch.role(judgeDispatchStartForRepo
+  // 가 active.deliveryReceipt.role에서 채운다, 아래)로 집 출처를 고른다.
+  const engineHint = resolveSeatEngineHint(dispatch.role);
+  const sizeCollected = collectSessionSizeObservation(
+    repoRoot,
+    engineHint,
+    opts,
+  );
   const currentObservation = {
     observedAtMs: now,
     lastOutputAt: observation.lastOutputAt,
@@ -2072,6 +2156,19 @@ function persistAndJudgeDispatchStart(
     reasonCode: judged.reasonCode,
     details: judged.details,
     dispatch,
+    // ★HYK-464-watch-start-axis-1 ⓒ(판정 §1 ⑷/§2 ⓒ, P3-2): sizeCollected가
+    // 이번 회차 관측 불가로 떨어지면(ok!==true) 그 사유 코드를 여기서
+    // 버리지 않고 결과에 함께 싣는다 -- 지금까지는 currentObservation에
+    // totalBytes를 안 싣는 자리로만 쓰이고 사라졌다(판정 반환값에만
+    // 남고 watch.log/last-run.json 산출물에는 한 글자도 안 남았다, 위
+    // collectSessionSizeObservation 헤더 "observationUnavailable 회차는
+    // 화면 쪽 reasonCode를 덮어쓰지 않는다" 참조 -- 그 설명대로 "덮어쓰지
+    // 않을 뿐"이지 "표면화된다"는 뜻이 아니었다). 정상 회차(sizeCollected.
+    // ok===true)는 이 필드가 없다(undefined) -- watch-run.mjs 쪽 수집기가
+    // "없으면 0건"으로 접으므로 정상 회차에 산출물 소음이 늘지 않는다.
+    ...(sizeCollected.ok !== true
+      ? { sizeObservationReasonCode: sizeCollected.reasonCode ?? null }
+      : {}),
     ...(correlation ? { correlation } : {}),
   };
 }
@@ -2087,9 +2184,15 @@ export function judgeDispatchStartForRepo(
   if (!active) {
     return { status: DISPATCH_START_WIRE_STATUS.NOT_APPLICABLE };
   }
+  // ★HYK-464-watch-start-axis-1 ⓑ: role은 active.deliveryReceipt.role에
+  // 이미 있다(checkDeliveryReceiptCoverage -> roleFromTaskFileName, 파일명
+  // `<role>-task.md`에서 파생 -- 새 파싱 0, 기존 값을 그대로 옮긴다).
+  // persistAndJudgeDispatchStart가 이 값으로 집 출처(claude/codex)를
+  // 고른다(resolveSeatEngineHint, 위).
   const dispatch = {
     dispatchId: active.path,
     dispatchedAtMs: active.droppedAtMs,
+    role: active.deliveryReceipt ? active.deliveryReceipt.role : null,
   };
   const execFn =
     typeof opts.execFn === "function" ? opts.execFn : createOrcaExecFn();
