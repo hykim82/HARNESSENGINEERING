@@ -1824,6 +1824,17 @@ function saveDispatchStartStore(storePath, store, opts) {
 // 수리: 자를 때 맨 앞(= 이번 배달의 첫 관측, 기준점)은 항상 보존하고,
 // 나머지 자리(N-1개)만 "가장 최근 것"으로 채운다. 창이 아직 다 안 찼으면
 // (길이 <= N) 기존과 완전히 동일(byte-identical, 자르기 자체가 안 일어남).
+//
+// ★HYK-464-watch-start-axis-1 r2 P2-2(REVIEW-r1.md §2 ⓑ 반려 수리):
+// 보존할 기준점은 "창의 첫 항목"(combined[0])이 아니라 "바이트가 처음
+// 관측된 항목"(typeof totalBytes === "number"인 첫 항목)이어야 한다 --
+// 배달 뒤 첫 회차가 관측 불가(totalBytes 없음)로 떨어지면, combined[0]을
+// 그대로 보존하는 옛 방식은 "크기 증거가 전혀 없는 빈 항목"을 지키는
+// 셈이라(size 판정은 `typeof o.totalBytes === "number"`로 거른 열만
+// 보므로 그 빈 항목은 애초에 안 걸러진다) 진짜 기준점(그 다음 회차의
+// 실측 바이트)이 창 밖으로 밀려난다. 바이트가 한 번도 관측되지 않은
+// 좌석(반대 방향)은 `baselineIndex === -1`이라 combined[0]을 그대로
+// 쓰므로 기존 판정과 같다(회귀 0).
 function nextObservationsForDispatch(prevEntry, dispatch, observation) {
   const sameDispatch =
     prevEntry && prevEntry.dispatchId === dispatch.dispatchId;
@@ -1835,10 +1846,20 @@ function nextObservationsForDispatch(prevEntry, dispatch, observation) {
   if (combined.length <= MAX_STORED_DISPATCH_START_OBSERVATIONS) {
     return combined;
   }
-  const baseline = combined[0];
   const recentSlotCount = MAX_STORED_DISPATCH_START_OBSERVATIONS - 1;
-  const recent = combined.slice(combined.length - recentSlotCount);
-  return [baseline, ...recent];
+  const recentStartIndex = combined.length - recentSlotCount;
+  const recent = combined.slice(recentStartIndex);
+  const baselineIndex = combined.findIndex(
+    (o) => typeof o.totalBytes === "number",
+  );
+  // 바이트가 한 번도 관측되지 않았거나(baselineIndex === -1), 바이트를
+  // 가진 첫 항목이 이미 "최근" 구간 안에 있으면(연속 관측 불가가
+  // recentSlotCount보다 길게 이어진 극단 사례 -- 별도 슬롯이 필요
+  // 없다·중복 방지) combined[0]을 그대로 쓴다(기존 동작).
+  if (baselineIndex === -1 || baselineIndex >= recentStartIndex) {
+    return [combined[0], ...recent];
+  }
+  return [combined[baselineIndex], ...recent];
 }
 
 // ---- HYK-464-watch-collection-1 ⓒ (coder-task.md §2 ⓒ) -- 착수 축이
@@ -1897,54 +1918,30 @@ export const DISPATCH_START_OVERRIDE_REASON = Object.freeze({
 // 값은 그대로, 시험만 주입 -- claudeHomeDir 전체 주입과 별개로 "기본
 // 경로 자체"를 시험이 지나가게 하는 유일한 통로).
 //
-// ★HYK-464-watch-start-axis-1 ⓑ(판정 §1 ⑶/§2 ⓑ, P3-1): 이 함수는
-// 지금까지 엔진과 무관하게 항상 `.claude-team`을 돌려줬다 -- codex 좌석
-// 워크트리를 관측할 때도 claude 좌석의 집을 본 것과 같다(관측 자체가
-// 틀린 폴더를 본다, 조회가 "성공"해도 틀렸다).
-//
-// 배달기 쪽 출처(읽기만, 한 글자도 안 바꿈. D:\문서관리\하네스-관제실\
-// orca-worker-seat.ps1 -- 이 경로는 관제실 고정 위치이며 이 축이 이미
-// 읽는 DEFAULT_DISPATCH_START_STORE_PATH와 같은 "저장소 밖" 성격이다):
-//   :56 `$Engine = if ($Role -eq "REVIEW" -or $Role -eq "PM") { "codex" } else { "claude" }`
-//   :79 (codex 분기) `$env:CODEX_HOME = $env:ORCA_CODEX_HOME`
-//   :95 (claude 분기, 기존 분기 그대로) `$env:CLAUDE_CONFIG_DIR = "C:\Users\Administrator\.claude-team"`
-// 이 세 줄과 "같은 규칙"을 그대로 쓴다(새 규칙 0) -- role→engine 매핑도
-// 배달기의 기본값 그대로, codex의 집도 배달기가 읽는 그 env var 이름
-// (`ORCA_CODEX_HOME`) 그대로다. ⛔한계(정직 한계, universal_claim_discipline):
-// 배달기는 `-Engine` 인자로 이 기본값을 덮어쓸 수 있다(HYK-472) -- 이
-// 축은 그 덮어쓰기를 볼 방법이 없다(새 orca 호출 0 제약, §2-3 그대로
-// 승계). role 기본값과 실제 엔진이 갈리면(예: CODER를 -Engine codex로
-// 띄움) 이 축은 틀린 집을 본다 -- 조용히 틀린 값을 내는 게 아니라
-// "그 집에서 못 찾음"(observationUnavailable)으로 떨어질 뿐이지,
-// 적극적으로 옳은 집을 찾아내지는 못한다(알려진 한계로 남긴다).
-function resolveSeatEngineHint(role) {
-  const upper = typeof role === "string" ? role.toUpperCase() : "";
-  return upper === "REVIEW" || upper === "PM" ? "codex" : "claude";
-}
+// ★HYK-464-watch-start-axis-1 r2(판정 2026-10-22 15:45 §1, REVIEW-r1.md
+// §2 ⓒ P1 반려 수리) -- ⓑ codex 좌석 분기(resolveSeatEngineHint·
+// `ORCA_CODEX_HOME` 읽기·`dispatch.role` 결선)를 전부 걷어낸다. 반려
+// 근거(읽기만, 한 글자도 안 바꿈): REVIEW 배달의 실 운용 다수 형태는
+// REVIEW=claude(실측 `seat-launch-registry.jsonl` 집계, 이 저장소
+// 워크트리만 REVIEW/claude 76 · REVIEW/codex 1)인데, 역할 낙하값만으로
+// "REVIEW=codex"로 단정한 이 분기가 claude로 뜬 REVIEW 좌석의 크기
+// 증거를 잃게 해 STARTED를 NOT_STARTED(SUSPECTED_NOT_STARTED)로
+// 오판시켰다(#323이 고친 "화면 멈춤=거짓 NOT_STARTED"의 재발). 배달기
+// (`dispatch-worker.ps1`) 자신도 이 "역할 낙하값" 규칙을 이미 폐기하고
+// 좌석 실측(`seat-engine-detect.mjs`)으로 바꿨다 -- 감시 쪽만 옛 규칙을
+// 새로 들여왔던 것. codex 쪽 실측 엔진 출처 연동은 범위 밖으로 미룬다
+// (별도 조각 464-후속-2, 책임자 판정 2026-10-22 15:45).
 
-// resolveClaudeHomeDir(opts, engineHint) -> {ok:true, homeDir} |
-// {ok:false} -- claude는 기존과 완전히 동일한 분기(byte-identical, 이름도
-// 안 바꿈: 호출부가 이미 opts.claudeHomeDir로 이 함수 전체를 우회할 수
-// 있다는 계약을 그대로 지킨다). codex는 `ORCA_CODEX_HOME`을 읽고, 그
-// 값이 없으면(미설정) `ok:false`로 "못 읽음"을 드러낸다 -- 조용히
-// `.claude-team`으로 낙하하지 않는다(§2 ⓑ "조용한 낙하 금지").
-function resolveClaudeHomeDir(opts, engineHint) {
+// resolveClaudeHomeDir(opts) -- r2: codex 분기 제거, adf352d와
+// byte-identical(이름도 안 바꿈: 호출부가 이미 opts.claudeHomeDir로 이
+// 함수 전체를 우회할 수 있다는 계약을 그대로 지킨다).
+function resolveClaudeHomeDir(opts) {
   if (typeof opts.claudeHomeDir === "string" && opts.claudeHomeDir) {
-    return { ok: true, homeDir: opts.claudeHomeDir };
-  }
-  if (engineHint === "codex") {
-    const codexHomeEnvFn =
-      typeof opts.codexHomeEnvFn === "function"
-        ? opts.codexHomeEnvFn
-        : () => process.env.ORCA_CODEX_HOME;
-    const codexHome = codexHomeEnvFn();
-    return typeof codexHome === "string" && codexHome.length > 0
-      ? { ok: true, homeDir: codexHome }
-      : { ok: false };
+    return opts.claudeHomeDir;
   }
   const homedirFn =
     typeof opts.osHomedirFn === "function" ? opts.osHomedirFn : os.homedir;
-  return { ok: true, homeDir: path.join(homedirFn(), ".claude-team") };
+  return path.join(homedirFn(), ".claude-team");
 }
 
 // collectTotalSessionBytes 자신의 계약(dispatch-start-size-adapter.mjs
@@ -1953,7 +1950,7 @@ function resolveClaudeHomeDir(opts, engineHint) {
 // 예기치 못하게 throw해도(이 코어는 보통 throw 대신 `{ok:false}`를
 // 돌려주지만, 방어적으로) "착수"로 새지 않도록 여기서 삼켜 `ok:false`로
 // 접는다.
-function collectSessionSizeObservation(repoRoot, engineHint, opts) {
+function collectSessionSizeObservation(repoRoot, opts) {
   const collectFn =
     typeof opts.collectSessionSizeFn === "function"
       ? opts.collectSessionSizeFn
@@ -1964,24 +1961,11 @@ function collectSessionSizeObservation(repoRoot, engineHint, opts) {
             lstatFn: opts.sessionSizeLstatFn,
             realpathFn: opts.sessionSizeRealpathFn,
           });
-  // ★HYK-464-watch-start-axis-1 ⓑ: 집 출처를 못 읽으면(codex 좌석인데
-  // ORCA_CODEX_HOME 미설정) collectFn을 아예 부르지 않고 바로
-  // observationUnavailable로 접는다(§2 ⓑ "조용한 낙하 금지") -- 이 자리는
-  // 기존 ⓒ(아래) 구멍과 정확히 같은 모양이므로 같은 reasonCode를
-  // 재사용한다(새 사유 코드 0).
-  const resolvedHome = resolveClaudeHomeDir(opts, engineHint);
-  if (!resolvedHome.ok) {
-    return {
-      ok: false,
-      reasonCode: "DISPATCH_START_SIZE_OBSERVATION_UNAVAILABLE",
-      observationUnavailable: true,
-    };
-  }
   let collected;
   try {
     collected = collectFn({
       repoRoot,
-      claudeHomeDir: resolvedHome.homeDir,
+      claudeHomeDir: resolveClaudeHomeDir(opts),
     });
   } catch (err) {
     return {
@@ -2095,14 +2079,7 @@ function persistAndJudgeDispatchStart(
       dispatch,
     };
   }
-  // ★HYK-464-watch-start-axis-1 ⓑ: dispatch.role(judgeDispatchStartForRepo
-  // 가 active.deliveryReceipt.role에서 채운다, 아래)로 집 출처를 고른다.
-  const engineHint = resolveSeatEngineHint(dispatch.role);
-  const sizeCollected = collectSessionSizeObservation(
-    repoRoot,
-    engineHint,
-    opts,
-  );
+  const sizeCollected = collectSessionSizeObservation(repoRoot, opts);
   const currentObservation = {
     observedAtMs: now,
     lastOutputAt: observation.lastOutputAt,
@@ -2184,15 +2161,9 @@ export function judgeDispatchStartForRepo(
   if (!active) {
     return { status: DISPATCH_START_WIRE_STATUS.NOT_APPLICABLE };
   }
-  // ★HYK-464-watch-start-axis-1 ⓑ: role은 active.deliveryReceipt.role에
-  // 이미 있다(checkDeliveryReceiptCoverage -> roleFromTaskFileName, 파일명
-  // `<role>-task.md`에서 파생 -- 새 파싱 0, 기존 값을 그대로 옮긴다).
-  // persistAndJudgeDispatchStart가 이 값으로 집 출처(claude/codex)를
-  // 고른다(resolveSeatEngineHint, 위).
   const dispatch = {
     dispatchId: active.path,
     dispatchedAtMs: active.droppedAtMs,
-    role: active.deliveryReceipt ? active.deliveryReceipt.role : null,
   };
   const execFn =
     typeof opts.execFn === "function" ? opts.execFn : createOrcaExecFn();
