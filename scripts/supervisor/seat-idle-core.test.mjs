@@ -130,13 +130,20 @@ test("static: seat-idle-core.mjs never uses SEAT_LIVENESS_* vocabulary in actual
 });
 
 // ---------------------------------------------------------------------------
-// (b) 닫힌 3상태 + fail-closed.
+// (b) 닫힌 4상태(HYK-464-idle-stop-reason-1까지: PARKED_WITH_REASON 추가,
+// §2ⓒ "판정 입력 1개 추가" -- stopReasonId가 없으면 이 새 상태로 새지
+// 않는다, 아래 (a)(비타협) 시험이 고정) + fail-closed.
 // ---------------------------------------------------------------------------
-test("closed 3-state: verdict is always one of IDLE_OK/SUSPECTED_ABANDONED/UNDECIDABLE (4/4 arbitrary inputs)", () => {
+test("closed 4-state: verdict is always one of IDLE_OK/SUSPECTED_ABANDONED/UNDECIDABLE/PARKED_WITH_REASON (4/4 arbitrary inputs)", () => {
   const closedSet = new Set(Object.values(SEAT_IDLE_VERDICT));
   assert.deepEqual(
     [...closedSet].sort(),
-    ["IDLE_OK", "SUSPECTED_ABANDONED", "UNDECIDABLE"].sort(),
+    [
+      "IDLE_OK",
+      "SUSPECTED_ABANDONED",
+      "UNDECIDABLE",
+      "PARKED_WITH_REASON",
+    ].sort(),
   );
   const cases = [
     undefined,
@@ -369,6 +376,65 @@ test("default threshold: DEFAULT_MAX_ABANDONED_SECONDS is a positive finite numb
     // thresholds 생략.
   });
   assert.equal(result.verdict, SEAT_IDLE_VERDICT.IDLE_OK);
+});
+
+// ---------------------------------------------------------------------------
+// HYK-464-idle-stop-reason-1 (coder-task.md §2ⓒ) -- 새 입력 1개
+// (`stopReasonId`)의 판정 행동. "기존 판정 규칙 무변"(§2ⓒ 원문)을
+// 두 각도로 고정한다: (1) 생략하면 바이트 동일(아래 (1)), (2) 과거
+// 시각(pastThreshold)이 아니면 stopReasonId가 있어도 영향이 없다(아래
+// (2) -- IDLE_OK는 여전히 IDLE_OK, PARKED_WITH_REASON으로 새지 않는다).
+// ---------------------------------------------------------------------------
+test("(1) stopReasonId 생략 -> 오늘의 13.75h 방치 표본이 바이트 동일하게 SUSPECTED_ABANDONED(새 입력이 없으면 기존 판정 규칙 무변, §2ⓒ)", () => {
+  const lastOutputAt = IDLE_BASE_AT;
+  const now = IDLE_BASE_AT + 13.75 * 60 * 60 * 1000;
+  const result = judgeSeatIdle({
+    observation: { observedAtMs: now, lastOutputAt },
+    now,
+    // stopReasonId 생략.
+  });
+  assert.equal(result.verdict, SEAT_IDLE_VERDICT.SUSPECTED_ABANDONED);
+  assert.equal(result.reasonCode, SEAT_IDLE_REASON.NO_OUTPUT_PAST_THRESHOLD);
+});
+
+test("(2) stopReasonId가 있어도 pastThreshold가 아니면(아직 정상 유휴) IDLE_OK 그대로 -- PARKED_WITH_REASON으로 새지 않는다", () => {
+  const lastOutputAt = IDLE_BASE_AT;
+  const now = IDLE_BASE_AT + 10 * 60 * 1000; // 10분, 문턱 한참 안쪽.
+  const result = judgeSeatIdle({
+    observation: { observedAtMs: now, lastOutputAt },
+    now,
+    stopReasonId: "HYK-464-merge-wait-1",
+  });
+  assert.equal(result.verdict, SEAT_IDLE_VERDICT.IDLE_OK);
+  assert.notEqual(result.verdict, SEAT_IDLE_VERDICT.PARKED_WITH_REASON);
+});
+
+test("(3) stopReasonId가 있고 pastThreshold -- 오늘의 13.75h 방치 표본이 SUSPECTED_ABANDONED 대신 PARKED_WITH_REASON으로 갈리고, details.openStopReasonId에 그 id가 그대로 실린다", () => {
+  const lastOutputAt = IDLE_BASE_AT;
+  const now = IDLE_BASE_AT + 13.75 * 60 * 60 * 1000;
+  const result = judgeSeatIdle({
+    observation: { observedAtMs: now, lastOutputAt },
+    now,
+    stopReasonId: "HYK-464-merge-wait-1",
+  });
+  assert.equal(result.verdict, SEAT_IDLE_VERDICT.PARKED_WITH_REASON);
+  assert.equal(result.reasonCode, SEAT_IDLE_REASON.PARKED_WITH_OPEN_REASON);
+  assert.equal(result.details.openStopReasonId, "HYK-464-merge-wait-1");
+  // elapsedMs/referencePointMs 등 기존 details 필드는 그대로 보존된다
+  // (§2ⓒ "기존 판정 규칙 무변" -- openStopReasonId를 덧붙일 뿐 지우지
+  // 않는다).
+  assert.equal(result.details.elapsedMs, now - lastOutputAt);
+});
+
+test("(4) stopReasonId가 빈 문자열이면 '사유 없음'과 동일하게 다룬다(비문자열/빈 문자열은 새 입력으로 치지 않는다)", () => {
+  const lastOutputAt = IDLE_BASE_AT;
+  const now = IDLE_BASE_AT + 13.75 * 60 * 60 * 1000;
+  const result = judgeSeatIdle({
+    observation: { observedAtMs: now, lastOutputAt },
+    now,
+    stopReasonId: "",
+  });
+  assert.equal(result.verdict, SEAT_IDLE_VERDICT.SUSPECTED_ABANDONED);
 });
 
 // ---------------------------------------------------------------------------
