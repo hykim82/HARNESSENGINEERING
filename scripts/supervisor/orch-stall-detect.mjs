@@ -1806,6 +1806,35 @@ function saveDispatchStartStore(storePath, store, opts) {
 // 같은 배달(dispatchId 동일)이면 저장된 관측 뒤에 이번 관측을 이어붙이고,
 // 배달이 바뀌었으면(새 태스크가 드롭됨) 히스토리를 새로 시작한다 -- 지난
 // 배달의 관측이 이번 배달의 "전진" 판정에 섞이지 않게 한다.
+//
+// ★HYK-464-watch-start-axis-1 ⓐ(판정 §1 ⑴/§2 ⓐ, P2-1): 수리 전에는
+// 길이가 MAX_STORED_DISPATCH_START_OBSERVATIONS를 넘으면 그냥 "가장 최근
+// N개"만 남겼다 -- 그러면 "배달 뒤 첫 관측"(기준점, totalBytes가 실제로
+// 늘기 시작한 그 시점)이 창 밖으로 밀려날 수 있다. judgeDispatchStartBySize
+// (dispatch-start-size-core.mjs computeLastGrowthAtMs/computeSustainedAtMs)
+// 는 둘 다 "정렬된 관측열의 첫 항목"을 성장의 기준선(runningMax 시작값)
+// 으로 쓴다 -- 기준점이 빠지면 창에 남은 나머지가 전부 같은(이미 자란)
+// 값이라 "그 뒤로 전혀 안 늘었다"로 보여, STALLED_AFTER_START(시작은
+// 했다가 멈춤)가 NOT_STARTED/NO_GROWTH_PAST_TIMEOUT(애초에 시작도 못 함)
+// 과 같은 사유로 재배달 후보에 오른다 -- 사람 조치가 다른 두 상태(§2
+// 항4, dispatch-start-size-core.mjs:45-48)가 창이 잘리는 순간 구별
+// 불가능해진다(coder-task.md §1 1b_shown, "관측 창이 잘려도 '착수 뒤
+// 정지' 판정이 진짜 미착수로 되돌아가지 않아야" 요구).
+//
+// 수리: 자를 때 맨 앞(= 이번 배달의 첫 관측, 기준점)은 항상 보존하고,
+// 나머지 자리(N-1개)만 "가장 최근 것"으로 채운다. 창이 아직 다 안 찼으면
+// (길이 <= N) 기존과 완전히 동일(byte-identical, 자르기 자체가 안 일어남).
+//
+// ★HYK-464-watch-start-axis-1 r2 P2-2(REVIEW-r1.md §2 ⓑ 반려 수리):
+// 보존할 기준점은 "창의 첫 항목"(combined[0])이 아니라 "바이트가 처음
+// 관측된 항목"(typeof totalBytes === "number"인 첫 항목)이어야 한다 --
+// 배달 뒤 첫 회차가 관측 불가(totalBytes 없음)로 떨어지면, combined[0]을
+// 그대로 보존하는 옛 방식은 "크기 증거가 전혀 없는 빈 항목"을 지키는
+// 셈이라(size 판정은 `typeof o.totalBytes === "number"`로 거른 열만
+// 보므로 그 빈 항목은 애초에 안 걸러진다) 진짜 기준점(그 다음 회차의
+// 실측 바이트)이 창 밖으로 밀려난다. 바이트가 한 번도 관측되지 않은
+// 좌석(반대 방향)은 `baselineIndex === -1`이라 combined[0]을 그대로
+// 쓰므로 기존 판정과 같다(회귀 0).
 function nextObservationsForDispatch(prevEntry, dispatch, observation) {
   const sameDispatch =
     prevEntry && prevEntry.dispatchId === dispatch.dispatchId;
@@ -1814,9 +1843,23 @@ function nextObservationsForDispatch(prevEntry, dispatch, observation) {
       ? prevEntry.observations
       : [];
   const combined = [...prevObservations, observation];
-  return combined.length > MAX_STORED_DISPATCH_START_OBSERVATIONS
-    ? combined.slice(combined.length - MAX_STORED_DISPATCH_START_OBSERVATIONS)
-    : combined;
+  if (combined.length <= MAX_STORED_DISPATCH_START_OBSERVATIONS) {
+    return combined;
+  }
+  const recentSlotCount = MAX_STORED_DISPATCH_START_OBSERVATIONS - 1;
+  const recentStartIndex = combined.length - recentSlotCount;
+  const recent = combined.slice(recentStartIndex);
+  const baselineIndex = combined.findIndex(
+    (o) => typeof o.totalBytes === "number",
+  );
+  // 바이트가 한 번도 관측되지 않았거나(baselineIndex === -1), 바이트를
+  // 가진 첫 항목이 이미 "최근" 구간 안에 있으면(연속 관측 불가가
+  // recentSlotCount보다 길게 이어진 극단 사례 -- 별도 슬롯이 필요
+  // 없다·중복 방지) combined[0]을 그대로 쓴다(기존 동작).
+  if (baselineIndex === -1 || baselineIndex >= recentStartIndex) {
+    return [combined[0], ...recent];
+  }
+  return [combined[baselineIndex], ...recent];
 }
 
 // ---- HYK-464-watch-collection-1 ⓒ (coder-task.md §2 ⓒ) -- 착수 축이
@@ -1874,6 +1917,24 @@ export const DISPATCH_START_OVERRIDE_REASON = Object.freeze({
 // `os.homedir()`는 opts.osHomedirFn으로만 바꿀 수 있게 열어 둔다(실 환경
 // 값은 그대로, 시험만 주입 -- claudeHomeDir 전체 주입과 별개로 "기본
 // 경로 자체"를 시험이 지나가게 하는 유일한 통로).
+//
+// ★HYK-464-watch-start-axis-1 r2(판정 2026-10-22 15:45 §1, REVIEW-r1.md
+// §2 ⓒ P1 반려 수리) -- ⓑ codex 좌석 분기(resolveSeatEngineHint·
+// `ORCA_CODEX_HOME` 읽기·`dispatch.role` 결선)를 전부 걷어낸다. 반려
+// 근거(읽기만, 한 글자도 안 바꿈): REVIEW 배달의 실 운용 다수 형태는
+// REVIEW=claude(실측 `seat-launch-registry.jsonl` 집계, 이 저장소
+// 워크트리만 REVIEW/claude 76 · REVIEW/codex 1)인데, 역할 낙하값만으로
+// "REVIEW=codex"로 단정한 이 분기가 claude로 뜬 REVIEW 좌석의 크기
+// 증거를 잃게 해 STARTED를 NOT_STARTED(SUSPECTED_NOT_STARTED)로
+// 오판시켰다(#323이 고친 "화면 멈춤=거짓 NOT_STARTED"의 재발). 배달기
+// (`dispatch-worker.ps1`) 자신도 이 "역할 낙하값" 규칙을 이미 폐기하고
+// 좌석 실측(`seat-engine-detect.mjs`)으로 바꿨다 -- 감시 쪽만 옛 규칙을
+// 새로 들여왔던 것. codex 쪽 실측 엔진 출처 연동은 범위 밖으로 미룬다
+// (별도 조각 464-후속-2, 책임자 판정 2026-10-22 15:45).
+
+// resolveClaudeHomeDir(opts) -- r2: codex 분기 제거, adf352d와
+// byte-identical(이름도 안 바꿈: 호출부가 이미 opts.claudeHomeDir로 이
+// 함수 전체를 우회할 수 있다는 계약을 그대로 지킨다).
 function resolveClaudeHomeDir(opts) {
   if (typeof opts.claudeHomeDir === "string" && opts.claudeHomeDir) {
     return opts.claudeHomeDir;
@@ -2072,6 +2133,19 @@ function persistAndJudgeDispatchStart(
     reasonCode: judged.reasonCode,
     details: judged.details,
     dispatch,
+    // ★HYK-464-watch-start-axis-1 ⓒ(판정 §1 ⑷/§2 ⓒ, P3-2): sizeCollected가
+    // 이번 회차 관측 불가로 떨어지면(ok!==true) 그 사유 코드를 여기서
+    // 버리지 않고 결과에 함께 싣는다 -- 지금까지는 currentObservation에
+    // totalBytes를 안 싣는 자리로만 쓰이고 사라졌다(판정 반환값에만
+    // 남고 watch.log/last-run.json 산출물에는 한 글자도 안 남았다, 위
+    // collectSessionSizeObservation 헤더 "observationUnavailable 회차는
+    // 화면 쪽 reasonCode를 덮어쓰지 않는다" 참조 -- 그 설명대로 "덮어쓰지
+    // 않을 뿐"이지 "표면화된다"는 뜻이 아니었다). 정상 회차(sizeCollected.
+    // ok===true)는 이 필드가 없다(undefined) -- watch-run.mjs 쪽 수집기가
+    // "없으면 0건"으로 접으므로 정상 회차에 산출물 소음이 늘지 않는다.
+    ...(sizeCollected.ok !== true
+      ? { sizeObservationReasonCode: sizeCollected.reasonCode ?? null }
+      : {}),
     ...(correlation ? { correlation } : {}),
   };
 }

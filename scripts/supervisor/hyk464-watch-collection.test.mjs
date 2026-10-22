@@ -1173,3 +1173,759 @@ test("NC mutation/hyk464 #4 (필수, ⓓ⑶): 영수증 파일 읽기 실패를 
     assert.equal(mutant.selectActiveDispatch(evidence.items), null);
   });
 });
+
+// ===========================================================================
+// HYK-464-watch-start-axis-1 (coder-task.md §2) -- 464 후속 "착수 축" 세
+// 칸: ⓐ 관측 창이 잘려도 기준점(배달 뒤 첫 관측) 보존 ⓑ codex 좌석은
+// ORCA_CODEX_HOME에서 세션 크기를 본다(배달기와 같은 출처) ⓒ "집 관측
+// 불가" 사유 코드가 watch.log/last-run.json까지 닿는다.
+// ===========================================================================
+
+test("ⓐ 수리: 관측 창이 MAX_STORED_DISPATCH_START_OBSERVATIONS(5)를 넘어 잘려도 기준점(배달 뒤 첫 관측, totalBytes=0)이 살아남아 '시작은 했다가 멈춤'(STALLED 오버라이드)을 유지한다 -- 창이 잘리며 기준점을 잃으면 '애초에 시작도 못 함'(NOT_STARTED)과 같은 사유로 재배달 후보에 오른다(판정 §1 ⑴ 재현, P2-1)", () => {
+  withTempDir("hyk464-baseline-", (dir) => {
+    initPlainGitRepo(dir);
+    writeTaskFile(dir, {
+      taskId: "HYK-464-baseline-1",
+      droppedAt: "2026-10-20 10:00",
+    });
+    const dispatchedAtMs = Date.parse("2026-10-20T10:00:00+09:00");
+    const store = fakeDispatchStartStore();
+    const worktreePath = gitWorktreeSelfPath(dir);
+    const showStub = {
+      ok: true,
+      result: { terminal: { lastOutputAt: dispatchedAtMs, title: "CODER" } },
+    };
+    const execFn = fakeOrcaExecFn({
+      terminals: [{ handle: "term_x", worktreePath }],
+      showsByHandle: { term_x: showStub },
+    });
+    // 6틱: t0 기준점(0B) -> t1 성장(5000B) -> t2..t5 평평(5000B, 변화 0).
+    // 여섯 번째 호출(t5)에서 창(5)이 처음으로 넘쳐 잘린다 -- 기준점(t0,
+    // 0B)이 안 보존되면 남는 5개가 전부 5000B로 평평해 "한 번도 안
+    // 늘었다"로 보인다.
+    const ticks = [10_000, 20_000, 30_000, 40_000, 50_000, 400_000];
+    const sizes = [0, 5_000, 5_000, 5_000, 5_000, 5_000];
+    const collectSessionSizeFn = fakeSessionSize(sizes);
+    const opts = {
+      execFn,
+      collectSessionSizeFn,
+      sessionSizeTimeoutMs: 60_000,
+      sessionSizeStallThresholdMs: 60_000,
+      ...store,
+    };
+    const evidence = evidenceItems(worktreePath);
+    let r;
+    for (const offset of ticks) {
+      r = judgeDispatchStartForRepo(
+        {
+          repoRoot: worktreePath,
+          droppedTaskFiles: evidence,
+          now: dispatchedAtMs + offset,
+        },
+        opts,
+      );
+    }
+    assert.equal(
+      store.peek()[worktreePath].observations.length,
+      5,
+      "창은 상한(5) 그대로 유지된다(자르기 자체는 그대로 일어남)",
+    );
+    assert.equal(
+      store.peek()[worktreePath].observations[0].totalBytes,
+      0,
+      "기준점(가장 이른 관측, 0B)이 창에서 밀려나지 않았다",
+    );
+    assert.equal(
+      r.verdict,
+      DISPATCH_START_VERDICT.STARTED,
+      "기준점이 보존돼 화면의 NOT_STARTED가 '시작은 했다가 멈춤'으로 뒤집혀야 한다",
+    );
+    assert.equal(
+      r.reasonCode,
+      DISPATCH_START_OVERRIDE_REASON.SESSION_SIZE_STARTED_THEN_STALLED,
+      "뒤집힌 사유가 GREW_RECENTLY/진짜 미착수와 다른 값으로 구별된다",
+    );
+    console.log(
+      "HYK-464-watch-start-axis-1 ⓐ quote: result =",
+      JSON.stringify({
+        verdict: r.verdict,
+        reasonCode: r.reasonCode,
+        storedBaseline: store.peek()[worktreePath].observations[0],
+      }),
+    );
+  });
+});
+
+test("ⓑ 수리: 배달 뒤 첫 회차가 관측 불가(totalBytes 없음)여도, 다음 회차부터 실제 관측된 바이트(0 포함)가 기준점으로 보존돼 창이 넘쳐도 '시작은 했다가 멈춤'을 유지한다(REVIEW-r1.md §2 ⓑ P2-2 반려 수리)", () => {
+  withTempDir("hyk464-p2-2-", (dir) => {
+    initPlainGitRepo(dir);
+    writeTaskFile(dir, {
+      taskId: "HYK-464-p2-2-1",
+      droppedAt: "2026-10-20 10:00",
+    });
+    const dispatchedAtMs = Date.parse("2026-10-20T10:00:00+09:00");
+    const store = fakeDispatchStartStore();
+    const worktreePath = gitWorktreeSelfPath(dir);
+    const showStub = {
+      ok: true,
+      result: { terminal: { lastOutputAt: dispatchedAtMs, title: "CODER" } },
+    };
+    const execFn = fakeOrcaExecFn({
+      terminals: [{ handle: "term_x", worktreePath }],
+      showsByHandle: { term_x: showStub },
+    });
+    // 6틱: t0 관측 불가(totalBytes 없음) -> t1 실제 기준점(0B, 바이트가
+    // "처음 관측된" 항목) -> t2 성장(5000B) -> t3..t5 평평. 여섯 번째
+    // 호출(t5)에서 창(5)이 넘쳐 잘린다 -- combined[0](t0, 빈 항목)을
+    // 그대로 보존하면(수리 전) 진짜 기준점(t1, 0B)이 창 밖으로 밀려나
+    // 남는 4개가 전부 5000B로 평평해 "한 번도 안 늘었다"로 보인다.
+    const ticks = [10_000, 20_000, 30_000, 40_000, 50_000, 400_000];
+    let tick = 0;
+    const collectSessionSizeFn = () => {
+      const i = tick;
+      tick += 1;
+      if (i === 0) {
+        return { ok: true, totalBytes: 0, observationUnavailable: true };
+      }
+      const sizes = [0, 5_000, 5_000, 5_000, 5_000];
+      return { ok: true, totalBytes: sizes[Math.min(i - 1, sizes.length - 1)] };
+    };
+    const opts = {
+      execFn,
+      collectSessionSizeFn,
+      sessionSizeTimeoutMs: 60_000,
+      sessionSizeStallThresholdMs: 60_000,
+      ...store,
+    };
+    const evidence = evidenceItems(worktreePath);
+    let r;
+    for (const offset of ticks) {
+      r = judgeDispatchStartForRepo(
+        {
+          repoRoot: worktreePath,
+          droppedTaskFiles: evidence,
+          now: dispatchedAtMs + offset,
+        },
+        opts,
+      );
+    }
+    const storedObservations = store.peek()[worktreePath].observations;
+    assert.equal(storedObservations.length, 5, "창은 상한(5) 그대로 유지된다");
+    assert.equal(
+      storedObservations[0].totalBytes,
+      0,
+      "보존된 기준점은 '창의 첫 항목'(관측 불가, totalBytes 없음)이 아니라 '바이트가 처음 관측된 항목'(0B)이어야 한다",
+    );
+    assert.equal(
+      r.verdict,
+      DISPATCH_START_VERDICT.STARTED,
+      "진짜 기준점(0B)이 보존돼 성장(0->5000)이 감지되고, 화면의 NOT_STARTED가 '시작은 했다가 멈춤'으로 뒤집혀야 한다",
+    );
+    assert.equal(
+      r.reasonCode,
+      DISPATCH_START_OVERRIDE_REASON.SESSION_SIZE_STARTED_THEN_STALLED,
+    );
+    console.log(
+      "HYK-464-watch-start-axis-1 r2 ⓑ quote: result =",
+      JSON.stringify({
+        verdict: r.verdict,
+        reasonCode: r.reasonCode,
+        storedBaseline: storedObservations[0],
+      }),
+    );
+  });
+});
+
+test("ⓑ 반대 방향: 바이트가 한 번도 관측되지 않은 좌석은 수리 전과 같은 판정이다(기준점 선택 기준이 바뀌어도 회귀 0)", () => {
+  withTempDir("hyk464-p2-2-reverse-", (dir) => {
+    initPlainGitRepo(dir);
+    writeTaskFile(dir, {
+      taskId: "HYK-464-p2-2-reverse-1",
+      droppedAt: "2026-10-20 10:00",
+    });
+    const dispatchedAtMs = Date.parse("2026-10-20T10:00:00+09:00");
+    const store = fakeDispatchStartStore();
+    const worktreePath = gitWorktreeSelfPath(dir);
+    const showStub = {
+      ok: true,
+      result: { terminal: { lastOutputAt: dispatchedAtMs, title: "CODER" } },
+    };
+    const execFn = fakeOrcaExecFn({
+      terminals: [{ handle: "term_x", worktreePath }],
+      showsByHandle: { term_x: showStub },
+    });
+    const collectSessionSizeFn = () => ({
+      ok: true,
+      totalBytes: 0,
+      observationUnavailable: true,
+    });
+    const ticks = [10_000, 20_000, 30_000, 40_000, 50_000, 400_000];
+    const opts = {
+      execFn,
+      collectSessionSizeFn,
+      sessionSizeTimeoutMs: 60_000,
+      sessionSizeStallThresholdMs: 60_000,
+      ...store,
+    };
+    const evidence = evidenceItems(worktreePath);
+    let r;
+    for (const offset of ticks) {
+      r = judgeDispatchStartForRepo(
+        {
+          repoRoot: worktreePath,
+          droppedTaskFiles: evidence,
+          now: dispatchedAtMs + offset,
+        },
+        opts,
+      );
+    }
+    const storedObservations = store.peek()[worktreePath].observations;
+    assert.equal(
+      storedObservations.every((o) => typeof o.totalBytes !== "number"),
+      true,
+      "바이트가 한 번도 관측되지 않았으면 baselineIndex===-1 -- combined[0]을 그대로 쓴다(기존 동작과 동일)",
+    );
+    assert.equal(
+      r.verdict,
+      DISPATCH_START_VERDICT.NOT_STARTED,
+      "관측된 바이트가 없으면 뒤집을 증거가 없다 -- 화면 판정 그대로",
+    );
+  });
+});
+
+// S4a/S4b 공용 자리(max-lines-per-function 상한(80) 준수를 위해 분리 --
+// 로직은 그대로). codexHomeEnvValue가 undefined면 S4a(미설정), 값이 있으면
+// S4b(실 codex 모양과 비슷한 경로가 "우연히" env에 있는 경우)다 -- 코드가
+// 이제 이 env를 전혀 안 읽으므로 둘 다 같은 결과여야 한다.
+function assertS4CaseStarted(codexHomeEnvValue) {
+  withTempDir("hyk464-s4-", (dir) => {
+    initPlainGitRepo(dir);
+    writeTaskFile(dir, {
+      role: "review",
+      taskId: `HYK-464-s4-${codexHomeEnvValue ?? "unset"}`,
+      droppedAt: "2026-10-20 10:00",
+    });
+    const dispatchedAtMs = Date.parse("2026-10-20T10:00:00+09:00");
+    const tick1At = dispatchedAtMs + 30_000;
+    const tick2At = Date.parse("2026-10-20T10:43:00+09:00");
+    const store = fakeDispatchStartStore();
+    const worktreePath = gitWorktreeSelfPath(dir);
+    const showStub = {
+      ok: true,
+      result: { terminal: { lastOutputAt: dispatchedAtMs, title: "REVIEW" } },
+    };
+    const execFn = fakeOrcaExecFn({
+      terminals: [{ handle: "term_x", worktreePath }],
+      showsByHandle: { term_x: showStub },
+    });
+    return withTempDir("hyk464-s4-claudehome-", (fakeHome) => {
+      const osHomedirFn = () => fakeHome;
+      const projectDir = join(
+        fakeHome,
+        ".claude-team",
+        "projects",
+        deriveClaudeProjectDirName(worktreePath),
+      );
+      mkdirSync(projectDir, { recursive: true });
+      writeFileSync(
+        join(projectDir, "session.jsonl"),
+        "x".repeat(1_000),
+        "utf8",
+      );
+      const evidence = evidenceItems(worktreePath);
+      judgeDispatchStartForRepo(
+        { repoRoot: worktreePath, droppedTaskFiles: evidence, now: tick1At },
+        { execFn, osHomedirFn, ...store },
+      );
+      writeFileSync(
+        join(projectDir, "session.jsonl"),
+        "x".repeat(51_000),
+        "utf8",
+      );
+      const r = judgeDispatchStartForRepo(
+        { repoRoot: worktreePath, droppedTaskFiles: evidence, now: tick2At },
+        { execFn, osHomedirFn, ...store },
+      );
+      assert.equal(
+        r.verdict,
+        DISPATCH_START_VERDICT.STARTED,
+        `${codexHomeEnvValue ?? "unset"}: claude로 일하는 REVIEW 좌석은 ORCA_CODEX_HOME과 무관하게 STARTED여야 한다(adf352d와 동일)`,
+      );
+      assert.equal(
+        r.reasonCode,
+        DISPATCH_START_OVERRIDE_REASON.SESSION_SIZE_GREW_RECENTLY,
+      );
+    });
+  });
+}
+
+test("S4a/S4b 회귀 확인: claude로 뜬 REVIEW 좌석은 ORCA_CODEX_HOME 설정 여부와 무관하게 adf352d와 같은 STARTED/GREW_RECENTLY를 낸다(codex 분기 제거, REVIEW-r1.md §2 ⓒ P1 수리)", () => {
+  const prevCodexHome = process.env.ORCA_CODEX_HOME;
+  try {
+    for (const codexHomeEnvValue of [undefined, "C:\\fake\\codex\\home"]) {
+      if (codexHomeEnvValue === undefined) delete process.env.ORCA_CODEX_HOME;
+      else process.env.ORCA_CODEX_HOME = codexHomeEnvValue;
+      assertS4CaseStarted(codexHomeEnvValue);
+    }
+  } finally {
+    if (prevCodexHome === undefined) delete process.env.ORCA_CODEX_HOME;
+    else process.env.ORCA_CODEX_HOME = prevCodexHome;
+  }
+});
+
+// ⓒ 결선의 두 칸이 공유하는 fixture(관측 불가 흉내) -- r2부터 codex
+// 분기가 없으므로 collectSessionSizeFn이 직접
+// observationUnavailable:true를 돌려주는 모양으로 바꾼다(위 "3R P1-1
+// observationUnavailable" 시험과 동일 자리, codex와 무관) --
+// max-lines-per-function 상한(80) 준수를 위해 두 test로 나누되, 뼈대
+// 조립만 뽑는다(판정 로직은 그대로).
+function buildSizeObsWiringFixture(dir) {
+  initPlainGitRepo(dir);
+  writeTaskFile(dir, {
+    role: "review",
+    taskId: "HYK-464-sizeobs-1",
+    droppedAt: "2026-10-20 10:00",
+  });
+  const dispatchedAtMs = Date.parse("2026-10-20T10:00:00+09:00");
+  const now = Date.parse("2026-10-20T10:43:00+09:00");
+  const worktreePath = gitWorktreeSelfPath(dir);
+  const showStub = {
+    ok: true,
+    result: { terminal: { lastOutputAt: dispatchedAtMs, title: "REVIEW" } },
+  };
+  const execFn = fakeOrcaExecFn({
+    terminals: [{ handle: "term_x", worktreePath }],
+    showsByHandle: { term_x: showStub },
+  });
+  const store = fakeDispatchStartStore();
+  const collectSessionSizeFn = () => ({
+    ok: true,
+    totalBytes: 0,
+    observationUnavailable: true,
+  });
+  const opts = { execFn, collectSessionSizeFn, ...store };
+  const dispatchStart = judgeDispatchStartAcrossWorktrees(
+    { repoRoot: worktreePath, now },
+    opts,
+  );
+  return { worktreePath, now, dispatchStart };
+}
+
+test("ⓒ 결선: 집 관측 불가 사유 코드(sizeObservationReasonCode)가 judgeDispatchStartAcrossWorktrees의 worktrees[]를 거쳐 watch-run.mjs의 last-run.json·watch.log까지 실제로 닿는다", () => {
+  withTempDir("hyk464-sizeobs-wiring-", (dir) => {
+    const { worktreePath, now, dispatchStart } = buildSizeObsWiringFixture(dir);
+    assert.equal(
+      dispatchStart.worktrees[0].sizeObservationReasonCode,
+      "DISPATCH_START_SIZE_OBSERVATION_UNAVAILABLE",
+    );
+    const watchDir = mkdtempSync(join(tmpdir(), "hyk464-sizeobs-watchdir-"));
+    try {
+      const stdout = JSON.stringify({
+        verdict: "PROGRESSING",
+        reasonCode: "OK",
+        dispatchStart,
+      });
+      const result = runWatchOnce({
+        repoRoot: worktreePath,
+        watchDir,
+        now,
+        execFn: () => stdout,
+      });
+      const record = JSON.parse(readFileSync(result.aliveRecordPath, "utf8"));
+      assert.equal(record.startSizeObservationUnavailable.length, 1);
+      assert.equal(
+        record.startSizeObservationUnavailable[0].reasonCode,
+        "DISPATCH_START_SIZE_OBSERVATION_UNAVAILABLE",
+      );
+      const logText = readFileSync(result.logPath, "utf8");
+      assert.match(
+        logText,
+        /start_size_observation_unavailable=1 start_size_observation_unavailable_detail=.+:DISPATCH_START_SIZE_OBSERVATION_UNAVAILABLE/,
+      );
+      console.log(
+        "HYK-464-watch-start-axis-1 ⓒ quote: watch.log line =",
+        logText.trim(),
+      );
+    } finally {
+      rmSync(watchDir, { recursive: true, force: true });
+    }
+  });
+});
+
+test("ⓒ 회귀 0: 정상 회차(관측 불가 0건)는 그 코드가 watch.log·last-run.json에 한 글자도 안 남는다(산출물 소음 없음)", () => {
+  withTempDir("hyk464-sizeobs-normal-", (dir) => {
+    const { worktreePath, now } = buildSizeObsWiringFixture(dir);
+    const normalDispatchStart = {
+      status: "DISPATCH_START_JUDGED",
+      verdict: "STARTED",
+      worstCount: 1,
+      totalWorktrees: 1,
+      worktrees: [
+        { worktreePath, status: "DISPATCH_START_JUDGED", verdict: "STARTED" },
+      ],
+    };
+    const watchDir = mkdtempSync(join(tmpdir(), "hyk464-sizeobs-watchdir2-"));
+    try {
+      const stdout = JSON.stringify({
+        verdict: "PROGRESSING",
+        reasonCode: "OK",
+        dispatchStart: normalDispatchStart,
+      });
+      const result = runWatchOnce({
+        repoRoot: worktreePath,
+        watchDir,
+        now,
+        execFn: () => stdout,
+      });
+      const record = JSON.parse(readFileSync(result.aliveRecordPath, "utf8"));
+      assert.equal(record.startSizeObservationUnavailable.length, 0);
+      const logText = readFileSync(result.logPath, "utf8");
+      assert.doesNotMatch(logText, /start_size_observation_unavailable=/);
+    } finally {
+      rmSync(watchDir, { recursive: true, force: true });
+    }
+  });
+});
+
+// ===========================================================================
+// NC mutation -- ⓐ/ⓑ/ⓒ 세 칸 되돌림(worker-dispatch-rule 비타협: mutations
+// RED, importMutatedSibling 관례 그대로 재사용).
+// ===========================================================================
+
+test("NC mutation/hyk464-start-axis #5 (필수, ⓐ): nextObservationsForDispatch의 기준점 보존을 걷어내 옛 '단순 최근 N개' 자르기로 되돌리기 -> RED(기준점을 잃어 STALLED 오버라이드가 NOT_STARTED로 오판)", async () => {
+  const mutant = await importMutatedSibling(
+    (src) =>
+      applyMutation(
+        src,
+        `  const combined = [...prevObservations, observation];
+  if (combined.length <= MAX_STORED_DISPATCH_START_OBSERVATIONS) {
+    return combined;
+  }
+  const recentSlotCount = MAX_STORED_DISPATCH_START_OBSERVATIONS - 1;
+  const recentStartIndex = combined.length - recentSlotCount;
+  const recent = combined.slice(recentStartIndex);
+  const baselineIndex = combined.findIndex(
+    (o) => typeof o.totalBytes === "number",
+  );
+  // 바이트가 한 번도 관측되지 않았거나(baselineIndex === -1), 바이트를
+  // 가진 첫 항목이 이미 "최근" 구간 안에 있으면(연속 관측 불가가
+  // recentSlotCount보다 길게 이어진 극단 사례 -- 별도 슬롯이 필요
+  // 없다·중복 방지) combined[0]을 그대로 쓴다(기존 동작).
+  if (baselineIndex === -1 || baselineIndex >= recentStartIndex) {
+    return [combined[0], ...recent];
+  }
+  return [combined[baselineIndex], ...recent];
+}`,
+        `  const combined = [...prevObservations, observation];
+  return combined.length > MAX_STORED_DISPATCH_START_OBSERVATIONS
+    ? combined.slice(combined.length - MAX_STORED_DISPATCH_START_OBSERVATIONS)
+    : combined;
+}`,
+      ),
+    "5",
+  );
+  withTempDir("hyk464-mutant5-", (dir) => {
+    initPlainGitRepo(dir);
+    writeTaskFile(dir, {
+      taskId: "HYK-464-baseline-mutant-1",
+      droppedAt: "2026-10-20 10:00",
+    });
+    const dispatchedAtMs = Date.parse("2026-10-20T10:00:00+09:00");
+    const store = fakeDispatchStartStore();
+    const worktreePath = gitWorktreeSelfPath(dir);
+    const showStub = {
+      ok: true,
+      result: { terminal: { lastOutputAt: dispatchedAtMs, title: "CODER" } },
+    };
+    const execFn = fakeOrcaExecFn({
+      terminals: [{ handle: "term_x", worktreePath }],
+      showsByHandle: { term_x: showStub },
+    });
+    const ticks = [10_000, 20_000, 30_000, 40_000, 50_000, 400_000];
+    const sizes = [0, 5_000, 5_000, 5_000, 5_000, 5_000];
+    const collectSessionSizeFn = fakeSessionSize(sizes);
+    const opts = {
+      execFn,
+      collectSessionSizeFn,
+      sessionSizeTimeoutMs: 60_000,
+      sessionSizeStallThresholdMs: 60_000,
+      ...store,
+    };
+    const evidence = mutant.collectDroppedTaskFileEvidence(worktreePath, {});
+    let r;
+    for (const offset of ticks) {
+      r = mutant.judgeDispatchStartForRepo(
+        {
+          repoRoot: worktreePath,
+          droppedTaskFiles: evidence.items,
+          now: dispatchedAtMs + offset,
+        },
+        opts,
+      );
+    }
+    assert.equal(
+      r.verdict,
+      DISPATCH_START_VERDICT.NOT_STARTED,
+      "mutant must lose the baseline and fall back to NOT_STARTED (RED signal; proves baseline preservation is load-bearing)",
+    );
+  });
+});
+
+// mutant6a 본문(max-lines-per-function 상한 준수를 위해 분리 -- 로직은
+// 그대로).
+function runMutant6aCase(mutant) {
+  withTempDir("hyk464-mutant6a-", (dir) => {
+    initPlainGitRepo(dir);
+    writeTaskFile(dir, {
+      taskId: "HYK-464-p2-2-mutant-1",
+      droppedAt: "2026-10-20 10:00",
+    });
+    const dispatchedAtMs = Date.parse("2026-10-20T10:00:00+09:00");
+    const store = fakeDispatchStartStore();
+    const worktreePath = gitWorktreeSelfPath(dir);
+    const showStub = {
+      ok: true,
+      result: { terminal: { lastOutputAt: dispatchedAtMs, title: "CODER" } },
+    };
+    const execFn = fakeOrcaExecFn({
+      terminals: [{ handle: "term_x", worktreePath }],
+      showsByHandle: { term_x: showStub },
+    });
+    const ticks = [10_000, 20_000, 30_000, 40_000, 50_000, 400_000];
+    let tick = 0;
+    const collectSessionSizeFn = () => {
+      const i = tick;
+      tick += 1;
+      if (i === 0) {
+        return { ok: true, totalBytes: 0, observationUnavailable: true };
+      }
+      const sizes = [0, 5_000, 5_000, 5_000, 5_000];
+      return { ok: true, totalBytes: sizes[Math.min(i - 1, sizes.length - 1)] };
+    };
+    const opts = {
+      execFn,
+      collectSessionSizeFn,
+      sessionSizeTimeoutMs: 60_000,
+      sessionSizeStallThresholdMs: 60_000,
+      ...store,
+    };
+    const evidence = mutant.collectDroppedTaskFileEvidence(worktreePath, {});
+    let r;
+    for (const offset of ticks) {
+      r = mutant.judgeDispatchStartForRepo(
+        {
+          repoRoot: worktreePath,
+          droppedTaskFiles: evidence.items,
+          now: dispatchedAtMs + offset,
+        },
+        opts,
+      );
+    }
+    assert.equal(
+      r.verdict,
+      DISPATCH_START_VERDICT.NOT_STARTED,
+      "mutant must lose the real (0B) baseline by keeping the unavailable first slot (RED signal; proves 'first observed bytes' selection is load-bearing)",
+    );
+  });
+}
+
+test("NC mutation/hyk464-start-axis-r2 #6a (필수, ⓑ P2-2): nextObservationsForDispatch의 '바이트가 처음 관측된 항목' 기준점 선택을 옛 '창의 첫 항목'(combined[0])으로 되돌리기 -> RED(관측 불가로 시작하는 D 모양에서 기준점을 잃는다)", async () => {
+  const mutant = await importMutatedSibling(
+    (src) =>
+      applyMutation(
+        src,
+        `  const recentSlotCount = MAX_STORED_DISPATCH_START_OBSERVATIONS - 1;
+  const recentStartIndex = combined.length - recentSlotCount;
+  const recent = combined.slice(recentStartIndex);
+  const baselineIndex = combined.findIndex(
+    (o) => typeof o.totalBytes === "number",
+  );
+  // 바이트가 한 번도 관측되지 않았거나(baselineIndex === -1), 바이트를
+  // 가진 첫 항목이 이미 "최근" 구간 안에 있으면(연속 관측 불가가
+  // recentSlotCount보다 길게 이어진 극단 사례 -- 별도 슬롯이 필요
+  // 없다·중복 방지) combined[0]을 그대로 쓴다(기존 동작).
+  if (baselineIndex === -1 || baselineIndex >= recentStartIndex) {
+    return [combined[0], ...recent];
+  }
+  return [combined[baselineIndex], ...recent];
+}`,
+        `  const baseline = combined[0];
+  const recentSlotCount = MAX_STORED_DISPATCH_START_OBSERVATIONS - 1;
+  const recent = combined.slice(combined.length - recentSlotCount);
+  return [baseline, ...recent];
+}`,
+      ),
+    "6a",
+  );
+  runMutant6aCase(mutant);
+});
+
+// mutant6b 본문(max-lines-per-function 상한 준수를 위해 분리 -- 로직은
+// 그대로).
+function runMutant6bCase(mutant) {
+  withTempDir("hyk464-mutant6b-", (dir) => {
+    initPlainGitRepo(dir);
+    writeTaskFile(dir, {
+      role: "review",
+      taskId: "HYK-464-s4-mutant-1",
+      droppedAt: "2026-10-20 10:00",
+    });
+    const dispatchedAtMs = Date.parse("2026-10-20T10:00:00+09:00");
+    const tick1At = dispatchedAtMs + 30_000;
+    const tick2At = Date.parse("2026-10-20T10:43:00+09:00");
+    const store = fakeDispatchStartStore();
+    const worktreePath = gitWorktreeSelfPath(dir);
+    const showStub = {
+      ok: true,
+      result: { terminal: { lastOutputAt: dispatchedAtMs, title: "REVIEW" } },
+    };
+    const execFn = fakeOrcaExecFn({
+      terminals: [{ handle: "term_x", worktreePath }],
+      showsByHandle: { term_x: showStub },
+    });
+    return withTempDir("hyk464-mutant6b-claudehome-", (fakeHome) => {
+      const osHomedirFn = () => fakeHome;
+      const projectDir = join(
+        fakeHome,
+        ".claude-team",
+        "projects",
+        deriveClaudeProjectDirName(worktreePath),
+      );
+      mkdirSync(projectDir, { recursive: true });
+      writeFileSync(
+        join(projectDir, "session.jsonl"),
+        "x".repeat(1_000),
+        "utf8",
+      );
+      const opts = { execFn, osHomedirFn, ...store };
+      const evidence = mutant.collectDroppedTaskFileEvidence(worktreePath, {});
+      mutant.judgeDispatchStartForRepo(
+        {
+          repoRoot: worktreePath,
+          droppedTaskFiles: evidence.items,
+          now: tick1At,
+        },
+        opts,
+      );
+      writeFileSync(
+        join(projectDir, "session.jsonl"),
+        "x".repeat(51_000),
+        "utf8",
+      );
+      const r = mutant.judgeDispatchStartForRepo(
+        {
+          repoRoot: worktreePath,
+          droppedTaskFiles: evidence.items,
+          now: tick2At,
+        },
+        opts,
+      );
+      assert.equal(
+        r.verdict,
+        DISPATCH_START_VERDICT.NOT_STARTED,
+        "mutant must lose the claude-home growth for a REVIEW seat again (RED signal; proves removing role-based engine selection is load-bearing)",
+      );
+    });
+  });
+}
+
+test("NC mutation/hyk464-start-axis-r2 #6b (필수, ⓐ 되돌림): 역할로 엔진을 고르는 줄(resolveSeatEngineHint/dispatch.role 결선)을 다시 집어넣기 -> RED(claude로 뜬 REVIEW 좌석이 다시 NOT_STARTED로 떨어진다, S4a/S4b 재현)", async () => {
+  const mutant = await importMutatedSibling((src) => {
+    const withRole = applyMutation(
+      src,
+      `  const active = selectActiveDispatchForStart(droppedTaskFiles);
+  if (!active) {
+    return { status: DISPATCH_START_WIRE_STATUS.NOT_APPLICABLE };
+  }
+  const dispatch = {
+    dispatchId: active.path,
+    dispatchedAtMs: active.droppedAtMs,
+  };`,
+      `  const active = selectActiveDispatchForStart(droppedTaskFiles);
+  if (!active) {
+    return { status: DISPATCH_START_WIRE_STATUS.NOT_APPLICABLE };
+  }
+  const dispatch = {
+    dispatchId: active.path,
+    dispatchedAtMs: active.droppedAtMs,
+    role: active.deliveryReceipt ? active.deliveryReceipt.role : null,
+  };`,
+    );
+    // r2 전 ⓑ 분기와 같은 관측 가능한 효과를 재현한다: REVIEW 역할
+    // 좌석은 실제 claude 집 성장과 무관하게 관측 불가로 떨어진다(REVIEW
+    // 가 codex로 단정됐는데 codex 집을 못 찾는 바로 그 증상).
+    return applyMutation(
+      withRole,
+      `  const sizeCollected = collectSessionSizeObservation(repoRoot, opts);`,
+      `  const sizeCollected =
+    typeof dispatch.role === "string" &&
+    dispatch.role.toUpperCase() === "REVIEW"
+      ? {
+          ok: false,
+          reasonCode: "DISPATCH_START_SIZE_OBSERVATION_UNAVAILABLE",
+          observationUnavailable: true,
+        }
+      : collectSessionSizeObservation(repoRoot, opts);`,
+    );
+  }, "6b");
+  runMutant6bCase(mutant);
+});
+
+test("NC mutation/hyk464-start-axis #7 (필수, ⓒ): persistAndJudgeDispatchStart가 sizeObservationReasonCode를 결과에 안 싣게 되돌리기 -> RED(관측 불가 사유가 다시 조용히 사라진다)", async () => {
+  const mutant = await importMutatedSibling(
+    (src) =>
+      applyMutation(
+        src,
+        `    ...(sizeCollected.ok !== true
+      ? { sizeObservationReasonCode: sizeCollected.reasonCode ?? null }
+      : {}),
+    ...(correlation ? { correlation } : {}),`,
+        `    ...(correlation ? { correlation } : {}),`,
+      ),
+    "7",
+  );
+  withTempDir("hyk464-mutant7-", (dir) => {
+    initPlainGitRepo(dir);
+    writeTaskFile(dir, {
+      role: "review",
+      taskId: "HYK-464-sizeobs-mutant-1",
+      droppedAt: "2026-10-20 10:00",
+    });
+    const dispatchedAtMs = Date.parse("2026-10-20T10:00:00+09:00");
+    const now = Date.parse("2026-10-20T10:43:00+09:00");
+    const worktreePath = gitWorktreeSelfPath(dir);
+    const showStub = {
+      ok: true,
+      result: { terminal: { lastOutputAt: dispatchedAtMs, title: "REVIEW" } },
+    };
+    const execFn = fakeOrcaExecFn({
+      terminals: [{ handle: "term_x", worktreePath }],
+      showsByHandle: { term_x: showStub },
+    });
+    const store = fakeDispatchStartStore();
+    const collectSessionSizeFn = () => ({
+      ok: true,
+      totalBytes: 0,
+      observationUnavailable: true,
+    });
+    const opts = { execFn, collectSessionSizeFn, ...store };
+    const evidence = mutant.collectDroppedTaskFileEvidence(worktreePath, {});
+    mutant.judgeDispatchStartForRepo(
+      {
+        repoRoot: worktreePath,
+        droppedTaskFiles: evidence.items,
+        now: dispatchedAtMs + 30_000,
+      },
+      opts,
+    );
+    const r = mutant.judgeDispatchStartForRepo(
+      { repoRoot: worktreePath, droppedTaskFiles: evidence.items, now },
+      opts,
+    );
+    assert.equal(
+      r.sizeObservationReasonCode,
+      undefined,
+      "mutant must drop the reason code again (RED signal; proves the field wiring is load-bearing)",
+    );
+  });
+});
