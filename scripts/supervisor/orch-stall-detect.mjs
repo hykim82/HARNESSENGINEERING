@@ -1582,17 +1582,45 @@ export const SEAT_IDLE_STOP_REASONS_STATUS = Object.freeze({
   READ_FAILED: SEAT_IDLE_SCAN_FAILURE.STOP_REASONS_READ_FAILED,
 });
 
-// HYK-464-idle-stop-reason-1 (coder-task.md §2ⓑ): 위치 = 감시가 이미
-// 받는 watchDir의 "부모". 생산 watchDir(schedule-plan-core.mjs가 짜는
-// 명령줄 기본값, D:\문서관리\하네스-관제실\watch)은 늘
-// `${CONTROL_ROOM_PATH}/watch`이므로 그 부모는 CONTROL_ROOM_PATH
-// 자신이다 -- 이 파일이 이미 재사용하는 상수(DEFAULT_DISPATCH_START_STORE_PATH
-// 참조, 위)를 그대로 다시 쓴다. ⛔새 CLI 인자를 추가하지 않는다(예약
-// 작업·watch-run.mjs의 감지기 호출 인자는 한 글자도 바뀌지 않는다) --
-// 시험은 opts.stopReasonsPath로만 오버라이드한다(loadDispatchStartStore의
-// dispatchStartExistsFn/dispatchStartReadFn과 동일한 "opts 주입, CLI
-// 인자 아님" 관례).
-export const DEFAULT_STOP_REASONS_PATH = `${CONTROL_ROOM_PATH}/stop-reasons.json`;
+// HYK-464-idle-stop-reason-1-r2 (coder-task.md §2ⓐ, 1R 검토 P2-3): 위치
+// = 감시가 이미 받는 watchDir의 "부모" -- 1R의 생산 상수
+// (DEFAULT_STOP_REASONS_PATH, CONTROL_ROOM_PATH 직속)는 이 저장소의
+// 기존 시험·mkdtemp watchDir로 도는 수동 실행까지 생산 관제실
+// stop-reasons.json에 묶어버렸다(1R 검토 §11 P2-3) -- 제거한다. 이
+// 프로세스는 watchDir 자체를 CLI 인자로 받지 않는다(⛔새 인자 추가 금지,
+// §2ⓐ 원문 "예약 작업 인자 무변") -- 대신 이미 받는
+// --unconsumed-notice-state 경로(watch-run.mjs의 runDetector가 watchDir
+// 안에 두는 파일, path.join(watchDir, "unconsumed-notice-state.json"))의
+// 부모가 watchDir 자신이다(resolveStopReasonsPathFromCli, 아래 -- 기존
+// 결선 재사용, 새 인자 0). 생산에서는 watchDir가 늘
+// `${CONTROL_ROOM_PATH}/watch`이므로(schedule-plan-core.mjs 기본값) 유도된
+// 위치는 1R과 바이트 동일(`${CONTROL_ROOM_PATH}/stop-reasons.json`). 그
+// 인자 없이 도는 호출 경로(감지기 단독 실행 등)에서는 watchDir를 알 길이
+// 없으므로 null -- loadOpenStopReasonsForScan(아래)이 이를 "사유
+// 0"(ABSENT)으로 접는다(경보를 끄는 방향이 아니다, §2ⓐ 원문). 시험은
+// opts.stopReasonsPath로 여전히 직접 오버라이드한다(이 유도보다 우선,
+// loadDispatchStartStore의 dispatchStartExistsFn/dispatchStartReadFn과
+// 동일한 "opts 주입, CLI 인자 아님" 관례 -- 바뀌지 않음).
+function resolveStopReasonsPathFromCli(cli) {
+  if (
+    typeof cli.unconsumedNoticeStatePath !== "string" ||
+    cli.unconsumedNoticeStatePath.length === 0
+  ) {
+    return null;
+  }
+  const watchDir = path.dirname(cli.unconsumedNoticeStatePath);
+  return path.join(path.dirname(watchDir), "stop-reasons.json");
+}
+
+// runOrchStallDetect에서 분리(eslint max-lines-per-function 상한 준수,
+// isValidStopReasonEntry와 동일 이유) -- opts.stopReasonsPath가 이미
+// 명시로 왔으면(시험이 이 진입점까지 통째로 호출하면서 오버라이드) 그
+// 값이 이긴다. CLI 유도(resolveStopReasonsPathFromCli)는 "안 줬을 때"만의
+// 기본값이다.
+function resolveSeatAxesOpts(opts, cli) {
+  if (opts.stopReasonsPath !== undefined) return opts;
+  return { ...opts, stopReasonsPath: resolveStopReasonsPathFromCli(cli) };
+}
 
 // 정지 사유 한 건의 최소 형식(coder-task.md §2ⓑ 원문): id(string) ·
 // openedAt(ISO string) · closedAt?(ISO string|null) · worktrees(string[]
@@ -1785,16 +1813,28 @@ function resolveIdleStopReasonsStatus(stopReasonsResult) {
 
 // judgeSeatIdleAcrossWorktrees에서 분리(eslint complexity 상한 12 준수) --
 // 정지 사유 파일은 스캔 전체에서 한 번만 읽는다(워크트리마다 다시 읽지
-// 않는다). 기본 경로는 DEFAULT_STOP_REASONS_PATH(=watchDir의 부모),
-// opts.stopReasonsPath로만 오버라이드(새 CLI 인자 0, §2ⓑ "닿을 수 없으면
-// NEEDS_INPUT" 조건은 이 상수 재사용으로 해소돼 발생하지 않는다). ⓓ:
-// 파일이 없거나(ok:true,present:false) 읽기/파싱/형식이 실패했으면
-// (ok:false) openReasons는 둘 다 빈 배열 -- "그 회차는 어떤 워크트리도
-// 사유 있는 존치로 빼지 않는다"(§2ⓓ 원문)를 실패 쪽도 안전 쪽과 같은
-// 코드 경로로 만족시킨다. 구별은 호출부의 resolveIdleStopReasonsStatus가
+// 않는다). 경로는 opts.stopReasonsPath로만 온다(1R의 생산 상수는
+// 제거됐다, 위 resolveStopReasonsPathFromCli 헤더 참조 -- runOrchStallDetect
+// 가 그 함수로 유도한 값을 여기 opts에 실어 보낸다, 새 CLI 인자 0).
+// opts.stopReasonsPath가 없으면(watchDir를 모르는 호출 경로, 또는 직접
+// judgeSeatIdleAcrossWorktrees를 부르면서 안 준 시험) existsFn조차
+// 부르지 않고 즉시 "사유 0"(ABSENT)으로 접는다 -- loadStopReasonsFile의
+// "파일 부재 = 사유 0" 경로와 바이트 동일한 결과를 조회 0회로 낸다(§2ⓐ
+// 원문 "경보를 끄지 않음"과 동일 안전 방향, 생산 파일에 무엇이 있어도
+// 이 경로는 그것을 조회하지 않으므로 영향받지 않는다). ⓓ: 파일이
+// 없거나(ok:true,present:false) 읽기/파싱/형식이 실패했으면(ok:false)
+// openReasons는 둘 다 빈 배열 -- "그 회차는 어떤 워크트리도 사유 있는
+// 존치로 빼지 않는다"(§2ⓓ 원문)를 실패 쪽도 안전 쪽과 같은 코드 경로로
+// 만족시킨다. 구별은 호출부의 resolveIdleStopReasonsStatus가
 // stopReasonsResult로 맡는다.
 function loadOpenStopReasonsForScan(opts, now) {
-  const stopReasonsPath = opts.stopReasonsPath ?? DEFAULT_STOP_REASONS_PATH;
+  const stopReasonsPath = opts.stopReasonsPath;
+  if (typeof stopReasonsPath !== "string" || stopReasonsPath.length === 0) {
+    return {
+      stopReasonsResult: { ok: true, present: false, reasons: [] },
+      openReasons: [],
+    };
+  }
   const stopReasonsResult = loadStopReasonsFile(stopReasonsPath, opts);
   const openReasons = stopReasonsResult.ok
     ? stopReasonsResult.reasons.filter((r) => isReasonOpen(r, now))
@@ -4857,11 +4897,13 @@ export function runOrchStallDetect(argv, opts = {}) {
   });
   // HYK-185 seat-scan/HYK-185-seat-idle-1/HYK-185-startcheck-wire: 좌석
   // 무응답·유휴 방치·«배달 후 시작됐는가» 판정을 이 저장소의 워크트리
-  // 전부에 걸쳐 부른다(computeSeatAxes 참조).
+  // 전부에 걸쳐 부른다(computeSeatAxes 참조). HYK-464-idle-stop-reason-1-r2
+  // (coder-task.md §2ⓐ): resolveSeatAxesOpts(위)가 정지 사유 경로를
+  // watchDir에서 유도해 싣는다.
   const { seatLiveness, seatIdle, dispatchStart } = computeSeatAxes(
     repoRoot,
     now,
-    opts,
+    resolveSeatAxesOpts(opts, cli),
   );
   // HYK-185-unconsumed-1: «워커 결과가 갱신됐는데 소비되지 않았다» 판정도
   // 같은 워크트리 전부에 걸쳐 부른다. ★이 축은 좌석 관측이 아니라 파일/

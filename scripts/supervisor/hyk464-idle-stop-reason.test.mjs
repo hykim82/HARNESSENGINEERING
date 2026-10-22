@@ -21,14 +21,14 @@ import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
 import { execFileSync } from "node:child_process";
 import {
   judgeSeatIdleAcrossWorktrees,
+  runOrchStallDetect,
   SEAT_IDLE_WIRE_STATUS,
   SEAT_IDLE_SCAN_FAILURE,
   SEAT_IDLE_STOP_REASONS_STATUS,
-  DEFAULT_STOP_REASONS_PATH,
 } from "./orch-stall-detect.mjs";
 import { SEAT_IDLE_VERDICT } from "./seat-idle-core.mjs";
 import { buildLogLine, runWatchOnce } from "./watch-run.mjs";
@@ -235,7 +235,7 @@ test("ⓑⓒ 열린 사유가 그 워크트리를 덮으면 SUSPECTED_ABANDONED 
   });
 });
 
-test("반대 방향(1/3) 사유 없음 -- 같은 워크트리가 덮이지 않으면(빈 reasons) 그대로 SUSPECTED_ABANDONED(회귀 0)", () => {
+test("반대 방향(1/4) 사유 없음 -- 같은 워크트리가 덮이지 않으면(빈 reasons) 그대로 SUSPECTED_ABANDONED(회귀 0)", () => {
   withTempDir("hyk464-idle-stop-main-rev1-", (mainDir) => {
     initPlainGitRepo(mainDir);
     const now =
@@ -261,7 +261,7 @@ test("반대 방향(1/3) 사유 없음 -- 같은 워크트리가 덮이지 않�
   });
 });
 
-test("반대 방향(2/3) 닫힌 사유 -- closedAt이 now보다 과거면 그 사유는 더 이상 열려 있지 않으므로 그대로 SUSPECTED_ABANDONED", () => {
+test("반대 방향(2/4) 닫힌 사유 -- closedAt이 now보다 과거면 그 사유는 더 이상 열려 있지 않으므로 그대로 SUSPECTED_ABANDONED", () => {
   withTempDir("hyk464-idle-stop-main-rev2-", (mainDir) => {
     initPlainGitRepo(mainDir);
     const now =
@@ -292,7 +292,7 @@ test("반대 방향(2/3) 닫힌 사유 -- closedAt이 now보다 과거면 그 �
   });
 });
 
-test("반대 방향(3/3) 다른 워크트리의 사유 -- 열려 있지만 방치된 워크트리가 아니라 다른(정상) 워크트리를 덮으면 방치된 쪽은 그대로 SUSPECTED_ABANDONED", () => {
+test("반대 방향(3/4) 다른 워크트리의 사유 -- 열려 있지만 방치된 워크트리가 아니라 다른(정상) 워크트리를 덮으면 방치된 쪽은 그대로 SUSPECTED_ABANDONED", () => {
   withTempDir("hyk464-idle-stop-main-rev3-", (mainDir) => {
     initPlainGitRepo(mainDir);
     const now =
@@ -318,6 +318,46 @@ test("반대 방향(3/3) 다른 워크트리의 사유 -- 열려 있지만 방�
       assert.equal(r.verdict, SEAT_IDLE_VERDICT.SUSPECTED_ABANDONED);
       assert.equal(r.worstCount, 1);
       assert.equal(r.parkedCount, 0);
+    } finally {
+      rmSync(linked1, { recursive: true, force: true });
+      rmSync(linked2, { recursive: true, force: true });
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ⓑ 미래 openedAt(coder-task.md §2ⓑ, 1R 검토 P2-1) -- 1R 변이 ⑶-b
+// (isReasonOpen의 openedAt > now 검사 무력화)가 15/15 초록으로 살아남은
+// 시험 공백을 닫는다. 이 칸이 바로 그 §2ⓑ 계약의 "1R 검토 변이 ⑶-b 가
+// RED" 요구다.
+// ---------------------------------------------------------------------------
+test("반대 방향(4/4) 미래 openedAt -- openedAt이 now보다 미래면 그 사유는 아직 열리지 않았으므로 그대로 SUSPECTED_ABANDONED", () => {
+  withTempDir("hyk464-idle-stop-main-rev4-", (mainDir) => {
+    initPlainGitRepo(mainDir);
+    const now =
+      Date.parse("2026-08-04T05:00:00+09:00") + 13.75 * 60 * 60 * 1000;
+    const abandonedLastOutputAt = now - 13.75 * 60 * 60 * 1000;
+    const { linked1, linked2, abandonedPath, execFn } =
+      buildThreeWorktreeFixture(mainDir, { now, abandonedLastOutputAt });
+    try {
+      const stopReasonsPath = writeStopReasonsFixture(mainDir, [
+        {
+          id: "HYK-464-future-open-1",
+          // now보다 1시간 뒤 -- §2ⓑ 원문 "열린 사유 = openedAt <= now"에
+          // 따라 아직 열리지 않았다.
+          openedAt: new Date(now + 60 * 60 * 1000).toISOString(),
+          closedAt: null,
+          worktrees: [abandonedPath],
+        },
+      ]);
+      const r = judgeSeatIdleAcrossWorktrees(
+        { repoRoot: mainDir, now },
+        { execFn, stopReasonsPath },
+      );
+      assert.equal(r.verdict, SEAT_IDLE_VERDICT.SUSPECTED_ABANDONED);
+      assert.equal(r.worstCount, 1);
+      assert.equal(r.parkedCount, 0);
+      assert.deepEqual(r.worstWorktreePaths, [abandonedPath]);
     } finally {
       rmSync(linked1, { recursive: true, force: true });
       rmSync(linked2, { recursive: true, force: true });
@@ -427,12 +467,88 @@ test("ⓓ(2/2) 형식 실패 -- {reasons:[...]} 모양이 아니거나 항목 �
   });
 });
 
-test("ⓑ 위치 상수 -- DEFAULT_STOP_REASONS_PATH는 CONTROL_ROOM_PATH 직속(watchDir의 부모)이고, opts 생략 시 이 상수를 쓴다(새 CLI 인자 0 -- opts.stopReasonsPath로만 오버라이드)", () => {
-  assert.match(DEFAULT_STOP_REASONS_PATH, /\/stop-reasons\.json$/);
-  assert.equal(
-    DEFAULT_STOP_REASONS_PATH.endsWith("/watch/stop-reasons.json"),
-    false,
-  );
+// ---------------------------------------------------------------------------
+// ⓐ 위치 유도(coder-task.md §2ⓐ, 1R 검토 P2-3) -- 생산 상수를 제거하고
+// watchDir의 부모에서 유도한다. 이 두 칸이 §2ⓐ의 칸⑴⑵다.
+// ---------------------------------------------------------------------------
+test("ⓐ 위치 유도 ⑴ -- mkdtemp watchDir로 도는 runOrchStallDetect는 그 부모의 stop-reasons.json만 조회하고, 생산 관제실 경로는 조회조차 하지 않는다(생산 경로를 가짜로 바꿔 '조회 0회'를 값으로)", () => {
+  withTempDir("hyk464-idle-stop-cliroot-", (repoDir) => {
+    initPlainGitRepo(repoDir);
+    const watchDir = mkdtempSync(join(tmpdir(), "hyk464-idle-stop-watch-"));
+    try {
+      const noticeStatePath = join(watchDir, "unconsumed-notice-state.json");
+      const expectedStopReasonsPath = join(
+        dirname(watchDir),
+        "stop-reasons.json",
+      );
+      const probedPaths = [];
+      const execFn = fakeOrcaExecFn({ terminals: [] });
+      runOrchStallDetect(
+        [
+          "--repo-root",
+          repoDir,
+          "--now",
+          "2026-08-03T18:00:00+09:00",
+          "--unconsumed-notice-state",
+          noticeStatePath,
+        ],
+        {
+          execFn,
+          stopReasonsExistsFn: (p) => {
+            probedPaths.push(p);
+            return false;
+          },
+        },
+      );
+      // 정확히 한 번, 그리고 그 한 번이 watchDir의 부모다 -- 생산
+      // 관제실 경로(`하네스-관제실`)는 이 목록에 전혀 등장하지 않는다.
+      assert.deepEqual(probedPaths, [expectedStopReasonsPath]);
+      assert.equal(
+        probedPaths.some((p) => p.includes("하네스-관제실")),
+        false,
+      );
+    } finally {
+      rmSync(watchDir, { recursive: true, force: true });
+    }
+  });
+});
+
+test('ⓐ 위치 유도 ⑵ -- opts.stopReasonsPath를 안 주면(seat-idle-wire.test.mjs의 기존 호출 관례) 정지 사유 파일 조회 자체가 0회다 -- 1R 검토 변이 ⑸("*" 열린 사유로 생산 경로를 흉내)가 더 이상 그 칸들을 못 건드리는 이유(생산 파일 의존 제거의 반대 방향 증거)', () => {
+  withTempDir("hyk464-idle-stop-noopts-", (mainDir) => {
+    initPlainGitRepo(mainDir);
+    const now = Date.parse("2026-08-04T05:00:00+09:00");
+    const execFn = fakeOrcaExecFn({ terminals: [] });
+    let probed = 0;
+    const r = judgeSeatIdleAcrossWorktrees(
+      { repoRoot: mainDir, now },
+      {
+        execFn,
+        // 1R 검토 §6 변이 ⑸가 생산 경로에 흉내 낸 것과 같은 모양(열린
+        // "*" 사유, openedAt 과거) -- 이 함수가 호출되기만 하면 모든
+        // 워크트리를 PARKED_WITH_REASON으로 덮었을 것이다. 아래서
+        // 호출 자체가 0회임을 증명한다(opts.stopReasonsPath 미제공 ->
+        // loadOpenStopReasonsForScan이 existsFn조차 부르지 않는다).
+        stopReasonsExistsFn: () => {
+          probed += 1;
+          return true;
+        },
+        stopReasonsReadFn: () =>
+          JSON.stringify({
+            reasons: [
+              {
+                id: "fake-prod-wildcard",
+                openedAt: "2020-01-01T00:00:00Z",
+                closedAt: null,
+                worktrees: "*",
+              },
+            ],
+          }),
+      },
+    );
+    assert.equal(probed, 0);
+    assert.equal(r.stopReasonsStatus, SEAT_IDLE_STOP_REASONS_STATUS.ABSENT);
+    assert.equal(r.parkedCount, 0);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -570,12 +686,17 @@ test("end-to-end: 감지기 stdout의 seatIdle.{worstWorktreePaths,parkedCount,p
           reasonCode: "OK",
           seatIdle: {
             status: "SEAT_IDLE_JUDGED",
-            verdict: "PARKED_WITH_REASON",
-            worstCount: 0,
+            verdict: "SUSPECTED_ABANDONED",
+            // HYK-464-idle-stop-reason-1-r2 (1R 검토 P2-2): worstWorktreePaths
+            // 가 비어 있으면 extractSeatIdleFields의 키 이름이 틀려도(1R
+            // 변이 ⑷-b, "worstWorktreePaths" -> 다른 이름) 결과가 똑같이
+            // []라 이 시험이 그 변이를 잡지 못했다 -- 비어 있지 않은 값을
+            // 줘서 그 키 이름 결선 자체를 단언한다.
+            worstCount: 1,
             totalWorktrees: 3,
-            worstWorktreePaths: [],
+            worstWorktreePaths: ["C:/wt-main/pm-lane"],
             parkedCount: 1,
-            parkedWorktreePaths: ["C:/wt-main/pm-lane"],
+            parkedWorktreePaths: ["C:/wt-main/pm-lane-2"],
             parkedReasonIds: ["HYK-464-merge-wait-1"],
             stopReasonsStatus: "SEAT_IDLE_STOP_REASONS_PRESENT",
             stopReasonsDetail: null,
@@ -585,7 +706,11 @@ test("end-to-end: 감지기 stdout의 seatIdle.{worstWorktreePaths,parkedCount,p
     const logText = readFileSync(result.logPath, "utf8");
     assert.match(
       logText,
-      /idle_parked=1 idle_parked_detail=pm-lane:HYK-464-merge-wait-1/,
+      /idle_worst_worktrees=1 idle_worst_worktree_detail=pm-lane\b/,
+    );
+    assert.match(
+      logText,
+      /idle_parked=1 idle_parked_detail=pm-lane-2:HYK-464-merge-wait-1/,
     );
     assert.match(
       logText,
@@ -595,7 +720,8 @@ test("end-to-end: 감지기 stdout의 seatIdle.{worstWorktreePaths,parkedCount,p
     // 그대로 스프레드, finalizeWatchOnceCycle 참조) -- 중첩 seatIdle
     // 객체가 아니다.
     const record = JSON.parse(readFileSync(result.aliveRecordPath, "utf8"));
-    assert.deepEqual(record.seatIdleParkedWorktrees, ["C:/wt-main/pm-lane"]);
+    assert.deepEqual(record.seatIdleWorstWorktrees, ["C:/wt-main/pm-lane"]);
+    assert.deepEqual(record.seatIdleParkedWorktrees, ["C:/wt-main/pm-lane-2"]);
     assert.equal(
       record.seatIdleStopReasonsStatus,
       "SEAT_IDLE_STOP_REASONS_PRESENT",
