@@ -266,6 +266,20 @@ function extractSeatIdleFields(seatIdle) {
     // HYK-464-watch-collection-1 3R P1-3: seatLiveness와 동일 이유.
     seatIdleExcludedUndeliveredTaskFiles:
       collectExcludedUndeliveredTaskFiles(seatIdle),
+    // HYK-464-idle-stop-reason-1 (coder-task.md §2ⓔ): unconsumedWorstWorktrees
+    // (HYK-328)와 동일 이유 -- worstCount 하나만으로는 "어느 워크트리"가
+    // 사라진다. 정상 회차(orch-stall-detect.mjs judgeSeatIdleAcrossWorktrees
+    // 참조)에는 빈 배열이라 pickStringArray가 []를 돌려준다.
+    seatIdleWorstWorktrees: pickStringArray(seatIdle, "worstWorktreePaths"),
+    // HYK-464-idle-stop-reason-1 (§2ⓒ): 열린 정지 사유가 덮어 "사유 있는
+    // 존치"로 갈린 워크트리 수·경로·사유 id.
+    seatIdleParkedCount: pickNumber(seatIdle, "parkedCount"),
+    seatIdleParkedWorktrees: pickStringArray(seatIdle, "parkedWorktreePaths"),
+    seatIdleParkedReasonIds: pickStringArray(seatIdle, "parkedReasonIds"),
+    // HYK-464-idle-stop-reason-1 (§2ⓓ): 정지 사유 파일 자체의 상태(부재/
+    // 있음/있는데 읽기·파싱·형식 실패) -- 조용한 낙하 금지.
+    seatIdleStopReasonsStatus: pickString(seatIdle, "stopReasonsStatus"),
+    seatIdleStopReasonsDetail: pickString(seatIdle, "stopReasonsDetail"),
   };
 }
 
@@ -447,6 +461,12 @@ function emptyDetectorFields() {
     seatIdleObservationReason: null,
     seatIdleReason: null,
     seatIdleExcludedUndeliveredTaskFiles: [],
+    seatIdleWorstWorktrees: null,
+    seatIdleParkedCount: null,
+    seatIdleParkedWorktrees: null,
+    seatIdleParkedReasonIds: null,
+    seatIdleStopReasonsStatus: null,
+    seatIdleStopReasonsDetail: null,
     startStatus: null,
     startVerdict: null,
     startWorstCount: null,
@@ -1260,6 +1280,20 @@ function buildSeatIdleSegments(detectorResult) {
     "idle",
     detectorResult.seatIdleExcludedUndeliveredTaskFiles,
   );
+  // HYK-464-idle-stop-reason-1 (coder-task.md §2ⓒⓔ): 세 세그먼트 모두
+  // "지금 이 시점의 맨 끝"에 붙는다(buildLogLine 참조) -- 이 세 줄은 그
+  // 값만 조립하고, 자리는 buildLogLine이 정한다.
+  const idleWorstDetail = idleWorstSegment(
+    detectorResult.seatIdleWorstWorktrees,
+  );
+  const idleParkedDetail = idleParkedSegment(
+    detectorResult.seatIdleParkedWorktrees,
+    detectorResult.seatIdleParkedReasonIds,
+  );
+  const idleStopReasonsDetail = idleStopReasonsSegment(
+    detectorResult.seatIdleStopReasonsStatus,
+    detectorResult.seatIdleStopReasonsDetail,
+  );
   return {
     seatSegment,
     seatFailureSegment,
@@ -1268,6 +1302,9 @@ function buildSeatIdleSegments(detectorResult) {
     idleSegment,
     idleReasonDetail,
     idleExcludedUndeliveredDetail,
+    idleWorstDetail,
+    idleParkedDetail,
+    idleStopReasonsDetail,
   };
 }
 
@@ -1411,6 +1448,63 @@ function worktreeShortName(rawPath) {
   return parts.length > 0 ? parts[parts.length - 1] : token;
 }
 
+// HYK-464-idle-stop-reason-1 (coder-task.md §2ⓔ) -- unconsumedWorstSegment와
+// 동일한 "상한 + N_more" 관례(새 형식 발명 0). 유휴 축 가장 나쁜(worst)
+// 워크트리가 없으면(정상 회차, orch-stall-detect.mjs judgeSeatIdleAcrossWorktrees
+// 참조) 세그먼트 자체를 안 붙인다 -- "정상 상태의 로그 줄을 조용히
+// 유지"(§2-3 비타협)와 동일.
+function idleWorstSegment(worstWorktrees) {
+  if (!Array.isArray(worstWorktrees) || worstWorktrees.length === 0) {
+    return null;
+  }
+  const shown = worstWorktrees
+    .slice(0, MAX_PARTIAL_FAILURE_ITEMS)
+    .map(worktreeShortName);
+  const omitted = worstWorktrees.length - shown.length;
+  const detail =
+    omitted > 0 ? `${shown.join("|")}|+${omitted}_more` : shown.join("|");
+  return `idle_worst_worktrees=${worstWorktrees.length} idle_worst_worktree_detail=${detail}`;
+}
+
+// HYK-464-idle-stop-reason-1 (coder-task.md §2ⓒ) -- 동일한 "상한 +
+// N_more" 관례. 각 워크트리 이름 뒤에 그 워크트리를 덮은 정지 사유 id를
+// 붙인다(사유 id가 줄에 보여야 한다, coder-task.md §1 1b_shown 원문).
+// 사유 있는 존치 워크트리가 없으면(가장 흔한 정상 회차) 세그먼트 자체를
+// 안 붙인다.
+function idleParkedSegment(parkedWorktrees, parkedReasonIds) {
+  if (!Array.isArray(parkedWorktrees) || parkedWorktrees.length === 0) {
+    return null;
+  }
+  const shown = parkedWorktrees
+    .slice(0, MAX_PARTIAL_FAILURE_ITEMS)
+    .map((p, i) => {
+      const name = worktreeShortName(p);
+      const reasonId = Array.isArray(parkedReasonIds)
+        ? parkedReasonIds[i]
+        : null;
+      return reasonId
+        ? `${name}:${sanitizeFailureToken(reasonId, "unknown_reason")}`
+        : name;
+    });
+  const omitted = parkedWorktrees.length - shown.length;
+  const detail =
+    omitted > 0 ? `${shown.join("|")}|+${omitted}_more` : shown.join("|");
+  return `idle_parked=${parkedWorktrees.length} idle_parked_detail=${detail}`;
+}
+
+// HYK-464-idle-stop-reason-1 (coder-task.md §2ⓓ) -- 정지 사유 파일 자체의
+// 상태(부재/있음/있는데 읽기·파싱·형식 실패)를 조용한 낙하 없이 로그
+// 줄까지 옮긴다. status가 없으면(구버전 감지기 stdout 등) 세그먼트 자체를
+// 안 붙인다 -- 기존 호출자 회귀 0.
+function idleStopReasonsSegment(status, detail) {
+  if (typeof status !== "string" || status.length === 0) return null;
+  const detailToken = truncateToken(
+    sanitizeFailureToken(detail, "none"),
+    MAX_PARTIAL_FAILURE_REASON_CHARS,
+  );
+  return `idle_stop_reasons_status=${status} idle_stop_reasons_detail=${detailToken}`;
+}
+
 // ★HYK-464-watch-start-axis-1 ⓒ: excludedUndeliveredLogSegment와 동일한
 // "상한 + N_more" 관례(새 형식 발명 0) -- 관측 불가 항목이 없으면(가장
 // 흔한 정상 회차) 이 축의 로그 줄에 아무 것도 더하지 않는다(null).
@@ -1460,6 +1554,9 @@ function buildAxisLogSegments(
     idleSegment,
     idleReasonDetail,
     idleExcludedUndeliveredDetail,
+    idleWorstDetail,
+    idleParkedDetail,
+    idleStopReasonsDetail,
     startSegment,
     startFailureSegment,
     startReasonDetail,
@@ -1510,6 +1607,9 @@ function buildAxisLogSegments(
     idleSegment,
     idleReasonDetail,
     idleExcludedUndeliveredDetail,
+    idleWorstDetail,
+    idleParkedDetail,
+    idleStopReasonsDetail,
     startSegment,
     startFailureSegment,
     startReasonDetail,
@@ -1658,6 +1758,16 @@ export function buildLogLine({
     // sizeObservationUnavailableLogSegment가 null을 돌려주므로
     // (filter(Boolean)) 로그 줄이 한 글자도 달라지지 않는다(회귀 0).
     segments.startSizeObservationUnavailableDetail,
+    // HYK-464-idle-stop-reason-1 (coder-task.md §2ⓒⓔ): 이 세 세그먼트도
+    // 지금 이 시점의 맨 끝이다 -- 앞선 모든 세그먼트의 필드·순서·값은 이
+    // 라운드가 손대지 않았다. worst/parked 목록이 비어 있는(가장 흔한
+    // 정상 회차) 호출자는 idleWorstSegment/idleParkedSegment가 null을
+    // 돌려주므로(filter(Boolean)) 로그 줄이 한 글자도 달라지지 않는다
+    // (회귀 0). idleStopReasonsDetail은 seatIdleStopReasonsStatus가 없는
+    // (구버전 감지기 stdout 등) 호출자에서만 null이다.
+    segments.idleWorstDetail,
+    segments.idleParkedDetail,
+    segments.idleStopReasonsDetail,
   ]
     .filter(Boolean)
     .join(" ");
