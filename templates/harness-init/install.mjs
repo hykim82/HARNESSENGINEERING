@@ -1512,6 +1512,20 @@ export const ENFORCEMENT_RELAY_FILES = [
 // another "./X.mjs"). concurrency-cap.json is a VALUE file and is deliberately
 // NOT copied here -- a separate scope decision. Any other scripts/supervisor/*
 // file is still a separate scope decision, not added here.
+// HYK-209-install-list-dispatch-start-1 (1R, 책임자 판정 2026-10-23 08:45
+// §2, "3 + 3"): the 관제실 dispatch pipeline (dispatch-worker.ps1, outside
+// this repo) invokes dispatch-start-confirm-cli.mjs BY PATH (same class of
+// presence requirement as derive-claude-project-dir-cli.mjs above), and
+// until this round the editor target only ever got this CLI and its two
+// imports via a hand-ported, byte-identical copy that install.mjs itself
+// never refreshed (목록 밖 손이식). dispatch-start-confirm-cli.mjs statically
+// imports dispatch-start-size-adapter.mjs and dispatch-start-size-core.mjs
+// (dispatch-start-confirm-cli.mjs:83/:90); dispatch-start-size-adapter.mjs
+// in turn imports the already-listed rate-limit-stall-adapter.mjs. All
+// three paired .test.mjs files are included too -- each resolves its own
+// relative imports to a name already in this list or to scripts/check/
+// (child-probe-timeout-policy.mjs, already on that axis), measured live via
+// grep, not guessed.
 export const ENFORCEMENT_SUPERVISOR_FILES = [
   "derive-claude-project-dir-cli.mjs",
   "rate-limit-stall-adapter.mjs",
@@ -1519,15 +1533,25 @@ export const ENFORCEMENT_SUPERVISOR_FILES = [
   "admission-ledger-core.mjs",
   "admission-ledger-store.mjs",
   "concurrency-cap-adapter.mjs",
+  "dispatch-start-confirm-cli.mjs",
+  "dispatch-start-confirm-cli.test.mjs",
+  "dispatch-start-size-adapter.mjs",
+  "dispatch-start-size-adapter.test.mjs",
+  "dispatch-start-size-core.mjs",
+  "dispatch-start-size-core.test.mjs",
 ];
 
 // Presence requirement, not an import-closure rule: the 관제실 dispatch
 // pipeline (dispatch-worker.ps1, outside this repo) invokes
 // derive-claude-project-dir-cli.mjs BY PATH, and nothing in this repo imports
 // it -- so the import-closure check alone cannot see its absence. Every name
-// here must appear in ENFORCEMENT_SUPERVISOR_FILES.
+// here must appear in ENFORCEMENT_SUPERVISOR_FILES. HYK-209-install-list-
+// dispatch-start-1 (1R): dispatch-start-confirm-cli.mjs is the same class of
+// by-path entry point (dispatch-worker.ps1 invokes it directly), so it joins
+// this requirement list too.
 export const ENFORCEMENT_SUPERVISOR_REQUIRED = [
   "derive-claude-project-dir-cli.mjs",
+  "dispatch-start-confirm-cli.mjs",
 ];
 
 // (repo source, installed destination) pairs for ENFORCEMENT_SUPERVISOR_FILES.
