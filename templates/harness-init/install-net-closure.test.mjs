@@ -315,10 +315,63 @@ function collectInstalledTestFiles(targetRepoPath) {
 // runner.mjs에서 import하지 않고 그대로 중복 적는다(이 파일 자신의
 // isolatedEnv() 헤더가 이미 쓰는 이 저장소의 consumer/producer 비결합
 // 관례와 같음).
-const STANDALONE_TIMEOUT_MS = 60000;
+// HYK-464 H7b-r4 (책임자 판정 2026-10-24 23:45 §2 ⓑ⑵): 60000 ms was already
+// too tight even in the "standalone, no artificial load" shape this constant
+// is meant to cover -- 검토 1R 실측(REVIEW-r1.md §4) = 평시 단독 61.4초, 이
+// 라운드 자신의 재실측(〔직접〕, 이 워크트리에서 relay-handshake-g1-dispatch-
+// check.test.mjs를 node --test로 직접 4회 연속 실행, 인위적 부하 0, ambient
+// free 3401~3555MB): 62920 / 61219 / 64766 / 68201 ms (최대 68201 ms, 측정
+// 시각은 결과 파일 §2 ⓑ 표에 값으로). 새 값 = 그 최대 실측값의 1.3배 이상,
+// 깨끗한 수 하나로 올림: 68201 * 1.3 = 88661.3 -> 90000 ms. 근거 배수(1.3배)는
+// 이 파일 자신의 UNDER_FULL_RUNNER_TIMEOUT_MS 선택(아래, 1.29배)과 같은
+// 자릿수 -- 이 라운드가 새로 발명한 배수가 아니다. 상한: 90000 ms는 여전히
+// UNDER_FULL_RUNNER_TIMEOUT_MS(180000 ms)의 절반이라 "표준 단독 시한이 부하
+// 재시도 시한을 넘어선다" 역전이 생기지 않는다(⛔무한대 금지 · ⛔근거 없는
+// 큰 값 금지 모두 충족).
+const STANDALONE_TIMEOUT_MS = 90000;
 // 180000 ms: 실측 최대 완주값(139124 ms)의 1.29배 이상, 한가 평균
 // (~39020 ms)의 4.6배 이상 -- 값을 올렸을 뿐 무한대는 아니다(⛔무한대 금지).
 const UNDER_FULL_RUNNER_TIMEOUT_MS = 180000;
+
+// HYK-464 H7b-r4 (§2 ⓑ⑴, §2 공통 정본 문면): the load-retry branch below may
+// only open when a measurement taken ON THE SPOT (at the moment the first
+// attempt's ETIMEDOUT is already in hand, never earlier) actually crosses a
+// reasoned threshold -- a first-attempt timeout alone is no longer enough
+// (r1's version retried unconditionally on every ETIMEDOUT, which is exactly
+// the "완화 조건에 부하 실측이 빠졌다" gap ORCH's own judgment admits,
+// coder-task.md round_reason). Free-memory based, same reasoning as the
+// hyk359 cell's own measureAmbientLoadOnTheSpot (one load vocabulary across
+// both cells, not two different mechanisms): counting sibling node processes
+// portably would need its own child-process spawn, adding overhead and a new
+// failure mode; freemem() is synchronous, in-process, effectively never
+// throws. LOAD_RETRY_FREE_THRESHOLD_MB reuses the exact same 3,072 MB
+// (3.0 GB) "저메모리" line this harness's own worker-dispatch-rule
+// memory_rule already treats as contested/loaded ambient memory
+// (coder-task.md 28행).
+const LOAD_RETRY_FREE_THRESHOLD_MB = 3072;
+
+// Measures load on the spot -- called ONLY after a first-attempt ETIMEDOUT
+// is already in hand (never before the first attempt runs: a pre-call
+// measurement would describe ambient conditions before the slow child ran,
+// not whether load was actually present AT the moment it timed out).
+// Measurement failure (a throwing freememImpl, or a non-finite result) is
+// reported as `measured: false`, never as loaded -- a tool failure must
+// never be read as evidence of load (symmetric with hyk359's own
+// measureAmbientLoadOnTheSpot).
+function measureLoadOnTimeout(freememImpl = freemem) {
+  let freeNowMB;
+  try {
+    freeNowMB = Math.round(freememImpl() / (1024 * 1024));
+  } catch {
+    return { measured: false };
+  }
+  if (!Number.isFinite(freeNowMB)) return { measured: false };
+  return {
+    measured: true,
+    freeNowMB,
+    loaded: freeNowMB < LOAD_RETRY_FREE_THRESHOLD_MB,
+  };
+}
 
 // 부하 신호(HARNESS_TEST_CONCURRENCY)가 유효한 양의 정수로 있으면 더 긴
 // 유한 시한, 없거나 값이 깨졌으면 원래 시한 -- isolated-suite-runner.mjs의
@@ -394,14 +447,27 @@ function runOneInstalledTestFile(
   );
 }
 
-// HYK-464 H7b (§2 ⓑ): exactly one retry, ONLY on an ETIMEDOUT first attempt,
-// at the UNDER_FULL_RUNNER_TIMEOUT_MS ceiling that already exists and is
-// already reasoned (319행) -- never a new, unbounded number (⛔무조건 상향
-// 금지). Extracted into its own function (rather than left inline in the
-// main test below) SOLELY so this round's own unit test further down can
-// drive it with a fake spawnSync -- a real child never actually spawns,
-// so the retry-vs-no-retry branching is verified in milliseconds, not by
-// waiting out a real 60s/180s timeout under real machine load.
+// HYK-464 H7b-r4 (§2 ⓑ⑴, §2 공통 정본 문면): exactly one retry, and ONLY when
+// BOTH (a) the first attempt was an ETIMEDOUT AND (b) a measurement taken
+// ON THE SPOT right here (measureLoadOnTimeout, never before the first
+// attempt ran -- r1's `freeMemBytes = freemem()` default was evaluated at
+// call entry, i.e. BEFORE the slow first attempt even started, which is the
+// P2-3 diagnostic-wording defect this round fixes: the old field name
+// `freeAtFirstTimeoutMB` claimed a measurement moment the code never
+// actually took) crosses LOAD_RETRY_FREE_THRESHOLD_MB. A first-attempt
+// ETIMEDOUT with NO measured load is read as a real hang, not load --
+// RED stays RED, exactly like a non-timeout error (⛔부하 측정 없이 모든
+// 첫 ETIMEDOUT 에 재시도 금지). The retry ceiling itself is still the
+// already-existing, already-reasoned UNDER_FULL_RUNNER_TIMEOUT_MS (319행 근처)
+// -- never a new, unbounded number (⛔무조건 상향 금지).
+//
+// Extracted into its own function (rather than left inline in the main test
+// below) SOLELY so this round's own unit tests further down can drive it
+// with a fake spawnSync AND a fake freememImpl -- a real child never
+// actually spawns and no real memory pressure is needed, so the
+// measured/not-measured and loaded/not-loaded branching is verified in
+// milliseconds, not by waiting out a real 60s/180s timeout under real
+// machine load.
 //
 // `result.error === undefined` on the retry is the ONLY signal read as
 // "load-caused, not a real defect" -- a genuinely-hanging installed test
@@ -414,13 +480,31 @@ function runOneInstalledTestFile(
 function runInstalledTestFileWithLoadRetry(
   targetRepoPath,
   rel,
-  { spawnSync: spawnSyncImpl = spawnSync, freeMemBytes = freemem() } = {},
+  { spawnSync: spawnSyncImpl = spawnSync, freemem: freememImpl = freemem } = {},
 ) {
   const firstResult = runOneInstalledTestFile(targetRepoPath, rel, {
     spawnSync: spawnSyncImpl,
   });
   if (!(firstResult.error !== undefined && isSpawnTimeout(firstResult))) {
-    return { result: firstResult, loadRetried: null };
+    return { result: firstResult, loadRetried: null, measuredNoLoad: null };
+  }
+  const load = measureLoadOnTimeout(freememImpl);
+  if (!(load.measured && load.loaded)) {
+    // Either the on-the-spot measurement failed, or it came back at/above
+    // the threshold (no measured load) -- the first attempt's ETIMEDOUT is
+    // read as a real hang, no retry fires, and the caller's unchanged hard
+    // assertion on `result.error` still goes RED.
+    return {
+      result: firstResult,
+      loadRetried: null,
+      measuredNoLoad: load.measured
+        ? {
+            rel,
+            freeAtTimeoutMB: load.freeNowMB,
+            thresholdMB: LOAD_RETRY_FREE_THRESHOLD_MB,
+          }
+        : null,
+    };
   }
   const retryResult = runOneInstalledTestFile(targetRepoPath, rel, {
     timeoutMs: UNDER_FULL_RUNNER_TIMEOUT_MS,
@@ -430,12 +514,12 @@ function runInstalledTestFileWithLoadRetry(
     retryResult.error === undefined
       ? {
           rel,
-          freeAtFirstTimeoutMB: Math.round(freeMemBytes / (1024 * 1024)),
+          freeAtFirstTimeoutMB: load.freeNowMB,
           firstTimeoutMsUsed: resolveInstalledTestTimeoutMs(isolatedEnv()),
           retryTimeoutMsUsed: UNDER_FULL_RUNNER_TIMEOUT_MS,
         }
       : null;
-  return { result: retryResult, loadRetried };
+  return { result: retryResult, loadRetried, measuredNoLoad: null };
 }
 
 test("install-net-closure: every INSTALL_NET_CLOSURE_KNOWN_EXCEPTIONS entry names a file this installer actually ships (no stale exception for a file that was removed/renamed)", () => {
@@ -577,22 +661,21 @@ function exceptionShapeMismatches(entry, result) {
 // than a hard failure here), then returns a plain outcome tag the caller
 // uses to update its own accumulators.
 function classifyInstalledTestFileRun(targetRepo, rel, exceptionsByFile) {
-  const { result, loadRetried } = runInstalledTestFileWithLoadRetry(
-    targetRepo,
-    rel,
-  );
+  const { result, loadRetried, measuredNoLoad } =
+    runInstalledTestFileWithLoadRetry(targetRepo, rel);
   assert.equal(
     result.error,
     undefined,
     `spawnSync itself failed running ${rel}${loadRetried ? "" : " (no load-retry fired, or it also timed out)"} -- error: ${result.error?.message}, signal: ${result.signal}, status: ${result.status}`,
   );
   if (result.status === 0) {
-    return { loadRetried, outcome: "passed" };
+    return { loadRetried, measuredNoLoad, outcome: "passed" };
   }
   const entry = exceptionsByFile.get(rel);
   if (!entry) {
     return {
       loadRetried,
+      measuredNoLoad,
       outcome: "unexpected",
       tail: `${result.stdout ?? ""}${result.stderr ?? ""}`.slice(-1500),
     };
@@ -602,11 +685,12 @@ function classifyInstalledTestFileRun(targetRepo, rel, exceptionsByFile) {
     const combined = `${result.stdout ?? ""}${result.stderr ?? ""}`;
     return {
       loadRetried,
+      measuredNoLoad,
       outcome: "unexpected",
       tail: `exception '${rel}' no longer matches its fixed shape (P2-3):\n${mismatches.join("\n")}\n\n${combined.slice(-1500)}`,
     };
   }
-  return { loadRetried, outcome: "exception-matched" };
+  return { loadRetried, measuredNoLoad, outcome: "exception-matched" };
 }
 
 test("install-net-closure: real installer -> real git target -> every installed .test.mjs actually RUNS (not just imports) with 0 failures, except the named, reasoned exceptions", (t) => {
@@ -629,14 +713,22 @@ test("install-net-closure: real installer -> real git target -> every installed 
     );
     const unexpectedFailures = [];
     const exceptionsSeen = new Set();
-    // HYK-464 H7b (§2 ⓑ): every file whose FIRST attempt timed out and whose
-    // retry then resolved cleanly (see loop below) -- purely a diagnostic
-    // record of "measurement was unavailable on attempt 1 under suspected
-    // load, retry resolved it", surfaced via t.diagnostic(), never used to
+    // HYK-464 H7b-r4 (§2 ⓑ): every file whose FIRST attempt timed out, a
+    // load measurement taken ON THE SPOT then crossed the threshold, AND
+    // whose retry then resolved cleanly (see loop below) -- purely a
+    // diagnostic record, surfaced via t.diagnostic(), never used to
     // suppress a real failure (the retry's own real result still flows into
     // unexpectedFailures/exceptionsSeen exactly like a first-attempt result
     // would).
     const loadRetried = [];
+    // HYK-464 H7b-r4 (§2 ⓑ⑴): every file whose FIRST attempt timed out but
+    // whose on-the-spot measurement did NOT cross the load threshold (or the
+    // measurement itself failed) -- these never retried, and their RED
+    // outcome already flowed into unexpectedFailures above like any other
+    // real failure; this is purely a diagnostic record of "a timeout
+    // happened but was not attributed to measured load" so a reader of the
+    // TAP output can tell the two timeout shapes apart.
+    const measuredNoLoad = [];
     // HYK-209-install-closure-1 2R P2-3: a shape mismatch against the
     // exception's own fixed expectations (fail count changed, a new/missing
     // subtest, a different missing module) is pushed into unexpectedFailures
@@ -644,10 +736,12 @@ test("install-net-closure: real installer -> real git target -> every installed 
     for (const rel of files) {
       const {
         loadRetried: retryEvidence,
+        measuredNoLoad: noLoadEvidence,
         outcome,
         tail,
       } = classifyInstalledTestFileRun(targetRepo, rel, exceptionsByFile);
       if (retryEvidence) loadRetried.push(retryEvidence);
+      if (noLoadEvidence) measuredNoLoad.push(noLoadEvidence);
       if (outcome === "unexpected") {
         unexpectedFailures.push({ rel, tail });
       } else if (outcome === "exception-matched") {
@@ -655,15 +749,25 @@ test("install-net-closure: real installer -> real git target -> every installed 
       }
     }
 
-    // HYK-464 H7b: purely informational -- the retry's own real result
+    // HYK-464 H7b-r4: purely informational -- the retry's own real result
     // already flowed through the normal pass/fail bookkeeping above, so
     // this never changes what the assertions below decide. Surfaced via
     // t.diagnostic (TAP '#' line, does not affect pass/fail) so a load-
     // caused first-attempt timeout is still visibly self-reported, not
-    // silently absorbed.
+    // silently absorbed. The "load-sensitive" prefix is now ONLY attached
+    // here, where a load measurement actually crossed the threshold at the
+    // moment of the timeout (P2-3 fix: r1 attached this same prefix to EVERY
+    // first-attempt timeout that resolved on retry, including ones where no
+    // load was ever actually measured -- the prefix now matches the
+    // measurement, not merely "a retry happened to help").
     if (loadRetried.length > 0) {
       t.diagnostic(
-        `load-sensitive (HYK-464 H7b): ${loadRetried.length} installed test file(s) hit spawnSync's timeout on attempt 1 and only completed after one load-retry at the extended ${UNDER_FULL_RUNNER_TIMEOUT_MS}ms budget -- ${JSON.stringify(loadRetried)}`,
+        `load-sensitive (HYK-464 H7b): ${loadRetried.length} installed test file(s) hit spawnSync's timeout on attempt 1, a load measurement taken at that moment crossed the ${LOAD_RETRY_FREE_THRESHOLD_MB}MB threshold, and the file then completed after one load-retry at the extended ${UNDER_FULL_RUNNER_TIMEOUT_MS}ms budget -- ${JSON.stringify(loadRetried)}`,
+      );
+    }
+    if (measuredNoLoad.length > 0) {
+      t.diagnostic(
+        `not-load-sensitive (HYK-464 H7b-r4): ${measuredNoLoad.length} installed test file(s) hit spawnSync's timeout on attempt 1 but no load was measured at that moment (or the measurement itself failed) -- no retry fired, and the timeout flowed through as a real failure -- ${JSON.stringify(measuredNoLoad)}`,
       );
     }
 
@@ -695,23 +799,23 @@ test("install-net-closure: real installer -> real git target -> every installed 
 // decision table, unit-level (no real spawn -- just the env-reading logic
 // above runOneInstalledTestFile).
 // ---------------------------------------------------------------------------
-test("install-net-closure timeout ⓑ: resolveInstalledTestTimeoutMs returns the original 60000 ms when HARNESS_TEST_CONCURRENCY is absent/empty/invalid (standalone run, unchanged behavior)", () => {
-  assert.equal(resolveInstalledTestTimeoutMs({}), 60000);
+test("install-net-closure timeout ⓑ (HYK-464 H7b-r4, STANDALONE_TIMEOUT_MS 재근거): resolveInstalledTestTimeoutMs returns the rebased 90000 ms when HARNESS_TEST_CONCURRENCY is absent/empty/invalid (standalone run)", () => {
+  assert.equal(resolveInstalledTestTimeoutMs({}), STANDALONE_TIMEOUT_MS);
   assert.equal(
     resolveInstalledTestTimeoutMs({ HARNESS_TEST_CONCURRENCY: "" }),
-    60000,
+    STANDALONE_TIMEOUT_MS,
   );
   assert.equal(
     resolveInstalledTestTimeoutMs({ HARNESS_TEST_CONCURRENCY: "not-a-number" }),
-    60000,
+    STANDALONE_TIMEOUT_MS,
   );
   assert.equal(
     resolveInstalledTestTimeoutMs({ HARNESS_TEST_CONCURRENCY: "0" }),
-    60000,
+    STANDALONE_TIMEOUT_MS,
   );
   assert.equal(
     resolveInstalledTestTimeoutMs({ HARNESS_TEST_CONCURRENCY: "-3" }),
-    60000,
+    STANDALONE_TIMEOUT_MS,
   );
 });
 
@@ -799,13 +903,59 @@ test("install-net-closure ⓒ: a truly-hung installed test file (infinite setInt
 });
 
 // ---------------------------------------------------------------------------
-// HYK-464 H7b (§2 ⓑ, §2 ⓒ 반대 방향): runInstalledTestFileWithLoadRetry's
-// own decision table, driven with a fake spawnSync (no real child, no real
-// 60s/180s wait) -- the real-install test further up this file already
-// exercises the real spawnSync path end to end; these three cells pin the
-// RETRY branching itself deterministically, in milliseconds.
+// HYK-464 H7b-r4 (§2 ⓑ⑶): runInstalledTestFileWithLoadRetry's own decision
+// table, driven with a fake spawnSync AND a fake freememImpl (no real child,
+// no real 60s/180s wait, no real memory pressure) -- the real-install test
+// further up this file already exercises the real spawnSync path end to
+// end; these four cells pin the measured-load-gated RETRY branching itself
+// deterministically, in milliseconds: 부하 아님 + ETIMEDOUT -> 재시도 0 ·
+// RED; 부하 실측 + ETIMEDOUT -> 재시도 1 · 성공 시 진단; 재시도도 ETIMEDOUT
+// -> RED; ENOENT -> 재시도 0.
 // ---------------------------------------------------------------------------
-test("install-net-closure load-retry ⓑ: a first-attempt ETIMEDOUT that succeeds on retry is reported as loadRetried evidence, and the CALLER sees the retry's own (clean) result, not the original timeout", () => {
+test("install-net-closure load-retry ⓑ⑶ (부하 아님 + ETIMEDOUT): a first-attempt ETIMEDOUT with NO measured load does not retry at all, and the caller still sees the original ETIMEDOUT (RED) -- a bare timeout is read as a real hang, not load", () => {
+  let calls = 0;
+  const fakeSpawn = () => {
+    calls += 1;
+    return {
+      error: Object.assign(new Error("timed out"), { code: "ETIMEDOUT" }),
+      signal: "SIGTERM",
+      status: null,
+      stdout: "",
+      stderr: "",
+    };
+  };
+  const { result, loadRetried, measuredNoLoad } =
+    runInstalledTestFileWithLoadRetry(
+      "/fake/target",
+      "scripts/check/fake-no-load.test.mjs",
+      {
+        spawnSync: fakeSpawn,
+        freemem: () => (LOAD_RETRY_FREE_THRESHOLD_MB + 1000) * 1024 * 1024,
+      },
+    );
+  assert.equal(
+    calls,
+    1,
+    "a first-attempt ETIMEDOUT with no measured load must NOT trigger a retry",
+  );
+  assert.equal(
+    loadRetried,
+    null,
+    "no load was measured, so this must never be reported as loadRetried evidence",
+  );
+  assert.equal(result.error?.code, "ETIMEDOUT");
+  assert.ok(
+    measuredNoLoad,
+    "expected measuredNoLoad evidence to be populated (measurement succeeded, just under threshold)",
+  );
+  assert.equal(measuredNoLoad.rel, "scripts/check/fake-no-load.test.mjs");
+  assert.equal(
+    measuredNoLoad.freeAtTimeoutMB,
+    LOAD_RETRY_FREE_THRESHOLD_MB + 1000,
+  );
+});
+
+test("install-net-closure load-retry ⓑ⑶ (부하 실측 + ETIMEDOUT): a first-attempt ETIMEDOUT WITH measured load (on the spot, below the threshold) retries exactly once, and a clean retry is reported as loadRetried evidence with the CALLER seeing the retry's own result", () => {
   const calls = [];
   const fakeSpawn = (cmd, args, opts) => {
     calls.push(opts.timeout);
@@ -826,11 +976,12 @@ test("install-net-closure load-retry ⓑ: a first-attempt ETIMEDOUT that succeed
       stderr: "",
     };
   };
-  const { result, loadRetried } = runInstalledTestFileWithLoadRetry(
-    "/fake/target",
-    "scripts/check/fake.test.mjs",
-    { spawnSync: fakeSpawn, freeMemBytes: 777 * 1024 * 1024 },
-  );
+  const { result, loadRetried, measuredNoLoad } =
+    runInstalledTestFileWithLoadRetry(
+      "/fake/target",
+      "scripts/check/fake.test.mjs",
+      { spawnSync: fakeSpawn, freemem: () => 777 * 1024 * 1024 },
+    );
   assert.equal(
     calls.length,
     2,
@@ -847,16 +998,17 @@ test("install-net-closure load-retry ⓑ: a first-attempt ETIMEDOUT that succeed
     "expected the retry's clean result to be what the caller sees",
   );
   assert.equal(result.status, 0);
+  assert.equal(measuredNoLoad, null);
   assert.ok(
     loadRetried,
-    "expected loadRetried evidence to be populated when the retry clears a first-attempt timeout",
+    "expected loadRetried evidence to be populated when a measured load's retry clears a first-attempt timeout",
   );
   assert.equal(loadRetried.rel, "scripts/check/fake.test.mjs");
   assert.equal(loadRetried.freeAtFirstTimeoutMB, 777);
   assert.equal(loadRetried.retryTimeoutMsUsed, UNDER_FULL_RUNNER_TIMEOUT_MS);
 });
 
-test("install-net-closure load-retry ⓒ 반대 방향 (거짓 초록 금지): a SECOND ETIMEDOUT on retry (the genuinely-hung-child shape) is NOT swallowed -- loadRetried stays null and the caller still sees an ETIMEDOUT result", () => {
+test("install-net-closure load-retry ⓑ⑶ (재시도도 ETIMEDOUT, 거짓 초록 금지): a measured load opens the retry, but a SECOND ETIMEDOUT on that retry (the genuinely-hung-child shape) is NOT swallowed -- loadRetried stays null and the caller still sees an ETIMEDOUT result", () => {
   let calls = 0;
   const fakeSpawn = () => {
     calls += 1;
@@ -868,21 +1020,23 @@ test("install-net-closure load-retry ⓒ 반대 방향 (거짓 초록 금지): a
       stderr: "",
     };
   };
-  const { result, loadRetried } = runInstalledTestFileWithLoadRetry(
-    "/fake/target",
-    "scripts/check/fake-hang.test.mjs",
-    { spawnSync: fakeSpawn },
-  );
+  const { result, loadRetried, measuredNoLoad } =
+    runInstalledTestFileWithLoadRetry(
+      "/fake/target",
+      "scripts/check/fake-hang.test.mjs",
+      { spawnSync: fakeSpawn, freemem: () => 500 * 1024 * 1024 },
+    );
   assert.equal(
     calls,
     2,
-    "expected exactly 2 spawn calls -- a hang gets ONE retry, never more (bounded)",
+    "expected exactly 2 spawn calls -- a measured-load hang gets ONE retry, never more (bounded)",
   );
   assert.equal(
     loadRetried,
     null,
     "a persistent timeout must NOT be reported as load-retried evidence",
   );
+  assert.equal(measuredNoLoad, null);
   assert.equal(
     result.error?.code,
     "ETIMEDOUT",
@@ -890,7 +1044,7 @@ test("install-net-closure load-retry ⓒ 반대 방향 (거짓 초록 금지): a
   );
 });
 
-test("install-net-closure load-retry ⓑ: a non-timeout spawn error (e.g. ENOENT) is never retried -- only ETIMEDOUT triggers the load-retry path", () => {
+test("install-net-closure load-retry ⓑ⑶ (ENOENT): a non-timeout spawn error is never retried, regardless of measured load -- only ETIMEDOUT triggers the load-retry path at all", () => {
   let calls = 0;
   const fakeSpawn = () => {
     calls += 1;
@@ -902,18 +1056,60 @@ test("install-net-closure load-retry ⓑ: a non-timeout spawn error (e.g. ENOENT
       stderr: "",
     };
   };
-  const { result, loadRetried } = runInstalledTestFileWithLoadRetry(
-    "/fake/target",
-    "scripts/check/fake-enoent.test.mjs",
-    { spawnSync: fakeSpawn },
-  );
+  const { result, loadRetried, measuredNoLoad } =
+    runInstalledTestFileWithLoadRetry(
+      "/fake/target",
+      "scripts/check/fake-enoent.test.mjs",
+      { spawnSync: fakeSpawn, freemem: () => 500 * 1024 * 1024 },
+    );
   assert.equal(
     calls,
     1,
-    "a non-timeout spawn failure must not trigger a retry at all",
+    "a non-timeout spawn failure must not trigger a retry at all, even with a measured load",
   );
   assert.equal(loadRetried, null);
+  assert.equal(measuredNoLoad, null);
   assert.equal(result.error?.code, "ENOENT");
+});
+
+// ---------------------------------------------------------------------------
+// HYK-464 H7b-r4 (§2 ⓑ⑴): measureLoadOnTimeout's own decision table,
+// unit-level (no spawn at all -- just the freemem-reading logic above
+// runInstalledTestFileWithLoadRetry).
+// ---------------------------------------------------------------------------
+test("install-net-closure measureLoadOnTimeout: free memory at/above the threshold is measured, not loaded", () => {
+  assert.deepEqual(
+    measureLoadOnTimeout(
+      () => (LOAD_RETRY_FREE_THRESHOLD_MB + 1) * 1024 * 1024,
+    ),
+    {
+      measured: true,
+      freeNowMB: LOAD_RETRY_FREE_THRESHOLD_MB + 1,
+      loaded: false,
+    },
+  );
+});
+
+test("install-net-closure measureLoadOnTimeout: free memory below the threshold is measured AND loaded", () => {
+  assert.deepEqual(
+    measureLoadOnTimeout(
+      () => (LOAD_RETRY_FREE_THRESHOLD_MB - 1) * 1024 * 1024,
+    ),
+    {
+      measured: true,
+      freeNowMB: LOAD_RETRY_FREE_THRESHOLD_MB - 1,
+      loaded: true,
+    },
+  );
+});
+
+test("install-net-closure measureLoadOnTimeout (측정 실패 = 측정 없음): a throwing freememImpl is measured:false, never loaded", () => {
+  assert.deepEqual(
+    measureLoadOnTimeout(() => {
+      throw new Error("no such metric on this platform");
+    }),
+    { measured: false },
+  );
 });
 
 // ---------------------------------------------------------------------------
@@ -970,7 +1166,7 @@ test("install-net-closure timeout ⓑ fix (P2-1): calling runOneInstalledTestFil
     resolveInstalledTestTimeoutMs(standaloneOpts.env),
     "no-bypass call must pass resolveInstalledTestTimeoutMs(env) as spawnSync's own timeout option (HARNESS_TEST_CONCURRENCY absent)",
   );
-  assert.equal(standaloneOpts.timeout, 60000);
+  assert.equal(standaloneOpts.timeout, STANDALONE_TIMEOUT_MS);
 
   const fullRunnerOpts = captureSpawnOptsUnder({
     HARNESS_TEST_CONCURRENCY: "12",

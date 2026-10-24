@@ -99,7 +99,7 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
+import { freemem, tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -1687,6 +1687,66 @@ test("HYK-371 4R 완료조건① (층 2·계약, 관측 지점 = 생산 경로):
   }
 });
 
+// HYK-464 H7b-r4 (§2 ⓐ, §2 공통 정본 문면): the on-the-spot load signal the
+// skip branch below requires before it may open. "On the spot" means this
+// function is called AFTER the low-overlap result is already in hand, never
+// before or during the sweep itself -- a measurement taken earlier would
+// describe ambient conditions before the fixture ran, not whether load was
+// actually present at the moment the fixture failed to demonstrate overlap.
+// Free-memory based (not "other node count"): counting sibling node
+// processes portably on this platform would need its own child-process
+// spawn (tasklist/ps), which both adds measurement overhead and is itself
+// one more place to fail; freemem() is synchronous, in-process, and never
+// throws in practice. OVERLAP_SKIP_FREE_THRESHOLD_MB intentionally reuses
+// the exact 3,072 MB (3.0 GB) threshold this harness's own worker-dispatch-
+// rule memory_rule already uses as its "하나라도 <3,072(3.0GB)=대기" low-
+// memory line (coder-task.md 28행) -- one load vocabulary, not a new number
+// invented just for this cell.
+const OVERLAP_SKIP_FREE_THRESHOLD_MB = 3072;
+function measureAmbientLoadOnTheSpot(freememImpl = freemem) {
+  let freeNowMB;
+  try {
+    freeNowMB = Math.round(freememImpl() / (1024 * 1024));
+  } catch {
+    return { measured: false };
+  }
+  if (!Number.isFinite(freeNowMB)) return { measured: false };
+  return {
+    measured: true,
+    freeNowMB,
+    loaded: freeNowMB < OVERLAP_SKIP_FREE_THRESHOLD_MB,
+  };
+}
+
+test("measureAmbientLoadOnTheSpot (HYK-464 H7b-r4): free memory at/above the threshold is reported as measured, not loaded -- the skip branch must not treat normal ambient memory as load", () => {
+  const result = measureAmbientLoadOnTheSpot(
+    () => (OVERLAP_SKIP_FREE_THRESHOLD_MB + 500) * 1024 * 1024,
+  );
+  assert.deepEqual(result, {
+    measured: true,
+    freeNowMB: OVERLAP_SKIP_FREE_THRESHOLD_MB + 500,
+    loaded: false,
+  });
+});
+
+test("measureAmbientLoadOnTheSpot (HYK-464 H7b-r4): free memory below the threshold is reported as measured AND loaded -- this is the ONLY shape that may open the skip branch above", () => {
+  const result = measureAmbientLoadOnTheSpot(
+    () => (OVERLAP_SKIP_FREE_THRESHOLD_MB - 500) * 1024 * 1024,
+  );
+  assert.deepEqual(result, {
+    measured: true,
+    freeNowMB: OVERLAP_SKIP_FREE_THRESHOLD_MB - 500,
+    loaded: true,
+  });
+});
+
+test("measureAmbientLoadOnTheSpot (HYK-464 H7b-r4, 측정 실패 = 측정 없음): a throwing freemem implementation is reported as NOT measured, never as loaded -- a tool failure must never be read as evidence of load", () => {
+  const result = measureAmbientLoadOnTheSpot(() => {
+    throw new Error("no such metric on this platform");
+  });
+  assert.deepEqual(result, { measured: false });
+});
+
 // HYK-477 §1-1/§1-4 (coder-task.md §1-4 "★중첩 자식이 바깥 상한 이하인가 --
 // «직접 관측»으로 보여라"): reuses the exact HYK-371 3R technique above
 // (writeIntervalFixture/computeMaxOverlap, no wall-clock threshold) but
@@ -1742,21 +1802,34 @@ test("HYK-477 §1-1 (직접 관측, 기계 무관): ambient HARNESS_TEST_CONCURR
     const uncappedOverlap = computeMaxOverlap(
       uncapped.map((f) => JSON.parse(readFileSync(f.timesPath, "utf8"))),
     );
-    // HYK-464 H7b (책임자 판정 2026-10-24 07:45 §2): under load this machine
-    // can fail to schedule enough concurrent sleeping children to ever
-    // exceed ENV_CAP, even with NO cap in effect at all -- that is this
-    // comparison run failing to DEMONSTRATE real concurrency (a measurement
-    // failure), not evidence that the env-propagation capping proven by run
-    // 1's cappedOverlap assertion above (left untouched, never weakened) is
-    // broken. Self-report as skipped with the observed value instead of
-    // asserting a false red; at normal load (no busy sibling work on this
-    // machine) the fixture reliably exceeds ENV_CAP and the assertion below
-    // runs exactly as before.
+    // HYK-464 H7b-r4 (책임자 판정 2026-10-24 23:45 §2 ⓐ, §2 공통 정본 문면):
+    // the r1 version of this cell opened the skip on a LOW uncappedOverlap
+    // alone, with no load actually measured at that moment -- the same
+    // branch would silently fire at normal load too (ORCH's own admission,
+    // this round's coder-task.md round_reason), hiding a real regression
+    // behind SKIP. Skip must now be earned by BOTH signals: insufficient
+    // overlap AND a load measurement taken ON THE SPOT (right here, not at
+    // module load or test start) that actually crosses a reasoned threshold.
+    // Reused threshold (not invented for this cell): OVERLAP_SKIP_FREE_
+    // THRESHOLD_MB below is the same 3,072 MB (3.0 GB) "저메모리" line this
+    // harness's own worker-dispatch-rule memory_rule already treats as
+    // contested/loaded ambient memory (coder-task.md 28행) -- one load
+    // vocabulary across this round's two cells, not two different numbers.
     if (uncappedOverlap <= ENV_CAP) {
-      t.skip(
-        `load-sensitive (HYK-464 H7b): could not demonstrate real concurrency without the env cap -- observed uncappedOverlap=${uncappedOverlap} (needed > ENV_CAP=${ENV_CAP}) across ${NESTED_SWEEP_CONCURRENCY} fixtures of ${SLEEP_MS}ms each; run 1's capped assertion (cappedOverlap=${cappedOverlap} <= ${ENV_CAP}) above still ran and was NOT weakened, but its detection power cannot be confirmed as non-vacuous under current load`,
-      );
-      return;
+      const load = measureAmbientLoadOnTheSpot();
+      if (load.measured && load.loaded) {
+        t.skip(
+          `load-sensitive (HYK-464 H7b): could not demonstrate real concurrency without the env cap -- observed uncappedOverlap=${uncappedOverlap} (needed > ENV_CAP=${ENV_CAP}) across ${NESTED_SWEEP_CONCURRENCY} fixtures of ${SLEEP_MS}ms each, AND a load measurement taken at this moment shows freemem=${load.freeNowMB}MB (< ${OVERLAP_SKIP_FREE_THRESHOLD_MB}MB threshold) -- run 1's capped assertion (cappedOverlap=${cappedOverlap} <= ${ENV_CAP}) above still ran and was NOT weakened, but its detection power cannot be confirmed as non-vacuous under this measured load`,
+        );
+        return;
+      }
+      // Either the on-the-spot measurement came back under the threshold
+      // (overlap was low for some OTHER reason, not measured load), or the
+      // measurement itself failed (freemem threw / returned a non-finite
+      // value) -- in both cases this is "측정 없음" territory, so the skip is
+      // NOT earned and the original hard assertion below still runs and can
+      // still go RED exactly as it did before this round (거짓 초록 금지:
+      // overlap being low is never, by itself, a license to skip).
     }
     assert.ok(
       uncappedOverlap > ENV_CAP,
