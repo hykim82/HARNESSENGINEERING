@@ -56,7 +56,7 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
+import { freemem, tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -331,6 +331,35 @@ function resolveInstalledTestTimeoutMs(env) {
   return UNDER_FULL_RUNNER_TIMEOUT_MS;
 }
 
+// HYK-464 H7b (책임자 판정 2026-10-24 07:45 §2 ⓑ): "부하 탓 시한 초과"와
+// "자식이 진짜로 멈춤"을 가르는 신호. 선택한 방향 = "시한을 부하 보정"
+// (지시서가 허용하는 두 방향 중 하나) -- freemem 임계값으로 자기 신고하는
+// 대신, 첫 시도가 타임아웃이면 "이미 이 파일 안에 있는, 이미 실측으로
+// 근거를 둔" UNDER_FULL_RUNNER_TIMEOUT_MS(180000ms) 한도로 정확히 1회만
+// 재시도한다(child-probe-timeout-policy.mjs의 RETRY_ON_TIMEOUT=1과 같은
+// 정책 -- "무응답에서만, 정확히 1회만", import하지 않고 이 파일 314행
+// 근처 관례대로 독립적으로 둔다). ⛔무조건 상향 금지: 재시도 한도가
+// 이미 존재하는 180000ms(실측 최대 완주값의 1.29배, 319행 근거)를 절대
+// 넘지 않는다 -- 새 숫자를 발명하지 않는다.
+//
+// 이 설계가 freemem 임계값보다 더 안전한 이유(〔직접〕 이 워크트리
+// 반복 실측): 이 머신의 ambient free는 2.2~2.9GB로, 부하를 전혀 더하지
+// 않아도 이미 "저메모리" 선 근방/미달이다(다른 병렬 좌석들의 실제
+// 메모리 사용 때문 -- parallel_rule). freemem 임계값 하나로 판정했다면
+// 진짜로 멈추는 자식도 "부하 탓"으로 잘못 자기 신고될 위험이 있었다
+// (§2ⓒ가 금지하는 거짓 초록). 재시도는 그 위험이 없다: 진짜로 멈추는
+// 합성 자식은 재시도에서도 결정론적으로 다시 타임아웃되어 그대로 RED로
+// 떨어지고(아래, ⛔시한 초과를 통과로 삼키기 금지), 부하 탓으로 한 번
+// 늦었을 뿐인 자식만 연장된 한도 안에서 실제로 끝나 정상 판정을 받는다.
+//
+// result.error가 spawnSync의 timeout 옵션에 의한 강제종료인지 판별한다
+// (Node는 timeout 초과 시 result.error.code === "ETIMEDOUT"을 설정한다,
+// 이 파일 아래 기존 주석/단언이 이미 그 모양을 전제). 다른 종류의 spawn
+// 실패(ENOENT 등)는 부하와 무관한 진짜 결함이므로 재시도하지 않는다.
+function isSpawnTimeout(result) {
+  return result.error?.code === "ETIMEDOUT";
+}
+
 // One `node --test` child per file -- unambiguous per-file pass/fail
 // attribution (see this file's own header for why over one combined run).
 // `timeoutMs` override: test-only escape hatch (ⓒ 반대 방향 칸이 180000 ms
@@ -363,6 +392,50 @@ function runOneInstalledTestFile(
       maxBuffer: 64 * 1024 * 1024,
     },
   );
+}
+
+// HYK-464 H7b (§2 ⓑ): exactly one retry, ONLY on an ETIMEDOUT first attempt,
+// at the UNDER_FULL_RUNNER_TIMEOUT_MS ceiling that already exists and is
+// already reasoned (319행) -- never a new, unbounded number (⛔무조건 상향
+// 금지). Extracted into its own function (rather than left inline in the
+// main test below) SOLELY so this round's own unit test further down can
+// drive it with a fake spawnSync -- a real child never actually spawns,
+// so the retry-vs-no-retry branching is verified in milliseconds, not by
+// waiting out a real 60s/180s timeout under real machine load.
+//
+// `result.error === undefined` on the retry is the ONLY signal read as
+// "load-caused, not a real defect" -- a genuinely-hanging installed test
+// (synthetic `setInterval`-forever shape, see this file's own ⓒ unit test
+// above runOneInstalledTestFile's sibling tests) times out AGAIN on the
+// retry just as deterministically as on the first attempt, so `result`
+// returned here is still an ETIMEDOUT error and the caller's unchanged hard
+// assertion on `result.error` still goes RED (⛔시한 초과를 통과로 삼키기
+// 금지) -- retrying never becomes a way to pass a real hang.
+function runInstalledTestFileWithLoadRetry(
+  targetRepoPath,
+  rel,
+  { spawnSync: spawnSyncImpl = spawnSync, freeMemBytes = freemem() } = {},
+) {
+  const firstResult = runOneInstalledTestFile(targetRepoPath, rel, {
+    spawnSync: spawnSyncImpl,
+  });
+  if (!(firstResult.error !== undefined && isSpawnTimeout(firstResult))) {
+    return { result: firstResult, loadRetried: null };
+  }
+  const retryResult = runOneInstalledTestFile(targetRepoPath, rel, {
+    timeoutMs: UNDER_FULL_RUNNER_TIMEOUT_MS,
+    spawnSync: spawnSyncImpl,
+  });
+  const loadRetried =
+    retryResult.error === undefined
+      ? {
+          rel,
+          freeAtFirstTimeoutMB: Math.round(freeMemBytes / (1024 * 1024)),
+          firstTimeoutMsUsed: resolveInstalledTestTimeoutMs(isolatedEnv()),
+          retryTimeoutMsUsed: UNDER_FULL_RUNNER_TIMEOUT_MS,
+        }
+      : null;
+  return { result: retryResult, loadRetried };
 }
 
 test("install-net-closure: every INSTALL_NET_CLOSURE_KNOWN_EXCEPTIONS entry names a file this installer actually ships (no stale exception for a file that was removed/renamed)", () => {
@@ -495,7 +568,48 @@ function exceptionShapeMismatches(entry, result) {
   return mismatches;
 }
 
-test("install-net-closure: real installer -> real git target -> every installed .test.mjs actually RUNS (not just imports) with 0 failures, except the named, reasoned exceptions", () => {
+// HYK-464 H7b: runs one installed file through the load-retry wrapper and
+// classifies its outcome -- extracted out of the main test's loop purely to
+// keep that callback's own cyclomatic complexity under this repo's quality
+// gate (same reasoning as exceptionShapeMismatches above). Asserts on
+// `result.error` itself (⛔시한 초과를 통과로 삼키기 금지 -- a persistent
+// timeout, load-retried or not, must never be classified as anything other
+// than a hard failure here), then returns a plain outcome tag the caller
+// uses to update its own accumulators.
+function classifyInstalledTestFileRun(targetRepo, rel, exceptionsByFile) {
+  const { result, loadRetried } = runInstalledTestFileWithLoadRetry(
+    targetRepo,
+    rel,
+  );
+  assert.equal(
+    result.error,
+    undefined,
+    `spawnSync itself failed running ${rel}${loadRetried ? "" : " (no load-retry fired, or it also timed out)"} -- error: ${result.error?.message}, signal: ${result.signal}, status: ${result.status}`,
+  );
+  if (result.status === 0) {
+    return { loadRetried, outcome: "passed" };
+  }
+  const entry = exceptionsByFile.get(rel);
+  if (!entry) {
+    return {
+      loadRetried,
+      outcome: "unexpected",
+      tail: `${result.stdout ?? ""}${result.stderr ?? ""}`.slice(-1500),
+    };
+  }
+  const mismatches = exceptionShapeMismatches(entry, result);
+  if (mismatches.length > 0) {
+    const combined = `${result.stdout ?? ""}${result.stderr ?? ""}`;
+    return {
+      loadRetried,
+      outcome: "unexpected",
+      tail: `exception '${rel}' no longer matches its fixed shape (P2-3):\n${mismatches.join("\n")}\n\n${combined.slice(-1500)}`,
+    };
+  }
+  return { loadRetried, outcome: "exception-matched" };
+}
+
+test("install-net-closure: real installer -> real git target -> every installed .test.mjs actually RUNS (not just imports) with 0 failures, except the named, reasoned exceptions", (t) => {
   const { base, targetRepo } = makeSyntheticTarget("hyk209-install-net-");
   try {
     runRealInstall(base, targetRepo);
@@ -515,37 +629,42 @@ test("install-net-closure: real installer -> real git target -> every installed 
     );
     const unexpectedFailures = [];
     const exceptionsSeen = new Set();
+    // HYK-464 H7b (§2 ⓑ): every file whose FIRST attempt timed out and whose
+    // retry then resolved cleanly (see loop below) -- purely a diagnostic
+    // record of "measurement was unavailable on attempt 1 under suspected
+    // load, retry resolved it", surfaced via t.diagnostic(), never used to
+    // suppress a real failure (the retry's own real result still flows into
+    // unexpectedFailures/exceptionsSeen exactly like a first-attempt result
+    // would).
+    const loadRetried = [];
     // HYK-209-install-closure-1 2R P2-3: a shape mismatch against the
     // exception's own fixed expectations (fail count changed, a new/missing
     // subtest, a different missing module) is pushed into unexpectedFailures
     // too -- it is NOT silently absorbed just because the file name matches.
     for (const rel of files) {
-      const result = runOneInstalledTestFile(targetRepo, rel);
-      assert.equal(
-        result.error,
-        undefined,
-        `spawnSync itself failed running ${rel} -- error: ${result.error?.message}, signal: ${result.signal}, status: ${result.status}`,
+      const {
+        loadRetried: retryEvidence,
+        outcome,
+        tail,
+      } = classifyInstalledTestFileRun(targetRepo, rel, exceptionsByFile);
+      if (retryEvidence) loadRetried.push(retryEvidence);
+      if (outcome === "unexpected") {
+        unexpectedFailures.push({ rel, tail });
+      } else if (outcome === "exception-matched") {
+        exceptionsSeen.add(rel);
+      }
+    }
+
+    // HYK-464 H7b: purely informational -- the retry's own real result
+    // already flowed through the normal pass/fail bookkeeping above, so
+    // this never changes what the assertions below decide. Surfaced via
+    // t.diagnostic (TAP '#' line, does not affect pass/fail) so a load-
+    // caused first-attempt timeout is still visibly self-reported, not
+    // silently absorbed.
+    if (loadRetried.length > 0) {
+      t.diagnostic(
+        `load-sensitive (HYK-464 H7b): ${loadRetried.length} installed test file(s) hit spawnSync's timeout on attempt 1 and only completed after one load-retry at the extended ${UNDER_FULL_RUNNER_TIMEOUT_MS}ms budget -- ${JSON.stringify(loadRetried)}`,
       );
-      const passed = result.status === 0;
-      if (passed) continue;
-      const entry = exceptionsByFile.get(rel);
-      if (!entry) {
-        unexpectedFailures.push({
-          rel,
-          tail: `${result.stdout ?? ""}${result.stderr ?? ""}`.slice(-1500),
-        });
-        continue;
-      }
-      const mismatches = exceptionShapeMismatches(entry, result);
-      if (mismatches.length > 0) {
-        const combined = `${result.stdout ?? ""}${result.stderr ?? ""}`;
-        unexpectedFailures.push({
-          rel,
-          tail: `exception '${rel}' no longer matches its fixed shape (P2-3):\n${mismatches.join("\n")}\n\n${combined.slice(-1500)}`,
-        });
-        continue;
-      }
-      exceptionsSeen.add(rel);
     }
 
     assert.deepEqual(
@@ -680,6 +799,124 @@ test("install-net-closure ⓒ: a truly-hung installed test file (infinite setInt
 });
 
 // ---------------------------------------------------------------------------
+// HYK-464 H7b (§2 ⓑ, §2 ⓒ 반대 방향): runInstalledTestFileWithLoadRetry's
+// own decision table, driven with a fake spawnSync (no real child, no real
+// 60s/180s wait) -- the real-install test further up this file already
+// exercises the real spawnSync path end to end; these three cells pin the
+// RETRY branching itself deterministically, in milliseconds.
+// ---------------------------------------------------------------------------
+test("install-net-closure load-retry ⓑ: a first-attempt ETIMEDOUT that succeeds on retry is reported as loadRetried evidence, and the CALLER sees the retry's own (clean) result, not the original timeout", () => {
+  const calls = [];
+  const fakeSpawn = (cmd, args, opts) => {
+    calls.push(opts.timeout);
+    if (calls.length === 1) {
+      return {
+        error: Object.assign(new Error("timed out"), { code: "ETIMEDOUT" }),
+        signal: "SIGTERM",
+        status: null,
+        stdout: "",
+        stderr: "",
+      };
+    }
+    return {
+      error: undefined,
+      signal: null,
+      status: 0,
+      stdout: "# tests 1\n# pass 1\n# fail 0\n# skipped 0\n",
+      stderr: "",
+    };
+  };
+  const { result, loadRetried } = runInstalledTestFileWithLoadRetry(
+    "/fake/target",
+    "scripts/check/fake.test.mjs",
+    { spawnSync: fakeSpawn, freeMemBytes: 777 * 1024 * 1024 },
+  );
+  assert.equal(
+    calls.length,
+    2,
+    "expected exactly 2 spawn calls (first attempt + exactly 1 retry)",
+  );
+  assert.equal(
+    calls[1],
+    UNDER_FULL_RUNNER_TIMEOUT_MS,
+    `expected the retry's own timeout option to be the existing, already-reasoned UNDER_FULL_RUNNER_TIMEOUT_MS (${UNDER_FULL_RUNNER_TIMEOUT_MS}), not a new number`,
+  );
+  assert.equal(
+    result.error,
+    undefined,
+    "expected the retry's clean result to be what the caller sees",
+  );
+  assert.equal(result.status, 0);
+  assert.ok(
+    loadRetried,
+    "expected loadRetried evidence to be populated when the retry clears a first-attempt timeout",
+  );
+  assert.equal(loadRetried.rel, "scripts/check/fake.test.mjs");
+  assert.equal(loadRetried.freeAtFirstTimeoutMB, 777);
+  assert.equal(loadRetried.retryTimeoutMsUsed, UNDER_FULL_RUNNER_TIMEOUT_MS);
+});
+
+test("install-net-closure load-retry ⓒ 반대 방향 (거짓 초록 금지): a SECOND ETIMEDOUT on retry (the genuinely-hung-child shape) is NOT swallowed -- loadRetried stays null and the caller still sees an ETIMEDOUT result", () => {
+  let calls = 0;
+  const fakeSpawn = () => {
+    calls += 1;
+    return {
+      error: Object.assign(new Error("timed out"), { code: "ETIMEDOUT" }),
+      signal: "SIGTERM",
+      status: null,
+      stdout: "",
+      stderr: "",
+    };
+  };
+  const { result, loadRetried } = runInstalledTestFileWithLoadRetry(
+    "/fake/target",
+    "scripts/check/fake-hang.test.mjs",
+    { spawnSync: fakeSpawn },
+  );
+  assert.equal(
+    calls,
+    2,
+    "expected exactly 2 spawn calls -- a hang gets ONE retry, never more (bounded)",
+  );
+  assert.equal(
+    loadRetried,
+    null,
+    "a persistent timeout must NOT be reported as load-retried evidence",
+  );
+  assert.equal(
+    result.error?.code,
+    "ETIMEDOUT",
+    "the caller's own hard assertion on result.error must still see ETIMEDOUT -- a real hang is never swallowed as a pass (⛔시한 초과를 통과로 삼키기 금지)",
+  );
+});
+
+test("install-net-closure load-retry ⓑ: a non-timeout spawn error (e.g. ENOENT) is never retried -- only ETIMEDOUT triggers the load-retry path", () => {
+  let calls = 0;
+  const fakeSpawn = () => {
+    calls += 1;
+    return {
+      error: Object.assign(new Error("spawn ENOENT"), { code: "ENOENT" }),
+      signal: null,
+      status: null,
+      stdout: "",
+      stderr: "",
+    };
+  };
+  const { result, loadRetried } = runInstalledTestFileWithLoadRetry(
+    "/fake/target",
+    "scripts/check/fake-enoent.test.mjs",
+    { spawnSync: fakeSpawn },
+  );
+  assert.equal(
+    calls,
+    1,
+    "a non-timeout spawn failure must not trigger a retry at all",
+  );
+  assert.equal(loadRetried, null);
+  assert.equal(result.error?.code, "ENOENT");
+});
+
+// ---------------------------------------------------------------------------
 // HYK-209-net-closure-timeout-1-r2 (검토 1R P2-1 수리): the ⓒ cell above
 // proves the spawnSync-timeout-kill MECHANISM works, but it calls through
 // the `timeoutMs` test-only bypass -- it never proved that the real
@@ -755,41 +992,57 @@ test("install-net-closure timeout ⓑ fix (P2-1): calling runOneInstalledTestFil
 // `runOneInstalledTestFile` WIRES its `timeoutMs`/`spawnSync` bypass
 // options correctly WHEN GIVEN -- but it calls the function directly with
 // its own fabricated args, never through the real production call site
-// inside the main test's loop above (the bare two-positional-arg call, no
-// third argument). Nothing before this round asserted THAT call site
-// itself passes none of those bypass args -- a mutation appending
-// `{ timeoutMs: 0 }` (or an `{ spawnSync: ... }` that strips `timeout` from
-// the options it forwards) there left the whole file 10/10 green (coder.md
-// §1 ⓐ 실측, 복원 sha256 confirmed unchanged after). This cell closes that
-// gap with a source-text assertion: 〔직접〕 the only call written with
-// exactly the two bare positional arguments (target repo path, relative
-// file path) and no trailing options object at all is the production one
-// inside the main loop; every other call in this file is a test's own
-// fabricated args and never matches that exact two-argument shape (the
-// literal call text is deliberately NOT quoted here, nor in the assertion
-// message below, so this comment/message cannot itself become a spurious
-// third match against its own source-text scan).
+// inside the main test's loop above. Nothing before this round asserted
+// THAT call site itself passes none of those bypass args -- a mutation
+// appending `{ timeoutMs: 0 }` there left the whole file 10/10 green
+// (coder.md §1 ⓐ 실측, 복원 sha256 confirmed unchanged after). This cell
+// closes that gap with a source-text assertion.
+//
+// HYK-464 H7b: the real production call site moved one level up, onto the
+// new load-retry wrapper (§2 ⓑ) that now sits between the main loop and
+// the lower-level spawnSync caller -- the check below moved with it, onto
+// that new real call site. A second check closes the gap this move itself
+// could have silently opened: the wrapper's own two internal calls into
+// the lower-level function must each forward its own real-by-default
+// executor parameter verbatim, never a different, hardcoded one --
+// otherwise the wrapper itself could quietly stop running real children
+// while the outer call site still looks bare and untouched. (Deliberately
+// not quoting either call's literal source text here, same reasoning as
+// the original cell below: this comment must never become a spurious
+// match against its own source-text scan.)
 // 한계 〔직접〕: this is a source-STRING check, not
-// a runtime one -- it would miss a mutation that keeps the two-arg call
-// site text untouched but changes behavior through an entirely different
-// path (e.g. redefining the imported `runOneInstalledTestFile` binding
-// itself, or editing `resolveInstalledTestTimeoutMs`'s own body). The first
-// of those is covered structurally by the P2-1 fix cell's own spawnSync
-// interception (above); this repo's own `quality-check`/review gates, not
-// this test file, are what stand against an import-rebinding mutation.
+// a runtime one -- it would miss a mutation that keeps the call site text
+// untouched but changes behavior through an entirely different path (e.g.
+// redefining an imported binding itself, or editing
+// `resolveInstalledTestTimeoutMs`'s own body). The first of those is
+// covered structurally by the P2-1 fix cell's own spawnSync interception
+// (above) and by this round's own load-retry unit tests; this repo's own
+// `quality-check`/review gates, not this test file, are what stand against
+// an import-rebinding mutation.
 // ---------------------------------------------------------------------------
-test("install-net-closure timeout ⓑ binding (r3): the real production call site passes no timeout-overriding arguments to runOneInstalledTestFile (source-text assertion, P2-1 companion)", () => {
+test("install-net-closure timeout ⓑ binding (r3): the real production call site passes no timeout-overriding arguments to the load-retry wrapper, and the wrapper never swaps in a non-real executor internally (source-text assertion, P2-1 companion)", () => {
   const src = readFileSync(fileURLToPath(import.meta.url), "utf8");
-  const callSiteArgs = [
-    ...src.matchAll(/runOneInstalledTestFile\(([^)]*)\)/g),
-  ].map((m) => m[1].trim());
-  const productionCallSites = callSiteArgs.filter(
+  const wrapperCallSiteArgs = [
+    ...src.matchAll(/runInstalledTestFileWithLoadRetry\(([^)]*)\)/g),
+  ].map((m) => m[1].replace(/\s+/g, " ").replace(/,\s*$/, "").trim());
+  const productionCallSites = wrapperCallSiteArgs.filter(
     (args) => args === "targetRepo, rel",
   );
   assert.equal(
     productionCallSites.length,
     1,
-    `expected exactly one production call site calling runOneInstalledTestFile with its two bare positional args and no extra/overriding options object, found ${productionCallSites.length} (all call sites seen: ${JSON.stringify(callSiteArgs)})`,
+    `expected exactly one production call site calling runInstalledTestFileWithLoadRetry with its two bare positional args and no extra/overriding options object, found ${productionCallSites.length} (all call sites seen: ${JSON.stringify(wrapperCallSiteArgs)})`,
+  );
+  const innerCallSiteArgs = [
+    ...src.matchAll(/(?<!function )runOneInstalledTestFile\(([^)]*)\)/gs),
+  ].map((m) => m[1].replace(/\s+/g, " ").trim());
+  const wrapperInnerCalls = innerCallSiteArgs.filter((args) =>
+    args.includes("spawnSync: spawnSyncImpl"),
+  );
+  assert.equal(
+    wrapperInnerCalls.length,
+    2,
+    `expected exactly 2 runOneInstalledTestFile call sites inside the wrapper (first attempt + exactly one retry), each forwarding spawnSyncImpl (the wrapper's own real-by-default parameter) verbatim -- never a different, hardcoded executor -- found ${wrapperInnerCalls.length} (all runOneInstalledTestFile call sites seen: ${JSON.stringify(innerCallSiteArgs)})`,
   );
 });
 

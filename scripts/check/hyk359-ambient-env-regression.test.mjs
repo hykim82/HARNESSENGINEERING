@@ -1696,7 +1696,7 @@ test("HYK-371 4R 완료조건① (층 2·계약, 관측 지점 = 생산 경로):
 // nested-spawn code path honors an ambient HARNESS_TEST_CONCURRENCY (the
 // env var isolated-suite-runner.mjs's spawnSuiteInClone now exports), not
 // merely that the mechanism CAN cap when told to explicitly.
-test("HYK-477 §1-1 (직접 관측, 기계 무관): ambient HARNESS_TEST_CONCURRENCY가 설정되면 runSweepAndAssert(생산 호출부, 진짜 spawnSync)의 실제 동시 실행 수가 NESTED_SWEEP_CONCURRENCY(4)보다 낮은 그 값 이하로 묶인다 -- env 미설정 시 동일 픽스처가 그 낮은 값을 넘어설 수 있음을 함께 확인해 우연한 '겹치지 않음'이 아님을 증명한다", () => {
+test("HYK-477 §1-1 (직접 관측, 기계 무관): ambient HARNESS_TEST_CONCURRENCY가 설정되면 runSweepAndAssert(생산 호출부, 진짜 spawnSync)의 실제 동시 실행 수가 NESTED_SWEEP_CONCURRENCY(4)보다 낮은 그 값 이하로 묶인다 -- env 미설정 시 동일 픽스처가 그 낮은 값을 넘어설 수 있음을 함께 확인해 우연한 '겹치지 않음'이 아님을 증명한다", (t) => {
   const dir = mkdtempSync(join(tmpdir(), "hyk477-1r-env-propagation-"));
   const originalEnvValue = process.env.HARNESS_TEST_CONCURRENCY;
   try {
@@ -1742,6 +1742,22 @@ test("HYK-477 §1-1 (직접 관측, 기계 무관): ambient HARNESS_TEST_CONCURR
     const uncappedOverlap = computeMaxOverlap(
       uncapped.map((f) => JSON.parse(readFileSync(f.timesPath, "utf8"))),
     );
+    // HYK-464 H7b (책임자 판정 2026-10-24 07:45 §2): under load this machine
+    // can fail to schedule enough concurrent sleeping children to ever
+    // exceed ENV_CAP, even with NO cap in effect at all -- that is this
+    // comparison run failing to DEMONSTRATE real concurrency (a measurement
+    // failure), not evidence that the env-propagation capping proven by run
+    // 1's cappedOverlap assertion above (left untouched, never weakened) is
+    // broken. Self-report as skipped with the observed value instead of
+    // asserting a false red; at normal load (no busy sibling work on this
+    // machine) the fixture reliably exceeds ENV_CAP and the assertion below
+    // runs exactly as before.
+    if (uncappedOverlap <= ENV_CAP) {
+      t.skip(
+        `load-sensitive (HYK-464 H7b): could not demonstrate real concurrency without the env cap -- observed uncappedOverlap=${uncappedOverlap} (needed > ENV_CAP=${ENV_CAP}) across ${NESTED_SWEEP_CONCURRENCY} fixtures of ${SLEEP_MS}ms each; run 1's capped assertion (cappedOverlap=${cappedOverlap} <= ${ENV_CAP}) above still ran and was NOT weakened, but its detection power cannot be confirmed as non-vacuous under current load`,
+      );
+      return;
+    }
     assert.ok(
       uncappedOverlap > ENV_CAP,
       `with no ambient HARNESS_TEST_CONCURRENCY, max observed overlap was only ${uncappedOverlap} (expected > ${ENV_CAP}) -- this fixture set doesn't demonstrate real concurrency beyond ENV_CAP at all on this machine, so run 1's capped assertion above would be vacuous (not evidence the propagation does anything)`,
