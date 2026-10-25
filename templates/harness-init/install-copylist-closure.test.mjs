@@ -272,6 +272,95 @@ describe("1-2 / 1-3 scripts/supervisor copy axis", () => {
   });
 });
 
+// HYK-209-install-list-dispatch-start-1 (1R): the "3 + 3" addition's own
+// teeth -- a required entry point and its two import-closure dependencies --
+// in a separate describe block (not appended to "1-2 / 1-3" above) purely to
+// stay under this repo's ESLint max-lines-per-function ceiling; same
+// REAL_LISTS / findClosureViolations the block above uses.
+describe("HYK-209-install-list-dispatch-start-1: dispatch-start trio supervisor-list teeth", () => {
+  test("removing dispatch-start-confirm-cli.mjs from the supervisor list goes RED (required entry point, this round's addition)", () => {
+    const reduced = ENFORCEMENT_SUPERVISOR_FILES.filter(
+      (n) => n !== "dispatch-start-confirm-cli.mjs",
+    );
+    const violations = findClosureViolations({
+      ...REAL_LISTS,
+      supervisor: reduced,
+    });
+    assert.ok(
+      violations.some(
+        (v) =>
+          v.missing ===
+          "supervisor/dispatch-start-confirm-cli.mjs (required entry point, absent from the list)",
+      ),
+      `expected removing dispatch-start-confirm-cli.mjs to surface a violation naming it; got ${JSON.stringify(violations)}`,
+    );
+  });
+
+  test("removing dispatch-start-size-core.mjs (confirm-cli's relative import) goes RED via import closure", () => {
+    const reduced = ENFORCEMENT_SUPERVISOR_FILES.filter(
+      (n) => n !== "dispatch-start-size-core.mjs",
+    );
+    const violations = findClosureViolations({
+      ...REAL_LISTS,
+      supervisor: reduced,
+    });
+    assert.ok(
+      violations.some(
+        (v) =>
+          v.file === "supervisor/dispatch-start-confirm-cli.mjs" &&
+          v.missing === "supervisor/dispatch-start-size-core.mjs",
+      ),
+      `expected confirm-cli's import of dispatch-start-size-core.mjs to surface a violation; got ${JSON.stringify(violations)}`,
+    );
+  });
+
+  test("removing dispatch-start-size-adapter.mjs (confirm-cli's other relative import) goes RED via import closure", () => {
+    const reduced = ENFORCEMENT_SUPERVISOR_FILES.filter(
+      (n) => n !== "dispatch-start-size-adapter.mjs",
+    );
+    const violations = findClosureViolations({
+      ...REAL_LISTS,
+      supervisor: reduced,
+    });
+    assert.ok(
+      violations.some(
+        (v) =>
+          v.file === "supervisor/dispatch-start-confirm-cli.mjs" &&
+          v.missing === "supervisor/dispatch-start-size-adapter.mjs",
+      ),
+      `expected confirm-cli's import of dispatch-start-size-adapter.mjs to surface a violation; got ${JSON.stringify(violations)}`,
+    );
+  });
+
+  // ⓔ⑶ (coder-task §2): removing one of the 3 paired .test.mjs entries does
+  // NOT go RED via this generic closure check -- no other listed file
+  // statically imports a .test.mjs file back (same documented blind spot as
+  // the "review-gate.mjs" case in the 음성대조 block below: a list member
+  // reached only by convention, not by another file's import, is invisible
+  // to a closure walk). There is no dedicated "paired-test convention" cell
+  // anywhere in this repo's checks -- 짝 관례 칸 = 없음. Not adding one here:
+  // the task's own product_scope caps new test files at 0 for this round,
+  // and a real enforcement cell for "every .mjs name in this list needs a
+  // same-named .test.mjs name also in this list" would be a generically
+  // useful new check applying to ALL list members, not a one-off for these
+  // three -- out of scope for this round, left as a later-round candidate.
+  test("removing dispatch-start-size-core.test.mjs (a paired test, not an import target) stays GREEN -- the documented 짝 관례 blind spot, not a violation", () => {
+    const reduced = ENFORCEMENT_SUPERVISOR_FILES.filter(
+      (n) => n !== "dispatch-start-size-core.test.mjs",
+    );
+    const violations = findClosureViolations({
+      ...REAL_LISTS,
+      supervisor: reduced,
+    });
+    assert.ok(
+      !violations.some((v) =>
+        /dispatch-start-size-core\.test\.mjs/.test(v.missing),
+      ),
+      `expected removing the paired test (with no other list member importing it back) to NOT surface a violation; got ${JSON.stringify(violations)}`,
+    );
+  });
+});
+
 // ⛔음성 대조 (negative control) + ★회귀 증명 (regression proof), both at
 // once: filter the REAL, CURRENT list down (in-memory only -- the real list
 // on disk is never mutated by this test) by removing exactly one past
