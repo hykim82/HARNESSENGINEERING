@@ -173,16 +173,22 @@ function runAffectedFiles() {
   return res.stdout ?? "";
 }
 
-// Parses TAP's per-test line into { name, skipped }. A skipped test appears
-// as `ok N - <name> # SKIP <reason>`; a run test (pass or fail) never has
-// the trailing `# SKIP` directive.
+// Parses TAP's per-test line into { name, skipped, skipReason }. A skipped
+// test appears as `ok N - <name> # SKIP <reason>`; a run test (pass or fail)
+// never has the trailing `# SKIP` directive. `skipReason` (HYK-464 H7b-r4,
+// §2 ⓒ probe) is the raw `# SKIP ...` directive text, or null when not
+// skipped -- added so a probe can assert on the skip's OWN reason content,
+// not merely that a skip happened.
 function parseTapNamedResults(stdout) {
   const results = new Map();
   for (const line of stdout.split(/\r?\n/)) {
     const m = line.match(/^(?:ok|not ok) \d+ - (.+?)(?: # (SKIP\b.*))?$/);
     if (!m) continue;
     const [, name, skipDirective] = m;
-    results.set(name, { skipped: Boolean(skipDirective) });
+    results.set(name, {
+      skipped: Boolean(skipDirective),
+      skipReason: skipDirective ?? null,
+    });
   }
   return results;
 }
@@ -308,6 +314,83 @@ test("HYK-364: known environment-conditional skip set is pinned BY NAME (set equ
 
   // Direction 2 (2R fix, the P1): nothing OUTSIDE the known set is skipped.
   assertNoUngovernedSkips(results);
+});
+
+// ---------------------------------------------------------------------------
+// HYK-464 H7b-r4 (§2 ⓒ): registers the hyk359 cell's new conditional skip in
+// this contract, BY NAME, same principles as the probe above (독립 탐침 ·
+// 집합 동일) -- but as its OWN separate, narrowly-scoped probe rather than
+// folding it into AFFECTED_FILES/runAffectedFiles. Reason: hyk359-ambient-
+// env-regression.test.mjs's own module header describes a file-level sweep
+// that enumerates and runs the WHOLE CI-canonical suite twice internally,
+// and this round's own standalone measurement of that file (단독 약 18분,
+// 결과 파일 §2 ⓒ 근거 값) confirmed it is far too expensive to add
+// unfiltered to AFFECTED_FILES's shared spawn -- exactly the cost
+// deviation_rule (coder-task.md) warns against paying inside an otherwise
+// fast contract test. Node's own `--test-name-pattern` (confirmed supported
+// on this node version, `node --test --help`) lets this probe spawn ONLY
+// the one test case that owns the new skip branch, without touching
+// hyk359's own production skip logic and without paying for the other 27
+// unrelated test cases in that file.
+//
+// The skip condition itself is machine-load-dependent (coder-task.md §2 ⓒ:
+// "독립 탐침으로 결정적 예측이 어려울 수 있음") -- this probe does NOT try
+// to predict skipped vs. not-skipped the way EXPECTATIONS above does for the
+// four original files. Instead it pins a «정직성» (honesty) axis: IF the
+// skip fires, its reason text MUST carry the on-the-spot load measurement
+// value (freemem=<N>MB) this round's judgment requires -- a skip that fires
+// without ever having actually measured a load value would be exactly the
+// silent, ungoverned relaxation HYK-464 H7b-r4 exists to close off.
+// ---------------------------------------------------------------------------
+const HYK359_SKIP_TEST_FILE =
+  "scripts/check/hyk359-ambient-env-regression.test.mjs";
+const HYK359_SKIP_TEST_NAME_PATTERN = "HYK-477 §1-1";
+const HYK359_SKIP_TEST_NAME =
+  "HYK-477 §1-1 (직접 관측, 기계 무관): ambient HARNESS_TEST_CONCURRENCY가 설정되면 runSweepAndAssert(생산 호출부, 진짜 spawnSync)의 실제 동시 실행 수가 NESTED_SWEEP_CONCURRENCY(4)보다 낮은 그 값 이하로 묶인다 -- env 미설정 시 동일 픽스처가 그 낮은 값을 넘어설 수 있음을 함께 확인해 우연한 '겹치지 않음'이 아님을 증명한다";
+
+function runHyk359SkipProbe() {
+  // Same NODE_TEST_CONTEXT/NODE_TEST_WORKER_ID stripping as runAffectedFiles
+  // above, same reason (this file itself runs under `node --test`).
+  const env = { ...process.env };
+  delete env.NODE_TEST_CONTEXT;
+  delete env.NODE_TEST_WORKER_ID;
+  const res = spawnSync(
+    process.execPath,
+    [
+      "--test",
+      "--test-reporter=tap",
+      `--test-name-pattern=${HYK359_SKIP_TEST_NAME_PATTERN}`,
+      HYK359_SKIP_TEST_FILE,
+    ],
+    { cwd: ROOT, encoding: "utf8", env, maxBuffer: 1024 * 1024 * 50 },
+  );
+  assert.equal(
+    res.error,
+    undefined,
+    `spawning the hyk359 skip probe failed: ${res.error?.message}`,
+  );
+  return res.stdout ?? "";
+}
+
+test("HYK-464 H7b-r4 (§2 ⓒ): the hyk359 cell's new conditional skip is governed BY NAME -- when it fires, the skip reason must carry an on-the-spot load measurement value (정직성 축; skipped vs. not-skipped itself is machine-load-dependent and is NOT predicted here)", () => {
+  const stdout = runHyk359SkipProbe();
+  const results = parseTapNamedResults(stdout);
+  const observed = results.get(HYK359_SKIP_TEST_NAME);
+  assert.ok(
+    observed,
+    `expected test case not found by exact name in ${HYK359_SKIP_TEST_FILE} -- it was renamed, removed, or the TAP output shape changed (never silently drop this name from this contract): "${HYK359_SKIP_TEST_NAME}"`,
+  );
+  if (observed.skipped) {
+    assert.match(
+      observed.skipReason ?? "",
+      /freemem=\d+MB/,
+      `this skip fired, so its reason must carry the on-the-spot load measurement value (freemem=<N>MB) -- a skip without a measured value is an ungoverned relaxation. Got: ${observed.skipReason}`,
+    );
+  }
+  // observed.skipped === false: either the overlap exceeded ENV_CAP on this
+  // machine at this moment, or the overlap was low but load was NOT measured
+  // as elevated -- both fall through to the unconditional hard assertion in
+  // production, nothing further to pin here.
 });
 
 test("HYK-364 sanity: resolveRealRepoGuard47 and resolveRealRepoGuard58 agree on whether .claude/settings.local.json is present (both gate on the identical file)", () => {
