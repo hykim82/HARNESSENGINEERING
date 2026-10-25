@@ -1030,6 +1030,16 @@ const OWN_TEST_FILE_SUFFIXES = [
   // (same reason as the unconsumed-*.test.mjs entries above): this file
   // imports no orca-adapter.mjs symbol.
   "hyk464-watch-collection.test.mjs",
+  // HYK-464-idle-stop-reason-1: hyk464-idle-stop-reason.test.mjs is the
+  // same shape once more -- it drives judgeSeatIdleAcrossWorktrees directly
+  // (same read-only production entry point as seat-idle-wire.test.mjs
+  // above) to pin the new "idle stop reason" input (open control-room
+  // stop-reasons.json file -> PARKED_WITH_REASON verdict, worst/parked
+  // detail segments). Excluded on the identical "own .test.mjs" basis.
+  // ⚠️no eslint.config.mjs counterpart is needed here (same reason as the
+  // unconsumed-*.test.mjs entries above): this file imports no orca-
+  // adapter.mjs symbol.
+  "hyk464-idle-stop-reason.test.mjs",
 ];
 
 function findOrchStallDetectImporters(root) {
