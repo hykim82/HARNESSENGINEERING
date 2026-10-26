@@ -1476,7 +1476,7 @@ function severityOfSeatIdleEntry(entry) {
 // 나쁜 항목의 상태를 이 워크트리의 대표 판정으로 삼는다 -- `seats`
 // (개별 좌석 판정 전부)도 함께 실어 대표값 하나만으로는 사라지는 정보를
 // 보존한다(judgeSeatIdleAcrossWorktrees의 worktrees 배열과 동일 원칙).
-function judgeSeatIdleAcrossSeats(seats, now) {
+function judgeSeatIdleAcrossSeats(seats, now, stopReasonId) {
   const perSeat = seats.map((s) => {
     if (!s.ok) {
       return {
@@ -1486,7 +1486,11 @@ function judgeSeatIdleAcrossSeats(seats, now) {
         reason: s.reason,
       };
     }
-    const judged = judgeSeatIdle({ observation: s.observation, now });
+    const judged = judgeSeatIdle({
+      observation: s.observation,
+      now,
+      stopReasonId,
+    });
     return {
       handle: s.handle,
       ok: true,
@@ -1524,7 +1528,7 @@ function judgeSeatIdleAcrossSeats(seats, now) {
 // judgeSeatLivenessForRepo와 대칭 구조이나 활성 배달 유무 분기가
 // 반대다.
 export function judgeSeatIdleForRepo(
-  { repoRoot, droppedTaskFiles, now },
+  { repoRoot, droppedTaskFiles, now, stopReasonId },
   opts = {},
 ) {
   const active = selectActiveDispatch(droppedTaskFiles);
@@ -1547,7 +1551,7 @@ export function judgeSeatIdleForRepo(
   if (observed.seatCount === 0) {
     return { status: SEAT_IDLE_WIRE_STATUS.NO_SEAT };
   }
-  return judgeSeatIdleAcrossSeats(observed.seats, now);
+  return judgeSeatIdleAcrossSeats(observed.seats, now, stopReasonId);
 }
 
 // HYK-185-seat-idle-1 §2-1-2 "gap#78 이 만든 워크트리 열거 결과를
@@ -1560,7 +1564,158 @@ export function judgeSeatIdleForRepo(
 export const SEAT_IDLE_SCAN_FAILURE = Object.freeze({
   WORKTREE_LIST_FAILED: "SEAT_IDLE_SCAN_WORKTREE_LIST_FAILED",
   HARNESS_READ_FAILED: "SEAT_IDLE_SCAN_HARNESS_READ_FAILED",
+  // HYK-464-idle-stop-reason-1 (coder-task.md §2ⓓ): 정지 사유 파일이
+  // "있는데" 읽기·파싱·형식이 실패했을 때만 쓴다 -- 파일 부재는 이
+  // 값이 아니라 SEAT_IDLE_STOP_REASONS_STATUS.ABSENT로 접힌다(조용한
+  // 낙하 금지는 "있는데 망가짐"에만 적용, §2ⓓ 원문).
+  STOP_REASONS_READ_FAILED: "SEAT_IDLE_SCAN_STOP_REASONS_READ_FAILED",
 });
+
+// HYK-464-idle-stop-reason-1 (coder-task.md §2ⓑ/ⓓ): 정지 사유 파일
+// 자체의 상태(워크트리별 판정과는 독립) -- 세 상태 모두 "조용한 낙하
+// 금지"(§2ⓓ)가 구별해야 하는 사례다: 파일이 없는 것(ABSENT, 정상·안전)
+// 과 있는데 망가진 것(READ_FAILED, 경보 유지 + 실패 코드 표면화)을 같은
+// 값으로 접으면 안 된다.
+export const SEAT_IDLE_STOP_REASONS_STATUS = Object.freeze({
+  ABSENT: "SEAT_IDLE_STOP_REASONS_ABSENT",
+  PRESENT: "SEAT_IDLE_STOP_REASONS_PRESENT",
+  READ_FAILED: SEAT_IDLE_SCAN_FAILURE.STOP_REASONS_READ_FAILED,
+});
+
+// HYK-464-idle-stop-reason-1-r2 (coder-task.md §2ⓐ, 1R 검토 P2-3): 위치
+// = 감시가 이미 받는 watchDir의 "부모" -- 1R의 생산 상수
+// (DEFAULT_STOP_REASONS_PATH, CONTROL_ROOM_PATH 직속)는 이 저장소의
+// 기존 시험·mkdtemp watchDir로 도는 수동 실행까지 생산 관제실
+// stop-reasons.json에 묶어버렸다(1R 검토 §11 P2-3) -- 제거한다. 이
+// 프로세스는 watchDir 자체를 CLI 인자로 받지 않는다(⛔새 인자 추가 금지,
+// §2ⓐ 원문 "예약 작업 인자 무변") -- 대신 이미 받는
+// --unconsumed-notice-state 경로(watch-run.mjs의 runDetector가 watchDir
+// 안에 두는 파일, path.join(watchDir, "unconsumed-notice-state.json"))의
+// 부모가 watchDir 자신이다(resolveStopReasonsPathFromCli, 아래 -- 기존
+// 결선 재사용, 새 인자 0). 생산에서는 watchDir가 늘
+// `${CONTROL_ROOM_PATH}/watch`이므로(schedule-plan-core.mjs 기본값) 유도된
+// 위치는 1R과 바이트 동일(`${CONTROL_ROOM_PATH}/stop-reasons.json`). 그
+// 인자 없이 도는 호출 경로(감지기 단독 실행 등)에서는 watchDir를 알 길이
+// 없으므로 null -- loadOpenStopReasonsForScan(아래)이 이를 "사유
+// 0"(ABSENT)으로 접는다(경보를 끄는 방향이 아니다, §2ⓐ 원문). 시험은
+// opts.stopReasonsPath로 여전히 직접 오버라이드한다(이 유도보다 우선,
+// loadDispatchStartStore의 dispatchStartExistsFn/dispatchStartReadFn과
+// 동일한 "opts 주입, CLI 인자 아님" 관례 -- 바뀌지 않음).
+function resolveStopReasonsPathFromCli(cli) {
+  if (
+    typeof cli.unconsumedNoticeStatePath !== "string" ||
+    cli.unconsumedNoticeStatePath.length === 0
+  ) {
+    return null;
+  }
+  const watchDir = path.dirname(cli.unconsumedNoticeStatePath);
+  return path.join(path.dirname(watchDir), "stop-reasons.json");
+}
+
+// runOrchStallDetect에서 분리(eslint max-lines-per-function 상한 준수,
+// isValidStopReasonEntry와 동일 이유) -- opts.stopReasonsPath가 이미
+// 명시로 왔으면(시험이 이 진입점까지 통째로 호출하면서 오버라이드) 그
+// 값이 이긴다. CLI 유도(resolveStopReasonsPathFromCli)는 "안 줬을 때"만의
+// 기본값이다.
+function resolveSeatAxesOpts(opts, cli) {
+  if (opts.stopReasonsPath !== undefined) return opts;
+  return { ...opts, stopReasonsPath: resolveStopReasonsPathFromCli(cli) };
+}
+
+// 정지 사유 한 건의 최소 형식(coder-task.md §2ⓑ 원문): id(string) ·
+// openedAt(ISO string) · closedAt?(ISO string|null) · worktrees(string[]
+// 또는 "*") · note(string, 선택). 하나라도 형식을 벗어나면 파일 전체를
+// "있는데 형식 실패"로 닫는다(§2ⓓ -- 부분 유효 항목만 골라 쓰지 않는다,
+// 부분 성공이 "일부 워크트리만 조용히 보호받지 못하는" 더 나쁜 침묵을
+// 만들 수 있어서다).
+// isValidStopReasonEntry에서 분리(eslint complexity 상한 12 준수 --
+// seat-idle-core.mjs의 resolveClockSkewToleranceMs와 동일 이유/패턴,
+// 판정 로직·값은 그대로 셋으로 나눴을 뿐이다).
+function isValidIsoTimestamp(v) {
+  return typeof v === "string" && Number.isFinite(Date.parse(v));
+}
+function isValidStopReasonClosedAt(closedAt) {
+  if (closedAt === undefined || closedAt === null) return true;
+  return isValidIsoTimestamp(closedAt);
+}
+function isValidStopReasonWorktrees(worktrees) {
+  if (worktrees === "*") return true;
+  if (!Array.isArray(worktrees)) return false;
+  return worktrees.every((w) => typeof w === "string" && w.length > 0);
+}
+
+function isValidStopReasonEntry(r) {
+  if (!isPlainObjectLocal(r)) return false;
+  if (typeof r.id !== "string" || r.id.length === 0) return false;
+  if (!isValidIsoTimestamp(r.openedAt)) return false;
+  if (!isValidStopReasonClosedAt(r.closedAt)) return false;
+  if (!isValidStopReasonWorktrees(r.worktrees)) return false;
+  if (r.note !== undefined && typeof r.note !== "string") return false;
+  return true;
+}
+
+// opts.stopReasonsExistsFn/stopReasonsReadFn 주입 가능(시험 전용) --
+// loadDispatchStartStore(위)와 동일 관례, 기본은 실 fs. 파일 부재는
+// "사유 0"(안전한 기존 동작)으로, 읽기/파싱/형식 실패는 명시적
+// ok:false로 구별한다(§2ⓓ).
+function loadStopReasonsFile(stopReasonsPath, opts) {
+  const existsFn =
+    typeof opts.stopReasonsExistsFn === "function"
+      ? opts.stopReasonsExistsFn
+      : existsSync;
+  const readFn =
+    typeof opts.stopReasonsReadFn === "function"
+      ? opts.stopReasonsReadFn
+      : (p) => readFileSync(p, "utf8");
+  try {
+    if (!existsFn(stopReasonsPath)) {
+      return { ok: true, present: false, reasons: [] };
+    }
+    const parsed = JSON.parse(readFn(stopReasonsPath));
+    if (!isPlainObjectLocal(parsed) || !Array.isArray(parsed.reasons)) {
+      return {
+        ok: false,
+        reason: "stop-reasons file: corrupt (not {reasons:[...]})",
+      };
+    }
+    if (!parsed.reasons.every(isValidStopReasonEntry)) {
+      return {
+        ok: false,
+        reason: "stop-reasons file: malformed reason entry",
+      };
+    }
+    return { ok: true, present: true, reasons: parsed.reasons };
+  } catch (err) {
+    return {
+      ok: false,
+      reason: `stop-reasons file: read/parse failed (${err && err.message ? err.message : String(err)})`,
+    };
+  }
+}
+
+// 열린 사유 = openedAt <= now 이고 closedAt 없음/미래(coder-task.md §2ⓑ
+// 원문). isValidStopReasonEntry가 이미 openedAt/closedAt의 파싱 가능성을
+// 보장했으므로 여기서는 재검증하지 않는다.
+function isReasonOpen(reason, now) {
+  if (Date.parse(reason.openedAt) > now) return false;
+  if (reason.closedAt === undefined || reason.closedAt === null) return true;
+  return Date.parse(reason.closedAt) > now;
+}
+
+// 매핑 = 경로 정규화(대소문자·구분자) 뒤 일치 또는 "*"(coder-task.md
+// §2ⓑ 원문) -- normalizeAbsolute(이 파일이 이미 쓰는, path-normalize.mjs)
+// 로 구분자를 posix로 통일하고 소문자로 비교한다.
+function findOpenStopReasonId(openReasons, worktreePath) {
+  const target = normalizeAbsolute(worktreePath).toLowerCase();
+  for (const r of openReasons) {
+    if (r.worktrees === "*") return r.id;
+    const hit = r.worktrees.some(
+      (w) => normalizeAbsolute(w).toLowerCase() === target,
+    );
+    if (hit) return r.id;
+  }
+  return null;
+}
 
 export const SEAT_IDLE_SCAN_SEVERITY = Object.freeze({
   NORMAL: 0, // NOT_APPLICABLE/NO_SEAT/JUDGED+IDLE_OK.
@@ -1588,7 +1743,7 @@ function idleSeverityOf(entry) {
   return SEAT_IDLE_SCAN_SEVERITY.NORMAL;
 }
 
-function judgeSeatIdleForWorktree(worktreePath, now, opts) {
+function judgeSeatIdleForWorktree(worktreePath, now, opts, openReasons) {
   // HYK-464-watch-collection-1 ⓑ: judgeSeatLivenessForWorktree와 동일 이유
   // (위 그 함수 헤더 참조) -- 전체 opts를 넘기고 readdirFn만 이름을 바꿔
   // 덮어쓴다.
@@ -1602,8 +1757,18 @@ function judgeSeatIdleForWorktree(worktreePath, now, opts) {
       status: SEAT_IDLE_SCAN_FAILURE.HARNESS_READ_FAILED,
     };
   }
+  // HYK-464-idle-stop-reason-1 (coder-task.md §2ⓒ): 이 워크트리를 덮는
+  // 열린 사유 하나(있으면 그 id)를 찾아 judgeSeatIdleForRepo에 넘긴다 --
+  // openReasons가 비어 있으면(사유 파일 부재/읽기 실패 둘 다 포함) 항상
+  // null이라 기존 판정과 바이트 동일.
+  const stopReasonId = findOpenStopReasonId(openReasons, worktreePath);
   const judged = judgeSeatIdleForRepo(
-    { repoRoot: worktreePath, droppedTaskFiles: evidence.items, now },
+    {
+      repoRoot: worktreePath,
+      droppedTaskFiles: evidence.items,
+      now,
+      stopReasonId,
+    },
     opts,
   );
   return {
@@ -1617,6 +1782,66 @@ function judgeSeatIdleForWorktree(worktreePath, now, opts) {
 // 축의 judgeSeatLivenessAcrossWorktrees와 대칭(워크트리 전부 열거 후
 // 각각 개별 판정, 가장 나쁜 항목을 대표값으로 상위에 싣고 전체 목록·
 // 건수도 함께 낸다).
+// judgeSeatIdleAcrossWorktrees에서 분리(eslint complexity 상한 12 준수 --
+// isValidStopReasonEntry와 동일 이유). 값·판정 로직은 그대로다.
+function resolveIdleWorstWorktreePaths(worstSeverity, worstEntries) {
+  if (worstSeverity === SEAT_IDLE_SCAN_SEVERITY.NORMAL) return [];
+  return worstEntries
+    .map((w) => w.worktreePath)
+    .filter((p) => typeof p === "string" && p.length > 0);
+}
+
+function resolveIdleParkedFields(worktrees) {
+  const parkedEntries = worktrees.filter(
+    (w) => w.verdict === SEAT_IDLE_VERDICT.PARKED_WITH_REASON,
+  );
+  return {
+    parkedCount: parkedEntries.length,
+    parkedWorktreePaths: parkedEntries.map((w) => w.worktreePath),
+    parkedReasonIds: parkedEntries.map(
+      (w) => (w.details && w.details.openStopReasonId) || null,
+    ),
+  };
+}
+
+function resolveIdleStopReasonsStatus(stopReasonsResult) {
+  if (!stopReasonsResult.ok) return SEAT_IDLE_STOP_REASONS_STATUS.READ_FAILED;
+  return stopReasonsResult.present
+    ? SEAT_IDLE_STOP_REASONS_STATUS.PRESENT
+    : SEAT_IDLE_STOP_REASONS_STATUS.ABSENT;
+}
+
+// judgeSeatIdleAcrossWorktrees에서 분리(eslint complexity 상한 12 준수) --
+// 정지 사유 파일은 스캔 전체에서 한 번만 읽는다(워크트리마다 다시 읽지
+// 않는다). 경로는 opts.stopReasonsPath로만 온다(1R의 생산 상수는
+// 제거됐다, 위 resolveStopReasonsPathFromCli 헤더 참조 -- runOrchStallDetect
+// 가 그 함수로 유도한 값을 여기 opts에 실어 보낸다, 새 CLI 인자 0).
+// opts.stopReasonsPath가 없으면(watchDir를 모르는 호출 경로, 또는 직접
+// judgeSeatIdleAcrossWorktrees를 부르면서 안 준 시험) existsFn조차
+// 부르지 않고 즉시 "사유 0"(ABSENT)으로 접는다 -- loadStopReasonsFile의
+// "파일 부재 = 사유 0" 경로와 바이트 동일한 결과를 조회 0회로 낸다(§2ⓐ
+// 원문 "경보를 끄지 않음"과 동일 안전 방향, 생산 파일에 무엇이 있어도
+// 이 경로는 그것을 조회하지 않으므로 영향받지 않는다). ⓓ: 파일이
+// 없거나(ok:true,present:false) 읽기/파싱/형식이 실패했으면(ok:false)
+// openReasons는 둘 다 빈 배열 -- "그 회차는 어떤 워크트리도 사유 있는
+// 존치로 빼지 않는다"(§2ⓓ 원문)를 실패 쪽도 안전 쪽과 같은 코드 경로로
+// 만족시킨다. 구별은 호출부의 resolveIdleStopReasonsStatus가
+// stopReasonsResult로 맡는다.
+function loadOpenStopReasonsForScan(opts, now) {
+  const stopReasonsPath = opts.stopReasonsPath;
+  if (typeof stopReasonsPath !== "string" || stopReasonsPath.length === 0) {
+    return {
+      stopReasonsResult: { ok: true, present: false, reasons: [] },
+      openReasons: [],
+    };
+  }
+  const stopReasonsResult = loadStopReasonsFile(stopReasonsPath, opts);
+  const openReasons = stopReasonsResult.ok
+    ? stopReasonsResult.reasons.filter((r) => isReasonOpen(r, now))
+    : [];
+  return { stopReasonsResult, openReasons };
+}
+
 export function judgeSeatIdleAcrossWorktrees({ repoRoot, now }, opts = {}) {
   const list = collectGitWorktrees(repoRoot, opts);
   if (!list.ok) {
@@ -1628,8 +1853,12 @@ export function judgeSeatIdleAcrossWorktrees({ repoRoot, now }, opts = {}) {
       worstCount: 1,
     };
   }
+  const { stopReasonsResult, openReasons } = loadOpenStopReasonsForScan(
+    opts,
+    now,
+  );
   const worktrees = list.worktrees.map((wt) =>
-    judgeSeatIdleForWorktree(wt, now, opts),
+    judgeSeatIdleForWorktree(wt, now, opts, openReasons),
   );
   const worstSeverity = worktrees.reduce(
     (acc, w) => Math.max(acc, idleSeverityOf(w)),
@@ -1639,6 +1868,24 @@ export function judgeSeatIdleAcrossWorktrees({ repoRoot, now }, opts = {}) {
     (w) => idleSeverityOf(w) === worstSeverity,
   );
   const worst = worstEntries[0] ?? null;
+  // HYK-464-idle-stop-reason-1 ⓔ: worst 등급 워크트리 경로 전부(unconsumed
+  // 축의 worstWorktreePaths, judgeUnconsumedAcrossWorktrees 참조, 와 동일
+  // "전부 담고 로그 단계에서만 상한" 원칙). ★정상 회차(worstSeverity가
+  // NORMAL)에는 채우지 않는다 -- idleSeverityOf는 PARKED_WITH_REASON도
+  // IDLE_OK/NOT_APPLICABLE/NO_SEAT와 같은 NORMAL 자리로 접으므로(별도
+  // 분기를 추가하지 않았다, judgeSeatIdle의 "새 입력 없으면 무변"과 같은
+  // 최소 변경 원칙), "정상"의 "worst"를 이름 붙이는 건 의미가 없고
+  // watch-run.mjs 쪽 로그 세그먼트도 조용해야 한다(§2-3 비타협 "정상
+  // 상태의 로그 줄을 조용히 유지").
+  const worstWorktreePaths = resolveIdleWorstWorktreePaths(
+    worstSeverity,
+    worstEntries,
+  );
+  // ⓒ: "사유 있는 존치"로 갈린 워크트리 수·경로·사유 id -- worst에서는
+  // 빠지지만(위 worstWorktreePaths가 PARKED_WITH_REASON을 worst로 세지
+  // 않음) 이 목록에서는 지우지 않는다(§2ⓒ "목록·줄에서 지우지 않는다").
+  const parkedFields = resolveIdleParkedFields(worktrees);
+  const stopReasonsStatus = resolveIdleStopReasonsStatus(stopReasonsResult);
   return {
     status: worst ? worst.status : SEAT_IDLE_WIRE_STATUS.NOT_APPLICABLE,
     verdict: worst ? worst.verdict : undefined,
@@ -1653,6 +1900,10 @@ export function judgeSeatIdleAcrossWorktrees({ repoRoot, now }, opts = {}) {
     worktrees,
     totalWorktrees: worktrees.length,
     worstCount: worstEntries.length,
+    worstWorktreePaths,
+    ...parkedFields,
+    stopReasonsStatus,
+    stopReasonsDetail: stopReasonsResult.ok ? null : stopReasonsResult.reason,
   };
 }
 
@@ -4646,11 +4897,13 @@ export function runOrchStallDetect(argv, opts = {}) {
   });
   // HYK-185 seat-scan/HYK-185-seat-idle-1/HYK-185-startcheck-wire: 좌석
   // 무응답·유휴 방치·«배달 후 시작됐는가» 판정을 이 저장소의 워크트리
-  // 전부에 걸쳐 부른다(computeSeatAxes 참조).
+  // 전부에 걸쳐 부른다(computeSeatAxes 참조). HYK-464-idle-stop-reason-1-r2
+  // (coder-task.md §2ⓐ): resolveSeatAxesOpts(위)가 정지 사유 경로를
+  // watchDir에서 유도해 싣는다.
   const { seatLiveness, seatIdle, dispatchStart } = computeSeatAxes(
     repoRoot,
     now,
-    opts,
+    resolveSeatAxesOpts(opts, cli),
   );
   // HYK-185-unconsumed-1: «워커 결과가 갱신됐는데 소비되지 않았다» 판정도
   // 같은 워크트리 전부에 걸쳐 부른다. ★이 축은 좌석 관측이 아니라 파일/

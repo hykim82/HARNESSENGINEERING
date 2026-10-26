@@ -70,6 +70,12 @@ export const SEAT_IDLE_VERDICT = Object.freeze({
   IDLE_OK: "IDLE_OK",
   SUSPECTED_ABANDONED: "SUSPECTED_ABANDONED",
   UNDECIDABLE: "UNDECIDABLE",
+  // HYK-464-idle-stop-reason-1 (coder-task.md §2ⓒ): 호출부(orch-stall-
+  // detect.mjs)가 "이 워크트리를 덮는 열린 정지 사유가 있다"를 넘기면
+  // (`stopReasonId`, 아래) 그 사유가 없었다면 SUSPECTED_ABANDONED였을
+  // 판정이 이 값으로 갈린다 -- 경보 대상(worst)에서는 빠지지만 "사유
+  // 있는 존치"로 여전히 보인다(호출부가 지우지 않고 세는 책임).
+  PARKED_WITH_REASON: "PARKED_WITH_REASON",
 });
 
 export const SEAT_IDLE_REASON = Object.freeze({
@@ -81,6 +87,8 @@ export const SEAT_IDLE_REASON = Object.freeze({
   OBSERVATION_IN_FUTURE: "OBSERVATION_IN_FUTURE",
   NO_OUTPUT_PAST_THRESHOLD: "NO_OUTPUT_PAST_THRESHOLD",
   WITHIN_THRESHOLD: "WITHIN_THRESHOLD",
+  // HYK-464-idle-stop-reason-1: PARKED_WITH_REASON의 사유 코드.
+  PARKED_WITH_OPEN_REASON: "PARKED_WITH_OPEN_REASON",
 });
 
 export const DEFAULT_MAX_ABANDONED_SECONDS = 14400; // 4시간, 근거는 위 헤더 주석.
@@ -110,6 +118,11 @@ function isPositiveFiniteNumber(v) {
 }
 function isNonNegativeFiniteNumber(v) {
   return isFiniteNumber(v) && v >= 0;
+}
+// HYK-464-idle-stop-reason-1: 판정 입력 1개 추가(`args.stopReasonId`)의
+// 유효성 검사 -- 빈 문자열/비문자열은 "사유 없음"과 동일하게 다룬다.
+function isNonEmptyString(v) {
+  return typeof v === "string" && v.length > 0;
 }
 
 // HYK-421 1R: judgeSeatIdle의 eslint complexity 상한(12) 준수를 위해
@@ -172,6 +185,13 @@ function observationProblem(observation, now, clockSkewToleranceMs) {
 //   `DEFAULT_MAX_ABANDONED_SECONDS`.
 // - `thresholds.observationClockSkewToleranceMs`(HYK-421 1R) = 생략 시
 //   `DEFAULT_OBSERVATION_CLOCK_SKEW_TOLERANCE_MS`.
+// - `stopReasonId`(HYK-464-idle-stop-reason-1, §2ⓒ 판정 입력 1개 추가) =
+//   생략 시(undefined/null/빈 문자열) 이 코어의 기존 판정 규칙(시간
+//   문턱·시계 오차)은 한 글자도 바뀌지 않는다(바이트 동일 결과) -- 주어
+//   지고 이 관측이 pastThreshold였을 경우에만 SUSPECTED_ABANDONED 대신
+//   PARKED_WITH_REASON으로 갈린다. 호출부(orch-stall-detect.mjs)가 "이
+//   워크트리를 덮는 열린 정지 사유가 있다"를 이미 판정해 넘긴 값이고,
+//   이 코어 자신은 정지 사유 파일을 읽지 않는다(I/O 0 비타협 유지).
 //
 // ★이 코어는 "활성 배달이 있는지"를 모른다 -- 호출부가 그 판정(§2-3
 // (b))을 이미 마치고 "이 좌석은 이 축의 대상이다"라는 것을 전제로 이
@@ -180,7 +200,7 @@ export function judgeSeatIdle(args) {
   if (!isPlainObject(args)) {
     return undecidable(SEAT_IDLE_REASON.ARGS_INVALID);
   }
-  const { observation, now, thresholds } = args;
+  const { observation, now, thresholds, stopReasonId } = args;
 
   if (!isFiniteNumber(now)) {
     return undecidable(SEAT_IDLE_REASON.NOW_INVALID);
@@ -216,6 +236,18 @@ export function judgeSeatIdle(args) {
   };
 
   if (pastThreshold) {
+    // HYK-464-idle-stop-reason-1 (§2ⓒ): 기존 판정 규칙(위 pastThreshold
+    // 계산)은 이 분기 위로 한 글자도 바뀌지 않았다 -- stopReasonId가
+    // 없으면(가장 흔한 호출자) 이 if 블록은 원문과 바이트 동일하게
+    // SUSPECTED_ABANDONED를 낸다.
+    if (isNonEmptyString(stopReasonId)) {
+      return {
+        ok: true,
+        verdict: SEAT_IDLE_VERDICT.PARKED_WITH_REASON,
+        reasonCode: SEAT_IDLE_REASON.PARKED_WITH_OPEN_REASON,
+        details: { ...details, openStopReasonId: stopReasonId },
+      };
+    }
     return {
       ok: true,
       verdict: SEAT_IDLE_VERDICT.SUSPECTED_ABANDONED,
