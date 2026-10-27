@@ -333,18 +333,25 @@ describe("HYK-209-install-list-dispatch-start-1: dispatch-start trio supervisor-
   });
 
   // ⓔ⑶ (coder-task §2): removing one of the 3 paired .test.mjs entries does
-  // NOT go RED via this generic closure check -- no other listed file
-  // statically imports a .test.mjs file back (same documented blind spot as
-  // the "review-gate.mjs" case in the 음성대조 block below: a list member
-  // reached only by convention, not by another file's import, is invisible
-  // to a closure walk). There is no dedicated "paired-test convention" cell
-  // anywhere in this repo's checks -- 짝 관례 칸 = 없음. Not adding one here:
-  // the task's own product_scope caps new test files at 0 for this round,
-  // and a real enforcement cell for "every .mjs name in this list needs a
-  // same-named .test.mjs name also in this list" would be a generically
-  // useful new check applying to ALL list members, not a one-off for these
-  // three -- out of scope for this round, left as a later-round candidate.
-  test("removing dispatch-start-size-core.test.mjs (a paired test, not an import target) stays GREEN -- the documented 짝 관례 blind spot, not a violation", () => {
+  // NOT go RED via THIS generic closure check (findClosureViolations) --
+  // no other listed file statically imports a .test.mjs file back (same
+  // documented blind spot as the "review-gate.mjs" case in the 음성대조
+  // block below: a list member reached only by convention, not by another
+  // file's import, is invisible to a closure walk).
+  //
+  // HYK-209-install-pair-test-1 (⛔UPDATE, this round): the broader "짝 관례
+  // 칸 = 없음" claim this comment used to make is no longer true -- the new,
+  // GENERIC "짝 .test.mjs 목록 편입 관례" describe block further below
+  // (findPairTestViolations) now catches exactly this removal (and every
+  // other non-test .mjs whose on-disk sibling .test.mjs drops out of the
+  // same list), across all three lists, not just these three dispatch-start
+  // entries. The assertion immediately below this comment stays literally
+  // true on its own narrow terms -- findClosureViolations itself (a static
+  // import-closure walk, not a pair-naming convention) still cannot and
+  // does not see this -- so the test is left in place, now documenting that
+  // specific, narrower limit of THIS check; the broader gap it used to
+  // describe is closed by the separate cell, not this one.
+  test("removing dispatch-start-size-core.test.mjs (a paired test, not an import target) stays GREEN under the import-closure check alone -- a narrower, still-real blind spot of findClosureViolations specifically (the separate pair-test cell below now catches the same removal)", () => {
     const reduced = ENFORCEMENT_SUPERVISOR_FILES.filter(
       (n) => n !== "dispatch-start-size-core.test.mjs",
     );
@@ -357,6 +364,276 @@ describe("HYK-209-install-list-dispatch-start-1: dispatch-start trio supervisor-
         /dispatch-start-size-core\.test\.mjs/.test(v.missing),
       ),
       `expected removing the paired test (with no other list member importing it back) to NOT surface a violation; got ${JSON.stringify(violations)}`,
+    );
+  });
+});
+
+// HYK-209-install-pair-test-1 (coder-task.md §2 ⓐ/ⓑ/ⓒ/ⓓ): generic "짝
+// 시험 목록 편입" cell -- every non-test .mjs that is ITSELF a member of one
+// of the three real lists, and whose on-disk sibling .test.mjs (same
+// directory, same basename + ".test.mjs" -- the exact convention every
+// existing pair in these three lists already follows, e.g.
+// "review-gate.mjs"/"review-gate.test.mjs") EXISTS IN THE REPO, must have
+// that sibling in the SAME list too. H6 검토 1R (REVIEW-r1.md, read-only
+// citation in coder-task.md §1) found this convention was not machine-
+// checked anywhere: a paired test can be dropped from a list with none of
+// the four installer test files going RED. This closes that, generically,
+// across all three lists (not just the 3-member dispatch-start trio the
+// describe block above already covers one-off).
+//
+// Deliberately separate from findClosureViolations() above: that function
+// checks STATIC IMPORT closure (a file importing another must have that
+// other file listed too); this one checks a NAMING CONVENTION (a listed
+// non-test file whose same-named .test.mjs exists on disk must have THAT
+// name listed too). Neither subsumes the other -- see the updated comment
+// on "removing dispatch-start-size-core.test.mjs ... stays GREEN under the
+// import-closure check alone" right above for the precise boundary between
+// the two.
+//
+// Returns the exact sibling .test.mjs name for a non-test .mjs name, or
+// null when `name` is not eligible for pairing (not a ".mjs" name at all,
+// or already itself a ".test.mjs" name).
+function siblingTestName(name) {
+  if (!name.endsWith(".mjs") || name.endsWith(".test.mjs")) return null;
+  return name.slice(0, -".mjs".length) + ".test.mjs";
+}
+
+// §2 ⓑ: exact-name, one-line, fact-only-reason exceptions -- the current
+// gaps 〔직접〕 measured by this round (findPairTestViolations against
+// REAL_LISTS, before this exception list existed): 8 total (check 2,
+// supervisor 6, relay 0), matching ORCH's own §1 count. No wildcards, no
+// directory-level entries -- every entry below names exactly one (dir,
+// main, sibling) triple.
+const PAIR_TEST_EXCEPTIONS = [
+  {
+    dir: "check",
+    main: "ledger-pointer-shared.mjs",
+    sibling: "ledger-pointer-shared.test.mjs",
+    reason:
+      "blocked, not just unadopted -- 짝 시험이 설치 대상에 없는 모듈을 import 함: ledger-pointer-shared.test.mjs:42의 readFileSync(join(HERE, '..', 'supervisor', 'orch-stall-detect.mjs')) -- orch-stall-detect.mjs는 세 목록(check/relay/supervisor) 어디에도 없다 〔직접〕(install.mjs 자신의 1254-1270행 주석이 이미 같은 사유로 문서화).",
+  },
+  {
+    dir: "check",
+    main: "abort-record-writer.mjs",
+    sibling: "abort-record-writer.test.mjs",
+    reason:
+      "미편입 · 편입 후보 -- 짝 시험의 import는 ./abort-record-writer.mjs, ./abort-record-core.mjs 둘뿐이고 둘 다 이미 check 목록 안에서 닫혀 있다(차단 사유 없음) 〔직접〕; 이 조각의 product_scope(생산 코드 0)가 실제 목록 편입을 막는다.",
+  },
+  {
+    dir: "supervisor",
+    main: "derive-claude-project-dir-cli.mjs",
+    sibling: "derive-claude-project-dir-cli.test.mjs",
+    reason:
+      "미편입 · 편입 후보 -- 짝 시험의 import는 ./derive-claude-project-dir-cli.mjs, ./rate-limit-stall-adapter.mjs 둘뿐이고 둘 다 이미 supervisor 목록 안에서 닫혀 있다(차단 사유 없음) 〔직접〕; product_scope(생산 코드 0)가 편입을 막는다.",
+  },
+  {
+    dir: "supervisor",
+    main: "rate-limit-stall-adapter.mjs",
+    sibling: "rate-limit-stall-adapter.test.mjs",
+    reason:
+      "미편입 · 편입 후보 -- 짝 시험은 자기 자신(./rate-limit-stall-adapter.mjs)만 import하고 node 빌트인 외 다른 상대 경로는 없다(차단 사유 없음) 〔직접〕; product_scope(생산 코드 0)가 편입을 막는다.",
+  },
+  {
+    dir: "supervisor",
+    main: "admission-cli.mjs",
+    sibling: "admission-cli.test.mjs",
+    reason:
+      "미편입 · 편입 후보 -- 짝 시험은 자기 자신(./admission-cli.mjs)만 import하고 node 빌트인 외 다른 상대 경로는 없다(차단 사유 없음) 〔직접〕; product_scope(생산 코드 0)가 편입을 막는다.",
+  },
+  {
+    dir: "supervisor",
+    main: "admission-ledger-core.mjs",
+    sibling: "admission-ledger-core.test.mjs",
+    reason:
+      "미편입 · 편입 후보 -- 짝 시험은 자기 자신(./admission-ledger-core.mjs)만 import한다(차단 사유 없음) 〔직접〕; product_scope(생산 코드 0)가 편입을 막는다.",
+  },
+  {
+    dir: "supervisor",
+    main: "admission-ledger-store.mjs",
+    sibling: "admission-ledger-store.test.mjs",
+    reason:
+      "미편입 · 편입 후보 -- 짝 시험의 상대 import는 ./admission-ledger-store.mjs, ./admission-ledger-core.mjs(둘 다 supervisor 목록 안), ../check/admission-ledger-env-isolation.mjs(이미 check 목록 안) 뿐이라 전부 닫혀 있다(차단 사유 없음) 〔직접〕; product_scope(생산 코드 0)가 편입을 막는다.",
+  },
+  {
+    dir: "supervisor",
+    main: "concurrency-cap-adapter.mjs",
+    sibling: "concurrency-cap-adapter.test.mjs",
+    reason:
+      "미편입 · 편입 후보 -- 짝 시험은 자기 자신(./concurrency-cap-adapter.mjs)만 import한다(차단 사유 없음) 〔직접〕; product_scope(생산 코드 0)가 편입을 막는다.",
+  },
+];
+
+// Every non-test .mjs in `lists[dirKey]` whose sibling .test.mjs exists on
+// disk in the same directory must itself be a member of `lists[dirKey]`,
+// unless an exact (dir, main) match is documented in `exceptions`.
+function findPairTestViolations(lists, exceptions) {
+  const exceptionMap = new Map(
+    exceptions.map((e) => [`${e.dir}::${e.main}`, e]),
+  );
+  const violations = [];
+  for (const dirKey of ["check", "relay", "supervisor"]) {
+    const list = lists[dirKey];
+    const listSet = new Set(list);
+    for (const name of list) {
+      const sibling = siblingTestName(name);
+      if (!sibling) continue;
+      if (!existsSync(path.join(DIRS[dirKey], sibling))) continue;
+      if (listSet.has(sibling)) continue;
+      const exc = exceptionMap.get(`${dirKey}::${name}`);
+      if (exc && exc.sibling === sibling) continue;
+      violations.push({ dir: dirKey, main: name, missing: sibling });
+    }
+  }
+  return violations;
+}
+
+// §2 ⓑ bidirectional staleness: a documented exception is stale -- and
+// must surface as its own violation rather than being silently honored --
+// when ANY of:
+//   (1) the main .mjs is no longer a member of `lists[dir]` (nothing left
+//       to except);
+//   (2) the sibling .test.mjs is ALREADY a member of `lists[dir]` (the pair
+//       was added -- the exception entry should have been deleted then);
+//   (3) the sibling .test.mjs file no longer exists on disk (nothing left
+//       to except).
+function findStaleExceptions(lists, exceptions) {
+  const stale = [];
+  for (const exc of exceptions) {
+    const listSet = new Set(lists[exc.dir]);
+    if (!listSet.has(exc.main)) {
+      stale.push({ ...exc, why: "main module no longer in list" });
+    } else if (listSet.has(exc.sibling)) {
+      stale.push({ ...exc, why: "sibling already in list" });
+    } else if (!existsSync(path.join(DIRS[exc.dir], exc.sibling))) {
+      stale.push({ ...exc, why: "sibling file no longer on disk" });
+    }
+  }
+  return stale;
+}
+
+// HYK-209-install-pair-test-1: split into two describe blocks purely to
+// stay under this repo's ESLint max-lines-per-function ceiling (same reason
+// the "HYK-209-install-list-dispatch-start-1" block above its own sibling
+// is separate from "1-2 / 1-3") -- both share the same REAL_LISTS /
+// PAIR_TEST_EXCEPTIONS / findPairTestViolations / findStaleExceptions this
+// file defines once, above.
+describe("HYK-209-install-pair-test-1: 짝 .test.mjs 목록 편입 관례 (core checks)", () => {
+  test("siblingTestName computes the exact sibling name (and null for ineligible names) -- direct unit test, independent of repo state (ⓓ⑷: a mutation hollowing this out to always return null would fail THIS assertion directly)", () => {
+    assert.equal(siblingTestName("foo.mjs"), "foo.test.mjs");
+    assert.equal(siblingTestName("foo.test.mjs"), null);
+    assert.equal(siblingTestName("foo.json"), null);
+    assert.equal(siblingTestName("review-gate.mjs"), "review-gate.test.mjs");
+  });
+
+  test("every non-test .mjs in the three real lists with an on-disk sibling .test.mjs has that sibling in the same list, modulo the documented exception list", () => {
+    const violations = findPairTestViolations(REAL_LISTS, PAIR_TEST_EXCEPTIONS);
+    assert.deepEqual(
+      violations,
+      [],
+      `missing pair-test entries (or a stale exception masking them): ${JSON.stringify(violations, null, 2)}`,
+    );
+  });
+
+  test("the exception list itself is not stale (every entry still names a real, current gap)", () => {
+    const stale = findStaleExceptions(REAL_LISTS, PAIR_TEST_EXCEPTIONS);
+    assert.deepEqual(
+      stale,
+      [],
+      `stale exception entries (no longer describe reality): ${JSON.stringify(stale, null, 2)}`,
+    );
+  });
+});
+
+describe("HYK-209-install-pair-test-1: 짝 .test.mjs 목록 편입 관례 (ⓓ mutation proofs + ⓔ candidate set)", () => {
+  // ⓓ⑴ mutation proof: removing a currently-paired (non-excepted) test file
+  // from a real list must surface a violation naming it.
+  test("ⓓ⑴ removing dispatch-start-size-core.test.mjs (a real, currently-paired, non-excepted test) from the supervisor list goes RED", () => {
+    const reduced = ENFORCEMENT_SUPERVISOR_FILES.filter(
+      (n) => n !== "dispatch-start-size-core.test.mjs",
+    );
+    const violations = findPairTestViolations(
+      { ...REAL_LISTS, supervisor: reduced },
+      PAIR_TEST_EXCEPTIONS,
+    );
+    assert.ok(
+      violations.some(
+        (v) =>
+          v.dir === "supervisor" &&
+          v.main === "dispatch-start-size-core.mjs" &&
+          v.missing === "dispatch-start-size-core.test.mjs",
+      ),
+      `expected removing the paired test to surface a violation naming it; got ${JSON.stringify(violations)}`,
+    );
+  });
+
+  // ⓓ⑵ mutation proof: removing a documented exception entry un-masks the
+  // (still-real) gap it was covering -- it must become a violation again,
+  // not silently stay green.
+  test("ⓓ⑵ removing the ledger-pointer-shared.mjs exception entry un-masks its still-real gap -> RED", () => {
+    const reducedExceptions = PAIR_TEST_EXCEPTIONS.filter(
+      (e) => e.main !== "ledger-pointer-shared.mjs",
+    );
+    const violations = findPairTestViolations(REAL_LISTS, reducedExceptions);
+    assert.ok(
+      violations.some(
+        (v) => v.dir === "check" && v.main === "ledger-pointer-shared.mjs",
+      ),
+      `expected removing the exception entry to re-surface its violation; got ${JSON.stringify(violations)}`,
+    );
+  });
+
+  // ⓓ⑶ mutation proof: a STALE exception (claims a gap for a pair that is
+  // ALREADY closed in the real list) must itself be reported by
+  // findStaleExceptions, not silently accepted as a valid exception.
+  test("ⓓ⑶ a stale exception entry (sibling already paired in the real list) is reported, not silently honored", () => {
+    const staleAddition = {
+      dir: "check",
+      // abort-record-core.mjs/.test.mjs are BOTH already in the real check
+      // list (ENFORCEMENT_CHECK_FILES) -- a synthetic, deliberately-wrong
+      // exception entry for an already-closed pair, to prove staleness
+      // detection fires; not a real exception (not added to
+      // PAIR_TEST_EXCEPTIONS itself).
+      main: "abort-record-core.mjs",
+      sibling: "abort-record-core.test.mjs",
+      reason: "synthetic stale-exception probe (not a real exception entry)",
+    };
+    const stale = findStaleExceptions(REAL_LISTS, [
+      ...PAIR_TEST_EXCEPTIONS,
+      staleAddition,
+    ]);
+    assert.ok(
+      stale.some(
+        (s) =>
+          s.main === "abort-record-core.mjs" &&
+          s.why === "sibling already in list",
+      ),
+      `expected the synthetic stale exception to be reported; got ${JSON.stringify(stale)}`,
+    );
+  });
+
+  // §2 ⓔ: candidates measured (not adopted this round -- product_scope
+  // caps production code at 0) -- every PAIR_TEST_EXCEPTIONS entry above
+  // whose own reason text says "미편입 · 편입 후보" (import closure already
+  // satisfied, no blocker found) rather than "blocked". Listed here so a
+  // later round reading this file alone (not just the result file, which
+  // will eventually rot out of the task's own history) can see the
+  // candidate set without re-deriving it.
+  test("§2 ⓔ candidate-for-adoption subset of the exception list is exactly the 7 non-blocked entries (documents the candidate set this round measured but did not adopt)", () => {
+    const candidates = PAIR_TEST_EXCEPTIONS.filter((e) =>
+      e.reason.startsWith("미편입 · 편입 후보"),
+    ).map((e) => e.main);
+    assert.deepEqual(
+      candidates,
+      [
+        "abort-record-writer.mjs",
+        "derive-claude-project-dir-cli.mjs",
+        "rate-limit-stall-adapter.mjs",
+        "admission-cli.mjs",
+        "admission-ledger-core.mjs",
+        "admission-ledger-store.mjs",
+        "concurrency-cap-adapter.mjs",
+      ],
+      `candidate set changed -- update this list (and the result file's ⓔ table) if that is intentional: ${JSON.stringify(candidates)}`,
     );
   });
 });
