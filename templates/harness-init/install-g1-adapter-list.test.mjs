@@ -48,6 +48,11 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { ENFORCEMENT_CHECK_FILES } from "./install.mjs";
+import {
+  UNDER_FULL_RUNNER_TIMEOUT_MS,
+  attemptWithRetryGate,
+  formatRetryGateDiagnostic,
+} from "./install-retry-gate.mjs";
 
 const REPO_ROOT = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -280,8 +285,13 @@ function ledgerIsolatedEnv() {
 // 무관하게 출력 형식을 고정한다. `maxBuffer`도 HYK-359 4R의 같은 교훈(기본
 // 1MB로는 조용히 잘려 "0건"으로 오독될 수 있다)을 그대로 적용해 넉넉히
 // 올린다.
-function runInstalledNodeTest(installedCheckDir, names, timeoutMs = 300000) {
-  return spawnSync(
+function runInstalledNodeTest(
+  installedCheckDir,
+  names,
+  timeoutMs = 300000,
+  { spawnSync: spawnSyncImpl = spawnSync } = {},
+) {
+  return spawnSyncImpl(
     process.execPath,
     ["--test", "--test-reporter=tap", ...names],
     {
@@ -291,6 +301,35 @@ function runInstalledNodeTest(installedCheckDir, names, timeoutMs = 300000) {
       timeout: timeoutMs,
       maxBuffer: 64 * 1024 * 1024,
     },
+  );
+}
+
+// HYK-464 H7c (coder-task.md §2ⓐ, 705행 칸): the SAME shared retry-gate
+// attemptWithRetryGate install-net-closure.test.mjs's own wrapper uses
+// (see that file's header on this function) -- a first-attempt ETIMEDOUT
+// here is retried exactly once, ONLY when the gate opens. 이 칸의 "단독
+// 시한" (300000ms, 위 기본값) 자체는 그대로 둔다(⛔단독 시한 변경 0,
+// product_scope) -- 재시도 시한만 두 칸이 공유하는 UNDER_FULL_RUNNER_
+// TIMEOUT_MS(180000ms, 시한은 그대로)를 쓴다. 이 자리는 net-closure의
+// resolveInstalledTestTimeoutMs처럼 concurrency에 따라 첫 시도 시한을
+// 바꾸지 않는다(그 분기 자체가 product_scope 밖) -- 그래서 재시도
+// 시한(180000)이 첫 시도 시한(300000)보다 짧아지는 비대칭이 생긴다; 이는
+// 이 라운드가 새로 만든 결함이 아니라 두 칸의 원래 "단독 시한" 선택이
+// 서로 다르다는 사실 그대로다(근거만 적음, 고치지 않음 -- 범위 밖).
+function runInstalledNodeTestWithRetryGate(
+  installedCheckDir,
+  names,
+  { freemem, env, countNodeProcesses } = {},
+) {
+  return attemptWithRetryGate(
+    () => runInstalledNodeTest(installedCheckDir, names),
+    () =>
+      runInstalledNodeTest(
+        installedCheckDir,
+        names,
+        UNDER_FULL_RUNNER_TIMEOUT_MS,
+      ),
+    { freemem, env, countNodeProcesses },
   );
 }
 
@@ -702,7 +741,7 @@ test("HYK-209 H4-2 정적 금지 단언 (⑨): this file's own source never pair
 // import `tmpdir` directly, not `os.tmpdir`), but that is a fact about this
 // file's current source, not a guarantee the scan itself enforces.
 
-test("(b) real installer (not --dry-run) installs into a git-init target outside this worktree, and `node --test` on the two newly-listed test files there has 0 failures", () => {
+test("(b) real installer (not --dry-run) installs into a git-init target outside this worktree, and `node --test` on the two newly-listed test files there has 0 failures", (t) => {
   const { base, targetRepo } = makeSyntheticTarget("hyk209-g1-adapter-real-");
   try {
     runRealInstall(base, targetRepo);
@@ -716,10 +755,26 @@ test("(b) real installer (not --dry-run) installs into a git-init target outside
         `expected the real installer to have copied ${name} into the target`,
       );
     }
-    const result = runInstalledNodeTest(installedCheckDir, [
-      "relay-handshake-g1-dispatch-check.test.mjs",
-      "admission-completion-adapter.test.mjs",
-    ]);
+    const { result, gate, retried } = runInstalledNodeTestWithRetryGate(
+      installedCheckDir,
+      [
+        "relay-handshake-g1-dispatch-check.test.mjs",
+        "admission-completion-adapter.test.mjs",
+      ],
+    );
+    // HYK-464 H7c (§2ⓑ, P2-2와 같은 이유로 여기서 먼저 찍는다 -- 아래
+    // ETIMEDOUT 단언이 throw하면 이 지점 이후 코드는 닿지 않는다): a
+    // first-attempt ETIMEDOUT occurred (gate !== null) -- name which
+    // signal(s), if any, opened the retry-gate and what the retry did.
+    if (gate) {
+      t.diagnostic(
+        formatRetryGateDiagnostic({
+          rel: "relay-handshake-g1-dispatch-check.test.mjs+admission-completion-adapter.test.mjs",
+          gate,
+          retried,
+        }),
+      );
+    }
     // HYK-434 H2 3R (책임자 판정 §2 요구 1, HYK-359 4R ①의 같은 교훈):
     // spawnSync 자체의 실패(예: maxBuffer를 넘겨 Node가 자식을 죽이면
     // result.error.code === 'ENOBUFS')는 그 자체로 요란하게 실패해야
@@ -727,7 +782,7 @@ test("(b) real installer (not --dry-run) installs into a git-init target outside
     assert.equal(
       result.error,
       undefined,
-      `spawnSync itself failed (child may have been killed mid-run, e.g. exceeding maxBuffer) -- error: ${result.error?.message} (code: ${result.error?.code}), signal: ${result.signal}, status: ${result.status}, stdout captured so far: ${(result.stdout ?? "").length} byte(s)`,
+      `spawnSync itself failed (child may have been killed mid-run, e.g. exceeding maxBuffer, or a real hang with no retry-gate signal loaded${gate ? `; retry-gate opened=${gate.opened}, openedBy=${JSON.stringify(gate.openedBy)}, retried=${retried}` : ""}) -- error: ${result.error?.message} (code: ${result.error?.code}), signal: ${result.signal}, status: ${result.status}, stdout captured so far: ${(result.stdout ?? "").length} byte(s)`,
     );
     assert.equal(
       result.status,
@@ -814,4 +869,204 @@ test('(b-negative) real installer + one extra copy reproducing "ledger-pointer-s
   } finally {
     rmSync(base, { recursive: true, force: true });
   }
+});
+
+// ---------------------------------------------------------------------------
+// HYK-464 H7c (§2ⓓ, coder-task.md "두 칸 각각"): runInstalledNodeTestWithRetryGate's
+// own decision table through the SAME shared install-retry-gate.mjs
+// install-net-closure.test.mjs's own cells exercise (no real child, no real
+// 300s/180s wait, no real memory/CPU pressure) -- the real-install (b) cell
+// above already exercises the real spawnSync path end to end. These four
+// cells pin the gated RETRY branching itself deterministically: 신호 0 +
+// ETIMEDOUT -> 재시도 0 · RED; 신호 1개(여기서는 concurrency, net-closure의
+// 4칸이 이미 free를 덮었으므로 여기선 다른 신호로) + ETIMEDOUT -> 재시도 1
+// · 성공 시 진단; 재시도도 ETIMEDOUT -> RED; ENOENT -> 재시도 0.
+// ---------------------------------------------------------------------------
+function noSignalGateOpts(overrides = {}) {
+  return {
+    freemem: () => 5000 * 1024 * 1024,
+    env: {},
+    countNodeProcesses: () => null,
+    ...overrides,
+  };
+}
+
+test("install-g1-adapter-list retry-gate ⓓ (신호 0 + ETIMEDOUT): a first-attempt ETIMEDOUT with no signal loaded does not retry, and the caller still sees the original ETIMEDOUT (RED)", () => {
+  let calls = 0;
+  const fakeSpawn = () => {
+    calls += 1;
+    return {
+      error: Object.assign(new Error("timed out"), { code: "ETIMEDOUT" }),
+      signal: "SIGTERM",
+      status: null,
+      stdout: "",
+      stderr: "",
+    };
+  };
+  const { result, gate, retried } = attemptWithRetryGate(
+    () =>
+      runInstalledNodeTest("/fake/dir", ["fake.test.mjs"], 300000, {
+        spawnSync: fakeSpawn,
+      }),
+    () =>
+      runInstalledNodeTest(
+        "/fake/dir",
+        ["fake.test.mjs"],
+        UNDER_FULL_RUNNER_TIMEOUT_MS,
+        {
+          spawnSync: fakeSpawn,
+        },
+      ),
+    noSignalGateOpts(),
+  );
+  assert.equal(calls, 1, "no signal loaded -- must NOT retry");
+  assert.equal(gate.opened, false);
+  assert.equal(retried, false);
+  assert.equal(result.error?.code, "ETIMEDOUT");
+});
+
+test("install-g1-adapter-list retry-gate ⓓ (concurrency 신호 + ETIMEDOUT): a first-attempt ETIMEDOUT WITH the concurrency signal loaded retries exactly once at UNDER_FULL_RUNNER_TIMEOUT_MS, and a clean retry is what the caller sees", () => {
+  const calls = [];
+  const fakeSpawn = (cmd, args, opts) => {
+    calls.push(opts.timeout);
+    if (calls.length === 1) {
+      return {
+        error: Object.assign(new Error("timed out"), { code: "ETIMEDOUT" }),
+        signal: "SIGTERM",
+        status: null,
+        stdout: "",
+        stderr: "",
+      };
+    }
+    return {
+      error: undefined,
+      signal: null,
+      status: 0,
+      stdout: "# tests 1\n# pass 1\n# fail 0\n# skipped 0\n",
+      stderr: "",
+    };
+  };
+  const { result, gate, retried } = attemptWithRetryGate(
+    () =>
+      runInstalledNodeTest("/fake/dir", ["fake.test.mjs"], 300000, {
+        spawnSync: fakeSpawn,
+      }),
+    () =>
+      runInstalledNodeTest(
+        "/fake/dir",
+        ["fake.test.mjs"],
+        UNDER_FULL_RUNNER_TIMEOUT_MS,
+        {
+          spawnSync: fakeSpawn,
+        },
+      ),
+    noSignalGateOpts({ env: { HARNESS_TEST_CONCURRENCY: "12" } }),
+  );
+  assert.equal(
+    calls.length,
+    2,
+    "expected exactly 2 spawn calls (first attempt + exactly 1 retry)",
+  );
+  assert.equal(
+    calls[1],
+    UNDER_FULL_RUNNER_TIMEOUT_MS,
+    "expected the retry's own timeout option to be the shared UNDER_FULL_RUNNER_TIMEOUT_MS",
+  );
+  assert.equal(result.error, undefined);
+  assert.equal(result.status, 0);
+  assert.equal(gate.opened, true);
+  assert.deepEqual(gate.openedBy, ["concurrency"]);
+  assert.equal(retried, true);
+});
+
+test("install-g1-adapter-list retry-gate ⓓ (재시도도 ETIMEDOUT, 거짓 초록 금지): a loaded signal opens the retry, but a SECOND ETIMEDOUT on that retry is NOT swallowed -- the caller still sees an ETIMEDOUT result", () => {
+  let calls = 0;
+  const fakeSpawn = () => {
+    calls += 1;
+    return {
+      error: Object.assign(new Error("timed out"), { code: "ETIMEDOUT" }),
+      signal: "SIGTERM",
+      status: null,
+      stdout: "",
+      stderr: "",
+    };
+  };
+  const { result, gate, retried } = attemptWithRetryGate(
+    () =>
+      runInstalledNodeTest("/fake/dir", ["fake.test.mjs"], 300000, {
+        spawnSync: fakeSpawn,
+      }),
+    () =>
+      runInstalledNodeTest(
+        "/fake/dir",
+        ["fake.test.mjs"],
+        UNDER_FULL_RUNNER_TIMEOUT_MS,
+        {
+          spawnSync: fakeSpawn,
+        },
+      ),
+    noSignalGateOpts({ countNodeProcesses: () => 9 }),
+  );
+  assert.equal(
+    calls,
+    2,
+    "a loaded-signal hang gets ONE retry, never more (bounded)",
+  );
+  assert.equal(gate.opened, true);
+  assert.deepEqual(gate.openedBy, ["nodeCount"]);
+  assert.equal(
+    retried,
+    false,
+    "a persistent timeout on the retry must NOT be reported as retried:true",
+  );
+  assert.equal(
+    result.error?.code,
+    "ETIMEDOUT",
+    "the caller's own hard assertion on result.error must still see ETIMEDOUT -- a real hang is never swallowed as a pass (⛔시한 초과를 통과로 삼키기 금지)",
+  );
+});
+
+test("install-g1-adapter-list retry-gate ⓓ (ENOENT): a non-timeout spawn error is never retried, regardless of any loaded signal", () => {
+  let calls = 0;
+  const fakeSpawn = () => {
+    calls += 1;
+    return {
+      error: Object.assign(new Error("spawn ENOENT"), { code: "ENOENT" }),
+      signal: null,
+      status: null,
+      stdout: "",
+      stderr: "",
+    };
+  };
+  const { result, gate, retried } = attemptWithRetryGate(
+    () =>
+      runInstalledNodeTest("/fake/dir", ["fake.test.mjs"], 300000, {
+        spawnSync: fakeSpawn,
+      }),
+    () =>
+      runInstalledNodeTest(
+        "/fake/dir",
+        ["fake.test.mjs"],
+        UNDER_FULL_RUNNER_TIMEOUT_MS,
+        {
+          spawnSync: fakeSpawn,
+        },
+      ),
+    noSignalGateOpts({
+      env: { HARNESS_TEST_CONCURRENCY: "12" },
+      countNodeProcesses: () => 9,
+    }),
+  );
+  assert.equal(
+    calls,
+    1,
+    "a non-timeout spawn failure must not trigger a retry at all, even with loaded signals",
+  );
+  assert.equal(
+    gate,
+    null,
+    "no ETIMEDOUT occurred -- the gate must never even be evaluated",
+  );
+  assert.equal(retried, false);
+  assert.equal(result.error?.code, "ENOENT");
 });
