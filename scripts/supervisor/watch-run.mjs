@@ -3128,6 +3128,11 @@ if (invokedDirectly) {
   // 하면(기본값) 이 축은 아예 실행되지 않는다(admissionSweep/wake와 동일
   // opt-in 관례 -- 기존 호출자·기존 시험은 회귀 0).
   let resourceResidueRegistryPath = null;
+  // HYK-255-outbox-aux-1 (coder-task.md §2 ⓐ·product_scope ⓓ): 보내는함
+  // 경로를 넘기는 유일한 자리 -- 생략하면(기본값 null) runPartialCountStep
+  // 이 options.outboxDir=null을 그대로 넘기고, runPartialCountOnce가 그
+  // 수집기를 건너뛰어 기존 동작과 완전히 같다(회귀 0).
+  let outboxDir = null;
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === "--repo-root") repoRoot = argv[++i];
     else if (argv[i] === "--watch-dir") watchDir = argv[++i];
@@ -3152,6 +3157,7 @@ if (invokedDirectly) {
       wakeFakeTerminalListJson = argv[++i];
     else if (argv[i] === "--resource-residue-registry-path")
       resourceResidueRegistryPath = argv[++i];
+    else if (argv[i] === "--outbox-dir") outboxDir = argv[++i];
   }
   if (!repoRoot || !watchDir) {
     console.error("usage: watch-run.mjs --repo-root <path> --watch-dir <path>");
@@ -3251,6 +3257,7 @@ if (invokedDirectly) {
       options: {
         repoRoot,
         watchLogPath: result.logPath,
+        outboxDir,
       },
     });
   }

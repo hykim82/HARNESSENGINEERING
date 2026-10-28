@@ -21,6 +21,7 @@ import {
   runPartialCountOnce,
   collectMergeCandidates,
   collectConsumedRounds,
+  collectOutboxHeaderCounts,
   DEFAULT_MAX_MERGE_CHECKS,
   DEFAULT_EXTRA_REPO_ROOTS,
   DEFAULT_ARCHIVE_ROOT,
@@ -1061,6 +1062,216 @@ test("ⓛ P3-3 고정 HYK-255-consumed-denominator-1 2R: archiveScanMaxDepth가 
     });
     assert.equal(withNegative.archiveScanMaxDepthUsed, 6);
     assert.equal(withNegative.archiveCount, 0);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// HYK-255-outbox-aux-1 -- 보내는함(통역) 머리줄 보조 수집기
+// (collectOutboxHeaderCounts, 프로덕션 export). 전부 mkdtemp 격리 -- 실
+// 보내는함(D:\문서관리\통역\보내는함) 미접촉(evidence_rule).
+// ---------------------------------------------------------------------------
+
+test("collectOutboxHeaderCounts: 분류 3종(책임자 경유·한용 확정·분류 불가) + 둘 다 있으면 한용 확정 우선 + 창 밖 파일은 제외", () => {
+  const root = tmpDir("nc-pcw-outbox-classify-");
+  try {
+    const now = NOW;
+    const mk = (name, firstLine, mtimeMs) => {
+      const full = join(root, name);
+      fs.writeFileSync(full, `${firstLine}\n본문\n`, "utf8");
+      fs.utimesSync(full, new Date(mtimeMs), new Date(mtimeMs));
+    };
+    mk("a-responsible.md", "[책임자 경유 · 상태 통지] 내용", now - HOUR);
+    mk(
+      "b-hanyong.md",
+      "[책임자 경유 · 한용 확정 B-9 위임] 내용",
+      now - 2 * HOUR,
+    );
+    mk("c-unclassified.md", "# 그냥 제목(분류 표지 없음)", now - 3 * HOUR);
+    mk("d-outside-window.md", "[책임자 경유] 창 밖", now - 999 * HOUR);
+    fs.writeFileSync(join(root, "e-not-md.txt"), "[한용 확정] 무시", "utf8");
+
+    const result = collectOutboxHeaderCounts({
+      outboxDir: root,
+      windowStartMs: now - 24 * HOUR,
+      windowEndMs: now,
+    });
+    assert.equal(result.known, true);
+    assert.equal(result.responsible, 1);
+    assert.equal(result.hanyongConfirmed, 1);
+    assert.equal(result.unclassified, 1);
+    assert.equal(result.scanned, 3);
+    assert.equal(result.readFailures, 0);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("collectOutboxHeaderCounts: 하위 폴더(보관·전달됨)는 보지 않는다", () => {
+  const root = tmpDir("nc-pcw-outbox-subdir-");
+  try {
+    const now = NOW;
+    const archived = join(root, "보관", "old.md");
+    fs.mkdirSync(join(root, "보관"), { recursive: true });
+    fs.writeFileSync(archived, "[한용 확정] 보관된 문서\n", "utf8");
+    fs.utimesSync(archived, new Date(now - HOUR), new Date(now - HOUR));
+
+    const result = collectOutboxHeaderCounts({
+      outboxDir: root,
+      windowStartMs: now - 24 * HOUR,
+      windowEndMs: now,
+    });
+    assert.equal(result.scanned, 0);
+    assert.equal(result.hanyongConfirmed, 0);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("collectOutboxHeaderCounts: outboxDir 미지정 -> 미결선(UNKNOWN 재료, 0 침묵 아님)", () => {
+  const result = collectOutboxHeaderCounts({
+    outboxDir: null,
+    windowStartMs: 0,
+    windowEndMs: NOW,
+  });
+  assert.equal(result.known, false);
+  assert.ok(result.reason.includes("미결선"));
+});
+
+test("collectOutboxHeaderCounts: 경로 자체 읽기 실패(readdir 실패) -> UNKNOWN(사유)", () => {
+  const result = collectOutboxHeaderCounts({
+    outboxDir: join(tmpdir(), "nc-pcw-outbox-does-not-exist-xyz"),
+    windowStartMs: 0,
+    windowEndMs: NOW,
+  });
+  assert.equal(result.known, false);
+  assert.ok(result.reason.includes("보내는함 읽기 실패"));
+});
+
+test("collectOutboxHeaderCounts: 개별 파일 stat/읽기 실패는 조용히 0으로 접히지 않고 readFailures로 값이 남는다", () => {
+  const root = tmpDir("nc-pcw-outbox-readfail-");
+  try {
+    fs.writeFileSync(join(root, "ok.md"), "[책임자 경유] 정상\n", "utf8");
+    const result = collectOutboxHeaderCounts({
+      outboxDir: root,
+      windowStartMs: NOW - 24 * HOUR,
+      windowEndMs: NOW,
+      statFn: () => {
+        throw new Error("synthetic stat failure");
+      },
+    });
+    assert.equal(result.known, true);
+    assert.equal(result.readFailures, 1);
+    assert.equal(result.scanned, 0);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("runPartialCountOnce: outboxDir을 주면 보조 관측 줄과 수집기 목록 1줄이 보고에 실리고, 1-C 판정 자격·미계수 예시 7개는 무변", async () => {
+  const root = tmpDir("nc-pcw-outbox-integration-");
+  try {
+    const fx = writeFixtures(root);
+    const outboxDir = join(root, "outbox");
+    fs.mkdirSync(outboxDir, { recursive: true });
+    const f1 = join(outboxDir, "x.md");
+    fs.writeFileSync(f1, "[책임자 경유 · 한용 확정] 지시\n", "utf8");
+    fs.utimesSync(f1, new Date(NOW - HOUR), new Date(NOW - HOUR));
+    const f2 = join(outboxDir, "y.md");
+    fs.writeFileSync(f2, "[책임자 경유] 통지\n", "utf8");
+    fs.utimesSync(f2, new Date(NOW - 2 * HOUR), new Date(NOW - 2 * HOUR));
+
+    const result = await runPartialCountOnce({
+      now: NOW,
+      repoRoot: root,
+      dispatchReceiptsPath: fx.dispatchReceiptsPath,
+      watchLogPath: fx.watchLogPath,
+      extraRepoRoots: [],
+      archiveRoot: join(root, "archive-missing"),
+      maxMergeChecks: 0,
+      outboxDir,
+      git: { run: () => ({ code: 0, stdout: "", stderr: "" }) },
+      gitWorktreeListExecFn: () => fx.worktreeListPorcelain,
+    });
+    const text = result.reportText;
+    assert.ok(
+      text.includes(
+        "- ORCH-writeable 보조 관측: 보내는함 머리줄: 책임자 경유 1건 · 한용 확정 1건 · 분류 불가 0건 — ORCH-writeable · 독립 계수에 미산입 — 독립 계수에 미산입",
+      ),
+    );
+    assert.ok(text.includes("보내는함보조수집기 OK(스캔 2건)"));
+    assert.ok(
+      text.includes(
+        "1-C 판정 자격: 없음 — 미계수 범위가 남아 있어 «ㄴ=0» 판정 불가",
+      ),
+    );
+    assert.ok(text.includes("알려진 미계수 예시: 7개(uncounted-examples/v2)"));
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("runPartialCountOnce: outboxDir 미지정이면 기존 기본 auxNote가 그대로 나온다(회귀 0)", async () => {
+  const root = tmpDir("nc-pcw-outbox-default-");
+  try {
+    const fx = writeFixtures(root);
+    const result = await runPartialCountOnce({
+      now: NOW,
+      repoRoot: root,
+      dispatchReceiptsPath: fx.dispatchReceiptsPath,
+      watchLogPath: fx.watchLogPath,
+      extraRepoRoots: [],
+      archiveRoot: join(root, "archive-missing"),
+      maxMergeChecks: 0,
+      git: { run: () => ({ code: 0, stdout: "", stderr: "" }) },
+      gitWorktreeListExecFn: () => fx.worktreeListPorcelain,
+    });
+    assert.ok(
+      result.reportText.includes(
+        "- ORCH-writeable 보조 관측: 미계수(이 라운드 결선된 보조 수집기 없음) — 독립 계수에 미산입",
+      ),
+    );
+    assert.ok(!result.reportText.includes("보내는함보조수집기"));
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("CLI 진입점: --outbox-dir을 주면 합성 보내는함을 읽어 보조 관측 줄을 낸다", () => {
+  const root = tmpDir("nc-pcw-outbox-cli-");
+  try {
+    const fx = writeFixtures(root, Date.now());
+    const outboxDir = join(root, "outbox");
+    fs.mkdirSync(outboxDir, { recursive: true });
+    fs.writeFileSync(join(outboxDir, "z.md"), "[한용 확정] 지시\n", "utf8");
+    const stdout = execFileSync(
+      process.execPath,
+      [
+        join(
+          process.cwd(),
+          "scripts",
+          "supervisor",
+          "partial-count-report.mjs",
+        ),
+        "--dispatch-receipts",
+        fx.dispatchReceiptsPath,
+        "--watch-log",
+        fx.watchLogPath,
+        "--repo-root",
+        join(root, "not-a-git-repo-i-swear"),
+        "--max-merge-checks",
+        "0",
+        "--outbox-dir",
+        outboxDir,
+      ],
+      { encoding: "utf8" },
+    );
+    assert.ok(
+      stdout.includes(
+        "보내는함 머리줄: 책임자 경유 0건 · 한용 확정 1건 · 분류 불가 0건",
+      ),
+    );
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

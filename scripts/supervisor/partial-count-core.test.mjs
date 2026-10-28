@@ -17,6 +17,7 @@ import {
   parseKstTimestampMs,
   formatKst,
   renderConfirmedLnCount,
+  renderOutboxAuxNote,
   formatPartialCountSection,
   GATE_TYPES,
   UNCOUNTED_EXAMPLES,
@@ -322,6 +323,91 @@ test("parseKstTimestampMs/formatKst: KST(UTC+9) 왕복이 맞고 파싱 불가�
   );
   assert.equal(parseKstTimestampMs("2026-08-14T06:04:39Z"), null);
   assert.equal(parseKstTimestampMs(null), null);
+});
+
+// ---------------------------------------------------------------------------
+// HYK-255-outbox-aux-1 -- UNCOUNTED_EXAMPLES v1(8) -> v2(7) + 보조 관측
+// 렌더링(renderOutboxAuxNote, 순수 함수 -- 수집은 wire의 몫이라 여기서는
+// collectOutboxHeaderCounts 산출물 모양을 손으로 만들어 통과시킨다).
+// ---------------------------------------------------------------------------
+
+test("UNCOUNTED_EXAMPLES: v1(8) -> v2(7), 빠진 항목은 «통역 보내는함 문서»뿐이고 1번(채팅 전체)은 그대로 남는다", () => {
+  assert.equal(UNCOUNTED_EXAMPLES.version, "uncounted-examples/v2");
+  assert.equal(UNCOUNTED_EXAMPLES.items.length, 7);
+  assert.ok(
+    UNCOUNTED_EXAMPLES.items.includes(
+      "채팅으로 온 판정·교정·지시(기계 기록 0)",
+    ),
+  );
+  assert.ok(
+    !UNCOUNTED_EXAMPLES.items.some((item) =>
+      item.includes("통역 보내는함 문서"),
+    ),
+  );
+});
+
+test("renderOutboxAuxNote: known이면 책임자 경유·한용 확정·분류 불가 세 수가 ORCH-writeable 문면으로 나온다", () => {
+  const text = renderOutboxAuxNote({
+    known: true,
+    responsible: 3,
+    hanyongConfirmed: 2,
+    unclassified: 1,
+    scanned: 6,
+    readFailures: 0,
+  });
+  assert.equal(
+    text,
+    "보내는함 머리줄: 책임자 경유 3건 · 한용 확정 2건 · 분류 불가 1건 — ORCH-writeable · 독립 계수에 미산입",
+  );
+});
+
+test("renderOutboxAuxNote: 읽기 실패가 있으면 조용히 사라지지 않고 꼬리에 붙는다", () => {
+  const text = renderOutboxAuxNote({
+    known: true,
+    responsible: 1,
+    hanyongConfirmed: 0,
+    unclassified: 0,
+    scanned: 1,
+    readFailures: 2,
+  });
+  assert.ok(text.endsWith("· 읽기 실패 2건"));
+});
+
+test("renderOutboxAuxNote: known:false(미결선·읽기 실패)는 0으로 접히지 않고 UNKNOWN(사유)로 나온다", () => {
+  assert.equal(
+    renderOutboxAuxNote({
+      known: false,
+      reason: "미결선(보내는함 경로 미지정)",
+    }),
+    "UNKNOWN(미결선(보내는함 경로 미지정))",
+  );
+  assert.equal(renderOutboxAuxNote(null), "UNKNOWN(사유 미상)");
+});
+
+test("필수 문면 ⓑ(보조 칸): buildPartialCountReport가 auxNote를 그대로 ORCH-writeable 보조 관측 줄에 싣고, 1-C 판정 자격 줄은 무변", () => {
+  const auxNote = renderOutboxAuxNote({
+    known: true,
+    responsible: 4,
+    hanyongConfirmed: 3,
+    unclassified: 0,
+    scanned: 7,
+    readFailures: 0,
+  });
+  const text = buildPartialCountReport(baseInput({ auxNote }));
+  // buildGaSection 문면은 "- ORCH-writeable 보조 관측: <auxNote> — 독립
+  // 계수에 미산입"이다 -- auxNote 자신도 "독립 계수에 미산입"을 담고
+  // 있어 중복되지만, 그 중복은 buildGaSection의 기존 문면 계약이라
+  // 이 라운드에서 바꾸지 않는다(회귀 0). 실제로 나오는 줄만 단언한다.
+  assert.ok(
+    text.includes(
+      `- ORCH-writeable 보조 관측: ${auxNote} — 독립 계수에 미산입`,
+    ),
+  );
+  assert.ok(
+    text.includes(
+      "1-C 판정 자격: 없음 — 미계수 범위가 남아 있어 «ㄴ=0» 판정 불가",
+    ),
+  );
 });
 
 test("formatPartialCountSection: 파일 없음/신선/오래됨/생성시각 불명이 각각 명시적으로 갈린다", () => {

@@ -55,8 +55,19 @@ export const INDEPENDENT_ANCHOR_COVERED_GATE_NUMBERS = Object.freeze([4]);
 // 목록의 건수·항목을 그대로 낸다(이 개수는 전체 유형의 분모가 아니다).
 // 항목 출처 = 북극성-좌표.md §1-C ㄴ 예시 + 관제실 2026-08-14-HYK255-
 // 계수기-리서치.md §2(채팅 개입은 어떤 기계 기록에도 안 남는다는 실측).
+//
+// HYK-255-outbox-aux-1 -- v1(8항목) -> v2(7항목). 뺀 항목 =
+// «통역 보내는함 문서(ORCH-writeable -- 보조 칸에서도 제외)». 이 라운드가
+// collectOutboxHeaderCounts/renderOutboxAuxNote(아래 + partial-count-
+// report.mjs)로 그 문서의 머리줄을 «보조 칸»에 실제로 엮었으므로 "보조
+// 칸에서도 제외"라는 그 항목의 전제가 더 이상 사실이 아니다 -- 사실과
+// 모순된 예시를 목록에 남기지 않는다. ⛔1번 «채팅으로 온 판정·교정·지시
+// (기계 기록 0)»은 그대로 둔다 -- 이 보조 칸이 세는 것은 «파일로 남은»
+// 보내는함 문서뿐이고, 채팅으로만 오가고 어떤 파일에도 안 남는 판정·
+// 교정·지시는 여전히 전부 미계수다(1번이 덮는 범위가 8번보다 넓다 --
+// 보조 관측이 센 것과 여전히 미계수인 것은 겹치지 않는다).
 export const UNCOUNTED_EXAMPLES = Object.freeze({
-  version: "uncounted-examples/v1",
+  version: "uncounted-examples/v2",
   items: Object.freeze([
     "채팅으로 온 판정·교정·지시(기계 기록 0)",
     "권한 확인창에 답해 주기",
@@ -65,7 +76,6 @@ export const UNCOUNTED_EXAMPLES = Object.freeze({
     "끝난 배달 기록을 손으로 닫기",
     "로그에만 뜬 경보를 사람이 발견해 알려 주기",
     "Linear 상태 전환(독립 앵커 비증명 -- 이 라운드 수집 제외)",
-    "통역 보내는함 문서(ORCH-writeable -- 보조 칸에서도 제외)",
   ]),
 });
 
@@ -227,6 +237,31 @@ function renderCount(value) {
 export function renderConfirmedLnCount(count) {
   if (count === 0) return "확인 0건";
   return `${count}건`;
+}
+
+// 보내는함(통역) 머리줄 보조 관측 렌더링(HYK-255-outbox-aux-1) -- wire
+// (partial-count-report.mjs의 collectOutboxHeaderCounts)의 산출물을
+// buildGaSection의 «ORCH-writeable 보조 관측» 줄 문면으로 바꾸는 순수
+// 함수(I/O 0, §2 원칙 그대로 -- 수집은 wire의 몫). 호출자가 outboxResult를
+// 안 주면(= outboxDir 미지정) buildPartialCountReport의 기본 auxNote
+// ("미계수(이 라운드 결선된 보조 수집기 없음)")가 그대로 쓰인다 -- 이
+// 함수는 outboxResult가 있을 때만 호출된다.
+export function renderOutboxAuxNote(outboxResult) {
+  if (!outboxResult || outboxResult.known !== true) {
+    const reason =
+      outboxResult && outboxResult.reason ? outboxResult.reason : "사유 미상";
+    return `UNKNOWN(${reason})`;
+  }
+  const failSuffix =
+    outboxResult.readFailures > 0
+      ? ` · 읽기 실패 ${outboxResult.readFailures}건`
+      : "";
+  return (
+    `보내는함 머리줄: 책임자 경유 ${outboxResult.responsible}건 · ` +
+    `한용 확정 ${outboxResult.hanyongConfirmed}건 · ` +
+    `분류 불가 ${outboxResult.unclassified}건` +
+    ` — ORCH-writeable · 독립 계수에 미산입${failSuffix}`
+  );
 }
 
 function buildGaSection(gate4, auxNote) {
