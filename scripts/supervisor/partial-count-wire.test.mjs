@@ -1261,6 +1261,54 @@ test("runPartialCountOnce: outboxDir 미지정이면 기존 기본 auxNote가 �
   }
 });
 
+// HYK-255-outbox-aux-1-r3 (책임자 판정 2116 §1 ⑵ · REVIEW-r2 P2-1) --
+// "결선"을 outboxResult 존재(인자 전달됨)가 아니라 수집기 결과
+// known:true로 좁힌다. --outbox-dir을 줬어도 그 경로가 없거나(폴더 부재
+// ·경로 오타) readdir 자체가 실패하면, 이 실행은 "미계수 예시 v2(7)"로
+// 세지 않는다 -- 8번 항목(«통역 보내는함 문서»)의 전제가 실제로는 깨지지
+// 않았기 때문이다(수집기가 한 줄도 못 읽었다). 동시에 그 실패는 조용한
+// 0이 아니라 보조 칸 FAIL(사유)로 남는다.
+test("runPartialCountOnce: --outbox-dir을 줬지만 폴더가 없으면(경로 오타와 같은 모양) 미계수 예시는 v1(8)로 남고 보조 칸은 FAIL(사유)이다(변이 11 -- 조건을 '인자 전달됨'으로 되돌리면 이 v1 단언이 RED)", async () => {
+  const root = tmpDir("nc-pcw-outbox-missing-folder-");
+  try {
+    const fx = writeFixtures(root);
+    const outboxDir = join(root, "no-such-outbox-dir");
+    const result = await runPartialCountOnce({
+      now: NOW,
+      repoRoot: root,
+      dispatchReceiptsPath: fx.dispatchReceiptsPath,
+      watchLogPath: fx.watchLogPath,
+      extraRepoRoots: [],
+      archiveRoot: join(root, "archive-missing"),
+      maxMergeChecks: 0,
+      outboxDir,
+      git: { run: () => ({ code: 0, stdout: "", stderr: "" }) },
+      gitWorktreeListExecFn: () => fx.worktreeListPorcelain,
+    });
+    assert.ok(
+      result.reportText.includes(
+        "알려진 미계수 예시: 8개(uncounted-examples/v1)",
+      ),
+      "폴더 부재 실행은 v2(7)로 세면 안 된다 -- 수집기가 아무것도 못 읽었다",
+    );
+    assert.ok(
+      result.reportText.includes(
+        "통역 보내는함 문서(ORCH-writeable -- 보조 칸에서도 제외)",
+      ),
+    );
+    assert.match(
+      result.reportText,
+      /보내는함보조수집기 FAIL\(보내는함 읽기 실패: /,
+    );
+    assert.ok(
+      !result.reportText.includes("보내는함보조수집기 OK"),
+      "읽기 실패인데 OK로 조용히 접히면 안 된다",
+    );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("CLI 진입점: --outbox-dir을 주면 합성 보내는함을 읽어 보조 관측 줄을 낸다", () => {
   const root = tmpDir("nc-pcw-outbox-cli-");
   try {

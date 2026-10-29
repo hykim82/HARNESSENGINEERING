@@ -1019,9 +1019,16 @@ function assemblePartialCountReportText({
     missingReceipts: deriveMissingReceipts(deliveredResult, consumedResult),
     gate4,
     auxNote: outboxResult ? renderOutboxAuxNote(outboxResult) : undefined,
-    uncountedExamples: outboxResult
-      ? UNCOUNTED_EXAMPLES_V2
-      : UNCOUNTED_EXAMPLES_V1,
+    // HYK-255-outbox-aux-1-r3 (책임자 판정 2116 §1 ⑵ · REVIEW-r2 P2-1) --
+    // "결선"을 outboxResult 존재(인자 전달됨)가 아니라 수집기 결과
+    // known:true로 좁힌다. 폴더 없음·경로 오타·readdir 실패는
+    // outboxResult가 존재해도 known:false이므로 v1(8)로 남고, 그 사유는
+    // auxNote(위 줄, renderOutboxAuxNote가 이미 UNKNOWN(사유)를 낸다)로
+    // 조용히 사라지지 않는다.
+    uncountedExamples:
+      outboxResult?.known === true
+        ? UNCOUNTED_EXAMPLES_V2
+        : UNCOUNTED_EXAMPLES_V1,
     // ⛔독립 ㄴ 수집기가 없는 이 라운드에 이 배열을 채우는 생산 경로는
     // 존재하지 않는다 -- 항상 [](= «확인 0건» 렌더링). 채우려면 독립적인
     // ㄴ 양성 신호원이 먼저 있어야 한다(PM 권고 «열어 둔다» 그대로).

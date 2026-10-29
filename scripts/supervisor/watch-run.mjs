@@ -2019,6 +2019,43 @@ export function buildPartialCountStepOptions({
   return { repoRoot, watchLogPath, outboxDir };
 }
 
+// HYK-255-outbox-aux-1-r3 (coder-task.md §2 ⓐ · REVIEW-r2 ⓑ "고치는 길"
+// 그대로) -- P1-1 수리. buildPartialCountStepOptions 단독 단위 시험은
+// 그 함수를 "직접" 호출하는 헬퍼일 뿐이라, invokedDirectly 블록의 argv
+// 분기(--outbox-dir)나 이 호출부의 outboxDir 전달 줄이 지워져도 그
+// 시험은 계속 초록이었다(REVIEW-r2 P1-1). 이 함수는 그 둘("argv 해석" +
+// "호출부 전달")을 "그대로" 옮겨 와, argv 배열을 받아 실제로 해석하고
+// 그 결과를 runPartialCountStepFn(기본값 runPartialCountStep, 시험에서
+// 주입 가능)에 넘긴다 -- runWatchOnce(ㄱ-4 GitHub 조회)는 거치지 않고도
+// argv 삭제·호출부 삭제 두 변이 모두 단위 시험으로 RED가 된다.
+export async function runWatchCliPartialCountStep({
+  argv,
+  repoRoot,
+  watchDir,
+  now,
+  result,
+  runPartialCountStepFn,
+}) {
+  let outboxDir = null;
+  for (let i = 0; i < argv.length; i++) {
+    if (argv[i] === "--outbox-dir") outboxDir = argv[++i];
+  }
+  const stepFn =
+    runPartialCountStepFn === undefined
+      ? runPartialCountStep
+      : runPartialCountStepFn;
+  return stepFn({
+    watchDir,
+    now,
+    logPath: result.logPath,
+    options: buildPartialCountStepOptions({
+      repoRoot,
+      watchLogPath: result.logPath,
+      outboxDir,
+    }),
+  });
+}
+
 // HYK-481 (coder-task.md §2) -- "ledger는 있는데 lock이 없다"를 가리키는
 // 명시 사유 코드. "미설정"(admissionSweep 자체가 없음)과 값으로 구별
 // 되는 것이 이 라운드의 목적이므로 별도 상수로 뽑는다.
@@ -3145,10 +3182,11 @@ if (invokedDirectly) {
   // opt-in 관례 -- 기존 호출자·기존 시험은 회귀 0).
   let resourceResidueRegistryPath = null;
   // HYK-255-outbox-aux-1 (coder-task.md §2 ⓐ·product_scope ⓓ): 보내는함
-  // 경로를 넘기는 유일한 자리 -- 생략하면(기본값 null) runPartialCountStep
-  // 이 options.outboxDir=null을 그대로 넘기고, runPartialCountOnce가 그
-  // 수집기를 건너뛰어 기존 동작과 완전히 같다(회귀 0).
-  let outboxDir = null;
+  // 경로 argv 해석은 runWatchCliPartialCountStep으로 옮겼다(r3, REVIEW-r2
+  // P1-1) -- 그 함수가 이 같은 argv 배열을 받아 "--outbox-dir"를 직접
+  // 해석하므로, 여기서 중복으로 변수를 만들지 않는다(생략하면 기본값
+  // null이고 runPartialCountOnce가 그 수집기를 건너뛰어 기존 동작과
+  // 완전히 같다, 회귀 0).
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === "--repo-root") repoRoot = argv[++i];
     else if (argv[i] === "--watch-dir") watchDir = argv[++i];
@@ -3173,7 +3211,6 @@ if (invokedDirectly) {
       wakeFakeTerminalListJson = argv[++i];
     else if (argv[i] === "--resource-residue-registry-path")
       resourceResidueRegistryPath = argv[++i];
-    else if (argv[i] === "--outbox-dir") outboxDir = argv[++i];
   }
   if (!repoRoot || !watchDir) {
     console.error("usage: watch-run.mjs --repo-root <path> --watch-dir <path>");
@@ -3266,15 +3303,14 @@ if (invokedDirectly) {
     // HYK-255-watch-wire-1 (coder-task.md §1 항2): 실패는 감시 로그 줄로
     // 시끄럽게 남고, 감시 실행 자체(위 result/process.exit)는 이 단계와
     // 무관하게 계속된다 -- runPartialCountStep은 절대 throw하지 않는다.
-    await runPartialCountStep({
+    // HYK-255-outbox-aux-1-r3 (REVIEW-r2 P1-1): argv 해석 + 호출부 전달을
+    // runWatchCliPartialCountStep으로 옮겼다 -- 이 argv 그대로 넘긴다.
+    await runWatchCliPartialCountStep({
+      argv,
+      repoRoot,
       watchDir,
       now: cliNow,
-      logPath: result.logPath,
-      options: buildPartialCountStepOptions({
-        repoRoot,
-        watchLogPath: result.logPath,
-        outboxDir,
-      }),
+      result,
     });
   }
   // HYK-270 (coder-task.md §9-8 "전부 실행 출력으로 보여라") -- 한도
