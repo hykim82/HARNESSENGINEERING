@@ -1,0 +1,4 @@
+[
+  "templates/harness-init/install-net-closure.test.mjs",
+  "templates/harness-init/install-g1-adapter-list.test.mjs"
+]

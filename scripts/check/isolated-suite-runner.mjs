@@ -32,7 +32,7 @@ import {
   realpathSync,
   rmSync,
 } from "node:fs";
-import { cpus, tmpdir } from "node:os";
+import { cpus, freemem, tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -102,6 +102,123 @@ export function collectTestFiles(
   return files;
 }
 
+// HYK-439 §2 ⓑ/ⓒ: the install-target child-spawnSync test family (memory-
+// heavy, real `node --test` grandchildren -- see runner-serial-family.json's
+// own header for which files and why) runs in a SEPARATE, serial
+// (--test-concurrency=1) pass so it never overlaps the main pass's own
+// concurrent children. This file lives outside this module's scope (a
+// JSON data file, not a script) so the family can be edited without
+// touching production code -- isolated-suite-runner.mjs only reads it.
+const SERIAL_FAMILY_LIST_PATH = fileURLToPath(
+  new URL("./runner-serial-family.json", import.meta.url),
+);
+
+// `path.join` on Windows emits backslashes for the directory-prefix
+// boundary (verified this round) even though TEST_DIRS/the JSON list both
+// use forward slashes -- every comparison between a collected file path and
+// a list entry normalizes through this first, or a real family file would
+// silently fail to match on Windows (the file this round primarily targets).
+function normalizeRelPath(p) {
+  return p.replace(/\\/g, "/");
+}
+
+export function loadSerialFamilyList({
+  readFileFn = readFileSync,
+  path = SERIAL_FAMILY_LIST_PATH,
+} = {}) {
+  const raw = readFileFn(path, "utf8");
+  let list;
+  try {
+    list = JSON.parse(raw);
+  } catch (err) {
+    throw new Error(
+      `isolated-suite-runner: runner-serial-family.json is not valid JSON (${err.message}) -- fail-closed`,
+      { cause: err },
+    );
+  }
+  if (
+    !Array.isArray(list) ||
+    list.length === 0 ||
+    list.some((x) => typeof x !== "string" || x.trim() === "")
+  ) {
+    throw new Error(
+      `isolated-suite-runner: runner-serial-family.json must be a non-empty JSON array of non-empty path strings, got: ${raw} -- fail-closed`,
+    );
+  }
+  return list;
+}
+
+// §2 ⓒ "기계 검사 칸": every file this run actually collected must end up in
+// EXACTLY ONE of the two passes -- never both (a silent double-run) and
+// never neither (a silent drop, the exact failure mode collectTestFiles's
+// own fail-closed readdir guard one level up exists to prevent). Takes the
+// three arrays as plain data (not computed internally) so a test can feed a
+// deliberately broken partition and watch this throw, independent of
+// whether splitSerialFamily's own partition logic below could ever actually
+// produce one -- defense in depth, not a redundant no-op.
+export function assertSerialFamilyPartition({
+  allFiles,
+  mainFiles,
+  familyFiles,
+}) {
+  const normAll = allFiles.map(normalizeRelPath);
+  const allSet = new Set(normAll);
+  const counts = new Map();
+  for (const f of [...mainFiles, ...familyFiles].map(normalizeRelPath)) {
+    counts.set(f, (counts.get(f) ?? 0) + 1);
+    if (!allSet.has(f)) {
+      throw new Error(
+        `isolated-suite-runner: serial-family split references "${f}" which is not one of this run's collected test files -- fail-closed`,
+      );
+    }
+  }
+  for (const f of normAll) {
+    const count = counts.get(f) ?? 0;
+    if (count === 0) {
+      throw new Error(
+        `isolated-suite-runner: test file "${f}" is missing from BOTH passes after serial-family split -- fail-closed, refusing to silently run fewer suites than collected`,
+      );
+    }
+    if (count > 1) {
+      throw new Error(
+        `isolated-suite-runner: test file "${f}" appears in BOTH passes after serial-family split (${count}x) -- fail-closed, refusing a double-run`,
+      );
+    }
+  }
+}
+
+// Splits `files` (this run's real collected file list) into the main pass
+// and the serial-family pass per `familyList`. Fail-closed on a list entry
+// that isn't one of `files` (a renamed/removed family file, or a typo'd
+// list entry naming something that was never collected) -- rather than
+// silently running a different file set than the CI-canonical command.
+export function splitSerialFamily({ files, familyList }) {
+  const fileSet = new Set(files.map(normalizeRelPath));
+  const seen = new Set();
+  for (const entry of familyList) {
+    const norm = normalizeRelPath(entry);
+    if (seen.has(norm)) {
+      throw new Error(
+        `isolated-suite-runner: runner-serial-family.json lists "${entry}" more than once -- fail-closed`,
+      );
+    }
+    seen.add(norm);
+    if (!fileSet.has(norm)) {
+      throw new Error(
+        `isolated-suite-runner: runner-serial-family.json lists "${entry}" but no such test file was collected for this run -- fail-closed, refusing to silently run a different file set than the CI-canonical command`,
+      );
+    }
+  }
+  const mainFiles = [];
+  const familyFiles = [];
+  for (const f of files) {
+    if (seen.has(normalizeRelPath(f))) familyFiles.push(f);
+    else mainFiles.push(f);
+  }
+  assertSerialFamilyPartition({ allFiles: files, mainFiles, familyFiles });
+  return { mainFiles, familyFiles };
+}
+
 // HYK-473 §2-1: `node --test` with no `--test-concurrency` defaults to one
 // worker per CPU core (this file previously passed zero concurrency flags
 // at all -- 0 hits on `--test-concurrency` grep, confirmed before this
@@ -117,6 +234,86 @@ export function collectTestFiles(
 export function resolveConcurrency({ cpuCount = cpus().length } = {}) {
   return Math.max(1, Math.floor(cpuCount / 2));
 }
+
+// HYK-439 §2 ⓐ (1R, 1주 시험 임시 규칙 2026-10-29 19:47 책임자 판정):
+// resolveConcurrency above (cpu-count/2) is kept exactly as-is -- existing
+// callers/tests of it (hyk473-runner-cap.test.mjs) are untouched by this
+// round -- but the REAL default path a CLI invocation takes no longer uses
+// it (runIsolatedSuite's useAutoConcurrency flag below, set unconditionally
+// by this file's own CLI entry point). This function replaces it there:
+// it resolves 1 vs 2 from TWO free-memory samples, `intervalMs` apart
+// (default 30s, real wall clock), never the old cpu-count default -- a
+// measurement failure of ANY kind (freememFn throws, returns a
+// non-finite value, sleepFn throws) resolves to 1 -- the conservative
+// side, never 2 -- with a reason string saying why (coder-task.md §2 ⓐ
+// "측정 실패 = 2 가 아니라 «1 + 사유»").
+//
+// Stays fully synchronous (no async/await) -- this file's whole call graph
+// (execFileSync/spawnSync) already is, and keeping it that way means
+// runIsolatedSuite's return type/the ~15 existing tests that call it
+// without overriding this seam need no changes at all (see sleepFn below:
+// defaultSleepSync blocks via Atomics.wait, never a real setTimeout the
+// event loop would need to be alive for).
+export const AUTO_CONCURRENCY_LOW_MEM_THRESHOLD_MB = 3000;
+export const AUTO_CONCURRENCY_SAMPLE_INTERVAL_MS = 30_000;
+export const AUTO_CONCURRENCY_SAMPLE_COUNT = 2;
+
+function bytesToMb(bytes) {
+  return bytes / (1024 * 1024);
+}
+
+function roundTo1Decimal(n) {
+  return Math.round(n * 10) / 10;
+}
+
+// A synchronous blocking sleep with no subprocess/timer dependency --
+// Atomics.wait on a throwaway SharedArrayBuffer blocks the calling thread
+// for real wall-clock `ms` (verified this round on this Node/platform),
+// which is exactly what "30초 간격 2회" (real time between the two samples)
+// needs without turning this file's synchronous call graph async.
+function defaultSleepSync(ms) {
+  const sab = new Int32Array(new SharedArrayBuffer(4));
+  Atomics.wait(sab, 0, 0, Math.max(0, Number(ms) || 0));
+}
+
+export function resolveAutoConcurrency({
+  freememFn = freemem,
+  sleepFn = defaultSleepSync,
+  sampleCount = AUTO_CONCURRENCY_SAMPLE_COUNT,
+  intervalMs = AUTO_CONCURRENCY_SAMPLE_INTERVAL_MS,
+  lowMemThresholdMb = AUTO_CONCURRENCY_LOW_MEM_THRESHOLD_MB,
+} = {}) {
+  let samples;
+  try {
+    samples = [];
+    for (let i = 0; i < sampleCount; i++) {
+      if (i > 0) sleepFn(intervalMs);
+      const mb = bytesToMb(freememFn());
+      if (!Number.isFinite(mb)) {
+        throw new Error(`freememFn returned a non-finite value: ${mb}`);
+      }
+      samples.push(mb);
+    }
+  } catch (err) {
+    return {
+      concurrency: 1,
+      startFreeMb: [],
+      reason: `auto-select: free-memory sampling failed (${err.message}) -- measurement failure resolves to 1 (conservative), never the old cpu-count default`,
+    };
+  }
+  const avg = samples.reduce((a, b) => a + b, 0) / samples.length;
+  const concurrency = avg < lowMemThresholdMb ? 1 : 2;
+  const roundedSamples = samples.map(roundTo1Decimal);
+  return {
+    concurrency,
+    startFreeMb: roundedSamples,
+    reason: `auto-select: start free avg ${roundTo1Decimal(avg)}MB across ${samples.length} sample(s) ${JSON.stringify(roundedSamples)} (threshold ${lowMemThresholdMb}MB) -> concurrency ${concurrency}`,
+  };
+}
+
+// §2 ⓑ: the serial-family pass always runs at this concurrency, regardless
+// of what the main pass's --concurrency resolved to.
+export const SERIAL_FAMILY_CONCURRENCY = 1;
 
 // HYK-477 §1-1: this runner's own `--test-concurrency` cap only bounds the
 // ONE layer of `node --test` children it spawns directly. ORCH's real
@@ -236,6 +433,35 @@ export function classifySpawnOutcome(result, { hasCompletion = false } = {}) {
     return { status: RUNNER_STATUS.MEASUREMENT_UNAVAILABLE_OOM, exitCode: 1 };
   }
   return { status: RUNNER_STATUS.TESTS_FAILED, exitCode: result.status ?? 1 };
+}
+
+// HYK-439 §2 ⓑ: combines the main pass's and the serial-family pass's
+// classified outcomes (each a classifySpawnOutcome result) into ONE
+// judgement for this run -- the WORSE status wins (never the optimistic
+// one: a measurement-unavailable or a real failure in EITHER pass must not
+// be hidden by the other pass's green), and the combined exit code is 0
+// ONLY when both passes exited 0.
+const RUNNER_STATUS_SEVERITY = {
+  [RUNNER_STATUS.OK]: 0,
+  [RUNNER_STATUS.TESTS_FAILED]: 1,
+  [RUNNER_STATUS.MEASUREMENT_UNAVAILABLE_OOM]: 2,
+};
+
+function combinePassOutcomes(mainOutcome, familyOutcome) {
+  const bothOk = mainOutcome.exitCode === 0 && familyOutcome.exitCode === 0;
+  const worse =
+    RUNNER_STATUS_SEVERITY[familyOutcome.status] >
+    RUNNER_STATUS_SEVERITY[mainOutcome.status]
+      ? familyOutcome
+      : mainOutcome;
+  return {
+    status: worse.status,
+    exitCode: bothOk
+      ? 0
+      : mainOutcome.exitCode !== 0
+        ? mainOutcome.exitCode
+        : familyOutcome.exitCode,
+  };
 }
 
 // HYK-477 §2-3 2R: the input classifySpawnOutcome's hasCompletion needs --
@@ -409,6 +635,74 @@ function resolveNodeVersionWarningInfo({
 // latest-file write above: a numbered-copy failure must not affect (and
 // must not be masked by) the latest write's own success/failure, and
 // neither may ever affect the suite's real exit code.
+// Isolated so emitRunnerReceipt can read ONE tap path's counts the exact
+// same way it always has (byte-for-byte the same try/catch + log message as
+// before this round) for both the main pass and, when a serial-family pass
+// ran, that pass's own separate tap file -- no behavior change for any
+// existing (single-pass) caller.
+function parseCountsFromTapWithWarning({ tapPath, readFile, elapsedMs, log }) {
+  try {
+    // HYK-209 §2 ⓐ-1: the same genuineness gate hasTapCompletion uses --
+    // a receipt must not carry a leaked subtest's fake counts (coder-
+    // task.md §2 ⓐ-1 "영수증이 ... fail 0 이 되지 않게").
+    return parseGenuineTapSummaryCounts(readFile(tapPath, "utf8"), {
+      elapsedMs,
+    });
+  } catch (err) {
+    log(
+      `[isolated-suite-runner] WARNING: could not read tap summary at ${tapPath} (${err.message}) -- receipt will carry null counts`,
+    );
+    return { tests: null, pass: null, fail: null, skip: null };
+  }
+}
+
+// HYK-439 §2 ⓑ/ⓓ: field-by-field sum of the main pass's and the serial-
+// family pass's counts -- a null in EITHER side makes that combined field
+// null too (never a real number summed with "unknown"), same "don't guess"
+// posture as parseGenuineTapSummaryCounts itself.
+function mergeCounts(a, b) {
+  const merged = {};
+  for (const key of ["tests", "pass", "fail", "skip"]) {
+    merged[key] = a[key] == null || b[key] == null ? null : a[key] + b[key];
+  }
+  return merged;
+}
+
+// Isolated so emitRunnerReceipt's own two write call sites (the "latest"
+// file and the run-scoped numbered copy) share ONE construction of the
+// common payload fields instead of repeating all of them twice -- no
+// behavior change, this is byte-for-byte the same fields both call sites
+// always passed, just named once.
+function buildReceiptPayload({
+  runnerExit,
+  runnerStatus,
+  counts,
+  sha,
+  finishedAtMs,
+  maxConcurrentNode,
+  nodeVersion,
+  nodeVersionWarning,
+  startFreeMb,
+  minFreeMbSampled,
+  concurrency,
+  serialFamilyConcurrency,
+}) {
+  return {
+    runnerExit,
+    runnerStatus,
+    counts,
+    headCommit: sha,
+    finishedAtMs,
+    maxConcurrentNode,
+    nodeVersion,
+    nodeVersionWarning,
+    startFreeMb,
+    minFreeMbSampled,
+    concurrency,
+    serialFamilyConcurrency,
+  };
+}
+
 function emitRunnerReceipt({
   root,
   sha,
@@ -425,32 +719,48 @@ function emitRunnerReceipt({
   nodeVersion,
   nodeVersionWarning,
   elapsedMs,
+  // HYK-439 §2 ⓑ/ⓓ: all optional, default = no serial-family pass ran this
+  // round (byte-for-byte the prior single-pass behavior).
+  familyTapPath = null,
+  familyElapsedMs = null,
+  startFreeMb = null,
+  minFreeMbSampled = null,
+  concurrency = null,
+  serialFamilyConcurrency = null,
 }) {
-  let counts = { tests: null, pass: null, fail: null, skip: null };
-  try {
-    // HYK-209 §2 ⓐ-1: the same genuineness gate hasTapCompletion uses --
-    // a receipt must not carry a leaked subtest's fake counts (coder-
-    // task.md §2 ⓐ-1 "영수증이 ... fail 0 이 되지 않게").
-    counts = parseGenuineTapSummaryCounts(readFile(tapPath, "utf8"), {
-      elapsedMs,
+  let counts = parseCountsFromTapWithWarning({
+    tapPath,
+    readFile,
+    elapsedMs,
+    log,
+  });
+  if (familyTapPath) {
+    const familyCounts = parseCountsFromTapWithWarning({
+      tapPath: familyTapPath,
+      readFile,
+      elapsedMs: familyElapsedMs,
+      log,
     });
-  } catch (err) {
-    log(
-      `[isolated-suite-runner] WARNING: could not read tap summary at ${tapPath} (${err.message}) -- receipt will carry null counts`,
-    );
+    counts = mergeCounts(counts, familyCounts);
   }
-  const finishedAtMs = nowMs();
+  const payload = buildReceiptPayload({
+    runnerExit,
+    runnerStatus,
+    counts,
+    sha,
+    finishedAtMs: nowMs(),
+    maxConcurrentNode,
+    nodeVersion,
+    nodeVersionWarning,
+    startFreeMb,
+    minFreeMbSampled,
+    concurrency,
+    serialFamilyConcurrency,
+  });
   try {
     const { path } = writeReceipt({
       harnessDir: join(root, ".harness"),
-      runnerExit,
-      runnerStatus,
-      counts,
-      headCommit: sha,
-      finishedAtMs,
-      maxConcurrentNode,
-      nodeVersion,
-      nodeVersionWarning,
+      ...payload,
     });
     log(`[isolated-suite-runner] runner receipt written -> ${path}`);
   } catch (err) {
@@ -462,14 +772,7 @@ function emitRunnerReceipt({
   try {
     const { path } = writeNumberedReceipt({
       receiptPath: runSlot.receiptPath,
-      runnerExit,
-      runnerStatus,
-      counts,
-      headCommit: sha,
-      finishedAtMs,
-      maxConcurrentNode,
-      nodeVersion,
-      nodeVersionWarning,
+      ...payload,
     });
     log(`[isolated-suite-runner] per-run numbered receipt written -> ${path}`);
   } catch (err) {
@@ -583,14 +886,45 @@ function cleanupRunDirs({ keep, log, cloneDir, tapDir }) {
 // longer logs itself, see runIsolatedSuite's own call site for why).
 // Isolated so its branching doesn't count against runIsolatedSuite's own
 // complexity gate.
-function resolveConcurrencyValue({ concurrency, resolveConcurrencyFn }) {
+//
+// HYK-439 §2 ⓐ: `useAutoConcurrency` is a new, OFF-by-default switch -- an
+// explicit `concurrency` always wins regardless of it (never even calls
+// resolveAutoConcurrencyFn, so "명시 인자 우선" costs zero measurement time);
+// when it's off (every existing caller/test, none of which pass this flag),
+// resolution is BYTE-FOR-BYTE the prior behavior (resolveConcurrencyFn ??
+// resolveConcurrency, i.e. the cpu-count default). Only this file's own CLI
+// entry point turns it on unconditionally -- so the cpu-count default is
+// "removed" from the real default flow (coder-task.md §2 ⓐ "기본값 12로
+// 떨어지는 경로 제거") without changing this function's behavior for any
+// caller that doesn't opt in, and without needing to touch any of the ~15
+// existing runIsolatedSuite call sites in this file's own test suite.
+function resolveConcurrencyValue({
+  concurrency,
+  resolveConcurrencyFn,
+  useAutoConcurrency,
+  resolveAutoConcurrencyFn = resolveAutoConcurrency,
+}) {
+  if (concurrency != null) {
+    return {
+      resolvedConcurrency: concurrency,
+      reason: OVERRIDE_CONCURRENCY_REASON,
+      startFreeMb: null,
+    };
+  }
+  if (useAutoConcurrency) {
+    const {
+      concurrency: resolvedConcurrency,
+      reason,
+      startFreeMb,
+    } = resolveAutoConcurrencyFn();
+    return { resolvedConcurrency, reason, startFreeMb };
+  }
   const resolveFn = resolveConcurrencyFn ?? resolveConcurrency;
-  const resolvedConcurrency = concurrency ?? resolveFn();
-  const reason =
-    concurrency != null
-      ? OVERRIDE_CONCURRENCY_REASON
-      : DEFAULT_CONCURRENCY_REASON;
-  return { resolvedConcurrency, reason };
+  return {
+    resolvedConcurrency: resolveFn(),
+    reason: DEFAULT_CONCURRENCY_REASON,
+    startFreeMb: null,
+  };
 }
 
 // No numbered artifacts this run (allocation failed, or nothing asked for
@@ -698,44 +1032,166 @@ function stopConcurrencySampler({
   }
 }
 
-// Runs the suite while sampling concurrent `node` process count around it
-// (start sampler -> spawn suite -> stop sampler) and returns both the
-// suite's own outcome and the sampled max together. Isolated into its own
-// function purely to keep runIsolatedSuite's own branch count down (same
-// "keeps runIsolatedSuite's own complexity gate happy" reasoning as
-// resolveConcurrencyValue/resolveRunSlot above) -- no new behavior, just a
-// named seam around the three sampler-related statements.
-function spawnSuiteWithSampler({
+// HYK-439 §2 ⓓ min_free_mb_sampled: same "separate process, not an
+// in-process timer" reasoning as node-concurrency-sampler.mjs's own header
+// (this run's event loop is blocked synchronously inside spawnSync for the
+// whole suite -- no in-process timer could fire meanwhile). That file
+// itself is OUT of this round's product_scope (only isolated-suite-
+// runner.mjs/runner-receipt-writer.mjs/one new list file are in scope), so
+// rather than extending it, this is a SECOND, independent sampler this file
+// spawns directly via `node -e` -- a plain string, not a new file on disk.
+// Never throws (same posture as startConcurrencySampler above): a failed
+// sample just contributes no data point, `null` propagates as "measurement
+// unavailable" if every sample fails or the sampler never started.
+const FREE_MEM_SAMPLER_SCRIPT = [
+  "const os=require('node:os');",
+  "const fs=require('node:fs');",
+  "const outPath=process.argv[1];",
+  "const intervalMs=Number(process.argv[2]);",
+  "let min=null;let samples=0;",
+  "function tick(){",
+  "const mb=os.freemem()/(1024*1024);",
+  "samples+=1;",
+  "if(min==null||mb<min)min=mb;",
+  "try{fs.writeFileSync(outPath, JSON.stringify({min,samples,lastSampleAtMs:Date.now()}));}catch(e){}",
+  "}",
+  "tick();",
+  "setInterval(tick, intervalMs);",
+].join("\n");
+
+function startFreeMemSampler({
+  spawnFn = spawnAsync,
+  outPath,
+  intervalMs = 250,
+  log,
+}) {
+  try {
+    const child = spawnFn(
+      process.execPath,
+      ["-e", FREE_MEM_SAMPLER_SCRIPT, "--", outPath, String(intervalMs)],
+      { stdio: "ignore" },
+    );
+    child.unref?.();
+    return child;
+  } catch (err) {
+    log(
+      `[isolated-suite-runner] WARNING: failed to start free-memory sampler (${err.message}) -- receipt's min_free_mb_sampled will be null`,
+    );
+    return null;
+  }
+}
+
+// Mirrors stopConcurrencySampler's own "best-effort kill, then read the
+// last persisted value" shape (same Windows TerminateProcess caveat --
+// mitigated the same way, persisting on every tick rather than only at
+// exit).
+function stopFreeMemSampler({
+  child,
+  outPath,
+  readFileFn = readFileSync,
+  log,
+}) {
+  if (!child) return null;
+  try {
+    child.kill();
+  } catch {
+    // best-effort -- see stopConcurrencySampler's own comment.
+  }
+  try {
+    const data = JSON.parse(readFileFn(outPath, "utf8"));
+    return Number.isFinite(data.min) ? data.min : null;
+  } catch (err) {
+    log(
+      `[isolated-suite-runner] WARNING: could not read free-memory sampler output at ${outPath} (${err.message}) -- min_free_mb_sampled will be null`,
+    );
+    return null;
+  }
+}
+
+// HYK-439 §2 ⓑ: orchestrates the (possibly two-pass) suite run -- splitting
+// `files` per `serialFamilyList` when one is given (fail-closed via
+// splitSerialFamily, before anything spawns), sampling concurrent `node`
+// process count across BOTH passes together (one sampler window spanning
+// the whole run, not just the main pass -- an honest max over everything
+// this run actually did, not a partial one), and combining their outcomes
+// when a family pass ran. Isolated into its own function purely to keep
+// runIsolatedSuite's own complexity/line-count gate happy (same reasoning
+// as every other small extraction in this file) -- for a run with no
+// serialFamilyList, this is byte-for-byte the prior single-pass
+// spawnSuiteWithSampler behavior it replaces.
+function runMainAndFamilySuite({
   spawn,
   cloneDir,
   files,
+  serialFamilyList,
+  mainConcurrency,
   tapPath,
-  concurrency,
-  logPath,
-  readFile,
+  tapDir,
+  mainLogPath,
   samplerOutPath,
+  readFile,
   startSampler = startConcurrencySampler,
   stopSampler = stopConcurrencySampler,
   log,
   nowMs,
 }) {
+  let mainFiles = files;
+  let familyFiles = [];
+  if (serialFamilyList) {
+    const split = splitSerialFamily({ files, familyList: serialFamilyList });
+    mainFiles = split.mainFiles;
+    familyFiles = split.familyFiles;
+  }
+
   const samplerChild = startSampler({ outPath: samplerOutPath, log });
-  const outcome = spawnSuiteInClone({
+  const mainOutcome = spawnSuiteInClone({
     spawn,
     cloneDir,
-    files,
+    files: mainFiles,
     tapPath,
-    concurrency,
-    logPath,
+    concurrency: mainConcurrency,
+    logPath: mainLogPath,
     readFile,
     nowMs,
   });
+
+  let combinedOutcome = mainOutcome;
+  let familyTapPath = null;
+  let familyElapsedMs = null;
+  let serialFamilyConcurrency = null;
+  if (familyFiles.length > 0) {
+    serialFamilyConcurrency = SERIAL_FAMILY_CONCURRENCY;
+    familyTapPath = join(tapDir, "runner-output-serial.tap");
+    const familyLogPath = mainLogPath
+      ? mainLogPath.replace(/\.log$/, "-serial.log")
+      : null;
+    const familyOutcome = spawnSerialFamilyPass({
+      spawn,
+      cloneDir,
+      familyFiles,
+      tapPath: familyTapPath,
+      logPath: familyLogPath,
+      readFile,
+      nowMs,
+    });
+    familyElapsedMs = familyOutcome.elapsedMs;
+    combinedOutcome = combinePassOutcomes(mainOutcome, familyOutcome);
+  }
+
   const maxConcurrentNode = stopSampler({
     child: samplerChild,
     outPath: samplerOutPath,
     log,
   });
-  return { outcome, maxConcurrentNode };
+
+  return {
+    mainOutcome,
+    combinedOutcome,
+    familyTapPath,
+    familyElapsedMs,
+    serialFamilyConcurrency,
+    maxConcurrentNode,
+  };
 }
 
 // HYK-464 2R P2-6 (책임자 판정 2026-10-16 16:4x §1, 원문 "A"): the run's
@@ -755,26 +1211,107 @@ function spawnSuiteWithSampler({
 // runIsolatedSuite's own complexity/line-count gate doesn't absorb this
 // (same "keeps runIsolatedSuite's own complexity gate happy" reasoning as
 // every other small extraction in this file).
+// HYK-439 §2 ⓐ: used ONLY on a failure path below (root resolution, or
+// head-sha resolution, throws) -- deliberately NEVER calls
+// resolveAutoConcurrencyFn, even when useAutoConcurrency is on, because a
+// run that is about to abort before spawning anything would otherwise pay
+// auto-select's real (up to 30s wall-clock) measurement cost for a decision
+// that will never be used. Explicit --concurrency still wins if given
+// (zero behavior change on that path); otherwise this logs a cheap,
+// honestly-labeled placeholder rather than a real measurement.
+function resolveFailureBannerConcurrency({
+  concurrency,
+  resolveConcurrencyFn,
+  useAutoConcurrency,
+}) {
+  if (concurrency != null) {
+    return {
+      resolvedConcurrency: concurrency,
+      reason: OVERRIDE_CONCURRENCY_REASON,
+    };
+  }
+  if (useAutoConcurrency) {
+    return {
+      resolvedConcurrency: 1,
+      reason:
+        "auto-select: skipped -- this run is aborting before a measurement would ever be used",
+    };
+  }
+  const resolveFn = resolveConcurrencyFn ?? resolveConcurrency;
+  return {
+    resolvedConcurrency: resolveFn(),
+    reason: DEFAULT_CONCURRENCY_REASON,
+  };
+}
+
+function logFailureBanner({
+  concurrency,
+  resolveConcurrencyFn,
+  useAutoConcurrency,
+  log,
+}) {
+  const { resolvedConcurrency, reason } = resolveFailureBannerConcurrency({
+    concurrency,
+    resolveConcurrencyFn,
+    useAutoConcurrency,
+  });
+  log(formatConcurrencyBanner({ concurrency: resolvedConcurrency, reason }));
+}
+
+// HYK-439 §2 ⓐ: root AND head-sha resolution now both happen BEFORE
+// concurrency is resolved (reversed from the prior order -- see
+// resolveFailureBannerConcurrency's own header for why): a bad root or a
+// root with no resolvable HEAD means this run aborts before spawning
+// anything, and auto-select's real measurement cost must not be paid on
+// that path. HYK-464 2R P2-6's own "banner logged before the throw, never
+// silently dropped" contract still holds on EITHER failure point, via
+// logFailureBanner above -- only the concurrency VALUE shown on a failure
+// path changes (never a real auto-select measurement); every caller that
+// doesn't use useAutoConcurrency (the ~15 existing tests, explicit-
+// concurrency callers) sees byte-for-byte the same banner text as before,
+// since resolveConcurrencyFn ?? resolveConcurrency is exactly as cheap/
+// instant on this path as it already was.
 function resolveRootAndFirstLine({
   sourceRoot,
   execFile,
   concurrency,
   resolveConcurrencyFn,
+  useAutoConcurrency,
+  resolveAutoConcurrencyFn,
   nodeVersion,
   readPackageJsonFn,
   log,
 }) {
-  const { resolvedConcurrency, reason } = resolveConcurrencyValue({
-    concurrency,
-    resolveConcurrencyFn,
-  });
   let root;
   try {
     root = sourceRoot ?? repoRootOf(process.cwd(), execFile);
   } catch (err) {
-    log(formatConcurrencyBanner({ concurrency: resolvedConcurrency, reason }));
+    logFailureBanner({
+      concurrency,
+      resolveConcurrencyFn,
+      useAutoConcurrency,
+      log,
+    });
     throw err;
   }
+  let headInfo;
+  try {
+    headInfo = resolveHeadShaAndDirty({ root, execFile });
+  } catch (err) {
+    logFailureBanner({
+      concurrency,
+      resolveConcurrencyFn,
+      useAutoConcurrency,
+      log,
+    });
+    throw err;
+  }
+  const { resolvedConcurrency, reason, startFreeMb } = resolveConcurrencyValue({
+    concurrency,
+    resolveConcurrencyFn,
+    useAutoConcurrency,
+    resolveAutoConcurrencyFn,
+  });
   // The "UNKNOWN/판정 불가" case deliberately contributes no suffix (see
   // formatFirstRunnerLine) -- every existing caller that mocks a non-real
   // `root` (no readable package.json) falls into that case, and §2-1's
@@ -789,12 +1326,257 @@ function resolveRootAndFirstLine({
       nodeVersionWarning,
     }),
   );
-  return { root, resolvedConcurrency, resolvedNodeVersion, nodeVersionWarning };
+  return {
+    root,
+    sha: headInfo.sha,
+    dirty: headInfo.dirty,
+    resolvedConcurrency,
+    resolvedNodeVersion,
+    nodeVersionWarning,
+    startFreeMb,
+  };
+}
+
+// HYK-439 §2 ⓑ: runs the serial-family pass (always --test-concurrency=1,
+// regardless of the main pass's own resolved concurrency) and returns its
+// classified outcome plus the elapsed time emitRunnerReceipt needs for its
+// own tap-plausibility check. Isolated so runIsolatedSuite's own
+// complexity/line-count gate doesn't absorb this (same reasoning as every
+// other small extraction in this file) -- only called when a serial-family
+// list was given AND the split actually produced family files.
+function spawnSerialFamilyPass({
+  spawn,
+  cloneDir,
+  familyFiles,
+  tapPath,
+  logPath,
+  readFile,
+  nowMs,
+}) {
+  return spawnSuiteInClone({
+    spawn,
+    cloneDir,
+    files: familyFiles,
+    tapPath,
+    concurrency: SERIAL_FAMILY_CONCURRENCY,
+    logPath,
+    readFile,
+    nowMs,
+  });
+}
+
+// Isolated purely to keep runIsolatedSuite's own line-count gate happy (same
+// reasoning as every other small extraction in this file) -- no behavior
+// change from the five inline statements this replaces.
+function setupRunDirs({ root, mkdtemp, allocateRunSlotFn, log }) {
+  const cloneDir = mkdtempSync(join(longFormTmpdir(), "hyk208-isolated-"));
+  // HYK-411: this tap destination lives OUTSIDE cloneDir on purpose --
+  // writing it inside cloneDir would add an untracked file to the very
+  // checkout the 34 git-status-porcelain safety-net tests (see this file's
+  // own header) snapshot from inside, turning this runner's own
+  // instrumentation into a false positive for those tests.
+  const tapDir = mkdtemp(join(longFormTmpdir(), "hyk411-tap-"));
+  const tapPath = join(tapDir, "runner-output.tap");
+  const harnessDir = join(root, ".harness");
+  const runSlot = resolveRunSlot({ harnessDir, allocateRunSlotFn, log });
+  return { cloneDir, tapDir, tapPath, runSlot };
+}
+
+// Isolated purely to keep runIsolatedSuite's own line-count gate happy (same
+// reasoning as every other small extraction in this file) -- no behavior
+// change from the four inline statements this replaces.
+function cloneAndCollectFiles({
+  execFile,
+  root,
+  cloneDir,
+  collectFiles,
+  sha,
+  dirty,
+  log,
+}) {
+  execFile("git", ["clone", "--quiet", root, cloneDir], { encoding: "utf8" });
+  const files = collectFiles(cloneDir);
+  log(formatBanner({ sha, dirty }));
+  log(
+    `[isolated-suite-runner] clone: ${cloneDir} (${files.length} test file(s))`,
+  );
+  return files;
+}
+
+// HYK-439 §2 ⓑ/ⓓ: the (possibly two-pass) run -> receipt sequence, isolated
+// into its own function so runIsolatedSuite's own complexity/line-count
+// gate doesn't absorb it (same reasoning as every other small extraction in
+// this file -- this one simply got large enough this round that the prior
+// inline shape no longer fit). Pure sequencing, almost no branching of its
+// own: all the actual decisions (auto-select, serial-family split, pass-
+// outcome combining) live in the functions it calls.
+// HYK-439 §2 ⓑ/ⓓ: wraps the free-memory sampler around runMainAndFamily
+// Suite's own node-count-sampled run (start -> run -> stop), then folds
+// minFreeMbSampled into whatever that call already returns. `...rest`
+// forwards every other seam (spawn/startSampler/stopSampler/nowMs/etc.)
+// through untouched, without this function needing to name each one just
+// to pass it along one level -- isolated purely to keep runCloneAndEmit
+// Receipt's own line-count gate happy (same reasoning as every other small
+// extraction in this file).
+function runSuiteWithFreeMemSampler({
+  tapDir,
+  startFreeMemSamplerFn = startFreeMemSampler,
+  stopFreeMemSamplerFn = stopFreeMemSampler,
+  log,
+  ...rest
+}) {
+  const freeMemOutPath = join(tapDir, "free-mem-sampler.json");
+  const freeMemSamplerChild = startFreeMemSamplerFn({
+    outPath: freeMemOutPath,
+    log,
+  });
+  const result = runMainAndFamilySuite({ tapDir, log, ...rest });
+  const minFreeMbSampled = stopFreeMemSamplerFn({
+    child: freeMemSamplerChild,
+    outPath: freeMemOutPath,
+    log,
+  });
+  return { ...result, minFreeMbSampled };
+}
+
+function runCloneAndEmitReceipt({
+  root,
+  sha,
+  files,
+  cloneDir,
+  tapDir,
+  tapPath,
+  serialFamilyList,
+  resolvedConcurrency,
+  runSlot,
+  readFile,
+  writeReceipt,
+  writeNumberedReceipt,
+  nowMs,
+  log,
+  resolvedNodeVersion,
+  nodeVersionWarning,
+  startFreeMb,
+  ...samplerOpts
+}) {
+  // HYK-439 §2 ⓑ/ⓒ: serialFamilyList is OFF by default (byte-for-byte the
+  // prior single-pass behavior) -- only this file's own CLI entry point
+  // supplies a real one unconditionally. See runMainAndFamilySuite's own
+  // header for the split/sampler/combine details; `...samplerOpts` is
+  // spawn/startSampler/stopSampler/startFreeMemSamplerFn/stopFreeMemSampler
+  // Fn, forwarded untouched (see runSuiteWithFreeMemSampler's own header).
+  const {
+    mainOutcome,
+    combinedOutcome,
+    familyTapPath,
+    familyElapsedMs,
+    serialFamilyConcurrency,
+    maxConcurrentNode,
+    minFreeMbSampled,
+  } = runSuiteWithFreeMemSampler({
+    ...samplerOpts,
+    cloneDir,
+    files,
+    serialFamilyList,
+    mainConcurrency: resolvedConcurrency,
+    tapPath,
+    tapDir,
+    mainLogPath: runSlot.logPath,
+    samplerOutPath: join(tapDir, "node-concurrency-sampler.json"),
+    readFile,
+    log,
+    nowMs,
+  });
+
+  return reportRunOutcome({
+    root,
+    sha,
+    tapPath,
+    runSlot,
+    readFile,
+    writeReceipt,
+    writeNumberedReceipt,
+    nowMs,
+    log,
+    maxConcurrentNode,
+    resolvedNodeVersion,
+    nodeVersionWarning,
+    startFreeMb,
+    minFreeMbSampled,
+    resolvedConcurrency,
+    mainOutcome,
+    combinedOutcome,
+    familyTapPath,
+    familyElapsedMs,
+    serialFamilyConcurrency,
+  });
+}
+
+// Isolated purely to keep runCloneAndEmitReceipt's own line-count gate happy
+// (same reasoning as every other small extraction in this file) -- no
+// behavior change from the inline emitRunnerReceipt call + return this
+// replaces.
+function reportRunOutcome({
+  root,
+  sha,
+  tapPath,
+  runSlot,
+  readFile,
+  writeReceipt,
+  writeNumberedReceipt,
+  nowMs,
+  log,
+  maxConcurrentNode,
+  resolvedNodeVersion,
+  nodeVersionWarning,
+  startFreeMb,
+  minFreeMbSampled,
+  resolvedConcurrency,
+  mainOutcome,
+  combinedOutcome,
+  familyTapPath,
+  familyElapsedMs,
+  serialFamilyConcurrency,
+}) {
+  emitRunnerReceipt({
+    root,
+    sha,
+    runnerExit: combinedOutcome.exitCode,
+    runnerStatus: combinedOutcome.status,
+    tapPath,
+    runSlot,
+    readFile,
+    writeReceipt,
+    writeNumberedReceipt,
+    nowMs,
+    log,
+    maxConcurrentNode,
+    elapsedMs: mainOutcome.elapsedMs,
+    nodeVersion: resolvedNodeVersion,
+    nodeVersionWarning,
+    familyTapPath,
+    familyElapsedMs,
+    startFreeMb,
+    minFreeMbSampled,
+    concurrency: resolvedConcurrency,
+    serialFamilyConcurrency,
+  });
+  return combinedOutcome.exitCode;
 }
 
 // Orchestrates one full run: clone committed HEAD -> run the suite in the
 // clone -> report -> always clean up (unless `keep`). Returns the child
 // process's exit code so the CLI entry point can propagate it verbatim.
+// HYK-439 §2 ⓑ/ⓓ: `...passthrough` below is writeNumberedReceipt/
+// serialFamilyList/startSampler/stopSampler/startFreeMemSamplerFn/
+// stopFreeMemSamplerFn -- the six params this function never reads itself,
+// only forwards verbatim to runCloneAndEmitReceipt's final call. None of
+// the six has a default HERE (each downstream function that actually uses
+// one applies its own, e.g. runMainAndFamilySuite's startSampler =
+// startConcurrencySampler), so capturing them via rest instead of naming
+// each individually changes nothing about what a caller that omits them
+// gets -- purely a line-count reduction (keeps this function's own gate
+// happy, same reasoning as every other small extraction in this file).
 export function runIsolatedSuite({
   sourceRoot,
   keep = false,
@@ -807,80 +1589,75 @@ export function runIsolatedSuite({
   readFile = readFileSync,
   writeReceipt = writeRunnerReceipt,
   allocateRunSlotFn,
-  writeNumberedReceipt,
   nowMs = Date.now,
   resolveConcurrencyFn,
-  startSampler,
-  stopSampler,
+  useAutoConcurrency,
+  resolveAutoConcurrencyFn,
   nodeVersion,
   readPackageJsonFn,
+  ...passthrough
 } = {}) {
   // HYK-464 2R P2-6: see resolveRootAndFirstLine's own header for why this
   // single call replaces 1R's separate repoRootOf + resolveAndLogNodeVersion
-  // Warning + resolveAndLogConcurrency sequence.
-  const { root, resolvedConcurrency, resolvedNodeVersion, nodeVersionWarning } =
-    resolveRootAndFirstLine({
-      sourceRoot,
-      execFile,
-      concurrency,
-      resolveConcurrencyFn,
-      nodeVersion,
-      readPackageJsonFn,
-      log,
-    });
-  const { sha, dirty } = resolveHeadShaAndDirty({ root, execFile });
+  // Warning + resolveAndLogConcurrency sequence. HYK-439 §2 ⓐ: it now also
+  // resolves sha/dirty (resolveHeadShaAndDirty moved inside it) -- see its
+  // own header for why (auto-select must never run on a path that aborts
+  // before spawning anything).
+  const {
+    root,
+    sha,
+    dirty,
+    resolvedConcurrency,
+    resolvedNodeVersion,
+    nodeVersionWarning,
+    startFreeMb,
+  } = resolveRootAndFirstLine({
+    sourceRoot,
+    execFile,
+    concurrency,
+    resolveConcurrencyFn,
+    useAutoConcurrency,
+    resolveAutoConcurrencyFn,
+    nodeVersion,
+    readPackageJsonFn,
+    log,
+  });
 
-  const cloneDir = mkdtempSync(join(longFormTmpdir(), "hyk208-isolated-"));
-  // HYK-411: this tap destination lives OUTSIDE cloneDir on purpose --
-  // writing it inside cloneDir would add an untracked file to the very
-  // checkout the 34 git-status-porcelain safety-net tests (see this file's
-  // own header) snapshot from inside, turning this runner's own
-  // instrumentation into a false positive for those tests.
-  const tapDir = mkdtemp(join(longFormTmpdir(), "hyk411-tap-"));
-  const tapPath = join(tapDir, "runner-output.tap");
-  const harnessDir = join(root, ".harness");
-  const runSlot = resolveRunSlot({ harnessDir, allocateRunSlotFn, log });
+  const { cloneDir, tapDir, tapPath, runSlot } = setupRunDirs({
+    root,
+    mkdtemp,
+    allocateRunSlotFn,
+    log,
+  });
   try {
-    execFile("git", ["clone", "--quiet", root, cloneDir], { encoding: "utf8" });
-    const files = collectFiles(cloneDir);
-    log(formatBanner({ sha, dirty }));
-    log(
-      `[isolated-suite-runner] clone: ${cloneDir} (${files.length} test file(s))`,
-    );
-    const { outcome, maxConcurrentNode } = spawnSuiteWithSampler({
-      spawn,
+    const files = cloneAndCollectFiles({
+      execFile,
+      root,
       cloneDir,
-      files,
-      tapPath,
-      concurrency: resolvedConcurrency,
-      logPath: runSlot.logPath,
-      readFile,
-      samplerOutPath: join(tapDir, "node-concurrency-sampler.json"),
-      startSampler,
-      stopSampler,
+      collectFiles,
+      sha,
+      dirty,
       log,
-      nowMs,
     });
-
-    emitRunnerReceipt({
+    return runCloneAndEmitReceipt({
+      ...passthrough,
       root,
       sha,
-      runnerExit: outcome.exitCode,
-      runnerStatus: outcome.status,
+      files,
+      cloneDir,
+      tapDir,
       tapPath,
-      runSlot,
+      spawn,
       readFile,
+      resolvedConcurrency,
+      runSlot,
       writeReceipt,
-      writeNumberedReceipt,
       nowMs,
       log,
-      maxConcurrentNode,
-      elapsedMs: outcome.elapsedMs,
-      nodeVersion: resolvedNodeVersion,
+      resolvedNodeVersion,
       nodeVersionWarning,
+      startFreeMb,
     });
-
-    return outcome.exitCode;
   } finally {
     cleanupRunDirs({ keep, log, cloneDir, tapDir });
   }
@@ -930,6 +1707,18 @@ if (invokedDirectly) {
     );
     process.exit(1);
   }
-  const exitCode = runIsolatedSuite({ sourceRoot, keep, concurrency });
+  // HYK-439 §2 ⓐ/ⓑ: the real CLI invocation always turns on auto-select
+  // (a no-op whenever --concurrency was given above, per resolveConcurrency
+  // Value's own "explicit wins" check) and always loads/applies the real
+  // serial-family list -- loadSerialFamilyList is fail-closed (throws
+  // loudly on a missing/malformed list file) rather than silently running
+  // without isolation.
+  const exitCode = runIsolatedSuite({
+    sourceRoot,
+    keep,
+    concurrency,
+    useAutoConcurrency: true,
+    serialFamilyList: loadSerialFamilyList(),
+  });
   process.exit(exitCode);
 }

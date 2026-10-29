@@ -340,6 +340,29 @@ function countField(counts, key) {
   return counts?.[key] ?? null;
 }
 
+// HYK-439 §2 ⓓ (additive only -- existing field names/meaning/order above
+// this comment are byte-for-byte unchanged): four new memory/concurrency
+// facts the low-memory auto-select + serial-family-isolation round adds.
+// `schema_version` is deliberately NOT bumped -- the consumer
+// (relay-handshake.mjs) never compares this receipt's schema_version value
+// (grepped this round, 0 hits outside fixtures/tests), and every new field
+// below is optional/null-safe, so a v2 consumer reading a receipt with
+// these fields present is unaffected either way; bumping would only add an
+// unnecessary surface for downstream readers to react to.
+// - start_free_mb: the concurrency auto-select's own free-memory samples
+//   (array, order = sample order), or null when auto-select did not run
+//   (explicit --concurrency, or a legacy caller that predates this field).
+// - min_free_mb_sampled: the lowest free memory observed by a periodic
+//   sampler spanning the whole run (both passes, see isolated-suite-
+//   runner.mjs's startFreeMemSampler) -- a POINT SAMPLE minimum (polling,
+//   not continuous), never coerced to 0 when unavailable.
+// - concurrency: the --test-concurrency this run's MAIN pass actually used
+//   (the resolved value, whatever path resolved it -- explicit, auto-
+//   select, or the legacy cpu-count default).
+// - serial_family_concurrency: the --test-concurrency the serial-family
+//   pass used, or null when no serial-family pass ran this round (fixed at
+//   1 whenever it does run -- see isolated-suite-runner.mjs's
+//   SERIAL_FAMILY_CONCURRENCY).
 export function buildRunnerReceipt({
   runnerExit,
   runnerStatus,
@@ -349,6 +372,10 @@ export function buildRunnerReceipt({
   maxConcurrentNode,
   nodeVersion,
   nodeVersionWarning,
+  startFreeMb,
+  minFreeMbSampled,
+  concurrency,
+  serialFamilyConcurrency,
 }) {
   return {
     schema_version: RUNNER_RECEIPT_SCHEMA_VERSION,
@@ -363,6 +390,10 @@ export function buildRunnerReceipt({
     max_concurrent_node: maxConcurrentNode ?? null,
     node_version: nodeVersion ?? null,
     node_version_warning: nodeVersionWarning ?? null,
+    start_free_mb: startFreeMb ?? null,
+    min_free_mb_sampled: minFreeMbSampled ?? null,
+    concurrency: concurrency ?? null,
+    serial_family_concurrency: serialFamilyConcurrency ?? null,
   };
 }
 
@@ -378,6 +409,10 @@ export function buildRunnerReceipt({
 // 별개 함수(allocateRunSlot/writeNumberedRunnerReceipt, 아래)가 맡는다.
 // HYK-485 §2-1: 기존 이 함수의 시그니처/동작을 한 글자도 바꾸지 않는 것
 // 자체가 "기존 runner-receipt.json 독자 무영향" 요구의 증명이다.
+// HYK-439 §2 ⓓ: the four new memory/concurrency params below are
+// additive-optional (undefined when a caller omits them, same as every
+// existing optional param here) -- an omitting caller's output is
+// byte-for-byte what HYK-485 §2-1's comment above already guarantees.
 export function writeRunnerReceipt({
   harnessDir,
   runnerExit,
@@ -388,6 +423,10 @@ export function writeRunnerReceipt({
   maxConcurrentNode,
   nodeVersion,
   nodeVersionWarning,
+  startFreeMb,
+  minFreeMbSampled,
+  concurrency,
+  serialFamilyConcurrency,
   mkdirFn = mkdirSync,
   writeFileFn = writeFileSync,
 }) {
@@ -402,6 +441,10 @@ export function writeRunnerReceipt({
     maxConcurrentNode,
     nodeVersion,
     nodeVersionWarning,
+    startFreeMb,
+    minFreeMbSampled,
+    concurrency,
+    serialFamilyConcurrency,
   });
   const path = join(dir, RUNNER_RECEIPT_FILENAME);
   writeFileFn(path, JSON.stringify(receipt, null, 2) + "\n", "utf8");
@@ -509,6 +552,10 @@ export function writeNumberedRunnerReceipt({
   maxConcurrentNode,
   nodeVersion,
   nodeVersionWarning,
+  startFreeMb,
+  minFreeMbSampled,
+  concurrency,
+  serialFamilyConcurrency,
   writeFileFn = writeFileSync,
 }) {
   const receipt = buildRunnerReceipt({
@@ -520,6 +567,10 @@ export function writeNumberedRunnerReceipt({
     maxConcurrentNode,
     nodeVersion,
     nodeVersionWarning,
+    startFreeMb,
+    minFreeMbSampled,
+    concurrency,
+    serialFamilyConcurrency,
   });
   writeFileFn(receiptPath, JSON.stringify(receipt, null, 2) + "\n", "utf8");
   return { path: receiptPath, receipt };

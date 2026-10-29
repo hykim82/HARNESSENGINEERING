@@ -6,11 +6,17 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 import {
+  AUTO_CONCURRENCY_LOW_MEM_THRESHOLD_MB,
+  SERIAL_FAMILY_CONCURRENCY,
   TEST_DIRS,
+  assertSerialFamilyPartition,
   collectTestFiles,
   formatBanner,
+  loadSerialFamilyList,
+  resolveAutoConcurrency,
   resolveNodeVersionWarning,
   runIsolatedSuite,
+  splitSerialFamily,
 } from "./isolated-suite-runner.mjs";
 
 // HYK-301: these tests spawn the real CLI entry point as a child process --
@@ -243,6 +249,8 @@ test("runIsolatedSuite: clones from repoRoot (not cwd), runs node --test in the 
   const exitCode = runIsolatedSuite({
     startSampler: () => null,
     stopSampler: () => null,
+    startFreeMemSamplerFn: () => null,
+    stopFreeMemSamplerFn: () => null,
     execFile,
     spawn,
     log: (m) => logs.push(m),
@@ -273,6 +281,8 @@ test("runIsolatedSuite: a dirty source repo's uncommitted changes surface in the
   runIsolatedSuite({
     startSampler: () => null,
     stopSampler: () => null,
+    startFreeMemSamplerFn: () => null,
+    stopFreeMemSamplerFn: () => null,
     execFile,
     spawn,
     log: (m) => logs.push(m),
@@ -312,6 +322,8 @@ test("runIsolatedSuite: a RED run (non-zero exit) still gets a receipt written -
   const exitCode = runIsolatedSuite({
     startSampler: () => null,
     stopSampler: () => null,
+    startFreeMemSamplerFn: () => null,
+    stopFreeMemSamplerFn: () => null,
     execFile: execFileForReceiptTests(),
     spawn: () => ({ status: 1 }),
     log: () => {},
@@ -334,6 +346,8 @@ test("runIsolatedSuite: receipt's headCommit is the runner's OWN `git rev-parse 
   runIsolatedSuite({
     startSampler: () => null,
     stopSampler: () => null,
+    startFreeMemSamplerFn: () => null,
+    stopFreeMemSamplerFn: () => null,
     execFile: execFileForReceiptTests(),
     spawn: () => ({ status: 0 }),
     log: () => {},
@@ -356,6 +370,8 @@ test("runIsolatedSuite: tap summary counts are parsed from the tap-reporter dest
   runIsolatedSuite({
     startSampler: () => null,
     stopSampler: () => null,
+    startFreeMemSamplerFn: () => null,
+    stopFreeMemSamplerFn: () => null,
     execFile: execFileForReceiptTests(),
     spawn: () => ({ status: 1 }),
     log: () => {},
@@ -380,6 +396,8 @@ test("runIsolatedSuite: an unreadable tap file degrades to null counts (not a cr
   const exitCode = runIsolatedSuite({
     startSampler: () => null,
     stopSampler: () => null,
+    startFreeMemSamplerFn: () => null,
+    stopFreeMemSamplerFn: () => null,
     execFile: execFileForReceiptTests(),
     spawn: () => ({ status: 0 }),
     log: (m) => logs.push(m),
@@ -429,6 +447,8 @@ test("runIsolatedSuite: HYK-209 R7c real-repro bytes + an ambiguous Windows forc
   const exitCode = runIsolatedSuite({
     startSampler: () => null,
     stopSampler: () => null,
+    startFreeMemSamplerFn: () => null,
+    stopFreeMemSamplerFn: () => null,
     execFile: execFileForReceiptTests(),
     // The real ambiguous Windows forced-kill shape: no signal, no error,
     // a non-zero status that is not a real node --test exit code
@@ -484,6 +504,8 @@ test("runIsolatedSuite: HYK-209 2R P1-2 K2 (REVIEW-r1.md ⓑ real TAP bytes, dur
   const exitCode = runIsolatedSuite({
     startSampler: () => null,
     stopSampler: () => null,
+    startFreeMemSamplerFn: () => null,
+    stopFreeMemSamplerFn: () => null,
     execFile: execFileForReceiptTests(),
     spawn: () => ({ status: 1 }),
     log: () => {},
@@ -514,6 +536,8 @@ test("runIsolatedSuite: HYK-209 2R P1-2 K5 (REVIEW-r1.md ⓑ real TAP bytes, for
   const exitCode = runIsolatedSuite({
     startSampler: () => null,
     stopSampler: () => null,
+    startFreeMemSamplerFn: () => null,
+    stopFreeMemSamplerFn: () => null,
     execFile: execFileForReceiptTests(),
     spawn: () => ({ status: 1 }),
     log: () => {},
@@ -560,6 +584,8 @@ test("runIsolatedSuite: HYK-464 2R P2-6 -- a real Node-major MISMATCH lands on t
   const exitCode = runIsolatedSuite({
     startSampler: () => null,
     stopSampler: () => null,
+    startFreeMemSamplerFn: () => null,
+    stopFreeMemSamplerFn: () => null,
     execFile: execFileForReceiptTests(),
     spawn: () => ({ status: 0 }),
     log: (m) => logs.push(m),
@@ -603,6 +629,8 @@ test("runIsolatedSuite: matching Node majors -> no warning logged, receipt's nod
   runIsolatedSuite({
     startSampler: () => null,
     stopSampler: () => null,
+    startFreeMemSamplerFn: () => null,
+    stopFreeMemSamplerFn: () => null,
     execFile: execFileForReceiptTests(),
     spawn: () => ({ status: 0 }),
     log: (m) => logs.push(m),
@@ -629,6 +657,8 @@ test("runIsolatedSuite: engines.node unreadable (default readPackageJsonFn again
   runIsolatedSuite({
     startSampler: () => null,
     stopSampler: () => null,
+    startFreeMemSamplerFn: () => null,
+    stopFreeMemSamplerFn: () => null,
     execFile: execFileForReceiptTests(),
     spawn: () => ({ status: 0 }),
     log: (m) => logs.push(m),
@@ -649,6 +679,8 @@ test("runIsolatedSuite: a receipt-write failure is swallowed (logged, not thrown
   const exitCode = runIsolatedSuite({
     startSampler: () => null,
     stopSampler: () => null,
+    startFreeMemSamplerFn: () => null,
+    stopFreeMemSamplerFn: () => null,
     execFile: execFileForReceiptTests(),
     spawn: () => ({ status: 3 }),
     log: (m) => logs.push(m),
@@ -673,6 +705,8 @@ test("runIsolatedSuite: M1 mutation guard -- a real Node-major MISMATCH alongsid
   const exitCode = runIsolatedSuite({
     startSampler: () => null,
     stopSampler: () => null,
+    startFreeMemSamplerFn: () => null,
+    stopFreeMemSamplerFn: () => null,
     execFile: execFileForReceiptTests(),
     spawn: () => ({ status: 5 }),
     log: () => {},
@@ -695,6 +729,8 @@ test("runIsolatedSuite: M2 mutation guard -- the in-clone node --test child is s
   runIsolatedSuite({
     startSampler: () => null,
     stopSampler: () => null,
+    startFreeMemSamplerFn: () => null,
+    stopFreeMemSamplerFn: () => null,
     execFile: execFileForReceiptTests(),
     spawn: (cmd) => {
       capturedCmd = cmd;
@@ -728,6 +764,8 @@ test("runIsolatedSuite: HYK-464 2R P2-6 -- when root resolution itself throws (n
       runIsolatedSuite({
         startSampler: () => null,
         stopSampler: () => null,
+        startFreeMemSamplerFn: () => null,
+        stopFreeMemSamplerFn: () => null,
         execFile,
         spawn: () => {
           throw new Error("must not be reached");
@@ -763,6 +801,8 @@ test("runIsolatedSuite: a fail-closed collectFiles throw propagates out (never s
       runIsolatedSuite({
         startSampler: () => null,
         stopSampler: () => null,
+        startFreeMemSamplerFn: () => null,
+        stopFreeMemSamplerFn: () => null,
         execFile,
         spawn,
         log: () => {},
@@ -824,4 +864,488 @@ test("CLI: --repo-root with no following value is rejected, not silently undefin
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /unrecognized argument/);
   assert.match(result.stderr, /--repo-root/);
+});
+
+// ---------------------------------------------------------------------------
+// HYK-439 §2 ⓐ: resolveAutoConcurrency -- the four required unit cells
+// (coder-task.md §2 ⓐ "단위 칸 4(2,900 -> 1, 3,100 -> 2, 측정 실패 -> 1,
+// 명시 인자 우선)") plus a few mutation guards. "명시 인자 우선" itself is
+// covered further down against resolveConcurrencyValue's own wiring
+// (runIsolatedSuite never even calls this seam when concurrency is given).
+// ---------------------------------------------------------------------------
+function mbToBytes(mb) {
+  return mb * 1024 * 1024;
+}
+
+test("resolveAutoConcurrency: avg free 2900MB (below the 3000MB threshold) -> concurrency 1", () => {
+  const result = resolveAutoConcurrency({
+    freememFn: () => mbToBytes(2900),
+    sleepFn: () => {},
+  });
+  assert.equal(result.concurrency, 1);
+  assert.deepEqual(result.startFreeMb, [2900, 2900]);
+  assert.match(result.reason, /auto-select/);
+  assert.equal(
+    AUTO_CONCURRENCY_LOW_MEM_THRESHOLD_MB,
+    3000,
+    "threshold constant must actually be 3000 for this cell to mean anything",
+  );
+});
+
+test("resolveAutoConcurrency: avg free 3100MB (above the 3000MB threshold) -> concurrency 2", () => {
+  const result = resolveAutoConcurrency({
+    freememFn: () => mbToBytes(3100),
+    sleepFn: () => {},
+  });
+  assert.equal(result.concurrency, 2);
+  assert.deepEqual(result.startFreeMb, [3100, 3100]);
+});
+
+test("resolveAutoConcurrency: exactly AT the 3000MB threshold resolves to 2 -- the comparison is '< threshold -> 1', never '<= threshold -> 1'", () => {
+  const result = resolveAutoConcurrency({
+    freememFn: () => mbToBytes(3000),
+    sleepFn: () => {},
+  });
+  assert.equal(result.concurrency, 2);
+});
+
+test("resolveAutoConcurrency: a freememFn failure (throws) resolves to 1 (conservative), never the old cpu-count default, with a reason naming the failure", () => {
+  const result = resolveAutoConcurrency({
+    freememFn: () => {
+      throw new Error("boom");
+    },
+    sleepFn: () => {},
+  });
+  assert.equal(result.concurrency, 1);
+  assert.deepEqual(result.startFreeMb, []);
+  assert.match(result.reason, /sampling failed/);
+  assert.match(result.reason, /boom/);
+});
+
+test("resolveAutoConcurrency: a sleepFn failure between samples also resolves to 1, never 2 (측정 실패 cell, sleep variant)", () => {
+  const result = resolveAutoConcurrency({
+    freememFn: () => mbToBytes(4000),
+    sleepFn: () => {
+      throw new Error("sleep boom");
+    },
+  });
+  assert.equal(result.concurrency, 1);
+  assert.match(result.reason, /sampling failed/);
+});
+
+test("resolveAutoConcurrency: a non-finite freemem reading (e.g. NaN) is a sampling failure, never coerced into a real average", () => {
+  const result = resolveAutoConcurrency({
+    freememFn: () => NaN,
+    sleepFn: () => {},
+  });
+  assert.equal(result.concurrency, 1);
+  assert.match(result.reason, /sampling failed/);
+});
+
+test("resolveAutoConcurrency: samples exactly 2 times (the real default), sleeping ONLY between them -- not before the first sample, not after the last", () => {
+  let sleeps = 0;
+  let freemems = 0;
+  resolveAutoConcurrency({
+    freememFn: () => {
+      freemems++;
+      return mbToBytes(4000);
+    },
+    sleepFn: () => {
+      sleeps++;
+    },
+  });
+  assert.equal(freemems, 2);
+  assert.equal(sleeps, 1);
+});
+
+// ---------------------------------------------------------------------------
+// HYK-439 §2 ⓒ: loadSerialFamilyList + splitSerialFamily + assertSerial
+// FamilyPartition -- the "기계 검사 칸" fail-closed mutation table (목록에
+// 없는 이름 추가 · 한 파일을 두 패스 모두에 넣기 · 한 파일 누락), plus the
+// REAL list file's own content (empirically confirmed family, coder.md §1).
+// ---------------------------------------------------------------------------
+test("loadSerialFamilyList: malformed JSON throws, fail-closed", () => {
+  assert.throws(
+    () => loadSerialFamilyList({ readFileFn: () => "not json" }),
+    /not valid JSON/,
+  );
+});
+
+test("loadSerialFamilyList: a non-array value throws, fail-closed", () => {
+  assert.throws(
+    () => loadSerialFamilyList({ readFileFn: () => JSON.stringify({ a: 1 }) }),
+    /non-empty JSON array/,
+  );
+});
+
+test("loadSerialFamilyList: an empty array throws, fail-closed (an empty list would silently disable isolation with no signal)", () => {
+  assert.throws(
+    () => loadSerialFamilyList({ readFileFn: () => "[]" }),
+    /non-empty JSON array/,
+  );
+});
+
+test("loadSerialFamilyList: a non-string/empty-string entry throws, fail-closed", () => {
+  assert.throws(
+    () =>
+      loadSerialFamilyList({
+        readFileFn: () => JSON.stringify(["a.test.mjs", 5]),
+      }),
+    /non-empty path strings/,
+  );
+  assert.throws(
+    () =>
+      loadSerialFamilyList({
+        readFileFn: () => JSON.stringify(["a.test.mjs", ""]),
+      }),
+    /non-empty path strings/,
+  );
+});
+
+test("loadSerialFamilyList: the REAL runner-serial-family.json names install-net-closure.test.mjs and install-g1-adapter-list.test.mjs -- the two files empirically confirmed to be the memory-heavy install-target spawnSync family (HYK-439 1R coder.md §1: standalone free-memory drop ~63MB and ~547MB respectively), excluding install-copylist-closure.test.mjs (confirmed negligible ~13MB drop -- pure static-import analysis, no real child spawnSync)", () => {
+  const list = loadSerialFamilyList();
+  assert.deepEqual(list, [
+    "templates/harness-init/install-net-closure.test.mjs",
+    "templates/harness-init/install-g1-adapter-list.test.mjs",
+  ]);
+});
+
+test("splitSerialFamily: a normal split puts listed files in the family pass and everything else in the main pass, in their original relative order", () => {
+  const { mainFiles, familyFiles } = splitSerialFamily({
+    files: ["a.test.mjs", "b.test.mjs", "c.test.mjs"],
+    familyList: ["b.test.mjs"],
+  });
+  assert.deepEqual(mainFiles, ["a.test.mjs", "c.test.mjs"]);
+  assert.deepEqual(familyFiles, ["b.test.mjs"]);
+});
+
+test("splitSerialFamily: a Windows backslash-joined collected path still matches a forward-slash list entry (normalizeRelPath)", () => {
+  const { mainFiles, familyFiles } = splitSerialFamily({
+    files: [
+      "templates\\harness-init\\install-net-closure.test.mjs",
+      "scripts\\check\\a.test.mjs",
+    ],
+    familyList: ["templates/harness-init/install-net-closure.test.mjs"],
+  });
+  assert.deepEqual(familyFiles, [
+    "templates\\harness-init\\install-net-closure.test.mjs",
+  ]);
+  assert.deepEqual(mainFiles, ["scripts\\check\\a.test.mjs"]);
+});
+
+test("splitSerialFamily: §2 ⓒ mutation table row 1 -- a list entry naming a file that was not collected this run is fail-closed, never silently ignored", () => {
+  assert.throws(
+    () =>
+      splitSerialFamily({
+        files: ["a.test.mjs"],
+        familyList: ["ghost.test.mjs"],
+      }),
+    /no such test file was collected/,
+  );
+});
+
+test("splitSerialFamily: a duplicated list entry is fail-closed", () => {
+  assert.throws(
+    () =>
+      splitSerialFamily({
+        files: ["a.test.mjs"],
+        familyList: ["a.test.mjs", "a.test.mjs"],
+      }),
+    /more than once/,
+  );
+});
+
+test("assertSerialFamilyPartition: a valid partition (every collected file in exactly one pass) does not throw", () => {
+  assert.doesNotThrow(() =>
+    assertSerialFamilyPartition({
+      allFiles: ["a.test.mjs", "b.test.mjs"],
+      mainFiles: ["a.test.mjs"],
+      familyFiles: ["b.test.mjs"],
+    }),
+  );
+});
+
+test("assertSerialFamilyPartition: §2 ⓒ mutation table row 2 -- a file placed in BOTH passes is fail-closed (double-run), never silently allowed", () => {
+  assert.throws(
+    () =>
+      assertSerialFamilyPartition({
+        allFiles: ["a.test.mjs", "b.test.mjs"],
+        mainFiles: ["a.test.mjs", "b.test.mjs"],
+        familyFiles: ["b.test.mjs"],
+      }),
+    /appears in BOTH passes/,
+  );
+});
+
+test("assertSerialFamilyPartition: §2 ⓒ mutation table row 3 -- a file missing from BOTH passes is fail-closed (silent drop), never silently allowed", () => {
+  assert.throws(
+    () =>
+      assertSerialFamilyPartition({
+        allFiles: ["a.test.mjs", "b.test.mjs"],
+        mainFiles: ["a.test.mjs"],
+        familyFiles: [],
+      }),
+    /missing from BOTH passes/,
+  );
+});
+
+test("assertSerialFamilyPartition: a pass referencing a file outside the collected set is fail-closed", () => {
+  assert.throws(
+    () =>
+      assertSerialFamilyPartition({
+        allFiles: ["a.test.mjs"],
+        mainFiles: ["a.test.mjs", "ghost.test.mjs"],
+        familyFiles: [],
+      }),
+    /not one of this run's collected test files/,
+  );
+});
+
+// ---------------------------------------------------------------------------
+// HYK-439 §2 ⓐ/ⓑ/ⓓ: full-pipeline wiring through runIsolatedSuite --
+// "명시 인자 우선", the 1b_exec_line dry runs (seam-injected 2900/3100MB),
+// and the serial-family two-pass combine (happy path + a RED family pass).
+// ---------------------------------------------------------------------------
+function execFileForTwoPassTests() {
+  return (cmd, args) => {
+    if (args[0] === "rev-parse" && args[1] === "--show-toplevel")
+      return "/src\n";
+    if (args[0] === "rev-parse" && args[1] === "HEAD") return "deadbeef\n";
+    if (args[0] === "status") return "";
+    if (args[0] === "clone") return "";
+    throw new Error(`unexpected execFile: ${cmd} ${args.join(" ")}`);
+  };
+}
+
+test("runIsolatedSuite: HYK-439 §2 ⓐ -- an explicit --concurrency always wins over useAutoConcurrency, and never even calls the auto-select seam (zero measurement cost paid)", () => {
+  let autoSelectCalled = false;
+  const logs = [];
+  const exitCode = runIsolatedSuite({
+    startSampler: () => null,
+    stopSampler: () => null,
+    startFreeMemSamplerFn: () => null,
+    stopFreeMemSamplerFn: () => null,
+    execFile: execFileForTwoPassTests(),
+    spawn: () => ({ status: 0 }),
+    log: (m) => logs.push(m),
+    collectFiles: () => [],
+    readFile: throwingReadFile,
+    writeReceipt: noopWriteReceipt,
+    concurrency: 7,
+    useAutoConcurrency: true,
+    resolveAutoConcurrencyFn: () => {
+      autoSelectCalled = true;
+      return { concurrency: 1, startFreeMb: [], reason: "must not be used" };
+    },
+  });
+  assert.equal(exitCode, 0);
+  assert.equal(autoSelectCalled, false);
+  assert.match(logs[0], /test-concurrency=7 /);
+});
+
+test("runIsolatedSuite: HYK-439 §2 ⓐ 1b_exec_line -- a dry run with the auto-select seam injected at a 2900MB start-free average picks concurrency 1, and the chosen value/reason/samples ride BOTH the first log line and the receipt's new memory fields", () => {
+  const logs = [];
+  const receipts = [];
+  const exitCode = runIsolatedSuite({
+    startSampler: () => null,
+    stopSampler: () => null,
+    startFreeMemSamplerFn: () => null,
+    stopFreeMemSamplerFn: () => null,
+    execFile: execFileForTwoPassTests(),
+    spawn: () => ({ status: 0 }),
+    log: (m) => logs.push(m),
+    collectFiles: () => [],
+    readFile: throwingReadFile,
+    writeReceipt: (payload) => {
+      receipts.push(payload);
+      return { path: "(stubbed)", receipt: {} };
+    },
+    useAutoConcurrency: true,
+    resolveAutoConcurrencyFn: () =>
+      resolveAutoConcurrency({
+        freememFn: () => mbToBytes(2900),
+        sleepFn: () => {},
+      }),
+  });
+  assert.equal(exitCode, 0);
+  assert.match(logs[0], /test-concurrency=1 /);
+  assert.match(logs[0], /auto-select: start free avg 2900/);
+  assert.deepEqual(receipts[0].startFreeMb, [2900, 2900]);
+  assert.equal(receipts[0].concurrency, 1);
+});
+
+test("runIsolatedSuite: HYK-439 §2 ⓐ 1b_exec_line -- the same dry run at a 3100MB start-free average picks concurrency 2", () => {
+  const logs = [];
+  const receipts = [];
+  const exitCode = runIsolatedSuite({
+    startSampler: () => null,
+    stopSampler: () => null,
+    startFreeMemSamplerFn: () => null,
+    stopFreeMemSamplerFn: () => null,
+    execFile: execFileForTwoPassTests(),
+    spawn: () => ({ status: 0 }),
+    log: (m) => logs.push(m),
+    collectFiles: () => [],
+    readFile: throwingReadFile,
+    writeReceipt: (payload) => {
+      receipts.push(payload);
+      return { path: "(stubbed)", receipt: {} };
+    },
+    useAutoConcurrency: true,
+    resolveAutoConcurrencyFn: () =>
+      resolveAutoConcurrency({
+        freememFn: () => mbToBytes(3100),
+        sleepFn: () => {},
+      }),
+  });
+  assert.equal(exitCode, 0);
+  assert.match(logs[0], /test-concurrency=2 /);
+  assert.match(logs[0], /auto-select: start free avg 3100/);
+  assert.deepEqual(receipts[0].startFreeMb, [3100, 3100]);
+  assert.equal(receipts[0].concurrency, 2);
+});
+
+test("runIsolatedSuite: HYK-439 §2 ⓐ -- root resolution failing never pays the real auto-select measurement cost (logFailureBanner skips it), and still logs a banner before the throw", () => {
+  const logs = [];
+  let autoSelectCalled = false;
+  assert.throws(
+    () =>
+      runIsolatedSuite({
+        startSampler: () => null,
+        stopSampler: () => null,
+        startFreeMemSamplerFn: () => null,
+        stopFreeMemSamplerFn: () => null,
+        execFile: () => {
+          throw new Error("fatal: not a git repository");
+        },
+        spawn: () => {
+          throw new Error("must not be reached");
+        },
+        log: (m) => logs.push(m),
+        collectFiles: () => {
+          throw new Error("must not be reached");
+        },
+        useAutoConcurrency: true,
+        resolveAutoConcurrencyFn: () => {
+          autoSelectCalled = true;
+          return {
+            concurrency: 1,
+            startFreeMb: [],
+            reason: "must not be used",
+          };
+        },
+      }),
+    /not a git repository/,
+  );
+  assert.equal(autoSelectCalled, false);
+  assert.equal(logs.length, 1);
+  assert.match(logs[0], /auto-select: skipped/);
+});
+
+test("runIsolatedSuite: HYK-439 §2 ⓑ/ⓓ -- a serial-family list splits files into two passes (main at the resolved concurrency, family always at concurrency 1), combines both passes' counts, and the receipt carries concurrency/serial_family_concurrency", () => {
+  const spawnCalls = [];
+  const spawn = (cmd, args) => {
+    spawnCalls.push(args);
+    return { status: 0 };
+  };
+  const readFile = (path) => {
+    if (String(path).endsWith("-serial.tap")) {
+      return "TAP version 13\n# tests 2\n# pass 2\n# fail 0\n# skipped 0\n";
+    }
+    return "TAP version 13\n# tests 5\n# pass 5\n# fail 0\n# skipped 0\n";
+  };
+  const receipts = [];
+  const exitCode = runIsolatedSuite({
+    startSampler: () => null,
+    stopSampler: () => null,
+    startFreeMemSamplerFn: () => null,
+    stopFreeMemSamplerFn: () => null,
+    execFile: execFileForTwoPassTests(),
+    spawn,
+    log: () => {},
+    collectFiles: () => ["a.test.mjs", "family.test.mjs"],
+    serialFamilyList: ["family.test.mjs"],
+    concurrency: 4,
+    readFile,
+    writeReceipt: (payload) => {
+      receipts.push(payload);
+      return { path: "(stubbed)", receipt: {} };
+    },
+  });
+  assert.equal(exitCode, 0);
+  assert.equal(spawnCalls.length, 2);
+  assert.match(spawnCalls[0].join(" "), /--test-concurrency=4/);
+  assert.ok(spawnCalls[0].includes("a.test.mjs"));
+  assert.ok(!spawnCalls[0].includes("family.test.mjs"));
+  assert.match(spawnCalls[1].join(" "), /--test-concurrency=1/);
+  assert.ok(spawnCalls[1].includes("family.test.mjs"));
+  assert.ok(!spawnCalls[1].includes("a.test.mjs"));
+  assert.deepEqual(receipts[0].counts, { tests: 7, pass: 7, fail: 0, skip: 0 });
+  assert.equal(receipts[0].concurrency, 4);
+  assert.equal(receipts[0].serialFamilyConcurrency, SERIAL_FAMILY_CONCURRENCY);
+});
+
+test("runIsolatedSuite: HYK-439 §2 ⓑ -- a RED serial-family pass makes the WHOLE run's exit code/status reflect it, even when the main pass itself is green (worse status wins, never hidden)", () => {
+  let call = 0;
+  const spawn = () => {
+    call++;
+    // first call = main pass (green), second = family pass (real failure).
+    return call === 1 ? { status: 0 } : { status: 1 };
+  };
+  const readFile = (path) => {
+    if (String(path).endsWith("-serial.tap")) {
+      return "TAP version 13\n# tests 2\n# pass 1\n# fail 1\n# skipped 0\n";
+    }
+    return "TAP version 13\n# tests 5\n# pass 5\n# fail 0\n# skipped 0\n";
+  };
+  const receipts = [];
+  const exitCode = runIsolatedSuite({
+    startSampler: () => null,
+    stopSampler: () => null,
+    startFreeMemSamplerFn: () => null,
+    stopFreeMemSamplerFn: () => null,
+    execFile: execFileForTwoPassTests(),
+    spawn,
+    log: () => {},
+    collectFiles: () => ["a.test.mjs", "family.test.mjs"],
+    serialFamilyList: ["family.test.mjs"],
+    concurrency: 4,
+    readFile,
+    writeReceipt: (payload) => {
+      receipts.push(payload);
+      return { path: "(stubbed)", receipt: {} };
+    },
+  });
+  assert.equal(exitCode, 1);
+  assert.equal(receipts[0].runnerStatus, "TESTS_FAILED");
+  assert.deepEqual(receipts[0].counts, { tests: 7, pass: 6, fail: 1, skip: 0 });
+});
+
+test("runIsolatedSuite: no serialFamilyList given -- byte-for-byte the legacy single-pass behavior (no second spawn call, serial_family_concurrency null)", () => {
+  const spawnCalls = [];
+  const spawn = (cmd, args) => {
+    spawnCalls.push(args);
+    return { status: 0 };
+  };
+  const receipts = [];
+  const exitCode = runIsolatedSuite({
+    startSampler: () => null,
+    stopSampler: () => null,
+    startFreeMemSamplerFn: () => null,
+    stopFreeMemSamplerFn: () => null,
+    execFile: execFileForTwoPassTests(),
+    spawn,
+    log: () => {},
+    collectFiles: () => ["a.test.mjs"],
+    concurrency: 4,
+    readFile: throwingReadFile,
+    writeReceipt: (payload) => {
+      receipts.push(payload);
+      return { path: "(stubbed)", receipt: {} };
+    },
+  });
+  assert.equal(exitCode, 0);
+  assert.equal(spawnCalls.length, 1);
+  assert.equal(receipts[0].serialFamilyConcurrency, null);
+  assert.equal(receipts[0].startFreeMb, null);
 });
