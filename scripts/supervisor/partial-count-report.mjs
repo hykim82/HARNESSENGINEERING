@@ -65,6 +65,8 @@ import {
   computeCoverageGaps,
   parseKstTimestampMs,
   renderOutboxAuxNote,
+  UNCOUNTED_EXAMPLES_V1,
+  UNCOUNTED_EXAMPLES_V2,
 } from "./partial-count-core.mjs";
 
 export const DEFAULT_DISPATCH_RECEIPTS_PATH =
@@ -992,6 +994,12 @@ function resolveOutboxResult({
 // 보고 조립 -- runPartialCountOnce에서 떼어낸 것(eslint max-lines-per-
 // function 예산). outboxResult가 null이면 auxNote는 undefined가 되고
 // buildPartialCountReport의 기본 문면이 그대로 쓰인다(§2 ⓐ 회귀 0).
+//
+// HYK-255-outbox-aux-1-r2 (coder-task.md §2 ⓐ) -- uncountedExamples 선택도
+// outboxResult 존재 여부(= --outbox-dir가 실제로 전달돼 수집기가 결선된
+// 실행인지, 성공/실패 무관)로 갈린다. auxNote와 정확히 같은 조건식을
+// 쓴다 -- 두 문면이 "결선 여부"에 대해 다른 답을 내면(하나는 결선,
+// 하나는 미결선) 보고서 자체가 자기모순이 된다.
 function assemblePartialCountReportText({
   now,
   windowStartMs,
@@ -1011,6 +1019,9 @@ function assemblePartialCountReportText({
     missingReceipts: deriveMissingReceipts(deliveredResult, consumedResult),
     gate4,
     auxNote: outboxResult ? renderOutboxAuxNote(outboxResult) : undefined,
+    uncountedExamples: outboxResult
+      ? UNCOUNTED_EXAMPLES_V2
+      : UNCOUNTED_EXAMPLES_V1,
     // ⛔독립 ㄴ 수집기가 없는 이 라운드에 이 배열을 채우는 생산 경로는
     // 존재하지 않는다 -- 항상 [](= «확인 0건» 렌더링). 채우려면 독립적인
     // ㄴ 양성 신호원이 먼저 있어야 한다(PM 권고 «열어 둔다» 그대로).

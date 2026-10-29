@@ -20,7 +20,8 @@ import {
   renderOutboxAuxNote,
   formatPartialCountSection,
   GATE_TYPES,
-  UNCOUNTED_EXAMPLES,
+  UNCOUNTED_EXAMPLES_V1,
+  UNCOUNTED_EXAMPLES_V2,
 } from "./partial-count-core.mjs";
 
 // 실물 watch.log 한 줄과 같은 형식(reach-report.test.mjs의 관례 재사용).
@@ -184,12 +185,35 @@ test("필수 문면 4·5: ㄱ/ㄴ/보조 칸 분리 · 분모 · 커버리지 1/
   assert.ok(text.includes("- 미커버 ㄱ 유형: 1 다음 작업 선택"));
   assert.ok(text.includes("Linear Done은 미커버"));
   // ㄴ은 열린 집합 -- 전수 비율 대신 버전 붙은 예시 목록 개수.
+  // HYK-255-outbox-aux-1-r2 -- uncountedExamples 인자를 안 준 호출(이
+  // baseInput())은 "미결선"과 같은 뜻이라 기본값 v1(8)이 나온다(변이
+  // ⑴ "조건을 항상 v2로" 고정하면 이 단언이 RED).
+  assert.equal(UNCOUNTED_EXAMPLES_V1.items.length, 8);
+  assert.equal(UNCOUNTED_EXAMPLES_V1.version, "uncounted-examples/v1");
   assert.ok(
     text.includes(
-      `- 알려진 미계수 예시: ${UNCOUNTED_EXAMPLES.items.length}개(${UNCOUNTED_EXAMPLES.version})`,
+      `- 알려진 미계수 예시: ${UNCOUNTED_EXAMPLES_V1.items.length}개(${UNCOUNTED_EXAMPLES_V1.version})`,
     ),
   );
+  assert.ok(
+    text.includes("통역 보내는함 문서(ORCH-writeable -- 보조 칸에서도 제외)"),
+  );
   assert.ok(text.includes("전체 유형의 분모가 아님"));
+
+  // 호출자가 uncountedExamples: UNCOUNTED_EXAMPLES_V2를 명시하면(=
+  // 보내는함 수집기가 결선된 실행) v2(7)로 바뀌고 8번 항목은 빠진다
+  // (변이 ⑵ "조건을 항상 v1로" 고정하면 이 단언이 RED).
+  const wired = buildPartialCountReport(
+    baseInput({ uncountedExamples: UNCOUNTED_EXAMPLES_V2 }),
+  );
+  assert.ok(
+    wired.includes(
+      `- 알려진 미계수 예시: ${UNCOUNTED_EXAMPLES_V2.items.length}개(${UNCOUNTED_EXAMPLES_V2.version})`,
+    ),
+  );
+  assert.ok(
+    !wired.includes("통역 보내는함 문서(ORCH-writeable -- 보조 칸에서도 제외)"),
+  );
   // ㄱ-4 확인 사건에는 결속 근거(PR·승인자)가 붙는다.
   assert.ok(text.includes("PR#152 승인자 hykim82"));
   // 관측 공백은 «정상 측정 기간이 아니다» 경고와 함께(비타협 5) --
@@ -326,23 +350,37 @@ test("parseKstTimestampMs/formatKst: KST(UTC+9) 왕복이 맞고 파싱 불가�
 });
 
 // ---------------------------------------------------------------------------
-// HYK-255-outbox-aux-1 -- UNCOUNTED_EXAMPLES v1(8) -> v2(7) + 보조 관측
-// 렌더링(renderOutboxAuxNote, 순수 함수 -- 수집은 wire의 몫이라 여기서는
-// collectOutboxHeaderCounts 산출물 모양을 손으로 만들어 통과시킨다).
+// HYK-255-outbox-aux-1-r2 -- UNCOUNTED_EXAMPLES_V1(8)/V2(7) 조건부 공존 +
+// 보조 관측 렌더링(renderOutboxAuxNote, 순수 함수 -- 수집은 wire의 몫이라
+// 여기서는 collectOutboxHeaderCounts 산출물 모양을 손으로 만들어
+// 통과시킨다). 어느 판을 쓸지 고르는 것은 wire의 몫(§2 ⓐ) -- 여기는 두
+// 상수의 모양 자체만 고정한다.
 // ---------------------------------------------------------------------------
 
-test("UNCOUNTED_EXAMPLES: v1(8) -> v2(7), 빠진 항목은 «통역 보내는함 문서»뿐이고 1번(채팅 전체)은 그대로 남는다", () => {
-  assert.equal(UNCOUNTED_EXAMPLES.version, "uncounted-examples/v2");
-  assert.equal(UNCOUNTED_EXAMPLES.items.length, 7);
+test("UNCOUNTED_EXAMPLES_V1(8)/V2(7): V2는 V1에서 «통역 보내는함 문서»만 뺀 판이고, 1번(채팅 전체)은 둘 다 그대로 남는다", () => {
+  assert.equal(UNCOUNTED_EXAMPLES_V1.version, "uncounted-examples/v1");
+  assert.equal(UNCOUNTED_EXAMPLES_V1.items.length, 8);
   assert.ok(
-    UNCOUNTED_EXAMPLES.items.includes(
+    UNCOUNTED_EXAMPLES_V1.items.some((item) =>
+      item.includes("통역 보내는함 문서"),
+    ),
+  );
+  assert.equal(UNCOUNTED_EXAMPLES_V2.version, "uncounted-examples/v2");
+  assert.equal(UNCOUNTED_EXAMPLES_V2.items.length, 7);
+  assert.ok(
+    UNCOUNTED_EXAMPLES_V2.items.includes(
       "채팅으로 온 판정·교정·지시(기계 기록 0)",
     ),
   );
   assert.ok(
-    !UNCOUNTED_EXAMPLES.items.some((item) =>
+    !UNCOUNTED_EXAMPLES_V2.items.some((item) =>
       item.includes("통역 보내는함 문서"),
     ),
+  );
+  assert.ok(
+    UNCOUNTED_EXAMPLES_V1.items
+      .filter((item) => !item.includes("통역 보내는함 문서"))
+      .every((item, i) => UNCOUNTED_EXAMPLES_V2.items[i] === item),
   );
 });
 

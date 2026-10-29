@@ -1207,12 +1207,21 @@ test("runPartialCountOnce: outboxDir을 주면 보조 관측 줄과 수집기 �
       ),
     );
     assert.ok(text.includes("알려진 미계수 예시: 7개(uncounted-examples/v2)"));
+    // HYK-255-outbox-aux-1-r2 (coder-task.md §2 ⓔ 변이 ⑵ "조건을 항상
+    // v1로" 고정하면 이 단언이 RED) -- 결선된 실행에서는 8번 항목
+    // («통역 보내는함 문서»)의 전제가 이 라운드로 깨지므로 빠져 있어야
+    // 한다.
+    assert.ok(
+      !text.includes(
+        "통역 보내는함 문서(ORCH-writeable -- 보조 칸에서도 제외)",
+      ),
+    );
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
 
-test("runPartialCountOnce: outboxDir 미지정이면 기존 기본 auxNote가 그대로 나온다(회귀 0)", async () => {
+test("runPartialCountOnce: outboxDir 미지정이면 기존 기본 auxNote가 그대로 나온다(회귀 0) + 미계수 예시는 v1(8 · 8번 항목 문구 그대로)", async () => {
   const root = tmpDir("nc-pcw-outbox-default-");
   try {
     const fx = writeFixtures(root);
@@ -1233,6 +1242,20 @@ test("runPartialCountOnce: outboxDir 미지정이면 기존 기본 auxNote가 �
       ),
     );
     assert.ok(!result.reportText.includes("보내는함보조수집기"));
+    // HYK-255-outbox-aux-1-r2 (coder-task.md §2 ⓐ·ⓔ 변이 ⑴ "조건을 항상
+    // v2로" 고정하면 이 단언이 RED) -- 미결선 실행은 8번 항목(«통역
+    // 보내는함 문서»)의 전제가 여전히 참이라 v1(8 · 문구 바이트 그대로)
+    // 이어야 한다.
+    assert.ok(
+      result.reportText.includes(
+        "알려진 미계수 예시: 8개(uncounted-examples/v1)",
+      ),
+    );
+    assert.ok(
+      result.reportText.includes(
+        "통역 보내는함 문서(ORCH-writeable -- 보조 칸에서도 제외)",
+      ),
+    );
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

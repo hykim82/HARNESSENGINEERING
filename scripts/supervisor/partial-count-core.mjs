@@ -56,18 +56,20 @@ export const INDEPENDENT_ANCHOR_COVERED_GATE_NUMBERS = Object.freeze([4]);
 // 항목 출처 = 북극성-좌표.md §1-C ㄴ 예시 + 관제실 2026-08-14-HYK255-
 // 계수기-리서치.md §2(채팅 개입은 어떤 기계 기록에도 안 남는다는 실측).
 //
-// HYK-255-outbox-aux-1 -- v1(8항목) -> v2(7항목). 뺀 항목 =
-// «통역 보내는함 문서(ORCH-writeable -- 보조 칸에서도 제외)». 이 라운드가
-// collectOutboxHeaderCounts/renderOutboxAuxNote(아래 + partial-count-
-// report.mjs)로 그 문서의 머리줄을 «보조 칸»에 실제로 엮었으므로 "보조
-// 칸에서도 제외"라는 그 항목의 전제가 더 이상 사실이 아니다 -- 사실과
-// 모순된 예시를 목록에 남기지 않는다. ⛔1번 «채팅으로 온 판정·교정·지시
-// (기계 기록 0)»은 그대로 둔다 -- 이 보조 칸이 세는 것은 «파일로 남은»
-// 보내는함 문서뿐이고, 채팅으로만 오가고 어떤 파일에도 안 남는 판정·
-// 교정·지시는 여전히 전부 미계수다(1번이 덮는 범위가 8번보다 넓다 --
-// 보조 관측이 센 것과 여전히 미계수인 것은 겹치지 않는다).
-export const UNCOUNTED_EXAMPLES = Object.freeze({
-  version: "uncounted-examples/v2",
+// HYK-255-outbox-aux-1-r2 (coder-task.md §2 ⓐ) -- v1(8항목)/v2(7항목)
+// «조건부» 공존. 1R은 v2를 상수로 고정했었는데, REVIEW-r1 P2-1이 실제
+// 예약 감시(OrchStallWatch)에 `--outbox-dir`가 없어 그 실행에서는 8번
+// 항목(«통역 보내는함 문서(ORCH-writeable -- 보조 칸에서도 제외)»)의
+// 전제가 여전히 참이라고 지적했다 -- 전제가 참인 실행에서 그 항목을
+// 빼면 거짓 축소다. 그래서 선택은 ㄴ 분자처럼 **실행마다** 갈린다: wire
+// (partial-count-report.mjs)가 보내는함 수집기를 결선했을 때(outboxDir이
+// 주어져 collectOutboxHeaderCounts를 실제로 불렀을 때, 성공/실패 무관)
+// 만 v2를 쓰고, 미결선 실행은 v1을 그대로 쓴다 -- 이 파일은 I/O 0(§2
+// 원칙)이라 "결선 여부"를 스스로 알 수 없고, 어느 쪽을 쓸지는 호출자가
+// buildPartialCountReport의 uncountedExamples 인자로 고른다(기본값 =
+// v1 -- "인자를 안 준 호출자"는 "미결선"과 같은 뜻이라야 회귀 0).
+export const UNCOUNTED_EXAMPLES_V1 = Object.freeze({
+  version: "uncounted-examples/v1",
   items: Object.freeze([
     "채팅으로 온 판정·교정·지시(기계 기록 0)",
     "권한 확인창에 답해 주기",
@@ -76,7 +78,22 @@ export const UNCOUNTED_EXAMPLES = Object.freeze({
     "끝난 배달 기록을 손으로 닫기",
     "로그에만 뜬 경보를 사람이 발견해 알려 주기",
     "Linear 상태 전환(독립 앵커 비증명 -- 이 라운드 수집 제외)",
+    "통역 보내는함 문서(ORCH-writeable -- 보조 칸에서도 제외)",
   ]),
+});
+
+// v2 -- v1에서 8번(통역 보내는함 문서) 하나만 뺀 판. ⛔1번 «채팅으로 온
+// 판정·교정·지시(기계 기록 0)»은 그대로 둔다 -- 이 보조 칸이 세는 것은
+// «파일로 남은» 보내는함 문서뿐이고, 채팅으로만 오가고 어떤 파일에도
+// 안 남는 판정·교정·지시는 여전히 전부 미계수다(1번이 덮는 범위가
+// 8번보다 넓다 -- 보조 관측이 센 것과 여전히 미계수인 것은 겹치지 않는다).
+export const UNCOUNTED_EXAMPLES_V2 = Object.freeze({
+  version: "uncounted-examples/v2",
+  items: Object.freeze(
+    UNCOUNTED_EXAMPLES_V1.items.filter(
+      (item) => !item.includes("통역 보내는함 문서"),
+    ),
+  ),
 });
 
 // 무진행-재개 의심 구간에 쓰는 축 -- reach-report-core.mjs AXES 중 «무진행»
@@ -294,7 +311,7 @@ function buildGaSection(gate4, auxNote) {
   return lines;
 }
 
-function buildLnSection(confirmedLnEvents, suspected) {
+function buildLnSection(confirmedLnEvents, suspected, uncountedExamples) {
   const lines = ["ㄴ 계획 밖 개입:"];
   const confirmedCount = Array.isArray(confirmedLnEvents)
     ? confirmedLnEvents.length
@@ -317,8 +334,8 @@ function buildLnSection(confirmedLnEvents, suspected) {
   }
   lines.push("- 상한: 알 수 없음");
   lines.push(
-    `- 알려진 미계수 예시: ${UNCOUNTED_EXAMPLES.items.length}개(${UNCOUNTED_EXAMPLES.version}) — ` +
-      `${UNCOUNTED_EXAMPLES.items.join(" · ")}; 전체 유형의 분모가 아님`,
+    `- 알려진 미계수 예시: ${uncountedExamples.items.length}개(${uncountedExamples.version}) — ` +
+      `${uncountedExamples.items.join(" · ")}; 전체 유형의 분모가 아님`,
   );
   return lines;
 }
@@ -359,6 +376,11 @@ export function buildPartialCountReport({
   missingReceipts,
   gate4,
   auxNote = "미계수(이 라운드 결선된 보조 수집기 없음)",
+  // HYK-255-outbox-aux-1-r2 (coder-task.md §2 ⓐ) -- 기본값 = v1(8).
+  // "인자를 안 준 호출자"는 auxNote 기본값과 같은 뜻으로 "미결선"이라야
+  // 하므로, 미계수 예시 쪽 기본값도 반드시 v1과 짝을 맞춘다(짝이
+  // 어긋나면 미결선 실행에서 v2가 섞여 나오는 거짓 축소가 생긴다).
+  uncountedExamples = UNCOUNTED_EXAMPLES_V1,
   confirmedLnEvents = [],
   suspected,
   collectors = [],
@@ -386,7 +408,9 @@ export function buildPartialCountReport({
   lines.push("");
   lines.push(...buildGaSection(gate4, auxNote));
   lines.push("");
-  lines.push(...buildLnSection(confirmedLnEvents, suspected));
+  lines.push(
+    ...buildLnSection(confirmedLnEvents, suspected, uncountedExamples),
+  );
   lines.push("");
   lines.push(...buildHealthSection({ collectors, lastAliveMs, coverageGaps }));
   lines.push("");

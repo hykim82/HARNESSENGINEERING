@@ -2003,6 +2003,22 @@ export async function runPartialCountStep({
   return runPartialCountStepCore({ now, logPath, ...resolved });
 }
 
+// HYK-255-outbox-aux-1-r2 (coder-task.md §2 ⓑ · product_scope ⓓ) -- CLI
+// 인자 --outbox-dir를 runPartialCountStep 옵션으로 넘기는 "1곳"을 이름
+// 붙은 함수로 뽑는다. 이유 1줄: 이 전달 자체(invokedDirectly 블록의
+// 평범한 객체 리터럴)는 그 블록 전체(runWatchOnce -- ㄱ-4 GitHub 조회를
+// 타는 실제 CLI 종단 실행)를 돌려야만 깨지는지 알 수 있는데, 그 종단
+// 실행은 금지 축(api.github.com 0회)과 겹쳐 단위 시험이 못쟀다
+// (REVIEW-r1 P2-3 ⑽). 뽑아내면 그 종단 실행 없이 "전달 1곳"만 단위
+// 시험으로 고정할 수 있다(변이 10).
+export function buildPartialCountStepOptions({
+  repoRoot,
+  watchLogPath,
+  outboxDir,
+}) {
+  return { repoRoot, watchLogPath, outboxDir };
+}
+
 // HYK-481 (coder-task.md §2) -- "ledger는 있는데 lock이 없다"를 가리키는
 // 명시 사유 코드. "미설정"(admissionSweep 자체가 없음)과 값으로 구별
 // 되는 것이 이 라운드의 목적이므로 별도 상수로 뽑는다.
@@ -3254,11 +3270,11 @@ if (invokedDirectly) {
       watchDir,
       now: cliNow,
       logPath: result.logPath,
-      options: {
+      options: buildPartialCountStepOptions({
         repoRoot,
         watchLogPath: result.logPath,
         outboxDir,
-      },
+      }),
     });
   }
   // HYK-270 (coder-task.md §9-8 "전부 실행 출력으로 보여라") -- 한도
