@@ -74,30 +74,62 @@ export const TEST_DIRS = [
 ];
 
 // Fail-closed (HYK-208 2R, review finding): a directory this runner expects
-// to exist in the clone (TEST_DIRS) that can't be read is NOT skipped --
-// skipping would silently run fewer suites than the CI-canonical command
-// and still report green. An unreadable expected directory means the clone
-// is incomplete or the layout changed; either way this must be a loud
-// failure, not a quiet one.
+// to exist in the clone (TEST_DIRS) that can't be read is NOT silently
+// absorbed into a smaller (but still green) run. HYK-439 §2 ⓐ/ⓑ (installed
+// targets, e.g. an editor repo, never carry every TEST_DIRS folder -- an
+// install only copies ENFORCEMENT_CHECK_FILES-listed files, and a folder
+// with none of those in it is simply never created) splits this into two
+// cases, discriminated on the THROWN error's own `.code`, never on message
+// text (HYK-262: a one-character wording change must not silently flip a
+// judgment):
+//   - ENOENT (the folder itself is absent): loudly SKIPPED -- one fixed,
+//     greppable log line (mirrors splitSerialFamily's own
+//     "not present in this checkout, skipped" phrasing) and this directory
+//     contributes zero files, never a thrown error. This is the one case
+//     this round makes non-fatal.
+//   - anything else (e.g. EACCES/a permission failure): still fail-closed,
+//     byte-for-byte the prior throw -- an expected directory that exists
+//     but can't be read means the clone is broken/incomplete, not a normal
+//     installed-target fact, so this must stay a loud failure.
+// A SECOND fail-closed guard below covers the case no single per-directory
+// check can: every TEST_DIRS folder absent (presentCount === 0) would
+// otherwise collect zero files and report an empty, green run -- exactly
+// the "silently run fewer suites... and still report green" failure mode
+// this function's fail-closed posture exists to prevent in the first
+// place, just triggered by ALL folders being absent instead of one being
+// unreadable.
 export function collectTestFiles(
   root,
   dirs = TEST_DIRS,
-  { readdir = readdirSync } = {},
+  { readdir = readdirSync, log = () => {} } = {},
 ) {
   const files = [];
+  let presentCount = 0;
   for (const dir of dirs) {
     let entries;
     try {
       entries = readdir(join(root, dir));
     } catch (err) {
+      if (err.code === "ENOENT") {
+        log(
+          `[isolated-suite-runner] required test directory "${dir}" is not present in this checkout, skipped`,
+        );
+        continue;
+      }
       throw new Error(
         `isolated-suite-runner: required test directory unreadable in the clone: ${dir} (${err.message}) -- fail-closed, refusing to silently run fewer suites than the CI-canonical command`,
         { cause: err },
       );
     }
+    presentCount += 1;
     for (const name of entries.filter((f) => f.endsWith(".test.mjs")).sort()) {
       files.push(join(dir, name));
     }
+  }
+  if (dirs.length > 0 && presentCount === 0) {
+    throw new Error(
+      `isolated-suite-runner: none of the ${dirs.length} TEST_DIRS folder(s) are present in this checkout (${dirs.join(", ")}) -- fail-closed, refusing to silently run zero suites and still report green`,
+    );
   }
   return files;
 }
@@ -1624,7 +1656,11 @@ function cloneAndCollectFiles({
   log,
 }) {
   execFile("git", ["clone", "--quiet", root, cloneDir], { encoding: "utf8" });
-  const files = collectFiles(cloneDir);
+  // HYK-439 §2 ⓐ: forwards this run's real log() so collectTestFiles' own
+  // ENOENT-skip line (an absent TEST_DIRS folder, the normal installed-
+  // target shape) actually reaches the run's log/stdout, instead of
+  // silently going nowhere via collectTestFiles' own default no-op log.
+  const files = collectFiles(cloneDir, undefined, { log });
   log(formatBanner({ sha, dirty }));
   log(
     `[isolated-suite-runner] clone: ${cloneDir} (${files.length} test file(s))`,
