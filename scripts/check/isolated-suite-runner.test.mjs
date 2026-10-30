@@ -5,14 +5,15 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
+import { existsSync } from "node:fs";
 import {
   AUTO_CONCURRENCY_LOW_MEM_THRESHOLD_MB,
   SERIAL_FAMILY_CONCURRENCY,
+  SERIAL_FAMILY_LIST,
   TEST_DIRS,
   assertSerialFamilyPartition,
   collectTestFiles,
   formatBanner,
-  loadSerialFamilyList,
   resolveAutoConcurrency,
   resolveNodeVersionWarning,
   runIsolatedSuite,
@@ -959,55 +960,53 @@ test("resolveAutoConcurrency: samples exactly 2 times (the real default), sleepi
 });
 
 // ---------------------------------------------------------------------------
-// HYK-439 §2 ⓒ: loadSerialFamilyList + splitSerialFamily + assertSerial
-// FamilyPartition -- the "기계 검사 칸" fail-closed mutation table (목록에
-// 없는 이름 추가 · 한 파일을 두 패스 모두에 넣기 · 한 파일 누락), plus the
-// REAL list file's own content (empirically confirmed family, coder.md §1).
+// HYK-439 §2 ⓐ/ⓒ/ⓓ (2R): SERIAL_FAMILY_LIST + splitSerialFamily + assert
+// SerialFamilyPartition -- the "기계 검사 칸" fail-closed mutation table (a
+// duplicated list entry · a file placed in BOTH passes · a file missing
+// from BOTH passes), the content of the now-hardcoded constant (empirically
+// confirmed family, 1R coder.md §1), and the §2 ⓓ staleness assertion
+// (every constant entry must actually exist as a file in THIS repo).
 // ---------------------------------------------------------------------------
-test("loadSerialFamilyList: malformed JSON throws, fail-closed", () => {
-  assert.throws(
-    () => loadSerialFamilyList({ readFileFn: () => "not json" }),
-    /not valid JSON/,
-  );
-});
+const REPO_ROOT = fileURLToPath(new URL("../../", import.meta.url));
 
-test("loadSerialFamilyList: a non-array value throws, fail-closed", () => {
-  assert.throws(
-    () => loadSerialFamilyList({ readFileFn: () => JSON.stringify({ a: 1 }) }),
-    /non-empty JSON array/,
-  );
-});
-
-test("loadSerialFamilyList: an empty array throws, fail-closed (an empty list would silently disable isolation with no signal)", () => {
-  assert.throws(
-    () => loadSerialFamilyList({ readFileFn: () => "[]" }),
-    /non-empty JSON array/,
-  );
-});
-
-test("loadSerialFamilyList: a non-string/empty-string entry throws, fail-closed", () => {
-  assert.throws(
-    () =>
-      loadSerialFamilyList({
-        readFileFn: () => JSON.stringify(["a.test.mjs", 5]),
-      }),
-    /non-empty path strings/,
-  );
-  assert.throws(
-    () =>
-      loadSerialFamilyList({
-        readFileFn: () => JSON.stringify(["a.test.mjs", ""]),
-      }),
-    /non-empty path strings/,
-  );
-});
-
-test("loadSerialFamilyList: the REAL runner-serial-family.json names install-net-closure.test.mjs and install-g1-adapter-list.test.mjs -- the two files empirically confirmed to be the memory-heavy install-target spawnSync family (HYK-439 1R coder.md §1: standalone free-memory drop ~63MB and ~547MB respectively), excluding install-copylist-closure.test.mjs (confirmed negligible ~13MB drop -- pure static-import analysis, no real child spawnSync)", () => {
-  const list = loadSerialFamilyList();
-  assert.deepEqual(list, [
+test("SERIAL_FAMILY_LIST: names install-net-closure.test.mjs and install-g1-adapter-list.test.mjs -- the two files empirically confirmed to be the memory-heavy install-target spawnSync family (HYK-439 1R coder.md §1: standalone free-memory drop ~63MB and ~547MB respectively), excluding install-copylist-closure.test.mjs (confirmed negligible ~13MB drop -- pure static-import analysis, no real child spawnSync)", () => {
+  assert.deepEqual(SERIAL_FAMILY_LIST, [
     "templates/harness-init/install-net-closure.test.mjs",
     "templates/harness-init/install-g1-adapter-list.test.mjs",
   ]);
+});
+
+// HYK-439 §2 ⓓ: "낡은 이름 탐지 = 이 저장소 시험 칸" -- stale-name detection
+// moved OUT of the runtime path (splitSerialFamily now SKIPS, not throws,
+// on an absent entry -- required for installed targets, see its own header)
+// and INTO this repo-only assertion: every SERIAL_FAMILY_LIST entry must
+// resolve to a real file UNDER THIS CHECKOUT. A renamed/removed family file
+// turns this RED in THIS repo's own CI, which is the only place staleness
+// against the SOURCE repo is a meaningful fact (an installed target's own
+// absence of these files is normal, not stale -- that is exactly what the
+// runtime skip-and-log path now treats as unremarkable).
+// §2 ⓑ's own fix (the exact bug this guard must not reintroduce, 〔직접〕
+// confirmed this round via a real install-sandbox run): this very test FILE
+// is itself one of ENFORCEMENT_CHECK_FILES, so it is copied -- and runs --
+// on every installed target too, where templates/harness-init/install.mjs
+// (the installer itself) is NEVER copied. On such a target REPO_ROOT does
+// not contain install-net-closure.test.mjs/install-g1-adapter-list.test.mjs
+// at all, which is normal (not stale), not this repo's own fact to assert.
+// Gated on install.mjs's own presence: real in THIS repo (CI catches a
+// stale entry here), a no-op skip everywhere else.
+test("SERIAL_FAMILY_LIST: every listed name is a real file in THIS repo (stale-name mutation guard -- adding a name that doesn't exist here must go RED)", (t) => {
+  if (!existsSync(join(REPO_ROOT, "templates/harness-init/install.mjs"))) {
+    t.skip(
+      "this checkout has no installer (an installed target, not the source repo) -- SERIAL_FAMILY_LIST staleness is only a fact about the source repo",
+    );
+    return;
+  }
+  for (const entry of SERIAL_FAMILY_LIST) {
+    assert.ok(
+      existsSync(join(REPO_ROOT, entry)),
+      `SERIAL_FAMILY_LIST entry "${entry}" does not exist under this repo's root (${REPO_ROOT}) -- stale list entry`,
+    );
+  }
 });
 
 test("splitSerialFamily: a normal split puts listed files in the family pass and everything else in the main pass, in their original relative order", () => {
@@ -1033,15 +1032,40 @@ test("splitSerialFamily: a Windows backslash-joined collected path still matches
   assert.deepEqual(mainFiles, ["scripts\\check\\a.test.mjs"]);
 });
 
-test("splitSerialFamily: §2 ⓒ mutation table row 1 -- a list entry naming a file that was not collected this run is fail-closed, never silently ignored", () => {
-  assert.throws(
-    () =>
-      splitSerialFamily({
-        files: ["a.test.mjs"],
-        familyList: ["ghost.test.mjs"],
-      }),
-    /no such test file was collected/,
-  );
+// HYK-439 §2 ⓑ (2R, replaces 1R's fail-closed row 1 -- this is the EXACT
+// path 1R's own install-sandbox crash lived on: an installed target's
+// checkout never collects templates/harness-init/*.test.mjs at all). A
+// list entry absent from this run's collected files is now logged once,
+// via `logFn`, with the fixed phrase, and simply excluded from the family
+// pass -- never fail-closed, never silently dropped with no trace.
+test("splitSerialFamily: §2 ⓑ -- a list entry naming a file that was not collected this run is skipped (logged once), not fail-closed, and the remaining files still partition correctly", () => {
+  const logs = [];
+  const { mainFiles, familyFiles } = splitSerialFamily({
+    files: ["a.test.mjs"],
+    familyList: ["ghost.test.mjs"],
+    logFn: (m) => logs.push(m),
+  });
+  assert.deepEqual(mainFiles, ["a.test.mjs"]);
+  assert.deepEqual(familyFiles, []);
+  assert.equal(logs.length, 1);
+  assert.match(logs[0], /"ghost\.test\.mjs"/);
+  assert.match(logs[0], /not present in this checkout, skipped/);
+});
+
+// HYK-439 §2 ⓑ: when EVERY family-list entry is absent from this run's
+// collected files (the real installed-target shape), the intersection is
+// the empty set -- familyFiles is empty and mainFiles is the full,
+// untouched file list, in original order.
+test("splitSerialFamily: §2 ⓑ -- when the whole family list is absent from this run (installed-target shape), the intersection is empty and mainFiles is untouched", () => {
+  const logs = [];
+  const { mainFiles, familyFiles } = splitSerialFamily({
+    files: ["a.test.mjs", "b.test.mjs"],
+    familyList: SERIAL_FAMILY_LIST,
+    logFn: (m) => logs.push(m),
+  });
+  assert.deepEqual(mainFiles, ["a.test.mjs", "b.test.mjs"]);
+  assert.deepEqual(familyFiles, []);
+  assert.equal(logs.length, SERIAL_FAMILY_LIST.length);
 });
 
 test("splitSerialFamily: a duplicated list entry is fail-closed", () => {
@@ -1053,6 +1077,27 @@ test("splitSerialFamily: a duplicated list entry is fail-closed", () => {
       }),
     /more than once/,
   );
+});
+
+// HYK-439 §2 ⓕ row 3: splitSerialFamily's own partition is always valid by
+// construction (its header explains why), so assertSerialFamilyPartition's
+// wiring call inside it is unreachable-by-construction from every test
+// above -- without this spy seam, deleting that call outright would pass
+// every test above silently. assertPartitionFn IS that seam: a real
+// caller never overrides it, a test can.
+test("splitSerialFamily: §2 ⓒ wiring -- assertPartitionFn is actually called once, with the exact computed partition (mutation guard for the 'delete the wiring call' row -- defense-in-depth is otherwise untestable from this function's own normal inputs)", () => {
+  const calls = [];
+  const { mainFiles, familyFiles } = splitSerialFamily({
+    files: ["a.test.mjs", "b.test.mjs", "c.test.mjs"],
+    familyList: ["b.test.mjs"],
+    assertPartitionFn: (args) => calls.push(args),
+  });
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0], {
+    allFiles: ["a.test.mjs", "b.test.mjs", "c.test.mjs"],
+    mainFiles,
+    familyFiles,
+  });
 });
 
 test("assertSerialFamilyPartition: a valid partition (every collected file in exactly one pass) does not throw", () => {
@@ -1285,6 +1330,86 @@ test("runIsolatedSuite: HYK-439 §2 ⓑ/ⓓ -- a serial-family list splits files
   assert.equal(receipts[0].serialFamilyConcurrency, SERIAL_FAMILY_CONCURRENCY);
 });
 
+// HYK-439 §2 ⓕ-2 (2R, judgment 2026-10-30 03:30 §2): main-pass and family-
+// pass start/min free-memory readings are tracked SEPARATELY from the
+// pre-existing whole-run startFreeMb/minFreeMbSampled pair (which this test
+// does not touch). freememFn is called exactly twice here (once per pass's
+// own single "start free" reading); stopFreeMemSamplerFn is called three
+// times total (main pass, family pass, then the whole-run wrapper) -- this
+// asserts the first two land on the receipt's new per-pass fields.
+test("runIsolatedSuite: HYK-439 §2 ⓕ-2 -- main-pass and family-pass start/min free-memory readings ride the receipt separately, in call order (main first, family second)", () => {
+  const spawn = () => ({ status: 0 });
+  const readFile = (path) => {
+    if (String(path).endsWith("-serial.tap")) {
+      return "TAP version 13\n# tests 2\n# pass 2\n# fail 0\n# skipped 0\n";
+    }
+    return "TAP version 13\n# tests 5\n# pass 5\n# fail 0\n# skipped 0\n";
+  };
+  const receipts = [];
+  let freememCalls = 0;
+  const freeMemStartSequenceMb = [3100, 2900];
+  let stopCalls = 0;
+  const stopSequence = [2950.1, 2400.5, 2300];
+  const exitCode = runIsolatedSuite({
+    startSampler: () => null,
+    stopSampler: () => null,
+    startFreeMemSamplerFn: () => "fake-child",
+    stopFreeMemSamplerFn: () => stopSequence[stopCalls++],
+    freememFn: () => mbToBytes(freeMemStartSequenceMb[freememCalls++]),
+    execFile: execFileForTwoPassTests(),
+    spawn,
+    log: () => {},
+    collectFiles: () => ["a.test.mjs", "family.test.mjs"],
+    serialFamilyList: ["family.test.mjs"],
+    concurrency: 4,
+    readFile,
+    writeReceipt: (payload) => {
+      receipts.push(payload);
+      return { path: "(stubbed)", receipt: {} };
+    },
+  });
+  assert.equal(exitCode, 0);
+  assert.equal(freememCalls, 2);
+  assert.equal(receipts[0].mainStartFreeMb, 3100);
+  assert.equal(receipts[0].mainMinFreeMb, 2950.1);
+  assert.equal(receipts[0].familyStartFreeMb, 2900);
+  assert.equal(receipts[0].familyMinFreeMb, 2400.5);
+});
+
+// HYK-439 §2 ⓕ-2: when no family pass runs at all (no serialFamilyList),
+// the two family-side fields stay null -- never 0, never the main-pass
+// values -- and freememFn is called exactly once (the main pass's own
+// start reading only).
+test("runIsolatedSuite: HYK-439 §2 ⓕ-2 -- with no serialFamilyList, familyStartFreeMb/familyMinFreeMb stay null and freememFn is called exactly once", () => {
+  const receipts = [];
+  let freememCalls = 0;
+  const exitCode = runIsolatedSuite({
+    startSampler: () => null,
+    stopSampler: () => null,
+    startFreeMemSamplerFn: () => "fake-child",
+    stopFreeMemSamplerFn: () => 2950.1,
+    freememFn: () => {
+      freememCalls++;
+      return mbToBytes(3100);
+    },
+    execFile: execFileForTwoPassTests(),
+    spawn: () => ({ status: 0 }),
+    log: () => {},
+    collectFiles: () => ["a.test.mjs"],
+    concurrency: 4,
+    readFile: throwingReadFile,
+    writeReceipt: (payload) => {
+      receipts.push(payload);
+      return { path: "(stubbed)", receipt: {} };
+    },
+  });
+  assert.equal(exitCode, 0);
+  assert.equal(freememCalls, 1);
+  assert.equal(receipts[0].mainStartFreeMb, 3100);
+  assert.equal(receipts[0].familyStartFreeMb, null);
+  assert.equal(receipts[0].familyMinFreeMb, null);
+});
+
 test("runIsolatedSuite: HYK-439 §2 ⓑ -- a RED serial-family pass makes the WHOLE run's exit code/status reflect it, even when the main pass itself is green (worse status wins, never hidden)", () => {
   let call = 0;
   const spawn = () => {
@@ -1319,6 +1444,44 @@ test("runIsolatedSuite: HYK-439 §2 ⓑ -- a RED serial-family pass makes the WH
   assert.equal(exitCode, 1);
   assert.equal(receipts[0].runnerStatus, "TESTS_FAILED");
   assert.deepEqual(receipts[0].counts, { tests: 7, pass: 6, fail: 1, skip: 0 });
+});
+
+// HYK-439 §2 ⓑ (2R): a serialFamilyList IS given, but NONE of its entries
+// match this run's collected files -- the exact shape of a real installed
+// target (no templates/harness-init/*.test.mjs collected at all, 1R's
+// crash). The family pass must not even start: one spawn call, a null
+// serialFamilyConcurrency (its documented meaning: no family pass ran --
+// see buildRunnerReceipt's own header), and two skip log lines.
+test("runIsolatedSuite: HYK-439 §2 ⓑ -- a serialFamilyList whose entries are ALL absent from this run's files never starts a family pass (one spawn call, serial_family_concurrency null, two skip log lines)", () => {
+  const spawnCalls = [];
+  const spawn = (cmd, args) => {
+    spawnCalls.push(args);
+    return { status: 0 };
+  };
+  const logs = [];
+  const receipts = [];
+  const exitCode = runIsolatedSuite({
+    startSampler: () => null,
+    stopSampler: () => null,
+    startFreeMemSamplerFn: () => null,
+    stopFreeMemSamplerFn: () => null,
+    execFile: execFileForTwoPassTests(),
+    spawn,
+    log: (m) => logs.push(m),
+    collectFiles: () => ["a.test.mjs"],
+    serialFamilyList: SERIAL_FAMILY_LIST,
+    concurrency: 4,
+    readFile: throwingReadFile,
+    writeReceipt: (payload) => {
+      receipts.push(payload);
+      return { path: "(stubbed)", receipt: {} };
+    },
+  });
+  assert.equal(exitCode, 0);
+  assert.equal(spawnCalls.length, 1);
+  assert.equal(receipts[0].serialFamilyConcurrency, null);
+  const skipLogs = logs.filter((m) => m.includes("skipped"));
+  assert.equal(skipLogs.length, SERIAL_FAMILY_LIST.length);
 });
 
 test("runIsolatedSuite: no serialFamilyList given -- byte-for-byte the legacy single-pass behavior (no second spawn call, serial_family_concurrency null)", () => {

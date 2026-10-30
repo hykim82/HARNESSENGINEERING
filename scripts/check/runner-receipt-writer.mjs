@@ -363,6 +363,31 @@ function countField(counts, key) {
 //   pass used, or null when no serial-family pass ran this round (fixed at
 //   1 whenever it does run -- see isolated-suite-runner.mjs's
 //   SERIAL_FAMILY_CONCURRENCY).
+// Pulled out of buildRunnerReceipt below for the same reason countField
+// above was (its own header) -- keeps that function's own ESLint
+// complexity gate happy; byte-for-byte the same four `?? null` branches
+// inlined before this extraction.
+function perPassFreeMemFields({
+  mainStartFreeMb,
+  mainMinFreeMb,
+  familyStartFreeMb,
+  familyMinFreeMb,
+}) {
+  return {
+    main_start_free_mb: mainStartFreeMb ?? null,
+    main_min_free_mb_sampled: mainMinFreeMb ?? null,
+    family_start_free_mb: familyStartFreeMb ?? null,
+    family_min_free_mb_sampled: familyMinFreeMb ?? null,
+  };
+}
+
+// HYK-439 §2 ⓕ-2 (2R, additive-only, same posture as the ⓓ block above):
+// per-pass start/min free-memory readings. Reason this file changes again
+// (product_scope ⓒ "변경 필요 시 사유 1줄"): the judgment (2026-10-30 03:30
+// §2) requires main-pass and serial-family-pass minimum free memory
+// recorded SEPARATELY, and a receipt field is the chosen home for that
+// (결과 파일 1줄과 중복, 기계로도 남긴다) -- min_free_mb_sampled above stays
+// a whole-run figure, unchanged.
 export function buildRunnerReceipt({
   runnerExit,
   runnerStatus,
@@ -376,6 +401,10 @@ export function buildRunnerReceipt({
   minFreeMbSampled,
   concurrency,
   serialFamilyConcurrency,
+  mainStartFreeMb,
+  mainMinFreeMb,
+  familyStartFreeMb,
+  familyMinFreeMb,
 }) {
   return {
     schema_version: RUNNER_RECEIPT_SCHEMA_VERSION,
@@ -394,6 +423,12 @@ export function buildRunnerReceipt({
     min_free_mb_sampled: minFreeMbSampled ?? null,
     concurrency: concurrency ?? null,
     serial_family_concurrency: serialFamilyConcurrency ?? null,
+    ...perPassFreeMemFields({
+      mainStartFreeMb,
+      mainMinFreeMb,
+      familyStartFreeMb,
+      familyMinFreeMb,
+    }),
   };
 }
 
@@ -427,6 +462,10 @@ export function writeRunnerReceipt({
   minFreeMbSampled,
   concurrency,
   serialFamilyConcurrency,
+  mainStartFreeMb,
+  mainMinFreeMb,
+  familyStartFreeMb,
+  familyMinFreeMb,
   mkdirFn = mkdirSync,
   writeFileFn = writeFileSync,
 }) {
@@ -445,6 +484,10 @@ export function writeRunnerReceipt({
     minFreeMbSampled,
     concurrency,
     serialFamilyConcurrency,
+    mainStartFreeMb,
+    mainMinFreeMb,
+    familyStartFreeMb,
+    familyMinFreeMb,
   });
   const path = join(dir, RUNNER_RECEIPT_FILENAME);
   writeFileFn(path, JSON.stringify(receipt, null, 2) + "\n", "utf8");
@@ -556,6 +599,10 @@ export function writeNumberedRunnerReceipt({
   minFreeMbSampled,
   concurrency,
   serialFamilyConcurrency,
+  mainStartFreeMb,
+  mainMinFreeMb,
+  familyStartFreeMb,
+  familyMinFreeMb,
   writeFileFn = writeFileSync,
 }) {
   const receipt = buildRunnerReceipt({
@@ -571,6 +618,10 @@ export function writeNumberedRunnerReceipt({
     minFreeMbSampled,
     concurrency,
     serialFamilyConcurrency,
+    mainStartFreeMb,
+    mainMinFreeMb,
+    familyStartFreeMb,
+    familyMinFreeMb,
   });
   writeFileFn(receiptPath, JSON.stringify(receipt, null, 2) + "\n", "utf8");
   return { path: receiptPath, receipt };

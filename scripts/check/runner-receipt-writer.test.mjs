@@ -473,7 +473,45 @@ test("buildRunnerReceipt: shape has all §2-1-required fields, schema_version pi
     min_free_mb_sampled: null,
     concurrency: null,
     serial_family_concurrency: null,
+    main_start_free_mb: null,
+    main_min_free_mb_sampled: null,
+    family_start_free_mb: null,
+    family_min_free_mb_sampled: null,
   });
+});
+
+// HYK-439 §2 ⓕ-2 (2R): the four per-pass memory fields are carried verbatim
+// when provided, and null when omitted -- same "report, don't guess"
+// posture as the whole-run start_free_mb/min_free_mb_sampled pair above
+// (which these are intentionally separate from, not a replacement for).
+test("buildRunnerReceipt: mainStartFreeMb/mainMinFreeMb/familyStartFreeMb/familyMinFreeMb are carried verbatim as main_start_free_mb/main_min_free_mb_sampled/family_start_free_mb/family_min_free_mb_sampled, all null when omitted", () => {
+  const withValues = buildRunnerReceipt({
+    runnerExit: 0,
+    runnerStatus: RUNNER_STATUS.OK,
+    counts: { tests: 1, pass: 1, fail: 0, skip: 0 },
+    headCommit: "abc",
+    finishedAtMs: 0,
+    mainStartFreeMb: 3100.2,
+    mainMinFreeMb: 2950.1,
+    familyStartFreeMb: 2900.5,
+    familyMinFreeMb: 2400.5,
+  });
+  assert.equal(withValues.main_start_free_mb, 3100.2);
+  assert.equal(withValues.main_min_free_mb_sampled, 2950.1);
+  assert.equal(withValues.family_start_free_mb, 2900.5);
+  assert.equal(withValues.family_min_free_mb_sampled, 2400.5);
+
+  const omitted = buildRunnerReceipt({
+    runnerExit: 0,
+    runnerStatus: RUNNER_STATUS.OK,
+    counts: { tests: 1, pass: 1, fail: 0, skip: 0 },
+    headCommit: "abc",
+    finishedAtMs: 0,
+  });
+  assert.equal(omitted.main_start_free_mb, null);
+  assert.equal(omitted.main_min_free_mb_sampled, null);
+  assert.equal(omitted.family_start_free_mb, null);
+  assert.equal(omitted.family_min_free_mb_sampled, null);
 });
 
 // HYK-439 §2 ⓓ: the four new memory/concurrency fields are carried verbatim

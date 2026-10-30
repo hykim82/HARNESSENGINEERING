@@ -102,50 +102,41 @@ export function collectTestFiles(
   return files;
 }
 
-// HYK-439 §2 ⓑ/ⓒ: the install-target child-spawnSync test family (memory-
-// heavy, real `node --test` grandchildren -- see runner-serial-family.json's
-// own header for which files and why) runs in a SEPARATE, serial
+// HYK-439 §2 ⓐ (2R, replaces 1R's runner-serial-family.json): the
+// install-target child-spawnSync test family (memory-heavy, real
+// `node --test` grandchildren) runs in a SEPARATE, serial
 // (--test-concurrency=1) pass so it never overlaps the main pass's own
-// concurrent children. This file lives outside this module's scope (a
-// JSON data file, not a script) so the family can be edited without
-// touching production code -- isolated-suite-runner.mjs only reads it.
-const SERIAL_FAMILY_LIST_PATH = fileURLToPath(
-  new URL("./runner-serial-family.json", import.meta.url),
-);
+// concurrent children. 1R shipped this list as a sibling JSON data file,
+// read via a `readFileSync` that is fail-closed on anything short of a
+// valid, non-empty array -- but an installed target only gets this .mjs
+// file (templates/harness-init/install.mjs's ENFORCEMENT_CHECK_FILES never
+// listed the JSON), so every installed `npm test` ENOENT-crashed before a
+// single test ran (HYK-439 1R coder.md §3-1, the NEEDS_INPUT this round
+// resolves). A hardcoded module constant has no load step and therefore no
+// load-failure path at all -- the two names below are the exact pair 1R's
+// standalone free-memory measurement empirically confirmed (coder.md §1-4:
+// install-net-closure.test.mjs -63.4MB, install-g1-adapter-list.test.mjs
+// -546.7MB; install-copylist-closure.test.mjs's -12.7MB drop is pure
+// static-import analysis with zero real child spawnSync, so it stays out
+// of the family). Runtime membership is now an intersection against this
+// run's own discovered files (splitSerialFamily below) -- a name here that
+// this checkout never collected (exactly what happens on every installed
+// target, which has no templates/harness-init/*.test.mjs at all) is logged
+// and skipped, never fail-closed; staleness of this list AGAINST THIS
+// REPO's own files is instead asserted once, in isolated-suite-runner.test
+// .mjs (§2 ⓓ), where a CI run can catch a renamed/removed family file.
+export const SERIAL_FAMILY_LIST = [
+  "templates/harness-init/install-net-closure.test.mjs",
+  "templates/harness-init/install-g1-adapter-list.test.mjs",
+];
 
 // `path.join` on Windows emits backslashes for the directory-prefix
-// boundary (verified this round) even though TEST_DIRS/the JSON list both
+// boundary (verified this round) even though TEST_DIRS/the list above both
 // use forward slashes -- every comparison between a collected file path and
 // a list entry normalizes through this first, or a real family file would
 // silently fail to match on Windows (the file this round primarily targets).
 function normalizeRelPath(p) {
   return p.replace(/\\/g, "/");
-}
-
-export function loadSerialFamilyList({
-  readFileFn = readFileSync,
-  path = SERIAL_FAMILY_LIST_PATH,
-} = {}) {
-  const raw = readFileFn(path, "utf8");
-  let list;
-  try {
-    list = JSON.parse(raw);
-  } catch (err) {
-    throw new Error(
-      `isolated-suite-runner: runner-serial-family.json is not valid JSON (${err.message}) -- fail-closed`,
-      { cause: err },
-    );
-  }
-  if (
-    !Array.isArray(list) ||
-    list.length === 0 ||
-    list.some((x) => typeof x !== "string" || x.trim() === "")
-  ) {
-    throw new Error(
-      `isolated-suite-runner: runner-serial-family.json must be a non-empty JSON array of non-empty path strings, got: ${raw} -- fail-closed`,
-    );
-  }
-  return list;
 }
 
 // §2 ⓒ "기계 검사 칸": every file this run actually collected must end up in
@@ -188,34 +179,61 @@ export function assertSerialFamilyPartition({
 }
 
 // Splits `files` (this run's real collected file list) into the main pass
-// and the serial-family pass per `familyList`. Fail-closed on a list entry
-// that isn't one of `files` (a renamed/removed family file, or a typo'd
-// list entry naming something that was never collected) -- rather than
-// silently running a different file set than the CI-canonical command.
-export function splitSerialFamily({ files, familyList }) {
+// and the serial-family pass per `familyList`, intersected against what
+// this run actually collected (HYK-439 §2 ⓑ, 2R). `familyList` is now a
+// hardcoded, this-repo-shaped constant (SERIAL_FAMILY_LIST) applied
+// UNCONDITIONALLY to every run, including ones against an installed
+// target's checkout that never has templates/harness-init/*.test.mjs at
+// all -- so a list entry absent from `files` is no longer fail-closed (1R's
+// bug: that path crashed the entire runner on every installed target). It
+// is logged once, via `logFn`, with a fixed, greppable phrase so a run's
+// log never silently shrinks the family with no trace -- then skipped. A
+// DUPLICATE entry (a typo'd edit to the constant itself, not a checkout
+// difference) stays fail-closed: that is this module's own bug, not a
+// per-checkout fact. The resulting `familyFiles` is always a sub-sequence
+// of `files` and `mainFiles` is exactly its complement, so
+// assertSerialFamilyPartition below can never actually fire from THIS
+// function's own construction -- it stays wired in as defense in depth
+// (§2 ⓒ, its own header) so a mutation here is still caught mechanically.
+// HYK-439 §2 ⓕ row 3 (2R): assertPartitionFn is injectable (default = the
+// real assertSerialFamilyPartition) purely so a test can SPY on this call
+// and prove it still fires -- the wiring the comment above calls "defense
+// in depth" is otherwise unreachable-by-construction from this function's
+// own normal data flow (every other test here can never make it throw),
+// so without an injectable seam, deleting this call outright would pass
+// every existing test silently. A real caller never overrides this.
+export function splitSerialFamily({
+  files,
+  familyList,
+  logFn = () => {},
+  assertPartitionFn = assertSerialFamilyPartition,
+}) {
   const fileSet = new Set(files.map(normalizeRelPath));
   const seen = new Set();
+  const matched = new Set();
   for (const entry of familyList) {
     const norm = normalizeRelPath(entry);
     if (seen.has(norm)) {
       throw new Error(
-        `isolated-suite-runner: runner-serial-family.json lists "${entry}" more than once -- fail-closed`,
+        `isolated-suite-runner: serial-family list entry "${entry}" is listed more than once -- fail-closed`,
       );
     }
     seen.add(norm);
     if (!fileSet.has(norm)) {
-      throw new Error(
-        `isolated-suite-runner: runner-serial-family.json lists "${entry}" but no such test file was collected for this run -- fail-closed, refusing to silently run a different file set than the CI-canonical command`,
+      logFn(
+        `[isolated-suite-runner] serial-family entry "${entry}" is not present in this checkout, skipped`,
       );
+      continue;
     }
+    matched.add(norm);
   }
-  const mainFiles = [];
-  const familyFiles = [];
-  for (const f of files) {
-    if (seen.has(normalizeRelPath(f))) familyFiles.push(f);
-    else mainFiles.push(f);
-  }
-  assertSerialFamilyPartition({ allFiles: files, mainFiles, familyFiles });
+  // Both partitions are filtered from `files` directly (not rebuilt from
+  // familyList) so their relative order is always this run's own collected
+  // order, never the (unrelated) order the family constant happens to list
+  // its entries in.
+  const mainFiles = files.filter((f) => !matched.has(normalizeRelPath(f)));
+  const familyFiles = files.filter((f) => matched.has(normalizeRelPath(f)));
+  assertPartitionFn({ allFiles: files, mainFiles, familyFiles });
   return { mainFiles, familyFiles };
 }
 
@@ -686,6 +704,10 @@ function buildReceiptPayload({
   minFreeMbSampled,
   concurrency,
   serialFamilyConcurrency,
+  mainStartFreeMb,
+  mainMinFreeMb,
+  familyStartFreeMb,
+  familyMinFreeMb,
 }) {
   return {
     runnerExit,
@@ -700,7 +722,59 @@ function buildReceiptPayload({
     minFreeMbSampled,
     concurrency,
     serialFamilyConcurrency,
+    // HYK-439 §2 ⓕ-2 (2R): per-pass start/min free-memory readings, kept
+    // separate from the whole-run startFreeMb/minFreeMbSampled above
+    // (those two fields are unchanged -- this is purely additive). null on
+    // either family field means no family pass ran this round (familyFiles
+    // was empty, e.g. every SERIAL_FAMILY_LIST entry was skipped as absent
+    // from this checkout) -- not a measurement failure.
+    mainStartFreeMb,
+    mainMinFreeMb,
+    familyStartFreeMb,
+    familyMinFreeMb,
   };
+}
+
+// Pulled out of emitRunnerReceipt below purely to keep its own ESLint
+// complexity/line-count gate happy (same reasoning as every other small
+// extraction in this file) -- byte-for-byte the same tap-merge logic
+// inlined before this extraction.
+function mergeMainAndFamilyCounts({
+  tapPath,
+  familyTapPath,
+  elapsedMs,
+  familyElapsedMs,
+  readFile,
+  log,
+}) {
+  const counts = parseCountsFromTapWithWarning({
+    tapPath,
+    readFile,
+    elapsedMs,
+    log,
+  });
+  if (!familyTapPath) return counts;
+  const familyCounts = parseCountsFromTapWithWarning({
+    tapPath: familyTapPath,
+    readFile,
+    elapsedMs: familyElapsedMs,
+    log,
+  });
+  return mergeCounts(counts, familyCounts);
+}
+
+// Pulled out of emitRunnerReceipt below -- the "latest" and "numbered"
+// receipt writes are the same try/write/log-or-warn shape, previously
+// inlined twice; this is byte-for-byte that same shape, named once (same
+// "keeps the complexity gate happy" reasoning as every other extraction in
+// this file).
+function writeReceiptSafely({ writeFn, args, log, okLabel, failMessage }) {
+  try {
+    const { path } = writeFn(args);
+    log(`[isolated-suite-runner] ${okLabel} -> ${path}`);
+  } catch (err) {
+    log(`[isolated-suite-runner] WARNING: ${failMessage(err)}`);
+  }
 }
 
 function emitRunnerReceipt({
@@ -727,22 +801,25 @@ function emitRunnerReceipt({
   minFreeMbSampled = null,
   concurrency = null,
   serialFamilyConcurrency = null,
+  // HYK-439 §2 ⓕ-2: no `= null` default here (unlike the params above) --
+  // ESLint's complexity rule counts each default as its own branch, and
+  // these four are unconditionally forwarded to buildReceiptPayload ->
+  // perPassFreeMemFields, which already does `?? null` on every one of
+  // them, so an omitted/undefined value here resolves to null there just
+  // the same (no behavior difference, purely a complexity-gate fix).
+  mainStartFreeMb,
+  mainMinFreeMb,
+  familyStartFreeMb,
+  familyMinFreeMb,
 }) {
-  let counts = parseCountsFromTapWithWarning({
+  const counts = mergeMainAndFamilyCounts({
     tapPath,
-    readFile,
+    familyTapPath,
     elapsedMs,
+    familyElapsedMs,
+    readFile,
     log,
   });
-  if (familyTapPath) {
-    const familyCounts = parseCountsFromTapWithWarning({
-      tapPath: familyTapPath,
-      readFile,
-      elapsedMs: familyElapsedMs,
-      log,
-    });
-    counts = mergeCounts(counts, familyCounts);
-  }
   const payload = buildReceiptPayload({
     runnerExit,
     runnerStatus,
@@ -756,30 +833,28 @@ function emitRunnerReceipt({
     minFreeMbSampled,
     concurrency,
     serialFamilyConcurrency,
+    mainStartFreeMb,
+    mainMinFreeMb,
+    familyStartFreeMb,
+    familyMinFreeMb,
   });
-  try {
-    const { path } = writeReceipt({
-      harnessDir: join(root, ".harness"),
-      ...payload,
-    });
-    log(`[isolated-suite-runner] runner receipt written -> ${path}`);
-  } catch (err) {
-    log(
-      `[isolated-suite-runner] WARNING: failed to write runner receipt (${err.message}) -- consumption-side fail-closed gate (relay-handshake.mjs) will treat this as a missing receipt`,
-    );
-  }
+  writeReceiptSafely({
+    writeFn: (args) => writeReceipt(args),
+    args: { harnessDir: join(root, ".harness"), ...payload },
+    log,
+    okLabel: "runner receipt written",
+    failMessage: (err) =>
+      `failed to write runner receipt (${err.message}) -- consumption-side fail-closed gate (relay-handshake.mjs) will treat this as a missing receipt`,
+  });
   if (!runSlot.receiptPath) return;
-  try {
-    const { path } = writeNumberedReceipt({
-      receiptPath: runSlot.receiptPath,
-      ...payload,
-    });
-    log(`[isolated-suite-runner] per-run numbered receipt written -> ${path}`);
-  } catch (err) {
-    log(
-      `[isolated-suite-runner] WARNING: failed to write numbered receipt run${runSlot.runNumber} (${err.message}) -- HYK-485 §2-2's per-round comparison will see this run's evidence as missing, i.e. measurement-unavailable, not as a fabricated pass`,
-    );
-  }
+  writeReceiptSafely({
+    writeFn: (args) => writeNumberedReceipt(args),
+    args: { receiptPath: runSlot.receiptPath, ...payload },
+    log,
+    okLabel: "per-run numbered receipt written",
+    failMessage: (err) =>
+      `failed to write numbered receipt run${runSlot.runNumber} (${err.message}) -- HYK-485 §2-2's per-round comparison will see this run's evidence as missing, i.e. measurement-unavailable, not as a fabricated pass`,
+  });
 }
 
 // Builds the argv for the in-clone `node --test` invocation. A second,
@@ -1108,6 +1183,31 @@ function stopFreeMemSampler({
   }
 }
 
+// HYK-439 §2 ⓕ-2: pulled out of runMainAndFamilySuite below -- the
+// "single freememFn start-reading, start a free-mem sampler, run the pass,
+// stop the sampler" shape is identical for the main pass and the family
+// pass, previously inlined twice. `runPassFn` is a thunk so this stays
+// agnostic to which pass it is wrapping (byte-for-byte the same sequence
+// either call site had inline before this extraction) -- same "keeps the
+// complexity/line-count gate happy" reasoning as every other extraction in
+// this file.
+function runPassWithFreeMemSampler({
+  tapDir,
+  outPathName,
+  freememFn,
+  startFreeMemSamplerFn,
+  stopFreeMemSamplerFn,
+  log,
+  runPassFn,
+}) {
+  const startFreeMb = roundTo1Decimal(bytesToMb(freememFn()));
+  const outPath = join(tapDir, outPathName);
+  const child = startFreeMemSamplerFn({ outPath, log });
+  const outcome = runPassFn();
+  const minFreeMb = stopFreeMemSamplerFn({ child, outPath, log });
+  return { startFreeMb, minFreeMb, outcome };
+}
+
 // HYK-439 §2 ⓑ: orchestrates the (possibly two-pass) suite run -- splitting
 // `files` per `serialFamilyList` when one is given (fail-closed via
 // splitSerialFamily, before anything spawns), sampling concurrent `node`
@@ -1119,6 +1219,133 @@ function stopFreeMemSampler({
 // as every other small extraction in this file) -- for a run with no
 // serialFamilyList, this is byte-for-byte the prior single-pass
 // spawnSuiteWithSampler behavior it replaces.
+// HYK-439 §2 ⓕ-2 (2R, judgment 2026-10-30 03:30 §2): the pre-existing
+// free-memory sampler (started one level up, in runSuiteWithFreeMemSampler)
+// spans the WHOLE run (both passes combined) and stays byte-for-byte as-is
+// -- this adds a SECOND, independent pair of sampler windows, one scoped to
+// just the main pass and one scoped to just the family pass (only when one
+// actually runs), each with its own single-sample "start free" reading
+// taken right before that pass's spawn. Two sampler child processes can run
+// concurrently with no interaction (each is its own `node -e` loop writing
+// to its own outPath), so nesting them inside the already-running whole-run
+// sampler is safe.
+// Pulled out of runMainAndFamilySuite below -- the "if there are any
+// family files, run the serial-family pass and combine its outcome" block,
+// named once so that function's own ESLint line-count/complexity gate
+// stays happy (same reasoning as every other extraction in this file).
+// Returns combinedOutcome === mainOutcome and every family-* field null
+// when familyFiles is empty -- byte-for-byte the no-family-pass shape
+// runMainAndFamilySuite's own inline version produced before this
+// extraction.
+function runFamilyPassIfAny({
+  familyFiles,
+  mainOutcome,
+  spawn,
+  cloneDir,
+  tapDir,
+  mainLogPath,
+  readFile,
+  nowMs,
+  freememFn,
+  startFreeMemSamplerFn,
+  stopFreeMemSamplerFn,
+  log,
+}) {
+  if (familyFiles.length === 0) {
+    return {
+      combinedOutcome: mainOutcome,
+      familyTapPath: null,
+      familyElapsedMs: null,
+      serialFamilyConcurrency: null,
+      familyStartFreeMb: null,
+      familyMinFreeMb: null,
+    };
+  }
+  const familyTapPath = join(tapDir, "runner-output-serial.tap");
+  const familyLogPath = mainLogPath
+    ? mainLogPath.replace(/\.log$/, "-serial.log")
+    : null;
+  const familyPass = runPassWithFreeMemSampler({
+    tapDir,
+    outPathName: "free-mem-sampler-family.json",
+    freememFn,
+    startFreeMemSamplerFn,
+    stopFreeMemSamplerFn,
+    log,
+    runPassFn: () =>
+      spawnSerialFamilyPass({
+        spawn,
+        cloneDir,
+        familyFiles,
+        tapPath: familyTapPath,
+        logPath: familyLogPath,
+        readFile,
+        nowMs,
+      }),
+  });
+  return {
+    combinedOutcome: combinePassOutcomes(mainOutcome, familyPass.outcome),
+    familyTapPath,
+    familyElapsedMs: familyPass.outcome.elapsedMs,
+    serialFamilyConcurrency: SERIAL_FAMILY_CONCURRENCY,
+    familyStartFreeMb: familyPass.startFreeMb,
+    familyMinFreeMb: familyPass.minFreeMb,
+  };
+}
+
+// Pulled out of runMainAndFamilySuite below -- the main pass's own
+// split-and-run-with-sampler wiring, named once for the same line-count
+// reason as runFamilyPassIfAny above. Returns the same
+// {outcome, startFreeMb, minFreeMb} shape runPassWithFreeMemSampler does.
+function runMainPass({
+  serialFamilyList,
+  files,
+  spawn,
+  cloneDir,
+  tapPath,
+  mainConcurrency,
+  mainLogPath,
+  readFile,
+  nowMs,
+  tapDir,
+  freememFn,
+  startFreeMemSamplerFn,
+  stopFreeMemSamplerFn,
+  log,
+}) {
+  let mainFiles = files;
+  let familyFiles = [];
+  if (serialFamilyList) {
+    const split = splitSerialFamily({
+      files,
+      familyList: serialFamilyList,
+      logFn: log,
+    });
+    mainFiles = split.mainFiles;
+    familyFiles = split.familyFiles;
+  }
+  const mainPass = runPassWithFreeMemSampler({
+    tapDir,
+    outPathName: "free-mem-sampler-main.json",
+    freememFn,
+    startFreeMemSamplerFn,
+    stopFreeMemSamplerFn,
+    log,
+    runPassFn: () =>
+      spawnSuiteInClone({
+        spawn,
+        cloneDir,
+        files: mainFiles,
+        tapPath,
+        concurrency: mainConcurrency,
+        logPath: mainLogPath,
+        readFile,
+        nowMs,
+      }),
+  });
+  return { ...mainPass, familyFiles };
+}
+
 function runMainAndFamilySuite({
   spawn,
   cloneDir,
@@ -1132,58 +1359,56 @@ function runMainAndFamilySuite({
   readFile,
   startSampler = startConcurrencySampler,
   stopSampler = stopConcurrencySampler,
+  freememFn = freemem,
+  startFreeMemSamplerFn = startFreeMemSampler,
+  stopFreeMemSamplerFn = stopFreeMemSampler,
   log,
   nowMs,
 }) {
-  let mainFiles = files;
-  let familyFiles = [];
-  if (serialFamilyList) {
-    const split = splitSerialFamily({ files, familyList: serialFamilyList });
-    mainFiles = split.mainFiles;
-    familyFiles = split.familyFiles;
-  }
-
   const samplerChild = startSampler({ outPath: samplerOutPath, log });
-  const mainOutcome = spawnSuiteInClone({
+  const mainPass = runMainPass({
+    serialFamilyList,
+    files,
     spawn,
     cloneDir,
-    files: mainFiles,
     tapPath,
-    concurrency: mainConcurrency,
-    logPath: mainLogPath,
+    mainConcurrency,
+    mainLogPath,
     readFile,
     nowMs,
+    tapDir,
+    freememFn,
+    startFreeMemSamplerFn,
+    stopFreeMemSamplerFn,
+    log,
   });
-
-  let combinedOutcome = mainOutcome;
-  let familyTapPath = null;
-  let familyElapsedMs = null;
-  let serialFamilyConcurrency = null;
-  if (familyFiles.length > 0) {
-    serialFamilyConcurrency = SERIAL_FAMILY_CONCURRENCY;
-    familyTapPath = join(tapDir, "runner-output-serial.tap");
-    const familyLogPath = mainLogPath
-      ? mainLogPath.replace(/\.log$/, "-serial.log")
-      : null;
-    const familyOutcome = spawnSerialFamilyPass({
-      spawn,
-      cloneDir,
-      familyFiles,
-      tapPath: familyTapPath,
-      logPath: familyLogPath,
-      readFile,
-      nowMs,
-    });
-    familyElapsedMs = familyOutcome.elapsedMs;
-    combinedOutcome = combinePassOutcomes(mainOutcome, familyOutcome);
-  }
-
+  const mainOutcome = mainPass.outcome;
+  const {
+    combinedOutcome,
+    familyTapPath,
+    familyElapsedMs,
+    serialFamilyConcurrency,
+    familyStartFreeMb,
+    familyMinFreeMb,
+  } = runFamilyPassIfAny({
+    familyFiles: mainPass.familyFiles,
+    mainOutcome,
+    spawn,
+    cloneDir,
+    tapDir,
+    mainLogPath,
+    readFile,
+    nowMs,
+    freememFn,
+    startFreeMemSamplerFn,
+    stopFreeMemSamplerFn,
+    log,
+  });
   const maxConcurrentNode = stopSampler({
     child: samplerChild,
     outPath: samplerOutPath,
     log,
   });
-
   return {
     mainOutcome,
     combinedOutcome,
@@ -1191,6 +1416,10 @@ function runMainAndFamilySuite({
     familyElapsedMs,
     serialFamilyConcurrency,
     maxConcurrentNode,
+    mainStartFreeMb: mainPass.startFreeMb,
+    mainMinFreeMb: mainPass.minFreeMb,
+    familyStartFreeMb,
+    familyMinFreeMb,
   };
 }
 
@@ -1430,7 +1659,20 @@ function runSuiteWithFreeMemSampler({
     outPath: freeMemOutPath,
     log,
   });
-  const result = runMainAndFamilySuite({ tapDir, log, ...rest });
+  // HYK-439 §2 ⓕ-2 (2R): startFreeMemSamplerFn/stopFreeMemSamplerFn are
+  // passed down EXPLICITLY here too (not left to runMainAndFamilySuite's
+  // own defaults) -- a caller that mocks these to disable the real
+  // sampler child process (every existing fast unit test does, via
+  // `() => null`) must disable it for the new per-pass windows as well,
+  // or those tests would start spawning real `node -e` subprocesses this
+  // round never asked them to.
+  const result = runMainAndFamilySuite({
+    tapDir,
+    log,
+    startFreeMemSamplerFn,
+    stopFreeMemSamplerFn,
+    ...rest,
+  });
   const minFreeMbSampled = stopFreeMemSamplerFn({
     child: freeMemSamplerChild,
     outPath: freeMemOutPath,
@@ -1473,6 +1715,10 @@ function runCloneAndEmitReceipt({
     serialFamilyConcurrency,
     maxConcurrentNode,
     minFreeMbSampled,
+    mainStartFreeMb,
+    mainMinFreeMb,
+    familyStartFreeMb,
+    familyMinFreeMb,
   } = runSuiteWithFreeMemSampler({
     ...samplerOpts,
     cloneDir,
@@ -1509,6 +1755,10 @@ function runCloneAndEmitReceipt({
     familyTapPath,
     familyElapsedMs,
     serialFamilyConcurrency,
+    mainStartFreeMb,
+    mainMinFreeMb,
+    familyStartFreeMb,
+    familyMinFreeMb,
   });
 }
 
@@ -1537,6 +1787,10 @@ function reportRunOutcome({
   familyTapPath,
   familyElapsedMs,
   serialFamilyConcurrency,
+  mainStartFreeMb,
+  mainMinFreeMb,
+  familyStartFreeMb,
+  familyMinFreeMb,
 }) {
   emitRunnerReceipt({
     root,
@@ -1560,6 +1814,10 @@ function reportRunOutcome({
     minFreeMbSampled,
     concurrency: resolvedConcurrency,
     serialFamilyConcurrency,
+    mainStartFreeMb,
+    mainMinFreeMb,
+    familyStartFreeMb,
+    familyMinFreeMb,
   });
   return combinedOutcome.exitCode;
 }
@@ -1707,18 +1965,21 @@ if (invokedDirectly) {
     );
     process.exit(1);
   }
-  // HYK-439 §2 ⓐ/ⓑ: the real CLI invocation always turns on auto-select
+  // HYK-439 §2 ⓐ/ⓑ (2R): the real CLI invocation always turns on auto-select
   // (a no-op whenever --concurrency was given above, per resolveConcurrency
-  // Value's own "explicit wins" check) and always loads/applies the real
-  // serial-family list -- loadSerialFamilyList is fail-closed (throws
-  // loudly on a missing/malformed list file) rather than silently running
-  // without isolation.
+  // Value's own "explicit wins" check) and always applies SERIAL_FAMILY_LIST
+  // -- a hardcoded module constant now, not a file read, so there is no
+  // load-failure path left to be fail-closed about. Membership is resolved
+  // at runtime against this run's own collected files (splitSerialFamily);
+  // an installed target that never collects any family-named file (e.g. no
+  // templates/harness-init/*.test.mjs at all) simply logs two skip lines
+  // and runs a single-pass suite, instead of 1R's ENOENT crash.
   const exitCode = runIsolatedSuite({
     sourceRoot,
     keep,
     concurrency,
     useAutoConcurrency: true,
-    serialFamilyList: loadSerialFamilyList(),
+    serialFamilyList: SERIAL_FAMILY_LIST,
   });
   process.exit(exitCode);
 }
