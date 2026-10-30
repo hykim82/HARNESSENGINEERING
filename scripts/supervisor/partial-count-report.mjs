@@ -48,6 +48,7 @@ import {
   existsSync,
   writeFileSync,
   mkdirSync,
+  statSync,
 } from "node:fs";
 import { execFileSync } from "node:child_process";
 import path from "node:path";
@@ -63,6 +64,9 @@ import {
   computeSuspectedStallResumeIntervals,
   computeCoverageGaps,
   parseKstTimestampMs,
+  renderOutboxAuxNote,
+  UNCOUNTED_EXAMPLES_V1,
+  UNCOUNTED_EXAMPLES_V2,
 } from "./partial-count-core.mjs";
 
 export const DEFAULT_DISPATCH_RECEIPTS_PATH =
@@ -626,6 +630,123 @@ export async function collectGate4Independent({
 }
 
 // ---------------------------------------------------------------------------
+// 수집 4(보조, HYK-255-outbox-aux-1) -- 보내는함(통역) 머리줄 보조 관측.
+// ⛔독립 앵커 아님(ORCH가 쓸 수 있는 폴더) -- ㄱ-4 독립 확인·ㄴ 확인
+// 사건에 전혀 섞이지 않고 renderOutboxAuxNote(partial-count-core.mjs)를
+// 거쳐 «ORCH-writeable 보조 관측» 줄 하나로만 나간다. outboxDir은
+// «인자로만» 받는다 -- 기본값이 없으므로 runPartialCountOnce가 그 값을
+// 안 받으면(기존 모든 호출자, 회귀 0) 이 수집기 자체를 부르지 않는다.
+// ---------------------------------------------------------------------------
+
+const OUTBOX_HANYONG_CONFIRMED_MARK = "한용 확정";
+const OUTBOX_RESPONSIBLE_MARK = "책임자 경유";
+
+// 파일 첫 줄 분류 -- coder-task.md §2 ⓐ: 한 파일이 둘 다 포함하면 «한용
+// 확정»이 우선한다(실측 = "[책임자 경유 · 한용 확정 B-9 위임]" 모양의
+// 머리줄이 실제로 다수 존재 -- 책임자 경유는 거의 모든 문서가 깔고 있는
+// 전달 경로 표시이고, 한용 확정은 그 위에 얹는 더 강한 신호라 상위로
+// 친다). 둘 다 아니면 «분류 불가»로만 센다(조용한 탈락 금지 -- 그 건수도
+// 값으로 남긴다).
+function classifyOutboxFirstLine(firstLine) {
+  if (
+    typeof firstLine === "string" &&
+    firstLine.includes(OUTBOX_HANYONG_CONFIRMED_MARK)
+  ) {
+    return "hanyongConfirmed";
+  }
+  if (
+    typeof firstLine === "string" &&
+    firstLine.includes(OUTBOX_RESPONSIBLE_MARK)
+  ) {
+    return "responsible";
+  }
+  return "unclassified";
+}
+
+// 파일 하나 스캔 -- stat 실패·창 밖·읽기 실패를 한 곳에 몰아 eslint
+// complexity 예산을 지킨다(이 파일의 다른 수집기들과 동일한 분리 이유,
+// 예: classifyReceiptFile). stat·읽기 실패는 sink.readFailures로 값을
+// 남기고(조용한 0 금지) 분류에선 제외한다.
+function scanOutboxFile({
+  name,
+  dir,
+  windowStartMs,
+  windowEndMs,
+  statFn,
+  readFn,
+  sink,
+}) {
+  const full = path.join(dir, name);
+  let st;
+  try {
+    st = statFn(full);
+  } catch {
+    sink.readFailures += 1;
+    return;
+  }
+  if (st.mtimeMs < windowStartMs || st.mtimeMs > windowEndMs) return;
+  let text;
+  try {
+    text = readFn(full, "utf8");
+  } catch {
+    sink.readFailures += 1;
+    return;
+  }
+  sink.scanned += 1;
+  const firstLine = text.split(/\r?\n/)[0] ?? "";
+  sink[classifyOutboxFirstLine(firstLine)] += 1;
+}
+
+export function collectOutboxHeaderCounts({
+  outboxDir,
+  windowStartMs,
+  windowEndMs,
+  readdirFn = readdirSync,
+  readFn = readFileSync,
+  statFn = statSync,
+}) {
+  if (!outboxDir) {
+    return { known: false, reason: "미결선(보내는함 경로 미지정)" };
+  }
+  let names;
+  try {
+    names = readdirFn(outboxDir);
+  } catch (err) {
+    return {
+      known: false,
+      reason: `보내는함 읽기 실패: ${err && err.message ? err.message : String(err)}`,
+    };
+  }
+  // ⛔하위 폴더(보관·전달됨) 미포함 -- coder-task.md §2 ⓐ 근거: 그 폴더로의
+  // 이동은 머리줄 발생 «이후»의 2차 손길(분류·정리)이고, 이 저장소의 다른
+  // 통계 수집기(collectConsumedRounds 등)와 달리 이동 자체가 "다시 쓴
+  // 사건"이 아니다 -- 그런데 mtime은 이동 시각으로 갱신될 수 있어서, 하위
+  // 폴더까지 보면 측정 기간의 뜻이 "그 기간에 머리줄이 났다"에서 "그
+  // 기간에 옮겨졌다"로 조용히 바뀌어버린다(과다/과소 계수). 최초 발화
+  // 신호만 보는 이 보조 칸은 평평한(top-level) *.md만 scan한다.
+  const sink = {
+    responsible: 0,
+    hanyongConfirmed: 0,
+    unclassified: 0,
+    scanned: 0,
+    readFailures: 0,
+  };
+  for (const name of names) {
+    if (!name.endsWith(".md")) continue;
+    scanOutboxFile({
+      name,
+      dir: outboxDir,
+      windowStartMs,
+      windowEndMs,
+      statFn,
+      readFn,
+      sink,
+    });
+  }
+  return { known: true, ...sink };
+}
+
+// ---------------------------------------------------------------------------
 // 조립 -- 한 번의 실행.
 // ---------------------------------------------------------------------------
 
@@ -705,12 +826,34 @@ function buildConsumedCollectorEntry(consumedResult) {
   return { name, ok: true, detail: details.join(" · ") };
 }
 
+// HYK-255-outbox-aux-1 -- 보조 수집기 1줄. outboxResult가 null이면(=
+// outboxDir 미지정, 기존 모든 호출자) 이 줄 자체를 목록에 더하지 않는다
+// (admissionSweep/wake 등 이 저장소의 다른 opt-in 축과 동일한 관례 --
+// "설정 안 함"과 "설정했는데 실패"를 섞지 않는다).
+function buildOutboxCollectorEntry(outboxResult) {
+  if (!outboxResult) return null;
+  if (outboxResult.known !== true) {
+    return {
+      name: "보내는함보조수집기",
+      ok: false,
+      detail: outboxResult.reason,
+    };
+  }
+  const detail =
+    `스캔 ${outboxResult.scanned}건` +
+    (outboxResult.readFailures > 0
+      ? ` · 읽기 실패 ${outboxResult.readFailures}건`
+      : "");
+  return { name: "보내는함보조수집기", ok: true, detail };
+}
+
 function buildCollectors({
   deliveredResult,
   consumedResult,
   watchOk,
   watchSkipped,
   gate4,
+  outboxResult,
 }) {
   const collectors = [];
   collectors.push({
@@ -743,6 +886,8 @@ function buildCollectors({
     ok: false,
     detail: "부재 — 이 라운드 결선 없음(ㄴ 확인은 원리적으로 불가)",
   });
+  const outboxEntry = buildOutboxCollectorEntry(outboxResult);
+  if (outboxEntry) collectors.push(outboxEntry);
   return collectors;
 }
 
@@ -803,6 +948,11 @@ function resolveValueOptions(options) {
     archiveRoot: options.archiveRoot ?? DEFAULT_ARCHIVE_ROOT,
     archiveScanMaxDepth:
       options.archiveScanMaxDepth ?? DEFAULT_ARCHIVE_SCAN_MAX_DEPTH,
+    // HYK-255-outbox-aux-1 -- 기본값 없음(§2 ⓐ "인자로 받음 · 기본값
+    // 없으면 미결선 그대로"). `??`가 아니라 명시적으로 null 기본 --
+    // undefined든 null이든 똑같이 "미지정"으로 다룬다(아래 runPartialCountOnce
+    // 의 `if (outboxDir)` 분기 하나로 충분).
+    outboxDir: options.outboxDir ?? null,
   };
 }
 
@@ -813,28 +963,111 @@ function resolvePortOptions(options, repoRoot) {
     readFn: options.readFn ?? readFileSync,
     readdirFn: options.readdirFn ?? readdirSync,
     existsFn: options.existsFn ?? existsSync,
+    statFn: options.statFn ?? statSync,
     gitWorktreeListExecFn: options.gitWorktreeListExecFn,
   };
 }
 
-export async function runPartialCountOnce(options = {}) {
-  const {
-    now,
-    windowHours,
-    maxMergeChecks,
-    repoRoot,
-    dispatchReceiptsPath,
-    watchLogPath,
-    allowlistPath,
-    extraRepoRoots,
-    archiveRoot,
-    archiveScanMaxDepth,
-  } = resolveValueOptions(options);
-  const { fetchJson, git, readFn, readdirFn, existsFn, gitWorktreeListExecFn } =
-    resolvePortOptions(options, repoRoot);
-  const windowEndMs = now;
-  const windowStartMs = now - windowHours * 60 * 60 * 1000;
+// HYK-255-outbox-aux-1 -- outboxDir이 없으면(기존 모든 호출자, 회귀 0) 이
+// 수집기 자체를 부르지 않는다(eslint max-lines-per-function 예산 때문에
+// runPartialCountOnce 본문에서 떼어낸 것 -- 로직은 그대로).
+function resolveOutboxResult({
+  outboxDir,
+  windowStartMs,
+  windowEndMs,
+  readdirFn,
+  readFn,
+  statFn,
+}) {
+  return outboxDir
+    ? collectOutboxHeaderCounts({
+        outboxDir,
+        windowStartMs,
+        windowEndMs,
+        readdirFn,
+        readFn,
+        statFn,
+      })
+    : null;
+}
 
+// 보고 조립 -- runPartialCountOnce에서 떼어낸 것(eslint max-lines-per-
+// function 예산). outboxResult가 null이면 auxNote는 undefined가 되고
+// buildPartialCountReport의 기본 문면이 그대로 쓰인다(§2 ⓐ 회귀 0).
+//
+// HYK-255-outbox-aux-1-r2 (coder-task.md §2 ⓐ) -- uncountedExamples 선택도
+// outboxResult 존재 여부(= --outbox-dir가 실제로 전달돼 수집기가 결선된
+// 실행인지, 성공/실패 무관)로 갈린다. auxNote와 정확히 같은 조건식을
+// 쓴다 -- 두 문면이 "결선 여부"에 대해 다른 답을 내면(하나는 결선,
+// 하나는 미결선) 보고서 자체가 자기모순이 된다.
+function assemblePartialCountReportText({
+  now,
+  windowStartMs,
+  windowEndMs,
+  deliveredResult,
+  consumedResult,
+  watch,
+  gate4,
+  outboxResult,
+}) {
+  return buildPartialCountReport({
+    generatedAtMs: now,
+    windowStartMs,
+    windowEndMs,
+    delivered: deliveredResult.delivered,
+    consumed: consumedResult.consumed,
+    missingReceipts: deriveMissingReceipts(deliveredResult, consumedResult),
+    gate4,
+    auxNote: outboxResult ? renderOutboxAuxNote(outboxResult) : undefined,
+    // HYK-255-outbox-aux-1-r3 (책임자 판정 2116 §1 ⑵ · REVIEW-r2 P2-1) --
+    // "결선"을 outboxResult 존재(인자 전달됨)가 아니라 수집기 결과
+    // known:true로 좁힌다. 폴더 없음·경로 오타·readdir 실패는
+    // outboxResult가 존재해도 known:false이므로 v1(8)로 남고, 그 사유는
+    // auxNote(위 줄, renderOutboxAuxNote가 이미 UNKNOWN(사유)를 낸다)로
+    // 조용히 사라지지 않는다.
+    uncountedExamples:
+      outboxResult?.known === true
+        ? UNCOUNTED_EXAMPLES_V2
+        : UNCOUNTED_EXAMPLES_V1,
+    // ⛔독립 ㄴ 수집기가 없는 이 라운드에 이 배열을 채우는 생산 경로는
+    // 존재하지 않는다 -- 항상 [](= «확인 0건» 렌더링). 채우려면 독립적인
+    // ㄴ 양성 신호원이 먼저 있어야 한다(PM 권고 «열어 둔다» 그대로).
+    confirmedLnEvents: [],
+    suspected: watch.suspected,
+    collectors: buildCollectors({
+      deliveredResult,
+      consumedResult,
+      watchOk: watch.watchOk,
+      watchSkipped: watch.skipped,
+      gate4,
+      outboxResult,
+    }),
+    lastAliveMs: watch.lastAliveMs,
+    coverageGaps: watch.coverageGaps,
+  });
+}
+
+// 수집 1~3 묶음(배달·소비·watch·ㄱ-4) -- runPartialCountOnce에서 떼어낸
+// 것(eslint max-lines-per-function 예산). 로직·순서·값은 원문과 완전히
+// 동일하다 -- 순수 리팩터, 새 동작 0.
+async function collectPartialCountInputs({
+  windowStartMs,
+  windowEndMs,
+  dispatchReceiptsPath,
+  repoRoot,
+  extraRepoRoots,
+  archiveRoot,
+  archiveScanMaxDepth,
+  watchLogPath,
+  fetchJson,
+  git,
+  allowlistPath,
+  maxMergeChecks,
+  readFn,
+  readdirFn,
+  existsFn,
+  gitWorktreeListExecFn,
+}) {
   const deliveredResult = collectDeliveredRounds({
     dispatchReceiptsPath,
     windowStartMs,
@@ -859,7 +1092,6 @@ export async function runPartialCountOnce(options = {}) {
     windowStartMs,
     windowEndMs,
   });
-
   const gate4 = await collectGate4Independent({
     fetchJson,
     git,
@@ -868,29 +1100,73 @@ export async function runPartialCountOnce(options = {}) {
     windowEndMs,
     maxMergeChecks,
   });
+  return { deliveredResult, consumedResult, watch, gate4 };
+}
 
-  const reportText = buildPartialCountReport({
-    generatedAtMs: now,
+export async function runPartialCountOnce(options = {}) {
+  const {
+    now,
+    windowHours,
+    maxMergeChecks,
+    repoRoot,
+    dispatchReceiptsPath,
+    watchLogPath,
+    allowlistPath,
+    extraRepoRoots,
+    archiveRoot,
+    archiveScanMaxDepth,
+    outboxDir,
+  } = resolveValueOptions(options);
+  const {
+    fetchJson,
+    git,
+    readFn,
+    readdirFn,
+    existsFn,
+    statFn,
+    gitWorktreeListExecFn,
+  } = resolvePortOptions(options, repoRoot);
+  const windowEndMs = now;
+  const windowStartMs = now - windowHours * 60 * 60 * 1000;
+
+  const { deliveredResult, consumedResult, watch, gate4 } =
+    await collectPartialCountInputs({
+      windowStartMs,
+      windowEndMs,
+      dispatchReceiptsPath,
+      repoRoot,
+      extraRepoRoots,
+      archiveRoot,
+      archiveScanMaxDepth,
+      watchLogPath,
+      fetchJson,
+      git,
+      allowlistPath,
+      maxMergeChecks,
+      readFn,
+      readdirFn,
+      existsFn,
+      gitWorktreeListExecFn,
+    });
+
+  const outboxResult = resolveOutboxResult({
+    outboxDir,
     windowStartMs,
     windowEndMs,
-    delivered: deliveredResult.delivered,
-    consumed: consumedResult.consumed,
-    missingReceipts: deriveMissingReceipts(deliveredResult, consumedResult),
+    readdirFn,
+    readFn,
+    statFn,
+  });
+
+  const reportText = assemblePartialCountReportText({
+    now,
+    windowStartMs,
+    windowEndMs,
+    deliveredResult,
+    consumedResult,
+    watch,
     gate4,
-    // ⛔독립 ㄴ 수집기가 없는 이 라운드에 이 배열을 채우는 생산 경로는
-    // 존재하지 않는다 -- 항상 [](= «확인 0건» 렌더링). 채우려면 독립적인
-    // ㄴ 양성 신호원이 먼저 있어야 한다(PM 권고 «열어 둔다» 그대로).
-    confirmedLnEvents: [],
-    suspected: watch.suspected,
-    collectors: buildCollectors({
-      deliveredResult,
-      consumedResult,
-      watchOk: watch.watchOk,
-      watchSkipped: watch.skipped,
-      gate4,
-    }),
-    lastAliveMs: watch.lastAliveMs,
-    coverageGaps: watch.coverageGaps,
+    outboxResult,
   });
 
   return {
@@ -898,6 +1174,7 @@ export async function runPartialCountOnce(options = {}) {
     gate4,
     suspected: watch.suspected,
     coverageGaps: watch.coverageGaps,
+    outboxResult,
   };
 }
 
@@ -907,23 +1184,52 @@ export async function runPartialCountOnce(options = {}) {
 // 관제실 watch/partial-count-report.md -- reach-report.mjs가 읽는 곳).
 // ---------------------------------------------------------------------------
 
+// HYK-255-outbox-aux-1 -- 플래그 하나당 분기 하나이던 기존 if/else 사슬이
+// --outbox-dir 추가로 eslint complexity(상한 12) 예산을 넘겼다. 분기를
+// 줄이기 위해 "플래그 이름 -> opts에 쓰는 법" 표로 바꾼다(로직·플래그
+// 이름·의미는 원문과 완전히 동일 -- 순수 리팩터, 새 동작 0).
+const CLI_FLAG_HANDLERS = Object.freeze({
+  "--report-out": (opts, v) => {
+    opts.reportOut = v;
+  },
+  "--window-hours": (opts, v) => {
+    opts.windowHours = Number(v);
+  },
+  "--max-merge-checks": (opts, v) => {
+    opts.maxMergeChecks = Number(v);
+  },
+  "--dispatch-receipts": (opts, v) => {
+    opts.dispatchReceiptsPath = v;
+  },
+  "--watch-log": (opts, v) => {
+    opts.watchLogPath = v;
+  },
+  "--repo-root": (opts, v) => {
+    opts.repoRoot = v;
+  },
+  "--extra-repo-root": (opts, v) => {
+    if (!opts.extraRepoRoots) opts.extraRepoRoots = [];
+    opts.extraRepoRoots.push(v);
+  },
+  "--archive-root": (opts, v) => {
+    opts.archiveRoot = v;
+  },
+  "--archive-scan-max-depth": (opts, v) => {
+    opts.archiveScanMaxDepth = Number(v);
+  },
+  // HYK-255-outbox-aux-1 -- §2 ⓐ "인자로 받음(기본값 없음)". 생략하면
+  // opts.outboxDir은 undefined -> resolveValueOptions가 null로 정규화
+  // -> 수집기 자체를 건너뛴다(기존 호출자 회귀 0).
+  "--outbox-dir": (opts, v) => {
+    opts.outboxDir = v;
+  },
+});
+
 function parseCliArgs(argv) {
   const opts = {};
   for (let i = 0; i < argv.length; i++) {
-    if (argv[i] === "--report-out") opts.reportOut = argv[++i];
-    else if (argv[i] === "--window-hours") opts.windowHours = Number(argv[++i]);
-    else if (argv[i] === "--max-merge-checks")
-      opts.maxMergeChecks = Number(argv[++i]);
-    else if (argv[i] === "--dispatch-receipts")
-      opts.dispatchReceiptsPath = argv[++i];
-    else if (argv[i] === "--watch-log") opts.watchLogPath = argv[++i];
-    else if (argv[i] === "--repo-root") opts.repoRoot = argv[++i];
-    else if (argv[i] === "--extra-repo-root") {
-      if (!opts.extraRepoRoots) opts.extraRepoRoots = [];
-      opts.extraRepoRoots.push(argv[++i]);
-    } else if (argv[i] === "--archive-root") opts.archiveRoot = argv[++i];
-    else if (argv[i] === "--archive-scan-max-depth")
-      opts.archiveScanMaxDepth = Number(argv[++i]);
+    const handler = CLI_FLAG_HANDLERS[argv[i]];
+    if (handler) handler(opts, argv[++i]);
   }
   return opts;
 }
