@@ -469,7 +469,82 @@ test("buildRunnerReceipt: shape has all §2-1-required fields, schema_version pi
     max_concurrent_node: null,
     node_version: null,
     node_version_warning: null,
+    start_free_mb: null,
+    min_free_mb_sampled: null,
+    concurrency: null,
+    serial_family_concurrency: null,
+    main_start_free_mb: null,
+    main_min_free_mb_sampled: null,
+    family_start_free_mb: null,
+    family_min_free_mb_sampled: null,
   });
+});
+
+// HYK-439 §2 ⓕ-2 (2R): the four per-pass memory fields are carried verbatim
+// when provided, and null when omitted -- same "report, don't guess"
+// posture as the whole-run start_free_mb/min_free_mb_sampled pair above
+// (which these are intentionally separate from, not a replacement for).
+test("buildRunnerReceipt: mainStartFreeMb/mainMinFreeMb/familyStartFreeMb/familyMinFreeMb are carried verbatim as main_start_free_mb/main_min_free_mb_sampled/family_start_free_mb/family_min_free_mb_sampled, all null when omitted", () => {
+  const withValues = buildRunnerReceipt({
+    runnerExit: 0,
+    runnerStatus: RUNNER_STATUS.OK,
+    counts: { tests: 1, pass: 1, fail: 0, skip: 0 },
+    headCommit: "abc",
+    finishedAtMs: 0,
+    mainStartFreeMb: 3100.2,
+    mainMinFreeMb: 2950.1,
+    familyStartFreeMb: 2900.5,
+    familyMinFreeMb: 2400.5,
+  });
+  assert.equal(withValues.main_start_free_mb, 3100.2);
+  assert.equal(withValues.main_min_free_mb_sampled, 2950.1);
+  assert.equal(withValues.family_start_free_mb, 2900.5);
+  assert.equal(withValues.family_min_free_mb_sampled, 2400.5);
+
+  const omitted = buildRunnerReceipt({
+    runnerExit: 0,
+    runnerStatus: RUNNER_STATUS.OK,
+    counts: { tests: 1, pass: 1, fail: 0, skip: 0 },
+    headCommit: "abc",
+    finishedAtMs: 0,
+  });
+  assert.equal(omitted.main_start_free_mb, null);
+  assert.equal(omitted.main_min_free_mb_sampled, null);
+  assert.equal(omitted.family_start_free_mb, null);
+  assert.equal(omitted.family_min_free_mb_sampled, null);
+});
+
+// HYK-439 §2 ⓓ: the four new memory/concurrency fields are carried verbatim
+// when provided, and null (never 0/undefined/omitted) when a caller doesn't
+// pass them -- same "report, don't guess" posture as max_concurrent_node.
+test("buildRunnerReceipt: startFreeMb/minFreeMbSampled/concurrency/serialFamilyConcurrency are carried verbatim as start_free_mb/min_free_mb_sampled/concurrency/serial_family_concurrency, all null when omitted", () => {
+  const withValues = buildRunnerReceipt({
+    runnerExit: 0,
+    runnerStatus: RUNNER_STATUS.OK,
+    counts: { tests: 1, pass: 1, fail: 0, skip: 0 },
+    headCommit: "abc",
+    finishedAtMs: 0,
+    startFreeMb: [2900.1, 2905.3],
+    minFreeMbSampled: 2800.4,
+    concurrency: 1,
+    serialFamilyConcurrency: 1,
+  });
+  assert.deepEqual(withValues.start_free_mb, [2900.1, 2905.3]);
+  assert.equal(withValues.min_free_mb_sampled, 2800.4);
+  assert.equal(withValues.concurrency, 1);
+  assert.equal(withValues.serial_family_concurrency, 1);
+
+  const omitted = buildRunnerReceipt({
+    runnerExit: 0,
+    runnerStatus: RUNNER_STATUS.OK,
+    counts: { tests: 1, pass: 1, fail: 0, skip: 0 },
+    headCommit: "abc",
+    finishedAtMs: 0,
+  });
+  assert.equal(omitted.start_free_mb, null);
+  assert.equal(omitted.min_free_mb_sampled, null);
+  assert.equal(omitted.concurrency, null);
+  assert.equal(omitted.serial_family_concurrency, null);
 });
 
 // HYK-477 §1-3: maxConcurrentNode rides the receipt as its own field,
