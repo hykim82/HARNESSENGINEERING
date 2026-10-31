@@ -11,10 +11,14 @@
 // 겹친다).
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import {
   forwardArgvToPartialCountStep,
   runWatchCliPartialCountStep,
 } from "./watch-run.mjs";
+
+const watchRunPath = fileURLToPath(new URL("./watch-run.mjs", import.meta.url));
 
 test("runWatchCliPartialCountStep: argv의 --outbox-dir가 실제로 options.outboxDir까지 전달된다(변이 10 -- argv 분기 또는 호출부 전달이 끊기면 이 단언이 RED)", async () => {
   let received = null;
@@ -83,4 +87,44 @@ test("forwardArgvToPartialCountStep: forwards the entry point's own real argv (a
   assert.equal(received.watchDir, "/repo/watch");
   assert.equal(received.now, 1000);
   assert.equal(received.result.logPath, "/repo/watch/watch.log");
+});
+
+// HYK-439-entry-wiring-1-r2 §2 ⓑ (REVIEW-r1 P1 fix, proposed verbatim by
+// the reviewer): the test above drives forwardArgvToPartialCountStep()
+// directly, so it stays green even if the invokedDirectly block's OWN call
+// site stops passing its real argv (e.g. a stand-in like argv: []) or stops
+// calling the wrapper at all. Action-based coverage was considered first
+// and ruled out: driving the real CLI entry point for real means driving
+// runWatchOnce's GitHub-querying end-to-end path, which this round's
+// network-ban axis forbids; no short-circuit flag exists in product_scope
+// to stop short of it. So this is a source-string cell: slice the file
+// from the invokedDirectly block to EOF and assert (a) the call site's
+// first key is the bare `argv` variable, not a literal stand-in, (b) that
+// `argv` variable is itself bound to the entry point's own
+// process.argv.slice(2), and (c) the block never calls the wrapped
+// function directly, bypassing the wrapper. Honesty limit: this checks the
+// call site's SHAPE (which identifiers/keys are written), not runtime
+// behavior -- a same-meaning call spelled a different way would be a false
+// red/miss here.
+test("CLI entry point (invokedDirectly block): forwards the entry point's own real argv into forwardArgvToPartialCountStep, never bypassing it (source-string cell)", () => {
+  const source = readFileSync(watchRunPath, "utf8");
+  const blockStart = source.indexOf("if (invokedDirectly) {");
+  assert.ok(blockStart >= 0, "invokedDirectly block marker not found");
+  const block = source.slice(blockStart);
+  assert.match(
+    block,
+    /const argv = process\.argv\.slice\(2\);/,
+    "invokedDirectly block must bind argv to process.argv.slice(2)",
+  );
+  assert.match(
+    block,
+    /forwardArgvToPartialCountStep\(\{\s*argv,/,
+    "invokedDirectly block's forwardArgvToPartialCountStep call must pass its own argv variable as-is (not a stand-in like argv: [])",
+  );
+  const bareCalls = block.match(/\brunWatchCliPartialCountStep\(/g);
+  assert.strictEqual(
+    bareCalls,
+    null,
+    `invokedDirectly block must not call runWatchCliPartialCountStep(...) directly (bypasses forwardArgvToPartialCountStep's unit-test seam), found: ${JSON.stringify(bareCalls)}`,
+  );
 });

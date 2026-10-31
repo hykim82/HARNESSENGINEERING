@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -975,6 +975,39 @@ test("runIsolatedSuiteCli: with no injected stub, actually calls the real runIso
   } finally {
     rmSync(notARepo, { recursive: true, force: true });
   }
+});
+
+// HYK-439-entry-wiring-1-r2 §2 ⓑ (REVIEW-r1 P2 fix, proposed verbatim by
+// the reviewer): the two tests above drive runIsolatedSuiteCli() directly,
+// so they stay green even if the invokedDirectly block's OWN call site
+// stops calling runIsolatedSuiteCli at all (e.g. reverted to the old
+// inline runIsolatedSuite({...}) call, which drops useAutoConcurrency and
+// serialFamilyList). Action-based coverage was considered first (per this
+// round's priority order) and ruled out: proving which function the call
+// site reached would need either a new CLI short-circuit flag (outside
+// product_scope's "thin extraction only, no new flags" line) or driving a
+// real clone+node--test run from this unit test. So this is a
+// source-string cell: slice the file from the invokedDirectly block to EOF
+// and assert the call site names the wrapper, never the bare function.
+// Honesty limit: this checks the call site's SHAPE (which identifier is
+// written), not its runtime behavior -- a same-meaning call spelled a
+// different way (e.g. an aliased import) would be a false red/miss here.
+test("CLI entry point (invokedDirectly block): the call site names runIsolatedSuiteCli, never the bare runIsolatedSuite (source-string cell)", () => {
+  const source = readFileSync(runnerPath, "utf8");
+  const blockStart = source.indexOf("if (invokedDirectly) {");
+  assert.ok(blockStart >= 0, "invokedDirectly block marker not found");
+  const block = source.slice(blockStart);
+  assert.match(
+    block,
+    /\brunIsolatedSuiteCli\(/,
+    "invokedDirectly block must call runIsolatedSuiteCli(...)",
+  );
+  const bareCalls = block.match(/\brunIsolatedSuite\(/g);
+  assert.strictEqual(
+    bareCalls,
+    null,
+    `invokedDirectly block must not call the bare runIsolatedSuite(...) directly (bypasses useAutoConcurrency/serialFamilyList wiring), found: ${JSON.stringify(bareCalls)}`,
+  );
 });
 
 // HYK-439-entry-wiring-1 §2 ⓑ: runIsolatedSuite -> collectFiles's third
