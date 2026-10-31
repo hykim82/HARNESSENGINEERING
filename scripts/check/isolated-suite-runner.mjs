@@ -1957,6 +1957,28 @@ export function runIsolatedSuite({
   }
 }
 
+// HYK-439 §2 ⓐ: thin wrapper around the invokedDirectly block's own
+// construction of the runIsolatedSuite() call below -- unit tests inject a
+// stub via runIsolatedSuiteFn to assert useAutoConcurrency:true and
+// serialFamilyList:SERIAL_FAMILY_LIST actually reach the call, without
+// having to drive a real clone+node--test run. No behavior change: the
+// default forwards to the real runIsolatedSuite exactly as the inline call
+// this replaces did.
+export function runIsolatedSuiteCli({
+  sourceRoot,
+  keep,
+  concurrency,
+  runIsolatedSuiteFn = runIsolatedSuite,
+}) {
+  return runIsolatedSuiteFn({
+    sourceRoot,
+    keep,
+    concurrency,
+    useAutoConcurrency: true,
+    serialFamilyList: SERIAL_FAMILY_LIST,
+  });
+}
+
 const invokedDirectly =
   process.argv[1] &&
   process.argv[1]
@@ -2010,12 +2032,6 @@ if (invokedDirectly) {
   // an installed target that never collects any family-named file (e.g. no
   // templates/harness-init/*.test.mjs at all) simply logs two skip lines
   // and runs a single-pass suite, instead of 1R's ENOENT crash.
-  const exitCode = runIsolatedSuite({
-    sourceRoot,
-    keep,
-    concurrency,
-    useAutoConcurrency: true,
-    serialFamilyList: SERIAL_FAMILY_LIST,
-  });
+  const exitCode = runIsolatedSuiteCli({ sourceRoot, keep, concurrency });
   process.exit(exitCode);
 }

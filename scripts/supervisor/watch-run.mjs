@@ -2056,6 +2056,30 @@ export async function runWatchCliPartialCountStep({
   });
 }
 
+// HYK-439 §2 ⓒ: thin wrapper around the invokedDirectly block's own call
+// to runWatchCliPartialCountStep below -- unit tests inject a stub via
+// runWatchCliPartialCountStepFn to assert the entry point's OWN real argv
+// (not a stand-in like []) is what actually gets forwarded, without
+// driving runWatchOnce's real GitHub-querying end-to-end path. No behavior
+// change: the default forwards to the real runWatchCliPartialCountStep
+// exactly as the inline call this replaces did.
+export function forwardArgvToPartialCountStep({
+  argv,
+  repoRoot,
+  watchDir,
+  now,
+  result,
+  runWatchCliPartialCountStepFn = runWatchCliPartialCountStep,
+}) {
+  return runWatchCliPartialCountStepFn({
+    argv,
+    repoRoot,
+    watchDir,
+    now,
+    result,
+  });
+}
+
 // HYK-481 (coder-task.md §2) -- "ledger는 있는데 lock이 없다"를 가리키는
 // 명시 사유 코드. "미설정"(admissionSweep 자체가 없음)과 값으로 구별
 // 되는 것이 이 라운드의 목적이므로 별도 상수로 뽑는다.
@@ -3305,7 +3329,9 @@ if (invokedDirectly) {
     // 무관하게 계속된다 -- runPartialCountStep은 절대 throw하지 않는다.
     // HYK-255-outbox-aux-1-r3 (REVIEW-r2 P1-1): argv 해석 + 호출부 전달을
     // runWatchCliPartialCountStep으로 옮겼다 -- 이 argv 그대로 넘긴다.
-    await runWatchCliPartialCountStep({
+    // HYK-439 §2 ⓒ: forwardArgvToPartialCountStep을 거쳐 이 전달 자체를
+    // 단위 시험이 붙들 수 있게 한다(위 함수 헤더 참조).
+    await forwardArgvToPartialCountStep({
       argv,
       repoRoot,
       watchDir,
