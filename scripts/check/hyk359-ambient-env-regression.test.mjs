@@ -1492,10 +1492,19 @@ function readWholeNpmTestStepBlock(enforceYmlText) {
   return m ? m[0] : null;
 }
 
+// HYK-477-ambient-sweep-ci-2 (검토 1R P2-1, 책임자 판정 0435 답): a YAML
+// comment line (first non-whitespace char `#`) must not count as "pinned" --
+// `.test(block)` with no line-start anchor matched the var's text anywhere in
+// the block, including inside `# HARNESS_FULL_AMBIENT_SWEEP: "1"`. Strip
+// comment lines out before testing, so only an ACTIVE env line can pass.
 function npmTestStepHasFullAmbientSweepEnvPinned(enforceYmlText) {
   const block = readWholeNpmTestStepBlock(enforceYmlText);
   if (block === null) return false;
-  return /HARNESS_FULL_AMBIENT_SWEEP:\s*"1"\s*$/m.test(block);
+  const activeLines = block
+    .split("\n")
+    .filter((line) => !/^\s*#/.test(line))
+    .join("\n");
+  return /HARNESS_FULL_AMBIENT_SWEEP:\s*"1"\s*$/m.test(activeLines);
 }
 
 test('HYK-477 §2 ⓒ-④ 정적 가드: enforce.yml의 \'npm test\' 단계가 HARNESS_FULL_AMBIENT_SWEEP="1" env를 값까지 그대로 들고 있다 -- 지우거나 "0"으로 바꾸면 RED', () => {
@@ -1507,6 +1516,27 @@ test('HYK-477 §2 ⓒ-④ 정적 가드: enforce.yml의 \'npm test\' 단계가 H
     npmTestStepHasFullAmbientSweepEnvPinned(text),
     true,
     `enforce.yml's 'npm test' step must carry env: HARNESS_FULL_AMBIENT_SWEEP: "1" -- this is the only anchor that makes CI actually run the full nested sweep (HYK-359 완료조건4). Observed step block:\n${stepBlock}`,
+  );
+});
+
+// HYK-477-ambient-sweep-ci-2 (검토 1R P2-1 헛시험 방지): drive
+// npmTestStepHasFullAmbientSweepEnvPinned directly against a synthetic
+// string, not the real enforce.yml, so this guard's comment-line exclusion
+// is pinned independently of the ⓒ-④ test above.
+test("HYK-477-ambient-sweep-ci-2 합성 직접 구동: npmTestStepHasFullAmbientSweepEnvPinned는 활성 env 줄만 인정하고, 같은 줄을 YAML 주석으로 바꾸면 false다", () => {
+  const stepName =
+    "- name: check test suites (scripts/check + scripts/relay + scripts/relay/adapters + scripts/supervisor + templates/harness-init *.test.mjs)\n";
+  const activeBlock = `${stepName}        run: npm test\n        env:\n          HARNESS_FULL_AMBIENT_SWEEP: "1"\n`;
+  const commentedBlock = `${stepName}        run: npm test\n        env:\n          # HARNESS_FULL_AMBIENT_SWEEP: "1"\n`;
+  assert.equal(
+    npmTestStepHasFullAmbientSweepEnvPinned(activeBlock),
+    true,
+    "active env line must be recognized",
+  );
+  assert.equal(
+    npmTestStepHasFullAmbientSweepEnvPinned(commentedBlock),
+    false,
+    "commenting out the same line must not be recognized as pinned",
   );
 });
 
