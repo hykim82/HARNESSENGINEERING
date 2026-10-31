@@ -1470,21 +1470,39 @@ function readWorkingTreeEnforceYml(root) {
   );
 }
 
-const NPM_TEST_STEP_PRECEDING_BLOCK_RE =
-  /- name: check test suites \(scripts\/check \+ scripts\/relay \+ scripts\/relay\/adapters \+ scripts\/supervisor \+ templates\/harness-init \*\.test\.mjs\)\n([\s\S]*?)run: npm test/;
+// HYK-477 (실측 회귀, run1 영수증 fail 1): `run:` stays the FIRST child key,
+// immediately after the step name line, on purpose -- nc-ci-enforce.
+// test.mjs:204-209's own mutation fixture string-replaces the literal
+// substring "<step name line>\n        run:" and asserts the replace
+// actually changed the text (`assert.notEqual(mutated, ENFORCE_YML, ...)`).
+// Inserting `env:` BETWEEN the name line and `run:` (this round's first
+// attempt) silently broke that unrelated, out-of-scope file's anchor --
+// `.replace()` found nothing to replace, so `mutated === ENFORCE_YML` and
+// that fixture assumption assertion itself failed (run1's lone red,
+// deterministic on rerun, confirmed via `--test-name-pattern` isolation).
+// Fix: keep `run: npm test` where it always was and append `env:` AFTER it
+// -- step-level key order is not semantically significant to GitHub
+// Actions, and this guard below is written to find the var regardless of
+// which side of `run:` it lands on, so it still reacts to an in-place,
+// uncommitted mutation of EITHER key.
+function readWholeNpmTestStepBlock(enforceYmlText) {
+  const m = enforceYmlText.match(
+    /- name: check test suites \(scripts\/check \+ scripts\/relay \+ scripts\/relay\/adapters \+ scripts\/supervisor \+ templates\/harness-init \*\.test\.mjs\)\n(?:[ \t]{7,}\S.*\n?)*/,
+  );
+  return m ? m[0] : null;
+}
 
 function npmTestStepHasFullAmbientSweepEnvPinned(enforceYmlText) {
-  const m = enforceYmlText.match(NPM_TEST_STEP_PRECEDING_BLOCK_RE);
-  if (!m) return false;
-  return /HARNESS_FULL_AMBIENT_SWEEP:\s*"1"\s*$/m.test(m[1]);
+  const block = readWholeNpmTestStepBlock(enforceYmlText);
+  if (block === null) return false;
+  return /HARNESS_FULL_AMBIENT_SWEEP:\s*"1"\s*$/m.test(block);
 }
 
 test('HYK-477 §2 ⓒ-④ 정적 가드: enforce.yml의 \'npm test\' 단계가 HARNESS_FULL_AMBIENT_SWEEP="1" env를 값까지 그대로 들고 있다 -- 지우거나 "0"으로 바꾸면 RED', () => {
   const root = repoRoot();
   const text = readWorkingTreeEnforceYml(root);
   const stepBlock =
-    text.match(NPM_TEST_STEP_PRECEDING_BLOCK_RE)?.[1] ??
-    "(step not found at all)";
+    readWholeNpmTestStepBlock(text) ?? "(step not found at all)";
   assert.equal(
     npmTestStepHasFullAmbientSweepEnvPinned(text),
     true,
