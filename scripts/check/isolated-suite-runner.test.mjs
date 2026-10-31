@@ -17,6 +17,7 @@ import {
   resolveAutoConcurrency,
   resolveNodeVersionWarning,
   runIsolatedSuite,
+  runIsolatedSuiteCli,
   splitSerialFamily,
 } from "./isolated-suite-runner.mjs";
 
@@ -935,6 +936,78 @@ test("CLI: --repo-root with no following value is rejected, not silently undefin
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /unrecognized argument/);
   assert.match(result.stderr, /--repo-root/);
+});
+
+// ---------------------------------------------------------------------------
+// HYK-439-entry-wiring-1 §2 ⓐ: runIsolatedSuiteCli -- the invokedDirectly
+// block's own call-site wiring for useAutoConcurrency/serialFamilyList.
+// Driven directly (not via runCli's child process) with a stub injected in
+// place of the real runIsolatedSuite, so this stays a unit test instead of
+// a real clone+node--test run.
+test("runIsolatedSuiteCli: forwards useAutoConcurrency:true and serialFamilyList:SERIAL_FAMILY_LIST to runIsolatedSuite, along with the CLI's own parsed args", () => {
+  let received;
+  const exitCode = runIsolatedSuiteCli({
+    sourceRoot: "/repo",
+    keep: true,
+    concurrency: 3,
+    runIsolatedSuiteFn: (args) => {
+      received = args;
+      return 0;
+    },
+  });
+  assert.equal(exitCode, 0);
+  assert.equal(received.sourceRoot, "/repo");
+  assert.equal(received.keep, true);
+  assert.equal(received.concurrency, 3);
+  assert.equal(received.useAutoConcurrency, true);
+  assert.equal(received.serialFamilyList, SERIAL_FAMILY_LIST);
+});
+
+test("runIsolatedSuiteCli: with no injected stub, actually calls the real runIsolatedSuite (default wiring, not just the test double path)", () => {
+  // A bogus, non-git sourceRoot makes the real runIsolatedSuite's `git
+  // rev-parse --show-toplevel` fail fast -- proving this reached the real
+  // function (default param), not merely returning without calling it.
+  const notARepo = mkdtempSync(join(tmpdir(), "hyk439-not-a-repo-"));
+  try {
+    assert.throws(() => {
+      runIsolatedSuiteCli({ sourceRoot: notARepo, keep: false });
+    });
+  } finally {
+    rmSync(notARepo, { recursive: true, force: true });
+  }
+});
+
+// HYK-439-entry-wiring-1 §2 ⓑ: runIsolatedSuite -> collectFiles's third
+// argument. cloneAndCollectFiles already forwards `{ log }` (see that
+// function's own header) -- this pins it with a collectFiles stub that
+// calls the log it receives, so dropping that forwarding turns this RED.
+test("runIsolatedSuite: forwards its own log() to collectFiles as the third argument (not collectTestFiles' silent no-op default)", () => {
+  const execFile = (cmd, args) => {
+    if (args[0] === "rev-parse" && args[1] === "--show-toplevel")
+      return "/src\n";
+    if (args[0] === "rev-parse" && args[1] === "HEAD") return "deadbeef\n";
+    if (args[0] === "status") return "";
+    if (args[0] === "clone") return "";
+    throw new Error(`unexpected execFile: ${cmd} ${args.join(" ")}`);
+  };
+  const spawn = () => ({ status: 0 });
+  const logs = [];
+  runIsolatedSuite({
+    startSampler: () => null,
+    stopSampler: () => null,
+    startFreeMemSamplerFn: () => null,
+    stopFreeMemSamplerFn: () => null,
+    execFile,
+    spawn,
+    log: (m) => logs.push(m),
+    collectFiles: (dir, patterns, opts) => {
+      opts.log("HYK-439-ENTRY-WIRING-MARKER");
+      return [];
+    },
+    readFile: throwingReadFile,
+    writeReceipt: noopWriteReceipt,
+  });
+  assert.ok(logs.some((l) => l.includes("HYK-439-ENTRY-WIRING-MARKER")));
 });
 
 // ---------------------------------------------------------------------------

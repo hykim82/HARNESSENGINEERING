@@ -11,7 +11,10 @@
 // 겹친다).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { runWatchCliPartialCountStep } from "./watch-run.mjs";
+import {
+  forwardArgvToPartialCountStep,
+  runWatchCliPartialCountStep,
+} from "./watch-run.mjs";
 
 test("runWatchCliPartialCountStep: argv의 --outbox-dir가 실제로 options.outboxDir까지 전달된다(변이 10 -- argv 분기 또는 호출부 전달이 끊기면 이 단언이 RED)", async () => {
   let received = null;
@@ -52,4 +55,32 @@ test("runWatchCliPartialCountStep: --outbox-dir을 안 주면(CLI 기본값) opt
   assert.equal(received.outboxDir, null);
   assert.equal(received.repoRoot, "/repo");
   assert.equal(received.watchLogPath, "/repo/watch/watch.log");
+});
+
+// HYK-439-entry-wiring-1 §2 ⓒ: forwardArgvToPartialCountStep -- the
+// invokedDirectly block's own call-site wiring that hands its real argv
+// (not a stand-in like []) into runWatchCliPartialCountStep. Driven
+// directly with a stub injected via runWatchCliPartialCountStepFn, so this
+// stays a unit test instead of driving runWatchOnce's real GitHub-querying
+// end-to-end path.
+test("forwardArgvToPartialCountStep: forwards the entry point's own real argv (and the other call-site args) into runWatchCliPartialCountStep unchanged", async () => {
+  let received = null;
+  const realArgv = ["--repo-root", "/repo", "--outbox-dir", "/outbox"];
+  const outcome = await forwardArgvToPartialCountStep({
+    argv: realArgv,
+    repoRoot: "/repo",
+    watchDir: "/repo/watch",
+    now: 1000,
+    result: { logPath: "/repo/watch/watch.log" },
+    runWatchCliPartialCountStepFn: async (args) => {
+      received = args;
+      return { ran: true, ok: true };
+    },
+  });
+  assert.equal(outcome.ok, true);
+  assert.equal(received.argv, realArgv);
+  assert.equal(received.repoRoot, "/repo");
+  assert.equal(received.watchDir, "/repo/watch");
+  assert.equal(received.now, 1000);
+  assert.equal(received.result.logPath, "/repo/watch/watch.log");
 });
