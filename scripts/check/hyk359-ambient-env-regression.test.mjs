@@ -88,6 +88,13 @@
 // repo's tooling might run under, then parse ONLY that pinned shape.
 // Fix for ①: raise `maxBuffer` generously AND treat `res.error` as its own,
 // distinct, loud failure -- never silently reinterpreted as "0 tests ran".
+//
+// HYK-477 (책임자 판정 2026-11-01 0215 답): this file's own completion-
+// condition-4 test (below, `shouldRunFullAmbientSweep`) now runs in full
+// ONLY in CI (enforce.yml sets HARNESS_FULL_AMBIENT_SWEEP=1 on the `npm
+// test` step) -- the full re-sweep's cost no longer lands on every local
+// worker round, while the contract itself still runs, unmodified, at the
+// merge gate every time.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync, execFileSync } from "node:child_process";
@@ -1413,69 +1420,174 @@ test("HYK-377 완료조건⑤ 열거ⓓ (swept 빈 배열 무협조 방어): swe
   }
 });
 
-test("HYK-359 완료조건4 (3R) + HYK-466 1R (저장소 쓰기 무결성): CI-canonical 시험 디렉토리 전체(예외 목록 제외, 정확한 개수)가 떠도는 ADMISSION_LEDGER_PATH/ADMISSION_LOCK_PATH/DISPATCH_RECEIPT_PATH 아래에서도 fail 0이고, 같은 스윕이 도는 동안 대상 checkout의 추적 대상 경로가 바이트 동일하게 유지된다 -- 보호 대상이 목록 없이 디스크에서 직접 발견되고, 예외 더하기·목록 잘라내기·저장소에 몰래 쓰기 어느 쪽도 조용히 통과하지 못한다", () => {
+// HYK-477 (책임자 판정 2026-11-01 0215 답, ORCH-126 조사 상신 (c) 채택): the
+// nested sweep the test below runs re-executes the ENTIRE CI-canonical suite
+// a second time inside itself (collectTestFiles(root) over the same
+// TEST_DIRS a bare `npm test` already swept once) -- measured at
+// 78.9~81.9% of a local worker round's runner main-pass wall time (ORCH-126
+// 상신, 25 정상 회차 표본, 740~975초). HYK-359's own completion-condition-4
+// contract ("floating ADMISSION_LEDGER_PATH/ADMISSION_LOCK_PATH/
+// DISPATCH_RECEIPT_PATH produces the SAME result as unset, swept over the
+// full CI-canonical set, exact count") still needs an anchor that actually
+// re-executes that full sweep -- but the anchor does not have to be every
+// local worker round. The merge gate (CI, enforce.yml) already runs once
+// per PR and is the one place "did the full sweep really run, with the
+// full exact count" leaves a human-verifiable trace (that step's own
+// duration_ms in the CI log). Opt-in via an explicit env var only -- never a
+// derived signal like `process.env.CI` (a provider/local distinction is not
+// this var's job; a floating/ambient CI-style var is exactly what the test
+// this guards is about).
+const FULL_AMBIENT_SWEEP_ENV_VAR = "HARNESS_FULL_AMBIENT_SWEEP";
+
+// Exported so this round's own production-entry-point test (below, "HYK-477
+// §2 ⓒ-⑤") can drive the SAME decision directly, rather than re-implementing
+// the condition a second time (HYK-359 3R/HYK-371 2R precedent in this same
+// file: a duplicated predicate is exactly what silently drifts from the
+// thing it's meant to mirror).
+export function shouldRunFullAmbientSweep(env) {
+  return env[FULL_AMBIENT_SWEEP_ENV_VAR] === "1";
+}
+
+// Pinned skip-reason text (책임자 판정 2026-11-01 0215 답 원문 포함,
+// coder-task.md product_scope ① -- this exact string, not a paraphrase;
+// scripts/check/skip-inventory-contract.test.mjs pins this test BY NAME and
+// asserts this same reason text when the skip fires).
+const FULL_AMBIENT_SWEEP_SKIP_REASON =
+  "HYK-359 계약은 CI(enforce.yml env)에서 전수 유지 · 로컬 러너 생략 · 책임자 판정 2026-11-01 0215 답";
+
+// HYK-477 §2 ⓒ-④ 정적 가드: reads the WORKING-TREE copy of enforce.yml, NOT
+// `git show HEAD:...` -- unlike nc-ci-enforce.test.mjs (that file's own
+// module header explains it deliberately only trusts COMMITTED text,
+// because the real CI gate only ever executes the committed text), this
+// round's own §2 ⓒ mutation verification mutates enforce.yml IN PLACE,
+// uncommitted, and this guard must react to that uncommitted mutation to
+// prove RED before this round's one commit exists at all. The two files'
+// read sources intentionally disagree for that reason.
+function readWorkingTreeEnforceYml(root) {
+  return readFileSync(
+    join(root, ".github", "workflows", "enforce.yml"),
+    "utf8",
+  );
+}
+
+const NPM_TEST_STEP_PRECEDING_BLOCK_RE =
+  /- name: check test suites \(scripts\/check \+ scripts\/relay \+ scripts\/relay\/adapters \+ scripts\/supervisor \+ templates\/harness-init \*\.test\.mjs\)\n([\s\S]*?)run: npm test/;
+
+function npmTestStepHasFullAmbientSweepEnvPinned(enforceYmlText) {
+  const m = enforceYmlText.match(NPM_TEST_STEP_PRECEDING_BLOCK_RE);
+  if (!m) return false;
+  return /HARNESS_FULL_AMBIENT_SWEEP:\s*"1"\s*$/m.test(m[1]);
+}
+
+test('HYK-477 §2 ⓒ-④ 정적 가드: enforce.yml의 \'npm test\' 단계가 HARNESS_FULL_AMBIENT_SWEEP="1" env를 값까지 그대로 들고 있다 -- 지우거나 "0"으로 바꾸면 RED', () => {
   const root = repoRoot();
-  const allFiles = collectTestFiles(root); // relative paths, e.g. "scripts/check/foo.test.mjs"
-
-  // HYK-371 2R P1-1 (불변식 A): compare the SORTED MEMBER LIST, not the
-  // size -- a size-only check (3R's `EXCEPTIONS.size === EXPECTED_
-  // EXCEPTIONS_SIZE`) passes unchanged if an entry is swapped for a
-  // different existing file name (same size, different actual protected
-  // set). deepEqual on the sorted array fails the moment membership
-  // diverges from the pinned list, regardless of size.
-  assert.deepEqual(
-    [...EXCEPTIONS].sort(),
-    [...EXPECTED_EXCEPTIONS].sort(),
-    `EXCEPTIONS = ${JSON.stringify([...EXCEPTIONS].sort())}, expected exactly ${JSON.stringify([...EXPECTED_EXCEPTIONS].sort())} -- if this change is deliberate, update EXPECTED_EXCEPTIONS in the SAME diff; if not, an entry was silently added, removed, or swapped for a different file`,
-  );
-
-  const swept = allFiles.filter((relPath) => {
-    const name = basename(relPath);
-    return name !== THIS_FILE_BASENAME && !EXCEPTIONS.has(name);
-  });
-
-  // HYK-359 3R P2: exact equality recomputed from PRIMARY sources
-  // (allFiles.length, EXCEPTIONS.size), not trusted from `swept.length`
-  // itself -- a mutation applied to `swept` AFTER this point (e.g. a
-  // trailing `.slice(0, N)`) diverges from this independently-derived
-  // expectation and goes red, whichever direction it moves. Legitimate
-  // growth (a new .test.mjs file anywhere in TEST_DIRS) changes
-  // `allFiles.length` and `swept.length` together on the same fresh
-  // `collectTestFiles` read, so the equality still holds with no edit here.
-  // (HYK-371 2R: this count check catches "one MORE/FEWER file swept" but
-  // NOT "the same count, different membership" -- that's what the
-  // deepEqual above is for. The two checks are complementary, neither
-  // subsumes the other.)
-  const expectedSweptCount = allFiles.length - 1 - EXCEPTIONS.size;
+  const text = readWorkingTreeEnforceYml(root);
+  const stepBlock =
+    text.match(NPM_TEST_STEP_PRECEDING_BLOCK_RE)?.[1] ??
+    "(step not found at all)";
   assert.equal(
-    swept.length,
-    expectedSweptCount,
-    `swept ${swept.length} file(s), expected exactly ${expectedSweptCount} (= ${allFiles.length} CI-canonical files - 1 self - ${EXCEPTIONS.size} exception(s)) -- the swept set was trimmed or padded after being built correctly`,
+    npmTestStepHasFullAmbientSweepEnvPinned(text),
+    true,
+    `enforce.yml's 'npm test' step must carry env: HARNESS_FULL_AMBIENT_SWEEP: "1" -- this is the only anchor that makes CI actually run the full nested sweep (HYK-359 완료조건4). Observed step block:\n${stepBlock}`,
   );
-
-  const dir = mkdtempSync(join(tmpdir(), "hyk359-ambient-regression-"));
-  // HYK-359 4R (ORCH 실사고): deliberately NOT wrapped in try/finally --
-  // if runSweepAndAssert throws, `dir` (and the sweep-full-stdout.log it
-  // wrote inside itself) is left on disk on purpose, so a human can open
-  // it after the fact. A `finally { rmSync(dir, ...) }` here would delete
-  // the only place the failing subtest's full context survived, exactly
-  // the mistake this round is fixing. Only a genuine pass reaches the
-  // cleanup below.
-  const beforeStatus = snapshotRepoStatus(root);
-  runProductionSweep({ root, swept, dir });
-  const afterStatus = snapshotRepoStatus(root);
-  // HYK-466 1R (저장소 쓰기 무결성, coder-task.md §2/§7): A=0("저장소에
-  // 쓰는 시험 0건")을 사람이 한 번 센 값이 아니라 매 실행마다 기계로
-  // 지킨다 -- 시작 시점 상태(beforeStatus)를 기준선으로 삼아 스윕
-  // 자체가 그 위에 무엇을 «추가로» 바꿨는지만 비교하므로, 미커밋
-  // 변경이 있는 워크트리에서 돌려도 오탐하지 않는다.
-  assert.equal(
-    afterStatus,
-    beforeStatus,
-    `CI-canonical 스윕이 도는 동안 저장소(${JSON.stringify(root)})의 추적 대상 경로가 바뀌었다 -- 스윕 전 상태:\n${beforeStatus || "(clean)"}\n스윕 후 상태:\n${afterStatus || "(clean)"}\n이 시험은 A=0(저장소에 쓰는 시험 0건)을 매 실행마다 기계로 지키기 위한 것이다(coder-task.md §2/§7) -- 새로 나타난 항목이 있다면 그 시험이 저장소에 쓴 것이다`,
-  );
-  rmSync(dir, { recursive: true, force: true });
 });
+
+test('HYK-477 §2 ⓒ-⑤ 생산 진입점: shouldRunFullAmbientSweep을 직접 구동("1"→true · 미설정·"0"·"true"→false)하고, HYK-359 완료조건4 시험의 skip 옵션이 바로 이 함수를 호출한다는 것을 소스 구조로 단언한다(헛시험 방지)', () => {
+  assert.equal(shouldRunFullAmbientSweep({}), false, "미설정 -> false");
+  assert.equal(
+    shouldRunFullAmbientSweep({ [FULL_AMBIENT_SWEEP_ENV_VAR]: "0" }),
+    false,
+    '"0" -> false',
+  );
+  assert.equal(
+    shouldRunFullAmbientSweep({ [FULL_AMBIENT_SWEEP_ENV_VAR]: "true" }),
+    false,
+    '"true" -> false',
+  );
+  assert.equal(
+    shouldRunFullAmbientSweep({ [FULL_AMBIENT_SWEEP_ENV_VAR]: "1" }),
+    true,
+    '"1" -> true',
+  );
+
+  const source = readFileSync(fileURLToPath(import.meta.url), "utf8");
+  assert.match(
+    source,
+    /test\(\s*"HYK-359 완료조건4 \(3R\) \+ HYK-466 1R \(저장소 쓰기 무결성\)[^"]*",\s*\{\s*skip:\s*!shouldRunFullAmbientSweep\(process\.env\)\s*&&\s*FULL_AMBIENT_SWEEP_SKIP_REASON,?\s*\},/,
+    "the HYK-359 완료조건4 test()'s skip option must call shouldRunFullAmbientSweep(process.env) directly and gate on the pinned FULL_AMBIENT_SWEEP_SKIP_REASON constant -- a parallel/duplicated condition here would not be caught by driving the exported function alone (헛시험 방지)",
+  );
+});
+
+test(
+  "HYK-359 완료조건4 (3R) + HYK-466 1R (저장소 쓰기 무결성): CI-canonical 시험 디렉토리 전체(예외 목록 제외, 정확한 개수)가 떠도는 ADMISSION_LEDGER_PATH/ADMISSION_LOCK_PATH/DISPATCH_RECEIPT_PATH 아래에서도 fail 0이고, 같은 스윕이 도는 동안 대상 checkout의 추적 대상 경로가 바이트 동일하게 유지된다 -- 보호 대상이 목록 없이 디스크에서 직접 발견되고, 예외 더하기·목록 잘라내기·저장소에 몰래 쓰기 어느 쪽도 조용히 통과하지 못한다",
+  {
+    skip:
+      !shouldRunFullAmbientSweep(process.env) && FULL_AMBIENT_SWEEP_SKIP_REASON,
+  },
+  () => {
+    const root = repoRoot();
+    const allFiles = collectTestFiles(root); // relative paths, e.g. "scripts/check/foo.test.mjs"
+
+    // HYK-371 2R P1-1 (불변식 A): compare the SORTED MEMBER LIST, not the
+    // size -- a size-only check (3R's `EXCEPTIONS.size === EXPECTED_
+    // EXCEPTIONS_SIZE`) passes unchanged if an entry is swapped for a
+    // different existing file name (same size, different actual protected
+    // set). deepEqual on the sorted array fails the moment membership
+    // diverges from the pinned list, regardless of size.
+    assert.deepEqual(
+      [...EXCEPTIONS].sort(),
+      [...EXPECTED_EXCEPTIONS].sort(),
+      `EXCEPTIONS = ${JSON.stringify([...EXCEPTIONS].sort())}, expected exactly ${JSON.stringify([...EXPECTED_EXCEPTIONS].sort())} -- if this change is deliberate, update EXPECTED_EXCEPTIONS in the SAME diff; if not, an entry was silently added, removed, or swapped for a different file`,
+    );
+
+    const swept = allFiles.filter((relPath) => {
+      const name = basename(relPath);
+      return name !== THIS_FILE_BASENAME && !EXCEPTIONS.has(name);
+    });
+
+    // HYK-359 3R P2: exact equality recomputed from PRIMARY sources
+    // (allFiles.length, EXCEPTIONS.size), not trusted from `swept.length`
+    // itself -- a mutation applied to `swept` AFTER this point (e.g. a
+    // trailing `.slice(0, N)`) diverges from this independently-derived
+    // expectation and goes red, whichever direction it moves. Legitimate
+    // growth (a new .test.mjs file anywhere in TEST_DIRS) changes
+    // `allFiles.length` and `swept.length` together on the same fresh
+    // `collectTestFiles` read, so the equality still holds with no edit here.
+    // (HYK-371 2R: this count check catches "one MORE/FEWER file swept" but
+    // NOT "the same count, different membership" -- that's what the
+    // deepEqual above is for. The two checks are complementary, neither
+    // subsumes the other.)
+    const expectedSweptCount = allFiles.length - 1 - EXCEPTIONS.size;
+    assert.equal(
+      swept.length,
+      expectedSweptCount,
+      `swept ${swept.length} file(s), expected exactly ${expectedSweptCount} (= ${allFiles.length} CI-canonical files - 1 self - ${EXCEPTIONS.size} exception(s)) -- the swept set was trimmed or padded after being built correctly`,
+    );
+
+    const dir = mkdtempSync(join(tmpdir(), "hyk359-ambient-regression-"));
+    // HYK-359 4R (ORCH 실사고): deliberately NOT wrapped in try/finally --
+    // if runSweepAndAssert throws, `dir` (and the sweep-full-stdout.log it
+    // wrote inside itself) is left on disk on purpose, so a human can open
+    // it after the fact. A `finally { rmSync(dir, ...) }` here would delete
+    // the only place the failing subtest's full context survived, exactly
+    // the mistake this round is fixing. Only a genuine pass reaches the
+    // cleanup below.
+    const beforeStatus = snapshotRepoStatus(root);
+    runProductionSweep({ root, swept, dir });
+    const afterStatus = snapshotRepoStatus(root);
+    // HYK-466 1R (저장소 쓰기 무결성, coder-task.md §2/§7): A=0("저장소에
+    // 쓰는 시험 0건")을 사람이 한 번 센 값이 아니라 매 실행마다 기계로
+    // 지킨다 -- 시작 시점 상태(beforeStatus)를 기준선으로 삼아 스윕
+    // 자체가 그 위에 무엇을 «추가로» 바꿨는지만 비교하므로, 미커밋
+    // 변경이 있는 워크트리에서 돌려도 오탐하지 않는다.
+    assert.equal(
+      afterStatus,
+      beforeStatus,
+      `CI-canonical 스윕이 도는 동안 저장소(${JSON.stringify(root)})의 추적 대상 경로가 바뀌었다 -- 스윕 전 상태:\n${beforeStatus || "(clean)"}\n스윕 후 상태:\n${afterStatus || "(clean)"}\n이 시험은 A=0(저장소에 쓰는 시험 0건)을 매 실행마다 기계로 지키기 위한 것이다(coder-task.md §2/§7) -- 새로 나타난 항목이 있다면 그 시험이 저장소에 쓴 것이다`,
+    );
+    rmSync(dir, { recursive: true, force: true });
+  },
+);
 
 // HYK-371 3R (검토자 2R-3 P1, coder-task.md §2): 2R의 "불변식 B" 시험은
 // 8개×500ms 픽스처의 총 소요시간이 900ms를 넘는지로 캡 삭제를 판정했다 --
