@@ -62,9 +62,18 @@ test("collectTestFiles: lists *.test.mjs per dir, sorted, joined with the dir pr
   ]);
 });
 
-test("collectTestFiles: a directory that does not exist in the clone throws (fail-closed), never silently skipped", () => {
+// HYK-439 §2 ⓑ: a NON-ENOENT read failure (the directory exists but can't
+// be read, e.g. a permission error) stays fail-closed, byte-for-byte the
+// prior throw -- discriminated on `err.code`, never on message text
+// (HYK-262). This replaces the pre-HYK-439 version of this test, which used
+// a bare `new Error("ENOENT")` with no `.code` set at all -- that mock never
+// exercised a real ENOENT path either before or after this round, it just
+// happened to land in the single fail-closed branch that existed back then.
+test("collectTestFiles: a non-ENOENT read failure (e.g. a permission error) stays fail-closed, never skipped", () => {
   const readdir = () => {
-    throw new Error("ENOENT");
+    const err = new Error("EACCES: permission denied");
+    err.code = "EACCES";
+    throw err;
   };
   assert.throws(
     () => collectTestFiles("/repo", ["scripts/missing"], { readdir }),
@@ -72,11 +81,13 @@ test("collectTestFiles: a directory that does not exist in the clone throws (fai
   );
 });
 
-test("collectTestFiles: fail-closed applies per directory -- an earlier readable dir's files do not mask a later dir's read failure", () => {
+test("collectTestFiles: fail-closed (non-ENOENT) applies per directory -- an earlier readable dir's files do not mask a later dir's read failure", () => {
   const readdir = (path) => {
     const key = path.replace(/\\/g, "/").replace(/^\/repo\//, "");
     if (key === "scripts/check") return ["a.test.mjs"];
-    throw new Error("ENOENT");
+    const err = new Error("EACCES: permission denied");
+    err.code = "EACCES";
+    throw err;
   };
   assert.throws(
     () =>
@@ -84,6 +95,65 @@ test("collectTestFiles: fail-closed applies per directory -- an earlier readable
         readdir,
       }),
     /scripts\/missing/,
+  );
+});
+
+// HYK-439 §2 ⓐ: the actual new behavior -- a TEST_DIRS folder absent from
+// THIS clone (real fs.readdirSync's own ENOENT, discriminated via
+// `err.code`, same as a real installed target missing e.g.
+// scripts/relay/adapters) is skipped with one fixed, greppable log line
+// (mirrors splitSerialFamily's own "not present in this checkout, skipped"
+// phrasing) and contributes zero files -- it must NOT throw, and an earlier
+// OR later readable directory's files must not be affected by it either
+// way.
+test("collectTestFiles: an ENOENT-absent directory is skipped with one log line, not fail-closed, and does not affect other directories' files (HYK-439 §2 ⓐ)", () => {
+  const logged = [];
+  const readdir = (path) => {
+    const key = path.replace(/\\/g, "/").replace(/^\/repo\//, "");
+    if (key === "scripts/relay/adapters") {
+      const err = new Error("ENOENT: no such file or directory");
+      err.code = "ENOENT";
+      throw err;
+    }
+    if (key === "scripts/check") return ["a.test.mjs"];
+    if (key === "scripts/relay") return ["r.test.mjs"];
+    return [];
+  };
+  const files = collectTestFiles(
+    "/repo",
+    ["scripts/check", "scripts/relay", "scripts/relay/adapters"],
+    { readdir, log: (line) => logged.push(line) },
+  ).map((f) => f.replace(/\\/g, "/"));
+  assert.deepEqual(files, [
+    "scripts/check/a.test.mjs",
+    "scripts/relay/r.test.mjs",
+  ]);
+  assert.ok(
+    logged.some(
+      (l) =>
+        l.includes('"scripts/relay/adapters"') &&
+        l.includes("not present in this checkout, skipped"),
+    ),
+    `expected one skip log line for scripts/relay/adapters, got: ${JSON.stringify(logged)}`,
+  );
+});
+
+// HYK-439 §2 ⓑ: the second fail-closed guard -- every TEST_DIRS folder
+// absent (all of them ENOENT) must still fail-closed, never silently
+// collect zero files and report an empty, green run. A skip-and-continue
+// per directory on its own cannot catch this; it needs its own check.
+test("collectTestFiles: every TEST_DIRS folder absent (all ENOENT) still fail-closes, never silently collects zero files", () => {
+  const readdir = () => {
+    const err = new Error("ENOENT: no such file or directory");
+    err.code = "ENOENT";
+    throw err;
+  };
+  assert.throws(
+    () =>
+      collectTestFiles("/repo", ["scripts/check", "scripts/relay"], {
+        readdir,
+      }),
+    /none of the 2 TEST_DIRS folder\(s\) are present/,
   );
 });
 
@@ -1005,6 +1075,30 @@ test("SERIAL_FAMILY_LIST: every listed name is a real file in THIS repo (stale-n
     assert.ok(
       existsSync(join(REPO_ROOT, entry)),
       `SERIAL_FAMILY_LIST entry "${entry}" does not exist under this repo's root (${REPO_ROOT}) -- stale list entry`,
+    );
+  }
+});
+
+// HYK-439 §2 ⓒ: "이 저장소 존재 칸" -- the companion assertion for TEST_DIRS
+// itself (same gate/skip shape as the SERIAL_FAMILY_LIST staleness test
+// above): every TEST_DIRS folder must actually exist under THIS repo's own
+// root. collectTestFiles' own ENOENT-skip path (added this round) makes an
+// absent TEST_DIRS folder a quiet, non-fatal fact on an installed target --
+// which is exactly why this repo's OWN CI still needs a loud assertion that
+// none of ITS folders went missing/got renamed; skipping on an installed
+// target (no templates/harness-init/install.mjs) because that absence is
+// normal there, never a stale-list fact.
+test("TEST_DIRS: every listed folder exists under THIS repo's root (existence mutation guard -- adding a folder name absent from this repo must go RED)", (t) => {
+  if (!existsSync(join(REPO_ROOT, "templates/harness-init/install.mjs"))) {
+    t.skip(
+      "this checkout has no installer (an installed target, not the source repo) -- TEST_DIRS existence is only a fact about the source repo",
+    );
+    return;
+  }
+  for (const dir of TEST_DIRS) {
+    assert.ok(
+      existsSync(join(REPO_ROOT, dir)),
+      `TEST_DIRS entry "${dir}" does not exist under this repo's root (${REPO_ROOT})`,
     );
   }
 });
