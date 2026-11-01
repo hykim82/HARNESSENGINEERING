@@ -393,6 +393,79 @@ test("HYK-464 H7b-r4 (§2 ⓒ): the hyk359 cell's new conditional skip is govern
   // production, nothing further to pin here.
 });
 
+// ---------------------------------------------------------------------------
+// HYK-477 (책임자 판정 2026-11-01 0215 답): registers the hyk359 file's
+// SECOND conditional skip in this contract, BY NAME -- same reasoning as the
+// HYK-477 §1-1 probe directly above (hyk359-ambient-env-regression.test.mjs's
+// own module header: a file-level sweep that re-runs the whole CI-canonical
+// suite internally is far too expensive to fold into AFFECTED_FILES's shared
+// spawn), so this gets its own narrow `--test-name-pattern` probe rather
+// than joining runAffectedFiles/EXPECTATIONS.
+//
+// Unlike the §1-1 probe's machine-load-dependent condition, this one is
+// DETERMINISTIC: shouldRunFullAmbientSweep(env) is `env.HARNESS_FULL_AMBIENT_
+// SWEEP === "1"` and nothing else (coder-task.md product_scope ①). This
+// probe explicitly deletes that var before spawning (never trusts whatever
+// happens to be ambient in THIS process) so the expectation below --
+// "skipped, with the exact pinned reason" -- holds unconditionally in any
+// local run, matching this round's own load_repro_rule (⛔
+// HARNESS_FULL_AMBIENT_SWEEP=1 전건 러너 실행 금지 로컬에서).
+// ---------------------------------------------------------------------------
+const HYK359_FULL_SWEEP_SKIP_TEST_NAME_PATTERN =
+  "같은 스윕이 도는 동안 대상 checkout의 추적 대상 경로가 바이트 동일하게 유지된다";
+const HYK359_FULL_SWEEP_SKIP_TEST_NAME =
+  "HYK-359 완료조건4 (3R) + HYK-466 1R (저장소 쓰기 무결성): CI-canonical 시험 디렉토리 전체(예외 목록 제외, 정확한 개수)가 떠도는 ADMISSION_LEDGER_PATH/ADMISSION_LOCK_PATH/DISPATCH_RECEIPT_PATH 아래에서도 fail 0이고, 같은 스윕이 도는 동안 대상 checkout의 추적 대상 경로가 바이트 동일하게 유지된다 -- 보호 대상이 목록 없이 디스크에서 직접 발견되고, 예외 더하기·목록 잘라내기·저장소에 몰래 쓰기 어느 쪽도 조용히 통과하지 못한다";
+const HYK359_FULL_SWEEP_SKIP_REASON_TEXT =
+  "HYK-359 계약은 CI(enforce.yml env)에서 전수 유지 · 로컬 러너 생략 · 책임자 판정 2026-11-01 0215 답";
+
+function runHyk359FullSweepSkipProbe() {
+  // Same NODE_TEST_CONTEXT/NODE_TEST_WORKER_ID stripping as the probes
+  // above, same reason. Also forces HARNESS_FULL_AMBIENT_SWEEP unset --
+  // this probe pins the LOCAL (unset) path only; the CI (set=1) path is
+  // pinned separately by this round's own static guard + production-entry
+  // unit test inside hyk359-ambient-env-regression.test.mjs itself (never by
+  // actually running the expensive full sweep here).
+  const env = { ...process.env };
+  delete env.NODE_TEST_CONTEXT;
+  delete env.NODE_TEST_WORKER_ID;
+  delete env.HARNESS_FULL_AMBIENT_SWEEP;
+  const res = spawnSync(
+    process.execPath,
+    [
+      "--test",
+      "--test-reporter=tap",
+      `--test-name-pattern=${HYK359_FULL_SWEEP_SKIP_TEST_NAME_PATTERN}`,
+      HYK359_SKIP_TEST_FILE,
+    ],
+    { cwd: ROOT, encoding: "utf8", env, maxBuffer: 1024 * 1024 * 50 },
+  );
+  assert.equal(
+    res.error,
+    undefined,
+    `spawning the hyk359 full-sweep skip probe failed: ${res.error?.message}`,
+  );
+  return res.stdout ?? "";
+}
+
+test("HYK-477: the hyk359 file's full-sweep test is governed BY NAME and, with HARNESS_FULL_AMBIENT_SWEEP unset (the local/default path), is skipped with the EXACT pinned reason (책임자 판정 2026-11-01 0215 답 원문) -- never an ungoverned or silently-reworded relaxation", () => {
+  const stdout = runHyk359FullSweepSkipProbe();
+  const results = parseTapNamedResults(stdout);
+  const observed = results.get(HYK359_FULL_SWEEP_SKIP_TEST_NAME);
+  assert.ok(
+    observed,
+    `expected test case not found by exact name in ${HYK359_SKIP_TEST_FILE} -- it was renamed, removed, or the TAP output shape changed (never silently drop this name from this contract): "${HYK359_FULL_SWEEP_SKIP_TEST_NAME}"`,
+  );
+  assert.equal(
+    observed.skipped,
+    true,
+    `with HARNESS_FULL_AMBIENT_SWEEP unset, this test must be skipped (deterministic, not machine-load-dependent) -- got skipped=${observed.skipped}`,
+  );
+  assert.ok(
+    (observed.skipReason ?? "").includes(HYK359_FULL_SWEEP_SKIP_REASON_TEXT),
+    `skip reason must include the exact pinned text (책임자 판정 2026-11-01 0215 답 원문) -- got: ${observed.skipReason}`,
+  );
+});
+
 test("HYK-364 sanity: resolveRealRepoGuard47 and resolveRealRepoGuard58 agree on whether .claude/settings.local.json is present (both gate on the identical file)", () => {
   const guard47 = resolveRealRepoGuard47({ repoRoot: GIT_ROOT });
   const guard58 = resolveRealRepoGuard58({ repoRoot: GIT_ROOT });
