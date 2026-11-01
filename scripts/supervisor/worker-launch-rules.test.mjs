@@ -37,8 +37,8 @@ function runCli(args) {
 // 문구 -- 숫자만 지우는 변이를 잡지 못하는 헛시험을 피한다).
 const REQUIRED_PHRASES = [
   [
-    "⑴ Start-Process -PassThru 로 띄우고 PID 출력",
-    /Start-Process -PassThru 로 띄우고, 그 호출은 PID 를 출력/,
+    "⑴ Start-Process pwsh -WindowStyle Hidden -PassThru 로 띄우고 PID 출력",
+    /Start-Process pwsh -WindowStyle Hidden -PassThru 로 띄우고, 그 호출은 PID 를 출력/,
   ],
   [
     "⑵ Wait-Process -Id <PID> -Timeout 540 반복",
@@ -57,8 +57,8 @@ const REQUIRED_PHRASES = [
     /끊긴 시각 · 끊긴 프로세스\(PID\) · 영수증이 0 B 인지 여부를 1줄로 적는다 -- 끊긴 흔적을 지우지 않는다/,
   ],
   [
-    "⑹ 지시서 launch_rule 이 더 좁으면 지시서 우선",
-    /지시서가 더 좁게 정한 쪽을 우선/,
+    "⑹ 지시서·규칙이 다르면 지시서가 우선(지시서가 더 좁게 정할 수 있다)",
+    /launch_rule 이 다르면 지시서가 우선한다\(지시서가 더 좁게 정할 수 있다\)/,
   ],
 ];
 
@@ -67,6 +67,13 @@ for (const [label, re] of REQUIRED_PHRASES) {
     assert.match(LAUNCH_RULE_BODY, re);
   });
 }
+
+// HYK-439-launch-rules-2 (coder-task.md §2ⓒ⑵): 6번의 옛 문장("지시서가 더
+// 좁게 정한 쪽을 우선" -- "지시서가 넓게 정하면 규칙이 이긴다"로 오독되는
+// 문장, H11 검토 1R P2-2)이 더 이상 본문에 없다.
+test("LAUNCH_RULE_BODY no longer contains the old (misreadable) item ⑹ wording", () => {
+  assert.doesNotMatch(LAUNCH_RULE_BODY, /지시서가 더 좁게 정한 쪽을 우선/);
+});
 
 // §2ⓑ 가변값 0: 본문에 관제실 절대경로(D:\ 또는 C:\Users 로 시작하는
 // 드라이브 경로)나 ISO 날짜가 들어 있지 않다.
