@@ -92,9 +92,9 @@ jobs:
           HARNESS_AMBIENT_SWEEP_MARKER: ${{ runner.temp }}/ambient-sweep-ran.json
 
       # HYK-477-ambient-sweep-report-1: self-report of whether the full
-      # nested sweep above actually ran. No `if:`/`continue-on-error:` on
-      # purpose -- a missing/stale/malformed marker must fail this step, not
-      # skip it quietly.
+      # nested sweep above actually ran. No step-skip condition and no
+      # soft-fail escape hatch here on purpose -- a missing/stale/malformed
+      # marker must fail this step, not skip it quietly.
       - name: ambient-sweep report (HYK-477)
         run: node scripts/check/ambient-sweep-report.mjs "${{ runner.temp }}/ambient-sweep-ran.json"
 
