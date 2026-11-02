@@ -148,6 +148,12 @@ export default [
     // read-only ports (SEAT_LIVENESS_OBSERVATION_REASON/DELIVERED_SEAT_REASON)
     // from orca-adapter.mjs, same pattern as hyk408-seat-decide-repro.test.mjs
     // above.
+    // HYK-433-seat-escalation-push-1 (coder-task.md §2 product_scope ②④):
+    // same shape one more time -- seat-escalation-wire.test.mjs imports
+    // buildSeatEscalationSendCommand (a pure argv builder, no exec call of
+    // its own) from orca-adapter.mjs to assert the new escalation-send
+    // wiring (watch-run.mjs calling that builder + createOrcaExecFn), same
+    // pattern as wake-wire.test.mjs above.
     files: [
       "scripts/supervisor/orch-stall-detect.mjs",
       "scripts/supervisor/seat-liveness-wire.test.mjs",
@@ -165,6 +171,7 @@ export default [
       "scripts/supervisor/admission-sweep-wire.mjs",
       "scripts/supervisor/wake-wire.mjs",
       "scripts/supervisor/wake-wire.test.mjs",
+      "scripts/supervisor/seat-escalation-wire.test.mjs",
     ],
     rules: {
       "no-restricted-imports": "off",

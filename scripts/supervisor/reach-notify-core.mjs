@@ -72,7 +72,14 @@ function formatNoticeEntry(a) {
     a.kind === "measurement_failure" && a.reasonDetail
       ? ` -- 사유: ${a.reasonDetail}`
       : "";
-  return `- **${a.label}** (${a.verdict ?? a.status}) -- ${formatKstIsh(a.sinceMs)}부터${why}`;
+  // HYK-433-seat-escalation-push-1 (coder-task.md §2 product_scope ③ "그
+  // wire -- 받는함 reach-notify-*.md"): seat 축만 좌석 식별 상세(handle·
+  // 워크트리·배달 라벨·무출력 분·마지막 출력 시각)를 받는다 -- 다른 축은
+  // a.identity가 항상 null이라 이 줄은 아무것도 더하지 않는다
+  // (reach-report-core.mjs formatOpenAnomaliesSection과 동일한 재료·동일
+  // 조건, 받는함과 아침 보고가 같은 값을 보여주게 한다).
+  const identitySuffix = a.identity ? ` -- ${a.identity}` : "";
+  return `- **${a.label}** (${a.verdict ?? a.status}) -- ${formatKstIsh(a.sinceMs)}부터${why}${identitySuffix}`;
 }
 
 export function buildNoticeText({ toNotify, nowMs }) {

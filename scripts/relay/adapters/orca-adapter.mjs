@@ -2285,6 +2285,29 @@ export function buildTaskUpdateCompletedCommand(taskId) {
     "--json",
   ];
 }
+// HYK-433-seat-escalation-push-1 (coder-task.md §2 product_scope ②) --
+// watch-run.mjs의 seat 축이 SUSPECTED_UNRESPONSIVE로 "새로 열릴" 때 Run
+// coordinator에게 보내는 escalation 메시지의 argv. 실측(`orca orchestration
+// send --help` 원문, 이 라운드 §2 기록 참조): `--to <run:id|dispatch:id|
+// legacy_handle>` -- `run:<runId>` 형식이 유효한 수신자 선택자다.
+// ⛔라이브 실행 0(live_send_ban, coder-task.md) -- 이 빌더는 순수 argv
+// 조립만 하고, 실제 spawn은 여전히 createOrcaExecFn()을 통해서만 나간다
+// (G9 재확인 -- 이 함수 자신은 child_process를 부르지 않는다).
+export function buildSeatEscalationSendCommand({ runId, subject, body }) {
+  return [
+    "orchestration",
+    "send",
+    "--to",
+    `run:${runId}`,
+    "--type",
+    "escalation",
+    "--subject",
+    subject,
+    "--body",
+    body,
+    "--json",
+  ];
+}
 // A5(실측 §8-5): git 명령으로 구성해뒀던 것을 폐기 -- Orca
 // `worktree rm --worktree path:<p> --force --json` 한 방이 폴더+git등록+
 // 브랜치+탭을 전부 제거한다(2단 §4/§6 실측). 실행은 guardedExec을 통해

@@ -104,6 +104,12 @@ import { countActive, isWellFormedLedger } from "./admission-ledger-core.mjs";
 // 실 좌석 전송(운영 --wake-live, 가짜 exec 시험 seam이 없을 때)에만
 // 쓰인다 -- orca 문자열 리터럴 spawn은 이 adapter 안에서만 일어난다(G9).
 import { createOrcaExecFn } from "../relay/adapters/orca-adapter.mjs";
+// HYK-433-seat-escalation-push-1 (coder-task.md §2 product_scope ②) --
+// seat 축이 새로 열릴 때 보내는 orchestration escalation 메시지의 argv
+// 조립. 실행(orca spawn)은 여전히 createOrcaExecFn()(위)을 통해서만
+// 나간다 -- 이 파일 자신은 orca를 spawn하지 않는다(G9, orca-cli-boundary
+// 정적 검사가 이 파일 밖에서 "orca" 리터럴 spawn 0건을 확인한다).
+import { buildSeatEscalationSendCommand } from "../relay/adapters/orca-adapter.mjs";
 // HYK-464-followup-1 축C (coder-task.md §1 축C) -- 자원 잔재 «보고» 축이
 // 재사용하는 기존 함수. detectOrphans는 재구현하지 않는다(§재사용) --
 // 좌석 "배정 0" 후보를 이미 판별하는 도구(HYK-464 이전 라운드 산출물).
@@ -248,6 +254,69 @@ function extractSeatLivenessFields(seatLiveness) {
     // 까지 옮긴다(위 collectExcludedUndeliveredTaskFiles 헤더 참조).
     seatLivenessExcludedUndeliveredTaskFiles:
       collectExcludedUndeliveredTaskFiles(seatLiveness),
+    // HYK-433-seat-escalation-push-1 (coder-task.md §2 product_scope ①③):
+    // escalation 메시지 body와 watch.log seat_detail·reach-notify/아침
+    // 보고가 전부 필요로 하는 좌석 식별(handle·배달 라벨·무출력 분·마지막
+    // 출력 시각)을 한 곳에서 뽑는다(extractSeatIdentity 참조) -- SUSPECTED_
+    // UNRESPONSIVE가 아니면 null(정상/판정불가에는 신원 상세가 필요 없다).
+    seatLivenessIdentity: extractSeatIdentity(seatLiveness),
+  };
+}
+
+// HYK-433-seat-escalation-push-1 (coder-task.md §2 ⓐ): judgeSeatLivenessAcrossWorktrees
+// (orch-stall-detect.mjs)는 "가장 나쁜" worktree의 status/verdict/details/
+// worktreePath만 top-level로 올리고, 그 worktree의 handle(correlation.handle)
+// ·배달 라벨(dispatch.dispatchId)은 `worktrees[]` 배열 안에만 남겨둔다
+// (실측: judgeSeatLivenessAcrossWorktrees 반환문, orch-stall-detect.mjs
+// 1392-1414행 근처 -- 이 라운드는 그 파일을 고치지 않는다, product_scope
+// 밖). 그래서 top-level worktreePath로 `worktrees[]`에서 같은 항목을 다시
+// 찾아 handle/dispatchLabel을 꺼낸다 -- 새 판정이 아니라 이미 있는 값을
+// 한 곳에 모을 뿐이다.
+//
+// ★정직 한계(결과 파일에도 적는다): `dispatch.dispatchId`는 "HYK-xxx" 형
+// 하네스 라벨이 아니라 그 활성 배달의 task 파일 경로(예:
+// ".harness/coder-task.md")다 -- 진짜 하네스 라벨(active.taskId)은
+// judgeSeatLivenessForRepo(orch-stall-detect.mjs) 안에서 계산되지만
+// dispatch 객체에 실리지 않고 버려진다(그 함수를 고치는 것은 product_scope
+// 밖). "배달 라벨" 칸에는 이 dispatchId(파일 경로)를 쓴다 -- 사람이 어느
+// 배달인지 식별할 수 있는 가장 가까운 기존 값이기 때문이다.
+//
+// ★또 다른 한계: worstCount>1(여러 워크트리가 동시에 SUSPECTED_UNRESPONSIVE)
+// 이어도 이 함수는 "대표(worst-wins) worktree" 하나만 본다 -- 이 축의
+// status/verdict 대표값 자체가 이미 그 설계(judgeSeatLivenessAcrossWorktrees
+// 헤더 주석)이고, reach-report-core.mjs의 "열려 있는 이상" 집계도 축마다
+// latest.axes[axis.key] 하나만 쓰는 동일한 대표값 원칙이라(computeOpenByPredicate
+// 참조) 새 비일관성이 아니다.
+function pickFiniteNumber(obj, key) {
+  return obj && typeof obj[key] === "number" && Number.isFinite(obj[key])
+    ? obj[key]
+    : null;
+}
+
+function findSeatWorktreeEntry(seatLiveness, worktreePath) {
+  if (!Array.isArray(seatLiveness.worktrees)) return null;
+  return (
+    seatLiveness.worktrees.find(
+      (wt) => isPlainObject(wt) && wt.worktreePath === worktreePath,
+    ) ?? null
+  );
+}
+
+function extractSeatIdentity(seatLiveness) {
+  if (!isPlainObject(seatLiveness)) return null;
+  if (seatLiveness.verdict !== "SUSPECTED_UNRESPONSIVE") return null;
+  const worktreePath = pickString(seatLiveness, "worktreePath");
+  if (!worktreePath) return null;
+  const wtEntry = findSeatWorktreeEntry(seatLiveness, worktreePath);
+  const correlation = wtEntry ? wtEntry.correlation : null;
+  const dispatch = wtEntry ? wtEntry.dispatch : null;
+  const details = seatLiveness.details;
+  return {
+    worktreePath,
+    handle: pickString(correlation, "handle"),
+    dispatchLabel: pickString(dispatch, "dispatchId"),
+    elapsedMs: pickFiniteNumber(details, "elapsedMs"),
+    referencePointMs: pickFiniteNumber(details, "referencePointMs"),
   };
 }
 
@@ -454,6 +523,7 @@ function emptyDetectorFields() {
     seatLivenessLiveDispatchJudgedCount: null,
     seatLivenessLiveDispatchVerdict: null,
     seatLivenessExcludedUndeliveredTaskFiles: [],
+    seatLivenessIdentity: null,
     seatIdleStatus: null,
     seatIdleVerdict: null,
     seatIdleWorstCount: null,
@@ -1055,6 +1125,240 @@ function runUnconsumedVanishStep({
   };
 }
 
+// ---- HYK-433-seat-escalation-push-1 (coder-task.md §2 product_scope ①) --
+// seat 축이 SUSPECTED_UNRESPONSIVE로 "새로 열릴" 때(전이 1회)만 Run
+// coordinator에게 escalation 메시지 1건을 보낸다 ----
+//
+// dedupe 상태 파일 패턴은 escalation-notify-state.json/unconsumed-vanish-
+// state.json과 동일하게 재사용한다(§2 사전확인 ⓐ⑴/§2 비타협 "기존 전이
+// 판정·상태 파일 패턴 재사용") -- 다만 그 둘과 달리 이 축은 이미 "대표
+// (worst-wins) worktree 하나"만 판정한다(judgeSeatLivenessAcrossWorktrees
+// 자신의 설계, extractSeatIdentity 헤더 참조)이므로, 추적 대상도 Set이
+// 아니라 "지금 열려 있는 대표 worktreePath 하나"(string|null)면 충분하다.
+function readSeatEscalationNotifyState(readFn, statePath) {
+  try {
+    const text = readFn(statePath, "utf8");
+    const parsed = JSON.parse(text);
+    return {
+      openWorktreePath:
+        typeof parsed?.openWorktreePath === "string"
+          ? parsed.openWorktreePath
+          : null,
+      stateMissing: false,
+    };
+  } catch {
+    // fail-open(runEscalationDedupeStep과 동일 원칙, §2 product_scope ①
+    // "미설정이면 보내기 생략 ... 받는함 통지는 그대로"의 자매 규칙 --
+    // dedupe 상태를 못 읽으면 "직전엔 닫혀 있었다"로 접어 전송 후보로
+    // 취급한다. fail-closed(조용히 억제)는 이 트랙이 잡으려는 실패
+    // (방치된 좌석을 아무도 못 봄)를 dedupe 층에서 재생산하기 때문이다.
+    return { openWorktreePath: null, stateMissing: true };
+  }
+}
+
+// 순수 함수(시험 용이성, computeEscalationNotifications와 동일 스타일) --
+// 이번 tick의 대표 SUSPECTED_UNRESPONSIVE worktreePath(없으면 null)와
+// 직전 tick의 값을 비교해 "새로 열렸는가"만 답한다. 같은 worktree가
+// 계속 열려 있으면(현재와 직전이 같은 non-null 문자열) false -- 반복
+// 회차 재통지 금지(§2 product_scope ① "같은 이상이 이어지는 회차는
+// 0건"). 닫혔다가 나중에 다시 열리면(현재 != 직전, 둘 다 non-null이어도)
+// true -- 이것도 "새로 열림"이다.
+export function isSeatUnresponsiveNewlyOpened({
+  currentOpenWorktreePath,
+  priorOpenWorktreePath,
+}) {
+  if (
+    typeof currentOpenWorktreePath !== "string" ||
+    currentOpenWorktreePath.length === 0
+  ) {
+    return false;
+  }
+  return currentOpenWorktreePath !== priorOpenWorktreePath;
+}
+
+// ⓐ⑶ Run id 후보 중 "관제실 파일"을 택했다(결과 파일 §2ⓐ⑶ 근거 참조) --
+// stop-reasons.json(orch-stall-detect.mjs resolveStopReasonsPathFromCli)과
+// 동일한 위치(watchDir의 부모 = CONTROL_ROOM_PATH, 예약 작업이 늘 쓰는
+// `${CONTROL_ROOM_PATH}/watch`)에 사람/ORCH가 두는 설정 파일이다. 없거나
+// 형식이 틀리면 null(=NO_RUN_CONFIGURED, 호출부가 그 사유로 보내기를
+// 생략한다) -- ⛔예약 작업 정의(schedule-plan-core.mjs)는 이 라운드가
+// 건드리지 않는다(product_scope 밖), 그래서 이 파일은 새 CLI 인자 없이
+// 이미 받는 watchDir에서 유도된다(resolveStopReasonsPathFromCli와 동일
+// 관례).
+function readRunIdConfig(readFn, runIdPath) {
+  try {
+    const text = readFn(runIdPath, "utf8");
+    const parsed = JSON.parse(text);
+    return typeof parsed?.runId === "string" && parsed.runId.length > 0
+      ? parsed.runId
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+// escalation 메시지 body 조립 -- 요구된 5칸(좌석 handle·워크트리·배달
+// 라벨·무출력 분·마지막 출력 시각)을 한 줄로 낸다. extractSeatIdentity가
+// 이미 좌석 식별 4값+referencePointMs를 모아놨으므로 여기서는 포맷만
+// 한다(재구현 0, seatDetailSegment와 같은 재료를 사람이 읽는 다른 모양
+// 으로 한 번 더 쓸 뿐).
+export function buildSeatEscalationBody(identity) {
+  const minutes =
+    typeof identity.elapsedMs === "number" &&
+    Number.isFinite(identity.elapsedMs)
+      ? Math.floor(identity.elapsedMs / 60000)
+      : "NONE";
+  const lastOutput =
+    typeof identity.referencePointMs === "number" &&
+    Number.isFinite(identity.referencePointMs)
+      ? new Date(identity.referencePointMs).toISOString()
+      : "NONE";
+  return (
+    `seat=${identity.handle ?? "NONE"} worktree=${identity.worktreePath ?? "NONE"} ` +
+    `dispatch=${identity.dispatchLabel ?? "NONE"} no_output_min=${minutes} ` +
+    `last_output=${lastOutput}`
+  );
+}
+
+// runSeatEscalationStep({identity, watchDir, readFn, writeFn, existsFn,
+// mkdirFn, execFn}) -- computePreLogDedupeSteps가 로그 줄 조립 *전*에
+// 부른다(escalationDedupe/unconsumedVanish와 동일 지점·동일 원칙).
+// `identity`는 extractSeatIdentity(seatLiveness)의 결과(SUSPECTED_
+// UNRESPONSIVE가 아니면 null)다.
+//
+// 반환 `{attempted, sent, reason, handle, worktreePath, stateMissing}` --
+// attempted=false면 이번 tick에 보낼 거리가 아예 없었다(닫혀 있거나
+// 계속 같은 이상이 열려 있음, 재통지 억제). attempted=true인데 sent=false
+// 면 NO_RUN_CONFIGURED 또는 SEND_FAILED:<사유> -- 어느 쪽이든 §2
+// product_scope ① 비타협대로 **이 함수 자신은 throw하지 않는다**(runReach
+// Step/runEscalationDedupeStep과 동일 "이 단계 자신의 실패가 감시기
+// 전체를 죽이면 안 된다" 원칙) -- 받는함 통지(reach 단계)는 이 단계와
+// 완전히 분리된 호출이라 이 단계의 실패와 무관하게 그대로 실행된다
+// (fail-open, §2 product_scope ① "보내기 실패는 받는함 통지를 막지
+// 않는다").
+// runSeatEscalationStep에서 분리(§6 eslint max-lines-per-function 상한
+// 준수) -- "새로 열렸다"가 확정된 뒤의 실제 전송 시도(run id 조회 + send +
+// 성공/실패 분류)만 담당한다. 로직·값은 원문 그대로, 자리만 옮겼다.
+// wake-wire.mjs:214/227(sendTextThenSubmit)과 같은 모양 -- orca의 일반
+// 오류(비0 종료 + `{"ok":false,...}`)는 throw가 아니라 반환값으로 온다
+// (createOrcaExecFn, orca-adapter.mjs:4001). `result.error.code`가 가장
+// 사람이 읽기 좋은 사유이므로 우선하고, 없으면 `result.reason`(orca-
+// adapter.mjs의 JSON-parse-실패 경로), 둘 다 없으면 원문 JSON을 그대로
+// 보여준다(지어내지 않는다).
+function extractSendFailureReason(result) {
+  if (isPlainObject(result)) {
+    if (isPlainObject(result.error) && typeof result.error.code === "string") {
+      return result.error.code;
+    }
+    if (typeof result.reason === "string") return result.reason;
+  }
+  return JSON.stringify(result);
+}
+
+function attemptSeatEscalationSend({ identity, readFn, runIdPath, execFn }) {
+  const runId = readRunIdConfig(readFn, runIdPath);
+  if (!runId) {
+    return {
+      attempted: true,
+      sent: false,
+      reason: "NO_RUN_CONFIGURED",
+      handle: identity.handle,
+      worktreePath: identity.worktreePath,
+    };
+  }
+  const subject = `seat unresponsive: ${identity.handle ?? identity.worktreePath}`;
+  const body = buildSeatEscalationBody(identity);
+  try {
+    const result = execFn(
+      buildSeatEscalationSendCommand({ runId, subject, body }),
+    );
+    if (!isPlainObject(result) || result.ok !== true) {
+      return {
+        attempted: true,
+        sent: false,
+        reason: `SEND_FAILED:${truncateToken(
+          sanitizeFailureToken(extractSendFailureReason(result), "send_failed"),
+          MAX_PARTIAL_FAILURE_REASON_CHARS,
+        )}`,
+        handle: identity.handle,
+        worktreePath: identity.worktreePath,
+      };
+    }
+    return {
+      attempted: true,
+      sent: true,
+      reason: null,
+      handle: identity.handle,
+      worktreePath: identity.worktreePath,
+    };
+  } catch (err) {
+    return {
+      attempted: true,
+      sent: false,
+      reason: `SEND_FAILED:${truncateToken(
+        sanitizeFailureToken(
+          err && err.message ? err.message : String(err),
+          "send_failed",
+        ),
+        MAX_PARTIAL_FAILURE_REASON_CHARS,
+      )}`,
+      handle: identity.handle,
+      worktreePath: identity.worktreePath,
+    };
+  }
+}
+
+function runSeatEscalationStep({
+  identity,
+  watchDir,
+  readFn,
+  writeFn,
+  existsFn,
+  mkdirFn,
+  execFn,
+}) {
+  const statePath = path.join(watchDir, "seat-escalation-notify-state.json");
+  const prior = readSeatEscalationNotifyState(readFn, statePath);
+  const currentOpenWorktreePath = isPlainObject(identity)
+    ? identity.worktreePath
+    : null;
+  const newlyOpened = isSeatUnresponsiveNewlyOpened({
+    currentOpenWorktreePath,
+    priorOpenWorktreePath: prior.openWorktreePath,
+  });
+  // 상태는 전송 성공 여부와 무관하게 "지금 열려 있는가"로 항상 갱신한다
+  // (escalationDedupe의 전이 추적과 동일 원칙 -- 전송 실패를 재시도하는
+  // 것은 이 라운드의 계약 밖이다, 아래 §한계 참조). 쓰기 실패는 조용히
+  // 접지 않지만(runUnconsumedVanishStep과 동일 원칙) 이 단계의 반환값을
+  // 막지 않는다 -- 다음 tick에 fail-open으로 다시 전부 재통지 후보가
+  // 될 뿐이다.
+  try {
+    if (!existsFn(watchDir)) mkdirFn(watchDir, { recursive: true });
+    writeFn(
+      statePath,
+      JSON.stringify({ openWorktreePath: currentOpenWorktreePath }),
+      "utf8",
+    );
+  } catch {
+    // fail-open, 다음 tick 재시도(위 주석).
+  }
+  if (!newlyOpened) {
+    return {
+      attempted: false,
+      sent: false,
+      reason: null,
+      handle: null,
+      worktreePath: null,
+      stateMissing: prior.stateMissing,
+    };
+  }
+  const runIdPath = path.join(path.dirname(watchDir), "run-id.json");
+  return {
+    ...attemptSeatEscalationSend({ identity, readFn, runIdPath, execFn }),
+    stateMissing: prior.stateMissing,
+  };
+}
+
 // escalation 축의 사람이 읽는 사유(§4 요건2 "막힌 워커가 있으면 사유가
 // 사람이 읽을 수 있게 실려야 한다", HYK-210 전례와 동일 형식 -- 공백
 // 치환·길이 상한·건수 상한+N_more). wakeHuman 스코프 전부(새 것이든
@@ -1193,6 +1497,30 @@ function escalationDetailSegment({ wakeScopes, newlyNotified, stateMissing }) {
   return `escalation_open=${wakeScopes.length} escalation_detail=${detail}${dedupeNote}`;
 }
 
+// HYK-433-seat-escalation-push-1 (coder-task.md §2 product_scope ①): seat
+// 축이 새로 열릴 때 보낸(또는 보내지 못한) escalation 메시지 1건의 결과를
+// 사람이 읽는 상세로 남긴다 -- escalationDetailSegment와 같은 "이번 tick에
+// 실제로 뭔가 있었을 때만 세그먼트를 더한다" 원칙(attempted=false면 null).
+function formatSeatEscalationEntry(result) {
+  const handle = sanitizeFailureToken(result.handle, "unknown_handle");
+  const wt = sanitizeFailureToken(result.worktreePath, "unknown_worktree");
+  const outcome = result.sent
+    ? "SENT"
+    : `SKIP:${sanitizeFailureToken(result.reason, "unknown_reason")}`;
+  return `${handle}@${wt}:${outcome}`;
+}
+
+function seatEscalationDetailSegment(seatEscalation) {
+  if (!isPlainObject(seatEscalation) || seatEscalation.attempted !== true) {
+    return null;
+  }
+  const detail = formatSeatEscalationEntry(seatEscalation);
+  const dedupeNote = seatEscalation.stateMissing
+    ? " seat_escalation_dedupe_state=MISSING"
+    : "";
+  return `seat_escalation_attempted=1 seat_escalation_detail=${detail}${dedupeNote}`;
+}
+
 // runWatchOnce에서 분리(§6 eslint max-complexity 상한 준수) -- §5-4 계약
 // 보존: 이 단계 자신의 실패(예: readFn이 예상외로 던짐)가 감시기 전체를
 // 죽이면 안 된다. readConcurrencyCap/judgeConcurrency는 둘 다 throw로
@@ -1224,6 +1552,37 @@ function computeCapResult({ repoRoot, capPath, capReadFn }) {
       message: err && err.message ? err.message : String(err),
     };
   }
+}
+
+// HYK-433-seat-escalation-push-1 (coder-task.md §2 product_scope ①③):
+// chainDetailSegment/bindingDetailSegment와 동일한 "verdict가 그 축의
+// 나쁜 값일 때만 상세를 붙인다" 원칙 -- identity가 null이면(정상/판정불가/
+// SUSPECTED_UNRESPONSIVE가 아님) 아무 것도 더하지 않는다(buildLogLine이
+// filter(Boolean)으로 걸러낸다, 기존 정상 로그 줄 형식 불변).
+// ★토큰 형식(공백 금지 -- reach-report-core.mjs의 LOG_LINE_RE/parseFieldTokens
+// 가 `/\s+/`로 토큰을 가르므로, 값 안에 raw whitespace가 있으면 다음 필드
+// 파싱이 깨진다): sanitizeFailureToken이 내부 공백을 밑줄로 접는다(기존
+// chainDetailSegment 등과 동일 관례) -- 콜론·`@`은 안전하다(parseFieldTokens
+// 는 첫 `=`만 분리점으로 쓴다).
+function seatDetailSegment(identity) {
+  if (!isPlainObject(identity)) return null;
+  const handle = sanitizeFailureToken(identity.handle, "unknown_handle");
+  const wt = sanitizeFailureToken(identity.worktreePath, "unknown_worktree");
+  const label = sanitizeFailureToken(
+    identity.dispatchLabel,
+    "unknown_dispatch",
+  );
+  const minutes =
+    typeof identity.elapsedMs === "number" &&
+    Number.isFinite(identity.elapsedMs)
+      ? Math.floor(identity.elapsedMs / 60000)
+      : "NONE";
+  const lastOutput =
+    typeof identity.referencePointMs === "number" &&
+    Number.isFinite(identity.referencePointMs)
+      ? new Date(identity.referencePointMs).toISOString()
+      : "NONE";
+  return `seat_detail=${handle}@${wt}:${label}:${minutes}m:${lastOutput}`;
 }
 
 // HYK-228 4R (coder-task.md §1 항3/§2): buildLogLine에서 세그먼트 조립부만
@@ -1294,11 +1653,18 @@ function buildSeatIdleSegments(detectorResult) {
     detectorResult.seatIdleStopReasonsStatus,
     detectorResult.seatIdleStopReasonsDetail,
   );
+  // HYK-433-seat-escalation-push-1 (coder-task.md §2 product_scope ①③):
+  // SUSPECTED_UNRESPONSIVE일 때만 좌석 식별 상세를 덧붙인다(chainDetailSegment/
+  // bindingDetailSegment와 동일 원칙 -- 정상/판정불가는 4필드 세그먼트만으로
+  // 충분, 소음 최소화). reach-report-core.mjs가 이 `seat_detail` 필드를
+  // 읽어 받는함/아침 보고의 "좌석 무응답" 행에 그대로 옮겨 적는다(wire ③).
+  const seatDetail = seatDetailSegment(detectorResult.seatLivenessIdentity);
   return {
     seatSegment,
     seatFailureSegment,
     seatReasonDetail,
     seatExcludedUndeliveredDetail,
+    seatDetail,
     idleSegment,
     idleReasonDetail,
     idleExcludedUndeliveredDetail,
@@ -1540,34 +1906,14 @@ function buildSeatIdleStartUnconsumedSegments(
   };
 }
 
-function buildAxisLogSegments(
+// buildAxisLogSegments에서 분리(§6 eslint max-lines-per-function 상한
+// 준수) -- escalation/postcheck/chain/binding/seatEscalation 다섯 "맨 끝에
+// 붙는" 세그먼트 조립만 모은다. 로직·값·순서는 원문 그대로, 자리만 옮겼다.
+function buildTailAxisSegments(
   detectorResult,
-  capResult,
   escalationDedupe,
-  unconsumedVanish,
+  seatEscalation,
 ) {
-  const {
-    seatSegment,
-    seatFailureSegment,
-    seatReasonDetail,
-    seatExcludedUndeliveredDetail,
-    idleSegment,
-    idleReasonDetail,
-    idleExcludedUndeliveredDetail,
-    idleWorstDetail,
-    idleParkedDetail,
-    idleStopReasonsDetail,
-    startSegment,
-    startFailureSegment,
-    startReasonDetail,
-    startExcludedUndeliveredDetail,
-    startSizeObservationUnavailableDetail,
-    unconsumedSegment,
-    unconsumedReasonDetail,
-    unconsumedWorstDetail,
-    unconsumedVanishedDetail,
-  } = buildSeatIdleStartUnconsumedSegments(detectorResult, unconsumedVanish);
-  const capSegment = capLogSegment(capResult ?? {});
   // HYK-173-push-wire (coder-task.md §4 요건2): escalation 축도 기존
   // 4필드 관례 그대로(escalation_status/escalation_verdict/
   // escalation_worst_count/escalation_worktrees) -- 새 축이지만 새
@@ -1599,11 +1945,74 @@ function buildAxisLogSegments(
   // 여섯+postcheck+chain 세그먼트의 필드·순서·값 불변).
   const { bindingSegment, bindingDetail } =
     buildBindingSegments(detectorResult);
+  // HYK-433-seat-escalation-push-1 (coder-task.md §2 product_scope ①): 새
+  // 축은 언제나 맨 끝에 붙는다(기존 모든 세그먼트의 필드·순서·값 불변,
+  // 지금까지의 모든 라운드와 동일한 설계 제약). seatEscalation이 주어지지
+  // 않은(기존 호출자, opt-in 아님이지만 기존 단위 시험은 이 인자를 안 줄
+  // 수 있다) 경우 seatEscalationDetailSegment가 null을 돌려주므로
+  // (filter(Boolean)) 로그 줄이 한 글자도 달라지지 않는다.
+  const seatEscalationDetail = seatEscalationDetailSegment(seatEscalation);
+  return {
+    escalationSegment,
+    escalationDetail,
+    postcheckSegment,
+    postcheckDetail,
+    chainSegment,
+    chainDetail,
+    bindingSegment,
+    bindingDetail,
+    seatEscalationDetail,
+  };
+}
+
+function buildAxisLogSegments(
+  detectorResult,
+  capResult,
+  escalationDedupe,
+  unconsumedVanish,
+  seatEscalation,
+) {
+  const {
+    seatSegment,
+    seatFailureSegment,
+    seatReasonDetail,
+    seatExcludedUndeliveredDetail,
+    seatDetail,
+    idleSegment,
+    idleReasonDetail,
+    idleExcludedUndeliveredDetail,
+    idleWorstDetail,
+    idleParkedDetail,
+    idleStopReasonsDetail,
+    startSegment,
+    startFailureSegment,
+    startReasonDetail,
+    startExcludedUndeliveredDetail,
+    startSizeObservationUnavailableDetail,
+    unconsumedSegment,
+    unconsumedReasonDetail,
+    unconsumedWorstDetail,
+    unconsumedVanishedDetail,
+  } = buildSeatIdleStartUnconsumedSegments(detectorResult, unconsumedVanish);
+  const capSegment = capLogSegment(capResult ?? {});
+  const {
+    escalationSegment,
+    escalationDetail,
+    postcheckSegment,
+    postcheckDetail,
+    chainSegment,
+    chainDetail,
+    bindingSegment,
+    bindingDetail,
+    seatEscalationDetail,
+  } = buildTailAxisSegments(detectorResult, escalationDedupe, seatEscalation);
   return {
     seatSegment,
     seatFailureSegment,
     seatReasonDetail,
     seatExcludedUndeliveredDetail,
+    seatDetail,
+    seatEscalationDetail,
     idleSegment,
     idleReasonDetail,
     idleExcludedUndeliveredDetail,
@@ -1661,6 +2070,13 @@ export function buildLogLine({
   // undefined -> resourceResidueLogSegment가 null을 돌려주므로
   // (filter(Boolean)) 로그 줄이 한 글자도 달라지지 않는다(회귀 0).
   resourceResidueResult,
+  // HYK-433-seat-escalation-push-1 (coder-task.md §2 product_scope ①):
+  // 기존 호출자 전부는 이 인자를 안 주므로 undefined ->
+  // seatEscalationDetailSegment가 null을 돌려주므로(filter(Boolean)) 로그
+  // 줄이 한 글자도 달라지지 않는다(회귀 0). seatDetail(segments 안)은
+  // detectorResult.seatLivenessIdentity가 없으면(구버전 stdout 등) 역시
+  // null이다.
+  seatEscalation,
 }) {
   if (detectorResult.runnerFailure) {
     return `${nowIso} RUNNER_FAILURE message=${detectorResult.message}`;
@@ -1672,6 +2088,7 @@ export function buildLogLine({
     capResult,
     escalationDedupe,
     unconsumedVanish,
+    seatEscalation,
   );
   // HYK-228 (coder-task.md §2 항1): 새 축은 언제나 맨 끝에 붙는다(기존
   // 여섯+postcheck 세그먼트의 필드·순서·값 불변, §7 기존 축 회귀 0) --
@@ -1768,6 +2185,14 @@ export function buildLogLine({
     segments.idleWorstDetail,
     segments.idleParkedDetail,
     segments.idleStopReasonsDetail,
+    // HYK-433-seat-escalation-push-1 (coder-task.md §2 product_scope ①③):
+    // 이 두 세그먼트도 지금 이 시점의 맨 끝이다 -- 앞선 모든 세그먼트의
+    // 필드·순서·값은 이 라운드가 손대지 않았다. SUSPECTED_UNRESPONSIVE가
+    // 아니거나(seatDetail) 이번 tick에 전송 시도가 없었던(seatEscalationDetail)
+    // 가장 흔한 회차는 둘 다 null을 돌려주므로(filter(Boolean)) 로그 줄이
+    // 한 글자도 달라지지 않는다(회귀 0).
+    segments.seatDetail,
+    segments.seatEscalationDetail,
   ]
     .filter(Boolean)
     .join(" ");
@@ -2729,6 +3154,7 @@ function finalizeWatchOnceCycle({
   blockedTerminationResult,
   unconsumedVanish,
   resourceResidueResult,
+  seatEscalation,
 }) {
   const nowIso = new Date(now).toISOString();
   const logPath = path.join(watchDir, "watch.log");
@@ -2743,6 +3169,7 @@ function finalizeWatchOnceCycle({
     blockedTerminationResult,
     unconsumedVanish,
     resourceResidueResult,
+    seatEscalation,
   });
   appendLogWithRotation({
     readFn,
@@ -2790,6 +3217,7 @@ function finalizeWatchOnceCycle({
     wakeResult,
     blockedTerminationResult,
     resourceResidueResult,
+    seatEscalation,
   });
 }
 
@@ -2815,6 +3243,7 @@ function finalizeWatchOnceTail({
   wakeResult,
   blockedTerminationResult,
   resourceResidueResult,
+  seatEscalation,
 }) {
   const reachResult = runReachStep({
     notifyDir,
@@ -2849,6 +3278,7 @@ function finalizeWatchOnceTail({
     wakeResult,
     blockedTerminationResult,
     resourceResidueResult,
+    seatEscalation,
   };
 }
 
@@ -2868,6 +3298,7 @@ function computePreLogDedupeSteps({
   writeFn,
   existsFn,
   mkdirFn,
+  seatEscalationExecFn,
 }) {
   const escalationDedupe = runEscalationDedupeStep({
     scopes: detectorResult.escalationScopes,
@@ -2885,7 +3316,24 @@ function computePreLogDedupeSteps({
     existsFn,
     mkdirFn,
   });
-  return { escalationDedupe, unconsumedVanish };
+  // HYK-433-seat-escalation-push-1 (coder-task.md §2 product_scope ①): 이
+  // 단계도 escalationDedupe/unconsumedVanish와 동일 지점(로그 줄 조립 전)
+  // ·동일 opt-in 없음 원칙("watchDir만 있으면 항상 돈다") -- 다만 실제
+  // 전송 여부는 ⑴ 전이가 새로 열렸는가 ⑵ run-id.json이 있는가 두 내부
+  // 게이트가 스스로 가린다(이 라운드가 실제로 보낼 일은 없다, live_send_
+  // ban). execFn 기본값은 실 orca 경로와 동일하게 createOrcaExecFn()
+  // (운영 호출자가 오버라이드하지 않으면)이다 -- 시험은 전부 fake execFn을
+  // 주입한다(§2 비타협 "라이브 실행 0").
+  const seatEscalation = runSeatEscalationStep({
+    identity: detectorResult.seatLivenessIdentity,
+    watchDir,
+    readFn,
+    writeFn,
+    existsFn,
+    mkdirFn,
+    execFn: seatEscalationExecFn ?? createOrcaExecFn(),
+  });
+  return { escalationDedupe, unconsumedVanish, seatEscalation };
 }
 
 // runWatchOnceCore에서 분리(§6 eslint max-lines-per-function 상한 준수 --
@@ -3031,6 +3479,12 @@ function runWatchOnceCore(params) {
     // HYK-464-followup-1 축C: admissionSweep/wake와 동일한 opt-in 계약 --
     // 기본값 null이면(기존 호출자 전부) 이 단계는 아예 실행되지 않는다.
     resourceResidue = null,
+    // HYK-433-seat-escalation-push-1 (coder-task.md §2 product_scope ①):
+    // opt-in 객체가 아니다(escalationDedupe/unconsumedVanish와 동일 --
+    // 항상 돈다) -- 기본값 undefined면 computePreLogDedupeSteps가
+    // createOrcaExecFn()(실 orca 경로)로 낙하한다. 시험만 fake execFn을
+    // 명시로 준다.
+    seatEscalationExecFn,
   } = params;
   mkdirFn(watchDir, { recursive: true });
   const detectorResult = runDetector({
@@ -3041,14 +3495,16 @@ function runWatchOnceCore(params) {
     watchDir,
   });
   const capResult = computeCapResult({ repoRoot, capPath, capReadFn });
-  const { escalationDedupe, unconsumedVanish } = computePreLogDedupeSteps({
-    detectorResult,
-    watchDir,
-    readFn,
-    writeFn,
-    existsFn,
-    mkdirFn,
-  });
+  const { escalationDedupe, unconsumedVanish, seatEscalation } =
+    computePreLogDedupeSteps({
+      detectorResult,
+      watchDir,
+      readFn,
+      writeFn,
+      existsFn,
+      mkdirFn,
+      seatEscalationExecFn,
+    });
   const {
     sweepResult,
     wakeResult,
@@ -3078,6 +3534,7 @@ function runWatchOnceCore(params) {
     blockedTerminationResult,
     unconsumedVanish,
     resourceResidueResult,
+    seatEscalation,
   });
 }
 
@@ -3122,6 +3579,13 @@ export function runWatchOnce({
   blockedTerminationReadFileFn,
   // HYK-464-followup-1 축C: admissionSweep/wake와 동일한 opt-in 계약.
   resourceResidue = null,
+  // HYK-433-seat-escalation-push-1 (coder-task.md §2 product_scope ①):
+  // 시험이 orca escalation send를 fake execFn으로 대체할 때만 쓴다(§2
+  // 비타협 "라이브 실행 0") -- 생략하면 runWatchOnceCore가 createOrcaExecFn()
+  // 으로 낙하한다(실 orca 경로, admissionSweep/wake의 opt-in null 계약과는
+  // 다르다 -- 이 단계는 escalationDedupe/unconsumedVanish와 같이 항상
+  // 돈다, 전송 여부는 내부 게이트(전이·run-id.json)가 가린다).
+  seatEscalationExecFn,
 }) {
   const fsFns = resolveWatchOnceFsFns({
     readFn,
@@ -3150,6 +3614,7 @@ export function runWatchOnce({
     blockedTerminationReaddirFn,
     blockedTerminationReadFileFn,
     resourceResidue,
+    seatEscalationExecFn,
   });
 }
 

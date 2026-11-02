@@ -312,6 +312,13 @@ function numOrNull(raw) {
 // the generic loop's contract ("every axis has `<prefix>_status`/
 // `<prefix>_verdict` fields") stays true for the other 8 axes (same
 // pattern as the cap-axis exception documented above).
+// buildAxesFromFields에서 분리(§6 eslint complexity 상한 준수 -- 1문짜리
+// 조건이라도 그 함수의 분기 수에 더해진다). HYK-433-seat-escalation-push-1
+// (coder-task.md §2 product_scope ③): seat 축만 좌석 식별 상세를 받는다.
+function seatIdentityField(axis, fields) {
+  return axis.key === "seat" ? (fields.seat_detail ?? null) : null;
+}
+
 function buildAxesFromFields(fields, topLevelVerdict, topLevelReasonCode) {
   const axes = {};
   for (const axis of AXES) {
@@ -341,6 +348,14 @@ function buildAxesFromFields(fields, topLevelVerdict, topLevelReasonCode) {
       // -- 축 전부가 이 필드를 갖는 것은 아니다(seat/idle/start/unconsumed
       // 넷뿐, §3-1 범위).
       reasonDetail: fields[`${axis.prefix}_reason_detail`] ?? null,
+      // HYK-433-seat-escalation-push-1 (coder-task.md §2 product_scope ③):
+      // seat 축만 좌석 식별 상세(handle·워크트리·배달 라벨·무출력 분·마지막
+      // 출력 시각, watch-run.mjs의 seatDetailSegment가 `seat_detail=...`로
+      // 싣는다)를 받는함/아침 보고까지 옮긴다 -- ⛔다른 축(chain/binding/
+      // postcheck도 각자 `<prefix>_detail` 필드를 watch.log에 이미 쓰고
+      // 있지만, 이 라운드는 "seat 축 항목"만 범위라 그 필드들은 건드리지
+      // 않는다(product_scope 밖, 그 축들의 판정·표시는 무변경).
+      identity: seatIdentityField(axis, fields),
     };
   }
   return axes;
@@ -446,6 +461,10 @@ function computeOpenByPredicate(entries, nowMs, predicate, kind) {
       verdict: latestAxisEntry.verdict,
       status: latestAxisEntry.status,
       reasonDetail: latestAxisEntry.reasonDetail ?? null,
+      // HYK-433-seat-escalation-push-1 (coder-task.md §2 product_scope ③):
+      // seat 축만 채워지는 좌석 식별 상세(buildAxesFromFields 참조) --
+      // 다른 축은 항상 null이다(그 축들의 표시는 무변경).
+      identity: latestAxisEntry.identity ?? null,
       // HYK-265-observe-split-1 (coder-task.md §4 완료조건1): 통지
       // (reach-notify-core.mjs buildNoticeText)도 이 둘을 다른 절로
       // 갈라야 하므로, 각 원소가 자기 출처를 스스로 밝힌다(호출부가
@@ -545,8 +564,14 @@ function formatOpenAnomaliesSection(openAnomalies) {
     return lines;
   }
   for (const a of openAnomalies) {
+    // HYK-433-seat-escalation-push-1 (coder-task.md §2 product_scope ③):
+    // seat 축 항목에만 좌석 식별 상세(handle·워크트리·배달 라벨·무출력
+    // 분·마지막 출력 시각, watch-run.mjs seatDetailSegment가 실은 값)를
+    // 덧붙인다 -- 다른 축은 a.identity가 항상 null이라 이 줄은 아무것도
+    // 더하지 않는다(그 축들의 표시는 무변경).
+    const identitySuffix = a.identity ? ` -- ${a.identity}` : "";
     lines.push(
-      `- **${a.label}** (${a.verdict ?? a.status}) -- ${formatKstIsh(a.sinceMs)}부터, ${formatDurationKo(a.openMs)}째`,
+      `- **${a.label}** (${a.verdict ?? a.status}) -- ${formatKstIsh(a.sinceMs)}부터, ${formatDurationKo(a.openMs)}째${identitySuffix}`,
     );
   }
   return lines;
