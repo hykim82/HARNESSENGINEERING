@@ -65,6 +65,20 @@ export const REASON = Object.freeze({
   SPLIT_STATE: "TEARDOWN_SPLIT_STATE",
   CONSISTENT_ABSENT: "TEARDOWN_CONSISTENT_ABSENT",
   ELIGIBLE: "TEARDOWN_ELIGIBLE",
+  // ---- HYK-464-teardown-shadow-1: 아카이브(워크트리 정리) 전제 축 4개 ----
+  // 이 네 사유는 judgeTeardown/classifyEligibility가 아니라 아래
+  // judgeArchiveEligibility 전용이다(독립 판정 -- 왜 독립인지는
+  // judgeArchiveEligibility 머리 주석 참조). "같은 성질"(근거가 주어지지
+  // 않으면 판정 불가)이라 REASON 이름공간은 공유하되, 평가 경로는
+  // 섞지 않는다.
+  MERGE_STATUS_UNKNOWN: "TEARDOWN_MERGE_STATUS_UNKNOWN",
+  NOT_MERGED_TO_MASTER: "TEARDOWN_NOT_MERGED_TO_MASTER",
+  UNCONSUMED_ROUNDS_UNKNOWN: "TEARDOWN_UNCONSUMED_ROUNDS_UNKNOWN",
+  UNCONSUMED_ROUNDS_PRESENT: "TEARDOWN_UNCONSUMED_ROUNDS_PRESENT",
+  KEEP_REASON_UNKNOWN: "TEARDOWN_KEEP_REASON_UNKNOWN",
+  KEEP_REASON_PRESENT: "TEARDOWN_KEEP_REASON_PRESENT",
+  ARCHIVE_MANIFEST_UNAVAILABLE: "TEARDOWN_ARCHIVE_MANIFEST_UNAVAILABLE",
+  ARCHIVE_ELIGIBLE: "TEARDOWN_ARCHIVE_ELIGIBLE",
 });
 
 const LAYER_VALUES = Object.freeze(["present", "absent", "unobservable"]);
@@ -576,4 +590,249 @@ export function judgePostConditions(args = {}) {
     return EXECUTION.FAILED_UNCHANGED;
   }
   return EXECUTION.FAILED_SPLIT;
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// HYK-464-teardown-shadow-1 -- 아카이브(워크트리 정리) 전제 축 4개.
+// ═══════════════════════════════════════════════════════════════════════
+//
+// ⛔왜 judgeTeardown/classifyEligibility에 섞지 않았는가(사전 확인 ⑴ 답,
+// coder.md §0에도 옮겨 적는다): classifyEligibility의
+// checkDispatchCorrelationProven은 "policy.dispatchCorrelationProven이
+// 명시적으로 true가 아니면 항상 차단"하고, 그 주석은 "4b-2가 권위 있는
+// 배정↔좌석 상관 수단을 만들기 전까지 이 전제조건을 절대 완화하지
+// 않는다 -- 이 사이클의 프로덕션 호출자는 아무도 이 값을 true로 주지
+// 않는다"고 명시적으로 다짐한다. 아카이브 판정(이 라운드)은 "좌석이
+// 지금 이 배정과 상관됐는가"를 전혀 묻지 않는다 -- 묻는 것은 ⓐ병합
+// 완료 ⓑ미소비 라운드 0 ⓒ보존 사유 파일 없음 ⓓ아카이브 대상 목록 뿐이다.
+// 그 네 축을 classifyEligibility 체인 안에 넣으려면 둘 중 하나가
+// 필요했다: (1) 그림자 호출자가 dispatchCorrelationProven:true를
+// 주거나(= 위 다짐을 깨는 "완화"), (2) dispatchCorrelationProven 가드
+// 자체에 새 우회 조건을 추가하거나(= 기존 가드의 조건을 바꾸는 것,
+// deviation_rule "기존 ELIGIBILITY 판정 순서·사유를 바꾸지 마라" 위반).
+// 둘 다 이 라운드의 범위 밖(§2 비타협)이라, 완전히 독립된 판정 함수로
+// 둔다 -- judgeTeardown/classifyEligibility는 이 변경으로 단 한 글자도
+// 바뀌지 않는다(기존 시험 무회귀가 구조적으로 보장된다).
+//
+// 네 축은 "기존 ELIGIBILITY_PREMISES와 같은 성질"(근거가 주어지지 않으면
+// 판정 불가 = ELIGIBLE 아님)이다 -- 그래서 ELIGIBILITY/REASON 이름공간은
+// 그대로 재사용한다(평가 경로만 분리). 입력(inventory)은 이 넷뿐이다:
+//   - inventory.mergeStatus       = {observable, isAncestorOfRemoteMaster?}
+//   - inventory.unconsumedRounds  = {observable, count?, consumedViaRetirement?}
+//   - inventory.keepReason        = {observable, present?, firstLine?}
+//   - inventory.archiveManifest   = {observable, files?: [{path,bytes,sha256}]}
+// 넷 다 "관측 자체가 안 됐다"(observable !== true, 또는 필드 자체가
+// 없음)와 "관측됐지만 막는 사실이 나왔다"를 구별해서 보고한다 --
+// 전자도 후자도 ELIGIBLE로 가지 않는다(fail-closed, 이름만 다르다).
+//
+// unconsumedRounds의 ⓑ: "미소비 라운드 0(있으면 거부)"을 이 파일이
+// 재판정하지 않는다 -- 호출자(watch-run.mjs)가 이미 HYK-185의
+// judgeUnconsumedAcrossWorktrees 결과를 가지고 이 필드를 채운다(새
+// 재구현 금지, §2 product_scope ①). "은퇴 기록이 있으면 소비됨"도
+// 호출자가 이미 계산해 consumedViaRetirement로 넘긴다 -- 이 파일은 그
+// 불(bool) 하나만 본다(412 코드를 이 파일이 import하거나 재구현하지
+// 않는다, §2 범위 밖 "412 코드 무접촉").
+
+function isValidMergeStatus(v) {
+  if (!isPlainObject(v) || typeof v.observable !== "boolean") return false;
+  if (v.observable !== true) return true;
+  return typeof v.isAncestorOfRemoteMaster === "boolean";
+}
+
+function isValidUnconsumedRounds(v) {
+  if (!isPlainObject(v) || typeof v.observable !== "boolean") return false;
+  if (v.observable !== true) return true;
+  return (
+    Number.isInteger(v.count) &&
+    v.count >= 0 &&
+    typeof v.consumedViaRetirement === "boolean"
+  );
+}
+
+function isValidKeepReason(v) {
+  if (!isPlainObject(v) || typeof v.observable !== "boolean") return false;
+  if (v.observable !== true) return true;
+  return typeof v.present === "boolean";
+}
+
+function isValidArchiveManifestFiles(files) {
+  return (
+    Array.isArray(files) &&
+    files.every(
+      (f) =>
+        isPlainObject(f) &&
+        isNonEmptyString(f.path) &&
+        Number.isInteger(f.bytes) &&
+        f.bytes >= 0 &&
+        isNonEmptyString(f.sha256),
+    )
+  );
+}
+
+function isValidArchiveManifest(v) {
+  if (!isPlainObject(v) || typeof v.observable !== "boolean") return false;
+  if (v.observable !== true) return true;
+  return isValidArchiveManifestFiles(v.files);
+}
+
+function buildArchiveEvidence(ruleId, extra = {}) {
+  return { ruleId, ...extra };
+}
+
+// ⓐ 병합 완료 -- 브랜치 head가 origin/master(ls-remote 값)의 조상인가.
+function checkMergeAncestry(inventory) {
+  const mergeStatus = inventory.mergeStatus;
+  if (!isValidMergeStatus(mergeStatus) || mergeStatus.observable !== true) {
+    return {
+      eligibility: ELIGIBILITY.EVIDENCE_NOT_DURABLE,
+      reason: REASON.MERGE_STATUS_UNKNOWN,
+      evidence: buildArchiveEvidence(REASON.MERGE_STATUS_UNKNOWN, {
+        mergeStatus: mergeStatus ?? null,
+      }),
+    };
+  }
+  if (mergeStatus.isAncestorOfRemoteMaster !== true) {
+    return {
+      eligibility: ELIGIBILITY.EVIDENCE_NOT_DURABLE,
+      reason: REASON.NOT_MERGED_TO_MASTER,
+      evidence: buildArchiveEvidence(REASON.NOT_MERGED_TO_MASTER, {
+        mergeStatus,
+      }),
+    };
+  }
+  return null;
+}
+
+// ⓑ 미소비 라운드 0(은퇴 기록이 있으면 소비됨으로 셈 -- 호출자가 이미
+// 그 판정을 끝내 consumedViaRetirement로 넘긴다, 위 헤더 참조).
+function checkUnconsumedRoundsClear(inventory) {
+  const unconsumedRounds = inventory.unconsumedRounds;
+  if (
+    !isValidUnconsumedRounds(unconsumedRounds) ||
+    unconsumedRounds.observable !== true
+  ) {
+    return {
+      eligibility: ELIGIBILITY.EVIDENCE_NOT_DURABLE,
+      reason: REASON.UNCONSUMED_ROUNDS_UNKNOWN,
+      evidence: buildArchiveEvidence(REASON.UNCONSUMED_ROUNDS_UNKNOWN, {
+        unconsumedRounds: unconsumedRounds ?? null,
+      }),
+    };
+  }
+  if (
+    unconsumedRounds.count > 0 &&
+    unconsumedRounds.consumedViaRetirement !== true
+  ) {
+    return {
+      eligibility: ELIGIBILITY.EVIDENCE_NOT_DURABLE,
+      reason: REASON.UNCONSUMED_ROUNDS_PRESENT,
+      evidence: buildArchiveEvidence(REASON.UNCONSUMED_ROUNDS_PRESENT, {
+        unconsumedRounds,
+      }),
+    };
+  }
+  return null;
+}
+
+// ⓒ 보존 사유 파일 .harness/keep-reason.md 없음(있으면 거부 -- 사유
+// 첫 줄을 증거에 싣는다).
+function checkKeepReasonAbsent(inventory) {
+  const keepReason = inventory.keepReason;
+  if (!isValidKeepReason(keepReason) || keepReason.observable !== true) {
+    return {
+      eligibility: ELIGIBILITY.EVIDENCE_NOT_DURABLE,
+      reason: REASON.KEEP_REASON_UNKNOWN,
+      evidence: buildArchiveEvidence(REASON.KEEP_REASON_UNKNOWN, {
+        keepReason: keepReason ?? null,
+      }),
+    };
+  }
+  if (keepReason.present === true) {
+    return {
+      eligibility: ELIGIBILITY.EVIDENCE_NOT_DURABLE,
+      reason: REASON.KEEP_REASON_PRESENT,
+      evidence: buildArchiveEvidence(REASON.KEEP_REASON_PRESENT, {
+        keepReasonFirstLine: isNonEmptyString(keepReason.firstLine)
+          ? keepReason.firstLine
+          : null,
+      }),
+    };
+  }
+  return null;
+}
+
+// ⓓ 아카이브 대상 목록 산출 -- 목록 자체을 관측할 수 없으면 판정 불가
+// (복사·삭제는 이 파일이 절대 하지 않는다 -- 목록을 evidence에 실을
+// 뿐이다).
+function checkArchiveManifestAvailable(inventory) {
+  const archiveManifest = inventory.archiveManifest;
+  if (
+    !isValidArchiveManifest(archiveManifest) ||
+    archiveManifest.observable !== true
+  ) {
+    return {
+      eligibility: ELIGIBILITY.EVIDENCE_NOT_DURABLE,
+      reason: REASON.ARCHIVE_MANIFEST_UNAVAILABLE,
+      evidence: buildArchiveEvidence(REASON.ARCHIVE_MANIFEST_UNAVAILABLE, {
+        archiveManifest: archiveManifest ?? null,
+      }),
+    };
+  }
+  return null;
+}
+
+const ARCHIVE_ELIGIBILITY_CHECKS = Object.freeze([
+  checkMergeAncestry,
+  checkUnconsumedRoundsClear,
+  checkKeepReasonAbsent,
+  checkArchiveManifestAvailable,
+]);
+
+// judgeArchiveEligibility({inventory}) -- 순수 판정, 부작용 0. armed/
+// allowSink 개념은 이 축에 없다(allowSink는 항상 false로 고정 -- 이
+// 함수는 어떤 파괴도 절대 허가하지 않는다, §2 비타협 "armed는 항상
+// false"). PR 2(무장)가 이 판정 결과를 실제 실행과 묶는 방법은 이
+// 라운드의 범위 밖이다.
+export function judgeArchiveEligibility(args = {}) {
+  // ★ 신뢰 경계(judgeTeardown과 동일 원칙): 인자를 한 번만 읽어 고정한다.
+  const fixed = snapshotPlainData(args);
+  if (!fixed.ok) {
+    return {
+      eligibility: ELIGIBILITY.EVIDENCE_NOT_DURABLE,
+      reason: REASON.SCHEMA_INVALID,
+      allowSink: false,
+      evidence: buildArchiveEvidence(REASON.SCHEMA_INVALID, {
+        inventory: null,
+        snapshotReason: fixed.reason,
+      }),
+    };
+  }
+  const { inventory } = isPlainObject(fixed.value) ? fixed.value : {};
+  if (!isPlainObject(inventory)) {
+    return {
+      eligibility: ELIGIBILITY.EVIDENCE_NOT_DURABLE,
+      reason: REASON.SCHEMA_INVALID,
+      allowSink: false,
+      evidence: buildArchiveEvidence(REASON.SCHEMA_INVALID, {
+        inventory: inventory ?? null,
+      }),
+    };
+  }
+  for (const check of ARCHIVE_ELIGIBILITY_CHECKS) {
+    const blocked = check(inventory);
+    if (blocked) {
+      return { ...blocked, allowSink: false };
+    }
+  }
+  return {
+    eligibility: ELIGIBILITY.ELIGIBLE,
+    reason: REASON.ARCHIVE_ELIGIBLE,
+    allowSink: false,
+    evidence: buildArchiveEvidence(REASON.ARCHIVE_ELIGIBLE, {
+      mergeStatus: inventory.mergeStatus,
+      unconsumedRounds: inventory.unconsumedRounds,
+      keepReason: inventory.keepReason,
+      archiveManifest: inventory.archiveManifest,
+    }),
+  };
 }

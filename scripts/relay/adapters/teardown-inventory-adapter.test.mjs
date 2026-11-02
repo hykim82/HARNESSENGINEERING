@@ -1,12 +1,16 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import {
   observeTeardownInventory,
+  observeArchiveInventory,
   computeCanonicalPathDigest,
   buildOrcaWorktreeListCommand,
   buildOrcaTerminalListCommand,
   buildGitWorktreeListCommand,
   buildGitStatusCommand,
+  buildGitRevParseHeadCommand,
+  buildGitLsRemoteMasterCommand,
 } from "./teardown-inventory-adapter.mjs";
 import { TEARDOWN_SCHEMA_VERSION } from "../teardown-core.mjs";
 
@@ -359,4 +363,177 @@ test("required#1: observeTeardownInventory never issues orchestration task-list/
       (a[1] === "task-list" || a[1] === "dispatch-show"),
   );
   assert.deepEqual(forbidden, []);
+});
+
+// ═══════════════════════════════════════════════════════════════════════
+// HYK-464-teardown-shadow-1 -- observeArchiveInventory(ⓐⓒⓓ 관측, 읽기
+// 전용). ⓑ(미소비)는 이 파일이 만들지 않는다(호출자가 채운다, 위
+// teardown-core.test.mjs의 judgeArchiveEligibility 시험이 그 축을 이미
+// 다룬다) -- 여기서는 ⓐⓒⓓ만 다룬다.
+// ═══════════════════════════════════════════════════════════════════════
+
+const SHA_HEAD = "a".repeat(40);
+const SHA_REMOTE = "b".repeat(40);
+
+function fullyEligibleArchiveOpts(overrides = {}) {
+  return {
+    gitFn: (argv) => {
+      assert.deepEqual(argv, buildGitRevParseHeadCommand());
+      return `${SHA_HEAD}\n`;
+    },
+    lsRemoteFn: (argv) => {
+      assert.deepEqual(argv, buildGitLsRemoteMasterCommand());
+      return `${SHA_REMOTE}\trefs/heads/master\n`;
+    },
+    isAncestorFn: (headSha, remoteSha) => {
+      assert.equal(headSha, SHA_HEAD);
+      assert.equal(remoteSha, SHA_REMOTE);
+      return true;
+    },
+    existsFn: () => false,
+    readFileFn: () => {
+      throw new Error(
+        "readFileFn should not be called when keep-reason.md absent",
+      );
+    },
+    listHarnessFilesFn: () => [".harness/coder.md"],
+    readFileBufferFn: () => Buffer.from("hello"),
+    ...overrides,
+  };
+}
+
+test("HYK-464-teardown-shadow-1 observeArchiveInventory: 전부 관측 가능하고 병합 완료 + keep-reason 없음 -> observable 전부 true", () => {
+  const inv = observeArchiveInventory(
+    { worktreePath: WT },
+    fullyEligibleArchiveOpts(),
+  );
+  assert.deepEqual(inv.mergeStatus, {
+    observable: true,
+    isAncestorOfRemoteMaster: true,
+    headSha: SHA_HEAD,
+    remoteMasterSha: SHA_REMOTE,
+  });
+  assert.deepEqual(inv.keepReason, {
+    observable: true,
+    present: false,
+    firstLine: null,
+  });
+  assert.equal(inv.archiveManifest.observable, true);
+  assert.equal(
+    inv.archiveManifest.files[0].sha256,
+    createHash("sha256").update(Buffer.from("hello")).digest("hex"),
+  );
+  assert.equal(inv.archiveManifest.files[0].bytes, 5);
+  assert.equal(inv.archiveManifest.files[0].path, ".harness/coder.md");
+});
+
+test("HYK-464-teardown-shadow-1 observeArchiveInventory: 병합 안 됨(is-ancestor false) -> mergeStatus.isAncestorOfRemoteMaster=false", () => {
+  const inv = observeArchiveInventory(
+    { worktreePath: WT },
+    fullyEligibleArchiveOpts({ isAncestorFn: () => false }),
+  );
+  assert.equal(inv.mergeStatus.observable, true);
+  assert.equal(inv.mergeStatus.isAncestorOfRemoteMaster, false);
+});
+
+test("HYK-464-teardown-shadow-1 observeArchiveInventory: lsRemoteFn이 없으면 mergeStatus는 UNOBSERVABLE(지어내지 않는다)", () => {
+  const inv = observeArchiveInventory(
+    { worktreePath: WT },
+    fullyEligibleArchiveOpts({ lsRemoteFn: undefined }),
+  );
+  assert.deepEqual(inv.mergeStatus, { observable: false });
+});
+
+test("HYK-464-teardown-shadow-1 observeArchiveInventory: isAncestorFn이 던지면(진짜 오류, 예: unknown revision) mergeStatus는 UNOBSERVABLE", () => {
+  const inv = observeArchiveInventory(
+    { worktreePath: WT },
+    fullyEligibleArchiveOpts({
+      isAncestorFn: () => {
+        throw new Error("fatal: Not a valid object name");
+      },
+    }),
+  );
+  assert.deepEqual(inv.mergeStatus, { observable: false });
+});
+
+test("HYK-464-teardown-shadow-1 observeArchiveInventory: ls-remote 응답이 40자 sha가 아니면(이상 출력) UNOBSERVABLE", () => {
+  const inv = observeArchiveInventory(
+    { worktreePath: WT },
+    fullyEligibleArchiveOpts({ lsRemoteFn: () => "not-a-sha\n" }),
+  );
+  assert.deepEqual(inv.mergeStatus, { observable: false });
+});
+
+test("HYK-464-teardown-shadow-1 observeArchiveInventory: keep-reason.md 존재 -> present:true + 첫 줄", () => {
+  const inv = observeArchiveInventory(
+    { worktreePath: WT },
+    fullyEligibleArchiveOpts({
+      existsFn: () => true,
+      readFileFn: () => "\n보존 사유 첫 줄\n둘째 줄은 안 쓴다\n",
+    }),
+  );
+  assert.deepEqual(inv.keepReason, {
+    observable: true,
+    present: true,
+    firstLine: "보존 사유 첫 줄",
+  });
+});
+
+test("HYK-464-teardown-shadow-1 observeArchiveInventory: keep-reason.md 있는데 못 읽으면(권한 등) UNOBSERVABLE(없다로 접지 않는다)", () => {
+  const inv = observeArchiveInventory(
+    { worktreePath: WT },
+    fullyEligibleArchiveOpts({
+      existsFn: () => true,
+      readFileFn: () => {
+        throw new Error("EACCES");
+      },
+    }),
+  );
+  assert.deepEqual(inv.keepReason, { observable: false });
+});
+
+test("HYK-464-teardown-shadow-1 observeArchiveInventory: listHarnessFilesFn이 없으면 archiveManifest는 UNOBSERVABLE", () => {
+  const inv = observeArchiveInventory(
+    { worktreePath: WT },
+    fullyEligibleArchiveOpts({ listHarnessFilesFn: undefined }),
+  );
+  assert.deepEqual(inv.archiveManifest, { observable: false });
+});
+
+test("HYK-464-teardown-shadow-1 observeArchiveInventory: readFileBufferFn이 던지면(파일 하나라도 읽기 실패) archiveManifest 전체가 UNOBSERVABLE", () => {
+  const inv = observeArchiveInventory(
+    { worktreePath: WT },
+    fullyEligibleArchiveOpts({
+      listHarnessFilesFn: () => [".harness/coder.md", ".harness/review.md"],
+      readFileBufferFn: (relPath) => {
+        if (relPath === ".harness/review.md") throw new Error("ENOENT");
+        return Buffer.from("x");
+      },
+    }),
+  );
+  assert.deepEqual(inv.archiveManifest, { observable: false });
+});
+
+test("HYK-464-teardown-shadow-1 observeArchiveInventory: 파괴 argv 0 -- gitFn/lsRemoteFn에는 조회성 argv만 간다", () => {
+  const calls = [];
+  observeArchiveInventory(
+    { worktreePath: WT },
+    fullyEligibleArchiveOpts({
+      gitFn: (argv) => {
+        calls.push(argv);
+        return `${SHA_HEAD}\n`;
+      },
+      lsRemoteFn: (argv) => {
+        calls.push(argv);
+        return `${SHA_REMOTE}\trefs/heads/master\n`;
+      },
+    }),
+  );
+  for (const argv of calls) {
+    assert.equal(argv.includes("rm"), false);
+    assert.equal(argv.includes("close"), false);
+    assert.equal(argv.includes("push"), false);
+    assert.equal(argv.includes("-f"), false);
+    assert.equal(argv.includes("--force"), false);
+  }
 });

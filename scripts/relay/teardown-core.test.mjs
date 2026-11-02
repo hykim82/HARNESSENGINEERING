@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   judgeTeardown,
   judgePostConditions,
+  judgeArchiveEligibility,
   OBSERVATION,
   ELIGIBILITY,
   EXECUTION,
@@ -611,4 +612,177 @@ test("HYK-431 8R: 허용 목록이 아니다 -- 계약에 없는 이름을 채�
   });
   assert.equal(withExtras.allowSink, true);
   assert.equal(withExtras.reason, REASON.ELIGIBLE);
+});
+
+// ═══════════════════════════════════════════════════════════════════════
+// HYK-464-teardown-shadow-1 -- judgeArchiveEligibility(아카이브 전제 축 4개)
+// ═══════════════════════════════════════════════════════════════════════
+// ⛔judgeTeardown/classifyEligibility와 완전히 독립된 함수다(teardown-
+// core.mjs 머리 주석 "왜 섞지 않았는가" 참조) -- 위의 모든 judgeTeardown
+// 시험은 이 블록으로 단 하나도 바뀌지 않는다(이미 위에서 58건 전부
+// 통과했다, §4 비타협 "기존 시험 무회귀").
+
+function eligibleArchiveInventory(overrides = {}) {
+  return {
+    mergeStatus: { observable: true, isAncestorOfRemoteMaster: true },
+    unconsumedRounds: {
+      observable: true,
+      count: 0,
+      consumedViaRetirement: false,
+    },
+    keepReason: { observable: true, present: false, firstLine: null },
+    archiveManifest: {
+      observable: true,
+      files: [{ path: ".harness/coder.md", bytes: 42, sha256: "a".repeat(64) }],
+    },
+    ...overrides,
+  };
+}
+
+// §1b_exec_line 판정 코어 표 -- 합성 워크트리 5종 + 관측 실패 1종.
+test("HYK-464-teardown-shadow-1 판정 코어 표: 병합 완료·미소비 0·사유 없음 -> ELIGIBLE", () => {
+  const r = judgeArchiveEligibility({ inventory: eligibleArchiveInventory() });
+  assert.equal(r.eligibility, ELIGIBILITY.ELIGIBLE);
+  assert.equal(r.reason, REASON.ARCHIVE_ELIGIBLE);
+  assert.equal(r.allowSink, false); // 이 축은 어떤 입력에도 파괴를 허가하지 않는다.
+  assert.deepEqual(r.evidence.archiveManifest.files, [
+    { path: ".harness/coder.md", bytes: 42, sha256: "a".repeat(64) },
+  ]);
+});
+
+test("HYK-464-teardown-shadow-1 판정 코어 표: 미병합(브랜치 head가 origin/master 조상 아님) -> 거부", () => {
+  const r = judgeArchiveEligibility({
+    inventory: eligibleArchiveInventory({
+      mergeStatus: { observable: true, isAncestorOfRemoteMaster: false },
+    }),
+  });
+  assert.equal(r.eligibility, ELIGIBILITY.EVIDENCE_NOT_DURABLE);
+  assert.equal(r.reason, REASON.NOT_MERGED_TO_MASTER);
+  assert.equal(r.allowSink, false);
+});
+
+test("HYK-464-teardown-shadow-1 판정 코어 표: 미소비 DONE 있음(은퇴 기록 없음) -> 거부", () => {
+  const r = judgeArchiveEligibility({
+    inventory: eligibleArchiveInventory({
+      unconsumedRounds: {
+        observable: true,
+        count: 1,
+        consumedViaRetirement: false,
+      },
+    }),
+  });
+  assert.equal(r.eligibility, ELIGIBILITY.EVIDENCE_NOT_DURABLE);
+  assert.equal(r.reason, REASON.UNCONSUMED_ROUNDS_PRESENT);
+});
+
+test("HYK-464-teardown-shadow-1 판정 코어 표: 미소비지만 은퇴 기록 있음 -> ELIGIBLE(소비됨으로 셈)", () => {
+  const r = judgeArchiveEligibility({
+    inventory: eligibleArchiveInventory({
+      unconsumedRounds: {
+        observable: true,
+        count: 1,
+        consumedViaRetirement: true,
+      },
+    }),
+  });
+  assert.equal(r.eligibility, ELIGIBILITY.ELIGIBLE);
+  assert.equal(r.reason, REASON.ARCHIVE_ELIGIBLE);
+});
+
+test("HYK-464-teardown-shadow-1 판정 코어 표: keep-reason.md 있음 -> 거부(사유 첫 줄이 증거에 실린다)", () => {
+  const r = judgeArchiveEligibility({
+    inventory: eligibleArchiveInventory({
+      keepReason: {
+        observable: true,
+        present: true,
+        firstLine: "아직 재현 로그를 더 수집하는 중",
+      },
+    }),
+  });
+  assert.equal(r.eligibility, ELIGIBILITY.EVIDENCE_NOT_DURABLE);
+  assert.equal(r.reason, REASON.KEEP_REASON_PRESENT);
+  assert.equal(
+    r.evidence.keepReasonFirstLine,
+    "아직 재현 로그를 더 수집하는 중",
+  );
+});
+
+test("HYK-464-teardown-shadow-1 판정 코어 표: 관측 실패(ls-remote 등 네트워크 의존 관측 불가) -> 판정 불가(ELIGIBLE 아님)", () => {
+  const r = judgeArchiveEligibility({
+    inventory: eligibleArchiveInventory({
+      mergeStatus: { observable: false },
+    }),
+  });
+  assert.equal(r.eligibility, ELIGIBILITY.EVIDENCE_NOT_DURABLE);
+  assert.equal(r.reason, REASON.MERGE_STATUS_UNKNOWN);
+  assert.notEqual(r.eligibility, ELIGIBILITY.ELIGIBLE);
+});
+
+// 그 밖의 "근거가 주어지지 않으면 판정 불가"(필드 자체가 없는 경우 --
+// observable:false와는 다른 입력이지만 같은 사유로 떨어져야 한다).
+test("HYK-464-teardown-shadow-1: 아카이브 전제 필드 자체가 없으면(undefined) 판정 불가로 떨어진다(지어내지 않는다)", () => {
+  const r = judgeArchiveEligibility({
+    inventory: {
+      unconsumedRounds: {
+        observable: true,
+        count: 0,
+        consumedViaRetirement: false,
+      },
+      keepReason: { observable: true, present: false, firstLine: null },
+      archiveManifest: { observable: true, files: [] },
+      // mergeStatus 자체가 없다.
+    },
+  });
+  assert.equal(r.eligibility, ELIGIBILITY.EVIDENCE_NOT_DURABLE);
+  assert.equal(r.reason, REASON.MERGE_STATUS_UNKNOWN);
+});
+
+test("HYK-464-teardown-shadow-1: 미소비 축 관측 불가 -> 판정 불가", () => {
+  const r = judgeArchiveEligibility({
+    inventory: eligibleArchiveInventory({
+      unconsumedRounds: { observable: false },
+    }),
+  });
+  assert.equal(r.eligibility, ELIGIBILITY.EVIDENCE_NOT_DURABLE);
+  assert.equal(r.reason, REASON.UNCONSUMED_ROUNDS_UNKNOWN);
+});
+
+test("HYK-464-teardown-shadow-1: keep-reason 관측 불가(있는데 못 읽음 등) -> 판정 불가", () => {
+  const r = judgeArchiveEligibility({
+    inventory: eligibleArchiveInventory({
+      keepReason: { observable: false },
+    }),
+  });
+  assert.equal(r.eligibility, ELIGIBILITY.EVIDENCE_NOT_DURABLE);
+  assert.equal(r.reason, REASON.KEEP_REASON_UNKNOWN);
+});
+
+test("HYK-464-teardown-shadow-1: 아카이브 목록 관측 불가 -> 판정 불가(복사·삭제는 어차피 이 함수가 절대 하지 않는다)", () => {
+  const r = judgeArchiveEligibility({
+    inventory: eligibleArchiveInventory({
+      archiveManifest: { observable: false },
+    }),
+  });
+  assert.equal(r.eligibility, ELIGIBILITY.EVIDENCE_NOT_DURABLE);
+  assert.equal(r.reason, REASON.ARCHIVE_MANIFEST_UNAVAILABLE);
+});
+
+test("HYK-464-teardown-shadow-1: 스키마 자체가 무너지면(inventory가 plain object가 아님) SCHEMA_INVALID", () => {
+  const r = judgeArchiveEligibility({ inventory: "not-an-object" });
+  assert.equal(r.eligibility, ELIGIBILITY.EVIDENCE_NOT_DURABLE);
+  assert.equal(r.reason, REASON.SCHEMA_INVALID);
+  assert.equal(r.allowSink, false);
+});
+
+// judgeTeardown과의 독립성 재확인 -- dispatchCorrelationProven을 전혀
+// 주지 않아도(이 축 자체가 그 필드를 보지 않는다) ELIGIBLE이 난다. 만약
+// 이 함수가 classifyEligibility 체인을 통과한다면 이 시험이 실패했을
+// 것이다(그 체인은 dispatchCorrelationProven:true가 없으면 항상 막는다).
+test("HYK-464-teardown-shadow-1: dispatchCorrelationProven/protectedTargets 등 seat-teardown 축은 전혀 보지 않는다(완전히 독립된 판정)", () => {
+  const r = judgeArchiveEligibility({
+    inventory: eligibleArchiveInventory(),
+    // policy는 아예 주지 않았다 -- judgeTeardown이었다면 이것만으로도
+    // DISPATCH_CORRELATION_UNPROVEN으로 항상 막혔을 것이다.
+  });
+  assert.equal(r.eligibility, ELIGIBILITY.ELIGIBLE);
 });
