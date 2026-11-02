@@ -29,6 +29,7 @@ import {
   checkRelayHandshake,
   RUNNER_RECEIPT_REJECT_REASON,
   RUNNER_RECEIPT_RUN_PREFIX,
+  parseKstTimestamp,
 } from "./relay-handshake.mjs";
 import {
   createEmptyLedger,
@@ -39,6 +40,12 @@ import { RELAY_HANDSHAKE_STATIC_SIBLINGS } from "./relay-handshake-fixture-sibli
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const RELAY_HANDSHAKE_PATH = join(HERE, "relay-handshake.mjs");
+// time-judgment-now-injection.test.mjs(tj-1) 선례와 같은 이유 -- 절대시각
+// 픽스처(doneAt/droppedAt)를 now 없이 시간 판정 진입점에 넘기면 하루 중
+// 특정 창에서만 깨지는 실시계 의존이 생긴다. 모든 checkRelayHandshake 호출에
+// 이 고정값을 명시로 주입한다(relay-handshake-runner-contract.test.mjs의
+// FIXED_NOW_MS 관례 그대로).
+const FIXED_NOW_MS = parseKstTimestamp("2026-11-02 09:00:00 KST").getTime();
 
 function tmpDir(prefix) {
   return mkdtempSync(join(tmpdir(), prefix));
@@ -204,7 +211,11 @@ test("(hyk412-1)★ 합성 HYK-433 2R 모양 표본(run3=0/run4=1/run5=0) -> che
 
     let result;
     withLedgerEnv(ledgerPath, () => {
-      result = checkRelayHandshake({ role: "coder", harnessDir: dir });
+      result = checkRelayHandshake({
+        role: "coder",
+        harnessDir: dir,
+        now: FIXED_NOW_MS,
+      });
     });
 
     assert.equal(result.ok, false);
@@ -263,13 +274,21 @@ test("(hyk412-2) 반복 폴링: 같은 라벨+같은 결과 지문이면 거부 
     const ledgerPath = setupLedger(dir, taskId);
 
     withLedgerEnv(ledgerPath, () => {
-      checkRelayHandshake({ role: "coder", harnessDir: dir });
+      checkRelayHandshake({
+        role: "coder",
+        harnessDir: dir,
+        now: FIXED_NOW_MS,
+      });
     });
     const firstPath = findRefusalRecordPath(dir);
     const firstContent = readFileSync(firstPath, "utf8");
 
     withLedgerEnv(ledgerPath, () => {
-      checkRelayHandshake({ role: "coder", harnessDir: dir });
+      checkRelayHandshake({
+        role: "coder",
+        harnessDir: dir,
+        now: FIXED_NOW_MS,
+      });
     });
     const secondPath = findRefusalRecordPath(dir);
     const secondContent = readFileSync(secondPath, "utf8");
@@ -303,7 +322,11 @@ test("(hyk412-3) 과적용 금지: 같은 게이트의 다른 거부 사유(entr
 
     let result;
     withLedgerEnv(ledgerPath, () => {
-      result = checkRelayHandshake({ role: "coder", harnessDir: dir });
+      result = checkRelayHandshake({
+        role: "coder",
+        harnessDir: dir,
+        now: FIXED_NOW_MS,
+      });
     });
 
     assert.equal(result.ok, false);
@@ -330,7 +353,11 @@ test("(hyk412-4) 은퇴 기록이 없으면 거부만 하고 원장 슬롯은 �
 
     let result;
     withLedgerEnv(ledgerPath, () => {
-      result = checkRelayHandshake({ role: "coder", harnessDir: dir });
+      result = checkRelayHandshake({
+        role: "coder",
+        harnessDir: dir,
+        now: FIXED_NOW_MS,
+      });
     });
     assert.equal(result.state, "CONSUMPTION_REFUSED_RUNNER_CONTRACT");
 
@@ -352,7 +379,11 @@ test("(hyk412-5)★ 유효한 은퇴 기록이 있으면 원장 슬롯을 실제
 
     let firstResult;
     withLedgerEnv(ledgerPath, () => {
-      firstResult = checkRelayHandshake({ role: "coder", harnessDir: dir });
+      firstResult = checkRelayHandshake({
+        role: "coder",
+        harnessDir: dir,
+        now: FIXED_NOW_MS,
+      });
     });
 
     const archivePath = join(dir, "rounds", "coder-r1.md");
@@ -380,7 +411,11 @@ test("(hyk412-5)★ 유효한 은퇴 기록이 있으면 원장 슬롯을 실제
 
     let secondResult;
     withLedgerEnv(ledgerPath, () => {
-      secondResult = checkRelayHandshake({ role: "coder", harnessDir: dir });
+      secondResult = checkRelayHandshake({
+        role: "coder",
+        harnessDir: dir,
+        now: FIXED_NOW_MS,
+      });
     });
 
     assert.equal(secondResult.ok, false);
@@ -404,7 +439,11 @@ test("(hyk412-6) 거부 기록의 영수증 sha256을 위조하면 재확인에 
     const ledgerPath = setupLedger(dir, taskId);
 
     withLedgerEnv(ledgerPath, () => {
-      checkRelayHandshake({ role: "coder", harnessDir: dir });
+      checkRelayHandshake({
+        role: "coder",
+        harnessDir: dir,
+        now: FIXED_NOW_MS,
+      });
     });
 
     const resultContent = readFileSync(join(dir, "coder.md"), "utf8");
@@ -435,7 +474,11 @@ test("(hyk412-6) 거부 기록의 영수증 sha256을 위조하면 재확인에 
     );
 
     withLedgerEnv(ledgerPath, () => {
-      checkRelayHandshake({ role: "coder", harnessDir: dir });
+      checkRelayHandshake({
+        role: "coder",
+        harnessDir: dir,
+        now: FIXED_NOW_MS,
+      });
     });
 
     const after = JSON.parse(readFileSync(ledgerPath, "utf8"));
@@ -583,7 +626,11 @@ test("(hyk412-7)★ 되돌림 변이: RETIREMENT_SIDE_EFFECT_STATES에서 CONSUM
       `file://${join(checkDir, "relay-handshake.mjs").replace(/\\/g, "/")}?t=${Date.now()}`
     );
     withLedgerEnv(ledgerPath, () => {
-      mod.checkRelayHandshake({ role: "coder", harnessDir });
+      mod.checkRelayHandshake({
+        role: "coder",
+        harnessDir,
+        now: FIXED_NOW_MS,
+      });
     });
 
     const after = JSON.parse(readFileSync(ledgerPath, "utf8"));
