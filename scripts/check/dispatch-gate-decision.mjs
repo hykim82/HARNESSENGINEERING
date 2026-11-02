@@ -16,6 +16,7 @@ import {
   readdirSync,
   mkdtempSync,
   rmSync,
+  statSync,
 } from "node:fs";
 import { createHash } from "node:crypto";
 import { join, dirname, resolve } from "node:path";
@@ -37,6 +38,7 @@ import {
   maskQuotedMarkerRegions,
   droppedAtScanText,
 } from "./reject-streak.mjs";
+import { lintDirective } from "./directive-lint.mjs";
 // HYK-257-done-stamp-2 §2 범위2 ⓑ: the ONE real, already-production-wired
 // anchor for a machine dropped_at stamp -- 관제실 dispatch-worker.ps1
 // (읽기 전용, 이 저장소 밖 실측 원문, 아래 bestEffortStampDroppedAt 헤더
@@ -270,6 +272,48 @@ function extractHeadCommitFacts(taskPath, role) {
     headCommitMatchCount: matches.length,
     headCommitNearMissPresent:
       matches.length === 0 && DISPATCH_HEAD_COMMIT_ANYWHERE_RE.test(normalized),
+  };
+}
+
+// HYK-488-directive-lint-1 §2: mirrors extractHeadCommitFacts's own shape
+// immediately above -- reads `taskPath` INDEPENDENTLY (S8: lintDirective
+// itself never touches a filesystem) so a genuine read/stat failure at
+// exactly this check's own moment is its own distinct reject, not silently
+// absorbed into an earlier read. mtimeMs comes from the SAME stat call
+// (not a caller-cached value) so a file replaced between an earlier read
+// and this one can't desync text vs. mtime.
+function extractDirectiveLintFacts(taskPath) {
+  let text;
+  let mtimeMs;
+  try {
+    text = readFileSync(taskPath, "utf8");
+    mtimeMs = statSync(taskPath).mtimeMs;
+  } catch (err) {
+    return { readOk: false, readErrorReason: firstNonEmptyErrorText(err) };
+  }
+  return { readOk: true, text, mtimeMs };
+}
+
+// HYK-488-directive-lint-1 §2: builds the decision object itself (kept out
+// of runDispatchGateDecision's own body -- quality-check's complexity/
+// max-lines budget for that function was already near its ceiling before
+// this axis existed). Returns null on PASS, matching every other
+// precondition axis's convention in this file.
+function buildDirectiveLintDecision(taskPath) {
+  const facts = extractDirectiveLintFacts(taskPath);
+  if (facts.readOk === false) {
+    return {
+      state: "REJECT_DIRECTIVE_LINT_UNREADABLE",
+      allow: false,
+      reason: `dispatch-gate-decision precondition: task 파일을 읽을 수 없어 지시서 린트(HYK-488)를 판정할 수 없음 -- 원인: ${facts.readErrorReason ?? "(no detail)"} -> 배달 거부(안전측 기본값). 조치: task 파일 경로/권한을 확인한 뒤 재시도하라`,
+    };
+  }
+  const lintResult = lintDirective(facts.text, { mtimeMs: facts.mtimeMs });
+  if (lintResult.ok) return null;
+  return {
+    state: "REJECT_DIRECTIVE_LINT",
+    allow: false,
+    reason: `dispatch-gate-decision precondition: 지시서 린트(HYK-488) 위반 -- ${lintResult.reasons.join(" | ")} -> 배달 거부(안전측 기본값). 조치: 금지 키 결합 줄을 쪼개거나, remnant_forbid 잔재 문자열을 지우거나, 머리의 미래 시각을 고쳐라`,
   };
 }
 
@@ -3953,6 +3997,17 @@ export function runDispatchGateDecision(argv) {
         // ever pushed.
         const consumptionDecision = evaluateConsumptionDecision(taskPath, args);
         if (consumptionDecision) decisions.push(consumptionDecision);
+        // HYK-488-directive-lint-1 §2: same placement reasoning as the
+        // axes immediately above -- last among the precondition axes, so
+        // this new axis's outcome never changes which existing
+        // precondition-reject fixture short-circuits before which gate.
+        // bestEffortInjectResultPaths already ran above (before the ledger
+        // branch) and may have rewritten taskPath in place -- that refreshes
+        // its mtime to "now", which only makes the ⓘⓘⓘ future-timestamp
+        // check MORE lenient (every embedded historical timestamp stays in
+        // the past relative to a newer mtime), never less.
+        const directiveLintDecision = buildDirectiveLintDecision(taskPath);
+        if (directiveLintDecision) decisions.push(directiveLintDecision);
       }
     }
   }
