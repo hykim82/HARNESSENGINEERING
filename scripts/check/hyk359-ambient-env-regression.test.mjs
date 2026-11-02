@@ -1455,6 +1455,24 @@ export function shouldRunFullAmbientSweep(env) {
 const FULL_AMBIENT_SWEEP_SKIP_REASON =
   "HYK-359 계약은 CI(enforce.yml env)에서 전수 유지 · 로컬 러너 생략 · 책임자 판정 2026-11-01 0215 답";
 
+// HYK-477-ambient-sweep-report-1: the env var CI points at an absolute
+// marker-file path through (enforce.yml's npm test step, set alongside
+// HARNESS_FULL_AMBIENT_SWEEP). The sweep test below only writes a marker
+// when this is present -- unset locally, it is a no-op, which is why the
+// local 1b_exec_line contract (coder-task.md) never sets it.
+const AMBIENT_SWEEP_MARKER_ENV_VAR = "HARNESS_AMBIENT_SWEEP_MARKER";
+
+// HYK-477-ambient-sweep-report-1: exported so this round's own production-
+// entry-point test (below) can drive it directly with a synthetic path, and
+// so scripts/check/ambient-sweep-report.mjs's own test file (synthetic
+// markers, no dependency on this file) has a single, shared definition of
+// the marker's JSON shape to target. Intentionally a thin, literal
+// writeFileSync -- the decision of WHAT to put in `fields` and WHEN to call
+// this stays in the sweep test body below, not here.
+export function writeAmbientSweepMarker(markerPath, fields) {
+  writeFileSync(markerPath, JSON.stringify(fields), "utf8");
+}
+
 // HYK-477 §2 ⓒ-④ 정적 가드: reads the WORKING-TREE copy of enforce.yml, NOT
 // `git show HEAD:...` -- unlike nc-ci-enforce.test.mjs (that file's own
 // module header explains it deliberately only trusts COMMITTED text,
@@ -1621,7 +1639,9 @@ test(
     // the mistake this round is fixing. Only a genuine pass reaches the
     // cleanup below.
     const beforeStatus = snapshotRepoStatus(root);
+    const sweepStartMs = Date.now();
     runProductionSweep({ root, swept, dir });
+    const sweepDurationMs = Date.now() - sweepStartMs;
     const afterStatus = snapshotRepoStatus(root);
     // HYK-466 1R (저장소 쓰기 무결성, coder-task.md §2/§7): A=0("저장소에
     // 쓰는 시험 0건")을 사람이 한 번 센 값이 아니라 매 실행마다 기계로
@@ -1633,9 +1653,138 @@ test(
       beforeStatus,
       `CI-canonical 스윕이 도는 동안 저장소(${JSON.stringify(root)})의 추적 대상 경로가 바뀌었다 -- 스윕 전 상태:\n${beforeStatus || "(clean)"}\n스윕 후 상태:\n${afterStatus || "(clean)"}\n이 시험은 A=0(저장소에 쓰는 시험 0건)을 매 실행마다 기계로 지키기 위한 것이다(coder-task.md §2/§7) -- 새로 나타난 항목이 있다면 그 시험이 저장소에 쓴 것이다`,
     );
+    // HYK-477-ambient-sweep-report-1: only after the repo-write-integrity
+    // assert above has already passed -- a marker's mere existence must
+    // imply that assertion held, never race ahead of it. A no-op when the
+    // env var is unset (every local worker round; coder-task.md
+    // env_marker_local_ban).
+    if (process.env[AMBIENT_SWEEP_MARKER_ENV_VAR]) {
+      writeAmbientSweepMarker(process.env[AMBIENT_SWEEP_MARKER_ENV_VAR], {
+        files: swept.length,
+        duration_ms: sweepDurationMs,
+        head: execFileSync("git", ["rev-parse", "HEAD"], {
+          cwd: root,
+          encoding: "utf8",
+        }).trim(),
+        node: process.version,
+        full_ambient_sweep: process.env[FULL_AMBIENT_SWEEP_ENV_VAR] ?? "",
+      });
+    }
     rmSync(dir, { recursive: true, force: true });
   },
 );
+
+// HYK-477-ambient-sweep-report-1 §2 ⓒ-④ 정적 가드 (① 파일 안, product_scope
+// ④): reads the WORKING-TREE copy of enforce.yml (same reason as the ⓒ-④
+// guard above this file already has -- this round's §2 ⓒ mutation
+// verification mutates enforce.yml in place, uncommitted). Three distinct
+// things must hold about the report step added right after the npm test
+// step: (a) it genuinely IS the very next step, not merely present
+// somewhere in the file, (b) its `run:` marker-path argument is
+// byte-identical to the SAME literal pinned in npm test's own env --
+// a drifted copy would silently report on a path the npm test step never
+// actually wrote to, and (c) it carries neither `if:` nor
+// `continue-on-error:` (either would let a broken/absent sweep still go
+// green).
+function readAmbientSweepMarkerEnvValue(enforceYmlText) {
+  const block = readWholeNpmTestStepBlock(enforceYmlText);
+  if (block === null) return null;
+  const activeLines = block
+    .split("\n")
+    .filter((line) => !/^\s*#/.test(line))
+    .join("\n");
+  const m = activeLines.match(/HARNESS_AMBIENT_SWEEP_MARKER:\s*(\S.*)$/m);
+  return m ? m[1].trim() : null;
+}
+
+function readStepImmediatelyAfterNpmTestStep(enforceYmlText) {
+  const stepBlock = readWholeNpmTestStepBlock(enforceYmlText);
+  if (stepBlock === null) return null;
+  const idx = enforceYmlText.indexOf(stepBlock);
+  if (idx === -1) return null;
+  const rest = enforceYmlText.slice(idx + stepBlock.length);
+  // No `^` anchor: the FIRST "- name:" occurrence in `rest` is, by
+  // construction, the step immediately after stepBlock -- any blank lines
+  // or comment lines between the two are simply text the search skips over,
+  // not something that needs its own sub-pattern.
+  const m = rest.match(/(- name: .*\n(?:[ \t]{7,}\S.*\n?)*)/);
+  return m ? m[1] : null;
+}
+
+test("HYK-477-ambient-sweep-report-1 정적 가드: npm test 단계 바로 다음 단계가 ambient-sweep-report 보고 단계이고, 그 run:의 마커 경로가 npm test env의 HARNESS_AMBIENT_SWEEP_MARKER 값과 바이트 동일하며, if:/continue-on-error가 없다", () => {
+  const root = repoRoot();
+  const text = readWorkingTreeEnforceYml(root);
+
+  const envValue = readAmbientSweepMarkerEnvValue(text);
+  assert.ok(
+    envValue,
+    `npm test 단계 env에 HARNESS_AMBIENT_SWEEP_MARKER가 없다 -- step block:\n${readWholeNpmTestStepBlock(text)}`,
+  );
+
+  const nextStep = readStepImmediatelyAfterNpmTestStep(text);
+  assert.ok(nextStep, "npm test 단계 바로 다음 단계를 찾지 못했다");
+  assert.match(
+    nextStep,
+    /^- name: .*\n\s*run: node scripts\/check\/ambient-sweep-report\.mjs /,
+    `npm test 단계 바로 다음 단계가 ambient-sweep-report 보고 단계가 아니다(이름 줄 바로 뒤 run:이어야 한다):\n${nextStep}`,
+  );
+  assert.ok(
+    nextStep.includes(envValue),
+    `보고 단계의 run:이 npm test env의 마커 경로(${envValue})를 그대로 쓰지 않는다:\n${nextStep}`,
+  );
+  assert.equal(
+    /\bif:/.test(nextStep),
+    false,
+    `보고 단계에 if:가 있으면 안 된다:\n${nextStep}`,
+  );
+  assert.equal(
+    /continue-on-error/.test(nextStep),
+    false,
+    `보고 단계에 continue-on-error가 있으면 안 된다:\n${nextStep}`,
+  );
+});
+
+// HYK-477-ambient-sweep-report-1 §2 ⓒ-⑤ 생산 진입점 (① 파일 안,
+// product_scope ⑤): drives writeAmbientSweepMarker directly against a
+// synthetic path (JSON 키 5개 · 값), then asserts via THIS file's own
+// source text that the sweep test body above calls that same function
+// right after (not before, not instead of) the repo-write-integrity
+// assert.equal -- driving the function alone would not catch "the call
+// moved earlier" or "the call was deleted and something else drives the
+// marker" (헛시험 방지).
+test("HYK-477-ambient-sweep-report-1 생산 진입점: writeAmbientSweepMarker를 합성 경로로 직접 구동하고, 스윕 시험 본문이 저장소 쓰기 무결성 assert 뒤에 이 함수를 부른다는 것을 소스 문자열로 단언한다", () => {
+  const dir = mkdtempSync(join(tmpdir(), "hyk477-marker-"));
+  try {
+    const markerPath = join(dir, "marker.json");
+    const fixtureHead = "deadbeef".padEnd(40, "0");
+    writeAmbientSweepMarker(markerPath, {
+      files: 42,
+      duration_ms: 1234,
+      head: fixtureHead,
+      node: process.version,
+      full_ambient_sweep: "1",
+    });
+    const written = JSON.parse(readFileSync(markerPath, "utf8"));
+    assert.deepEqual(
+      Object.keys(written).sort(),
+      ["duration_ms", "files", "full_ambient_sweep", "head", "node"].sort(),
+    );
+    assert.equal(written.files, 42);
+    assert.equal(written.duration_ms, 1234);
+    assert.equal(written.head, fixtureHead);
+    assert.equal(written.node, process.version);
+    assert.equal(written.full_ambient_sweep, "1");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+
+  const source = readFileSync(fileURLToPath(import.meta.url), "utf8");
+  assert.match(
+    source,
+    /afterStatus,\s*\n\s*beforeStatus,[\s\S]*?\n\s*\);\s*\n\s*\/\/ HYK-477-ambient-sweep-report-1: only after the repo-write-integrity\s*\n[\s\S]*?\n\s*if \(process\.env\[AMBIENT_SWEEP_MARKER_ENV_VAR\]\) \{\s*\n\s*writeAmbientSweepMarker\(/,
+    "the sweep test body must call writeAmbientSweepMarker AFTER the repo-write-integrity assert.equal(afterStatus, beforeStatus, ...), not before it (헛시험 방지)",
+  );
+});
 
 // HYK-371 3R (검토자 2R-3 P1, coder-task.md §2): 2R의 "불변식 B" 시험은
 // 8개×500ms 픽스처의 총 소요시간이 900ms를 넘는지로 캡 삭제를 판정했다 --

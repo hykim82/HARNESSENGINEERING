@@ -32,4 +32,5 @@ export const DISPATCH_GATE_DECISION_SIBLINGS = [
   "envelope-archive.mjs",
   "seat-origin-warn.mjs",
   "seat-origin-registry.mjs",
+  "directive-lint.mjs",
 ];

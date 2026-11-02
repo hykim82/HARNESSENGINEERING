@@ -78,6 +78,12 @@ const ENVELOPE_ARCHIVE_PATH = join(HERE, "envelope-archive.mjs");
 // addition above.
 const SEAT_ORIGIN_WARN_PATH = join(HERE, "seat-origin-warn.mjs");
 const SEAT_ORIGIN_REGISTRY_PATH = join(HERE, "seat-origin-registry.mjs");
+// HYK-488-directive-lint-1: dispatch-gate-decision.mjs now also statically
+// imports scripts/check/directive-lint.mjs (the new task-file-header lint
+// axis) -- same MODULE_NOT_FOUND reasoning as every other *_PATH addition
+// above (this file predates DISPATCH_GATE_DECISION_SIBLINGS and still
+// hand-maintains its own staged-file list).
+const DIRECTIVE_LINT_PATH = join(HERE, "directive-lint.mjs");
 
 function assertExactlyOneMatch(src, target, label) {
   const count = src.split(target).length - 1;
@@ -131,6 +137,7 @@ function stageScriptsCheckDir(rootDir, overrides) {
     "envelope-archive.mjs": readFileSync(ENVELOPE_ARCHIVE_PATH, "utf8"),
     "seat-origin-warn.mjs": readFileSync(SEAT_ORIGIN_WARN_PATH, "utf8"),
     "seat-origin-registry.mjs": readFileSync(SEAT_ORIGIN_REGISTRY_PATH, "utf8"),
+    "directive-lint.mjs": readFileSync(DIRECTIVE_LINT_PATH, "utf8"),
     ...overrides,
   };
   for (const [name, content] of Object.entries(files)) {
