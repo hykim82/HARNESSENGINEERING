@@ -1142,6 +1142,12 @@ export const ENFORCEMENT_CHECK_FILES = [
   "seat-origin-warn.mjs",
   "seat-origin-registry.mjs",
   "seat-origin-registry.test.mjs",
+  // HYK-488-directive-lint-1: dispatch-gate-decision.mjs gained one more
+  // static import (directive-lint.mjs, DISPATCH_GATE_DECISION_SIBLINGS'
+  // own in-repo counterpart to this install list) -- same recurring class
+  // of gap this list's own header comments already name 8 times over.
+  "directive-lint.mjs",
+  "directive-lint.test.mjs",
   "consumption-receipt-core.mjs",
   "consumption-receipt-core.test.mjs",
   "abort-record-core.mjs",
