@@ -25,7 +25,10 @@ import {
   isSeatUnresponsiveNewlyOpened,
   buildSeatEscalationBody,
 } from "./watch-run.mjs";
-import { buildSeatEscalationSendCommand } from "../relay/adapters/orca-adapter.mjs";
+import {
+  buildSeatEscalationSendCommand,
+  createOrcaExecFn,
+} from "../relay/adapters/orca-adapter.mjs";
 import {
   computeOpenAnomalies,
   parseWatchLog,
@@ -403,6 +406,62 @@ test("어댑터 실패(send 자체가 throw): SEND_FAILED로 사유를 남기고
         result.reachResult.noticePath,
         "어댑터 실패는 reach 단계를 막지 않아야 한다(fail-open) -- notice 파일이 써져야 한다",
       );
+    } finally {
+      fs.rmSync(notifyDir, { recursive: true, force: true });
+    }
+  });
+});
+
+test("생산 execFn 모양(createOrcaExecFn): orca의 일반 오류(비0 종료 + ok:false run_not_found)가 SEND_FAILED로 접히고, 거짓 SENT가 남지 않는다(P1-1) (1/1)", () => {
+  withWatchDir((watchDir) => {
+    const runIdPath = join(dirname(watchDir), "run-id.json");
+    const notifyDir = fs.mkdtempSync(join(tmpdir(), "nc-seat-esc-notify3-"));
+    try {
+      const seatEscalationExecFn = createOrcaExecFn({
+        spawnSyncFn: () => ({
+          status: 1,
+          stdout: JSON.stringify({
+            ok: false,
+            error: { code: "run_not_found" },
+          }),
+        }),
+      });
+      const result = runWatchOnce({
+        repoRoot: ROOT,
+        watchDir,
+        now: NOW_MS,
+        execFn: () => seatUnresponsiveExec(),
+        readFn: makeReadFnWithRunId(
+          runIdPath,
+          JSON.stringify({ runId: "run_stale_1" }),
+        ),
+        notifyDir,
+        seatEscalationExecFn,
+      });
+      assert.equal(result.seatEscalation.attempted, true);
+      assert.equal(
+        result.seatEscalation.sent,
+        false,
+        "orca가 ok:false로 응답하면(throw 없이) sent=false여야 한다(1R 버그: 무조건 true)",
+      );
+      assert.match(result.seatEscalation.reason, /^SEND_FAILED:/);
+      assert.match(result.seatEscalation.reason, /run_not_found/);
+      const logText = fs.readFileSync(result.logPath, "utf8");
+      assert.match(
+        logText,
+        /seat_escalation_detail=term_fake_handle@C:\/repo\/wt1:SKIP:SEND_FAILED/,
+      );
+      assert.match(logText, /run_not_found/);
+      assert.doesNotMatch(
+        logText,
+        /seat_escalation_detail=term_fake_handle@C:\/repo\/wt1:SENT/,
+        "거짓 SENT 기록이 남으면 안 된다",
+      );
+      assert.ok(
+        result.reachResult.noticePath,
+        "orca의 일반 오류(ok:false)도 reach 단계를 막지 않아야 한다(fail-open)",
+      );
+      assert.ok(fs.existsSync(result.reachResult.noticePath));
     } finally {
       fs.rmSync(notifyDir, { recursive: true, force: true });
     }

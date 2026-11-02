@@ -1239,6 +1239,22 @@ export function buildSeatEscalationBody(identity) {
 // runSeatEscalationStep에서 분리(§6 eslint max-lines-per-function 상한
 // 준수) -- "새로 열렸다"가 확정된 뒤의 실제 전송 시도(run id 조회 + send +
 // 성공/실패 분류)만 담당한다. 로직·값은 원문 그대로, 자리만 옮겼다.
+// wake-wire.mjs:214/227(sendTextThenSubmit)과 같은 모양 -- orca의 일반
+// 오류(비0 종료 + `{"ok":false,...}`)는 throw가 아니라 반환값으로 온다
+// (createOrcaExecFn, orca-adapter.mjs:4001). `result.error.code`가 가장
+// 사람이 읽기 좋은 사유이므로 우선하고, 없으면 `result.reason`(orca-
+// adapter.mjs의 JSON-parse-실패 경로), 둘 다 없으면 원문 JSON을 그대로
+// 보여준다(지어내지 않는다).
+function extractSendFailureReason(result) {
+  if (isPlainObject(result)) {
+    if (isPlainObject(result.error) && typeof result.error.code === "string") {
+      return result.error.code;
+    }
+    if (typeof result.reason === "string") return result.reason;
+  }
+  return JSON.stringify(result);
+}
+
 function attemptSeatEscalationSend({ identity, readFn, runIdPath, execFn }) {
   const runId = readRunIdConfig(readFn, runIdPath);
   if (!runId) {
@@ -1253,7 +1269,21 @@ function attemptSeatEscalationSend({ identity, readFn, runIdPath, execFn }) {
   const subject = `seat unresponsive: ${identity.handle ?? identity.worktreePath}`;
   const body = buildSeatEscalationBody(identity);
   try {
-    execFn(buildSeatEscalationSendCommand({ runId, subject, body }));
+    const result = execFn(
+      buildSeatEscalationSendCommand({ runId, subject, body }),
+    );
+    if (!isPlainObject(result) || result.ok !== true) {
+      return {
+        attempted: true,
+        sent: false,
+        reason: `SEND_FAILED:${truncateToken(
+          sanitizeFailureToken(extractSendFailureReason(result), "send_failed"),
+          MAX_PARTIAL_FAILURE_REASON_CHARS,
+        )}`,
+        handle: identity.handle,
+        worktreePath: identity.worktreePath,
+      };
+    }
     return {
       attempted: true,
       sent: true,
