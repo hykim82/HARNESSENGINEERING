@@ -30,6 +30,7 @@
 
 import { readFileSync } from "node:fs";
 import { resolve, relative, isAbsolute } from "node:path";
+import { createHash } from "node:crypto";
 import {
   RETIREMENT_BLOCK_REASON,
   MECHANICALLY_CONFIRMABLE_BLOCK_REASONS,
@@ -172,14 +173,120 @@ function confirmAuthorSeatLostBeforeStamp(record, resultText, ledgerPath) {
   return confirmReservationSeatLost(record?.harnessTaskLabel, ledgerPath);
 }
 
+// HYK-412 §2: resultContent(결과 파일 내용)의 지문 -- relay-handshake.mjs의
+// computeResultFingerprint(createHash("sha256").update(text,
+// "utf8").digest("hex"))와 바이트 동일한 알고리즘의 의도적 복제다(이 파일
+// 헤더의 zero-heavy-import 원칙 그대로 -- relay-handshake.mjs를 끌어들이지
+// 않는다, node:crypto만 쓴다).
+function sha256OfUtf8Text(text) {
+  return createHash("sha256")
+    .update(typeof text === "string" ? text : "", "utf8")
+    .digest("hex");
+}
+
+function sha256OfFileBytesOrNull(path) {
+  try {
+    return createHash("sha256").update(readFileSync(path)).digest("hex");
+  } catch {
+    return null;
+  }
+}
+
+// CONSUMPTION_REFUSED_RUNNER_CONTRACT 전용 -- record.evidenceReceiptPath가
+// 가리키는 것은 러너 영수증 자신이 아니라, relay-handshake.mjs의
+// persistRunnerContractRefusalRecordIfApplicable(HYK-412 §2)이 HYK-485
+// 연속 영수증 게이트의 runner_exit≠0 거부 순간에 `.harness/receipts/`에
+// 남기는 "거부 1줄 지속 기록"이다. 그 기록을 harnessDir 기준으로 실제로
+// 다시 읽어 네 가지를 전부 독립적으로 재확인한다(하나라도 거짓이면
+// false -- "ORCH가 그렇다고 했다"만으로는 통과하지 못한다, §3-4 원칙
+// 그대로):
+//   ⓐ 그 기록이 존재하고(경로 탈출 거부 포함, resolveEvidenceReceiptPath
+//      WithinHarnessDir 재사용)
+//   ⓑ 기록의 resultFingerprintSha256이 이 라운드 결과 파일 자신의 내용
+//      (resultText)을 지금 다시 해시해도 같고
+//   ⓒ 기록이 나열한 영수증마다(그 path도 harnessDir 안으로 한정, 같은
+//      경로 탈출 거부 함수 재사용) 그 파일을 지금 다시 읽은 바이트의
+//      sha256이 기록이 주장하는 값과 같고
+//   ⓓ ⓒ를 통과한 영수증 중 지금 다시 읽은 JSON의 runner_exit이 실제로
+//      0이 아닌 것이 적어도 하나 있다(기록 안의 runner_exit 필드를
+//      그대로 믿지 않는다 -- confirmRunnerGreenUnreachableAtHead가 live
+//      영수증 파일을 다시 읽는 것과 동일한 신뢰 축).
+// confirmConsumptionRefusedRunnerContract 자신의 분기 수를 줄이기 위해
+// (eslint complexity 게이트, firstUnreadableReceiptVerdict 등을 뽑은 것과
+// 같은 이유) 영수증 한 건의 ⓒ(경로 탈출 거부 + sha256 재대조)와 ⓓ(live
+// runner_exit 재파싱) 판정을 뽑는다 -- 판정은 조금도 바뀌지 않는다.
+// `valid:false`는 "이 항목 하나라도 깨지면 전체 거부"(ⓒ 위반)를 뜻하고,
+// `valid:true`일 때의 `nonZeroRunnerExit`만 ⓓ의 "적어도 하나" 집계에
+// 쓰인다.
+function resolveLiveReceiptEntryFacts(entry, harnessDir) {
+  if (!isNonEmptyString(entry?.path) || !isNonEmptyString(entry?.sha256)) {
+    return { valid: false };
+  }
+  const receiptPath = resolveEvidenceReceiptPathWithinHarnessDir(
+    harnessDir,
+    entry.path,
+  );
+  if (receiptPath === null) return { valid: false };
+  const liveSha256 = sha256OfFileBytesOrNull(receiptPath);
+  if (liveSha256 === null || liveSha256 !== entry.sha256) {
+    return { valid: false };
+  }
+  let liveReceipt;
+  try {
+    liveReceipt = JSON.parse(readFileSync(receiptPath, "utf8"));
+  } catch {
+    return { valid: true, nonZeroRunnerExit: false };
+  }
+  return {
+    valid: true,
+    nonZeroRunnerExit:
+      typeof liveReceipt?.runner_exit === "number" &&
+      liveReceipt.runner_exit !== 0,
+  };
+}
+
+function confirmConsumptionRefusedRunnerContract(
+  record,
+  harnessDir,
+  resultText,
+) {
+  const resolvedPath = resolveEvidenceReceiptPathWithinHarnessDir(
+    harnessDir,
+    record?.evidenceReceiptPath,
+  );
+  if (resolvedPath === null) return false;
+  let refusalRecord;
+  try {
+    refusalRecord = JSON.parse(readFileSync(resolvedPath, "utf8"));
+  } catch {
+    return false;
+  }
+  if (!isNonEmptyString(refusalRecord?.resultFingerprintSha256)) return false;
+  if (refusalRecord.resultFingerprintSha256 !== sha256OfUtf8Text(resultText)) {
+    return false;
+  }
+  const receipts = Array.isArray(refusalRecord.receipts)
+    ? refusalRecord.receipts
+    : [];
+  if (receipts.length === 0) return false;
+  let hasLiveNonZeroRunnerExit = false;
+  for (const entry of receipts) {
+    const facts = resolveLiveReceiptEntryFacts(entry, harnessDir);
+    if (!facts.valid) return false;
+    if (facts.nonZeroRunnerExit) hasLiveNonZeroRunnerExit = true;
+  }
+  return hasLiveNonZeroRunnerExit;
+}
+
 // §3-4 (retirement-record-core.mjs 헤더): 기계로 확인 가능한 사유(현재
-// 넷 -- DONE_TIMESTAMP_NOT_PARSEABLE · DONE_PREDATES_DROPPED_AT ·
-// RUNNER_GREEN_UNREACHABLE_AT_HEAD · AUTHOR_SEAT_LOST_BEFORE_STAMP)만
-// 독립 재확인한다. 나머지 사유(DONE_REWRITE_LOCKED ·
-// TASK_CONTRACT_PROHIBITS_REPAIR)는 이 코드베이스가 기계로 재현할 수
-// 없는 계약 텍스트 질문이므로 null을 돌려준다(가짜 확인을 만들지 않는다
-// -- null은 코어가 "이 사유는 이 축에서 재확인 대상이 아니다"로 이미
-// 처리한다, MECHANICALLY_CONFIRMABLE_BLOCK_REASONS 확인).
+// 다섯 -- DONE_TIMESTAMP_NOT_PARSEABLE · DONE_PREDATES_DROPPED_AT ·
+// RUNNER_GREEN_UNREACHABLE_AT_HEAD · AUTHOR_SEAT_LOST_BEFORE_STAMP ·
+// CONSUMPTION_REFUSED_RUNNER_CONTRACT(HYK-412))만 독립 재확인한다. 나머지
+// 사유(DONE_REWRITE_LOCKED · TASK_CONTRACT_PROHIBITS_REPAIR)는 이
+// 코드베이스가 기계로 재현할 수 없는 계약 텍스트 질문이므로 null을
+// 돌려준다(가짜 확인을 만들지 않는다 -- null은 코어가 "이 사유는 이 축에서
+// 재확인 대상이 아니다"로 이미 처리한다, MECHANICALLY_CONFIRMABLE_BLOCK_
+// REASONS 확인).
 //
 // harnessDir은 필수다: RUNNER_GREEN_UNREACHABLE_AT_HEAD 가지가 러너
 // 영수증을 harnessDir 기준 상대 경로로 다시 읽어야 하기 때문이다(위
@@ -225,6 +332,16 @@ export function confirmRetirementBlockReason(
     RETIREMENT_BLOCK_REASON.AUTHOR_SEAT_LOST_BEFORE_STAMP
   ) {
     return confirmAuthorSeatLostBeforeStamp(record, resultText, ledgerPath);
+  }
+  if (
+    record.blockReasonCode ===
+    RETIREMENT_BLOCK_REASON.CONSUMPTION_REFUSED_RUNNER_CONTRACT
+  ) {
+    return confirmConsumptionRefusedRunnerContract(
+      record,
+      harnessDir,
+      resultText,
+    );
   }
   return null;
 }
