@@ -1,4 +1,11 @@
-import { readFileSync, existsSync, statSync, readdirSync } from "node:fs";
+import {
+  readFileSync,
+  existsSync,
+  statSync,
+  readdirSync,
+  mkdirSync,
+  writeFileSync,
+} from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execSync, execFileSync } from "node:child_process";
@@ -2248,9 +2255,24 @@ function firstInvalidReceiptVerdict(read, actualHeadSha, contractSuffix = "") {
       };
     }
     if (receipt.runner_exit !== 0) {
+      // HYK-412 §2: `state` is a NEW field on this exact branch (previously
+      // absent -- only `ok`/`code`/`reason` existed here), additive only
+      // (mirrors checkRewriteAndStaleness's own HYK-398 comment on
+      // STALE_DONE_PREDATES_DROP, same contract: no existing caller/test
+      // that reads `.ok`/`.code`/`.reason` off this exact shape is
+      // affected). checkRelayHandshake uses this new `state` (via
+      // returnRunnerContractVerdict) to decide whether to attempt the
+      // retirement-release side effect AND persist a refusal record under
+      // `.harness/receipts/` -- see runRetirementSideEffectsIfApplicable's
+      // own header for why this exact state (among this gate's three
+      // reject codes -- RED/STALE/MEASUREMENT_UNAVAILABLE) is the only one
+      // that triggers it. STALE/MEASUREMENT_UNAVAILABLE branches in this
+      // same function/gate are deliberately left without a `state` field
+      // (과적용 금지, coder-task.md §2 범위 밖 "HYK-485 다른 거부 사유").
       return {
         ok: false,
         code: RUNNER_RECEIPT_REJECT_REASON.RED,
+        state: "CONSUMPTION_REFUSED_RUNNER_CONTRACT",
         reason: `consecutive runner receipt gate (HYK-485): ${path} reports runner_exit=${receipt.runner_exit} (non-zero) -- refusing to consume a claimed 2-consecutive-green result when one of the two runs was not green${contractSuffix}`,
       };
     }
@@ -3054,11 +3076,22 @@ function checkRewriteAndStaleness({
 // 않는다(예약은 ACTIVE로 남는다) -- best-effort, non-fatal, 이 라운드
 // 자신의 ok:false/state/reason은 조금도 바뀌지 않는다(S11 동일 원칙).
 //
-// ⛔state가 정확히 "STALE_DONE_PREDATES_DROP"일 때만 실행한다 -- 다른
-// ok:false 상태(BLOCKED/NEEDS_INPUT/PENDING/AMBIGUOUS_BLOCKED/
-// MALFORMED_BLOCKED/그 외 시간권한 위반)는 이 축의 대상이 아니다(관제실
-// 지시서 §1 표: 은퇴 축은 "이름표는 VALID인데 영원히 소비 불가"한
-// 라운드 전용이고, 그 첫 실사례가 바로 이 stale 모양이다).
+// ⛔state가 아래 RETIREMENT_SIDE_EFFECT_STATES 집합의 값일 때만 실행한다
+// -- 다른 ok:false 상태(BLOCKED/NEEDS_INPUT/PENDING/AMBIGUOUS_BLOCKED/
+// MALFORMED_BLOCKED/그 외 시간권한 위반, 그리고 이 집합 밖의 HYK-485
+// 거부 사유)는 이 축의 대상이 아니다(관제실 지시서 §1 표: 은퇴 축은
+// "이름표는 VALID인데 영원히 소비 불가"한 라운드 전용이다).
+// HYK-412 §2: CONSUMPTION_REFUSED_RUNNER_CONTRACT(HYK-485 연속 영수증
+// 게이트의 runner_exit≠0 거부, firstInvalidReceiptVerdict 참조)를 이
+// 집합에 추가한다 -- STALE_DONE_PREDATES_DROP과 사실의 축은 다르지만
+// ("이 라운드가 커밋한 뒤 돌린 러너 중 하나가 실제로 빨강이었다"는, 이
+// 소비 시도 자신의 게이트가 낸 사실) 같은 원칙이다: 영원히 정상 소비
+// 경로로 통과할 수 없는, 기계로 재확인 가능한 사실이라 은퇴 축의 대상이
+// 된다(retirement-record-core.mjs의 RETIREMENT_BLOCK_REASON 주석 참조).
+const RETIREMENT_SIDE_EFFECT_STATES = new Set([
+  "STALE_DONE_PREDATES_DROP",
+  "CONSUMPTION_REFUSED_RUNNER_CONTRACT",
+]);
 // HYK-398: archiveRoundEnvelope(envelope-archive.mjs) 자신은 동일-내용
 // 중복 방지가 없다(archiveRoundTaskFileIfNew와 달리 매 호출마다 무조건
 // 다음 번호로 새 사본을 만든다 -- envelope-archive.mjs 자신의 코드로
@@ -3104,7 +3137,7 @@ function runRetirementSideEffectsIfApplicable({
   taskContent,
   resultContent,
 }) {
-  if (state !== "STALE_DONE_PREDATES_DROP") return;
+  if (!RETIREMENT_SIDE_EFFECT_STATES.has(state)) return;
   runRetirementSideEffects({
     role,
     harnessDir,
@@ -3174,6 +3207,42 @@ function returnRewriteOrStaleVerdict({
   return rewriteOrStaleVerdict;
 }
 
+// HYK-412 §2: `resolveRunnerContractGatedVerdict`가 돌려주는 거부 verdict의
+// 자리 원칙 -- returnRewriteOrStaleVerdict와 정확히 같은 모양(byte-identical
+// 반환, 부수효과는 state를 보고서만 best-effort로 실행). 두 부수효과를
+// 건다: ⑴ runRetirementSideEffectsIfApplicable(기존 축, RETIREMENT_SIDE_
+// EFFECT_STATES 집합에 이미 CONSUMPTION_REFUSED_RUNNER_CONTRACT를 추가해
+// 뒀다 -- 봉투 보관 + 반납 시도) ⑵ persistRunnerContractRefusalRecordIfApplicable
+// (신규, 이 사유 전용 -- `.harness/receipts/`에 거부 1줄 지속 기록). 둘 다
+// state가 집합/값 밖이면 즉시 no-op이라(과적용 금지), HYK-485의 다른 거부
+// 사유(STALE/MEASUREMENT_UNAVAILABLE 등 state 없음)에는 영향이 없다.
+function returnRunnerContractVerdict({
+  runnerContractVerdict,
+  role,
+  harnessDir,
+  taskId,
+  taskContent,
+  resultContent,
+}) {
+  runRetirementSideEffectsIfApplicable({
+    state: runnerContractVerdict.state,
+    role,
+    harnessDir,
+    taskId,
+    taskContent,
+    resultContent,
+  });
+  persistRunnerContractRefusalRecordIfApplicable({
+    state: runnerContractVerdict.state,
+    role,
+    harnessDir,
+    taskId,
+    resultContent,
+    reason: runnerContractVerdict.reason,
+  });
+  return runnerContractVerdict;
+}
+
 function runRetirementSideEffects({
   role,
   harnessDir,
@@ -3193,6 +3262,128 @@ function runRetirementSideEffects({
   }
 
   spawnAdmissionRetirementReleaseProcess(taskId, harnessDir, role);
+}
+
+// HYK-412 §2: product_scope ②가 요구하는 "거부 1줄 지속 기록"의 하위
+// 디렉터리 -- consumption-receipt-writer.mjs의 RECEIPT_SUBDIR(소비
+// «성공» 영수증, `<role>-receipt-r<N>.json`)과 같은 harnessDir 하위
+// `receipts/`를 공유하지만, 파일명 패턴이 `-receipt-r<N>.` 이 아니라
+// `-runner-contract-refused-` 라 그 writer의 nextReceiptFileName 번호
+// 계산과 절대 겹치지 않는다(서로 다른 파일 집합, 충돌 없음). 그 writer
+// 모듈을 import하지 않는다(⛔zero-import 유지 -- 이 함수도 node 내장
+// (fs/crypto)만 쓴다).
+const RUNNER_CONTRACT_REFUSAL_RECEIPT_SUBDIR = "receipts";
+
+// 라벨(이 라운드의 task_id)을 파일명에 안전하게 쓰기 위한 치환 -- 영숫자·
+// `.`·`_`·`-` 밖은 전부 `_`로 접는다(경로 구분자·공백 등이 파일명을
+// 깨지 않게 하는 것이 유일한 목적, 복잡한 슬러그 규칙을 새로 만들지
+// 않는다).
+function sanitizeRunnerContractRefusalLabel(label) {
+  return String(label ?? "unknown").replace(/[^A-Za-z0-9._-]/g, "_");
+}
+
+function sha256OfFileOrNull(path) {
+  try {
+    return createHash("sha256").update(readFileSync(path)).digest("hex");
+  } catch {
+    return null;
+  }
+}
+
+// resolveConsecutiveRunnerReceiptsVerdict 자신의 "가장 최근 두 회차"
+// 선택(entries.slice(-2))과 정확히 같은 선택을 다시 한다 -- 거부 기록에
+// 담을 "판정에 쓴 영수증"은 그 게이트가 실제로 읽은 바로 그 둘이어야
+// 한다(다른 회차를 담으면 재확인 축이 엉뚱한 파일을 가리키게 된다).
+function collectJudgedConsecutiveReceiptEvidence(harnessDir) {
+  const entries = listNumberedRunnerReceiptEntries(harnessDir);
+  return entries.slice(-2).map((e) => {
+    const path = join(harnessDir, e.name);
+    const read = readNumberedRunnerReceipt(harnessDir, e.name);
+    return {
+      path: e.name,
+      sha256: sha256OfFileOrNull(path),
+      runner_exit:
+        typeof read.receipt?.runner_exit === "number"
+          ? read.receipt.runner_exit
+          : null,
+      head_commit:
+        typeof read.receipt?.head_commit === "string"
+          ? read.receipt.head_commit
+          : null,
+    };
+  });
+}
+
+// HYK-412 §2: product_scope ②의 "거부 1줄 지속 기록"을 best-effort로
+// `.harness/receipts/<role>-runner-contract-refused-<label>.json`에
+// 남긴다 -- autoArchiveRoundEnvelope/autoArchiveRoundTaskFile과 동일한
+// never-throws 계약(실패는 checkRelayHandshake 자신의 반환값을 조금도
+// 바꾸지 않는다, try/catch 안에서만 성공/실패를 로그로 알린다).
+// state가 정확히 "CONSUMPTION_REFUSED_RUNNER_CONTRACT"일 때만 실행한다
+// (runRetirementSideEffectsIfApplicable과 같은 "정확히 이 상태만" 원칙,
+// 다만 이 함수는 그 집합 전체가 아니라 이 사유 전용이다 -- STALE_DONE_
+// PREDATES_DROP은 봉투/반납만 받고 이 거부 기록은 받지 않는다, 러너
+// 영수증이라는 사실의 축 자체가 그 사유에는 없기 때문이다).
+//
+// 같은 라벨(taskId)+같은 결과 지문(resultFingerprintSha256)이면 이미
+// 기록이 있으므로 다시 쓰지 않는다(반복 폴링 중복 0, product_scope ②
+// 원문) -- 파일명이 라벨로 고정되므로(번호 매기지 않는다) 그 파일을 열어
+// 지문만 대조하면 된다.
+function persistRunnerContractRefusalRecordIfApplicable({
+  state,
+  role,
+  harnessDir,
+  taskId,
+  resultContent,
+  reason,
+}) {
+  if (state !== "CONSUMPTION_REFUSED_RUNNER_CONTRACT") return;
+  try {
+    const receiptsDir = join(
+      harnessDir,
+      RUNNER_CONTRACT_REFUSAL_RECEIPT_SUBDIR,
+    );
+    if (!existsSync(receiptsDir)) {
+      mkdirSync(receiptsDir, { recursive: true });
+    }
+    const label = sanitizeRunnerContractRefusalLabel(taskId);
+    const fileName = `${role}-runner-contract-refused-${label}.json`;
+    const destPath = join(receiptsDir, fileName);
+    const resultFingerprintSha256 = computeResultFingerprint(
+      resultContent ?? "",
+    );
+    if (existsSync(destPath)) {
+      let existing;
+      try {
+        existing = JSON.parse(readFileSync(destPath, "utf8"));
+      } catch {
+        existing = null;
+      }
+      if (existing?.resultFingerprintSha256 === resultFingerprintSha256) {
+        console.log(
+          `relay-handshake: runner-contract refusal record already present for '${taskId}' (same result fingerprint) -- not re-written (HYK-412, 반복 폴링 중복 0)`,
+        );
+        return;
+      }
+    }
+    const record = {
+      label: taskId ?? null,
+      role,
+      blockReasonCode: "CONSUMPTION_REFUSED_RUNNER_CONTRACT",
+      resultFingerprintSha256,
+      receipts: collectJudgedConsecutiveReceiptEvidence(harnessDir),
+      reason,
+      recordedAt: new Date().toISOString(),
+    };
+    writeFileSync(destPath, `${JSON.stringify(record, null, 2)}\n`, "utf8");
+    console.log(
+      `relay-handshake: runner-contract refusal record written -> ${join(RUNNER_CONTRACT_REFUSAL_RECEIPT_SUBDIR, fileName)} (HYK-412)`,
+    );
+  } catch (err) {
+    console.error(
+      `relay-handshake: failed to persist runner-contract refusal record (${err.message}) -- best-effort, non-fatal to this handshake's own verdict (HYK-412)`,
+    );
+  }
 }
 
 // HYK-419-wire-2 (coder-task.md §2⑵) -- «한 줄» 출력 계약을 부모가
@@ -3809,7 +4000,16 @@ export function checkRelayHandshake({
     resultContent: judgedRegion,
     harnessDir,
   });
-  if (runnerContractVerdict) return runnerContractVerdict;
+  // HYK-412 §2: returnRunnerContractVerdict 자신의 헤더 참조.
+  if (runnerContractVerdict)
+    return returnRunnerContractVerdict({
+      runnerContractVerdict,
+      role,
+      harnessDir,
+      taskId,
+      taskContent,
+      resultContent,
+    });
 
   // HYK-387/HYK-434: headCommitVerdict와 같은 자리 원칙(§4 무회귀) -- REVIEW
   // 한정 아님(오늘의 실사고는 CODER 라운드였다, coder-task.md §1 원문).

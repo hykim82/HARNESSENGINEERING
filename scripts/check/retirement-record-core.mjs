@@ -125,6 +125,12 @@
 //       조작)까지 막지는 못한다 -- 이 코어가 보장하는 것은 "주어진 사실이
 //       정직하게 구조화됐다면 판정이 안전측"이라는 것뿐이다(abort-record-
 //       core.mjs §5-b와 동일한 한계).
+//   (e) HYK-412: CONSUMPTION_REFUSED_RUNNER_CONTRACT의 거부 기록
+//       (`.harness/receipts/` 아래)도 이 워크트리 안, 즉 워커가 쓸 수 있는
+//       표면에 있다 -- (d)와 같은 한계다. 이 축이 증명하는 것은 "위조
+//       불가"가 아니라 "거부 사실을 기계가 다시 보일 수 있다"까지이고,
+//       은퇴는 소비 성공을 인정하는 것이 아니다(여전히 ok:false, state만
+//       추가된다).
 
 // HYK-398 §2-⑵: DONE_PREDATES_DROPPED_AT 추가 -- "DONE이 파싱은 되는데
 // dropped_at보다 과거"(=relay-handshake.mjs의 기존 stale 거부 사유와
@@ -205,6 +211,32 @@
 //   (c) 원장 파일 자체를 직접 손으로 편집하는 위조는 이 축 혼자 막지
 //       못한다(§5-d의 일반 한계와 동일 -- 이 코드베이스 밖의 사람 개입을
 //       완전히 막는 축은 없다).
+// HYK-412 §2 (coder-task.md product_scope ①): CONSUMPTION_REFUSED_RUNNER_
+// CONTRACT 추가 -- 앞의 다섯과 또 사실의 축이 다르다("그 라운드 자신의
+// DONE 줄"도, "커밋 시점의 전체 러너 결과"(RUNNER_GREEN_UNREACHABLE_AT_HEAD
+// 는 그 라운드가 커밋한 head에서 러너가 "영원히" 재현 불가능한 빨강이라는
+// 사실)도, "좌석 소실"도 아니라 "HYK-485 연속 영수증 게이트가 바로 이
+// 라운드 자신의 DONE 소비 시도를 runner_exit≠0인 영수증을 근거로 거부
+// 했다"는, 소비 시점 그 자체에서 난 사실). 임의 문자열이 아니라 닫힌
+// 집합에 값을 하나 더하고(§3-2), 기계로 확인 가능하므로
+// MECHANICALLY_CONFIRMABLE_BLOCK_REASONS에 넣는다(§3-4 아래).
+//
+// 이 사유도 RUNNER_GREEN_UNREACHABLE_AT_HEAD와 같은 모양으로
+// record.evidenceReceiptPath를 요구한다 -- 그러나 그 경로가 가리키는 것은
+// 러너 영수증 자신이 아니라, relay-handshake.mjs(resolveConsecutiveRunner
+// ReceiptsVerdict가 runner_exit≠0 갈래로 거부하는 그 순간)가 best-effort로
+// `.harness/receipts/`에 남기는 "거부 1줄 지속 기록"이다(라벨·결과 지문
+// sha256·판정에 쓴 영수증 경로·sha256·runner_exit·head_commit·거부 사유·
+// 기록 시각 -- 같은 라벨+같은 결과 지문이면 반복 폴링에도 1개만). 어댑터
+// (retirement-block-reason-shared.mjs의 confirmConsumptionRefusedRunnerContract)
+// 가 그 거부 기록을 harnessDir 기준으로 실제로 다시 읽어, 기록 자체의
+// 존재·결과 지문 일치·기록이 나열한 영수증마다의 sha256 일치·그중
+// runner_exit≠0이 실제로(지금 다시 읽어도) 있음을 독립적으로 재확인해야만
+// blockReasonConfirmed:true가 된다 -- 그 필드가 없거나 가리키는 거부
+// 기록을 못 읽거나 지문·sha256이 어긋나거나 전부 초록이면 어댑터가
+// blockReasonConfirmed:false/null을 넘기고, 이 코어는 BLOCK_REASON_
+// UNCONFIRMED로 거부한다(닫힌 사유 코드 이름을 새로 짓는 것만으로는
+// 통과하지 못한다, 다른 다섯 사유와 동일한 원칙).
 export const RETIREMENT_BLOCK_REASON = Object.freeze({
   DONE_TIMESTAMP_NOT_PARSEABLE: "DONE_TIMESTAMP_NOT_PARSEABLE",
   DONE_PREDATES_DROPPED_AT: "DONE_PREDATES_DROPPED_AT",
@@ -212,6 +244,7 @@ export const RETIREMENT_BLOCK_REASON = Object.freeze({
   TASK_CONTRACT_PROHIBITS_REPAIR: "TASK_CONTRACT_PROHIBITS_REPAIR",
   RUNNER_GREEN_UNREACHABLE_AT_HEAD: "RUNNER_GREEN_UNREACHABLE_AT_HEAD",
   AUTHOR_SEAT_LOST_BEFORE_STAMP: "AUTHOR_SEAT_LOST_BEFORE_STAMP",
+  CONSUMPTION_REFUSED_RUNNER_CONTRACT: "CONSUMPTION_REFUSED_RUNNER_CONTRACT",
 });
 
 // §3-4 -- 이 부분집합만 어댑터가 live 파일에서 독립 재확인한다.
@@ -226,12 +259,16 @@ export const RETIREMENT_BLOCK_REASON = Object.freeze({
 // HYK-478: AUTHOR_SEAT_LOST_BEFORE_STAMP도 기계로 독립 재확인 가능하다
 // (아래 RETIREMENT_BLOCK_REASON 주석의 confirmAuthorSeatLostBeforeStamp
 // 결선 참조) -- 같은 집합에 넣는다.
+// HYK-412: CONSUMPTION_REFUSED_RUNNER_CONTRACT도 기계로 독립 재확인
+// 가능하다(위 RETIREMENT_BLOCK_REASON 주석의
+// confirmConsumptionRefusedRunnerContract 결선 참조) -- 같은 집합에 넣는다.
 export const MECHANICALLY_CONFIRMABLE_BLOCK_REASONS = Object.freeze(
   new Set([
     RETIREMENT_BLOCK_REASON.DONE_TIMESTAMP_NOT_PARSEABLE,
     RETIREMENT_BLOCK_REASON.DONE_PREDATES_DROPPED_AT,
     RETIREMENT_BLOCK_REASON.RUNNER_GREEN_UNREACHABLE_AT_HEAD,
     RETIREMENT_BLOCK_REASON.AUTHOR_SEAT_LOST_BEFORE_STAMP,
+    RETIREMENT_BLOCK_REASON.CONSUMPTION_REFUSED_RUNNER_CONTRACT,
   ]),
 );
 

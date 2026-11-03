@@ -339,3 +339,140 @@ task 파일의 라벨과 원장 예약이 어긋나는 경우), **둘 중 어느
   확인했다. 이건 "없다는 걸 증명했다"가 아니라 "이 한 파일 안에서 grep 패턴으로
   찾을 수 있는 형태는 없었다"는 뜻이다 — [실측 기반이지만 이 파일 밖(예: 미래에 추가될
   어댑터)의 같은 결함까지 보장하지는 않는다].
+
+## 11. C — HYK-485 연속 영수증 게이트 자신의 거부(CONSUMPTION_REFUSED_RUNNER_CONTRACT, 이 라운드 HYK-412-refusal-retire-1)
+
+A(§2, "소비 시도가 한 번도 없었다")도 B(§3, "사람 서명이 필요한, 기계가 재현할 수
+없는 사유")도 아닌 **세 번째 모양**을 이 라운드가 닫는다: 소비 시도는 **있었다** —
+그리고 그 시도를 낸 것이 바로 `relay-handshake.mjs`의 HYK-485 연속 영수증 게이트
+(`resolveConsecutiveRunnerReceiptsVerdict`) 자신이다. 커밋 뒤 돌린 "가장 최근 두
+회차" 러너 중 하나가 `runner_exit≠0`이면 그 게이트는 "2회 연속 초록"을 영원히
+확인할 수 없는 사실을 안고 거부한다 — DONE_PREDATES_DROPPED_AT(§0 "기존" 다섯
+사유 중 하나, HYK-398)이 "그 라운드 자신의 DONE 줄"을 사실의 축으로 삼는 것과
+구조적으로 같은 자리이지만, 이쪽은 "그 라운드가 커밋한 뒤 돌린 러너 자신의
+결과"가 사실의 축이다. A/B와 달리 **이 사유는 처음부터 기계로 완전히 재확인
+가능하다** — 그래서 retirement-record-core.mjs의 `MECHANICALLY_CONFIRMABLE_
+BLOCK_REASONS`(이미 네 개를 담고 있던 닫힌 집합, HYK-398/455/478)에 다섯 번째
+값으로 들어간다. §6이 "범위 밖"으로 그어 둔 `retirement-record-core.mjs` 수정은,
+A/B가 아니라 **이미 그 파일이 스스로 열어 둔 "기계 재확인 가능한 사유" 확장
+슬롯**에 값 하나를 더하는 것일 뿐이라 같은 금지선에 걸리지 않는다(아래 11-4).
+
+### 11-1. 배선 세 조각
+
+1. **상태 이름 부여** — `relay-handshake.mjs`의 `firstInvalidReceiptVerdict`(HYK-485
+   연속 영수증 게이트가 "가장 최근 두 회차"를 읽는 자리)가 `runner_exit≠0`을 보는
+   그 정확한 분기에만 `state: "CONSUMPTION_REFUSED_RUNNER_CONTRACT"`를 추가한다
+   (additive, `ok`/`code`/`reason`은 바이트 단위 그대로 — HYK-398이
+   `STALE_DONE_PREDATES_DROP`에 `state`를 추가한 것과 같은 계약). 같은 게이트의
+   다른 두 거부(MEASUREMENT_UNAVAILABLE, STALE)와 단일-영수증 축(HYK-411,
+   `resolveRunnerReceiptVerdict`)의 RED 분기는 이 상태를 받지 않는다(과적용 금지).
+2. **은퇴 부수효과 확장** — HYK-398이 처음 심은 `runRetirementSideEffectsIfApplicable`
+   (state가 `STALE_DONE_PREDATES_DROP`일 때만 봉투 보관 + 원장 반납 시도를 건
+   함수)을 세 번째 문을 새로 만들지 않고 집합(`RETIREMENT_SIDE_EFFECT_STATES`)으로
+   넓혀, 같은 두 부수효과를 `CONSUMPTION_REFUSED_RUNNER_CONTRACT`에도 그대로
+   태운다(관제실 지시서 §2-⑶ "이미 있는 문 두 개의 배선만 잇는다"는 원칙의 세 번째
+   재사용).
+3. **거부 1줄 지속 기록** — HYK-455(RUNNER_GREEN_UNREACHABLE_AT_HEAD)의
+   `evidenceReceiptPath` 결선과 같은 모양을 쓰지만 가리키는 대상이 다르다:
+   HYK-455는 `evidenceReceiptPath`가 **러너 영수증 자신**을 가리키지만, 이 축은
+   그 거부 판정이 일어나는 바로 그 순간에 `relay-handshake.mjs`가 best-effort로
+   새로 남기는 **"거부 1줄 지속 기록"**(`.harness/receipts/<role>-runner-contract-
+refused-<label>.json` — 라벨·결과 지문 sha256·판정에 쓴 영수증(경로·sha256·
+   runner_exit·head_commit)·거부 사유 원문·기록 시각)을 가리킨다. 같은 라벨+같은
+   결과 지문이면 반복 폴링에도 파일을 다시 쓰지 않는다(파일명이 라벨로 고정되고,
+   기존 기록의 지문과 대조해 같으면 skip).
+
+### 11-2. 재확인(위조 차단) — `retirement-block-reason-shared.mjs`의 새 갈래
+
+`confirmConsumptionRefusedRunnerContract`는 HYK-455의
+`confirmRunnerGreenUnreachableAtHead`와 같은 신뢰 축("ORCH가 그렇다고 했다"만으로는
+통과하지 못한다)이지만 한 겹 더 깊다 — 재확인 대상이 영수증 자신이 아니라 "영수증을
+가리키는 거부 기록"이기 때문이다. 넷을 전부 독립적으로 다시 읽어 확인한다(하나라도
+거짓이면 false):
+
+- ⓐ `evidenceReceiptPath`가 가리키는 거부 기록이 harnessDir 안에 실제로 존재한다
+  (경로 탈출 거부는 기존 `resolveEvidenceReceiptPathWithinHarnessDir`를 그대로
+  재사용 — 이 축을 위한 새 경로-탈출 방어를 따로 만들지 않는다).
+- ⓑ 그 기록의 `resultFingerprintSha256`이 **지금** 결과 파일을 다시 해시해도 같다.
+- ⓒ 그 기록이 나열한 영수증마다, **지금** 그 파일을 다시 읽은 바이트의 sha256이
+  기록이 주장하는 값과 같다(같은 경로-탈출 방어를 영수증 경로에도 적용).
+- ⓓ ⓒ를 통과한 영수증 중 **지금** 다시 읽은 JSON의 `runner_exit`이 실제로 0이
+  아닌 것이 적어도 하나 있다 — 기록 안에 적힌 `runner_exit` 필드를 그대로
+  믿지 않는다(ⓒ가 이미 그 파일이 지금도 같은 바이트임을 증명했으므로, 그 바이트를
+  다시 파싱해 얻은 값만 신뢰한다).
+
+### 11-3. HYK-412 A/B와의 관계 — 왜 "C"인가
+
+A(§2)는 "소비 시도 자체가 없었다"를 열고, B(§3)는 "시도도 있었고 거부도 있었지만
+그 사유가 계약 텍스트 질문이라 기계로 재현할 수 없다"를 사람 서명으로 넘긴다. 이
+축(C)은 **시도가 있었고, 거부도 있었고, 그 거부의 사실 자체(러너가 실제로
+빨갰다)가 이미 기계 파일(러너 영수증)로 남아 있다** — A도 B도 아니라, 기존
+`RETIREMENT_BLOCK_REASON`의 "다섯 사유" 계열(DONE_TIMESTAMP_NOT_PARSEABLE /
+DONE_PREDATES_DROPPED_AT / RUNNER_GREEN_UNREACHABLE_AT_HEAD /
+AUTHOR_SEAT_LOST_BEFORE_STAMP)와 같은 자리에 들어가는 **여섯 번째 사유**다. 이
+문서가 A/B라는 두 글자만 쓴 것은 §0~§3을 쓴 라운드 시점에 이 다섯 사유 계열
+(HYK-398/455/478)이 이미 존재했다는 사실을 몰랐거나 언급하지 않았기 때문이다 —
+이 절이 그 공백을 "C"로 메운다. ⚠️번호(§11)는 코더-task.md 지시 그대로지만, 그
+안의 "A/B"는 이 문서 §1~§3의 용어이고 RETIREMENT_BLOCK_REASON의 "여섯 사유
+계열"과는 다른 분류축이다 — 혼동하지 않도록 이 절에서 "C"라는 세 번째 글자를
+새로 쓴다.
+
+### 11-4. §6 범위 판단과의 관계 — 이번엔 왜 코어를 고쳤는가
+
+§6은 "라이브 배달기를 건드리는 결선"과 "기존 소비 축의 검증 로직을 바꾸는 결선"을
+범위 밖으로 그었다(A/B 설계 제안이 그 금지선에 걸렸기 때문). 이번 라운드가 고친
+세 파일은 그 금지선이 막던 것과 다르다:
+
+- `retirement-record-core.mjs`는 **닫힌 사유 집합에 값 하나를 추가**했을
+  뿐이다 — `checkRetirementRecord`의 판정 로직(아카이브+지문+사유+후속이름표 네
+  관문) 자체는 한 글자도 바뀌지 않았고, 기존 다섯 사유의 재확인 결과도 바뀌지
+  않는다(§3 완료조건 2 "기존 사유 5개 시험 무회귀"로 고정). §3-2가 우려한 것은
+  `checkArchiveFacts`에 **사유별 예외 분기**(아카이브 요구 자체를 건너뛰는)를
+  추가하는 것이었다 — 이 라운드는 그런 예외 분기를 만들지 않는다(네 관문을
+  전부 그대로 요구한다).
+- `retirement-block-reason-shared.mjs`는 그 자체가 "기계 재확인 가능한 사유마다
+  분기를 추가하는" 목적으로 존재하는 파일이다(파일 헤더: HYK-457 §3-A) — 새
+  사유가 생기면 분기가 늘어나는 것이 이 파일의 정상 성장 방식이고, §6이 막은
+  "기존 소비 축의 검증 로직 변경"에 해당하지 않는다(기존 네 분기의 판정은
+  그대로다, 표-구동 회귀 시험 `retirement-block-reason-shared.test.mjs`가
+  이 무회귀를 고정한다).
+- `dispatch-gate-decision.mjs`(배달 게이트) · `admission-completion-adapter.mjs`
+  (반납 어댑터) · `watch-run.mjs` · `envelope-archive.mjs`는 이번에도 **여전히
+  무수정**이다(A/B 설계와 같은 원칙 유지) — 셋 다 공유 재확인 함수
+  (`confirmRetirementBlockReason`)를 이미 import하고 있어, 그 함수에 새 분기가
+  생기는 것만으로 결선이 완성된다(admission-completion-adapter.mjs:97의 기존
+  import, §11-2).
+
+### 11-5. 정직 한계 (§7과 같은 형식)
+
+- 거부 1줄 지속 기록과 그 안에 담긴 영수증은 **이 워크트리 안**(`.harness/
+receipts/`, `.harness/runner-receipt-run<N>.json`)에 있다 — §5 항목 2가 이미
+  명시한 것과 같은 표면(워크트리 쓰기 권한을 가진 주체는 조작할 수 있다). 이 축이
+  증명하는 것은 "위조 불가"가 아니라 "거부 사실을 기계가 다시 보일 수 있다"까지다
+  (retirement-record-core.mjs §5-(e), 이 라운드가 새로 추가한 한계 항목).
+- ⓒ의 sha256 재대조는 "그 파일이 거부 시점과 같은 바이트"임을 증명하지만, 그
+  바이트 자체가 **거부 시점에 이미 손으로 조작된 영수증**이었다면(러너를 실제로
+  돌리지 않고 JSON 파일만 손으로 써서 `runner_exit: 1`을 만든 경우) 이 축은 그
+  조작을 탐지하지 못한다 — 러너 영수증 생산자(`isolated-suite-runner.mjs`/
+  `runner-receipt-writer.mjs`) 자신의 무결성은 이 코어·이 어댑터의 신뢰 경계 밖이다
+  (RUNNER_GREEN_UNREACHABLE_AT_HEAD가 이미 물려받은 것과 같은 한계,
+  retirement-record-core.mjs §5-(d)).
+- 이 라운드는 합성 표본(관제실 HYK-433 2R 봉투 사본 모양, run3=0/run4=1/run5=0)으로만
+  재현했다 — 라이브 실물은 다음 실제 HYK-485 `runner_exit` 거부가 날 때까지 아직
+  없다(coder.md의 완료조건 4가 같은 문장을 결과 파일에도 요구한다).
+
+### 11-6. 안 한 것
+
+- `dispatch-gate-decision.mjs`/`admission-completion-adapter.mjs`/`watch-run.mjs`/
+  `retirement-record-writer.mjs`/`envelope-archive.mjs` 중 어느 것도 수정하지
+  않았다(11-4).
+- 저장소 모듈 새 import를 추가하지 않았다 — `relay-handshake.mjs`가 새로 쓰는
+  `mkdirSync`/`writeFileSync`(node:fs)와 `retirement-block-reason-shared.mjs`가
+  새로 쓰는 `createHash`(node:crypto)는 둘 다 이미 그 파일이 import하던 node 내장
+  모듈의 named import를 늘린 것뿐이다(둘 다 이미 `node:fs`/연계된 node:crypto
+  사용 전례가 있는 파일) — mutation 격리 픽스처가 고정하는 형제 파일 목록
+  (`RELAY_HANDSHAKE_STATIC_SIBLINGS`)은 손대지 않았다.
+- 은퇴 기록(`.harness/retirements/<role>-retire-r<N>.json`) 자체를 기계가 쓰게
+  만들지 않았다 — 저자 경계(§3-1과 같은 원칙, "그 기록이 존재한다는 사실 자체가
+  사람이 관여했다는 절차적 증거")는 그대로 지켰다. 이 라운드가 기계로 쓰는 것은
+  그 기록이 "가리킬" 증거 파일(거부 1줄 지속 기록)뿐이다.

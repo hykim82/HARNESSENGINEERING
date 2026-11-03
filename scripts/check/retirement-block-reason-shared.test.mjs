@@ -19,9 +19,10 @@
 // element is present in the Set.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { createHash } from "node:crypto";
 import {
   RETIREMENT_BLOCK_REASON,
   MECHANICALLY_CONFIRMABLE_BLOCK_REASONS,
@@ -30,6 +31,66 @@ import { confirmRetirementBlockReason } from "./retirement-block-reason-shared.m
 
 function tmpDir(prefix) {
   return mkdtempSync(join(tmpdir(), prefix));
+}
+
+function sha256Hex(buf) {
+  return createHash("sha256").update(buf).digest("hex");
+}
+
+// HYK-412 §2: CONSUMPTION_REFUSED_RUNNER_CONTRACT 전용 픽스처 조립 --
+// relay-handshake.mjs의 persistRunnerContractRefusalRecordIfApplicable이
+// 실제로 쓰는 것과 같은 모양(label/role/blockReasonCode/
+// resultFingerprintSha256/receipts[]/reason/recordedAt)의 거부 기록을
+// harnessDir/receipts/ 아래 직접 조립한다(프로덕션 writer를 호출하지
+// 않는다 -- 이 시험은 confirmRetirementBlockReason의 재확인 자체만
+// 고정한다, writer 자신의 동작은 relay-handshake.mjs 쪽 시험이 고정).
+function buildRunnerContractRefusalFixture({
+  harnessDir,
+  resultText,
+  tamperSha256 = false,
+  allGreen = false,
+}) {
+  mkdirSync(join(harnessDir, "receipts"), { recursive: true });
+  const headCommit = "b".repeat(40);
+  // allGreen: 거부 기록이 "거부당했다"고 주장하면서도 그 거부 기록이
+  // 가리키는 실제 영수증 파일은 runner_exit:0(초록)이다 -- 위조/오기
+  // 표본(ⓓ 위반, product_scope "전부 초록" 음성 케이스).
+  const receiptBody = JSON.stringify({
+    schema_version: 2,
+    runner_exit: allGreen ? 0 : 1,
+    runner_status: allGreen ? "OK" : "TESTS_FAILED",
+    head_commit: headCommit,
+    finished_at: "2026-11-02 12:29:50 KST",
+  });
+  writeFileSync(
+    join(harnessDir, "runner-receipt-run4.json"),
+    receiptBody,
+    "utf8",
+  );
+  const trueSha256 = sha256Hex(Buffer.from(receiptBody, "utf8"));
+  const refusalRecord = {
+    label: "HYK-412-table-T",
+    role: "CODER",
+    blockReasonCode:
+      RETIREMENT_BLOCK_REASON.CONSUMPTION_REFUSED_RUNNER_CONTRACT,
+    resultFingerprintSha256: sha256Hex(Buffer.from(resultText, "utf8")),
+    receipts: [
+      {
+        path: "runner-receipt-run4.json",
+        sha256: tamperSha256 ? "f".repeat(64) : trueSha256,
+        runner_exit: allGreen ? 0 : 1,
+        head_commit: headCommit,
+      },
+    ],
+    reason:
+      "consecutive runner receipt gate (HYK-485): runner_exit=1 (test fixture)",
+    recordedAt: "2026-11-02T12:30:00.000Z",
+  };
+  writeFileSync(
+    join(harnessDir, "receipts", "coder-runner-contract-refused-test.json"),
+    JSON.stringify(refusalRecord),
+    "utf8",
+  );
 }
 
 // Per-reason (fixture, expected-verdict) pairs. Each builder returns the
@@ -113,6 +174,26 @@ const FIXTURE_BUILDERS = {
       droppedAt: null,
       harnessDir,
       ledgerPath,
+      expected: true,
+    };
+  },
+  // HYK-412 §2: CONSUMPTION_REFUSED_RUNNER_CONTRACT -- GREEN 표본은 거부
+  // 기록이 존재하고 결과 지문이 일치하고 그 기록이 나열한 영수증의
+  // sha256이 지금도 일치하고 그 영수증의 runner_exit이 실제로 0이 아닐
+  // 때 참이다(buildRunnerContractRefusalFixture 참조).
+  [RETIREMENT_BLOCK_REASON.CONSUMPTION_REFUSED_RUNNER_CONTRACT]: () => {
+    const harnessDir = tmpDir("hyk412-table-runnercontract-");
+    const resultText = "task_id: HYK-412-table-T\n";
+    buildRunnerContractRefusalFixture({ harnessDir, resultText });
+    return {
+      record: {
+        blockReasonCode:
+          RETIREMENT_BLOCK_REASON.CONSUMPTION_REFUSED_RUNNER_CONTRACT,
+        evidenceReceiptPath: "receipts/coder-runner-contract-refused-test.json",
+      },
+      resultText,
+      droppedAt: null,
+      harnessDir,
       expected: true,
     };
   },
@@ -231,6 +312,120 @@ test("HYK-457 §3-C negative: the same three reasons return false (not null, not
       null,
       tmpDir("hyk478-table-neg-seatlost-harnessdir-"),
       seatLostLedgerPath,
+    ),
+    false,
+  );
+});
+
+// HYK-412 §2 negative -- 위 §3-C negative와 같은 원칙(세 reason은 참, 증거만
+// 한 축씩 깨짐)을 CONSUMPTION_REFUSED_RUNNER_CONTRACT에도 적용한다. 별도
+// test()로 뽑은 것은 §3-C negative 자체를 건드리지 않고(§2 완료조건
+// "기존 사유 5개 시험 무회귀") quality-check의 max-lines-per-function 상한을
+// 지키기 위해서다(판정/표본은 조금도 바뀌지 않는다).
+test("HYK-412 §2 negative: CONSUMPTION_REFUSED_RUNNER_CONTRACT는 ⓐ 기록 없음 · ⓒ sha256 위조 · ⓓ 전부 초록 세 축 각각에서 false를 돌려준다(not null, not true)", () => {
+  // ⓒ 위반: 거부 기록이 나열한 영수증의 sha256을 «위조»한 경우(기록이
+  // 주장하는 값과 지금 다시 읽은 파일의 sha256이 다르다) -- ⓓ(runner_exit
+  // ≠0)는 실제로 참이어도 전체는 거짓이어야 한다.
+  const tamperedHarnessDir = tmpDir(
+    "hyk412-table-neg-runnercontract-tampered-",
+  );
+  const tamperedResultText = "task_id: HYK-412-table-neg-T\n";
+  buildRunnerContractRefusalFixture({
+    harnessDir: tamperedHarnessDir,
+    resultText: tamperedResultText,
+    tamperSha256: true,
+  });
+  assert.equal(
+    confirmRetirementBlockReason(
+      {
+        blockReasonCode:
+          RETIREMENT_BLOCK_REASON.CONSUMPTION_REFUSED_RUNNER_CONTRACT,
+        evidenceReceiptPath: "receipts/coder-runner-contract-refused-test.json",
+      },
+      tamperedResultText,
+      null,
+      tamperedHarnessDir,
+    ),
+    false,
+  );
+
+  // ⓓ 위반(전부 초록): 거부 기록이 나열한 영수증을 지금 다시 읽어도
+  // (sha256은 일치) 그 실제 내용이 runner_exit:0(초록)인 경우 -- "거부
+  // 기록이 존재하고 지문·sha256도 맞지만, 실제로는 거부할 근거가 하나도
+  // 없었다"는 위조/오기 표본.
+  const allGreenHarnessDir = tmpDir(
+    "hyk412-table-neg-runnercontract-allgreen-",
+  );
+  const allGreenResultText = "task_id: HYK-412-table-neg-allgreen-T\n";
+  buildRunnerContractRefusalFixture({
+    harnessDir: allGreenHarnessDir,
+    resultText: allGreenResultText,
+    allGreen: true,
+  });
+  assert.equal(
+    confirmRetirementBlockReason(
+      {
+        blockReasonCode:
+          RETIREMENT_BLOCK_REASON.CONSUMPTION_REFUSED_RUNNER_CONTRACT,
+        evidenceReceiptPath: "receipts/coder-runner-contract-refused-test.json",
+      },
+      allGreenResultText,
+      null,
+      allGreenHarnessDir,
+    ),
+    false,
+  );
+
+  // ⓐ 위반(기록 없음): evidenceReceiptPath가 아예 설정되지 않은 경우.
+  assert.equal(
+    confirmRetirementBlockReason(
+      {
+        blockReasonCode:
+          RETIREMENT_BLOCK_REASON.CONSUMPTION_REFUSED_RUNNER_CONTRACT,
+      },
+      "task_id: HYK-412-table-neg-norecord-T\n",
+      null,
+      tmpDir("hyk412-table-neg-runnercontract-norecord-"),
+    ),
+    false,
+  );
+});
+
+// HYK-412 2R P1-2 (검토 1R): ⓑ(결과 지문 불일치) 음성이 1R에는 없었다 --
+// 거부 기록의 resultFingerprintSha256은 건드리지 않고 live 결과 파일
+// (resultText) 쪽을 1글자 바꿔서 confirmConsumptionRefusedRunnerContract의
+// `refusalRecord.resultFingerprintSha256 !== sha256OfUtf8Text(resultText)`
+// 비교가 실제로 갈라지는지를 고정한다 -- M4(그 비교 3줄 삭제)가 이 시험을
+// 깨뜨리지 못하면 §evidence_rule 변이표에서 RED여야 할 칸이 조용히
+// GREEN으로 남는다(검토 1R P1-2 반려 사유 그대로).
+test("HYK-412 §2 negative (P1-2): CONSUMPTION_REFUSED_RUNNER_CONTRACT는 ⓑ 결과 지문 불일치에서도 false를 돌려준다(not null, not true)", () => {
+  const harnessDir = tmpDir("hyk412-table-neg-runnercontract-fp-mismatch-");
+  const recordedResultText = "task_id: HYK-412-table-neg-fp-T\n";
+  buildRunnerContractRefusalFixture({
+    harnessDir,
+    resultText: recordedResultText,
+  });
+  // live 결과 파일이 거부 기록 작성 시점과 1글자라도 달라지면(ORCH가 그
+  // 사이 결과 파일을 다시 쓴 경우 등) 지문이 더는 맞지 않는다 -- 영수증
+  // sha256·runner_exit은 둘 다 참이어도 전체는 거짓이어야 한다.
+  const liveResultTextChangedByOneChar =
+    recordedResultText.slice(0, -2) + "X" + recordedResultText.slice(-1);
+  assert.equal(
+    liveResultTextChangedByOneChar.length,
+    recordedResultText.length,
+    "진짜 1글자 «치환»인지 확인(길이는 그대로, 값만 다름)",
+  );
+  assert.notEqual(liveResultTextChangedByOneChar, recordedResultText);
+  assert.equal(
+    confirmRetirementBlockReason(
+      {
+        blockReasonCode:
+          RETIREMENT_BLOCK_REASON.CONSUMPTION_REFUSED_RUNNER_CONTRACT,
+        evidenceReceiptPath: "receipts/coder-runner-contract-refused-test.json",
+      },
+      liveResultTextChangedByOneChar,
+      null,
+      harnessDir,
     ),
     false,
   );
