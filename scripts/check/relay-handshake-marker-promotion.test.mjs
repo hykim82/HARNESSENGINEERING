@@ -29,7 +29,10 @@ import {
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
-import { checkRelayHandshake } from "./relay-handshake.mjs";
+import {
+  checkRelayHandshake,
+  hasDoneStampedByMarker,
+} from "./relay-handshake.mjs";
 import { findFirstObservation } from "./first-observation.mjs";
 import { RELAY_HANDSHAKE_STATIC_SIBLINGS } from "./relay-handshake-fixture-siblings.mjs";
 // HYK-148 A3 inventory (no-restricted-imports): scripts/check/* must never
@@ -102,6 +105,82 @@ test("HYK-418 §2-1: marked (finalize-done's own marker line, hand-assembled her
       "coder",
       "task_id: HYK-1\n\n>>> DONE: CODER @ 2026-08-03 06:10:00 KST\ndone_stamped_by: finalize-done\n",
     );
+    const result = checkRelayHandshake({
+      role: "coder",
+      harnessDir: dir,
+      now: Date.parse("2026-08-02T21:10:05Z"), // 2026-08-03 06:10:05 KST
+    });
+    assert.equal(result.ok, true);
+  });
+});
+
+// HYK-426 §2 ----------------------------------------------------------------
+//
+// hasDoneStampedByMarker is the newly exported predicate (same regex,
+// DONE_STAMPED_BY_MARKER_RE, that the fail-closed rejection above already
+// used) -- finalize-done.mjs now imports and reuses this exact function
+// instead of its own looser rawLine.trim() compare. These two tests lock
+// the "no loosening" half: a marker with leading whitespace or a tab
+// prefix must still read as "absent" on the consumer side, exactly as it
+// did before HYK-426 touched anything here (this file's own consumer rule
+// is untouched -- only finalize-done.mjs's reading of the SAME rule
+// changed).
+test("HYK-426: hasDoneStampedByMarker (newly exported) agrees with checkRelayHandshake's own rejection -- a LEADING-SPACE marker is still 'absent', not loosened", () => {
+  withFixtureDir((dir) => {
+    writeTask(
+      dir,
+      "coder",
+      "task_id: HYK-1\ndropped_at: 2026-08-03 06:00 KST\n",
+    );
+    const content =
+      "task_id: HYK-1\n\n>>> DONE: CODER @ 2026-08-03 06:10:00 KST\n done_stamped_by: finalize-done\n";
+    writeResult(dir, "coder", content);
+    assert.equal(
+      hasDoneStampedByMarker(content),
+      false,
+      "leading whitespace must still read as 'no marker' -- same column-0 rule as before",
+    );
+    const result = checkRelayHandshake({
+      role: "coder",
+      harnessDir: dir,
+      now: Date.parse("2026-08-02T21:10:05Z"), // 2026-08-03 06:10:05 KST
+    });
+    assert.equal(result.ok, false);
+    assert.match(result.reason, /done_stamped_by: finalize-done.*marker/);
+  });
+});
+
+test("HYK-426: a TAB-prefixed marker is also still 'absent' (not just leading space) -- hasDoneStampedByMarker and checkRelayHandshake agree", () => {
+  withFixtureDir((dir) => {
+    writeTask(
+      dir,
+      "coder",
+      "task_id: HYK-1\ndropped_at: 2026-08-03 06:00 KST\n",
+    );
+    const content =
+      "task_id: HYK-1\n\n>>> DONE: CODER @ 2026-08-03 06:10:00 KST\n\tdone_stamped_by: finalize-done\n";
+    writeResult(dir, "coder", content);
+    assert.equal(hasDoneStampedByMarker(content), false);
+    const result = checkRelayHandshake({
+      role: "coder",
+      harnessDir: dir,
+      now: Date.parse("2026-08-02T21:10:05Z"), // 2026-08-03 06:10:05 KST
+    });
+    assert.equal(result.ok, false);
+  });
+});
+
+test("HYK-426: a column-0 marker with TRAILING whitespace is still accepted (existing \\s*$ allowance, unchanged by this round) -- hasDoneStampedByMarker says 'present'", () => {
+  withFixtureDir((dir) => {
+    writeTask(
+      dir,
+      "coder",
+      "task_id: HYK-1\ndropped_at: 2026-08-03 06:00 KST\n",
+    );
+    const content =
+      "task_id: HYK-1\n\n>>> DONE: CODER @ 2026-08-03 06:10:00 KST\ndone_stamped_by: finalize-done   \n";
+    writeResult(dir, "coder", content);
+    assert.equal(hasDoneStampedByMarker(content), true);
     const result = checkRelayHandshake({
       role: "coder",
       harnessDir: dir,

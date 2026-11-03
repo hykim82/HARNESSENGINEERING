@@ -401,6 +401,16 @@ function countNearMissMarkerShapes(resultContent) {
 // used to fail closed instead).
 const DONE_STAMPED_BY_MARKER_RE = /^done_stamped_by:\s*finalize-done\s*$/im;
 
+// HYK-426 §2: single exported predicate for "does this content have the
+// finalize-done stamp marker" -- the ONLY column-0 judgment this module
+// makes about the marker, reused by finalize-done.mjs (via import) instead
+// of that file re-deriving presence with its own, looser trim() compare.
+// Consumer behavior above is unchanged: still DONE_STAMPED_BY_MARKER_RE,
+// still column-0, still read here first.
+export function hasDoneStampedByMarker(content) {
+  return DONE_STAMPED_BY_MARKER_RE.test(content);
+}
+
 // HYK-428 §2⑴: `cwd` is optional/back-compat -- callers that omit it (every
 // pre-HYK-428 caller) get the exact unchanged process.cwd()-derived
 // behavior. Threading an explicit `cwd` (see mainRepoRoot below) is what

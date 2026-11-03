@@ -33,10 +33,21 @@ import { join } from "node:path";
 // was "not parseable" (replaceable) at the handshake but ALREADY_FINALIZED
 // (not replaceable) here -- 검토 반려 원문 참조. r2: both sides now call
 // the exact same exported function.
+// HYK-426 §2: hasDoneStampedByMarker is now also reused here -- see that
+// export's own comment (relay-handshake.mjs, right after
+// DONE_STAMPED_BY_MARKER_RE) for why this is a plain, non-circular import:
+// this file already imports DONE_RE/isWellFormedDoneTimestamp/etc. FROM
+// relay-handshake.mjs in this exact same direction, and relay-handshake.mjs
+// imports nothing back from this file. Before this change,
+// hasFinalizeDoneMarker (removed below) re-derived presence with its own
+// rawLine.trim() compare, which is why a marker with leading whitespace
+// read as "present" here (ALREADY_FINALIZED, no escape) but "absent" to
+// the consumer's column-0 regex (rejected) -- a dead end (HYK-426).
 import {
   DONE_RE,
   DROPPED_AT_RE,
   isWellFormedDoneTimestamp,
+  hasDoneStampedByMarker,
   resolveResultTaskId,
   resolveLiveRoundFilePaths,
   __probeResolveResultDoneMatch,
@@ -76,17 +87,6 @@ export const FINALIZE_DONE_MARKER_LINE = "done_stamped_by: finalize-done";
 
 function pad(n) {
   return String(n).padStart(2, "0");
-}
-
-// HYK-418 §2-3: presence check for FINALIZE_DONE_MARKER_LINE (defined just
-// above), reading it back from this file's OWN exported constant rather
-// than a second regex copy -- see resolveExistingDoneLine's
-// unmarkedWellFormedSingle comment for why this isn't a cross-import of
-// relay-handshake.mjs's DONE_STAMPED_BY_MARKER_RE instead.
-function hasFinalizeDoneMarker(content) {
-  return content
-    .split("\n")
-    .some((rawLine) => rawLine.trim() === FINALIZE_DONE_MARKER_LINE);
 }
 
 // KST has no DST -- a fixed +9h offset from UTC is exact and stable, unlike
@@ -337,20 +337,20 @@ function resolveExistingDoneLine({
     doneMatches.length === 1 && !isWellFormedDoneTimestamp(doneMatches[0][1]);
   // HYK-418 §2-3: the other half of the deadlock coder-task.md §1 요구4
   // names -- a single line that IS format-valid but was never stamped
-  // through this producer (no FINALIZE_DONE_MARKER_LINE anywhere in the
-  // file). Reuses this same file's own exported marker-line constant
-  // (hasFinalizeDoneMarker below) rather than duplicating the literal a
-  // third time -- relay-handshake.mjs already keeps its own copy of this
-  // regex in manual sync (see that file's DONE_STAMPED_BY_MARKER_RE
-  // comment); a real cross-import here would be circular (relay-handshake
-  // -> finalize-done -> relay-handshake, since finalize-done already
-  // imports DONE_RE/isWellFormedDoneTimestamp/etc. FROM relay-handshake),
-  // so this file instead re-derives presence from ITS OWN already-exported
-  // constant, which cannot drift because there is nothing to keep in sync.
+  // through this producer (no marker anywhere in the file). HYK-426: now
+  // reads presence via the imported hasDoneStampedByMarker (relay-
+  // handshake.mjs's own column-0 regex), the SAME judgment the consumer
+  // (checkRelayHandshake) makes, instead of this file's former, looser
+  // rawLine.trim() compare -- a leading-space marker used to read as
+  // "present" here (ALREADY_FINALIZED, no escape) while the consumer's
+  // column-0 regex read it as "absent" (rejected): a dead end. With one
+  // shared predicate, a leading-space marker now reads "absent" on both
+  // sides, so it falls into this same unmarkedWellFormedSingle branch
+  // (REPLACED_UNMARKED) instead.
   const unmarkedWellFormedSingle =
     doneMatches.length === 1 &&
     isWellFormedDoneTimestamp(doneMatches[0][1]) &&
-    !hasFinalizeDoneMarker(existing);
+    !hasDoneStampedByMarker(existing);
 
   if (!malformedSingle && !unmarkedWellFormedSingle) {
     return {
