@@ -622,6 +622,14 @@ test("HYK-431 8R: 허용 목록이 아니다 -- 계약에 없는 이름을 채�
 // 시험은 이 블록으로 단 하나도 바뀌지 않는다(이미 위에서 58건 전부
 // 통과했다, §4 비타협 "기존 시험 무회귀").
 
+// HYK-464-teardown-shadow-2 (coder-task.md §2 ⓑ⑴ B1, 바뀐 계약): 1R에는
+// mainCheckout/roundEvidence 두 축이 없었다 -- 그때는 이 헬퍼가 구성하는
+// inventory가 "ELIGIBLE 전제조건 전부 충족"의 정의였다. 이제 이 축도
+// 충족해야 ELIGIBLE이 난다(본체 아님 + 소비 영수증 1건 이상) -- 전후
+// 원문: 이전에는 이 두 필드가 아예 없었고 그래도 ELIGIBLE이 났다(아래
+// 모든 ELIGIBLE 기대 시험이 그 사실로 통과했다). 지금은 둘 다 명시해야
+// ELIGIBLE이 유지된다(그렇지 않으면 TEARDOWN_MAIN_CHECKOUT_UNKNOWN/
+// TEARDOWN_ROUND_EVIDENCE_UNKNOWN으로 거부 -- 아래 새 시험 참조).
 function eligibleArchiveInventory(overrides = {}) {
   return {
     mergeStatus: { observable: true, isAncestorOfRemoteMaster: true },
@@ -635,6 +643,8 @@ function eligibleArchiveInventory(overrides = {}) {
       observable: true,
       files: [{ path: ".harness/coder.md", bytes: 42, sha256: "a".repeat(64) }],
     },
+    mainCheckout: { observable: true, isMain: false },
+    roundEvidence: { observable: true, count: 1 },
     ...overrides,
   };
 }
@@ -786,3 +796,71 @@ test("HYK-464-teardown-shadow-1: dispatchCorrelationProven/protectedTargets 등 
   });
   assert.equal(r.eligibility, ELIGIBILITY.ELIGIBLE);
 });
+
+// ═══════════════════════════════════════════════════════════════════════
+// HYK-464-teardown-shadow-2 (REVIEW 1R P1-2, 책임자 판정 1012 B1) --
+// 본체(비연결 작업 트리) 제외 + 라운드 증거 0 제외.
+// ═══════════════════════════════════════════════════════════════════════
+
+test("HYK-464-teardown-shadow-2 B1: 본체(isMain:true)는 나머지 전제가 전부 깨끗해도 거부된다(TEARDOWN_MAIN_CHECKOUT)", () => {
+  const r = judgeArchiveEligibility({
+    inventory: eligibleArchiveInventory({
+      mainCheckout: { observable: true, isMain: true },
+    }),
+  });
+  assert.equal(r.eligibility, ELIGIBILITY.EVIDENCE_NOT_DURABLE);
+  assert.equal(r.reason, REASON.MAIN_CHECKOUT);
+  assert.equal(r.allowSink, false);
+});
+
+test("HYK-464-teardown-shadow-2 B1: mainCheckout 관측 불가 -> 판정 불가(본체인지 모르면 ELIGIBLE로 지어내지 않는다)", () => {
+  const r = judgeArchiveEligibility({
+    inventory: eligibleArchiveInventory({
+      mainCheckout: { observable: false },
+    }),
+  });
+  assert.equal(r.eligibility, ELIGIBILITY.EVIDENCE_NOT_DURABLE);
+  assert.equal(r.reason, REASON.MAIN_CHECKOUT_UNKNOWN);
+});
+
+test("HYK-464-teardown-shadow-2 B1: mainCheckout 필드 자체가 없으면(undefined) 판정 불가로 떨어진다", () => {
+  const r = judgeArchiveEligibility({
+    inventory: eligibleArchiveInventory({ mainCheckout: undefined }),
+  });
+  assert.equal(r.eligibility, ELIGIBILITY.EVIDENCE_NOT_DURABLE);
+  assert.equal(r.reason, REASON.MAIN_CHECKOUT_UNKNOWN);
+});
+
+test("HYK-464-teardown-shadow-2 B1: 라운드 증거(소비 영수증) 0건 -> 거부(TEARDOWN_NO_ROUND_EVIDENCE) -- '막 만든 워크트리'를 ELIGIBLE로 지어내지 않는다", () => {
+  const r = judgeArchiveEligibility({
+    inventory: eligibleArchiveInventory({
+      roundEvidence: { observable: true, count: 0 },
+    }),
+  });
+  assert.equal(r.eligibility, ELIGIBILITY.EVIDENCE_NOT_DURABLE);
+  assert.equal(r.reason, REASON.NO_ROUND_EVIDENCE);
+});
+
+test("HYK-464-teardown-shadow-2 B1: 라운드 증거 관측 불가 -> 판정 불가", () => {
+  const r = judgeArchiveEligibility({
+    inventory: eligibleArchiveInventory({
+      roundEvidence: { observable: false },
+    }),
+  });
+  assert.equal(r.eligibility, ELIGIBILITY.EVIDENCE_NOT_DURABLE);
+  assert.equal(r.reason, REASON.ROUND_EVIDENCE_UNKNOWN);
+});
+
+test("HYK-464-teardown-shadow-2 B1: 라운드 증거가 1건 이상이면(본체도 아니면) 통과 -- ELIGIBLE", () => {
+  const r = judgeArchiveEligibility({
+    inventory: eligibleArchiveInventory({
+      roundEvidence: { observable: true, count: 3 },
+    }),
+  });
+  assert.equal(r.eligibility, ELIGIBILITY.ELIGIBLE);
+  assert.equal(r.reason, REASON.ARCHIVE_ELIGIBLE);
+});
+
+// ⓒ⑵/⑶ 변이 대상: ARCHIVE_ELIGIBILITY_CHECKS에서 checkNotMainCheckout/
+// checkRoundEvidencePresent를 지우면 위 두 거부 시험이 RED가 된다(coder.md
+// §변이 표 참조 -- 이 두 함수가 실제로 체인에 연결돼 있다는 증거).

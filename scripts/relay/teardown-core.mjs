@@ -79,6 +79,13 @@ export const REASON = Object.freeze({
   KEEP_REASON_PRESENT: "TEARDOWN_KEEP_REASON_PRESENT",
   ARCHIVE_MANIFEST_UNAVAILABLE: "TEARDOWN_ARCHIVE_MANIFEST_UNAVAILABLE",
   ARCHIVE_ELIGIBLE: "TEARDOWN_ARCHIVE_ELIGIBLE",
+  // ---- HYK-464-teardown-shadow-2 (REVIEW 1R P1-2/§2 ⓑ⑴ B1): 본체
+  // (비연결 작업 트리) 제외 + 라운드 증거 0 제외. 둘 다 "근거가 주어지지
+  // 않으면 판정 불가"와 같은 성질(ELIGIBLE 아님) -- 책임자 판정 1012 §2.
+  MAIN_CHECKOUT_UNKNOWN: "TEARDOWN_MAIN_CHECKOUT_UNKNOWN",
+  MAIN_CHECKOUT: "TEARDOWN_MAIN_CHECKOUT",
+  ROUND_EVIDENCE_UNKNOWN: "TEARDOWN_ROUND_EVIDENCE_UNKNOWN",
+  NO_ROUND_EVIDENCE: "TEARDOWN_NO_ROUND_EVIDENCE",
 });
 
 const LAYER_VALUES = Object.freeze(["present", "absent", "unobservable"]);
@@ -781,11 +788,88 @@ function checkArchiveManifestAvailable(inventory) {
   return null;
 }
 
+// ---- HYK-464-teardown-shadow-2 (REVIEW 1R P1-2, 책임자 판정 1012 B1) ----
+// ⓔ 본체(비연결 작업 트리) 제외 -- 실물 1회(검토 1R §2ⓔ)에서 본체
+// 체크아웃이 HYK-185 NOT_APPLICABLE·keep-reason 없음·자기 자신의 조상
+// 이라는 사실만으로 그대로 ELIGIBLE이 났다(거짓 ELIGIBLE). 본체는 애초에
+// `orca worktree rm`의 대상이 될 수 없다 -- B-15(사람 손 정리) 대상의
+// 부분집합이 아니다.
+// `isMain` 판정 근거: `git worktree list --porcelain`은 본체(main
+// working tree)를 항상 첫 행으로 낸다(이 저장소에서 실측, coder.md §0
+// 실측 로그 참조 -- porcelain 출력에 본체를 가리키는 별도 플래그는
+// 없다, `bare`/`locked`/`prunable`은 각각 다른 조건에서만 나온다).
+// 호출자(watch-run.mjs runTeardownShadowStep)가 워크트리 목록의 인덱스
+// 0을 이 필드에 싣는다 -- 이 코어 자신은 git을 전혀 모른다(G9).
+function isValidMainCheckout(v) {
+  if (!isPlainObject(v) || typeof v.observable !== "boolean") return false;
+  if (v.observable !== true) return true;
+  return typeof v.isMain === "boolean";
+}
+function checkNotMainCheckout(inventory) {
+  const mainCheckout = inventory.mainCheckout;
+  if (!isValidMainCheckout(mainCheckout) || mainCheckout.observable !== true) {
+    return {
+      eligibility: ELIGIBILITY.EVIDENCE_NOT_DURABLE,
+      reason: REASON.MAIN_CHECKOUT_UNKNOWN,
+      evidence: buildArchiveEvidence(REASON.MAIN_CHECKOUT_UNKNOWN, {
+        mainCheckout: mainCheckout ?? null,
+      }),
+    };
+  }
+  if (mainCheckout.isMain === true) {
+    return {
+      eligibility: ELIGIBILITY.EVIDENCE_NOT_DURABLE,
+      reason: REASON.MAIN_CHECKOUT,
+      evidence: buildArchiveEvidence(REASON.MAIN_CHECKOUT, {}),
+    };
+  }
+  return null;
+}
+
+// ⓖ 라운드 증거 0 -- 실물 1회에서 "막 만든 워크트리"(아직 어떤 라운드도
+// 끝낸 적 없음)도 같은 4축을 통과했다(검토 1R P1-2 "같은 모양" 추론).
+// 소비 영수증(`.harness/receipts/<role>-receipt-r<N>.json`)이 단 하나도
+// 없는 워크트리는 "이 워크트리에서 라운드가 끝난 적이 있다"는 증거가
+// 전혀 없다 -- ELIGIBLE(아카이브해도 된다)이라는 적극적 결론을 뒷받침할
+// 근거가 없다(HYK-431 8R과 같은 원칙: 부재는 통과가 아니라 판정 불가).
+function isValidRoundEvidence(v) {
+  if (!isPlainObject(v) || typeof v.observable !== "boolean") return false;
+  if (v.observable !== true) return true;
+  return Number.isInteger(v.count) && v.count >= 0;
+}
+function checkRoundEvidencePresent(inventory) {
+  const roundEvidence = inventory.roundEvidence;
+  if (
+    !isValidRoundEvidence(roundEvidence) ||
+    roundEvidence.observable !== true
+  ) {
+    return {
+      eligibility: ELIGIBILITY.EVIDENCE_NOT_DURABLE,
+      reason: REASON.ROUND_EVIDENCE_UNKNOWN,
+      evidence: buildArchiveEvidence(REASON.ROUND_EVIDENCE_UNKNOWN, {
+        roundEvidence: roundEvidence ?? null,
+      }),
+    };
+  }
+  if (roundEvidence.count === 0) {
+    return {
+      eligibility: ELIGIBILITY.EVIDENCE_NOT_DURABLE,
+      reason: REASON.NO_ROUND_EVIDENCE,
+      evidence: buildArchiveEvidence(REASON.NO_ROUND_EVIDENCE, {
+        roundEvidence,
+      }),
+    };
+  }
+  return null;
+}
+
 const ARCHIVE_ELIGIBILITY_CHECKS = Object.freeze([
   checkMergeAncestry,
   checkUnconsumedRoundsClear,
   checkKeepReasonAbsent,
   checkArchiveManifestAvailable,
+  checkNotMainCheckout,
+  checkRoundEvidencePresent,
 ]);
 
 // judgeArchiveEligibility({inventory}) -- 순수 판정, 부작용 0. armed/
