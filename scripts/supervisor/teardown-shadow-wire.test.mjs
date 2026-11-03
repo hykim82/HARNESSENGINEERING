@@ -398,6 +398,73 @@ test("HYK-464-teardown-shadow-2 P1-5/C1: 은퇴 기록은 role+harnessTaskLabel�
   }
 });
 
+// HYK-464-teardown-shadow-2 P1-4: 기본 fs 함수(listHarnessFilesFn 미주입)
+// -- `.harness`가 "없는"(ENOENT) 것과 "디렉터리가 아닌"(그 밖의 오류)
+// 것은 다르다. 전자만 빈 목록으로 접고, 후자는 관측 불가로 접어야 한다
+// (검토 1R 실측: 1R은 둘 다 빈 목록으로 접어 ELIGIBLE로 샜다). 실 fs를
+// 써야 하는 시험이라 실제 tmp 디렉터리에 `.harness`를 파일로 만든다.
+test("HYK-464-teardown-shadow-2 P1-4: .harness가 디렉터리가 아니면(ENOENT 아닌 다른 오류) 기본 fs 함수가 '없음'으로 접지 않고 판정 불가(ARCHIVE_MANIFEST_UNAVAILABLE)로 떨어진다", () => {
+  const dir = fs.mkdtempSync(join(tmpdir(), "nc-teardown-shadow-notadir-"));
+  const worktreePath = dir.replace(/\\/g, "/");
+  fs.writeFileSync(join(dir, ".harness"), "not a directory");
+  const watchDir = tmpWatchDir();
+  try {
+    const result = runWatchOnce({
+      repoRoot: ROOT,
+      watchDir,
+      now: NOW_MS,
+      execFn: unconsumedExecFn([{ worktreePath, kind: "NA" }]),
+      resourceResidue: {
+        worktreeListFn: () => ({ ok: true, worktrees: [worktreePath] }),
+        teardownShadow: baseTeardownShadow({
+          gitFn: () => `${SHA_HEAD}\n`,
+          isAncestorFn: () => true,
+          // 기본값(실 fs)을 그대로 쓰게 두 injection 모두 비운다.
+          listHarnessFilesFn: undefined,
+          readFileBufferFn: undefined,
+        }),
+      },
+    });
+    assert.match(result.line, /teardown_shadow_eligible=0/);
+    assert.match(result.line, /TEARDOWN_ARCHIVE_MANIFEST_UNAVAILABLE:1/);
+  } finally {
+    fs.rmSync(watchDir, { recursive: true, force: true });
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("HYK-464-teardown-shadow-2 P1-4: 기본 fs 함수 -- `.harness`가 아예 없으면(ENOENT) 빈 목록으로 접는다(회귀 0, 1R의 '없으면 빈 배열' 재량은 그대로)", () => {
+  const dir = fs.mkdtempSync(join(tmpdir(), "nc-teardown-shadow-noharness-"));
+  const worktreePath = dir.replace(/\\/g, "/");
+  const watchDir = tmpWatchDir();
+  try {
+    const result = runWatchOnce({
+      repoRoot: ROOT,
+      watchDir,
+      now: NOW_MS,
+      execFn: unconsumedExecFn([{ worktreePath, kind: "NA" }]),
+      resourceResidue: {
+        worktreeListFn: () => ({ ok: true, worktrees: [worktreePath] }),
+        teardownShadow: baseTeardownShadow({
+          gitFn: () => `${SHA_HEAD}\n`,
+          isAncestorFn: () => true,
+          listHarnessFilesFn: undefined,
+          readFileBufferFn: undefined,
+        }),
+      },
+    });
+    // `.harness` 자체가 없으니 archiveManifest는 빈 목록(observable:true)
+    // -- 단일 워크트리라 인덱스 0=본체로 먼저 거부되지만(이 시험의
+    // 관심사는 아니다), 핵심은 ARCHIVE_MANIFEST_UNAVAILABLE이 "아니다"
+    // 라는 것이다(ENOENT는 "없음"이고 "못 읽음"이 아니다).
+    assert.match(result.line, /teardown_shadow_eligible=0/);
+    assert.equal(result.line.includes("ARCHIVE_MANIFEST_UNAVAILABLE"), false);
+  } finally {
+    fs.rmSync(watchDir, { recursive: true, force: true });
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("opt-in: ELIGIBLE이 1건 이상이면 받는함에 통지 파일이 생기고, 같은 ELIGIBLE 집합이 이어지는 다음 회차는 재통지하지 않는다", () => {
   const watchDir = tmpWatchDir();
   const notifyDir = tmpNotifyDir();
