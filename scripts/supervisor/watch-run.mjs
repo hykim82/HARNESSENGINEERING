@@ -110,6 +110,22 @@ import { createOrcaExecFn } from "../relay/adapters/orca-adapter.mjs";
 // 나간다 -- 이 파일 자신은 orca를 spawn하지 않는다(G9, orca-cli-boundary
 // 정적 검사가 이 파일 밖에서 "orca" 리터럴 spawn 0건을 확인한다).
 import { buildSeatEscalationSendCommand } from "../relay/adapters/orca-adapter.mjs";
+// HYK-464-teardown-shadow-1 (coder-task.md §2 product_scope ①③) -- 축C가
+// 그림자로 구동하는 아카이브 판정 코어 + 그 관측 어댑터. ⛔이것은 위
+// "절대 import하지 않는다" 경계(orch-stall-detect.mjs 전용)와 무관하다 --
+// teardown-core.mjs/teardown-inventory-adapter.mjs는 relay/* 이고, 그
+// 경계는 orch-stall-detect.mjs 하나만 가리킨다(이 파일 §재사용 주석
+// 참조). 미소비(ⓑ) 판정은 이 두 모듈 어느 쪽도 하지 않는다 -- 이미 이
+// 러너가 child process로 받는 detectorResult.unconsumedWorstWorktrees
+// (HYK-328, HYK-185)를 그대로 재사용한다(새 재구현 0).
+import {
+  judgeArchiveEligibility,
+  ELIGIBILITY,
+} from "../relay/teardown-core.mjs";
+import {
+  observeArchiveInventory,
+  computeCanonicalPathDigest,
+} from "../relay/adapters/teardown-inventory-adapter.mjs";
 // HYK-464-followup-1 축C (coder-task.md §1 축C) -- 자원 잔재 «보고» 축이
 // 재사용하는 기존 함수. detectOrphans는 재구현하지 않는다(§재사용) --
 // 좌석 "배정 0" 후보를 이미 판별하는 도구(HYK-464 이전 라운드 산출물).
@@ -134,6 +150,9 @@ function defaultExec(cmd, args, opts) {
 
 function isPlainObject(v) {
   return v !== null && typeof v === "object" && !Array.isArray(v);
+}
+function isNonEmptyString(v) {
+  return typeof v === "string" && v.length > 0;
 }
 
 // HYK-210-human-log-1 (coder-task.md §1-§2): HYK-207이 seatLiveness/
@@ -405,7 +424,33 @@ function extractUnconsumedFields(unconsumed) {
     // stdout 등) null -- 필드 자체는 항상 존재한다(emptyDetectorFields도
     // 동일 키를 null로 둔다).
     unconsumedWorstWorktrees: pickStringArray(unconsumed, "worstWorktreePaths"),
+    // HYK-464-teardown-shadow-2 (coder-task.md §2 ⓑ⑷ P1-3 수리, 검토 1R
+    // 실측): worstWorktreePaths(위)만 보면 억제(HYK-452)·등급 가림·
+    // 워크트리별 수집 실패가 전부 "미소비 0"으로 접힌다(발화 «대표값»
+    // 투영일 뿐 HYK-185 판정 그 자체가 아니다). 그림자 teardown 축은 이
+    // 워크트리별 전체 항목(status/verdict/resultFile.path)을 그대로
+    // 옮겨 적는다 -- HYK-185 자신의 판정은 한 글자도 다시 하지 않는다
+    // (아래 pickUnconsumedWorktreeEntries 참조).
+    unconsumedWorktreeEntries: pickUnconsumedWorktreeEntries(unconsumed),
   };
+}
+
+// 문자열이 아니거나 형태가 어긋난 원소는 조용히 버린다(pickStringArray와
+// 동일 원칙) -- 이 배열은 teardown-shadow 축(아래 deriveUnconsumedRounds
+// ForWorktree)만 읽는다, 다른 네 축의 기존 동작은 전혀 바뀌지 않는다.
+function pickUnconsumedWorktreeEntries(unconsumed) {
+  if (!unconsumed || !Array.isArray(unconsumed.worktrees)) return null;
+  return unconsumed.worktrees
+    .filter((w) => isPlainObject(w) && isNonEmptyString(w.worktreePath))
+    .map((w) => ({
+      worktreePath: w.worktreePath,
+      status: typeof w.status === "string" ? w.status : null,
+      verdict: typeof w.verdict === "string" ? w.verdict : null,
+      resultFilePath:
+        isPlainObject(w.resultFile) && typeof w.resultFile.path === "string"
+          ? w.resultFile.path
+          : null,
+    }));
 }
 
 // HYK-328-receipt-name-1: pickString/pickNumber와 동일한 "형태가 아니면
@@ -552,6 +597,7 @@ function emptyDetectorFields() {
     unconsumedReason: null,
     unconsumedWorktreePath: null,
     unconsumedWorstWorktrees: null,
+    unconsumedWorktreeEntries: null,
     escalationStatus: null,
     escalationVerdict: null,
     escalationWorstCount: null,
@@ -2193,6 +2239,12 @@ export function buildLogLine({
     // 한 글자도 달라지지 않는다(회귀 0).
     segments.seatDetail,
     segments.seatEscalationDetail,
+    // HYK-464-teardown-shadow-1: 이 세그먼트도 지금 이 시점의 맨 끝이다 --
+    // 앞선 모든 세그먼트의 필드·순서·값은 이 라운드가 손대지 않았다.
+    // resourceResidue.teardownShadow가 opt-in으로 주어지지 않은(기존
+    // 호출자 전부) 회차는 teardownShadowLogSegment가 null을 돌려주므로
+    // (filter(Boolean)) 로그 줄이 한 글자도 달라지지 않는다(회귀 0).
+    teardownShadowLogSegment(resourceResidueResult?.teardownShadowResult),
   ]
     .filter(Boolean)
     .join(" ");
@@ -2903,20 +2955,694 @@ function collectNodeResidueStep({ resourceResidue, execFn }) {
   });
 }
 
+// ═══════════════════════════════════════════════════════════════════════
+// HYK-464-teardown-shadow-1 (coder-task.md §2 product_scope ③) -- 축C가
+// (resourceResidue가 켜진 회차에) 아카이브 판정 코어(judgeArchiveEligibility)
+// 를 워크트리마다 «그림자»로 구동한다. opt-in 중 opt-in -- resourceResidue.
+// teardownShadow가 명시로 주어지지 않으면(기본값, 기존 호출자 전부) 이
+// 단계는 아예 실행되지 않는다(notRun:true, 다른 세 잔재 축과 완전히
+// 독립 -- resourceResidue가 켜져 있어도 teardownShadow가 없으면 이 축만
+// 조용하다). ⛔armed는 어디에도 없다 -- 이 축은 판정만 하고, 실행(close/
+// rm)은 절대 하지 않는다(파괴 argv 0건, §2 비타협).
+// ---------------------------------------------------------------------------
+
+// 실 git/fs 호출의 기본 구현(시험은 resourceResidue.teardownShadow.*Fn으로
+// 전부 주입해 이 기본값을 쓰지 않는다 -- defaultListNodeProcessRows와
+// 동일한 "기본값은 실 운용, 시험은 주입"관례).
+function defaultArchiveGitFn(argv, worktreePath) {
+  return execFileSync("git", argv, {
+    cwd: worktreePath,
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "ignore"],
+  });
+}
+// HYK-464-teardown-shadow-2 (coder-task.md §2 ⓑ⑹ P2-3 수리, 검토 1R
+// 실측): 기본 lsRemoteFn이 워크트리마다(N개) `git ls-remote origin
+// refs/heads/master`를 다시 불렀다 -- 링크된 워크트리는 전부 같은
+// 저장소(같은 .git 객체·remote 설정)를 공유하므로 이 답은 워크트리마다
+// 달라지지 않는다. 한 회차(runTeardownShadowStep 한 번의 호출) 동안만
+// 유효한 메모를 만들어 실제 ls-remote 호출을 회차당 1회로 줄인다 --
+// 실패(네트워크 오류 등)도 그대로 메모해 재시도하지 않는다(그 회차의
+// 모든 워크트리가 같은 MERGE_STATUS_UNKNOWN을 공유한다, fail-closed
+// 성질은 바뀌지 않는다). 사용자(시험)가 `teardownShadow.lsRemoteFn`을
+// 직접 주입한 경우는 이 메모를 전혀 쓰지 않는다(아래 runTeardownShadowStep
+// 참조 -- 기본값에만 적용). `underlyingFn`은 실 운용에서는 항상
+// `defaultArchiveGitFn`(생략 시 기본값)이고, 시험이 호출 횟수를 셀 수
+// 있도록 export해 직접 주입 가능하게 한다(실 git/네트워크 호출 없이
+// 메모이즈 로직 자체를 증명한다).
+export function createMemoizedDefaultLsRemoteFn(
+  underlyingFn = defaultArchiveGitFn,
+) {
+  let cache = null;
+  return (argv, worktreePath) => {
+    if (cache === null) {
+      try {
+        cache = { ok: true, value: underlyingFn(argv, worktreePath) };
+      } catch (err) {
+        cache = { ok: false, error: err };
+      }
+    }
+    if (cache.ok) return cache.value;
+    throw cache.error;
+  };
+}
+// `git merge-base --is-ancestor`는 exit code로만 답한다(stdout 없음) --
+// exit 0 = 조상, exit 1 = 조상 아님, 그 밖(128 등) = 진짜 오류(알 수 없는
+// 리비전 등) -- execFileSync가 던지는 err.status로 셋을 구별한다. 진짜
+// 오류는 다시 던져서 호출자(observeMergeStatus)의 catch가 UNOBSERVABLE로
+// 접게 한다("아니다"로 지어내지 않는다).
+function defaultIsAncestorFn(headSha, remoteSha, worktreePath) {
+  try {
+    execFileSync("git", ["merge-base", "--is-ancestor", headSha, remoteSha], {
+      cwd: worktreePath,
+      stdio: ["ignore", "ignore", "ignore"],
+    });
+    return true;
+  } catch (err) {
+    if (typeof err?.status === "number" && err.status === 1) return false;
+    throw err;
+  }
+}
+function defaultArchiveExistsFn(p) {
+  return existsSync(p);
+}
+function defaultArchiveReadFileFn(p) {
+  return readFileSync(p, "utf8");
+}
+// `.harness` 아래 전부(재귀)를 상대경로(`.harness/...`, posix 구분자)로
+// 나열한다. ★HYK-464-teardown-shadow-2 (coder-task.md §2 ⓑ⑸ P1-4 수리,
+// 검토 1R 실측): `.harness`가 «없는»(ENOENT) 것과 «못 읽는»(디렉터리가
+// 아님·권한 없음 등) 것은 다르다 -- 전자만 "비정상이지만 파괴적이지
+// 않은 상태 -- 빈 배열"로 접는다(observeArchiveManifest에서 "목록이
+// 비었다"로 받는다). 후자는 최상위(root) 호출에서 그대로 다시 던져
+// observeArchiveManifest의 catch가 observable:false로 접게 한다(지어낸
+// "없음"으로 과대판정하지 않는다). 재귀 하위 디렉터리의 읽기 실패는(최상위
+// 존재가 이미 확인된 뒤라 드문 경쟁 상태뿐) 기존과 동일하게 조용히 건너
+// 뛴다 -- 이 축이 실측으로 겨냥한 것은 `.harness` 자체의 상태뿐이다.
+function defaultListHarnessFiles(worktreePath) {
+  const harnessDir = path.join(worktreePath, ".harness");
+  const out = [];
+  const walk = (dir, relPrefix, isRoot) => {
+    let entries;
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch (err) {
+      if (isRoot && err && err.code !== "ENOENT") throw err;
+      return;
+    }
+    for (const entry of entries) {
+      const rel = relPrefix ? `${relPrefix}/${entry.name}` : entry.name;
+      if (entry.isDirectory()) {
+        walk(path.join(dir, entry.name), rel, false);
+      } else if (entry.isFile()) {
+        out.push(`.harness/${rel}`);
+      }
+    }
+  };
+  walk(harnessDir, "", true);
+  return out;
+}
+function defaultReadHarnessFileBuffer(relPath, worktreePath) {
+  return readFileSync(path.join(worktreePath, relPath));
+}
+// ★HYK-464-teardown-shadow-2 (coder-task.md §2 ⓑ⑵ C1 수리, 책임자 판정
+// 1012): 1R은 ⓑ(미소비 라운드 0)의 "은퇴 기록 = 소비됨"을 «파일 존재로만»
+// 읽었다(검토 1R P1-5: 옛 회차·다른 역할의 은퇴 기록 1건이 새 회차
+// 미소비를 가렸다). 이제 그 파일을 JSON.parse해 그 «미소비 라운드 자신»의
+// role·회차(라벨)과 대조한다 -- 일치하는 기록이 하나도 없으면 "소비
+// 아님"이다(다른 라운드 은퇴 = 소비 아님). ⛔이것은 412(retirement-
+// record-core.mjs)의 전체 재확인(아카이브 존재·지문·기계 재확인 등)을
+// 재구현하는 것이 아니다 -- 그림자(판정만, 파괴 0) 축에 맞는 더 가벼운
+// 자기완결 대조이고, 412 코드를 이 파일이 import하거나 호출하지 않는다
+// (§2 범위 밖 "412 코드 무접촉" 그대로 지킨다).
+const RETIREMENT_FILE_RE = /^[a-z0-9_-]+-retire-r\d+\.json$/i;
+function defaultRetirementReaddir(worktreePath) {
+  return readdirSync(path.join(worktreePath, ".harness", "retirements"));
+}
+
+// 감지기가 이 워크트리에서 미소비로 판정한 결과 파일(`.harness/<role>.md`
+// 관례)에서 role(파일명 역산) + 라벨(`task_id:` 헤더 줄)을 읽는다. 둘 중
+// 하나라도 못 구하면 null -- 호출자가 "은퇴 기록과 대조할 근거가 없다"로
+// 처리한다(=소비 아님으로 남는다, 과대판정 없음).
+function extractRoleFromResultFilePath(resultFilePath) {
+  const m = /^\.harness\/([^/]+)\.md$/.exec(String(resultFilePath ?? ""));
+  return m ? m[1].toUpperCase() : null;
+}
+function resolveRoundLabelFromResultFile({
+  worktreePath,
+  resultFilePath,
+  readFileFn,
+}) {
+  if (!isNonEmptyString(resultFilePath) || typeof readFileFn !== "function") {
+    return null;
+  }
+  let text;
+  try {
+    // observeKeepReason과 동일 관례(watch-run.mjs 내 기존 선례) -- 실
+    // fs 호출에서 OS별 구분자 변환(path.join)에 의존하지 않고 원래
+    // 경로를 forward-slash로 그대로 잇는다(테스트의 문자열 대조도 OS
+    // 무관하게 안정적이다).
+    const fullPath = `${String(worktreePath).replace(/[\\/]+$/, "")}/${resultFilePath}`;
+    text = readFileFn(fullPath, worktreePath);
+  } catch {
+    return null;
+  }
+  if (typeof text !== "string") return null;
+  const m = /^task_id:\s*(.+)$/m.exec(text);
+  return m ? m[1].trim() : null;
+}
+
+// 은퇴 디렉터리 안의 파일들을 하나씩 JSON.parse해 role·harnessTaskLabel이
+// «그 미소비 라운드 자신»과 정확히 일치하는 기록이 있는지 본다. ★HYK-464-
+// teardown-shadow-3(coder-task.md §2 ⓒ P2-C 수리, 검토 2R 지적 판정
+// 1012 C1 "깨짐·불일치 = 판정 불가"): 못읽음·깨짐과 "정상 JSON이지만
+// 다른 역할/회차"는 더 이상 같은 결론이 아니다 -- 전자는 그 파일이 실제
+// 일치였는지 알 수 없으므로 판정 불가(observable:false, 이 축만
+// TEARDOWN_UNCONSUMED_ROUNDS_UNKNOWN), 후자는 내용을 끝까지 읽었고
+// 정상적으로 다른 라운드임을 확인했으므로 "소비 아님"으로 확정
+// (TEARDOWN_UNCONSUMED_ROUNDS_PRESENT, 그대로). 무관한 옛 은퇴 기록
+// 하나가 깨져 있어도, 다른 파일이 정상적으로 "다른 라운드"라고 확인해
+// 주면 그 결론(PRESENT)이 유지된다 -- 전부 깨졌을 때만 UNKNOWN이다.
+// eslint complexity 상한 회피(§ retirementFileMatchStatus/
+// resolveRetirementMatchStatus로 분리 -- retirement-record-writer.mjs류
+// 선례와 동일한 이유, 몸통만 쪼갠다). 파일 하나를 읽어 role+
+// harnessTaskLabel이 일치하는지만 본다.
+const RETIREMENT_MATCH = Object.freeze({
+  MATCHED: "matched",
+  BROKEN: "broken", // 못 읽음 또는 깨진 JSON -- 판정 불가(이 파일만으로는).
+  NOT_MATCHED: "not_matched", // 정상 JSON, 역할/라벨이 다름 -- 소비 아님 확정.
+});
+
+function retirementFileMatchStatus({
+  worktreePath,
+  name,
+  targetRole,
+  targetLabel,
+  readFileFn,
+}) {
+  const fullPath = `${String(worktreePath).replace(/[\\/]+$/, "")}/.harness/retirements/${name}`;
+  let text;
+  try {
+    text = readFileFn(fullPath, worktreePath);
+  } catch {
+    return RETIREMENT_MATCH.BROKEN; // 못 읽음 -- 판정 불가.
+  }
+  let record;
+  try {
+    record = JSON.parse(text);
+  } catch {
+    return RETIREMENT_MATCH.BROKEN; // 깨짐 -- 동일(판정 불가).
+  }
+  return isPlainObject(record) &&
+    record.role === targetRole &&
+    record.harnessTaskLabel === targetLabel
+    ? RETIREMENT_MATCH.MATCHED
+    : RETIREMENT_MATCH.NOT_MATCHED; // 정상 JSON, 다른 역할/회차 -- 소비 아님 확정.
+}
+
+// eslint complexity 상한 회피(resolveRetirementMatchStatus 자신의 분기 수를
+// 줄이려고 readdir 처리와 이름별 스캔을 각각 뽑았다 -- 판정/문구는 조금도
+// 바뀌지 않는다, 몸통만 쪼갠다, retirement-record-writer.mjs류 선례와
+// 동일한 이유).
+function resolveRetirementDirNames({ worktreePath, retirementReaddirFn }) {
+  try {
+    return { names: retirementReaddirFn(worktreePath), broken: false };
+  } catch (err) {
+    // ENOENT(디렉터리 부재)는 "은퇴 기록 없음"일 뿐, 관측 실패가 아니다.
+    // 그 밖의 오류(예: retirements가 디렉터리가 아님)는 판정 불가다.
+    return { names: [], broken: !(err && err.code === "ENOENT") };
+  }
+}
+
+function scanRetirementNames({
+  worktreePath,
+  names,
+  targetRole,
+  targetLabel,
+  readFileFn,
+}) {
+  let sawBroken = false;
+  for (const name of names) {
+    if (typeof name !== "string" || !RETIREMENT_FILE_RE.test(name)) continue;
+    const status = retirementFileMatchStatus({
+      worktreePath,
+      name,
+      targetRole,
+      targetLabel,
+      readFileFn,
+    });
+    if (status === RETIREMENT_MATCH.MATCHED) return RETIREMENT_MATCH.MATCHED;
+    if (status === RETIREMENT_MATCH.BROKEN) sawBroken = true;
+  }
+  return sawBroken ? RETIREMENT_MATCH.BROKEN : RETIREMENT_MATCH.NOT_MATCHED;
+}
+
+function resolveRetirementMatchStatus({
+  worktreePath,
+  targetRole,
+  targetLabel,
+  retirementReaddirFn,
+  readFileFn,
+}) {
+  if (!isNonEmptyString(targetRole) || !isNonEmptyString(targetLabel)) {
+    return RETIREMENT_MATCH.NOT_MATCHED;
+  }
+  const dir = resolveRetirementDirNames({ worktreePath, retirementReaddirFn });
+  if (dir.broken) return RETIREMENT_MATCH.BROKEN;
+  if (!Array.isArray(dir.names) || typeof readFileFn !== "function") {
+    return RETIREMENT_MATCH.NOT_MATCHED;
+  }
+  return scanRetirementNames({
+    worktreePath,
+    names: dir.names,
+    targetRole,
+    targetLabel,
+    readFileFn,
+  });
+}
+
+// HYK-464-teardown-shadow-2 (coder-task.md §2 ⓑ⑷ P1-3 수리): worst-list
+// (발화 대표값)만 보던 1R을 "이 워크트리 자신의 status/verdict"(위
+// pickUnconsumedWorktreeEntries가 옮겨 적은 unconsumedWorktreeEntries)로
+// 바꾼다 -- NOT_APPLICABLE(판정 대상 없음)이나 JUDGED+CONSUMED가 아니면
+// "있음"이고, 그 밖의 status(COLLECTION_FAILED·TASK_FILE_MTIME_UNAVAILABLE
+// 등)는 "판정 불가"다(§재사용: HYK-185 판정 자체는 한 글자도 다시 하지
+// 않는다 -- 그 판정이 이미 낸 status/verdict 문자열만 읽는다).
+const UNCONSUMED_STATUS_NOT_APPLICABLE = "UNCONSUMED_NOT_APPLICABLE";
+const UNCONSUMED_STATUS_JUDGED = "UNCONSUMED_JUDGED";
+const UNCONSUMED_VERDICT_CONSUMED = "CONSUMED";
+
+function findUnconsumedEntryForWorktree(entries, worktreePath) {
+  const targetDigest = computeCanonicalPathDigest(worktreePath);
+  return (
+    entries.find(
+      (e) =>
+        typeof e.worktreePath === "string" &&
+        computeCanonicalPathDigest(e.worktreePath) === targetDigest,
+    ) ?? null
+  );
+}
+
+function deriveUnconsumedRoundsForWorktree({
+  worktreePath,
+  detectorResult,
+  retirementReaddirFn,
+  readFileFn,
+}) {
+  const entries = detectorResult?.unconsumedWorktreeEntries;
+  if (!Array.isArray(entries)) return { observable: false };
+  const entry = findUnconsumedEntryForWorktree(entries, worktreePath);
+  if (!entry) return { observable: false };
+  if (entry.status === UNCONSUMED_STATUS_NOT_APPLICABLE) {
+    return { observable: true, count: 0, consumedViaRetirement: false };
+  }
+  if (entry.status === UNCONSUMED_STATUS_JUDGED) {
+    if (entry.verdict === UNCONSUMED_VERDICT_CONSUMED) {
+      return { observable: true, count: 0, consumedViaRetirement: false };
+    }
+    const targetRole = extractRoleFromResultFilePath(entry.resultFilePath);
+    const targetLabel = resolveRoundLabelFromResultFile({
+      worktreePath,
+      resultFilePath: entry.resultFilePath,
+      readFileFn,
+    });
+    const matchStatus = resolveRetirementMatchStatus({
+      worktreePath,
+      targetRole,
+      targetLabel,
+      retirementReaddirFn,
+      readFileFn,
+    });
+    // HYK-464-teardown-shadow-3 P2-C: 못읽음/깨진 은퇴 JSON(전부 BROKEN)은
+    // "소비 아님"으로 확정할 수 없다 -- 판정 불가로 접는다(observable:
+    // false -> TEARDOWN_UNCONSUMED_ROUNDS_UNKNOWN). 정상 JSON이지만 다른
+    // 역할/회차는 그대로 "소비 아님"(PRESENT)이다.
+    if (matchStatus === RETIREMENT_MATCH.BROKEN) {
+      return { observable: false };
+    }
+    return {
+      observable: true,
+      count: 1,
+      consumedViaRetirement: matchStatus === RETIREMENT_MATCH.MATCHED,
+    };
+  }
+  // COLLECTION_FAILED/TASK_FILE_MTIME_UNAVAILABLE/그 밖의 알 수 없는
+  // status -- 억제·등급 가림·수집 실패를 "0건"으로 접지 않는다(P1-3).
+  return { observable: false };
+}
+
+// 워크트리 하나에 대해 observeArchiveInventory(ⓐⓒⓓ) + 위 ⓑ + 아래
+// B1(본체 제외·라운드 증거 0)을 합쳐 judgeArchiveEligibility를 구동한다.
+// 전부 주입 가능(시험은 fake git/fs/retirementReaddir를 명시로 준다,
+// 기본값은 위 default*Fn). `isMainCheckout`은 호출자(runTeardownShadowStep,
+// 아래)가 워크트리 목록의 인덱스 0인지만 전달한다 -- 이 함수 자신은
+// 워크트리 목록 전체를 모른다(단일 워크트리 관측 경계, teardown-
+// inventory-adapter.mjs와 동일한 관심사 분리).
+function judgeTeardownShadowForWorktree({
+  worktreePath,
+  detectorResult,
+  teardownShadow,
+  isMainCheckout,
+}) {
+  const observeArchiveInventoryFn =
+    teardownShadow.observeArchiveInventoryFn ?? observeArchiveInventory;
+  const readFileFn = teardownShadow.readFileFn ?? defaultArchiveReadFileFn;
+  const archiveInventory = observeArchiveInventoryFn(
+    { worktreePath },
+    {
+      gitFn: teardownShadow.gitFn ?? defaultArchiveGitFn,
+      lsRemoteFn: teardownShadow.lsRemoteFn ?? defaultArchiveGitFn,
+      isAncestorFn: teardownShadow.isAncestorFn ?? defaultIsAncestorFn,
+      existsFn: teardownShadow.existsFn ?? defaultArchiveExistsFn,
+      readFileFn,
+      listHarnessFilesFn:
+        teardownShadow.listHarnessFilesFn ?? defaultListHarnessFiles,
+      readFileBufferFn:
+        teardownShadow.readFileBufferFn ?? defaultReadHarnessFileBuffer,
+    },
+  );
+  const unconsumedRounds = deriveUnconsumedRoundsForWorktree({
+    worktreePath,
+    detectorResult,
+    retirementReaddirFn:
+      teardownShadow.retirementReaddirFn ?? defaultRetirementReaddir,
+    readFileFn,
+  });
+  // B1(책임자 판정 1012) -- 본체는 `isMainCheckout`을 그대로 싣는다(이미
+  // 관측된 사실, 재관측 불필요). 라운드 증거는 archiveManifest가 이미
+  // 수집한 `.harness` 전체 파일 목록에서 `.harness/receipts/` 하위
+  // 개수만 센다(새 fs 호출 0 -- 같은 관측을 재사용한다).
+  const mainCheckout = { observable: true, isMain: isMainCheckout === true };
+  const roundEvidence =
+    archiveInventory.archiveManifest.observable === true
+      ? {
+          observable: true,
+          count: archiveInventory.archiveManifest.files.filter((f) =>
+            f.path.startsWith(".harness/receipts/"),
+          ).length,
+        }
+      : { observable: false };
+  const judgeArchiveEligibilityFn =
+    teardownShadow.judgeArchiveEligibilityFn ?? judgeArchiveEligibility;
+  const judged = judgeArchiveEligibilityFn({
+    inventory: {
+      ...archiveInventory,
+      unconsumedRounds,
+      mainCheckout,
+      roundEvidence,
+    },
+  });
+  return {
+    worktreePath,
+    eligibility: judged.eligibility,
+    reason: judged.reason,
+  };
+}
+
+const TEARDOWN_SHADOW_STATE_FILENAME = "teardown-shadow-notify-state.json";
+
+function readTeardownShadowNotifyState(readFn, statePath) {
+  try {
+    const parsed = JSON.parse(readFn(statePath, "utf8"));
+    return Array.isArray(parsed?.eligibleDigests) ? parsed.eligibleDigests : [];
+  } catch {
+    // fail-open(escalation-notify-state.json과 동일 원칙): 직전 통지가
+    // 없었다로 접어 재통지 후보로 둔다 -- 과소통지보다 과대통지가 안전.
+    return [];
+  }
+}
+
+// HYK-464-teardown-shadow-2 (coder-task.md §2 ⓑ⑹ P2-2/P2-4 수리):
+// ⑴ P2-2 -- `allEntries`(워크트리 전부, ELIGIBLE 여부 무관)를 받아 ELIGIBLE
+//    목록 아래에 "그 밖의 판정"(워크트리:사유) 전체를 옮겨 적는다. 로그
+//    줄은 요약(건수)만 내고, 워크트리별 전체 상세는 여기(받는함)로만
+//    보장한다 -- 60자 절단으로 행이 사라지지 않는다.
+// ⑵ P2-4 -- ORCH 초안이 "SHA 선기록"만 적고 "복원" 줄이 없었다(검토 1R
+//    P2-4). `orca worktree rm`은 브랜치도 함께 지우므로, 되돌릴 때 쓸
+//    `git branch <이름> <SHA>` 복원 줄을 선기록 줄 바로 다음에 더한다
+//    (브랜치 이름은 워크트리 디렉터리 이름으로 짐작하지 않는다 -- 사람이
+//    실제 브랜치명을 적어 넣을 자리로 `<branch-name>`을 그대로 남긴다).
+function buildTeardownShadowNoticeText({ eligibleEntries, allEntries, nowMs }) {
+  const lines = [];
+  lines.push(
+    `# 그림자 teardown 판정 -- 아카이브 후보 ${eligibleEntries.length}건 (${new Date(nowMs).toISOString()})`,
+  );
+  lines.push("");
+  lines.push(
+    "이 축은 그림자(판정만)입니다 -- 아무것도 지우지 않았습니다(armed=false 고정, HYK-464-teardown-shadow-1).",
+  );
+  for (const entry of eligibleEntries) {
+    lines.push("");
+    lines.push(`## ${entry.worktreePath}`);
+    lines.push("- 판정: ELIGIBLE");
+    lines.push(
+      `- ORCH 초안 3줄(검토 후 손으로 실행 -- ⚠️\`orca worktree rm\`은 브랜치도 함께 지운다):`,
+    );
+    lines.push(
+      `  1. SHA 선기록: \`git -C "${entry.worktreePath}" rev-parse HEAD\``,
+    );
+    lines.push(
+      `  2. 제거: \`orca worktree rm --worktree "${entry.worktreePath}" --json\``,
+    );
+    lines.push(
+      `  3. 복원이 필요하면: \`git branch <branch-name> <위 1에서 선기록한 SHA>\``,
+    );
+  }
+  const rest = (Array.isArray(allEntries) ? allEntries : []).filter(
+    (e) => e.eligibility !== ELIGIBILITY.ELIGIBLE,
+  );
+  if (rest.length > 0) {
+    lines.push("");
+    lines.push("## 그 밖의 판정(ELIGIBLE 아님, 워크트리별 전체)");
+    for (const entry of rest) {
+      lines.push(`- ${entry.worktreePath}: ${entry.reason}`);
+    }
+  }
+  return lines.join("\n") + "\n";
+}
+
+function buildTeardownShadowNoticeFileName(nowMs) {
+  const iso = new Date(nowMs).toISOString().replace(/[:.]/g, "-");
+  return `teardown-shadow-notify-${iso}.md`;
+}
+
+// "같은 집합이 이어지면 재통지 0"(§2 product_scope ③) -- dedupe 열쇠는
+// 지금 ELIGIBLE인 워크트리 경로 다이제스트 집합이다. 집합이 비면(0건)
+// 상태를 비워 둔다 -- 그래야 나중에 "사라졌다가 다시 나타난" 같은 집합이
+// 다시 발화한다(unconsumed-vanish 축과 동일 원칙, §2 비타협).
+function runTeardownShadowNotifyStep({
+  eligibleEntries,
+  allEntries,
+  watchDir,
+  notifyDir,
+  now,
+  readFn,
+  writeFn,
+  existsFn,
+  mkdirFn,
+}) {
+  if (!notifyDir) return { attempted: false };
+  const statePath = path.join(watchDir, TEARDOWN_SHADOW_STATE_FILENAME);
+  const currentDigests = eligibleEntries
+    .map((e) => computeCanonicalPathDigest(e.worktreePath))
+    .sort();
+  const priorDigests = readTeardownShadowNotifyState(readFn, statePath);
+  const sameSet =
+    priorDigests.length === currentDigests.length &&
+    priorDigests.every((d, i) => d === currentDigests[i]);
+  const persistState = () => {
+    try {
+      if (!existsFn(watchDir)) mkdirFn(watchDir, { recursive: true });
+      writeFn(
+        statePath,
+        JSON.stringify({ eligibleDigests: currentDigests }),
+        "utf8",
+      );
+    } catch {
+      // 상태 저장 실패는 이 단계의 계약을 깨지 않는다(fail-open -- 다음
+      // 회차에 다시 재통지될 뿐, runEscalationDedupeStep과 동일 원칙).
+    }
+  };
+  if (eligibleEntries.length === 0 || sameSet) {
+    persistState();
+    return {
+      attempted: false,
+      suppressed: sameSet && eligibleEntries.length > 0,
+    };
+  }
+  try {
+    if (!existsFn(notifyDir)) mkdirFn(notifyDir, { recursive: true });
+    const noticeText = buildTeardownShadowNoticeText({
+      eligibleEntries,
+      allEntries,
+      nowMs: now,
+    });
+    const noticePath = path.join(
+      notifyDir,
+      buildTeardownShadowNoticeFileName(now),
+    );
+    writeFn(noticePath, noticeText, "utf8");
+    persistState();
+    return { attempted: true, sent: true, noticePath };
+  } catch (err) {
+    return {
+      attempted: true,
+      sent: false,
+      reason: err && err.message ? err.message : String(err),
+    };
+  }
+}
+
+// runTeardownShadowStep -- resourceResidue.teardownShadow가 없으면
+// (기본값, 기존 호출자 전부) 아예 실행하지 않는다(notRun:true, 다른 세
+// 잔재 축과 독립적인 opt-in). 워크트리 열거는 resourceResidue.worktreeListFn
+// 을 그대로 재사용한다(§재사용 -- 새 열거 로직을 만들지 않는다, 이미
+// collectWorktreeResidueStep이 쓰는 동일 주입점).
+function runTeardownShadowStep({
+  resourceResidue,
+  detectorResult,
+  repoRoot,
+  now,
+  watchDir,
+  notifyDir,
+  readFn,
+  writeFn,
+  existsFn,
+  mkdirFn,
+}) {
+  const teardownShadow = resourceResidue?.teardownShadow;
+  if (!teardownShadow) return { notRun: true };
+  // P2-3: 기본 lsRemoteFn만 회차당 1회로 메모이즈한다(위 주석) -- 시험이
+  // lsRemoteFn을 직접 주입했으면(진실성 검사: 키 존재) 그 주입을 그대로
+  // 쓴다(테스트별 호출 추적을 방해하지 않는다).
+  const teardownShadowForRun = teardownShadow.lsRemoteFn
+    ? teardownShadow
+    : { ...teardownShadow, lsRemoteFn: createMemoizedDefaultLsRemoteFn() };
+  const worktreeListFn =
+    resourceResidue.worktreeListFn ?? collectGitWorktreesLocal;
+  const worktreeList = worktreeListFn(repoRoot, {});
+  if (!worktreeList.ok) {
+    return {
+      notRun: false,
+      status: "WORKTREE_LIST_FAILED",
+      totalWorktrees: 0,
+      eligibleCount: 0,
+      entries: [],
+      notice: { attempted: false },
+    };
+  }
+  // B1(책임자 판정 1012, coder.md §0 실측): `git worktree list
+  // --porcelain`은 본체(main working tree)를 항상 인덱스 0에 낸다 --
+  // 이 배열은 그 porcelain 출력을 그대로 파싱한 것이다(worktreeListFn
+  // 기본값 collectGitWorktreesLocal, 위 parseGitWorktreeListPorcelainLocal
+  // 참조). 그래서 인덱스 0만 본체로 싣는다 -- 경로 문자열이나 이름으로
+  // 추측하지 않는다.
+  const entries = worktreeList.worktrees.map((worktreePath, idx) =>
+    judgeTeardownShadowForWorktree({
+      worktreePath,
+      detectorResult,
+      teardownShadow: teardownShadowForRun,
+      isMainCheckout: idx === 0,
+    }),
+  );
+  const eligibleEntries = entries.filter(
+    (e) => e.eligibility === ELIGIBILITY.ELIGIBLE,
+  );
+  const notice = runTeardownShadowNotifyStep({
+    eligibleEntries,
+    allEntries: entries,
+    watchDir,
+    notifyDir,
+    now,
+    readFn,
+    writeFn,
+    existsFn,
+    mkdirFn,
+  });
+  return {
+    notRun: false,
+    status: "OK",
+    totalWorktrees: entries.length,
+    eligibleCount: eligibleEntries.length,
+    entries,
+    notice,
+  };
+}
+
+// HYK-464-teardown-shadow-2 (coder-task.md §2 ⓑ⑹ P2-2 수리, 검토 1R
+// §2ⓔ 실측): 워크트리별 "이름:사유" 목록은 MAX_PARTIAL_FAILURE_REASON_CHARS
+// (60자)에서 그대로 잘려 실물 5행 중 1.5행만 보였다. 이름이 아니라
+// "사유별 건수" 요약으로 바꾼다 -- 워크트리 수가 늘어도 요약 종류(사유
+// 코드 집합)는 작게 유지되므로 잘릴 일이 거의 없다. 워크트리별 전체
+// 상세(이름 + 사유)는 runTeardownShadowNotifyStep이 받는함에 적는다
+// (아래 buildTeardownShadowNoticeText가 이제 entries 전체를 받는다).
+function teardownShadowLogSegment(result) {
+  if (!result || result.notRun) return null;
+  const entries = Array.isArray(result.entries) ? result.entries : [];
+  const counts = new Map();
+  for (const e of entries) {
+    const key = e.eligibility === ELIGIBILITY.ELIGIBLE ? "ELIGIBLE" : e.reason;
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  const summary = [...counts.entries()]
+    .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))
+    .map(([key, n]) => `${key}:${n}`)
+    .join(",");
+  return (
+    `teardown_shadow_status=${result.status} ` +
+    `teardown_shadow_total=${result.totalWorktrees} ` +
+    `teardown_shadow_eligible=${result.eligibleCount} ` +
+    `teardown_shadow_detail=${summary.length > 0 ? summary : "NONE"}`
+  );
+}
+
 // 세 잔재 종류를 한 회차에 모아 보고한다. opt-in(위 헤더 주석) --
 // `resourceResidue`가 없으면(기본값, 대부분의 호출자) 실행하지 않는다
 // (admissionSweep/wake와 동일 원칙).
 // resourceResidue: { registryPath?, orcaExecFn?, listNodeProcessRowsFn?,
-//   worktreeListFn?, collectEvidenceFn? } -- 뒤 둘은 시험 전용 주입구
-// (실 git/실 fs 대신, 이 저장소 자체를 대상으로도 결정적으로 시험할 수
-// 있게 -- blockedTerminationScan의 harnessDir 오버라이드와 동일 재량).
-function runResourceResidueStep({ resourceResidue, repoRoot, execFn }) {
+//   worktreeListFn?, collectEvidenceFn?, teardownShadow? } -- teardownShadow는
+// HYK-464-teardown-shadow-1이 더한 완전히 독립된 opt-in(위 헤더 참조) --
+// 나머지 네 필드는 시험 전용 주입구(실 git/실 fs 대신, 이 저장소 자체를
+// 대상으로도 결정적으로 시험할 수 있게 -- blockedTerminationScan의
+// harnessDir 오버라이드와 동일 재량).
+function runResourceResidueStep({
+  resourceResidue,
+  repoRoot,
+  execFn,
+  detectorResult,
+  now,
+  watchDir,
+  notifyDir,
+  readFn,
+  writeFn,
+  existsFn,
+  mkdirFn,
+}) {
   if (!resourceResidue) return { notRun: true };
   return {
     notRun: false,
     worktreeResidue: collectWorktreeResidueStep({ resourceResidue, repoRoot }),
     idleSeatResidue: collectIdleSeatResidueStep({ resourceResidue }),
     nodeResidue: collectNodeResidueStep({ resourceResidue, execFn }),
+    // HYK-464-teardown-shadow-1: 이 필드는 지금 이 시점의 맨 끝이다 --
+    // 앞선 세 필드의 이름·값·계산은 이 라운드가 전혀 손대지 않았다(위
+    // 셋 다 그대로 재사용, §2 비타협 "기존 보고 칸 변경 0").
+    // teardownShadowResult는 resourceResidue.teardownShadow가 opt-in으로
+    // 주어지지 않은 기존 호출자에서 {notRun:true}이고, teardownShadowLogSegment
+    // 가 null을 돌려주므로(filter(Boolean)) 로그 줄이 한 글자도 달라지지
+    // 않는다(회귀 0).
+    teardownShadowResult: runTeardownShadowStep({
+      resourceResidue,
+      detectorResult,
+      repoRoot,
+      now,
+      watchDir,
+      notifyDir,
+      readFn,
+      writeFn,
+      existsFn,
+      mkdirFn,
+    }),
   };
 }
 
@@ -3381,6 +4107,18 @@ function runVisibilityScanSteps({
   blockedTerminationReaddirFn,
   blockedTerminationReadFileFn,
   resourceResidue,
+  // HYK-464-teardown-shadow-1: 넷 다 resourceResidue.teardownShadow가
+  // opt-in으로 주어지지 않으면(기존 호출자 전부) runResourceResidueStep
+  // 안의 runTeardownShadowStep이 아예 돌지 않으므로(notRun:true) 이 값들은
+  // 쓰이지 않는다(회귀 0).
+  detectorResult,
+  now,
+  watchDir,
+  notifyDir,
+  readFn,
+  writeFn,
+  existsFn,
+  mkdirFn,
 }) {
   const blockedTerminationResult = runBlockedTerminationScanStep({
     repoRoot,
@@ -3392,6 +4130,14 @@ function runVisibilityScanSteps({
     resourceResidue,
     repoRoot,
     execFn,
+    detectorResult,
+    now,
+    watchDir,
+    notifyDir,
+    readFn,
+    writeFn,
+    existsFn,
+    mkdirFn,
   });
   return { blockedTerminationResult, resourceResidueResult };
 }
@@ -3417,6 +4163,10 @@ function runOptionalAxisSteps({
   blockedTerminationReaddirFn,
   blockedTerminationReadFileFn,
   resourceResidue,
+  // HYK-464-teardown-shadow-1: runVisibilityScanSteps -> runResourceResidueStep
+  // -> runTeardownShadowStep까지만 흘려보낸다(opt-in, 위 주석과 동일 원칙).
+  detectorResult,
+  notifyDir,
 }) {
   const { sweepResult, wakeResult } = runSweepAndWakeSteps({
     admissionSweep,
@@ -3438,6 +4188,14 @@ function runOptionalAxisSteps({
       blockedTerminationReaddirFn,
       blockedTerminationReadFileFn,
       resourceResidue,
+      detectorResult,
+      now,
+      watchDir,
+      notifyDir,
+      readFn,
+      writeFn,
+      existsFn,
+      mkdirFn,
     });
   return {
     sweepResult,
@@ -3514,6 +4272,10 @@ function runWatchOnceCore(params) {
     ...params,
     blockedTerminationScan,
     resourceResidue,
+    // HYK-464-teardown-shadow-1: detectorResult는 params에 없다(이 함수
+    // 본문에서 막 계산된 로컬 값) -- 명시로 더한다. notifyDir은 이미
+    // params 안에 있으므로(...params가 포함) 그대로 흘러간다.
+    detectorResult,
   });
   return finalizeWatchOnceCycle({
     repoRoot,
@@ -3618,6 +4380,29 @@ export function runWatchOnce({
   });
 }
 
+// HYK-464-teardown-shadow-2 (coder-task.md §2 ⓑ⑴ A1, 책임자 판정 1012):
+// CLI 인자(`--resource-residue-registry-path`) -> `resourceResidue` 조립을
+// 프로덕션 CLI와 시험이 똑같이 부르는 자리로 뽑는다(1R 검토 P1-1: 결선
+// 시험이 `resourceResidue.teardownShadow`를 손으로 넣어서, CLI가 그 값을
+// 실제로는 한 번도 싣지 않는 결함을 못 잡았다 -- 이 함수를 export해
+// 시험이 "CLI 인자 파싱" 그 자체를 직접 구동할 수 있게 한다).
+// ★축 C(레지스트리 경로)가 켜진 회차면 teardownShadow를 기본값(빈 객체
+// = judgeTeardownShadowForWorktree가 default*Fn을 쓴다)으로 **항상**
+// 싣는다 -- 새 CLI 플래그 0(§2 비타협 "새 CLI 플래그 0"), 축 C가 꺼지면
+// (레지스트리 경로 생략, 기본값) resourceResidue 자체가 null이라 그림자도
+// 0(옵트인 그대로 유지).
+export function buildResourceResidueFromArgv(argv) {
+  let resourceResidueRegistryPath = null;
+  for (let i = 0; i < argv.length; i++) {
+    if (argv[i] === "--resource-residue-registry-path") {
+      resourceResidueRegistryPath = argv[++i];
+    }
+  }
+  return resourceResidueRegistryPath
+    ? { registryPath: resourceResidueRegistryPath, teardownShadow: {} }
+    : null;
+}
+
 const invokedDirectly =
   process.argv[1] &&
   process.argv[1]
@@ -3668,8 +4453,9 @@ if (invokedDirectly) {
   let blockedTerminationHarnessDir = null;
   // HYK-464-followup-1 축C: `--resource-residue-registry-path`를 생략
   // 하면(기본값) 이 축은 아예 실행되지 않는다(admissionSweep/wake와 동일
-  // opt-in 관례 -- 기존 호출자·기존 시험은 회귀 0).
-  let resourceResidueRegistryPath = null;
+  // opt-in 관례 -- 기존 호출자·기존 시험은 회귀 0). HYK-464-teardown-
+  // shadow-2: 실제 파싱은 buildResourceResidueFromArgv(위)로 옮겼다 --
+  // 아래 메인 루프는 이 플래그를 더 추적하지 않는다(중복 파싱 금지).
   // HYK-255-outbox-aux-1 (coder-task.md §2 ⓐ·product_scope ⓓ): 보내는함
   // 경로 argv 해석은 runWatchCliPartialCountStep으로 옮겼다(r3, REVIEW-r2
   // P1-1) -- 그 함수가 이 같은 argv 배열을 받아 "--outbox-dir"를 직접
@@ -3698,8 +4484,6 @@ if (invokedDirectly) {
       wakeFakeExecFailSubmit = true;
     else if (argv[i] === "--wake-fake-terminal-list-json")
       wakeFakeTerminalListJson = argv[++i];
-    else if (argv[i] === "--resource-residue-registry-path")
-      resourceResidueRegistryPath = argv[++i];
   }
   if (!repoRoot || !watchDir) {
     console.error("usage: watch-run.mjs --repo-root <path> --watch-dir <path>");
@@ -3775,9 +4559,7 @@ if (invokedDirectly) {
   const blockedTerminationScan = blockedTerminationHarnessDir
     ? { harnessDir: blockedTerminationHarnessDir }
     : null;
-  const resourceResidue = resourceResidueRegistryPath
-    ? { registryPath: resourceResidueRegistryPath }
-    : null;
+  const resourceResidue = buildResourceResidueFromArgv(argv);
   const result = runWatchOnce({
     repoRoot,
     watchDir,
