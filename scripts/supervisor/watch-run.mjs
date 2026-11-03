@@ -3113,18 +3113,27 @@ function resolveRoundLabelFromResultFile({
 }
 
 // 은퇴 디렉터리 안의 파일들을 하나씩 JSON.parse해 role·harnessTaskLabel이
-// «그 미소비 라운드 자신»과 정확히 일치하는 기록이 있는지 본다. 깨짐·
-// 못읽음·불일치는 전부 같은 결론(그 파일은 소비 증거가 아니다)으로
-// 접고, 계속 다음 파일을 본다 -- 무관한 옛 은퇴 기록 하나가 깨져 있다고
-// 해서 이 전체 축을 "판정 불가"로 끌어내리지 않는다(그 과도한 반응은
-// 다른 모든 정상 라운드의 아카이브 후보까지 조용히 막아버린다 -- 이
-// 함수가 내는 결론은 언제나 true/false뿐, observable:false는 없다).
-// eslint complexity 상한 회피(§ hasMatchingRetirementRecord 자신의 분기
-// 수를 줄이려고 뽑았다, retirement-record-writer.mjs류 선례와 동일한
-// 이유 -- 판정/문구는 조금도 바뀌지 않는다, 몸통만 쪼갠다). 파일 하나를
-// 읽어 role+harnessTaskLabel이 일치하는지만 본다 -- 못 읽음·깨짐·
-// 불일치는 전부 같은 결론(false, 이 파일은 소비 증거가 아니다).
-function retirementFileMatches({
+// «그 미소비 라운드 자신»과 정확히 일치하는 기록이 있는지 본다. ★HYK-464-
+// teardown-shadow-3(coder-task.md §2 ⓒ P2-C 수리, 검토 2R 지적 판정
+// 1012 C1 "깨짐·불일치 = 판정 불가"): 못읽음·깨짐과 "정상 JSON이지만
+// 다른 역할/회차"는 더 이상 같은 결론이 아니다 -- 전자는 그 파일이 실제
+// 일치였는지 알 수 없으므로 판정 불가(observable:false, 이 축만
+// TEARDOWN_UNCONSUMED_ROUNDS_UNKNOWN), 후자는 내용을 끝까지 읽었고
+// 정상적으로 다른 라운드임을 확인했으므로 "소비 아님"으로 확정
+// (TEARDOWN_UNCONSUMED_ROUNDS_PRESENT, 그대로). 무관한 옛 은퇴 기록
+// 하나가 깨져 있어도, 다른 파일이 정상적으로 "다른 라운드"라고 확인해
+// 주면 그 결론(PRESENT)이 유지된다 -- 전부 깨졌을 때만 UNKNOWN이다.
+// eslint complexity 상한 회피(§ retirementFileMatchStatus/
+// resolveRetirementMatchStatus로 분리 -- retirement-record-writer.mjs류
+// 선례와 동일한 이유, 몸통만 쪼갠다). 파일 하나를 읽어 role+
+// harnessTaskLabel이 일치하는지만 본다.
+const RETIREMENT_MATCH = Object.freeze({
+  MATCHED: "matched",
+  BROKEN: "broken", // 못 읽음 또는 깨진 JSON -- 판정 불가(이 파일만으로는).
+  NOT_MATCHED: "not_matched", // 정상 JSON, 역할/라벨이 다름 -- 소비 아님 확정.
+});
+
+function retirementFileMatchStatus({
   worktreePath,
   name,
   targetRole,
@@ -3136,22 +3145,59 @@ function retirementFileMatches({
   try {
     text = readFileFn(fullPath, worktreePath);
   } catch {
-    return false; // 못 읽음 -- 이 파일은 소비 증거로 쓰지 않는다.
+    return RETIREMENT_MATCH.BROKEN; // 못 읽음 -- 판정 불가.
   }
   let record;
   try {
     record = JSON.parse(text);
   } catch {
-    return false; // 깨짐 -- 동일(소비 증거로 쓰지 않는다).
+    return RETIREMENT_MATCH.BROKEN; // 깨짐 -- 동일(판정 불가).
   }
-  return (
-    isPlainObject(record) &&
+  return isPlainObject(record) &&
     record.role === targetRole &&
     record.harnessTaskLabel === targetLabel
-  );
+    ? RETIREMENT_MATCH.MATCHED
+    : RETIREMENT_MATCH.NOT_MATCHED; // 정상 JSON, 다른 역할/회차 -- 소비 아님 확정.
 }
 
-function hasMatchingRetirementRecord({
+// eslint complexity 상한 회피(resolveRetirementMatchStatus 자신의 분기 수를
+// 줄이려고 readdir 처리와 이름별 스캔을 각각 뽑았다 -- 판정/문구는 조금도
+// 바뀌지 않는다, 몸통만 쪼갠다, retirement-record-writer.mjs류 선례와
+// 동일한 이유).
+function resolveRetirementDirNames({ worktreePath, retirementReaddirFn }) {
+  try {
+    return { names: retirementReaddirFn(worktreePath), broken: false };
+  } catch (err) {
+    // ENOENT(디렉터리 부재)는 "은퇴 기록 없음"일 뿐, 관측 실패가 아니다.
+    // 그 밖의 오류(예: retirements가 디렉터리가 아님)는 판정 불가다.
+    return { names: [], broken: !(err && err.code === "ENOENT") };
+  }
+}
+
+function scanRetirementNames({
+  worktreePath,
+  names,
+  targetRole,
+  targetLabel,
+  readFileFn,
+}) {
+  let sawBroken = false;
+  for (const name of names) {
+    if (typeof name !== "string" || !RETIREMENT_FILE_RE.test(name)) continue;
+    const status = retirementFileMatchStatus({
+      worktreePath,
+      name,
+      targetRole,
+      targetLabel,
+      readFileFn,
+    });
+    if (status === RETIREMENT_MATCH.MATCHED) return RETIREMENT_MATCH.MATCHED;
+    if (status === RETIREMENT_MATCH.BROKEN) sawBroken = true;
+  }
+  return sawBroken ? RETIREMENT_MATCH.BROKEN : RETIREMENT_MATCH.NOT_MATCHED;
+}
+
+function resolveRetirementMatchStatus({
   worktreePath,
   targetRole,
   targetLabel,
@@ -3159,27 +3205,20 @@ function hasMatchingRetirementRecord({
   readFileFn,
 }) {
   if (!isNonEmptyString(targetRole) || !isNonEmptyString(targetLabel)) {
-    return false;
+    return RETIREMENT_MATCH.NOT_MATCHED;
   }
-  let names;
-  try {
-    names = retirementReaddirFn(worktreePath);
-  } catch {
-    return false; // 디렉터리 부재는 "은퇴 기록 없음"일 뿐, 관측 실패가 아니다.
+  const dir = resolveRetirementDirNames({ worktreePath, retirementReaddirFn });
+  if (dir.broken) return RETIREMENT_MATCH.BROKEN;
+  if (!Array.isArray(dir.names) || typeof readFileFn !== "function") {
+    return RETIREMENT_MATCH.NOT_MATCHED;
   }
-  if (!Array.isArray(names) || typeof readFileFn !== "function") return false;
-  return names.some(
-    (name) =>
-      typeof name === "string" &&
-      RETIREMENT_FILE_RE.test(name) &&
-      retirementFileMatches({
-        worktreePath,
-        name,
-        targetRole,
-        targetLabel,
-        readFileFn,
-      }),
-  );
+  return scanRetirementNames({
+    worktreePath,
+    names: dir.names,
+    targetRole,
+    targetLabel,
+    readFileFn,
+  });
 }
 
 // HYK-464-teardown-shadow-2 (coder-task.md §2 ⓑ⑷ P1-3 수리): worst-list
@@ -3227,16 +3266,24 @@ function deriveUnconsumedRoundsForWorktree({
       resultFilePath: entry.resultFilePath,
       readFileFn,
     });
+    const matchStatus = resolveRetirementMatchStatus({
+      worktreePath,
+      targetRole,
+      targetLabel,
+      retirementReaddirFn,
+      readFileFn,
+    });
+    // HYK-464-teardown-shadow-3 P2-C: 못읽음/깨진 은퇴 JSON(전부 BROKEN)은
+    // "소비 아님"으로 확정할 수 없다 -- 판정 불가로 접는다(observable:
+    // false -> TEARDOWN_UNCONSUMED_ROUNDS_UNKNOWN). 정상 JSON이지만 다른
+    // 역할/회차는 그대로 "소비 아님"(PRESENT)이다.
+    if (matchStatus === RETIREMENT_MATCH.BROKEN) {
+      return { observable: false };
+    }
     return {
       observable: true,
       count: 1,
-      consumedViaRetirement: hasMatchingRetirementRecord({
-        worktreePath,
-        targetRole,
-        targetLabel,
-        retirementReaddirFn,
-        readFileFn,
-      }),
+      consumedViaRetirement: matchStatus === RETIREMENT_MATCH.MATCHED,
     };
   }
   // COLLECTION_FAILED/TASK_FILE_MTIME_UNAVAILABLE/그 밖의 알 수 없는

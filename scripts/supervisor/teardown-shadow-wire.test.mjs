@@ -277,6 +277,46 @@ test("HYK-464-teardown-shadow-2 B1: 본체(인덱스 0)는 나머지 전제가 �
   }
 });
 
+// HYK-464-teardown-shadow-3 P2-B(= 검토 2R 지적 · 1R P2-1 미수리, 변이
+// M7 생존): 결선 시험에 keep-reason.md가 "있음"인 칸이 0개였다 --
+// baseTeardownShadow의 existsFn 고정값(() => false)을 덮어쓰는 시험이
+// 없어 checkKeepReasonAbsent를 지운 변이(M7)에도 wire 18/18이 초록이
+// 었다. 이 칸은 existsFn/readFileFn이 .harness/keep-reason.md를 "있음 ·
+// 첫 줄 = 사유"로 주는 회차를 실제로 구동한다(merge·unconsumed 축은
+// 통과하게 맞춰 keepReason 체크까지 도달시킨다 -- checkKeepReasonAbsent
+// 는 checkNotMainCheckout보다 앞선 체크라, 워크트리 1개(인덱스 0=본체)
+// 라도 본체 사유에 가려지지 않는다, 위 B1 시험과 같은 체인 자리).
+test("HYK-464-teardown-shadow-3 P2-B: keep-reason.md가 있으면(existsFn이 '있음'을 주는 회차) TEARDOWN_KEEP_REASON_PRESENT -- 변이 M7(checkKeepReasonAbsent 제거)에 이 칸이 RED여야 한다", () => {
+  const watchDir = tmpWatchDir();
+  try {
+    const keepReasonFirstLine = "보존: HYK-464 PR 2(무장) 전까지 유지";
+    const result = runWatchOnce({
+      repoRoot: ROOT,
+      watchDir,
+      now: NOW_MS,
+      execFn: unconsumedExecFn([{ worktreePath: WT_MAIN, kind: "NA" }]),
+      resourceResidue: {
+        worktreeListFn: () => ({ ok: true, worktrees: [WT_MAIN] }),
+        teardownShadow: baseTeardownShadow({
+          gitFn: () => `${SHA_HEAD}\n`, // 본체도 조상 통과하게 맞춘다(B1 시험과 동일 재량).
+          isAncestorFn: () => true,
+          existsFn: (p) => String(p).endsWith(".harness/keep-reason.md"),
+          readFileFn: (p) => {
+            if (String(p).endsWith(".harness/keep-reason.md")) {
+              return `${keepReasonFirstLine}\n뒤 내용은 안 읽는다`;
+            }
+            throw new Error(`unexpected readFileFn path: ${p}`);
+          },
+        }),
+      },
+    });
+    assert.match(result.line, /teardown_shadow_eligible=0/);
+    assert.match(result.line, /TEARDOWN_KEEP_REASON_PRESENT:1/);
+  } finally {
+    fs.rmSync(watchDir, { recursive: true, force: true });
+  }
+});
+
 test("HYK-464-teardown-shadow-2 B1: 라운드 증거(소비 영수증) 0건인 워크트리는 거부된다(막 만든 워크트리를 ELIGIBLE로 지어내지 않는다)", () => {
   const watchDir = tmpWatchDir();
   try {
@@ -328,7 +368,7 @@ test("HYK-464-teardown-shadow-2 P1-3: 억제·수집 실패로 발화 대표값(
   }
 });
 
-test("HYK-464-teardown-shadow-2 P1-5/C1: 은퇴 기록은 role+harnessTaskLabel이 정확히 일치해야 '소비됨'으로 센다", () => {
+test("HYK-464-teardown-shadow-2 P1-5/C1(+shadow-3 P2-A/P2-C): 은퇴 기록은 role+harnessTaskLabel이 정확히 일치해야 '소비됨'으로 센다", () => {
   const watchDir = tmpWatchDir();
   const label = "HYK-464-teardown-shadow-2-coder-1";
   const resultFileText = `role: CODER\ntask_id: ${label}\n`;
@@ -340,6 +380,16 @@ test("HYK-464-teardown-shadow-2 P1-5/C1: 은퇴 기록은 role+harnessTaskLabel�
   const mismatchedRetirement = JSON.stringify({
     role: "REVIEW", // 다른 역할 -- 이 라운드의 은퇴가 아니다.
     harnessTaskLabel: label,
+  });
+  // HYK-464-teardown-shadow-3 P2-A(검토 2R 지적: 변이 M3b 생존 -- 라벨
+  // 대조만 지우면 wire 18/18이 그대로 초록이었다): 같은 역할(CODER) ·
+  // 다른(옛) 회차 라벨. 라벨 대조가 빠지면(M3b) 이 기록이 "일치"로
+  // 잘못 셈해져 ELIGIBLE로 샌다.
+  const oldRoundLabel = "HYK-464-teardown-shadow-1-coder-1";
+  const oldRoundRetirement = JSON.stringify({
+    role: "CODER",
+    harnessTaskLabel: oldRoundLabel, // 현재 라운드 라벨(label)과 다르다.
+    successorLabel: "HYK-464-teardown-shadow-1-coder-2",
   });
 
   const run = ({ retirementFiles, retirementContents }) =>
@@ -385,14 +435,28 @@ test("HYK-464-teardown-shadow-2 P1-5/C1: 은퇴 기록은 role+harnessTaskLabel�
     assert.match(mismatched.line, /teardown_shadow_eligible=0/);
     assert.match(mismatched.line, /TEARDOWN_UNCONSUMED_ROUNDS_PRESENT:1/);
 
-    // ⑶ 깨진 JSON만 있음 -- 역시 소비 증거로 쓰지 않는다(판정 불가로
-    //    과소비하지 않되, ELIGIBLE로도 새지 않는다).
+    // ⑶ 깨진 JSON만 있음 -- HYK-464-teardown-shadow-3 P2-C(검토 2R 지적
+    //    · 판정 1012 C1 "깨짐·불일치 = 판정 불가"): 이 파일이 실제
+    //    일치였는지 알 수 없으니 판정 불가 이름으로 접는다(ELIGIBLE로는
+    //    새지 않되, 이름이 "있음"(PRESENT)이 아니라 "판정 불가"(UNKNOWN)
+    //    다 -- 2R까지는 PRESENT로 잘못 나갔다).
     const broken = run({
       retirementFiles: ["coder-retire-r1.json"],
       retirementContents: { "coder-retire-r1.json": "{not json" },
     });
     assert.match(broken.line, /teardown_shadow_eligible=0/);
-    assert.match(broken.line, /TEARDOWN_UNCONSUMED_ROUNDS_PRESENT:1/);
+    assert.match(broken.line, /TEARDOWN_UNCONSUMED_ROUNDS_UNKNOWN:1/);
+
+    // ⑷ 같은 역할 · 옛 회차 라벨의 은퇴 기록만 있음(P2-A) -- 내용은
+    //    정상 JSON이라 "다른 라운드 은퇴"로 끝까지 확인된다 -> 소비
+    //    아님으로 확정(판정 불가가 아니라 PRESENT 그대로, ⑵와 같은
+    //    이름 -- 바뀌는 것은 ⑶뿐이다).
+    const oldRound = run({
+      retirementFiles: ["coder-retire-r1.json"],
+      retirementContents: { "coder-retire-r1.json": oldRoundRetirement },
+    });
+    assert.match(oldRound.line, /teardown_shadow_eligible=0/);
+    assert.match(oldRound.line, /TEARDOWN_UNCONSUMED_ROUNDS_PRESENT:1/);
   } finally {
     fs.rmSync(watchDir, { recursive: true, force: true });
   }
