@@ -96,6 +96,16 @@ function unconsumedExecFn(rows) {
       resultFile: { path: `.harness/${role}.md` },
     };
   });
+  // 발화 대표값(worst-list)도 사실적으로 채운다 -- orch-stall-detect.mjs의
+  // 실제 계약(COLLECTION_FAILURE 등급 2는 비발화, SUSPECTED_UNCONSUMED만
+  // 발화)과 같게, "SUSPECTED"만 worst-list에 올린다. 이 필드를 비워두면
+  // (undefined) pickStringArray가 null을 돌려줘 옛(1R) 코드도 우연히
+  // observable:false로 떨어져 P1-3 변이(mutation ⑷)를 가린다 -- 그래서
+  // COLLECTION_FAILED/NA/CONSUMED 모두 worst-list "밖"(=[])에 명시적으로
+  // 두어야 "worst-list만 보면 0건으로 접힌다"는 실제 결함이 재현된다.
+  const worstWorktreePaths = rows
+    .filter((r) => r.kind === "SUSPECTED")
+    .map((r) => r.worktreePath);
   return () =>
     JSON.stringify({
       verdict: "PROGRESSING",
@@ -103,6 +113,8 @@ function unconsumedExecFn(rows) {
       unconsumed: {
         status: "JUDGED",
         totalWorktrees: entries.length,
+        worstWorktreePaths,
+        worstCount: worstWorktreePaths.length,
         worktrees: entries,
       },
     });
