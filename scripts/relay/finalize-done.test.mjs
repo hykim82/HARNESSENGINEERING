@@ -671,3 +671,106 @@ test("HYK-418 §2-3 production entry point: relay-handshake CLI rejects an unmar
     );
   });
 });
+
+// HYK-426 ---------------------------------------------------------------
+//
+// Before this round: relay-handshake.mjs's consumer judged the marker at
+// column 0 (DONE_STAMPED_BY_MARKER_RE), but finalize-done.mjs's own
+// hasFinalizeDoneMarker judged it with rawLine.trim() -- looser, so a
+// marker with LEADING WHITESPACE read as "present" here (ALREADY_FINALIZED,
+// no escape) while the consumer read it as "absent" (rejected): a round
+// with no way out. The fix makes finalize-done.mjs import and use the
+// SAME column-0 predicate (hasDoneStampedByMarker, exported from relay-
+// handshake.mjs) instead of re-deriving presence -- this test is the
+// round-trip proof that a leading-space marker now escapes the exact same
+// way an unmarked line already did (REPLACED_UNMARKED), and that the
+// consumer's own rule did not loosen in the process.
+test("HYK-426 production entry point: a DONE line with a LEADING-SPACE finalize-done marker is rejected by relay-handshake CLI exactly like an unmarked one (no loosening); finalize-done CLI's REPLACED_UNMARKED clears it; relay-handshake CLI then accepts the SAME round", () => {
+  withDir((dir) => {
+    writeFileSync(
+      join(dir, "coder-task.md"),
+      "task_id: HYK-1\ndropped_at: 2026-08-19 05:00 KST\n",
+      "utf8",
+    );
+    writeFileSync(
+      join(dir, "coder.md"),
+      "task_id: HYK-1\n\nbody\n\n>>> DONE: CODER @ 2026-08-19 05:10:00 KST\n done_stamped_by: finalize-done\n",
+      "utf8",
+    );
+
+    const before = runHandshakeCli(["CODER", dir]);
+    assert.notEqual(
+      before.exit,
+      0,
+      "a leading-space marker must be rejected exactly like no marker at all -- the consumer's column-0 rule must not loosen",
+    );
+    assert.match(before.stderr, /no finalize-done marker/);
+    assert.match(
+      before.stderr,
+      /node scripts\/relay\/finalize-done\.mjs CODER/,
+    );
+
+    const finalize = runCli(["coder", dir]);
+    assert.equal(finalize.exit, 0);
+    assert.match(finalize.stdout, /^REPLACED_UNMARKED: >>> DONE: CODER @ /);
+    const content = readFileSync(join(dir, "coder.md"), "utf8");
+    assert.match(
+      content,
+      /^superseded_done: >>> DONE: CODER @ 2026-08-19 05:10:00 KST$/m,
+      "the original line (without its orphaned leading-space marker) is preserved verbatim as superseded_done:",
+    );
+    assert.match(content, /^done_stamped_by: finalize-done$/m);
+
+    const after = runHandshakeCli(["CODER", dir]);
+    assert.equal(
+      after.exit,
+      0,
+      "after the one-time machine re-stamp, the SAME round must now be consumable -- a leading-space marker is no longer a dead end (HYK-426)",
+    );
+  });
+});
+
+// Same shape as the ACTIVE_OBSERVATION_BLOCKED test above (HYK-353 2R §1
+// P1-2), but the suspicious rewrite is a well-formed DONE line carrying a
+// LEADING-SPACE marker instead of a malformed timestamp -- HYK-426 must
+// not touch this gate: a rewrite made AFTER an active first observation is
+// exactly as suspicious whether the new line is malformed or merely
+// unmarked-by-the-shared-predicate.
+test("HYK-426: active first observation + rewrite to a well-formed DONE with a LEADING-SPACE marker -> still ACTIVE_OBSERVATION_BLOCKED (gate unchanged), file untouched", () => {
+  withDir((dir) => {
+    const taskId = "HYK-1";
+    const droppedAt = "2026-08-19 05:00 KST";
+    writeFileSync(
+      join(dir, "coder-task.md"),
+      `task_id: ${taskId}\ndropped_at: ${droppedAt}\n`,
+      "utf8",
+    );
+    const goodDoneRaw = ">>> DONE: CODER @ 2026-08-19 05:10:00 KST";
+    const goodContent = `task_id: ${taskId}\n\n${goodDoneRaw}\ndone_stamped_by: finalize-done\n`;
+    writeFileSync(join(dir, "coder.md"), goodContent, "utf8");
+    const observed = observeDoneLine({
+      taskId,
+      droppedAt,
+      role: "coder",
+      harnessDir: dir,
+      resultContent: goodContent,
+      doneLineRaw: goodDoneRaw,
+    });
+    assert.equal(observed.rewritten, false);
+
+    const rewritten = `task_id: ${taskId}\n\n>>> DONE: CODER @ 2026-08-19 05:12:00 KST\n done_stamped_by: finalize-done\n`;
+    writeFileSync(join(dir, "coder.md"), rewritten, "utf8");
+
+    const result = finalizeDone({ role: "coder", harnessDir: dir });
+    assert.equal(result.ok, false);
+    assert.equal(
+      result.reasonCode,
+      FINALIZE_DONE_REASON.ACTIVE_OBSERVATION_BLOCKED,
+    );
+    assert.equal(
+      readFileSync(join(dir, "coder.md"), "utf8"),
+      rewritten,
+      "the suspicious post-observation rewrite must survive untouched -- no laundered replacement",
+    );
+  });
+});
