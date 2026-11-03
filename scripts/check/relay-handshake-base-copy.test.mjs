@@ -284,6 +284,7 @@ test("(bc-8)★ 되돌림 변이: 실제 HEAD 비교를 제거하고 base 선언
       const result = mod.checkRelayHandshake({
         role: "coder",
         harnessDir: dir,
+        now: Date.now(),
       });
       assert.equal(
         result.ok,
@@ -318,6 +319,7 @@ test("(bc-9)★ 되돌림 변이: resolveBaseCopyGuard 호출 자체를 checkRel
       const result = mod.checkRelayHandshake({
         role: "coder",
         harnessDir: dir,
+        now: Date.now(),
       });
       assert.equal(
         result.ok,

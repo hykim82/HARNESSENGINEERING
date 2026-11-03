@@ -4039,13 +4039,13 @@ export function checkRelayHandshake({
   const core = resolveHandshakeCore({ role, harnessDir, now, dispatchId });
   if (!core.ok) return core.verdict;
   const {
+    taskContent,
     resultContent,
-    taskId,
     droppedAt,
     droppedMatch,
     doneAt,
     doneMatch,
-    observation,
+    judgedRegion,
   } = core;
 
   // HYK-325 §2-3 승격 (HYK-418 §2-1): the missing-marker check used to live
@@ -4060,7 +4060,7 @@ export function checkRelayHandshake({
   // code that always no-ops.
 
   const rewriteOrStaleVerdict = checkRewriteAndStaleness({
-    observation,
+    observation: core.observation,
     doneAt,
     droppedAt,
     doneMatch,
@@ -4071,8 +4071,8 @@ export function checkRelayHandshake({
       rewriteOrStaleVerdict,
       role,
       harnessDir,
-      taskId,
-      taskContent: core.taskContent,
+      taskId: core.taskId,
+      taskContent,
       resultContent,
     });
   }
@@ -4094,8 +4094,8 @@ export function checkRelayHandshake({
   // 없앤다.
   const headCommitVerdict = resolveHeadCommitBinding({
     role,
-    taskContent: core.taskContent,
-    resultContent: core.judgedRegion,
+    taskContent,
+    resultContent: judgedRegion,
     harnessDir,
   });
   if (!headCommitVerdict.ok) return headCommitVerdict;
@@ -4108,8 +4108,8 @@ export function checkRelayHandshake({
   // 순서는 조금도 바뀌지 않는다, resolveRunnerContractGatedVerdict 자체
   // 헤더 참조).
   const runnerContractVerdict = resolveRunnerContractGatedVerdict({
-    taskContent: core.taskContent,
-    resultContent: core.judgedRegion,
+    taskContent,
+    resultContent: judgedRegion,
     harnessDir,
   });
   // HYK-412 §2: returnRunnerContractVerdict 자신의 헤더 참조.
@@ -4118,8 +4118,8 @@ export function checkRelayHandshake({
       runnerContractVerdict,
       role,
       harnessDir,
-      taskId,
-      taskContent: core.taskContent,
+      taskId: core.taskId,
+      taskContent,
       resultContent,
     });
 
@@ -4129,19 +4129,19 @@ export function checkRelayHandshake({
   // 등과 같은 이유로 뽑았다(판정/사유/순서는 조금도 바뀌지 않는다).
   const dispatchAndG1Verdict = resolveDispatchAndG1Verdict({
     role,
-    taskId,
+    taskId: core.taskId,
     dispatchLedgerPath,
     doneAt,
     harnessDir,
-    judgedRegion: core.judgedRegion,
+    judgedRegion,
   });
   if (dispatchAndG1Verdict) return dispatchAndG1Verdict;
 
   const sideEffectVerdict = runCompletionSideEffects({
     role,
     harnessDir,
-    taskId,
-    taskContent: core.taskContent,
+    taskId: core.taskId,
+    taskContent,
     resultContent,
     droppedMatch,
     doneMatch,
@@ -4149,7 +4149,7 @@ export function checkRelayHandshake({
   });
   if (sideEffectVerdict) return sideEffectVerdict;
 
-  return { ok: true, reason: `relay handshake ok for ${taskId}` };
+  return { ok: true, reason: `relay handshake ok for ${core.taskId}` };
 }
 
 // HYK-224-2R §3 옵션3, rewired HYK-227 §2 -- best-effort spawn of the
