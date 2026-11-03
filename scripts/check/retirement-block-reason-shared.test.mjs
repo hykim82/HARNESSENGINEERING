@@ -391,6 +391,46 @@ test("HYK-412 §2 negative: CONSUMPTION_REFUSED_RUNNER_CONTRACT는 ⓐ 기록 �
   );
 });
 
+// HYK-412 2R P1-2 (검토 1R): ⓑ(결과 지문 불일치) 음성이 1R에는 없었다 --
+// 거부 기록의 resultFingerprintSha256은 건드리지 않고 live 결과 파일
+// (resultText) 쪽을 1글자 바꿔서 confirmConsumptionRefusedRunnerContract의
+// `refusalRecord.resultFingerprintSha256 !== sha256OfUtf8Text(resultText)`
+// 비교가 실제로 갈라지는지를 고정한다 -- M4(그 비교 3줄 삭제)가 이 시험을
+// 깨뜨리지 못하면 §evidence_rule 변이표에서 RED여야 할 칸이 조용히
+// GREEN으로 남는다(검토 1R P1-2 반려 사유 그대로).
+test("HYK-412 §2 negative (P1-2): CONSUMPTION_REFUSED_RUNNER_CONTRACT는 ⓑ 결과 지문 불일치에서도 false를 돌려준다(not null, not true)", () => {
+  const harnessDir = tmpDir("hyk412-table-neg-runnercontract-fp-mismatch-");
+  const recordedResultText = "task_id: HYK-412-table-neg-fp-T\n";
+  buildRunnerContractRefusalFixture({
+    harnessDir,
+    resultText: recordedResultText,
+  });
+  // live 결과 파일이 거부 기록 작성 시점과 1글자라도 달라지면(ORCH가 그
+  // 사이 결과 파일을 다시 쓴 경우 등) 지문이 더는 맞지 않는다 -- 영수증
+  // sha256·runner_exit은 둘 다 참이어도 전체는 거짓이어야 한다.
+  const liveResultTextChangedByOneChar =
+    recordedResultText.slice(0, -2) + "X" + recordedResultText.slice(-1);
+  assert.equal(
+    liveResultTextChangedByOneChar.length,
+    recordedResultText.length,
+    "진짜 1글자 «치환»인지 확인(길이는 그대로, 값만 다름)",
+  );
+  assert.notEqual(liveResultTextChangedByOneChar, recordedResultText);
+  assert.equal(
+    confirmRetirementBlockReason(
+      {
+        blockReasonCode:
+          RETIREMENT_BLOCK_REASON.CONSUMPTION_REFUSED_RUNNER_CONTRACT,
+        evidenceReceiptPath: "receipts/coder-runner-contract-refused-test.json",
+      },
+      liveResultTextChangedByOneChar,
+      null,
+      harnessDir,
+    ),
+    false,
+  );
+});
+
 test("confirmRetirementBlockReason returns null (not a fake boolean) for a contract-text-only reason it cannot mechanically confirm", () => {
   assert.equal(
     confirmRetirementBlockReason(
