@@ -1759,6 +1759,104 @@ export function resolveHeadCommitBinding({
   return { ok: true, sha: resultHead.sha };
 }
 
+// HYK-424: 419-wire-2/422-dispatch-run-1 실사고 -- 워커가 결과 파일의
+// `head_commit:`에 "이 라운드의 base"(지시서가 선언한 값)를 그대로
+// 베껴 썼다(자기 커밋이 아님). 당시 CODER 지시서 머리의 `head_commit:`
+// 키가 "base"를 뜻했고, 결과 파일의 `head_commit:`은 "워커가 만든 커밋"을
+// 뜻했다 -- 같은 이름, 다른 뜻. 정식 표기는 `base_commit_of_this_round:`
+// (ORCH 생성기가 이미 이 키로 옮겨 적는다). 레거시 CODER 머리의
+// `head_commit:`도 여전히 "base 선언"으로 읽는다(과거 지시서·관제실
+// 실물 호환) -- 단 REVIEW 계열에는 적용하지 않는다: REVIEW 머리의
+// `head_commit:`은 "판정 대상 커밋"이라는 다른 뜻이고(resolveHeadCommitBinding
+// 축 ⓐ), 정당한 REVIEW 라운드는 결과·지시서·실제 HEAD가 셋 다 그 값으로
+// 같아지는 것이 설계된 동작이라 이 축이 오발동할 근거가 없다(no false
+// positive). resolveHeadCommitBinding(HYK-383)보다 «먼저» 건다(coder-task.md
+// §2 product_scope ①) -- 서로 다른 역할에만 걸리므로 결과는 같지만,
+// "base 를 베꼈다"는 더 구체적인 사유를 일반 383 사유보다 앞세운다.
+const BASE_COMMIT_OF_ROUND_RE_G =
+  /^base_commit_of_this_round:[ \t]*([0-9a-fA-F]{40})[ \t]*$/gm;
+
+// task 파일에서 "이 라운드의 base"를 읽는다 -- 정식 키가 모호하지 않게
+// 정확히 1개면 그 값을 쓰고, 없으면(그리고 REVIEW 계열이 아니면) 레거시
+// CODER 머리의 `head_commit:` 단독 줄로 물러난다. 둘 다 없거나 정식 키가
+// 모호하면(2개 이상) "base 선언 없음"으로 보고 이 축 자체를 건너뛴다(다른
+// 축이 모호성을 각자의 몫으로 다룬다 -- 이 축은 base-copy 전용이다).
+function resolveDeclaredRoundBase(taskContent, role) {
+  const scan = maskQuotedMarkerRegions(taskContent);
+  const formalMatches = [...scan.matchAll(BASE_COMMIT_OF_ROUND_RE_G)];
+  if (formalMatches.length === 1) {
+    return {
+      declared: true,
+      sha: formalMatches[0][1].toLowerCase(),
+      source: "base_commit_of_this_round",
+    };
+  }
+  if (formalMatches.length === 0 && !isReviewFamilyRole(role)) {
+    const legacyMatches = [...scan.matchAll(HEAD_COMMIT_RE_G)];
+    if (legacyMatches.length === 1) {
+      return {
+        declared: true,
+        sha: legacyMatches[0][1].toLowerCase(),
+        source: "legacy CODER head_commit header",
+      };
+    }
+  }
+  return { declared: false };
+}
+
+// HYK-424: task가 base를 선언했는데 결과의 head_commit이 그 base와
+// 같고, 실제 워크트리 HEAD는 그 base와 다르면(=워커가 자기 커밋을 만들고도
+// base를 그대로 베꼈다) 전용 사유로 거부한다. 결과에 head_commit 표지가
+// 없거나(흔한 CODER 모양) 모호하면(2개 이상) 이 축의 대상이 아니므로
+// 건너뛴다 -- 다른 축이 그 모양을 각자 다룬다. 실제 HEAD가 base와 같으면
+// (예: 커밋 0 라운드) base를 echo하는 것이 정직한 값이므로 거부하지
+// 않는다.
+export function resolveBaseCopyGuard({
+  role,
+  taskContent,
+  resultContent,
+  harnessDir,
+}) {
+  const declaredBase = resolveDeclaredRoundBase(taskContent, role);
+  if (!declaredBase.declared) return { ok: true, skipped: true };
+
+  const resultHead = resolveHeadCommitField(resultContent, { label: "result" });
+  if (!resultHead.ok) return { ok: true, skipped: true };
+
+  if (resultHead.sha !== declaredBase.sha) return { ok: true, skipped: true };
+
+  const actualHead = readActualWorktreeHeadCommit(harnessDir);
+  if (!actualHead.ok) {
+    return {
+      ok: false,
+      reason: `base-copy 확인 실패 (HYK-424): ${actualHead.reason}`,
+    };
+  }
+  if (actualHead.sha === declaredBase.sha) {
+    return { ok: true, skipped: true };
+  }
+
+  return {
+    ok: false,
+    reason: `base를 베꼈다 · 네 커밋 SHA를 적어라 (HYK-424 base-copy guard): result head_commit '${resultHead.sha}' equals this round's declared base (${declaredBase.source} = '${declaredBase.sha}') but the actual worktree HEAD at '${harnessDir}' is '${actualHead.sha}' -- head_commit은 네가 만든 커밋이어야 한다, base를 그대로 적지 마라`,
+  };
+}
+
+// checkRelayHandshake의 max-lines-per-function 예산을 지키려고 뽑았다
+// (checkRewriteAndStaleness 등과 같은 이유) -- 판정/사유/순서는 조금도
+// 바뀌지 않는다. null이면 통과, 아니면 그 verdict가 최종 거부다. `core`를
+// 그대로 받아 taskContent/judgedRegion을 꺼낸다(호출부를 2줄로 좁혀
+// max-lines-per-function 예산 안에 든다, coder-task.md §2 product_scope ①).
+function resolveBaseCopyRejection(core, role, harnessDir) {
+  const verdict = resolveBaseCopyGuard({
+    role,
+    taskContent: core.taskContent,
+    resultContent: core.judgedRegion,
+    harnessDir,
+  });
+  return verdict.ok ? null : verdict;
+}
+
 // HYK-411: 2026-09-01 실측(coder-task.md §1 원문) -- `npm test 2>&1 | tail`
 // 형태의 파이프는 **마지막 명령(tail)의** 종료코드를 셸에 보여준다. 실패한
 // 러너가 파이프 뒤에서 exit 0으로 보인다(독립 재현: `sh -c 'exit 7' 2>&1 |
@@ -3941,7 +4039,6 @@ export function checkRelayHandshake({
   const core = resolveHandshakeCore({ role, harnessDir, now, dispatchId });
   if (!core.ok) return core.verdict;
   const {
-    taskContent,
     resultContent,
     taskId,
     droppedAt,
@@ -3949,7 +4046,6 @@ export function checkRelayHandshake({
     doneAt,
     doneMatch,
     observation,
-    judgedRegion,
   } = core;
 
   // HYK-325 §2-3 승격 (HYK-418 §2-1): the missing-marker check used to live
@@ -3976,10 +4072,16 @@ export function checkRelayHandshake({
       role,
       harnessDir,
       taskId,
-      taskContent,
+      taskContent: core.taskContent,
       resultContent,
     });
   }
+
+  // HYK-424: base-copy 전용 축을 HYK-383 일반 거부보다 «먼저» 건다
+  // (coder-task.md §2 product_scope ①). judgedRegion을 넘기는 이유는
+  // 바로 아래 headCommitVerdict와 같다(HYK-423 3R §2 지문 범위 통일).
+  const baseCopyVerdict = resolveBaseCopyRejection(core, role, harnessDir);
+  if (baseCopyVerdict) return baseCopyVerdict;
 
   // HYK-383: 다른 모든 사유별 검사가 이미 통과한 뒤, 완료 판정 직전에 건다
   // (§4 무회귀 -- 기존 구체적 거부 사유가 가려지지 않는다). 비REVIEW는
@@ -3992,8 +4094,8 @@ export function checkRelayHandshake({
   // 없앤다.
   const headCommitVerdict = resolveHeadCommitBinding({
     role,
-    taskContent,
-    resultContent: judgedRegion,
+    taskContent: core.taskContent,
+    resultContent: core.judgedRegion,
     harnessDir,
   });
   if (!headCommitVerdict.ok) return headCommitVerdict;
@@ -4006,8 +4108,8 @@ export function checkRelayHandshake({
   // 순서는 조금도 바뀌지 않는다, resolveRunnerContractGatedVerdict 자체
   // 헤더 참조).
   const runnerContractVerdict = resolveRunnerContractGatedVerdict({
-    taskContent,
-    resultContent: judgedRegion,
+    taskContent: core.taskContent,
+    resultContent: core.judgedRegion,
     harnessDir,
   });
   // HYK-412 §2: returnRunnerContractVerdict 자신의 헤더 참조.
@@ -4017,7 +4119,7 @@ export function checkRelayHandshake({
       role,
       harnessDir,
       taskId,
-      taskContent,
+      taskContent: core.taskContent,
       resultContent,
     });
 
@@ -4031,7 +4133,7 @@ export function checkRelayHandshake({
     dispatchLedgerPath,
     doneAt,
     harnessDir,
-    judgedRegion,
+    judgedRegion: core.judgedRegion,
   });
   if (dispatchAndG1Verdict) return dispatchAndG1Verdict;
 
@@ -4039,7 +4141,7 @@ export function checkRelayHandshake({
     role,
     harnessDir,
     taskId,
-    taskContent,
+    taskContent: core.taskContent,
     resultContent,
     droppedMatch,
     doneMatch,

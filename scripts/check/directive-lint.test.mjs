@@ -121,6 +121,48 @@ test("(ⓘⓘⓘ-neg-no-mtime) mtimeMs를 안 넘기면 판정 불가로 보고 
 });
 
 // ===========================================================================
+// ⓘⓘⓘⓘ CODER 지시서 머리의 head_commit: 키(HYK-424): 레거시 base 표기가
+// CODER 지시서에 다시 실리면 거부. REVIEW 지시서의 head_commit:(=판정
+// 대상 커밋)은 그대로 허용(과차단 0).
+// ===========================================================================
+
+test("(ⓘⓘⓘⓘ-pos) role: CODER 머리에 head_commit: 키 -> 거부", () => {
+  const text =
+    "task_id: HYK-424-C\nrole: CODER\nhead_commit: " +
+    "a".repeat(40) +
+    "\n---\n";
+  const { ok, reasons } = lintDirective(text, { mtimeMs: Date.now() });
+  assert.equal(ok, false);
+  assert.ok(
+    reasons.some((r) => r.includes("ⓘⓘⓘⓘ CODER 지시서 머리에 head_commit:")),
+  );
+});
+
+test("(ⓘⓘⓘⓘ-neg-review) role: REVIEW 머리에 head_commit: 키 -> 통과(판정 대상 커밋이라는 다른 뜻, 과차단 0)", () => {
+  const text =
+    "task_id: HYK-424-R\nrole: REVIEW\nhead_commit: " +
+    "a".repeat(40) +
+    "\n---\n";
+  const { ok, reasons } = lintDirective(text, { mtimeMs: Date.now() });
+  assert.equal(ok, true, `expected pass, reasons=${JSON.stringify(reasons)}`);
+});
+
+test("(ⓘⓘⓘⓘ-neg-no-headcommit) role: CODER 머리에 head_commit: 키가 없으면(정식 base_commit_of_this_round:만 있으면) -> 통과", () => {
+  const text =
+    "task_id: HYK-424-C\nrole: CODER\nbase_commit_of_this_round: " +
+    "a".repeat(40) +
+    "\n---\n";
+  const { ok, reasons } = lintDirective(text, { mtimeMs: Date.now() });
+  assert.equal(ok, true, `expected pass, reasons=${JSON.stringify(reasons)}`);
+});
+
+test("(ⓘⓘⓘⓘ-neg-no-role) role: 줄 자체가 없으면 -> 판정 보류(거부하지 않는다, fail-open)", () => {
+  const text = "task_id: HYK-424-X\nhead_commit: " + "a".repeat(40) + "\n---\n";
+  const { ok } = lintDirective(text, { mtimeMs: Date.now() });
+  assert.equal(ok, true);
+});
+
+// ===========================================================================
 // 게이트 결선: 린트 거부 -> runDispatchGateDecision이 allow:false + 사유
 // 줄을 그대로 낸다. CLI를 실제로 실행하는 (관제실이 호출하는 바로 그 것)
 // dispatch-gate-head-commit-wire.test.mjs 자신의 runCli 관례를 그대로 쓴다.
@@ -177,6 +219,38 @@ test("(wire-2) 같은 금지가 줄마다 쪼개져 있으면(안전 모양) -> 
     writeFileSync(
       taskPath,
       `task_id: HYK-9404-coder-1\nload_repro_rule: ⛔부하 재현 0\n${ONE_B_BLOCK}`,
+      "utf8",
+    );
+    const ledgerPath = freshLedger(dir);
+    const r = runGateCli([taskPath, "--ledger", ledgerPath]);
+    assert.equal(r.status, 0, `expected ALLOW exit 0, stderr=${r.stderr}`);
+    assert.match(r.stdout, /ALLOW/);
+  });
+});
+
+test("(wire-3, HYK-424) role: CODER 머리에 head_commit: 키가 든 CODER task -> dispatch-gate-decision CLI가 REJECT, exit 1, HYK-424 사유 줄", () => {
+  withFixtureDir((dir) => {
+    const taskPath = join(dir, "coder-task.md");
+    writeFileSync(
+      taskPath,
+      `task_id: HYK-9405-coder-1\nrole: CODER\nhead_commit: ${"a".repeat(40)}\n${ONE_B_BLOCK}`,
+      "utf8",
+    );
+    const ledgerPath = freshLedger(dir);
+    const r = runGateCli([taskPath, "--ledger", ledgerPath]);
+    assert.equal(r.status, 1, `expected REJECT exit 1, stdout=${r.stdout}`);
+    assert.match(r.stderr, /지시서 린트\(HYK-488\) 위반/);
+    assert.match(r.stderr, /ⓘⓘⓘⓘ CODER 지시서 머리에 head_commit:/);
+    assert.match(r.stderr, /dispatch-gate-decision: REJECT/);
+  });
+});
+
+test("(wire-4, HYK-424) role: REVIEW 머리에 head_commit: 키가 든 REVIEW task -> ALLOW, exit 0(과차단 0 -- 판정 대상 커밋이라는 다른 뜻)", () => {
+  withFixtureDir((dir) => {
+    const taskPath = join(dir, "review-task.md");
+    writeFileSync(
+      taskPath,
+      `task_id: HYK-9406-review-1\nrole: REVIEW\nhead_commit: ${"a".repeat(40)}\n${ONE_B_BLOCK}`,
       "utf8",
     );
     const ledgerPath = freshLedger(dir);
