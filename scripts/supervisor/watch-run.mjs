@@ -2451,6 +2451,21 @@ function buildRelayLedgerNoticeText({ relayResult, nowMs }) {
     readFailureCount > 0 ? "(전달 파일 읽기 실패로 불확실)" : "";
   const readFailureNote =
     readFailureCount > 0 ? ` · 읽기 실패 ${readFailureCount}건` : "";
+  // P2-1(2R) ⓘⓘ · 게이트 2 판정 A(HYK-255-relay-aux-4) -- 보조 관측
+  // 줄(partial-count-core.mjs renderRelayLedgerAuxLines)과 같은 두
+  // 사유를 통지 문면에도 낸다: "없는 번호를 가리킴"(짝 없는 번호
+  // 토큰) · "시각 미정"(정규식 밖 줄의 own 시각을 못 정함). 0건이면
+  // 줄 자체를 내지 않는다(다른 보조 칸과 같은 관례).
+  const numberMismatchLine =
+    typeof relayResult.numberMismatchCandidateCount === "number" &&
+    relayResult.numberMismatchCandidateCount > 0
+      ? [`- 없는 번호를 가리킴: ${relayResult.numberMismatchCandidateCount}건`]
+      : [];
+  const undeterminedLine =
+    typeof relayResult.undeterminedCount === "number" &&
+    relayResult.undeterminedCount > 0
+      ? [`- 시각 미정: ${relayResult.undeterminedCount}건`]
+      : [];
   const lines = [
     `# 전달 파일 대조 보조 관측 변화 (${new Date(nowMs).toISOString()})`,
     "",
@@ -2458,7 +2473,9 @@ function buildRelayLedgerNoticeText({ relayResult, nowMs }) {
       "(ORCH-writeable 보조 관측, HYK-255-relay-aux-1).",
     "",
     `- 대응 없음(ㄴ 후보): ${relayResult.candidateCount}건${candidateNote}${readFailureNote}`,
+    ...numberMismatchLine,
     `- 형식 오류: ${relayResult.formatErrorCount}건`,
+    ...undeterminedLine,
     `- ㄱ-7 기록 누락: ${relayResult.gate7MissingCount}건`,
     `- 출처 한용 발화: ${relayResult.sourceUtteranceCount}건 · ` +
       `전달 항목 대응: ${relayResult.matchedCount}건`,

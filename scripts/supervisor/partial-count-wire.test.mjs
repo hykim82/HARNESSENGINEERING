@@ -1451,12 +1451,21 @@ test("collectRelayLedger: 번호 일치·시각창 매칭·대응 없음·같은
     // 대응 없음(ㄴ 후보, out3) = 1 -- out4는 ㄱ-7로 따로 빠진다.
     assert.equal(result.candidateCount, 1);
     assert.equal(result.gate7MissingCount, 1);
-    // 형식 오류 = 중복 번호(#1010 두번째) 1 + 정규식 밖 머리줄
-    // ("이상한 포맷 틀림") 1 = 2. 본문 속(들여쓴) 가짜 머리줄은 줄 머리가
-    // 아니므로 항목·오류 어느 쪽에도 안 들어간다(변이①의 표적).
-    assert.equal(result.formatErrorCount, 2);
-    // 형식 이전(in3, 2026-10-01 < 형식 시작 2026-11-01 10:00) = 1.
-    assert.equal(result.beforeFormatCount, 1);
+    // HYK-255-relay-aux-4(게이트 2 판정 A · 3R NEEDS_INPUT 결정) --
+    // 형식 오류 = 중복 번호(#1010 두번째, own 시각 10:11 >= 형식 시작
+    // 10:00) 1건뿐이다. 정규식 밖 머리줄("이상한 포맷 틀림")은 줄 안
+    // 시각 토큰도 없고 파일 이름("전달-test.md")에도 날짜가 없어
+    // "시각 미정"이고, 판정 원문대로 형식 이전 쪽으로 간다(E가 아님) --
+    // 그래서 형식 오류는 1건, 형식 이전은 그만큼 늘어 2건이다(아래).
+    // 본문 속(들여쓴) 가짜 머리줄은 줄 머리가 아니므로 항목·오류 어느
+    // 쪽에도 안 들어간다(변이①의 표적).
+    assert.equal(result.formatErrorCount, 1);
+    // 형식 이전 = in3(2026-10-01 < 형식 시작 2026-11-01 10:00) 1 +
+    // "이상한 포맷 틀림"(시각 미정) 1 = 2.
+    assert.equal(result.beforeFormatCount, 2);
+    // 시각 미정("이상한 포맷 틀림" 1건) -- 판정 원문 "형식 이전 + 별도
+    // 칸"의 그 별도 칸.
+    assert.equal(result.undeterminedCount, 1);
     assert.deepEqual(result.classificationTally, {
       "ㄱ-1": 1,
       "ㄱ-2": 0,
@@ -1677,12 +1686,15 @@ test("collectRelayLedger: ㄱ-7 짝은 다른 날 같은 HHMM이나 이름 속 �
   }
 });
 
-// HYK-255-relay-aux-2 ⓑ⑸ · P2-2(이 라운드 변이④의 표적) -- PM 설계
-// §(b) "소급 0": 형식이 아직 시작되지 않았으면(유효 머리줄 0개)
-// `[책임자 경유 · ` 로 시작하는 옛 줄은 형식 오류 E가 아니라 "형식
-// 이전 · 미계수"로 간다. 형식이 이미 시작된 뒤에는(유효 머리줄 1개
-// 이상) 그 뒤의 정규식 밖 줄은 그대로 E다(기존 동작 무변).
-test("collectRelayLedger: 형식 시작 전 정규식 밖 줄은 E가 아니라 형식 이전이고, 형식 시작 뒤는 그대로 E다(P2-2)", () => {
+// HYK-255-relay-aux-4(게이트 2 판정 A, 2R 시험 2단계 뒤집기 -- 옛
+// 2단계 `assert.equal(afterStart.formatErrorCount, 2)`는 "형식 시작
+// 시각이 있으면 전부 E"(2R 전역 판정)를 고정했다는 검토 2R P1-1(2R)
+// 지적대로다. 게이트 2 판정 A(줄 단위 시각 결정)대로면, 옛 두 줄은
+// own 시각이 "시각 미정"(토큰도 파일 이름 날짜도 없음)이라 형식 시작
+// 뒤에도 여전히 형식 이전이다 -- E가 되는 것은 "형식 시작 뒤에 새로
+// 생긴" 정규식 밖 줄뿐이다(PM 설계 §(b) "소급 0"). 전후 원문은 바로
+// 위 diff(이 메시지가 새로 쓴 코드 블록) 그대로 보존한다.
+test("collectRelayLedger: 형식 시작 전 정규식 밖 줄은 형식 시작 뒤에도 여전히 형식 이전이고(소급 0), E가 되는 건 형식 시작 뒤 새로 생긴 정규식 밖 줄뿐이다(P2-2 뒤집기)", () => {
   const root = tmpDir("nc-pcw-relay-preformat-");
   try {
     const relayDir = join(root, "기록");
@@ -1693,6 +1705,8 @@ test("collectRelayLedger: 형식 시작 전 정규식 밖 줄은 E가 아니라 
     fs.mkdirSync(inboxDir, { recursive: true });
 
     // 유효 머리줄이 0개인 전달 파일 -- 옛 형식(검토자 묶음 E 모양) 2편.
+    // 파일 이름에 날짜가 없고 줄 안에도 시각 토큰이 없다 -- 게이트 2
+    // 판정 A 기준 "시각 미정"(3단계 fallback 둘 다 실패).
     fs.writeFileSync(
       join(relayDir, "전달-old.md"),
       [
@@ -1710,14 +1724,20 @@ test("collectRelayLedger: 형식 시작 전 정규식 밖 줄은 E가 아니라 
     assert.equal(beforeStart.known, true);
     assert.equal(beforeStart.formatErrorCount, 0);
     assert.equal(beforeStart.beforeFormatCount, 2);
+    assert.equal(beforeStart.undeterminedCount, 2);
 
-    // 유효 머리줄 1개를 더하면(형식 시작) 같은 두 옛 줄은 그대로지만
-    // 이제는 형식 시작 "뒤"로 보여 E로 센다.
+    // 유효 머리줄 1개(형식 시작 2026-11-01 09:00)를 더한다 -- 같은 두
+    // 옛 줄(전달-old.md)은 여전히 시각 미정이라 형식 이전 그대로다
+    // (뒤집힌 단언: 2R 판은 여기서 E 2를 단언했었다). 새로 "형식 시작
+    // 뒤" 줄 안 시각 토큰을 가진 정규식 밖 줄 1개를 같은 파일에 더
+    // 쓴다(09:30 > 09:00) -- 이 줄만 E다.
     fs.writeFileSync(
       join(relayDir, "전달-new.md"),
       [
         "[책임자 경유 · 한용 확정 · #20261101-0900 · 2026-11-01 09:00 KST · 지시 · ㄱ-2]",
         "> 한용: «형식 시작됨»",
+        "",
+        "[책임자 경유 · 형식 깨짐] 2026-11-01 09:30 메모",
         "",
       ].join("\n"),
       "utf8",
@@ -1728,7 +1748,11 @@ test("collectRelayLedger: 형식 시작 전 정규식 밖 줄은 E가 아니라 
       inboxDir,
     });
     assert.equal(afterStart.known, true);
-    assert.equal(afterStart.formatErrorCount, 2);
+    // 옛 두 줄 = 형식 이전 유지(소급 0 -- 뒤집힌 값).
+    assert.equal(afterStart.beforeFormatCount, 2);
+    assert.equal(afterStart.undeterminedCount, 2);
+    // 형식 시작 뒤 새로 생긴 정규식 밖 줄 1개만 E.
+    assert.equal(afterStart.formatErrorCount, 1);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
@@ -1881,11 +1905,17 @@ test("CLI 진입점: --relay-glob --inbox-dir을 주면 ㄴ 절에 전달 파일
       ],
       { encoding: "utf8" },
     );
+    // HYK-255-relay-aux-4(게이트 2 판정 A) -- 같은 fixture
+    // (writeRelayLedgerFixtures)의 "이상한 포맷 틀림" 줄이 시각 미정
+    // 판정으로 형식 이전 쪽으로 가면서(위 collectRelayLedger 단위
+    // 시험과 같은 근거) 형식 오류 2→1 · 형식 이전 1→2로 바뀌고, 새
+    // "시각 미정 1건" 사유가 덧붙는다(판정의 직접 귀결 · 3R NEEDS_INPUT
+    // 결정으로 이 값 변경이 승인됐다).
     assert.ok(
       stdout.includes(
         "- ORCH-writeable 보조 관측(전달 파일 대조): 출처 한용 발화 5건 · " +
-          "전달 항목 대응 2건 · 대응 없음(ㄴ 후보) 1건 · 형식 오류 2건 · " +
-          "ㄱ-7 기록 누락 1건 · 형식 이전 구간 미계수 1건 — 독립 계수에 미산입",
+          "전달 항목 대응 2건 · 대응 없음(ㄴ 후보) 1건 · 형식 오류 1건 · " +
+          "ㄱ-7 기록 누락 1건 · 형식 이전 구간 미계수 2건 · 시각 미정 1건 — 독립 계수에 미산입",
       ),
     );
     assert.ok(stdout.includes("- 전달 항목 분류: ㄱ-1 1 ·"));

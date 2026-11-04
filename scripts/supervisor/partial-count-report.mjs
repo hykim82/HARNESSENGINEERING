@@ -814,6 +814,43 @@ function parseRelayHeaderTimeField(raw) {
   return { ms: parseKstTimestampMs(`${datePart} ${hh}:${mmNorm} KST`), approx };
 }
 
+// 게이트 2 판정 A(HYK-255-relay-aux-4, 1604 상신 답) -- 정규식 밖
+// `[책임자 경유 · ` 줄 하나의 시각을 "그 줄 자신"에서 정한다: ⑴ 줄 안에
+// 머리줄 3번째 필드와 같은 모양의 `YYYY-MM-DD HH:MM`(분 추정 `\dx` 포함)
+// 토큰이 있으면 그것 ⑵ 없으면 그 줄이 든 전달 파일 이름의
+// `전달-YYYY-MM-DD` 날짜(그 날 00:00 KST) ⑶ 둘 다 없으면 "시각 미정"
+// (timeMs null · timeSource "undetermined"). 이 세 단계 중 어느 것으로
+// 정해졌는지(timeSource)도 함께 남긴다 -- 아래 classifyFormatErrorCandidates
+// 가 "시각 미정"만 따로 세기 위해서다.
+const INLINE_LINE_TIME_TOKEN_RE = /(\d{4}-\d{2}-\d{2}) (\d{2}):(\d{2}|\dx)/;
+
+function parseInlineLineTimeMs(line) {
+  const m = INLINE_LINE_TIME_TOKEN_RE.exec(line);
+  if (!m) return null;
+  const mm = m[3].includes("x") ? `${m[3][0]}0` : m[3];
+  return parseKstTimestampMs(`${m[1]} ${m[2]}:${mm} KST`);
+}
+
+// 전달 파일 이름 `전달-YYYY-MM-DD...` 머리의 날짜 -- 그 날 00:00 KST로
+// 본다(파일 이름에 시각(HHMM)이 더 있어도 날짜만 쓴다, 판정 원문 그대로
+// "그 날 00:00 KST").
+const RELAY_FILE_NAME_DATE_RE = /^전달-(\d{4})-(\d{2})-(\d{2})/;
+
+function parseRelayFileNameDateMs(fileName) {
+  const m = RELAY_FILE_NAME_DATE_RE.exec(fileName);
+  if (!m) return null;
+  return parseKstTimestampMs(`${m[1]}-${m[2]}-${m[3]} 00:00 KST`);
+}
+
+function resolveInvalidLineTime(line, fileName) {
+  const inlineMs = parseInlineLineTimeMs(line);
+  if (inlineMs !== null) return { timeMs: inlineMs, timeSource: "inline" };
+  const fileNameMs = parseRelayFileNameDateMs(fileName);
+  if (fileNameMs !== null)
+    return { timeMs: fileNameMs, timeSource: "fileName" };
+  return { timeMs: null, timeSource: "undetermined" };
+}
+
 // 헤더 다음 줄들에서 첫 `> 한용:` 인용 줄만 집는다(빈 줄 또는 다음
 // 머리줄 접두에서 멈춘다 -- 한 항목의 인용이 다음 항목으로 새지 않게).
 function findQuoteAfterHeader(lines, headerIdx) {
@@ -827,15 +864,19 @@ function findQuoteAfterHeader(lines, headerIdx) {
   return null;
 }
 
-// 전달 파일 한 편의 본문 -> 항목 배열 + 형식 오류 수(중복 번호는 아직
-// 안 센다 -- dedupeRelayEntriesByNumber가 뒤에서 센다). 변이①의 표적 =
-// 이 함수가 매 줄을 "그 줄 전체"에 `^...$` 고정 정규식으로만 매칭한다는
-// 사실 자체(본문 속 줄 중간에 끼워진 머리줄 모양 문자열은 줄 머리가
-// 아니므로 매칭되지 않는다).
-function parseRelayFileEntries(text) {
+// 전달 파일 한 편의 본문 -> 항목 배열 + 정규식 밖 줄 배열(중복 번호는
+// 아직 안 센다 -- dedupeRelayEntriesByNumber가 뒤에서 센다). 변이①의
+// 표적 = 이 함수가 매 줄을 "그 줄 전체"에 `^...$` 고정 정규식으로만
+// 매칭한다는 사실 자체(본문 속 줄 중간에 끼워진 머리줄 모양 문자열은
+// 줄 머리가 아니므로 매칭되지 않는다). 게이트 2 판정 A(HYK-255-relay-
+// aux-4) -- 정규식 밖 줄은 더 이상 숫자로만 세지 않는다: 각 줄의 own
+// 시각(resolveInvalidLineTime)을 같이 남겨 collectRelayLedger가
+// formatStartMs 대조로 형식 오류/형식 이전/시각 미정을 줄 단위로
+// 가르게 한다.
+function parseRelayFileEntries(text, fileName) {
   const lines = text.split(/\r?\n/);
   const entries = [];
-  let formatErrorCount = 0;
+  const invalidLines = [];
   for (let i = 0; i < lines.length; i++) {
     const full = RELAY_HEADER_RE.exec(lines[i]);
     if (full) {
@@ -853,28 +894,32 @@ function parseRelayFileEntries(text) {
         lineNo: i + 1,
       });
     } else if (RELAY_HEADER_PREFIX_RE.test(lines[i])) {
-      formatErrorCount += 1;
+      const { timeMs, timeSource } = resolveInvalidLineTime(lines[i], fileName);
+      invalidLines.push({ lineNo: i + 1, timeMs, timeSource });
     }
   }
-  return { entries, formatErrorCount };
+  return { entries, invalidLines };
 }
 
-// 번호 중복 = 형식 오류로 센다(§(b) "조용히 하나를 고르지 않는다") --
-// 변이④의 표적. 처음 본 번호만 "유효 항목"으로 남기고 그 뒤 같은 번호는
-// 전부 형식 오류로 꺾는다(매칭·분류 집계는 유효 항목만 쓴다).
+// 번호 중복 = 형식 오류 후보로 센다(§(b) "조용히 하나를 고르지 않는다")
+// -- 변이④의 표적. 처음 본 번호만 "유효 항목"으로 남기고 그 뒤 같은
+// 번호는 duplicates에 담는다(own timeMs 보존 -- 완전 매칭 헤더라
+// own 시각이 항상 있다, "정규식 밖 줄"의 시각 미정 3단계 fallback은
+// 여기엔 적용하지 않는다, product_scope ① "시각 결정은 정규식 밖 줄에만").
+// 매칭·분류 집계는 유효 항목만 쓴다.
 function dedupeRelayEntriesByNumber(entries) {
   const byNumber = new Map();
   const valid = [];
-  let duplicateCount = 0;
+  const duplicates = [];
   for (const e of entries) {
     if (byNumber.has(e.number)) {
-      duplicateCount += 1;
+      duplicates.push(e);
       continue;
     }
     byNumber.set(e.number, e);
     valid.push(e);
   }
-  return { valid, byNumber, duplicateCount };
+  return { valid, byNumber, duplicates, duplicateCount: duplicates.length };
 }
 
 // `<dir>/전달-*.md` 모양의 glob 1개를 디렉터리 + 파일명 정규식으로
@@ -909,15 +954,16 @@ function readRelayFiles({ relayGlob, readdirFn, readFn }) {
   }
   names.sort();
   const allEntries = [];
+  const allInvalidLines = [];
   const readFailures = [];
-  let formatErrorCount = 0;
   for (const name of names) {
     try {
-      const { entries, formatErrorCount: fe } = parseRelayFileEntries(
+      const { entries, invalidLines } = parseRelayFileEntries(
         readFn(path.join(dir, name), "utf8"),
+        name,
       );
       allEntries.push(...entries);
-      formatErrorCount += fe;
+      allInvalidLines.push(...invalidLines);
     } catch {
       readFailures.push(name);
     }
@@ -925,7 +971,7 @@ function readRelayFiles({ relayGlob, readdirFn, readFn }) {
   return {
     known: true,
     entries: allEntries,
-    formatErrorCount,
+    invalidLines: allInvalidLines,
     readFailures,
     scannedFiles: names.length,
   };
@@ -1094,6 +1140,11 @@ function isGate7MissingCandidate({ item, inboxNames }) {
 // entry가 하나라도 있으면 그 자체로 그 disjunct가 참이 된다) -- 그래서
 // 창 안 존재 하나만 보면 되고, 인용 앞 8글자는 별도 비교가 필요 없다
 // (검토 1R P1-1 제안 그대로 "결과적으로 창 안 전달 항목 존재와 같다").
+// P2-1(2R) ⓘⓘ(HYK-255-relay-aux-4) -- 번호 토큰이 있는데 그 번호의
+// 전달 항목이 전혀 없는 경우("없는 번호를 가리킴")를 시각 창 미매칭과
+// 구분해서 돌려준다 -- 아래 classifySourceItems가 그 사유를
+// numberMismatchCandidates로 따로 세어 렌더·통지 문면에 실제로 낸다
+// (계수 동작 자체는 무변 -- 둘 다 "candidate"로 떨어진다).
 function matchOneSourceItem({
   item,
   validEntries,
@@ -1107,7 +1158,7 @@ function matchOneSourceItem({
     return "before-format";
   }
   if (item.number) {
-    return relayByNumber.has(item.number) ? "matched" : "candidate";
+    return relayByNumber.has(item.number) ? "matched" : "number-mismatch";
   }
   for (const entry of validEntries) {
     if (relayEntryInWindow(entry, item.timeMs)) return "matched";
@@ -1126,6 +1177,7 @@ function classifySourceItems({
   let candidates = 0;
   let beforeFormat = 0;
   let gate7Missing = 0;
+  let numberMismatchCandidates = 0;
   for (const item of items) {
     const verdict = matchOneSourceItem({
       item,
@@ -1141,9 +1193,16 @@ function classifySourceItems({
       gate7Missing += 1;
     } else {
       candidates += 1;
+      if (verdict === "number-mismatch") numberMismatchCandidates += 1;
     }
   }
-  return { matched, candidates, beforeFormat, gate7Missing };
+  return {
+    matched,
+    candidates,
+    beforeFormat,
+    gate7Missing,
+    numberMismatchCandidates,
+  };
 }
 
 // 전달 항목(유효분만) 자기 분류 집계 -- 닫힌 목록(ㄱ-1~7·ㄴ) 밖 값은
@@ -1157,6 +1216,57 @@ function tallyRelayClassification(validEntries) {
     if (tally[e.classification] !== undefined) tally[e.classification] += 1;
   }
   return tally;
+}
+
+// 게이트 2 판정 A(HYK-255-relay-aux-4) -- 정규식 밖 줄·중복 번호 줄을
+// "own 시각 vs formatStartMs"로 형식 오류 E/형식 이전/시각 미정으로
+// 가른다(줄 단위 -- 2R의 전역 판정 `formatStartMs === null ? 0 : raw`를
+// 대체한다). formatStartMs가 null(유효 머리줄 0개)이면 아직 시작되지
+// 않은 형식을 소급해서 어겼다고 보지 않는다(2R 동작 유지) -- 전부
+// 형식 이전으로 간다. 시각 미정(own 시각을 못 정한 정규식 밖 줄)은
+// 형식 이전 버킷에 들어가되 별도 칸으로도 센다(판정 원문 "시각 미정 =
+// 형식 이전 + 별도 칸"). 중복 번호 줄은 완전 매칭 헤더라 own 시각이
+// 항상 있다 -- 시각 미정 3단계 fallback은 "정규식 밖 줄"에만 적용한다
+// (product_scope ① 명시).
+function classifyFormatErrorCandidates({
+  invalidLines,
+  duplicates,
+  formatStartMs,
+}) {
+  if (formatStartMs === null) {
+    // 형식 머리줄이 아직 0개라도 "시각 미정" 건수는 정보로 남긴다(둘 다
+    // 형식 이전 버킷으로 가는 것은 같다 -- beforeFormatCount는 raw
+    // 그대로, 2R 동작 무변).
+    const undeterminedCount = invalidLines.filter(
+      (line) => line.timeSource === "undetermined",
+    ).length;
+    return {
+      formatErrorCount: 0,
+      beforeFormatCount: invalidLines.length + duplicates.length,
+      undeterminedCount,
+    };
+  }
+  let formatErrorCount = 0;
+  let beforeFormatCount = 0;
+  let undeterminedCount = 0;
+  for (const line of invalidLines) {
+    if (line.timeMs === null) {
+      beforeFormatCount += 1;
+      undeterminedCount += 1;
+    } else if (line.timeMs < formatStartMs) {
+      beforeFormatCount += 1;
+    } else {
+      formatErrorCount += 1;
+    }
+  }
+  for (const dup of duplicates) {
+    if (dup.timeMs !== null && dup.timeMs < formatStartMs) {
+      beforeFormatCount += 1;
+    } else {
+      formatErrorCount += 1;
+    }
+  }
+  return { formatErrorCount, beforeFormatCount, undeterminedCount };
 }
 
 // collectRelayLedger -- 조립(읍기만, §2 비타협: 세 폴더 중 하나라도
@@ -1195,33 +1305,42 @@ export function collectRelayLedger({
   const {
     valid: validEntries,
     byNumber: relayByNumber,
-    duplicateCount,
+    duplicates,
   } = dedupeRelayEntriesByNumber(relayFiles.entries);
   const formatStartMs = findFormatStartMs(validEntries);
   const { merged, mergedAwayCount } = mergeSameMinuteSourceItems([
     ...outboxQuotes.items,
     ...inboxQuotes.items,
   ]);
-  const { matched, candidates, beforeFormat, gate7Missing } =
-    classifySourceItems({
-      items: merged,
-      validEntries,
-      relayByNumber,
-      formatStartMs,
-      inboxNames: inboxQuotes.names,
-    });
+  const {
+    matched,
+    candidates,
+    beforeFormat,
+    gate7Missing,
+    numberMismatchCandidates,
+  } = classifySourceItems({
+    items: merged,
+    validEntries,
+    relayByNumber,
+    formatStartMs,
+    inboxNames: inboxQuotes.names,
+  });
 
-  // P2-2(이 라운드 변이④의 표적) -- PM 설계 §(b) "소급 = 하지 않는다":
-  // 형식 시작 시각(= 유효 머리줄 최소 시각) 자체가 없으면(formatStartMs
-  // null, "형식 머리줄이 0개") 전달 파일의 `[책임자 경유 · ` 로 시작했지만
-  // 전체 정규식에 안 맞는 줄·중복 번호는 아직 시작되지 않은 형식을
-  // 어겼다고 볼 수 없다 -- 형식 오류 E가 아니라 "형식 이전 · 미계수"
-  // 칸으로 보낸다. 형식이 이미 시작됐으면(formatStartMs !== null) 그
-  // 뒤의 정규식 밖 줄·중복 번호는 그대로 E다(기존 동작 무변).
-  const relayFormatErrorRaw = relayFiles.formatErrorCount + duplicateCount;
-  const formatErrorCount = formatStartMs === null ? 0 : relayFormatErrorRaw;
-  const relayBeforeFormatCount =
-    formatStartMs === null ? relayFormatErrorRaw : 0;
+  // 게이트 2 판정 A(HYK-255-relay-aux-4, P2-2 2R 반려 수리) -- 정규식
+  // 밖 줄·중복 번호는 더 이상 "형식 시작 시각이 있으면 전부 E"(2R의
+  // 전역 판정)가 아니라, 줄 하나하나의 own 시각 대 formatStartMs로
+  // 갈린다(classifyFormatErrorCandidates). 형식 머리줄이 아직 0개면
+  // (formatStartMs null) 소급 0 원칙대로 전부 형식 이전이다(2R 동작
+  // 유지).
+  const {
+    formatErrorCount,
+    beforeFormatCount: relayBeforeFormatCount,
+    undeterminedCount,
+  } = classifyFormatErrorCandidates({
+    invalidLines: relayFiles.invalidLines,
+    duplicates,
+    formatStartMs,
+  });
 
   return {
     known: true,
@@ -1229,9 +1348,11 @@ export function collectRelayLedger({
     mergedAwayCount,
     matchedCount: matched,
     candidateCount: candidates,
+    numberMismatchCandidateCount: numberMismatchCandidates,
     gate7MissingCount: gate7Missing,
     formatErrorCount,
     beforeFormatCount: beforeFormat + relayBeforeFormatCount,
+    undeterminedCount,
     classificationTally: tallyRelayClassification(validEntries),
     scannedRelayFiles: relayFiles.scannedFiles,
     relayReadFailures: relayFiles.readFailures,

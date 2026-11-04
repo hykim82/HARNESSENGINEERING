@@ -372,12 +372,28 @@ export function renderRelayLedgerAuxLines(relayLedgerResult) {
     readFailureCount > 0 ? "(전달 파일 읽기 실패로 불확실)" : "";
   const readFailureNote =
     readFailureCount > 0 ? ` · 읽기 실패 ${readFailureCount}건` : "";
+  // P2-1(2R) ⓘⓘ(HYK-255-relay-aux-4) -- 짝 없는 `전달 #번호`("없는
+  // 번호를 가리킴")는 ㄴ 후보 수치에는 이미 포함되지만, 그 사유 자체가
+  // 보이지 않는다는 지적이었다(검토 2R P2-1) -- 0건이 아닐 때만 사유를
+  // 덧붙인다(조용한 과시 금지, 다른 보조 칸과 같은 관례).
+  const numberMismatchNote =
+    typeof r.numberMismatchCandidateCount === "number" &&
+    r.numberMismatchCandidateCount > 0
+      ? ` · 없는 번호를 가리킴 ${r.numberMismatchCandidateCount}건`
+      : "";
+  // 게이트 2 판정 A(HYK-255-relay-aux-4) -- 줄 안 토큰도 파일 이름
+  // 날짜도 없는 정규식 밖 줄("시각 미정")은 형식 이전에 섞여 들어가되
+  // 그 건수도 별도로 보인다(판정 원문 "형식 이전 + 별도 칸").
+  const undeterminedNote =
+    typeof r.undeterminedCount === "number" && r.undeterminedCount > 0
+      ? ` · 시각 미정 ${r.undeterminedCount}건`
+      : "";
   const line1 =
     `- ORCH-writeable 보조 관측(전달 파일 대조): 출처 한용 발화 ${r.sourceUtteranceCount}건 · ` +
     `전달 항목 대응 ${r.matchedCount}건 · ` +
-    `대응 없음(ㄴ 후보) ${r.candidateCount}건${candidateNote} · ` +
+    `대응 없음(ㄴ 후보) ${r.candidateCount}건${candidateNote}${numberMismatchNote} · ` +
     `형식 오류 ${r.formatErrorCount}건 · ㄱ-7 기록 누락 ${r.gate7MissingCount}건 · ` +
-    `형식 이전 구간 미계수 ${r.beforeFormatCount}건${readFailureNote} — 독립 계수에 미산입`;
+    `형식 이전 구간 미계수 ${r.beforeFormatCount}건${readFailureNote}${undeterminedNote} — 독립 계수에 미산입`;
   const tallyText = Object.entries(r.classificationTally)
     .map(([key, count]) => `${key} ${count}`)
     .join(" · ");
