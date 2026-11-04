@@ -349,6 +349,18 @@ test("(492-5) 대조군(무회귀): STALE(S 밖) 거부 뒤 DONE 줄은 무변, 
 // 직접 고정한다(합성 1회, CLI를 거치지 않는 좁은 단위 시험).
 // ===========================================================================
 
+// HYK-492-refused-obs-3 (owner ruling A 뒤 뒤집기 -- deviation_rule이 허용한
+// "2R 폭을 단언하던 칸만 뒤집기", 전후 원문): 이 시험은 원래
+// `head_commit: AAAA`/`head_commit: BBBB`(40-hex가 아닌 자리표시자)로
+// head_commit-only 눈감아주기를 확인했다 -- 2R의 `/^head_commit:.*$/gm`
+// 은 콜론 뒤 글자가 무엇이든 지웠으므로 통과했다. 3R은 지울 줄을 383
+// 게이트와 같은 정의(열 0 단독 `head_commit: <40자리hex>`)로 좁혔다 --
+// AAAA/BBBB는 그 정의에 안 맞아(매치 0개) 이제는 예외가 꺼진다(정확히
+// 이 라운드가 의도한 동작). 그래서 이 시험이 "눈감아주기"라는 같은
+// 메커니즘을 계속 재는 데는, 값을 40자리 hex-모양 문자열로 바꿔야 한다
+// (git sha를 실제로 바꾸는 CLI 수준 시험 (492-1)/(492-2)와 달리 이 시험은
+// first-observation.mjs 자신의 export만 직접 호출하는 단위 시험이라
+// "진짜 git HEAD"가 필요 없다 -- 40자리 hex 모양이면 충분하다).
 test("(492-6)★ 관측 원장 시퀀스(단위): 관측 -> 거부 표시 -> 재관측(head_commit-only 눈감아주기) -> consumed -- findFirstObservation은 세대 첫 관측에 그대로 고정된다", () => {
   const harnessDir = mkdtempSync(join(tmpdir(), "hyk492-unit-ledger-"));
   try {
@@ -356,13 +368,15 @@ test("(492-6)★ 관측 원장 시퀀스(단위): 관측 -> 거부 표시 -> 재
     const droppedAt = "2026-11-04 06:00 KST";
     const role = "coder";
     const doneLineRaw = ">>> DONE: CODER @ 2026-11-04 06:10:00 KST";
+    const shaA = "a".repeat(40);
+    const shaB = "b".repeat(40);
 
     const first = observeDoneLine({
       taskId,
       droppedAt,
       role,
       harnessDir,
-      resultContent: `task_id: ${taskId}\nhead_commit: AAAA\n\n${doneLineRaw}`,
+      resultContent: `task_id: ${taskId}\nhead_commit: ${shaA}\n\n${doneLineRaw}`,
       doneLineRaw,
     });
     assert.equal(first.rewritten, false, "첫 관측은 스스로와 비교라 항상 일치");
@@ -392,13 +406,13 @@ test("(492-6)★ 관측 원장 시퀀스(단위): 관측 -> 거부 표시 -> 재
       droppedAt,
       role,
       harnessDir,
-      resultContent: `task_id: ${taskId}\nhead_commit: BBBB\n\n${doneLineRaw}`,
+      resultContent: `task_id: ${taskId}\nhead_commit: ${shaB}\n\n${doneLineRaw}`,
       doneLineRaw,
     });
     assert.equal(
       second.rewritten,
       false,
-      "거부 표시 뒤 head_commit 줄만 다른 재관측은 2R의 head_commit-only 눈감아주기로 통과해야 한다(1R처럼 '스스로와 비교'가 아니라, 세대 첫 관측(AAAA)과 비교해도 head_commit 줄만 다르므로 통과)",
+      "거부 표시 뒤 head_commit 줄만 다른 재관측은 2R의 head_commit-only 눈감아주기로 통과해야 한다(1R처럼 '스스로와 비교'가 아니라, 세대 첫 관측(shaA)과 비교해도 head_commit 줄만 다르므로 통과)",
     );
     assert.equal(
       second.existing.doneLineRaw,
@@ -550,6 +564,209 @@ test("(492-9)★★★ (P2-2) HYK-424 거부 뒤 같은 내용으로 3번 더 �
       afterRepeats,
       afterPoll1,
       `내용이 바뀌지 않은 채 3번 더 폴해도 관측 원장은 전혀 자라면 안 된다: ${JSON.stringify(afterRepeats)}`,
+    );
+  });
+});
+
+// ===========================================================================
+// (10)(11) HYK-492-refused-obs-3 (P2-A, owner ruling A): 2R의
+// `/^head_commit:.*$/gm`은 열 0에서 "head_commit:"로 시작하는 «모든» 줄을
+// 지웠다 -- 383 게이트가 표지로 세지 않는 둘째 줄(해시 아닌 메모) · 코드
+// 펜스 안 줄도 함께 지워졌다(review.md §3 P2-A, SHAPE second-col0-nonhex
+// / fenced-col0 = ok=true). 3R은 383 게이트와 같은 정의(HEAD_COMMIT_RE_G
+// over maskQuotedMarkerRegions)로 지울 줄을 정확히 1개로 좁힌다 -- 아래
+// 두 시험은 "정상 head_commit 줄은 고치면서, 그 밖의 head_commit:-모양
+// 줄도 같이 고치면" 이제는 거부돼야 함을 고정한다(RED 먼저: a91d281에서
+// 이 정확한 입력이 ok=true였다 -- 아래 두 함수 헤더에 재현 방법을 적는다).
+// ===========================================================================
+
+test("(492-10)★★★ 수리 뒤(P2-A ⓧ): HYK-424 거부 뒤 head_commit 줄은 고치면서, 열 0 둘째 head_commit: 줄(해시 아닌 메모)의 글자도 같이 바꾸면 -- 여전히 DONE_REWRITTEN(그 둘째 줄은 비교에 포함)", () => {
+  // RED-first 재현(이 라운드의 수리 전, a91d281): first-observation.mjs를
+  // `git show a91d281:scripts/check/first-observation.mjs`로 되돌린 뒤
+  // 이 정확한 poll1/poll2 입력을 주면 poll2.exit===0(ok=true)이었다 --
+  // 2R의 HEAD_COMMIT_LINE_RE가 둘째 줄까지 블랙아웃했기 때문이다.
+  withFixtureDir("hyk492-424-second-line-", (dir) => {
+    const baseSha = ensureGitHeadCommit(dir);
+    const ownSha = makeAnotherCommit(dir, "worker's own commit");
+    writeFileSync(
+      join(dir, "coder-task.md"),
+      `task_id: HYK-492-C\ndropped_at: 2026-11-04 06:00 KST\nbase_commit_of_this_round: ${baseSha}\n`,
+      "utf8",
+    );
+    writeFileSync(
+      join(dir, "coder.md"),
+      `task_id: HYK-492-C\nhead_commit: ${baseSha}\nhead_commit: 이전 라운드 참고(해시 아님)\n\n>>> DONE: CODER @ 2026-11-04 06:10:00 KST\ndone_stamped_by: finalize-done\n`,
+      "utf8",
+    );
+    const poll1 = runCli(["coder", dir]);
+    assert.notEqual(poll1.exit, 0, `poll1 must reject: ${poll1.stdout}`);
+    assert.match(poll1.stderr, /base를 베꼈다/);
+
+    // 정상 head_commit 줄은 실제 HEAD로 고친다 -- 그런데 둘째(해시 아닌)
+    // 줄의 콜론 뒤 글자도 같이 바꾼다. DONE 줄은 바이트 동일.
+    writeFileSync(
+      join(dir, "coder.md"),
+      `task_id: HYK-492-C\nhead_commit: ${ownSha}\nhead_commit: 완전히 다른 메모로 바꿔치기\n\n>>> DONE: CODER @ 2026-11-04 06:10:00 KST\ndone_stamped_by: finalize-done\n`,
+      "utf8",
+    );
+    const poll2 = runCli(["coder", dir]);
+    assert.notEqual(
+      poll2.exit,
+      0,
+      `수리 뒤에는 둘째(해시 아닌) head_commit: 줄도 비교에 포함돼야 한다 -- 거부돼야 하는데 통과함: ${poll2.stdout}`,
+    );
+    assert.match(
+      poll2.stderr,
+      /result DONE line was rewritten between first observation and final judgment/,
+    );
+  });
+});
+
+test("(492-11)★★★ 수리 뒤(P2-A ⓨ): HYK-424 거부 뒤 head_commit 줄은 고치면서, 코드펜스 «안» 열 0 head_commit: 줄의 글자도 같이 바꾸면 -- 여전히 DONE_REWRITTEN(펜스 안 줄도 비교에 포함)", () => {
+  // RED-first 재현(a91d281): 같은 입력으로 poll2.exit===0 -- 2R의
+  // HEAD_COMMIT_LINE_RE는 maskQuotedMarkerRegions를 거치지 않아 펜스
+  // 안쪽 열 0 head_commit: 줄도 블랙아웃했기 때문이다.
+  withFixtureDir("hyk492-424-fenced-line-", (dir) => {
+    const baseSha = ensureGitHeadCommit(dir);
+    const ownSha = makeAnotherCommit(dir, "worker's own commit");
+    const fencedShaA = "1".repeat(40);
+    const fencedShaB = "2".repeat(40);
+    writeFileSync(
+      join(dir, "coder-task.md"),
+      `task_id: HYK-492-C\ndropped_at: 2026-11-04 06:00 KST\nbase_commit_of_this_round: ${baseSha}\n`,
+      "utf8",
+    );
+    writeFileSync(
+      join(dir, "coder.md"),
+      `task_id: HYK-492-C\nhead_commit: ${baseSha}\n\n\`\`\`\nhead_commit: ${fencedShaA}\n\`\`\`\n\n>>> DONE: CODER @ 2026-11-04 06:10:00 KST\ndone_stamped_by: finalize-done\n`,
+      "utf8",
+    );
+    const poll1 = runCli(["coder", dir]);
+    assert.notEqual(poll1.exit, 0, `poll1 must reject: ${poll1.stdout}`);
+    assert.match(poll1.stderr, /base를 베꼈다/);
+
+    writeFileSync(
+      join(dir, "coder.md"),
+      `task_id: HYK-492-C\nhead_commit: ${ownSha}\n\n\`\`\`\nhead_commit: ${fencedShaB}\n\`\`\`\n\n>>> DONE: CODER @ 2026-11-04 06:10:00 KST\ndone_stamped_by: finalize-done\n`,
+      "utf8",
+    );
+    const poll2 = runCli(["coder", dir]);
+    assert.notEqual(
+      poll2.exit,
+      0,
+      `수리 뒤에는 펜스 안 head_commit: 줄도 비교에 포함돼야 한다 -- 거부돼야 하는데 통과함: ${poll2.stdout}`,
+    );
+    assert.match(
+      poll2.stderr,
+      /result DONE line was rewritten between first observation and final judgment/,
+    );
+  });
+});
+
+test("(492-12) 대조군(무회귀): 둘째(해시 아닌) head_commit: 줄과 펜스 안 head_commit: 줄이 «변경 없이» 그대로 있을 때 -- 정상 head_commit 줄만 고치면 여전히 같은 세대 재소비 ok", () => {
+  withFixtureDir("hyk492-424-decoy-unchanged-", (dir) => {
+    const baseSha = ensureGitHeadCommit(dir);
+    const ownSha = makeAnotherCommit(dir, "worker's own commit");
+    const fencedSha = "3".repeat(40);
+    const decoyLine = "head_commit: 이전 라운드 참고(해시 아님)";
+    writeFileSync(
+      join(dir, "coder-task.md"),
+      `task_id: HYK-492-C\ndropped_at: 2026-11-04 06:00 KST\nbase_commit_of_this_round: ${baseSha}\n`,
+      "utf8",
+    );
+    writeFileSync(
+      join(dir, "coder.md"),
+      `task_id: HYK-492-C\nhead_commit: ${baseSha}\n${decoyLine}\n\n\`\`\`\nhead_commit: ${fencedSha}\n\`\`\`\n\n>>> DONE: CODER @ 2026-11-04 06:10:00 KST\ndone_stamped_by: finalize-done\n`,
+      "utf8",
+    );
+    const poll1 = runCli(["coder", dir]);
+    assert.notEqual(poll1.exit, 0, `poll1 must reject: ${poll1.stdout}`);
+    assert.match(poll1.stderr, /base를 베꼈다/);
+
+    // 정상 head_commit 줄만 고친다 -- 둘째 줄·펜스 안 줄은 바이트 동일.
+    writeFileSync(
+      join(dir, "coder.md"),
+      `task_id: HYK-492-C\nhead_commit: ${ownSha}\n${decoyLine}\n\n\`\`\`\nhead_commit: ${fencedSha}\n\`\`\`\n\n>>> DONE: CODER @ 2026-11-04 06:10:00 KST\ndone_stamped_by: finalize-done\n`,
+      "utf8",
+    );
+    const poll2 = runCli(["coder", dir]);
+    assert.equal(
+      poll2.exit,
+      0,
+      `장식 줄이 변하지 않았으면 정상 head_commit 줄만의 수정은 여전히 통과해야 한다: ${poll2.stderr}`,
+    );
+  });
+});
+
+// ===========================================================================
+// (13)(14) owner ruling A의 "0개 또는 2개 이상이면 예외 꺼짐" 경계 --
+// checkRewriteAndStaleness(DONE_REWRITTEN 축)가 424/383 게이트보다 먼저
+// 평가되므로(relay-handshake.mjs:4209-4248), 두 시험 모두 DONE_REWRITTEN
+// 으로 거부된다(383 게이트의 "ambiguous/missing" 분기에는 도달하지 않음
+// -- 아래 각 시험이 직접 관측한 state를 그대로 적는다).
+// ===========================================================================
+
+test("(492-13)★★★ 경계(0개): HYK-424 거부 뒤 head_commit 값을 40자리 hex가 아닌 값으로 바꾸면 -- 예외가 꺼지고 DONE_REWRITTEN(0개 매치는 '아무 것도 지우지 않는다')", () => {
+  withFixtureDir("hyk492-424-zero-match-", (dir) => {
+    const baseSha = ensureGitHeadCommit(dir);
+    makeAnotherCommit(dir, "worker's own commit");
+    writeCoderRound(dir, {
+      taskExtra: `base_commit_of_this_round: ${baseSha}\n`,
+      resultExtra: `head_commit: ${baseSha}\n`,
+    });
+    const poll1 = runCli(["coder", dir]);
+    assert.notEqual(poll1.exit, 0, `poll1 must reject: ${poll1.stdout}`);
+    assert.match(poll1.stderr, /base를 베꼈다/);
+
+    // head_commit 값을 40-hex가 아닌 값으로 바꾼다 -- HEAD_COMMIT_RE_G
+    // 매치 0개.
+    writeFileSync(
+      join(dir, "coder.md"),
+      "task_id: HYK-492-C\nhead_commit: not-a-real-sha\n\n>>> DONE: CODER @ 2026-11-04 06:10:00 KST\ndone_stamped_by: finalize-done\n",
+      "utf8",
+    );
+    const poll2 = runCli(["coder", dir]);
+    assert.notEqual(
+      poll2.exit,
+      0,
+      `정의에 맞는 줄이 0개면 예외가 꺼져야 한다(거부돼야 하는데 통과함): ${poll2.stdout}`,
+    );
+    assert.match(
+      poll2.stderr,
+      /result DONE line was rewritten between first observation and final judgment/,
+    );
+  });
+});
+
+test("(492-14)★★★ 경계(2개 이상): HYK-424 거부 뒤 head_commit 줄을 고치면서 열 0에 또 하나의(펜스 밖) 40자리 hex head_commit: 줄을 추가하면 -- 예외가 꺼지고 DONE_REWRITTEN(2개 매치는 '아무 것도 지우지 않는다')", () => {
+  withFixtureDir("hyk492-424-two-match-", (dir) => {
+    const baseSha = ensureGitHeadCommit(dir);
+    const ownSha = makeAnotherCommit(dir, "worker's own commit");
+    const secondUnfencedSha = "4".repeat(40);
+    writeCoderRound(dir, {
+      taskExtra: `base_commit_of_this_round: ${baseSha}\n`,
+      resultExtra: `head_commit: ${baseSha}\n`,
+    });
+    const poll1 = runCli(["coder", dir]);
+    assert.notEqual(poll1.exit, 0, `poll1 must reject: ${poll1.stdout}`);
+    assert.match(poll1.stderr, /base를 베꼈다/);
+
+    // head_commit 줄은 고치지만, 펜스 밖 열 0에 또 하나의 40-hex
+    // head_commit: 줄이 새로 생긴다 -- HEAD_COMMIT_RE_G 매치 2개.
+    writeFileSync(
+      join(dir, "coder.md"),
+      `task_id: HYK-492-C\nhead_commit: ${ownSha}\nhead_commit: ${secondUnfencedSha}\n\n>>> DONE: CODER @ 2026-11-04 06:10:00 KST\ndone_stamped_by: finalize-done\n`,
+      "utf8",
+    );
+    const poll2 = runCli(["coder", dir]);
+    assert.notEqual(
+      poll2.exit,
+      0,
+      `정의에 맞는 줄이 2개 이상이면 예외가 꺼져야 한다(거부돼야 하는데 통과함): ${poll2.stdout}`,
+    );
+    assert.match(
+      poll2.stderr,
+      /result DONE line was rewritten between first observation and final judgment/,
     );
   });
 });
@@ -966,6 +1183,74 @@ test("(mut-6)★★★ 되돌림 변이: recordFirstDoneObservation의 '내용 �
         afterPoll2,
         afterPoll1,
         "RED: 중복 방지가 없으면, 내용이 바뀌지 않은 재폴에도 관측 원장이 자라야 한다(mut-6이 그 성장을 다시 연다)",
+      );
+    } finally {
+      rmSync(mutDir, { recursive: true, force: true });
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ⑦ (HYK-492-refused-obs-3 §2 product_scope ⓘ, 새 변이) owner ruling A의
+// "정확히 1개" 조건을 제거하고 2R 폭(열 0 head_commit: 줄 전부 제외)으로
+// 되돌린다 -> (492-10)/(492-13)이 다시 거짓으로 통과한다(RED, 이 좁히기가
+// load-bearing임을 증명 -- P2-A가 다시 열린다).
+// ---------------------------------------------------------------------------
+test("(mut-7)★★★ 되돌림 변이: blankHeadCommitLine의 '정확히 1개' 조건을 지우고 2R 폭(열 0 head_commit: 줄 전부 제외)으로 되돌리면 -- (492-10)의 둘째(해시 아닌) head_commit: 줄 수정이 다시 거짓으로 통과한다(RED, P2-A가 다시 열림)", async () => {
+  const firstObsSrc = readFileSync(join(HERE, "first-observation.mjs"), "utf8");
+  const target =
+    'function blankHeadCommitLine(resultContent) {\n  const scan = maskQuotedMarkerRegions(resultContent);\n  const matches = [...scan.matchAll(HEAD_COMMIT_RE_G)];\n  if (matches.length !== 1) return resultContent;\n  const [match] = matches;\n  const start = match.index;\n  const end = start + match[0].length;\n  return (\n    resultContent.slice(0, start) + "head_commit:" + resultContent.slice(end)\n  );\n}';
+  assertExactlyOneMatch(
+    firstObsSrc,
+    target,
+    "blankHeadCommitLine exactly-1 narrowing (mut-7 target)",
+  );
+  const mutatedFirstObs = firstObsSrc.replace(
+    target,
+    'function blankHeadCommitLine(resultContent) {\n  return resultContent.replace(/^head_commit:.*$/gm, "head_commit:");\n}',
+  );
+  const relaySrc = readFileSync(CLI_PATH, "utf8");
+
+  await withFixtureDirAsync("hyk492-mut7-fixture-", async (dir) => {
+    const baseSha = ensureGitHeadCommit(dir);
+    const ownSha = makeAnotherCommit(dir, "worker's own commit");
+    writeFileSync(
+      join(dir, "coder-task.md"),
+      `task_id: HYK-492-C\ndropped_at: 2026-11-04 06:00 KST\nbase_commit_of_this_round: ${baseSha}\n`,
+      "utf8",
+    );
+    writeFileSync(
+      join(dir, "coder.md"),
+      `task_id: HYK-492-C\nhead_commit: ${baseSha}\nhead_commit: 이전 라운드 참고(해시 아님)\n\n>>> DONE: CODER @ 2026-11-04 06:10:00 KST\ndone_stamped_by: finalize-done\n`,
+      "utf8",
+    );
+    const { mod, mutDir } = await importMutatedRelayHandshake(
+      relaySrc,
+      "p2a-reopened",
+      { firstObservationSrc: mutatedFirstObs },
+    );
+    try {
+      const poll1 = mod.checkRelayHandshake({
+        role: "coder",
+        harnessDir: dir,
+        now: Date.now(),
+      });
+      assert.equal(poll1.ok, false);
+
+      writeFileSync(
+        join(dir, "coder.md"),
+        `task_id: HYK-492-C\nhead_commit: ${ownSha}\nhead_commit: 완전히 다른 메모로 바꿔치기\n\n>>> DONE: CODER @ 2026-11-04 06:10:00 KST\ndone_stamped_by: finalize-done\n`,
+        "utf8",
+      );
+      const poll2 = mod.checkRelayHandshake({
+        role: "coder",
+        harnessDir: dir,
+        now: Date.now(),
+      });
+      assert.equal(
+        poll2.ok,
+        true,
+        "RED: '정확히 1개' 조건이 없으면, 둘째(해시 아닌) head_commit: 줄의 변경도 다시 눈감아줘야 한다(P2-A 재현)",
       );
     } finally {
       rmSync(mutDir, { recursive: true, force: true });

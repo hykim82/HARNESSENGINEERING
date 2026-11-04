@@ -40,6 +40,22 @@
 import { readFileSync, appendFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
+// HYK-492-refused-obs-3 (owner ruling A, 책임자 판정 2026-11-05 · P2-A 닫기):
+// blankHeadCommitLine(아래)이 지울 줄을 383 게이트(HYK-383)와 «같은
+// 정의»로 좁히려면 그 게이트가 쓰는 바로 그 상수(HEAD_COMMIT_RE_G)와
+// 가림 함수(maskQuotedMarkerRegions)가 필요하다 -- 재구현하면(같은 모양을
+// 이 파일에 또 적으면) 두 정의가 드리프트해도 어느 시험도 못 잡는다(이
+// 파일 안 HEAD_COMMIT_RE_G 재-export 주석과 같은 재사용 규율). 이 파일은
+// relay-handshake.mjs를 정적 import«한다»(반대 방향, relay-handshake.mjs
+// 가 이 파일을 spawn하는 것과는 별개 -- relay-handshake.mjs는 이 파일을
+// 정적 import하지 않으므로 순환이 아니다). 이 파일이 스폰되는 모든
+// 격리 픽스처(hyk186/hyk423/hyk492 등)는 이미 relay-handshake.mjs를 이
+// 파일과 같은 디렉터리에 함께 복사한다(스폰 메커니즘 자체가 요구하는
+// 배치이므로, 이 새 import로 새 사이드카 요구사항이 생기지 않는다).
+import {
+  HEAD_COMMIT_RE_G,
+  maskQuotedMarkerRegions,
+} from "./relay-handshake.mjs";
 
 function logPath(role, harnessDir) {
   return join(
@@ -147,18 +163,35 @@ export function findFirstObservation({ taskId, droppedAt, role, harnessDir }) {
 // 예외만 허용한다 -- 아래 blankHeadCommitLine/checkIntermediateRewrite
 // 참조. 이 함수(hasRefusalForGeneration)는 그 예외를 켤지 결정하는
 // 스위치일 뿐, 비교 기준값 자체를 바꾸지 않는다.
-const HEAD_COMMIT_LINE_RE = /^head_commit:.*$/gm;
-
-// 지문 비교 전에 "head_commit:" 로 시작하는 줄(들)의 값을 지운다 -- 그
-// 줄의 «값»만 달라져도 괜찮다는 owner ruling B(coder-task.md §1)를
-// 그대로 코드로 옮긴 것: 줄 자체가 없어지거나(삭제), 다른 자리에 새로
-// 생기거나(삽입), 가리키는 바이트 길이/위치가 바뀌면(그 두 변형 모두
-// 전체 문자열 비교에서 여전히 다르게 보인다) 이 치환은 그 차이를
-// 지우지 않는다 -- 오직 "head_commit:" 로 시작하는 줄의 콘텐츠 한
-// 종류만 지운다(coder-task.md P2-4: "줄 위치·개수 무변 · 그 줄의
-// 값만").
+//
+// HYK-492-refused-obs-3 (owner ruling A, P2-A 닫기 -- REVIEW 2R 지적: 2R의
+// `/^head_commit:.*$/gm`은 "열 0에서 head_commit:로 시작하는 모든 줄"을
+// 지웠다. 그래서 383 게이트가 표지로 세지 않는 둘째 줄(값이 40-hex가
+// 아닌 메모 줄, 또는 코드펜스 안에 인용된 줄)의 콜론 뒤 글자도 S 거부
+// 뒤에 조용히 바뀔 수 있었다 -- 실측 review.md §3 P2-A "SHAPE
+// second-col0-nonhex / fenced-col0 = ok=true"). 지울 줄을 "383 게이트와
+// 같은 정의"로 좁힌다: HEAD_COMMIT_RE_G(열 0 단독 `head_commit:
+// <40자리hex>` 줄)를 maskQuotedMarkerRegions로 가린 스캔 위에서 찾는다
+// (resolveHeadCommitField(relay-handshake.mjs:1705-1709)와 정확히 같은
+// 상수·같은 가림 함수 -- 재구현이 아니라 import, 드리프트 불가). 그
+// 매치가 «정확히 1개»일 때만 그 한 줄의 값을 지운다. 0개 또는 2개
+// 이상이면 아무것도 지우지 않는다 -- 그러면 이 함수의 출력은 입력과
+// 그대로 같아지므로, 그 상태에서 내용이 조금이라도 다르면(그 "애매한"
+// head_commit 줄 자신이든 다른 줄이든) headCommitOnlyDiffAllowed의
+// 지문 대조가 실패해 예외가 켜지지 않는다("예외 꺼짐"). 코드펜스 안
+// 인용 줄과 해시가 아닌 메모 줄은 이 함수가 건드리지 않으므로(가려서
+// 매치에서 빠지거나, 매치 자체가 안 되거나) 둘 다 비교에 그대로
+// 남는다 -- product_scope가 요구한 "포함" 그대로.
 function blankHeadCommitLine(resultContent) {
-  return resultContent.replace(HEAD_COMMIT_LINE_RE, "head_commit:");
+  const scan = maskQuotedMarkerRegions(resultContent);
+  const matches = [...scan.matchAll(HEAD_COMMIT_RE_G)];
+  if (matches.length !== 1) return resultContent;
+  const [match] = matches;
+  const start = match.index;
+  const end = start + match[0].length;
+  return (
+    resultContent.slice(0, start) + "head_commit:" + resultContent.slice(end)
+  );
 }
 
 // 한 번의 순회로 recordFirstDoneObservation/markRefused(아래)의 중복
