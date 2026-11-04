@@ -25,7 +25,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { execFileSync, spawnSync } from "node:child_process";
-import { checkRelayHandshake } from "./relay-handshake.mjs";
+import { checkRelayHandshake, parseKstTimestamp } from "./relay-handshake.mjs";
 import { writeLedger } from "./reject-streak.mjs";
 import { withIsolatedAmbientLedgerEnv } from "./admission-ledger-env-isolation.mjs";
 import { runAdmissionCli } from "../supervisor/admission-cli.mjs";
@@ -110,7 +110,7 @@ function runGateCli(args) {
 // max-lines-per-function) -- 동작은 그대로다: admission 원장에 실 CLI로
 // ACTIVE 예약을 만들고, 그 env를 일시 주입한 채로 프로덕션
 // checkRelayHandshake를 호출한 뒤 env를 원복한다.
-function completeWithRealAdmissionLedger(harnessDir, reservationId) {
+function completeWithRealAdmissionLedger(harnessDir, reservationId, nowMs) {
   const ledgerDir = mkdtempSync(
     join(tmpdir(), "hyk424-redispatch-b-admission-"),
   );
@@ -124,7 +124,10 @@ function completeWithRealAdmissionLedger(harnessDir, reservationId) {
     process.env.ADMISSION_LEDGER_PATH = admissionLedger;
     process.env.ADMISSION_LOCK_PATH = admissionLock;
     try {
-      return checkRelayHandshake({ role: "CODER", harnessDir });
+      // time-judgment-now-injection 비타협: 절대시각 픽스처를 쓰는 호출은
+      // 반드시 now를 명시로 주입한다(실제 벽시계 Date.now() 기본값 금지) --
+      // 그 DONE 줄 자신의 KST 시각 + 1분을 판정 시각으로 쓴다.
+      return checkRelayHandshake({ role: "CODER", harnessDir, now: nowMs });
     } finally {
       if (priorLedgerEnv === undefined)
         delete process.env.ADMISSION_LEDGER_PATH;
@@ -183,8 +186,12 @@ test("(redispatch-a) 같은 워크트리 + 새 라벨: base-copy로 거부된 �
       `task_id: ${prevTaskId}\nhead_commit: ${baseSha}\n\n>>> DONE: CODER @ 2026-11-04 06:10:00 KST\ndone_stamped_by: finalize-done\n`,
       "utf8",
     );
+    // time-judgment-now-injection 비타협: now를 명시로 주입한다(실제
+    // 벽시계 기본값 금지) -- 그 DONE 줄 자신의 KST 시각 + 1분.
+    const nowMs =
+      parseKstTimestamp("2026-11-04 06:10:00 KST").getTime() + 60_000;
     const rejection = withIsolatedAmbientLedgerEnv(() =>
-      checkRelayHandshake({ role: "CODER", harnessDir }),
+      checkRelayHandshake({ role: "CODER", harnessDir, now: nowMs }),
     );
     assert.equal(
       rejection.ok,
@@ -297,7 +304,11 @@ test("(redispatch-b) 새 워크트리(작성자 HEAD) + 새 라벨: 직전 결�
       "utf8",
     );
 
-    const completion = completeWithRealAdmissionLedger(harnessDir, nextTaskId);
+    const completion = completeWithRealAdmissionLedger(
+      harnessDir,
+      nextTaskId,
+      parseKstTimestamp("2026-11-04 07:30:00 KST").getTime() + 60_000,
+    );
     assert.equal(
       completion.ok,
       true,
