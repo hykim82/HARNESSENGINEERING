@@ -297,6 +297,88 @@ test("(bc-8)★ 되돌림 변이: 실제 HEAD 비교를 제거하고 base 선언
   });
 });
 
+// ---------------------------------------------------------------------------
+// (bc-10)/(bc-11) HYK-424-head-label-3 §2 product_scope ①ⓘⓘ (P2-2):
+// 레거시 `head_commit:` 폴백은 CODER 한정이다 -- VERIFY·PM 라운드가 같은
+// 이름의 머리 필드를 base 선언으로 오인하지 않는다(과차단 금지, 1R의
+// `!isReviewFamilyRole(role)`은 REVIEW가 아니면 전부 통과시켜 VERIFY·PM도
+// 함께 끌어들였다 -- 이 사고가 실측된 적은 CODER 라운드뿐이다,
+// coder-task.md §1/419-wire-2/422-dispatch-run-1).
+// ---------------------------------------------------------------------------
+test("(bc-10)★ P2-2: VERIFY role은 레거시 head_commit 머리를 base로 읽지 않는다(declared:false -> skipped, CODER 한정 수리 뒤)", () => {
+  const r = resolveBaseCopyGuard({
+    role: "verify",
+    taskContent: `task_id: X\nhead_commit: ${"b".repeat(40)}\n`,
+    resultContent: `task_id: X\nhead_commit: ${"b".repeat(40)}\n`,
+    harnessDir: "/does/not/matter",
+  });
+  assert.deepEqual(r, { ok: true, skipped: true });
+});
+
+test("(bc-11)★ P2-2: PM role도 레거시 head_commit 머리를 base로 읽지 않는다(declared:false -> skipped, CODER 한정 수리 뒤)", () => {
+  const r = resolveBaseCopyGuard({
+    role: "PM",
+    taskContent: `task_id: X\nhead_commit: ${"c".repeat(40)}\n`,
+    resultContent: `task_id: X\nhead_commit: ${"c".repeat(40)}\n`,
+    harnessDir: "/does/not/matter",
+  });
+  assert.deepEqual(r, { ok: true, skipped: true });
+});
+
+test("(bc-12)★ P2-2 무회귀: CODER role은 수리 뒤에도 레거시 head_commit 머리를 base로 계속 읽는다(bc-1과 같은 표본, role 대문자 표기)", () => {
+  withFixtureDir("hyk424-coder-upper-", (dir) => {
+    const baseSha = ensureGitHeadCommit(dir);
+    makeAnotherCommit(dir);
+    writeCoderRound(dir, {
+      taskExtra: `head_commit: ${baseSha}\n`,
+      resultExtra: `head_commit: ${baseSha}\n`,
+    });
+    const res = runCli(["CODER", dir]);
+    assert.notEqual(res.exit, 0, `base-copy must be rejected: ${res.stdout}`);
+    assert.match(res.stderr, /base를 베꼈다/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// (bc-13) HYK-424-head-label-3 §2ⓑ: 거부 사유 문구 정정 -- 사유 원문이
+// 「같은 세대 재소비 불가」·「같은 라벨 재배달 불가」·「§2ⓐ에서 실측으로
+// 통과한 경로(새 워크트리 + 새 라벨)」 세 요소를 담고, 「finalize-done」을
+// 복구 수단으로 안내하지 않는다(1R의 "네 커밋 SHA를 적어라"가 2R/3R
+// 실측으로 반증된 뒤의 정정).
+// ---------------------------------------------------------------------------
+test("(bc-13)★ 사유 문구 정정: 같은 세대 재소비 불가·같은 라벨 재배달 불가·통과 경로(새 워크트리+새 라벨) 세 요소를 담고 finalize-done을 안내하지 않는다", () => {
+  withFixtureDir("hyk424-reason-text-", (dir) => {
+    const baseSha = ensureGitHeadCommit(dir);
+    makeAnotherCommit(dir);
+    writeCoderRound(dir, {
+      taskExtra: `base_commit_of_this_round: ${baseSha}\n`,
+      resultExtra: `head_commit: ${baseSha}\n`,
+    });
+    const res = runCli(["coder", dir]);
+    assert.notEqual(res.exit, 0);
+    assert.match(
+      res.stderr,
+      /같은 세대\(같은 dropped_at\)에서 결과 파일만 고쳐 재소비할 수 없다/,
+      "같은 세대 재소비 불가 요소가 있어야 한다",
+    );
+    assert.match(
+      res.stderr,
+      /같은 워크트리에서 라벨만 새로 바꿔 재배달해도 통과하지 못한다/,
+      "같은 라벨(워크트리) 재배달 불가 요소가 있어야 한다",
+    );
+    assert.match(
+      res.stderr,
+      /작성자 HEAD의 새 워크트리.*새 task_id\(라벨\)로 재배달/,
+      "통과 경로(새 워크트리 + 새 라벨) 요소가 있어야 한다",
+    );
+    assert.doesNotMatch(
+      res.stderr,
+      /finalize-done/,
+      "finalize-done을 복구 수단으로 안내하면 안 된다",
+    );
+  });
+});
+
 test("(bc-9)★ 되돌림 변이: resolveBaseCopyGuard 호출 자체를 checkRelayHandshake에서 제거하면 -- (bc-1) 사고 표본이 다시 통과한다(RED, 결선이 load-bearing임을 증명)", async () => {
   const src = readFileSync(CLI_PATH, "utf8");
   const target =

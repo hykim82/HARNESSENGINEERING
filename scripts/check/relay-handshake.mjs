@@ -1776,8 +1776,24 @@ export function resolveHeadCommitBinding({
 const BASE_COMMIT_OF_ROUND_RE_G =
   /^base_commit_of_this_round:[ \t]*([0-9a-fA-F]{40})[ \t]*$/gm;
 
+// HYK-424-head-label-3 §2 product_scope ①ⓘⓘ (P2-2): 레거시 `head_commit:`
+// 폴백은 그 이름 그대로 "레거시 CODER 머리"의 관례다 -- VERIFY·PM 라운드가
+// 같은 이름의 필드를 다른 뜻(또는 전혀 다른 목적)으로 쓰는 것까지 base
+// 선언으로 오인하면 안 된다. 1R은 `!isReviewFamilyRole(role)`만 썼는데
+// 그건 "REVIEW가 아니면 전부"(VERIFY·PM 포함)를 통과시킨다 -- 이 축이
+// 막으려는 사고(coder-task.md §1 원문, 419-wire-2/422-dispatch-run-1)는
+// CODER 라운드에서만 실측됐으므로 범위를 CODER 단독으로 좁힌다(대소문자
+// 무관 -- isReviewFamilyRole과 같은 비교 방식, 이 저장소 전역에서 role
+// 문자열이 "coder"/"CODER" 두 표기로 섞여 쓰인다, bc-1~bc-9 fixture
+// 참조).
+const CODER_ROLE_RE = /^coder$/i;
+
+function isCoderRole(role) {
+  return typeof role === "string" && CODER_ROLE_RE.test(role);
+}
+
 // task 파일에서 "이 라운드의 base"를 읽는다 -- 정식 키가 모호하지 않게
-// 정확히 1개면 그 값을 쓰고, 없으면(그리고 REVIEW 계열이 아니면) 레거시
+// 정확히 1개면 그 값을 쓰고, 없으면(그리고 CODER 라운드라면) 레거시
 // CODER 머리의 `head_commit:` 단독 줄로 물러난다. 둘 다 없거나 정식 키가
 // 모호하면(2개 이상) "base 선언 없음"으로 보고 이 축 자체를 건너뛴다(다른
 // 축이 모호성을 각자의 몫으로 다룬다 -- 이 축은 base-copy 전용이다).
@@ -1791,7 +1807,7 @@ function resolveDeclaredRoundBase(taskContent, role) {
       source: "base_commit_of_this_round",
     };
   }
-  if (formalMatches.length === 0 && !isReviewFamilyRole(role)) {
+  if (formalMatches.length === 0 && isCoderRole(role)) {
     const legacyMatches = [...scan.matchAll(HEAD_COMMIT_RE_G)];
     if (legacyMatches.length === 1) {
       return {
@@ -1836,9 +1852,22 @@ export function resolveBaseCopyGuard({
     return { ok: true, skipped: true };
   }
 
+  // HYK-424-head-label-2/3 §2ⓐⓑ (실측 고정, 책임자 판정 B-prime): 이전
+  // 문구("네 커밋 SHA를 적어라")는 같은 결과 파일의 head_commit만 고쳐
+  // 같은 세대에서 다시 소비시키라는 뜻으로 읽혔는데, 그 경로는 실제로
+  // DONE_REWRITTEN_AFTER_FIRST_OBSERVATION으로 다시 거부된다(실측,
+  // head-label-2 결과). 같은 워크트리에 라벨만 새로 바꿔 재배달해도
+  // 통과하지 못한다(실측, head-label-3 §2ⓐ: consumption-receipt의
+  // RECEIPT_MISSING은 이 워크트리에 남은 직전 결과 파일 자신의 task_id
+  // 에코로 판정하므로 다음 라벨이 무엇이든 무관하다). 실측으로 통과하는
+  // 경로는 ORCH가 작성자 HEAD의 새 워크트리(아직 직전 결과 파일이 없는
+  // harnessDir)에 새 task_id(라벨)로 재배달하는 것뿐이다(head-label-3
+  // §2ⓑ 실측: 결과 파일이 없으므로 배달 게이트가 진짜 첫 배달/부트스트랩
+  // 으로 본다). ⛔사람 손으로 finalize-done을 다시 찍는 것은 이 거부를
+  // 복구하지 않는다(같은 세대 재소비 불가는 그대로 남는다).
   return {
     ok: false,
-    reason: `base를 베꼈다 · 네 커밋 SHA를 적어라 (HYK-424 base-copy guard): result head_commit '${resultHead.sha}' equals this round's declared base (${declaredBase.source} = '${declaredBase.sha}') but the actual worktree HEAD at '${harnessDir}' is '${actualHead.sha}' -- head_commit은 네가 만든 커밋이어야 한다, base를 그대로 적지 마라`,
+    reason: `base를 베꼈다 (HYK-424 base-copy guard): result head_commit '${resultHead.sha}' equals this round's declared base (${declaredBase.source} = '${declaredBase.sha}') but the actual worktree HEAD at '${harnessDir}' is '${actualHead.sha}' -- head_commit 필드는 "이 라운드에서 네가 실제로 만든 커밋"이어야 하는데 base를 그대로 베꼈다. 복구(실측 고정, HYK-424-head-label-2/3): 같은 세대(같은 dropped_at)에서 결과 파일만 고쳐 재소비할 수 없다(DONE_REWRITTEN_AFTER_FIRST_OBSERVATION으로 다시 거부) · 같은 워크트리에서 라벨만 새로 바꿔 재배달해도 통과하지 못한다(consumption-receipt: RECEIPT_MISSING -- 직전 결과 파일이 그대로 남아 있는 한 라벨은 무관하다) · 실측으로 통과하는 유일한 경로는 ORCH가 작성자 HEAD의 새 워크트리(아직 직전 결과 파일이 없는 harnessDir)에 새 task_id(라벨)로 재배달하는 것이다`,
   };
 }
 
