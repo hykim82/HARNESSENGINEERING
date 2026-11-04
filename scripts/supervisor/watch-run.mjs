@@ -2411,6 +2411,135 @@ function resolvePartialCountStepDefaults({
   };
 }
 
+// HYK-255-relay-aux-1 (coder-task.md product_scope ③ · PM 설계 §(e)) --
+// "ㄴ 후보 K 또는 형식 오류 E가 바뀔 때만 받는함 통지 1개"(그림자
+// teardown 통지 :3362·:3426 모양 · 상태 파일 · --notify-dir 기본값
+// :4415 준용). relayResult가 없거나(미결선) known!==true(폴더 없음·
+// 읍기 실패)면 "판단 불가"를 "변화 없음"으로 접지 않고 시도 자체를
+// 건너뛴다(fail-open -- 다음 회차에 다시 평가한다).
+const RELAY_LEDGER_NOTIFY_STATE_FILENAME = "relay-ledger-notify-state.json";
+
+function readRelayLedgerNotifyState(readFn, statePath) {
+  try {
+    const parsed = JSON.parse(readFn(statePath, "utf8"));
+    return {
+      candidateCount:
+        typeof parsed?.candidateCount === "number"
+          ? parsed.candidateCount
+          : null,
+      formatErrorCount:
+        typeof parsed?.formatErrorCount === "number"
+          ? parsed.formatErrorCount
+          : null,
+    };
+  } catch {
+    // fail-open(teardown-shadow와 동일 원칙): 직전 통지가 없었다로 접어
+    // 재통지 후보로 둔다 -- 과소통지보다 과대통지가 안전.
+    return { candidateCount: null, formatErrorCount: null };
+  }
+}
+
+function buildRelayLedgerNoticeText({ relayResult, nowMs }) {
+  const lines = [
+    `# 전달 파일 대조 보조 관측 변화 (${new Date(nowMs).toISOString()})`,
+    "",
+    "이 통지는 참고용입니다 -- 독립 계수에 미산입" +
+      "(ORCH-writeable 보조 관측, HYK-255-relay-aux-1).",
+    "",
+    `- 대응 없음(ㄴ 후보): ${relayResult.candidateCount}건`,
+    `- 형식 오류: ${relayResult.formatErrorCount}건`,
+    `- ㄱ-7 기록 누락: ${relayResult.gate7MissingCount}건`,
+    `- 출처 한용 발화: ${relayResult.sourceUtteranceCount}건 · ` +
+      `전달 항목 대응: ${relayResult.matchedCount}건`,
+  ];
+  return lines.join("\n") + "\n";
+}
+
+function buildRelayLedgerNoticeFileName(nowMs) {
+  const iso = new Date(nowMs).toISOString().replace(/[:.]/g, "-");
+  return `relay-ledger-notify-${iso}.md`;
+}
+
+function persistRelayLedgerNotifyState({
+  relayResult,
+  watchDir,
+  statePath,
+  existsFn,
+  mkdirFn,
+  writeFn,
+}) {
+  try {
+    if (!existsFn(watchDir)) mkdirFn(watchDir, { recursive: true });
+    writeFn(
+      statePath,
+      JSON.stringify({
+        candidateCount: relayResult.candidateCount,
+        formatErrorCount: relayResult.formatErrorCount,
+      }),
+      "utf8",
+    );
+  } catch {
+    // 상태 저장 실패는 이 단계 계약을 깨지 않는다(fail-open,
+    // runTeardownShadowNotifyStep과 동일 원칙).
+  }
+}
+
+// 변이⑥의 표적 -- 이 "unchanged" 분기 자체가 "매시 같은 통지"를 막는
+// 유일한 장치다. 이 분기를 지우면(상태 파일을 무시하면) 값이 같아도
+// 매 회차 통지가 나간다.
+function runRelayLedgerNotifyStep({
+  relayResult,
+  watchDir,
+  notifyDir,
+  now,
+  readFn,
+  writeFn,
+  existsFn,
+  mkdirFn,
+}) {
+  if (!notifyDir || !relayResult || relayResult.known !== true) {
+    return { attempted: false };
+  }
+  const statePath = path.join(watchDir, RELAY_LEDGER_NOTIFY_STATE_FILENAME);
+  const prior = readRelayLedgerNotifyState(readFn, statePath);
+  const unchanged =
+    prior.candidateCount === relayResult.candidateCount &&
+    prior.formatErrorCount === relayResult.formatErrorCount;
+  const persist = () =>
+    persistRelayLedgerNotifyState({
+      relayResult,
+      watchDir,
+      statePath,
+      existsFn,
+      mkdirFn,
+      writeFn,
+    });
+  if (unchanged) {
+    persist();
+    return { attempted: false, suppressed: true };
+  }
+  try {
+    if (!existsFn(notifyDir)) mkdirFn(notifyDir, { recursive: true });
+    const noticePath = path.join(
+      notifyDir,
+      buildRelayLedgerNoticeFileName(now),
+    );
+    writeFn(
+      noticePath,
+      buildRelayLedgerNoticeText({ relayResult, nowMs: now }),
+      "utf8",
+    );
+    persist();
+    return { attempted: true, sent: true, noticePath };
+  } catch (err) {
+    return {
+      attempted: true,
+      sent: false,
+      reason: err && err.message ? err.message : String(err),
+    };
+  }
+}
+
 // runPartialCountStepCore -- 원래 `runPartialCountStep`의 본문 그 자체
 // (기본값 해석을 뺀 나머지, HYK-255-watch-wire-3). 모든 파라미터는 이미
 // 해석된 값이며 기본값을 갖지 않는다(complexity를 늘리지 않는다) --
@@ -2418,6 +2547,7 @@ function resolvePartialCountStepDefaults({
 // (`PARTIAL_COUNT_STEP_FAILED`)은 원문 그대로.
 async function runPartialCountStepCore({
   now,
+  watchDir,
   partialCountOut,
   runPartialCountOnceFn,
   writeFn,
@@ -2427,13 +2557,24 @@ async function runPartialCountStepCore({
   logPath,
   maxLogLines,
   options,
+  notifyDir,
 }) {
   try {
     const result = await runPartialCountOnceFn({ now, ...options });
     const dir = path.dirname(partialCountOut);
     if (!existsFn(dir)) mkdirFn(dir, { recursive: true });
     writeFn(partialCountOut, result.reportText, "utf8");
-    return { ran: true, ok: true, partialCountOut };
+    const relayNotify = runRelayLedgerNotifyStep({
+      relayResult: result.relayResult,
+      watchDir,
+      notifyDir,
+      now,
+      readFn,
+      writeFn,
+      existsFn,
+      mkdirFn,
+    });
+    return { ran: true, ok: true, partialCountOut, relayNotify };
   } catch (err) {
     const message = err && err.message ? err.message : String(err);
     if (logPath) {
@@ -2465,6 +2606,7 @@ export async function runPartialCountStep({
   logPath,
   maxLogLines,
   options,
+  notifyDir,
 }) {
   const resolved = resolvePartialCountStepDefaults({
     watchDir,
@@ -2477,7 +2619,13 @@ export async function runPartialCountStep({
     maxLogLines,
     options,
   });
-  return runPartialCountStepCore({ now, logPath, ...resolved });
+  return runPartialCountStepCore({
+    now,
+    watchDir,
+    logPath,
+    notifyDir,
+    ...resolved,
+  });
 }
 
 // HYK-255-outbox-aux-1-r2 (coder-task.md §2 ⓑ · product_scope ⓓ) -- CLI
@@ -2488,12 +2636,19 @@ export async function runPartialCountStep({
 // 실행은 금지 축(api.github.com 0회)과 겹쳐 단위 시험이 못쟀다
 // (REVIEW-r1 P2-3 ⑽). 뽑아내면 그 종단 실행 없이 "전달 1곳"만 단위
 // 시험으로 고정할 수 있다(변이 10).
+// HYK-255-relay-aux-1 (coder-task.md product_scope ③ ":2494") -- 두 인자
+// (--relay-glob · --inbox-dir)를 같은 "전달 1곳"에 더한다. outboxDir과
+// 동일한 opt-in 관례(둘 다 생략하면 relayGlob/inboxDir은 undefined ->
+// resolveValueOptions가 null로 정규화 -> collectRelayLedger 자체를
+// 건너뛴다, 회귀 0).
 export function buildPartialCountStepOptions({
   repoRoot,
   watchLogPath,
   outboxDir,
+  relayGlob,
+  inboxDir,
 }) {
-  return { repoRoot, watchLogPath, outboxDir };
+  return { repoRoot, watchLogPath, outboxDir, relayGlob, inboxDir };
 }
 
 // HYK-255-outbox-aux-1-r3 (coder-task.md §2 ⓐ · REVIEW-r2 ⓑ "고치는 길"
@@ -2505,18 +2660,33 @@ export function buildPartialCountStepOptions({
 // 그 결과를 runPartialCountStepFn(기본값 runPartialCountStep, 시험에서
 // 주입 가능)에 넘긴다 -- runWatchOnce(ㄱ-4 GitHub 조회)는 거치지 않고도
 // argv 삭제·호출부 삭제 두 변이 모두 단위 시험으로 RED가 된다.
+// HYK-255-relay-aux-1 -- argv에서 --relay-glob/--inbox-dir도 같은 방식
+// (이름 붙은 플래그 하나당 변수 하나)으로 뽑는다. eslint complexity
+// 예산 때문에 그 파싱만 떼어낸다(로직은 --outbox-dir과 완전히 동일).
+function parseRelayLedgerArgv(argv) {
+  let relayGlob = null;
+  let inboxDir = null;
+  for (let i = 0; i < argv.length; i++) {
+    if (argv[i] === "--relay-glob") relayGlob = argv[++i];
+    else if (argv[i] === "--inbox-dir") inboxDir = argv[++i];
+  }
+  return { relayGlob, inboxDir };
+}
+
 export async function runWatchCliPartialCountStep({
   argv,
   repoRoot,
   watchDir,
   now,
   result,
+  notifyDir,
   runPartialCountStepFn,
 }) {
   let outboxDir = null;
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === "--outbox-dir") outboxDir = argv[++i];
   }
+  const { relayGlob, inboxDir } = parseRelayLedgerArgv(argv);
   const stepFn =
     runPartialCountStepFn === undefined
       ? runPartialCountStep
@@ -2524,11 +2694,14 @@ export async function runWatchCliPartialCountStep({
   return stepFn({
     watchDir,
     now,
+    notifyDir,
     logPath: result.logPath,
     options: buildPartialCountStepOptions({
       repoRoot,
       watchLogPath: result.logPath,
       outboxDir,
+      relayGlob,
+      inboxDir,
     }),
   });
 }
@@ -2546,6 +2719,7 @@ export function forwardArgvToPartialCountStep({
   watchDir,
   now,
   result,
+  notifyDir,
   runWatchCliPartialCountStepFn = runWatchCliPartialCountStep,
 }) {
   return runWatchCliPartialCountStepFn({
@@ -2554,6 +2728,7 @@ export function forwardArgvToPartialCountStep({
     watchDir,
     now,
     result,
+    notifyDir,
   });
 }
 
@@ -4584,6 +4759,7 @@ if (invokedDirectly) {
       watchDir,
       now: cliNow,
       result,
+      notifyDir,
     });
   }
   // HYK-270 (coder-task.md §9-8 "전부 실행 출력으로 보여라") -- 한도

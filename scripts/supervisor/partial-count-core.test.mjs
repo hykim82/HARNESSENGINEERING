@@ -22,6 +22,8 @@ import {
   GATE_TYPES,
   UNCOUNTED_EXAMPLES_V1,
   UNCOUNTED_EXAMPLES_V2,
+  UNCOUNTED_EXAMPLES_V3,
+  renderRelayLedgerAuxLines,
 } from "./partial-count-core.mjs";
 
 // 실물 watch.log 한 줄과 같은 형식(reach-report.test.mjs의 관례 재사용).
@@ -384,6 +386,98 @@ test("UNCOUNTED_EXAMPLES_V1(8)/V2(7): V2는 V1에서 «통역 보내는함 문�
   );
 });
 
+// HYK-255-relay-aux-1 (PM 설계 §(d)) -- v3(7)는 v2(7)와 개수가 같고,
+// "통역 보내는함 문서" 항목은 v2처럼 없고, 1·4·5·6번 문면만 좁혀진다.
+test("UNCOUNTED_EXAMPLES_V3(7): 개수는 v2와 같고, 1번은 S1·S2 대조 몫으로 좁혀지고 4·5·6번엔 보조 관측 이동 단서가 붙는다", () => {
+  assert.equal(UNCOUNTED_EXAMPLES_V3.version, "uncounted-examples/v3");
+  assert.equal(UNCOUNTED_EXAMPLES_V3.items.length, 7);
+  assert.ok(
+    !UNCOUNTED_EXAMPLES_V3.items.some((item) =>
+      item.includes("통역 보내는함 문서"),
+    ),
+  );
+  assert.ok(UNCOUNTED_EXAMPLES_V3.items[0].includes("전달 파일·대조 출처"));
+  assert.ok(!UNCOUNTED_EXAMPLES_V2.items[0].includes("전달 파일·대조 출처"));
+  for (const idx of [3, 4, 5]) {
+    assert.ok(UNCOUNTED_EXAMPLES_V3.items[idx].includes("보조 관측으로 이동"));
+    assert.ok(!UNCOUNTED_EXAMPLES_V2.items[idx].includes("보조 관측으로 이동"));
+  }
+  assert.ok(
+    UNCOUNTED_EXAMPLES_V3.items.includes(
+      "Linear 상태 전환(독립 앵커 비증명 -- 이 라운드 수집 제외)",
+    ),
+  );
+});
+
+function baseRelayLedgerResult(overrides = {}) {
+  return {
+    known: true,
+    sourceUtteranceCount: 10,
+    mergedAwayCount: 1,
+    matchedCount: 7,
+    candidateCount: 2,
+    gate7MissingCount: 1,
+    formatErrorCount: 0,
+    beforeFormatCount: 0,
+    classificationTally: {
+      "ㄱ-1": 1,
+      "ㄱ-2": 0,
+      "ㄱ-3": 0,
+      "ㄱ-4": 0,
+      "ㄱ-5": 0,
+      "ㄱ-6": 0,
+      "ㄱ-7": 2,
+      ㄴ: 0,
+    },
+    scannedRelayFiles: 1,
+    relayReadFailures: [],
+    ...overrides,
+  };
+}
+
+test("renderRelayLedgerAuxLines: 미결선(null)이면 줄이 0개다(회귀 0)", () => {
+  assert.deepEqual(renderRelayLedgerAuxLines(null), []);
+  assert.deepEqual(renderRelayLedgerAuxLines(undefined), []);
+});
+
+test("renderRelayLedgerAuxLines: known:false(전달 폴더 없음·읍기 실패)는 0으로 접히지 않고 UNKNOWN(사유) 한 줄로 나온다", () => {
+  const lines = renderRelayLedgerAuxLines({
+    known: false,
+    reason: "전달 폴더 읽기 실패: ENOENT",
+  });
+  assert.equal(lines.length, 1);
+  assert.equal(
+    lines[0],
+    "- ORCH-writeable 보조 관측(전달 파일 대조): UNKNOWN(전달 폴더 읽기 실패: ENOENT) — 독립 계수에 미산입",
+  );
+});
+
+test("renderRelayLedgerAuxLines: known:true면 대조 수치 줄 + 분류 집계 줄 두 개가 나온다", () => {
+  const lines = renderRelayLedgerAuxLines(baseRelayLedgerResult());
+  assert.equal(lines.length, 2);
+  assert.equal(
+    lines[0],
+    "- ORCH-writeable 보조 관측(전달 파일 대조): 출처 한용 발화 10건 · " +
+      "전달 항목 대응 7건 · 대응 없음(ㄴ 후보) 2건 · 형식 오류 0건 · " +
+      "ㄱ-7 기록 누락 1건 · 형식 이전 구간 미계수 0건 — 독립 계수에 미산입",
+  );
+  assert.equal(
+    lines[1],
+    "- 전달 항목 분류: ㄱ-1 1 · ㄱ-2 0 · ㄱ-3 0 · ㄱ-4 0 · ㄱ-5 0 · ㄱ-6 0 · " +
+      "ㄱ-7 2 · ㄴ 0(자기 분류 — 독립 아님)",
+  );
+});
+
+test("buildPartialCountReport: relayLedgerResult를 주면 ㄴ 절 끝에 전달 파일 대조 두 줄이 더 붙고, 안 주면(undefined) 줄이 그대로 0개다", () => {
+  const withRelay = buildPartialCountReport(
+    baseInput({ relayLedgerResult: baseRelayLedgerResult() }),
+  );
+  assert.ok(withRelay.includes("전달 파일 대조): 출처 한용 발화 10건"));
+  assert.ok(withRelay.includes("- 전달 항목 분류: ㄱ-1 1"));
+  const withoutRelay = buildPartialCountReport(baseInput());
+  assert.ok(!withoutRelay.includes("전달 파일 대조)"));
+});
+
 test("renderOutboxAuxNote: known이면 책임자 경유·한용 확정·분류 불가 세 수가 ORCH-writeable 문면으로 나온다", () => {
   const text = renderOutboxAuxNote({
     known: true,
@@ -393,9 +487,12 @@ test("renderOutboxAuxNote: known이면 책임자 경유·한용 확정·분류 �
     scanned: 6,
     readFailures: 0,
   });
+  // HYK-255-relay-aux-1 (product_scope ②) -- 꼬리 "독립 계수에 미산입"은
+  // 더 이상 여기서 안 붙는다(buildGaSection:301이 호출자 쪽에서 한 번만
+  // 붙인다 -- 중복 꼬리 수리, 아래 "필수 문면 ⓑ" 시험의 주석 참조).
   assert.equal(
     text,
-    "보내는함 머리줄: 책임자 경유 3건 · 한용 확정 2건 · 분류 불가 1건 — ORCH-writeable · 독립 계수에 미산입",
+    "보내는함 머리줄: 책임자 경유 3건 · 한용 확정 2건 · 분류 불가 1건 — ORCH-writeable",
   );
 });
 
@@ -422,6 +519,35 @@ test("renderOutboxAuxNote: known:false(미결선·읽기 실패)는 0으로 접�
   assert.equal(renderOutboxAuxNote(null), "UNKNOWN(사유 미상)");
 });
 
+// HYK-255-relay-aux-1 (coder-task.md §2 ⓒ⑹ "중복 꼬리 수리 전후 원문")
+// -- 수리 전 08:43 보고서에 실제로 찍혔던 중복 문면과, 수리 후 실제로
+// 나오는 문면을 나란히 고정한다(근거-부록 E: core:280·:301이 같은
+// 말을 두 번 붙인다). 수리 전 문면은 과거 산출물을 손으로 그대로
+// 베낀 것(옛 renderOutboxAuxNote가 꼬리를 자체로도 붙였던 결과)이고,
+// 이 시험은 그것과 "달라야 한다"만 고정한다 -- 옛 함수를 되살리지
+// 않는다.
+test("중복 꼬리 수리 전후 원문: 08:43 보고서의 '— 독립 계수에 미산입 — 독립 계수에 미산입' 중복이 더 이상 나오지 않는다", () => {
+  const beforeFixText =
+    "- ORCH-writeable 보조 관측: 보내는함 머리줄: 책임자 경유 14건 · " +
+    "한용 확정 0건 · 분류 불가 0건 — ORCH-writeable · 독립 계수에 미산입 — 독립 계수에 미산입";
+  const auxNote = renderOutboxAuxNote({
+    known: true,
+    responsible: 14,
+    hanyongConfirmed: 0,
+    unclassified: 0,
+    scanned: 14,
+    readFailures: 0,
+  });
+  const text = buildPartialCountReport(baseInput({ auxNote }));
+  const afterFixLine = `- ORCH-writeable 보조 관측: ${auxNote} — 독립 계수에 미산입`;
+  assert.ok(text.includes(afterFixLine));
+  assert.notEqual(afterFixLine, beforeFixText.replace(/^- /, "- "));
+  // 수리 후 줄에는 "독립 계수에 미산입"이 정확히 한 번만 나온다(수리
+  // 전 문면은 두 번 -- 위 beforeFixText 리터럴이 그 사실의 증거다).
+  assert.equal((afterFixLine.match(/독립 계수에 미산입/g) ?? []).length, 1);
+  assert.equal((beforeFixText.match(/독립 계수에 미산입/g) ?? []).length, 2);
+});
+
 test("필수 문면 ⓑ(보조 칸): buildPartialCountReport가 auxNote를 그대로 ORCH-writeable 보조 관측 줄에 싣고, 1-C 판정 자격 줄은 무변", () => {
   const auxNote = renderOutboxAuxNote({
     known: true,
@@ -433,9 +559,12 @@ test("필수 문면 ⓑ(보조 칸): buildPartialCountReport가 auxNote를 그�
   });
   const text = buildPartialCountReport(baseInput({ auxNote }));
   // buildGaSection 문면은 "- ORCH-writeable 보조 관측: <auxNote> — 독립
-  // 계수에 미산입"이다 -- auxNote 자신도 "독립 계수에 미산입"을 담고
-  // 있어 중복되지만, 그 중복은 buildGaSection의 기존 문면 계약이라
-  // 이 라운드에서 바꾸지 않는다(회귀 0). 실제로 나오는 줄만 단언한다.
+  // 계수에 미산입"이다. HYK-255-relay-aux-1(product_scope ② · core:280·
+  // :301 수리) 전에는 auxNote 자신도 "독립 계수에 미산입"을 담고 있어
+  // 08:43 보고서에 그 말이 두 번 찍혔다("— 독립 계수에 미산입 — 독립
+  // 계수에 미산입") -- 지금은 renderOutboxAuxNote가 그 꼬리를 더 이상
+  // 붙이지 않아(위 renderOutboxAuxNote 시험 참조) 아래 줄에 꼬리가
+  // 정확히 한 번만 나온다.
   assert.ok(
     text.includes(
       `- ORCH-writeable 보조 관측: ${auxNote} — 독립 계수에 미산입`,

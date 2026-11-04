@@ -96,6 +96,27 @@ export const UNCOUNTED_EXAMPLES_V2 = Object.freeze({
   ),
 });
 
+// v3 -- HYK-255-relay-aux-1(coder-task.md product_scope ⓑ · PM 설계
+// §(d)) -- v2(7)에서 개수는 그대로 두고 문면만 좁힌다. 1번은 "전달
+// 파일·S1·S2 대조로도 못 잡는 채팅 지시"로 좁히고(그 대조에 남는 몫은
+// collectRelayLedger의 ORCH-writeable 보조 관측으로 이미 옮겨졌으므로),
+// 4·5·6번은 "한용이 전달 파일에 남긴 몫은 보조 관측으로 이동했다"는
+// 단서를 덧붙인다(설계 §(d): "전달 기록분 = 보조 관측" 단서). ⛔개수를
+// 줄였다고 쓸 근거는 없다(설계 §(d) 그대로 7개 유지) -- v2와 마찬가지로
+// "통역 보내는함 문서" 항목은 넣지 않는다.
+export const UNCOUNTED_EXAMPLES_V3 = Object.freeze({
+  version: "uncounted-examples/v3",
+  items: Object.freeze([
+    "전달 파일·대조 출처(S1·S2) 어디에도 없는 채팅 지시(전달 머리줄·보내는함·받는함에 남은 몫은 보조 관측으로 이동)",
+    "권한 확인창에 답해 주기",
+    "미제출 배달을 빈 Enter로 밀어 주기",
+    "멈춘 좌석을 사람이 알아채고 깨우기 — 전달 기록분은 보조 관측으로 이동",
+    "끝난 배달 기록을 손으로 닫기 — 전달 기록분은 보조 관측으로 이동",
+    "로그에만 뜬 경보를 사람이 발견해 알려 주기 — 전달 기록분은 보조 관측으로 이동",
+    "Linear 상태 전환(독립 앵커 비증명 -- 이 라운드 수집 제외)",
+  ]),
+});
+
 // 무진행-재개 의심 구간에 쓰는 축 -- reach-report-core.mjs AXES 중 «무진행»
 // 성격의 넷만(PM이 재사용을 지정한 orch-stall-detect/dispatch-start-core/
 // unconsumed-core 계열의 verdict가 흐르는 축). cap/chain/binding/postcheck/
@@ -263,6 +284,14 @@ export function renderConfirmedLnCount(count) {
 // 안 주면(= outboxDir 미지정) buildPartialCountReport의 기본 auxNote
 // ("미계수(이 라운드 결선된 보조 수집기 없음)")가 그대로 쓰인다 -- 이
 // 함수는 outboxResult가 있을 때만 호출된다.
+//
+// HYK-255-relay-aux-1 (coder-task.md product_scope ②) -- 꼬리 "독립
+// 계수에 미산입"을 여기서 더 붙이지 않는다. buildGaSection(:301)이 이
+// 함수의 반환값에 그 꼬리를 "한 번" 붙인다 -- 여기서도 붙이면 08:43
+// 보고서에 실제로 찍혔던 "— 독립 계수에 미산입 — 독립 계수에 미산입"
+// 중복이 재현된다(근거-부록 E: core:280 · :301이 같은 말을 두 번
+// 붙인다). 이 함수는 "ORCH-writeable"까지만 내고, 꼬리는 호출자(:301)의
+// 몫으로 남긴다.
 export function renderOutboxAuxNote(outboxResult) {
   if (!outboxResult || outboxResult.known !== true) {
     const reason =
@@ -277,7 +306,7 @@ export function renderOutboxAuxNote(outboxResult) {
     `보내는함 머리줄: 책임자 경유 ${outboxResult.responsible}건 · ` +
     `한용 확정 ${outboxResult.hanyongConfirmed}건 · ` +
     `분류 불가 ${outboxResult.unclassified}건` +
-    ` — ORCH-writeable · 독립 계수에 미산입${failSuffix}`
+    ` — ORCH-writeable${failSuffix}`
   );
 }
 
@@ -311,7 +340,41 @@ function buildGaSection(gate4, auxNote) {
   return lines;
 }
 
-function buildLnSection(confirmedLnEvents, suspected, uncountedExamples) {
+// 전달 파일(통역 「기록\전달-*.md」) 대조 보조 관측 렌더링(HYK-255-
+// relay-aux-1, PM 설계 §(c) 출력 칸 문면) -- wire
+// (partial-count-report.mjs의 collectRelayLedger)의 산출물을 ㄴ 절 두
+// 줄 문면으로 바꾸는 순수 함수(I/O 0 -- 수집은 wire의 몫). 호출자가
+// relayLedgerResult를 안 주면(= --relay-glob 미지정) 줄 자체를 내지
+// 않는다(outbox 보조 칸과 동일한 "미결선 = 줄 0개" 관례 -- §2 ⓐ 회귀
+// 0). 결선됐지만 known:false(전달 폴더 없음·읽기 실패)면 ⛔0으로 접지
+// 않고 UNKNOWN(사유) 한 줄만 낸다(비타협 2).
+export function renderRelayLedgerAuxLines(relayLedgerResult) {
+  if (!relayLedgerResult) return [];
+  if (relayLedgerResult.known !== true) {
+    const reason = relayLedgerResult.reason ?? "사유 미상";
+    return [
+      `- ORCH-writeable 보조 관측(전달 파일 대조): UNKNOWN(${reason}) — 독립 계수에 미산입`,
+    ];
+  }
+  const r = relayLedgerResult;
+  const line1 =
+    `- ORCH-writeable 보조 관측(전달 파일 대조): 출처 한용 발화 ${r.sourceUtteranceCount}건 · ` +
+    `전달 항목 대응 ${r.matchedCount}건 · 대응 없음(ㄴ 후보) ${r.candidateCount}건 · ` +
+    `형식 오류 ${r.formatErrorCount}건 · ㄱ-7 기록 누락 ${r.gate7MissingCount}건 · ` +
+    `형식 이전 구간 미계수 ${r.beforeFormatCount}건 — 독립 계수에 미산입`;
+  const tallyText = Object.entries(r.classificationTally)
+    .map(([key, count]) => `${key} ${count}`)
+    .join(" · ");
+  const line2 = `- 전달 항목 분류: ${tallyText}(자기 분류 — 독립 아님)`;
+  return [line1, line2];
+}
+
+function buildLnSection(
+  confirmedLnEvents,
+  suspected,
+  uncountedExamples,
+  relayLedgerResult,
+) {
   const lines = ["ㄴ 계획 밖 개입:"];
   const confirmedCount = Array.isArray(confirmedLnEvents)
     ? confirmedLnEvents.length
@@ -337,6 +400,7 @@ function buildLnSection(confirmedLnEvents, suspected, uncountedExamples) {
     `- 알려진 미계수 예시: ${uncountedExamples.items.length}개(${uncountedExamples.version}) — ` +
       `${uncountedExamples.items.join(" · ")}; 전체 유형의 분모가 아님`,
   );
+  lines.push(...renderRelayLedgerAuxLines(relayLedgerResult));
   return lines;
 }
 
@@ -386,6 +450,9 @@ export function buildPartialCountReport({
   collectors = [],
   lastAliveMs = null,
   coverageGaps,
+  // HYK-255-relay-aux-1 (product_scope ②) -- 기본값 = undefined ->
+  // renderRelayLedgerAuxLines([]) 그대로 -> 줄 0개(미결선, 회귀 0).
+  relayLedgerResult,
 }) {
   const lines = [];
   lines.push("집계 성격: PARTIAL — 전수 아님");
@@ -409,7 +476,12 @@ export function buildPartialCountReport({
   lines.push(...buildGaSection(gate4, auxNote));
   lines.push("");
   lines.push(
-    ...buildLnSection(confirmedLnEvents, suspected, uncountedExamples),
+    ...buildLnSection(
+      confirmedLnEvents,
+      suspected,
+      uncountedExamples,
+      relayLedgerResult,
+    ),
   );
   lines.push("");
   lines.push(...buildHealthSection({ collectors, lastAliveMs, coverageGaps }));

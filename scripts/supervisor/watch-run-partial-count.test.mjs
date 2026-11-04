@@ -12,7 +12,10 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { runPartialCountStep } from "./watch-run.mjs";
+import {
+  runPartialCountStep,
+  runWatchCliPartialCountStep,
+} from "./watch-run.mjs";
 import { runReachOnce } from "./reach-report.mjs";
 
 const NOW = Date.parse("2026-08-14T12:00:00.000Z");
@@ -164,6 +167,138 @@ test("ORCH 정정 고정: 실제 생산 경로가 만든 부분 계수 파일에
   } finally {
     fs.rmSync(watchDir, { recursive: true, force: true });
   }
+});
+
+// HYK-255-relay-aux-1 (coder-task.md product_scope ③ · §2 ⓒ⑸) -- "ㄴ
+// 후보 K 또는 형식 오류 E가 바뀔 때만 받는함 통지 1개"(그림자 teardown
+// 통지 모양 · 상태 파일). 변이⑥의 표적 -- 상태 파일 dedupe를 지우면
+// 2·3회차에서 통지 파일이 매번 더 생긴다.
+function makeRelayLedgerResult(candidateCount, formatErrorCount) {
+  return {
+    known: true,
+    sourceUtteranceCount: 5,
+    mergedAwayCount: 0,
+    matchedCount: 2,
+    candidateCount,
+    gate7MissingCount: 0,
+    formatErrorCount,
+    beforeFormatCount: 0,
+    classificationTally: {},
+    scannedRelayFiles: 1,
+    relayReadFailures: [],
+  };
+}
+
+test("watch-run 통지: 전달 파일 대조의 ㄴ 후보·형식 오류가 바뀌면 받는함에 통지 파일이 하나 생기고, 같은 값 재실행은 더 생기지 않으며, 값이 다시 바뀌면 또 하나 생긴다", async () => {
+  const watchDir = tmpDir("nc-wr-relay-notify-");
+  const notifyDir = join(watchDir, "받는함");
+  try {
+    await runPartialCountStep({
+      watchDir,
+      now: NOW,
+      notifyDir,
+      runPartialCountOnceFn: async () => ({
+        reportText: "집계 성격: PARTIAL — 전수 아님\n1\n",
+        relayResult: makeRelayLedgerResult(1, 0),
+      }),
+    });
+    assert.equal(fs.readdirSync(notifyDir).length, 1);
+
+    await runPartialCountStep({
+      watchDir,
+      now: NOW + 1000,
+      notifyDir,
+      runPartialCountOnceFn: async () => ({
+        reportText: "집계 성격: PARTIAL — 전수 아님\n2\n",
+        relayResult: makeRelayLedgerResult(1, 0),
+      }),
+    });
+    assert.equal(
+      fs.readdirSync(notifyDir).length,
+      1,
+      "값이 안 바뀌었는데 통지가 더 생겼다(상태 파일 무시 -- 변이⑥)",
+    );
+
+    await runPartialCountStep({
+      watchDir,
+      now: NOW + 2000,
+      notifyDir,
+      runPartialCountOnceFn: async () => ({
+        reportText: "집계 성격: PARTIAL — 전수 아님\n3\n",
+        relayResult: makeRelayLedgerResult(2, 0),
+      }),
+    });
+    assert.equal(
+      fs.readdirSync(notifyDir).length,
+      2,
+      "ㄴ 후보 K가 바뀌었는데 통지가 안 생겼다",
+    );
+  } finally {
+    fs.rmSync(watchDir, { recursive: true, force: true });
+  }
+});
+
+test("watch-run 통지: relayResult가 없거나(미결선) known:false(폴더 없음)면 통지를 시도하지 않는다(판단 불가를 변화 없음으로 접지 않는다)", async () => {
+  const watchDir = tmpDir("nc-wr-relay-notify-skip-");
+  const notifyDir = join(watchDir, "받는함");
+  try {
+    const stepA = await runPartialCountStep({
+      watchDir,
+      now: NOW,
+      notifyDir,
+      runPartialCountOnceFn: async () => ({
+        reportText: "집계 성격: PARTIAL — 전수 아님\n",
+      }),
+    });
+    assert.equal(stepA.relayNotify.attempted, false);
+    assert.equal(fs.existsSync(notifyDir), false);
+
+    const stepB = await runPartialCountStep({
+      watchDir,
+      now: NOW + 1000,
+      notifyDir,
+      runPartialCountOnceFn: async () => ({
+        reportText: "집계 성격: PARTIAL — 전수 아님\n",
+        relayResult: { known: false, reason: "전달 폴더 읽기 실패: ENOENT" },
+      }),
+    });
+    assert.equal(stepB.relayNotify.attempted, false);
+    assert.equal(fs.existsSync(notifyDir), false);
+  } finally {
+    fs.rmSync(watchDir, { recursive: true, force: true });
+  }
+});
+
+// coder-task.md product_scope ③ ":2494" -- --relay-glob/--inbox-dir도
+// --outbox-dir과 같은 "1곳 전달"로 옵션까지 닿는다(watch-run-outbox-
+// forward.test.mjs의 변이10 패턴과 동일 -- argv 분기 또는 호출부 전달이
+// 끊기면 이 단언이 RED).
+test("runWatchCliPartialCountStep: argv의 --relay-glob/--inbox-dir이 실제로 options까지 전달된다", async () => {
+  let received = null;
+  const fakeStepFn = async ({ options }) => {
+    received = options;
+    return { ran: true, ok: true };
+  };
+  await runWatchCliPartialCountStep({
+    argv: [
+      "--relay-glob",
+      "D:/문서관리/통역/기록/전달-*.md",
+      "--inbox-dir",
+      "D:/문서관리/통역/받는함",
+    ],
+    repoRoot: "/repo",
+    watchDir: "/repo/watch",
+    now: 1000,
+    result: { logPath: "/repo/watch/watch.log" },
+    runPartialCountStepFn: fakeStepFn,
+  });
+  assert.deepEqual(received, {
+    repoRoot: "/repo",
+    watchLogPath: "/repo/watch/watch.log",
+    outboxDir: null,
+    relayGlob: "D:/문서관리/통역/기록/전달-*.md",
+    inboxDir: "D:/문서관리/통역/받는함",
+  });
 });
 
 test("경로 위생: partialCountOut 기본값은 호출자가 준 watchDir에서만 파생된다(절대경로 하드코딩 없음) — 다른 watchDir을 주면 그 밑에 쓴다", async () => {
