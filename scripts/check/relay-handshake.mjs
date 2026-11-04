@@ -1759,6 +1759,133 @@ export function resolveHeadCommitBinding({
   return { ok: true, sha: resultHead.sha };
 }
 
+// HYK-424: 419-wire-2/422-dispatch-run-1 실사고 -- 워커가 결과 파일의
+// `head_commit:`에 "이 라운드의 base"(지시서가 선언한 값)를 그대로
+// 베껴 썼다(자기 커밋이 아님). 당시 CODER 지시서 머리의 `head_commit:`
+// 키가 "base"를 뜻했고, 결과 파일의 `head_commit:`은 "워커가 만든 커밋"을
+// 뜻했다 -- 같은 이름, 다른 뜻. 정식 표기는 `base_commit_of_this_round:`
+// (ORCH 생성기가 이미 이 키로 옮겨 적는다). 레거시 CODER 머리의
+// `head_commit:`도 여전히 "base 선언"으로 읽는다(과거 지시서·관제실
+// 실물 호환) -- 단 REVIEW 계열에는 적용하지 않는다: REVIEW 머리의
+// `head_commit:`은 "판정 대상 커밋"이라는 다른 뜻이고(resolveHeadCommitBinding
+// 축 ⓐ), 정당한 REVIEW 라운드는 결과·지시서·실제 HEAD가 셋 다 그 값으로
+// 같아지는 것이 설계된 동작이라 이 축이 오발동할 근거가 없다(no false
+// positive). resolveHeadCommitBinding(HYK-383)보다 «먼저» 건다(coder-task.md
+// §2 product_scope ①) -- 서로 다른 역할에만 걸리므로 결과는 같지만,
+// "base 를 베꼈다"는 더 구체적인 사유를 일반 383 사유보다 앞세운다.
+const BASE_COMMIT_OF_ROUND_RE_G =
+  /^base_commit_of_this_round:[ \t]*([0-9a-fA-F]{40})[ \t]*$/gm;
+
+// HYK-424-head-label-3 §2 product_scope ①ⓘⓘ (P2-2): 레거시 `head_commit:`
+// 폴백은 그 이름 그대로 "레거시 CODER 머리"의 관례다 -- VERIFY·PM 라운드가
+// 같은 이름의 필드를 다른 뜻(또는 전혀 다른 목적)으로 쓰는 것까지 base
+// 선언으로 오인하면 안 된다. 1R은 `!isReviewFamilyRole(role)`만 썼는데
+// 그건 "REVIEW가 아니면 전부"(VERIFY·PM 포함)를 통과시킨다 -- 이 축이
+// 막으려는 사고(coder-task.md §1 원문, 419-wire-2/422-dispatch-run-1)는
+// CODER 라운드에서만 실측됐으므로 범위를 CODER 단독으로 좁힌다(대소문자
+// 무관 -- isReviewFamilyRole과 같은 비교 방식, 이 저장소 전역에서 role
+// 문자열이 "coder"/"CODER" 두 표기로 섞여 쓰인다, bc-1~bc-9 fixture
+// 참조).
+const CODER_ROLE_RE = /^coder$/i;
+
+function isCoderRole(role) {
+  return typeof role === "string" && CODER_ROLE_RE.test(role);
+}
+
+// task 파일에서 "이 라운드의 base"를 읽는다 -- 정식 키가 모호하지 않게
+// 정확히 1개면 그 값을 쓰고, 없으면(그리고 CODER 라운드라면) 레거시
+// CODER 머리의 `head_commit:` 단독 줄로 물러난다. 둘 다 없거나 정식 키가
+// 모호하면(2개 이상) "base 선언 없음"으로 보고 이 축 자체를 건너뛴다(다른
+// 축이 모호성을 각자의 몫으로 다룬다 -- 이 축은 base-copy 전용이다).
+function resolveDeclaredRoundBase(taskContent, role) {
+  const scan = maskQuotedMarkerRegions(taskContent);
+  const formalMatches = [...scan.matchAll(BASE_COMMIT_OF_ROUND_RE_G)];
+  if (formalMatches.length === 1) {
+    return {
+      declared: true,
+      sha: formalMatches[0][1].toLowerCase(),
+      source: "base_commit_of_this_round",
+    };
+  }
+  if (formalMatches.length === 0 && isCoderRole(role)) {
+    const legacyMatches = [...scan.matchAll(HEAD_COMMIT_RE_G)];
+    if (legacyMatches.length === 1) {
+      return {
+        declared: true,
+        sha: legacyMatches[0][1].toLowerCase(),
+        source: "legacy CODER head_commit header",
+      };
+    }
+  }
+  return { declared: false };
+}
+
+// HYK-424: task가 base를 선언했는데 결과의 head_commit이 그 base와
+// 같고, 실제 워크트리 HEAD는 그 base와 다르면(=워커가 자기 커밋을 만들고도
+// base를 그대로 베꼈다) 전용 사유로 거부한다. 결과에 head_commit 표지가
+// 없거나(흔한 CODER 모양) 모호하면(2개 이상) 이 축의 대상이 아니므로
+// 건너뛴다 -- 다른 축이 그 모양을 각자 다룬다. 실제 HEAD가 base와 같으면
+// (예: 커밋 0 라운드) base를 echo하는 것이 정직한 값이므로 거부하지
+// 않는다.
+export function resolveBaseCopyGuard({
+  role,
+  taskContent,
+  resultContent,
+  harnessDir,
+}) {
+  const declaredBase = resolveDeclaredRoundBase(taskContent, role);
+  if (!declaredBase.declared) return { ok: true, skipped: true };
+
+  const resultHead = resolveHeadCommitField(resultContent, { label: "result" });
+  if (!resultHead.ok) return { ok: true, skipped: true };
+
+  if (resultHead.sha !== declaredBase.sha) return { ok: true, skipped: true };
+
+  const actualHead = readActualWorktreeHeadCommit(harnessDir);
+  if (!actualHead.ok) {
+    return {
+      ok: false,
+      reason: `base-copy 확인 실패 (HYK-424): ${actualHead.reason}`,
+    };
+  }
+  if (actualHead.sha === declaredBase.sha) {
+    return { ok: true, skipped: true };
+  }
+
+  // HYK-424-head-label-2/3 §2ⓐⓑ (실측 고정, 책임자 판정 B-prime): 이전
+  // 문구("네 커밋 SHA를 적어라")는 같은 결과 파일의 head_commit만 고쳐
+  // 같은 세대에서 다시 소비시키라는 뜻으로 읽혔는데, 그 경로는 실제로
+  // DONE_REWRITTEN_AFTER_FIRST_OBSERVATION으로 다시 거부된다(실측,
+  // head-label-2 결과). 같은 워크트리에 라벨만 새로 바꿔 재배달해도
+  // 통과하지 못한다(실측, head-label-3 §2ⓐ: consumption-receipt의
+  // RECEIPT_MISSING은 이 워크트리에 남은 직전 결과 파일 자신의 task_id
+  // 에코로 판정하므로 다음 라벨이 무엇이든 무관하다). 실측으로 통과하는
+  // 경로는 ORCH가 작성자 HEAD의 새 워크트리(아직 직전 결과 파일이 없는
+  // harnessDir)에 새 task_id(라벨)로 재배달하는 것뿐이다(head-label-3
+  // §2ⓑ 실측: 결과 파일이 없으므로 배달 게이트가 진짜 첫 배달/부트스트랩
+  // 으로 본다). ⛔사람 손으로 finalize-done을 다시 찍는 것은 이 거부를
+  // 복구하지 않는다(같은 세대 재소비 불가는 그대로 남는다).
+  return {
+    ok: false,
+    reason: `base를 베꼈다 (HYK-424 base-copy guard): result head_commit '${resultHead.sha}' equals this round's declared base (${declaredBase.source} = '${declaredBase.sha}') but the actual worktree HEAD at '${harnessDir}' is '${actualHead.sha}' -- head_commit 필드는 "이 라운드에서 네가 실제로 만든 커밋"이어야 하는데 base를 그대로 베꼈다. 복구(실측 고정, HYK-424-head-label-2/3): 같은 세대(같은 dropped_at)에서 결과 파일만 고쳐 재소비할 수 없다(DONE_REWRITTEN_AFTER_FIRST_OBSERVATION으로 다시 거부) · 같은 워크트리에서 라벨만 새로 바꿔 재배달해도 통과하지 못한다(consumption-receipt: RECEIPT_MISSING -- 직전 결과 파일이 그대로 남아 있는 한 라벨은 무관하다) · 실측으로 통과하는 유일한 경로는 ORCH가 작성자 HEAD의 새 워크트리(아직 직전 결과 파일이 없는 harnessDir)에 새 task_id(라벨)로 재배달하는 것이다`,
+  };
+}
+
+// checkRelayHandshake의 max-lines-per-function 예산을 지키려고 뽑았다
+// (checkRewriteAndStaleness 등과 같은 이유) -- 판정/사유/순서는 조금도
+// 바뀌지 않는다. null이면 통과, 아니면 그 verdict가 최종 거부다. `core`를
+// 그대로 받아 taskContent/judgedRegion을 꺼낸다(호출부를 2줄로 좁혀
+// max-lines-per-function 예산 안에 든다, coder-task.md §2 product_scope ①).
+function resolveBaseCopyRejection(core, role, harnessDir) {
+  const verdict = resolveBaseCopyGuard({
+    role,
+    taskContent: core.taskContent,
+    resultContent: core.judgedRegion,
+    harnessDir,
+  });
+  return verdict.ok ? null : verdict;
+}
+
 // HYK-411: 2026-09-01 실측(coder-task.md §1 원문) -- `npm test 2>&1 | tail`
 // 형태의 파이프는 **마지막 명령(tail)의** 종료코드를 셸에 보여준다. 실패한
 // 러너가 파이프 뒤에서 exit 0으로 보인다(독립 재현: `sh -c 'exit 7' 2>&1 |
@@ -3943,12 +4070,10 @@ export function checkRelayHandshake({
   const {
     taskContent,
     resultContent,
-    taskId,
     droppedAt,
     droppedMatch,
     doneAt,
     doneMatch,
-    observation,
     judgedRegion,
   } = core;
 
@@ -3964,7 +4089,7 @@ export function checkRelayHandshake({
   // code that always no-ops.
 
   const rewriteOrStaleVerdict = checkRewriteAndStaleness({
-    observation,
+    observation: core.observation,
     doneAt,
     droppedAt,
     doneMatch,
@@ -3975,11 +4100,17 @@ export function checkRelayHandshake({
       rewriteOrStaleVerdict,
       role,
       harnessDir,
-      taskId,
+      taskId: core.taskId,
       taskContent,
       resultContent,
     });
   }
+
+  // HYK-424: base-copy 전용 축을 HYK-383 일반 거부보다 «먼저» 건다
+  // (coder-task.md §2 product_scope ①). judgedRegion을 넘기는 이유는
+  // 바로 아래 headCommitVerdict와 같다(HYK-423 3R §2 지문 범위 통일).
+  const baseCopyVerdict = resolveBaseCopyRejection(core, role, harnessDir);
+  if (baseCopyVerdict) return baseCopyVerdict;
 
   // HYK-383: 다른 모든 사유별 검사가 이미 통과한 뒤, 완료 판정 직전에 건다
   // (§4 무회귀 -- 기존 구체적 거부 사유가 가려지지 않는다). 비REVIEW는
@@ -4016,7 +4147,7 @@ export function checkRelayHandshake({
       runnerContractVerdict,
       role,
       harnessDir,
-      taskId,
+      taskId: core.taskId,
       taskContent,
       resultContent,
     });
@@ -4027,7 +4158,7 @@ export function checkRelayHandshake({
   // 등과 같은 이유로 뽑았다(판정/사유/순서는 조금도 바뀌지 않는다).
   const dispatchAndG1Verdict = resolveDispatchAndG1Verdict({
     role,
-    taskId,
+    taskId: core.taskId,
     dispatchLedgerPath,
     doneAt,
     harnessDir,
@@ -4038,7 +4169,7 @@ export function checkRelayHandshake({
   const sideEffectVerdict = runCompletionSideEffects({
     role,
     harnessDir,
-    taskId,
+    taskId: core.taskId,
     taskContent,
     resultContent,
     droppedMatch,
@@ -4047,7 +4178,7 @@ export function checkRelayHandshake({
   });
   if (sideEffectVerdict) return sideEffectVerdict;
 
-  return { ok: true, reason: `relay handshake ok for ${taskId}` };
+  return { ok: true, reason: `relay handshake ok for ${core.taskId}` };
 }
 
 // HYK-224-2R §3 옵션3, rewired HYK-227 §2 -- best-effort spawn of the

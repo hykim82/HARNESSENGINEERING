@@ -100,6 +100,39 @@ function checkFutureTimestamp(headerLines, mtimeMs, reasons) {
   });
 }
 
+// 판정 4(ⓘⓘⓘⓘ, HYK-424/HYK-488): 머리의 `role:` 값이 CODER면 `head_commit:`
+// 키를 거부한다. 레거시로 "이 라운드의 base"를 뜻하던 그 키가 CODER
+// 지시서 머리에 다시 실리면, 작업자가 결과 파일의 head_commit에 그 값을
+// 그대로 베껴 쓰는 사고(HYK-424 원 사고, 419-wire-2/422-dispatch-run-1)가
+// 재발할 수 있다. 정식 표기는 `base_commit_of_this_round:`(relay-
+// handshake.mjs의 resolveBaseCopyGuard가 읽는 키, HYK-424). REVIEW
+// 지시서의 `head_commit:`은 "판정 대상 커밋"이라는 다른 뜻(HYK-383
+// resolveHeadCommitBinding 축 ⓐ)이라 그대로 허용한다. 머리에 `role:`
+// 줄이 없으면(또는 CODER가 아니면) 이 축은 건너뛴다(fail-open -- 판정
+// 1/2/3과 같은 관례, ⓘⓘ-neg-no-key 참조).
+const ROLE_VALUE_RE = /(^|·\s)role:\s*(\S+)/;
+
+function findHeaderRole(headerLines) {
+  for (const line of headerLines) {
+    const m = line.match(ROLE_VALUE_RE);
+    if (m) return m[2];
+  }
+  return null;
+}
+
+function checkCoderHeadCommitHeader(headerLines, reasons) {
+  const roleValue = findHeaderRole(headerLines);
+  if (!roleValue || !/^coder/i.test(roleValue)) return;
+  const offendingLine = headerLines.find((line) =>
+    findKeyTokens(line).includes("head_commit"),
+  );
+  if (offendingLine) {
+    reasons.push(
+      `directive-lint: ⓘⓘⓘⓘ CODER 지시서 머리에 head_commit: 키(레거시 base 표기, HYK-424) -- 정식은 base_commit_of_this_round:, line="${offendingLine.slice(0, 80)}"`,
+    );
+  }
+}
+
 // 머리 = 첫 '---' 단독 줄(좌우 공백 제거 후 정확히 '---') 앞 전체. '---'
 // 줄이 없으면 파일 전체를 머리로 본다.
 export function lintDirective(text, { mtimeMs } = {}) {
@@ -112,6 +145,7 @@ export function lintDirective(text, { mtimeMs } = {}) {
   checkCombinedBanLines(headerLines, reasons);
   checkRemnantForbid(rawLines, headerEndIndex, reasons);
   checkFutureTimestamp(headerLines, mtimeMs, reasons);
+  checkCoderHeadCommitHeader(headerLines, reasons);
 
   return { ok: reasons.length === 0, reasons };
 }
