@@ -67,6 +67,8 @@ import {
   renderOutboxAuxNote,
   UNCOUNTED_EXAMPLES_V1,
   UNCOUNTED_EXAMPLES_V2,
+  UNCOUNTED_EXAMPLES_V3,
+  GATE_TYPES,
 } from "./partial-count-core.mjs";
 
 export const DEFAULT_DISPATCH_RECEIPTS_PATH =
@@ -747,6 +749,617 @@ export function collectOutboxHeaderCounts({
 }
 
 // ---------------------------------------------------------------------------
+// 수집 5(보조, HYK-255-relay-aux-1) -- 전달 파일(통역 「기록\전달-*.md」)
+// 머리줄 대조. 설계 정본 = D:\문서관리\하네스-관제실\PM\산출물\하네스\
+// 2026-11-04-SSOT-전달파일-계수기\SSOT-전달파일-계수기-설계.md §(b)(c).
+// ⛔읍기 전용 -- 전달 파일·보내는함·받는함 중 어느 것도 쓰지 않는다.
+// ⛔독립 앵커 아님(ORCH가 쓸 수 있는 세 폴더를 전부 대조할 뿐) --
+// renderRelayLedgerAuxLines(partial-count-core.mjs)를 거쳐 ㄴ 절의
+// «ORCH-writeable 보조 관측» 두 줄로만 나간다. relayGlob은 «인자로만»
+// 받는다(기본값 없음 -- §(f) "다음 조각 밖" 그대로, outboxDir과 동일한
+// opt-in 관례).
+// ---------------------------------------------------------------------------
+
+// §(b) 머리줄 정규식 그대로(줄 머리 고정 `^` · 줄 끝 고정 `$` -- 본문
+// 속에 떠다니는 인용을 항목으로 세지 않는다, 변이①의 표적).
+const RELAY_HEADER_RE =
+  /^\[책임자 경유 · (한용 확정|책임자 판정) · #(\d{8}-\d{4}[a-z]?) · (\d{4}-\d{2}-\d{2} \d{2}:(?:\d{2}|\dx)) KST · (지시|판정|교정|승인|답변) · (ㄱ-[1-7]|ㄴ)\]$/;
+// "머리줄처럼 시작했는데 전체 정규식은 안 맞는" 줄을 형식 오류로 잡기
+// 위한 느슨한 접두 판정(줄 머리 고정은 유지한다).
+const RELAY_HEADER_PREFIX_RE = /^\[책임자 경유 · /;
+// §(b) "그다음 줄부터 `> 한용: «…」` 인용 줄" -- 혼용 종결 부호(«…»/«…」)
+// 모두 받는다(근거-부록 B).
+const RELAY_QUOTE_LINE_RE = /^> 한용: «(.+)[」»]$/;
+const RELAY_TIME_FIELD_RE = /^(\d{4}-\d{2}-\d{2}) (\d{2}):(\d{2}|\dx)$/;
+// 보내는함·받는함 파일 이름 머리의 `YYYY-MM-DD-HHMM`(두 함 모두 이
+// 이름 체계를 쓴다, 근거-부록 B·D) -- 발화 시각으로 쓴다.
+const LEDGER_FILE_NAME_TS_RE = /^(\d{4})-(\d{2})-(\d{2})-(\d{2})(\d{2})/;
+// S1·S2 공용 인용 추출 -- 근거-부록 B: `«[^」»]{3,}[」»]`로 찾으면
+// 바이트가 아니라 글자 단위라야 한다(C: cut -c 바이트 절단은 가짜
+// "없음"을 낸다).
+const QUOTE_EXTRACT_RE = /«([^」»]{3,})[」»]/;
+const INBOX_QUOTE_LINE_RE = /한용\s*«([^」»]{3,})[」»]/g;
+const RELAY_NUMBER_TOKEN_RE = /전달 #(\d{8}-\d{4}[a-z]?)/;
+// 오탐 방지 ⓑ -- 보내는함 파일 이름이 `판정-<HHMM>` 모양이면 그 HHMM을
+// 뽑아 받는함의 `상신` 파일과 대조한다(아래 isGate7MissingCandidate).
+const OUTBOX_PANJEONG_HHMM_RE = /판정-(\d{4})/;
+
+function parseLedgerFileNameTimestampMs(name) {
+  const m = LEDGER_FILE_NAME_TS_RE.exec(name);
+  if (!m) return null;
+  const [, y, mo, d, h, mi] = m;
+  return parseKstTimestampMs(`${y}-${mo}-${d} ${h}:${mi} KST`);
+}
+
+// P2-4(이 라운드 변이③의 표적) -- ㄱ-7 기록 누락 대조는 "같은 날짜 +
+// HHMM"을 파일 이름의 날짜·시각 토큰에서 구조로 뽑아 대조해야 한다
+// (부분 문자열 포함 판정이면 다른 날 같은 HHMM, 또는 이름 어딘가에
+// 우연히 같은 네 자리가 낀 파일도 짝이 된다).
+function parseLedgerFileNameDateHhmm(name) {
+  const m = LEDGER_FILE_NAME_TS_RE.exec(name);
+  if (!m) return null;
+  const [, y, mo, d, h, mi] = m;
+  return { date: `${y}-${mo}-${d}`, hhmm: `${h}${mi}` };
+}
+
+// 머리줄의 시각 필드("2026-11-03 21:4x" 모양)를 ms로. 분 자리가 `x`면
+// (분 추정) approx:true를 돌려주고, 시각 창 매칭에서 ±10분(그 외 ±15분,
+// §(c))으로 좁힌다 -- §(b) "분 자리 x 허용"의 코드쪽 짝.
+function parseRelayHeaderTimeField(raw) {
+  const m = RELAY_TIME_FIELD_RE.exec(raw);
+  if (!m) return { ms: null, approx: false };
+  const [, datePart, hh, mm] = m;
+  const approx = mm.includes("x");
+  const mmNorm = approx ? `${mm[0]}0` : mm;
+  return { ms: parseKstTimestampMs(`${datePart} ${hh}:${mmNorm} KST`), approx };
+}
+
+// 게이트 2 판정 A(HYK-255-relay-aux-4, 1604 상신 답) -- 정규식 밖
+// `[책임자 경유 · ` 줄 하나의 시각을 "그 줄 자신"에서 정한다: ⑴ 줄 안에
+// 머리줄 3번째 필드와 같은 모양의 `YYYY-MM-DD HH:MM`(분 추정 `\dx` 포함)
+// 토큰이 있으면 그것 ⑵ 없으면 그 줄이 든 전달 파일 이름의
+// `전달-YYYY-MM-DD` 날짜(그 날 00:00 KST) ⑶ 둘 다 없으면 "시각 미정"
+// (timeMs null · timeSource "undetermined"). 이 세 단계 중 어느 것으로
+// 정해졌는지(timeSource)도 함께 남긴다 -- 아래 classifyFormatErrorCandidates
+// 가 "시각 미정"만 따로 세기 위해서다.
+const INLINE_LINE_TIME_TOKEN_RE = /(\d{4}-\d{2}-\d{2}) (\d{2}):(\d{2}|\dx)/;
+
+function parseInlineLineTimeMs(line) {
+  const m = INLINE_LINE_TIME_TOKEN_RE.exec(line);
+  if (!m) return null;
+  const mm = m[3].includes("x") ? `${m[3][0]}0` : m[3];
+  return parseKstTimestampMs(`${m[1]} ${m[2]}:${mm} KST`);
+}
+
+// 전달 파일 이름 `전달-YYYY-MM-DD...` 머리의 날짜 -- 그 날 00:00 KST로
+// 본다(파일 이름에 시각(HHMM)이 더 있어도 날짜만 쓴다, 판정 원문 그대로
+// "그 날 00:00 KST").
+const RELAY_FILE_NAME_DATE_RE = /^전달-(\d{4})-(\d{2})-(\d{2})/;
+
+function parseRelayFileNameDateMs(fileName) {
+  const m = RELAY_FILE_NAME_DATE_RE.exec(fileName);
+  if (!m) return null;
+  return parseKstTimestampMs(`${m[1]}-${m[2]}-${m[3]} 00:00 KST`);
+}
+
+function resolveInvalidLineTime(line, fileName) {
+  const inlineMs = parseInlineLineTimeMs(line);
+  if (inlineMs !== null) return { timeMs: inlineMs, timeSource: "inline" };
+  const fileNameMs = parseRelayFileNameDateMs(fileName);
+  if (fileNameMs !== null)
+    return { timeMs: fileNameMs, timeSource: "fileName" };
+  return { timeMs: null, timeSource: "undetermined" };
+}
+
+// 헤더 다음 줄들에서 첫 `> 한용:` 인용 줄만 집는다(빈 줄 또는 다음
+// 머리줄 접두에서 멈춘다 -- 한 항목의 인용이 다음 항목으로 새지 않게).
+function findQuoteAfterHeader(lines, headerIdx) {
+  for (let j = headerIdx + 1; j < lines.length; j++) {
+    const q = RELAY_QUOTE_LINE_RE.exec(lines[j]);
+    if (q) return q[1];
+    if (lines[j].trim() === "" || RELAY_HEADER_PREFIX_RE.test(lines[j])) {
+      return null;
+    }
+  }
+  return null;
+}
+
+// 전달 파일 한 편의 본문 -> 항목 배열 + 정규식 밖 줄 배열(중복 번호는
+// 아직 안 센다 -- dedupeRelayEntriesByNumber가 뒤에서 센다). 변이①의
+// 표적 = 이 함수가 매 줄을 "그 줄 전체"에 `^...$` 고정 정규식으로만
+// 매칭한다는 사실 자체(본문 속 줄 중간에 끼워진 머리줄 모양 문자열은
+// 줄 머리가 아니므로 매칭되지 않는다). 게이트 2 판정 A(HYK-255-relay-
+// aux-4) -- 정규식 밖 줄은 더 이상 숫자로만 세지 않는다: 각 줄의 own
+// 시각(resolveInvalidLineTime)을 같이 남겨 collectRelayLedger가
+// formatStartMs 대조로 형식 오류/형식 이전/시각 미정을 줄 단위로
+// 가르게 한다.
+function parseRelayFileEntries(text, fileName) {
+  const lines = text.split(/\r?\n/);
+  const entries = [];
+  const invalidLines = [];
+  for (let i = 0; i < lines.length; i++) {
+    const full = RELAY_HEADER_RE.exec(lines[i]);
+    if (full) {
+      const [, scheme, number, timeRaw, kind, classification] = full;
+      const { ms: timeMs, approx: timeApprox } =
+        parseRelayHeaderTimeField(timeRaw);
+      entries.push({
+        scheme,
+        number,
+        timeMs,
+        timeApprox,
+        kind,
+        classification,
+        quote: findQuoteAfterHeader(lines, i),
+        lineNo: i + 1,
+      });
+    } else if (RELAY_HEADER_PREFIX_RE.test(lines[i])) {
+      const { timeMs, timeSource } = resolveInvalidLineTime(lines[i], fileName);
+      invalidLines.push({ lineNo: i + 1, timeMs, timeSource });
+    }
+  }
+  return { entries, invalidLines };
+}
+
+// 번호 중복 = 형식 오류 후보로 센다(§(b) "조용히 하나를 고르지 않는다")
+// -- 변이④의 표적. 처음 본 번호만 "유효 항목"으로 남기고 그 뒤 같은
+// 번호는 duplicates에 담는다(own timeMs 보존 -- 완전 매칭 헤더라
+// own 시각이 항상 있다, "정규식 밖 줄"의 시각 미정 3단계 fallback은
+// 여기엔 적용하지 않는다, product_scope ① "시각 결정은 정규식 밖 줄에만").
+// 매칭·분류 집계는 유효 항목만 쓴다.
+function dedupeRelayEntriesByNumber(entries) {
+  const byNumber = new Map();
+  const valid = [];
+  const duplicates = [];
+  for (const e of entries) {
+    if (byNumber.has(e.number)) {
+      duplicates.push(e);
+      continue;
+    }
+    byNumber.set(e.number, e);
+    valid.push(e);
+  }
+  return { valid, byNumber, duplicates, duplicateCount: duplicates.length };
+}
+
+// `<dir>/전달-*.md` 모양의 glob 1개를 디렉터리 + 파일명 정규식으로
+// 쪼갠다 -- `*`만 지원하는 최소 glob(이 저장소에 쓰는 모든 --relay-glob
+// 예시가 이 모양이다, PM 설계 §(e)).
+function splitGlobDirPattern(glob) {
+  return { dir: path.dirname(glob), pattern: path.basename(glob) };
+}
+
+function globPatternToRegex(pattern) {
+  const escaped = pattern
+    .replace(/[.+^${}()|[\]\\]/g, "\\$&")
+    .replace(/\*/g, ".*");
+  return new RegExp(`^${escaped}$`);
+}
+
+// 전달 폴더 읍기 -- 변이③의 표적: 폴더 자체가 없거나 읍기 실패면
+// known:false(⛔0 아님)로 돌려준다. 폴더는 있는데 패턴에 걸리는 파일이
+// 0개면(진짜 "아직 전달 파일 없음") known:true · entries:[] 그대로다 --
+// "폴더 없음"과 "폴더는 있는데 0건"은 다른 사실이라 섞지 않는다.
+function readRelayFiles({ relayGlob, readdirFn, readFn }) {
+  const { dir, pattern } = splitGlobDirPattern(relayGlob);
+  const re = globPatternToRegex(pattern);
+  let names;
+  try {
+    names = readdirFn(dir).filter((n) => re.test(n));
+  } catch (err) {
+    return {
+      known: false,
+      reason: `전달 폴더 읽기 실패: ${err && err.message ? err.message : String(err)}`,
+    };
+  }
+  names.sort();
+  const allEntries = [];
+  const allInvalidLines = [];
+  const readFailures = [];
+  for (const name of names) {
+    try {
+      const { entries, invalidLines } = parseRelayFileEntries(
+        readFn(path.join(dir, name), "utf8"),
+        name,
+      );
+      allEntries.push(...entries);
+      allInvalidLines.push(...invalidLines);
+    } catch {
+      readFailures.push(name);
+    }
+  }
+  return {
+    known: true,
+    entries: allEntries,
+    invalidLines: allInvalidLines,
+    readFailures,
+    scannedFiles: names.length,
+  };
+}
+
+// S1 -- 보내는함 첫 줄의 한용 인용(§(c) 출처 S1). "한용"이 전혀 없는
+// 첫 줄은 대조 대상 자체가 아니다(이 보조 칸이 세려는 것은 한용 발화
+// 신호가 있는 줄뿐).
+function extractOutboxQuoteItem({ name, firstLine }) {
+  if (typeof firstLine !== "string" || !firstLine.includes("한용")) {
+    return null;
+  }
+  const q = QUOTE_EXTRACT_RE.exec(firstLine);
+  if (!q) return null;
+  const numberM = RELAY_NUMBER_TOKEN_RE.exec(firstLine);
+  const panjeongM = OUTBOX_PANJEONG_HHMM_RE.exec(name);
+  // P2-4: ㄱ-7 짝 대조의 날짜는 이 출처 파일 자신의 이름 머리
+  // `YYYY-MM-DD`에서 구조로 뽑는다(판정 토큰은 HHMM만 갖고 있다).
+  const fileDateHhmm = parseLedgerFileNameDateHhmm(name);
+  return {
+    source: "S1",
+    name,
+    quote: q[1],
+    number: numberM ? numberM[1] : null,
+    timeMs: parseLedgerFileNameTimestampMs(name),
+    panjeongHhmm: panjeongM ? panjeongM[1] : null,
+    panjeongDate: panjeongM && fileDateHhmm ? fileDateHhmm.date : null,
+  };
+}
+
+function collectOutboxHanyongQuotes({ outboxDir, readdirFn, readFn }) {
+  let names;
+  try {
+    names = readdirFn(outboxDir);
+  } catch (err) {
+    return {
+      known: false,
+      reason: `보내는함 읽기 실패: ${err && err.message ? err.message : String(err)}`,
+    };
+  }
+  const items = [];
+  for (const name of names) {
+    if (!name.endsWith(".md")) continue;
+    let text;
+    try {
+      text = readFn(path.join(outboxDir, name), "utf8");
+    } catch {
+      continue;
+    }
+    const item = extractOutboxQuoteItem({
+      name,
+      firstLine: text.split(/\r?\n/)[0] ?? "",
+    });
+    if (item) items.push(item);
+  }
+  return { known: true, items };
+}
+
+// S2 -- 받는함 본문의 `한용 «` 줄(§(c) 출처 S2). 첫 줄만이 아니라 본문
+// 전체를 본다(책임자 전달 뭉치가 아니라 ORCH 자유 서식 에코라 인용이
+// 본문 어디에나 올 수 있다).
+function extractInboxQuoteItems({ name, text }) {
+  const timeMs = parseLedgerFileNameTimestampMs(name);
+  const numberM = RELAY_NUMBER_TOKEN_RE.exec(text);
+  const number = numberM ? numberM[1] : null;
+  const items = [];
+  const re = new RegExp(INBOX_QUOTE_LINE_RE);
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    items.push({ source: "S2", name, quote: m[1], number, timeMs });
+  }
+  return items;
+}
+
+function collectInboxHanyongQuotes({ inboxDir, readdirFn, readFn }) {
+  let names;
+  try {
+    names = readdirFn(inboxDir);
+  } catch (err) {
+    return {
+      known: false,
+      reason: `받는함 읽기 실패: ${err && err.message ? err.message : String(err)}`,
+    };
+  }
+  const items = [];
+  for (const name of names) {
+    if (!name.endsWith(".md")) continue;
+    let text;
+    try {
+      text = readFn(path.join(inboxDir, name), "utf8");
+    } catch {
+      continue;
+    }
+    if (!text.includes("한용 «") && !text.includes("한용«")) continue;
+    items.push(...extractInboxQuoteItems({ name, text }));
+  }
+  return { known: true, items, names };
+}
+
+// ⓒ "같은 분 다중 인용은 1건으로 합친다" -- S1·S2를 합친 뒤 분(floor)
+// 단위로 묶어 먼저 본 것만 남긴다(시각 불명 항목은 묶지 않는다 -- 묶을
+// 분 자체가 없다).
+function mergeSameMinuteSourceItems(items) {
+  const seenMinutes = new Set();
+  const merged = [];
+  let mergedAwayCount = 0;
+  for (const item of items) {
+    if (item.timeMs === null) {
+      merged.push(item);
+      continue;
+    }
+    const key = Math.floor(item.timeMs / 60000);
+    if (seenMinutes.has(key)) {
+      mergedAwayCount += 1;
+      continue;
+    }
+    seenMinutes.add(key);
+    merged.push(item);
+  }
+  return { merged, mergedAwayCount };
+}
+
+function findFormatStartMs(validEntries) {
+  let min = null;
+  for (const e of validEntries) {
+    if (e.timeMs !== null && (min === null || e.timeMs < min)) min = e.timeMs;
+  }
+  return min;
+}
+
+function relayEntryInWindow(entry, sourceTimeMs) {
+  if (entry.timeMs === null || sourceTimeMs === null) return false;
+  const windowMs = (entry.timeApprox ? 10 : 15) * 60 * 1000;
+  return Math.abs(entry.timeMs - sourceTimeMs) <= windowMs;
+}
+
+// 오탐 방지 ⓑ -- 대응 없는 S1 항목이라도 파일 이름이 `판정-<HHMM>`이고
+// 받는함에 "같은 날짜 + 같은 HHMM"의 `상신` 파일이 있으면 "ㄱ-7 기록
+// 누락"으로 따로 센다(ㄴ 후보 아님). P2-4: 날짜·HHMM 둘 다 파일 이름의
+// 구조화된 토큰으로 대조한다 -- 부분 문자열 포함(`includes`)만으로는
+// 다른 날 같은 HHMM, 또는 이름 어딘가에 같은 네 자리가 낀 파일까지
+// 짝으로 잡는다(이 라운드 변이③의 표적).
+function isGate7MissingCandidate({ item, inboxNames }) {
+  if (item.source !== "S1" || !item.panjeongHhmm || !item.panjeongDate) {
+    return false;
+  }
+  return (inboxNames ?? []).some((n) => {
+    if (!n.includes("상신")) return false;
+    const parsed = parseLedgerFileNameDateHhmm(n);
+    return (
+      parsed !== null &&
+      parsed.date === item.panjeongDate &&
+      parsed.hhmm === item.panjeongHhmm
+    );
+  });
+}
+
+// 대조 키 1순위 = 번호 일치(P2-3: 번호 토큰은 있는데 그 번호의 전달
+// 항목이 없으면 "없는 번호를 가리킨다" 자체가 신호라 2순위로 넘기지
+// 않고 곧장 ㄴ 후보로 둔다 -- 이 라운드 변이②의 표적) · 2순위(번호 없는
+// 옛 출처) = 시각 창(±15분, 분 추정이면 ±10분) **안에서만** 매칭으로
+// 친다(PM 설계 §(c) "그리고" -- 창 밖에서 인용 앞 8글자만 같은 것은
+// 매칭이 아니다, 이 라운드 변이①의 표적, P1-1). §(c)가 2순위에 나열한
+// "인용 앞 8글자 일치 또는 같은 창 안 한용 항목 존재"는 창 조건과
+// 묶이면 항상 뒤쪽 "같은 창 안 한용 항목 존재"로 흡수된다(창 안의
+// entry가 하나라도 있으면 그 자체로 그 disjunct가 참이 된다) -- 그래서
+// 창 안 존재 하나만 보면 되고, 인용 앞 8글자는 별도 비교가 필요 없다
+// (검토 1R P1-1 제안 그대로 "결과적으로 창 안 전달 항목 존재와 같다").
+// P2-1(2R) ⓘⓘ(HYK-255-relay-aux-4) -- 번호 토큰이 있는데 그 번호의
+// 전달 항목이 전혀 없는 경우("없는 번호를 가리킴")를 시각 창 미매칭과
+// 구분해서 돌려준다 -- 아래 classifySourceItems가 그 사유를
+// numberMismatchCandidates로 따로 세어 렌더·통지 문면에 실제로 낸다
+// (계수 동작 자체는 무변 -- 둘 다 "candidate"로 떨어진다).
+function matchOneSourceItem({
+  item,
+  validEntries,
+  relayByNumber,
+  formatStartMs,
+}) {
+  if (
+    formatStartMs === null ||
+    (item.timeMs !== null && item.timeMs < formatStartMs)
+  ) {
+    return "before-format";
+  }
+  if (item.number) {
+    return relayByNumber.has(item.number) ? "matched" : "number-mismatch";
+  }
+  for (const entry of validEntries) {
+    if (relayEntryInWindow(entry, item.timeMs)) return "matched";
+  }
+  return "candidate";
+}
+
+function classifySourceItems({
+  items,
+  validEntries,
+  relayByNumber,
+  formatStartMs,
+  inboxNames,
+}) {
+  let matched = 0;
+  let candidates = 0;
+  let beforeFormat = 0;
+  let gate7Missing = 0;
+  let numberMismatchCandidates = 0;
+  for (const item of items) {
+    const verdict = matchOneSourceItem({
+      item,
+      validEntries,
+      relayByNumber,
+      formatStartMs,
+    });
+    if (verdict === "matched") {
+      matched += 1;
+    } else if (verdict === "before-format") {
+      beforeFormat += 1;
+    } else if (isGate7MissingCandidate({ item, inboxNames })) {
+      gate7Missing += 1;
+    } else {
+      candidates += 1;
+      if (verdict === "number-mismatch") numberMismatchCandidates += 1;
+    }
+  }
+  return {
+    matched,
+    candidates,
+    beforeFormat,
+    gate7Missing,
+    numberMismatchCandidates,
+  };
+}
+
+// 전달 항목(유효분만) 자기 분류 집계 -- 닫힌 목록(ㄱ-1~7·ㄴ) 밖 값은
+// 조용히 버린다(정규식 5번째 그룹이 이미 그 닫힌 집합으로 고정돼 있어
+// 실제로는 발생하지 않는다 -- 방어적으로만 가드).
+function tallyRelayClassification(validEntries) {
+  const tally = {};
+  for (const g of GATE_TYPES) tally[`ㄱ-${g.number}`] = 0;
+  tally["ㄴ"] = 0;
+  for (const e of validEntries) {
+    if (tally[e.classification] !== undefined) tally[e.classification] += 1;
+  }
+  return tally;
+}
+
+// 게이트 2 판정 A(HYK-255-relay-aux-4) -- 정규식 밖 줄·중복 번호 줄을
+// "own 시각 vs formatStartMs"로 형식 오류 E/형식 이전/시각 미정으로
+// 가른다(줄 단위 -- 2R의 전역 판정 `formatStartMs === null ? 0 : raw`를
+// 대체한다). formatStartMs가 null(유효 머리줄 0개)이면 아직 시작되지
+// 않은 형식을 소급해서 어겼다고 보지 않는다(2R 동작 유지) -- 전부
+// 형식 이전으로 간다. 시각 미정(own 시각을 못 정한 정규식 밖 줄)은
+// 형식 이전 버킷에 들어가되 별도 칸으로도 센다(판정 원문 "시각 미정 =
+// 형식 이전 + 별도 칸"). 중복 번호 줄은 완전 매칭 헤더라 own 시각이
+// 항상 있다 -- 시각 미정 3단계 fallback은 "정규식 밖 줄"에만 적용한다
+// (product_scope ① 명시).
+function classifyFormatErrorCandidates({
+  invalidLines,
+  duplicates,
+  formatStartMs,
+}) {
+  if (formatStartMs === null) {
+    // 형식 머리줄이 아직 0개라도 "시각 미정" 건수는 정보로 남긴다(둘 다
+    // 형식 이전 버킷으로 가는 것은 같다 -- beforeFormatCount는 raw
+    // 그대로, 2R 동작 무변).
+    const undeterminedCount = invalidLines.filter(
+      (line) => line.timeSource === "undetermined",
+    ).length;
+    return {
+      formatErrorCount: 0,
+      beforeFormatCount: invalidLines.length + duplicates.length,
+      undeterminedCount,
+    };
+  }
+  let formatErrorCount = 0;
+  let beforeFormatCount = 0;
+  let undeterminedCount = 0;
+  for (const line of invalidLines) {
+    if (line.timeMs === null) {
+      beforeFormatCount += 1;
+      undeterminedCount += 1;
+    } else if (line.timeMs < formatStartMs) {
+      beforeFormatCount += 1;
+    } else {
+      formatErrorCount += 1;
+    }
+  }
+  for (const dup of duplicates) {
+    if (dup.timeMs !== null && dup.timeMs < formatStartMs) {
+      beforeFormatCount += 1;
+    } else {
+      formatErrorCount += 1;
+    }
+  }
+  return { formatErrorCount, beforeFormatCount, undeterminedCount };
+}
+
+// collectRelayLedger -- 조립(읍기만, §2 비타협: 세 폴더 중 하나라도
+// 결선이 안 됐거나 읍기 실패면 known:false로 fail-closed한다 -- 부분
+// 수치를 조용히 내지 않는다).
+export function collectRelayLedger({
+  relayGlob,
+  outboxDir,
+  inboxDir,
+  readdirFn = readdirSync,
+  readFn = readFileSync,
+}) {
+  if (!outboxDir || !inboxDir) {
+    return {
+      known: false,
+      reason: !outboxDir
+        ? "미결선(보내는함 경로 미지정)"
+        : "미결선(받는함 경로 미지정)",
+    };
+  }
+  const relayFiles = readRelayFiles({ relayGlob, readdirFn, readFn });
+  if (relayFiles.known !== true) return relayFiles;
+  const outboxQuotes = collectOutboxHanyongQuotes({
+    outboxDir,
+    readdirFn,
+    readFn,
+  });
+  if (outboxQuotes.known !== true) return outboxQuotes;
+  const inboxQuotes = collectInboxHanyongQuotes({
+    inboxDir,
+    readdirFn,
+    readFn,
+  });
+  if (inboxQuotes.known !== true) return inboxQuotes;
+
+  const {
+    valid: validEntries,
+    byNumber: relayByNumber,
+    duplicates,
+  } = dedupeRelayEntriesByNumber(relayFiles.entries);
+  const formatStartMs = findFormatStartMs(validEntries);
+  const { merged, mergedAwayCount } = mergeSameMinuteSourceItems([
+    ...outboxQuotes.items,
+    ...inboxQuotes.items,
+  ]);
+  const {
+    matched,
+    candidates,
+    beforeFormat,
+    gate7Missing,
+    numberMismatchCandidates,
+  } = classifySourceItems({
+    items: merged,
+    validEntries,
+    relayByNumber,
+    formatStartMs,
+    inboxNames: inboxQuotes.names,
+  });
+
+  // 게이트 2 판정 A(HYK-255-relay-aux-4, P2-2 2R 반려 수리) -- 정규식
+  // 밖 줄·중복 번호는 더 이상 "형식 시작 시각이 있으면 전부 E"(2R의
+  // 전역 판정)가 아니라, 줄 하나하나의 own 시각 대 formatStartMs로
+  // 갈린다(classifyFormatErrorCandidates). 형식 머리줄이 아직 0개면
+  // (formatStartMs null) 소급 0 원칙대로 전부 형식 이전이다(2R 동작
+  // 유지).
+  const {
+    formatErrorCount,
+    beforeFormatCount: relayBeforeFormatCount,
+    undeterminedCount,
+  } = classifyFormatErrorCandidates({
+    invalidLines: relayFiles.invalidLines,
+    duplicates,
+    formatStartMs,
+  });
+
+  return {
+    known: true,
+    sourceUtteranceCount: merged.length,
+    mergedAwayCount,
+    matchedCount: matched,
+    candidateCount: candidates,
+    numberMismatchCandidateCount: numberMismatchCandidates,
+    gate7MissingCount: gate7Missing,
+    formatErrorCount,
+    beforeFormatCount: beforeFormat + relayBeforeFormatCount,
+    undeterminedCount,
+    classificationTally: tallyRelayClassification(validEntries),
+    scannedRelayFiles: relayFiles.scannedFiles,
+    relayReadFailures: relayFiles.readFailures,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // 조립 -- 한 번의 실행.
 // ---------------------------------------------------------------------------
 
@@ -948,11 +1561,26 @@ function resolveValueOptions(options) {
     archiveRoot: options.archiveRoot ?? DEFAULT_ARCHIVE_ROOT,
     archiveScanMaxDepth:
       options.archiveScanMaxDepth ?? DEFAULT_ARCHIVE_SCAN_MAX_DEPTH,
+    ...resolveAuxDirOptions(options),
+  };
+}
+
+// HYK-255-relay-aux-1 -- resolveValueOptions가 relayGlob/inboxDir 두
+// `??` 를 더 받아 eslint complexity(상한 12) 예산을 넘겼다(실측 14).
+// outboxDir과 짝인 세 "경로 없으면 미결선" 기본값만 떼어낸다 --
+// 로직·값은 원문과 완전히 동일.
+function resolveAuxDirOptions(options) {
+  return {
     // HYK-255-outbox-aux-1 -- 기본값 없음(§2 ⓐ "인자로 받음 · 기본값
     // 없으면 미결선 그대로"). `??`가 아니라 명시적으로 null 기본 --
     // undefined든 null이든 똑같이 "미지정"으로 다룬다(아래 runPartialCountOnce
     // 의 `if (outboxDir)` 분기 하나로 충분).
     outboxDir: options.outboxDir ?? null,
+    // HYK-255-relay-aux-1 -- 기본값 없음(outboxDir과 동일한 opt-in
+    // 관례) -- 둘 다 없으면 resolveRelayLedgerResult가 수집기 자체를
+    // 부르지 않는다(회귀 0).
+    relayGlob: options.relayGlob ?? null,
+    inboxDir: options.inboxDir ?? null,
   };
 }
 
@@ -991,6 +1619,25 @@ function resolveOutboxResult({
     : null;
 }
 
+// HYK-255-relay-aux-1 (product_scope ①) -- relayGlob이 없으면(기존 모든
+// 호출자, 회귀 0) 이 수집기 자체를 부르지 않는다. relayGlob이 있어도
+// outboxDir·inboxDir 중 하나가 없으면 collectRelayLedger 자신이
+// known:false(미결선)로 되돌린다 -- 여기서 null을 돌리지 않는 이유는
+// "결선 시도는 했는데 재료가 모자랐다"를 "시도 자체를 안 했다"와 섞지
+// 않기 위해서다(아래 렌더러가 null과 known:false를 다르게 그린다 --
+// null = 줄 0개, known:false = UNKNOWN(사유) 한 줄).
+function resolveRelayLedgerResult({
+  relayGlob,
+  outboxDir,
+  inboxDir,
+  readdirFn,
+  readFn,
+}) {
+  return relayGlob
+    ? collectRelayLedger({ relayGlob, outboxDir, inboxDir, readdirFn, readFn })
+    : null;
+}
+
 // 보고 조립 -- runPartialCountOnce에서 떼어낸 것(eslint max-lines-per-
 // function 예산). outboxResult가 null이면 auxNote는 undefined가 되고
 // buildPartialCountReport의 기본 문면이 그대로 쓰인다(§2 ⓐ 회귀 0).
@@ -1000,6 +1647,19 @@ function resolveOutboxResult({
 // 실행인지, 성공/실패 무관)로 갈린다. auxNote와 정확히 같은 조건식을
 // 쓴다 -- 두 문면이 "결선 여부"에 대해 다른 답을 내면(하나는 결선,
 // 하나는 미결선) 보고서 자체가 자기모순이 된다.
+// HYK-255-relay-aux-1 (product_scope ① "미계수 예시 v3 선택 :1028-1030
+// «결선 + known:true 일 때만» 규칙 준용") -- 두 보조 수집기 중 "더 좁힌"
+// 쪽(관계 파일 대조가 결선됐으면 v3, 그게 아니면 보내는함만 결선됐으면
+// v2, 둘 다 아니면 v1)을 고른다. ⛔relayResult가 "존재"만 해도(known
+// 무관) v3을 고르면 전달 폴더가 없거나 읍기 실패한 실행에서도 v3이
+// 나가는 거짓 축소가 생긴다(변이⑤의 표적) -- known===true를 엄격히
+// 요구한다.
+function selectUncountedExamples({ outboxResult, relayResult }) {
+  if (relayResult?.known === true) return UNCOUNTED_EXAMPLES_V3;
+  if (outboxResult?.known === true) return UNCOUNTED_EXAMPLES_V2;
+  return UNCOUNTED_EXAMPLES_V1;
+}
+
 function assemblePartialCountReportText({
   now,
   windowStartMs,
@@ -1009,6 +1669,7 @@ function assemblePartialCountReportText({
   watch,
   gate4,
   outboxResult,
+  relayResult,
 }) {
   return buildPartialCountReport({
     generatedAtMs: now,
@@ -1019,16 +1680,7 @@ function assemblePartialCountReportText({
     missingReceipts: deriveMissingReceipts(deliveredResult, consumedResult),
     gate4,
     auxNote: outboxResult ? renderOutboxAuxNote(outboxResult) : undefined,
-    // HYK-255-outbox-aux-1-r3 (책임자 판정 2116 §1 ⑵ · REVIEW-r2 P2-1) --
-    // "결선"을 outboxResult 존재(인자 전달됨)가 아니라 수집기 결과
-    // known:true로 좁힌다. 폴더 없음·경로 오타·readdir 실패는
-    // outboxResult가 존재해도 known:false이므로 v1(8)로 남고, 그 사유는
-    // auxNote(위 줄, renderOutboxAuxNote가 이미 UNKNOWN(사유)를 낸다)로
-    // 조용히 사라지지 않는다.
-    uncountedExamples:
-      outboxResult?.known === true
-        ? UNCOUNTED_EXAMPLES_V2
-        : UNCOUNTED_EXAMPLES_V1,
+    uncountedExamples: selectUncountedExamples({ outboxResult, relayResult }),
     // ⛔독립 ㄴ 수집기가 없는 이 라운드에 이 배열을 채우는 생산 경로는
     // 존재하지 않는다 -- 항상 [](= «확인 0건» 렌더링). 채우려면 독립적인
     // ㄴ 양성 신호원이 먼저 있어야 한다(PM 권고 «열어 둔다» 그대로).
@@ -1044,6 +1696,7 @@ function assemblePartialCountReportText({
     }),
     lastAliveMs: watch.lastAliveMs,
     coverageGaps: watch.coverageGaps,
+    relayLedgerResult: relayResult,
   });
 }
 
@@ -1103,6 +1756,38 @@ async function collectPartialCountInputs({
   return { deliveredResult, consumedResult, watch, gate4 };
 }
 
+// HYK-255-relay-aux-1 -- runPartialCountOnce 본문이 relayResult 한 줄
+// 추가로 max-lines-per-function(상한 80) 예산을 넘겼다(실측 81). 보조
+// 수집기 두 개(outbox·relay) 호출만 떼어낸다 -- 로직·순서·값은 원문과
+// 완전히 동일.
+function resolveAuxCollectorResults({
+  outboxDir,
+  relayGlob,
+  inboxDir,
+  windowStartMs,
+  windowEndMs,
+  readdirFn,
+  readFn,
+  statFn,
+}) {
+  const outboxResult = resolveOutboxResult({
+    outboxDir,
+    windowStartMs,
+    windowEndMs,
+    readdirFn,
+    readFn,
+    statFn,
+  });
+  const relayResult = resolveRelayLedgerResult({
+    relayGlob,
+    outboxDir,
+    inboxDir,
+    readdirFn,
+    readFn,
+  });
+  return { outboxResult, relayResult };
+}
+
 export async function runPartialCountOnce(options = {}) {
   const {
     now,
@@ -1116,6 +1801,8 @@ export async function runPartialCountOnce(options = {}) {
     archiveRoot,
     archiveScanMaxDepth,
     outboxDir,
+    relayGlob,
+    inboxDir,
   } = resolveValueOptions(options);
   const {
     fetchJson,
@@ -1149,8 +1836,10 @@ export async function runPartialCountOnce(options = {}) {
       gitWorktreeListExecFn,
     });
 
-  const outboxResult = resolveOutboxResult({
+  const { outboxResult, relayResult } = resolveAuxCollectorResults({
     outboxDir,
+    relayGlob,
+    inboxDir,
     windowStartMs,
     windowEndMs,
     readdirFn,
@@ -1167,6 +1856,7 @@ export async function runPartialCountOnce(options = {}) {
     watch,
     gate4,
     outboxResult,
+    relayResult,
   });
 
   return {
@@ -1175,6 +1865,7 @@ export async function runPartialCountOnce(options = {}) {
     suspected: watch.suspected,
     coverageGaps: watch.coverageGaps,
     outboxResult,
+    relayResult,
   };
 }
 
@@ -1222,6 +1913,16 @@ const CLI_FLAG_HANDLERS = Object.freeze({
   // -> 수집기 자체를 건너뛴다(기존 호출자 회귀 0).
   "--outbox-dir": (opts, v) => {
     opts.outboxDir = v;
+  },
+  // HYK-255-relay-aux-1 -- 둘 다 기본값 없음(--outbox-dir과 동일한
+  // opt-in 관례). 생략하면 opts.relayGlob/opts.inboxDir은 undefined ->
+  // resolveValueOptions가 null로 정규화 -> collectRelayLedger 자체를
+  // 건너뛴다(기존 호출자 회귀 0).
+  "--relay-glob": (opts, v) => {
+    opts.relayGlob = v;
+  },
+  "--inbox-dir": (opts, v) => {
+    opts.inboxDir = v;
   },
 });
 

@@ -35,10 +35,15 @@ test("runWatchCliPartialCountStep: argv의 --outbox-dir가 실제로 options.out
     runPartialCountStepFn: fakeStepFn,
   });
   assert.equal(result.ok, true);
+  // HYK-255-relay-aux-1 -- buildPartialCountStepOptions가 relayGlob·
+  // inboxDir 두 키를 더 돌려준다(이 시험은 --relay-glob/--inbox-dir을
+  // 안 줬으므로 둘 다 null -- outboxDir과 동일한 opt-in 관례, 회귀 0).
   assert.deepEqual(received, {
     repoRoot: "/repo",
     watchLogPath: "/repo/watch/watch.log",
     outboxDir: "D:/문서관리/통역/보내는함",
+    relayGlob: null,
+    inboxDir: null,
   });
 });
 
