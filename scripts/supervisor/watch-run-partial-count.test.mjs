@@ -238,6 +238,38 @@ test("watch-run 통지: 전달 파일 대조의 ㄴ 후보·형식 오류가 바
   }
 });
 
+// HYK-255-relay-aux-2 P2-1 -- 전달 파일 개별 읽기 실패가 있으면 통지
+// 문면에도 "읽기 실패 N건"이 찍히고, "대응 없음(ㄴ 후보)" 수치에
+// 불확실 괄호가 붙는다(partial-count-core.mjs의 보조 관측 줄과 같은
+// 문구).
+test("watch-run 통지: 전달 파일 읽기 실패가 있으면 통지 문면에 읽기 실패 건수와 ㄴ 후보 불확실 표기가 찍힌다(P2-1)", async () => {
+  const watchDir = tmpDir("nc-wr-relay-notify-readfail-");
+  const notifyDir = join(watchDir, "받는함");
+  try {
+    await runPartialCountStep({
+      watchDir,
+      now: NOW,
+      notifyDir,
+      runPartialCountOnceFn: async () => ({
+        reportText: "집계 성격: PARTIAL — 전수 아님\n1\n",
+        relayResult: {
+          ...makeRelayLedgerResult(1, 0),
+          relayReadFailures: ["전달-잠김.md"],
+        },
+      }),
+    });
+    const files = fs.readdirSync(notifyDir);
+    assert.equal(files.length, 1);
+    const text = fs.readFileSync(join(notifyDir, files[0]), "utf8");
+    assert.ok(text.includes("읽기 실패 1건"));
+    assert.ok(
+      text.includes("대응 없음(ㄴ 후보): 1건(전달 파일 읽기 실패로 불확실)"),
+    );
+  } finally {
+    fs.rmSync(watchDir, { recursive: true, force: true });
+  }
+});
+
 test("watch-run 통지: relayResult가 없거나(미결선) known:false(폴더 없음)면 통지를 시도하지 않는다(판단 불가를 변화 없음으로 접지 않는다)", async () => {
   const watchDir = tmpDir("nc-wr-relay-notify-skip-");
   const notifyDir = join(watchDir, "받는함");

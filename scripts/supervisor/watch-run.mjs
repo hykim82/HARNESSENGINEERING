@@ -2439,14 +2439,25 @@ function readRelayLedgerNotifyState(readFn, statePath) {
   }
 }
 
+// P2-1 -- 전달 파일 "개별" 읽기 실패가 있으면 통지에도 그 건수를
+// 보이고, "대응 없음(ㄴ 후보)" 값이 확정으로 읽히지 않게 괄호 문구를
+// 붙인다(partial-count-core.mjs renderRelayLedgerAuxLines의 보조 관측
+// 줄과 같은 문구 · 검토 1R P2-1).
 function buildRelayLedgerNoticeText({ relayResult, nowMs }) {
+  const readFailureCount = Array.isArray(relayResult.relayReadFailures)
+    ? relayResult.relayReadFailures.length
+    : 0;
+  const candidateNote =
+    readFailureCount > 0 ? "(전달 파일 읽기 실패로 불확실)" : "";
+  const readFailureNote =
+    readFailureCount > 0 ? ` · 읽기 실패 ${readFailureCount}건` : "";
   const lines = [
     `# 전달 파일 대조 보조 관측 변화 (${new Date(nowMs).toISOString()})`,
     "",
     "이 통지는 참고용입니다 -- 독립 계수에 미산입" +
       "(ORCH-writeable 보조 관측, HYK-255-relay-aux-1).",
     "",
-    `- 대응 없음(ㄴ 후보): ${relayResult.candidateCount}건`,
+    `- 대응 없음(ㄴ 후보): ${relayResult.candidateCount}건${candidateNote}${readFailureNote}`,
     `- 형식 오류: ${relayResult.formatErrorCount}건`,
     `- ㄱ-7 기록 누락: ${relayResult.gate7MissingCount}건`,
     `- 출처 한용 발화: ${relayResult.sourceUtteranceCount}건 · ` +

@@ -468,6 +468,25 @@ test("renderRelayLedgerAuxLines: known:true면 대조 수치 줄 + 분류 집계
   );
 });
 
+// HYK-255-relay-aux-2 P2-1(이 라운드 변이⑤의 표적) -- 전달 파일
+// "개별" 읽기 실패가 1건이라도 있으면 보조 관측 줄에 "읽기 실패
+// N건"이 찍히고, "대응 없음(ㄴ 후보)" 수치가 확정으로 안 보이게
+// 괄호 문구가 붙는다(보내는함 보조 칸 readFailures 표기 관례와 같은
+// "조용히 접지 않는다" 원칙).
+test("renderRelayLedgerAuxLines: 전달 파일 읽기 실패가 있으면 읽기 실패 건수가 찍히고 ㄴ 후보 수치에 불확실 괄호가 붙는다(P2-1)", () => {
+  const lines = renderRelayLedgerAuxLines(
+    baseRelayLedgerResult({ relayReadFailures: ["전달-잠김.md", "전달-x.md"] }),
+  );
+  assert.equal(lines.length, 2);
+  assert.equal(
+    lines[0],
+    "- ORCH-writeable 보조 관측(전달 파일 대조): 출처 한용 발화 10건 · " +
+      "전달 항목 대응 7건 · 대응 없음(ㄴ 후보) 2건(전달 파일 읽기 실패로 불확실) · " +
+      "형식 오류 0건 · ㄱ-7 기록 누락 1건 · 형식 이전 구간 미계수 0건 · " +
+      "읽기 실패 2건 — 독립 계수에 미산입",
+  );
+});
+
 test("buildPartialCountReport: relayLedgerResult를 주면 ㄴ 절 끝에 전달 파일 대조 두 줄이 더 붙고, 안 주면(undefined) 줄이 그대로 0개다", () => {
   const withRelay = buildPartialCountReport(
     baseInput({ relayLedgerResult: baseRelayLedgerResult() }),

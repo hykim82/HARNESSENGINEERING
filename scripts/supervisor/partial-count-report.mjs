@@ -776,20 +776,30 @@ const RELAY_TIME_FIELD_RE = /^(\d{4}-\d{2}-\d{2}) (\d{2}):(\d{2}|\dx)$/;
 const LEDGER_FILE_NAME_TS_RE = /^(\d{4})-(\d{2})-(\d{2})-(\d{2})(\d{2})/;
 // S1·S2 공용 인용 추출 -- 근거-부록 B: `«[^」»]{3,}[」»]`로 찾으면
 // 바이트가 아니라 글자 단위라야 한다(C: cut -c 바이트 절단은 가짜
-// "없음"을 낸다) -- quotePrefix()가 Array.from으로 글자 단위를 쓴다.
+// "없음"을 낸다).
 const QUOTE_EXTRACT_RE = /«([^」»]{3,})[」»]/;
 const INBOX_QUOTE_LINE_RE = /한용\s*«([^」»]{3,})[」»]/g;
 const RELAY_NUMBER_TOKEN_RE = /전달 #(\d{8}-\d{4}[a-z]?)/;
 // 오탐 방지 ⓑ -- 보내는함 파일 이름이 `판정-<HHMM>` 모양이면 그 HHMM을
 // 뽑아 받는함의 `상신` 파일과 대조한다(아래 isGate7MissingCandidate).
 const OUTBOX_PANJEONG_HHMM_RE = /판정-(\d{4})/;
-const QUOTE_PREFIX_LEN = 8;
 
 function parseLedgerFileNameTimestampMs(name) {
   const m = LEDGER_FILE_NAME_TS_RE.exec(name);
   if (!m) return null;
   const [, y, mo, d, h, mi] = m;
   return parseKstTimestampMs(`${y}-${mo}-${d} ${h}:${mi} KST`);
+}
+
+// P2-4(이 라운드 변이③의 표적) -- ㄱ-7 기록 누락 대조는 "같은 날짜 +
+// HHMM"을 파일 이름의 날짜·시각 토큰에서 구조로 뽑아 대조해야 한다
+// (부분 문자열 포함 판정이면 다른 날 같은 HHMM, 또는 이름 어딘가에
+// 우연히 같은 네 자리가 낀 파일도 짝이 된다).
+function parseLedgerFileNameDateHhmm(name) {
+  const m = LEDGER_FILE_NAME_TS_RE.exec(name);
+  if (!m) return null;
+  const [, y, mo, d, h, mi] = m;
+  return { date: `${y}-${mo}-${d}`, hhmm: `${h}${mi}` };
 }
 
 // 머리줄의 시각 필드("2026-11-03 21:4x" 모양)를 ms로. 분 자리가 `x`면
@@ -802,14 +812,6 @@ function parseRelayHeaderTimeField(raw) {
   const approx = mm.includes("x");
   const mmNorm = approx ? `${mm[0]}0` : mm;
   return { ms: parseKstTimestampMs(`${datePart} ${hh}:${mmNorm} KST`), approx };
-}
-
-// 글자(코드포인트) 단위 앞 8글자 -- 근거-부록 C의 "cut -c 바이트 절단
-// 버그"를 재현하지 않는다(바이트로 자르면 멀티바이트 글자가 깨져
-// 가짜 "불일치"가 난다).
-function quotePrefix(text) {
-  if (typeof text !== "string") return null;
-  return Array.from(text).slice(0, QUOTE_PREFIX_LEN).join("");
 }
 
 // 헤더 다음 줄들에서 첫 `> 한용:` 인용 줄만 집는다(빈 줄 또는 다음
@@ -940,6 +942,9 @@ function extractOutboxQuoteItem({ name, firstLine }) {
   if (!q) return null;
   const numberM = RELAY_NUMBER_TOKEN_RE.exec(firstLine);
   const panjeongM = OUTBOX_PANJEONG_HHMM_RE.exec(name);
+  // P2-4: ㄱ-7 짝 대조의 날짜는 이 출처 파일 자신의 이름 머리
+  // `YYYY-MM-DD`에서 구조로 뽑는다(판정 토큰은 HHMM만 갖고 있다).
+  const fileDateHhmm = parseLedgerFileNameDateHhmm(name);
   return {
     source: "S1",
     name,
@@ -947,6 +952,7 @@ function extractOutboxQuoteItem({ name, firstLine }) {
     number: numberM ? numberM[1] : null,
     timeMs: parseLedgerFileNameTimestampMs(name),
     panjeongHhmm: panjeongM ? panjeongM[1] : null,
+    panjeongDate: panjeongM && fileDateHhmm ? fileDateHhmm.date : null,
   };
 }
 
@@ -1057,19 +1063,37 @@ function relayEntryInWindow(entry, sourceTimeMs) {
 }
 
 // 오탐 방지 ⓑ -- 대응 없는 S1 항목이라도 파일 이름이 `판정-<HHMM>`이고
-// 받는함에 같은 HHMM의 `상신` 파일이 있으면 "ㄱ-7 기록 누락"으로 따로
-// 센다(ㄴ 후보 아님).
+// 받는함에 "같은 날짜 + 같은 HHMM"의 `상신` 파일이 있으면 "ㄱ-7 기록
+// 누락"으로 따로 센다(ㄴ 후보 아님). P2-4: 날짜·HHMM 둘 다 파일 이름의
+// 구조화된 토큰으로 대조한다 -- 부분 문자열 포함(`includes`)만으로는
+// 다른 날 같은 HHMM, 또는 이름 어딘가에 같은 네 자리가 낀 파일까지
+// 짝으로 잡는다(이 라운드 변이③의 표적).
 function isGate7MissingCandidate({ item, inboxNames }) {
-  if (item.source !== "S1" || !item.panjeongHhmm) return false;
-  return (inboxNames ?? []).some(
-    (n) => n.includes("상신") && n.includes(item.panjeongHhmm),
-  );
+  if (item.source !== "S1" || !item.panjeongHhmm || !item.panjeongDate) {
+    return false;
+  }
+  return (inboxNames ?? []).some((n) => {
+    if (!n.includes("상신")) return false;
+    const parsed = parseLedgerFileNameDateHhmm(n);
+    return (
+      parsed !== null &&
+      parsed.date === item.panjeongDate &&
+      parsed.hhmm === item.panjeongHhmm
+    );
+  });
 }
 
-// 대조 키 1순위 = 번호 일치 · 2순위 = 시각 창(±15분, 분 추정이면 ±10분)
-// 또는 인용 앞 8글자 일치(§(c)) -- 변이②의 표적: 대응된 항목은 여기서
-// "matched"로 끝나야 하고, 호출자(classifySourceItems)가 그걸 ㄴ 후보
-// 쪽으로 세면 안 된다.
+// 대조 키 1순위 = 번호 일치(P2-3: 번호 토큰은 있는데 그 번호의 전달
+// 항목이 없으면 "없는 번호를 가리킨다" 자체가 신호라 2순위로 넘기지
+// 않고 곧장 ㄴ 후보로 둔다 -- 이 라운드 변이②의 표적) · 2순위(번호 없는
+// 옛 출처) = 시각 창(±15분, 분 추정이면 ±10분) **안에서만** 매칭으로
+// 친다(PM 설계 §(c) "그리고" -- 창 밖에서 인용 앞 8글자만 같은 것은
+// 매칭이 아니다, 이 라운드 변이①의 표적, P1-1). §(c)가 2순위에 나열한
+// "인용 앞 8글자 일치 또는 같은 창 안 한용 항목 존재"는 창 조건과
+// 묶이면 항상 뒤쪽 "같은 창 안 한용 항목 존재"로 흡수된다(창 안의
+// entry가 하나라도 있으면 그 자체로 그 disjunct가 참이 된다) -- 그래서
+// 창 안 존재 하나만 보면 되고, 인용 앞 8글자는 별도 비교가 필요 없다
+// (검토 1R P1-1 제안 그대로 "결과적으로 창 안 전달 항목 존재와 같다").
 function matchOneSourceItem({
   item,
   validEntries,
@@ -1082,13 +1106,11 @@ function matchOneSourceItem({
   ) {
     return "before-format";
   }
-  if (item.number && relayByNumber.has(item.number)) return "matched";
-  const srcPrefix = quotePrefix(item.quote);
+  if (item.number) {
+    return relayByNumber.has(item.number) ? "matched" : "candidate";
+  }
   for (const entry of validEntries) {
     if (relayEntryInWindow(entry, item.timeMs)) return "matched";
-    if (srcPrefix && entry.quote && quotePrefix(entry.quote) === srcPrefix) {
-      return "matched";
-    }
   }
   return "candidate";
 }
@@ -1175,6 +1197,7 @@ export function collectRelayLedger({
     byNumber: relayByNumber,
     duplicateCount,
   } = dedupeRelayEntriesByNumber(relayFiles.entries);
+  const formatStartMs = findFormatStartMs(validEntries);
   const { merged, mergedAwayCount } = mergeSameMinuteSourceItems([
     ...outboxQuotes.items,
     ...inboxQuotes.items,
@@ -1184,9 +1207,21 @@ export function collectRelayLedger({
       items: merged,
       validEntries,
       relayByNumber,
-      formatStartMs: findFormatStartMs(validEntries),
+      formatStartMs,
       inboxNames: inboxQuotes.names,
     });
+
+  // P2-2(이 라운드 변이④의 표적) -- PM 설계 §(b) "소급 = 하지 않는다":
+  // 형식 시작 시각(= 유효 머리줄 최소 시각) 자체가 없으면(formatStartMs
+  // null, "형식 머리줄이 0개") 전달 파일의 `[책임자 경유 · ` 로 시작했지만
+  // 전체 정규식에 안 맞는 줄·중복 번호는 아직 시작되지 않은 형식을
+  // 어겼다고 볼 수 없다 -- 형식 오류 E가 아니라 "형식 이전 · 미계수"
+  // 칸으로 보낸다. 형식이 이미 시작됐으면(formatStartMs !== null) 그
+  // 뒤의 정규식 밖 줄·중복 번호는 그대로 E다(기존 동작 무변).
+  const relayFormatErrorRaw = relayFiles.formatErrorCount + duplicateCount;
+  const formatErrorCount = formatStartMs === null ? 0 : relayFormatErrorRaw;
+  const relayBeforeFormatCount =
+    formatStartMs === null ? relayFormatErrorRaw : 0;
 
   return {
     known: true,
@@ -1195,8 +1230,8 @@ export function collectRelayLedger({
     matchedCount: matched,
     candidateCount: candidates,
     gate7MissingCount: gate7Missing,
-    formatErrorCount: relayFiles.formatErrorCount + duplicateCount,
-    beforeFormatCount: beforeFormat,
+    formatErrorCount,
+    beforeFormatCount: beforeFormat + relayBeforeFormatCount,
     classificationTally: tallyRelayClassification(validEntries),
     scannedRelayFiles: relayFiles.scannedFiles,
     relayReadFailures: relayFiles.readFailures,

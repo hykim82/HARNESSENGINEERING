@@ -28,7 +28,7 @@ import {
   DEFAULT_ARCHIVE_ROOT,
 } from "./partial-count-report.mjs";
 import { runReachOnce } from "./reach-report.mjs";
-import { formatKst } from "./partial-count-core.mjs";
+import { formatKst, renderRelayLedgerAuxLines } from "./partial-count-core.mjs";
 
 const HOUR = 60 * 60 * 1000;
 const DAY = 24 * HOUR;
@@ -1474,7 +1474,13 @@ test("collectRelayLedger: 번호 일치·시각창 매칭·대응 없음·같은
   }
 });
 
-test("collectRelayLedger: 인용 앞 8글자만 일치해도(시각 창 밖이라도) 대응으로 센다", () => {
+// HYK-255-relay-aux-2 P1-1(뒤집기, 이 라운드 변이①의 표적) -- 1R
+// 결과(.harness/rounds/CODER-r1.md)의 이 시험은 "인용 앞 8글자만
+// 일치해도(시각 창 밖이라도) 대응으로 센다"였다(matchedCount 1 ·
+// candidateCount 0). 검토 1R(P1-1)이 PM 설계 §(c) "그리고"를 어겼다고
+// 판정했다 -- 창 밖 인용 일치는 매칭이 아니라 ㄴ 후보다. 아래가 그
+// 뒤집힌 버전(전후 원문은 결과 파일에).
+test("collectRelayLedger: 인용 앞 8글자만 일치해도 시각 창 밖이면 대응이 아니라 ㄴ 후보로 센다(P1-1 뒤집기)", () => {
   const root = tmpDir("nc-pcw-relay-quote-");
   try {
     const relayDir = join(root, "기록");
@@ -1505,8 +1511,271 @@ test("collectRelayLedger: 인용 앞 8글자만 일치해도(시각 창 밖이�
       inboxDir,
     });
     assert.equal(result.known, true);
+    // 뒤집힌 값: 창 밖이라 매칭 0 · ㄴ 후보 1(1R은 matched 1 · candidate 0).
+    assert.equal(result.matchedCount, 0);
+    assert.equal(result.candidateCount, 1);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// HYK-255-relay-aux-2 ⓑ⑵ -- 1R 동작 유지 확인: 같은 인용이라도 시각
+// 창 "안"이면(여기서는 번호 없이 시각만) 여전히 대응으로 센다(위
+// 시험과 짝 -- 창 밖만 ㄴ 후보로 바뀌었을 뿐, 창 안은 회귀 없음).
+test("collectRelayLedger: 창 안이면 인용 앞 8글자가 같아도(또는 달라도) 여전히 대응이다(1R 동작 유지)", () => {
+  const root = tmpDir("nc-pcw-relay-quote-inwin-");
+  try {
+    const relayDir = join(root, "기록");
+    const outboxDir = join(root, "보내는함");
+    const inboxDir = join(root, "받는함");
+    fs.mkdirSync(relayDir, { recursive: true });
+    fs.mkdirSync(outboxDir, { recursive: true });
+    fs.mkdirSync(inboxDir, { recursive: true });
+    fs.writeFileSync(
+      join(relayDir, "전달-q.md"),
+      [
+        "[책임자 경유 · 한용 확정 · #20261101-0900 · 2026-11-01 09:00 KST · 지시 · ㄱ-2]",
+        "> 한용: «같은 앞머리 여덞글자 뒤는달라»",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    // 2026-11-01 09:05 -- #0900과 5분 차(±15분 창 안), 인용 앞 8글자도
+    // 같다.
+    fs.writeFileSync(
+      join(outboxDir, "2026-11-01-0905-가까운시각.md"),
+      "[책임자 경유] 한용 «같은 앞머리 여덞글자 완전히 다른 뒷부분»\n",
+      "utf8",
+    );
+    const result = collectRelayLedger({
+      relayGlob: join(relayDir, "전달-*.md"),
+      outboxDir,
+      inboxDir,
+    });
+    assert.equal(result.known, true);
     assert.equal(result.matchedCount, 1);
     assert.equal(result.candidateCount, 0);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// HYK-255-relay-aux-2 ⓑ⑶ · P2-3(이 라운드 변이②의 표적) -- 출처에
+// `전달 #번호` 토큰이 있는데 그 번호의 전달 항목이 전혀 없으면 "없는
+// 번호를 가리킨다" 자체가 신호라 2순위(시각 창)로 넘기지 않고 곧장
+// ㄴ 후보로 둔다. 아래 출처는 시각이 전달 항목과 창 안(±15분)인데도
+// 번호 토큰이 틀려서 후보여야 한다 -- 2순위로 새면 매칭으로 잘못
+// 세어진다.
+test("collectRelayLedger: 전달 #번호 토큰이 있는데 짝이 없으면 시각이 창 안이어도 2순위로 안 넘기고 ㄴ 후보다(P2-3)", () => {
+  const root = tmpDir("nc-pcw-relay-badnum-");
+  try {
+    const relayDir = join(root, "기록");
+    const outboxDir = join(root, "보내는함");
+    const inboxDir = join(root, "받는함");
+    fs.mkdirSync(relayDir, { recursive: true });
+    fs.mkdirSync(outboxDir, { recursive: true });
+    fs.mkdirSync(inboxDir, { recursive: true });
+    fs.writeFileSync(
+      join(relayDir, "전달-badnum.md"),
+      [
+        "[책임자 경유 · 한용 확정 · #20261101-0900 · 2026-11-01 09:00 KST · 지시 · ㄱ-2]",
+        "> 한용: «번호 불일치 창안 발화»",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    // 2026-11-01 09:05(전달 #0900과 5분 차, 창 안) -- 그러나 토큰이
+    // 가리키는 번호(#20261101-9999)는 전달 파일에 없다.
+    fs.writeFileSync(
+      join(outboxDir, "2026-11-01-0905-없는번호.md"),
+      "[책임자 경유 · 한용 확정 · 전달 #20261101-9999] 한용 «번호 불일치 창안 발화 그대로»\n",
+      "utf8",
+    );
+    const result = collectRelayLedger({
+      relayGlob: join(relayDir, "전달-*.md"),
+      outboxDir,
+      inboxDir,
+    });
+    assert.equal(result.known, true);
+    assert.equal(result.matchedCount, 0);
+    assert.equal(result.candidateCount, 1);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// HYK-255-relay-aux-2 ⓑ⑷ · P2-4(이 라운드 변이③의 표적) -- ㄱ-7 짝은
+// "같은 날짜 + 같은 HHMM"의 상신 파일만 인정한다. 다른 날 같은 HHMM,
+// 또는 이름 어딘가에 같은 네 자리가 낀 파일은 짝이 아니다.
+test("collectRelayLedger: ㄱ-7 짝은 다른 날 같은 HHMM이나 이름 속 같은 네 자리로는 안 되고, 같은 날 같은 HHMM만 된다(P2-4)", () => {
+  const root = tmpDir("nc-pcw-relay-gate7-date-");
+  try {
+    const relayDir = join(root, "기록");
+    const outboxDir = join(root, "보내는함");
+    const inboxDir = join(root, "받는함");
+    fs.mkdirSync(relayDir, { recursive: true });
+    fs.mkdirSync(outboxDir, { recursive: true });
+    fs.mkdirSync(inboxDir, { recursive: true });
+    // 전달 파일은 비워 둔다(이 시험은 ㄱ-7 분기만 본다 -- 대응 0 ·
+    // formatStartMs는 null이라 전부 형식 이전으로 빠지지 않도록 유효
+    // 항목 하나를 아주 먼 미래에 둔다. 모든 출처가 그보다 전이면
+    // before-format으로 빠져서 ㄱ-7 분기 자체가 평가되지 않으므로,
+    // 유효 항목의 시각을 출처들보다 훨씬 이전으로 둔다.
+    fs.writeFileSync(
+      join(relayDir, "전달-anchor.md"),
+      [
+        "[책임자 경유 · 한용 확정 · #20200101-0000 · 2020-01-01 00:00 KST · 지시 · ㄱ-1]",
+        "> 한용: «형식 시작 고정용 더미»",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    // out1 -- 2026-11-01 "판정-0900"(ㄱ-7 짝 후보 1). 받는함에 "다른
+    // 날(11-02) 같은 HHMM 0900 상신" 파일 + "이름 속에 0900이 낀(상신
+    // 아닌 접두)" 파일만 있다 -- 둘 다 짝이 아니어야 한다.
+    fs.writeFileSync(
+      join(outboxDir, "2026-11-01-0900-판정-0900.md"),
+      "[책임자 경유] 한용 «짝 없는 ㄱ-7 발화 하나»\n",
+      "utf8",
+    );
+    fs.writeFileSync(
+      join(inboxDir, "2026-11-02-0900-상신-확인.md"),
+      "다른 날 같은 HHMM -- 짝이면 안 된다\n",
+      "utf8",
+    );
+    fs.writeFileSync(
+      join(inboxDir, "2026-11-03-0901-그냥-0900든파일.md"),
+      "이름 속에 우연히 0900이 낀 상신 파일 -- 짝이면 안 된다\n",
+      "utf8",
+    );
+    const resultNoMatch = collectRelayLedger({
+      relayGlob: join(relayDir, "전달-*.md"),
+      outboxDir,
+      inboxDir,
+    });
+    assert.equal(resultNoMatch.known, true);
+    assert.equal(resultNoMatch.gate7MissingCount, 0);
+    assert.equal(resultNoMatch.candidateCount, 1);
+
+    // 같은 날(2026-11-01) 같은 HHMM(0900) 상신 파일을 추가하면 그제서야
+    // 짝이다.
+    fs.writeFileSync(
+      join(inboxDir, "2026-11-01-0900-상신-확인.md"),
+      "같은 날 같은 HHMM -- 짝이어야 한다\n",
+      "utf8",
+    );
+    const resultMatch = collectRelayLedger({
+      relayGlob: join(relayDir, "전달-*.md"),
+      outboxDir,
+      inboxDir,
+    });
+    assert.equal(resultMatch.known, true);
+    assert.equal(resultMatch.gate7MissingCount, 1);
+    assert.equal(resultMatch.candidateCount, 0);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// HYK-255-relay-aux-2 ⓑ⑸ · P2-2(이 라운드 변이④의 표적) -- PM 설계
+// §(b) "소급 0": 형식이 아직 시작되지 않았으면(유효 머리줄 0개)
+// `[책임자 경유 · ` 로 시작하는 옛 줄은 형식 오류 E가 아니라 "형식
+// 이전 · 미계수"로 간다. 형식이 이미 시작된 뒤에는(유효 머리줄 1개
+// 이상) 그 뒤의 정규식 밖 줄은 그대로 E다(기존 동작 무변).
+test("collectRelayLedger: 형식 시작 전 정규식 밖 줄은 E가 아니라 형식 이전이고, 형식 시작 뒤는 그대로 E다(P2-2)", () => {
+  const root = tmpDir("nc-pcw-relay-preformat-");
+  try {
+    const relayDir = join(root, "기록");
+    const outboxDir = join(root, "보내는함");
+    const inboxDir = join(root, "받는함");
+    fs.mkdirSync(relayDir, { recursive: true });
+    fs.mkdirSync(outboxDir, { recursive: true });
+    fs.mkdirSync(inboxDir, { recursive: true });
+
+    // 유효 머리줄이 0개인 전달 파일 -- 옛 형식(검토자 묶음 E 모양) 2편.
+    fs.writeFileSync(
+      join(relayDir, "전달-old.md"),
+      [
+        "[책임자 경유 · 한용 확정] 옛 형식 줄 1",
+        "[책임자 경유 · B-9] 옛 형식 줄 2",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    const beforeStart = collectRelayLedger({
+      relayGlob: join(relayDir, "전달-*.md"),
+      outboxDir,
+      inboxDir,
+    });
+    assert.equal(beforeStart.known, true);
+    assert.equal(beforeStart.formatErrorCount, 0);
+    assert.equal(beforeStart.beforeFormatCount, 2);
+
+    // 유효 머리줄 1개를 더하면(형식 시작) 같은 두 옛 줄은 그대로지만
+    // 이제는 형식 시작 "뒤"로 보여 E로 센다.
+    fs.writeFileSync(
+      join(relayDir, "전달-new.md"),
+      [
+        "[책임자 경유 · 한용 확정 · #20261101-0900 · 2026-11-01 09:00 KST · 지시 · ㄱ-2]",
+        "> 한용: «형식 시작됨»",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    const afterStart = collectRelayLedger({
+      relayGlob: join(relayDir, "전달-*.md"),
+      outboxDir,
+      inboxDir,
+    });
+    assert.equal(afterStart.known, true);
+    assert.equal(afterStart.formatErrorCount, 2);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// HYK-255-relay-aux-2 ⓑ⑹ · P2-1(이 라운드 변이⑤의 표적) -- 전달 파일
+// 1개가 EISDIR(폴더를 파일처럼 읥으려다 실패)이면 readFailures에
+// 흔적이 남고, 보조 관측 줄에 "읽기 실패 N건"이 찍히며 "대응
+// 없음(ㄴ 후보)"은 확정 문구가 아니게 괄호가 붙는다(검토자 묶음 C
+// 모양 재현).
+test("collectRelayLedger: 전달 파일 1개가 EISDIR이면 relayReadFailures에 남고, 보조 관측 줄이 읍기 실패 건수와 ㄴ 후보 불확실 표기를 낸다(P2-1)", () => {
+  const root = tmpDir("nc-pcw-relay-eisdir-");
+  try {
+    const relayDir = join(root, "기록");
+    const outboxDir = join(root, "보내는함");
+    const inboxDir = join(root, "받는함");
+    fs.mkdirSync(relayDir, { recursive: true });
+    fs.mkdirSync(outboxDir, { recursive: true });
+    fs.mkdirSync(inboxDir, { recursive: true });
+    fs.writeFileSync(
+      join(relayDir, "전달-ok.md"),
+      [
+        "[책임자 경유 · 한용 확정 · #20261101-0900 · 2026-11-01 09:00 KST · 지시 · ㄱ-2]",
+        "> 한용: «정상 파일»",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    // "전달-잠김.md"를 폴더로 만들면 readFileSync가 EISDIR을 던진다.
+    fs.mkdirSync(join(relayDir, "전달-잠김.md"));
+    fs.writeFileSync(
+      join(outboxDir, "2026-11-05-0000-무관.md"),
+      "[책임자 경유] 한용 «전달 기록과 무관한 발화»\n",
+      "utf8",
+    );
+    const result = collectRelayLedger({
+      relayGlob: join(relayDir, "전달-*.md"),
+      outboxDir,
+      inboxDir,
+    });
+    assert.equal(result.known, true);
+    assert.deepEqual(result.relayReadFailures, ["전달-잠김.md"]);
+    const lines = renderRelayLedgerAuxLines(result);
+    assert.ok(lines[0].includes("읽기 실패 1건"));
+    assert.ok(
+      lines[0].includes("대응 없음(ㄴ 후보) 1건(전달 파일 읽기 실패로 불확실)"),
+    );
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

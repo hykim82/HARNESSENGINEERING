@@ -357,11 +357,27 @@ export function renderRelayLedgerAuxLines(relayLedgerResult) {
     ];
   }
   const r = relayLedgerResult;
+  // P2-1(이 라운드 변이⑤의 표적) -- 전달 파일 "개별" 읽기 실패는
+  // readRelayFiles가 조용히 0으로 접지 않고 relayReadFailures 배열에
+  // 담아 올려주는데, 이 줄이 그 값을 안 보이면 다시 조용한 접음이
+  // 된다(보내는함 보조 칸 collectOutboxHeaderCounts의 readFailures
+  // 표기 관례와 동일, :1339 꼴). 읽기 실패가 1건이라도 있으면 "대응 없음(ㄴ
+  // 후보)" 수치를 확정으로 보이지 않게 괄호 문구를 붙인다 -- 형식
+  // 머리줄이 든 파일 하나가 실패하면 유효 항목이 적게 보여 K가 과다
+  // 또는 과소하게 나올 수 있다(검토 1R P2-1).
+  const readFailureCount = Array.isArray(r.relayReadFailures)
+    ? r.relayReadFailures.length
+    : 0;
+  const candidateNote =
+    readFailureCount > 0 ? "(전달 파일 읽기 실패로 불확실)" : "";
+  const readFailureNote =
+    readFailureCount > 0 ? ` · 읽기 실패 ${readFailureCount}건` : "";
   const line1 =
     `- ORCH-writeable 보조 관측(전달 파일 대조): 출처 한용 발화 ${r.sourceUtteranceCount}건 · ` +
-    `전달 항목 대응 ${r.matchedCount}건 · 대응 없음(ㄴ 후보) ${r.candidateCount}건 · ` +
+    `전달 항목 대응 ${r.matchedCount}건 · ` +
+    `대응 없음(ㄴ 후보) ${r.candidateCount}건${candidateNote} · ` +
     `형식 오류 ${r.formatErrorCount}건 · ㄱ-7 기록 누락 ${r.gate7MissingCount}건 · ` +
-    `형식 이전 구간 미계수 ${r.beforeFormatCount}건 — 독립 계수에 미산입`;
+    `형식 이전 구간 미계수 ${r.beforeFormatCount}건${readFailureNote} — 독립 계수에 미산입`;
   const tallyText = Object.entries(r.classificationTally)
     .map(([key, count]) => `${key} ${count}`)
     .join(" · ");
