@@ -136,57 +136,101 @@ export function findFirstObservation({ taskId, droppedAt, role, harnessDir }) {
   return active;
 }
 
-// HYK-492 §(b) ②′ (PM 1R 설계 §(b) ⑴ 원문): «지문 기준값» 조회 --
-// findFirstObservation(바로 위, 바이트 무변)과 거의 같은 순회이지만,
-// `refused: true` 항목(아래 markRefused)도 `consumed: true`와 똑같이
-// "활성 관측을 리셋"으로 다룬다는 점만 다르다. S 게이트(HYK-424
-// base-copy · HYK-383 head_commit, relay-handshake.mjs 자신의 호출부
-// 참조)가 이 세대를 거부해 markRefused가 append되면, 그 뒤에 기록되는
-// 다음 관측이 이 함수의 기준값이 된다 -- DONE 줄 기준값(findFirstObservation)
-// 은 markRefused로 리셋되지 않으므로 세대의 진짜 첫 관측에 그대로
-// 고정된다(452902c가 반려한 모양 -- 거부 = tombstone이라 원본이 없어져
-// DONE까지 바꿔치기할 수 있었던 것 -- 을 다시 열지 않는다, 이 파일
-// 맨 위 주석 참조). 거부가 한 번도 없던 세대에서는 이 함수와
-// findFirstObservation이 항상 같은 항목을 돌려준다(둘 다 세대의 첫
-// 관측) -- S 밖 게이트(시간 게이트·러너 영수증·G1)는 markRefused를
-// 부르지 않으므로 그 세대들에서는 이 함수가 추가된 전과 바이트 하나도
-// 다르지 않게 움직인다(§4 무회귀).
-export function findFingerprintBaseline({
+// HYK-492-refused-obs-2 §(b) ②″ (2R 좁히기, REVIEW 1R P2-4 반려 -- review.md
+// §3 원문: "일부러 S 거부를 유도하면 DONE 앞 본문 전체 -- REVIEW의 판정
+// 낱말까지 -- 를 다시 쓴 뒤 같은 세대로 소비된다"): 1R은 지문 기준값
+// 자체를 refused/consumed에서 null로 "리셋"했다 -- 그 리셋 뒤 첫 재관측이
+// 무엇이든 스스로와 비교되므로, head_commit 한 줄만 바뀐 것인지 본문
+// 전체(verdict: 포함)가 바뀐 것인지 구별하지 못했다. 2R은 "리셋"
+// 개념을 버리고, 세대의 진짜 첫 관측(existing, findFirstObservation)에
+// 그대로 고정된 채 "head_commit 줄 하나만 값이 달라도 괜찮다"는 좁은
+// 예외만 허용한다 -- 아래 blankHeadCommitLine/checkIntermediateRewrite
+// 참조. 이 함수(hasRefusalForGeneration)는 그 예외를 켤지 결정하는
+// 스위치일 뿐, 비교 기준값 자체를 바꾸지 않는다.
+const HEAD_COMMIT_LINE_RE = /^head_commit:.*$/gm;
+
+// 지문 비교 전에 "head_commit:" 로 시작하는 줄(들)의 값을 지운다 -- 그
+// 줄의 «값»만 달라져도 괜찮다는 owner ruling B(coder-task.md §1)를
+// 그대로 코드로 옮긴 것: 줄 자체가 없어지거나(삭제), 다른 자리에 새로
+// 생기거나(삽입), 가리키는 바이트 길이/위치가 바뀌면(그 두 변형 모두
+// 전체 문자열 비교에서 여전히 다르게 보인다) 이 치환은 그 차이를
+// 지우지 않는다 -- 오직 "head_commit:" 로 시작하는 줄의 콘텐츠 한
+// 종류만 지운다(coder-task.md P2-4: "줄 위치·개수 무변 · 그 줄의
+// 값만").
+function blankHeadCommitLine(resultContent) {
+  return resultContent.replace(HEAD_COMMIT_LINE_RE, "head_commit:");
+}
+
+// 한 번의 순회로 recordFirstDoneObservation/markRefused(아래)의 중복
+// 방지와 checkIntermediateRewrite의 예외 스위치가 공유하는 세 값을
+// 전부 계산한다(파일을 따로따로 다시 읽지 않는다) --
+//   - lastObservation: 이 (taskId, droppedAt)의 "관측" 항목(resultFingerprint
+//     를 가진 항목) 중 가장 최근 것. consumed로 리셋된다(세대가 끝나면
+//     null).
+//   - refusedSinceLastObservation: lastObservation 뒤에 refused 표시가
+//     있었는가(= 아직 그 거부를 "해소"하는 새 관측이 기록되지 않은
+//     상태) -- 다음 관측 항목이 나타나면 다시 false로 접힌다(그 관측이
+//     그 거부를 "해소"했으므로). HYK-492-refused-obs-1 P2-2(재관측/거부
+//     표시 중복 0) 판정에 쓰인다.
+//   - refusedSinceConsumed: 이 세대(마지막 consumed 이후)에 refused
+//     표시가 «한 번이라도» 있었는가 -- 새 관측이 나타나도 꺼지지
+//     않는다(세대가 끝날 때까지 그대로 유지, owner ruling B가 "그
+//     세대의 첫 관측"을 기준으로 말했을 뿐 "마지막 거부 이후"로
+//     좁히지 않았으므로).
+function scanRefusalState({ taskId, droppedAt, role, harnessDir }) {
+  const entries = readEntries(logPath(role, harnessDir));
+  let lastObservation = null;
+  let refusedSinceLastObservation = false;
+  let refusedSinceConsumed = false;
+  for (const entry of entries) {
+    if (!sameRound(entry, taskId, droppedAt)) continue;
+    if (entry.consumed === true) {
+      lastObservation = null;
+      refusedSinceLastObservation = false;
+      refusedSinceConsumed = false;
+      continue;
+    }
+    if (entry.refused === true) {
+      refusedSinceLastObservation = true;
+      refusedSinceConsumed = true;
+      continue;
+    }
+    lastObservation = entry;
+    refusedSinceLastObservation = false;
+  }
+  return { lastObservation, refusedSinceLastObservation, refusedSinceConsumed };
+}
+
+// checkIntermediateRewrite(아래)가 head_commit-only 예외를 켤지 묻는
+// 질문 그 자체를 export한다 -- S 밖 게이트(시간 게이트·러너 영수증·G1)는
+// markRefused를 전혀 부르지 않으므로 그 세대들에서는 항상 false이고
+// (§4 무회귀), S 게이트(HYK-424/HYK-383)가 한 번이라도 거부한 세대에서만
+// true가 된다.
+export function hasRefusalForGeneration({
   taskId,
   droppedAt,
   role,
   harnessDir,
 }) {
-  const entries = readEntries(logPath(role, harnessDir));
-  let active = null;
-  for (const entry of entries) {
-    if (!sameRound(entry, taskId, droppedAt)) continue;
-    if (entry.consumed === true || entry.refused === true) {
-      active = null;
-      continue;
-    }
-    if (active === null) active = entry;
-  }
-  return active;
+  return scanRefusalState({ taskId, droppedAt, role, harnessDir })
+    .refusedSinceConsumed;
 }
 
-// 이 (taskId, droppedAt) 세대에 대해 «지문 기준값이 아직 없을 때»에만
-// append한다(이미 이번 세대의 지문 기준값이 있으면 아무것도 하지 않는다
-// -- 덮어쓰지 않는다, append-only 계약). Best-effort: 실패해도 절대
-// throw하지 않는다(checkRelayHandshake 자신의 판정에 영향을 주지 않아야
-// 한다는 이 파일의 house style, spawnAdmissionCompletion/
+// 이 (taskId, droppedAt) 세대에 대해 «새로 적을 내용이 있을 때»에만
+// append한다 -- 덮어쓰지 않는다(append-only 계약). Best-effort: 실패해도
+// 절대 throw하지 않는다(checkRelayHandshake 자신의 판정에 영향을 주지
+// 않아야 한다는 이 파일의 house style, spawnAdmissionCompletion/
 // autoWriteConsumptionReceipt와 동일 원칙).
-// HYK-492 §(b) ②′: 게이트를 findFirstObservation(세대의 진짜 첫 관측,
-// markRefused로 리셋되지 않음)에서 findFingerprintBaseline(markRefused
-// 뒤 리셋됨)으로 바꿨다 -- 거부가 없던 세대에서는 두 함수가 항상 같은
-// 항목을 돌려주므로(위 findFingerprintBaseline 자신의 헤더 참조) 이
-// 함수의 "두 번째 폴부터는 아무것도 안 쓴다"는 기존 동작은 정상 라운드
-// 에서 바이트 하나도 바뀌지 않는다(§4 무회귀). S 게이트가 이 세대를
-// 거부해 markRefused가 append된 뒤에는 findFingerprintBaseline이
-// null을 돌려주므로, 다음 관측이 "거부 뒤 첫 관측"으로 새로 기록된다
-// -- 이 함수 이름이 암시하는 "세대당 한 번"은 더 정확히는 "거부 표시
-// 당 한 번"이다(이름은 과거 호환을 위해 그대로 둔다, 모든 기존
-// export가 이 이름으로 import된다).
+// HYK-492-refused-obs-2 §(b) ②″ (P2-2, REVIEW 1R 지적 -- 1R은 거부
+// 표시 뒤 «내용이 바뀌지 않아도» 매 폴마다 새 관측 항목을 appen드해
+// 로그가 폴 횟수에 비례해 선형으로 자랐다, review.md §3 "growth.mjs"
+// 실측): 이제 "아직 적은 적 없다"(lastObservation===null) 또는 "직전
+// 관측과 지문이 다르다"일 때만 적는다 -- 그리고 지문이 다를 때도, 그
+// 차이가 S 게이트 거부 뒤(refusedSinceLastObservation)에 일어난 것이
+// 아니면 적지 않는다(거부 없이 내용만 조용히 달라지는 경로는 여전히
+// checkIntermediateRewrite의 엄격 비교(existing과 바이트 대조)에
+// 맡긴다 -- 거부 없이 재기준을 열면 HYK-492-refused-obs-1이 막으려던
+// 바로 그 "경고 없이 통과" 구멍이 다시 열린다, §3 범위 제한 무변).
 export function recordFirstDoneObservation({
   taskId,
   droppedAt,
@@ -197,19 +241,31 @@ export function recordFirstDoneObservation({
   observedAtMs = Date.now(),
 }) {
   try {
-    const existing = findFingerprintBaseline({
+    const { lastObservation, refusedSinceLastObservation } = scanRefusalState({
       taskId,
       droppedAt,
       role,
       harnessDir,
     });
-    if (existing)
-      return { recorded: false, reason: "already observed", existing };
+    if (lastObservation) {
+      const unchanged =
+        fingerprint(resultContent) === lastObservation.resultFingerprint;
+      if (unchanged || !refusedSinceLastObservation) {
+        return {
+          recorded: false,
+          reason: "already observed",
+          existing: lastObservation,
+        };
+      }
+    }
     const entry = {
       taskId,
       droppedAt,
       observedAtMs,
       resultFingerprint: fingerprint(resultContent),
+      resultFingerprintSansHeadCommit: fingerprint(
+        blankHeadCommitLine(resultContent),
+      ),
       doneLineRaw: doneLineRaw.trim(),
     };
     appendFileSync(
@@ -257,25 +313,46 @@ export function markObservationConsumed({
 // 아니라 `refused`라는 별도 필드를 쓰므로, findFirstObservation(바이트
 // 무변)은 이 항목을 완전히 무시한다(그 함수는 `consumed === true`만
 // 리셋 신호로 본다) -- DONE 줄 기준값은 markRefused 뒤에도 세대의 진짜
-// 첫 관측에 그대로 고정된다. 오직 findFingerprintBaseline(위 함수)만
-// 이 표시를 리셋 신호로 읽어, 지문 기준값만 다시 잡는다. 452902c가
-// 반려한 모양(거부 = tombstone => "원본이 없어져 DONE까지 바꿔치기할
-// 수 있다")을 다시 열지 않는 이유가 바로 이것이다: 이 표시는 "세대가
-// 끝났다"가 아니라 "지문 기준값만 다시 잡아라"는 뜻이고, DONE 줄은
-// 이 표시 뒤에도 여전히 원래 값과 비교된다. relay-handshake.mjs가
-// S 게이트(HYK-424 base-copy · HYK-383 head_commit)가 거부하는 바로
-// 그 지점에서만 이것을 부른다(S 밖의 시간 게이트·러너 영수증·G1은
-// 부르지 않는다 -- 그 축들은 재기준이 없다). Best-effort, 항상
-// append만 한다(이 파일의 다른 mark 함수들과 동일한 house style).
+// 첫 관측에 그대로 고정된다. relay-handshake.mjs가 S 게이트(HYK-424
+// base-copy · HYK-383 head_commit)가 거부하는 바로 그 지점에서만
+// 이것을 부른다(S 밖의 시간 게이트·러너 영수증·G1은 부르지 않는다 --
+// 그 축들은 재기준이 없다). Best-effort, 항상 append만 한다(이 파일의
+// 다른 mark 함수들과 동일한 house style).
+// HYK-492-refused-obs-2 §(b) ②″ (P2-2): `resultContent`는 선택
+// 인자다(생략하면 과거 1R 동작 그대로 매번 append -- 이 파일 자신의
+// 단위 시험(hyk492-value-refusal-observation.test.mjs (492-6))처럼
+// 판정에 쓰이는 정확한 값이 중요하지 않은 호출자를 위한 하위호환).
+// relay-handshake.mjs는 이제 S 게이트가 판정 중이던 바로 그
+// `judgedRegion`을 넘긴다 -- 그 값이 «직전 관측 뒤 아직 해소되지 않은
+// refused 표시»와 같은 내용이면(= 워커가 아무것도 고치지 않고 같은
+// 폴이 반복됨), 또 하나의 refused 줄을 append하지 않는다(review.md
+// §3 "growth.mjs" 실측이 가리킨 바로 그 성장 -- 관측 쪽만 막아도
+// refused 쪽이 계속 자라면 P2-2는 반만 닫힌다).
 export function markRefused({
   taskId,
   droppedAt,
   role,
   harnessDir,
   reason,
+  resultContent,
   refusedAtMs = Date.now(),
 }) {
   try {
+    if (typeof resultContent === "string") {
+      const { lastObservation, refusedSinceLastObservation } = scanRefusalState(
+        { taskId, droppedAt, role, harnessDir },
+      );
+      if (
+        refusedSinceLastObservation &&
+        lastObservation &&
+        lastObservation.resultFingerprint === fingerprint(resultContent)
+      ) {
+        return {
+          recorded: false,
+          reason: "already refused (unchanged content)",
+        };
+      }
+    }
     const entry = { taskId, droppedAt, refused: true, refusedAtMs };
     if (reason) entry.reason = reason;
     appendFileSync(
@@ -301,25 +378,18 @@ export function markRefused({
 // 관측했는데 그때와 지금 값이 다를 때»에만 발생한다. 이미 소비-표시된
 // 세대는 findFirstObservation이 null을 반환하므로(위 함수 헤더 참조)
 // 다음 라운드가 같은 키를 재사용해도 오탐하지 않는다.
-// HYK-492 §(b) ②′: DONE 줄 비교 기준값(`existing`, findFirstObservation)은
-// 바뀌지 않았다 -- 세대의 진짜 첫 관측에 그대로 고정된다(이 함수 자신의
-// doneLineRaw 비교는 무변, coder-task.md product_scope ⑴ 요건). 지문
-// 비교 기준값만 findFingerprintBaseline으로 바꿨다: 거부가 없던 세대에서는
-// findFingerprintBaseline이 항상 existing과 같은 항목이라(위
-// findFingerprintBaseline 자신의 헤더 참조) 오탐 0이 그대로 유지된다
-// (§4 무회귀). S 게이트 거부 뒤에는 recordFirstDoneObservation(바로 위)
-// 이 이미 "거부 뒤 첫 관측"을 새로 기록했으므로(record-then-compare는
-// 항상 record가 먼저 실행된다, observeDoneLine 참조) 여기서
-// findFingerprintBaseline을 다시 읽으면 그 새 항목을 돌려준다 -- 방금
-// 쓴 값과 스스로 비교하므로 지문 축은 항상 일치한다(기존 "처음 관측 =
-// 스스로와 비교" 패턴과 같다). `existing`이 null이면(이 세대의 첫 관측
-// 자체가 없음) 위에서 이미 걸러지므로, 그 아래에서 fingerprintBaseline이
-// null일 수는 없다(적어도 existing 자신이 findFingerprintBaseline에도
-// 걸린다) -- `?? existing`는 오직 이 함수가 recordFirstDoneObservation을
-// 거치지 않고 "직접" 호출되는 기존 단위 시험들(수동으로 seed한 로그,
-// first-observation.test.mjs의 round2Rewrite 등)을 위한 방어적 fallback
-// 이다(그 경로에서는 findFingerprintBaseline이 기존 findFirstObservation
-// 과 똑같이 동작해야 하고, `?? existing`가 그 동등성을 보장한다).
+// HYK-492-refused-obs-2 §(b) ②″ (P2-4, REVIEW 1R 반려 -- review.md §3
+// 원문: "일부러 S 거부를 유도하면 DONE 앞 본문 전체 -- 판정 낱말까지 --
+// 를 다시 쓸 수 있었다"): DONE 줄 비교 기준값(`existing`,
+// findFirstObservation)은 1R처럼 세대의 진짜 첫 관측에 그대로
+// 고정된다 -- 바뀐 것은 "지문이 다르면 곧바로 거부"라는 1R의 단순
+// 규칙이다. 지금은 지문이 달라도, ⓐ 이 세대가 S 게이트에 한 번이라도
+// 거부된 적이 있고(hasRefusalForGeneration) ⓑ head_commit 줄을
+// 지운(blankHeadCommitLine) 지문이 세대 첫 관측의 그것과 «그래도»
+// 같다면(= head_commit 줄 «하나만» 달랐다는 뜻) 그 차이 하나만 눈감아
+// 준다. S 거부가 한 번도 없었거나, head_commit 말고 다른 글자가 단
+// 하나라도 달랐으면(검토자 반례 C2b: verdict: rejected -> approved
+// 포함) 이 눈감아주기는 켜지지 않고 1R 이전과 똑같이 즉시 거부한다.
 export function checkIntermediateRewrite({
   taskId,
   droppedAt,
@@ -336,18 +406,21 @@ export function checkIntermediateRewrite({
       harnessDir,
     });
     if (!existing) return { rewritten: false, reason: "no prior observation" };
-    const fingerprintBaseline =
-      findFingerprintBaseline({ taskId, droppedAt, role, harnessDir }) ??
-      existing;
     const currentFingerprint = fingerprint(resultContent);
     const currentDoneLine = doneLineRaw.trim();
+    const doneLineMatches = existing.doneLineRaw === currentDoneLine;
+    const exactBodyMatches = existing.resultFingerprint === currentFingerprint;
+    const headCommitOnlyDiffAllowed =
+      !exactBodyMatches &&
+      typeof existing.resultFingerprintSansHeadCommit === "string" &&
+      existing.resultFingerprintSansHeadCommit ===
+        fingerprint(blankHeadCommitLine(resultContent)) &&
+      hasRefusalForGeneration({ taskId, droppedAt, role, harnessDir });
     const rewritten =
-      fingerprintBaseline.resultFingerprint !== currentFingerprint ||
-      existing.doneLineRaw !== currentDoneLine;
+      !doneLineMatches || (!exactBodyMatches && !headCommitOnlyDiffAllowed);
     return {
       rewritten,
       existing,
-      fingerprintBaseline,
       currentFingerprint,
       currentDoneLine,
     };
@@ -493,6 +566,7 @@ if (
             role: payload.role,
             harnessDir,
             reason: payload.reason,
+            resultContent: payload.resultContent,
           })
         : observeDoneLine({
             taskId: payload.taskId,

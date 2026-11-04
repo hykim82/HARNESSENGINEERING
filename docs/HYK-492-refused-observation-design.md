@@ -92,13 +92,57 @@ core.droppedMatch[1].trim(), ...})`.
 
 STALE(`STALE_DONE_PREDATES_DROP`)·mislabel·future-skew·러너 영수증·G1은
 `markRefused`를 전혀 부르지 않는다 -- 그래서 그 축들의 거부 뒤에는
-`findFingerprintBaseline`이 `findFirstObservation`과 똑같이 동작하고,
-거부 전과 바이트 하나도 다르지 않게 움직인다(§4 무회귀). 구조적으로도
+`hasRefusalForGeneration`이 항상 false이고(이 세대에 `refused:true` 항목
+자체가 없으므로), head_commit-only 예외(아래 §5)가 켜질 일이 없다 --
+거부 전과 바이트 하나도 다르지 않게 움직인다(§6 무회귀). 구조적으로도
 STALE은 `checkRewriteAndStaleness`에서 `baseCopyVerdict`/`headCommitVerdict`
 보다 **먼저** 평가되므로, STALE이 거부하는 라운드는 S 게이트 함수
 자체에 도달하지도 않는다.
 
-## 4. 한계(정직)
+## 5. 2R(②″) 좁히기 -- head_commit 줄 «하나만» 눈감아준다
+
+REVIEW 1R(review.md §3 P2-4)이 반려한 폭: 1R은 S 게이트가 거부한 뒤
+지문 기준값 자체를 `null`로 "리셋"했다(`findFingerprintBaseline`). 그
+리셋 뒤 첫 재관측은 무엇이든 "스스로와 비교"되므로 head_commit 줄 하나만
+바뀐 것인지, DONE 앞 본문 전체(REVIEW의 `verdict:` 판정 낱말 포함)가
+바뀐 것인지 구별하지 못했다 -- 실측(C2b): 383 거부를 유도한 뒤
+head_commit을 고치면서 `verdict: rejected`를 `approved`로 같이 바꿔도
+같은 세대로 통과했다(ok:true).
+
+②″는 "리셋" 개념을 버린다. 비교 기준값은 1R 이전과 같이 항상 세대의
+진짜 첫 관측(`existing`, `findFirstObservation`, 바이트 무변)에 고정된
+채다 -- 다만 그 비교 자체가 바이트 완전 일치 하나만이 아니라 **둘 중
+하나**가 되었다:
+
+1. `existing.resultFingerprint === fingerprint(resultContent)` (바이트
+   완전 일치, 1R 이전과 동일), 또는
+2. 다음 셋이 **모두** 참일 때만: ⓐ 위 1이 거짓이고(즉 뭔가 다르고) ⓑ
+   `blankHeadCommitLine`(head_commit: 줄의 값만 지우는 정규식 치환)으로
+   양쪽을 정규화한 지문이 그래도 일치하고(= head_commit 줄 «하나만»의
+   값이 달랐다는 뜻, 그 줄의 위치·개수가 달라지거나 다른 줄이 단 한
+   글자라도 달랐으면 이 정규화 지문도 달라진다) ⓒ 이 세대가 S 게이트에
+   한 번이라도 거부된 적이 있다(`hasRefusalForGeneration`, `consumed`에만
+   리셋되는 생성-전역 스위치 -- "마지막 거부 이후"로 좁히지 않는다).
+
+DONE 줄 비교(`existing.doneLineRaw !== currentDoneLine`)는 완전히
+그대로다 -- 위 두 경로 중 어느 쪽으로 본문이 "일치"하더라도 DONE 줄이
+한 글자라도 다르면 여전히 거부된다(452902c가 막은 모양, mut-2/mut-5가
+이 두 축을 각각 따로 고정한다).
+
+## 6. P2-2: 거부가 고쳐지지 않은 재폴은 원장을 키우지 않는다
+
+1R은 거부 표시 뒤 "아직 재관측이 없으면 기록한다"는 게이트만 썼다 --
+내용이 전혀 바뀌지 않은 채 같은 폴이 반복돼도(워커가 아무것도 고치지
+않음) 매 폴마다 관측 1줄 + refused 1줄이 새로 쌓였다(review.md §3
+"growth.mjs" 실측: 4회 폴 -> 8줄). ②″는 "직전 관측과 지문이 같으면
+적지 않는다"는 조건을 `recordFirstDoneObservation`과 `markRefused`
+양쪽에 똑같이 추가한다 -- 관측 쪽만 막으면 refused 쪽이 계속 자라
+반만 닫히므로, 두 mark 함수 모두 "거부된 적이 있고(refusedSinceLastObservation)
+그 직전 관측과 지문이 같다"일 때만 조용히 건너뛴다. 내용이 실제로
+달라지면(거부 뒤의 정당한 수정이든, 거부 없이 조용한 변조든) 평소처럼
+기록되거나 거부된다 -- 이 중복 방지는 "똑같은 재시도"만 골라낸다.
+
+## 7. 한계(정직)
 
 - 거부 표시 줄은 워커가 쓸 수 있는 표면(관측 원장 = 워크트리 안)에
   있다 -- HYK-412 §5-(d)와 같은 한계(기계 신뢰 경계가 아니라 best-effort
@@ -109,5 +153,11 @@ STALE은 `checkRewriteAndStaleness`에서 `baseCopyVerdict`/`headCommitVerdict`
   PM 설계 §(h) 해석 확인 범위 그대로).
 - DONE 줄까지 고친 경우는 여전히 같은 세대에서 재소비할 수 없다 -- 그
   경우는 관제실 ORCH70 §31(새 워크트리 + 새 라벨)로 간다.
+- 손으로 위조한 `refused:true` 줄(관측 원장 = 워크트리 안의 파일이라
+  워커가 쓸 수 있는 표면, 위 첫 항목과 같은 한계)은 S 밖 거부에도
+  head_commit-only 눈감아주기를 켤 수 있다 -- 하지만 그 위조로 열리는
+  범위는 "head_commit 줄 하나의 값"뿐이다(DONE 줄 고정은 위조로도 안
+  열린다, §5). 원장을 통째로 비워 DONE까지 바꿔치기하는 기존 한계
+  (HYK-412 §5-(d) 계열)보다 좁다 -- 새로운 종류의 문은 아니다.
 - 라이브 실물 검증은 다음 실제 424/383 거부 1회에서 일어난다(이 라운드는
   전부 합성 fixture다, mkdtemp git 저장소).

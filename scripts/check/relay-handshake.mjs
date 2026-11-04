@@ -1358,7 +1358,23 @@ function spawnMarkObservationConsumed({ taskId, droppedAt, role, harnessDir }) {
 // 바로 위와 같은 house style: best-effort, non-fatal, 실패해도
 // checkRelayHandshake 자신의 판정(= 이미 결정된 거부)을 조금도 바꾸지
 // 않는다.
-function spawnMarkRefused({ taskId, droppedAt, role, harnessDir, reason }) {
+// HYK-492-refused-obs-2 §(b) ②″ (P2-2): `resultContent` is new -- callers
+// now pass the exact judged region they just rejected, so first-
+// observation.mjs's markRefused can skip appending a second "refused" line
+// when a poll repeats with byte-identical content (review.md §3's
+// "growth.mjs" finding: an unfixed S-refused round used to grow the ledger
+// by 2 lines every single poll forever). Optional on this function's own
+// signature so callers that don't have it handy (none currently) still
+// work -- first-observation.mjs's own markRefused treats a missing value
+// the same as before this round (always append).
+function spawnMarkRefused({
+  taskId,
+  droppedAt,
+  role,
+  harnessDir,
+  reason,
+  resultContent,
+}) {
   try {
     const scriptPath = join(
       dirname(fileURLToPath(new URL(import.meta.url))),
@@ -1370,6 +1386,7 @@ function spawnMarkRefused({ taskId, droppedAt, role, harnessDir, reason }) {
       role,
       action: "markRefused",
       reason,
+      resultContent,
     });
     const out = execFileSync("node", [scriptPath, harnessDir], {
       input: payload,
@@ -1808,7 +1825,12 @@ function resolveHeadCommitBindingCore({
 // HYK-492 §(b) ②′: best-effort markRefused trigger for the 383 axis above
 // -- taskId/droppedAt은 taskContent에서 다시 뽑는다(resolveHeadCommitBindingCore
 // 자신의 헤더 참조, 왜 이 재파싱이 안전한지).
-function markHeadCommitAxisRefusal(taskContent, role, harnessDir) {
+function markHeadCommitAxisRefusal(
+  taskContent,
+  resultContent,
+  role,
+  harnessDir,
+) {
   const taskIdMatch = taskContent.match(TASK_ID_RE);
   const droppedMatch = droppedAtScanText(taskContent).match(DROPPED_AT_RE);
   if (!taskIdMatch || !droppedMatch) return;
@@ -1818,6 +1840,7 @@ function markHeadCommitAxisRefusal(taskContent, role, harnessDir) {
     role,
     harnessDir,
     reason: "head_commit",
+    resultContent,
   });
 }
 
@@ -1834,7 +1857,7 @@ export function resolveHeadCommitBinding({
     harnessDir,
   });
   if (!verdict.ok) {
-    markHeadCommitAxisRefusal(taskContent, role, harnessDir);
+    markHeadCommitAxisRefusal(taskContent, resultContent, role, harnessDir);
   }
   return verdict;
 }
@@ -1933,11 +1956,12 @@ export function resolveBaseCopyGuard({
   }
 
   // HYK-424-head-label-2/3 §2ⓐⓑ (실측 고정, 책임자 판정 B-prime) ->
-  // HYK-492 §(b) ②′로 갱신: 1R 문구는 "같은 세대 재소비는 어떤 수정으로도
-  // 불가능하다"고 적었는데, 그 주장은 head_commit 줄 «단독» 수정 경로에
-  // 대해서는 이제 더 이상 사실이 아니다(이 라운드가 그 경로를 연다 --
-  // markRefused + findFingerprintBaseline, first-observation.mjs 자신의
-  // 헤더 참조). DONE 줄까지 고친 경우(head-label-2가 실측한 그 경로)는
+  // HYK-492-refused-obs-2 §(b) ②″로 갱신: 1R 문구는 "같은 세대 재소비는
+  // 어떤 수정으로도 불가능하다"고 적었는데, 그 주장은 head_commit 줄
+  // «단독» 수정 경로에 대해서는 이제 더 이상 사실이 아니다(이 라운드가
+  // 그 경로를 연다 -- markRefused + hasRefusalForGeneration/
+  // blankHeadCommitLine, first-observation.mjs 자신의 헤더 참조).
+  // DONE 줄까지 고친 경우(head-label-2가 실측한 그 경로)는
   // 여전히 같은 세대에서 재소비할 수 없다 -- DONE 줄은 markRefused 뒤에도
   // 세대의 진짜 첫 관측과 비교되므로(findFirstObservation 바이트 무변)
   // 그 경우에만 ORCH가 작성자 HEAD의 새 워크트리로 재배달해야 한다(head-
@@ -1975,6 +1999,7 @@ function resolveBaseCopyRejection(core, role, harnessDir) {
     role,
     harnessDir,
     reason: "base_copy",
+    resultContent: core.judgedRegion,
   });
   return verdict;
 }

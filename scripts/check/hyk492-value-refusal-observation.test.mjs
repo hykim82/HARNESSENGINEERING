@@ -1,11 +1,16 @@
-// HYK-492-refused-obs-1: PM 1R 설계(②′, D:\문서관리\하네스-관제실\PM\
+// HYK-492-refused-obs-1/2: PM 1R 설계(②′, D:\문서관리\하네스-관제실\PM\
 // 산출물\하네스\2026-11-04-막다른모양-첫관측-순서\막다른모양-첫관측-순서-
-// 설계.md §(b))의 실 구현 고정 -- S = {HYK-424 base-copy, HYK-383
-// head_commit} 거부로 끝난 관측에 한해, markRefused(append-only, 세대
-// tombstone 아님)로 "거부로 끝난 관측"을 표시하고, DONE 앞 지문
-// 기준값만 "마지막 거부 표시 뒤 첫 관측"으로 재기준한다. DONE 줄
-// 기준값(findFirstObservation)과 finalize-done의 findFirstObservation
-// 의존은 바이트 무변이다(first-observation.mjs 자신의 주석 참조).
+// 설계.md §(b))의 실 구현 고정, 2R(②″)에서 좁혀짐 -- S = {HYK-424
+// base-copy, HYK-383 head_commit} 거부로 끝난 관측에 한해, markRefused
+// (append-only, 세대 tombstone 아님)로 "거부로 끝난 관측"을 표시한다.
+// 1R은 그 뒤 지문 기준값 «전체»를 "마지막 거부 표시 뒤 첫 관측"으로
+// 재기준했다 -- REVIEW 1R이 그 폭을 "DONE 앞 본문 전체(판정 낱말
+// 포함)를 다시 쓸 수 있다"로 반려했다(P2-4, C2b: 383 거부 유도 ->
+// head_commit 고치면서 `verdict: rejected`를 `approved`로 같이 바꿔도
+// 통과). 2R은 그 재기준을 "head_commit 줄 «하나»의 값만 달라도 된다"
+// 로 좁힌다(아래 (492-1)/(492-2)/(492-7) 이하) -- DONE 줄 기준값
+// (findFirstObservation)과 finalize-done의 findFirstObservation 의존은
+// 바이트 무변이다(first-observation.mjs 자신의 주석 참조).
 //
 // ⛔실물 원장·관제실·아카이브 무접촉: 모든 fixture는 mkdtemp 안에 새로
 // 만든 합성 git 저장소다(이 라운드 head 머리 live_send_ban 준수).
@@ -29,7 +34,7 @@ import {
   markRefused,
   markObservationConsumed,
   findFirstObservation,
-  findFingerprintBaseline,
+  hasRefusalForGeneration,
 } from "./first-observation.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -138,6 +143,14 @@ test("(492-1)★★★ 수리 뒤: HYK-424 base-copy 거부 -> head_commit 줄�
     const poll1 = runCli(["coder", dir]);
     assert.notEqual(poll1.exit, 0, `poll1 must reject: ${poll1.stdout}`);
     assert.match(poll1.stderr, /base를 베꼈다/);
+    // P2-1(REVIEW 1R 지적): mut-4(아래)는 소스 문자열만 보는 동어반복이었다
+    // -- 여기서는 프로덕션 CLI가 실제로 stderr에 찍은 사유 원문에 안내
+    // 문구가 실제로 실리는지를 직접 단언한다(소스 검색이 아니라 방출된
+    // 바이트).
+    assert.match(
+      poll1.stderr,
+      /head_commit 줄만 네 실제 HEAD로 고쳐라 -- DONE 줄은 건드리지 마라/,
+    );
 
     // head_commit 줄만 고친다 -- DONE 줄은 완전히 그대로(바이트 동일).
     writeCoderRound(dir, {
@@ -336,7 +349,7 @@ test("(492-5) 대조군(무회귀): STALE(S 밖) 거부 뒤 DONE 줄은 무변, 
 // 직접 고정한다(합성 1회, CLI를 거치지 않는 좁은 단위 시험).
 // ===========================================================================
 
-test("(492-6)★ 관측 원장 시퀀스(단위): 관측 -> 거부 표시 -> 재관측(지문만 재기준) -> consumed -- findFirstObservation은 세대 첫 관측에 그대로 고정된다", () => {
+test("(492-6)★ 관측 원장 시퀀스(단위): 관측 -> 거부 표시 -> 재관측(head_commit-only 눈감아주기) -> consumed -- findFirstObservation은 세대 첫 관측에 그대로 고정된다", () => {
   const harnessDir = mkdtempSync(join(tmpdir(), "hyk492-unit-ledger-"));
   try {
     const taskId = "task_hyk492_unit";
@@ -365,17 +378,12 @@ test("(492-6)★ 관측 원장 시퀀스(단위): 관측 -> 거부 표시 -> 재
     });
     assert.equal(pinnedForDoneLine.doneLineRaw, doneLineRaw);
 
-    // 지문 기준값은 거부 표시 뒤에는 리셋된다(아직 재관측 전).
-    const resetBaseline = findFingerprintBaseline({
-      taskId,
-      droppedAt,
-      role,
-      harnessDir,
-    });
+    // head_commit-only 눈감아주기 스위치는 거부 표시 뒤 켜진다(아직
+    // 재관측 전에도).
     assert.equal(
-      resetBaseline,
-      null,
-      "거부 표시 뒤, 재관측 전에는 지문 기준값이 없어야 한다",
+      hasRefusalForGeneration({ taskId, droppedAt, role, harnessDir }),
+      true,
+      "거부 표시 뒤에는 head_commit-only 눈감아주기가 켜져 있어야 한다",
     );
 
     // head_commit 줄만 고친 재관측 -- DONE 줄은 동일.
@@ -390,12 +398,20 @@ test("(492-6)★ 관측 원장 시퀀스(단위): 관측 -> 거부 표시 -> 재
     assert.equal(
       second.rewritten,
       false,
-      "거부 표시 뒤 첫 재관측은 스스로와 비교라 일치해야 한다",
+      "거부 표시 뒤 head_commit 줄만 다른 재관측은 2R의 head_commit-only 눈감아주기로 통과해야 한다(1R처럼 '스스로와 비교'가 아니라, 세대 첫 관측(AAAA)과 비교해도 head_commit 줄만 다르므로 통과)",
     );
     assert.equal(
       second.existing.doneLineRaw,
       doneLineRaw,
       "DONE 줄 비교 기준은 여전히 세대 첫 관측(existing)이다",
+    );
+    // 2R: head_commit-only 눈감아주기는 재관측 뒤에도(소비되기 전까지는)
+    // 켜진 채로 남는다 -- owner ruling B는 "그 세대의 첫 관측"을 기준으로
+    // 말했지, "마지막 거부 이후"로 좁히지 않았다.
+    assert.equal(
+      hasRefusalForGeneration({ taskId, droppedAt, role, harnessDir }),
+      true,
+      "재관측 뒤에도 소비 전까지는 눈감아주기 스위치가 꺼지지 않아야 한다",
     );
 
     markObservationConsumed({ taskId, droppedAt, role, harnessDir });
@@ -420,7 +436,127 @@ test("(492-6)★ 관측 원장 시퀀스(단위): 관측 -> 거부 표시 -> 재
 });
 
 // ===========================================================================
-// ⓓ 변이(제자리) -- 아래 4개는 하나씩 켜봐야 하는 변이다. 각 시험은
+// ⑺ (P2-4, REVIEW 1R 반려 C2b) 수리 뒤: HYK-383 head_commit 거부(REVIEW)
+// -> head_commit 줄은 고치지만 verdict: rejected -> approved도 같이
+// 바꿔치기(DONE 줄은 무변) -> 여전히 DONE_REWRITTEN이어야 한다. RED-first
+// 실측(c8fb958, 이 라운드의 수리 전): 이 정확한 입력으로 poll2.ok===true
+// 였다(이 파일의 probe-c2b-red.mjs 디버그 스크립트로 직접 재현, 결과
+// 파일 §1 원문 참조) -- 수리 뒤에는 ok:false여야 한다.
+// ===========================================================================
+
+test("(492-7)★★★ 수리 뒤 (P2-4, C2b): HYK-383 거부 -> head_commit은 고치지만 verdict까지 같이 바꿔치기 -- 여전히 DONE_REWRITTEN(head_commit «한 줄»만 눈감아준다)", () => {
+  withFixtureDir("hyk492-383-c2b-", (dir) => {
+    const targetSha = ensureGitHeadCommit(dir);
+    const wrongSha = "e".repeat(40);
+    writeFileSync(
+      join(dir, "review-task.md"),
+      `task_id: HYK-492-C2B\ndropped_at: 2026-11-04 06:00 KST\nhead_commit: ${targetSha}\n`,
+      "utf8",
+    );
+    writeFileSync(
+      join(dir, "review.md"),
+      `task_id: HYK-492-C2B\nfor: HYK-100-x-1\nverdict: rejected\nhead_commit: ${wrongSha}\n\n>>> DONE: REVIEW @ 2026-11-04 06:10:00 KST\ndone_stamped_by: finalize-done\n`,
+      "utf8",
+    );
+    const poll1 = runCli(["review", dir]);
+    assert.notEqual(poll1.exit, 0, `poll1 must reject: ${poll1.stdout}`);
+    assert.match(poll1.stderr, /head_commit mismatch/);
+
+    // head_commit은 고치지만, 판정 낱말도 같이 바꾼다 -- DONE 줄은 바이트
+    // 동일.
+    writeFileSync(
+      join(dir, "review.md"),
+      `task_id: HYK-492-C2B\nfor: HYK-100-x-1\nverdict: approved\nhead_commit: ${targetSha}\n\n>>> DONE: REVIEW @ 2026-11-04 06:10:00 KST\ndone_stamped_by: finalize-done\n`,
+      "utf8",
+    );
+    const poll2 = runCli(["review", dir]);
+    assert.notEqual(
+      poll2.exit,
+      0,
+      "head_commit 말고 verdict까지 달라졌으면 여전히 거부돼야 한다(P2-4)",
+    );
+    assert.match(
+      poll2.stderr,
+      /result DONE line was rewritten between first observation and final judgment/,
+    );
+  });
+});
+
+// ===========================================================================
+// ⑻ (P2-4) head_commit 줄 + 다른 한 줄(빈 줄 추가) -- 아주 작은 변경이라도
+// head_commit 말고 한 글자라도 다르면 여전히 DONE_REWRITTEN.
+// ===========================================================================
+
+test("(492-8)★★★ 대조군(P2-4): HYK-424 거부 뒤 head_commit은 고치되 다른 자리에 빈 줄 하나를 추가하면 -- 여전히 DONE_REWRITTEN(head_commit 줄 «하나만»의 값 차이만 눈감아준다)", () => {
+  withFixtureDir("hyk492-424-extraline-", (dir) => {
+    const baseSha = ensureGitHeadCommit(dir);
+    const ownSha = makeAnotherCommit(dir, "worker's own commit");
+    writeCoderRound(dir, {
+      taskExtra: `base_commit_of_this_round: ${baseSha}\n`,
+      resultExtra: `head_commit: ${baseSha}\n`,
+    });
+    const poll1 = runCli(["coder", dir]);
+    assert.notEqual(poll1.exit, 0);
+    assert.match(poll1.stderr, /base를 베꼈다/);
+
+    // head_commit 줄만 고친 "정상" 수정에, 아무 뜻 없는 빈 줄 하나를
+    // 더 끼워 넣는다 -- DONE 줄 자체는 바이트 동일.
+    writeFileSync(
+      join(dir, "coder.md"),
+      `task_id: HYK-492-C\nhead_commit: ${ownSha}\n\n\n>>> DONE: CODER @ 2026-11-04 06:10:00 KST\ndone_stamped_by: finalize-done\n`,
+      "utf8",
+    );
+    const poll2 = runCli(["coder", dir]);
+    assert.notEqual(
+      poll2.exit,
+      0,
+      "head_commit 말고 줄 하나(빈 줄)라도 더 달라졌으면 여전히 거부돼야 한다(P2-4: 줄 위치·개수 무변)",
+    );
+    assert.match(
+      poll2.stderr,
+      /result DONE line was rewritten between first observation and final judgment/,
+    );
+  });
+});
+
+// ===========================================================================
+// ⑼ (P2-2) S 거부가 고쳐지지 않은 채 같은 내용으로 3번 더 폴되면 -- 관측
+// 원장에 줄을 추가하지 않는다(재관측·refused 줄 중복 0).
+// ===========================================================================
+
+test("(492-9)★★★ (P2-2) HYK-424 거부 뒤 같은 내용으로 3번 더 폴해도 -- 관측 원장은 전혀 자라지 않는다(재관측·refused 줄 중복 0)", () => {
+  withFixtureDir("hyk492-424-nogrowth-", (dir) => {
+    const baseSha = ensureGitHeadCommit(dir);
+    makeAnotherCommit(dir, "worker's own commit"); // 실제 HEAD != base -- 거부가 계속 재현되게.
+    writeCoderRound(dir, {
+      taskExtra: `base_commit_of_this_round: ${baseSha}\n`,
+      resultExtra: `head_commit: ${baseSha}\n`, // 고쳐지지 않는다 -- 매 폴 다시 거부.
+    });
+    const poll1 = runCli(["coder", dir]);
+    assert.notEqual(poll1.exit, 0);
+    assert.match(poll1.stderr, /base를 베꼈다/);
+
+    const afterPoll1 = readObservationLog(dir, "coder");
+    assert.equal(afterPoll1.length, 2, "poll1 뒤: 관측 1 + refused 1");
+
+    for (let i = 0; i < 3; i += 1) {
+      const pollN = runCli(["coder", dir]);
+      assert.notEqual(pollN.exit, 0, `poll${i + 2}도 여전히 거부돼야 한다`);
+      assert.match(pollN.stderr, /base를 베꼈다/);
+    }
+
+    const afterRepeats = readObservationLog(dir, "coder");
+    assert.deepEqual(
+      afterRepeats,
+      afterPoll1,
+      `내용이 바뀌지 않은 채 3번 더 폴해도 관측 원장은 전혀 자라면 안 된다: ${JSON.stringify(afterRepeats)}`,
+    );
+  });
+});
+
+// ===========================================================================
+// ⓓ 변이(제자리) -- 아래 6개(①~④는 1R부터, ⑤⑥은 2R 신설)는 하나씩
+// 켜봐야 하는 변이다. 각 시험은
 // (1) 원본 소스에서 변이 대상 리터럴이 정확히 1회 나타나는지 확인하고,
 // (2) 변이한 사본을 임시 디렉터리에 (siblings + first-observation.mjs와
 // 함께) 써서 동적 import한 뒤, (3) 그 변이가 구체적으로 어떤 통제를
@@ -487,7 +623,7 @@ async function importMutatedRelayHandshake(
 test("(mut-1)★★★ 되돌림 변이: resolveBaseCopyRejection의 markRefused 호출을 제거하면 -- (492-1)의 head_commit-only 수정 경로가 다시 DONE_REWRITTEN으로 거짓 거부된다(RED)", async () => {
   const src = readFileSync(CLI_PATH, "utf8");
   const target =
-    '  if (verdict.ok) return null;\n  spawnMarkRefused({\n    taskId: core.taskId,\n    droppedAt: core.droppedMatch[1].trim(),\n    role,\n    harnessDir,\n    reason: "base_copy",\n  });\n  return verdict;\n';
+    '  if (verdict.ok) return null;\n  spawnMarkRefused({\n    taskId: core.taskId,\n    droppedAt: core.droppedMatch[1].trim(),\n    role,\n    harnessDir,\n    reason: "base_copy",\n    resultContent: core.judgedRegion,\n  });\n  return verdict;\n';
   assertExactlyOneMatch(
     src,
     target,
@@ -539,66 +675,78 @@ test("(mut-1)★★★ 되돌림 변이: resolveBaseCopyRejection의 markRefused
 });
 
 // ---------------------------------------------------------------------------
-// ② DONE 줄 기준을 지문 기준값과 합침(checkIntermediateRewrite가
-// existing.doneLineRaw 대신 fingerprintBaseline.doneLineRaw로 비교) ->
-// (492-3) 대조군(S 거부 뒤 DONE까지 바꿔치기)이 거짓으로 통과한다(RED,
-// DONE 줄이 세대 첫 관측에 고정돼야 한다는 불변식이 load-bearing임을
-// 증명 -- 452902c가 반려한 모양이 다시 열리는 경로).
+// ② (HYK-492-refused-obs-2 product_scope ⓒ①) 2R의 좁히기 자체를 되돌림
+// -- checkIntermediateRewrite의 headCommitOnlyDiffAllowed에서
+// head_commit-전용 지문 대조(blankHeadCommitLine)를 빼고 "S 거부가 한
+// 번이라도 있었으면 지문 불일치는 전부 눈감아준다"는 1R의 폭 넓은 모양
+// 으로 되돌린다 -> REVIEW 1R이 반려한 바로 그 구멍(C2b: 383 거부 유도 ->
+// head_commit 고치면서 verdict: rejected -> approved도 같이 바꿔도
+// 통과)이 다시 열린다(RED, head_commit 한 줄만 눈감아줘야 한다는
+// 불변식이 load-bearing임을 증명).
 // ---------------------------------------------------------------------------
-test("(mut-2)★★★ 되돌림 변이: checkIntermediateRewrite의 DONE 줄 비교 기준을 지문 기준값과 합치면 -- (492-3) S거부+DONE바꿔치기 대조군이 거짓으로 통과한다(RED, 452902c가 반려한 모양이 다시 열림)", async () => {
+test("(mut-2)★★★ 되돌림 변이: head_commit-전용 대조를 빼고 'S 거부 뒤 지문 불일치는 전부 눈감아준다'로 되돌리면 -- C2b(REVIEW 383 거부 유도 뒤 verdict까지 바꿔치기)가 거짓으로 통과한다(RED, 2R 좁히기가 load-bearing임을 증명)", async () => {
   const firstObsSrc = readFileSync(join(HERE, "first-observation.mjs"), "utf8");
   const target =
-    "    const rewritten =\n      fingerprintBaseline.resultFingerprint !== currentFingerprint ||\n      existing.doneLineRaw !== currentDoneLine;\n";
+    '    const headCommitOnlyDiffAllowed =\n      !exactBodyMatches &&\n      typeof existing.resultFingerprintSansHeadCommit === "string" &&\n      existing.resultFingerprintSansHeadCommit ===\n        fingerprint(blankHeadCommitLine(resultContent)) &&\n      hasRefusalForGeneration({ taskId, droppedAt, role, harnessDir });\n';
   assertExactlyOneMatch(
     firstObsSrc,
     target,
-    "checkIntermediateRewrite rewritten calc",
+    "checkIntermediateRewrite headCommitOnlyDiffAllowed calc",
   );
   const mutatedFirstObs = firstObsSrc.replace(
     target,
-    "    const rewritten =\n      fingerprintBaseline.resultFingerprint !== currentFingerprint ||\n      fingerprintBaseline.doneLineRaw !== currentDoneLine;\n",
+    "    const headCommitOnlyDiffAllowed =\n      !exactBodyMatches &&\n      hasRefusalForGeneration({ taskId, droppedAt, role, harnessDir });\n",
   );
 
   const relaySrc = readFileSync(CLI_PATH, "utf8");
 
   await withFixtureDirAsync("hyk492-mut2-fixture-", async (dir) => {
-    const baseSha = ensureGitHeadCommit(dir);
-    const ownSha = makeAnotherCommit(dir, "worker's own commit");
-    writeCoderRound(dir, {
-      taskExtra: `base_commit_of_this_round: ${baseSha}\n`,
-      resultExtra: `head_commit: ${baseSha}\n`,
-    });
+    const targetSha = ensureGitHeadCommit(dir);
+    const wrongSha = "e".repeat(40);
+    // (492-2)의 writeReviewRound 헬퍼는 'for:'/'verdict:' 줄을 쓰지 않는다
+    // -- C2b는 그 두 줄이 필요하므로 여기서는 직접 쓴다.
+    writeFileSync(
+      join(dir, "review.md"),
+      `task_id: HYK-492-C2B\nfor: HYK-100-x-1\nverdict: rejected\nhead_commit: ${wrongSha}\n\n>>> DONE: REVIEW @ 2026-11-04 06:10:00 KST\ndone_stamped_by: finalize-done\n`,
+      "utf8",
+    );
+    writeFileSync(
+      join(dir, "review-task.md"),
+      `task_id: HYK-492-C2B\ndropped_at: 2026-11-04 06:00 KST\nhead_commit: ${targetSha}\n`,
+      "utf8",
+    );
     const { mod, mutDir } = await importMutatedRelayHandshake(
       relaySrc,
-      "done-merged-with-fp",
+      "no-head-commit-only-narrowing",
       {
         firstObservationSrc: mutatedFirstObs,
       },
     );
     try {
       const poll1 = mod.checkRelayHandshake({
-        role: "coder",
+        role: "review",
         harnessDir: dir,
         now: Date.now(),
       });
       assert.equal(poll1.ok, false);
-      assert.match(poll1.reason, /base를 베꼈다/);
+      assert.match(poll1.reason, /head_commit mismatch/);
 
-      // head_commit도 고치고 DONE 줄도 같이 바꿔치기한다.
+      // head_commit은 고치지만, 판정 낱말도 같이 바꿔치기한다(DONE 줄은
+      // 무변) -- 2R이 막아야 하는 바로 그 모양.
       writeFileSync(
-        join(dir, "coder.md"),
-        `task_id: HYK-492-C\nhead_commit: ${ownSha}\n\n>>> DONE: CODER @ 2026-11-04 06:20:00 KST\ndone_stamped_by: finalize-done\n`,
+        join(dir, "review.md"),
+        `task_id: HYK-492-C2B\nfor: HYK-100-x-1\nverdict: approved\nhead_commit: ${targetSha}\n\n>>> DONE: REVIEW @ 2026-11-04 06:10:00 KST\ndone_stamped_by: finalize-done\n`,
         "utf8",
       );
       const poll2 = mod.checkRelayHandshake({
-        role: "coder",
+        role: "review",
         harnessDir: dir,
         now: Date.now(),
       });
       assert.equal(
         poll2.ok,
         true,
-        "RED: DONE 줄 비교가 지문 기준값에 합쳐지면, 거부 표시 뒤 DONE까지 바꿔치기한 값이 스스로와 비교돼 거짓으로 통과해야 한다",
+        "RED: head_commit-전용 대조 없이 'S 거부 뒤 지문 불일치는 전부 눈감아준다'로 되돌리면, verdict까지 같이 바꿔치기한 값도 거짓으로 통과해야 한다",
       );
     } finally {
       rmSync(mutDir, { recursive: true, force: true });
@@ -697,4 +845,130 @@ test("(mut-4)★ 되돌림 변이: HYK-424 거부 문구에서 「head_commit �
     /head_commit 줄만 네 실제 HEAD로 고쳐라/,
     "RED: 원복하면 head_commit-only 수정 안내가 더 이상 보이지 않아야 한다(이 변이 자체가 그 사라짐을 증명)",
   );
+});
+
+// ---------------------------------------------------------------------------
+// ⑤ (HYK-492-refused-obs-2 product_scope ⓒ②) head_commit-전용 예외
+// 자체를 완전히 제거(headCommitOnlyDiffAllowed를 항상 false로) -> (492-1)/
+// (492-2)의 "head_commit 줄만 고치면 같은 세대 재소비 ok" 경로가 다시
+// DONE_REWRITTEN으로 거짓 거부된다(RED, 이 예외가 load-bearing임을
+// 증명 -- mut-1과 다른 지점: mut-1은 markRefused 호출 자체를 지워 예외가
+// "켜질" 기회를 없앴고, 이 변이는 예외의 "판정 로직"만 지운다).
+// ---------------------------------------------------------------------------
+test("(mut-5)★★★ 되돌림 변이: head_commit-전용 예외(headCommitOnlyDiffAllowed)를 항상 false로 지우면 -- (492-1)/(492-2)의 head_commit-only 수정 경로가 다시 DONE_REWRITTEN으로 거짓 거부된다(RED)", async () => {
+  const firstObsSrc = readFileSync(join(HERE, "first-observation.mjs"), "utf8");
+  const target =
+    '    const headCommitOnlyDiffAllowed =\n      !exactBodyMatches &&\n      typeof existing.resultFingerprintSansHeadCommit === "string" &&\n      existing.resultFingerprintSansHeadCommit ===\n        fingerprint(blankHeadCommitLine(resultContent)) &&\n      hasRefusalForGeneration({ taskId, droppedAt, role, harnessDir });\n';
+  assertExactlyOneMatch(
+    firstObsSrc,
+    target,
+    "checkIntermediateRewrite headCommitOnlyDiffAllowed calc (mut-5 target)",
+  );
+  const mutatedFirstObs = firstObsSrc.replace(
+    target,
+    "    const headCommitOnlyDiffAllowed = false;\n",
+  );
+  const relaySrc = readFileSync(CLI_PATH, "utf8");
+
+  await withFixtureDirAsync("hyk492-mut5-fixture-", async (dir) => {
+    const baseSha = ensureGitHeadCommit(dir);
+    const ownSha = makeAnotherCommit(dir, "worker's own commit");
+    writeCoderRound(dir, {
+      taskExtra: `base_commit_of_this_round: ${baseSha}\n`,
+      resultExtra: `head_commit: ${baseSha}\n`,
+    });
+    const { mod, mutDir } = await importMutatedRelayHandshake(
+      relaySrc,
+      "no-head-commit-exception",
+      { firstObservationSrc: mutatedFirstObs },
+    );
+    try {
+      const poll1 = mod.checkRelayHandshake({
+        role: "coder",
+        harnessDir: dir,
+        now: Date.now(),
+      });
+      assert.equal(poll1.ok, false);
+
+      writeCoderRound(dir, {
+        taskExtra: `base_commit_of_this_round: ${baseSha}\n`,
+        resultExtra: `head_commit: ${ownSha}\n`,
+      });
+      const poll2 = mod.checkRelayHandshake({
+        role: "coder",
+        harnessDir: dir,
+        now: Date.now(),
+      });
+      assert.equal(
+        poll2.ok,
+        false,
+        "RED: head_commit-전용 예외가 없으면, 정당한 head_commit-only 수정도 다시 거부돼야 한다",
+      );
+      assert.equal(poll2.state, "DONE_REWRITTEN_AFTER_FIRST_OBSERVATION");
+    } finally {
+      rmSync(mutDir, { recursive: true, force: true });
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ⑥ (HYK-492-refused-obs-2 product_scope ⓒ③) P2-2의 재폴 중복 방지를
+// 제거(recordFirstDoneObservation이 내용 불변 여부를 더 이상 보지 않고
+// "거부된 적이 있으면 무조건 다시 적는다") -> (492-9)의 "내용이 바뀌지
+// 않으면 관측 원장이 자라지 않는다" 대조군이 거짓이 된다(RED, 중복
+// 방지가 load-bearing임을 증명).
+// ---------------------------------------------------------------------------
+test("(mut-6)★★★ 되돌림 변이: recordFirstDoneObservation의 '내용 불변이면 적지 않는다' 중복 방지를 제거하면 -- (492-9) P2-2 대조군(같은 내용 재폴 시 원장 무증가)이 거짓이 된다(RED)", async () => {
+  const firstObsSrc = readFileSync(join(HERE, "first-observation.mjs"), "utf8");
+  const target =
+    '    if (lastObservation) {\n      const unchanged =\n        fingerprint(resultContent) === lastObservation.resultFingerprint;\n      if (unchanged || !refusedSinceLastObservation) {\n        return {\n          recorded: false,\n          reason: "already observed",\n          existing: lastObservation,\n        };\n      }\n    }\n';
+  assertExactlyOneMatch(
+    firstObsSrc,
+    target,
+    "recordFirstDoneObservation dedup gate (mut-6 target)",
+  );
+  const mutatedFirstObs = firstObsSrc.replace(
+    target,
+    '    if (lastObservation && !refusedSinceLastObservation) {\n      return {\n        recorded: false,\n        reason: "already observed",\n        existing: lastObservation,\n      };\n    }\n',
+  );
+  const relaySrc = readFileSync(CLI_PATH, "utf8");
+
+  await withFixtureDirAsync("hyk492-mut6-fixture-", async (dir) => {
+    const baseSha = ensureGitHeadCommit(dir);
+    makeAnotherCommit(dir, "worker's own commit");
+    writeCoderRound(dir, {
+      taskExtra: `base_commit_of_this_round: ${baseSha}\n`,
+      resultExtra: `head_commit: ${baseSha}\n`, // 고쳐지지 않는다 -- 매 폴 다시 거부.
+    });
+    const { mod, mutDir } = await importMutatedRelayHandshake(
+      relaySrc,
+      "no-dedup-on-unchanged-content",
+      { firstObservationSrc: mutatedFirstObs },
+    );
+    try {
+      const poll1 = mod.checkRelayHandshake({
+        role: "coder",
+        harnessDir: dir,
+        now: Date.now(),
+      });
+      assert.equal(poll1.ok, false);
+      const afterPoll1 = readObservationLog(dir, "coder");
+      assert.equal(afterPoll1.length, 2, "poll1 뒤: 관측 1 + refused 1");
+
+      const poll2 = mod.checkRelayHandshake({
+        role: "coder",
+        harnessDir: dir,
+        now: Date.now(),
+      });
+      assert.equal(poll2.ok, false);
+      const afterPoll2 = readObservationLog(dir, "coder");
+      assert.notDeepEqual(
+        afterPoll2,
+        afterPoll1,
+        "RED: 중복 방지가 없으면, 내용이 바뀌지 않은 재폴에도 관측 원장이 자라야 한다(mut-6이 그 성장을 다시 연다)",
+      );
+    } finally {
+      rmSync(mutDir, { recursive: true, force: true });
+    }
+  });
 });
