@@ -1351,6 +1351,57 @@ function spawnMarkObservationConsumed({ taskId, droppedAt, role, harnessDir }) {
   }
 }
 
+// HYK-492 §(b) ②′ (PM 1R 설계 §(b) ⑵ 원문): S 게이트(HYK-424 base-copy ·
+// HYK-383 head_commit)가 이 세대를 거부하는 바로 그 지점에서만 부른다 --
+// first-observation.mjs의 markRefused 자신의 헤더 참조(세대를 tombstone
+// 하지 않는다, 452902c가 반려한 모양을 다시 열지 않는다). spawnMarkObservationConsumed
+// 바로 위와 같은 house style: best-effort, non-fatal, 실패해도
+// checkRelayHandshake 자신의 판정(= 이미 결정된 거부)을 조금도 바꾸지
+// 않는다.
+// HYK-492-refused-obs-2 §(b) ②″ (P2-2): `resultContent` is new -- callers
+// now pass the exact judged region they just rejected, so first-
+// observation.mjs's markRefused can skip appending a second "refused" line
+// when a poll repeats with byte-identical content (review.md §3's
+// "growth.mjs" finding: an unfixed S-refused round used to grow the ledger
+// by 2 lines every single poll forever). Optional on this function's own
+// signature so callers that don't have it handy (none currently) still
+// work -- first-observation.mjs's own markRefused treats a missing value
+// the same as before this round (always append).
+function spawnMarkRefused({
+  taskId,
+  droppedAt,
+  role,
+  harnessDir,
+  reason,
+  resultContent,
+}) {
+  try {
+    const scriptPath = join(
+      dirname(fileURLToPath(new URL(import.meta.url))),
+      "first-observation.mjs",
+    );
+    const payload = JSON.stringify({
+      taskId,
+      droppedAt,
+      role,
+      action: "markRefused",
+      reason,
+      resultContent,
+    });
+    const out = execFileSync("node", [scriptPath, harnessDir], {
+      input: payload,
+      encoding: "utf8",
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    return JSON.parse(out.trim());
+  } catch (err) {
+    console.error(
+      `relay-handshake: first-observation mark-refused spawn skipped/failed (non-fatal -- HYK-492 §(b) ②′): ${err.stderr ?? err.message}`,
+    );
+    return { recorded: false, reason: "spawn failed" };
+  }
+}
+
 function resolveDoneAt(
   resultContent,
   now,
@@ -1706,12 +1757,24 @@ function readActualWorktreeHeadCommit(harnessDir) {
   }
 }
 
-// Extracted from checkRelayHandshake (same ESLint-limit reason as its
-// siblings) -- REVIEW 계열에만 건다(isReviewFamilyRole, coder-task.md §2
-// 범위: CODER는 이 축 밖). 비REVIEW 역할은 즉시 `{ok:true, skipped:true}`로
-// 빠져 나가 이 축의 어떤 검사도 겪지 않는다(§4 무회귀: CODER/VERIFY 라운드
-// 는 이 축이 존재하기 전과 완전히 동일하게 움직인다).
-export function resolveHeadCommitBinding({
+// HYK-492 §(b) ②′ (PM 1R 설계 §(b) ⑵ 원문): checkRelayHandshake의 호출부
+// (`const headCommitVerdict = resolveHeadCommitBinding({...}); if
+// (!headCommitVerdict.ok) return headCommitVerdict;`)는 두 변이 시험에
+// 글자 하나까지 고정돼 있다(hyk355-reject-streak-isolation.test.mjs,
+// hyk423-observation-order.test.mjs (mut-3) -- assertExactlyOneMatch).
+// 그래서 markRefused는 그 호출부가 아니라 이 함수 "안"에서, 거부가
+// 확정되는 바로 그 반환 직전에 띖운다 -- resolveHeadCommitBindingCore가
+// 원래 몸통 그대로(판정/사유/순서 무변)이고, 이 export만 거부
+// (`!verdict.ok`, skip 경로는 ok:true라 걸리지 않는다) 때 best-effort로
+// markRefused를 부른 뒤 같은 verdict를 그대로 돌려준다. taskId/droppedAt
+// 은 이 함수의 유일한 입력인 taskContent에서 다시 뽑는다(모듈 상단의
+// TASK_ID_RE/droppedAtScanText+DROPPED_AT_RE와 같은 정규식 -- 실제
+// checkRelayHandshake 호출 경로에서는 이미 resolveMatchedTaskId/
+// resolveDroppedAt이 같은 taskContent로 이 값들을 검증해 통과한 뒤이므로
+// 여기서 다시 매치하면 항상 성공한다). 파싱이 실패하면(이 함수를 직접
+// 부르는 기존 단위 시험처럼 taskContent가 이 형식이 아닐 때) 그냥
+// 건너뛴다 -- best-effort, 판정에 영향 0(§4 무회귀).
+function resolveHeadCommitBindingCore({
   role,
   taskContent,
   resultContent,
@@ -1757,6 +1820,46 @@ export function resolveHeadCommitBinding({
   }
 
   return { ok: true, sha: resultHead.sha };
+}
+
+// HYK-492 §(b) ②′: best-effort markRefused trigger for the 383 axis above
+// -- taskId/droppedAt은 taskContent에서 다시 뽑는다(resolveHeadCommitBindingCore
+// 자신의 헤더 참조, 왜 이 재파싱이 안전한지).
+function markHeadCommitAxisRefusal(
+  taskContent,
+  resultContent,
+  role,
+  harnessDir,
+) {
+  const taskIdMatch = taskContent.match(TASK_ID_RE);
+  const droppedMatch = droppedAtScanText(taskContent).match(DROPPED_AT_RE);
+  if (!taskIdMatch || !droppedMatch) return;
+  spawnMarkRefused({
+    taskId: taskIdMatch[1],
+    droppedAt: droppedMatch[1].trim(),
+    role,
+    harnessDir,
+    reason: "head_commit",
+    resultContent,
+  });
+}
+
+export function resolveHeadCommitBinding({
+  role,
+  taskContent,
+  resultContent,
+  harnessDir,
+}) {
+  const verdict = resolveHeadCommitBindingCore({
+    role,
+    taskContent,
+    resultContent,
+    harnessDir,
+  });
+  if (!verdict.ok) {
+    markHeadCommitAxisRefusal(taskContent, resultContent, role, harnessDir);
+  }
+  return verdict;
 }
 
 // HYK-424: 419-wire-2/422-dispatch-run-1 실사고 -- 워커가 결과 파일의
@@ -1852,22 +1955,21 @@ export function resolveBaseCopyGuard({
     return { ok: true, skipped: true };
   }
 
-  // HYK-424-head-label-2/3 §2ⓐⓑ (실측 고정, 책임자 판정 B-prime): 이전
-  // 문구("네 커밋 SHA를 적어라")는 같은 결과 파일의 head_commit만 고쳐
-  // 같은 세대에서 다시 소비시키라는 뜻으로 읽혔는데, 그 경로는 실제로
-  // DONE_REWRITTEN_AFTER_FIRST_OBSERVATION으로 다시 거부된다(실측,
-  // head-label-2 결과). 같은 워크트리에 라벨만 새로 바꿔 재배달해도
-  // 통과하지 못한다(실측, head-label-3 §2ⓐ: consumption-receipt의
-  // RECEIPT_MISSING은 이 워크트리에 남은 직전 결과 파일 자신의 task_id
-  // 에코로 판정하므로 다음 라벨이 무엇이든 무관하다). 실측으로 통과하는
-  // 경로는 ORCH가 작성자 HEAD의 새 워크트리(아직 직전 결과 파일이 없는
-  // harnessDir)에 새 task_id(라벨)로 재배달하는 것뿐이다(head-label-3
-  // §2ⓑ 실측: 결과 파일이 없으므로 배달 게이트가 진짜 첫 배달/부트스트랩
-  // 으로 본다). ⛔사람 손으로 finalize-done을 다시 찍는 것은 이 거부를
-  // 복구하지 않는다(같은 세대 재소비 불가는 그대로 남는다).
+  // HYK-424-head-label-2/3 §2ⓐⓑ (실측 고정, 책임자 판정 B-prime) ->
+  // HYK-492-refused-obs-2 §(b) ②″로 갱신: 1R 문구는 "같은 세대 재소비는
+  // 어떤 수정으로도 불가능하다"고 적었는데, 그 주장은 head_commit 줄
+  // «단독» 수정 경로에 대해서는 이제 더 이상 사실이 아니다(이 라운드가
+  // 그 경로를 연다 -- markRefused + hasRefusalForGeneration/
+  // blankHeadCommitLine, first-observation.mjs 자신의 헤더 참조).
+  // DONE 줄까지 고친 경우(head-label-2가 실측한 그 경로)는
+  // 여전히 같은 세대에서 재소비할 수 없다 -- DONE 줄은 markRefused 뒤에도
+  // 세대의 진짜 첫 관측과 비교되므로(findFirstObservation 바이트 무변)
+  // 그 경우에만 ORCH가 작성자 HEAD의 새 워크트리로 재배달해야 한다(head-
+  // label-3 §2ⓑ 실측 그대로 보존). ⛔사람 손으로 finalize-done을 다시
+  // 찍는 것은 이 거부를 복구하지 않는다(두 경로 모두 공통).
   return {
     ok: false,
-    reason: `base를 베꼈다 (HYK-424 base-copy guard): result head_commit '${resultHead.sha}' equals this round's declared base (${declaredBase.source} = '${declaredBase.sha}') but the actual worktree HEAD at '${harnessDir}' is '${actualHead.sha}' -- head_commit 필드는 "이 라운드에서 네가 실제로 만든 커밋"이어야 하는데 base를 그대로 베꼈다. 복구(실측 고정, HYK-424-head-label-2/3): 같은 세대(같은 dropped_at)에서 결과 파일만 고쳐 재소비할 수 없다(DONE_REWRITTEN_AFTER_FIRST_OBSERVATION으로 다시 거부) · 같은 워크트리에서 라벨만 새로 바꿔 재배달해도 통과하지 못한다(consumption-receipt: RECEIPT_MISSING -- 직전 결과 파일이 그대로 남아 있는 한 라벨은 무관하다) · 실측으로 통과하는 유일한 경로는 ORCH가 작성자 HEAD의 새 워크트리(아직 직전 결과 파일이 없는 harnessDir)에 새 task_id(라벨)로 재배달하는 것이다`,
+    reason: `base를 베꼈다 (HYK-424 base-copy guard): result head_commit '${resultHead.sha}' equals this round's declared base (${declaredBase.source} = '${declaredBase.sha}') but the actual worktree HEAD at '${harnessDir}' is '${actualHead.sha}' -- head_commit 필드는 "이 라운드에서 네가 실제로 만든 커밋"이어야 하는데 base를 그대로 베꼈다. 복구(HYK-492 수리, 2026-11-04): 같은 세대(같은 dropped_at)에서 결과 파일의 head_commit 줄만 네 실제 HEAD로 고쳐라 -- DONE 줄은 건드리지 마라, 그러면 다음 폴에서 같은 세대 재소비가 통과한다(DONE_REWRITTEN_AFTER_FIRST_OBSERVATION 재발 없음). DONE 줄까지 고친 경우에는 같은 세대(같은 dropped_at)에서 결과 파일만 고쳐 재소비할 수 없다(DONE_REWRITTEN_AFTER_FIRST_OBSERVATION으로 다시 거부, 실측 고정 HYK-424-head-label-2/3) · 같은 워크트리에서 라벨만 새로 바꿔 재배달해도 통과하지 못한다(consumption-receipt: RECEIPT_MISSING -- 직전 결과 파일이 그대로 남아 있는 한 라벨은 무관하다) · 그 경우 실측으로 통과하는 유일한 경로는 ORCH가 작성자 HEAD의 새 워크트리(아직 직전 결과 파일이 없는 harnessDir)에 새 task_id(라벨)로 재배달하는 것이다`,
   };
 }
 
@@ -1876,6 +1978,13 @@ export function resolveBaseCopyGuard({
 // 바뀌지 않는다. null이면 통과, 아니면 그 verdict가 최종 거부다. `core`를
 // 그대로 받아 taskContent/judgedRegion을 꺼낸다(호출부를 2줄로 좁혀
 // max-lines-per-function 예산 안에 든다, coder-task.md §2 product_scope ①).
+// HYK-492 §(b) ②′ (PM 1R 설계 §(b) ⑵ 원문): 거부 시(verdict.ok === false)
+// best-effort로 markRefused를 띄운다 -- 이 함수가 이미 `core`를 그대로
+// 받으므로(위 헤더) taskId/droppedAt을 다시 파싱할 필요가 없다
+// (core.taskId/core.droppedMatch는 resolveHandshakeCore가 이미 검증해
+// 채운 값, resolveMatchedTaskId/resolveDroppedAt 참조). 호출부(:4112
+// 근처 checkRelayHandshake)의 리터럴은 이 함수의 몸통을 바꿔도 그대로다
+// (bc-9 변이 시험이 고정하는 것은 호출부 2줄뿐, 이 함수 내부가 아니다).
 function resolveBaseCopyRejection(core, role, harnessDir) {
   const verdict = resolveBaseCopyGuard({
     role,
@@ -1883,7 +1992,16 @@ function resolveBaseCopyRejection(core, role, harnessDir) {
     resultContent: core.judgedRegion,
     harnessDir,
   });
-  return verdict.ok ? null : verdict;
+  if (verdict.ok) return null;
+  spawnMarkRefused({
+    taskId: core.taskId,
+    droppedAt: core.droppedMatch[1].trim(),
+    role,
+    harnessDir,
+    reason: "base_copy",
+    resultContent: core.judgedRegion,
+  });
+  return verdict;
 }
 
 // HYK-411: 2026-09-01 실측(coder-task.md §1 원문) -- `npm test 2>&1 | tail`
