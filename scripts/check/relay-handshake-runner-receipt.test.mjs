@@ -509,8 +509,15 @@ test("(rr-e1)★ 되돌림 변이: 소비 축(checkRelayHandshake 결선) 자체
   // unchanged, only its input's scope narrowed; deleting this whole block
   // still removes both the gate AND that scoping, so the RED assertion
   // below still proves the gate itself is load-bearing.
+  //
+  // HYK-438-honest-red-2: call-site text updated again -- `role` is now
+  // threaded through to the gate (검토 1R P1-1 수리, REVIEW-family 역할
+  // 조건을 isHonestRedBackedRejection에 거는 데 필요한 값) -- this block's
+  // text must match the current working-tree source byte-for-byte or
+  // assertExactlyOneMatch fails closed (found 0) rather than silently
+  // matching nothing.
   const target =
-    "  const runnerReceiptVerdict = resolveRunnerReceiptVerdict({\n    resultContent,\n    harnessDir,\n    requiredRuns: runnerContractActivation.requiredRuns,\n    contractDirective: runnerContractActivation.directive,\n  });\n  if (!runnerReceiptVerdict.ok) return runnerReceiptVerdict;\n\n";
+    "  const runnerReceiptVerdict = resolveRunnerReceiptVerdict({\n    resultContent,\n    harnessDir,\n    requiredRuns: runnerContractActivation.requiredRuns,\n    contractDirective: runnerContractActivation.directive,\n    role,\n  });\n  if (!runnerReceiptVerdict.ok) return runnerReceiptVerdict;\n\n";
   assertExactlyOneMatch(src, target, "runner receipt wiring block");
   const mutated = src.replace(target, "");
   assert.equal(mutated.length, src.length - target.length);

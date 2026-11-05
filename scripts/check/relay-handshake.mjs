@@ -17,6 +17,7 @@ import {
   maskQuotedMarkerRegions,
   unclosedQuoteOpenLine,
   droppedAtScanText,
+  parseReviewOutcome,
 } from "./reject-streak.mjs";
 import {
   archiveRoundEnvelopeIfNew,
@@ -2293,11 +2294,46 @@ function readRunnerReceiptFile(harnessDir) {
   }
 }
 
+// HYK-438: true iff `resultContent` honestly claims `verdict: rejected`
+// (read via reject-streak.mjs's own parseReviewOutcome -- not a second
+// regex, so this gate and the reject-streak recorder it feeds can never
+// disagree about what "rejected" means, closing the exact drift risk this
+// issue exists to prevent) AND the receipt backing that claim is both red
+// (runner_exit !== 0) and for this exact worktree HEAD. A receipt for some
+// OTHER commit proves nothing about this head, so the match is required
+// here, not left to a later check -- callers that don't satisfy this fall
+// through to the pre-existing unconditional RED check unchanged (무회귀).
+//
+// HYK-438-honest-red-2 (검토 1R P1-1): role이 REVIEW 계열(isReviewFamilyRole,
+// reject-streak.mjs의 recordRejectStreakFromResultText가 적재 여부를 가르는
+// 바로 그 판별)이 아니면 이 분기 자체를 적용하지 않는다 -- CODER/VERIFY/PM
+// 결과가 `verdict: rejected` 줄을 (실수로든 의도로든) 갖고 있어도 그 결과는
+// reject-streak에 적재될 길이 없으므로(recordRejectStreakFromResultText가
+// 같은 판별로 건너뛴다), 여기서만 소비를 열어주면 "소비는 되는데 아무 데도
+// 적재되지 않는" 조용한 손실이 재발한다(이 이슈가 막으려던 바로 그 모양).
+// 적재 쪽과 "같은 판별"을 쓰는 것이 핵심이다 -- 새 정규식을 짜지 않는다.
+function isHonestRedBackedRejection({
+  resultContent,
+  receipt,
+  actualHead,
+  role,
+}) {
+  const claimedOutcome = parseReviewOutcome(resultContent);
+  return (
+    isReviewFamilyRole(role) &&
+    claimedOutcome.ok &&
+    claimedOutcome.verdict === "rejected" &&
+    receipt.runner_exit !== 0 &&
+    receipt.head_commit.toLowerCase() === actualHead.sha
+  );
+}
+
 export function resolveRunnerReceiptVerdict({
   resultContent,
   harnessDir,
   requiredRuns = 0,
   contractDirective,
+  role,
 }) {
   const claims = resultClaimsRunnerResults(resultContent);
   if (!claims && requiredRuns < 1) {
@@ -2355,6 +2391,21 @@ export function resolveRunnerReceiptVerdict({
       code: RUNNER_RECEIPT_REJECT_REASON.MEASUREMENT_UNAVAILABLE,
       reason: `runner receipt gate (HYK-477): runner receipt at ${found.path} reports runner_status=${MEASUREMENT_UNAVAILABLE_OOM_STATUS} -- 측정 불능(measurement unavailable), NOT a test failure: the runner was forcibly killed (OOM/signal) before node --test produced a real result (HYK-467 규율) -- fail-closed all the same (소비는 여전히 거부한다), but reported with a distinct code/문장 so a reader cannot mistake this for "the tests failed"${contractSuffix}`,
     };
+  }
+  // HYK-438: a result that honestly claims `verdict: rejected` and backs
+  // that claim with its own red receipt is NOT "claiming green" -- the
+  // claim and the observation agree, so the RED check below (which exists
+  // to catch a result claiming green while the runner actually failed)
+  // does not apply (실사고 HYK-430: 이 정직한 반려가 streak에 오르지
+  // 못했다). isHonestRedBackedRejection is pulled out to a separate
+  // function (not inlined here) to keep this function's own ESLint
+  // complexity under the repo's ceiling -- same reason
+  // missingReceiptReasonHead/runnerContractReasonSuffix were pulled out
+  // above.
+  if (
+    isHonestRedBackedRejection({ resultContent, receipt, actualHead, role })
+  ) {
+    return { ok: true };
   }
   if (receipt.runner_exit !== 0) {
     return {
@@ -4145,6 +4196,7 @@ function resolveRunnerContractGatedVerdict({
   taskContent,
   resultContent,
   harnessDir,
+  role,
 }) {
   const runnerContractActivation = resolveRunnerContractActivation({
     taskContent,
@@ -4157,6 +4209,7 @@ function resolveRunnerContractGatedVerdict({
     harnessDir,
     requiredRuns: runnerContractActivation.requiredRuns,
     contractDirective: runnerContractActivation.directive,
+    role,
   });
   if (!runnerReceiptVerdict.ok) return runnerReceiptVerdict;
 
@@ -4174,6 +4227,38 @@ function resolveRunnerContractGatedVerdict({
     return consecutiveRunnerReceiptsVerdict;
 
   return null;
+}
+
+// HYK-438-honest-red-2: extracted purely to keep checkRelayHandshake under
+// the quality-check max-lines-per-function budget after threading `role`
+// through to the runner-receipt gate -- same reason
+// resolveRunnerContractGatedVerdict/returnRunnerContractVerdict were
+// themselves pulled out of this function (their own headers). Judgment/
+// reason/order are not touched: this just moves the existing
+// resolve-then-maybe-return pair into one call.
+function resolveRunnerContractVerdictReturn({
+  core,
+  taskContent,
+  resultContent,
+  judgedRegion,
+  harnessDir,
+  role,
+}) {
+  const runnerContractVerdict = resolveRunnerContractGatedVerdict({
+    taskContent,
+    resultContent: judgedRegion,
+    harnessDir,
+    role,
+  });
+  if (!runnerContractVerdict) return null;
+  return returnRunnerContractVerdict({
+    runnerContractVerdict,
+    role,
+    harnessDir,
+    taskId: core.taskId,
+    taskContent,
+    resultContent,
+  });
 }
 
 export function checkRelayHandshake({
@@ -4250,25 +4335,19 @@ export function checkRelayHandshake({
   // HYK-411/HYK-425: headCommitVerdict와 같은 자리 원칙(§4 무회귀) -- role
   // 무관(이번 실사고 HYK-408 1R도 CODER 라운드였다,
   // resolveDispatchRecordExistence와 동일 논거). HYK-423 3R §2: 여기도
-  // `judgedRegion`을 넘긴다. quality-check max-lines-per-function 상한을
-  // 지키려고 checkRewriteAndStaleness 등과 같은 이유로 뽑았다(판정/사유/
-  // 순서는 조금도 바뀌지 않는다, resolveRunnerContractGatedVerdict 자체
-  // 헤더 참조).
-  const runnerContractVerdict = resolveRunnerContractGatedVerdict({
+  // `judgedRegion`을 넘긴다. HYK-438-honest-red-2: role을 내려보내는 것은
+  // resolveRunnerContractVerdictReturn 안의 "정직한 빨강 반려" 예외만
+  // REVIEW 계열로 좁히기 위함(그 함수 헤더 참조, 무회귀 아님 -- 이
+  // 라운드의 유일한 동작 변화).
+  const runnerContractReturn = resolveRunnerContractVerdictReturn({
+    core,
     taskContent,
-    resultContent: judgedRegion,
+    resultContent,
+    judgedRegion,
     harnessDir,
+    role,
   });
-  // HYK-412 §2: returnRunnerContractVerdict 자신의 헤더 참조.
-  if (runnerContractVerdict)
-    return returnRunnerContractVerdict({
-      runnerContractVerdict,
-      role,
-      harnessDir,
-      taskId: core.taskId,
-      taskContent,
-      resultContent,
-    });
+  if (runnerContractReturn) return runnerContractReturn;
 
   // HYK-387/HYK-434: headCommitVerdict와 같은 자리 원칙(§4 무회귀) -- REVIEW
   // 한정 아님(오늘의 실사고는 CODER 라운드였다, coder-task.md §1 원문).
