@@ -105,14 +105,24 @@ function writeReviewRound(
 }
 
 function writeCoderRound(harnessDir, { resultExtra = "" }) {
+  writeNonReviewRound(harnessDir, "coder", { resultExtra });
+}
+
+// HYK-438-honest-red-2 §2 product_scope ⓘ: generalizes writeCoderRound to
+// any non-REVIEW role (coder/verify/pm) -- file names are derived from
+// `role.toLowerCase()` exactly as resolveLiveRoundFilePaths does (relay-
+// handshake.mjs HYK-244 2R-ci-1), so a "verify" round lands in
+// verify-task.md/verify.md, not coder-task.md/coder.md.
+function writeNonReviewRound(harnessDir, role, { resultExtra = "" } = {}) {
+  const label = `HYK-438-${role.toUpperCase()}`;
   writeFileSync(
-    join(harnessDir, "coder-task.md"),
-    "task_id: HYK-438-C\ndropped_at: 2026-11-05 06:00 KST\nrunner_contract: full-1x\n",
+    join(harnessDir, `${role}-task.md`),
+    `task_id: ${label}\ndropped_at: 2026-11-05 06:00 KST\nrunner_contract: full-1x\n`,
     "utf8",
   );
   writeFileSync(
-    join(harnessDir, "coder.md"),
-    `task_id: HYK-438-C\n${resultExtra}\n>>> DONE: CODER @ 2026-11-05 06:10:00 KST\ndone_stamped_by: finalize-done\n`,
+    join(harnessDir, `${role}.md`),
+    `task_id: ${label}\n${resultExtra}\n>>> DONE: ${role.toUpperCase()} @ 2026-11-05 06:10:00 KST\ndone_stamped_by: finalize-done\n`,
     "utf8",
   );
 }
@@ -456,6 +466,60 @@ test("(438-11)★★★ 적재 경로 드리프트 방지: verdict: 줄 2개(모
   });
 });
 
+// ===========================================================================
+// HYK-438-honest-red-2 (검토 1R P1-1 수리): CODER/VERIFY/PM 결과가
+// `verdict: rejected` 줄을 갖고(실수로든, 이 축을 노린 것이든) 자기 head와
+// 일치하는 빨간 영수증까지 갖고 있어도 -- 이 역할들은 reject-streak.mjs의
+// recordRejectStreakFromResultText가 쓰는 판별(isReviewFamilyRole)로
+// "적재 대상"이 아니므로, 여기서 소비를 열어주면 "소비는 되는데 아무 데도
+// 적재되지 않는" 조용한 손실이 재발한다 -- 이 축이 그 구멍을 닫는다.
+//
+// RED-first 실측(⛔사본 import 아님, 수리 "전" base ff04491의 scripts/check
+// 전체를 git archive로 뽑은 별도 샌드박스에서 production checkRelayHandshake
+// 를 이 정확한 입력으로 직접 구동): 세 역할 모두 `{"ok":true,"reason":
+// "relay handshake ok for HYK-438-RF"}` -- 수리 전에는 소비됐다(버그
+// 재현). 이 커밋 "이후"(이 파일이 보는 production 코드)로 같은 입력을
+// 다시 구동하면 세 역할 모두 `{"ok":false,"code":"RUNNER_RECEIPT_RED"}`로
+// 바뀐다 -- 아래 테스트가 그 "이후" 계약을 고정한다.
+// ===========================================================================
+for (const role of ["coder", "verify", "pm"]) {
+  test(`(438-12-${role})★★★ ${role.toUpperCase()} 결과에 verdict: rejected 줄 + runner_exit=1(head 일치) -> 여전히 RUNNER_RECEIPT_RED(검토 1R P1-1 수리 -- REVIEW 계열만 '정직한 빨강 반려' 예외를 받는다)`, () => {
+    withFixtureDir(`hyk438-role-${role}-`, (repo) => {
+      const { sha, harnessDir } = ensureGitHeadCommit(repo);
+      writeNonReviewRound(harnessDir, role, {
+        resultExtra: `verdict: rejected\nhead_commit: ${sha}`,
+      });
+      writeReceipt(harnessDir, baseReceipt(sha));
+      const result = checkRelayHandshake({
+        role,
+        harnessDir,
+        now: FIXED_NOW_MS,
+      });
+      assert.equal(
+        result.ok,
+        false,
+        `${role} verdict:rejected + red는 여전히 거부돼야 한다: ${JSON.stringify(result)}`,
+      );
+      assert.equal(result.code, RUNNER_RECEIPT_REJECT_REASON.RED);
+    });
+  });
+
+  test(`(438-13-${role}) resolveRunnerReceiptVerdict 직접 확인: role="${role}" + verdict: rejected + red + head일치 -> RED(REVIEW 계열이 아니므로 역할 조건에서 막힌다)`, () => {
+    withFixtureDir(`hyk438-role-direct-${role}-`, (repo) => {
+      const { sha, harnessDir } = ensureGitHeadCommit(repo);
+      writeReceipt(harnessDir, baseReceipt(sha));
+      const r = resolveRunnerReceiptVerdict({
+        resultContent: `task_id: HYK-438-${role.toUpperCase()}\nverdict: rejected\nhead_commit: ${sha}\n`,
+        harnessDir,
+        requiredRuns: 1,
+        role,
+      });
+      assert.equal(r.ok, false);
+      assert.equal(r.code, RUNNER_RECEIPT_REJECT_REASON.RED);
+    });
+  });
+}
+
 test("(438-10) resolveRunnerReceiptVerdict 직접 확인: rejected+red+head일치 -> {ok:true}, approved+red+head일치 -> RED", () => {
   withFixtureDir("hyk438-direct-", (repo) => {
     const { sha, harnessDir } = ensureGitHeadCommit(repo);
@@ -464,6 +528,7 @@ test("(438-10) resolveRunnerReceiptVerdict 직접 확인: rejected+red+head일�
       resultContent: `task_id: HYK-438-R\nfor: HYK-430-review-1\nverdict: rejected\nhead_commit: ${sha}\n`,
       harnessDir,
       requiredRuns: 1,
+      role: "review",
     });
     assert.deepEqual(rejected, { ok: true });
 
@@ -471,6 +536,7 @@ test("(438-10) resolveRunnerReceiptVerdict 직접 확인: rejected+red+head일�
       resultContent: `task_id: HYK-438-R\nfor: HYK-430-review-1\nverdict: approved\nhead_commit: ${sha}\n`,
       harnessDir,
       requiredRuns: 1,
+      role: "review",
     });
     assert.equal(approved.ok, false);
     assert.equal(approved.code, RUNNER_RECEIPT_REJECT_REASON.RED);

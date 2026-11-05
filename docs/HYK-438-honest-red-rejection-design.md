@@ -86,3 +86,49 @@ reject-streak 기록기가 "rejected"라고 읽는 방식이 같은 함수에서
 이 라운드의 증거는 전부 합성(mkdtemp 안의 새 git 저장소)이다. 실물
 검증은 다음 실제 "빨간 러너를 근거로 든 `rejected`" 검토 1회가 이
 수리된 게이트를 통과해 reject-streak에 실제로 오르는 것으로만 끝난다.
+
+## HYK-438-honest-red-2 (검토 1R P1-1 수리): 역할 조건
+
+1R이 연 "정직한 빨강 반려" 예외(`isHonestRedBackedRejection`)는 role을
+전혀 읽지 않았다 -- `verdict: rejected` 줄과 자기 head와 일치하는 빨간
+영수증만 있으면 CODER/VERIFY/PM 결과도 이 예외를 통과해 소비됐다. 그런데
+reject-streak 기록기(`recordRejectStreakFromResultText`, reject-streak.mjs)는
+`isReviewFamilyRole(role)`이 아니면 적재 자체를 건너뛴다 -- 그래서
+CODER/VERIFY/PM의 그런 결과는 "소비는 되는데 reject-streak에는 아무것도
+적재되지 않는" 조용한 손실을 새 모양으로 재발시켰다(이 이슈 전체가
+막으려는 바로 그 손실).
+
+수리: `isHonestRedBackedRejection`에 `isReviewFamilyRole(role)` 조건을
+맨 앞에 추가한다 -- 적재 쪽이 쓰는 것과 **같은 판별 함수**(새 정규식을
+만들지 않는다). `role`은 `checkRelayHandshake` -> (새로 뽑은)
+`resolveRunnerContractVerdictReturn` -> `resolveRunnerContractGatedVerdict`
+-> `resolveRunnerReceiptVerdict` -> `isHonestRedBackedRejection`으로
+내려 보낸다. `resolveRunnerContractVerdictReturn`은 `role`을 추가로
+내려보내는 호출부 변경만으로 `checkRelayHandshake`가 quality-check
+max-lines-per-function(80줄) 상한을 넘었기 때문에 그 함수에서 뽑아낸
+순수 분해다(판정/사유/순서 무변, resolveRunnerContractGatedVerdict 자신이
+이미 같은 이유로 뽑혔던 것과 동일 선례).
+
+이 축 자신의 적용 범위(게이트 전체)는 role 무관으로 남는다 -- 바뀌는
+것은 오직 "정직한 빨강 반려" 예외 하나뿐이다: REVIEW 계열은 여전히
+rejected+빨강+head일치가 소비되고(streak +1, 무회귀), CODER/VERIFY/PM은
+같은 입력이라도 이제 종전처럼 `RUNNER_RECEIPT_RED`로 거부된다.
+
+RED-first 실측(수리 "전" base `ff04491`의 scripts/check 전체를 git
+archive로 뽑은 별도 샌드박스에서 production `checkRelayHandshake`를
+CODER/VERIFY/PM × `verdict: rejected` + 빨강 + head일치 입력으로 직접
+구동): 세 역할 모두 `{"ok":true,"reason":"relay handshake ok for ..."}`
+-- 수리 전에는 소비됐다(버그 재현, 사본 import 아님). 수리 "후"(이
+커밋의 production 코드)로 같은 입력을 다시 구동하면 세 역할 모두
+`{"ok":false,"code":"RUNNER_RECEIPT_RED"}`로 거부된다 -- REVIEW는
+그대로 `{"ok":true}` + 합성 streak +1. 고정 테스트 =
+`scripts/check/hyk438-honest-red-rejection.test.mjs`의 (438-12-_)/(438-13-_).
+
+## 한계 (검토 1R P2-1, 범위 밖)
+
+검토 1R P2-1: REVIEW rejected + 빨강 + **원장 손상**(reject-streak.json
+자체가 깨져 있거나 쓸 수 없는 경우)은 그래도 소비(`checkRelayHandshake`
+ok:true)되지만 적재는 0건으로 끝난다(`recordRejectStreakFromResultText`가
+`loadLedger` 실패를 삼키는 기존 `NOT_BLOCKED` 경로, HYK-262/266 갈래가
+"정직한 빨강 반려" 소비까지 넓어진 모양) -- 이 갈래는 이 조각(HYK-438)의
+범위 밖이며 수리하지 않는다. 책임자 판단 대상.
