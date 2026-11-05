@@ -64,6 +64,12 @@ import {
   readdirSync,
 } from "node:fs";
 import path from "node:path";
+// HYK-493-memory-reopen-1 (coder-task.md §1 "ORCH 관측" · §2 product_scope ⓘ):
+// free 메모리 재측 기본 seam의 유일한 출처(os.freemem()를 MB로 환산). PM
+// 설계 2026-10-31 (b)④ 원문: Windows에서 os.freemem()은 libuv ullAvailPhys,
+// memory-gate.ps1의 \Memory\Available MBytes와 같은 축으로 설계됐다 --
+// ★다른 축일 가능성은 한계 문단에 적는다(§3 완료조건4), NEEDS_INPUT 아님.
+import os from "node:os";
 import { runReachOnce, DEFAULT_NOTIFY_DIR } from "./reach-report.mjs";
 // HYK-255-watch-wire-1 (coder-task.md §1) -- 부분 계수 보고 «실파일» 생성을
 // 감시 실행에 잇는다. 계수 로직은 새로 쓰지 않는다 -- 병합된 프로덕션 API
@@ -143,6 +149,24 @@ import {
 import { detectOrphans } from "../check/seat-orphan-detect.mjs";
 
 export const MAX_LOG_LINES = 5000;
+
+// HYK-493-memory-reopen-1 (coder-task.md §2 product_scope ⓘ "여유(여유 =
+// 이름 붙은 상수 1개 · 기본 200MB · 근거 1줄)"): 게이트 자신의 재측정
+// 안정성 상한(memory-gate.ps1 161행 근처 "range -gt 300" -- 표본 간 흔들림
+// 300MB까지는 "안정됨"으로 본다)보다 작게 둔다 -- 문턱을 겨우 넘겼다가
+// 게이트 자신의 재측정에서 바로 다시 닫히는 거짓 재개 통지를 줄이기
+// 위함이다.
+export const MEMORY_REOPEN_MARGIN_MB = 200;
+
+// HYK-493-memory-reopen-1 (coder-task.md §2 product_scope ⓘ "표본 간격
+// seam · 기본 간격 = 근거 1줄"): memory-gate.ps1 자신의 step2 A/B 재확인
+// 간격(174행 근처 `Start-Sleep -Seconds 30`)과 동일한 리듬을 재사용한다 --
+// 새 측정 리듬을 지어내지 않는다.
+export const MEMORY_REOPEN_SAMPLE_INTERVAL_MS = 30000;
+
+// HYK-493-memory-reopen-1 (coder-task.md §1 "상태 파일의 생산자"): 관제실
+// memory-gate.ps1의 Write-GateState(53행 근처)가 쓰는 스키마 식별자 그대로.
+const MEMORY_GATE_SCHEMA_V1 = "memory-gate-state/v1";
 
 function defaultExec(cmd, args, opts) {
   return execFileSync(cmd, args, { encoding: "utf8", ...opts });
@@ -1405,6 +1429,286 @@ function runSeatEscalationStep({
   };
 }
 
+// ---- HYK-493-memory-reopen-1 (coder-task.md §1 F-2 · §2 product_scope) --
+// 게이트 닫힘 뒤 메모리 재개 재시도 깨움 ----
+//
+// 이 단계는 "재고 알릴" 뿐이다 -- 좌석·러너·게이트는 이 단계가 절대
+// 띄우지 않는다(ORCH가 그 판단을 다시 한다, §3 완료조건4 한계 문단 참조).
+// 상태 파일의 유일한 생산자는 관제실 memory-gate.ps1(Write-GateState)이고
+// 이 단계는 그 파일을 읽기만 한다(§1 비타협 -- 그 스크립트를 고치지
+// 않는다).
+
+// readMemoryGateState -- <watchDir>/memory-gate-state.json을 읽어 v1
+// 스키마인지 확인한다. 파일 없음/JSON 파싱 실패/스키마 불일치는 모두
+// "판정 불가"로 접는다(throw하지 않는다 -- runDetector/runReachStep과
+// 동일 "이 단계 자신의 실패가 감시기 전체를 죽이면 안 된다" 원칙).
+function readMemoryGateState(readFn, statePath) {
+  let text;
+  try {
+    text = readFn(statePath, "utf8");
+  } catch {
+    return { ok: false, reasonToken: "MEMORY_REOPEN_STATE_MISSING" };
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return { ok: false, reasonToken: "MEMORY_REOPEN_STATE_INVALID_JSON" };
+  }
+  if (!isPlainObject(parsed) || parsed.schema !== MEMORY_GATE_SCHEMA_V1) {
+    return { ok: false, reasonToken: "MEMORY_REOPEN_SCHEMA_MISMATCH" };
+  }
+  return {
+    ok: true,
+    status: pickString(parsed, "status"),
+    dryRun: parsed.dry_run === true,
+    thresholdMb:
+      typeof parsed.threshold_mb === "number" ? parsed.threshold_mb : null,
+    closedAt: pickString(parsed, "closed_at"),
+    round: pickString(parsed, "round"),
+    pendingCmd: pickString(parsed, "pending_cmd"),
+  };
+}
+
+// readMemoryReopenNotifyState -- dedupe 상태(통지한 closed_at 1개, seat
+// escalation의 openWorktreePath와 동일한 "직전 값 하나만" 모양). 읽기
+// 실패는 fail-open(runEscalationDedupeStep과 동일 원칙) -- "직전엔 통지
+// 안 됨"으로 접어 전송 후보로 취급한다.
+function readMemoryReopenNotifyState(readFn, statePath) {
+  try {
+    const text = readFn(statePath, "utf8");
+    const parsed = JSON.parse(text);
+    return {
+      notifiedClosedAt:
+        typeof parsed?.notifiedClosedAt === "string"
+          ? parsed.notifiedClosedAt
+          : null,
+      stateMissing: false,
+    };
+  } catch {
+    return { notifiedClosedAt: null, stateMissing: true };
+  }
+}
+
+// buildMemoryReopenBody -- 요구된 5칸(round·threshold·두 표본·closed_at·
+// pending_cmd)을 한 줄로 낸다(buildSeatEscalationBody와 동일한 "사람이
+// 읽는 본문 조립" 원칙). 이 문자열은 watch.log 줄이 아니라 orchestration
+// send의 --body 인자 하나이므로(배열 원소 그대로 전달, 쉘 재해석 없음)
+// 토큰 공백 치환이 필요 없다(sanitizeFailureToken은 watch.log 필드 전용).
+function buildMemoryReopenBody({
+  round,
+  thresholdMb,
+  freeSamples,
+  closedAt,
+  pendingCmd,
+}) {
+  const samplesText = Array.isArray(freeSamples)
+    ? freeSamples.join(",")
+    : "NONE";
+  return (
+    `round=${round ?? "NONE"} threshold_mb=${thresholdMb ?? "NONE"} ` +
+    `free_samples_mb=${samplesText} closed_at=${closedAt ?? "NONE"} ` +
+    `pending_cmd=${pendingCmd ?? "NONE"}`
+  );
+}
+
+// attemptMemoryReopenSend -- attemptSeatEscalationSend과 동일한 모양으로
+// "기존 통로"를 그대로 재사용한다(§2 product_scope ⓘ "buildSeatEscalation
+// SendCommand와 같은 ... run id = 기존 run-id.json 읽기 함수 재사용") --
+// 새 adapter 명령 모양을 만들지 않는다(deviation_rule 비타협).
+function attemptMemoryReopenSend({ readFn, runIdPath, execFn, subject, body }) {
+  const runId = readRunIdConfig(readFn, runIdPath);
+  if (!runId) {
+    return {
+      attempted: true,
+      sent: false,
+      reasonToken: "MEMORY_REOPEN_NO_RUN_CONFIGURED",
+    };
+  }
+  try {
+    const result = execFn(
+      buildSeatEscalationSendCommand({ runId, subject, body }),
+    );
+    if (!isPlainObject(result) || result.ok !== true) {
+      return {
+        attempted: true,
+        sent: false,
+        reasonToken: `MEMORY_REOPEN_SEND_FAILED:${truncateToken(
+          sanitizeFailureToken(extractSendFailureReason(result), "send_failed"),
+          MAX_PARTIAL_FAILURE_REASON_CHARS,
+        )}`,
+      };
+    }
+    return { attempted: true, sent: true, reasonToken: null };
+  } catch (err) {
+    return {
+      attempted: true,
+      sent: false,
+      reasonToken: `MEMORY_REOPEN_SEND_FAILED:${truncateToken(
+        sanitizeFailureToken(
+          err && err.message ? err.message : String(err),
+          "send_failed",
+        ),
+        MAX_PARTIAL_FAILURE_REASON_CHARS,
+      )}`,
+    };
+  }
+}
+
+// finishMemoryReopenEligible -- runMemoryReopenStep에서 분리(§6 eslint
+// max-lines-per-function 상한 준수). 두 표본이 이미 문턱+여유를 넘긴
+// 뒤에만 불린다: dedupe(같은 closed_at 재통지 금지) -> 전송 시도 ->
+// 성공했을 때만 상태 기록(실패는 다음 tick 재시도, seat escalation 단계와
+// 동일 원칙).
+function finishMemoryReopenEligible({
+  gate,
+  freeSamples,
+  watchDir,
+  readFn,
+  writeFn,
+  existsFn,
+  mkdirFn,
+  execFn,
+}) {
+  const statePath = path.join(watchDir, "memory-reopen-notify-state.json");
+  const prior = readMemoryReopenNotifyState(readFn, statePath);
+  if (prior.notifiedClosedAt === gate.closedAt) {
+    return {
+      sampled: true,
+      sent: false,
+      freeSamples,
+      reasonToken: "MEMORY_REOPEN_ALREADY_NOTIFIED",
+      stateMissing: prior.stateMissing,
+    };
+  }
+  const subject = "memory reopened: gate retry";
+  const body = buildMemoryReopenBody({
+    round: gate.round,
+    thresholdMb: gate.thresholdMb,
+    freeSamples,
+    closedAt: gate.closedAt,
+    pendingCmd: gate.pendingCmd,
+  });
+  const runIdPath = path.join(path.dirname(watchDir), "run-id.json");
+  const sendResult = attemptMemoryReopenSend({
+    readFn,
+    runIdPath,
+    execFn,
+    subject,
+    body,
+  });
+  if (sendResult.sent) {
+    try {
+      if (!existsFn(watchDir)) mkdirFn(watchDir, { recursive: true });
+      writeFn(
+        statePath,
+        JSON.stringify({ notifiedClosedAt: gate.closedAt }),
+        "utf8",
+      );
+    } catch {
+      // fail-open(runSeatEscalationStep과 동일 원칙) -- 다음 tick 재시도.
+    }
+  }
+  return {
+    sampled: true,
+    sent: sendResult.sent,
+    freeSamples,
+    reasonToken: sendResult.reasonToken,
+    stateMissing: prior.stateMissing,
+  };
+}
+
+// defaultMemoryReopenFreeSampleMb -- 주입 가능한 seam의 기본값(§2
+// product_scope ⓘ "기본 = os.freemem()를 MB로"). 시험은 항상 다른
+// sampleFn을 주입한다(§2 비타협 "라이브 측정 0").
+function defaultMemoryReopenFreeSampleMb() {
+  return Math.floor(os.freemem() / (1024 * 1024));
+}
+
+// defaultMemoryReopenSleep -- isolated-suite-runner.mjs의 defaultSleepSync
+// (305행 근처)와 동일한 관례: Atomics.wait로 실제로 블록한다(바쁜 대기
+// 아님). 시험은 항상 sleepFn을 주입해 이 기본값을 쓰지 않는다(§2 비타협
+// "라이브 간격 0" -- 시험이 실제로 30초씩 느려지는 것을 막기 위함).
+function defaultMemoryReopenSleep(ms) {
+  const sab = new Int32Array(new SharedArrayBuffer(4));
+  Atomics.wait(sab, 0, 0, Math.max(0, Number(ms) || 0));
+}
+
+// runMemoryReopenStep -- computePreLogDedupeSteps가 로그 줄 조립 *전*에
+// 부른다(seatEscalation과 동일 지점·동일 "opt-in 아님, watchDir만 있으면
+// 항상 돈다" 원칙). status==="closed"이고 dry_run이 아닐 때만 두 표본을
+// 재고, 두 표본 모두 threshold_mb+여유를 넘을 때만 dedupe+전송으로 넘어간다
+// (finishMemoryReopenEligible). 그 밖의 모든 경로는 sampleFn/execFn을 호출
+// 하지 않고 사유 토큰만 돌려준다(§2ⓒ⑸ "재측 seam 호출 0").
+function runMemoryReopenStep({
+  watchDir,
+  readFn,
+  writeFn,
+  existsFn,
+  mkdirFn,
+  execFn,
+  sampleFn,
+  sleepFn,
+}) {
+  const gateStatePath = path.join(watchDir, "memory-gate-state.json");
+  const gate = readMemoryGateState(readFn, gateStatePath);
+  if (!gate.ok) {
+    return { sampled: false, sent: false, reasonToken: gate.reasonToken };
+  }
+  if (gate.status !== "closed") {
+    return {
+      sampled: false,
+      sent: false,
+      reasonToken: "MEMORY_REOPEN_STATUS_NOT_CLOSED",
+    };
+  }
+  if (gate.dryRun) {
+    return {
+      sampled: false,
+      sent: false,
+      reasonToken: "MEMORY_REOPEN_DRY_RUN",
+    };
+  }
+  const sample1 = sampleFn();
+  sleepFn(MEMORY_REOPEN_SAMPLE_INTERVAL_MS);
+  const sample2 = sampleFn();
+  const freeSamples = [sample1, sample2];
+  const requiredMb = (gate.thresholdMb ?? 0) + MEMORY_REOPEN_MARGIN_MB;
+  const meetsLine = freeSamples.every(
+    (s) => typeof s === "number" && Number.isFinite(s) && s >= requiredMb,
+  );
+  if (!meetsLine) {
+    return {
+      sampled: true,
+      sent: false,
+      freeSamples,
+      reasonToken: "MEMORY_REOPEN_BELOW_LINE",
+    };
+  }
+  return finishMemoryReopenEligible({
+    gate,
+    freeSamples,
+    watchDir,
+    readFn,
+    writeFn,
+    existsFn,
+    mkdirFn,
+    execFn,
+  });
+}
+
+// memoryReopenLogSegment -- capLogSegment와 같은 "항상 있음" 원칙(§2ⓒ⑸
+// "로그 꼬리 사유 토큰 원문" -- 미달/전송 실패뿐 아니라 판정 불가 경로도
+// 전부 사유 토큰을 남긴다). memoryReopen이 주어지지 않은(기존 buildLogLine
+// 직접 호출자, opt-in 아님이지만 기존 단위 시험 호출자는 이 인자를 안 줄
+// 수 있다) 경우만 null -- 그 경우 로그 줄이 한 글자도 달라지지 않는다.
+function memoryReopenLogSegment(memoryReopen) {
+  if (!isPlainObject(memoryReopen)) return null;
+  const sent = memoryReopen.sent === true ? "true" : "false";
+  const reason = memoryReopen.reasonToken ?? "NONE";
+  return `memory_reopen_sent=${sent} memory_reopen_reason=${reason}`;
+}
+
 // escalation 축의 사람이 읽는 사유(§4 요건2 "막힌 워커가 있으면 사유가
 // 사람이 읽을 수 있게 실려야 한다", HYK-210 전례와 동일 형식 -- 공백
 // 치환·길이 상한·건수 상한+N_more). wakeHuman 스코프 전부(새 것이든
@@ -2123,6 +2427,11 @@ export function buildLogLine({
   // detectorResult.seatLivenessIdentity가 없으면(구버전 stdout 등) 역시
   // null이다.
   seatEscalation,
+  // HYK-493-memory-reopen-1 (coder-task.md §2 product_scope): 기존 호출자
+  // 전부는 이 인자를 안 주므로 undefined -> memoryReopenLogSegment가
+  // null을 돌려주므로(filter(Boolean)) 로그 줄이 한 글자도 달라지지
+  // 않는다(회귀 0).
+  memoryReopen,
 }) {
   if (detectorResult.runnerFailure) {
     return `${nowIso} RUNNER_FAILURE message=${detectorResult.message}`;
@@ -2245,6 +2554,13 @@ export function buildLogLine({
     // 호출자 전부) 회차는 teardownShadowLogSegment가 null을 돌려주므로
     // (filter(Boolean)) 로그 줄이 한 글자도 달라지지 않는다(회귀 0).
     teardownShadowLogSegment(resourceResidueResult?.teardownShadowResult),
+    // HYK-493-memory-reopen-1 (coder-task.md §2 product_scope "로그 줄
+    // 꼬리 칸 1"): 이 세그먼트도 지금 이 시점의 맨 끝이다 -- 앞선 모든
+    // 세그먼트의 필드·순서·값은 이 라운드가 손대지 않았다. memoryReopen이
+    // 주어지지 않은(기존 buildLogLine 직접 호출자) 경우만
+    // memoryReopenLogSegment가 null을 돌려주므로(filter(Boolean)) 로그
+    // 줄이 한 글자도 달라지지 않는다(회귀 0).
+    memoryReopenLogSegment(memoryReopen),
   ]
     .filter(Boolean)
     .join(" ");
@@ -4084,6 +4400,11 @@ function finalizeWatchOnceCycle({
   unconsumedVanish,
   resourceResidueResult,
   seatEscalation,
+  // HYK-493-memory-reopen-1 (coder-task.md §2 product_scope): 결과를
+  // buildLogLine까지 옮기고, 아래 finalizeWatchOnceTail 반환 객체에도
+  // 그대로 싣는다(seatEscalation과 동일한 "결과를 직접 단언할 수 있게
+  // 노출" 원칙).
+  memoryReopen,
 }) {
   const nowIso = new Date(now).toISOString();
   const logPath = path.join(watchDir, "watch.log");
@@ -4099,6 +4420,7 @@ function finalizeWatchOnceCycle({
     unconsumedVanish,
     resourceResidueResult,
     seatEscalation,
+    memoryReopen,
   });
   appendLogWithRotation({
     readFn,
@@ -4147,6 +4469,7 @@ function finalizeWatchOnceCycle({
     blockedTerminationResult,
     resourceResidueResult,
     seatEscalation,
+    memoryReopen,
   });
 }
 
@@ -4173,6 +4496,7 @@ function finalizeWatchOnceTail({
   blockedTerminationResult,
   resourceResidueResult,
   seatEscalation,
+  memoryReopen,
 }) {
   const reachResult = runReachStep({
     notifyDir,
@@ -4208,6 +4532,7 @@ function finalizeWatchOnceTail({
     blockedTerminationResult,
     resourceResidueResult,
     seatEscalation,
+    memoryReopen,
   };
 }
 
@@ -4228,6 +4553,9 @@ function computePreLogDedupeSteps({
   existsFn,
   mkdirFn,
   seatEscalationExecFn,
+  memoryReopenExecFn,
+  memoryReopenSampleFn,
+  memoryReopenSleepFn,
 }) {
   const escalationDedupe = runEscalationDedupeStep({
     scopes: detectorResult.escalationScopes,
@@ -4262,7 +4590,24 @@ function computePreLogDedupeSteps({
     mkdirFn,
     execFn: seatEscalationExecFn ?? createOrcaExecFn(),
   });
-  return { escalationDedupe, unconsumedVanish, seatEscalation };
+  // HYK-493-memory-reopen-1 (coder-task.md §2 product_scope): seatEscalation
+  // 과 동일한 "opt-in 아님, watchDir만 있으면 항상 돈다" 원칙 -- 실제
+  // 재측/전송 여부는 runMemoryReopenStep 내부 게이트(상태·dry_run·문턱·
+  // dedupe)가 스스로 가린다. execFn 기본값은 실 orca 경로와 동일하게
+  // createOrcaExecFn()(운영 호출자가 오버라이드하지 않으면)이다 -- 시험은
+  // 전부 fake execFn/sampleFn/sleepFn을 주입한다(§2 비타협 "라이브 실행·
+  // 라이브 측정 0").
+  const memoryReopen = runMemoryReopenStep({
+    watchDir,
+    readFn,
+    writeFn,
+    existsFn,
+    mkdirFn,
+    execFn: memoryReopenExecFn ?? createOrcaExecFn(),
+    sampleFn: memoryReopenSampleFn ?? defaultMemoryReopenFreeSampleMb,
+    sleepFn: memoryReopenSleepFn ?? defaultMemoryReopenSleep,
+  });
+  return { escalationDedupe, unconsumedVanish, seatEscalation, memoryReopen };
 }
 
 // runWatchOnceCore에서 분리(§6 eslint max-lines-per-function 상한 준수 --
@@ -4446,6 +4791,12 @@ function runWatchOnceCore(params) {
     // createOrcaExecFn()(실 orca 경로)로 낙하한다. 시험만 fake execFn을
     // 명시로 준다.
     seatEscalationExecFn,
+    // HYK-493-memory-reopen-1 (coder-task.md §2 product_scope): seatEscalation
+    // ExecFn과 동일한 계약(opt-in 객체 아님, 기본값 undefined면
+    // computePreLogDedupeSteps가 각자의 운영 기본값으로 낙하한다).
+    memoryReopenExecFn,
+    memoryReopenSampleFn,
+    memoryReopenSleepFn,
   } = params;
   mkdirFn(watchDir, { recursive: true });
   const detectorResult = runDetector({
@@ -4456,7 +4807,7 @@ function runWatchOnceCore(params) {
     watchDir,
   });
   const capResult = computeCapResult({ repoRoot, capPath, capReadFn });
-  const { escalationDedupe, unconsumedVanish, seatEscalation } =
+  const { escalationDedupe, unconsumedVanish, seatEscalation, memoryReopen } =
     computePreLogDedupeSteps({
       detectorResult,
       watchDir,
@@ -4465,6 +4816,9 @@ function runWatchOnceCore(params) {
       existsFn,
       mkdirFn,
       seatEscalationExecFn,
+      memoryReopenExecFn,
+      memoryReopenSampleFn,
+      memoryReopenSleepFn,
     });
   const {
     sweepResult,
@@ -4500,6 +4854,7 @@ function runWatchOnceCore(params) {
     unconsumedVanish,
     resourceResidueResult,
     seatEscalation,
+    memoryReopen,
   });
 }
 
@@ -4551,6 +4906,16 @@ export function runWatchOnce({
   // 다르다 -- 이 단계는 escalationDedupe/unconsumedVanish와 같이 항상
   // 돈다, 전송 여부는 내부 게이트(전이·run-id.json)가 가린다).
   seatEscalationExecFn,
+  // HYK-493-memory-reopen-1 (coder-task.md §2 product_scope): seatEscalation
+  // ExecFn과 동일한 계약 -- 시험이 가짜 exec/free 표본/간격 seam을 주입할
+  // 때만 쓴다(§2 비타협 "라이브 실행·라이브 측정 0"). 생략하면 각자의
+  // 운영 기본값(createOrcaExecFn()/os.freemem()/Atomics.wait)으로
+  // 낙하한다 -- 이 축도 escalationDedupe/unconsumedVanish/seatEscalation과
+  // 같이 항상 돈다, 실제 재측·전송 여부는 내부 게이트(상태·dry_run·문턱·
+  // dedupe)가 가린다.
+  memoryReopenExecFn,
+  memoryReopenSampleFn,
+  memoryReopenSleepFn,
 }) {
   const fsFns = resolveWatchOnceFsFns({
     readFn,
@@ -4580,6 +4945,9 @@ export function runWatchOnce({
     blockedTerminationReadFileFn,
     resourceResidue,
     seatEscalationExecFn,
+    memoryReopenExecFn,
+    memoryReopenSampleFn,
+    memoryReopenSleepFn,
   });
 }
 
