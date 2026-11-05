@@ -17,6 +17,7 @@ import {
   maskQuotedMarkerRegions,
   unclosedQuoteOpenLine,
   droppedAtScanText,
+  parseReviewOutcome,
 } from "./reject-streak.mjs";
 import {
   archiveRoundEnvelopeIfNew,
@@ -2293,6 +2294,25 @@ function readRunnerReceiptFile(harnessDir) {
   }
 }
 
+// HYK-438: true iff `resultContent` honestly claims `verdict: rejected`
+// (read via reject-streak.mjs's own parseReviewOutcome -- not a second
+// regex, so this gate and the reject-streak recorder it feeds can never
+// disagree about what "rejected" means, closing the exact drift risk this
+// issue exists to prevent) AND the receipt backing that claim is both red
+// (runner_exit !== 0) and for this exact worktree HEAD. A receipt for some
+// OTHER commit proves nothing about this head, so the match is required
+// here, not left to a later check -- callers that don't satisfy this fall
+// through to the pre-existing unconditional RED check unchanged (무회귀).
+function isHonestRedBackedRejection({ resultContent, receipt, actualHead }) {
+  const claimedOutcome = parseReviewOutcome(resultContent);
+  return (
+    claimedOutcome.ok &&
+    claimedOutcome.verdict === "rejected" &&
+    receipt.runner_exit !== 0 &&
+    receipt.head_commit.toLowerCase() === actualHead.sha
+  );
+}
+
 export function resolveRunnerReceiptVerdict({
   resultContent,
   harnessDir,
@@ -2355,6 +2375,19 @@ export function resolveRunnerReceiptVerdict({
       code: RUNNER_RECEIPT_REJECT_REASON.MEASUREMENT_UNAVAILABLE,
       reason: `runner receipt gate (HYK-477): runner receipt at ${found.path} reports runner_status=${MEASUREMENT_UNAVAILABLE_OOM_STATUS} -- 측정 불능(measurement unavailable), NOT a test failure: the runner was forcibly killed (OOM/signal) before node --test produced a real result (HYK-467 규율) -- fail-closed all the same (소비는 여전히 거부한다), but reported with a distinct code/문장 so a reader cannot mistake this for "the tests failed"${contractSuffix}`,
     };
+  }
+  // HYK-438: a result that honestly claims `verdict: rejected` and backs
+  // that claim with its own red receipt is NOT "claiming green" -- the
+  // claim and the observation agree, so the RED check below (which exists
+  // to catch a result claiming green while the runner actually failed)
+  // does not apply (실사고 HYK-430: 이 정직한 반려가 streak에 오르지
+  // 못했다). isHonestRedBackedRejection is pulled out to a separate
+  // function (not inlined here) to keep this function's own ESLint
+  // complexity under the repo's ceiling -- same reason
+  // missingReceiptReasonHead/runnerContractReasonSuffix were pulled out
+  // above.
+  if (isHonestRedBackedRejection({ resultContent, receipt, actualHead })) {
+    return { ok: true };
   }
   if (receipt.runner_exit !== 0) {
     return {
