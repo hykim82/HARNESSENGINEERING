@@ -124,6 +124,15 @@ function ensureGitHeadCommit(dir) {
       ],
       { cwd: dir },
     );
+    // HYK-266: a REVIEW-family consumption now actually attempts to write
+    // the reject-streak ledger at `mainRepoRoot(harnessDir)/.harness/
+    // reject-streak.json` -- since `dir` IS harnessDir's own git root
+    // (HYK-428 anchors mainRepoRoot purely to harnessDir, never to this
+    // process's ambient cwd), that write targets THIS isolated mkdtemp
+    // repo, never the real one -- but it still needs `.harness/` to
+    // exist here, or it fails with LEDGER_WRITE_ERROR (now a blocking
+    // reasonCode, not a silent pass-through).
+    mkdirSync(join(dir, ".harness"), { recursive: true });
   }
   return execFileSync("git", ["rev-parse", "HEAD"], {
     cwd: dir,
@@ -231,25 +240,28 @@ test("mutation ⓑ 갱신: nextArchiveFileName이 항상 round 1을 반환하도
       `file://${join(scriptsCheckDir, "relay-handshake.mjs")}?t=${Date.now()}`
     );
 
-    // NOTE: content deliberately avoids a real `verdict: approved`/
-    // `verdict: rejected` line -- role "review" makes reject-streak.mjs's
-    // own isReviewFamilyRole(role) true, and that module's ledger path is
-    // NOT injectable (mainRepoRoot() always resolves THIS machine's actual
-    // main repo, not this test's mkdtemp fixture). A genuine verdict line
-    // would silently write a synthetic entry into the REAL production
-    // `.harness/reject-streak.json` -- exactly the "실제 .harness를
-    // 어지럽히지 마라" rule this suite must never violate.
+    // HYK-266: a NO_VERDICT_LINE result is now a blocking contract
+    // violation (not a pass-through), so this fixture needs a real
+    // `verdict:` line to still reach ok:true. The old premise this
+    // comment used to state ("mainRepoRoot() always resolves THIS
+    // machine's actual main repo") is stale post-HYK-428: mainRepoRoot()
+    // anchors purely to harnessDir's OWN git worktree (never to this
+    // process's ambient cwd) -- and `dir` (harnessDir's parent, git-inited
+    // by ensureGitHeadCommit just above, now with its own `.harness/`)
+    // IS harnessDir's worktree root here, so the ledger write this now
+    // triggers lands in THIS mkdtemp fixture's own isolated
+    // `.harness/reject-streak.json`, never the real repo's.
     writeFixture(
       harnessDir,
       "review",
       "HYK-9901",
       "2026-08-08 06:00 KST",
       "2026-08-08 06:10:00 KST",
-      "outcome-note: needs-rework\n",
+      "outcome-note: needs-rework\nverdict: rejected\n",
       headCommit,
     );
     const first = mod.checkRelayHandshake({ role: "review", harnessDir });
-    assert.equal(first.ok, true);
+    assert.equal(first.ok, true, `expected ok:true: ${first.reason}`);
 
     writeFixture(
       harnessDir,
@@ -257,11 +269,11 @@ test("mutation ⓑ 갱신: nextArchiveFileName이 항상 round 1을 반환하도
       "HYK-9901",
       "2026-08-08 07:00 KST",
       "2026-08-08 07:10:00 KST",
-      "outcome-note: looks-good\n",
+      "outcome-note: looks-good\nverdict: approved\n",
       headCommit,
     );
     const second = mod.checkRelayHandshake({ role: "review", harnessDir });
-    assert.equal(second.ok, true);
+    assert.equal(second.ok, true, `expected ok:true: ${second.reason}`);
 
     // HYK-241 §2 조각1: nextTaskArchiveFileName (task-file side) is a
     // SEPARATE, unmutated function with its own return line -- filtered out

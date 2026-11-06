@@ -105,6 +105,17 @@ function ensureGitHeadCommit(dir) {
       ["commit", "-q", "--allow-empty", "-m", "relay-handshake test fixture"],
       { cwd: dir },
     );
+    // HYK-266: a REVIEW-family consumption now actually attempts to write
+    // the reject-streak ledger at `mainRepoRoot(harnessDir)/.harness/
+    // reject-streak.json` -- when this fresh ad-hoc repo IS harnessDir
+    // itself (writeValidFixture's call site), that write needs the
+    // `.harness/` directory to already exist (mirrors the real production
+    // shape every other fixture builder in this repo already assumes --
+    // reject-streak-auto-record.test.mjs's initPlainGitRepo comment:
+    // "coder-task.md 등이 routinely dropped there") or it fails with
+    // LEDGER_WRITE_ERROR (now a blocking reasonCode, not a silent
+    // pass-through) for every caller of this helper.
+    mkdirSync(join(dir, ".harness"), { recursive: true });
   }
   return execFileSync("git", ["rev-parse", "HEAD"], {
     cwd: dir,
@@ -117,6 +128,14 @@ function writeValidFixture(dir, role, taskId) {
   const headCommitLine = isReview
     ? `head_commit: ${ensureGitHeadCommit(dir)}\n`
     : "";
+  // HYK-266: a REVIEW-family result that never reaches a `verdict:
+  // approved|rejected` line is now a contract-violation consumption
+  // reject (NO_VERDICT_LINE), not a pass-through -- this shared "valid,
+  // should confirm ok:true" fixture builder must carry one for every
+  // REVIEW-family caller, or every CLI test reusing it for an exit-0
+  // assertion would start exercising THIS round's own rejection instead
+  // of whatever axis it actually means to test.
+  const verdictLine = isReview ? "verdict: approved\n" : "";
   writeFileSync(
     join(dir, `${role}-task.md`),
     `task_id: ${taskId}\ndropped_at: 2026-08-03 06:00 KST\n${headCommitLine}`,
@@ -128,7 +147,7 @@ function writeValidFixture(dir, role, taskId) {
     // with no finalize-done marker (fail-closed) -- this shared fixture
     // builder must carry the marker so every CLI/ok:true test that reuses
     // it keeps exercising ITS OWN feature, not this promotion's rejection.
-    `task_id: ${taskId}\n${headCommitLine}\n>>> DONE: ${role.toUpperCase()} @ 2026-08-03 06:10:00 KST\ndone_stamped_by: finalize-done\n`,
+    `task_id: ${taskId}\n${headCommitLine}${verdictLine}\n>>> DONE: ${role.toUpperCase()} @ 2026-08-03 06:10:00 KST\ndone_stamped_by: finalize-done\n`,
     "utf8",
   );
 }
@@ -550,7 +569,11 @@ test("(q) paired good: same content, task_id moved to a standalone column-0 line
     writeResult(
       dir,
       "review",
-      `dispatch_verified: yes\ntask_id_from_dispatch: HYK-167-review-2\npane_match: 일치\ntask_id: HYK-167-review-2\nhead_commit: ${headCommit}\n\nfor: HYK-167 / role: REVIEW-CODEX\n\n>>> DONE: REVIEW-CODEX @ 2026-07-05 06:10:00 KST\ndone_stamped_by: finalize-done\n`,
+      // HYK-266: this fixture's own subject is task_id-echo line placement
+      // (the "paired good" counterpart of test (p) above), not the
+      // reject-streak verdict axis -- add a verdict line so this stays an
+      // ok:true REVIEW consumption rather than a NO_VERDICT_LINE reject.
+      `dispatch_verified: yes\ntask_id_from_dispatch: HYK-167-review-2\npane_match: 일치\ntask_id: HYK-167-review-2\nhead_commit: ${headCommit}\nverdict: approved\n\nfor: HYK-167 / role: REVIEW-CODEX\n\n>>> DONE: REVIEW-CODEX @ 2026-07-05 06:10:00 KST\ndone_stamped_by: finalize-done\n`,
     );
     const result = checkRelayHandshake({ role: "review", harnessDir: dir });
     assert.equal(result.ok, true);

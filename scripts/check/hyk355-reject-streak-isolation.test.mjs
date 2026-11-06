@@ -361,11 +361,25 @@ test("HYK-355 (c)★ HYK-428 갱신: 게이트(+axis ⓑ)를 디스크에서 실
     const result = runRelayHandshakeCli(mutantPath, ["review", probeDir], {
       cwd: mainDir,
     });
-    assert.equal(result.exit, 0, `mutant handshake: ${result.stderr}`);
+    // HYK-266 ⓐ⑷ (grep-anchor sync, worker-dispatch-rule ORCH70 §33b):
+    // LEDGER_WRITE_ERROR is now one of the 7 reasonCodes
+    // checkLedgerUnavailableViolation blocks consumption on -- this
+    // mutant still carries that call site (it is far from both
+    // GATE_TARGET/HEAD_COMMIT_AXIS_CALL_TARGET, neither of which this
+    // test removes it with), so the handshake itself now flips to
+    // ok:false/exit 1 instead of the pre-HYK-266 exit 0. The ledger-
+    // integrity assertions below (nothing lands anywhere) are this test's
+    // actual subject and are unchanged/still true.
+    assert.equal(result.exit, 1, `mutant handshake: ${result.stderr}`);
     assert.match(
       result.stderr,
       /reject-streak auto-record: ledger write failed unexpectedly/,
       "HYK-428's try/catch must degrade this to a logged failure, not an uncaught crash",
+    );
+    assert.match(
+      result.stderr,
+      /consumption deferred \(HYK-266\): reject-streak ledger unavailable/,
+      "HYK-266: LEDGER_WRITE_ERROR is now also blocked, not just logged",
     );
     assert.equal(
       readMainLedger(mainDir),
@@ -413,10 +427,25 @@ test("HYK-355 (d) 변이 검사 ② (axis ⓑ를 격리한 채로): GATE_TARGET�
     const result = runRelayHandshakeCli(mutantPath, ["review", probeDir], {
       cwd: mainDir,
     });
-    assert.equal(result.exit, 0, `restored handshake: ${result.stderr}`);
+    // HYK-266 ⓐ⑷ (grep-anchor sync, worker-dispatch-rule ORCH70 §33b):
+    // UNISOLATED_HARNESS_DIR (`blocked:true`) is now also intercepted by
+    // checkUnisolatedHarnessDirViolation before this consumption can
+    // proceed -- that call site is untouched by this test's own isolation
+    // edit (only HEAD_COMMIT_AXIS_CALL_TARGET is removed here), so it
+    // still fires and flips exit from 0 to 1. The GATE_TARGET
+    // RED/GREEN contrast this test exists to pin (does HYK-355's own
+    // isolation check still run at all) is unchanged -- it is visible
+    // below in the unchanged ledger-non-creation assertion and the
+    // still-present "refusing mainRepoRoot() default" log line.
+    assert.equal(result.exit, 1, `restored handshake: ${result.stderr}`);
     assert.match(
       result.stderr,
       /reject-streak auto-record: refusing mainRepoRoot\(\) default/,
+    );
+    assert.match(
+      result.stderr,
+      /consumption rejected \(HYK-266, 범위 밖 발견 ⓐ\)/,
+      "HYK-266: UNISOLATED_HARNESS_DIR is now also blocked, not a silent pass-through",
     );
     assert.equal(
       readMainLedger(mainDir),

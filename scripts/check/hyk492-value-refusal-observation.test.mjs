@@ -70,6 +70,15 @@ function ensureGitHeadCommit(dir) {
     ["commit", "-q", "--allow-empty", "-m", "hyk492 test fixture"],
     { cwd: dir },
   );
+  // HYK-266: a REVIEW-family consumption now actually attempts to write
+  // the reject-streak ledger at `mainRepoRoot(harnessDir)/.harness/
+  // reject-streak.json` -- `dir` IS harnessDir's own git root in every
+  // caller of this helper, so that write targets THIS isolated mkdtemp
+  // repo (HYK-428 anchors mainRepoRoot purely to harnessDir), but it
+  // still needs `.harness/` to exist here or it fails with
+  // LEDGER_WRITE_ERROR (now blocking, not a silent pass-through) --
+  // harmless no-op for the CODER-role callers of this same helper.
+  mkdirSync(join(dir, ".harness"), { recursive: true });
   return execFileSync("git", ["rev-parse", "HEAD"], {
     cwd: dir,
     encoding: "utf8",
@@ -192,7 +201,11 @@ function writeReviewRound(dir, { taskHead, resultHead }) {
   );
   writeFileSync(
     join(dir, "review.md"),
-    `task_id: HYK-492-R\nhead_commit: ${resultHead}\n\n>>> DONE: REVIEW @ 2026-11-04 06:10:00 KST\ndone_stamped_by: finalize-done\n`,
+    // HYK-266: NO_VERDICT_LINE is now a blocking contract violation --
+    // add a verdict line so this fixture's own subject (the head_commit
+    // axis, HYK-383) is reachable without first being rejected on this
+    // unrelated axis.
+    `task_id: HYK-492-R\nfor: HYK-492-R\nverdict: rejected\nhead_commit: ${resultHead}\n\n>>> DONE: REVIEW @ 2026-11-04 06:10:00 KST\ndone_stamped_by: finalize-done\n`,
     "utf8",
   );
 }

@@ -85,6 +85,13 @@ function ensureGitHeadCommit(dir) {
       ["commit", "-q", "--allow-empty", "-m", "nc-codex-lane test fixture"],
       { cwd: dir },
     );
+    // HYK-266: a REVIEW-family consumption now actually attempts to write
+    // the reject-streak ledger at `mainRepoRoot(harnessDir)/.harness/
+    // reject-streak.json` -- `dir` IS harnessDir's own git root here
+    // (HYK-428 anchors mainRepoRoot purely to harnessDir), so it needs
+    // `.harness/` to exist or it fails with LEDGER_WRITE_ERROR (now
+    // blocking, not a silent pass-through).
+    mkdirSync(join(dir, ".harness"), { recursive: true });
   }
   return execFileSync("git", ["rev-parse", "HEAD"], {
     cwd: dir,
@@ -108,7 +115,10 @@ function writeCodexReviewFixture(dir, { droppedAt, doneAt }) {
     // with no finalize-done marker (fail-closed) -- this file's own
     // subject is the future-skew block parity across engines, not the
     // marker gate, so carry the marker to reach that axis unmasked.
-    `task_id: HYK-9186-codex\nhead_commit: ${headCommit}\n\n>>> DONE: REVIEW-CODEX @ ${doneAt}\ndone_stamped_by: finalize-done\n`,
+    // HYK-266: add a verdict line -- NO_VERDICT_LINE is now a blocking
+    // contract violation and would otherwise mask this fixture's own
+    // future-DONE axis behind an unrelated rejection.
+    `task_id: HYK-9186-codex\nfor: HYK-9186-codex\nverdict: rejected\nhead_commit: ${headCommit}\n\n>>> DONE: REVIEW-CODEX @ ${doneAt}\ndone_stamped_by: finalize-done\n`,
     "utf8",
   );
 }
