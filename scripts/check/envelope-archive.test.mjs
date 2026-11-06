@@ -626,6 +626,14 @@ function ensureGitHeadCommit(dir) {
       ["commit", "-q", "--allow-empty", "-m", "envelope-archive test fixture"],
       { cwd: dir },
     );
+    // HYK-266: a REVIEW-family consumption now actually attempts to write
+    // the reject-streak ledger at `mainRepoRoot(harnessDir)/.harness/
+    // reject-streak.json` -- since `dir` IS harnessDir's own git root
+    // here, that write targets THIS isolated mkdtemp repo (HYK-428 anchors
+    // mainRepoRoot purely to harnessDir, never this process's ambient
+    // cwd), but still needs `.harness/` to exist or it fails with
+    // LEDGER_WRITE_ERROR (now blocking, not a silent pass-through).
+    mkdirSync(join(dir, ".harness"), { recursive: true });
   }
   return execFileSync("git", ["rev-parse", "HEAD"], {
     cwd: dir,
@@ -709,16 +717,17 @@ test("wiring: checkRelayHandshake blocked (mismatch) -> no archive is written --
   });
 });
 
-// NOTE: these fixtures deliberately never write a real `verdict: approved`/
-// `verdict: rejected` line. Role "review" makes reject-streak.mjs's own
-// isReviewFamilyRole(role) true, and that module's ledger path is NOT
-// injectable -- mainRepoRoot() always resolves THIS machine's actual main
-// repo, not this test's mkdtemp fixture. A genuine verdict line here would
-// silently write a synthetic entry into the REAL production
-// `.harness/reject-streak.json`, exactly the "실제 .harness를 어지럽히지
-// 마라" rule this suite must never violate (a 2026-08-08 실측 mistake this
-// very track made and had to clean up by hand). An "outcome-note:" line
-// keeps the round content distinguishable while parseReviewOutcome's own
+// HYK-266: a NO_VERDICT_LINE result is now a blocking contract violation
+// (not a pass-through), so the test below adds a real `verdict:` line.
+// ⛔옛 문면(stale, HYK-428 이후 더는 맞지 않음): "mainRepoRoot() always
+// resolves THIS machine's actual main repo" -- mainRepoRoot()는 오직
+// harnessDir 자신의 git worktree에만 닻을 내린다(이 프로세스의 ambient
+// cwd는 전혀 안 본다). `dir`(harnessDir 자신, 바로 위 ensureGitHeadCommit
+// 이 git-init하고 이제 `.harness/`도 함께 만든다)가 harnessDir의 worktree
+// root이므로, 이 변경으로 새로 일어나는 원장 쓰기는 이 mkdtemp 픽스처
+// 자신의 격리된 `.harness/reject-streak.json`에만 떨어진다 -- 실제
+// 저장소는 건드리지 않는다(아래에서 직접 확인했다). An "outcome-note:"
+// line keeps the round content distinguishable while parseReviewOutcome's own
 // verdict-line requirement fails closed, so no write is ever attempted.
 test("wiring: same track, two rounds re-checked via checkRelayHandshake -> both round texts survive under harnessDir/rounds (§5 착수 기준 그대로)", () => {
   withFixtureDir("relay-wiring-two-rounds-", (dir) => {
@@ -732,11 +741,11 @@ test("wiring: same track, two rounds re-checked via checkRelayHandshake -> both 
       "review",
       "HYK-204",
       "2026-08-08 06:10:00 KST",
-      "outcome-note: needs-rework\n",
+      "outcome-note: needs-rework\nverdict: rejected\n",
       headCommit,
     );
     const first = checkRelayHandshake({ role: "review", harnessDir: dir });
-    assert.equal(first.ok, true);
+    assert.equal(first.ok, true, `expected ok:true: ${first.reason}`);
 
     // Round 2: same track, task file re-dropped for the next review pass,
     // result overwritten -- this overwrite is exactly what used to erase
@@ -747,11 +756,11 @@ test("wiring: same track, two rounds re-checked via checkRelayHandshake -> both 
       "review",
       "HYK-204",
       "2026-08-08 07:10:00 KST",
-      "outcome-note: looks-good\n",
+      "outcome-note: looks-good\nverdict: approved\n",
       headCommit,
     );
     const second = checkRelayHandshake({ role: "review", harnessDir: dir });
-    assert.equal(second.ok, true);
+    assert.equal(second.ok, true, `expected ok:true: ${second.reason}`);
 
     // HYK-241 §2 조각1: checkRelayHandshake now ALSO archives the round's
     // TASK file at the same call site -- this test's own writeTask() calls

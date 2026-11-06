@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -109,6 +109,12 @@ function ensureGitHeadCommit(dir) {
     ["commit", "-q", "--allow-empty", "-m", "go-wait-pilot test fixture"],
     { cwd: dir },
   );
+  // HYK-266: REVIEW-family consumption now actually attempts the
+  // reject-streak ledger write at `mainRepoRoot(harnessDir)/.harness/
+  // reject-streak.json` -- `dir` IS harnessDir's own (isolated, mkdtemp)
+  // git root here, so it needs `.harness/` to exist or the write fails
+  // with LEDGER_WRITE_ERROR (now blocking).
+  mkdirSync(join(dir, ".harness"), { recursive: true });
   return execFileSync("git", ["rev-parse", "HEAD"], {
     cwd: dir,
     encoding: "utf8",
@@ -288,7 +294,10 @@ async function scenarioS1(tally) {
             if (bTicks === 1)
               writeFileSync(
                 join(dirB, "review.md"),
-                `task_id: HYK-142-pilot-B\nhead_commit: ${headCommitB}\n\n>>> DONE: REVIEW @ 2026-07-14 21:06:00 KST\ndone_stamped_by: finalize-done\n`,
+                // HYK-266: NO_VERDICT_LINE is now a blocking contract
+                // violation -- add a verdict line so this lane-isolation
+                // scenario still reaches status "done", its own subject.
+                `task_id: HYK-142-pilot-B\nfor: HYK-142-pilot-B\nverdict: approved\nhead_commit: ${headCommitB}\n\n>>> DONE: REVIEW @ 2026-07-14 21:06:00 KST\ndone_stamped_by: finalize-done\n`,
                 "utf8",
               );
           },

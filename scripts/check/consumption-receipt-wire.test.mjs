@@ -252,7 +252,14 @@ test("§4-4 (표적: admissionReturned 실패): ADMISSION_LEDGER_PATH가 없으�
 // 경우, isReviewFamilyRole만 true이고 실제 기록은 실패하는 시나리오).
 // ---------------------------------------------------------------------------
 
-test("§4-4 (표적: REVIEW ledgerRecorded 실패): verdict 줄이 없는 REVIEW 결과는 handshake ok:true라도 영수증이 생성되지 않는다", () => {
+// HYK-266: 검토자의 5번째 지적(PM-r14 (d) 표 5칸) -- verdict 줄이 없는
+// 것(NO_VERDICT_LINE)은 이제 ledgerRecorded 실패가 ok:true 뒤에 영수증만
+// 조용히 거르는 "부분 성공"이 아니라, handshake 자신을 ok:false로 거부
+// (checkContractViolation)한다. 이름은 그대로 두되(이 §4-4 "후속효과
+// 실패 → 영수증 0" 묶음의 2번째 표적이라는 위치는 변하지 않는다),
+// 단언만 새 계약(ok:false)으로 갱신한다 -- 영수증 0은 변함없다(오히려
+// 더 일찍, 더 강하게 보장된다).
+test("§4-4 (표적: REVIEW ledgerRecorded 실패, HYK-266로 갱신): verdict 줄이 없는 REVIEW 결과는 이제 handshake 자신이 ok:false로 거부하고, 영수증도 생성되지 않는다", () => {
   const harnessDir = tmpDir("hyk244-wire-c-harness-");
   const ledgerDir = tmpDir("hyk244-wire-c-ledger-");
   const ledger = join(ledgerDir, "l.json");
@@ -296,13 +303,17 @@ test("§4-4 (표적: REVIEW ledgerRecorded 실패): verdict 줄이 없는 REVIEW
     );
     assert.equal(
       result.ok,
-      true,
-      "precondition: handshake itself still succeeded",
+      false,
+      "HYK-266: no verdict line is a contract violation -- the handshake itself is now rejected, not just the receipt",
+    );
+    assert.match(
+      result.reason,
+      /consumption rejected \(HYK-266\): REVIEW-family result file does not carry a resolvable, finished verdict/,
     );
     assert.deepEqual(
       receiptsIn(harnessDir),
       [],
-      "ledgerRecorded가 REVIEW 계열의 필수 효과인데 실패했으므로 영수증이 생기지 않는다",
+      "ledgerRecorded가 REVIEW 계열의 필수 효과인데 실패했으므로 영수증이 생기지 않는다 (HYK-266 이후로는 더 일찍, handshake 자체 거부로 보장된다)",
     );
   } finally {
     rmSync(harnessDir, { recursive: true, force: true });
