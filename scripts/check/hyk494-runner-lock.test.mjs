@@ -50,6 +50,26 @@ function freshLockDir(prefix = "hyk494-lock-") {
   return mkdtempSync(join(tmpdir(), prefix));
 }
 
+// HYK-494 live finding (this round's own full-runner run 1, §3 완료 조건 3
+// evidence): this test FILE can itself run nested inside a real
+// isolated-suite-runner.mjs invocation that already holds the real lock --
+// that outer process marks NESTED_LOCK_BYPASS_ENV_VAR on its own
+// process.env BEFORE spawning the main `node --test` pass (the exact
+// mechanism §8 of the design doc describes), and that marker is still
+// present in THIS process's ambient process.env when these tests run. Every
+// test below that means to exercise NON-nested behavior must explicitly
+// strip it, or it silently bypasses the lock it is trying to test (found
+// live: all 5 non-nested acquireRunnerLock(...) call sites below, plus the
+// GREEN race test's spawned children, failed this exact way on this
+// round's own first full-runner run -- same class of fix as hyk473-runner-
+// cap.test.mjs's own NESTED_CONCURRENCY_ENV_VAR "save/strip/restore"
+// comment).
+function cleanEnv() {
+  const env = { ...process.env };
+  delete env[NESTED_LOCK_BYPASS_ENV_VAR];
+  return env;
+}
+
 // -- §1: defaultRunnerLockPath -----------------------------------------
 
 test("defaultRunnerLockPath: lives under os.tmpdir() with the fixed filename, never a per-worktree path", () => {
@@ -71,6 +91,7 @@ test("acquireRunnerLock: uncontended acquisition is immediate (waitMs 0, pollCou
       startedAtMs: 1000,
       worktree: "/src",
       head: "deadbeef",
+      env: cleanEnv(),
     });
     assert.equal(r.acquired, true);
     assert.equal(r.nested, false);
@@ -103,7 +124,12 @@ test("releaseRunnerLock: releases our own lock (pid matches) -- file removed", (
   const dir = freshLockDir();
   const lockPath = join(dir, "r.lock");
   try {
-    acquireRunnerLock({ lockPath, pid: process.pid, startedAtMs: 1 });
+    acquireRunnerLock({
+      lockPath,
+      pid: process.pid,
+      startedAtMs: 1,
+      env: cleanEnv(),
+    });
     assert.ok(existsSync(lockPath));
     const result = releaseRunnerLock({ lockPath, pid: process.pid });
     assert.equal(result.released, true);
@@ -180,6 +206,7 @@ test("acquireRunnerLock: a lock held by a DEAD pid is reclaimed (reclaimedOrphan
       startedAtMs: 2,
       timeoutMs: 5000,
       pollIntervalMs: 5,
+      env: cleanEnv(),
     });
     assert.equal(r.acquired, true);
     assert.equal(r.reclaimedOrphan, true);
@@ -220,6 +247,7 @@ test("acquireRunnerLock: a lock held by a live pid past the upper bound times ou
       startedAtMs: 2,
       timeoutMs: 60,
       pollIntervalMs: 10,
+      env: cleanEnv(),
     });
     const elapsedWall = Date.now() - start;
     assert.equal(r.acquired, false);
@@ -299,7 +327,11 @@ test("acquireRunnerLock: a non-EEXIST write failure (e.g. missing lock directory
   };
   assert.throws(
     () =>
-      acquireRunnerLock({ lockPath: "/does/not/exist/r.lock", writeFileFn }),
+      acquireRunnerLock({
+        lockPath: "/does/not/exist/r.lock",
+        writeFileFn,
+        env: cleanEnv(),
+      }),
     /ENOENT/,
   );
 });
@@ -400,7 +432,13 @@ function spawnRaceChild({ lockPath, holdMs, outPath, noLock }) {
         outPath,
         noLock ? "1" : "0",
       ],
-      { stdio: "ignore" },
+      // cleanEnv(): this child's own acquireRunnerLock call (inside
+      // lockRaceChildScript) relies on its own default `env: process.env`
+      // -- without stripping NESTED_LOCK_BYPASS_ENV_VAR here, a child
+      // spawned while this test file itself runs nested inside a real
+      // locked full-runner invocation would silently bypass the very lock
+      // this test exists to prove serializes (see cleanEnv's own header).
+      { stdio: "ignore", env: cleanEnv() },
     );
     child.on("exit", (code) => resolve(code));
   });
