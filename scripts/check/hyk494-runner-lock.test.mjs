@@ -28,7 +28,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { EventEmitter } from "node:events";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -91,6 +91,22 @@ test("defaultRunnerLockPath: lives under os.homedir() with the fixed filename, n
     p1,
     join("/fake/home", "harness-isolated-suite-runner.lock"),
     "must be joined onto the injected homedirFn() result, not some other base",
+  );
+});
+
+// HYK-494 2R: the REAL (no-override) default specifically -- proves the
+// production call site (no test ever exercises this path, every other test
+// here injects homedirFn) resolves under os.homedir(), never os.tmpdir()
+// (mutation target: swapping the `homedirFn = homedir` default back to
+// `tmpdir` would make this the ONLY test that catches it -- every other
+// test overrides the seam and would stay green).
+test("defaultRunnerLockPath: the REAL default (no override) resolves under the REAL os.homedir(), not os.tmpdir()", () => {
+  const real = defaultRunnerLockPath();
+  assert.equal(real, join(homedir(), "harness-isolated-suite-runner.lock"));
+  assert.notEqual(
+    real,
+    join(tmpdir(), "harness-isolated-suite-runner.lock"),
+    "homedir() and tmpdir() must not coincide on this machine, or this assertion is vacuous",
   );
 });
 
