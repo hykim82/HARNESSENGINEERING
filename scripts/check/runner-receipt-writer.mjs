@@ -32,10 +32,23 @@ export const RUNNER_RECEIPT_FILENAME = "runner-receipt.json";
 // it did not (isolated-suite-runner.mjs's classifySpawnOutcome is the only
 // producer of this value, and it decides structurally on spawnSync's own
 // signal/status/error fields -- never by matching message text, HYK-262).
+// HYK-494: a FOURTH status -- the machine-wide runner lock (runner-
+// lock.mjs) was never acquired within its upper-bound wait, so this run
+// never cloned/measured/spawned anything at all. Deliberately NOT folded
+// into MEASUREMENT_UNAVAILABLE_OOM: that name's own string bakes in "OOM",
+// and this cause has nothing to do with memory -- a downstream reader
+// (human or relay-handshake.mjs) must not be told "OOM" for a lock
+// contention timeout (정직 > 편의). relay-handshake.mjs's actual fail-closed
+// gate checks `runner_exit !== 0` first (HYK-411), which this status always
+// pairs with, so adding a new enum member here cannot make any existing
+// consumer treat a run under this status as green -- see coder-task.md §1
+// pre-check ⑶ for the grep confirming relay-handshake.mjs does not switch
+// exhaustively over RUNNER_STATUS's members.
 export const RUNNER_STATUS = Object.freeze({
   OK: "OK",
   TESTS_FAILED: "TESTS_FAILED",
   MEASUREMENT_UNAVAILABLE_OOM: "MEASUREMENT_UNAVAILABLE_OOM",
+  LOCK_TIMEOUT: "LOCK_TIMEOUT",
 });
 
 // Callers that don't classify a spawn outcome themselves (this file's own
@@ -388,6 +401,42 @@ function perPassFreeMemFields({
 // recorded SEPARATELY, and a receipt field is the chosen home for that
 // (결과 파일 1줄과 중복, 기계로도 남긴다) -- min_free_mb_sampled above stays
 // a whole-run figure, unchanged.
+// HYK-494 (additive only -- every field above this comment is byte-for-byte
+// unchanged in name/meaning/order): the runner-lock.mjs mutual-exclusion
+// wait, as observed by THIS run's own acquireRunnerLock call. `lockInfo` is
+// a single object (mirrors how `counts` above is already one object, not
+// four separate params) so adding it costs exactly one new parameter at
+// every call site in the chain, not six. A caller that omits it (every
+// pre-HYK-494 test in this file, and any legacy caller) gets all-null lock_*
+// fields -- the same "omitted optional param -> null field" posture as
+// every other additive block in this function.
+// Merged via object spread (quality-gate fix, not a behavior change -- see
+// runner-lock.mjs's ACQUIRE_LOCK_STATIC_DEFAULTS for the same pattern/same
+// reasoning): `?.`/`??` chains each cost a branch under this file's
+// `complexity` rule, and six of them pushed this function over budget.
+// `{ ...LOCK_INFO_DEFAULTS, ...lockInfo }` is complexity-free and handles
+// `lockInfo === undefined` the same way (spreading `undefined` is a no-op).
+const LOCK_INFO_DEFAULTS = {
+  path: null,
+  waitMs: null,
+  pollCount: null,
+  reclaimedOrphan: null,
+  nested: null,
+  timedOut: null,
+};
+
+function lockReceiptFields(lockInfo) {
+  const resolved = { ...LOCK_INFO_DEFAULTS, ...lockInfo };
+  return {
+    lock_path: resolved.path,
+    lock_wait_ms: resolved.waitMs,
+    lock_poll_count: resolved.pollCount,
+    lock_reclaimed_orphan: resolved.reclaimedOrphan,
+    lock_nested: resolved.nested,
+    lock_timed_out: resolved.timedOut,
+  };
+}
+
 export function buildRunnerReceipt({
   runnerExit,
   runnerStatus,
@@ -405,6 +454,7 @@ export function buildRunnerReceipt({
   mainMinFreeMb,
   familyStartFreeMb,
   familyMinFreeMb,
+  lockInfo,
 }) {
   return {
     schema_version: RUNNER_RECEIPT_SCHEMA_VERSION,
@@ -429,6 +479,7 @@ export function buildRunnerReceipt({
       familyStartFreeMb,
       familyMinFreeMb,
     }),
+    ...lockReceiptFields(lockInfo),
   };
 }
 
@@ -466,6 +517,7 @@ export function writeRunnerReceipt({
   mainMinFreeMb,
   familyStartFreeMb,
   familyMinFreeMb,
+  lockInfo,
   mkdirFn = mkdirSync,
   writeFileFn = writeFileSync,
 }) {
@@ -488,6 +540,7 @@ export function writeRunnerReceipt({
     mainMinFreeMb,
     familyStartFreeMb,
     familyMinFreeMb,
+    lockInfo,
   });
   const path = join(dir, RUNNER_RECEIPT_FILENAME);
   writeFileFn(path, JSON.stringify(receipt, null, 2) + "\n", "utf8");
@@ -603,6 +656,7 @@ export function writeNumberedRunnerReceipt({
   mainMinFreeMb,
   familyStartFreeMb,
   familyMinFreeMb,
+  lockInfo,
   writeFileFn = writeFileSync,
 }) {
   const receipt = buildRunnerReceipt({
@@ -622,6 +676,7 @@ export function writeNumberedRunnerReceipt({
     mainMinFreeMb,
     familyStartFreeMb,
     familyMinFreeMb,
+    lockInfo,
   });
   writeFileFn(receiptPath, JSON.stringify(receipt, null, 2) + "\n", "utf8");
   return { path: receiptPath, receipt };

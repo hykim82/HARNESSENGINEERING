@@ -477,6 +477,15 @@ test("buildRunnerReceipt: shape has all §2-1-required fields, schema_version pi
     main_min_free_mb_sampled: null,
     family_start_free_mb: null,
     family_min_free_mb_sampled: null,
+    // HYK-494 fixture sync (ORCH70 §33 ⓒ, additive only): lockInfo was
+    // omitted above, so every lock_* field below is null -- see
+    // lockReceiptFields's own header.
+    lock_path: null,
+    lock_wait_ms: null,
+    lock_poll_count: null,
+    lock_reclaimed_orphan: null,
+    lock_nested: null,
+    lock_timed_out: null,
   });
 });
 

@@ -1166,6 +1166,13 @@ export const ENFORCEMENT_CHECK_FILES = [
   // block right below for why.
   "isolated-suite-runner.mjs",
   "isolated-suite-runner.test.mjs",
+  // HYK-494: isolated-suite-runner.mjs gained a new static import this
+  // round (the machine-wide runner mutual-exclusion lock) -- without this
+  // entry, install-copylist-closure.test.mjs's own import-closure check
+  // (below) would catch an installed target MODULE_NOT_FOUND-ing on this
+  // file the moment isolated-suite-runner.mjs tries to import it.
+  "runner-lock.mjs",
+  "hyk494-runner-lock.test.mjs",
   "quality-check.mjs",
   "quality-check.test.mjs",
   // ★정직 한계 (HYK-209-frame-repair-1, discovered live by
