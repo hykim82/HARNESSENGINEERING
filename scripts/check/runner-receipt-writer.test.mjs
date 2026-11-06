@@ -486,7 +486,80 @@ test("buildRunnerReceipt: shape has all §2-1-required fields, schema_version pi
     lock_reclaimed_orphan: null,
     lock_nested: null,
     lock_timed_out: null,
+    // HYK-494 2R fixture sync (ORCH70 §33 ⓒ, additive only -- REVIEW-1R
+    // P1-2's own required new fields, see priorOwnerReceiptFields/
+    // lockReceiptFields's headers): lockInfo omitted above, so these are
+    // null too.
+    lock_wait_start_ms: null,
+    lock_wait_end_ms: null,
+    lock_prior_owner_pid: null,
+    lock_prior_owner_started_at_ms: null,
+    lock_prior_owner_worktree: null,
+    lock_nested_bypass_rejected: null,
   });
+});
+
+// HYK-494 2R: dedicated coverage for the fields REVIEW-1R's P1-2 found
+// missing -- a populated lockInfo (every field, including a non-null
+// priorOwner) must surface all 12 lock_* fields verbatim, not just the
+// original 6.
+test("buildRunnerReceipt: a populated lockInfo (incl. priorOwner/waitStartMs/waitEndMs/nestedBypassRejected) surfaces all 12 lock_* fields verbatim", () => {
+  const receipt = buildRunnerReceipt({
+    runnerExit: 0,
+    runnerStatus: RUNNER_STATUS.OK,
+    counts: { tests: 1, pass: 1, fail: 0, skip: 0 },
+    headCommit: "abc",
+    finishedAtMs: 0,
+    lockInfo: {
+      path: "/fake/lock",
+      waitMs: 1234,
+      pollCount: 3,
+      reclaimedOrphan: true,
+      nested: false,
+      timedOut: false,
+      waitStartMs: 1000,
+      waitEndMs: 2234,
+      priorOwner: { pid: 777, startedAtMs: 1, worktree: "/other" },
+      nestedBypassRejected: true,
+    },
+  });
+  assert.equal(receipt.lock_path, "/fake/lock");
+  assert.equal(receipt.lock_wait_ms, 1234);
+  assert.equal(receipt.lock_poll_count, 3);
+  assert.equal(receipt.lock_reclaimed_orphan, true);
+  assert.equal(receipt.lock_nested, false);
+  assert.equal(receipt.lock_timed_out, false);
+  assert.equal(receipt.lock_wait_start_ms, 1000);
+  assert.equal(receipt.lock_wait_end_ms, 2234);
+  assert.equal(receipt.lock_prior_owner_pid, 777);
+  assert.equal(receipt.lock_prior_owner_started_at_ms, 1);
+  assert.equal(receipt.lock_prior_owner_worktree, "/other");
+  assert.equal(receipt.lock_nested_bypass_rejected, true);
+});
+
+test("buildRunnerReceipt: lockInfo.priorOwner === null -> the three lock_prior_owner_* fields are null (never throws on a missing prior owner)", () => {
+  const receipt = buildRunnerReceipt({
+    runnerExit: 0,
+    runnerStatus: RUNNER_STATUS.OK,
+    counts: { tests: 1, pass: 1, fail: 0, skip: 0 },
+    headCommit: "abc",
+    finishedAtMs: 0,
+    lockInfo: {
+      path: "/fake/lock",
+      waitMs: 0,
+      pollCount: 0,
+      reclaimedOrphan: false,
+      nested: false,
+      timedOut: false,
+      waitStartMs: 1000,
+      waitEndMs: 1000,
+      priorOwner: null,
+      nestedBypassRejected: false,
+    },
+  });
+  assert.equal(receipt.lock_prior_owner_pid, null);
+  assert.equal(receipt.lock_prior_owner_started_at_ms, null);
+  assert.equal(receipt.lock_prior_owner_worktree, null);
 });
 
 // HYK-439 §2 ⓕ-2 (2R): the four per-pass memory fields are carried verbatim

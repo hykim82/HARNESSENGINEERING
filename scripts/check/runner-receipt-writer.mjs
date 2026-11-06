@@ -423,7 +423,30 @@ const LOCK_INFO_DEFAULTS = {
   reclaimedOrphan: null,
   nested: null,
   timedOut: null,
+  waitStartMs: null,
+  waitEndMs: null,
+  priorOwner: null,
+  nestedBypassRejected: null,
 };
+
+// HYK-494 2R (additive only -- every field above this comment is byte-for-
+// byte unchanged in name/meaning/order, review P1-2's own "기존 칸 이름·
+// 의미 변경 금지, 새 칸 추가만"): REVIEW-1R P1-2 rejected 1R for omitting
+// exactly these -- product_scope ⓘⓘ "앞 소유자(pid · 시작 시각 · 워크트리)
+// · 대기 시작 시각 · 대기 끝 시각". `priorOwner` carries the lock file's
+// full last-read content (pid/startedAtMs/worktree/head/lockId/aliveAtMs,
+// see runner-lock.mjs's acquireRunnerLock), but only the three named
+// fields are surfaced here -- the receipt is a diagnostic artifact a human
+// reads, not a dump of this module's internal lock-identity bookkeeping
+// (lockId/aliveAtMs/head are implementation detail, not part of the
+// product_scope-named contract).
+function priorOwnerReceiptFields(priorOwner) {
+  return {
+    lock_prior_owner_pid: priorOwner?.pid ?? null,
+    lock_prior_owner_started_at_ms: priorOwner?.startedAtMs ?? null,
+    lock_prior_owner_worktree: priorOwner?.worktree ?? null,
+  };
+}
 
 function lockReceiptFields(lockInfo) {
   const resolved = { ...LOCK_INFO_DEFAULTS, ...lockInfo };
@@ -434,6 +457,10 @@ function lockReceiptFields(lockInfo) {
     lock_reclaimed_orphan: resolved.reclaimedOrphan,
     lock_nested: resolved.nested,
     lock_timed_out: resolved.timedOut,
+    lock_wait_start_ms: resolved.waitStartMs,
+    lock_wait_end_ms: resolved.waitEndMs,
+    ...priorOwnerReceiptFields(resolved.priorOwner),
+    lock_nested_bypass_rejected: resolved.nestedBypassRejected,
   };
 }
 

@@ -49,6 +49,7 @@ import {
   defaultRunnerLockPath,
   installLockReleaseOnSignal,
   releaseRunnerLock,
+  startLockHeartbeat,
 } from "./runner-lock.mjs";
 
 // Windows can hand back an 8.3 short-name form of %TEMP% (e.g.
@@ -1938,6 +1939,16 @@ const RUN_ISOLATED_SUITE_DEFAULTS = {
   acquireLockFn: acquireRunnerLock,
   releaseLockFn: releaseRunnerLock,
   installSignalHandlersFn: installLockReleaseOnSignal,
+  // HYK-494 2R 선택 ① heartbeat: OFF by default (no-op), same posture as
+  // `useAutoConcurrency` above -- the ~50+ existing runIsolatedSuite call
+  // sites in this file's own and this repo's other test suites stub
+  // acquireLockFn/lockPath to synthetic values (coder-task.md "Synthetic
+  // lock paths only") and never mention heartbeat at all; a REAL default
+  // here would spawn a genuine child `node -e ...` process on every single
+  // one of them. Only this file's own CLI entry point
+  // (runIsolatedSuiteCli below) turns the real sidecar on -- the one path
+  // that ever holds the REAL, production (os.homedir()-based) lock.
+  startHeartbeatFn: () => ({ stop: () => {} }),
   env: process.env,
 };
 
@@ -1964,6 +1975,7 @@ export function runIsolatedSuite(opts) {
     acquireLockFn,
     releaseLockFn,
     installSignalHandlersFn,
+    startHeartbeatFn,
     env,
     ...passthrough
   } = { ...RUN_ISOLATED_SUITE_DEFAULTS, ...opts };
@@ -1978,6 +1990,7 @@ export function runIsolatedSuite(opts) {
     acquireLockFn,
     releaseLockFn,
     installSignalHandlersFn,
+    startHeartbeatFn,
     env,
     nowMs,
     writeReceipt,
@@ -2149,6 +2162,10 @@ function reportLockTimeout({
         reclaimedOrphan: lockResult.reclaimedOrphan,
         nested: false,
         timedOut: true,
+        waitStartMs: lockResult.waitStartMs,
+        waitEndMs: lockResult.waitEndMs,
+        priorOwner: lockResult.priorOwner,
+        nestedBypassRejected: lockResult.nestedBypassRejected,
       },
     },
     log,
@@ -2179,6 +2196,7 @@ function acquireLockForRun({
   acquireLockFn,
   releaseLockFn,
   installSignalHandlersFn,
+  startHeartbeatFn,
   env,
   nowMs,
   writeReceipt,
@@ -2219,6 +2237,7 @@ function acquireLockForRun({
     env,
     releaseLockFn,
     installSignalHandlersFn,
+    startHeartbeatFn,
   });
   return {
     root,
@@ -2232,6 +2251,10 @@ function acquireLockForRun({
       reclaimedOrphan: lockResult.reclaimedOrphan,
       nested: lockResult.nested,
       timedOut: false,
+      waitStartMs: lockResult.waitStartMs,
+      waitEndMs: lockResult.waitEndMs,
+      priorOwner: lockResult.priorOwner,
+      nestedBypassRejected: lockResult.nestedBypassRejected,
     },
   };
 }
@@ -2243,30 +2266,45 @@ function acquireLockForRun({
 // the real CLI as a child, and that child would otherwise wait forever on
 // a lock its own ancestor process is synchronously blocked holding). In
 // that case `release()` is a no-op -- there is nothing of ours to release,
-// and nothing of ours to mark/unmark in `env`.
+// and nothing of ours (no heartbeat sidecar either) to mark/unmark in `env`.
 //
-// Otherwise this is the real owner: it marks `env` so any process this one
-// spawns (directly or transitively, as long as each spawn inherits
+// Otherwise this is the real owner: it marks `env` with this lock's own
+// token (lockResult.lockId, NOT a pid -- HYK-494 2R P2-1 fix, see
+// NESTED_LOCK_BYPASS_ENV_VAR's own header in runner-lock.mjs for why a
+// bare pid was trivially forgeable) so any process this one spawns
+// (directly or transitively, as long as each spawn inherits
 // `process.env`) sees NESTED_LOCK_BYPASS_ENV_VAR and skips the file entirely
-// (same mechanism/placement as NESTED_CONCURRENCY_ENV_VAR above), and
-// installs the SIGINT/SIGTERM release guard (installSignalHandlersFn's own
-// header states this file's honest limit on signal timing).
+// (same mechanism/placement as NESTED_CONCURRENCY_ENV_VAR above), starts the
+// heartbeat sidecar (HYK-494 2R 선택 ①, startLockHeartbeat's own header),
+// and installs the SIGINT/SIGTERM release guard (installSignalHandlersFn's
+// own header states this file's honest limit on signal timing) -- the
+// guard stops the heartbeat too, so a crash/signal exit doesn't leave a
+// sidecar refreshing a lock file this process is about to (try to) release.
 function guardLockForRun({
   lockResult,
   resolvedLockPath,
   env,
   releaseLockFn,
   installSignalHandlersFn,
+  startHeartbeatFn,
 }) {
   if (lockResult.nested) return () => {};
-  env[NESTED_LOCK_BYPASS_ENV_VAR] = String(process.pid);
+  env[NESTED_LOCK_BYPASS_ENV_VAR] = String(lockResult.lockId);
+  const heartbeat = startHeartbeatFn({
+    lockPath: resolvedLockPath,
+    token: lockResult.lockId,
+    pid: process.pid,
+  });
   const uninstallSignalHandlers = installSignalHandlersFn({
-    release: () =>
-      releaseLockFn({ lockPath: resolvedLockPath, pid: process.pid }),
+    release: () => {
+      heartbeat.stop();
+      releaseLockFn({ lockPath: resolvedLockPath, pid: process.pid });
+    },
   });
   return () => {
     uninstallSignalHandlers();
     delete env[NESTED_LOCK_BYPASS_ENV_VAR];
+    heartbeat.stop();
     releaseLockFn({ lockPath: resolvedLockPath, pid: process.pid });
   };
 }
@@ -2290,6 +2328,10 @@ export function runIsolatedSuiteCli({
     concurrency,
     useAutoConcurrency: true,
     serialFamilyList: SERIAL_FAMILY_LIST,
+    // HYK-494 2R: the ONE call site that ever holds the REAL (os.homedir()-
+    // based) production lock -- see RUN_ISOLATED_SUITE_DEFAULTS' own comment
+    // on why the general default stays a no-op.
+    startHeartbeatFn: startLockHeartbeat,
   });
 }
 
