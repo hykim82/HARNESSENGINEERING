@@ -987,21 +987,112 @@ function checkValueInvalidCoverViolation(recordOutcome) {
   };
 }
 
-// HYK-262 §3 (책임자 확정 2R): the two shapes that reach `attempted:true,
-// ok:false` WITHOUT being an ambiguous-cover-line violation (checked above)
-// -- e.g. 판정 줄 0개(NO_VERDICT_LINE) or 원장 파일 손상(LEDGER_READ_FAILED/
-// LEDGER_INVALID_JSON/LEDGER_INVALID_SHAPE) -- are deliberately NOT blocked
-// this round (HYK-266 범위, 착수 금지). But §3의 근거 문장("관측·기록이
-// 실패했으면 그 사실이 다음 단계의 「진행 가능 여부」에 반영되어야 한다 --
-// 화면 출력만으로는 「반영」이 아니다")은 여전히 지켜야 하므로, 최소한
-// «이 경우는 차단하지 않았다»는 사실 자체를 명시적으로 남긴다 -- 기존
-// autoRecordRejectStreak의 console.error 한 줄(레코딩 실패 그 자체)과는
-// 별개로, «그리고 이건 차단 안 했다»는 판단을 새로 찍는다.
+// HYK-266 §2 ⓘ: PM-r14 (a) 실측 전수 -- `attempted:true, ok:false`로
+// 떨어지는데 결과 파일 «자신»이 계약(표지 줄 수·값)을 어긴 게 아니라
+// 판정 줄 자체가 없거나 이슈 id를 못 뽑는 갈래. NO_VERDICT_LINE(판정
+// 어휘 밖 포함, verdict:가 approved|rejected가 아닌 모든 값은 이 코드로
+// 접힌다 -- reject-streak.mjs:382 VERDICT_LINE_RE_G) · NO_COVER_LINE
+// (for:/task_id: 둘 다 없음) · ISSUE_ID_UNPARSEABLE(task_id:-소스, HYK-
+// <숫자> 모양이 아님) 셋. HYK-262가 이 갈래를 "표지 줄 계약 위반"과
+// 다른 범주로 가른 것(checkAmbiguousCoverViolation과 분리)은 맞다 -- 이
+// 셋은 "표지 줄이 너무 많다/값이 틀렸다"가 아니라 "판정 자체를 끝내지
+// 않았다"는 별개의 결함이다. 그러나 HYK-262 §3이 "통과시킨다" 판단은
+// 라이브 4라운드(HYK-214·218·227·335) 전부가 이 모양이었고, 소비 뒤에
+// 복구할 수단이 없어 판정이 영원히 빠진다는 사실(PM-r14 (a)⑤·(b))을
+// 몰랐을 때의 판단이다 -- 이 라운드가 그 판단을 "통과"에서 "계약 위반"
+// 쪽 차단으로 넘겨받는다.
+const CONTRACT_VIOLATION_REASON_CODES = new Set([
+  REJECT_STREAK_REASON_CODE.NO_VERDICT_LINE,
+  REJECT_STREAK_REASON_CODE.NO_COVER_LINE,
+  REJECT_STREAK_REASON_CODE.ISSUE_ID_UNPARSEABLE,
+]);
+
+// HYK-266 §2 ⓘ: 위와 나란한, «결과 파일»이 아니라 «원장 쪽»이 원인인
+// 갈래 -- 읽기 실패(LEDGER_READ_FAILED) · JSON 파싱 실패
+// (LEDGER_INVALID_JSON) · 모양 위반(LEDGER_INVALID_SHAPE) 셋은
+// reject-streak.mjs의 loadLedger가 내는 reasonCode를 그대로 가져온다.
+// "LEDGER_WRITE_ERROR"는 reject-streak.mjs의 enum에 없다 -- 그 코드는
+// loadLedger 자신이 아니라 바로 아래 autoRecordRejectStreak 자신의
+// try/catch(HYK-428)가 writeLedger의 예기치 못한 예외를 접을 때만
+// 만드는, 이 파일 로컬의 reasonCode다(enum에 넣으면 reject-streak.mjs의
+// parse/load 순서만 바꾸라는 §2 범위를 넘는 추가 변경이 되므로 리터럴
+// 문자열로 둔다). PM-r14 (b)/(h): 이 넷(원장을 손상시키면 다음 배달
+// 게이트가 이미 fail-closed로 PM을 뺀 전체를 세운다 -- 소비를 막아도
+// «새 전면 교착»은 생기지 않고, 반대로 통과시키면 판정이 영구히
+// 빠진다)이 "사람 쪽 복구 경로가 이미 있다"는 근거로 묶인다.
+const LEDGER_UNAVAILABLE_REASON_CODES = new Set([
+  REJECT_STREAK_REASON_CODE.LEDGER_READ_FAILED,
+  REJECT_STREAK_REASON_CODE.LEDGER_INVALID_JSON,
+  REJECT_STREAK_REASON_CODE.LEDGER_INVALID_SHAPE,
+  "LEDGER_WRITE_ERROR",
+]);
+
+function checkContractViolation(recordOutcome) {
+  const isContractViolation =
+    recordOutcome.attempted &&
+    !recordOutcome.ok &&
+    CONTRACT_VIOLATION_REASON_CODES.has(recordOutcome.reasonCode);
+  if (!isContractViolation) return null;
+  return {
+    ok: false,
+    reason: `consumption rejected (HYK-266): REVIEW-family result file does not carry a resolvable, finished verdict (${recordOutcome.reason}) -- envelope/task archiving and consumption receipt are skipped for this round ('verdict: approved' 또는 'verdict: rejected' 한 줄을 써서 다시 완료해야 한다; 원장은 건드리지 않았다)`,
+  };
+}
+
+function checkLedgerUnavailableViolation(recordOutcome) {
+  const isLedgerUnavailable =
+    recordOutcome.attempted &&
+    !recordOutcome.ok &&
+    LEDGER_UNAVAILABLE_REASON_CODES.has(recordOutcome.reasonCode);
+  if (!isLedgerUnavailable) return null;
+  return {
+    ok: false,
+    reason: `consumption deferred (HYK-266): reject-streak ledger unavailable (${recordOutcome.reason}) -- envelope/task archiving and consumption receipt are skipped for this round; this is not a worker violation -- repair the ledger file and re-consume this SAME result to have the verdict recorded (idempotency preserves it, see recordRejectStreakFromResultText's own header)`,
+  };
+}
+
+// HYK-266 §2 ⓘⓘ (범위 밖 발견 ⓐ, 같은 함수): UNISOLATED_HARNESS_DIR은
+// `attempted:false, blocked:true`로 autoRecordRejectStreak 자신의 머리
+// (바로 위 isInsideGitWorktree 가지)에서 돌아온다 -- 위 두 함수 모두
+// `recordOutcome.attempted`를 요구해 이 모양은 걸러내지 못하고, 지금까지
+// 이 값을 읽는 호출부가 전혀 없어 흔적조차 없이 통과했다(PM-r14 (a)
+// 실측). 같은 "소비 실패로 막는다" 원칙을 적용하되, 사유는 따로 둔다 --
+// 이것은 "판정이 비었다"도 "원장이 깨졌다"도 아니라 "이 라운드가 격리된
+// git worktree 밖에서 소비되려 했다"는, 범주가 다른 결함이다.
+function checkUnisolatedHarnessDirViolation(recordOutcome) {
+  if (!recordOutcome.blocked) return null;
+  return {
+    ok: false,
+    reason: `consumption rejected (HYK-266, 범위 밖 발견 ⓐ): ${recordOutcome.reason} -- envelope/task archiving and consumption receipt are skipped for this round (harnessDir를 격리된 실제 git worktree 안으로 두고 다시 완료해야 한다)`,
+  };
+}
+
+// HYK-262 §3 (책임자 확정 2R) 도입, HYK-266로 갱신: 이 함수가 걸던 "판정
+// 줄 0개(NO_VERDICT_LINE)·원장 손상(LEDGER_*)은 통과시킨다"는 결정 자체가
+// 뒤집혔다 -- 바로 위 checkContractViolation/checkLedgerUnavailableViolation/
+// checkUnisolatedHarnessDirViolation이 이제 이 호출부(아래 참조) «앞에서»
+// 이 세 범주(+UNISOLATED_HARNESS_DIR) 전부를 가로채 블록한다. reject-
+// streak.mjs의 REJECT_STREAK_REASON_CODE enum 10종 + 이 파일 로컬
+// "LEDGER_WRITE_ERROR" + "UNISOLATED_HARNESS_DIR"을 모두 더하면, attempted
+// 가 true인데 ok:false인 모든 reasonCode(AMBIGUOUS_FOR/TASK_ID/VERDICT_LINE
+// · FOR_LINE_ISSUE_ID_UNPARSEABLE · 이 셋 넷 다 checkAmbiguousCoverViolation/
+// checkValueInvalidCoverViolation이 이미 가로챔)와 attempted:false인데
+// blocked:true(UNISOLATED_HARNESS_DIR)까지 «전부» 이 호출부에 도달하기
+// 전에 분류된다 -- ⭐이 라운드부터 이 함수는 어떤 현재 정의된 reasonCode
+// 로도 도달하지 않는 죽은 경로다(결과 파일 §3-4 "남은 갈래 0" 실증
+// 참조). 삭제하지 않고 남기는 이유: 미래에 reject-streak.mjs가 새
+// reasonCode를 추가하고 이 파일의 분류 Set 셋 중 어디에도 등록하지
+// 않는 실수를 저질러도 "조용히 통과"가 아니라 최소한 화면에 "분류
+// 안 된 실패가 있다"는 흔적이 남도록 하는 fail-visible 안전망이다.
+// ⛔옛 문면 "consumption/archiving/receipt proceed normally"는 거짓이었다
+// (PM-r14 (e) 실측: REVIEW 계열은 ledgerRecorded=recordOutcome.ok가
+// 필수 효과라 autoWriteConsumptionReceipt의 requiredEffectsOk가 false가
+// 되고, 영수증은 발행되지 않는다 -- :4713-4723 참조). 아래가 정정이다.
 function traceUnblockedRecordFailure(recordOutcome) {
   if (!recordOutcome.attempted || recordOutcome.ok) return;
   const reasonCode = recordOutcome.reasonCode ?? "UNKNOWN_REASON_CODE";
   console.log(
-    `relay-handshake: NOT_BLOCKED (HYK-262 §3) -- reject-streak record failed with reasonCode=${reasonCode} but this round is NOT blocked (${recordOutcome.reason}) -- consumption/archiving/receipt proceed normally; HYK-266 (별건) decides whether this reasonCode class should block in future`,
+    `relay-handshake: NOT_BLOCKED (HYK-262 §3, HYK-266 갱신) -- reject-streak record failed with reasonCode=${reasonCode} but this round is NOT blocked (${recordOutcome.reason}) -- envelope/task archiving still proceed, but the consumption RECEIPT is withheld for REVIEW-family rounds whenever ledgerRecorded is false (HYK-244 2R-a §2 조각2); as of HYK-266 every currently-defined reject-streak reasonCode (+UNISOLATED_HARNESS_DIR) is classified into a blocking check above, so this trace line is expected to be unreachable for any CURRENT reasonCode -- it remains only as a fail-visible net for a future, not-yet-classified one`,
   );
 }
 
@@ -3921,6 +4012,18 @@ function runCompletionSideEffects({
   if (coverViolation) return coverViolation;
   const valueViolation = checkValueInvalidCoverViolation(recordOutcome);
   if (valueViolation) return valueViolation;
+  // HYK-266 §2: 세 갈래 추가 -- UNISOLATED_HARNESS_DIR(범위 밖 발견 ⓐ,
+  // attempted:false/blocked:true라 위 두 함수 모두 걸러내지 못한다) ·
+  // 계약 위반 7종 중 3종(판정 자체가 없거나 이슈 id를 못 뽑음) · 원장
+  // 사용 불가 7종 중 4종(읽기·JSON·모양·쓰기 실패). 순서: 이 라운드가
+  // 손대지 않는 기존 두 차단(표지 줄 수·값)이 여전히 먼저다.
+  const unisolatedViolation = checkUnisolatedHarnessDirViolation(recordOutcome);
+  if (unisolatedViolation) return unisolatedViolation;
+  const contractViolation = checkContractViolation(recordOutcome);
+  if (contractViolation) return contractViolation;
+  const ledgerUnavailableViolation =
+    checkLedgerUnavailableViolation(recordOutcome);
+  if (ledgerUnavailableViolation) return ledgerUnavailableViolation;
   traceUnblockedRecordFailure(recordOutcome);
   // HYK-204: the moment this function confirms a round's result file is
   // COMPLETE (every check above already passed) is also the last moment

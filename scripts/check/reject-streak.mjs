@@ -899,6 +899,25 @@ export function recordRejectStreakFromResultText({
     };
   }
 
+  // HYK-266 §2 ⓘⓘⓘ: parse 먼저, load 나중 -- 위반 사유(결과 파일 자신의
+  // 계약 위반)가 원장 사유(읽기/쓰기 실패)보다 우선한다. 되돌린 순서
+  // (load 먼저)에서는 원장이 손상된 동안 결과 파일도 깨졌을 때 항상
+  // LEDGER_* 사유만 보이고, 결과 파일 자신의 계약 위반(예: 표지 줄 2개
+  // 이상, NO_VERDICT_LINE 등)은 한 번도 드러나지 않았다 -- loadLedger가
+  // parseReviewOutcome을 부르기도 전에 먼저 ok:false로 돌아갔기 때문이다
+  // (PM-r14 (a) 실측 원문). computeRecord 자신은 내부에서 다시
+  // parseReviewOutcome을 부르므로(아래), 이 앞선 호출은 그 함수의 계약/
+  // 시그니처를 하나도 바꾸지 않는다 -- 순서만 앞당긴 추가 확인이다.
+  const outcome = parseReviewOutcome(resultText);
+  if (!outcome.ok) {
+    return {
+      attempted: true,
+      ok: false,
+      reasonCode: outcome.reasonCode,
+      reason: `reject-streak auto-record: UNJUDGABLE -- ${outcome.reason} (fail-open, ledger untouched)`,
+    };
+  }
+
   const loaded = loadLedger(ledgerPath);
   if (!loaded.ok) {
     return {
