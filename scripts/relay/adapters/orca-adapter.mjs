@@ -3994,6 +3994,76 @@ export function teardownSeat(ctx, opts = {}) {
   return executeArmedTeardown(c, opts, before, judged);
 }
 
+// ---- HYK-491-teardown-arm-1 (coder-task.md §2 product_scope ① "teardown
+// 실행 경로 · `teardownSeat` armed 결선 · 워크트리 제거 명령은 기존
+// `buildWorktreeRemoveCommand` 재사용") ----
+// teardownSeat(위)은 HYK-171 좌석(seat/pty) 축의 판정(judgeTeardown,
+// dispatchCorrelationProven 등)에 묶여 있다 -- 이 축(HYK-464 아카이브
+// 판정, judgeArchiveEligibility)은 완전히 다른 전제(병합 완료·미소비
+// 0·keep-reason 없음 등)를 쓰고, 좌석 close 단계가 전혀 없다(워크트리만
+// 지운다, close argv 0 -- 아카이브 대상은 이미 좌석이 없다고 호출자가
+// 확인한 뒤에만 여기 온다, teardown-inventory-adapter.mjs의
+// observeSeatCount 참조). 그래서 teardownSeat의 판정 체인을 재사용하지
+// 않고(판정은 이미 호출자가 끝냈다), **같은 armed-gate 모양**만 따라
+// 만든 독립 함수다 -- armed!==true면 close/rm 어느 것도 호출되지 않는
+// 것과 동형으로, 여기도 armed!==true면 guardedExec을 한 번도 타지
+// 않는다(파괴 argv 0). 제거 명령 자체는 새로 만들지 않고 기존
+// buildWorktreeRemoveCommand(위, A5)를 그대로 재사용한다.
+export const ARCHIVE_TEARDOWN_PHASE = Object.freeze({
+  GATE: "GATE",
+  REMOVE: "REMOVE",
+  DONE: "DONE",
+});
+export const ARCHIVE_TEARDOWN_GATE_REASON = Object.freeze({
+  NOT_ARMED: "ARCHIVE_TEARDOWN_NOT_ARMED",
+});
+
+// ctx: { worktreePath, armed? } -- opts: { execFn }
+export function removeArchivedWorktree(ctx, opts = {}) {
+  const c = isPlainObject(ctx) ? ctx : {};
+  if (typeof opts.execFn !== "function") {
+    return {
+      ok: false,
+      reason: "orca-adapter: removeArchivedWorktree -- opts.execFn is required",
+    };
+  }
+  if (!isNonEmptyString(c.worktreePath)) {
+    return {
+      ok: false,
+      reason:
+        "orca-adapter: removeArchivedWorktree -- worktreePath is required",
+    };
+  }
+  const armed = c.armed === true;
+  if (!armed) {
+    return {
+      ok: false,
+      phase: ARCHIVE_TEARDOWN_PHASE.GATE,
+      armed,
+      reason: ARCHIVE_TEARDOWN_GATE_REASON.NOT_ARMED,
+    };
+  }
+  const removed = guardedExec(
+    buildWorktreeRemoveCommand(c.worktreePath),
+    opts.execFn,
+    "ARCHIVE_TEARDOWN_REMOVE_FAILED",
+  );
+  if (!removed.ok) {
+    return {
+      ok: false,
+      phase: ARCHIVE_TEARDOWN_PHASE.REMOVE,
+      armed,
+      reason: removed.reason,
+    };
+  }
+  return {
+    ok: true,
+    phase: ARCHIVE_TEARDOWN_PHASE.DONE,
+    armed,
+    response: removed.response,
+  };
+}
+
 // ---- 실 orca execFn (이 파일이 `orca` 문자열로 실제 프로세스를 spawn하는
 // 유일한 지점 -- G9). run-step.mjs가 기본으로 이걸 쓰지만, 이 태스크에서는
 // 어디에서도 호출되지 않는다(비타협 제약: 실 orca 호출 0). 테스트는 전부
