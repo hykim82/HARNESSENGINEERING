@@ -43,19 +43,33 @@ OS 사용자 계정 단위로 고정이고 어떤 프로세스의 환경변수�
 
 ## 3. 원자적 획득 — `wx` 배타 생성
 
-`acquireRunnerLock`의 `tryClaim`은 `writeFileSync(lockPath, content, {
-flag: "wx" })`로 잠금을 잡는다 — POSIX의 `O_CREAT|O_EXCL`, Windows의
-`CreateFile CREATE_NEW`에 해당하며 양쪽 모두 원자적이다(이 저장소의
-`allocateRunSlot`이 run 번호 슬롯 경쟁을 막는 데 쓰는 것과 같은 1차
-근거). 내용은 `{ pid, startedAtMs, worktree, head }`(JSON) — 누가, 언제,
-어느 워크트리/HEAD에서 쥐고 있는지 사람이 읽을 수 있는 진단 정보다.
+⚠️**3R 수리(판정 23:5x §1 ①′+③+④′)**: `wx`는 더 이상 잠금 "게시" 그 자체의
+메커니즘이 아니다 — `createExclusive`가 전체 내용을 임시 파일에 먼저 다
+쓴 뒤 `linkSync(tmp, lockPath)`로 "올린다"(T0 실측, 아래). `link`는 그
+이름이 **없을 때만** 성공하고(원자적, `EEXIST`로 실패), 쓰는 중간의
+"빈 내용" 순간이 전혀 없다(전체 내용이 이미 디스크에 있는 다른 이름을
+링크로 올리는 것뿐이므로). 내용은 `{ pid, startedAtMs, procStart,
+worktree, head, lockId }`(JSON) — `procStart`(§7의 신원)와
+`lockId`(§8 교착 방지 토큰)가 2R 대비 신규다. **`aliveAtMs`는 더 이상
+이 내용 안에 없다** — heartbeat는 별도 파일로 옮겼다(§7-5 F8 수리).
 
-`EEXIST`는 "누가 이미 쥐고 있다"는 정상적인 경쟁 신호로 받고(허수아비
-처리), 그 **외의** 쓰기 실패(`ENOENT`: 디렉터리 부재, `EACCES` 등)는
-**그대로 던진다** — 삼키면 "상호 배제를 보장하는 척하면서 실제로는 보장
-못 하는" 상태(이 모듈이 막으려는 사고의 재판)가 되기 때문이다. 결과적으로
-그런 환경에서는 전체 러너가 LOCK_TIMEOUT이 아니라 예외로 실패한다(초록
-으로 접히지 않는다는 요구는 어느 쪽이든 만족).
+`EEXIST`는 "누가 이미 쥐고 있다"는 정상적인 경쟁 신호로 받는다(허수아비
+처리). `EPERM`/`EBUSY`/`EACCES`(백신·삭제 대기 등 일시 실패)는 "busy"로
+구분해 재시도하되, `BUSY_RETRY_TIMEOUT_MS`(30초) 연속을 넘기면 던진다 —
+**EEXIST만 "다른 주인이 있다"는 사실**이고, 나머지는 재시도 후 bounded
+throw로 흡수한다(PM 설계 (b) 영향 2-3). 그 **외의** 쓰기 실패는 그대로
+던진다 — 삼키면 "상호 배제를 보장하는 척하면서 실제로는 보장 못 하는"
+상태(이 모듈이 막으려는 사고의 재판)가 되기 때문이다.
+
+### 3-1. T0 — 이 머신(Windows)에서 직접 잰 값
+
+3R 착수 전 실측(구현 전): ① `link(tmp, L)`은 L이 있으면 `EEXIST`로
+실패하고 L을 덮어쓰지 않는다(✔) ② 동시 5개 `link` 중 정확히 1명만
+성공(30회 반복, 위반 0, 실제 자식 프로세스)(✔) ③ 전체 내용을 쓴 뒤
+link하므로 L을 읽는 쪽이 부분 내용을 보지 않는다(✔) ④ `rename`은 대상이
+있으면 덮어쓴다(✔, 판정 문면 요구 — 설계가 rename을 쓰지 않더라도
+1회 실측). 네 가지 모두 PM 설계 (b)의 전제와 일치했다 — NEEDS_INPUT
+없이 구현을 진행했다.
 
 ## 4. 대기 — 이름 붙은 상수 + 근거
 
@@ -66,7 +80,11 @@ flag: "wx" })`로 잠금을 잡는다 — POSIX의 `O_CREAT|O_EXCL`, Windows의
   2배 — 정상적인 선행 실행을 기다리는 데는 충분하고, 진짜로 걸린(교착·
   매우 느린 머신) 경우를 무한정 기다리지 않는 바깥 울타리다.
 
-둘 다 `acquireRunnerLock`의 파라미터로 오버라이드 가능(시험은 둘 다 ms
+- `BUSY_RETRY_TIMEOUT_MS = 30초`(3R 신규): `createExclusive`가 EPERM/EBUSY/
+  EACCES를 연속으로 보는 시간의 상한 — 백신·삭제 대기 같은 일시 현상을
+  흡수하는 재시도 창이되, 무한정 삼키지 않는다(§3).
+
+셋 다 `acquireRunnerLock`의 파라미터로 오버라이드 가능(시험은 모두 ms
 단위의 작은 값을 쓴다 — 실제 '몇 분 기다리는' 시험은 0개, 모두 바운드된
 빠른 시험).
 
@@ -99,20 +117,31 @@ flag: "wx" })`로 잠금을 잡는다 — POSIX의 `O_CREAT|O_EXCL`, Windows의
 추가했고, 2R(REVIEW-1R P1-2 rejected 뒤)이 다시 6개를 **더** 추가한다 —
 총 12개, 기존 칸 이름·의미·순서는 바이트 단위로 그대로:
 
-| 칸                               | 의미                                           | 라운드 |
-| -------------------------------- | ---------------------------------------------- | ------ |
-| `lock_path`                      | 이 실행이 겨냥한 잠금 파일 경로                | 1R     |
-| `lock_wait_ms`                   | 획득까지 실제로 기다린 ms(0 = 경쟁 없이 즉시)  | 1R     |
-| `lock_poll_count`                | 폴링 횟수                                      | 1R     |
-| `lock_reclaimed_orphan`          | 이 실행이 고아 잠금을 회수했는가               | 1R     |
-| `lock_nested`                    | 중첩 우회로 통과했는가(파일을 건드리지 않음)   | 1R     |
-| `lock_timed_out`                 | 상한을 넘겨 포기했는가                         | 1R     |
-| `lock_wait_start_ms`             | 대기를 "시작"한 epoch ms                       | 2R     |
-| `lock_wait_end_ms`               | 대기를 "끝낸"(획득/타임아웃) epoch ms          | 2R     |
-| `lock_prior_owner_pid`           | 마지막으로 읽을 수 있었던 앞 소유자의 pid      | 2R     |
-| `lock_prior_owner_started_at_ms` | 앞 소유자의 시작 시각                          | 2R     |
-| `lock_prior_owner_worktree`      | 앞 소유자의 워크트리                           | 2R     |
-| `lock_nested_bypass_rejected`    | 우회 마커가 있었지만 토큰이 안 맞아 거부됐는가 | 2R     |
+| 칸                               | 의미                                                           | 라운드 |
+| -------------------------------- | -------------------------------------------------------------- | ------ |
+| `lock_path`                      | 이 실행이 겨냥한 잠금 파일 경로                                | 1R     |
+| `lock_wait_ms`                   | 획득까지 실제로 기다린 ms(0 = 경쟁 없이 즉시)                  | 1R     |
+| `lock_poll_count`                | 폴링 횟수                                                      | 1R     |
+| `lock_reclaimed_orphan`          | 이 실행이 고아 잠금을 회수했는가                               | 1R     |
+| `lock_nested`                    | 중첩 우회로 통과했는가(파일을 건드리지 않음)                   | 1R     |
+| `lock_timed_out`                 | 상한을 넘겨 포기했는가                                         | 1R     |
+| `lock_wait_start_ms`             | 대기를 "시작"한 epoch ms                                       | 2R     |
+| `lock_wait_end_ms`               | 대기를 "끝낸"(획득/타임아웃) epoch ms                          | 2R     |
+| `lock_prior_owner_pid`           | 마지막으로 읽을 수 있었던 앞 소유자의 pid                      | 2R     |
+| `lock_prior_owner_started_at_ms` | 앞 소유자의 시작 시각                                          | 2R     |
+| `lock_prior_owner_worktree`      | 앞 소유자의 워크트리                                           | 2R     |
+| `lock_nested_bypass_rejected`    | 우회 마커가 있었지만 토큰이 안 맞아 거부됐는가                 | 2R     |
+| `lock_reclaim_reason`            | 이 실행이 "왜" 고아를 회수했는가(`pid-dead`·`pid-reused`·null) | 3R     |
+| `lock_lost`                      | 해제 시점에 이 잠금이 더는 우리 것이 아니었는가                | 3R     |
+
+⚠️3R 새 칸 2개(판정 23:5x §1 ⑸): `lock_reclaim_reason`은
+`reclaimedOrphan`이 true일 때만 의미 있다 — `judgeOwner`가 DEAD로 판정한
+이유 그대로(§7-1). `lock_lost`는 **해제**(release) 시점의 사실이다 —
+`releaseRunnerLock`이 lockId 불일치/누락으로 지우지 못하면 true가 되고,
+`isolated-suite-runner.mjs`는 이를 `RUNNER_STATUS.LOCK_LOST` + `exit 1`로
+번역한다(기존 `LOCK_TIMEOUT`과 같은 "초록으로 안 접힘" 길, §9-2). 두 칸
+모두 기존 12칸 이름·의미·순서를 바이트 단위로 그대로 두고 **덧붙이기만**
+한다.
 
 ⚠️2R 새 칸은 REVIEW-1R P1-2가 명시 계약 미이행으로 반려한 바로 그
 필드다(product_scope ⓘⓘ "앞 소유자(pid·시작 시각·워크트리)·대기 시작
@@ -128,78 +157,117 @@ flag: "wx" })`로 잠금을 잡는다 — POSIX의 `O_CREAT|O_EXCL`, Windows의
 "그 쪽은 이 receipt의 schema_version 값을 전혀 비교하지 않는다"). 모르는
 새 칸은 단순히 무시된다 — 판정에 영향 없음.
 
-## 7. 고아 회수 — 죽은 pid, 또는 heartbeat가 멈춘 pid
+## 7. 고아 회수 — 3R: 세대 번호 회수권 + "낡음은 방아쇠일 뿐"
 
-`isOrphan`은 두 축을 OR로 본다:
+**불변식(1줄, PM 설계 (d)):** L이라는 이름을 지울 수 있는 "살아 있는"
+프로세스는 언제나 1개 이하다 — 살아 있는 주인 자신이거나, 주인이 DEAD일
+때 그 인스턴스의 유일한 살아 있는 회수권자다. L의 생성은 `link`로 1명만
+이기므로 "두 주인"은 구조적으로 불가능하다.
 
-1. **pid**: 잠금 파일의 `pid`에 `process.kill(pid, 0)`(신호를 실제로
-   보내지 않고 존재/권한만 검사 — Node 공식 동작, POSIX·Windows 모두)을
-   던져본다. `ESRCH`(또는 그 대응)면 죽었다 → 고아.
-2. **heartbeat**(2R 신설, §7-2): pid가 살아 있어도, 잠금 내용의
-   `aliveAtMs`가 `HEARTBEAT_STALE_MS`보다 오래 멈춰 있으면 → 고아.
-   `aliveAtMs`가 없는(구버전/합성 fixture) 내용은 이 축을 건너뛴다 —
-   pid만으로 판단(1R 칸 무회귀).
+⚠️**왜 3R인가(reject-streak-envelope)**: 2R의 고아 회수는 "훔친 뒤
+검증·틀리면 되돌림"(낙관적 회수)이었다 — rename으로 훔친 뒤 불일치면
+link로 되돌리는데, 그 되돌리는 틈에 4번째 진입자가 빈 이름을 채우면
+되돌리기가 `EEXIST`로 생략되어 "살아 있는 새 주인의 잠금"이 영영
+사라졌다(검토 2R 실측: 잠금 함수 15/30, 실제 러너 진입점 9/10 완전
+겹침 — 이 라운드 자체 탐침 재현도 §7-6 참조). heartbeat 낡음을 "회수
+판정"으로 쓴 것도 겹침을 만들었다 — 60초 넘게 기다린 뒤 잡은 주인은
+잡는 순간 `aliveAtMs`가 이미 대기 시작 시각이라 곧바로 "낡음"으로 보여,
+첫 heartbeat(2R 기준 30초) 전까지 다른 진입자가 "고아"로 회수했다(실측
+겹침 5,005 ms).
 
-고아로 판단되면 **무조건 지우지 않는다** — §7-3의 "비교 후 삭제"로
-회수한다. 그 외(예: 권한 때문에 존재는 확인되지만 신호는 못 보내는
-경우, 또는 heartbeat가 아직 신선한 경우)는 "살아있다"로 보아
-**기다린다**(섣부른 회수보다 안전).
+### 7-1. `judgeOwner` — 판정은 둘, 그 중 하나만 즉시
 
-### 7-1. ⚠️정직 한계 — pid 재사용
+```
+judge(O):  if kill(O.pid,0)==ESRCH → DEAD("pid-dead")                 # 싼 경로, 즉시
+           if age(L.alive.<O.lockId>) ≤ M → ALIVE("alive-fresh")       # 싼 경로
+           s = startIdentity(O.pid)                                    # 비싼 경로, 낡았을 때만
+           if s≠null and O.procStart≠null and s≠O.procStart → DEAD("pid-reused")
+           else ALIVE("alive-heartbeat-stale")                         # 회수하지 않음, 기록만
+```
 
-이 신호는 "죽은 pid"는 명확히 잡는다(ESRCH는 모호하지 않다). 반대 방향
-— 그 pid가 이미 **다른, 전혀 무관한 새 프로세스**에게 재사용되어
-"살아있다"로 보이는 경우 — 는 pid 신호만으로는 구분할 수 없었다(1R의
-한계). **2R은 §7-2 heartbeat로 이 틈을 메운다**: 진짜 주인이 죽는 순간
-heartbeat 사이드카도 같은 사실을 알아채고(§12, 자기 자신의 tick에서
-주인 pid를 확인) 더는 `aliveAtMs`를 갱신하지 않으며, 그 pid가 "나중에"
-무관한 새 프로세스에 재사용돼도 이미 멈춰 버린 `aliveAtMs`는 바뀌지
-않는다 — staleness 검사가 그 사실을 그대로 본다. `startedAtMs`를
-잠금 내용에 남기는 근거도 여전히 같다(미래의 더 정밀한 대조 재료).
+**이탈 1(책임자 판정 23:5x §1 ⑴ 승인)**: heartbeat가 `M`(기한)을 넘겨
+낡았다는 사실 **그 자체는 회수 사유가 아니다** — 신원 질의(`startIdentity`)
+를 부르는 "방아쇠"일 뿐이다. 신원이 일치하거나(같은 프로세스가 계속
+살아 있다) 모르면(질의 실패) **ALIVE로 본다** — 절대 "낡음"만으로
+회수하지 않는다. 신원이 **다를 때만**("pid-reused") DEAD로 판정한다.
+근거: 살아 있는 pid의 잠금을 뺏는 것은 그 프로세스가 재개하면 정의상
+두 주인이다(사이드카 사망·절전 재개가 바로 이 모양을 만든다) — 큰
+기한의 heartbeat 회수로 얻는 것이 없다(사이드카는 "멈춘(hung) 러너"를
+어차피 못 본다, §12).
 
-### 7-2. ⚠️정직 한계 — heartbeat 기한 안에 주인이 죽으면 그만큼은 기다린다
+### 7-2. `startIdentity(pid)` — 신원 질의
 
-heartbeat는 staleness를 **더 빨리** 드러내는 보강일 뿐, 즉시성을
-보장하지 않는다 — 주인이 `aliveAtMs`를 갱신한 바로 다음 순간 죽으면,
-다른 호출자들은 `HEARTBEAT_STALE_MS`(기본 90초, §4 이름 붙은 상수)가
-다 지나야 그 사실을 "고아"로 본다. 이 간격은 `LOCK_WAIT_TIMEOUT_MS`
-(20분)보다 훨씬 작게 고른 것이 바로 이 한계를 실용적인 크기로 줄이기
-위한 선택이다(§4).
+- **Linux**: `/proc/<pid>/stat`의 22번째 필드(부팅 후 tick, comm 필드
+  뒤 **마지막** `")"`부터 파싱 — comm 자체가 공백·괄호를 포함할 수
+  있어서다). 〔못쟀다〕 실물(이 라운드는 Windows 머신) — 파싱 로직만
+  주입 seam으로 결정론적으로 시험했다.
+- **Windows**: `(Get-Process -Id N).StartTime.ToFileTimeUtc()`를
+  PowerShell로 1회 부른다(동기, `spawnSync`). 〔직접〕 실물.
+- 그 밖/실패: `null`. 비교는 항상 **원문 문자열이 같은지**로만 한다.
+  **전제 A1(§13)**: 이 질의가 틀리면(같은 프로세스인데 다른 값) 거짓
+  회수가 생길 수 있다 — 실패하면 `null` → ALIVE로 보수적으로 처리한다.
 
-### 7-3. 비교 후 삭제 — `tryReclaimOrphan`의 원자성 근거
+### 7-3. 세대 번호 회수권 — `L.reclaim.<O.lockId>.<k>`
 
-1R은 "읽고 → 판단 → 무조건 `unlinkSync`"였다(REVIEW-1R P1-1: 동시
-회수자가 같은 고아를 둘 다 "회수"하고 둘 다 겹쳐 돌았다, 10회 중 7회
-완전 겹침). 2R은 다음 순서로 바꾼다:
+```
+k = 이미 있는 O의 권한 중 최대 번호(없으면 0)
+if k>0 and judge(권한 k 보유자)≠DEAD: wait                 # 이미 누가 회수 중
+createExclusive(L.reclaim.<O.lockId>.<k+1>, {pid, procStart}) → EEXIST면 wait
+if read(L).lockId == O.lockId: unlink L                     # 유일한 비주인 삭제 지점
+best-effort unlink L.alive.<O.lockId>, L.reclaim.<O.lockId>.*  # L 삭제 "뒤"
+```
 
-1. `renameSync(lockPath, tempPath)` — **원자적 "훔치기"**: 같은 원본
-   경로를 두고 경쟁하는 모든 호출 중 정확히 하나만 성공한다(파일시스템이
-   보장하는 디렉터리 엔트리의 원자적 test-and-set). 성공한 쪽은 "그 순간
-   그 경로에 있던 내용"을 배타적으로 손에 넣는다 — 더는 그 누구도 같은
-   내용을 또 훔칠 수 없다.
-2. 옮긴 내용을 읽어, 우리가 애초에 고아라고 판단했던 그 내용(pid ·
-   startedAtMs · lockId)과 비교한다.
-3. **같으면** 삭제(진짜 그 죽은 주인이었다) — `reclaimed:true`.
-4. **다르면** — 우리가 읽은 뒤 rename하기 전 사이에 누군가 새로
-   잠금을 잡았다는 뜻. 그 새 주인의 것을 지우면 안 되므로
-   `linkSync(tempPath, lockPath)`로 되돌린다. `linkSync`(하드링크)를
-   쓰는 이유: 그 이름이 **비어 있을 때만** 성공하고(원자적), 이미 누가
-   또 새로 잡았으면 `EEXIST`로 실패한다 — 그 경우 **아무것도 하지
-   않는다**(세 번째 진입자의 몫을 덮어쓰지 않는다). 리뷰의 원래 힌트
-   ("되돌릴 때도 rename")는 복원하는 그 순간 세 번째 진입자의 몫을
-   rename으로 덮어쓸 수 있는 구멍이 있어(rename은 목적지가 있어도
-   덮어쓴다), 이 라운드가 `link`로 강화했다.
-5. 어느 쪽이든 `tempPath`는 치운다(best-effort).
+**되돌림이 전혀 없다** — 2R의 "rename-steal → 비교 → 불일치면 link로
+복원"을 완전히 버렸다. 한 번호(`k+1`)는 `link`로 정확히 1명만 얻으므로
+"살아 있는 회수권자"는 O 하나당 언제나 1명 이하다. 표식이 고아가 되면
+(회수권자가 죽으면) **지우지 않는다** — 다음 번호를 새로 만든다. 죽은
+보유자는 되살아나지 않으므로 세대가 복제될 수 없다(2R의 "고정 이름
+표식" 모양이 가진 두 주인 가능성이 구조적으로 없다). 늦게 만들어진
+권한은 재확인에서 `L.lockId ≠ O.lockId`가 되어 아무것도 지우지 않는다
+(L이 이미 다른 주인으로 넘어갔다는 뜻).
 
-### 7-4. 읽기 실패 ≠ 고아 (REVIEW-1R P1-1 둘째 발견)
+### 7-4. ③ 잡는 순간 heartbeat — P1-B를 구조적으로 닫는다
+
+acquire 루프는 **매 라운드**(폴마다) `L.alive.<me.lockId> = now`를
+먼저 쓴 뒤에 `createExclusive(L, ...)`를 시도한다(`refreshOwnAliveFile`).
+그래서 "이번 라운드에 실제로 이기는" 순간의 heartbeat는 **항상 최대
+한 폴 간격(기본 1초)만큼만 늙어 있다** — 대기가 99초였든 0초였든 무관
+하다. 2R의 버그(`aliveAtMs = startedAtMs`, 대기 시작 시각에 고정)가
+사라지는 자리가 정확히 여기다.
+
+### 7-5. F8 수리 — 사이드카는 L을 열지도 쓰지도 않는다
+
+2R의 사이드카는 L 경로 자체를 `readFileSync`/`writeFileSync`로 직접
+고쳐 썼다(PM 발견 F8) — 거짓 고아 회수 뒤 새 주인의 L을 옛 내용으로
+덮거나, 지워진 L을 되살릴 수 있는 경로였다(재현은 안 됐지만 소스상
+가능했다). 3R의 `HEARTBEAT_SCRIPT`/`defaultSpawnHeartbeat`는 **`lockPath`
+인자 자체를 받지 않는다** — `alivePath`(`L.alive.<token>`)만 안다.
+구조적으로 L을 건드릴 길이 없다(소스: `runner-lock.mjs`의
+`defaultSpawnHeartbeat`/`HEARTBEAT_SCRIPT` 정의, 재현 불요 · 자동화된
+동작 시험도 이 라운드에 추가됨 — "the sidecar NEVER touches the lock
+file L itself").
+
+### 7-6. 읽기 실패 ≠ 고아 (2R 수리, 무변 — 3R도 유지)
 
 `readLockContentResult`가 실패(ENOENT · 파싱 실패 · 빈/손상 내용)하면
-`{ok:false}`를 돌려주고, 호출자는 이를 **"바쁘다"로만** 본다 — 고아
-판정 자체를 건너뛴다(`unlinkFn`을 전혀 안 부른다, 단위 시험으로 고정).
-1R은 `!content -> true`(읽기 실패 = 고아)였고, 그 경로로 "방금 막 잡힌
-새 주인의 잠금"을 지운 사고가 있었다(3자 경합 50회 중 3회). 2R은 그
-가능성 자체를 없앤다 — 다음 바퀴의 `tryClaim`이 "파일이 진짜 사라졌는가"
-를 스스로 판단한다.
+`{ok:false}`를 돌려주고, 호출자는 이를 **"바쁘다"로만** 본다 —
+`judgeOwner`/`resolveContendedStep` 자체를 건너뛴다. 1R의 "읽기 실패 =
+고아" 버그가 재발하지 않는다.
+
+### 7-7. 이 라운드 실측 — RED(e4691d9) → GREEN(3R)
+
+`runner-lock-race-probe.mjs`(신규 탐침, §(f) 칠 명령)로 실측:
+
+| 칸                                                      | e4691d9(2R)                  | 3R                   |
+| ------------------------------------------------------- | ---------------------------- | -------------------- |
+| orphan-dead, 3 entrants, 30 trials                      | overlap 5~8/30, owners_max 3 | **overlap 0/30**     |
+| long-wait(backdated startedAtMs), 2 entrants, 10 trials | overlap 10/10                | **overlap 0/10**     |
+| cold-start, 3 entrants, 15 trials                       | overlap 0/15(이미 닫힘)      | overlap 0/15(무회귀) |
+
+같은 프로세스 seam 결정론 재현(D1, hooked renameFn으로 review-2 §2
+ⓐ의 정확한 5단계를 2R 코드 위에서 재생)도 RED 확인(owners_max 2) —
+3R은 rename을 reclaim 경로에서 완전히 뺐으므로(§7-3) 같은 메커니즘
+자체가 존재하지 않는다.
 
 ## 8. 중첩 실행 교착 금지
 
@@ -251,16 +319,40 @@ heartbeat는 staleness를 **더 빨리** 드러내는 보강일 뿐, 즉시성�
 바깥에서 손으로 맞출 수 없다 — "값이 있으면 믿는다"는 더는 통하지
 않는다.
 
-## 9. 해제 — 자기 잠금만, 정상·예외·신호에서
+## 9. 해제 — lockId로만, 정상·예외·신호에서
 
-`releaseRunnerLock`은 파일 내용의 `pid`가 호출자 자신의 `pid`와 일치할
-때만 지운다. `isolated-suite-runner.mjs`의 `runIsolatedSuite`는
-`try { ... } finally { release(); }`로 정상 반환과 모든 예외(클론 실패,
-spawn 실패 등) 둘 다에서 해제를 보장한다. SIGINT/SIGTERM은
-`installLockReleaseOnSignal`(`runner-lock.mjs`)이 별도로 건다. 2R부터는
-이 `release()`가 heartbeat 사이드카(§12)도 함께 멈춘다 — 잠금은 풀렸는데
-사이드카만 살아남아 남의(다음 주인의) 잠금을 계속 갱신하는 사고를
-막는다.
+⚠️**3R 수리(F11 닫힘)**: `releaseRunnerLock`은 더 이상 `pid`를 대조하지
+않는다 — 파일 내용의 `lockId`가 호출자가 건넨 `lockId`와 정확히 일치할
+때만 지운다(PM 설계 (d) "release: if read(L).lockId==me.lockId: unlink
+L else lock_lost=true"). lockId는 획득할 때마다 새로 뽑는 난수라, pid
+재사용(같은 pid가 전혀 다른 인스턴스를 가리키는 경우)에도 헷갈리지
+않는다 — pid 대조보다 더 정확한 키다. 일치하지 않거나(다른 주인) 파일
+자체가 없으면(이미 누가 치웠다) **지우지 않고** `{released:false,
+lockLost:true}`를 돌린다.
+
+### 9-2. LOCK_LOST — 해제 시점에 "내 것이 아니었다"는 사실의 번역
+
+`isolated-suite-runner.mjs`의 `guardLockForRun`이 돌리는 `release()`는
+**메모이즈**된다(한 번만 실제로 파일을 건드리고, 그 결과를 캐시해서
+돌려준다) — `reportRunOutcome`이 영수증을 쓰기 **직전**에 한 번
+부르고, 바깥 `runIsolatedSuite`의 `finally`가 예외-안전망으로 또 한 번
+불러도 두 번째는 캐시된 결과만 돌아올 뿐 파일을 다시 건드리지 않는다.
+`release()`가 `lockLost:true`를 돌리면 — 이 실행 "자체"의 측정 결과가
+무엇이었든(`node --test`가 초록이었어도) — 최종 반환 exit code는 1,
+영수증의 `runner_status`는 `RUNNER_STATUS.LOCK_LOST`로 **덮어써진다**
+(기존 `LOCK_TIMEOUT`과 다른, 새 enum 값 — 저쪭은 "측정을 시작도 안 함",
+이쪽은 "측정은 했지만 그 사이 잠금을 빼앗겨 결과를 믿을 수 없음",
+`reportLockTimeout` 분기는 건드리지 않는다). 판정 23:5x §1 ⑶: "조용한
+겹침보다 보이는 빨강이 낫다" — 이 번역이 그 선언을 코드로 만든다.
+
+`isolated-suite-runner.mjs`는 `try { ... } finally { release(); }`로
+정상 반환과 모든 예외(클론 실패, spawn 실패 등) 둘 다에서 해제를
+보장한다. SIGINT/SIGTERM은 `installLockReleaseOnSignal`(`runner-lock.
+mjs`)이 별도로 건다. `release()`는 heartbeat 사이드카(§12)도 함께
+멈춘다 — 잠금은 풀렸는데 사이드카만 살아남아 남의(다음 주인의) 잠금을
+계속 갱신하는 사고를 막는다(사이드카는 자기 소유의 `L.alive.<token>`
+파일만 갱신하므로, §7-5의 구조적 보장과 맞물려 이 사고의 범위는
+"쓸모없는 파일 하나가 좀 더 오래 남는다" 정도로 좁혀진다).
 
 ### 9-1. ⚠️정직 한계 — 신호 타이밍
 
@@ -279,7 +371,7 @@ CI는 한 번에 한 러너만 돈다 — 잠금은 항상 비어 있는 상태�
 트리거되지 않는다 — 판정 계약(tests 총수 · fail 0 · head 일치 ·
 full-2x)은 한 글자도 바뀌지 않는다.
 
-## 12. HYK-494 2R 선택 ① — heartbeat 사이드카
+## 12. heartbeat 사이드카 — 3R: 자기 소유 파일만, L은 열지도 쓰지도 않는다
 
 `startLockHeartbeat`는 **별도 프로세스**(`-e` 인라인 스크립트, 이 파일의
 `FREE_MEM_SAMPLER_SCRIPT`/`node-concurrency-sampler.mjs`와 같은
@@ -289,27 +381,38 @@ full-2x)은 한 글자도 바뀌지 않는다.
 `isolated-suite-runner.mjs`의 `guardLockForRun`이 **실제로 잠금을 쥔
 직후에만**(`nested`가 아닐 때만) 시작한다.
 
-- **간격·기한**: `HEARTBEAT_INTERVAL_MS`(30초) — 이 저장소 전건 러너
-  최장 실측(~623초)보다 훨씬 촘촘해서 정상 실행 내내 여러 번(약 20회)
-  갱신한다. `HEARTBEAT_STALE_MS`(90초, 간격의 3배) — 한 번의 tick이
-  일시적으로 늦어도 바로 orphan으로 오판하지 않을 여유를 주면서도,
-  `LOCK_WAIT_TIMEOUT_MS`(20분)보다 훨씬 작아 pid 재사용/신호사망
-  상황에서 다른 러너들이 20분을 다 기다리지 않게 한다.
+⚠️**3R 수리(F8, PM 발견)**: 2R의 `HEARTBEAT_SCRIPT`는 `lockPath`를
+인자로 받아 L을 직접 `readFileSync`/`writeFileSync`로 고쳐 썼다 — 구조
+상 거짓 고아 회수 뒤 새 주인의 L을 덮거나 지워진 L을 되살릴 수 있는
+경로였다. 3R의 `HEARTBEAT_SCRIPT`/`defaultSpawnHeartbeat`는 **`alivePath`
+(`L.alive.<token>`)만 인자로 받는다** — `lockPath` 자체를 모른다, 구조
+적으로 L을 건드릴 길이 없다(§7-5).
+
+- **간격·기한(판정 23:5x §1 ⑴)**: `HEARTBEAT_INTERVAL_MS`(10초, 2R의
+  30초에서 교체) · `HEARTBEAT_STALE_MS`(3분, 2R의 90초에서 교체) — N·M
+  모두 책임자 판정이 지정한 값. M/N=18이라 사이드카가 17번 연속 늦어야
+  신원 질의 1회가 생긴다(비용만 든다, §7-1). 이 설계에서 M은 "안전값"이
+  아니다 — 낡음은 신원 질의를 부를 뿐 회수하지 않기 때문이다(§7-1의
+  이탈 1).
 - **자기 종료 조건**: 사이드카 자신이 매 tick "주인 pid가 아직
   살아 있는가"를 확인한다 — 죽었으면 더는 갱신하지 않고 스스로
-  멈춘다(그 이후로 `aliveAtMs`가 "멈춘다" — pid가 나중에 재사용돼도
-  바뀌지 않는다, §7-1). 또한 잠금 파일의 `lockId`가 자기 토큰과 더는
-  맞지 않으면(이미 풀려서 다른 주인이 새로 잡은 경우) 역시 멈춘다 —
-  남의 잠금을 갱신하지 않는다.
+  멈춘다. 또한 `alivePath`가 가리키는 토큰이 주인이 넘겨준 그대로이므로
+  (사이드카는 토큰 재검증을 하지 않는다 — 애초에 자기만 그 경로를
+  쓴다, F8 수리 이후 "남의 것을 덮어쓸" 경로 자체가 없다).
 - **인프라 실패는 측정 불가로 격하**: 스폰 자체가 실패해도 조용히
   no-op 핸들을 돌려준다(startConcurrencySampler/startFreeMemSampler와
-  같은 자세) — heartbeat가 없어도 잠금 자체의 상호 배제(§3 wx 배타
-  생성)는 깨지지 않는다, 다만 pid 재사용 보강(§7-1)만 못 받는다.
-- **기본은 OFF**: 이 저장소의 ~90개 이상 기존/다른 `runIsolatedSuite`
-  호출 전부가 `startHeartbeatFn`을 언급하지 않는다 — 기본값이 실제
-  사이드카였다면 그 모두가 진짜 자식 프로세스를 띄웠을 것이다.
-  `useAutoConcurrency`와 같은 패턴으로, 이 파일 자신의 CLI 진입점
-  (`runIsolatedSuiteCli`)만 실제(`startLockHeartbeat`)를 켠다.
+  같은 자세) — heartbeat가 없어도 잠금 자체의 상호 배제(§3 link 배타
+  게시)는 깨지지 않는다, 다만 pid-reused 보강(§7-1)만 못 받는다(그
+  경우 heartbeat 나이는 항상 Infinity로 취급되어 매 폴 신원 질의를
+  부른다 — 느려질 뿐 안전은 깨지지 않는다).
+- **기본은 OFF**: 이 저장소의 기존/다른 `runIsolatedSuite` 호출 전부가
+  `startHeartbeatFn`을 언급하지 않는다 — 기본값이 실제 사이드카였다면
+  그 모두가 진짜 자식 프로세스를 띄웠을 것이다. `useAutoConcurrency`와
+  같은 패턴으로, 이 파일 자신의 CLI 진입점(`runIsolatedSuiteCli`)만
+  실제(`startLockHeartbeat`)를 켠다.
+- ⚠️**사이드카는 여전히 "멈춘(hung) 러너"를 못 본다** — 주인 pid가
+  `spawnSync` 안에서 영원히 멈춰 있어도 그 pid는 "살아 있다"이므로
+  heartbeat는 계속 신선하다. 이 설계는 그것을 감지 대상에서 뺐다(§13).
 
 ## 13. 정직 한계 (요약, ⛔지시서 §4 필수 3줄 포함)
 
@@ -325,19 +428,32 @@ full-2x)은 한 글자도 바뀌지 않는다.
    구현에 좌우된다(로컬 NTFS/ext4만 실측, 네트워크 드라이브는
    〔못쟀다〕).
 3. **라이브 실물 = 다음 병렬 레인 2개 라운드다** — 이 라운드는 합성
-   (mkdtemp) 잠금 경로로 두세 "실제" 자식 프로세스를 띄워 직렬화와
-   비교-후-삭제의 안전성을 증명했고(§ⓒ⑴, §10b), 자기 자신의 전건
+   (mkdtemp) 잠금 경로로 여러 "실제" 자식 프로세스를 띄워 직렬화와
+   회수의 안전성을 증명했고(§ⓒ⑴, §10b, §7-7), 자기 자신의 전건
    러너를 2회 돌려 잠금이 실제로 잡히고 풀리는지 영수증으로 확인했다
    (§3 완료 조건 3) — 하지만 "서로 다른 두 워크트리의 진짜 전건 러너
    2개가 동시에 시작해도 겹치지 않는다"는 그 다음 실물 라운드가
    확인해야 할 사실이다.
-4. pid 재사용 오판(§7-1, 2R에서 heartbeat로 보강했지만 완전히 없어지진
-   않음), 신호 타이밍(§9-1) — 위에서 각각 서술. ⚠️**2R 추가**:
-   **heartbeat 기한 안에 주인이 죽으면 그만큼은 기다린다**(§7-2) —
-   즉시성은 보장하지 않는다.
-5. **Windows만 실측했다** — Linux CI의 `process.kill(pid, 0)` 동작은
-   Node 문서상 동일하게 명시돼 있으나 이 라운드에서 직접 재현하지는
-   않았다(〔추론〕).
-6. **2R도 전수 조사가 아니다** — §10b의 real-child-process 시험은
-   유한 표본(10·15회)이다. 0회 위반을 봤다는 것은 "이 머신, 이 시각,
+4. pid 재사용 오판(§7-1, 3R은 신원 질의로 닫았지만 전제 A1 — 신원 질의
+   자체가 틀릴 가능성 — 은 남는다), 신호 타이밍(§9-1) — 위에서 각각
+   서술.
+5. ⚠️**3R 추가(S11, 판정 23:5x §1 ⑶ "대가 수용")**: **멈춘(hung) 러너는
+   살아 있으므로 회수하지 않는다.** 주인 프로세스가 `spawnSync` 안에서
+   영원히 멈춰 있어도 그 pid는 "살아 있다"이고, 사이드카는 "주인 pid가
+   살아 있는가"만 보므로(§12) heartbeat는 계속 신선하다 — hung을 감지할
+   길이 구조적으로 없다. 뒤에 줄 선 러너들은 `LOCK_WAIT_TIMEOUT_MS`
+   (20분)마다 `LOCK_TIMEOUT`(시험 0·빨강)을 받고, **사람이 그 프로세스를
+   직접 끝내야** 풀린다. 이것이 "두 주인 0"(§7 불변식)의 대가다 —
+   **조용한 겹침보다 보이는 빨강이 낫다**는 판정이 받아들인 trade-off다.
+6. **Windows만 실측했다** — Linux CI의 `process.kill(pid, 0)`과
+   `/proc/<pid>/stat` 파싱(§7-2)은 Node/커널 문서상 동일하게 명시돼
+   있으나 이 라운드에서 직접 재현하지는 않았다(〔추론〕 — 파싱 로직만
+   주입 seam으로 결정론적 단위 시험했다).
+7. **3R도 전수 조사가 아니다** — §7-7/§10b의 real-child-process 시험은
+   유한 표본(10·15·30회)이다. 0회 위반을 봤다는 것은 "이 머신, 이 시각,
    이 표본수에서" 사실이지 전칭 증명이 아니다(universal_claim_discipline).
+8. **커널이 쥐는 잠금(판단 유보, 이탈 아님)** — Windows 공유 모드 0
+   열기·libuv `UV_FS_O_EXLOCK` 같은 대안은 프로세스가 죽으면 OS가 풀어
+   고아 회수가 아예 없다. Node가 이 플래그를 실제로 노출/통과시키는지는
+   미확인이다 — 확인 전에는 채택하지 않는다(3R 밖의 리서치 항목, PM
+   설계 (i)).

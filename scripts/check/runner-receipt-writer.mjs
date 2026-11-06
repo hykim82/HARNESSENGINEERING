@@ -44,11 +44,22 @@ export const RUNNER_RECEIPT_FILENAME = "runner-receipt.json";
 // consumer treat a run under this status as green -- see coder-task.md §1
 // pre-check ⑶ for the grep confirming relay-handshake.mjs does not switch
 // exhaustively over RUNNER_STATUS's members.
+// HYK-494 3R: a FIFTH status -- the machine-wide runner lock WAS acquired
+// (measurement happened, counts below may be real), but at release time the
+// lock file no longer belonged to this run (lockId mismatch or missing --
+// runner-lock.mjs's releaseRunnerLock, `lockLost:true`). This means another
+// process judged us DEAD (pid-reused misjudgment, or this run's own identity
+// check was wrong -- §(g) 전제 A1) and reclaimed the lock WHILE we were still
+// running -- our measurement may have overlapped a concurrent run and is not
+// trustworthy. Deliberately a DIFFERENT status from LOCK_TIMEOUT (that one
+// never even started measuring; this one measured, but the result is
+// suspect) so a downstream reader can tell the two failure shapes apart.
 export const RUNNER_STATUS = Object.freeze({
   OK: "OK",
   TESTS_FAILED: "TESTS_FAILED",
   MEASUREMENT_UNAVAILABLE_OOM: "MEASUREMENT_UNAVAILABLE_OOM",
   LOCK_TIMEOUT: "LOCK_TIMEOUT",
+  LOCK_LOST: "LOCK_LOST",
 });
 
 // Callers that don't classify a spawn outcome themselves (this file's own
@@ -427,6 +438,13 @@ const LOCK_INFO_DEFAULTS = {
   waitEndMs: null,
   priorOwner: null,
   nestedBypassRejected: null,
+  // HYK-494 3R additive-only fields (judgment §1 ⑸ "영수증 새 칸 2"):
+  // reclaimReason mirrors runner-lock.mjs's acquireRunnerLock result
+  // ("pid-dead" | "pid-reused" | null -- only meaningful when
+  // reclaimedOrphan is true). lockLost mirrors releaseRunnerLock's own
+  // result (true when this run's lock was no longer ours at release time).
+  reclaimReason: null,
+  lockLost: null,
 };
 
 // HYK-494 2R (additive only -- every field above this comment is byte-for-
@@ -461,6 +479,9 @@ function lockReceiptFields(lockInfo) {
     lock_wait_end_ms: resolved.waitEndMs,
     ...priorOwnerReceiptFields(resolved.priorOwner),
     lock_nested_bypass_rejected: resolved.nestedBypassRejected,
+    // HYK-494 3R additive -- see LOCK_INFO_DEFAULTS' own comment.
+    lock_reclaim_reason: resolved.reclaimReason,
+    lock_lost: resolved.lockLost,
   };
 }
 

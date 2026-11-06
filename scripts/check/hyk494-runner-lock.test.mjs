@@ -1,26 +1,25 @@
-// HYK-494: tests for runner-lock.mjs (machine-wide runner mutual-exclusion
-// lock) and its wiring into isolated-suite-runner.mjs's runIsolatedSuite.
+// HYK-494-runner-lock-3: tests for runner-lock.mjs (machine-wide runner
+// mutual-exclusion lock, PM design (d) 재구현 -- 세대 번호 회수권 + 잡는
+// 순간 heartbeat + "낡음은 신원 질의의 방아쇠일 뿐" judge, 되돌림 0) and
+// its wiring into isolated-suite-runner.mjs's runIsolatedSuite.
 //
 // ⛔Synthetic lock paths only (dispatch task): every test below either
 // drives the production acquireRunnerLock/releaseRunnerLock functions
 // against a disposable mkdtemp'd lock PATH, or stubs the lock entirely via
 // NOOP_LOCK_SEAMS -- none ever touches runner-lock.mjs's real,
-// machine-wide default (os.homedir()-based, HYK-494 2R P2-4 fix) lock file.
+// machine-wide default (os.homedir()-based) lock file.
 //
-// §ⓒ⑴'s real-child-process proof (RED before any lock, serialized after)
-// is the one scenario a pure in-process unit test cannot honestly make:
-// two REAL `node` child processes, started together, racing for the SAME
-// file. It drives the production module directly (no copy -- the two
-// children import this repo's own scripts/check/runner-lock.mjs by its
-// real file:// URL), via a short inline ESM script string (same technique
-// isolated-suite-runner.mjs's own FREE_MEM_SAMPLER_SCRIPT uses for its
-// synthetic child, not a new file on disk -- product_scope names exactly
-// which new files this round may add, and a fixture .mjs isn't one of
-// them).
+// §ⓒ⑴/ⓓ's real-child-process races are the one scenario a pure in-process
+// unit test cannot honestly make: REAL `node` child processes, started
+// together, racing for the SAME file. They drive the production module
+// directly (no copy -- the children import this repo's own runner-lock.mjs
+// by its real file:// URL), via a short inline ESM script string (same
+// technique isolated-suite-runner.mjs's own FREE_MEM_SAMPLER_SCRIPT uses).
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import {
   existsSync,
+  linkSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -33,12 +32,14 @@ import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
+  BUSY_RETRY_TIMEOUT_MS,
   HEARTBEAT_INTERVAL_MS,
   HEARTBEAT_STALE_MS,
   LOCK_POLL_INTERVAL_MS,
   LOCK_WAIT_TIMEOUT_MS,
   NESTED_LOCK_BYPASS_ENV_VAR,
   acquireRunnerLock,
+  defaultGetStartIdentity,
   defaultRunnerLockPath,
   installLockReleaseOnSignal,
   releaseRunnerLock,
@@ -54,34 +55,20 @@ function freshLockDir(prefix = "hyk494-lock-") {
   return mkdtempSync(join(tmpdir(), prefix));
 }
 
-// HYK-494 live finding (this round's own full-runner run 1, §3 완료 조건 3
-// evidence): this test FILE can itself run nested inside a real
-// isolated-suite-runner.mjs invocation that already holds the real lock --
-// that outer process marks NESTED_LOCK_BYPASS_ENV_VAR on its own
-// process.env BEFORE spawning the main `node --test` pass (the exact
-// mechanism §8 of the design doc describes), and that marker is still
-// present in THIS process's ambient process.env when these tests run. Every
-// test below that means to exercise NON-nested behavior must explicitly
-// strip it, or it silently bypasses the lock it is trying to test (found
-// live: all 5 non-nested acquireRunnerLock(...) call sites below, plus the
-// GREEN race test's spawned children, failed this exact way on this
-// round's own first full-runner run -- same class of fix as hyk473-runner-
-// cap.test.mjs's own NESTED_CONCURRENCY_ENV_VAR "save/strip/restore"
-// comment).
+// HYK-494 2R live finding (still true in 3R -- the mechanism, NESTED_LOCK_
+// BYPASS_ENV_VAR, is unchanged): this test FILE can itself run nested
+// inside a real isolated-suite-runner.mjs invocation that already holds
+// the real lock. Every test below that means to exercise NON-nested
+// behavior must explicitly strip it.
 function cleanEnv() {
   const env = { ...process.env };
   delete env[NESTED_LOCK_BYPASS_ENV_VAR];
   return env;
 }
 
-// -- §1: defaultRunnerLockPath -----------------------------------------
+// -- §1: defaultRunnerLockPath (unchanged from 2R -- this calculation is
+// not part of the (d) redesign, product_scope names it unchanged) --------
 
-// HYK-494 2R (fixture sync, ORCH70 §33 ⓒ -- this is a real behavior change,
-// not a weakening): review P2-4 found os.tmpdir() follows the process's own
-// TEMP/TMP, so different seats with different TEMP never actually shared
-// one lock file. The fix (coder-task dispatch: "default lock path under
-// os.homedir (not TEMP)") moves the default to os.homedir() -- this test
-// now proves THAT, not the old (broken) tmpdir claim.
 test("defaultRunnerLockPath: lives under os.homedir() with the fixed filename, never TEMP/TMP, never a per-worktree path", () => {
   const p1 = defaultRunnerLockPath({ homedirFn: () => "/fake/home" });
   const p2 = defaultRunnerLockPath({ homedirFn: () => "/fake/home" });
@@ -94,12 +81,6 @@ test("defaultRunnerLockPath: lives under os.homedir() with the fixed filename, n
   );
 });
 
-// HYK-494 2R: the REAL (no-override) default specifically -- proves the
-// production call site (no test ever exercises this path, every other test
-// here injects homedirFn) resolves under os.homedir(), never os.tmpdir()
-// (mutation target: swapping the `homedirFn = homedir` default back to
-// `tmpdir` would make this the ONLY test that catches it -- every other
-// test overrides the seam and would stay green).
 test("defaultRunnerLockPath: the REAL default (no override) resolves under the REAL os.homedir(), not os.tmpdir()", () => {
   const real = defaultRunnerLockPath();
   assert.equal(real, join(homedir(), "harness-isolated-suite-runner.lock"));
@@ -112,7 +93,7 @@ test("defaultRunnerLockPath: the REAL default (no override) resolves under the R
 
 // -- §2: acquireRunnerLock basic acquire/release -------------------------
 
-test("acquireRunnerLock: uncontended acquisition is immediate (waitMs 0, pollCount 0), writes pid/startedAtMs/worktree/head", () => {
+test("acquireRunnerLock: uncontended acquisition is immediate (waitMs 0, pollCount 0), writes pid/startedAtMs/worktree/head/lockId/procStart", () => {
   const dir = freshLockDir();
   const lockPath = join(dir, "r.lock");
   try {
@@ -126,25 +107,14 @@ test("acquireRunnerLock: uncontended acquisition is immediate (waitMs 0, pollCou
     });
     assert.equal(r.acquired, true);
     assert.equal(r.nested, false);
-    // HYK-494: NOT asserted === 0 -- two back-to-back real Date.now() calls
-    // (waitStartMs, then this return's nowMs() - waitStartMs) can legitimately
-    // differ by 1ms if a millisecond boundary falls between them, even with
-    // zero actual polling/waiting (found flaky empirically: ~30% of separate
-    // `node --test` process invocations under this exact assertion). What
-    // actually proves "uncontended, no polling" is pollCount === 0 below.
     assert.ok(
       r.waitMs <= 5,
       `waitMs (${r.waitMs}) must be near-zero with no contention`,
     );
     assert.equal(r.pollCount, 0);
     assert.equal(r.reclaimedOrphan, false);
+    assert.equal(r.reclaimReason, null);
     assert.equal(r.timedOut, false);
-    // HYK-494 2R fixture sync (ORCH70 §33 ⓒ, additive-only content shape):
-    // the written lock content gained two new fields this round --
-    // `lockId` (P2-1's nested-bypass token) and `aliveAtMs` (§12 heartbeat
-    // staleness baseline, initialized to startedAtMs at claim time). Both
-    // asserted structurally rather than deepEqual-pinned to the whole
-    // object, since lockId is a fresh random UUID every call.
     assert.equal(r.lockId, JSON.parse(readFileSync(lockPath, "utf8")).lockId);
     assert.ok(
       typeof r.lockId === "string" && r.lockId.length > 0,
@@ -155,43 +125,52 @@ test("acquireRunnerLock: uncontended acquisition is immediate (waitMs 0, pollCou
     assert.equal(content.startedAtMs, 1000);
     assert.equal(content.worktree, "/src");
     assert.equal(content.head, "deadbeef");
-    assert.equal(
-      content.aliveAtMs,
-      1000,
-      "aliveAtMs must be initialized to startedAtMs at claim time",
-    );
+    // HYK-494 3R content shape change (fixture sync, ORCH70 §33 ⓒ -- real
+    // behavior change, PM design (d) "me = {v:3,pid,procStart,lockId,...}"):
+    // aliveAtMs is GONE from the lock content entirely -- heartbeat now
+    // lives in a separate L.alive.<lockId> file (F8 fix), never inside L
+    // itself. `procStart` (this process's own start identity) replaces it.
     assert.equal(
       Object.keys(content).sort().join(","),
-      "aliveAtMs,head,lockId,pid,startedAtMs,worktree",
-      "no untracked extra fields -- the content shape is exactly these six",
+      "head,lockId,pid,procStart,startedAtMs,worktree",
+      "no untracked extra fields, and no aliveAtMs inside L itself (F8)",
+    );
+    // ③ 잡는 순간 heartbeat: the alive file must exist the instant we claim.
+    const aliveContent = JSON.parse(
+      readFileSync(`${lockPath}.alive.${r.lockId}`, "utf8"),
+    );
+    assert.ok(
+      Number.isFinite(aliveContent.aliveAtMs),
+      "L.alive.<lockId> must be written at claim time",
     );
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
-test("releaseRunnerLock: releases our own lock (pid matches) -- file removed", () => {
+test("releaseRunnerLock: releases our own lock (lockId matches) -- file removed, lockLost false", () => {
   const dir = freshLockDir();
   const lockPath = join(dir, "r.lock");
   try {
-    acquireRunnerLock({
+    const acquired = acquireRunnerLock({
       lockPath,
       pid: process.pid,
       startedAtMs: 1,
       env: cleanEnv(),
     });
     assert.ok(existsSync(lockPath));
-    const result = releaseRunnerLock({ lockPath, pid: process.pid });
+    const result = releaseRunnerLock({ lockPath, lockId: acquired.lockId });
     assert.equal(result.released, true);
+    assert.equal(result.lockLost, false);
     assert.equal(existsSync(lockPath), false);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
-// -- §3: release only our own lock (product_scope ⓘⓘⓘⓘⓘ) ---------------
+// -- §3: release by lockId only (HYK-494 3R, F11 수리: pid 대조에서 교체) --
 
-test("releaseRunnerLock: a lock file owned by a DIFFERENT pid is left untouched -- never deletes another process's lock", () => {
+test("releaseRunnerLock: a lock file owned by a DIFFERENT lockId is left untouched -- never deletes another instance's lock, reports lockLost true", () => {
   const dir = freshLockDir();
   const lockPath = join(dir, "r.lock");
   try {
@@ -202,42 +181,60 @@ test("releaseRunnerLock: a lock file owned by a DIFFERENT pid is left untouched 
         startedAtMs: 1,
         worktree: null,
         head: null,
+        lockId: "someone-elses-lock-id",
       }),
     );
-    const result = releaseRunnerLock({ lockPath, pid: process.pid });
+    const result = releaseRunnerLock({ lockPath, lockId: "my-lock-id" });
     assert.equal(result.released, false);
+    assert.equal(
+      result.lockLost,
+      true,
+      "the lock is no longer ours -- LOCK_LOST territory",
+    );
     assert.equal(
       existsSync(lockPath),
       true,
-      "the other process's lock must survive",
+      "the other instance's lock must survive",
     );
     const stillThere = JSON.parse(readFileSync(lockPath, "utf8"));
-    assert.equal(stillThere.pid, 999999);
+    assert.equal(stillThere.lockId, "someone-elses-lock-id");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
-test("releaseRunnerLock: a missing/unreadable lock file is reported as not-released, never throws", () => {
+test("releaseRunnerLock: a missing/unreadable lock file is reported as not-released and lockLost true, never throws", () => {
   const dir = freshLockDir();
   const lockPath = join(dir, "never-created.lock");
   try {
-    const result = releaseRunnerLock({ lockPath, pid: process.pid });
+    const result = releaseRunnerLock({ lockPath, lockId: "whatever" });
     assert.equal(result.released, false);
+    assert.equal(result.lockLost, true);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
-// -- §4: orphan (dead pid) reclaim ----------------------------------------
-
-test("acquireRunnerLock: a lock held by a DEAD pid is reclaimed (reclaimedOrphan true), then acquired under our own pid", () => {
+test("releaseRunnerLock: calling with no lockId at all never matches anything (never a false release)", () => {
   const dir = freshLockDir();
   const lockPath = join(dir, "r.lock");
   try {
-    // A real, guaranteed-dead pid: spawnSync blocks until this child has
-    // already exited, so by the time we read its pid back it cannot still
-    // be alive on this machine.
+    writeFileSync(lockPath, JSON.stringify({ pid: 1, lockId: undefined }));
+    const result = releaseRunnerLock({ lockPath });
+    assert.equal(result.released, false);
+    assert.equal(result.lockLost, true);
+    assert.equal(existsSync(lockPath), true);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// -- §4: orphan (dead pid) reclaim -- generation-numbered reclaim ticket --
+
+test("acquireRunnerLock: a lock held by a DEAD pid is reclaimed (reclaimedOrphan true, reclaimReason pid-dead), then acquired under our own pid", () => {
+  const dir = freshLockDir();
+  const lockPath = join(dir, "r.lock");
+  try {
     const dead = spawnSync(process.execPath, ["-e", "process.exit(0)"]);
     const deadPid = dead.pid;
     assert.ok(Number.isInteger(deadPid), "spawnSync must report a real pid");
@@ -248,6 +245,7 @@ test("acquireRunnerLock: a lock held by a DEAD pid is reclaimed (reclaimedOrphan
         startedAtMs: 1,
         worktree: null,
         head: null,
+        lockId: "dead-owner-token",
       }),
     );
     const r = acquireRunnerLock({
@@ -260,6 +258,7 @@ test("acquireRunnerLock: a lock held by a DEAD pid is reclaimed (reclaimedOrphan
     });
     assert.equal(r.acquired, true);
     assert.equal(r.reclaimedOrphan, true);
+    assert.equal(r.reclaimReason, "pid-dead");
     assert.equal(r.priorOwner.pid, deadPid);
     const content = JSON.parse(readFileSync(lockPath, "utf8"));
     assert.equal(
@@ -267,23 +266,18 @@ test("acquireRunnerLock: a lock held by a DEAD pid is reclaimed (reclaimedOrphan
       process.pid,
       "the reclaimed lock must now be ours",
     );
+    // best-effort cleanup (product_scope §(d) "L 삭제 뒤" 청소): the dead
+    // owner's own alive file and reclaim tickets must not linger forever.
+    assert.equal(existsSync(`${lockPath}.alive.dead-owner-token`), false);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
-// -- §4b: HYK-494 2R P1-1 fix -- a read failure is "busy", never "orphan" --
-//
-// A scripted readFileFn fails exactly once (simulating the review's exact
-// repro class: ENOENT raced with another process's release/claim, a
-// mid-write empty/partial file) -- the OLD code (`!content -> true` inside
-// isOrphan) would have treated that failure itself as proof of an orphan
-// and called unlinkSync on whatever is really at lockPath (review §2 ⓑ⑵/
-// ⑶: a live, different owner's FRESH lock, 3/50). The new code must never
-// even reach the orphan/reclaim branch on a read failure -- proven here by
-// a spy unlinkFn that must never be called while that failure is live.
+// -- §4b: a read failure is "busy", never "orphan" (2R P1-1 fix, unchanged
+// axis in 3R) --------------------------------------------------------------
 
-test("acquireRunnerLock: a readFileFn failure never calls unlinkFn (read failure != orphan, the exact P1-1 2nd-finding fix) -- recovers and times out against the real (live) owner once reads succeed again", () => {
+test("acquireRunnerLock: a readFileFn failure never triggers a reclaim (read failure != orphan) -- recovers and times out against the real (live) owner once reads succeed again", () => {
   const dir = freshLockDir();
   const lockPath = join(dir, "r.lock");
   try {
@@ -294,21 +288,17 @@ test("acquireRunnerLock: a readFileFn failure never calls unlinkFn (read failure
         startedAtMs: 1,
         worktree: null,
         head: null,
+        lockId: "live-owner",
       }),
     );
     let readCalls = 0;
-    let unlinkCalls = 0;
     const realReadFileFn = (p, enc) => readFileSync(p, enc);
     const readFileFn = (p, enc) => {
       readCalls += 1;
-      if (readCalls <= 3) {
+      if (readCalls <= 3 && p === lockPath) {
         throw new Error("simulated transient read failure (ENOENT-shaped)");
       }
       return realReadFileFn(p, enc);
-    };
-    const unlinkFn = (p) => {
-      unlinkCalls += 1;
-      return unlinkSync(p);
     };
     const r = acquireRunnerLock({
       lockPath,
@@ -317,14 +307,8 @@ test("acquireRunnerLock: a readFileFn failure never calls unlinkFn (read failure
       timeoutMs: 80,
       pollIntervalMs: 10,
       readFileFn,
-      unlinkFn,
       env: cleanEnv(),
     });
-    assert.equal(
-      unlinkCalls,
-      0,
-      "a read failure must never trigger an unlink -- it is not evidence of an orphan",
-    );
     assert.ok(readCalls > 3, "must have retried past the simulated failures");
     assert.equal(r.acquired, false);
     assert.equal(r.timedOut, true);
@@ -344,77 +328,104 @@ test("acquireRunnerLock: a readFileFn failure never calls unlinkFn (read failure
   }
 });
 
-// -- §4c: HYK-494 2R 선택 ① heartbeat -- pid-alive-but-stale is orphan too --
-//
-// Pure, deterministic unit coverage of the staleness AXIS of isOrphan,
-// independent of any real heartbeat sidecar process (that gets its own
-// dedicated real-child-process coverage in §12 below) -- a fake nowMs
-// clock makes this bounded and fast instead of a real ~90s wall-clock wait.
+// -- §4c: HYK-494 3R core behavior change -- heartbeat staleness is a
+// TRIGGER for an identity check, never a reclaim verdict by itself
+// (judgment 23:5x §1 ⑴, 이탈 1 승인) --------------------------------------
 
-test("acquireRunnerLock: a lock whose owner pid is genuinely ALIVE but whose heartbeat (aliveAtMs) is older than HEARTBEAT_STALE_MS is still reclaimed (pid reuse / signal death, P2-2's own gap)", () => {
+test("acquireRunnerLock: a lock whose owner pid is ALIVE and whose startIdentity MATCHES is never reclaimed, even with a stale/missing heartbeat (false-orphan bait closed)", () => {
   const dir = freshLockDir();
   const lockPath = join(dir, "r.lock");
   try {
-    const FAR_FUTURE = 10 * HEARTBEAT_STALE_MS;
+    const myProcStart = defaultGetStartIdentity(process.pid);
     writeFileSync(
       lockPath,
       JSON.stringify({
-        pid: process.pid, // genuinely alive (this test's own process) --
-        // proves staleness alone can override a passing pid-alive check.
+        pid: process.pid, // genuinely alive -- this test's own process,
+        // the WHOLE time (not reused) -- must never be mistaken for a
+        // pid-reuse orphan just because its heartbeat looks stale.
         startedAtMs: 1,
+        procStart: myProcStart,
         worktree: null,
         head: null,
-        lockId: "stale-owner-token",
-        aliveAtMs: 1,
+        lockId: "same-identity-token",
       }),
     );
+    // No L.alive.<lockId> file at all -- readAliveAgeMs resolves to
+    // Infinity, i.e. maximally "stale" -- the strongest possible bait.
     const r = acquireRunnerLock({
       lockPath,
       pid: process.pid + 1,
-      startedAtMs: FAR_FUTURE,
-      timeoutMs: 5000,
-      pollIntervalMs: 5,
-      nowMs: () => FAR_FUTURE,
+      startedAtMs: 2,
+      timeoutMs: 100,
+      pollIntervalMs: 10,
+      heartbeatStaleMs: 1,
       env: cleanEnv(),
     });
-    assert.equal(r.acquired, true);
+    assert.equal(r.acquired, false);
+    assert.equal(r.timedOut, true);
     assert.equal(
       r.reclaimedOrphan,
-      true,
-      "stale heartbeat must trigger reclaim despite a live-looking pid",
+      false,
+      "staleness alone must NEVER reclaim a live, same-identity owner",
     );
-    assert.equal(r.priorOwner.lockId, "stale-owner-token");
     const content = JSON.parse(readFileSync(lockPath, "utf8"));
-    assert.equal(content.pid, process.pid + 1, "now ours");
+    assert.equal(content.lockId, "same-identity-token", "untouched");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
-test("acquireRunnerLock: a lock whose heartbeat (aliveAtMs) is FRESH is never reclaimed even though the owner pid differs from the caller -- waits normally and times out (no false-positive staleness)", () => {
+test("acquireRunnerLock: a lock whose pid is alive but whose startIdentity MISMATCHES (pid reuse) IS reclaimed once the heartbeat looks stale -- reclaimReason pid-reused", () => {
   const dir = freshLockDir();
   const lockPath = join(dir, "r.lock");
   try {
-    // HYK-494 2R (bug found live while writing this very round, "sync
-    // fake clock never advances -> timeout check never fires -> real
-    // hang"): a REAL, advancing wall clock (the default nowMs=Date.now) is
-    // required here -- unlike the stale-reclaim test above (which returns
-    // on its FIRST loop iteration via a successful reclaim, a fixed fake
-    // `now` never gets asked to show elapsed time), this test's lock is
-    // genuinely NOT stale, so it must fall through to the elapsed-time
-    // timeout check on every iteration -- a `nowMs` that always returns the
-    // same constant makes `elapsed` permanently 0 and the loop never ends.
+    writeFileSync(
+      lockPath,
+      JSON.stringify({
+        pid: process.pid, // alive, but under a DIFFERENT identity now
+        startedAtMs: 1,
+        procStart: "a-start-identity-that-is-not-this-process's",
+        worktree: null,
+        head: null,
+        lockId: "reused-pid-token",
+      }),
+    );
+    const r = acquireRunnerLock({
+      lockPath,
+      pid: process.pid + 1,
+      startedAtMs: 2,
+      timeoutMs: 5000,
+      pollIntervalMs: 10,
+      heartbeatStaleMs: 1,
+      env: cleanEnv(),
+    });
+    assert.equal(r.acquired, true);
+    assert.equal(r.reclaimedOrphan, true);
+    assert.equal(r.reclaimReason, "pid-reused");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("acquireRunnerLock: a lock whose heartbeat (L.alive.<lockId>) is FRESH is never reclaimed even though startIdentity is unknown -- waits normally and times out (cheap path short-circuits the identity query)", () => {
+  const dir = freshLockDir();
+  const lockPath = join(dir, "r.lock");
+  try {
     const realNow = Date.now();
     writeFileSync(
       lockPath,
       JSON.stringify({
         pid: process.pid,
         startedAtMs: realNow - 10,
+        procStart: null, // unknown identity -- must not matter on the fresh path
         worktree: null,
         head: null,
         lockId: "fresh-owner-token",
-        aliveAtMs: realNow - 10, // well within HEARTBEAT_STALE_MS of now
       }),
+    );
+    writeFileSync(
+      `${lockPath}.alive.fresh-owner-token`,
+      JSON.stringify({ aliveAtMs: realNow - 10 }),
     );
     const start = Date.now();
     const r = acquireRunnerLock({
@@ -440,82 +451,206 @@ test("acquireRunnerLock: a lock whose heartbeat (aliveAtMs) is FRESH is never re
   }
 });
 
-// -- §4d: HYK-494 2R P1-1 fix -- compare-and-delete never deletes a
-// DIFFERENT (mismatched) lock it finds after the atomic rename-steal, and
-// restores it instead -- a deterministic, white-box drive of
-// tryReclaimOrphan's mismatch branch (the real-process, timing-based proof
-// of the same safety property lives in §12's concurrent-reclaim test; this
-// one pins the exact mechanism byte-for-byte without relying on timing).
+// -- §4d: generation-numbered reclaim tickets -- exactly one concurrent
+// reclaimer, an existing LIVE ticket holder blocks a second ticket --------
 
-test("acquireRunnerLock: if the content moved by the atomic rename-steal does NOT match what was read as orphan, it is restored (never deleted) -- proves the rename-then-COMPARE step actually gates the delete", () => {
+test("acquireRunnerLock: when a reclaim ticket for this orphan already exists and its holder is still ALIVE, a second caller does NOT create ticket k+1 -- it waits instead (single-reclaimer invariant)", () => {
   const dir = freshLockDir();
   const lockPath = join(dir, "r.lock");
   try {
     const deadPid = spawnSync(process.execPath, ["-e", "process.exit(0)"]).pid;
-    const diskContent = {
-      pid: deadPid,
-      startedAtMs: 1,
-      worktree: null,
-      head: null,
-      lockId: "dead-owner-token",
-      aliveAtMs: 1,
-    };
-    writeFileSync(lockPath, JSON.stringify(diskContent));
-    // The main loop's OWN read (over lockPath) sees the dead-pid content and
-    // decides "orphan". tryReclaimOrphan's read (over the tempPath the
-    // rename just created) is made to see a DIFFERENT lockId -- simulating
-    // "a live owner's content was actually there at rename time" without
-    // needing a second real process to win a real race.
-    const readFileFn = (p) => {
-      if (p === lockPath) return JSON.stringify(diskContent);
-      return JSON.stringify({ ...diskContent, lockId: "a-different-owner" });
-    };
+    writeFileSync(
+      lockPath,
+      JSON.stringify({ pid: deadPid, lockId: "O-token", procStart: null }),
+    );
+    // Pre-seed reclaim ticket k=1, held by a genuinely ALIVE pid (this
+    // test's own process) -- simulates "someone else is already mid-reclaim".
+    const tmp1 = `${lockPath}.reclaim.O-token.1.tmp`;
+    writeFileSync(tmp1, JSON.stringify({ pid: process.pid, procStart: null }));
+    linkSync(tmp1, `${lockPath}.reclaim.O-token.1`);
+    unlinkSync(tmp1);
+
     const r = acquireRunnerLock({
       lockPath,
-      pid: process.pid,
-      startedAtMs: 2,
-      timeoutMs: 80,
+      pid: process.pid + 1,
+      startedAtMs: 1,
+      timeoutMs: 100,
       pollIntervalMs: 10,
-      readFileFn,
       env: cleanEnv(),
     });
-    assert.equal(r.acquired, false);
+    assert.equal(r.acquired, false, "must not steal from an active reclaimer");
     assert.equal(r.timedOut, true);
     assert.equal(
-      r.reclaimedOrphan,
+      existsSync(`${lockPath}.reclaim.O-token.2`),
       false,
-      "a mismatch must never be reported as a successful reclaim",
+      "must never create ticket k+1 while ticket k's holder is alive",
     );
-    // The REAL on-disk bytes (never stubbed) must be exactly what was
-    // originally there -- restored via linkSync, not clobbered.
-    assert.deepEqual(JSON.parse(readFileSync(lockPath, "utf8")), diskContent);
+    assert.equal(
+      existsSync(lockPath),
+      true,
+      "O's lock entry is untouched -- only ticket 1's (still-alive) holder may act on it",
+    );
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
-// -- §5: upper-bound timeout -- bounded, deterministic, no real long wait --
-
-test("acquireRunnerLock: a lock held by a live pid past the upper bound times out -- acquired:false, timedOut:true, no reclaim attempted", () => {
+test("acquireRunnerLock: when a reclaim ticket's holder is DEAD, the next caller creates ticket k+1 and proceeds (generation chain advances, no deadlock)", () => {
   const dir = freshLockDir();
   const lockPath = join(dir, "r.lock");
   try {
-    // Our OWN process's pid is, by construction, alive for the entire
-    // duration of this test -- no mocked isPidAliveFn needed, this is a
-    // real liveness fact, not a simulated one.
+    const deadPid1 = spawnSync(process.execPath, ["-e", "process.exit(0)"]).pid;
+    const deadPid2 = spawnSync(process.execPath, ["-e", "process.exit(0)"]).pid;
+    writeFileSync(
+      lockPath,
+      JSON.stringify({ pid: deadPid1, lockId: "O-token-2", procStart: null }),
+    );
+    writeFileSync(
+      `${lockPath}.reclaim.O-token-2.1`,
+      JSON.stringify({ pid: deadPid2, procStart: null }), // ticket 1's holder ALSO dead
+    );
+    const r = acquireRunnerLock({
+      lockPath,
+      pid: process.pid,
+      startedAtMs: 1,
+      timeoutMs: 5000,
+      pollIntervalMs: 10,
+      env: cleanEnv(),
+    });
+    assert.equal(r.acquired, true, "must advance past a dead ticket holder");
+    assert.equal(r.reclaimedOrphan, true);
+    const content = JSON.parse(readFileSync(lockPath, "utf8"));
+    assert.equal(content.pid, process.pid);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("acquireRunnerLock: NEVER a rename/link-restore step anywhere on the reclaim path -- the function signature accepts no renameFn seam at all (되돌림 0, PM 설계 (d))", () => {
+  // A white-box, source-level proof this round's own design promise holds:
+  // 2R's acquireRunnerLock accepted a `renameFn` option used by the
+  // reclaim path (tryReclaimOrphan). 3R's reclaim path (resolveContended
+  // Step/createExclusive) never calls rename at all -- passing a renameFn
+  // that throws if ever invoked must have NO effect on a successful
+  // orphan reclaim.
+  const dir = freshLockDir();
+  const lockPath = join(dir, "r.lock");
+  try {
+    const deadPid = spawnSync(process.execPath, ["-e", "process.exit(0)"]).pid;
+    writeFileSync(
+      lockPath,
+      JSON.stringify({
+        pid: deadPid,
+        lockId: "no-rename-token",
+        procStart: null,
+      }),
+    );
+    const r = acquireRunnerLock({
+      lockPath,
+      pid: process.pid,
+      startedAtMs: 1,
+      timeoutMs: 5000,
+      pollIntervalMs: 10,
+      renameFn: () => {
+        throw new Error("renameFn must never be called -- 되돌림 0");
+      },
+      env: cleanEnv(),
+    });
+    assert.equal(r.acquired, true);
+    assert.equal(r.reclaimedOrphan, true);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// -- §4e: createExclusive busy (EPERM/EBUSY/EACCES) handling --------------
+
+test("acquireRunnerLock: a busy (EPERM) linkFn error is retried, not immediately thrown, and succeeds once the transient condition clears", () => {
+  const dir = freshLockDir();
+  const lockPath = join(dir, "r.lock");
+  try {
+    let calls = 0;
+    const linkFn = (src, dst) => {
+      calls += 1;
+      if (calls <= 2) {
+        const err = new Error("simulated transient EPERM");
+        err.code = "EPERM";
+        throw err;
+      }
+      return linkSync(src, dst);
+    };
+    const r = acquireRunnerLock({
+      lockPath,
+      pid: process.pid,
+      startedAtMs: 1,
+      timeoutMs: 5000,
+      pollIntervalMs: 10,
+      linkFn,
+      env: cleanEnv(),
+    });
+    assert.equal(r.acquired, true);
+    assert.ok(calls >= 3, "must have retried past the simulated EPERM");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("acquireRunnerLock: a busy linkFn error that NEVER clears throws after the bounded retry window, instead of waiting forever", () => {
+  const dir = freshLockDir();
+  const lockPath = join(dir, "r.lock");
+  try {
+    const linkFn = () => {
+      const err = new Error("permanently busy");
+      err.code = "EBUSY";
+      throw err;
+    };
+    assert.throws(
+      () =>
+        acquireRunnerLock({
+          lockPath,
+          pid: process.pid,
+          startedAtMs: 1,
+          timeoutMs: 5_000_000, // large -- must throw from busyRetryTimeoutMs, not this.
+          pollIntervalMs: 5,
+          busyRetryTimeoutMs: 40,
+          linkFn,
+          env: cleanEnv(),
+        }),
+      /busy \(EBUSY\) for over/,
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("BUSY_RETRY_TIMEOUT_MS: named, positive, well below LOCK_WAIT_TIMEOUT_MS", () => {
+  assert.ok(
+    Number.isInteger(BUSY_RETRY_TIMEOUT_MS) && BUSY_RETRY_TIMEOUT_MS > 0,
+  );
+  assert.ok(BUSY_RETRY_TIMEOUT_MS < LOCK_WAIT_TIMEOUT_MS);
+});
+
+// -- §5: upper-bound timeout -----------------------------------------------
+
+test("acquireRunnerLock: a lock held by a live, same-identity pid past the upper bound times out -- acquired:false, timedOut:true, no reclaim attempted", () => {
+  const dir = freshLockDir();
+  const lockPath = join(dir, "r.lock");
+  try {
     writeFileSync(
       lockPath,
       JSON.stringify({
         pid: process.pid,
         startedAtMs: 1,
+        procStart: defaultGetStartIdentity(process.pid),
         worktree: null,
         head: null,
+        lockId: "live-same-identity",
       }),
     );
     const start = Date.now();
     const r = acquireRunnerLock({
       lockPath,
-      pid: process.pid + 1, // a different "caller" than the lock's own owner
+      pid: process.pid + 1,
       startedAtMs: 2,
       timeoutMs: 60,
       pollIntervalMs: 10,
@@ -533,7 +668,6 @@ test("acquireRunnerLock: a lock held by a live pid past the upper bound times ou
       elapsedWall < 5000,
       `this test must stay bounded (real wall time ${elapsedWall}ms) -- a real hang would mean the upper bound stopped working`,
     );
-    // the lock file must be untouched -- a timeout never claims it.
     const content = JSON.parse(readFileSync(lockPath, "utf8"));
     assert.equal(content.pid, process.pid);
   } finally {
@@ -541,25 +675,8 @@ test("acquireRunnerLock: a lock held by a live pid past the upper bound times ou
   }
 });
 
-// -- §6: nested bypass (중첩 실행 교착 금지) -------------------------------
-//
-// isolated-suite-runner.test.mjs's own `runCli` helper (that file's line
-// ~33) spawns the real CLI entry point as a child process -- when THAT
-// spawn happens from inside a `node --test` run that is itself running
-// inside an outer isolated-suite-runner.mjs invocation's clone (i.e. this
-// repo's own full runner, which includes isolated-suite-runner.test.mjs in
-// its own suite), the outer process is synchronously blocked (spawnSync)
-// waiting for that exact child -- if the child tried to acquire the SAME
-// lock the outer process already holds, neither side could ever finish.
-// NESTED_LOCK_BYPASS_ENV_VAR is the only mechanism that breaks that cycle.
+// -- §6: nested bypass (중첩 실행 교착 금지, unchanged mechanism) ---------
 
-// HYK-494 2R P2-1 fix (fixture sync, ORCH70 §33 ⓒ -- a real behavior
-// change, not a weakening): 1R trusted ANY non-empty env value unconditionally
-// (review repro: an outer shell setting an arbitrary value bypassed a lock a
-// LIVE, different owner held). 2R only bypasses when the env value equals
-// the CURRENT lock file's own `lockId` token -- this test now proves that
-// correct (matching-token) path; the next test proves the REJECTION path
-// the old test's "any value" premise no longer holds for.
 test("acquireRunnerLock: NESTED_LOCK_BYPASS_ENV_VAR set to the lock file's OWN lockId -> immediate bypass (nested:true, zero wait), the lock file is never touched", () => {
   const dir = freshLockDir();
   const lockPath = join(dir, "r.lock");
@@ -573,7 +690,6 @@ test("acquireRunnerLock: NESTED_LOCK_BYPASS_ENV_VAR set to the lock file's OWN l
         worktree: null,
         head: null,
         lockId: realLockId,
-        aliveAtMs: 1,
       }),
     );
     const before = readFileSync(lockPath, "utf8");
@@ -581,7 +697,7 @@ test("acquireRunnerLock: NESTED_LOCK_BYPASS_ENV_VAR set to the lock file's OWN l
       lockPath,
       pid: process.pid + 1,
       startedAtMs: 2,
-      timeoutMs: 50, // short -- if the bypass didn't fire, this would time out
+      timeoutMs: 50,
       pollIntervalMs: 5,
       env: { [NESTED_LOCK_BYPASS_ENV_VAR]: realLockId },
     });
@@ -600,32 +716,19 @@ test("acquireRunnerLock: NESTED_LOCK_BYPASS_ENV_VAR set to the lock file's OWN l
   }
 });
 
-// HYK-494 2R P2-1 fix: this is the review's exact repro shape (an env value
-// present, but NOT the current lock's own token) -- it must now be rejected
-// and fall through to a normal, bounded wait against the real (live, this
-// test process's own pid) owner, timing out exactly as if the env var had
-// never been set, with `nestedBypassRejected:true` recorded (product_scope
-// P2-1 "영수증에 «우회 거부» 기록").
 test("acquireRunnerLock: NESTED_LOCK_BYPASS_ENV_VAR set to a value that does NOT match the lock file's lockId -> rejected, waits normally against the live owner, times out (nestedBypassRejected:true)", () => {
   const dir = freshLockDir();
   const lockPath = join(dir, "r.lock");
   try {
-    // aliveAtMs must be a REAL, fresh Date.now()-based value here (not a
-    // tiny fake like `1`) -- this test uses the default real nowMs
-    // (Date.now), and a stale-looking aliveAtMs would trigger the
-    // heartbeat-staleness orphan branch (§4c) instead of the rejection path
-    // this test exists to prove (found live while writing this round: a
-    // mismatched fake-vs-real clock made this test accidentally RECLAIM the
-    // "live" owner instead of waiting/timing out).
     writeFileSync(
       lockPath,
       JSON.stringify({
-        pid: process.pid, // genuinely alive -- this test's own process
+        pid: process.pid,
         startedAtMs: Date.now(),
+        procStart: defaultGetStartIdentity(process.pid),
         worktree: null,
         head: null,
         lockId: "the-real-token",
-        aliveAtMs: Date.now(),
       }),
     );
     const r = acquireRunnerLock({
@@ -657,7 +760,7 @@ test("acquireRunnerLock: NESTED_LOCK_BYPASS_ENV_VAR set to a value that does NOT
 
 // -- §7: write failures propagate (never silently "acquired") ------------
 
-test("acquireRunnerLock: a non-EEXIST write failure (e.g. missing lock directory) propagates -- never silently treated as acquired", () => {
+test("acquireRunnerLock: a non-EEXIST, non-busy write failure (e.g. missing lock directory) propagates -- never silently treated as acquired", () => {
   const writeFileFn = () => {
     const err = new Error("ENOENT: no such directory");
     err.code = "ENOENT";
@@ -674,7 +777,7 @@ test("acquireRunnerLock: a non-EEXIST write failure (e.g. missing lock directory
   );
 });
 
-// -- §8: named constants exist with sane values ---------------------------
+// -- §8: named constants ---------------------------------------------------
 
 test("LOCK_POLL_INTERVAL_MS/LOCK_WAIT_TIMEOUT_MS: named, positive, poll interval well below the upper bound", () => {
   assert.ok(
@@ -684,10 +787,11 @@ test("LOCK_POLL_INTERVAL_MS/LOCK_WAIT_TIMEOUT_MS: named, positive, poll interval
   assert.ok(LOCK_POLL_INTERVAL_MS < LOCK_WAIT_TIMEOUT_MS);
 });
 
-// HYK-494 2R 선택 ① heartbeat: same "named, positive, sane relative to each
-// other" bar as the pair above -- product_scope ⓘⓘⓘⓘ's own named-constant
-// requirement ("간격·기한 근거 1줄").
-test("HEARTBEAT_INTERVAL_MS/HEARTBEAT_STALE_MS: named, positive, interval well below the staleness limit, and both well below LOCK_WAIT_TIMEOUT_MS", () => {
+// HYK-494 3R (judgment 23:5x §1 ⑴ "N=10초, M=3분 -- 판정 제안과 같다",
+// values changed from 2R's 30s/90s -- fixture sync, real behavior change).
+test("HEARTBEAT_INTERVAL_MS/HEARTBEAT_STALE_MS: 10s/3min (judgment §1 ⑴), named, positive, interval well below the staleness limit, and both well below LOCK_WAIT_TIMEOUT_MS", () => {
+  assert.equal(HEARTBEAT_INTERVAL_MS, 10 * 1000);
+  assert.equal(HEARTBEAT_STALE_MS, 3 * 60 * 1000);
   assert.ok(
     Number.isInteger(HEARTBEAT_INTERVAL_MS) && HEARTBEAT_INTERVAL_MS > 0,
   );
@@ -698,15 +802,11 @@ test("HEARTBEAT_INTERVAL_MS/HEARTBEAT_STALE_MS: named, positive, interval well b
   );
   assert.ok(
     HEARTBEAT_STALE_MS < LOCK_WAIT_TIMEOUT_MS,
-    "a pid-reuse/signal-death orphan must be reclaimable well before the full 20-minute upper bound",
+    "a pid-reuse orphan must be reclaimable well before the full 20-minute upper bound",
   );
 });
 
-// -- §9: installLockReleaseOnSignal --------------------------------------
-//
-// A fake EventEmitter stands in for `process` -- this never installs a
-// REAL process-level signal handler and never sends a real signal to this
-// test's own process (which would be unsafe/flaky in a shared test run).
+// -- §9: installLockReleaseOnSignal (unchanged) ---------------------------
 
 test("installLockReleaseOnSignal: emitting SIGINT on the (fake) process calls release() then exits with a non-zero code", () => {
   const fakeProcess = new EventEmitter();
@@ -749,12 +849,7 @@ test("installLockReleaseOnSignal: release() throwing still exits (best-effort --
 });
 
 // -- §10: real-child-process proof (ⓒ⑴) ----------------------------------
-//
-// One inline ESM script (a literal string, not a new fixture file --
-// product_scope lists exactly which new files this round may add) drives
-// the REAL runner-lock.mjs by its real file:// URL. `--no-lock` makes a
-// child skip acquireRunnerLock entirely, to produce the honest "before any
-// lock exists" baseline this task's RED-first requirement asks for.
+
 function lockRaceChildScript() {
   return [
     `import { acquireRunnerLock, releaseRunnerLock } from ${JSON.stringify(RUNNER_LOCK_URL)};`,
@@ -763,13 +858,13 @@ function lockRaceChildScript() {
     `const holdMs = Number(process.argv[2]);`,
     `const outPath = process.argv[3];`,
     `const noLock = process.argv[4] === "1";`,
-    `let r = { waitMs: 0, pollCount: 0, reclaimedOrphan: false, nested: false };`,
+    `let r = { waitMs: 0, pollCount: 0, reclaimedOrphan: false, nested: false, lockId: null };`,
     `if (!noLock) r = acquireRunnerLock({ lockPath, pollIntervalMs: 15, timeoutMs: 15000 });`,
     `const acquiredAtMs = Date.now();`,
     `writeFileSync(outPath, JSON.stringify({ pid: process.pid, acquiredAtMs, r }) + "\\n");`,
     `await new Promise((res) => setTimeout(res, holdMs));`,
     `const releasedAtMs = Date.now();`,
-    `if (!noLock) releaseRunnerLock({ lockPath });`,
+    `if (!noLock) releaseRunnerLock({ lockPath, lockId: r.lockId });`,
     `appendFileSync(outPath, JSON.stringify({ releasedAtMs }) + "\\n");`,
   ].join("\n");
 }
@@ -788,12 +883,6 @@ function spawnRaceChild({ lockPath, holdMs, outPath, noLock }) {
         outPath,
         noLock ? "1" : "0",
       ],
-      // cleanEnv(): this child's own acquireRunnerLock call (inside
-      // lockRaceChildScript) relies on its own default `env: process.env`
-      // -- without stripping NESTED_LOCK_BYPASS_ENV_VAR here, a child
-      // spawned while this test file itself runs nested inside a real
-      // locked full-runner invocation would silently bypass the very lock
-      // this test exists to prove serializes (see cleanEnv's own header).
       { stdio: "ignore", env: cleanEnv() },
     );
     child.on("exit", (code) => resolve(code));
@@ -823,7 +912,7 @@ test("RED baseline (no lock at all): two real child processes started together o
       Math.max(a.acquiredAtMs, b.acquiredAtMs);
     assert.ok(
       overlap > 0,
-      `RED baseline must overlap (got overlap=${overlap}ms, a=${JSON.stringify(a)}, b=${JSON.stringify(b)}) -- without the lock, two started-together processes' hold windows intersect`,
+      `RED baseline must overlap (got overlap=${overlap}ms) -- without the lock, two started-together processes' hold windows intersect`,
     );
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -848,10 +937,7 @@ test("GREEN (locked): two real child processes started together on the SAME lock
     const overlap =
       Math.min(a.releasedAtMs, b.releasedAtMs) -
       Math.max(a.acquiredAtMs, b.acquiredAtMs);
-    assert.ok(
-      overlap <= 0,
-      `locked run must NOT overlap (got overlap=${overlap}ms, a=${JSON.stringify(a)}, b=${JSON.stringify(b)})`,
-    );
+    assert.ok(overlap <= 0, `locked run must NOT overlap (got ${overlap}ms)`);
     assert.ok(
       wallMs >= 450,
       `serialized total wall time (${wallMs}ms) should be close to holdMs*2=500ms, never ~250ms (parallel)`,
@@ -871,15 +957,10 @@ test("GREEN (locked): two real child processes started together on the SAME lock
   }
 });
 
-// -- §10b: HYK-494 2R P1-1 fix -- real-process proof, clock-independent --
-//
-// review §2 ⓑ⑶'s own method (critical-section marker file, "시계
-// 무관 확인"): timing-based overlap detection (§10 above) found false
-// negatives on this exact bug in 1R (it never showed the 10/30/50-trial
-// violations the review's dedicated marker-file method did) -- a marker
-// file created with `wx` exclusive-create right after acquiring, deleted
-// right before releasing, makes "two children both inside the critical
-// section at once" a hard EEXIST fact, never a clock comparison.
+// -- §10b: clock-independent, critical-section-marker real-process proofs
+// (review's own method -- a `wx` marker makes "two in the critical section
+// at once" an EEXIST fact, never a timing comparison) --------------------
+
 function reclaimRaceChildScript() {
   return [
     `import { acquireRunnerLock, releaseRunnerLock } from ${JSON.stringify(RUNNER_LOCK_URL)};`,
@@ -898,9 +979,9 @@ function reclaimRaceChildScript() {
     `  catch (e) { violation = true; }`,
     `  await new Promise((res) => setTimeout(res, holdMs));`,
     `  if (csCreated) { try { unlinkSync(csPath); } catch (e) {} }`,
-    `  releaseRunnerLock({ lockPath });`,
+    `  releaseRunnerLock({ lockPath, lockId: r.lockId });`,
     `}`,
-    `writeFileSync(outPath, JSON.stringify({ pid: process.pid, acquired: r.acquired, reclaimedOrphan: r.reclaimedOrphan, timedOut: r.timedOut, violation }));`,
+    `writeFileSync(outPath, JSON.stringify({ pid: process.pid, acquired: r.acquired, reclaimedOrphan: r.reclaimedOrphan, reclaimReason: r.reclaimReason ?? null, timedOut: r.timedOut, violation }));`,
   ].join("\n");
 }
 
@@ -927,25 +1008,18 @@ function spawnReclaimRaceChild({
         String(pollIntervalMs),
         String(timeoutMs),
       ],
-      { stdio: "ignore", env: cleanEnv() }, // cleanEnv(): see spawnRaceChild's own header.
+      { stdio: "ignore", env: cleanEnv() },
     );
     child.on("exit", () => resolve(JSON.parse(readFileSync(outPath, "utf8"))));
   });
 }
 
-// product_scope 1b_exec_line ⑴ "고아 동시 회수 반복(검토 모양·N≥10)=겹침
-// 발생 → 수리 뒤 0": N=2 real children race on a lock PRE-SEEDED with a
-// dead pid's content (a genuine orphan) every trial -- 1R's "read -> judge
-// -> unconditionally unlink" let both see the same orphan and both "win"
-// (review's own repro: 7/10 complete overlaps). The fix (tryReclaimOrphan's
-// rename-steal-then-compare, runner-lock.mjs) must make this impossible.
 const RECLAIM_TRIALS = 10;
 
-test(`GREEN (compare-and-delete reclaim): ${RECLAIM_TRIALS} trials of 2 real children racing a lock pre-seeded with a DEAD pid's orphan content -- zero critical-section violations (clock-independent marker proof, the exact P1-1 repro shape)`, async () => {
+test(`GREEN (compare-and-delete reclaim): ${RECLAIM_TRIALS} trials of 2 real children racing a lock pre-seeded with a DEAD pid's orphan content -- zero critical-section violations`, async () => {
   const dir = freshLockDir();
   try {
     let violations = 0;
-    let bothAcquiredCount = 0;
     for (let trial = 0; trial < RECLAIM_TRIALS; trial += 1) {
       const lockPath = join(dir, `race-${trial}.lock`);
       const csPath = join(dir, `cs-${trial}.marker`);
@@ -963,7 +1037,6 @@ test(`GREEN (compare-and-delete reclaim): ${RECLAIM_TRIALS} trials of 2 real chi
           worktree: null,
           head: null,
           lockId: `dead-${trial}`,
-          aliveAtMs: 1,
         }),
       );
       const [a, b] = await Promise.all([
@@ -985,44 +1058,26 @@ test(`GREEN (compare-and-delete reclaim): ${RECLAIM_TRIALS} trials of 2 real chi
         }),
       ]);
       if (a.violation || b.violation) violations += 1;
-      if (a.acquired && b.acquired) bothAcquiredCount += 1;
       assert.ok(
         a.acquired && b.acquired,
-        `trial ${trial}: both children must eventually acquire (serialized), got a=${JSON.stringify(a)} b=${JSON.stringify(b)}`,
+        `trial ${trial}: both children must eventually acquire (serialized)`,
       );
-      assert.equal(
-        existsSync(lockPath),
-        false,
-        `trial ${trial}: both released -- nothing left behind`,
-      );
-      assert.equal(
-        existsSync(csPath),
-        false,
-        `trial ${trial}: the critical-section marker must not survive either`,
-      );
+      assert.equal(existsSync(lockPath), false, `trial ${trial}: released`);
+      assert.equal(existsSync(csPath), false, `trial ${trial}: marker gone`);
     }
     assert.equal(
       violations,
       0,
-      `${violations}/${RECLAIM_TRIALS} trials saw a critical-section violation (review's 1R repro: 7/10) -- 〔직접〕 finite sample, this machine, this run`,
+      `${violations}/${RECLAIM_TRIALS} trials saw a critical-section violation -- 〔직접〕 finite sample, this machine, this run`,
     );
-    assert.equal(bothAcquiredCount, RECLAIM_TRIALS);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
-// product_scope ⓑ⑶ "고아 없음 N=3: 50회 중 0회 … 3: 50회 중 3회" (3자
-// 경합): N=3 real children race a COLD-START (no pre-existing file) lock
-// across TRIALS trials -- the exact shape that found a 3/50 violation
-// rate under 1R's "읽기 실패=고아" bug (a read racing a release/claim
-// window misread as orphan, unlinking a brand-new owner's lock). Trial
-// count kept modest here (⛔finite sample, 〔직접〕 this machine/run only,
-// universal_claim_discipline) relative to review's 50 -- real child-process
-// spawn cost scales with trials*children.
 const THREE_WAY_TRIALS = 15;
 
-test(`GREEN (3-way cold-start contention): ${THREE_WAY_TRIALS} trials of 3 real children racing a lock with NO pre-existing file -- zero critical-section violations (the exact "read failure misread as orphan" repro shape)`, async () => {
+test(`GREEN (3-way cold-start contention): ${THREE_WAY_TRIALS} trials of 3 real children racing a lock with NO pre-existing file -- zero critical-section violations`, async () => {
   const dir = freshLockDir();
   try {
     let violations = 0;
@@ -1047,39 +1102,242 @@ test(`GREEN (3-way cold-start contention): ${THREE_WAY_TRIALS} trials of 3 real 
       if (results.some((r) => r.violation)) violations += 1;
       assert.ok(
         results.every((r) => r.acquired),
-        `trial ${trial}: all 3 must eventually acquire, got ${JSON.stringify(results)}`,
+        `trial ${trial}: all 3 must eventually acquire`,
       );
-      assert.equal(
-        existsSync(lockPath),
-        false,
-        `trial ${trial}: nothing left behind`,
-      );
+      assert.equal(existsSync(lockPath), false, `trial ${trial}: no leftover`);
     }
     assert.equal(
       violations,
       0,
-      `${violations}/${THREE_WAY_TRIALS} trials saw a critical-section violation (review's 1R repro: 3/50) -- 〔직접〕 finite sample, this machine, this run`,
+      `${violations}/${THREE_WAY_TRIALS} trials saw a critical-section violation -- 〔직접〕 finite sample, this machine, this run`,
     );
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
-// -- §12: HYK-494 2R 선택 ① heartbeat sidecar (real child process) -------
+// product_scope 1b_exec_line ⑴ "3 × 고아 30" -- the exact P1-A repro shape
+// (review-2 §2 ⓐ: 고아 + 3자, 30 trials, 15/30 violations on 2R) -- NEW this
+// round, required by the dispatch task explicitly (the old suite only had
+// 2-way orphan and 3-way COLD-START, never 3-way ORPHAN).
+const THREE_WAY_ORPHAN_TRIALS = 30;
 
-test("startLockHeartbeat: the real sidecar keeps refreshing a lock file's aliveAtMs on a named interval while the token matches and the owner pid is alive, and stop() ends further updates", async () => {
+test(`GREEN (3-way orphan contention, the exact P1-A repro shape): ${THREE_WAY_ORPHAN_TRIALS} trials of 3 real children racing a lock PRE-SEEDED with a DEAD pid's orphan content -- zero critical-section violations (2R's own repro: 15/30)`, async () => {
+  const dir = freshLockDir();
+  try {
+    let violations = 0;
+    let owners = new Set();
+    for (let trial = 0; trial < THREE_WAY_ORPHAN_TRIALS; trial += 1) {
+      const lockPath = join(dir, `orph-${trial}.lock`);
+      const csPath = join(dir, `orph-cs-${trial}.marker`);
+      const outs = [0, 1, 2].map((i) =>
+        join(dir, `orph-out-${trial}-${i}.json`),
+      );
+      const deadPid = spawnSync(process.execPath, [
+        "-e",
+        "process.exit(0)",
+      ]).pid;
+      writeFileSync(
+        lockPath,
+        JSON.stringify({ pid: deadPid, lockId: `orph-${trial}` }),
+      );
+      const results = await Promise.all(
+        outs.map((outPath) =>
+          spawnReclaimRaceChild({
+            lockPath,
+            csPath,
+            outPath,
+            holdMs: 30,
+            pollIntervalMs: 10,
+            timeoutMs: 5000,
+          }),
+        ),
+      );
+      if (results.some((r) => r.violation)) violations += 1;
+      for (const r of results) if (r.reclaimReason) owners.add(r.reclaimReason);
+      assert.ok(
+        results.every((r) => r.acquired),
+        `trial ${trial}: all 3 must eventually acquire`,
+      );
+      assert.equal(existsSync(lockPath), false, `trial ${trial}: no leftover`);
+    }
+    assert.equal(
+      violations,
+      0,
+      `${violations}/${THREE_WAY_ORPHAN_TRIALS} trials saw a critical-section violation (2R's own repro: 15/30) -- 〔직접〕 finite sample, this machine, this run`,
+    );
+    assert.ok(owners.has("pid-dead"), "at least one reclaim must be pid-dead");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// product_scope 1b_exec_line ⑴ "오래 기다린 뒤 잡기" (P1-B repro shape),
+// scaled N/M: a long-waiting entrant's own startedAtMs is backdated (same
+// shape as isolated-suite-runner.mjs's real call site: `startedAtMs:
+// nowMs()` captured BEFORE the wait loop) -- 2R's bug let this reclaim a
+// genuinely-fresh, just-claimed owner within the first heartbeat interval.
+function longWaitChildScript() {
+  return [
+    `import { acquireRunnerLock, releaseRunnerLock, startLockHeartbeat } from ${JSON.stringify(RUNNER_LOCK_URL)};`,
+    `import { writeFileSync, unlinkSync } from "node:fs";`,
+    `const [lockPath, csPath, outPath, holdMs, pollIntervalMs, timeoutMs, heartbeatIntervalMs, heartbeatStaleMs, simulatedWaitMs] = process.argv.slice(2);`,
+    `const opts = { lockPath, pollIntervalMs: Number(pollIntervalMs), timeoutMs: Number(timeoutMs), heartbeatStaleMs: Number(heartbeatStaleMs) };`,
+    `if (Number(simulatedWaitMs) > 0) opts.startedAtMs = Date.now() - Number(simulatedWaitMs);`,
+    `const r = acquireRunnerLock(opts);`,
+    `let violation = false, csCreated = false, hb = null;`,
+    `if (r.acquired) {`,
+    `  if (r.lockId) { try { hb = startLockHeartbeat({ lockPath, token: r.lockId, pid: process.pid, intervalMs: Number(heartbeatIntervalMs) }); } catch (e) {} }`,
+    `  try { writeFileSync(csPath, String(process.pid), { flag: "wx" }); csCreated = true; } catch (e) { violation = true; }`,
+    `  await new Promise((res) => setTimeout(res, Number(holdMs)));`,
+    `  if (csCreated) { try { unlinkSync(csPath); } catch (e) {} }`,
+    `  if (hb) { try { hb.stop(); } catch (e) {} }`,
+    `  releaseRunnerLock({ lockPath, lockId: r.lockId });`,
+    `}`,
+    `writeFileSync(outPath, JSON.stringify({ pid: process.pid, acquired: r.acquired, reclaimedOrphan: r.reclaimedOrphan, violation }));`,
+  ].join("\n");
+}
+
+// A handful of retries with a short settle delay -- this machine's
+// antivirus/indexer occasionally holds a just-written temp file briefly
+// unreadable right after the writing process exits (same class of transient
+// condition runner-lock.mjs's own BUSY_RETRY_TIMEOUT_MS exists to absorb on
+// the lock file itself, product_scope (b) 영향 2-3). Never masks a GENUINE
+// missing file forever -- it still throws after the bounded retry window.
+async function readJsonWithRetry(path, { attempts = 20, delayMs = 25 } = {}) {
+  let lastErr;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      return JSON.parse(readFileSync(path, "utf8"));
+    } catch (err) {
+      lastErr = err;
+      await new Promise((res) => setTimeout(res, delayMs));
+    }
+  }
+  throw lastErr;
+}
+
+// HYK-494 3R live finding (this round's own test-writing): a `-e`/
+// `--input-type=module` inline child combined with a REAL detached
+// heartbeat grandchild (startLockHeartbeat's own spawn+unref) was observed
+// to occasionally exit WITHOUT its final writeFileSync landing on disk, on
+// this machine -- the SAME child script written to a real temp .mjs file
+// (mkdtemp'd, ephemeral, never committed -- not a new fixture under
+// product_scope's named file list) and spawned by path never showed this,
+// matching runner-lock-race-probe.mjs's own (separately verified-reliable)
+// technique. Written once per test run, reused across trials.
+function writeLongWaitChildScript(dir) {
+  const scriptPath = join(dir, "lw-child.mjs");
+  writeFileSync(scriptPath, longWaitChildScript());
+  return scriptPath;
+}
+
+function spawnLongWaitChild({ scriptPath, args }) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [scriptPath, ...args], {
+      stdio: "ignore",
+      env: cleanEnv(),
+    });
+    child.on("exit", () => {
+      readJsonWithRetry(args[2]).then(resolve, reject);
+    });
+  });
+}
+
+const LONG_WAIT_TRIALS = 10;
+
+test(`GREEN (long-wait-then-claim, the exact P1-B repro shape, scaled N=100ms/M=600ms): ${LONG_WAIT_TRIALS} trials -- a backdated-startedAtMs owner is never reclaimed by a fast-polling second entrant within the pre-first-heartbeat-tick window (2R's own repro: real overlap every time this shape fires)`, async () => {
+  const dir = freshLockDir();
+  try {
+    const scriptPath = writeLongWaitChildScript(dir);
+    let violations = 0;
+    for (let trial = 0; trial < LONG_WAIT_TRIALS; trial += 1) {
+      const lockPath = join(dir, `lw-${trial}.lock`);
+      const csPath = join(dir, `lw-cs-${trial}.marker`);
+      const out1 = join(dir, `lw-out-${trial}-1.json`);
+      const out2 = join(dir, `lw-out-${trial}-2.json`);
+      const p1 = spawnLongWaitChild({
+        scriptPath,
+        args: [
+          lockPath,
+          csPath,
+          out1,
+          "400",
+          "5",
+          "5000",
+          "100",
+          "600",
+          "2000",
+        ],
+      });
+      await new Promise((res) => setTimeout(res, 30));
+      const p2 = spawnLongWaitChild({
+        scriptPath,
+        args: [lockPath, csPath, out2, "400", "5", "5000", "100", "600", "0"],
+      });
+      const [a, b] = await Promise.all([p1, p2]);
+      if (a.violation || b.violation) violations += 1;
+      assert.ok(a.acquired && b.acquired, `trial ${trial}: both must acquire`);
+      assert.equal(existsSync(lockPath), false, `trial ${trial}: no leftover`);
+    }
+    assert.equal(
+      violations,
+      0,
+      `${violations}/${LONG_WAIT_TRIALS} trials saw a critical-section violation -- 〔직접〕 finite sample, this machine, this run`,
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// -- §11: F8 check -- the heartbeat sidecar never opens/writes L itself --
+
+test("startLockHeartbeat: the sidecar NEVER touches the lock file L itself -- only L.alive.<token> changes while L's own bytes stay byte-for-byte identical (F8 fix, real sidecar process)", async () => {
   const dir = freshLockDir();
   const lockPath = join(dir, "r.lock");
   try {
-    const initial = {
+    const initial = JSON.stringify({
       pid: process.pid,
       startedAtMs: Date.now(),
       worktree: null,
       head: null,
-      lockId: "heartbeat-token",
-      aliveAtMs: 1, // deliberately stale -- proves the SIDECAR (not us) refreshes it
-    };
-    writeFileSync(lockPath, JSON.stringify(initial));
+      lockId: "f8-token",
+    });
+    writeFileSync(lockPath, initial);
+    const heartbeat = startLockHeartbeat({
+      lockPath,
+      token: "f8-token",
+      pid: process.pid,
+      intervalMs: 20,
+    });
+    try {
+      await new Promise((res) => setTimeout(res, 120));
+      assert.equal(
+        readFileSync(lockPath, "utf8"),
+        initial,
+        "L itself must be byte-for-byte unchanged -- the sidecar only ever writes L.alive.<token>",
+      );
+      const aliveContent = JSON.parse(
+        readFileSync(`${lockPath}.alive.f8-token`, "utf8"),
+      );
+      assert.ok(
+        Number.isFinite(aliveContent.aliveAtMs),
+        "the sidecar must still be doing its job, just on the separate alive file",
+      );
+    } finally {
+      heartbeat.stop();
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("startLockHeartbeat: the real sidecar keeps refreshing L.alive.<token> on a named interval while the token's owner pid is alive, and stop() ends further updates", async () => {
+  const dir = freshLockDir();
+  const lockPath = join(dir, "r.lock");
+  const alivePath = `${lockPath}.alive.heartbeat-token`;
+  try {
+    writeFileSync(alivePath, JSON.stringify({ aliveAtMs: 1 }));
     const heartbeat = startLockHeartbeat({
       lockPath,
       token: "heartbeat-token",
@@ -1088,19 +1346,16 @@ test("startLockHeartbeat: the real sidecar keeps refreshing a lock file's aliveA
     });
     try {
       await new Promise((res) => setTimeout(res, 140));
-      const afterRunning = JSON.parse(readFileSync(lockPath, "utf8"));
+      const afterRunning = JSON.parse(readFileSync(alivePath, "utf8"));
       assert.ok(
         afterRunning.aliveAtMs > 1,
         `sidecar must have refreshed aliveAtMs at least once (got ${afterRunning.aliveAtMs})`,
       );
       heartbeat.stop();
-      // a brief settle window for the kill signal to actually land before
-      // asserting "no further ticks" -- the sidecar's own setInterval tick
-      // (30ms) is well inside this.
       await new Promise((res) => setTimeout(res, 60));
-      const afterStop = JSON.parse(readFileSync(lockPath, "utf8"));
+      const afterStop = JSON.parse(readFileSync(alivePath, "utf8"));
       await new Promise((res) => setTimeout(res, 100));
-      const afterMore = JSON.parse(readFileSync(lockPath, "utf8"));
+      const afterMore = JSON.parse(readFileSync(alivePath, "utf8"));
       assert.equal(
         afterStop.aliveAtMs,
         afterMore.aliveAtMs,
@@ -1117,17 +1372,10 @@ test("startLockHeartbeat: the real sidecar keeps refreshing a lock file's aliveA
 test("startLockHeartbeat: the sidecar stops refreshing once the owner pid is dead (never refreshes a lock whose real owner already exited)", async () => {
   const dir = freshLockDir();
   const lockPath = join(dir, "r.lock");
+  const alivePath = `${lockPath}.alive.dead-owner-heartbeat-token`;
   try {
     const deadPid = spawnSync(process.execPath, ["-e", "process.exit(0)"]).pid;
-    const initial = {
-      pid: deadPid,
-      startedAtMs: 1,
-      worktree: null,
-      head: null,
-      lockId: "dead-owner-heartbeat-token",
-      aliveAtMs: 1,
-    };
-    writeFileSync(lockPath, JSON.stringify(initial));
+    writeFileSync(alivePath, JSON.stringify({ aliveAtMs: 1 }));
     const heartbeat = startLockHeartbeat({
       lockPath,
       token: "dead-owner-heartbeat-token",
@@ -1136,61 +1384,11 @@ test("startLockHeartbeat: the sidecar stops refreshing once the owner pid is dea
     });
     try {
       await new Promise((res) => setTimeout(res, 120));
-      const after = JSON.parse(readFileSync(lockPath, "utf8"));
+      const after = JSON.parse(readFileSync(alivePath, "utf8"));
       assert.equal(
         after.aliveAtMs,
         1,
         "a dead owner's lock must never be refreshed by the sidecar",
-      );
-    } finally {
-      heartbeat.stop();
-    }
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test("startLockHeartbeat: the sidecar stops refreshing once the lock file's lockId no longer matches its own token (lock already released/reclaimed by someone else)", async () => {
-  const dir = freshLockDir();
-  const lockPath = join(dir, "r.lock");
-  try {
-    writeFileSync(
-      lockPath,
-      JSON.stringify({
-        pid: process.pid,
-        startedAtMs: Date.now(),
-        worktree: null,
-        head: null,
-        lockId: "original-token",
-        aliveAtMs: 1,
-      }),
-    );
-    const heartbeat = startLockHeartbeat({
-      lockPath,
-      token: "original-token",
-      pid: process.pid,
-      intervalMs: 20,
-    });
-    try {
-      // simulate someone else having released and re-claimed this lock
-      // under a NEW identity, between this sidecar's ticks.
-      writeFileSync(
-        lockPath,
-        JSON.stringify({
-          pid: process.pid,
-          startedAtMs: Date.now(),
-          worktree: null,
-          head: null,
-          lockId: "a-different-owners-token",
-          aliveAtMs: 2,
-        }),
-      );
-      await new Promise((res) => setTimeout(res, 100));
-      const after = JSON.parse(readFileSync(lockPath, "utf8"));
-      assert.equal(
-        after.aliveAtMs,
-        2,
-        "a token mismatch must stop the sidecar from touching a lock it no longer owns",
       );
     } finally {
       heartbeat.stop();
@@ -1212,7 +1410,83 @@ test("startLockHeartbeat: a spawnHeartbeatFn failure degrades gracefully to a no
   assert.doesNotThrow(() => heartbeat.stop());
 });
 
-// -- §11: wiring into runIsolatedSuite ------------------------------------
+// -- §12: startIdentity (Linux /proc parsing + Windows PowerShell, both
+// injected seams -- Linux branch 〔못쟀다〕 실물, parsing logic only) --------
+
+test("defaultGetStartIdentity: Linux branch parses /proc/<pid>/stat's 22nd field (starttime), tolerating a comm field with spaces/parens", () => {
+  // A synthetic /proc/<pid>/stat line -- comm field "(my (weird) proc)" has
+  // nested parens, proving the parser anchors on the LAST ")" not the first.
+  const fakeStat =
+    "1234 (my (weird) proc) S 1 1234 1234 0 -1 4194560 100 0 0 0 10 2 0 0 20 0 1 0 999888777 ...";
+  const readFileFn = (p) => {
+    assert.equal(p, "/proc/1234/stat");
+    return fakeStat;
+  };
+  const id = defaultGetStartIdentity(1234, { platform: "linux", readFileFn });
+  assert.equal(id, "999888777");
+});
+
+test("defaultGetStartIdentity: Linux branch returns null on read failure (no throw)", () => {
+  const id = defaultGetStartIdentity(1234, {
+    platform: "linux",
+    readFileFn: () => {
+      throw new Error("ENOENT");
+    },
+  });
+  assert.equal(id, null);
+});
+
+test("defaultGetStartIdentity: Windows branch calls PowerShell Get-Process StartTime and returns its trimmed output", () => {
+  const id = defaultGetStartIdentity(4321, {
+    platform: "win32",
+    execFileSyncFn: (cmd, args) => {
+      assert.equal(cmd, "powershell");
+      assert.ok(args.some((a) => a.includes("4321")));
+      return "133700000000000000\n";
+    },
+  });
+  assert.equal(id, "133700000000000000");
+});
+
+test("defaultGetStartIdentity: Windows branch returns null on PowerShell failure (no throw) and never calls it for a non-integer pid", () => {
+  const id1 = defaultGetStartIdentity(4321, {
+    platform: "win32",
+    execFileSyncFn: () => {
+      throw new Error("powershell not found");
+    },
+  });
+  assert.equal(id1, null);
+  let called = false;
+  const id2 = defaultGetStartIdentity(NaN, {
+    platform: "win32",
+    execFileSyncFn: () => {
+      called = true;
+      return "x";
+    },
+  });
+  assert.equal(id2, null);
+  assert.equal(called, false);
+});
+
+test("defaultGetStartIdentity: an unrecognized platform returns null (§(g) 정직 한계 1 -- 신원 모름 -> ALIVE)", () => {
+  const id = defaultGetStartIdentity(1, { platform: "sunos" });
+  assert.equal(id, null);
+});
+
+test("defaultGetStartIdentity: the REAL (no override) default actually resolves something for THIS process on this machine (comparison is always string equality)", () => {
+  const id = defaultGetStartIdentity(process.pid);
+  // 〔직접〕 this machine (Windows): must be a non-empty numeric string.
+  // 〔못쟀다〕 Linux CI -- not exercised here, only the injected-seam parsing
+  // logic above is (universal_claim_discipline).
+  assert.ok(typeof id === "string" && id.length > 0);
+  assert.equal(
+    id,
+    defaultGetStartIdentity(process.pid),
+    "stable within one run",
+  );
+});
+
+// -- §13: wiring into runIsolatedSuite ------------------------------------
 
 const NOOP_LOCK_SEAMS = {
   acquireLockFn: () => ({
@@ -1222,10 +1496,11 @@ const NOOP_LOCK_SEAMS = {
     waitMs: 0,
     pollCount: 0,
     reclaimedOrphan: false,
+    reclaimReason: null,
     priorOwner: null,
     timedOut: false,
   }),
-  releaseLockFn: () => ({ released: true, reason: null }),
+  releaseLockFn: () => ({ released: true, lockLost: false, reason: null }),
   installSignalHandlersFn: () => () => {},
   env: {},
 };
@@ -1241,7 +1516,7 @@ function execFileForWiringTests() {
   };
 }
 
-test("runIsolatedSuite: acquireLockFn is called BEFORE any spawn (lock-before-measurement), and its result's lock fields ride the receipt", () => {
+test("runIsolatedSuite: acquireLockFn is called BEFORE any spawn (lock-before-measurement), releaseLockFn is called exactly ONCE (memoized -- reportRunOutcome's own release() call and the outer finally's both resolve to the same real call), and lock fields ride the receipt", () => {
   const calls = [];
   const receipts = [];
   const exitCode = runIsolatedSuite({
@@ -1274,25 +1549,34 @@ test("runIsolatedSuite: acquireLockFn is called BEFORE any spawn (lock-before-me
         waitMs: 1234,
         pollCount: 3,
         reclaimedOrphan: true,
+        reclaimReason: "pid-dead",
         priorOwner: { pid: 1 },
         timedOut: false,
+        lockId: "the-lock-id",
       };
     },
-    releaseLockFn: () => {
+    releaseLockFn: (relOpts) => {
       calls.push("releaseLock");
-      return { released: true, reason: null };
+      assert.equal(relOpts.lockId, "the-lock-id");
+      return { released: true, lockLost: false, reason: null };
     },
     installSignalHandlersFn: () => () => {},
     env: {},
   });
   assert.equal(exitCode, 0);
-  assert.deepEqual(calls, ["acquireLock", "spawn", "releaseLock"]);
+  assert.deepEqual(
+    calls,
+    ["acquireLock", "spawn", "releaseLock"],
+    "the real releaseLockFn fires exactly once -- guardLockForRun's release() memoizes, so the outer finally's own second call reuses the cached result instead of touching the filesystem again",
+  );
   assert.equal(receipts.length, 1);
   assert.equal(receipts[0].lockInfo.waitMs, 1234);
   assert.equal(receipts[0].lockInfo.pollCount, 3);
   assert.equal(receipts[0].lockInfo.reclaimedOrphan, true);
+  assert.equal(receipts[0].lockInfo.reclaimReason, "pid-dead");
   assert.equal(receipts[0].lockInfo.nested, false);
   assert.equal(receipts[0].lockInfo.timedOut, false);
+  assert.equal(receipts[0].lockInfo.lockLost, false);
 });
 
 test("runIsolatedSuite: lock timeout -- never clones/spawns, returns a non-zero exit code, writes a LOCK_TIMEOUT receipt (never folds green)", () => {
@@ -1345,11 +1629,7 @@ test("runIsolatedSuite: lock timeout -- never clones/spawns, returns a non-zero 
     "a lock timeout must never return a green (0) exit code",
   );
   assert.equal(cloneCalled, false, "must never clone the repo");
-  assert.equal(
-    spawnCalled,
-    false,
-    "must never spawn node --test (시험을 돌리지 않고)",
-  );
+  assert.equal(spawnCalled, false, "시험을 돌리지 않고");
   assert.equal(receipts.length, 1);
   assert.equal(receipts[0].runnerExit, exitCode);
   assert.equal(receipts[0].runnerStatus, RUNNER_STATUS.LOCK_TIMEOUT);
@@ -1362,9 +1642,10 @@ test("runIsolatedSuite: lock timeout -- never clones/spawns, returns a non-zero 
   });
   assert.equal(receipts[0].lockInfo.timedOut, true);
   assert.equal(receipts[0].lockInfo.waitMs, 999999);
+  assert.equal(receipts[0].lockInfo.lockLost, null);
 });
 
-test("runIsolatedSuite: nested bypass (NESTED_LOCK_BYPASS_ENV_VAR already set) -- acquireLockFn still runs, but release/signal-guard installation is skipped (nothing of ours to release)", () => {
+test("runIsolatedSuite: nested bypass (NESTED_LOCK_BYPASS_ENV_VAR already set) -- acquireLockFn still runs, but release/signal-guard installation is skipped (nothing of ours to release), release() still returns a stable no-op result", () => {
   let installCalled = false;
   let releaseCalled = false;
   const exitCode = runIsolatedSuite({
@@ -1393,7 +1674,7 @@ test("runIsolatedSuite: nested bypass (NESTED_LOCK_BYPASS_ENV_VAR already set) -
     }),
     releaseLockFn: () => {
       releaseCalled = true;
-      return { released: true, reason: null };
+      return { released: true, lockLost: false, reason: null };
     },
     installSignalHandlersFn: () => {
       installCalled = true;
@@ -1410,11 +1691,11 @@ test("runIsolatedSuite: nested bypass (NESTED_LOCK_BYPASS_ENV_VAR already set) -
   assert.equal(
     releaseCalled,
     false,
-    "nested run must not release a lock it never acquired",
+    "nested run must not call the real releaseLockFn -- there is nothing of ours to release",
   );
 });
 
-test("runIsolatedSuite: a real (non-nested) acquisition marks NESTED_LOCK_BYPASS_ENV_VAR to the ACQUIRED lock's own lockId (not a bare pid, HYK-494 2R P2-1 fix) during the run, and clears it afterward", () => {
+test("runIsolatedSuite: a real (non-nested) acquisition marks NESTED_LOCK_BYPASS_ENV_VAR to the ACQUIRED lock's own lockId during the run, and clears it afterward", () => {
   const env = {};
   let sawDuringSpawn;
   runIsolatedSuite({
@@ -1444,7 +1725,7 @@ test("runIsolatedSuite: a real (non-nested) acquisition marks NESTED_LOCK_BYPASS
       timedOut: false,
       lockId: "this-runs-own-lock-token",
     }),
-    releaseLockFn: () => ({ released: true, reason: null }),
+    releaseLockFn: () => ({ released: true, lockLost: false, reason: null }),
     installSignalHandlersFn: () => () => {},
     startHeartbeatFn: () => ({ stop: () => {} }),
     env,
@@ -1452,7 +1733,7 @@ test("runIsolatedSuite: a real (non-nested) acquisition marks NESTED_LOCK_BYPASS
   assert.equal(
     sawDuringSpawn,
     "this-runs-own-lock-token",
-    "the marker must be set to this run's OWN lockId (not a pid) BEFORE spawn, so a child spreading ...process.env inherits the exact token",
+    "the marker must be set to this run's OWN lockId BEFORE spawn",
   );
   assert.equal(
     env[NESTED_LOCK_BYPASS_ENV_VAR],
@@ -1461,15 +1742,11 @@ test("runIsolatedSuite: a real (non-nested) acquisition marks NESTED_LOCK_BYPASS
   );
 });
 
-// -- §11b: HYK-494 2R 선택 ① heartbeat wiring -----------------------------
+// -- §13b: heartbeat wiring (unchanged mechanism) -------------------------
 
 test("runIsolatedSuite: a real (non-nested) acquisition starts the heartbeat sidecar with this run's own lockId as `token`, and stops it on release", () => {
   const calls = [];
   const exitCode = runIsolatedSuite({
-    // resolvedLockPath (acquireLockForRun) comes from THIS top-level
-    // option, never from acquireLockFn's own returned `lockPath` field
-    // (that field only rides the receipt's lock_path verbatim) -- must be
-    // set here for startHeartbeatFn's `lockPath` arg to match.
     lockPath: "/fake/lock",
     startSampler: () => null,
     stopSampler: () => null,
@@ -1494,7 +1771,7 @@ test("runIsolatedSuite: a real (non-nested) acquisition starts the heartbeat sid
       timedOut: false,
       lockId: "the-heartbeat-token",
     }),
-    releaseLockFn: () => ({ released: true, reason: null }),
+    releaseLockFn: () => ({ released: true, lockLost: false, reason: null }),
     installSignalHandlersFn: () => () => {},
     startHeartbeatFn: (opts) => {
       calls.push({ event: "start", opts });
@@ -1578,6 +1855,7 @@ test("runIsolatedSuite: RUN_ISOLATED_SUITE_DEFAULTS' own startHeartbeatFn defaul
       timedOut: false,
       lockId: "whatever",
     }),
+    releaseLockFn: () => ({ released: true, lockLost: false, reason: null }),
     // startHeartbeatFn deliberately omitted -- this must not throw/hang/
     // spawn a real process.
   });
@@ -1606,7 +1884,7 @@ test("runIsolatedSuite: the lock is released even when the run throws (clone/spa
       }),
       releaseLockFn: () => {
         releaseCalled = true;
-        return { released: true, reason: null };
+        return { released: true, lockLost: false, reason: null };
       },
       installSignalHandlersFn: () => () => {},
       env: {},
@@ -1646,6 +1924,171 @@ test("runIsolatedSuite: a real lock acquired via a synthetic lockPath is actuall
       false,
       "the real lock file must be gone after a normal run",
     );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// -- §14: LOCK_LOST wiring (HYK-494 3R new behavior) -----------------------
+
+test("runIsolatedSuite: when release() reports lockLost, the final exit code becomes 1 and the receipt's runner_status becomes LOCK_LOST, overriding whatever the test run itself returned (조용한 겹침보다 보이는 빨강)", () => {
+  const receipts = [];
+  const exitCode = runIsolatedSuite({
+    startSampler: () => null,
+    stopSampler: () => null,
+    startFreeMemSamplerFn: () => null,
+    stopFreeMemSamplerFn: () => null,
+    execFile: execFileForWiringTests(),
+    spawn: () => ({ status: 0 }), // the test run ITSELF was green
+    log: () => {},
+    collectFiles: () => [],
+    readFile: () => {
+      throw new Error("no tap");
+    },
+    writeReceipt: (payload) => {
+      receipts.push(payload);
+      return { path: "(stubbed)", receipt: {} };
+    },
+    acquireLockFn: () => ({
+      acquired: true,
+      nested: false,
+      lockPath: "/fake/lock",
+      waitMs: 0,
+      pollCount: 0,
+      reclaimedOrphan: false,
+      priorOwner: null,
+      timedOut: false,
+      lockId: "lost-token",
+    }),
+    releaseLockFn: () => ({
+      released: false,
+      lockLost: true,
+      reason: "not-our-lock-or-missing",
+    }),
+    installSignalHandlersFn: () => () => {},
+    env: {},
+  });
+  assert.equal(exitCode, 1, "LOCK_LOST must never fold green");
+  assert.equal(receipts.length, 1);
+  assert.equal(receipts[0].runnerExit, 1);
+  assert.equal(receipts[0].runnerStatus, RUNNER_STATUS.LOCK_LOST);
+  assert.equal(receipts[0].lockInfo.lockLost, true);
+});
+
+test("runIsolatedSuite: when release() reports NOT lockLost, the receipt's lockLost field is explicitly false (never left null/undefined for a run that actually released)", () => {
+  const receipts = [];
+  const exitCode = runIsolatedSuite({
+    startSampler: () => null,
+    stopSampler: () => null,
+    startFreeMemSamplerFn: () => null,
+    stopFreeMemSamplerFn: () => null,
+    execFile: execFileForWiringTests(),
+    spawn: () => ({ status: 0 }),
+    log: () => {},
+    collectFiles: () => [],
+    readFile: () => {
+      throw new Error("no tap");
+    },
+    writeReceipt: (payload) => {
+      receipts.push(payload);
+      return { path: "(stubbed)", receipt: {} };
+    },
+    acquireLockFn: () => ({
+      acquired: true,
+      nested: false,
+      lockPath: "/fake/lock",
+      waitMs: 0,
+      pollCount: 0,
+      reclaimedOrphan: false,
+      priorOwner: null,
+      timedOut: false,
+      lockId: "kept-token",
+    }),
+    releaseLockFn: () => ({ released: true, lockLost: false, reason: null }),
+    installSignalHandlersFn: () => () => {},
+    env: {},
+  });
+  assert.equal(exitCode, 0);
+  assert.equal(receipts[0].runnerStatus, RUNNER_STATUS.OK);
+  assert.equal(receipts[0].lockInfo.lockLost, false);
+});
+
+test("runIsolatedSuite: a nested run's release() is a stable no-op ({released:false, lockLost:false}) -- never reported as LOCK_LOST (nothing of ours was ever at risk)", () => {
+  const receipts = [];
+  const exitCode = runIsolatedSuite({
+    ...NOOP_LOCK_SEAMS,
+    startSampler: () => null,
+    stopSampler: () => null,
+    startFreeMemSamplerFn: () => null,
+    stopFreeMemSamplerFn: () => null,
+    execFile: execFileForWiringTests(),
+    spawn: () => ({ status: 0 }),
+    log: () => {},
+    collectFiles: () => [],
+    readFile: () => {
+      throw new Error("no tap");
+    },
+    writeReceipt: (payload) => {
+      receipts.push(payload);
+      return { path: "(stubbed)", receipt: {} };
+    },
+    acquireLockFn: () => ({
+      acquired: true,
+      nested: true,
+      lockPath: "/fake/lock",
+      waitMs: 0,
+      pollCount: 0,
+      reclaimedOrphan: false,
+      priorOwner: null,
+      timedOut: false,
+    }),
+    env: {},
+  });
+  assert.equal(exitCode, 0);
+  assert.equal(receipts[0].runnerStatus, RUNNER_STATUS.OK);
+  assert.equal(receipts[0].lockInfo.lockLost, false);
+});
+
+test("runIsolatedSuite: an end-to-end LOCK_LOST via REAL releaseRunnerLock (no stub) -- another process's lockId already occupies the path by the time this run tries to release", () => {
+  const dir = freshLockDir();
+  const lockPath = join(dir, "real.lock");
+  const receipts = [];
+  try {
+    const exitCode = runIsolatedSuite({
+      lockPath,
+      startSampler: () => null,
+      stopSampler: () => null,
+      startFreeMemSamplerFn: () => null,
+      stopFreeMemSamplerFn: () => null,
+      installSignalHandlersFn: () => () => {},
+      env: {},
+      execFile: execFileForWiringTests(),
+      spawn: () => {
+        // simulate "someone else reclaimed and re-claimed under a NEW
+        // lockId" happening WHILE this run's own test pass is executing.
+        writeFileSync(
+          lockPath,
+          JSON.stringify({ pid: 999999, lockId: "a-different-owner-now" }),
+        );
+        return { status: 0 };
+      },
+      log: () => {},
+      collectFiles: () => [],
+      readFile: () => {
+        throw new Error("no tap");
+      },
+      writeReceipt: (payload) => {
+        receipts.push(payload);
+        return { path: "(stubbed)", receipt: {} };
+      },
+    });
+    assert.equal(exitCode, 1);
+    assert.equal(receipts[0].runnerStatus, RUNNER_STATUS.LOCK_LOST);
+    assert.equal(receipts[0].lockInfo.lockLost, true);
+    // the OTHER owner's lock must survive -- this run's release must never
+    // delete a lockId it doesn't recognize.
+    const stillThere = JSON.parse(readFileSync(lockPath, "utf8"));
+    assert.equal(stillThere.lockId, "a-different-owner-now");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

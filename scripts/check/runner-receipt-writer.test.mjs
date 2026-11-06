@@ -496,6 +496,10 @@ test("buildRunnerReceipt: shape has all §2-1-required fields, schema_version pi
     lock_prior_owner_started_at_ms: null,
     lock_prior_owner_worktree: null,
     lock_nested_bypass_rejected: null,
+    // HYK-494 3R fixture sync (ORCH70 §33 ⓒ, additive only -- judgment
+    // §1 ⑸ "영수증 새 칸 2"): lockInfo omitted above, so these are null too.
+    lock_reclaim_reason: null,
+    lock_lost: null,
   });
 });
 
@@ -535,6 +539,41 @@ test("buildRunnerReceipt: a populated lockInfo (incl. priorOwner/waitStartMs/wai
   assert.equal(receipt.lock_prior_owner_started_at_ms, 1);
   assert.equal(receipt.lock_prior_owner_worktree, "/other");
   assert.equal(receipt.lock_nested_bypass_rejected, true);
+});
+
+// HYK-494 3R: dedicated coverage for the two NEW fields (judgment §1 ⑸)
+// -- reclaimReason (only meaningful when reclaimedOrphan is true) and
+// lockLost (only meaningful once release() has actually run).
+test("buildRunnerReceipt: a populated lockInfo with reclaimReason/lockLost surfaces lock_reclaim_reason/lock_lost verbatim", () => {
+  const receipt = buildRunnerReceipt({
+    runnerExit: 1,
+    runnerStatus: RUNNER_STATUS.LOCK_LOST,
+    counts: { tests: 1, pass: 1, fail: 0, skip: 0 },
+    headCommit: "abc",
+    finishedAtMs: 0,
+    lockInfo: {
+      path: "/fake/lock",
+      reclaimedOrphan: true,
+      reclaimReason: "pid-reused",
+      lockLost: true,
+    },
+  });
+  assert.equal(receipt.runner_status, RUNNER_STATUS.LOCK_LOST);
+  assert.equal(receipt.lock_reclaim_reason, "pid-reused");
+  assert.equal(receipt.lock_lost, true);
+});
+
+test("buildRunnerReceipt: lockInfo omitting reclaimReason/lockLost -> both null (never coerced to false)", () => {
+  const receipt = buildRunnerReceipt({
+    runnerExit: 0,
+    runnerStatus: RUNNER_STATUS.OK,
+    counts: { tests: 1, pass: 1, fail: 0, skip: 0 },
+    headCommit: "abc",
+    finishedAtMs: 0,
+    lockInfo: { path: "/fake/lock" },
+  });
+  assert.equal(receipt.lock_reclaim_reason, null);
+  assert.equal(receipt.lock_lost, null);
 });
 
 test("buildRunnerReceipt: lockInfo.priorOwner === null -> the three lock_prior_owner_* fields are null (never throws on a missing prior owner)", () => {

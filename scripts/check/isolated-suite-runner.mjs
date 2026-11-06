@@ -1770,6 +1770,7 @@ function runCloneAndEmitReceipt({
   nodeVersionWarning,
   startFreeMb,
   lockInfo,
+  release,
   ...samplerOpts
 }) {
   // HYK-439 §2 ⓑ/ⓒ: serialFamilyList is OFF by default (byte-for-byte the
@@ -1831,6 +1832,7 @@ function runCloneAndEmitReceipt({
     familyStartFreeMb,
     familyMinFreeMb,
     lockInfo,
+    release,
   });
 }
 
@@ -1838,6 +1840,35 @@ function runCloneAndEmitReceipt({
 // (same reasoning as every other small extraction in this file) -- no
 // behavior change from the inline emitRunnerReceipt call + return this
 // replaces.
+// HYK-494 3R: this run's OWN measurement may be done (combinedOutcome
+// already reflects whatever node --test actually returned), but the lock
+// that was supposed to make that measurement exclusive might not have been
+// ours anymore by the time we're about to report it -- release() (called
+// HERE, before the receipt is built, not in the outer runIsolatedSuite's
+// finally) is the single, authoritative point that finds out. A lost lock
+// means another process judged us DEAD and reclaimed while we were still
+// running: our result may have overlapped a concurrent run and must not
+// fold green (judgment §1 ⑶ "조용한 겹침보다 보이는 빨강이 낫다").
+const LOCK_LOST_EXIT_CODE = 1;
+
+function applyReleaseOutcome({ combinedOutcome, lockInfo, release }) {
+  const releaseResult = release ? release() : { lockLost: false };
+  if (!releaseResult.lockLost) {
+    return {
+      outcome: combinedOutcome,
+      lockInfo: { ...lockInfo, lockLost: false },
+    };
+  }
+  return {
+    outcome: {
+      ...combinedOutcome,
+      exitCode: LOCK_LOST_EXIT_CODE,
+      status: RUNNER_STATUS.LOCK_LOST,
+    },
+    lockInfo: { ...lockInfo, lockLost: true },
+  };
+}
+
 function reportRunOutcome({
   root,
   sha,
@@ -1855,7 +1886,7 @@ function reportRunOutcome({
   minFreeMbSampled,
   resolvedConcurrency,
   mainOutcome,
-  combinedOutcome,
+  combinedOutcome: rawCombinedOutcome,
   familyTapPath,
   familyElapsedMs,
   serialFamilyConcurrency,
@@ -1863,8 +1894,14 @@ function reportRunOutcome({
   mainMinFreeMb,
   familyStartFreeMb,
   familyMinFreeMb,
-  lockInfo,
+  lockInfo: rawLockInfo,
+  release,
 }) {
+  const { outcome: combinedOutcome, lockInfo } = applyReleaseOutcome({
+    combinedOutcome: rawCombinedOutcome,
+    lockInfo: rawLockInfo,
+    release,
+  });
   emitRunnerReceipt({
     root,
     sha,
@@ -2053,7 +2090,7 @@ function runLockedSuite({
   readPackageJsonFn,
   passthrough,
 }) {
-  const { root, sha, dirty, lockInfo } = locked;
+  const { root, sha, dirty, lockInfo, release } = locked;
   // HYK-464 2R P2-6: see resolveConcurrencyAndFirstLine's own header for
   // why this single call replaces 1R's separate resolveAndLogNodeVersion
   // Warning + resolveAndLogConcurrency sequence. HYK-494: this now runs
@@ -2111,6 +2148,7 @@ function runLockedSuite({
       nodeVersionWarning,
       startFreeMb,
       lockInfo,
+      release,
     });
   } finally {
     cleanupRunDirs({ keep, log, cloneDir, tapDir });
@@ -2160,12 +2198,17 @@ function reportLockTimeout({
         waitMs: lockResult.waitMs,
         pollCount: lockResult.pollCount,
         reclaimedOrphan: lockResult.reclaimedOrphan,
+        reclaimReason: lockResult.reclaimReason ?? null,
         nested: false,
         timedOut: true,
         waitStartMs: lockResult.waitStartMs,
         waitEndMs: lockResult.waitEndMs,
         priorOwner: lockResult.priorOwner,
         nestedBypassRejected: lockResult.nestedBypassRejected,
+        // HYK-494 3R: a timed-out acquisition never held anything to lose --
+        // lockLost stays null (distinct from false: "never applicable", not
+        // "checked and fine").
+        lockLost: null,
       },
     },
     log,
@@ -2249,12 +2292,17 @@ function acquireLockForRun({
       waitMs: lockResult.waitMs,
       pollCount: lockResult.pollCount,
       reclaimedOrphan: lockResult.reclaimedOrphan,
+      reclaimReason: lockResult.reclaimReason ?? null,
       nested: lockResult.nested,
       timedOut: false,
       waitStartMs: lockResult.waitStartMs,
       waitEndMs: lockResult.waitEndMs,
       priorOwner: lockResult.priorOwner,
       nestedBypassRejected: lockResult.nestedBypassRejected,
+      // HYK-494 3R: filled in by release() once this run actually lets go
+      // of the lock (reportRunOutcome calls locked.release() before writing
+      // the receipt) -- null here is "not yet known", not "checked and fine".
+      lockLost: null,
     },
   };
 }
@@ -2280,6 +2328,19 @@ function acquireLockForRun({
 // own header states this file's honest limit on signal timing) -- the
 // guard stops the heartbeat too, so a crash/signal exit doesn't leave a
 // sidecar refreshing a lock file this process is about to (try to) release.
+// HYK-494 3R: `release()` now RETURNS a result (`{released, lockLost,
+// reason}`, releaseRunnerLock's own shape) instead of nothing -- a caller
+// that cares (reportRunOutcome, below) can tell whether this run's lock was
+// still ours at release time and fold that into the final receipt/exit code
+// (LOCK_LOST). `release()` is memoized (idempotent) so it is safe to call
+// MORE than once -- it still must be: the outer runIsolatedSuite's own
+// `finally { locked.release(); }` (unchanged) remains the exception-safety
+// net for the clone/spawn-throws path, while the normal (non-throwing) path
+// now ALSO calls it once, earlier, from inside reportRunOutcome (before the
+// receipt is written) so the receipt can reflect LOCK_LOST honestly. The
+// second call (from the outer finally) must never re-touch the filesystem
+// or double-stop an already-stopped heartbeat/signal guard -- it just
+// returns the cached result from the first call.
 function guardLockForRun({
   lockResult,
   resolvedLockPath,
@@ -2288,25 +2349,33 @@ function guardLockForRun({
   installSignalHandlersFn,
   startHeartbeatFn,
 }) {
-  if (lockResult.nested) return () => {};
+  if (lockResult.nested) {
+    // nothing of ours to release -- a stable, honest no-op result.
+    return () => ({ released: false, lockLost: false, reason: null });
+  }
   env[NESTED_LOCK_BYPASS_ENV_VAR] = String(lockResult.lockId);
   const heartbeat = startHeartbeatFn({
     lockPath: resolvedLockPath,
     token: lockResult.lockId,
     pid: process.pid,
   });
-  const uninstallSignalHandlers = installSignalHandlersFn({
-    release: () => {
+  let cachedResult = null;
+  const releaseMemoized = () => {
+    if (cachedResult === null) {
+      uninstallSignalHandlers();
+      delete env[NESTED_LOCK_BYPASS_ENV_VAR];
       heartbeat.stop();
-      releaseLockFn({ lockPath: resolvedLockPath, pid: process.pid });
-    },
-  });
-  return () => {
-    uninstallSignalHandlers();
-    delete env[NESTED_LOCK_BYPASS_ENV_VAR];
-    heartbeat.stop();
-    releaseLockFn({ lockPath: resolvedLockPath, pid: process.pid });
+      cachedResult = releaseLockFn({
+        lockPath: resolvedLockPath,
+        lockId: lockResult.lockId,
+      });
+    }
+    return cachedResult;
   };
+  const uninstallSignalHandlers = installSignalHandlersFn({
+    release: releaseMemoized,
+  });
+  return releaseMemoized;
 }
 
 // HYK-439 §2 ⓐ: thin wrapper around the invokedDirectly block's own
