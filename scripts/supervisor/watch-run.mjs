@@ -134,6 +134,12 @@ import {
   observeTeardownInventory,
   observeSeatCount,
   buildGitRevParseAbbrevRefCommand,
+  // HYK-491-teardown-arm-2 (coder-task.md §2 product_scope P1-1 수리) --
+  // 제거 직전 working tree가 clean한지 확인하는 argv. HYK-171 축의
+  // observeWorkingTree(비공개)가 이미 같은 argv로 dirty/untracked/unmerged를
+  // 읽는다 -- 이 축은 그 판정 로직을 다시 구현하지 않고 argv 빌더만
+  // 재사용한다(판정은 checkWorkingTreeCleanForArm, 아래).
+  buildGitStatusCommand,
 } from "../relay/adapters/teardown-inventory-adapter.mjs";
 // HYK-491-teardown-arm-1 (coder-task.md §2 product_scope ① "teardown 실행
 // 경로") -- 무장(armed) 실행의 유일한 orca 호출 지점(G9: orca 문자열
@@ -4031,8 +4037,8 @@ function runTeardownShadowNotifyStep({
 
 // ═══════════════════════════════════════════════════════════════════════
 // HYK-491-teardown-arm-1 (coder-task.md §2 product_scope ⓘ~ⓘⓘⓘⓘ) -- 무장
-// (armed) 실행 경로. 기본 off(아래 isTeardownArmed가 파일 부재를 false로
-// 읽는다) -- off면 이 구역 전체가 호출되지 않거나(runTeardownShadowStep이
+// (armed) 실행 경로. 기본 off(아래 judgeTeardownArmFlag가 파일 부재를
+// off로 읽는다) -- off면 이 구역 전체가 호출되지 않거나(runTeardownShadowStep이
 // armed:false를 즉시 받고 attempted:false를 돌린다) 아무 fs/orca 호출도
 // 만들지 않는다(§2 비타협 ⓘ "off면 바이트 동작 동일").
 //
@@ -4043,18 +4049,105 @@ function runTeardownShadowNotifyStep({
 // 않는다(product_scope ⓘⓘⓘⓘ "켜는 주체 = 병합 뒤 책임자 통지로 ORCH").
 // ---------------------------------------------------------------------------
 
-const TEARDOWN_ARM_FLAG_FILENAME = "teardown-arm.flag";
+// HYK-491-teardown-arm-2 (coder-task.md §2 product_scope P1-2 수리, 검토
+// 1R P1-2 실측): 1R은 "파일이 존재하기만 하면 on"이었다 -- 그래서
+// `false`/`{"armed":false}`/다른 키/디렉터리까지 전부 on으로 샜다. 2R은
+// 파일 이름을 `teardown-arm.json`으로 바꾸고(내용이 있는 파일이라는
+// 뜻을 이름에도 반영), 그 내용이 **JSON 객체이고 `armed`가 정확히
+// 불리언 `true`**일 때만 on으로 판정한다 -- 그 밖(없음·빈 파일·JSON
+// 아님·폴더·문자열/숫자/배열 최상위 값·armed 키 없음·armed:false)은
+// 전부 off이고, 각 사유를 서로 다른 토큰으로 구분한다(판정 자체에는
+// 쓰지 않는다 -- armed는 오직 위 한 조건으로만 true가 된다).
+const TEARDOWN_ARM_FLAG_FILENAME = "teardown-arm.json";
 
-function isTeardownArmed({ watchDir, existsFn }) {
-  if (!isNonEmptyString(watchDir) || typeof existsFn !== "function") {
-    return false;
+export const TEARDOWN_ARM_FLAG_REASON = Object.freeze({
+  ABSENT: "TEARDOWN_ARM_FLAG_ABSENT",
+  IS_DIRECTORY: "TEARDOWN_ARM_FLAG_IS_DIRECTORY",
+  EMPTY: "TEARDOWN_ARM_FLAG_EMPTY",
+  NOT_JSON: "TEARDOWN_ARM_FLAG_NOT_JSON",
+  VALUE_IS_ARRAY: "TEARDOWN_ARM_FLAG_VALUE_IS_ARRAY",
+  VALUE_IS_STRING: "TEARDOWN_ARM_FLAG_VALUE_IS_STRING",
+  VALUE_IS_NUMBER: "TEARDOWN_ARM_FLAG_VALUE_IS_NUMBER",
+  NOT_OBJECT: "TEARDOWN_ARM_FLAG_NOT_OBJECT",
+  ARMED_KEY_MISSING: "TEARDOWN_ARM_FLAG_ARMED_KEY_MISSING",
+  ARMED_NOT_TRUE: "TEARDOWN_ARM_FLAG_ARMED_NOT_TRUE",
+});
+
+// confirmedBy/at은 §2 비타협("기록만 -- 판정 불사용")대로 여기서도 armed
+// 판정에 전혀 쓰지 않는다 -- 아래에서 읽어서 호출자(runTeardownArmStep ->
+// writeTeardownArmNotice)에 그대로 실어 보내기만 한다(받는함에 "기록").
+// judgeTeardownArmFlag(아래)에서 분리(복잡도 분산) -- 파일 존재·읽기
+// 단계만 맡는다. fail-closed: watchDir/existsFn/readFn이 없거나,
+// 존재를 못 읽거나, 없거나, 디렉터리거나, 빈 파일이면 여기서 끝난다.
+function readTeardownArmFlagRaw({ watchDir, existsFn, readFn }) {
+  if (
+    !isNonEmptyString(watchDir) ||
+    typeof existsFn !== "function" ||
+    typeof readFn !== "function"
+  ) {
+    return { ok: false, reason: TEARDOWN_ARM_FLAG_REASON.ABSENT };
   }
+  const flagPath = path.join(watchDir, TEARDOWN_ARM_FLAG_FILENAME);
+  let exists;
   try {
-    return existsFn(path.join(watchDir, TEARDOWN_ARM_FLAG_FILENAME)) === true;
+    exists = existsFn(flagPath) === true;
   } catch {
-    // fail-closed: 플래그 자체를 읽을 수 없으면 무장이 아니다(§2 비타협).
-    return false;
+    // fail-closed: 존재 자체를 못 읽으면 무장이 아니다(§2 비타협).
+    return { ok: false, reason: TEARDOWN_ARM_FLAG_REASON.ABSENT };
   }
+  if (!exists) {
+    return { ok: false, reason: TEARDOWN_ARM_FLAG_REASON.ABSENT };
+  }
+  let raw;
+  try {
+    raw = readFn(flagPath, "utf8");
+  } catch (err) {
+    if (err && err.code === "EISDIR") {
+      return { ok: false, reason: TEARDOWN_ARM_FLAG_REASON.IS_DIRECTORY };
+    }
+    return { ok: false, reason: TEARDOWN_ARM_FLAG_REASON.NOT_JSON };
+  }
+  if (typeof raw !== "string" || raw.trim() === "") {
+    return { ok: false, reason: TEARDOWN_ARM_FLAG_REASON.EMPTY };
+  }
+  return { ok: true, raw };
+}
+
+// judgeTeardownArmFlag(아래)에서 분리(복잡도 분산) -- 이미 JSON.parse된
+// 값의 "모양"만 분류한다. null = armed 판정 통과(그 값이 바로 armed:true
+// 객체라는 뜻 -- 호출자가 그 객체에서 confirmed_by/at을 읽는다).
+function classifyTeardownArmFlagValue(parsed) {
+  if (Array.isArray(parsed)) return TEARDOWN_ARM_FLAG_REASON.VALUE_IS_ARRAY;
+  if (typeof parsed === "string")
+    return TEARDOWN_ARM_FLAG_REASON.VALUE_IS_STRING;
+  if (typeof parsed === "number")
+    return TEARDOWN_ARM_FLAG_REASON.VALUE_IS_NUMBER;
+  if (parsed === null || typeof parsed !== "object")
+    return TEARDOWN_ARM_FLAG_REASON.NOT_OBJECT;
+  if (!Object.prototype.hasOwnProperty.call(parsed, "armed"))
+    return TEARDOWN_ARM_FLAG_REASON.ARMED_KEY_MISSING;
+  if (parsed.armed !== true) return TEARDOWN_ARM_FLAG_REASON.ARMED_NOT_TRUE;
+  return null;
+}
+
+function judgeTeardownArmFlag({ watchDir, existsFn, readFn }) {
+  const read = readTeardownArmFlagRaw({ watchDir, existsFn, readFn });
+  if (!read.ok) return { armed: false, reason: read.reason };
+  let parsed;
+  try {
+    parsed = JSON.parse(read.raw);
+  } catch {
+    return { armed: false, reason: TEARDOWN_ARM_FLAG_REASON.NOT_JSON };
+  }
+  const badReason = classifyTeardownArmFlagValue(parsed);
+  if (badReason) return { armed: false, reason: badReason };
+  return {
+    armed: true,
+    confirmedBy: isNonEmptyString(parsed.confirmed_by)
+      ? parsed.confirmed_by
+      : null,
+    at: isNonEmptyString(parsed.at) ? parsed.at : null,
+  };
 }
 
 // 워크트리가 지워진 «뒤»에도 쓸 수 있어야 한다(cwd=worktreePath는 그
@@ -4267,6 +4360,59 @@ function observeFreshArmInventory({
   };
 }
 
+// HYK-491-teardown-arm-2 (coder-task.md §2 product_scope P2-2 수리, 검토
+// 1R P2-2 실측): 1R은 `computeCanonicalPathDigest`(32-hex)를 아카이브
+// 하위 폴더 이름으로 썼다 -- 사람이 읽을 수 없고, ORCH 손 B-15
+// (`<이름>-final`)와도 모양이 다르다. 2R은 워크트리 경로의 마지막
+// 세그먼트(이름) + `-final`을 쓴다 -- B-15와 같은 모양이고, "같은
+// 경로 -> 항상 같은 폴더 이름"이 그대로 유지돼(P2-3 아래) 재사용 경로
+// 충돌도 그대로 걸린다.
+function buildArmArchiveFinalName(worktreePath) {
+  const trimmed = String(worktreePath).replace(/[\\/]+$/, "");
+  const base = path.basename(trimmed);
+  return `${base}-final`;
+}
+
+// HYK-491-teardown-arm-2 (coder-task.md §2 product_scope P2-2 수리) --
+// archiveRoot 기본값. 감시 폴더(watchDir)의 "부모"(관제실)에 `아카이브`
+// 폴더를 두고, 그 아래 날짜 자동 폴더 하나(ORCH 손 B-15와 같은 모양,
+// "<날짜>-B76-..." 대신 이 축 전용 고정 토큰 "teardown-arm"을 쓴다 --
+// 사람 작업(B-15)과 자동 무장 경로를 폴더 이름만으로 구분할 수 있게).
+function buildDefaultTeardownArmArchiveRoot(watchDir, now) {
+  const dateToken = new Date(now).toISOString().slice(0, 10);
+  return path.join(
+    path.dirname(watchDir),
+    "아카이브",
+    `${dateToken}-teardown-arm`,
+  );
+}
+
+// HYK-491-teardown-arm-2 (coder-task.md §2 product_scope P2-3 수리, 검토
+// 1R P2-3 실측): 1R은 같은 경로가 다시 아카이브 대상이 되면 디지스트
+// 폴더를 그대로 덮어써 1차·2차 내용이 섞였다. 2R은 recordDir(위 이름
+// 그대로)이 이미 있으면(과거에 같은 경로를 아카이브한 적이 있다는 뜻)
+// 그 자리에서 멈춘다 -- ORCH 손 B-15의 `if (Test-Path $A) { throw
+// 'archive exists' }`와 같은 성질(덮어쓰기 금지), 다만 여기는 throw가
+// 아니라 그 워크트리만 건너뛴다(기존 fail-closed 관례 그대로).
+function checkArchiveDestAbsentForArm({ recordDir, existsFn }) {
+  let exists;
+  try {
+    exists = existsFn(recordDir) === true;
+  } catch {
+    return {
+      step: "ARCHIVE_EXISTS_CHECK",
+      reason: "TEARDOWN_ARM_ARCHIVE_DEST_UNOBSERVABLE",
+    };
+  }
+  if (exists) {
+    return {
+      step: "ARCHIVE_EXISTS_CHECK",
+      reason: "TEARDOWN_ARM_ARCHIVE_ALREADY_EXISTS",
+    };
+  }
+  return null;
+}
+
 // ⑵+⑶ SHA·브랜치 선기록 + 아카이브 + sha256 대조 IDENTICAL.
 // runArmedRemovalForWorktree에서 분리(복잡도 분산).
 function recordShaAndArchive({
@@ -4285,8 +4431,10 @@ function recordShaAndArchive({
 }) {
   const recordDir = path.join(
     archiveRoot,
-    computeCanonicalPathDigest(worktreePath),
+    buildArmArchiveFinalName(worktreePath),
   );
+  const existsFailure = checkArchiveDestAbsentForArm({ recordDir, existsFn });
+  if (existsFailure) return existsFailure;
   let recordPath;
   try {
     recordPath = recordTeardownArmSha({
@@ -4341,6 +4489,45 @@ function checkSeatZeroForArm({ worktreePath, execFn, teardownShadow }) {
       step: "SEAT_CHECK",
       reason: "TEARDOWN_ARM_SEAT_PRESENT",
       seatCount: seat.count,
+    };
+  }
+  return null;
+}
+
+// HYK-491-teardown-arm-2 (coder-task.md §2 product_scope P1-1 수리, 검토
+// 1R P1-1 실측): 그림자 판정(judgeArchiveEligibility, 6축)은 working
+// tree가 dirty한지 전혀 보지 않는다 -- 그래서 1R은 커밋 안 된 변경이
+// 있는 워크트리도 ELIGIBLE이 나면 그대로 force-제거해 그 변경을 영구히
+// 잃었다. 이 축은 좌석 확인(위)과 같은 자리에서(제거 직전, ELIGIBLE
+// 집합을 "더 좁히기만" 하는 추가 안전판 -- 그림자 조건 자체는 넓히지
+// 않는다) `git status --porcelain`이 0줄인지 fail-closed로 확인한다.
+// teardown-inventory-adapter.mjs의 observeWorkingTree(비공개, HYK-171
+// 축)가 이미 같은 판정(dirty = 줄 수 > 0)을 하므로 그 로직을 다시 짜지
+// 않고, argv 빌더(buildGitStatusCommand, 위 import)만 재사용한다 --
+// gitFn 호출 관례가 그 함수와 다르다(이 파일의 gitFn은 항상 두 번째
+// 인자로 worktreePath를 받는다, defaultArchiveGitFn 참조)는 이유로
+// 판정 자체는 이 파일에 독립으로 둔다.
+function checkWorkingTreeCleanForArm({ worktreePath, gitFn }) {
+  let output;
+  try {
+    output = gitFn(buildGitStatusCommand(), worktreePath);
+  } catch {
+    return {
+      step: "WORKING_TREE_CHECK",
+      reason: "TEARDOWN_ARM_WORKING_TREE_UNOBSERVABLE",
+    };
+  }
+  if (typeof output !== "string") {
+    return {
+      step: "WORKING_TREE_CHECK",
+      reason: "TEARDOWN_ARM_WORKING_TREE_UNOBSERVABLE",
+    };
+  }
+  const dirty = output.split("\n").some((line) => line.length > 0);
+  if (dirty) {
+    return {
+      step: "WORKING_TREE_CHECK",
+      reason: "TEARDOWN_ARM_WORKING_TREE_DIRTY",
     };
   }
   return null;
@@ -4546,6 +4733,20 @@ function runArmedRemovalForWorktree({
     };
   }
 
+  const workingTreeFailure = checkWorkingTreeCleanForArm({
+    worktreePath,
+    gitFn: teardownShadow.gitFn ?? defaultArchiveGitFn,
+  });
+  if (workingTreeFailure) {
+    return {
+      worktreePath,
+      ok: false,
+      ...workingTreeFailure,
+      recordPath,
+      archivedFiles,
+    };
+  }
+
   return removeRestoreAndReobserve({
     worktreePath,
     repoRoot,
@@ -4560,11 +4761,50 @@ function runArmedRemovalForWorktree({
   });
 }
 
-function buildTeardownArmNoticeText({ results, now }) {
+// HYK-491-teardown-arm-2 (coder-task.md §2 product_scope P1-2 수리) --
+// confirmedBy/at은 §2 비타협대로 판정에 전혀 쓰지 않는다 -- 있으면
+// 받는함 머리에 "기록만" 한다(사람이 "누가·언제 확인했다"를 읽을 수
+// 있게, armed 여부와 무관).
+// buildTeardownArmNoticeText(아래)에서 분리(복잡도 분산) -- 워크트리
+// 하나의 상세 블록만 만든다.
+function buildTeardownArmNoticeResultLines(r) {
+  const lines = [];
+  lines.push(`## ${r.worktreePath}`);
+  lines.push(`- 결과: ${r.ok ? "제거됨(SUCCEEDED)" : `중단(${r.step})`}`);
+  if (!r.ok) lines.push(`- 사유: ${r.reason}`);
+  if (isNonEmptyString(r.recordPath)) {
+    lines.push(`- SHA 선기록 파일: ${r.recordPath}`);
+  }
+  if (Array.isArray(r.archivedFiles)) {
+    lines.push(`- 아카이브된 파일 수: ${r.archivedFiles.length}`);
+  }
+  if (isNonEmptyString(r.branchName)) {
+    lines.push(
+      `- 브랜치: ${r.branchName} @ ${r.sha}${r.branchRestored ? " (복원함)" : ""}`,
+    );
+  }
+  // HYK-491-teardown-arm-2 (coder-task.md §2 product_scope P2-4 수리,
+  // 검토 1R P2-4 실측): 브랜치 복원이 실패하면(워크트리는 이미 지워졌다)
+  // 선기록 SHA로 사람이 손으로 복원할 수 있는 명령을 그대로 적어 준다
+  // -- 1R은 "브랜치: X @ sha"만 적고 "복원하라"는 지시가 없었다.
+  if (r.step === "BRANCH_RESTORE" && isNonEmptyString(r.branchName)) {
+    lines.push(
+      `- 로컬 브랜치 없음 -- 복원 명령: git branch ${r.branchName} ${r.sha}`,
+    );
+  }
+  return lines;
+}
+
+function buildTeardownArmNoticeText({ results, now, confirmedBy, at }) {
   const lines = [];
   lines.push(
     `# 무장 teardown 실행 결과 -- 대상 ${results.length}건 (${new Date(now).toISOString()})`,
   );
+  if (isNonEmptyString(confirmedBy) || isNonEmptyString(at)) {
+    lines.push(
+      `- 무장 파일 기록(판정 불사용): confirmed_by=${confirmedBy ?? "(없음)"} at=${at ?? "(없음)"}`,
+    );
+  }
   lines.push("");
   const aborted = results.length > 0 && !results[results.length - 1].ok;
   lines.push(
@@ -4574,20 +4814,7 @@ function buildTeardownArmNoticeText({ results, now }) {
   );
   for (const r of results) {
     lines.push("");
-    lines.push(`## ${r.worktreePath}`);
-    lines.push(`- 결과: ${r.ok ? "제거됨(SUCCEEDED)" : `중단(${r.step})`}`);
-    if (!r.ok) lines.push(`- 사유: ${r.reason}`);
-    if (isNonEmptyString(r.recordPath)) {
-      lines.push(`- SHA 선기록 파일: ${r.recordPath}`);
-    }
-    if (Array.isArray(r.archivedFiles)) {
-      lines.push(`- 아카이브된 파일 수: ${r.archivedFiles.length}`);
-    }
-    if (isNonEmptyString(r.branchName)) {
-      lines.push(
-        `- 브랜치: ${r.branchName} @ ${r.sha}${r.branchRestored ? " (복원함)" : ""}`,
-      );
-    }
+    lines.push(...buildTeardownArmNoticeResultLines(r));
   }
   return lines.join("\n") + "\n";
 }
@@ -4654,11 +4881,17 @@ function writeTeardownArmNotice({
   existsFn,
   mkdirFn,
   writeFn,
+  confirmedBy,
+  at,
 }) {
   const noticePath = path.join(notifyDir, buildTeardownArmNoticeFileName(now));
   try {
     if (!existsFn(notifyDir)) mkdirFn(notifyDir, { recursive: true });
-    writeFn(noticePath, buildTeardownArmNoticeText({ results, now }), "utf8");
+    writeFn(
+      noticePath,
+      buildTeardownArmNoticeText({ results, now, confirmedBy, at }),
+      "utf8",
+    );
   } catch (err) {
     return {
       ok: false,
@@ -4670,6 +4903,9 @@ function writeTeardownArmNotice({
 
 function runTeardownArmStep({
   armed,
+  flagReason,
+  confirmedBy,
+  at,
   eligibleEntries,
   teardownShadow,
   repoRoot,
@@ -4681,7 +4917,13 @@ function runTeardownArmStep({
   writeFn,
   execFn,
 }) {
-  if (!armed) return { armed: false, attempted: false };
+  // HYK-491-teardown-arm-2 (coder-task.md §2 product_scope P1-2 수리):
+  // flagReason은 off일 때만 실리고(armed:false 공통 경로), §2 비타협
+  // "off면 바이트 동작 동일"은 아래 teardownShadowLogSegment가
+  // `attempted!==true`면 토큰을 한 글자도 더하지 않는 것으로 계속
+  // 지켜진다 -- flagReason은 그 로그 줄이 아니라 이 armResult 값
+  // 자체에만 "기록"된다(호출자·시험이 왜 off인지 구분할 수 있게).
+  if (!armed) return { armed: false, attempted: false, flagReason };
   if (!Array.isArray(eligibleEntries) || eligibleEntries.length === 0) {
     return { armed: true, attempted: false, results: [] };
   }
@@ -4710,6 +4952,8 @@ function runTeardownArmStep({
     existsFn,
     mkdirFn,
     writeFn,
+    confirmedBy,
+    at,
   });
   if (!notice.ok) {
     return {
@@ -4732,6 +4976,49 @@ function runTeardownArmStep({
 // 잔재 축과 독립적인 opt-in). 워크트리 열거는 resourceResidue.worktreeListFn
 // 을 그대로 재사용한다(§재사용 -- 새 열거 로직을 만들지 않는다, 이미
 // collectWorktreeResidueStep이 쓰는 동일 주입점).
+// runTeardownShadowStep(아래)에서 분리(복잡도·줄수 분산) -- 무장 판정
+// +실행 한 덩어리만 맡는다. HYK-491-teardown-arm-1 (coder-task.md §2
+// product_scope ⓘ): armed가 아니면(기본값, 플래그 파일 부재 -- 또는
+// 2R부터는 어떤 형식이든 {armed:true}가 아니면) runTeardownArmStep은
+// {armed:false, attempted:false}만 돌리고 fs/orca 호출을 전혀 만들지
+// 않는다 -- teardownShadowLogSegment도 그 상태에서는 한 글자도 더하지
+// 않는다(§2 비타협 ⓘ "off면 바이트 동작 동일").
+function runTeardownArmPhase({
+  resourceResidue,
+  teardownShadow,
+  repoRoot,
+  now,
+  watchDir,
+  notifyDir,
+  readFn,
+  writeFn,
+  existsFn,
+  mkdirFn,
+  eligibleEntries,
+}) {
+  const flagResult = judgeTeardownArmFlag({ watchDir, existsFn, readFn });
+  const armed = flagResult.armed === true;
+  const archiveRoot = isNonEmptyString(teardownShadow.archiveRoot)
+    ? teardownShadow.archiveRoot
+    : buildDefaultTeardownArmArchiveRoot(watchDir, now);
+  return runTeardownArmStep({
+    armed,
+    flagReason: flagResult.reason ?? null,
+    confirmedBy: flagResult.confirmedBy ?? null,
+    at: flagResult.at ?? null,
+    eligibleEntries,
+    teardownShadow,
+    repoRoot,
+    archiveRoot,
+    now,
+    notifyDir,
+    execFn: resourceResidue.orcaExecFn ?? createOrcaExecFn(),
+    existsFn,
+    mkdirFn,
+    writeFn,
+  });
+}
+
 function runTeardownShadowStep({
   resourceResidue,
   detectorResult,
@@ -4793,27 +5080,18 @@ function runTeardownShadowStep({
     existsFn,
     mkdirFn,
   });
-  // HYK-491-teardown-arm-1 (coder-task.md §2 product_scope ⓘ): armed가
-  // 아니면(기본값, 플래그 파일 부재) runTeardownArmStep은 {armed:false,
-  // attempted:false}만 돌리고 fs/orca 호출을 전혀 만들지 않는다 -- 아래
-  // teardownShadowLogSegment도 그 상태에서는 한 글자도 더하지 않는다
-  // (§2 비타협 ⓘ "off면 바이트 동작 동일").
-  const armed = isTeardownArmed({ watchDir, existsFn });
-  const archiveRoot = isNonEmptyString(teardownShadow.archiveRoot)
-    ? teardownShadow.archiveRoot
-    : path.join(watchDir, "teardown-armed-archive");
-  const armResult = runTeardownArmStep({
-    armed,
-    eligibleEntries,
+  const armResult = runTeardownArmPhase({
+    resourceResidue,
     teardownShadow: teardownShadowForRun,
     repoRoot,
-    archiveRoot,
     now,
+    watchDir,
     notifyDir,
-    execFn: resourceResidue.orcaExecFn ?? createOrcaExecFn(),
+    readFn,
+    writeFn,
     existsFn,
     mkdirFn,
-    writeFn,
+    eligibleEntries,
   });
   return {
     notRun: false,
@@ -4857,7 +5135,16 @@ function teardownShadowLogSegment(result) {
   const arm = result.armResult;
   if (!arm || arm.attempted !== true) return base;
   const results = Array.isArray(arm.results) ? arm.results : [];
-  const removed = results.filter((r) => r.ok).length;
+  // HYK-491-teardown-arm-2 (coder-task.md §2 product_scope P2-4 수리,
+  // 검토 1R P2-4 실측): 브랜치 복원 실패(BRANCH_RESTORE)·재관측 실패
+  // (REOBSERVE)는 `ok:false`이지만 워크트리는 "실제로 이미 없어진"
+  // 뒤다(removeAndRestoreBranch/reobserveArmedRemoval이 그 경로에
+  // `removed:true`를 싣는다) -- 1R은 `ok`만 셌다. 이 칸은 "워크트리가
+  // 실제로 없어진 수"를 세야 한다(복원 실패로 중단돼도 지워졌으면
+  // 센다).
+  const removed = results.filter(
+    (r) => r.ok === true || r.removed === true,
+  ).length;
   return (
     `${base} ` +
     `teardown_arm_attempted=true ` +

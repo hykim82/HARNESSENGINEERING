@@ -65,8 +65,24 @@ function setupRepo() {
   git(mainRoot, ["init", "-q", "-b", "master"]);
   git(mainRoot, ["config", "user.email", "t@example.com"]);
   git(mainRoot, ["config", "user.name", "T"]);
+  // HYK-491-teardown-arm-2 (coder-task.md §2 product_scope P1-1 수리 --
+  // 새 checkWorkingTreeCleanForArm이 `git status --porcelain`을 실제로
+  // 본다): 이 기계의 전역 core.autocrlf=true가 커밋 직후에도 README.md를
+  // "LF -> CRLF 치환 예정"으로 dirty 처리해 모든 양성 시험을 거짓
+  // TEARDOWN_ARM_WORKING_TREE_DIRTY로 빠뜨렸다(이 레포 다른 시험의 기존
+  // 관례, queue-observation-adapter.test.mjs:71 참조 -- 같은 이유로 이미
+  // 끈다). 끄지 않으면 "진짜 커밋 안 된 변경"과 "줄바꿈 정규화 예정"을
+  // 구별할 수 없다.
+  git(mainRoot, ["config", "core.autocrlf", "false"]);
   git(mainRoot, ["remote", "add", "origin", originRoot]);
   fs.writeFileSync(path.join(mainRoot, "README.md"), "root\n");
+  // HYK-491-teardown-arm-2 (coder-task.md §2 product_scope P1-1 수리 --
+  // 검토 1R P1-1의 전제 "실물과 같은 모양": `.harness/`는 실 저장소에서
+  // git-ignore된다(harness_gitignore_note). 이 .gitignore가 없으면
+  // makeEligibleHarness가 쓰는 `.harness/*` 고정물 자체가 매번 "??
+  // .harness/"(미추적)로 잡혀 새 checkWorkingTreeCleanForArm이 모든
+  // 양성 시험을 거짓 TEARDOWN_ARM_WORKING_TREE_DIRTY로 빠뜨린다.
+  fs.writeFileSync(path.join(mainRoot, ".gitignore"), ".harness/\n");
   git(mainRoot, ["add", "."]);
   git(mainRoot, ["commit", "-q", "-m", "init"]);
   git(mainRoot, ["push", "-q", "origin", "master"]);
@@ -115,8 +131,11 @@ function tmpArchiveRoot() {
   return fs.mkdtempSync(path.join(tmpdir(), "nc-hyk491-archive-"));
 }
 
-function armFlag(watchDir) {
-  fs.writeFileSync(path.join(watchDir, "teardown-arm.flag"), "on\n");
+function armFlag(watchDir, extra = {}) {
+  fs.writeFileSync(
+    path.join(watchDir, "teardown-arm.json"),
+    JSON.stringify({ armed: true, ...extra }),
+  );
 }
 
 // 감지기(자식 프로세스) 자리 -- 미소비 축 fixture(teardown-shadow-wire.
@@ -225,6 +244,19 @@ function readNoticeText(notifyDir) {
     .find((n) => n.startsWith("teardown-arm-notify-"));
   assert.ok(name, "expected a teardown-arm-notify-*.md file");
   return fs.readFileSync(path.join(notifyDir, name), "utf8");
+}
+
+// 같은 notifyDir에 두 번 이상 tick이 돌면 받는함 파일이 여러 장 쌓인다
+// (파일명이 ISO now를 담는다) -- readNoticeText는 .find()의 첫 매치만
+// 보므로(알파벳순 == 시간순) 두 번째 이후 tick의 받는함을 확인할 때는
+// 이 함수(정렬 뒤 마지막)를 쓴다.
+function readLatestNoticeText(notifyDir) {
+  const names = fs
+    .readdirSync(notifyDir)
+    .filter((n) => n.startsWith("teardown-arm-notify-"))
+    .sort();
+  assert.ok(names.length > 0, "expected a teardown-arm-notify-*.md file");
+  return fs.readFileSync(path.join(notifyDir, names[names.length - 1]), "utf8");
 }
 
 function cleanup(dirs) {
@@ -352,7 +384,6 @@ test("2. armed on + 양성 1: 고정 순서(SHA 선기록 -> 아카이브 sha256
       "rm",
       "--worktree",
       `path:${wtPath}`,
-      "--force",
       "--json",
     ]);
 
@@ -660,7 +691,12 @@ test("4c. 중간 실패 -- 브랜치 복원 실패: SHA 선기록 파일이 남�
         orcaExecFn: execFn,
       },
     });
-    assert.match(result.line, /teardown_arm_removed=0/);
+    // HYK-491-teardown-arm-2 (coder-task.md §2 product_scope P2-4 수리,
+    // 검토 1R P2-4 실측): 워크트리는 "실제로" 지워졌다(아래 existsSync
+    // 단언) -- 브랜치 복원만 실패했을 뿐이다. 1R의 `removed=0` 단언은
+    // 그 자체가 P2-4 버그였다(로그가 실제 제거를 덜 셈) -- 2R은 "워크
+    // 트리가 실제로 없어진 수"를 센다.
+    assert.match(result.line, /teardown_arm_removed=1/);
     assert.equal(
       fs.existsSync(wtPath),
       false,
@@ -679,6 +715,13 @@ test("4c. 중간 실패 -- 브랜치 복원 실패: SHA 선기록 파일이 남�
     const noticeText = readNoticeText(notifyDir);
     assert.match(noticeText, /TEARDOWN_ARM_BRANCH_RESTORE_FAILED/);
     assert.match(noticeText, new RegExp(record.sha));
+    // P2-4: 받는함에 손 복원 명령이 그대로 적혀 있어야 한다.
+    assert.match(
+      noticeText,
+      new RegExp(
+        `로컬 브랜치 없음 -- 복원 명령: git branch feature/restorefail ${record.sha}`,
+      ),
+    );
   } finally {
     cleanup([repo.parent, watchDir, notifyDir, archiveRoot]);
   }
@@ -789,3 +832,464 @@ test("6. 아카이브 사본이 손상됐으면(원본·사본 sha256 불일치)
     cleanup([repo.parent, watchDir, notifyDir, archiveRoot]);
   }
 });
+
+// ---------------------------------------------------------------------------
+// HYK-491-teardown-arm-2 (coder-task.md §2 product_scope, 검토 1R P1-1/P1-2/
+// P2-2/P2-3/P2-6 수리) -- 아래부터는 2R이 더한 시험이다.
+// ---------------------------------------------------------------------------
+
+test("7. 음성 -- 커밋 안 된 변경(추적 수정, P1-1): armed on + ELIGIBLE이어도 porcelain 확인이 제거를 막고 변경을 보존한다", () => {
+  const repo = setupRepo();
+  addWorktree(repo, "wt-dirty-tracked", "feature/dirty-tracked");
+  const [mainPath, wtPath] = listWorktreePaths(repo.mainRoot);
+  makeEligibleHarness(wtPath);
+  fs.writeFileSync(path.join(wtPath, "README.md"), "UNCOMMITTED EDIT\n");
+  const watchDir = tmpWatchDir();
+  const notifyDir = tmpNotifyDir();
+  const archiveRoot = tmpArchiveRoot();
+  try {
+    armFlag(watchDir);
+    const execFn = buildFakeOrcaExecFn({ mainRoot: repo.mainRoot });
+    const result = runWatchOnce({
+      repoRoot: repo.mainRoot,
+      watchDir,
+      notifyDir,
+      now: Date.parse("2026-11-06T09:00:00+09:00"),
+      execFn: unconsumedExecFn([
+        { worktreePath: mainPath, kind: "NA" },
+        { worktreePath: wtPath, kind: "CONSUMED" },
+      ]),
+      resourceResidue: {
+        worktreeListFn: () => ({
+          ok: true,
+          worktrees: listWorktreePaths(repo.mainRoot),
+        }),
+        teardownShadow: { archiveRoot },
+        orcaExecFn: execFn,
+      },
+    });
+    assert.match(result.line, /teardown_shadow_eligible=1/);
+    assert.match(result.line, /teardown_arm_processed=1/);
+    assert.match(result.line, /teardown_arm_removed=0/);
+    assert.equal(removeCalls(execFn).length, 0, "--force must never run");
+    assert.equal(fs.existsSync(wtPath), true, "worktree must survive");
+    assert.equal(
+      fs.readFileSync(path.join(wtPath, "README.md"), "utf8"),
+      "UNCOMMITTED EDIT\n",
+      "uncommitted tracked edit must survive",
+    );
+    assert.match(readNoticeText(notifyDir), /TEARDOWN_ARM_WORKING_TREE_DIRTY/);
+  } finally {
+    cleanup([repo.parent, watchDir, notifyDir, archiveRoot]);
+  }
+});
+
+test("8. 음성 -- 커밋 안 된 변경(미추적, P1-1): armed on + ELIGIBLE이어도 porcelain 확인이 제거를 막고 새 파일을 보존한다", () => {
+  const repo = setupRepo();
+  addWorktree(repo, "wt-dirty-untracked", "feature/dirty-untracked");
+  const [mainPath, wtPath] = listWorktreePaths(repo.mainRoot);
+  makeEligibleHarness(wtPath);
+  fs.writeFileSync(
+    path.join(wtPath, "work-in-progress.txt"),
+    "UNCOMMITTED EDIT\n",
+  );
+  const watchDir = tmpWatchDir();
+  const notifyDir = tmpNotifyDir();
+  const archiveRoot = tmpArchiveRoot();
+  try {
+    armFlag(watchDir);
+    const execFn = buildFakeOrcaExecFn({ mainRoot: repo.mainRoot });
+    const result = runWatchOnce({
+      repoRoot: repo.mainRoot,
+      watchDir,
+      notifyDir,
+      now: Date.parse("2026-11-06T09:00:00+09:00"),
+      execFn: unconsumedExecFn([
+        { worktreePath: mainPath, kind: "NA" },
+        { worktreePath: wtPath, kind: "CONSUMED" },
+      ]),
+      resourceResidue: {
+        worktreeListFn: () => ({
+          ok: true,
+          worktrees: listWorktreePaths(repo.mainRoot),
+        }),
+        teardownShadow: { archiveRoot },
+        orcaExecFn: execFn,
+      },
+    });
+    assert.match(result.line, /teardown_arm_removed=0/);
+    assert.equal(removeCalls(execFn).length, 0, "--force must never run");
+    assert.equal(fs.existsSync(wtPath), true);
+    assert.equal(
+      fs.existsSync(path.join(wtPath, "work-in-progress.txt")),
+      true,
+      "untracked work-in-progress file must survive",
+    );
+    assert.match(readNoticeText(notifyDir), /TEARDOWN_ARM_WORKING_TREE_DIRTY/);
+  } finally {
+    cleanup([repo.parent, watchDir, notifyDir, archiveRoot]);
+  }
+});
+
+test("9. 음성 -- 본체(main checkout, P2-6): armed on + 본체가 다른 ELIGIBLE 조건을 전부 만족해도 인덱스 0 축이 막는다(제거 0)", () => {
+  const repo = setupRepo();
+  addWorktree(repo, "wt-sibling", "feature/sibling");
+  const [mainPath, wtPath] = listWorktreePaths(repo.mainRoot);
+  makeEligibleHarness(mainPath);
+  makeEligibleHarness(wtPath);
+  const watchDir = tmpWatchDir();
+  const notifyDir = tmpNotifyDir();
+  const archiveRoot = tmpArchiveRoot();
+  try {
+    armFlag(watchDir);
+    const execFn = buildFakeOrcaExecFn({ mainRoot: repo.mainRoot });
+    const result = runWatchOnce({
+      repoRoot: repo.mainRoot,
+      watchDir,
+      notifyDir,
+      now: Date.parse("2026-11-06T09:00:00+09:00"),
+      execFn: unconsumedExecFn([
+        { worktreePath: mainPath, kind: "CONSUMED" },
+        { worktreePath: wtPath, kind: "CONSUMED" },
+      ]),
+      resourceResidue: {
+        worktreeListFn: () => ({
+          ok: true,
+          worktrees: listWorktreePaths(repo.mainRoot),
+        }),
+        teardownShadow: { archiveRoot },
+        orcaExecFn: execFn,
+      },
+    });
+    assert.match(result.line, /TEARDOWN_MAIN_CHECKOUT:1/);
+    assert.match(result.line, /teardown_arm_processed=1/);
+    assert.match(result.line, /teardown_arm_removed=1/);
+    const rmCalls = removeCalls(execFn);
+    assert.equal(rmCalls.length, 1);
+    assert.equal(
+      rmCalls.some((a) => a.includes(`path:${mainPath}`)),
+      false,
+      "main checkout must never appear in a remove call",
+    );
+    assert.equal(
+      fs.existsSync(mainPath),
+      true,
+      "main checkout must never be removed",
+    );
+    assert.equal(fs.existsSync(wtPath), false);
+  } finally {
+    cleanup([repo.parent, watchDir, notifyDir, archiveRoot]);
+  }
+});
+
+test("10. 아카이브 기본 위치(P2-2): archiveRoot 미지정이면 감시 폴더의 부모 아카이브 아래 <날짜>-teardown-arm/<이름>-final 에 쓰인다", () => {
+  const repo = setupRepo();
+  addWorktree(repo, "wt-defaultarchive", "feature/defaultarchive");
+  const [mainPath, wtPath] = listWorktreePaths(repo.mainRoot);
+  makeEligibleHarness(wtPath);
+  const watchParent = fs.mkdtempSync(path.join(tmpdir(), "nc-hyk491-ctrl-"));
+  const watchDir = path.join(watchParent, "watch");
+  fs.mkdirSync(watchDir, { recursive: true });
+  const notifyDir = tmpNotifyDir();
+  try {
+    armFlag(watchDir);
+    const execFn = buildFakeOrcaExecFn({ mainRoot: repo.mainRoot });
+    runWatchOnce({
+      repoRoot: repo.mainRoot,
+      watchDir,
+      notifyDir,
+      now: Date.parse("2026-11-06T09:00:00+09:00"),
+      execFn: unconsumedExecFn([
+        { worktreePath: mainPath, kind: "NA" },
+        { worktreePath: wtPath, kind: "CONSUMED" },
+      ]),
+      resourceResidue: {
+        worktreeListFn: () => ({
+          ok: true,
+          worktrees: listWorktreePaths(repo.mainRoot),
+        }),
+        teardownShadow: {},
+        orcaExecFn: execFn,
+      },
+    });
+    const expectedFinalDir = path.join(
+      watchParent,
+      "아카이브",
+      "2026-11-06-teardown-arm",
+      "wt-defaultarchive-final",
+    );
+    assert.equal(
+      fs.existsSync(path.join(expectedFinalDir, "sha-record.json")),
+      true,
+    );
+    assert.equal(
+      fs.existsSync(
+        path.join(
+          expectedFinalDir,
+          "harness-archive",
+          ".harness",
+          "receipts",
+          "CODER-receipt-r1.json",
+        ),
+      ),
+      true,
+    );
+    assert.equal(fs.existsSync(wtPath), false);
+  } finally {
+    cleanup([repo.parent, watchParent, notifyDir]);
+  }
+});
+
+// 테스트 11을 위한 1차 제거(아래 test()의 몸통 길이를 줄이려고 분리) --
+// 아카이브가 실제로 생기고, 사본 sha256이 원본과 같은지까지 확인한다.
+function runArchiveReuseFirstTick({
+  repo,
+  mainPath,
+  wtPath,
+  notifyDir,
+  archiveRoot,
+  watchDir,
+}) {
+  const firstBuffer = fs.readFileSync(
+    path.join(wtPath, ".harness/receipts/CODER-receipt-r1.json"),
+  );
+  const execFn1 = buildFakeOrcaExecFn({ mainRoot: repo.mainRoot });
+  runWatchOnce({
+    repoRoot: repo.mainRoot,
+    watchDir,
+    notifyDir,
+    now: Date.parse("2026-11-06T09:00:00+09:00"),
+    execFn: unconsumedExecFn([
+      { worktreePath: mainPath, kind: "NA" },
+      { worktreePath: wtPath, kind: "CONSUMED" },
+    ]),
+    resourceResidue: {
+      worktreeListFn: () => ({
+        ok: true,
+        worktrees: listWorktreePaths(repo.mainRoot),
+      }),
+      teardownShadow: { archiveRoot },
+      orcaExecFn: execFn1,
+    },
+  });
+  assert.equal(fs.existsSync(wtPath), false);
+  const finalDir = path.join(archiveRoot, "wt-reuse-final");
+  const copyPath = path.join(
+    finalDir,
+    "harness-archive",
+    ".harness",
+    "receipts",
+    "CODER-receipt-r1.json",
+  );
+  assert.equal(fs.existsSync(copyPath), true);
+  assert.equal(sha256(fs.readFileSync(copyPath)), sha256(firstBuffer));
+  return { finalDir, copyPath, firstBuffer };
+}
+
+// 같은 경로에 새 워크트리를 다시 만든다(다른 브랜치, 다른 .harness
+// 내용 -- rounds/SECOND-only.md가 1차 아카이브에 없던 파일이다).
+function recreateWorktreeAtReusedPath(repo, wtPath) {
+  git(repo.mainRoot, [
+    "worktree",
+    "add",
+    "-q",
+    "-b",
+    "feature/reuse-2",
+    wtPath,
+    "master",
+  ]);
+  makeEligibleHarness(wtPath);
+  writeHarnessFile(wtPath, ".harness/rounds/SECOND-only.md", "second\n");
+}
+
+test("11. 아카이브 경로 재사용(P2-3): 같은 워크트리 경로가 2차로 제거 대상이 되면 기존 아카이브를 덮어쓰지 않고 건너뛴다", () => {
+  const repo = setupRepo();
+  addWorktree(repo, "wt-reuse", "feature/reuse-1");
+  const [mainPath, wtPath] = listWorktreePaths(repo.mainRoot);
+  makeEligibleHarness(wtPath);
+  const watchDir = tmpWatchDir();
+  const notifyDir = tmpNotifyDir();
+  const archiveRoot = tmpArchiveRoot();
+  try {
+    armFlag(watchDir);
+    const { finalDir, copyPath, firstBuffer } = runArchiveReuseFirstTick({
+      repo,
+      mainPath,
+      wtPath,
+      notifyDir,
+      archiveRoot,
+      watchDir,
+    });
+    recreateWorktreeAtReusedPath(repo, wtPath);
+
+    const execFn2 = buildFakeOrcaExecFn({ mainRoot: repo.mainRoot });
+    const result2 = runWatchOnce({
+      repoRoot: repo.mainRoot,
+      watchDir,
+      notifyDir,
+      now: Date.parse("2026-11-06T09:05:00+09:00"),
+      execFn: unconsumedExecFn([
+        { worktreePath: mainPath, kind: "NA" },
+        { worktreePath: wtPath, kind: "CONSUMED" },
+      ]),
+      resourceResidue: {
+        worktreeListFn: () => ({
+          ok: true,
+          worktrees: listWorktreePaths(repo.mainRoot),
+        }),
+        teardownShadow: { archiveRoot },
+        orcaExecFn: execFn2,
+      },
+    });
+    assert.match(result2.line, /teardown_arm_removed=0/);
+    assert.equal(
+      removeCalls(execFn2).length,
+      0,
+      "must skip before calling remove",
+    );
+    assert.equal(
+      fs.existsSync(wtPath),
+      true,
+      "second worktree at the reused path must remain",
+    );
+    // 기존 아카이브 바이트 무변(섞이지 않음).
+    assert.equal(sha256(fs.readFileSync(copyPath)), sha256(firstBuffer));
+    assert.equal(
+      fs.existsSync(
+        path.join(
+          finalDir,
+          "harness-archive",
+          ".harness",
+          "rounds",
+          "SECOND-only.md",
+        ),
+      ),
+      false,
+      "second round file must not leak into the first archive",
+    );
+    assert.match(
+      readLatestNoticeText(notifyDir),
+      /TEARDOWN_ARM_ARCHIVE_ALREADY_EXISTS/,
+    );
+  } finally {
+    cleanup([repo.parent, watchDir, notifyDir, archiveRoot]);
+  }
+});
+
+// HYK-491-teardown-arm-2 (coder-task.md §2 product_scope P1-2 수리, 검토
+// 1R P1-2 실측 "이상 값 7종이 전부 on으로 샌다") -- 9종 각각 off로
+// 새고, 사유 토큰이 구분되는지 각 시나리오를 독립 test()로 확인한다.
+const ARM_FLAG_INVALID_VALUE_CASES = [
+  {
+    name: "없음(파일 없음)",
+    setup: () => {},
+    reason: "TEARDOWN_ARM_FLAG_ABSENT",
+  },
+  {
+    name: "빈 파일",
+    setup: (watchDir) =>
+      fs.writeFileSync(path.join(watchDir, "teardown-arm.json"), ""),
+    reason: "TEARDOWN_ARM_FLAG_EMPTY",
+  },
+  {
+    name: "JSON 아님",
+    setup: (watchDir) =>
+      fs.writeFileSync(path.join(watchDir, "teardown-arm.json"), "not json{"),
+    reason: "TEARDOWN_ARM_FLAG_NOT_JSON",
+  },
+  {
+    name: "폴더",
+    setup: (watchDir) => fs.mkdirSync(path.join(watchDir, "teardown-arm.json")),
+    reason: "TEARDOWN_ARM_FLAG_IS_DIRECTORY",
+  },
+  {
+    name: '문자열 "true"',
+    setup: (watchDir) =>
+      fs.writeFileSync(
+        path.join(watchDir, "teardown-arm.json"),
+        JSON.stringify("true"),
+      ),
+    reason: "TEARDOWN_ARM_FLAG_VALUE_IS_STRING",
+  },
+  {
+    name: "숫자 1",
+    setup: (watchDir) =>
+      fs.writeFileSync(path.join(watchDir, "teardown-arm.json"), "1"),
+    reason: "TEARDOWN_ARM_FLAG_VALUE_IS_NUMBER",
+  },
+  {
+    name: "false",
+    setup: (watchDir) =>
+      fs.writeFileSync(
+        path.join(watchDir, "teardown-arm.json"),
+        JSON.stringify({ armed: false }),
+      ),
+    reason: "TEARDOWN_ARM_FLAG_ARMED_NOT_TRUE",
+  },
+  {
+    name: "키 없음",
+    setup: (watchDir) =>
+      fs.writeFileSync(
+        path.join(watchDir, "teardown-arm.json"),
+        JSON.stringify({ other: 1 }),
+      ),
+    reason: "TEARDOWN_ARM_FLAG_ARMED_KEY_MISSING",
+  },
+  {
+    name: "배열",
+    setup: (watchDir) =>
+      fs.writeFileSync(path.join(watchDir, "teardown-arm.json"), "[]"),
+    reason: "TEARDOWN_ARM_FLAG_VALUE_IS_ARRAY",
+  },
+];
+
+for (const c of ARM_FLAG_INVALID_VALUE_CASES) {
+  test(`12. 무장 파일 이상 값 -- ${c.name}: off로 새고 사유 토큰이 구분된다(제거 0, orca exec 호출 0)`, () => {
+    const repo = setupRepo();
+    addWorktree(repo, "wt-invalidflag", "feature/invalidflag");
+    const [mainPath, wtPath] = listWorktreePaths(repo.mainRoot);
+    makeEligibleHarness(wtPath);
+    const watchDir = tmpWatchDir();
+    const notifyDir = tmpNotifyDir();
+    const archiveRoot = tmpArchiveRoot();
+    try {
+      c.setup(watchDir);
+      const execFn = buildFakeOrcaExecFn({ mainRoot: repo.mainRoot });
+      const result = runWatchOnce({
+        repoRoot: repo.mainRoot,
+        watchDir,
+        notifyDir,
+        now: Date.parse("2026-11-06T09:00:00+09:00"),
+        execFn: unconsumedExecFn([
+          { worktreePath: mainPath, kind: "NA" },
+          { worktreePath: wtPath, kind: "CONSUMED" },
+        ]),
+        resourceResidue: {
+          worktreeListFn: () => ({
+            ok: true,
+            worktrees: listWorktreePaths(repo.mainRoot),
+          }),
+          teardownShadow: { archiveRoot },
+          orcaExecFn: execFn,
+        },
+      });
+      assert.equal(
+        result.line.includes("teardown_arm_"),
+        false,
+        `case ${c.name}: off must stay byte-identical to the base log line`,
+      );
+      assert.equal(
+        execFn.calls.length,
+        0,
+        `case ${c.name}: armed must be off, orca exec must never be called`,
+      );
+      assert.equal(fs.existsSync(wtPath), true);
+      const armResult =
+        result.resourceResidueResult.teardownShadowResult.armResult;
+      assert.equal(armResult.armed, false);
+      assert.equal(armResult.flagReason, c.reason);
+    } finally {
+      cleanup([repo.parent, watchDir, notifyDir, archiveRoot]);
+    }
+  });
+}

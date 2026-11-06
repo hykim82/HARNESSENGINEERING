@@ -3995,8 +3995,7 @@ export function teardownSeat(ctx, opts = {}) {
 }
 
 // ---- HYK-491-teardown-arm-1 (coder-task.md §2 product_scope ① "teardown
-// 실행 경로 · `teardownSeat` armed 결선 · 워크트리 제거 명령은 기존
-// `buildWorktreeRemoveCommand` 재사용") ----
+// 실행 경로 · `teardownSeat` armed 결선") ----
 // teardownSeat(위)은 HYK-171 좌석(seat/pty) 축의 판정(judgeTeardown,
 // dispatchCorrelationProven 등)에 묶여 있다 -- 이 축(HYK-464 아카이브
 // 판정, judgeArchiveEligibility)은 완전히 다른 전제(병합 완료·미소비
@@ -4007,8 +4006,23 @@ export function teardownSeat(ctx, opts = {}) {
 // 않고(판정은 이미 호출자가 끝냈다), **같은 armed-gate 모양**만 따라
 // 만든 독립 함수다 -- armed!==true면 close/rm 어느 것도 호출되지 않는
 // 것과 동형으로, 여기도 armed!==true면 guardedExec을 한 번도 타지
-// 않는다(파괴 argv 0). 제거 명령 자체는 새로 만들지 않고 기존
-// buildWorktreeRemoveCommand(위, A5)를 그대로 재사용한다.
+// 않는다(파괴 argv 0).
+// HYK-491-teardown-arm-2 (coder-task.md §2 product_scope P1-1 수리, 검토
+// 1R P1-1 실측): 1R은 여기서 `buildWorktreeRemoveCommand`(위, A5 -- 항상
+// `--force`)를 재사용했다 -- 그래서 커밋 안 된 변경이 있는 워크트리도
+// 조용히 force-제거되고 그 변경은 어디에도 남지 않았다(§P1-1). 호출자
+// (watch-run.mjs의 runArmedRemovalForWorktree)가 제거 직전에 이미
+// `git status --porcelain` 0줄을 fail-closed로 확인하므로(그 축이
+// clean하지 않으면 여기까지 오지 않는다) 이 축은 더는 `--force`가
+// 필요 없다 -- 그리고 `buildWorktreeRemoveCommand` 자체의 기본 --force
+// 계약을 조용히 바꾸면 createManagedWorktree의 rollback(비범위, 그
+// 함수의 유일한 다른 호출자)까지 깨진다(§2-C 비타협 #4가 §2-C 쪽에
+// 이미 똑같은 이유로 만든 별도 빌더 `buildTeardownWorktreeRemoveCommand`
+// 참조). 그래서 이 축은 `buildWorktreeRemoveCommand`를 더는 호출하지
+// 않고, 이미 "force는 opts.force===true일 때만"을 계약하는 그 기존
+// 빌더를 force:false로 재사용한다(새 빌더 0, `buildWorktreeRemoveCommand`
+// 변경 0 -- 그 함수의 유일한 남은 호출자(rollback)는 이 변경으로 전혀
+// 영향받지 않는다).
 export const ARCHIVE_TEARDOWN_PHASE = Object.freeze({
   GATE: "GATE",
   REMOVE: "REMOVE",
@@ -4044,7 +4058,7 @@ export function removeArchivedWorktree(ctx, opts = {}) {
     };
   }
   const removed = guardedExec(
-    buildWorktreeRemoveCommand(c.worktreePath),
+    buildTeardownWorktreeRemoveCommand(c.worktreePath, { force: false }),
     opts.execFn,
     "ARCHIVE_TEARDOWN_REMOVE_FAILED",
   );
