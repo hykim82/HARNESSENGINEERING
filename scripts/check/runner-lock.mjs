@@ -939,13 +939,21 @@ export function acquireRunnerLock(opts) {
 }
 
 // §(d) release -- "if read(L).lockId==me.lockId: unlink L else lock_lost=
-// true". lockId로만 대조한다(2R까지의 pid 대조에서 교체, F11 닫힘) --
-// 해제는 "그 특정 획득 인스턴스"가 지우는 것이지 "그 pid"가 지우는 게
-// 아니다(같은 pid가 재사용되어 새로 잡았을 수도 있다는 사실을 F6/judge가
-// 이미 다루지만, 해제 축도 독립적으로 lockId라는 더 정확한 키를 쓴다).
-// lockId가 맞지 않거나(다른 주인) 파일 자체가 없으면(이미 누가 치웠다)
-// 지우지 않고 lockLost:true를 돌린다 -- 호출자(guardLockForRun)가 이것을
-// LOCK_LOST(러너 exit 1)로 번역한다.
+// true; ...; unlink L.alive.<me>". lockId로만 대조한다(2R까지의 pid
+// 대조에서 교체, F11 닫힘) -- 해제는 "그 특정 획득 인스턴스"가 지우는
+// 것이지 "그 pid"가 지우는 게 아니다(같은 pid가 재사용되어 새로 잡았을
+// 수도 있다는 사실을 F6/judge가 이미 다루지만, 해제 축도 독립적으로
+// lockId라는 더 정확한 키를 쓴다). lockId가 맞지 않거나(다른 주인) 파일
+// 자체가 없으면(이미 누가 치웠다) 지우지 않고 lockLost:true를 돌린다 --
+// 호출자(guardLockForRun)가 이것을 LOCK_LOST(러너 exit 1)로 번역한다.
+//
+// HYK-494-runner-lock-3-fix1 (라이브 발견, 1R 전건 러너 1회차 실측): L
+// 자체는 지워지는데 자기 소유 `L.alive.<lockId>` heartbeat 파일이 영원히
+// 남았다 -- §(d) 의사 코드의 "unlink L.alive.<me>" 줄을 빠뜨렸다. L이
+// 지워졌는지(lockLost) 여부와 무관하게 항상 best-effort로 치운다 --
+// 우리 소유의 파일이고(lockId는 우리가 생성한 난수), 더 이상 참조할
+// 길이 없는 채로 남으면 홈 디렉터리에 누수만 쌓인다(§(d) 회수권 청소와
+// 같은 "best-effort, 공간 누수일 뿐 불변식 무관" 근거).
 export function releaseRunnerLock({
   lockPath,
   lockId,
@@ -953,7 +961,16 @@ export function releaseRunnerLock({
   unlinkFn = unlinkSync,
 } = {}) {
   const { ok, content } = readLockContentResult(readFileFn, lockPath);
+  const cleanupAliveFile = () => {
+    if (!lockId) return;
+    try {
+      unlinkFn(aliveFilePath(lockPath, lockId));
+    } catch {
+      // best-effort.
+    }
+  };
   if (!ok || !content || !lockId || content.lockId !== lockId) {
+    cleanupAliveFile();
     return {
       released: false,
       lockLost: true,
@@ -962,11 +979,13 @@ export function releaseRunnerLock({
   }
   try {
     unlinkFn(lockPath);
+    cleanupAliveFile();
     return { released: true, lockLost: false, reason: null };
   } catch (err) {
     // 지우기 자체가 실패(권한 등) -- 우리 것이었던 게 맞지만 못 지웠다.
     // 이것도 "더 이상 우리가 안전하게 비웠다고 보증 못 한다"는 뜻이라
     // lockLost로 분류한다(러너는 LOCK_LOST로 끝낸다, 정직 > 낙관).
+    cleanupAliveFile();
     return { released: false, lockLost: true, reason: err.message };
   }
 }

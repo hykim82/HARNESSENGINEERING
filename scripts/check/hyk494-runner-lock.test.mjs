@@ -168,6 +168,65 @@ test("releaseRunnerLock: releases our own lock (lockId matches) -- file removed,
   }
 });
 
+// HYK-494-runner-lock-3-fix1 (live finding, this round's own full-runner
+// run 1): a normal release must ALSO clean up our own L.alive.<lockId>
+// heartbeat file -- a leftover was found in the real homedir after the
+// first full-runner pass (§(d) "unlink L.alive.<me>", missed in the first
+// implementation).
+test("releaseRunnerLock: a normal release ALSO removes our own L.alive.<lockId> heartbeat file (no leftover)", () => {
+  const dir = freshLockDir();
+  const lockPath = join(dir, "r.lock");
+  try {
+    const acquired = acquireRunnerLock({
+      lockPath,
+      pid: process.pid,
+      startedAtMs: 1,
+      env: cleanEnv(),
+    });
+    assert.ok(
+      existsSync(`${lockPath}.alive.${acquired.lockId}`),
+      "the alive file must exist right after claiming (sanity check)",
+    );
+    releaseRunnerLock({ lockPath, lockId: acquired.lockId });
+    assert.equal(
+      existsSync(`${lockPath}.alive.${acquired.lockId}`),
+      false,
+      "the alive file must be gone after release -- no leftover in the home directory",
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("releaseRunnerLock: even a LOST lock (lockId mismatch) still cleans up OUR OWN alive file (it is our bookkeeping, not the new owner's)", () => {
+  const dir = freshLockDir();
+  const lockPath = join(dir, "r.lock");
+  try {
+    writeFileSync(
+      `${lockPath}.alive.my-own-token`,
+      JSON.stringify({ aliveAtMs: Date.now() }),
+    );
+    writeFileSync(
+      lockPath,
+      JSON.stringify({ pid: 999999, lockId: "someone-elses-token" }),
+    );
+    const result = releaseRunnerLock({ lockPath, lockId: "my-own-token" });
+    assert.equal(result.lockLost, true);
+    assert.equal(
+      existsSync(`${lockPath}.alive.my-own-token`),
+      false,
+      "our own stale alive file must still be cleaned up even when we lost the lock",
+    );
+    assert.equal(
+      existsSync(lockPath),
+      true,
+      "the OTHER owner's lock itself must survive untouched",
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // -- §3: release by lockId only (HYK-494 3R, F11 수리: pid 대조에서 교체) --
 
 test("releaseRunnerLock: a lock file owned by a DIFFERENT lockId is left untouched -- never deletes another instance's lock, reports lockLost true", () => {
