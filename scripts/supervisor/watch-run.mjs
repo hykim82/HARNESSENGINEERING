@@ -4445,23 +4445,52 @@ function buildDefaultTeardownArmArchiveRoot(watchDir, now) {
 // 토큰 TEARDOWN_ARM_ARCHIVE_ALREADY_EXISTS) 건너뛴다 -- 덮어쓰기 금지는
 // 그대로다(기존 아카이브 바이트를 손대지 않는다). resolveExistingArmArchive
 // 에서 분리(복잡도 분산).
-function resolveExistingArmArchive({
-  recordDir,
+// HYK-491-arm-followup-3 (coder-task.md §2 product_scope P2-C 수리,
+// 검토 1R P2-C 실측 M·N·O): .harness 파일 내용이 IDENTICAL이라는 것만
+// 으로는 "이 아카이브가 «이» 워크트리의 것"이라는 신원을 보장하지
+// 않는다 -- 옛 SHA가 남아 있어도(M, rm 실패 뒤 새 커밋이 master에
+// 병합된 경우), 다른 경로의 같은 basename도(N), 기록 자체가 없어도(O)
+// 파일 내용만 보면 통과했다. 선기록 sha-record.json(recordTeardownArmSha
+// 가 쓴 그 파일)을 "지금" 관측한 worktreePath·sha·branch와 대조한다 --
+// 기록이 없거나 읽기/파싱에 실패하거나 셋 중 하나라도 다르면 false다.
+// resolveExistingArmArchive에서 분리(복잡도 분산).
+function matchesArmShaRecord({
+  recordPath,
+  worktreePath,
+  headSha,
+  branchName,
+  readArchiveBufferFn,
+}) {
+  let record;
+  try {
+    record = JSON.parse(readArchiveBufferFn(recordPath).toString("utf8"));
+  } catch {
+    return false;
+  }
+  return (
+    !!record &&
+    typeof record === "object" &&
+    record.worktreePath === worktreePath &&
+    record.sha === headSha &&
+    record.branch === branchName
+  );
+}
+
+// 파일 «집합»이 같은지 + 파일별 sha256이 IDENTICAL인지(P2-B 가드).
+// resolveExistingArmArchive에서 분리(복잡도 분산). ok:false면 호출자가
+// 재사용을 거부한다 -- 이유는 호출자가 통일된 사유 토큰으로 싣는다.
+function collectIdenticalArchivedFiles({
+  archiveDestDir,
   worktreePath,
   archiveManifestFiles,
   readFileBufferFn,
   readArchiveBufferFn,
 }) {
-  const archiveDestDir = path.join(recordDir, "harness-archive");
-  const alreadyExistsFailure = {
-    step: "ARCHIVE_EXISTS_CHECK",
-    reason: "TEARDOWN_ARM_ARCHIVE_ALREADY_EXISTS",
-  };
   let archivedPaths;
   try {
     archivedPaths = defaultListHarnessFiles(archiveDestDir).slice().sort();
   } catch {
-    return alreadyExistsFailure;
+    return { ok: false };
   }
   const currentPaths = archiveManifestFiles
     .map((f) => f.path)
@@ -4470,7 +4499,7 @@ function resolveExistingArmArchive({
   const sameSet =
     archivedPaths.length === currentPaths.length &&
     archivedPaths.every((p, i) => p === currentPaths[i]);
-  if (!sameSet) return alreadyExistsFailure;
+  if (!sameSet) return { ok: false };
   const archivedFiles = [];
   for (const f of archiveManifestFiles) {
     let currentBuffer;
@@ -4479,26 +4508,63 @@ function resolveExistingArmArchive({
       currentBuffer = readFileBufferFn(f.path, worktreePath);
       archivedBuffer = readArchiveBufferFn(path.join(archiveDestDir, f.path));
     } catch {
-      return alreadyExistsFailure;
+      return { ok: false };
     }
     if (!Buffer.isBuffer(currentBuffer) || !Buffer.isBuffer(archivedBuffer)) {
-      return alreadyExistsFailure;
+      return { ok: false };
     }
     const currentSha = createHash("sha256").update(currentBuffer).digest("hex");
     const archivedSha = createHash("sha256")
       .update(archivedBuffer)
       .digest("hex");
-    if (currentSha !== archivedSha) return alreadyExistsFailure;
+    if (currentSha !== archivedSha) return { ok: false };
     archivedFiles.push({
       path: f.path,
       bytes: currentBuffer.length,
       sha256: currentSha,
     });
   }
+  return { ok: true, archivedFiles };
+}
+
+function resolveExistingArmArchive({
+  recordDir,
+  worktreePath,
+  headSha,
+  branchName,
+  archiveManifestFiles,
+  readFileBufferFn,
+  readArchiveBufferFn,
+}) {
+  const archiveDestDir = path.join(recordDir, "harness-archive");
+  const recordPath = path.join(recordDir, "sha-record.json");
+  const alreadyExistsFailure = {
+    step: "ARCHIVE_EXISTS_CHECK",
+    reason: "TEARDOWN_ARM_ARCHIVE_ALREADY_EXISTS",
+  };
+  if (
+    !matchesArmShaRecord({
+      recordPath,
+      worktreePath,
+      headSha,
+      branchName,
+      readArchiveBufferFn,
+    })
+  ) {
+    return alreadyExistsFailure;
+  }
+  const identical = collectIdenticalArchivedFiles({
+    archiveDestDir,
+    worktreePath,
+    archiveManifestFiles,
+    readFileBufferFn,
+    readArchiveBufferFn,
+  });
+  if (!identical.ok) return alreadyExistsFailure;
   return {
     ok: true,
-    recordPath: path.join(recordDir, "sha-record.json"),
-    archivedFiles,
+    recordPath,
+    archivedFiles: identical.archivedFiles,
     reusedArchive: true,
   };
 }
@@ -4536,6 +4602,8 @@ function recordShaAndArchive({
     return resolveExistingArmArchive({
       recordDir,
       worktreePath,
+      headSha,
+      branchName,
       archiveManifestFiles,
       readFileBufferFn,
       readArchiveBufferFn,
@@ -4873,10 +4941,19 @@ function runArmedRemovalForWorktree({
 // 있게, armed 여부와 무관).
 // buildTeardownArmNoticeText(아래)에서 분리(복잡도 분산) -- 워크트리
 // 하나의 상세 블록만 만든다.
+// HYK-491-arm-followup-3 (coder-task.md §2 product_scope P2-E 수리,
+// 검토 1R P2-E 실측): 항목 줄이 이 결과 하나만 보고 "중단"이라고 썼다
+// -- 그 실패가 isArmRemovalSkipOnlyFailure(건너뜀, 전체 중단 아님)이면
+// 머리말과 같은 낱말("건너뜀")을 써야 한다(머리말/항목 줄 문구 일치).
+function buildTeardownArmNoticeResultLabel(r) {
+  if (r.ok) return "제거됨(SUCCEEDED)";
+  if (isArmRemovalSkipOnlyFailure(r)) return `건너뜀(${r.step})`;
+  return `중단(${r.step})`;
+}
 function buildTeardownArmNoticeResultLines(r) {
   const lines = [];
   lines.push(`## ${r.worktreePath}`);
-  lines.push(`- 결과: ${r.ok ? "제거됨(SUCCEEDED)" : `중단(${r.step})`}`);
+  lines.push(`- 결과: ${buildTeardownArmNoticeResultLabel(r)}`);
   if (!r.ok) lines.push(`- 사유: ${r.reason}`);
   if (isNonEmptyString(r.recordPath)) {
     lines.push(`- SHA 선기록 파일: ${r.recordPath}`);
@@ -5270,6 +5347,21 @@ function teardownArmOffLogSegment(base, arm) {
   return base;
 }
 
+// HYK-491-arm-followup-3 (coder-task.md §2 product_scope P2-D 수리,
+// 검토 1R P2-D 실측): confirmed_by/at은 사람 손 파일(teardown-arm.json)
+// 값이라 공백·제어문자(개행 포함)가 그대로 로그 줄에 실리면 watch.log가
+// 여러 줄로 갈라지고, 공백으로 나뉘는 가짜 teardown_arm_* 토큰이 꼬리에
+// 섞일 수 있다(이 로그 줄은 공백으로 key=value 토큰을 가른다 -- 값
+// 안의 공백이 사라지면 가짜 토큰도 한 덩어리로 뭉쳐 토큰 경계가 생기지
+// 않는다). 모든 공백(개행 포함)·제어문자(U+0000~U+001F, U+007F)를 "_"
+// 치환한다(기록만 -- 판정 불사용이므로 완전한 가역성은 필요 없다).
+function sanitizeArmLogValue(value) {
+  // \p{Cc}(유니코드 제어문자 범주, U+0000~U+001F·U+007F 포함)를 쓴다 --
+  // 리터럴 \x00-\x1f 범위는 no-control-regex 린트에 걸린다(의도적으로
+  // 제어문자를 거르는 자리인데도).
+  return String(value).replace(/[\s\p{Cc}]/gu, "_");
+}
+
 // armed===true + attempted===true 경로만 맡는다(처리 수·제거 수 +
 // HYK-491-arm-followup-1 P2-① confirmed_by/at "기록만"). teardownShadowLogSegment
 // 에서 분리(복잡도 분산).
@@ -5295,9 +5387,15 @@ function teardownArmAttemptedLogSegment(base, arm) {
   // 머리에 이미 적는 것과 같은 값을 꼬리 칸에도 옮긴다(사람이 로그만
   // 보고도 "누가·언제 확인했다"를 알 수 있게).
   if (isNonEmptyString(arm.confirmedBy) || isNonEmptyString(arm.at)) {
+    const confirmedByToken = isNonEmptyString(arm.confirmedBy)
+      ? sanitizeArmLogValue(arm.confirmedBy)
+      : "NONE";
+    const atToken = isNonEmptyString(arm.at)
+      ? sanitizeArmLogValue(arm.at)
+      : "NONE";
     line +=
-      ` teardown_arm_confirmed_by=${arm.confirmedBy ?? "NONE"} ` +
-      `teardown_arm_at=${arm.at ?? "NONE"}`;
+      ` teardown_arm_confirmed_by=${confirmedByToken} ` +
+      `teardown_arm_at=${atToken}`;
   }
   return line;
 }

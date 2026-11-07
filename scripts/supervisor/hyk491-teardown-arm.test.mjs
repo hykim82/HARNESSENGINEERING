@@ -1461,6 +1461,12 @@ test("15. P2-② 음성 -- 커밋 안 된 변경이 있는 워크트리는 «그
     );
     const noticeText = readNoticeText(notifyDir);
     assert.match(noticeText, /TEARDOWN_ARM_WORKING_TREE_DIRTY/);
+    // HYK-491-arm-followup-3 (coder-task.md §2 product_scope P2-E 수리,
+    // 검토 1R P2-E 실측): 건너뜀(전체 중단 아님)인 항목은 받는함 머리말
+    // ("전부가 순서대로 처리됐다")과 같은 낱말을 써야 한다 -- "중단"이
+    // 아니라 "건너뜀".
+    assert.match(noticeText, /- 결과: 건너뜀\(WORKING_TREE_CHECK\)/);
+    assert.doesNotMatch(noticeText, /- 결과: 중단\(WORKING_TREE_CHECK\)/);
   } finally {
     cleanup([repo.parent, watchDir, notifyDir, archiveRoot]);
   }
@@ -1506,16 +1512,19 @@ test("16. P2-② 자기 아카이브 같은 날 재시도(IDENTICAL): 지금 .ha
     );
     const firstCopyBuffer = fs.readFileSync(copyPath);
 
-    // 같은 경로에 같은 내용(makeEligibleHarness는 결정적)으로 다시
+    // 같은 경로 · 같은 브랜치(1차 tick이 복원해 둔 feature/identical-
+    // retry-1) · 같은 내용(makeEligibleHarness는 결정적)으로 다시
     // 워크트리를 만든다 -- 아카이브는 이미 있지만 내용이 IDENTICAL.
+    // HYK-491-arm-followup-3 (coder-task.md §2 product_scope P2-C 수리):
+    // 재사용 조건이 이제 sha-record.json의 worktreePath·sha·branch까지
+    // 대조한다 -- "같은 날 안전한 재시도"는 브랜치까지 같은 경우를
+    // 말한다(새 브랜치는 "다른 신원"이라 거부 대상, 아래 19번대 시험).
     git(repo.mainRoot, [
       "worktree",
       "add",
       "-q",
-      "-b",
-      "feature/identical-retry-2",
       wtPath,
-      "master",
+      "feature/identical-retry-1",
     ]);
     makeEligibleHarness(wtPath);
 
@@ -1598,6 +1607,18 @@ function runArchiveMismatchFirstTick({
 // 테스트 17을 위한 2차 설정(몸통 길이를 줄이려고 분리): 같은 경로를
 // 다른 내용(추가 파일)으로 재사용 + 그 뒤에 새 워크트리 하나를 더
 // 더한다(건너뜀이 뒤 워크트리를 막지 않는지 확인하는 데 쓴다).
+//
+// HYK-491-arm-followup-3 (coder-task.md §2 product_scope P2-A 수리,
+// 검토 1R P2-A 실측): `git worktree list --porcelain`은 "마지막에 더한
+// 것 = 끝"이 아니라 `.git/worktrees` 아래 폴더 이름의 사전순으로 나온다
+// (직접 재현: after-reuse-diff · clean-order-b · dirty-order-a ·
+// reuse-diff 순, review-1 §3 P2-A 원문). 1R이 쓴 이름 "wt-after-reuse-
+// diff"는 "wt-reuse-diff"보다 사전순으로 "앞"이다(a < r) -- 그래서 실제
+// 처리 순서는 after가 먼저, reuse-diff(건너뜀 대상)가 나중이었고, base
+// (중단)와 HEAD(건너뜀 뒤 계속) 결과가 똑같이 나와(마지막 항목이라 뒤가
+// 없다) 이 시험은 base에서도 통과하는 헛시험이었다. 이름을 "wt-zz-
+// after"로 바꿔 사전순으로 반드시 뒤에 오게 한다(z > r) -- 그리고 실제
+// 순서를 추측하지 않고 listWorktreePaths로 직접 확인한다.
 function setupMismatchedReuseAndExtraWorktree({ repo, mainPath, wtReuse }) {
   git(repo.mainRoot, [
     "worktree",
@@ -1610,15 +1631,22 @@ function setupMismatchedReuseAndExtraWorktree({ repo, mainPath, wtReuse }) {
   ]);
   makeEligibleHarness(wtReuse);
   writeHarnessFile(wtReuse, ".harness/rounds/EXTRA.md", "extra\n");
-  addWorktree(repo, "wt-after-reuse-diff", "feature/after-reuse-diff");
+  addWorktree(repo, "wt-zz-after", "feature/zz-after");
   const allPaths = listWorktreePaths(repo.mainRoot);
-  // HYK-491-arm-followup-1: git worktree list --porcelain의 순서는
-  // "마지막에 더한 것 = 끝"을 보장하지 않는다(알파벳 비슷한 정렬로
-  // 샐 수 있다) -- mainPath/wtReuse를 제외한 나머지로 직접 찾는다.
   const wtAfter = allPaths.find((p) => p !== mainPath && p !== wtReuse);
   assert.ok(
     wtAfter,
     "expected a third worktree path distinct from main/wtReuse",
+  );
+  // 처리 순서 단언(추측 조립 0) -- eligibleEntries는 이 배열 순서를
+  // 그대로 보존하므로, wtReuse가 wtAfter보다 앞에 와야만 "건너뜀 뒤
+  // 계속"을 실제로 재는 시험이 된다(그렇지 않으면 위에서 적은 헛시험
+  // 모양으로 되돌아간다).
+  const reuseIndex = allPaths.indexOf(wtReuse);
+  const afterIndex = allPaths.indexOf(wtAfter);
+  assert.ok(
+    reuseIndex >= 0 && afterIndex >= 0 && reuseIndex < afterIndex,
+    `expected wtReuse(index ${reuseIndex}) before wtAfter(index ${afterIndex}) in git worktree list order: ${JSON.stringify(allPaths)}`,
   );
   makeEligibleHarness(wtAfter);
   return wtAfter;
@@ -1685,10 +1713,12 @@ test("17. P2-② 아카이브 재사용 불일치도 그 워크트리만 건너�
       sha256(firstCopyBuffer),
       "existing archive bytes from the first tick must remain untouched",
     );
-    assert.match(
-      readLatestNoticeText(notifyDir),
-      /TEARDOWN_ARM_ARCHIVE_ALREADY_EXISTS/,
-    );
+    const latestNotice = readLatestNoticeText(notifyDir);
+    assert.match(latestNotice, /TEARDOWN_ARM_ARCHIVE_ALREADY_EXISTS/);
+    // P2-E: 건너뜀(뒤 워크트리는 계속 처리됨)을 "중단"으로 표기하지
+    // 않는다 -- 머리말/항목 줄 문구 일치.
+    assert.match(latestNotice, /- 결과: 건너뜀\(ARCHIVE_EXISTS_CHECK\)/);
+    assert.doesNotMatch(latestNotice, /- 결과: 중단\(ARCHIVE_EXISTS_CHECK\)/);
   } finally {
     cleanup([repo.parent, watchDir, notifyDir, archiveRoot]);
   }
@@ -1744,5 +1774,390 @@ test("18. P2-③ 아카이브 날짜 폴더는 KST 기준이다(now = KST 08:30,
     assert.equal(fs.existsSync(wtPath), false);
   } finally {
     cleanup([repo.parent, watchParent, notifyDir]);
+  }
+});
+
+// HYK-491-arm-followup-3 (coder-task.md §2 product_scope P2-B, 검토 1R
+// P2-B 실측): 시험 17은 파일 «집합»이 달라서(EXTRA.md 추가) 집합
+// 비교에서 먼저 걸린다 -- 집합은 같은데 내용만 다른 경우(파일별
+// sha256 대조, resolveExistingArmArchive의 for 루프)를 지키는 시험이
+// 없었다. 그 가드가 없으면(변이 M5) 내용이 바뀐 .harness를 실제로
+// 지운다(review-1 §2ⓔ M5 아래 F 탐침). 이 시험은 sha-record.json의
+// worktreePath·sha·branch는 전부 일치시키고(P2-C 축과 분리) 파일
+// «이름 집합»만 같게, 내용만 다르게 둔다.
+// 테스트 19를 위한 1차 제거(몸통 길이를 줄이려고 분리, 테스트 11/17과
+// 동일 관례) -- 아카이브가 실제로 생기고, 사본 버퍼를 돌려준다.
+function runContentDiffFirstTick({
+  repo,
+  mainPath,
+  wtPath,
+  notifyDir,
+  archiveRoot,
+  watchDir,
+}) {
+  armFlag(watchDir);
+  const execFn1 = buildFakeOrcaExecFn({ mainRoot: repo.mainRoot });
+  runWatchOnce({
+    repoRoot: repo.mainRoot,
+    watchDir,
+    notifyDir,
+    now: Date.parse("2026-11-06T09:00:00+09:00"),
+    execFn: unconsumedExecFn([
+      { worktreePath: mainPath, kind: "NA" },
+      { worktreePath: wtPath, kind: "CONSUMED" },
+    ]),
+    resourceResidue: {
+      worktreeListFn: () => ({
+        ok: true,
+        worktrees: listWorktreePaths(repo.mainRoot),
+      }),
+      teardownShadow: { archiveRoot },
+      orcaExecFn: execFn1,
+    },
+  });
+  assert.equal(fs.existsSync(wtPath), false, "first tick must remove it");
+  const finalDir = path.join(archiveRoot, "wt-content-diff-final");
+  const copyPath = path.join(
+    finalDir,
+    "harness-archive",
+    ".harness",
+    "receipts",
+    "CODER-receipt-r1.json",
+  );
+  return { copyPath, firstCopyBuffer: fs.readFileSync(copyPath) };
+}
+
+// 테스트 19를 위한 2차 설정(몸통 길이를 줄이려고 분리): 같은 경로 ·
+// 같은 브랜치(1차 tick이 복원한 feature/content-diff-1, sha-record와
+// 신원 전부 일치) -- 그러나 파일 «집합»은 같게 두고 내용만 다르게
+// 쓴다(집합 비교는 통과, 내용 sha256 대조에서 걸려야 한다). 그 뒤에
+// 새 워크트리를 더해 처리 순서를 단언한다(P2-A와 같은 관례).
+function setupContentMismatchAndExtraWorktree({ repo, mainPath, wtPath }) {
+  git(repo.mainRoot, [
+    "worktree",
+    "add",
+    "-q",
+    wtPath,
+    "feature/content-diff-1",
+  ]);
+  writeHarnessFile(
+    wtPath,
+    ".harness/receipts/CODER-receipt-r1.json",
+    JSON.stringify({ ok: true, changed: true }),
+  );
+  writeHarnessFile(wtPath, ".harness/coder.md", "task_id: FIXTURE-1\n");
+
+  addWorktree(repo, "wt-zz-after-content", "feature/zz-after-content");
+  const allPaths = listWorktreePaths(repo.mainRoot);
+  const wtAfter = allPaths.find((p) => p !== mainPath && p !== wtPath);
+  assert.ok(wtAfter, "expected a third worktree path");
+  const reuseIndex = allPaths.indexOf(wtPath);
+  const afterIndex = allPaths.indexOf(wtAfter);
+  assert.ok(
+    reuseIndex >= 0 && afterIndex >= 0 && reuseIndex < afterIndex,
+    `expected wtPath(index ${reuseIndex}) before wtAfter(index ${afterIndex}): ${JSON.stringify(allPaths)}`,
+  );
+  makeEligibleHarness(wtAfter);
+  return wtAfter;
+}
+
+test("19. P2-B 같은 파일 집합 · 내용만 다른 자기 아카이브는 재사용 거부(파일별 sha256 가드)", () => {
+  const repo = setupRepo();
+  addWorktree(repo, "wt-content-diff", "feature/content-diff-1");
+  const [mainPath, wtPath] = listWorktreePaths(repo.mainRoot);
+  makeEligibleHarness(wtPath);
+  const watchDir = tmpWatchDir();
+  const notifyDir = tmpNotifyDir();
+  const archiveRoot = tmpArchiveRoot();
+  try {
+    const { copyPath, firstCopyBuffer } = runContentDiffFirstTick({
+      repo,
+      mainPath,
+      wtPath,
+      notifyDir,
+      archiveRoot,
+      watchDir,
+    });
+    const wtAfter = setupContentMismatchAndExtraWorktree({
+      repo,
+      mainPath,
+      wtPath,
+    });
+
+    const execFn2 = buildFakeOrcaExecFn({ mainRoot: repo.mainRoot });
+    const result2 = runWatchOnce({
+      repoRoot: repo.mainRoot,
+      watchDir,
+      notifyDir,
+      now: Date.parse("2026-11-06T09:05:00+09:00"),
+      execFn: unconsumedExecFn([
+        { worktreePath: mainPath, kind: "NA" },
+        { worktreePath: wtPath, kind: "CONSUMED" },
+        { worktreePath: wtAfter, kind: "CONSUMED" },
+      ]),
+      resourceResidue: {
+        worktreeListFn: () => ({
+          ok: true,
+          worktrees: listWorktreePaths(repo.mainRoot),
+        }),
+        teardownShadow: { archiveRoot },
+        orcaExecFn: execFn2,
+      },
+    });
+    assert.match(result2.line, /teardown_arm_processed=2/);
+    assert.match(result2.line, /teardown_arm_removed=1/);
+    assert.equal(
+      fs.existsSync(wtPath),
+      true,
+      "content-mismatched reuse must be skipped, not removed",
+    );
+    assert.equal(
+      fs.existsSync(wtAfter),
+      false,
+      "worktree after the skipped one must still be removed",
+    );
+    assert.equal(
+      sha256(fs.readFileSync(copyPath)),
+      sha256(firstCopyBuffer),
+      "existing archive bytes must remain untouched (no overwrite)",
+    );
+    assert.match(
+      readLatestNoticeText(notifyDir),
+      /TEARDOWN_ARM_ARCHIVE_ALREADY_EXISTS/,
+    );
+  } finally {
+    cleanup([repo.parent, watchDir, notifyDir, archiveRoot]);
+  }
+});
+
+// HYK-491-arm-followup-3 (coder-task.md §2 product_scope P2-C, 검토 1R
+// P2-C 실측 M·N·O): 재사용 경로가 sha-record.json을 "지금" 관측값과
+// 대조하지 않았다 -- 옛 SHA가 남아 있어도(M), 다른 경로의 같은
+// basename도(N), 기록 자체가 없어도(O) 파일 내용만 보면 통과했다. 네
+// 경우(기록 없음·다른 worktreePath·다른 sha·다른 branch) 각각 재사용을
+// 거부하는지 독립 test()로 확인한다 -- 합법적 재시도(같은 경로·같은
+// 브랜치·같은 내용)를 먼저 만든 뒤 선기록 파일«만» 변조해 "지금 관측"과
+// "선기록"을 isolate해서 어긋나게 한다.
+const SHA_RECORD_MISMATCH_CASES = [
+  {
+    name: "기록 없음(sha-record.json 삭제)",
+    corrupt: (recordPath) => fs.rmSync(recordPath),
+  },
+  {
+    name: "다른 worktreePath",
+    corrupt: (recordPath) => {
+      const rec = JSON.parse(fs.readFileSync(recordPath, "utf8"));
+      rec.worktreePath = rec.worktreePath + "-tampered";
+      fs.writeFileSync(recordPath, JSON.stringify(rec));
+    },
+  },
+  {
+    name: "다른 sha",
+    corrupt: (recordPath) => {
+      const rec = JSON.parse(fs.readFileSync(recordPath, "utf8"));
+      rec.sha = "0".repeat(40);
+      fs.writeFileSync(recordPath, JSON.stringify(rec));
+    },
+  },
+  {
+    name: "다른 branch",
+    corrupt: (recordPath) => {
+      const rec = JSON.parse(fs.readFileSync(recordPath, "utf8"));
+      rec.branch = "feature/totally-different-branch";
+      fs.writeFileSync(recordPath, JSON.stringify(rec));
+    },
+  },
+];
+
+// 테스트 20을 위한 1차 제거(몸통 길이를 줄이려고 분리) -- 아카이브가
+// 생기고, sha-record.json 경로 + 사본 버퍼를 돌려준다.
+function runShaRecordFirstTick({
+  repo,
+  mainPath,
+  wtPath,
+  notifyDir,
+  archiveRoot,
+  watchDir,
+}) {
+  armFlag(watchDir);
+  const execFn1 = buildFakeOrcaExecFn({ mainRoot: repo.mainRoot });
+  runWatchOnce({
+    repoRoot: repo.mainRoot,
+    watchDir,
+    notifyDir,
+    now: Date.parse("2026-11-06T09:00:00+09:00"),
+    execFn: unconsumedExecFn([
+      { worktreePath: mainPath, kind: "NA" },
+      { worktreePath: wtPath, kind: "CONSUMED" },
+    ]),
+    resourceResidue: {
+      worktreeListFn: () => ({
+        ok: true,
+        worktrees: listWorktreePaths(repo.mainRoot),
+      }),
+      teardownShadow: { archiveRoot },
+      orcaExecFn: execFn1,
+    },
+  });
+  assert.equal(fs.existsSync(wtPath), false, "first tick must remove it");
+  const finalDir = path.join(archiveRoot, "wt-shrecord-final");
+  const recordPath = path.join(finalDir, "sha-record.json");
+  const copyPath = path.join(
+    finalDir,
+    "harness-archive",
+    ".harness",
+    "receipts",
+    "CODER-receipt-r1.json",
+  );
+  const firstCopyBuffer = fs.readFileSync(copyPath);
+  assert.equal(fs.existsSync(recordPath), true);
+  return { recordPath, copyPath, firstCopyBuffer };
+}
+
+for (const c of SHA_RECORD_MISMATCH_CASES) {
+  test(`20. P2-C sha-record.json 대조 -- ${c.name}: 재사용 거부(덮어쓰기 금지 무변)`, () => {
+    const repo = setupRepo();
+    addWorktree(repo, "wt-shrecord", "feature/shrecord-1");
+    const [mainPath, wtPath] = listWorktreePaths(repo.mainRoot);
+    makeEligibleHarness(wtPath);
+    const watchDir = tmpWatchDir();
+    const notifyDir = tmpNotifyDir();
+    const archiveRoot = tmpArchiveRoot();
+    try {
+      const { recordPath, copyPath, firstCopyBuffer } = runShaRecordFirstTick({
+        repo,
+        mainPath,
+        wtPath,
+        notifyDir,
+        archiveRoot,
+        watchDir,
+      });
+
+      // 합법적 재시도 모양(같은 경로 · 같은 브랜치 · 같은 내용)으로
+      // 다시 워크트리를 만든 뒤, 선기록 파일«만» 변조한다.
+      git(repo.mainRoot, [
+        "worktree",
+        "add",
+        "-q",
+        wtPath,
+        "feature/shrecord-1",
+      ]);
+      makeEligibleHarness(wtPath);
+      c.corrupt(recordPath);
+
+      const execFn2 = buildFakeOrcaExecFn({ mainRoot: repo.mainRoot });
+      const result2 = runWatchOnce({
+        repoRoot: repo.mainRoot,
+        watchDir,
+        notifyDir,
+        now: Date.parse("2026-11-06T09:05:00+09:00"),
+        execFn: unconsumedExecFn([
+          { worktreePath: mainPath, kind: "NA" },
+          { worktreePath: wtPath, kind: "CONSUMED" },
+        ]),
+        resourceResidue: {
+          worktreeListFn: () => ({
+            ok: true,
+            worktrees: listWorktreePaths(repo.mainRoot),
+          }),
+          teardownShadow: { archiveRoot },
+          orcaExecFn: execFn2,
+        },
+      });
+      assert.match(result2.line, /teardown_arm_removed=0/);
+      assert.equal(
+        removeCalls(execFn2).length,
+        0,
+        "must refuse reuse before calling remove",
+      );
+      assert.equal(
+        fs.existsSync(wtPath),
+        true,
+        "worktree with mismatched sha-record must remain",
+      );
+      assert.equal(
+        sha256(fs.readFileSync(copyPath)),
+        sha256(firstCopyBuffer),
+        "existing archive bytes must remain untouched (no overwrite)",
+      );
+      assert.match(
+        readLatestNoticeText(notifyDir),
+        /TEARDOWN_ARM_ARCHIVE_ALREADY_EXISTS/,
+      );
+    } finally {
+      cleanup([repo.parent, watchDir, notifyDir, archiveRoot]);
+    }
+  });
+}
+
+// HYK-491-arm-followup-3 (coder-task.md §2 product_scope P2-D, 검토 1R
+// P2-D 실측): confirmed_by·at이 이스케이프 없이 로그 줄에 실리면
+// 공백·개행이 그대로 끼어들어 watch.log가 여러 줄로 갈라지고, 공백으로
+// 나뉘는 가짜 teardown_arm_* 토큰이 꼬리에 섞인다. 공백·제어문자를
+// 치환하면 (1) 한 줄을 유지하고 (2) 값 안의 "teardown_arm_removed=99"
+// 같은 문구가 독립된 "낱말"(공백으로 나뉜 토큰)이 되지 않는다.
+test("21. P2-D confirmed_by/at 의 공백·개행·가짜 토큰이 로그 줄에 섞이지 않는다(한 줄 유지)", () => {
+  const repo = setupRepo();
+  addWorktree(repo, "wt-confirmedby-escape", "feature/confirmedby-escape");
+  const [mainPath, wtPath] = listWorktreePaths(repo.mainRoot);
+  makeEligibleHarness(wtPath);
+  const watchDir = tmpWatchDir();
+  const notifyDir = tmpNotifyDir();
+  const archiveRoot = tmpArchiveRoot();
+  try {
+    armFlag(watchDir, {
+      confirmed_by: "han young\nFAKE_LINE teardown_arm_removed=99",
+      at: "2026-11-07T10:00:00+09:00 extra token",
+    });
+    const execFn = buildFakeOrcaExecFn({ mainRoot: repo.mainRoot });
+    const result = runWatchOnce({
+      repoRoot: repo.mainRoot,
+      watchDir,
+      notifyDir,
+      now: Date.parse("2026-11-06T09:00:00+09:00"),
+      execFn: unconsumedExecFn([
+        { worktreePath: mainPath, kind: "NA" },
+        { worktreePath: wtPath, kind: "CONSUMED" },
+      ]),
+      resourceResidue: {
+        worktreeListFn: () => ({
+          ok: true,
+          worktrees: listWorktreePaths(repo.mainRoot),
+        }),
+        teardownShadow: { archiveRoot },
+        orcaExecFn: execFn,
+      },
+    });
+    assert.equal(
+      result.line.includes("\n"),
+      false,
+      "watch.log line must stay one line",
+    );
+    assert.match(
+      result.line,
+      /teardown_arm_removed=1(\s|$)/,
+      "the real removed count must stay 1",
+    );
+    const tokens = result.line.split(" ");
+    assert.equal(
+      tokens.filter((t) => t === "teardown_arm_removed=99").length,
+      0,
+      "no forged teardown_arm_removed token must appear as its own word",
+    );
+    assert.equal(
+      tokens.filter((t) => t.startsWith("teardown_arm_removed=")).length,
+      1,
+      "exactly one real teardown_arm_removed token must exist",
+    );
+    assert.match(
+      result.line,
+      /teardown_arm_confirmed_by=han_young_FAKE_LINE_teardown_arm_removed=99 /,
+    );
+    assert.match(
+      result.line,
+      /teardown_arm_at=2026-11-07T10:00:00\+09:00_extra_token(\s|$)/,
+    );
+  } finally {
+    cleanup([repo.parent, watchDir, notifyDir, archiveRoot]);
   }
 });

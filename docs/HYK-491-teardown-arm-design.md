@@ -63,6 +63,20 @@ armed 여부 판정에는 전혀 쓰지 않는다. 있으면(둘 중 하나라�
 옮겨 적는다(사람이 "누가·언제 승인했다"를 읽을 수 있게 — 그 값 자체의
 진위는 검증하지 않는다).
 
+**HYK-491-arm-followup-3(P2-D 수리, 검토 arm-followup-1 review-1 §3
+P2-D 실측)**: `confirmed_by`·`at`은 사람 손 파일(`teardown-arm.json`)의
+값이라 공백·제어문자(개행 포함)가 그대로 **로그 줄**에 실리면
+`watch.log`가 여러 줄로 갈라지고, 공백으로 나뉘는 가짜
+`teardown_arm_*` 토큰이 꼬리에 섞일 수 있었다(예:
+`confirmed_by:"han young\nFAKE_LINE teardown_arm_removed=99"` →
+꼬리에 위조된 `teardown_arm_removed=99`가 별도 토큰으로 나타남). 이제
+`teardownArmAttemptedLogSegment`가 로그 줄에 싣기 직전에
+`sanitizeArmLogValue`로 모든 공백·제어문자(U+0000~U+001F, U+007F 포함)
+를 `_`로 치환한다 — 한 줄을 유지하고, 값 안의 문구가 공백으로 나뉜
+독립 토큰이 되지 않는다(기록만이므로 완전한 가역성은 요구하지 않는다).
+**받는함 문서**(markdown)의 머리 줄은 이 라운드가 손대지 않았다 —
+과제 범위가 "로그 줄"로 좁혀져 있다(coder-task.md §2 P2-D).
+
 디렉터리 판정은 `readFileSync`가 디렉터리에 던지는 `EISDIR`을 잡아서
 낸다(별도 `statSync` 없이 — 이 저장소의 fs 주입 관례와 맞춘다, §5).
 
@@ -116,6 +130,17 @@ rm`은 브랜치도 함께 지우므로, 선기록 SHA로만(`git branch <name>
 | 7 (제거)                                              | 그대로 둔다(제거 0)                                                             | **중단**                                                             |
 | 8 (브랜치 복원)                                       | 워크트리는 이미 지워졌다 — SHA 선기록 파일로 손 복원 가능(받는함에 명령 그대로) | **중단**                                                             |
 | 9 (재관측)                                            | 워크트리는 지워졌고 브랜치도 복원됐지만 사후 조건이 안 맞음(의심스러운 상태)    | **중단**                                                             |
+
+**HYK-491-arm-followup-3(P2-E 수리, 검토 arm-followup-1 review-1 §3
+P2-E 실측)**: 받는함 문서의 머리말은 이미 "건너뜀"(위 표의 두 사유)과
+"중단"(그 밖)을 구분해 왔지만, 워크트리별 항목 줄(`## <경로>` 아래
+`- 결과: ...`)은 **항목 하나만 보고** 실패면 전부 "중단(`<step>`)"으로
+썼다 — dirty·`ARCHIVE_ALREADY_EXISTS`로 건너뛴 항목도 "중단
+(WORKING_TREE_CHECK)"처럼 적혀 머리말("전부가 순서대로 처리됐다")과
+어긋났다. `buildTeardownArmNoticeResultLabel`이
+`isArmRemovalSkipOnlyFailure`(머리말과 같은 판정)로 갈라 건너뜀
+항목은 "건너뜀(`<step>`)"을, 그 밖은 "중단(`<step>`)"을 쓴다(문구만,
+판정 로직은 무변).
 
 **기본값 = 전체 중단**(한 워크트리의 실패가 그 회차의 나머지를 멈춘다).
 이것은 1R·2R의 기존 설계를 그대로 유지한다(`runArmedRemovalLoop`의
@@ -198,6 +223,21 @@ review-1 P2-1).
     건너뛴다**, 같은 회차의 **뒤 워크트리는 계속 처리된다**(§3 표,
     전체 중단 폐지). 기존 아카이브의 바이트는 무변으로 보존된다(§2
     변이표 ④ 실측, 기존과 동일).
+  - **재사용의 신원 확인(HYK-491-arm-followup-3 P2-C 수리, 검토
+    arm-followup-1 review-1 §3 P2-C 실측 M·N·O)**: "지금 .harness와
+    파일별로 IDENTICAL"이라는 것만으로는 "이 아카이브가 «이»
+    워크트리의 것"이라는 신원을 보장하지 않는다 — rm 실패 뒤 master에
+    새 커밋이 병합돼도(M, sha-record가 옛 SHA 그대로), 다른 경로의
+    같은 basename이 와도(N), 기록 자체가 지워져도(O) 파일 내용만
+    보면 통과했다. followup-3은 `resolveExistingArmArchive`가 내용
+    대조 전에 먼저 **선기록 `sha-record.json`**(`recordTeardownArmSha`
+    가 쓴 그 파일, `{worktreePath, branch, sha, recordedAt}`)을 "지금"
+    관측한 `worktreePath`·`headSha`·`branchName`과 대조하게 한다 —
+    기록을 읽거나 파싱하지 못하거나, `worktreePath`·`sha`·`branch`
+    셋 중 하나라도 다르면 **같은 사유 토큰**(`TEARDOWN_ARM_ARCHIVE_ALREADY_EXISTS`)
+    으로 재사용을 거부한다(덮어쓰기 금지는 무변 — 기존 아카이브는
+    손대지 않는다). 셋이 모두 일치할 때만 파일별 sha256 대조(위
+    단계)로 넘어간다.
 - **실제 제거 수**(P2-4): 로그 꼬리의 `teardown_arm_removed`는 "워크트리가
   실제로 없어진 수"를 센다(`r.ok===true || r.removed===true`) —
   브랜치 복원이 실패해도(워크트리는 이미 지워졌다) 센다. 1R은 `r.ok`만
@@ -242,6 +282,42 @@ review-1 P2-1).
   계속 처리, 기존 아카이브 바이트 무변(17).
 - 아카이브 날짜 폴더 KST 경계(now=KST 08:30, UTC 날짜와 다른 칸)(18).
 
+**1R RED 먼저 기록 정정(HYK-491-arm-followup-3, 검토 arm-followup-1
+review-1 §2ⓔ·§3 P2-A 실측)**: arm-followup-1 1R 결과 파일(`.harness/
+rounds/CODER-r1.md`)은 base(`b1d3196`)에서 "`# tests 30 / # pass 16 /
+
+# fail 14` -- 실패 14건 = 시험 12(비-ABSENT 8종) + 신설 13~18(6건)"이라
+
+적었다. 검토가 직접 재현한 값은 **tests 30 / pass 17 / fail 13**이다
+— 시험 17이 `git worktree list --porcelain`의 실제 순서(`.git/worktrees`
+폴더 이름의 사전순, 생성 순서가 아니다)에서 "뒤" 워크트리로 쓴
+`wt-after-reuse-diff`가 "wt-reuse-diff"보다 사전순으로 **앞**이라
+실제로 먼저 처리돼, base에서도 처리 순서상 우연히 통과하는 헛시험이었다
+(처음 기록의 "13~18 6건" 중 17은 실제로 안 걸렸다). 이 라운드는 그
+워크트리 이름을 "wt-zz-after"로 바꿔 사전순으로 반드시 뒤에 오게
+하고, `listWorktreePaths`로 실제 순서를 직접 단언한다(위 §3 사유토큰
+불변) — 그 결과 시험 17은 base에서 **다시** 실패하지만, 이번에는
+진짜 "건너뜀 뒤 계속" 계약을 재는 것이 그 이유다(헛시험 모양이 아니다).
+
+**HYK-491-arm-followup-3이 더한 시험**(위 P2-B·P2-C·P2-D·P2-E 수리의
+실물 증거, `hyk491-teardown-arm.test.mjs` 19~21):
+
+- 같은 파일 집합 · 내용만 다른 자기 아카이브 — 재사용 거부(파일별
+  sha256 가드가 실제로 값을 낸다는 증거, 19).
+- `sha-record.json` 대조 4종(기록 없음 · 다른 worktreePath · 다른
+  sha · 다른 branch) — 각각 재사용 거부, 덮어쓰기 금지 무변(20).
+- `confirmed_by`/`at`에 공백·개행·가짜 토큰이 있어도 로그 줄은 한 줄을
+  유지하고 가짜 `teardown_arm_removed=99` 토큰이 독립된 낱말로 생기지
+  않는다(21).
+
+**arm-followup-3 레드 먼저(HEAD `111efa7`, 이 라운드 착수 전 커밋)**:
+위 7건(15·17·19~21 중 테스트 15·17·20×4·21, tests 36/pass 29/fail 7)
+이 그 코드 그대로 RED였다 — 15·17은 P2-A/P2-E 문구 단언 추가로, 20
+×4는 P2-C 축 자체가 없어서, 21은 P2-D 이스케이프가 없어서다. 19는
+`resolveExistingArmArchive`의 파일별 sha256 대조가 이미 arm-followup-1
+에 있어 111efa7에서도 통과했다(review-1이 "제품 코드는 막지만 지키는
+시험이 없다"고 지적한 그대로 — 새 버그가 아니라 새 커버리지).
+
 ## 9. 정직 한계
 
 1. **무장 기본 off** — 이 PR이 병합돼도 `teardown-arm.json`을 만들지
@@ -285,3 +361,19 @@ review-1 P2-1).
    `attempted!==true` 조기 반환, 2R부터 있던 동작 — 이 축이 "암묵적으로
    armed인지"를 로그만으로 드러내지 않는다는 성질은 이 라운드가 넓히지
    않았다, product_scope 범위를 좁게 읽은 해석 — 책임자 재확인 후보).
+7. **HYK-491-arm-followup-3 — P2-C는 "신원"만 좁힌다, 그 뒤의 M/N/O류
+   상호작용을 전부 닫지는 않았다**: `sha-record.json` 대조는 "이
+   아카이브가 «이» 워크트리의 것인가"만 확인한다 — 신원이 일치해도
+   같은 커밋 위에서 `.harness`만 바뀐 경우(흔한 실제 시나리오: git
+   식별자는 그대로인데 런타임 산출물만 달라짐)는 여전히 §6의 파일별
+   sha256 대조가 막는다(P2-B, 신원과 내용은 서로 다른 축이다 — 둘 다
+   필요하다). 또한 `sha-record.json` 자체가 손상(디스크 오류 등)되면
+   "거부"(안전 쪽)로 떨어지지만, 그 손상이 "진짜 다른 워크트리"와
+   구분되지 않는다는 점은 이 라운드가 바꾸지 않았다(기존 fail-closed
+   관례 — 과도 거부는 손실보다 싸다는 설계 전제 그대로).
+   **범위 밖**: 받는함 markdown 머리 줄의 confirmed_by/at 이스케이프
+   (P2-D는 "로그 줄"로 좁혀 읽었다, 위 §1), 사유 토큰을 네 가지(missing·
+   path·sha·branch)로 세분하는 것(이 라운드는 넷 모두 같은 기존 토큰
+   `TEARDOWN_ARM_ARCHIVE_ALREADY_EXISTS`를 그대로 썼다 — 과제 문면이
+   "거부 + 사유"까지만 요구했고, 세분은 사람이 원인을 더 빨리 읽게
+   하는 개선일 뿐 판정을 바꾸지 않는다, 책임자 재확인 후보).
