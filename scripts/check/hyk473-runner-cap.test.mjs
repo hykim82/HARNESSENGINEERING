@@ -46,6 +46,29 @@ import {
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
+// HYK-494 §2 ⓒ fixture sync (ORCH70 §33 ⓒ, "Synthetic lock paths only"):
+// every runIsolatedSuite(...) call below (real import or the dynamically
+// imported mutant) tests an axis unrelated to locking and provides no
+// lockPath -- without this seam each would acquire runner-lock.mjs's REAL
+// machine-wide default lock file. Same stub shape as isolated-suite-
+// runner.test.mjs's own NOOP_LOCK_SEAMS (not imported across test files on
+// purpose -- these are test-only fixtures, not production coupling).
+const NOOP_LOCK_SEAMS = {
+  acquireLockFn: () => ({
+    acquired: true,
+    nested: false,
+    lockPath: null,
+    waitMs: 0,
+    pollCount: 0,
+    reclaimedOrphan: false,
+    priorOwner: null,
+    timedOut: false,
+  }),
+  releaseLockFn: () => ({ released: true, reason: null }),
+  installSignalHandlersFn: () => () => {},
+  env: {},
+};
+
 // -- §2-1: resolveConcurrency ------------------------------------------
 
 test("resolveConcurrency: max(1, floor(cpuCount/2)) -- halves core count, never rounds up past it", () => {
@@ -101,6 +124,7 @@ function execFileStub() {
 test("runIsolatedSuite: the resolved test-concurrency value is the literal first log() line of the run (coder-task.md §2-1 'first line' requirement)", () => {
   const logs = [];
   runIsolatedSuite({
+    ...NOOP_LOCK_SEAMS,
     startSampler: () => null,
     stopSampler: () => null,
     execFile: execFileStub(),
@@ -119,6 +143,7 @@ test("runIsolatedSuite: the resolved test-concurrency value is the literal first
 test("runIsolatedSuite: an explicit --concurrency override is labeled as an override in the same first line, not the default reasoning text", () => {
   const logs = [];
   runIsolatedSuite({
+    ...NOOP_LOCK_SEAMS,
     startSampler: () => null,
     stopSampler: () => null,
     execFile: execFileStub(),
@@ -137,6 +162,7 @@ test("runIsolatedSuite: an explicit --concurrency override is labeled as an over
 test("runIsolatedSuite: with no explicit concurrency, the first line carries the default reasoning (cpu-count-derived, not a bare number with no context)", () => {
   const logs = [];
   runIsolatedSuite({
+    ...NOOP_LOCK_SEAMS,
     startSampler: () => null,
     stopSampler: () => null,
     execFile: execFileStub(),
@@ -171,6 +197,7 @@ test("runIsolatedSuite: --test-concurrency=<resolved value> is present in the in
     return { status: 0 };
   };
   runIsolatedSuite({
+    ...NOOP_LOCK_SEAMS,
     startSampler: () => null,
     stopSampler: () => null,
     execFile: execFileStub(),
@@ -198,6 +225,7 @@ test("runIsolatedSuite: when allocateRunSlotFn resolves a slot, a third '--test-
     return { status: 0 };
   };
   runIsolatedSuite({
+    ...NOOP_LOCK_SEAMS,
     startSampler: () => null,
     stopSampler: () => null,
     execFile: execFileStub(),
@@ -246,6 +274,7 @@ test("runIsolatedSuite: when allocateRunSlotFn yields no slot (null), no third r
     return { status: 0 };
   };
   runIsolatedSuite({
+    ...NOOP_LOCK_SEAMS,
     startSampler: () => null,
     stopSampler: () => null,
     execFile: execFileStub(),
@@ -268,6 +297,7 @@ test("runIsolatedSuite: when allocateRunSlotFn yields no slot (null), no third r
 test("runIsolatedSuite: allocateRunSlotFn throwing does not crash the run -- it degrades to no numbered artifacts (WARNING logged), the real suite still runs and the real exit code still propagates", () => {
   const logs = [];
   const exitCode = runIsolatedSuite({
+    ...NOOP_LOCK_SEAMS,
     startSampler: () => null,
     stopSampler: () => null,
     execFile: execFileStub(),
@@ -420,6 +450,7 @@ test("classifySpawnOutcome: a REAL child that exits non-zero entirely on its own
 test("runIsolatedSuite: a REAL synthetically forced-killed child produces a receipt with runnerStatus MEASUREMENT_UNAVAILABLE_OOM, never TESTS_FAILED, and a non-zero exit code", () => {
   const receipts = [];
   const exitCode = runIsolatedSuite({
+    ...NOOP_LOCK_SEAMS,
     startSampler: () => null,
     stopSampler: () => null,
     execFile: execFileStub(),
@@ -462,6 +493,7 @@ const tapCompletionReadFile = () => completedTapSummary;
 test("runIsolatedSuite: a REAL child failing entirely on its own (same pipeline, no kill), a real tap completion summary present -> produces a receipt with runnerStatus TESTS_FAILED -- the same-situation contrast at the full-pipeline level", () => {
   const receipts = [];
   const exitCode = runIsolatedSuite({
+    ...NOOP_LOCK_SEAMS,
     startSampler: () => null,
     stopSampler: () => null,
     execFile: execFileStub(),
@@ -487,6 +519,7 @@ test("runIsolatedSuite: a REAL child failing entirely on its own (same pipeline,
 test("runIsolatedSuite: a REAL child that exits non-zero on its own, but no tap completion summary was ever written (e.g. the Windows 0xFFFFFFFF shape this repo actually produces) -> produces a receipt with runnerStatus MEASUREMENT_UNAVAILABLE_OOM, NOT TESTS_FAILED (review P1-1, full-pipeline level)", () => {
   const receipts = [];
   runIsolatedSuite({
+    ...NOOP_LOCK_SEAMS,
     startSampler: () => null,
     stopSampler: () => null,
     execFile: execFileStub(),
@@ -511,6 +544,7 @@ test("runIsolatedSuite: a REAL child that exits non-zero on its own, but no tap 
 test("runIsolatedSuite: a REAL clean child (status 0) produces a receipt with runnerStatus OK -- the third leg of the same contrast", () => {
   const receipts = [];
   const exitCode = runIsolatedSuite({
+    ...NOOP_LOCK_SEAMS,
     startSampler: () => null,
     stopSampler: () => null,
     execFile: execFileStub(),
@@ -581,6 +615,7 @@ test("runIsolatedSuite: the in-clone node --test child's env carries HARNESS_TES
     return { status: 0 };
   };
   runIsolatedSuite({
+    ...NOOP_LOCK_SEAMS,
     startSampler: () => null,
     stopSampler: () => null,
     execFile: execFileStub(),
@@ -608,6 +643,12 @@ test("runIsolatedSuite: the in-clone node --test child's env carries HARNESS_TES
 
 const ISOLATED_SUITE_RUNNER_PATH = join(HERE, "isolated-suite-runner.mjs");
 const RUNNER_RECEIPT_WRITER_PATH = join(HERE, "runner-receipt-writer.mjs");
+// HYK-494 §2 ⓐ⑷ (hand-maintained staging list, the exact gap class this
+// round's coder-task.md warned about): isolated-suite-runner.mjs gained a
+// SECOND relative import (./runner-lock.mjs) this round -- without staging
+// it too, every mutant below MODULE_NOT_FOUNDs before the mutation under
+// test is ever exercised.
+const RUNNER_LOCK_PATH = join(HERE, "runner-lock.mjs");
 const MIN_OP_TARGET = "return Math.min(desired, n);";
 
 async function withMutatedIsolatedSuiteRunner(mutate, run) {
@@ -628,6 +669,10 @@ async function withMutatedIsolatedSuiteRunner(mutate, run) {
     // hyk241-oneb-gate-mutation.test.mjs's *_PATH copies).
     const receiptWriterCopyPath = join(dir, "runner-receipt-writer.mjs");
     copyFileSync(RUNNER_RECEIPT_WRITER_PATH, receiptWriterCopyPath);
+    // HYK-494 §2 ⓐ⑷: second sibling, see RUNNER_LOCK_PATH's own comment
+    // above for why.
+    const runnerLockCopyPath = join(dir, "runner-lock.mjs");
+    copyFileSync(RUNNER_LOCK_PATH, runnerLockCopyPath);
     // HYK-477 CI mutation-tmpdir fix: verify the staged copies actually
     // landed on disk BEFORE handing the directory to `run` (which does
     // `await import(...)`) -- surface a clear staging failure here instead
@@ -639,6 +684,10 @@ async function withMutatedIsolatedSuiteRunner(mutate, run) {
     assert.ok(
       existsSync(receiptWriterCopyPath),
       `staged receipt-writer copy missing at ${receiptWriterCopyPath} right after copyFileSync -- staging failed before import`,
+    );
+    assert.ok(
+      existsSync(runnerLockCopyPath),
+      `staged runner-lock copy missing at ${runnerLockCopyPath} right after copyFileSync -- staging failed before import`,
     );
     // `run` is async (it does `await import(...)`); this function must
     // itself await it here, inside the try, so the `finally` below (which
@@ -729,6 +778,7 @@ test("HYK-477 §1-4 변이 RED: 환경변수 전파(spawnSuiteInClone의 HARNESS
       delete process.env[NESTED_CONCURRENCY_ENV_VAR];
       try {
         mod.runIsolatedSuite({
+          ...NOOP_LOCK_SEAMS,
           startSampler: () => null,
           stopSampler: () => null,
           execFile: execFileStub(),

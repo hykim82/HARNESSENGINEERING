@@ -1166,6 +1166,20 @@ export const ENFORCEMENT_CHECK_FILES = [
   // block right below for why.
   "isolated-suite-runner.mjs",
   "isolated-suite-runner.test.mjs",
+  // HYK-494: isolated-suite-runner.mjs gained a new static import this
+  // round (the machine-wide runner mutual-exclusion lock) -- without this
+  // entry, install-copylist-closure.test.mjs's own import-closure check
+  // (below) would catch an installed target MODULE_NOT_FOUND-ing on this
+  // file the moment isolated-suite-runner.mjs tries to import it.
+  "runner-lock.mjs",
+  "hyk494-runner-lock.test.mjs",
+  // HYK-494-runner-lock-3: a standalone probe CLI (judgment 23:5x §1 ⑵,
+  // approved 7-file scope) -- it only imports node:* built-ins + this
+  // repo's own runner-lock.mjs's PUBLIC exports via a `--lock-module`
+  // path, so it adds no new import-closure edge, but product_scope §2
+  // names install.mjs registration explicitly ("install.mjs 등록이
+  // 따른다", PM 설계 (g) "사람이 확인할 것").
+  "runner-lock-race-probe.mjs",
   "quality-check.mjs",
   "quality-check.test.mjs",
   // ★정직 한계 (HYK-209-frame-repair-1, discovered live by

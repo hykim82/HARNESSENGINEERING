@@ -37,6 +37,35 @@ function runCli(args, opts = {}) {
   });
 }
 
+// HYK-494 §2 ⓒ fixture sync (ORCH70 §33 ⓒ, "단언 약화 금지"): every one of
+// this file's pre-existing runIsolatedSuite({...}) calls below tests an
+// UNRELATED axis (concurrency resolution, receipt fields, CLI argv parsing,
+// etc.) and none of them provide a lockPath -- without this seam they would
+// each acquire runner-lock.mjs's REAL, machine-wide default lock file
+// (os.tmpdir()-based), which the dispatch task explicitly forbids for any
+// test ("Synthetic lock paths only"). These stubs make every such call
+// behave exactly as if the lock were acquired instantly and uncontended
+// (nested:false, zero wait), with zero real file I/O -- the lock mechanism
+// itself gets its OWN dedicated real-file/real-child-process coverage in
+// hyk494-runner-lock.test.mjs, never here. No existing assertion in this
+// file is about locking, so spreading this into every call weakens none of
+// them.
+const NOOP_LOCK_SEAMS = {
+  acquireLockFn: () => ({
+    acquired: true,
+    nested: false,
+    lockPath: null,
+    waitMs: 0,
+    pollCount: 0,
+    reclaimedOrphan: false,
+    priorOwner: null,
+    timedOut: false,
+  }),
+  releaseLockFn: () => ({ released: true, reason: null }),
+  installSignalHandlersFn: () => () => {},
+  env: {},
+};
+
 test("collectTestFiles: lists *.test.mjs per dir, sorted, joined with the dir prefix", () => {
   const fakeTree = {
     "scripts/check": ["b.test.mjs", "a.test.mjs", "not-a-test.mjs"],
@@ -319,6 +348,7 @@ test("runIsolatedSuite: clones from repoRoot (not cwd), runs node --test in the 
   };
   const logs = [];
   const exitCode = runIsolatedSuite({
+    ...NOOP_LOCK_SEAMS,
     startSampler: () => null,
     stopSampler: () => null,
     startFreeMemSamplerFn: () => null,
@@ -351,6 +381,7 @@ test("runIsolatedSuite: a dirty source repo's uncommitted changes surface in the
   const spawn = () => ({ status: 0 });
   const logs = [];
   runIsolatedSuite({
+    ...NOOP_LOCK_SEAMS,
     startSampler: () => null,
     stopSampler: () => null,
     startFreeMemSamplerFn: () => null,
@@ -392,6 +423,7 @@ test("runIsolatedSuite: a RED run (non-zero exit) still gets a receipt written -
   // OOM -- completedTapReadFile makes that distinction observable here too
   // (runnerStatus), not just via the coincidentally-matching exitCode.
   const exitCode = runIsolatedSuite({
+    ...NOOP_LOCK_SEAMS,
     startSampler: () => null,
     stopSampler: () => null,
     startFreeMemSamplerFn: () => null,
@@ -416,6 +448,7 @@ test("runIsolatedSuite: a RED run (non-zero exit) still gets a receipt written -
 test("runIsolatedSuite: receipt's headCommit is the runner's OWN `git rev-parse HEAD` reading of the source root, not something spawn/collectFiles could influence", () => {
   const receipts = [];
   runIsolatedSuite({
+    ...NOOP_LOCK_SEAMS,
     startSampler: () => null,
     stopSampler: () => null,
     startFreeMemSamplerFn: () => null,
@@ -440,6 +473,7 @@ test("runIsolatedSuite: tap summary counts are parsed from the tap-reporter dest
   );
   const receipts = [];
   runIsolatedSuite({
+    ...NOOP_LOCK_SEAMS,
     startSampler: () => null,
     stopSampler: () => null,
     startFreeMemSamplerFn: () => null,
@@ -466,6 +500,7 @@ test("runIsolatedSuite: an unreadable tap file degrades to null counts (not a cr
   const receipts = [];
   const logs = [];
   const exitCode = runIsolatedSuite({
+    ...NOOP_LOCK_SEAMS,
     startSampler: () => null,
     stopSampler: () => null,
     startFreeMemSamplerFn: () => null,
@@ -515,8 +550,13 @@ test("runIsolatedSuite: HYK-209 R7c real-repro bytes + an ambiguous Windows forc
   // sleep: the first nowMs() call (spawnSuiteInClone's startedAtMs) returns
   // 0, the second (right after spawn returns, used for elapsedMs) returns
   // 5000 -- same order of magnitude as the real repro's measured ~3000ms.
-  const nowMs = () => (tick++ === 0 ? 0 : 5000);
+  // HYK-494 fixture sync (ORCH70 §33 ⓒ): see the other two K2/K5 tests'
+  // matching comment -- acquireLockForRun's own extra nowMs() call now
+  // lands here too, so the first TWO calls (lock, then spawnSuiteInClone's
+  // startedAtMs) both read 0 and everything after reads 5000.
+  const nowMs = () => (tick++ <= 1 ? 0 : 5000);
   const exitCode = runIsolatedSuite({
+    ...NOOP_LOCK_SEAMS,
     startSampler: () => null,
     stopSampler: () => null,
     startFreeMemSamplerFn: () => null,
@@ -572,8 +612,16 @@ const K5_REAL_REPRO_TAP_TEXT =
 test("runIsolatedSuite: HYK-209 2R P1-2 K2 (REVIEW-r1.md ⓑ real TAP bytes, duration_ms=999999) -- before this round's fix this misclassified as TESTS_FAILED with fake 9/9/0/0 counts; now it is MEASUREMENT_UNAVAILABLE_OOM with null counts", () => {
   const receipts = [];
   let tick = 0;
-  const nowMs = () => (tick++ === 0 ? 0 : 5000);
+  // HYK-494 fixture sync (ORCH70 §33 ⓒ): acquireLockForRun now makes ONE
+  // extra nowMs() call (the lock's own startedAtMs) before spawnSuiteIn
+  // Clone's own two calls -- this test's elapsedMs-plausibility axis only
+  // cares that spawnSuiteInClone's own startedAtMs call reads 0 and its
+  // elapsedMs call reads 5000, so the first TWO calls (lock, then
+  // spawnSuiteInClone's startedAtMs) both read 0 and every call after that
+  // reads 5000, never changing which TWO calls feed elapsedMs's subtraction.
+  const nowMs = () => (tick++ <= 1 ? 0 : 5000);
   const exitCode = runIsolatedSuite({
+    ...NOOP_LOCK_SEAMS,
     startSampler: () => null,
     stopSampler: () => null,
     startFreeMemSamplerFn: () => null,
@@ -604,8 +652,16 @@ test("runIsolatedSuite: HYK-209 2R P1-2 K2 (REVIEW-r1.md ⓑ real TAP bytes, dur
 test("runIsolatedSuite: HYK-209 2R P1-2 K5 (REVIEW-r1.md ⓑ real TAP bytes, forged plan line escaped as '# 1..9', no duration_ms) -- before this round's fix this misclassified as TESTS_FAILED with fake 9/9/0/0 counts; now it is MEASUREMENT_UNAVAILABLE_OOM with null counts", () => {
   const receipts = [];
   let tick = 0;
-  const nowMs = () => (tick++ === 0 ? 0 : 5000);
+  // HYK-494 fixture sync (ORCH70 §33 ⓒ): acquireLockForRun now makes ONE
+  // extra nowMs() call (the lock's own startedAtMs) before spawnSuiteIn
+  // Clone's own two calls -- this test's elapsedMs-plausibility axis only
+  // cares that spawnSuiteInClone's own startedAtMs call reads 0 and its
+  // elapsedMs call reads 5000, so the first TWO calls (lock, then
+  // spawnSuiteInClone's startedAtMs) both read 0 and every call after that
+  // reads 5000, never changing which TWO calls feed elapsedMs's subtraction.
+  const nowMs = () => (tick++ <= 1 ? 0 : 5000);
   const exitCode = runIsolatedSuite({
+    ...NOOP_LOCK_SEAMS,
     startSampler: () => null,
     stopSampler: () => null,
     startFreeMemSamplerFn: () => null,
@@ -654,6 +710,7 @@ test("runIsolatedSuite: HYK-464 2R P2-6 -- a real Node-major MISMATCH lands on t
   const receipts = [];
   const logs = [];
   const exitCode = runIsolatedSuite({
+    ...NOOP_LOCK_SEAMS,
     startSampler: () => null,
     stopSampler: () => null,
     startFreeMemSamplerFn: () => null,
@@ -699,6 +756,7 @@ test("runIsolatedSuite: matching Node majors -> no warning logged, receipt's nod
   const receipts = [];
   const logs = [];
   runIsolatedSuite({
+    ...NOOP_LOCK_SEAMS,
     startSampler: () => null,
     stopSampler: () => null,
     startFreeMemSamplerFn: () => null,
@@ -727,6 +785,7 @@ test("runIsolatedSuite: engines.node unreadable (default readPackageJsonFn again
   const receipts = [];
   const logs = [];
   runIsolatedSuite({
+    ...NOOP_LOCK_SEAMS,
     startSampler: () => null,
     stopSampler: () => null,
     startFreeMemSamplerFn: () => null,
@@ -749,6 +808,7 @@ test("runIsolatedSuite: engines.node unreadable (default readPackageJsonFn again
 test("runIsolatedSuite: a receipt-write failure is swallowed (logged, not thrown) and the real exit code still propagates -- writing a receipt must never mask the suite's own result", () => {
   const logs = [];
   const exitCode = runIsolatedSuite({
+    ...NOOP_LOCK_SEAMS,
     startSampler: () => null,
     stopSampler: () => null,
     startFreeMemSamplerFn: () => null,
@@ -775,6 +835,7 @@ test("runIsolatedSuite: a receipt-write failure is swallowed (logged, not thrown
 // coincidentally pass.
 test("runIsolatedSuite: M1 mutation guard -- a real Node-major MISMATCH alongside a REAL failed spawn (exit 5) still returns the spawn's own exit code verbatim, never forced to 1 by the mismatch", () => {
   const exitCode = runIsolatedSuite({
+    ...NOOP_LOCK_SEAMS,
     startSampler: () => null,
     stopSampler: () => null,
     startFreeMemSamplerFn: () => null,
@@ -799,6 +860,7 @@ test("runIsolatedSuite: M1 mutation guard -- a real Node-major MISMATCH alongsid
 test("runIsolatedSuite: M2 mutation guard -- the in-clone node --test child is spawned via process.execPath, not a bare 'node' string", () => {
   let capturedCmd;
   runIsolatedSuite({
+    ...NOOP_LOCK_SEAMS,
     startSampler: () => null,
     stopSampler: () => null,
     startFreeMemSamplerFn: () => null,
@@ -834,6 +896,7 @@ test("runIsolatedSuite: HYK-464 2R P2-6 -- when root resolution itself throws (n
   assert.throws(
     () =>
       runIsolatedSuite({
+        ...NOOP_LOCK_SEAMS,
         startSampler: () => null,
         stopSampler: () => null,
         startFreeMemSamplerFn: () => null,
@@ -871,6 +934,7 @@ test("runIsolatedSuite: a fail-closed collectFiles throw propagates out (never s
   assert.throws(
     () =>
       runIsolatedSuite({
+        ...NOOP_LOCK_SEAMS,
         startSampler: () => null,
         stopSampler: () => null,
         startFreeMemSamplerFn: () => null,
@@ -1026,6 +1090,7 @@ test("runIsolatedSuite: forwards its own log() to collectFiles as the third argu
   const spawn = () => ({ status: 0 });
   const logs = [];
   runIsolatedSuite({
+    ...NOOP_LOCK_SEAMS,
     startSampler: () => null,
     stopSampler: () => null,
     startFreeMemSamplerFn: () => null,
@@ -1366,6 +1431,7 @@ test("runIsolatedSuite: HYK-439 §2 ⓐ -- an explicit --concurrency always wins
   let autoSelectCalled = false;
   const logs = [];
   const exitCode = runIsolatedSuite({
+    ...NOOP_LOCK_SEAMS,
     startSampler: () => null,
     stopSampler: () => null,
     startFreeMemSamplerFn: () => null,
@@ -1392,6 +1458,7 @@ test("runIsolatedSuite: HYK-439 §2 ⓐ 1b_exec_line -- a dry run with the auto-
   const logs = [];
   const receipts = [];
   const exitCode = runIsolatedSuite({
+    ...NOOP_LOCK_SEAMS,
     startSampler: () => null,
     stopSampler: () => null,
     startFreeMemSamplerFn: () => null,
@@ -1423,6 +1490,7 @@ test("runIsolatedSuite: HYK-439 §2 ⓐ 1b_exec_line -- the same dry run at a 31
   const logs = [];
   const receipts = [];
   const exitCode = runIsolatedSuite({
+    ...NOOP_LOCK_SEAMS,
     startSampler: () => null,
     stopSampler: () => null,
     startFreeMemSamplerFn: () => null,
@@ -1456,6 +1524,7 @@ test("runIsolatedSuite: HYK-439 §2 ⓐ -- root resolution failing never pays th
   assert.throws(
     () =>
       runIsolatedSuite({
+        ...NOOP_LOCK_SEAMS,
         startSampler: () => null,
         stopSampler: () => null,
         startFreeMemSamplerFn: () => null,
@@ -1501,6 +1570,7 @@ test("runIsolatedSuite: HYK-439 §2 ⓑ/ⓓ -- a serial-family list splits files
   };
   const receipts = [];
   const exitCode = runIsolatedSuite({
+    ...NOOP_LOCK_SEAMS,
     startSampler: () => null,
     stopSampler: () => null,
     startFreeMemSamplerFn: () => null,
@@ -1551,6 +1621,7 @@ test("runIsolatedSuite: HYK-439 §2 ⓕ-2 -- main-pass and family-pass start/min
   let stopCalls = 0;
   const stopSequence = [2950.1, 2400.5, 2300];
   const exitCode = runIsolatedSuite({
+    ...NOOP_LOCK_SEAMS,
     startSampler: () => null,
     stopSampler: () => null,
     startFreeMemSamplerFn: () => "fake-child",
@@ -1584,6 +1655,7 @@ test("runIsolatedSuite: HYK-439 §2 ⓕ-2 -- with no serialFamilyList, familySta
   const receipts = [];
   let freememCalls = 0;
   const exitCode = runIsolatedSuite({
+    ...NOOP_LOCK_SEAMS,
     startSampler: () => null,
     stopSampler: () => null,
     startFreeMemSamplerFn: () => "fake-child",
@@ -1625,6 +1697,7 @@ test("runIsolatedSuite: HYK-439 §2 ⓑ -- a RED serial-family pass makes the WH
   };
   const receipts = [];
   const exitCode = runIsolatedSuite({
+    ...NOOP_LOCK_SEAMS,
     startSampler: () => null,
     stopSampler: () => null,
     startFreeMemSamplerFn: () => null,
@@ -1661,6 +1734,7 @@ test("runIsolatedSuite: HYK-439 §2 ⓑ -- a serialFamilyList whose entries are 
   const logs = [];
   const receipts = [];
   const exitCode = runIsolatedSuite({
+    ...NOOP_LOCK_SEAMS,
     startSampler: () => null,
     stopSampler: () => null,
     startFreeMemSamplerFn: () => null,
@@ -1692,6 +1766,7 @@ test("runIsolatedSuite: no serialFamilyList given -- byte-for-byte the legacy si
   };
   const receipts = [];
   const exitCode = runIsolatedSuite({
+    ...NOOP_LOCK_SEAMS,
     startSampler: () => null,
     stopSampler: () => null,
     startFreeMemSamplerFn: () => null,
