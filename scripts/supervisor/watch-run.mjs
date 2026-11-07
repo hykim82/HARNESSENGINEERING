@@ -4093,6 +4093,11 @@ export const TEARDOWN_ARM_FLAG_REASON = Object.freeze({
   NOT_OBJECT: "TEARDOWN_ARM_FLAG_NOT_OBJECT",
   ARMED_KEY_MISSING: "TEARDOWN_ARM_FLAG_ARMED_KEY_MISSING",
   ARMED_NOT_TRUE: "TEARDOWN_ARM_FLAG_ARMED_NOT_TRUE",
+  // HYK-491-arm-followup-1 (coder-task.md §2 product_scope P2-④, 검토 2R
+  // P2-④ 실측): 읽기 자체가 실패한 경우(EACCES·EBUSY·EPERM 등)는 "JSON
+  // 파싱에 실패했다"(NOT_JSON)와 다른 사실이다 -- 그 전에 내용을 보지도
+  // 못했다. 아래에서 분리해 쓴다(readTeardownArmFlagRaw 참조).
+  READ_FAILED: "TEARDOWN_ARM_FLAG_READ_FAILED",
 });
 
 // confirmedBy/at은 §2 비타협("기록만 -- 판정 불사용")대로 여기서도 armed
@@ -4127,7 +4132,11 @@ function readTeardownArmFlagRaw({ watchDir, existsFn, readFn }) {
     if (err && err.code === "EISDIR") {
       return { ok: false, reason: TEARDOWN_ARM_FLAG_REASON.IS_DIRECTORY };
     }
-    return { ok: false, reason: TEARDOWN_ARM_FLAG_REASON.NOT_JSON };
+    // HYK-491-arm-followup-1 (coder-task.md §2 product_scope P2-④ 수리):
+    // EISDIR 말고 다른 읽기 실패(EACCES·EBUSY·EPERM 등)는 NOT_JSON이
+    // 아니다 -- NOT_JSON은 아래 judgeTeardownArmFlag의 JSON.parse 실패
+    // 전용으로 좁힌다(이 함수는 더는 그 토큰을 쓰지 않는다).
+    return { ok: false, reason: TEARDOWN_ARM_FLAG_REASON.READ_FAILED };
   }
   if (typeof raw !== "string" || raw.trim() === "") {
     return { ok: false, reason: TEARDOWN_ARM_FLAG_REASON.EMPTY };
@@ -4400,8 +4409,19 @@ function buildArmArchiveFinalName(worktreePath) {
 // 폴더를 두고, 그 아래 날짜 자동 폴더 하나(ORCH 손 B-15와 같은 모양,
 // "<날짜>-B76-..." 대신 이 축 전용 고정 토큰 "teardown-arm"을 쓴다 --
 // 사람 작업(B-15)과 자동 무장 경로를 폴더 이름만으로 구분할 수 있게).
+// HYK-491-arm-followup-1 (coder-task.md §2 product_scope P2-③ 수리, 검토
+// 2R P2-③ 실측): `toISOString()`은 항상 UTC 날짜를 낸다 -- KST(UTC+9)
+// 00:00~08:59 구간은 UTC로는 "전날"이라 ORCH 손 B-15 폴더(KST 기준)와
+// 날짜가 어긋났다. epoch ms에 9시간을 더한 뒤 UTC slice를 그대로 쓰면
+// 그 값이 KST의 날짜 숫자와 같다(흔한 트릭 -- 시·분·초는 쓰지 않고
+// 날짜 숫자만 쓰므로 안전하다).
+function toKstDateToken(nowMs) {
+  const KST_OFFSET_MS = 9 * 60 * 60 * 1000;
+  return new Date(nowMs + KST_OFFSET_MS).toISOString().slice(0, 10);
+}
+
 function buildDefaultTeardownArmArchiveRoot(watchDir, now) {
-  const dateToken = new Date(now).toISOString().slice(0, 10);
+  const dateToken = toKstDateToken(now);
   return path.join(
     path.dirname(watchDir),
     "아카이브",
@@ -4416,23 +4436,71 @@ function buildDefaultTeardownArmArchiveRoot(watchDir, now) {
 // 그 자리에서 멈춘다 -- ORCH 손 B-15의 `if (Test-Path $A) { throw
 // 'archive exists' }`와 같은 성질(덮어쓰기 금지), 다만 여기는 throw가
 // 아니라 그 워크트리만 건너뛴다(기존 fail-closed 관례 그대로).
-function checkArchiveDestAbsentForArm({ recordDir, existsFn }) {
-  let exists;
+//
+// HYK-491-arm-followup-1 (coder-task.md §2 product_scope P2-② 수리, 2R
+// 설계 메모 §5 한계 5가 예견한 상호작용의 수리): recordDir이 이미
+// 있다고 더는 무조건 멈추지 않는다 -- 그 내용이 "지금" .harness와
+// 파일별로(이름 집합 + 내용 sha256) IDENTICAL이면 같은 head의 안전한
+// 재시도로 보고 재사용해 다음 단계로 간다. 다르면 "지금처럼"(같은 사유
+// 토큰 TEARDOWN_ARM_ARCHIVE_ALREADY_EXISTS) 건너뛴다 -- 덮어쓰기 금지는
+// 그대로다(기존 아카이브 바이트를 손대지 않는다). resolveExistingArmArchive
+// 에서 분리(복잡도 분산).
+function resolveExistingArmArchive({
+  recordDir,
+  worktreePath,
+  archiveManifestFiles,
+  readFileBufferFn,
+  readArchiveBufferFn,
+}) {
+  const archiveDestDir = path.join(recordDir, "harness-archive");
+  const alreadyExistsFailure = {
+    step: "ARCHIVE_EXISTS_CHECK",
+    reason: "TEARDOWN_ARM_ARCHIVE_ALREADY_EXISTS",
+  };
+  let archivedPaths;
   try {
-    exists = existsFn(recordDir) === true;
+    archivedPaths = defaultListHarnessFiles(archiveDestDir).slice().sort();
   } catch {
-    return {
-      step: "ARCHIVE_EXISTS_CHECK",
-      reason: "TEARDOWN_ARM_ARCHIVE_DEST_UNOBSERVABLE",
-    };
+    return alreadyExistsFailure;
   }
-  if (exists) {
-    return {
-      step: "ARCHIVE_EXISTS_CHECK",
-      reason: "TEARDOWN_ARM_ARCHIVE_ALREADY_EXISTS",
-    };
+  const currentPaths = archiveManifestFiles
+    .map((f) => f.path)
+    .slice()
+    .sort();
+  const sameSet =
+    archivedPaths.length === currentPaths.length &&
+    archivedPaths.every((p, i) => p === currentPaths[i]);
+  if (!sameSet) return alreadyExistsFailure;
+  const archivedFiles = [];
+  for (const f of archiveManifestFiles) {
+    let currentBuffer;
+    let archivedBuffer;
+    try {
+      currentBuffer = readFileBufferFn(f.path, worktreePath);
+      archivedBuffer = readArchiveBufferFn(path.join(archiveDestDir, f.path));
+    } catch {
+      return alreadyExistsFailure;
+    }
+    if (!Buffer.isBuffer(currentBuffer) || !Buffer.isBuffer(archivedBuffer)) {
+      return alreadyExistsFailure;
+    }
+    const currentSha = createHash("sha256").update(currentBuffer).digest("hex");
+    const archivedSha = createHash("sha256")
+      .update(archivedBuffer)
+      .digest("hex");
+    if (currentSha !== archivedSha) return alreadyExistsFailure;
+    archivedFiles.push({
+      path: f.path,
+      bytes: currentBuffer.length,
+      sha256: currentSha,
+    });
   }
-  return null;
+  return {
+    ok: true,
+    recordPath: path.join(recordDir, "sha-record.json"),
+    archivedFiles,
+    reusedArchive: true,
+  };
 }
 
 // ⑵+⑶ SHA·브랜치 선기록 + 아카이브 + sha256 대조 IDENTICAL.
@@ -4455,8 +4523,24 @@ function recordShaAndArchive({
     archiveRoot,
     buildArmArchiveFinalName(worktreePath),
   );
-  const existsFailure = checkArchiveDestAbsentForArm({ recordDir, existsFn });
-  if (existsFailure) return existsFailure;
+  let recordDirExists;
+  try {
+    recordDirExists = existsFn(recordDir) === true;
+  } catch {
+    return {
+      step: "ARCHIVE_EXISTS_CHECK",
+      reason: "TEARDOWN_ARM_ARCHIVE_DEST_UNOBSERVABLE",
+    };
+  }
+  if (recordDirExists) {
+    return resolveExistingArmArchive({
+      recordDir,
+      worktreePath,
+      archiveManifestFiles,
+      readFileBufferFn,
+      readArchiveBufferFn,
+    });
+  }
   let recordPath;
   try {
     recordPath = recordTeardownArmSha({
@@ -4800,6 +4884,12 @@ function buildTeardownArmNoticeResultLines(r) {
   if (Array.isArray(r.archivedFiles)) {
     lines.push(`- 아카이브된 파일 수: ${r.archivedFiles.length}`);
   }
+  // HYK-491-arm-followup-1 (coder-task.md §2 product_scope P2-② 수리):
+  // 이번에 새로 쓰지 않고 기존 아카이브를 재사용했다는 사실을 사람이
+  // 읽을 수 있게 남긴다(감사 추적 -- 판정에는 쓰지 않는다).
+  if (r.reusedArchive === true) {
+    lines.push("- 아카이브: 기존 사본 재사용(IDENTICAL 확인, 새로 쓰지 않음)");
+  }
   if (isNonEmptyString(r.branchName)) {
     lines.push(
       `- 브랜치: ${r.branchName} @ ${r.sha}${r.branchRestored ? " (복원함)" : ""}`,
@@ -4828,7 +4918,15 @@ function buildTeardownArmNoticeText({ results, now, confirmedBy, at }) {
     );
   }
   lines.push("");
-  const aborted = results.length > 0 && !results[results.length - 1].ok;
+  // HYK-491-arm-followup-1 (coder-task.md §2 product_scope P2-② 수리):
+  // 마지막 항목이 "건너뜀"(dirty·자기 아카이브 불일치)이면 중단이
+  // 아니다 -- isArmRemovalSkipOnlyFailure(runArmedRemovalLoop와 동일
+  // 판정) 참조.
+  const lastResult = results[results.length - 1];
+  const aborted =
+    results.length > 0 &&
+    !lastResult.ok &&
+    !isArmRemovalSkipOnlyFailure(lastResult);
   lines.push(
     aborted
       ? "이 회차는 중간에 중단됐다 -- 마지막 항목 이후 워크트리는 손대지 않았다(fail-closed, 설계 메모 §2 ⓘⓘⓘ)."
@@ -4857,6 +4955,21 @@ function buildTeardownArmNoticeFileName(nowMs) {
 // 그 자리에서 멈춘다(기본 = 전체 중단, 설계 메모 §2 ⓘⓘⓘ "한 개 실패가
 // 전체를 지우지 않고" 조항의 반대쪽 기본값 -- 다음 회차(다음 tick)에
 // 다시 판정·시도된다).
+// HYK-491-arm-followup-1 (coder-task.md §2 product_scope P2-② 수리):
+// "전체 중단" 기본값(2R 설계 메모 §3)의 두 예외 -- 커밋 안 된 변경
+// (dirty)과 자기 아카이브 재사용 불일치는 "건너뜀"이지 "중단"이 아니다
+// (책임자 판정 2026-11-06 16:0x §1 ⓘⓘ 원문: "뒤 워크트리는 계속
+// 판정·처리"). 그 밖(아카이브 쓰기/대조 실패·제거 실패·복원 실패·
+// 재관측 실패·좌석 실패 등 "중간 단계 실패")은 무변으로 전체 중단을
+// 유지한다.
+const ARM_REMOVAL_SKIP_ONLY_REASONS = new Set([
+  "TEARDOWN_ARM_WORKING_TREE_DIRTY",
+  "TEARDOWN_ARM_ARCHIVE_ALREADY_EXISTS",
+]);
+function isArmRemovalSkipOnlyFailure(r) {
+  return r.ok === false && ARM_REMOVAL_SKIP_ONLY_REASONS.has(r.reason);
+}
+
 function runArmedRemovalLoop({
   eligibleEntries,
   repoRoot,
@@ -4890,7 +5003,7 @@ function runArmedRemovalLoop({
       execFn,
     });
     results.push(r);
-    if (!r.ok) break;
+    if (!r.ok && !isArmRemovalSkipOnlyFailure(r)) break;
   }
   return results;
 }
@@ -4940,14 +5053,19 @@ function runTeardownArmStep({
   execFn,
 }) {
   // HYK-491-teardown-arm-2 (coder-task.md §2 product_scope P1-2 수리):
-  // flagReason은 off일 때만 실리고(armed:false 공통 경로), §2 비타협
-  // "off면 바이트 동작 동일"은 아래 teardownShadowLogSegment가
-  // `attempted!==true`면 토큰을 한 글자도 더하지 않는 것으로 계속
-  // 지켜진다 -- flagReason은 그 로그 줄이 아니라 이 armResult 값
-  // 자체에만 "기록"된다(호출자·시험이 왜 off인지 구분할 수 있게).
+  // flagReason은 off일 때만 실린다(armed:false 공통 경로).
+  //
+  // HYK-491-arm-followup-1 (coder-task.md §2 product_scope P2-① 수리):
+  // 위 주석의 "flagReason은 로그 줄이 아니라 armResult 값에만 기록된다"
+  // 는 더는 전부 참이 아니다 -- 아래 teardownShadowLogSegment가 이제
+  // flagReason이 ABSENT(파일 없음)가 아니면 꼬리 칸에 사유 토큰을
+  // 싣는다(§2 비타협 "off면 바이트 동작 동일"은 ABSENT에만 그대로
+  // 지켜진다). confirmedBy/at도 같은 이유로 여기 armResult에 실어
+  // 보낸다(로그 꼬리가 armed:true + attempted:true일 때 "기록만"
+  // 옮겨 적을 수 있게).
   if (!armed) return { armed: false, attempted: false, flagReason };
   if (!Array.isArray(eligibleEntries) || eligibleEntries.length === 0) {
-    return { armed: true, attempted: false, results: [] };
+    return { armed: true, attempted: false, results: [], confirmedBy, at };
   }
   const results = runArmedRemovalLoop({
     eligibleEntries,
@@ -4983,6 +5101,8 @@ function runTeardownArmStep({
       attempted: true,
       results,
       noticeError: notice.reason,
+      confirmedBy,
+      at,
     };
   }
   return {
@@ -4990,6 +5110,8 @@ function runTeardownArmStep({
     attempted: true,
     results,
     noticePath: notice.noticePath,
+    confirmedBy,
+    at,
   };
 }
 
@@ -5133,6 +5255,53 @@ function runTeardownShadowStep({
 // 코드 집합)는 작게 유지되므로 잘릴 일이 거의 없다. 워크트리별 전체
 // 상세(이름 + 사유)는 runTeardownShadowNotifyStep이 받는함에 적는다
 // (아래 buildTeardownShadowNoticeText가 이제 entries 전체를 받는다).
+// HYK-491-arm-followup-1 (coder-task.md §2 product_scope P2-① 수리,
+// 책임자 판정 2026-11-06 16:0x §1 ⓘ): armed!==true(off) 경로만 맡는다
+// -- 무장 파일이 "없음"(ABSENT)이면 바이트 동일을 유지하고, "있는데
+// on이 아님"(그 밖의 사유 전부)이면 꼬리 칸에 사유 토큰 원문 1개를
+// 싣는다. teardownShadowLogSegment에서 분리(복잡도 분산).
+function teardownArmOffLogSegment(base, arm) {
+  if (
+    isNonEmptyString(arm.flagReason) &&
+    arm.flagReason !== TEARDOWN_ARM_FLAG_REASON.ABSENT
+  ) {
+    return `${base} teardown_arm_off_reason=${arm.flagReason}`;
+  }
+  return base;
+}
+
+// armed===true + attempted===true 경로만 맡는다(처리 수·제거 수 +
+// HYK-491-arm-followup-1 P2-① confirmed_by/at "기록만"). teardownShadowLogSegment
+// 에서 분리(복잡도 분산).
+function teardownArmAttemptedLogSegment(base, arm) {
+  const results = Array.isArray(arm.results) ? arm.results : [];
+  // HYK-491-teardown-arm-2 (coder-task.md §2 product_scope P2-4 수리,
+  // 검토 1R P2-4 실측): 브랜치 복원 실패(BRANCH_RESTORE)·재관측 실패
+  // (REOBSERVE)는 `ok:false`이지만 워크트리는 "실제로 이미 없어진"
+  // 뒤다(removeAndRestoreBranch/reobserveArmedRemoval이 그 경로에
+  // `removed:true`를 싣는다) -- 1R은 `ok`만 셌다. 이 칸은 "워크트리가
+  // 실제로 없어진 수"를 세야 한다(복원 실패로 중단돼도 지워졌으면
+  // 센다).
+  const removed = results.filter(
+    (r) => r.ok === true || r.removed === true,
+  ).length;
+  let line =
+    `${base} ` +
+    `teardown_arm_attempted=true ` +
+    `teardown_arm_processed=${results.length} ` +
+    `teardown_arm_removed=${removed}`;
+  // HYK-491-arm-followup-1 (coder-task.md §2 product_scope P2-① 수리):
+  // on일 때 confirmed_by/at도 로그에 "기록만"(판정 불사용) -- 받는함
+  // 머리에 이미 적는 것과 같은 값을 꼬리 칸에도 옮긴다(사람이 로그만
+  // 보고도 "누가·언제 확인했다"를 알 수 있게).
+  if (isNonEmptyString(arm.confirmedBy) || isNonEmptyString(arm.at)) {
+    line +=
+      ` teardown_arm_confirmed_by=${arm.confirmedBy ?? "NONE"} ` +
+      `teardown_arm_at=${arm.at ?? "NONE"}`;
+  }
+  return line;
+}
+
 function teardownShadowLogSegment(result) {
   if (!result || result.notRun) return null;
   const entries = Array.isArray(result.entries) ? result.entries : [];
@@ -5155,24 +5324,13 @@ function teardownShadowLogSegment(result) {
   // eligible 0) 이 칸을 한 글자도 더하지 않는다 -- §2 비타협 "off면
   // 바이트 동작 동일"이 로그 줄에도 그대로 적용된다.
   const arm = result.armResult;
-  if (!arm || arm.attempted !== true) return base;
-  const results = Array.isArray(arm.results) ? arm.results : [];
-  // HYK-491-teardown-arm-2 (coder-task.md §2 product_scope P2-4 수리,
-  // 검토 1R P2-4 실측): 브랜치 복원 실패(BRANCH_RESTORE)·재관측 실패
-  // (REOBSERVE)는 `ok:false`이지만 워크트리는 "실제로 이미 없어진"
-  // 뒤다(removeAndRestoreBranch/reobserveArmedRemoval이 그 경로에
-  // `removed:true`를 싣는다) -- 1R은 `ok`만 셌다. 이 칸은 "워크트리가
-  // 실제로 없어진 수"를 세야 한다(복원 실패로 중단돼도 지워졌으면
-  // 센다).
-  const removed = results.filter(
-    (r) => r.ok === true || r.removed === true,
-  ).length;
-  return (
-    `${base} ` +
-    `teardown_arm_attempted=true ` +
-    `teardown_arm_processed=${results.length} ` +
-    `teardown_arm_removed=${removed}`
-  );
+  if (!arm) return base;
+  // off는 armed!==true일 때만 일어나고 그 경로의 attempted는 항상
+  // false이므로, 아래 `attempted!==true` 조기 반환보다 먼저 가른다
+  // (teardownArmOffLogSegment 참조).
+  if (arm.armed !== true) return teardownArmOffLogSegment(base, arm);
+  if (arm.attempted !== true) return base;
+  return teardownArmAttemptedLogSegment(base, arm);
 }
 
 // 세 잔재 종류를 한 회차에 모아 보고한다. opt-in(위 헤더 주석) --

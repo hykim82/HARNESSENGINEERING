@@ -1244,7 +1244,7 @@ const ARM_FLAG_INVALID_VALUE_CASES = [
 ];
 
 for (const c of ARM_FLAG_INVALID_VALUE_CASES) {
-  test(`12. 무장 파일 이상 값 -- ${c.name}: off로 새고 사유 토큰이 구분된다(제거 0, orca exec 호출 0)`, () => {
+  test(`12. 무장 파일 이상 값 -- ${c.name}: off로 새고 사유 토큰이 구분된다(제거 0, orca exec 호출 0, P2-① 로그 꼬리 사유 토큰)`, () => {
     const repo = setupRepo();
     addWorktree(repo, "wt-invalidflag", "feature/invalidflag");
     const [mainPath, wtPath] = listWorktreePaths(repo.mainRoot);
@@ -1273,11 +1273,24 @@ for (const c of ARM_FLAG_INVALID_VALUE_CASES) {
           orcaExecFn: execFn,
         },
       });
-      assert.equal(
-        result.line.includes("teardown_arm_"),
-        false,
-        `case ${c.name}: off must stay byte-identical to the base log line`,
-      );
+      // HYK-491-arm-followup-1 (coder-task.md §2 product_scope P2-①): 무장
+      // 파일 "없음"(ABSENT)만 로그 줄 바이트 동일을 유지한다 -- 그 밖의
+      // 8종(파일이 "있는데" on이 아닌 경우)은 꼬리 칸에 사유 토큰 원문
+      // 1개(`teardown_arm_off_reason=<토큰>`)가 실려야 한다(#352 약속은
+      // "파일 없음"에만 적용, 책임자 판정 2026-11-06 16:0x §1 ⓘ).
+      if (c.reason === "TEARDOWN_ARM_FLAG_ABSENT") {
+        assert.equal(
+          result.line.includes("teardown_arm_"),
+          false,
+          `case ${c.name}: file-absent must stay byte-identical to the base log line`,
+        );
+      } else {
+        assert.match(
+          result.line,
+          new RegExp(`teardown_arm_off_reason=${c.reason}(\\s|$)`),
+          `case ${c.name}: file-present-but-not-on must carry the off reason token in the log tail`,
+        );
+      }
       assert.equal(
         execFn.calls.length,
         0,
@@ -1293,3 +1306,443 @@ for (const c of ARM_FLAG_INVALID_VALUE_CASES) {
     }
   });
 }
+
+// ---------------------------------------------------------------------------
+// HYK-491-arm-followup-1 (coder-task.md §2 product_scope P2-①~④, 검토 2R
+// §3 재현 원문) -- 아래부터는 이 라운드가 더한 시험이다.
+// ---------------------------------------------------------------------------
+
+test("13. P2-① on 일 때 confirmed_by/at 도 로그 꼬리에 기록만 된다(판정 불사용)", () => {
+  const repo = setupRepo();
+  addWorktree(repo, "wt-confirmedby", "feature/confirmedby");
+  const [mainPath, wtPath] = listWorktreePaths(repo.mainRoot);
+  makeEligibleHarness(wtPath);
+  const watchDir = tmpWatchDir();
+  const notifyDir = tmpNotifyDir();
+  const archiveRoot = tmpArchiveRoot();
+  try {
+    armFlag(watchDir, {
+      confirmed_by: "hanyoung",
+      at: "2026-11-07T10:00:00+09:00",
+    });
+    const execFn = buildFakeOrcaExecFn({ mainRoot: repo.mainRoot });
+    const result = runWatchOnce({
+      repoRoot: repo.mainRoot,
+      watchDir,
+      notifyDir,
+      now: Date.parse("2026-11-06T09:00:00+09:00"),
+      execFn: unconsumedExecFn([
+        { worktreePath: mainPath, kind: "NA" },
+        { worktreePath: wtPath, kind: "CONSUMED" },
+      ]),
+      resourceResidue: {
+        worktreeListFn: () => ({
+          ok: true,
+          worktrees: listWorktreePaths(repo.mainRoot),
+        }),
+        teardownShadow: { archiveRoot },
+        orcaExecFn: execFn,
+      },
+    });
+    assert.match(result.line, /teardown_arm_removed=1/);
+    assert.match(result.line, /teardown_arm_confirmed_by=hanyoung/);
+    assert.match(result.line, /teardown_arm_at=2026-11-07T10:00:00\+09:00/);
+  } finally {
+    cleanup([repo.parent, watchDir, notifyDir, archiveRoot]);
+  }
+});
+
+test("14. P2-④ 무장 파일 읽기 실패(EACCES)는 TEARDOWN_ARM_FLAG_NOT_JSON과 구분되는 TEARDOWN_ARM_FLAG_READ_FAILED 로 off", () => {
+  const repo = setupRepo();
+  addWorktree(repo, "wt-readfail", "feature/readfail");
+  const [mainPath, wtPath] = listWorktreePaths(repo.mainRoot);
+  makeEligibleHarness(wtPath);
+  const watchDir = tmpWatchDir();
+  const notifyDir = tmpNotifyDir();
+  const archiveRoot = tmpArchiveRoot();
+  try {
+    const flagPath = path.join(watchDir, "teardown-arm.json");
+    fs.writeFileSync(flagPath, JSON.stringify({ armed: true }));
+    const execFn = buildFakeOrcaExecFn({ mainRoot: repo.mainRoot });
+    const result = runWatchOnce({
+      repoRoot: repo.mainRoot,
+      watchDir,
+      notifyDir,
+      now: Date.parse("2026-11-06T09:00:00+09:00"),
+      // 다른 모든 경로는 실 fs로 위임 -- 무장 파일 자체만 EACCES로
+      // 읽기를 막는다(이 라운드가 더하는 유일한 주입구).
+      readFn: (p, enc) => {
+        if (p === flagPath) {
+          const err = new Error("synthetic read failure");
+          err.code = "EACCES";
+          throw err;
+        }
+        return fs.readFileSync(p, enc);
+      },
+      execFn: unconsumedExecFn([
+        { worktreePath: mainPath, kind: "NA" },
+        { worktreePath: wtPath, kind: "CONSUMED" },
+      ]),
+      resourceResidue: {
+        worktreeListFn: () => ({
+          ok: true,
+          worktrees: listWorktreePaths(repo.mainRoot),
+        }),
+        teardownShadow: { archiveRoot },
+        orcaExecFn: execFn,
+      },
+    });
+    assert.match(
+      result.line,
+      /teardown_arm_off_reason=TEARDOWN_ARM_FLAG_READ_FAILED(\s|$)/,
+    );
+    assert.equal(execFn.calls.length, 0);
+    assert.equal(fs.existsSync(wtPath), true);
+    const armResult =
+      result.resourceResidueResult.teardownShadowResult.armResult;
+    assert.equal(armResult.armed, false);
+    assert.equal(armResult.flagReason, "TEARDOWN_ARM_FLAG_READ_FAILED");
+  } finally {
+    cleanup([repo.parent, watchDir, notifyDir, archiveRoot]);
+  }
+});
+
+test("15. P2-② 음성 -- 커밋 안 된 변경이 있는 워크트리는 «그 워크트리만» 건너뛰고 뒤 워크트리는 계속 처리된다(전체 중단 폐지)", () => {
+  const repo = setupRepo();
+  addWorktree(repo, "wt-dirty-order-a", "feature/dirty-order-a");
+  addWorktree(repo, "wt-clean-order-b", "feature/clean-order-b");
+  const [mainPath, wtDirty, wtClean] = listWorktreePaths(repo.mainRoot);
+  makeEligibleHarness(wtDirty);
+  makeEligibleHarness(wtClean);
+  fs.writeFileSync(path.join(wtDirty, "README.md"), "UNCOMMITTED EDIT\n");
+  const watchDir = tmpWatchDir();
+  const notifyDir = tmpNotifyDir();
+  const archiveRoot = tmpArchiveRoot();
+  try {
+    armFlag(watchDir);
+    const execFn = buildFakeOrcaExecFn({ mainRoot: repo.mainRoot });
+    const result = runWatchOnce({
+      repoRoot: repo.mainRoot,
+      watchDir,
+      notifyDir,
+      now: Date.parse("2026-11-06T09:00:00+09:00"),
+      execFn: unconsumedExecFn([
+        { worktreePath: mainPath, kind: "NA" },
+        { worktreePath: wtDirty, kind: "CONSUMED" },
+        { worktreePath: wtClean, kind: "CONSUMED" },
+      ]),
+      resourceResidue: {
+        worktreeListFn: () => ({
+          ok: true,
+          worktrees: listWorktreePaths(repo.mainRoot),
+        }),
+        teardownShadow: { archiveRoot },
+        orcaExecFn: execFn,
+      },
+    });
+    assert.match(result.line, /teardown_shadow_eligible=2/);
+    assert.match(result.line, /teardown_arm_processed=2/);
+    assert.match(
+      result.line,
+      /teardown_arm_removed=1/,
+      "the dirty worktree must not count as removed, but the clean one after it must",
+    );
+    const rmCalls = removeCalls(execFn);
+    assert.equal(rmCalls.length, 1, "only the clean worktree must be rm'd");
+    assert.equal(fs.existsSync(wtDirty), true, "dirty worktree must survive");
+    assert.equal(
+      fs.readFileSync(path.join(wtDirty, "README.md"), "utf8"),
+      "UNCOMMITTED EDIT\n",
+    );
+    assert.equal(
+      fs.existsSync(wtClean),
+      false,
+      "clean worktree after it must still be removed",
+    );
+    const noticeText = readNoticeText(notifyDir);
+    assert.match(noticeText, /TEARDOWN_ARM_WORKING_TREE_DIRTY/);
+  } finally {
+    cleanup([repo.parent, watchDir, notifyDir, archiveRoot]);
+  }
+});
+
+test("16. P2-② 자기 아카이브 같은 날 재시도(IDENTICAL): 지금 .harness 와 파일별 sha256 같으면 재사용해 다음 단계로 진행해 제거까지 간다", () => {
+  const repo = setupRepo();
+  addWorktree(repo, "wt-identical-retry", "feature/identical-retry-1");
+  const [mainPath, wtPath] = listWorktreePaths(repo.mainRoot);
+  makeEligibleHarness(wtPath);
+  const watchDir = tmpWatchDir();
+  const notifyDir = tmpNotifyDir();
+  const archiveRoot = tmpArchiveRoot();
+  try {
+    armFlag(watchDir);
+    const execFn1 = buildFakeOrcaExecFn({ mainRoot: repo.mainRoot });
+    runWatchOnce({
+      repoRoot: repo.mainRoot,
+      watchDir,
+      notifyDir,
+      now: Date.parse("2026-11-06T09:00:00+09:00"),
+      execFn: unconsumedExecFn([
+        { worktreePath: mainPath, kind: "NA" },
+        { worktreePath: wtPath, kind: "CONSUMED" },
+      ]),
+      resourceResidue: {
+        worktreeListFn: () => ({
+          ok: true,
+          worktrees: listWorktreePaths(repo.mainRoot),
+        }),
+        teardownShadow: { archiveRoot },
+        orcaExecFn: execFn1,
+      },
+    });
+    assert.equal(fs.existsSync(wtPath), false, "first tick must remove it");
+    const finalDir = path.join(archiveRoot, "wt-identical-retry-final");
+    const copyPath = path.join(
+      finalDir,
+      "harness-archive",
+      ".harness",
+      "receipts",
+      "CODER-receipt-r1.json",
+    );
+    const firstCopyBuffer = fs.readFileSync(copyPath);
+
+    // 같은 경로에 같은 내용(makeEligibleHarness는 결정적)으로 다시
+    // 워크트리를 만든다 -- 아카이브는 이미 있지만 내용이 IDENTICAL.
+    git(repo.mainRoot, [
+      "worktree",
+      "add",
+      "-q",
+      "-b",
+      "feature/identical-retry-2",
+      wtPath,
+      "master",
+    ]);
+    makeEligibleHarness(wtPath);
+
+    const execFn2 = buildFakeOrcaExecFn({ mainRoot: repo.mainRoot });
+    const result2 = runWatchOnce({
+      repoRoot: repo.mainRoot,
+      watchDir,
+      notifyDir,
+      now: Date.parse("2026-11-06T09:05:00+09:00"),
+      execFn: unconsumedExecFn([
+        { worktreePath: mainPath, kind: "NA" },
+        { worktreePath: wtPath, kind: "CONSUMED" },
+      ]),
+      resourceResidue: {
+        worktreeListFn: () => ({
+          ok: true,
+          worktrees: listWorktreePaths(repo.mainRoot),
+        }),
+        teardownShadow: { archiveRoot },
+        orcaExecFn: execFn2,
+      },
+    });
+    assert.match(result2.line, /teardown_arm_removed=1/);
+    assert.equal(removeCalls(execFn2).length, 1);
+    assert.equal(
+      fs.existsSync(wtPath),
+      false,
+      "second tick must remove it too (reused archive)",
+    );
+    // 기존 아카이브 바이트 무변(재사용 -- 다시 쓰지 않았다).
+    assert.equal(sha256(fs.readFileSync(copyPath)), sha256(firstCopyBuffer));
+  } finally {
+    cleanup([repo.parent, watchDir, notifyDir, archiveRoot]);
+  }
+});
+
+// 테스트 17을 위한 1차 제거(몸통 길이를 줄이려고 분리, 테스트 11의
+// runArchiveReuseFirstTick과 동일 관례) -- 아카이브가 실제로 생기고,
+// 그 사본 버퍼를 돌려준다(2차 tick에서 "무변"을 대조하는 데 쓴다).
+function runArchiveMismatchFirstTick({
+  repo,
+  mainPath,
+  wtReuse,
+  notifyDir,
+  archiveRoot,
+  watchDir,
+}) {
+  armFlag(watchDir);
+  const execFn1 = buildFakeOrcaExecFn({ mainRoot: repo.mainRoot });
+  runWatchOnce({
+    repoRoot: repo.mainRoot,
+    watchDir,
+    notifyDir,
+    now: Date.parse("2026-11-06T09:00:00+09:00"),
+    execFn: unconsumedExecFn([
+      { worktreePath: mainPath, kind: "NA" },
+      { worktreePath: wtReuse, kind: "CONSUMED" },
+    ]),
+    resourceResidue: {
+      worktreeListFn: () => ({
+        ok: true,
+        worktrees: listWorktreePaths(repo.mainRoot),
+      }),
+      teardownShadow: { archiveRoot },
+      orcaExecFn: execFn1,
+    },
+  });
+  assert.equal(fs.existsSync(wtReuse), false);
+  const finalDir = path.join(archiveRoot, "wt-reuse-diff-final");
+  const copyPath = path.join(
+    finalDir,
+    "harness-archive",
+    ".harness",
+    "receipts",
+    "CODER-receipt-r1.json",
+  );
+  return { copyPath, firstCopyBuffer: fs.readFileSync(copyPath) };
+}
+
+// 테스트 17을 위한 2차 설정(몸통 길이를 줄이려고 분리): 같은 경로를
+// 다른 내용(추가 파일)으로 재사용 + 그 뒤에 새 워크트리 하나를 더
+// 더한다(건너뜀이 뒤 워크트리를 막지 않는지 확인하는 데 쓴다).
+function setupMismatchedReuseAndExtraWorktree({ repo, mainPath, wtReuse }) {
+  git(repo.mainRoot, [
+    "worktree",
+    "add",
+    "-q",
+    "-b",
+    "feature/reuse-diff-2",
+    wtReuse,
+    "master",
+  ]);
+  makeEligibleHarness(wtReuse);
+  writeHarnessFile(wtReuse, ".harness/rounds/EXTRA.md", "extra\n");
+  addWorktree(repo, "wt-after-reuse-diff", "feature/after-reuse-diff");
+  const allPaths = listWorktreePaths(repo.mainRoot);
+  // HYK-491-arm-followup-1: git worktree list --porcelain의 순서는
+  // "마지막에 더한 것 = 끝"을 보장하지 않는다(알파벳 비슷한 정렬로
+  // 샐 수 있다) -- mainPath/wtReuse를 제외한 나머지로 직접 찾는다.
+  const wtAfter = allPaths.find((p) => p !== mainPath && p !== wtReuse);
+  assert.ok(
+    wtAfter,
+    "expected a third worktree path distinct from main/wtReuse",
+  );
+  makeEligibleHarness(wtAfter);
+  return wtAfter;
+}
+
+test("17. P2-② 아카이브 재사용 불일치도 그 워크트리만 건너뛰고(기존 아카이브 바이트 무변) 뒤 워크트리는 계속 처리된다", () => {
+  const repo = setupRepo();
+  addWorktree(repo, "wt-reuse-diff", "feature/reuse-diff-1");
+  const [mainPath, wtReuse] = listWorktreePaths(repo.mainRoot);
+  makeEligibleHarness(wtReuse);
+  const watchDir = tmpWatchDir();
+  const notifyDir = tmpNotifyDir();
+  const archiveRoot = tmpArchiveRoot();
+  try {
+    const { copyPath, firstCopyBuffer } = runArchiveMismatchFirstTick({
+      repo,
+      mainPath,
+      wtReuse,
+      notifyDir,
+      archiveRoot,
+      watchDir,
+    });
+
+    const wtAfter = setupMismatchedReuseAndExtraWorktree({
+      repo,
+      mainPath,
+      wtReuse,
+    });
+
+    const execFn2 = buildFakeOrcaExecFn({ mainRoot: repo.mainRoot });
+    const result2 = runWatchOnce({
+      repoRoot: repo.mainRoot,
+      watchDir,
+      notifyDir,
+      now: Date.parse("2026-11-06T09:05:00+09:00"),
+      execFn: unconsumedExecFn([
+        { worktreePath: mainPath, kind: "NA" },
+        { worktreePath: wtReuse, kind: "CONSUMED" },
+        { worktreePath: wtAfter, kind: "CONSUMED" },
+      ]),
+      resourceResidue: {
+        worktreeListFn: () => ({
+          ok: true,
+          worktrees: listWorktreePaths(repo.mainRoot),
+        }),
+        teardownShadow: { archiveRoot },
+        orcaExecFn: execFn2,
+      },
+    });
+    assert.match(result2.line, /teardown_arm_processed=2/);
+    assert.match(result2.line, /teardown_arm_removed=1/);
+    assert.equal(
+      fs.existsSync(wtReuse),
+      true,
+      "mismatched reuse must be skipped, not removed",
+    );
+    assert.equal(
+      fs.existsSync(wtAfter),
+      false,
+      "worktree after the skipped one must still be removed",
+    );
+    assert.equal(
+      sha256(fs.readFileSync(copyPath)),
+      sha256(firstCopyBuffer),
+      "existing archive bytes from the first tick must remain untouched",
+    );
+    assert.match(
+      readLatestNoticeText(notifyDir),
+      /TEARDOWN_ARM_ARCHIVE_ALREADY_EXISTS/,
+    );
+  } finally {
+    cleanup([repo.parent, watchDir, notifyDir, archiveRoot]);
+  }
+});
+
+test("18. P2-③ 아카이브 날짜 폴더는 KST 기준이다(now = KST 08:30, UTC 날짜와 다른 경계 칸)", () => {
+  const repo = setupRepo();
+  addWorktree(repo, "wt-kstdate", "feature/kstdate");
+  const [mainPath, wtPath] = listWorktreePaths(repo.mainRoot);
+  makeEligibleHarness(wtPath);
+  const watchParent = fs.mkdtempSync(path.join(tmpdir(), "nc-hyk491-kst-"));
+  const watchDir = path.join(watchParent, "watch");
+  fs.mkdirSync(watchDir);
+  const notifyDir = tmpNotifyDir();
+  try {
+    armFlag(watchDir);
+    const execFn = buildFakeOrcaExecFn({ mainRoot: repo.mainRoot });
+    // KST 2026-11-07 08:30 == UTC 2026-11-06 23:30 -- UTC 날짜 슬라이스를
+    // 그대로 쓰면 "2026-11-06"(전날) 폴더가 되고, KST 기준이면
+    // "2026-11-07"(당일) 폴더가 된다.
+    runWatchOnce({
+      repoRoot: repo.mainRoot,
+      watchDir,
+      notifyDir,
+      now: Date.parse("2026-11-07T08:30:00+09:00"),
+      execFn: unconsumedExecFn([
+        { worktreePath: mainPath, kind: "NA" },
+        { worktreePath: wtPath, kind: "CONSUMED" },
+      ]),
+      resourceResidue: {
+        worktreeListFn: () => ({
+          ok: true,
+          worktrees: listWorktreePaths(repo.mainRoot),
+        }),
+        teardownShadow: {},
+        orcaExecFn: execFn,
+      },
+    });
+    const kstDir = path.join(
+      watchParent,
+      "아카이브",
+      "2026-11-07-teardown-arm",
+      "wt-kstdate-final",
+    );
+    const utcDir = path.join(
+      watchParent,
+      "아카이브",
+      "2026-11-06-teardown-arm",
+      "wt-kstdate-final",
+    );
+    assert.equal(fs.existsSync(path.join(kstDir, "sha-record.json")), true);
+    assert.equal(fs.existsSync(utcDir), false);
+    assert.equal(fs.existsSync(wtPath), false);
+  } finally {
+    cleanup([repo.parent, watchParent, notifyDir]);
+  }
+});
