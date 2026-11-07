@@ -344,6 +344,31 @@ function readLockContentResult(readFileFn, lockPath) {
   }
 }
 
+// HYK-494 후속 P2-2: readLockContentResult와 달리 ENOENT와 그 밖의 읽기
+// 실패(일시적 공유 위반·EBUSY/EPERM·쓰기 도중의 부분/빈 내용 등)를 갈라
+// 돌려준다 -- 회수권 보유자를 읽을 때만 쓴다. ENOENT는 "보유자가 이미
+// 지웠다"는 평범한 사실(다음 판정으로 진행해도 안전)이지만, 그 밖의
+// 실패는 보유자가 여전히 살아 있을 수도 있다는 뜻이라 "고아"로 보면
+// 안 된다(2R이 L 자체에 대해 닫은 "읽기 실패 ≠ 고아"(F3) 원칙을 회수권
+// 판독에도 적용).
+function readLockContentResultDetailed(readFileFn, path) {
+  let raw;
+  try {
+    raw = readFileFn(path, "utf8");
+  } catch (err) {
+    if (err?.code === "ENOENT")
+      return { ok: false, content: null, enoent: true };
+    return { ok: false, content: null, enoent: false };
+  }
+  try {
+    return { ok: true, content: JSON.parse(raw) };
+  } catch {
+    // 부분/손상 내용(비원자적 쓰기 중간을 본 경우) -- ENOENT가 아니므로
+    // "보유자가 지웠다"로 보지 않는다, 위와 같은 이유.
+    return { ok: false, content: null, enoent: false };
+  }
+}
+
 // best-effort 청소 -- O의 heartbeat 파일 + O의 회수권 전부(반드시 L 삭제
 // "뒤", PM 설계 (d) "best-effort: unlink O의 heartbeat 파일 · O의 권한
 // 전부"). 실패해도 삼킨다(공간 누수일 뿐, 불변식에는 영향이 없다 -- §(d)
@@ -402,7 +427,7 @@ function resolveContendedStep({
     readdirFn,
   });
   if (k > 0) {
-    const holderResult = readLockContentResult(
+    const holderResult = readLockContentResultDetailed(
       readFileFn,
       reclaimTicketPath(lockPath, content.lockId, k),
     );
@@ -413,11 +438,18 @@ function resolveContendedStep({
         getStartIdentityFn,
       });
       if (!holderVerdict.dead) return { step: "wait" }; // 이미 누가 회수 중.
+    } else if (!holderResult.enoent) {
+      // HYK-494 후속 P2-2: ENOENT 외의 읽기 실패(일시적 공유 위반 등)는
+      // "보유자가 지웠다"는 뜻이 아니다 -- 판정 없이 k+1로 가지 않는다
+      // (살아 있는 회수권자 ≤1 불변식을 지키려면 여기서 "모르면 기다린다"
+      // 로 떨어져야 한다). 호출자가 BUSY_RETRY_TIMEOUT_MS와 같은 상한 뒤
+      // throw한다(handleTicketReadBusy).
+      return { step: "wait", ticketReadBusy: true };
     }
-    // holderResult.ok===false(표식 자체가 못 읽힘)도 "DEAD로 본다"는
-    // 뜻이 아니다 -- 아래에서 k+1을 "시도"하되, 이미 다른 1명이 더 빨리
-    // 같은 결론(읽기 실패 -> 다음 번호 시도)에 이르렀다면 link의 EEXIST가
-    // 우리를 걸러낸다(세대 번호 자체가 "정확히 1명" 보장의 원천).
+    // holderResult.enoent===true(표식 자체가 ENOENT)는 "보유자가 이미
+    // 지웠다"는 평범한 사실이다 -- 아래에서 k+1을 "시도"하되, 이미 다른
+    // 1명이 더 빨리 같은 결론에 이르렀다면 link의 EEXIST가 우리를
+    // 걸러낸다(세대 번호 자체가 "정확히 1명" 보장의 원천).
   }
   const myTicket = createExclusive({
     path: reclaimTicketPath(lockPath, content.lockId, k + 1),
@@ -429,21 +461,28 @@ function resolveContendedStep({
   });
   if (!myTicket.ok) return { step: "wait" }; // k+1을 못 얻음(EEXIST) -- 다음 폴.
   const reread = readLockContentResult(readFileFn, lockPath);
-  if (reread.ok && reread.content?.lockId === content.lockId) {
-    try {
-      unlinkFn(lockPath);
-    } catch {
-      // L이 그 사이 사라졌다면(또 다른 경합) 유일한 삭제 지점이 이미 비어
-      // 있다는 뜻 -- 상태는 우리가 원하는 대로다(L에 O가 없다), 삼킨다.
+  if (reread.ok) {
+    if (reread.content?.lockId === content.lockId) {
+      try {
+        unlinkFn(lockPath);
+      } catch {
+        // L이 그 사이 사라졌다면(또 다른 경합) 유일한 삭제 지점이 이미 비어
+        // 있다는 뜻 -- 상태는 우리가 원하는 대로다(L에 O가 없다), 삼킨다.
+      }
     }
+    // L 삭제 "뒤"에만 청소한다(§(d) 순서 그대로).
+    cleanupAfterReclaim({
+      lockPath,
+      lockId: content.lockId,
+      unlinkFn,
+      readdirFn,
+    });
   }
-  // L 삭제 "뒤"에만 청소한다(§(d) 순서 그대로).
-  cleanupAfterReclaim({
-    lockPath,
-    lockId: content.lockId,
-    unlinkFn,
-    readdirFn,
-  });
+  // HYK-494 후속 P2-3: 재확인 읽기 자체가 실패하면(!reread.ok) L을 지웠는지
+  // 확인할 길이 없다 -- 이 경우 청소를 건너뛴다(설계 논증 4·5의 전제
+  // "청소 = L 삭제 뒤"를 글자대로 지킨다). 우리 회수권(과 O의 heartbeat
+  // 파일)은 그대로 남아 "살아 있는 회수권자 ≤1"을 계속 보장한다 -- 다음
+  // 라운드가 L을 다시 읽어 확인한다.
   return { step: "claim-again" };
 }
 
@@ -466,6 +505,10 @@ const ACQUIRE_LOCK_STATIC_DEFAULTS = {
   randomSuffixFn: randomSuffix,
   isPidAliveFn: defaultIsPidAlive,
   getStartIdentityFn: defaultGetStartIdentity,
+  // HYK-494 후속 P2-1: 기본은 no-op -- 이 값을 언급하지 않는 기존/다른
+  // 모든 호출자는 이 변경 전과 똑같이 조용하다(product_scope 무회귀,
+  // useAutoConcurrency/startHeartbeatFn과 같은 "기본은 OFF" 패턴).
+  logFn: () => {},
   env: process.env,
   nestedEnvVar: NESTED_LOCK_BYPASS_ENV_VAR,
 };
@@ -649,6 +692,35 @@ function handleBusyClaim({
   return null;
 }
 
+// HYK-494 후속 P2-2: the bounded-retry-then-throw counterpart of
+// handleBusyClaim above, for a reclaim ticket read that keeps failing
+// (non-ENOENT) -- same BUSY_RETRY_TIMEOUT_MS-shaped reasoning (an unknown
+// ticket holder must never be treated as "safely absent" forever; past the
+// bound this throws rather than silently waiting past LOCK_WAIT_TIMEOUT_MS
+// too, same "정직 > 낙관" posture as handleBusyClaim). Mutates
+// `state.ticketReadBusySinceMs`/`state.pollCount`.
+function handleTicketReadBusy({
+  state,
+  lockPath,
+  nowMs,
+  sleepFn,
+  pollIntervalMs,
+  busyRetryTimeoutMs,
+}) {
+  if (state.ticketReadBusySinceMs === null)
+    state.ticketReadBusySinceMs = nowMs();
+  if (nowMs() - state.ticketReadBusySinceMs > busyRetryTimeoutMs) {
+    throw new Error(
+      `runner-lock: reclaim ticket read busy (non-ENOENT) for over ` +
+        `${busyRetryTimeoutMs}ms at ${lockPath} -- refusing to advance past ` +
+        `a possibly-alive ticket holder without a verdict`,
+    );
+  }
+  state.pollCount += 1;
+  sleepFn(pollIntervalMs);
+  return null;
+}
+
 // Pulled out of handleContendedClaim below -- judge the existing owner O,
 // then act on that verdict via resolveContendedStep. Same line-count-gate
 // reasoning as every other extraction in this file.
@@ -698,6 +770,27 @@ function judgeAndResolveStep({
 // branch only: read O, judge it, act on resolveContendedStep's verdict. Same
 // line-count-gate reasoning/mutate-`state`-in-place contract as
 // handleBusyClaim above.
+// Pulled out of handleContendedClaim below -- purely to keep that
+// function's own line-count gate happy (same reasoning as every other
+// small extraction in this file). HYK-494 후속 P2-1: judge(O)가 "낡음
+// 만으로는 회수 안 함"(alive-heartbeat-stale)으로 떨어질 때 대기자 로그에
+// 1줄 남긴다(설계 (d) 원문). 매 폴 반복해도 상태가 그대로면(여전히
+// alive-heartbeat-stale) 또 찍지 않는다 -- 상태가 "바뀔 때"만(여기
+// 들어오거나 벗어날 때) 1번. Mutates `state.aliveHeartbeatStaleLogged`.
+function logAliveHeartbeatStaleOnce({ state, verdict, existing, logFn }) {
+  if (verdict.reason !== "alive-heartbeat-stale") {
+    state.aliveHeartbeatStaleLogged = false;
+    return;
+  }
+  if (state.aliveHeartbeatStaleLogged) return;
+  logFn(
+    `[runner-lock] waiting: owner (pid ${existing?.pid}) heartbeat is ` +
+      `stale but startIdentity still matches -- NOT reclaiming ` +
+      `(alive-heartbeat-stale)`,
+  );
+  state.aliveHeartbeatStaleLogged = true;
+}
+
 function handleContendedClaim({
   state,
   lockPath,
@@ -718,6 +811,8 @@ function handleContendedClaim({
   sleepFn,
   pollIntervalMs,
   timeoutMs,
+  busyRetryTimeoutMs,
+  logFn,
 }) {
   const timedOutFields = () => ({
     lockPath,
@@ -758,11 +853,57 @@ function handleContendedClaim({
     heartbeatStaleMs,
     nowMs,
   });
+  logAliveHeartbeatStaleOnce({ state, verdict, existing, logFn });
+  return dispatchContendedStep({
+    state,
+    step,
+    verdict,
+    lockPath,
+    nowMs,
+    waitStartMs,
+    timeoutMs,
+    sleepFn,
+    pollIntervalMs,
+    busyRetryTimeoutMs,
+    timedOutFields,
+  });
+}
+
+// Pulled out of handleContendedClaim above -- purely to keep that
+// function's own line-count gate happy (same reasoning as every other
+// small extraction in this file). Acts on judgeAndResolveStep's verdict:
+// "claim-again" (no sleep), a ticket-read-busy bounded wait (P2-2), or the
+// ordinary poll-and-maybe-timeout wait.
+function dispatchContendedStep({
+  state,
+  step,
+  verdict,
+  lockPath,
+  nowMs,
+  waitStartMs,
+  timeoutMs,
+  sleepFn,
+  pollIntervalMs,
+  busyRetryTimeoutMs,
+  timedOutFields,
+}) {
   if (step.step === "claim-again") {
     state.reclaimedOrphan = true;
     state.reclaimReason = verdict.reason;
+    state.ticketReadBusySinceMs = null;
     return null; // §(d) "continue (sleep 없음)".
   }
+  if (step.ticketReadBusy) {
+    return handleTicketReadBusy({
+      state,
+      lockPath,
+      nowMs,
+      sleepFn,
+      pollIntervalMs,
+      busyRetryTimeoutMs,
+    });
+  }
+  state.ticketReadBusySinceMs = null;
   return sleepOrTimeOut({
     state,
     nowMs,
@@ -808,6 +949,7 @@ function handleFailedClaim({
     nowMs,
     sleepFn,
     pollIntervalMs,
+    busyRetryTimeoutMs,
     ...rest,
   });
 }
@@ -841,6 +983,8 @@ function runAcquireLoop(opts) {
     reclaimReason: null,
     priorOwner: null,
     busySinceMs: null,
+    ticketReadBusySinceMs: null, // HYK-494 후속 P2-2
+    aliveHeartbeatStaleLogged: false, // HYK-494 후속 P2-1
   };
   for (;;) {
     refreshOwnAliveFile({ lockPath, lockId, writeFileFn, nowMs });
@@ -897,6 +1041,7 @@ export function acquireRunnerLock(opts) {
     randomSuffixFn,
     isPidAliveFn,
     getStartIdentityFn,
+    logFn,
     env,
     nestedEnvVar,
   } = resolveAcquireLockOptions(opts);
@@ -913,29 +1058,57 @@ export function acquireRunnerLock(opts) {
 
   const lockId = randomUUID();
   const content = { pid, startedAtMs, procStart, worktree, head, lockId };
-  return runAcquireLoop({
-    lockPath,
-    content,
-    lockId,
-    pid,
-    procStart,
-    waitStartMs: nowMs(),
-    nestedBypassRejected,
-    writeFileFn,
-    readFileFn,
-    linkFn,
-    unlinkFn,
-    readdirFn,
-    randomSuffixFn,
-    isPidAliveFn,
-    getStartIdentityFn,
-    nowMs,
-    heartbeatStaleMs,
-    sleepFn,
-    pollIntervalMs,
-    timeoutMs,
-    busyRetryTimeoutMs,
-  });
+  try {
+    const result = runAcquireLoop({
+      lockPath,
+      content,
+      lockId,
+      pid,
+      procStart,
+      waitStartMs: nowMs(),
+      nestedBypassRejected,
+      writeFileFn,
+      readFileFn,
+      linkFn,
+      unlinkFn,
+      readdirFn,
+      randomSuffixFn,
+      isPidAliveFn,
+      getStartIdentityFn,
+      logFn,
+      nowMs,
+      heartbeatStaleMs,
+      sleepFn,
+      pollIntervalMs,
+      timeoutMs,
+      busyRetryTimeoutMs,
+    });
+    if (!result.acquired) {
+      // HYK-494 후속 P2-7: 시간 초과로 포기한 대기자는 자기 heartbeat
+      // 파일을 best-effort로 지운다 -- 안 그러면 LOCK_TIMEOUT 1회마다
+      // 잠금 디렉터리에 파일이 하나씩 누수된다(불변식 무관, 공간 누수일
+      // 뿐 -- cleanupAfterReclaim과 같은 근거).
+      cleanupOwnAliveFileBestEffort({ lockPath, lockId, unlinkFn });
+    }
+    return result;
+  } catch (err) {
+    // 같은 이유로, 바쁨 상한을 넘겨 throw하는 경로(P2-7의 "또는 busy
+    // throw")도 자기 heartbeat 파일을 지운 뒤에 던진다.
+    cleanupOwnAliveFileBestEffort({ lockPath, lockId, unlinkFn });
+    throw err;
+  }
+}
+
+// HYK-494 후속 P2-7: a waiter that gives up (timeout OR a bounded-busy
+// throw) must remove its OWN L.alive.<lockId> heartbeat file -- best-effort,
+// same "space leak only, invariant unaffected" reasoning as
+// cleanupAfterReclaim above.
+function cleanupOwnAliveFileBestEffort({ lockPath, lockId, unlinkFn }) {
+  try {
+    unlinkFn(aliveFilePath(lockPath, lockId));
+  } catch {
+    // best-effort.
+  }
 }
 
 // §(d) release -- "if read(L).lockId==me.lockId: unlink L else lock_lost=
@@ -1038,7 +1211,15 @@ const HEARTBEAT_SCRIPT = [
   "function alive(pid){try{process.kill(pid,0);return true;}catch(e){return e&&e.code!=='ESRCH';}}",
   "function tick(){",
   "if(!alive(ownerPid)){clearInterval(timer);return;}",
-  "try{fs.writeFileSync(alivePath,JSON.stringify({aliveAtMs:Date.now()}));}catch(e){}",
+  // HYK-494 후속 CI-1: writeFileSync(alivePath, ...)는 open(O_TRUNC)으로
+  // 먼저 비운 뒤 write하는 두 단계라, 그 사이에 (다른 프로세스가) 읽으면
+  // 빈 파일을 본다(master CI 541bc95 enforce 빨강,
+  // hyk494-runner-lock.test.mjs:1379 "Unexpected end of JSON input" --
+  // 읽는 "자리"는 L이 아니라 이 alive 파일, 쓰기가 비원자적이었다). tmp에
+  // 전체 내용을 다 쓴 뒤 rename(대상이 있으면 덮어쓴다, design doc §3-1
+  // ④ 실측)으로 교체 -- 빈 내용 순간이 전혀 없다(createExclusive의 tmp+
+  // link 관용구와 같은 원리, rename은 EEXIST가 없다는 점만 다르다).
+  "try{const tmp=alivePath+'.tmp.'+process.pid+'.'+Date.now()+'.'+Math.random().toString(36).slice(2,8);fs.writeFileSync(tmp,JSON.stringify({aliveAtMs:Date.now()}));fs.renameSync(tmp,alivePath);}catch(e){}",
   "}",
   "const timer=setInterval(tick,intervalMs);",
 ].join("\n");

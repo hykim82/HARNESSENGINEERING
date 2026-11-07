@@ -2261,6 +2261,7 @@ function acquireLockForRun({
     head: sha,
     nowMs,
     env,
+    logFn: log, // HYK-494 후속 P2-1: 대기자 로그 결선 줄만(product_scope)
   });
   if (!lockResult.acquired) {
     return {
