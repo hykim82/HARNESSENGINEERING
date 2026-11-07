@@ -32,10 +32,34 @@ export const RUNNER_RECEIPT_FILENAME = "runner-receipt.json";
 // it did not (isolated-suite-runner.mjs's classifySpawnOutcome is the only
 // producer of this value, and it decides structurally on spawnSync's own
 // signal/status/error fields -- never by matching message text, HYK-262).
+// HYK-494: a FOURTH status -- the machine-wide runner lock (runner-
+// lock.mjs) was never acquired within its upper-bound wait, so this run
+// never cloned/measured/spawned anything at all. Deliberately NOT folded
+// into MEASUREMENT_UNAVAILABLE_OOM: that name's own string bakes in "OOM",
+// and this cause has nothing to do with memory -- a downstream reader
+// (human or relay-handshake.mjs) must not be told "OOM" for a lock
+// contention timeout (정직 > 편의). relay-handshake.mjs's actual fail-closed
+// gate checks `runner_exit !== 0` first (HYK-411), which this status always
+// pairs with, so adding a new enum member here cannot make any existing
+// consumer treat a run under this status as green -- see coder-task.md §1
+// pre-check ⑶ for the grep confirming relay-handshake.mjs does not switch
+// exhaustively over RUNNER_STATUS's members.
+// HYK-494 3R: a FIFTH status -- the machine-wide runner lock WAS acquired
+// (measurement happened, counts below may be real), but at release time the
+// lock file no longer belonged to this run (lockId mismatch or missing --
+// runner-lock.mjs's releaseRunnerLock, `lockLost:true`). This means another
+// process judged us DEAD (pid-reused misjudgment, or this run's own identity
+// check was wrong -- §(g) 전제 A1) and reclaimed the lock WHILE we were still
+// running -- our measurement may have overlapped a concurrent run and is not
+// trustworthy. Deliberately a DIFFERENT status from LOCK_TIMEOUT (that one
+// never even started measuring; this one measured, but the result is
+// suspect) so a downstream reader can tell the two failure shapes apart.
 export const RUNNER_STATUS = Object.freeze({
   OK: "OK",
   TESTS_FAILED: "TESTS_FAILED",
   MEASUREMENT_UNAVAILABLE_OOM: "MEASUREMENT_UNAVAILABLE_OOM",
+  LOCK_TIMEOUT: "LOCK_TIMEOUT",
+  LOCK_LOST: "LOCK_LOST",
 });
 
 // Callers that don't classify a spawn outcome themselves (this file's own
@@ -388,6 +412,79 @@ function perPassFreeMemFields({
 // recorded SEPARATELY, and a receipt field is the chosen home for that
 // (결과 파일 1줄과 중복, 기계로도 남긴다) -- min_free_mb_sampled above stays
 // a whole-run figure, unchanged.
+// HYK-494 (additive only -- every field above this comment is byte-for-byte
+// unchanged in name/meaning/order): the runner-lock.mjs mutual-exclusion
+// wait, as observed by THIS run's own acquireRunnerLock call. `lockInfo` is
+// a single object (mirrors how `counts` above is already one object, not
+// four separate params) so adding it costs exactly one new parameter at
+// every call site in the chain, not six. A caller that omits it (every
+// pre-HYK-494 test in this file, and any legacy caller) gets all-null lock_*
+// fields -- the same "omitted optional param -> null field" posture as
+// every other additive block in this function.
+// Merged via object spread (quality-gate fix, not a behavior change -- see
+// runner-lock.mjs's ACQUIRE_LOCK_STATIC_DEFAULTS for the same pattern/same
+// reasoning): `?.`/`??` chains each cost a branch under this file's
+// `complexity` rule, and six of them pushed this function over budget.
+// `{ ...LOCK_INFO_DEFAULTS, ...lockInfo }` is complexity-free and handles
+// `lockInfo === undefined` the same way (spreading `undefined` is a no-op).
+const LOCK_INFO_DEFAULTS = {
+  path: null,
+  waitMs: null,
+  pollCount: null,
+  reclaimedOrphan: null,
+  nested: null,
+  timedOut: null,
+  waitStartMs: null,
+  waitEndMs: null,
+  priorOwner: null,
+  nestedBypassRejected: null,
+  // HYK-494 3R additive-only fields (judgment §1 ⑸ "영수증 새 칸 2"):
+  // reclaimReason mirrors runner-lock.mjs's acquireRunnerLock result
+  // ("pid-dead" | "pid-reused" | null -- only meaningful when
+  // reclaimedOrphan is true). lockLost mirrors releaseRunnerLock's own
+  // result (true when this run's lock was no longer ours at release time).
+  reclaimReason: null,
+  lockLost: null,
+};
+
+// HYK-494 2R (additive only -- every field above this comment is byte-for-
+// byte unchanged in name/meaning/order, review P1-2's own "기존 칸 이름·
+// 의미 변경 금지, 새 칸 추가만"): REVIEW-1R P1-2 rejected 1R for omitting
+// exactly these -- product_scope ⓘⓘ "앞 소유자(pid · 시작 시각 · 워크트리)
+// · 대기 시작 시각 · 대기 끝 시각". `priorOwner` carries the lock file's
+// full last-read content (pid/startedAtMs/worktree/head/lockId/aliveAtMs,
+// see runner-lock.mjs's acquireRunnerLock), but only the three named
+// fields are surfaced here -- the receipt is a diagnostic artifact a human
+// reads, not a dump of this module's internal lock-identity bookkeeping
+// (lockId/aliveAtMs/head are implementation detail, not part of the
+// product_scope-named contract).
+function priorOwnerReceiptFields(priorOwner) {
+  return {
+    lock_prior_owner_pid: priorOwner?.pid ?? null,
+    lock_prior_owner_started_at_ms: priorOwner?.startedAtMs ?? null,
+    lock_prior_owner_worktree: priorOwner?.worktree ?? null,
+  };
+}
+
+function lockReceiptFields(lockInfo) {
+  const resolved = { ...LOCK_INFO_DEFAULTS, ...lockInfo };
+  return {
+    lock_path: resolved.path,
+    lock_wait_ms: resolved.waitMs,
+    lock_poll_count: resolved.pollCount,
+    lock_reclaimed_orphan: resolved.reclaimedOrphan,
+    lock_nested: resolved.nested,
+    lock_timed_out: resolved.timedOut,
+    lock_wait_start_ms: resolved.waitStartMs,
+    lock_wait_end_ms: resolved.waitEndMs,
+    ...priorOwnerReceiptFields(resolved.priorOwner),
+    lock_nested_bypass_rejected: resolved.nestedBypassRejected,
+    // HYK-494 3R additive -- see LOCK_INFO_DEFAULTS' own comment.
+    lock_reclaim_reason: resolved.reclaimReason,
+    lock_lost: resolved.lockLost,
+  };
+}
+
 export function buildRunnerReceipt({
   runnerExit,
   runnerStatus,
@@ -405,6 +502,7 @@ export function buildRunnerReceipt({
   mainMinFreeMb,
   familyStartFreeMb,
   familyMinFreeMb,
+  lockInfo,
 }) {
   return {
     schema_version: RUNNER_RECEIPT_SCHEMA_VERSION,
@@ -429,6 +527,7 @@ export function buildRunnerReceipt({
       familyStartFreeMb,
       familyMinFreeMb,
     }),
+    ...lockReceiptFields(lockInfo),
   };
 }
 
@@ -466,6 +565,7 @@ export function writeRunnerReceipt({
   mainMinFreeMb,
   familyStartFreeMb,
   familyMinFreeMb,
+  lockInfo,
   mkdirFn = mkdirSync,
   writeFileFn = writeFileSync,
 }) {
@@ -488,6 +588,7 @@ export function writeRunnerReceipt({
     mainMinFreeMb,
     familyStartFreeMb,
     familyMinFreeMb,
+    lockInfo,
   });
   const path = join(dir, RUNNER_RECEIPT_FILENAME);
   writeFileFn(path, JSON.stringify(receipt, null, 2) + "\n", "utf8");
@@ -603,6 +704,7 @@ export function writeNumberedRunnerReceipt({
   mainMinFreeMb,
   familyStartFreeMb,
   familyMinFreeMb,
+  lockInfo,
   writeFileFn = writeFileSync,
 }) {
   const receipt = buildRunnerReceipt({
@@ -622,6 +724,7 @@ export function writeNumberedRunnerReceipt({
     mainMinFreeMb,
     familyStartFreeMb,
     familyMinFreeMb,
+    lockInfo,
   });
   writeFileFn(receiptPath, JSON.stringify(receipt, null, 2) + "\n", "utf8");
   return { path: receiptPath, receipt };
