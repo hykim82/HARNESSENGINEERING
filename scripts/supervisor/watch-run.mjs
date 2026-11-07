@@ -184,6 +184,20 @@ export const MEMORY_REOPEN_SAMPLE_INTERVAL_MS = 30000;
 // memory-gate.ps1의 Write-GateState(53행 근처)가 쓰는 스키마 식별자 그대로.
 const MEMORY_GATE_SCHEMA_V1 = "memory-gate-state/v1";
 
+// HYK-493-f2bc-1 (coder-task.md §2 product_scope ⓘⓘ): 닫힘 사유 중 "메모리가
+// 모자라서 닫혔다"는 3종만 깨움 후보다 -- memory-gate.ps1의 Finish() 호출
+// 지점(161/181/202행 근처) 중 THRESH 미달로 닫힌 경우만. 그 밖 닫힘
+// (CLOSED_UNSTABLE·CLOSED_GAME_MODE_RUNNER_AXIS·CLOSED_VMMEM_RESIDENT·
+// CLOSED_STEP2_VMMEM_RESIDENT·CLOSED_STEP4B_VMMEM_RESIDENT)은 메모리가
+// 다시 넉넉해졌다고 해서 재시도가 성립하는 닫힘이 아니다(측정 불안정·
+// 게임 모드·VM 상주 등 다른 원인) -- 재고 알릴 거리가 없으므로 재측
+// seam조차 부르지 않는다(§2ⓒ⑸ "재측 seam 호출 0").
+const MEMORY_REOPEN_ELIGIBLE_VERDICTS = new Set([
+  "CLOSED_BELOW_THRESHOLD",
+  "CLOSED_STEP2_BELOW_LINE",
+  "CLOSED_STEP4B_BELOW_LINE",
+]);
+
 function defaultExec(cmd, args, opts) {
   return execFileSync(cmd, args, { encoding: "utf8", ...opts });
 }
@@ -1477,6 +1491,7 @@ function readMemoryGateState(readFn, statePath) {
   return {
     ok: true,
     status: pickString(parsed, "status"),
+    verdict: pickString(parsed, "verdict"),
     dryRun: parsed.dry_run === true,
     thresholdMb:
       typeof parsed.threshold_mb === "number" ? parsed.threshold_mb : null,
@@ -1683,6 +1698,13 @@ function runMemoryReopenStep({
       sampled: false,
       sent: false,
       reasonToken: "MEMORY_REOPEN_DRY_RUN",
+    };
+  }
+  if (!MEMORY_REOPEN_ELIGIBLE_VERDICTS.has(gate.verdict)) {
+    return {
+      sampled: false,
+      sent: false,
+      reasonToken: "MEMORY_REOPEN_VERDICT_NOT_ELIGIBLE",
     };
   }
   const sample1 = sampleFn();

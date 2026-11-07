@@ -2287,9 +2287,17 @@ export function buildTaskUpdateCompletedCommand(taskId) {
 }
 // HYK-433-seat-escalation-push-1 (coder-task.md §2 product_scope ②) --
 // watch-run.mjs의 seat 축이 SUSPECTED_UNRESPONSIVE로 "새로 열릴" 때 Run
-// coordinator에게 보내는 escalation 메시지의 argv. 실측(`orca orchestration
+// coordinator에게 보내는 통지 메시지의 argv. 실측(`orca orchestration
 // send --help` 원문, 이 라운드 §2 기록 참조): `--to <run:id|dispatch:id|
 // legacy_handle>` -- `run:<runId>` 형식이 유효한 수신자 선택자다.
+// HYK-493 F-2c(coder-task.md §1 증거): `--type escalation`은 배정 없는
+// 발신자(watcher 자신은 Dispatch가 없다)를 Orca가 `sender_not_assignee`로
+// 거부한다(라이브 거부 원문 2026-11-06 19:14:07) -- 깨움 자체가 "거부
+// 통지가 ORCH 좌석에 표출된다"는 우연에 기대는 설계였다. ORCH 실측
+// (2026-11-06 19:57): 배정 없는 발신자로 `--type status`를 run 우편함에
+// 보내면 ok:true다. 그래서 `--type escalation`을 `--type status`로
+// 바꾼다 -- 수신자(`run:${runId}`)·본문·subject 모양은 그대로(기존 호출부
+// 무변경).
 // ⛔라이브 실행 0(live_send_ban, coder-task.md) -- 이 빌더는 순수 argv
 // 조립만 하고, 실제 spawn은 여전히 createOrcaExecFn()을 통해서만 나간다
 // (G9 재확인 -- 이 함수 자신은 child_process를 부르지 않는다).
@@ -2300,7 +2308,7 @@ export function buildSeatEscalationSendCommand({ runId, subject, body }) {
     "--to",
     `run:${runId}`,
     "--type",
-    "escalation",
+    "status",
     "--subject",
     subject,
     "--body",

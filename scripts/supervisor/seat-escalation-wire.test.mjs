@@ -217,7 +217,7 @@ test("buildSeatEscalationBody: 값이 없으면(null) NONE으로 접는다(거�
   );
 });
 
-test("buildSeatEscalationSendCommand: argv shape는 실측 --help 원문과 일치한다 (--to run:<id> --type escalation --subject --body --json) (1/1)", () => {
+test("buildSeatEscalationSendCommand: argv shape는 HYK-493 F-2c 통로 수리 뒤 원문과 일치한다 (--to run:<id> --type status --subject --body --json -- escalation은 배정 없는 발신자에게 거부된다, coder-task.md §1 증거 ⑴) (1/1)", () => {
   const argv = buildSeatEscalationSendCommand({
     runId: "run_abc123",
     subject: "seat unresponsive: term_x",
@@ -229,7 +229,7 @@ test("buildSeatEscalationSendCommand: argv shape는 실측 --help 원문과 일�
     "--to",
     "run:run_abc123",
     "--type",
-    "escalation",
+    "status",
     "--subject",
     "seat unresponsive: term_x",
     "--body",

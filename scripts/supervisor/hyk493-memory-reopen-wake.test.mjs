@@ -142,14 +142,14 @@ test("⑴ RED 먼저(수리 뒤 확인): 닫힘 + 문턱+여유 이상 2표본 -
       memoryReopenSleepFn: noSleep,
     });
     assert.equal(calls.count, 2, "표본 2개를 잰다");
-    assert.equal(sentArgvs.length, 1, "escalation 1건");
+    assert.equal(sentArgvs.length, 1, "통지 1건");
     assert.deepEqual(sentArgvs[0], [
       "orchestration",
       "send",
       "--to",
       "run:run_live_1",
       "--type",
-      "escalation",
+      "status",
       "--subject",
       "memory reopened: gate retry",
       "--body",
@@ -350,6 +350,101 @@ test("⑸-g schema 불일치 -> 0건, 재측 0, 사유=MEMORY_REOPEN_SCHEMA_MISM
   assertNoOpScenario("schema_mismatch", {
     setup: (wd) => writeGateState(wd, { schema: "memory-gate-state/v2" }),
     expectedReasonToken: "MEMORY_REOPEN_SCHEMA_MISMATCH",
+  });
+});
+
+// ---- ⑻ verdict 허용 목록(coder-task.md §2 product_scope ⓘⓘ) -- 허용 3종만
+// 깨움 후보가 되고(두 표본 재측까지 간다), 그 밖 닫힘 5종 + verdict 없음은
+// 재측 seam 호출 0으로 끝난다(assertNoOpScenario 재사용) ----
+
+function assertWakeEligibleScenario(label, verdict) {
+  withWatchDir((watchDir) => {
+    writeGateState(watchDir, { verdict });
+    const runIdPath = join(dirname(watchDir), "run-id.json");
+    const { fn: sampleFn, calls } = makeSampleFn([3300, 3300]);
+    const sentArgvs = [];
+    const result = runWatchOnce({
+      repoRoot: ROOT,
+      watchDir,
+      now: NOW_MS,
+      execFn: () => progressingExec(),
+      readFn: makeReadFnWithRunId(runIdPath, RUN_ID_CONTENT),
+      memoryReopenExecFn: (argv) => {
+        sentArgvs.push(argv);
+        return { ok: true };
+      },
+      memoryReopenSampleFn: sampleFn,
+      memoryReopenSleepFn: noSleep,
+    });
+    assert.equal(calls.count, 2, `${label}: 허용 verdict는 두 표본을 잰다`);
+    assert.equal(sentArgvs.length, 1, `${label}: 허용 verdict는 통지 1건`);
+    assert.equal(result.memoryReopen.sent, true, label);
+  });
+}
+
+test("⑻-a verdict=CLOSED_BELOW_THRESHOLD(허용 3종 중 1) -> 두 표본 재측 + 통지 1건 (1/1)", () => {
+  assertWakeEligibleScenario(
+    "CLOSED_BELOW_THRESHOLD",
+    "CLOSED_BELOW_THRESHOLD",
+  );
+});
+
+test("⑻-b verdict=CLOSED_STEP2_BELOW_LINE(허용 3종 중 1) -> 두 표본 재측 + 통지 1건 (1/1)", () => {
+  assertWakeEligibleScenario(
+    "CLOSED_STEP2_BELOW_LINE",
+    "CLOSED_STEP2_BELOW_LINE",
+  );
+});
+
+test("⑻-c verdict=CLOSED_STEP4B_BELOW_LINE(허용 3종 중 1) -> 두 표본 재측 + 통지 1건 (1/1)", () => {
+  assertWakeEligibleScenario(
+    "CLOSED_STEP4B_BELOW_LINE",
+    "CLOSED_STEP4B_BELOW_LINE",
+  );
+});
+
+test("⑻-d verdict=CLOSED_UNSTABLE(비허용) -> 0건, 재측 0, 사유=MEMORY_REOPEN_VERDICT_NOT_ELIGIBLE (1/1)", () => {
+  assertNoOpScenario("CLOSED_UNSTABLE", {
+    setup: (wd) => writeGateState(wd, { verdict: "CLOSED_UNSTABLE" }),
+    expectedReasonToken: "MEMORY_REOPEN_VERDICT_NOT_ELIGIBLE",
+  });
+});
+
+test("⑻-e verdict=CLOSED_GAME_MODE_RUNNER_AXIS(비허용) -> 0건, 재측 0, 사유=MEMORY_REOPEN_VERDICT_NOT_ELIGIBLE (1/1)", () => {
+  assertNoOpScenario("CLOSED_GAME_MODE_RUNNER_AXIS", {
+    setup: (wd) =>
+      writeGateState(wd, { verdict: "CLOSED_GAME_MODE_RUNNER_AXIS" }),
+    expectedReasonToken: "MEMORY_REOPEN_VERDICT_NOT_ELIGIBLE",
+  });
+});
+
+test("⑻-f verdict=CLOSED_VMMEM_RESIDENT(비허용) -> 0건, 재측 0, 사유=MEMORY_REOPEN_VERDICT_NOT_ELIGIBLE (1/1)", () => {
+  assertNoOpScenario("CLOSED_VMMEM_RESIDENT", {
+    setup: (wd) => writeGateState(wd, { verdict: "CLOSED_VMMEM_RESIDENT" }),
+    expectedReasonToken: "MEMORY_REOPEN_VERDICT_NOT_ELIGIBLE",
+  });
+});
+
+test("⑻-g verdict=CLOSED_STEP2_VMMEM_RESIDENT(비허용) -> 0건, 재측 0, 사유=MEMORY_REOPEN_VERDICT_NOT_ELIGIBLE (1/1)", () => {
+  assertNoOpScenario("CLOSED_STEP2_VMMEM_RESIDENT", {
+    setup: (wd) =>
+      writeGateState(wd, { verdict: "CLOSED_STEP2_VMMEM_RESIDENT" }),
+    expectedReasonToken: "MEMORY_REOPEN_VERDICT_NOT_ELIGIBLE",
+  });
+});
+
+test("⑻-h verdict=CLOSED_STEP4B_VMMEM_RESIDENT(비허용) -> 0건, 재측 0, 사유=MEMORY_REOPEN_VERDICT_NOT_ELIGIBLE (1/1)", () => {
+  assertNoOpScenario("CLOSED_STEP4B_VMMEM_RESIDENT", {
+    setup: (wd) =>
+      writeGateState(wd, { verdict: "CLOSED_STEP4B_VMMEM_RESIDENT" }),
+    expectedReasonToken: "MEMORY_REOPEN_VERDICT_NOT_ELIGIBLE",
+  });
+});
+
+test("⑻-i verdict 없음(필드 자체가 null) -> 0건, 재측 0, 사유=MEMORY_REOPEN_VERDICT_NOT_ELIGIBLE (1/1)", () => {
+  assertNoOpScenario("verdict_missing", {
+    setup: (wd) => writeGateState(wd, { verdict: null }),
+    expectedReasonToken: "MEMORY_REOPEN_VERDICT_NOT_ELIGIBLE",
   });
 });
 
