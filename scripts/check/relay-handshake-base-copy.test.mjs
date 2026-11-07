@@ -12,7 +12,13 @@
 // git 저장소다.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, readFileSync, rmSync } from "node:fs";
+import {
+  mkdtempSync,
+  writeFileSync,
+  readFileSync,
+  rmSync,
+  mkdirSync,
+} from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { tmpdir } from "node:os";
@@ -46,6 +52,13 @@ function ensureGitHeadCommit(dir) {
     ["commit", "-q", "--allow-empty", "-m", "base-copy test fixture"],
     { cwd: dir },
   );
+  // HYK-266: a REVIEW-family consumption now actually attempts to write
+  // the reject-streak ledger at `mainRepoRoot(harnessDir)/.harness/
+  // reject-streak.json` -- `dir` IS harnessDir's own git root in every
+  // caller of this helper, so it needs `.harness/` to exist or it fails
+  // with LEDGER_WRITE_ERROR (now blocking) -- harmless no-op for the
+  // CODER-role callers of this same helper.
+  mkdirSync(join(dir, ".harness"), { recursive: true });
   return execFileSync("git", ["rev-parse", "HEAD"], {
     cwd: dir,
     encoding: "utf8",
@@ -196,7 +209,10 @@ test("(bc-6) 과차단 0: REVIEW 라운드의 정상 head_commit 삼중 일치�
     );
     writeFileSync(
       join(dir, "review.md"),
-      `task_id: HYK-424-R\nhead_commit: ${sha}\n\n>>> DONE: REVIEW @ 2026-11-04 06:10:00 KST\ndone_stamped_by: finalize-done\n`,
+      // HYK-266: a verdict line is now required (NO_VERDICT_LINE blocks
+      // consumption) -- this fixture's own subject is the base-copy axis,
+      // not the verdict axis, so add one to keep reaching that axis.
+      `task_id: HYK-424-R\nfor: HYK-424-R\nverdict: rejected\nhead_commit: ${sha}\n\n>>> DONE: REVIEW @ 2026-11-04 06:10:00 KST\ndone_stamped_by: finalize-done\n`,
       "utf8",
     );
     const res = runCli(["review", dir]);

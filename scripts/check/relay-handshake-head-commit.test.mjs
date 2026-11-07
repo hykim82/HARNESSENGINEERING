@@ -12,7 +12,13 @@
 // mainRepoRoot()가 fixture 자신의 mkdtemp 저장소로 해석되므로 격리된다).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, readFileSync, rmSync } from "node:fs";
+import {
+  mkdtempSync,
+  writeFileSync,
+  readFileSync,
+  rmSync,
+  mkdirSync,
+} from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { tmpdir } from "node:os";
@@ -65,6 +71,12 @@ function ensureGitHeadCommit(dir) {
     ["commit", "-q", "--allow-empty", "-m", "head-commit test fixture"],
     { cwd: dir },
   );
+  // HYK-266: REVIEW-family consumption now actually attempts the
+  // reject-streak ledger write at `mainRepoRoot(harnessDir)/.harness/
+  // reject-streak.json` -- `dir` IS harnessDir's own (isolated, mkdtemp)
+  // git root here, so it needs `.harness/` to exist or the write fails
+  // with LEDGER_WRITE_ERROR (now blocking).
+  mkdirSync(join(dir, ".harness"), { recursive: true });
   return execFileSync("git", ["rev-parse", "HEAD"], {
     cwd: dir,
     encoding: "utf8",
@@ -86,7 +98,12 @@ function writeReviewRound(
     // with no finalize-done marker (fail-closed) -- carry the marker so
     // this shared fixture keeps exercising the head-commit binding
     // mechanics under test, not this promotion's rejection.
-    `task_id: HYK-383-T\n${resultHeadCommit ?? ""}${extra}\n>>> DONE: REVIEW @ 2026-08-28 06:10:00 KST\ndone_stamped_by: finalize-done\n`,
+    // HYK-266: also carry a `verdict:` line -- NO_VERDICT_LINE is now a
+    // blocking contract violation, and this fixture's own subject is the
+    // head_commit axis, not the verdict axis. No existing call site's
+    // `extra` supplies its own verdict line, so this default never
+    // collides into an AMBIGUOUS_VERDICT_LINE.
+    `task_id: HYK-383-T\n${resultHeadCommit ?? ""}verdict: rejected\n${extra}\n>>> DONE: REVIEW @ 2026-08-28 06:10:00 KST\ndone_stamped_by: finalize-done\n`,
     "utf8",
   );
 }

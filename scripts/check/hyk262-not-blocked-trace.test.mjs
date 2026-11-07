@@ -1,10 +1,14 @@
-// HYK-262 §3 (책임자 확정 2R): «막지 않는 2종에 흔적» -- attempted && !ok
-// 이지만 표지 줄 계약 위반(AMBIGUOUS_*)이 «아닌» 두 갈래(판정 줄 0개 =
-// NO_VERDICT_LINE, 원장 파일 손상 = LEDGER_INVALID_JSON 등)는 이 라운드에서
-// 여전히 차단하지 않는다(HYK-266 별건, 이 라운드는 착수 금지) -- 하지만
-// «이 경우는 차단하지 않았다»는 판단 자체가 소비 출력에 명시적으로 남아야
-// 한다(화면 출력만으로는 부족하다는 근거 문장이 아니라, "그 판단 자체가
-// 보여야 한다"는 §3 요구를 그대로 고정한다).
+// HYK-262 §3 (책임자 확정 2R), HYK-266로 뒤집힘: 이 파일은 원래 "표지 줄
+// 계약 위반(AMBIGUOUS_*)이 아닌 두 갈래(판정 줄 0개 = NO_VERDICT_LINE,
+// 원장 파일 손상 = LEDGER_INVALID_JSON 등)는 소비를 막지 않는다 -- 대신
+// '그 판단 자체'가 'NOT_BLOCKED' 흔적으로 명시적으로 남는다"는 §3의
+// 결정을 고정했었다.
+//
+// HYK-266 (PM-r14 설계)이 그 결정을 뒤집었다: 라이브 표본 전수(HYK-214·
+// 218·227·335 네 라운드 전부)가 정확히 이 모양이었고, 소비를 통과시키면
+// 판정이 복구 수단 없이 영원히 빠진다(PM-r14 (a)⑤·(b) 실측) -- 그래서
+// 이 두 갈래(+ 나머지 5종 + UNISOLATED_HARNESS_DIR)는 이제 '통과 + 흔적'
+// 이 아니라 '소비 자체를 막는다'. 이 파일은 그 뒤집힌 계약을 고정한다.
 //
 // ⛔모든 원장/영수증은 mkdtemp 합성 픽스처다 -- 실제 관제실 정본에는 절대
 // 쓰지 않는다.
@@ -22,6 +26,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { execFileSync, spawnSync } from "node:child_process";
+import { REJECT_STREAK_REASON_CODE } from "./reject-streak.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const RELAY_HANDSHAKE_PATH = join(HERE, "relay-handshake.mjs");
@@ -82,7 +87,7 @@ function runRelayHandshakeCli(scriptPath, args, opts = {}) {
 }
 
 // HYK-383: REVIEW 계열 소비는 head_commit: 축(축 ⓐ+ⓑ)도 통과해야 한다 --
-// 이 파일의 fixture는 이 축과 무관한(NOT_BLOCKED 흔적) 동작을 시험하므로,
+// 이 파일의 fixture는 이 축과 무관한(이제는 "블록" 동작) 동작을 시험하므로,
 // head_commit 축이 그 관찰을 가리지 않도록 항상 실제 워크트리 HEAD로
 // 채운다(harnessDir는 이미 진짜 링크드 워크트리 안이다).
 function writeNoVerdictFixture(harnessDir, { taskId, droppedAt, doneAt }) {
@@ -117,11 +122,11 @@ function writeNormalRejectFixture(harnessDir, { taskId, droppedAt, doneAt }) {
 }
 
 // ---------------------------------------------------------------------------
-// ① 판정 줄 0개(NO_VERDICT_LINE) -- 차단하지 않지만 NOT_BLOCKED 흔적이 남아야
-// 한다.
+// ① NO_VERDICT_LINE -- HYK-266 이전엔 차단하지 않고 NOT_BLOCKED 흔적만
+// 남겼다. 이제는 소비 자체를 막는다(계약 위반).
 // ---------------------------------------------------------------------------
 
-test("① NO_VERDICT_LINE: 판정 줄 0개는 소비를 막지 않지만 'NOT_BLOCKED' 흔적이 reasonCode와 함께 남는다", () => {
+test("① NO_VERDICT_LINE (HYK-266로 갱신): 판정 줄 0개는 이제 소비를 막는다 -- NOT_BLOCKED 흔적은 더 이상 남지 않는다", () => {
   withRepoAndFixture((harnessDir, linkedDir) => {
     writeNoVerdictFixture(harnessDir, {
       taskId: "HYK-9800-review-1",
@@ -135,28 +140,28 @@ test("① NO_VERDICT_LINE: 판정 줄 0개는 소비를 막지 않지만 'NOT_BL
     );
     assert.equal(
       result.exit,
-      0,
-      `NO_VERDICT_LINE must NOT block consumption this round (HYK-266 범위): ${result.stderr}`,
+      1,
+      `HYK-266: NO_VERDICT_LINE must now block consumption: ${result.stderr}`,
     );
-    assert.match(
+    assert.doesNotMatch(
       result.stdout,
       /NOT_BLOCKED/,
-      "the explicit 'this case was not blocked' trace must appear in the consumption output",
+      "the old 'not blocked' trace must be gone for this reasonCode -- it is now intercepted earlier",
     );
     assert.match(
-      result.stdout,
-      /reasonCode=NO_VERDICT_LINE/,
-      "the trace must name which reasonCode class this is, not just a generic 'something failed'",
+      result.stderr,
+      /consumption rejected \(HYK-266\): REVIEW-family result file does not carry a resolvable, finished verdict/,
+      "the new HYK-266 consumption-rejected line must name the reasonCode's own diagnostic",
     );
+    assert.match(result.stderr, /NO_VERDICT_LINE|UNJUDGABLE/);
   });
 });
 
 // ---------------------------------------------------------------------------
-// ② 원장 파일 손상(LEDGER_INVALID_JSON) -- 차단하지 않지만 NOT_BLOCKED
-// 흔적이 남아야 한다.
+// ② LEDGER_INVALID_JSON -- 같은 뒤집힘.
 // ---------------------------------------------------------------------------
 
-test("② LEDGER_INVALID_JSON: 원장 파일이 깨져도 소비를 막지 않지만 'NOT_BLOCKED' 흔적이 reasonCode와 함께 남는다", () => {
+test("② LEDGER_INVALID_JSON (HYK-266로 갱신): 원장 파일이 깨지면 이제 소비를 막는다 -- NOT_BLOCKED 흔적은 더 이상 남지 않는다", () => {
   withRepoAndFixture((harnessDir, linkedDir, mainDir) => {
     writeFileSync(
       join(mainDir, ".harness", "reject-streak.json"),
@@ -175,29 +180,35 @@ test("② LEDGER_INVALID_JSON: 원장 파일이 깨져도 소비를 막지 않�
     );
     assert.equal(
       result.exit,
-      0,
-      `ledger corruption must NOT block consumption this round (HYK-266 범위): ${result.stderr}`,
+      1,
+      `HYK-266: ledger corruption must now block consumption: ${result.stderr}`,
     );
-    assert.match(
+    assert.doesNotMatch(
       result.stdout,
       /NOT_BLOCKED/,
-      "the explicit 'this case was not blocked' trace must appear in the consumption output",
+      "the old 'not blocked' trace must be gone for this reasonCode -- it is now intercepted earlier",
     );
     assert.match(
-      result.stdout,
-      /reasonCode=LEDGER_INVALID_JSON/,
-      "the trace must name which reasonCode class this is",
+      result.stderr,
+      /consumption deferred \(HYK-266\): reject-streak ledger unavailable/,
+      "the new HYK-266 consumption-deferred line must appear",
     );
+    assert.match(result.stderr, /LEDGER_INVALID_JSON|not valid JSON/);
   });
 });
 
 // ---------------------------------------------------------------------------
-// ③ ★RED: NOT_BLOCKED 흔적 문장 자체를 지운 변이는 위 시험들이 실패해야
-// 한다 -- 이 시험이 "그 문장이 사라지면 RED가 된다"는 완료조건 6을
-// 고정한다. 변이는 임시 사본에서만 만들고 실 소스는 무손상임을 단언한다.
+// ③ (HYK-266 재작업) -- traceUnblockedRecordFailure의 호출 자체를 지운
+// 변이가, 이제는 ①의 입력(NO_VERDICT_LINE)에서 '아무 관측 가능한 차이도
+// 만들지 못함'을 증명한다. 이전(HYK-262 시절)에는 이 변이가 "NOT_BLOCKED
+// 흔적이 사라진다"는 RED 신호였다 -- 이제는 checkContractViolation이 그
+// 호출 "앞에서" 이미 막으므로, 그 호출이 있든 없든 출력이 바이트 단위로
+// 같다. 이것이 바로 결과 파일 §3-4가 요구하는 "남은 갈래가 0" 증명이다
+// (traceUnblockedRecordFailure 자신은 지우지 않고 fail-visible 안전망으로
+// 남긴다 -- relay-handshake.mjs 자신의 새 헤더 주석 참조).
 // ---------------------------------------------------------------------------
 
-test("③ ★RED: NOT_BLOCKED 흔적 호출을 제거한 변이는 ①의 입력에서 흔적이 사라진다(회귀 재현), 원복 후 무손상", () => {
+test("③ (HYK-266 재작업): NOT_BLOCKED 흔적 호출을 제거해도 ①의 입력에서 산출이 바이트 단위로 동일하다 (이제 그 호출은 이 입력에 도달하지 못하는 죽은 경로다), 원복 후 무손상", () => {
   const target = "  traceUnblockedRecordFailure(recordOutcome);\n";
   const count = RELAY_HANDSHAKE_SRC.split(target).length - 1;
   assert.equal(
@@ -247,18 +258,37 @@ test("③ ★RED: NOT_BLOCKED 흔적 호출을 제거한 변이는 ①의 입력
         droppedAt: "2026-08-14 20:00",
         doneAt: "2026-08-14 20:10:00",
       });
-      const result = runRelayHandshakeCli(mutantRelay, ["review", harnessDir], {
-        cwd: linkedDir,
-      });
-      assert.equal(
-        result.exit,
-        0,
-        "RED mutant still does not block (this axis is untouched by removing the trace call)",
+      const mutantResult = runRelayHandshakeCli(
+        mutantRelay,
+        ["review", harnessDir],
+        { cwd: linkedDir },
       );
-      assert.doesNotMatch(
-        result.stdout,
-        /NOT_BLOCKED/,
-        "RED: with the trace call removed, the explicit 'not blocked' statement must be gone (the regression this test exists to catch)",
+      const liveResult = runRelayHandshakeCli(
+        RELAY_HANDSHAKE_PATH,
+        ["review", harnessDir],
+        { cwd: linkedDir },
+      );
+      assert.equal(
+        mutantResult.exit,
+        1,
+        "HYK-266: still blocked -- checkContractViolation runs before the removed trace call",
+      );
+      // ⚠️전체 stderr를 바이트 대조하지 않는다 -- 이 mkdtemp 사본은
+      // first-observation.mjs 같은 일부 형제 모듈을 복제하지 않아 그 축의
+      // best-effort 경고(이 시험의 주제와 무관)가 따로 끼어든다. 이
+      // 시험이 증명하려는 것은 좁다: exit code와 "소비를 막았다"는
+      // 핵심 판정 문면이 트레이스 호출의 유무와 무관하게 같다는 것뿐.
+      assert.equal(mutantResult.exit, liveResult.exit);
+      assert.doesNotMatch(mutantResult.stdout, /NOT_BLOCKED/);
+      assert.doesNotMatch(liveResult.stdout, /NOT_BLOCKED/);
+      assert.match(
+        mutantResult.stderr,
+        /consumption rejected \(HYK-266\): REVIEW-family result file does not carry a resolvable, finished verdict/,
+        "mutant (trace call removed) still produces the exact same blocking verdict line",
+      );
+      assert.match(
+        liveResult.stderr,
+        /consumption rejected \(HYK-266\): REVIEW-family result file does not carry a resolvable, finished verdict/,
       );
     },
     { withMutantDir: true },
@@ -272,9 +302,41 @@ test("③ ★RED: NOT_BLOCKED 흔적 호출을 제거한 변이는 ①의 입력
   );
 });
 
-// re-confirm the real source is still GREEN (trace present) after the RED
-// mutant ran against an isolated copy.
-test("(원복 후 재확인) 실 소스로 ①과 같은 입력을 다시 돌리면 여전히 NOT_BLOCKED 흔적이 남는다", () => {
+// ---------------------------------------------------------------------------
+// ④ (신규) 완전성 닻: reject-streak.mjs의 REJECT_STREAK_REASON_CODE enum
+// 전수(현재 정의된 모든 값) + 이 파일 로컬 리터럴 둘("LEDGER_WRITE_ERROR"
+// · "UNISOLATED_HARNESS_DIR")이 relay-handshake.mjs 소스 문자열 «어딘가에»
+// 등장하는지를 grep 형태로 자기 점검한다(ORCH70 §33b 사전-그렙 문자열 닻과
+// 같은 정신). ⚠️정직 한계: "그 문자열이 파일에 있다"는 "분류 Set 안에
+// 있다"의 약한 근사다(Set을 export하지 않으므로 더 정밀하게 집을 수
+// 없다 -- 기존 AMBIGUOUS_COVER_REASON_CODES도 비공개다) -- 그러나 미래에
+// reject-streak.mjs가 11번째 reasonCode를 추가하면 그 새 식별자 문자열은
+// relay-handshake.mjs 어디에도 아직 없을 것이므로, 이 닻은 "완전히 새로
+// 추가됐는데 통째로 안 건드렸다"는 사고는 여전히 잡는다(지금 10종 + 로컬
+// 2종 = 0건 미분류라는 스냅샷만 고정한다).
+// ---------------------------------------------------------------------------
+
+test("④ (신규) 완전성 닻 (정직 한계 있음): 현재 정의된 모든 reject-streak reasonCode 문자열이 relay-handshake.mjs 소스 어딘가에 등장한다 (0건 미분류 스냅샷)", () => {
+  const allReasonCodes = [
+    ...Object.values(REJECT_STREAK_REASON_CODE),
+    "LEDGER_WRITE_ERROR",
+    "UNISOLATED_HARNESS_DIR",
+  ];
+  const missing = allReasonCodes.filter(
+    (code) =>
+      !RELAY_HANDSHAKE_SRC.includes(`"${code}"`) &&
+      !RELAY_HANDSHAKE_SRC.includes(`.${code}`),
+  );
+  assert.deepEqual(
+    missing,
+    [],
+    `every currently-defined reasonCode must be classified somewhere in relay-handshake.mjs (found unclassified: ${JSON.stringify(missing)}) -- a future reject-streak.mjs addition that lands here means someone forgot to add it to a blocking Set`,
+  );
+});
+
+// re-confirm the real source is still GREEN (blocks, no NOT_BLOCKED trace)
+// after the mutant ran against an isolated copy.
+test("(원복 후 재확인) 실 소스로 ①과 같은 입력을 다시 돌리면 여전히 소비를 막고, NOT_BLOCKED 흔적은 남지 않는다", () => {
   withRepoAndFixture((harnessDir, linkedDir) => {
     writeNoVerdictFixture(harnessDir, {
       taskId: "HYK-9803-review-1",
@@ -286,8 +348,8 @@ test("(원복 후 재확인) 실 소스로 ①과 같은 입력을 다시 돌리
       ["review", harnessDir],
       { cwd: linkedDir },
     );
-    assert.equal(result.exit, 0);
-    assert.match(result.stdout, /NOT_BLOCKED/);
+    assert.equal(result.exit, 1);
+    assert.doesNotMatch(result.stdout, /NOT_BLOCKED/);
   });
 });
 

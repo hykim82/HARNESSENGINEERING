@@ -333,7 +333,13 @@ test("(c)★ 원장 위치: no reject-streak.json is EVER created inside the lin
 // 바꾸지 않는다 (§2-1 R5).
 // ---------------------------------------------------------------------------
 
-test("(d)★ 실패 가시성: a corrupted main-repo ledger does not silently no-op -- the failure is printed, while the handshake's own PASS/exit code stays unchanged", () => {
+// HYK-266: PM-r14 (d) 표 2칸 -- 원장 손상(LEDGER_INVALID_JSON)은 이제
+// «통과 + NOT_BLOCKED 흔적»이 아니라 소비 자체를 막는다(checkLedgerUnavailableViolation).
+// UNJUDGABLE 문면은 여전히 보이지만(autoRecordRejectStreak가 변함없이
+// console.error로 찍는다), 그 위에 소비 거부 문면이 더 찍히고 exit도
+// 0에서 1로 바뀐다 -- §2-1 R5("broken ledger must not flip the handshake's
+// own PASS") 자체가 이 라운드의 판정 문면(HYK-266)으로 뒤집혔다.
+test("(d)★ 실패 가시성 (HYK-266로 갱신): a corrupted main-repo ledger NOW blocks consumption -- the original UNJUDGABLE line is still printed (not swallowed), plus a new consumption-rejected line, and exit flips to 1", () => {
   withTempDir("hyk183-main-", (mainDir) => {
     initPlainGitRepo(mainDir);
     mkdirSync(join(mainDir, ".harness"), { recursive: true });
@@ -358,13 +364,18 @@ test("(d)★ 실패 가시성: a corrupted main-repo ledger does not silently no
       );
       assert.equal(
         result.exit,
-        0,
-        "a broken ledger must not flip the handshake's own confirmed-complete verdict (§2-1 R5)",
+        1,
+        `HYK-266: a broken ledger is no longer a pass-through -- consumption is deferred until the ledger is repaired: ${result.stderr}`,
       );
       assert.match(
         result.stderr,
         /reject-streak: UNJUDGABLE.*not valid JSON/,
-        "the ledger read/parse failure must be visible in the process output, not swallowed",
+        "the ledger read/parse failure must still be visible in the process output, not swallowed",
+      );
+      assert.match(
+        result.stderr,
+        /consumption deferred \(HYK-266\): reject-streak ledger unavailable/,
+        "the new HYK-266 consumption-rejected line must also be present",
       );
     } finally {
       rmSync(linkedDir, { recursive: true, force: true });
@@ -372,7 +383,11 @@ test("(d)★ 실패 가시성: a corrupted main-repo ledger does not silently no
   });
 });
 
-test("(d) 실패 가시성: a REVIEW result file with no 'verdict:' line still confirms the handshake, but visibly reports the record as skipped/UNJUDGABLE", () => {
+// HYK-266: PM-r14 (d) 표 1칸 -- 판정 줄 0개(NO_VERDICT_LINE)도 이제
+// «통과 + UNJUDGABLE 흔적»이 아니라 소비 자체를 막는다
+// (checkContractViolation). 원장은 여전히 한 번도 생성되지 않는다(만들
+// 시도 자체가 일어나지 않으므로 이 축은 그대로다).
+test("(d) 실패 가시성 (HYK-266로 갱신): a REVIEW result file with no 'verdict:' line NOW blocks the handshake (contract violation), ledger still never created", () => {
   withTempDir("hyk183-main-", (mainDir) => {
     initPlainGitRepo(mainDir);
     const linkedDir = addLinkedWorktree(mainDir);
@@ -395,8 +410,16 @@ test("(d) 실패 가시성: a REVIEW result file with no 'verdict:' line still c
         ["review", harnessDir],
         { cwd: linkedDir },
       );
-      assert.equal(result.exit, 0);
+      assert.equal(
+        result.exit,
+        1,
+        `HYK-266: no verdict line is a contract violation, consumption must now be rejected: ${result.stderr}`,
+      );
       assert.match(result.stderr, /UNJUDGABLE/);
+      assert.match(
+        result.stderr,
+        /consumption rejected \(HYK-266\): REVIEW-family result file does not carry a resolvable, finished verdict/,
+      );
       assert.equal(
         readMainLedger(mainDir),
         null,

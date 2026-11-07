@@ -2287,9 +2287,17 @@ export function buildTaskUpdateCompletedCommand(taskId) {
 }
 // HYK-433-seat-escalation-push-1 (coder-task.md §2 product_scope ②) --
 // watch-run.mjs의 seat 축이 SUSPECTED_UNRESPONSIVE로 "새로 열릴" 때 Run
-// coordinator에게 보내는 escalation 메시지의 argv. 실측(`orca orchestration
+// coordinator에게 보내는 통지 메시지의 argv. 실측(`orca orchestration
 // send --help` 원문, 이 라운드 §2 기록 참조): `--to <run:id|dispatch:id|
 // legacy_handle>` -- `run:<runId>` 형식이 유효한 수신자 선택자다.
+// HYK-493 F-2c(coder-task.md §1 증거): `--type escalation`은 배정 없는
+// 발신자(watcher 자신은 Dispatch가 없다)를 Orca가 `sender_not_assignee`로
+// 거부한다(라이브 거부 원문 2026-11-06 19:14:07) -- 깨움 자체가 "거부
+// 통지가 ORCH 좌석에 표출된다"는 우연에 기대는 설계였다. ORCH 실측
+// (2026-11-06 19:57): 배정 없는 발신자로 `--type status`를 run 우편함에
+// 보내면 ok:true다. 그래서 `--type escalation`을 `--type status`로
+// 바꾼다 -- 수신자(`run:${runId}`)·본문·subject 모양은 그대로(기존 호출부
+// 무변경).
 // ⛔라이브 실행 0(live_send_ban, coder-task.md) -- 이 빌더는 순수 argv
 // 조립만 하고, 실제 spawn은 여전히 createOrcaExecFn()을 통해서만 나간다
 // (G9 재확인 -- 이 함수 자신은 child_process를 부르지 않는다).
@@ -2300,7 +2308,7 @@ export function buildSeatEscalationSendCommand({ runId, subject, body }) {
     "--to",
     `run:${runId}`,
     "--type",
-    "escalation",
+    "status",
     "--subject",
     subject,
     "--body",
@@ -3992,6 +4000,90 @@ export function teardownSeat(ctx, opts = {}) {
   }
 
   return executeArmedTeardown(c, opts, before, judged);
+}
+
+// ---- HYK-491-teardown-arm-1 (coder-task.md §2 product_scope ① "teardown
+// 실행 경로 · `teardownSeat` armed 결선") ----
+// teardownSeat(위)은 HYK-171 좌석(seat/pty) 축의 판정(judgeTeardown,
+// dispatchCorrelationProven 등)에 묶여 있다 -- 이 축(HYK-464 아카이브
+// 판정, judgeArchiveEligibility)은 완전히 다른 전제(병합 완료·미소비
+// 0·keep-reason 없음 등)를 쓰고, 좌석 close 단계가 전혀 없다(워크트리만
+// 지운다, close argv 0 -- 아카이브 대상은 이미 좌석이 없다고 호출자가
+// 확인한 뒤에만 여기 온다, teardown-inventory-adapter.mjs의
+// observeSeatCount 참조). 그래서 teardownSeat의 판정 체인을 재사용하지
+// 않고(판정은 이미 호출자가 끝냈다), **같은 armed-gate 모양**만 따라
+// 만든 독립 함수다 -- armed!==true면 close/rm 어느 것도 호출되지 않는
+// 것과 동형으로, 여기도 armed!==true면 guardedExec을 한 번도 타지
+// 않는다(파괴 argv 0).
+// HYK-491-teardown-arm-2 (coder-task.md §2 product_scope P1-1 수리, 검토
+// 1R P1-1 실측): 1R은 여기서 `buildWorktreeRemoveCommand`(위, A5 -- 항상
+// `--force`)를 재사용했다 -- 그래서 커밋 안 된 변경이 있는 워크트리도
+// 조용히 force-제거되고 그 변경은 어디에도 남지 않았다(§P1-1). 호출자
+// (watch-run.mjs의 runArmedRemovalForWorktree)가 제거 직전에 이미
+// `git status --porcelain` 0줄을 fail-closed로 확인하므로(그 축이
+// clean하지 않으면 여기까지 오지 않는다) 이 축은 더는 `--force`가
+// 필요 없다 -- 그리고 `buildWorktreeRemoveCommand` 자체의 기본 --force
+// 계약을 조용히 바꾸면 createManagedWorktree의 rollback(비범위, 그
+// 함수의 유일한 다른 호출자)까지 깨진다(§2-C 비타협 #4가 §2-C 쪽에
+// 이미 똑같은 이유로 만든 별도 빌더 `buildTeardownWorktreeRemoveCommand`
+// 참조). 그래서 이 축은 `buildWorktreeRemoveCommand`를 더는 호출하지
+// 않고, 이미 "force는 opts.force===true일 때만"을 계약하는 그 기존
+// 빌더를 force:false로 재사용한다(새 빌더 0, `buildWorktreeRemoveCommand`
+// 변경 0 -- 그 함수의 유일한 남은 호출자(rollback)는 이 변경으로 전혀
+// 영향받지 않는다).
+export const ARCHIVE_TEARDOWN_PHASE = Object.freeze({
+  GATE: "GATE",
+  REMOVE: "REMOVE",
+  DONE: "DONE",
+});
+export const ARCHIVE_TEARDOWN_GATE_REASON = Object.freeze({
+  NOT_ARMED: "ARCHIVE_TEARDOWN_NOT_ARMED",
+});
+
+// ctx: { worktreePath, armed? } -- opts: { execFn }
+export function removeArchivedWorktree(ctx, opts = {}) {
+  const c = isPlainObject(ctx) ? ctx : {};
+  if (typeof opts.execFn !== "function") {
+    return {
+      ok: false,
+      reason: "orca-adapter: removeArchivedWorktree -- opts.execFn is required",
+    };
+  }
+  if (!isNonEmptyString(c.worktreePath)) {
+    return {
+      ok: false,
+      reason:
+        "orca-adapter: removeArchivedWorktree -- worktreePath is required",
+    };
+  }
+  const armed = c.armed === true;
+  if (!armed) {
+    return {
+      ok: false,
+      phase: ARCHIVE_TEARDOWN_PHASE.GATE,
+      armed,
+      reason: ARCHIVE_TEARDOWN_GATE_REASON.NOT_ARMED,
+    };
+  }
+  const removed = guardedExec(
+    buildTeardownWorktreeRemoveCommand(c.worktreePath, { force: false }),
+    opts.execFn,
+    "ARCHIVE_TEARDOWN_REMOVE_FAILED",
+  );
+  if (!removed.ok) {
+    return {
+      ok: false,
+      phase: ARCHIVE_TEARDOWN_PHASE.REMOVE,
+      armed,
+      reason: removed.reason,
+    };
+  }
+  return {
+    ok: true,
+    phase: ARCHIVE_TEARDOWN_PHASE.DONE,
+    armed,
+    response: removed.response,
+  };
 }
 
 // ---- 실 orca execFn (이 파일이 `orca` 문자열로 실제 프로세스를 spawn하는

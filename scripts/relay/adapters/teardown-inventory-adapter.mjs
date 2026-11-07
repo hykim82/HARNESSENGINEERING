@@ -70,6 +70,13 @@ export function buildGitRevParseHeadCommand() {
 export function buildGitLsRemoteMasterCommand() {
   return ["ls-remote", "origin", "refs/heads/master"];
 }
+// HYK-491-teardown-arm-1 (coder-task.md §2 product_scope ⓘⓘ) -- 무장 실행
+// 경로가 복원 때 쓸 브랜치 «이름»을 구하는 argv. `rev-parse HEAD`(위)는
+// SHA만 주므로 이 argv가 따로 필요하다(워크트리가 지워지기 «전»에,
+// `defaultArchiveGitFn`과 동일 cwd=worktreePath로 호출한다).
+export function buildGitRevParseAbbrevRefCommand() {
+  return ["rev-parse", "--abbrev-ref", "HEAD"];
+}
 // HYK-171 사이클4b-1 재작업3(사람 게이트 결정, coder-task.md §0/§1): 이전
 // (스트릭1)에 있던 `buildTaskListDispatchedCommand`/`buildDispatchShowCommand`
 // /`collectDispatchActivePaneKeys`/`fetchDispatchPaneKey`/`DISPATCH_FETCH_FAILED`
@@ -397,6 +404,40 @@ function observeArchiveManifest(worktreePath, opts) {
   }
   files.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
   return { observable: true, files };
+}
+
+// ---- HYK-491-teardown-arm-1 (coder-task.md §2 product_scope ⓘⓘⓘ "활성
+// 예약 또는 좌석") -- 무장 실행 경로 전용 안전판. judgeArchiveEligibility
+// (6축)는 이 축을 전혀 모른다(§2 비타협 "그림자 ELIGIBLE 조건을 넓히지
+// 않는다" -- 이 관측은 그 판정에 섞이지 않고, 호출자(무장 실행 경로)가
+// ELIGIBLE 뒤에 «추가로» 확인한다, 부분집합만 지우는 설계). `activeReferences`
+// (observeActiveReferences, 위)와 다르다 -- 그 함수는 `connected:true`+
+// 자기-좌석 제외만 센다(배정 판정용, HYK-171). 이 함수는 **그 워크트리를
+// 가리키는 터미널이 하나라도 있으면**(연결 여부 무관) count>0으로
+// 보고한다 -- 실행(worktree rm) 직전의 마지막 안전판이라 더 엄격하다.
+export function observeSeatCount(worktreePath, opts) {
+  const targetCanonical = canonicalizePath(worktreePath);
+  if (typeof opts.execFn !== "function") return { observable: false };
+  let response;
+  try {
+    response = opts.execFn(buildOrcaTerminalListCommand());
+  } catch {
+    return { observable: false };
+  }
+  if (!isPlainObject(response) || response.ok !== true) {
+    return { observable: false };
+  }
+  const list = Array.isArray(response.result?.terminals)
+    ? response.result.terminals
+    : null;
+  if (!list) return { observable: false };
+  const count = list.filter(
+    (entry) =>
+      isPlainObject(entry) &&
+      isNonEmptyString(entry.worktreePath) &&
+      canonicalizePath(entry.worktreePath) === targetCanonical,
+  ).length;
+  return { observable: true, count };
 }
 
 // observeArchiveInventory(ctx, opts) -- ⓐⓒⓓ를 한 봉투로 묶는다(ⓑ는
