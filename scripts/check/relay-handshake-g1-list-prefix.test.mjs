@@ -27,10 +27,18 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const CLI_PATH = join(HERE, "relay-handshake.mjs");
 const SIBLING_DEPS = RELAY_HANDSHAKE_STATIC_SIBLINGS;
 
-const SCRATCH_ROOT = join(tmpdir(), "hyk425-g1-prefix-scratch");
+// HYK-496: same per-process-unique-root fix as relay-handshake-g1-
+// headswap.test.mjs / relay-handshake-g1-dispatch-check.test.mjs's own
+// SCRATCH_ROOT (see their comments) -- a fixed literal name here collided
+// across processes running this same file concurrently (full runner
+// parallel, nested install target, HYK-359 sweep): whichever process
+// finished first wiped the shared root out from under the others while
+// they were still writing into their own mkdtemp subdirectories under it
+// (observed in CI as ENOENT, reproduced locally on Windows as EPERM --
+// same root cause, OS-specific error shape).
+const SCRATCH_ROOT = mkdtempSync(join(tmpdir(), "hyk425-g1-prefix-scratch-"));
 
 function withFixtureDir(prefix, fn) {
-  mkdirSync(SCRATCH_ROOT, { recursive: true });
   const dir = mkdtempSync(join(SCRATCH_ROOT, prefix));
   try {
     return fn(dir);
