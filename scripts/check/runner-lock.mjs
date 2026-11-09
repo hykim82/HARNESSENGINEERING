@@ -227,6 +227,31 @@ function aliveFilePath(lockPath, lockId) {
   return join(dirname(lockPath), `${basename(lockPath)}.alive.${lockId}`);
 }
 
+// HYK-494 후속 5R P2-c(검토 2R §3 참고 지적, 이번 라운드 명시 범위): 사이드카
+// stop()의 child.kill()이 HEARTBEAT_SCRIPT의 write(tmp)·rename(alivePath)
+// 사이를 끊으면(SIGTERM은 그 스크립트의 catch를 거치지 않고 프로세스를
+// 바로 끝낸다) `${alivePath}.tmp.*`가 남는다. 해제(release) 경로는 보통
+// stop() 보다 뒤에 불려 kill 신호가 이미 정착할 시간이 있었으므로, 여기서
+// "자기 token" 접두만(남의 사이드카 tmp는 무접촉) best-effort로 쓸어
+// 담는다 -- 불변식과 무관한 공간 누수일 뿐이다(cleanupOwnAliveFileBestEffort/
+// P2-7과 같은 근거, "정확히 0 보장"은 하지 않는다).
+function cleanupOwnAliveTmpLeftovers({ alivePath, readdirFn, unlinkFn }) {
+  try {
+    const dir = dirname(alivePath);
+    const ownPrefix = `${basename(alivePath)}.tmp.`;
+    for (const name of readdirFn(dir)) {
+      if (!name.startsWith(ownPrefix)) continue;
+      try {
+        unlinkFn(join(dir, name));
+      } catch {
+        // best-effort.
+      }
+    }
+  } catch {
+    // best-effort (listing may fail / dir missing).
+  }
+}
+
 function reclaimTicketPath(lockPath, lockId, k) {
   return join(
     dirname(lockPath),
@@ -1194,16 +1219,21 @@ export function releaseRunnerLock({
   lockPath,
   lockId,
   readFileFn = readFileSync,
+  readdirFn = readdirSync,
   unlinkFn = unlinkSync,
 } = {}) {
   const { ok, content } = readLockContentResult(readFileFn, lockPath);
   const cleanupAliveFile = () => {
     if (!lockId) return;
+    const alivePath = aliveFilePath(lockPath, lockId);
     try {
-      unlinkFn(aliveFilePath(lockPath, lockId));
+      unlinkFn(alivePath);
     } catch {
       // best-effort.
     }
+    // P2-c: best-effort sweep of our OWN leftover heartbeat tmp file(s),
+    // see cleanupOwnAliveTmpLeftovers's header above.
+    cleanupOwnAliveTmpLeftovers({ alivePath, readdirFn, unlinkFn });
   };
   if (!ok || !content || !lockId || content.lockId !== lockId) {
     cleanupAliveFile();

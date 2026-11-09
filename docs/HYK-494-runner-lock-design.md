@@ -607,3 +607,101 @@ createExclusive와 같은 관용구 -- tmp 이름에 전체 내용을 다 쓴 �
     맞지만(〔직접〕), 오류 자체의 "실제 OS성"은 검토 1R만큼 실측하지
     않았다(〔못쟀다〕, universal_claim_discipline). P2-1 칸은 반대로
     실제 PowerShell 공유 위반을 쓴다(〔직접〕).
+
+## 14. HYK-494 후속 5R — CI-② 간헐 수리(시계 · 원인 기록 · 신원) + P2-a~c
+
+(검토 2R §2 ⓓ · §3, 책임자 판정 2026-11-09 19:0x)
+
+### 14-1. CI-② — PR #357 master 기반 CI 3/5 빨강, 이 머신 0/690 미재현
+
+검토 2R이 소스 판독으로 적은 원인 후보 4개(§2 ⓓ) 중 1~3을 이 라운드가
+고친다(4번 좀비는 범위 밖, 기록만 — 아래 14-5).
+
+1. **원인 후보 1(시계)**: `hyk494-runner-lock.test.mjs`의 3-way 칸들은
+   자식마다 `timeoutMs: 5000`(또는 8000) 고정 상한으로 "결국 획득"을
+   판정했다 — CI 중첩 스윕(`hyk359-ambient-env-regression.test.mjs:136`
+   `NESTED_SWEEP_CONCURRENCY=4`)의 CPU 과포화에서 굶은 자식이 그 안에
+   못 잡으면 거짓 RED다. **수리**: `GENEROUS_EVENTUAL_ACQUIRE_TIMEOUT_MS
+= 20_000`(수십 초)로 올려 cold-start · orphan(이 칸) · dead-ticket ·
+   staggered-alive · pid-reuse 5개 3-way 칸에 동일 적용(2-way reclaim과
+   5-way cold-start는 "3-way" 범위 밖, 손대지 않음). `wx` 배제 위반 0과
+   "3자 모두 획득" 단언은 그대로(단언 약화 아님) — 상한만 "결국"의
+   정의를 좁혀 거짓 RED를 줄인다. RED-first 확인(〔직접〕, 2026-11-09,
+   base 20b701f 위 2-프로세스 단순화 재현): 실제 홀더가 6000ms 쥐는
+   동안 고정 5000ms 획득자는 결정적으로 `timedOut:true`(`waitMs:5003`),
+   20000ms로 올리면 같은 조건에서 `acquired:true`(`waitMs:5972`)로
+   뒤집혔다.
+2. **원인 후보 2(원인 기록 부재)**: `spawnReclaimRaceChild`가
+   `stdio:"ignore"`+무던지기 않는 `error` 리스너 없이, 자식이 비정상
+   종료하면(`outPath` 미생성) `exit` 처리기의 `JSON.parse(readFileSync
+(...))`가 ENOENT를 그대로 던졌다(RED-first 확인: 2026-11-09, 자식을
+   50ms 뒤 SIGKILL하자 처리기가 던진 ENOENT가 프로세스 전체를 크래시
+   시켰다 — 원인 없는 크래시, 어느 자식이 왜인지 CI 로그에 안 남는다).
+   **수리**: stderr를 파이프로 받고 `error` 이벤트를 흡수하고, 읽기
+   실패를 던지지 않고 `{missingOutput:true, exitCode, signal,
+spawnErrorMessage, readErrorMessage}`로 수집한다. 모든 호출(§10b/
+   §10b-2 전체)이 `elapsedMs`/`stderrTail`을 결과에 함께 싣고, 실패
+   단언 메시지는 `JSON.stringify(results)`로 회차별 3자 결과·경과
+   ms·stderr 꼬리를 그대로 보여준다.
+3. **원인 후보 3(죽은 pid 재사용)**: 3-way orphan/dead-ticket 칸이
+   시드한 죽은 pid 고아 내용에 `procStart`가 없었다(`undefined`,
+   `!= null` 비교에서 `null`과 동치) — CI 중첩 스윕에서 그 pid가 다른
+   살아있는 프로세스로 재사용되면 `judgeOwner`/`identityIsDead`
+   (`runner-lock.mjs:268-282`, §7-1)가 "신원 모름 → ALIVE"로 오판해
+   아무도 회수하지 않고 3자 모두 시계 상한까지 간다. **수리**: 고아
+   내용에 비-null 자리표시자 `procStart`(예: `dead-orphan-seed-${trial}`)
+   를 심어, 재사용된 pid의 실제 신원과 반드시 불일치하게 만든다 →
+   "pid-reused"(dead)로 떨어진다. pid가 재사용되지 않은 보통 경우는
+   `isPidAliveFn`이 그보다 먼저 false를 돌려 "pid-dead"로 즉시 판정
+   하므로(:306) 이 자리표시자는 그 경로에 영향이 없다 — pid-reuse-
+   simulated 칸의 `"not-this-process's-real-identity"`와 같은 기법
+   (fixture 현실화).
+4. **이 머신에서는 CI-②를 재현하지 못했다(0/690, 검토 2R과 같은
+   값)** — 위 세 수리는 모두 소스 판독 기반이고(〔추론〕), **Linux
+   CI·중첩 스윕 실부하는 〔못쟀다〕**(WSL 0, universal_claim_discipline).
+   증명은 다음 PR CI(책임자 판독)가 맡는다.
+
+### 14-2. P2-a — `:544-547`(5R 라인 번호, 3R `:545-547`과 같은 칸) 오진 문구
+
+"청소 전 호출" 필터(`p.startsWith(lockDirPrefix) && !p.includes(".tmp.")`)
+는 요청자 자신의 `L.alive.<자기 lockId>` 삭제(P2-7 수리)까지 "청소"로
+센다. 교착 류 변이에서도 먼저 걸리는 단언이 "P2-3 위반"이라는 엉뚱한
+문구가 되어 오진을 유발한다(RED 자체는 맞다). **수리**: 필터를 그대로
+두고, `acquired`/`timedOut` 단언을 먼저 두는 순서로 바꿔 진짜 결함이
+먼저·정확한 문구로 드러나게 한다(review가 허용한 두 대안 중 하나).
+
+### 14-3. P2-b — `:696`(3R 라인) "C1이 회수권을 먼저 잡았는지" 미확인
+
+C2가 15ms 뒤에 뜨고, 주입은 "C1의 2번째 L 읽기"에 건다 — C2가 먼저
+ticket #1을 잡는 회차에서는 C1의 주입이 자기-회수권-재확인이 아닌
+다른 자리(경합 중 L 읽기)에 떨어져도 둘 다 결국 획득해 통과한다(헛
+시험은 아니지만 "자기 분기"를 탄 회차 수를 안 세었다). **수리**: 주입
+순간(`lockReadCount===2`) 자기 이름(`process.pid`)의 reclaim ticket이
+이미 존재하는지 디렉터리에서 직접 확인해 `selfBranchHit`을 결과에
+싣고, 바깥 시험이 `selfBranchTrials >= 1`을 단언한다.
+
+### 14-4. P2-c — 사이드카 stop()의 kill 경합 tmp 잔존 (release 경로에서 best-effort 정리)
+
+`startLockHeartbeat`의 `stop()`(`child.kill()`)이 `HEARTBEAT_SCRIPT`의
+write(tmp)·rename(alivePath) 사이를 끊으면 `${alivePath}.tmp.*`가
+남는다(SIGTERM은 그 스크립트의 catch를 거치지 않는다) — 검토 2R 실측:
+동시 읽기 0·1ms 간격·50회 중 9회차에 1개. **수리**: `releaseRunnerLock`
+의 기존 alive-file 청소 자리(`cleanupAliveFile`)에
+`cleanupOwnAliveTmpLeftovers`를 추가해, "자기 token" 접두(
+`${basename(alivePath)}.tmp.`)만 best-effort로 쓸어 담는다(남의
+사이드카 tmp는 무접촉) — release는 보통 stop()보다 뒤에 불려 kill
+신호가 이미 정착할 시간이 있다. **정직 한계**: 이것도 "정확히 0 보장"
+이 아니다(§13 11번과 같은 posture) — RED-first는 kill-타이밍의 실제
+결과물(끊긴 write가 남기는 정확히 그 모양의 tmp 파일)을 직접 심어
+확인했다(주입, 〔직접〕 아님) — 실제 kill-레이스 자체는 OS 스케줄링에
+좌우되는 순수한 운이라 결정론적 RED-first 재료로 쓰지 않았다.
+
+### 14-5. 범위 밖(기록만)
+
+- **원인 후보 4(좀비)**: `process.kill(pid,0)`은 좀비도 살아 있다고
+  본다 — 고아 pid는 `spawnSync`가 회수하므로 해당 가능성은 낮다고
+  추론했지만(§7-1), 이 라운드도 고치지 않았다. 다음 라운드 후보.
+- `cleanupAfterReclaim` 접두 매칭 틈(§13 9번, 설계 §7-3) — 무변.
+- PM 설계 (d) 불변식 재심 — 이 라운드는 시험의 시계 의존·원인 기록·
+  fixture만 고쳤고, `runner-lock.mjs`의 §7 판정 로직(judgeOwner/
+  identityIsDead 자체) 변경은 P2-c(release 경로 추가) 외에는 0이다.

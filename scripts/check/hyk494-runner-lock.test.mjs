@@ -558,17 +558,27 @@ test("acquireRunnerLock: when the post-ticket reread of L fails once (transient,
       unlinkFn,
       env: cleanEnv(),
     });
-    assert.deepEqual(
-      cleanupCallsBeforeReconfirm,
-      [],
-      `P2-3 위반: L 삭제(재확인 성공)보다 먼저 청소가 일어났다 -- ${JSON.stringify(cleanupCallsBeforeReconfirm)}`,
-    );
+    // product_scope ⓥ(P2-a, 검토 2R §3): :545-547의 "청소 전 호출" 필터는
+    // `${lockPath}.` 로 시작하는 모든 non-tmp unlink를 세므로, 우리 자신의
+    // 포기/정리 경로에서 나오는 자기 alive 파일 삭제(`r.lock.alive.
+    // <자기 lockId>`, P2-7 수리)까지 "청소"로 잡는다. 그래서 실제 결함이
+    // 교착(timedOut)인 변이(M1 등)에서도 「먼저」 걸리는 단언이 엉뚱한
+    // "P2-3 위반" 문구가 되어 오진을 유발한다(RED 자체는 맞지만 원인
+    // 표시가 틀린다). acquired/timedOut을 먼저 확인하는 순서로 바꿔
+    // 진짜 결함이 먼저, 더 정확한 문구로 드러나게 한다(필터 자체를
+    // O의 lockId 접두로 좁히는 대신 이 방법을 택한다 -- review 문면이
+    // 둘 중 하나로 허용).
     assert.equal(
       r.acquired,
       true,
       "HYK-494 followup-3 P1-1: must eventually acquire, not deadlock on our own live reclaim ticket (previously timedOut:true against this exact shape)",
     );
     assert.equal(r.timedOut, false);
+    assert.deepEqual(
+      cleanupCallsBeforeReconfirm,
+      [],
+      `P2-3 위반: L 삭제(재확인 성공)보다 먼저 청소가 일어났다 -- ${JSON.stringify(cleanupCallsBeforeReconfirm)}`,
+    );
     assert.equal(
       existsSync(`${lockPath}.reclaim.O-reread-token.1`),
       false,
@@ -655,17 +665,40 @@ test("acquireRunnerLock: a timed-out result never reports reclaimedOrphan:true, 
 // C2는 아무 주입도 없는 평범한 두 번째 대기자다. 수리 전(base 787b95e)
 // 이면 둘 다 LOCK_WAIT_TIMEOUT_MS까지 멈춘다(교착) -- 수리 후에는 둘 다
 // 결국 획득해야 한다.
+// product_scope ⓥⓘ(P2-b, 검토 2R §3): ":722에서 C2를 15ms 뒤에 띄우고,
+// 주입은 'C1의 2번째 L 읽기'에 건다. C2가 먼저 #1을 잡는 회차에서는
+// C1의 주입이 다른 자리(경합 중 L 읽기)에 떨어진다 -- 그래도 둘 다
+// 획득하므로 그 회차는 '자기 분기(C1이 자기 회수권을 먼저 잡은 뒤
+// 그 재확인에서 주입이 떨어지는 자리)'를 타지 않고도 통과한다." 이
+// 수리는 주입 순간(lockReadCount===2) C1 자신의 이름으로 된 reclaim
+// ticket이 이미 존재하는지(=자기 회수권을 먼저 잡았는지)를 직접
+// 디렉터리에서 확인해 `selfBranchHit`으로 싣는다 -- 자기 분기를 탄
+// 회차 수를 아래 시험이 ≥1로 단언한다(오진 아님, 헛시험 아님을 수로
+// 증명).
 function p1SelfReclaimDeadlockChildScript() {
   return [
     `import { acquireRunnerLock, releaseRunnerLock } from ${JSON.stringify(RUNNER_LOCK_URL)};`,
-    `import { readFileSync, writeFileSync } from "node:fs";`,
+    `import { readFileSync, readdirSync, writeFileSync } from "node:fs";`,
+    `import { basename, dirname } from "node:path";`,
     `const [lockPath, outPath, timeoutMs, pollIntervalMs, injectFailure] = process.argv.slice(2);`,
     `const realReadFileFn = (p, enc) => readFileSync(p, enc);`,
     `let lockReadCount = 0;`,
+    `let selfBranchHit = false;`,
     `const readFileFn = injectFailure !== "1" ? realReadFileFn : (p, enc) => {`,
     `  if (p === lockPath) {`,
     `    lockReadCount += 1;`,
     `    if (lockReadCount === 2) {`,
+    `      try {`,
+    `        const dir = dirname(lockPath);`,
+    `        const ticketPrefix = \`\${basename(lockPath)}.reclaim.\`;`,
+    `        for (const name of readdirSync(dir)) {`,
+    `          if (!name.startsWith(ticketPrefix)) continue;`,
+    `          try {`,
+    `            const ticket = JSON.parse(realReadFileFn(\`\${dir}/\${name}\`, "utf8"));`,
+    `            if (ticket.pid === process.pid) { selfBranchHit = true; break; }`,
+    `          } catch (e) {}`,
+    `        }`,
+    `      } catch (e) {}`,
     `      const err = new Error("HYK-494 followup-3 real-process repro: injected transient EBUSY on L reread");`,
     `      err.code = "EBUSY";`,
     `      throw err;`,
@@ -675,7 +708,7 @@ function p1SelfReclaimDeadlockChildScript() {
     `};`,
     `const r = acquireRunnerLock({ lockPath, pid: process.pid, startedAtMs: Date.now(), timeoutMs: Number(timeoutMs), pollIntervalMs: Number(pollIntervalMs), readFileFn, env: {} });`,
     `if (r.acquired) releaseRunnerLock({ lockPath, lockId: r.lockId });`,
-    `writeFileSync(outPath, JSON.stringify({ pid: process.pid, acquired: r.acquired, timedOut: r.timedOut, reclaimedOrphan: r.reclaimedOrphan }));`,
+    `writeFileSync(outPath, JSON.stringify({ pid: process.pid, acquired: r.acquired, timedOut: r.timedOut, reclaimedOrphan: r.reclaimedOrphan, selfBranchHit }));`,
   ].join("\n");
 }
 
@@ -699,6 +732,7 @@ test(`GREEN (P1-1 교착 재현, 다른 대기자 1명을 둔 실제 프로세�
     const scriptPath = join(dir, "p1-child.mjs");
     writeFileSync(scriptPath, p1SelfReclaimDeadlockChildScript());
     let deadlocks = 0;
+    let selfBranchTrials = 0;
     for (let trial = 0; trial < P1_DEADLOCK_TRIALS; trial += 1) {
       const lockPath = join(dir, `p1-${trial}.lock`);
       const deadPid = spawnSync(process.execPath, [
@@ -728,6 +762,7 @@ test(`GREEN (P1-1 교착 재현, 다른 대기자 1명을 둔 실제 프로세�
       if (!a.acquired || !b.acquired || a.timedOut || b.timedOut) {
         deadlocks += 1;
       }
+      if (a.selfBranchHit) selfBranchTrials += 1;
       assert.ok(
         a.acquired && b.acquired,
         `trial ${trial}: both C1(${JSON.stringify(a)}) and C2(${JSON.stringify(b)}) must eventually acquire -- no deadlock`,
@@ -742,6 +777,10 @@ test(`GREEN (P1-1 교착 재현, 다른 대기자 1명을 둔 실제 프로세�
       deadlocks,
       0,
       `${deadlocks}/${P1_DEADLOCK_TRIALS} trials deadlocked -- 〔직접〕 finite sample, this machine, this run, injected (not real-OS) EBUSY`,
+    );
+    assert.ok(
+      selfBranchTrials >= 1,
+      `P2-b: 0/${P1_DEADLOCK_TRIALS} trials actually took the self-reclaim-ticket branch (C1 must have already claimed its own ticket #1 at the moment the injected EBUSY fires) -- this cell would be a vacuous pass otherwise (검토 2R §3 P2-b)`,
     );
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -1568,6 +1607,20 @@ function reclaimRaceChildScript() {
   ].join("\n");
 }
 
+// product_scope ⓘⓘ (CI-② 원인 후보 2, 검토 2R §2 ⓓ): 수리 전에는
+// `stdio: "ignore"`라 자식 stderr가 버려지고 `error` 이벤트 처리도 없었다
+// -- 자식이 비정상 종료하면(메모리 압박 · spawn 실패 · 모듈 로드 실패)
+// `exit` 처리기의 `JSON.parse(readFileSync(outPath, ...))`가 ENOENT를
+// 그대로 던져(RED-first 확인: 2026-11-09 abnormal-exit seam 재현, 아래
+// §0 답 참고) "어느 자식이 왜"가 CI 로그에 안 남았다. 이제 stderr를
+// 파이프로 받고 `error` 이벤트를 흡수하고, 출력 파일 읽기 자체가 실패해도
+// 던지지 않고 "결과"로 수집한다(`missingOutput:true` + exitCode/signal/
+// spawnErrorMessage/readErrorMessage) -- 모든 호출자(§10b/§10b-2의 모든
+// 칸)가 자동으로 이 혜택을 받는다. `elapsedMs`/`stderrTail`은 성공·실패
+// 모두에 실어, 실패 단언 메시지가 회차별 3자 결과 JSON·경과 ms·stderr
+// 꼬리를 그대로 보여주게 한다(product_scope ⓘⓘ 문면 그대로).
+const STDERR_TAIL_CHARS = 2000;
+
 function spawnReclaimRaceChild({
   lockPath,
   csPath,
@@ -1576,7 +1629,10 @@ function spawnReclaimRaceChild({
   pollIntervalMs,
   timeoutMs,
 }) {
+  const startMs = Date.now();
   return new Promise((resolve) => {
+    let stderrChunks = "";
+    let spawnErrorMessage = null;
     const child = spawn(
       process.execPath,
       [
@@ -1591,12 +1647,41 @@ function spawnReclaimRaceChild({
         String(pollIntervalMs),
         String(timeoutMs),
       ],
-      { stdio: "ignore", env: cleanEnv() },
+      { stdio: ["ignore", "ignore", "pipe"], env: cleanEnv() },
     );
-    child.on("exit", () => resolve(JSON.parse(readFileSync(outPath, "utf8"))));
+    child.stderr.on("data", (chunk) => {
+      stderrChunks += chunk.toString("utf8");
+    });
+    child.on("error", (err) => {
+      spawnErrorMessage = err?.message ?? String(err);
+    });
+    child.on("exit", (exitCode, signal) => {
+      const elapsedMs = Date.now() - startMs;
+      const stderrTail = stderrChunks.slice(-STDERR_TAIL_CHARS);
+      let parsed;
+      try {
+        parsed = JSON.parse(readFileSync(outPath, "utf8"));
+      } catch (readErr) {
+        resolve({
+          acquired: false,
+          violation: false,
+          missingOutput: true,
+          exitCode,
+          signal,
+          spawnErrorMessage,
+          readErrorMessage: readErr?.message ?? String(readErr),
+          elapsedMs,
+          stderrTail,
+        });
+        return;
+      }
+      resolve({ ...parsed, exitCode, signal, elapsedMs, stderrTail });
+    });
   });
 }
 
+// product_scope ⓘⓘⓘⓘ 범위 밖(목록만 + 근거): 이 칸은 2-way(=3-way 아님)라
+// 클럭 상한 수리 대상에서 뺀다(deviation_rule) -- timeoutMs: 5000 그대로.
 const RECLAIM_TRIALS = 10;
 
 test(`GREEN (compare-and-delete reclaim): ${RECLAIM_TRIALS} trials of 2 real children racing a lock pre-seeded with a DEAD pid's orphan content -- zero critical-section violations`, async () => {
@@ -1658,6 +1743,29 @@ test(`GREEN (compare-and-delete reclaim): ${RECLAIM_TRIALS} trials of 2 real chi
   }
 });
 
+// product_scope ⓘ (CI-② 원인 후보 1, 검토 2R §2 ⓓ): 자식별 고정
+// 5초(또는 8초) 시계로 "결국 획득"을 판정하면, CI 중첩 스윕의 CPU
+// 과포화에서 굶은 자식이 그 안에 못 잡는다 -- 알고리즘 결함이 아니라
+// 시험 자신의 시계 상한이 짧은 것이다(RED-first 2026-11-09 확인: 실제
+// 홀더가 6000ms 를 쥐고 있을 때 고정 5000ms 획득자는 결정적으로
+// timedOut:true 였고, 20000ms 로 올리자 같은 조건에서 acquired:true 로
+// 뒤집혔다 -- 아래 §0 답 참고). "결국 획득"의 통과 조건에서 시계
+// 의존을 완전히 제거하는 대신(폴링 루프 자체가 무한 대기가 되면
+// busyRetryTimeoutMs 기본값(30s, BUSY_RETRY_TIMEOUT_MS)과의 상호작용이
+// 복잡해진다) 상한을 수십 초로 넉넉히 늘린다(product_scope ⓘ의 두 옵션
+// 중 전자) -- `wx` 배제 위반 0 단언과 3자 모두 획득 단언은 그대로
+// 유지한다(단언 약화 아님). 칸 전체 시간 상한(파일 단독 ≤150초)은 보통
+// 경로(이 머신, 굶음 없음)에서 각 trial이 즉시 끝나므로 영향받지 않는다
+// -- 이 상한이 실제로 소진되는 경우는 정말로 20초 가까이 굶는 trial이
+// 여러 번 겹칠 때뿐이고, 그건 시험의 시계가 아니라 알고리즘 자체의
+// 문제라 별도 신호다. 같은 모양(자식별 고정 클럭 + "결국 획득" 판정)의
+// 3-way 칸을 재검색해 cold-start(:1707 아래) · 이 칸(orphan) ·
+// dead-ticket(:1811 아래) · staggered-alive(:1907 아래) · pid-reuse
+// (:1973 아래) 5개에 모두 적용한다 -- 2-way reclaim(RECLAIM_TRIALS, 위)과
+// 5-way cold-start(FIVE_WAY_TRIALS, 아래)는 "3-way"가 아니라서 범위
+// 밖으로 남긴다(product_scope 문면 그대로, 목록만 + 근거).
+const GENEROUS_EVENTUAL_ACQUIRE_TIMEOUT_MS = 20_000;
+
 const THREE_WAY_TRIALS = 15;
 
 test(`GREEN (3-way cold-start contention): ${THREE_WAY_TRIALS} trials of 3 real children racing a lock with NO pre-existing file -- zero critical-section violations`, async () => {
@@ -1678,14 +1786,14 @@ test(`GREEN (3-way cold-start contention): ${THREE_WAY_TRIALS} trials of 3 real 
             outPath,
             holdMs: 20,
             pollIntervalMs: 5,
-            timeoutMs: 5000,
+            timeoutMs: GENEROUS_EVENTUAL_ACQUIRE_TIMEOUT_MS,
           }),
         ),
       );
       if (results.some((r) => r.violation)) violations += 1;
       assert.ok(
         results.every((r) => r.acquired),
-        `trial ${trial}: all 3 must eventually acquire`,
+        `trial ${trial}: all 3 must eventually acquire -- ${JSON.stringify(results)}`,
       );
       assert.equal(existsSync(lockPath), false, `trial ${trial}: no leftover`);
     }
@@ -1722,7 +1830,25 @@ test(`GREEN (3-way orphan contention, the exact P1-A repro shape): ${THREE_WAY_O
       ]).pid;
       writeFileSync(
         lockPath,
-        JSON.stringify({ pid: deadPid, lockId: `orph-${trial}` }),
+        JSON.stringify({
+          pid: deadPid,
+          lockId: `orph-${trial}`,
+          // product_scope ⓘⓘⓘ(원인 후보 3, 검토 2R §2 ⓓ): procStart를
+          // 안 실으면(= undefined, `!= null` 비교에서 null과 동치),
+          // CI 중첩 스윕에서 deadPid가 다른 살아있는 프로세스로 재사용될
+          // 경우 judgeOwner/identityIsDead(runner-lock.mjs:268-282)가
+          // "낡음/신원 모름 -> ALIVE"로 오판해 아무도 회수하지 않고
+          // 3자 모두 시계 상한까지 간다. 죽은 프로세스의 "진짜" 시작
+          // 신원은 죽은 뒤 다시 구할 수 없으므로(Windows: `Get-Process`가
+          // ESRCH로 실패), 재사용자의 실제 신원과 결코 같을 수 없는
+          // 비-null 자리표시자를 심어 "신원 불일치 -> pid-reused"(dead)
+          // 가지로 떨어지게 한다 -- pid가 재사용되지 않은(이 머신의
+          // 보통 경우) isPidAliveFn이 그보다 먼저 false를 돌려
+          // "pid-dead"로 즉시 판정하므로(:306) 이 자리표시자는 그 경로엔
+          // 영향이 없다(fixture 현실화, pid-reuse-simulated 칸의
+          // "not-this-process's-real-identity" 자리표시자와 같은 기법).
+          procStart: `dead-orphan-seed-${trial}`,
+        }),
       );
       const results = await Promise.all(
         outs.map((outPath) =>
@@ -1732,7 +1858,7 @@ test(`GREEN (3-way orphan contention, the exact P1-A repro shape): ${THREE_WAY_O
             outPath,
             holdMs: 30,
             pollIntervalMs: 10,
-            timeoutMs: 5000,
+            timeoutMs: GENEROUS_EVENTUAL_ACQUIRE_TIMEOUT_MS,
           }),
         ),
       );
@@ -1740,7 +1866,7 @@ test(`GREEN (3-way orphan contention, the exact P1-A repro shape): ${THREE_WAY_O
       for (const r of results) if (r.reclaimReason) owners.add(r.reclaimReason);
       assert.ok(
         results.every((r) => r.acquired),
-        `trial ${trial}: all 3 must eventually acquire`,
+        `trial ${trial}: all 3 must eventually acquire -- ${JSON.stringify(results)}`,
       );
       assert.equal(existsSync(lockPath), false, `trial ${trial}: no leftover`);
     }
@@ -1782,11 +1908,19 @@ test(`GREEN (3-way orphan contention WITH a pre-existing DEAD reclaim ticket #1)
       ]).pid;
       writeFileSync(
         lockPath,
-        JSON.stringify({ pid: deadOwnerPid, lockId: `dt-owner-${trial}` }),
+        JSON.stringify({
+          pid: deadOwnerPid,
+          lockId: `dt-owner-${trial}`,
+          // 같은 모양 (ⓘⓘⓘ) -- 이 칸도 같은 수리를 받는다 (ⓘⓘⓘⓘ).
+          procStart: `dead-dt-owner-seed-${trial}`,
+        }),
       );
       writeFileSync(
         `${lockPath}.reclaim.dt-owner-${trial}.1`,
-        JSON.stringify({ pid: deadTicketPid, procStart: null }),
+        JSON.stringify({
+          pid: deadTicketPid,
+          procStart: `dead-dt-ticket-seed-${trial}`,
+        }),
       );
       const results = await Promise.all(
         outs.map((outPath) =>
@@ -1796,14 +1930,14 @@ test(`GREEN (3-way orphan contention WITH a pre-existing DEAD reclaim ticket #1)
             outPath,
             holdMs: 20,
             pollIntervalMs: 5,
-            timeoutMs: 5000,
+            timeoutMs: GENEROUS_EVENTUAL_ACQUIRE_TIMEOUT_MS,
           }),
         ),
       );
       if (results.some((r) => r.violation)) violations += 1;
       assert.ok(
         results.every((r) => r.acquired),
-        `trial ${trial}: all 3 must eventually acquire`,
+        `trial ${trial}: all 3 must eventually acquire -- ${JSON.stringify(results)}`,
       );
       assert.equal(existsSync(lockPath), false, `trial ${trial}: released`);
     }
@@ -1817,6 +1951,10 @@ test(`GREEN (3-way orphan contention WITH a pre-existing DEAD reclaim ticket #1)
   }
 });
 
+// product_scope ⓘⓘⓘⓘ 범위 밖(목록만 + 근거): 5-way는 "3-way"가 아니라서
+// 수리 대상에서 명시적으로 뺀다 -- 같은 클럭-의존 모양이긴 하지만
+// product_scope가 "3-way 칸"으로 범위를 적었고(deviation_rule), 손대지
+// 않은 채 timeoutMs: 8000 그대로 둔다.
 const FIVE_WAY_TRIALS = 10;
 
 test(`GREEN (5-way cold-start contention): ${FIVE_WAY_TRIALS} trials of 5 real children racing a lock with NO pre-existing file -- zero critical-section violations (P2-5, 실제 프로세스 "5 진입")`, async () => {
@@ -1876,7 +2014,7 @@ test(`GREEN (staggered start, ALIVE owner held briefly then 2 late entrants): ${
         outPath: outOwner,
         holdMs: 80,
         pollIntervalMs: 5,
-        timeoutMs: 5000,
+        timeoutMs: GENEROUS_EVENTUAL_ACQUIRE_TIMEOUT_MS,
       });
       // Give the owner time to genuinely acquire before the late entrants
       // even start -- this is the "살아 있는 주인 짧게 쥠" shape, distinct
@@ -1890,7 +2028,7 @@ test(`GREEN (staggered start, ALIVE owner held briefly then 2 late entrants): ${
           outPath: out2,
           holdMs: 20,
           pollIntervalMs: 5,
-          timeoutMs: 5000,
+          timeoutMs: GENEROUS_EVENTUAL_ACQUIRE_TIMEOUT_MS,
         }),
         spawnReclaimRaceChild({
           lockPath,
@@ -1898,14 +2036,14 @@ test(`GREEN (staggered start, ALIVE owner held briefly then 2 late entrants): ${
           outPath: out3,
           holdMs: 20,
           pollIntervalMs: 5,
-          timeoutMs: 5000,
+          timeoutMs: GENEROUS_EVENTUAL_ACQUIRE_TIMEOUT_MS,
         }),
       ]);
       const all = [ownerResult, r2, r3];
       if (all.some((r) => r.violation)) violations += 1;
       assert.ok(
         all.every((r) => r.acquired),
-        `trial ${trial}: all 3 must eventually acquire`,
+        `trial ${trial}: all 3 must eventually acquire -- ${JSON.stringify(all)}`,
       );
       assert.equal(
         ownerResult.reclaimedOrphan,
@@ -1961,7 +2099,7 @@ test(`GREEN (3-way pid-reuse-simulated contention): ${PID_REUSE_THREE_WAY_TRIALS
             outPath,
             holdMs: 20,
             pollIntervalMs: 10,
-            timeoutMs: 8000,
+            timeoutMs: GENEROUS_EVENTUAL_ACQUIRE_TIMEOUT_MS,
           }),
         ),
       );
@@ -1969,7 +2107,7 @@ test(`GREEN (3-way pid-reuse-simulated contention): ${PID_REUSE_THREE_WAY_TRIALS
       if (results.some((r) => r.violation)) violations += 1;
       assert.ok(
         results.every((r) => r.acquired),
-        `trial ${trial}: all 3 must eventually acquire`,
+        `trial ${trial}: all 3 must eventually acquire -- ${JSON.stringify(results)}`,
       );
       assert.ok(
         results.some((r) => r.reclaimReason === "pid-reused"),
@@ -2399,6 +2537,56 @@ test("startLockHeartbeat: a real sidecar racing a real Windows sharing-violation
     assert.ok(
       leftoverTmp.length <= 3,
       `P2-1 위반(또는 수리 되돌림): rename 실패 뒤 tmp 파일이 너무 많이 남았다(${leftoverTmp.length}개, 문턱 3) -- ${JSON.stringify(leftoverTmp)}`,
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// product_scope ⓥⓘⓘ(P2-c, 검토 2R §3 참고): 사이드카 stop()의
+// child.kill()이 HEARTBEAT_SCRIPT의 write(tmp)·rename(alivePath) 사이를
+// 끊으면(SIGTERM은 그 스크립트의 catch를 거치지 않고 프로세스를 바로
+// 끝낸다) `${alivePath}.tmp.*`가 남는다. 실제 kill-타이밍 경합(review의
+// 1ms 간격 50회 측정, 9/50)은 순수한 운(OS 스케줄링)에 좌우돼 RED-first
+// 확인에 그대로 쓸 수 없다 -- 대신 그 결과물(=kill에 끊긴 사이드카가
+// 남기는 정확히 그 모양의 tmp 파일)을 직접 심어(주입, 〔직접〕 아님,
+// universal_claim_discipline) releaseRunnerLock()의 해제 경로가 "자기
+// token"만 쓸어 담고 "남의 것"은 무접촉인지를 결정론적으로 확인한다.
+test("releaseRunnerLock: the release path best-effort-sweeps our OWN leftover heartbeat tmp file(s) left by a killed sidecar (write/rename interrupted), but never touches a DIFFERENT token's tmp leftover (P2-c fix, HYK-494 followup-5)", () => {
+  const dir = freshLockDir();
+  const lockPath = join(dir, "r.lock");
+  try {
+    const r = acquireRunnerLock({
+      lockPath,
+      pid: process.pid,
+      startedAtMs: Date.now(),
+      env: cleanEnv(),
+    });
+    assert.equal(r.acquired, true, "setup: must actually hold the lock");
+    const ownAlivePath = `${lockPath}.alive.${r.lockId}`;
+    // Simulates exactly what HEARTBEAT_SCRIPT's own tmp naming produces
+    // (`alivePath+'.tmp.'+pid+'.'+Date.now()+'.'+rand`, :1296) when
+    // child.kill() lands between the write and the rename.
+    const ownLeftoverTmp = `${ownAlivePath}.tmp.99999.1.abcdef`;
+    writeFileSync(ownLeftoverTmp, JSON.stringify({ aliveAtMs: 1 }));
+    // A DIFFERENT token's own leftover tmp in the SAME directory -- must
+    // stay untouched ("자기 token만 · 남의 것 무접촉").
+    const otherAlivePath = `${lockPath}.alive.some-other-lockId`;
+    const otherLeftoverTmp = `${otherAlivePath}.tmp.88888.2.ghijkl`;
+    writeFileSync(otherLeftoverTmp, JSON.stringify({ aliveAtMs: 1 }));
+
+    const rel = releaseRunnerLock({ lockPath, lockId: r.lockId });
+
+    assert.equal(rel.released, true);
+    assert.equal(
+      existsSync(ownLeftoverTmp),
+      false,
+      "P2-c: our own leftover heartbeat tmp file must be swept by the release path",
+    );
+    assert.equal(
+      existsSync(otherLeftoverTmp),
+      true,
+      "P2-c: a DIFFERENT token's tmp leftover must be left untouched (own-token-only)",
     );
   } finally {
     rmSync(dir, { recursive: true, force: true });
