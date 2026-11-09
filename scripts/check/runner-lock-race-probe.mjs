@@ -76,6 +76,19 @@ const CELL_DEFS = {
     simulatedWaitMs: 2000,
     entrantDelaysMs: [0, 30],
   },
+  // HYK-494 후속 P2-4: entrant 0이 잠금을 쥔 "뒤" 자기 L을 직접(외부 침입을
+  //흉내) 다른 lockId로 덮어써서 releaseRunnerLock이 lockLost:true를
+  // 돌리게 만든다 -- 이 칸의 목적은 "lost"가 상수가 아니라 실제로 잰 값
+  // (releaseRunnerLock의 반환값)임을 증명하는 것뿐이다, 상호 배제 자체를
+  // 주장하지 않는다(외부가 L을 직접 덮어쓰면 상호 배제가 성립하지 않는
+  // 것이 당연하다 -- design doc §9-2).
+  "lock-lost": {
+    seed: "none",
+    holdMs: 20,
+    pollIntervalMs: 5,
+    timeoutMs: 5000,
+    forceLockLossMs: 10,
+  },
 };
 
 function childScript() {
@@ -84,7 +97,7 @@ import { acquireRunnerLock, releaseRunnerLock, startLockHeartbeat } from ${JSON.
     pathToFileURL(globalThis.__PROBE_LOCK_MODULE__).href,
   )};
 import { writeFileSync, unlinkSync } from "node:fs";
-const [lockPath, csPath, outPath, holdMs, pollIntervalMs, timeoutMs, heartbeatIntervalMs, heartbeatStaleMs, delayBeforeMs, simulatedWaitMs] = process.argv.slice(2);
+const [lockPath, csPath, outPath, holdMs, pollIntervalMs, timeoutMs, heartbeatIntervalMs, heartbeatStaleMs, delayBeforeMs, simulatedWaitMs, forceLockLossMs] = process.argv.slice(2);
 await new Promise((res) => setTimeout(res, Number(delayBeforeMs) || 0));
 const opts = { lockPath, pollIntervalMs: Number(pollIntervalMs), timeoutMs: Number(timeoutMs), env: {} };
 if (Number(heartbeatStaleMs) > 0) opts.heartbeatStaleMs = Number(heartbeatStaleMs);
@@ -93,6 +106,7 @@ const r = acquireRunnerLock(opts);
 let violation = false;
 let csCreated = false;
 let hb = null;
+let lockLost = false;
 if (r.acquired) {
   if (Number(heartbeatIntervalMs) > 0 && typeof startLockHeartbeat === "function" && r.lockId) {
     try {
@@ -101,11 +115,23 @@ if (r.acquired) {
   }
   try { writeFileSync(csPath, String(process.pid), { flag: "wx" }); csCreated = true; }
   catch (e) { violation = true; }
+  if (Number(forceLockLossMs) > 0) {
+    // HYK-494 후속 P2-4: self-inflicted intrusion -- overwrite our OWN L
+    // with a different lockId while we still hold it, so releaseRunnerLock
+    // below genuinely returns lockLost:true (not a hardcoded probe value).
+    await new Promise((res) => setTimeout(res, Number(forceLockLossMs)));
+    try {
+      writeFileSync(lockPath, JSON.stringify({ pid: 999999999, startedAtMs: 1, worktree: null, head: null, lockId: "INTRUDER-" + Date.now() }));
+    } catch {}
+  }
   await new Promise((res) => setTimeout(res, Number(holdMs)));
   if (csCreated) { try { unlinkSync(csPath); } catch {} }
   if (hb) { try { hb.stop(); } catch {} }
   if (typeof releaseRunnerLock === "function") {
-    try { releaseRunnerLock({ lockPath, pid: process.pid, lockId: r.lockId }); } catch {}
+    try {
+      const rel = releaseRunnerLock({ lockPath, pid: process.pid, lockId: r.lockId });
+      lockLost = !!(rel && rel.lockLost);
+    } catch {}
   }
 }
 writeFileSync(outPath, JSON.stringify({
@@ -115,6 +141,7 @@ writeFileSync(outPath, JSON.stringify({
   reclaimReason: r.reclaimReason ?? null,
   timedOut: r.timedOut,
   violation,
+  lockLost,
 }));
 `;
 }
@@ -161,10 +188,12 @@ async function runTrial({ name, def, entrants, scriptPath, dir, trialIdx }) {
     const outPath = join(dir, `${name}-${trialIdx}-${i}.json`);
     outs.push(outPath);
     const delayBefore = (def.entrantDelaysMs || [])[i] ?? 0;
-    // simulatedWaitMs only applies to entrant 0 -- the one whose backdated
-    // startedAtMs reproduces the P1-B window; later entrants use their own
-    // real, un-backdated wait.
+    // simulatedWaitMs/forceLockLossMs only apply to entrant 0 -- the one
+    // whose backdated startedAtMs reproduces the P1-B window, or (for
+    // lock-lost) the one that self-inflicts the intrusion; later entrants
+    // use their own real, unmodified path.
     const simulatedWaitMs = i === 0 ? def.simulatedWaitMs || 0 : 0;
+    const forceLockLossMs = i === 0 ? def.forceLockLossMs || 0 : 0;
     promises.push(
       runChildReal({
         scriptPath,
@@ -179,6 +208,7 @@ async function runTrial({ name, def, entrants, scriptPath, dir, trialIdx }) {
           String(def.heartbeatStaleMs || 0),
           String(delayBefore),
           String(simulatedWaitMs),
+          String(forceLockLossMs),
         ],
       }),
     );
@@ -212,6 +242,9 @@ function foldTrialIntoTotals(totals, { results, lockLeftAfter }) {
         (totals.reclaimReasons[r.reclaimReason] || 0) + 1;
     }
     if (r.timedOut) totals.timedOutCount += 1;
+    // HYK-494 후속 P2-4: measured from releaseRunnerLock's own return value
+    // (childScript above), never a constant.
+    if (r.lockLost) totals.lostCount += 1;
   }
   if (lockLeftAfter) totals.lockLeftCount += 1;
 }
@@ -230,6 +263,7 @@ async function runCell(name, def, { lockModule, dir }) {
     lockLeftCount: 0,
     reclaimReasons: {},
     timedOutCount: 0,
+    lostCount: 0,
   };
   for (let t = 0; t < trials; t++) {
     const trialOutcome = await runTrial({
@@ -251,7 +285,7 @@ async function runCell(name, def, { lockModule, dir }) {
     owners_max: totals.ownersMax,
     lock_left: totals.lockLeftCount,
     reclaim_reasons: totals.reclaimReasons,
-    lost: 0,
+    lost: totals.lostCount,
     timedOut: totals.timedOutCount,
   };
 }
