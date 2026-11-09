@@ -195,6 +195,15 @@ judge(O):  if kill(O.pid,0)==ESRCH → DEAD("pid-dead")                 # 싼 �
 기한의 heartbeat 회수로 얻는 것이 없다(사이드카는 "멈춘(hung) 러너"를
 어차피 못 본다, §12).
 
+⚠️**HYK-494 후속 수리(P2-1)**: 이 "alive-heartbeat-stale" 판정 그
+자체는 3R에서부터 이미 안전했지만(회수하지 않는다), 그 사실을 아는
+사람이 없었다 — 사유가 계산 뒤 버려졌고 로그·영수증·반환값 어디에도
+남지 않았다(REVIEW-3R P2-1 지적). `acquireRunnerLock`은 이제 `logFn`
+(기본 no-op, `isolated-suite-runner.mjs`는 자기 `log`를 그대로 넘긴다
+-- 결선 줄 1개)을 받아, 이 판정에 들어올 때 1번만 찍는다(폴마다 찍으면
+홍수가 되므로 "상태가 바뀔 때"만 -- 벗어나면 다시 찍을 수 있는 상태로
+돌아간다).
+
 ### 7-2. `startIdentity(pid)` — 신원 질의
 
 - **Linux**: `/proc/<pid>/stat`의 22번째 필드(부팅 후 tick, comm 필드
@@ -211,11 +220,66 @@ judge(O):  if kill(O.pid,0)==ESRCH → DEAD("pid-dead")                 # 싼 �
 
 ```
 k = 이미 있는 O의 권한 중 최대 번호(없으면 0)
-if k>0 and judge(권한 k 보유자)≠DEAD: wait                 # 이미 누가 회수 중
+if k>0:
+  r = read(권한 k)
+  if r.ok and r.content is 자기(pid, procStart) 자신:        # HYK-494 후속(followup-3) P1-1
+    reread = read(L)
+    if reread.ok:
+      if reread.content.lockId == O.lockId: unlink L
+      best-effort unlink L.alive.<O.lockId>, L.reclaim.<O.lockId>.*
+      claim-again
+    else: wait(bounded, 연속 상한 뒤 throw)                  # P2-2 메커니즘 재사용
+  elif r.ok and judge(r.content)≠DEAD: wait                  # 이미 "남이" 회수 중
+  elif r.ok==false and r.err≠ENOENT: wait(bounded, 연속 상한 뒤 throw)  # HYK-494 후속 P2-2
+  # r.ok==false and r.err==ENOENT(보유자가 이미 지웠다)만 다음 줄로 진행
 createExclusive(L.reclaim.<O.lockId>.<k+1>, {pid, procStart}) → EEXIST면 wait
-if read(L).lockId == O.lockId: unlink L                     # 유일한 비주인 삭제 지점
-best-effort unlink L.alive.<O.lockId>, L.reclaim.<O.lockId>.*  # L 삭제 "뒤"
+reread = read(L)
+if reread.ok:
+  if reread.content.lockId == O.lockId: unlink L            # 유일한 비주인 삭제 지점
+  best-effort unlink L.alive.<O.lockId>, L.reclaim.<O.lockId>.*  # L 삭제 "뒤"(reread.ok일 때만, HYK-494 후속 P2-3)
+# reread.ok==false면 청소를 건너뛴다 -- L을 지웠는지 확인하지 못했다.
+#   (HYK-494 후속followup-3: 다음 라운드가 바로 위 "자기 자신" 분기로
+#    돌아와 재시도한다 -- 20분 LOCK_WAIT_TIMEOUT_MS 전체를 자기 자신을
+#    기다리는 데 쓰지 않는다.)
 ```
+
+⚠️**HYK-494 후속 수리(P2-2·P2-3, 이 의사 코드는 그 수리를 반영해 고친
+문면이다 -- 원래 글자 그대로였던 "청소 무조건"은 REVIEW P2-3이 지적한
+빈칸이었다)**: 회수권 k를 읽다가 ENOENT가 아닌 실패(일시적 공유 위반 등)
+를 보면 "보유자가 지웠다"로 보지 않는다 -- 2R이 L 자체에 대해 닫은
+"읽기 실패 ≠ 고아"(F3) 원칙을 회수권 판독에도 적용한다(bounded 재시도
+뒤 throw, `BUSY_RETRY_TIMEOUT_MS`와 같은 상수). 그리고 "재확인 읽기"
+자체가 실패하면(reread.ok==false) L을 지웠는지 확인할 길이 없으므로
+청소를 건너뛴다(**논증 4·5의 "청소 = L 삭제 뒤" 전제를 글자대로 지킨다**)
+-- 우리 회수권은 그대로 남아 "살아 있는 회수권자 ≤1"을 계속 보장한다.
+
+⚠️**HYK-494 후속(followup-3) 수리(P1-1, 검토 1R 교착 지적)**: 바로 위
+"재확인 읽기 자체가 실패하면 청소를 건너뛴다"는 맞다 — 하지만 그
+회수권(k+1, 우리 자신의 것)은 다음 라운드에도 그대로 살아 있다. REVIEW
+1R이 재현한 교착은 그 "다음 라운드"의 동작이었다: `judge(권한 k 보유자)`
+가 "자기 자신"을 "이미 누가 회수 중"으로 오판해 `wait`로 떨어지고, 그게
+`LOCK_WAIT_TIMEOUT_MS`(20분)까지 반복됐다(같은 고아를 기다리는 다른
+모든 러너도 그 뒤에서 함께 멈췄다 — 실제 자식 2개로 재현, HEAD 3/3 시간
+초과 · base 0/3). 수리는 "회수권 k 보유자가 자기 자신이면 기다리지
+말고 재확인·삭제 단계를 그 자리에서 재시도한다"이다(PM 설계 재심이
+아니다 — P2-3의 "청소 = L 삭제 뒤" 전제를 그대로 지킨다, 재시도도 같은
+reread-then-cleanup 경로를 재사용할 뿐이다). 재시도의 reread가 또
+실패하면 무조건 claim-again(타이트 스핀)으로 두지 않고, 이미 검증된
+P2-2의 "바쁨 상한 뒤 throw" 메커니즘(`ticketReadBusySinceMs`)을
+재사용한다 -- 자기 자신을 기다리는 데 20분 전체를 쓰지 않고
+`BUSY_RETRY_TIMEOUT_MS`(30초)로 끊는다(선택 ②, 근거: 무조건
+claim-again은 reread가 계속 실패하는 동안 sleep 없는 타이트 스핀이
+되지만, 바쁨 메커니즘 재사용은 폴 간격 sleep과 상한을 둘 다 그대로
+얻는다). 불변식("살아 있는 회수권자 ≤1")은 무변 -- 재시도가 새 회수권을
+만들지 않고 k를 재사용하기 때문이다.
+
+⚠️**HYK-494 후속(followup-3) 수리(P2-3 참고 칸)**: 시간 초과로 끝난
+결과에 `reclaimedOrphan:true`가 남아 있던 적이 있었다(claim-again이
+낙관적으로 세운 플래그가, 그 뒤 「진짜」 살아 있는 새 주인에게 졌을
+때도 지워지지 않았다 — 영수증 `lock_reclaimed_orphan` 오독 소지).
+`timedOut:true`인 결과는 이제 항상 `reclaimedOrphan:false`·
+`reclaimReason:null`이다 — "시간 초과"는 정의상 "확정된 회수"가 아니기
+때문이다.
 
 **되돌림이 전혀 없다** — 2R의 "rename-steal → 비교 → 불일치면 link로
 복원"을 완전히 버렸다. 한 번호(`k+1`)는 `link`로 정확히 1명만 얻으므로
@@ -225,6 +289,18 @@ best-effort unlink L.alive.<O.lockId>, L.reclaim.<O.lockId>.*  # L 삭제 "뒤"
 표식" 모양이 가진 두 주인 가능성이 구조적으로 없다). 늦게 만들어진
 권한은 재확인에서 `L.lockId ≠ O.lockId`가 되어 아무것도 지우지 않는다
 (L이 이미 다른 주인으로 넘어갔다는 뜻).
+
+⚠️**범위 밖 발견(〔직접〕, 고치지 않음, deviation_rule)**: 이 라운드의
+D2 시험(`hyk494-runner-lock.test.mjs`의 "D2 (scoped)")이 세 번째
+삽입점("자기 회수권을 link하기 직전")을
+탐색하다가 `cleanupAfterReclaim`의 접두 매칭(`reclaim.<lockId>.`)이 다른
+프로세스의 **아직 link되지 않은** `reclaim.<lockId>.<k>.tmp.<suffix>`
+파일에도 걸린다는 사실을 발견했다(그 tmp 이름 자체가 그 접두로 시작
+하므로) -- 한 회수권자의 청소가 다른 회수권자의 진행 중인 tmp 파일을
+지워 그 쪽의 `linkSync`를 ENOENT로 실패시킬 수 있다. 이것은 실재하는
+좁은 틈이지만 이번 라운드가 받은 계약(P2-1~P2-7·CI-1)의 밖이라 고치지
+않았다 -- 시험 파일의 D2 주석과 이 결과 파일에 그대로 남긴다(다음
+라운드 후보).
 
 ### 7-4. ③ 잡는 순간 heartbeat — P1-B를 구조적으로 닫는다
 
@@ -268,6 +344,16 @@ file L itself").
 ⓐ의 정확한 5단계를 2R 코드 위에서 재생)도 RED 확인(owners_max 2) —
 3R은 rename을 reclaim 경로에서 완전히 뺐으므로(§7-3) 같은 메커니즘
 자체가 존재하지 않는다.
+
+⚠️**HYK-494 후속 수리(P2-4)**: 이 탐침(`runner-lock-race-probe.mjs`)의
+출력 칸 `lost`는 REVIEW-3R이 지적할 때까지 상수 `0`이었다 -- 재지 않은
+값을 잰 것처럼 보였다. childScript는 이제 `releaseRunnerLock`의 실제
+반환값(`lockLost`)을 담아 돌리고, `runCell`은 그 값을 모아 돌린다. 새
+`lock-lost` 칸(진입자가 자기 잠금을 쥔 "뒤" 직접 다른 lockId로 덮어써
+해제 시 lockLost:true가 되게 하는 자기 침입 흉내)으로 `lost`가 실제로
+0이 아닌 값을 낼 수 있음을 증명했다(1 진입자 5회 실행 → `lost=5`) --
+이 칸은 상호 배제 자체를 주장하지 않는다(외부가 L을 직접 덮어쓰면 당연히
+성립하지 않는다, §9-2) -- "상수가 아니라 측정값"이라는 사실만 증명한다.
 
 ## 8. 중첩 실행 교착 금지
 
@@ -354,6 +440,20 @@ mjs`)이 별도로 건다. `release()`는 heartbeat 사이드카(§12)도 함께
 파일만 갱신하므로, §7-5의 구조적 보장과 맞물려 이 사고의 범위는
 "쓸모없는 파일 하나가 좀 더 오래 남는다" 정도로 좁혀진다).
 
+### 9-3. HYK-494 후속 수리(P2-7) — 포기한 대기자도 자기 heartbeat 파일을 지운다
+
+대기자는 매 폴 `refreshOwnAliveFile`로 `L.alive.<자기 lockId>`를 쓴다
+(§7-4) -- 그런데 그 대기가 시간 초과(`timedOut:true`)로 끝나거나, 바쁨
+상한을 넘겨 throw로 끝나면(§3 `BUSY_RETRY_TIMEOUT_MS`, 그리고 이번
+라운드가 같은 모양으로 추가한 회수권 읽기 busy의 bounded throw) 그
+파일을 안 지우고 있었다 -- LOCK_TIMEOUT(또는 busy throw) 1회마다 잠금
+디렉터리(운영 = 홈)에 파일 1개가 누수됐다(fix1이 "정상 해제" 경로만
+고쳤고, "못 잡고 포기" 경로는 그대로 남아 있었다). `acquireRunnerLock`
+은 이제 `runAcquireLoop`를 try/catch로 감싸 결과가 `acquired:false`면
+(또는 catch에서 다시 던지기 전) 자기 heartbeat 파일을 best-effort로
+지운다 -- 공간 누수일 뿐 불변식과는 무관하다(§7-3의 회수권 청소와 같은
+근거).
+
 ### 9-1. ⚠️정직 한계 — 신호 타이밍
 
 이 파일의 호출 그래프는 전부 동기 차단(`spawnSync`/`Atomics.wait`)이다.
@@ -387,6 +487,24 @@ full-2x)은 한 글자도 바뀌지 않는다.
 경로였다. 3R의 `HEARTBEAT_SCRIPT`/`defaultSpawnHeartbeat`는 **`alivePath`
 (`L.alive.<token>`)만 인자로 받는다** — `lockPath` 자체를 모른다, 구조
 적으로 L을 건드릴 길이 없다(§7-5).
+
+⚠️**HYK-494 후속 수리(CI-1, master CI 541bc95 enforce 빨강 원인 ①)**:
+`HEARTBEAT_SCRIPT`가 `alivePath`에 쓰는 방식 자체가 비원자적이었다 --
+`fs.writeFileSync(alivePath, ...)`는 `open(O_TRUNC)`으로 먼저 비운 뒤
+별도의 `write()`로 내용을 채우는 두 단계다. 그 사이에(틀림없이 아주
+좁은 창이지만) 다른 프로세스가 `alivePath`를 읽으면 빈 파일을 본다 --
+`hyk494-runner-lock.test.mjs:1379`의 `JSON.parse` "Unexpected end of
+JSON input"이 정확히 이 모양이다(읽는 "자리"는 L이 아니라 이 alive
+파일 -- F8 수리로 사이드카는 L 자체를 열지 않으므로 L이 빈 순간이 될
+길은 없다, §3의 createExclusive가 이미 "전체 내용을 tmp에 다 쓴 뒤
+link"로 닫은 자리와 같은 성격의 구멍이 이 파일에만 남아 있었다).
+자연 타이밍 재현은 이 머신에서 50회 중 0회(창이 실재하지만 매우
+좁다) -- seam으로 그 열림(open-truncate)과 닫힘(write) 사이를 인위적
+으로 넓혀 결정론적으로 재현했다(4/4, 정확히 같은 오류 문자열). 수리는
+createExclusive와 같은 관용구 -- tmp 이름에 전체 내용을 다 쓴 뒤
+`renameSync`(대상이 있으면 덮어쓴다, §3-1 ④ 실측)로 `alivePath` 위에
+교체한다 -- 빈 내용 순간이 전혀 없다. 수리 뒤 같은 seam 재현은 4/4
+모두 `emptyReadObserved:false`.
 
 - **간격·기한(판정 23:5x §1 ⑴)**: `HEARTBEAT_INTERVAL_MS`(10초, 2R의
   30초에서 교체) · `HEARTBEAT_STALE_MS`(3분, 2R의 90초에서 교체) — N·M
@@ -457,3 +575,133 @@ full-2x)은 한 글자도 바뀌지 않는다.
    고아 회수가 아예 없다. Node가 이 플래그를 실제로 노출/통과시키는지는
    미확인이다 — 확인 전에는 채택하지 않는다(3R 밖의 리서치 항목, PM
    설계 (i)).
+9. **HYK-494 후속 라운드 발견(범위 밖, 고치지 않음)** — `cleanupAfterReclaim`
+   의 접두 매칭(`reclaim.<lockId>.`)이 다른 회수권자의 **아직 link되지
+   않은** `reclaim.<lockId>.<k>.tmp.<suffix>` 이름에도 걸린다(그 tmp
+   이름 자체가 그 접두로 시작하므로) — 한 회수권자의 청소가 다른
+   회수권자의 진행 중인 tmp 파일을 지워 그 쪽의 `linkSync`를 ENOENT로
+   실패시킬 수 있다(이번 라운드의 D2 시험이 세 번째 삽입점에서 실측).
+   이 라운드가 받은 계약(P2-1~P2-7·CI-1) 밖이라 고치지 않았다 — 다음
+   라운드 후보.
+10. **HYK-494 후속(followup-3) P1-1 수리의 상한은 20분에서 30초로 줄었을
+    뿐, "영원한 보장"이 아니다** — 재확인 읽기가 `BUSY_RETRY_TIMEOUT_MS`
+    (30초)를 넘겨 계속 실패하면(이 머신에서는 못 재현했다, 리뷰 1R의
+    실제 EBUSY도 400~2000ms 수준) 여전히 throw한다(정직 > 낙관, §7-3
+    기존 posture 그대로). 다만 그 throw는 **보이는 빨강**이고,
+    20분짜리 조용한 교착보다 사람이 훨씬 빨리 알아챈다.
+11. **HYK-494 후속(followup-3) P2-1 수리는 best-effort다, "tmp 0 보장"이
+    아니다** — 이 라운드 실측(real PowerShell sharing-violation, 40회
+    충돌 유도): 수리 뒤에도 드물게(5~~8회 시도 중 0~~1개) tmp가 남는
+    회차를 봤다(원인 미확인 — write 성공 뒤 아무 로그도 남기지 못한 채
+    사라진 자리, 〔못쟀다〕). 되돌리면(catch에서 unlink를 빼면) 같은
+    조건에서 80개 넘게 남는다(이 라운드 실측, 5회 중 81~83개) — 그래서
+    새 시험(`hyk494-runner-lock.test.mjs`의 "leaks almost no tmp
+    files")은 "정확히 0"이 아니라 "압도적으로 적음"(문턱 3) 을 기대값
+    으로 삼는다.
+12. **HYK-494 후속(followup-3) P1-1의 "다른 대기자 1명을 둔 실제 프로세스"
+    칸은 실제 OS EBUSY가 아니라 주입된(synthetic) EBUSY다** — 검토 1R은
+    실제 PowerShell `FileShare.None`으로 진짜 공유 위반을 일으켰지만,
+    이 라운드의 실제-프로세스 회귀 칸은 (기존 단위 시험들과 같은 관례로)
+    자식 스크립트 안에서 두 번째 `L` 읽기에 `err.code="EBUSY"`인 합성
+    오류를 주입한다 — 실제 자식 프로세스 2개가 진짜로 경합하는 것은
+    맞지만(〔직접〕), 오류 자체의 "실제 OS성"은 검토 1R만큼 실측하지
+    않았다(〔못쟀다〕, universal_claim_discipline). P2-1 칸은 반대로
+    실제 PowerShell 공유 위반을 쓴다(〔직접〕).
+
+## 14. HYK-494 후속 5R — CI-② 간헐 수리(시계 · 원인 기록 · 신원) + P2-a~c
+
+(검토 2R §2 ⓓ · §3, 책임자 판정 2026-11-09 19:0x)
+
+### 14-1. CI-② — PR #357 master 기반 CI 3/5 빨강, 이 머신 0/690 미재현
+
+검토 2R이 소스 판독으로 적은 원인 후보 4개(§2 ⓓ) 중 1~3을 이 라운드가
+고친다(4번 좀비는 범위 밖, 기록만 — 아래 14-5).
+
+1. **원인 후보 1(시계)**: `hyk494-runner-lock.test.mjs`의 3-way 칸들은
+   자식마다 `timeoutMs: 5000`(또는 8000) 고정 상한으로 "결국 획득"을
+   판정했다 — CI 중첩 스윕(`hyk359-ambient-env-regression.test.mjs:136`
+   `NESTED_SWEEP_CONCURRENCY=4`)의 CPU 과포화에서 굶은 자식이 그 안에
+   못 잡으면 거짓 RED다. **수리**: `GENEROUS_EVENTUAL_ACQUIRE_TIMEOUT_MS
+= 20_000`(수십 초)로 올려 cold-start · orphan(이 칸) · dead-ticket ·
+   staggered-alive · pid-reuse 5개 3-way 칸에 동일 적용(2-way reclaim과
+   5-way cold-start는 "3-way" 범위 밖, 손대지 않음). `wx` 배제 위반 0과
+   "3자 모두 획득" 단언은 그대로(단언 약화 아님) — 상한만 "결국"의
+   정의를 좁혀 거짓 RED를 줄인다. RED-first 확인(〔직접〕, 2026-11-09,
+   base 20b701f 위 2-프로세스 단순화 재현): 실제 홀더가 6000ms 쥐는
+   동안 고정 5000ms 획득자는 결정적으로 `timedOut:true`(`waitMs:5003`),
+   20000ms로 올리면 같은 조건에서 `acquired:true`(`waitMs:5972`)로
+   뒤집혔다.
+2. **원인 후보 2(원인 기록 부재)**: `spawnReclaimRaceChild`가
+   `stdio:"ignore"`+무던지기 않는 `error` 리스너 없이, 자식이 비정상
+   종료하면(`outPath` 미생성) `exit` 처리기의 `JSON.parse(readFileSync
+(...))`가 ENOENT를 그대로 던졌다(RED-first 확인: 2026-11-09, 자식을
+   50ms 뒤 SIGKILL하자 처리기가 던진 ENOENT가 프로세스 전체를 크래시
+   시켰다 — 원인 없는 크래시, 어느 자식이 왜인지 CI 로그에 안 남는다).
+   **수리**: stderr를 파이프로 받고 `error` 이벤트를 흡수하고, 읽기
+   실패를 던지지 않고 `{missingOutput:true, exitCode, signal,
+spawnErrorMessage, readErrorMessage}`로 수집한다. 모든 호출(§10b/
+   §10b-2 전체)이 `elapsedMs`/`stderrTail`을 결과에 함께 싣고, 실패
+   단언 메시지는 `JSON.stringify(results)`로 회차별 3자 결과·경과
+   ms·stderr 꼬리를 그대로 보여준다.
+3. **원인 후보 3(죽은 pid 재사용)**: 3-way orphan/dead-ticket 칸이
+   시드한 죽은 pid 고아 내용에 `procStart`가 없었다(`undefined`,
+   `!= null` 비교에서 `null`과 동치) — CI 중첩 스윕에서 그 pid가 다른
+   살아있는 프로세스로 재사용되면 `judgeOwner`/`identityIsDead`
+   (`runner-lock.mjs:268-282`, §7-1)가 "신원 모름 → ALIVE"로 오판해
+   아무도 회수하지 않고 3자 모두 시계 상한까지 간다. **수리**: 고아
+   내용에 비-null 자리표시자 `procStart`(예: `dead-orphan-seed-${trial}`)
+   를 심어, 재사용된 pid의 실제 신원과 반드시 불일치하게 만든다 →
+   "pid-reused"(dead)로 떨어진다. pid가 재사용되지 않은 보통 경우는
+   `isPidAliveFn`이 그보다 먼저 false를 돌려 "pid-dead"로 즉시 판정
+   하므로(:306) 이 자리표시자는 그 경로에 영향이 없다 — pid-reuse-
+   simulated 칸의 `"not-this-process's-real-identity"`와 같은 기법
+   (fixture 현실화).
+4. **이 머신에서는 CI-②를 재현하지 못했다(0/690, 검토 2R과 같은
+   값)** — 위 세 수리는 모두 소스 판독 기반이고(〔추론〕), **Linux
+   CI·중첩 스윕 실부하는 〔못쟀다〕**(WSL 0, universal_claim_discipline).
+   증명은 다음 PR CI(책임자 판독)가 맡는다.
+
+### 14-2. P2-a — `:544-547`(5R 라인 번호, 3R `:545-547`과 같은 칸) 오진 문구
+
+"청소 전 호출" 필터(`p.startsWith(lockDirPrefix) && !p.includes(".tmp.")`)
+는 요청자 자신의 `L.alive.<자기 lockId>` 삭제(P2-7 수리)까지 "청소"로
+센다. 교착 류 변이에서도 먼저 걸리는 단언이 "P2-3 위반"이라는 엉뚱한
+문구가 되어 오진을 유발한다(RED 자체는 맞다). **수리**: 필터를 그대로
+두고, `acquired`/`timedOut` 단언을 먼저 두는 순서로 바꿔 진짜 결함이
+먼저·정확한 문구로 드러나게 한다(review가 허용한 두 대안 중 하나).
+
+### 14-3. P2-b — `:696`(3R 라인) "C1이 회수권을 먼저 잡았는지" 미확인
+
+C2가 15ms 뒤에 뜨고, 주입은 "C1의 2번째 L 읽기"에 건다 — C2가 먼저
+ticket #1을 잡는 회차에서는 C1의 주입이 자기-회수권-재확인이 아닌
+다른 자리(경합 중 L 읽기)에 떨어져도 둘 다 결국 획득해 통과한다(헛
+시험은 아니지만 "자기 분기"를 탄 회차 수를 안 세었다). **수리**: 주입
+순간(`lockReadCount===2`) 자기 이름(`process.pid`)의 reclaim ticket이
+이미 존재하는지 디렉터리에서 직접 확인해 `selfBranchHit`을 결과에
+싣고, 바깥 시험이 `selfBranchTrials >= 1`을 단언한다.
+
+### 14-4. P2-c — 사이드카 stop()의 kill 경합 tmp 잔존 (release 경로에서 best-effort 정리)
+
+`startLockHeartbeat`의 `stop()`(`child.kill()`)이 `HEARTBEAT_SCRIPT`의
+write(tmp)·rename(alivePath) 사이를 끊으면 `${alivePath}.tmp.*`가
+남는다(SIGTERM은 그 스크립트의 catch를 거치지 않는다) — 검토 2R 실측:
+동시 읽기 0·1ms 간격·50회 중 9회차에 1개. **수리**: `releaseRunnerLock`
+의 기존 alive-file 청소 자리(`cleanupAliveFile`)에
+`cleanupOwnAliveTmpLeftovers`를 추가해, "자기 token" 접두(
+`${basename(alivePath)}.tmp.`)만 best-effort로 쓸어 담는다(남의
+사이드카 tmp는 무접촉) — release는 보통 stop()보다 뒤에 불려 kill
+신호가 이미 정착할 시간이 있다. **정직 한계**: 이것도 "정확히 0 보장"
+이 아니다(§13 11번과 같은 posture) — RED-first는 kill-타이밍의 실제
+결과물(끊긴 write가 남기는 정확히 그 모양의 tmp 파일)을 직접 심어
+확인했다(주입, 〔직접〕 아님) — 실제 kill-레이스 자체는 OS 스케줄링에
+좌우되는 순수한 운이라 결정론적 RED-first 재료로 쓰지 않았다.
+
+### 14-5. 범위 밖(기록만)
+
+- **원인 후보 4(좀비)**: `process.kill(pid,0)`은 좀비도 살아 있다고
+  본다 — 고아 pid는 `spawnSync`가 회수하므로 해당 가능성은 낮다고
+  추론했지만(§7-1), 이 라운드도 고치지 않았다. 다음 라운드 후보.
+- `cleanupAfterReclaim` 접두 매칭 틈(§13 9번, 설계 §7-3) — 무변.
+- PM 설계 (d) 불변식 재심 — 이 라운드는 시험의 시계 의존·원인 기록·
+  fixture만 고쳤고, `runner-lock.mjs`의 §7 판정 로직(judgeOwner/
+  identityIsDead 자체) 변경은 P2-c(release 경로 추가) 외에는 0이다.
