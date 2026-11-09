@@ -35,6 +35,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   BUSY_RETRY_TIMEOUT_MS,
   HEARTBEAT_INTERVAL_MS,
+  HEARTBEAT_SCRIPT,
   HEARTBEAT_STALE_MS,
   LOCK_POLL_INTERVAL_MS,
   LOCK_WAIT_TIMEOUT_MS,
@@ -501,7 +502,17 @@ test("acquireRunnerLock: a reclaim ticket that is ENOENT (gone by read time, tho
 // -- §4b-3: HYK-494 후속 P2-3 -- cleanup only follows a CONFIRMED read of L,
 // never merely an attempt (design (d) "청소 = L 삭제 뒤") --------------------
 
-test('acquireRunnerLock: when the post-ticket reread of L fails (transient, non-ENOENT), the reclaim ticket (and the dead owner\'s bookkeeping) are NOT cleaned up -- cleanup only follows a CONFIRMED read of L (P2-3, design (d) "청소 = L 삭제 뒤")', () => {
+// HYK-494 후속(followup-3) P1-1: 검토 1R이 교착으로 판정한 바로 그 시험
+// (base 787b95e에서 `git show`로 뜬 원문 대비 직접 재현: 고친 전 코드로는
+// `acquired:false timedOut:true` + 회수권 생존 그대로였다). 기대값을
+// 바꾼다 -- "청소 0"을 "영원히 청소 안 함"이 아니라 "재확인(=L 삭제)이
+// 확정되기 「전」에는 청소 호출이 0회"로 읽는다(근거 1줄: "영원히 청소
+// 0 + 결국 획득"은 모순이다 -- L이 끝내 안 지워지면 createExclusive가
+// 영원히 EEXIST라 획득 자체가 성립할 수 없다). 그 전제 위에서 "결국
+// 획득(교착 0)"을 새 기대값으로 삼는다 -- 다음 라운드가 "자기 자신의"
+// 살아 있는 회수권 k를 재확인·삭제 재시도의 트리거로 쓰기 때문이다(P1-1
+// 수리, resolveContendedStep의 isSelf 분기).
+test("acquireRunnerLock: when the post-ticket reread of L fails once (transient, non-ENOENT), cleanup is skipped for THAT attempt (confirmed L-delete required, P2-3 unchanged) -- but the next round retries the recheck/delete on the SAME (now self-held) reclaim ticket and the lock is eventually acquired, no deadlock (P1-1 fix, HYK-494 followup-3; previously this exact shape timed out, reproduced directly against base 787b95e)", () => {
   const dir = freshLockDir();
   const lockPath = join(dir, "r.lock");
   try {
@@ -523,30 +534,214 @@ test('acquireRunnerLock: when the post-ticket reread of L fails (transient, non-
       }
       return realReadFileFn(p, enc);
     };
+    // P2-3 불변식을 "최종 상태"가 아니라 "호출 순서"로 직접 관측한다 --
+    // L 자체의 unlink(=재확인 성공 확정)보다 「먼저」 alive/reclaim-ticket
+    // 청소가 일어나면 위반이다. createExclusive 자신의 tmp 파일 뒷정리
+    // (`.tmp.` 접미)는 이 불변식과 무관하므로 제외한다.
+    const lockDirPrefix = `${lockPath}.`;
+    const cleanupCallsBeforeReconfirm = [];
+    let reconfirmed = false;
+    const unlinkFn = (p) => {
+      const isCleanupTarget =
+        p.startsWith(lockDirPrefix) && !p.includes(".tmp.");
+      if (isCleanupTarget && !reconfirmed) cleanupCallsBeforeReconfirm.push(p);
+      if (p === lockPath) reconfirmed = true;
+      return unlinkSync(p);
+    };
     const r = acquireRunnerLock({
       lockPath,
       pid: process.pid,
       startedAtMs: 1,
-      timeoutMs: 80,
+      timeoutMs: 2000,
       pollIntervalMs: 10,
       readFileFn,
+      unlinkFn,
+      env: cleanEnv(),
+    });
+    assert.deepEqual(
+      cleanupCallsBeforeReconfirm,
+      [],
+      `P2-3 위반: L 삭제(재확인 성공)보다 먼저 청소가 일어났다 -- ${JSON.stringify(cleanupCallsBeforeReconfirm)}`,
+    );
+    assert.equal(
+      r.acquired,
+      true,
+      "HYK-494 followup-3 P1-1: must eventually acquire, not deadlock on our own live reclaim ticket (previously timedOut:true against this exact shape)",
+    );
+    assert.equal(r.timedOut, false);
+    assert.equal(
+      existsSync(`${lockPath}.reclaim.O-reread-token.1`),
+      false,
+      "the reclaim ticket is eventually cleaned up once the recheck/delete retry succeeds -- it cannot survive forever and still have let us acquire",
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// HYK-494 후속(followup-3) P2-3(참고 칸 정리): claim-again이 state.
+// reclaimedOrphan=true를 세운 뒤, 그 사이 「정말로 살아 있는」 새 주인이
+// L을 먼저 잡아 우리가 결국 시간 초과로 포기하는 경우 -- 영수증에
+// `reclaimedOrphan:true`와 `timedOut:true`가 함께 남으면 오독 소지다
+// (검토 1R §3 P2-3). linkFn을 가로채 "우리의 두 번째 createExclusive(L)
+// 시도"에서 결정론적으로 새 ALIVE 소유자를 L에 심어, 이후 매 폴 verdict가
+// ALIVE로 떨어지게 만든다(getStartIdentityFn을 null-고정해 신원 질의
+// 자체의 느림/비결정성을 제거).
+test("acquireRunnerLock: a timed-out result never reports reclaimedOrphan:true, even if an earlier poll round DID claim-again before a genuinely alive new owner beat us to L (P2-3 receipt-honesty, HYK-494 followup-3)", () => {
+  const dir = freshLockDir();
+  const lockPath = join(dir, "r.lock");
+  try {
+    const deadPid = spawnSync(process.execPath, ["-e", "process.exit(0)"]).pid;
+    writeFileSync(
+      lockPath,
+      JSON.stringify({ pid: deadPid, lockId: "O-race-token", procStart: null }),
+    );
+    const realLinkFn = (src, dest) => linkSync(src, dest);
+    let lockLinkAttempts = 0;
+    const linkFn = (src, dest) => {
+      if (dest === lockPath) {
+        lockLinkAttempts += 1;
+        if (lockLinkAttempts === 2) {
+          // "누가 먼저 잡았다" 흉내 -- 우리가 claim-again한 바로 다음
+          // 라운드에, 우리가 아닌 실제 ALIVE 소유자(이 테스트 프로세스
+          // 자신의 pid, 하지만 전혀 다른 lockId)가 L을 이미 채워 둔
+          // 것처럼 만든다. createExclusive는 그 뒤 실제 link를 시도해
+          // EEXIST로 자연히 실패한다.
+          writeFileSync(
+            lockPath,
+            JSON.stringify({
+              pid: process.pid,
+              lockId: "O-newowner-token",
+              procStart: null,
+            }),
+          );
+        }
+      }
+      return realLinkFn(src, dest);
+    };
+    const r = acquireRunnerLock({
+      lockPath,
+      pid: process.pid + 1000, // 우리 자신과 겹치지 않는 가짜 "요청자" pid.
+      startedAtMs: 1,
+      timeoutMs: 60,
+      pollIntervalMs: 5,
+      linkFn,
+      getStartIdentityFn: () => null, // 신원 모름 -> judge가 "낡음이어도 ALIVE".
       env: cleanEnv(),
     });
     assert.equal(
-      r.acquired,
-      false,
-      "must not succeed by cleaning up a reclaim ticket whose L-delete was never confirmed",
-    );
-    assert.equal(r.timedOut, true);
-    assert.equal(
-      readFileSync(lockPath, "utf8"),
-      originalContent,
-      "L must remain byte-for-byte unchanged -- the one unlink site was never confirmed to have run",
-    );
-    assert.equal(
-      existsSync(`${lockPath}.reclaim.O-reread-token.1`),
+      r.timedOut,
       true,
-      "the reclaim ticket must survive -- cleanup must follow a confirmed L deletion, not merely an attempt",
+      "the genuinely-alive new owner must win -- we time out",
+    );
+    assert.equal(r.acquired, false);
+    assert.equal(
+      r.reclaimedOrphan,
+      false,
+      "a timed-out result must never carry reclaimedOrphan:true, even though an earlier round DID claim-again before losing the race",
+    );
+    assert.equal(r.reclaimReason, null);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// HYK-494 후속(followup-3) P1-1: 다른 대기자 1명을 둔 「실제 프로세스」
+// 칸(product_scope 명시) -- C1이 자기 회수권을 만든 직후 L의 재확인
+// 읽기에서 1회 실패(주입, 검토 1R의 실제 PowerShell EBUSY와 같은 자리를
+// 겨눈다 -- 오류 코드도 EBUSY로 맞춘다. 〔직접〕이 아니라 주입임을 그대로
+// 적는다: 이 칸은 "실제 OS 공유 위반"이 아니라 "실제 두 프로세스 경합+
+// 그 자리의 주입된 비-ENOENT 실패"다, universal_claim_discipline) --
+// C2는 아무 주입도 없는 평범한 두 번째 대기자다. 수리 전(base 787b95e)
+// 이면 둘 다 LOCK_WAIT_TIMEOUT_MS까지 멈춘다(교착) -- 수리 후에는 둘 다
+// 결국 획득해야 한다.
+function p1SelfReclaimDeadlockChildScript() {
+  return [
+    `import { acquireRunnerLock, releaseRunnerLock } from ${JSON.stringify(RUNNER_LOCK_URL)};`,
+    `import { readFileSync, writeFileSync } from "node:fs";`,
+    `const [lockPath, outPath, timeoutMs, pollIntervalMs, injectFailure] = process.argv.slice(2);`,
+    `const realReadFileFn = (p, enc) => readFileSync(p, enc);`,
+    `let lockReadCount = 0;`,
+    `const readFileFn = injectFailure !== "1" ? realReadFileFn : (p, enc) => {`,
+    `  if (p === lockPath) {`,
+    `    lockReadCount += 1;`,
+    `    if (lockReadCount === 2) {`,
+    `      const err = new Error("HYK-494 followup-3 real-process repro: injected transient EBUSY on L reread");`,
+    `      err.code = "EBUSY";`,
+    `      throw err;`,
+    `    }`,
+    `  }`,
+    `  return realReadFileFn(p, enc);`,
+    `};`,
+    `const r = acquireRunnerLock({ lockPath, pid: process.pid, startedAtMs: Date.now(), timeoutMs: Number(timeoutMs), pollIntervalMs: Number(pollIntervalMs), readFileFn, env: {} });`,
+    `if (r.acquired) releaseRunnerLock({ lockPath, lockId: r.lockId });`,
+    `writeFileSync(outPath, JSON.stringify({ pid: process.pid, acquired: r.acquired, timedOut: r.timedOut, reclaimedOrphan: r.reclaimedOrphan }));`,
+  ].join("\n");
+}
+
+function spawnP1Child({ scriptPath, args }) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [scriptPath, ...args], {
+      stdio: "ignore",
+      env: cleanEnv(),
+    });
+    child.on("exit", () => {
+      readJsonWithRetry(args[1]).then(resolve, reject);
+    });
+  });
+}
+
+const P1_DEADLOCK_TRIALS = 3;
+
+test(`GREEN (P1-1 교착 재현, 다른 대기자 1명을 둔 실제 프로세스): ${P1_DEADLOCK_TRIALS} trials -- C1 hits an injected transient (non-ENOENT) reread failure right after claiming its own reclaim ticket, C2 is a plain second waiter racing the same dead-owner orphan -- both must eventually acquire, zero deadlocks (P1-1 fix, HYK-494 followup-3)`, async () => {
+  const dir = freshLockDir();
+  try {
+    const scriptPath = join(dir, "p1-child.mjs");
+    writeFileSync(scriptPath, p1SelfReclaimDeadlockChildScript());
+    let deadlocks = 0;
+    for (let trial = 0; trial < P1_DEADLOCK_TRIALS; trial += 1) {
+      const lockPath = join(dir, `p1-${trial}.lock`);
+      const deadPid = spawnSync(process.execPath, [
+        "-e",
+        "process.exit(0)",
+      ]).pid;
+      writeFileSync(
+        lockPath,
+        JSON.stringify({
+          pid: deadPid,
+          lockId: `O-p1-${trial}`,
+          procStart: null,
+        }),
+      );
+      const out1 = join(dir, `p1-out-${trial}-1.json`);
+      const out2 = join(dir, `p1-out-${trial}-2.json`);
+      const c1 = spawnP1Child({
+        scriptPath,
+        args: [lockPath, out1, "6000", "20", "1"],
+      });
+      await new Promise((res) => setTimeout(res, 15));
+      const c2 = spawnP1Child({
+        scriptPath,
+        args: [lockPath, out2, "6000", "20", "0"],
+      });
+      const [a, b] = await Promise.all([c1, c2]);
+      if (!a.acquired || !b.acquired || a.timedOut || b.timedOut) {
+        deadlocks += 1;
+      }
+      assert.ok(
+        a.acquired && b.acquired,
+        `trial ${trial}: both C1(${JSON.stringify(a)}) and C2(${JSON.stringify(b)}) must eventually acquire -- no deadlock`,
+      );
+      assert.equal(
+        existsSync(lockPath),
+        false,
+        `trial ${trial}: whichever finished last must leave L released`,
+      );
+    }
+    assert.equal(
+      deadlocks,
+      0,
+      `${deadlocks}/${P1_DEADLOCK_TRIALS} trials deadlocked -- 〔직접〕 finite sample, this machine, this run, injected (not real-OS) EBUSY`,
     );
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -2080,6 +2275,131 @@ test("startLockHeartbeat: the sidecar NEVER touches the lock file L itself -- on
     } finally {
       heartbeat.stop();
     }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// -- HYK-494 후속(followup-3) CI-1: 결정적 회귀 그물(문자열 anchor,
+// 타이밍 무관) -- 검토 1R §2 ⓒ·§3 P2-2가 권한 "사이드카 스크립트 문자열에
+// rename 관용구가 있는지" 그대로. 실제 사이드카 자식을 띄우는 F8/heartbeat
+// 시험들은 타이밍에 기대지만, 이 칸은 되돌림 변이(④)를 스위트 안에서
+// 100% 결정론적으로 RED로 만든다.
+test("HYK-494 followup-3 CI-1 regression (deterministic anchor): the sidecar heartbeat script writes the alive file via tmp-write-then-rename, never a direct in-place write -- guards the atomic-write fix without depending on real OS timing (P2-2)", () => {
+  assert.match(
+    HEARTBEAT_SCRIPT,
+    /fs\.renameSync\(tmp,\s*alivePath\)/,
+    "the sidecar must rename a fully-written tmp file onto alivePath (atomic replace)",
+  );
+  assert.doesNotMatch(
+    HEARTBEAT_SCRIPT,
+    /fs\.writeFileSync\(alivePath,/,
+    "the sidecar must never write the alive file in place (non-atomic -- this is the exact CI-1 regression shape, master CI 541bc95 enforce red)",
+  );
+});
+
+// -- HYK-494 후속(followup-3) P2-1: real-process tmp-leak-on-rename-failure
+// regression -- 검토 1R §2 ⓒ 실측(1ms/20ms 간격 50회 중 각 2108/425개 tmp
+// 잔존)과 같은 자리, 실제 PowerShell로 real Windows 공유 위반을 일으킨다.
+function findPsExeForSidecarTest() {
+  for (const exe of ["powershell", "pwsh"]) {
+    try {
+      const r = spawnSync(
+        exe,
+        ["-NoProfile", "-NonInteractive", "-Command", "1"],
+        {
+          timeout: 5000,
+        },
+      );
+      if (!r.error && r.status === 0) return exe;
+    } catch {
+      // try next candidate.
+    }
+  }
+  return null;
+}
+
+// 정직 한계(이 라운드 실측, 〔직접〕): best-effort unlink는 "0 보장"이
+// 아니다 -- 이 머신에서 수리 뒤에도 드물게 1개가 남는 회차를 봤다(예:
+// write 성공 뒤 rename 「전」 killed-mid-tick 류가 아니라, 이 실제 자식
+// 프로세스가 로그 한 줄도 못 남긴 채 사라진 자리 -- 원인 불명, 설계
+// 문서 §12 "best-effort" 문구 그대로, 이 PR이 "완전 봉쇄"를 주장하지
+// 않는다). 반면 수리를 되돌리면(catch에서 unlink를 빼면) 같은 조건에서
+// 80개 넘게 남는다(이 라운드 실측, 5회 중 81~83개). 그래서 "정확히 0"이
+// 아니라 "압도적으로 적다"는 문턱으로 수리 유무를 가른다 -- 되돌림
+// 변이는 여전히 이 문턱에서 100% RED다.
+test("startLockHeartbeat: a real sidecar racing a real Windows sharing-violation on its own alive-file rename leaks almost no tmp files (P2-1 fix, HYK-494 followup-3 -- 검토 1R 실측: 수리 전 1ms/20ms 간격 50회 중 각 2108/425개 잔존; 이 라운드 실측: 수리 되돌림이면 같은 조건에서 80개+ 잔존, 수리 뒤는 0~1개)", async (t) => {
+  const psExe = findPsExeForSidecarTest();
+  if (!psExe) {
+    t.skip(
+      "no powershell/pwsh executable on PATH -- cannot induce a real sharing violation, 〔못쟀다〕",
+    );
+    return;
+  }
+  const dir = freshLockDir();
+  const lockPath = join(dir, "r.lock");
+  const aliveBasename = "r.lock.alive.p21-token";
+  const alivePath = join(dir, aliveBasename);
+  const holdScriptPath = join(dir, "hold.ps1");
+  writeFileSync(
+    holdScriptPath,
+    [
+      "$path = $args[0]",
+      "$iterations = [int]$args[1]",
+      "$holdMs = [int]$args[2]",
+      "$gapMs = [int]$args[3]",
+      "for ($i = 0; $i -lt $iterations; $i++) {",
+      "  try {",
+      "    $fs = [System.IO.File]::Open($path, 'Open', 'Read', 'None')",
+      "    Start-Sleep -Milliseconds $holdMs",
+      "    $fs.Close()",
+      "  } catch {}",
+      "  Start-Sleep -Milliseconds $gapMs",
+      "}",
+    ].join("\n"),
+  );
+  writeFileSync(alivePath, JSON.stringify({ aliveAtMs: 0 }));
+  const holder = spawn(
+    psExe,
+    [
+      "-NoProfile",
+      "-NonInteractive",
+      "-File",
+      holdScriptPath,
+      alivePath,
+      "40",
+      "15",
+      "5",
+    ],
+    { stdio: "ignore" },
+  );
+  const heartbeat = startLockHeartbeat({
+    lockPath,
+    token: "p21-token",
+    pid: process.pid,
+    intervalMs: 10,
+  });
+  // holder가 "자기 iteration 수만큼" 끝낼 때까지 기다린 뒤(고정 시간이
+  // 아니라 실제 종료 이벤트로), 몇 번의 "깨끗한"(충돌 없는) 틱이 더
+  // 지나가게 짧게 버퍼를 둔다 -- 그 다음에야 스캔한다. heartbeat.stop()
+  // (= child.kill())은 스캔 「뒤」에만 부른다 -- kill이 틱 중간을 끊는
+  // 것은 이 수리(rename 실패 뒤 unlink)와 무관한 별개의, 더 희귀한
+  // 경합이라 섞지 않는다(근거: kill 전에 스캔해도 이 머신에서 드물게
+  // 1개가 남는 것을 관찰했다 -- 아래 문턱이 그 한계를 반영한다).
+  await new Promise((resolve) => {
+    holder.on("exit", resolve);
+    holder.on("error", resolve);
+  });
+  await new Promise((res) => setTimeout(res, 150));
+  const leftoverTmp = readdirSync(dir).filter((name) =>
+    name.startsWith(`${aliveBasename}.tmp.`),
+  );
+  heartbeat.stop();
+  try {
+    assert.ok(
+      leftoverTmp.length <= 3,
+      `P2-1 위반(또는 수리 되돌림): rename 실패 뒤 tmp 파일이 너무 많이 남았다(${leftoverTmp.length}개, 문턱 3) -- ${JSON.stringify(leftoverTmp)}`,
+    );
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

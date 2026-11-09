@@ -397,14 +397,50 @@ function cleanupAfterReclaim({ lockPath, lockId, unlinkFn, readdirFn }) {
   }
 }
 
+// Pulled out of resolveContendedStep below -- the "재확인 읽기 -> 성공하면
+// lockId 일치 시 unlink L, 그 뒤에만 청소" 단계(§(d) 의사 코드 "reread ="
+// 그대로). 새 회수권을 막 만든 바로 다음(기존 경로)과, 다음 라운드에
+// "자기 자신의" 살아 있는 회수권 k를 다시 쥔 채로 재시도하는 경로(HYK-494
+// 후속 P1-1 수리, 아래) 둘 다 이 단계를 그대로 재사용한다. 반환값은
+// reread가 성공했는지(reread.ok) -- 자기-회수권 재시도 경로만 그 값으로
+// "claim-again"과 "바쁨 재시도" 중 무엇을 할지 고른다(기존 경로는 무조건
+// claim-again, 무회귀).
+function rereadLockAndMaybeCleanup({
+  lockPath,
+  content,
+  readFileFn,
+  unlinkFn,
+  readdirFn,
+}) {
+  const reread = readLockContentResult(readFileFn, lockPath);
+  if (reread.ok) {
+    if (reread.content?.lockId === content.lockId) {
+      try {
+        unlinkFn(lockPath);
+      } catch {
+        // L이 그 사이 사라졌다면(또 다른 경합) 유일한 삭제 지점이 이미 비어
+        // 있다는 뜻 -- 상태는 우리가 원하는 대로다(L에 O가 없다), 삼킨다.
+      }
+    }
+    // L 삭제 "뒤"에만 청소한다(§(d) 순서 그대로).
+    cleanupAfterReclaim({
+      lockPath,
+      lockId: content.lockId,
+      unlinkFn,
+      readdirFn,
+    });
+  }
+  return reread.ok;
+}
+
 // §(d) 한 번의 경합 라운드가 orphan O를 만나 취하는 다음 단계. 반환:
 // - step:"claim-again" -- 우리가 회수권 k+1을 얻어 L을 지웠다(또는 L이
 //   이미 사라져 있었다). 다음 루프에서 즉시 createExclusive(L)을 재시도
 //   한다(sleep 없음, §(d) "continue (sleep 없음)").
-// - step:"wait" -- O가 아직 ALIVE(판정에서), 또는 회수권 k가 아직 살아
-//   있는 보유자를 두고 있어 우리가 끼어들지 않는다, 또는 회수권 생성
-//   자체에서 졌다(EEXIST, 다른 1명이 이미 k+1을 잡음) -- 전부 보통의
-//   폴 대기로 떨어진다.
+// - step:"wait" -- O가 아직 ALIVE(판정에서), 또는 회수권 k가 아직 (남이)
+//   살아 있는 보유자를 두고 있어 우리가 끼어들지 않는다, 또는 회수권
+//   생성 자체에서 졌다(EEXIST, 다른 1명이 이미 k+1을 잡음) -- 전부
+//   보통의 폴 대기로 떨어진다.
 function resolveContendedStep({
   lockPath,
   content,
@@ -432,12 +468,42 @@ function resolveContendedStep({
       reclaimTicketPath(lockPath, content.lockId, k),
     );
     if (holderResult.ok) {
+      const isSelf =
+        holderResult.content?.pid === pid &&
+        holderResult.content?.procStart === procStart;
+      if (isSelf) {
+        // HYK-494 후속(followup-3) P1-1 교착 수리: 회수권 k는 우리 자신의
+        // 것이다 -- 이전 라운드에서 재확인 읽기가 실패해(EBUSY 등) L
+        // 삭제를 확인 못 한 채 claim-again만 하고 청소를 건너뛰었을
+        // 뿐이다(P2-3 그대로 유지). 그 회수권의 pid가 "살아 있다"는
+        // identityIsDead 판정은 사실이지만(우리가 살아 있으니까), 그걸
+        // "이미 누가 회수 중이니 기다린다"로 읽으면 자기 자신을 기다리는
+        // 교착이 된다(검토 1R P1-1, runner-lock.mjs:429-440 실측 3/3).
+        // 기다리지 않고 재확인·삭제 단계를 그 자리에서 재시도한다 -- 새
+        // 회수권을 또 만들지 않는다(k 그대로 재사용, "살아 있는 회수권자
+        // ≤1" 불변식 무변, 회수 경로 되돌림 0). 선택 ②(바쁨 상한 안에서
+        // 그 자리 재시도)를 택한 근거: 재시도를 무조건 claim-again(기존
+        // k==0 경로와 같은 모양)으로 두면 reread가 계속 실패하는 동안
+        // sleep 없는 타이트 스핀이 된다 -- 이미 검증된 P2-2의 바쁨-
+        // 상한-뒤-throw 메커니즘(ticketReadBusy)을 재사용하면 폴 간격
+        // sleep과 BUSY_RETRY_TIMEOUT_MS 상한을 둘 다 그대로 얻는다(20분
+        // LOCK_WAIT_TIMEOUT_MS 전체를 자기 자신에게 쓰지 않는다).
+        const confirmed = rereadLockAndMaybeCleanup({
+          lockPath,
+          content,
+          readFileFn,
+          unlinkFn,
+          readdirFn,
+        });
+        if (confirmed) return { step: "claim-again" };
+        return { step: "wait", ticketReadBusy: true };
+      }
       const holderVerdict = identityIsDead({
         content: holderResult.content,
         isPidAliveFn,
         getStartIdentityFn,
       });
-      if (!holderVerdict.dead) return { step: "wait" }; // 이미 누가 회수 중.
+      if (!holderVerdict.dead) return { step: "wait" }; // 이미 "남이" 회수 중.
     } else if (!holderResult.enoent) {
       // HYK-494 후속 P2-2: ENOENT 외의 읽기 실패(일시적 공유 위반 등)는
       // "보유자가 지웠다"는 뜻이 아니다 -- 판정 없이 k+1로 가지 않는다
@@ -460,29 +526,20 @@ function resolveContendedStep({
     randomSuffixFn,
   });
   if (!myTicket.ok) return { step: "wait" }; // k+1을 못 얻음(EEXIST) -- 다음 폴.
-  const reread = readLockContentResult(readFileFn, lockPath);
-  if (reread.ok) {
-    if (reread.content?.lockId === content.lockId) {
-      try {
-        unlinkFn(lockPath);
-      } catch {
-        // L이 그 사이 사라졌다면(또 다른 경합) 유일한 삭제 지점이 이미 비어
-        // 있다는 뜻 -- 상태는 우리가 원하는 대로다(L에 O가 없다), 삼킨다.
-      }
-    }
-    // L 삭제 "뒤"에만 청소한다(§(d) 순서 그대로).
-    cleanupAfterReclaim({
-      lockPath,
-      lockId: content.lockId,
-      unlinkFn,
-      readdirFn,
-    });
-  }
-  // HYK-494 후속 P2-3: 재확인 읽기 자체가 실패하면(!reread.ok) L을 지웠는지
-  // 확인할 길이 없다 -- 이 경우 청소를 건너뛴다(설계 논증 4·5의 전제
-  // "청소 = L 삭제 뒤"를 글자대로 지킨다). 우리 회수권(과 O의 heartbeat
-  // 파일)은 그대로 남아 "살아 있는 회수권자 ≤1"을 계속 보장한다 -- 다음
-  // 라운드가 L을 다시 읽어 확인한다.
+  // HYK-494 후속 P2-3: 재확인 읽기 자체가 실패하면(반환값 false) L을
+  // 지웠는지 확인할 길이 없다 -- 이 경우 청소를 건너뛴다(설계 논증 4·5의
+  // 전제 "청소 = L 삭제 뒤"를 글자대로 지킨다). 우리 회수권(과 O의
+  // heartbeat 파일)은 그대로 남아 "살아 있는 회수권자 ≤1"을 계속
+  // 보장한다 -- 다음 라운드가 (바로 위 isSelf 분기로) L을 다시 읽어
+  // 확인한다. 성공/실패 어느 쪽이든 무조건 claim-again -- 기존 동작
+  // 무변(무회귀, isSelf 분기만 그 값을 보고 갈라진다).
+  rereadLockAndMaybeCleanup({
+    lockPath,
+    content,
+    readFileFn,
+    unlinkFn,
+    readdirFn,
+  });
   return { step: "claim-again" };
 }
 
@@ -591,14 +648,20 @@ function buildClaimedResult({
   };
 }
 
+// HYK-494 후속(followup-3) P2-3: 시간 초과 결과는 "회수를 시도했지만
+// 확정하지 못했다"는 뜻이다 -- claim-again이 state.reclaimedOrphan=true를
+// 낙관적으로 세워도(재확인 읽기가 실패해 L 삭제를 확인 못 한 채 반복
+// 됐을 수 있다, 위 isSelf 분기), 최종 결과가 timedOut이면 "회수함" 플래그
+// (와 그 사유)를 지운다 -- 둘 중 하나만 지우면 reclaimReason만 남아
+// 더 헷갈린다(영수증 lock_reclaimed_orphan 오독 방지, 검토 1R P2-3 참고).
+// `reclaimedOrphan`/`reclaimReason`을 더 이상 받지 않는다(호출자가
+// 여전히 넘겨도 무시한다 -- 무회귀).
 function buildTimedOutResult({
   lockPath,
   waitStartMs,
   elapsed,
   nowMs,
   pollCount,
-  reclaimedOrphan,
-  reclaimReason,
   priorOwner,
   nestedBypassRejected,
 }) {
@@ -610,8 +673,8 @@ function buildTimedOutResult({
     waitStartMs,
     waitEndMs: nowMs(),
     pollCount,
-    reclaimedOrphan,
-    reclaimReason,
+    reclaimedOrphan: false,
+    reclaimReason: null,
     priorOwner,
     timedOut: true,
     nestedBypassRejected,
@@ -1203,7 +1266,12 @@ export function installLockReleaseOnSignal({
 // 3R 사이드카는 정적으로 L의 경로 문자열 자체를 아예 참조하지 않는다,
 // `lockPath` 인자조차 받지 않는다). `-e` 인라인 스크립트(2R과 같은 기법,
 // product_scope 명시 파일 목록 밖의 새 파일을 만들지 않는다).
-const HEARTBEAT_SCRIPT = [
+// `export`: HYK-494 후속(followup-3) P2-2 -- 이 문자열 자체를 결정적으로
+// 검사하는 스위트-내 회귀 칸(아래 CI-1 anchor test)이 import해 쓴다(실제
+// 사이드카 자식 프로세스를 띄우고 타이밍에 기대는 대신, "쓰기 관용구가
+// 여전히 tmp+rename인지"를 소스 문자열로 바로 확인한다 -- 되돌림 변이가
+// 스위트 안에서 결정적으로 RED가 된다, 검토 1R P2-2).
+export const HEARTBEAT_SCRIPT = [
   "const fs=require('node:fs');",
   "const alivePath=process.argv[1];",
   "const ownerPid=Number(process.argv[2]);",
@@ -1219,7 +1287,13 @@ const HEARTBEAT_SCRIPT = [
   // 전체 내용을 다 쓴 뒤 rename(대상이 있으면 덮어쓴다, design doc §3-1
   // ④ 실측)으로 교체 -- 빈 내용 순간이 전혀 없다(createExclusive의 tmp+
   // link 관용구와 같은 원리, rename은 EEXIST가 없다는 점만 다르다).
-  "try{const tmp=alivePath+'.tmp.'+process.pid+'.'+Date.now()+'.'+Math.random().toString(36).slice(2,8);fs.writeFileSync(tmp,JSON.stringify({aliveAtMs:Date.now()}));fs.renameSync(tmp,alivePath);}catch(e){}",
+  // HYK-494 후속(followup-3) P2-1: Windows에서 rename 자체가 공유 위반으로
+  // 실패할 수 있다(검토 1R 실측: 1ms 간격 50회 중 tmp 2108개, 20ms 간격
+  // 50회 중 425개 잔존) -- catch에서 tmp를 best-effort unlink한다(지우기도
+  // 실패하면 삼킨다, "공간 누수일 뿐 불변식 무관" 근거는 이 파일의 다른
+  // best-effort 청소들과 같다). `tmp`를 try 밖에서 선언해 catch가 볼 수
+  // 있게 한다.
+  "let tmp;try{tmp=alivePath+'.tmp.'+process.pid+'.'+Date.now()+'.'+Math.random().toString(36).slice(2,8);fs.writeFileSync(tmp,JSON.stringify({aliveAtMs:Date.now()}));fs.renameSync(tmp,alivePath);}catch(e){if(tmp){try{fs.unlinkSync(tmp);}catch(e2){}}}",
   "}",
   "const timer=setInterval(tick,intervalMs);",
 ].join("\n");

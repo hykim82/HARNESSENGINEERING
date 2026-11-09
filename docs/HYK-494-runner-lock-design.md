@@ -222,8 +222,15 @@ judge(O):  if kill(O.pid,0)==ESRCH → DEAD("pid-dead")                 # 싼 �
 k = 이미 있는 O의 권한 중 최대 번호(없으면 0)
 if k>0:
   r = read(권한 k)
-  if r.ok and judge(r.content)≠DEAD: wait                  # 이미 누가 회수 중
-  if r.ok==false and r.err≠ENOENT: wait(bounded, 연속 상한 뒤 throw)  # HYK-494 후속 P2-2
+  if r.ok and r.content is 자기(pid, procStart) 자신:        # HYK-494 후속(followup-3) P1-1
+    reread = read(L)
+    if reread.ok:
+      if reread.content.lockId == O.lockId: unlink L
+      best-effort unlink L.alive.<O.lockId>, L.reclaim.<O.lockId>.*
+      claim-again
+    else: wait(bounded, 연속 상한 뒤 throw)                  # P2-2 메커니즘 재사용
+  elif r.ok and judge(r.content)≠DEAD: wait                  # 이미 "남이" 회수 중
+  elif r.ok==false and r.err≠ENOENT: wait(bounded, 연속 상한 뒤 throw)  # HYK-494 후속 P2-2
   # r.ok==false and r.err==ENOENT(보유자가 이미 지웠다)만 다음 줄로 진행
 createExclusive(L.reclaim.<O.lockId>.<k+1>, {pid, procStart}) → EEXIST면 wait
 reread = read(L)
@@ -231,6 +238,9 @@ if reread.ok:
   if reread.content.lockId == O.lockId: unlink L            # 유일한 비주인 삭제 지점
   best-effort unlink L.alive.<O.lockId>, L.reclaim.<O.lockId>.*  # L 삭제 "뒤"(reread.ok일 때만, HYK-494 후속 P2-3)
 # reread.ok==false면 청소를 건너뛴다 -- L을 지웠는지 확인하지 못했다.
+#   (HYK-494 후속followup-3: 다음 라운드가 바로 위 "자기 자신" 분기로
+#    돌아와 재시도한다 -- 20분 LOCK_WAIT_TIMEOUT_MS 전체를 자기 자신을
+#    기다리는 데 쓰지 않는다.)
 ```
 
 ⚠️**HYK-494 후속 수리(P2-2·P2-3, 이 의사 코드는 그 수리를 반영해 고친
@@ -242,6 +252,34 @@ if reread.ok:
 자체가 실패하면(reread.ok==false) L을 지웠는지 확인할 길이 없으므로
 청소를 건너뛴다(**논증 4·5의 "청소 = L 삭제 뒤" 전제를 글자대로 지킨다**)
 -- 우리 회수권은 그대로 남아 "살아 있는 회수권자 ≤1"을 계속 보장한다.
+
+⚠️**HYK-494 후속(followup-3) 수리(P1-1, 검토 1R 교착 지적)**: 바로 위
+"재확인 읽기 자체가 실패하면 청소를 건너뛴다"는 맞다 — 하지만 그
+회수권(k+1, 우리 자신의 것)은 다음 라운드에도 그대로 살아 있다. REVIEW
+1R이 재현한 교착은 그 "다음 라운드"의 동작이었다: `judge(권한 k 보유자)`
+가 "자기 자신"을 "이미 누가 회수 중"으로 오판해 `wait`로 떨어지고, 그게
+`LOCK_WAIT_TIMEOUT_MS`(20분)까지 반복됐다(같은 고아를 기다리는 다른
+모든 러너도 그 뒤에서 함께 멈췄다 — 실제 자식 2개로 재현, HEAD 3/3 시간
+초과 · base 0/3). 수리는 "회수권 k 보유자가 자기 자신이면 기다리지
+말고 재확인·삭제 단계를 그 자리에서 재시도한다"이다(PM 설계 재심이
+아니다 — P2-3의 "청소 = L 삭제 뒤" 전제를 그대로 지킨다, 재시도도 같은
+reread-then-cleanup 경로를 재사용할 뿐이다). 재시도의 reread가 또
+실패하면 무조건 claim-again(타이트 스핀)으로 두지 않고, 이미 검증된
+P2-2의 "바쁨 상한 뒤 throw" 메커니즘(`ticketReadBusySinceMs`)을
+재사용한다 -- 자기 자신을 기다리는 데 20분 전체를 쓰지 않고
+`BUSY_RETRY_TIMEOUT_MS`(30초)로 끊는다(선택 ②, 근거: 무조건
+claim-again은 reread가 계속 실패하는 동안 sleep 없는 타이트 스핀이
+되지만, 바쁨 메커니즘 재사용은 폴 간격 sleep과 상한을 둘 다 그대로
+얻는다). 불변식("살아 있는 회수권자 ≤1")은 무변 -- 재시도가 새 회수권을
+만들지 않고 k를 재사용하기 때문이다.
+
+⚠️**HYK-494 후속(followup-3) 수리(P2-3 참고 칸)**: 시간 초과로 끝난
+결과에 `reclaimedOrphan:true`가 남아 있던 적이 있었다(claim-again이
+낙관적으로 세운 플래그가, 그 뒤 「진짜」 살아 있는 새 주인에게 졌을
+때도 지워지지 않았다 — 영수증 `lock_reclaimed_orphan` 오독 소지).
+`timedOut:true`인 결과는 이제 항상 `reclaimedOrphan:false`·
+`reclaimReason:null`이다 — "시간 초과"는 정의상 "확정된 회수"가 아니기
+때문이다.
 
 **되돌림이 전혀 없다** — 2R의 "rename-steal → 비교 → 불일치면 link로
 복원"을 완전히 버렸다. 한 번호(`k+1`)는 `link`로 정확히 1명만 얻으므로
@@ -545,3 +583,27 @@ createExclusive와 같은 관용구 -- tmp 이름에 전체 내용을 다 쓴 �
    실패시킬 수 있다(이번 라운드의 D2 시험이 세 번째 삽입점에서 실측).
    이 라운드가 받은 계약(P2-1~P2-7·CI-1) 밖이라 고치지 않았다 — 다음
    라운드 후보.
+10. **HYK-494 후속(followup-3) P1-1 수리의 상한은 20분에서 30초로 줄었을
+    뿐, "영원한 보장"이 아니다** — 재확인 읽기가 `BUSY_RETRY_TIMEOUT_MS`
+    (30초)를 넘겨 계속 실패하면(이 머신에서는 못 재현했다, 리뷰 1R의
+    실제 EBUSY도 400~2000ms 수준) 여전히 throw한다(정직 > 낙관, §7-3
+    기존 posture 그대로). 다만 그 throw는 **보이는 빨강**이고,
+    20분짜리 조용한 교착보다 사람이 훨씬 빨리 알아챈다.
+11. **HYK-494 후속(followup-3) P2-1 수리는 best-effort다, "tmp 0 보장"이
+    아니다** — 이 라운드 실측(real PowerShell sharing-violation, 40회
+    충돌 유도): 수리 뒤에도 드물게(5~~8회 시도 중 0~~1개) tmp가 남는
+    회차를 봤다(원인 미확인 — write 성공 뒤 아무 로그도 남기지 못한 채
+    사라진 자리, 〔못쟀다〕). 되돌리면(catch에서 unlink를 빼면) 같은
+    조건에서 80개 넘게 남는다(이 라운드 실측, 5회 중 81~83개) — 그래서
+    새 시험(`hyk494-runner-lock.test.mjs`의 "leaks almost no tmp
+    files")은 "정확히 0"이 아니라 "압도적으로 적음"(문턱 3) 을 기대값
+    으로 삼는다.
+12. **HYK-494 후속(followup-3) P1-1의 "다른 대기자 1명을 둔 실제 프로세스"
+    칸은 실제 OS EBUSY가 아니라 주입된(synthetic) EBUSY다** — 검토 1R은
+    실제 PowerShell `FileShare.None`으로 진짜 공유 위반을 일으켰지만,
+    이 라운드의 실제-프로세스 회귀 칸은 (기존 단위 시험들과 같은 관례로)
+    자식 스크립트 안에서 두 번째 `L` 읽기에 `err.code="EBUSY"`인 합성
+    오류를 주입한다 — 실제 자식 프로세스 2개가 진짜로 경합하는 것은
+    맞지만(〔직접〕), 오류 자체의 "실제 OS성"은 검토 1R만큼 실측하지
+    않았다(〔못쟀다〕, universal_claim_discipline). P2-1 칸은 반대로
+    실제 PowerShell 공유 위반을 쓴다(〔직접〕).
