@@ -24,15 +24,25 @@
 
 import fs from "node:fs";
 import path from "node:path";
-import { getEngineModelFamilyPatterns } from "./engine-profile.mjs";
+import {
+  getEngineByRole,
+  getEngineModelFamilyPatterns,
+} from "./engine-profile.mjs";
 
 export const REVIEW_LABEL_PATTERN = /^(.*)-review-(\d+)$/;
 export const ISSUE_PATTERN = /^(HYK-\d+)/;
 // HYK-153-engine-profile-1 (piece B): the family-classification words
 // ("sonnet"/"opus") now come from scripts/check/engine-profiles.json
-// (engines.claude.modelFamilyPatterns) -- same /i case-insensitive match as
-// before, built here instead of hardcoded.
-const CLAUDE_MODEL_FAMILY_PATTERNS = getEngineModelFamilyPatterns("claude");
+// (engines.<CODER's engine>.modelFamilyPatterns) -- same /i
+// case-insensitive match as before, built here instead of hardcoded.
+// HYK-153-engine-profile-2 (coder-task.md §2 P2-4): role-based lookup, not
+// a literal "claude" config-access argument -- CODER's and REVIEW's live
+// roles both resolve to the SAME engine (that engine is exactly why its
+// one modelFamilyPatterns object carries both the sonnet and opus
+// classification words this module pairs author vs. reviewer on).
+const AUTHOR_REVIEW_ENGINE = getEngineByRole().CODER;
+const CLAUDE_MODEL_FAMILY_PATTERNS =
+  getEngineModelFamilyPatterns(AUTHOR_REVIEW_ENGINE);
 export const SONNET_FAMILY_PATTERN = new RegExp(
   CLAUDE_MODEL_FAMILY_PATTERNS.sonnet,
   "i",

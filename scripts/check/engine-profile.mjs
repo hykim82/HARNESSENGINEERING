@@ -62,6 +62,21 @@ function invalid(configPath, detail) {
   );
 }
 
+// HYK-153-engine-profile-2 (coder-task.md §2 P2-2): deliveryMode is a
+// closed value set, not merely "any non-empty string" -- a typo or a new
+// delivery strategy that forgot to teach deliverTaskInternal about itself
+// must fail loudly at config-load time, not fall through
+// getEngineDeliveryMode(engine) === "no-inject" as false and silently take
+// the claude-shaped branch.
+const KNOWN_DELIVERY_MODES = new Set(["inject", "no-inject"]);
+
+// HYK-153-engine-profile-2 (coder-task.md §2 P2-3): these per-engine keys
+// are consumed by production code (getEngineAttr(engine,"homeDirName"),
+// getEngineModelFamilyPatterns, getEngineAgentMarkerWords) that used to
+// default silently (null / {} / []) when the key was simply absent from
+// config -- a missing key looked identical to "this engine deliberately
+// has none". Requiring the key's *presence* (homeDirName may still be
+// null, e.g. codex) turns that silent default into a load-time rejection.
 function validateEngines(engines, configPath) {
   if (!isPlainObject(engines) || Object.keys(engines).length === 0) {
     invalid(configPath, `"engines" must be a non-empty object`);
@@ -70,10 +85,51 @@ function validateEngines(engines, configPath) {
     if (!isPlainObject(engineCfg)) {
       invalid(configPath, `engines.${engineName} must be an object`);
     }
-    if (!isNonEmptyString(engineCfg.deliveryMode)) {
+    if (!KNOWN_DELIVERY_MODES.has(engineCfg.deliveryMode)) {
       invalid(
         configPath,
-        `engines.${engineName}.deliveryMode must be a non-empty string`,
+        `engines.${engineName}.deliveryMode must be one of ${[...KNOWN_DELIVERY_MODES].join(", ")}, got ${JSON.stringify(engineCfg.deliveryMode)}`,
+      );
+    }
+    if (!("homeDirName" in engineCfg)) {
+      invalid(
+        configPath,
+        `engines.${engineName}.homeDirName is required (may be null)`,
+      );
+    }
+    if (!isPlainObject(engineCfg.modelFamilyPatterns)) {
+      invalid(
+        configPath,
+        `engines.${engineName}.modelFamilyPatterns must be an object (may be empty)`,
+      );
+    }
+    if (!Array.isArray(engineCfg.agentMarkerWords)) {
+      invalid(
+        configPath,
+        `engines.${engineName}.agentMarkerWords must be an array (may be empty)`,
+      );
+    }
+  }
+}
+
+// HYK-153-engine-profile-2 (coder-task.md §2 P2-3): bannerMarkerPatterns.*
+// is consumed by getBannerMarkerPattern("orcaAdapterAgentMarker"/
+// "seatCensusAgentBanner") -- same silent-default problem as the per-engine
+// keys above, fixed the same way (required presence, rejected at load).
+const REQUIRED_BANNER_MARKER_PATTERN_KEYS = [
+  "orcaAdapterAgentMarker",
+  "seatCensusAgentBanner",
+];
+
+function validateBannerMarkerPatterns(bannerMarkerPatterns, configPath) {
+  if (!isPlainObject(bannerMarkerPatterns)) {
+    invalid(configPath, `"bannerMarkerPatterns" must be an object`);
+  }
+  for (const key of REQUIRED_BANNER_MARKER_PATTERN_KEYS) {
+    if (!isNonEmptyString(bannerMarkerPatterns[key])) {
+      invalid(
+        configPath,
+        `bannerMarkerPatterns.${key} must be a non-empty string`,
       );
     }
   }
@@ -108,6 +164,7 @@ function validateSchema(parsed, configPath) {
   }
   validateEngines(parsed.engines, configPath);
   validateRoles(parsed.roles, parsed.engines, configPath);
+  validateBannerMarkerPatterns(parsed.bannerMarkerPatterns, configPath);
   return parsed;
 }
 

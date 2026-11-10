@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
   "anchorPattern": "claude|codex|sonnet|opus|haiku|fable|gpt-|anthropic|openai",
-  "note": "HYK-153-engine-profile-1 (piece B, coder-task.md \u00a72 \u24d8\u24d8\u24d8 '\u314d\u3745 \u3141\u3758 \u3146\u3758'). Every B2-TODO row from the engine-split-2 baseline (piece A) is now resolved into one of E1/E2/E5: moved into scripts/check/engine-profiles.json + engine-profile.mjs (E1, a single config-reading point -- a handful of these rows are the config-access literal itself, e.g. getEngineAttr(\"claude\", ...), which selects which profile to read rather than branching on an engine name), or recategorized into E2 (an already-established category for files whose role is inherently engine-specific, e.g. seat-config-inject.mjs's claude-only hook/settings machinery and dispatch-worker-modal-check.mjs's literal Claude Code CLI UI text -- same precedent as the pre-existing derive-claude-project-dir-cli.mjs/dispatch-start-confirm-cli.mjs E2 rows). The two E3 rows (go-wait-supervisor.mjs:128, pull-supervisor.mjs:532) were reworded to drop the engine-name mention entirely, so E3 has zero rows left. branchLiteralBaseline is now empty: all three engine===\"claude\"/\"codex\" branch comparisons were replaced with engine-profile.mjs's deliveryMode attribute comparison (getEngineDeliveryMode(engine) === \"inject\"/\"no-inject\"), which does not match the engine-name anchor pattern. Final categories present: E1 (config), E2 (registered per-engine modules), E5 (out-of-layer Claude-only hooks). E4 (tests/fixtures) stays out of scan scope by construction.",
+  "note": "HYK-153-engine-profile-2 (coder-task.md \u00a72 P2-4/P2-5, owner wording \u00ab literal engine-name only in the config file + registered per-engine modules \u00bb, taken literally): piece B 1R's E1 category (4 rows -- engine-split-rounds.mjs:35, orca-adapter.mjs:2649, seat-candidate-adapter.mjs:281/287) was itself a config-ACCESS-argument literal living in a .mjs file, not inside the config file -- that violates the owner wording just as much as a branch comparison would. This round removed the literal argument from all four call sites (role-based lookup via getEngineByRole(), or iteration over getKnownEngines() where no role maps to the engine in question) so the literal itself is gone; E1 now has zero rows and the category name stays recognized in the schema only for a future genuine case. Separately (P2-5, honesty): piece B 1R had also moved 4 rows (seat-config-inject.mjs:62/246/279, dispatch-worker-modal-check.mjs:26) from B2-TODO to E2 with zero code change, on the precedent of claude-adapter.mjs/codex-adapter.mjs/derive-claude-project-dir-cli.mjs -- but those precedent files all carry the engine name in their own filename (the actual, checkable basis an E2 registered-per-engine-module entry needs), and neither of these two files does. This round reverted those 4 rows to B2-TODO rather than inventing a new basis for the classification (see docs/HYK-153-engine-agnostic.md for the full note; each reverted row's own note links back here). Final categories present: E2 (registered per-engine modules, filename-based precedent only), E5 (out-of-layer Claude-only hooks), B2-TODO (the 4 reverted rows above). E1/E3 have zero rows. E4 (tests/fixtures) stays out of scan scope by construction.",
   "generatedAt": "2026-11-10",
   "literalExceptions": [
     {
@@ -53,14 +53,6 @@
       "note": "엔진별 어댑터·관측 모듈(파일명/역할이 엔진 고유) -- PM 설계 §b E2"
     },
     {
-      "file": "scripts/check/engine-split-rounds.mjs",
-      "literal": "claude",
-      "line": 35,
-      "count": 1,
-      "category": "E1",
-      "note": "HYK-153-engine-profile-1: getEngineModelFamilyPatterns(\"claude\") -- config-access literal (which profile to read), not a branch comparison on engine name"
-    },
-    {
       "file": "scripts/check/migration-ledger.schema.mjs",
       "literal": "cycle 0: no transitions, all PRIMARY_CLAUDE",
       "line": 123,
@@ -89,24 +81,24 @@
       "literal": "if [ -z \"$CLAUDE_PROJECT_DIR\" ]; then echo \"role-guard: CLAUDE_PROJECT_DIR is unset/empty -- refusing to fail-open (HYK-462 2R hardening)\" >&2; exit 2; fi; node \"$CLAUDE_PROJECT_DIR/scripts/check/role-guard.mjs\"",
       "line": 62,
       "count": 1,
-      "category": "E2",
-      "note": "HYK-153-engine-profile-1: recategorized from B2-TODO -- this whole module injects Claude Code's own hook/settings.local.json machinery (no codex equivalent exists to compare against), same precedent as dispatch-start-confirm-cli.mjs's E2 '.claude'/'--claude-home' rows"
+      "category": "B2-TODO",
+      "note": "HYK-153-engine-profile-2 (P2-5, 정직화): piece B 1R reclassified this B2-TODO row to E2 with zero code change, on the stated precedent of claude-adapter.mjs/codex-adapter.mjs/derive-claude-project-dir-cli.mjs -- but every one of those precedent files carries the engine name in its own filename (the actual, checkable basis an E2 registered-per-engine-module entry needs); seat-config-inject.mjs does not, so that basis does not hold here even though the file's content genuinely is claude-only hook machinery. Not engine-neutral either (the shell snippet is inherently a Claude Code CLAUDE_PROJECT_DIR check, nothing to read from config). Reverted to B2-TODO rather than inventing a new basis -- see docs/HYK-153-engine-agnostic.md for the full note."
     },
     {
       "file": "scripts/check/seat-config-inject.mjs",
       "literal": ".claude",
       "line": 246,
       "count": 1,
-      "category": "E2",
-      "note": "HYK-153-engine-profile-1: recategorized from B2-TODO -- same reason as this file's line 62 row (Claude-only settings-injection module)"
+      "category": "B2-TODO",
+      "note": "HYK-153-engine-profile-2 (P2-5, 정직화): same revert and same reason as this file's line 62 row -- see that row's note."
     },
     {
       "file": "scripts/check/seat-config-inject.mjs",
       "literal": "C:\\\\Users\\\\Administrator\\\\.claude-team",
       "line": 279,
       "count": 1,
-      "category": "E2",
-      "note": "HYK-153-engine-profile-1: recategorized from B2-TODO -- matches the live launcher's own hardcoded CLAUDE_CONFIG_DIR literal (orca-worker-seat.ps1, control-room file this round does not edit); same reason as this file's line 62 row"
+      "category": "B2-TODO",
+      "note": "HYK-153-engine-profile-2 (P2-5, 정직화): same revert and same reason as this file's line 62 row -- see that row's note."
     },
     {
       "file": "scripts/check/selfcheck-inventory.mjs",
@@ -221,30 +213,6 @@
       "note": "계층 밖 Claude 전용 훅 목록(selfcheck 축) -- PM 설계 §b E5"
     },
     {
-      "file": "scripts/relay/adapters/orca-adapter.mjs",
-      "literal": "claude",
-      "line": 2649,
-      "count": 1,
-      "category": "E1",
-      "note": "HYK-153-engine-profile-1: getEngineAttr(\"claude\", \"homeDirName\") -- config-access literal (which profile to read), not a branch comparison. ENGINE_BY_ROLE/AGENT_MARKER_RE/deliverTaskInternal's engine===literal branch all moved to engine-profile.mjs this round, so this is the ONLY engine-name literal left in this file."
-    },
-    {
-      "file": "scripts/relay/adapters/seat-candidate-adapter.mjs",
-      "literal": "claude",
-      "line": 281,
-      "count": 1,
-      "category": "E1",
-      "note": "HYK-153-engine-profile-1: getEngineAgentMarkerWords(\"claude\") -- config-access literal (which profile to read), not a branch comparison"
-    },
-    {
-      "file": "scripts/relay/adapters/seat-candidate-adapter.mjs",
-      "literal": "codex",
-      "line": 287,
-      "count": 1,
-      "category": "E1",
-      "note": "HYK-153-engine-profile-1: getEngineAgentMarkerWords(\"codex\") -- config-access literal (which profile to read), not a branch comparison"
-    },
-    {
       "file": "scripts/relay/claude-adapter.mjs",
       "literal": "claude",
       "line": 72,
@@ -265,8 +233,8 @@
       "literal": "No, and tell Claude what to do differently",
       "line": 26,
       "count": 1,
-      "category": "E2",
-      "note": "HYK-153-engine-profile-1: recategorized from B2-TODO -- this is Claude Code's own literal CLI modal text (MODAL_MARKERS catalog), not a branch/config value; the file's own header already documents it as the one canonical, hand-authored source (carrying it in two places would risk drift) -- an engine-specific observation catalog, same category shape as claude-adapter.mjs/codex-adapter.mjs"
+      "category": "B2-TODO",
+      "note": "HYK-153-engine-profile-2 (P2-5, 정직화): piece B 1R reclassified this B2-TODO row to E2 with zero code change, citing claude-adapter.mjs/codex-adapter.mjs as precedent -- but those files carry the engine name in their own filename (the checkable basis an E2 registered-per-engine-module entry needs) and dispatch-worker-modal-check.mjs does not, so the precedent doesn't actually transfer even though the content genuinely is Claude-only modal text. Not engine-neutral either (MODAL_MARKERS is a hand-authored literal catalog, not something to read from config). Reverted to B2-TODO -- see docs/HYK-153-engine-agnostic.md for the full note."
     },
     {
       "file": "scripts/supervisor/derive-claude-project-dir-cli.mjs",

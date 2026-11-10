@@ -66,11 +66,15 @@ REVIEW 롤 전부 `"engine":"claude","model":"claude-opus-5-5"` — 지난 11-06
   $Engine = if ($Role -eq "REVIEW" -or $Role -eq "PM") { "codex" } else { "claude" }
 ```
 
-**제안 교체문** — PM/REVIEW를 역할 리터럴로 추측하지 않고,
-`engine-profile-cli.mjs`가 `engine-profiles.json`에서 읽은 값을 쓴다(PM은
-아직 config.roles에 없으므로 CLI가 실패하면 **기존 리터럴 폴백**으로
-떨어진다 -- 조용한 회귀가 아니라 "그 역할은 아직 config에 없다"를 그대로
-보여주는 2단 방어):
+**제안 교체문 (HYK-153-engine-profile-2 정정)** — PM/REVIEW를 역할
+리터럴로 추측하지 않고, `engine-profile-cli.mjs`가 `engine-profiles.json`
+에서 읽은 값을 쓴다. ⛔**옛 리터럴 폴백은 뺐다**(P2-8) — 그 리터럴
+(`$Role -eq "REVIEW" -or $Role -eq "PM") { "codex" }`)은 이 패치가
+고치려는 바로 그 버그와 같은 모양(역할을 "추측"해서 엔진을 정함)이었고,
+PM도 REVIEW와 마찬가지로 실측상 `codex`가 아니라 `claude`로 뜬다(§0 ·
+seat-launch-registry.jsonl) -- 즉 그 폴백 리터럴 자체가 처음부터
+틀려 있었다. config 조회가 실패하면 조용히 그 틀린 값으로 떨어지는 대신
+**멈춘다**(실패 = 멈춤 + 사유, 조용한 기본값 금지):
 
 ```text
   $engineCliPath = Join-Path $Worktree "scripts\check\engine-profile-cli.mjs"
@@ -78,20 +82,20 @@ REVIEW 롤 전부 `"engine":"claude","model":"claude-opus-5-5"` — 지난 11-06
   if ($LASTEXITCODE -eq 0 -and $profileLine) {
     $Engine = ($profileLine | Select-String '^engine=(.+)$').Matches.Groups[1].Value
   } else {
-    # engine-profiles.json에 아직 없는 역할(예: PM, 또는 옛 워크트리라
-    # 이 CLI가 없음) -- 옛 리터럴 폴백, 조용한 추측이 아니라 "config
-    # 미해당"을 그대로 남긴다(HYK-153 patch note, 사람이 config.roles에
-    # PM을 추가하면 이 분기는 더 이상 안 탄다).
-    $Engine = if ($Role -eq "REVIEW" -or $Role -eq "PM") { "codex" } else { "claude" }
+    Write-Error "orca-worker-seat: engine-profile-cli resolve --role $Role failed (exitcode=$LASTEXITCODE, cliPath=$engineCliPath) -- refusing to guess an engine from the role literal, seat NOT started"
+    exit 1
   }
 ```
 
-**사람이 적용 전 확인할 것**: `$Role -eq "PM"` 분기는 지금
-`engine-profiles.json.roles`에 PM이 없으므로(이 라운드 범위 밖, §2 ⛔
-deviation_rule — PM 기본값은 바꾸지 않았다) **폴백이 그대로 적용된다** —
-즉 이 패치는 PM 좌석의 동작을 바꾸지 않는다. REVIEW만 `engine-profiles.json`
-의 `"claude"` 값으로 해석되어, 호출자가 `-Engine`을 빼먹어도 더 이상
-codex로 떨어지지 않는다.
+**사람이 적용 전 확인할 것 (정정)**: HYK-153-engine-profile-2가
+`engine-profiles.json.roles`에 PM을 추가했다(engine=claude, 관제실
+seat-launch-registry.jsonl의 최근 PM 행 실측과 일치) — 그래서 이 패치가
+적용된 뒤에는 PM과 REVIEW 둘 다 `engine-profile-cli.mjs resolve`가
+성공해서 `"claude"`로 해석되고, 위의 실패-멈춤 분기는 워크트리에
+`engine-profile-cli.mjs`가 아직 없는 옛 체크아웃에서만 탄다(그 경우도
+더 이상 틀린 값으로 조용히 떨어지지 않고 좌석 기동 자체를 멈춘다). 이전
+문면("PM은 아직 config.roles에 없으므로 폴백이 그대로 적용된다")은
+PM 추가 전 상태를 서술한 것으로, 이번 라운드로 더 이상 맞지 않는다.
 
 ## §2 patch unit B — `dispatch-worker.ps1` — ⛔변경 없음(명시)
 
@@ -107,22 +111,38 @@ codex로 떨어지지 않는다.
   [string]$Model = 'claude-sonnet-5',
 ```
 
-**제안 교체문** — 리터럴 기본값 대신 CODER 프로필의 모델을 기본값으로
-쓴다(아래 §4의 `node ... resolve --role CODER` 호출과 동일 CLI):
+**제안 교체문 (HYK-153-engine-profile-2 경로 오류 정정)** — 리터럴
+기본값 대신 CODER 프로필의 모델을 기본값으로 쓴다(아래 §4의
+`node ... resolve --role CODER` 호출과 동일 CLI). ⛔**옛 문면의 경로는
+수식 자체가 틀렸다** — `D:\문서관리\하네스-관제실\..\..`는 `D:\문서관리`를
+두 단계 거슬러 올라가 `D:\`가 되고, 거기에 `scripts\check\...`를 붙인
+`D:\scripts\check\engine-profile-cli.mjs`는 어느 체크아웃에도 존재하지
+않는 경로다(관제실 디렉터리 기준으로 저장소 루트를 계산하려 한 식이지만
+저장소는 관제실의 하위/상위 경로가 아니다 -- 애초에 성립할 수 없는 상대
+경로였다). memory-gate.ps1은 이미 `$Worktree`를 필수 파라미터로
+받는다(`param()` 블록에서 `$Model`보다 앞에 선언되어 있어 `$Model`의
+기본값 식이 평가되는 시점에는 이미 바인딩돼 있다) -- unit A가
+`orca-worker-seat.ps1`에서 쓰는 것과 같은 `Join-Path $Worktree
+"scripts\check\engine-profile-cli.mjs"` 패턴으로 바꾼다:
 
 ```text
   [string]$Model = $(
-    $__p = & node "D:\문서관리\하네스-관제실\..\..\scripts\check\engine-profile-cli.mjs" resolve --role CODER 2>$null
-    if ($LASTEXITCODE -eq 0) { ($__p | Select-String '^model=(.+)$').Matches.Groups[1].Value } else { 'claude-sonnet-5' }
+    $__cliPath = Join-Path $Worktree "scripts\check\engine-profile-cli.mjs"
+    $__p = if (Test-Path $__cliPath) { & node $__cliPath resolve --role CODER 2>$null } else { $null }
+    if ($LASTEXITCODE -eq 0 -and $__p) { ($__p | Select-String '^model=(.+)$').Matches.Groups[1].Value } else { 'claude-sonnet-5' }
   ),
 ```
 
-**정직 한계**: param 블록의 기본값 식은 스크립트가 로드되는 모든 워크트리
-경로가 아직 없을 수 있는 시점에 평가된다 — 위 식은 그래서 CLI 경로가 없거나
-실패하면 **옛 리터럴로 폴백**한다(조용한 추측이 아니라 "이 CLI를 못
-찾았다"의 안전한 동치). 사람이 적용할 때 실제 경로(워크트리 고정이 아니라
-저장소 템플릿 설치 경로 기준)를 재확인하라 — 이 문서는 패치의 **모양**만
-제안하고, 경로 상수는 적용자가 그 시점의 실제 배치를 보고 고른다.
+**정직 한계**: unit C는 unit A와 달리(P2-8) 폴백을 **유지한다** — 이
+리터럴(`'claude-sonnet-5'`)은 unit A의 PM/REVIEW 리터럴과 달리 오늘
+measured 값과 어긋나 있지 않다(config.roles.CODER.model이 정확히
+`claude-sonnet-5`다, memory-gate.ps1은 CODER류 좌석 전용이라 애초에
+역할을 추측하지 않는다). param 블록의 기본값 식은 스크립트가 로드되는
+모든 워크트리 경로가 아직 없을 수 있는 시점에 평가되므로, CLI 경로가
+없거나 실패하면 이 폴백으로 떨어진다(조용한 추측이 아니라 "이 CLI를
+못 찾았다"의 안전한 동치 -- 틀린 값으로의 폴백이 아니라는 점이 unit A와
+다르다). 사람이 적용할 때 `$Worktree`가 그 시점 실제로 바인딩되는지
+재확인하라 -- 이 문서는 패치의 **모양**만 제안한다.
 
 ## §4 CLI 참고 (이 라운드가 새로 추가, 이미 시험됨)
 

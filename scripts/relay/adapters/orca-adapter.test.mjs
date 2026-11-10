@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { DEFAULT_ENGINE_PROFILES_PATH } from "../../check/engine-profile.mjs";
 import {
   ensureSeat,
   deliverTask,
@@ -3499,6 +3500,30 @@ test("deliverTask: D11-A unknown role/profile is rejected with zero execFn calls
   assert.equal(execFn.calls.length, 0);
 });
 
+// HYK-153-engine-profile-2 (coder-task.md §2 P2-1): engineOverrideForTests
+// used to be trusted verbatim -- a garbage/unknown value fell through
+// getEngineDeliveryMode(engine) === "no-inject" as false and silently took
+// the claude-shaped delivery branch (a quiet wrong-path bug, not a loud
+// rejection). assertKnownEngine now rejects it with zero execFn calls,
+// same D11 "no side effects for unknown profiles" contract as an unknown
+// role. A real override value ("codex", used by every other test in this
+// file) is unaffected -- it is, and stays, a known engine.
+test("deliverTask: an unknown engineOverrideForTests value is rejected with a reason, not silently treated as the role's own engine", () => {
+  const execFn = fakeExecFn({});
+  const r = deliverTask(
+    { taskId: "HYK-169-coder-1", role: "CODER", worktreePath: VALID_WORKTREE },
+    {
+      execFn,
+      existingSeatHandle: "term_x",
+      engineOverrideForTests: "made-up-engine",
+    },
+  );
+  assert.equal(r.ok, false);
+  assert.match(r.reason, /UNSUPPORTED_PROFILE/);
+  assert.match(r.reason, /made-up-engine/);
+  assert.equal(execFn.calls.length, 0);
+});
+
 // ---------------------------------------------------------------------------
 // D13-G1 (pm-2 §QE): 기동문 자격 판정 -- 결정적 seam. 아래 표는 §3 D13-G1의
 // 5행 반사실 그대로다. "텍스트" 열은 이 함수의 입력이 아니므로(시그니처
@@ -4400,10 +4425,31 @@ test("teardownSeat: missing worktreePath is rejected", () => {
 // touch role->seat-handle resolution (resolveSeatHandle/
 // resolveRoleBoundSeatHandle join only on the registry's role field, see the
 // HYK-214 §0 test above).
-test("ENGINE_BY_ROLE: CODER/VERIFY/REVIEW are all claude (B9 single config point, corrected to match live seat-launch-registry)", () => {
-  assert.equal(ENGINE_BY_ROLE.CODER, "claude");
-  assert.equal(ENGINE_BY_ROLE.VERIFY, "claude");
-  assert.equal(ENGINE_BY_ROLE.REVIEW, "claude");
+// HYK-153-engine-profile-2 (coder-task.md §2 P2-12): config-based
+// assertion -- this re-reads the raw engine-profiles.json file directly
+// (not through getEngineByRole()/ENGINE_BY_ROLE's own loader a second
+// time) and compares against it, so changing the config file moves this
+// test's expectation with it instead of requiring a second, independently
+// drifting hardcoded literal here. Not a weakening: it still pins today's
+// live snapshot (all claude) AND adds the independent-source cross-check.
+test("ENGINE_BY_ROLE: CODER/VERIFY/REVIEW/PM match engine-profiles.json's roles.*.engine (config-based, not an independent literal)", () => {
+  const rawConfig = JSON.parse(
+    readFileSync(DEFAULT_ENGINE_PROFILES_PATH, "utf8"),
+  );
+  for (const role of ["CODER", "VERIFY", "REVIEW", "PM"]) {
+    assert.equal(
+      ENGINE_BY_ROLE[role],
+      rawConfig.roles[role].engine,
+      `ENGINE_BY_ROLE.${role} must track engine-profiles.json's roles.${role}.engine`,
+    );
+  }
+  // live-measured snapshot (2026-11-10 seat-launch-registry): all four are
+  // claude today -- this is documentation of today's value, not what
+  // drives the test's pass/fail (the loop above does that).
+  assert.equal(rawConfig.roles.CODER.engine, "claude");
+  assert.equal(rawConfig.roles.VERIFY.engine, "claude");
+  assert.equal(rawConfig.roles.REVIEW.engine, "claude");
+  assert.equal(rawConfig.roles.PM.engine, "claude");
 });
 
 // ---------------------------------------------------------------------------

@@ -1128,13 +1128,20 @@ export const ENFORCEMENT_CHECK_FILES = [
   // HYK-153-engine-profile-1 (piece B): seat-engine-detect.mjs now imports
   // "./engine-profile.mjs" (same scripts/check/ directory on the real repo
   // -- a same-directory import, so it must be copied to scripts/check/ on
-  // the target too, NOT scripts/relay/; the closure test
-  // (install-copylist-closure.test.mjs) only checks that the import target
-  // EXISTS somewhere in the combined copy set, not which specific list it's
-  // in, so putting it on the wrong axis passed that test while still
-  // producing a real ERR_MODULE_NOT_FOUND on an actual install -- caught by
-  // install-net-closure.test.mjs's live network-install run instead, not by
-  // the static closure check). engine-profiles.json is a non-.mjs data file
+  // the target too, NOT scripts/relay/. HYK-153-engine-profile-2 correction
+  // (사실 오기 정정): the previous commit message here claimed the closure
+  // test "only checks the import target exists somewhere in the combined
+  // copy set, not which specific list it's in" -- that is wrong.
+  // install-copylist-closure.test.mjs's findClosureViolations compares each
+  // import target against the SAME list the importing file itself lives in
+  // (sets.check / sets.relay, not a union), so the wrong-axis placement was
+  // already a violation the moment this import existed -- re-running that
+  // test at the commit that introduced the wrong placement (8b1b8d4)
+  // reproduces exactly one failure, "check/seat-engine-detect.mjs missing
+  // check/engine-profile.mjs" (verified directly, not inferred). It was not
+  // "caught live instead of statically" -- moving these entries to
+  // ENFORCEMENT_CHECK_FILES was still the correct fix, just not for the
+  // reason originally written. engine-profiles.json is a non-.mjs data file
   // engine-profile.mjs reads via readFileSync (not a static import the
   // closure algorithm tracks), so it is listed by hand here -- without it,
   // engine-profile.mjs would be present but its loadEngineProfiles() call

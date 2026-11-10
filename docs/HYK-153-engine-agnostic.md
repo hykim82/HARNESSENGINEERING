@@ -115,3 +115,45 @@ node --test scripts/check/engine-name-literal.test.mjs
   지적했으나 이 라운드에서는 보수적으로 B2-TODO를 유지했다 -- 상신 대상).
 - 엔진 분기 코드·`ENGINE_BY_ROLE`·런처 기본값 수정, 엔진 프로필 설정 이관,
   가짜 엔진 어댑터는 이 라운드의 범위 밖이다(조각 B·C).
+
+## 추기 (HYK-153-engine-profile-2, 조각 B 2R -- 책임자 판정 2026-11-10
+
+23:5x 상신 2348 → A 반영)
+
+책임자 판정이 피스 B 1R의 정제 문면("엔진 이름 리터럴은 설정 1곳 +
+등록된 엔진별 모듈 안에만")을 **글자 그대로** 적용하라고 확정했다 --
+"설정 접근 인자에 엔진 이름을 적는 것도 엔진 이름 리터럴"이라는 해석
+(상신 안 C는 비채택, 이 해석 자체는 그대로 확정). 이 라운드가 §b 분류를
+다시 건드린 지점 둘:
+
+- **E1 전원 제거**: 1R이 "config-access literal(어느 프로필을 읽을지
+  고르는 인자일 뿐, 분기 비교가 아님)"이라는 이유로 E1으로 분류했던 4행
+  (`engine-split-rounds.mjs:35` · `orca-adapter.mjs:2649` ·
+  `seat-candidate-adapter.mjs:281`/`287`)은 전부 **설정 파일 밖(.mjs
+  안)**에 있었다 -- 정제 문면을 글자 그대로 적용하면 그 자체로 반칙이다.
+  네 지점 모두 리터럴 인자를 역할 기반 조회(`getEngineByRole()`) 또는
+  설정에서 읽은 엔진 목록 순회(`getKnownEngines()`)로 바꿔 리터럴 자체를
+  없앴다 -- 결과값은 넷 다 바뀌지 않았다(라이브 역할 해석 무변,
+  `engine-split-rounds.test.mjs`/`seat-candidate-adapter.test.mjs`/
+  `seat-marker-divergence.contract.test.mjs`로 확인). E1은 이제 허용
+  목록에 0행이다(분류 이름 자체는 스키마에 남긴다 -- 미래의 진짜 사례를
+  위해).
+- **E2 정직화(4행 B2-TODO 복귀)**: 1R이 코드 0 변경으로 B2-TODO에서
+  E2로 옮긴 4행 (`seat-config-inject.mjs:62`/`246`/`279` ·
+  `dispatch-worker-modal-check.mjs:26`)은 그 재분류를 "claude-adapter.mjs
+  /codex-adapter.mjs/derive-claude-project-dir-cli.mjs와 같은 전례"라고
+  적었다 -- 그런데 그 세 전례 파일은 전부 **파일명 자체에 엔진 이름이
+  있다**(E2 "등록된 엔진별 모듈"이 실제로 검증 가능한 유일한 근거). 이
+  두 파일(`seat-config-inject.mjs`, `dispatch-worker-modal-check.mjs`)은
+  파일명에 엔진 이름이 없다 -- 내용은 진짜로 claude 전용(role-guard
+  훅/설정 주입, Claude Code CLI 모달 문구)이지만, 그 전례의 근거가 이
+  두 파일에는 그대로 옮겨지지 않는다. 엔진 중립으로 고칠 수도 없다(둘 다
+  설정에서 읽을 수 있는 값이 아니라 claude 전용 셸 스니펫·CLI 문구 그
+  자체). P2-5가 준 세 갈래(엔진 중립화 / 파일명 규칙 근거의 등록된
+  목록 / B2-TODO 복귀) 중 남는 것은 세 번째뿐이라, 새 근거를 만들어내지
+  않고 B2-TODO로 되돌렸다(허용 목록 각 행의 note에 같은 설명을 반복해
+  둔다).
+
+둘 다 코드 동작은 바뀌지 않았다(리터럴을 없애거나, 분류 칸만 되돌렸다) --
+`ENGINE_BY_ROLE` 역할별 해석 결과는 PM 추가 외에는 무변이다. 상신
+2348·14:5x ⓑ 정제 문면 원문은 PM 설계 산출물(§1 참조)에 있다.

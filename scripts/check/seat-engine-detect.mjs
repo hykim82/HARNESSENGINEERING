@@ -111,11 +111,32 @@ function parseArgs(argv) {
   return out;
 }
 
-const USAGE =
-  "Usage: node seat-engine-detect.mjs --role <Role> (--preview-file <path> | --preview <text>)\n" +
-  "Prints JSON {engine, measured, source, role} on stdout, exit 0.\n" +
-  `engine in {${getKnownEngines().join(", ")}}; source = measured-preview.\n` +
-  "unknown measurement -> REFUSED: stderr 'FAILED reason=UNKNOWN_SEAT_ENGINE ...', exit 2 (no engine guessed).";
+// HYK-153-engine-profile-2 (coder-task.md §2 P2-11): exit codes this CLI
+// documents and commits to. 0/2 existed before (success / UNKNOWN_SEAT_
+// ENGINE refusal); CONFIG_LOAD_FAILED is new -- previously a broken
+// engine-profiles.json (unreadable/invalid JSON/invalid schema) threw
+// uncaught out of getKnownEngines()/matchEngineByPreviewMarkers (the
+// latter reached even via --help, since USAGE itself calls
+// getKnownEngines()), crashing with a raw Node stack trace and Node's own
+// generic exit 1 -- no documented code, no one-line reason, and not even
+// consistently 1 (uncaught-exception exit codes aren't a stable contract).
+export const EXIT_CODE = Object.freeze({
+  OK: 0,
+  UNKNOWN_SEAT_ENGINE: 2,
+  CONFIG_LOAD_FAILED: 3,
+});
+export const ENGINE_PROFILE_CONFIG_FAILURE_REASON =
+  "ENGINE_PROFILE_CONFIG_FAILURE";
+
+function buildUsage() {
+  return (
+    "Usage: node seat-engine-detect.mjs --role <Role> (--preview-file <path> | --preview <text>)\n" +
+    "Prints JSON {engine, measured, source, role} on stdout, exit 0.\n" +
+    `engine in {${getKnownEngines().join(", ")}}; source = measured-preview.\n` +
+    `unknown measurement -> REFUSED: stderr 'FAILED reason=UNKNOWN_SEAT_ENGINE ...', exit ${EXIT_CODE.UNKNOWN_SEAT_ENGINE} (no engine guessed).\n` +
+    `engine-profiles.json unreadable/invalid JSON/invalid schema -> stderr 'FAILED reason=<ENGINE_PROFILE_LOAD_REASON or ${ENGINE_PROFILE_CONFIG_FAILURE_REASON}> detail=...', exit ${EXIT_CODE.CONFIG_LOAD_FAILED} (no engine guessed, not a silent default).`
+  );
+}
 
 export function runSeatEngineDetectCli(argv) {
   const parsed = parseArgs(argv);
@@ -129,15 +150,34 @@ export function runSeatEngineDetectCli(argv) {
         ok: false,
         reason: "PREVIEW_FILE_UNREADABLE",
         detail: err.message,
+        exitCode: EXIT_CODE.UNKNOWN_SEAT_ENGINE,
       };
     }
   }
-  const result = resolveSeatEngine({
-    previewText: previewText ?? "",
-    role: parsed.role,
-  });
+  let result;
+  try {
+    result = resolveSeatEngine({
+      previewText: previewText ?? "",
+      role: parsed.role,
+    });
+  } catch (err) {
+    return {
+      ok: false,
+      reason:
+        err && err.name === "EngineProfileLoadError"
+          ? err.reason
+          : ENGINE_PROFILE_CONFIG_FAILURE_REASON,
+      detail: err.message,
+      exitCode: EXIT_CODE.CONFIG_LOAD_FAILED,
+    };
+  }
   if (result.refused) {
-    return { ok: false, reason: result.reason, detail: result.detail };
+    return {
+      ok: false,
+      reason: result.reason,
+      detail: result.detail,
+      exitCode: EXIT_CODE.UNKNOWN_SEAT_ENGINE,
+    };
   }
   return { ok: true, result };
 }
@@ -148,17 +188,24 @@ const invokedDirectly =
     .replace(/\\/g, "/")
     .endsWith("scripts/check/seat-engine-detect.mjs");
 if (invokedDirectly) {
-  const outcome = runSeatEngineDetectCli(process.argv.slice(2));
-  if (outcome.help) {
-    console.log(USAGE);
-    process.exit(0);
-  }
-  if (!outcome.ok) {
+  try {
+    const outcome = runSeatEngineDetectCli(process.argv.slice(2));
+    if (outcome.help) {
+      console.log(buildUsage());
+      process.exit(EXIT_CODE.OK);
+    }
+    if (!outcome.ok) {
+      console.error(
+        `FAILED reason=${outcome.reason} detail=${outcome.detail ?? ""}`,
+      );
+      process.exit(outcome.exitCode ?? EXIT_CODE.UNKNOWN_SEAT_ENGINE);
+    }
+    console.log(JSON.stringify(outcome.result));
+    process.exit(EXIT_CODE.OK);
+  } catch (err) {
     console.error(
-      `FAILED reason=${outcome.reason} detail=${outcome.detail ?? ""}`,
+      `FAILED reason=${ENGINE_PROFILE_CONFIG_FAILURE_REASON} detail=${err.message}`,
     );
-    process.exit(2);
+    process.exit(EXIT_CODE.CONFIG_LOAD_FAILED);
   }
-  console.log(JSON.stringify(outcome.result));
-  process.exit(0);
 }

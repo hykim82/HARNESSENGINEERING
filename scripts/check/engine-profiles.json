@@ -40,6 +40,11 @@
       "engine": "claude",
       "model": "claude-sonnet-5",
       "effort": "high"
+    },
+    "PM": {
+      "engine": "claude",
+      "model": "claude-opus-5-5",
+      "effort": "high"
     }
   }
 }

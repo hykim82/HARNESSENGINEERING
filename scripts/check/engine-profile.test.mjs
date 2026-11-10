@@ -32,6 +32,40 @@ function withTempConfig(content, fn) {
   }
 }
 
+// HYK-153-engine-profile-2 (coder-task.md §2 P2-3): a minimal but
+// *complete* engine block -- every key validateEngines now requires
+// present (homeDirName/modelFamilyPatterns/agentMarkerWords), so synthetic
+// configs below that aren't testing one of those specific keys don't have
+// to repeat all four lines inline. `overrides` replaces individual keys
+// (including with intentionally-missing via `undefined` deletion below).
+function fullEngineBlock(deliveryMode, overrides = {}) {
+  const base = {
+    deliveryMode,
+    homeDirName: null,
+    modelFamilyPatterns: {},
+    agentMarkerWords: [],
+    ...overrides,
+  };
+  for (const [k, v] of Object.entries(base)) {
+    if (v === undefined) delete base[k];
+  }
+  return base;
+}
+
+// Same idea for the top-level bannerMarkerPatterns object this round made
+// required (P2-3).
+function fullBannerMarkerPatterns(overrides = {}) {
+  const base = {
+    orcaAdapterAgentMarker: "x",
+    seatCensusAgentBanner: "y",
+    ...overrides,
+  };
+  for (const [k, v] of Object.entries(base)) {
+    if (v === undefined) delete base[k];
+  }
+  return base;
+}
+
 // ---- real config (production export, production file -- not a copy) ----
 
 test("loadEngineProfiles: the real repo config loads and validates", () => {
@@ -234,7 +268,8 @@ test("loadEngineProfiles: missing engines/roles keys each throw CONFIG_SCHEMA_IN
 test("loadEngineProfiles: a role naming an engine absent from config.engines is CONFIG_SCHEMA_INVALID (no silent cross-reference guess)", () => {
   withTempConfig(
     JSON.stringify({
-      engines: { claude: { deliveryMode: "inject" } },
+      engines: { claude: fullEngineBlock("inject") },
+      bannerMarkerPatterns: fullBannerMarkerPatterns(),
       roles: { CODER: { engine: "codex", model: "m", effort: "high" } },
     }),
     (file) => {
@@ -251,9 +286,10 @@ test("loadEngineProfiles: a well-formed synthetic config of the same shape as pr
   withTempConfig(
     JSON.stringify({
       engines: {
-        claude: { deliveryMode: "inject" },
-        codex: { deliveryMode: "no-inject" },
+        claude: fullEngineBlock("inject"),
+        codex: fullEngineBlock("no-inject"),
       },
+      bannerMarkerPatterns: fullBannerMarkerPatterns(),
       roles: {
         CODER: { engine: "claude", model: "m-sonnet", effort: "high" },
       },
@@ -265,4 +301,139 @@ test("loadEngineProfiles: a well-formed synthetic config of the same shape as pr
       assert.equal(getEngineDeliveryMode("codex", profiles), "no-inject");
     },
   );
+});
+
+// ---- P2-2/P2-3 honesty contract: deliveryMode closed set + required
+// consumed keys (coder-task.md §2 "조용한 기본값 -> 사유 있는 실패") ----
+
+test("loadEngineProfiles: deliveryMode outside the closed {inject, no-inject} set is CONFIG_SCHEMA_INVALID, not silently truthy", () => {
+  withTempConfig(
+    JSON.stringify({
+      engines: { claude: fullEngineBlock("sideways-inject") },
+      bannerMarkerPatterns: fullBannerMarkerPatterns(),
+      roles: { CODER: { engine: "claude", model: "m", effort: "high" } },
+    }),
+    (file) => {
+      assert.throws(
+        () => loadEngineProfiles(file),
+        (err) =>
+          err.reason === ENGINE_PROFILE_LOAD_REASON.CONFIG_SCHEMA_INVALID,
+      );
+    },
+  );
+});
+
+test("loadEngineProfiles: a missing homeDirName KEY (not just a falsy value) is CONFIG_SCHEMA_INVALID -- codex's real null value still loads fine", () => {
+  withTempConfig(
+    JSON.stringify({
+      engines: {
+        claude: fullEngineBlock("inject", { homeDirName: undefined }),
+      },
+      bannerMarkerPatterns: fullBannerMarkerPatterns(),
+      roles: { CODER: { engine: "claude", model: "m", effort: "high" } },
+    }),
+    (file) => {
+      assert.throws(
+        () => loadEngineProfiles(file),
+        (err) =>
+          err.reason === ENGINE_PROFILE_LOAD_REASON.CONFIG_SCHEMA_INVALID,
+      );
+    },
+  );
+  withTempConfig(
+    JSON.stringify({
+      engines: { claude: fullEngineBlock("inject", { homeDirName: null }) },
+      bannerMarkerPatterns: fullBannerMarkerPatterns(),
+      roles: { CODER: { engine: "claude", model: "m", effort: "high" } },
+    }),
+    (file) => {
+      assert.doesNotThrow(() => loadEngineProfiles(file));
+    },
+  );
+});
+
+test("loadEngineProfiles: modelFamilyPatterns must be an object, agentMarkerWords must be an array -- missing either is CONFIG_SCHEMA_INVALID", () => {
+  withTempConfig(
+    JSON.stringify({
+      engines: {
+        claude: fullEngineBlock("inject", { modelFamilyPatterns: undefined }),
+      },
+      bannerMarkerPatterns: fullBannerMarkerPatterns(),
+      roles: { CODER: { engine: "claude", model: "m", effort: "high" } },
+    }),
+    (file) => {
+      assert.throws(
+        () => loadEngineProfiles(file),
+        (err) =>
+          err.reason === ENGINE_PROFILE_LOAD_REASON.CONFIG_SCHEMA_INVALID,
+      );
+    },
+  );
+  withTempConfig(
+    JSON.stringify({
+      engines: {
+        claude: fullEngineBlock("inject", { agentMarkerWords: undefined }),
+      },
+      bannerMarkerPatterns: fullBannerMarkerPatterns(),
+      roles: { CODER: { engine: "claude", model: "m", effort: "high" } },
+    }),
+    (file) => {
+      assert.throws(
+        () => loadEngineProfiles(file),
+        (err) =>
+          err.reason === ENGINE_PROFILE_LOAD_REASON.CONFIG_SCHEMA_INVALID,
+      );
+    },
+  );
+});
+
+test("loadEngineProfiles: a missing bannerMarkerPatterns object, or one missing a required key, is CONFIG_SCHEMA_INVALID", () => {
+  withTempConfig(
+    JSON.stringify({
+      engines: { claude: fullEngineBlock("inject") },
+      roles: { CODER: { engine: "claude", model: "m", effort: "high" } },
+    }),
+    (file) => {
+      assert.throws(
+        () => loadEngineProfiles(file),
+        (err) =>
+          err.reason === ENGINE_PROFILE_LOAD_REASON.CONFIG_SCHEMA_INVALID,
+      );
+    },
+  );
+  withTempConfig(
+    JSON.stringify({
+      engines: { claude: fullEngineBlock("inject") },
+      bannerMarkerPatterns: fullBannerMarkerPatterns({
+        seatCensusAgentBanner: undefined,
+      }),
+      roles: { CODER: { engine: "claude", model: "m", effort: "high" } },
+    }),
+    (file) => {
+      assert.throws(
+        () => loadEngineProfiles(file),
+        (err) =>
+          err.reason === ENGINE_PROFILE_LOAD_REASON.CONFIG_SCHEMA_INVALID,
+      );
+    },
+  );
+});
+
+// ---- P2-7: PM added to config.roles (live = claude, Opus-family model,
+// high -- 관제실 seat-launch-registry.jsonl 최근 PM 행 실측, 2026-11-10) ----
+
+test("getRoleProfile: PM resolves to claude/opus-family/high (added this round, matches live seat-launch-registry)", () => {
+  const pm = getRoleProfile("PM");
+  assert.ok(pm, "expected config.roles.PM to exist");
+  assert.equal(pm.engine, "claude");
+  assert.match(pm.model, /opus/i);
+  assert.equal(pm.effort, "high");
+});
+
+test("getEngineByRole: adding PM does not change CODER/REVIEW/VERIFY's resolved engine (live role resolution unchanged apart from PM)", () => {
+  const byRole = getEngineByRole();
+  assert.equal(byRole.CODER, "claude");
+  assert.equal(byRole.REVIEW, "claude");
+  assert.equal(byRole.VERIFY, "claude");
+  assert.equal(byRole.PM, "claude");
 });

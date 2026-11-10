@@ -34,7 +34,11 @@ import {
   isGhostTab,
   createOrcaExecFn,
 } from "./orca-adapter.mjs";
-import { getEngineAgentMarkerWords } from "../../check/engine-profile.mjs";
+import {
+  getEngineAgentMarkerWords,
+  getEngineByRole,
+  getKnownEngines,
+} from "../../check/engine-profile.mjs";
 
 export const SCHEMA_VERSION = 1;
 
@@ -277,14 +281,25 @@ const DEAD_SHELL_PROMPT_RE = /^PS [A-Za-z]:\\.*>\s*$/;
 // scripts/check/engine-profiles.json (engines.<name>.agentMarkerWords) --
 // moved verbatim, same order, so this array stays byte-identical to what
 // seat-marker-divergence.contract.test.mjs already pins below.
+// HYK-153-engine-profile-2 (coder-task.md §2 P2-4): no literal "claude"/
+// "codex" config-access argument -- ROLE_ENGINES is every engine a live
+// role resolves to (today, just one: all four roles in config.roles share
+// it); OTHER_ENGINES is the rest of config.engines' known-engine list.
+// CLAUDE_AGENT_MARKERS/CODEX_AGENT_MARKERS keep their names (pinned by
+// seat-marker-divergence.contract.test.mjs) and their exact values -- only
+// how those values are derived changed.
+const ROLE_ENGINES = new Set(Object.values(getEngineByRole()));
+const OTHER_ENGINES = getKnownEngines().filter((e) => !ROLE_ENGINES.has(e));
 export const CLAUDE_AGENT_MARKERS = [
-  ...getEngineAgentMarkerWords("claude"),
+  ...[...ROLE_ENGINES].flatMap((e) => getEngineAgentMarkerWords(e)),
   "[CODER seat]",
   "[REVIEW seat]",
   "[VERIFY seat]",
   "bypass permissions",
 ];
-export const CODEX_AGENT_MARKERS = getEngineAgentMarkerWords("codex");
+export const CODEX_AGENT_MARKERS = OTHER_ENGINES.flatMap((e) =>
+  getEngineAgentMarkerWords(e),
+);
 const IDLE_PROMPT_MARKERS = ["? for shortcuts", "Ctrl+C to exit"];
 // review-1 P1 (2): active dispatch/queued work를 명시 관측하는 별도
 // capability(detectActiveWork)의 기준 신호 -- PM 위험2 경고대로

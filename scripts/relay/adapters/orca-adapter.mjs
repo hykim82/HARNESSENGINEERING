@@ -43,6 +43,7 @@ import {
   getEngineDeliveryMode,
   getEngineAttr,
   getBannerMarkerPattern,
+  assertKnownEngine,
 } from "../../check/engine-profile.mjs";
 import { judgeDispatchPostcheck } from "./dispatch-postcheck-core.mjs";
 // HYK-413-seat-binding §2⑴: reuse relay-handshake.mjs's own
@@ -2644,13 +2645,18 @@ function defaultFsDeps(overrides = {}) {
 }
 
 // A3: 메인 repo의 .claude/settings.local.json을 워크트리에 복사(훅 복원).
-// 이미 있으면 건너뜀(멱등). 디렉터리 이름(".claude")은
-// engine-profiles.json의 claude.homeDirName에서 읽는다(HYK-153 piece B).
-const CLAUDE_HOME_DIR_NAME = getEngineAttr("claude", "homeDirName");
-function ensureSettingsCopied(mainRepoDir, worktreePath, fs, steps) {
+// 이미 있으면 건너뜀(멱등). 디렉터리 이름은 engine-profiles.json의
+// <role의 엔진>.homeDirName에서 읽는다(HYK-153 piece B) -- role이 ENGINE_
+// BY_ROLE에 없거나 그 엔진의 homeDirName이 없으면(예: homeDirName:null인
+// 엔진) 복사할 대상 디렉터리 자체가 없으므로 조용히 건너뛴다(엔진 이름을
+// 여기서 추측하지 않는다, HYK-153-engine-profile-2 coder-task.md §2 P2-4:
+// 역할 기반 조회로 리터럴 "claude" 제거).
+function ensureSettingsCopied(role, mainRepoDir, worktreePath, fs, steps) {
   if (!isNonEmptyString(mainRepoDir)) return;
-  const src = join(mainRepoDir, CLAUDE_HOME_DIR_NAME, "settings.local.json");
-  const dst = join(worktreePath, CLAUDE_HOME_DIR_NAME, "settings.local.json");
+  const homeDirName = getEngineAttr(ENGINE_BY_ROLE[role], "homeDirName");
+  if (!isNonEmptyString(homeDirName)) return;
+  const src = join(mainRepoDir, homeDirName, "settings.local.json");
+  const dst = join(worktreePath, homeDirName, "settings.local.json");
   if (fs.existsFn(dst) || !fs.existsFn(src)) return;
   fs.mkdirFn(dirname(dst), { recursive: true });
   fs.copyFileFn(src, dst);
@@ -2708,7 +2714,7 @@ function validateEnsureSeatInput(role, worktreePath, create) {
 // 라이브 표본은 0건이다 -- 이 경로는 fake execFn PASS 대상이지 라이브
 // 준비 완료 주장이 아니다(UNVERIFIED, 실패해도 ⓑ로 자동 강등하지 않는다).
 function createNewSeat(role, worktreePath, mainRepoDir, opts, fs, steps) {
-  ensureSettingsCopied(mainRepoDir, worktreePath, fs, steps);
+  ensureSettingsCopied(role, mainRepoDir, worktreePath, fs, steps);
   ensureNodeModulesCopied(mainRepoDir, worktreePath, fs, steps);
 
   const resolved = resolveSeatHandle({ role, worktreePath }, opts);
@@ -3426,10 +3432,29 @@ function deliverTaskInternal(ctx, opts = {}) {
   // corrected from a stale "codex" to the live "claude", HYK-153 piece B
   // 1순위) -- the codex delivery path (deliverToCodexSeat, below) stays a
   // registered, directly-tested engine module (E2) even though today's
-  // three roles no longer route to it through ctx.role alone.
-  const engine = isNonEmptyString(opts.engineOverrideForTests)
-    ? opts.engineOverrideForTests
-    : ENGINE_BY_ROLE[c.role];
+  // roles no longer route to it through ctx.role alone.
+  //
+  // HYK-153-engine-profile-2 (coder-task.md §2 P2-1): the override value
+  // used to be trusted verbatim -- a caller passing a garbage/unknown
+  // engine name here (not just a deliberate test selecting "codex") fell
+  // through getEngineDeliveryMode(engine) === "no-inject" as false and
+  // silently took the claude-shaped branch, a quiet wrong-path bug rather
+  // than a loud rejection. assertKnownEngine turns that into a reasoned
+  // failure; every existing engineOverrideForTests:"codex" call site is
+  // unaffected ("codex" is, and stays, a known engine).
+  let engine;
+  if (isNonEmptyString(opts.engineOverrideForTests)) {
+    try {
+      engine = assertKnownEngine(opts.engineOverrideForTests);
+    } catch (err) {
+      return {
+        ok: false,
+        reason: `orca-adapter: ${REASON.UNSUPPORTED_PROFILE} -- engineOverrideForTests ${JSON.stringify(opts.engineOverrideForTests)} is not a known engine (${err.message})`,
+      };
+    }
+  } else {
+    engine = ENGINE_BY_ROLE[c.role];
+  }
   if (!isNonEmptyString(engine)) {
     return {
       ok: false,
