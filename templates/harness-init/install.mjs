@@ -1514,6 +1514,23 @@ export const ENFORCEMENT_RELAY_FILES = [
   "hyk171-cycle4b2c-fixtures.mjs",
   "dispatch-bound-seat-proof.mjs",
   "dispatch-bound-seat-proof.test.mjs",
+  // HYK-153-engine-profile-1 (piece B): scripts/check/seat-engine-detect.mjs
+  // (already listed on the check axis below) now imports
+  // scripts/check/engine-profile.mjs -- a new import edge that the closure
+  // test (install-copylist-closure.test.mjs) caught live. engine-profiles.json
+  // is a non-.mjs data file engine-profile.mjs reads via readFileSync (not a
+  // static import the closure algorithm tracks), so it is listed by hand
+  // here -- without it, engine-profile.mjs would be present but its
+  // loadEngineProfiles() call would fail CONFIG_FILE_UNREADABLE on the
+  // installed repo. engine-profile-cli.mjs/.test.mjs are not required by any
+  // import closure (nothing else imports them) but are included so the CLI
+  // docs/control-room-patches/HYK-153-engine-profile.md proposes calling
+  // actually exists on an installed worktree.
+  "engine-profile.mjs",
+  "engine-profile.test.mjs",
+  "engine-profiles.json",
+  "engine-profile-cli.mjs",
+  "engine-profile-cli.test.mjs",
 ];
 
 // HYK-209-installer-closure-derive-1 (2R): the scripts/supervisor/*.mjs copy

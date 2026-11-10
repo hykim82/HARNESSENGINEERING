@@ -19,8 +19,13 @@
 // 쪽의 몫이다) -- 그래야 두 번 실행한 출력이 항상 바이트 단위로 같다
 // (결정성, coder-task.md §2ⓒ).
 
+// HYK-153-engine-profile-1 (piece B): KNOWN_ENGINES used to hardcode the
+// two engine-name literals here; it now reads the set of registered
+// engines from scripts/check/engine-profiles.json (one config point).
+import { getKnownEngines } from "../check/engine-profile.mjs";
+
 export const KNOWN_ROLES = ["ORCH", "CODER", "REVIEW", "VERIFY", "PM"];
-export const KNOWN_ENGINES = ["claude", "codex"];
+export const KNOWN_ENGINES = getKnownEngines();
 
 // 본문 6항목은 coder-task.md §2ⓑ ⑴~⑹과 1:1 대응한다. 숫자를 넣은 것은
 // 사람이 §6-c와 대조하기 쉽게 하기 위함이고, 시험은 숫자가 아니라 각 줄의
@@ -56,7 +61,7 @@ export function buildLaunchRuleBlock({ role, engine }) {
 
 function printUsage() {
   console.error(
-    "usage: node scripts/supervisor/worker-launch-rules.mjs --role <ORCH|CODER|REVIEW|VERIFY|PM> --engine <claude|codex>",
+    `usage: node scripts/supervisor/worker-launch-rules.mjs --role <${KNOWN_ROLES.join("|")}> --engine <${KNOWN_ENGINES.join("|")}>`,
   );
 }
 

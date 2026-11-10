@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
   "anchorPattern": "claude|codex|sonnet|opus|haiku|fable|gpt-|anthropic|openai",
-  "note": "HYK-153 engine-split-2 (rework of engine-split-1) -- pins today's engine-name literal/branch-comparison OCCURRENCE COUNTS (multiset, not just set membership -- review 1R P1-1) in scripts/**/*.mjs (tests and fixtures excluded) so new hardcoding, or one more occurrence of an already-allowed key, turns scripts/check/engine-name-literal.test.mjs red. Regex-literal bodies are now scanned too (review 1R P2-3). Reducing this list is HYK-153 piece B, not this round.",
+  "note": "HYK-153-engine-profile-1 (piece B, coder-task.md \u00a72 \u24d8\u24d8\u24d8 '\u314d\u3745 \u3141\u3758 \u3146\u3758'). Every B2-TODO row from the engine-split-2 baseline (piece A) is now resolved into one of E1/E2/E5: moved into scripts/check/engine-profiles.json + engine-profile.mjs (E1, a single config-reading point -- a handful of these rows are the config-access literal itself, e.g. getEngineAttr(\"claude\", ...), which selects which profile to read rather than branching on an engine name), or recategorized into E2 (an already-established category for files whose role is inherently engine-specific, e.g. seat-config-inject.mjs's claude-only hook/settings machinery and dispatch-worker-modal-check.mjs's literal Claude Code CLI UI text -- same precedent as the pre-existing derive-claude-project-dir-cli.mjs/dispatch-start-confirm-cli.mjs E2 rows). The two E3 rows (go-wait-supervisor.mjs:128, pull-supervisor.mjs:532) were reworded to drop the engine-name mention entirely, so E3 has zero rows left. branchLiteralBaseline is now empty: all three engine===\"claude\"/\"codex\" branch comparisons were replaced with engine-profile.mjs's deliveryMode attribute comparison (getEngineDeliveryMode(engine) === \"inject\"/\"no-inject\"), which does not match the engine-name anchor pattern. Final categories present: E1 (config), E2 (registered per-engine modules), E5 (out-of-layer Claude-only hooks). E4 (tests/fixtures) stays out of scan scope by construction.",
   "generatedAt": "2026-11-10",
   "literalExceptions": [
     {
@@ -54,19 +54,11 @@
     },
     {
       "file": "scripts/check/engine-split-rounds.mjs",
-      "literal": "sonnet",
-      "line": 23,
+      "literal": "claude",
+      "line": 35,
       "count": 1,
-      "category": "B2-TODO",
-      "note": "review 1R P2-3(정규식 리터럴 신규 고정) -- 이 라운드 자신의 SONNET_FAMILY_PATTERN 분류 상수(/sonnet/i)"
-    },
-    {
-      "file": "scripts/check/engine-split-rounds.mjs",
-      "literal": "opus",
-      "line": 24,
-      "count": 1,
-      "category": "B2-TODO",
-      "note": "review 1R P2-3(정규식 리터럴 신규 고정) -- 이 라운드 자신의 OPUS_FAMILY_PATTERN 분류 상수(/opus/i)"
+      "category": "E1",
+      "note": "HYK-153-engine-profile-1: getEngineModelFamilyPatterns(\"claude\") -- config-access literal (which profile to read), not a branch comparison on engine name"
     },
     {
       "file": "scripts/check/migration-ledger.schema.mjs",
@@ -82,7 +74,7 @@
       "line": 24,
       "count": 1,
       "category": "E5",
-      "note": "review 1R P2-3(정규식 리터럴 신규 고정) -- MCP 쓰기 도구 차단 정규식, 'claude_ai_Linear' 안의 'claude' 때문에 적중. 계층 밖 훅 목록(selfcheck 축과 같은 성격) -- PM 설계 §b E5"
+      "note": "review 1R P2-3: MCP 쓰기 도구 차단 정규식, 'claude_ai_Linear' 안의 'claude' 때문에 적중. 계층 밖 훅 목록(selfcheck 축과 같은 성격) -- PM 설계 §b E5"
     },
     {
       "file": "scripts/check/pm-guard.mjs",
@@ -93,84 +85,28 @@
       "note": "계층 밖 Claude 전용 훅 목록(selfcheck 축) -- PM 설계 §b E5"
     },
     {
-      "file": "scripts/check/seat-census.mjs",
-      "literal": "gpt-5\\.6|Sonnet|Opus|Fable|\\[CODER\\]|\\[REVIEW\\]|bypass permissions|MCP startup|weekly \\d",
-      "line": 28,
-      "count": 1,
-      "category": "B2-TODO",
-      "note": "review 1R P2-3(정규식 리터럴 신규 고정) -- AGENT_BANNER_MARKERS 좌석 배너 마커 정규식, seat-engine-detect.mjs/orca-adapter.mjs의 같은 성격 마커와 동일 분류"
-    },
-    {
       "file": "scripts/check/seat-config-inject.mjs",
       "literal": "if [ -z \"$CLAUDE_PROJECT_DIR\" ]; then echo \"role-guard: CLAUDE_PROJECT_DIR is unset/empty -- refusing to fail-open (HYK-462 2R hardening)\" >&2; exit 2; fi; node \"$CLAUDE_PROJECT_DIR/scripts/check/role-guard.mjs\"",
       "line": 62,
       "count": 1,
-      "category": "B2-TODO",
-      "note": "엔진 분기·설정 상수 -- 조각 B(HYK-153 piece B)에서 config/engine-profiles.json 로 이관 예정"
+      "category": "E2",
+      "note": "HYK-153-engine-profile-1: recategorized from B2-TODO -- this whole module injects Claude Code's own hook/settings.local.json machinery (no codex equivalent exists to compare against), same precedent as dispatch-start-confirm-cli.mjs's E2 '.claude'/'--claude-home' rows"
     },
     {
       "file": "scripts/check/seat-config-inject.mjs",
       "literal": ".claude",
       "line": 246,
       "count": 1,
-      "category": "B2-TODO",
-      "note": "엔진 분기·설정 상수 -- 조각 B(HYK-153 piece B)에서 config/engine-profiles.json 로 이관 예정"
+      "category": "E2",
+      "note": "HYK-153-engine-profile-1: recategorized from B2-TODO -- same reason as this file's line 62 row (Claude-only settings-injection module)"
     },
     {
       "file": "scripts/check/seat-config-inject.mjs",
       "literal": "C:\\\\Users\\\\Administrator\\\\.claude-team",
       "line": 279,
       "count": 1,
-      "category": "B2-TODO",
-      "note": "엔진 분기·설정 상수 -- 조각 B(HYK-153 piece B)에서 config/engine-profiles.json 로 이관 예정"
-    },
-    {
-      "file": "scripts/check/seat-engine-detect.mjs",
-      "literal": "Sonnet|Opus|Fable|bypass permissions",
-      "line": 39,
-      "count": 1,
-      "category": "B2-TODO",
-      "note": "review 1R P2-3(정규식 리터럴 신규 고정) -- 좌석 배너 마커 정규식, 같은 파일의 B2-TODO 분류와 일치"
-    },
-    {
-      "file": "scripts/check/seat-engine-detect.mjs",
-      "literal": "gpt-5\\.6",
-      "line": 40,
-      "count": 1,
-      "category": "B2-TODO",
-      "note": "review 1R P2-3(정규식 리터럴 신규 고정) -- 좌석 배너 마커 정규식, 같은 파일의 B2-TODO 분류와 일치"
-    },
-    {
-      "file": "scripts/check/seat-engine-detect.mjs",
-      "literal": "claude",
-      "line": 46,
-      "count": 1,
-      "category": "B2-TODO",
-      "note": "엔진 분기·설정 상수 -- 조각 B(HYK-153 piece B)에서 config/engine-profiles.json 로 이관 예정"
-    },
-    {
-      "file": "scripts/check/seat-engine-detect.mjs",
-      "literal": "codex",
-      "line": 47,
-      "count": 1,
-      "category": "B2-TODO",
-      "note": "엔진 분기·설정 상수 -- 조각 B(HYK-153 piece B)에서 config/engine-profiles.json 로 이관 예정"
-    },
-    {
-      "file": "scripts/check/seat-engine-detect.mjs",
-      "literal": "찾던 마커: claude[Sonnet|Opus|Fable|bypass permissions] / codex[gpt-5.6] -- ",
-      "line": 84,
-      "count": 1,
-      "category": "B2-TODO",
-      "note": "엔진 분기·설정 상수 -- 조각 B(HYK-153 piece B)에서 config/engine-profiles.json 로 이관 예정"
-    },
-    {
-      "file": "scripts/check/seat-engine-detect.mjs",
-      "literal": "engine in {claude, codex}; source = measured-preview.\\n",
-      "line": 104,
-      "count": 1,
-      "category": "B2-TODO",
-      "note": "엔진 분기·설정 상수 -- 조각 B(HYK-153 piece B)에서 config/engine-profiles.json 로 이관 예정"
+      "category": "E2",
+      "note": "HYK-153-engine-profile-1: recategorized from B2-TODO -- matches the live launcher's own hardcoded CLAUDE_CONFIG_DIR literal (orca-worker-seat.ps1, control-room file this round does not edit); same reason as this file's line 62 row"
     },
     {
       "file": "scripts/check/selfcheck-inventory.mjs",
@@ -194,7 +130,7 @@
       "line": 922,
       "count": 3,
       "category": "E5",
-      "note": "계층 밖 Claude 전용 훅 목록(selfcheck 축) -- PM 설계 §b E5. review 1R P1-1: 같은 리터럴이 3곳(922·1092·1344)에 있고 이전엔 Set 비교라 1개 키로 접혔다 -- 다중집합으로 count=3 고정."
+      "note": "계층 밖 Claude 전용 훅 목록(selfcheck 축) -- PM 설계 §b E5. 같은 리터럴이 3곳(922·1092·1344)에 있고 다중집합으로 count=3 고정."
     },
     {
       "file": "scripts/check/selfcheck-inventory.mjs",
@@ -210,7 +146,7 @@
       "line": 1395,
       "count": 2,
       "category": "E5",
-      "note": "계층 밖 Claude 전용 훅 목록(selfcheck 축) -- PM 설계 §b E5. review 1R P1-1: 같은 리터럴이 2곳(1395·1427)에 있고 이전엔 Set 비교라 1개 키로 접혔다 -- 다중집합으로 count=2 고정."
+      "note": "계층 밖 Claude 전용 훅 목록(selfcheck 축) -- PM 설계 §b E5. 같은 리터럴이 2곳(1395·1427)에 있고 다중집합으로 count=2 고정."
     },
     {
       "file": "scripts/check/selfcheck-inventory.mjs",
@@ -285,100 +221,28 @@
       "note": "계층 밖 Claude 전용 훅 목록(selfcheck 축) -- PM 설계 §b E5"
     },
     {
-      "file": "scripts/relay/adapters/dispatch-correlation-adapter.mjs",
-      "literal": "CLAUDE_INJECT_MISSING",
-      "line": 220,
-      "count": 1,
-      "category": "B2-TODO",
-      "note": "엔진 분기·설정 상수 -- 조각 B(HYK-153 piece B)에서 config/engine-profiles.json 로 이관 예정"
-    },
-    {
-      "file": "scripts/relay/adapters/dispatch-correlation-adapter.mjs",
-      "literal": "claude",
-      "line": 230,
-      "count": 1,
-      "category": "B2-TODO",
-      "note": "엔진 분기·설정 상수 -- 조각 B(HYK-153 piece B)에서 config/engine-profiles.json 로 이관 예정"
-    },
-    {
-      "file": "scripts/relay/adapters/dispatch-correlation-adapter.mjs",
-      "literal": "codex",
-      "line": 239,
-      "count": 1,
-      "category": "B2-TODO",
-      "note": "엔진 분기·설정 상수 -- 조각 B(HYK-153 piece B)에서 config/engine-profiles.json 로 이관 예정"
-    },
-    {
       "file": "scripts/relay/adapters/orca-adapter.mjs",
       "literal": "claude",
-      "line": 153,
-      "count": 2,
-      "category": "B2-TODO",
-      "note": "엔진 분기·설정 상수 -- 조각 B(HYK-153 piece B)에서 config/engine-profiles.json 로 이관 예정. review 1R P1-1: 같은 리터럴이 153·155 두 곳에 있고 이전엔 Set 비교라 1개 키로 접혔다 -- 다중집합으로 count=2 고정(review M5 재현 지점)."
-    },
-    {
-      "file": "scripts/relay/adapters/orca-adapter.mjs",
-      "literal": "codex",
-      "line": 154,
-      "count": 2,
-      "category": "B2-TODO",
-      "note": "엔진 분기·설정 상수 -- 조각 B(HYK-153 piece B)에서 config/engine-profiles.json 로 이관 예정. review 1R P1-1: 같은 리터럴이 154·3410 두 곳에 있고 이전엔 Set 비교라 1개 키로 접혔다 -- 다중집합으로 count=2 고정(review M5 재현 지점)."
-    },
-    {
-      "file": "scripts/relay/adapters/orca-adapter.mjs",
-      "literal": "gpt-5\\.6|Sonnet|Opus|\\[CODER seat\\]|\\[REVIEW seat\\]|bypass permissions|MCP startup|weekly \\d",
-      "line": 1190,
+      "line": 2649,
       "count": 1,
-      "category": "B2-TODO",
-      "note": "review 1R P2-3(정규식 리터럴 신규 고정) -- 좌석 배너 마커 정규식, 같은 파일의 B2-TODO 분류와 일치"
-    },
-    {
-      "file": "scripts/relay/adapters/orca-adapter.mjs",
-      "literal": ".claude",
-      "line": 2630,
-      "count": 2,
-      "category": "B2-TODO",
-      "note": "엔진 분기·설정 상수 -- 조각 B(HYK-153 piece B)에서 config/engine-profiles.json 로 이관 예정. review 1R P1-1: 같은 리터럴이 2630·2631 두 곳에 있고 이전엔 Set 비교라 1개 키로 접혔다 -- 다중집합으로 count=2 고정."
+      "category": "E1",
+      "note": "HYK-153-engine-profile-1: getEngineAttr(\"claude\", \"homeDirName\") -- config-access literal (which profile to read), not a branch comparison. ENGINE_BY_ROLE/AGENT_MARKER_RE/deliverTaskInternal's engine===literal branch all moved to engine-profile.mjs this round, so this is the ONLY engine-name literal left in this file."
     },
     {
       "file": "scripts/relay/adapters/seat-candidate-adapter.mjs",
-      "literal": "Sonnet",
-      "line": 275,
+      "literal": "claude",
+      "line": 281,
       "count": 1,
-      "category": "B2-TODO",
-      "note": "엔진 분기·설정 상수 -- 조각 B(HYK-153 piece B)에서 config/engine-profiles.json 로 이관 예정"
-    },
-    {
-      "file": "scripts/relay/adapters/seat-candidate-adapter.mjs",
-      "literal": "Opus",
-      "line": 276,
-      "count": 1,
-      "category": "B2-TODO",
-      "note": "엔진 분기·설정 상수 -- 조각 B(HYK-153 piece B)에서 config/engine-profiles.json 로 이관 예정"
-    },
-    {
-      "file": "scripts/relay/adapters/seat-candidate-adapter.mjs",
-      "literal": "Haiku",
-      "line": 277,
-      "count": 1,
-      "category": "B2-TODO",
-      "note": "엔진 분기·설정 상수 -- 조각 B(HYK-153 piece B)에서 config/engine-profiles.json 로 이관 예정"
-    },
-    {
-      "file": "scripts/relay/adapters/seat-candidate-adapter.mjs",
-      "literal": "gpt-5.6",
-      "line": 283,
-      "count": 1,
-      "category": "B2-TODO",
-      "note": "엔진 분기·설정 상수 -- 조각 B(HYK-153 piece B)에서 config/engine-profiles.json 로 이관 예정"
+      "category": "E1",
+      "note": "HYK-153-engine-profile-1: getEngineAgentMarkerWords(\"claude\") -- config-access literal (which profile to read), not a branch comparison"
     },
     {
       "file": "scripts/relay/adapters/seat-candidate-adapter.mjs",
       "literal": "codex",
-      "line": 283,
+      "line": 287,
       "count": 1,
-      "category": "B2-TODO",
-      "note": "엔진 분기·설정 상수 -- 조각 B(HYK-153 piece B)에서 config/engine-profiles.json 로 이관 예정"
+      "category": "E1",
+      "note": "HYK-153-engine-profile-1: getEngineAgentMarkerWords(\"codex\") -- config-access literal (which profile to read), not a branch comparison"
     },
     {
       "file": "scripts/relay/claude-adapter.mjs",
@@ -401,24 +265,8 @@
       "literal": "No, and tell Claude what to do differently",
       "line": 26,
       "count": 1,
-      "category": "B2-TODO",
-      "note": "review 1R P2-5: MODAL_MARKERS 검출 상수(좌석 화면 문자열과 대조하는 엔진 UI 마커)다 -- 사람에게 보이는 표시 문구(E3)가 아니라 분기·설정 상수(B2-TODO)로 재분류. 조각 B에서 프로필 previewMarkers 로 이관 예정."
-    },
-    {
-      "file": "scripts/relay/go-wait-supervisor.mjs",
-      "literal": "arm-state: runSupervisedAttempt requires opts.adapterFn (stub in 5A -- real Claude/codex adapters are group 5B)",
-      "line": 128,
-      "count": 1,
-      "category": "E3",
-      "note": "사람에게 보이는 사유문·usage 문구, 비교연산자 오른쪽에 쓰이지 않음 -- PM 설계 §b E3"
-    },
-    {
-      "file": "scripts/relay/pull-supervisor.mjs",
-      "literal": "pull-supervisor: opts.adapterFn is required (inject fake -- real Claude/codex CLI is cycle3 scope)",
-      "line": 532,
-      "count": 1,
-      "category": "E3",
-      "note": "사람에게 보이는 사유문·usage 문구, 비교연산자 오른쪽에 쓰이지 않음 -- PM 설계 §b E3"
+      "category": "E2",
+      "note": "HYK-153-engine-profile-1: recategorized from B2-TODO -- this is Claude Code's own literal CLI modal text (MODAL_MARKERS catalog), not a branch/config value; the file's own header already documents it as the one canonical, hand-authored source (carrying it in two places would risk drift) -- an engine-specific observation catalog, same category shape as claude-adapter.mjs/codex-adapter.mjs"
     },
     {
       "file": "scripts/supervisor/derive-claude-project-dir-cli.mjs",
@@ -491,47 +339,7 @@
       "count": 1,
       "category": "E2",
       "note": "엔진별 어댑터·관측 모듈(파일명/역할이 엔진 고유) -- PM 설계 §b E2"
-    },
-    {
-      "file": "scripts/supervisor/worker-launch-rules.mjs",
-      "literal": "claude",
-      "line": 23,
-      "count": 1,
-      "category": "B2-TODO",
-      "note": "엔진 분기·설정 상수 -- 조각 B(HYK-153 piece B)에서 config/engine-profiles.json 로 이관 예정"
-    },
-    {
-      "file": "scripts/supervisor/worker-launch-rules.mjs",
-      "literal": "codex",
-      "line": 23,
-      "count": 1,
-      "category": "B2-TODO",
-      "note": "엔진 분기·설정 상수 -- 조각 B(HYK-153 piece B)에서 config/engine-profiles.json 로 이관 예정"
-    },
-    {
-      "file": "scripts/supervisor/worker-launch-rules.mjs",
-      "literal": "usage: node scripts/supervisor/worker-launch-rules.mjs --role <ORCH|CODER|REVIEW|VERIFY|PM> --engine <claude|codex>",
-      "line": 59,
-      "count": 1,
-      "category": "B2-TODO",
-      "note": "엔진 분기·설정 상수 -- 조각 B(HYK-153 piece B)에서 config/engine-profiles.json 로 이관 예정"
     }
   ],
-  "branchLiteralBaseline": [
-    {
-      "file": "scripts/relay/adapters/dispatch-correlation-adapter.mjs",
-      "match": "=== \"claude",
-      "count": 1
-    },
-    {
-      "file": "scripts/relay/adapters/dispatch-correlation-adapter.mjs",
-      "match": "=== \"codex",
-      "count": 1
-    },
-    {
-      "file": "scripts/relay/adapters/orca-adapter.mjs",
-      "match": "=== \"codex",
-      "count": 1
-    }
-  ]
+  "branchLiteralBaseline": []
 }

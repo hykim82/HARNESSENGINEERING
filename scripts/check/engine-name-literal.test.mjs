@@ -455,7 +455,7 @@ function loadAllowlist() {
 // sha256 을 시험 안에 고정"). If the allowlist changes, this constant must
 // be updated in the same commit, so widening it is visible in the diff.
 const EXPECTED_ALLOWLIST_SHA256 =
-  "c0e6327c98966dd90b84abfa02dbc698bd7190d79b434c524147055e5b605883";
+  "3e39e367e6d2eb588cab8225db3b119a652296e67ea463efe2c7377995d48579";
 
 test("allowlist file hash is pinned (widening the allowlist must show in the diff)", () => {
   const { sha256 } = loadAllowlist();

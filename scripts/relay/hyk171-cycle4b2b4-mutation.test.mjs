@@ -416,7 +416,7 @@ test("mutation M10: receiving the identical (runtimeTaskId, dispatchId) twice ne
 // M11 -- 프로필별 injected 검증을 제거하면, claude의 injected:false가 codex와
 // 똑같이 "정상"으로 통과해 RED("배정됨"과 "본문 주입됨" 혼동).
 // ---------------------------------------------------------------------------
-test("mutation M11a: claude profile with injected:false is NOT a normal outcome -- CLAUDE_INJECT_MISSING", () => {
+test("mutation M11a: claude profile with injected:false is NOT a normal outcome -- INJECT_EXPECTED_BUT_MISSING", () => {
   const envelope = normalizeDispatchRawUnion(rawDispatchNotInjected());
   assert.equal(envelope.ok, true);
   assert.equal(envelope.shape, DISPATCH_SHAPE.DISPATCH);
@@ -429,7 +429,7 @@ test("mutation M11a: claude profile with injected:false is NOT a normal outcome 
   assert.equal(profile.ok, false);
   assert.equal(
     profile.reasonCode,
-    INJECTED_PROFILE_REASON.CLAUDE_INJECT_MISSING,
+    INJECTED_PROFILE_REASON.INJECT_EXPECTED_BUT_MISSING,
   );
 });
 

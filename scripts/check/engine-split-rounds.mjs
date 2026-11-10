@@ -24,11 +24,23 @@
 
 import fs from "node:fs";
 import path from "node:path";
+import { getEngineModelFamilyPatterns } from "./engine-profile.mjs";
 
 export const REVIEW_LABEL_PATTERN = /^(.*)-review-(\d+)$/;
 export const ISSUE_PATTERN = /^(HYK-\d+)/;
-export const SONNET_FAMILY_PATTERN = /sonnet/i;
-export const OPUS_FAMILY_PATTERN = /opus/i;
+// HYK-153-engine-profile-1 (piece B): the family-classification words
+// ("sonnet"/"opus") now come from scripts/check/engine-profiles.json
+// (engines.claude.modelFamilyPatterns) -- same /i case-insensitive match as
+// before, built here instead of hardcoded.
+const CLAUDE_MODEL_FAMILY_PATTERNS = getEngineModelFamilyPatterns("claude");
+export const SONNET_FAMILY_PATTERN = new RegExp(
+  CLAUDE_MODEL_FAMILY_PATTERNS.sonnet,
+  "i",
+);
+export const OPUS_FAMILY_PATTERN = new RegExp(
+  CLAUDE_MODEL_FAMILY_PATTERNS.opus,
+  "i",
+);
 
 function isPlainObject(v) {
   return v !== null && typeof v === "object" && !Array.isArray(v);

@@ -23,9 +23,15 @@
 import { readFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { readRegistryDiagnostics } from "./seat-origin-registry.mjs";
+import { getBannerMarkerPattern } from "./engine-profile.mjs";
 
-export const AGENT_BANNER_MARKERS =
-  /gpt-5\.6|Sonnet|Opus|Fable|\[CODER\]|\[REVIEW\]|bypass permissions|MCP startup|weekly \d/i;
+// HYK-153-engine-profile-1 (piece B): the pattern source moved verbatim
+// into scripts/check/engine-profiles.json
+// bannerMarkerPatterns.seatCensusAgentBanner -- same /i flag as before.
+export const AGENT_BANNER_MARKERS = new RegExp(
+  getBannerMarkerPattern("seatCensusAgentBanner"),
+  "i",
+);
 
 // HYK-464-followup-1 축A: 정본 런처(orca-worker-seat.ps1)가 뜨는 즉시
 // 스스로 찍는 로그 줄 -- 실측(ORCH 2026-09-16 19:16, 좌석 2): 방금 기동한

@@ -10,6 +10,12 @@
 // 입력만 받는다 -- dispatch-correlation-core.mjs 헤더 참조). vendor 명령을
 // spawn하지 않는다(호출자가 이미 얻은 응답 객체만 받는다).
 
+// HYK-153-engine-profile-1 (piece B): judgeInjectedProfile used to branch on
+// the engine-name literal itself (`engine === "claude"` / `"codex"`) --
+// moved to the deliveryMode profile attribute (engine-profile.mjs) so this
+// file carries zero engine-name literals/branches.
+import { getEngineDeliveryMode } from "../../check/engine-profile.mjs";
+
 export const DISPATCH_SHOW_REASON = Object.freeze({
   NOT_OK: "NOT_OK",
   // coder-task.md §1-B 실측: 미배정 태스크와 오타 난(존재하지 않는) 태스크
@@ -217,7 +223,7 @@ export function normalizeDispatchRawUnion(rawResponse) {
 // ---------------------------------------------------------------------------
 export const INJECTED_PROFILE_REASON = Object.freeze({
   NOT_APPLICABLE: "NOT_APPLICABLE",
-  CLAUDE_INJECT_MISSING: "CLAUDE_INJECT_MISSING",
+  INJECT_EXPECTED_BUT_MISSING: "INJECT_EXPECTED_BUT_MISSING",
   UNSUPPORTED_ENGINE: "UNSUPPORTED_ENGINE",
   OK: "OK",
 });
@@ -227,19 +233,20 @@ export function judgeInjectedProfile({ engine, shape, injected } = {}) {
   if (shape !== DISPATCH_SHAPE.DISPATCH) {
     return { ok: true, reasonCode: INJECTED_PROFILE_REASON.NOT_APPLICABLE };
   }
-  if (engine === "claude") {
+  const deliveryMode = getEngineDeliveryMode(engine);
+  if (deliveryMode === "inject") {
     if (injected !== true) {
       return {
         ok: false,
-        reasonCode: INJECTED_PROFILE_REASON.CLAUDE_INJECT_MISSING,
+        reasonCode: INJECTED_PROFILE_REASON.INJECT_EXPECTED_BUT_MISSING,
       };
     }
     return { ok: true, reasonCode: INJECTED_PROFILE_REASON.OK };
   }
-  if (engine === "codex") {
-    // codex는 injected:false가 정상이다(PM M11 핵심) -- false를 실패로
-    // 취급하지 않는다. injected:true 쪽은 이 사이클 범위 밖(추정 금지,
-    // 판단 보류만 하고 실패로 만들지 않는다).
+  if (deliveryMode === "no-inject") {
+    // no-inject 프로필은 injected:false가 정상이다(PM M11 핵심) -- false를
+    // 실패로 취급하지 않는다. injected:true 쪽은 이 사이클 범위 밖(추정
+    // 금지, 판단 보류만 하고 실패로 만들지 않는다).
     return { ok: true, reasonCode: INJECTED_PROFILE_REASON.OK };
   }
   return { ok: false, reasonCode: INJECTED_PROFILE_REASON.UNSUPPORTED_ENGINE };

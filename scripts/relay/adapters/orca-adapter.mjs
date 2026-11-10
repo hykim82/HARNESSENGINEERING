@@ -38,6 +38,12 @@ import {
   judgeInjectedProfile,
   normalizeDispatchShow,
 } from "./dispatch-correlation-adapter.mjs";
+import {
+  getEngineByRole,
+  getEngineDeliveryMode,
+  getEngineAttr,
+  getBannerMarkerPattern,
+} from "../../check/engine-profile.mjs";
 import { judgeDispatchPostcheck } from "./dispatch-postcheck-core.mjs";
 // HYK-413-seat-binding §2⑴: reuse relay-handshake.mjs's own
 // receipt-ledger-path resolution and JSONL reader (HYK-387 3R hardened
@@ -149,11 +155,19 @@ export const REASON = Object.freeze({
 });
 
 // ---- B9: 엔진별 좌석 실행 정책(단일 구성 지점 -- 하드코딩 분산 금지) ----
-export const ENGINE_BY_ROLE = Object.freeze({
-  CODER: "claude",
-  REVIEW: "codex",
-  VERIFY: "claude",
-});
+// HYK-153-engine-profile-1 (piece B, coder-task.md §1 1순위): 이 상수는
+// scripts/check/engine-profiles.json 한 곳에서 읽는다. 고치기 전까지는
+// REVIEW가 "codex"로 하드코딩돼 있었는데, 실제 REVIEW 좌석은 Claude
+// Opus로 뜬다(관제실 seat-launch-registry.jsonl 최근 행 실측, 2026-11-10)
+// -- 역할→엔진 "식별" 상수가 실물과 어긋나 있었다는 뜻이다. 주의: 이 상수가
+// 바뀌는 것은 "역할이 어느 좌석 handle로 풀리는가"(resolveSeatHandle/
+// resolveRoleBoundSeatHandle, 대장 registry의 role 필드 기반 -- 완전히
+// 별개 축, 이 라운드가 손대지 않음)가 아니라 "그 좌석에 작업을 넣을 때
+// 어떤 전달 프로토콜(--inject 1회 vs 무-inject+기동문+Enter)을 쓰는가"
+// (deliverTaskInternal, 아래)뿐이다 -- claude 좌석에 claude 프로토콜을
+// 쓰는 것은 동작 변경이 아니라 실물과 어긋났던 선택을 실물에 맞추는
+// 수정이다.
+export const ENGINE_BY_ROLE = getEngineByRole();
 
 // 현행 런처(관측 A2/A3/A5/B7/B9/B10 소진 지점, 관제실 관리) -- 그대로 호출하는
 // 것도 허용됨(태스크 지시). 좌석은 이 스크립트를 실행하는 셸로 뜬다.
@@ -1186,8 +1200,14 @@ const DEAD_SHELL_PROMPT_RE = /^PS [A-Za-z]:\\.*>\s*$/;
 // drifts without the other being consciously reviewed. Exporting a regex
 // object changes no runtime behavior anywhere this module is already
 // imported (classifySeatPreview below is still the only production caller).
-export const AGENT_MARKER_RE =
-  /gpt-5\.6|Sonnet|Opus|\[CODER seat\]|\[REVIEW seat\]|bypass permissions|MCP startup|weekly \d/;
+// HYK-153-engine-profile-1 (piece B): the pattern source moved verbatim
+// (byte-identical, see engine-profile.test.mjs's own pin on the config
+// value) into scripts/check/engine-profiles.json
+// bannerMarkerPatterns.orcaAdapterAgentMarker -- this line no longer writes
+// the engine-name literal itself, it reads it back as data.
+export const AGENT_MARKER_RE = new RegExp(
+  getBannerMarkerPattern("orcaAdapterAgentMarker"),
+);
 
 function lastNonEmptyPreviewLine(text) {
   const lines = String(text ?? "").split(/\r?\n/);
@@ -2624,11 +2644,13 @@ function defaultFsDeps(overrides = {}) {
 }
 
 // A3: 메인 repo의 .claude/settings.local.json을 워크트리에 복사(훅 복원).
-// 이미 있으면 건너뜀(멱등).
+// 이미 있으면 건너뜀(멱등). 디렉터리 이름(".claude")은
+// engine-profiles.json의 claude.homeDirName에서 읽는다(HYK-153 piece B).
+const CLAUDE_HOME_DIR_NAME = getEngineAttr("claude", "homeDirName");
 function ensureSettingsCopied(mainRepoDir, worktreePath, fs, steps) {
   if (!isNonEmptyString(mainRepoDir)) return;
-  const src = join(mainRepoDir, ".claude", "settings.local.json");
-  const dst = join(worktreePath, ".claude", "settings.local.json");
+  const src = join(mainRepoDir, CLAUDE_HOME_DIR_NAME, "settings.local.json");
+  const dst = join(worktreePath, CLAUDE_HOME_DIR_NAME, "settings.local.json");
   if (fs.existsFn(dst) || !fs.existsFn(src)) return;
   fs.mkdirFn(dirname(dst), { recursive: true });
   fs.copyFileFn(src, dst);
@@ -3392,7 +3414,22 @@ function deliverTaskInternal(ctx, opts = {}) {
   const invalid = validateDeliverInput(c, opts);
   if (invalid) return { ok: false, reason: invalid };
 
-  const engine = ENGINE_BY_ROLE[c.role];
+  // engineOverrideForTests: test-only, same convention as
+  // opts.existingSeatHandle above -- NOT physically stripped on the real
+  // `deliverTask` export (unlike confirmPastedFn, which HYK-376 strips for
+  // a security reason: a caller must never be able to skip the paste
+  // confirmation axis). There is no equivalent reason to strip an engine
+  // override: no production caller constructs this key, and unlike
+  // confirmPastedFn it cannot suppress any safety check, only select which
+  // already-tested delivery protocol runs. Exists because no role in
+  // engine-profiles.json maps to "codex" anymore (ENGINE_BY_ROLE.REVIEW was
+  // corrected from a stale "codex" to the live "claude", HYK-153 piece B
+  // 1순위) -- the codex delivery path (deliverToCodexSeat, below) stays a
+  // registered, directly-tested engine module (E2) even though today's
+  // three roles no longer route to it through ctx.role alone.
+  const engine = isNonEmptyString(opts.engineOverrideForTests)
+    ? opts.engineOverrideForTests
+    : ENGINE_BY_ROLE[c.role];
   if (!isNonEmptyString(engine)) {
     return {
       ok: false,
@@ -3407,7 +3444,7 @@ function deliverTaskInternal(ctx, opts = {}) {
   if (!handleResult.ok) return handleResult;
   const seatHandle = handleResult.handle;
 
-  if (engine === "codex") {
+  if (getEngineDeliveryMode(engine) === "no-inject") {
     return deliverToCodexSeat(c, seatHandle, taskResult.runtimeTaskId, opts);
   }
   return deliverToClaudeSeat(c, seatHandle, taskResult.runtimeTaskId, opts);

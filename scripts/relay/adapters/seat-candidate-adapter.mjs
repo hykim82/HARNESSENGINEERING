@@ -34,6 +34,7 @@ import {
   isGhostTab,
   createOrcaExecFn,
 } from "./orca-adapter.mjs";
+import { getEngineAgentMarkerWords } from "../../check/engine-profile.mjs";
 
 export const SCHEMA_VERSION = 1;
 
@@ -271,16 +272,19 @@ const DEAD_SHELL_PROMPT_RE = /^PS [A-Za-z]:\\.*>\s*$/;
 // 사본도 같이 고친다(어긋난 채로 두면 다음 사람이 어느 쪽이 맞는지
 // 다시 실측해야 한다 -- seat-marker-divergence.contract.test.mjs가 두
 // 사본의 의식적 동기화를 강제한다).
+// HYK-153-engine-profile-1 (piece B): the per-engine model-family words
+// ("Sonnet"/"Opus"/"Haiku", "gpt-5.6") now come from
+// scripts/check/engine-profiles.json (engines.<name>.agentMarkerWords) --
+// moved verbatim, same order, so this array stays byte-identical to what
+// seat-marker-divergence.contract.test.mjs already pins below.
 export const CLAUDE_AGENT_MARKERS = [
-  "Sonnet",
-  "Opus",
-  "Haiku",
+  ...getEngineAgentMarkerWords("claude"),
   "[CODER seat]",
   "[REVIEW seat]",
   "[VERIFY seat]",
   "bypass permissions",
 ];
-export const CODEX_AGENT_MARKERS = ["gpt-5.6", "codex"];
+export const CODEX_AGENT_MARKERS = getEngineAgentMarkerWords("codex");
 const IDLE_PROMPT_MARKERS = ["? for shortcuts", "Ctrl+C to exit"];
 // review-1 P1 (2): active dispatch/queued work를 명시 관측하는 별도
 // capability(detectActiveWork)의 기준 신호 -- PM 위험2 경고대로
