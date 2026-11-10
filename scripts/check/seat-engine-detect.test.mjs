@@ -13,7 +13,16 @@ import {
   EXIT_CODE,
 } from "./seat-engine-detect.mjs";
 
-const EXIT_CODE_CONFIG_LOAD_FAILED = EXIT_CODE.CONFIG_LOAD_FAILED;
+// Pinned literal, NOT read from EXIT_CODE.CONFIG_LOAD_FAILED -- if this
+// constant drifted from 3, importing it here would make every P2-E test
+// below track the drift silently instead of going red (mutation ②,
+// coder-task.md §2 ⓓ: "종료코드 3 -> 다른 값 -> RED" requires the test to
+// pin the value 3 independently of the module that can change it).
+const EXIT_CODE_CONFIG_LOAD_FAILED = 3;
+
+test("P2-E: EXIT_CODE.CONFIG_LOAD_FAILED is pinned at 3 (documented exit code, coder-task.md §2 ⓘⓘⓘ)", () => {
+  assert.equal(EXIT_CODE.CONFIG_LOAD_FAILED, 3);
+});
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const SCRIPT_PATH = join(
