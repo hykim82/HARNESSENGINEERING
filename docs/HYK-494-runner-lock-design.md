@@ -575,14 +575,17 @@ createExclusive와 같은 관용구 -- tmp 이름에 전체 내용을 다 쓴 �
    고아 회수가 아예 없다. Node가 이 플래그를 실제로 노출/통과시키는지는
    미확인이다 — 확인 전에는 채택하지 않는다(3R 밖의 리서치 항목, PM
    설계 (i)).
-9. **HYK-494 후속 라운드 발견(범위 밖, 고치지 않음)** — `cleanupAfterReclaim`
-   의 접두 매칭(`reclaim.<lockId>.`)이 다른 회수권자의 **아직 link되지
-   않은** `reclaim.<lockId>.<k>.tmp.<suffix>` 이름에도 걸린다(그 tmp
-   이름 자체가 그 접두로 시작하므로) — 한 회수권자의 청소가 다른
-   회수권자의 진행 중인 tmp 파일을 지워 그 쪽의 `linkSync`를 ENOENT로
-   실패시킬 수 있다(이번 라운드의 D2 시험이 세 번째 삽입점에서 실측).
-   이 라운드가 받은 계약(P2-1~P2-7·CI-1) 밖이라 고치지 않았다 — 다음
-   라운드 후보.
+9. ✅**HYK-498이 수리했다(§15 참고, 더는 "범위 밖"이 아니다)** —
+   `cleanupAfterReclaim`의 접두 매칭(`reclaim.<lockId>.`)이 다른
+   회수권자의 **아직 link되지 않은** `reclaim.<lockId>.<k>.tmp.<suffix>`
+   이름에도 걸렸다(그 tmp 이름 자체가 그 접두로 시작하므로) — 한
+   회수권자의 청소가 다른 회수권자의 진행 중인 tmp 파일을 지워 그 쪽의
+   `linkSync`를 ENOENT로 실패시킬 수 있었다(검토 3R `probe-prefix-gap.mjs`
+   결정적 재현, 이번 라운드의 D2 시험 세 번째 삽입점("before-ticket-link")
+   이 같은 모양을 production `acquireRunnerLock` 진입점으로 재확인 --
+   base(#358/6d7bed1) 위에서 RED, 수리 뒤 GREEN). 이전 라운드(5R)가 받은
+   계약(P2-1~P2-7·CI-1) 밖이라 그때는 고치지 않았던 항목이다 -- §15-1
+   참고.
 10. **HYK-494 후속(followup-3) P1-1 수리의 상한은 20분에서 30초로 줄었을
     뿐, "영원한 보장"이 아니다** — 재확인 읽기가 `BUSY_RETRY_TIMEOUT_MS`
     (30초)를 넘겨 계속 실패하면(이 머신에서는 못 재현했다, 리뷰 1R의
@@ -701,7 +704,239 @@ write(tmp)·rename(alivePath) 사이를 끊으면 `${alivePath}.tmp.*`가
 - **원인 후보 4(좀비)**: `process.kill(pid,0)`은 좀비도 살아 있다고
   본다 — 고아 pid는 `spawnSync`가 회수하므로 해당 가능성은 낮다고
   추론했지만(§7-1), 이 라운드도 고치지 않았다. 다음 라운드 후보.
-- `cleanupAfterReclaim` 접두 매칭 틈(§13 9번, 설계 §7-3) — 무변.
+- `cleanupAfterReclaim` 접두 매칭 틈(§13 9번, 설계 §7-3) — 무변(이
+  5R 라운드는). HYK-498이 나중에 수리했다 — §15-1 참고.
 - PM 설계 (d) 불변식 재심 — 이 라운드는 시험의 시계 의존·원인 기록·
   fixture만 고쳤고, `runner-lock.mjs`의 §7 판정 로직(judgeOwner/
   identityIsDead 자체) 변경은 P2-c(release 경로 추가) 외에는 0이다.
+
+## 15. HYK-498 — §13-9 동시 회수 크래시 수리 + 2-way/5-way 시계 + P2-1/P2-2
+
+(책임자 판정 2026-11-09 23:5x · 상신 = "A. #358 그대로 병합 진행 +
+새 조각 HYK-498" · 검토 3R §2 ⓐ-3·§3 P2-1·P2-2·"정보"(시계 칸 잔존)가
+근거)
+
+### 15-1. §13-9 수리 — `cleanupAfterReclaim`을 완성된 티켓 이름만으로 좁힌다
+
+**틈(§13 9번 원문)**: `cleanupAfterReclaim`(`runner-lock.mjs`)은
+`reclaimTicketPrefix`(접두 `<basename(L)>.reclaim.<lockId>.`)로 시작하는
+이름을 전부 지웠다. 그런데 `createExclusive`가 티켓을 link하기 "전"에
+쓰는 임시 이름(`<티켓 경로>.tmp.<randomSuffix>`, 예:
+`r.lock.reclaim.O.1.tmp.1699999999999.ab12cd`)도 같은 접두로 시작한다
+-- 티켓 번호(`1`) 뒤에 바로 `.tmp.`가 붙으므로 접두 "매칭"은 그 티켓
+번호가 있든 없든 통과한다. 그래서 회수권자 A가 자기 reclaim을 끝내고
+`cleanupAfterReclaim(O)`를 부르면, **다른** 회수권자 B가 "방금 쓰고
+아직 link 전"인 tmp 파일까지 지워버린다 -- B의 뒤이은
+`linkFn(tmp, 티켓경로)` 호출은 그 tmp가 사라졌으므로 `ENOENT`로 실패
+한다. `createExclusive`의 catch는 `EEXIST`/busy(EPERM·EBUSY·EACCES)만
+받고 그 밖은 그대로 `throw`하므로(헤더 주석 그대로, §(d) 불변식과
+무관하게 "모르는 실패는 삼키지 않는다"는 기존 posture) 이 `ENOENT`는
+호출자(러너 3개가 같은 고아를 동시에 회수하는 드문 경우, 실제 러너
+진입점)까지 그대로 올라가 크래시한다. 검토 3R이 `probe-prefix-gap.mjs`
+(워크트리 `runner-lock.mjs`를 file URL로 직접 import)로 결정적으로
+재현했다: _"행위자 B가 회수권 tmp를 쓴 뒤 link하기 직전, 경쟁자 A가
+전체 획득+해제를 끝낸다. 그러면 A의 `cleanupAfterReclaim`이 B의
+`...reclaim.orph-X.1.tmp....`를 지운다 ... B의 `acquireRunnerLock`이
+throw한다."_
+
+**수리(코더-task §2 ⓘ, 두 옵션 중 전자를 택함)**: 청소 대상을
+`reclaim.<O>.<k>` "정확 이름"으로 좁힌다 -- `maxReclaimTicketNumber`가
+이미 같은 구분(`Number(suffix)`가 `NaN`이면 제외)을 쓰고 있었으므로,
+`cleanupAfterReclaim`에도 같은 "suffix가 숫자뿐인가"(`/^\d+$/`) 검사를
+추가했다. `.tmp.<suffix>` 이름은 숫자가 아닌 문자(`.`, 알파벳)를 포함
+하므로 이 검사에 걸러진다 -- **완성된(link까지 끝난) 티켓만** 지운다.
+
+**둘 중 왜 전자인가(근거 1줄, 코더-task §2 ⓘ 요구)**: link `ENOENT`를
+"이번 라운드 패배(wait)"로 분류하는 대안도 성립하지만(review가 제시한
+두 번째 옵션), 그러면 `createExclusive`가 "어떤 ENOENT든" 패배로
+삼키게 되어 다른 자리(예: 정말로 디스크에서 사라진 tmp를 다른 버그가
+만든 경우)의 ENOENT까지 조용히 가려질 위험이 있다(이 파일의 기존
+posture "모르는 실패는 삼키지 않는다"와 어긋난다). 반면 접두 좁히기는
+근본 원인(완성 안 된 이름까지 지운 것) 자체를 없애 그런 ENOENT가
+**다시는 일어나지 않게** 한다 -- 사후 분류보다 사전 차단을 택했다.
+
+**PM 설계 불변식 무변**: "살아 있는 회수권자 ≤1"·"회수 경로 되돌림
+0"·"L이라는 이름을 지울 수 있는 살아 있는 프로세스는 언제나 1개
+이하"(§7 머리말) 전부 무변 -- 이 수리는 **다른 프로세스의 아직
+완성되지 않은 자원을 건드리지 않게** 좁히기만 했을 뿐, 누가 언제
+무엇을 회수하는지의 판정 로직(judgeOwner/resolveContendedStep)은
+한 글자도 바뀌지 않았다.
+
+**시험(D2, §10d)**: 기존 D2(scoped) 2개 삽입점(before-reread ·
+before-unlink)에 세 번째("before-ticket-link")를 추가했다 -- A의
+`createExclusive`가 자기 티켓 tmp를 쓴 "직후, link 전"에 경쟁자 B가
+`runActorBOnce`로 전체 획득+해제(와 그 안의 `cleanupAfterReclaim`)를
+끝낸다. **base(#358/6d7bed1) 위에서 RED**: `link ENOENT`가 그대로
+throw돼 테스트 자체가 실패했다(원문: `ENOENT: no such file or
+directory, link '...reclaim.d2-dead-owner.1.tmp....' -> '...reclaim.
+d2-dead-owner.1'`). **수리 뒤 GREEN**: A의 tmp가 B의 청소를 살아남아
+A의 link가 성공한다(기존 2개 삽입점과 같은 "A가 결국 획득, L은
+released" 단언 무변).
+
+### 15-2. 2-way·5-way 시계 칸에도 3-way와 같은 넉넉한 상한을 준다
+
+#358(5R)의 §14-1 수리는 "자식별 고정 클럭으로 결국 획득을 판정"하는
+7개 칸 중 5개 3-way 칸(cold-start·orphan·dead-ticket·staggered-alive·
+pid-reuse)만 `GENEROUS_EVENTUAL_ACQUIRE_TIMEOUT_MS`(20_000ms)로
+올렸다 -- product_scope 문면이 "3-way 칸"으로 좁았고, 2-way
+(`RECLAIM_TRIALS`, 5000ms)·5-way(`FIVE_WAY_TRIALS`, 8000ms)는 같은
+모양(자식별 고정 클럭)인데도 명시적으로 범위 밖(목록 + 근거 주석만,
+`deviation_rule`)으로 남겨졌다(검토 3R "정보" 항목이 이 둘의 존속을
+지적). 이 라운드는 그 범위를 2-way·5-way까지 넓혀 같은 상수를 쓴다 --
+"결국 획득" 판정에서 시계 의존을 완전히 제거하지 않는 이유도 #358과
+동일하다(폴링 루프 자체가 무한 대기가 되면 `busyRetryTimeoutMs`
+기본값과의 상호작용이 복잡해진다). `wx` 배제 위반 0 단언과 전원 획득
+단언은 그대로(단언 약화 아님).
+
+### 15-3. P2-1 — P1-1 self-branch 단언의 타이밍 의존 제거
+
+5R이 신설한 `selfBranchTrials >= 1` 단언(P2-b)은 C2를 C1보다 고정
+15ms 늦게 띄우는 타이밍에 기댔다 -- C1이 느리게 스케줄되면(부하 등)
+C2가 reclaim ticket #1을 먼저 잡아 C1의 `selfBranchHit`이 구조적으로
+false가 될 수 있다(검토 3R 제자리 계측: trials 3→30, hit 83/90).
+**수리**: C1의 자식 스크립트가 (이미 있던) 주입 지점(`lockReadCount
+===2`, 자기 티켓 #1을 막 확인한 바로 다음)에서 지워지지 않는 신호
+파일(`signalPath`)을 쓰게 하고, 바깥 시험은 **그 신호가 나타난 뒤에만**
+C2를 띄운다 -- C2가 존재하지도 않는 동안 C1이 ticket #1을 독점하므로
+경쟁 자체가 없어진다(순서 결정화). ⚠️**실측 함정(이 라운드에서 직접
+겪음)**: 처음에는 신호 대신 reclaim ticket "파일 자체"가 디스크에
+나타나길 폴링했는데, 주입이 없는 평범한 경로에서 그 파일의 생존
+구간이 `waitMs:6`(〔직접〕) 수준으로 짧아 10ms 간격 외부 폴로는 5초를
+기다려도 "전혀" 포착하지 못했다(티켓은 같은 동기 호출 안에서 만들어
+지고 곧바로 재확인·삭제된다) -- 그래서 알고리즘이 지우지 않는 **전용
+신호 파일**로 바꿨다. 단언도 `>=1`에서 `=== P1_DEADLOCK_TRIALS`(모든
+회차)로 강화했다(단언 약화 아님 -- 순서가 결정적이므로 매 회차 반드시
+탄다).
+
+### 15-4. P2-2 — `stderrTail`을 `close`에서 확정한다(`exit` 아님)
+
+검토 3R 지적: `spawnReclaimRaceChild`(§10b~§10b-2 전체가 공유)가
+`exit` 이벤트에서 `stderrChunks`를 잘라 썼다 -- Node 문서상 `exit`는
+자식의 stdio 스트림이 아직 열려 있는 상태에서도 먼저 올 수 있어
+사망 직전 stderr가 늦게 도착하면 꼬리가 비거나 잘릴 수 있다. **수리**:
+`close`(모든 stdio가 닫힌 "뒤"에만 오는 이벤트)에서 확정한다 -- 콜백
+시그니처(`code, signal`)는 같다. ⚠️**정직 한계(〔못쟀다〕)**: 이 라운드
+도 이 머신(Windows)에서 `exit` vs `close`의 실제 차이를 재현하지
+못했다(큰 stderr 페이로드(5MB) 직후 즉시 종료하는 합성 시나리오로
+10회씩 비교, 둘 다 손실 0) -- 검토 3R의 "로컬 5/5는 전문이 실렸다"와
+같은 결과다. Linux CI의 실제 차이는 여전히 〔못쟀다〕. `close`로 바꾼
+것은 "Node 문서가 명시하는 구조적으로 더 안전한 자리"로의 방어적
+전환이다(관측된 버그의 수정이 아니라 잠재적 창을 구조적으로 닫는
+수리).
+
+### 15-5. 범위 밖(기록만)
+
+- `process.kill(pid,0)`의 좀비 오판(§14-5 원인 후보 4) — 여전히 고치지
+  않았다.
+- PM 설계 (d) 불변식 재심 — `runner-lock.mjs`의 §7 판정 로직 변경은
+  §13-9 수리(cleanupAfterReclaim 청소 대상 좁히기) 외에는 0이다.
+- `exit` vs `close`의 Linux CI 실측 — 〔못쟀다〕, 다음 라이브 CI가 맡는다.
+
+## 16. HYK-498 2R — P2-A 메시지 진단 · P2-B tmp 대가+정리 · 남은 고정 시계 3곳
+
+(책임자 판정 2026-11-10 상신 P2-A(1143) = "B. 같은 브랜치에 2R 덧커밋" ·
+범위 = 검토 1R §3 P2-A·P2-B·정보 1~2)
+
+### 16-1. P2-A — 2-way·5-way 실패 메시지에 자식별 진단을 싣는다
+
+**틈**: 3-way 칸(§10b, `THREE_WAY_TRIALS` 등 5개)의 "결국 획득" 실패
+메시지는 `` `trial ${trial}: all 3 must eventually acquire -- ${JSON.
+stringify(results)}` `` 모양으로 자식별 결과(`spawnReclaimRaceChild`가
+이미 싣는 `stderrTail`·`exitCode`·`elapsedMs`, P2-2/§15-4 그대로)를
+담는다. 그런데 2-way 칸(`RECLAIM_TRIALS`)과 5-way 칸(`FIVE_WAY_TRIALS`)
+은 §15-2가 같은 `GENEROUS_EVENTUAL_ACQUIRE_TIMEOUT_MS`로 시계만
+맞췄을 뿐, 메시지 자체는 각각 `"... (serialized)"` / `"all 5 must
+eventually acquire"`로 사유가 0이었다 — CI가 이 둘에서 빨간 것을 보면
+"어느 자식이 왜"를 로그만으로 알 길이 없다(3-way와 다른 대우를 받을
+이유가 없다).
+
+**수리**: 2-way는 `a`·`b`(두 `spawnReclaimRaceChild` 결과)를, 5-way는
+이미 있던 `results` 배열을 그대로 `JSON.stringify`해 메시지에 싣는다 —
+3-way와 정확히 같은 모양(새 필드 추가 없음, 포맷만 통일).
+
+### 16-2. P2-B — 죽은 회수자의 tmp가 영구히 남는 대가, 그리고 보수적 정리
+
+**대가(문서화)**: §15-1의 §13-9 수리는 "완성된(숫자만인 suffix) 티켓
+이름만" 지우고 `.tmp.<suffix>` 이름은 **전부** 건드리지 않는다 — 다른
+회수자의 진행 중 tmp를 지울 위험을 원천적으로 없애려는 의도적 선택
+이었다. 그 대가: 회수자가 `createExclusive`의 `writeFileFn(tmpPath,
+...)` 직후, `linkFn(tmpPath, path)` 전에 죽으면(크래시·OOM-kill·강제
+종료 등) 그 tmp 이름은 **아무도 다시 지우지 않는다** — `createExclusive`
+자신의 catch(링크 실패 시 자기 tmp를 지우는 코드, `runner-lock.mjs`
+"§(d) createExclusive" 헤더 그대로)도 죽은 프로세스에서는 실행되지
+않고, §13-9 수리 이후의 `cleanupAfterReclaim`도 `.tmp.` 이름을 전부
+건너뛴다. 영향은 **디스크 공간 누수뿐**(바이트 몇백 수준의 JSON 파일,
+`<L>.reclaim.<O>.<k>.tmp.<suffix>` 하나당) — 아무 코드도 그 이름을
+다시 읽거나 참조하지 않으므로(§13-9 설계 논증 "이 lockId를 다시 참조할
+길이 없으면 누수는 harmless하다"와 같은 근거) PM 설계 불변식("살아
+있는 회수권자 ≤1" 등)에는 영향이 없다. 다만 이 lockPath 디렉터리가
+장기간(수개월) 같은 자리에서 반복 경합하면 이런 이름이 누적될 수
+있다(측정하지 않았다, 〔못쟀다〕).
+
+**정리(넣음, `maybeCleanupDeadReclaimerTmp`)**: `cleanupAfterReclaim`이
+이미 완성된 티켓을 지우는 그 디렉터리 스캔 루프 안에서, suffix가
+`/^\d+\.tmp\./` 모양(즉 "이 lockId의 어떤 티켓 번호에 대한 tmp")인
+이름만 추가로 살핀다 — 그 tmp의 내용(`createExclusive`가 link 전에
+이미 전부 쓴 `{pid, procStart}`)을 읽어 `identityIsDead`(이미 있는
+동일 판정 로직)로 "쓴 사람이 죽었는가"를 확인한 뒤에만 지운다. **왜
+이것이 §13-9를 재도입하지 않는가**: 살아 있는 회수자의 진행 중 tmp는
+`isPidAliveFn(그 pid)`가 반드시 `true`를 돌리므로 `identityIsDead`가
+`dead:false`로 떨어져 **절대 지워지지 않는다** — "죽었다고 확정될
+때만" 지우는 규칙이라 §13-9가 금지한 "살아 있는 다른 회수자의 진행
+중 tmp를 지우는 규칙"이 아니다(변이 ⑤가 이 경계를 무너뜨리면 D2
+"before-ticket-link" 칸이 정확히 §13-9와 같은 크래시로 되돌아가는
+것을 실측으로 확인했다 — 아래 §0 변이표). 읽기/파싱이 실패하면(쓰는
+도중을 보거나, 그 사이 다른 경로로 이미 지워진 경우) 모호한 쪽은
+손대지 않는다(삭제하지 않음) — "확정 전에는 손대지 않는다"는 같은
+원칙의 연장이다. 새 시험 2칸(P2-B ⑴·⑵, §10b-2 바로 뒤)이 production
+`acquireRunnerLock` 진입점으로 "죽은 reclaimer의 tmp는 쓸린다" /
+"살아 있는(자기 자신) reclaimer의 진행 중 tmp는 살아남는다"를 각각
+확인한다.
+
+**나이 기반을 쓰지 않은 이유**: 코더-task는 "나이 기반 또는 주인 사망
+확정 시만"을 후보로 줬지만, 순수 나이 기반(예: "tmp가 N초보다 오래됐으면
+지운다")은 극단적인 스케줄링 지연·GC 정지·디스크 스톨 아래서 **아직
+살아 있는** 회수자의 진행 중 tmp를 지울 수 있다(확률은 낮아도 0이
+아니다) — 이는 §13-9가 명시적으로 금지한 "살아 있는 다른 회수자의
+진행 중 tmp를 지울 수 있는 규칙"에 해당해 채택하지 않았다. 신원 확정
+기반은 이 가능성 자체를 0으로 만든다(핀 포인트: pid가 죽었으면 그
+프로세스는 다시는 그 tmp를 link할 수 없다 — 모순 없음).
+
+### 16-3. 정보 1~2 — 남은 고정 시계 3곳을 같은 "결국 완료" 모양으로
+
+**P1-1 칸의 자식별 `"6000"`과 §10 `lockRaceChildScript`의
+`timeoutMs: 15000`**: 둘 다 `acquireRunnerLock` 자신의 `timeoutMs`다 —
+§15-2가 2-way·5-way에 준 처방과 정확히 같은 모양(자식별 고정 클럭으로
+"결국 획득"을 판정)이라, 이 라운드가 똑같이
+`GENEROUS_EVENTUAL_ACQUIRE_TIMEOUT_MS`(20_000ms)로 올렸다. RED-first
+〔직접〕 측정(이 라운드, 실제 분리 프로세스 홀더가 7000ms를 쥐고 있을
+때): 고정 6000ms 대기자는 `{acquired:false, timedOut:true}`로
+결정적으로 졌고, 20000ms로 올리자 같은 조건에서 `{acquired:true,
+timedOut:false}`(elapsed≈7.5s)로 뒤집혔다(§0 답 참고) — 1R이 3-way
+칸에서 겪은 것과 정확히 같은 모양의 증거다.
+
+**`waitForFileToExist`의 `attempts=500,delayMs=10`(명목 5초)**: 이건
+`acquireRunnerLock`이 아니라 P1-1 시험 자신의 신호-파일 폴링 상한이다
+— 같은 "자식별 고정 클럭 + 결국 완료 판정" 모양이라 같은 상수를
+쓴다(`attempts = GENEROUS_EVENTUAL_ACQUIRE_TIMEOUT_MS / 10`). RED-first
+〔직접〕 측정: 신호 파일 쓰기를 9초 지연시키자(C1이 부하로 늦게
+스케줄되는 것을 흉내) 명목 5초 상한(이 머신에서 실측 상한은 setTimeout/
+이벤트 루프 오버헤드로 ~8.5초였다 — 명목값보다 이미 관대했다는 뜰
+자체가 추가 증거) 쪽은 `ready:false`였고, 20초 상한 쪽은 `ready:true`
+(elapsed≈9s)로 뒤집혔다(§0 답 참고).
+
+**"결국 완료" 판정에서 시계 의존을 완전히 제거하지 않는 이유**는
+§15-2와 동일(폴링 루프가 무한 대기가 되면 `busyRetryTimeoutMs`
+기본값·`LOCK_WAIT_TIMEOUT_MS`와의 상호작용이 복잡해진다) — 상한만
+넉넉히 늘렸다. `GENEROUS_EVENTUAL_ACQUIRE_TIMEOUT_MS`의 정의는 이
+라운드가 시험 파일 앞쪽(`freshLockDir` 바로 아래)으로 옮겼다 — 세
+자리 모두 하나의 정의를 공유한다.
+
+### 16-4. 범위 밖(기록만)
+
+- `.harness`/이 머신 밖 Linux CI에서의 실제 부하 모양 — 〔못쟀다〕,
+  완료 조건은 라이브 CI 연속 3회 hyk494 빨강 0(ORCH-135 §3 `1b_reach_path`
+  그대로).
+- 디스크에 수개월 누적될 수 있는 죽은-reclaimer-tmp 개수의 실측 —
+  〔못쟀다〕, §16-2의 "대가" 문단은 메커니즘과 상한 없는 가능성만
+  기술한다.
