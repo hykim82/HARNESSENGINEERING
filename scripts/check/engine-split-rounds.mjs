@@ -1,4 +1,5 @@
-// HYK-153 engine-split-1 (coder-task.md §2 (a)) -- read-only aggregation CLI.
+// HYK-153 engine-split-2 (coder-task.md §2, rework of engine-split-1) --
+// read-only aggregation CLI.
 //
 // Joins the admission ledger's reservations (admission-ledger-core.mjs
 // RESERVATION_STATUS entries, keyed by harness_label) with the seat launch
@@ -7,12 +8,18 @@
 // both sides consumed (status COMPLETED). This module performs no writes;
 // it only reads the two files passed on argv and prints a summary.
 //
-// Pairing rule (PM design 1R, 엔진무관-증명-설계.md §a): a review-labeled
-// reservation key matches /^(.*)-review-(\d+)$/, and capture group 1 is the
-// author's harness_label verbatim (not group1+"-"+group2) -- confirmed
-// against the live review-result `for:` line in 2/2 sampled rounds. Review
-// labels whose capture-1 has no matching reservation are not paired (they
-// are not counted in strict or loose; this undercounts older rounds whose
+// Pairing rule (PM design 1R, 엔진무관-증명-설계.md §a; review 1R P2-2 fix):
+// a review-labeled reservation key matches /^(.*)-review-(\d+)$/, where
+// capture group 2 is the review round number N. The real author
+// reservation to pair with is `${group1}-r${N}` when that key exists in
+// the ledger (a rework/CODER-retry round, labelled e.g. "X-1-r2" for the
+// round that review-2 reviewed) -- otherwise it falls back to `group1`
+// verbatim (round 1, which carries no "-rN" suffix). The live admission
+// ledger confirms this: e.g. "HYK-480-checklist-inject-2-review-2" pairs
+// with "HYK-480-checklist-inject-2-r2" (not the bare, round-1 reservation),
+// while "...-review-1" pairs with the bare label. Review labels whose
+// resolved author key has no matching reservation are not paired (they are
+// not counted in strict or loose; this undercounts older rounds whose
 // labelling convention differs, which is a known, documented limitation).
 
 import fs from "node:fs";
@@ -144,7 +151,22 @@ export function classifyPair(
     strict,
     loose,
     issue: issueMatch ? issueMatch[1] : null,
+    admittedAt:
+      typeof reviewEntry.admitted_at === "string"
+        ? reviewEntry.admitted_at
+        : null,
   };
+}
+
+// Resolves a review label's author key (see module header P2-2 note): a
+// rework round `${base}-r${n}` takes priority over the bare `${base}` when
+// both the regex captured an N and that rework reservation actually exists.
+export function resolveAuthorLabel(base, reviewRoundNumber, reservations) {
+  const reworkLabel = `${base}-r${reviewRoundNumber}`;
+  if (Object.prototype.hasOwnProperty.call(reservations, reworkLabel)) {
+    return reworkLabel;
+  }
+  return base;
 }
 
 export function joinRounds(reservations, byPaneKey) {
@@ -152,7 +174,13 @@ export function joinRounds(reservations, byPaneKey) {
   for (const [label, entry] of Object.entries(reservations)) {
     const m = REVIEW_LABEL_PATTERN.exec(label);
     if (!m) continue;
-    const authorLabel = m[1];
+    const base = m[1];
+    const reviewRoundNumber = m[2];
+    const authorLabel = resolveAuthorLabel(
+      base,
+      reviewRoundNumber,
+      reservations,
+    );
     const authorEntry = reservations[authorLabel];
     const row = classifyPair(label, entry, authorLabel, authorEntry, byPaneKey);
     if (row) rows.push(row);
@@ -201,14 +229,37 @@ function tally(rows) {
   };
 }
 
+// review 1R P2-6 fix: firstPair/lastPair are now the chronologically first
+// and last reviewed rounds (by the review reservation's admitted_at), not
+// the label text's localeCompare order -- "first pair" previously meant
+// "alphabetically first label" (e.g. "HYK-129-..." sorts before
+// "HYK-209-..." regardless of when either was actually reviewed). Rows
+// with a missing/unparseable admitted_at are excluded from this ordering
+// (documented limitation -- they still count in n/strict/loose).
+function chronologicalFirstLast(rows) {
+  const withTime = rows
+    .map((r) => ({
+      r,
+      t: typeof r.admittedAt === "string" ? Date.parse(r.admittedAt) : NaN,
+    }))
+    .filter((x) => Number.isFinite(x.t));
+  if (withTime.length === 0) return { firstPair: null, lastPair: null };
+  withTime.sort((a, b) => a.t - b.t);
+  return {
+    firstPair: withTime[0].r.reviewLabel,
+    lastPair: withTime[withTime.length - 1].r.reviewLabel,
+  };
+}
+
 export function summarize(rows) {
   const strictRows = rows.filter((r) => r.strict);
   const looseRows = rows.filter((r) => r.loose);
+  const { firstPair, lastPair } = chronologicalFirstLast(rows);
   return {
     strict: tally(strictRows),
     loose: tally(looseRows),
-    firstPair: rows.length > 0 ? rows[0].reviewLabel : null,
-    lastPair: rows.length > 0 ? rows[rows.length - 1].reviewLabel : null,
+    firstPair,
+    lastPair,
     sampleRows: rows.slice(0, 3),
   };
 }
@@ -226,6 +277,28 @@ export function summarize(rows) {
 export function deriveTranscriptFolderName(worktreePath) {
   if (!isNonEmptyString(worktreePath)) return null;
   return worktreePath.replace(/[^A-Za-z0-9]/g, "-");
+}
+
+// review 1R P2-1: a real Claude Code session-transcript jsonl line carries
+// the model name at `message.model` -- the top-level `model` field used by
+// this module's own pre-fix synthetic fixtures never appears in a real
+// transcript (confirmed: 0 top-level `model` lines vs. 101 `message.model`
+// lines in one sampled transcript folder), so reading only `rec.model` left
+// --transcripts permanently at checked=0 against real data. Both shapes are
+// read (message.model preferred) so a line carrying either still
+// corroborates.
+function modelFromTranscriptLine(line) {
+  if (line.trim().length === 0) return null;
+  let rec;
+  try {
+    rec = JSON.parse(line);
+  } catch {
+    return null;
+  }
+  if (!isPlainObject(rec)) return null;
+  if (isNonEmptyString(rec.message?.model)) return rec.message.model;
+  if (isNonEmptyString(rec.model)) return rec.model;
+  return null;
 }
 
 function scanTranscriptModels(transcriptsRoot, folderName, fsOps) {
@@ -247,16 +320,8 @@ function scanTranscriptModels(transcriptsRoot, folderName, fsOps) {
       continue;
     }
     for (const line of text.split(/\r?\n/)) {
-      if (line.trim().length === 0) continue;
-      let rec;
-      try {
-        rec = JSON.parse(line);
-      } catch {
-        continue;
-      }
-      if (isPlainObject(rec) && isNonEmptyString(rec.model)) {
-        models.add(rec.model);
-      }
+      const model = modelFromTranscriptLine(line);
+      if (model !== null) models.add(model);
     }
   }
   return [...models];
@@ -336,6 +401,21 @@ export function crossCheckSessions(
 
 // ---- CLI ----
 
+const NUMERIC_FLAGS = {
+  "--min-strict": "minStrict",
+  "--min-strict-excl-top": "minStrictExclTop",
+  "--min-authors": "minAuthors",
+  "--min-issues": "minIssues",
+  "--min-confirmed": "minConfirmed",
+};
+
+// review 1R P2-4 fix: `Number(argv[++i])` on a missing or non-numeric value
+// (e.g. `--min-strict abc`, or `--min-strict` as the last argv with no
+// value) produced NaN, and every NaN threshold comparison (`n < NaN`) is
+// false -- so the threshold silently never failed (exit 0, "thresholds:
+// OK") instead of rejecting the bad input. parseArgs now records which
+// flags got a non-finite value; runCli refuses to run rather than silently
+// opening every threshold.
 function parseArgs(argv) {
   const out = {
     ledger: null,
@@ -348,20 +428,24 @@ function parseArgs(argv) {
     minIssues: 10,
     minConfirmed: 20,
   };
+  const invalidFlags = [];
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
     if (a === "--ledger") out.ledger = argv[++i];
     else if (a === "--registry") out.registry = argv[++i];
     else if (a === "--transcripts") out.transcripts = argv[++i];
     else if (a === "--json") out.json = true;
-    else if (a === "--min-strict") out.minStrict = Number(argv[++i]);
-    else if (a === "--min-strict-excl-top")
-      out.minStrictExclTop = Number(argv[++i]);
-    else if (a === "--min-authors") out.minAuthors = Number(argv[++i]);
-    else if (a === "--min-issues") out.minIssues = Number(argv[++i]);
-    else if (a === "--min-confirmed") out.minConfirmed = Number(argv[++i]);
+    else if (Object.prototype.hasOwnProperty.call(NUMERIC_FLAGS, a)) {
+      const raw = argv[++i];
+      const n = Number(raw);
+      if (!Number.isFinite(n)) {
+        invalidFlags.push(`${a} (got ${JSON.stringify(raw ?? null)})`);
+      } else {
+        out[NUMERIC_FLAGS[a]] = n;
+      }
+    }
   }
-  return out;
+  return { ...out, invalidFlags };
 }
 
 function buildThresholdFailures(summary, sessionCheck, args) {
@@ -471,6 +555,12 @@ function runSessionCheck(rows, byPaneKey, args, fsOps) {
 
 export function runCli(argv, fsOps = fs) {
   const args = parseArgs(argv);
+  if (args.invalidFlags.length > 0) {
+    return {
+      rc: 1,
+      output: `engine-split-rounds: invalid numeric value for ${args.invalidFlags.join(", ")}`,
+    };
+  }
   const inputs = loadInputsOrError(args, fsOps);
   if (!inputs.ok) return { rc: 1, output: inputs.output };
 

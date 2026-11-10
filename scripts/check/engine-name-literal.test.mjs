@@ -1,15 +1,27 @@
-// HYK-153 engine-split-1 (coder-task.md §2 (b)-1) -- pins the current
-// engine-name string-literal and branch-literal count in scripts/**/*.mjs
-// (tests and fixtures excluded) against an allowlist, so any *new*
-// hardcoded engine name (or any drift in the allowlist itself) turns this
-// test -- and CI -- red. This round only freezes today's baseline; it does
-// not reduce the hardcoding (that is HYK-153 piece B).
+// HYK-153 engine-split-2 (coder-task.md §2, rework of engine-split-1) --
+// pins the current engine-name string-literal, template-literal,
+// regex-literal and branch-literal *occurrence count* in scripts/**/*.mjs
+// (tests and fixtures excluded) against an allowlist, so any *new* hardcoded
+// engine name -- or any *additional occurrence* of an already-allowed one,
+// or any drift in the allowlist itself -- turns this test, and CI, red.
+// This round only freezes today's baseline; it does not reduce the
+// hardcoding (that is HYK-153 piece B).
 //
 // Tokenizer: strips `//` and `/* */` comments, then extracts string and
 // template literals (handling backslash escapes and `${}` interpolation,
-// whose expression body is scanned as code, not literal text). The anchor
-// pattern is tested against extracted literal text only, never against
-// comments or bare identifiers.
+// whose expression body is scanned as code, not literal text) *and* the
+// body text of regex literals (review 1R P2-3: a regex literal such as
+// `/codex/i` previously fell into neither the literal axis nor the branch
+// axis). The anchor pattern is tested against extracted literal text only,
+// never against comments or bare identifiers.
+//
+// Comparison axis (review 1R P1-1 fix): a (file, literal) or (file, branch
+// match) key is compared as a *multiset* -- the allowlist pins how many
+// times each key occurs, not just whether it occurs at all. Previously two
+// Sets were diffed, so adding a second `engine === "codex"` branch (or a
+// second `"claude"` literal) to a file that already had one was invisible
+// to this test. See the "already-allowed key, one more occurrence" copy
+// tests below for the regression this closes.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -25,10 +37,17 @@ const ALLOWLIST_PATH = path.join(HERE, "engine-name-literal-allowlist.json");
 
 export const ANCHOR_PATTERN =
   /claude|codex|sonnet|opus|haiku|fable|gpt-|anthropic|openai/i;
+// review 1R P2-7: the old pattern matched any literal that merely *starts*
+// with an anchor word plus a quote char, so `"claude-settings"` (a distinct
+// identifier, not an engine-name comparison) was counted as a branch
+// literal on `"claude"`. Fixed by requiring the literal's content to be
+// *exactly* the anchor word (lookahead on the same quote char closing it
+// immediately) -- except for the `gpt-` anchor, which is deliberately a
+// prefix (model names like `gpt-5.6` legitimately continue after it).
 export const BRANCH_LITERAL_PATTERN =
-  /[=!]==\s*["'`](claude|codex|sonnet|opus|haiku|fable|gpt-|anthropic|openai)/gi;
+  /[=!]==\s*(["'`])(claude|codex|sonnet|opus|haiku|fable|anthropic|openai)(?=\1)|[=!]==\s*["'`](gpt-)/gi;
 
-// ---- tokenizer: comments stripped, string/template literals extracted ----
+// ---- tokenizer: comments stripped, string/template/regex literals extracted ----
 
 function consumeQuotedString(source, startIndex, quoteChar) {
   let i = startIndex + 1;
@@ -78,30 +97,38 @@ function classifyCodeChar(ch) {
 
 // Consumes a regex literal starting at source[startIndex] === "/" (caller
 // has already confirmed regex context). Returns the end index (just past
-// the trailing flags) and the raw text consumed (pushed to `decommented`
-// verbatim so branch-literal scanning still sees the same byte span).
+// the trailing flags), the raw text consumed (pushed to `decommented`
+// verbatim so branch-literal scanning still sees the same byte span), and
+// `body` -- the text strictly between the delimiting slashes (review 1R
+// P2-3: now scanned as a literal, same as a quoted string). An unterminated
+// regex (shouldn't happen in valid JS; bails out at the line break) reports
+// body "" rather than guessing.
 function consumeRegexLiteral(source, startIndex) {
   const n = source.length;
   let i = startIndex + 1;
   let inCharClass = false;
+  let closed = false;
   while (i < n) {
     const ch = source[i];
     if (ch === "\\") {
       i += 2;
       continue;
     }
-    if (ch === "\n") break; // unterminated regex (shouldn't happen in valid JS) -- bail out
+    if (ch === "\n") break; // unterminated regex -- bail out
     if (ch === "[") inCharClass = true;
     else if (ch === "]") inCharClass = false;
     else if (ch === "/" && !inCharClass) {
+      closed = true;
       i += 1;
       break;
     }
     i += 1;
   }
+  const bodyEnd = closed ? i - 1 : i;
+  const body = closed ? source.slice(startIndex + 1, bodyEnd) : "";
   // trailing flags
   while (i < n && /[a-z]/i.test(source[i])) i += 1;
-  return { endIndex: i, raw: source.slice(startIndex, i) };
+  return { endIndex: i, raw: source.slice(startIndex, i), body };
 }
 
 function currentFrame(state) {
@@ -164,7 +191,10 @@ function stepTemplateOpen(state) {
 function stepRegex(state) {
   if (state.source[state.i] !== "/" || !isRegexAllowed(state.prevIsValue))
     return false;
-  const { endIndex, raw } = consumeRegexLiteral(state.source, state.i);
+  const { endIndex, raw, body } = consumeRegexLiteral(state.source, state.i);
+  if (body.length > 0) {
+    state.literals.push({ text: body, line: state.line });
+  }
   state.decommented.push(raw);
   state.i = endIndex;
   state.prevIsValue = true;
@@ -264,8 +294,8 @@ function stepTemplateText(state) {
 // Returns { decommented, literals }. `decommented` is the source with
 // comments blanked out (same literal content, used for branch-literal
 // scanning). `literals` is a flat list of { text, line } -- one entry per
-// quoted string, and one entry per template-literal text chunk (the parts
-// outside `${}`).
+// quoted string, one per template-literal text chunk (the parts outside
+// `${}`), and one per non-empty regex-literal body.
 export function tokenize(source) {
   const state = {
     source,
@@ -356,16 +386,61 @@ export function scanRepo(repoRoot = REPO_ROOT) {
   return { literalHits, branchHits, fileCount: files.length };
 }
 
-function literalKey(h) {
+export function literalKey(h) {
   return `${h.file}\u0000${h.literal}`;
 }
-function branchKey(h) {
+export function branchKey(h) {
   return `${h.file}\u0000${h.match}`;
 }
 
-function setDiff(actualKeys, expectedKeys) {
-  const newOnes = [...actualKeys].filter((k) => !expectedKeys.has(k));
-  const stale = [...expectedKeys].filter((k) => !actualKeys.has(k));
+// ---- multiset comparison (review 1R P1-1 fix) ----
+//
+// A plain Set diff (old behavior) only asks "does this key exist at all,
+// in the actual scan vs. the allowlist?" -- so once a (file, literal) or
+// (file, branch-match) key was allowed once, any *further* occurrence of
+// the exact same key in the exact same file was invisible: both sides'
+// Sets already contained the key, so no diff. These three helpers instead
+// compare *occurrence counts* per key.
+
+// hits: literalHits or branchHits. keyFn: literalKey or branchKey.
+export function countByKey(hits, keyFn) {
+  const counts = new Map();
+  for (const h of hits) {
+    const k = keyFn(h);
+    counts.set(k, (counts.get(k) ?? 0) + 1);
+  }
+  return counts;
+}
+
+// allowlistRows: literalExceptions or branchLiteralBaseline rows, each
+// carrying an explicit `count` (defaults to 1 if the row omits it, for
+// backward-compatible schemas). Rows that repeat the same key have their
+// counts summed, so either "one row per key with a count" or "one row per
+// occurrence" is a valid allowlist shape.
+export function expectedCountByKey(allowlistRows, keyFn) {
+  const counts = new Map();
+  for (const row of allowlistRows) {
+    const k = keyFn(row);
+    const c = typeof row.count === "number" ? row.count : 1;
+    counts.set(k, (counts.get(k) ?? 0) + c);
+  }
+  return counts;
+}
+
+// Returns { newOnes, stale } -- each entry is `"<key> (actual A > expected
+// E)"` / `"<key> (actual A < expected E)"` so a widened-but-undeclared
+// occurrence count is distinguishable from a brand-new key (E=0) or a
+// stale allowlist row (A=0) in the assertion failure message.
+export function multisetDiff(actualCounts, expectedCounts) {
+  const keys = new Set([...actualCounts.keys(), ...expectedCounts.keys()]);
+  const newOnes = [];
+  const stale = [];
+  for (const k of keys) {
+    const a = actualCounts.get(k) ?? 0;
+    const e = expectedCounts.get(k) ?? 0;
+    if (a > e) newOnes.push(`${k} (actual ${a} > expected ${e})`);
+    if (a < e) stale.push(`${k} (actual ${a} < expected ${e})`);
+  }
   return { newOnes, stale };
 }
 
@@ -380,14 +455,14 @@ function loadAllowlist() {
 // sha256 을 시험 안에 고정"). If the allowlist changes, this constant must
 // be updated in the same commit, so widening it is visible in the diff.
 const EXPECTED_ALLOWLIST_SHA256 =
-  "ed0695a5a68c9330eccd7ad96404140245b775ea3583682b25c68b57d3d0ee87";
+  "c0e6327c98966dd90b84abfa02dbc698bd7190d79b434c524147055e5b605883";
 
 test("allowlist file hash is pinned (widening the allowlist must show in the diff)", () => {
   const { sha256 } = loadAllowlist();
   assert.equal(sha256, EXPECTED_ALLOWLIST_SHA256);
 });
 
-test("allowlist schema: every literal exception has a recognized category", () => {
+test("allowlist schema: every literal/branch row has a recognized category (literals only) and a positive integer count", () => {
   const { parsed } = loadAllowlist();
   const validCategories = new Set(["E1", "E2", "E3", "E5", "B2-TODO"]);
   assert.ok(Array.isArray(parsed.literalExceptions));
@@ -398,46 +473,59 @@ test("allowlist schema: every literal exception has a recognized category", () =
     );
     assert.ok(typeof row.file === "string" && row.file.length > 0);
     assert.ok(typeof row.literal === "string" && row.literal.length > 0);
+    assert.ok(
+      Number.isInteger(row.count) && row.count >= 1,
+      `count must be a positive integer in ${JSON.stringify(row)}`,
+    );
+  }
+  assert.ok(Array.isArray(parsed.branchLiteralBaseline));
+  for (const row of parsed.branchLiteralBaseline) {
+    assert.ok(typeof row.file === "string" && row.file.length > 0);
+    assert.ok(typeof row.match === "string" && row.match.length > 0);
+    assert.ok(
+      Number.isInteger(row.count) && row.count >= 1,
+      `count must be a positive integer in ${JSON.stringify(row)}`,
+    );
   }
 });
 
-test("repo-wide anchor-literal scan two-way exact matches the allowlist", () => {
+test("repo-wide anchor-literal scan: per-key occurrence count exactly matches the allowlist (multiset)", () => {
   const { parsed } = loadAllowlist();
   const { literalHits } = scanRepo();
 
-  const actualKeys = new Set(literalHits.map(literalKey));
-  const expectedKeys = new Set(parsed.literalExceptions.map(literalKey));
-  const { newOnes, stale } = setDiff(actualKeys, expectedKeys);
+  const actual = countByKey(literalHits, literalKey);
+  const expected = expectedCountByKey(parsed.literalExceptions, literalKey);
+  const { newOnes, stale } = multisetDiff(actual, expected);
 
   assert.deepEqual(
     newOnes,
     [],
-    `new engine-name literal(s) not in allowlist: ${JSON.stringify(newOnes)}`,
+    `new engine-name literal(s), or more occurrences of an already-allowed one, not matching the allowlist count: ${JSON.stringify(newOnes)}`,
   );
   assert.deepEqual(
     stale,
     [],
-    `stale allowlist entries no longer present in scripts/: ${JSON.stringify(stale)}`,
+    `stale allowlist entries/counts no longer present in scripts/: ${JSON.stringify(stale)}`,
   );
 });
 
-test("repo-wide branch-literal scan two-way exact matches the pinned baseline", () => {
+test("repo-wide branch-literal scan: per-key occurrence count exactly matches the pinned baseline (multiset)", () => {
   const { parsed } = loadAllowlist();
   const { branchHits } = scanRepo();
 
-  const actualKeys = new Set(branchHits.map(branchKey));
-  const expectedKeys = new Set(parsed.branchLiteralBaseline.map(branchKey));
-  const { newOnes, stale } = setDiff(actualKeys, expectedKeys);
+  const actual = countByKey(branchHits, branchKey);
+  const expected = expectedCountByKey(parsed.branchLiteralBaseline, branchKey);
+  const { newOnes, stale } = multisetDiff(actual, expected);
 
   assert.deepEqual(
     newOnes,
     [],
-    `new engine-name branch literal(s) not in the pinned baseline: ${JSON.stringify(newOnes)}`,
+    `new engine-name branch literal(s), or more occurrences of an already-pinned one, not matching the baseline count: ${JSON.stringify(newOnes)}`,
   );
   assert.deepEqual(
     stale,
     [],
-    `branch-literal baseline entries no longer present in scripts/ (baseline is pinned, not "<=''): ${JSON.stringify(stale)}`,
+    `branch-literal baseline entries/counts no longer present in scripts/ (baseline is pinned, not "<=''): ${JSON.stringify(stale)}`,
   );
 });
 
@@ -487,6 +575,25 @@ test("tokenizer: template literal text chunks outside ${} are scanned as literal
   assert.equal(hits[0].text, "engine=claude-");
 });
 
+// ---- tokenizer: regex-literal body is now scanned (review 1R P2-3) ----
+
+test("tokenizer: a regex literal's body is scanned as a literal (previously a blind spot)", () => {
+  const src = "const isEngine = /codex|claude/i.test(name);\n";
+  const hits = findAnchorHits(src);
+  assert.equal(hits.length, 1);
+  assert.equal(hits[0].text, "codex|claude");
+});
+
+test("tokenizer: regex-literal vs. division disambiguation is unaffected by anchor scanning", () => {
+  // `a / b` after an identifier is division, not a regex literal -- the
+  // literal/regex content "codex" here must NOT be read as a literal at
+  // all (there is no literal here; this just guards against a regression
+  // where regex detection starts misreading division as a regex start).
+  const src = "const codex = a / b / c;\n";
+  const hits = findAnchorHits(src);
+  assert.deepEqual(hits, []);
+});
+
 test("branch-literal: comparison against a string literal is detected", () => {
   const src = 'if (engine === "codex") { doThing(); }\n';
   const hits = findBranchLiterals(src);
@@ -499,10 +606,28 @@ test("branch-literal: the anchor word appearing only as a bare identifier is not
   assert.deepEqual(hits, []);
 });
 
+// ---- branch-literal: prefix-match false positive (review 1R P2-7) ----
+
+test("branch-literal: a longer identifier that merely starts with the anchor word is not a branch literal", () => {
+  // "claude-settings" is a distinct identifier, not an engine-name
+  // comparison -- the old pattern matched on the `["'`]claude` prefix alone
+  // and counted this as a branch literal on "claude".
+  const src = 'if (target.kind === "claude-settings") { return 1; }\n';
+  const hits = findBranchLiterals(src);
+  assert.deepEqual(hits, []);
+});
+
+test("branch-literal: the gpt- anchor is still deliberately a prefix match (model names continue after it)", () => {
+  const src = 'if (model === "gpt-5.6") { return 1; }\n';
+  const hits = findBranchLiterals(src);
+  assert.equal(hits.length, 1);
+  assert.equal(hits[0], '=== "gpt-');
+});
+
 // ---- mkdtemp-copy mutation regression (synthetic sample content, not a
 // copy of production logic -- these exercise the *real* exported scanner
 // functions above against deliberately mutated synthetic source text, per
-// coder-task.md §2 ⓘⓘ "시험 안 mkdtemp 사본 변이 3종") ----
+// coder-task.md §2 ⓘⓘ "시험 안 mkdtemp 사본 변이") ----
 
 function withTempFile(content, fn) {
   const dir = fs.mkdtempSync(
@@ -552,23 +677,175 @@ test("mutation ②: injecting an engine-name branch comparison turns the branch-
   });
 });
 
-test("mutation ③: deleting one allowlist row makes the repo-wide scan report a new (unlisted) hit", () => {
+test("mutation ③: deleting one allowlist row's count surfaces its occurrence(s) as a new (unlisted) hit", () => {
   const { parsed } = loadAllowlist();
   assert.ok(
     parsed.literalExceptions.length > 0,
     "allowlist must be non-empty for this mutation to be meaningful",
   );
   const removed = parsed.literalExceptions[0];
-  const shrunk = {
-    ...parsed,
-    literalExceptions: parsed.literalExceptions.slice(1),
-  };
+  const shrunk = parsed.literalExceptions.slice(1);
   const { literalHits } = scanRepo();
-  const actualKeys = new Set(literalHits.map(literalKey));
-  const expectedKeys = new Set(shrunk.literalExceptions.map(literalKey));
-  const { newOnes } = setDiff(actualKeys, expectedKeys);
+  const actual = countByKey(literalHits, literalKey);
+  const expected = expectedCountByKey(shrunk, literalKey);
+  const { newOnes } = multisetDiff(actual, expected);
   assert.ok(
-    newOnes.includes(literalKey(removed)),
-    `expected removing ${JSON.stringify(removed)} from the allowlist to surface it as an unlisted hit`,
+    newOnes.some((entry) => entry.startsWith(`${literalKey(removed)} (`)),
+    `expected removing ${JSON.stringify(removed)} from the allowlist to surface it as an unlisted hit: ${JSON.stringify(newOnes)}`,
   );
+});
+
+// ---- PM 설계 §b ⑴: layered-file *copy* mutations that go all the way
+// through the allowlist comparison (keyCount + multisetDiff), not just the
+// bare findAnchorHits/findBranchLiterals calls -- review 1R flagged that a
+// copy-mutation test which stops at the bare detector functions is not
+// evidence the allowlist-comparison step itself would turn red (mutation
+// ①② above are exactly that weaker shape; these four are the stronger
+// one). Each builds a throwaway `<tmp>/scripts/...` tree via scanRepo's own
+// repoRoot parameter -- a real directory walk, not a copy-import of
+// production code -- and a synthetic allowlist sized to the *clean*
+// version of the sample, then mutates the file on disk and re-scans. ----
+
+function withCopyRepo(relPath, content, fn) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "engine-copy-repo-"));
+  const abs = path.join(root, "scripts", relPath);
+  fs.mkdirSync(path.dirname(abs), { recursive: true });
+  fs.writeFileSync(abs, content, "utf8");
+  try {
+    return fn(root, abs);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+}
+
+test("copy-mutation (literal, via allowlist comparison): injecting a new literal into a layered-file copy is RED", () => {
+  const clean = "export function f(x) { return x + 1; }\n";
+  withCopyRepo("relay/adapters/sample-adapter.mjs", clean, (root) => {
+    const { literalHits } = scanRepo(root);
+    const expected = expectedCountByKey([], literalKey);
+    const before = multisetDiff(countByKey(literalHits, literalKey), expected);
+    assert.deepEqual(before.newOnes, []);
+
+    fs.writeFileSync(
+      path.join(root, "scripts", "relay/adapters/sample-adapter.mjs"),
+      'export function f(x) { const e = "codex"; return x + 1; }\n',
+      "utf8",
+    );
+    const { literalHits: afterHits } = scanRepo(root);
+    const after = multisetDiff(countByKey(afterHits, literalKey), expected);
+    assert.ok(
+      after.newOnes.length >= 1,
+      "expected the injected literal to turn the allowlist comparison RED",
+    );
+  });
+});
+
+test("copy-mutation (branch, via allowlist comparison): injecting a new engine-name branch into a layered-file copy is RED", () => {
+  const clean = "export function f(engine) { return engine.length; }\n";
+  withCopyRepo("relay/adapters/sample-adapter.mjs", clean, (root) => {
+    const { branchHits } = scanRepo(root);
+    const expected = expectedCountByKey([], branchKey);
+    const before = multisetDiff(countByKey(branchHits, branchKey), expected);
+    assert.deepEqual(before.newOnes, []);
+
+    fs.writeFileSync(
+      path.join(root, "scripts", "relay/adapters/sample-adapter.mjs"),
+      'export function f(engine) { if (engine === "claude") return 1; return 0; }\n',
+      "utf8",
+    );
+    const { branchHits: afterHits } = scanRepo(root);
+    const after = multisetDiff(countByKey(afterHits, branchKey), expected);
+    assert.ok(
+      after.newOnes.length >= 1,
+      "expected the injected branch comparison to turn the allowlist comparison RED",
+    );
+  });
+});
+
+test("copy-mutation (P1-1 regression): one MORE occurrence of an already-allowed key, via allowlist comparison, is RED", () => {
+  // This is the exact shape review 1R's M5 found live on orca-adapter.mjs:
+  // a file that already has an allowed `engine === "codex"` branch and an
+  // allowed "claude" literal gets a *second* occurrence of each -- a plain
+  // Set-membership comparison stays green because the key already existed;
+  // the multiset comparison must go RED because the count changed.
+  const clean =
+    'export function f(engine) { if (engine === "codex") { return "claude"; } return 0; }\n';
+  withCopyRepo("relay/adapters/sample-adapter.mjs", clean, (root) => {
+    const relFile = "scripts/relay/adapters/sample-adapter.mjs";
+    const { literalHits, branchHits } = scanRepo(root);
+    const expectedLiteral = expectedCountByKey(
+      [
+        { file: relFile, literal: "claude", count: 1 },
+        { file: relFile, literal: "codex", count: 1 },
+      ],
+      literalKey,
+    );
+    const expectedBranch = expectedCountByKey(
+      [{ file: relFile, match: '=== "codex', count: 1 }],
+      branchKey,
+    );
+    const beforeLiteral = multisetDiff(
+      countByKey(literalHits, literalKey),
+      expectedLiteral,
+    );
+    const beforeBranch = multisetDiff(
+      countByKey(branchHits, branchKey),
+      expectedBranch,
+    );
+    assert.deepEqual(beforeLiteral.newOnes, []);
+    assert.deepEqual(beforeLiteral.stale, []);
+    assert.deepEqual(beforeBranch.newOnes, []);
+    assert.deepEqual(beforeBranch.stale, []);
+
+    // Inject one MORE occurrence of the exact same already-allowed key on
+    // both axes -- nothing new in the Set sense, but the count changes.
+    fs.writeFileSync(
+      path.join(root, relFile.replace(/^scripts\//, "scripts/")),
+      'export function f(engine) { if (engine === "codex") { return "claude"; } if (engine === "codex") { return "claude"; } return 0; }\n',
+      "utf8",
+    );
+    const { literalHits: afterLit, branchHits: afterBranch } = scanRepo(root);
+    const afterLiteralDiff = multisetDiff(
+      countByKey(afterLit, literalKey),
+      expectedLiteral,
+    );
+    const afterBranchDiff = multisetDiff(
+      countByKey(afterBranch, branchKey),
+      expectedBranch,
+    );
+    assert.ok(
+      afterLiteralDiff.newOnes.some((e) =>
+        e.startsWith(`${relFile}\u0000claude (`),
+      ),
+      `expected the second "claude" occurrence to be RED: ${JSON.stringify(afterLiteralDiff.newOnes)}`,
+    );
+    assert.ok(
+      afterBranchDiff.newOnes.some((e) =>
+        e.startsWith(`${relFile}\u0000=== "codex (`),
+      ),
+      `expected the second === "codex" occurrence to be RED: ${JSON.stringify(afterBranchDiff.newOnes)}`,
+    );
+  });
+});
+
+test("copy-mutation (regex-literal, via allowlist comparison): an engine name hidden in a new regex literal is RED", () => {
+  const clean = "export function f(name) { return name.length; }\n";
+  withCopyRepo("check/sample-detect.mjs", clean, (root) => {
+    const { literalHits } = scanRepo(root);
+    const expected = expectedCountByKey([], literalKey);
+    const before = multisetDiff(countByKey(literalHits, literalKey), expected);
+    assert.deepEqual(before.newOnes, []);
+
+    fs.writeFileSync(
+      path.join(root, "scripts", "check/sample-detect.mjs"),
+      "export function f(name) { const isEngine = /codex|claude/i.test(name); return isEngine; }\n",
+      "utf8",
+    );
+    const { literalHits: afterHits } = scanRepo(root);
+    const after = multisetDiff(countByKey(afterHits, literalKey), expected);
+    assert.ok(
+      after.newOnes.length >= 1,
+      "expected the engine name hidden in a new regex literal to turn the allowlist comparison RED",
+    );
+  });
 });

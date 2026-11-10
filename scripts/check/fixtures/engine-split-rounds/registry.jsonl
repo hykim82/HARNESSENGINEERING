@@ -7,3 +7,6 @@
 {"paneKey":"pane-author-6","role":"CODER","engine":"claude","model":"claude-sonnet-5","effort":"high","worktree":"C:/fake/worktrees/hyk6-demo","launchedVia":"orca-worker-seat.ps1","launchedAt":"2026-11-06T00:00:00.000Z"}
 this-line-is-not-json
 {"paneKey":"","role":"REVIEW","engine":"codex","model":"","effort":"","worktree":"","launchedVia":"orca-worker-seat.ps1","launchedAt":"2026-11-07T00:00:00.000Z"}
+{"paneKey":"pane-author-7a","role":"CODER","engine":"claude","model":"claude-sonnet-5","effort":"high","worktree":"C:/fake/worktrees/hyk7-rework-1","launchedVia":"orca-worker-seat.ps1","launchedAt":"2026-11-07T00:00:00.000Z"}
+{"paneKey":"pane-author-7b","role":"CODER","engine":"claude","model":"claude-opus-5","effort":"high","worktree":"C:/fake/worktrees/hyk7-rework-1-r2","launchedVia":"orca-worker-seat.ps1","launchedAt":"2026-11-07T01:00:00.000Z"}
+{"paneKey":"pane-review-7","role":"REVIEW","engine":"claude","model":"claude-opus-5-5","effort":"high","worktree":"C:/fake/worktrees/hyk7-rework-1-review","launchedVia":"orca-worker-seat.ps1","launchedAt":"2026-11-07T00:11:00.000Z"}

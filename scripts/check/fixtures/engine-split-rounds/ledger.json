@@ -91,8 +91,36 @@
       "status": "COMPLETED",
       "role": "REVIEW",
       "seat_key": "pane-review-1",
-      "admitted_at": "2026-11-06T00:11:00.000Z",
-      "completed_at": "2026-11-06T00:20:00.000Z"
+      "admitted_at": "2026-10-31T00:00:00.000Z",
+      "completed_at": "2026-10-31T00:10:00.000Z"
+    },
+    "HYK-7-rework-1": {
+      "status": "COMPLETED",
+      "role": "CODER",
+      "seat_key": "pane-author-7a",
+      "admitted_at": "2026-11-07T00:00:00.000Z",
+      "completed_at": "2026-11-07T00:10:00.000Z"
+    },
+    "HYK-7-rework-1-r2": {
+      "status": "COMPLETED",
+      "role": "CODER",
+      "seat_key": "pane-author-7b",
+      "admitted_at": "2026-11-07T01:00:00.000Z",
+      "completed_at": "2026-11-07T01:10:00.000Z"
+    },
+    "HYK-7-rework-1-review-1": {
+      "status": "COMPLETED",
+      "role": "REVIEW",
+      "seat_key": "pane-review-7",
+      "admitted_at": "2026-11-07T00:11:00.000Z",
+      "completed_at": "2026-11-07T00:20:00.000Z"
+    },
+    "HYK-7-rework-1-review-2": {
+      "status": "COMPLETED",
+      "role": "REVIEW",
+      "seat_key": "pane-review-7",
+      "admitted_at": "2026-11-07T01:11:00.000Z",
+      "completed_at": "2026-11-07T01:20:00.000Z"
     }
   }
 }
