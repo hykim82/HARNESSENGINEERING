@@ -2193,46 +2193,66 @@ test(`GREEN (3-way pid-reuse-simulated contention): ${PID_REUSE_THREE_WAY_TRIALS
       const outs = [0, 1, 2].map((i) =>
         join(dir, `reuse-out-${trial}-${i}.json`),
       );
+      // product_scope ⓘ(CI-③, 새 얼굴, master 45ba111 15:38:55 CI 실패
+      // 원인): 고정 4000ms 자기 타이머는 "결국 획득" 판정과 같은 모양의
+      // per-child 시계 의존이다 -- CI 중첩 스윕 하에서 3자 경합 자체가
+      // 4초를 넘기면(굶음), 이 홀더가 "진짜로" 죽어 judgeOwner의
+      // isPidAliveFn 가지(identity 질의보다 먼저 보는 싼 경로,
+      // runner-lock.mjs:331)가 pid-dead로 떨어지고, pid-reused가 아니게
+      // 돼 바로 아래 단언이 깨진다(starvation seam 재현,〔직접〕: 이
+      // 4000ms를 50ms로 줄이면 trial 0에서 바로 이 모양 -- "at least one
+      // child must reclaim via pid-reused" RED, 복원 확인 포함 결과 파일
+      // §0 참고). 시계 의존을 완전히 없애는 쪽(완료 판정)으로 고친다 --
+      // 자기 타이머를 없애고(setInterval 간격을 사실상 무한대로 둬 자연
+      // 종료가 없게) 부모의 명시적 kill()만이 유일한 종료 경로가 되게
+      // 한다. try/finally로 Promise.all이 던지는 경우에도(스폰 자체가
+      // 거부되는 경우는 없지만, 방어적으로) kill이 보장된다 -- 완료
+      // 판정으로 바꾼 뒤에는 holder가 안 죽으면 영원히 살 수 있어
+      // (12.4일) 수리 전 "4초면 저절로 끝난다"는 안전망이 없어졌기
+      // 때문에 이 보장이 전보다 더 중요해졌다.
       const aliveHolder = spawn(
         process.execPath,
-        ["-e", "setTimeout(() => {}, 4000)"],
+        ["-e", "setInterval(() => {}, 0x7fffffff)"],
         { stdio: "ignore" },
       );
-      await new Promise((res) => setTimeout(res, 15)); // let it really start.
-      writeFileSync(
-        lockPath,
-        JSON.stringify({
-          pid: aliveHolder.pid,
-          startedAtMs: 1,
-          procStart: "not-this-process's-real-identity",
-          worktree: null,
-          head: null,
-          lockId: `reuse-${trial}`,
-        }),
-      );
-      const results = await Promise.all(
-        outs.map((outPath) =>
-          spawnReclaimRaceChild({
-            lockPath,
-            csPath,
-            outPath,
-            holdMs: 20,
-            pollIntervalMs: 10,
-            timeoutMs: GENEROUS_EVENTUAL_ACQUIRE_TIMEOUT_MS,
+      try {
+        await new Promise((res) => setTimeout(res, 15)); // let it really start.
+        writeFileSync(
+          lockPath,
+          JSON.stringify({
+            pid: aliveHolder.pid,
+            startedAtMs: 1,
+            procStart: "not-this-process's-real-identity",
+            worktree: null,
+            head: null,
+            lockId: `reuse-${trial}`,
           }),
-        ),
-      );
-      aliveHolder.kill();
-      if (results.some((r) => r.violation)) violations += 1;
-      assert.ok(
-        results.every((r) => r.acquired),
-        `trial ${trial}: all 3 must eventually acquire -- ${JSON.stringify(results)}`,
-      );
-      assert.ok(
-        results.some((r) => r.reclaimReason === "pid-reused"),
-        `trial ${trial}: at least one child must reclaim via pid-reused`,
-      );
-      assert.equal(existsSync(lockPath), false, `trial ${trial}: released`);
+        );
+        const results = await Promise.all(
+          outs.map((outPath) =>
+            spawnReclaimRaceChild({
+              lockPath,
+              csPath,
+              outPath,
+              holdMs: 20,
+              pollIntervalMs: 10,
+              timeoutMs: GENEROUS_EVENTUAL_ACQUIRE_TIMEOUT_MS,
+            }),
+          ),
+        );
+        if (results.some((r) => r.violation)) violations += 1;
+        assert.ok(
+          results.every((r) => r.acquired),
+          `trial ${trial}: all 3 must eventually acquire -- ${JSON.stringify(results)}`,
+        );
+        assert.ok(
+          results.some((r) => r.reclaimReason === "pid-reused"),
+          `trial ${trial}: at least one child must reclaim via pid-reused -- ${JSON.stringify(results)}`,
+        );
+        assert.equal(existsSync(lockPath), false, `trial ${trial}: released`);
+      } finally {
+        aliveHolder.kill();
+      }
     }
     assert.equal(
       violations,
@@ -2523,6 +2543,108 @@ test("acquireRunnerLock (P2-B ⑵): cleanupAfterReclaim leaves a LIVE reclaimer'
   }
 });
 
+// product_scope ⓘⓘⓘ (검토 2R P2-1, 이 라운드 신규): P2-B ⑴/⑵ 둘 다
+// "확정" 가지만 잰다(⑴ 신원 파싱 성공 + pid 사망 확정 = 지운다, ⑵ 신원
+// 파싱 성공 + pid 생존 확정 = 보존한다). 세 번째 가지 -- tmp 내용을
+// 읽거나 파싱할 수 없는 경우(쓰는 중의 빈/부분 내용, 또는 EBUSY류 읽기
+// 실패) -- 는 runner-lock.mjs:452-456 `maybeCleanupDeadReclaimerTmp`의
+// `catch { return; }`가 "모호하면 보존"으로 이미 떨어뜨리지만, 이 칸이
+// 커밋되기 전까지는 그 가지를 production acquireRunnerLock 진입점으로
+// 직접 단언하는 회귀 시험이 없었다(§13-9 주석이 "모호한 쪽은 손대지
+// 않는다"로 말만 하고 있었다). 검토자 변이(이 catch를 "모호 = 사망"으로
+// 바꿔 unlink하게 하는 것)가 이 칸을 RED로 만든다는 것을 아래 §0 답에서
+// 직접 확인했다(변이 ④) -- 그 확인이 바로 이 칸이 "말뿐"이 아니라는
+// 증거다. 세 내용 모양(빈 · 부분 · 읽기 실패) 전부 같은 catch 가지로
+// 떨어지므로 한 시험에서 루프로 셋 다 돈다(D2의 "insertionPoints 루프"와
+// 같은 기법). "읽기 실패"는 실제 OS 권한 API(파편적·플랫폼 종속)를 쓰지
+// 않고, 이 파일의 다른 모든 자리(D2 등)와 같은 방식으로 `readFileFn`을
+// 그 경로에만 던지도록 주입한다(합성 EBUSY, 〔직접〕 아님 -- universal_
+// claim_discipline, 실제 OS 공유 위반은 §11의 PowerShell 자리에서만
+// 잰다).
+const P2B3_AMBIGUOUS_CASES = [
+  {
+    label: "empty",
+    seedContent: () => "",
+  },
+  {
+    label: "partial",
+    // createExclusive가 link 전에 이미 다 쓴 `{pid, procStart}` 모양의
+    // JSON이 쓰는 도중 끊긴 것을 흉내낸다(비원자적 쓰기 중간을 본 경우,
+    // §13-9 주석 그대로) -- JSON.parse가 SyntaxError로 던진다.
+    seedContent: () => '{"pid": 123, "procSt',
+  },
+  {
+    label: "unreadable",
+    // 내용 자체는 완전히 유효하다 -- 읽기 단계(EBUSY/EPERM류, 아래
+    // readFileFn 주입)에서 실패하는 모양이라 내용이 안 보이는 경우를
+    // 흉내낸다.
+    seedContent: () =>
+      JSON.stringify({ pid: process.pid, procStart: "whatever" }),
+  },
+];
+
+test("acquireRunnerLock (P2-B ⑶, 모호하면 보존): cleanupAfterReclaim leaves an AMBIGUOUS orphaned ticket tmp (empty / partial / unreadable content) untouched, through the production acquireRunnerLock entry point -- a reviewer mutation that treats 'ambiguous' as 'dead' must turn this RED (product_scope ⓘⓘⓘ, 검토 2R P2-1)", () => {
+  for (const { label, seedContent } of P2B3_AMBIGUOUS_CASES) {
+    const dir = freshLockDir();
+    const lockPath = join(dir, "r.lock");
+    try {
+      const deadOwnerPid = spawnSync(process.execPath, [
+        "-e",
+        "process.exit(0)",
+      ]).pid;
+      const lockId = `p2b3-${label}`;
+      writeFileSync(
+        lockPath,
+        JSON.stringify({
+          pid: deadOwnerPid,
+          lockId,
+          procStart: `dead-p2b3-${label}-seed`,
+        }),
+      );
+      const ambiguousTmpPath = `${lockPath}.reclaim.${lockId}.1.tmp.ambiguousleftover`;
+      writeFileSync(ambiguousTmpPath, seedContent());
+      const realReadFileFn = (p, enc) => readFileSync(p, enc);
+      const readFileFn =
+        label === "unreadable"
+          ? (p, enc) => {
+              if (p === ambiguousTmpPath) {
+                const err = new Error(
+                  "EBUSY: resource busy or locked (injected seam, P2-B ⑶)",
+                );
+                err.code = "EBUSY";
+                throw err;
+              }
+              return realReadFileFn(p, enc);
+            }
+          : realReadFileFn;
+      const r = acquireRunnerLock({
+        lockPath,
+        pid: process.pid,
+        startedAtMs: Date.now(),
+        timeoutMs: 5000,
+        pollIntervalMs: 10,
+        readFileFn,
+        getStartIdentityFn: p2bGetStartIdentityFn,
+        env: cleanEnv(),
+      });
+      assert.equal(
+        r.acquired,
+        true,
+        `[${label}]: must still acquire -- ${JSON.stringify(r)}`,
+      );
+      assert.equal(
+        existsSync(ambiguousTmpPath),
+        true,
+        `[${label}]: an AMBIGUOUS (unparseable/unreadable) orphaned ticket tmp must NEVER be deleted on ambiguity alone (P2-B ⑶, 모호하면 보존)`,
+      );
+      releaseRunnerLock({ lockPath, lockId: r.lockId });
+      rmSync(ambiguousTmpPath, { force: true });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+});
+
 // product_scope 1b_exec_line ⑴ "오래 기다린 뒤 잡기" (P1-B repro shape),
 // scaled N/M: a long-waiting entrant's own startedAtMs is backdated (same
 // shape as isolated-suite-runner.mjs's real call site: `startedAtMs:
@@ -2583,14 +2705,48 @@ function writeLongWaitChildScript(dir) {
   return scriptPath;
 }
 
+// product_scope ⓘⓘ (남은 실제 자식 프로세스 경합 칸 전수): 이 칸은 수리
+// 전까지 `stdio: "ignore"`라 자식 stderr가 버려졌고, 실패 단언 메시지
+// (아래 `assert.ok(a.acquired && b.acquired, ...)`)도 자식별 진단 없이
+// "둘 다 획득해야 한다"는 한 줄뿐이었다 -- §10b/§10b-2 모든 칸이 이미
+// 받은 처방(spawnReclaimRaceChild의 stderrTail/exitCode/elapsedMs)과
+// 같은 모양으로 맞춘다. `close`(`exit`가 아님) -- 다른 모든 자식
+// wrapper와 같은 이유(stdio 스트림이 아직 열린 채로 `exit`가 먼저 올 수
+// 있다, P2-2).
 function spawnLongWaitChild({ scriptPath, args }) {
-  return new Promise((resolve, reject) => {
+  const startMs = Date.now();
+  return new Promise((resolve) => {
+    let stderrChunks = "";
+    let spawnErrorMessage = null;
     const child = spawn(process.execPath, [scriptPath, ...args], {
-      stdio: "ignore",
+      stdio: ["ignore", "ignore", "pipe"],
       env: cleanEnv(),
     });
-    child.on("exit", () => {
-      readJsonWithRetry(args[2]).then(resolve, reject);
+    child.stderr.on("data", (chunk) => {
+      stderrChunks += chunk.toString("utf8");
+    });
+    child.on("error", (err) => {
+      spawnErrorMessage = err?.message ?? String(err);
+    });
+    child.on("close", (exitCode, signal) => {
+      const elapsedMs = Date.now() - startMs;
+      const stderrTail = stderrChunks.slice(-STDERR_TAIL_CHARS);
+      readJsonWithRetry(args[2]).then(
+        (parsed) =>
+          resolve({ ...parsed, exitCode, signal, elapsedMs, stderrTail }),
+        (readErr) =>
+          resolve({
+            acquired: false,
+            violation: false,
+            missingOutput: true,
+            exitCode,
+            signal,
+            spawnErrorMessage,
+            readErrorMessage: readErr?.message ?? String(readErr),
+            elapsedMs,
+            stderrTail,
+          }),
+      );
     });
   });
 }
@@ -2615,7 +2771,16 @@ test(`GREEN (long-wait-then-claim, the exact P1-B repro shape, scaled N=100ms/M=
           out1,
           "400",
           "5",
-          "5000",
+          // product_scope ⓘⓘ: 고정 "5000" -> GENEROUS_EVENTUAL_ACQUIRE_
+          // TIMEOUT_MS(20초) -- 이 칸만 §10b/§10b-2 5개 칸이 이미 받은
+          // 처방(:1878 부근 주석의 cold-start·orphan·dead-ticket·
+          // staggered-alive·pid-reuse 목록)에서 빠져 있었다(이 round의
+          // 전수 재검색으로 발견). heartbeatIntervalMs(100)/heartbeatStale
+          // Ms(600)/simulatedWaitMs(2000) -- 이 칸이 실제로 단언하는
+          // "사전-첫-heartbeat-틱" 창 -- 는 전혀 바뀌지 않는다, 늘어나는
+          // 것은 acquireRunnerLock 자신의 "포기하기 전 상한"뿐이다(굶었을
+          // 때만 소진, 보통 경로 무영향 -- 다른 5개 칸과 같은 근거).
+          String(GENEROUS_EVENTUAL_ACQUIRE_TIMEOUT_MS),
           "100",
           "600",
           "2000",
@@ -2624,11 +2789,24 @@ test(`GREEN (long-wait-then-claim, the exact P1-B repro shape, scaled N=100ms/M=
       await new Promise((res) => setTimeout(res, 30));
       const p2 = spawnLongWaitChild({
         scriptPath,
-        args: [lockPath, csPath, out2, "400", "5", "5000", "100", "600", "0"],
+        args: [
+          lockPath,
+          csPath,
+          out2,
+          "400",
+          "5",
+          String(GENEROUS_EVENTUAL_ACQUIRE_TIMEOUT_MS),
+          "100",
+          "600",
+          "0",
+        ],
       });
       const [a, b] = await Promise.all([p1, p2]);
       if (a.violation || b.violation) violations += 1;
-      assert.ok(a.acquired && b.acquired, `trial ${trial}: both must acquire`);
+      assert.ok(
+        a.acquired && b.acquired,
+        `trial ${trial}: both must acquire -- ${JSON.stringify({ a, b })}`,
+      );
       assert.equal(existsSync(lockPath), false, `trial ${trial}: no leftover`);
     }
     assert.equal(
