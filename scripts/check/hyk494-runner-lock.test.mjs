@@ -675,12 +675,40 @@ test("acquireRunnerLock: a timed-out result never reports reclaimedOrphan:true, 
 // 디렉터리에서 확인해 `selfBranchHit`으로 싣는다 -- 자기 분기를 탄
 // 회차 수를 아래 시험이 ≥1로 단언한다(오진 아님, 헛시험 아님을 수로
 // 증명).
+//
+// HYK-498 §2 ⓘⓘⓘ(P2-1, 검토 3R §3 "P2-1" 그대로): 위 "C2를 15ms 뒤에
+// 띄운다"는 타이밍 의존이었다 -- C1이 느리게 스케줄되면(부하 등) C2가
+// ticket #1을 먼저 잡아 C1의 selfBranchHit이 구조적으로 false가 될 수
+// 있다(검토 3R 제자리 계측: trials 3→30, hit 83/90 -- 로컬 기준 3회
+// 모두 빗나갈 확률 ~0.05%이지만 0은 아니다). 수리(검토 3R 수리 예 그대로
+// "C1의 회수권 생성을 확인한 뒤 C2를 띄운다") -- 단, ticket #1 파일
+// 자체를 바깥(부모) 프로세스가 폴링하는 방식은 못 썼다: 주입이 없을 때
+// 실측(〔직접〕, 이 라운드)하면 ticket 생성 -> 재확인읽기 -> 삭제가 전부
+// 같은 동기 호출 안에서 ~6ms 안에 끝나(waitMs:6), 그보다 거친 외부 폴
+// (IPC/프로세스 간 10ms 간격)로는 그 창을 거의 항상 놓친다(5초를 돌려도
+// "ticket never appeared" -- 창이 폴 간격보다 훨씬 짧다는 뜻). 대신 C1
+// 자신의 readFileFn 주입 지점(lockReadCount===2, 즉 자기 ticket #1을
+// "막" 만든 바로 다음 줄)에서 지워지지 않는 전용 신호 파일(signalPath)을
+// 쓴다 -- 이 파일은 알고리즘이 건드리는 이름이 아니라 이 시험만 보는
+// 새 이름이라, 누구도 지우지 않고 그대로 남는다. C2는 이 신호가 나타난
+// 뒤에야 뜬다 -- 그 시점에 C1은 이미 ticket #1을 "링크까지" 끝낸 뒤이므로
+// (신호를 쓰는 코드 자리 자체가 그 다음 줄), C2가 존재하지도 않는 동안
+// C1이 ticket #1을 독점한다(경쟁 기회 자체가 없다, 순서 결정화). 단언
+// 약화 아님: 아래 `selfBranchTrials` 단언은 ">=1"에서 "모든 회차"로
+// 강화됐다.
+async function waitForFileToExist(path, { attempts = 500, delayMs = 10 } = {}) {
+  for (let i = 0; i < attempts; i += 1) {
+    if (existsSync(path)) return true;
+    await new Promise((res) => setTimeout(res, delayMs));
+  }
+  return false;
+}
 function p1SelfReclaimDeadlockChildScript() {
   return [
     `import { acquireRunnerLock, releaseRunnerLock } from ${JSON.stringify(RUNNER_LOCK_URL)};`,
     `import { readFileSync, readdirSync, writeFileSync } from "node:fs";`,
     `import { basename, dirname } from "node:path";`,
-    `const [lockPath, outPath, timeoutMs, pollIntervalMs, injectFailure] = process.argv.slice(2);`,
+    `const [lockPath, outPath, timeoutMs, pollIntervalMs, injectFailure, signalPath] = process.argv.slice(2);`,
     `const realReadFileFn = (p, enc) => readFileSync(p, enc);`,
     `let lockReadCount = 0;`,
     `let selfBranchHit = false;`,
@@ -699,6 +727,11 @@ function p1SelfReclaimDeadlockChildScript() {
     `          } catch (e) {}`,
     `        }`,
     `      } catch (e) {}`,
+    // HYK-498 P2-1: a durable sentinel (never cleaned up by the lock
+    // algorithm, unlike the ephemeral reclaim ticket itself) right at the
+    // point we've already confirmed our own ticket #1 exists -- the test
+    // waits on THIS file, not the ticket file, before starting C2.
+    `      if (signalPath) { try { writeFileSync(signalPath, "1"); } catch (e) {} }`,
     `      const err = new Error("HYK-494 followup-3 real-process repro: injected transient EBUSY on L reread");`,
     `      err.code = "EBUSY";`,
     `      throw err;`,
@@ -749,14 +782,23 @@ test(`GREEN (P1-1 교착 재현, 다른 대기자 1명을 둔 실제 프로세�
       );
       const out1 = join(dir, `p1-out-${trial}-1.json`);
       const out2 = join(dir, `p1-out-${trial}-2.json`);
+      const c1SignalPath = join(dir, `p1-signal-${trial}.flag`);
       const c1 = spawnP1Child({
         scriptPath,
-        args: [lockPath, out1, "6000", "20", "1"],
+        args: [lockPath, out1, "6000", "20", "1", c1SignalPath],
       });
-      await new Promise((res) => setTimeout(res, 15));
+      // HYK-498 P2-1: wait for C1's durable signal (written right after C1
+      // has already confirmed its own ticket #1 -- see the header comment
+      // above) before starting C2 -- deterministic order, replaces the old
+      // fixed-15ms race.
+      const c1SignalReady = await waitForFileToExist(c1SignalPath);
+      assert.ok(
+        c1SignalReady,
+        `trial ${trial}: C1 must signal (${c1SignalPath}) that it has already claimed its own reclaim ticket #1 before C2 starts`,
+      );
       const c2 = spawnP1Child({
         scriptPath,
-        args: [lockPath, out2, "6000", "20", "0"],
+        args: [lockPath, out2, "6000", "20", "0", ""],
       });
       const [a, b] = await Promise.all([c1, c2]);
       if (!a.acquired || !b.acquired || a.timedOut || b.timedOut) {
@@ -778,9 +820,14 @@ test(`GREEN (P1-1 교착 재현, 다른 대기자 1명을 둔 실제 프로세�
       0,
       `${deadlocks}/${P1_DEADLOCK_TRIALS} trials deadlocked -- 〔직접〕 finite sample, this machine, this run, injected (not real-OS) EBUSY`,
     );
-    assert.ok(
-      selfBranchTrials >= 1,
-      `P2-b: 0/${P1_DEADLOCK_TRIALS} trials actually took the self-reclaim-ticket branch (C1 must have already claimed its own ticket #1 at the moment the injected EBUSY fires) -- this cell would be a vacuous pass otherwise (검토 2R §3 P2-b)`,
+    // HYK-498 P2-1: with C2 deterministically started only after C1's own
+    // ticket #1 already exists (above), C1 can never lose that race to
+    // C2 -- selfBranchHit must be true EVERY trial now, not just >=1
+    // (strengthened from the P2-b original, not weakened: 검토 3R §3 P2-1).
+    assert.equal(
+      selfBranchTrials,
+      P1_DEADLOCK_TRIALS,
+      `P2-1: only ${selfBranchTrials}/${P1_DEADLOCK_TRIALS} trials took the self-reclaim-ticket branch -- with C2 gated on C1's own ticket existing first, every trial must take it (검토 3R §3 P2-1 fix)`,
     );
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -1619,6 +1666,13 @@ function reclaimRaceChildScript() {
 // 칸)가 자동으로 이 혜택을 받는다. `elapsedMs`/`stderrTail`은 성공·실패
 // 모두에 실어, 실패 단언 메시지가 회차별 3자 결과 JSON·경과 ms·stderr
 // 꼬리를 그대로 보여주게 한다(product_scope ⓘⓘ 문면 그대로).
+//
+// HYK-498 §2 ⓘⓘⓘⓘ(P2-2, 검토 3R §3 "P2-2" 그대로): `exit`는 Node 문서상
+// 자식의 stdio 스트림이 아직 열려 있는 상태에서도 먼저 올 수 있다 --
+// 사망 직전 stderr 줄이 그 사이 늦게 도착하면 `stderrTail`이 비거나
+// 잘린 채로 확정된다(검토 3R: 로컬 5/5는 전문이 실렸지만 Linux CI는
+// 〔못쟀다〕). `close`는 모든 stdio 스트림이 닫힌 "뒤"에만 온다(Node
+// 문서) -- stderrTail을 그 시점에 확정하면 이 창이 구조적으로 없어진다.
 const STDERR_TAIL_CHARS = 2000;
 
 function spawnReclaimRaceChild({
@@ -1655,7 +1709,9 @@ function spawnReclaimRaceChild({
     child.on("error", (err) => {
       spawnErrorMessage = err?.message ?? String(err);
     });
-    child.on("exit", (exitCode, signal) => {
+    // HYK-498 P2-2: `close` (not `exit`) -- see STDERR_TAIL_CHARS header
+    // above. `close`'s own callback signature is the same (code, signal).
+    child.on("close", (exitCode, signal) => {
       const elapsedMs = Date.now() - startMs;
       const stderrTail = stderrChunks.slice(-STDERR_TAIL_CHARS);
       let parsed;
@@ -1680,8 +1736,19 @@ function spawnReclaimRaceChild({
   });
 }
 
-// product_scope ⓘⓘⓘⓘ 범위 밖(목록만 + 근거): 이 칸은 2-way(=3-way 아님)라
-// 클럭 상한 수리 대상에서 뺀다(deviation_rule) -- timeoutMs: 5000 그대로.
+// HYK-498 §2 ⓘⓘ: 자식별 고정 클럭으로 "결국 획득"을 판정하는 칸은 이
+// 2-way 칸 · 5개 3-way 칸(THREE_WAY_*, 아래) · 5-way 칸(FIVE_WAY_TRIALS,
+// 아래) 7개 모두 같은 모양이다. #358(HYK-494 후속 5R)은 5개 3-way 칸만
+// 5000ms/8000ms -> `GENEROUS_EVENTUAL_ACQUIRE_TIMEOUT_MS`(20_000ms)로
+// 올리고 이 2-way 칸과 5-way 칸은 명시적으로 범위 밖(deviation_rule,
+// "3-way 칸" 문면)으로 남겼다(검토 3R "정보" 항목, :1683-1684 옛 주석).
+// 이 라운드(product_scope ⓘⓘ)가 그 둘에도 같은 처방을 준다 -- "결국
+// 획득" 판정에서 시계 의존을 완전히 제거하는 대신(폴링 루프 자체가
+// 무한 대기가 되면 busyRetryTimeoutMs 기본값과의 상호작용이 복잡해진다,
+// 5R과 같은 근거) 상한만 넉넉히 늘린다(5R이 고른 옵션과 동일). `wx`
+// 배제 위반 0 단언과 전원 획득 단언은 그대로 유지한다(단언 약화 아님).
+const GENEROUS_EVENTUAL_ACQUIRE_TIMEOUT_MS = 20_000;
+
 const RECLAIM_TRIALS = 10;
 
 test(`GREEN (compare-and-delete reclaim): ${RECLAIM_TRIALS} trials of 2 real children racing a lock pre-seeded with a DEAD pid's orphan content -- zero critical-section violations`, async () => {
@@ -1714,7 +1781,7 @@ test(`GREEN (compare-and-delete reclaim): ${RECLAIM_TRIALS} trials of 2 real chi
           outPath: out1,
           holdMs: 40,
           pollIntervalMs: 10,
-          timeoutMs: 5000,
+          timeoutMs: GENEROUS_EVENTUAL_ACQUIRE_TIMEOUT_MS,
         }),
         spawnReclaimRaceChild({
           lockPath,
@@ -1722,7 +1789,7 @@ test(`GREEN (compare-and-delete reclaim): ${RECLAIM_TRIALS} trials of 2 real chi
           outPath: out2,
           holdMs: 40,
           pollIntervalMs: 10,
-          timeoutMs: 5000,
+          timeoutMs: GENEROUS_EVENTUAL_ACQUIRE_TIMEOUT_MS,
         }),
       ]);
       if (a.violation || b.violation) violations += 1;
@@ -1749,23 +1816,17 @@ test(`GREEN (compare-and-delete reclaim): ${RECLAIM_TRIALS} trials of 2 real chi
 // 시험 자신의 시계 상한이 짧은 것이다(RED-first 2026-11-09 확인: 실제
 // 홀더가 6000ms 를 쥐고 있을 때 고정 5000ms 획득자는 결정적으로
 // timedOut:true 였고, 20000ms 로 올리자 같은 조건에서 acquired:true 로
-// 뒤집혔다 -- 아래 §0 답 참고). "결국 획득"의 통과 조건에서 시계
-// 의존을 완전히 제거하는 대신(폴링 루프 자체가 무한 대기가 되면
-// busyRetryTimeoutMs 기본값(30s, BUSY_RETRY_TIMEOUT_MS)과의 상호작용이
-// 복잡해진다) 상한을 수십 초로 넉넉히 늘린다(product_scope ⓘ의 두 옵션
-// 중 전자) -- `wx` 배제 위반 0 단언과 3자 모두 획득 단언은 그대로
-// 유지한다(단언 약화 아님). 칸 전체 시간 상한(파일 단독 ≤150초)은 보통
-// 경로(이 머신, 굶음 없음)에서 각 trial이 즉시 끝나므로 영향받지 않는다
-// -- 이 상한이 실제로 소진되는 경우는 정말로 20초 가까이 굶는 trial이
-// 여러 번 겹칠 때뿐이고, 그건 시험의 시계가 아니라 알고리즘 자체의
-// 문제라 별도 신호다. 같은 모양(자식별 고정 클럭 + "결국 획득" 판정)의
-// 3-way 칸을 재검색해 cold-start(:1707 아래) · 이 칸(orphan) ·
+// 뒤집혔다 -- 아래 §0 답 참고). 칸 전체 시간 상한(파일 단독 ≤150초)은
+// 보통 경로(이 머신, 굶음 없음)에서 각 trial이 즉시 끝나므로 영향받지
+// 않는다 -- 이 상한이 실제로 소진되는 경우는 정말로 20초 가까이 굶는
+// trial이 여러 번 겹칠 때뿐이고, 그건 시험의 시계가 아니라 알고리즘
+// 자체의 문제라 별도 신호다. 같은 모양(자식별 고정 클럭 + "결국 획득"
+// 판정)의 3-way 칸을 재검색해 cold-start(:1707 아래) · 이 칸(orphan) ·
 // dead-ticket(:1811 아래) · staggered-alive(:1907 아래) · pid-reuse
-// (:1973 아래) 5개에 모두 적용한다 -- 2-way reclaim(RECLAIM_TRIALS, 위)과
-// 5-way cold-start(FIVE_WAY_TRIALS, 아래)는 "3-way"가 아니라서 범위
-// 밖으로 남긴다(product_scope 문면 그대로, 목록만 + 근거).
-const GENEROUS_EVENTUAL_ACQUIRE_TIMEOUT_MS = 20_000;
-
+// (:1973 아래) 5개에 모두 적용한다. `GENEROUS_EVENTUAL_ACQUIRE_TIMEOUT_MS`
+// 는 위(2-way RECLAIM_TRIALS 바로 앞)에서 이미 정의했다 -- HYK-498이
+// 2-way·5-way 칸까지 같은 상수로 넓혔다(위 주석 참고, 더는 "3-way만"이
+// 아니다).
 const THREE_WAY_TRIALS = 15;
 
 test(`GREEN (3-way cold-start contention): ${THREE_WAY_TRIALS} trials of 3 real children racing a lock with NO pre-existing file -- zero critical-section violations`, async () => {
@@ -1951,10 +2012,11 @@ test(`GREEN (3-way orphan contention WITH a pre-existing DEAD reclaim ticket #1)
   }
 });
 
-// product_scope ⓘⓘⓘⓘ 범위 밖(목록만 + 근거): 5-way는 "3-way"가 아니라서
-// 수리 대상에서 명시적으로 뺀다 -- 같은 클럭-의존 모양이긴 하지만
-// product_scope가 "3-way 칸"으로 범위를 적었고(deviation_rule), 손대지
-// 않은 채 timeoutMs: 8000 그대로 둔다.
+// HYK-498 §2 ⓘⓘ: 5-way도 같은 클럭-의존 모양이다 -- #358(5R)은 "3-way
+// 칸"으로 범위를 적어(deviation_rule) 이 칸을 명시적으로 뺐지만(검토 3R
+// "정보" 항목, 5-way가 3-way보다 굶기 쉬운 모양이라는 추론과 함께), 이
+// 라운드가 그 범위를 2-way·5-way까지 넓힌다(위 RECLAIM_TRIALS 앞 주석
+// 참고) -- 같은 `GENEROUS_EVENTUAL_ACQUIRE_TIMEOUT_MS`를 쓴다.
 const FIVE_WAY_TRIALS = 10;
 
 test(`GREEN (5-way cold-start contention): ${FIVE_WAY_TRIALS} trials of 5 real children racing a lock with NO pre-existing file -- zero critical-section violations (P2-5, 실제 프로세스 "5 진입")`, async () => {
@@ -1975,7 +2037,7 @@ test(`GREEN (5-way cold-start contention): ${FIVE_WAY_TRIALS} trials of 5 real c
             outPath,
             holdMs: 15,
             pollIntervalMs: 5,
-            timeoutMs: 8000,
+            timeoutMs: GENEROUS_EVENTUAL_ACQUIRE_TIMEOUT_MS,
           }),
         ),
       );
@@ -2181,20 +2243,28 @@ function runActorBOnce({ lockPath, timeoutMs = 300, pollIntervalMs = 5 }) {
   return r;
 }
 
-// ⚠️정직 한계(〔직접〕, 범위 밖 발견 -- 고치지 않음, deviation_rule): a
-// third insertion point ("before-ticket-link", B fires AFTER A's tmp write
-// but BEFORE A's own linkFn) was tried and surfaced a REAL, narrow race:
-// cleanupAfterReclaim's prefix match (`reclaim.<lockId>.`) also matches
-// OTHER processes' in-flight `reclaim.<lockId>.<k>.tmp.<suffix>` files (not
-// just finished tickets), so B's cleanup can delete A's not-yet-linked tmp
-// file out from under it (ENOENT on A's own linkSync). This is a genuine
-// implementation gap in `cleanupAfterReclaim`, but it is NOT one of the
-// contracted P2-1~P2-7/CI-1 items -- product_scope/deviation_rule say to
-// flag, not fix, a finding outside the contract. Scoped down to the 2
-// insertion points that do NOT hit it (both fire only after A's own ticket
-// is already linked, so B correctly sees it alive and waits).
-test("D2 (scoped): 2 insertion points -- a FULL competing actor B runs to completion in the middle of actor A's own reclaim sequence (between ticket-create and reread / between reread and unlink) -- the single-reclaimer invariant survives every insertion, A still ends up correctly acquiring+releasing", () => {
-  const insertionPoints = ["before-reread", "before-unlink"];
+// HYK-498 §13-9 수리 확인(〔직접〕, production acquireRunnerLock 진입점 그대로
+// 구동): a third insertion point ("before-ticket-link", B fires AFTER A's
+// tmp write but BEFORE A's own linkFn) surfaces the EXACT narrow race 검토
+// 3R의 probe-prefix-gap.mjs가 결정적으로 재현한 것과 같은 모양이다--
+// cleanupAfterReclaim의 접두 매칭(수리 전)이 다른 회수권자의 in-flight
+// `reclaim.<lockId>.<k>.tmp.<suffix>` 파일까지 지워 그 쪽의 linkSync를
+// ENOENT로 실패시킨다. **base(#358/6d7bed1) 위에서는 이 세 번째 삽입점이
+// RED였다**(결과 파일의 RED-first 원문 참고) -- B가 전체 획득+해제를
+// 끝내며 cleanupAfterReclaim(lockId="d2-dead-owner")을 부르면, A가 막
+// 쓴(아직 link 전) ticket tmp가 그 접두 스캔에 걸려 지워지고, 재개된
+// A의 realLinkFn 호출이 ENOENT로 throw한다(uncaught -- 시험 자체가
+// 크래시). **HYK-498 수리 뒤에는 GREEN이다**: cleanupAfterReclaim이
+// 완성된(숫자만인 suffix) 티켓 이름만 지우므로 A의 tmp는 살아남고,
+// A의 링크가 성공한 뒤(ticket #1을 다시 만들 자리가 비어 있으면 그
+// 자리를 그대로 쓴다) A는 정상적으로 이어간다 -- 아래처럼 3개 삽입점
+// 전부 돈다(기존 2개 + 이 세 번째, 단언 약화 0).
+test("D2: 3 insertion points -- a FULL competing actor B runs to completion in the middle of actor A's own reclaim sequence (between ticket-create and reread / between reread and unlink / between A's own tmp write and A's own link) -- the single-reclaimer invariant survives every insertion, A still ends up correctly acquiring+releasing (HYK-498 §13-9 fix, production acquireRunnerLock)", () => {
+  const insertionPoints = [
+    "before-reread",
+    "before-unlink",
+    "before-ticket-link",
+  ];
   for (const point of insertionPoints) {
     const dir = freshLockDir();
     const lockPath = join(dir, "r.lock");
@@ -2232,6 +2302,19 @@ test("D2 (scoped): 2 insertion points -- a FULL competing actor B runs to comple
         if (point === "before-unlink" && p === lockPath) fireB();
         return realUnlinkFn(p);
       };
+      // HYK-498 §13-9: fires B right after A's createExclusive has written
+      // its OWN reclaim-ticket tmp file but before A's own linkFn runs --
+      // the exact window cleanupAfterReclaim's prefix-match bug could land
+      // in (destPath here is the ticket's FINAL name, never lockPath itself,
+      // since A's reclaim-ticket createExclusive always runs after A's own
+      // lockPath createExclusive has already failed EEXIST).
+      const realLinkFn = linkSync;
+      const linkFn = (tmpPath, destPath) => {
+        if (point === "before-ticket-link" && destPath.includes(".reclaim.")) {
+          fireB();
+        }
+        return realLinkFn(tmpPath, destPath);
+      };
       const a = acquireRunnerLock({
         lockPath,
         pid: process.pid,
@@ -2240,6 +2323,7 @@ test("D2 (scoped): 2 insertion points -- a FULL competing actor B runs to comple
         pollIntervalMs: 5,
         readFileFn,
         unlinkFn,
+        linkFn,
         env: cleanEnv(),
       });
       if (a.acquired) releaseRunnerLock({ lockPath, lockId: a.lockId });

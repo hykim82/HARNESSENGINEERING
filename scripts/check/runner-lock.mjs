@@ -399,6 +399,20 @@ function readLockContentResultDetailed(readFileFn, path) {
 // 전부"). 실패해도 삼킨다(공간 누수일 뿐, 불변식에는 영향이 없다 -- §(d)
 // "번호가 늦게 만들어지는 경우" 문단과 같은 근거: 이 lockId를 다시 참조할
 // 길이 없으면 누수는 harmless하다).
+// HYK-498 §13-9 수리: 접두 매칭(name.startsWith(prefix))만으로 지우면
+// 다른 회수권자가 createExclusive로 ticket k+1을 만드는 중(write(tmp)
+// 끝, link(tmp, path) 전)인 `<prefix><k+1>.tmp.<suffix>` 이름도 걸린다 --
+// 그 tmp 이름 자체가 이 prefix로 시작하기 때문이다(review 3R §2 ⓐ-3
+// 결정적 재현: 세 번째 회수권자가 그 tmp를 지우면 원래 주인의 `linkSync`
+// 가 ENOENT로 throw한다, createExclusive의 catch는 EEXIST/busy만 받고
+// 그 밖은 던진다). maxReclaimTicketNumber(위)가 이미 같은 구분을
+// "suffix가 숫자뿐인가"로 하고 있다(Number("<k>.tmp.<suffix>")===NaN) --
+// 여기도 같은 테스트를 적용해 **완성된(link된) 티켓 이름만**(suffix가
+// 정수 하나) 지운다. 다른 회수권자의 진행 중 tmp는 이 함수가 절대
+// 건드리지 않는다 -- 그 쪽의 createExclusive 자신의 catch(실패 시)나
+// 성공 뒤 자기 unlink(tmpPath)가 치운다(PM 설계 불변식·회수 경로
+// 되돌림 0 무변, 살아 있는 회수권자 ≤1도 무변 -- 이 함수는 "이미
+// link되어 끝난" 티켓만 청소 대상으로 본다).
 function cleanupAfterReclaim({ lockPath, lockId, unlinkFn, readdirFn }) {
   try {
     unlinkFn(aliveFilePath(lockPath, lockId));
@@ -414,6 +428,8 @@ function cleanupAfterReclaim({ lockPath, lockId, unlinkFn, readdirFn }) {
   const prefix = reclaimTicketPrefix(lockPath, lockId);
   for (const name of names) {
     if (!name.startsWith(prefix)) continue;
+    const suffix = name.slice(prefix.length);
+    if (!/^\d+$/.test(suffix)) continue; // `.tmp.<suffix>` 등은 완성 티켓이 아니다.
     try {
       unlinkFn(join(dirname(lockPath), name));
     } catch {
