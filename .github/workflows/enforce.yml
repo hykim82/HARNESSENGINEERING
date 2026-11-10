@@ -9,6 +9,7 @@ on:
 env:
   GITLEAKS_VERSION: "8.30.1"
   GITLEAKS_SHA256: "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
+  GITLEAKS_EXPECTED_SIZE: "8230402"
 
 jobs:
   enforce:
@@ -65,11 +66,37 @@ jobs:
       # error-tolerant flag was downgraded after review) -- an install
       # failure fails the job right here, nc-ci-enforce.test.mjs:145 keeps
       # that true workflow-wide.
+      # HYK-497: curl -sSL alone retried nothing and happily wrote a
+      # truncated/error-body response to gitleaks.tar.gz on 2 of 3 CI runs
+      # in one day -- the pinned asset itself was confirmed intact by hand
+      # (same URL, same sha256, same byte count), so this was an Actions-
+      # runner-side download corruption, not a bad pin. --retry/--fail
+      # handle network-level retryable failures at the curl layer; the
+      # size+checksum re-download below additionally catches a 200 response
+      # whose body is silently truncated or substituted, which --retry does
+      # not cover on its own.
       - name: Install gitleaks (pinned, checksum-verified)
         run: |
           set -e
-          curl -sSL -o gitleaks.tar.gz "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          GITLEAKS_URL="https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          verify_gitleaks_tarball() {
+            actual_size=$(stat -c%s gitleaks.tar.gz)
+            if [ "$actual_size" != "$GITLEAKS_EXPECTED_SIZE" ]; then
+              echo "gitleaks tarball size mismatch: got ${actual_size} bytes, expected ${GITLEAKS_EXPECTED_SIZE} bytes" >&2
+              return 1
+            fi
           echo "${GITLEAKS_SHA256}  gitleaks.tar.gz" | sha256sum -c -
+          }
+          curl --fail -sSL --retry 5 --retry-all-errors --retry-delay 3 -o gitleaks.tar.gz "$GITLEAKS_URL"
+          if ! verify_gitleaks_tarball; then
+            echo "gitleaks tarball failed verification on first attempt -- retrying download once (same URL, same filename)" >&2
+            rm -f gitleaks.tar.gz
+            curl --fail -sSL --retry 5 --retry-all-errors --retry-delay 3 -o gitleaks.tar.gz "$GITLEAKS_URL"
+            if ! verify_gitleaks_tarball; then
+              echo "::error::download-corrupted: gitleaks tarball failed size/checksum verification after a retry -- the pinned asset is already confirmed intact at the source, so this is an infra-side download corruption, not a bad version/sha256 pin"
+              exit 1
+            fi
+          fi
           tar -xzf gitleaks.tar.gz gitleaks
           chmod +x gitleaks
           sudo mv gitleaks /usr/local/bin/gitleaks
