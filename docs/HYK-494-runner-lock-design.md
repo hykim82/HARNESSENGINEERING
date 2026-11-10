@@ -831,3 +831,112 @@ C2를 띄운다 -- C2가 존재하지도 않는 동안 C1이 ticket #1을 독점
 - PM 설계 (d) 불변식 재심 — `runner-lock.mjs`의 §7 판정 로직 변경은
   §13-9 수리(cleanupAfterReclaim 청소 대상 좁히기) 외에는 0이다.
 - `exit` vs `close`의 Linux CI 실측 — 〔못쟀다〕, 다음 라이브 CI가 맡는다.
+
+## 16. HYK-498 2R — P2-A 메시지 진단 · P2-B tmp 대가+정리 · 남은 고정 시계 3곳
+
+(책임자 판정 2026-11-10 상신 P2-A(1143) = "B. 같은 브랜치에 2R 덧커밋" ·
+범위 = 검토 1R §3 P2-A·P2-B·정보 1~2)
+
+### 16-1. P2-A — 2-way·5-way 실패 메시지에 자식별 진단을 싣는다
+
+**틈**: 3-way 칸(§10b, `THREE_WAY_TRIALS` 등 5개)의 "결국 획득" 실패
+메시지는 `` `trial ${trial}: all 3 must eventually acquire -- ${JSON.
+stringify(results)}` `` 모양으로 자식별 결과(`spawnReclaimRaceChild`가
+이미 싣는 `stderrTail`·`exitCode`·`elapsedMs`, P2-2/§15-4 그대로)를
+담는다. 그런데 2-way 칸(`RECLAIM_TRIALS`)과 5-way 칸(`FIVE_WAY_TRIALS`)
+은 §15-2가 같은 `GENEROUS_EVENTUAL_ACQUIRE_TIMEOUT_MS`로 시계만
+맞췄을 뿐, 메시지 자체는 각각 `"... (serialized)"` / `"all 5 must
+eventually acquire"`로 사유가 0이었다 — CI가 이 둘에서 빨간 것을 보면
+"어느 자식이 왜"를 로그만으로 알 길이 없다(3-way와 다른 대우를 받을
+이유가 없다).
+
+**수리**: 2-way는 `a`·`b`(두 `spawnReclaimRaceChild` 결과)를, 5-way는
+이미 있던 `results` 배열을 그대로 `JSON.stringify`해 메시지에 싣는다 —
+3-way와 정확히 같은 모양(새 필드 추가 없음, 포맷만 통일).
+
+### 16-2. P2-B — 죽은 회수자의 tmp가 영구히 남는 대가, 그리고 보수적 정리
+
+**대가(문서화)**: §15-1의 §13-9 수리는 "완성된(숫자만인 suffix) 티켓
+이름만" 지우고 `.tmp.<suffix>` 이름은 **전부** 건드리지 않는다 — 다른
+회수자의 진행 중 tmp를 지울 위험을 원천적으로 없애려는 의도적 선택
+이었다. 그 대가: 회수자가 `createExclusive`의 `writeFileFn(tmpPath,
+...)` 직후, `linkFn(tmpPath, path)` 전에 죽으면(크래시·OOM-kill·강제
+종료 등) 그 tmp 이름은 **아무도 다시 지우지 않는다** — `createExclusive`
+자신의 catch(링크 실패 시 자기 tmp를 지우는 코드, `runner-lock.mjs`
+"§(d) createExclusive" 헤더 그대로)도 죽은 프로세스에서는 실행되지
+않고, §13-9 수리 이후의 `cleanupAfterReclaim`도 `.tmp.` 이름을 전부
+건너뛴다. 영향은 **디스크 공간 누수뿐**(바이트 몇백 수준의 JSON 파일,
+`<L>.reclaim.<O>.<k>.tmp.<suffix>` 하나당) — 아무 코드도 그 이름을
+다시 읽거나 참조하지 않으므로(§13-9 설계 논증 "이 lockId를 다시 참조할
+길이 없으면 누수는 harmless하다"와 같은 근거) PM 설계 불변식("살아
+있는 회수권자 ≤1" 등)에는 영향이 없다. 다만 이 lockPath 디렉터리가
+장기간(수개월) 같은 자리에서 반복 경합하면 이런 이름이 누적될 수
+있다(측정하지 않았다, 〔못쟀다〕).
+
+**정리(넣음, `maybeCleanupDeadReclaimerTmp`)**: `cleanupAfterReclaim`이
+이미 완성된 티켓을 지우는 그 디렉터리 스캔 루프 안에서, suffix가
+`/^\d+\.tmp\./` 모양(즉 "이 lockId의 어떤 티켓 번호에 대한 tmp")인
+이름만 추가로 살핀다 — 그 tmp의 내용(`createExclusive`가 link 전에
+이미 전부 쓴 `{pid, procStart}`)을 읽어 `identityIsDead`(이미 있는
+동일 판정 로직)로 "쓴 사람이 죽었는가"를 확인한 뒤에만 지운다. **왜
+이것이 §13-9를 재도입하지 않는가**: 살아 있는 회수자의 진행 중 tmp는
+`isPidAliveFn(그 pid)`가 반드시 `true`를 돌리므로 `identityIsDead`가
+`dead:false`로 떨어져 **절대 지워지지 않는다** — "죽었다고 확정될
+때만" 지우는 규칙이라 §13-9가 금지한 "살아 있는 다른 회수자의 진행
+중 tmp를 지우는 규칙"이 아니다(변이 ⑤가 이 경계를 무너뜨리면 D2
+"before-ticket-link" 칸이 정확히 §13-9와 같은 크래시로 되돌아가는
+것을 실측으로 확인했다 — 아래 §0 변이표). 읽기/파싱이 실패하면(쓰는
+도중을 보거나, 그 사이 다른 경로로 이미 지워진 경우) 모호한 쪽은
+손대지 않는다(삭제하지 않음) — "확정 전에는 손대지 않는다"는 같은
+원칙의 연장이다. 새 시험 2칸(P2-B ⑴·⑵, §10b-2 바로 뒤)이 production
+`acquireRunnerLock` 진입점으로 "죽은 reclaimer의 tmp는 쓸린다" /
+"살아 있는(자기 자신) reclaimer의 진행 중 tmp는 살아남는다"를 각각
+확인한다.
+
+**나이 기반을 쓰지 않은 이유**: 코더-task는 "나이 기반 또는 주인 사망
+확정 시만"을 후보로 줬지만, 순수 나이 기반(예: "tmp가 N초보다 오래됐으면
+지운다")은 극단적인 스케줄링 지연·GC 정지·디스크 스톨 아래서 **아직
+살아 있는** 회수자의 진행 중 tmp를 지울 수 있다(확률은 낮아도 0이
+아니다) — 이는 §13-9가 명시적으로 금지한 "살아 있는 다른 회수자의
+진행 중 tmp를 지울 수 있는 규칙"에 해당해 채택하지 않았다. 신원 확정
+기반은 이 가능성 자체를 0으로 만든다(핀 포인트: pid가 죽었으면 그
+프로세스는 다시는 그 tmp를 link할 수 없다 — 모순 없음).
+
+### 16-3. 정보 1~2 — 남은 고정 시계 3곳을 같은 "결국 완료" 모양으로
+
+**P1-1 칸의 자식별 `"6000"`과 §10 `lockRaceChildScript`의
+`timeoutMs: 15000`**: 둘 다 `acquireRunnerLock` 자신의 `timeoutMs`다 —
+§15-2가 2-way·5-way에 준 처방과 정확히 같은 모양(자식별 고정 클럭으로
+"결국 획득"을 판정)이라, 이 라운드가 똑같이
+`GENEROUS_EVENTUAL_ACQUIRE_TIMEOUT_MS`(20_000ms)로 올렸다. RED-first
+〔직접〕 측정(이 라운드, 실제 분리 프로세스 홀더가 7000ms를 쥐고 있을
+때): 고정 6000ms 대기자는 `{acquired:false, timedOut:true}`로
+결정적으로 졌고, 20000ms로 올리자 같은 조건에서 `{acquired:true,
+timedOut:false}`(elapsed≈7.5s)로 뒤집혔다(§0 답 참고) — 1R이 3-way
+칸에서 겪은 것과 정확히 같은 모양의 증거다.
+
+**`waitForFileToExist`의 `attempts=500,delayMs=10`(명목 5초)**: 이건
+`acquireRunnerLock`이 아니라 P1-1 시험 자신의 신호-파일 폴링 상한이다
+— 같은 "자식별 고정 클럭 + 결국 완료 판정" 모양이라 같은 상수를
+쓴다(`attempts = GENEROUS_EVENTUAL_ACQUIRE_TIMEOUT_MS / 10`). RED-first
+〔직접〕 측정: 신호 파일 쓰기를 9초 지연시키자(C1이 부하로 늦게
+스케줄되는 것을 흉내) 명목 5초 상한(이 머신에서 실측 상한은 setTimeout/
+이벤트 루프 오버헤드로 ~8.5초였다 — 명목값보다 이미 관대했다는 뜰
+자체가 추가 증거) 쪽은 `ready:false`였고, 20초 상한 쪽은 `ready:true`
+(elapsed≈9s)로 뒤집혔다(§0 답 참고).
+
+**"결국 완료" 판정에서 시계 의존을 완전히 제거하지 않는 이유**는
+§15-2와 동일(폴링 루프가 무한 대기가 되면 `busyRetryTimeoutMs`
+기본값·`LOCK_WAIT_TIMEOUT_MS`와의 상호작용이 복잡해진다) — 상한만
+넉넉히 늘렸다. `GENEROUS_EVENTUAL_ACQUIRE_TIMEOUT_MS`의 정의는 이
+라운드가 시험 파일 앞쪽(`freshLockDir` 바로 아래)으로 옮겼다 — 세
+자리 모두 하나의 정의를 공유한다.
+
+### 16-4. 범위 밖(기록만)
+
+- `.harness`/이 머신 밖 Linux CI에서의 실제 부하 모양 — 〔못쟀다〕,
+  완료 조건은 라이브 CI 연속 3회 hyk494 빨강 0(ORCH-135 §3 `1b_reach_path`
+  그대로).
+- 디스크에 수개월 누적될 수 있는 죽은-reclaimer-tmp 개수의 실측 —
+  〔못쟀다〕, §16-2의 "대가" 문단은 메커니즘과 상한 없는 가능성만
+  기술한다.

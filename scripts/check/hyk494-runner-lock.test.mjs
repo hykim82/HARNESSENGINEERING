@@ -57,6 +57,21 @@ function freshLockDir(prefix = "hyk494-lock-") {
   return mkdtempSync(join(tmpdir(), prefix));
 }
 
+// HYK-498 §2 ⓘⓘⓘ(정보 1~2): 자식별 고정 클럭으로 "결국 완료"를 판정하던
+// 세 자리(waitForFileToExist의 5초, P1-1 칸의 자식별 "6000", §10의
+// lockRaceChildScript timeoutMs:15000) 전부가 §2 ⓘⓘ 2-way/5-way 칸과
+// 같은 모양(부하에서 굶은 쪽이 시험 자신의 짧은 시계에 걸려 알고리즘
+// 결함처럼 보이는 가짜 RED)이다 -- 그래서 이 라운드가 그 세 자리에도
+// 같은 처방(GENEROUS_EVENTUAL_ACQUIRE_TIMEOUT_MS, 5R이 고른 20_000ms)을
+// 쓴다. 정의를 파일 앞쪽(이 세 자리가 실제로 쓰는 위치보다 앞)으로
+// 옮겼다 -- #358/HYK-498 1R이 쓰던 자리(아래 §10b 앞, RECLAIM_TRIALS
+// 바로 위)는 이제 이 선언을 참조만 한다. "결국 완료" 판정에서 시계
+// 의존을 완전히 제거하지 않고(폴링 루프가 무한 대기가 되면
+// busyRetryTimeoutMs 기본값과의 상호작용이 복잡해진다, 5R과 같은 근거)
+// 상한만 넉넉히 늘리는 선택도 그대로다 -- 전원 획득·순서·배제 단언은
+// 전부 무변(단언 약화 아님).
+const GENEROUS_EVENTUAL_ACQUIRE_TIMEOUT_MS = 20_000;
+
 // HYK-494 2R live finding (still true in 3R -- the mechanism, NESTED_LOCK_
 // BYPASS_ENV_VAR, is unchanged): this test FILE can itself run nested
 // inside a real isolated-suite-runner.mjs invocation that already holds
@@ -696,7 +711,16 @@ test("acquireRunnerLock: a timed-out result never reports reclaimedOrphan:true, 
 // C1이 ticket #1을 독점한다(경쟁 기회 자체가 없다, 순서 결정화). 단언
 // 약화 아님: 아래 `selfBranchTrials` 단언은 ">=1"에서 "모든 회차"로
 // 강화됐다.
-async function waitForFileToExist(path, { attempts = 500, delayMs = 10 } = {}) {
+// HYK-498 §2 ⓘⓘⓘ(정보 1): 500×10ms=5초 고정 상한은 2-way/5-way 칸과
+// 같은 모양의 가짜 RED를 만들 수 있다(C1이 부하로 늦게 스케줄되면 신호
+// 파일이 5초 안에 못 나타난다 -- 알고리즘 결함이 아니라 시험 자신의
+// 짧은 시계). attempts를 늘려 전체 상한을
+// `GENEROUS_EVENTUAL_ACQUIRE_TIMEOUT_MS`(20초)로 맞춘다 -- delayMs(폴
+// 간격)는 무변, `c1SignalReady` 단언 자체도 무변(단언 약화 아님).
+async function waitForFileToExist(
+  path,
+  { attempts = GENEROUS_EVENTUAL_ACQUIRE_TIMEOUT_MS / 10, delayMs = 10 } = {},
+) {
   for (let i = 0; i < attempts; i += 1) {
     if (existsSync(path)) return true;
     await new Promise((res) => setTimeout(res, delayMs));
@@ -785,7 +809,17 @@ test(`GREEN (P1-1 교착 재현, 다른 대기자 1명을 둔 실제 프로세�
       const c1SignalPath = join(dir, `p1-signal-${trial}.flag`);
       const c1 = spawnP1Child({
         scriptPath,
-        args: [lockPath, out1, "6000", "20", "1", c1SignalPath],
+        // HYK-498 §2 ⓘⓘⓘ(정보 2): 고정 "6000" -> GENEROUS_EVENTUAL_
+        // ACQUIRE_TIMEOUT_MS(20초) -- 부하에서 굶은 자식도 결국 획득할
+        // 여유를 준다(acquireRunnerLock 자신의 timeoutMs, 단언 무변).
+        args: [
+          lockPath,
+          out1,
+          String(GENEROUS_EVENTUAL_ACQUIRE_TIMEOUT_MS),
+          "20",
+          "1",
+          c1SignalPath,
+        ],
       });
       // HYK-498 P2-1: wait for C1's durable signal (written right after C1
       // has already confirmed its own ticket #1 -- see the header comment
@@ -798,7 +832,14 @@ test(`GREEN (P1-1 교착 재현, 다른 대기자 1명을 둔 실제 프로세�
       );
       const c2 = spawnP1Child({
         scriptPath,
-        args: [lockPath, out2, "6000", "20", "0", ""],
+        args: [
+          lockPath,
+          out2,
+          String(GENEROUS_EVENTUAL_ACQUIRE_TIMEOUT_MS),
+          "20",
+          "0",
+          "",
+        ],
       });
       const [a, b] = await Promise.all([c1, c2]);
       if (!a.acquired || !b.acquired || a.timedOut || b.timedOut) {
@@ -1519,6 +1560,13 @@ test("installLockReleaseOnSignal: release() throwing still exits (best-effort --
 
 // -- §10: real-child-process proof (ⓒ⑴) ----------------------------------
 
+// HYK-498 §2 ⓘⓘⓘ(정보 2): 고정 15000ms -> GENEROUS_EVENTUAL_ACQUIRE_
+// TIMEOUT_MS(20초, 2-way/5-way와 같은 상수) -- 자식 스크립트는 문자열로
+// 생성돼 별도 프로세스에서 돈다, 부모의 JS 변수를 직접 참조할 수 없어
+// 생성 시점에 `${}`로 값을 박아 넣는다(이 파일의 다른 모든 자식 스크립트
+// 생성자와 같은 기법, 예: RUNNER_LOCK_URL). GREEN 칸의 wallMs>=450 단언은
+// holdMs(250ms×2)만으로 성립하므로(:1611 부근) 이 상한 증가로 깨지지
+// 않는다 -- 상한은 "굶었을 때만" 소진된다.
 function lockRaceChildScript() {
   return [
     `import { acquireRunnerLock, releaseRunnerLock } from ${JSON.stringify(RUNNER_LOCK_URL)};`,
@@ -1528,7 +1576,7 @@ function lockRaceChildScript() {
     `const outPath = process.argv[3];`,
     `const noLock = process.argv[4] === "1";`,
     `let r = { waitMs: 0, pollCount: 0, reclaimedOrphan: false, nested: false, lockId: null };`,
-    `if (!noLock) r = acquireRunnerLock({ lockPath, pollIntervalMs: 15, timeoutMs: 15000 });`,
+    `if (!noLock) r = acquireRunnerLock({ lockPath, pollIntervalMs: 15, timeoutMs: ${GENEROUS_EVENTUAL_ACQUIRE_TIMEOUT_MS} });`,
     `const acquiredAtMs = Date.now();`,
     `writeFileSync(outPath, JSON.stringify({ pid: process.pid, acquiredAtMs, r }) + "\\n");`,
     `await new Promise((res) => setTimeout(res, holdMs));`,
@@ -1747,7 +1795,9 @@ function spawnReclaimRaceChild({
 // 무한 대기가 되면 busyRetryTimeoutMs 기본값과의 상호작용이 복잡해진다,
 // 5R과 같은 근거) 상한만 넉넉히 늘린다(5R이 고른 옵션과 동일). `wx`
 // 배제 위반 0 단언과 전원 획득 단언은 그대로 유지한다(단언 약화 아님).
-const GENEROUS_EVENTUAL_ACQUIRE_TIMEOUT_MS = 20_000;
+// `GENEROUS_EVENTUAL_ACQUIRE_TIMEOUT_MS` 정의는 이 라운드가 파일 앞쪽
+// (freshLockDir 바로 아래)으로 옮겼다 -- waitForFileToExist/P1-1/§10도
+// 같은 상수를 쓴다(아래 §0 답, 정보 1~2).
 
 const RECLAIM_TRIALS = 10;
 
@@ -1795,7 +1845,11 @@ test(`GREEN (compare-and-delete reclaim): ${RECLAIM_TRIALS} trials of 2 real chi
       if (a.violation || b.violation) violations += 1;
       assert.ok(
         a.acquired && b.acquired,
-        `trial ${trial}: both children must eventually acquire (serialized)`,
+        // HYK-498 §2 ⓘ(P2-A): 3-way 칸과 같은 모양으로 자식별 결과(stderr
+        // 꼬리 · exitCode · 경과 ms, spawnReclaimRaceChild가 이미 싣는
+        // 필드 그대로)를 메시지에 실어, 빨간 CI 로그에 "어느 자식이 왜"가
+        // 남게 한다(product_scope ⓘ 그대로).
+        `trial ${trial}: both children must eventually acquire (serialized) -- ${JSON.stringify({ a, b })}`,
       );
       assert.equal(existsSync(lockPath), false, `trial ${trial}: released`);
       assert.equal(existsSync(csPath), false, `trial ${trial}: marker gone`);
@@ -2044,7 +2098,10 @@ test(`GREEN (5-way cold-start contention): ${FIVE_WAY_TRIALS} trials of 5 real c
       if (results.some((r) => r.violation)) violations += 1;
       assert.ok(
         results.every((r) => r.acquired),
-        `trial ${trial}: all 5 must eventually acquire`,
+        // HYK-498 §2 ⓘ(P2-A): 3-way 칸과 같은 모양(:1857 부근 `${JSON.
+        // stringify(results)}`) -- results 배열이 이미 자식별 stderr
+        // 꼬리 · exitCode · 경과 ms를 싣는다.
+        `trial ${trial}: all 5 must eventually acquire -- ${JSON.stringify(results)}`,
       );
       assert.equal(existsSync(lockPath), false, `trial ${trial}: released`);
     }
@@ -2339,6 +2396,130 @@ test("D2: 3 insertion points -- a FULL competing actor B runs to completion in t
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  }
+});
+
+// HYK-498 §2 ⓘⓘ(P2-B, docs/HYK-494-runner-lock-design.md §15-2 그대로): a
+// reclaimer that died between its own ticket tmp write and its own link
+// leaves `<L>.reclaim.<O>.<k>.tmp.<suffix>` behind forever under the §13-9
+// fix ALONE (that fix intentionally skips EVERY `.tmp.` name -- it never
+// tells "dead" from "live" apart, it just never touches any of them, to
+// never delete a LIVE reclaimer's in-flight write). The next two tests
+// drive the production acquireRunnerLock entry point (no copy) through
+// two real scenarios against the SAME shape of dead owner O (split into
+// two `test()`s purely for the max-lines-per-function lint gate -- same
+// reasoning as every other extraction in this file): ⑴ a DEAD reclaimer's
+// own orphaned tmp (its pid already exited before it could link) -- must
+// be swept once some later caller's own cleanupAfterReclaim(lockId=O) runs
+// ⑵ a LIVE (self) reclaimer's in-flight tmp -- must survive untouched (the
+// exact §13-9 invariant, now operationalized via identityIsDead instead of
+// a bare prefix match -- never delete another live reclaimer's in-flight
+// tmp).
+const P2B_PROC_START = defaultGetStartIdentity(process.pid);
+// Same cost-stub reasoning as :995 above -- the REAL default spawns
+// PowerShell per query on Windows; only the query COST is stubbed, the
+// verdict logic under test (identityIsDead) runs for real.
+function p2bGetStartIdentityFn(pid) {
+  return pid === process.pid ? P2B_PROC_START : null;
+}
+
+test("acquireRunnerLock (P2-B ⑴): cleanupAfterReclaim sweeps a DEAD reclaimer's orphaned ticket tmp (write-then-crash-before-link)", () => {
+  const dir = freshLockDir();
+  const lockPath = join(dir, "r.lock");
+  try {
+    const deadOwnerPid = spawnSync(process.execPath, [
+      "-e",
+      "process.exit(0)",
+    ]).pid;
+    const deadReclaimerPid = spawnSync(process.execPath, [
+      "-e",
+      "process.exit(0)",
+    ]).pid;
+    writeFileSync(
+      lockPath,
+      JSON.stringify({
+        pid: deadOwnerPid,
+        lockId: "p2b-dead-owner",
+        procStart: "dead-p2b-owner-seed",
+      }),
+    );
+    const orphanedTmpPath = `${lockPath}.reclaim.p2b-dead-owner.1.tmp.deadleftover`;
+    writeFileSync(
+      orphanedTmpPath,
+      JSON.stringify({
+        pid: deadReclaimerPid,
+        procStart: "dead-p2b-reclaimer-seed",
+      }),
+    );
+    const r = acquireRunnerLock({
+      lockPath,
+      pid: process.pid,
+      startedAtMs: Date.now(),
+      timeoutMs: 5000,
+      pollIntervalMs: 10,
+      getStartIdentityFn: p2bGetStartIdentityFn,
+      env: cleanEnv(),
+    });
+    assert.equal(
+      r.acquired,
+      true,
+      `must still acquire -- ${JSON.stringify(r)}`,
+    );
+    assert.equal(
+      existsSync(orphanedTmpPath),
+      false,
+      "a DEAD reclaimer's orphaned ticket tmp must be swept (P2-B)",
+    );
+    releaseRunnerLock({ lockPath, lockId: r.lockId });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("acquireRunnerLock (P2-B ⑵): cleanupAfterReclaim leaves a LIVE reclaimer's in-flight ticket tmp for the same dead owner untouched (§13-9 invariant, not reintroduced)", () => {
+  const dir = freshLockDir();
+  const lockPath = join(dir, "r.lock");
+  try {
+    const deadOwnerPid = spawnSync(process.execPath, [
+      "-e",
+      "process.exit(0)",
+    ]).pid;
+    writeFileSync(
+      lockPath,
+      JSON.stringify({
+        pid: deadOwnerPid,
+        lockId: "p2b-dead-owner-2",
+        procStart: "dead-p2b-owner-seed-2",
+      }),
+    );
+    const liveTmpPath = `${lockPath}.reclaim.p2b-dead-owner-2.1.tmp.liveinflight`;
+    writeFileSync(
+      liveTmpPath,
+      JSON.stringify({ pid: process.pid, procStart: P2B_PROC_START }),
+    );
+    const r = acquireRunnerLock({
+      lockPath,
+      pid: process.pid,
+      startedAtMs: Date.now(),
+      timeoutMs: 5000,
+      pollIntervalMs: 10,
+      getStartIdentityFn: p2bGetStartIdentityFn,
+      env: cleanEnv(),
+    });
+    assert.equal(
+      r.acquired,
+      true,
+      `must still acquire -- ${JSON.stringify(r)}`,
+    );
+    assert.equal(
+      existsSync(liveTmpPath),
+      true,
+      "a LIVE reclaimer's in-flight ticket tmp must NEVER be deleted by another reclaimer's cleanup (§13-9 invariant)",
+    );
+    releaseRunnerLock({ lockPath, lockId: r.lockId });
+    rmSync(liveTmpPath, { force: true });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 });
 

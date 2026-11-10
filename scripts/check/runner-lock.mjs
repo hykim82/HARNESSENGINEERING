@@ -413,7 +413,69 @@ function readLockContentResultDetailed(readFileFn, path) {
 // 성공 뒤 자기 unlink(tmpPath)가 치운다(PM 설계 불변식·회수 경로
 // 되돌림 0 무변, 살아 있는 회수권자 ≤1도 무변 -- 이 함수는 "이미
 // link되어 끝난" 티켓만 청소 대상으로 본다).
-function cleanupAfterReclaim({ lockPath, lockId, unlinkFn, readdirFn }) {
+// HYK-498 §2 ⓘⓘ(P2-B, docs/HYK-494-runner-lock-design.md §15-2 "대가"
+// 문단 그대로): write(tmp)와 link 사이에서 죽은 회수자가 남긴
+// `<prefix><k>.tmp.<suffix>`는 위 루프가 (suffix가 숫자뿐이 아니라서)
+// 그냥 지나친다 -- §13-9 수리가 "다른 회수자의 진행 중 tmp를 절대
+// 건드리지 않는다"를 지키려고 일부러 전부 건너뛰게 했기 때문이다. 그
+// 결과 "죽은" 경우도 같이 걸러져 그 tmp 이름이 영구히 남는다(디스크
+// 공간 누수뿐, 불변식에는 영향 없음 -- 아무도 그 이름을 다시 참조하지
+// 않는다). 이 함수가 그 이름만(완성 티켓은 건드리지 않음) 대상으로
+// "쓴 사람이 죽었다고 확정될 때만" 지운다 -- §13-9가 금지한 "살아 있는
+// 다른 회수자의 진행 중 tmp를 지우는 규칙"이 되지 않는 이유: tmp의
+// 내용(createExclusive가 link 전에 이미 다 쓴 `{pid, procStart}`)을
+// 읽어 identityIsDead로 판정한다. 그 회수자가 아직 살아 있으면(보통
+// 경로) isPidAliveFn이 true를 돌려 반드시 dead:false가 되어 지우지
+// 않는다 -- D2 "before-ticket-link" 칸(actor A가 바로 이 자리에 멈춰
+// 있는 동안 actor B가 같은 lockId로 이 함수를 부르는 시험)이 이를
+// 실측으로 지킨다. 읽기/파싱이 실패하면(쓰는 중 · 이미 자기 자신이
+// 치운 뒤 등) 모호한 쪽은 손대지 않는다(아래 §0 답, 변이 ④/⑤ 참고).
+// Pulled out of cleanupAfterReclaim below purely to keep that function's
+// own complexity gate happy (same line-count/complexity-gate reasoning as
+// every other extraction in this file). Handles exactly one stray
+// `<k>.tmp.<suffix>` name: deletes it only if the tmp's own content
+// (already fully written by createExclusive before link, §(d)) names a
+// writer that identityIsDead confirms dead -- never on ambiguity (can't
+// read/parse) and never while the writer is still alive. See
+// cleanupAfterReclaim's own header comment for why this can never
+// reintroduce §13-9 (a live reclaimer's in-flight tmp always resolves
+// isPidAliveFn===true -> dead:false -> skipped).
+function maybeCleanupDeadReclaimerTmp({
+  namePath,
+  readFileFn,
+  unlinkFn,
+  isPidAliveFn,
+  getStartIdentityFn,
+}) {
+  if (!readFileFn || !isPidAliveFn || !getStartIdentityFn) return; // 주입 안 됐으면 생략(best-effort).
+  let tmpContent;
+  try {
+    tmpContent = JSON.parse(readFileFn(namePath, "utf8"));
+  } catch {
+    return; // 쓰는 중이거나 이미 지워졌다 -- 모호하면 손대지 않는다.
+  }
+  const verdict = identityIsDead({
+    content: tmpContent,
+    isPidAliveFn,
+    getStartIdentityFn,
+  });
+  if (!verdict.dead) return; // 살아 있는 회수자의 진행 중 tmp -- 절대 지우지 않는다.
+  try {
+    unlinkFn(namePath);
+  } catch {
+    // best-effort.
+  }
+}
+
+function cleanupAfterReclaim({
+  lockPath,
+  lockId,
+  unlinkFn,
+  readdirFn,
+  readFileFn,
+  isPidAliveFn,
+  getStartIdentityFn,
+}) {
   try {
     unlinkFn(aliveFilePath(lockPath, lockId));
   } catch {
@@ -429,12 +491,23 @@ function cleanupAfterReclaim({ lockPath, lockId, unlinkFn, readdirFn }) {
   for (const name of names) {
     if (!name.startsWith(prefix)) continue;
     const suffix = name.slice(prefix.length);
-    if (!/^\d+$/.test(suffix)) continue; // `.tmp.<suffix>` 등은 완성 티켓이 아니다.
-    try {
-      unlinkFn(join(dirname(lockPath), name));
-    } catch {
-      // best-effort.
+    if (/^\d+$/.test(suffix)) {
+      // 완성(link된) 티켓 -- 기존 동작 그대로, 무회귀.
+      try {
+        unlinkFn(join(dirname(lockPath), name));
+      } catch {
+        // best-effort.
+      }
+      continue;
     }
+    if (!/^\d+\.tmp\./.test(suffix)) continue; // 알려진 모양이 아니면 손대지 않는다.
+    maybeCleanupDeadReclaimerTmp({
+      namePath: join(dirname(lockPath), name),
+      readFileFn,
+      unlinkFn,
+      isPidAliveFn,
+      getStartIdentityFn,
+    });
   }
 }
 
@@ -452,6 +525,8 @@ function rereadLockAndMaybeCleanup({
   readFileFn,
   unlinkFn,
   readdirFn,
+  isPidAliveFn,
+  getStartIdentityFn,
 }) {
   const reread = readLockContentResult(readFileFn, lockPath);
   if (reread.ok) {
@@ -469,6 +544,9 @@ function rereadLockAndMaybeCleanup({
       lockId: content.lockId,
       unlinkFn,
       readdirFn,
+      readFileFn,
+      isPidAliveFn,
+      getStartIdentityFn,
     });
   }
   return reread.ok;
@@ -535,6 +613,8 @@ function resolveContendedStep({
           readFileFn,
           unlinkFn,
           readdirFn,
+          isPidAliveFn,
+          getStartIdentityFn,
         });
         if (confirmed) return { step: "claim-again" };
         return { step: "wait", ticketReadBusy: true };
@@ -580,6 +660,8 @@ function resolveContendedStep({
     readFileFn,
     unlinkFn,
     readdirFn,
+    isPidAliveFn,
+    getStartIdentityFn,
   });
   return { step: "claim-again" };
 }
