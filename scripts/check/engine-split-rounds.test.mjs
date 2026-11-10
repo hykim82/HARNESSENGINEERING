@@ -607,3 +607,152 @@ test("runCli: a valid numeric --min-strict value is accepted normally", () => {
   );
   assert.equal(rc, 0);
 });
+
+// ---- P2-A (review-4 §3): missing/empty modelFamilyPatterns is a reasoned
+// module-load failure, not a silent match-all regex ----
+//
+// Direct probe before this round's fix (HARNESS_ENGINE_PROFILES_PATH
+// pointing at a synthetic config whose CODER role resolves to an engine
+// with an empty modelFamilyPatterns object): `new RegExp(undefined, "i")`
+// compiled to `/(?:)/i` and classified "gpt-5.6-luna" as sonnet AND
+// "claude-sonnet-5" as opus (both match-all) -- the exact "모두 일치" bug
+// review-4 found. These tests spawn the real CLI entrypoint (production
+// import path, not a copy) against a synthetic config via the
+// HARNESS_ENGINE_PROFILES_PATH seam (engine-profile.mjs) -- never the real
+// shared engine-profiles.json.
+function withSyntheticEngineProfiles(config, fn) {
+  const dir = fs.mkdtempSync(
+    path.join(os.tmpdir(), "engine-split-rounds-profile-test-"),
+  );
+  const file = path.join(dir, "engine-profiles.json");
+  fs.writeFileSync(file, JSON.stringify(config), "utf8");
+  try {
+    return fn(file);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+function fullEngineBlockForProfileTest(deliveryMode, overrides = {}) {
+  return {
+    deliveryMode,
+    homeDirName: null,
+    modelFamilyPatterns: {},
+    agentMarkerWords: [],
+    ...overrides,
+  };
+}
+
+const BANNER_MARKER_PATTERNS_FOR_PROFILE_TEST = {
+  orcaAdapterAgentMarker: "x",
+  seatCensusAgentBanner: "y",
+};
+
+test("P2-A: CODER engine with a missing modelFamilyPatterns.sonnet key refuses to load (module-import throw), not a match-all regex", () => {
+  withSyntheticEngineProfiles(
+    {
+      engines: {
+        codex: fullEngineBlockForProfileTest("no-inject", {
+          modelFamilyPatterns: { opus: "opus" },
+        }),
+      },
+      bannerMarkerPatterns: BANNER_MARKER_PATTERNS_FOR_PROFILE_TEST,
+      roles: {
+        CODER: { engine: "codex", model: "gpt-5.6-luna", effort: "high" },
+      },
+    },
+    (configPath) => {
+      let thrown = null;
+      try {
+        execFileSync(process.execPath, [CLI_PATH], {
+          encoding: "utf8",
+          env: { ...process.env, HARNESS_ENGINE_PROFILES_PATH: configPath },
+          stdio: ["ignore", "pipe", "pipe"],
+        });
+      } catch (err) {
+        thrown = err;
+      }
+      assert.ok(thrown, "missing modelFamilyPatterns.sonnet must not load");
+      assert.match(
+        String(thrown.stderr),
+        /engines\.codex\.modelFamilyPatterns\.sonnet is missing or empty/,
+      );
+    },
+  );
+});
+
+test("P2-A: CODER engine with an empty-string modelFamilyPatterns.opus value refuses to load, same as a missing key", () => {
+  withSyntheticEngineProfiles(
+    {
+      engines: {
+        codex: fullEngineBlockForProfileTest("no-inject", {
+          modelFamilyPatterns: { sonnet: "sonnet", opus: "" },
+        }),
+      },
+      bannerMarkerPatterns: BANNER_MARKER_PATTERNS_FOR_PROFILE_TEST,
+      roles: {
+        CODER: { engine: "codex", model: "gpt-5.6-luna", effort: "high" },
+      },
+    },
+    (configPath) => {
+      let thrown = null;
+      try {
+        execFileSync(process.execPath, [CLI_PATH], {
+          encoding: "utf8",
+          env: { ...process.env, HARNESS_ENGINE_PROFILES_PATH: configPath },
+          stdio: ["ignore", "pipe", "pipe"],
+        });
+      } catch (err) {
+        thrown = err;
+      }
+      assert.ok(thrown, "empty modelFamilyPatterns.opus must not load");
+      assert.match(
+        String(thrown.stderr),
+        /engines\.codex\.modelFamilyPatterns\.opus is missing or empty/,
+      );
+    },
+  );
+});
+
+test("P2-A (anti-vacuity): the same CODER-engine-is-codex shape with BOTH patterns present and non-empty loads and runs the real CLI end to end", () => {
+  withSyntheticEngineProfiles(
+    {
+      engines: {
+        codex: fullEngineBlockForProfileTest("no-inject", {
+          modelFamilyPatterns: { sonnet: "sonnet", opus: "opus" },
+        }),
+      },
+      bannerMarkerPatterns: BANNER_MARKER_PATTERNS_FOR_PROFILE_TEST,
+      roles: {
+        CODER: { engine: "codex", model: "gpt-5.6-luna", effort: "high" },
+      },
+    },
+    (configPath) => {
+      const out = execFileSync(
+        process.execPath,
+        [
+          CLI_PATH,
+          "--ledger",
+          FIXTURE_LEDGER,
+          "--registry",
+          FIXTURE_REGISTRY,
+          "--json",
+          "--min-strict",
+          "5",
+          "--min-strict-excl-top",
+          "2",
+          "--min-authors",
+          "3",
+          "--min-issues",
+          "3",
+        ],
+        {
+          encoding: "utf8",
+          env: { ...process.env, HARNESS_ENGINE_PROFILES_PATH: configPath },
+        },
+      );
+      const result = JSON.parse(out);
+      assert.equal(result.ok, true);
+    },
+  );
+});

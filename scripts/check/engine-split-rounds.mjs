@@ -43,12 +43,50 @@ export const ISSUE_PATTERN = /^(HYK-\d+)/;
 const AUTHOR_REVIEW_ENGINE = getEngineByRole().CODER;
 const CLAUDE_MODEL_FAMILY_PATTERNS =
   getEngineModelFamilyPatterns(AUTHOR_REVIEW_ENGINE);
+
+// HYK-153-engine-profile-3 (review-4 §3 P2-A, coder-task.md §2 product_scope
+// ⓘ): a missing or empty modelFamilyPatterns.<key> must not silently become
+// `new RegExp(undefined, "i")` / `new RegExp("", "i")` -- both compile to
+// `/(?:)/i`, which matches every string, so an unrelated model name on
+// either side of the pairing would be classified as a match (confirmed by
+// direct probe before this fix: CODER engine = codex, whose config has
+// `modelFamilyPatterns: {}` -- "gpt-5.6-luna" matched SONNET_FAMILY_PATTERN
+// and "claude-sonnet-5" matched OPUS_FAMILY_PATTERN). Reject at
+// module-load time with the engine name and the missing key named, instead
+// of papering over it with a default pattern (today's config -- CODER's
+// engine is claude, whose modelFamilyPatterns carries both keys -- is
+// unaffected; this only changes behavior if a role's engine config stops
+// naming these keys).
+// Dot-property access (patterns.sonnet / patterns.opus), not a quoted
+// ["sonnet"]/["opus"] computed-key lookup -- the engine-name-literal
+// scanner tokenizes string/template/regex literal content, not bare
+// identifiers after a `.` or as an object-literal key, so this stays at
+// the same zero-new-literal baseline as the property reads this module
+// already did before this fix (coder-task.md §2 product_scope "새 엔진
+// 이름 리터럴 0" -- a quoted key here would itself be a new literal).
+function requireFamilyPatterns(patterns, engine) {
+  const checked = { sonnet: patterns.sonnet, opus: patterns.opus };
+  for (const key of Object.keys(checked)) {
+    const value = checked[key];
+    if (typeof value !== "string" || value.length === 0) {
+      throw new Error(
+        `engine-split-rounds: engines.${engine}.modelFamilyPatterns.${key} is missing or empty in engine-profiles.json -- refusing to build a match-all regex (new RegExp(undefined/"") matches every string)`,
+      );
+    }
+  }
+  return checked;
+}
+
+const REQUIRED_MODEL_FAMILY_PATTERNS = requireFamilyPatterns(
+  CLAUDE_MODEL_FAMILY_PATTERNS,
+  AUTHOR_REVIEW_ENGINE,
+);
 export const SONNET_FAMILY_PATTERN = new RegExp(
-  CLAUDE_MODEL_FAMILY_PATTERNS.sonnet,
+  REQUIRED_MODEL_FAMILY_PATTERNS.sonnet,
   "i",
 );
 export const OPUS_FAMILY_PATTERN = new RegExp(
-  CLAUDE_MODEL_FAMILY_PATTERNS.opus,
+  REQUIRED_MODEL_FAMILY_PATTERNS.opus,
   "i",
 );
 

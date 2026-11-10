@@ -111,37 +111,55 @@ PM 추가 전 상태를 서술한 것으로, 이번 라운드로 더 이상 맞�
   [string]$Model = 'claude-sonnet-5',
 ```
 
-**제안 교체문 (HYK-153-engine-profile-2 경로 오류 정정)** — 리터럴
-기본값 대신 CODER 프로필의 모델을 기본값으로 쓴다(아래 §4의
-`node ... resolve --role CODER` 호출과 동일 CLI). ⛔**옛 문면의 경로는
-수식 자체가 틀렸다** — `D:\문서관리\하네스-관제실\..\..`는 `D:\문서관리`를
-두 단계 거슬러 올라가 `D:\`가 되고, 거기에 `scripts\check\...`를 붙인
-`D:\scripts\check\engine-profile-cli.mjs`는 어느 체크아웃에도 존재하지
-않는 경로다(관제실 디렉터리 기준으로 저장소 루트를 계산하려 한 식이지만
-저장소는 관제실의 하위/상위 경로가 아니다 -- 애초에 성립할 수 없는 상대
-경로였다). memory-gate.ps1은 이미 `$Worktree`를 필수 파라미터로
-받는다(`param()` 블록에서 `$Model`보다 앞에 선언되어 있어 `$Model`의
-기본값 식이 평가되는 시점에는 이미 바인딩돼 있다) -- unit A가
+**제안 교체문 (HYK-153-engine-profile-3 경로·역할 정정, review-4 §3
+P2-D)** — 리터럴 기본값 대신 **호출된 역할의** 프로필 모델을 기본값으로
+쓴다. ⛔**옛 문면의 경로는 수식 자체가 틀렸다** — `D:\문서관리\하네스-관제실\..\..`는
+`D:\문서관리`를 두 단계 거슬러 올라가 `D:\`가 되고, 거기에
+`scripts\check\...`를 붙인 `D:\scripts\check\engine-profile-cli.mjs`는
+어느 체크아웃에도 존재하지 않는 경로다(관제실 디렉터리 기준으로 저장소
+루트를 계산하려 한 식이지만 저장소는 관제실의 하위/상위 경로가 아니다 --
+애초에 성립할 수 없는 상대 경로였다). memory-gate.ps1은 이미
+`$Worktree`**와 `$Role`** 을 필수 파라미터로 받는다(`param()` 블록에서
+`$Role`이 17행, `$Model`이 21행 — 둘 다 `$Model`보다 앞에 선언되어 있어
+`$Model`의 기본값 식이 평가되는 시점에는 이미 바인딩돼 있다) -- unit A가
 `orca-worker-seat.ps1`에서 쓰는 것과 같은 `Join-Path $Worktree
-"scripts\check\engine-profile-cli.mjs"` 패턴으로 바꾼다:
+"scripts\check\engine-profile-cli.mjs"` 패턴으로 바꾸고, `resolve` 호출의
+`--role`도 **리터럴 `CODER`가 아니라 바인딩된 `$Role`** 을 넘긴다(아래
+근거):
 
 ```text
   [string]$Model = $(
     $__cliPath = Join-Path $Worktree "scripts\check\engine-profile-cli.mjs"
-    $__p = if (Test-Path $__cliPath) { & node $__cliPath resolve --role CODER 2>$null } else { $null }
+    $__p = if (Test-Path $__cliPath) { & node $__cliPath resolve --role $Role 2>$null } else { $null }
     if ($LASTEXITCODE -eq 0 -and $__p) { ($__p | Select-String '^model=(.+)$').Matches.Groups[1].Value } else { 'claude-sonnet-5' }
   ),
 ```
 
+**정정(review-4 §3 P2-D)**: 이전 문면은 "memory-gate.ps1은 CODER류
+좌석 전용이라 애초에 역할을 추측하지 않는다"고 적었는데 사실과 다르다 —
+memory-gate.ps1은 `$Role`을 Mandatory 파라미터로 받아(17행) **아무
+역할의 좌석이나** 띄운다(209~210행: `Log "GATE=OPEN ... launching $Role
+seat ..."` · 실제 기동 커맨드에 `-Role $Role`을 그대로 넘긴다 — 역할은
+호출자가 정하고, 이 스크립트는 그 역할로 좌석을 띄울 뿐이다). 그래서
+제안문을 옛 문면대로 `resolve --role CODER`로 **고정**했다면, REVIEW나
+VERIFY 라운드의 memory-gate 호출에서도 `$Model`의 기본값이 항상 CODER
+프로필의 모델로 떨어져(`$Model`을 호출자가 명시하지 않는 모든 호출에서)
+실제 역할과 다른 모델이 쓰였을 것이다 — `--role $Role`로 고쳐야 호출된
+역할 자신의 프로필을 읽는다. 오늘의 리터럴(`'claude-sonnet-5'`)이 CODER
+라운드에서 우연히 맞았던 것은 "memory-gate가 CODER 전용"이라서가 아니라
+"오늘 이 스크립트를 부르는 모든 라운드가 CODER였다"는 호출 관행
+때문이었을 뿐 — 이 패치 문면은 그 착각을 코드에 그대로 박아 넣을
+뻔했다.
+
 **정직 한계**: unit C는 unit A와 달리(P2-8) 폴백을 **유지한다** — 이
 리터럴(`'claude-sonnet-5'`)은 unit A의 PM/REVIEW 리터럴과 달리 오늘
 measured 값과 어긋나 있지 않다(config.roles.CODER.model이 정확히
-`claude-sonnet-5`다, memory-gate.ps1은 CODER류 좌석 전용이라 애초에
-역할을 추측하지 않는다). param 블록의 기본값 식은 스크립트가 로드되는
+`claude-sonnet-5`다, 그리고 오늘 이 스크립트를 부르는 라운드가 전부
+CODER였다 — 위 정정 참조). param 블록의 기본값 식은 스크립트가 로드되는
 모든 워크트리 경로가 아직 없을 수 있는 시점에 평가되므로, CLI 경로가
 없거나 실패하면 이 폴백으로 떨어진다(조용한 추측이 아니라 "이 CLI를
 못 찾았다"의 안전한 동치 -- 틀린 값으로의 폴백이 아니라는 점이 unit A와
-다르다). 사람이 적용할 때 `$Worktree`가 그 시점 실제로 바인딩되는지
+다르다). 사람이 적용할 때 `$Worktree`·`$Role`이 그 시점 실제로 바인딩되는지
 재확인하라 -- 이 문서는 패치의 **모양**만 제안한다.
 
 ## §4 CLI 참고 (이 라운드가 새로 추가, 이미 시험됨)

@@ -4430,8 +4430,7 @@ test("teardownSeat: missing worktreePath is rejected", () => {
 // (not through getEngineByRole()/ENGINE_BY_ROLE's own loader a second
 // time) and compares against it, so changing the config file moves this
 // test's expectation with it instead of requiring a second, independently
-// drifting hardcoded literal here. Not a weakening: it still pins today's
-// live snapshot (all claude) AND adds the independent-source cross-check.
+// drifting hardcoded literal here.
 test("ENGINE_BY_ROLE: CODER/VERIFY/REVIEW/PM match engine-profiles.json's roles.*.engine (config-based, not an independent literal)", () => {
   const rawConfig = JSON.parse(
     readFileSync(DEFAULT_ENGINE_PROFILES_PATH, "utf8"),
@@ -4443,9 +4442,28 @@ test("ENGINE_BY_ROLE: CODER/VERIFY/REVIEW/PM match engine-profiles.json's roles.
       `ENGINE_BY_ROLE.${role} must track engine-profiles.json's roles.${role}.engine`,
     );
   }
-  // live-measured snapshot (2026-11-10 seat-launch-registry): all four are
-  // claude today -- this is documentation of today's value, not what
-  // drives the test's pass/fail (the loop above does that).
+});
+
+// HYK-153-engine-profile-3 (coder-task.md §2 P2-C, review-4 §3 P2-C): split
+// out of the config-follow test above. The old single test put these four
+// assertions directly below the config-follow loop with a comment claiming
+// they were "documentation of today's value, not what drives the test's
+// pass/fail (the loop above does that)" -- that was false: they are plain
+// assert.equal calls in the SAME test, so they decide its pass/fail just
+// as much as the loop does. review-4 measured this directly: flipping
+// config.roles.REVIEW.engine to "codex" in place turned 5 assertions red
+// across two files, including this one. Splitting it into its own test
+// makes the comment's claim true by construction -- a config change that
+// keeps ENGINE_BY_ROLE in sync with config (the test above, which would
+// still pass) can disagree with today's live value (this test, which goes
+// red), and the two now fail independently instead of sharing one
+// assertion block. Same four assert.equal calls as before the split --
+// not weakened (8 assertions total across both tests, same as the 4 loop
+// iterations + 4 pins the single test had).
+test("ENGINE_BY_ROLE: today's live value for all four roles is claude (live-snapshot pin, 2026-11-10 seat-launch-registry) -- a config change away from claude fails THIS test, not the config-follow test above", () => {
+  const rawConfig = JSON.parse(
+    readFileSync(DEFAULT_ENGINE_PROFILES_PATH, "utf8"),
+  );
   assert.equal(rawConfig.roles.CODER.engine, "claude");
   assert.equal(rawConfig.roles.VERIFY.engine, "claude");
   assert.equal(rawConfig.roles.REVIEW.engine, "claude");

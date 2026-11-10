@@ -203,9 +203,19 @@ if (invokedDirectly) {
     console.log(JSON.stringify(outcome.result));
     process.exit(EXIT_CODE.OK);
   } catch (err) {
-    console.error(
-      `FAILED reason=${ENGINE_PROFILE_CONFIG_FAILURE_REASON} detail=${err.message}`,
-    );
+    // HYK-153-engine-profile-3 (review-4 §3 P2-E): the --help path reaches
+    // buildUsage() -> getKnownEngines() above, which throws the same
+    // EngineProfileLoadError a broken config throws on the execution path
+    // (runSeatEngineDetectCli already narrows that to its specific reason,
+    // see the try/catch inside it) -- this outer catch used to collapse
+    // every escaping error to the generic ENGINE_PROFILE_CONFIG_FAILURE_REASON,
+    // so --help on a broken config reported a less specific reason than the
+    // same broken config's normal run. Same narrowing here closes that gap.
+    const reason =
+      err && err.name === "EngineProfileLoadError"
+        ? err.reason
+        : ENGINE_PROFILE_CONFIG_FAILURE_REASON;
+    console.error(`FAILED reason=${reason} detail=${err.message}`);
     process.exit(EXIT_CODE.CONFIG_LOAD_FAILED);
   }
 }

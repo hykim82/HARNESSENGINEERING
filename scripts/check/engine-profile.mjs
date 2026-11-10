@@ -28,10 +28,19 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const DEFAULT_CONFIG_PATH = join(
-  dirname(fileURLToPath(import.meta.url)),
-  "engine-profiles.json",
-);
+// HYK-153-engine-profile-3 (coder-task.md §2 product_scope P2-E): minimal
+// path-injection seam -- no CLI flag or other override existed to point a
+// *spawned child process* (seat-engine-detect.mjs run as a real CLI,
+// engine-split-rounds.mjs's module-top-level pattern read) at a synthetic
+// broken config, so committed tests for the config-failure exit-3 path and
+// the P2-A missing-pattern path could not drive real entry points without
+// writing to the actual shared engine-profiles.json. Follows the existing
+// HARNESS_<NAME>_PATH override convention used elsewhere in scripts/check/
+// (e.g. HARNESS_STATUS_PATH, HARNESS_CONTROL_ROOM_PATH): unset, the default
+// path is exactly what it was before this round.
+const DEFAULT_CONFIG_PATH =
+  process.env.HARNESS_ENGINE_PROFILES_PATH ||
+  join(dirname(fileURLToPath(import.meta.url)), "engine-profiles.json");
 
 function isPlainObject(v) {
   return v !== null && typeof v === "object" && !Array.isArray(v);
