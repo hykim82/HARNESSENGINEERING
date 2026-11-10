@@ -1125,6 +1125,29 @@ export const ENFORCEMENT_CHECK_FILES = [
   "hyk400-receiver-guard.test.mjs",
   "seat-engine-detect.mjs",
   "seat-engine-detect.test.mjs",
+  // HYK-153-engine-profile-1 (piece B): seat-engine-detect.mjs now imports
+  // "./engine-profile.mjs" (same scripts/check/ directory on the real repo
+  // -- a same-directory import, so it must be copied to scripts/check/ on
+  // the target too, NOT scripts/relay/; the closure test
+  // (install-copylist-closure.test.mjs) only checks that the import target
+  // EXISTS somewhere in the combined copy set, not which specific list it's
+  // in, so putting it on the wrong axis passed that test while still
+  // producing a real ERR_MODULE_NOT_FOUND on an actual install -- caught by
+  // install-net-closure.test.mjs's live network-install run instead, not by
+  // the static closure check). engine-profiles.json is a non-.mjs data file
+  // engine-profile.mjs reads via readFileSync (not a static import the
+  // closure algorithm tracks), so it is listed by hand here -- without it,
+  // engine-profile.mjs would be present but its loadEngineProfiles() call
+  // would fail CONFIG_FILE_UNREADABLE on the installed repo.
+  // engine-profile-cli.mjs/.test.mjs are not required by any import closure
+  // (nothing else imports them) but are included so the CLI
+  // docs/control-room-patches/HYK-153-engine-profile.md proposes calling
+  // actually exists on an installed worktree.
+  "engine-profile.mjs",
+  "engine-profile.test.mjs",
+  "engine-profiles.json",
+  "engine-profile-cli.mjs",
+  "engine-profile-cli.test.mjs",
   "seat-proof-wrapper-shape.mjs",
   "seat-proof-wrapper-shape.test.mjs",
   // transitive: dispatch-gate-decision.mjs -> {dropped-at-stamp-core,
@@ -1514,23 +1537,6 @@ export const ENFORCEMENT_RELAY_FILES = [
   "hyk171-cycle4b2c-fixtures.mjs",
   "dispatch-bound-seat-proof.mjs",
   "dispatch-bound-seat-proof.test.mjs",
-  // HYK-153-engine-profile-1 (piece B): scripts/check/seat-engine-detect.mjs
-  // (already listed on the check axis below) now imports
-  // scripts/check/engine-profile.mjs -- a new import edge that the closure
-  // test (install-copylist-closure.test.mjs) caught live. engine-profiles.json
-  // is a non-.mjs data file engine-profile.mjs reads via readFileSync (not a
-  // static import the closure algorithm tracks), so it is listed by hand
-  // here -- without it, engine-profile.mjs would be present but its
-  // loadEngineProfiles() call would fail CONFIG_FILE_UNREADABLE on the
-  // installed repo. engine-profile-cli.mjs/.test.mjs are not required by any
-  // import closure (nothing else imports them) but are included so the CLI
-  // docs/control-room-patches/HYK-153-engine-profile.md proposes calling
-  // actually exists on an installed worktree.
-  "engine-profile.mjs",
-  "engine-profile.test.mjs",
-  "engine-profiles.json",
-  "engine-profile-cli.mjs",
-  "engine-profile-cli.test.mjs",
 ];
 
 // HYK-209-installer-closure-derive-1 (2R): the scripts/supervisor/*.mjs copy
