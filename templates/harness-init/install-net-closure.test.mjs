@@ -348,10 +348,62 @@ const STANDALONE_TIMEOUT_MS = 90000;
 // install-retry-gate.mjs as measureFreeMemSignal, now one of three signals
 // evaluateRetryGate combines (HYK-464 H7c) -- see that module's own header.
 
+// HYK-500 2R (책임자 판정 2026-11-11 11:1x §1, 채택 ⓘⓘ): the two generic
+// ceilings above (STANDALONE_TIMEOUT_MS / UNDER_FULL_RUNNER_TIMEOUT_MS)
+// assume every installed `.test.mjs` file finishes well inside the
+// full-runner-shape 180000ms ceiling -- HYK-500 1R found one file that does
+// not. Measured THROUGH THIS FILE'S OWN install-net-closure path (real
+// installer -> real synthetic target -> the exact isolatedEnv() + `node
+// --test --test-reporter=tap <rel>` shape runOneInstalledTestFile uses,
+// just with a generous timeoutMs bypass so it runs to a real completion
+// instead of being killed): scripts/check/hyk494-runner-lock.test.mjs took
+// 257825ms (~257.8s, exit 0, 78/78 pass) on this machine (〔직접〕, HYK-500
+// 2R, this round's coder.md §2 ⓑ 표 -- base-commit direct standalone copy
+// measured 242300ms in 1R, B-branch 251700ms; this is a fresh, separate
+// measurement through the real install path, same order of magnitude). A
+// per-file entry below REPLACES the generic decision (both the first
+// attempt AND the retry, regardless of standalone/full-runner mode -- this
+// file is slow enough to blow BOTH generic ceilings, not just the
+// full-runner one) for that one file's installed relative path; every
+// OTHER file keeps the unchanged generic ceiling untouched (⛔무조건 상향
+// 금지는 표에 없는 파일에는 적용되지 않는다 -- 그 파일들은 그대로).
+// Ceiling here = measured * 2.33 (515650ms would be the bare 2x floor),
+// rounded up to a clean number (600000ms = 10 minutes) -- same "compute
+// then round to a clean number above the floor" convention
+// STANDALONE_TIMEOUT_MS's own header already used (88661.3 -> 90000).
+const PER_FILE_CEILING_MS = {
+  "scripts/check/hyk494-runner-lock.test.mjs": {
+    ms: 600000,
+    measuredMs: 257825,
+    basis:
+      "installed duration via install-net-closure path (HYK-500 2R 〔직접〕): 257825ms; ceiling = measured * 2.33, rounded to a clean number (600000ms), well above the required 2x floor (515650ms)",
+  },
+};
+
+// Returns the subset of `ceilingTable`'s own keys that `installedFiles`
+// does NOT contain -- a non-empty result means a per-file ceiling entry
+// names a file this installer does not actually ship (dead/stale entry).
+// Extracted as a pure function (rather than inlined into the real-install
+// test below) so this round's own unit test can drive it with a fabricated
+// table/file-list pair, without needing a real broken install to prove the
+// "missing file -> reasoned failure, not a silent skip" contract (HYK-500
+// 2R, 판정 11:1x ⓘⓘⓑ: "표에 적힌 파일이 설치본에 없으면 사유 있는 실패").
+function missingPerFileCeilingTargets(ceilingTable, installedFiles) {
+  const installedSet = new Set(installedFiles);
+  return Object.keys(ceilingTable).filter((rel) => !installedSet.has(rel));
+}
+
 // 부하 신호(HARNESS_TEST_CONCURRENCY)가 유효한 양의 정수로 있으면 더 긴
 // 유한 시한, 없거나 값이 깨졌으면 원래 시한 -- isolated-suite-runner.mjs의
 // resolveNestedConcurrency와 같은 "결정 실패 시 원래 동작으로" 규칙.
-function resolveInstalledTestTimeoutMs(env) {
+// `rel`: HYK-500 2R, optional -- when given and PER_FILE_CEILING_MS has an
+// entry for it, that entry's own ms REPLACES this generic decision entirely
+// (checked first, before reading HARNESS_TEST_CONCURRENCY at all) -- a file
+// not in the table (or no `rel` given at all, the pre-HYK-500 call shape)
+// falls through to the unchanged generic logic below.
+function resolveInstalledTestTimeoutMs(env, rel) {
+  const override = PER_FILE_CEILING_MS[rel];
+  if (override !== undefined) return override.ms;
   const raw = env.HARNESS_TEST_CONCURRENCY;
   if (raw == null || raw === "") return STANDALONE_TIMEOUT_MS;
   const n = Number(raw);
@@ -412,7 +464,7 @@ function runOneInstalledTestFile(
       cwd: targetRepoPath,
       encoding: "utf8",
       env,
-      timeout: timeoutMs ?? resolveInstalledTestTimeoutMs(env),
+      timeout: timeoutMs ?? resolveInstalledTestTimeoutMs(env, rel),
       maxBuffer: 64 * 1024 * 1024,
     },
   );
@@ -458,9 +510,16 @@ function runInstalledTestFileWithLoadRetry(
       runOneInstalledTestFile(targetRepoPath, rel, {
         spawnSync: spawnSyncImpl,
       }),
+    // HYK-500 2R: the retry's own ceiling must never be shorter than what a
+    // per-file override already gave the first attempt -- a file in
+    // PER_FILE_CEILING_MS already needed more than UNDER_FULL_RUNNER_
+    // TIMEOUT_MS on attempt 1, so retrying it at the shorter generic
+    // ceiling would just guarantee a second, pointless ETIMEDOUT. Falls
+    // back to the unchanged UNDER_FULL_RUNNER_TIMEOUT_MS for every file not
+    // in the table -- pre-HYK-500 behavior, untouched.
     () =>
       runOneInstalledTestFile(targetRepoPath, rel, {
-        timeoutMs: UNDER_FULL_RUNNER_TIMEOUT_MS,
+        timeoutMs: PER_FILE_CEILING_MS[rel]?.ms ?? UNDER_FULL_RUNNER_TIMEOUT_MS,
         spawnSync: spawnSyncImpl,
       }),
     { freemem, env, countNodeProcesses },
@@ -662,6 +721,20 @@ test("install-net-closure: real installer -> real git target -> every installed 
       `expected at least 40 installed .test.mjs files (sanity floor against a broken collection, got ${files.length}): ${files.join(", ")}`,
     );
 
+    // HYK-500 2R (판정 11:1x ⓘⓘⓑ): a PER_FILE_CEILING_MS entry naming a file
+    // this installer does not actually ship must be a reasoned failure, not
+    // a silently-ignored dead table entry (missingPerFileCeilingTargets's
+    // own header).
+    const missingCeilingTargets = missingPerFileCeilingTargets(
+      PER_FILE_CEILING_MS,
+      files,
+    );
+    assert.deepEqual(
+      missingCeilingTargets,
+      [],
+      `PER_FILE_CEILING_MS names file(s) this installer does not actually ship: ${missingCeilingTargets.join(", ")} -- remove the stale ceiling entry or fix the install list`,
+    );
+
     const exceptionsByFile = new Map(
       INSTALL_NET_CLOSURE_KNOWN_EXCEPTIONS.map((e) => [e.file, e]),
     );
@@ -770,6 +843,121 @@ test("install-net-closure timeout ⓑ: resolveInstalledTestTimeoutMs returns the
       resolveInstalledTestTimeoutMs({ HARNESS_TEST_CONCURRENCY: "24" }),
     ),
   );
+});
+
+// ---------------------------------------------------------------------------
+// HYK-500 2R (판정 11:1x ⓘⓘ): PER_FILE_CEILING_MS override cells.
+// ---------------------------------------------------------------------------
+test("install-net-closure per-file ceiling (HYK-500 2R): a file named in PER_FILE_CEILING_MS gets that entry's own ms REGARDLESS of HARNESS_TEST_CONCURRENCY (standalone or full-runner shape), never the generic 90000/180000 ceiling", () => {
+  const rel = "scripts/check/hyk494-runner-lock.test.mjs";
+  assert.equal(
+    resolveInstalledTestTimeoutMs({}, rel),
+    PER_FILE_CEILING_MS[rel].ms,
+    "standalone shape (no HARNESS_TEST_CONCURRENCY) must still use the per-file override, not STANDALONE_TIMEOUT_MS",
+  );
+  assert.equal(
+    resolveInstalledTestTimeoutMs({ HARNESS_TEST_CONCURRENCY: "12" }, rel),
+    PER_FILE_CEILING_MS[rel].ms,
+    "full-runner shape must still use the per-file override, not UNDER_FULL_RUNNER_TIMEOUT_MS",
+  );
+  assert.notEqual(PER_FILE_CEILING_MS[rel].ms, STANDALONE_TIMEOUT_MS);
+  assert.notEqual(PER_FILE_CEILING_MS[rel].ms, UNDER_FULL_RUNNER_TIMEOUT_MS);
+});
+
+test("install-net-closure per-file ceiling (HYK-500 2R): a file NOT named in PER_FILE_CEILING_MS is unaffected -- it still gets the plain generic ceiling", () => {
+  assert.equal(
+    resolveInstalledTestTimeoutMs({}, "scripts/check/not-in-table.test.mjs"),
+    STANDALONE_TIMEOUT_MS,
+  );
+  assert.equal(
+    resolveInstalledTestTimeoutMs(
+      { HARNESS_TEST_CONCURRENCY: "12" },
+      "scripts/check/not-in-table.test.mjs",
+    ),
+    UNDER_FULL_RUNNER_TIMEOUT_MS,
+  );
+  // Omitting `rel` entirely (the pre-HYK-500 call shape) must also be
+  // unaffected -- `undefined` must never accidentally match a table key.
+  assert.equal(resolveInstalledTestTimeoutMs({}), STANDALONE_TIMEOUT_MS);
+});
+
+test("install-net-closure per-file ceiling (HYK-500 2R, basis-enforced-in-code, ⓘⓘⓐ): every PER_FILE_CEILING_MS entry's ms is at least 2x its own measuredMs, per the owner ruling's floor", () => {
+  for (const [rel, entry] of Object.entries(PER_FILE_CEILING_MS)) {
+    assert.ok(
+      entry.ms >= entry.measuredMs * 2,
+      `PER_FILE_CEILING_MS['${rel}'].ms (${entry.ms}) is below the required 2x measured floor (measuredMs=${entry.measuredMs}, floor=${entry.measuredMs * 2})`,
+    );
+  }
+});
+
+test("install-net-closure per-file ceiling (HYK-500 2R, ⓘⓘⓑ): missingPerFileCeilingTargets reports a table entry whose file is not among the installed files, not silently empty", () => {
+  const fakeTable = {
+    "scripts/check/does-not-exist.test.mjs": { ms: 1, measuredMs: 1 },
+  };
+  assert.deepEqual(
+    missingPerFileCeilingTargets(fakeTable, [
+      "scripts/check/some-other-real-file.test.mjs",
+    ]),
+    ["scripts/check/does-not-exist.test.mjs"],
+  );
+  assert.deepEqual(
+    missingPerFileCeilingTargets(fakeTable, [
+      "scripts/check/does-not-exist.test.mjs",
+    ]),
+    [],
+    "a table entry whose file IS among the installed files must not be reported",
+  );
+  assert.deepEqual(
+    missingPerFileCeilingTargets({}, ["scripts/check/anything.test.mjs"]),
+    [],
+    "an empty table must never report anything",
+  );
+});
+
+test("install-net-closure per-file ceiling (HYK-500 2R): a load-retry with a per-file override retries at that override's own ms, not the shorter generic UNDER_FULL_RUNNER_TIMEOUT_MS", () => {
+  const rel = "scripts/check/hyk494-runner-lock.test.mjs";
+  const calls = [];
+  const fakeSpawn = (cmd, args, opts) => {
+    calls.push(opts.timeout);
+    if (calls.length === 1) {
+      return {
+        error: Object.assign(new Error("timed out"), { code: "ETIMEDOUT" }),
+        signal: "SIGTERM",
+        status: null,
+        stdout: "",
+        stderr: "",
+      };
+    }
+    return {
+      error: undefined,
+      signal: null,
+      status: 0,
+      stdout: "# tests 1\n# pass 1\n# fail 0\n# skipped 0\n",
+      stderr: "",
+    };
+  };
+  const { result, gate, retried } = runInstalledTestFileWithLoadRetry(
+    "/fake/target",
+    rel,
+    noSignalGateOpts({
+      spawnSync: fakeSpawn,
+      freemem: () => 777 * 1024 * 1024,
+    }),
+  );
+  assert.equal(calls.length, 2, "expected exactly 2 spawn calls");
+  assert.equal(
+    calls[0],
+    PER_FILE_CEILING_MS[rel].ms,
+    "the FIRST attempt for a table-listed file must also use the per-file override (not STANDALONE_TIMEOUT_MS)",
+  );
+  assert.equal(
+    calls[1],
+    PER_FILE_CEILING_MS[rel].ms,
+    `expected the retry's own timeout option to be the per-file override (${PER_FILE_CEILING_MS[rel].ms}), not the shorter generic UNDER_FULL_RUNNER_TIMEOUT_MS (${UNDER_FULL_RUNNER_TIMEOUT_MS})`,
+  );
+  assert.equal(result.error, undefined);
+  assert.equal(retried, true);
+  assert.ok(gate.opened);
 });
 
 // ---------------------------------------------------------------------------
