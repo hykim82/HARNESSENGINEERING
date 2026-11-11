@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { DEFAULT_ENGINE_PROFILES_PATH } from "../../check/engine-profile.mjs";
 import {
   ensureSeat,
   deliverTask,
@@ -1435,16 +1436,22 @@ test("resolveRoleBoundSeatHandle: §4-5 repro, opposite request -- requesting RE
 });
 
 // HYK-214-seat-legacy-1 §0/§4(a) -- ★이 라운드의 가장 중요한 시험★. 어젯밤
-// 실사고 원문 그대로 고정: `-Role CODER` 배달이 codex REVIEW 좌석으로 갔다
-// (§0 원문 "좌석 2개 중 에이전트 마커로 1개 선별 -> ⛔이게 REVIEW(codex)
-// 좌석이었다"). resolveRoleBoundSeatHandle은 그 실패 경로(마커 기반
-// judgeSeatReadiness)와 달리 대장 조인만 본다 -- ENGINE_BY_ROLE(CODER=
-// claude, REVIEW=codex)이 다른 두 좌석이 동석해도 role=CODER 요청이
-// REVIEW(codex) 좌석의 handle을 절대 반환하지 않는다는 것을 명시로 고정
-// (line 1347 테스트와 동형이나, §0 사고를 직접 가리키는 별도 앵커로 둔다).
-test("resolveRoleBoundSeatHandle: HYK-214 §0 incident pin -- claude CODER + codex REVIEW co-located, -Role CODER never returns the codex REVIEW seat's handle", () => {
+// 실사고 원문 그대로 고정: `-Role CODER` 배달이 다른 role의 좌석으로 갔다
+// (§0 원문 "좌석 2개 중 에이전트 마커로 1개 선별 -> ⛔이게 REVIEW 좌석이었다").
+// resolveRoleBoundSeatHandle은 그 실패 경로(마커 기반 judgeSeatReadiness)와
+// 달리 대장 조인만 본다 -- 대장(registry)의 role 문자열만으로 좌석을 고르지,
+// ENGINE_BY_ROLE(엔진 선택, 좌석-handle 결속과는 다른 축)은 전혀 보지
+// 않는다는 것을 명시로 고정한다(line 1347 테스트와 동형이나, §0 사고를
+// 직접 가리키는 별도 앵커로 둔다).
+// HYK-153-engine-profile-1 (piece B): 당시 사고 원문은 REVIEW 좌석이
+// codex였다(그 시점 실물)지만, 이 시험이 고정하는 불변식(역할 join이
+// ENGINE_BY_ROLE 값과 무관하다)은 두 역할이 지금처럼 같은 엔진(claude)이어도
+// 똑같이 성립한다 -- 그래서 ENGINE_BY_ROLE.REVIEW는 config가 읽은 오늘의
+// 실물 값(claude)으로 고정하고, 레지스트리 pty 이름(`pty_codex_review` 등)은
+// 그 역사적 사고를 가리키는 서술적 이름으로만 남긴다(동작에는 쓰이지 않음).
+test("resolveRoleBoundSeatHandle: HYK-214 §0 incident pin -- two co-located, same-engine-but-different-role seats, -Role CODER never returns the other role's handle", () => {
   assert.equal(ENGINE_BY_ROLE.CODER, "claude");
-  assert.equal(ENGINE_BY_ROLE.REVIEW, "codex");
+  assert.equal(ENGINE_BY_ROLE.REVIEW, "claude");
   const registry = seatRegistryStub([
     registryRecord({ ptyId: "pty_codex_review", role: "REVIEW" }),
     registryRecord({ ptyId: "pty_claude_coder", role: "CODER" }),
@@ -2532,6 +2539,7 @@ test("deliverTask: codex engine (REVIEW) -- postcheck never runs (no --inject, i
   const r = deliverTaskWithConfirmOverrideForTests(
     { taskId: "HYK-169-coder-1", role: "REVIEW", worktreePath: VALID_WORKTREE },
     {
+      engineOverrideForTests: "codex",
       execFn,
       existingSeatHandle: "term_x",
       confirmPastedFn: () => true,
@@ -2572,7 +2580,12 @@ test("deliverTask: D11 codex (REVIEW) -- no-inject dispatch, then bootstrap text
   });
   const r = deliverTaskWithConfirmOverrideForTests(
     { taskId: "HYK-169-coder-1", role: "REVIEW", worktreePath: VALID_WORKTREE },
-    { execFn, existingSeatHandle: "term_x", confirmPastedFn: () => true },
+    {
+      engineOverrideForTests: "codex",
+      execFn,
+      existingSeatHandle: "term_x",
+      confirmPastedFn: () => true,
+    },
   );
   assert.equal(r.ok, true);
   assert.equal(r.submitted, "explicit");
@@ -2607,6 +2620,7 @@ test("deliverTask: D11-B codex -- confirmPastedFn is invoked before the Enter ca
   const r = deliverTaskWithConfirmOverrideForTests(
     { taskId: "HYK-169-coder-1", role: "REVIEW", worktreePath: VALID_WORKTREE },
     {
+      engineOverrideForTests: "codex",
       execFn,
       existingSeatHandle: "term_x",
       confirmPastedFn: () => {
@@ -2635,7 +2649,12 @@ test("deliverTask: D11-C codex -- Enter failing returns DELIVERY_UNJUDGABLE imme
   });
   const r = deliverTaskWithConfirmOverrideForTests(
     { taskId: "HYK-169-coder-1", role: "REVIEW", worktreePath: VALID_WORKTREE },
-    { execFn, existingSeatHandle: "term_x", confirmPastedFn: () => true },
+    {
+      engineOverrideForTests: "codex",
+      execFn,
+      existingSeatHandle: "term_x",
+      confirmPastedFn: () => true,
+    },
   );
   assert.equal(r.ok, false);
   assert.match(r.reason, /DELIVERY_UNJUDGABLE/);
@@ -2653,7 +2672,12 @@ test("deliverTask: D11-C codex -- bootstrap text-send failing returns DELIVERY_U
   });
   const r = deliverTaskWithConfirmOverrideForTests(
     { taskId: "HYK-169-coder-1", role: "REVIEW", worktreePath: VALID_WORKTREE },
-    { execFn, existingSeatHandle: "term_x", confirmPastedFn: () => true },
+    {
+      engineOverrideForTests: "codex",
+      execFn,
+      existingSeatHandle: "term_x",
+      confirmPastedFn: () => true,
+    },
   );
   assert.equal(r.ok, false);
   assert.match(r.reason, /DELIVERY_UNJUDGABLE/);
@@ -2667,7 +2691,12 @@ test("deliverTask: D11-B codex PASTE_UNCONFIRMED -- confirmPastedFn returning fa
   });
   const r = deliverTaskWithConfirmOverrideForTests(
     { taskId: "HYK-169-coder-1", role: "REVIEW", worktreePath: VALID_WORKTREE },
-    { execFn, existingSeatHandle: "term_x", confirmPastedFn: () => false },
+    {
+      engineOverrideForTests: "codex",
+      execFn,
+      existingSeatHandle: "term_x",
+      confirmPastedFn: () => false,
+    },
   );
   assert.equal(r.ok, false);
   assert.match(r.reason, /PASTE_UNCONFIRMED/);
@@ -2683,7 +2712,12 @@ test("deliverTask: D11-B codex PASTE_UNCONFIRMED -- confirmPastedFn returning tr
   });
   const r = deliverTaskWithConfirmOverrideForTests(
     { taskId: "HYK-169-coder-1", role: "REVIEW", worktreePath: VALID_WORKTREE },
-    { execFn, existingSeatHandle: "term_x", confirmPastedFn: () => true },
+    {
+      engineOverrideForTests: "codex",
+      execFn,
+      existingSeatHandle: "term_x",
+      confirmPastedFn: () => true,
+    },
   );
   assert.equal(r.ok, true);
   assert.equal(terminalSendEnterCalls(execFn).length, 1);
@@ -2697,6 +2731,7 @@ test("deliverTask: D11-B codex PASTE_UNCONFIRMED -- confirmPastedFn throwing is 
   const r = deliverTaskWithConfirmOverrideForTests(
     { taskId: "HYK-169-coder-1", role: "REVIEW", worktreePath: VALID_WORKTREE },
     {
+      engineOverrideForTests: "codex",
       execFn,
       existingSeatHandle: "term_x",
       confirmPastedFn: () => {
@@ -2725,7 +2760,11 @@ test("deliverTask: D11-B codex default confirm path -- omitting confirmPastedFn 
   });
   const r = deliverTask(
     { taskId: "HYK-169-coder-1", role: "REVIEW", worktreePath: VALID_WORKTREE },
-    { execFn, existingSeatHandle: "term_x" },
+    {
+      engineOverrideForTests: "codex",
+      execFn,
+      existingSeatHandle: "term_x",
+    },
   );
   assert.equal(r.ok, false);
   assert.match(r.reason, /PASTE_UNCONFIRMED/);
@@ -2759,7 +2798,12 @@ test("deliverTask (production export, NOT the test-only override): a caller-supp
   const alwaysTrueHook = () => true;
   const r = deliverTask(
     { taskId: "HYK-169-coder-1", role: "REVIEW", worktreePath: VALID_WORKTREE },
-    { execFn, existingSeatHandle: "term_x", confirmPastedFn: alwaysTrueHook },
+    {
+      engineOverrideForTests: "codex",
+      execFn,
+      existingSeatHandle: "term_x",
+      confirmPastedFn: alwaysTrueHook,
+    },
   );
   assert.equal(r.ok, false);
   assert.match(r.reason, /PASTE_UNCONFIRMED/);
@@ -2864,6 +2908,7 @@ for (const kind of CONFIRM_PASTED_FN_SHAPES) {
     const carrierOpts = makeConfirmPastedFnCarrier(kind, () => true);
     carrierOpts.execFn = execFn;
     carrierOpts.existingSeatHandle = "term_x";
+    carrierOpts.engineOverrideForTests = "codex";
     const r = deliverTask(
       {
         taskId: "HYK-169-coder-1",
@@ -2906,7 +2951,11 @@ test("deliverTask: D11-B codex default confirm path -- marker (taskId) alone in 
   });
   const r = deliverTask(
     { taskId: "HYK-169-coder-1", role: "REVIEW", worktreePath: VALID_WORKTREE },
-    { execFn, existingSeatHandle: "term_x" },
+    {
+      engineOverrideForTests: "codex",
+      execFn,
+      existingSeatHandle: "term_x",
+    },
   );
   assert.equal(r.ok, true);
   assert.equal(terminalSendEnterCalls(execFn).length, 1);
@@ -2942,7 +2991,11 @@ test("deliverTask: D11-B codex default confirm path -- exact real-world redraw-m
   });
   const r = deliverTask(
     { taskId: marker, role: "REVIEW", worktreePath: VALID_WORKTREE },
-    { execFn, existingSeatHandle: "term_x" },
+    {
+      engineOverrideForTests: "codex",
+      execFn,
+      existingSeatHandle: "term_x",
+    },
   );
   assert.equal(r.ok, true);
   assert.notEqual(FIXTURE_PREVIEW_REDRAW, marker); // proves it's not exact-match luck
@@ -2965,7 +3018,11 @@ test("deliverTask: D11-B codex -- a busy signal alone (no marker) no longer conf
   });
   const r = deliverTask(
     { taskId: "HYK-169-coder-1", role: "REVIEW", worktreePath: VALID_WORKTREE },
-    { execFn, existingSeatHandle: "term_x" },
+    {
+      engineOverrideForTests: "codex",
+      execFn,
+      existingSeatHandle: "term_x",
+    },
   );
   assert.equal(r.ok, false);
   assert.match(r.reason, /PASTE_UNCONFIRMED/);
@@ -2983,7 +3040,11 @@ test("deliverTask: D11-B codex -- a *different* task's marker in the preview doe
   });
   const r = deliverTask(
     { taskId: "HYK-169-coder-1", role: "REVIEW", worktreePath: VALID_WORKTREE },
-    { execFn, existingSeatHandle: "term_x" },
+    {
+      engineOverrideForTests: "codex",
+      execFn,
+      existingSeatHandle: "term_x",
+    },
   );
   assert.equal(r.ok, false);
   assert.match(r.reason, /PASTE_UNCONFIRMED/);
@@ -3011,7 +3072,11 @@ test("★변이(필수, 검토 P1 수리): send 응답에 result.send 필드 자
   });
   const r = deliverTask(
     { taskId: "HYK-169-coder-1", role: "REVIEW", worktreePath: VALID_WORKTREE },
-    { execFn, existingSeatHandle: "term_x" },
+    {
+      engineOverrideForTests: "codex",
+      execFn,
+      existingSeatHandle: "term_x",
+    },
   );
   assert.equal(r.ok, false);
   assert.match(r.reason, /PASTE_UNCONFIRMED/);
@@ -3044,7 +3109,11 @@ test("deliverTask: D11-B codex 화면밖 축 -- send 응답에 result.send는 �
   });
   const r = deliverTask(
     { taskId: "HYK-169-coder-1", role: "REVIEW", worktreePath: VALID_WORKTREE },
-    { execFn, existingSeatHandle: "term_x" },
+    {
+      engineOverrideForTests: "codex",
+      execFn,
+      existingSeatHandle: "term_x",
+    },
   );
   assert.equal(r.ok, false);
   assert.match(r.reason, /PASTE_UNCONFIRMED/);
@@ -3076,7 +3145,11 @@ test("★변이(필수): send 응답이 result.send를 실어 오는데 bytesWri
   });
   const r = deliverTask(
     { taskId: "HYK-169-coder-1", role: "REVIEW", worktreePath: VALID_WORKTREE },
-    { execFn, existingSeatHandle: "term_x" },
+    {
+      engineOverrideForTests: "codex",
+      execFn,
+      existingSeatHandle: "term_x",
+    },
   );
   assert.equal(r.ok, false);
   assert.match(r.reason, /PASTE_UNCONFIRMED/);
@@ -3108,7 +3181,11 @@ test("deliverTask: D11-B codex 화면밖 축 -- send 응답의 bytesWritten이 �
   });
   const r = deliverTask(
     { taskId: "HYK-169-coder-1", role: "REVIEW", worktreePath: VALID_WORKTREE },
-    { execFn, existingSeatHandle: "term_x" },
+    {
+      engineOverrideForTests: "codex",
+      execFn,
+      existingSeatHandle: "term_x",
+    },
   );
   assert.equal(r.ok, true);
   assert.equal(terminalSendEnterCalls(execFn).length, 1);
@@ -3137,7 +3214,11 @@ const OFF_SCREEN_OPT_OUT_ATTEMPTS = Object.freeze({
 });
 
 function buildDeliverOptsAttemptingOptOut(execFn, formLabel, value) {
-  const base = { execFn, existingSeatHandle: "term_x" };
+  const base = {
+    execFn,
+    existingSeatHandle: "term_x",
+    engineOverrideForTests: "codex",
+  };
   if (formLabel === "생략(키 자체를 안 만듦)") return base;
   return { ...base, offScreenSend: value };
 }
@@ -3182,6 +3263,7 @@ test("★불변식(필수, 게이트 2 수리): 호출자가 opts.offScreenSend�
   const r = deliverTask(
     { taskId: "HYK-169-coder-1", role: "REVIEW", worktreePath: VALID_WORKTREE },
     {
+      engineOverrideForTests: "codex",
       execFn,
       existingSeatHandle: "term_x",
       // 호출자가 스스로 "완벽히 일치하는" 가짜 축을 만들어 봐도:
@@ -3325,7 +3407,12 @@ test("deliverTask: D11-B codex PASTE_UNCONFIRMED -- a truthy-but-not-true confir
   });
   const r = deliverTaskWithConfirmOverrideForTests(
     { taskId: "HYK-169-coder-1", role: "REVIEW", worktreePath: VALID_WORKTREE },
-    { execFn, existingSeatHandle: "term_x", confirmPastedFn: () => "yes" },
+    {
+      engineOverrideForTests: "codex",
+      execFn,
+      existingSeatHandle: "term_x",
+      confirmPastedFn: () => "yes",
+    },
   );
   assert.equal(r.ok, false);
   assert.match(r.reason, /PASTE_UNCONFIRMED/);
@@ -3353,7 +3440,11 @@ test("deliverTask: dispatch failure short-circuits before submit", () => {
   });
   const r = deliverTask(
     { taskId: "HYK-169-coder-1", role: "REVIEW", worktreePath: VALID_WORKTREE },
-    { execFn, existingSeatHandle: "term_x" },
+    {
+      engineOverrideForTests: "codex",
+      execFn,
+      existingSeatHandle: "term_x",
+    },
   );
   assert.equal(r.ok, false);
   assert.match(r.reason, /no such seat/);
@@ -3406,6 +3497,30 @@ test("deliverTask: D11-A unknown role/profile is rejected with zero execFn calls
   );
   assert.equal(r.ok, false);
   assert.match(r.reason, /UNSUPPORTED_PROFILE/);
+  assert.equal(execFn.calls.length, 0);
+});
+
+// HYK-153-engine-profile-2 (coder-task.md §2 P2-1): engineOverrideForTests
+// used to be trusted verbatim -- a garbage/unknown value fell through
+// getEngineDeliveryMode(engine) === "no-inject" as false and silently took
+// the claude-shaped delivery branch (a quiet wrong-path bug, not a loud
+// rejection). assertKnownEngine now rejects it with zero execFn calls,
+// same D11 "no side effects for unknown profiles" contract as an unknown
+// role. A real override value ("codex", used by every other test in this
+// file) is unaffected -- it is, and stays, a known engine.
+test("deliverTask: an unknown engineOverrideForTests value is rejected with a reason, not silently treated as the role's own engine", () => {
+  const execFn = fakeExecFn({});
+  const r = deliverTask(
+    { taskId: "HYK-169-coder-1", role: "CODER", worktreePath: VALID_WORKTREE },
+    {
+      execFn,
+      existingSeatHandle: "term_x",
+      engineOverrideForTests: "made-up-engine",
+    },
+  );
+  assert.equal(r.ok, false);
+  assert.match(r.reason, /UNSUPPORTED_PROFILE/);
+  assert.match(r.reason, /made-up-engine/);
   assert.equal(execFn.calls.length, 0);
 });
 
@@ -4300,10 +4415,59 @@ test("teardownSeat: missing worktreePath is rejected", () => {
 // ---------------------------------------------------------------------------
 // ENGINE_BY_ROLE
 // ---------------------------------------------------------------------------
-test("ENGINE_BY_ROLE: CODER/VERIFY are claude, REVIEW is codex (B9 single config point)", () => {
-  assert.equal(ENGINE_BY_ROLE.CODER, "claude");
-  assert.equal(ENGINE_BY_ROLE.VERIFY, "claude");
-  assert.equal(ENGINE_BY_ROLE.REVIEW, "codex");
+// HYK-153-engine-profile-1 (piece B, 1순위): REVIEW was pinned "codex" here
+// even though live REVIEW seats run Claude Opus (관제실
+// seat-launch-registry.jsonl 실측, 2026-11-10) -- ENGINE_BY_ROLE now reads
+// scripts/check/engine-profiles.json (getEngineByRole, engine-profile.mjs)
+// instead of a hardcoded object, and the config's REVIEW entry matches the
+// live value. This only changes which delivery PROTOCOL deliverTaskInternal
+// picks for role=REVIEW (--inject vs no-inject+text+Enter); it does not
+// touch role->seat-handle resolution (resolveSeatHandle/
+// resolveRoleBoundSeatHandle join only on the registry's role field, see the
+// HYK-214 §0 test above).
+// HYK-153-engine-profile-2 (coder-task.md §2 P2-12): config-based
+// assertion -- this re-reads the raw engine-profiles.json file directly
+// (not through getEngineByRole()/ENGINE_BY_ROLE's own loader a second
+// time) and compares against it, so changing the config file moves this
+// test's expectation with it instead of requiring a second, independently
+// drifting hardcoded literal here.
+test("ENGINE_BY_ROLE: CODER/VERIFY/REVIEW/PM match engine-profiles.json's roles.*.engine (config-based, not an independent literal)", () => {
+  const rawConfig = JSON.parse(
+    readFileSync(DEFAULT_ENGINE_PROFILES_PATH, "utf8"),
+  );
+  for (const role of ["CODER", "VERIFY", "REVIEW", "PM"]) {
+    assert.equal(
+      ENGINE_BY_ROLE[role],
+      rawConfig.roles[role].engine,
+      `ENGINE_BY_ROLE.${role} must track engine-profiles.json's roles.${role}.engine`,
+    );
+  }
+});
+
+// HYK-153-engine-profile-3 (coder-task.md §2 P2-C, review-4 §3 P2-C): split
+// out of the config-follow test above. The old single test put these four
+// assertions directly below the config-follow loop with a comment claiming
+// they were "documentation of today's value, not what drives the test's
+// pass/fail (the loop above does that)" -- that was false: they are plain
+// assert.equal calls in the SAME test, so they decide its pass/fail just
+// as much as the loop does. review-4 measured this directly: flipping
+// config.roles.REVIEW.engine to "codex" in place turned 5 assertions red
+// across two files, including this one. Splitting it into its own test
+// makes the comment's claim true by construction -- a config change that
+// keeps ENGINE_BY_ROLE in sync with config (the test above, which would
+// still pass) can disagree with today's live value (this test, which goes
+// red), and the two now fail independently instead of sharing one
+// assertion block. Same four assert.equal calls as before the split --
+// not weakened (8 assertions total across both tests, same as the 4 loop
+// iterations + 4 pins the single test had).
+test("ENGINE_BY_ROLE: today's live value for all four roles is claude (live-snapshot pin, 2026-11-10 seat-launch-registry) -- a config change away from claude fails THIS test, not the config-follow test above", () => {
+  const rawConfig = JSON.parse(
+    readFileSync(DEFAULT_ENGINE_PROFILES_PATH, "utf8"),
+  );
+  assert.equal(rawConfig.roles.CODER.engine, "claude");
+  assert.equal(rawConfig.roles.VERIFY.engine, "claude");
+  assert.equal(rawConfig.roles.REVIEW.engine, "claude");
+  assert.equal(rawConfig.roles.PM.engine, "claude");
 });
 
 // ---------------------------------------------------------------------------

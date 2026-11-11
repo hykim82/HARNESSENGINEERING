@@ -22,6 +22,11 @@
 // 받는다. 기다림은 배달기 쪽 짧은 재시도가 맡는다(패치 문서 참고).
 
 import { readFileSync } from "node:fs";
+import {
+  matchEngineByPreviewMarkers,
+  describePreviewMarkerPatterns,
+  getKnownEngines,
+} from "./engine-profile.mjs";
 
 // 배너 마커는 실제 CLI가 기동 직후 화면에 찍는, 서로 겹치지 않는 고유
 // 문자열만 쓴다(코드 실측 -- 관제실 dispatch-worker.ps1:102의 기존
@@ -36,16 +41,13 @@ import { readFileSync } from "node:fs";
 // 아니었다. 넣어 뒀다면 codex 좌석을 claude로 오판정했을 것이다(양쪽
 // 마커가 다 매치 -> unknown으로만 떨어지므로 실제 사고로 이어지진
 // 않았겠지만, "고유 마커"라는 전제 자체가 거짓이었다). 제거.
-export const CLAUDE_ENGINE_MARKERS = /Sonnet|Opus|Fable|bypass permissions/;
-export const CODEX_ENGINE_MARKERS = /gpt-5\.6/;
-
+//
+// HYK-153-engine-profile-1 (piece B): 이 마커 패턴과 "어느 엔진으로
+// 판정됐나"의 엔진 이름 자체는 이제 scripts/check/engine-profiles.json
+// 한 곳에서 읽는다(matchEngineByPreviewMarkers) -- 이 파일은 엔진 이름
+// 리터럴을 전혀 쓰지 않는다(설정이 돌려주는 데이터로만 다룬다).
 export function detectSeatEngine(previewText) {
-  const text = String(previewText ?? "");
-  const isClaude = CLAUDE_ENGINE_MARKERS.test(text);
-  const isCodex = CODEX_ENGINE_MARKERS.test(text);
-  if (isClaude && !isCodex) return "claude";
-  if (isCodex && !isClaude) return "codex";
-  return "unknown";
+  return matchEngineByPreviewMarkers(previewText) ?? "unknown";
 }
 
 export const UNKNOWN_SEAT_ENGINE_REASON = "UNKNOWN_SEAT_ENGINE";
@@ -73,15 +75,26 @@ export function resolveSeatEngine({ previewText, role }) {
   };
 }
 
+// HYK-153-engine-profile-1 (piece B): the engine names and marker patterns
+// quoted in this message now come from config (describePreviewMarkerPatterns)
+// -- this file no longer writes "claude"/"codex" as a literal anywhere.
+// Display-only: a `\.` regex escape (e.g. codex's "gpt-5\.6") is rendered as
+// a plain "." for a human reader, matching this message's pre-config byte
+// shape exactly (verified by seat-engine-detect.test.mjs's own assertions).
 function describeUnknown(previewText, role) {
   const text = String(previewText ?? "");
-  const kind =
-    CLAUDE_ENGINE_MARKERS.test(text) && CODEX_ENGINE_MARKERS.test(text)
-      ? "BOTH_ENGINE_MARKERS"
-      : "NO_ENGINE_MARKER";
+  const patterns = describePreviewMarkerPatterns();
+  const entries = Object.entries(patterns);
+  const matchedCount = entries.filter(
+    ([, pattern]) => pattern && new RegExp(pattern).test(text),
+  ).length;
+  const kind = matchedCount >= 2 ? "BOTH_ENGINE_MARKERS" : "NO_ENGINE_MARKER";
+  const markerDesc = entries
+    .map(([engine, pattern]) => `${engine}[${pattern.replace(/\\\./g, ".")}]`)
+    .join(" / ");
   return (
     `${kind} role=${role ?? "(none)"} preview_chars=${text.length} ` +
-    "찾던 마커: claude[Sonnet|Opus|Fable|bypass permissions] / codex[gpt-5.6] -- " +
+    `찾던 마커: ${markerDesc} -- ` +
     "엔진을 추측하지 않고 거부한다"
   );
 }
@@ -98,11 +111,32 @@ function parseArgs(argv) {
   return out;
 }
 
-const USAGE =
-  "Usage: node seat-engine-detect.mjs --role <Role> (--preview-file <path> | --preview <text>)\n" +
-  "Prints JSON {engine, measured, source, role} on stdout, exit 0.\n" +
-  "engine in {claude, codex}; source = measured-preview.\n" +
-  "unknown measurement -> REFUSED: stderr 'FAILED reason=UNKNOWN_SEAT_ENGINE ...', exit 2 (no engine guessed).";
+// HYK-153-engine-profile-2 (coder-task.md §2 P2-11): exit codes this CLI
+// documents and commits to. 0/2 existed before (success / UNKNOWN_SEAT_
+// ENGINE refusal); CONFIG_LOAD_FAILED is new -- previously a broken
+// engine-profiles.json (unreadable/invalid JSON/invalid schema) threw
+// uncaught out of getKnownEngines()/matchEngineByPreviewMarkers (the
+// latter reached even via --help, since USAGE itself calls
+// getKnownEngines()), crashing with a raw Node stack trace and Node's own
+// generic exit 1 -- no documented code, no one-line reason, and not even
+// consistently 1 (uncaught-exception exit codes aren't a stable contract).
+export const EXIT_CODE = Object.freeze({
+  OK: 0,
+  UNKNOWN_SEAT_ENGINE: 2,
+  CONFIG_LOAD_FAILED: 3,
+});
+export const ENGINE_PROFILE_CONFIG_FAILURE_REASON =
+  "ENGINE_PROFILE_CONFIG_FAILURE";
+
+function buildUsage() {
+  return (
+    "Usage: node seat-engine-detect.mjs --role <Role> (--preview-file <path> | --preview <text>)\n" +
+    "Prints JSON {engine, measured, source, role} on stdout, exit 0.\n" +
+    `engine in {${getKnownEngines().join(", ")}}; source = measured-preview.\n` +
+    `unknown measurement -> REFUSED: stderr 'FAILED reason=UNKNOWN_SEAT_ENGINE ...', exit ${EXIT_CODE.UNKNOWN_SEAT_ENGINE} (no engine guessed).\n` +
+    `engine-profiles.json unreadable/invalid JSON/invalid schema -> stderr 'FAILED reason=<ENGINE_PROFILE_LOAD_REASON or ${ENGINE_PROFILE_CONFIG_FAILURE_REASON}> detail=...', exit ${EXIT_CODE.CONFIG_LOAD_FAILED} (no engine guessed, not a silent default).`
+  );
+}
 
 export function runSeatEngineDetectCli(argv) {
   const parsed = parseArgs(argv);
@@ -116,15 +150,34 @@ export function runSeatEngineDetectCli(argv) {
         ok: false,
         reason: "PREVIEW_FILE_UNREADABLE",
         detail: err.message,
+        exitCode: EXIT_CODE.UNKNOWN_SEAT_ENGINE,
       };
     }
   }
-  const result = resolveSeatEngine({
-    previewText: previewText ?? "",
-    role: parsed.role,
-  });
+  let result;
+  try {
+    result = resolveSeatEngine({
+      previewText: previewText ?? "",
+      role: parsed.role,
+    });
+  } catch (err) {
+    return {
+      ok: false,
+      reason:
+        err && err.name === "EngineProfileLoadError"
+          ? err.reason
+          : ENGINE_PROFILE_CONFIG_FAILURE_REASON,
+      detail: err.message,
+      exitCode: EXIT_CODE.CONFIG_LOAD_FAILED,
+    };
+  }
   if (result.refused) {
-    return { ok: false, reason: result.reason, detail: result.detail };
+    return {
+      ok: false,
+      reason: result.reason,
+      detail: result.detail,
+      exitCode: EXIT_CODE.UNKNOWN_SEAT_ENGINE,
+    };
   }
   return { ok: true, result };
 }
@@ -135,17 +188,34 @@ const invokedDirectly =
     .replace(/\\/g, "/")
     .endsWith("scripts/check/seat-engine-detect.mjs");
 if (invokedDirectly) {
-  const outcome = runSeatEngineDetectCli(process.argv.slice(2));
-  if (outcome.help) {
-    console.log(USAGE);
-    process.exit(0);
+  try {
+    const outcome = runSeatEngineDetectCli(process.argv.slice(2));
+    if (outcome.help) {
+      console.log(buildUsage());
+      process.exit(EXIT_CODE.OK);
+    }
+    if (!outcome.ok) {
+      console.error(
+        `FAILED reason=${outcome.reason} detail=${outcome.detail ?? ""}`,
+      );
+      process.exit(outcome.exitCode ?? EXIT_CODE.UNKNOWN_SEAT_ENGINE);
+    }
+    console.log(JSON.stringify(outcome.result));
+    process.exit(EXIT_CODE.OK);
+  } catch (err) {
+    // HYK-153-engine-profile-3 (review-4 §3 P2-E): the --help path reaches
+    // buildUsage() -> getKnownEngines() above, which throws the same
+    // EngineProfileLoadError a broken config throws on the execution path
+    // (runSeatEngineDetectCli already narrows that to its specific reason,
+    // see the try/catch inside it) -- this outer catch used to collapse
+    // every escaping error to the generic ENGINE_PROFILE_CONFIG_FAILURE_REASON,
+    // so --help on a broken config reported a less specific reason than the
+    // same broken config's normal run. Same narrowing here closes that gap.
+    const reason =
+      err && err.name === "EngineProfileLoadError"
+        ? err.reason
+        : ENGINE_PROFILE_CONFIG_FAILURE_REASON;
+    console.error(`FAILED reason=${reason} detail=${err.message}`);
+    process.exit(EXIT_CODE.CONFIG_LOAD_FAILED);
   }
-  if (!outcome.ok) {
-    console.error(
-      `FAILED reason=${outcome.reason} detail=${outcome.detail ?? ""}`,
-    );
-    process.exit(2);
-  }
-  console.log(JSON.stringify(outcome.result));
-  process.exit(0);
 }

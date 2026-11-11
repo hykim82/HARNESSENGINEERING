@@ -1,0 +1,313 @@
+{
+  "schemaVersion": 2,
+  "anchorPattern": "claude|codex|sonnet|opus|haiku|fable|gpt-|anthropic|openai",
+  "note": "HYK-153-engine-profile-2 (coder-task.md \u00a72 P2-4/P2-5, owner wording \u00ab literal engine-name only in the config file + registered per-engine modules \u00bb, taken literally): piece B 1R's E1 category (4 rows -- engine-split-rounds.mjs:35, orca-adapter.mjs:2649, seat-candidate-adapter.mjs:281/287) was itself a config-ACCESS-argument literal living in a .mjs file, not inside the config file -- that violates the owner wording just as much as a branch comparison would. This round removed the literal argument from all four call sites (role-based lookup via getEngineByRole(), or iteration over getKnownEngines() where no role maps to the engine in question) so the literal itself is gone; E1 now has zero rows and the category name stays recognized in the schema only for a future genuine case. Separately (P2-5, honesty): piece B 1R had also moved 4 rows (seat-config-inject.mjs:62/246/279, dispatch-worker-modal-check.mjs:26) from B2-TODO to E2 with zero code change, on the precedent of claude-adapter.mjs/codex-adapter.mjs/derive-claude-project-dir-cli.mjs -- but those precedent files all carry the engine name in their own filename (the actual, checkable basis an E2 registered-per-engine-module entry needs), and neither of these two files does. This round reverted those 4 rows to B2-TODO rather than inventing a new basis for the classification (see docs/HYK-153-engine-agnostic.md for the full note; each reverted row's own note links back here). Final categories present: E2 (registered per-engine modules, filename-based precedent only), E5 (out-of-layer Claude-only hooks), B2-TODO (the 4 reverted rows above). E1/E3 have zero rows. E4 (tests/fixtures) stays out of scan scope by construction.",
+  "generatedAt": "2026-11-10",
+  "literalExceptions": [
+    {
+      "file": "scripts/check/codex-snapshot-behavior.mjs",
+      "literal": "runCodexSnapshotBehavior: no PowerShell executable found on PATH -- call findPowerShell() first and skip with a reason instead of calling this",
+      "line": 140,
+      "count": 1,
+      "category": "E2",
+      "note": "엔진별 어댑터·관측 모듈(파일명/역할이 엔진 고유) -- PM 설계 §b E2"
+    },
+    {
+      "file": "scripts/check/codex-snapshot-behavior.mjs",
+      "literal": "codex-snapshot-behavior-",
+      "line": 144,
+      "count": 1,
+      "category": "E2",
+      "note": "엔진별 어댑터·관측 모듈(파일명/역할이 엔진 고유) -- PM 설계 §b E2"
+    },
+    {
+      "file": "scripts/check/codex-snapshot-behavior.mjs",
+      "literal": "$__result = Confirm-GetCodexSnapshot \"",
+      "line": 158,
+      "count": 1,
+      "category": "E2",
+      "note": "엔진별 어댑터·관측 모듈(파일명/역할이 엔진 고유) -- PM 설계 §b E2"
+    },
+    {
+      "file": "scripts/check/codex-snapshot-behavior.mjs",
+      "literal": "icacls not found on PATH -- cannot construct a real permission-denied directory on this Windows host (HYK-286-codex-collect-2 honesty limit: skip, do not crash)",
+      "line": 258,
+      "count": 1,
+      "category": "E2",
+      "note": "엔진별 어댑터·관측 모듈(파일명/역할이 엔진 고유) -- PM 설계 §b E2"
+    },
+    {
+      "file": "scripts/check/control-room-patch-canonical-sync.mjs",
+      "literal": "SHA-256-pinned by 5 OTHER tests (control-room-patch-apply-hyk286-collect/hyk327-wire, dispatch-arg-contract-hyk327-applied-snapshot/snapshot, codex-snapshot-behavior) -- deliberately left at its original (pre-HYK-271) body; the post-HYK-271-synced copy lives in a separate dedicated file (see copies) so this shared one never has to change",
+      "line": 403,
+      "count": 1,
+      "category": "E5",
+      "note": "계층 밖 Claude 전용 훅 목록(selfcheck 축) -- PM 설계 §b E5"
+    },
+    {
+      "file": "scripts/check/dispatch-arg-contract-registry.mjs",
+      "literal": "--claude-home",
+      "line": 184,
+      "count": 1,
+      "category": "E2",
+      "note": "엔진별 어댑터·관측 모듈(파일명/역할이 엔진 고유) -- PM 설계 §b E2"
+    },
+    {
+      "file": "scripts/check/migration-ledger.schema.mjs",
+      "literal": "cycle 0: no transitions, all PRIMARY_CLAUDE",
+      "line": 123,
+      "count": 1,
+      "category": "E5",
+      "note": "계층 밖 Claude 전용 훅 목록(selfcheck 축) -- PM 설계 §b E5"
+    },
+    {
+      "file": "scripts/check/pm-guard.mjs",
+      "literal": "^mcp__(linear-server|claude_ai_Linear)__(save_|create_|delete_)",
+      "line": 24,
+      "count": 1,
+      "category": "E5",
+      "note": "review 1R P2-3: MCP 쓰기 도구 차단 정규식, 'claude_ai_Linear' 안의 'claude' 때문에 적중. 계층 밖 훅 목록(selfcheck 축과 같은 성격) -- PM 설계 §b E5"
+    },
+    {
+      "file": "scripts/check/pm-guard.mjs",
+      "literal": "appdata/local/temp/claude/",
+      "line": 40,
+      "count": 1,
+      "category": "E5",
+      "note": "계층 밖 Claude 전용 훅 목록(selfcheck 축) -- PM 설계 §b E5"
+    },
+    {
+      "file": "scripts/check/seat-config-inject.mjs",
+      "literal": "if [ -z \"$CLAUDE_PROJECT_DIR\" ]; then echo \"role-guard: CLAUDE_PROJECT_DIR is unset/empty -- refusing to fail-open (HYK-462 2R hardening)\" >&2; exit 2; fi; node \"$CLAUDE_PROJECT_DIR/scripts/check/role-guard.mjs\"",
+      "line": 62,
+      "count": 1,
+      "category": "B2-TODO",
+      "note": "HYK-153-engine-profile-2 (P2-5, 정직화): piece B 1R reclassified this B2-TODO row to E2 with zero code change, on the stated precedent of claude-adapter.mjs/codex-adapter.mjs/derive-claude-project-dir-cli.mjs -- but every one of those precedent files carries the engine name in its own filename (the actual, checkable basis an E2 registered-per-engine-module entry needs); seat-config-inject.mjs does not, so that basis does not hold here even though the file's content genuinely is claude-only hook machinery. Not engine-neutral either (the shell snippet is inherently a Claude Code CLAUDE_PROJECT_DIR check, nothing to read from config). Reverted to B2-TODO rather than inventing a new basis -- see docs/HYK-153-engine-agnostic.md for the full note."
+    },
+    {
+      "file": "scripts/check/seat-config-inject.mjs",
+      "literal": ".claude",
+      "line": 246,
+      "count": 1,
+      "category": "B2-TODO",
+      "note": "HYK-153-engine-profile-2 (P2-5, 정직화): same revert and same reason as this file's line 62 row -- see that row's note."
+    },
+    {
+      "file": "scripts/check/seat-config-inject.mjs",
+      "literal": "C:\\\\Users\\\\Administrator\\\\.claude-team",
+      "line": 279,
+      "count": 1,
+      "category": "B2-TODO",
+      "note": "HYK-153-engine-profile-2 (P2-5, 정직화): same revert and same reason as this file's line 62 row -- see that row's note."
+    },
+    {
+      "file": "scripts/check/selfcheck-inventory.mjs",
+      "literal": "' fired under a real Claude runtime event",
+      "line": 181,
+      "count": 1,
+      "category": "E5",
+      "note": "계층 밖 Claude 전용 훅 목록(selfcheck 축) -- PM 설계 §b E5"
+    },
+    {
+      "file": "scripts/check/selfcheck-inventory.mjs",
+      "literal": "' -- Claude-only check cannot be ALIVE from static wiring alone (G9)",
+      "line": 188,
+      "count": 1,
+      "category": "E5",
+      "note": "계층 밖 Claude 전용 훅 목록(selfcheck 축) -- PM 설계 §b E5"
+    },
+    {
+      "file": "scripts/check/selfcheck-inventory.mjs",
+      "literal": "claude-settings",
+      "line": 922,
+      "count": 3,
+      "category": "E5",
+      "note": "계층 밖 Claude 전용 훅 목록(selfcheck 축) -- PM 설계 §b E5. 같은 리터럴이 3곳(922·1092·1344)에 있고 다중집합으로 count=3 고정."
+    },
+    {
+      "file": "scripts/check/selfcheck-inventory.mjs",
+      "literal": "live wiring file '.claude/settings.local.json' is local-only (git-untracked) -- CI has no live wiring to audit here; local weekly selfcheck covers this gap",
+      "line": 1386,
+      "count": 1,
+      "category": "E5",
+      "note": "계층 밖 Claude 전용 훅 목록(selfcheck 축) -- PM 설계 §b E5"
+    },
+    {
+      "file": "scripts/check/selfcheck-inventory.mjs",
+      "literal": ".claude",
+      "line": 1395,
+      "count": 2,
+      "category": "E5",
+      "note": "계층 밖 Claude 전용 훅 목록(selfcheck 축) -- PM 설계 §b E5. 같은 리터럴이 2곳(1395·1427)에 있고 다중집합으로 count=2 고정."
+    },
+    {
+      "file": "scripts/check/selfcheck-inventory.mjs",
+      "literal": "live wiring file '.claude/settings.local.json' is local-only (git-untracked) -- CI has no repo-settings wiring to audit here; local weekly selfcheck covers this gap",
+      "line": 1416,
+      "count": 1,
+      "category": "E5",
+      "note": "계층 밖 Claude 전용 훅 목록(selfcheck 축) -- PM 설계 §b E5"
+    },
+    {
+      "file": "scripts/check/selfcheck-inventory.mjs",
+      "literal": ".claude-team",
+      "line": 1437,
+      "count": 1,
+      "category": "E5",
+      "note": "계층 밖 Claude 전용 훅 목록(selfcheck 축) -- PM 설계 §b E5"
+    },
+    {
+      "file": "scripts/check/selfcheck-report.mjs",
+      "literal": "Claude feedback",
+      "line": 95,
+      "count": 1,
+      "category": "E5",
+      "note": "계층 밖 Claude 전용 훅 목록(selfcheck 축) -- PM 설계 §b E5"
+    },
+    {
+      "file": "scripts/check/selfcheck-report.mjs",
+      "literal": "N/A (temp fixture CLI/logic smoke, not a live Claude Stop canary -- see 한계)",
+      "line": 101,
+      "count": 1,
+      "category": "E5",
+      "note": "계층 밖 Claude 전용 훅 목록(selfcheck 축) -- PM 설계 §b E5"
+    },
+    {
+      "file": "scripts/check/selfcheck.mjs",
+      "literal": "claude-settings",
+      "line": 42,
+      "count": 1,
+      "category": "E5",
+      "note": "계층 밖 Claude 전용 훅 목록(selfcheck 축) -- PM 설계 §b E5"
+    },
+    {
+      "file": "scripts/check/selfcheck.mjs",
+      "literal": "Claude 전용 훅(role-guard·pm-guard·status-fresh·clear-safe-check·linear-sync·controlroom-fresh·context-inject·worker-status-onstart)은 canary 영수증 없이는 ALIVE로 판정하지 않는다(G9) -- 정적 배선만으로 '실제 Claude 런타임이 이 훅을 발화시켰다'를 증명할 수 없기 때문.",
+      "line": 62,
+      "count": 1,
+      "category": "E5",
+      "note": "계층 밖 Claude 전용 훅 목록(selfcheck 축) -- PM 설계 §b E5"
+    },
+    {
+      "file": "scripts/check/selfcheck.mjs",
+      "literal": "이 러너 자체가 Claude Stop/PreToolUse/UserPromptSubmit 이벤트를 실제로 발생시키지 않는다 -- canary 영수증은 별도의 격리 Claude 세션이 생성해야 하며(ORCH 후속 몫), 이 실행은 그 영수증이 있으면 읽고 없으면 UNJUDGABLE로 정직하게 남긴다.",
+      "line": 63,
+      "count": 1,
+      "category": "E5",
+      "note": "계층 밖 Claude 전용 훅 목록(selfcheck 축) -- PM 설계 §b E5"
+    },
+    {
+      "file": "scripts/check/selfcheck.mjs",
+      "literal": "Claude canary receipt dir: ",
+      "line": 81,
+      "count": 1,
+      "category": "E5",
+      "note": "계층 밖 Claude 전용 훅 목록(selfcheck 축) -- PM 설계 §b E5"
+    },
+    {
+      "file": "scripts/check/selfcheck.mjs",
+      "literal": "Claude canary receipt dir: (제공되지 않음 -- 이번 실행은 canary 없이 UNJUDGABLE로 남는 Claude 전용 항목이 있음)",
+      "line": 82,
+      "count": 1,
+      "category": "E5",
+      "note": "계층 밖 Claude 전용 훅 목록(selfcheck 축) -- PM 설계 §b E5"
+    },
+    {
+      "file": "scripts/relay/claude-adapter.mjs",
+      "literal": "claude",
+      "line": 72,
+      "count": 1,
+      "category": "E2",
+      "note": "엔진별 어댑터·관측 모듈(파일명/역할이 엔진 고유) -- PM 설계 §b E2"
+    },
+    {
+      "file": "scripts/relay/codex-adapter.mjs",
+      "literal": "codex",
+      "line": 54,
+      "count": 1,
+      "category": "E2",
+      "note": "엔진별 어댑터·관측 모듈(파일명/역할이 엔진 고유) -- PM 설계 §b E2"
+    },
+    {
+      "file": "scripts/relay/dispatch-worker-modal-check.mjs",
+      "literal": "No, and tell Claude what to do differently",
+      "line": 26,
+      "count": 1,
+      "category": "B2-TODO",
+      "note": "HYK-153-engine-profile-2 (P2-5, 정직화): piece B 1R reclassified this B2-TODO row to E2 with zero code change, citing claude-adapter.mjs/codex-adapter.mjs as precedent -- but those files carry the engine name in their own filename (the checkable basis an E2 registered-per-engine-module entry needs) and dispatch-worker-modal-check.mjs does not, so the precedent doesn't actually transfer even though the content genuinely is Claude-only modal text. Not engine-neutral either (MODAL_MARKERS is a hand-authored literal catalog, not something to read from config). Reverted to B2-TODO -- see docs/HYK-153-engine-agnostic.md for the full note."
+    },
+    {
+      "file": "scripts/supervisor/derive-claude-project-dir-cli.mjs",
+      "literal": "usage: node scripts/supervisor/derive-claude-project-dir-cli.mjs <worktree-abs-path> [--json]",
+      "line": 39,
+      "count": 1,
+      "category": "E2",
+      "note": "엔진별 어댑터·관측 모듈(파일명/역할이 엔진 고유) -- PM 설계 §b E2"
+    },
+    {
+      "file": "scripts/supervisor/derive-claude-project-dir-cli.mjs",
+      "literal": "scripts/supervisor/derive-claude-project-dir-cli.mjs",
+      "line": 47,
+      "count": 1,
+      "category": "E2",
+      "note": "엔진별 어댑터·관측 모듈(파일명/역할이 엔진 고유) -- PM 설계 §b E2"
+    },
+    {
+      "file": "scripts/supervisor/derive-claude-project-dir-cli.mjs",
+      "literal": "derive-claude-project-dir-cli: 사유 코드=",
+      "line": 64,
+      "count": 1,
+      "category": "E2",
+      "note": "엔진별 어댑터·관측 모듈(파일명/역할이 엔진 고유) -- PM 설계 §b E2"
+    },
+    {
+      "file": "scripts/supervisor/dispatch-start-confirm-cli.mjs",
+      "literal": ".claude",
+      "line": 133,
+      "count": 1,
+      "category": "E2",
+      "note": "엔진별 어댑터·관측 모듈(파일명/역할이 엔진 고유) -- PM 설계 §b E2"
+    },
+    {
+      "file": "scripts/supervisor/dispatch-start-confirm-cli.mjs",
+      "literal": "이것은 «착수 안 했다»는 뜻이 «아닙니다» -- 폴더 이름 파생 규칙이 실제 폴더와 어긋났거나 그 밖의 사유로 관측 경로 자체가 그 폴더를 못 찾았을 수 있습니다. 자동 재시도는 하지 않습니다 -- 사람이 관측 경로(예: --claude-home)를 직접 확인해 주십시오(이 상태만으로 자동으로 다시 배달하지 않습니다).",
+      "line": 184,
+      "count": 1,
+      "category": "E2",
+      "note": "엔진별 어댑터·관측 모듈(파일명/역할이 엔진 고유) -- PM 설계 §b E2"
+    },
+    {
+      "file": "scripts/supervisor/dispatch-start-confirm-cli.mjs",
+      "literal": "--claude-home",
+      "line": 614,
+      "count": 1,
+      "category": "E2",
+      "note": "엔진별 어댑터·관측 모듈(파일명/역할이 엔진 고유) -- PM 설계 §b E2"
+    },
+    {
+      "file": "scripts/supervisor/dispatch-start-confirm-cli.mjs",
+      "literal": "usage: dispatch-start-confirm-cli.mjs --repo-root <path> --dispatched-at-ms <epoch-ms> --notify-dir <path> [--task-id <id>] [--claude-home <path>] [--baseline-bytes <n>] [--timeout-ms <n>] [--stall-threshold-ms <n>] [--poll-interval-ms <n>]",
+      "line": 632,
+      "count": 1,
+      "category": "E2",
+      "note": "엔진별 어댑터·관측 모듈(파일명/역할이 엔진 고유) -- PM 설계 §b E2"
+    },
+    {
+      "file": "scripts/supervisor/orch-stall-detect.mjs",
+      "literal": ".claude-team",
+      "line": 2195,
+      "count": 1,
+      "category": "E2",
+      "note": "엔진별 어댑터·관측 모듈(파일명/역할이 엔진 고유) -- PM 설계 §b E2"
+    },
+    {
+      "file": "scripts/supervisor/rate-limit-stall-wire.mjs",
+      "literal": ".claude",
+      "line": 43,
+      "count": 1,
+      "category": "E2",
+      "note": "엔진별 어댑터·관측 모듈(파일명/역할이 엔진 고유) -- PM 설계 §b E2"
+    }
+  ],
+  "branchLiteralBaseline": []
+}

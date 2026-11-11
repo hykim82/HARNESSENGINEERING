@@ -1029,6 +1029,7 @@ test("HYK-376: relayStep -> runDeliverStage -> production deliverTask (REVIEW/co
         capabilities: READINESS_CAPS,
         existingSeatHandle: "term_ready",
         confirmPastedFn: () => true,
+        engineOverrideForTests: "codex",
       },
     );
     assert.equal(r.ok, false);
@@ -1068,6 +1069,7 @@ test("HYK-376: relayStep -> runDeliverStage -> production deliverTask (REVIEW/co
       capabilities: READINESS_CAPS,
       existingSeatHandle: "term_ready",
       confirmPastedFn: () => true,
+      engineOverrideForTests: "codex",
     };
     const optsProxy = new Proxy(optsTarget, {
       has(target, prop) {

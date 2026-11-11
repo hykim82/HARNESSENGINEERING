@@ -10,7 +10,19 @@ import {
   detectSeatEngine,
   resolveSeatEngine,
   runSeatEngineDetectCli,
+  EXIT_CODE,
 } from "./seat-engine-detect.mjs";
+
+// Pinned literal, NOT read from EXIT_CODE.CONFIG_LOAD_FAILED -- if this
+// constant drifted from 3, importing it here would make every P2-E test
+// below track the drift silently instead of going red (mutation ②,
+// coder-task.md §2 ⓓ: "종료코드 3 -> 다른 값 -> RED" requires the test to
+// pin the value 3 independently of the module that can change it).
+const EXIT_CODE_CONFIG_LOAD_FAILED = 3;
+
+test("P2-E: EXIT_CODE.CONFIG_LOAD_FAILED is pinned at 3 (documented exit code, coder-task.md §2 ⓘⓘⓘ)", () => {
+  assert.equal(EXIT_CODE.CONFIG_LOAD_FAILED, 3);
+});
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const SCRIPT_PATH = join(
@@ -210,5 +222,146 @@ test("★CLI refusal (anti-vacuity): the SAME codex banner that resolves OK exit
       { encoding: "utf8" },
     );
     assert.equal(JSON.parse(stdout.trim()).engine, "codex");
+  });
+});
+
+// ---- P2-E (review-4 §3): engine-profiles.json config-failure -> exit 3,
+// and the --help path reports the SAME specific reason as the execution
+// path (not the generic ENGINE_PROFILE_CONFIG_FAILURE_REASON) ----
+//
+// These drive the real CLI entrypoint (production import path) against a
+// synthetic broken config via the HARNESS_ENGINE_PROFILES_PATH seam
+// (engine-profile.mjs) -- never the real shared engine-profiles.json.
+function withSyntheticConfigFile(content, fn) {
+  return withTempDir((dir) => {
+    const file = join(dir, "engine-profiles.json");
+    writeFileSync(file, content, "utf8");
+    return fn(file);
+  });
+}
+
+function runCliWithConfig(configPath, args) {
+  let thrown = null;
+  let stdout = "";
+  try {
+    stdout = execFileSync(process.execPath, [SCRIPT_PATH, ...args], {
+      encoding: "utf8",
+      env: { ...process.env, HARNESS_ENGINE_PROFILES_PATH: configPath },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+  } catch (err) {
+    thrown = err;
+  }
+  return { thrown, stdout };
+}
+
+test("P2-E: broken JSON config -> exit 3 with reason CONFIG_FILE_INVALID_JSON on the execution path", () => {
+  withSyntheticConfigFile("{ not valid json", (configPath) => {
+    const { thrown } = runCliWithConfig(configPath, [
+      "--role",
+      "CODER",
+      "--preview",
+      "x",
+    ]);
+    assert.ok(thrown, "broken JSON config must not exit 0");
+    assert.equal(thrown.status, EXIT_CODE_CONFIG_LOAD_FAILED);
+    assert.match(thrown.stderr, /FAILED reason=CONFIG_FILE_INVALID_JSON/);
+  });
+});
+
+test("P2-E: broken JSON config -> the --help path reports the SAME specific reason (CONFIG_FILE_INVALID_JSON), not the generic ENGINE_PROFILE_CONFIG_FAILURE", () => {
+  withSyntheticConfigFile("{ not valid json", (configPath) => {
+    const { thrown } = runCliWithConfig(configPath, ["--help"]);
+    assert.ok(thrown, "--help on a broken config must not exit 0");
+    assert.equal(thrown.status, EXIT_CODE_CONFIG_LOAD_FAILED);
+    assert.match(thrown.stderr, /FAILED reason=CONFIG_FILE_INVALID_JSON/);
+    assert.doesNotMatch(
+      thrown.stderr,
+      /FAILED reason=ENGINE_PROFILE_CONFIG_FAILURE/,
+      "--help must not collapse to the generic reason when the specific one is known",
+    );
+  });
+});
+
+test("P2-E: schema-invalid config (bad deliveryMode) -> exit 3 reason CONFIG_SCHEMA_INVALID on both the execution path and --help", () => {
+  const schemaInvalid = JSON.stringify({
+    engines: {
+      claude: {
+        deliveryMode: "sideways",
+        homeDirName: null,
+        modelFamilyPatterns: {},
+        agentMarkerWords: [],
+      },
+    },
+    bannerMarkerPatterns: {
+      orcaAdapterAgentMarker: "x",
+      seatCensusAgentBanner: "y",
+    },
+    roles: { CODER: { engine: "claude", model: "m", effort: "high" } },
+  });
+  withSyntheticConfigFile(schemaInvalid, (configPath) => {
+    const exec = runCliWithConfig(configPath, [
+      "--role",
+      "CODER",
+      "--preview",
+      "x",
+    ]);
+    assert.equal(exec.thrown.status, EXIT_CODE_CONFIG_LOAD_FAILED);
+    assert.match(exec.thrown.stderr, /FAILED reason=CONFIG_SCHEMA_INVALID/);
+
+    const help = runCliWithConfig(configPath, ["--help"]);
+    assert.equal(help.thrown.status, EXIT_CODE_CONFIG_LOAD_FAILED);
+    assert.match(help.thrown.stderr, /FAILED reason=CONFIG_SCHEMA_INVALID/);
+  });
+});
+
+test("P2-E: missing config file -> exit 3 reason CONFIG_FILE_UNREADABLE on both the execution path and --help", () => {
+  withTempDir((dir) => {
+    const configPath = join(dir, "does-not-exist.json");
+    const exec = runCliWithConfig(configPath, [
+      "--role",
+      "CODER",
+      "--preview",
+      "x",
+    ]);
+    assert.equal(exec.thrown.status, EXIT_CODE_CONFIG_LOAD_FAILED);
+    assert.match(exec.thrown.stderr, /FAILED reason=CONFIG_FILE_UNREADABLE/);
+
+    const help = runCliWithConfig(configPath, ["--help"]);
+    assert.equal(help.thrown.status, EXIT_CODE_CONFIG_LOAD_FAILED);
+    assert.match(help.thrown.stderr, /FAILED reason=CONFIG_FILE_UNREADABLE/);
+  });
+});
+
+test("P2-E (anti-vacuity): a well-formed synthetic config loads cleanly on both paths -- exit 3 above is caused by the broken config, not the CLI being broken", () => {
+  const ok = JSON.stringify({
+    engines: {
+      claude: {
+        deliveryMode: "inject",
+        homeDirName: ".claude",
+        modelFamilyPatterns: { sonnet: "sonnet", opus: "opus" },
+        agentMarkerWords: [],
+        previewMarkerPattern: "Sonnet|Opus",
+      },
+    },
+    bannerMarkerPatterns: {
+      orcaAdapterAgentMarker: "x",
+      seatCensusAgentBanner: "y",
+    },
+    roles: { CODER: { engine: "claude", model: "m", effort: "high" } },
+  });
+  withSyntheticConfigFile(ok, (configPath) => {
+    const exec = runCliWithConfig(configPath, [
+      "--role",
+      "CODER",
+      "--preview",
+      "Opus 5",
+    ]);
+    assert.equal(exec.thrown, null);
+    assert.equal(JSON.parse(exec.stdout.trim()).engine, "claude");
+
+    const help = runCliWithConfig(configPath, ["--help"]);
+    assert.equal(help.thrown, null);
+    assert.match(help.stdout, /^Usage:/);
   });
 });

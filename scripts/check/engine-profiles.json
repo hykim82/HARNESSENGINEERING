@@ -1,0 +1,50 @@
+{
+  "schemaVersion": 1,
+  "note": "HYK-153-engine-profile-1 (piece B, coder-task.md §2): single config point for role defaults (engine/model/effort) and the per-engine attributes that production code used to branch on by literal engine name. `config/` is not an installer-copied top-level folder (templates/harness-init/install.mjs has no top-level `config/` copy list, grep-verified before this round) so this file lives beside its reader engine-profile.mjs under scripts/check/ instead -- not scripts/relay/, where it was first written: eslint.config.mjs's no-restricted-imports rule makes scripts/relay/* a one-way sink (nothing outside scripts/relay/ may import from it), so a module consumed by both scripts/check/* and scripts/relay/* files has to live on the check side.",
+  "engines": {
+    "claude": {
+      "deliveryMode": "inject",
+      "homeDirName": ".claude",
+      "teamDirName": ".claude-team",
+      "cliHomeFlag": "--claude-home",
+      "previewMarkerPattern": "Sonnet|Opus|Fable|bypass permissions",
+      "agentMarkerWords": ["Sonnet", "Opus", "Haiku"],
+      "modelFamilyPatterns": { "sonnet": "sonnet", "opus": "opus" }
+    },
+    "codex": {
+      "deliveryMode": "no-inject",
+      "homeDirName": null,
+      "teamDirName": null,
+      "cliHomeFlag": null,
+      "previewMarkerPattern": "gpt-5\\.6",
+      "agentMarkerWords": ["gpt-5.6", "codex"],
+      "modelFamilyPatterns": {}
+    }
+  },
+  "bannerMarkerPatterns": {
+    "orcaAdapterAgentMarker": "gpt-5\\.6|Sonnet|Opus|\\[CODER seat\\]|\\[REVIEW seat\\]|bypass permissions|MCP startup|weekly \\d",
+    "seatCensusAgentBanner": "gpt-5\\.6|Sonnet|Opus|Fable|\\[CODER\\]|\\[REVIEW\\]|bypass permissions|MCP startup|weekly \\d"
+  },
+  "roles": {
+    "CODER": {
+      "engine": "claude",
+      "model": "claude-sonnet-5",
+      "effort": "high"
+    },
+    "REVIEW": {
+      "engine": "claude",
+      "model": "claude-opus-5-5",
+      "effort": "high"
+    },
+    "VERIFY": {
+      "engine": "claude",
+      "model": "claude-sonnet-5",
+      "effort": "high"
+    },
+    "PM": {
+      "engine": "claude",
+      "model": "claude-opus-5-5",
+      "effort": "high"
+    }
+  }
+}

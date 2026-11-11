@@ -529,7 +529,7 @@ function startAndFinishStage(
     );
     return denyResult("adapter_missing", REASON.ADAPTER_MISSING, {
       detail:
-        "pull-supervisor: opts.adapterFn is required (inject fake -- real Claude/codex CLI is cycle3 scope)",
+        "pull-supervisor: opts.adapterFn is required (inject fake -- real engine CLI adapters are cycle3 scope)",
       jtiConsumed: true,
       armClaimed: true,
       armTerminal,
