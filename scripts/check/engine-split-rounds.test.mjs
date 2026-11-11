@@ -706,9 +706,20 @@ test("P2-A: CODER engine with an empty-string modelFamilyPatterns.opus value ref
         thrown = err;
       }
       assert.ok(thrown, "empty modelFamilyPatterns.opus must not load");
+      // HYK-153-engine-profile-4 (coder-task.md §2 product_scope ⓘ, string
+      // anchor sync per ORCH70 §33 ⓑ): this exact empty-string-VALUE case
+      // is now caught centrally by engine-profile.mjs's schema validation
+      // (converged per coder-task.md §2 -- see engine-profile.test.mjs's
+      // own pin on this message) before engine-split-rounds.mjs's
+      // module-local requireFamilyPatterns ever runs, so the thrown
+      // message's wording changed; the missing-KEY case right above this
+      // test is untouched (requireFamilyPatterns still catches that one --
+      // engine-profile.mjs's schema check only validates the VALUE of
+      // whatever keys are present, it does not require "sonnet"/"opus" to
+      // exist).
       assert.match(
         String(thrown.stderr),
-        /engines\.codex\.modelFamilyPatterns\.opus is missing or empty/,
+        /engines\.codex\.modelFamilyPatterns\.opus must be a non-empty string/,
       );
     },
   );

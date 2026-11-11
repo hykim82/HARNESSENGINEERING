@@ -437,3 +437,272 @@ test("getEngineByRole: adding PM does not change CODER/REVIEW/VERIFY's resolved 
   assert.equal(byRole.VERIFY, "claude");
   assert.equal(byRole.PM, "claude");
 });
+
+// ---- HYK-153-engine-profile-4 (coder-task.md §2 product_scope ⓘ): close
+// the whole "empty config value" family in the one schema-validation place
+// -- empty string / blank-only string / empty array element, for every key
+// production code actually consumes. Missing-key presence rules above
+// (homeDirName/modelFamilyPatterns/agentMarkerWords/bannerMarkerPatterns)
+// are unchanged; these tests are about a key being PRESENT but carrying an
+// empty or whitespace-only value, which used to load cleanly and only bite
+// a consumer later (e.g. seat-candidate-adapter.mjs's
+// `CLAUDE_AGENT_MARKERS.some((m) => text.includes(m))` -- an empty-string
+// marker makes `text.includes("")` true for every text, so
+// agentMarkerWords: [""] silently turned "any seat output" into "this is
+// an agent", confirmed by direct probe against this exact config shape
+// before this round's fix).
+
+test("loadEngineProfiles: agentMarkerWords containing an empty-string or whitespace-only element is CONFIG_SCHEMA_INVALID -- text.includes('') matches everything, so this must not load silently", () => {
+  withTempConfig(
+    JSON.stringify({
+      engines: {
+        claude: fullEngineBlock("inject", { agentMarkerWords: ["Sonnet", ""] }),
+      },
+      bannerMarkerPatterns: fullBannerMarkerPatterns(),
+      roles: { CODER: { engine: "claude", model: "m", effort: "high" } },
+    }),
+    (file) => {
+      assert.throws(
+        () => loadEngineProfiles(file),
+        (err) =>
+          err.reason === ENGINE_PROFILE_LOAD_REASON.CONFIG_SCHEMA_INVALID &&
+          /agentMarkerWords\[1\] must be a non-empty string/.test(err.message),
+      );
+    },
+  );
+  withTempConfig(
+    JSON.stringify({
+      engines: {
+        claude: fullEngineBlock("inject", { agentMarkerWords: ["   "] }),
+      },
+      bannerMarkerPatterns: fullBannerMarkerPatterns(),
+      roles: { CODER: { engine: "claude", model: "m", effort: "high" } },
+    }),
+    (file) => {
+      assert.throws(
+        () => loadEngineProfiles(file),
+        (err) =>
+          err.reason === ENGINE_PROFILE_LOAD_REASON.CONFIG_SCHEMA_INVALID,
+      );
+    },
+  );
+});
+
+test("loadEngineProfiles: an empty agentMarkerWords array ([]) still loads fine -- zero markers is safe (text.includes never called), unlike a zero-length element", () => {
+  withTempConfig(
+    JSON.stringify({
+      engines: {
+        claude: fullEngineBlock("inject", { agentMarkerWords: [] }),
+      },
+      bannerMarkerPatterns: fullBannerMarkerPatterns(),
+      roles: { CODER: { engine: "claude", model: "m", effort: "high" } },
+    }),
+    (file) => {
+      assert.doesNotThrow(() => loadEngineProfiles(file));
+    },
+  );
+});
+
+test("loadEngineProfiles: a modelFamilyPatterns value that is an empty string or whitespace-only is CONFIG_SCHEMA_INVALID, centrally -- not only when engine-split-rounds.mjs's own consumer-side guard happens to run (B3 review-4 P2-A, converged into this one schema place per coder-task.md §2 product_scope ⓘ)", () => {
+  withTempConfig(
+    JSON.stringify({
+      engines: {
+        claude: fullEngineBlock("inject", {
+          modelFamilyPatterns: { sonnet: "sonnet", opus: "" },
+        }),
+      },
+      bannerMarkerPatterns: fullBannerMarkerPatterns(),
+      roles: { CODER: { engine: "claude", model: "m", effort: "high" } },
+    }),
+    (file) => {
+      assert.throws(
+        () => loadEngineProfiles(file),
+        (err) =>
+          err.reason === ENGINE_PROFILE_LOAD_REASON.CONFIG_SCHEMA_INVALID &&
+          /modelFamilyPatterns\.opus must be a non-empty string/.test(
+            err.message,
+          ),
+      );
+    },
+  );
+  withTempConfig(
+    JSON.stringify({
+      engines: {
+        claude: fullEngineBlock("inject", {
+          modelFamilyPatterns: { sonnet: "  " },
+        }),
+      },
+      bannerMarkerPatterns: fullBannerMarkerPatterns(),
+      roles: { CODER: { engine: "claude", model: "m", effort: "high" } },
+    }),
+    (file) => {
+      assert.throws(
+        () => loadEngineProfiles(file),
+        (err) =>
+          err.reason === ENGINE_PROFILE_LOAD_REASON.CONFIG_SCHEMA_INVALID,
+      );
+    },
+  );
+});
+
+test("loadEngineProfiles: an empty modelFamilyPatterns object ({}) still loads fine -- codex's real config carries this today, and no consumer presupposes a non-empty object (only presupposes non-empty VALUES for whichever keys are present)", () => {
+  withTempConfig(
+    JSON.stringify({
+      engines: {
+        claude: fullEngineBlock("inject", { modelFamilyPatterns: {} }),
+      },
+      bannerMarkerPatterns: fullBannerMarkerPatterns(),
+      roles: { CODER: { engine: "claude", model: "m", effort: "high" } },
+    }),
+    (file) => {
+      assert.doesNotThrow(() => loadEngineProfiles(file));
+    },
+  );
+});
+
+test("loadEngineProfiles: homeDirName present but an empty string or whitespace-only is CONFIG_SCHEMA_INVALID -- distinct from the deliberate null codex uses for 'no home dir'", () => {
+  withTempConfig(
+    JSON.stringify({
+      engines: { claude: fullEngineBlock("inject", { homeDirName: "" }) },
+      bannerMarkerPatterns: fullBannerMarkerPatterns(),
+      roles: { CODER: { engine: "claude", model: "m", effort: "high" } },
+    }),
+    (file) => {
+      assert.throws(
+        () => loadEngineProfiles(file),
+        (err) =>
+          err.reason === ENGINE_PROFILE_LOAD_REASON.CONFIG_SCHEMA_INVALID &&
+          /homeDirName must be null or a non-empty string/.test(err.message),
+      );
+    },
+  );
+  withTempConfig(
+    JSON.stringify({
+      engines: { claude: fullEngineBlock("inject", { homeDirName: "  " }) },
+      bannerMarkerPatterns: fullBannerMarkerPatterns(),
+      roles: { CODER: { engine: "claude", model: "m", effort: "high" } },
+    }),
+    (file) => {
+      assert.throws(
+        () => loadEngineProfiles(file),
+        (err) =>
+          err.reason === ENGINE_PROFILE_LOAD_REASON.CONFIG_SCHEMA_INVALID,
+      );
+    },
+  );
+  // null is still the correct, required way to say "no home dir" (codex).
+  withTempConfig(
+    JSON.stringify({
+      engines: { claude: fullEngineBlock("inject", { homeDirName: null }) },
+      bannerMarkerPatterns: fullBannerMarkerPatterns(),
+      roles: { CODER: { engine: "claude", model: "m", effort: "high" } },
+    }),
+    (file) => {
+      assert.doesNotThrow(() => loadEngineProfiles(file));
+    },
+  );
+});
+
+test("loadEngineProfiles: previewMarkerPattern, when present, must be a non-empty/non-blank string -- an empty value would silently and permanently never match (matchEngineByPreviewMarkers already guards isNonEmptyString at the call site, but a present-and-empty value should be a reasoned load-time refusal, not a quietly-unreachable engine)", () => {
+  withTempConfig(
+    JSON.stringify({
+      engines: {
+        claude: fullEngineBlock("inject", { previewMarkerPattern: "" }),
+      },
+      bannerMarkerPatterns: fullBannerMarkerPatterns(),
+      roles: { CODER: { engine: "claude", model: "m", effort: "high" } },
+    }),
+    (file) => {
+      assert.throws(
+        () => loadEngineProfiles(file),
+        (err) =>
+          err.reason === ENGINE_PROFILE_LOAD_REASON.CONFIG_SCHEMA_INVALID &&
+          /previewMarkerPattern must be a non-empty string/.test(err.message),
+      );
+    },
+  );
+  // absent entirely is still fine -- this key is optional (an engine may
+  // legitimately not participate in preview-marker detection).
+  withTempConfig(
+    JSON.stringify({
+      engines: { claude: fullEngineBlock("inject") },
+      bannerMarkerPatterns: fullBannerMarkerPatterns(),
+      roles: { CODER: { engine: "claude", model: "m", effort: "high" } },
+    }),
+    (file) => {
+      assert.doesNotThrow(() => loadEngineProfiles(file));
+    },
+  );
+});
+
+test("loadEngineProfiles: bannerMarkerPatterns required values that are whitespace-only are CONFIG_SCHEMA_INVALID, not just a length check (closes the gap next to B2's isNonEmptyString)", () => {
+  withTempConfig(
+    JSON.stringify({
+      engines: { claude: fullEngineBlock("inject") },
+      bannerMarkerPatterns: fullBannerMarkerPatterns({
+        orcaAdapterAgentMarker: "   ",
+      }),
+      roles: { CODER: { engine: "claude", model: "m", effort: "high" } },
+    }),
+    (file) => {
+      assert.throws(
+        () => loadEngineProfiles(file),
+        (err) =>
+          err.reason === ENGINE_PROFILE_LOAD_REASON.CONFIG_SCHEMA_INVALID,
+      );
+    },
+  );
+});
+
+test("loadEngineProfiles: roles.<role>.model/effort that are whitespace-only are CONFIG_SCHEMA_INVALID, not just empty-length (closes the same gap for role fields)", () => {
+  withTempConfig(
+    JSON.stringify({
+      engines: { claude: fullEngineBlock("inject") },
+      bannerMarkerPatterns: fullBannerMarkerPatterns(),
+      roles: { CODER: { engine: "claude", model: "   ", effort: "high" } },
+    }),
+    (file) => {
+      assert.throws(
+        () => loadEngineProfiles(file),
+        (err) =>
+          err.reason === ENGINE_PROFILE_LOAD_REASON.CONFIG_SCHEMA_INVALID,
+      );
+    },
+  );
+  withTempConfig(
+    JSON.stringify({
+      engines: { claude: fullEngineBlock("inject") },
+      bannerMarkerPatterns: fullBannerMarkerPatterns(),
+      roles: { CODER: { engine: "claude", model: "m", effort: "   " } },
+    }),
+    (file) => {
+      assert.throws(
+        () => loadEngineProfiles(file),
+        (err) =>
+          err.reason === ENGINE_PROFILE_LOAD_REASON.CONFIG_SCHEMA_INVALID,
+      );
+    },
+  );
+});
+
+// ---- P2-2 (coder-task.md §2 product_scope ⓘⓘ): HARNESS_ENGINE_PROFILES_PATH
+// self-report -- the loaded result object always carries the path actually
+// used, so a caller reading a non-default (injected) config has one place
+// to see that fact without re-deriving it from the env var itself.
+
+test("loadEngineProfiles: the returned object carries configPathUsed -- the exact path argument it loaded (default or injected)", () => {
+  assert.equal(
+    loadEngineProfiles().configPathUsed,
+    DEFAULT_ENGINE_PROFILES_PATH,
+  );
+  withTempConfig(
+    JSON.stringify({
+      engines: { claude: fullEngineBlock("inject") },
+      bannerMarkerPatterns: fullBannerMarkerPatterns(),
+      roles: { CODER: { engine: "claude", model: "m", effort: "high" } },
+    }),
+    (file) => {
+      assert.equal(loadEngineProfiles(file).configPathUsed, file);
+    },
+  );
+});
