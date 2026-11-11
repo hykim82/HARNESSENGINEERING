@@ -769,14 +769,54 @@ function p1SelfReclaimDeadlockChildScript() {
   ].join("\n");
 }
 
+// product_scope ⓘⓘⓘ(P1-1 사망 사유): 수리 전에는 `stdio: "ignore"` +
+// `exit` + reject라, 자식이 outPath를 쓰기 전에 죽으면(비정상 종료)
+// readJsonWithRetry가 그냥 ENOENT를 던져 "C1/C2 중 어느 쪽이 왜" 죽었는지
+// 실패 메시지에 전혀 안 남았다 -- §10b/§10b-2 모든 칸과
+// spawnLongWaitChild(이 파일 아래)가 이미 받은 처방(stderr 파이프 +
+// `close`(exit가 아님, P2-2 근거 그대로) + exitCode/signal/
+// spawnErrorMessage/readErrorMessage)과 같은 모양으로 맞춘다. reject가
+// 아니라 enriched 객체로 resolve해 -- 호출부(:810대)의 기존
+// `JSON.stringify(a)`/`JSON.stringify(b)` 단언 메시지가 이 진단을 그대로
+// 싣는다. `acquired`/`timedOut`/`reclaimedOrphan`/`selfBranchHit`는
+// missingOutput 경로에서도 명시값(false)을 돌려 호출부가 이미 읽는
+// 필드들이 undefined가 되지 않게 한다 -- 어떤 단언도 약화하지 않는다.
 function spawnP1Child({ scriptPath, args }) {
-  return new Promise((resolve, reject) => {
+  const startMs = Date.now();
+  return new Promise((resolve) => {
+    let stderrChunks = "";
+    let spawnErrorMessage = null;
     const child = spawn(process.execPath, [scriptPath, ...args], {
-      stdio: "ignore",
+      stdio: ["ignore", "ignore", "pipe"],
       env: cleanEnv(),
     });
-    child.on("exit", () => {
-      readJsonWithRetry(args[1]).then(resolve, reject);
+    child.stderr.on("data", (chunk) => {
+      stderrChunks += chunk.toString("utf8");
+    });
+    child.on("error", (err) => {
+      spawnErrorMessage = err?.message ?? String(err);
+    });
+    child.on("close", (exitCode, signal) => {
+      const elapsedMs = Date.now() - startMs;
+      const stderrTail = stderrChunks.slice(-STDERR_TAIL_CHARS);
+      readJsonWithRetry(args[1]).then(
+        (parsed) =>
+          resolve({ ...parsed, exitCode, signal, elapsedMs, stderrTail }),
+        (readErr) =>
+          resolve({
+            acquired: false,
+            timedOut: false,
+            reclaimedOrphan: false,
+            selfBranchHit: false,
+            missingOutput: true,
+            exitCode,
+            signal,
+            spawnErrorMessage,
+            readErrorMessage: readErr?.message ?? String(readErr),
+            elapsedMs,
+            stderrTail,
+          }),
+      );
     });
   });
 }
@@ -1567,14 +1607,50 @@ test("installLockReleaseOnSignal: release() throwing still exits (best-effort --
 // 생성자와 같은 기법, 예: RUNNER_LOCK_URL). GREEN 칸의 wallMs>=450 단언은
 // holdMs(250ms×2)만으로 성립하므로(:1611 부근) 이 상한 증가로 깨지지
 // 않는다 -- 상한은 "굶었을 때만" 소진된다.
+// product_scope ⓘ: the pre-fix version assumed the OS would schedule both
+// `spawn()` calls (and each child's own process startup) close enough
+// together that each child's holdMs window would still overlap the
+// other's -- i.e. actual start skew < holdMs. Under a loaded machine (the
+// exact CI-sweep conditions #358/#359/#360 already had to harden the
+// other real-child cells against), that assumption can break: if one
+// child is actually scheduled 400ms+ later than the other, its hold
+// window only begins AFTER the first child has already released, and
+// overlap is 0 even though no lock exists at all (RED-first, 〔직접〕:
+// this round, injecting the START_SKEW_SEAM_MS gap below between the two
+// spawn() calls against the pre-fix script reproduces exactly this --
+// overlap<=0, baseline goes red -- 결과 파일 §1 참고). Fixed the same way
+// the P1-1/3-way reclaim cells already removed their own fixed-wait races
+// in this file (HYK-498 §2 ⓘⓘⓘ, the c1SignalPath/waitForFileToExist
+// precedent below): each child writes its OWN ready marker immediately on
+// start, then BLOCKS until the OTHER child's ready marker exists, before
+// ever reading the clock for its hold window -- so both hold windows
+// always begin together (bounded only by the 5ms poll below), no matter
+// how late either process was actually scheduled to start. `readyPath`/
+// `counterpartReadyPath` default to "" (rendezvous skipped) so the GREEN
+// (locked) cell below -- which never had this problem, since the lock
+// itself already serializes the two children regardless of start skew --
+// keeps its exact prior behavior untouched.
 function lockRaceChildScript() {
   return [
     `import { acquireRunnerLock, releaseRunnerLock } from ${JSON.stringify(RUNNER_LOCK_URL)};`,
-    `import { writeFileSync, appendFileSync } from "node:fs";`,
+    `import { existsSync, writeFileSync, appendFileSync } from "node:fs";`,
     `const lockPath = process.argv[1];`,
     `const holdMs = Number(process.argv[2]);`,
     `const outPath = process.argv[3];`,
     `const noLock = process.argv[4] === "1";`,
+    `const readyPath = process.argv[5] || "";`,
+    `const counterpartReadyPath = process.argv[6] || "";`,
+    `const rendezvousTimeoutMs = Number(process.argv[7] || 0);`,
+    `if (readyPath) {`,
+    `  writeFileSync(readyPath, "1");`,
+    `  const rendezvousStartMs = Date.now();`,
+    `  while (!existsSync(counterpartReadyPath)) {`,
+    `    if (Date.now() - rendezvousStartMs > rendezvousTimeoutMs) {`,
+    `      throw new Error(\`rendezvous timeout waiting for \${counterpartReadyPath} after \${rendezvousTimeoutMs}ms\`);`,
+    `    }`,
+    `    await new Promise((res) => setTimeout(res, 5));`,
+    `  }`,
+    `}`,
     `let r = { waitMs: 0, pollCount: 0, reclaimedOrphan: false, nested: false, lockId: null };`,
     `if (!noLock) r = acquireRunnerLock({ lockPath, pollIntervalMs: 15, timeoutMs: ${GENEROUS_EVENTUAL_ACQUIRE_TIMEOUT_MS} });`,
     `const acquiredAtMs = Date.now();`,
@@ -1586,7 +1662,15 @@ function lockRaceChildScript() {
   ].join("\n");
 }
 
-function spawnRaceChild({ lockPath, holdMs, outPath, noLock }) {
+function spawnRaceChild({
+  lockPath,
+  holdMs,
+  outPath,
+  noLock,
+  readyPath = "",
+  counterpartReadyPath = "",
+  rendezvousTimeoutMs = 0,
+}) {
   return new Promise((resolve) => {
     const child = spawn(
       process.execPath,
@@ -1599,6 +1683,9 @@ function spawnRaceChild({ lockPath, holdMs, outPath, noLock }) {
         String(holdMs),
         outPath,
         noLock ? "1" : "0",
+        readyPath,
+        counterpartReadyPath,
+        String(rendezvousTimeoutMs),
       ],
       { stdio: "ignore", env: cleanEnv() },
     );
@@ -1611,16 +1698,43 @@ function readRaceOutput(outPath) {
   return { ...JSON.parse(first), ...JSON.parse(second) };
 }
 
+// product_scope ⓘ seam (kept permanently, not a one-off probe): a real
+// gap between literally calling spawn() for child 1 and for child 2 --
+// this is the exact start-skew shape a loaded CI box can produce on its
+// own, forced here deterministically rather than hoped for, so this cell
+// keeps proving the rendezvous fix above under the exact skew that broke
+// it, and so mutation ① (reverting the rendezvous) reliably goes red
+// again under the same seam every run, not just on an unloaded machine.
+const START_SKEW_SEAM_MS = 420;
+
 test("RED baseline (no lock at all): two real child processes started together overlap -- this is the exact race HYK-494 was opened to close", async () => {
   const dir = freshLockDir();
   const lockPath = join(dir, "race.lock");
   const out1 = join(dir, "out1.json");
   const out2 = join(dir, "out2.json");
+  const ready1 = join(dir, "ready1.flag");
+  const ready2 = join(dir, "ready2.flag");
   try {
-    const codes = await Promise.all([
-      spawnRaceChild({ lockPath, holdMs: 250, outPath: out1, noLock: true }),
-      spawnRaceChild({ lockPath, holdMs: 250, outPath: out2, noLock: true }),
-    ]);
+    const child1 = spawnRaceChild({
+      lockPath,
+      holdMs: 250,
+      outPath: out1,
+      noLock: true,
+      readyPath: ready1,
+      counterpartReadyPath: ready2,
+      rendezvousTimeoutMs: GENEROUS_EVENTUAL_ACQUIRE_TIMEOUT_MS,
+    });
+    await new Promise((res) => setTimeout(res, START_SKEW_SEAM_MS));
+    const child2 = spawnRaceChild({
+      lockPath,
+      holdMs: 250,
+      outPath: out2,
+      noLock: true,
+      readyPath: ready2,
+      counterpartReadyPath: ready1,
+      rendezvousTimeoutMs: GENEROUS_EVENTUAL_ACQUIRE_TIMEOUT_MS,
+    });
+    const codes = await Promise.all([child1, child2]);
     assert.deepEqual(codes, [0, 0]);
     const a = readRaceOutput(out1);
     const b = readRaceOutput(out2);
@@ -1629,7 +1743,7 @@ test("RED baseline (no lock at all): two real child processes started together o
       Math.max(a.acquiredAtMs, b.acquiredAtMs);
     assert.ok(
       overlap > 0,
-      `RED baseline must overlap (got overlap=${overlap}ms) -- without the lock, two started-together processes' hold windows intersect`,
+      `RED baseline must overlap (got overlap=${overlap}ms, start skew seam=${START_SKEW_SEAM_MS}ms) -- without the lock, two started-together processes' hold windows intersect`,
     );
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -2208,7 +2322,7 @@ test(`GREEN (3-way pid-reuse-simulated contention): ${PID_REUSE_THREE_WAY_TRIALS
       // 한다. try/finally로 Promise.all이 던지는 경우에도(스폰 자체가
       // 거부되는 경우는 없지만, 방어적으로) kill이 보장된다 -- 완료
       // 판정으로 바꾼 뒤에는 holder가 안 죽으면 영원히 살 수 있어
-      // (12.4일) 수리 전 "4초면 저절로 끝난다"는 안전망이 없어졌기
+      // (약 24.86일, 0x7fffffff ms) 수리 전 "4초면 저절로 끝난다"는 안전망이 없어졌기
       // 때문에 이 보장이 전보다 더 중요해졌다.
       const aliveHolder = spawn(
         process.execPath,
@@ -2819,6 +2933,87 @@ test(`GREEN (long-wait-then-claim, the exact P1-B repro shape, scaled N=100ms/M=
   }
 });
 
+// product_scope ⓘⓘ(F8/갱신 칸 공통): startLockHeartbeat의 기본 스폰 경로
+// (defaultSpawnHeartbeat, runner-lock.mjs:1431)는 `stdio:"ignore"`라
+// 사이드카가 죽어도 "왜"가 안 남는다 -- `runner-lock.mjs`는 이 라운드
+// 범위 밖(product_scope)이라 그 기본 경로 자체는 손대지 않는다. 대신
+// `startLockHeartbeat`가 이미 테스트 스텁 전용으로 노출한
+// `spawnHeartbeatFn` 주입점(runner-lock.mjs:1451, production은 기본값만
+// 씀)으로 "같은 HEARTBEAT_SCRIPT, 같은 인자"를 쓰는(여전히 real 사이드카
+// 자식 프로세스, 여전히 real OS 타이밍) 진단용 스폰을 넘긴다 -- stderr를
+// 파이프로 받고 exitCode/signal을 기록해, 사이드카가 뭘 쓰기도 전에
+// 죽으면 그 이유가 실패 메시지에 남게 한다. `startDelayMs`(쓰기-지연
+// seam, product_scope ⓘⓘ)는 "진짜 spawn()" 자체를 그만큼 늦춘다 -- 수리
+// 전 "고정 sleep 뒤 한 번 판정" 모양은 바로 이 지연 아래 레드가 되고,
+// 수리 뒤(결국 완료 판정)는 같은 지연에서도 그대로 통과한다(F8/갱신 칸
+// 둘 다 §2 ⓓ 변이 ②③이 이 seam 아래서 검증한다 -- 영원히 늦지 않고
+// GENEROUS_EVENTUAL_ACQUIRE_TIMEOUT_MS 안에서 틱이 오면 통과, 결국 완료
+// 판정이지 무한 대기가 아니다). `kill()`은 아직 실제 spawn이 안 됐어도
+// (seam 대기 중이어도) 안전하게 취소한다. 사이드카 자신의 틱 간격
+// (intervalMs)은 F8/갱신 칸 둘 다 손대지 않는다 -- 갱신 칸의 "stop() 뒤
+// 틱 없음" 음성 단언은 틱 간격이 바뀌면 의미가 희석되기 때문(간격을
+// 늘리면 멈추지 않아도 그 창에서 틱이 안 와 거짓으로 통과할 수 있다).
+const WRITE_DELAY_SEAM_MS = 200;
+
+function spawnDiagnosableHeartbeat({ startDelayMs = 0 } = {}) {
+  const diag = {
+    stderrTail: "",
+    exitCode: null,
+    signal: null,
+    spawnErrorMessage: null,
+    exited: false,
+  };
+  let realChild = null;
+  let cancelled = false;
+  const spawnHeartbeatFn = ({ alivePath, pid, intervalMs }) => {
+    const reallySpawn = () => {
+      if (cancelled) return;
+      const child = spawn(
+        process.execPath,
+        [
+          "-e",
+          HEARTBEAT_SCRIPT,
+          "--",
+          alivePath,
+          String(pid),
+          String(intervalMs),
+        ],
+        { stdio: ["ignore", "ignore", "pipe"] },
+      );
+      realChild = child;
+      child.stderr.on("data", (chunk) => {
+        diag.stderrTail = (diag.stderrTail + chunk.toString("utf8")).slice(
+          -STDERR_TAIL_CHARS,
+        );
+      });
+      child.on("error", (err) => {
+        diag.spawnErrorMessage = err?.message ?? String(err);
+      });
+      child.on("close", (exitCode, signal) => {
+        diag.exited = true;
+        diag.exitCode = exitCode;
+        diag.signal = signal;
+      });
+    };
+    if (startDelayMs > 0) {
+      setTimeout(reallySpawn, startDelayMs);
+    } else {
+      reallySpawn();
+    }
+    return {
+      kill: () => {
+        cancelled = true;
+        try {
+          realChild?.kill();
+        } catch {
+          // best-effort, same posture as defaultSpawnHeartbeat's own child.
+        }
+      },
+    };
+  };
+  return { spawnHeartbeatFn, diag };
+}
+
 // -- §11: F8 check -- the heartbeat sidecar never opens/writes L itself --
 
 test("startLockHeartbeat: the sidecar NEVER touches the lock file L itself -- only L.alive.<token> changes while L's own bytes stay byte-for-byte identical (F8 fix, real sidecar process)", async () => {
@@ -2833,25 +3028,44 @@ test("startLockHeartbeat: the sidecar NEVER touches the lock file L itself -- on
       lockId: "f8-token",
     });
     writeFileSync(lockPath, initial);
+    const { spawnHeartbeatFn, diag } = spawnDiagnosableHeartbeat({
+      startDelayMs: WRITE_DELAY_SEAM_MS,
+    });
     const heartbeat = startLockHeartbeat({
       lockPath,
       token: "f8-token",
       pid: process.pid,
       intervalMs: 20,
+      spawnHeartbeatFn,
     });
     try {
-      await new Promise((res) => setTimeout(res, 120));
+      const alivePath = `${lockPath}.alive.f8-token`;
+      const startMs = Date.now();
+      let aliveContent = null;
+      while (Date.now() - startMs < GENEROUS_EVENTUAL_ACQUIRE_TIMEOUT_MS) {
+        if (existsSync(alivePath)) {
+          try {
+            const parsed = JSON.parse(readFileSync(alivePath, "utf8"));
+            if (Number.isFinite(parsed.aliveAtMs)) {
+              aliveContent = parsed;
+              break;
+            }
+          } catch {
+            // mid tmp-write-then-rename -- retry.
+          }
+        }
+        if (diag.exited) break;
+        await new Promise((res) => setTimeout(res, 15));
+      }
+      const elapsedMs = Date.now() - startMs;
+      assert.ok(
+        aliveContent && Number.isFinite(aliveContent.aliveAtMs),
+        `the sidecar must still be doing its job, just on the separate alive file (elapsed=${elapsedMs}ms, exitCode=${diag.exitCode}, signal=${diag.signal}, spawnError=${diag.spawnErrorMessage ?? "none"}, stderrTail=${JSON.stringify(diag.stderrTail)})`,
+      );
       assert.equal(
         readFileSync(lockPath, "utf8"),
         initial,
         "L itself must be byte-for-byte unchanged -- the sidecar only ever writes L.alive.<token>",
-      );
-      const aliveContent = JSON.parse(
-        readFileSync(`${lockPath}.alive.f8-token`, "utf8"),
-      );
-      assert.ok(
-        Number.isFinite(aliveContent.aliveAtMs),
-        "the sidecar must still be doing its job, just on the separate alive file",
       );
     } finally {
       heartbeat.stop();
@@ -3042,18 +3256,36 @@ test("startLockHeartbeat: the real sidecar keeps refreshing L.alive.<token> on a
   const alivePath = `${lockPath}.alive.heartbeat-token`;
   try {
     writeFileSync(alivePath, JSON.stringify({ aliveAtMs: 1 }));
+    const { spawnHeartbeatFn, diag } = spawnDiagnosableHeartbeat({
+      startDelayMs: WRITE_DELAY_SEAM_MS,
+    });
     const heartbeat = startLockHeartbeat({
       lockPath,
       token: "heartbeat-token",
       pid: process.pid,
       intervalMs: 30,
+      spawnHeartbeatFn,
     });
     try {
-      await new Promise((res) => setTimeout(res, 140));
-      const afterRunning = JSON.parse(readFileSync(alivePath, "utf8"));
+      const startMs = Date.now();
+      let afterRunning = null;
+      while (Date.now() - startMs < GENEROUS_EVENTUAL_ACQUIRE_TIMEOUT_MS) {
+        try {
+          const parsed = JSON.parse(readFileSync(alivePath, "utf8"));
+          if (parsed.aliveAtMs > 1) {
+            afterRunning = parsed;
+            break;
+          }
+        } catch {
+          // mid tmp-write-then-rename -- retry.
+        }
+        if (diag.exited) break;
+        await new Promise((res) => setTimeout(res, 15));
+      }
+      const elapsedMs = Date.now() - startMs;
       assert.ok(
-        afterRunning.aliveAtMs > 1,
-        `sidecar must have refreshed aliveAtMs at least once (got ${afterRunning.aliveAtMs})`,
+        afterRunning && afterRunning.aliveAtMs > 1,
+        `sidecar must have refreshed aliveAtMs at least once (elapsed=${elapsedMs}ms, exitCode=${diag.exitCode}, signal=${diag.signal}, spawnError=${diag.spawnErrorMessage ?? "none"}, stderrTail=${JSON.stringify(diag.stderrTail)})`,
       );
       heartbeat.stop();
       await new Promise((res) => setTimeout(res, 60));
