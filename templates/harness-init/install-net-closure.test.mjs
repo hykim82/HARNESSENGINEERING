@@ -476,9 +476,10 @@ function runOneInstalledTestFile(
 // attemptWithRetryGate, shared verbatim with install-g1-adapter-list.test
 // .mjs's own wrapper (see that file). This function keeps only what is
 // genuinely LOCAL to this file: the two spawnSync call shapes (first
-// attempt at resolveInstalledTestTimeoutMs(env)'s own decision, retry at
-// the shared UNDER_FULL_RUNNER_TIMEOUT_MS ceiling -- both still via
-// runOneInstalledTestFile, unchanged call shape).
+// attempt at resolveInstalledTestTimeoutMs(env, rel)'s own decision, retry
+// at PER_FILE_CEILING_MS[rel]'s own ms when that file has an override
+// (HYK-500 2R), else the shared UNDER_FULL_RUNNER_TIMEOUT_MS ceiling --
+// both still via runOneInstalledTestFile, unchanged call shape).
 //
 // Extracted into its own function (rather than left inline in the main test
 // below) SOLELY so this round's own unit tests further down can drive it
@@ -777,7 +778,7 @@ test("install-net-closure: real installer -> real git target -> every installed 
     // changes what the assertions below decide.
     if (gateOpenedCount > 0) {
       t.diagnostic(
-        `retry-gate summary (HYK-464 H7c): opened for ${gateOpenedCount} installed test file(s), ${retriedCount} resolved cleanly on the single retry (LOAD_RETRY_FREE_THRESHOLD_MB=${LOAD_RETRY_FREE_THRESHOLD_MB}, UNDER_FULL_RUNNER_TIMEOUT_MS=${UNDER_FULL_RUNNER_TIMEOUT_MS})`,
+        `retry-gate summary (HYK-464 H7c): opened for ${gateOpenedCount} installed test file(s), ${retriedCount} resolved cleanly on the single retry (LOAD_RETRY_FREE_THRESHOLD_MB=${LOAD_RETRY_FREE_THRESHOLD_MB}, UNDER_FULL_RUNNER_TIMEOUT_MS=${UNDER_FULL_RUNNER_TIMEOUT_MS}, PER_FILE_CEILING_MS=${JSON.stringify(Object.fromEntries(Object.entries(PER_FILE_CEILING_MS).map(([rel, entry]) => [rel, entry.ms])))})`,
       );
     }
 

@@ -2933,90 +2933,30 @@ test(`GREEN (long-wait-then-claim, the exact P1-B repro shape, scaled N=100ms/M=
   }
 });
 
-// product_scope ⓘⓘ(F8/갱신 칸 공통): startLockHeartbeat의 기본 스폰 경로
-// (defaultSpawnHeartbeat, runner-lock.mjs:1431)는 `stdio:"ignore"`라
-// 사이드카가 죽어도 "왜"가 안 남는다 -- `runner-lock.mjs`는 이 라운드
-// 범위 밖(product_scope)이라 그 기본 경로 자체는 손대지 않는다. 대신
-// `startLockHeartbeat`가 이미 테스트 스텁 전용으로 노출한
-// `spawnHeartbeatFn` 주입점(runner-lock.mjs:1451, production은 기본값만
-// 씀)으로 "같은 HEARTBEAT_SCRIPT, 같은 인자"를 쓰는(여전히 real 사이드카
-// 자식 프로세스, 여전히 real OS 타이밍) 진단용 스폰을 넘긴다 -- stderr를
-// 파이프로 받고 exitCode/signal을 기록해, 사이드카가 뭘 쓰기도 전에
-// 죽으면 그 이유가 실패 메시지에 남게 한다. `startDelayMs`(쓰기-지연
-// seam, product_scope ⓘⓘ)는 "진짜 spawn()" 자체를 그만큼 늦춘다 -- 수리
-// 전 "고정 sleep 뒤 한 번 판정" 모양은 바로 이 지연 아래 레드가 되고,
-// 수리 뒤(결국 완료 판정)는 같은 지연에서도 그대로 통과한다(F8/갱신 칸
-// 둘 다 §2 ⓓ 변이 ②③이 이 seam 아래서 검증한다 -- 영원히 늦지 않고
-// GENEROUS_EVENTUAL_ACQUIRE_TIMEOUT_MS 안에서 틱이 오면 통과, 결국 완료
-// 판정이지 무한 대기가 아니다). `kill()`은 아직 실제 spawn이 안 됐어도
-// (seam 대기 중이어도) 안전하게 취소한다. 사이드카 자신의 틱 간격
-// (intervalMs)은 F8/갱신 칸 둘 다 손대지 않는다 -- 갱신 칸의 "stop() 뒤
-// 틱 없음" 음성 단언은 틱 간격이 바뀌면 의미가 희석되기 때문(간격을
-// 늘리면 멈추지 않아도 그 창에서 틱이 안 와 거짓으로 통과할 수 있다).
-const WRITE_DELAY_SEAM_MS = 200;
-
-function spawnDiagnosableHeartbeat({ startDelayMs = 0 } = {}) {
-  const diag = {
-    stderrTail: "",
-    exitCode: null,
-    signal: null,
-    spawnErrorMessage: null,
-    exited: false,
-  };
-  let realChild = null;
-  let cancelled = false;
-  const spawnHeartbeatFn = ({ alivePath, pid, intervalMs }) => {
-    const reallySpawn = () => {
-      if (cancelled) return;
-      const child = spawn(
-        process.execPath,
-        [
-          "-e",
-          HEARTBEAT_SCRIPT,
-          "--",
-          alivePath,
-          String(pid),
-          String(intervalMs),
-        ],
-        { stdio: ["ignore", "ignore", "pipe"] },
-      );
-      realChild = child;
-      child.stderr.on("data", (chunk) => {
-        diag.stderrTail = (diag.stderrTail + chunk.toString("utf8")).slice(
-          -STDERR_TAIL_CHARS,
-        );
-      });
-      child.on("error", (err) => {
-        diag.spawnErrorMessage = err?.message ?? String(err);
-      });
-      child.on("close", (exitCode, signal) => {
-        diag.exited = true;
-        diag.exitCode = exitCode;
-        diag.signal = signal;
-      });
-    };
-    if (startDelayMs > 0) {
-      setTimeout(reallySpawn, startDelayMs);
-    } else {
-      reallySpawn();
-    }
-    return {
-      kill: () => {
-        cancelled = true;
-        try {
-          realChild?.kill();
-        } catch {
-          // best-effort, same posture as defaultSpawnHeartbeat's own child.
-        }
-      },
-    };
-  };
-  return { spawnHeartbeatFn, diag };
-}
+// HYK-500-lock-clock-3 (owner ruling 2026-11-11 14:1x §2, voided review 1R
+// §2 ⓒ/§3 P1-1): the F8 and "갱신"(refresh) cells below used to inject a
+// test-only `spawnHeartbeatFn` (same HEARTBEAT_SCRIPT/args, just piping
+// stderr + a write-delay seam) instead of exercising `startLockHeartbeat`'s
+// real, production default spawn path (`defaultSpawnHeartbeat`,
+// runner-lock.mjs:1431). That injection bypassed `defaultSpawnHeartbeat`
+// entirely, so a regression IN that function (e.g. the alive-path argument
+// swapped/wrong) could not turn these two cells red -- the voided review's
+// reproduction confirmed base commit 4d9c70e's 186/186 installed-test pass
+// even under that exact mutation (coder.md §1b below has the mutation
+// table). The fix: call `startLockHeartbeat` with no `spawnHeartbeatFn`
+// override at all, so it runs `defaultSpawnHeartbeat` for real (still a
+// real sidecar child process, still real OS timing) -- `runner-lock.mjs`
+// itself stays unchanged (product_scope). The "결국 완료"(eventual
+// completion) polling loop with the GENEROUS_EVENTUAL_ACQUIRE_TIMEOUT_MS
+// ceiling stays (no reverting to a fixed 120ms/140ms single-shot sleep,
+// product_scope ⓘⓘ) -- the only thing a failure message can report now is
+// elapsed ms, since `defaultSpawnHeartbeat` uses `stdio:"ignore"` and gives
+// no stderr/exitCode to surface (that default spawn path itself is out of
+// this round's scope, so this test cannot add diagnostics to it).
 
 // -- §11: F8 check -- the heartbeat sidecar never opens/writes L itself --
 
-test("startLockHeartbeat: the sidecar NEVER touches the lock file L itself -- only L.alive.<token> changes while L's own bytes stay byte-for-byte identical (F8 fix, real sidecar process)", async () => {
+test("startLockHeartbeat: the sidecar NEVER touches the lock file L itself -- only L.alive.<token> changes while L's own bytes stay byte-for-byte identical (F8 fix, real sidecar process, production default spawn path)", async () => {
   const dir = freshLockDir();
   const lockPath = join(dir, "r.lock");
   try {
@@ -3028,15 +2968,11 @@ test("startLockHeartbeat: the sidecar NEVER touches the lock file L itself -- on
       lockId: "f8-token",
     });
     writeFileSync(lockPath, initial);
-    const { spawnHeartbeatFn, diag } = spawnDiagnosableHeartbeat({
-      startDelayMs: WRITE_DELAY_SEAM_MS,
-    });
     const heartbeat = startLockHeartbeat({
       lockPath,
       token: "f8-token",
       pid: process.pid,
       intervalMs: 20,
-      spawnHeartbeatFn,
     });
     try {
       const alivePath = `${lockPath}.alive.f8-token`;
@@ -3054,13 +2990,12 @@ test("startLockHeartbeat: the sidecar NEVER touches the lock file L itself -- on
             // mid tmp-write-then-rename -- retry.
           }
         }
-        if (diag.exited) break;
         await new Promise((res) => setTimeout(res, 15));
       }
       const elapsedMs = Date.now() - startMs;
       assert.ok(
         aliveContent && Number.isFinite(aliveContent.aliveAtMs),
-        `the sidecar must still be doing its job, just on the separate alive file (elapsed=${elapsedMs}ms, exitCode=${diag.exitCode}, signal=${diag.signal}, spawnError=${diag.spawnErrorMessage ?? "none"}, stderrTail=${JSON.stringify(diag.stderrTail)})`,
+        `the sidecar must still be doing its job, just on the separate alive file (elapsed=${elapsedMs}ms)`,
       );
       assert.equal(
         readFileSync(lockPath, "utf8"),
@@ -3250,21 +3185,17 @@ test("releaseRunnerLock: the release path best-effort-sweeps our OWN leftover he
   }
 });
 
-test("startLockHeartbeat: the real sidecar keeps refreshing L.alive.<token> on a named interval while the token's owner pid is alive, and stop() ends further updates", async () => {
+test("startLockHeartbeat: the real sidecar keeps refreshing L.alive.<token> on a named interval while the token's owner pid is alive, and stop() ends further updates (production default spawn path)", async () => {
   const dir = freshLockDir();
   const lockPath = join(dir, "r.lock");
   const alivePath = `${lockPath}.alive.heartbeat-token`;
   try {
     writeFileSync(alivePath, JSON.stringify({ aliveAtMs: 1 }));
-    const { spawnHeartbeatFn, diag } = spawnDiagnosableHeartbeat({
-      startDelayMs: WRITE_DELAY_SEAM_MS,
-    });
     const heartbeat = startLockHeartbeat({
       lockPath,
       token: "heartbeat-token",
       pid: process.pid,
       intervalMs: 30,
-      spawnHeartbeatFn,
     });
     try {
       const startMs = Date.now();
@@ -3279,13 +3210,12 @@ test("startLockHeartbeat: the real sidecar keeps refreshing L.alive.<token> on a
         } catch {
           // mid tmp-write-then-rename -- retry.
         }
-        if (diag.exited) break;
         await new Promise((res) => setTimeout(res, 15));
       }
       const elapsedMs = Date.now() - startMs;
       assert.ok(
         afterRunning && afterRunning.aliveAtMs > 1,
-        `sidecar must have refreshed aliveAtMs at least once (elapsed=${elapsedMs}ms, exitCode=${diag.exitCode}, signal=${diag.signal}, spawnError=${diag.spawnErrorMessage ?? "none"}, stderrTail=${JSON.stringify(diag.stderrTail)})`,
+        `sidecar must have refreshed aliveAtMs at least once (elapsed=${elapsedMs}ms)`,
       );
       heartbeat.stop();
       await new Promise((res) => setTimeout(res, 60));
