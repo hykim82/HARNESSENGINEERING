@@ -9,7 +9,8 @@
       "cliHomeFlag": "--claude-home",
       "previewMarkerPattern": "Sonnet|Opus|Fable|bypass permissions",
       "agentMarkerWords": ["Sonnet", "Opus", "Haiku"],
-      "modelFamilyPatterns": { "sonnet": "sonnet", "opus": "opus" }
+      "modelFamilyPatterns": { "sonnet": "sonnet", "opus": "opus" },
+      "adapterModule": "scripts/relay/adapters/orca-relay-adapter.mjs"
     },
     "codex": {
       "deliveryMode": "no-inject",
@@ -18,7 +19,8 @@
       "cliHomeFlag": null,
       "previewMarkerPattern": "gpt-5\\.6",
       "agentMarkerWords": ["gpt-5.6", "codex"],
-      "modelFamilyPatterns": {}
+      "modelFamilyPatterns": {},
+      "adapterModule": "scripts/relay/adapters/orca-relay-adapter.mjs"
     }
   },
   "bannerMarkerPatterns": {

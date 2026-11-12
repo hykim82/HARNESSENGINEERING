@@ -1,10 +1,18 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import {
+  mkdtempSync,
+  mkdirSync,
+  writeFileSync,
+  rmSync,
+  readFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import { parseRunStepArgs, runStepCli } from "./run-step.mjs";
 import { WORKSPACES_ROOT } from "./adapters/orca-adapter.mjs";
+import { ADAPTER_SELECT_REASON } from "./engine-adapter-registry.mjs";
 
 // HYK-169-coder-1/2: run-step.mjs is written but never executed in this task
 // (비타협 제약: 실 orca 호출 0) -- these tests only exercise the pure argv
@@ -129,4 +137,63 @@ test("runStepCli: invalid argv never reaches the adapter/execFn at all", async (
   });
   assert.equal(r.ok, false);
   assert.equal(called, false);
+});
+
+// HYK-153-adapter-registry-1 (coder-task.md §2 product_scope ⓘⓘⓘⓘ, piece D):
+// run-step.mjs itself no longer has a static `from "./adapters/..."`
+// import -- this is the RED-first assertion the coder-task.md §2 1b_exec_line
+// names (`git grep -n -E 'from "\./adapters/' -- scripts/relay/run-step.mjs`
+// must be 0 lines on the committed file), pinned here as a permanent
+// regression test, not just a one-off grep during implementation.
+test("run-step.mjs itself has zero static 'from \"./adapters/...\"' imports -- the registry (engine-adapter-registry.mjs), not a static import, picks the adapter", () => {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const source = readFileSync(join(here, "run-step.mjs"), "utf8");
+  assert.doesNotMatch(source, /from\s+["']\.\/adapters\//);
+});
+
+// coder-task.md §2 product_scope ⓘⓘⓘⓘ "고름 실패 시 relayStep 호출 0 ·
+// harnessDir 지시서 복사 0": when the registry refuses to pick an adapter
+// for the role, runStepCli must fail closed before relayStep ever runs --
+// no task-file copy into harnessDir, no seat/deliver call of any kind.
+test("runStepCli: when the registry refuses to pick an adapter for the role (ROLE_PROFILE_MISSING), relayStep is never reached -- no task-file copy, no execFn call", async () => {
+  const harnessDir = mkdtempSync(
+    join(tmpdir(), "hyk153-run-step-registry-fail-"),
+  );
+  const mainRepoDir = mkdtempSync(
+    join(tmpdir(), "hyk153-run-step-registry-fail-main-"),
+  );
+  try {
+    mkdirSync(join(mainRepoDir, ".harness"), { recursive: true });
+    writeFileSync(
+      join(mainRepoDir, ".harness", "not-a-real-role-task.md"),
+      "task_id: HYK-x\ndropped_at: 2026-07-22 07:05 KST\n\nbody\n",
+      "utf8",
+    );
+    let execFnCalled = false;
+    const r = await runStepCli(
+      [
+        "--role",
+        "NOT-A-REAL-ROLE",
+        "--worktree",
+        VALID_WORKTREE,
+        "--task-id",
+        "HYK-x",
+        "--harness-dir",
+        harnessDir,
+        "--main-repo-dir",
+        mainRepoDir,
+      ],
+      {
+        execFn: () => {
+          execFnCalled = true;
+        },
+      },
+    );
+    assert.equal(r.ok, false);
+    assert.equal(r.reasonCode, ADAPTER_SELECT_REASON.ROLE_PROFILE_MISSING);
+    assert.equal(execFnCalled, false);
+  } finally {
+    rmSync(harnessDir, { recursive: true, force: true });
+    rmSync(mainRepoDir, { recursive: true, force: true });
+  }
 });

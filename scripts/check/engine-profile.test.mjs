@@ -44,6 +44,11 @@ function fullEngineBlock(deliveryMode, overrides = {}) {
     homeDirName: null,
     modelFamilyPatterns: {},
     agentMarkerWords: [],
+    // HYK-153-adapter-registry-1 (piece D): adapterModule joined the
+    // required-key family this round -- defaulted here so every existing
+    // test that builds a synthetic engine block to probe a DIFFERENT key
+    // keeps loading fine unless it explicitly overrides this one.
+    adapterModule: "scripts/relay/adapters/orca-relay-adapter.mjs",
     ...overrides,
   };
   for (const [k, v] of Object.entries(base)) {
@@ -632,6 +637,210 @@ test("loadEngineProfiles: previewMarkerPattern, when present, must be a non-empt
     (file) => {
       assert.doesNotThrow(() => loadEngineProfiles(file));
     },
+  );
+});
+
+// ---- HYK-153-adapter-registry-1 (piece D): adapterModule schema family ----
+// (coder-task.md §2 product_scope ⓘⓘⓘ "적재 층" -- shape-only, no fs check)
+
+test("loadEngineProfiles: a missing adapterModule KEY is CONFIG_SCHEMA_INVALID", () => {
+  withTempConfig(
+    JSON.stringify({
+      engines: {
+        claude: fullEngineBlock("inject", { adapterModule: undefined }),
+      },
+      bannerMarkerPatterns: fullBannerMarkerPatterns(),
+      roles: { CODER: { engine: "claude", model: "m", effort: "high" } },
+    }),
+    (file) => {
+      assert.throws(
+        () => loadEngineProfiles(file),
+        (err) =>
+          err.reason === ENGINE_PROFILE_LOAD_REASON.CONFIG_SCHEMA_INVALID &&
+          /adapterModule is required/.test(err.message),
+      );
+    },
+  );
+});
+
+test("loadEngineProfiles: adapterModule present but empty/whitespace-only is CONFIG_SCHEMA_INVALID -- unlike homeDirName, adapterModule has no 'deliberately none' null escape", () => {
+  for (const blank of ["", "   "]) {
+    withTempConfig(
+      JSON.stringify({
+        engines: {
+          claude: fullEngineBlock("inject", { adapterModule: blank }),
+        },
+        bannerMarkerPatterns: fullBannerMarkerPatterns(),
+        roles: { CODER: { engine: "claude", model: "m", effort: "high" } },
+      }),
+      (file) => {
+        assert.throws(
+          () => loadEngineProfiles(file),
+          (err) =>
+            err.reason === ENGINE_PROFILE_LOAD_REASON.CONFIG_SCHEMA_INVALID &&
+            /adapterModule must be a non-empty string/.test(err.message),
+        );
+      },
+    );
+  }
+  withTempConfig(
+    JSON.stringify({
+      engines: { claude: fullEngineBlock("inject", { adapterModule: null }) },
+      bannerMarkerPatterns: fullBannerMarkerPatterns(),
+      roles: { CODER: { engine: "claude", model: "m", effort: "high" } },
+    }),
+    (file) => {
+      // null is NOT a valid escape for adapterModule (unlike homeDirName) --
+      // it still fails the non-blank-string check above.
+      assert.throws(
+        () => loadEngineProfiles(file),
+        (err) =>
+          err.reason === ENGINE_PROFILE_LOAD_REASON.CONFIG_SCHEMA_INVALID,
+      );
+    },
+  );
+});
+
+test("loadEngineProfiles: adapterModule containing '..' is CONFIG_SCHEMA_INVALID (naming-pattern violation)", () => {
+  withTempConfig(
+    JSON.stringify({
+      engines: {
+        claude: fullEngineBlock("inject", {
+          adapterModule: "scripts/relay/adapters/../orca-adapter.mjs",
+        }),
+      },
+      bannerMarkerPatterns: fullBannerMarkerPatterns(),
+      roles: { CODER: { engine: "claude", model: "m", effort: "high" } },
+    }),
+    (file) => {
+      assert.throws(
+        () => loadEngineProfiles(file),
+        (err) =>
+          err.reason === ENGINE_PROFILE_LOAD_REASON.CONFIG_SCHEMA_INVALID &&
+          /adapterModule must match/.test(err.message),
+      );
+    },
+  );
+});
+
+test("loadEngineProfiles: an absolute-path adapterModule is CONFIG_SCHEMA_INVALID (naming-pattern violation)", () => {
+  for (const abs of [
+    "/scripts/relay/adapters/orca-relay-adapter.mjs",
+    "C:/scripts/relay/adapters/orca-relay-adapter.mjs",
+  ]) {
+    withTempConfig(
+      JSON.stringify({
+        engines: {
+          claude: fullEngineBlock("inject", { adapterModule: abs }),
+        },
+        bannerMarkerPatterns: fullBannerMarkerPatterns(),
+        roles: { CODER: { engine: "claude", model: "m", effort: "high" } },
+      }),
+      (file) => {
+        assert.throws(
+          () => loadEngineProfiles(file),
+          (err) =>
+            err.reason === ENGINE_PROFILE_LOAD_REASON.CONFIG_SCHEMA_INVALID &&
+            /adapterModule must match/.test(err.message),
+        );
+      },
+    );
+  }
+});
+
+test("loadEngineProfiles: a backslash-separated adapterModule is CONFIG_SCHEMA_INVALID (naming-pattern violation)", () => {
+  withTempConfig(
+    JSON.stringify({
+      engines: {
+        claude: fullEngineBlock("inject", {
+          adapterModule: "scripts\\relay\\adapters\\orca-relay-adapter.mjs",
+        }),
+      },
+      bannerMarkerPatterns: fullBannerMarkerPatterns(),
+      roles: { CODER: { engine: "claude", model: "m", effort: "high" } },
+    }),
+    (file) => {
+      assert.throws(
+        () => loadEngineProfiles(file),
+        (err) =>
+          err.reason === ENGINE_PROFILE_LOAD_REASON.CONFIG_SCHEMA_INVALID &&
+          /adapterModule must match/.test(err.message),
+      );
+    },
+  );
+});
+
+test("loadEngineProfiles: an adapterModule in a subfolder under scripts/relay/adapters/ is CONFIG_SCHEMA_INVALID (naming-pattern violation -- no subfolder allowed)", () => {
+  withTempConfig(
+    JSON.stringify({
+      engines: {
+        claude: fullEngineBlock("inject", {
+          adapterModule: "scripts/relay/adapters/nested/orca-relay-adapter.mjs",
+        }),
+      },
+      bannerMarkerPatterns: fullBannerMarkerPatterns(),
+      roles: { CODER: { engine: "claude", model: "m", effort: "high" } },
+    }),
+    (file) => {
+      assert.throws(
+        () => loadEngineProfiles(file),
+        (err) =>
+          err.reason === ENGINE_PROFILE_LOAD_REASON.CONFIG_SCHEMA_INVALID &&
+          /adapterModule must match/.test(err.message),
+      );
+    },
+  );
+});
+
+test("loadEngineProfiles: an adapterModule whose filename does not end in '-relay-adapter.mjs' is CONFIG_SCHEMA_INVALID (naming-pattern violation)", () => {
+  withTempConfig(
+    JSON.stringify({
+      engines: {
+        claude: fullEngineBlock("inject", {
+          adapterModule: "scripts/relay/adapters/orca-adapter.mjs",
+        }),
+      },
+      bannerMarkerPatterns: fullBannerMarkerPatterns(),
+      roles: { CODER: { engine: "claude", model: "m", effort: "high" } },
+    }),
+    (file) => {
+      assert.throws(
+        () => loadEngineProfiles(file),
+        (err) =>
+          err.reason === ENGINE_PROFILE_LOAD_REASON.CONFIG_SCHEMA_INVALID &&
+          /adapterModule must match/.test(err.message),
+      );
+    },
+  );
+});
+
+test("loadEngineProfiles: a well-formed adapterModule (matches the naming pattern) loads fine -- shape-only check, no filesystem existence check (installed-target shape has no scripts/relay/adapters/ at all, see install-net-closure.test.mjs)", () => {
+  withTempConfig(
+    JSON.stringify({
+      engines: {
+        claude: fullEngineBlock("inject", {
+          adapterModule:
+            "scripts/relay/adapters/does-not-exist-relay-adapter.mjs",
+        }),
+      },
+      bannerMarkerPatterns: fullBannerMarkerPatterns(),
+      roles: { CODER: { engine: "claude", model: "m", effort: "high" } },
+    }),
+    (file) => {
+      assert.doesNotThrow(() => loadEngineProfiles(file));
+    },
+  );
+});
+
+test("getEngineAttr: adapterModule round-trips through getEngineAttr like any other engine attribute", () => {
+  const profiles = loadEngineProfiles();
+  assert.equal(
+    getEngineAttr("claude", "adapterModule", profiles),
+    "scripts/relay/adapters/orca-relay-adapter.mjs",
+  );
+  assert.equal(
+    getEngineAttr("codex", "adapterModule", profiles),
+    "scripts/relay/adapters/orca-relay-adapter.mjs",
   );
 });
 

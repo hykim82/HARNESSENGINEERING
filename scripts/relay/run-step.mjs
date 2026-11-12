@@ -1,29 +1,21 @@
 import { relayStep } from "./relay-core.mjs";
-import {
-  ensureSeat,
-  deliverTask,
-  collectCompletionSignals,
-  teardownSeat,
-  createOrcaExecFn,
-} from "./adapters/orca-adapter.mjs";
-import { observeSeatCandidates } from "./adapters/seat-candidate-adapter.mjs";
+import { selectRelayAdapterForRole } from "./engine-adapter-registry.mjs";
 
 // HYK-169-coder-1: CLI 진입점 -- `node scripts/relay/run-step.mjs --role CODER
 // --worktree <path> --task-id <id>` 한 명령으로 좌석 준비+배달까지 끝낸다.
 // 실 orca를 부르는 경로이므로 **이 태스크에서는 실행하지 않는다**(작성만,
 // 비타협 제약 -- 실행은 ORCH가 이후 별도로 한다).
+//
+// HYK-153-adapter-registry-1 (coder-task.md §2 product_scope ⓘⓘⓘⓘ, piece D):
+// this CLI no longer imports any ./adapters/*.mjs module statically, and no
+// longer builds its own ORCA_ADAPTER constant -- it asks the registry which
+// adapter+execFn to use for `parsed.role`, and relayStep is never called at
+// all when that pick fails (fail-closed: no deliverTask, no .harness task
+// file copy, since those only happen inside relayStep).
 
 function isNonEmptyString(v) {
   return typeof v === "string" && v.length > 0;
 }
-
-const ORCA_ADAPTER = Object.freeze({
-  ensureSeat,
-  observeSeatCandidates,
-  deliverTask,
-  collectCompletionSignals,
-  teardownSeat,
-});
 
 // 플래그 -> parsed 필드 매핑(단일 지점 -- if/else 사슬 대신 lookup, 복잡도 억제).
 const FLAG_TO_FIELD = Object.freeze({
@@ -72,9 +64,17 @@ export function parseRunStepArgs(args) {
 export async function runStepCli(argv, opts = {}) {
   const parsed = parseRunStepArgs(argv);
   if (!parsed.ok) return { ok: false, reason: parsed.reason };
+  const selection = await selectRelayAdapterForRole(parsed.role, opts);
+  if (!selection.ok) {
+    return {
+      ok: false,
+      reason: selection.reason,
+      reasonCode: selection.reasonCode,
+    };
+  }
   const execFn =
-    typeof opts.execFn === "function" ? opts.execFn : createOrcaExecFn();
-  return relayStep(parsed, ORCA_ADAPTER, { ...opts, execFn });
+    typeof opts.execFn === "function" ? opts.execFn : selection.execFn;
+  return relayStep(parsed, selection.adapter, { ...opts, execFn });
 }
 
 const invokedDirectly =

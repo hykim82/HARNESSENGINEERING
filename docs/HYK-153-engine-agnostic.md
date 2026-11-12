@@ -157,3 +157,24 @@ node --test scripts/check/engine-name-literal.test.mjs
 둘 다 코드 동작은 바뀌지 않았다(리터럴을 없애거나, 분류 칸만 되돌렸다) --
 `ENGINE_BY_ROLE` 역할별 해석 결과는 PM 추가 외에는 무변이다. 상신
 2348·14:5x ⓑ 정제 문면 원문은 PM 설계 산출물(§1 참조)에 있다.
+
+## 추기 (HYK-153-adapter-registry-1, 조각 D -- 책임자 판정 2026-11-11 12:1x/13:0x)
+
+`engine-profiles.json`의 `engines.<engine>.adapterModule`(저장소 루트
+기준 POSIX 상대 경로, 라이브 claude/codex 둘 다
+`scripts/relay/adapters/orca-relay-adapter.mjs`)과 새 모듈
+`scripts/relay/engine-adapter-registry.mjs`(`selectRelayAdapterForRole
+(role)`)가 역할 → 릴레이 어댑터(ensureSeat/observeSeatCandidates/
+deliverTask/collectCompletionSignals/teardownSeat + execFn) 고름을 한
+자리로 모았다. `scripts/relay/run-step.mjs`는 이제
+`./adapters/*.mjs`를 정적으로 import하지 않고 이 등록부가 고른 결과를
+쓴다 -- 고름이 실패하면(`ROLE_PROFILE_MISSING` ·
+`ADAPTER_MODULE_MISSING` · `ADAPTER_MODULE_OUTSIDE_ALLOWED_DIR` ·
+`ADAPTER_MODULE_IMPORT_FAILED` · `ADAPTER_CONTRACT_INVALID`, 모두 사유
+있는 실패, 기본값으로 떨어지는 길 없음) `relayStep` 자체가 호출되지
+않는다. 오늘의 라이브 claude/codex 역할 해석·배달 결과는 무변 -- 이
+라운드는 "설정에서 어댑터를 고른다"는 간접 한 단계만 추가했다.
+
+정직 한계(판정 1259 ⓑ): 관제실 ps1(좌석 기동·배달)의 엔진 리터럴
+분기는 저장소 밖이라 이 라운드로 증명되지 않는다 -- 조각 E(범위 밖)로
+등재.

@@ -27,6 +27,9 @@ function withSyntheticConfig(fn) {
           homeDirName: null,
           modelFamilyPatterns: {},
           agentMarkerWords: [],
+          // HYK-153-adapter-registry-1 (piece D): adapterModule joined the
+          // required-key family this round.
+          adapterModule: "scripts/relay/adapters/orca-relay-adapter.mjs",
         },
       },
       bannerMarkerPatterns: {

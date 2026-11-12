@@ -192,6 +192,41 @@ function validateEnginePreviewMarkerPattern(engineName, engineCfg, configPath) {
   }
 }
 
+// HYK-153-adapter-registry-1 (coder-task.md §2 product_scope ⓘ, piece D):
+// adapterModule names the repo-root-relative POSIX path of the module
+// engine-adapter-registry.mjs's selectRelayAdapterForRole() dynamically
+// imports to pick a role's relay adapter port set (ensureSeat/
+// observeSeatCandidates/deliverTask/collectCompletionSignals/teardownSeat).
+// REQUIRED (unlike homeDirName, never null) -- an engine with no relay
+// adapter wired cannot be picked for any role, and that must fail loudly at
+// config-load time, not surface later as a silent undefined. Load-layer
+// validation is SHAPE-ONLY (string pattern -- no filesystem/existsSync
+// check: the installed-target shape of this repo never ships
+// scripts/relay/adapters/*, and engine-profile.test.mjs must stay green on
+// that installed shape, see templates/harness-init/install-net-closure.test
+// .mjs's own header). The picking layer (engine-adapter-registry.mjs) does
+// its OWN separate, real-filesystem containment check (realpath-based,
+// catches a symlink/junction that passes this shape check but resolves
+// outside scripts/relay/adapters/ on disk) -- two layers, two different
+// failure classes, per coder-task.md §2 product_scope ⓘⓘⓘ.
+const ADAPTER_MODULE_NAME_RE =
+  /^scripts\/relay\/adapters\/[a-z0-9][a-z0-9-]*-relay-adapter\.mjs$/;
+
+function validateEngineAdapterModule(engineName, adapterModule, configPath) {
+  if (!isNonBlankString(adapterModule)) {
+    invalid(
+      configPath,
+      `engines.${engineName}.adapterModule must be a non-empty string, got ${JSON.stringify(adapterModule)}`,
+    );
+  }
+  if (!ADAPTER_MODULE_NAME_RE.test(adapterModule)) {
+    invalid(
+      configPath,
+      `engines.${engineName}.adapterModule must match ${ADAPTER_MODULE_NAME_RE} (repo-root-relative POSIX path directly under scripts/relay/adapters/, no '..', no absolute path, no backslash, no subfolder), got ${JSON.stringify(adapterModule)}`,
+    );
+  }
+}
+
 // HYK-153-engine-profile-2 (coder-task.md §2 P2-3): these per-engine keys
 // are consumed by production code (getEngineAttr(engine,"homeDirName"),
 // getEngineModelFamilyPatterns, getEngineAgentMarkerWords) that used to
@@ -247,6 +282,14 @@ function validateEngines(engines, configPath) {
       configPath,
     );
     validateEnginePreviewMarkerPattern(engineName, engineCfg, configPath);
+    if (!("adapterModule" in engineCfg)) {
+      invalid(configPath, `engines.${engineName}.adapterModule is required`);
+    }
+    validateEngineAdapterModule(
+      engineName,
+      engineCfg.adapterModule,
+      configPath,
+    );
   }
 }
 
@@ -479,3 +522,4 @@ export function getEngineAgentMarkerWords(
 }
 
 export const DEFAULT_ENGINE_PROFILES_PATH = DEFAULT_CONFIG_PATH;
+export { ADAPTER_MODULE_NAME_RE };
