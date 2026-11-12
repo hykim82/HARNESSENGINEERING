@@ -354,6 +354,23 @@ test("그 밖 조회 실패(404 · 던짐 · 모양 위반)는 확인으로 세�
   }
 });
 
+test("다른 커밋의 응답(sha 불일치)은 검증 통과 모양이어도 확인이 아니라 미조회(모양 위반)다", async () => {
+  const repo = buildRepo([updateBranchSpec(30)]);
+  try {
+    const { fetchJson, calls } = makeFetch(() =>
+      okResponse(validCommitPayload("d".repeat(40))),
+    );
+    const r = await collect(repo.dir, fetchJson);
+    assert.equal(calls.length, 1);
+    assert.equal(r.confirmed, 0);
+    assert.equal(r.unchecked, 1);
+    assert.equal(r.uncheckedByFailure, 1);
+    assert.ok(r.diagnostics.some((d) => d.includes("모양")));
+  } finally {
+    cleanup(repo.dir);
+  }
+});
+
 test("캐시는 승인 권위가 아니다: 같은 후보도 회차마다 그 회차 REST 응답으로만 확인된다", async () => {
   const repo = buildRepo([updateBranchSpec(30)]);
   try {
