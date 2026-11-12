@@ -642,7 +642,22 @@ export async function collectGate4Independent({
     uncheckedByBudget: cand.candidates.length - toCheck.length,
     approvedEvents,
     verdicts,
+    undecidableReasons: summarizeUndecidableReasons(verdicts),
   };
+}
+
+// HYK-255-g-aux-render-1 커밋 2 (D3 ⑵) -- UNDECIDABLE 판정의 사유 분포. 사유는
+// 위 루프가 이미 받은 판정(verdict.evidence.reason -- approval-authority-adapter
+// 의 APPROVAL_REASON 코드)에서 읽을 뿐이고 새 REST 호출은 없다. 사유가 없는
+// 판정은 «사유 미상» 으로 센다(조용히 빼지 않는다).
+function summarizeUndecidableReasons(verdicts) {
+  const reasons = {};
+  for (const v of verdicts) {
+    if (v.status !== APPROVAL_STATUS.UNDECIDABLE) continue;
+    const reason = v.evidence?.reason ?? "사유 미상";
+    reasons[reason] = (reasons[reason] ?? 0) + 1;
+  }
+  return reasons;
 }
 
 // ---------------------------------------------------------------------------

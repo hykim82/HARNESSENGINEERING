@@ -357,6 +357,23 @@ export function renderGateAuxObservationLine(gateAux) {
   );
 }
 
+// HYK-255-g-aux-render-1 커밋 2 (D3 ⑵) -- ㄱ-4 «UNDECIDABLE N» 에 사유 분포를
+// 붙인다: «UNDECIDABLE 2(사유: HTTP_FAILED 1 · RATE_LIMITED 1)». 사유는 wire 가
+// 이미 받은 판정(gate4.undecidableReasons = {사유 코드: 건수})에서 전달한다 --
+// 건수 많은 순 · 같으면 이름순. N 이 0 이면 붙이지 않는다(기존 문면 무변). N>0 인데
+// 사유가 전달되지 않았으면 «사유 미상» 으로 낸다(조용한 생략 금지).
+function renderUndecidableWithReasons(gate4) {
+  if (!(gate4.undecidable > 0)) return `UNDECIDABLE ${gate4.undecidable}`;
+  const entries = Object.entries(gate4.undecidableReasons ?? {}).sort(
+    ([nameA, countA], [nameB, countB]) =>
+      countB - countA || nameA.localeCompare(nameB),
+  );
+  if (entries.length === 0)
+    return `UNDECIDABLE ${gate4.undecidable}(사유 미상)`;
+  const dist = entries.map(([name, count]) => `${name} ${count}`).join(" · ");
+  return `UNDECIDABLE ${gate4.undecidable}(사유: ${dist})`;
+}
+
 function buildGaSection(gate4, auxNote, gateAux) {
   const lines = ["ㄱ 설계된 정지:"];
   if (gate4.known === true) {
@@ -364,7 +381,7 @@ function buildGaSection(gate4, auxNote, gateAux) {
     lines.push(
       `- ㄱ-4 후보 병합(측정 기간 내 origin/master): ${gate4.candidatesInWindow}건` +
         ` 중 조회 ${gate4.checked}건 · APPROVED ${gate4.approved} · NOT_APPROVED ${gate4.notApproved}` +
-        ` · UNDECIDABLE ${gate4.undecidable} · 미조회(예산) ${gate4.uncheckedByBudget}건 — 미조회는 미계수다`,
+        ` · ${renderUndecidableWithReasons(gate4)} · 미조회(예산) ${gate4.uncheckedByBudget}건 — 미조회는 미계수다`,
     );
     for (const ev of gate4.approvedEvents ?? []) {
       lines.push(
@@ -448,11 +465,32 @@ export function renderRelayLedgerAuxLines(relayLedgerResult) {
     `대응 없음(ㄴ 후보) ${r.candidateCount}건${candidateNote}${numberMismatchNote} · ` +
     `형식 오류 ${r.formatErrorCount}건 · ㄱ-7 기록 누락 ${r.gate7MissingCount}건 · ` +
     `형식 이전 구간 미계수 ${r.beforeFormatCount}건${readFailureNote}${undeterminedNote} — 독립 계수에 미산입`;
-  const tallyText = Object.entries(r.classificationTally)
-    .map(([key, count]) => `${key} ${count}`)
-    .join(" · ");
-  const line2 = `- 전달 항목 분류: ${tallyText}(자기 분류 — 독립 아님)`;
-  return [line1, line2];
+  return [line1, renderRelayClassificationLine(r.classificationTally)];
+}
+
+// HYK-255-g-aux-render-1 커밋 2 (D3 ⑴ · ⑶) -- 전달 항목 분류 줄.
+// ⑴ 유효 항목이 0개(= 전달 머리줄 형식이 아직 시작되지 않음)면 «ㄴ 0» 을 포함한 모든
+//   0 이 bare 로 찍혀 «ㄴ=0» 으로 오독될 수 있다 -- 숫자 대신 «형식 미시작 — 분류
+//   없음». 항목이 1개라도 있으면 기존 숫자 표기 그대로.
+// ⑶ 자기 분류 라벨 ㄱ-5 는 폐지된 게이트(ABOLISHED_GATE_TYPES · 번호 유지)라 «ㄱ-5(폐지)»
+//   로 적는다(1-C 문면 정합 -- 분모 6 인 줄 옆에서 현행 유형처럼 읽히지 않게).
+const ABOLISHED_TALLY_LABELS = new Set(
+  ABOLISHED_GATE_TYPES.map((g) => `ㄱ-${g.number}`),
+);
+
+function renderRelayClassificationLine(classificationTally) {
+  const entries = Object.entries(classificationTally);
+  const total = entries.reduce((sum, [, count]) => sum + count, 0);
+  const body =
+    total === 0
+      ? "형식 미시작 — 분류 없음"
+      : entries
+          .map(
+            ([key, count]) =>
+              `${ABOLISHED_TALLY_LABELS.has(key) ? `${key}(폐지)` : key} ${count}`,
+          )
+          .join(" · ");
+  return `- 전달 항목 분류: ${body}(자기 분류 — 독립 아님)`;
 }
 
 // HYK-255-ln-github-anchor-1 (판정 2026-11-12 19:1x 1ⓑ) -- ㄴ 독립 수집기
