@@ -224,8 +224,19 @@ function withWorktree(opts, fn) {
 // The success line only -- a BLOCKED reason may also contain "engine-profile:".
 const profileLine = (text) =>
   text.split("\n").find((l) => l.includes(" engine-profile: engine=")) ?? "";
-const blockedLine = (text) =>
-  text.split("\n").find((l) => l.includes("BLOCKED --")) ?? "";
+// A refusal prints exactly ONE BLOCKED line. Two lines mean a branch lost its
+// exit and fell through into a later check (M2 of the mutation round: deleting
+// the exit of the resolve-failure branch stayed green while only the first
+// BLOCKED line was inspected).
+const blockedLine = (text) => {
+  const lines = text.split("\n").filter((l) => l.includes("BLOCKED --"));
+  assert.equal(
+    lines.length,
+    1,
+    `expected exactly one BLOCKED line, got ${lines.length}:\n${text}`,
+  );
+  return lines[0];
+};
 const warnLines = (text) =>
   text
     .split("\n")
