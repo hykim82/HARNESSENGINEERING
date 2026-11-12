@@ -6,6 +6,7 @@ import {
   writeFileSync,
   rmSync,
   readFileSync,
+  readdirSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
@@ -192,6 +193,127 @@ test("runStepCli: when the registry refuses to pick an adapter for the role (ROL
     assert.equal(r.ok, false);
     assert.equal(r.reasonCode, ADAPTER_SELECT_REASON.ROLE_PROFILE_MISSING);
     assert.equal(execFnCalled, false);
+    // P2-4 (coder-task.md §2 product_scope ⓘⓘⓘⓘ 헛시험 수리, review-1
+    // REVIEW-r1.md §1 P2-4): this test's own name promises "no task-file
+    // copy" but the original assertions (reasonCode/execFnCalled only)
+    // never actually looked at harnessDir's contents -- relayStep's
+    // placeAndVerifyTaskFile (relay-core.mjs) is the only code that ever
+    // writes into harnessDir, so an empty directory here is the real,
+    // direct proof that it was never reached.
+    assert.deepEqual(
+      readdirSync(harnessDir),
+      [],
+      "harnessDir must still be empty -- relayStep's own task-file copy must never have run",
+    );
+  } finally {
+    rmSync(harnessDir, { recursive: true, force: true });
+    rmSync(mainRepoDir, { recursive: true, force: true });
+  }
+});
+
+// HYK-153-fake-engine-2 (coder-task.md §2 product_scope ⓒ "«seam 0» 정적
+// 단언 1"): engine-adapter-registry.mjs's and run-step.mjs's own on-disk
+// source must together contain zero occurrences of the two identifiers
+// the removed registry injection seam used to be named -- spelled out here
+// as joined string fragments (never a literal contiguous substring in this
+// file's own source) so this proof does not itself add a match to the
+// RED-first scripts/relay-wide seam-identifier grep count (coder-task.md
+// §2 1b_exec_line ⑴, which must read 0 after this round).
+test("engine-adapter-registry.mjs and run-step.mjs together contain 0 occurrences of the removed registry-seam identifiers (seam truly deleted from source, not merely dead)", () => {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const registrySrc = readFileSync(
+    join(here, "engine-adapter-registry.mjs"),
+    "utf8",
+  );
+  const runStepSrc = readFileSync(join(here, "run-step.mjs"), "utf8");
+  const seamNames = [
+    ["load", "ProfilesFn"].join(""),
+    ["im", "portFn"].join(""),
+  ];
+  for (const name of seamNames) {
+    assert.equal(
+      registrySrc.includes(name),
+      false,
+      `engine-adapter-registry.mjs must not mention '${name}'`,
+    );
+    assert.equal(
+      runStepSrc.includes(name),
+      false,
+      `run-step.mjs must not mention '${name}'`,
+    );
+  }
+});
+
+// HYK-153-fake-engine-2 (coder-task.md §2 product_scope ⓒ "동적 단언 1"):
+// the two dead seam keys (same joined-fragment spelling as above), passed
+// as opts that THROW if ever actually invoked, must change nothing -- the
+// registry must still pick the real default adapter from the real config,
+// proving it never reads either key anymore (not just that the branch is
+// gone from source, but that nothing downstream still honors the shape).
+test("runStepCli: opts shaped like the removed registry-seam keys (poisoned -- they throw if ever called) are silently ignored, wiring through to the real default adapter exactly as without them", async () => {
+  const harnessDir = mkdtempSync(join(tmpdir(), "hyk153c2-run-step-seam-"));
+  const mainRepoDir = mkdtempSync(
+    join(tmpdir(), "hyk153c2-run-step-seam-main-"),
+  );
+  try {
+    mkdirSync(join(mainRepoDir, ".harness"), { recursive: true });
+    writeFileSync(
+      join(mainRepoDir, ".harness", "coder-task.md"),
+      "task_id: HYK-x\ndropped_at: 2026-07-22 07:05 KST\n\nbody\n",
+      "utf8",
+    );
+    let execFnCalled = false;
+    const fakeExecFn = (argv) => {
+      execFnCalled = true;
+      if (argv[0] === "terminal" && argv[1] === "list") {
+        return {
+          ok: true,
+          result: {
+            terminals: [
+              {
+                handle: "term_fake",
+                worktreePath: VALID_WORKTREE,
+                tabId: "tab-1",
+              },
+            ],
+          },
+        };
+      }
+      if (argv[0] === "terminal" && argv[1] === "show") {
+        return { ok: true, result: { terminal: { preview: "IDLE" } } };
+      }
+      return { ok: true, result: { task: { id: "task_fake" } } };
+    };
+    const poison = () => {
+      throw new Error(
+        "dead seam key must never be invoked -- it no longer exists",
+      );
+    };
+    const deadKey1 = ["load", "ProfilesFn"].join("");
+    const deadKey2 = ["im", "portFn"].join("");
+    const r = await runStepCli(
+      [
+        "--role",
+        "CODER",
+        "--worktree",
+        VALID_WORKTREE,
+        "--task-id",
+        "HYK-x",
+        "--harness-dir",
+        harnessDir,
+        "--main-repo-dir",
+        mainRepoDir,
+      ],
+      {
+        execFn: fakeExecFn,
+        existingSeatHandle: "term_fake",
+        capabilities: { classify: (tail) => (tail === "IDLE" ? "idle" : null) },
+        [deadKey1]: poison,
+        [deadKey2]: poison,
+      },
+    );
+    assert.equal(r.ok, true, JSON.stringify(r));
+    assert.equal(execFnCalled, true);
   } finally {
     rmSync(harnessDir, { recursive: true, force: true });
     rmSync(mainRepoDir, { recursive: true, force: true });

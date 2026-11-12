@@ -36,7 +36,7 @@ import {
   chmodSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, dirname, delimiter as PATH_DELIMITER } from "node:path";
+import { join, dirname, resolve, delimiter as PATH_DELIMITER } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { execSync, execFileSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
@@ -52,12 +52,6 @@ const REPO_ROOT = execSync("git rev-parse --show-toplevel", {
   encoding: "utf8",
 }).trim();
 const RUN_STEP_PATH = join(RELAY_DIR, "run-step.mjs");
-const ENGINE_PROFILE_PATH = join(
-  RELAY_DIR,
-  "..",
-  "check",
-  "engine-profile.mjs",
-);
 const ADAPTER_PATH = join(
   RELAY_DIR,
   "adapters",
@@ -288,6 +282,50 @@ async function withPrependedPath(extraDir, asyncFn) {
   }
 }
 
+// HYK-153-fake-engine-2 (coder-task.md §2 product_scope ⓘ "새 주입 seam 0"):
+// engine-adapter-registry.mjs no longer accepts any config/import-override
+// opts seam, so a test that needs run-step.mjs's module-level
+// DEFAULT_CONFIG_PATH to capture a DIFFERENT HARNESS_ENGINE_PROFILES_PATH
+// than the one before() already froze into this process's cached
+// engine-profile.mjs module (see this file's header -- the env var is only
+// ever read once per process, at that module's first import) has no choice
+// but a FRESH child process: this probe writes a tiny runner script to
+// mkdtemp, spawns `node <runner>` with the desired
+// HARNESS_ENGINE_PROFILES_PATH (and any other env overrides) already set
+// at spawn time, and the runner's own dynamic import of run-step.mjs is the
+// first (and only) time THAT process's engine-profile.mjs module loads --
+// genuinely env-driven, not opts-injected. The runner's own execFn is a
+// fixed literal (never parameterized from outside, so nothing needs to
+// cross the process boundary as a function) that only records whether it
+// was ever called -- in every cell this probe is used for, the registry is
+// expected to refuse before relayStep ever reaches execFn selection.
+function runStepProbe({ argv, env = {} }) {
+  const runnerDir = tmpDir("hyk153c2-runstep-probe-");
+  const runnerPath = join(runnerDir, "probe.mjs");
+  const runStepHref = pathToFileURL(RUN_STEP_PATH).href;
+  writeFileSync(
+    runnerPath,
+    [
+      `const mod = await import(${JSON.stringify(runStepHref)});`,
+      `let execFnCalled = false;`,
+      `const result = await mod.runStepCli(JSON.parse(process.argv[2]), { execFn: () => { execFnCalled = true; return { ok: false, result: null }; } });`,
+      `process.stdout.write(JSON.stringify({ ...result, execFnCalled }));`,
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+  try {
+    const out = execFileSync(
+      process.execPath,
+      [runnerPath, JSON.stringify(argv)],
+      { env: { ...process.env, ...env }, encoding: "utf8" },
+    );
+    return JSON.parse(out.trim());
+  } finally {
+    rmSync(runnerDir, { recursive: true, force: true });
+  }
+}
+
 async function captureConsoleError(asyncFn) {
   const lines = [];
   const orig = console.error;
@@ -334,7 +372,10 @@ function buildShims() {
   return { shimDir, markerDir };
 }
 
-function buildFakeConfig({ brokenModel = false } = {}) {
+function buildFakeConfig({
+  brokenModel = false,
+  dropAdapterModule = false,
+} = {}) {
   const parsed = JSON.parse(readFileSync(LIVE_ENGINE_PROFILES_PATH, "utf8"));
   parsed.engines[FAKE_ENGINE_NAME] = {
     deliveryMode: "inject",
@@ -343,6 +384,12 @@ function buildFakeConfig({ brokenModel = false } = {}) {
     agentMarkerWords: [],
     adapterModule: FAKE_ADAPTER_MODULE_REL,
   };
+  // P1-2 D 교차 음성 칸 (coder-task.md §2 product_scope ⓘⓘⓘ): drop the
+  // *required* adapterModule key itself -- engine-profile.mjs's schema
+  // validation (validateEngines) rejects this at load time
+  // (CONFIG_SCHEMA_INVALID), before engine-adapter-registry.mjs or
+  // relayStep ever run, exactly like any other malformed config shape.
+  if (dropAdapterModule) delete parsed.engines[FAKE_ENGINE_NAME].adapterModule;
   const roleProfile = {
     engine: FAKE_ENGINE_NAME,
     model: brokenModel ? " " : "fake-model-0",
@@ -374,7 +421,6 @@ function receiptsIn(harnessDir) {
 // Module-level fixtures shared by every test (before()/after()).
 // ---------------------------------------------------------------------------
 let runStepCli;
-let loadEngineProfiles;
 let shimDir;
 let markerDir;
 let fakeConfigPath;
@@ -385,8 +431,19 @@ let realControlRoomSnapshot;
 const REAL_LEDGER_PATH = "D:\\문서관리\\하네스-관제실\\admission-ledger.json";
 const REAL_DISPATCH_RECEIPTS_PATH =
   "D:\\문서관리\\하네스-관제실\\dispatch-receipts.jsonl";
-const THIS_WORKTREE_REJECT_STREAK_PATH = join(
-  REPO_ROOT,
+const REAL_COMPLETION_FAILURES_PATH = `${REAL_LEDGER_PATH}.completion-failures.jsonl`;
+// P2-2 (coder-task.md §2 product_scope ⓘⓘⓘⓘ 헛시험 수리): the real global
+// reject-streak target is the MAIN repo's own .harness/, found via
+// `git rev-parse --git-common-dir` -- NOT this linked worktree's own
+// REPO_ROOT/.harness (which this worktree never populates, so comparing
+// that path before/after was a vacuous null==null pass, review-1 P2-2).
+const GIT_COMMON_DIR = execSync("git rev-parse --git-common-dir", {
+  cwd: RELAY_DIR,
+  encoding: "utf8",
+}).trim();
+const MAIN_REPO_ROOT = resolve(RELAY_DIR, dirname(GIT_COMMON_DIR));
+const MAIN_REPO_REJECT_STREAK_PATH = join(
+  MAIN_REPO_ROOT,
   ".harness",
   "reject-streak.json",
 );
@@ -405,7 +462,7 @@ before(async () => {
   realControlRoomSnapshot = {
     ledger: readIfExists(REAL_LEDGER_PATH),
     dispatchReceipts: readIfExists(REAL_DISPATCH_RECEIPTS_PATH),
-    rejectStreak: readIfExists(THIS_WORKTREE_REJECT_STREAK_PATH),
+    rejectStreak: readIfExists(MAIN_REPO_REJECT_STREAK_PATH),
   };
 
   ({ shimDir, markerDir } = buildShims());
@@ -421,10 +478,6 @@ before(async () => {
   process.env.HARNESS_ENGINE_PROFILES_PATH = fakeConfigPath;
   const runStepMod = await import(pathToFileURL(RUN_STEP_PATH).href);
   runStepCli = runStepMod.runStepCli;
-  const engineProfileMod = await import(
-    pathToFileURL(ENGINE_PROFILE_PATH).href
-  );
-  loadEngineProfiles = engineProfileMod.loadEngineProfiles;
 });
 
 after(() => {
@@ -496,6 +549,27 @@ test("정적 단언 ③: G9 스캐너(orca-cli-boundary.mjs의 scanForOrcaExecCa
     { legacyExempt: [] },
   );
   assert.deepEqual(violations, []);
+});
+
+// P2-2 (coder-task.md §2 product_scope ⓘⓘⓘⓘ 헛시험 수리, review-1
+// REVIEW-r1.md §1 P2-2): a direct, permanent guard on the constant itself
+// -- the real global reject-streak target MUST resolve under the main
+// repo's own checkout (git-common-dir-resolved), never under this linked
+// worktree's own REPO_ROOT. Reverting MAIN_REPO_ROOT back to REPO_ROOT (the
+// original bug) makes this fail directly, instead of relying only on a
+// before/after comparison that -- in a worktree where even the WRONG path
+// is absent -- would otherwise still pass vacuously (exactly how review-1
+// found it).
+test("P2-2: MAIN_REPO_REJECT_STREAK_PATH resolves under the main repo's own checkout (git-common-dir), never under this linked worktree's own REPO_ROOT", () => {
+  assert.ok(
+    MAIN_REPO_REJECT_STREAK_PATH.startsWith(MAIN_REPO_ROOT),
+    MAIN_REPO_REJECT_STREAK_PATH,
+  );
+  assert.equal(
+    MAIN_REPO_REJECT_STREAK_PATH.startsWith(REPO_ROOT),
+    false,
+    `must NOT resolve under this linked worktree's own REPO_ROOT (${REPO_ROOT}) -- that is exactly review-1's P2-2 vacuous-pass bug`,
+  );
 });
 
 // ---------------------------------------------------------------------------
@@ -601,7 +675,7 @@ async function runReviewRoundE2E(fx, { labelC, headCommit }) {
 
   writeFileSync(
     join(fx.repo, ".harness", "review-task.md"),
-    `task_id: ${labelR}\ndropped_at: ${formatKstMinutes(Date.now() - 2 * 60 * 1000)}\nfor: ${labelC}\nhead_commit: ${headCommit}\n`,
+    `task_id: ${labelR}\ndropped_at: ${formatKstMinutes(Date.now() - 2 * 60 * 1000)}\nfor: ${labelC}\nhead_commit: ${headCommit}\nrunner_contract: none\n`,
     "utf8",
   );
   recordDispatch(fx, {
@@ -667,7 +741,7 @@ async function runReviewRoundE2E(fx, { labelC, headCommit }) {
 }
 
 // 합성 원장 기록(§(d)) + 전역 대상 합성 라벨 0 단언.
-function assertRoundsIsolatedAndRecorded(fx, { labelC, labelR }) {
+function assertRoundsIsolatedAndRecorded(fx, { labelC, labelR }, t) {
   const ledgerJson = JSON.parse(readFileSync(fx.ledger, "utf8"));
   for (const label of [labelC, labelR]) {
     assert.equal(ledgerJson.reservations[label].status, "COMPLETED");
@@ -699,6 +773,7 @@ function assertRoundsIsolatedAndRecorded(fx, { labelC, labelR }) {
   for (const text of [
     readIfExists(REAL_LEDGER_PATH),
     readIfExists(REAL_DISPATCH_RECEIPTS_PATH),
+    readIfExists(REAL_COMPLETION_FAILURES_PATH),
   ]) {
     if (text === null) continue;
     assert.equal(
@@ -712,20 +787,37 @@ function assertRoundsIsolatedAndRecorded(fx, { labelC, labelR }) {
       `real control-room ledger must not contain ${labelR}`,
     );
   }
-  assert.equal(
-    readIfExists(THIS_WORKTREE_REJECT_STREAK_PATH),
-    realControlRoomSnapshot.rejectStreak,
-    "this worktree's real .harness/reject-streak.json must be unchanged -- only the synthetic repo's own copy was written",
-  );
+  // P2-2 (coder-task.md §2 product_scope ⓘⓘⓘⓘ 헛시험 수리): the real target
+  // is the MAIN repo's .harness/reject-streak.json (git-common-dir
+  // resolved) -- if this machine genuinely has none, that is a measurement
+  // gap, not a free pass, so it is logged via t.diagnostic and still backed
+  // by a real (if narrower) positive assertion, never a silent null==null.
+  const mainRepoRejectStreakNow = readIfExists(MAIN_REPO_REJECT_STREAK_PATH);
+  if (realControlRoomSnapshot.rejectStreak === null) {
+    t?.diagnostic(
+      `측정 불가 -- 본 저장소(git-common-dir 기준) reject-streak.json 이 이 기계에 없다: ${MAIN_REPO_REJECT_STREAK_PATH}`,
+    );
+    assert.equal(
+      mainRepoRejectStreakNow,
+      null,
+      "main-repo reject-streak.json must still be absent if it was absent before this file ran",
+    );
+  } else {
+    assert.equal(
+      mainRepoRejectStreakNow,
+      realControlRoomSnapshot.rejectStreak,
+      "the MAIN repo's real .harness/reject-streak.json (git-common-dir-resolved, not this linked worktree's own) must be byte-identical before/after this file's run",
+    );
+  }
 }
 
-test("양성: 설정 사본에 등록한 가짜 엔진이 runStepCli(저장소 진입점)로 CODER->REVIEW 1라운드를 완주한다 -- 영수증 2 · fingerprint 결속 · 전역 라벨 0", async () => {
+test("양성: 설정 사본에 등록한 가짜 엔진이 runStepCli(저장소 진입점)로 CODER->REVIEW 1라운드를 완주한다 -- 영수증 2 · fingerprint 결속 · 전역 라벨 0", async (t) => {
   const fx = buildFixture();
   try {
     await withPrependedPath(shimDir, async () => {
       const { labelC, headCommit } = await runCoderRoundE2E(fx);
       const { labelR } = await runReviewRoundE2E(fx, { labelC, headCommit });
-      assertRoundsIsolatedAndRecorded(fx, { labelC, labelR });
+      assertRoundsIsolatedAndRecorded(fx, { labelC, labelR }, t);
     });
   } finally {
     cleanupFixture(fx);
@@ -737,7 +829,12 @@ test("양성: 설정 사본에 등록한 가짜 엔진이 runStepCli(저장소 �
 // 안 불린다(어댑터 선택이 선행 단계에서 거부됨).
 // ---------------------------------------------------------------------------
 
-test("음성(B4): roles.CODER.model=' ' -> CONFIG_SCHEMA_INVALID로 적재 거부, relayStep 미도달 -- 영수증 0 · task 파일 복사 0", async () => {
+// HYK-153-fake-engine-2 (coder-task.md §2 product_scope ⓘ "새 주입 seam 0"):
+// B4 needs a DIFFERENT config than the one before() already froze into this
+// process (see runStepProbe's header) -- the config-override opts seam is
+// gone, so a fresh child process (env-driven, not opts-injected) is the only way left
+// to exercise a second, broken HARNESS_ENGINE_PROFILES_PATH value.
+test("음성(B4): roles.CODER.model=' ' -> CONFIG_SCHEMA_INVALID로 적재 거부, relayStep 미도달 -- 영수증 0 · task 파일 복사 0 · execFn 호출 0", async () => {
   const fx = buildFixture();
   try {
     const brokenConfigDir = tmpDir("hyk153c-broken-config-");
@@ -752,8 +849,8 @@ test("음성(B4): roles.CODER.model=' ' -> CONFIG_SCHEMA_INVALID로 적재 거�
         "utf8",
       );
       const result = await withEnvLedger(fx, () =>
-        runStepCli(
-          [
+        runStepProbe({
+          argv: [
             "--role",
             "CODER",
             "--worktree",
@@ -763,11 +860,12 @@ test("음성(B4): roles.CODER.model=' ' -> CONFIG_SCHEMA_INVALID로 적재 거�
             "--main-repo-dir",
             fx.repo,
           ],
-          { loadProfilesFn: () => loadEngineProfiles(brokenConfigPath) },
-        ),
+          env: { HARNESS_ENGINE_PROFILES_PATH: brokenConfigPath },
+        }),
       );
       assert.equal(result.ok, false);
       assert.equal(result.reasonCode, "CONFIG_SCHEMA_INVALID");
+      assert.equal(result.execFnCalled, false, "execFn must never be called");
       assert.equal(
         existsSync(join(fx.cWt, ".harness", "coder-task.md")),
         false,
@@ -776,6 +874,62 @@ test("음성(B4): roles.CODER.model=' ' -> CONFIG_SCHEMA_INVALID로 적재 거�
       assert.deepEqual(receiptsIn(join(fx.cWt, ".harness")), []);
     } finally {
       rmSync(brokenConfigDir, { recursive: true, force: true });
+    }
+  } finally {
+    cleanupFixture(fx);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// P1-2 / D 교차 음성 칸 (coder-task.md §2 product_scope ⓘⓘⓘ, review-1 REVIEW-r1
+// .harness/rounds/REVIEW-r1.md §1 "P1-2"): the config copy's fake engine is
+// missing its REQUIRED adapterModule key entirely -- engine-profile.mjs's
+// own schema validation (piece B, scripts/check/engine-profile.mjs
+// validateEngines) rejects this at load time, before engine-adapter-
+// registry.mjs (piece D) or relayStep (piece C) ever run.
+// ---------------------------------------------------------------------------
+
+test("음성(D교차/P1-2): 설정 사본에서 engines.<가짜엔진>.adapterModule 제거 -> CONFIG_SCHEMA_INVALID, relayStep 미도달 -- 지시서 복사 0 · 영수증 0 · execFn 호출 0", async () => {
+  const fx = buildFixture();
+  try {
+    const crossConfigDir = tmpDir("hyk153c2-cross-config-");
+    const crossConfigPath = writeFakeConfigCopy(crossConfigDir, {
+      dropAdapterModule: true,
+    });
+    try {
+      const label = `HYK-0-fake-engine-${randomBytes(4).toString("hex")}-dcross`;
+      writeFileSync(
+        join(fx.repo, ".harness", "coder-task.md"),
+        `task_id: ${label}\ndropped_at: ${formatKstMinutes(Date.now() - 2 * 60 * 1000)}\nbase_commit_of_this_round: ${fx.baseCommit}\n`,
+        "utf8",
+      );
+      const result = await withEnvLedger(fx, () =>
+        runStepProbe({
+          argv: [
+            "--role",
+            "CODER",
+            "--worktree",
+            fx.cWt,
+            "--task-id",
+            label,
+            "--main-repo-dir",
+            fx.repo,
+          ],
+          env: { HARNESS_ENGINE_PROFILES_PATH: crossConfigPath },
+        }),
+      );
+      assert.equal(result.ok, false);
+      assert.equal(result.reasonCode, "CONFIG_SCHEMA_INVALID");
+      assert.match(result.reason, /adapterModule is required/);
+      assert.equal(result.execFnCalled, false, "execFn must never be called");
+      assert.equal(
+        existsSync(join(fx.cWt, ".harness", "coder-task.md")),
+        false,
+        "relayStep must never have run -- the task file must not have been copied",
+      );
+      assert.deepEqual(receiptsIn(join(fx.cWt, ".harness")), []);
+    } finally {
+      rmSync(crossConfigDir, { recursive: true, force: true });
     }
   } finally {
     cleanupFixture(fx);
@@ -950,7 +1104,7 @@ function setUpReviewPrereqs(
   execFileSync("git", ["checkout", "-q", headCommit], { cwd: fx.rWt });
   writeFileSync(
     join(fx.repo, ".harness", "review-task.md"),
-    `task_id: ${label}\ndropped_at: ${formatKstMinutes(Date.now() - 2 * 60 * 1000)}\nfor: ${forTaskId}\nhead_commit: ${headCommit}\n`,
+    `task_id: ${label}\ndropped_at: ${formatKstMinutes(Date.now() - 2 * 60 * 1000)}\nfor: ${forTaskId}\nhead_commit: ${headCommit}\nrunner_contract: none\n`,
     "utf8",
   );
   recordDispatch(fx, {

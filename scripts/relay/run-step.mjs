@@ -64,7 +64,13 @@ export function parseRunStepArgs(args) {
 export async function runStepCli(argv, opts = {}) {
   const parsed = parseRunStepArgs(argv);
   if (!parsed.ok) return { ok: false, reason: parsed.reason };
-  const selection = await selectRelayAdapterForRole(parsed.role, opts);
+  // HYK-153-fake-engine-2 (coder-task.md §2 product_scope ⓘ "새 주입 seam
+  // 0", restoring a 1R review-1 P1-1 rejection): this CLI entry point never
+  // forwards its own opts to the registry -- that would let any caller
+  // bypass the registry's own config/import contract (allowed-dir
+  // containment, naming pattern) via this entry point. opts is still used
+  // below, for relayStep's own (unrelated) opts, e.g. execFn.
+  const selection = await selectRelayAdapterForRole(parsed.role);
   if (!selection.ok) {
     return {
       ok: false,

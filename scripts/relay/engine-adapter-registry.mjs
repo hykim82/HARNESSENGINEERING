@@ -13,6 +13,14 @@
 // contract, is refused, never silently routed through whichever adapter
 // happens to load.
 //
+// HYK-153-fake-engine-2 (coder-task.md §2 product_scope ⓘ "새 주입 seam
+// 0", restoring a 1R review-1 P1-1 rejection): there is exactly one way to
+// change which config/adapter this module loads -- the existing
+// HARNESS_ENGINE_PROFILES_PATH environment variable engine-profile.mjs's
+// loadEngineProfiles() already reads. No caller, test or otherwise, can
+// hand this module a different profiles object or a different dynamic
+// import function; selectRelayAdapterForRole takes only `role`.
+//
 // Two layers of validation, two different failure classes (same §2 ⓘⓘⓘ):
 //   - the config SHAPE (engine-profile.mjs's schema validation, enforced at
 //     loadEngineProfiles() time -- a missing key, an empty/blank value, or
@@ -63,9 +71,9 @@ export const ADAPTER_SELECT_REASON = Object.freeze({
 // HYK-153-adapter-registry-1 (coder-task.md §2 product_scope ⓘⓘⓘ "기준 경로
 // = 등록부 모듈 자기 위치에서 계산한 저장소 루트(설정 파일 위치 아님)"):
 // this anchor is fixed at this module's own on-disk location -- it is
-// never read from config or from any opts, so a synthetic config injected
-// via HARNESS_ENGINE_PROFILES_PATH (or a test's own loadProfilesFn) cannot
-// widen where an adapterModule is allowed to resolve.
+// never read from config or from any caller-supplied override, so a
+// synthetic config injected via HARNESS_ENGINE_PROFILES_PATH cannot widen
+// where an adapterModule is allowed to resolve.
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 export const ALLOWED_ADAPTER_DIR = resolve(
   REPO_ROOT,
@@ -132,13 +140,9 @@ function validateAdapterContract(created) {
   return null;
 }
 
-function loadProfilesOrFail(opts) {
-  const loadFn =
-    typeof opts.loadProfilesFn === "function"
-      ? opts.loadProfilesFn
-      : loadEngineProfiles;
+function loadProfilesOrFail() {
   try {
-    return { ok: true, profiles: loadFn() };
+    return { ok: true, profiles: loadEngineProfiles() };
   } catch (err) {
     const reasonCode =
       isPlainObject(err) && isNonEmptyString(err.reason)
@@ -151,24 +155,21 @@ function loadProfilesOrFail(opts) {
   }
 }
 
-async function importAdapterModule(literalPath, opts) {
-  const importFn =
-    typeof opts.importFn === "function"
-      ? opts.importFn
-      : (href) => import(href);
+async function importAdapterModule(literalPath) {
   try {
-    return { ok: true, mod: await importFn(pathToFileURL(literalPath).href) };
+    return { ok: true, mod: await import(pathToFileURL(literalPath).href) };
   } catch {
     return null;
   }
 }
 
-// selectRelayAdapterForRole(role, opts?) -- the one production entry point
-// run-step.mjs calls. Never throws. opts.loadProfilesFn/opts.importFn are
-// test-only injection seams (default to the real loadEngineProfiles()/
-// dynamic import()) -- production call sites never pass them.
-export async function selectRelayAdapterForRole(role, opts = {}) {
-  const loaded = loadProfilesOrFail(opts);
+// selectRelayAdapterForRole(role) -- the one production entry point
+// run-step.mjs calls. Never throws. Takes no opts: the only way to change
+// what this resolves to is the real loadEngineProfiles() config (itself
+// only steerable via the existing HARNESS_ENGINE_PROFILES_PATH env var) and
+// the real dynamic import() of whatever adapterModule that config names.
+export async function selectRelayAdapterForRole(role) {
+  const loaded = loadProfilesOrFail();
   if (!loaded.ok) return loaded;
   const { profiles } = loaded;
 
@@ -197,7 +198,7 @@ export async function selectRelayAdapterForRole(role, opts = {}) {
     );
   }
 
-  const imported = await importAdapterModule(literalPath, opts);
+  const imported = await importAdapterModule(literalPath);
   if (!imported) {
     return fail(
       ADAPTER_SELECT_REASON.ADAPTER_MODULE_IMPORT_FAILED,
