@@ -28,18 +28,33 @@ import { ORCH_PROGRESS_VERDICT } from "./orch-progress-core.mjs";
 // 닫힌 목록 상수 -- 출처를 벗어난 항목을 코드가 지어내지 않게 한 곳에 둔다.
 // ---------------------------------------------------------------------------
 
-// ㄱ 닫힌 일곱 유형. ⛔유일한 출처 = D:\문서관리\하네스-관제실\
-// 북극성-좌표.md §1-C «ㄱ. 설계된 정지 -- 닫힌 목록»(91~103행, 2026-08-07
-// 한용 확정). 분모 7은 이 배열 길이에서만 온다 -- 문자열로 "7"을 박지
-// 않는다(목록이 한용 확정으로 바뀌면 분모도 기계로 따라간다).
+// ㄱ 닫힌 여섯 유형(번호 1~4 · 6 · 7). ⛔유일한 출처 = D:\문서관리\
+// 하네스-관제실\북극성-좌표.md §1-C «ㄱ. 설계된 정지 -- 닫힌 목록»(2026-08-07
+// 한용 확정 · 2026-11-12 19:1x 책임자 판정으로 게이트 5 폐지 반영 -- 원문
+// 일곱은 취소선으로 보존). 분모는 이 배열 길이에서만 온다 -- 문자열로
+// 숫자를 박지 않는다(목록이 한용 확정으로 바뀌면 분모도 기계로 따라간다).
+// 폐지된 5 는 아래 ABOLISHED_GATE_TYPES 에 번호만 남아 표기된다.
 export const GATE_TYPES = Object.freeze([
   Object.freeze({ number: 1, name: "다음 작업 선택" }),
   Object.freeze({ number: 2, name: "연속 반려 판정" }),
   Object.freeze({ number: 3, name: "북극성·큰 실행 승인" }),
   Object.freeze({ number: 4, name: "PR 승인·병합 / Linear Done" }),
-  Object.freeze({ number: 5, name: "패킷 서명" }),
   Object.freeze({ number: 6, name: "하드스톱" }),
   Object.freeze({ number: 7, name: "상신 답변" }),
+]);
+
+// HYK-255-ln-github-anchor-1 커밋 2 -- 폐지된 ㄱ 유형(분모 밖, 표기만).
+// 게이트 5 «패킷 서명»은 한용 «B» 확정 2026-09-03 05:55(sign.sh 서명 폐지,
+// 정본 = 통역 CLAUDE.md B-11)로 폐지됐고, 북극성-좌표.md §1-C 는
+// 2026-11-12 19:1x 에 «다음 여섯뿐 · 게이트 5 취소선 · 번호는 유지»로
+// 갱신됐다. 번호는 유지하되 분모(GATE_TYPES)에서만 뺀다.
+export const ABOLISHED_GATE_TYPES = Object.freeze([
+  Object.freeze({
+    number: 5,
+    name: "패킷 서명",
+    abolishedOn: "2026-09-03",
+    basis: "B-11",
+  }),
 ]);
 
 // 이 라운드에 독립 앵커(= ORCH가 만들거나 사람 actor로 가장할 수 없음이
@@ -337,6 +352,11 @@ function buildGaSection(gate4, auxNote) {
     `- 미커버 ㄱ 유형: ${uncovered.map((g) => `${g.number} ${g.name}`).join(" · ")}` +
       ` (4도 PR 승인·병합만 — Linear Done은 미커버)`,
   );
+  for (const g of ABOLISHED_GATE_TYPES) {
+    lines.push(
+      `- 폐지된 ㄱ 유형(분모 밖): ${g.number} ${g.name} — 폐지(${g.abolishedOn} ${g.basis})`,
+    );
+  }
   return lines;
 }
 
@@ -401,11 +421,57 @@ export function renderRelayLedgerAuxLines(relayLedgerResult) {
   return [line1, line2];
 }
 
+// HYK-255-ln-github-anchor-1 (판정 2026-11-12 19:1x 1ⓑ) -- ㄴ 독립 수집기
+// 1호(GitHub 웹 «Update branch» 병합 커밋 후보)의 ㄴ 절 새 줄. ⛔이 줄의
+// 확인 N 은 «후보 중 서명·작성자가 확인된 건수»일 뿐 ㄴ 분자가 아니다 --
+// 분류(Update branch 클릭이 ㄴ 인가 ㄱ-4 부속인가)가 확정되기 전이라
+// confirmedLnEvents 에는 절대 들어가지 않고(위 «확인 0건» 줄 무변), 이
+// 줄이 «분류 대기»를 문면으로 박는다. 입력이 없으면(미결선 호출자) 줄 0개.
+// 수집 실패는 bare 숫자 0 이 아니라 «수집 실패(사유)»다.
+const EXTERNAL_EVIDENCE_LINE_PREFIX = "- 외부 독립 증거 후보: ";
+
+export function renderExternalEvidenceCandidateLine(externalEvidence) {
+  if (!externalEvidence) return null;
+  if (externalEvidence.known !== true) {
+    const reason = externalEvidence.reason ?? "사유 미상";
+    return `${EXTERNAL_EVIDENCE_LINE_PREFIX}수집 실패(${reason})`;
+  }
+  return (
+    `${EXTERNAL_EVIDENCE_LINE_PREFIX}확인 ${externalEvidence.confirmed} · ` +
+    `미조회 ${externalEvidence.unchecked} · 분류 대기`
+  );
+}
+
+const EXTERNAL_EVIDENCE_COUNT_RE =
+  /^- 외부 독립 증거 후보: 확인 (\d+) · 미조회 (\d+) · 분류 대기$/m;
+const EXTERNAL_EVIDENCE_FAILED_RE =
+  /^- 외부 독립 증거 후보: 수집 실패\((.*)\)$/m;
+
+// 보고서 «텍스트»에서 위 줄을 다시 읽는다 -- reach-report.mjs 가 (수집기를
+// 다시 돌리지 않고) 이미 쓰인 partial-count-report.md 를 읽어 N 이 바뀌었는지
+// 판정할 때 쓴다. 줄 문면의 정본이 이 파일 한 곳이라 렌더와 파서가 어긋나지
+// 않는다. {state: "count"|"failed"|"absent"}.
+export function parseExternalEvidenceCandidateLine(reportText) {
+  const text = typeof reportText === "string" ? reportText : "";
+  const count = text.match(EXTERNAL_EVIDENCE_COUNT_RE);
+  if (count) {
+    return {
+      state: "count",
+      confirmed: Number(count[1]),
+      unchecked: Number(count[2]),
+    };
+  }
+  const failed = text.match(EXTERNAL_EVIDENCE_FAILED_RE);
+  if (failed) return { state: "failed", reason: failed[1] };
+  return { state: "absent" };
+}
+
 function buildLnSection(
   confirmedLnEvents,
   suspected,
   uncountedExamples,
   relayLedgerResult,
+  externalEvidence,
 ) {
   const lines = ["ㄴ 계획 밖 개입:"];
   const confirmedCount = Array.isArray(confirmedLnEvents)
@@ -414,6 +480,9 @@ function buildLnSection(
   lines.push(
     `- 외부 독립 증거로 확인된 사건: ${renderConfirmedLnCount(confirmedCount)}`,
   );
+  const externalEvidenceLine =
+    renderExternalEvidenceCandidateLine(externalEvidence);
+  if (externalEvidenceLine) lines.push(externalEvidenceLine);
   if (suspected.known === true) {
     const openNote =
       suspected.openCount > 0
@@ -485,6 +554,9 @@ export function buildPartialCountReport({
   // HYK-255-relay-aux-1 (product_scope ②) -- 기본값 = undefined ->
   // renderRelayLedgerAuxLines([]) 그대로 -> 줄 0개(미결선, 회귀 0).
   relayLedgerResult,
+  // HYK-255-ln-github-anchor-1 -- 기본값 undefined -> ㄴ 절 새 줄 0개
+  // (미결선 호출자 회귀 0). confirmedLnEvents 와 «별개 입력»이다.
+  externalEvidence,
 }) {
   const lines = [];
   lines.push("집계 성격: PARTIAL — 전수 아님");
@@ -513,6 +585,7 @@ export function buildPartialCountReport({
       suspected,
       uncountedExamples,
       relayLedgerResult,
+      externalEvidence,
     ),
   );
   lines.push("");

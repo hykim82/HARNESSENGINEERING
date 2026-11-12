@@ -44,7 +44,10 @@ import {
 // 보고에 편입한다(1-B «아침 보고 도달» 축). 판정·렌더링은 전부
 // partial-count-core.mjs의 순수 함수 몫이고, 이 wire는 파일 하나를
 // 읽어 넘길 뿐이다.
-import { formatPartialCountSection } from "./partial-count-core.mjs";
+import {
+  formatPartialCountSection,
+  parseExternalEvidenceCandidateLine,
+} from "./partial-count-core.mjs";
 
 export const DEFAULT_WATCH_LOG_PATH =
   "D:/문서관리/하네스-관제실/watch/watch.log";
@@ -71,18 +74,89 @@ function readStateFile(readFn, statePath) {
 // HYK-255 -- 부분 계수 보고 파일을 읽어 아침 보고용 절로 바꾼다. 파일이
 // 없으면(첫 운영 전·아직 안 만든 경우) null을 넘겨 «UNKNOWN — 파일 없음»
 // 절이 나온다 -- 조용한 생략 경로는 없다.
-function readPartialCountSection({ readFn, partialCountPath, now }) {
-  let fileText = null;
+function readPartialCountText({ readFn, partialCountPath }) {
   try {
-    fileText = readFn(partialCountPath, "utf8");
+    return readFn(partialCountPath, "utf8");
   } catch {
-    // 파일 없음/읽기 실패 -> fileText는 null 그대로.
+    // 파일 없음/읽기 실패 -> null (절이 UNKNOWN 을 명시한다).
+    return null;
   }
+}
+
+function readPartialCountSection({ fileText, partialCountPath, now }) {
   return formatPartialCountSection({
     fileText,
     sourceLabel: partialCountPath,
     nowMs: now,
   });
+}
+
+// HYK-255-ln-github-anchor-1 (판정 2026-11-12 19:1x 1ⓑ) -- 부분 계수 보고서
+// ㄴ 절 «외부 독립 증거 후보: 확인 N» 의 N 이 바뀔 때만 받는함 통지 1장(기존
+// 통지 길 -- 같은 notifyDir · 같은 파일 이름 규칙 · 같은 상태 파일). 이 wire
+// 는 수집기를 다시 돌리지 않고 이미 쓰인 보고서 «텍스트»의 그 줄만 읽는다.
+// 상태 파일의 아래 키 하나가 직전 N 을 기억한다 -- 이상 전이 키(axisKey)와
+// 섞이지 않는 이름이다.
+//
+// 줄을 못 읽은 회차(수집 실패 · 줄 없음 · 보고서 없음)는 N 변화가 아니다:
+// 통지 0장, 직전 N 기억 유지(실패를 사이에 두고 돌아온 같은 N 이 변화로
+// 오인되지 않게). 처음 관측은 N=0 이면 기준선(통지 0장), N>0 이면 변화로
+// 통지한다(과소통지보다 과대통지 -- 위 readStateFile 과 같은 원칙).
+export const EXTERNAL_EVIDENCE_STATE_KEY = "__externalEvidenceCandidates";
+
+function decideExternalEvidenceChange({ previousState, fileText }) {
+  const prevEntry = previousState[EXTERNAL_EVIDENCE_STATE_KEY];
+  const previous =
+    prevEntry && Number.isInteger(prevEntry.confirmed)
+      ? prevEntry.confirmed
+      : null;
+  const parsed = parseExternalEvidenceCandidateLine(fileText);
+  if (parsed.state !== "count") {
+    return { nextEntry: previous === null ? null : prevEntry, change: null };
+  }
+  const changed =
+    previous === null ? parsed.confirmed > 0 : previous !== parsed.confirmed;
+  return {
+    nextEntry: { confirmed: parsed.confirmed },
+    change: changed
+      ? { previous, current: parsed.confirmed, unchecked: parsed.unchecked }
+      : null,
+  };
+}
+
+// 받는함 통지 1장 -- 새 이상 전이(toNotify)와 외부 독립 증거 후보 N 변화
+// (externalChange)는 «같은 tick 에 겹쳐도 파일 1장»에 함께 싣는다. 둘 다
+// 없으면 파일도 폴더도 만들지 않고 null.
+function writeNoticeFile({
+  toNotify,
+  externalChange,
+  notifyDir,
+  now,
+  existsFn,
+  mkdirFn,
+  writeFn,
+}) {
+  if (toNotify.length === 0 && !externalChange) return null;
+  if (!existsFn(notifyDir)) mkdirFn(notifyDir, { recursive: true });
+  const noticeText =
+    buildNoticeText({ toNotify, nowMs: now }) +
+    formatExternalEvidenceChangeSection(externalChange);
+  const noticePath = path.join(notifyDir, buildNoticeFileName(now));
+  writeFn(noticePath, noticeText, "utf8");
+  return noticePath;
+}
+
+function formatExternalEvidenceChangeSection(change) {
+  if (!change) return "";
+  const before = change.previous === null ? "이전 기록 없음" : change.previous;
+  return [
+    "",
+    "부분 계수 보고서 ㄴ 절 «외부 독립 증거 후보» 의 확인 건수가 바뀌었습니다(같은 N 이 계속되면 다시 오지 않습니다):",
+    "",
+    `- **외부 독립 증거 후보(GitHub 웹 Update branch 병합 커밋)** 확인 ${before} -> ${change.current} ` +
+      `(미조회 ${change.unchecked} · 분류 대기 -- ㄴ 분자에는 들어가지 않았습니다. 분류 확정은 한용 몫입니다)`,
+    "",
+  ].join("\n");
 }
 
 // runReachOnce(...) -- 한 번의 실행. 모든 I/O가 주입 가능(시험이 실제
@@ -114,8 +188,9 @@ export function runReachOnce({
     watchLogText = "";
   }
   const { entries, skipped } = parseWatchLog(watchLogText);
+  const partialCountText = readPartialCountText({ readFn, partialCountPath });
   const partialCountSection = readPartialCountSection({
-    readFn,
+    fileText: partialCountText,
     partialCountPath,
     now,
   });
@@ -151,14 +226,23 @@ export function runReachOnce({
     openAnomalies: [...openAnomalies, ...openMeasurementFailures],
   });
 
-  let noticePath = null;
-  if (toNotify.length > 0) {
-    const noticeDir = notifyDir;
-    if (!existsFn(noticeDir)) mkdirFn(noticeDir, { recursive: true });
-    const noticeText = buildNoticeText({ toNotify, nowMs: now });
-    noticePath = path.join(noticeDir, buildNoticeFileName(now));
-    writeFn(noticePath, noticeText, "utf8");
+  const external = decideExternalEvidenceChange({
+    previousState,
+    fileText: partialCountText,
+  });
+  if (external.nextEntry) {
+    nextState[EXTERNAL_EVIDENCE_STATE_KEY] = external.nextEntry;
   }
+
+  const noticePath = writeNoticeFile({
+    toNotify,
+    externalChange: external.change,
+    notifyDir,
+    now,
+    existsFn,
+    mkdirFn,
+    writeFn,
+  });
 
   const stateDir = path.dirname(statePath);
   if (!existsFn(stateDir)) mkdirFn(stateDir, { recursive: true });
