@@ -178,3 +178,61 @@ deliverTask/collectCompletionSignals/teardownSeat + execFn) 고름을 한
 정직 한계(판정 1259 ⓑ): 관제실 ps1(좌석 기동·배달)의 엔진 리터럴
 분기는 저장소 밖이라 이 라운드로 증명되지 않는다 -- 조각 E(범위 밖)로
 등재.
+
+## ④ⓒ 가짜 엔진 합성 완주 (HYK-153-fake-engine-1, 조각 C -- 책임자 판정
+
+2026-11-11 12:1x/13:0x + 상신 1259 (가))
+
+```
+node --test scripts/relay/fake-engine-round.test.mjs
+```
+
+- **무엇을 증명하는가**: `scripts/check/engine-profiles.json`을 mkdtemp에
+  바이트 그대로 복사하고 `engines.<F>`(가짜 엔진, 어댑터 =
+  `scripts/relay/adapters/fake-engine-relay-adapter.mjs`) 1개를 더한 뒤
+  `HARNESS_ENGINE_PROFILES_PATH`로 그 사본을 가리키게 하면, 저장소
+  진입점 `run-step.mjs`의 `runStepCli`가 조각 D의 등록부로 그 가짜
+  어댑터를 실제로 골라 CODER→REVIEW 1라운드를 프로덕션 소비 게이트
+  (`checkRelayHandshake`의 전체 검사 · 합성 admission 반납 ·
+  `consumption-receipt-writer.mjs` 영수증 · reject-streak 기록, 검사
+  끔 0)까지 완주시킨다 -- 영수증 2개, 결과 파일의 `engine_profile:`
+  증언 줄이 영수증 `binding.resultFingerprint`에 결속, 전역(실제
+  관제실 원장 · 이 워크트리의 실제 `.harness/reject-streak.json`)에는
+  라벨 흔적이 0이다.
+- **라이브 설정·전역 원장 무변**: 라이브 `engine-profiles.json`의
+  sha256과 이 워크트리의 실제 `.harness/` 지문은 이 시험 전/후 바이트
+  단위로 같다(시험 자신의 `after()`가 매번 재확인). 실제 관제실
+  `D:\문서관리\하네스-관제실\admission-ledger.json`/`dispatch-
+receipts.jsonl`은 읽기만 한다(합성 라벨이 0건인지 대조하는 용도).
+- **음성 칸 6개**: B4(가짜 설정 `model: " "` → `CONFIG_SCHEMA_INVALID`,
+  어댑터 선택 자체가 실패해 `relayStep` 미도달) + pane_match 불일치(G1) ·
+  DONE 손찍기(`done_stamped_by` 마커 없음) · 예약 없음
+  (`admissionReturned` 실패) · REVIEW `head_commit` 불일치 · `verdict:`
+  2줄(AMBIGUOUS) -- 각각 영수증 0 + 지정된 거부 사유로 끝난다.
+- **실 모델/Orca 호출 0**: PATH 맨 앞에 `claude`/`codex`/`orca` 심(.cmd +
+  POSIX, 호출되면 표식 파일을 쓰고 97로 끝난다)을 두고 전 라운드를
+  돌린 뒤 표식 파일 0개를 확인한다. 가짜 어댑터의 정적 import 닫힘에는
+  `orca-adapter.mjs`/`claude-adapter.mjs`/`codex-adapter.mjs`/
+  `orca-relay-adapter.mjs`가 없고(G9 스캐너를 그 파일 원문에 직접
+  돌려도 위반 0), 이 테스트 파일 자신도 `run-step.mjs`/
+  `engine-adapter-registry.mjs`/`engine-profile.mjs`를 정적 import하지
+  않는다(env 주입 뒤 동적 import로만 닿는다).
+
+### 정직 한계
+
+- 이 라운드는 "다른 회사 엔진이 실제로 돈다"를 증명하지 않는다 --
+  오늘 claude/codex 둘 다 같은 Orca 어댑터로 수렴하는 것은 조각 D
+  그대로이고, 이 라운드는 등록부가 «설정에서 고른 임의의 어댑터
+  모듈»을 끝까지 소비 게이트에 태울 수 있음을 증명한다.
+- 관제실 ps1(좌석 기동·배달)의 엔진 리터럴 분기는 저장소 밖이라 여전히
+  증명되지 않는다 -- 조각 E(범위 밖)로 등재(판정 1259 ⓑ, 조각 D의 같은
+  한계를 조각 C도 물려받는다).
+- 러너 영수증 축은 이 시험의 범위 밖이다(`runner_contract: none` -- 합성
+  러너 영수증을 손으로 만들면 그 자체가 "손으로 만든 영수증"이 되므로
+  만들지 않는다).
+- `deliveryMode: "inject"`는 가짜 엔진에 참인 값이 아니다(가짜 완주는
+  Orca 배달을 타지 않으므로 이 값은 어디서도 읽히지 않는다) -- C-2,
+  기록만.
+- `engines`/`roles`의 빈 키 이름(`engines[""]`/`roles[""]`) 거부는
+  별도 커밋(`scripts/check/engine-profile.mjs`)으로 들어간다(C-1, B4가
+  의식적으로 범위 밖에 뒀던 반례).
