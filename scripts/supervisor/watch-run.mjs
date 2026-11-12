@@ -140,6 +140,10 @@ import {
   // 읽는다 -- 이 축은 그 판정 로직을 다시 구현하지 않고 argv 빌더만
   // 재사용한다(판정은 checkWorkingTreeCleanForArm, 아래).
   buildGitStatusCommand,
+  // HYK-464-teardown-3kinds-1 -- 무장 teardown 이 못 지우던 3부류 중 기계
+  // 증거로 닫히는 둘의 관측(주입형 어댑터 · 이 파일이 기본 구현을 결선한다).
+  observePatchEquivalence,
+  observePmReceiptBinding,
 } from "../relay/adapters/teardown-inventory-adapter.mjs";
 // HYK-491-teardown-arm-1 (coder-task.md §2 product_scope ① "teardown 실행
 // 경로") -- 무장(armed) 실행의 유일한 orca 호출 지점(G9: orca 문자열
@@ -3580,6 +3584,34 @@ function defaultIsAncestorFn(headSha, remoteSha, worktreePath) {
     throw err;
   }
 }
+// HYK-464-teardown-3kinds-1 -- ⓑ patch-id 동등의 기본 patchIdFn.
+// `git log -p --binary ...` 의 출력(바이트 그대로, 문자열로 풀지 않는다)을
+// `git patch-id --stable` 의 stdin 으로 넣고 그 출력만 돌려준다 --
+// 어댑터는 큰 diff 를 만지지 않는다. 호출당 시간 제한(10s)과 출력 상한이
+// 있고, 초과·실패는 던진다(어댑터가 «관측 안 됨» 으로 접는다).
+const PATCH_ID_CALL_TIMEOUT_MS = 10_000;
+const PATCH_ID_LOG_MAX_BUFFER = 256 * 1024 * 1024;
+const PATCH_ID_OUT_MAX_BUFFER = 16 * 1024 * 1024;
+export function defaultPatchIdFn(logArgv, worktreePath) {
+  const logBytes = execFileSync("git", logArgv, {
+    cwd: worktreePath,
+    stdio: ["ignore", "pipe", "ignore"],
+    timeout: PATCH_ID_CALL_TIMEOUT_MS,
+    maxBuffer: PATCH_ID_LOG_MAX_BUFFER,
+  });
+  const out = execFileSync("git", ["patch-id", "--stable"], {
+    cwd: worktreePath,
+    input: logBytes,
+    stdio: ["pipe", "pipe", "ignore"],
+    timeout: PATCH_ID_CALL_TIMEOUT_MS,
+    maxBuffer: PATCH_ID_OUT_MAX_BUFFER,
+  });
+  return out.toString("utf8");
+}
+// ⓒ 관제실 파일 목록(영수증 폴더) 기본 구현 -- 읽기 전용.
+function defaultControlRoomReaddirFn(dir) {
+  return readdirSync(dir);
+}
 function defaultArchiveExistsFn(p) {
   return existsSync(p);
 }
@@ -3855,6 +3887,61 @@ function deriveUnconsumedRoundsForWorktree({
   return { observable: false };
 }
 
+// B1(책임자 판정 1012) -- 라운드 증거는 archiveManifest가 이미 수집한
+// `.harness` 전체 파일 목록에서 `.harness/receipts/` 하위 개수만 센다(새 fs
+// 호출 0 -- 같은 관측을 재사용한다).
+function deriveRoundEvidence(archiveInventory) {
+  if (archiveInventory.archiveManifest.observable !== true) {
+    return { observable: false };
+  }
+  return {
+    observable: true,
+    count: archiveInventory.archiveManifest.files.filter((f) =>
+      f.path.startsWith(".harness/receipts/"),
+    ).length,
+  };
+}
+
+// HYK-464-teardown-3kinds-1 -- 새 증거는 «필요할 때만» 관측한다(조상이 아님이
+// 관측된 워크트리만 ⓑ · 영수증 0 인 워크트리만 ⓒ). 새 관측은 검사 순서를
+// 바꾸지 않는다 -- 코어의 검사 1·6 통과 분기가 소비한다. 필요 없으면 키 자체를
+// 싣지 않는다(기존 인벤토리 모양 무변).
+function observeNewTeardownEvidence({
+  worktreePath,
+  mergeStatus,
+  roundEvidence,
+  teardownShadow,
+  controlRoomRoot,
+  gitFn,
+  readFileFn,
+  existsFn,
+}) {
+  const evidence = {};
+  if (
+    mergeStatus?.observable === true &&
+    mergeStatus.isAncestorOfRemoteMaster === false
+  ) {
+    evidence.patchEquivalence = observePatchEquivalence(
+      worktreePath,
+      mergeStatus,
+      { gitFn, patchIdFn: teardownShadow.patchIdFn ?? defaultPatchIdFn },
+    );
+  }
+  if (roundEvidence.observable === true && roundEvidence.count === 0) {
+    evidence.pmBinding = observePmReceiptBinding(
+      worktreePath,
+      controlRoomRoot,
+      {
+        readFileFn,
+        existsFn,
+        readdirFn:
+          teardownShadow.controlRoomReaddirFn ?? defaultControlRoomReaddirFn,
+      },
+    );
+  }
+  return evidence;
+}
+
 // 워크트리 하나에 대해 observeArchiveInventory(ⓐⓒⓓ) + 위 ⓑ + 아래
 // B1(본체 제외·라운드 증거 0)을 합쳐 judgeArchiveEligibility를 구동한다.
 // 전부 주입 가능(시험은 fake git/fs/retirementReaddir를 명시로 준다,
@@ -3862,28 +3949,42 @@ function deriveUnconsumedRoundsForWorktree({
 // 아래)가 워크트리 목록의 인덱스 0인지만 전달한다 -- 이 함수 자신은
 // 워크트리 목록 전체를 모른다(단일 워크트리 관측 경계, teardown-
 // inventory-adapter.mjs와 동일한 관심사 분리).
+// 그림자 판정의 관측 주입 묶음(기본값은 위 default*Fn) -- judgeTeardownShadow
+// ForWorktree 의 복잡도 분산용 분리(동작 무변).
+function buildShadowObserveOpts({
+  teardownShadow,
+  gitFn,
+  existsFn,
+  readFileFn,
+}) {
+  return {
+    gitFn,
+    lsRemoteFn: teardownShadow.lsRemoteFn ?? defaultArchiveGitFn,
+    isAncestorFn: teardownShadow.isAncestorFn ?? defaultIsAncestorFn,
+    existsFn,
+    readFileFn,
+    listHarnessFilesFn:
+      teardownShadow.listHarnessFilesFn ?? defaultListHarnessFiles,
+    readFileBufferFn:
+      teardownShadow.readFileBufferFn ?? defaultReadHarnessFileBuffer,
+  };
+}
+
 function judgeTeardownShadowForWorktree({
   worktreePath,
   detectorResult,
   teardownShadow,
   isMainCheckout,
+  controlRoomRoot,
 }) {
   const observeArchiveInventoryFn =
     teardownShadow.observeArchiveInventoryFn ?? observeArchiveInventory;
   const readFileFn = teardownShadow.readFileFn ?? defaultArchiveReadFileFn;
+  const gitFn = teardownShadow.gitFn ?? defaultArchiveGitFn;
+  const existsFn = teardownShadow.existsFn ?? defaultArchiveExistsFn;
   const archiveInventory = observeArchiveInventoryFn(
     { worktreePath },
-    {
-      gitFn: teardownShadow.gitFn ?? defaultArchiveGitFn,
-      lsRemoteFn: teardownShadow.lsRemoteFn ?? defaultArchiveGitFn,
-      isAncestorFn: teardownShadow.isAncestorFn ?? defaultIsAncestorFn,
-      existsFn: teardownShadow.existsFn ?? defaultArchiveExistsFn,
-      readFileFn,
-      listHarnessFilesFn:
-        teardownShadow.listHarnessFilesFn ?? defaultListHarnessFiles,
-      readFileBufferFn:
-        teardownShadow.readFileBufferFn ?? defaultReadHarnessFileBuffer,
-    },
+    buildShadowObserveOpts({ teardownShadow, gitFn, existsFn, readFileFn }),
   );
   const unconsumedRounds = deriveUnconsumedRoundsForWorktree({
     worktreePath,
@@ -3893,19 +3994,19 @@ function judgeTeardownShadowForWorktree({
     readFileFn,
   });
   // B1(책임자 판정 1012) -- 본체는 `isMainCheckout`을 그대로 싣는다(이미
-  // 관측된 사실, 재관측 불필요). 라운드 증거는 archiveManifest가 이미
-  // 수집한 `.harness` 전체 파일 목록에서 `.harness/receipts/` 하위
-  // 개수만 센다(새 fs 호출 0 -- 같은 관측을 재사용한다).
+  // 관측된 사실, 재관측 불필요).
   const mainCheckout = { observable: true, isMain: isMainCheckout === true };
-  const roundEvidence =
-    archiveInventory.archiveManifest.observable === true
-      ? {
-          observable: true,
-          count: archiveInventory.archiveManifest.files.filter((f) =>
-            f.path.startsWith(".harness/receipts/"),
-          ).length,
-        }
-      : { observable: false };
+  const roundEvidence = deriveRoundEvidence(archiveInventory);
+  const newEvidence = observeNewTeardownEvidence({
+    worktreePath,
+    mergeStatus: archiveInventory.mergeStatus,
+    roundEvidence,
+    teardownShadow,
+    controlRoomRoot,
+    gitFn,
+    readFileFn,
+    existsFn,
+  });
   const judgeArchiveEligibilityFn =
     teardownShadow.judgeArchiveEligibilityFn ?? judgeArchiveEligibility;
   const judged = judgeArchiveEligibilityFn({
@@ -3914,13 +4015,24 @@ function judgeTeardownShadowForWorktree({
       unconsumedRounds,
       mainCheckout,
       roundEvidence,
+      ...newEvidence,
     },
   });
   return {
     worktreePath,
     eligibility: judged.eligibility,
     reason: judged.reason,
+    // N13: 판정이 본 HEAD(무장 직전 재대조 기준) · 어느 문으로 열렸는지.
+    headSha: judgedHeadShaOf(archiveInventory.mergeStatus),
+    openedBy: judged.evidence?.openedBy ?? null,
   };
+}
+
+function judgedHeadShaOf(mergeStatus) {
+  return mergeStatus?.observable === true &&
+    isNonEmptyString(mergeStatus.headSha)
+    ? mergeStatus.headSha
+    : null;
 }
 
 const TEARDOWN_SHADOW_STATE_FILENAME = "teardown-shadow-notify-state.json";
@@ -3959,6 +4071,11 @@ function buildTeardownShadowNoticeText({ eligibleEntries, allEntries, nowMs }) {
     lines.push("");
     lines.push(`## ${entry.worktreePath}`);
     lines.push("- 판정: ELIGIBLE");
+    if (entry.openedBy && typeof entry.openedBy === "object") {
+      lines.push(
+        `- 열린 문: 병합=${entry.openedBy.merge ?? "(없음)"} · 라운드 증거=${entry.openedBy.round ?? "(없음)"}`,
+      );
+    }
     lines.push(
       `- ORCH 초안 3줄(검토 후 손으로 실행 -- ⚠️\`orca worktree rm\`은 브랜치도 함께 지운다):`,
     );
@@ -4853,8 +4970,51 @@ function removeRestoreAndReobserve({
   };
 }
 
+// HYK-464-teardown-3kinds-1 N13 -- 판정 뒤·무장 실행 전에 HEAD 가 움직였는지
+// 대조한다. patch-id 동등(ⓑ)은 «그 HEAD 의 내용»에 대한 증거이므로, 판정
+// 때 본 HEAD 와 지금 HEAD 가 다르면 그 증거는 이 커밋을 덮지 않는다.
+// 판정 HEAD 를 모르면(없음) 같다고 보지 않는다(fail-closed). 건너뜀 사유
+// TEARDOWN_ARM_HEAD_MOVED 는 판정 REASON 이 아니라 «무장 경로 건너뜀» 사유다.
+function checkArmHeadUnmoved({ judgedHeadSha, currentHeadSha }) {
+  const same =
+    isNonEmptyString(judgedHeadSha) &&
+    isNonEmptyString(currentHeadSha) &&
+    judgedHeadSha.toLowerCase() === currentHeadSha.toLowerCase();
+  if (same) return null;
+  return {
+    ok: false,
+    step: "HEAD_RECHECK",
+    reason: "TEARDOWN_ARM_HEAD_MOVED",
+    judgedHeadSha: judgedHeadSha ?? null,
+    currentHeadSha: currentHeadSha ?? null,
+  };
+}
+
+// 재관측(observeFreshArmInventory) + N13 HEAD 재대조를 한 걸음으로 묶는다
+// (runArmedRemovalForWorktree 의 줄수·복잡도 분산). 실패는 {ok:false, step,
+// reason} 모양 그대로다.
+function observeFreshArmInventoryUnmoved({
+  worktreePath,
+  judgedHeadSha,
+  teardownShadow,
+  readFileBufferFn,
+}) {
+  const observed = observeFreshArmInventory({
+    worktreePath,
+    teardownShadow,
+    readFileBufferFn,
+  });
+  if (!observed.ok) return observed;
+  const headMoved = checkArmHeadUnmoved({
+    judgedHeadSha,
+    currentHeadSha: observed.headSha,
+  });
+  return headMoved ?? observed;
+}
+
 function runArmedRemovalForWorktree({
   worktreePath,
+  judgedHeadSha,
   repoRoot,
   archiveRoot,
   now,
@@ -4868,8 +5028,9 @@ function runArmedRemovalForWorktree({
   writeFn,
   execFn,
 }) {
-  const observed = observeFreshArmInventory({
+  const observed = observeFreshArmInventoryUnmoved({
     worktreePath,
+    judgedHeadSha,
     teardownShadow,
     readFileBufferFn,
   });
@@ -4950,11 +5111,27 @@ function buildTeardownArmNoticeResultLabel(r) {
   if (isArmRemovalSkipOnlyFailure(r)) return `건너뜀(${r.step})`;
   return `중단(${r.step})`;
 }
+// HYK-464-teardown-3kinds-1 -- 어느 문으로 열렸는지(감사 표기) · N13 두 SHA.
+function buildTeardownArmNoticeOpenedByLines(r) {
+  const lines = [];
+  if (r.openedBy && typeof r.openedBy === "object") {
+    lines.push(
+      `- 열린 문: 병합=${r.openedBy.merge ?? "(없음)"} · 라운드 증거=${r.openedBy.round ?? "(없음)"}`,
+    );
+  }
+  if (r.reason === "TEARDOWN_ARM_HEAD_MOVED") {
+    lines.push(
+      `- 판정 때 HEAD: ${r.judgedHeadSha ?? "(없음)"} / 지금 HEAD: ${r.currentHeadSha ?? "(없음)"} (다음 회차에 다시 판정)`,
+    );
+  }
+  return lines;
+}
 function buildTeardownArmNoticeResultLines(r) {
   const lines = [];
   lines.push(`## ${r.worktreePath}`);
   lines.push(`- 결과: ${buildTeardownArmNoticeResultLabel(r)}`);
   if (!r.ok) lines.push(`- 사유: ${r.reason}`);
+  lines.push(...buildTeardownArmNoticeOpenedByLines(r));
   if (isNonEmptyString(r.recordPath)) {
     lines.push(`- SHA 선기록 파일: ${r.recordPath}`);
   }
@@ -5039,9 +5216,12 @@ function buildTeardownArmNoticeFileName(nowMs) {
 // 판정·처리"). 그 밖(아카이브 쓰기/대조 실패·제거 실패·복원 실패·
 // 재관측 실패·좌석 실패 등 "중간 단계 실패")은 무변으로 전체 중단을
 // 유지한다.
+// HYK-464-teardown-3kinds-1 N13: 판정 뒤 HEAD 이동도 «건너뜀» 이다(그
+// 워크트리만 — 다음 회차에 다시 판정된다 · 뒤 워크트리는 계속 처리).
 const ARM_REMOVAL_SKIP_ONLY_REASONS = new Set([
   "TEARDOWN_ARM_WORKING_TREE_DIRTY",
   "TEARDOWN_ARM_ARCHIVE_ALREADY_EXISTS",
+  "TEARDOWN_ARM_HEAD_MOVED",
 ]);
 function isArmRemovalSkipOnlyFailure(r) {
   return r.ok === false && ARM_REMOVAL_SKIP_ONLY_REASONS.has(r.reason);
@@ -5064,8 +5244,9 @@ function runArmedRemovalLoop({
 }) {
   const results = [];
   for (const entry of eligibleEntries) {
-    const r = runArmedRemovalForWorktree({
+    const r0 = runArmedRemovalForWorktree({
       worktreePath: entry.worktreePath,
+      judgedHeadSha: entry.headSha,
       repoRoot,
       archiveRoot,
       now,
@@ -5079,6 +5260,8 @@ function runArmedRemovalLoop({
       writeFn,
       execFn,
     });
+    // 받는함에 «어느 문으로 열렸나»를 표기하려고 판정의 openedBy 를 싣는다.
+    const r = { ...r0, openedBy: entry.openedBy ?? null };
     results.push(r);
     if (!r.ok && !isArmRemovalSkipOnlyFailure(r)) break;
   }
@@ -5285,6 +5468,9 @@ function runTeardownShadowStep({
       detectorResult,
       teardownShadow: teardownShadowForRun,
       isMainCheckout: idx === 0,
+      // 관제실 루트 = dirname(--watch-dir) (새 CLI 플래그 0). ⛔watch/ 아래
+      // 낡은 사본(예: watch/dispatch-receipts.jsonl)은 읽지 않는다.
+      controlRoomRoot: path.dirname(watchDir),
     }),
   );
   const eligibleEntries = entries.filter(

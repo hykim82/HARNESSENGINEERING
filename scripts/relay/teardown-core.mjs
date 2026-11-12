@@ -686,7 +686,162 @@ function buildArchiveEvidence(ruleId, extra = {}) {
   return { ruleId, ...extra };
 }
 
-// ⓐ 병합 완료 -- 브랜치 head가 origin/master(ls-remote 값)의 조상인가.
+// ---- HYK-464-teardown-3kinds-1 -- «무장 teardown 이 구조적으로 못 지우던
+// 3부류» 중 기계 증거만으로 닫히는 둘. 새 검사를 끼우지 않는다 --
+// 검사 1(병합)과 검사 6(라운드 증거)의 «통과» 분기에 OR 한 묶음씩만 넓힌다
+// (아래 MERGE_OPENERS / ROUND_EVIDENCE_OPENERS: 한 자리 OR 묶음 -- CODER-2 가
+// 은퇴 표지 분기를 같은 배열 끝에 덧붙인다). 검사 순서·새 REASON 코드 0.
+//
+// fail-closed 규약(위 헤더 «관측 안 됨» 대 «막는 사실»과 같다): 새 증거
+// 필드는 observable === true 일 때만, 그리고 이 파일이 숫자 불변식을
+// 다시 확인해 맞을 때만 «통과» 분기를 연다. 어댑터가 넘긴 equivalent:true /
+// bound:true 한 글자를 믿지 않는다. 실패 사유는 기존 NOT_MERGED_TO_MASTER /
+// NO_ROUND_EVIDENCE 그대로이고, 새 필드는 거부 evidence 에만 실린다.
+export const PATCH_EQUIVALENCE_BRANCH_CAP = 50;
+export const PATCH_EQUIVALENCE_MASTER_CAP = 1000;
+// evidence 전용 «원인» 닫힌 집합(판정 REASON 이 아니다).
+export const PATCH_EQUIVALENCE_CAUSE = Object.freeze({
+  HAS_MERGE: "HAS_MERGE",
+  RANGE_EXCEEDED: "RANGE_EXCEEDED",
+  EMPTY_RANGE: "EMPTY_RANGE",
+  PATCH_ID_COUNT_MISMATCH: "PATCH_ID_COUNT_MISMATCH",
+  UNMATCHED: "UNMATCHED",
+});
+export const PM_BINDING_CAUSE = Object.freeze({
+  NO_REGISTRY_ROW: "NO_REGISTRY_ROW",
+  NON_PM_ROW: "NON_PM_ROW",
+  AMBIGUOUS_PANE: "AMBIGUOUS_PANE",
+  NO_DISPATCH: "NO_DISPATCH",
+  NON_PM_DISPATCH: "NON_PM_DISPATCH",
+  NO_RECEIPT: "NO_RECEIPT",
+  AMBIGUOUS_RECEIPT: "AMBIGUOUS_RECEIPT",
+  RECEIPT_BEFORE_DISPATCH: "RECEIPT_BEFORE_DISPATCH",
+  PRE_DISPATCH_WINDOW: "PRE_DISPATCH_WINDOW",
+});
+// ELIGIBLE evidence.openedBy 표기용 «어느 문으로 열렸나» 토큰.
+export const OPENED_BY = Object.freeze({
+  ANCESTOR: "ANCESTOR",
+  PATCH_ID: "PATCH_ID",
+  RECEIPTS: "RECEIPTS",
+  PM_BINDING: "PM_BINDING",
+});
+
+function isSha40(v) {
+  return typeof v === "string" && /^[0-9a-f]{40}$/i.test(v);
+}
+
+function isValidPatchEquivalence(v) {
+  if (!isPlainObject(v) || typeof v.observable !== "boolean") return false;
+  if (v.observable !== true) return true;
+  return typeof v.equivalent === "boolean";
+}
+
+function isIntegerInRange(v, min, max) {
+  return Number.isInteger(v) && v >= min && v <= max;
+}
+
+// 증거가 «이 판정이 본 바로 그 HEAD / master» 에 대한 것이어야 한다.
+function patchEquivalenceBoundToMergeStatus(pe, mergeStatus) {
+  return (
+    isSha40(pe.headSha) &&
+    pe.headSha === mergeStatus.headSha &&
+    isSha40(pe.remoteMasterSha) &&
+    pe.remoteMasterSha === mergeStatus.remoteMasterSha
+  );
+}
+
+// 숫자 불변식(설계 «코어의 재확인» 문장 그대로): 병합 0 · 커밋 1..50 ·
+// master 쪽 0..1000 · patch-id 줄 수 = 커밋 수 = 대응 수 · 미대응 0.
+function patchEquivalenceCountsHold(pe) {
+  const n = pe.branchCommitCount;
+  return (
+    pe.branchMergeCount === 0 &&
+    isIntegerInRange(n, 1, PATCH_EQUIVALENCE_BRANCH_CAP) &&
+    isIntegerInRange(pe.masterCommitCount, 0, PATCH_EQUIVALENCE_MASTER_CAP) &&
+    pe.patchIdLineCount === n &&
+    pe.matchedCount === n &&
+    Array.isArray(pe.unmatched) &&
+    pe.unmatched.length === 0
+  );
+}
+
+// «코어의 재확인»: 숫자 불변식이 하나라도 깨지면 거부한다.
+function confirmPatchEquivalence(pe, mergeStatus) {
+  if (!isValidPatchEquivalence(pe)) return false;
+  if (pe.observable !== true || pe.equivalent !== true) return false;
+  return (
+    patchEquivalenceBoundToMergeStatus(pe, mergeStatus) &&
+    patchEquivalenceCountsHold(pe)
+  );
+}
+
+function isValidPmBinding(v) {
+  if (!isPlainObject(v) || typeof v.observable !== "boolean") return false;
+  if (v.observable !== true) return true;
+  return typeof v.bound === "boolean";
+}
+
+// 숫자 불변식: PM 좌석 1개 이상 · 배달 1건 이상 · «모든» 배달이 소비됨(전칭)
+// · PM 아닌 행 0 · 모호한 paneKey 0 · 미소비 라벨 0 · 배달 전 구간 닫힘.
+function pmBindingCountsHold(pm) {
+  return (
+    isIntegerInRange(pm.paneCount, 1, Number.MAX_SAFE_INTEGER) &&
+    isIntegerInRange(pm.dispatchCount, 1, Number.MAX_SAFE_INTEGER) &&
+    pm.consumedCount === pm.dispatchCount &&
+    pm.nonPmRowCount === 0 &&
+    pm.ambiguousPaneCount === 0 &&
+    Array.isArray(pm.unconsumedLabels) &&
+    pm.unconsumedLabels.length === 0 &&
+    pm.preDispatchWindowOpen === false
+  );
+}
+
+function confirmPmBinding(pm) {
+  if (!isValidPmBinding(pm)) return false;
+  if (pm.observable !== true || pm.bound !== true) return false;
+  return pmBindingCountsHold(pm);
+}
+
+// 한 자리 OR 묶음 -- 순서대로 첫 «열린 문» 의 토큰을 돌려준다(없으면 null).
+const MERGE_OPENERS = Object.freeze([
+  {
+    via: OPENED_BY.ANCESTOR,
+    opens: (inventory) =>
+      inventory.mergeStatus.isAncestorOfRemoteMaster === true,
+  },
+  {
+    via: OPENED_BY.PATCH_ID,
+    opens: (inventory) =>
+      confirmPatchEquivalence(
+        inventory.patchEquivalence,
+        inventory.mergeStatus,
+      ),
+  },
+]);
+const ROUND_EVIDENCE_OPENERS = Object.freeze([
+  {
+    via: OPENED_BY.RECEIPTS,
+    opens: (inventory) => inventory.roundEvidence.count > 0,
+  },
+  {
+    via: OPENED_BY.PM_BINDING,
+    opens: (inventory) => confirmPmBinding(inventory.pmBinding),
+  },
+]);
+function firstOpenedBy(openers, inventory) {
+  for (const opener of openers) {
+    if (opener.opens(inventory) === true) return opener.via;
+  }
+  return null;
+}
+
+// 거부 evidence 에만 새 필드를 싣는다(있을 때만 -- 기존 evidence 모양 무변).
+function withOptionalEvidence(extra, key, value) {
+  return value === undefined ? extra : { ...extra, [key]: value };
+}
+
+// ⓐ 병합 완료 -- 브랜치 head가 origin/master(ls-remote 값)의 조상이거나
+// (HYK-464-teardown-3kinds-1) patch-id 가 전부 master 에 들어 있는가.
 function checkMergeAncestry(inventory) {
   const mergeStatus = inventory.mergeStatus;
   if (!isValidMergeStatus(mergeStatus) || mergeStatus.observable !== true) {
@@ -698,13 +853,18 @@ function checkMergeAncestry(inventory) {
       }),
     };
   }
-  if (mergeStatus.isAncestorOfRemoteMaster !== true) {
+  if (firstOpenedBy(MERGE_OPENERS, inventory) === null) {
     return {
       eligibility: ELIGIBILITY.EVIDENCE_NOT_DURABLE,
       reason: REASON.NOT_MERGED_TO_MASTER,
-      evidence: buildArchiveEvidence(REASON.NOT_MERGED_TO_MASTER, {
-        mergeStatus,
-      }),
+      evidence: buildArchiveEvidence(
+        REASON.NOT_MERGED_TO_MASTER,
+        withOptionalEvidence(
+          { mergeStatus },
+          "patchEquivalence",
+          inventory.patchEquivalence,
+        ),
+      ),
     };
   }
   return null;
@@ -851,13 +1011,20 @@ function checkRoundEvidencePresent(inventory) {
       }),
     };
   }
-  if (roundEvidence.count === 0) {
+  // HYK-464-teardown-3kinds-1 -- 영수증 «또는» (CODER-2 가 이어 붙일) 다른
+  // 문: 한 자리 OR 묶음(ROUND_EVIDENCE_OPENERS).
+  if (firstOpenedBy(ROUND_EVIDENCE_OPENERS, inventory) === null) {
     return {
       eligibility: ELIGIBILITY.EVIDENCE_NOT_DURABLE,
       reason: REASON.NO_ROUND_EVIDENCE,
-      evidence: buildArchiveEvidence(REASON.NO_ROUND_EVIDENCE, {
-        roundEvidence,
-      }),
+      evidence: buildArchiveEvidence(
+        REASON.NO_ROUND_EVIDENCE,
+        withOptionalEvidence(
+          { roundEvidence },
+          "pmBinding",
+          inventory.pmBinding,
+        ),
+      ),
     };
   }
   return null;
@@ -917,6 +1084,11 @@ export function judgeArchiveEligibility(args = {}) {
       unconsumedRounds: inventory.unconsumedRounds,
       keepReason: inventory.keepReason,
       archiveManifest: inventory.archiveManifest,
+      // HYK-464-teardown-3kinds-1 -- 어느 문으로 열렸는지(감사 표기).
+      openedBy: {
+        merge: firstOpenedBy(MERGE_OPENERS, inventory),
+        round: firstOpenedBy(ROUND_EVIDENCE_OPENERS, inventory),
+      },
     }),
   };
 }

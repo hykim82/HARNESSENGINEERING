@@ -1,6 +1,12 @@
 import { createHash } from "node:crypto";
 import { posix as posixPath } from "node:path";
-import { TEARDOWN_SCHEMA_VERSION } from "../teardown-core.mjs";
+import {
+  TEARDOWN_SCHEMA_VERSION,
+  PATCH_EQUIVALENCE_BRANCH_CAP,
+  PATCH_EQUIVALENCE_MASTER_CAP,
+  PATCH_EQUIVALENCE_CAUSE,
+  PM_BINDING_CAUSE,
+} from "../teardown-core.mjs";
 
 // HYK-171 사이클4b-1 (coder-task.md §2-A) -- teardown 3층(git/orca/dir) +
 // 활성참조 + working tree를 **관측만** 하는 어댑터. 파괴 argv 0(worktree
@@ -438,6 +444,494 @@ export function observeSeatCount(worktreePath, opts) {
       canonicalizePath(entry.worktreePath) === targetCanonical,
   ).length;
   return { observable: true, count };
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// HYK-464-teardown-3kinds-1 -- «무장 teardown 이 구조적으로 못 지우던 3부류»
+// 중 기계 증거만으로 닫히는 둘의 관측. 이 파일은 프로세스를 실행하지 않는다
+// (전부 주입형) -- git 은 opts.gitFn, patch-id 계산은 opts.patchIdFn, 관제실
+// 파일은 opts.readFileFn / existsFn / readdirFn. 읽기 전용 argv 만 만든다.
+// ═══════════════════════════════════════════════════════════════════════
+
+export function buildGitMergeBaseCommand(headSha, remoteSha) {
+  return ["merge-base", headSha, remoteSha];
+}
+export function buildGitRevListMergesCountCommand(range) {
+  return ["rev-list", "--merges", "--count", range];
+}
+// --max-count: 상한 + 1 개까지만 읽어 «상한 초과» 를 판별한다(무제한 출력 0).
+export function buildGitRevListBranchCommitsCommand(range, maxCount) {
+  return ["rev-list", "--no-merges", `--max-count=${maxCount}`, range];
+}
+export function buildGitRevListNoMergesCountCommand(range) {
+  return ["rev-list", "--no-merges", "--count", range];
+}
+// ⛔--binary 필수: 빼면 이진 파일 변경이 «Binary files differ» 한 줄로
+// 접혀 다른 내용끼리 같은 patch-id 를 낼 수 있다(설계 §(b) ⓑ 조건 5).
+// 병합 커밋은 patch 를 내지 않으므로 --no-merges (병합 커밋 0 은 따로 센다).
+// 장식·서명·textconv·외부 diff 는 사용자 설정과 무관하게 끈다.
+export function buildGitLogPatchCommand(range) {
+  return [
+    "log",
+    "-p",
+    "--binary",
+    "--no-merges",
+    "--no-color",
+    "--no-ext-diff",
+    "--no-textconv",
+    "--no-decorate",
+    "--no-show-signature",
+    range,
+  ];
+}
+
+function isSha40(v) {
+  return typeof v === "string" && /^[0-9a-f]{40}$/i.test(v);
+}
+function readNonNegativeInt(text) {
+  const trimmed = String(text).trim();
+  return /^\d+$/.test(trimmed) ? Number(trimmed) : null;
+}
+// rev-list 출력 -- 한 줄에 sha 하나. 모양이 틀리면 null.
+function parseShaLines(text) {
+  if (typeof text !== "string") return null;
+  const out = [];
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (line.length === 0) continue;
+    if (!isSha40(line)) return null;
+    out.push(line);
+  }
+  return out;
+}
+// `git patch-id --stable` 출력 -- «<patch-id> <commit-id>» 한 줄씩.
+function parsePatchIdLines(text) {
+  if (typeof text !== "string") return null;
+  const out = [];
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (line.length === 0) continue;
+    const m = /^([0-9a-f]{40}|[0-9a-f]{64}) ([0-9a-f]{40}|[0-9a-f]{64})$/i.exec(
+      line,
+    );
+    if (!m) return null;
+    out.push({ patchId: m[1].toLowerCase(), commitId: m[2].toLowerCase() });
+  }
+  return out;
+}
+
+// ⓑ patch-id 동등 -- 설계 §(b) ⓑ 7조건. mergeStatus 는 observeMergeStatus 의
+// 결과(조상이 «아님» 이 관측된 경우에만 부른다). git 호출이 하나라도 던지거나
+// 시간 초과거나 모양이 틀리면 {observable:false}(거짓 «아니다» / «맞다» 0).
+// 조건 2~7 이 거짓이면 {observable:true, equivalent:false, cause}.
+function sameStringSets(a, b) {
+  if (a.length !== b.length) return false;
+  const setA = new Set(a);
+  if (setA.size !== a.length) return false;
+  return b.every((x) => setA.has(x));
+}
+
+function notEquivalentResult(base, cause, extra) {
+  return { ...base, equivalent: false, cause, ...extra };
+}
+
+// 조건 2~4: 범위 계수 -- 병합 커밋 0 · 브랜치 비병합 커밋 1..50 · master 쪽
+// 비병합 커밋 ≤1000. 끝나면 {result}(조기 종료) 또는 {branchCommits, masterCommitCount}.
+function checkPatchEquivalenceRanges(worktreePath, base, ranges, opts) {
+  const run = (argv) => opts.gitFn(argv, worktreePath);
+  // 조건 2: 병합 커밋 0 (git cherry / --no-merges 는 병합 커밋을 조용히 건너뛴다).
+  const merges = readNonNegativeInt(
+    run(buildGitRevListMergesCountCommand(ranges.branch)),
+  );
+  if (merges === null) return { result: { observable: false } };
+  if (merges > 0) {
+    const extra = { branchMergeCount: merges };
+    return {
+      result: notEquivalentResult(
+        base,
+        PATCH_EQUIVALENCE_CAUSE.HAS_MERGE,
+        extra,
+      ),
+    };
+  }
+  // 조건 3: 브랜치 쪽 비병합 커밋 1개 이상 · 상한(50) 이하.
+  const branchCommits = parseShaLines(
+    run(
+      buildGitRevListBranchCommitsCommand(
+        ranges.branch,
+        PATCH_EQUIVALENCE_BRANCH_CAP + 1,
+      ),
+    ),
+  );
+  if (branchCommits === null) return { result: { observable: false } };
+  const emptyOrHuge =
+    branchCommits.length === 0
+      ? PATCH_EQUIVALENCE_CAUSE.EMPTY_RANGE
+      : branchCommits.length > PATCH_EQUIVALENCE_BRANCH_CAP
+        ? PATCH_EQUIVALENCE_CAUSE.RANGE_EXCEEDED
+        : null;
+  if (emptyOrHuge) {
+    const extra = { branchMergeCount: 0 };
+    return { result: notEquivalentResult(base, emptyOrHuge, extra) };
+  }
+  // 조건 4: master 쪽 비병합 커밋 상한(1000) 이하.
+  const masterCommitCount = readNonNegativeInt(
+    run(buildGitRevListNoMergesCountCommand(ranges.master)),
+  );
+  if (masterCommitCount === null) return { result: { observable: false } };
+  if (masterCommitCount > PATCH_EQUIVALENCE_MASTER_CAP) {
+    const extra = {
+      branchMergeCount: 0,
+      branchCommitCount: branchCommits.length,
+      masterCommitCount,
+    };
+    return {
+      result: notEquivalentResult(
+        base,
+        PATCH_EQUIVALENCE_CAUSE.RANGE_EXCEEDED,
+        extra,
+      ),
+    };
+  }
+  return { branchCommits, masterCommitCount };
+}
+
+// 조건 5~7: 양쪽 patch-id(--binary) -- 줄 수 = 커밋 수 · 출력 커밋 집합 =
+// 브랜치 커밋 집합 · 브랜치의 모든 patch-id 가 master 쪽 집합에 있다.
+function comparePatchIds(worktreePath, base, ranges, bounds, opts) {
+  const patchIds = (range) =>
+    parsePatchIdLines(
+      opts.patchIdFn(buildGitLogPatchCommand(range), worktreePath),
+    );
+  const branchPairs = patchIds(ranges.branch);
+  const masterPairs = patchIds(ranges.master);
+  if (branchPairs === null || masterPairs === null)
+    return { observable: false };
+  const { branchCommits, masterCommitCount } = bounds;
+  const counts = {
+    branchMergeCount: 0,
+    branchCommitCount: branchCommits.length,
+    masterCommitCount,
+    patchIdLineCount: branchPairs.length,
+  };
+  // 조건 5: 빈 커밋은 patch-id 를 내지 않는다 -- 수가 다르면 «증명 못 함».
+  const sameCommits =
+    branchPairs.length === branchCommits.length &&
+    sameStringSets(
+      branchCommits.map((c) => c.toLowerCase()),
+      branchPairs.map((p) => p.commitId),
+    );
+  if (!sameCommits) {
+    return notEquivalentResult(
+      base,
+      PATCH_EQUIVALENCE_CAUSE.PATCH_ID_COUNT_MISMATCH,
+      counts,
+    );
+  }
+  // 조건 7: 미대응 0.
+  const masterIds = new Set(masterPairs.map((p) => p.patchId));
+  const unmatched = branchPairs
+    .filter((p) => !masterIds.has(p.patchId))
+    .map((p) => p.commitId);
+  const matchedCount = branchPairs.length - unmatched.length;
+  const result = { ...counts, matchedCount, unmatched };
+  if (unmatched.length > 0) {
+    return notEquivalentResult(base, PATCH_EQUIVALENCE_CAUSE.UNMATCHED, result);
+  }
+  return { ...base, equivalent: true, cause: null, ...result };
+}
+
+function observePatchEquivalenceUnsafe(worktreePath, mergeStatus, opts) {
+  const headSha = mergeStatus.headSha;
+  const remoteSha = mergeStatus.remoteMasterSha;
+  const mergeBaseSha = String(
+    opts.gitFn(buildGitMergeBaseCommand(headSha, remoteSha), worktreePath),
+  ).trim();
+  if (!isSha40(mergeBaseSha)) return { observable: false };
+  const ranges = {
+    branch: `${mergeBaseSha}..${headSha}`,
+    master: `${mergeBaseSha}..${remoteSha}`,
+  };
+  const base = {
+    observable: true,
+    headSha,
+    remoteMasterSha: remoteSha,
+    mergeBaseSha,
+  };
+  const bounds = checkPatchEquivalenceRanges(worktreePath, base, ranges, opts);
+  if (bounds.result) return bounds.result;
+  return comparePatchIds(worktreePath, base, ranges, bounds, opts);
+}
+
+export function observePatchEquivalence(worktreePath, mergeStatus, opts = {}) {
+  if (
+    typeof opts.gitFn !== "function" ||
+    typeof opts.patchIdFn !== "function"
+  ) {
+    return { observable: false };
+  }
+  if (
+    !isPlainObject(mergeStatus) ||
+    mergeStatus.observable !== true ||
+    mergeStatus.isAncestorOfRemoteMaster !== false ||
+    !isSha40(mergeStatus.headSha) ||
+    !isSha40(mergeStatus.remoteMasterSha)
+  ) {
+    return { observable: false };
+  }
+  try {
+    return observePatchEquivalenceUnsafe(worktreePath, mergeStatus, opts);
+  } catch {
+    return { observable: false };
+  }
+}
+
+// ⓒ 관제실 PM 영수증 결속 -- 설계 §(b) ⓒ C1~C5. 워크트리 → 좌석 등록부
+// (paneKey) → 배달 원장(harness_task_label) → PM 영수증(binding.taskId).
+// ⛔번호(r<N>)로 묶지 않는다(영수증 번호와 라운드 번호는 1씩 어긋난다).
+// ⛔관제실 루트 밖(예: watch/ 아래 낡은 사본)은 읽지 않는다.
+// 파일 읽기 실패 · 깨진 JSON 줄 · 경로 미설정 = 모두 {observable:false}.
+const KST_OFFSET_MS = 9 * 60 * 60 * 1000;
+function parseDoneAtKstMs(text) {
+  const m = /^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2})(?::(\d{2}))? KST$/.exec(
+    String(text).trim(),
+  );
+  if (!m) return null;
+  return (
+    Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], m[6] ? +m[6] : 0) -
+    KST_OFFSET_MS
+  );
+}
+function parseDispatchUtcMs(text) {
+  const m =
+    /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})(?:\.\d+)?Z?$/.exec(
+      String(text).trim(),
+    );
+  if (!m) return null;
+  return Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]);
+}
+function parseJsonlObjects(text) {
+  if (typeof text !== "string") throw new Error("jsonl text expected");
+  const rows = [];
+  for (const raw of text.split(/\r?\n/)) {
+    if (raw.trim().length === 0) continue;
+    const row = JSON.parse(raw);
+    if (!isPlainObject(row)) throw new Error("jsonl row must be an object");
+    rows.push(row);
+  }
+  return rows;
+}
+
+function pmBindingResult(bound, cause, fields) {
+  return {
+    observable: true,
+    bound,
+    cause,
+    paneCount: 0,
+    dispatchCount: 0,
+    consumedCount: 0,
+    nonPmRowCount: 0,
+    ambiguousPaneCount: 0,
+    unconsumedLabels: [],
+    preDispatchWindowOpen: false,
+    ...fields,
+  };
+}
+
+function readPmReceipts(root, opts, worktreePath) {
+  const dir = `${root}/PM/relay/receipts`;
+  const names = opts.readdirFn(dir);
+  if (!Array.isArray(names)) throw new Error("receipts dir listing expected");
+  return names
+    .filter((n) => typeof n === "string" && /^PM-receipt-r\d+\.json$/.test(n))
+    .map((name) => {
+      const parsed = JSON.parse(
+        opts.readFileFn(`${dir}/${name}`, worktreePath),
+      );
+      if (!isPlainObject(parsed)) throw new Error("receipt must be an object");
+      const binding = isPlainObject(parsed.binding) ? parsed.binding : {};
+      return {
+        taskId: binding.taskId,
+        role: binding.role,
+        doneAt: binding.doneAt,
+      };
+    });
+}
+
+// C4: 한 배달에 대한 영수증 판정 -- "consumed" | 원인 문자열.
+function judgeDispatchReceipt(dispatch, receipts) {
+  const matches = receipts.filter(
+    (r) => r.role === "PM" && r.taskId === dispatch.label,
+  );
+  if (matches.length === 0) return PM_BINDING_CAUSE.NO_RECEIPT;
+  if (matches.length > 1) return PM_BINDING_CAUSE.AMBIGUOUS_RECEIPT;
+  const doneMs = parseDoneAtKstMs(matches[0].doneAt);
+  if (doneMs === null) throw new Error("unparseable receipt doneAt");
+  return doneMs > dispatch.atMs
+    ? "consumed"
+    : PM_BINDING_CAUSE.RECEIPT_BEFORE_DISPATCH;
+}
+
+// C5: 지금 pm-task.md 가 «배달 전 구간»(영수증 없는 task_id + 이 워크트리)인가.
+function isPreDispatchWindowOpen({ pmTaskText, receipts, wtCanon }) {
+  const taskId = /^task_id:[ \t]*(\S+)/m.exec(pmTaskText)?.[1] ?? null;
+  const hasReceipt =
+    taskId !== null &&
+    receipts.some((r) => r.role === "PM" && r.taskId === taskId);
+  if (hasReceipt) return false;
+  const wtLine = /^worktree:[ \t]*(.+)$/m.exec(pmTaskText)?.[1];
+  if (!isNonEmptyString(wtLine)) return true; // 해석 못 하면 거부.
+  const lineCanon = canonicalizePath(wtLine.trim());
+  if (lineCanon === wtCanon) return true;
+  // 경로 뒤에 괄호 산문이 붙는 모양 -- 경로 토큰 경계에서 시작하면 같은 경로.
+  return (
+    lineCanon.startsWith(wtCanon) &&
+    /^[\s(]/.test(lineCanon.slice(wtCanon.length))
+  );
+}
+
+// C1·C2: 이 워크트리의 등록부 행 -- 비어 있지 않고 «모든 행이 PM», 각
+// paneKey 가 등록부 전체에서 정확히 1행. {result}(조기 종료) 또는 {panes}.
+function judgePmRegistryRows(registry, wtCanon) {
+  const rows = registry.filter(
+    (r) =>
+      isNonEmptyString(r.worktree) && canonicalizePath(r.worktree) === wtCanon,
+  );
+  if (rows.length === 0) {
+    return {
+      result: pmBindingResult(false, PM_BINDING_CAUSE.NO_REGISTRY_ROW, {}),
+    };
+  }
+  if (rows.some((r) => !isNonEmptyString(r.paneKey))) {
+    throw new Error("registry row without paneKey");
+  }
+  const panes = [...new Set(rows.map((r) => r.paneKey))];
+  const nonPmRowCount = rows.filter((r) => r.role !== "PM").length;
+  if (nonPmRowCount > 0) {
+    const fields = { paneCount: panes.length, nonPmRowCount };
+    return {
+      result: pmBindingResult(false, PM_BINDING_CAUSE.NON_PM_ROW, fields),
+    };
+  }
+  const ambiguousPaneCount = panes.filter(
+    (pk) => registry.filter((r) => r.paneKey === pk).length !== 1,
+  ).length;
+  if (ambiguousPaneCount > 0) {
+    const fields = { paneCount: panes.length, ambiguousPaneCount };
+    return {
+      result: pmBindingResult(false, PM_BINDING_CAUSE.AMBIGUOUS_PANE, fields),
+    };
+  }
+  return { panes };
+}
+
+// C3: 배달 원장에서 이 pane 들의 행(모양이 틀린 행은 던진다 = 관측 안 됨).
+function collectPmDispatches(dispatchRows, panes) {
+  return dispatchRows
+    .filter((d) => panes.includes(d.assignee_pane_key))
+    .map((d) => {
+      const atMs = parseDispatchUtcMs(d.dispatch_timestamp_utc);
+      if (atMs === null || !isNonEmptyString(d.harness_task_label)) {
+        throw new Error("malformed dispatch row");
+      }
+      return { role: d.role, label: d.harness_task_label, atMs };
+    });
+}
+
+// C4: «모든» 배달에 PM 영수증이 정확히 1개 · doneAt 이 배달 뒤 (전칭).
+function judgePmDispatchReceipts(dispatches, receipts, counts) {
+  const verdicts = dispatches.map((d) => judgeDispatchReceipt(d, receipts));
+  const consumedCount = verdicts.filter((v) => v === "consumed").length;
+  if (consumedCount === dispatches.length) return { consumedCount };
+  const cause =
+    [
+      PM_BINDING_CAUSE.NO_RECEIPT,
+      PM_BINDING_CAUSE.AMBIGUOUS_RECEIPT,
+      PM_BINDING_CAUSE.RECEIPT_BEFORE_DISPATCH,
+    ].find((c) => verdicts.includes(c)) ?? PM_BINDING_CAUSE.NO_RECEIPT;
+  return {
+    result: pmBindingResult(false, cause, {
+      ...counts,
+      consumedCount,
+      unconsumedLabels: dispatches
+        .filter((_, i) => verdicts[i] !== "consumed")
+        .map((d) => d.label),
+    }),
+  };
+}
+
+function observePmReceiptBindingUnsafe(worktreePath, root, opts) {
+  const wtCanon = canonicalizePath(worktreePath);
+  const read = (p) => opts.readFileFn(p, worktreePath);
+  const registry = parseJsonlObjects(
+    read(`${root}/seat-launch-registry.jsonl`),
+  );
+  const dispatchRows = parseJsonlObjects(
+    read(`${root}/dispatch-receipts.jsonl`),
+  );
+  const receipts = readPmReceipts(root, opts, worktreePath);
+
+  const registryJudged = judgePmRegistryRows(registry, wtCanon);
+  if (registryJudged.result) return registryJudged.result;
+  const dispatches = collectPmDispatches(dispatchRows, registryJudged.panes);
+  const counts = {
+    paneCount: registryJudged.panes.length,
+    dispatchCount: dispatches.length,
+  };
+  if (dispatches.length === 0) {
+    return pmBindingResult(false, PM_BINDING_CAUSE.NO_DISPATCH, counts);
+  }
+  if (dispatches.some((d) => d.role !== "PM")) {
+    return pmBindingResult(false, PM_BINDING_CAUSE.NON_PM_DISPATCH, counts);
+  }
+  const receiptJudged = judgePmDispatchReceipts(dispatches, receipts, counts);
+  if (receiptJudged.result) return receiptJudged.result;
+  const { consumedCount } = receiptJudged;
+  // C5: 배달 원장에 행이 생기기 전 구간(pm-task.md)을 막는다.
+  const pmTaskPath = `${root}/PM/relay/pm-task.md`;
+  const pmTaskExists = opts.existsFn(pmTaskPath, worktreePath);
+  if (typeof pmTaskExists !== "boolean") {
+    throw new Error("exists must be boolean");
+  }
+  const windowOpen =
+    pmTaskExists &&
+    isPreDispatchWindowOpen({
+      pmTaskText: read(pmTaskPath),
+      receipts,
+      wtCanon,
+    });
+  if (windowOpen) {
+    return pmBindingResult(false, PM_BINDING_CAUSE.PRE_DISPATCH_WINDOW, {
+      ...counts,
+      consumedCount,
+      preDispatchWindowOpen: true,
+    });
+  }
+  return pmBindingResult(true, null, { ...counts, consumedCount });
+}
+
+export function observePmReceiptBinding(
+  worktreePath,
+  controlRoomRoot,
+  opts = {},
+) {
+  if (!isNonEmptyString(worktreePath) || !isNonEmptyString(controlRoomRoot)) {
+    return { observable: false };
+  }
+  if (
+    typeof opts.readFileFn !== "function" ||
+    typeof opts.readdirFn !== "function" ||
+    typeof opts.existsFn !== "function"
+  ) {
+    return { observable: false };
+  }
+  const root = String(controlRoomRoot).replace(/[\\/]+$/, "");
+  if (root.length === 0) return { observable: false };
+  try {
+    return observePmReceiptBindingUnsafe(worktreePath, root, opts);
+  } catch {
+    return { observable: false };
+  }
 }
 
 // observeArchiveInventory(ctx, opts) -- ⓐⓒⓓ를 한 봉투로 묶는다(ⓑ는

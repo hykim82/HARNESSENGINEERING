@@ -44,6 +44,15 @@ PR 1은 **판정만** 한다 — 파괴(`orca worktree rm`/`terminal close`)는 
 
 두 사유(`TEARDOWN_MAIN_CHECKOUT`/`TEARDOWN_NO_ROUND_EVIDENCE`)는 다른 네 축과 같은 성질(근거가 주어지지 않으면 판정 불가 = ELIGIBLE 아님)이다.
 
+## 2-c. 3kinds-1 — 검사 1·6 의 «통과» 분기 두 곳을 넓힌다 (HYK-464 후속)
+
+새 검사를 끼우지 않는다. 검사 순서(`ARCHIVE_ELIGIBILITY_CHECKS`)와 REASON 코드는 그대로이고, 검사 1(병합)과 검사 6(라운드 증거)의 «통과» 분기에 OR 한 묶음씩(`MERGE_OPENERS` · `ROUND_EVIDENCE_OPENERS`)을 더했다. 새 증거 필드(`patchEquivalence` · `pmBinding`)는 `observable === true` 이고 코어가 숫자 불변식을 다시 확인했을 때만 문을 연다. 실패 사유는 기존 `NOT_MERGED_TO_MASTER` · `NO_ROUND_EVIDENCE` 그대로이고 새 필드는 거부 evidence 에만 실린다. ELIGIBLE evidence 의 `openedBy` 가 어느 문으로 열렸는지(`ANCESTOR`/`PATCH_ID` · `RECEIPTS`/`PM_BINDING`)를 적는다.
+
+- ⓑ patch-id 동등(검사 1): HEAD 가 origin/master 의 조상이 «아님» 이 관측된 워크트리에서만 본다. merge-base 이후 병합 커밋 0 · 브랜치 비병합 커밋 1..50 · master 쪽 비병합 커밋 ≤1000 · `git log -p --binary --no-merges` 의 patch-id 줄 수 = 커밋 수(빈 커밋은 patch-id 를 내지 않는다) · 출력 커밋 집합 = 브랜치 커밋 집합 · 브랜치의 모든 patch-id 가 master 쪽에 있음(미대응 0). 코어는 `headSha`/`remoteMasterSha` 가 mergeStatus 와 같은지와 위 숫자를 다시 확인한다.
+- ⓒ PM 영수증 결속(검사 6): 영수증이 0 인 워크트리에서만 본다. 관제실 루트(`dirname(--watch-dir)`)의 좌석 등록부 → 배달 원장 → `PM/relay/receipts/PM-receipt-r*.json` 을 라벨(`binding.taskId`)로 묶는다(번호로 묶지 않는다). 등록부 행이 전부 PM · paneKey 가 등록부에서 유일 · 배달이 전부 PM · «모든» 배달에 PM 영수증이 정확히 1개이고 `doneAt` 이 배달 뒤 · `pm-task.md` 가 이 워크트리의 영수증 없는 배달 전 구간이 아님. `watch/` 아래 낡은 사본은 읽지 않는다.
+- N13: 판정 결과에 `headSha` 를 싣고, 무장 경로가 실행 직전 HEAD 를 다시 읽어 다르면 그 워크트리만 건너뛴다(`TEARDOWN_ARM_HEAD_MOVED` — 판정 REASON 이 아니라 무장 경로 건너뜀 사유, 다음 회차에 다시 판정).
+- 한계: patch-id 동등은 «내용이 master 에 들어갔다» 의 증거이며 이후 master 에서 되돌려졌는지는 보지 않는다(기존 조상 검사와 같은 성질). 스쿼시 병합은 patch-id 가 달라 거부된다. 결속은 «등록부와 배달 원장이 모든 배달을 기록한다» 를 가정한다(원장 완전성은 증명하지 않는다). 사람 승인 은퇴 표지(ⓐ)는 이 절의 범위 밖이다.
+
 ## 3. 보존 사유 파일 이름 (판정②)
 
 **`.harness/keep-reason.md`** — HYK-464 09-16 추기 문면 그대로 확정. 첫 줄 = 사유 1문장, 둘째 줄 = 쓴 날짜, 그 외 자유. 파일이 있으면(관측 가능할 때) 무조건 거부(`TEARDOWN_KEEP_REASON_PRESENT`), 첫 줄을 evidence에 싣는다.
