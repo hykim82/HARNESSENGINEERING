@@ -676,8 +676,10 @@ function summarizeUndecidableReasons(verdicts) {
 //   "web-flow" · 작성자 author.login + id 가 approvers 허용 목록(origin/
 //   master 판본)의 사람.
 // ⓘⓘⓘ 무인증 REST 예산 = 회차당 상한 maxChecks(기본 10, 기존 maxMergeChecks
-//   와 별개) -- 초과분은 «미조회(예산)». 403/429 는 «미조회(rate limit)»로
-//   세고 재시도 0 이며 그 회차의 남은 후보는 더 조회하지 않는다(같은 IP 의
+//   와 별개) -- 초과분은 «미조회(예산)». 403/429 도 판정 문면상 «미조회(예산)»의
+//   한 갈래이고(표기 = «미조회(예산 · rate limit)» -- 진단 줄이 «예산» 과 나란한
+//   별도 낱말로 찍지 않는다 · 검토 P2-2), 내부 필드는 uncheckedByRateLimit 로
+//   따로 세며 재시도 0 이고 그 회차의 남은 후보는 더 조회하지 않는다(같은 IP 의
 //   한도를 ㄱ-4 · 책임자 CI 판독과 나눠 쓴다). 그 밖 조회 실패(404 · 던짐 ·
 //   모양 위반)도 확인이 아니고 «미조회»에 넣되 사유를 diagnostics 에 남긴다.
 // ⛔캐시는 승인 권위가 아니다 -- 확인 N 은 «이 회차 REST 응답»으로만 세고
@@ -903,7 +905,9 @@ async function checkCandidates({
     if (r.kind === "rateLimited") {
       rateLimited = true;
       out.uncheckedByRateLimit += 1;
-      out.diagnostics.push(`${c.sha.slice(0, 7)} rate limit(${r.detail})`);
+      out.diagnostics.push(
+        `${c.sha.slice(0, 7)} 미조회(예산 · rate limit: ${r.detail})`,
+      );
     } else if (r.kind === "failure") {
       out.uncheckedByFailure += 1;
       out.diagnostics.push(`${c.sha.slice(0, 7)} ${r.detail}`);
@@ -2128,7 +2132,9 @@ function buildExternalEvidenceCollectorEntry(externalEvidence) {
   const parts = [
     `후보 ${e.candidatesInWindow}건 · 조회 ${e.checked}건 · 확인 ${e.confirmed}`,
     `서명·작성자 불일치 ${e.notConfirmed}`,
-    `미조회: 예산 ${e.uncheckedByBudget} · rate limit ${e.uncheckedByRateLimit} · 조회 실패 ${e.uncheckedByFailure}`,
+    // 403/429(rate limit)는 판정 문면 «미조회(예산)» 안에 묶어 «예산(rate limit 포함)»
+    // 으로 적는다(검토 P2-2). 합 = 예산 + rate limit, 그중 rate limit 은 따로 병기.
+    `미조회: 예산(rate limit 포함) ${e.uncheckedByBudget + e.uncheckedByRateLimit}(그중 rate limit ${e.uncheckedByRateLimit}) · 조회 실패 ${e.uncheckedByFailure}`,
   ];
   if (e.diagnostics.length > 0) parts.push(e.diagnostics.join("; "));
   return { name, ok: true, detail: parts.join(" · ") };

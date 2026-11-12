@@ -9,6 +9,7 @@
 // 가짜 entries 배열을 손으로 만들지 않는다.
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { parseWatchLog } from "./reach-report-core.mjs";
 import {
   buildPartialCountReport,
@@ -167,7 +168,7 @@ test("필수 문면 ⓔ: 조회 실패·관측 없음은 0이 아니라 UNKNOWN(
   );
 });
 
-test("필수 문면 4·5: ㄱ/ㄴ/보조 칸 분리 · 분모 · 커버리지 1/7 · 미계수 예시 목록이 문면대로 나온다", () => {
+test("필수 문면 4·5: ㄱ/ㄴ/보조 칸 분리 · 분모 · 커버리지 1/6 · 미계수 예시 목록이 문면대로 나온다", () => {
   const text = buildPartialCountReport(baseInput());
   assert.ok(text.includes("라운드 분모: 배달 5 / 소비 3 / 영수증 결손 2"));
   // 2R 반려 1 수리 고정: 분모 «바로 다음 줄»에 기준 단위가 명시된다
@@ -756,6 +757,28 @@ test("renderExternalEvidenceCandidateLine / parseExternalEvidenceCandidateLine: 
   assert.deepEqual(parseExternalEvidenceCandidateLine(null), {
     state: "absent",
   });
+});
+
+// ---------------------------------------------------------------------------
+// HYK-255-g-aux-render-1 커밋 3 (D1 검토 P2-3) -- 이 파일의 시험 제목에 낡은
+// 분모(7 로 끝나는 커버리지 표기)가 남지 않는다. 제목만의 문제였다(단언은 이미
+// 6 이었다) -- 실패 출력에 낡은 숫자가 보이는 것을 막는 자기 점검.
+// ---------------------------------------------------------------------------
+
+test("P2-3: 이 파일의 시험 제목 어디에도 낡은 커버리지 분모 표기가 없고, 현행 분모 표기가 제목에 있다", () => {
+  const src = readFileSync(new URL(import.meta.url), "utf8");
+  const titles = src.split("\n").filter((line) => line.startsWith('test("'));
+  assert.ok(titles.length > 20, "제목 줄을 읽었다");
+  const staleDenominator = ["1", "7"].join("/");
+  const stale = titles.filter((t) =>
+    t.includes(`커버리지 ${staleDenominator}`),
+  );
+  assert.deepEqual(stale, [], "낡은 분모 제목");
+  const currentDenominator = ["1", String(GATE_TYPES.length)].join("/");
+  assert.ok(
+    titles.some((t) => t.includes(`커버리지 ${currentDenominator}`)),
+    `제목에 현행 분모 ${currentDenominator} 가 없다`,
+  );
 });
 
 // ---------------------------------------------------------------------------
