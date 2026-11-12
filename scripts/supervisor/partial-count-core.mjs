@@ -401,11 +401,57 @@ export function renderRelayLedgerAuxLines(relayLedgerResult) {
   return [line1, line2];
 }
 
+// HYK-255-ln-github-anchor-1 (판정 2026-11-12 19:1x 1ⓑ) -- ㄴ 독립 수집기
+// 1호(GitHub 웹 «Update branch» 병합 커밋 후보)의 ㄴ 절 새 줄. ⛔이 줄의
+// 확인 N 은 «후보 중 서명·작성자가 확인된 건수»일 뿐 ㄴ 분자가 아니다 --
+// 분류(Update branch 클릭이 ㄴ 인가 ㄱ-4 부속인가)가 확정되기 전이라
+// confirmedLnEvents 에는 절대 들어가지 않고(위 «확인 0건» 줄 무변), 이
+// 줄이 «분류 대기»를 문면으로 박는다. 입력이 없으면(미결선 호출자) 줄 0개.
+// 수집 실패는 bare 숫자 0 이 아니라 «수집 실패(사유)»다.
+const EXTERNAL_EVIDENCE_LINE_PREFIX = "- 외부 독립 증거 후보: ";
+
+export function renderExternalEvidenceCandidateLine(externalEvidence) {
+  if (!externalEvidence) return null;
+  if (externalEvidence.known !== true) {
+    const reason = externalEvidence.reason ?? "사유 미상";
+    return `${EXTERNAL_EVIDENCE_LINE_PREFIX}수집 실패(${reason})`;
+  }
+  return (
+    `${EXTERNAL_EVIDENCE_LINE_PREFIX}확인 ${externalEvidence.confirmed} · ` +
+    `미조회 ${externalEvidence.unchecked} · 분류 대기`
+  );
+}
+
+const EXTERNAL_EVIDENCE_COUNT_RE =
+  /^- 외부 독립 증거 후보: 확인 (\d+) · 미조회 (\d+) · 분류 대기$/m;
+const EXTERNAL_EVIDENCE_FAILED_RE =
+  /^- 외부 독립 증거 후보: 수집 실패\((.*)\)$/m;
+
+// 보고서 «텍스트»에서 위 줄을 다시 읽는다 -- reach-report.mjs 가 (수집기를
+// 다시 돌리지 않고) 이미 쓰인 partial-count-report.md 를 읽어 N 이 바뀌었는지
+// 판정할 때 쓴다. 줄 문면의 정본이 이 파일 한 곳이라 렌더와 파서가 어긋나지
+// 않는다. {state: "count"|"failed"|"absent"}.
+export function parseExternalEvidenceCandidateLine(reportText) {
+  const text = typeof reportText === "string" ? reportText : "";
+  const count = text.match(EXTERNAL_EVIDENCE_COUNT_RE);
+  if (count) {
+    return {
+      state: "count",
+      confirmed: Number(count[1]),
+      unchecked: Number(count[2]),
+    };
+  }
+  const failed = text.match(EXTERNAL_EVIDENCE_FAILED_RE);
+  if (failed) return { state: "failed", reason: failed[1] };
+  return { state: "absent" };
+}
+
 function buildLnSection(
   confirmedLnEvents,
   suspected,
   uncountedExamples,
   relayLedgerResult,
+  externalEvidence,
 ) {
   const lines = ["ㄴ 계획 밖 개입:"];
   const confirmedCount = Array.isArray(confirmedLnEvents)
@@ -414,6 +460,9 @@ function buildLnSection(
   lines.push(
     `- 외부 독립 증거로 확인된 사건: ${renderConfirmedLnCount(confirmedCount)}`,
   );
+  const externalEvidenceLine =
+    renderExternalEvidenceCandidateLine(externalEvidence);
+  if (externalEvidenceLine) lines.push(externalEvidenceLine);
   if (suspected.known === true) {
     const openNote =
       suspected.openCount > 0
@@ -485,6 +534,9 @@ export function buildPartialCountReport({
   // HYK-255-relay-aux-1 (product_scope ②) -- 기본값 = undefined ->
   // renderRelayLedgerAuxLines([]) 그대로 -> 줄 0개(미결선, 회귀 0).
   relayLedgerResult,
+  // HYK-255-ln-github-anchor-1 -- 기본값 undefined -> ㄴ 절 새 줄 0개
+  // (미결선 호출자 회귀 0). confirmedLnEvents 와 «별개 입력»이다.
+  externalEvidence,
 }) {
   const lines = [];
   lines.push("집계 성격: PARTIAL — 전수 아님");
@@ -513,6 +565,7 @@ export function buildPartialCountReport({
       suspected,
       uncountedExamples,
       relayLedgerResult,
+      externalEvidence,
     ),
   );
   lines.push("");

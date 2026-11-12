@@ -186,3 +186,158 @@ test("missing watch.log (not yet written) does not throw -- report still renders
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+// ---------------------------------------------------------------------------
+// HYK-255-ln-github-anchor-1 (coder-task.md §2 ⓒ) -- «외부 독립 증거 후보:
+// 확인 N» 의 N 이 바뀔 때만 받는함 통지 1장. 프로덕션 runReachOnce 를
+// mkdtemp 격리 경로(합성 partial-count-report.md · 합성 상태 파일 · 합성
+// 받는함)로 직접 구동한다.
+// ---------------------------------------------------------------------------
+
+function writeReachFixture(root, extLine) {
+  const watchLogPath = join(root, "watch.log");
+  const t0 = Date.parse("2026-11-12T00:00:00.000Z");
+  if (!fs.existsSync(watchLogPath)) {
+    fs.writeFileSync(
+      watchLogPath,
+      watchLogLine({ ts: new Date(t0).toISOString() }),
+      "utf8",
+    );
+  }
+  const partialCountPath = join(root, "partial-count-report.md");
+  fs.writeFileSync(
+    partialCountPath,
+    [
+      "집계 성격: PARTIAL — 전수 아님",
+      "생성 시각: 2026-11-12 09:00:00 KST",
+      "ㄴ 계획 밖 개입:",
+      "- 외부 독립 증거로 확인된 사건: 확인 0건",
+      ...(extLine === null ? [] : [extLine]),
+      "관측 건강:",
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+  return {
+    watchLogPath,
+    partialCountPath,
+    reportOutPath: join(root, "morning-report.md"),
+    statePath: join(root, "state.json"),
+    notifyDir: join(root, "받는함"),
+    now: t0 + 3_600_000,
+  };
+}
+
+function tick(fx, extLine, nowOffsetMs = 0) {
+  writeReachFixture(fx.root, extLine);
+  return runReachOnce({
+    watchLogPath: fx.watchLogPath,
+    partialCountPath: fx.partialCountPath,
+    reportOutPath: fx.reportOutPath,
+    statePath: fx.statePath,
+    notifyDir: fx.notifyDir,
+    now: fx.now + nowOffsetMs,
+  });
+}
+
+function noticeFiles(fx) {
+  return fs.existsSync(fx.notifyDir) ? fs.readdirSync(fx.notifyDir) : [];
+}
+
+const EXT = (n, u = 0) =>
+  `- 외부 독립 증거 후보: 확인 ${n} · 미조회 ${u} · 분류 대기`;
+
+test("외부 독립 증거 후보 N: 처음 0 은 기준선(통지 0장) · 0->1 변화는 통지 1장 · 같은 1 반복은 0장 · 1->2 는 또 1장", () => {
+  const root = tmpDir("nc-reach-ext-");
+  try {
+    const fx = { ...writeReachFixture(root, EXT(0)), root };
+    const first = tick(fx, EXT(0));
+    assert.equal(first.noticePath, null, "기준선 0 -- 통지 없음");
+    assert.equal(noticeFiles(fx).length, 0);
+
+    const changed = tick(fx, EXT(1, 2), 1000);
+    assert.ok(changed.noticePath, "0->1 변화 -- 통지 1장");
+    assert.equal(noticeFiles(fx).length, 1);
+    const body = fs.readFileSync(changed.noticePath, "utf8");
+    assert.match(body, /외부 독립 증거 후보/);
+    assert.match(body, /0 -> 1/);
+    assert.match(body, /분류 대기/);
+
+    const same = tick(fx, EXT(1, 5), 2000);
+    assert.equal(same.noticePath, null, "N 무변(U 만 바뀜) -- 통지 0장");
+    assert.equal(noticeFiles(fx).length, 1);
+
+    const up = tick(fx, EXT(2), 3000);
+    assert.ok(up.noticePath);
+    assert.equal(noticeFiles(fx).length, 2);
+    assert.match(fs.readFileSync(up.noticePath, "utf8"), /1 -> 2/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("외부 독립 증거 후보 N: 첫 관측부터 N>0 이면 «이전 없음 -> N» 변화로 통지 1장 (과소통지보다 과대통지)", () => {
+  const root = tmpDir("nc-reach-ext-first-");
+  try {
+    const fx = { ...writeReachFixture(root, EXT(3)), root };
+    const first = tick(fx, EXT(3));
+    assert.ok(first.noticePath);
+    assert.equal(noticeFiles(fx).length, 1);
+    assert.equal(tick(fx, EXT(3), 1000).noticePath, null);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("외부 독립 증거 후보: 수집 실패 줄 · 줄 없음 은 N 변화가 아니다 -- 통지 0장이고 이전 N 은 기억된다", () => {
+  const root = tmpDir("nc-reach-ext-fail-");
+  try {
+    const fx = { ...writeReachFixture(root, EXT(1)), root };
+    assert.ok(tick(fx, EXT(1)).noticePath);
+    assert.equal(noticeFiles(fx).length, 1);
+    assert.equal(
+      tick(fx, "- 외부 독립 증거 후보: 수집 실패(x)", 1000).noticePath,
+      null,
+    );
+    assert.equal(tick(fx, null, 2000).noticePath, null);
+    assert.equal(
+      tick(fx, EXT(1), 3000).noticePath,
+      null,
+      "실패를 사이에 두고 돌아와도 같은 N 이면 0장",
+    );
+    assert.equal(noticeFiles(fx).length, 1);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("외부 독립 증거 후보 N 변화 + 새 이상 전이가 같은 tick 에 겹쳐도 통지 파일은 1장이고 상태 파일에 두 기억이 함께 남는다", () => {
+  const root = tmpDir("nc-reach-ext-both-");
+  try {
+    const fx = { ...writeReachFixture(root, EXT(1)), root };
+    const t0 = Date.parse("2026-11-12T00:00:00.000Z");
+    fs.writeFileSync(
+      fx.watchLogPath,
+      watchLogLine({
+        ts: new Date(t0).toISOString(),
+        idleStatus: "SEAT_IDLE_JUDGED",
+        idleVerdict: "SUSPECTED_ABANDONED",
+      }),
+      "utf8",
+    );
+    const r = tick(fx, EXT(1));
+    assert.equal(r.toNotify.length, 1);
+    assert.ok(r.noticePath);
+    assert.equal(noticeFiles(fx).length, 1);
+    const body = fs.readFileSync(r.noticePath, "utf8");
+    assert.match(body, /외부 독립 증거 후보/);
+    assert.match(body, /좌석 유휴 방치/);
+    const state = JSON.parse(fs.readFileSync(fx.statePath, "utf8"));
+    assert.ok(Object.keys(state).length >= 2, JSON.stringify(state));
+    // 다음 tick: 둘 다 무변 -> 0장.
+    assert.equal(tick(fx, EXT(1), 1000).noticePath, null);
+    assert.equal(noticeFiles(fx).length, 1);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});

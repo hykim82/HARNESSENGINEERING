@@ -55,6 +55,8 @@ import path from "node:path";
 import {
   createGitHubApprovalPort,
   createAnonymousFetchJson,
+  measureRepoIdentity,
+  readApproverAllowlist,
   APPROVAL_STATUS,
 } from "./approval-authority-adapter.mjs";
 import { parseWatchLog } from "./reach-report-core.mjs";
@@ -629,6 +631,278 @@ export async function collectGate4Independent({
     approvedEvents,
     verdicts,
   };
+}
+
+// ---------------------------------------------------------------------------
+// 수집 3-b (HYK-255-ln-github-anchor-1, 판정 2026-11-12 19:1x 1) -- ㄴ 독립
+// 수집기 1호: GitHub 웹 «Update branch» 병합 커밋 후보. ㄱ-4 수집기와
+// «독립»이다 (collectGate4Independent 의 후보·예산·판정을 건드리지 않는다).
+//
+// ⓘ 후보 = git 으로 고른다: 측정 창 안, origin/master 에 «도달 가능»(first-
+//   parent 가 아니다 -- Update branch 병합 커밋은 PR 브랜치 쪽에 있다),
+//   committer = GitHub <noreply@github.com>, 부모 정확히 2, 제목 «Merge
+//   branch …». 사람 committer 일반 병합 · «Merge pull request» · 창 밖은
+//   후보가 아니다(REST 호출 0).
+// ⓘⓘ 확인 = 주입 fetchJson 으로 무인증 REST /repos/<owner>/<repo>/commits/
+//   <sha> 한 번: commit.verification.verified === true · reason === "valid"
+//   (서명 검증은 GitHub 서버 판정에 기댄다) · 서명 주체 committer.login ===
+//   "web-flow" · 작성자 author.login + id 가 approvers 허용 목록(origin/
+//   master 판본)의 사람.
+// ⓘⓘⓘ 무인증 REST 예산 = 회차당 상한 maxChecks(기본 10, 기존 maxMergeChecks
+//   와 별개) -- 초과분은 «미조회(예산)». 403/429 는 «미조회(rate limit)»로
+//   세고 재시도 0 이며 그 회차의 남은 후보는 더 조회하지 않는다(같은 IP 의
+//   한도를 ㄱ-4 · 책임자 CI 판독과 나눠 쓴다). 그 밖 조회 실패(404 · 던짐 ·
+//   모양 위반)도 확인이 아니고 «미조회»에 넣되 사유를 diagnostics 에 남긴다.
+// ⛔캐시는 승인 권위가 아니다 -- 확인 N 은 «이 회차 REST 응답»으로만 세고
+//   회차 사이에 남는 상태가 없다. ⛔이 결과는 confirmedLnEvents 에 들어가지
+//   않는다(분류 확정 전 -- ㄴ 분자 0 · 오탐 0 유지).
+// ---------------------------------------------------------------------------
+
+export const DEFAULT_MAX_EXTERNAL_EVIDENCE_CHECKS = 10;
+
+const CANDIDATE_LOG_FIELD_SEP = "\x1f";
+const CANDIDATE_LOG_FORMAT = ["%H", "%cI", "%P", "%cn", "%ce", "%s"].join(
+  "%x1f",
+);
+// 실물 합산 6주 표본이 27건 -- 창(기본 24h)을 한참 넘는 여유.
+const CANDIDATE_LOG_MAX_MERGES = 500;
+const GITHUB_WEB_COMMITTER_NAME = "GitHub";
+const GITHUB_WEB_COMMITTER_EMAIL = "noreply@github.com";
+const GITHUB_WEB_FLOW_LOGIN = "web-flow";
+const UPDATE_BRANCH_SUBJECT_RE = /^Merge branch /;
+
+function isUpdateBranchLogFields(fields) {
+  const parents = fields[2].split(" ").filter(Boolean);
+  return (
+    parents.length === 2 &&
+    fields[3] === GITHUB_WEB_COMMITTER_NAME &&
+    fields[4] === GITHUB_WEB_COMMITTER_EMAIL &&
+    UPDATE_BRANCH_SUBJECT_RE.test(fields[5])
+  );
+}
+
+export async function collectUpdateBranchCandidates({
+  git,
+  windowStartMs,
+  windowEndMs,
+}) {
+  let result;
+  try {
+    result = await git.run([
+      "log",
+      "--merges",
+      `--format=${CANDIDATE_LOG_FORMAT}`,
+      "-n",
+      String(CANDIDATE_LOG_MAX_MERGES),
+      "origin/master",
+    ]);
+  } catch (err) {
+    return { ok: false, detail: err?.message ?? String(err) };
+  }
+  if (!result || result.code !== 0) {
+    return { ok: false, detail: result?.stderr || "git log failed" };
+  }
+  const candidates = [];
+  for (const line of String(result.stdout).split(/\r?\n/)) {
+    const c = parseUpdateBranchLogLine(line, windowStartMs, windowEndMs);
+    if (c) candidates.push(c);
+  }
+  return { ok: true, candidates };
+}
+
+// 로그 한 줄 -> 창 안 Update branch 후보 {sha, tsMs} | null.
+function parseUpdateBranchLogLine(line, windowStartMs, windowEndMs) {
+  const fields = line.split(CANDIDATE_LOG_FIELD_SEP);
+  if (fields.length !== 6 || !/^[0-9a-f]{40}$/.test(fields[0])) return null;
+  const tsMs = Date.parse(fields[1]);
+  if (Number.isNaN(tsMs) || tsMs < windowStartMs || tsMs > windowEndMs) {
+    return null;
+  }
+  return isUpdateBranchLogFields(fields) ? { sha: fields[0], tsMs } : null;
+}
+
+// 응답 한 건 -> {kind: "rateLimited"|"failure"|"response", ...}. throw 0.
+async function fetchCommitResponse(fetchJson, url) {
+  let resp;
+  try {
+    resp = await fetchJson({ url });
+  } catch (err) {
+    return { kind: "failure", detail: `조회 예외: ${err?.message ?? err}` };
+  }
+  if (!resp || typeof resp !== "object") {
+    return { kind: "failure", detail: "응답 모양 위반(객체 아님)" };
+  }
+  if (resp.status === 403 || resp.status === 429) {
+    return { kind: "rateLimited", detail: `HTTP ${resp.status}` };
+  }
+  if (resp.networkError || typeof resp.status !== "number") {
+    return {
+      kind: "failure",
+      detail: `조회 실패: ${resp.detail ?? "상태 코드 없음"}`,
+    };
+  }
+  if (!resp.ok) return { kind: "failure", detail: `HTTP ${resp.status}` };
+  return { kind: "response", json: resp.json };
+}
+
+function hasWellFormedCommitShape(json, sha) {
+  const v = json?.commit?.verification;
+  return (
+    json !== null &&
+    typeof json === "object" &&
+    json.sha === sha &&
+    v !== null &&
+    typeof v === "object" &&
+    typeof v.verified === "boolean"
+  );
+}
+
+function isAllowlistedAuthor(author, allowlist) {
+  return (
+    author !== null &&
+    typeof author === "object" &&
+    allowlist.approvers.some(
+      (a) => a.login === author.login && a.id === author.id,
+    )
+  );
+}
+
+// 서명 확인 -- 이 한 함수가 «확인»의 전부다(서명 · 서명 주체 · 작성자).
+function isVerifiedAllowlistedWebMerge(json, allowlist) {
+  const v = json.commit.verification;
+  return (
+    v.verified === true &&
+    v.reason === "valid" &&
+    json.committer?.login === GITHUB_WEB_FLOW_LOGIN &&
+    isAllowlistedAuthor(json.author, allowlist)
+  );
+}
+
+async function readExternalEvidenceAllowlist({ git, allowlistPath }) {
+  const identity = await measureRepoIdentity({ git });
+  if (!identity.ok) {
+    return { ok: false, reason: `저장소 신원 측정 실패: ${identity.detail}` };
+  }
+  const ref = await git.run(["rev-parse", "origin/master"]);
+  if (!ref || ref.code !== 0) {
+    return {
+      ok: false,
+      reason: "origin/master 해석 실패(허용 목록 읽기 불가)",
+    };
+  }
+  const read = await readApproverAllowlist({
+    git,
+    allowlistPath,
+    expectedRepoFullName: identity.repoFullName,
+    expectedRefSha: String(ref.stdout).trim(),
+  });
+  if (!read.ok) {
+    return {
+      ok: false,
+      reason: `허용 목록 읽기 실패(${read.reason}): ${read.detail}`,
+    };
+  }
+  return {
+    ok: true,
+    allowlist: read.allowlist,
+    repoFullName: identity.repoFullName,
+  };
+}
+
+export async function collectExternalEvidenceCandidates({
+  fetchJson,
+  git,
+  allowlistPath,
+  windowStartMs,
+  windowEndMs,
+  maxChecks = DEFAULT_MAX_EXTERNAL_EVIDENCE_CHECKS,
+}) {
+  const cand = await collectUpdateBranchCandidates({
+    git,
+    windowStartMs,
+    windowEndMs,
+  });
+  if (!cand.ok) {
+    return { known: false, reason: `후보 고름 실패: ${cand.detail}` };
+  }
+  const out = {
+    known: true,
+    candidatesInWindow: cand.candidates.length,
+    checked: 0,
+    confirmed: 0,
+    notConfirmed: 0,
+    uncheckedByBudget: 0,
+    uncheckedByRateLimit: 0,
+    uncheckedByFailure: 0,
+    confirmedShas: [],
+    diagnostics: [],
+  };
+  if (cand.candidates.length > 0) {
+    const read = await readExternalEvidenceAllowlist({ git, allowlistPath });
+    if (!read.ok) return { known: false, reason: read.reason };
+    await checkCandidates({
+      out,
+      candidates: cand.candidates,
+      fetchJson,
+      allowlist: read.allowlist,
+      repoFullName: read.repoFullName,
+      budget: Number.isFinite(maxChecks)
+        ? Math.max(0, Math.floor(maxChecks))
+        : 0,
+    });
+  }
+  out.unchecked =
+    out.uncheckedByBudget + out.uncheckedByRateLimit + out.uncheckedByFailure;
+  return out;
+}
+
+async function checkCandidates({
+  out,
+  candidates,
+  fetchJson,
+  allowlist,
+  repoFullName,
+  budget,
+}) {
+  let rateLimited = false;
+  for (const c of candidates) {
+    if (rateLimited || out.checked >= budget) {
+      out.uncheckedByBudget += 1;
+      continue;
+    }
+    out.checked += 1;
+    const url = `https://api.github.com/repos/${repoFullName}/commits/${c.sha}`;
+    const r = await fetchCommitResponse(fetchJson, url);
+    if (r.kind === "rateLimited") {
+      rateLimited = true;
+      out.uncheckedByRateLimit += 1;
+      out.diagnostics.push(`${c.sha.slice(0, 7)} rate limit(${r.detail})`);
+    } else if (r.kind === "failure") {
+      out.uncheckedByFailure += 1;
+      out.diagnostics.push(`${c.sha.slice(0, 7)} ${r.detail}`);
+    } else if (!hasWellFormedCommitShape(r.json, c.sha)) {
+      out.uncheckedByFailure += 1;
+      out.diagnostics.push(`${c.sha.slice(0, 7)} 응답 모양 위반`);
+    } else if (isVerifiedAllowlistedWebMerge(r.json, allowlist)) {
+      out.confirmed += 1;
+      out.confirmedShas.push(c.sha);
+    } else {
+      out.notConfirmed += 1;
+    }
+  }
+}
+
+// 수집기가 던져도(예: 주입 포트 결함) 보고 전체를 죽이지 않는다 -- 수집
+// 실패(사유)로 표면화한다.
+async function collectExternalEvidenceSafely(args) {
+  try {
+    return await collectExternalEvidenceCandidates(args);
+  } catch (err) {
+    return {
+      known: false,
+      reason: `수집기 예외: ${err?.message ?? String(err)}`,
+    };
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1467,6 +1741,7 @@ function buildCollectors({
   watchSkipped,
   gate4,
   outboxResult,
+  externalEvidence,
 }) {
   const collectors = [];
   collectors.push({
@@ -1501,7 +1776,29 @@ function buildCollectors({
   });
   const outboxEntry = buildOutboxCollectorEntry(outboxResult);
   if (outboxEntry) collectors.push(outboxEntry);
+  const externalEntry = buildExternalEvidenceCollectorEntry(externalEvidence);
+  if (externalEntry) collectors.push(externalEntry);
   return collectors;
+}
+
+// HYK-255-ln-github-anchor-1 -- 새 수집기의 «진단 줄»(관측 건강). ㄴ 절 줄은
+// 문면 고정 1줄이라 미조회 사유의 내역(예산 · rate limit · 조회 실패와 그
+// 사유)은 여기에 남는다. 위 «독립ㄴ수집기 FAIL(부재 …)» 줄은 건드리지
+// 않는다(이 후보 수집기는 분류 대기라 ㄴ 확인 수집기가 아니다).
+function buildExternalEvidenceCollectorEntry(externalEvidence) {
+  if (!externalEvidence) return null;
+  const name = "외부독립증거후보수집기";
+  if (externalEvidence.known !== true) {
+    return { name, ok: false, detail: externalEvidence.reason };
+  }
+  const e = externalEvidence;
+  const parts = [
+    `후보 ${e.candidatesInWindow}건 · 조회 ${e.checked}건 · 확인 ${e.confirmed}`,
+    `서명·작성자 불일치 ${e.notConfirmed}`,
+    `미조회: 예산 ${e.uncheckedByBudget} · rate limit ${e.uncheckedByRateLimit} · 조회 실패 ${e.uncheckedByFailure}`,
+  ];
+  if (e.diagnostics.length > 0) parts.push(e.diagnostics.join("; "));
+  return { name, ok: true, detail: parts.join(" · ") };
 }
 
 // watch.log 관측 묶음 -- 읽기 실패는 suspected/coverageGaps를 UNKNOWN
@@ -1552,6 +1849,8 @@ function resolveValueOptions(options) {
     now: options.now ?? Date.now(),
     windowHours: options.windowHours ?? DEFAULT_WINDOW_HOURS,
     maxMergeChecks: options.maxMergeChecks ?? DEFAULT_MAX_MERGE_CHECKS,
+    maxExternalEvidenceChecks:
+      options.maxExternalEvidenceChecks ?? DEFAULT_MAX_EXTERNAL_EVIDENCE_CHECKS,
     repoRoot: options.repoRoot ?? process.cwd(),
     dispatchReceiptsPath:
       options.dispatchReceiptsPath ?? DEFAULT_DISPATCH_RECEIPTS_PATH,
@@ -1670,6 +1969,7 @@ function assemblePartialCountReportText({
   gate4,
   outboxResult,
   relayResult,
+  externalEvidence,
 }) {
   return buildPartialCountReport({
     generatedAtMs: now,
@@ -1684,7 +1984,10 @@ function assemblePartialCountReportText({
     // ⛔독립 ㄴ 수집기가 없는 이 라운드에 이 배열을 채우는 생산 경로는
     // 존재하지 않는다 -- 항상 [](= «확인 0건» 렌더링). 채우려면 독립적인
     // ㄴ 양성 신호원이 먼저 있어야 한다(PM 권고 «열어 둔다» 그대로).
+    // HYK-255-ln-github-anchor-1 -- Update branch 후보 수집기(아래
+    // externalEvidence)의 확인분도 «분류 대기»라 여기에 넣지 않는다.
     confirmedLnEvents: [],
+    externalEvidence,
     suspected: watch.suspected,
     collectors: buildCollectors({
       deliveredResult,
@@ -1693,6 +1996,7 @@ function assemblePartialCountReportText({
       watchSkipped: watch.skipped,
       gate4,
       outboxResult,
+      externalEvidence,
     }),
     lastAliveMs: watch.lastAliveMs,
     coverageGaps: watch.coverageGaps,
@@ -1716,6 +2020,7 @@ async function collectPartialCountInputs({
   git,
   allowlistPath,
   maxMergeChecks,
+  maxExternalEvidenceChecks,
   readFn,
   readdirFn,
   existsFn,
@@ -1753,7 +2058,16 @@ async function collectPartialCountInputs({
     windowEndMs,
     maxMergeChecks,
   });
-  return { deliveredResult, consumedResult, watch, gate4 };
+  // HYK-255-ln-github-anchor-1 -- ㄱ-4 와 독립인 ㄴ 후보 수집기(자기 상한).
+  const externalEvidence = await collectExternalEvidenceSafely({
+    fetchJson,
+    git,
+    allowlistPath,
+    windowStartMs,
+    windowEndMs,
+    maxChecks: maxExternalEvidenceChecks,
+  });
+  return { deliveredResult, consumedResult, watch, gate4, externalEvidence };
 }
 
 // HYK-255-relay-aux-1 -- runPartialCountOnce 본문이 relayResult 한 줄
@@ -1793,6 +2107,7 @@ export async function runPartialCountOnce(options = {}) {
     now,
     windowHours,
     maxMergeChecks,
+    maxExternalEvidenceChecks,
     repoRoot,
     dispatchReceiptsPath,
     watchLogPath,
@@ -1816,7 +2131,7 @@ export async function runPartialCountOnce(options = {}) {
   const windowEndMs = now;
   const windowStartMs = now - windowHours * 60 * 60 * 1000;
 
-  const { deliveredResult, consumedResult, watch, gate4 } =
+  const { deliveredResult, consumedResult, watch, gate4, externalEvidence } =
     await collectPartialCountInputs({
       windowStartMs,
       windowEndMs,
@@ -1830,6 +2145,7 @@ export async function runPartialCountOnce(options = {}) {
       git,
       allowlistPath,
       maxMergeChecks,
+      maxExternalEvidenceChecks,
       readFn,
       readdirFn,
       existsFn,
@@ -1857,11 +2173,13 @@ export async function runPartialCountOnce(options = {}) {
     gate4,
     outboxResult,
     relayResult,
+    externalEvidence,
   });
 
   return {
     reportText,
     gate4,
+    externalEvidence,
     suspected: watch.suspected,
     coverageGaps: watch.coverageGaps,
     outboxResult,

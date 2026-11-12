@@ -24,6 +24,8 @@ import {
   UNCOUNTED_EXAMPLES_V2,
   UNCOUNTED_EXAMPLES_V3,
   renderRelayLedgerAuxLines,
+  renderExternalEvidenceCandidateLine,
+  parseExternalEvidenceCandidateLine,
 } from "./partial-count-core.mjs";
 
 // 실물 watch.log 한 줄과 같은 형식(reach-report.test.mjs의 관례 재사용).
@@ -638,4 +640,99 @@ test("formatPartialCountSection: 파일 없음/신선/오래됨/생성시각 불
     nowMs,
   }).join("\n");
   assert.ok(noStamp.includes("생성 시각 UNKNOWN — 신선도 판정 불가"));
+});
+
+// ---------------------------------------------------------------------------
+// HYK-255-ln-github-anchor-1 (coder-task.md §2 ⓒ) -- ㄴ 절 «외부 독립 증거
+// 후보» 새 줄. 프로덕션 export(buildPartialCountReport ·
+// renderExternalEvidenceCandidateLine · parseExternalEvidenceCandidateLine)를
+// 직접 구동한다.
+// ---------------------------------------------------------------------------
+
+const EXT_PREFIX = "- 외부 독립 증거 후보: ";
+
+function lnSectionLines(text) {
+  const lines = text.split("\n");
+  const start = lines.indexOf("ㄴ 계획 밖 개입:");
+  const end = lines.indexOf("관측 건강:");
+  return lines.slice(start, end);
+}
+
+test("ㄴ 절 새 줄: 확인 N · 미조회 U · 분류 대기 -- 문면 그대로, 확인 사건(분자)은 «확인 0건» 유지", () => {
+  const text = buildPartialCountReport(
+    baseInput({
+      externalEvidence: { known: true, confirmed: 2, unchecked: 3 },
+    }),
+  );
+  assert.ok(text.includes(`${EXT_PREFIX}확인 2 · 미조회 3 · 분류 대기\n`));
+  assert.ok(text.includes("- 외부 독립 증거로 확인된 사건: 확인 0건\n"));
+  assert.ok(!text.includes("외부 독립 증거로 확인된 사건: 2건"));
+  assert.ok(lnSectionLines(text).some((l) => l.startsWith(EXT_PREFIX)));
+});
+
+test("ㄴ 절 새 줄: 수집 실패(사유) 모양 -- bare 숫자 0 금지", () => {
+  const text = buildPartialCountReport(
+    baseInput({
+      externalEvidence: { known: false, reason: "허용 목록 읽기 실패" },
+    }),
+  );
+  assert.ok(text.includes(`${EXT_PREFIX}수집 실패(허용 목록 읽기 실패)\n`));
+  assert.ok(!text.includes(`${EXT_PREFIX}확인 0`));
+});
+
+test("ㄴ 절 새 줄: 입력이 없으면(미결선 호출자) 줄이 0개이고, 있으면 정확히 1줄만 늘어난다", () => {
+  const without = buildPartialCountReport(baseInput());
+  const withLine = buildPartialCountReport(
+    baseInput({
+      externalEvidence: { known: true, confirmed: 0, unchecked: 0 },
+    }),
+  );
+  assert.ok(!without.includes(EXT_PREFIX));
+  assert.equal(
+    lnSectionLines(withLine).length - lnSectionLines(without).length,
+    1,
+  );
+  // 새 줄 말고는 보고서 전체가 한 글자도 안 바뀐다.
+  assert.equal(
+    withLine.replace(`${EXT_PREFIX}확인 0 · 미조회 0 · 분류 대기\n`, ""),
+    without,
+  );
+});
+
+test("renderExternalEvidenceCandidateLine / parseExternalEvidenceCandidateLine: 왕복", () => {
+  assert.equal(
+    renderExternalEvidenceCandidateLine({
+      known: true,
+      confirmed: 1,
+      unchecked: 4,
+    }),
+    `${EXT_PREFIX}확인 1 · 미조회 4 · 분류 대기`,
+  );
+  assert.equal(renderExternalEvidenceCandidateLine(undefined), null);
+  const text = buildPartialCountReport(
+    baseInput({
+      externalEvidence: { known: true, confirmed: 7, unchecked: 0 },
+    }),
+  );
+  assert.deepEqual(parseExternalEvidenceCandidateLine(text), {
+    state: "count",
+    confirmed: 7,
+    unchecked: 0,
+  });
+  const failed = buildPartialCountReport(
+    baseInput({ externalEvidence: { known: false, reason: "x" } }),
+  );
+  assert.deepEqual(parseExternalEvidenceCandidateLine(failed), {
+    state: "failed",
+    reason: "x",
+  });
+  assert.deepEqual(
+    parseExternalEvidenceCandidateLine(buildPartialCountReport(baseInput())),
+    {
+      state: "absent",
+    },
+  );
+  assert.deepEqual(parseExternalEvidenceCandidateLine(null), {
+    state: "absent",
+  });
 });
