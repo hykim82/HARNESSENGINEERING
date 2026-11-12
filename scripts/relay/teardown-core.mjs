@@ -718,12 +718,45 @@ export const PM_BINDING_CAUSE = Object.freeze({
   RECEIPT_BEFORE_DISPATCH: "RECEIPT_BEFORE_DISPATCH",
   PRE_DISPATCH_WINDOW: "PRE_DISPATCH_WINDOW",
 });
+// HYK-464-teardown-3kinds-2 -- ⓐ 사람 승인 은퇴 표지(검사 6 «통과» OR 묶음의
+// 끝 항목). 표지는 검사 6(라운드 증거)만 대신한다 -- 검사 1~5(병합·미소비·
+// keep-reason·목록·본체)는 표지가 완벽해도 앞에서 그대로 거부한다. 새 REASON
+// 코드 0: 표지가 어긋나면 사유는 기존 NO_ROUND_EVIDENCE 이고 evidence 에만
+// retireMarker 가 실린다. 표지는 암호 서명이 아니라 «절차적 앵커» 다(설계 §(h)).
+export const RETIRE_MARKER_SCHEMA = "teardown-retire-v1";
+export const RETIRE_MARKER_REASON_CODES = Object.freeze([
+  "INVALID_ROUND_LABEL",
+  "ABANDONED_ROUND",
+]);
+export const RETIRE_MARKER_MAX_AGE_MS = 14 * 24 * 60 * 60 * 1000;
+// evidence 전용 «원인» 닫힌 집합(판정 REASON 이 아니다).
+export const RETIRE_MARKER_CAUSE = Object.freeze({
+  NO_MARKER: "NO_MARKER",
+  SHAPE_MISMATCH: "SHAPE_MISMATCH",
+  SCHEMA_MISMATCH: "SCHEMA_MISMATCH",
+  WORKTREE_MISMATCH: "WORKTREE_MISMATCH",
+  HEAD_INVALID: "HEAD_INVALID",
+  HEAD_MISMATCH: "HEAD_MISMATCH",
+  REASON_CODE_INVALID: "REASON_CODE_INVALID",
+  CONFIRMED_BY_EMPTY: "CONFIRMED_BY_EMPTY",
+  AT_INVALID: "AT_INVALID",
+  AT_FUTURE: "AT_FUTURE",
+  AT_STALE: "AT_STALE",
+  MULTIPLE_MARKERS: "MULTIPLE_MARKERS",
+  APPROVAL_REF_INVALID: "APPROVAL_REF_INVALID",
+  APPROVAL_NOT_FOUND: "APPROVAL_NOT_FOUND",
+  APPROVAL_OUTSIDE_ROOT: "APPROVAL_OUTSIDE_ROOT",
+  APPROVAL_IS_MARKER: "APPROVAL_IS_MARKER",
+  APPROVAL_MISSING_NAME: "APPROVAL_MISSING_NAME",
+  APPROVAL_MISSING_HEAD: "APPROVAL_MISSING_HEAD",
+});
 // ELIGIBLE evidence.openedBy 표기용 «어느 문으로 열렸나» 토큰.
 export const OPENED_BY = Object.freeze({
   ANCESTOR: "ANCESTOR",
   PATCH_ID: "PATCH_ID",
   RECEIPTS: "RECEIPTS",
   PM_BINDING: "PM_BINDING",
+  RETIRE_MARKER: "RETIRE_MARKER",
 });
 
 function isSha40(v) {
@@ -802,6 +835,44 @@ function confirmPmBinding(pm) {
   return pmBindingCountsHold(pm);
 }
 
+function isValidRetireMarker(v) {
+  if (!isPlainObject(v) || typeof v.observable !== "boolean") return false;
+  if (v.observable !== true) return true;
+  return typeof v.valid === "boolean";
+}
+
+// 표지가 «이 판정이 본 바로 그 HEAD» 에 묶였고 집합 안 reasonCode 를 가졌는가.
+function retireMarkerBoundToHead(rm, mergeStatus) {
+  return (
+    isSha40(rm.headSha) &&
+    rm.headSha === mergeStatus.headSha &&
+    RETIRE_MARKER_REASON_CODES.includes(rm.reasonCode)
+  );
+}
+
+// 어댑터가 낸 불리언 플래그와 개수 -- 하나라도 정확히 맞지 않으면 거부한다.
+function retireMarkerFlagsHold(rm) {
+  return (
+    rm.markerCount === 1 &&
+    typeof rm.approvalRef === "string" &&
+    rm.approvalRef.length > 0 &&
+    typeof rm.confirmedBy === "string" &&
+    rm.confirmedBy.length > 0 &&
+    rm.approvalNamesWorktree === true &&
+    rm.approvalNamesHeadPrefix === true &&
+    rm.approvalInsideAllowedRoot === true &&
+    rm.atNotFuture === true &&
+    rm.atWithin14Days === true
+  );
+}
+
+// «코어의 재확인»: 어댑터의 valid:true 한 글자를 믿지 않는다.
+function confirmRetireMarker(rm, mergeStatus) {
+  if (!isValidRetireMarker(rm)) return false;
+  if (rm.observable !== true || rm.valid !== true) return false;
+  return retireMarkerBoundToHead(rm, mergeStatus) && retireMarkerFlagsHold(rm);
+}
+
 // 한 자리 OR 묶음 -- 순서대로 첫 «열린 문» 의 토큰을 돌려준다(없으면 null).
 const MERGE_OPENERS = Object.freeze([
   {
@@ -826,6 +897,11 @@ const ROUND_EVIDENCE_OPENERS = Object.freeze([
   {
     via: OPENED_BY.PM_BINDING,
     opens: (inventory) => confirmPmBinding(inventory.pmBinding),
+  },
+  {
+    via: OPENED_BY.RETIRE_MARKER,
+    opens: (inventory) =>
+      confirmRetireMarker(inventory.retireMarker, inventory.mergeStatus),
   },
 ]);
 function firstOpenedBy(openers, inventory) {
@@ -1020,9 +1096,13 @@ function checkRoundEvidencePresent(inventory) {
       evidence: buildArchiveEvidence(
         REASON.NO_ROUND_EVIDENCE,
         withOptionalEvidence(
-          { roundEvidence },
-          "pmBinding",
-          inventory.pmBinding,
+          withOptionalEvidence(
+            { roundEvidence },
+            "pmBinding",
+            inventory.pmBinding,
+          ),
+          "retireMarker",
+          inventory.retireMarker,
         ),
       ),
     };

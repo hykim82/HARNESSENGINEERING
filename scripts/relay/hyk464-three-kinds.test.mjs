@@ -216,7 +216,14 @@ function unconsumedNaExecFn(paths) {
     });
 }
 
-function runTick({ repo, cr, teardownShadow = {}, orcaExecFn, armed = false }) {
+function runTick({
+  repo,
+  cr,
+  teardownShadow = {},
+  orcaExecFn,
+  armed = false,
+  execFn,
+}) {
   const notifyDir = fs.mkdtempSync(path.join(tmpdir(), "nc-hyk464-3k-notify-"));
   if (armed) {
     fs.writeFileSync(
@@ -229,7 +236,7 @@ function runTick({ repo, cr, teardownShadow = {}, orcaExecFn, armed = false }) {
     watchDir: cr.watchDir,
     notifyDir,
     now: NOW_MS,
-    execFn: unconsumedNaExecFn(listWorktreePaths(repo.mainRoot)),
+    execFn: execFn ?? unconsumedNaExecFn(listWorktreePaths(repo.mainRoot)),
     resourceResidue: {
       worktreeListFn: () => ({
         ok: true,
@@ -1763,4 +1770,914 @@ test("HYK-464-3kinds 무장 N13: HEAD 이동은 «건너뜀» -- 뒤 워크트�
   } finally {
     cleanup([repo.parent, cr.root, archiveRoot]);
   }
+});
+
+// ═══════════════════ ⓐ 사람 승인 은퇴 표지 (HYK-464-teardown-3kinds-2 · CODER-2) ═══════════════════
+// 표지는 검사 6(라운드 증거)의 «통과» OR 묶음 끝 항목 하나다. 쓰는 도구는 없다 --
+// 아래 writeMarker 류는 «시험 안에서 합성 관제실에» 쓰는 시험 helper 일 뿐이다.
+// 시험 대상 = 프로덕션 export(judgeArchiveEligibility · adapter.observeRetireMarker ·
+// runWatchOnce). 합성 관제실은 mkdtemp 아래(관제실/통역 형제 폴더 포함)에만 만든다.
+
+const AT_OK = "2026-11-12T19:00:00+09:00"; // NOW_MS(20:00 KST) 한 시간 전.
+const RETIRE_SCHEMA = "teardown-retire-v1";
+
+// 합성 관제실: <mkdtemp>/관제실 + 형제 <mkdtemp>/통역 (실물 형제 폴더 모양).
+function makeRetireRoom() {
+  const parent = fs.mkdtempSync(path.join(tmpdir(), "nc-hyk464-3k-ret-"));
+  const tmpRoot = fs.realpathSync(tmpdir()).toLowerCase();
+  assert.ok(
+    fs.realpathSync(parent).toLowerCase().startsWith(tmpRoot),
+    "synthetic control room must live under the mkdtemp area",
+  );
+  const root = path.join(parent, "관제실");
+  const room = {
+    parent,
+    root,
+    watchDir: path.join(root, "watch"),
+    retireDir: path.join(root, "watch", "teardown-retire"),
+    approvals: path.join(root, "approvals"),
+    interp: path.join(parent, "통역"),
+    outside: path.join(parent, "outside"),
+  };
+  for (const d of [
+    room.retireDir,
+    room.approvals,
+    room.interp,
+    room.outside,
+    path.join(root, "PM", "relay", "receipts"),
+  ]) {
+    fs.mkdirSync(d, { recursive: true });
+  }
+  return room;
+}
+
+// 워크트리 하나 + 그 표지/승인 근거를 합성 관제실에 만든다.
+function addRetireCase(repo, room, name, o = {}) {
+  const wtPath = addWorktree(repo, name, `feature/${name}`);
+  const head = headOf(wtPath);
+  const approvalDir = o.approvalDir ?? room.approvals;
+  const approvalPath = path.join(approvalDir, `approval-${name}.md`);
+  const text =
+    o.approvalText ?? `승인 근거: ${name} @ ${head.slice(0, 7)} 무효 라운드\n`;
+  if (o.writeApproval !== false) fs.writeFileSync(approvalPath, text);
+  const body = {
+    schema: RETIRE_SCHEMA,
+    worktree: name,
+    headSha: head,
+    reasonCode: "INVALID_ROUND_LABEL",
+    approvalRef: o.approvalRef ?? approvalPath,
+    confirmed_by: "한용",
+    at: AT_OK,
+    ...(o.marker ?? {}),
+  };
+  for (const k of o.dropKeys ?? []) delete body[k];
+  if (o.writeMarker !== false) {
+    fs.writeFileSync(
+      path.join(room.retireDir, `${name}.json`),
+      o.rawMarker ?? JSON.stringify(body),
+    );
+  }
+  return { wtPath, head, approvalPath, body };
+}
+
+const retireVerdict = (shadow, wtPath) => verdictOf(entryOf(shadow, wtPath));
+const ELIGIBLE_V = { eligibility: ELIGIBILITY.ELIGIBLE, reason: R_ELIGIBLE };
+const NO_EVIDENCE_V = {
+  eligibility: ELIGIBILITY.EVIDENCE_NOT_DURABLE,
+  reason: R_NO_EVIDENCE,
+};
+
+test("HYK-464-3kinds: ⓐ marker valid -> ELIGIBLE", () => {
+  const repo = setupRepo();
+  const room = makeRetireRoom();
+  try {
+    // 승인 근거가 관제실 루트 아래(INVALID_ROUND_LABEL) / 형제 통역 폴더 아래(ABANDONED_ROUND).
+    const inRoot = addRetireCase(repo, room, "rm-ok-root");
+    const inInterp = addRetireCase(repo, room, "rm-ok-interp", {
+      approvalDir: room.interp,
+      marker: { reasonCode: "ABANDONED_ROUND" },
+    });
+    // 표지 없는 워크트리는 그대로 거부(기존 사유).
+    const noMarker = addRetireCase(repo, room, "rm-ok-none", {
+      writeMarker: false,
+    });
+    const { shadow, notifyDir } = runTick({ repo, cr: room });
+    assert.deepEqual(retireVerdict(shadow, inRoot.wtPath), ELIGIBLE_V);
+    assert.deepEqual(retireVerdict(shadow, inInterp.wtPath), ELIGIBLE_V);
+    assert.deepEqual(retireVerdict(shadow, noMarker.wtPath), NO_EVIDENCE_V);
+    const e = entryOf(shadow, inRoot.wtPath);
+    assert.deepEqual(e.openedBy, { merge: "ANCESTOR", round: "RETIRE_MARKER" });
+    assert.equal(e.headSha, inRoot.head);
+    cleanup([notifyDir]);
+  } finally {
+    cleanup([repo.parent, room.parent]);
+  }
+});
+
+test("HYK-464-3kinds: ⓐ 관제실에 watch/teardown-retire/ 폴더 자체가 없어도(실물 현재 상태) 판정이 죽지 않고 기존 사유로 거부", () => {
+  const repo = setupRepo();
+  const room = makeRetireRoom();
+  try {
+    const c = addRetireCase(repo, room, "rm-nodir", { writeMarker: false });
+    fs.rmSync(room.retireDir, { recursive: true, force: true });
+    const { shadow, notifyDir } = runTick({ repo, cr: room });
+    assert.deepEqual(retireVerdict(shadow, c.wtPath), NO_EVIDENCE_V);
+    cleanup([notifyDir]);
+  } finally {
+    cleanup([repo.parent, room.parent]);
+  }
+});
+
+// 위조·불완전 표지 -- 전부 NO_ROUND_EVIDENCE. 한 저장소·한 회차에 워크트리 여럿을 둔다.
+function retireForgedCases(repo, room) {
+  const cases = {};
+  const add = (key, o) => {
+    cases[key] = addRetireCase(repo, room, `rm-${key}`, o);
+    return cases[key];
+  };
+  // N10: 표지 뒤 커밋 -- 승인 근거 본문에는 «새 HEAD 앞 7자리» 도 적어 headSha 대조만 홀로 막게 한다.
+  const n10 = add("n10");
+  commitFile(n10.wtPath, "after.txt", "after\n", "after marker");
+  // 새 HEAD 도 master 에 들어가 «병합됨» 은 유지한다 -- 막는 것이 표지의 headSha 대조뿐이게.
+  git(n10.wtPath, ["push", "-q", "origin", "HEAD:master"]);
+  fs.writeFileSync(
+    n10.approvalPath,
+    `승인 근거: rm-n10 @ ${n10.head.slice(0, 7)} / ${headOf(n10.wtPath).slice(0, 7)}\n`,
+  );
+  // N11: 승인 근거 파일 없음 · 이름 없음 · SHA 없음 · 이름이 더 긴 이름의 일부 · SHA 가 다른 해시의 일부.
+  add("noapproval", { writeApproval: false });
+  add("noname", { approvalText: "승인 근거: 이름 없음 aaaaaaa\n" });
+  const nosha = add("nosha", {});
+  fs.writeFileSync(nosha.approvalPath, "승인 근거: rm-nosha 만 있다\n");
+  const longer = add("longer", {});
+  fs.writeFileSync(
+    longer.approvalPath,
+    `승인: rm-longer-2 @ ${longer.head.slice(0, 7)}\n`,
+  );
+  const embedded = add("embedded", {});
+  fs.writeFileSync(
+    embedded.approvalPath,
+    `승인: rm-embedded @ f${embedded.head.slice(0, 7)}\n`,
+  );
+  // 키 개수 · 값 규격.
+  add("keys6", { dropKeys: ["confirmed_by"] });
+  add("keys8", { marker: { extra: "x" } });
+  add("reason", { marker: { reasonCode: "OTHER_REASON" } });
+  add("schema", { marker: { schema: "teardown-retire-v2" } });
+  add("wtfield", { marker: { worktree: "rm-someone-else" } });
+  add("short", { marker: { headSha: "abc1234" } });
+  add("whoempty", { marker: { confirmed_by: "" } });
+  // 시각.
+  add("future", { marker: { at: "2026-11-12T21:00:00+09:00" } });
+  add("old15", { marker: { at: "2026-10-28T19:00:00+09:00" } });
+  add("nooffset", { marker: { at: "2026-11-12T19:00:00" } });
+  add("badday", { marker: { at: "2026-02-30T00:00:00+09:00" } });
+  // 표지 2개: 같은 워크트리를 가리키는 두 번째 파일.
+  const dup = add("dup");
+  fs.writeFileSync(
+    path.join(room.retireDir, "rm-dup-copy.json"),
+    JSON.stringify(dup.body),
+  );
+  // approvalRef 위치: 관제실·통역 밖 / 상대경로 / 표지 파일 자기 자신.
+  const outsideFile = path.join(room.outside, "approval-out.md");
+  add("outside", { writeApproval: false, approvalRef: outsideFile });
+  fs.writeFileSync(
+    outsideFile,
+    `승인: rm-outside @ ${cases.outside.head.slice(0, 7)}\n`,
+  );
+  add("relative", { approvalRef: "approvals/approval-rm-relative.md" });
+  const selfRef = add("selfref", {});
+  fs.writeFileSync(
+    path.join(room.retireDir, "rm-selfref.json"),
+    JSON.stringify({
+      ...selfRef.body,
+      approvalRef: path.join(room.retireDir, "rm-selfref.json"),
+    }),
+  );
+  // JSON 깨짐 · 객체가 아님.
+  add("broken", { rawMarker: "{ not json" });
+  add("array", { rawMarker: "[]" });
+  // 워크트리 안 .harness/retirements/ 만 있고 관제실 표지는 없다(재사용 금지).
+  const inWt = add("inwt", { writeMarker: false });
+  writeHarnessFile(
+    inWt.wtPath,
+    ".harness/retirements/CODER-retire-r1.json",
+    JSON.stringify(inWt.body),
+  );
+  return cases;
+}
+
+test("HYK-464-3kinds: ⓐ marker forged|incomplete -> NO_ROUND_EVIDENCE (N10 표지 뒤 커밋 · N11 근거 없음/이름 없음/SHA 없음 · 키 6/8 · reasonCode 밖 · at 미래/15일 · 표지 2개 · approvalRef 루트 밖 · 워크트리 안 retirements 만 · JSON 깨짐)", () => {
+  const repo = setupRepo();
+  const room = makeRetireRoom();
+  try {
+    const cases = retireForgedCases(repo, room);
+    const control = addRetireCase(repo, room, "rm-control"); // 같은 틀의 정상 표지 -- 헛시험 방지.
+    const { shadow, notifyDir } = runTick({ repo, cr: room });
+    assert.deepEqual(
+      retireVerdict(shadow, control.wtPath),
+      ELIGIBLE_V,
+      "정상 표지 대조군은 ELIGIBLE 이어야 한다(아니면 아래 거부는 헛시험)",
+    );
+    for (const [key, c] of Object.entries(cases)) {
+      assert.deepEqual(
+        retireVerdict(shadow, c.wtPath),
+        NO_EVIDENCE_V,
+        `case ${key} must stay NO_ROUND_EVIDENCE`,
+      );
+    }
+    cleanup([notifyDir]);
+  } finally {
+    cleanup([repo.parent, room.parent]);
+  }
+});
+
+test("HYK-464-3kinds: ⓐ marker + junction -- 관제실 밖으로 빠지는 junction 은 거부, 관제실 안으로 도는 junction 은 해석 뒤 안이라 통과", (t) => {
+  const repo = setupRepo();
+  const room = makeRetireRoom();
+  try {
+    const escapeDir = path.join(room.approvals, "link-out");
+    const innerLink = path.join(room.interp, "link-in");
+    try {
+      fs.symlinkSync(room.outside, escapeDir, "junction");
+      fs.symlinkSync(room.approvals, innerLink, "junction");
+    } catch (err) {
+      t.skip(`junction 을 만들 수 없다(${err.code ?? err.message}) -- 못 쟀다`);
+      return;
+    }
+    const esc = addRetireCase(repo, room, "rm-jesc", { writeApproval: false });
+    fs.writeFileSync(
+      path.join(room.outside, "approval-jesc.md"),
+      `승인: rm-jesc @ ${esc.head.slice(0, 7)}\n`,
+    );
+    fs.writeFileSync(
+      path.join(room.retireDir, "rm-jesc.json"),
+      JSON.stringify({
+        ...esc.body,
+        approvalRef: path.join(escapeDir, "approval-jesc.md"),
+      }),
+    );
+    const inn = addRetireCase(repo, room, "rm-jin");
+    fs.writeFileSync(
+      path.join(room.retireDir, "rm-jin.json"),
+      JSON.stringify({
+        ...inn.body,
+        approvalRef: path.join(innerLink, "approval-rm-jin.md"),
+      }),
+    );
+    const { shadow, notifyDir } = runTick({ repo, cr: room });
+    assert.deepEqual(retireVerdict(shadow, esc.wtPath), NO_EVIDENCE_V);
+    assert.deepEqual(retireVerdict(shadow, inn.wtPath), ELIGIBLE_V);
+    cleanup([notifyDir]);
+  } finally {
+    cleanup([repo.parent, room.parent]);
+  }
+});
+
+test("HYK-464-3kinds N1: 본체 체크아웃은 표지가 있어도 MAIN_CHECKOUT 으로 거부 (검사 5 가 표지보다 앞)", () => {
+  const repo = setupRepo();
+  const room = makeRetireRoom();
+  try {
+    const mainName = path.basename(repo.mainRoot);
+    const mainHead = headOf(repo.mainRoot);
+    const approval = path.join(room.approvals, "approval-main.md");
+    fs.writeFileSync(approval, `승인: ${mainName} @ ${mainHead.slice(0, 7)}\n`);
+    fs.writeFileSync(
+      path.join(room.retireDir, `${mainName}.json`),
+      JSON.stringify({
+        schema: RETIRE_SCHEMA,
+        worktree: mainName,
+        headSha: mainHead,
+        reasonCode: "ABANDONED_ROUND",
+        approvalRef: approval,
+        confirmed_by: "한용",
+        at: AT_OK,
+      }),
+    );
+    const { shadow, notifyDir } = runTick({ repo, cr: room });
+    assert.equal(
+      entryOf(shadow, listWorktreePaths(repo.mainRoot)[0]).reason,
+      REASON.MAIN_CHECKOUT,
+    );
+    cleanup([notifyDir]);
+  } finally {
+    cleanup([repo.parent, room.parent]);
+  }
+});
+
+test("HYK-464-3kinds N2: 미소비 결과 파일이 있는 무효 라운드는 표지가 있어도 UNCONSUMED_ROUNDS_PRESENT (표지는 검사 6 만 대신)", () => {
+  const repo = setupRepo();
+  const room = makeRetireRoom();
+  try {
+    const c = addRetireCase(repo, room, "rm-n2");
+    writeHarnessFile(c.wtPath, ".harness/coder.md", "task_id: HYK-N2-1\n");
+    const execFn = () =>
+      JSON.stringify({
+        verdict: "PROGRESSING",
+        reasonCode: "OK",
+        unconsumed: {
+          status: "JUDGED",
+          totalWorktrees: 1,
+          worstWorktreePaths: [c.wtPath],
+          worstCount: 1,
+          worktrees: [
+            {
+              worktreePath: c.wtPath,
+              status: "UNCONSUMED_JUDGED",
+              verdict: "UNCONSUMED",
+              resultFile: { path: ".harness/coder.md" },
+            },
+          ],
+        },
+      });
+    const { shadow, notifyDir } = runTick({ repo, cr: room, execFn });
+    assert.equal(
+      entryOf(shadow, c.wtPath).reason,
+      REASON.UNCONSUMED_ROUNDS_PRESENT,
+    );
+    cleanup([notifyDir]);
+  } finally {
+    cleanup([repo.parent, room.parent]);
+  }
+});
+
+test("HYK-464-3kinds N3: keep-reason.md 있음 + 표지 -> KEEP_REASON_PRESENT / 병합 안 됨 + 표지 -> NOT_MERGED_TO_MASTER (표지는 검사 3·1 을 대신하지 않는다)", () => {
+  const repo = setupRepo();
+  const room = makeRetireRoom();
+  try {
+    const keep = addRetireCase(repo, room, "rm-n3");
+    writeHarnessFile(
+      keep.wtPath,
+      ".harness/keep-reason.md",
+      "보존\n2026-11-12\n",
+    );
+    const unmerged = addRetireCase(repo, room, "rm-unmerged");
+    commitFile(unmerged.wtPath, "uniq.txt", "u\n", "unique");
+    // 표지의 headSha·승인 근거를 «새 HEAD» 에 맞춰 다시 쓴다 -- 병합 검사만 홀로 막게 한다.
+    const newHead = headOf(unmerged.wtPath);
+    fs.writeFileSync(
+      unmerged.approvalPath,
+      `승인: rm-unmerged @ ${newHead.slice(0, 7)}\n`,
+    );
+    fs.writeFileSync(
+      path.join(room.retireDir, "rm-unmerged.json"),
+      JSON.stringify({ ...unmerged.body, headSha: newHead }),
+    );
+    const { shadow, notifyDir } = runTick({ repo, cr: room });
+    assert.equal(
+      entryOf(shadow, keep.wtPath).reason,
+      REASON.KEEP_REASON_PRESENT,
+    );
+    assert.equal(entryOf(shadow, unmerged.wtPath).reason, R_NOT_MERGED);
+    cleanup([notifyDir]);
+  } finally {
+    cleanup([repo.parent, room.parent]);
+  }
+});
+
+test("HYK-464-3kinds 무장 end-to-end ⓐ: 표지가 맞는 무효 라운드 워크트리를 무장 정리가 지운다 (받는함 열린 문 RETIRE_MARKER · 브랜치는 SHA 로 복원) / 표지 없는 이웃은 그대로", () => {
+  const repo = setupRepo();
+  const room = makeRetireRoom();
+  const archiveRoot = fs.mkdtempSync(path.join(tmpdir(), "nc-hyk464-3k-arch-"));
+  try {
+    const c = addRetireCase(repo, room, "rm-arm");
+    const neighbor = addRetireCase(repo, room, "rm-arm-none", {
+      writeMarker: false,
+    });
+    const orca = fakeOrca(repo.mainRoot);
+    const { shadow, notifyDir } = runTick({
+      repo,
+      cr: room,
+      armed: true,
+      orcaExecFn: orca,
+      teardownShadow: { archiveRoot },
+    });
+    assert.deepEqual(
+      rmCalls(orca).map((a) => a.find((x) => x.startsWith("path:")).slice(5)),
+      [c.wtPath],
+    );
+    assert.equal(fs.existsSync(c.wtPath), false);
+    assert.equal(fs.existsSync(neighbor.wtPath), true);
+    assert.equal(
+      git(repo.mainRoot, ["rev-parse", "feature/rm-arm"]).trim(),
+      c.head,
+    );
+    assert.equal(shadow.armResult.results[0].ok, true);
+    const notice = fs
+      .readdirSync(notifyDir)
+      .filter((n) => n.startsWith("teardown-arm-notify-"))
+      .map((n) => fs.readFileSync(path.join(notifyDir, n), "utf8"))
+      .join("\n");
+    assert.match(notice, /RETIRE_MARKER/);
+    cleanup([notifyDir]);
+  } finally {
+    cleanup([repo.parent, room.parent, archiveRoot]);
+  }
+});
+
+// ───────── 코어: judgeArchiveEligibility 의 ROUND_EVIDENCE_OPENERS 끝 항목 ─────────
+
+function goodRetireMarker(o = {}) {
+  return {
+    observable: true,
+    valid: true,
+    cause: null,
+    worktree: "rm-x",
+    headSha: H,
+    reasonCode: "INVALID_ROUND_LABEL",
+    approvalRef: "/cr/approvals/a.md",
+    confirmedBy: "한용",
+    at: AT_OK,
+    markerCount: 1,
+    approvalNamesWorktree: true,
+    approvalNamesHeadPrefix: true,
+    approvalInsideAllowedRoot: true,
+    atNotFuture: true,
+    atWithin14Days: true,
+    ...o,
+  };
+}
+const zeroReceipts = { roundEvidence: { observable: true, count: 0 } };
+
+test("HYK-464-3kinds core ⓐ: 표지 증거가 전부 맞으면 RETIRE_MARKER 로 라운드 증거 통과 (receipts 0) -- 기존 길이 먼저 열리면 그 표기가 이긴다", () => {
+  const r = judge(
+    baseInv({ ...zeroReceipts, retireMarker: goodRetireMarker() }),
+  );
+  assert.equal(r.eligibility, ELIGIBILITY.ELIGIBLE);
+  assert.deepEqual(r.evidence.openedBy, {
+    merge: "ANCESTOR",
+    round: "RETIRE_MARKER",
+  });
+  const withReceipts = judge(
+    baseInv({
+      roundEvidence: { observable: true, count: 2 },
+      retireMarker: goodRetireMarker(),
+    }),
+  );
+  assert.equal(withReceipts.evidence.openedBy.round, "RECEIPTS");
+  const withPm = judge(
+    baseInv({
+      ...zeroReceipts,
+      pmBinding: goodPmBinding(),
+      retireMarker: goodRetireMarker(),
+    }),
+  );
+  assert.equal(withPm.evidence.openedBy.round, "PM_BINDING");
+});
+
+function retireMarkerBreakers() {
+  return [
+    ["valid:false", { valid: false }],
+    ["valid 없음", { valid: undefined }],
+    ["valid 문자열", { valid: "true" }],
+    ["observable:false", { observable: false }],
+    ["observable 없음", { observable: undefined }],
+    ["observable 문자열", { observable: "true" }],
+    ["observable 1", { observable: 1 }],
+    ["headSha 불일치(표지 뒤 커밋)", { headSha: "d".repeat(40) }],
+    ["headSha 짧음", { headSha: "aaaaaaa" }],
+    ["reasonCode 집합 밖", { reasonCode: "OTHER_REASON" }],
+    ["reasonCode 없음", { reasonCode: undefined }],
+    ["markerCount 2", { markerCount: 2 }],
+    ["markerCount 0", { markerCount: 0 }],
+    ["markerCount 문자열", { markerCount: "1" }],
+    ["confirmedBy 빈 값", { confirmedBy: "" }],
+    ["approvalRef 빈 값", { approvalRef: "" }],
+    ["근거 본문에 이름 없음", { approvalNamesWorktree: false }],
+    ["근거 본문에 SHA 없음", { approvalNamesHeadPrefix: false }],
+    ["근거 위치 밖", { approvalInsideAllowedRoot: false }],
+    ["at 미래", { atNotFuture: false }],
+    ["at 14일 초과", { atWithin14Days: false }],
+    ["근거 이름 플래그 없음", { approvalNamesWorktree: undefined }],
+    ["at 플래그 문자열", { atNotFuture: "true" }],
+  ];
+}
+
+test("HYK-464-3kinds core ⓐ 재확인(M6·M7 코어 자리): 어댑터가 valid:true 를 줘도 숫자·플래그 하나라도 깨지면 NO_ROUND_EVIDENCE, 거부 evidence 에만 retireMarker", () => {
+  for (const [label, patch] of retireMarkerBreakers()) {
+    const rm = goodRetireMarker();
+    for (const [k, v] of Object.entries(patch)) {
+      if (v === undefined) delete rm[k];
+      else rm[k] = v;
+    }
+    const r = judge(baseInv({ ...zeroReceipts, retireMarker: rm }));
+    assert.equal(r.reason, R_NO_EVIDENCE, label);
+    assert.equal(r.eligibility, ELIGIBILITY.EVIDENCE_NOT_DURABLE, label);
+    assert.deepEqual(r.evidence.retireMarker, rm, `${label}: evidence`);
+  }
+  // 표지 키 자체가 없으면 evidence 에 retireMarker 키도 없다(기존 거부 evidence 모양 무변).
+  const none = judge(baseInv({ ...zeroReceipts }));
+  assert.equal(none.reason, R_NO_EVIDENCE);
+  assert.equal(Object.hasOwn(none.evidence, "retireMarker"), false);
+  // 비객체.
+  for (const bad of [null, "x", 1, [], true]) {
+    const r = judge(baseInv({ ...zeroReceipts, retireMarker: bad }));
+    assert.equal(r.reason, R_NO_EVIDENCE, `비객체 ${JSON.stringify(bad)}`);
+  }
+});
+
+test("HYK-464-3kinds core ⓐ M8: 표지는 검사 6 만 대신한다 -- 앞선 검사 1~5 는 표지가 완벽해도 먼저 거부한다", () => {
+  const open = { ...zeroReceipts, retireMarker: goodRetireMarker() };
+  const cases = [
+    [{ mergeStatus: notAncestor }, R_NOT_MERGED],
+    [
+      {
+        unconsumedRounds: {
+          observable: true,
+          count: 1,
+          consumedViaRetirement: false,
+        },
+      },
+      REASON.UNCONSUMED_ROUNDS_PRESENT,
+    ],
+    [
+      { keepReason: { observable: true, present: true, firstLine: "k" } },
+      REASON.KEEP_REASON_PRESENT,
+    ],
+    [
+      { archiveManifest: { observable: false } },
+      REASON.ARCHIVE_MANIFEST_UNAVAILABLE,
+    ],
+    [
+      { mainCheckout: { observable: true, isMain: true } },
+      REASON.MAIN_CHECKOUT,
+    ],
+  ];
+  for (const [extra, reason] of cases) {
+    const r = judge(baseInv({ ...open, ...extra }));
+    assert.equal(r.reason, reason, `marker-open + ${reason}`);
+    assert.notEqual(r.eligibility, ELIGIBILITY.ELIGIBLE);
+  }
+});
+
+test("HYK-464-3kinds core ⓐ: roundEvidence 자체가 관측 안 됨이면 표지가 완벽해도 기존 ROUND_EVIDENCE_UNKNOWN", () => {
+  const r = judge(
+    baseInv({
+      roundEvidence: { observable: false },
+      retireMarker: goodRetireMarker(),
+    }),
+  );
+  assert.equal(r.reason, REASON.ROUND_EVIDENCE_UNKNOWN);
+});
+
+// ───────── 어댑터: observeRetireMarker (주입형 · 프로세스 실행 0) ─────────
+
+const RM_ROOT = "/cr";
+const RM_WT = "C:/wt/rm-x";
+const RM_HEAD = "a".repeat(40);
+const RM_STATUS = {
+  observable: true,
+  isAncestorOfRemoteMaster: true,
+  headSha: RM_HEAD,
+  remoteMasterSha: "b".repeat(40),
+};
+const RM_APPROVAL = `${RM_ROOT}/approvals/a.md`;
+const RM_MARKER_PATH = `${RM_ROOT}/watch/teardown-retire/rm-x.json`;
+const RM_NOW = NOW_MS;
+
+function rmMarkerBody(o = {}) {
+  return {
+    schema: RETIRE_SCHEMA,
+    worktree: "rm-x",
+    headSha: RM_HEAD,
+    reasonCode: "INVALID_ROUND_LABEL",
+    approvalRef: RM_APPROVAL,
+    confirmed_by: "한용",
+    at: AT_OK,
+    ...o,
+  };
+}
+
+function rmMarkerWithout(key) {
+  const m = rmMarkerBody();
+  delete m[key];
+  return m;
+}
+
+// o.files 로 파일을 더하고/덮고, o.dir 로 목록을 바꾼다. null 값 = 파일 없음.
+function retireFake(o = {}) {
+  const files = {
+    [RM_MARKER_PATH]: JSON.stringify(o.marker ?? rmMarkerBody()),
+    [RM_APPROVAL]: o.approval ?? "근거: rm-x @ aaaaaaa 승인\n",
+    ...(o.files ?? {}),
+  };
+  for (const k of Object.keys(files)) if (files[k] === null) delete files[k];
+  const dirs = {
+    [`${RM_ROOT}/watch/teardown-retire`]: o.dir ?? ["rm-x.json"],
+  };
+  const reads = [];
+  const real = o.real ?? {};
+  return {
+    reads,
+    existsFn: (p) => Object.hasOwn(files, p),
+    readFileFn: (p) => {
+      reads.push(p);
+      if (o.throwRead?.includes(p)) throw new Error(`EIO ${p}`);
+      if (!Object.hasOwn(files, p)) throw new Error(`ENOENT ${p}`);
+      return files[p];
+    },
+    readdirFn: (d) => {
+      reads.push(d);
+      if (o.throwDir) throw new Error(`EIO ${d}`);
+      if (!Object.hasOwn(dirs, d)) throw new Error(`ENOENT ${d}`);
+      return dirs[d];
+    },
+    realpathFn: (p) => {
+      if (o.throwReal?.includes(p)) throw new Error(`EIO real ${p}`);
+      return real[p] ?? p;
+    },
+    nowMs: RM_NOW,
+    ...(o.opts ?? {}),
+  };
+}
+const observeRm = (fake, mergeStatus = RM_STATUS, root = RM_ROOT) =>
+  adapter.observeRetireMarker(RM_WT, root, mergeStatus, fake);
+
+test("HYK-464-3kinds adapter ⓐ: 정상 표지 -> valid:true + 필드·플래그 채움 / 읽은 경로는 표지 폴더와 승인 근거뿐", () => {
+  const fake = retireFake();
+  const r = observeRm(fake);
+  assert.equal(r.observable, true);
+  assert.equal(r.valid, true);
+  assert.equal(r.cause, null);
+  assert.equal(r.worktree, "rm-x");
+  assert.equal(r.headSha, RM_HEAD);
+  assert.equal(r.reasonCode, "INVALID_ROUND_LABEL");
+  assert.equal(r.confirmedBy, "한용");
+  assert.equal(r.markerCount, 1);
+  for (const k of [
+    "approvalNamesWorktree",
+    "approvalNamesHeadPrefix",
+    "approvalInsideAllowedRoot",
+    "atNotFuture",
+    "atWithin14Days",
+  ]) {
+    assert.equal(r[k], true, k);
+  }
+  for (const p of fake.reads) {
+    assert.ok(
+      p.startsWith(`${RM_ROOT}/watch/teardown-retire`) || p === RM_APPROVAL,
+      `unexpected read: ${p}`,
+    );
+    assert.equal(p.includes(".harness/retirements"), false);
+  }
+});
+
+test("HYK-464-3kinds adapter ⓐ: 표지 폴더의 JSON 이 아닌 이웃 파일은 표지가 될 수 없어 무시한다 (깨진 JSON 한 개가 모든 표지를 막지 않는다)", () => {
+  const r = observeRm(
+    retireFake({
+      files: {
+        "/cr/watch/teardown-retire/zz.json": "{ no",
+        "/cr/watch/teardown-retire/notes.txt": "x",
+      },
+      dir: ["rm-x.json", "zz.json", "notes.txt"],
+    }),
+  );
+  assert.equal(r.valid, true);
+  assert.equal(r.markerCount, 1);
+});
+
+test("HYK-464-3kinds adapter ⓐ: 통역 형제 폴더 아래 승인 근거도 통과 (reasonCode ABANDONED_ROUND)", () => {
+  const approval = "/통역/a.md";
+  const r = observeRm(
+    retireFake({
+      marker: rmMarkerBody({
+        approvalRef: approval,
+        reasonCode: "ABANDONED_ROUND",
+      }),
+      files: { [approval]: "rm-x aaaaaaa\n" },
+    }),
+  );
+  assert.equal(r.valid, true);
+});
+
+// 표지 본문(키 · 이름 · HEAD · 사유 · 시각)이 어긋난 칸.
+function retireInvalidBodyCases() {
+  return [
+    ["no marker file", { files: { [RM_MARKER_PATH]: null } }, "NO_MARKER"],
+    ["keys 6", { marker: rmMarkerWithout("confirmed_by") }, "SHAPE_MISMATCH"],
+    ["keys 8", { marker: rmMarkerBody({ extra: "x" }) }, "SHAPE_MISMATCH"],
+    ["array", { marker: [] }, "SHAPE_MISMATCH"],
+    ["schema", { marker: rmMarkerBody({ schema: "v2" }) }, "SCHEMA_MISMATCH"],
+    [
+      "worktree",
+      { marker: rmMarkerBody({ worktree: "rm-y" }) },
+      "WORKTREE_MISMATCH",
+    ],
+    [
+      "headSha short",
+      { marker: rmMarkerBody({ headSha: "aaaaaaa" }) },
+      "HEAD_INVALID",
+    ],
+    [
+      "headSha moved (M6)",
+      { marker: rmMarkerBody({ headSha: "c".repeat(40) }) },
+      "HEAD_MISMATCH",
+    ],
+    [
+      "reasonCode",
+      { marker: rmMarkerBody({ reasonCode: "OTHER" }) },
+      "REASON_CODE_INVALID",
+    ],
+    [
+      "confirmed_by empty",
+      { marker: rmMarkerBody({ confirmed_by: "" }) },
+      "CONFIRMED_BY_EMPTY",
+    ],
+    [
+      "at no offset",
+      { marker: rmMarkerBody({ at: "2026-11-12T19:00:00" }) },
+      "AT_INVALID",
+    ],
+    [
+      "at bad day",
+      { marker: rmMarkerBody({ at: "2026-02-30T00:00:00+09:00" }) },
+      "AT_INVALID",
+    ],
+    [
+      "at future",
+      { marker: rmMarkerBody({ at: "2026-11-12T20:00:01+09:00" }) },
+      "AT_FUTURE",
+    ],
+    [
+      "at 14d + 1s",
+      { marker: rmMarkerBody({ at: "2026-10-29T19:59:59+09:00" }) },
+      "AT_STALE",
+    ],
+  ];
+}
+
+// 표지 개수와 승인 근거(위치 · 본문)가 어긋난 칸.
+function retireInvalidApprovalCases() {
+  const dup = {
+    "/cr/watch/teardown-retire/rm-x-copy.json": JSON.stringify(rmMarkerBody()),
+  };
+  return [
+    [
+      "two markers",
+      { files: dup, dir: ["rm-x.json", "rm-x-copy.json"] },
+      "MULTIPLE_MARKERS",
+    ],
+    [
+      "approvalRef relative",
+      { marker: rmMarkerBody({ approvalRef: "approvals/a.md" }) },
+      "APPROVAL_REF_INVALID",
+    ],
+    [
+      "approval missing",
+      { files: { [RM_APPROVAL]: null } },
+      "APPROVAL_NOT_FOUND",
+    ],
+    [
+      "approval outside",
+      {
+        marker: rmMarkerBody({ approvalRef: "/elsewhere/a.md" }),
+        files: { "/elsewhere/a.md": "rm-x aaaaaaa" },
+      },
+      "APPROVAL_OUTSIDE_ROOT",
+    ],
+    [
+      "approval is a marker file",
+      {
+        marker: rmMarkerBody({ approvalRef: RM_MARKER_PATH }),
+      },
+      "APPROVAL_IS_MARKER",
+    ],
+    [
+      "approval lacks name (M7)",
+      { approval: "근거: aaaaaaa 승인\n" },
+      "APPROVAL_MISSING_NAME",
+    ],
+    [
+      "approval lacks head prefix",
+      { approval: "근거: rm-x 승인\n" },
+      "APPROVAL_MISSING_HEAD",
+    ],
+    [
+      "name only inside a longer name",
+      { approval: "근거: rm-x-2 aaaaaaa\n" },
+      "APPROVAL_MISSING_NAME",
+    ],
+    [
+      "head prefix only inside another hash",
+      { approval: "근거: rm-x faaaaaaa\n" },
+      "APPROVAL_MISSING_HEAD",
+    ],
+  ];
+}
+
+test("HYK-464-3kinds adapter ⓐ: 위조·불완전 표지 -> valid:false + 닫힌 cause (observable:true)", () => {
+  const all = [...retireInvalidBodyCases(), ...retireInvalidApprovalCases()];
+  for (const [label, o, cause] of all) {
+    const r = observeRm(retireFake(o));
+    assert.equal(r.observable, true, label);
+    assert.equal(r.valid, false, label);
+    assert.equal(r.cause, cause, label);
+  }
+});
+
+test("HYK-464-3kinds adapter ⓐ: 14일 경계 -- 정확히 14일 전은 통과, 1초 지나면 AT_STALE / 현재 시각과 같은 at 은 미래가 아니다", () => {
+  const at14 = "2026-10-29T20:00:00+09:00"; // NOW_MS 정확히 14일 전.
+  assert.equal(
+    observeRm(retireFake({ marker: rmMarkerBody({ at: at14 }) })).valid,
+    true,
+  );
+  const atNow = "2026-11-12T20:00:00+09:00";
+  assert.equal(
+    observeRm(retireFake({ marker: rmMarkerBody({ at: atNow }) })).valid,
+    true,
+  );
+  // UTC 표기(Z)와 소수초도 같은 순간으로 읽는다.
+  const z = "2026-11-12T10:00:00.000Z"; // = 19:00 KST
+  assert.equal(
+    observeRm(retireFake({ marker: rmMarkerBody({ at: z }) })).valid,
+    true,
+  );
+});
+
+test("HYK-464-3kinds adapter ⓐ M9 자리: 읽기 실패·JSON 깨짐·주입 부재·잘못된 입력 -> observable:false (valid 를 지어내지 않는다)", () => {
+  const unobservable = [
+    ["marker read throws", retireFake({ throwRead: [RM_MARKER_PATH] })],
+    ["marker JSON broken", retireFake({ files: { [RM_MARKER_PATH]: "{ no" } })],
+    ["approval read throws", retireFake({ throwRead: [RM_APPROVAL] })],
+    ["approval realpath throws", retireFake({ throwReal: [RM_APPROVAL] })],
+    ["root realpath throws", retireFake({ throwReal: [RM_ROOT] })],
+    ["readdir throws", retireFake({ throwDir: true })],
+    [
+      "sibling read throws",
+      retireFake({
+        files: { "/cr/watch/teardown-retire/zz.json": "{}" },
+        dir: ["rm-x.json", "zz.json"],
+        throwRead: ["/cr/watch/teardown-retire/zz.json"],
+      }),
+    ],
+    ["own file missing from listing", retireFake({ dir: [] })],
+    ["no readFileFn", retireFake({ opts: { readFileFn: undefined } })],
+    ["no existsFn", retireFake({ opts: { existsFn: undefined } })],
+    ["no readdirFn", retireFake({ opts: { readdirFn: undefined } })],
+    ["no realpathFn", retireFake({ opts: { realpathFn: undefined } })],
+    ["no nowMs", retireFake({ opts: { nowMs: undefined } })],
+    ["nowMs NaN", retireFake({ opts: { nowMs: Number.NaN } })],
+    ["exists non-boolean", retireFake({ opts: { existsFn: () => "yes" } })],
+  ];
+  for (const [label, fake] of unobservable) {
+    assert.deepEqual(observeRm(fake), { observable: false }, label);
+  }
+  assert.deepEqual(observeRm(retireFake(), { observable: false }), {
+    observable: false,
+  });
+  assert.deepEqual(observeRm(retireFake(), { observable: true }), {
+    observable: false,
+  });
+  assert.deepEqual(observeRm(retireFake(), RM_STATUS, ""), {
+    observable: false,
+  });
+  assert.deepEqual(
+    adapter.observeRetireMarker("", RM_ROOT, RM_STATUS, retireFake()),
+    { observable: false },
+  );
+});
+
+test("HYK-464-3kinds adapter ⓐ: 승인 근거 위치는 해석된 실경로로 판정한다 -- 링크가 밖으로 나가면 거부, 안으로 돌면 통과 (루트 검사 제거 변이 자리)", () => {
+  const link = `${RM_ROOT}/approvals/link.md`;
+  const base = {
+    marker: rmMarkerBody({ approvalRef: link }),
+    files: { [link]: "rm-x aaaaaaa" },
+  };
+  const escaped = observeRm(
+    retireFake({ ...base, real: { [link]: "/elsewhere/real.md" } }),
+  );
+  assert.equal(escaped.valid, false);
+  assert.equal(escaped.cause, "APPROVAL_OUTSIDE_ROOT");
+  assert.equal(escaped.approvalInsideAllowedRoot, false);
+  const inner = observeRm(
+    retireFake({ ...base, real: { [link]: `${RM_ROOT}/approvals/real.md` } }),
+  );
+  assert.equal(inner.valid, true);
+  // 접두사만 같은 형제 폴더(/cr-evil)는 안이 아니다.
+  const sibling = observeRm(
+    retireFake({ ...base, real: { [link]: "/cr-evil/real.md" } }),
+  );
+  assert.equal(sibling.cause, "APPROVAL_OUTSIDE_ROOT");
+  // 통역 형제 폴더가 없어도(realpath 던짐) 관제실 안 근거는 통과한다.
+  const noInterp = observeRm(retireFake({ throwReal: ["/통역"] }));
+  assert.equal(noInterp.valid, true);
+});
+
+test("HYK-464-3kinds adapter ⓐ: 표지 폴더 밖의 낡은 사본은 읽지 않는다 (watch/ 의 다른 파일 · 워크트리 .harness/retirements/ 0 reads)", () => {
+  const fake = retireFake({
+    files: {
+      "/cr/watch/teardown-retire-stale.json": JSON.stringify(rmMarkerBody()),
+      [`${RM_WT}/.harness/retirements/CODER-retire-r1.json`]:
+        JSON.stringify(rmMarkerBody()),
+    },
+  });
+  observeRm(fake);
+  assert.equal(
+    fake.reads.some((p) => p.includes("stale")),
+    false,
+  );
+  assert.equal(
+    fake.reads.some((p) => p.startsWith(RM_WT)),
+    false,
+  );
 });

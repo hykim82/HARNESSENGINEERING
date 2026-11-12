@@ -62,6 +62,7 @@ import {
   mkdirSync,
   existsSync,
   readdirSync,
+  realpathSync,
 } from "node:fs";
 import path from "node:path";
 // HYK-493-memory-reopen-1 (coder-task.md §1 "ORCH 관측" · §2 product_scope ⓘ):
@@ -144,6 +145,8 @@ import {
   // 증거로 닫히는 둘의 관측(주입형 어댑터 · 이 파일이 기본 구현을 결선한다).
   observePatchEquivalence,
   observePmReceiptBinding,
+  // HYK-464-teardown-3kinds-2 -- ⓐ 사람 승인 은퇴 표지(관제실 watch/teardown-retire/).
+  observeRetireMarker,
 } from "../relay/adapters/teardown-inventory-adapter.mjs";
 // HYK-491-teardown-arm-1 (coder-task.md §2 product_scope ① "teardown 실행
 // 경로") -- 무장(armed) 실행의 유일한 orca 호출 지점(G9: orca 문자열
@@ -3612,6 +3615,10 @@ export function defaultPatchIdFn(logArgv, worktreePath) {
 function defaultControlRoomReaddirFn(dir) {
   return readdirSync(dir);
 }
+// ⓐ 은퇴 표지의 승인 근거 실경로 해석(링크·junction 을 풀어 관제실 안인지 본다).
+function defaultControlRoomRealpathFn(p) {
+  return realpathSync.native(p);
+}
 function defaultArchiveExistsFn(p) {
   return existsSync(p);
 }
@@ -3912,6 +3919,7 @@ function observeNewTeardownEvidence({
   roundEvidence,
   teardownShadow,
   controlRoomRoot,
+  nowMs,
   gitFn,
   readFileFn,
   existsFn,
@@ -3928,14 +3936,25 @@ function observeNewTeardownEvidence({
     );
   }
   if (roundEvidence.observable === true && roundEvidence.count === 0) {
+    const readdirFn =
+      teardownShadow.controlRoomReaddirFn ?? defaultControlRoomReaddirFn;
     evidence.pmBinding = observePmReceiptBinding(
       worktreePath,
       controlRoomRoot,
+      { readFileFn, existsFn, readdirFn },
+    );
+    // ⓐ 은퇴 표지: 영수증도 PM 결속도 없는 워크트리만(관제실 루트 아래 한 장).
+    evidence.retireMarker = observeRetireMarker(
+      worktreePath,
+      controlRoomRoot,
+      mergeStatus,
       {
         readFileFn,
         existsFn,
-        readdirFn:
-          teardownShadow.controlRoomReaddirFn ?? defaultControlRoomReaddirFn,
+        readdirFn,
+        realpathFn:
+          teardownShadow.controlRoomRealpathFn ?? defaultControlRoomRealpathFn,
+        nowMs,
       },
     );
   }
@@ -3976,6 +3995,7 @@ function judgeTeardownShadowForWorktree({
   teardownShadow,
   isMainCheckout,
   controlRoomRoot,
+  nowMs,
 }) {
   const observeArchiveInventoryFn =
     teardownShadow.observeArchiveInventoryFn ?? observeArchiveInventory;
@@ -4003,6 +4023,7 @@ function judgeTeardownShadowForWorktree({
     roundEvidence,
     teardownShadow,
     controlRoomRoot,
+    nowMs,
     gitFn,
     readFileFn,
     existsFn,
@@ -5471,6 +5492,8 @@ function runTeardownShadowStep({
       // 관제실 루트 = dirname(--watch-dir) (새 CLI 플래그 0). ⛔watch/ 아래
       // 낡은 사본(예: watch/dispatch-receipts.jsonl)은 읽지 않는다.
       controlRoomRoot: path.dirname(watchDir),
+      // ⓐ 표지의 «미래 아님 · 14일 이내» 기준 시각(주입된 회차 시각).
+      nowMs: now,
     }),
   );
   const eligibleEntries = entries.filter(

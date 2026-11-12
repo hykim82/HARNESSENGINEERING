@@ -6,6 +6,10 @@ import {
   PATCH_EQUIVALENCE_MASTER_CAP,
   PATCH_EQUIVALENCE_CAUSE,
   PM_BINDING_CAUSE,
+  RETIRE_MARKER_SCHEMA,
+  RETIRE_MARKER_REASON_CODES,
+  RETIRE_MARKER_MAX_AGE_MS,
+  RETIRE_MARKER_CAUSE,
 } from "../teardown-core.mjs";
 
 // HYK-171 사이클4b-1 (coder-task.md §2-A) -- teardown 3층(git/orca/dir) +
@@ -929,6 +933,312 @@ export function observePmReceiptBinding(
   if (root.length === 0) return { observable: false };
   try {
     return observePmReceiptBindingUnsafe(worktreePath, root, opts);
+  } catch {
+    return { observable: false };
+  }
+}
+
+// ---- HYK-464-teardown-3kinds-2 -- ⓐ 사람 승인 은퇴 표지 (검사 6 전용) ----
+// 관제실 `watch/teardown-retire/<워크트리 이름>.json` 한 장을 «읽기만» 한다
+// (쓰는 도구는 없다 -- 쓰는 주체는 사람 또는 한용 명시 지시를 받은 ORCH).
+// ⛔워크트리 안 `.harness/retirements/`(watch-run 의 기존 은퇴 기록)는 표지가
+// 아니다 -- 읽지 않는다. 시각(nowMs)·파일 읽기·실경로 해석은 전부 주입.
+// 표지가 어긋나면 valid:false + 닫힌 cause, 읽기 실패·JSON 깨짐·주입 부재는
+// {observable:false} -- 둘 다 코어의 통과 분기에 들어가지 못한다.
+const RETIRE_MARKER_DIR_REL = "watch/teardown-retire";
+const RETIRE_INTERPRETER_DIR = "통역";
+const RETIRE_MARKER_KEYS = Object.freeze([
+  "schema",
+  "worktree",
+  "headSha",
+  "reasonCode",
+  "approvalRef",
+  "confirmed_by",
+  "at",
+]);
+const RETIRE_AT_RE =
+  /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,3})?(?:Z|[+-](\d{2}):(\d{2}))$/;
+
+function retireMarkerResult(valid, cause, fields) {
+  return {
+    observable: true,
+    valid,
+    cause,
+    worktree: null,
+    headSha: null,
+    reasonCode: null,
+    approvalRef: null,
+    confirmedBy: null,
+    at: null,
+    markerCount: 0,
+    approvalNamesWorktree: false,
+    approvalNamesHeadPrefix: false,
+    approvalInsideAllowedRoot: false,
+    atNotFuture: false,
+    atWithin14Days: false,
+    ...fields,
+  };
+}
+
+function retireWorktreeName(worktreePath) {
+  const segs = String(worktreePath)
+    .split(/[\\/]+/)
+    .filter((s) => s.length > 0);
+  const name = segs.length > 0 ? segs[segs.length - 1] : "";
+  if (name === "" || name === "." || name === "..") return null;
+  return /[<>:"|?*]/.test(name) ? null : name;
+}
+
+function isCalendarTime(y, mo, d, h, mi, s) {
+  if (mo < 1 || mo > 12 || d < 1 || h > 23 || mi > 59 || s > 59) return false;
+  return d <= new Date(Date.UTC(y, mo, 0)).getUTCDate();
+}
+
+// ISO8601 + 오프셋(Z 포함) -- 달력에 없는 날(2월 30일)과 오프셋 없는 시각은 null.
+function parseRetireAtMs(text) {
+  const m = typeof text === "string" ? RETIRE_AT_RE.exec(text) : null;
+  if (!m) return null;
+  const [y, mo, d, h, mi, s] = m.slice(1, 7).map(Number);
+  if (!isCalendarTime(y, mo, d, h, mi, s)) return null;
+  if (m[7] !== undefined && (Number(m[7]) > 23 || Number(m[8]) > 59)) {
+    return null;
+  }
+  const ms = Date.parse(text);
+  return Number.isFinite(ms) ? ms : null;
+}
+
+function retireMarkerShapeOk(m) {
+  if (!isPlainObject(m)) return false;
+  return (
+    Object.keys(m).length === RETIRE_MARKER_KEYS.length &&
+    RETIRE_MARKER_KEYS.every(
+      (k) => Object.hasOwn(m, k) && typeof m[k] === "string",
+    )
+  );
+}
+
+// 이름·HEAD·사유·확인자 -- 처음 어긋난 원인 한 개(없으면 null).
+function retireMarkerIdentityCause(m, name, observedHead) {
+  if (m.schema !== RETIRE_MARKER_SCHEMA) {
+    return RETIRE_MARKER_CAUSE.SCHEMA_MISMATCH;
+  }
+  if (m.worktree !== name) return RETIRE_MARKER_CAUSE.WORKTREE_MISMATCH;
+  if (!/^[0-9a-f]{40}$/.test(m.headSha)) {
+    return RETIRE_MARKER_CAUSE.HEAD_INVALID;
+  }
+  if (m.headSha !== observedHead) return RETIRE_MARKER_CAUSE.HEAD_MISMATCH;
+  if (!RETIRE_MARKER_REASON_CODES.includes(m.reasonCode)) {
+    return RETIRE_MARKER_CAUSE.REASON_CODE_INVALID;
+  }
+  if (m.confirmed_by.trim().length === 0) {
+    return RETIRE_MARKER_CAUSE.CONFIRMED_BY_EMPTY;
+  }
+  return null;
+}
+
+// at: 미래 아님 · 14일 이내(경계 포함). {cause, flags}.
+function retireMarkerTimeJudge(at, nowMs) {
+  const atMs = parseRetireAtMs(at);
+  if (atMs === null)
+    return { cause: RETIRE_MARKER_CAUSE.AT_INVALID, flags: {} };
+  const flags = {
+    atNotFuture: atMs <= nowMs,
+    atWithin14Days: nowMs - atMs <= RETIRE_MARKER_MAX_AGE_MS,
+  };
+  if (!flags.atNotFuture) {
+    return { cause: RETIRE_MARKER_CAUSE.AT_FUTURE, flags };
+  }
+  if (!flags.atWithin14Days) {
+    return { cause: RETIRE_MARKER_CAUSE.AT_STALE, flags };
+  }
+  return { cause: null, flags };
+}
+
+// 표지 본문 판정 -- {cause, fields}. 키 7개 -> 이름·HEAD·사유 -> 시각 순서.
+function judgeRetireMarkerBody(m, name, observedHead, nowMs) {
+  if (!retireMarkerShapeOk(m)) {
+    return { cause: RETIRE_MARKER_CAUSE.SHAPE_MISMATCH, fields: {} };
+  }
+  const fields = {
+    worktree: m.worktree,
+    headSha: observedHead,
+    reasonCode: m.reasonCode,
+    approvalRef: m.approvalRef,
+    confirmedBy: m.confirmed_by,
+    at: m.at,
+  };
+  const idCause = retireMarkerIdentityCause(m, name, observedHead);
+  if (idCause) return { cause: idCause, fields };
+  const time = retireMarkerTimeJudge(m.at, nowMs);
+  return { cause: time.cause, fields: { ...fields, ...time.flags } };
+}
+
+// «같은 워크트리에 표지 파일 1개» -- 폴더의 .json 중 worktree 필드가 이 이름인
+// 파일 수. JSON 이 아닌 이웃은 표지가 될 수 없어 무시하고, 읽기 오류는 던진다.
+function markerFileNamesWorktree(text, name) {
+  try {
+    const parsed = JSON.parse(text);
+    return isPlainObject(parsed) && parsed.worktree === name;
+  } catch {
+    return false;
+  }
+}
+function countRetireMarkersFor(dir, name, opts, worktreePath) {
+  const names = opts.readdirFn(dir);
+  if (!Array.isArray(names)) throw new Error("marker dir listing expected");
+  let count = 0;
+  for (const n of names) {
+    if (typeof n !== "string" || !/\.json$/i.test(n)) continue;
+    const text = opts.readFileFn(`${dir}/${n}`, worktreePath);
+    if (markerFileNamesWorktree(text, name)) count += 1;
+  }
+  if (count === 0) throw new Error("own marker missing from directory listing");
+  return count;
+}
+
+function realpathOf(opts, p) {
+  const real = opts.realpathFn(p);
+  if (!isNonEmptyString(real)) throw new Error("realpath must be a string");
+  return real;
+}
+function isInsideCanon(baseCanon, pCanon) {
+  const prefix = baseCanon.endsWith("/") ? baseCanon : `${baseCanon}/`;
+  return pCanon.startsWith(prefix);
+}
+// 승인 근거가 설 수 있는 곳: 관제실 루트, 그 부모 아래 `통역` 형제 폴더(없으면 건너뜀).
+function retireAllowedBases(root, opts) {
+  const bases = [canonicalizePath(realpathOf(opts, root))];
+  const sibling = posixPath.join(
+    posixPath.dirname(root.replace(/\\/g, "/")),
+    RETIRE_INTERPRETER_DIR,
+  );
+  try {
+    bases.push(canonicalizePath(realpathOf(opts, sibling)));
+  } catch {
+    // 통역 폴더가 없다 -- 관제실 안 근거만 허용한다.
+  }
+  return bases;
+}
+
+function escapeRegExp(s) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+// 이름·HEAD 앞 7자리는 «토큰 경계» 로 찾는다 -- 더 긴 이름(…-10)이나 다른 해시의
+// 일부가 우연히 포함돼도 통과하지 않는다.
+function bodyNamesWorktree(body, name) {
+  const re = new RegExp(
+    `(?<![A-Za-z0-9_.-])${escapeRegExp(name)}(?![A-Za-z0-9_.-])`,
+  );
+  return re.test(body);
+}
+function bodyNamesHeadPrefix(body, head) {
+  return new RegExp(`(?<![0-9a-f])${head.slice(0, 7)}`, "i").test(body);
+}
+
+function requireBoolean(v) {
+  if (typeof v !== "boolean") throw new Error("exists must be boolean");
+  return v;
+}
+
+// 승인 근거 판정 -- {cause, fields}. ctx: {name, head, root, dir, worktreePath, opts}.
+function judgeRetireApproval(ref, ctx) {
+  const { name, head, root, dir, worktreePath, opts } = ctx;
+  if (!/^(?:[A-Za-z]:[\\/]|[\\/])/.test(ref)) {
+    return { cause: RETIRE_MARKER_CAUSE.APPROVAL_REF_INVALID, fields: {} };
+  }
+  if (!requireBoolean(opts.existsFn(ref, worktreePath))) {
+    return { cause: RETIRE_MARKER_CAUSE.APPROVAL_NOT_FOUND, fields: {} };
+  }
+  const realCanon = canonicalizePath(realpathOf(opts, ref));
+  const inside = retireAllowedBases(root, opts).some((b) =>
+    isInsideCanon(b, realCanon),
+  );
+  if (!inside) {
+    return { cause: RETIRE_MARKER_CAUSE.APPROVAL_OUTSIDE_ROOT, fields: {} };
+  }
+  const fields = { approvalInsideAllowedRoot: true };
+  // 표지 파일 자신을 승인 근거로 삼으면 «승인 문서가 따로 있다» 는 뜻이 사라진다.
+  if (isInsideCanon(canonicalizePath(realpathOf(opts, dir)), realCanon)) {
+    return { cause: RETIRE_MARKER_CAUSE.APPROVAL_IS_MARKER, fields };
+  }
+  const body = opts.readFileFn(ref, worktreePath);
+  if (typeof body !== "string") throw new Error("approval body must be text");
+  fields.approvalNamesWorktree = bodyNamesWorktree(body, name);
+  fields.approvalNamesHeadPrefix = bodyNamesHeadPrefix(body, head);
+  if (!fields.approvalNamesWorktree) {
+    return { cause: RETIRE_MARKER_CAUSE.APPROVAL_MISSING_NAME, fields };
+  }
+  if (!fields.approvalNamesHeadPrefix) {
+    return { cause: RETIRE_MARKER_CAUSE.APPROVAL_MISSING_HEAD, fields };
+  }
+  return { cause: null, fields };
+}
+
+function observeRetireMarkerUnsafe(worktreePath, root, mergeStatus, opts) {
+  const name = retireWorktreeName(worktreePath);
+  if (name === null) return { observable: false };
+  const dir = `${root}/${RETIRE_MARKER_DIR_REL}`;
+  const markerPath = `${dir}/${name}.json`;
+  if (!requireBoolean(opts.existsFn(markerPath, worktreePath))) {
+    return retireMarkerResult(false, RETIRE_MARKER_CAUSE.NO_MARKER, {});
+  }
+  const marker = JSON.parse(opts.readFileFn(markerPath, worktreePath));
+  const body = judgeRetireMarkerBody(
+    marker,
+    name,
+    mergeStatus.headSha,
+    opts.nowMs,
+  );
+  if (body.cause) return retireMarkerResult(false, body.cause, body.fields);
+  const markerCount = countRetireMarkersFor(dir, name, opts, worktreePath);
+  const fields = { ...body.fields, markerCount };
+  if (markerCount !== 1) {
+    return retireMarkerResult(
+      false,
+      RETIRE_MARKER_CAUSE.MULTIPLE_MARKERS,
+      fields,
+    );
+  }
+  const approval = judgeRetireApproval(marker.approvalRef, {
+    name,
+    head: mergeStatus.headSha,
+    root,
+    dir,
+    worktreePath,
+    opts,
+  });
+  const all = { ...fields, ...approval.fields };
+  return retireMarkerResult(approval.cause === null, approval.cause, all);
+}
+
+function retireMarkerInputsOk(worktreePath, root, mergeStatus, opts) {
+  if (!isNonEmptyString(worktreePath) || !isNonEmptyString(root)) return false;
+  if (!isPlainObject(mergeStatus) || mergeStatus.observable !== true) {
+    return false;
+  }
+  if (!isNonEmptyString(mergeStatus.headSha)) return false;
+  return (
+    typeof opts.readFileFn === "function" &&
+    typeof opts.readdirFn === "function" &&
+    typeof opts.existsFn === "function" &&
+    typeof opts.realpathFn === "function" &&
+    Number.isFinite(opts.nowMs)
+  );
+}
+
+export function observeRetireMarker(
+  worktreePath,
+  controlRoomRoot,
+  mergeStatus,
+  opts = {},
+) {
+  if (!retireMarkerInputsOk(worktreePath, controlRoomRoot, mergeStatus, opts)) {
+    return { observable: false };
+  }
+  const root = String(controlRoomRoot).replace(/[\\/]+$/, "");
+  if (root.length === 0) return { observable: false };
+  try {
+    return observeRetireMarkerUnsafe(worktreePath, root, mergeStatus, opts);
   } catch {
     return { observable: false };
   }
