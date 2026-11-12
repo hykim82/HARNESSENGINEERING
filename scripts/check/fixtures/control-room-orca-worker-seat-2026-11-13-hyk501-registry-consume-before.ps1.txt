@@ -1,0 +1,130 @@
+# 하네스 무인 워커 좌석 런처 (Orca 어댑터 B)
+# 사용: ~~pwsh -NoExit -File orca-worker-seat.ps1 -Role CODER -Worktree "<path>"~~
+# 사용(2026-10-29 책임자 판정 B · pwsh 업데이트 안내 기동 사망 우회): & "D:\문서관리\하네스-관제실\orca-worker-seat.cmd" -Role CODER -Worktree "<path>" (래퍼가 POWERSHELL_UPDATECHECK=Off + pwsh -NoLogo 로 이 파일을 띄운다 · 되돌림 = 래퍼 삭제 + 이 두 줄 원복)
+# 기동 규칙(G1 위조 차단)은 worker-dispatch-rule.md를 시스템 프롬프트로 실어 보낸다.
+#
+# HYK-472(2026-09-16): 엔진·모델·effort를 -Engine/-Model/-Effort 인자로 받는다.
+# 계기 = `orca terminal create --command "..."`를 통과하는 동안
+# `$env:HARNESS_SEAT_ENGINE`(옛 방식, 이 명령 앞에 `$env:HARNESS_SEAT_ENGINE='claude';`를
+# 붙이는 별도 문장이었다)이 소실돼 REVIEW 좌석이 의도와 달리 codex로 뜬 사고가
+# 실측 2회 났다(코덱스 좌석 2개 오기동, 한도 0이라 실소모는 없었음). 인자는
+# `--command` 문자열 자체의 일부이므로 이 소실 경로에 노출되지 않는다.
+# ⛔런처 기본값(REVIEW/PM=codex, 모델 luna/sol)은 이 라운드가 손대지 않는다
+# (`luna→terra` 등 기본값 교정은 HYK-462 범위 -- 여기서 중복 착수하면 그
+# 라운드의 검토 대상과 겹친다). -Engine/-Model/-Effort를 안 주면 이전과
+# 100% 같은 값으로 뜬다(회귀 없음).
+# HYK-464(2026-09-16): 좌석이 실제로 뜨는 시점에 "누가/무엇으로 띄웠는지"를
+# 좌석 자신의 title이 아니라(title은 셸이 덮어써 못 쓴다) 별도 등록부에
+# 남긴다(scripts/check/seat-origin-registry.mjs). 손으로 `orca terminal
+# create`를 쳐 이 런처를 거치지 않은 좌석은 이 등록이 없다 -- 그것이
+# scripts/check/seat-orphan-detect.mjs가 "고아 후보"를 가르는 신호다.
+# 등록 실패는 좌석 기동을 막지 않는다(best-effort -- 관제실의 다른
+# 포인터 파일 관례와 동일, dispatch-worker.ps1의
+# dispatch-receipt-path.txt 포인터 기록과 같은 층).
+param(
+  [ValidateSet("CODER","REVIEW","VERIFY","PM")]
+  [string]$Role = "CODER",
+  [string]$Worktree = "C:\Users\Administrator\orca\workspaces\HARNESSENGINEERING\hyk164-fix",
+  [ValidateSet("claude","codex","")]
+  [string]$Engine = "",
+  [string]$Model = "",
+  [string]$Effort = ""
+)
+
+Set-Location $Worktree
+$global:LASTEXITCODE = 1; node scripts/check/seat-preflight.mjs; if ($LASTEXITCODE -ne 0) { Write-Host "[$Role seat] BLOCKED -- 훅 대조에 실패했습니다. 좌석을 띄우지 않습니다. 위에 뜬 «고치는 명령»을 실행한 뒤 다시 기동하십시오."; exit $LASTEXITCODE }
+
+$rulePath = "D:\문서관리\하네스-관제실\worker-dispatch-rule.md"
+$rule = Get-Content -Raw -Encoding UTF8 $rulePath
+
+$env:HARNESS_ROLE = $Role
+$env:HARNESS_STATUS_PATH = "D:\문서관리\하네스-관제실\STATUS.md"
+
+# HYK-B17(2026-09-18 한용 확정): 입력란 자동완성(prompt suggestion)을 끈다.
+# ⚠️전역 설정(~/.claude/settings.json · ~/.claude-team/settings.json)에 이미
+# promptSuggestionEnabled:false + 같은 env 가 «들어 있는데도» 한용이 자동완성을
+# 본다 ⇒ 이 줄은 «이중 안전장치」다. 그래도 뜨면 «설정 키가 더 이상 그 기능을
+# 끄지 않는다」는 뜻이니 조사 대상이다(다음 주 인계 항목).
+# ⛔codex 분기에는 넣지 않는다 — claude 전용 키다.
+$env:CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION = "false"
+
+# HYK-472: 인자 미지정 시 옛 역할 기본값 그대로(하위호환, 값 변경 없음).
+# 옛 문면(취소선 보존, B-10 안전핀): ~~env $env:HARNESS_SEAT_ENGINE로 REVIEW/PM
+# 분기의 codex 기본값을 claude로 덮어썼다~~ -- `orca terminal create
+# --command`를 지나며 그 env가 소실돼(HYK-472 실측 2회) 신뢰할 수 없었다.
+# 이제 이 인자(-Engine)는 --command 문자열 자체의 일부라 그 경로로 안 잃는다.
+if ([string]::IsNullOrWhiteSpace($Engine)) {
+  $Engine = if ($Role -eq "REVIEW" -or $Role -eq "PM") { "codex" } else { "claude" }
+}
+
+Write-Host "[$Role seat] worktree=$Worktree  pane=$env:ORCA_PANE_KEY  engine=$Engine"
+
+# H11(#335) 런처 결선 · 2026-10-31 책임자 승인(변경안 1446 · 조건 1 = stdout 만 블록 · stderr 는 WARN 줄에만):
+# 저장소 규칙 블록을 시스템 프롬프트에 덧붙인다. 본문은 엔진 무관(저장소 CI 가 지킨다) · 파일이 없는 옛 워크트리 ·
+# 실행 실패 = 관제실 규칙만 싣고 좌석은 뜬다(멈춤 0). codex 분기는 $rule 을 쓰지 않으므로 무변(정직 한계 · HYK-264).
+$launchRulesCli = Join-Path $Worktree "scripts\supervisor\worker-launch-rules.mjs"
+if (Test-Path $launchRulesCli) {
+  $prevEnc = [Console]::OutputEncoding
+  [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+  $launchRulesOut = & node $launchRulesCli --role $Role --engine $Engine 2>&1
+  $launchRulesRc = $LASTEXITCODE
+  [Console]::OutputEncoding = $prevEnc
+  $block = ($launchRulesOut | Where-Object { $_ -isnot [System.Management.Automation.ErrorRecord] }) -join "`n"
+  $launchRulesErr = ($launchRulesOut | Where-Object { $_ -is [System.Management.Automation.ErrorRecord] } | ForEach-Object { $_.ToString() }) -join ' | '
+  if ($launchRulesRc -eq 0 -and $block) {
+    $rule = $rule + "`n`n" + $block
+    Write-Host "[$Role seat] launch-rules block appended ($($block.Length) chars)"
+    if ($launchRulesErr) { Write-Host "[$Role seat] WARN -- worker-launch-rules.mjs stderr: $launchRulesErr" }
+  } else {
+    Write-Host "[$Role seat] WARN -- worker-launch-rules.mjs rc=$launchRulesRc (block not appended; control-room rule only) $launchRulesErr"
+  }
+} else {
+  Write-Host "[$Role seat] worker-launch-rules.mjs absent (older worktree) -- control-room rule only"
+}
+
+# HYK-464: 기동 주체 표식 -- 등록부에 이 좌석의 pane key를 남긴다.
+# 판단(등록 형식·조회)은 저장소 CLI 몫이다(scripts/check/seat-origin-registry.mjs),
+# 이 런처는 부르기만 한다. 실패해도 좌석 기동을 막지 않는다(best-effort).
+try {
+  $seatRegistryPath = Join-Path $PSScriptRoot "seat-launch-registry.jsonl"
+  $seatRegistryCliPath = Join-Path $Worktree "scripts\check\seat-origin-registry.mjs"
+  if ((Test-Path -LiteralPath $seatRegistryCliPath) -and $env:ORCA_PANE_KEY) {
+    & node $seatRegistryCliPath record --registry-path $seatRegistryPath --pane-key $env:ORCA_PANE_KEY --role $Role --engine $Engine --model $Model --effort $Effort --worktree $Worktree --launched-via "orca-worker-seat.ps1" 2>&1 | ForEach-Object { Write-Host "      [origin-registry] $_" }
+  } else {
+    Write-Warning "HYK-464: 좌석 등록부 CLI 또는 ORCA_PANE_KEY가 없어 기동 주체 표식을 남기지 못했다(비치명적, 좌석은 계속 뜬다)."
+  }
+} catch {
+  Write-Warning "HYK-464: 좌석 등록부 기록 실패(비치명적, 좌석은 계속 뜬다): $($_.Exception.Message)"
+}
+
+if ($Engine -eq "codex") {
+  # REVIEW/PM = codex (CODER와 다른 엔진 원칙 유지). REVIEW=luna / PM=sol.
+  # 2026-08-28: 주석이 22일간 코드와 어긋나 있었다(주석 terra / 코드 luna). 정본 = relay-terminal-setup.md §1.5 ③(같은 날 luna 로 개정).
+  $env:CODEX_HOME = $env:ORCA_CODEX_HOME
+  # 관측 B6: codex 좌석에서 `spawn orca ENOENT` — orca 실행파일 경로를 PATH 앞에 명시한다.
+  $orcaBin = "C:\Users\Administrator\AppData\Local\Programs\orca\resources\bin"
+  if (Test-Path $orcaBin) { $env:PATH = "$orcaBin;$env:PATH" }
+  $codexModel = if ($Model) { $Model } elseif ($Role -eq "PM") { "gpt-5.6-sol" } else { "gpt-5.6-luna" }
+  # HYK-379: codex 자체 업데이트 확인을 시작 시점에 끈다 -- 확인이 없으면
+  # "Update now/Skip" 대화형 프롬프트도 뜨지 않는다(원 사고: 이 프롬프트에서
+  # 숫자 선택 전송이 막히고 Enter만 먹혀 기본값 Update now가 조용히 실행됐다).
+  # HYK-472: -Effort가 주어졌을 때만 reasoning_effort를 얹는다 -- 기본
+  # 동작(인자 없음)은 이전과 정확히 같은 명령줄이다(회귀 없음).
+  if ($Effort) {
+    codex --model $codexModel -a never -s danger-full-access -c check_for_update_on_startup=false -c reasoning_effort=$Effort
+  } else {
+    codex --model $codexModel -a never -s danger-full-access -c check_for_update_on_startup=false
+  }
+} else {
+  $env:CLAUDE_CONFIG_DIR = "C:\Users\Administrator\.claude-team"
+  # HYK-379: claude 쪽 방어적 조치 -- codex와 같은 "대화형 선택 프롬프트" 형태의
+  # 사고 재현은 이 조사에서 확인되지 않았지만(§4 정직 한계), 백그라운드
+  # 자동 업데이트가 무인 좌석 도중 끼어드는 경로 자체를 줄인다.
+  $env:DISABLE_AUTOUPDATER = '1'
+  $env:CLAUDE_CODE_FORCE_SESSION_PERSISTENCE = '1'
+  $claudeModel = if ($Model) { $Model } else { "claude-sonnet-5" }
+  $claudeEffort = if ($Effort) { $Effort } else { "medium" }
+  # 무인 운영 시에는 권한 확인 창에서 멈추지 않도록 사람이 이 좌석의 권한 모드를 별도로 정한다
+  # (관제실 노트 참조 — 안전망은 권한창이 아니라 하네스 훅·git 훅·독립 REVIEW).
+  claude --model $claudeModel --effort $claudeEffort --dangerously-skip-permissions --append-system-prompt $rule
+}

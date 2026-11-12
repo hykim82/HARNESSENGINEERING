@@ -1,0 +1,217 @@
+# 하네스 무인 워커 좌석 런처 (Orca 어댑터 B)
+# 사용: ~~pwsh -NoExit -File orca-worker-seat.ps1 -Role CODER -Worktree "<path>"~~
+# 사용(2026-10-29 책임자 판정 B · pwsh 업데이트 안내 기동 사망 우회): & "D:\문서관리\하네스-관제실\orca-worker-seat.cmd" -Role CODER -Worktree "<path>" (래퍼가 POWERSHELL_UPDATECHECK=Off + pwsh -NoLogo 로 이 파일을 띄운다 · 되돌림 = 래퍼 삭제 + 이 두 줄 원복)
+# 기동 규칙(G1 위조 차단)은 worker-dispatch-rule.md를 시스템 프롬프트로 실어 보낸다.
+#
+# HYK-472(2026-09-16): 엔진·모델·effort를 -Engine/-Model/-Effort 인자로 받는다.
+# 계기 = `orca terminal create --command "..."`를 통과하는 동안
+# `$env:HARNESS_SEAT_ENGINE`(옛 방식, 이 명령 앞에 `$env:HARNESS_SEAT_ENGINE='claude';`를
+# 붙이는 별도 문장이었다)이 소실돼 REVIEW 좌석이 의도와 달리 codex로 뜬 사고가
+# 실측 2회 났다(코덱스 좌석 2개 오기동, 한도 0이라 실소모는 없었음). 인자는
+# `--command` 문자열 자체의 일부이므로 이 소실 경로에 노출되지 않는다.
+# ⛔런처 기본값(REVIEW/PM=codex, 모델 luna/sol)은 이 라운드가 손대지 않는다
+# (`luna→terra` 등 기본값 교정은 HYK-462 범위 -- 여기서 중복 착수하면 그
+# 라운드의 검토 대상과 겹친다). -Engine/-Model/-Effort를 안 주면 이전과
+# 100% 같은 값으로 뜬다(회귀 없음).
+# HYK-464(2026-09-16): 좌석이 실제로 뜨는 시점에 "누가/무엇으로 띄웠는지"를
+# 좌석 자신의 title이 아니라(title은 셸이 덮어써 못 쓴다) 별도 등록부에
+# 남긴다(scripts/check/seat-origin-registry.mjs). 손으로 `orca terminal
+# create`를 쳐 이 런처를 거치지 않은 좌석은 이 등록이 없다 -- 그것이
+# scripts/check/seat-orphan-detect.mjs가 "고아 후보"를 가르는 신호다.
+# 등록 실패는 좌석 기동을 막지 않는다(best-effort -- 관제실의 다른
+# 포인터 파일 관례와 동일, dispatch-worker.ps1의
+# dispatch-receipt-path.txt 포인터 기록과 같은 층).
+param(
+  [ValidateSet("CODER","REVIEW","VERIFY","PM")]
+  [string]$Role = "CODER",
+  [string]$Worktree = "C:\Users\Administrator\orca\workspaces\HARNESSENGINEERING\hyk164-fix",
+  [ValidateSet("claude","codex","")]
+  [string]$Engine = "",
+  [string]$Model = "",
+  [string]$Effort = "",
+  [switch]$DryRun
+)
+
+Set-Location $Worktree
+$global:LASTEXITCODE = 1; node scripts/check/seat-preflight.mjs; if ($LASTEXITCODE -ne 0) { Write-Host "[$Role seat] BLOCKED -- 훅 대조에 실패했습니다. 좌석을 띄우지 않습니다. 위에 뜬 «고치는 명령»을 실행한 뒤 다시 기동하십시오."; exit $LASTEXITCODE }
+
+# HYK-501 (조각 E · 2026-11-13): 엔진·모델·effort 기본값은 이 파일의 리터럴이 아니라 «대상 워크트리의 저장소 등록부»
+# (scripts/check/engine-profiles.json)가 정한다. 해석은 저장소 CLI(engine-profile-cli.mjs resolve) 한 곳이 하고 이 런처는 부르기만 한다.
+# 읽기에 실패하면 좌석을 띄우지 않는다(종료코드 3 · fail-closed). 명시 인자 3개가 다 있어도 읽기는 성공해야 한다 --
+# 기본값 경로가 실전에서 한 번도 안 돌아 조용히 썩는 일을 막는다. 출처 = docs/control-room-patches/HYK-501-registry-consume.md
+$profileCli = Join-Path $Worktree "scripts/check/engine-profile-cli.mjs"
+if (-not (Test-Path -LiteralPath $profileCli)) {
+  Write-Host "[$Role seat] BLOCKED -- ENGINE_PROFILE_CLI_MISSING ($profileCli) -- 옛 워크트리입니다. 워크트리를 최신 master 로 리베이스한 뒤 다시 기동하십시오. 좌석을 띄우지 않습니다."
+  exit 3
+}
+# 이 env 는 시험 주입용이다 -- 상속되면 조용히 다른 등록부를 읽는다. 지운 뒤 불러서 워크트리 파일만 읽게 한다.
+Remove-Item Env:HARNESS_ENGINE_PROFILES_PATH -ErrorAction SilentlyContinue
+# stdout 과 stderr 를 나눠 잡는다(실패 사유는 stderr 에 있다 -- 버리지 않는다).
+$global:LASTEXITCODE = 1
+try {
+  $profOut = & node $profileCli resolve --role $Role --json 2>&1
+  $profRc = $LASTEXITCODE
+} catch {
+  Write-Host "[$Role seat] BLOCKED -- ENGINE_PROFILE_RESOLVE_FAILED rc=-1 reason=$($_.Exception.Message) -- 좌석을 띄우지 않습니다."
+  exit 3
+}
+$profStdout = (@($profOut | Where-Object { $_ -isnot [System.Management.Automation.ErrorRecord] } | ForEach-Object { [string]$_ })) -join "`n"
+$profStderr = (@($profOut | Where-Object { $_ -is [System.Management.Automation.ErrorRecord] } | ForEach-Object { $_.ToString() })) -join ' | '
+if ($profRc -ne 0) {
+  Write-Host "[$Role seat] BLOCKED -- ENGINE_PROFILE_RESOLVE_FAILED rc=$profRc reason=$profStderr -- 좌석을 띄우지 않습니다."
+  exit 3
+}
+$prof = $null
+try { $prof = $profStdout | ConvertFrom-Json -ErrorAction Stop } catch { $prof = $null }
+if ($null -eq $prof -or [string]::IsNullOrWhiteSpace([string]$prof.engine) -or [string]::IsNullOrWhiteSpace([string]$prof.model) -or [string]::IsNullOrWhiteSpace([string]$prof.effort)) {
+  Write-Host "[$Role seat] BLOCKED -- ENGINE_PROFILE_OUTPUT_INVALID (등록부 해석 출력이 engine/model/effort 를 담은 JSON 이 아닙니다: $profStdout) -- 좌석을 띄우지 않습니다."
+  exit 3
+}
+# 신뢰 기준: 워크트리 등록부 blob 과 origin/master 의 같은 파일 blob 을 대조한다(마지막 fetch 기준 -- origin 참조가 낡으면 정상 워크트리도 갈라짐으로 보인다 = 안전 방향).
+$regRel = "scripts/check/engine-profiles.json"
+$global:LASTEXITCODE = 1
+$wtBlobOut = & git -C $Worktree hash-object -- $regRel 2>&1
+$wtBlob = if ($LASTEXITCODE -eq 0) { (@($wtBlobOut | Where-Object { $_ -isnot [System.Management.Automation.ErrorRecord] } | ForEach-Object { [string]$_ }) -join '').Trim() } else { '' }
+$global:LASTEXITCODE = 1
+$ogBlobOut = & git -C $Worktree rev-parse "origin/master:$regRel" 2>&1
+$ogBlob = if ($LASTEXITCODE -eq 0) { (@($ogBlobOut | Where-Object { $_ -isnot [System.Management.Automation.ErrorRecord] } | ForEach-Object { [string]$_ }) -join '').Trim() } else { '' }
+$regMatch = ($wtBlob -match '^[0-9a-f]{40,64}$') -and ($wtBlob -eq $ogBlob)
+$hasEngine = -not [string]::IsNullOrWhiteSpace($Engine)
+$hasModel = -not [string]::IsNullOrWhiteSpace($Model)
+$hasEffort = -not [string]::IsNullOrWhiteSpace($Effort)
+if (-not $regMatch -and -not ($hasEngine -and $hasModel -and $hasEffort)) {
+  Write-Host "[$Role seat] BLOCKED -- REGISTRY_DIVERGES_FROM_ORIGIN_MASTER (워크트리 등록부 blob=[$wtBlob] · origin/master blob=[$ogBlob]) -- 브랜치가 등록부를 바꿨거나 origin 참조가 낡았습니다. -Engine -Model -Effort 셋을 모두 명시하거나 워크트리를 origin/master 와 맞춘 뒤 다시 기동하십시오. 좌석을 띄우지 않습니다."
+  exit 3
+}
+# 명시 인자가 필드별로 이긴다. 엔진을 등록부와 다르게 명시했는데 모델·effort 가 비면 멈춘다(다른 엔진에 등록부의 모델을 넘기는 사고 방지).
+if ($hasEngine -and $Engine -ne [string]$prof.engine -and -not ($hasModel -and $hasEffort)) {
+  Write-Host "[$Role seat] BLOCKED -- ENGINE_OVERRIDE_NEEDS_MODEL (-Engine $Engine 는 등록부의 엔진 $($prof.engine) 과 다릅니다 -- 다른 엔진에 등록부의 모델·effort 를 그대로 넘기지 않도록 -Model 과 -Effort 를 함께 명시하십시오) -- 좌석을 띄우지 않습니다."
+  exit 3
+}
+$effEngine = if ($hasEngine) { $Engine } else { [string]$prof.engine }
+if ($effEngine -eq 'codex') {
+  if (-not $hasEngine) {
+    Write-Host "[$Role seat] BLOCKED -- ENGINE_CODEX_REFUSED (등록부의 $Role 엔진이 codex 입니다 -- codex 신규 개시는 금지입니다. 명시 -Engine codex 는 -Model 과 함께일 때만 통과합니다) -- 좌석을 띄우지 않습니다."
+    exit 3
+  }
+  if (-not $hasModel) {
+    Write-Host "[$Role seat] BLOCKED -- ENGINE_OVERRIDE_NEEDS_MODEL (명시 -Engine codex 에는 -Model 이 필요합니다 -- 모델 리터럴 기본값은 없습니다) -- 좌석을 띄우지 않습니다."
+    exit 3
+  }
+}
+if ($effEngine -notin @('claude', 'codex')) {
+  Write-Host "[$Role seat] BLOCKED -- ENGINE_PROFILE_OUTPUT_INVALID (이 런처가 띄울 수 없는 엔진: $effEngine) -- 좌석을 띄우지 않습니다."
+  exit 3
+}
+$effModel = if ($hasModel) { $Model } else { [string]$prof.model }
+$effEffort = if ($hasEffort) { $Effort } else { [string]$prof.effort }
+$engineSrc = if ($hasEngine) { 'arg' } else { 'registry' }
+$modelSrc = if ($hasModel) { 'arg' } else { 'registry' }
+$effortSrc = if ($hasEffort) { 'arg' } else { 'registry' }
+$regShort = if ($wtBlob.Length -ge 7) { $wtBlob.Substring(0, 7) } else { 'none' }
+$ogShort = if ($ogBlob.Length -ge 7) { $ogBlob.Substring(0, 7) } else { 'none' }
+$matchWord = if ($regMatch) { 'yes' } else { 'no' }
+Write-Host "[$Role seat] engine-profile: engine=$effEngine($engineSrc) model=$effModel($modelSrc) effort=$effEffort($effortSrc) registry_blob=$regShort origin_blob=$ogShort match=$matchWord"
+if ($hasEngine -and $Engine -ne [string]$prof.engine) { Write-Host "[$Role seat] WARN explicit overrides registry: engine $Engine (registry $($prof.engine))" }
+if ($hasModel -and $Model -ne [string]$prof.model) { Write-Host "[$Role seat] WARN explicit overrides registry: model $Model (registry $($prof.model))" }
+if ($hasEffort -and $Effort -ne [string]$prof.effort) { Write-Host "[$Role seat] WARN explicit overrides registry: effort $Effort (registry $($prof.effort))" }
+$Engine = $effEngine
+$Model = $effModel
+$Effort = $effEffort
+if ($DryRun) {
+  Write-Host "[$Role seat] DRYRUN rc=0 -- 해석과 출력까지만 했습니다(좌석 등록부 기록 · 규칙 블록 덧붙이기 · 엔진 기동 없음)."
+  exit 0
+}
+
+$rulePath = "D:\문서관리\하네스-관제실\worker-dispatch-rule.md"
+$rule = Get-Content -Raw -Encoding UTF8 $rulePath
+
+$env:HARNESS_ROLE = $Role
+$env:HARNESS_STATUS_PATH = "D:\문서관리\하네스-관제실\STATUS.md"
+
+# HYK-B17(2026-09-18 한용 확정): 입력란 자동완성(prompt suggestion)을 끈다.
+# ⚠️전역 설정(~/.claude/settings.json · ~/.claude-team/settings.json)에 이미
+# promptSuggestionEnabled:false + 같은 env 가 «들어 있는데도» 한용이 자동완성을
+# 본다 ⇒ 이 줄은 «이중 안전장치」다. 그래도 뜨면 «설정 키가 더 이상 그 기능을
+# 끄지 않는다」는 뜻이니 조사 대상이다(다음 주 인계 항목).
+# ⛔codex 분기에는 넣지 않는다 — claude 전용 키다.
+$env:CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION = "false"
+
+# HYK-472: 엔진은 -Engine 인자(--command 문자열 자체의 일부)로 받는다 -- 옛 env 방식은 `orca terminal create
+# --command` 를 지나며 소실돼 REVIEW 좌석이 의도와 달리 codex 로 뜬 사고가 실측 2회 났다.
+# HYK-501(2026-11-13): 인자가 없을 때의 «역할→엔진 리터럴 폴백»은 이 자리에서 삭제했다. 기본값은 위 해석 단계가
+# 저장소 등록부에서 정한다(읽지 못하면 좌석이 안 뜬다). 이 시점의 $Engine 은 이미 실효값이다.
+
+Write-Host "[$Role seat] worktree=$Worktree  pane=$env:ORCA_PANE_KEY  engine=$Engine"
+
+# H11(#335) 런처 결선 · 2026-10-31 책임자 승인(변경안 1446 · 조건 1 = stdout 만 블록 · stderr 는 WARN 줄에만):
+# 저장소 규칙 블록을 시스템 프롬프트에 덧붙인다. 본문은 엔진 무관(저장소 CI 가 지킨다) · 파일이 없는 옛 워크트리 ·
+# 실행 실패 = 관제실 규칙만 싣고 좌석은 뜬다(멈춤 0). codex 분기는 $rule 을 쓰지 않으므로 무변(정직 한계 · HYK-264).
+$launchRulesCli = Join-Path $Worktree "scripts\supervisor\worker-launch-rules.mjs"
+if (Test-Path $launchRulesCli) {
+  $prevEnc = [Console]::OutputEncoding
+  [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+  $launchRulesOut = & node $launchRulesCli --role $Role --engine $Engine 2>&1
+  $launchRulesRc = $LASTEXITCODE
+  [Console]::OutputEncoding = $prevEnc
+  $block = ($launchRulesOut | Where-Object { $_ -isnot [System.Management.Automation.ErrorRecord] }) -join "`n"
+  $launchRulesErr = ($launchRulesOut | Where-Object { $_ -is [System.Management.Automation.ErrorRecord] } | ForEach-Object { $_.ToString() }) -join ' | '
+  if ($launchRulesRc -eq 0 -and $block) {
+    $rule = $rule + "`n`n" + $block
+    Write-Host "[$Role seat] launch-rules block appended ($($block.Length) chars)"
+    if ($launchRulesErr) { Write-Host "[$Role seat] WARN -- worker-launch-rules.mjs stderr: $launchRulesErr" }
+  } else {
+    Write-Host "[$Role seat] WARN -- worker-launch-rules.mjs rc=$launchRulesRc (block not appended; control-room rule only) $launchRulesErr"
+  }
+} else {
+  Write-Host "[$Role seat] worker-launch-rules.mjs absent (older worktree) -- control-room rule only"
+}
+
+# HYK-464: 기동 주체 표식 -- 등록부에 이 좌석의 pane key를 남긴다.
+# 판단(등록 형식·조회)은 저장소 CLI 몫이다(scripts/check/seat-origin-registry.mjs),
+# 이 런처는 부르기만 한다. 실패해도 좌석 기동을 막지 않는다(best-effort).
+try {
+  $seatRegistryPath = Join-Path $PSScriptRoot "seat-launch-registry.jsonl"
+  $seatRegistryCliPath = Join-Path $Worktree "scripts\check\seat-origin-registry.mjs"
+  if ((Test-Path -LiteralPath $seatRegistryCliPath) -and $env:ORCA_PANE_KEY) {
+    & node $seatRegistryCliPath record --registry-path $seatRegistryPath --pane-key $env:ORCA_PANE_KEY --role $Role --engine $Engine --model $Model --effort $Effort --worktree $Worktree --launched-via "orca-worker-seat.ps1" 2>&1 | ForEach-Object { Write-Host "      [origin-registry] $_" }
+  } else {
+    Write-Warning "HYK-464: 좌석 등록부 CLI 또는 ORCA_PANE_KEY가 없어 기동 주체 표식을 남기지 못했다(비치명적, 좌석은 계속 뜬다)."
+  }
+} catch {
+  Write-Warning "HYK-464: 좌석 등록부 기록 실패(비치명적, 좌석은 계속 뜬다): $($_.Exception.Message)"
+}
+
+if ($Engine -eq "codex") {
+  # REVIEW/PM = codex (CODER와 다른 엔진 원칙 유지). REVIEW=luna / PM=sol.
+  # 2026-08-28: 주석이 22일간 코드와 어긋나 있었다(주석 terra / 코드 luna). 정본 = relay-terminal-setup.md §1.5 ③(같은 날 luna 로 개정).
+  $env:CODEX_HOME = $env:ORCA_CODEX_HOME
+  # 관측 B6: codex 좌석에서 `spawn orca ENOENT` — orca 실행파일 경로를 PATH 앞에 명시한다.
+  $orcaBin = "C:\Users\Administrator\AppData\Local\Programs\orca\resources\bin"
+  if (Test-Path $orcaBin) { $env:PATH = "$orcaBin;$env:PATH" }
+  # HYK-501: 모델 리터럴 기본값 삭제 -- 해석 단계가 codex 에는 -Model 명시를 요구한다(없으면 좌석이 안 뜬다).
+  $codexModel = $Model
+  # HYK-379: codex 자체 업데이트 확인을 시작 시점에 끈다 -- 확인이 없으면
+  # "Update now/Skip" 대화형 프롬프트도 뜨지 않는다(원 사고: 이 프롬프트에서
+  # 숫자 선택 전송이 막히고 Enter만 먹혀 기본값 Update now가 조용히 실행됐다).
+  # HYK-472: -Effort가 주어졌을 때만 reasoning_effort를 얹는다 -- 기본
+  # 동작(인자 없음)은 이전과 정확히 같은 명령줄이다(회귀 없음).
+  if ($Effort) {
+    codex --model $codexModel -a never -s danger-full-access -c check_for_update_on_startup=false -c reasoning_effort=$Effort
+  } else {
+    codex --model $codexModel -a never -s danger-full-access -c check_for_update_on_startup=false
+  }
+} else {
+  $env:CLAUDE_CONFIG_DIR = "C:\Users\Administrator\.claude-team"
+  # HYK-379: claude 쪽 방어적 조치 -- codex와 같은 "대화형 선택 프롬프트" 형태의
+  # 사고 재현은 이 조사에서 확인되지 않았지만(§4 정직 한계), 백그라운드
+  # 자동 업데이트가 무인 좌석 도중 끼어드는 경로 자체를 줄인다.
+  $env:DISABLE_AUTOUPDATER = '1'
+  $env:CLAUDE_CODE_FORCE_SESSION_PERSISTENCE = '1'
+  # HYK-501: 리터럴 기본값 삭제 -- 위 해석 단계가 모델·effort 를 명시 인자 또는 저장소 등록부 값으로 채워 둔다.
+  $claudeModel = $Model
+  $claudeEffort = $Effort
+  # 무인 운영 시에는 권한 확인 창에서 멈추지 않도록 사람이 이 좌석의 권한 모드를 별도로 정한다
+  # (관제실 노트 참조 — 안전망은 권한창이 아니라 하네스 훅·git 훅·독립 REVIEW).
+  claude --model $claudeModel --effort $claudeEffort --dangerously-skip-permissions --append-system-prompt $rule
+}
