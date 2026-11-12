@@ -28,18 +28,33 @@ import { ORCH_PROGRESS_VERDICT } from "./orch-progress-core.mjs";
 // 닫힌 목록 상수 -- 출처를 벗어난 항목을 코드가 지어내지 않게 한 곳에 둔다.
 // ---------------------------------------------------------------------------
 
-// ㄱ 닫힌 일곱 유형. ⛔유일한 출처 = D:\문서관리\하네스-관제실\
-// 북극성-좌표.md §1-C «ㄱ. 설계된 정지 -- 닫힌 목록»(91~103행, 2026-08-07
-// 한용 확정). 분모 7은 이 배열 길이에서만 온다 -- 문자열로 "7"을 박지
-// 않는다(목록이 한용 확정으로 바뀌면 분모도 기계로 따라간다).
+// ㄱ 닫힌 여섯 유형(번호 1~4 · 6 · 7). ⛔유일한 출처 = D:\문서관리\
+// 하네스-관제실\북극성-좌표.md §1-C «ㄱ. 설계된 정지 -- 닫힌 목록»(2026-08-07
+// 한용 확정 · 2026-11-12 19:1x 책임자 판정으로 게이트 5 폐지 반영 -- 원문
+// 일곱은 취소선으로 보존). 분모는 이 배열 길이에서만 온다 -- 문자열로
+// 숫자를 박지 않는다(목록이 한용 확정으로 바뀌면 분모도 기계로 따라간다).
+// 폐지된 5 는 아래 ABOLISHED_GATE_TYPES 에 번호만 남아 표기된다.
 export const GATE_TYPES = Object.freeze([
   Object.freeze({ number: 1, name: "다음 작업 선택" }),
   Object.freeze({ number: 2, name: "연속 반려 판정" }),
   Object.freeze({ number: 3, name: "북극성·큰 실행 승인" }),
   Object.freeze({ number: 4, name: "PR 승인·병합 / Linear Done" }),
-  Object.freeze({ number: 5, name: "패킷 서명" }),
   Object.freeze({ number: 6, name: "하드스톱" }),
   Object.freeze({ number: 7, name: "상신 답변" }),
+]);
+
+// HYK-255-ln-github-anchor-1 커밋 2 -- 폐지된 ㄱ 유형(분모 밖, 표기만).
+// 게이트 5 «패킷 서명»은 한용 «B» 확정 2026-09-03 05:55(sign.sh 서명 폐지,
+// 정본 = 통역 CLAUDE.md B-11)로 폐지됐고, 북극성-좌표.md §1-C 는
+// 2026-11-12 19:1x 에 «다음 여섯뿐 · 게이트 5 취소선 · 번호는 유지»로
+// 갱신됐다. 번호는 유지하되 분모(GATE_TYPES)에서만 뺀다.
+export const ABOLISHED_GATE_TYPES = Object.freeze([
+  Object.freeze({
+    number: 5,
+    name: "패킷 서명",
+    abolishedOn: "2026-09-03",
+    basis: "B-11",
+  }),
 ]);
 
 // 이 라운드에 독립 앵커(= ORCH가 만들거나 사람 actor로 가장할 수 없음이
@@ -337,6 +352,11 @@ function buildGaSection(gate4, auxNote) {
     `- 미커버 ㄱ 유형: ${uncovered.map((g) => `${g.number} ${g.name}`).join(" · ")}` +
       ` (4도 PR 승인·병합만 — Linear Done은 미커버)`,
   );
+  for (const g of ABOLISHED_GATE_TYPES) {
+    lines.push(
+      `- 폐지된 ㄱ 유형(분모 밖): ${g.number} ${g.name} — 폐지(${g.abolishedOn} ${g.basis})`,
+    );
+  }
   return lines;
 }
 

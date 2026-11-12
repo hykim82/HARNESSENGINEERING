@@ -71,6 +71,7 @@ import {
   UNCOUNTED_EXAMPLES_V2,
   UNCOUNTED_EXAMPLES_V3,
   GATE_TYPES,
+  ABOLISHED_GATE_TYPES,
 } from "./partial-count-core.mjs";
 
 export const DEFAULT_DISPATCH_RECEIPTS_PATH =
@@ -1484,7 +1485,13 @@ function classifySourceItems({
 // 실제로는 발생하지 않는다 -- 방어적으로만 가드).
 function tallyRelayClassification(validEntries) {
   const tally = {};
-  for (const g of GATE_TYPES) tally[`ㄱ-${g.number}`] = 0;
+  // 전달 파일의 자기 분류 라벨은 폐지된 ㄱ-5 도 여전히 쓸 수 있다(과거
+  // 항목) -- 분모(GATE_TYPES)에서 5 가 빠져도 이 집계 키를 지우면 그 라벨이
+  // 아래 가드에서 «조용히 버려진다». 그래서 번호 순으로 폐지 목록을 합친다.
+  const labelGates = [...GATE_TYPES, ...ABOLISHED_GATE_TYPES].sort(
+    (a, b) => a.number - b.number,
+  );
+  for (const g of labelGates) tally[`ㄱ-${g.number}`] = 0;
   tally["ㄴ"] = 0;
   for (const e of validEntries) {
     if (tally[e.classification] !== undefined) tally[e.classification] += 1;

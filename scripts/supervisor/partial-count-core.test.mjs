@@ -20,6 +20,7 @@ import {
   renderOutboxAuxNote,
   formatPartialCountSection,
   GATE_TYPES,
+  ABOLISHED_GATE_TYPES,
   UNCOUNTED_EXAMPLES_V1,
   UNCOUNTED_EXAMPLES_V2,
   UNCOUNTED_EXAMPLES_V3,
@@ -183,10 +184,30 @@ test("필수 문면 4·5: ㄱ/ㄴ/보조 칸 분리 · 분모 · 커버리지 1/
       "- ORCH-writeable 보조 관측: 미계수(이 라운드 결선된 보조 수집기 없음) — 독립 계수에 미산입",
     ),
   );
-  // 분모 7은 북극성 닫힌 목록 배열 길이에서 기계로 온다.
-  assert.equal(GATE_TYPES.length, 7);
+  // 분모는 북극성 닫힌 목록 배열 길이에서 기계로 온다. HYK-255-ln-github-
+  // anchor-1 커밋 2(판정 2026-11-12 19:1x 2ⓑ) -- 게이트 5(패킷 서명)는
+  // 2026-09-03 B-11 로 폐지돼 분모 7 -> 6, 커버리지 1/7 -> 1/6.
+  assert.equal(GATE_TYPES.length, 6);
+  assert.deepEqual(
+    GATE_TYPES.map((g) => g.number),
+    [1, 2, 3, 4, 6, 7],
+  );
   assert.ok(text.includes(`- 독립 앵커 유형 커버리지: 1/${GATE_TYPES.length}`));
+  assert.ok(text.includes("- 독립 앵커 유형 커버리지: 1/6\n"));
   assert.ok(text.includes("- 미커버 ㄱ 유형: 1 다음 작업 선택"));
+  assert.ok(
+    !text.includes("5 패킷 서명 · 6"),
+    "폐지된 5 는 미커버 목록에 없다",
+  );
+  assert.deepEqual(
+    ABOLISHED_GATE_TYPES.map((g) => g.number),
+    [5],
+  );
+  assert.ok(
+    text.includes(
+      "- 폐지된 ㄱ 유형(분모 밖): 5 패킷 서명 — 폐지(2026-09-03 B-11)\n",
+    ),
+  );
   assert.ok(text.includes("Linear Done은 미커버"));
   // ㄴ은 열린 집합 -- 전수 비율 대신 버전 붙은 예시 목록 개수.
   // HYK-255-outbox-aux-1-r2 -- uncountedExamples 인자를 안 준 호출(이
