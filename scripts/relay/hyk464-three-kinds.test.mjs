@@ -2573,6 +2573,11 @@ test("HYK-464-3kinds adapter ⓐ: 위조·불완전 표지 -> valid:false + 닫�
     assert.equal(r.valid, false, label);
     assert.equal(r.cause, cause, label);
   }
+  // 어댑터는 표지가 «적은» headSha 를 그대로 싣는다 -- 관측 HEAD 로 덮어쓰면 코어의 재대조가 빈 껍데기가 된다.
+  const moved = observeRm(
+    retireFake({ marker: rmMarkerBody({ headSha: "c".repeat(40) }) }),
+  );
+  assert.equal(moved.headSha, "c".repeat(40));
 });
 
 test("HYK-464-3kinds adapter ⓐ: 14일 경계 -- 정확히 14일 전은 통과, 1초 지나면 AT_STALE / 현재 시각과 같은 at 은 미래가 아니다", () => {

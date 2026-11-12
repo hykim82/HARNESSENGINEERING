@@ -1061,7 +1061,8 @@ function judgeRetireMarkerBody(m, name, observedHead, nowMs) {
   }
   const fields = {
     worktree: m.worktree,
-    headSha: observedHead,
+    // 표지가 «적은» HEAD 를 그대로 싣는다 -- 코어가 관측 HEAD 와 독립으로 다시 대조한다.
+    headSha: m.headSha,
     reasonCode: m.reasonCode,
     approvalRef: m.approvalRef,
     confirmedBy: m.confirmed_by,
