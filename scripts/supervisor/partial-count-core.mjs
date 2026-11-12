@@ -325,7 +325,39 @@ export function renderOutboxAuxNote(outboxResult) {
   );
 }
 
-function buildGaSection(gate4, auxNote) {
+// HYK-255-g-aux-render-1 커밋 1 (PM 진단 §(d) D2) -- ㄱ «보조 관측(독립 아님)»
+// 한 줄. wire(partial-count-report.mjs 의 collectGateAuxObservations)의 산출물
+// {gate1, gate2, gate6, gate7} 각 칸 = {known:true, count[, readFailures,
+// undated]} | {known:false, reason}. ⛔못 읽은 칸은 bare 0 이 아니라 «ㄱ-N 수집
+// 실패(사유)» -- 읽을 수 있었던 진짜 0 과 구별된다. ⛔이 값은 «독립 앵커 유형
+// 커버리지» 분자 · 분모 어디에도 들어가지 않는다(buildGaSection 의 커버리지
+// 줄은 INDEPENDENT_ANCHOR_COVERED_GATE_NUMBERS 와 GATE_TYPES 만 읽는다).
+// 입력이 없으면(미결선 호출자) 줄 0개.
+function renderGateAuxCell(label, cell) {
+  if (!cell || cell.known !== true || !Number.isInteger(cell.count)) {
+    const reason = cell && cell.reason ? cell.reason : "사유 미상";
+    return `${label} 수집 실패(${reason})`;
+  }
+  const notes = [];
+  if (cell.readFailures > 0) notes.push(`읽기 실패 ${cell.readFailures}건`);
+  if (cell.undated > 0) notes.push(`시각 불명 ${cell.undated}건`);
+  return `${label} ${cell.count}${notes.length > 0 ? `(${notes.join(" · ")})` : ""}`;
+}
+
+export function renderGateAuxObservationLine(gateAux) {
+  if (!gateAux) return null;
+  return (
+    "- 보조 관측(독립 아님): " +
+    [
+      renderGateAuxCell("ㄱ-1", gateAux.gate1),
+      renderGateAuxCell("ㄱ-2", gateAux.gate2),
+      renderGateAuxCell("ㄱ-6", gateAux.gate6),
+      renderGateAuxCell("ㄱ-7", gateAux.gate7),
+    ].join(" · ")
+  );
+}
+
+function buildGaSection(gate4, auxNote, gateAux) {
   const lines = ["ㄱ 설계된 정지:"];
   if (gate4.known === true) {
     lines.push(`- 외부 독립 앵커로 확인: ${gate4.approved}건`);
@@ -343,6 +375,8 @@ function buildGaSection(gate4, auxNote) {
     lines.push(`- 외부 독립 앵커로 확인: UNKNOWN(${gate4.reason})`);
   }
   lines.push(`- ORCH-writeable 보조 관측: ${auxNote} — 독립 계수에 미산입`);
+  const gateAuxLine = renderGateAuxObservationLine(gateAux);
+  if (gateAuxLine) lines.push(gateAuxLine);
   const covered = INDEPENDENT_ANCHOR_COVERED_GATE_NUMBERS;
   lines.push(
     `- 독립 앵커 유형 커버리지: ${covered.length}/${GATE_TYPES.length}`,
@@ -557,6 +591,9 @@ export function buildPartialCountReport({
   // HYK-255-ln-github-anchor-1 -- 기본값 undefined -> ㄴ 절 새 줄 0개
   // (미결선 호출자 회귀 0). confirmedLnEvents 와 «별개 입력»이다.
   externalEvidence,
+  // HYK-255-g-aux-render-1 커밋 1 -- 기본값 undefined -> ㄱ 절 새 줄 0개(미결선
+  // 호출자 회귀 0). 독립 앵커 입력(gate4)과 «별개 입력»이다.
+  gateAuxObservation,
 }) {
   const lines = [];
   lines.push("집계 성격: PARTIAL — 전수 아님");
@@ -577,7 +614,7 @@ export function buildPartialCountReport({
     "(기준 단위: 배달·소비 = 레코드 수 · 영수증 결손 = 영수증 없는 고유 라벨 수 — 단위가 달라 «배달−소비=결손»이 성립하지 않음)",
   );
   lines.push("");
-  lines.push(...buildGaSection(gate4, auxNote));
+  lines.push(...buildGaSection(gate4, auxNote, gateAuxObservation));
   lines.push("");
   lines.push(
     ...buildLnSection(
