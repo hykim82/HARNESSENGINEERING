@@ -30,7 +30,7 @@
   "roles": {
     "CODER": {
       "engine": "claude",
-      "model": "claude-sonnet-5",
+      "model": "claude-sonnet-5-5",
       "effort": "high"
     },
     "REVIEW": {
@@ -40,7 +40,7 @@
     },
     "VERIFY": {
       "engine": "claude",
-      "model": "claude-sonnet-5",
+      "model": "claude-sonnet-5-5",
       "effort": "high"
     },
     "PM": {
