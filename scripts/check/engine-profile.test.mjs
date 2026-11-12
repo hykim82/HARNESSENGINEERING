@@ -915,3 +915,75 @@ test("loadEngineProfiles: the returned object carries configPathUsed -- the exac
     },
   );
 });
+
+// ---- C-1 (HYK-153-fake-engine-1, coder-task.md §2 product_scope, piece C
+// 설계 §(e)): a blank-string OBJECT KEY in "engines"/"roles" -- a 5th,
+// distinct category from every per-field blank-VALUE check above (B4 left
+// this one out on purpose, CODER-r6.md:44). ----
+
+test("loadEngineProfiles: engines[''] (a blank-string engine key) is CONFIG_SCHEMA_INVALID -- distinct from any per-field blank value", () => {
+  withTempConfig(
+    JSON.stringify({
+      engines: { "": fullEngineBlock("inject") },
+      bannerMarkerPatterns: fullBannerMarkerPatterns(),
+      roles: { CODER: { engine: "", model: "m", effort: "high" } },
+    }),
+    (file) => {
+      assert.throws(
+        () => loadEngineProfiles(file),
+        (err) =>
+          err.reason === ENGINE_PROFILE_LOAD_REASON.CONFIG_SCHEMA_INVALID &&
+          /"engines" has a blank\/whitespace-only key/.test(err.message),
+      );
+    },
+  );
+});
+
+test("loadEngineProfiles: engines['   '] (whitespace-only engine key) is CONFIG_SCHEMA_INVALID", () => {
+  withTempConfig(
+    JSON.stringify({
+      engines: { "   ": fullEngineBlock("inject") },
+      bannerMarkerPatterns: fullBannerMarkerPatterns(),
+      roles: { CODER: { engine: "   ", model: "m", effort: "high" } },
+    }),
+    (file) => {
+      assert.throws(
+        () => loadEngineProfiles(file),
+        (err) =>
+          err.reason === ENGINE_PROFILE_LOAD_REASON.CONFIG_SCHEMA_INVALID &&
+          /"engines" has a blank\/whitespace-only key/.test(err.message),
+      );
+    },
+  );
+});
+
+test("loadEngineProfiles: roles[''] (a blank-string role key) is CONFIG_SCHEMA_INVALID", () => {
+  withTempConfig(
+    JSON.stringify({
+      engines: { claude: fullEngineBlock("inject") },
+      bannerMarkerPatterns: fullBannerMarkerPatterns(),
+      roles: { "": { engine: "claude", model: "m", effort: "high" } },
+    }),
+    (file) => {
+      assert.throws(
+        () => loadEngineProfiles(file),
+        (err) =>
+          err.reason === ENGINE_PROFILE_LOAD_REASON.CONFIG_SCHEMA_INVALID &&
+          /"roles" has a blank\/whitespace-only key/.test(err.message),
+      );
+    },
+  );
+});
+
+test("loadEngineProfiles: a non-blank engines/roles key with the SAME engine name still loads fine -- the blank-key check above has no false positive on ordinary keys", () => {
+  withTempConfig(
+    JSON.stringify({
+      engines: { claude: fullEngineBlock("inject") },
+      bannerMarkerPatterns: fullBannerMarkerPatterns(),
+      roles: { CODER: { engine: "claude", model: "m", effort: "high" } },
+    }),
+    (file) => {
+      assert.doesNotThrow(() => loadEngineProfiles(file));
+    },
+  );
+});

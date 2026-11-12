@@ -243,6 +243,20 @@ function validateEngines(engines, configPath) {
     invalid(configPath, `"engines" must be a non-empty object`);
   }
   for (const [engineName, engineCfg] of Object.entries(engines)) {
+    // HYK-153-fake-engine-1 (coder-task.md §2 product_scope, C-1 -- piece
+    // C 설계 §(e), B4가 "객체의 키 자체가 빈 문자열"이라는 별도 범주로
+    // 의식적으로 범위 밖에 둔 반례). An empty-string KEY is not a value
+    // this module's per-field blank checks ever see -- Object.entries still
+    // yields `["", engineCfg]` for `{"": {...}}`, and every later check
+    // below validates `engineCfg`'s own fields, never the key itself. A
+    // blank engine name is exactly as useless/dangerous as a blank field
+    // value (same family this module already closes).
+    if (!isNonBlankString(engineName)) {
+      invalid(
+        configPath,
+        `"engines" has a blank/whitespace-only key (got ${JSON.stringify(engineName)})`,
+      );
+    }
     if (!isPlainObject(engineCfg)) {
       invalid(configPath, `engines.${engineName} must be an object`);
     }
@@ -327,6 +341,15 @@ function validateRoles(roles, engines, configPath) {
     invalid(configPath, `"roles" must be a non-empty object`);
   }
   for (const [role, roleCfg] of Object.entries(roles)) {
+    // HYK-153-fake-engine-1 (C-1, same rationale as validateEngines' own
+    // blank-key check above): a blank role name is the same "object key
+    // itself is a blank string" category B4 left out.
+    if (!isNonBlankString(role)) {
+      invalid(
+        configPath,
+        `"roles" has a blank/whitespace-only key (got ${JSON.stringify(role)})`,
+      );
+    }
     if (!isPlainObject(roleCfg)) {
       invalid(configPath, `roles.${role} must be an object`);
     }
