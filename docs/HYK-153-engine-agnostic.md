@@ -157,3 +157,111 @@ node --test scripts/check/engine-name-literal.test.mjs
 둘 다 코드 동작은 바뀌지 않았다(리터럴을 없애거나, 분류 칸만 되돌렸다) --
 `ENGINE_BY_ROLE` 역할별 해석 결과는 PM 추가 외에는 무변이다. 상신
 2348·14:5x ⓑ 정제 문면 원문은 PM 설계 산출물(§1 참조)에 있다.
+
+## 추기 (HYK-153-adapter-registry-1, 조각 D -- 책임자 판정 2026-11-11 12:1x/13:0x)
+
+`engine-profiles.json`의 `engines.<engine>.adapterModule`(저장소 루트
+기준 POSIX 상대 경로, 라이브 claude/codex 둘 다
+`scripts/relay/adapters/orca-relay-adapter.mjs`)과 새 모듈
+`scripts/relay/engine-adapter-registry.mjs`(`selectRelayAdapterForRole
+(role)`)가 역할 → 릴레이 어댑터(ensureSeat/observeSeatCandidates/
+deliverTask/collectCompletionSignals/teardownSeat + execFn) 고름을 한
+자리로 모았다. `scripts/relay/run-step.mjs`는 이제
+`./adapters/*.mjs`를 정적으로 import하지 않고 이 등록부가 고른 결과를
+쓴다 -- 고름이 실패하면(`ROLE_PROFILE_MISSING` ·
+`ADAPTER_MODULE_MISSING` · `ADAPTER_MODULE_OUTSIDE_ALLOWED_DIR` ·
+`ADAPTER_MODULE_IMPORT_FAILED` · `ADAPTER_CONTRACT_INVALID`, 모두 사유
+있는 실패, 기본값으로 떨어지는 길 없음) `relayStep` 자체가 호출되지
+않는다. 오늘의 라이브 claude/codex 역할 해석·배달 결과는 무변 -- 이
+라운드는 "설정에서 어댑터를 고른다"는 간접 한 단계만 추가했다.
+
+정직 한계(판정 1259 ⓑ): 관제실 ps1(좌석 기동·배달)의 엔진 리터럴
+분기는 저장소 밖이라 이 라운드로 증명되지 않는다 -- 조각 E(범위 밖)로
+등재.
+
+## ④ⓒ 가짜 엔진 합성 완주 (HYK-153-fake-engine-1, 조각 C -- 책임자 판정 2026-11-11 12:1x/13:0x + 상신 1259 (가))
+
+```
+node --test scripts/relay/fake-engine-round.test.mjs
+```
+
+- **무엇을 증명하는가**: `scripts/check/engine-profiles.json`을 mkdtemp에
+  바이트 그대로 복사하고 `engines.<F>`(가짜 엔진, 어댑터 =
+  `scripts/relay/adapters/fake-engine-relay-adapter.mjs`) 1개를 더한 뒤
+  `HARNESS_ENGINE_PROFILES_PATH`로 그 사본을 가리키게 하면, 저장소
+  진입점 `run-step.mjs`의 `runStepCli`가 조각 D의 등록부로 그 가짜
+  어댑터를 실제로 골라 CODER→REVIEW 1라운드를 프로덕션 소비 게이트
+  (`checkRelayHandshake`의 전체 검사 · 합성 admission 반납 ·
+  `consumption-receipt-writer.mjs` 영수증 · reject-streak 기록, 검사
+  끔 0)까지 완주시킨다 -- 영수증 2개, 결과 파일의 `engine_profile:`
+  증언 줄이 영수증 `binding.resultFingerprint`에 결속, 전역(실제
+  관제실 원장 · 이 워크트리의 실제 `.harness/reject-streak.json`)에는
+  라벨 흔적이 0이다.
+- **라이브 설정·전역 원장 무변**: 라이브 `engine-profiles.json`의
+  sha256과 이 워크트리의 실제 `.harness/` 지문은 이 시험 전/후 바이트
+  단위로 같다(시험 자신의 `after()`가 매번 재확인). 실제 관제실
+  `D:\문서관리\하네스-관제실\admission-ledger.json`/`dispatch-
+receipts.jsonl`은 읽기만 한다(합성 라벨이 0건인지 대조하는 용도).
+- **음성 칸 7개**: B4(가짜 설정 `model: " "` → `CONFIG_SCHEMA_INVALID`,
+  어댑터 선택 자체가 실패해 `relayStep` 미도달) + D 교차 칸(HYK-153-fake-
+  engine-2, 사본에서 `engines.<F>.adapterModule` 제거 →
+  `CONFIG_SCHEMA_INVALID`, 지시서 복사 0 · 영수증 0 · execFn 호출 0) +
+  pane_match 불일치(G1) · DONE 손찍기(`done_stamped_by` 마커 없음) ·
+  예약 없음(`admissionReturned` 실패) · REVIEW `head_commit` 불일치 ·
+  `verdict:` 2줄(AMBIGUOUS) -- 각각 영수증 0 + 지정된 거부 사유로
+  끝난다. B4/D 교차 칸은 before()가 이미 고정한 설정과 다른
+  `HARNESS_ENGINE_PROFILES_PATH` 값이 필요해, 그 둘만 별도의 짧은
+  child process(runStepCli를 다시 동적 import)로 돈다 -- 나머지
+  5칸은 이 파일의 공유 `runStepCli`를 그대로 쓴다.
+- **실 모델/Orca 호출 0**: PATH 맨 앞에 `claude`/`codex`/`orca` 심(.cmd +
+  POSIX, 호출되면 표식 파일을 쓰고 97로 끝난다)을 두고 전 라운드를
+  돌린 뒤 표식 파일 0개를 확인한다. 가짜 어댑터의 정적 import 닫힘에는
+  `orca-adapter.mjs`/`claude-adapter.mjs`/`codex-adapter.mjs`/
+  `orca-relay-adapter.mjs`가 없고(G9 스캐너를 그 파일 원문에 직접
+  돌려도 위반 0), 이 테스트 파일 자신도 `run-step.mjs`/
+  `engine-adapter-registry.mjs`/`engine-profile.mjs`를 정적 import하지
+  않는다(env 주입 뒤 동적 import로만 닿는다).
+
+### 정직 한계
+
+- 이 라운드는 "다른 회사 엔진이 실제로 돈다"를 증명하지 않는다 --
+  오늘 claude/codex 둘 다 같은 Orca 어댑터로 수렴하는 것은 조각 D
+  그대로이고, 이 라운드는 등록부가 «설정에서 고른 임의의 어댑터
+  모듈»을 끝까지 소비 게이트에 태울 수 있음을 증명한다.
+- 관제실 ps1(좌석 기동·배달)의 엔진 리터럴 분기는 저장소 밖이라 여전히
+  증명되지 않는다 -- 조각 E(범위 밖)로 등재(판정 1259 ⓑ, 조각 D의 같은
+  한계를 조각 C도 물려받는다).
+- 러너 영수증 축은 이 시험의 범위 밖이다(`runner_contract: none` -- 합성
+  러너 영수증을 손으로 만들면 그 자체가 "손으로 만든 영수증"이 되므로
+  만들지 않는다).
+- `deliveryMode: "inject"`는 가짜 엔진에 참인 값이 아니다(가짜 완주는
+  Orca 배달을 타지 않으므로 이 값은 어디서도 읽히지 않는다) -- C-2,
+  기록만.
+- `engines`/`roles`의 빈 키 이름(`engines[""]`/`roles[""]`) 거부는
+  별도 커밋(`scripts/check/engine-profile.mjs`)으로 들어간다(C-1, B4가
+  의식적으로 범위 밖에 뒀던 반례).
+
+## 추기 (HYK-153-fake-engine-2, 2R -- 검토 1R P1-1/P1-2 반려 수리, 계약 회복)
+
+검토 1R(REVIEW-r1.md)이 P1 2건으로 반려했다: ⓐ 등록부가 계약이 금지한
+«새 주입 seam 2개»(`opts.loadProfilesFn`/`opts.importFn`)를 가지고
+있었고 저장소 진입점 `runStepCli(argv, opts)`가 그 opts를 등록부로 그대로
+넘겨 진입점만으로 등록부의 적재·import 계약을 건너뛸 수 있었다(P1-1)
+ⓑ 조각 C 계약의 D 교차 음성 칸(사본에서 `adapterModule` 제거 →
+`CONFIG_SCHEMA_INVALID`)이 시험에 없었다(P1-2). 이 라운드는 둘 다
+닫는다: `selectRelayAdapterForRole`는 이제 `role` 하나만 받고,
+`runStepCli`는 opts를 등록부로 넘기지 않는다(등록부를 바꾸는 유일한
+길 = 기존 `HARNESS_ENGINE_PROFILES_PATH`). 등록부 시험(`engine-adapter-
+registry.test.mjs`)의 seam 경유 음성 칸은 전부 그 env 변수가 가리키는
+mkdtemp 설정 사본(+ 필요한 칸은 실제 `scripts/relay/adapters/`에 고유
+이름으로 둔 합성 어댑터 파일, `finally`에서 제거)으로 옮겼다 -- 단
+`adapterModule` 누락과 경로 대수(`..`)로 등록부 자신의
+`ADAPTER_MODULE_MISSING`/문자열-대수만의 `ADAPTER_MODULE_OUTSIDE_
+ALLOWED_DIR` 분기를 때리던 두 칸은, 실 스키마 로더를 통하면 그 전에
+`engine-profile.mjs`의 `validateEngines`가 `CONFIG_SCHEMA_INVALID`로
+먼저 거부한다는 사실이 드러나(검토 1R 자신의 §2 ⓐ 표 c1/c3-c7과 같은
+결론) -- 그 두 반응 코드는 실제 호출자가 만들 수 있는 어떤 설정으로도
+닿지 않는 방어 코드로 남는다(의도적으로 유지, 조각 D 나머지 모양
+reasonCode 5 변경 0). 조각 C(`fake-engine-round.test.mjs`)의 B4 칸도
+같은 이유로 opts 대신 짧은 자식 프로세스로 옮겼고, D 교차 칸을 새로
+더했다.

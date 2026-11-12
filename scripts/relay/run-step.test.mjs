@@ -1,10 +1,19 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import {
+  mkdtempSync,
+  mkdirSync,
+  writeFileSync,
+  rmSync,
+  readFileSync,
+  readdirSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import { parseRunStepArgs, runStepCli } from "./run-step.mjs";
 import { WORKSPACES_ROOT } from "./adapters/orca-adapter.mjs";
+import { ADAPTER_SELECT_REASON } from "./engine-adapter-registry.mjs";
 
 // HYK-169-coder-1/2: run-step.mjs is written but never executed in this task
 // (비타협 제약: 실 orca 호출 0) -- these tests only exercise the pure argv
@@ -129,4 +138,184 @@ test("runStepCli: invalid argv never reaches the adapter/execFn at all", async (
   });
   assert.equal(r.ok, false);
   assert.equal(called, false);
+});
+
+// HYK-153-adapter-registry-1 (coder-task.md §2 product_scope ⓘⓘⓘⓘ, piece D):
+// run-step.mjs itself no longer has a static `from "./adapters/..."`
+// import -- this is the RED-first assertion the coder-task.md §2 1b_exec_line
+// names (`git grep -n -E 'from "\./adapters/' -- scripts/relay/run-step.mjs`
+// must be 0 lines on the committed file), pinned here as a permanent
+// regression test, not just a one-off grep during implementation.
+test("run-step.mjs itself has zero static 'from \"./adapters/...\"' imports -- the registry (engine-adapter-registry.mjs), not a static import, picks the adapter", () => {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const source = readFileSync(join(here, "run-step.mjs"), "utf8");
+  assert.doesNotMatch(source, /from\s+["']\.\/adapters\//);
+});
+
+// coder-task.md §2 product_scope ⓘⓘⓘⓘ "고름 실패 시 relayStep 호출 0 ·
+// harnessDir 지시서 복사 0": when the registry refuses to pick an adapter
+// for the role, runStepCli must fail closed before relayStep ever runs --
+// no task-file copy into harnessDir, no seat/deliver call of any kind.
+test("runStepCli: when the registry refuses to pick an adapter for the role (ROLE_PROFILE_MISSING), relayStep is never reached -- no task-file copy, no execFn call", async () => {
+  const harnessDir = mkdtempSync(
+    join(tmpdir(), "hyk153-run-step-registry-fail-"),
+  );
+  const mainRepoDir = mkdtempSync(
+    join(tmpdir(), "hyk153-run-step-registry-fail-main-"),
+  );
+  try {
+    mkdirSync(join(mainRepoDir, ".harness"), { recursive: true });
+    writeFileSync(
+      join(mainRepoDir, ".harness", "not-a-real-role-task.md"),
+      "task_id: HYK-x\ndropped_at: 2026-07-22 07:05 KST\n\nbody\n",
+      "utf8",
+    );
+    let execFnCalled = false;
+    const r = await runStepCli(
+      [
+        "--role",
+        "NOT-A-REAL-ROLE",
+        "--worktree",
+        VALID_WORKTREE,
+        "--task-id",
+        "HYK-x",
+        "--harness-dir",
+        harnessDir,
+        "--main-repo-dir",
+        mainRepoDir,
+      ],
+      {
+        execFn: () => {
+          execFnCalled = true;
+        },
+      },
+    );
+    assert.equal(r.ok, false);
+    assert.equal(r.reasonCode, ADAPTER_SELECT_REASON.ROLE_PROFILE_MISSING);
+    assert.equal(execFnCalled, false);
+    // P2-4 (coder-task.md §2 product_scope ⓘⓘⓘⓘ 헛시험 수리, review-1
+    // REVIEW-r1.md §1 P2-4): this test's own name promises "no task-file
+    // copy" but the original assertions (reasonCode/execFnCalled only)
+    // never actually looked at harnessDir's contents -- relayStep's
+    // placeAndVerifyTaskFile (relay-core.mjs) is the only code that ever
+    // writes into harnessDir, so an empty directory here is the real,
+    // direct proof that it was never reached.
+    assert.deepEqual(
+      readdirSync(harnessDir),
+      [],
+      "harnessDir must still be empty -- relayStep's own task-file copy must never have run",
+    );
+  } finally {
+    rmSync(harnessDir, { recursive: true, force: true });
+    rmSync(mainRepoDir, { recursive: true, force: true });
+  }
+});
+
+// HYK-153-fake-engine-2 (coder-task.md §2 product_scope ⓒ "«seam 0» 정적
+// 단언 1"): engine-adapter-registry.mjs's and run-step.mjs's own on-disk
+// source must together contain zero occurrences of the two identifiers
+// the removed registry injection seam used to be named -- spelled out here
+// as joined string fragments (never a literal contiguous substring in this
+// file's own source) so this proof does not itself add a match to the
+// RED-first scripts/relay-wide seam-identifier grep count (coder-task.md
+// §2 1b_exec_line ⑴, which must read 0 after this round).
+test("engine-adapter-registry.mjs and run-step.mjs together contain 0 occurrences of the removed registry-seam identifiers (seam truly deleted from source, not merely dead)", () => {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const registrySrc = readFileSync(
+    join(here, "engine-adapter-registry.mjs"),
+    "utf8",
+  );
+  const runStepSrc = readFileSync(join(here, "run-step.mjs"), "utf8");
+  const seamNames = [
+    ["load", "ProfilesFn"].join(""),
+    ["im", "portFn"].join(""),
+  ];
+  for (const name of seamNames) {
+    assert.equal(
+      registrySrc.includes(name),
+      false,
+      `engine-adapter-registry.mjs must not mention '${name}'`,
+    );
+    assert.equal(
+      runStepSrc.includes(name),
+      false,
+      `run-step.mjs must not mention '${name}'`,
+    );
+  }
+});
+
+// HYK-153-fake-engine-2 (coder-task.md §2 product_scope ⓒ "동적 단언 1"):
+// the two dead seam keys (same joined-fragment spelling as above), passed
+// as opts that THROW if ever actually invoked, must change nothing -- the
+// registry must still pick the real default adapter from the real config,
+// proving it never reads either key anymore (not just that the branch is
+// gone from source, but that nothing downstream still honors the shape).
+test("runStepCli: opts shaped like the removed registry-seam keys (poisoned -- they throw if ever called) are silently ignored, wiring through to the real default adapter exactly as without them", async () => {
+  const harnessDir = mkdtempSync(join(tmpdir(), "hyk153c2-run-step-seam-"));
+  const mainRepoDir = mkdtempSync(
+    join(tmpdir(), "hyk153c2-run-step-seam-main-"),
+  );
+  try {
+    mkdirSync(join(mainRepoDir, ".harness"), { recursive: true });
+    writeFileSync(
+      join(mainRepoDir, ".harness", "coder-task.md"),
+      "task_id: HYK-x\ndropped_at: 2026-07-22 07:05 KST\n\nbody\n",
+      "utf8",
+    );
+    let execFnCalled = false;
+    const fakeExecFn = (argv) => {
+      execFnCalled = true;
+      if (argv[0] === "terminal" && argv[1] === "list") {
+        return {
+          ok: true,
+          result: {
+            terminals: [
+              {
+                handle: "term_fake",
+                worktreePath: VALID_WORKTREE,
+                tabId: "tab-1",
+              },
+            ],
+          },
+        };
+      }
+      if (argv[0] === "terminal" && argv[1] === "show") {
+        return { ok: true, result: { terminal: { preview: "IDLE" } } };
+      }
+      return { ok: true, result: { task: { id: "task_fake" } } };
+    };
+    const poison = () => {
+      throw new Error(
+        "dead seam key must never be invoked -- it no longer exists",
+      );
+    };
+    const deadKey1 = ["load", "ProfilesFn"].join("");
+    const deadKey2 = ["im", "portFn"].join("");
+    const r = await runStepCli(
+      [
+        "--role",
+        "CODER",
+        "--worktree",
+        VALID_WORKTREE,
+        "--task-id",
+        "HYK-x",
+        "--harness-dir",
+        harnessDir,
+        "--main-repo-dir",
+        mainRepoDir,
+      ],
+      {
+        execFn: fakeExecFn,
+        existingSeatHandle: "term_fake",
+        capabilities: { classify: (tail) => (tail === "IDLE" ? "idle" : null) },
+        [deadKey1]: poison,
+        [deadKey2]: poison,
+      },
+    );
+    assert.equal(r.ok, true, JSON.stringify(r));
+    assert.equal(execFnCalled, true);
+  } finally {
+    rmSync(harnessDir, { recursive: true, force: true });
+    rmSync(mainRepoDir, { recursive: true, force: true });
+  }
 });

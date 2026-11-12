@@ -342,6 +342,9 @@ test("P2-E (anti-vacuity): a well-formed synthetic config loads cleanly on both 
         modelFamilyPatterns: { sonnet: "sonnet", opus: "opus" },
         agentMarkerWords: [],
         previewMarkerPattern: "Sonnet|Opus",
+        // HYK-153-adapter-registry-1 (piece D): adapterModule joined the
+        // required-key family this round.
+        adapterModule: "scripts/relay/adapters/orca-relay-adapter.mjs",
       },
     },
     bannerMarkerPatterns: {
