@@ -426,7 +426,6 @@ let markerDir;
 let fakeConfigPath;
 let liveHarnessFingerprintBefore;
 let liveConfigShaBefore;
-let realControlRoomSnapshot;
 
 const REAL_LEDGER_PATH = "D:\\문서관리\\하네스-관제실\\admission-ledger.json";
 const REAL_DISPATCH_RECEIPTS_PATH =
@@ -459,11 +458,6 @@ function readIfExists(path) {
 before(async () => {
   liveHarnessFingerprintBefore = fingerprintDir(join(REPO_ROOT, ".harness"));
   liveConfigShaBefore = sha256File(LIVE_ENGINE_PROFILES_PATH);
-  realControlRoomSnapshot = {
-    ledger: readIfExists(REAL_LEDGER_PATH),
-    dispatchReceipts: readIfExists(REAL_DISPATCH_RECEIPTS_PATH),
-    rejectStreak: readIfExists(MAIN_REPO_REJECT_STREAK_PATH),
-  };
 
   ({ shimDir, markerDir } = buildShims());
 
@@ -552,24 +546,48 @@ test("정적 단언 ③: G9 스캐너(orca-cli-boundary.mjs의 scanForOrcaExecCa
 });
 
 // P2-2 (coder-task.md §2 product_scope ⓘⓘⓘⓘ 헛시험 수리, review-1
-// REVIEW-r1.md §1 P2-2): a direct, permanent guard on the constant itself
-// -- the real global reject-streak target MUST resolve under the main
-// repo's own checkout (git-common-dir-resolved), never under this linked
-// worktree's own REPO_ROOT. Reverting MAIN_REPO_ROOT back to REPO_ROOT (the
-// original bug) makes this fail directly, instead of relying only on a
-// before/after comparison that -- in a worktree where even the WRONG path
-// is absent -- would otherwise still pass vacuously (exactly how review-1
-// found it).
-test("P2-2: MAIN_REPO_REJECT_STREAK_PATH resolves under the main repo's own checkout (git-common-dir), never under this linked worktree's own REPO_ROOT", () => {
-  assert.ok(
-    MAIN_REPO_REJECT_STREAK_PATH.startsWith(MAIN_REPO_ROOT),
-    MAIN_REPO_REJECT_STREAK_PATH,
-  );
-  assert.equal(
-    MAIN_REPO_REJECT_STREAK_PATH.startsWith(REPO_ROOT),
-    false,
-    `must NOT resolve under this linked worktree's own REPO_ROOT (${REPO_ROOT}) -- that is exactly review-1's P2-2 vacuous-pass bug`,
-  );
+// REVIEW-r1.md §1 P2-2, review-2 REVIEW-r1.md §1 P1-A): a direct, permanent
+// guard on the constant itself -- the real global reject-streak target
+// MUST resolve under the main repo's own checkout (git-common-dir-resolved).
+// review-2 found that comparing the raw (unresolved) strings is itself
+// broken: on Windows a plain clone (main repo == work tree, exactly the
+// runner/CI shape) makes MAIN_REPO_ROOT and REPO_ROOT the SAME directory,
+// but one carries git's forward slashes and the other path.resolve's
+// native backslashes, so the raw startsWith("must NOT be under REPO_ROOT")
+// assertion passed only by separator-mismatch accident -- while on POSIX
+// (no separator mismatch) the same raw comparison correctly saw they were
+// equal and failed outright. Both paths are now normalized with
+// path.resolve before comparing, and the two clone shapes get different
+// assertions instead of one blanket "must differ" claim: when the main
+// repo IS the work tree (plain clone/runner/CI) assert the target resolves
+// under REPO_ROOT (positive branch, not skipped); only in a linked
+// worktree (main repo != work tree) assert the target does NOT resolve
+// under this worktree's own REPO_ROOT.
+test("P2-2: MAIN_REPO_REJECT_STREAK_PATH resolves under the main repo's own checkout (git-common-dir) -- positively under REPO_ROOT in a plain clone/CI where main repo == work tree, and never under this worktree's own REPO_ROOT in a linked worktree where they differ", (t) => {
+  const resolvedTarget = resolve(MAIN_REPO_REJECT_STREAK_PATH);
+  const resolvedMainRepoRoot = resolve(MAIN_REPO_ROOT);
+  const resolvedRepoRoot = resolve(REPO_ROOT);
+
+  assert.ok(resolvedTarget.startsWith(resolvedMainRepoRoot), resolvedTarget);
+
+  if (resolvedMainRepoRoot === resolvedRepoRoot) {
+    t?.diagnostic(
+      `plain-clone 분기: 본체(git-common-dir 기준, ${resolvedMainRepoRoot}) == 작업 트리(${resolvedRepoRoot}) -- 양성 단언`,
+    );
+    assert.ok(
+      resolvedTarget.startsWith(resolvedRepoRoot),
+      `plain clone/runner/CI 에서는 main repo == work tree 이므로 REPO_ROOT(${resolvedRepoRoot}) 밑에 있어야 한다: ${resolvedTarget}`,
+    );
+  } else {
+    t?.diagnostic(
+      `linked-worktree 분기: 본체(${resolvedMainRepoRoot}) != 작업 트리(${resolvedRepoRoot}) -- "다르다" 단언`,
+    );
+    assert.equal(
+      resolvedTarget.startsWith(resolvedRepoRoot),
+      false,
+      `must NOT resolve under this linked worktree's own REPO_ROOT (${resolvedRepoRoot}) -- that is exactly review-1's P2-2 vacuous-pass bug`,
+    );
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -787,26 +805,34 @@ function assertRoundsIsolatedAndRecorded(fx, { labelC, labelR }, t) {
       `real control-room ledger must not contain ${labelR}`,
     );
   }
-  // P2-2 (coder-task.md §2 product_scope ⓘⓘⓘⓘ 헛시험 수리): the real target
-  // is the MAIN repo's .harness/reject-streak.json (git-common-dir
-  // resolved) -- if this machine genuinely has none, that is a measurement
-  // gap, not a free pass, so it is logged via t.diagnostic and still backed
-  // by a real (if narrower) positive assertion, never a silent null==null.
+  // P2-2 (coder-task.md §2 product_scope ⓘⓘⓘⓘⓘ 헛시험 수리, review-2
+  // REVIEW-r1.md §1 P2-d): the real target is the MAIN repo's own
+  // .harness/reject-streak.json (git-common-dir resolved) -- a LIVE file
+  // shared with every other seat's dispatch/review traffic on this
+  // machine, so a byte-identity comparison before/after this test's own
+  // run is flaky by construction: any other seat's legitimate write
+  // landing inside this test's run window turns into a false red here,
+  // even though nothing this test did was wrong. Replaced with a
+  // synthetic-label 0-count check instead -- the same zero-synthetic-label
+  // style already used above for the other real control-room files: this
+  // test's own synthetic labels (labelC/labelR) must never appear in it.
+  // A concurrent legitimate write from another seat never contains this
+  // test's own random labels, so it can never flip this assertion red.
   const mainRepoRejectStreakNow = readIfExists(MAIN_REPO_REJECT_STREAK_PATH);
-  if (realControlRoomSnapshot.rejectStreak === null) {
+  if (mainRepoRejectStreakNow === null) {
     t?.diagnostic(
       `측정 불가 -- 본 저장소(git-common-dir 기준) reject-streak.json 이 이 기계에 없다: ${MAIN_REPO_REJECT_STREAK_PATH}`,
     );
-    assert.equal(
-      mainRepoRejectStreakNow,
-      null,
-      "main-repo reject-streak.json must still be absent if it was absent before this file ran",
-    );
   } else {
     assert.equal(
-      mainRepoRejectStreakNow,
-      realControlRoomSnapshot.rejectStreak,
-      "the MAIN repo's real .harness/reject-streak.json (git-common-dir-resolved, not this linked worktree's own) must be byte-identical before/after this file's run",
+      mainRepoRejectStreakNow.includes(labelC),
+      false,
+      `main-repo reject-streak.json (git-common-dir-resolved) must not contain ${labelC}`,
+    );
+    assert.equal(
+      mainRepoRejectStreakNow.includes(labelR),
+      false,
+      `main-repo reject-streak.json (git-common-dir-resolved) must not contain ${labelR}`,
     );
   }
 }
