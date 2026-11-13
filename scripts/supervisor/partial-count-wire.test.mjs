@@ -1353,7 +1353,15 @@ test("CLI 진입점: --outbox-dir을 주면 합성 보내는함을 읽어 보조
         "--outbox-dir",
         outboxDir,
       ],
-      { encoding: "utf8" },
+      {
+        encoding: "utf8",
+        // HYK-255-p5a-perm-1 -- 자식 CLI 의 권한 확인창 수집기가 실물 홈(os.homedir())을 읽지 않게 합성 빈 홈을 준다(격리만 · 단언 무변).
+        env: {
+          ...process.env,
+          HOME: join(root, "no-session-home"),
+          USERPROFILE: join(root, "no-session-home"),
+        },
+      },
     );
     assert.ok(
       stdout.includes(
@@ -1916,7 +1924,15 @@ test("CLI 진입점: --relay-glob --inbox-dir을 주면 ㄴ 절에 전달 파일
         "--inbox-dir",
         inboxDir,
       ],
-      { encoding: "utf8" },
+      {
+        encoding: "utf8",
+        // HYK-255-p5a-perm-1 -- 자식 CLI 의 권한 확인창 수집기가 실물 홈을 읽지 않게 합성 빈 홈(격리만 · 단언 무변).
+        env: {
+          ...process.env,
+          HOME: join(root, "no-session-home"),
+          USERPROFILE: join(root, "no-session-home"),
+        },
+      },
     );
     // HYK-255-relay-aux-4(게이트 2 판정 A) -- 같은 fixture
     // (writeRelayLedgerFixtures)의 "이상한 포맷 틀림" 줄이 시각 미정
