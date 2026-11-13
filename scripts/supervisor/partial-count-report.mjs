@@ -1142,7 +1142,12 @@ const RELAY_NUMBER_TOKEN_RE = /전달 #(\d{8}-\d{4}[a-z]?)/;
 // 4자리 뒤에 숫자가 더 이어지면(5자리 이상) HHMM 이 아니다 · `상신-1830` 처럼
 // 하이픈이 끼면 토큰이 아니다 · «상신» 뒤가 아닌 다른 4자리(게이트 번호 · 시각 아닌
 // 숫자)는 키가 아니다.
-const GATE7_PAIR_TOKEN_RE = /(?:판정-|상신)(\d{4})(?!\d)/g;
+// HYK-255-g7-token-diag-1 (판정 1410 ⓑ) -- «상신HHMM» 토큰 경계: «상신» 바로 앞이
+// 글자 또는 숫자(유니코드 \p{L} · \p{N})면 토큰이 아니다(«미상신1530» · «X상신1530» ·
+// «3상신1530» = 키 아님 -- 부정 접두 오탐 방지). «상신» 앞이 이름 시작이거나 글자·숫자가
+// 아닌 문자(구분자: `-` `_` 공백 `.` `(` `[` `+` 등 -- 글자·숫자의 여집합 «전부»)면 토큰이다.
+// ⛔이 경계도 같은 한 정의 안에 있다(보조 ㄱ-7 · «기록 누락» 공용) -- `판정-` 머리는 무변.
+const GATE7_PAIR_TOKEN_RE = /(?:판정-|(?<![\p{L}\p{N}])상신)(\d{4})(?!\d)/gu;
 
 function parseLedgerFileNameTimestampMs(name) {
   const m = LEDGER_FILE_NAME_TS_RE.exec(name);
@@ -1168,12 +1173,15 @@ function parseLedgerFileNameDateHhmm(name) {
 function parseGate7PairKey(name) {
   const dateHhmm = parseLedgerFileNameDateHhmm(name);
   if (!dateHhmm) return null;
-  const hhmms = [
-    ...new Set(
-      [...name.matchAll(GATE7_PAIR_TOKEN_RE)].map((token) => token[1]),
-    ),
-  ];
+  const hhmms = extractGate7PairTokens(name);
   return hhmms.length > 0 ? { date: dateHhmm.date, hhmms } : null;
+}
+
+// 이름에서 ㄱ-7 짝 키 HHMM 토큰만 뽑는다(등장 순서 · 같은 HHMM 은 한 번). 날짜 머리 검사는
+// 하지 않는다 -- 그건 parseGate7PairKey 몫. 토큰 정의(GATE7_PAIR_TOKEN_RE)를 읽는
+// «유일한» 함수라 시험이 경계(이름 시작 포함)를 바로 구동할 수 있다.
+export function extractGate7PairTokens(name) {
+  return [...new Set([...name.matchAll(GATE7_PAIR_TOKEN_RE)].map((t) => t[1]))];
 }
 
 // 머리줄의 시각 필드("2026-11-03 21:4x" 모양)를 ms로. 분 자리가 `x`면
