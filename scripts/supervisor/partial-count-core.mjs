@@ -678,6 +678,9 @@ export function buildPartialCountReport({
   // HYK-255-g-aux-render-1 커밋 1 -- 기본값 undefined -> ㄱ 절 새 줄 0개(미결선
   // 호출자 회귀 0). 독립 앵커 입력(gate4)과 «별개 입력»이다.
   gateAuxObservation,
+  // HYK-255-p1-daily-1 -- 기본값 undefined -> 새 줄 0개(미결선 호출자 회귀 0). 값은 watch-run 의 일별
+  // 단계가 일별 줄 파일에서 읽어 만든 «연속 확인-0 일수» 한 줄(renderConfirmedZeroStreakLine). 문턱 판정 0.
+  confirmedZeroStreakLine,
 }) {
   const lines = [];
   lines.push("집계 성격: PARTIAL — 전수 아님");
@@ -686,6 +689,12 @@ export function buildPartialCountReport({
     `측정 기간: ${formatKst(windowStartMs)} ~ ${formatKst(windowEndMs)}`,
   );
   lines.push("1-C 판정 자격: 없음 — 미계수 범위가 남아 있어 «ㄴ=0» 판정 불가");
+  if (
+    typeof confirmedZeroStreakLine === "string" &&
+    confirmedZeroStreakLine !== ""
+  ) {
+    lines.push(confirmedZeroStreakLine);
+  }
   lines.push("");
   lines.push(
     `라운드 분모: 배달 ${renderCount(delivered)} / 소비 ${renderCount(consumed)} / 영수증 결손 ${renderCount(missingReceipts)}`,
@@ -764,4 +773,352 @@ export function formatPartialCountSection({
   lines.push("");
   lines.push(fileText.trimEnd());
   return lines;
+}
+
+// ---------------------------------------------------------------------------
+// HYK-255-p1-daily-1 (판정 2205 ④ · 2305 ②③) -- 일별 마감 줄 · 연속 확인-0 일수.
+//
+// 이 절은 «적기만» 한다. 며칠 · 몇 트랙 같은 문턱 판정(P2 몫) · 자격 있음/없음 · 위의 «1-C 판정
+// 자격» 줄은 만들지도 바꾸지도 않는다. I/O 0(§2 원칙) -- 파일 읽기·쓰기는 watch-run 의 몫이다.
+//
+//   일별 상태(partial-count-daily-state.json) = 오늘 값 하나, 회차마다 덮어쓴다.
+//   일별 줄(partial-count-daily.jsonl)         = 지나간 날 줄만, 덧붙이기 전용 · 한 번 쓴 줄은 고치지 않는다.
+//   날 경계 = KST 자정(formatKst 와 같은 UTC+9 고정).
+//   관측 공백 = 같은 날 안에서 연속한 두 회차 간격이 20분 초과, 또는 00:00 -> 그날 첫 회차가 20분 초과,
+//              또는 그날 마지막 회차 -> 24:00 이 20분 초과(마감 때 판정). 근거(ORCH 실측 wake-receipts
+//              최근 14일 1,173 회차): 15분 회차 + 5분 여유를 넘으면 누락.
+//   그날 줄의 값 = 그날 «마지막 회차»의 값(확인 · 미조회 · 수집 실패) -- 재조회 0 · REST 무증가.
+//   ⛔캐시는 승인 권위가 아니다 -- 일별 줄은 «그 회차에 이미 센 값의 기록»이지 다음 회차 확인의 근거가 아니다.
+// ---------------------------------------------------------------------------
+
+export const DAILY_SCHEMA = "partial-count-daily/v1";
+export const DAILY_STATE_SCHEMA = "partial-count-daily-state/v1";
+export const DAILY_COVERAGE_GAP_MS = 20 * 60 * 1000;
+const DAY_MS = 24 * 60 * 60 * 1000;
+const DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+export function kstDayOf(ms) {
+  return formatKst(ms).slice(0, 10);
+}
+
+export function kstDayStartMs(day) {
+  return parseKstTimestampMs(`${day} 00:00 KST`);
+}
+
+function addKstDays(day, n) {
+  return kstDayOf(kstDayStartMs(day) + n * DAY_MS);
+}
+
+const isCount = (v) => Number.isInteger(v) && v >= 0;
+
+// 그 회차 값 -> 일별 칸 값. 못 센 값은 null(0 으로 접지 않는다) -- 읽는 쪽이 null 을 끊김으로 본다.
+export function buildDailyTickValues({
+  externalEvidence,
+  collectors,
+  delivered,
+  uncountedExamples,
+}) {
+  const items = Array.isArray(uncountedExamples?.items)
+    ? uncountedExamples.items
+    : [];
+  return {
+    ...pickExternalEvidenceCounts(externalEvidence),
+    collectorFails: failedCollectorNames(collectors),
+    delivered:
+      delivered?.known === true && isCount(delivered.count)
+        ? delivered.count
+        : null,
+    uncountedRanges: items.map((_, i) => `U${i + 1}`),
+    uncountedVersion: uncountedExamples?.version ?? null,
+  };
+}
+
+// ㄴ 분자(확인) · 미조회 -- 수집이 known 일 때만 센다. 수집 실패 · 미결선은 null(0 이 아니다).
+function pickExternalEvidenceCounts(externalEvidence) {
+  const known = externalEvidence?.known === true;
+  const shas =
+    known && Array.isArray(externalEvidence.confirmedShas)
+      ? externalEvidence.confirmedShas
+      : null;
+  return {
+    lnConfirmed: shas ? shas.length : null,
+    lnUnchecked:
+      known && isCount(externalEvidence.unchecked)
+        ? externalEvidence.unchecked
+        : null,
+  };
+}
+
+// FAIL 인 수집기 이름(괄호 뒤 가변 꼬리 제거 · 중복 제거).
+function failedCollectorNames(collectors) {
+  const names = (Array.isArray(collectors) ? collectors : [])
+    .filter((c) => c && c.ok !== true)
+    .map((c) => String(c.name ?? "이름 미상").replace(/\(.*$/s, ""));
+  return [...new Set(names)];
+}
+
+// 단계가 던졌거나 결과에 값이 없는 회차 -- «회차가 돌았다» 는 사실은 남기되 그날을 0 으로 세지 않는다.
+export function dailyFailureTick(reason) {
+  return {
+    lnConfirmed: null,
+    lnUnchecked: null,
+    collectorFails: [reason],
+    delivered: null,
+    uncountedRanges: [],
+    uncountedVersion: null,
+  };
+}
+
+// 주입·옛 수집기의 결과 모양을 믿지 않는다 -- 모양이 틀리면 «값 없음» 실패 회차로 접는다.
+export function normalizeDailyTick(tick) {
+  if (!tick || typeof tick !== "object" || Array.isArray(tick)) {
+    return dailyFailureTick("일별 회차 값 없음");
+  }
+  const fails = Array.isArray(tick.collectorFails)
+    ? tick.collectorFails.map(String)
+    : ["수집 실패 목록 모양 오류"];
+  return {
+    lnConfirmed: isCount(tick.lnConfirmed) ? tick.lnConfirmed : null,
+    lnUnchecked: isCount(tick.lnUnchecked) ? tick.lnUnchecked : null,
+    collectorFails: fails,
+    delivered: isCount(tick.delivered) ? tick.delivered : null,
+    uncountedRanges: Array.isArray(tick.uncountedRanges)
+      ? tick.uncountedRanges.map(String)
+      : [],
+    uncountedVersion:
+      typeof tick.uncountedVersion === "string" ? tick.uncountedVersion : null,
+  };
+}
+
+function freshDailyState(day) {
+  return {
+    schema: DAILY_STATE_SCHEMA,
+    day,
+    firstTickAtMs: null,
+    lastTickAtMs: null,
+    ticks: 0,
+    gapCount: 0,
+    gapTotalMs: 0,
+    lnConfirmed: null,
+    lnUnchecked: null,
+    collectorFails: [],
+    concurrentTracksMax: null,
+    delivered: null,
+    uncountedRanges: [],
+    uncountedVersion: null,
+  };
+}
+
+export function isValidDailyState(state) {
+  if (!state || typeof state !== "object" || Array.isArray(state)) return false;
+  if (state.schema !== DAILY_STATE_SCHEMA) return false;
+  if (typeof state.day !== "string" || !DAY_RE.test(state.day)) return false;
+  if (!isCount(state.ticks) || !isCount(state.gapCount)) return false;
+  if (!Number.isFinite(state.gapTotalMs) || state.gapTotalMs < 0) return false;
+  return state.ticks === 0 || hasTickTimes(state);
+}
+
+function hasTickTimes(state) {
+  return (
+    Number.isFinite(state.firstTickAtMs) && Number.isFinite(state.lastTickAtMs)
+  );
+}
+
+// 마감 줄 = 그날 상태 + 마지막 회차 -> 24:00 공백 판정. 값은 그날 마지막 회차의 값 그대로.
+function buildClosedDailyLine({ state, closedAtMs }) {
+  const dayEndMs = kstDayStartMs(state.day) + DAY_MS;
+  const tailMs = dayEndMs - state.lastTickAtMs;
+  const tailGap = tailMs > DAILY_COVERAGE_GAP_MS;
+  return {
+    schema: DAILY_SCHEMA,
+    day: state.day,
+    windowStartMs: state.lastTickAtMs - DAY_MS,
+    windowEndMs: state.lastTickAtMs,
+    closedAtMs,
+    firstTickAtMs: state.firstTickAtMs,
+    lastTickAtMs: state.lastTickAtMs,
+    ticks: state.ticks,
+    lnConfirmed: state.lnConfirmed,
+    lnUnchecked: state.lnUnchecked,
+    collectorFails: state.collectorFails,
+    coverageGaps: {
+      count: state.gapCount + (tailGap ? 1 : 0),
+      totalMs: state.gapTotalMs + (tailGap ? tailMs : 0),
+    },
+    concurrentTracksMax: state.concurrentTracksMax,
+    delivered: state.delivered,
+    uncountedRanges: state.uncountedRanges,
+    uncountedVersion: state.uncountedVersion,
+  };
+}
+
+// 날이 바뀐 첫 회차 -- 전날 상태가 유효하고(회차 ≥ 1) 그 날 줄이 아직 없으면 줄 1개를 돌려준다.
+// closedDays = 일별 파일에 이미 있는 날 집합(재실행이 같은 날 줄을 또 쓰지 않게 -- 덧붙이기 전용).
+// 상태가 없거나 깨졌으면 줄을 지어내지 않는다(그 날은 줄 없음 = 끊김).
+export function rolloverDailyState({ state, nowMs, closedDays }) {
+  const today = kstDayOf(nowMs);
+  const valid = isValidDailyState(state);
+  if (valid && state.day === today) return { state, closedLine: null };
+  const closable =
+    valid &&
+    state.day < today &&
+    state.ticks > 0 &&
+    !(closedDays instanceof Set && closedDays.has(state.day));
+  return {
+    state: freshDailyState(today),
+    closedLine: closable
+      ? buildClosedDailyLine({ state, closedAtMs: nowMs })
+      : null,
+  };
+}
+
+function maxNullable(a, b) {
+  if (a === null || a === undefined) return b ?? null;
+  if (b === null || b === undefined) return a;
+  return Math.max(a, b);
+}
+
+// 이 회차를 오늘 상태에 적는다 -- 값은 덮어쓰고(마지막 회차 값) 동시 배달은 최대, 공백은 누적.
+// 간격 기준점 = 오늘 첫 회차면 00:00, 아니면 직전 회차. 초과(> 20분)만 공백(정확히 20분은 아님).
+export function recordDailyTick({ state, nowMs, tick, concurrentActive }) {
+  const today = kstDayOf(nowMs);
+  const base =
+    isValidDailyState(state) && state.day === today
+      ? state
+      : freshDailyState(today);
+  const prevMs = base.ticks > 0 ? base.lastTickAtMs : kstDayStartMs(today);
+  const spanMs = nowMs - prevMs;
+  const gap = spanMs > DAILY_COVERAGE_GAP_MS;
+  const t = normalizeDailyTick(tick);
+  return {
+    ...base,
+    firstTickAtMs: base.ticks > 0 ? base.firstTickAtMs : nowMs,
+    lastTickAtMs: nowMs,
+    ticks: base.ticks + 1,
+    gapCount: base.gapCount + (gap ? 1 : 0),
+    gapTotalMs: base.gapTotalMs + (gap ? spanMs : 0),
+    lnConfirmed: t.lnConfirmed,
+    lnUnchecked: t.lnUnchecked,
+    collectorFails: t.collectorFails,
+    delivered: t.delivered,
+    uncountedRanges: t.uncountedRanges,
+    uncountedVersion: t.uncountedVersion,
+    concurrentTracksMax: maxNullable(
+      base.concurrentTracksMax,
+      isCount(concurrentActive) ? concurrentActive : null,
+    ),
+  };
+}
+
+// 일별 파일 텍스트 -> 줄 객체들. 깨진 줄은 건너뛰되 개수를 센다(그 날은 줄 없음으로 끊김).
+export function parseDailyLines(text) {
+  const lines = [];
+  let malformed = 0;
+  for (const raw of String(text ?? "").split("\n")) {
+    if (raw.trim() === "") continue;
+    try {
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        lines.push(parsed);
+      } else {
+        malformed += 1;
+      }
+    } catch {
+      malformed += 1;
+    }
+  }
+  return { lines, malformed };
+}
+
+// 그날을 «0 으로 이어진 날» 로 세지 못하게 하는 사유들. 하나라도 있으면 끊김.
+// 값 모름(null · 모양 오류)은 0 이 아니라 사유다(UNKNOWN 을 0 으로 접지 않는다 · Q-5 잠정).
+function dailyBreakReasons(line) {
+  const reasons = [];
+  if (line.lnUnchecked !== 0) {
+    reasons.push(
+      isCount(line.lnUnchecked)
+        ? `미조회 ${line.lnUnchecked}`
+        : "미조회 UNKNOWN",
+    );
+  }
+  if (line.lnConfirmed !== 0) {
+    reasons.push(
+      isCount(line.lnConfirmed) ? `확인 ${line.lnConfirmed}` : "확인 UNKNOWN",
+    );
+  }
+  if (!Array.isArray(line.collectorFails)) {
+    reasons.push("수집 실패 UNKNOWN");
+  } else if (line.collectorFails.length > 0) {
+    reasons.push(`수집 실패(${line.collectorFails.join("·")})`);
+  }
+  const gaps = line.coverageGaps;
+  if (!gaps || typeof gaps !== "object" || !isCount(gaps.count)) {
+    reasons.push("관측 공백 UNKNOWN");
+  } else if (gaps.count > 0) {
+    reasons.push(`관측 공백 ${gaps.count}구간`);
+  }
+  return reasons;
+}
+
+function groupDailyLinesByDay(lines) {
+  const byDay = new Map();
+  for (const l of Array.isArray(lines) ? lines : []) {
+    if (!l || l.schema !== DAILY_SCHEMA || !DAY_RE.test(String(l.day))) {
+      continue;
+    }
+    byDay.set(l.day, [...(byDay.get(l.day) ?? []), l]);
+  }
+  return byDay;
+}
+
+// 그날 줄들 -> 끊김 사유(없으면 []). 줄 없는 날 · 같은 날 줄이 둘 = 끊김.
+function breakReasonsForDay(entries) {
+  if (!entries) return ["줄 없음"];
+  if (entries.length > 1) return [`줄 중복 ${entries.length}`];
+  return dailyBreakReasons(entries[0]);
+}
+
+// 연속 확인-0 일수(읽는 쪽 · 순수 함수 · 문턱 0). 어제부터 거꾸로, 날마다
+//   미조회 0 ∧ 확인 0 ∧ 수집 실패 [] ∧ 관측 공백 0 인 날만 센다.
+// 줄 없는 날 · 같은 날 줄이 둘인 날 = 끊김. 오늘(미마감)은 세지 않는다(어제부터 시작).
+export function computeConfirmedZeroStreak({ lines, nowMs }) {
+  const byDay = groupDailyLinesByDay(lines);
+  let day = addKstDays(kstDayOf(nowMs), -1);
+  let days = 0;
+  let uncountedRangeCount = null;
+  for (;;) {
+    const entries = byDay.get(day);
+    const reasons = breakReasonsForDay(entries);
+    if (reasons.length > 0) {
+      return {
+        known: true,
+        days,
+        lastBreak: { day, reasons },
+        uncountedRangeCount,
+      };
+    }
+    if (days === 0) {
+      const ranges = entries[0].uncountedRanges;
+      uncountedRangeCount = Array.isArray(ranges) ? ranges.length : null;
+    }
+    days += 1;
+    day = addKstDays(day, -1);
+  }
+}
+
+// 보고 줄 -- «ㄴ=0 N일» 문면은 쓰지 않는다(표기 규율). 0 일이어도 끊긴 날짜·사유를 적는다.
+export function renderConfirmedZeroStreakLine(streak) {
+  const prefix = "연속 확인-0 일수: ";
+  if (!streak || streak.known !== true) {
+    return `${prefix}UNKNOWN(${streak?.reason ?? "사유 미상"})`;
+  }
+  const range =
+    streak.days > 0 && Number.isInteger(streak.uncountedRangeCount)
+      ? ` 미계수 범위 ${streak.uncountedRangeCount}개 동반 ·`
+      : "";
+  const brk = streak.lastBreak;
+  return (
+    `${prefix}${streak.days}일(부분 —${range} ` +
+    `마지막 끊김 ${brk.day} ${brk.reasons.join(", ")})`
+  );
 }

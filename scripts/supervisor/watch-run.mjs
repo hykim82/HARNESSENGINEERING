@@ -76,6 +76,17 @@ import { runReachOnce, DEFAULT_NOTIFY_DIR } from "./reach-report.mjs";
 // 감시 실행에 잇는다. 계수 로직은 새로 쓰지 않는다 -- 병합된 프로덕션 API
 // (runPartialCountOnce)를 그대로 호출해 그 출력을 파일로 쓸 뿐이다.
 import { runPartialCountOnce } from "./partial-count-report.mjs";
+// HYK-255-p1-daily-1 -- 일별 마감 줄(순수 함수들 · 이미 partial-count-report 가 import 하는 같은 모듈이라
+// 새 파일 의존 0 -- 설치 목록 변경 불필요).
+import {
+  DAILY_SCHEMA,
+  computeConfirmedZeroStreak,
+  dailyFailureTick,
+  parseDailyLines,
+  recordDailyTick,
+  renderConfirmedZeroStreakLine,
+  rolloverDailyState,
+} from "./partial-count-core.mjs";
 import { readConcurrencyCap } from "./concurrency-cap-adapter.mjs";
 import { judgeConcurrency } from "./concurrency-core.mjs";
 // HYK-173-push-wire (coder-task.md §5-D) -- shouldNotify는 이 러너가
@@ -2929,12 +2940,227 @@ function runRelayLedgerNotifyStep({
   }
 }
 
+// HYK-255-p1-daily-1 (판정 2205 ④ · 2305 ②③ · coder-task.md §1 ORCH 값 ①~⑦) -- 일별 마감 줄.
+//
+// 이 단계 하나가 유일한 작성자다(둘째 작성자 0). 파일 둘 모두 watchDir 에서 파생한다(관제실 절대경로 0):
+//   partial-count-daily.jsonl       = 지나간 날 줄만 · 덧붙이기 전용 · 한 번 쓴 줄은 고치지 않는다.
+//   partial-count-daily-state.json  = 오늘 누적 상태 · 회차마다 덮어쓴다(그날 마지막 회차 값 + 공백 + 동시 배달 최대).
+// 흐름: ⑴ 회차 시작 -- 날이 바뀌었으면(상태의 day ≠ 이 회차 KST 날짜) 전날 상태를 줄 1개로 덧붙이고
+// 오늘 상태를 새로 연다(재조회 0 · REST 무증가) · 일별 파일을 읽어 «연속 확인-0 일수» 줄을 만든다(보고에 실림)
+// ⑵ 수집 · 보고 쓰기(원래 단계) ⑶ 이 회차 값을 오늘 상태에 적는다.
+// ⛔조용한 생략 금지: 이 단계의 어떤 실패도 던지지 않고 notes 로 돌려줘 watch.log 에
+// `PARTIAL_COUNT_DAILY_FAILED` 한 줄로 남긴다(원래 단계 계약 · 감시 실행 전체는 계속된다). 일별 파일을 못 읽거나
+// 줄을 못 쓰면 상태를 «건드리지 않고» 다음 회차에 다시 시도한다(전날 상태를 덮어써 날을 잃지 않는다).
+// ⛔캐시는 승인 권위가 아니다: 일별 줄은 «그 회차에 이미 센 값의 기록»일 뿐 다음 회차 확인의 근거로 읽지 않는다.
+const PARTIAL_COUNT_DAILY_FILENAME = "partial-count-daily.jsonl";
+const PARTIAL_COUNT_DAILY_STATE_FILENAME = "partial-count-daily-state.json";
+
+function errMessage(err) {
+  return err && err.message ? err.message : String(err);
+}
+
+function readPartialCountDailyState({ statePath, readFn, existsFn, notes }) {
+  try {
+    return existsFn(statePath) ? JSON.parse(readFn(statePath, "utf8")) : null;
+  } catch (err) {
+    notes.push(
+      `상태 파일 읽기 실패(${errMessage(err)}) -- 전날 줄은 쓰지 않는다(그 날은 줄 없음 = 끊김)`,
+    );
+    return null;
+  }
+}
+
+function beginPartialCountDaily({
+  watchDir,
+  now,
+  readFn,
+  existsFn,
+  mkdirFn,
+  appendFn,
+}) {
+  const notes = [];
+  const dailyPath = path.join(watchDir, PARTIAL_COUNT_DAILY_FILENAME);
+  const statePath = path.join(watchDir, PARTIAL_COUNT_DAILY_STATE_FILENAME);
+  const state = readPartialCountDailyState({
+    statePath,
+    readFn,
+    existsFn,
+    notes,
+  });
+  let parsed;
+  try {
+    parsed = existsFn(dailyPath)
+      ? parseDailyLines(readFn(dailyPath, "utf8"))
+      : { lines: [], malformed: 0 };
+  } catch (err) {
+    notes.push(`일별 파일 읽기 실패(${errMessage(err)})`);
+    return {
+      streakLine: renderConfirmedZeroStreakLine({
+        known: false,
+        reason: "일별 파일 읽기 실패",
+      }),
+      state,
+      skipRecord: true,
+      notes,
+    };
+  }
+  const closedDays = new Set(
+    parsed.lines.filter((l) => l?.schema === DAILY_SCHEMA).map((l) => l.day),
+  );
+  const rolled = rolloverDailyState({ state, nowMs: now, closedDays });
+  let lines = parsed.lines;
+  let skipRecord = false;
+  if (rolled.closedLine) {
+    try {
+      if (!existsFn(watchDir)) mkdirFn(watchDir, { recursive: true });
+      appendFn(dailyPath, `${JSON.stringify(rolled.closedLine)}\n`, "utf8");
+      lines = [...lines, rolled.closedLine];
+    } catch (err) {
+      notes.push(
+        `일별 줄 쓰기 실패(${errMessage(err)}) -- 상태 무변 · 다음 회차에 재시도`,
+      );
+      skipRecord = true;
+    }
+  }
+  return {
+    streakLine: renderConfirmedZeroStreakLine(
+      computeConfirmedZeroStreak({ lines, nowMs: now }),
+    ),
+    state: skipRecord ? state : rolled.state,
+    skipRecord,
+    notes,
+  };
+}
+
+function finishPartialCountDaily({
+  watchDir,
+  now,
+  daily,
+  tick,
+  admissionLedgerPath,
+  writeFn,
+  existsFn,
+  mkdirFn,
+}) {
+  if (daily.skipRecord) return daily.notes;
+  const notes = [...daily.notes];
+  const concurrentActive = computeWakeActiveRoundCount({
+    admissionSweep: admissionLedgerPath
+      ? { ledgerPath: admissionLedgerPath }
+      : null,
+  });
+  const next = recordDailyTick({
+    state: daily.state,
+    nowMs: now,
+    tick,
+    concurrentActive,
+  });
+  try {
+    if (!existsFn(watchDir)) mkdirFn(watchDir, { recursive: true });
+    writeFn(
+      path.join(watchDir, PARTIAL_COUNT_DAILY_STATE_FILENAME),
+      `${JSON.stringify(next, null, 2)}\n`,
+      "utf8",
+    );
+  } catch (err) {
+    notes.push(`상태 파일 쓰기 실패(${errMessage(err)})`);
+  }
+  return notes;
+}
+
+function logPartialCountDailyNotes({
+  notes,
+  now,
+  logPath,
+  readFn,
+  writeFn,
+  maxLogLines,
+}) {
+  if (!logPath) return;
+  for (const note of notes) {
+    try {
+      appendLogWithRotation({
+        readFn,
+        writeFn,
+        logPath,
+        line: `${new Date(now).toISOString()} PARTIAL_COUNT_DAILY_FAILED message=${note}`,
+        maxLines: maxLogLines,
+      });
+    } catch {
+      // 로그 실패는 이 단계 계약을 깨지 않는다(runReachStep과 동일 원칙).
+    }
+  }
+}
+
 // runPartialCountStepCore -- 원래 `runPartialCountStep`의 본문 그 자체
 // (기본값 해석을 뺀 나머지, HYK-255-watch-wire-3). 모든 파라미터는 이미
 // 해석된 값이며 기본값을 갖지 않는다(complexity를 늘리지 않는다) --
 // 로직·순서·값·반환 모양(`{ran, ok, message}`)·실패 로그 문면
 // (`PARTIAL_COUNT_STEP_FAILED`)은 원문 그대로.
+// HYK-255-p1-daily-1: 앞뒤로 일별 마감 줄 두 단계(beginPartialCountDaily · finishPartialCountDaily)가 붙는다 --
+// REST 호출 수 · 상한 · 통지 조건은 무변(이 두 단계는 수집기를 부르지 않는다).
 async function runPartialCountStepCore({
+  now,
+  watchDir,
+  partialCountOut,
+  runPartialCountOnceFn,
+  writeFn,
+  readFn,
+  mkdirFn,
+  existsFn,
+  logPath,
+  maxLogLines,
+  options,
+  notifyDir,
+  admissionLedgerPath,
+  appendFn,
+}) {
+  const daily = beginPartialCountDaily({
+    watchDir,
+    now,
+    readFn,
+    existsFn,
+    mkdirFn,
+    appendFn: appendFn === undefined ? appendFileSync : appendFn,
+  });
+  const outcome = await runPartialCountCollect({
+    now,
+    watchDir,
+    partialCountOut,
+    runPartialCountOnceFn,
+    writeFn,
+    readFn,
+    mkdirFn,
+    existsFn,
+    logPath,
+    maxLogLines,
+    options: { ...options, confirmedZeroStreakLine: daily.streakLine },
+    notifyDir,
+  });
+  const notes = finishPartialCountDaily({
+    watchDir,
+    now,
+    daily,
+    tick: outcome.dailyTick,
+    admissionLedgerPath,
+    writeFn,
+    existsFn,
+    mkdirFn,
+  });
+  logPartialCountDailyNotes({
+    notes,
+    now,
+    logPath,
+    readFn,
+    writeFn,
+    maxLogLines,
+  });
+  return outcome.step;
+}
+
+// 원래 단계 본문(수집 -> 보고 쓰기 -> 받는함 통지) -- HYK-255-p1-daily-1 이전의 runPartialCountStepCore 본문을
+// 그대로 옮겼다. 반환만 {step, dailyTick} 로 감싼다(step = 옛 반환 모양 그대로 · dailyTick = 그 회차 일별 값).
+async function runPartialCountCollect({
   now,
   watchDir,
   partialCountOut,
@@ -2963,7 +3189,10 @@ async function runPartialCountStepCore({
       existsFn,
       mkdirFn,
     });
-    return { ran: true, ok: true, partialCountOut, relayNotify };
+    return {
+      step: { ran: true, ok: true, partialCountOut, relayNotify },
+      dailyTick: result.dailyTick,
+    };
   } catch (err) {
     const message = err && err.message ? err.message : String(err);
     if (logPath) {
@@ -2979,7 +3208,10 @@ async function runPartialCountStepCore({
         // 로그 실패는 이 단계 계약을 깨지 않는다(runReachStep과 동일 원칙).
       }
     }
-    return { ran: true, ok: false, message };
+    return {
+      step: { ran: true, ok: false, message },
+      dailyTick: dailyFailureTick("부분 계수 단계 실패"),
+    };
   }
 }
 
@@ -2996,6 +3228,8 @@ export async function runPartialCountStep({
   maxLogLines,
   options,
   notifyDir,
+  admissionLedgerPath,
+  appendFn,
 }) {
   const resolved = resolvePartialCountStepDefaults({
     watchDir,
@@ -3013,6 +3247,8 @@ export async function runPartialCountStep({
     watchDir,
     logPath,
     notifyDir,
+    admissionLedgerPath,
+    appendFn,
     ...resolved,
   });
 }
@@ -3072,8 +3308,13 @@ export async function runWatchCliPartialCountStep({
   runPartialCountStepFn,
 }) {
   let outboxDir = null;
+  let admissionLedgerPath = null;
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === "--outbox-dir") outboxDir = argv[++i];
+    // HYK-255-p1-daily-1 -- 일별 «동시 배달 최대» 표본의 원장 경로. 새 CLI 인자 0: 감시 실행이 이미 받는
+    // --admission-sweep-ledger 를 같은 argv 에서 읽기만 한다(원장 쓰기 0).
+    else if (argv[i] === "--admission-sweep-ledger")
+      admissionLedgerPath = argv[++i];
   }
   const { relayGlob, inboxDir } = parseRelayLedgerArgv(argv);
   const stepFn =
@@ -3084,6 +3325,7 @@ export async function runWatchCliPartialCountStep({
     watchDir,
     now,
     notifyDir,
+    admissionLedgerPath,
     logPath: result.logPath,
     options: buildPartialCountStepOptions({
       repoRoot,

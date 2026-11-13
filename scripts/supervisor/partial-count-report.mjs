@@ -80,6 +80,7 @@ import {
   buildPartialCountReport,
   computeSuspectedStallResumeIntervals,
   computeCoverageGaps,
+  buildDailyTickValues,
   parseKstTimestampMs,
   renderOutboxAuxNote,
   UNCOUNTED_EXAMPLES_V1,
@@ -2436,9 +2437,12 @@ function assemblePartialCountReportText({
   // 보조 수집기 묶음 {outboxResult, relayResult, gateAux} -- runPartialCountOnce 의
   // eslint max-lines-per-function 예산 때문에 한 덩어리로 받는다(값 · 순서 무변).
   aux,
+  // HYK-255-p1-daily-1 -- watch-run 일별 단계가 만든 «연속 확인-0 일수» 줄(없으면 undefined = 새 줄 0개).
+  confirmedZeroStreakLine,
 }) {
   const { outboxResult, relayResult, gateAux } = aux;
   return buildPartialCountReport({
+    confirmedZeroStreakLine,
     generatedAtMs: now,
     windowStartMs,
     windowEndMs,
@@ -2470,6 +2474,35 @@ function assemblePartialCountReportText({
     relayLedgerResult: relayResult,
     // HYK-255-g-aux-render-1 -- ㄱ 보조 관측(독립 아님). null -> 줄 0개.
     gateAuxObservation: gateAux ?? undefined,
+  });
+}
+
+// HYK-255-p1-daily-1 -- 일별 마감 줄의 «이 회차 값». 보고문이 방금 센 값과 같은 원천(같은 externalEvidence ·
+// 같은 수집기 목록 · 같은 미계수 예시 선택)에서 뽑는다 -- 재조회 0 · REST 무증가. 순수(buildCollectors ·
+// selectUncountedExamples 는 읽기·계산만이라 assemblePartialCountReportText 와 한 번 더 불러도 같은 값).
+function buildDailyTick({
+  deliveredResult,
+  consumedResult,
+  watch,
+  gate4,
+  externalEvidence,
+  aux,
+}) {
+  const { outboxResult, relayResult, gateAux } = aux;
+  return buildDailyTickValues({
+    externalEvidence,
+    collectors: buildCollectors({
+      deliveredResult,
+      consumedResult,
+      watchOk: watch.watchOk,
+      watchSkipped: watch.skipped,
+      gate4,
+      outboxResult,
+      externalEvidence,
+      gateAux,
+    }),
+    delivered: deliveredResult.delivered,
+    uncountedExamples: selectUncountedExamples({ outboxResult, relayResult }),
   });
 }
 
@@ -2652,6 +2685,35 @@ export async function runPartialCountOnce(options = {}) {
     existsFn,
   });
 
+  return buildPartialCountOnceResult({
+    now,
+    windowStartMs,
+    windowEndMs,
+    deliveredResult,
+    consumedResult,
+    watch,
+    gate4,
+    externalEvidence,
+    aux,
+    confirmedZeroStreakLine: options.confirmedZeroStreakLine,
+  });
+}
+
+// 보고문 조립 + 결과 모양 -- runPartialCountOnce 에서 떼어낸 것(eslint max-lines-per-function 예산,
+// HYK-255-p1-daily-1 이 dailyTick 한 칸을 더하면서 80줄을 넘었다). 결과의 키 · 값 · 순서는 원문 그대로이고
+// `dailyTick`(일별 마감 줄의 «이 회차 값»)만 새로 붙는다.
+function buildPartialCountOnceResult({
+  now,
+  windowStartMs,
+  windowEndMs,
+  deliveredResult,
+  consumedResult,
+  watch,
+  gate4,
+  externalEvidence,
+  aux,
+  confirmedZeroStreakLine,
+}) {
   const reportText = assemblePartialCountReportText({
     now,
     windowStartMs,
@@ -2662,10 +2724,18 @@ export async function runPartialCountOnce(options = {}) {
     gate4,
     externalEvidence,
     aux,
+    confirmedZeroStreakLine,
   });
-
   return {
     reportText,
+    dailyTick: buildDailyTick({
+      deliveredResult,
+      consumedResult,
+      watch,
+      gate4,
+      externalEvidence,
+      aux,
+    }),
     gate4,
     externalEvidence,
     suspected: watch.suspected,
