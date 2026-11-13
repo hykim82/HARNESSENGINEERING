@@ -285,11 +285,12 @@ function renderCount(value) {
 }
 
 // ㄴ 확인 건수 렌더링 -- 필수 문면 3(한용 확정): 독립 증거로 확인된 것이
-// 없으면 반드시 «확인 0건»으로 쓴다. bare «0건»은 «ㄴ=0»(기간 내 총 0회)
-// 으로 오독되므로 ⛔절대 내지 않는다.
+// 없으면 반드시 «확인 0건»으로 쓴다. bare «0건»은 «ㄴ=0»(기간 내 총 0건이 아니라
+// «확인된 것 0»)으로 오독되므로 ⛔절대 내지 않는다. HYK-255-ln-update-branch-1 --
+// 확인분이 있어도 같은 모양(«확인 N건»)이다(한용 확정 2026-11-13 15:3x: GitHub 웹
+// Update branch 클릭 = ㄴ · 그 회차 REST 응답으로 확인된 건수가 분자).
 export function renderConfirmedLnCount(count) {
-  if (count === 0) return "확인 0건";
-  return `${count}건`;
+  return `확인 ${count}건`;
 }
 
 // 보내는함(통역) 머리줄 보조 관측 렌더링(HYK-255-outbox-aux-1) -- wire
@@ -494,20 +495,23 @@ function renderRelayClassificationLine(classificationTally) {
 }
 
 // HYK-255-ln-github-anchor-1 (판정 2026-11-12 19:1x 1ⓑ) -- ㄴ 독립 수집기
-// 1호(GitHub 웹 «Update branch» 병합 커밋 후보)의 ㄴ 절 새 줄. ⛔이 줄의
-// 확인 N 은 «후보 중 서명·작성자가 확인된 건수»일 뿐 ㄴ 분자가 아니다 --
-// 분류(Update branch 클릭이 ㄴ 인가 ㄱ-4 부속인가)가 확정되기 전이라
-// confirmedLnEvents 에는 절대 들어가지 않고(위 «확인 0건» 줄 무변), 이
-// 줄이 «분류 대기»를 문면으로 박는다. 입력이 없으면(미결선 호출자) 줄 0개.
-// 수집 실패는 bare 숫자 0 이 아니라 «수집 실패(사유)»다.
+// 1호(GitHub 웹 «Update branch» 병합 커밋 후보)의 ㄴ 절 새 줄. 이 줄의
+// 확인 N 은 «후보 중 그 회차 REST 응답으로 서명·작성자가 확인된 건수»다.
+// HYK-255-ln-update-branch-1 (한용 확정 2026-11-13 15:3x) -- 분류가 확정됐다:
+// Update branch 클릭 = ㄴ. 그래서 이 확인 N 은 위 «외부 독립 증거로 확인된 사건»
+// 줄(ㄴ 분자 = confirmedLnEvents 길이)로 들어가고(wire 가 채운다 -- 이 렌더는
+// 두 입력을 별개로 받는다), 이 줄은 분자에 «반영된다» 는 문면(옛 «분류 대기»
+// 대신)을 박는다. 미조회 · 불일치 · 스테일 직전 값은 분자 밖이다. 입력이 없으면
+// (미결선 호출자) 줄 0개. 수집 실패는 bare 숫자 0 이 아니라 «수집 실패(사유)»다.
 const EXTERNAL_EVIDENCE_LINE_PREFIX = "- 외부 독립 증거 후보: ";
+const EXTERNAL_EVIDENCE_NUMERATOR_NOTE = "ㄴ 분자 반영";
 
 //
 // HYK-255-g7-key-stale-1 (커밋 3) -- 스테일 표기. 그 회차에 미조회(예산 · rate limit ·
 // 조회 실패)로 확인을 못 한 후보가 있어 «확인 N» 이 직전보다 낮게 나오면 줄 끝에
 // 「스테일 표시(확인 아님): 직전 확인 M · 마지막 확인 HH:MM KST」 를 «덧붙인다».
 // ⛔앞의 «확인 N · 미조회 U» 는 그 회차 REST 응답으로만 센 값 그대로다 -- 직전 값은
-// 표시일 뿐 확인으로 세지 않고(ㄴ 분자 «확인 0건» 무변 · 캐시는 승인 권위 아님) 이 줄의
+// 표시일 뿐 확인으로 세지 않고(ㄴ 분자에 들어가지 않는다 · 캐시는 승인 권위 아님) 이 줄의
 // 파서도 앞의 두 숫자만 읽는다. 입력 externalEvidence.stalePrevious =
 // {confirmed, atMs|null, nowMs} (wire 가 감시 상태 파일에서 읽어 넣는다 -- 이 렌더는
 // I/O 0). 마지막 확인이 보고서 생성일과 다른 날이면 «MM-DD HH:MM», 시각을 모르면
@@ -538,13 +542,15 @@ export function renderExternalEvidenceCandidateLine(externalEvidence) {
   }
   return (
     `${EXTERNAL_EVIDENCE_LINE_PREFIX}확인 ${externalEvidence.confirmed} · ` +
-    `미조회 ${externalEvidence.unchecked} · 분류 대기` +
+    `미조회 ${externalEvidence.unchecked} · ${EXTERNAL_EVIDENCE_NUMERATOR_NOTE}` +
     renderExternalEvidenceStaleSuffix(externalEvidence.stalePrevious)
   );
 }
 
+// 파서는 옛 문면 «분류 대기» 도 읽는다 -- 새 버전 첫 회차에 reach-report 가 «옛 버전이 쓴
+// 보고서 파일» 을 읽어도 직전 N 기억이 «줄 없음» 으로 끊기지 않게 하는 호환(렌더는 새 문면만).
 const EXTERNAL_EVIDENCE_COUNT_RE =
-  /^- 외부 독립 증거 후보: 확인 (\d+) · 미조회 (\d+) · 분류 대기(?: · 스테일 표시\(확인 아님\): .*)?$/m;
+  /^- 외부 독립 증거 후보: 확인 (\d+) · 미조회 (\d+) · (?:ㄴ 분자 반영|분류 대기)(?: · 스테일 표시\(확인 아님\): .*)?$/m;
 const EXTERNAL_EVIDENCE_FAILED_RE =
   /^- 외부 독립 증거 후보: 수집 실패\((.*)\)$/m;
 
