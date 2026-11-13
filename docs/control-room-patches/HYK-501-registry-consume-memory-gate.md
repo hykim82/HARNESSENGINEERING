@@ -117,6 +117,8 @@ if ($seatOptArr.Count -gt 0) { $cmd += ' ' + ($seatOptArr -join ' ') }
 
 ⛔**런처가 적용돼 있고 `-DryRun` 4역할이 통과한 뒤에만.** 같은 형식의 절차다(전체 설명은 `HYK-501-registry-consume.md` §4).
 
+⛔**실행 폴더**: **1번의 `node scripts/check/control-room-patch-apply.mjs --doc docs/control-room-patches/…` 만 상대 경로**이므로 **이 저장소(하네스)의 «master 워크트리 루트»에서 친다**(`HYK-501-registry-consume.md` §4 와 같은 워크트리) — 관제실 폴더 `D:\문서관리\하네스-관제실` 에는 `scripts\` 가 없어(2026-11-13 폴더 목록 실측) 거기서 치면 도구를 찾지 못한다. 나머지 명령(0번 · 2번부터 5번까지)은 전부 절대 경로라 어느 폴더에서 쳐도 같다. 라이브 파일과 `.tmp\` 는 `D:\문서관리\하네스-관제실` 안에 있다(읽고 교체할 대상이지 «실행 폴더» 가 아니다). 5번의 `$wt` 도 같은 master 워크트리 경로다. 0~5번은 **같은 pwsh 세션**에서 순서대로 친다. 2번은 `$errs` 가 없는 새 셸에서 그 줄만 쳐도 거짓 `0` 이 나오지 않도록 `$errs` 를 스스로 비운다.
+
 ```
 # 0. 적용 «전» 라이브 SHA-256 = before
 (Get-FileHash 'D:\문서관리\하네스-관제실\memory-gate.ps1' -Algorithm SHA256).Hash.ToLower()
@@ -127,8 +129,8 @@ node scripts/check/control-room-patch-apply.mjs --doc docs/control-room-patches/
 (Get-FileHash 'D:\문서관리\하네스-관제실\.tmp\memory-gate.hyk501-applied.ps1' -Algorithm SHA256).Hash.ToLower()
 #   기대값: c9db5cd91f7232d5c77f548b8df18700d10dfc3b199ebd85b124bcb3d98b99b9
 
-# 2. 파싱 검사 (오류 0)
-[System.Management.Automation.Language.Parser]::ParseFile('D:\문서관리\하네스-관제실\.tmp\memory-gate.hyk501-applied.ps1', [ref]$null, [ref]$errs) | Out-Null; $errs.Count
+# 2. 파싱 검사 (오류 0 -- 앞의 `$errs = $null;` 이 없으면 새 셸에서 [ref]$errs 가 «존재하지 않는 변수» 오류로 ParseFile 을 건너뛰고도 마지막 `$errs.Count` 가 거짓 `0` 을 찍는다. 실행 결과에 빨간 오류가 함께 보이면 0 이어도 통과가 아니다)
+$errs = $null; [System.Management.Automation.Language.Parser]::ParseFile('D:\문서관리\하네스-관제실\.tmp\memory-gate.hyk501-applied.ps1', [ref]$null, [ref]$errs) | Out-Null; $errs.Count
 
 # 3. 라이브 교체 (되돌림 사본 먼저)
 Copy-Item 'D:\문서관리\하네스-관제실\memory-gate.ps1' 'D:\문서관리\하네스-관제실\.tmp\memory-gate.before.ps1'
@@ -137,7 +139,20 @@ Copy-Item 'D:\문서관리\하네스-관제실\.tmp\memory-gate.hyk501-applied.p
 
 # 4. 리터럴 자리 확인 (적용 후 0줄)
 rg -n "claude-sonnet-5|gpt-5\.6-|\"medium\"|\"codex\" \} else|-Engine claude" D:\문서관리\하네스-관제실\orca-worker-seat.ps1 D:\문서관리\하네스-관제실\memory-gate.ps1
+
+# 5. 적용 «후» 게이트 자체 확인 -- 새 스위치 없이 적용본이 이미 가진 -DryRun · -LogPath · -StatePath · -HistoryPath 만 쓴다.
+#    -DryRun 은 좌석을 절대 띄우지 않는다. 로그·상태·이력은 스크래치 폴더로 보내 라이브 watch\ 상태 파일과 이력을 건드리지 않는다.
+$s = 'D:\문서관리\하네스-관제실\.tmp\gate-selfcheck'; New-Item -ItemType Directory -Force $s | Out-Null
+$wt = '<등록부가 origin/master 와 같은 master 워크트리>'
+# 5-a. 음성(몇 초): 등록부 JSON 을 깨뜨린 임시 워크트리 -- 측정 «전»에 닫혀야 한다
+pwsh -NoLogo -File 'D:\문서관리\하네스-관제실\memory-gate.ps1' -Round e2-selfcheck-neg -Worktree '<등록부 JSON 을 깨뜨린 임시 워크트리>' -Role CODER -Title e2-selfcheck -OrchHandle e2-selfcheck -LogPath "$s\neg.log" -StatePath "$s\neg-state.json" -HistoryPath "$s\neg-history.jsonl" -DryRun; "rc=$LASTEXITCODE"
+#   볼 것: 화면과 neg.log 에 seat-dryrun rc=3 + VERDICT=CLOSED_ENGINE_PROFILE_UNRESOLVED rc=3 · neg.log 에 mode= / ALIGN= / step1 줄이 «없다» · neg-state.json 의 status=closed + dry_run=true · 마지막 rc=0 (게이트는 판정과 무관하게 exit 0)
+# 5-b. 양성: 등록부가 origin/master 와 같은 워크트리 -- 런처 선확인이 통과해 측정으로 들어가야 한다
+pwsh -NoLogo -File 'D:\문서관리\하네스-관제실\memory-gate.ps1' -Round e2-selfcheck-pos -Worktree $wt -Role CODER -Title e2-selfcheck -OrchHandle e2-selfcheck -LogPath "$s\pos.log" -StatePath "$s\pos-state.json" -HistoryPath "$s\pos-history.jsonl" -DryRun; "rc=$LASTEXITCODE"
+#   볼 것: pos.log 에 seat-dryrun rc=0 + [CODER seat] engine-profile: ... match=yes + DRYRUN rc=0 가 먼저 나오고 CLOSED_ENGINE_PROFILE_UNRESOLVED 는 «없다».
+#   그 뒤는 실제 측정이라 수 분 걸리고 메모리·게임 사정에 따라 DRYRUN_WOULD_OPEN 이나 CLOSED_* 로 끝난다 -- 합격 기준은 위 «선확인 통과» 줄이지 OPEN 이 아니다. 위 줄을 보았으면 Ctrl+C 로 끊어도 된다(스크래치 파일만 남는다).
 ```
 
 **되돌림** = `.tmp\memory-gate.before.ps1` 를 라이브 경로에 복사하고 SHA-256 이 `17219bdc…ade51` 인지 확인한다.
 적용 뒤 첫 실기동(`-Model` 손 명시 없이 배달한 CODER 1회)의 좌석 화면 `engine-profile:` 1줄과 좌석 등록부 행의 `model` 이 등록부 값인지 본다.
+**5번(게이트 자체 확인)이 보는 것 / 못 보는 것**: 보는 것 = 적용된 라이브 게이트가 측정 «전»에 라이브 런처를 `-DryRun` 으로 불러 결과를 판정에 쓰는 배선(음성은 측정 없이 닫힘 · 양성은 측정으로 진입). 못 보는 것 = 실제 좌석 기동(`orca terminal create`)과 선확인 뒤 등록부가 바뀌는 틈(§3) — 그건 위 «첫 실기동» 확인의 몫이다. 같은 음성 경로를 저장소 시험이 합성으로 구동한다(`control-room-patch-apply-hyk501-effect.test.mjs` 의 N11 · 런처는 스텁) — 이 시험은 라이브 게이트를 열지 않으므로 5번을 대신하지 못한다.

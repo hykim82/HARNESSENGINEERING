@@ -31,7 +31,7 @@ node scripts/check/control-room-patch-apply.mjs --doc docs/control-room-patches/
 | 우선순위             | **명시 인자가 필드별로 이긴다**(`-Model` 만 주면 모델만 인자 · 엔진·effort 는 등록부). 명시값이 등록부와 다르면 `WARN explicit overrides registry: <필드> <명시값> (registry <등록부값>)` 한 줄씩.                                                                                                                                                             |
 | 읽기 필수            | 명시 인자 3개가 다 있어도 **등록부 읽기는 반드시 성공해야 한다**(fail-closed 상시). 지금 게이트는 늘 셋을 명시하므로, 그때 읽기를 건너뛰면 기본값 경로가 실전에서 한 번도 안 돌아 조용히 썩는다.                                                                                                                                                               |
 | 엔진만 바꿀 때       | `-Engine` 이 등록부의 엔진과 다르면 `-Model` 과 `-Effort` 를 함께 명시해야 한다(`ENGINE_OVERRIDE_NEEDS_MODEL`) — 다른 엔진에 등록부의 모델 이름을 그대로 넘겨 claude 에 `gpt-…` 를 주는 사고를 막는다.                                                                                                                                                         |
-| codex                | 등록부 엔진이 `codex` 면 `ENGINE_CODEX_REFUSED`(10-27 codex 신규 개시 금지). 명시 `-Engine codex` 는 `-Model` 명시가 있을 때만 통과한다(한용 해제 시 경로 보존 — 기계로 막지 않는다). codex 모델 리터럴은 삭제.                                                                                                                                                |
+| codex                | 등록부 엔진이 `codex` 면 `ENGINE_CODEX_REFUSED`(10-27 codex 신규 개시 금지). 명시 `-Engine codex` 는 `-Model` 명시가 있을 때만 통과하고, 등록부 엔진이 claude 이면 `-Effort` 도 함께 명시해야 한다(바로 위 행 `ENGINE_OVERRIDE_NEEDS_MODEL` · 시험 이름과 같다 — 한용 해제 시 경로 보존 · 기계로 막지 않는다). codex 모델 리터럴은 삭제.                       |
 | env                  | `HARNESS_ENGINE_PROFILES_PATH`(시험 주입용)를 CLI 호출 «전»에 지운다 — 상속되면 조용히 다른 등록부를 읽는다. 라이브 런처는 워크트리 파일만 읽는다.                                                                                                                                                                                                             |
 | 출력 1줄             | `[ROLE seat] engine-profile: engine=X(arg\|registry) model=Y(…) effort=Z(…) registry_blob=<7자> origin_blob=<7자> match=yes\|no`                                                                                                                                                                                                                               |
 | `-DryRun`(새 스위치) | seat-preflight + 해석 + 출력 1줄 뒤 `DRYRUN rc=0` 로 **exit 0**. 좌석 등록부 기록 · 규칙 블록 덧붙이기 · 엔진 기동은 하지 않는다.                                                                                                                                                                                                                              |
@@ -225,6 +225,8 @@ mode: replace
 ⛔**순서 = 런처 먼저, memory-gate 나중. 역순 금지.** 새 memory-gate 는 `-Engine` 을 넘기지 않으므로, 옛 런처에 닿으면 `:57` 의 역할→엔진 리터럴로 REVIEW/PM 이 **codex 로 뜬다**.
 전제: PR #365(등록부 CODER/VERIFY = `claude-sonnet-5-5`)가 master 에 병합돼 있고, 적용에 쓰는 «master 워크트리» 의 등록부 blob 이 `origin/master` 와 같다(`match=yes`).
 
+⛔**실행 폴더**: 아래 명령은 경로를 두 가지로 쓴다. **1번의 `node scripts/check/control-room-patch-apply.mjs --doc docs/control-room-patches/…` 만 상대 경로**이므로 **이 저장소(하네스)의 «master 워크트리 루트»(위 전제의 워크트리)에서 친다** — 관제실 폴더 `D:\문서관리\하네스-관제실` 에는 `scripts\` 가 없어(2026-11-13 폴더 목록 실측) 거기서 치면 도구를 찾지 못한다. 나머지 명령(0번 · 2번부터 5번까지)은 전부 절대 경로라 어느 폴더에서 쳐도 같다. 라이브 파일과 `.tmp\` 는 `D:\문서관리\하네스-관제실` 안에 있다(읽고 교체할 대상이지 «실행 폴더» 가 아니다). 4번의 `$wt` 도 같은 master 워크트리 경로다. 0~5번은 **같은 pwsh 세션**에서 순서대로 친다(`$wt` 가 이어진다). 2번은 `$errs` 가 없는 새 셸에서 그 줄만 쳐도 거짓 `0` 이 나오지 않도록 `$errs` 를 스스로 비운다.
+
 ```
 # 0. 적용 «전» 라이브 SHA-256 = before (다르면 적용 중단 -- 라이브가 문서를 자른 뒤 바뀐 것이다)
 (Get-FileHash 'D:\문서관리\하네스-관제실\orca-worker-seat.ps1' -Algorithm SHA256).Hash.ToLower()
@@ -235,8 +237,8 @@ node scripts/check/control-room-patch-apply.mjs --doc docs/control-room-patches/
 (Get-FileHash 'D:\문서관리\하네스-관제실\.tmp\orca-worker-seat.hyk501-applied.ps1' -Algorithm SHA256).Hash.ToLower()
 #   기대값: 6e69909429962d0953502db41c3ec584c61a1bb34667cd1492e091439810ebe9   (= 저장소 applied 사본의 SHA-256. 다르면 중단)
 
-# 2. 파싱 검사 (오류 0 이어야 한다)
-[System.Management.Automation.Language.Parser]::ParseFile('D:\문서관리\하네스-관제실\.tmp\orca-worker-seat.hyk501-applied.ps1', [ref]$null, [ref]$errs) | Out-Null; $errs.Count
+# 2. 파싱 검사 (오류 0 이어야 한다 -- 앞의 `$errs = $null;` 이 없으면 새 셸에서 [ref]$errs 가 «존재하지 않는 변수» 오류로 ParseFile 을 건너뛰고도 마지막 `$errs.Count` 가 거짓 `0` 을 찍는다. 실행 결과에 빨간 오류가 함께 보이면 0 이어도 통과가 아니다)
+$errs = $null; [System.Management.Automation.Language.Parser]::ParseFile('D:\문서관리\하네스-관제실\.tmp\orca-worker-seat.hyk501-applied.ps1', [ref]$null, [ref]$errs) | Out-Null; $errs.Count
 
 # 3. 라이브 교체 (되돌림 사본을 먼저 보관) -- 줄끝은 LF 그대로
 Copy-Item 'D:\문서관리\하네스-관제실\orca-worker-seat.ps1' 'D:\문서관리\하네스-관제실\.tmp\orca-worker-seat.before.ps1'
