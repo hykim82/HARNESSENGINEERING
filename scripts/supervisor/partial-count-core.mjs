@@ -294,10 +294,21 @@ function renderCount(value) {
 // 확인하지 못한 것(미조회: 예산 · rate limit · 조회 실패)이 K ≥ 1 이면 분자 N 은 «이 회차에 확인된
 // 것만»이라 실제보다 작을 수 있다 -- 그래서 «확인 N건 이상 · 미조회 K» 로 쓴다(분자가 하한임이
 // 그 줄에서 읽힌다 · N = 0 도 «확인 0건 이상»). 미조회 0 이면 표기 0(옛 «확인 N건» 그대로).
-export function renderConfirmedLnCount(count, uncheckedCount = 0) {
+//
+// HYK-255-p5a-perm-1 -- 셋째 인자 gapPieces(문자열 배열 · 기본 []): 권한 확인창 답 수집기(ㄴ 유형 4)가 «센 값이
+// 실제보다 작을 수 있다» 고 알리는 토막(판정 불가 K · 필드 없는 세션 S · 읽기 실패 · 수집 실패). 하나라도 있으면 «이상»
+// 표기를 켜고 토막을 «미조회» 뒤에 잇는다. 빈 배열이면 옛 문면 그대로(두 인자 호출자 회귀 0).
+export function renderConfirmedLnCount(
+  count,
+  uncheckedCount = 0,
+  gapPieces = [],
+) {
+  const pieces = [];
   if (Number.isInteger(uncheckedCount) && uncheckedCount > 0) {
-    return `확인 ${count}건 이상 · 미조회 ${uncheckedCount}`;
+    pieces.push(`미조회 ${uncheckedCount}`);
   }
+  pieces.push(...(Array.isArray(gapPieces) ? gapPieces : []));
+  if (pieces.length > 0) return `확인 ${count}건 이상 · ${pieces.join(" · ")}`;
   return `확인 ${count}건`;
 }
 
@@ -587,20 +598,25 @@ function buildLnSection(
   uncountedExamples,
   relayLedgerResult,
   externalEvidence,
+  permissionAnswers,
 ) {
   const lines = ["ㄴ 계획 밖 개입:"];
-  const confirmedCount = Array.isArray(confirmedLnEvents)
-    ? confirmedLnEvents.length
-    : 0;
+  const confirmedCount =
+    (Array.isArray(confirmedLnEvents) ? confirmedLnEvents.length : 0) +
+    permissionHumanTotal(permissionAnswers);
   // 하한 표기: 수집이 성공했고(known) 미조회가 있는 회차에만. 입력 없음 · 수집 실패는 표기 0.
   const uncheckedForLowerBound =
     externalEvidence?.known === true ? externalEvidence.unchecked : 0;
+  // HYK-255-p5a-perm-1 -- ㄴ 분자 = D1 확인분 + 권한 확인창 사람 답(N+W+U · 통역 포함). 판정 불가 K · 필드 없는 세션 ·
+  // 읽기 실패 · 수집 실패는 «이상» 토막으로 하한을 알린다(permissionAnswers 없음 = 미결선 = 옛 문면 그대로).
   lines.push(
-    `- 외부 독립 증거로 확인된 사건: ${renderConfirmedLnCount(confirmedCount, uncheckedForLowerBound)}`,
+    `- 외부 독립 증거로 확인된 사건: ${renderConfirmedLnCount(confirmedCount, uncheckedForLowerBound, permissionGapPieces(permissionAnswers))}`,
   );
   const externalEvidenceLine =
     renderExternalEvidenceCandidateLine(externalEvidence);
   if (externalEvidenceLine) lines.push(externalEvidenceLine);
+  const permissionLine = renderPermissionAnswersLine(permissionAnswers);
+  if (permissionLine) lines.push(permissionLine);
   if (suspected.known === true) {
     const openNote =
       suspected.openCount > 0
@@ -681,6 +697,9 @@ export function buildPartialCountReport({
   // HYK-255-p1-daily-1 -- 기본값 undefined -> 새 줄 0개(미결선 호출자 회귀 0). 값은 watch-run 의 일별
   // 단계가 일별 줄 파일에서 읽어 만든 «연속 확인-0 일수» 한 줄(renderConfirmedZeroStreakLine). 문턱 판정 0.
   confirmedZeroStreakLine,
+  // HYK-255-p5a-perm-1 -- 기본값 undefined -> ㄴ 절 새 줄 0개 · 분자 합산 0(미결선 호출자 회귀 0). 값 =
+  // summarizePermissionRecords 결과 + 수집 부가 칸(wire 의 collectPermissionAnswers) 또는 {known:false, reason}.
+  permissionAnswers,
 }) {
   const lines = [];
   lines.push("집계 성격: PARTIAL — 전수 아님");
@@ -716,6 +735,7 @@ export function buildPartialCountReport({
       uncountedExamples,
       relayLedgerResult,
       externalEvidence,
+      permissionAnswers,
     ),
   );
   lines.push("");
@@ -817,12 +837,15 @@ export function buildDailyTickValues({
   collectors,
   delivered,
   uncountedExamples,
+  // HYK-255-p5a-perm-1 -- 없으면(미결선) 새 두 칸을 «싣지 않는다»(옛 회차 값 모양 그대로).
+  permissionAnswers,
 }) {
   const items = Array.isArray(uncountedExamples?.items)
     ? uncountedExamples.items
     : [];
   return {
     ...pickExternalEvidenceCounts(externalEvidence),
+    ...pickPermissionColumns(permissionAnswers),
     collectorFails: failedCollectorNames(collectors),
     delivered:
       delivered?.known === true && isCount(delivered.count)
@@ -880,6 +903,7 @@ export function normalizeDailyTick(tick) {
   return {
     lnConfirmed: isCount(tick.lnConfirmed) ? tick.lnConfirmed : null,
     lnUnchecked: isCount(tick.lnUnchecked) ? tick.lnUnchecked : null,
+    ...normalizePermissionColumns(tick),
     collectorFails: fails,
     delivered: isCount(tick.delivered) ? tick.delivered : null,
     uncountedRanges: Array.isArray(tick.uncountedRanges)
@@ -940,6 +964,7 @@ function buildClosedDailyLine({ state, closedAtMs }) {
     ticks: state.ticks,
     lnConfirmed: state.lnConfirmed,
     lnUnchecked: state.lnUnchecked,
+    ...normalizePermissionColumns(state),
     collectorFails: state.collectorFails,
     coverageGaps: {
       count: state.gapCount + (tailGap ? 1 : 0),
@@ -990,8 +1015,13 @@ export function recordDailyTick({ state, nowMs, tick, concurrentActive }) {
   const spanMs = nowMs - prevMs;
   const gap = spanMs > DAILY_COVERAGE_GAP_MS;
   const t = normalizeDailyTick(tick);
+  // 권한 두 칸은 «마지막 회차 값» 규칙대로 덮어쓴다 -- 이번 회차 값에 칸이 없으면(미결선) 앞 회차 값도 남기지 않는다.
+  const carried = { ...base };
+  delete carried.permissionHumanAnswers;
+  delete carried.permissionUndecidable;
   return {
-    ...base,
+    ...carried,
+    ...normalizePermissionColumns(t),
     firstTickAtMs: base.ticks > 0 ? base.firstTickAtMs : nowMs,
     lastTickAtMs: nowMs,
     ticks: base.ticks + 1,
@@ -1057,6 +1087,7 @@ function dailyBreakReasons(line) {
   } else if (gaps.count > 0) {
     reasons.push(`관측 공백 ${gaps.count}구간`);
   }
+  reasons.push(...permissionBreakReasons(line));
   return reasons;
 }
 
@@ -1121,4 +1152,495 @@ export function renderConfirmedZeroStreakLine(streak) {
     `${prefix}${streak.days}일(부분 —${range} ` +
     `마지막 끊김 ${brk.day} ${brk.reasons.join(", ")})`
   );
+}
+
+// ---------------------------------------------------------------------------
+// HYK-255-p5a-perm-1 (판정 2026-11-14 0105 ④ · P5 설계 (가)(다) P5a 행) -- ㄴ 유형 4 «권한 확인창 답» 분류 · 합산 ·
+// 렌더 · 일별 새 칸 2. I/O 0(§2 원칙) -- 세션 jsonl 을 읽는 것은 wire(partial-count-report.mjs
+// collectPermissionAnswers)의 몫이고, 이 절은 그 wire 가 «쓰는 칸만» 뽑아 넘긴 레코드를 센다.
+//
+// ⛔본문 무접촉: 이 절의 입력 레코드에는 대화 본문 칸(메시지 text · content · input · toolUseResult 값)이 없다 --
+// {sessionKey, uid, toolUseId, atMs, cwd, rootName, entrypoint, version, hasDecision, decision{decision, source},
+// toolName}. 출력(요약 · 렌더 · 일별 칸)도 건수 · 시각 · 도구 이름 · 판정 값 이름뿐이다.
+//
+// 분류 정본(설계 (가) 표 · 벤더 CLI 2.1.322 내장 설명): source ∈ {config, classifier, hook} = 자동 M ·
+// {user_temporary, user_permanent, user_reject, user_abort} = 사람 답 N · {invalid_input,
+// permission_updated_input_invalid, server_fallback_tombstone} = 기계 종료 W · 그 밖 모든 것(모르는 source ·
+// source 없음 · 문자열 아님 · decision 이 accept/reject/cancelled 밖) = 모르는 값 U. N · W · U 가 ㄴ 분자다
+// («애매하면 ㄴ» · 한용 확정 문면). 판정 칸 자체가 없는 tool_result = 판정 불가 K(하한). 판정 칸이 없는 세션 =
+// 필드 없는 세션 S(수집 실패 · 그날 끊김).
+// ---------------------------------------------------------------------------
+
+// 판정 칸이 처음 생긴 Claude Code CLI 판(설계 §E2 · §E4). 이보다 낮거나 모르는 판의 «판정 없는 tool_result» 는
+// K(하한)가 아니라 «측정 불가» 라 세션 단위 수집 실패(S)로 센다.
+export const PERMISSION_MIN_VERSION = "2.1.322";
+
+export const PERMISSION_CLASS = Object.freeze({
+  AUTO: "M",
+  HUMAN: "N",
+  MACHINE_END: "W",
+  UNKNOWN: "U",
+});
+
+const PERMISSION_AUTO_SOURCES = new Set(["config", "classifier", "hook"]);
+const PERMISSION_HUMAN_SOURCES = new Set([
+  "user_temporary",
+  "user_permanent",
+  "user_reject",
+  "user_abort",
+]);
+const PERMISSION_MACHINE_END_SOURCES = new Set([
+  "invalid_input",
+  "permission_updated_input_invalid",
+  "server_fallback_tombstone",
+]);
+const PERMISSION_DECISIONS = new Set(["accept", "reject", "cancelled"]);
+
+// 판정 칸 {decision, source} -> M | N | W | U. 칸 모양이 틀리면 U(분자 쪽 -- 애매하면 ㄴ).
+export function classifyPermissionDecision(permissionDecision) {
+  const pd = permissionDecision;
+  if (!pd || typeof pd !== "object" || Array.isArray(pd)) {
+    return PERMISSION_CLASS.UNKNOWN;
+  }
+  if (typeof pd.source !== "string" || !PERMISSION_DECISIONS.has(pd.decision)) {
+    return PERMISSION_CLASS.UNKNOWN;
+  }
+  if (PERMISSION_AUTO_SOURCES.has(pd.source)) return PERMISSION_CLASS.AUTO;
+  if (PERMISSION_HUMAN_SOURCES.has(pd.source)) return PERMISSION_CLASS.HUMAN;
+  if (PERMISSION_MACHINE_END_SOURCES.has(pd.source)) {
+    return PERMISSION_CLASS.MACHINE_END;
+  }
+  return PERMISSION_CLASS.UNKNOWN;
+}
+
+function parseVersionTuple(version) {
+  const m = /^(\d+)\.(\d+)\.(\d+)/.exec(
+    typeof version === "string" ? version : "",
+  );
+  return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : null;
+}
+
+// «이 판의 CLI 는 tool_result 에 판정 칸을 적는다» -- 모르는 판 · 파싱 불가 판 = false(측정 불가 쪽).
+export function isPermissionFieldVersion(version) {
+  const have = parseVersionTuple(version);
+  const min = parseVersionTuple(PERMISSION_MIN_VERSION);
+  if (have === null || min === null) return false;
+  for (let i = 0; i < 3; i++) {
+    if (have[i] !== min[i]) return have[i] > min[i];
+  }
+  return true;
+}
+
+// ---- 좌석 범위 -- 가르는 열쇠 = 판정 줄의 cwd (폴더 이름은 한글이 «-» 로 뭉개져 못 쓴다 · 설계 §E5) ----
+
+export const PERMISSION_SEAT = Object.freeze({
+  ORCH: "ORCH",
+  WORKER_HARNESS: "워커H",
+  WORKER_OTHER: "워커E",
+  WORKER_MAIN: "워커본체",
+  INTERPRETER: "통역",
+  UNCLASSIFIED: "미분류",
+  OUT_OF_LANE: "레인밖",
+});
+
+const PERMISSION_LANE_SEATS = Object.freeze([
+  PERMISSION_SEAT.ORCH,
+  PERMISSION_SEAT.WORKER_HARNESS,
+  PERMISSION_SEAT.WORKER_OTHER,
+  PERMISSION_SEAT.WORKER_MAIN,
+  PERMISSION_SEAT.INTERPRETER,
+  PERMISSION_SEAT.UNCLASSIFIED,
+]);
+
+// 경로 비교용 정규형 -- 슬래시 통일 · 끝 슬래시 제거 · 소문자. 못 쓰는 값 = null.
+export function normalizeSessionPath(p) {
+  if (typeof p !== "string") return null;
+  const n = p.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+  return n === "" ? null : n;
+}
+
+// 부모 폴더(정규형). 통역 폴더 = 이미 있는 --outbox-dir 값의 부모 -- 새 CLI 인자 0 (설계 (다)).
+export function parentDirOf(p) {
+  const n = normalizeSessionPath(p);
+  if (n === null) return null;
+  const cut = n.lastIndexOf("/");
+  return cut > 0 ? n.slice(0, cut) : null;
+}
+
+function isUnderPath(cwd, base) {
+  return base !== null && (cwd === base || cwd.startsWith(`${base}/`));
+}
+
+// 좌석 경로 뿌리 -- 전부 홈 폴더에서 «파생» 한다(관제실 절대 경로 박기 0 · 설계 (가) 좌석 범위 표).
+//   ORCH 자리 = <홈>/Documents/HARNESSENGINEERING (orca-adapter.mjs MAIN_REPO_PATH 와 같은 값 -- 시험이 대조한다)
+//   워커 = <홈>/orca/workspaces/... (HARNESSENGINEERING 아래 = 하네스 워커 · 그 밖 = 다른 제품 워커)
+//   통역 = outboxDir 의 부모 폴더(호출자가 넘긴 interpreterRoot)
+export function deriveSeatRoots({ homeDir, interpreterRoot }) {
+  const home = normalizeSessionPath(homeDir);
+  return {
+    main: home === null ? null : `${home}/documents/harnessengineering`,
+    workspaces: home === null ? null : `${home}/orca/workspaces`,
+    harnessWorkspaces:
+      home === null ? null : `${home}/orca/workspaces/harnessengineering`,
+    interpreter: normalizeSessionPath(interpreterRoot),
+  };
+}
+
+// cwd + 어느 뿌리(.claude / .claude-team)의 세션인가 -> 좌석 종류. cwd 없음 = 미분류(애매하면 ㄴ · 제외 아님).
+// 레인 밖은 «.claude 쪽에서 어디에도 안 맞는 cwd» 뿐이다 -- .claude-team 의 안 맞는 cwd 는 미분류(포함).
+export function classifySessionSeat({ cwd, rootName, roots }) {
+  const c = normalizeSessionPath(cwd);
+  if (c === null) return PERMISSION_SEAT.UNCLASSIFIED;
+  if (isUnderPath(c, roots.interpreter)) return PERMISSION_SEAT.INTERPRETER;
+  if (isUnderPath(c, roots.main)) {
+    return rootName === "claude"
+      ? PERMISSION_SEAT.ORCH
+      : PERMISSION_SEAT.WORKER_MAIN;
+  }
+  if (isUnderPath(c, roots.harnessWorkspaces)) {
+    return PERMISSION_SEAT.WORKER_HARNESS;
+  }
+  if (isUnderPath(c, roots.workspaces)) return PERMISSION_SEAT.WORKER_OTHER;
+  return rootName === "claude-team"
+    ? PERMISSION_SEAT.UNCLASSIFIED
+    : PERMISSION_SEAT.OUT_OF_LANE;
+}
+
+// ---- 요약 -- 레코드(쓰는 칸만) -> 건수 --------------------------------------------------
+
+// 값 이름 칸(source · 도구 이름)에 «이름처럼 생긴 것» 만 싣는다 -- 형식 밖 문자열은 그대로 옮기지 않는다(본문 유입 차단).
+function safeNameToken(value) {
+  if (typeof value !== "string" || value === "") return "(없음)";
+  return /^[A-Za-z0-9_.:-]{1,64}$/.test(value) ? value : "(형식 밖)";
+}
+
+function newPermissionAccumulator() {
+  return {
+    human: 0,
+    machineEnd: 0,
+    unknownValue: 0,
+    auto: 0,
+    sdkAnswers: 0,
+    duplicates: 0,
+    undated: 0,
+    sessions: new Map(),
+    excludedSessions: new Set(),
+    excludedHuman: 0,
+    bySeat: Object.fromEntries(
+      PERMISSION_LANE_SEATS.map((seat) => [seat, { human: 0, auto: 0 }]),
+    ),
+    byKstDay: {},
+    humanEvents: [],
+  };
+}
+
+const PERMISSION_HUMAN_FIELD = Object.freeze({
+  [PERMISSION_CLASS.HUMAN]: "human",
+  [PERMISSION_CLASS.MACHINE_END]: "machineEnd",
+  [PERMISSION_CLASS.UNKNOWN]: "unknownValue",
+});
+
+// 판정 칸이 있는 레코드 1건을 센다(레인 안).
+function addPermissionDecision(acc, record, seat, cls) {
+  if (cls === PERMISSION_CLASS.AUTO) {
+    acc.auto += 1;
+    acc.bySeat[seat].auto += 1;
+    return;
+  }
+  acc[PERMISSION_HUMAN_FIELD[cls]] += 1;
+  acc.bySeat[seat].human += 1;
+  if (record.entrypoint !== "cli") acc.sdkAnswers += 1;
+  const day = kstDayOf(record.atMs);
+  acc.byKstDay[day] = (acc.byKstDay[day] ?? 0) + 1;
+  acc.humanEvents.push({
+    atMs: record.atMs,
+    seat,
+    source: safeNameToken(record.decision?.source),
+    toolName: safeNameToken(record.toolName),
+  });
+}
+
+function addPermissionLaneRecord(acc, record, seat) {
+  const key =
+    typeof record.sessionKey === "string" ? record.sessionKey : "(세션 미상)";
+  const session = acc.sessions.get(key) ?? {
+    withDecision: 0,
+    noDecisionNew: 0,
+    noDecisionOld: 0,
+  };
+  acc.sessions.set(key, session);
+  if (record.hasDecision === true) {
+    session.withDecision += 1;
+    addPermissionDecision(
+      acc,
+      record,
+      seat,
+      classifyPermissionDecision(record.decision),
+    );
+    return;
+  }
+  if (isPermissionFieldVersion(record.version)) session.noDecisionNew += 1;
+  else session.noDecisionOld += 1;
+}
+
+function addPermissionExcludedRecord(acc, record) {
+  acc.excludedSessions.add(
+    typeof record.sessionKey === "string" ? record.sessionKey : "(세션 미상)",
+  );
+  if (
+    record.hasDecision === true &&
+    classifyPermissionDecision(record.decision) !== PERMISSION_CLASS.AUTO
+  ) {
+    acc.excludedHuman += 1;
+  }
+}
+
+// 이어받기(resume)는 앞 대화 줄을 새 파일에 다시 적을 수 있다 -- 줄 uuid + tool_use_id 가 같으면 한 건이다.
+function isDuplicatePermissionRecord(seen, record) {
+  if (typeof record.uid !== "string" || record.uid === "") return false;
+  const key = `${record.uid}|${record.toolUseId ?? ""}`;
+  if (seen.has(key)) return true;
+  seen.add(key);
+  return false;
+}
+
+// 세션 단위 마감 -- 판정 칸이 한 줄도 없는 세션 · 판정 칸 없던 구판 줄이 섞인 세션 = S(수집 실패), 그 밖 세션의
+// 판정 없는 tool_result = K(하한).
+function finalizePermissionSessions(acc) {
+  let fieldMissingSessions = 0;
+  let undecided = 0;
+  for (const s of acc.sessions.values()) {
+    if (s.noDecisionOld > 0 || s.withDecision === 0) fieldMissingSessions += 1;
+    else undecided += s.noDecisionNew;
+  }
+  return { fieldMissingSessions, undecided };
+}
+
+export function summarizePermissionRecords({
+  records,
+  windowStartMs,
+  windowEndMs,
+  roots,
+}) {
+  const acc = newPermissionAccumulator();
+  const seen = new Set();
+  for (const record of Array.isArray(records) ? records : []) {
+    if (!record || !Number.isFinite(record.atMs)) {
+      acc.undated += 1;
+      continue;
+    }
+    if (record.atMs < windowStartMs || record.atMs > windowEndMs) continue;
+    if (isDuplicatePermissionRecord(seen, record)) {
+      acc.duplicates += 1;
+      continue;
+    }
+    const seat = classifySessionSeat({
+      cwd: record.cwd,
+      rootName: record.rootName,
+      roots,
+    });
+    if (seat === PERMISSION_SEAT.OUT_OF_LANE) {
+      addPermissionExcludedRecord(acc, record);
+    } else {
+      addPermissionLaneRecord(acc, record, seat);
+    }
+  }
+  const { fieldMissingSessions, undecided } = finalizePermissionSessions(acc);
+  return {
+    known: true,
+    sessions: acc.sessions.size,
+    human: acc.human,
+    machineEnd: acc.machineEnd,
+    unknownValue: acc.unknownValue,
+    humanTotal: acc.human + acc.machineEnd + acc.unknownValue,
+    auto: acc.auto,
+    undecided,
+    fieldMissingSessions,
+    sdkAnswers: acc.sdkAnswers,
+    interpreterAnswers: acc.bySeat[PERMISSION_SEAT.INTERPRETER].human,
+    bySeat: acc.bySeat,
+    excluded: {
+      sessions: acc.excludedSessions.size,
+      human: acc.excludedHuman,
+    },
+    duplicates: acc.duplicates,
+    undated: acc.undated,
+    byKstDay: acc.byKstDay,
+    humanEvents: acc.humanEvents.sort((a, b) => a.atMs - b.atMs),
+  };
+}
+
+// ---- 합산 · 렌더 · 일별 칸 ------------------------------------------------------------
+
+// ㄴ 분자에 더해지는 사람 답(N+W+U · 통역 · SDK 포함). 수집 실패 · 미결선 = 0(더하지 않는다 -- 실패는 gapPieces 가 알린다).
+export function permissionHumanTotal(permissionAnswers) {
+  return permissionAnswers?.known === true &&
+    isCount(permissionAnswers.humanTotal)
+    ? permissionAnswers.humanTotal
+    : 0;
+}
+
+const readCount = (value) => (isCount(value) ? value : 0);
+
+// 센 값이 실제보다 작을 수 있는 사유 토막(= 분자 «이상» 표기를 켜는 것). 미결선 = [].
+export function permissionGapPieces(permissionAnswers) {
+  if (permissionAnswers === undefined || permissionAnswers === null) return [];
+  if (permissionAnswers.known !== true) return ["권한기록 수집 실패"];
+  const p = permissionAnswers;
+  const pieces = [];
+  if (readCount(p.undecided) > 0) pieces.push(`판정 불가 ${p.undecided}`);
+  if (readCount(p.fieldMissingSessions) > 0) {
+    pieces.push(`권한기록 필드 없는 세션 ${p.fieldMissingSessions}`);
+  }
+  if (readCount(p.readFailures) > 0) {
+    pieces.push(`권한기록 읽기 실패 ${p.readFailures}파일`);
+  }
+  return pieces;
+}
+
+const PERMISSION_LINE_PREFIX = "- 권한 확인창 사람 답(B · 세션 기록): ";
+
+function seatHumanTotal(bySeat, seats) {
+  return seats.reduce((sum, seat) => sum + readCount(bySeat?.[seat]?.human), 0);
+}
+
+// ㄴ 절 B 줄 -- «확인 N건[ 이상](통역 · SDK · 판정 불가 · 레인 밖 제외)» + 좌석별 + 자동 건수. 미결선 = null.
+// 수집 실패는 bare 0 이 아니라 «수집 실패(사유)».
+export function renderPermissionAnswersLine(permissionAnswers) {
+  if (permissionAnswers === undefined || permissionAnswers === null) {
+    return null;
+  }
+  const p = permissionAnswers;
+  if (p.known !== true) {
+    return `${PERMISSION_LINE_PREFIX}수집 실패(${p.reason ?? "사유 미상"}) — ㄴ 확인 건수에 미반영`;
+  }
+  const lower = permissionGapPieces(p).length > 0 ? " 이상" : "";
+  const inner = [
+    `통역 ${readCount(p.interpreterAnswers)}`,
+    `SDK ${readCount(p.sdkAnswers)}`,
+    `판정 불가 ${readCount(p.undecided)}`,
+    `레인 밖 제외 ${readCount(p.excluded?.sessions)}(사람 답 ${readCount(p.excluded?.human)})`,
+  ];
+  if (readCount(p.fieldMissingSessions) > 0) {
+    inner.push(`필드 없는 세션 ${p.fieldMissingSessions}`);
+  }
+  if (readCount(p.readFailures) > 0) {
+    inner.push(`읽기 실패 ${p.readFailures}파일`);
+  }
+  const workers = seatHumanTotal(p.bySeat, [
+    PERMISSION_SEAT.WORKER_HARNESS,
+    PERMISSION_SEAT.WORKER_OTHER,
+    PERMISSION_SEAT.WORKER_MAIN,
+  ]);
+  return (
+    `${PERMISSION_LINE_PREFIX}확인 ${readCount(p.humanTotal)}건${lower}(${inner.join(" · ")})` +
+    ` · ORCH ${seatHumanTotal(p.bySeat, [PERMISSION_SEAT.ORCH])} · 워커 ${workers}` +
+    ` · 미분류 ${seatHumanTotal(p.bySeat, [PERMISSION_SEAT.UNCLASSIFIED])} · 자동 ${readCount(p.auto)}` +
+    " — ㄴ 확인 건수에 포함 · Claude 세션 기록 한정"
+  );
+}
+
+const PERMISSION_EVENT_LIST_MAX = 5;
+
+// «0 이면 안 적는» 보조 칸들(필드 없는 세션 · 읽기 실패 · 줄 파싱 실패 · 시각 불명 · 중복).
+function permissionDetailExtraParts(p) {
+  const extras = [
+    ["fieldMissingSessions", (n) => `필드 없는 세션 ${n}`],
+    ["readFailures", (n) => `읽기 실패 ${n}파일`],
+    ["parseFailures", (n) => `줄 파싱 실패 ${n}줄`],
+    ["undated", (n) => `시각 불명 ${n}줄`],
+    ["duplicates", (n) => `중복 ${n}건 제외`],
+  ];
+  return extras
+    .filter(([key]) => readCount(p[key]) > 0)
+    .map(([key, render]) => render(p[key]));
+}
+
+// KST 일별 사람 답 + 사람 답 시각 · 도구 이름(최대 5건). 없으면 [].
+function permissionDetailEventParts(p) {
+  const parts = [];
+  const days = Object.entries(p.byKstDay ?? {}).sort(([a], [b]) =>
+    a.localeCompare(b),
+  );
+  if (days.length > 0) {
+    parts.push(
+      `KST 일별 사람 답 ${days.map(([day, n]) => `${day} ${n}`).join(" · ")}`,
+    );
+  }
+  const events = Array.isArray(p.humanEvents) ? p.humanEvents : [];
+  if (events.length > 0) {
+    const shown = events
+      .slice(0, PERMISSION_EVENT_LIST_MAX)
+      .map(
+        (e) => `${formatKst(e.atMs)} ${e.toolName}(${e.seat} · ${e.source})`,
+      );
+    const more =
+      events.length > PERMISSION_EVENT_LIST_MAX
+        ? ` 외 ${events.length - PERMISSION_EVENT_LIST_MAX}건`
+        : "";
+    parts.push(`사람 답 시각·도구 ${shown.join(" · ")}${more}`);
+  }
+  return parts;
+}
+
+// 관측 건강 «진단 줄» 문면 -- 건수 · KST 일별 · 사람 답 시각 · 도구 이름뿐(본문 0).
+export function renderPermissionCollectorDetail(permissionAnswers) {
+  const p = permissionAnswers;
+  if (p?.known !== true) return p?.reason ?? "사유 미상";
+  return [
+    `세션 ${readCount(p.sessions)} · 파일 ${readCount(p.filesScanned)}`,
+    `사람 답 ${readCount(p.humanTotal)}(사용자 ${readCount(p.human)} · 기계 종료 ${readCount(p.machineEnd)} · 모르는 값 ${readCount(p.unknownValue)})`,
+    `자동 ${readCount(p.auto)} · 판정 불가 ${readCount(p.undecided)}`,
+    ...permissionDetailExtraParts(p),
+    ...permissionDetailEventParts(p),
+  ].join(" · ");
+}
+
+// 일별 회차 값의 새 칸 2 -- permissionHumanAnswers(N+W+U · 통역 포함) · permissionUndecidable(K).
+// 미결선(permissionAnswers 없음) = 칸을 «싣지 않는다»(옛 회차 값 모양). 수집 실패 = null 2개(0 이 아니다).
+function pickPermissionColumns(permissionAnswers) {
+  if (permissionAnswers === undefined || permissionAnswers === null) return {};
+  if (permissionAnswers.known !== true) {
+    return { permissionHumanAnswers: null, permissionUndecidable: null };
+  }
+  return {
+    permissionHumanAnswers: isCount(permissionAnswers.humanTotal)
+      ? permissionAnswers.humanTotal
+      : null,
+    permissionUndecidable: isCount(permissionAnswers.undecided)
+      ? permissionAnswers.undecided
+      : null,
+  };
+}
+
+const PERMISSION_DAILY_KEYS = Object.freeze([
+  "permissionHumanAnswers",
+  "permissionUndecidable",
+]);
+
+// 칸이 «있는» 객체(회차 값 · 상태)에서만 새 칸 2를 뽑는다 -- 있되 모양이 틀리면 null(값 모름), 없으면 싣지 않는다.
+function normalizePermissionColumns(source) {
+  const out = {};
+  for (const key of PERMISSION_DAILY_KEYS) {
+    if (Object.hasOwn(source, key)) {
+      out[key] = isCount(source[key]) ? source[key] : null;
+    }
+  }
+  return out;
+}
+
+// 연속 확인-0 끊김 사유(읽는 쪽) -- 새 칸이 «있는» 줄만 본다. 칸 없는 줄 = 이 수집기 이전(또는 미결선)에 마감된 날 =
+// 옛 규칙 그대로(P1 줄 해석 무변). 칸이 있는데 값을 모르면(null · 모양 오류) 0 이 아니라 사유다.
+function permissionBreakReasons(line) {
+  const reasons = [];
+  const labels = {
+    permissionHumanAnswers: "권한 확인창 사람 답",
+    permissionUndecidable: "권한 판정 불가",
+  };
+  for (const key of PERMISSION_DAILY_KEYS) {
+    if (!Object.hasOwn(line, key)) continue;
+    if (!isCount(line[key])) reasons.push(`${labels[key]} UNKNOWN`);
+    else if (line[key] > 0) reasons.push(`${labels[key]} ${line[key]}`);
+  }
+  return reasons;
 }

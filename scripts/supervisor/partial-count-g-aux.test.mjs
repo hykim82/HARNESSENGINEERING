@@ -565,6 +565,8 @@ async function runOnce(d, extra = {}) {
     archiveRoot: join(d.root, "archive-missing"),
     maxMergeChecks: 0,
     maxExternalEvidenceChecks: 0,
+    // HYK-255-p5a-perm-1 -- 권한 확인창 수집기가 실물 홈을 읽지 않게 합성 빈 홈(격리만 · 단언 무변). extra 가 덮을 수 있다.
+    sessionHomeDir: join(d.root, "no-session-home"),
     ...fakePorts(),
     ...extra,
   });

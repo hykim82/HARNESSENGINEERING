@@ -1201,6 +1201,8 @@ test("runPartialCountOnce: outboxDir을 주면 보조 관측 줄과 수집기 �
       archiveRoot: join(root, "archive-missing"),
       maxMergeChecks: 0,
       outboxDir,
+      // HYK-255-p5a-perm-1 -- 권한 확인창 수집기가 실물 홈(.claude/projects)을 읽지 않게 합성 빈 홈을 준다(격리만 · 단언 무변).
+      sessionHomeDir: join(root, "no-session-home"),
       git: { run: () => ({ code: 0, stdout: "", stderr: "" }) },
       gitWorktreeListExecFn: () => fx.worktreeListPorcelain,
     });
@@ -1295,6 +1297,8 @@ test("runPartialCountOnce: --outbox-dir을 줬지만 폴더가 없으면(경로 
       archiveRoot: join(root, "archive-missing"),
       maxMergeChecks: 0,
       outboxDir,
+      // HYK-255-p5a-perm-1 -- 실물 홈 격리(합성 빈 홈 · 단언 무변).
+      sessionHomeDir: join(root, "no-session-home"),
       git: { run: () => ({ code: 0, stdout: "", stderr: "" }) },
       gitWorktreeListExecFn: () => fx.worktreeListPorcelain,
     });
@@ -1955,6 +1959,8 @@ test("runPartialCountOnce: relayGlob이 known:false(폴더 없음)면 미계수 
       archiveRoot: join(root, "archive-missing"),
       maxMergeChecks: 0,
       outboxDir,
+      // HYK-255-p5a-perm-1 -- 실물 홈 격리(합성 빈 홈 · 단언 무변).
+      sessionHomeDir: join(root, "no-session-home"),
       relayGlob: join(root, "없는-전달-폴더", "전달-*.md"),
       inboxDir: join(root, "받는함-없음"),
       git: { run: () => ({ code: 0, stdout: "", stderr: "" }) },

@@ -51,6 +51,7 @@ import {
   statSync,
 } from "node:fs";
 import { execFileSync } from "node:child_process";
+import { homedir } from "node:os";
 import path from "node:path";
 import {
   createGitHubApprovalPort,
@@ -83,6 +84,12 @@ import {
   buildDailyTickValues,
   parseKstTimestampMs,
   renderOutboxAuxNote,
+  PERMISSION_CLASS,
+  classifyPermissionDecision,
+  deriveSeatRoots,
+  parentDirOf,
+  summarizePermissionRecords,
+  renderPermissionCollectorDetail,
   UNCOUNTED_EXAMPLES_V1,
   UNCOUNTED_EXAMPLES_V2,
   UNCOUNTED_EXAMPLES_V3,
@@ -2132,6 +2139,284 @@ function buildOutboxCollectorEntry(outboxResult) {
   return { name: "보내는함보조수집기", ok: true, detail };
 }
 
+// ---------------------------------------------------------------------------
+// HYK-255-p5a-perm-1 (판정 0105 ④ · P5 설계 (가)) -- ㄴ 유형 4 «권한 확인창 답» 수집기.
+//
+// Claude Code 세션 기록(jsonl, 뿌리 두 곳 <홈>/.claude/projects · <홈>/.claude-team/projects, 하위 subagents 포함)을
+// «읽기만» 한다. 줄 1개 = JSON 1개 -- 이 수집기가 «여는» 칸은 아래뿐이다:
+//   줄: type · uuid · timestamp · cwd · sessionId · version · entrypoint · permissionDecision{decision, source}
+//   message.content[] 의 항목 형식(type)과 tool_use_id · tool_use 항목의 id · name
+// ⛔대화 본문(message.content 의 text · content · input, toolUseResult 값)은 읽지도, 결과·보고·일별 줄에 싣지도 않는다.
+// 회차 사이 상태(바이트 위치 캐시) 0 -- 매 회차 창(회차 −24h ~ 회차) 안 줄을 처음부터 다시 읽는다(캐시는 승인 권위 아님 ·
+// 판정 1910). 읽을 파일 = mtime ≥ 창 시작인 jsonl 뿐이고, 줄은 `"permissionDecision"` 또는 `"tool_result"` 문자열이 있는
+// 것만 JSON 해석한다.
+//
+// ⛔정직 한계: Claude Code 전용 원천이다(codex 좌석 기록은 이 원천에 없다 -- 엔진 무관 아님). 판정 칸은 CLI 2.1.322
+// 이후 판부터 있어 그 앞 날은 «필드 없는 세션(S)» 으로 수집 실패다. SDK 세션은 자기 설정 규칙도 user_* 로 적혀 사람
+// 클릭이 아닐 수 있다(SDK j건을 따로 적는다). 세션 jsonl 은 같은 계정 파일이라 지우거나 고치면 사람 답을 숨길 수 있다(B 등급).
+// ---------------------------------------------------------------------------
+const PERMISSION_ROOT_DIRS = Object.freeze([
+  Object.freeze({ rootName: "claude", segments: [".claude", "projects"] }),
+  Object.freeze({
+    rootName: "claude-team",
+    segments: [".claude-team", "projects"],
+  }),
+]);
+const PERMISSION_WALK_MAX_DEPTH = 8;
+const PERMISSION_LINE_FILTERS = Object.freeze([
+  '"permissionDecision"',
+  '"tool_result"',
+]);
+
+// 뿌리 하나의 jsonl 목록(하위 폴더 포함 · mtime ≥ 창 시작). 뿌리 자체를 못 읽으면 throw -- 호출자가 수집 실패로 접는다.
+function walkPermissionRoot({ root, readdirFn, statFn, windowStartMs }) {
+  const files = [];
+  let failures = 0;
+  const visit = (dir, depth, isRoot) => {
+    let names;
+    try {
+      names = readdirFn(dir);
+    } catch (err) {
+      if (isRoot) throw err;
+      failures += 1;
+      return;
+    }
+    for (const name of names) {
+      const p = path.join(dir, name);
+      let st;
+      try {
+        st = statFn(p);
+      } catch {
+        failures += 1;
+        continue;
+      }
+      if (st.isDirectory()) {
+        if (depth < PERMISSION_WALK_MAX_DEPTH) visit(p, depth + 1, false);
+      } else if (name.endsWith(".jsonl") && st.mtimeMs >= windowStartMs) {
+        files.push(p);
+      }
+    }
+  };
+  visit(root, 0, true);
+  return { files, failures };
+}
+
+const isPlainObject = (v) =>
+  v !== null && typeof v === "object" && !Array.isArray(v);
+const strOrNull = (v) => (typeof v === "string" ? v : null);
+
+// message.content 항목 중 type 이 `type` 인 것들 -- 항목의 «형식 이름(type)» 만 보고 고른다(본문 칸은 열지 않는다).
+function contentItemsOfType(o, type) {
+  const content = isPlainObject(o?.message) ? o.message.content : undefined;
+  if (!Array.isArray(content)) return [];
+  return content.filter((item) => isPlainObject(item) && item.type === type);
+}
+
+function sessionKeyOf(o, filePath) {
+  return typeof o.sessionId === "string" && o.sessionId !== ""
+    ? o.sessionId
+    : `file:${filePath}`;
+}
+
+// 줄 1개(파싱된 객체) -> 레코드들. «쓰는 칸만» 옮긴다 -- 나머지 칸(본문 포함)은 여기서 버려진다.
+function recordsFromLine(o, { rootName, filePath }) {
+  const hasDecision = Object.hasOwn(o, "permissionDecision");
+  const toolUseIds = contentItemsOfType(o, "tool_result").map((item) =>
+    strOrNull(item.tool_use_id),
+  );
+  if (!hasDecision && toolUseIds.length === 0) return [];
+  const pd = o.permissionDecision;
+  const base = {
+    sessionKey: sessionKeyOf(o, filePath),
+    uid: strOrNull(o.uuid),
+    atMs: typeof o.timestamp === "string" ? Date.parse(o.timestamp) : NaN,
+    cwd: strOrNull(o.cwd),
+    rootName,
+    entrypoint: strOrNull(o.entrypoint),
+    version: strOrNull(o.version),
+    hasDecision,
+    decision: isPlainObject(pd)
+      ? { decision: pd.decision, source: pd.source }
+      : null,
+    toolName: null,
+  };
+  const ids = toolUseIds.length > 0 ? toolUseIds : [null];
+  return ids.map((toolUseId) => ({ ...base, toolUseId }));
+}
+
+// 도구 이름을 찾을 «사람 답 후보»(판정 칸이 있고 자동이 아닌 것)의 tool_use_id 들.
+function wantedToolUseIds(records) {
+  const wanted = new Map();
+  for (const r of records) {
+    if (
+      r.hasDecision &&
+      r.toolUseId !== null &&
+      classifyPermissionDecision(r.decision) !== PERMISSION_CLASS.AUTO
+    ) {
+      wanted.set(r.toolUseId, null);
+    }
+  }
+  return wanted;
+}
+
+// raw 줄이 tool_use 를 담고 찾는 id 중 하나를 문자열로 포함할 때만 JSON 해석한다.
+function toolUseItemsOfLine(raw, wanted) {
+  if (!raw.includes('"tool_use"')) return [];
+  if (![...wanted.keys()].some((id) => raw.includes(id))) return [];
+  try {
+    return contentItemsOfType(JSON.parse(raw), "tool_use");
+  } catch {
+    return [];
+  }
+}
+
+// 사람 답 후보 레코드의 도구 이름 -- 같은 파일의 tool_use 항목(id · name)만 본다.
+function attachToolNames(records, lines) {
+  const wanted = wantedToolUseIds(records);
+  if (wanted.size === 0) return;
+  for (const raw of lines) {
+    for (const item of toolUseItemsOfLine(raw, wanted)) {
+      if (wanted.has(item.id)) wanted.set(item.id, strOrNull(item.name));
+    }
+  }
+  for (const r of records) {
+    if (wanted.has(r.toolUseId)) r.toolName = wanted.get(r.toolUseId);
+  }
+}
+
+// 파일 1개의 텍스트 -> {records, parseFailures}.
+function extractPermissionRecords({ text, rootName, filePath }) {
+  const lines = text.split("\n");
+  const records = [];
+  let parseFailures = 0;
+  for (const raw of lines) {
+    if (!PERMISSION_LINE_FILTERS.some((needle) => raw.includes(needle))) {
+      continue;
+    }
+    let o;
+    try {
+      o = JSON.parse(raw);
+    } catch {
+      parseFailures += 1;
+      continue;
+    }
+    if (isPlainObject(o)) {
+      records.push(...recordsFromLine(o, { rootName, filePath }));
+    }
+  }
+  attachToolNames(records, lines);
+  return { records, parseFailures };
+}
+
+// 수집기 본체. 홈(homeDir)과 통역 폴더(interpreterRoot = --outbox-dir 의 부모)만 받는다 -- 새 CLI 인자 0.
+// 반환 = summarizePermissionRecords 결과 + {filesScanned, readFailures, parseFailures} | {known:false, reason}.
+export function collectPermissionAnswers({
+  homeDir,
+  interpreterRoot,
+  windowStartMs,
+  windowEndMs,
+  readdirFn = readdirSync,
+  readFn = readFileSync,
+  statFn = statSync,
+}) {
+  const roots = deriveSeatRoots({ homeDir, interpreterRoot });
+  if (roots.main === null || roots.interpreter === null) {
+    return {
+      known: false,
+      reason: "세션 뿌리 경로 파생 실패(홈 또는 통역 폴더 경로 없음)",
+    };
+  }
+  const targets = [];
+  let readFailures = 0;
+  for (const { rootName, segments } of PERMISSION_ROOT_DIRS) {
+    try {
+      const walked = walkPermissionRoot({
+        root: path.join(homeDir, ...segments),
+        readdirFn,
+        statFn,
+        windowStartMs,
+      });
+      readFailures += walked.failures;
+      targets.push(...walked.files.map((filePath) => ({ rootName, filePath })));
+    } catch (err) {
+      return {
+        known: false,
+        reason: `세션 뿌리 읽기 실패(${rootName}: ${err && err.code ? err.code : "오류"})`,
+      };
+    }
+  }
+  const records = [];
+  let parseFailures = 0;
+  for (const { rootName, filePath } of targets) {
+    let text;
+    try {
+      text = readFn(filePath, "utf8");
+    } catch {
+      readFailures += 1;
+      continue;
+    }
+    const extracted = extractPermissionRecords({ text, rootName, filePath });
+    records.push(...extracted.records);
+    parseFailures += extracted.parseFailures;
+  }
+  return {
+    ...summarizePermissionRecords({
+      records,
+      windowStartMs,
+      windowEndMs,
+      roots,
+    }),
+    filesScanned: targets.length,
+    readFailures,
+    parseFailures,
+  };
+}
+
+// --outbox-dir 가 주어졌을 때만 이 수집기를 부른다(미결선 호출자 회귀 0 · 새 CLI 인자 0). 예기치 못한 throw 는
+// 보고 전체를 죽이지 않고 수집 실패(사유)로 접는다 -- 0 으로 접지 않는다.
+function resolvePermissionResult({
+  outboxDir,
+  sessionHomeDir,
+  windowStartMs,
+  windowEndMs,
+  readdirFn,
+  readFn,
+  statFn,
+}) {
+  if (!outboxDir) return null;
+  try {
+    return collectPermissionAnswers({
+      homeDir: sessionHomeDir ?? homedir(),
+      interpreterRoot: parentDirOf(outboxDir),
+      windowStartMs,
+      windowEndMs,
+      readdirFn,
+      readFn,
+      statFn,
+    });
+  } catch (err) {
+    return {
+      known: false,
+      reason: `수집기 오류(${err && err.message ? err.message : String(err)})`,
+    };
+  }
+}
+
+// 수집기 «진단 줄». 필드 없는 세션(S) · 읽기 실패는 수집 실패(FAIL)다 -- 그날 끊김. 미결선 = 줄 0개.
+function buildPermissionCollectorEntry(permissionResult) {
+  if (!permissionResult) return null;
+  const name = "권한기록수집기";
+  const ok =
+    permissionResult.known === true &&
+    !(permissionResult.fieldMissingSessions > 0) &&
+    !(permissionResult.readFailures > 0);
+  return {
+    name,
+    ok,
+    detail: renderPermissionCollectorDetail(permissionResult),
+  };
+}
+
 function buildCollectors({
   deliveredResult,
   consumedResult,
@@ -2141,6 +2426,7 @@ function buildCollectors({
   outboxResult,
   externalEvidence,
   gateAux,
+  permissionResult,
 }) {
   const collectors = [];
   collectors.push({
@@ -2172,6 +2458,8 @@ function buildCollectors({
   if (externalEntry) collectors.push(externalEntry);
   const gateAuxEntry = buildGateAuxCollectorEntry(gateAux);
   if (gateAuxEntry) collectors.push(gateAuxEntry);
+  const permissionEntry = buildPermissionCollectorEntry(permissionResult);
+  if (permissionEntry) collectors.push(permissionEntry);
   return collectors;
 }
 
@@ -2335,6 +2623,8 @@ function resolveAuxDirOptions(options) {
     // 부르지 않는다(회귀 0).
     relayGlob: options.relayGlob ?? null,
     inboxDir: options.inboxDir ?? null,
+    // HYK-255-p5a-perm-1 -- 세션 기록 홈(기본 = os.homedir()). 시험이 합성 홈을 주입한다. 새 CLI 인자 아님.
+    sessionHomeDir: options.sessionHomeDir ?? null,
   };
 }
 
@@ -2440,8 +2730,9 @@ function assemblePartialCountReportText({
   // HYK-255-p1-daily-1 -- watch-run 일별 단계가 만든 «연속 확인-0 일수» 줄(없으면 undefined = 새 줄 0개).
   confirmedZeroStreakLine,
 }) {
-  const { outboxResult, relayResult, gateAux } = aux;
+  const { outboxResult, relayResult, gateAux, permissionResult } = aux;
   return buildPartialCountReport({
+    permissionAnswers: permissionResult ?? undefined,
     confirmedZeroStreakLine,
     generatedAtMs: now,
     windowStartMs,
@@ -2468,6 +2759,7 @@ function assemblePartialCountReportText({
       outboxResult,
       externalEvidence,
       gateAux,
+      permissionResult,
     }),
     lastAliveMs: watch.lastAliveMs,
     coverageGaps: watch.coverageGaps,
@@ -2488,9 +2780,10 @@ function buildDailyTick({
   externalEvidence,
   aux,
 }) {
-  const { outboxResult, relayResult, gateAux } = aux;
+  const { outboxResult, relayResult, gateAux, permissionResult } = aux;
   return buildDailyTickValues({
     externalEvidence,
+    permissionAnswers: permissionResult ?? undefined,
     collectors: buildCollectors({
       deliveredResult,
       consumedResult,
@@ -2500,6 +2793,7 @@ function buildDailyTick({
       outboxResult,
       externalEvidence,
       gateAux,
+      permissionResult,
     }),
     delivered: deliveredResult.delivered,
     uncountedExamples: selectUncountedExamples({ outboxResult, relayResult }),
@@ -2585,6 +2879,7 @@ function resolveAuxCollectorResults({
   outboxDir,
   relayGlob,
   inboxDir,
+  sessionHomeDir,
   repoRoot,
   windowStartMs,
   windowEndMs,
@@ -2619,7 +2914,16 @@ function resolveAuxCollectorResults({
     statFn,
     existsFn,
   });
-  return { outboxResult, relayResult, gateAux };
+  const permissionResult = resolvePermissionResult({
+    outboxDir,
+    sessionHomeDir,
+    windowStartMs,
+    windowEndMs,
+    readdirFn,
+    readFn,
+    statFn,
+  });
+  return { outboxResult, relayResult, gateAux, permissionResult };
 }
 
 export async function runPartialCountOnce(options = {}) {
@@ -2638,6 +2942,7 @@ export async function runPartialCountOnce(options = {}) {
     outboxDir,
     relayGlob,
     inboxDir,
+    sessionHomeDir,
   } = resolveValueOptions(options);
   const {
     fetchJson,
@@ -2676,6 +2981,7 @@ export async function runPartialCountOnce(options = {}) {
     outboxDir,
     relayGlob,
     inboxDir,
+    sessionHomeDir,
     repoRoot,
     windowStartMs,
     windowEndMs,
