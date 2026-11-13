@@ -61,6 +61,17 @@ import {
 } from "./approval-authority-adapter.mjs";
 import { parseWatchLog } from "./reach-report-core.mjs";
 import { DEFAULT_WATCH_LOG_PATH } from "./reach-report.mjs";
+// HYK-255-g-aux-render-1 커밋 1 -- ㄱ-2 · ㄱ-6 보조 관측이 reject-streak 원장을
+// «읽기만» 한다. 하드스톱 문턱은 그 모듈의 상수를 import 해서 따라간다(숫자
+// 리터럴 금지). 두 모듈은 이미 설치기 목록(templates/harness-init/install.mjs
+// 1113 · 1268)과 DISPATCH_GATE_DECISION_SIBLINGS 에 실려 있고, 이 파일
+// (scripts/supervisor/partial-count-report.mjs)은 설치기·스테이징 목록 어디에도
+// 없어서 새로 등록할 목록은 없다.
+import { HARD_STOP_STREAK, loadLedger } from "../check/reject-streak.mjs";
+import {
+  loadChainLedger,
+  checkAppendOnlyAll,
+} from "../check/reject-streak-chain.mjs";
 import {
   buildPartialCountReport,
   computeSuspectedStallResumeIntervals,
@@ -631,7 +642,22 @@ export async function collectGate4Independent({
     uncheckedByBudget: cand.candidates.length - toCheck.length,
     approvedEvents,
     verdicts,
+    undecidableReasons: summarizeUndecidableReasons(verdicts),
   };
+}
+
+// HYK-255-g-aux-render-1 커밋 2 (D3 ⑵) -- UNDECIDABLE 판정의 사유 분포. 사유는
+// 위 루프가 이미 받은 판정(verdict.evidence.reason -- approval-authority-adapter
+// 의 APPROVAL_REASON 코드)에서 읽을 뿐이고 새 REST 호출은 없다. 사유가 없는
+// 판정은 «사유 미상» 으로 센다(조용히 빼지 않는다).
+function summarizeUndecidableReasons(verdicts) {
+  const reasons = {};
+  for (const v of verdicts) {
+    if (v.status !== APPROVAL_STATUS.UNDECIDABLE) continue;
+    const reason = v.evidence?.reason ?? "사유 미상";
+    reasons[reason] = (reasons[reason] ?? 0) + 1;
+  }
+  return reasons;
 }
 
 // ---------------------------------------------------------------------------
@@ -650,8 +676,10 @@ export async function collectGate4Independent({
 //   "web-flow" · 작성자 author.login + id 가 approvers 허용 목록(origin/
 //   master 판본)의 사람.
 // ⓘⓘⓘ 무인증 REST 예산 = 회차당 상한 maxChecks(기본 10, 기존 maxMergeChecks
-//   와 별개) -- 초과분은 «미조회(예산)». 403/429 는 «미조회(rate limit)»로
-//   세고 재시도 0 이며 그 회차의 남은 후보는 더 조회하지 않는다(같은 IP 의
+//   와 별개) -- 초과분은 «미조회(예산)». 403/429 도 판정 문면상 «미조회(예산)»의
+//   한 갈래이고(표기 = «미조회(예산 · rate limit)» -- 진단 줄이 «예산» 과 나란한
+//   별도 낱말로 찍지 않는다 · 검토 P2-2), 내부 필드는 uncheckedByRateLimit 로
+//   따로 세며 재시도 0 이고 그 회차의 남은 후보는 더 조회하지 않는다(같은 IP 의
 //   한도를 ㄱ-4 · 책임자 CI 판독과 나눠 쓴다). 그 밖 조회 실패(404 · 던짐 ·
 //   모양 위반)도 확인이 아니고 «미조회»에 넣되 사유를 diagnostics 에 남긴다.
 // ⛔캐시는 승인 권위가 아니다 -- 확인 N 은 «이 회차 REST 응답»으로만 세고
@@ -877,7 +905,9 @@ async function checkCandidates({
     if (r.kind === "rateLimited") {
       rateLimited = true;
       out.uncheckedByRateLimit += 1;
-      out.diagnostics.push(`${c.sha.slice(0, 7)} rate limit(${r.detail})`);
+      out.diagnostics.push(
+        `${c.sha.slice(0, 7)} 미조회(예산 · rate limit: ${r.detail})`,
+      );
     } else if (r.kind === "failure") {
       out.uncheckedByFailure += 1;
       out.diagnostics.push(`${c.sha.slice(0, 7)} ${r.detail}`);
@@ -1641,6 +1671,280 @@ export function collectRelayLedger({
 }
 
 // ---------------------------------------------------------------------------
+// 수집 6(보조, HYK-255-g-aux-render-1 커밋 1 · PM 진단 §(b) · §(d) D2) -- ㄱ
+// «보조 관측(독립 아님)» 4종. 이미 있는 ORCH · 책임자가 쓸 수 있는 파일을
+// «읽기만» 센다 -- ⛔독립 앵커가 아니다(B · C 등급): 독립 앵커 유형 커버리지
+// (INDEPENDENT_ANCHOR_COVERED_GATE_NUMBERS)의 분자 · 분모에 절대 넣지 않는다.
+//   ㄱ-1 = 보내는함 파일 이름 «게이트1» 의 창 안 개수
+//   ㄱ-2 = reject-streak 원장에서 streak 가 «2 로 올라서는 전이»가 창 안인 이슈 수
+//   ㄱ-6 = 같은 원장에서 streak 가 하드스톱 문턱(HARD_STOP_STREAK)에 «닿는 전이»가
+//          창 안인 이슈 수
+//   ㄱ-7 = 받는함 «상신» 중 보내는함 «판정-HHMM» 과 날짜 + HHMM 짝이 있는 수
+//          (짝 대조 = 기존 isGate7MissingCandidate 재사용 -- 기존 «ㄱ-7 기록
+//          누락» 계수는 건드리지 않는다)
+// 창 = runPartialCountOnce 가 쓰는 보고서 창(windowStartMs..windowEndMs) 그대로
+// -- 새 창 상수 0. 파일 기반 칸(ㄱ-1 · ㄱ-7)은 보내는함 보조 수집기
+// (collectOutboxHeaderCounts)와 같은 «파일 mtime 이 창 안» 규칙이다.
+// ⛔못 읽은 칸은 bare 0 이 아니라 {known:false, reason}: 폴더 읽기 실패 ·
+// 원장 읽기 실패 · 원장 없음 · 체인(해시 체인 검증 실패 또는 체인 파일 없음).
+// 체인은 ㄱ-2 와 ㄱ-6 이 같은 원장에서 나오므로 두 칸이 같이 실패로 낸다.
+// ---------------------------------------------------------------------------
+
+const GATE1_OUTBOX_NAME_RE = /게이트1(?!\d)/;
+// ㄱ-2 = «연속 반려 2 회에 닿는» 전이(북극성-좌표 §1-C 게이트 2 · PM 진단 §(b)).
+const GATE2_STREAK_THRESHOLD = 2;
+
+function listWindowMdNames({
+  dir,
+  label,
+  windowStartMs,
+  windowEndMs,
+  readdirFn,
+  statFn,
+}) {
+  if (!dir) return { known: false, reason: `미결선(${label} 경로 미지정)` };
+  let names;
+  try {
+    names = readdirFn(dir);
+  } catch (err) {
+    return {
+      known: false,
+      reason: `${label} 읽기 실패: ${err && err.message ? err.message : String(err)}`,
+    };
+  }
+  const inWindow = [];
+  let readFailures = 0;
+  for (const name of names) {
+    if (!name.endsWith(".md")) continue;
+    let st;
+    try {
+      st = statFn(path.join(dir, name));
+    } catch {
+      readFailures += 1;
+      continue;
+    }
+    if (st.mtimeMs >= windowStartMs && st.mtimeMs <= windowEndMs) {
+      inWindow.push(name);
+    }
+  }
+  return { known: true, names: inWindow, readFailures };
+}
+
+function collectGate1AuxCell(outboxListing) {
+  if (outboxListing.known !== true) {
+    return { known: false, reason: outboxListing.reason };
+  }
+  return {
+    known: true,
+    count: outboxListing.names.filter((n) => GATE1_OUTBOX_NAME_RE.test(n))
+      .length,
+    readFailures: outboxListing.readFailures,
+  };
+}
+
+// 보내는함 «판정-HHMM» 파일 이름 -> isGate7MissingCandidate 가 읽는 S1 항목 모양
+// (extractOutboxQuoteItem 과 같은 이름 규칙: 판정 HHMM + 이름 머리 날짜).
+function buildOutboxPanjeongItem(name) {
+  const panjeongM = OUTBOX_PANJEONG_HHMM_RE.exec(name);
+  const dateHhmm = parseLedgerFileNameDateHhmm(name);
+  if (!panjeongM || !dateHhmm) return null;
+  return {
+    source: "S1",
+    panjeongHhmm: panjeongM[1],
+    panjeongDate: dateHhmm.date,
+  };
+}
+
+function collectGate7AuxCell({ outboxListing, inboxListing }) {
+  if (outboxListing.known !== true) {
+    return { known: false, reason: outboxListing.reason };
+  }
+  if (inboxListing.known !== true) {
+    return { known: false, reason: inboxListing.reason };
+  }
+  const items = outboxListing.names
+    .map(buildOutboxPanjeongItem)
+    .filter((item) => item !== null);
+  const count = inboxListing.names
+    .filter((n) => n.includes("상신"))
+    .filter((n) =>
+      items.some((item) => isGate7MissingCandidate({ item, inboxNames: [n] })),
+    ).length;
+  return {
+    known: true,
+    count,
+    readFailures: outboxListing.readFailures + inboxListing.readFailures,
+  };
+}
+
+// 원장 + 체인 읽기·검증. 실패는 전부 {ok:false, reason, detail} -- 0 으로 접지
+// 않는다. 체인 검증은 reject-streak-chain.mjs 의 checkAppendOnlyAll(변조 «탐지»
+// 일 뿐 방지가 아니다 -- 원장과 체인을 둘 다 다시 쓰면 못 잡는다).
+function readVerifiedRejectStreakLedger({ repoRoot, readFn, existsFn }) {
+  const ledgerPath = path.join(repoRoot, ".harness", "reject-streak.json");
+  const chainPath = path.join(repoRoot, ".harness", "reject-streak-chain.json");
+  const io = { readFileFn: (p) => readFn(p, "utf8"), existsFn };
+  const loaded = loadLedger(ledgerPath, io);
+  if (loaded.ok !== true) {
+    return { ok: false, reason: "원장 읽기 실패", detail: loaded.reason };
+  }
+  if (loaded.existed !== true) {
+    return { ok: false, reason: "원장 없음", detail: ledgerPath };
+  }
+  const chain = loadChainLedger(chainPath, io);
+  if (chain.ok !== true) {
+    return { ok: false, reason: "체인", detail: chain.reason };
+  }
+  if (chain.existed !== true) {
+    return {
+      ok: false,
+      reason: "체인",
+      detail: `체인 파일 없음: ${chainPath}`,
+    };
+  }
+  const verdict = checkAppendOnlyAll({
+    primaryLedger: loaded.ledger,
+    chain: chain.chain,
+  });
+  if (verdict.ok !== true) {
+    const firstBad = verdict.results.find((r) => r.status === "BLOCK");
+    return {
+      ok: false,
+      reason: "체인",
+      detail: `${verdict.reason} -- ${firstBad ? firstBad.reason : "사유 미상"}`,
+    };
+  }
+  return { ok: true, ledger: loaded.ledger };
+}
+
+// 이슈별로 streak 를 처음부터 접어(반려 +1 · 그 밖 0 -- reject-streak.mjs
+// applyOutcome 과 같은 규칙) «threshold 미만 -> threshold 이상으로 올라서는»
+// 전이를 찾는다. 현재 값이 threshold 이상이라는 사실만으로는 전이가 아니다(2->3
+// 은 새 전이 아님). 전이 시각 = 그 항목의 at. 이슈 수로 센다.
+function findStreakCrossingTimes(history, threshold) {
+  const times = [];
+  let run = 0;
+  for (const entry of history) {
+    const before = run;
+    run = entry?.verdict === "rejected" ? run + 1 : 0;
+    if (before < threshold && run >= threshold) {
+      times.push(parseKstTimestampMs(entry?.at));
+    }
+  }
+  return times;
+}
+
+function countStreakTransitions({
+  ledger,
+  threshold,
+  windowStartMs,
+  windowEndMs,
+}) {
+  let count = 0;
+  let undated = 0;
+  for (const issue of Object.values(ledger.issues ?? {})) {
+    const times = findStreakCrossingTimes(issue?.history ?? [], threshold);
+    if (
+      times.some((t) => t !== null && t >= windowStartMs && t <= windowEndMs)
+    ) {
+      count += 1;
+    } else if (times.includes(null)) {
+      undated += 1;
+    }
+  }
+  return { known: true, count, undated };
+}
+
+function collectLedgerAuxCells({
+  repoRoot,
+  hardStopStreak,
+  windowStartMs,
+  windowEndMs,
+  readFn,
+  existsFn,
+}) {
+  const read = readVerifiedRejectStreakLedger({ repoRoot, readFn, existsFn });
+  if (read.ok !== true) {
+    const failed = { known: false, reason: read.reason, detail: read.detail };
+    return { gate2: failed, gate6: failed };
+  }
+  const range = { ledger: read.ledger, windowStartMs, windowEndMs };
+  return {
+    gate2: countStreakTransitions({
+      ...range,
+      threshold: GATE2_STREAK_THRESHOLD,
+    }),
+    gate6: countStreakTransitions({ ...range, threshold: hardStopStreak }),
+  };
+}
+
+export function collectGateAuxObservations({
+  repoRoot,
+  outboxDir,
+  inboxDir,
+  windowStartMs,
+  windowEndMs,
+  hardStopStreak = HARD_STOP_STREAK,
+  readdirFn = readdirSync,
+  readFn = readFileSync,
+  statFn = statSync,
+  existsFn = existsSync,
+}) {
+  const list = (dir, label) =>
+    listWindowMdNames({
+      dir,
+      label,
+      windowStartMs,
+      windowEndMs,
+      readdirFn,
+      statFn,
+    });
+  const outboxListing = list(outboxDir, "보내는함");
+  const inboxListing = list(inboxDir, "받는함");
+  return {
+    gate1: collectGate1AuxCell(outboxListing),
+    ...collectLedgerAuxCells({
+      repoRoot,
+      hardStopStreak,
+      windowStartMs,
+      windowEndMs,
+      readFn,
+      existsFn,
+    }),
+    gate7: collectGate7AuxCell({ outboxListing, inboxListing }),
+  };
+}
+
+// HYK-255-g-aux-render-1 -- outboxDir 이 없으면(= 기존 모든 호출자 · 보내는함이
+// 결선되지 않은 실행) 이 보조 수집기 자체를 부르지 않는다(줄 0개 · 회귀 0 --
+// resolveOutboxResult 와 같은 opt-in 관례).
+function resolveGateAuxResult({
+  outboxDir,
+  inboxDir,
+  repoRoot,
+  windowStartMs,
+  windowEndMs,
+  readdirFn,
+  readFn,
+  statFn,
+  existsFn,
+}) {
+  return outboxDir
+    ? collectGateAuxObservations({
+        repoRoot,
+        outboxDir,
+        inboxDir,
+        windowStartMs,
+        windowEndMs,
+        readdirFn,
+        readFn,
+        statFn,
+        existsFn,
+      })
+    : null;
+}
+
+// ---------------------------------------------------------------------------
 // 조립 -- 한 번의 실행.
 // ---------------------------------------------------------------------------
 
@@ -1749,6 +2053,7 @@ function buildCollectors({
   gate4,
   outboxResult,
   externalEvidence,
+  gateAux,
 }) {
   const collectors = [];
   collectors.push({
@@ -1785,7 +2090,32 @@ function buildCollectors({
   if (outboxEntry) collectors.push(outboxEntry);
   const externalEntry = buildExternalEvidenceCollectorEntry(externalEvidence);
   if (externalEntry) collectors.push(externalEntry);
+  const gateAuxEntry = buildGateAuxCollectorEntry(gateAux);
+  if (gateAuxEntry) collectors.push(gateAuxEntry);
   return collectors;
+}
+
+// HYK-255-g-aux-render-1 -- ㄱ 보조 관측 4칸의 «진단 줄»(관측 건강). 보고서 ㄱ 절
+// 줄은 문면 고정 1줄(칸마다 짧은 사유)이라, 실패한 칸의 자세한 사유(체인이 어느
+// 이슈에서 깨졌는지 등)는 여기에 남는다. 한 칸이라도 못 읽었으면 FAIL.
+function buildGateAuxCollectorEntry(gateAux) {
+  if (!gateAux) return null;
+  const cells = [
+    ["ㄱ-1", gateAux.gate1],
+    ["ㄱ-2", gateAux.gate2],
+    ["ㄱ-6", gateAux.gate6],
+    ["ㄱ-7", gateAux.gate7],
+  ];
+  const parts = cells.map(([label, cell]) =>
+    cell.known === true
+      ? `${label} OK`
+      : `${label} FAIL(${cell.reason}${cell.detail ? `: ${cell.detail}` : ""})`,
+  );
+  return {
+    name: "ㄱ보조관측수집기",
+    ok: cells.every(([, cell]) => cell.known === true),
+    detail: parts.join(" · "),
+  };
 }
 
 // HYK-255-ln-github-anchor-1 -- 새 수집기의 «진단 줄»(관측 건강). ㄴ 절 줄은
@@ -1802,7 +2132,9 @@ function buildExternalEvidenceCollectorEntry(externalEvidence) {
   const parts = [
     `후보 ${e.candidatesInWindow}건 · 조회 ${e.checked}건 · 확인 ${e.confirmed}`,
     `서명·작성자 불일치 ${e.notConfirmed}`,
-    `미조회: 예산 ${e.uncheckedByBudget} · rate limit ${e.uncheckedByRateLimit} · 조회 실패 ${e.uncheckedByFailure}`,
+    // 403/429(rate limit)는 판정 문면 «미조회(예산)» 안에 묶어 «예산(rate limit 포함)»
+    // 으로 적는다(검토 P2-2). 합 = 예산 + rate limit, 그중 rate limit 은 따로 병기.
+    `미조회: 예산(rate limit 포함) ${e.uncheckedByBudget + e.uncheckedByRateLimit}(그중 rate limit ${e.uncheckedByRateLimit}) · 조회 실패 ${e.uncheckedByFailure}`,
   ];
   if (e.diagnostics.length > 0) parts.push(e.diagnostics.join("; "));
   return { name, ok: true, detail: parts.join(" · ") };
@@ -1974,10 +2306,12 @@ function assemblePartialCountReportText({
   consumedResult,
   watch,
   gate4,
-  outboxResult,
-  relayResult,
   externalEvidence,
+  // 보조 수집기 묶음 {outboxResult, relayResult, gateAux} -- runPartialCountOnce 의
+  // eslint max-lines-per-function 예산 때문에 한 덩어리로 받는다(값 · 순서 무변).
+  aux,
 }) {
+  const { outboxResult, relayResult, gateAux } = aux;
   return buildPartialCountReport({
     generatedAtMs: now,
     windowStartMs,
@@ -2004,10 +2338,13 @@ function assemblePartialCountReportText({
       gate4,
       outboxResult,
       externalEvidence,
+      gateAux,
     }),
     lastAliveMs: watch.lastAliveMs,
     coverageGaps: watch.coverageGaps,
     relayLedgerResult: relayResult,
+    // HYK-255-g-aux-render-1 -- ㄱ 보조 관측(독립 아님). null -> 줄 0개.
+    gateAuxObservation: gateAux ?? undefined,
   });
 }
 
@@ -2085,11 +2422,13 @@ function resolveAuxCollectorResults({
   outboxDir,
   relayGlob,
   inboxDir,
+  repoRoot,
   windowStartMs,
   windowEndMs,
   readdirFn,
   readFn,
   statFn,
+  existsFn,
 }) {
   const outboxResult = resolveOutboxResult({
     outboxDir,
@@ -2106,7 +2445,18 @@ function resolveAuxCollectorResults({
     readdirFn,
     readFn,
   });
-  return { outboxResult, relayResult };
+  const gateAux = resolveGateAuxResult({
+    outboxDir,
+    inboxDir,
+    repoRoot,
+    windowStartMs,
+    windowEndMs,
+    readdirFn,
+    readFn,
+    statFn,
+    existsFn,
+  });
+  return { outboxResult, relayResult, gateAux };
 }
 
 export async function runPartialCountOnce(options = {}) {
@@ -2159,15 +2509,17 @@ export async function runPartialCountOnce(options = {}) {
       gitWorktreeListExecFn,
     });
 
-  const { outboxResult, relayResult } = resolveAuxCollectorResults({
+  const aux = resolveAuxCollectorResults({
     outboxDir,
     relayGlob,
     inboxDir,
+    repoRoot,
     windowStartMs,
     windowEndMs,
     readdirFn,
     readFn,
     statFn,
+    existsFn,
   });
 
   const reportText = assemblePartialCountReportText({
@@ -2178,9 +2530,8 @@ export async function runPartialCountOnce(options = {}) {
     consumedResult,
     watch,
     gate4,
-    outboxResult,
-    relayResult,
     externalEvidence,
+    aux,
   });
 
   return {
@@ -2189,8 +2540,7 @@ export async function runPartialCountOnce(options = {}) {
     externalEvidence,
     suspected: watch.suspected,
     coverageGaps: watch.coverageGaps,
-    outboxResult,
-    relayResult,
+    ...aux,
   };
 }
 

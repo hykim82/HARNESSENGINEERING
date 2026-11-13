@@ -306,7 +306,7 @@ test("후보 11 -> 조회 10 · 미조회(예산) 1 (회차 상한 10, 11번째 
   }
 });
 
-test("403 rate limit -> 미조회(예산), 재시도 0 (가짜 fetch 호출 수 단언) 이고 이후 후보도 조회하지 않는다", async () => {
+test("403 rate limit -> 미조회(예산 · rate limit) -- 판정 문면 «미조회(예산)» 안에 rate limit 이 묶인다, 재시도 0 (가짜 fetch 호출 수 단언) 이고 이후 후보도 조회하지 않는다", async () => {
   const specs = [];
   for (let i = 0; i < 5; i++) specs.push(updateBranchSpec(200 - i * 10));
   const repo = buildRepo(specs);
@@ -322,6 +322,43 @@ test("403 rate limit -> 미조회(예산), 재시도 0 (가짜 fetch 호출 수 
     assert.equal(r.unchecked, 4);
     assert.equal(r.uncheckedByRateLimit, 1);
     assert.equal(r.uncheckedByBudget, 3);
+  } finally {
+    cleanup(repo.dir);
+  }
+});
+
+// HYK-255-g-aux-render-1 커밋 3 (D1 검토 P2-2) -- 403/429 는 판정 문면 «미조회(예산)»
+// 의 한 갈래다. 진단 줄이 «예산» 과 나란한 별도 낱말로 «rate limit» 을 찍지 않고
+// «예산(rate limit 포함)» 으로 묶어 표기한다. 계수 필드(uncheckedByRateLimit ·
+// uncheckedByBudget · unchecked)와 중단 동작은 그대로다(위 시험이 단언).
+test("P2-2: 403 진단 줄은 «미조회: 예산(rate limit 포함) 4(그중 rate limit 1) · 조회 실패 0» 이고 후보별 진단도 «미조회(예산 · rate limit: …)» 다", async () => {
+  const specs = [];
+  for (let i = 0; i < 5; i++) specs.push(updateBranchSpec(200 - i * 10));
+  const repo = buildRepo(specs);
+  try {
+    const { fetchJson } = makeFetch(({ url }, n) =>
+      n === 2
+        ? { ok: false, status: 403, json: null, linkHeader: null }
+        : okResponse(validCommitPayload(shaOfUrl(url))),
+    );
+    const result = await runOnce(repo, fetchJson);
+    // ㄴ 절 줄은 무변: U = 예산 3 + rate limit 1.
+    assert.ok(
+      result.reportText.includes(
+        `${LN_LINE_PREFIX}확인 1 · 미조회 4 · 분류 대기\n`,
+      ),
+    );
+    const healthText = result.reportText.slice(
+      result.reportText.indexOf("관측 건강:"),
+    );
+    assert.match(
+      healthText,
+      /미조회: 예산\(rate limit 포함\) 4\(그중 rate limit 1\) · 조회 실패 0/,
+    );
+    assert.match(healthText, /[0-9a-f]{7} 미조회\(예산 · rate limit: [^)]*\)/);
+    // 옛 표기(«예산 N · rate limit M» 나란히)는 남지 않는다.
+    assert.doesNotMatch(healthText, /미조회: 예산 \d+ · rate limit \d+/);
+    assert.doesNotMatch(healthText, /[0-9a-f]{7} rate limit\(/);
   } finally {
     cleanup(repo.dir);
   }

@@ -341,3 +341,114 @@ test("외부 독립 증거 후보 N 변화 + 새 이상 전이가 같은 tick �
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+// ---------------------------------------------------------------------------
+// HYK-255-g-aux-render-1 커밋 3 (D1 검토 P2-4) -- 통지 표면: N 변화만 있는 tick 의
+// 머리 문구는 «이상 전이 통지» 가 아니고, N 변화 절은 마무리 줄 «이 파일이 정본
+// 입니다 …» 앞에 온다. 통지 조건 · 장 수는 무변(위 시험들이 그대로 단언한다).
+// ---------------------------------------------------------------------------
+
+const CLOSING_LINE_PREFIX = "이 파일이 정본입니다";
+const OLD_ANOMALY_HEADER = "이상 전이 통지";
+
+function nonEmptyLines(text) {
+  return text.split("\n").filter((l) => l.trim() !== "");
+}
+
+test("P2-4: N 변화만 있는 tick 의 통지 머리는 «이상 전이 통지» 가 아니라 부분 계수 변화 통지다", () => {
+  const root = tmpDir("nc-reach-p24-head-");
+  try {
+    const fx = { ...writeReachFixture(root, EXT(0)), root };
+    tick(fx, EXT(0));
+    const changed = tick(fx, EXT(1, 2), 1000);
+    assert.equal(changed.toNotify.length, 0, "이상 전이 없이 N 변화만");
+    const body = fs.readFileSync(changed.noticePath, "utf8");
+    const head = body.split("\n")[0];
+    assert.ok(head.startsWith("# "), head);
+    assert.ok(!head.includes(OLD_ANOMALY_HEADER), `머리가 낡은 문구: ${head}`);
+    assert.ok(head.includes("부분 계수 변화 통지"), head);
+    assert.ok(!body.includes("새로 열린 이상"), "이상 절은 없다");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("P2-4: N 변화 절은 마무리 줄 «이 파일이 정본입니다 …» 앞에 온다 (N 변화만 · 이상 전이와 겹침 둘 다)", () => {
+  const root = tmpDir("nc-reach-p24-order-");
+  try {
+    const fx = { ...writeReachFixture(root, EXT(0)), root };
+    tick(fx, EXT(0));
+    const only = fs.readFileSync(tick(fx, EXT(1, 2), 1000).noticePath, "utf8");
+    const onlyLines = nonEmptyLines(only);
+    assert.ok(
+      onlyLines.at(-1).startsWith(CLOSING_LINE_PREFIX),
+      onlyLines.at(-1),
+    );
+    assert.ok(
+      only.indexOf("외부 독립 증거 후보") < only.indexOf(CLOSING_LINE_PREFIX),
+      "N 변화 절이 마무리 줄 뒤에 있다",
+    );
+    assert.equal(
+      only.split(CLOSING_LINE_PREFIX).length - 1,
+      1,
+      "마무리 줄은 1개",
+    );
+
+    // 겹침: 새 이상 전이 + N 변화 -> 머리는 이상 전이 통지 그대로, 순서는 같다.
+    const root2 = tmpDir("nc-reach-p24-both-");
+    try {
+      const fx2 = { ...writeReachFixture(root2, EXT(1)), root: root2 };
+      const t0 = Date.parse("2026-11-12T00:00:00.000Z");
+      fs.writeFileSync(
+        fx2.watchLogPath,
+        watchLogLine({
+          ts: new Date(t0).toISOString(),
+          idleStatus: "SEAT_IDLE_JUDGED",
+          idleVerdict: "SUSPECTED_ABANDONED",
+        }),
+        "utf8",
+      );
+      const both = tick(fx2, EXT(1));
+      const bothBody = fs.readFileSync(both.noticePath, "utf8");
+      assert.ok(bothBody.split("\n")[0].includes(OLD_ANOMALY_HEADER));
+      assert.ok(nonEmptyLines(bothBody).at(-1).startsWith(CLOSING_LINE_PREFIX));
+      assert.ok(
+        bothBody.indexOf("좌석 유휴 방치") <
+          bothBody.indexOf("외부 독립 증거 후보") &&
+          bothBody.indexOf("외부 독립 증거 후보") <
+            bothBody.indexOf(CLOSING_LINE_PREFIX),
+        "이상 절 -> N 변화 절 -> 마무리 줄 순서",
+      );
+    } finally {
+      fs.rmSync(root2, { recursive: true, force: true });
+    }
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("P2-4: 통지 조건 · 장 수는 무변 -- 이상 전이만 있는 tick 의 통지 머리는 그대로 «이상 전이 통지», N 변화가 없으면 0장", () => {
+  const root = tmpDir("nc-reach-p24-anom-");
+  try {
+    const fx = { ...writeReachFixture(root, null), root };
+    const t0 = Date.parse("2026-11-12T00:00:00.000Z");
+    fs.writeFileSync(
+      fx.watchLogPath,
+      watchLogLine({
+        ts: new Date(t0).toISOString(),
+        idleStatus: "SEAT_IDLE_JUDGED",
+        idleVerdict: "SUSPECTED_ABANDONED",
+      }),
+      "utf8",
+    );
+    const r = tick(fx, null);
+    assert.equal(r.toNotify.length, 1);
+    const body = fs.readFileSync(r.noticePath, "utf8");
+    assert.ok(body.split("\n")[0].includes(OLD_ANOMALY_HEADER));
+    assert.ok(!body.includes("외부 독립 증거 후보"));
+    assert.equal(noticeFiles(fx).length, 1);
+    assert.equal(tick(fx, null, 1000).noticePath, null);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});

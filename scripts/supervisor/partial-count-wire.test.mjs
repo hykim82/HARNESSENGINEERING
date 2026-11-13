@@ -23,6 +23,7 @@ import {
   collectConsumedRounds,
   collectOutboxHeaderCounts,
   collectRelayLedger,
+  collectGate4Independent,
   DEFAULT_MAX_MERGE_CHECKS,
   DEFAULT_EXTRA_REPO_ROOTS,
   DEFAULT_ARCHIVE_ROOT,
@@ -1954,6 +1955,107 @@ test("runPartialCountOnce: relayGlob이 known:false(폴더 없음)면 미계수 
     assert.equal(result.relayResult.known, false);
     assert.ok(result.reportText.includes("7개(uncounted-examples/v2)"));
     assert.ok(!result.reportText.includes("uncounted-examples/v3"));
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// HYK-255-g-aux-render-1 커밋 2 (D3 ⑵) -- ㄱ-4 UNDECIDABLE 사유 분포. 사유는
+// 기존 판정 결과(verdict.evidence.reason)에서 그대로 전달하고 새 REST 호출은
+// 없다. 가짜 git · 가짜 fetchJson 은 수집기의 실제 코드(createGitHubApprovalPort
+// -> isHumanApproved)를 통과시킨다 -- 후보 3개: 첫 후보는 git remote 를 못 읽어
+// REPO_IDENTITY_MISMATCH, 나머지 둘은 remote 는 읽히지만 fetch 가 500 이라
+// HTTP_FAILED.
+// ---------------------------------------------------------------------------
+
+function undecidableGitPort(nowMs) {
+  let remoteCalls = 0;
+  const logOut =
+    [1, 2, 3]
+      .map(
+        (i) =>
+          `${String(i).repeat(40)} ${new Date(nowMs - i * HOUR).toISOString()}`,
+      )
+      .join("\n") + "\n";
+  return {
+    run(args) {
+      if (args[0] === "log") return { code: 0, stdout: logOut, stderr: "" };
+      if (args[0] === "remote") {
+        remoteCalls += 1;
+        if (remoteCalls === 1) {
+          return { code: 1, stdout: "", stderr: "no remote" };
+        }
+        return {
+          code: 0,
+          stdout: `https://github.com/${REPO}.git\n`,
+          stderr: "",
+        };
+      }
+      return { code: 1, stdout: "", stderr: "unexpected git call" };
+    },
+  };
+}
+
+test("D3 ⑵ collectGate4Independent: UNDECIDABLE 판정의 사유(evidence.reason)가 분포로 전달된다 · 새 REST 호출 0", async () => {
+  let fetchCalls = 0;
+  const gate4 = await collectGate4Independent({
+    fetchJson: async () => {
+      fetchCalls += 1;
+      return { ok: false, status: 500 };
+    },
+    git: undecidableGitPort(NOW),
+    allowlistPath: "scripts/supervisor/approver-allowlist.json",
+    windowStartMs: NOW - DAY,
+    windowEndMs: NOW,
+    maxMergeChecks: 3,
+  });
+  assert.equal(gate4.known, true);
+  assert.equal(gate4.undecidable, 3);
+  assert.deepEqual(gate4.undecidableReasons, {
+    REPO_IDENTITY_MISMATCH: 1,
+    HTTP_FAILED: 2,
+  });
+  // 사유 전달은 이미 한 판정에서 읽을 뿐이다 -- fetch 는 판정이 하던 만큼(후보 둘
+  // 각 1회)만 불렸다.
+  assert.equal(fetchCalls, 2);
+});
+
+test("D3 ⑵ collectGate4Independent: UNDECIDABLE 이 없으면 사유 분포는 빈 객체다", async () => {
+  const gate4 = await collectGate4Independent({
+    fetchJson: async () => ({ ok: false, status: 500 }),
+    git: undecidableGitPort(NOW),
+    allowlistPath: "scripts/supervisor/approver-allowlist.json",
+    windowStartMs: NOW - DAY,
+    windowEndMs: NOW,
+    maxMergeChecks: 0,
+  });
+  assert.equal(gate4.undecidable, 0);
+  assert.deepEqual(gate4.undecidableReasons, {});
+});
+
+test("D3 ⑵ runPartialCountOnce: 보고서 ㄱ-4 줄에 «UNDECIDABLE 3(사유: HTTP_FAILED 2 · REPO_IDENTITY_MISMATCH 1)» 이 찍힌다", async () => {
+  const root = tmpDir("nc-pcw-undecidable-");
+  try {
+    const result = await runPartialCountOnce({
+      now: NOW,
+      repoRoot: root,
+      dispatchReceiptsPath: join(root, "none.jsonl"),
+      watchLogPath: join(root, "none.log"),
+      extraRepoRoots: [],
+      archiveRoot: join(root, "archive-missing"),
+      maxMergeChecks: 3,
+      maxExternalEvidenceChecks: 0,
+      fetchJson: async () => ({ ok: false, status: 500 }),
+      git: undecidableGitPort(NOW),
+      gitWorktreeListExecFn: () => "",
+    });
+    assert.ok(
+      result.reportText.includes(
+        "UNDECIDABLE 3(사유: HTTP_FAILED 2 · REPO_IDENTITY_MISMATCH 1)",
+      ),
+      result.reportText,
+    );
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
