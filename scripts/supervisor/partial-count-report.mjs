@@ -2196,6 +2196,13 @@ function buildExternalEvidenceCollectorEntry(externalEvidence) {
     // 으로 적는다(검토 P2-2). 합 = 예산 + rate limit, 그중 rate limit 은 따로 병기.
     `미조회: 예산(rate limit 포함) ${e.uncheckedByBudget + e.uncheckedByRateLimit}(그중 rate limit ${e.uncheckedByRateLimit}) · 조회 실패 ${e.uncheckedByFailure}`,
   ];
+  // HYK-255-g7-token-diag-1 (판정 1410 ⓐ · «예산 낙차는 진단 줄로») -- 미조회 때문에
+  // 확인이 직전 확인값보다 떨어진 회차(stalePrevious 가 붙은 회차 = 미조회 > 0 이고
+  // 직전 확인 M > 이번 확인 N)에만 «낙차 M→N(미조회)» 1토막. 낙차 없는 회차엔 0토막.
+  // ⛔표시일 뿐이다 -- 확인 N · ㄴ 분자 · 통지 조건 · 장 수는 이 토막과 무관하다.
+  if (e.stalePrevious) {
+    parts.push(`낙차 ${e.stalePrevious.confirmed}→${e.confirmed}(미조회)`);
+  }
   if (e.diagnostics.length > 0) parts.push(e.diagnostics.join("; "));
   return { name, ok: true, detail: parts.join(" · ") };
 }
