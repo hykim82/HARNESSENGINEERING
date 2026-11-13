@@ -92,7 +92,7 @@ function readPartialCountSection({ fileText, partialCountPath, now }) {
 }
 
 // HYK-255-ln-github-anchor-1 (판정 2026-11-12 19:1x 1ⓑ) -- 부분 계수 보고서
-// ㄴ 절 «외부 독립 증거 후보: 확인 N» 의 N 이 바뀔 때만 받는함 통지 1장(기존
+// ㄴ 절 «외부 독립 증거 후보: 확인 N» 의 N 이 «늘 때만» 받는함 통지 1장(기존
 // 통지 길 -- 같은 notifyDir · 같은 파일 이름 규칙 · 같은 상태 파일). 이 wire
 // 는 수집기를 다시 돌리지 않고 이미 쓰인 보고서 «텍스트»의 그 줄만 읽는다.
 // 상태 파일의 아래 키 하나가 직전 N 을 기억한다 -- 이상 전이 키(axisKey)와
@@ -104,7 +104,15 @@ function readPartialCountSection({ fileText, partialCountPath, now }) {
 // 통지한다(과소통지보다 과대통지 -- 위 readStateFile 과 같은 원칙).
 export const EXTERNAL_EVIDENCE_STATE_KEY = "__externalEvidenceCandidates";
 
-function decideExternalEvidenceChange({ previousState, fileText }) {
+//
+// HYK-255-g7-key-stale-1 (커밋 3) -- 통지는 확인 «증가» 에만: 처음 관측 N>0 · 직전
+// 기준선보다 큰 N. 같은 값 · 감소 · 미조회로 낮게 나온 회차는 통지 0장이다. 상태 키는
+// {confirmed, atMs} -- confirmed = 기준선, atMs = 그 값이 «이번 회차 REST 응답으로»
+// 마지막 확인된 시각(부분 계수 보고서의 스테일 표시가 읽는다 · 표시 전용, 승인 권위
+// 아님). 미조회가 낀 회차(미조회 > 0)에 N 이 기준선보다 낮으면 «미조회 흔들림» 이라
+// 기준선 · 시각을 그대로 지킨다(1 -> 0 -> 1 에 매 회차 통지 0). 전부 조회했는데(미조회
+// 0) 낮아졌으면 진짜 감소라 기준선을 낮춘다(통지 0 -- 낮아진 뒤 다시 오르면 증가).
+function decideExternalEvidenceChange({ previousState, fileText, now }) {
   const prevEntry = previousState[EXTERNAL_EVIDENCE_STATE_KEY];
   const previous =
     prevEntry && Number.isInteger(prevEntry.confirmed)
@@ -114,13 +122,14 @@ function decideExternalEvidenceChange({ previousState, fileText }) {
   if (parsed.state !== "count") {
     return { nextEntry: previous === null ? null : prevEntry, change: null };
   }
-  const changed =
-    previous === null ? parsed.confirmed > 0 : previous !== parsed.confirmed;
+  const { confirmed, unchecked } = parsed;
+  if (previous !== null && confirmed < previous && unchecked > 0) {
+    return { nextEntry: prevEntry, change: null };
+  }
+  const increased = previous === null ? confirmed > 0 : confirmed > previous;
   return {
-    nextEntry: { confirmed: parsed.confirmed },
-    change: changed
-      ? { previous, current: parsed.confirmed, unchecked: parsed.unchecked }
-      : null,
+    nextEntry: confirmed > 0 ? { confirmed, atMs: now } : { confirmed },
+    change: increased ? { previous, current: confirmed, unchecked } : null,
   };
 }
 
@@ -148,7 +157,7 @@ function writeNoticeFile({
 function externalEvidenceChangeSectionLines(change) {
   const before = change.previous === null ? "이전 기록 없음" : change.previous;
   return [
-    "부분 계수 보고서 ㄴ 절 «외부 독립 증거 후보» 의 확인 건수가 바뀌었습니다(같은 N 이 계속되면 다시 오지 않습니다):",
+    "부분 계수 보고서 ㄴ 절 «외부 독립 증거 후보» 의 확인 건수가 늘었습니다(같은 값이 계속되거나 줄거나 미조회로 낮게 나온 회차에는 다시 오지 않습니다):",
     "",
     `- **외부 독립 증거 후보(GitHub 웹 Update branch 병합 커밋)** 확인 ${before} -> ${change.current} ` +
       `(미조회 ${change.unchecked} · 분류 대기 -- ㄴ 분자에는 들어가지 않았습니다. 분류 확정은 한용 몫입니다)`,
@@ -255,6 +264,7 @@ export function runReachOnce({
   const external = decideExternalEvidenceChange({
     previousState,
     fileText: partialCountText,
+    now,
   });
   if (external.nextEntry) {
     nextState[EXTERNAL_EVIDENCE_STATE_KEY] = external.nextEntry;
