@@ -249,9 +249,11 @@ test("커밋1 짝 키 정의는 소스에 «한 곳» 이다 (상신HHMM 토큰 
   // 바뀌었다 -- «판정-|상신)(\d{4})» 연속 문자열 대신 «상신)(\d{4})» 정의 1개 + 경계 존재.
   const defs = src.match(/상신\)\(\\d\{4\}\)/g) ?? [];
   assert.equal(defs.length, 1, `짝 키 토큰 정의가 ${defs.length}곳`);
+  // HYK-255-ln-update-branch-1 (의도된 변경 · 판정 1705 ②): 경계가 «판정-|상신» 두 머리 앞에
+  // «한 번» 놓인다 -- 정의는 여전히 1개이고 lookbehind 가 두 머리를 함께 덮는다.
   assert.ok(
-    src.includes("(?<![\\p{L}\\p{N}])상신)(\\d{4})"),
-    "토큰 경계(상신 앞 글자·숫자 금지)가 정의에 있다",
+    src.includes("(?<![\\p{L}\\p{N}])(?:판정-|상신)(\\d{4})"),
+    "토큰 경계(판정- · 상신 앞 글자·숫자 금지)가 정의에 있다",
   );
   assert.ok(!src.includes("OUTBOX_PANJEONG_HHMM_RE"), "옛 정의가 남아 있다");
 });
