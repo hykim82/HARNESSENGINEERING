@@ -15,6 +15,7 @@ import fs from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import * as report from "./partial-count-report.mjs";
+import * as core from "./partial-count-core.mjs";
 import { catchUpCheckpoints } from "../check/reject-streak-chain.mjs";
 
 const HOUR = 60 * 60 * 1000;
@@ -245,4 +246,156 @@ test("커밋1 짝 키 정의는 소스에 «한 곳» 이다 (상신HHMM 토큰 
   const defs = src.match(/판정-\|상신\)\(\\d\{4\}\)/g) ?? [];
   assert.equal(defs.length, 1, `짝 키 토큰 정의가 ${defs.length}곳`);
   assert.ok(!src.includes("OUTBOX_PANJEONG_HHMM_RE"), "옛 정의가 남아 있다");
+});
+
+// ---------------------------------------------------------------------------
+// 커밋 2 -- 시각 불명 전이(원장 항목 `at` 를 못 읽음)가 보조 칸에 표면화된다
+// (#366 검토 P2-2 -- 이 칸이 없으면 undated 계수를 지워도 시험이 안 깨진다)
+// ---------------------------------------------------------------------------
+
+const AUX_PREFIX = "- 보조 관측(독립 아님): ";
+const DATED_IN_WINDOW = "2026-11-12 09:00 KST"; // 창 안(창 = 11-11 19:00 ~ 11-12 19:00 KST)
+
+function rows(...ats) {
+  return ats.map((at) => ["rejected", at]);
+}
+
+function reportWithAux(aux) {
+  return core.buildPartialCountReport(reportInput({ gateAuxObservation: aux }));
+}
+
+function reportInput(extra = {}) {
+  return {
+    generatedAtMs: NOW,
+    windowStartMs: WINDOW_START,
+    windowEndMs: NOW,
+    delivered: { known: true, count: 1 },
+    consumed: { known: true, count: 1 },
+    missingReceipts: { known: true, count: 0 },
+    gate4: {
+      known: true,
+      candidatesInWindow: 0,
+      checked: 0,
+      approved: 0,
+      notApproved: 0,
+      undecidable: 0,
+      uncheckedByBudget: 0,
+      approvedEvents: [],
+    },
+    suspected: { known: true, closedCount: 0, openCount: 0 },
+    coverageGaps: { known: true, count: 0, totalMs: 0 },
+    ...extra,
+  };
+}
+
+test("커밋2 시각 불명: 2 에 닿는 반려 항목의 `at` 가 없으면 ㄱ-2 는 count 0 · undated 1 이고 «시각 불명 1건» 이 줄에 나온다", () => {
+  const d = makeDirs();
+  try {
+    writeSyntheticLedger(d.repoRoot, {
+      "HYK-U": rows(DATED_IN_WINDOW, undefined),
+    });
+    const aux = collectAux(d);
+    assert.deepEqual(
+      {
+        known: aux.gate2.known,
+        count: aux.gate2.count,
+        undated: aux.gate2.undated,
+      },
+      { known: true, count: 0, undated: 1 },
+    );
+    assert.equal(
+      core.renderGateAuxObservationLine(aux),
+      `${AUX_PREFIX}ㄱ-1 0 · ㄱ-2 0(시각 불명 1건) · ㄱ-6 0 · ㄱ-7 0`,
+    );
+  } finally {
+    cleanup(d.root);
+  }
+});
+
+test("커밋2 시각 불명: `at` 가 있지만 읽을 수 없는 모양(KST 형식 아님)도 시각 불명이다 -- 창 밖으로 접히지 않는다", () => {
+  const d = makeDirs();
+  try {
+    writeSyntheticLedger(d.repoRoot, {
+      "HYK-BAD": rows(DATED_IN_WINDOW, "어제 오후 3시경"),
+    });
+    const aux = collectAux(d);
+    assert.equal(aux.gate2.count, 0);
+    assert.equal(aux.gate2.undated, 1);
+  } finally {
+    cleanup(d.root);
+  }
+});
+
+test("커밋2 시각 불명은 읽은 전이와 따로 센다: 창 안 전이 1 + 시각 불명 1 -> «ㄱ-2 1(시각 불명 1건)» (서로의 칸에 섞이지 않는다)", () => {
+  const d = makeDirs();
+  try {
+    writeSyntheticLedger(d.repoRoot, {
+      "HYK-D": rows(DATED_IN_WINDOW, "2026-11-12 10:00 KST"),
+      "HYK-U": rows(DATED_IN_WINDOW, undefined),
+    });
+    const aux = collectAux(d);
+    assert.equal(aux.gate2.count, 1, "읽은 전이만 count");
+    assert.equal(aux.gate2.undated, 1, "못 읽은 전이만 undated");
+    assert.ok(
+      core.renderGateAuxObservationLine(aux).includes("ㄱ-2 1(시각 불명 1건)"),
+    );
+  } finally {
+    cleanup(d.root);
+  }
+});
+
+test("커밋2 시각 불명은 ㄱ-6 칸에도 표면화된다 (4 번째 반려 `at` 불명 -> ㄱ-6 0(시각 불명 1건) · ㄱ-2 는 2 번째 반려가 읽혀 1)", () => {
+  const d = makeDirs();
+  try {
+    writeSyntheticLedger(d.repoRoot, {
+      "HYK-S": rows(
+        "2026-11-12 08:00 KST",
+        "2026-11-12 09:00 KST",
+        "2026-11-12 10:00 KST",
+        undefined,
+      ),
+    });
+    const aux = collectAux(d);
+    assert.deepEqual(
+      { count: aux.gate2.count, undated: aux.gate2.undated },
+      { count: 1, undated: 0 },
+    );
+    assert.deepEqual(
+      { count: aux.gate6.count, undated: aux.gate6.undated },
+      { count: 0, undated: 1 },
+    );
+    assert.ok(
+      core.renderGateAuxObservationLine(aux).includes("ㄱ-6 0(시각 불명 1건)"),
+    );
+  } finally {
+    cleanup(d.root);
+  }
+});
+
+test("커밋2 시각 불명 칸은 보고서 본문(buildPartialCountReport)의 보조 관측 줄에 그대로 실린다 -- 독립 커버리지 줄은 무변", () => {
+  const d = makeDirs();
+  try {
+    writeSyntheticLedger(d.repoRoot, {
+      "HYK-U": rows(DATED_IN_WINDOW, undefined),
+    });
+    const withUndated = reportWithAux(collectAux(d));
+    assert.ok(
+      withUndated.includes(
+        `${AUX_PREFIX}ㄱ-1 0 · ㄱ-2 0(시각 불명 1건) · ㄱ-6 0 · ㄱ-7 0\n`,
+      ),
+      withUndated,
+    );
+    const clean = reportWithAux(
+      (() => {
+        writeSyntheticLedger(d.repoRoot, {});
+        return collectAux(d);
+      })(),
+    );
+    assert.ok(!clean.includes("시각 불명"), "원장이 비면 칸도 없다");
+    const coverage = (text) =>
+      text.split("\n").find((l) => l.startsWith("- 독립 앵커 유형 커버리지"));
+    assert.equal(coverage(withUndated), coverage(clean));
+  } finally {
+    cleanup(d.root);
+  }
 });
