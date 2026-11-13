@@ -115,7 +115,9 @@ const NOT_APPROVED_REASON_CODES = new Set([
 ]);
 
 const GITHUB_API_BASE = "https://api.github.com";
-const DEFAULT_CALL_BUDGET = 8;
+// HYK-255-p1-daily-1 커밋 2 (#371 검토 P2-1) -- export 1줄만(값 · 동작 무변). partial-count-rest-cap 시험이
+// 회차당 최악 호출 수 산술에 이 값을 그대로 쓰게 해, 값이 바뀌면 그 산술 시험이 RED 가 된다.
+export const DEFAULT_CALL_BUDGET = 8;
 
 // ---------------------------------------------------------------------------
 // 작은 유틸

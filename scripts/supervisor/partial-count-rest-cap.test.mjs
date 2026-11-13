@@ -15,6 +15,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { execFileSync } from "node:child_process";
 import * as report from "./partial-count-report.mjs";
+import { DEFAULT_CALL_BUDGET } from "./approval-authority-adapter.mjs";
 import {
   buildPartialCountReport,
   parseExternalEvidenceCandidateLine,
@@ -34,8 +35,9 @@ const LN_LINE_PREFIX = "- 외부 독립 증거 후보: ";
 const GITHUB_COMMITTER = { name: "GitHub", email: "noreply@github.com" };
 const HUMAN_COMMITTER = { name: "hykim82", email: "hykim82@example.com" };
 const PULL_HEAD_SHA = "e".repeat(40);
-// sha당 callBudget(approval-authority-adapter DEFAULT_CALL_BUDGET) -- 이 라운드는 무변(8).
-const CALL_BUDGET_PER_SHA = 8;
+// sha당 callBudget -- 리터럴 8 이 아니라 어댑터의 export 를 그대로 쓴다(HYK-255-p1-daily-1 · #371 검토 P2-1).
+// 어댑터 값이 바뀌면 아래 «회차당 최악 12 · 시간당 48» 산술 시험이 RED 가 된다.
+const CALL_BUDGET_PER_SHA = DEFAULT_CALL_BUDGET;
 const ROUNDS_PER_HOUR = 4; // 15분 회차
 
 function tmpDir(prefix) {
