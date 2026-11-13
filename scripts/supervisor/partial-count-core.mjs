@@ -807,8 +807,13 @@ export function formatPartialCountSection({
 //   관측 공백 = 같은 날 안에서 연속한 두 회차 간격이 20분 초과, 또는 00:00 -> 그날 첫 회차가 20분 초과,
 //              또는 그날 마지막 회차 -> 24:00 이 20분 초과(마감 때 판정). 근거(ORCH 실측 wake-receipts
 //              최근 14일 1,173 회차): 15분 회차 + 5분 여유를 넘으면 누락.
-//   그날 줄의 값 = 그날 «마지막 회차»의 값(확인 · 미조회 · 수집 실패) -- 재조회 0 · REST 무증가.
-//   ⛔캐시는 승인 권위가 아니다 -- 일별 줄은 «그 회차에 이미 센 값의 기록»이지 다음 회차 확인의 근거가 아니다.
+//   그날 줄의 값 = 미조회 · 수집 실패는 그날 «마지막 회차»의 값 -- 재조회 0 · REST 무증가.
+//   ⭐HYK-255-p1fix-2 (판정 0706 · 사건 합집합) 그날 줄의 «확인 값» 은 마지막 회차 값이 아니다 -- 날 사이(23:41 -> 00:20)에
+//   일어난 사건이 마지막 회차의 24시간 창 밖이라 어느 줄에도 안 들던 틈을 막는다. 회차마다 그 회차가 «확인한» 사건의
+//   식별자(D1 = 커밋 sha · 권한 사람 답 = 세션 + tool_use_id)를 오늘 상태에 모으고(합집합), 마감 때 확인 값 = 그날 처음 본
+//   식별자 수 - 앞 일별 줄들이 이미 센 식별자(최근 2일 보관). 줄 창 = 첫 회차의 창 시작 ~ 마지막 회차(값의 창).
+//   ⛔캐시는 승인 권위가 아니다 -- 일별 줄 · 식별자 집합은 «그 회차에 이미 센 값의 기록 · 중복 제거 장부»이지 다음 회차
+//   확인의 근거가 아니다(다음 회차는 자기 응답으로만 확인한다).
 // ---------------------------------------------------------------------------
 
 export const DAILY_SCHEMA = "partial-count-daily/v1";
@@ -830,6 +835,18 @@ function addKstDays(day, n) {
 }
 
 const isCount = (v) => Number.isInteger(v) && v >= 0;
+
+// HYK-255-p1fix-2 -- 앞 일별 줄들이 이미 센 식별자를 보관하는 날 수. 확인 사건은 24시간 창에만 보이므로(창이 23시간 넘게
+// 겹친다) 이틀이면 겹침을 덮는다. 오늘 기준 «어제 · 그제» 몫을 남기고 그보다 오래된 날의 식별자는 지운다.
+export const DAILY_EVENT_KEEP_DAYS = 2;
+
+const uniqueStrings = (values) => [
+  ...new Set(
+    (Array.isArray(values) ? values : []).filter(
+      (v) => typeof v === "string" && v !== "",
+    ),
+  ),
+];
 
 // HYK-255-p1fix-1 (판정 0206 ④ 가) -- 예시 식별자. 일별 줄의 이 칸은 «알려진 미계수 예시가 몇 개였나» 를 적는다.
 // 값 = «V<판본>-<순번>»(예 V3-2). 1-C 설계의 U-id(U1 = 열린 집합 …)와 문자열이 겹치지 않도록 접두를 판본으로 둔다.
@@ -864,6 +881,8 @@ export function buildDailyTickValues({
   uncountedExamples,
   // HYK-255-p5a-perm-1 -- 없으면(미결선) 새 두 칸을 «싣지 않는다»(옛 회차 값 모양 그대로).
   permissionAnswers,
+  // HYK-255-p1fix-2 -- 이 회차 보고 창의 시작(일별 줄 창 표기 = 첫 회차의 이 값). 없으면 null.
+  windowStartMs,
 }) {
   const items = Array.isArray(uncountedExamples?.items)
     ? uncountedExamples.items
@@ -871,6 +890,11 @@ export function buildDailyTickValues({
   return {
     ...pickExternalEvidenceCounts(externalEvidence),
     ...pickPermissionColumns(permissionAnswers),
+    confirmedEventIds: pickConfirmedEventIds({
+      externalEvidence,
+      permissionAnswers,
+    }),
+    windowStartMs: Number.isFinite(windowStartMs) ? windowStartMs : null,
     collectorFails: failedCollectorNames(collectors),
     delivered:
       delivered?.known === true && isCount(delivered.count)
@@ -879,6 +903,25 @@ export function buildDailyTickValues({
     uncountedExampleIds: exampleIdsOf(items.length, uncountedExamples?.version),
     uncountedVersion: uncountedExamples?.version ?? null,
   };
+}
+
+// 이 회차가 «이미 자기 응답으로 확인한» 사건의 식별자 -- 새 조회 0(그 회차 값이 이미 들고 있는 sha · 세션 답 식별자를
+// 옮겨 적을 뿐). 수집 실패 · 미결선은 식별자 없음. D1 = `sha:<커밋 sha>` · 권한 사람 답 = `perm:<세션>|<tool_use_id>`.
+function pickConfirmedEventIds({ externalEvidence, permissionAnswers }) {
+  const shas =
+    externalEvidence?.known === true &&
+    Array.isArray(externalEvidence.confirmedShas)
+      ? externalEvidence.confirmedShas
+      : [];
+  const answers =
+    permissionAnswers?.known === true &&
+    Array.isArray(permissionAnswers.humanEventIds)
+      ? permissionAnswers.humanEventIds
+      : [];
+  return uniqueStrings([
+    ...shas.map((sha) => `${DAILY_EVENT_PREFIX.D1}${sha}`),
+    ...answers,
+  ]);
 }
 
 // ㄴ 분자(확인) · 미조회 -- 수집이 known 일 때만 센다. 수집 실패 · 미결선은 null(0 이 아니다).
@@ -910,6 +953,8 @@ export function dailyFailureTick(reason) {
   return {
     lnConfirmed: null,
     lnUnchecked: null,
+    confirmedEventIds: [],
+    windowStartMs: null,
     collectorFails: [reason],
     delivered: null,
     uncountedExampleIds: [],
@@ -929,6 +974,13 @@ export function normalizeDailyTick(tick) {
     lnConfirmed: isCount(tick.lnConfirmed) ? tick.lnConfirmed : null,
     lnUnchecked: isCount(tick.lnUnchecked) ? tick.lnUnchecked : null,
     ...normalizePermissionColumns(tick),
+    // 식별자 칸이 없는 옛 회차 값 = null(«식별자를 모른다» -- 빈 배열 «확인 사건 없음» 과 다르다).
+    confirmedEventIds: Array.isArray(tick.confirmedEventIds)
+      ? uniqueStrings(tick.confirmedEventIds)
+      : null,
+    windowStartMs: Number.isFinite(tick.windowStartMs)
+      ? tick.windowStartMs
+      : null,
     collectorFails: fails,
     delivered: isCount(tick.delivered) ? tick.delivered : null,
     uncountedExampleIds: readUncountedExampleIds(tick) ?? [],
@@ -943,6 +995,7 @@ function freshDailyState(day) {
     day,
     firstTickAtMs: null,
     lastTickAtMs: null,
+    firstWindowStartMs: null,
     ticks: 0,
     gapCount: 0,
     gapTotalMs: 0,
@@ -953,6 +1006,13 @@ function freshDailyState(day) {
     delivered: null,
     uncountedExampleIds: [],
     uncountedVersion: null,
+    // HYK-255-p1fix-2 -- 사건 합집합 장부(상태 파일에만 · 일별 줄에는 건수만).
+    //   confirmedEventIds = 오늘 회차들이 본 확인 사건 식별자의 합집합
+    //   eventIdsPartial   = 오늘 어느 회차의 식별자를 모른다(옛 회차 값 · 옛 상태에서 이어짐) -> 마감은 옛 규칙(마지막 회차 값)
+    //   countedEventIds   = {날: [식별자]} 앞 일별 줄들이 이미 센 식별자(최근 DAILY_EVENT_KEEP_DAYS 일)
+    confirmedEventIds: [],
+    eventIdsPartial: false,
+    countedEventIds: {},
   };
 }
 
@@ -984,41 +1044,106 @@ function measureDayCrossingInterval({ prevTickAtMs, nowMs }) {
   };
 }
 
-// HYK-255-p1fix-1 (판정 0206 ④ 다) -- 마감 줄의 창 시작 = 직전 일별 줄(같은 파일의 마지막 줄 · 읽기만)의 창 끝 -- 날 사이
-// 틈 0. 직전 줄이 «어제» 줄이 아니면(첫 날 · 여러 날 건너뜀 뒤 첫 줄) = 그날 첫 회차의 창 시작(첫 회차 - 24h).
-// 직전 줄의 창 끝이 이 날 첫 회차보다 뒤로 어긋나 있으면(값이 틀린 줄) 믿지 않고 같은 대체값을 쓴다.
-// 직전 줄은 «창 경계» 로만 읽는다 -- 확인 값의 근거로 쓰지 않는다(판정 1910).
-function closedWindowStartMs(state, previousDailyLine) {
-  const prev = previousDailyLine;
-  const adjacent =
-    prev?.schema === DAILY_SCHEMA &&
-    prev.day === addKstDays(state.day, -1) &&
-    Number.isFinite(prev.windowEndMs) &&
-    prev.windowEndMs <= state.firstTickAtMs;
-  return adjacent ? prev.windowEndMs : state.firstTickAtMs - DAY_MS;
+// HYK-255-p1fix-2 (판정 0706) -- 날을 마감할 때 «그날 처음 본 확인 사건» 을 가른다. 순수 함수.
+//   그날 회차들이 본 식별자 합집합(state.confirmedEventIds) 중 앞 일별 줄들이 이미 센 식별자(state.countedEventIds)를
+//   뺀 것 = fresh. 확인 값을 «아는» 종류(그날 마지막 회차의 칸이 수일 때)의 식별자만 센다 -- 마지막 회차가 수집 실패(null)라
+//   값 자리가 UNKNOWN 인 종류는 센 줄이 없으니 다음 날에 다시 보여도 센다.
+//   식별자를 모르는 날(옛 상태 파일 · 식별자 없는 옛 회차 값이 섞인 날) = complete false -> 옛 규칙(마지막 회차 값 그대로).
+function countedIdSet(counted) {
+  const ids = new Set();
+  for (const list of Object.values(
+    counted && typeof counted === "object" && !Array.isArray(counted)
+      ? counted
+      : {},
+  )) {
+    for (const id of uniqueStrings(list)) ids.add(id);
+  }
+  return ids;
 }
 
-// 마감 줄 = 그날 상태 + 날을 건넌 회차 간격의 전날 몫. 값은 그날 마지막 회차의 값 그대로.
-function buildClosedDailyLine({
-  state,
-  closedAtMs,
-  interval,
-  previousDailyLine,
-}) {
+function knownEventKinds(state) {
+  return [
+    { prefix: DAILY_EVENT_PREFIX.D1, known: isCount(state.lnConfirmed) },
+    {
+      prefix: DAILY_EVENT_PREFIX.PERMISSION,
+      known:
+        Object.hasOwn(state, "permissionHumanAnswers") &&
+        isCount(state.permissionHumanAnswers),
+    },
+  ];
+}
+
+function settleDailyEvents(state) {
+  const complete =
+    Array.isArray(state.confirmedEventIds) && state.eventIdsPartial !== true;
+  if (!complete) return { complete: false, fresh: [], excluded: 0 };
+  const kinds = knownEventKinds(state);
+  const seen = uniqueStrings(state.confirmedEventIds).filter((id) =>
+    kinds.some((k) => k.known && id.startsWith(k.prefix)),
+  );
+  const prior = countedIdSet(state.countedEventIds);
+  const fresh = seen.filter((id) => !prior.has(id));
+  return { complete: true, fresh, excluded: seen.length - fresh.length };
+}
+
+// 줄의 확인 값 두 칸 -- 아는 종류는 «처음 본 사건 수» · 모르는 종류(null)는 null 그대로. 식별자를 모르는 날 = 옛 값 그대로.
+function settledConfirmedColumns(state, settled) {
+  const permission = normalizePermissionColumns(state);
+  if (!settled.complete)
+    return { lnConfirmed: state.lnConfirmed, ...permission };
+  const countOf = (prefix) =>
+    settled.fresh.filter((id) => id.startsWith(prefix)).length;
+  const out = {
+    lnConfirmed: isCount(state.lnConfirmed)
+      ? countOf(DAILY_EVENT_PREFIX.D1)
+      : null,
+    ...permission,
+  };
+  if (Object.hasOwn(permission, "permissionHumanAnswers")) {
+    out.permissionHumanAnswers = isCount(permission.permissionHumanAnswers)
+      ? countOf(DAILY_EVENT_PREFIX.PERMISSION)
+      : null;
+  }
+  return out;
+}
+
+// 오늘로 넘어가는 «앞 줄에서 센 식별자» 장부 -- 방금 마감한 날의 fresh 를 더하고 오래된 날을 지운다.
+function nextCountedEventIds({ state, settled, today }) {
+  const keepFrom = addKstDays(today, -DAILY_EVENT_KEEP_DAYS);
+  const merged = {
+    ...(state?.countedEventIds && typeof state.countedEventIds === "object"
+      ? state.countedEventIds
+      : {}),
+    ...(settled?.complete ? { [state.day]: settled.fresh } : {}),
+  };
+  const out = {};
+  for (const [day, ids] of Object.entries(merged)) {
+    if (DAY_RE.test(day) && day >= keepFrom) out[day] = uniqueStrings(ids);
+  }
+  return out;
+}
+
+// 마감 줄 = 그날 상태 + 날을 건넌 회차 간격의 전날 몫. 확인 값 = 그날 처음 본 사건 수(앞 줄에서 센 것 제외) ·
+// 나머지(미조회 · 수집 실패 · 동시 배달 최대 · 판정 불가)는 그날 마지막 회차의 값 그대로.
+// 창 표기 = 첫 회차의 창 시작 ~ 마지막 회차 -- 값이 센 사건의 창과 같다(1R 의 «직전 줄 창 끝부터» 라벨은 되돌렸다).
+function buildClosedDailyLine({ state, closedAtMs, interval, settled }) {
   const tailGap = interval.gap;
   const tailMs = interval.prevDayShareMs;
   return {
     schema: DAILY_SCHEMA,
     day: state.day,
-    windowStartMs: closedWindowStartMs(state, previousDailyLine),
+    windowStartMs: Number.isFinite(state.firstWindowStartMs)
+      ? state.firstWindowStartMs
+      : state.firstTickAtMs - DAY_MS,
     windowEndMs: state.lastTickAtMs,
     closedAtMs,
     firstTickAtMs: state.firstTickAtMs,
     lastTickAtMs: state.lastTickAtMs,
     ticks: state.ticks,
-    lnConfirmed: state.lnConfirmed,
+    ...settledConfirmedColumns(state, settled),
+    confirmedExcludedEarlier: settled.excluded,
+    windowNote: `앞 줄에서 센 사건 ${settled.excluded}건 제외`,
     lnUnchecked: state.lnUnchecked,
-    ...normalizePermissionColumns(state),
     collectorFails: state.collectorFails,
     coverageGaps: {
       count: state.gapCount + (tailGap ? 1 : 0),
@@ -1034,14 +1159,9 @@ function buildClosedDailyLine({
 // 날이 바뀐 첫 회차 -- 전날 상태가 유효하고(회차 ≥ 1) 그 날 줄이 아직 없으면 줄 1개를 돌려준다.
 // closedDays = 일별 파일에 이미 있는 날 집합(재실행이 같은 날 줄을 또 쓰지 않게 -- 덧붙이기 전용).
 // 상태가 없거나 깨졌으면 줄을 지어내지 않는다(그 날은 줄 없음 = 끊김).
-// previousDailyLine = 같은 파일의 마지막 일별 줄(창 시작을 이어 붙일 때만 읽는다 · 없으면 null).
 // 직전 회차를 아는 새 날은 간격을 여기서 «한 번» 재어 그 날 몫을 상태에 미리 적는다(openingGapSettled).
-export function rolloverDailyState({
-  state,
-  nowMs,
-  closedDays,
-  previousDailyLine = null,
-}) {
+// 마감한 날의 «처음 본 사건» 은 새 날 상태의 장부(countedEventIds)로 넘어간다(이 날 줄이 이미 있어도 같은 값을 넘긴다).
+export function rolloverDailyState({ state, nowMs, closedDays }) {
   const today = kstDayOf(nowMs);
   const valid = isValidDailyState(state);
   if (valid && state.day === today) return { state, closedLine: null };
@@ -1054,21 +1174,26 @@ export function rolloverDailyState({
     : null;
   const closable =
     crossing && !(closedDays instanceof Set && closedDays.has(state.day));
+  const settled = crossing ? settleDailyEvents(state) : null;
   return {
-    state: openDailyState(today, interval),
+    state: openDailyState({
+      today,
+      interval,
+      counted: valid ? nextCountedEventIds({ state, settled, today }) : {},
+    }),
     closedLine: closable
       ? buildClosedDailyLine({
           state,
           closedAtMs: nowMs,
           interval,
-          previousDailyLine,
+          settled,
         })
       : null,
   };
 }
 
-function openDailyState(today, interval) {
-  const opened = freshDailyState(today);
+function openDailyState({ today, interval, counted }) {
+  const opened = { ...freshDailyState(today), countedEventIds: counted };
   if (!interval) return opened;
   return {
     ...opened,
@@ -1084,7 +1209,26 @@ function maxNullable(a, b) {
   return Math.max(a, b);
 }
 
+// 이 회차가 확인한 사건 식별자를 오늘 합집합에 더한다. 이 회차 값에 식별자 칸이 없거나(옛 회차 값) 오늘 앞 회차를
+// 식별자 없이 적은 상태(옛 상태 파일)에서 이어지면 «그날 식별자를 다 모른다»(eventIdsPartial) -- 마감은 옛 규칙으로 간다.
+function unionEventIds(base, t) {
+  const carriedIds = Array.isArray(base.confirmedEventIds)
+    ? base.confirmedEventIds
+    : [];
+  const unknownBefore =
+    base.eventIdsPartial === true ||
+    (base.ticks > 0 && !Array.isArray(base.confirmedEventIds));
+  return {
+    confirmedEventIds: uniqueStrings([
+      ...carriedIds,
+      ...(t.confirmedEventIds ?? []),
+    ]),
+    eventIdsPartial: unknownBefore || t.confirmedEventIds === null,
+  };
+}
+
 // 이 회차를 오늘 상태에 적는다 -- 값은 덮어쓰고(마지막 회차 값) 동시 배달은 최대, 공백은 누적.
+// 확인 사건 식별자는 «덮어쓰지 않고 합집합»(마감 때 확인 값을 만든다).
 // 간격 기준점 = 오늘 첫 회차면 00:00, 아니면 직전 회차. 초과(> 20분)만 공백(정확히 20분은 아님).
 export function recordDailyTick({ state, nowMs, tick, concurrentActive }) {
   const today = kstDayOf(nowMs);
@@ -1110,6 +1254,9 @@ export function recordDailyTick({ state, nowMs, tick, concurrentActive }) {
     ...normalizePermissionColumns(t),
     firstTickAtMs: base.ticks > 0 ? base.firstTickAtMs : nowMs,
     lastTickAtMs: nowMs,
+    firstWindowStartMs:
+      base.ticks > 0 ? (base.firstWindowStartMs ?? null) : t.windowStartMs,
+    ...unionEventIds(base, t),
     ticks: base.ticks + 1,
     gapCount: base.gapCount + (gap ? 1 : 0),
     gapTotalMs: base.gapTotalMs + (gap ? spanMs : 0),
@@ -1426,7 +1573,26 @@ function newPermissionAccumulator() {
     ),
     byKstDay: {},
     humanEvents: [],
+    humanEventIds: new Set(),
   };
+}
+
+// HYK-255-p1fix-2 (판정 0706) -- 사람 답 1건의 식별자 = 세션 식별자 + tool_use_id(없으면 줄 uuid · 그것도 없으면 시각).
+// 같은 세션의 서로 다른 두 답은 tool_use_id 가 달라 다른 식별자다 · 다른 세션이 같은 tool_use_id 를 써도 세션이 달라 다르다.
+// 값은 일별 상태 파일에만 모이고(일별 줄에는 건수만) 보고문에는 렌더하지 않는다.
+export const DAILY_EVENT_PREFIX = Object.freeze({
+  D1: "sha:",
+  PERMISSION: "perm:",
+});
+
+const firstFilledString = (...values) =>
+  values.find((v) => typeof v === "string" && v !== "") ?? null;
+
+function permissionEventId(record) {
+  const session = firstFilledString(record.sessionKey) ?? "(세션 미상)";
+  const own =
+    firstFilledString(record.toolUseId, record.uid) ?? `@${record.atMs}`;
+  return `${DAILY_EVENT_PREFIX.PERMISSION}${session}|${own}`;
 }
 
 const PERMISSION_HUMAN_FIELD = Object.freeze({
@@ -1447,6 +1613,7 @@ function addPermissionDecision(acc, record, seat, cls) {
   if (record.entrypoint !== "cli") acc.sdkAnswers += 1;
   const day = kstDayOf(record.atMs);
   acc.byKstDay[day] = (acc.byKstDay[day] ?? 0) + 1;
+  acc.humanEventIds.add(permissionEventId(record));
   acc.humanEvents.push({
     atMs: record.atMs,
     seat,
@@ -1562,6 +1729,7 @@ export function summarizePermissionRecords({
     undated: acc.undated,
     byKstDay: acc.byKstDay,
     humanEvents: acc.humanEvents.sort((a, b) => a.atMs - b.atMs),
+    humanEventIds: [...acc.humanEventIds],
   };
 }
 

@@ -286,49 +286,98 @@ test("(나-5) 직전 회차 정보가 없는 새 날 첫 회차(첫 실행)는 �
 
 // ---- (다) 창 연속 ------------------------------------------------------------------------------
 
-test("(다-1) 3일 연속: 각 날 줄의 창 시작 = 직전 줄의 창 끝 · 첫 줄은 그날 첫 회차의 창 시작 · 창 끝 = 마지막 회차", async () => {
+// HYK-255-p1fix-2 (판정 0706) -- 1R 의 «직전 줄 창 끝부터» 라벨은 되돌렸다. 일별 줄 창 = 그날 첫 회차의 창 시작 ~ 마지막 회차 ·
+// 확인 값 = 그날 처음 본 사건(앞 줄에서 센 사건 제외). 아래 칸은 사건을 넣고 «값» 을 함께 단언한다(라벨 산수만 단언 금지).
+const withShas = (shas) =>
+  core.buildDailyTickValues({
+    externalEvidence: { known: true, confirmedShas: shas, unchecked: 0 },
+    collectors: [],
+    delivered: { known: true, count: 3 },
+    uncountedExamples: core.UNCOUNTED_EXAMPLES_V3,
+    permissionAnswers: { known: true, humanTotal: 0, undecided: 0 },
+  });
+
+// 사건 = 날마다 sha 하나(그날 첫 회차부터 다음 날 끝까지 24시간 창에 보인다 -- 오늘 것 + 어제 것).
+const shaOfDay = (day) => day.replaceAll("-", "").padEnd(40, "f");
+const everyDayTick = (now) =>
+  withShas([shaOfDay(core.kstDayOf(now)), shaOfDay(core.kstDayOf(now - DAY))]);
+
+async function runDayEvents(dir, day, last) {
+  const start = core.kstDayStartMs(day);
+  const times = [kst(`${day} ${last}`)];
+  while (times[0] - 15 * MIN >= start) times.unshift(times[0] - 15 * MIN);
+  for (const t of times) await tickAt(dir, t, everyDayTick(t));
+  return times;
+}
+
+test("(다-1) 3일 연속: 각 날 줄의 창 = 그날 첫 회차의 창 시작 ~ 마지막 회차 · 날마다 새 사건 1(앞 줄에서 센 어제 사건 1건은 제외)", async () => {
   const dir = tmpDir("nc-fix-window-chain-");
   try {
-    const t12 = await runDay(dir, "2026-11-12", "23:45");
-    await runDay(dir, "2026-11-13", "23:41");
-    await runDay(dir, "2026-11-14", "23:59");
+    const t12 = await runDayEvents(dir, "2026-11-12", "23:45");
+    const t13 = await runDayEvents(dir, "2026-11-13", "23:41");
+    const t14 = await runDayEvents(dir, "2026-11-14", "23:59");
     await tickAt(dir, kst("2026-11-15 00:10"));
     const lines = readLines(dir);
     assert.deepEqual(
       lines.map((l) => l.day),
       ["2026-11-12", "2026-11-13", "2026-11-14"],
     );
-    assert.equal(
-      lines[0].windowStartMs,
-      t12[0] - DAY,
-      "첫 날 = 첫 회차의 창 시작",
-    );
+    assert.equal(lines[0].windowStartMs, t12[0] - DAY, "첫 회차의 창 시작");
     assert.equal(lines[0].windowEndMs, kst("2026-11-12 23:45"));
-    assert.equal(lines[1].windowStartMs, lines[0].windowEndMs, "틈 0");
+    assert.equal(
+      lines[1].windowStartMs,
+      t13[0] - DAY,
+      "직전 줄 창 끝이 아니다",
+    );
     assert.equal(lines[1].windowEndMs, kst("2026-11-13 23:41"));
-    assert.equal(lines[2].windowStartMs, lines[1].windowEndMs, "틈 0");
+    assert.equal(
+      lines[2].windowStartMs,
+      t14[0] - DAY,
+      "직전 줄 창 끝이 아니다",
+    );
     assert.equal(lines[2].windowEndMs, kst("2026-11-14 23:59"));
+    // 값: 첫 날은 어제(11-11) 사건까지 새로 본다 2 · 이튿날부터 어제 사건은 앞 줄에서 센 것이라 오늘 사건 1 만 센다
+    assert.deepEqual(
+      lines.map((l) => l.lnConfirmed),
+      [2, 1, 1],
+    );
+    assert.deepEqual(
+      lines.map((l) => l.confirmedExcludedEarlier),
+      [0, 1, 1],
+    );
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
 
-test("(다-2) 틈 사건: 23:41 -> 00:20 뒤 둘째 날 줄의 창이 (23:41 ..] 부터 시작 -- (23:41, 23:50] 이 어느 줄 창에도 안 빠지는 일 없다", async () => {
+test("(다-2) 틈 사건: 23:41 -> 00:20 사이 사건(23:45)은 11-13 줄 0 · 11-14 줄 1 — 두 줄 합 1 (어느 줄에서도 0 으로 사라지지 않는다)", async () => {
   const dir = tmpDir("nc-fix-window-gap-");
   try {
-    await runDay(dir, "2026-11-13", "23:41");
-    await runDay(dir, "2026-11-14", "23:50");
-    await tickAt(dir, kst("2026-11-15 00:05"));
+    const gapSha = "9".repeat(40);
+    // 23:45 의 사건 = 11-13 23:45 이후 회차의 창에 보인다(회차 시각 ≥ 사건 시각 · ≤ 사건 + 24h)
+    const seen = (now) =>
+      now >= kst("2026-11-13 23:45") && now <= kst("2026-11-14 23:45")
+        ? withShas([gapSha])
+        : withShas([]);
+    for (const hhmm of ["23:11", "23:26", "23:41"]) {
+      await tickAt(
+        dir,
+        kst(`2026-11-13 ${hhmm}`),
+        seen(kst(`2026-11-13 ${hhmm}`)),
+      );
+    }
+    for (const hhmm of ["00:20", "12:00", "23:50"]) {
+      await tickAt(
+        dir,
+        kst(`2026-11-14 ${hhmm}`),
+        seen(kst(`2026-11-14 ${hhmm}`)),
+      );
+    }
+    await tickAt(dir, kst("2026-11-15 00:05"), withShas([]));
     const [l13, l14] = readLines(dir);
-    assert.equal(l13.windowEndMs, kst("2026-11-13 23:41"));
-    assert.equal(l14.windowStartMs, kst("2026-11-13 23:41"));
-    const probe = kst("2026-11-13 23:45"); // 틈 안의 한 시각
-    const inWindow = (l) => probe > l.windowStartMs && probe <= l.windowEndMs;
-    assert.equal(
-      [l13, l14].filter(inWindow).length,
-      1,
-      "틈 안의 시각이 정확히 한 줄의 창에 든다",
-    );
+    assert.deepEqual([l13.lnConfirmed, l14.lnConfirmed], [0, 1]);
+    // 마지막 회차 값(1R 규칙)이면 11-14 줄은 23:50 회차의 창(11-13 23:50 ~) 밖이라 0 이 된다 -- 그게 막은 거짓 0
+    assert.equal(l14.windowStartMs, kst("2026-11-14 00:20") - DAY);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -351,7 +400,7 @@ test("(다-3) 여러 날 건너뜀 뒤 첫 줄 = 직전 줄이 어제가 아니�
   }
 });
 
-test("(다-4) 직전 줄이 옛 칸 이름이어도 창 끝을 읽는다 · 이미 쓴 줄은 바이트 무변", async () => {
+test("(다-4) 직전 줄이 옛 칸 이름이어도 이미 쓴 줄은 바이트 무변 · 새 줄 창 = 그날 첫 회차의 창 시작(옛 줄 창 끝을 읽지 않는다) · 값은 사건 합집합", async () => {
   const dir = tmpDir("nc-fix-window-oldline-");
   try {
     const old = {
@@ -371,8 +420,9 @@ test("(다-4) 직전 줄이 옛 칸 이름이어도 창 끝을 읽는다 · 이�
     };
     fs.writeFileSync(dailyPath(dir), `${JSON.stringify(old)}\n`, "utf8");
     const seeded = fs.readFileSync(dailyPath(dir));
-    await runDay(dir, "2026-11-13", "23:41");
-    await tickAt(dir, kst("2026-11-14 00:10"));
+    const oldSha = "8".repeat(40);
+    const t13 = await runDay(dir, "2026-11-13", "23:41", withShas([oldSha]));
+    await tickAt(dir, kst("2026-11-14 00:10"), withShas([]));
     const after = fs.readFileSync(dailyPath(dir));
     assert.ok(
       after.subarray(0, seeded.length).equals(seeded),
@@ -380,7 +430,9 @@ test("(다-4) 직전 줄이 옛 칸 이름이어도 창 끝을 읽는다 · 이�
     );
     const lines = readLines(dir);
     assert.equal(lines.length, 2);
-    assert.equal(lines[1].windowStartMs, old.windowEndMs);
+    assert.equal(lines[1].windowStartMs, t13[0] - DAY);
+    assert.notEqual(lines[1].windowStartMs, old.windowEndMs);
+    assert.equal(lines[1].lnConfirmed, 1, "옛 줄 뒤 첫 줄도 사건 합집합 값");
     assert.ok(Array.isArray(lines[1].uncountedExampleIds));
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });

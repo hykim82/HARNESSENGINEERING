@@ -2829,9 +2829,11 @@ function buildDailyTick({
   gate4,
   externalEvidence,
   aux,
+  windowStartMs,
 }) {
   const { outboxResult, relayResult, gateAux, permissionResult } = aux;
   return buildDailyTickValues({
+    windowStartMs,
     externalEvidence,
     permissionAnswers: permissionResult ?? undefined,
     collectors: buildCollectors({
@@ -3091,6 +3093,7 @@ function buildPartialCountOnceResult({
       gate4,
       externalEvidence,
       aux,
+      windowStartMs,
     }),
     gate4,
     externalEvidence,
