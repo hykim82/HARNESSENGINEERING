@@ -245,8 +245,14 @@ test("커밋1 짝 키 정의는 소스에 «한 곳» 이다 (상신HHMM 토큰 
     new URL("./partial-count-report.mjs", import.meta.url),
     "utf8",
   );
-  const defs = src.match(/판정-\|상신\)\(\\d\{4\}\)/g) ?? [];
+  // HYK-255-g7-token-diag-1: 토큰 경계(lookbehind)가 «상신» 앞에 들어와 정규식 모양이
+  // 바뀌었다 -- «판정-|상신)(\d{4})» 연속 문자열 대신 «상신)(\d{4})» 정의 1개 + 경계 존재.
+  const defs = src.match(/상신\)\(\\d\{4\}\)/g) ?? [];
   assert.equal(defs.length, 1, `짝 키 토큰 정의가 ${defs.length}곳`);
+  assert.ok(
+    src.includes("(?<![\\p{L}\\p{N}])상신)(\\d{4})"),
+    "토큰 경계(상신 앞 글자·숫자 금지)가 정의에 있다",
+  );
   assert.ok(!src.includes("OUTBOX_PANJEONG_HHMM_RE"), "옛 정의가 남아 있다");
 });
 
