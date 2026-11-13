@@ -1,0 +1,222 @@
+# memory-gate.ps1 -- canonical ORCH memory gate (L1 F-1 · 2026-11-05 ORCH-133 · 책임자 판정 1521 답 §2)
+# Origin: ORCH scratch template gate-round338.ps1 (ORCH-132) -- measurement procedure UNCHANGED (ORCH70 §13-1-b):
+#   game check -> runner-detect -> VM phase alignment -> discard + 60s settle -> 4 stable samples (range<=300, vmmem 0)
+#   -> step2 (A/B 30s, >= threshold) -> step4b (C1/C2 30s) -> launch seat via canonical launcher orca-worker-seat.cmd.
+# Added by F-1 (no change to the verdicts or exit codes):
+#   * every verdict writes watch\memory-gate-state.json (status open|closed|deferred · closed_at · min · threshold ·
+#     pending delivery command · free/vmmem samples · paged/nonpaged pool MB · boot time) and appends one line to
+#     watch\memory-gate-history.jsonl (24h paged-pool rate samples for L1 E).
+#   * -DryRun: full measurement, NEVER launches a seat (verdict OPEN becomes DRYRUN_WOULD_OPEN); use -StatePath/-HistoryPath
+#     pointing at a scratch folder for dry runs.
+# Threshold default 3,000 = runner axis (11-05 decision · 339 onward). Rollback condition (runner low-memory death 1 or
+# start<3,700 ETIMEDOUT red 2) -> pass -Threshold 3200 and notify inbox.
+# Honest limit: this is a convention-level script (ORCH runs it); the state file is read by nobody until F-2 lands.
+param(
+  [Parameter(Mandatory=$true)][string]$Round,
+  [Parameter(Mandatory=$true)][string]$Worktree,
+  [Parameter(Mandatory=$true)][string]$Role,
+  [Parameter(Mandatory=$true)][string]$Title,
+  [Parameter(Mandatory=$true)][string]$OrchHandle,
+  [Parameter(Mandatory=$true)][string]$LogPath,
+  [string]$Model = 'claude-sonnet-5',
+  [string]$Effort = 'high',
+  [int]$Threshold = 3000,
+  [int]$ThresholdGame = 3800,
+  [int]$Line5D = 5100,
+  [int]$RunnerNode = 8,
+  [string]$PendingCmd = '',
+  [string]$StatePath = 'D:\문서관리\하네스-관제실\watch\memory-gate-state.json',
+  [string]$HistoryPath = 'D:\문서관리\하네스-관제실\watch\memory-gate-history.jsonl',
+  [switch]$DryRun
+)
+$ErrorActionPreference = 'Stop'
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$OutputEncoding = [System.Text.Encoding]::UTF8
+$OUT = $LogPath
+$WT = $Worktree
+$WTID = 'e841ec57-d1b5-4be0-a44b-2023793e7d33::' + ($Worktree -replace '\\', '/')
+$script:Samples = @()
+
+function Log([string]$m) { $ts = (Get-Date -Format 'HH:mm:ss'); Add-Content -Path $OUT -Value "$ts $m"; Write-Host "$ts $m" }
+function Get-FreeMb { [int]((Get-Counter '\Memory\Available MBytes').CounterSamples[0].CookedValue) }
+function Get-VmMb {
+  $p = Get-Process -Name vmmem, vmmemWSL -ErrorAction SilentlyContinue
+  if (-not $p) { return 0 }
+  return [int](($p | Measure-Object -Property WorkingSet64 -Sum).Sum / 1MB)
+}
+function Get-NodeCount { (Get-Process -Name node -ErrorAction SilentlyContinue | Measure-Object).Count }
+function Get-GameCount {
+  (Get-Process -Name LeagueClient, 'League of Legends', LeagueClientUx, LeagueClientUxRender -ErrorAction SilentlyContinue | Measure-Object).Count  # vgc excluded (owner ruling 2026-11-07 17:5x §1: Vanguard kernel module stays resident after boot without a game session)
+}
+function Get-PoolMb([string]$c) { [int]((Get-Counter "\Memory\$c").CounterSamples[0].CookedValue / 1MB) }
+
+function Write-GateState([string]$verdict, [string]$status, $min) {
+  $now = Get-Date
+  $boot = (Get-CimInstance Win32_OperatingSystem).LastBootUpTime
+  $o = [ordered]@{
+    schema = 'memory-gate-state/v1'
+    status = $status
+    verdict = $verdict
+    round = $Round
+    at = $now.ToString('yyyy-MM-ddTHH:mm:sszzz')
+    closed_at = $(if ($status -eq 'closed') { $now.ToString('yyyy-MM-ddTHH:mm:sszzz') } else { $null })
+    min_free_mb = $min
+    threshold_mb = $script:THRESH
+    mode = $script:MODE
+    role = $Role
+    worktree = $Worktree
+    pending_cmd = $(if ($status -eq 'open') { '' } else { $PendingCmd })
+    samples_free_mb = $script:Samples
+    paged_pool_mb = (Get-PoolMb 'Pool Paged Bytes')
+    nonpaged_pool_mb = (Get-PoolMb 'Pool Nonpaged Bytes')
+    free_now_mb = (Get-FreeMb)
+    boot_time = $boot.ToString('yyyy-MM-ddTHH:mm:sszzz')
+    uptime_h = [math]::Round(($now - $boot).TotalHours, 2)
+    dry_run = [bool]$DryRun
+  }
+  $json = $o | ConvertTo-Json -Compress -Depth 4
+  $enc = New-Object System.Text.UTF8Encoding($false)
+  [IO.File]::WriteAllText($StatePath, ($o | ConvertTo-Json -Depth 4), $enc)
+  [IO.File]::AppendAllText($HistoryPath, $json + "`n", $enc)
+}
+function Finish([string]$verdictTail, [string]$status, $min) {
+  Log "VERDICT=$verdictTail"
+  Write-GateState (($verdictTail -split ' ')[0]) $status $min
+  exit 0
+}
+
+$NODE_BASE = (Get-Process -Name node -ErrorAction SilentlyContinue | Measure-Object).Count
+function Assert-NoRunner([string]$where) {
+  $n = Get-NodeCount
+  if (($n - $NODE_BASE) -ge $RunnerNode) { Finish "DEFERRED_RUNNER_ON_OTHER_SEAT at=$where node=$n base=$NODE_BASE (no gate measurement while a full runner runs)" 'deferred' $null }
+}
+function Take-Sample { $f = Get-FreeMb; $v = Get-VmMb; return @($f, $v) }
+function Take-AbsenceConfirmed {
+  $waited = 0
+  while ((Get-VmMb) -gt 0 -and $waited -lt 90) { Start-Sleep -Seconds 5; $waited += 5 }
+  $s = Take-Sample
+  return @($s[0], $s[1], $waited)
+}
+
+$script:THRESH = $Threshold; $script:MODE = 'NORMAL'
+Set-Content -Path $OUT -Value "memory-gate.ps1 round $Round ($Title · role $Role · $Model/$Effort) · runner axis threshold $Threshold (11-05 decision) · game threshold $ThresholdGame · (5)-d line $Line5D · dry_run=$([bool]$DryRun). Procedure = ORCH70 §13-1-b (stable 4 samples range<=300, consecutive 2, (4)-a, (4)-b, alignment fixed text 51, runner-detect = increase over node floor >= $RunnerNode). Canonical launcher orca-worker-seat.cmd wrapper only."
+
+$g = Get-GameCount
+if ($g -gt 0) { $script:MODE = 'GAME'; Finish "CLOSED_GAME_MODE_RUNNER_AXIS game=$g (runner-axis slice is not delivered in game mode)" 'closed' $null }
+Log "mode=$($script:MODE) game=$g threshold=$($script:THRESH) node=$(Get-NodeCount)"
+Assert-NoRunner 'start'
+
+# Phase alignment: wait for the next VM appear -> vanish, then 20s
+$t0 = Get-Date; $seen = $false; $gone = $null
+while (((Get-Date) - $t0).TotalSeconds -lt 340) {
+  if ((Get-VmMb) -gt 0) { if (-not $seen) { Log "vm appeared" }; $seen = $true }
+  elseif ($seen) { $gone = Get-Date; break }
+  Start-Sleep -Seconds 3
+}
+if ($null -eq $gone) {
+  if (-not $seen) { Log "ALIGN=(b) 340s continuous vmmem 0 (never appeared) -- alignment satisfied (fixed text 51, Supervisor 2026-10-14 14:4x)" }
+  else { Finish "DEFERRED_NO_VM_CYCLE_OBSERVED seen=$seen (vm appeared but did not vanish within 340s)" 'deferred' $null }
+} else {
+  Log "ALIGN=(a) vm vanished at $($gone.ToString('HH:mm:ss')) -- waiting 20s"
+  Start-Sleep -Seconds 20
+}
+Assert-NoRunner 'post-align'
+
+$d = Take-Sample
+Log "discard-sample free=$($d[0]) vmmem=$($d[1])"
+Log "settling 60s"
+Start-Sleep -Seconds 60
+
+$valid = @(); $raw = @(); $vms = @(); $replaceLog = @()
+for ($slot = 1; $slot -le 4; $slot++) {
+  Assert-NoRunner "slot$slot"
+  $tries = 0; $got = $null
+  while ($tries -lt 3 -and $null -eq $got) {
+    $tries++
+    $s = Take-AbsenceConfirmed
+    $raw += $s[0]; $vms += $s[1]
+    if ($s[1] -eq 0) { $got = $s[0] }
+    else { $replaceLog += "slot$slot try$tries INVALID vmmem=$($s[1]) raw=$($s[0]) wait=$($s[2])s" }
+  }
+  if ($null -eq $got) {
+    foreach ($r in $replaceLog) { Log $r }
+    $corrected = for ($i = 0; $i -lt $raw.Count; $i++) { $raw[$i] + $vms[$i] }
+    $cmin = ($corrected | Measure-Object -Minimum).Minimum
+    $cmax = ($corrected | Measure-Object -Maximum).Maximum
+    $rawmin = ($raw | Measure-Object -Minimum).Minimum
+    Log "step1 EXHAUSTED slot$slot -- (5)-d check: corrected_range=$($cmax - $cmin) raw_min=$rawmin line=$Line5D"
+    if (($cmax - $cmin) -le 300 -and $rawmin -ge $Line5D) { Log "(5)-d SATISFIED -- proceeding"; $valid = $raw; break }
+    $script:Samples = $raw
+    Finish "CLOSED_VMMEM_RESIDENT ((5)-d not satisfied: raw_min=$rawmin < $Line5D)" 'closed' $rawmin
+  }
+  $valid += $got
+  Log "slot$slot valid free=$got (tries $tries) node=$(Get-NodeCount) game=$(Get-GameCount)"
+  if ($slot -lt 4) { Start-Sleep -Seconds 15 }
+}
+foreach ($r in $replaceLog) { Log $r }
+$script:Samples = $valid
+$min = ($valid | Measure-Object -Minimum).Minimum
+$max = ($valid | Measure-Object -Maximum).Maximum
+Log "step1 samples=$($valid -join ',') min=$min max=$max range=$($max - $min)"
+if (($max - $min) -gt 300) { Finish "CLOSED_UNSTABLE range=$($max - $min)" 'closed' $min }
+if ($min -lt $script:THRESH) { Finish "CLOSED_BELOW_THRESHOLD mode=$($script:MODE) min=$min < $($script:THRESH)" 'closed' $min }
+
+$a = $null; $b = $null; $closed = $false
+for ($try = 1; $try -le 3; $try++) {
+  Assert-NoRunner "step2 try$try"
+  if ($null -eq $a) {
+    $s = Take-AbsenceConfirmed
+    Log "step2 try$try A free=$($s[0]) vmmem=$($s[1]) wait=$($s[2])s"
+    if ($s[1] -gt 0) { Log "step2 A INVALID (vmmem resident)"; continue }
+    if ($s[0] -lt $script:THRESH) { Log "step2 A valid but BELOW LINE"; $closed = $true; break }
+    $a = $s[0]
+  }
+  Start-Sleep -Seconds 30
+  $s = Take-AbsenceConfirmed
+  Log "step2 try$try B free=$($s[0]) vmmem=$($s[1]) wait=$($s[2])s"
+  if ($s[1] -gt 0) { Log "step2 B INVALID (vmmem resident) -- retake"; $a = $null; continue }
+  if ($s[0] -lt $script:THRESH) { Log "step2 B valid but BELOW LINE"; $closed = $true; break }
+  $b = $s[0]; break
+}
+if ($closed) { Finish "CLOSED_STEP2_BELOW_LINE mode=$($script:MODE)" 'closed' $min }
+if ($null -eq $a -or $null -eq $b) { Finish "CLOSED_STEP2_VMMEM_RESIDENT" 'closed' $min }
+Log "step2 PASS a=$a b=$b"
+
+$c1 = $null; $c2 = $null; $closed4 = $false
+for ($try = 1; $try -le 3; $try++) {
+  Assert-NoRunner "step4b try$try"
+  if ($null -eq $c1) {
+    $s = Take-AbsenceConfirmed
+    Log "step4b try$try C1 free=$($s[0]) vmmem=$($s[1]) wait=$($s[2])s"
+    if ($s[0] -ge $script:THRESH -and $s[1] -eq 0) { $c1 = $s[0] }
+    elseif ($s[1] -gt 0) { Log "step4b C1 invalid (vmmem resident) -- retake"; continue }
+    else { Log "step4b C1 valid and below line"; $closed4 = $true; break }
+  }
+  Start-Sleep -Seconds 30
+  $s = Take-AbsenceConfirmed
+  Log "step4b try$try C2 free=$($s[0]) vmmem=$($s[1]) wait=$($s[2])s"
+  if ($s[0] -ge $script:THRESH -and $s[1] -eq 0) { $c2 = $s[0]; break }
+  elseif ($s[1] -gt 0) { Log "step4b C2 invalid (vmmem resident) -- retake"; $c1 = $null; continue }
+  else { Log "step4b C2 valid and below line"; $closed4 = $true; break }
+}
+if ($closed4) { Finish "CLOSED_STEP4B_BELOW_LINE mode=$($script:MODE)" 'closed' $min }
+if ($null -eq $c1 -or $null -eq $c2) { Finish "CLOSED_STEP4B_VMMEM_RESIDENT" 'closed' $min }
+Log "step4b PASS c1=$c1 c2=$c2"
+Assert-NoRunner 'pre-launch'
+
+if ($DryRun) { Finish "DRYRUN_WOULD_OPEN mode=$($script:MODE) min=$min (no seat launched)" 'dryrun-open' $min }
+
+Log "GATE=OPEN mode=$($script:MODE) -- launching $Role seat via canonical launcher orca-worker-seat.ps1 ($Model / $Effort)"
+$cmd = '& "D:\문서관리\하네스-관제실\orca-worker-seat.cmd" -Role ' + $Role + ' -Worktree "' + $WT + '" -Engine claude -Model ' + $Model + ' -Effort ' + $Effort
+Add-Content -Path $OUT -Value "launch-command: $cmd"
+$seat = & orca terminal create --worktree $WTID --command $cmd --title $Title --json 2>&1 | Out-String
+Add-Content -Path $OUT -Value $seat
+Write-Host $seat
+Start-Sleep -Seconds 12
+$a1 = Take-Sample
+Log "seat-after-1 free=$($a1[0]) vmmem=$($a1[1]) game=$(Get-GameCount)"
+Start-Sleep -Seconds 30
+$a2 = Take-Sample
+Log "seat-after-2 free=$($a2[0]) vmmem=$($a2[1]) game=$(Get-GameCount)"
+Log "VERDICT=OPEN_SEAT_LAUNCHED mode=$($script:MODE)"
+Write-GateState 'OPEN_SEAT_LAUNCHED' 'open' $min
