@@ -9,6 +9,7 @@
 // 가짜 entries 배열을 손으로 만들지 않는다.
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { parseWatchLog } from "./reach-report-core.mjs";
 import {
   buildPartialCountReport,
@@ -167,7 +168,7 @@ test("필수 문면 ⓔ: 조회 실패·관측 없음은 0이 아니라 UNKNOWN(
   );
 });
 
-test("필수 문면 4·5: ㄱ/ㄴ/보조 칸 분리 · 분모 · 커버리지 1/7 · 미계수 예시 목록이 문면대로 나온다", () => {
+test("필수 문면 4·5: ㄱ/ㄴ/보조 칸 분리 · 분모 · 커버리지 1/6 · 미계수 예시 목록이 문면대로 나온다", () => {
   const text = buildPartialCountReport(baseInput());
   assert.ok(text.includes("라운드 분모: 배달 5 / 소비 3 / 영수증 결손 2"));
   // 2R 반려 1 수리 고정: 분모 «바로 다음 줄»에 기준 단위가 명시된다
@@ -486,7 +487,7 @@ test("renderRelayLedgerAuxLines: known:true면 대조 수치 줄 + 분류 집계
   );
   assert.equal(
     lines[1],
-    "- 전달 항목 분류: ㄱ-1 1 · ㄱ-2 0 · ㄱ-3 0 · ㄱ-4 0 · ㄱ-5 0 · ㄱ-6 0 · " +
+    "- 전달 항목 분류: ㄱ-1 1 · ㄱ-2 0 · ㄱ-3 0 · ㄱ-4 0 · ㄱ-5(폐지) 0 · ㄱ-6 0 · " +
       "ㄱ-7 2 · ㄴ 0(자기 분류 — 독립 아님)",
   );
 });
@@ -756,4 +757,168 @@ test("renderExternalEvidenceCandidateLine / parseExternalEvidenceCandidateLine: 
   assert.deepEqual(parseExternalEvidenceCandidateLine(null), {
     state: "absent",
   });
+});
+
+// ---------------------------------------------------------------------------
+// HYK-255-g-aux-render-1 커밋 3 (D1 검토 P2-3) -- 이 파일의 시험 제목에 낡은
+// 분모(7 로 끝나는 커버리지 표기)가 남지 않는다. 제목만의 문제였다(단언은 이미
+// 6 이었다) -- 실패 출력에 낡은 숫자가 보이는 것을 막는 자기 점검.
+// ---------------------------------------------------------------------------
+
+test("P2-3: 이 파일의 시험 제목 어디에도 낡은 커버리지 분모 표기가 없고, 현행 분모 표기가 제목에 있다", () => {
+  const src = readFileSync(new URL(import.meta.url), "utf8");
+  const titles = src.split("\n").filter((line) => line.startsWith('test("'));
+  assert.ok(titles.length > 20, "제목 줄을 읽었다");
+  const staleDenominator = ["1", "7"].join("/");
+  const stale = titles.filter((t) =>
+    t.includes(`커버리지 ${staleDenominator}`),
+  );
+  assert.deepEqual(stale, [], "낡은 분모 제목");
+  const currentDenominator = ["1", String(GATE_TYPES.length)].join("/");
+  assert.ok(
+    titles.some((t) => t.includes(`커버리지 ${currentDenominator}`)),
+    `제목에 현행 분모 ${currentDenominator} 가 없다`,
+  );
+});
+
+// ---------------------------------------------------------------------------
+// HYK-255-g-aux-render-1 커밋 2 (PM 진단 §(d) D3) -- 렌더 결함 3.
+// ---------------------------------------------------------------------------
+
+const ZERO_TALLY = {
+  "ㄱ-1": 0,
+  "ㄱ-2": 0,
+  "ㄱ-3": 0,
+  "ㄱ-4": 0,
+  "ㄱ-5": 0,
+  "ㄱ-6": 0,
+  "ㄱ-7": 0,
+  ㄴ: 0,
+};
+
+test("D3 ⑴ 항목 0개(전달 머리줄 형식 미시작)면 bare «ㄴ 0» 대신 «형식 미시작 — 분류 없음» 이 나온다", () => {
+  const lines = renderRelayLedgerAuxLines(
+    baseRelayLedgerResult({ classificationTally: ZERO_TALLY }),
+  );
+  assert.equal(
+    lines[1],
+    "- 전달 항목 분류: 형식 미시작 — 분류 없음(자기 분류 — 독립 아님)",
+  );
+  assert.ok(!lines[1].includes("ㄴ 0"), "bare «ㄴ 0» 이 남아 있다");
+  const text = buildPartialCountReport(
+    baseInput({
+      relayLedgerResult: baseRelayLedgerResult({
+        classificationTally: ZERO_TALLY,
+      }),
+    }),
+  );
+  assert.ok(text.includes("형식 미시작 — 분류 없음"));
+  assert.ok(!/ㄴ 0\(자기 분류/.test(text));
+});
+
+test("D3 ⑴ 항목이 1개라도 있으면(ㄴ 만 1 이어도) 기존 숫자 표기가 그대로다", () => {
+  const onlyLn = renderRelayLedgerAuxLines(
+    baseRelayLedgerResult({ classificationTally: { ...ZERO_TALLY, ㄴ: 1 } }),
+  );
+  assert.ok(onlyLn[1].endsWith("ㄴ 1(자기 분류 — 독립 아님)"));
+  assert.ok(!onlyLn[1].includes("형식 미시작"));
+  const one = renderRelayLedgerAuxLines(
+    baseRelayLedgerResult({
+      classificationTally: { ...ZERO_TALLY, "ㄱ-1": 1 },
+    }),
+  );
+  assert.ok(one[1].includes("ㄱ-1 1 ·"));
+  assert.ok(one[1].includes("ㄴ 0(자기 분류 — 독립 아님)"));
+  assert.ok(!one[1].includes("형식 미시작"));
+});
+
+test("D3 ⑶ 전달 항목 분류 줄의 ㄱ-5 는 현행 유형처럼 읽히지 않는다 -- «ㄱ-5(폐지)» 로 표기된다 (1-C 문면: 게이트 5 폐지 · 번호 유지)", () => {
+  const lines = renderRelayLedgerAuxLines(baseRelayLedgerResult());
+  assert.ok(lines[1].includes("ㄱ-5(폐지) 0"));
+  assert.ok(!/ㄱ-5 0/.test(lines[1]));
+  // 폐지 번호는 ABOLISHED_GATE_TYPES 에서 기계로 나온다 (번호를 문자열로 박지 않는다).
+  for (const g of ABOLISHED_GATE_TYPES) {
+    assert.ok(lines[1].includes(`ㄱ-${g.number}(폐지) `));
+  }
+  // 분모 6 · 게이트 5 폐지 표기는 보고서에서 그대로.
+  const text = buildPartialCountReport(baseInput());
+  assert.ok(text.includes("- 독립 앵커 유형 커버리지: 1/6\n"));
+  assert.ok(
+    text.includes(
+      "- 폐지된 ㄱ 유형(분모 밖): 5 패킷 서명 — 폐지(2026-09-03 B-11)\n",
+    ),
+  );
+});
+
+function gate4WithUndecidable(overrides = {}) {
+  return {
+    known: true,
+    candidatesInWindow: 3,
+    checked: 3,
+    approved: 0,
+    notApproved: 1,
+    undecidable: 2,
+    uncheckedByBudget: 0,
+    approvedEvents: [],
+    ...overrides,
+  };
+}
+
+test("D3 ⑵ UNDECIDABLE N 에 사유 분포가 붙는다 -- «UNDECIDABLE 2(사유: HTTP_FAILED 1 · RATE_LIMITED 1)»", () => {
+  const text = buildPartialCountReport(
+    baseInput({
+      gate4: gate4WithUndecidable({
+        undecidableReasons: { RATE_LIMITED: 1, HTTP_FAILED: 1 },
+      }),
+    }),
+  );
+  assert.ok(
+    text.includes(
+      "UNDECIDABLE 2(사유: HTTP_FAILED 1 · RATE_LIMITED 1) · 미조회(예산) 0건",
+    ),
+    "사유 분포 칸이 없다",
+  );
+});
+
+test("D3 ⑵ 사유는 건수 많은 순 · 같으면 이름순이고, 한 가지 사유도 같은 모양이다", () => {
+  const many = buildPartialCountReport(
+    baseInput({
+      gate4: gate4WithUndecidable({
+        undecidable: 4,
+        undecidableReasons: {
+          RATE_LIMITED: 1,
+          HTTP_FAILED: 2,
+          ALLOWLIST_REF_MISMATCH: 1,
+        },
+      }),
+    }),
+  );
+  assert.ok(
+    many.includes(
+      "UNDECIDABLE 4(사유: HTTP_FAILED 2 · ALLOWLIST_REF_MISMATCH 1 · RATE_LIMITED 1)",
+    ),
+  );
+  const one = buildPartialCountReport(
+    baseInput({
+      gate4: gate4WithUndecidable({
+        undecidable: 2,
+        undecidableReasons: { ALLOWLIST_REF_MISMATCH: 2 },
+      }),
+    }),
+  );
+  assert.ok(one.includes("UNDECIDABLE 2(사유: ALLOWLIST_REF_MISMATCH 2)"));
+});
+
+test("D3 ⑵ UNDECIDABLE 0 이면 사유 칸이 없고(기존 문면 그대로) · 사유 정보가 전달되지 않았으면 «사유 미상» 으로 낸다(조용한 생략 금지)", () => {
+  const zero = buildPartialCountReport(
+    baseInput({
+      gate4: gate4WithUndecidable({ undecidable: 0, notApproved: 3 }),
+    }),
+  );
+  assert.ok(zero.includes("UNDECIDABLE 0 · 미조회(예산) 0건"));
+  assert.ok(!zero.includes("사유:"));
+  const unknown = buildPartialCountReport(
+    baseInput({ gate4: gate4WithUndecidable() }),
+  );
+  assert.ok(unknown.includes("UNDECIDABLE 2(사유 미상) · 미조회(예산) 0건"));
 });

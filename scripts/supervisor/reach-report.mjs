@@ -138,25 +138,51 @@ function writeNoticeFile({
 }) {
   if (toNotify.length === 0 && !externalChange) return null;
   if (!existsFn(notifyDir)) mkdirFn(notifyDir, { recursive: true });
-  const noticeText =
-    buildNoticeText({ toNotify, nowMs: now }) +
-    formatExternalEvidenceChangeSection(externalChange);
+  const noticeText = composeNoticeText({ toNotify, externalChange, now });
   const noticePath = path.join(notifyDir, buildNoticeFileName(now));
   writeFn(noticePath, noticeText, "utf8");
   return noticePath;
 }
 
-function formatExternalEvidenceChangeSection(change) {
-  if (!change) return "";
+// N 변화 절의 줄들 -- 앞뒤 빈 줄은 composeNoticeText 가 맞춘다.
+function externalEvidenceChangeSectionLines(change) {
   const before = change.previous === null ? "이전 기록 없음" : change.previous;
   return [
-    "",
     "부분 계수 보고서 ㄴ 절 «외부 독립 증거 후보» 의 확인 건수가 바뀌었습니다(같은 N 이 계속되면 다시 오지 않습니다):",
     "",
     `- **외부 독립 증거 후보(GitHub 웹 Update branch 병합 커밋)** 확인 ${before} -> ${change.current} ` +
       `(미조회 ${change.unchecked} · 분류 대기 -- ㄴ 분자에는 들어가지 않았습니다. 분류 확정은 한용 몫입니다)`,
     "",
-  ].join("\n");
+  ];
+}
+
+// HYK-255-g-aux-render-1 커밋 3 (D1 검토 P2-4) -- 통지 본문 조립.
+// 기존 buildNoticeText(이상 전이 · 측정 불능 절 + 마무리 줄 «이 파일이 정본입니다 …»)
+// 는 건드리지 않고 그 결과에 N 변화 절을 «마무리 줄 앞에» 끼운다(마무리 줄 = 본문의
+// 마지막 비어 있지 않은 줄). 이상 전이가 하나도 없고 N 변화만 있는 tick 이면 머리
+// 문구를 «이상 전이 통지» 로 찍지 않는다(이상이 열린 것이 아니다). 통지 조건 · 파일
+// 장 수는 그대로다.
+const ANOMALY_NOTICE_HEADER_PHRASE = "이상 전이 통지";
+const PARTIAL_COUNT_NOTICE_HEADER_PHRASE = "부분 계수 변화 통지";
+
+function composeNoticeText({ toNotify, externalChange, now }) {
+  const base = buildNoticeText({ toNotify, nowMs: now });
+  if (!externalChange) return base;
+  const lines = base.split("\n");
+  let closingIdx = lines.length - 1;
+  while (closingIdx > 0 && lines[closingIdx].trim() === "") closingIdx -= 1;
+  if (toNotify.length === 0) {
+    lines[0] = lines[0].replace(
+      ANOMALY_NOTICE_HEADER_PHRASE,
+      PARTIAL_COUNT_NOTICE_HEADER_PHRASE,
+    );
+  }
+  lines.splice(
+    closingIdx,
+    0,
+    ...externalEvidenceChangeSectionLines(externalChange),
+  );
+  return lines.join("\n");
 }
 
 // runReachOnce(...) -- 한 번의 실행. 모든 I/O가 주입 가능(시험이 실제
