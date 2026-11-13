@@ -25,13 +25,16 @@ const MIN = 60 * 1000;
 // "2026-11-13 23:59" (KST) -> epoch ms. 분 단위 입력만 쓴다(초는 합성 시계에 불필요).
 const kst = (s) => Date.parse(`${s.replace(" ", "T")}:00+09:00`);
 
-const UNCOUNTED_V3 = ["U1", "U2", "U3", "U4", "U5", "U6", "U7"];
+// HYK-255-p1fix-1 -- 새 칸 이름(uncountedExampleIds · V3-n). 옛 칸 이름 줄(uncountedRanges · U1..)은 «지나간 줄» 합성 입력
+// (dailyLine)에만 남긴다 -- 읽는 쪽이 둘 다 받는지 보기 위함.
+const UNCOUNTED_V3 = ["V3-1", "V3-2", "V3-3", "V3-4", "V3-5", "V3-6", "V3-7"];
+const LEGACY_UNCOUNTED_V3 = ["U1", "U2", "U3", "U4", "U5", "U6", "U7"];
 const ZERO = Object.freeze({
   lnConfirmed: 0,
   lnUnchecked: 0,
   collectorFails: [],
   delivered: 3,
-  uncountedRanges: UNCOUNTED_V3,
+  uncountedExampleIds: UNCOUNTED_V3,
   uncountedVersion: "uncounted-examples/v3",
 });
 
@@ -100,7 +103,7 @@ function dailyLine(day, overrides = {}) {
     coverageGaps: { count: 0, totalMs: 0 },
     concurrentTracksMax: 1,
     delivered: 3,
-    uncountedRanges: UNCOUNTED_V3,
+    uncountedRanges: LEGACY_UNCOUNTED_V3,
     ...overrides,
   };
 }
@@ -170,7 +173,8 @@ test("⑵ KST 자정을 넘긴 첫 회차 -> 전날 줄 정확히 1 · 값 = 그
       count: 1,
       totalMs: (23 * 60 + 40) * MIN,
     });
-    assert.deepEqual(l.uncountedRanges, UNCOUNTED_V3);
+    assert.deepEqual(l.uncountedExampleIds, UNCOUNTED_V3);
+    assert.equal(Object.hasOwn(l, "uncountedRanges"), false, "옛 칸 이름 없음");
     // 새 날의 상태는 새 날 값으로 시작한다.
     const s = readState(dir);
     assert.equal(s.day, "2026-11-14");
@@ -596,7 +600,7 @@ test("(22) KST 날 경계: 23:59:59 KST 와 00:00:00 KST 는 다른 날 · UTC �
   assert.equal(core.kstDayOf(Date.parse("2026-11-13T15:00:00Z")), "2026-11-14");
 });
 
-test("(23) 그날 마지막 회차의 24시간 창 · 줄 모양 필드(schema · day · windowStartMs/EndMs · closedAtMs · 첫/마지막 회차 · uncountedRanges)", async () => {
+test("(23) 그날 마지막 회차의 24시간 창 · 줄 모양 필드(schema · day · windowStartMs/EndMs · closedAtMs · 첫/마지막 회차 · uncountedExampleIds)", async () => {
   const dir = tmpDir("nc-daily-shape-");
   try {
     await tickAt(dir, kst("2026-11-13 23:50"));
@@ -619,7 +623,7 @@ test("(23) 그날 마지막 회차의 24시간 창 · 줄 모양 필드(schema �
       "coverageGaps",
       "concurrentTracksMax",
       "delivered",
-      "uncountedRanges",
+      "uncountedExampleIds",
     ]) {
       assert.ok(key in l, `필드 ${key}`);
     }
@@ -714,8 +718,10 @@ test("(24) 실제 runPartialCountOnce: dailyTick = 그 회차 보고가 센 값(
   // 수집기 목록의 FAIL 이름이 collectorFails 에 그대로 반영된다.
   const failNames = [...result.reportText.matchAll(/(\S+) FAIL\(/g)].length;
   assert.ok(t.collectorFails.length >= (failNames > 0 ? 1 : 0));
-  assert.equal(Array.isArray(t.uncountedRanges), true);
-  assert.ok(t.uncountedRanges.length >= 1);
+  assert.equal(Array.isArray(t.uncountedExampleIds), true);
+  assert.ok(t.uncountedExampleIds.length >= 1);
+  assert.ok(t.uncountedExampleIds.every((s) => /^V\d+-\d+$/.test(s)));
+  assert.equal(Object.hasOwn(t, "uncountedRanges"), false);
   assert.match(t.uncountedVersion, /^uncounted-examples\/v\d+$/);
 });
 

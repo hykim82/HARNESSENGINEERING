@@ -822,7 +822,7 @@ const DAY_ZERO = Object.freeze({
   lnUnchecked: 0,
   collectorFails: [],
   delivered: 3,
-  uncountedRanges: ["U1"],
+  uncountedExampleIds: ["V3-1"],
   uncountedVersion: "uncounted-examples/v3",
 });
 

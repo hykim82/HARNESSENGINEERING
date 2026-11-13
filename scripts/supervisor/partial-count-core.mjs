@@ -831,6 +831,31 @@ function addKstDays(day, n) {
 
 const isCount = (v) => Number.isInteger(v) && v >= 0;
 
+// HYK-255-p1fix-1 (판정 0206 ④ 가) -- 예시 식별자. 일별 줄의 이 칸은 «알려진 미계수 예시가 몇 개였나» 를 적는다.
+// 값 = «V<판본>-<순번>»(예 V3-2). 1-C 설계의 U-id(U1 = 열린 집합 …)와 문자열이 겹치지 않도록 접두를 판본으로 둔다.
+// 판본을 못 읽으면 접두 VX(U 와 겹치지 않는 쪽).
+function exampleIdPrefix(version) {
+  const m = /(?:^|\/)v(\d+)$/i.exec(typeof version === "string" ? version : "");
+  return m ? `V${m[1]}` : "VX";
+}
+
+function exampleIdsOf(count, version) {
+  const prefix = exampleIdPrefix(version);
+  return Array.from({ length: count }, (_, i) => `${prefix}-${i + 1}`);
+}
+
+// 읽는 쪽 -- 새 칸 이름(uncountedExampleIds)이 있으면 그것, 없으면 «옛 칸 이름»(uncountedRanges · U1..) 줄 · 상태 ·
+// 회차 값도 읽는다(옛 칸 이름은 개수만 믿고 V 꼴로 옮긴다). 둘 다 없으면 null.
+function readUncountedExampleIds(source) {
+  if (Array.isArray(source?.uncountedExampleIds)) {
+    return source.uncountedExampleIds.map(String);
+  }
+  if (Array.isArray(source?.uncountedRanges)) {
+    return exampleIdsOf(source.uncountedRanges.length, source.uncountedVersion);
+  }
+  return null;
+}
+
 // 그 회차 값 -> 일별 칸 값. 못 센 값은 null(0 으로 접지 않는다) -- 읽는 쪽이 null 을 끊김으로 본다.
 export function buildDailyTickValues({
   externalEvidence,
@@ -851,7 +876,7 @@ export function buildDailyTickValues({
       delivered?.known === true && isCount(delivered.count)
         ? delivered.count
         : null,
-    uncountedRanges: items.map((_, i) => `U${i + 1}`),
+    uncountedExampleIds: exampleIdsOf(items.length, uncountedExamples?.version),
     uncountedVersion: uncountedExamples?.version ?? null,
   };
 }
@@ -887,7 +912,7 @@ export function dailyFailureTick(reason) {
     lnUnchecked: null,
     collectorFails: [reason],
     delivered: null,
-    uncountedRanges: [],
+    uncountedExampleIds: [],
     uncountedVersion: null,
   };
 }
@@ -906,9 +931,7 @@ export function normalizeDailyTick(tick) {
     ...normalizePermissionColumns(tick),
     collectorFails: fails,
     delivered: isCount(tick.delivered) ? tick.delivered : null,
-    uncountedRanges: Array.isArray(tick.uncountedRanges)
-      ? tick.uncountedRanges.map(String)
-      : [],
+    uncountedExampleIds: readUncountedExampleIds(tick) ?? [],
     uncountedVersion:
       typeof tick.uncountedVersion === "string" ? tick.uncountedVersion : null,
   };
@@ -928,7 +951,7 @@ function freshDailyState(day) {
     collectorFails: [],
     concurrentTracksMax: null,
     delivered: null,
-    uncountedRanges: [],
+    uncountedExampleIds: [],
     uncountedVersion: null,
   };
 }
@@ -948,15 +971,46 @@ function hasTickTimes(state) {
   );
 }
 
-// 마감 줄 = 그날 상태 + 마지막 회차 -> 24:00 공백 판정. 값은 그날 마지막 회차의 값 그대로.
-function buildClosedDailyLine({ state, closedAtMs }) {
-  const dayEndMs = kstDayStartMs(state.day) + DAY_MS;
-  const tailMs = dayEndMs - state.lastTickAtMs;
-  const tailGap = tailMs > DAILY_COVERAGE_GAP_MS;
+// HYK-255-p1fix-1 (판정 0206 ④ 나) -- 날을 건너는 회차 간격(직전 회차 -> 이번 회차)을 «한 번만» 잰다.
+// 20분 초과면 공백이고, 그 간격이 KST 자정을 걸쳤으면 두 날 각각에 공백 1 을 준다 -- 각 날의 몫 = 그 날 안에 든 길이
+// (전날 = 마지막 회차 -> 24:00 · 새 날 = 00:00 -> 이번 회차). 양쪽을 따로 20분과 견주지 않는다(23:41 -> 00:20 = 39분 =
+// 몫 19 · 20 이라 따로 보면 어느 날도 공백 0 이 되는 거짓 0 방향 결함이었다). 20분 기준 자체는 무변(초과만 공백).
+function measureDayCrossingInterval({ prevTickAtMs, nowMs }) {
+  const prevDayEndMs = kstDayStartMs(kstDayOf(prevTickAtMs)) + DAY_MS;
+  return {
+    gap: nowMs - prevTickAtMs > DAILY_COVERAGE_GAP_MS,
+    prevDayShareMs: prevDayEndMs - prevTickAtMs,
+    nowDayShareMs: nowMs - kstDayStartMs(kstDayOf(nowMs)),
+  };
+}
+
+// HYK-255-p1fix-1 (판정 0206 ④ 다) -- 마감 줄의 창 시작 = 직전 일별 줄(같은 파일의 마지막 줄 · 읽기만)의 창 끝 -- 날 사이
+// 틈 0. 직전 줄이 «어제» 줄이 아니면(첫 날 · 여러 날 건너뜀 뒤 첫 줄) = 그날 첫 회차의 창 시작(첫 회차 - 24h).
+// 직전 줄의 창 끝이 이 날 첫 회차보다 뒤로 어긋나 있으면(값이 틀린 줄) 믿지 않고 같은 대체값을 쓴다.
+// 직전 줄은 «창 경계» 로만 읽는다 -- 확인 값의 근거로 쓰지 않는다(판정 1910).
+function closedWindowStartMs(state, previousDailyLine) {
+  const prev = previousDailyLine;
+  const adjacent =
+    prev?.schema === DAILY_SCHEMA &&
+    prev.day === addKstDays(state.day, -1) &&
+    Number.isFinite(prev.windowEndMs) &&
+    prev.windowEndMs <= state.firstTickAtMs;
+  return adjacent ? prev.windowEndMs : state.firstTickAtMs - DAY_MS;
+}
+
+// 마감 줄 = 그날 상태 + 날을 건넌 회차 간격의 전날 몫. 값은 그날 마지막 회차의 값 그대로.
+function buildClosedDailyLine({
+  state,
+  closedAtMs,
+  interval,
+  previousDailyLine,
+}) {
+  const tailGap = interval.gap;
+  const tailMs = interval.prevDayShareMs;
   return {
     schema: DAILY_SCHEMA,
     day: state.day,
-    windowStartMs: state.lastTickAtMs - DAY_MS,
+    windowStartMs: closedWindowStartMs(state, previousDailyLine),
     windowEndMs: state.lastTickAtMs,
     closedAtMs,
     firstTickAtMs: state.firstTickAtMs,
@@ -972,7 +1026,7 @@ function buildClosedDailyLine({ state, closedAtMs }) {
     },
     concurrentTracksMax: state.concurrentTracksMax,
     delivered: state.delivered,
-    uncountedRanges: state.uncountedRanges,
+    uncountedExampleIds: readUncountedExampleIds(state) ?? [],
     uncountedVersion: state.uncountedVersion,
   };
 }
@@ -980,20 +1034,47 @@ function buildClosedDailyLine({ state, closedAtMs }) {
 // 날이 바뀐 첫 회차 -- 전날 상태가 유효하고(회차 ≥ 1) 그 날 줄이 아직 없으면 줄 1개를 돌려준다.
 // closedDays = 일별 파일에 이미 있는 날 집합(재실행이 같은 날 줄을 또 쓰지 않게 -- 덧붙이기 전용).
 // 상태가 없거나 깨졌으면 줄을 지어내지 않는다(그 날은 줄 없음 = 끊김).
-export function rolloverDailyState({ state, nowMs, closedDays }) {
+// previousDailyLine = 같은 파일의 마지막 일별 줄(창 시작을 이어 붙일 때만 읽는다 · 없으면 null).
+// 직전 회차를 아는 새 날은 간격을 여기서 «한 번» 재어 그 날 몫을 상태에 미리 적는다(openingGapSettled).
+export function rolloverDailyState({
+  state,
+  nowMs,
+  closedDays,
+  previousDailyLine = null,
+}) {
   const today = kstDayOf(nowMs);
   const valid = isValidDailyState(state);
   if (valid && state.day === today) return { state, closedLine: null };
+  const crossing = valid && state.day < today && state.ticks > 0;
+  const interval = crossing
+    ? measureDayCrossingInterval({
+        prevTickAtMs: state.lastTickAtMs,
+        nowMs,
+      })
+    : null;
   const closable =
-    valid &&
-    state.day < today &&
-    state.ticks > 0 &&
-    !(closedDays instanceof Set && closedDays.has(state.day));
+    crossing && !(closedDays instanceof Set && closedDays.has(state.day));
   return {
-    state: freshDailyState(today),
+    state: openDailyState(today, interval),
     closedLine: closable
-      ? buildClosedDailyLine({ state, closedAtMs: nowMs })
+      ? buildClosedDailyLine({
+          state,
+          closedAtMs: nowMs,
+          interval,
+          previousDailyLine,
+        })
       : null,
+  };
+}
+
+function openDailyState(today, interval) {
+  const opened = freshDailyState(today);
+  if (!interval) return opened;
+  return {
+    ...opened,
+    gapCount: interval.gap ? 1 : 0,
+    gapTotalMs: interval.gap ? interval.nowDayShareMs : 0,
+    openingGapSettled: true,
   };
 }
 
@@ -1013,12 +1094,17 @@ export function recordDailyTick({ state, nowMs, tick, concurrentActive }) {
       : freshDailyState(today);
   const prevMs = base.ticks > 0 ? base.lastTickAtMs : kstDayStartMs(today);
   const spanMs = nowMs - prevMs;
-  const gap = spanMs > DAILY_COVERAGE_GAP_MS;
+  // 날을 건넌 첫 회차의 간격은 rolloverDailyState 가 이미 한 번 쟀다(openingGapSettled) -- 여기서 00:00 기준으로 또 재지 않는다.
+  const settled = base.ticks === 0 && base.openingGapSettled === true;
+  const gap = !settled && spanMs > DAILY_COVERAGE_GAP_MS;
   const t = normalizeDailyTick(tick);
   // 권한 두 칸은 «마지막 회차 값» 규칙대로 덮어쓴다 -- 이번 회차 값에 칸이 없으면(미결선) 앞 회차 값도 남기지 않는다.
+  // 옛 칸 이름 상태(uncountedRanges)는 새 칸 이름으로 덮고 옛 칸은 남기지 않는다.
   const carried = { ...base };
   delete carried.permissionHumanAnswers;
   delete carried.permissionUndecidable;
+  delete carried.uncountedRanges;
+  delete carried.openingGapSettled;
   return {
     ...carried,
     ...normalizePermissionColumns(t),
@@ -1031,7 +1117,7 @@ export function recordDailyTick({ state, nowMs, tick, concurrentActive }) {
     lnUnchecked: t.lnUnchecked,
     collectorFails: t.collectorFails,
     delivered: t.delivered,
-    uncountedRanges: t.uncountedRanges,
+    uncountedExampleIds: t.uncountedExampleIds,
     uncountedVersion: t.uncountedVersion,
     concurrentTracksMax: maxNullable(
       base.concurrentTracksMax,
@@ -1129,8 +1215,9 @@ export function computeConfirmedZeroStreak({ lines, nowMs }) {
       };
     }
     if (days === 0) {
-      const ranges = entries[0].uncountedRanges;
-      uncountedRangeCount = Array.isArray(ranges) ? ranges.length : null;
+      // 읽는 쪽은 옛 칸 이름(uncountedRanges)과 새 칸 이름(uncountedExampleIds) 둘 다 받는다(덧붙이기 전용이라 옛 줄이 남는다).
+      const ids = readUncountedExampleIds(entries[0]);
+      uncountedRangeCount = ids ? ids.length : null;
     }
     days += 1;
     day = addKstDays(day, -1);

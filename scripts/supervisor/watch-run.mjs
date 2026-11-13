@@ -3007,7 +3007,15 @@ function beginPartialCountDaily({
   const closedDays = new Set(
     parsed.lines.filter((l) => l?.schema === DAILY_SCHEMA).map((l) => l.day),
   );
-  const rolled = rolloverDailyState({ state, nowMs: now, closedDays });
+  // HYK-255-p1fix-1 -- 일별 줄 창을 이어 붙이려고 «같은 파일의 마지막 줄» 을 창 경계로만 읽는다(읽기만 · 값의 근거 아님).
+  const previousDailyLine =
+    [...parsed.lines].reverse().find((l) => l?.schema === DAILY_SCHEMA) ?? null;
+  const rolled = rolloverDailyState({
+    state,
+    nowMs: now,
+    closedDays,
+    previousDailyLine,
+  });
   let lines = parsed.lines;
   let skipRecord = false;
   if (rolled.closedLine) {
