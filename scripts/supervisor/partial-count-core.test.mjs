@@ -688,8 +688,12 @@ test("ㄴ 절 새 줄: 확인 N · 미조회 U · ㄴ 분자 반영 -- 문면 �
     }),
   );
   assert.ok(text.includes(`${EXT_PREFIX}확인 2 · 미조회 3 · ㄴ 분자 반영\n`));
-  assert.ok(text.includes("- 외부 독립 증거로 확인된 사건: 확인 0건\n"));
-  assert.ok(!text.includes("외부 독립 증거로 확인된 사건: 2건"));
+  // 커밋 3(의도된 변경 · 교정 1904 ④): 미조회 3 이라 분자 옆 하한 표기 -- 분자는 별개 입력이 비어
+  // 있어 0(«확인 0건 이상 · 미조회 3»).
+  assert.ok(
+    text.includes("- 외부 독립 증거로 확인된 사건: 확인 0건 이상 · 미조회 3\n"),
+  );
+  assert.ok(!text.includes("외부 독립 증거로 확인된 사건: 확인 2건"));
   assert.ok(lnSectionLines(text).some((l) => l.startsWith(EXT_PREFIX)));
 });
 

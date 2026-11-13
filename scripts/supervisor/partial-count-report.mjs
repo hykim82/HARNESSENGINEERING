@@ -92,8 +92,13 @@ import {
 export const DEFAULT_DISPATCH_RECEIPTS_PATH =
   "D:/문서관리/하네스-관제실/dispatch-receipts.jsonl";
 export const DEFAULT_WINDOW_HOURS = 24;
-// sha당 REST 최대 8회(수집기 예산) x 3 = 24회 < 무인증 한도 60회/시간.
-export const DEFAULT_MAX_MERGE_CHECKS = 3;
+// HYK-255-ln-update-branch-1 커밋 3 (책임자 판정 1804 · 교정 1904) -- ㄱ-4 회차당 조회 상한.
+// sha당 REST 최대 8회(수집기 예산 callBudget 8 -- 무변) x 1 = 회차당 최대 8회. 예약 감시
+// (watch-run.mjs)는 이 기본값으로 부른다(상한 인자 없음). D1 상한(아래
+// DEFAULT_MAX_EXTERNAL_EVIDENCE_CHECKS 4)과 합쳐 회차당 최악 8 + 4 = 12 · 15분 회차 4개 =
+// 시간당 최악 48(익명 한도 60 중 나머지 12 는 책임자 CI 판독 몫). 옛 값은 3(= 회차당 최대 24).
+// 상한 밖 ㄱ-4 후보는 «미조회(예산)» 그대로다(숨김 0) -- 회차당 최신 1건만 조회한다.
+export const DEFAULT_MAX_MERGE_CHECKS = 1;
 export const DEFAULT_ALLOWLIST_PATH =
   "scripts/supervisor/approver-allowlist.json";
 
@@ -679,8 +684,10 @@ function summarizeUndecidableReasons(verdicts) {
 //   (서명 검증은 GitHub 서버 판정에 기댄다) · 서명 주체 committer.login ===
 //   "web-flow" · 작성자 author.login + id 가 approvers 허용 목록(origin/
 //   master 판본)의 사람.
-// ⓘⓘⓘ 무인증 REST 예산 = 회차당 상한 maxChecks(기본 10, 기존 maxMergeChecks
-//   와 별개) -- 초과분은 «미조회(예산)». 403/429 도 판정 문면상 «미조회(예산)»의
+// ⓘⓘⓘ 무인증 REST 예산 = 회차당 상한 maxChecks(기본 4 -- HYK-255-ln-update-branch-1
+//   커밋 3 · 판정 1804/교정 1904 · 후보당 1회 = 회차당 최대 4 · 옛 기본 10 · 기존
+//   maxMergeChecks 와 별개) -- 초과분은 «미조회(예산)» 이고 그 회차 ㄴ 분자 옆에 하한 표기
+//   («확인 N건 이상 · 미조회 K») 가 붙는다(core 렌더). 403/429 도 판정 문면상 «미조회(예산)»의
 //   한 갈래이고(표기 = «미조회(예산 · rate limit)» -- 진단 줄이 «예산» 과 나란한
 //   별도 낱말로 찍지 않는다 · 검토 P2-2), 내부 필드는 uncheckedByRateLimit 로
 //   따로 세며 재시도 0 이고 그 회차의 남은 후보는 더 조회하지 않는다(같은 IP 의
@@ -697,7 +704,7 @@ function summarizeUndecidableReasons(verdicts) {
 //   (과거를 따로 재집계하지 않는다 -- 후보가 창에서 빠지면 분자에서도 빠진다).
 // ---------------------------------------------------------------------------
 
-export const DEFAULT_MAX_EXTERNAL_EVIDENCE_CHECKS = 10;
+export const DEFAULT_MAX_EXTERNAL_EVIDENCE_CHECKS = 4;
 
 const CANDIDATE_LOG_FIELD_SEP = "\x1f";
 const CANDIDATE_LOG_FORMAT = ["%H", "%cI", "%P", "%cn", "%ce", "%s"].join(

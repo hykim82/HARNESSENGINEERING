@@ -477,8 +477,14 @@ test("커밋3 분자 무변: 스테일이 붙어도 ㄴ 확인 사건은 «확�
       },
     }),
   );
-  assert.ok(stale.includes("- 외부 독립 증거로 확인된 사건: 확인 0건\n"));
-  assert.ok(!stale.includes("외부 독립 증거로 확인된 사건: 1건"));
+  // HYK-255-ln-update-branch-1 커밋 3 (의도된 변경 · 교정 1904 ④): 미조회 1 인 회차의 분자는
+  // 하한 표기가 붙는다. 스테일 직전 값(1)은 분자에 들어가지 않는다(분자 0 -- «확인 0건 이상»).
+  assert.ok(
+    stale.includes(
+      "- 외부 독립 증거로 확인된 사건: 확인 0건 이상 · 미조회 1\n",
+    ),
+  );
+  assert.ok(!stale.includes("외부 독립 증거로 확인된 사건: 확인 1건"));
   const strip = (t) =>
     t
       .split("\n")
@@ -676,8 +682,11 @@ test("커밋3 조립: 직전 확인 1 · 이번 회차 403(미조회) -> «확�
   );
   assert.equal(calls.length, 1, "REST 호출 수 무변(재시도 0)");
   assert.equal(result.externalEvidence.confirmed, 0, "직전 값은 확인이 아니다");
+  // 분자 = 이 회차 확인 0 (하한 표기: 미조회 1 -- HYK-255-ln-update-branch-1 커밋 3 의도된 변경).
   assert.ok(
-    result.reportText.includes("- 외부 독립 증거로 확인된 사건: 확인 0건\n"),
+    result.reportText.includes(
+      "- 외부 독립 증거로 확인된 사건: 확인 0건 이상 · 미조회 1\n",
+    ),
   );
 });
 

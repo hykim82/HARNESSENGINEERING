@@ -314,7 +314,8 @@ test("호출 예산 0이면 후보는 «미조회(예산)»로 남고 REST 호�
     assert.ok(
       result.reportText.includes("미조회(예산) 1건 — 미조회는 미계수다"),
     );
-    assert.equal(DEFAULT_MAX_MERGE_CHECKS, 3);
+    // HYK-255-ln-update-branch-1 커밋 3 (의도된 변경 · 판정 1804): ㄱ-4 기본 상한 3 -> 1.
+    assert.equal(DEFAULT_MAX_MERGE_CHECKS, 1);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

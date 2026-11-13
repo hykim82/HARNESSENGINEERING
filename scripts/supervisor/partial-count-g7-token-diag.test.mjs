@@ -281,7 +281,12 @@ test("ⓐ 동작 보존: 낙차 회차의 후보 줄은 base 의 스테일 문�
   );
   assert.equal(result.externalEvidence.confirmed, 0);
   assert.equal(result.externalEvidence.unchecked, 1);
-  assert.ok(reportText.includes("- 외부 독립 증거로 확인된 사건: 확인 0건\n"));
+  // 분자 = 이 회차 확인 0 · 하한 표기(미조회 1) -- HYK-255-ln-update-branch-1 커밋 3 의도된 변경.
+  assert.ok(
+    reportText.includes(
+      "- 외부 독립 증거로 확인된 사건: 확인 0건 이상 · 미조회 1\n",
+    ),
+  );
   const lines = reportText.split("\n");
   assert.equal(
     lines.filter((l) => l.startsWith(EXT_PREFIX)).length,

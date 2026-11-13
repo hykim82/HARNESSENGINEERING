@@ -273,9 +273,10 @@ test("분자 밖 ⓑ 미조회(조회 실패 404): 확인 0건 · 미조회 1 --
       json: null,
     }));
     const result = await runOnce(repo, fetchJson);
+    // 분자 0 -- 미조회 1 이라 커밋 3 의 하한 표기가 붙는다(«확인 0건 이상 · 미조회 1»).
     assert.equal(
       numeratorLine(result.reportText),
-      `${NUMERATOR_PREFIX}확인 0건`,
+      `${NUMERATOR_PREFIX}확인 0건 이상 · 미조회 1`,
     );
     assert.equal(
       candidateLine(result.reportText),
@@ -296,9 +297,10 @@ test("분자 밖 ⓒ rate limit(429): 미조회 -- 분자에 넣지 않는다 ·
       linkHeader: null,
     }));
     const result = await runOnce(repo, fetchJson);
+    // 분자 0 · 미조회 2(429 한 건 + 429 뒤 남은 후보 한 건) -- 하한 표기.
     assert.equal(
       numeratorLine(result.reportText),
-      `${NUMERATOR_PREFIX}확인 0건`,
+      `${NUMERATOR_PREFIX}확인 0건 이상 · 미조회 2`,
     );
     assert.equal(calls.length, 1, "429 뒤 남은 후보는 더 조회하지 않는다");
   } finally {
@@ -358,7 +360,7 @@ test("분자 밖 ⓓ 응답 sha 불일치: 검증 통과 모양이어도 분자�
     const result = await runOnce(repo, fetchJson);
     assert.equal(
       numeratorLine(result.reportText),
-      `${NUMERATOR_PREFIX}확인 0건`,
+      `${NUMERATOR_PREFIX}확인 0건 이상 · 미조회 1`,
     );
     assert.equal(result.externalEvidence.unchecked, 1);
   } finally {
@@ -380,7 +382,7 @@ test("분자 밖 ⓔ 스테일 직전 값: 직전 확인 1 · 이번 회차 403 
     });
     assert.equal(
       numeratorLine(result.reportText),
-      `${NUMERATOR_PREFIX}확인 0건`,
+      `${NUMERATOR_PREFIX}확인 0건 이상 · 미조회 1`,
     );
     assert.ok(
       candidateLine(result.reportText).includes(

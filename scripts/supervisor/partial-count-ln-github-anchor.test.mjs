@@ -511,7 +511,9 @@ test("보고서 ㄴ 절 새 줄: 확인 1 · 미조회 0 · ㄴ 분자 반영, �
   }
 });
 
-test("보고서: 예산 초과 모양 (후보 11 -> 확인 10 · 미조회 1)", async () => {
+// HYK-255-ln-update-branch-1 커밋 3 (의도된 변경 · 판정 1804/교정 1904): D1 기본 상한 10 -> 4.
+// 후보 11 -> 확인 4 · 미조회 7(예산) · 호출 4 (옛 값: 확인 10 · 미조회 1 · 호출 10).
+test("보고서: 예산 초과 모양 (후보 11 -> 확인 4 · 미조회 7 · 호출 4 -- 기본 상한 4)", async () => {
   const specs = [];
   for (let i = 0; i < 11; i++) specs.push(updateBranchSpec(200 - i * 10));
   const repo = buildRepo(specs);
@@ -522,10 +524,15 @@ test("보고서: 예산 초과 모양 (후보 11 -> 확인 10 · 미조회 1)", 
     const result = await runOnce(repo, fetchJson);
     assert.ok(
       result.reportText.includes(
-        `${LN_LINE_PREFIX}확인 10 · 미조회 1 · ㄴ 분자 반영\n`,
+        `${LN_LINE_PREFIX}확인 4 · 미조회 7 · ㄴ 분자 반영\n`,
       ),
     );
-    assert.equal(calls.length, 10);
+    assert.ok(
+      result.reportText.includes(
+        "- 외부 독립 증거로 확인된 사건: 확인 4건 이상 · 미조회 7\n",
+      ),
+    );
+    assert.equal(calls.length, 4);
   } finally {
     cleanup(repo.dir);
   }
@@ -558,7 +565,7 @@ test("보고서: 수집 실패 모양 -> «수집 실패(사유)» 줄, bare 숫
   }
 });
 
-test("기존 ㄱ-4 상한(maxMergeChecks)과 별개: maxMergeChecks:0 이어도 새 수집기는 자기 상한(기본 10)으로 돈다", async () => {
+test("기존 ㄱ-4 상한(maxMergeChecks)과 별개: maxMergeChecks:0 이어도 새 수집기는 자기 상한(기본 4 · 옛 10 -- 커밋 3 의도된 변경)으로 돈다", async () => {
   const repo = buildRepo([updateBranchSpec(30)]);
   try {
     const { fetchJson, calls } = makeFetch(({ url }) =>
@@ -566,7 +573,7 @@ test("기존 ㄱ-4 상한(maxMergeChecks)과 별개: maxMergeChecks:0 이어도 
     );
     await runOnce(repo, fetchJson, { maxMergeChecks: 0 });
     assert.equal(calls.length, 1);
-    assert.equal(report.DEFAULT_MAX_EXTERNAL_EVIDENCE_CHECKS, 10);
+    assert.equal(report.DEFAULT_MAX_EXTERNAL_EVIDENCE_CHECKS, 4);
   } finally {
     cleanup(repo.dir);
   }

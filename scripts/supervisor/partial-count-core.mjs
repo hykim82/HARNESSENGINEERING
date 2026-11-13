@@ -289,7 +289,15 @@ function renderCount(value) {
 // «확인된 것 0»)으로 오독되므로 ⛔절대 내지 않는다. HYK-255-ln-update-branch-1 --
 // 확인분이 있어도 같은 모양(«확인 N건»)이다(한용 확정 2026-11-13 15:3x: GitHub 웹
 // Update branch 클릭 = ㄴ · 그 회차 REST 응답으로 확인된 건수가 분자).
-export function renderConfirmedLnCount(count) {
+//
+// HYK-255-ln-update-branch-1 커밋 3 (책임자 교정 1904 ④) -- 하한 표기. D1 후보 중 이 회차에
+// 확인하지 못한 것(미조회: 예산 · rate limit · 조회 실패)이 K ≥ 1 이면 분자 N 은 «이 회차에 확인된
+// 것만»이라 실제보다 작을 수 있다 -- 그래서 «확인 N건 이상 · 미조회 K» 로 쓴다(분자가 하한임이
+// 그 줄에서 읽힌다 · N = 0 도 «확인 0건 이상»). 미조회 0 이면 표기 0(옛 «확인 N건» 그대로).
+export function renderConfirmedLnCount(count, uncheckedCount = 0) {
+  if (Number.isInteger(uncheckedCount) && uncheckedCount > 0) {
+    return `확인 ${count}건 이상 · 미조회 ${uncheckedCount}`;
+  }
   return `확인 ${count}건`;
 }
 
@@ -584,8 +592,11 @@ function buildLnSection(
   const confirmedCount = Array.isArray(confirmedLnEvents)
     ? confirmedLnEvents.length
     : 0;
+  // 하한 표기: 수집이 성공했고(known) 미조회가 있는 회차에만. 입력 없음 · 수집 실패는 표기 0.
+  const uncheckedForLowerBound =
+    externalEvidence?.known === true ? externalEvidence.unchecked : 0;
   lines.push(
-    `- 외부 독립 증거로 확인된 사건: ${renderConfirmedLnCount(confirmedCount)}`,
+    `- 외부 독립 증거로 확인된 사건: ${renderConfirmedLnCount(confirmedCount, uncheckedForLowerBound)}`,
   );
   const externalEvidenceLine =
     renderExternalEvidenceCandidateLine(externalEvidence);
