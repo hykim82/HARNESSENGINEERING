@@ -1085,9 +1085,15 @@ const LEDGER_FILE_NAME_TS_RE = /^(\d{4})-(\d{2})-(\d{2})-(\d{2})(\d{2})/;
 const QUOTE_EXTRACT_RE = /«([^」»]{3,})[」»]/;
 const INBOX_QUOTE_LINE_RE = /한용\s*«([^」»]{3,})[」»]/g;
 const RELAY_NUMBER_TOKEN_RE = /전달 #(\d{8}-\d{4}[a-z]?)/;
-// 오탐 방지 ⓑ -- 보내는함 파일 이름이 `판정-<HHMM>` 모양이면 그 HHMM을
-// 뽑아 받는함의 `상신` 파일과 대조한다(아래 isGate7MissingCandidate).
-const OUTBOX_PANJEONG_HHMM_RE = /판정-(\d{4})/;
+// 오탐 방지 ⓑ -- ㄱ-7 짝 키(HYK-255-g7-key-stale-1 판정 1110 (가)): 보내는함 파일
+// 이름의 `판정-<HHMM>` 머리 «또는» 이름 어디든 `상신<HHMM>` 토큰에서 HHMM을 뽑아
+// 받는함의 `상신` 파일과 대조한다. ⛔이 정규식이 짝 키의 «유일한» 정의다 -- D2
+// 보조 ㄱ-7 짝 수(collectGate7AuxCell)와 기존 «ㄱ-7 기록 누락» 계수
+// (isGate7MissingCandidate)가 둘 다 parseGate7PairKey 를 거쳐 이 한 곳에서 읽는다.
+// 4자리 뒤에 숫자가 더 이어지면(5자리 이상) HHMM 이 아니다 · `상신-1830` 처럼
+// 하이픈이 끼면 토큰이 아니다 · «상신» 뒤가 아닌 다른 4자리(게이트 번호 · 시각 아닌
+// 숫자)는 키가 아니다.
+const GATE7_PAIR_TOKEN_RE = /(?:판정-|상신)(\d{4})(?!\d)/g;
 
 function parseLedgerFileNameTimestampMs(name) {
   const m = LEDGER_FILE_NAME_TS_RE.exec(name);
@@ -1105,6 +1111,20 @@ function parseLedgerFileNameDateHhmm(name) {
   if (!m) return null;
   const [, y, mo, d, h, mi] = m;
   return { date: `${y}-${mo}-${d}`, hhmm: `${h}${mi}` };
+}
+
+// ㄱ-7 짝 키(보내는함 판정 파일 이름) -- {date: 이름 머리 날짜, hhmms: 서로 다른
+// HHMM 토큰들}. 두 모양이 한 이름에 같이 있어도 같은 HHMM 은 한 번만 담긴다(중복
+// 0). 날짜 머리가 없거나 토큰이 하나도 없으면 null(키 아님).
+function parseGate7PairKey(name) {
+  const dateHhmm = parseLedgerFileNameDateHhmm(name);
+  if (!dateHhmm) return null;
+  const hhmms = [
+    ...new Set(
+      [...name.matchAll(GATE7_PAIR_TOKEN_RE)].map((token) => token[1]),
+    ),
+  ];
+  return hhmms.length > 0 ? { date: dateHhmm.date, hhmms } : null;
 }
 
 // 머리줄의 시각 필드("2026-11-03 21:4x" 모양)를 ms로. 분 자리가 `x`면
@@ -1292,18 +1312,15 @@ function extractOutboxQuoteItem({ name, firstLine }) {
   const q = QUOTE_EXTRACT_RE.exec(firstLine);
   if (!q) return null;
   const numberM = RELAY_NUMBER_TOKEN_RE.exec(firstLine);
-  const panjeongM = OUTBOX_PANJEONG_HHMM_RE.exec(name);
-  // P2-4: ㄱ-7 짝 대조의 날짜는 이 출처 파일 자신의 이름 머리
-  // `YYYY-MM-DD`에서 구조로 뽑는다(판정 토큰은 HHMM만 갖고 있다).
-  const fileDateHhmm = parseLedgerFileNameDateHhmm(name);
   return {
     source: "S1",
     name,
     quote: q[1],
     number: numberM ? numberM[1] : null,
     timeMs: parseLedgerFileNameTimestampMs(name),
-    panjeongHhmm: panjeongM ? panjeongM[1] : null,
-    panjeongDate: panjeongM && fileDateHhmm ? fileDateHhmm.date : null,
+    // P2-4: ㄱ-7 짝 대조의 날짜는 이 출처 파일 자신의 이름 머리 `YYYY-MM-DD`에서
+    // 구조로 뽑는다(판정 토큰은 HHMM만 갖고 있다) -- parseGate7PairKey 가 한 곳.
+    gate7PairKey: parseGate7PairKey(name),
   };
 }
 
@@ -1413,23 +1430,22 @@ function relayEntryInWindow(entry, sourceTimeMs) {
   return Math.abs(entry.timeMs - sourceTimeMs) <= windowMs;
 }
 
-// 오탐 방지 ⓑ -- 대응 없는 S1 항목이라도 파일 이름이 `판정-<HHMM>`이고
-// 받는함에 "같은 날짜 + 같은 HHMM"의 `상신` 파일이 있으면 "ㄱ-7 기록
-// 누락"으로 따로 센다(ㄴ 후보 아님). P2-4: 날짜·HHMM 둘 다 파일 이름의
-// 구조화된 토큰으로 대조한다 -- 부분 문자열 포함(`includes`)만으로는
-// 다른 날 같은 HHMM, 또는 이름 어딘가에 같은 네 자리가 낀 파일까지
-// 짝으로 잡는다(이 라운드 변이③의 표적).
+// 오탐 방지 ⓑ -- 대응 없는 S1 항목이라도 파일 이름에 ㄱ-7 짝 키(`판정-<HHMM>` 머리
+// 또는 이름 어디든 `상신<HHMM>`)가 있고 받는함에 "같은 날짜 + 같은 HHMM"의 `상신`
+// 파일이 있으면 "ㄱ-7 기록 누락"으로 따로 센다(ㄴ 후보 아님). P2-4: 날짜·HHMM 둘 다
+// 파일 이름의 구조화된 토큰으로 대조한다 -- 부분 문자열 포함(`includes`)만으로는
+// 다른 날 같은 HHMM, 또는 이름 어딘가에 같은 네 자리가 낀 파일까지 짝으로 잡는다
+// (이 라운드 변이③의 표적).
 function isGate7MissingCandidate({ item, inboxNames }) {
-  if (item.source !== "S1" || !item.panjeongHhmm || !item.panjeongDate) {
-    return false;
-  }
+  if (item.source !== "S1" || !item.gate7PairKey) return false;
+  const key = item.gate7PairKey;
   return (inboxNames ?? []).some((n) => {
     if (!n.includes("상신")) return false;
     const parsed = parseLedgerFileNameDateHhmm(n);
     return (
       parsed !== null &&
-      parsed.date === item.panjeongDate &&
-      parsed.hhmm === item.panjeongHhmm
+      parsed.date === key.date &&
+      key.hhmms.includes(parsed.hhmm)
     );
   });
 }
@@ -1679,9 +1695,9 @@ export function collectRelayLedger({
 //   ㄱ-2 = reject-streak 원장에서 streak 가 «2 로 올라서는 전이»가 창 안인 이슈 수
 //   ㄱ-6 = 같은 원장에서 streak 가 하드스톱 문턱(HARD_STOP_STREAK)에 «닿는 전이»가
 //          창 안인 이슈 수
-//   ㄱ-7 = 받는함 «상신» 중 보내는함 «판정-HHMM» 과 날짜 + HHMM 짝이 있는 수
-//          (짝 대조 = 기존 isGate7MissingCandidate 재사용 -- 기존 «ㄱ-7 기록
-//          누락» 계수는 건드리지 않는다)
+//   ㄱ-7 = 받는함 «상신» 중 보내는함 «판정-HHMM» 머리 또는 «…상신HHMM…» 토큰과
+//          날짜 + HHMM 짝이 있는 수(짝 대조 = 기존 isGate7MissingCandidate 재사용 ·
+//          짝 키 = parseGate7PairKey 한 정의 -- 기존 «ㄱ-7 기록 누락» 계수도 같은 키)
 // 창 = runPartialCountOnce 가 쓰는 보고서 창(windowStartMs..windowEndMs) 그대로
 // -- 새 창 상수 0. 파일 기반 칸(ㄱ-1 · ㄱ-7)은 보내는함 보조 수집기
 // (collectOutboxHeaderCounts)와 같은 «파일 mtime 이 창 안» 규칙이다.
@@ -1742,17 +1758,12 @@ function collectGate1AuxCell(outboxListing) {
   };
 }
 
-// 보내는함 «판정-HHMM» 파일 이름 -> isGate7MissingCandidate 가 읽는 S1 항목 모양
-// (extractOutboxQuoteItem 과 같은 이름 규칙: 판정 HHMM + 이름 머리 날짜).
+// 보내는함 ㄱ-7 짝 키가 있는 파일 이름 -> isGate7MissingCandidate 가 읽는 S1 항목
+// 모양(extractOutboxQuoteItem 과 같은 parseGate7PairKey 한 정의).
 function buildOutboxPanjeongItem(name) {
-  const panjeongM = OUTBOX_PANJEONG_HHMM_RE.exec(name);
-  const dateHhmm = parseLedgerFileNameDateHhmm(name);
-  if (!panjeongM || !dateHhmm) return null;
-  return {
-    source: "S1",
-    panjeongHhmm: panjeongM[1],
-    panjeongDate: dateHhmm.date,
-  };
+  const gate7PairKey = parseGate7PairKey(name);
+  if (!gate7PairKey) return null;
+  return { source: "S1", gate7PairKey };
 }
 
 function collectGate7AuxCell({ outboxListing, inboxListing }) {
