@@ -60,7 +60,11 @@ import {
   APPROVAL_STATUS,
 } from "./approval-authority-adapter.mjs";
 import { parseWatchLog } from "./reach-report-core.mjs";
-import { DEFAULT_WATCH_LOG_PATH } from "./reach-report.mjs";
+import {
+  DEFAULT_WATCH_LOG_PATH,
+  DEFAULT_STATE_PATH,
+  EXTERNAL_EVIDENCE_STATE_KEY,
+} from "./reach-report.mjs";
 // HYK-255-g-aux-render-1 커밋 1 -- ㄱ-2 · ㄱ-6 보조 관측이 reject-streak 원장을
 // «읽기만» 한다. 하드스톱 문턱은 그 모듈의 상수를 import 해서 따라간다(숫자
 // 리터럴 금지). 두 모듈은 이미 설치기 목록(templates/harness-init/install.mjs
@@ -921,6 +925,51 @@ async function checkCandidates({
       out.notConfirmed += 1;
     }
   }
+}
+
+// HYK-255-g7-key-stale-1 (커밋 3) -- 스테일 표기용 직전 확인값. 그 회차에 미조회가
+// 있어(미조회 > 0) «확인 N» 이 직전 확인값보다 낮게 나왔으면, 이미 쓰는 감시 상태
+// 파일(reach-notify-state.json -- 감시 로그와 같은 watch 폴더 · reach-report.mjs 가
+// 쓰는 `__externalEvidenceCandidates` {confirmed, atMs})의 값을 externalEvidence
+// .stalePrevious 로 «표시용으로만» 붙인다. ⛔confirmed · unchecked 는 건드리지 않는다
+// (직전 값은 확인이 아니다 -- ㄴ 분자 무변 · 캐시는 승인 권위 아님) · REST 호출 0 ·
+// 새 CLI 인자 0 · 새 파일 0. 상태 파일이 없거나 깨졌거나 직전 확인이 없으면(0 ·
+// 숫자 아님) 붙이지 않는다 -- 조용히 옛 문면 그대로다.
+function readExternalEvidencePrevious({ watchLogPath, readFn }) {
+  try {
+    const statePath = path.join(
+      path.dirname(watchLogPath),
+      path.basename(DEFAULT_STATE_PATH),
+    );
+    const entry = JSON.parse(readFn(statePath, "utf8"))?.[
+      EXTERNAL_EVIDENCE_STATE_KEY
+    ];
+    if (!Number.isInteger(entry?.confirmed) || entry.confirmed <= 0) {
+      return null;
+    }
+    return {
+      confirmed: entry.confirmed,
+      atMs: Number.isFinite(entry.atMs) ? entry.atMs : null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function attachExternalEvidenceStale({
+  externalEvidence,
+  watchLogPath,
+  readFn,
+  nowMs,
+}) {
+  if (externalEvidence?.known !== true || !(externalEvidence.unchecked > 0)) {
+    return externalEvidence;
+  }
+  const previous = readExternalEvidencePrevious({ watchLogPath, readFn });
+  if (!previous || previous.confirmed <= externalEvidence.confirmed) {
+    return externalEvidence;
+  }
+  return { ...externalEvidence, stalePrevious: { ...previous, nowMs } };
 }
 
 // 수집기가 던져도(예: 주입 포트 결함) 보고 전체를 죽이지 않는다 -- 수집
@@ -2414,13 +2463,18 @@ async function collectPartialCountInputs({
     maxMergeChecks,
   });
   // HYK-255-ln-github-anchor-1 -- ㄱ-4 와 독립인 ㄴ 후보 수집기(자기 상한).
-  const externalEvidence = await collectExternalEvidenceSafely({
-    fetchJson,
-    git,
-    allowlistPath,
-    windowStartMs,
-    windowEndMs,
-    maxChecks: maxExternalEvidenceChecks,
+  const externalEvidence = attachExternalEvidenceStale({
+    externalEvidence: await collectExternalEvidenceSafely({
+      fetchJson,
+      git,
+      allowlistPath,
+      windowStartMs,
+      windowEndMs,
+      maxChecks: maxExternalEvidenceChecks,
+    }),
+    watchLogPath,
+    readFn,
+    nowMs: windowEndMs,
   });
   return { deliveredResult, consumedResult, watch, gate4, externalEvidence };
 }
