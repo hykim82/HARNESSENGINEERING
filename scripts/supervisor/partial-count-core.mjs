@@ -502,6 +502,34 @@ function renderRelayClassificationLine(classificationTally) {
 // 수집 실패는 bare 숫자 0 이 아니라 «수집 실패(사유)»다.
 const EXTERNAL_EVIDENCE_LINE_PREFIX = "- 외부 독립 증거 후보: ";
 
+//
+// HYK-255-g7-key-stale-1 (커밋 3) -- 스테일 표기. 그 회차에 미조회(예산 · rate limit ·
+// 조회 실패)로 확인을 못 한 후보가 있어 «확인 N» 이 직전보다 낮게 나오면 줄 끝에
+// 「스테일 표시(확인 아님): 직전 확인 M · 마지막 확인 HH:MM KST」 를 «덧붙인다».
+// ⛔앞의 «확인 N · 미조회 U» 는 그 회차 REST 응답으로만 센 값 그대로다 -- 직전 값은
+// 표시일 뿐 확인으로 세지 않고(ㄴ 분자 «확인 0건» 무변 · 캐시는 승인 권위 아님) 이 줄의
+// 파서도 앞의 두 숫자만 읽는다. 입력 externalEvidence.stalePrevious =
+// {confirmed, atMs|null, nowMs} (wire 가 감시 상태 파일에서 읽어 넣는다 -- 이 렌더는
+// I/O 0). 마지막 확인이 보고서 생성일과 다른 날이면 «MM-DD HH:MM», 시각을 모르면
+// «시각 미상» -- 스테일이 오늘 값처럼 읽히지 않게 한다.
+function formatStaleLastConfirmed({ atMs, nowMs }) {
+  if (!Number.isFinite(atMs)) return "시각 미상";
+  const at = formatKst(atMs);
+  const hhmm = `${at.slice(11, 16)} KST`;
+  const sameDay =
+    Number.isFinite(nowMs) && formatKst(nowMs).slice(0, 10) === at.slice(0, 10);
+  return sameDay ? hhmm : `${at.slice(5, 10)} ${hhmm}`;
+}
+
+function renderExternalEvidenceStaleSuffix(stalePrevious) {
+  if (!stalePrevious || !Number.isInteger(stalePrevious.confirmed)) return "";
+  if (stalePrevious.confirmed <= 0) return "";
+  return (
+    ` · 스테일 표시(확인 아님): 직전 확인 ${stalePrevious.confirmed}` +
+    ` · 마지막 확인 ${formatStaleLastConfirmed(stalePrevious)}`
+  );
+}
+
 export function renderExternalEvidenceCandidateLine(externalEvidence) {
   if (!externalEvidence) return null;
   if (externalEvidence.known !== true) {
@@ -510,12 +538,13 @@ export function renderExternalEvidenceCandidateLine(externalEvidence) {
   }
   return (
     `${EXTERNAL_EVIDENCE_LINE_PREFIX}확인 ${externalEvidence.confirmed} · ` +
-    `미조회 ${externalEvidence.unchecked} · 분류 대기`
+    `미조회 ${externalEvidence.unchecked} · 분류 대기` +
+    renderExternalEvidenceStaleSuffix(externalEvidence.stalePrevious)
   );
 }
 
 const EXTERNAL_EVIDENCE_COUNT_RE =
-  /^- 외부 독립 증거 후보: 확인 (\d+) · 미조회 (\d+) · 분류 대기$/m;
+  /^- 외부 독립 증거 후보: 확인 (\d+) · 미조회 (\d+) · 분류 대기(?: · 스테일 표시\(확인 아님\): .*)?$/m;
 const EXTERNAL_EVIDENCE_FAILED_RE =
   /^- 외부 독립 증거 후보: 수집 실패\((.*)\)$/m;
 
