@@ -391,6 +391,47 @@ test("옛 상태 파일(식별자 칸 없음 · 마지막 회차 값만 있음)�
   );
 });
 
+test("옛 상태 파일에서 이어진 날(앞 회차 식별자를 모름 + 뒤 회차는 식별자를 가짐)은 «그날 식별자를 다 모른다» -- 마감은 마지막 회차 값 · 앞 줄 장부에 넣지 않는다(보수 쪽: 다음 날 같은 사건을 또 세어도 숨기지 않는다)", async () => {
+  const dir = tmpDir("nc-union-legacy-mixed-");
+  const SHA = "e".repeat(40);
+  const legacy = {
+    schema: "partial-count-daily-state/v1",
+    day: "2026-11-13",
+    firstTickAtMs: kst("2026-11-13 23:00"),
+    lastTickAtMs: kst("2026-11-13 23:30"),
+    ticks: 3,
+    gapCount: 0,
+    gapTotalMs: 0,
+    lnConfirmed: 2,
+    lnUnchecked: 0,
+    collectorFails: [],
+    concurrentTracksMax: 1,
+    delivered: 1,
+    uncountedExampleIds: [],
+    uncountedVersion: null,
+  };
+  fs.writeFileSync(statePath(dir), JSON.stringify(legacy), "utf8");
+  await stepWith(dir, kst("2026-11-13 23:45"), () => tickWith([SHA]));
+  assert.equal(
+    readState(dir).eventIdsPartial,
+    true,
+    "앞 회차를 식별자 없이 적은 날 = 부분",
+  );
+  await stepWith(dir, kst("2026-11-14 00:10"), () => tickWith([SHA]));
+  await stepWith(dir, kst("2026-11-15 00:05"), () => tickWith([]));
+  const lines = readLines(dir);
+  assert.equal(
+    lineOf(lines, "2026-11-13").lnConfirmed,
+    1,
+    "부분인 날 = 마지막 회차 값",
+  );
+  assert.equal(
+    lineOf(lines, "2026-11-14").lnConfirmed,
+    1,
+    "부분인 날은 앞 줄 장부에 안 들어가므로 같은 사건이 다음 날에도 센다(숨기지 않는 쪽)",
+  );
+});
+
 // ======================================================================================
 // ⑷ 뜻 무변 -- 미조회 · 수집 실패 · 공백 · 동시 배달 최대 · 판정 불가
 // ======================================================================================
@@ -460,6 +501,33 @@ test("창 표기: 일별 줄 창 = 첫 회차의 창 시작 ~ 마지막 회차 �
     assert.ok(atMs > l14.windowStartMs && atMs <= l14.windowEndMs);
   }
   assert.ok(kst("2026-11-14 23:55") > l14.windowEndMs);
+});
+
+test("창 표기 = 값의 창: 회차 창이 24시간이 아니어도(windowHours 6) 줄 창 시작 = 첫 회차가 실제로 본 창 시작 · 그 창 밖 사건은 값에 안 든다", async () => {
+  const rig = makeRig();
+  putSession(rig.h, "sess-w6", [
+    { atMs: kst("2026-11-14 03:00"), toolUseId: "tu-outside" }, // 첫 회차 창(04:00 ~) 밖
+    { atMs: kst("2026-11-14 05:00"), toolUseId: "tu-inside" }, // 창 안
+  ]);
+  const tick6 = (now) =>
+    runPartialCountStep({
+      watchDir: rig.watchDir,
+      now,
+      logPath: join(rig.watchDir, "watch.log"),
+      options: {
+        outboxDir: rig.h.outboxDir,
+        sessionHomeDir: rig.h.home,
+        windowHours: 6,
+      },
+      runPartialCountOnceFn: rig.runReal,
+    });
+  await tick6(kst("2026-11-14 10:00"));
+  await tick6(kst("2026-11-14 10:15"));
+  await tick6(kst("2026-11-15 00:05"));
+  const l14 = lineOf(readLines(rig.watchDir), "2026-11-14");
+  assert.equal(l14.windowStartMs, kst("2026-11-14 04:00"));
+  assert.equal(l14.windowEndMs, kst("2026-11-14 10:15"));
+  assert.equal(l14.permissionHumanAnswers, 1, "창 안 사건 1 · 창 밖 0");
 });
 
 test("창 표기: 앞 줄에서 센 사건이 있으면 «앞 줄에서 센 사건 N건 제외» 의 N = 실제로 뺀 수 · 값 + 제외 = 그날 창이 본 사건 수", async () => {
