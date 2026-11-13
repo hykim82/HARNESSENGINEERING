@@ -1233,6 +1233,14 @@ export function isPermissionFieldVersion(version) {
 
 // ---- 좌석 범위 -- 가르는 열쇠 = 판정 줄의 cwd (폴더 이름은 한글이 «-» 로 뭉개져 못 쓴다 · 설계 §E5) ----
 
+// 세션 뿌리의 «종류» -- 엔진 이름이 아니라 엔진 프로필(scripts/check/engine-profiles.json)의 칸 이름을 따른다:
+// HOME = homeDirName 뿌리(대화형 본체 좌석 · ORCH · 통역이 앉는 곳) · TEAM = teamDirName 뿌리(워커 좌석).
+// 이 파일에 엔진 이름 문자열을 새로 적지 않는다(engine-name-literal 기준선 · HYK-153).
+export const PERMISSION_ROOT_KIND = Object.freeze({
+  HOME: "home",
+  TEAM: "team",
+});
+
 export const PERMISSION_SEAT = Object.freeze({
   ORCH: "ORCH",
   WORKER_HARNESS: "워커H",
@@ -1293,7 +1301,7 @@ export function classifySessionSeat({ cwd, rootName, roots }) {
   if (c === null) return PERMISSION_SEAT.UNCLASSIFIED;
   if (isUnderPath(c, roots.interpreter)) return PERMISSION_SEAT.INTERPRETER;
   if (isUnderPath(c, roots.main)) {
-    return rootName === "claude"
+    return rootName === PERMISSION_ROOT_KIND.HOME
       ? PERMISSION_SEAT.ORCH
       : PERMISSION_SEAT.WORKER_MAIN;
   }
@@ -1301,7 +1309,7 @@ export function classifySessionSeat({ cwd, rootName, roots }) {
     return PERMISSION_SEAT.WORKER_HARNESS;
   }
   if (isUnderPath(c, roots.workspaces)) return PERMISSION_SEAT.WORKER_OTHER;
-  return rootName === "claude-team"
+  return rootName === PERMISSION_ROOT_KIND.TEAM
     ? PERMISSION_SEAT.UNCLASSIFIED
     : PERMISSION_SEAT.OUT_OF_LANE;
 }
@@ -1536,7 +1544,7 @@ export function renderPermissionAnswersLine(permissionAnswers) {
     `${PERMISSION_LINE_PREFIX}확인 ${readCount(p.humanTotal)}건${lower}(${inner.join(" · ")})` +
     ` · ORCH ${seatHumanTotal(p.bySeat, [PERMISSION_SEAT.ORCH])} · 워커 ${workers}` +
     ` · 미분류 ${seatHumanTotal(p.bySeat, [PERMISSION_SEAT.UNCLASSIFIED])} · 자동 ${readCount(p.auto)}` +
-    " — ㄴ 확인 건수에 포함 · Claude 세션 기록 한정"
+    " — ㄴ 확인 건수에 포함 · 세션 기록 한정(다른 엔진 좌석 미포함)"
   );
 }
 

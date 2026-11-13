@@ -536,7 +536,7 @@ test("칸 뿌리를 못 읽으면 수집 실패(known:false) -- 0 으로 접지 
   fs.rmSync(join(h.home, ".claude-team"), { recursive: true, force: true });
   const r = collect(h);
   assert.equal(r.known, false);
-  assert.match(r.reason, /세션 뿌리 읽기 실패\(claude-team/);
+  assert.match(r.reason, /세션 뿌리 읽기 실패\(team: /);
   assert.deepEqual(core.permissionGapPieces(r), ["권한기록 수집 실패"]);
   assert.equal(core.permissionHumanTotal(r), 0);
 });
@@ -727,7 +727,7 @@ test("보고: 칸 표 한 판 -> ㄴ 분자 «확인 4건 이상 · 판정 불�
   assert.equal(lnLine(result.reportText), "확인 4건 이상 · 판정 불가 1");
   assert.equal(
     permLine(result.reportText),
-    "확인 4건 이상(통역 1 · SDK 1 · 판정 불가 1 · 레인 밖 제외 1(사람 답 1)) · ORCH 1 · 워커 2 · 미분류 0 · 자동 7 — ㄴ 확인 건수에 포함 · Claude 세션 기록 한정",
+    "확인 4건 이상(통역 1 · SDK 1 · 판정 불가 1 · 레인 밖 제외 1(사람 답 1)) · ORCH 1 · 워커 2 · 미분류 0 · 자동 7 — ㄴ 확인 건수에 포함 · 세션 기록 한정(다른 엔진 좌석 미포함)",
   );
   assert.match(
     result.reportText,
@@ -768,7 +768,7 @@ test("보고: 수집 실패(뿌리 없음) = 분자에 안 더하고 «수집 �
   assert.equal(lnLine(result.reportText), "확인 0건 이상 · 권한기록 수집 실패");
   assert.match(
     permLine(result.reportText),
-    /^수집 실패\(세션 뿌리 읽기 실패\(claude: /,
+    /^수집 실패\(세션 뿌리 읽기 실패\(home: /,
   );
   assert.equal(result.dailyTick.permissionHumanAnswers, null);
   assert.equal(result.dailyTick.permissionUndecidable, null);
@@ -1059,7 +1059,7 @@ test("summarizePermissionRecords: 입력이 레코드 배열이 아니면 0 건 
       toolUseId: "t1",
       atMs: 5,
       cwd: "/h/t",
-      rootName: "claude",
+      rootName: "home",
       entrypoint: "cli",
       version: "2.1.322",
       hasDecision: true,

@@ -60,6 +60,11 @@ import {
   readApproverAllowlist,
   APPROVAL_STATUS,
 } from "./approval-authority-adapter.mjs";
+import {
+  loadEngineProfiles,
+  getKnownEngines,
+  getEngineAttr,
+} from "../check/engine-profile.mjs";
 import { parseWatchLog } from "./reach-report-core.mjs";
 import {
   DEFAULT_WATCH_LOG_PATH,
@@ -85,6 +90,7 @@ import {
   parseKstTimestampMs,
   renderOutboxAuxNote,
   PERMISSION_CLASS,
+  PERMISSION_ROOT_KIND,
   classifyPermissionDecision,
   deriveSeatRoots,
   parentDirOf,
@@ -2155,13 +2161,26 @@ function buildOutboxCollectorEntry(outboxResult) {
 // 이후 판부터 있어 그 앞 날은 «필드 없는 세션(S)» 으로 수집 실패다. SDK 세션은 자기 설정 규칙도 user_* 로 적혀 사람
 // 클릭이 아닐 수 있다(SDK j건을 따로 적는다). 세션 jsonl 은 같은 계정 파일이라 지우거나 고치면 사람 답을 숨길 수 있다(B 등급).
 // ---------------------------------------------------------------------------
-const PERMISSION_ROOT_DIRS = Object.freeze([
-  Object.freeze({ rootName: "claude", segments: [".claude", "projects"] }),
-  Object.freeze({
-    rootName: "claude-team",
-    segments: [".claude-team", "projects"],
-  }),
-]);
+// 세션 뿌리 이름(홈 아래 폴더 이름)은 엔진 프로필 설정(scripts/check/engine-profiles.json 의 homeDirName ·
+// teamDirName)에서 «읽는다» -- 이 파일에 엔진 이름 문자열을 새로 적지 않는다(engine-name-literal 기준선 · HYK-153).
+// 해당 칸이 null 인 엔진(세션 기록이 이 형식이 아닌 엔진)은 뿌리가 없다.
+function permissionRootDirs(profiles = loadEngineProfiles()) {
+  const dirs = [];
+  const seen = new Set();
+  for (const engine of getKnownEngines(profiles)) {
+    for (const [attr, rootName] of [
+      ["homeDirName", PERMISSION_ROOT_KIND.HOME],
+      ["teamDirName", PERMISSION_ROOT_KIND.TEAM],
+    ]) {
+      const dirName = getEngineAttr(engine, attr, profiles);
+      if (typeof dirName !== "string" || dirName === "") continue;
+      if (seen.has(dirName)) continue;
+      seen.add(dirName);
+      dirs.push({ rootName, segments: [dirName, "projects"] });
+    }
+  }
+  return dirs;
+}
 const PERMISSION_WALK_MAX_DEPTH = 8;
 const PERMISSION_LINE_FILTERS = Object.freeze([
   '"permissionDecision"',
@@ -2310,25 +2329,23 @@ function extractPermissionRecords({ text, rootName, filePath }) {
 
 // 수집기 본체. 홈(homeDir)과 통역 폴더(interpreterRoot = --outbox-dir 의 부모)만 받는다 -- 새 CLI 인자 0.
 // 반환 = summarizePermissionRecords 결과 + {filesScanned, readFailures, parseFailures} | {known:false, reason}.
-export function collectPermissionAnswers({
-  homeDir,
-  interpreterRoot,
-  windowStartMs,
-  windowEndMs,
-  readdirFn = readdirSync,
-  readFn = readFileSync,
-  statFn = statSync,
-}) {
-  const roots = deriveSeatRoots({ homeDir, interpreterRoot });
-  if (roots.main === null || roots.interpreter === null) {
+const errorMessageOf = (err) =>
+  err && err.message ? err.message : String(err);
+
+// 읽을 파일 목록 -- {targets, readFailures} | {known:false, reason}. 뿌리 하나라도 못 읽으면 수집 실패(조용한 0 금지).
+function listPermissionTargets({ homeDir, readdirFn, statFn, windowStartMs }) {
+  let rootDirs;
+  try {
+    rootDirs = permissionRootDirs();
+  } catch (err) {
     return {
       known: false,
-      reason: "세션 뿌리 경로 파생 실패(홈 또는 통역 폴더 경로 없음)",
+      reason: `엔진 프로필 읽기 실패(${errorMessageOf(err)})`,
     };
   }
   const targets = [];
   let readFailures = 0;
-  for (const { rootName, segments } of PERMISSION_ROOT_DIRS) {
+  for (const { rootName, segments } of rootDirs) {
     try {
       const walked = walkPermissionRoot({
         root: path.join(homeDir, ...segments),
@@ -2345,7 +2362,13 @@ export function collectPermissionAnswers({
       };
     }
   }
+  return { targets, readFailures };
+}
+
+// 파일들 -> {records, readFailures, parseFailures}. 파일 하나를 못 읽어도 나머지는 센다(실패는 값으로 남는다).
+function readPermissionTargets(targets, readFn) {
   const records = [];
+  let readFailures = 0;
   let parseFailures = 0;
   for (const { rootName, filePath } of targets) {
     let text;
@@ -2359,16 +2382,43 @@ export function collectPermissionAnswers({
     records.push(...extracted.records);
     parseFailures += extracted.parseFailures;
   }
+  return { records, readFailures, parseFailures };
+}
+
+export function collectPermissionAnswers({
+  homeDir,
+  interpreterRoot,
+  windowStartMs,
+  windowEndMs,
+  readdirFn = readdirSync,
+  readFn = readFileSync,
+  statFn = statSync,
+}) {
+  const roots = deriveSeatRoots({ homeDir, interpreterRoot });
+  if (roots.main === null || roots.interpreter === null) {
+    return {
+      known: false,
+      reason: "세션 뿌리 경로 파생 실패(홈 또는 통역 폴더 경로 없음)",
+    };
+  }
+  const listing = listPermissionTargets({
+    homeDir,
+    readdirFn,
+    statFn,
+    windowStartMs,
+  });
+  if (listing.known === false) return listing;
+  const read = readPermissionTargets(listing.targets, readFn);
   return {
     ...summarizePermissionRecords({
-      records,
+      records: read.records,
       windowStartMs,
       windowEndMs,
       roots,
     }),
-    filesScanned: targets.length,
-    readFailures,
-    parseFailures,
+    filesScanned: listing.targets.length,
+    readFailures: listing.readFailures + read.readFailures,
+    parseFailures: read.parseFailures,
   };
 }
 
