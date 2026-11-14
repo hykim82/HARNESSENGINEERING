@@ -599,24 +599,30 @@ function buildLnSection(
   relayLedgerResult,
   externalEvidence,
   permissionAnswers,
+  githubHumanActions,
 ) {
   const lines = ["ㄴ 계획 밖 개입:"];
+  // HYK-255-p3-gh-1 -- ㄴ 분자 = D1 확인분 + 권한 확인창 사람 답 + GitHub 사람 손 조작(미조회 · 수집 실패 = 더하지 않는다 ·
+  // 그 사실은 아래 하한 토막이 알린다).
   const confirmedCount =
     (Array.isArray(confirmedLnEvents) ? confirmedLnEvents.length : 0) +
-    permissionHumanTotal(permissionAnswers);
+    permissionHumanTotal(permissionAnswers) +
+    githubHumanTotal(githubHumanActions);
   // 하한 표기: 수집이 성공했고(known) 미조회가 있는 회차에만. 입력 없음 · 수집 실패는 표기 0.
   const uncheckedForLowerBound =
     externalEvidence?.known === true ? externalEvidence.unchecked : 0;
   // HYK-255-p5a-perm-1 -- ㄴ 분자 = D1 확인분 + 권한 확인창 사람 답(N+W+U · 통역 포함). 판정 불가 K · 필드 없는 세션 ·
   // 읽기 실패 · 수집 실패는 «이상» 토막으로 하한을 알린다(permissionAnswers 없음 = 미결선 = 옛 문면 그대로).
   lines.push(
-    `- 외부 독립 증거로 확인된 사건: ${renderConfirmedLnCount(confirmedCount, uncheckedForLowerBound, permissionGapPieces(permissionAnswers))}`,
+    `- 외부 독립 증거로 확인된 사건: ${renderConfirmedLnCount(confirmedCount, uncheckedForLowerBound, [...permissionGapPieces(permissionAnswers), ...githubGapPieces(githubHumanActions)])}`,
   );
   const externalEvidenceLine =
     renderExternalEvidenceCandidateLine(externalEvidence);
   if (externalEvidenceLine) lines.push(externalEvidenceLine);
   const permissionLine = renderPermissionAnswersLine(permissionAnswers);
   if (permissionLine) lines.push(permissionLine);
+  const githubLine = renderGithubHumanActionsLine(githubHumanActions);
+  if (githubLine) lines.push(githubLine);
   if (suspected.known === true) {
     const openNote =
       suspected.openCount > 0
@@ -700,6 +706,9 @@ export function buildPartialCountReport({
   // HYK-255-p5a-perm-1 -- 기본값 undefined -> ㄴ 절 새 줄 0개 · 분자 합산 0(미결선 호출자 회귀 0). 값 =
   // summarizePermissionRecords 결과 + 수집 부가 칸(wire 의 collectPermissionAnswers) 또는 {known:false, reason}.
   permissionAnswers,
+  // HYK-255-p3-gh-1 -- 기본값 undefined -> ㄴ 절 새 줄 0개 · 분자 합산 0(미결선 호출자 회귀 0). 값 = summarizeGithubEvents 결과 +
+  // 수집 부가 칸(wire 의 collectGithubHumanActions) · 미조회 {known:false, unchecked:true, reason} · 수집 실패 {known:false, reason}.
+  githubHumanActions,
 }) {
   const lines = [];
   lines.push("집계 성격: PARTIAL — 전수 아님");
@@ -736,6 +745,7 @@ export function buildPartialCountReport({
       relayLedgerResult,
       externalEvidence,
       permissionAnswers,
+      githubHumanActions,
     ),
   );
   lines.push("");
@@ -881,6 +891,8 @@ export function buildDailyTickValues({
   uncountedExamples,
   // HYK-255-p5a-perm-1 -- 없으면(미결선) 새 두 칸을 «싣지 않는다»(옛 회차 값 모양 그대로).
   permissionAnswers,
+  // HYK-255-p3-gh-1 -- 없으면(미결선) 새 칸을 «싣지 않는다»(옛 회차 값 모양 그대로).
+  githubHumanActions,
   // HYK-255-p1fix-2 -- 이 회차 보고 창의 시작(일별 줄 창 표기 = 첫 회차의 이 값). 없으면 null.
   windowStartMs,
 }) {
@@ -890,9 +902,11 @@ export function buildDailyTickValues({
   return {
     ...pickExternalEvidenceCounts(externalEvidence),
     ...pickPermissionColumns(permissionAnswers),
+    ...pickGithubColumns(githubHumanActions),
     confirmedEventIds: pickConfirmedEventIds({
       externalEvidence,
       permissionAnswers,
+      githubHumanActions,
     }),
     windowStartMs: Number.isFinite(windowStartMs) ? windowStartMs : null,
     collectorFails: failedCollectorNames(collectors),
@@ -907,7 +921,11 @@ export function buildDailyTickValues({
 
 // 이 회차가 «이미 자기 응답으로 확인한» 사건의 식별자 -- 새 조회 0(그 회차 값이 이미 들고 있는 sha · 세션 답 식별자를
 // 옮겨 적을 뿐). 수집 실패 · 미결선은 식별자 없음. D1 = `sha:<커밋 sha>` · 권한 사람 답 = `perm:<세션>|<tool_use_id>`.
-function pickConfirmedEventIds({ externalEvidence, permissionAnswers }) {
+function pickConfirmedEventIds({
+  externalEvidence,
+  permissionAnswers,
+  githubHumanActions,
+}) {
   const shas =
     externalEvidence?.known === true &&
     Array.isArray(externalEvidence.confirmedShas)
@@ -918,9 +936,14 @@ function pickConfirmedEventIds({ externalEvidence, permissionAnswers }) {
     Array.isArray(permissionAnswers.humanEventIds)
       ? permissionAnswers.humanEventIds
       : [];
+  // HYK-255-p3-gh-1 -- GitHub 사람 손 = 사건 `id`(접두 gh:). 그 회차 P3 가 «완전히» 센 회차(미조회 · 실패 · 판정 불가 0 아님)만.
+  const githubIds = githubDailyComplete(githubHumanActions)
+    ? githubHumanActions.humanEventIds
+    : [];
   return uniqueStrings([
     ...shas.map((sha) => `${DAILY_EVENT_PREFIX.D1}${sha}`),
     ...answers,
+    ...githubIds.map((id) => `${DAILY_EVENT_PREFIX.GITHUB}${id}`),
   ]);
 }
 
@@ -974,6 +997,7 @@ export function normalizeDailyTick(tick) {
     lnConfirmed: isCount(tick.lnConfirmed) ? tick.lnConfirmed : null,
     lnUnchecked: isCount(tick.lnUnchecked) ? tick.lnUnchecked : null,
     ...normalizePermissionColumns(tick),
+    ...normalizeGithubColumn(tick),
     // 식별자 칸이 없는 옛 회차 값 = null(«식별자를 모른다» -- 빈 배열 «확인 사건 없음» 과 다르다).
     confirmedEventIds: Array.isArray(tick.confirmedEventIds)
       ? uniqueStrings(tick.confirmedEventIds)
@@ -1070,6 +1094,12 @@ function knownEventKinds(state) {
         Object.hasOwn(state, "permissionHumanAnswers") &&
         isCount(state.permissionHumanAnswers),
     },
+    // HYK-255-p3-gh-1 -- 그날 P3 가 한 번이라도 미조회 · 실패 · 판정 불가였으면(githubHumanActionsMissed) 그날 GitHub 사건은
+    // «센 줄이 없는» 종류 -- 다음 날에 다시 보여도 센다(값을 잃지 않는다).
+    {
+      prefix: DAILY_EVENT_PREFIX.GITHUB,
+      known: isCount(githubStateColumn(state).githubHumanActions),
+    },
   ];
 }
 
@@ -1089,8 +1119,11 @@ function settleDailyEvents(state) {
 // 줄의 확인 값 두 칸 -- 아는 종류는 «처음 본 사건 수» · 모르는 종류(null)는 null 그대로. 식별자를 모르는 날 = 옛 값 그대로.
 function settledConfirmedColumns(state, settled) {
   const permission = normalizePermissionColumns(state);
-  if (!settled.complete)
-    return { lnConfirmed: state.lnConfirmed, ...permission };
+  // HYK-255-p3-gh-1 -- 새 칸(githubHumanActions): 칸이 있는 상태에서만 · 그날 미조회 · 실패가 한 번이라도 있었으면 null.
+  const github = githubStateColumn(state);
+  if (!settled.complete) {
+    return { lnConfirmed: state.lnConfirmed, ...permission, ...github };
+  }
   const countOf = (prefix) =>
     settled.fresh.filter((id) => id.startsWith(prefix)).length;
   const out = {
@@ -1102,6 +1135,11 @@ function settledConfirmedColumns(state, settled) {
   if (Object.hasOwn(permission, "permissionHumanAnswers")) {
     out.permissionHumanAnswers = isCount(permission.permissionHumanAnswers)
       ? countOf(DAILY_EVENT_PREFIX.PERMISSION)
+      : null;
+  }
+  if (Object.hasOwn(github, "githubHumanActions")) {
+    out.githubHumanActions = isCount(github.githubHumanActions)
+      ? countOf(DAILY_EVENT_PREFIX.GITHUB)
       : null;
   }
   return out;
@@ -1249,9 +1287,14 @@ export function recordDailyTick({ state, nowMs, tick, concurrentActive }) {
   delete carried.permissionUndecidable;
   delete carried.uncountedRanges;
   delete carried.openingGapSettled;
+  // GitHub 칸도 «마지막 회차 값» 규칙 -- 이번 회차 값에 칸이 없으면 앞 회차 값도 남기지 않는다. «그날 미조회 · 실패가 있었다»
+  // 는 사실(githubHumanActionsMissed)만 날 단위로 이어진다(칸이 사라졌다 돌아와도 그날은 null).
+  delete carried.githubHumanActions;
   return {
     ...carried,
     ...normalizePermissionColumns(t),
+    ...normalizeGithubColumn(t),
+    ...githubMissedFlag(base, t),
     firstTickAtMs: base.ticks > 0 ? base.firstTickAtMs : nowMs,
     lastTickAtMs: nowMs,
     firstWindowStartMs:
@@ -1321,6 +1364,7 @@ function dailyBreakReasons(line) {
     reasons.push(`관측 공백 ${gaps.count}구간`);
   }
   reasons.push(...permissionBreakReasons(line));
+  reasons.push(...githubBreakReasons(line));
   return reasons;
 }
 
@@ -1583,6 +1627,8 @@ function newPermissionAccumulator() {
 export const DAILY_EVENT_PREFIX = Object.freeze({
   D1: "sha:",
   PERMISSION: "perm:",
+  // HYK-255-p3-gh-1 -- GitHub 사람 손 조작 = 저장소 사건 목록의 사건 `id`.
+  GITHUB: "gh:",
 });
 
 const firstFilledString = (...values) =>
@@ -1906,4 +1952,268 @@ function permissionBreakReasons(line) {
     else if (line[key] > 0) reasons.push(`${labels[key]} ${line[key]}`);
   }
   return reasons;
+}
+
+// ---------------------------------------------------------------------------
+// HYK-255-p3-gh-1 (판정 2026-11-14 0939 ④⑤ · P3 행) -- ㄴ «GitHub 사람 손 조작» 분류 · 합산 · 렌더 · 일별 새 칸 1.
+// I/O 0(§2 원칙) -- 저장소 사건 목록을 부르는 것은 wire(partial-count-report.mjs collectGithubHumanActions)의 몫이고, 이 절은
+// 그 wire 가 받아 넘긴 사건 배열을 센다.
+//
+// 세는 종류 4(그 창 안 · 행위자 = 봇 목록에 «없는» 계정 = 사람 · 애매하면 ㄴ):
+//   (가) PR 대화 댓글  = IssueCommentEvent 중 payload.issue.pull_request 있음
+//   (나) PR 리뷰 줄 댓글 = PullRequestReviewCommentEvent
+//   (다) 변경 요청     = PullRequestReviewEvent 중 payload.review.state = changes_requested
+//   (라) 미병합 닫기   = PullRequestEvent 중 payload.action = closed 이고 payload.pull_request.merged = false
+// 승인(approved) · 병합 = 계획된 개입이라 세지 않는다. 모르는 사건 종류 = 버린다(건수만). 모양이 어긋난 사건(필드 없음)은 0 이
+// 아니라 «판정 불가 K» -- 하한 표기를 켠다. 봇 목록은 wire 가 설정 파일에서 읽어 소문자 login 집합으로 넘긴다(이 파일에 이름 리터럴 0).
+// ---------------------------------------------------------------------------
+
+const GITHUB_DAILY_KEY = "githubHumanActions";
+const GITHUB_EVENT_TYPE = Object.freeze({
+  ISSUE_COMMENT: "IssueCommentEvent",
+  REVIEW_COMMENT: "PullRequestReviewCommentEvent",
+  REVIEW: "PullRequestReviewEvent",
+  PULL_REQUEST: "PullRequestEvent",
+});
+const GITHUB_EVENT_TYPES = new Set(Object.values(GITHUB_EVENT_TYPE));
+const GITHUB_CHANGES_REQUESTED = "changes_requested";
+const GITHUB_NONE = "none";
+const GITHUB_UNDECIDABLE = "undecidable";
+
+const isRecord = (v) =>
+  v !== null && typeof v === "object" && !Array.isArray(v);
+
+function githubEventId(event) {
+  const id = event.id;
+  if (typeof id === "string" && id !== "") return id;
+  return typeof id === "number" && Number.isFinite(id) ? String(id) : null;
+}
+
+function githubLoginOf(event) {
+  const login = event.actor?.login;
+  return typeof login === "string" && login !== "" ? login : null;
+}
+
+// 종류별 payload 판독 -> "comment" | "reviewComment" | "changeRequest" | "unmergedClose" | "none" | "undecidable".
+function judgeIssueCommentPayload(payload) {
+  if (!isRecord(payload.issue)) return GITHUB_UNDECIDABLE;
+  return isRecord(payload.issue.pull_request) ? "comment" : GITHUB_NONE;
+}
+
+function judgeReviewPayload(payload) {
+  const state = payload.review?.state;
+  if (typeof state !== "string") return GITHUB_UNDECIDABLE;
+  return state.toLowerCase() === GITHUB_CHANGES_REQUESTED
+    ? "changeRequest"
+    : GITHUB_NONE;
+}
+
+function judgePullRequestPayload(payload) {
+  if (typeof payload.action !== "string") return GITHUB_UNDECIDABLE;
+  if (payload.action !== "closed") return GITHUB_NONE;
+  const merged = payload.pull_request?.merged;
+  if (typeof merged !== "boolean") return GITHUB_UNDECIDABLE;
+  return merged ? GITHUB_NONE : "unmergedClose";
+}
+
+const GITHUB_PAYLOAD_JUDGES = Object.freeze({
+  [GITHUB_EVENT_TYPE.ISSUE_COMMENT]: judgeIssueCommentPayload,
+  [GITHUB_EVENT_TYPE.REVIEW_COMMENT]: () => "reviewComment",
+  [GITHUB_EVENT_TYPE.REVIEW]: judgeReviewPayload,
+  [GITHUB_EVENT_TYPE.PULL_REQUEST]: judgePullRequestPayload,
+});
+
+function classifyGithubPayload(type, payload) {
+  if (!isRecord(payload)) return GITHUB_UNDECIDABLE;
+  return GITHUB_PAYLOAD_JUDGES[type](payload);
+}
+
+function newGithubTally() {
+  return {
+    comment: 0,
+    reviewComment: 0,
+    changeRequest: 0,
+    unmergedClose: 0,
+    undecidable: 0,
+    botSkipped: 0,
+    unknownKinds: 0,
+    outOfWindow: 0,
+    duplicates: 0,
+    scanned: 0,
+  };
+}
+
+// 사건 하나 -> {kind, id}(센다) | {skip: <tally 칸>}(그 칸에 센다) | {skip: null}(세지 않고 진단 칸도 없음 -- 승인 · 병합 ·
+// PR 아닌 댓글 등). 창 밖은 판정 불가 판정보다 먼저다(창 밖 사건의 모양은 안 본다).
+function readGithubEventHead(event, windowStartMs, windowEndMs) {
+  const tsMs =
+    typeof event.created_at === "string" ? Date.parse(event.created_at) : NaN;
+  if (!Number.isFinite(tsMs)) return { skip: "undecidable" };
+  if (tsMs < windowStartMs || tsMs > windowEndMs) {
+    return { skip: "outOfWindow" };
+  }
+  const id = githubEventId(event);
+  const login = githubLoginOf(event);
+  if (id === null || login === null) return { skip: "undecidable" };
+  return { id, login };
+}
+
+function judgeGithubEvent(event, { botLogins, windowStartMs, windowEndMs }) {
+  if (!isRecord(event) || typeof event.type !== "string") {
+    return { skip: "undecidable" };
+  }
+  if (!GITHUB_EVENT_TYPES.has(event.type)) return { skip: "unknownKinds" };
+  const head = readGithubEventHead(event, windowStartMs, windowEndMs);
+  if (head.skip !== undefined) return head;
+  const { id, login } = head;
+  if (botLogins.has(login.toLowerCase())) return { skip: "botSkipped" };
+  const kind = classifyGithubPayload(event.type, event.payload);
+  if (kind === GITHUB_UNDECIDABLE) return { skip: "undecidable" };
+  return kind === GITHUB_NONE ? { skip: null } : { kind, id };
+}
+
+export function summarizeGithubEvents({
+  events,
+  botLogins,
+  windowStartMs,
+  windowEndMs,
+}) {
+  const tally = newGithubTally();
+  const seen = new Set();
+  const ids = [];
+  const ctx = {
+    botLogins: botLogins instanceof Set ? botLogins : new Set(),
+    windowStartMs,
+    windowEndMs,
+  };
+  for (const event of Array.isArray(events) ? events : []) {
+    tally.scanned += 1;
+    const verdict = judgeGithubEvent(event, ctx);
+    if (verdict.skip !== undefined) {
+      if (verdict.skip !== null) tally[verdict.skip] += 1;
+    } else if (seen.has(verdict.id)) {
+      tally.duplicates += 1;
+    } else {
+      seen.add(verdict.id);
+      ids.push(verdict.id);
+      tally[verdict.kind] += 1;
+    }
+  }
+  return {
+    known: true,
+    ...tally,
+    humanTotal:
+      tally.comment +
+      tally.reviewComment +
+      tally.changeRequest +
+      tally.unmergedClose,
+    humanEventIds: ids,
+  };
+}
+
+// ㄴ 분자에 더해지는 사람 손 조작 수. 미조회 · 수집 실패 · 미결선 = 0(더하지 않는다 -- 사실은 gapPieces · 줄이 알린다).
+export function githubHumanTotal(githubHumanActions) {
+  return githubHumanActions?.known === true &&
+    isCount(githubHumanActions.humanTotal)
+    ? githubHumanActions.humanTotal
+    : 0;
+}
+
+// 센 값이 실제보다 작을 수 있는 사유 토막(= 분자 «이상» 표기를 켜는 것). 미결선 = [].
+export function githubGapPieces(githubHumanActions) {
+  const g = githubHumanActions;
+  if (g === undefined || g === null) return [];
+  if (g.known !== true) {
+    return [
+      g.unchecked === true
+        ? "GitHub 사람 손 미조회"
+        : "GitHub 사람 손 수집 실패",
+    ];
+  }
+  return readCount(g.undecidable) > 0
+    ? [`GitHub 판정 불가 ${g.undecidable}`]
+    : [];
+}
+
+const GITHUB_LINE_PREFIX = "- GitHub 사람 손 ";
+
+// ㄴ 절 줄 -- «GitHub 사람 손 N건[ 이상](댓글 a · 리뷰 줄 댓글 b · 변경 요청 c · 미병합 닫기 d · 판정 불가 K)». 미결선 = null.
+// 미조회 · 수집 실패는 bare 0 이 아니라 «미조회(사유)» · «수집 실패(사유)» -- 둘 다 «0 아님».
+export function renderGithubHumanActionsLine(githubHumanActions) {
+  const g = githubHumanActions;
+  if (g === undefined || g === null) return null;
+  if (g.known !== true) {
+    const kind = g.unchecked === true ? "미조회" : "수집 실패";
+    return `${GITHUB_LINE_PREFIX}${kind}(${g.reason ?? "사유 미상"}) — ㄴ 확인 건수에 미반영 · 0 아님`;
+  }
+  const lower = readCount(g.undecidable) > 0 ? " 이상" : "";
+  return (
+    `${GITHUB_LINE_PREFIX}${readCount(g.humanTotal)}건${lower}(` +
+    `댓글 ${readCount(g.comment)} · 리뷰 줄 댓글 ${readCount(g.reviewComment)} · ` +
+    `변경 요청 ${readCount(g.changeRequest)} · 미병합 닫기 ${readCount(g.unmergedClose)} · ` +
+    `판정 불가 ${readCount(g.undecidable)})` +
+    " — ㄴ 확인 건수에 포함 · 저장소 사건 목록 한정(사건 API 지연 · 승인 · 병합 · 웹 화면 행위 미포함)"
+  );
+}
+
+// 회차 값에 «완전히 센» 사건인가 -- 수집 성공 · 판정 불가 0. (판정 불가가 있으면 센 값이 하한이라 일별 칸이 정확한 수일 수 없다.)
+function githubDailyComplete(githubHumanActions) {
+  const g = githubHumanActions;
+  return (
+    g?.known === true &&
+    isCount(g.humanTotal) &&
+    readCount(g.undecidable) === 0 &&
+    Array.isArray(g.humanEventIds)
+  );
+}
+
+// 일별 회차 값의 새 칸 1 -- githubHumanActions(사람 손 조작 수 | null). 미결선 = 칸을 «싣지 않는다». 미조회 · 수집 실패 ·
+// 판정 불가 > 0 = null(0 이 아니다).
+function pickGithubColumns(githubHumanActions) {
+  if (githubHumanActions === undefined || githubHumanActions === null) {
+    return {};
+  }
+  return {
+    [GITHUB_DAILY_KEY]: githubDailyComplete(githubHumanActions)
+      ? githubHumanActions.humanTotal
+      : null,
+  };
+}
+
+// 칸이 «있는» 객체(회차 값)에서만 새 칸을 뽑는다 -- 있되 모양이 틀리면 null(값 모름), 없으면 싣지 않는다.
+function normalizeGithubColumn(source) {
+  if (!Object.hasOwn(source, GITHUB_DAILY_KEY)) return {};
+  return {
+    [GITHUB_DAILY_KEY]: isCount(source[GITHUB_DAILY_KEY])
+      ? source[GITHUB_DAILY_KEY]
+      : null,
+  };
+}
+
+// 상태의 새 칸 -- 칸이 있고 그날 미조회 · 실패가 한 번도 없었던 날만 값 · 아니면 null. 칸 없는 상태 = {}.
+function githubStateColumn(state) {
+  if (!Object.hasOwn(state, GITHUB_DAILY_KEY)) return {};
+  const usable =
+    state.githubHumanActionsMissed !== true && isCount(state[GITHUB_DAILY_KEY]);
+  return { [GITHUB_DAILY_KEY]: usable ? state[GITHUB_DAILY_KEY] : null };
+}
+
+// «그날 회차 중 P3 미조회 · 실패가 하나라도 있었다» 표지 -- 한 번 서면 그날 끝까지 간다(날이 바뀌면 새 상태라 사라진다).
+function githubMissedFlag(base, tickValues) {
+  const missed =
+    base.githubHumanActionsMissed === true ||
+    (Object.hasOwn(tickValues, GITHUB_DAILY_KEY) &&
+      tickValues[GITHUB_DAILY_KEY] === null);
+  return missed ? { githubHumanActionsMissed: true } : {};
+}
+
+// 연속 확인-0 끊김 사유(읽는 쪽) -- 새 칸이 «있는» 줄만 본다. 칸 없는 줄 = P3 이전에 마감된 날 = 옛 규칙 그대로. 칸이 있는데
+// 값을 모르면(null · 모양 오류) 0 이 아니라 사유다.
+function githubBreakReasons(line) {
+  if (!Object.hasOwn(line, GITHUB_DAILY_KEY)) return [];
+  const label = "GitHub 사람 손 조작";
+  if (!isCount(line[GITHUB_DAILY_KEY])) return [`${label} UNKNOWN`];
+  return line[GITHUB_DAILY_KEY] > 0
+    ? [`${label} ${line[GITHUB_DAILY_KEY]}`]
+    : [];
 }

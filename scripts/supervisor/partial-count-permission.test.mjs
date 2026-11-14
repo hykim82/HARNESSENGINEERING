@@ -195,6 +195,16 @@ function repoOnce() {
     }),
     "utf8",
   );
+  // HYK-255-p3-gh-1 -- P3(GitHub 사람 손 수집기)는 이 시험의 관심 밖이다. 봇 목록 파일을 둬서 P3 가 «수집 실패» 로 ㄴ 분자
+  // 표기(하한 토막)를 바꾸지 않게 하고, 아래 runReal 의 사건 목록 호출은 빈 목록(사람 손 0)으로 받는다.
+  fs.writeFileSync(
+    join(repo, "scripts", "supervisor", "github-bot-accounts.json"),
+    JSON.stringify({
+      schema_version: "github-bot-accounts/v1",
+      bots: [{ login: "bot-fixture-a" }],
+    }),
+    "utf8",
+  );
   git(repo, ["add", "-A"]);
   git(repo, ["commit", "-q", "-m", "root"]);
   git(repo, ["remote", "add", "origin", `https://github.com/${REPO_SLUG}.git`]);
@@ -213,12 +223,10 @@ async function runReal(options) {
     watchLogPath: join(root, "watch.log"),
     extraRepoRoots: [],
     archiveRoot: join(root, "archive-missing"),
-    fetchJson: async () => ({
-      ok: false,
-      status: 404,
-      json: null,
-      linkHeader: null,
-    }),
+    fetchJson: async ({ url }) =>
+      /\/events\?per_page=/.test(url)
+        ? { ok: true, status: 200, json: [], linkHeader: null }
+        : { ok: false, status: 404, json: null, linkHeader: null },
     git: report.createProcessGitPort(repo),
     gitWorktreeListExecFn: () => "",
     ...options,
