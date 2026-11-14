@@ -2,7 +2,8 @@
 //
 //   (가) 칸 이름 uncountedRanges -> uncountedExampleIds · 값 = «V<판본>-<순번>» (설계 U-id 와 문자열이 겹치지 않는다)
 //   (나) 자정을 걸친 회차 간격 = 하나로 재고, 20분 초과면 두 날 각각에 공백 1(몫 = 그 날 안에 든 길이)
-//   (다) 일별 줄 창 시작 = 직전 일별 줄의 창 끝(없으면 그날 첫 회차의 창 시작)
+//   (다) 일별 줄 창 연속 -- 1R 의 «직전 줄 창 끝부터» 라벨은 2R 에서 되돌렸다. 지금 = 그날 첫 회차의 창 시작 ~ 마지막 회차
+//        (값과 같은 창) · 시험은 사건을 넣고 표기 창과 값을 한 칸에서 함께 단언한다.
 //
 // ⛔헛시험 금지: 프로덕션 export 를 직접 구동한다 -- runPartialCountStep(watch-run 부분 계수 단계) · partial-count-core 의
 // 순수 함수. 사본 import 0. 저장소/파일은 전부 mkdtemp 합성 watchDir · 주입 시계(now) -- 실제 네트워크 · 관제실 쓰기 0.
@@ -383,18 +384,63 @@ test("(다-2) 틈 사건: 23:41 -> 00:20 사이 사건(23:45)은 11-13 줄 0 · 
   }
 });
 
-test("(다-3) 여러 날 건너뜀 뒤 첫 줄 = 직전 줄이 어제가 아니므로 그날 첫 회차의 창 시작", async () => {
+// 사건 목록 [{ sha, atMs }] -> 회차 시각(now)의 24시간 창 (now - 24h, now] 에 든 사건의 sha 로 만든 회차 값.
+const eventsSeenAt = (events) => (now) =>
+  withShas(
+    events.filter((e) => e.atMs > now - DAY && e.atMs <= now).map((e) => e.sha),
+  );
+
+async function runDayWithEvents(dir, day, last, events) {
+  const start = core.kstDayStartMs(day);
+  const times = [kst(`${day} ${last}`)];
+  while (times[0] - 15 * MIN >= start) times.unshift(times[0] - 15 * MIN);
+  const seen = eventsSeenAt(events);
+  for (const t of times) await tickAt(dir, t, seen(t));
+  return times;
+}
+
+test("(다-3) 여러 날 건너뛴 뒤 첫 줄: 빈 날 낮의 사건이 표기 창(그날 첫 회차의 창 시작 ~ 마지막 회차) 안에 들고 · 같은 창으로 센 값 + 제외 = 창 안 사건 수", async () => {
   const dir = tmpDir("nc-fix-window-skip-");
   try {
-    await runDay(dir, "2026-11-11", "23:50");
-    const t13 = await runDay(dir, "2026-11-13", "23:50"); // 11-12 통째 빔
+    const events = [
+      { sha: "1".repeat(40), atMs: kst("2026-11-11 12:00") }, // 11-11 줄의 창 안
+      { sha: "2".repeat(40), atMs: kst("2026-11-11 23:58") }, // 어느 회차도 못 본 사건 · 11-11 마지막 회차(23:50) 뒤
+      { sha: "3".repeat(40), atMs: kst("2026-11-12 12:00") }, // 통째 빈 날 낮 -> 11-13 앞쪽 회차 창에만 보인다
+    ];
+    await runDayWithEvents(dir, "2026-11-11", "23:50", events);
+    const t13 = await runDayWithEvents(dir, "2026-11-13", "23:50", events); // 11-12 통째 빔
     await tickAt(dir, kst("2026-11-14 00:05"));
     const lines = readLines(dir);
     assert.deepEqual(
       lines.map((l) => l.day),
       ["2026-11-11", "2026-11-13"],
     );
-    assert.equal(lines[1].windowStartMs, t13[0] - DAY);
+    const [l11, l13] = lines;
+    // 표기 창: 그날 첫 회차의 창 시작 ~ 마지막 회차
+    assert.equal(l13.windowStartMs, t13[0] - DAY);
+    assert.equal(l13.windowEndMs, kst("2026-11-13 23:50"));
+    // 같은 줄의 값: 빈 날 낮의 사건 1건이 11-13 줄에 센다(어느 줄에서도 사라지지 않는다)
+    assert.equal(l13.lnConfirmed, 1);
+    assert.equal(l13.confirmedExcludedEarlier, 0);
+    assert.equal(l11.lnConfirmed, 1);
+    assert.equal(l11.confirmedExcludedEarlier, 0);
+    // 표기 창과 값이 같은 범위: 줄마다 «표기 창 안» 에 든 사건 수 = 값 + 제외 (창 밖 사건은 값에도 없다)
+    const inLabelWindow = (l) =>
+      events.filter((e) => e.atMs > l.windowStartMs && e.atMs <= l.windowEndMs)
+        .length;
+    assert.equal(
+      inLabelWindow(l13),
+      l13.lnConfirmed + l13.confirmedExcludedEarlier,
+    );
+    assert.equal(
+      inLabelWindow(l11),
+      l11.lnConfirmed + l11.confirmedExcludedEarlier,
+    );
+    // 빈 날 낮의 사건 시각은 11-13 줄 표기 창 안 · 11-11 줄 표기 창 밖
+    assert.ok(
+      events[2].atMs > l13.windowStartMs && events[2].atMs <= l13.windowEndMs,
+    );
+    assert.ok(events[2].atMs > l11.windowEndMs);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

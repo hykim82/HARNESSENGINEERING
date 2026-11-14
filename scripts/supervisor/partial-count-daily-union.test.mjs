@@ -455,6 +455,44 @@ test("뜻 무변: 마지막 회차가 수집 실패(null)면 확인 값은 0 이
   assert.deepEqual(l14.collectorFails, ["수집기 실패"]);
 });
 
+test("모르는 종류는 앞 줄 장부에 들어가지 않는다: 마지막 회차가 D1 수집 실패인 날에 본 D1 sha 는 다음 날 줄에서 1 로 센다 · 제외 0 (그날 줄 자신은 null)", async () => {
+  const dir = tmpDir("nc-union-unknown-kind-");
+  const SHA = "f".repeat(40);
+  // 11-13: 낮 회차가 sha 를 본다 -> 그날 마지막 회차(23:50)는 D1 수집 실패(값 자리 = 모르는 종류).
+  // 11-14: 같은 sha 가 아직 24시간 창 안이라 첫 회차가 다시 본다 · 마지막 회차는 사건 없음.
+  const plan = [
+    ["2026-11-13 12:00", () => tickWith([SHA])],
+    ["2026-11-13 23:50", () => core.dailyFailureTick("수집기 실패")],
+    ["2026-11-14 00:05", () => tickWith([SHA])],
+    ["2026-11-14 23:50", () => tickWith([])],
+  ];
+  for (const [t, make] of plan.slice(0, 3)) {
+    await stepWith(dir, kst(t), make);
+  }
+  // 11-13 을 닫은 직후: 값을 못 센 날(null)의 식별자는 «앞 줄에서 센 장부» 에 없다.
+  assert.deepEqual(
+    readState(dir).countedEventIds["2026-11-13"],
+    [],
+    "마지막 회차가 수집 실패인 날 = D1 식별자를 장부에 넣지 않는다",
+  );
+  const [lastT, lastMake] = plan[3];
+  await stepWith(dir, kst(lastT), lastMake);
+  await stepWith(dir, kst("2026-11-15 00:05"), () => tickWith([])); // 11-14 줄을 닫는다
+  const lines = readLines(dir);
+  const l13 = lineOf(lines, "2026-11-13");
+  const l14 = lineOf(lines, "2026-11-14");
+  assert.ok(l13 && l14, "두 날 줄이 모두 있다");
+  assert.equal(l13.lnConfirmed, null, "그날 줄 = 모르는 종류 -> null(0 아님)");
+  assert.deepEqual(l13.collectorFails, ["수집기 실패"]);
+  assert.equal(
+    l14.lnConfirmed,
+    1,
+    "11-13 줄이 세지 않았으니 11-14 줄이 센다(거짓 0 으로 사라지지 않는다)",
+  );
+  assert.equal(l14.confirmedExcludedEarlier, 0, "앞 줄에서 센 사건 = 0");
+  assert.match(l14.windowNote, /앞 줄에서 센 사건 0건 제외/);
+});
+
 test("뜻 무변: 미조회 · 관측 공백 · 동시 배달 최대 칸은 사건 합집합과 무관하게 마지막 회차 값 · 20분 초과 공백 · 최대값 그대로", async () => {
   const dir = tmpDir("nc-union-meaning-");
   const make = (now) =>
