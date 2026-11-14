@@ -605,6 +605,13 @@ test("⑶ 봇 목록 없음 · 깨짐 · 스키마 불일치 · 비어 있음 = 
     assert.notEqual(result.githubHumanActions.unchecked, true, name);
     assert.match(result.githubHumanActions.reason, /봇 목록/, name);
     assert.equal(calls.events.length, 0, `${name}: 사건 목록 호출 0`);
+    // 사유에 git stderr 의 개행이 섞여도 보고문 줄 · 관측 건강 줄이 «한 줄» 로 남는다(합성 렌더에서 실측한 줄 깨짐).
+    assert.equal(/[\r\n]/.test(result.githubHumanActions.reason), false, name);
+    assert.match(
+      ghLine(result.reportText),
+      /^- GitHub 사람 손 수집 실패\(봇 목록 읽기 실패: [^\r\n]*\) — ㄴ 확인 건수에 미반영 · 0 아님$/,
+      name,
+    );
     assert.equal(
       numerator(result.reportText),
       `${NUMERATOR_PREFIX}확인 0건 이상 · GitHub 사람 손 수집 실패`,

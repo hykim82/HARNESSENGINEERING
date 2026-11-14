@@ -1037,6 +1037,7 @@ export const GITHUB_HUMAN_MAX_CALLS = 2;
 export const DEFAULT_GITHUB_BOT_ACCOUNTS_PATH =
   "scripts/supervisor/github-bot-accounts.json";
 const GITHUB_EVENTS_PAGE_SIZE = 100;
+const GITHUB_REASON_MAX_CHARS = 200;
 const GITHUB_BOT_ACCOUNTS_SCHEMA = "github-bot-accounts/v1";
 
 // P3 몫 = min(2, 12 - 이 회차에 이미 쓴 호출 수) -- 음수 없음. 0 이면 호출하지 않고 «미조회(예산)».
@@ -1060,8 +1061,22 @@ function meterFetchJson(fetchJson) {
   };
 }
 
-const githubUnchecked = (reason) => ({ known: false, unchecked: true, reason });
-const githubFailed = (reason) => ({ known: false, reason });
+// 사유는 보고문 «한 줄» 과 관측 건강 «한 줄» 에 들어간다 -- git stderr 같은 개행 · 연속 공백은 접고 길이를 자른다(합성 렌더에서
+// 봇 목록 파일이 없을 때 git 의 «fatal: …» 개행이 보고문 줄을 쪼갠 것을 실측해 넣었다).
+const oneLineReason = (reason) =>
+  String(reason ?? "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, GITHUB_REASON_MAX_CHARS);
+const githubUnchecked = (reason) => ({
+  known: false,
+  unchecked: true,
+  reason: oneLineReason(reason),
+});
+const githubFailed = (reason) => ({
+  known: false,
+  reason: oneLineReason(reason),
+});
 
 // 설정 파일 본문 -> {ok:true, logins: Set(소문자 login)} | {ok:false, reason}. 스키마 불일치 · 빈 목록 · login 모양 위반 = 못 읽음.
 function parseGithubBotAccounts(text) {
