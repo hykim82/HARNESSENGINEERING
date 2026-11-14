@@ -2240,10 +2240,12 @@ function sessionKeyOf(o, filePath) {
 // 줄 1개(파싱된 객체) -> 레코드들. «쓰는 칸만» 옮긴다 -- 나머지 칸(본문 포함)은 여기서 버려진다.
 function recordsFromLine(o, { rootName, filePath }) {
   const hasDecision = Object.hasOwn(o, "permissionDecision");
-  const toolUseIds = contentItemsOfType(o, "tool_result").map((item) =>
-    strOrNull(item.tool_use_id),
-  );
-  if (!hasDecision && toolUseIds.length === 0) return [];
+  // HYK-255-p5a-errsplit-1 -- 항목마다 `is_error` «칸» 이 불리언 true 인지만 옮긴다(본문 `content` 는 열지 않는다).
+  const results = contentItemsOfType(o, "tool_result").map((item) => ({
+    toolUseId: strOrNull(item.tool_use_id),
+    isError: item.is_error === true,
+  }));
+  if (!hasDecision && results.length === 0) return [];
   const pd = o.permissionDecision;
   const base = {
     sessionKey: sessionKeyOf(o, filePath),
@@ -2259,8 +2261,13 @@ function recordsFromLine(o, { rootName, filePath }) {
       : null,
     toolName: null,
   };
-  const ids = toolUseIds.length > 0 ? toolUseIds : [null];
-  return ids.map((toolUseId) => ({ ...base, toolUseId }));
+  const items =
+    results.length > 0 ? results : [{ toolUseId: null, isError: false }];
+  return items.map(({ toolUseId, isError }) => ({
+    ...base,
+    toolUseId,
+    isError,
+  }));
 }
 
 // 도구 이름을 찾을 «사람 답 후보»(판정 칸이 있고 자동이 아닌 것)의 tool_use_id 들.

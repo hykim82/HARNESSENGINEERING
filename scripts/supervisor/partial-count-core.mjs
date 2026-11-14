@@ -1247,6 +1247,7 @@ export function recordDailyTick({ state, nowMs, tick, concurrentActive }) {
   const carried = { ...base };
   delete carried.permissionHumanAnswers;
   delete carried.permissionUndecidable;
+  delete carried.permissionErrorEnded;
   delete carried.uncountedRanges;
   delete carried.openingGapSettled;
   return {
@@ -1565,6 +1566,7 @@ function newPermissionAccumulator() {
     sdkAnswers: 0,
     duplicates: 0,
     undated: 0,
+    undatedHuman: 0,
     sessions: new Map(),
     excludedSessions: new Set(),
     excludedHuman: 0,
@@ -1629,6 +1631,7 @@ function addPermissionLaneRecord(acc, record, seat) {
     withDecision: 0,
     noDecisionNew: 0,
     noDecisionOld: 0,
+    errorEnded: 0,
   };
   acc.sessions.set(key, session);
   if (record.hasDecision === true) {
@@ -1641,8 +1644,14 @@ function addPermissionLaneRecord(acc, record, seat) {
     );
     return;
   }
-  if (isPermissionFieldVersion(record.version)) session.noDecisionNew += 1;
-  else session.noDecisionOld += 1;
+  if (!isPermissionFieldVersion(record.version)) {
+    session.noDecisionOld += 1;
+    return;
+  }
+  // HYK-255-p5a-errsplit-1 (판정 1306 ④ (가)) -- 판정 칸이 없는데 도구 결과의 오류 표시 칸이 «참(true)» 인 것 = 권한창이 뜨기
+  // 전에 기계가 끝낸 것으로 보고 K 에서 떼어 따로 센다. 참이 아닌 모든 것(없음 · false · 다른 값)은 K 로 남는다(애매하면 K).
+  if (record.isError === true) session.errorEnded += 1;
+  else session.noDecisionNew += 1;
 }
 
 function addPermissionExcludedRecord(acc, record) {
@@ -1666,16 +1675,41 @@ function isDuplicatePermissionRecord(seen, record) {
   return false;
 }
 
-// 세션 단위 마감 -- 판정 칸이 한 줄도 없는 세션 · 판정 칸 없던 구판 줄이 섞인 세션 = S(수집 실패), 그 밖 세션의
-// 판정 없는 tool_result = K(하한).
+// 세션 단위 마감 -- 구판 줄(판정 칸 없던 판)이 섞인 세션 · 새 판인데 판정 칸이 한 줄도 없고 «오류 아닌» 판정 없음이 있는
+// 세션 = S(수집 실패). 그 밖 세션의 판정 없는 tool_result 는 오류 표시 참 = errorEnded(끊김 아님 · 감사용) · 나머지 = K(하한).
+// 새 판 세션의 도구 결과가 «전부» 오류 참이면 판정 0 이어도 S 가 아니다(판정 1306 ④ (나)).
 function finalizePermissionSessions(acc) {
   let fieldMissingSessions = 0;
   let undecided = 0;
+  let errorEnded = 0;
   for (const s of acc.sessions.values()) {
-    if (s.noDecisionOld > 0 || s.withDecision === 0) fieldMissingSessions += 1;
-    else undecided += s.noDecisionNew;
+    if (s.noDecisionOld > 0 || (s.withDecision === 0 && s.noDecisionNew > 0)) {
+      fieldMissingSessions += 1;
+    } else {
+      undecided += s.noDecisionNew;
+      errorEnded += s.errorEnded;
+    }
   }
-  return { fieldMissingSessions, undecided };
+  return { fieldMissingSessions, undecided, errorEnded };
+}
+
+// 시각 불명 줄 중 «판정 칸이 있고 사람 답 계열(자동이 아닌 것)» -- 날짜를 모르니 일별 칸 · 합계에는 못 넣고 하한 토막으로만
+// 센다(판정 1306 ④ (다)). 레인 밖 · 이어받기 중복은 시각이 있는 줄과 같은 규칙으로 뺀다.
+function addUndatedHumanRecord(acc, seen, record, roots) {
+  if (
+    record.hasDecision !== true ||
+    classifyPermissionDecision(record.decision) === PERMISSION_CLASS.AUTO
+  ) {
+    return;
+  }
+  const seat = classifySessionSeat({
+    cwd: record.cwd,
+    rootName: record.rootName,
+    roots,
+  });
+  if (seat === PERMISSION_SEAT.OUT_OF_LANE) return;
+  if (isDuplicatePermissionRecord(seen, record)) return;
+  acc.undatedHuman += 1;
 }
 
 export function summarizePermissionRecords({
@@ -1689,6 +1723,7 @@ export function summarizePermissionRecords({
   for (const record of Array.isArray(records) ? records : []) {
     if (!record || !Number.isFinite(record.atMs)) {
       acc.undated += 1;
+      if (record) addUndatedHumanRecord(acc, seen, record, roots);
       continue;
     }
     if (record.atMs < windowStartMs || record.atMs > windowEndMs) continue;
@@ -1707,7 +1742,8 @@ export function summarizePermissionRecords({
       addPermissionLaneRecord(acc, record, seat);
     }
   }
-  const { fieldMissingSessions, undecided } = finalizePermissionSessions(acc);
+  const { fieldMissingSessions, undecided, errorEnded } =
+    finalizePermissionSessions(acc);
   return {
     known: true,
     sessions: acc.sessions.size,
@@ -1717,6 +1753,7 @@ export function summarizePermissionRecords({
     humanTotal: acc.human + acc.machineEnd + acc.unknownValue,
     auto: acc.auto,
     undecided,
+    errorEndedNoDecision: errorEnded,
     fieldMissingSessions,
     sdkAnswers: acc.sdkAnswers,
     interpreterAnswers: acc.bySeat[PERMISSION_SEAT.INTERPRETER].human,
@@ -1727,6 +1764,7 @@ export function summarizePermissionRecords({
     },
     duplicates: acc.duplicates,
     undated: acc.undated,
+    undatedHumanAnswers: acc.undatedHuman,
     byKstDay: acc.byKstDay,
     humanEvents: acc.humanEvents.sort((a, b) => a.atMs - b.atMs),
     humanEventIds: [...acc.humanEventIds],
@@ -1758,8 +1796,16 @@ export function permissionGapPieces(permissionAnswers) {
   if (readCount(p.readFailures) > 0) {
     pieces.push(`권한기록 읽기 실패 ${p.readFailures}파일`);
   }
+  // 시각 불명 사람 답 = 날짜를 몰라 분자에 못 더한 사람 답이 있다 -> «이상». (오류로 끝난 도구 결과는 끊김이 아니라 토막 아님.)
+  if (readCount(p.undatedHumanAnswers) > 0) {
+    pieces.push(`시각 불명 사람 답 ${p.undatedHumanAnswers}`);
+  }
   return pieces;
 }
+
+// 오류로 끝난 도구 결과(판정 없음 · 끊김 아님) 문면 -- 보고 B 줄 · 진단 줄 · (이름 고정 · 판정 1407 ①).
+const renderErrorEndedPiece = (n) =>
+  `오류로 끝난 도구 결과 ${n}(판정 없음 · 끊김 아님)`;
 
 const PERMISSION_LINE_PREFIX = "- 권한 확인창 사람 답(B · 세션 기록): ";
 
@@ -1782,8 +1828,16 @@ export function renderPermissionAnswersLine(permissionAnswers) {
     `통역 ${readCount(p.interpreterAnswers)}`,
     `SDK ${readCount(p.sdkAnswers)}`,
     `판정 불가 ${readCount(p.undecided)}`,
-    `레인 밖 제외 ${readCount(p.excluded?.sessions)}(사람 답 ${readCount(p.excluded?.human)})`,
   ];
+  if (readCount(p.errorEndedNoDecision) > 0) {
+    inner.push(renderErrorEndedPiece(p.errorEndedNoDecision));
+  }
+  inner.push(
+    `레인 밖 제외 ${readCount(p.excluded?.sessions)}(사람 답 ${readCount(p.excluded?.human)})`,
+  );
+  if (readCount(p.undatedHumanAnswers) > 0) {
+    inner.push(`시각 불명 사람 답 ${p.undatedHumanAnswers}`);
+  }
   if (readCount(p.fieldMissingSessions) > 0) {
     inner.push(`필드 없는 세션 ${p.fieldMissingSessions}`);
   }
@@ -1808,10 +1862,12 @@ const PERMISSION_EVENT_LIST_MAX = 5;
 // «0 이면 안 적는» 보조 칸들(필드 없는 세션 · 읽기 실패 · 줄 파싱 실패 · 시각 불명 · 중복).
 function permissionDetailExtraParts(p) {
   const extras = [
+    ["errorEndedNoDecision", renderErrorEndedPiece],
     ["fieldMissingSessions", (n) => `필드 없는 세션 ${n}`],
     ["readFailures", (n) => `읽기 실패 ${n}파일`],
     ["parseFailures", (n) => `줄 파싱 실패 ${n}줄`],
     ["undated", (n) => `시각 불명 ${n}줄`],
+    ["undatedHumanAnswers", (n) => `시각 불명 사람 답 ${n}`],
     ["duplicates", (n) => `중복 ${n}건 제외`],
   ];
   return extras
@@ -1864,9 +1920,13 @@ export function renderPermissionCollectorDetail(permissionAnswers) {
 function pickPermissionColumns(permissionAnswers) {
   if (permissionAnswers === undefined || permissionAnswers === null) return {};
   if (permissionAnswers.known !== true) {
-    return { permissionHumanAnswers: null, permissionUndecidable: null };
+    return {
+      permissionHumanAnswers: null,
+      permissionUndecidable: null,
+      permissionErrorEnded: null,
+    };
   }
-  return {
+  const columns = {
     permissionHumanAnswers: isCount(permissionAnswers.humanTotal)
       ? permissionAnswers.humanTotal
       : null,
@@ -1874,6 +1934,15 @@ function pickPermissionColumns(permissionAnswers) {
       ? permissionAnswers.undecided
       : null,
   };
+  // HYK-255-p5a-errsplit-1 -- 감사 칸(끊김 사유 아님). 수집 결과에 이 값이 없으면(옛 모양 입력) 싣지 않는다.
+  if (Object.hasOwn(permissionAnswers, "errorEndedNoDecision")) {
+    columns.permissionErrorEnded = isCount(
+      permissionAnswers.errorEndedNoDecision,
+    )
+      ? permissionAnswers.errorEndedNoDecision
+      : null;
+  }
+  return columns;
 }
 
 const PERMISSION_DAILY_KEYS = Object.freeze([
@@ -1881,10 +1950,13 @@ const PERMISSION_DAILY_KEYS = Object.freeze([
   "permissionUndecidable",
 ]);
 
-// 칸이 «있는» 객체(회차 값 · 상태)에서만 새 칸 2를 뽑는다 -- 있되 모양이 틀리면 null(값 모름), 없으면 싣지 않는다.
+// 감사 칸 -- 일별 줄에 싣되 연속 확인-0 일수의 끊김 사유에는 «쓰지 않는다»(permissionBreakReasons 는 PERMISSION_DAILY_KEYS 만 본다).
+const PERMISSION_AUDIT_KEYS = Object.freeze(["permissionErrorEnded"]);
+
+// 칸이 «있는» 객체(회차 값 · 상태)에서만 권한 칸을 뽑는다 -- 있되 모양이 틀리면 null(값 모름), 없으면 싣지 않는다.
 function normalizePermissionColumns(source) {
   const out = {};
-  for (const key of PERMISSION_DAILY_KEYS) {
+  for (const key of [...PERMISSION_DAILY_KEYS, ...PERMISSION_AUDIT_KEYS]) {
     if (Object.hasOwn(source, key)) {
       out[key] = isCount(source[key]) ? source[key] : null;
     }
