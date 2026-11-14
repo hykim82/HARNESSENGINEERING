@@ -529,14 +529,17 @@ function git(cwd, args, env = {}) {
 const REPO_FULL = "hykim82/HARNESSENGINEERING";
 const ALLOWLIST_PATH = "scripts/supervisor/approver-allowlist.json";
 // HYK-255-p3-gh-1 -- P3(GitHub 사람 손 수집기)는 이 시험의 관심 밖이다. 합성 저장소에 봇 목록 파일을 둬서 P3 가 «수집 실패»
-// 로 분자 표기(하한 토막)를 바꾸지 않게 하고, 사건 목록 호출은 빈 목록(사람 손 0)으로 받아 이 시험의 호출 기록에 섞지 않는다.
+// 로 분자 표기(하한 토막)를 바꾸지 않게 하고, 실시간 목록 호출(닫힌 PR · 대화 댓글 · 리뷰 줄 댓글 -- 판정 1407 P3 2R)은 빈 목록(사람
+// 손 0)으로 받아 이 시험의 호출 기록에 섞지 않는다. 회차 순번상 못 부른 목록 1개는 분자에 «GitHub 사람 손 목록 1개 미조회» 토막으로 남는다.
 const BOTS_PATH = "scripts/supervisor/github-bot-accounts.json";
 const BOTS_JSON = JSON.stringify({
   schema_version: "github-bot-accounts/v1",
   bots: [{ login: "bot-fixture-a" }],
 });
-const passGithubEvents = (fetchJson) => (opts) =>
-  /\/events\?per_page=/.test(opts.url)
+const passGithubLists = (fetchJson) => (opts) =>
+  /\/pulls\?state=closed|\/issues\/comments\?|\/pulls\/comments\?/.test(
+    opts.url,
+  )
     ? { ok: true, status: 200, json: [], linkHeader: null }
     : fetchJson(opts);
 
@@ -655,7 +658,7 @@ async function runWithState({ stateEntry, fetchHandler, extra = {} }) {
       extraRepoRoots: [],
       archiveRoot: join(root, "archive-missing"),
       maxMergeChecks: 0,
-      fetchJson: passGithubEvents(fetchJson),
+      fetchJson: passGithubLists(fetchJson),
       git: report.createProcessGitPort(repo.dir),
       gitWorktreeListExecFn: () => "",
       ...extra,
@@ -694,10 +697,11 @@ test("커밋3 조립: 직전 확인 1 · 이번 회차 403(미조회) -> «확�
   );
   assert.equal(calls.length, 1, "REST 호출 수 무변(재시도 0)");
   assert.equal(result.externalEvidence.confirmed, 0, "직전 값은 확인이 아니다");
-  // 분자 = 이 회차 확인 0 (하한 표기: 미조회 1 -- HYK-255-ln-update-branch-1 커밋 3 의도된 변경).
+  // 분자 = 이 회차 확인 0 (하한 표기: 미조회 1 -- HYK-255-ln-update-branch-1 커밋 3 의도된 변경 · 판정 1407 P3 2R 의도된 변경: 못 부른 P3
+  // 목록 1개(회차 순번)의 토막이 뒤에 붙는다).
   assert.ok(
     result.reportText.includes(
-      "- 외부 독립 증거로 확인된 사건: 확인 0건 이상 · 미조회 1\n",
+      "- 외부 독립 증거로 확인된 사건: 확인 0건 이상 · 미조회 1 · GitHub 사람 손 목록 1개 미조회\n",
     ),
   );
 });

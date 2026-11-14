@@ -31,19 +31,25 @@ const ALLOWLIST_JSON = JSON.stringify({
   approvers: [{ login: "hykim82", id: 286230306 }],
 });
 // HYK-255-p3-gh-1 -- P3(GitHub 사람 손 수집기)는 이 시험의 관심 밖이다. 합성 저장소에 봇 목록 파일을 둬서 P3 가 «수집 실패»
-// 로 분자 표기(하한 토막)를 바꾸지 않게 하고, 사건 목록 호출은 빈 목록(사람 손 0)으로 받아 이 시험의 호출 기록 · 상한 단언에
-// 섞지 않는다(passGithubEvents).
+// 로 분자 표기(하한 토막)를 바꾸지 않게 하고, 실시간 목록 호출(닫힌 PR · 대화 댓글 · 리뷰 줄 댓글 -- 판정 1407 P3 2R)은 빈 목록(사람
+// 손 0)으로 받아 이 시험의 호출 기록 · 상한 단언에 섞지 않는다(passGithubLists). 회차 순번상 못 부른 목록 1개는 분자에 «GitHub 사람 손 목록
+// 1개 미조회» 토막으로 남는다.
 const BOTS_PATH = "scripts/supervisor/github-bot-accounts.json";
 const BOTS_JSON = JSON.stringify({
   schema_version: "github-bot-accounts/v1",
   bots: [{ login: "bot-fixture-a" }],
 });
-const passGithubEvents = (fetchJson) => (opts) =>
-  /\/events\?per_page=/.test(opts.url)
+const passGithubLists = (fetchJson) => (opts) =>
+  /\/pulls\?state=closed|\/issues\/comments\?|\/pulls\/comments\?/.test(
+    opts.url,
+  )
     ? { ok: true, status: 200, json: [], linkHeader: null }
     : fetchJson(opts);
 const LN_LINE_PREFIX = "- 외부 독립 증거 후보: ";
 const NUMERATOR_PREFIX = "- 외부 독립 증거로 확인된 사건: ";
+// 판정 1407 P3 2R(의도된 변경): P3 목록은 회차마다 돌아가며 부른다(회차 예산 2 · 세 목록) -- 못 부른 목록 1개는 분자에 이 토막을 남기고
+// «이상» 표기를 켠다(옛 판의 «확인 N건» 은 «확인 N건 이상 · <토막>» 이 된다). 이 시험의 관심(D1)은 그대로다.
+const P3_UNCHECKED = "GitHub 사람 손 목록 1개 미조회";
 const STATE_KEY = "__externalEvidenceCandidates";
 const GITHUB_COMMITTER = { name: "GitHub", email: "noreply@github.com" };
 const HUMAN_COMMITTER = { name: "hykim82", email: "hykim82@example.com" };
@@ -188,7 +194,7 @@ async function runOnce(repo, fetchJson, { stateEntry, extra = {} } = {}) {
       extraRepoRoots: [],
       archiveRoot: join(root, "archive-missing"),
       maxMergeChecks: 0,
-      fetchJson: passGithubEvents(fetchJson),
+      fetchJson: passGithubLists(fetchJson),
       git: report.createProcessGitPort(repo.dir),
       gitWorktreeListExecFn: () => "",
       ...extra,
@@ -220,7 +226,10 @@ test("ⓐ 확인 1: Update branch 1건이 그 회차 REST 응답으로 확인되
     const { fetchJson, calls } = makeFetch(confirmedHandler);
     const result = await runOnce(repo, fetchJson);
     const text = result.reportText;
-    assert.equal(numeratorLine(text), `${NUMERATOR_PREFIX}확인 1건`);
+    assert.equal(
+      numeratorLine(text),
+      `${NUMERATOR_PREFIX}확인 1건 이상 · ${P3_UNCHECKED}`,
+    );
     assert.equal(
       candidateLine(text),
       `${LN_LINE_PREFIX}확인 1 · 미조회 0 · ㄴ 분자 반영`,
@@ -243,7 +252,7 @@ test("ⓐ 확인 2: 서로 다른 Update branch 2건이 확인되면 ㄴ 분자 
     const result = await runOnce(repo, fetchJson);
     assert.equal(
       numeratorLine(result.reportText),
-      `${NUMERATOR_PREFIX}확인 2건`,
+      `${NUMERATOR_PREFIX}확인 2건 이상 · ${P3_UNCHECKED}`,
     );
     assert.equal(result.externalEvidence.confirmed, 2);
   } finally {
@@ -267,8 +276,14 @@ test("ⓐ 분자는 그 회차 REST 응답으로만 센다: 같은 후보가 다
     );
     const r1 = await runOnce(repo, first.fetchJson);
     const r2 = await runOnce(repo, second.fetchJson);
-    assert.equal(numeratorLine(r1.reportText), `${NUMERATOR_PREFIX}확인 1건`);
-    assert.equal(numeratorLine(r2.reportText), `${NUMERATOR_PREFIX}확인 0건`);
+    assert.equal(
+      numeratorLine(r1.reportText),
+      `${NUMERATOR_PREFIX}확인 1건 이상 · ${P3_UNCHECKED}`,
+    );
+    assert.equal(
+      numeratorLine(r2.reportText),
+      `${NUMERATOR_PREFIX}확인 0건 이상 · ${P3_UNCHECKED}`,
+    );
     assert.equal(second.calls.length, 1, "두 번째 회차도 다시 조회한다");
   } finally {
     cleanup(repo);
@@ -289,7 +304,7 @@ test("분자 밖 ⓑ 미조회(조회 실패 404): 확인 0건 · 미조회 1 --
     // 분자 0 -- 미조회 1 이라 커밋 3 의 하한 표기가 붙는다(«확인 0건 이상 · 미조회 1»).
     assert.equal(
       numeratorLine(result.reportText),
-      `${NUMERATOR_PREFIX}확인 0건 이상 · 미조회 1`,
+      `${NUMERATOR_PREFIX}확인 0건 이상 · 미조회 1 · ${P3_UNCHECKED}`,
     );
     assert.equal(
       candidateLine(result.reportText),
@@ -313,7 +328,7 @@ test("분자 밖 ⓒ rate limit(429): 미조회 -- 분자에 넣지 않는다 ·
     // 분자 0 · 미조회 2(429 한 건 + 429 뒤 남은 후보 한 건) -- 하한 표기.
     assert.equal(
       numeratorLine(result.reportText),
-      `${NUMERATOR_PREFIX}확인 0건 이상 · 미조회 2`,
+      `${NUMERATOR_PREFIX}확인 0건 이상 · 미조회 2 · ${P3_UNCHECKED}`,
     );
     assert.equal(calls.length, 1, "429 뒤 남은 후보는 더 조회하지 않는다");
   } finally {
@@ -337,7 +352,7 @@ test("분자 밖 ⓓ 서명 불일치(verified:false): 불일치 -- 분자에 �
     const result = await runOnce(repo, fetchJson);
     assert.equal(
       numeratorLine(result.reportText),
-      `${NUMERATOR_PREFIX}확인 0건`,
+      `${NUMERATOR_PREFIX}확인 0건 이상 · ${P3_UNCHECKED}`,
     );
     assert.equal(result.externalEvidence.notConfirmed, 1);
   } finally {
@@ -356,7 +371,7 @@ test("분자 밖 ⓓ 작성자가 허용 목록 밖: 불일치 -- 분자에 넣�
     const result = await runOnce(repo, fetchJson);
     assert.equal(
       numeratorLine(result.reportText),
-      `${NUMERATOR_PREFIX}확인 0건`,
+      `${NUMERATOR_PREFIX}확인 0건 이상 · ${P3_UNCHECKED}`,
     );
     assert.equal(result.externalEvidence.notConfirmed, 1);
   } finally {
@@ -373,7 +388,7 @@ test("분자 밖 ⓓ 응답 sha 불일치: 검증 통과 모양이어도 분자�
     const result = await runOnce(repo, fetchJson);
     assert.equal(
       numeratorLine(result.reportText),
-      `${NUMERATOR_PREFIX}확인 0건 이상 · 미조회 1`,
+      `${NUMERATOR_PREFIX}확인 0건 이상 · 미조회 1 · ${P3_UNCHECKED}`,
     );
     assert.equal(result.externalEvidence.unchecked, 1);
   } finally {
@@ -395,7 +410,7 @@ test("분자 밖 ⓔ 스테일 직전 값: 직전 확인 1 · 이번 회차 403 
     });
     assert.equal(
       numeratorLine(result.reportText),
-      `${NUMERATOR_PREFIX}확인 0건 이상 · 미조회 1`,
+      `${NUMERATOR_PREFIX}확인 0건 이상 · 미조회 1 · ${P3_UNCHECKED}`,
     );
     assert.ok(
       candidateLine(result.reportText).includes(
@@ -415,7 +430,7 @@ test("분자 밖 ⓕ 창 밖(25시간 전) Update branch: 후보 0 · REST 0 -- 
     const result = await runOnce(repo, fetchJson);
     assert.equal(
       numeratorLine(result.reportText),
-      `${NUMERATOR_PREFIX}확인 0건`,
+      `${NUMERATOR_PREFIX}확인 0건 이상 · ${P3_UNCHECKED}`,
     );
     assert.equal(calls.length, 0);
     assert.equal(result.externalEvidence.candidatesInWindow, 0);
@@ -441,7 +456,7 @@ test("분자 밖 ⓖ 수집 실패(known:false): 분자는 «확인 0건» -- �
     });
     assert.equal(
       numeratorLine(result.reportText),
-      `${NUMERATOR_PREFIX}확인 0건`,
+      `${NUMERATOR_PREFIX}확인 0건 이상 · ${P3_UNCHECKED}`,
     );
     assert.match(
       candidateLine(result.reportText),
@@ -468,7 +483,7 @@ test("반례 ⓗ 로컬 봇 병합 커밋(«Merge remote-tracking branch origin/
     assert.equal(calls.length, 0);
     assert.equal(
       numeratorLine(result.reportText),
-      `${NUMERATOR_PREFIX}확인 0건`,
+      `${NUMERATOR_PREFIX}확인 0건 이상 · ${P3_UNCHECKED}`,
     );
   } finally {
     cleanup(repo);
@@ -487,7 +502,7 @@ test("반례 ⓗ 사람 committer 일반 병합 · GitHub committer 인데 제�
     assert.equal(calls.length, 0);
     assert.equal(
       numeratorLine(result.reportText),
-      `${NUMERATOR_PREFIX}확인 0건`,
+      `${NUMERATOR_PREFIX}확인 0건 이상 · ${P3_UNCHECKED}`,
     );
   } finally {
     cleanup(repo);
@@ -508,7 +523,7 @@ test("반례 ⓗ 한 저장소에 로컬 봇 병합 + Update branch 확인 1: �
     assert.equal(calls.length, 1);
     assert.equal(
       numeratorLine(result.reportText),
-      `${NUMERATOR_PREFIX}확인 1건`,
+      `${NUMERATOR_PREFIX}확인 1건 이상 · ${P3_UNCHECKED}`,
     );
   } finally {
     cleanup(repo);
