@@ -345,7 +345,7 @@ test("P2-2: 403 진단 줄은 «미조회: 예산(rate limit 포함) 4(그중 ra
     // ㄴ 절 줄은 무변: U = 예산 3 + rate limit 1.
     assert.ok(
       result.reportText.includes(
-        `${LN_LINE_PREFIX}확인 1 · 미조회 4 · 분류 대기\n`,
+        `${LN_LINE_PREFIX}확인 1 · 미조회 4 · ㄴ 분자 반영\n`,
       ),
     );
     const healthText = result.reportText.slice(
@@ -485,7 +485,7 @@ async function runOnce(repo, fetchJson, extra = {}) {
   }
 }
 
-test("보고서 ㄴ 절 새 줄: 확인 1 · 미조회 0 · 분류 대기, 그러나 ㄴ 확인 사건(분자)은 «확인 0건» 그대로", async () => {
+test("보고서 ㄴ 절 새 줄: 확인 1 · 미조회 0 · ㄴ 분자 반영, 그리고 ㄴ 확인 사건(분자)은 «확인 1건» (HYK-255-ln-update-branch-1 의도된 변경 -- 옛 단언은 «확인 0건» 그대로였다)", async () => {
   const repo = buildRepo([updateBranchSpec(30)]);
   try {
     const { fetchJson } = makeFetch(({ url }) =>
@@ -494,11 +494,11 @@ test("보고서 ㄴ 절 새 줄: 확인 1 · 미조회 0 · 분류 대기, 그�
     const result = await runOnce(repo, fetchJson);
     const text = result.reportText;
     assert.ok(
-      text.includes(`${LN_LINE_PREFIX}확인 1 · 미조회 0 · 분류 대기\n`),
+      text.includes(`${LN_LINE_PREFIX}확인 1 · 미조회 0 · ㄴ 분자 반영\n`),
       text,
     );
-    assert.ok(text.includes("- 외부 독립 증거로 확인된 사건: 확인 0건\n"));
-    assert.ok(!text.includes("외부 독립 증거로 확인된 사건: 1건"));
+    assert.ok(text.includes("- 외부 독립 증거로 확인된 사건: 확인 1건\n"));
+    assert.ok(!text.includes("외부 독립 증거로 확인된 사건: 확인 0건"));
     // 줄은 정확히 1개, ㄴ 절 안에 있다.
     const lnStart = text.indexOf("ㄴ 계획 밖 개입:");
     const healthStart = text.indexOf("관측 건강:");
@@ -511,7 +511,9 @@ test("보고서 ㄴ 절 새 줄: 확인 1 · 미조회 0 · 분류 대기, 그�
   }
 });
 
-test("보고서: 예산 초과 모양 (후보 11 -> 확인 10 · 미조회 1)", async () => {
+// HYK-255-ln-update-branch-1 커밋 3 (의도된 변경 · 판정 1804/교정 1904): D1 기본 상한 10 -> 4.
+// 후보 11 -> 확인 4 · 미조회 7(예산) · 호출 4 (옛 값: 확인 10 · 미조회 1 · 호출 10).
+test("보고서: 예산 초과 모양 (후보 11 -> 확인 4 · 미조회 7 · 호출 4 -- 기본 상한 4)", async () => {
   const specs = [];
   for (let i = 0; i < 11; i++) specs.push(updateBranchSpec(200 - i * 10));
   const repo = buildRepo(specs);
@@ -522,10 +524,15 @@ test("보고서: 예산 초과 모양 (후보 11 -> 확인 10 · 미조회 1)", 
     const result = await runOnce(repo, fetchJson);
     assert.ok(
       result.reportText.includes(
-        `${LN_LINE_PREFIX}확인 10 · 미조회 1 · 분류 대기\n`,
+        `${LN_LINE_PREFIX}확인 4 · 미조회 7 · ㄴ 분자 반영\n`,
       ),
     );
-    assert.equal(calls.length, 10);
+    assert.ok(
+      result.reportText.includes(
+        "- 외부 독립 증거로 확인된 사건: 확인 4건 이상 · 미조회 7\n",
+      ),
+    );
+    assert.equal(calls.length, 4);
   } finally {
     cleanup(repo.dir);
   }
@@ -558,7 +565,7 @@ test("보고서: 수집 실패 모양 -> «수집 실패(사유)» 줄, bare 숫
   }
 });
 
-test("기존 ㄱ-4 상한(maxMergeChecks)과 별개: maxMergeChecks:0 이어도 새 수집기는 자기 상한(기본 10)으로 돈다", async () => {
+test("기존 ㄱ-4 상한(maxMergeChecks)과 별개: maxMergeChecks:0 이어도 새 수집기는 자기 상한(기본 4 · 옛 10 -- 커밋 3 의도된 변경)으로 돈다", async () => {
   const repo = buildRepo([updateBranchSpec(30)]);
   try {
     const { fetchJson, calls } = makeFetch(({ url }) =>
@@ -566,7 +573,7 @@ test("기존 ㄱ-4 상한(maxMergeChecks)과 별개: maxMergeChecks:0 이어도 
     );
     await runOnce(repo, fetchJson, { maxMergeChecks: 0 });
     assert.equal(calls.length, 1);
-    assert.equal(report.DEFAULT_MAX_EXTERNAL_EVIDENCE_CHECKS, 10);
+    assert.equal(report.DEFAULT_MAX_EXTERNAL_EVIDENCE_CHECKS, 4);
   } finally {
     cleanup(repo.dir);
   }
@@ -583,7 +590,7 @@ test("진단 줄(관측 건강)에 조회 실패 사유가 남는다 -- ㄴ 절 
     const result = await runOnce(repo, fetchJson);
     assert.ok(
       result.reportText.includes(
-        `${LN_LINE_PREFIX}확인 1 · 미조회 1 · 분류 대기\n`,
+        `${LN_LINE_PREFIX}확인 1 · 미조회 1 · ㄴ 분자 반영\n`,
       ),
     );
     const healthText = result.reportText.slice(

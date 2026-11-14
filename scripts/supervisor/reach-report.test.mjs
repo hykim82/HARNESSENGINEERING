@@ -245,7 +245,7 @@ function noticeFiles(fx) {
 }
 
 const EXT = (n, u = 0) =>
-  `- 외부 독립 증거 후보: 확인 ${n} · 미조회 ${u} · 분류 대기`;
+  `- 외부 독립 증거 후보: 확인 ${n} · 미조회 ${u} · ㄴ 분자 반영`;
 
 test("외부 독립 증거 후보 N: 처음 0 은 기준선(통지 0장) · 0->1 변화는 통지 1장 · 같은 1 반복은 0장 · 1->2 는 또 1장", () => {
   const root = tmpDir("nc-reach-ext-");
@@ -261,7 +261,8 @@ test("외부 독립 증거 후보 N: 처음 0 은 기준선(통지 0장) · 0->1
     const body = fs.readFileSync(changed.noticePath, "utf8");
     assert.match(body, /외부 독립 증거 후보/);
     assert.match(body, /0 -> 1/);
-    assert.match(body, /분류 대기/);
+    assert.match(body, /ㄴ 분자에 반영됩니다/);
+    assert.ok(!body.includes("분류 대기"), "옛 «분류 대기» 문면 0");
 
     const same = tick(fx, EXT(1, 5), 2000);
     assert.equal(same.noticePath, null, "N 무변(U 만 바뀜) -- 통지 0장");

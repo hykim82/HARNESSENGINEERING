@@ -102,6 +102,8 @@ function readPartialCountSection({ fileText, partialCountPath, now }) {
 // 통지 0장, 직전 N 기억 유지(실패를 사이에 두고 돌아온 같은 N 이 변화로
 // 오인되지 않게). 처음 관측은 N=0 이면 기준선(통지 0장), N>0 이면 변화로
 // 통지한다(과소통지보다 과대통지 -- 위 readStateFile 과 같은 원칙).
+// HYK-255-ln-update-branch-1 -- 이 N(확인)이 이제 ㄴ 분자(외부 독립 증거로 확인된 사건)와
+// 같은 값이다(Update branch 클릭 = ㄴ · 한용 확정 2026-11-13). 통지 조건 · 파일 장 수는 무변.
 export const EXTERNAL_EVIDENCE_STATE_KEY = "__externalEvidenceCandidates";
 
 //
@@ -160,7 +162,7 @@ function externalEvidenceChangeSectionLines(change) {
     "부분 계수 보고서 ㄴ 절 «외부 독립 증거 후보» 의 확인 건수가 늘었습니다(같은 값이 계속되거나 줄거나 미조회로 낮게 나온 회차에는 다시 오지 않습니다):",
     "",
     `- **외부 독립 증거 후보(GitHub 웹 Update branch 병합 커밋)** 확인 ${before} -> ${change.current} ` +
-      `(미조회 ${change.unchecked} · 분류 대기 -- ㄴ 분자에는 들어가지 않았습니다. 분류 확정은 한용 몫입니다)`,
+      `(미조회 ${change.unchecked} · ㄴ 분자에 반영됩니다 -- 한용 확정 2026-11-13: GitHub 웹 Update branch 클릭 = ㄴ 계획 밖 개입. 미조회는 분자에 넣지 않습니다)`,
     "",
   ];
 }

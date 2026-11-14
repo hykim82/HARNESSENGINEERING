@@ -253,8 +253,15 @@ test("runPartialCountOnce: 실제 수집기(approval-authority-adapter)를 GitHu
     assert.ok(text.includes("- 무진행-재개 의심 구간: 1건 — ㄴ 분자에 미산입"));
     assert.ok(text.includes("- 외부 독립 증거로 확인된 사건: 확인 0건"));
     assert.ok(!text.includes("외부 독립 증거로 확인된 사건: 0건"));
-    // 독립 ㄴ 수집기 부재가 관측 건강에 표면화된다.
-    assert.ok(text.includes("독립ㄴ수집기 FAIL(부재 — 이 라운드 결선 없음"));
+    // 독립 ㄴ 수집기: HYK-255-ln-update-branch-1 -- Update branch 수집기가 결선됐으므로
+    // 옛 «FAIL(부재 -- 이 라운드 결선 없음)» 은 사실이 아니다(의도된 변경 · 한용 확정 1540).
+    // 한 유형만 결선이라는 사실은 줄에 남는다.
+    assert.ok(!text.includes("독립ㄴ수집기 FAIL(부재"));
+    assert.ok(
+      text.includes(
+        "독립ㄴ수집기 OK(GitHub 웹 Update branch 확인분만 결선(외부독립증거후보수집기) — 그 밖 ㄴ 유형은 결선 없음)",
+      ),
+    );
     // 배달 영수증 파싱 실패 1줄이 조용히 사라지지 않는다.
     assert.ok(text.includes("파싱 실패 1줄"));
   } finally {
@@ -307,7 +314,8 @@ test("호출 예산 0이면 후보는 «미조회(예산)»로 남고 REST 호�
     assert.ok(
       result.reportText.includes("미조회(예산) 1건 — 미조회는 미계수다"),
     );
-    assert.equal(DEFAULT_MAX_MERGE_CHECKS, 3);
+    // HYK-255-ln-update-branch-1 커밋 3 (의도된 변경 · 판정 1804): ㄱ-4 기본 상한 3 -> 1.
+    assert.equal(DEFAULT_MAX_MERGE_CHECKS, 1);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

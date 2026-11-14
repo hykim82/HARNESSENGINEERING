@@ -92,8 +92,13 @@ import {
 export const DEFAULT_DISPATCH_RECEIPTS_PATH =
   "D:/문서관리/하네스-관제실/dispatch-receipts.jsonl";
 export const DEFAULT_WINDOW_HOURS = 24;
-// sha당 REST 최대 8회(수집기 예산) x 3 = 24회 < 무인증 한도 60회/시간.
-export const DEFAULT_MAX_MERGE_CHECKS = 3;
+// HYK-255-ln-update-branch-1 커밋 3 (책임자 판정 1804 · 교정 1904) -- ㄱ-4 회차당 조회 상한.
+// sha당 REST 최대 8회(수집기 예산 callBudget 8 -- 무변) x 1 = 회차당 최대 8회. 예약 감시
+// (watch-run.mjs)는 이 기본값으로 부른다(상한 인자 없음). D1 상한(아래
+// DEFAULT_MAX_EXTERNAL_EVIDENCE_CHECKS 4)과 합쳐 회차당 최악 8 + 4 = 12 · 15분 회차 4개 =
+// 시간당 최악 48(익명 한도 60 중 나머지 12 는 책임자 CI 판독 몫). 옛 값은 3(= 회차당 최대 24).
+// 상한 밖 ㄱ-4 후보는 «미조회(예산)» 그대로다(숨김 0) -- 회차당 최신 1건만 조회한다.
+export const DEFAULT_MAX_MERGE_CHECKS = 1;
 export const DEFAULT_ALLOWLIST_PATH =
   "scripts/supervisor/approver-allowlist.json";
 
@@ -679,19 +684,27 @@ function summarizeUndecidableReasons(verdicts) {
 //   (서명 검증은 GitHub 서버 판정에 기댄다) · 서명 주체 committer.login ===
 //   "web-flow" · 작성자 author.login + id 가 approvers 허용 목록(origin/
 //   master 판본)의 사람.
-// ⓘⓘⓘ 무인증 REST 예산 = 회차당 상한 maxChecks(기본 10, 기존 maxMergeChecks
-//   와 별개) -- 초과분은 «미조회(예산)». 403/429 도 판정 문면상 «미조회(예산)»의
+// ⓘⓘⓘ 무인증 REST 예산 = 회차당 상한 maxChecks(기본 4 -- HYK-255-ln-update-branch-1
+//   커밋 3 · 판정 1804/교정 1904 · 후보당 1회 = 회차당 최대 4 · 옛 기본 10 · 기존
+//   maxMergeChecks 와 별개) -- 초과분은 «미조회(예산)» 이고 그 회차 ㄴ 분자 옆에 하한 표기
+//   («확인 N건 이상 · 미조회 K») 가 붙는다(core 렌더). 403/429 도 판정 문면상 «미조회(예산)»의
 //   한 갈래이고(표기 = «미조회(예산 · rate limit)» -- 진단 줄이 «예산» 과 나란한
 //   별도 낱말로 찍지 않는다 · 검토 P2-2), 내부 필드는 uncheckedByRateLimit 로
 //   따로 세며 재시도 0 이고 그 회차의 남은 후보는 더 조회하지 않는다(같은 IP 의
 //   한도를 ㄱ-4 · 책임자 CI 판독과 나눠 쓴다). 그 밖 조회 실패(404 · 던짐 ·
 //   모양 위반)도 확인이 아니고 «미조회»에 넣되 사유를 diagnostics 에 남긴다.
 // ⛔캐시는 승인 권위가 아니다 -- 확인 N 은 «이 회차 REST 응답»으로만 세고
-//   회차 사이에 남는 상태가 없다. ⛔이 결과는 confirmedLnEvents 에 들어가지
-//   않는다(분류 확정 전 -- ㄴ 분자 0 · 오탐 0 유지).
+//   회차 사이에 남는 상태가 없다.
+// HYK-255-ln-update-branch-1 (한용 확정 2026-11-13 15:3x · 책임자 판정 1705) --
+//   분류가 확정됐다(GitHub 웹 Update branch 클릭 = ㄴ). 이 수집기가 «그 회차 REST
+//   응답으로» 확인한 confirmedShas 만 ㄴ 분자(confirmedLnEvents)로 들어간다
+//   (assemblePartialCountReportText). 미조회(예산 · rate limit · 조회 실패) ·
+//   서명/작성자/sha 불일치 · 스테일 직전 값 · 창 밖은 분자 밖이다 -- 분자 ≠ 0 을
+//   숨기지 않고, 미조회는 분자에 넣지 않는다. 창 = 위 후보 고름의 24시간 그대로
+//   (과거를 따로 재집계하지 않는다 -- 후보가 창에서 빠지면 분자에서도 빠진다).
 // ---------------------------------------------------------------------------
 
-export const DEFAULT_MAX_EXTERNAL_EVIDENCE_CHECKS = 10;
+export const DEFAULT_MAX_EXTERNAL_EVIDENCE_CHECKS = 4;
 
 const CANDIDATE_LOG_FIELD_SEP = "\x1f";
 const CANDIDATE_LOG_FORMAT = ["%H", "%cI", "%P", "%cn", "%ce", "%s"].join(
@@ -1146,8 +1159,13 @@ const RELAY_NUMBER_TOKEN_RE = /전달 #(\d{8}-\d{4}[a-z]?)/;
 // 글자 또는 숫자(유니코드 \p{L} · \p{N})면 토큰이 아니다(«미상신1530» · «X상신1530» ·
 // «3상신1530» = 키 아님 -- 부정 접두 오탐 방지). «상신» 앞이 이름 시작이거나 글자·숫자가
 // 아닌 문자(구분자: `-` `_` 공백 `.` `(` `[` `+` 등 -- 글자·숫자의 여집합 «전부»)면 토큰이다.
-// ⛔이 경계도 같은 한 정의 안에 있다(보조 ㄱ-7 · «기록 누락» 공용) -- `판정-` 머리는 무변.
-const GATE7_PAIR_TOKEN_RE = /(?:판정-|(?<![\p{L}\p{N}])상신)(\d{4})(?!\d)/gu;
+// ⛔이 경계도 같은 한 정의 안에 있다(보조 ㄱ-7 · «기록 누락» 공용).
+// HYK-255-ln-update-branch-1 (책임자 판정 2026-11-13 17:0x 항목 2 · #370 검토 1R 상신 대상 ①) --
+// `판정-HHMM` 머리도 «상신» 과 같은 경계다: «판정-» 바로 앞이 글자 또는 숫자면 키가 아니다
+// («…-미판정-1530» · «X판정-1530» · «3판정-1530» = 키 아님). 이름 시작이거나 글자·숫자가 아닌
+// 문자(구분자 · 기호)면 키다(«…-판정-1530» · 이름 시작 «판정-1530»). 경계는 두 머리가 «한 번»
+// 공유한다(lookbehind 를 갈라 두 번 쓰지 않는다 -- 한 정의 유지).
+const GATE7_PAIR_TOKEN_RE = /(?<![\p{L}\p{N}])(?:판정-|상신)(\d{4})(?!\d)/gu;
 
 function parseLedgerFileNameTimestampMs(name) {
   const m = LEDGER_FILE_NAME_TS_RE.exec(name);
@@ -2146,14 +2164,7 @@ function buildCollectors({
     ok: gate4.known === true,
     detail: gate4.known === true ? undefined : gate4.reason,
   });
-  // 독립 ㄴ 수집기는 이 라운드에 존재하지 않는다 -- 그 부재 자체를 수집
-  // 실패로 표면화한다(조용한 «확인 0건»이 «수집기가 돌았는데 0»으로
-  // 오독되는 것을 막는 줄).
-  collectors.push({
-    name: "독립ㄴ수집기",
-    ok: false,
-    detail: "부재 — 이 라운드 결선 없음(ㄴ 확인은 원리적으로 불가)",
-  });
+  collectors.push(buildIndependentLnCollectorEntry(externalEvidence));
   const outboxEntry = buildOutboxCollectorEntry(outboxResult);
   if (outboxEntry) collectors.push(outboxEntry);
   const externalEntry = buildExternalEvidenceCollectorEntry(externalEvidence);
@@ -2186,10 +2197,39 @@ function buildGateAuxCollectorEntry(gateAux) {
   };
 }
 
+// HYK-255-ln-update-branch-1 -- «독립ㄴ수집기» 진단 줄의 사실 문면. 옛 줄은 «FAIL(부재 --
+// 이 라운드 결선 없음 · ㄴ 확인은 원리적으로 불가)» 였지만 이제 Update branch 확인이 ㄴ
+// 분자라(외부독립증거후보수집기) 수집기가 돈 회차에 그 문면은 사실이 아니다.
+//   - 외부 증거 입력 없음(미결선 호출자): 옛 문면 그대로(그 호출자에겐 사실이다).
+//   - 수집 실패(known:false): FAIL(수집 실패: 사유) -- 조용히 «확인 0건» 으로 접지 않는다.
+//   - 수집 성공: OK -- 다만 Update branch 한 유형만 결선이라는 사실을 줄에 남긴다.
+function buildIndependentLnCollectorEntry(externalEvidence) {
+  const name = "독립ㄴ수집기";
+  if (!externalEvidence) {
+    return {
+      name,
+      ok: false,
+      detail: "부재 — 이 라운드 결선 없음(ㄴ 확인은 원리적으로 불가)",
+    };
+  }
+  if (externalEvidence.known !== true) {
+    return {
+      name,
+      ok: false,
+      detail: `수집 실패: ${externalEvidence.reason ?? "사유 미상"}`,
+    };
+  }
+  return {
+    name,
+    ok: true,
+    detail:
+      "GitHub 웹 Update branch 확인분만 결선(외부독립증거후보수집기) — 그 밖 ㄴ 유형은 결선 없음",
+  };
+}
+
 // HYK-255-ln-github-anchor-1 -- 새 수집기의 «진단 줄»(관측 건강). ㄴ 절 줄은
 // 문면 고정 1줄이라 미조회 사유의 내역(예산 · rate limit · 조회 실패와 그
-// 사유)은 여기에 남는다. 위 «독립ㄴ수집기 FAIL(부재 …)» 줄은 건드리지
-// 않는다(이 후보 수집기는 분류 대기라 ㄴ 확인 수집기가 아니다).
+// 사유)은 여기에 남는다.
 function buildExternalEvidenceCollectorEntry(externalEvidence) {
   if (!externalEvidence) return null;
   const name = "외부독립증거후보수집기";
@@ -2373,6 +2413,17 @@ function selectUncountedExamples({ outboxResult, relayResult }) {
   return UNCOUNTED_EXAMPLES_V1;
 }
 
+// externalEvidence(collectExternalEvidenceCandidates 결과) -> ㄴ 분자 사건 배열.
+// known !== true(수집 실패 · 미결선)면 [] -- 0 으로 «접는» 것이 아니라 줄은 따로
+// «수집 실패(사유)» 로 찍힌다. stalePrevious 는 표시 전용이라 여기 들어오지 않는다.
+function buildConfirmedLnEvents(externalEvidence) {
+  if (externalEvidence?.known !== true) return [];
+  return externalEvidence.confirmedShas.map((sha) => ({
+    source: "GitHub 웹 Update branch(외부 독립 증거)",
+    ref: sha,
+  }));
+}
+
 function assemblePartialCountReportText({
   now,
   windowStartMs,
@@ -2397,12 +2448,11 @@ function assemblePartialCountReportText({
     gate4,
     auxNote: outboxResult ? renderOutboxAuxNote(outboxResult) : undefined,
     uncountedExamples: selectUncountedExamples({ outboxResult, relayResult }),
-    // ⛔독립 ㄴ 수집기가 없는 이 라운드에 이 배열을 채우는 생산 경로는
-    // 존재하지 않는다 -- 항상 [](= «확인 0건» 렌더링). 채우려면 독립적인
-    // ㄴ 양성 신호원이 먼저 있어야 한다(PM 권고 «열어 둔다» 그대로).
-    // HYK-255-ln-github-anchor-1 -- Update branch 후보 수집기(아래
-    // externalEvidence)의 확인분도 «분류 대기»라 여기에 넣지 않는다.
-    confirmedLnEvents: [],
+    // ㄴ 분자 = 독립 수집기가 «그 회차 REST 응답으로» 확인한 사건뿐이다(확인 없음 =
+    // [] = «확인 0건» 렌더링). HYK-255-ln-update-branch-1 -- Update branch 수집기의
+    // 확인분(confirmedShas)이 분류 확정(한용 2026-11-13 15:3x)으로 여기에 들어간다.
+    // 수집 실패(known:false) · 미조회 · 불일치 · 스테일 직전 값은 confirmedShas 에 없다.
+    confirmedLnEvents: buildConfirmedLnEvents(externalEvidence),
     externalEvidence,
     suspected: watch.suspected,
     collectors: buildCollectors({

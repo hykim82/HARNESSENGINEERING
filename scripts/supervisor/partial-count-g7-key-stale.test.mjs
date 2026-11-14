@@ -249,9 +249,11 @@ test("커밋1 짝 키 정의는 소스에 «한 곳» 이다 (상신HHMM 토큰 
   // 바뀌었다 -- «판정-|상신)(\d{4})» 연속 문자열 대신 «상신)(\d{4})» 정의 1개 + 경계 존재.
   const defs = src.match(/상신\)\(\\d\{4\}\)/g) ?? [];
   assert.equal(defs.length, 1, `짝 키 토큰 정의가 ${defs.length}곳`);
+  // HYK-255-ln-update-branch-1 (의도된 변경 · 판정 1705 ②): 경계가 «판정-|상신» 두 머리 앞에
+  // «한 번» 놓인다 -- 정의는 여전히 1개이고 lookbehind 가 두 머리를 함께 덮는다.
   assert.ok(
-    src.includes("(?<![\\p{L}\\p{N}])상신)(\\d{4})"),
-    "토큰 경계(상신 앞 글자·숫자 금지)가 정의에 있다",
+    src.includes("(?<![\\p{L}\\p{N}])(?:판정-|상신)(\\d{4})"),
+    "토큰 경계(판정- · 상신 앞 글자·숫자 금지)가 정의에 있다",
   );
   assert.ok(!src.includes("OUTBOX_PANJEONG_HHMM_RE"), "옛 정의가 남아 있다");
 });
@@ -430,10 +432,10 @@ function staleLine(confirmed, unchecked, stalePrevious) {
   });
 }
 
-test("커밋3 렌더: 스테일 입력이 있으면 «확인 0 · 미조회 1 · 분류 대기 · 스테일 표시(확인 아님): 직전 확인 1 · 마지막 확인 11:05 KST» (확인은 이번 회차 값 그대로)", () => {
+test("커밋3 렌더: 스테일 입력이 있으면 «확인 0 · 미조회 1 · ㄴ 분자 반영 · 스테일 표시(확인 아님): 직전 확인 1 · 마지막 확인 11:05 KST» (확인은 이번 회차 값 그대로)", () => {
   assert.equal(
     staleLine(0, 1, { confirmed: 1, atMs: STALE_AT_MS, nowMs: NOW }),
-    `${EXT_PREFIX}확인 0 · 미조회 1 · 분류 대기 · 스테일 표시(확인 아님): 직전 확인 1 · 마지막 확인 11:05 KST`,
+    `${EXT_PREFIX}확인 0 · 미조회 1 · ㄴ 분자 반영 · 스테일 표시(확인 아님): 직전 확인 1 · 마지막 확인 11:05 KST`,
   );
 });
 
@@ -455,7 +457,7 @@ test("커밋3 렌더: 마지막 확인이 어제면 날짜를 붙이고(MM-DD HH
 test("커밋3 렌더: 스테일 입력이 없으면 줄은 옛 문면 그대로다 (회귀 0)", () => {
   assert.equal(
     staleLine(1, 0, undefined),
-    `${EXT_PREFIX}확인 1 · 미조회 0 · 분류 대기`,
+    `${EXT_PREFIX}확인 1 · 미조회 0 · ㄴ 분자 반영`,
   );
 });
 
@@ -475,8 +477,14 @@ test("커밋3 분자 무변: 스테일이 붙어도 ㄴ 확인 사건은 «확�
       },
     }),
   );
-  assert.ok(stale.includes("- 외부 독립 증거로 확인된 사건: 확인 0건\n"));
-  assert.ok(!stale.includes("외부 독립 증거로 확인된 사건: 1건"));
+  // HYK-255-ln-update-branch-1 커밋 3 (의도된 변경 · 교정 1904 ④): 미조회 1 인 회차의 분자는
+  // 하한 표기가 붙는다. 스테일 직전 값(1)은 분자에 들어가지 않는다(분자 0 -- «확인 0건 이상»).
+  assert.ok(
+    stale.includes(
+      "- 외부 독립 증거로 확인된 사건: 확인 0건 이상 · 미조회 1\n",
+    ),
+  );
+  assert.ok(!stale.includes("외부 독립 증거로 확인된 사건: 확인 1건"));
   const strip = (t) =>
     t
       .split("\n")
@@ -670,12 +678,15 @@ test("커밋3 조립: 직전 확인 1 · 이번 회차 403(미조회) -> «확�
   });
   assert.equal(
     line,
-    `${EXT_PREFIX}확인 0 · 미조회 1 · 분류 대기 · 스테일 표시(확인 아님): 직전 확인 1 · 마지막 확인 11:05 KST`,
+    `${EXT_PREFIX}확인 0 · 미조회 1 · ㄴ 분자 반영 · 스테일 표시(확인 아님): 직전 확인 1 · 마지막 확인 11:05 KST`,
   );
   assert.equal(calls.length, 1, "REST 호출 수 무변(재시도 0)");
   assert.equal(result.externalEvidence.confirmed, 0, "직전 값은 확인이 아니다");
+  // 분자 = 이 회차 확인 0 (하한 표기: 미조회 1 -- HYK-255-ln-update-branch-1 커밋 3 의도된 변경).
   assert.ok(
-    result.reportText.includes("- 외부 독립 증거로 확인된 사건: 확인 0건\n"),
+    result.reportText.includes(
+      "- 외부 독립 증거로 확인된 사건: 확인 0건 이상 · 미조회 1\n",
+    ),
   );
 });
 
@@ -686,7 +697,10 @@ test("커밋3 조립: 예산 미조회(상한 0 -> REST 0회) 에도 스테일�
     extra: { maxExternalEvidenceChecks: 0 },
   });
   assert.equal(calls.length, 0);
-  assert.ok(line.includes("확인 0 · 미조회 1 · 분류 대기 · 스테일 표시"), line);
+  assert.ok(
+    line.includes("확인 0 · 미조회 1 · ㄴ 분자 반영 · 스테일 표시"),
+    line,
+  );
 });
 
 test("커밋3 조립: 조회 실패(HTTP 500) 미조회에도 스테일이 붙는다", async () => {
@@ -707,7 +721,7 @@ test("커밋3 조립: 이번 회차 REST 가 확인하면 스테일 없이 옛 �
     stateEntry: { confirmed: 1, atMs: STALE_AT_MS },
     fetchHandler: confirmedResponse,
   });
-  assert.equal(line, `${EXT_PREFIX}확인 1 · 미조회 0 · 분류 대기`);
+  assert.equal(line, `${EXT_PREFIX}확인 1 · 미조회 0 · ㄴ 분자 반영`);
   assert.equal(result.externalEvidence.confirmed, 1);
 });
 
@@ -724,7 +738,7 @@ test("커밋3 조립: 전부 조회했는데 확인이 줄었으면(미조회 0)
       linkHeader: null,
     }),
   });
-  assert.equal(line, `${EXT_PREFIX}확인 0 · 미조회 0 · 분류 대기`);
+  assert.equal(line, `${EXT_PREFIX}확인 0 · 미조회 0 · ㄴ 분자 반영`);
 });
 
 test("커밋3 조립: 상태 파일이 없거나 · 깨졌거나 · 직전 확인이 0 이면 스테일 없음 (옛 문면)", async () => {
@@ -740,7 +754,7 @@ test("커밋3 조립: 상태 파일이 없거나 · 깨졌거나 · 직전 확�
     });
     assert.equal(
       line,
-      `${EXT_PREFIX}확인 0 · 미조회 1 · 분류 대기`,
+      `${EXT_PREFIX}확인 0 · 미조회 1 · ㄴ 분자 반영`,
       JSON.stringify(stateEntry),
     );
   }
@@ -814,7 +828,7 @@ function stateEntry(fx) {
   return JSON.parse(fs.readFileSync(fx.statePath, "utf8"))[STATE_KEY];
 }
 
-const EXT = (n, u = 0) => `${EXT_PREFIX}확인 ${n} · 미조회 ${u} · 분류 대기`;
+const EXT = (n, u = 0) => `${EXT_PREFIX}확인 ${n} · 미조회 ${u} · ㄴ 분자 반영`;
 const EXT_STALE = (u, prev) =>
   staleLine(0, u, { confirmed: prev, atMs: STALE_AT_MS, nowMs: NOW });
 

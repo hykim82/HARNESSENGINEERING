@@ -133,9 +133,10 @@ test("독립 증거 사건이 실제로 있으면 그 개수만 분자에 오른
       ],
     }),
   );
-  assert.ok(text.includes("- 외부 독립 증거로 확인된 사건: 2건"));
+  // HYK-255-ln-update-branch-1 (의도된 변경 · 한용 확정 1540): 확인분이 있어도 «확인 N건».
+  assert.ok(text.includes("- 외부 독립 증거로 확인된 사건: 확인 2건"));
   assert.equal(renderConfirmedLnCount(0), "확인 0건");
-  assert.equal(renderConfirmedLnCount(2), "2건");
+  assert.equal(renderConfirmedLnCount(2), "확인 2건");
 });
 
 test("필수 문면 ⓔ: 조회 실패·관측 없음은 0이 아니라 UNKNOWN(사유)로 나온다", () => {
@@ -680,15 +681,19 @@ function lnSectionLines(text) {
   return lines.slice(start, end);
 }
 
-test("ㄴ 절 새 줄: 확인 N · 미조회 U · 분류 대기 -- 문면 그대로, 확인 사건(분자)은 «확인 0건» 유지", () => {
+test("ㄴ 절 새 줄: 확인 N · 미조회 U · ㄴ 분자 반영 -- 문면 그대로, 이 렌더의 분자(confirmedLnEvents)는 별개 입력이라 비어 있으면 «확인 0건» (분자를 채우는 것은 wire)", () => {
   const text = buildPartialCountReport(
     baseInput({
       externalEvidence: { known: true, confirmed: 2, unchecked: 3 },
     }),
   );
-  assert.ok(text.includes(`${EXT_PREFIX}확인 2 · 미조회 3 · 분류 대기\n`));
-  assert.ok(text.includes("- 외부 독립 증거로 확인된 사건: 확인 0건\n"));
-  assert.ok(!text.includes("외부 독립 증거로 확인된 사건: 2건"));
+  assert.ok(text.includes(`${EXT_PREFIX}확인 2 · 미조회 3 · ㄴ 분자 반영\n`));
+  // 커밋 3(의도된 변경 · 교정 1904 ④): 미조회 3 이라 분자 옆 하한 표기 -- 분자는 별개 입력이 비어
+  // 있어 0(«확인 0건 이상 · 미조회 3»).
+  assert.ok(
+    text.includes("- 외부 독립 증거로 확인된 사건: 확인 0건 이상 · 미조회 3\n"),
+  );
+  assert.ok(!text.includes("외부 독립 증거로 확인된 사건: 확인 2건"));
   assert.ok(lnSectionLines(text).some((l) => l.startsWith(EXT_PREFIX)));
 });
 
@@ -716,7 +721,7 @@ test("ㄴ 절 새 줄: 입력이 없으면(미결선 호출자) 줄이 0개이�
   );
   // 새 줄 말고는 보고서 전체가 한 글자도 안 바뀐다.
   assert.equal(
-    withLine.replace(`${EXT_PREFIX}확인 0 · 미조회 0 · 분류 대기\n`, ""),
+    withLine.replace(`${EXT_PREFIX}확인 0 · 미조회 0 · ㄴ 분자 반영\n`, ""),
     without,
   );
 });
@@ -728,7 +733,7 @@ test("renderExternalEvidenceCandidateLine / parseExternalEvidenceCandidateLine: 
       confirmed: 1,
       unchecked: 4,
     }),
-    `${EXT_PREFIX}확인 1 · 미조회 4 · 분류 대기`,
+    `${EXT_PREFIX}확인 1 · 미조회 4 · ㄴ 분자 반영`,
   );
   assert.equal(renderExternalEvidenceCandidateLine(undefined), null);
   const text = buildPartialCountReport(

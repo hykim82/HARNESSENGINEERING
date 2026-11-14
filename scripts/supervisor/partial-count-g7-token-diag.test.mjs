@@ -277,11 +277,16 @@ test("ⓐ 동작 보존: 낙차 회차의 후보 줄은 base 의 스테일 문�
   });
   assert.equal(
     extLine,
-    `${EXT_PREFIX}확인 0 · 미조회 1 · 분류 대기 · 스테일 표시(확인 아님): 직전 확인 1 · 마지막 확인 11:05 KST`,
+    `${EXT_PREFIX}확인 0 · 미조회 1 · ㄴ 분자 반영 · 스테일 표시(확인 아님): 직전 확인 1 · 마지막 확인 11:05 KST`,
   );
   assert.equal(result.externalEvidence.confirmed, 0);
   assert.equal(result.externalEvidence.unchecked, 1);
-  assert.ok(reportText.includes("- 외부 독립 증거로 확인된 사건: 확인 0건\n"));
+  // 분자 = 이 회차 확인 0 · 하한 표기(미조회 1) -- HYK-255-ln-update-branch-1 커밋 3 의도된 변경.
+  assert.ok(
+    reportText.includes(
+      "- 외부 독립 증거로 확인된 사건: 확인 0건 이상 · 미조회 1\n",
+    ),
+  );
   const lines = reportText.split("\n");
   assert.equal(
     lines.filter((l) => l.startsWith(EXT_PREFIX)).length,
@@ -333,7 +338,7 @@ test("ⓐ 통지 장 수 무변: 낙차 토막이 있는 «실제 보고서 본�
       [
         "집계 성격: PARTIAL — 전수 아님",
         "생성 시각: 2026-11-12 09:00:00 KST",
-        `${EXT_PREFIX}확인 1 · 미조회 0 · 분류 대기`,
+        `${EXT_PREFIX}확인 1 · 미조회 0 · ㄴ 분자 반영`,
         "",
       ].join("\n"),
       "utf8",
