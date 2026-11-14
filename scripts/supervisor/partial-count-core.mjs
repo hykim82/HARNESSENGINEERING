@@ -1667,9 +1667,14 @@ function addPermissionExcludedRecord(acc, record) {
 }
 
 // 이어받기(resume)는 앞 대화 줄을 새 파일에 다시 적을 수 있다 -- 줄 uuid + tool_use_id 가 같으면 한 건이다.
+function permissionRecordKey(record) {
+  if (typeof record.uid !== "string" || record.uid === "") return null;
+  return `${record.uid}|${record.toolUseId ?? ""}`;
+}
+
 function isDuplicatePermissionRecord(seen, record) {
-  if (typeof record.uid !== "string" || record.uid === "") return false;
-  const key = `${record.uid}|${record.toolUseId ?? ""}`;
+  const key = permissionRecordKey(record);
+  if (key === null) return false;
   if (seen.has(key)) return true;
   seen.add(key);
   return false;
@@ -1695,7 +1700,11 @@ function finalizePermissionSessions(acc) {
 
 // 시각 불명 줄 중 «판정 칸이 있고 사람 답 계열(자동이 아닌 것)» -- 날짜를 모르니 일별 칸 · 합계에는 못 넣고 하한 토막으로만
 // 센다(판정 1306 ④ (다)). 레인 밖 · 이어받기 중복은 시각이 있는 줄과 같은 규칙으로 뺀다.
-function addUndatedHumanRecord(acc, seen, record, roots) {
+// HYK-255-p5a-errsplit-2 (상신 1614 A · 검토 1R P2-1) -- 이 함수는 «시각 있는 줄을 전부 처리한 뒤» 두 번째 패스에서만 부른다:
+// 같은 uuid + tool_use_id 의 시각 있는 줄이 이미 장부(seen)에 있으면 시각 불명 사본이 빠지므로 입력 순서와 무관하게 시각 있는 쪽이
+// 이긴다. datedKeys = 첫 패스가 끝난 시점의 장부 사본 -- 시각 있는 줄과 겹쳐 빠진 사본만 중복 칸(acc.duplicates)에 센다
+// (시각 불명끼리의 중복은 1R 처럼 중복 칸에 세지 않는다).
+function addUndatedHumanRecord(acc, seen, datedKeys, record, roots) {
   if (
     record.hasDecision !== true ||
     classifyPermissionDecision(record.decision) === PERMISSION_CLASS.AUTO
@@ -1708,7 +1717,10 @@ function addUndatedHumanRecord(acc, seen, record, roots) {
     roots,
   });
   if (seat === PERMISSION_SEAT.OUT_OF_LANE) return;
-  if (isDuplicatePermissionRecord(seen, record)) return;
+  if (isDuplicatePermissionRecord(seen, record)) {
+    if (datedKeys.has(permissionRecordKey(record))) acc.duplicates += 1;
+    return;
+  }
   acc.undatedHuman += 1;
 }
 
@@ -1720,10 +1732,11 @@ export function summarizePermissionRecords({
 }) {
   const acc = newPermissionAccumulator();
   const seen = new Set();
+  const undatedRecords = [];
   for (const record of Array.isArray(records) ? records : []) {
     if (!record || !Number.isFinite(record.atMs)) {
       acc.undated += 1;
-      if (record) addUndatedHumanRecord(acc, seen, record, roots);
+      if (record) undatedRecords.push(record); // 두 번째 패스로 미룬다(시각 있는 쪽이 이김)
       continue;
     }
     if (record.atMs < windowStartMs || record.atMs > windowEndMs) continue;
@@ -1741,6 +1754,10 @@ export function summarizePermissionRecords({
     } else {
       addPermissionLaneRecord(acc, record, seat);
     }
+  }
+  const datedKeys = new Set(seen);
+  for (const record of undatedRecords) {
+    addUndatedHumanRecord(acc, seen, datedKeys, record, roots);
   }
   const { fieldMissingSessions, undecided, errorEnded } =
     finalizePermissionSessions(acc);

@@ -395,6 +395,120 @@ test("칸 시각 불명 + 사람 답 + 레인 밖 cwd = 하한 토막에서도 �
   assert.equal(r.undatedHumanAnswers, 0);
 });
 
+// ---- HYK-255-p5a-errsplit-2 (상신 1614 A · 검토 1R P2-1 반례 CX1 · CX1b) ----------------------------------
+// 같은 줄 uuid + tool_use_id 의 «시각 불명 사본» 과 «시각 있는 레인 안 사람 답» 은 한 건이다 -- 시각 있는 쪽이 이긴다(입력 순서 무관).
+// CX1 = 시각 불명 사본이 «먼저» 읽힘 · CX1b = 순서를 뒤집음(시각 있는 쪽이 먼저). 두 칸의 값은 같아야 한다.
+function cxHome(name, undatedFirst) {
+  const h = makeHome();
+  const dated = {
+    source: "user_temporary",
+    uuid: "cx-uuid",
+    toolUseId: "cx-t",
+  };
+  const undated = { ...dated, noTimestamp: true };
+  sess(h, name, undatedFirst ? [undated, dated] : [dated, undated]);
+  return h;
+}
+
+for (const [label, undatedFirst] of [
+  ["CX1 시각 불명 사본이 먼저", true],
+  ["CX1b 시각 있는 쪽이 먼저(순서 뒤집음)", false],
+]) {
+  test(`칸 ${label}: 같은 uuid + tool_use_id = 시각 있는 쪽이 이긴다 -- 사람 답 1 · 일별 칸 1 · 시각 불명 사람 답 0 · 중복 1 (순서 무관)`, async () => {
+    const h = cxHome(`s-cx-${undatedFirst ? "1" : "1b"}`, undatedFirst);
+    const r = collect(h);
+    assert.equal(r.human, 1, "시각 있는 사람 답이 살아 있다");
+    assert.equal(r.humanTotal, 1);
+    assert.equal(r.undated, 1, "시각 불명 줄 수 자체는 그대로 1");
+    assert.equal(r.undatedHumanAnswers, 0, "시각 불명 사본은 중복으로 빠진다");
+    assert.equal(r.duplicates, 1, "빠진 쪽(시각 불명 사본)이 중복 1");
+    assert.deepEqual(core.permissionGapPieces(r), [], "하한 토막 없음");
+    assert.deepEqual(
+      r.byKstDay,
+      { "2026-11-13": 1 },
+      "일별 칸 = 그날 사람 답 1",
+    );
+    assert.equal(r.humanEventIds.length, 1);
+
+    const result = await runReal(h);
+    assert.equal(
+      result.dailyTick.permissionHumanAnswers,
+      1,
+      "일별 줄 사람 답이 0 으로 사라지지 않는다",
+    );
+    assert.equal(result.dailyTick.permissionUndecidable, 0);
+    const line = dailyLineFor("2026-11-13", {
+      collectorFails: result.dailyTick.collectorFails.filter(
+        (n) => n === "권한기록수집기",
+      ),
+      permissionHumanAnswers: result.dailyTick.permissionHumanAnswers,
+      permissionUndecidable: result.dailyTick.permissionUndecidable,
+      permissionErrorEnded: result.dailyTick.permissionErrorEnded,
+    });
+    const s = core.computeConfirmedZeroStreak({
+      lines: [line],
+      nowMs: kst("2026-11-14 09:00"),
+    });
+    assert.equal(s.days, 0, "그날은 사람 답 때문에 끊긴다");
+    assert.deepEqual(s.lastBreak.reasons, ["권한 확인창 사람 답 1"]);
+  });
+}
+
+test("칸 같은 한 건의 시각 있는 쪽이 레인 밖(제외)이어도 시각 있는 쪽이 이긴다 -- 시각 불명 사본은 하한 토막 0 · 중복 1 · 제외 사람 답 1", () => {
+  // 시각 있는 줄은 레인 밖 cwd 의 다른 세션(제외) · 시각 불명 줄은 레인 안 -- 같은 uuid + tool_use_id.
+  const h = makeHome();
+  sess(
+    h,
+    "s-cx-out",
+    [{ source: "user_temporary", uuid: "cx-o", toolUseId: "cx-ot" }],
+    { root: "claude", cwd: h.elsewhere },
+  );
+  sess(h, "s-cx-in", [
+    {
+      source: "user_temporary",
+      uuid: "cx-o",
+      toolUseId: "cx-ot",
+      noTimestamp: true,
+    },
+  ]);
+  const r = collect(h);
+  assert.equal(r.excluded.human, 1);
+  assert.equal(r.human, 0);
+  assert.equal(
+    r.undatedHumanAnswers,
+    0,
+    "같은 한 건 -- 시각 있는 쪽(레인 밖 제외)이 이긴 것이므로 사본도 센다 안 함",
+  );
+  assert.equal(r.duplicates, 1);
+});
+
+test("칸 시각 불명 사본만 있는 사람 답 = 1R 처럼 하한 토막 1 (짝이 없으면 그대로 센다) · 시각 불명끼리 중복은 1건 · 중복 칸 0(1R 무변)", () => {
+  const h = makeHome();
+  sess(h, "s-cx-only", [
+    {
+      source: "user_temporary",
+      noTimestamp: true,
+      uuid: "u-only",
+      toolUseId: "t-only",
+    },
+    {
+      source: "user_temporary",
+      noTimestamp: true,
+      uuid: "u-only",
+      toolUseId: "t-only",
+    },
+  ]);
+  const r = collect(h);
+  assert.equal(r.undatedHumanAnswers, 1);
+  assert.equal(
+    r.duplicates,
+    0,
+    "시각 불명끼리의 중복은 1R 처럼 중복 칸에 안 센다",
+  );
+  assert.equal(r.human, 0);
+  assert.deepEqual(core.permissionGapPieces(r), ["시각 불명 사람 답 1"]);
+});
+
 // ======================================================================================
 // ⑵-4 칸 -- 값의 범위(K + 새 칸 = 판정 없는 레인 안 결과 수) · 레인 밖 · KST 자정 경계 · 본문 0
 // ======================================================================================
