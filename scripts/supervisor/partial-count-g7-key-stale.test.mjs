@@ -528,12 +528,24 @@ function git(cwd, args, env = {}) {
 
 const REPO_FULL = "hykim82/HARNESSENGINEERING";
 const ALLOWLIST_PATH = "scripts/supervisor/approver-allowlist.json";
+// HYK-255-p3-gh-1 -- P3(GitHub 사람 손 수집기)는 이 시험의 관심 밖이다. 합성 저장소에 봇 목록 파일을 둬서 P3 가 «수집 실패»
+// 로 분자 표기(하한 토막)를 바꾸지 않게 하고, 사건 목록 호출은 빈 목록(사람 손 0)으로 받아 이 시험의 호출 기록에 섞지 않는다.
+const BOTS_PATH = "scripts/supervisor/github-bot-accounts.json";
+const BOTS_JSON = JSON.stringify({
+  schema_version: "github-bot-accounts/v1",
+  bots: [{ login: "bot-fixture-a" }],
+});
+const passGithubEvents = (fetchJson) => (opts) =>
+  /\/events\?per_page=/.test(opts.url)
+    ? { ok: true, status: 200, json: [], linkHeader: null }
+    : fetchJson(opts);
 
 // 합성 저장소 -- GitHub 웹 «Update branch» 병합 커밋 후보 1개가 origin/master 에 닿는다.
 function buildCandidateRepo() {
   const dir = tmpDir("nc-g7-stale-repo-");
   git(dir, ["init", "-q"]);
   fs.mkdirSync(join(dir, "scripts", "supervisor"), { recursive: true });
+  fs.writeFileSync(join(dir, BOTS_PATH), BOTS_JSON, "utf8");
   fs.writeFileSync(
     join(dir, ALLOWLIST_PATH),
     JSON.stringify({
@@ -643,7 +655,7 @@ async function runWithState({ stateEntry, fetchHandler, extra = {} }) {
       extraRepoRoots: [],
       archiveRoot: join(root, "archive-missing"),
       maxMergeChecks: 0,
-      fetchJson,
+      fetchJson: passGithubEvents(fetchJson),
       git: report.createProcessGitPort(repo.dir),
       gitWorktreeListExecFn: () => "",
       ...extra,
