@@ -196,7 +196,8 @@ function repoOnce() {
     "utf8",
   );
   // HYK-255-p3-gh-1 -- P3(GitHub 사람 손 수집기)는 이 시험의 관심 밖이다. 봇 목록 파일을 둬서 P3 가 «수집 실패» 로 ㄴ 분자
-  // 표기(하한 토막)를 바꾸지 않게 하고, 아래 runReal 의 사건 목록 호출은 빈 목록(사람 손 0)으로 받는다.
+  // 표기(하한 토막)를 바꾸지 않게 하고, 아래 runReal 의 실시간 목록 호출(닫힌 PR · 대화 댓글 · 리뷰 줄 댓글 -- 판정 1407 P3 2R)은
+  // 빈 목록(사람 손 0)으로 받는다. 회차 순번상 못 부른 목록 1개는 분자에 «GitHub 사람 손 목록 1개 미조회» 토막으로 남는다(GH_P3_PIECE).
   fs.writeFileSync(
     join(repo, "scripts", "supervisor", "github-bot-accounts.json"),
     JSON.stringify({
@@ -224,7 +225,7 @@ async function runReal(options) {
     extraRepoRoots: [],
     archiveRoot: join(root, "archive-missing"),
     fetchJson: async ({ url }) =>
-      /\/events\?per_page=/.test(url)
+      /\/pulls\?state=closed|\/issues\/comments\?|\/pulls\/comments\?/.test(url)
         ? { ok: true, status: 200, json: [], linkHeader: null }
         : { ok: false, status: 404, json: null, linkHeader: null },
     git: report.createProcessGitPort(repo),
@@ -235,6 +236,8 @@ async function runReal(options) {
 
 const lnLine = (text) =>
   /^- 외부 독립 증거로 확인된 사건: (.*)$/m.exec(text)?.[1];
+// 판정 1407 P3 2R(의도된 변경): P3 목록은 회차마다 돌아가며 불려 못 부른 목록 1개가 분자에 이 토막을 남기고 «이상» 을 켠다.
+const GH_P3_PIECE = "GitHub 사람 손 목록 1개 미조회";
 const permLine = (text) =>
   /^- 권한 확인창 사람 답\(B · 세션 기록\): (.*)$/m.exec(text)?.[1];
 
@@ -732,7 +735,10 @@ test("보고: 칸 표 한 판 -> ㄴ 분자 «확인 4건 이상 · 판정 불�
     sessionHomeDir: h.home,
     outboxDir: h.outboxDir,
   });
-  assert.equal(lnLine(result.reportText), "확인 4건 이상 · 판정 불가 1");
+  assert.equal(
+    lnLine(result.reportText),
+    `확인 4건 이상 · 판정 불가 1 · ${GH_P3_PIECE}`,
+  );
   assert.equal(
     permLine(result.reportText),
     "확인 4건 이상(통역 1 · SDK 1 · 판정 불가 1 · 레인 밖 제외 1(사람 답 1)) · ORCH 1 · 워커 2 · 미분류 0 · 자동 7 — ㄴ 확인 건수에 포함 · 세션 기록 한정(다른 엔진 좌석 미포함)",
@@ -757,7 +763,7 @@ test("보고: 사람 답 0 · 판정 불가 0 이면 «확인 0건» (bare «0�
     sessionHomeDir: h.home,
     outboxDir: h.outboxDir,
   });
-  assert.equal(lnLine(result.reportText), "확인 0건");
+  assert.equal(lnLine(result.reportText), `확인 0건 이상 · ${GH_P3_PIECE}`);
   assert.match(
     permLine(result.reportText),
     /^확인 0건\(통역 0 · SDK 0 · 판정 불가 0 · 레인 밖 제외 0\(사람 답 0\)\)/,
@@ -773,7 +779,10 @@ test("보고: 수집 실패(뿌리 없음) = 분자에 안 더하고 «수집 �
     sessionHomeDir: h.home,
     outboxDir: h.outboxDir,
   });
-  assert.equal(lnLine(result.reportText), "확인 0건 이상 · 권한기록 수집 실패");
+  assert.equal(
+    lnLine(result.reportText),
+    `확인 0건 이상 · 권한기록 수집 실패 · ${GH_P3_PIECE}`,
+  );
   assert.match(
     permLine(result.reportText),
     /^수집 실패\(세션 뿌리 읽기 실패\(home: /,
@@ -789,7 +798,7 @@ test("보고: 미결선(--outbox-dir 없음) = 사람 답 줄 0 · 수집기 줄
   const result = await runReal({ sessionHomeDir: h.home });
   assert.equal(permLine(result.reportText), undefined);
   assert.doesNotMatch(result.reportText, /권한기록수집기/);
-  assert.equal(lnLine(result.reportText), "확인 0건");
+  assert.equal(lnLine(result.reportText), `확인 0건 이상 · ${GH_P3_PIECE}`);
   assert.equal(
     Object.hasOwn(result.dailyTick, "permissionHumanAnswers"),
     false,
@@ -805,7 +814,7 @@ test("보고: ㄴ 분자는 D1 확인분과 «더해진다» -- 사람 답 2 + �
     sessionHomeDir: h.home,
     outboxDir: h.outboxDir,
   });
-  assert.equal(lnLine(result.reportText), "확인 2건");
+  assert.equal(lnLine(result.reportText), `확인 2건 이상 · ${GH_P3_PIECE}`);
   assert.match(permLine(result.reportText), /^확인 2건\(/);
 });
 

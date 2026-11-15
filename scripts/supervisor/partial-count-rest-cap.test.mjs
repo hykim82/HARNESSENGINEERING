@@ -31,8 +31,11 @@ const ALLOWLIST_JSON = JSON.stringify({
   approvers: [{ login: "hykim82", id: 286230306 }],
 });
 // HYK-255-p3-gh-1 -- P3(GitHub 사람 손 수집기)는 이 시험의 관심 밖이다(그 시험 = partial-count-github-human.test.mjs). 합성 저장소에
-// 봇 목록 파일을 둬서 P3 가 «수집 실패» 로 분자 표기(하한 토막)를 바꾸지 않게 하고, 사건 목록 호출은 빈 목록(사람 손 0)으로 받되
-// calls.events 에 따로 센다 -- ㄱ-4 · D1 호출 기록은 그대로이고, «회차 총» 단언만 P3 호출까지 포함하도록 강화했다.
+// 봇 목록 파일을 둬서 P3 가 «수집 실패» 로 분자 표기(하한 토막)를 바꾸지 않게 하고, 실시간 목록 호출(닫힌 PR · 대화 댓글 · 리뷰 줄 댓글 --
+// 판정 1407 P3 2R)은 빈 목록(사람 손 0)으로 받되 calls.events 에 따로 센다(이름은 1R 그대로 -- 지금은 P3 목록 호출 기록이다) --
+// ㄱ-4 · D1 호출 기록은 그대로이고, «회차 총» 단언만 P3 호출까지 포함하도록 강화했다.
+// 판정 1407 P3 2R(의도된 변경): 못 부른 P3 목록 1개(회차 순번 · 예산 2)는 분자에 이 토막을 남기고 «이상» 표기를 켠다.
+const P3_UNCHECKED = "GitHub 사람 손 목록 1개 미조회";
 const BOTS_PATH = "scripts/supervisor/github-bot-accounts.json";
 const BOTS_JSON = JSON.stringify({
   schema_version: "github-bot-accounts/v1",
@@ -148,7 +151,11 @@ function makeCountingFetch(repo) {
   const respond = (json) => ({ ok: true, status: 200, json, linkHeader: null });
   const fetchJson = async ({ url }) => {
     const path = url.replace(`https://api.github.com/repos/${REPO}`, "");
-    if (/^\/events\?per_page=100/.test(path)) {
+    if (
+      /^\/(?:pulls\?state=closed|issues\/comments\?|pulls\/comments\?)/.test(
+        path,
+      )
+    ) {
       calls.events.push(url);
       return respond([]);
     }
@@ -298,7 +305,7 @@ test("ⓑ D1 후보 5 · 상한 4 · 전부 확인 응답 -> 확인 4 + 미조�
     assert.equal(result.externalEvidence.confirmed, 4);
     assert.equal(
       numeratorLine(result.reportText),
-      `${NUMERATOR_PREFIX}확인 4건 이상 · 미조회 1`,
+      `${NUMERATOR_PREFIX}확인 4건 이상 · 미조회 1 · ${P3_UNCHECKED}`,
     );
     assert.ok(
       result.reportText.includes(
@@ -317,11 +324,16 @@ test("ⓑ 미조회 0 인 회차(D1 후보 4 = 상한 4)는 하한 표기 0 -- �
     const result = await runDefault(repo, fetchJson);
     assert.equal(result.externalEvidence.confirmed, 4);
     assert.equal(result.externalEvidence.unchecked, 0);
+    // 판정 1407 P3 2R(의도된 변경): P3 목록은 돌아가며 불려 못 부른 목록 1개가 «이상» 을 켠다 -- D1 몫의 하한 표기(미조회 N 토막)는 여전히 0.
     assert.equal(
       numeratorLine(result.reportText),
-      `${NUMERATOR_PREFIX}확인 4건`,
+      `${NUMERATOR_PREFIX}확인 4건 이상 · ${P3_UNCHECKED}`,
     );
-    assert.ok(!result.reportText.includes("이상"), "하한 표기 0");
+    assert.equal(
+      / · 미조회 \d/.test(numeratorLine(result.reportText)),
+      false,
+      "D1 하한 표기 0",
+    );
   } finally {
     cleanup(repo);
   }
@@ -334,7 +346,7 @@ test("ⓑ 후보 0 인 회차 · 수집 실패 회차는 하한 표기 0 (분자
     const result = await runDefault(repo, fetchJson);
     assert.equal(
       numeratorLine(result.reportText),
-      `${NUMERATOR_PREFIX}확인 0건`,
+      `${NUMERATOR_PREFIX}확인 0건 이상 · ${P3_UNCHECKED}`,
     );
   } finally {
     cleanup(repo);
