@@ -2862,9 +2862,19 @@ function buildGithubHumanCollectorEntry(githubHumanActions) {
     ok: true,
     detail:
       `목록 ${okLists}/${GITHUB_LIST_KEYS.length} 조회 · 호출 ${g.calls}/${g.budget} · 항목 ${g.scanned}건 · 사람 ${g.humanTotal} · ` +
-      `봇 제외 ${g.botSkipped} · 창 밖 ${g.outOfWindow} · 중복 ${g.duplicates} · 판정 불가 ${g.undecidable} · ` +
-      `변경 요청 PR ${g.changeRequestPrs}건`,
+      `봇 제외 ${g.botSkipped} · 병합 PR 제외 ${githubMergedClosedTotal(g)} · 창 밖 ${g.outOfWindow} · 중복 ${g.duplicates} · ` +
+      `판정 불가 ${g.undecidable} · 변경 요청 PR ${g.changeRequestPrs}건`,
   };
+}
+
+// 진단 «병합 PR 제외 N» = 조회에 성공한 목록들의 목록별 mergedClosed 합(병합된 닫힌 PR 은 창 판정보다 먼저 빠진다 -- judgeClosedPr 가
+// 센 값 · 창 안팎 무관한 수라 «창 밖» 과 다른 칸이다). core 반환 칸(sums)을 늘리지 않고 목록별 값에서 «그리는 쪽» 이 합한다. 못 부른 목록 = 0.
+function githubMergedClosedTotal(g) {
+  return GITHUB_LIST_KEYS.reduce((sum, key) => {
+    const list = g.lists?.[key];
+    const n = list?.state === "ok" ? list.mergedClosed : 0;
+    return sum + (Number.isInteger(n) && n > 0 ? n : 0);
+  }, 0);
 }
 
 // HYK-255-g-aux-render-1 -- ㄱ 보조 관측 4칸의 «진단 줄»(관측 건강). 보고서 ㄱ 절
