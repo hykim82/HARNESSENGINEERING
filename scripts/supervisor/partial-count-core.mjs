@@ -703,6 +703,9 @@ export function buildPartialCountReport({
   // HYK-255-p1-daily-1 -- 기본값 undefined -> 새 줄 0개(미결선 호출자 회귀 0). 값은 watch-run 의 일별
   // 단계가 일별 줄 파일에서 읽어 만든 «연속 확인-0 일수» 한 줄(renderConfirmedZeroStreakLine). 문턱 판정 0.
   confirmedZeroStreakLine,
+  // HYK-255-p2a-scope-1 -- 기본값 undefined -> 새 줄 0개(미결선 호출자 회귀 0). 값 = renderMachineScopeLine 결과(설정 파일 값 기준 ·
+  // 보고 진입점이 렌더) -- «연속 확인-0 일수» 줄 바로 아래에 싣는다. 문턱 판정 · 통지 · 장 수 0(줄 1개 추가뿐).
+  machineScopeLine,
   // HYK-255-p5a-perm-1 -- 기본값 undefined -> ㄴ 절 새 줄 0개 · 분자 합산 0(미결선 호출자 회귀 0). 값 =
   // summarizePermissionRecords 결과 + 수집 부가 칸(wire 의 collectPermissionAnswers) 또는 {known:false, reason}.
   permissionAnswers,
@@ -722,6 +725,9 @@ export function buildPartialCountReport({
     confirmedZeroStreakLine !== ""
   ) {
     lines.push(confirmedZeroStreakLine);
+  }
+  if (typeof machineScopeLine === "string" && machineScopeLine !== "") {
+    lines.push(machineScopeLine);
   }
   lines.push("");
   lines.push(
@@ -1448,6 +1454,76 @@ export function renderConfirmedZeroStreakLine(streak) {
   return (
     `${prefix}${streak.days}일(부분 —${range} ` +
     `마지막 끊김 ${brk.day} ${brk.reasons.join(", ")})`
+  );
+}
+
+// ---------------------------------------------------------------------------
+// HYK-255-p2a-scope-1 -- 기계 계수 범위 기준(읽는 쪽 · 순수 함수 · 문턱 값은 «인자»). 일별 줄에서 어제부터 거꾸로, 날마다
+//   끊김 사유 0(breakReasonsForDay -- 수집 실패 · 미조회 · 공백 · 줄 없음 · 줄 중복 = 끊김) ∧ 그날 동시 배달 최대 ≥ minConcurrentTracks
+// 인 날만 센다(동시 배달 최대를 모르면(null · 칸 없음) 그날 끊김). 연속으로 센 날 수가 observationDays 이상이면 «충족», 아니면 «미충족».
+// 끊기면 연속은 그 뒤 날부터 다시 센다(상태 0 -- 거꾸로 세는 계산이 이미 그 뜻). 오늘(미마감)은 세지 않는다.
+// ⚠️ 이 기준은 «기계로 센 범위» 의 기준일 뿐이다 -- 기계로 못 세는 개입은 이 줄 밖이고, 1-C 줄(상수)은 이 계산이 바꾸지 않는다.
+// 관측 일수 · 문턱의 값(7 · 2)은 코드에 없다 -- 설정 파일에서 읽어 인자로 넘어온다(partial-count-report.mjs).
+// ---------------------------------------------------------------------------
+
+const MACHINE_SCOPE_LINE_PREFIX = "기계 계수 범위 기준: ";
+
+// 그날 줄들 -> 기계 계수 끊김 사유(없으면 []). 줄이 하나일 때만 동시 배달 최대를 본다(줄 없음 · 줄 중복은 그 사유가 이미 끊김).
+function machineScopeDayReasons(entries, minConcurrentTracks) {
+  const reasons = breakReasonsForDay(entries);
+  if (!entries || entries.length !== 1) return reasons;
+  const max = entries[0].concurrentTracksMax;
+  if (!isCount(max)) return [...reasons, "동시 배달 최대 모름"];
+  return max >= minConcurrentTracks
+    ? reasons
+    : [...reasons, `동시 배달 최대 ${max} < 기준 ${minConcurrentTracks}`];
+}
+
+export function computeMachineScope({
+  lines,
+  nowMs,
+  observationDays,
+  minConcurrentTracks,
+}) {
+  const byDay = groupDailyLinesByDay(lines);
+  const toDay = addKstDays(kstDayOf(nowMs), -1);
+  let day = toDay;
+  let days = 0;
+  let fromDay = null;
+  for (;;) {
+    const reasons = machineScopeDayReasons(byDay.get(day), minConcurrentTracks);
+    if (reasons.length > 0) {
+      return {
+        known: true,
+        met: days >= observationDays,
+        days,
+        // 날짜 범위 = 실제로 센 날들(가장 이른 센 날 ~ 어제). 센 날 0 = 범위 없음.
+        fromDay,
+        toDay: days > 0 ? toDay : null,
+        observationDays,
+        minConcurrentTracks,
+        lastBreak: { day, reasons },
+      };
+    }
+    days += 1;
+    fromDay = day;
+    day = addKstDays(day, -1);
+  }
+}
+
+// 보고 줄 -- «기계 계수 범위 기준: 충족|미충족 — 연속 N일 / 기준 M일(동시 배달 최대 ≥ K · 끊김 사유 0) · 센 날 <첫날>~<끝날> · 마지막 끊김 …».
+// 모르면(설정 · 일별 줄을 못 읽음) UNKNOWN(사유) -- 충족도 미충족도 아니다. 기준 숫자 · 날짜 범위는 계산이 쓴 값 그대로다.
+export function renderMachineScopeLine(scope) {
+  if (!scope || scope.known !== true) {
+    return `${MACHINE_SCOPE_LINE_PREFIX}UNKNOWN(${scope?.reason ?? "사유 미상"})`;
+  }
+  const range = scope.days > 0 ? `${scope.fromDay}~${scope.toDay}` : "없음";
+  const brk = scope.lastBreak;
+  return (
+    `${MACHINE_SCOPE_LINE_PREFIX}${scope.met ? "충족" : "미충족"} — ` +
+    `연속 ${scope.days}일 / 기준 ${scope.observationDays}일(동시 배달 최대 ≥ ${scope.minConcurrentTracks} · 끊김 사유 0) · ` +
+    `센 날 ${range} · 마지막 끊김 ${brk.day} ${brk.reasons.join(", ")} — ` +
+    "기계로 센 범위의 기준일 뿐 · 기계로 못 세는 개입 미포함"
   );
 }
 

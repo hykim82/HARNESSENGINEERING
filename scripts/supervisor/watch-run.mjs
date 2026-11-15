@@ -2999,6 +2999,8 @@ function beginPartialCountDaily({
         known: false,
         reason: "일별 파일 읽기 실패",
       }),
+      // HYK-255-p2a-scope-1 -- 못 읽음 = null(보고 단계가 «UNKNOWN(일별 파일 읽기 실패)» 로 적는다).
+      dailyLines: null,
       state,
       skipRecord: true,
       notes,
@@ -3026,6 +3028,8 @@ function beginPartialCountDaily({
     streakLine: renderConfirmedZeroStreakLine(
       computeConfirmedZeroStreak({ lines, nowMs: now }),
     ),
+    // HYK-255-p2a-scope-1 -- 같은 일별 줄(방금 마감한 줄 포함)을 보고 단계에 넘긴다(기계 계수 범위 기준 한 줄의 재료).
+    dailyLines: lines,
     state: skipRecord ? state : rolled.state,
     skipRecord,
     notes,
@@ -3134,7 +3138,11 @@ async function runPartialCountStepCore({
     existsFn,
     logPath,
     maxLogLines,
-    options: { ...options, confirmedZeroStreakLine: daily.streakLine },
+    options: {
+      ...options,
+      confirmedZeroStreakLine: daily.streakLine,
+      machineScopeDailyLines: daily.dailyLines,
+    },
     notifyDir,
   });
   const notes = finishPartialCountDaily({
