@@ -30,6 +30,14 @@ const ALLOWLIST_JSON = JSON.stringify({
   repo: REPO,
   approvers: [{ login: "hykim82", id: 286230306 }],
 });
+// HYK-255-p3-gh-1 -- P3(GitHub 사람 손 수집기)는 이 시험의 관심 밖이다(그 시험 = partial-count-github-human.test.mjs). 합성 저장소에
+// 봇 목록 파일을 둬서 P3 가 «수집 실패» 로 분자 표기(하한 토막)를 바꾸지 않게 하고, 사건 목록 호출은 빈 목록(사람 손 0)으로 받되
+// calls.events 에 따로 센다 -- ㄱ-4 · D1 호출 기록은 그대로이고, «회차 총» 단언만 P3 호출까지 포함하도록 강화했다.
+const BOTS_PATH = "scripts/supervisor/github-bot-accounts.json";
+const BOTS_JSON = JSON.stringify({
+  schema_version: "github-bot-accounts/v1",
+  bots: [{ login: "bot-fixture-a" }],
+});
 const NUMERATOR_PREFIX = "- 외부 독립 증거로 확인된 사건: ";
 const LN_LINE_PREFIX = "- 외부 독립 증거 후보: ";
 const GITHUB_COMMITTER = { name: "GitHub", email: "noreply@github.com" };
@@ -82,6 +90,7 @@ function buildRepo(ubCounts) {
   git(dir, ["init", "-q"]);
   fs.mkdirSync(join(dir, "scripts", "supervisor"), { recursive: true });
   fs.writeFileSync(join(dir, ALLOWLIST_PATH), ALLOWLIST_JSON, "utf8");
+  fs.writeFileSync(join(dir, BOTS_PATH), BOTS_JSON, "utf8");
   git(dir, ["add", "-A"]);
   const tree = git(dir, ["write-tree"]);
   const rootIso = new Date(NOW - 100 * 24 * HOUR).toISOString();
@@ -134,11 +143,15 @@ const cleanup = (repo) => fs.rmSync(repo.dir, { recursive: true, force: true });
 //   ㄱ-4 후보(병합 커밋) = repo · 보호 브랜치 · pulls · pull 상세 · reviews 가 전부 승인 모양.
 //   D1 후보(Update branch) = 서명·작성자 확인 모양 응답.
 function makeCountingFetch(repo) {
-  const calls = { gate4: [], d1: [] };
+  const calls = { gate4: [], d1: [], events: [] };
   const mergeNumber = new Map(repo.mergeShas.map((s, i) => [s, i + 1]));
   const respond = (json) => ({ ok: true, status: 200, json, linkHeader: null });
   const fetchJson = async ({ url }) => {
     const path = url.replace(`https://api.github.com/repos/${REPO}`, "");
+    if (/^\/events\?per_page=100/.test(path)) {
+      calls.events.push(url);
+      return respond([]);
+    }
     const d1 = /^\/commits\/([0-9a-f]{40})$/.exec(path);
     if (d1) {
       calls.d1.push(url);
@@ -235,7 +248,8 @@ test("ⓐ 프로덕션 진입점 1회(기본 옵션 · 상한 인자 없이) · 
     assert.equal(result.externalEvidence.candidatesInWindow, 5, "D1 후보 ≥ 5");
     assert.ok(calls.gate4.length <= 8, `ㄱ-4 호출 ${calls.gate4.length} > 8`);
     assert.ok(calls.d1.length <= 4, `D1 호출 ${calls.d1.length} > 4`);
-    const total = calls.gate4.length + calls.d1.length;
+    // HYK-255-p3-gh-1 -- «회차 총» 에 P3(사건 목록) 호출을 포함한다(ㄱ-4 · D1 단언은 위 그대로).
+    const total = calls.gate4.length + calls.d1.length + calls.events.length;
     assert.ok(total <= 12, `회차 총 호출 ${total} > 12`);
     assert.ok(
       total * ROUNDS_PER_HOUR <= 48,

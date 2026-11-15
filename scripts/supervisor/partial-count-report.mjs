@@ -101,6 +101,7 @@ import {
   UNCOUNTED_EXAMPLES_V3,
   GATE_TYPES,
   ABOLISHED_GATE_TYPES,
+  summarizeGithubEvents,
 } from "./partial-count-core.mjs";
 
 export const DEFAULT_DISPATCH_RECEIPTS_PATH =
@@ -1009,6 +1010,213 @@ async function collectExternalEvidenceSafely(args) {
       known: false,
       reason: `수집기 예외: ${err?.message ?? String(err)}`,
     };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 수집 3-c (HYK-255-p3-gh-1, 판정 2026-11-14 0939 ④⑤ · P3 행) -- ㄴ «GitHub 사람 손 조작» 수집기.
+//
+// ⓘ 원천 = GitHub 익명 REST 저장소 단위 사건 목록 «하나»: GET /repos/<owner>/<repo>/events?per_page=100. 저장소 이름은 D1 과
+//   같은 길(저장소 신원 + approver-allowlist 의 repo 값 대조 · readExternalEvidenceAllowlist)에서 읽는다 -- 리터럴 0. 1쪽이 그 회차
+//   창(회차 -24h ~ 회차)의 가장 오래된 시각까지 닿지 못하면(100건 꽉 참 · 창보다 오래된 사건이 쪽 안에 없음) 2쪽 1회 · 그래도
+//   못 덮으면 «미조회(창 덮지 못함)». ⛔PR 마다 조회 0 · ⛔재시도 0 · 403/429 = «미조회(rate limit)»(0 아님 · D1 과 같은 모양).
+// ⓘⓘ 사람 판별 = actor.login 이 봇 목록(새 설정 파일 github-bot-accounts.json · origin/master 판본 -- 허용 목록을 읽는 길과 같은
+//   방식)에 «없으면» 사람. 못 읽으면(없음 · 깨짐 · 스키마 불일치 · 빈 목록) = 수집 실패(0 아님) + REST 호출 0. 코드에 봇 이름 리터럴 0.
+// ⓘⓘⓘ 예산(시간당 48 무변) = ㄱ-4 · D1 이 «그 회차에 실제로 쓴» 호출 수를 뺀 나머지(12 - 사용)와 2 중 작은 수. 호출 순서 =
+//   기존 둘 먼저 · P3 마지막(collectPartialCountInputs 가 호출 수를 세는 fetchJson 으로 셋을 이어 부른다). 몫 0 이면 호출 0 ·
+//   «미조회(예산)» · 몫 1 인데 2쪽이 필요하면 «미조회(예산 · 창 덮지 못함)».
+// ⚠️정직 한계: 사건 API 는 공개 저장소 활동을 몇 분~몇 시간 늦게 싣는다〔추론 · 못 쟀다〕 -- 늦게 실린 사건은 다음 회차 창에서 잡히고
+//   일별 사건 합집합(식별자 = 사건 id)이 중복을 막는다. 사건 목록은 쪽 상한이 있다(2쪽 = 최대 200건). 웹 화면만 본 행위(로그 읽기 ·
+//   재실행 버튼 등)는 사건 목록에 흔적이 없다. 봇 목록에 없는 앱 계정(`…[bot]`)은 사람으로 센다(부풀리는 쪽 · 목록 추가는 사람 결정).
+// ---------------------------------------------------------------------------
+
+// 회차당 최악 12 = ㄱ-4(DEFAULT_MAX_MERGE_CHECKS 1 × sha당 callBudget 8) + D1(DEFAULT_MAX_EXTERNAL_EVIDENCE_CHECKS 4) · 15분 회차
+// 4개 = 시간당 48. 이 값은 «합산 천장»이라 두 상한 상수를 바꾸지 않는다(시험이 세 값의 산술 관계를 못 박는다).
+export const PER_TICK_CALL_CEILING = 12;
+export const GITHUB_HUMAN_MAX_CALLS = 2;
+export const DEFAULT_GITHUB_BOT_ACCOUNTS_PATH =
+  "scripts/supervisor/github-bot-accounts.json";
+const GITHUB_EVENTS_PAGE_SIZE = 100;
+const GITHUB_REASON_MAX_CHARS = 200;
+const GITHUB_BOT_ACCOUNTS_SCHEMA = "github-bot-accounts/v1";
+
+// P3 몫 = min(2, 12 - 이 회차에 이미 쓴 호출 수) -- 음수 없음. 0 이면 호출하지 않고 «미조회(예산)».
+export function githubHumanBudget(usedCalls) {
+  const used = Number.isFinite(usedCalls) ? Math.max(0, usedCalls) : 0;
+  return Math.min(
+    GITHUB_HUMAN_MAX_CALLS,
+    Math.max(0, PER_TICK_CALL_CEILING - used),
+  );
+}
+
+// 주입 fetchJson 을 감싸 «호출 시도 수» 를 센다(던지는 호출도 한 번). ㄱ-4 · D1 · P3 가 같은 감싼 함수를 쓴다.
+function meterFetchJson(fetchJson) {
+  let count = 0;
+  return {
+    fetchJson: (args) => {
+      count += 1;
+      return fetchJson(args);
+    },
+    calls: () => count,
+  };
+}
+
+// 사유는 보고문 «한 줄» 과 관측 건강 «한 줄» 에 들어간다 -- git stderr 같은 개행 · 연속 공백은 접고 길이를 자른다(합성 렌더에서
+// 봇 목록 파일이 없을 때 git 의 «fatal: …» 개행이 보고문 줄을 쪼갠 것을 실측해 넣었다).
+const oneLineReason = (reason) =>
+  String(reason ?? "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, GITHUB_REASON_MAX_CHARS);
+const githubUnchecked = (reason) => ({
+  known: false,
+  unchecked: true,
+  reason: oneLineReason(reason),
+});
+const githubFailed = (reason) => ({
+  known: false,
+  reason: oneLineReason(reason),
+});
+
+// 설정 파일 본문 -> {ok:true, logins: Set(소문자 login)} | {ok:false, reason}. 스키마 불일치 · 빈 목록 · login 모양 위반 = 못 읽음.
+function parseGithubBotAccounts(text) {
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch (err) {
+    return { ok: false, reason: `JSON 깨짐: ${err.message}` };
+  }
+  const bots = parsed?.bots;
+  const wellFormed =
+    parsed?.schema_version === GITHUB_BOT_ACCOUNTS_SCHEMA &&
+    Array.isArray(bots) &&
+    bots.length > 0 &&
+    bots.every((b) => typeof b?.login === "string" && b.login !== "");
+  if (!wellFormed) {
+    return {
+      ok: false,
+      reason: `스키마 불일치(${GITHUB_BOT_ACCOUNTS_SCHEMA} · bots[].login 필요 · 빈 목록 불가)`,
+    };
+  }
+  return {
+    ok: true,
+    logins: new Set(bots.map((b) => b.login.toLowerCase())),
+  };
+}
+
+// 봇 목록 = origin/master 판본의 설정 파일(허용 목록을 읽는 길과 같은 방식 -- 작업 폴더 판본은 읽지 않는다).
+async function readGithubBotLogins({ git, botAccountsPath }) {
+  let blob;
+  try {
+    blob = await git.run([
+      "cat-file",
+      "blob",
+      `origin/master:${botAccountsPath.split(path.sep).join("/")}`,
+    ]);
+  } catch (err) {
+    return { ok: false, reason: err?.message ?? String(err) };
+  }
+  if (!blob || blob.code !== 0) {
+    return { ok: false, reason: blob?.stderr || "git cat-file 실패" };
+  }
+  return parseGithubBotAccounts(String(blob.stdout));
+}
+
+// 쪽 하나가 창의 시작을 덮는가 -- 100건 미만(더 없음)이거나 창 시작보다 오래된 사건이 쪽 안에 있다.
+function githubPageCoversWindow(events, windowStartMs) {
+  if (events.length < GITHUB_EVENTS_PAGE_SIZE) return true;
+  return events.some((e) => Date.parse(e?.created_at ?? "") < windowStartMs);
+}
+
+// 사건 목록 쪽을 몫 안에서 부른다 -> {ok:true, events, pages} | {ok:false, result}. 쪽당 호출 1 · 재시도 0.
+async function fetchGithubEventPages({
+  fetchJson,
+  repoFullName,
+  windowStartMs,
+  budget,
+}) {
+  const base = `https://api.github.com/repos/${repoFullName}/events?per_page=${GITHUB_EVENTS_PAGE_SIZE}`;
+  const events = [];
+  for (let page = 1; page <= GITHUB_HUMAN_MAX_CALLS; page += 1) {
+    const r = await fetchCommitResponse(
+      fetchJson,
+      page === 1 ? base : `${base}&page=${page}`,
+    );
+    if (r.kind === "rateLimited") {
+      return {
+        ok: false,
+        result: githubUnchecked(`rate limit · ${r.detail}`),
+      };
+    }
+    if (r.kind === "failure") {
+      return {
+        ok: false,
+        result: githubFailed(`사건 목록 조회 실패(${page}쪽): ${r.detail}`),
+      };
+    }
+    if (!Array.isArray(r.json)) {
+      return {
+        ok: false,
+        result: githubFailed(`사건 목록 응답 모양 위반(${page}쪽 · 배열 아님)`),
+      };
+    }
+    events.push(...r.json);
+    if (githubPageCoversWindow(r.json, windowStartMs)) {
+      return { ok: true, events, pages: page };
+    }
+    if (page >= budget) {
+      const noBudget = page < GITHUB_HUMAN_MAX_CALLS;
+      return {
+        ok: false,
+        result: githubUnchecked(
+          noBudget ? "예산 · 창 덮지 못함" : "창 덮지 못함",
+        ),
+      };
+    }
+  }
+  return { ok: false, result: githubUnchecked("창 덮지 못함") };
+}
+
+export async function collectGithubHumanActions({
+  fetchJson,
+  git,
+  allowlistPath,
+  botAccountsPath,
+  windowStartMs,
+  windowEndMs,
+  budget,
+}) {
+  if (!(budget >= 1)) return githubUnchecked("예산");
+  const repo = await readExternalEvidenceAllowlist({ git, allowlistPath });
+  if (!repo.ok) return githubFailed(`저장소 신원 · 허용 목록: ${repo.reason}`);
+  const bots = await readGithubBotLogins({ git, botAccountsPath });
+  if (!bots.ok) return githubFailed(`봇 목록 읽기 실패: ${bots.reason}`);
+  const fetched = await fetchGithubEventPages({
+    fetchJson,
+    repoFullName: repo.repoFullName,
+    windowStartMs,
+    budget,
+  });
+  if (!fetched.ok) return fetched.result;
+  return {
+    ...summarizeGithubEvents({
+      events: fetched.events,
+      botLogins: bots.logins,
+      windowStartMs,
+      windowEndMs,
+    }),
+    pages: fetched.pages,
+    budget,
+    botListSize: bots.logins.size,
+  };
+}
+
+// 수집기가 던져도(주입 포트 결함) 보고 전체를 죽이지 않는다 -- 수집 실패(사유)로 표면화한다.
+async function collectGithubHumanActionsSafely(args) {
+  try {
+    return await collectGithubHumanActions(args);
+  } catch (err) {
+    return githubFailed(`수집기 예외: ${err?.message ?? String(err)}`);
   }
 }
 
@@ -2477,6 +2685,7 @@ function buildCollectors({
   externalEvidence,
   gateAux,
   permissionResult,
+  githubHumanActions,
 }) {
   const collectors = [];
   collectors.push({
@@ -2510,7 +2719,29 @@ function buildCollectors({
   if (gateAuxEntry) collectors.push(gateAuxEntry);
   const permissionEntry = buildPermissionCollectorEntry(permissionResult);
   if (permissionEntry) collectors.push(permissionEntry);
+  const githubEntry = buildGithubHumanCollectorEntry(githubHumanActions);
+  if (githubEntry) collectors.push(githubEntry);
   return collectors;
+}
+
+// HYK-255-p3-gh-1 -- «GitHub사람손수집기» 진단 줄(관측 건강). 미조회(예산 · 창 · rate limit)는 D1 후보 미조회와 같은 관례로 OK +
+// 사유(수집은 성공했고 «못 센 칸이 있다» 는 사실은 ㄴ 절 줄 · 하한 표기 · 일별 칸 null 이 알린다) · 수집 실패 = FAIL(사유).
+function buildGithubHumanCollectorEntry(githubHumanActions) {
+  const g = githubHumanActions;
+  if (!g) return null;
+  const name = "GitHub사람손수집기";
+  if (g.known !== true) {
+    return g.unchecked === true
+      ? { name, ok: true, detail: `미조회(${g.reason})` }
+      : { name, ok: false, detail: g.reason };
+  }
+  return {
+    name,
+    ok: true,
+    detail:
+      `사건 ${g.scanned}건 · 쪽 ${g.pages} · 조회 ${g.pages}/${g.budget} · 사람 ${g.humanTotal} · 봇 제외 ${g.botSkipped} · ` +
+      `모르는 종류 버림 ${g.unknownKinds} · 창 밖 ${g.outOfWindow} · 중복 ${g.duplicates} · 판정 불가 ${g.undecidable}`,
+  };
 }
 
 // HYK-255-g-aux-render-1 -- ㄱ 보조 관측 4칸의 «진단 줄»(관측 건강). 보고서 ㄱ 절
@@ -2675,6 +2906,10 @@ function resolveAuxDirOptions(options) {
     inboxDir: options.inboxDir ?? null,
     // HYK-255-p5a-perm-1 -- 세션 기록 홈(기본 = os.homedir()). 시험이 합성 홈을 주입한다. 새 CLI 인자 아님.
     sessionHomeDir: options.sessionHomeDir ?? null,
+    // HYK-255-p3-gh-1 -- 봇 목록 설정 파일 경로(기본 = 저장소 설정 파일 · resolveValueOptions 의 eslint complexity 예산 때문에
+    // 여기에 둔다). 시험 주입용 옵션이며 새 CLI 인자가 아니다.
+    githubBotAccountsPath:
+      options.githubBotAccountsPath ?? DEFAULT_GITHUB_BOT_ACCOUNTS_PATH,
   };
 }
 
@@ -2774,6 +3009,8 @@ function assemblePartialCountReportText({
   watch,
   gate4,
   externalEvidence,
+  // HYK-255-p3-gh-1 -- ㄴ «GitHub 사람 손 조작» 수집 결과(사람 손 수 · 미조회 · 수집 실패).
+  githubHumanActions,
   // 보조 수집기 묶음 {outboxResult, relayResult, gateAux} -- runPartialCountOnce 의
   // eslint max-lines-per-function 예산 때문에 한 덩어리로 받는다(값 · 순서 무변).
   aux,
@@ -2783,6 +3020,7 @@ function assemblePartialCountReportText({
   const { outboxResult, relayResult, gateAux, permissionResult } = aux;
   return buildPartialCountReport({
     permissionAnswers: permissionResult ?? undefined,
+    githubHumanActions,
     confirmedZeroStreakLine,
     generatedAtMs: now,
     windowStartMs,
@@ -2810,6 +3048,7 @@ function assemblePartialCountReportText({
       externalEvidence,
       gateAux,
       permissionResult,
+      githubHumanActions,
     }),
     lastAliveMs: watch.lastAliveMs,
     coverageGaps: watch.coverageGaps,
@@ -2828,6 +3067,7 @@ function buildDailyTick({
   watch,
   gate4,
   externalEvidence,
+  githubHumanActions,
   aux,
   windowStartMs,
 }) {
@@ -2836,6 +3076,7 @@ function buildDailyTick({
     windowStartMs,
     externalEvidence,
     permissionAnswers: permissionResult ?? undefined,
+    githubHumanActions,
     collectors: buildCollectors({
       deliveredResult,
       consumedResult,
@@ -2846,6 +3087,7 @@ function buildDailyTick({
       externalEvidence,
       gateAux,
       permissionResult,
+      githubHumanActions,
     }),
     delivered: deliveredResult.delivered,
     uncountedExamples: selectUncountedExamples({ outboxResult, relayResult }),
@@ -2867,6 +3109,7 @@ async function collectPartialCountInputs({
   fetchJson,
   git,
   allowlistPath,
+  githubBotAccountsPath,
   maxMergeChecks,
   maxExternalEvidenceChecks,
   readFn,
@@ -2898,6 +3141,38 @@ async function collectPartialCountInputs({
     windowStartMs,
     windowEndMs,
   });
+  const rest = await collectRestObservations({
+    fetchJson,
+    git,
+    allowlistPath,
+    githubBotAccountsPath,
+    windowStartMs,
+    windowEndMs,
+    maxMergeChecks,
+    maxExternalEvidenceChecks,
+    watchLogPath,
+    readFn,
+  });
+  return { deliveredResult, consumedResult, watch, ...rest };
+}
+
+// GitHub REST 를 부르는 수집 셋(ㄱ-4 · D1 · P3) -- collectPartialCountInputs 에서 떼어낸 것(eslint max-lines-per-function 예산).
+// HYK-255-p3-gh-1 -- 셋이 같은 «호출 수 세는» fetchJson 을 쓴다. 호출 순서 = ㄱ-4 · D1 먼저 · P3 마지막 -- P3 몫 =
+// min(2, 12 - 앞의 둘이 이 회차에 실제로 쓴 호출 수). ㄱ-4 · D1 의 호출 · 상한 · 값은 원문 그대로다.
+async function collectRestObservations({
+  fetchJson: rawFetchJson,
+  git,
+  allowlistPath,
+  githubBotAccountsPath,
+  windowStartMs,
+  windowEndMs,
+  maxMergeChecks,
+  maxExternalEvidenceChecks,
+  watchLogPath,
+  readFn,
+}) {
+  const meter = meterFetchJson(rawFetchJson);
+  const fetchJson = meter.fetchJson;
   const gate4 = await collectGate4Independent({
     fetchJson,
     git,
@@ -2920,7 +3195,16 @@ async function collectPartialCountInputs({
     readFn,
     nowMs: windowEndMs,
   });
-  return { deliveredResult, consumedResult, watch, gate4, externalEvidence };
+  const githubHumanActions = await collectGithubHumanActionsSafely({
+    fetchJson,
+    git,
+    allowlistPath,
+    botAccountsPath: githubBotAccountsPath,
+    windowStartMs,
+    windowEndMs,
+    budget: githubHumanBudget(meter.calls()),
+  });
+  return { gate4, externalEvidence, githubHumanActions };
 }
 
 // HYK-255-relay-aux-1 -- runPartialCountOnce 본문이 relayResult 한 줄
@@ -2988,6 +3272,7 @@ export async function runPartialCountOnce(options = {}) {
     dispatchReceiptsPath,
     watchLogPath,
     allowlistPath,
+    githubBotAccountsPath,
     extraRepoRoots,
     archiveRoot,
     archiveScanMaxDepth,
@@ -3008,26 +3293,26 @@ export async function runPartialCountOnce(options = {}) {
   const windowEndMs = now;
   const windowStartMs = now - windowHours * 60 * 60 * 1000;
 
-  const { deliveredResult, consumedResult, watch, gate4, externalEvidence } =
-    await collectPartialCountInputs({
-      windowStartMs,
-      windowEndMs,
-      dispatchReceiptsPath,
-      repoRoot,
-      extraRepoRoots,
-      archiveRoot,
-      archiveScanMaxDepth,
-      watchLogPath,
-      fetchJson,
-      git,
-      allowlistPath,
-      maxMergeChecks,
-      maxExternalEvidenceChecks,
-      readFn,
-      readdirFn,
-      existsFn,
-      gitWorktreeListExecFn,
-    });
+  const inputs = await collectPartialCountInputs({
+    windowStartMs,
+    windowEndMs,
+    dispatchReceiptsPath,
+    repoRoot,
+    extraRepoRoots,
+    archiveRoot,
+    archiveScanMaxDepth,
+    watchLogPath,
+    fetchJson,
+    git,
+    allowlistPath,
+    githubBotAccountsPath,
+    maxMergeChecks,
+    maxExternalEvidenceChecks,
+    readFn,
+    readdirFn,
+    existsFn,
+    gitWorktreeListExecFn,
+  });
 
   const aux = resolveAuxCollectorResults({
     outboxDir,
@@ -3043,15 +3328,12 @@ export async function runPartialCountOnce(options = {}) {
     existsFn,
   });
 
+  // inputs = {deliveredResult, consumedResult, watch, gate4, externalEvidence, githubHumanActions}
   return buildPartialCountOnceResult({
     now,
     windowStartMs,
     windowEndMs,
-    deliveredResult,
-    consumedResult,
-    watch,
-    gate4,
-    externalEvidence,
+    ...inputs,
     aux,
     confirmedZeroStreakLine: options.confirmedZeroStreakLine,
   });
@@ -3069,6 +3351,7 @@ function buildPartialCountOnceResult({
   watch,
   gate4,
   externalEvidence,
+  githubHumanActions,
   aux,
   confirmedZeroStreakLine,
 }) {
@@ -3081,6 +3364,7 @@ function buildPartialCountOnceResult({
     watch,
     gate4,
     externalEvidence,
+    githubHumanActions,
     aux,
     confirmedZeroStreakLine,
   });
@@ -3092,11 +3376,13 @@ function buildPartialCountOnceResult({
       watch,
       gate4,
       externalEvidence,
+      githubHumanActions,
       aux,
       windowStartMs,
     }),
     gate4,
     externalEvidence,
+    githubHumanActions,
     suspected: watch.suspected,
     coverageGaps: watch.coverageGaps,
     ...aux,
