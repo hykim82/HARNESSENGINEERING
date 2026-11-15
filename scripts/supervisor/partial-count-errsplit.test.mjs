@@ -199,6 +199,9 @@ async function runReal(h, options = {}) {
 
 const lnLine = (text) =>
   /^- 외부 독립 증거로 확인된 사건: (.*)$/m.exec(text)?.[1];
+// PR #374 맞춤(ORCH · 판정 20261115-1000 ⑤ · 단언 줄만): 이 합성 저장소엔 봇 목록 파일이 없어 P3(GitHub 사람 손 수집기)가
+// «수집 실패» 토막을 분자 끝에 붙인다(P3 의 «모르면 0 아님」 규칙 · 이 시험의 관심 밖). 권한 쪽 토막 단언은 그대로다.
+const GH_FAIL_PIECE = "GitHub 사람 손 수집 실패";
 const permLine = (text) =>
   /^- 권한 확인창 사람 답\(B · 세션 기록\): (.*)$/m.exec(text)?.[1];
 
@@ -630,8 +633,8 @@ test("보고: 오류 참 판정 없음 -> «오류로 끝난 도구 결과 N(판
   const result = await runReal(h);
   assert.equal(
     lnLine(result.reportText),
-    "확인 1건",
-    "하한 토막 없음 = 이상 없음",
+    `확인 1건 이상 · ${GH_FAIL_PIECE}`,
+    "권한 쪽 하한 토막(판정 불가 · 시각 불명) 없음 -- «이상」 은 P3 수집 실패 토막에서만 온다",
   );
   const line = permLine(result.reportText);
   assert.ok(line.includes(ERR_PIECE(2)), `B 줄에 새 칸 문면: ${line}`);
@@ -649,7 +652,10 @@ test("보고: 오류 아닌 판정 없음만 K -- «판정 불가 1» · 일별 
   const h = makeHome();
   sess(h, "s-rep2", [{ source: "config" }, {}]);
   const result = await runReal(h);
-  assert.equal(lnLine(result.reportText), "확인 0건 이상 · 판정 불가 1");
+  assert.equal(
+    lnLine(result.reportText),
+    `확인 0건 이상 · 판정 불가 1 · ${GH_FAIL_PIECE}`,
+  );
   assert.equal(permLine(result.reportText).includes("오류로 끝난"), false);
   assert.equal(result.dailyTick.permissionUndecidable, 1);
   assert.equal(result.dailyTick.permissionErrorEnded, 0);
@@ -664,7 +670,7 @@ test("보고: 시각 불명 사람 답 -> ㄴ 분자 «이상 · 시각 불명 �
   const result = await runReal(h);
   assert.equal(
     lnLine(result.reportText),
-    "확인 0건 이상 · 시각 불명 사람 답 1",
+    `확인 0건 이상 · 시각 불명 사람 답 1 · ${GH_FAIL_PIECE}`,
   );
   assert.ok(permLine(result.reportText).includes("시각 불명 사람 답 1"));
   assert.match(result.reportText, /권한기록수집기 OK\(.*시각 불명 사람 답 1/);
