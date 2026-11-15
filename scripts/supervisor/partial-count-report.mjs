@@ -101,7 +101,13 @@ import {
   UNCOUNTED_EXAMPLES_V3,
   GATE_TYPES,
   ABOLISHED_GATE_TYPES,
-  summarizeGithubEvents,
+  GITHUB_LIST_KEYS,
+  GITHUB_LIST_PAGE_SIZE,
+  githubListLabel,
+  githubListCoversWindow,
+  summarizeGithubList,
+  summarizeChangeRequests,
+  assembleGithubHumanActions,
 } from "./partial-count-core.mjs";
 
 export const DEFAULT_DISPATCH_RECEIPTS_PATH =
@@ -1014,20 +1020,30 @@ async function collectExternalEvidenceSafely(args) {
 }
 
 // ---------------------------------------------------------------------------
-// 수집 3-c (HYK-255-p3-gh-1, 판정 2026-11-14 0939 ④⑤ · P3 행) -- ㄴ «GitHub 사람 손 조작» 수집기.
+// 수집 3-c (HYK-255-p3-gh-2, 판정 2026-11-14 1407 ④⑤ · P3 2R 원천 교체) -- ㄴ «GitHub 사람 손 조작» 수집기.
 //
-// ⓘ 원천 = GitHub 익명 REST 저장소 단위 사건 목록 «하나»: GET /repos/<owner>/<repo>/events?per_page=100. 저장소 이름은 D1 과
-//   같은 길(저장소 신원 + approver-allowlist 의 repo 값 대조 · readExternalEvidenceAllowlist)에서 읽는다 -- 리터럴 0. 1쪽이 그 회차
-//   창(회차 -24h ~ 회차)의 가장 오래된 시각까지 닿지 못하면(100건 꽉 참 · 창보다 오래된 사건이 쪽 안에 없음) 2쪽 1회 · 그래도
-//   못 덮으면 «미조회(창 덮지 못함)». ⛔PR 마다 조회 0 · ⛔재시도 0 · 403/429 = «미조회(rate limit)»(0 아님 · D1 과 같은 모양).
-// ⓘⓘ 사람 판별 = actor.login 이 봇 목록(새 설정 파일 github-bot-accounts.json · origin/master 판본 -- 허용 목록을 읽는 길과 같은
+// ⓘ 원천 = GitHub 익명 REST «실시간 저장소 목록» 3종(저장소 단위 · per_page=100 · PR 마다 조회 0 · 재시도 0 · 쪽 넘김 0):
+//     닫힌 PR   GET /repos/<o>/<r>/pulls?state=closed&sort=updated&direction=desc     -> 미병합 닫기(merged_at null ∧ closed_at 창 안)
+//     대화 댓글 GET /repos/<o>/<r>/issues/comments?since=<창 시작>&sort=created&direction=desc  -> 댓글(PR · 이슈 구분 없이)
+//     리뷰 줄 댓글 GET /repos/<o>/<r>/pulls/comments?since=<창 시작>&sort=created&direction=desc  -> 리뷰 줄 댓글
+//   (1R 의 저장소 사건 목록 /events 는 공개 활동을 수십 시간 늦게 싣는다는 것이 책임자 실측(2026-11-14)으로 드러나 걷어냈다 --
+//    그 지연이 창 안 0건이라는 거짓 0 을 만들었다.) 저장소 이름은 D1 과 같은 길(저장소 신원 + approver-allowlist 의 repo 값 대조 ·
+//    readExternalEvidenceAllowlist)에서 읽는다 -- 리터럴 0. 목록 하나가 창 시작까지 닿지 못하면(100건 꽉 참 + 정렬 끝 항목이 창 안) 그 목록은
+//    «미조회(창 덮지 못함)» -- 2쪽은 부르지 않는다(다음 회차 몫). 403/429 = «미조회(rate limit)»(0 아님) · 그 회차의 남은 호출은 중단.
+//   댓글 둘에 정렬(sort=created&direction=desc)을 붙인 것은 «정렬 끝 항목 = 가장 오래된 항목» 이어야 위 덮음 판정이 성립하기 때문이다(기본
+//   정렬은 오름차순이라 100건 꽉 찬 쪽의 끝 항목이 가장 새 것이 된다) 〔문서 근거 · 실제 응답은 못 쟀다 -- 익명 호출 0〕.
+// ⓘⓘ 사람 판별 = user.login 이 봇 목록(새 설정 파일 github-bot-accounts.json · origin/master 판본 -- 허용 목록을 읽는 길과 같은
 //   방식)에 «없으면» 사람. 못 읽으면(없음 · 깨짐 · 스키마 불일치 · 빈 목록) = 수집 실패(0 아님) + REST 호출 0. 코드에 봇 이름 리터럴 0.
-// ⓘⓘⓘ 예산(시간당 48 무변) = ㄱ-4 · D1 이 «그 회차에 실제로 쓴» 호출 수를 뺀 나머지(12 - 사용)와 2 중 작은 수. 호출 순서 =
-//   기존 둘 먼저 · P3 마지막(collectPartialCountInputs 가 호출 수를 세는 fetchJson 으로 셋을 이어 부른다). 몫 0 이면 호출 0 ·
-//   «미조회(예산)» · 몫 1 인데 2쪽이 필요하면 «미조회(예산 · 창 덮지 못함)».
-// ⚠️정직 한계: 사건 API 는 공개 저장소 활동을 몇 분~몇 시간 늦게 싣는다〔추론 · 못 쟀다〕 -- 늦게 실린 사건은 다음 회차 창에서 잡히고
-//   일별 사건 합집합(식별자 = 사건 id)이 중복을 막는다. 사건 목록은 쪽 상한이 있다(2쪽 = 최대 200건). 웹 화면만 본 행위(로그 읽기 ·
-//   재실행 버튼 등)는 사건 목록에 흔적이 없다. 봇 목록에 없는 앱 계정(`…[bot]`)은 사람으로 센다(부풀리는 쪽 · 목록 추가는 사람 결정).
+//   닫힌 PR 목록에는 «닫은 행위자» 칸이 없다(user.login = 작성자) -> 미병합 닫기는 봇 판별 없이 전부 사람 손으로 센다(애매하면 ㄴ).
+// ⓘⓘⓘ 예산(시간당 48 무변) = ㄱ-4 · D1 이 «그 회차에 실제로 쓴» 호출 수를 뺀 나머지(12 - 사용)와 2 중 작은 수 = 불러도 되는 «목록 수».
+//   세 목록은 «돌아가며»: 순번 = 회차 시각(floor(시각 / 15분) % 3 에서 시작)에서만 정한다 -- 회차 사이 상태 0. 못 부른 목록 = «미조회(순번)»
+//   · «미조회(예산)»(0 아님). 호출 순서 = 기존 둘 먼저 · P3 마지막(collectPartialCountInputs 가 호출 수를 세는 fetchJson 으로 셋을 이어
+//   부른다). 몫 0 이면 호출 0 · «미조회(예산)».
+// ⓘⓘⓘⓘ 변경 요청 = 새 조회 없이 ㄱ-4 가 이미 받은 PR 리뷰 응답(`/pulls/<n>/reviews`)의 `state` 만 읽는다(meterFetchJson 이 그 응답을 «읽기만»
+//   들고 있다) -- 읽은 PR 이 없으면 «미수집»(0 아님).
+// ⚠️정직 한계: 닫은 행위자 칸이 없어 미병합 닫기는 봇이 닫은 것도 센다(부풀리는 쪽) · 대화 댓글은 PR · 이슈 구분 없이 센다 · 변경 요청은 ㄱ-4 가
+//   읽은 PR(회차당 최신 병합 1건) 한정 · 응답 칸 목록은 책임자 실측 표본(병합 뒤 첫 회차가 처음 실물). 웹 화면만 본 행위(로그 읽기 · 재실행 버튼
+//   등)는 목록에 흔적이 없다. 봇 목록에 없는 앱 계정(`…[bot]`)은 사람으로 센다(부풀리는 쪽 · 목록 추가는 사람 결정).
 // ---------------------------------------------------------------------------
 
 // 회차당 최악 12 = ㄱ-4(DEFAULT_MAX_MERGE_CHECKS 1 × sha당 callBudget 8) + D1(DEFAULT_MAX_EXTERNAL_EVIDENCE_CHECKS 4) · 15분 회차
@@ -1036,9 +1052,12 @@ export const PER_TICK_CALL_CEILING = 12;
 export const GITHUB_HUMAN_MAX_CALLS = 2;
 export const DEFAULT_GITHUB_BOT_ACCOUNTS_PATH =
   "scripts/supervisor/github-bot-accounts.json";
-const GITHUB_EVENTS_PAGE_SIZE = 100;
 const GITHUB_REASON_MAX_CHARS = 200;
 const GITHUB_BOT_ACCOUNTS_SCHEMA = "github-bot-accounts/v1";
+// 목록 순번의 한 칸 = 감시 회차 간격(15분) -- 순번은 회차 시각 / 이 값 으로만 정한다.
+const GITHUB_ORDER_STEP_MS = 15 * 60 * 1000;
+// ㄱ-4 가 받는 PR 리뷰 응답의 주소 모양(변경 요청 판독용으로 «읽기만» 한다).
+const PULL_REVIEWS_URL_RE = /\/pulls\/\d+\/reviews(?:\?|$)/;
 
 // P3 몫 = min(2, 12 - 이 회차에 이미 쓴 호출 수) -- 음수 없음. 0 이면 호출하지 않고 «미조회(예산)».
 export function githubHumanBudget(usedCalls) {
@@ -1050,14 +1069,24 @@ export function githubHumanBudget(usedCalls) {
 }
 
 // 주입 fetchJson 을 감싸 «호출 시도 수» 를 센다(던지는 호출도 한 번). ㄱ-4 · D1 · P3 가 같은 감싼 함수를 쓴다.
+// HYK-255-p3-gh-2 -- ㄱ-4 가 이미 받는 PR 리뷰 응답(성공 · 배열)은 변경 요청 판독용으로 «읽기만» 들고 있는다(새 호출 0 · 응답은 그대로 돌려준다).
 function meterFetchJson(fetchJson) {
   let count = 0;
+  const reviewLists = [];
   return {
     fetchJson: (args) => {
       count += 1;
-      return fetchJson(args);
+      const pending = fetchJson(args);
+      if (!PULL_REVIEWS_URL_RE.test(String(args?.url ?? ""))) return pending;
+      return Promise.resolve(pending).then((resp) => {
+        if (resp && resp.ok === true && Array.isArray(resp.json)) {
+          reviewLists.push(resp.json);
+        }
+        return resp;
+      });
     },
     calls: () => count,
+    reviewLists: () => reviewLists,
   };
 }
 
@@ -1122,59 +1151,113 @@ async function readGithubBotLogins({ git, botAccountsPath }) {
   return parseGithubBotAccounts(String(blob.stdout));
 }
 
-// 쪽 하나가 창의 시작을 덮는가 -- 100건 미만(더 없음)이거나 창 시작보다 오래된 사건이 쪽 안에 있다.
-function githubPageCoversWindow(events, windowStartMs) {
-  if (events.length < GITHUB_EVENTS_PAGE_SIZE) return true;
-  return events.some((e) => Date.parse(e?.created_at ?? "") < windowStartMs);
+// 목록 순번 -- 회차 시각에서만 정한다(상태 0): floor(시각 / 15분) % 3 에서 시작해 돌려 앞에서 몫만큼 부른다. 같은 시각 = 같은 순번 ·
+// 세 연속 회차 = 맨 앞이 세 목록 한 번씩.
+export function githubListOrder(nowMs) {
+  const n = GITHUB_LIST_KEYS.length;
+  const step = Number.isFinite(nowMs)
+    ? Math.floor(nowMs / GITHUB_ORDER_STEP_MS)
+    : 0;
+  const start = ((step % n) + n) % n;
+  return GITHUB_LIST_KEYS.map((_, i) => GITHUB_LIST_KEYS[(start + i) % n]);
 }
 
-// 사건 목록 쪽을 몫 안에서 부른다 -> {ok:true, events, pages} | {ok:false, result}. 쪽당 호출 1 · 재시도 0.
-async function fetchGithubEventPages({
+// 목록 하나의 주소 -- 저장소 단위 · per_page=100 · 댓글 둘은 창 시작 since + 최신순.
+function githubListUrl(repoFullName, listKey, windowStartMs) {
+  const base = `https://api.github.com/repos/${repoFullName}`;
+  const page = `per_page=${GITHUB_LIST_PAGE_SIZE}`;
+  if (listKey === "closedPrs") {
+    return `${base}/pulls?state=closed&sort=updated&direction=desc&${page}`;
+  }
+  const since = `since=${new Date(windowStartMs).toISOString()}&sort=created&direction=desc&${page}`;
+  return listKey === "issueComments"
+    ? `${base}/issues/comments?${since}`
+    : `${base}/pulls/comments?${since}`;
+}
+
+// 목록 하나를 부른다 -> {state:"ok", items} | {state:"unchecked", reason, rateLimited?} | {state:"failed", reason}. 호출 1 · 재시도 0.
+async function fetchGithubList({
+  fetchJson,
+  repoFullName,
+  listKey,
+  windowStartMs,
+}) {
+  const label = githubListLabel(listKey);
+  const r = await fetchCommitResponse(
+    fetchJson,
+    githubListUrl(repoFullName, listKey, windowStartMs),
+  );
+  if (r.kind === "rateLimited") {
+    return {
+      state: "unchecked",
+      reason: `rate limit · ${r.detail}`,
+      rateLimited: true,
+    };
+  }
+  if (r.kind === "failure") {
+    return { state: "failed", reason: `${label} 목록 ${r.detail}` };
+  }
+  if (!Array.isArray(r.json)) {
+    return {
+      state: "failed",
+      reason: `${label} 목록 응답 모양 위반(배열 아님)`,
+    };
+  }
+  if (!githubListCoversWindow(listKey, r.json, windowStartMs)) {
+    return { state: "unchecked", reason: "창 덮지 못함" };
+  }
+  return { state: "ok", items: r.json };
+}
+
+// 못 부른 목록의 사유 -- 순번 밖(몫 2 를 넘는 자리) = 순번 · 몫 안인데 예산이 모자람 = 예산.
+const githubSkipReason = (position) =>
+  position < GITHUB_HUMAN_MAX_CALLS ? "예산" : "순번";
+
+// 순번대로 몫 안에서 목록을 부른다 -> {listResults, attempted}. 403/429 가 나오면 그 회차의 남은 호출을 멈춘다.
+async function fetchGithubLists({
   fetchJson,
   repoFullName,
   windowStartMs,
+  windowEndMs,
   budget,
 }) {
-  const base = `https://api.github.com/repos/${repoFullName}/events?per_page=${GITHUB_EVENTS_PAGE_SIZE}`;
-  const events = [];
-  for (let page = 1; page <= GITHUB_HUMAN_MAX_CALLS; page += 1) {
-    const r = await fetchCommitResponse(
-      fetchJson,
-      page === 1 ? base : `${base}&page=${page}`,
-    );
-    if (r.kind === "rateLimited") {
-      return {
-        ok: false,
-        result: githubUnchecked(`rate limit · ${r.detail}`),
+  const listResults = {};
+  const attempted = [];
+  let rateLimited = false;
+  for (const [position, listKey] of githubListOrder(windowEndMs).entries()) {
+    if (position >= budget) {
+      listResults[listKey] = {
+        state: "unchecked",
+        reason: githubSkipReason(position),
       };
-    }
-    if (r.kind === "failure") {
-      return {
-        ok: false,
-        result: githubFailed(`사건 목록 조회 실패(${page}쪽): ${r.detail}`),
+    } else if (rateLimited) {
+      listResults[listKey] = {
+        state: "unchecked",
+        reason: "rate limit 뒤 중단",
       };
-    }
-    if (!Array.isArray(r.json)) {
-      return {
-        ok: false,
-        result: githubFailed(`사건 목록 응답 모양 위반(${page}쪽 · 배열 아님)`),
-      };
-    }
-    events.push(...r.json);
-    if (githubPageCoversWindow(r.json, windowStartMs)) {
-      return { ok: true, events, pages: page };
-    }
-    if (page >= budget) {
-      const noBudget = page < GITHUB_HUMAN_MAX_CALLS;
-      return {
-        ok: false,
-        result: githubUnchecked(
-          noBudget ? "예산 · 창 덮지 못함" : "창 덮지 못함",
-        ),
-      };
+    } else {
+      const r = await fetchGithubList({
+        fetchJson,
+        repoFullName,
+        listKey,
+        windowStartMs,
+      });
+      attempted.push(listKey);
+      rateLimited = r.rateLimited === true;
+      listResults[listKey] = r;
     }
   }
-  return { ok: false, result: githubUnchecked("창 덮지 못함") };
+  return { listResults, attempted };
+}
+
+// 한 목록도 못 셌을 때 -- 불러 본 목록 중 수집 실패가 있으면 수집 실패 · 아니면 미조회(0 아님). 사유 = 불러 본 목록의 사유 합.
+function githubNoListResult(listResults, attempted) {
+  const reasons = [
+    ...new Set(attempted.map((key) => listResults[key].reason)),
+  ].join(" · ");
+  return attempted.some((key) => listResults[key].state === "failed")
+    ? githubFailed(reasons)
+    : githubUnchecked(reasons || "예산");
 }
 
 export async function collectGithubHumanActions({
@@ -1185,27 +1268,56 @@ export async function collectGithubHumanActions({
   windowStartMs,
   windowEndMs,
   budget,
+  // ㄱ-4 가 이미 받은 PR 리뷰 응답 배열들(추가 조회 0). 없으면 변경 요청 = 미수집.
+  reviewLists = [],
 }) {
   if (!(budget >= 1)) return githubUnchecked("예산");
   const repo = await readExternalEvidenceAllowlist({ git, allowlistPath });
   if (!repo.ok) return githubFailed(`저장소 신원 · 허용 목록: ${repo.reason}`);
   const bots = await readGithubBotLogins({ git, botAccountsPath });
   if (!bots.ok) return githubFailed(`봇 목록 읽기 실패: ${bots.reason}`);
-  const fetched = await fetchGithubEventPages({
+  const fetched = await fetchGithubLists({
     fetchJson,
     repoFullName: repo.repoFullName,
     windowStartMs,
+    windowEndMs,
     budget,
   });
-  if (!fetched.ok) return fetched.result;
+  const { listResults, attempted } = fetched;
+  const checked = GITHUB_LIST_KEYS.filter(
+    (key) => listResults[key].state === "ok",
+  );
+  if (checked.length === 0) return githubNoListResult(listResults, attempted);
+  const counted = {};
+  for (const key of GITHUB_LIST_KEYS) {
+    const r = listResults[key];
+    counted[key] =
+      r.state === "ok"
+        ? {
+            state: "ok",
+            summary: summarizeGithubList({
+              listKey: key,
+              items: r.items,
+              botLogins: bots.logins,
+              windowStartMs,
+              windowEndMs,
+            }),
+          }
+        : r;
+  }
   return {
-    ...summarizeGithubEvents({
-      events: fetched.events,
-      botLogins: bots.logins,
+    ...assembleGithubHumanActions({
+      listResults: counted,
+      changeRequests: summarizeChangeRequests({
+        reviewLists,
+        botLogins: bots.logins,
+        windowStartMs,
+        windowEndMs,
+      }),
       windowStartMs,
       windowEndMs,
     }),
-    pages: fetched.pages,
+    calls: attempted.length,
     budget,
     botListSize: bots.logins.size,
   };
@@ -2448,10 +2560,12 @@ function sessionKeyOf(o, filePath) {
 // 줄 1개(파싱된 객체) -> 레코드들. «쓰는 칸만» 옮긴다 -- 나머지 칸(본문 포함)은 여기서 버려진다.
 function recordsFromLine(o, { rootName, filePath }) {
   const hasDecision = Object.hasOwn(o, "permissionDecision");
-  const toolUseIds = contentItemsOfType(o, "tool_result").map((item) =>
-    strOrNull(item.tool_use_id),
-  );
-  if (!hasDecision && toolUseIds.length === 0) return [];
+  // HYK-255-p5a-errsplit-1 -- 항목마다 `is_error` «칸» 이 불리언 true 인지만 옮긴다(본문 `content` 는 열지 않는다).
+  const results = contentItemsOfType(o, "tool_result").map((item) => ({
+    toolUseId: strOrNull(item.tool_use_id),
+    isError: item.is_error === true,
+  }));
+  if (!hasDecision && results.length === 0) return [];
   const pd = o.permissionDecision;
   const base = {
     sessionKey: sessionKeyOf(o, filePath),
@@ -2467,8 +2581,13 @@ function recordsFromLine(o, { rootName, filePath }) {
       : null,
     toolName: null,
   };
-  const ids = toolUseIds.length > 0 ? toolUseIds : [null];
-  return ids.map((toolUseId) => ({ ...base, toolUseId }));
+  const items =
+    results.length > 0 ? results : [{ toolUseId: null, isError: false }];
+  return items.map(({ toolUseId, isError }) => ({
+    ...base,
+    toolUseId,
+    isError,
+  }));
 }
 
 // 도구 이름을 찾을 «사람 답 후보»(판정 칸이 있고 자동이 아닌 것)의 tool_use_id 들.
@@ -2735,12 +2854,16 @@ function buildGithubHumanCollectorEntry(githubHumanActions) {
       ? { name, ok: true, detail: `미조회(${g.reason})` }
       : { name, ok: false, detail: g.reason };
   }
+  const okLists = GITHUB_LIST_KEYS.filter(
+    (key) => g.lists?.[key]?.state === "ok",
+  ).length;
   return {
     name,
     ok: true,
     detail:
-      `사건 ${g.scanned}건 · 쪽 ${g.pages} · 조회 ${g.pages}/${g.budget} · 사람 ${g.humanTotal} · 봇 제외 ${g.botSkipped} · ` +
-      `모르는 종류 버림 ${g.unknownKinds} · 창 밖 ${g.outOfWindow} · 중복 ${g.duplicates} · 판정 불가 ${g.undecidable}`,
+      `목록 ${okLists}/${GITHUB_LIST_KEYS.length} 조회 · 호출 ${g.calls}/${g.budget} · 항목 ${g.scanned}건 · 사람 ${g.humanTotal} · ` +
+      `봇 제외 ${g.botSkipped} · 창 밖 ${g.outOfWindow} · 중복 ${g.duplicates} · 판정 불가 ${g.undecidable} · ` +
+      `변경 요청 PR ${g.changeRequestPrs}건`,
   };
 }
 
@@ -3203,6 +3326,7 @@ async function collectRestObservations({
     windowStartMs,
     windowEndMs,
     budget: githubHumanBudget(meter.calls()),
+    reviewLists: meter.reviewLists(),
   });
   return { gate4, externalEvidence, githubHumanActions };
 }
