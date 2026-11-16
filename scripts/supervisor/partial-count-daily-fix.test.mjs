@@ -498,6 +498,10 @@ function line(day, extra = {}) {
     coverageGaps: { count: 0, totalMs: 0 },
     concurrentTracksMax: 1,
     delivered: 3,
+    // HYK-255-p2c-nofield-1 -- 칸 없는 줄 = 끊김(판정 1404): 이 시험의 관심은 «미계수 칸 이름» 이라 권한 두 칸 + GitHub 칸은 «있고 0» 으로 둔다.
+    permissionHumanAnswers: 0,
+    permissionUndecidable: 0,
+    githubHumanActions: 0,
     ...extra,
   };
 }
