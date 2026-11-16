@@ -48,6 +48,10 @@ const dayLine = (offset, over = {}) => ({
   coverageGaps: { count: 0, totalMs: 0 },
   concurrentTracksMax: 2,
   uncountedExampleIds: [],
+  // HYK-255-p2c-nofield-1 -- 칸 없는 줄 = 끊김(판정 1404): «깨끗한 날» 은 권한 두 칸 + GitHub 칸이 있고 값 0 이다.
+  permissionHumanAnswers: 0,
+  permissionUndecidable: 0,
+  githubHumanActions: 0,
   ...over,
 });
 // from..to(포함) 날마다 줄 1개 -- over(offset) 이 줄 칸을 덮는다. 빠진 날 = 줄 없음.

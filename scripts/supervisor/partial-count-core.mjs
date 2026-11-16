@@ -2197,8 +2197,10 @@ function normalizePermissionColumns(source) {
   return out;
 }
 
-// 연속 확인-0 끊김 사유(읽는 쪽) -- 새 칸이 «있는» 줄만 본다. 칸 없는 줄 = 이 수집기 이전(또는 미결선)에 마감된 날 =
-// 옛 규칙 그대로(P1 줄 해석 무변). 칸이 있는데 값을 모르면(null · 모양 오류) 0 이 아니라 사유다.
+// 연속 확인-0 끊김 사유(읽는 쪽) -- HYK-255-p2c-nofield-1(판정 2026-11-16 1404 ②): 권한 칸이 «아예 없는» 줄 = 그날을 «모른다» = 끊김
+// (칸마다 사유 1개 `… 칸 없음`). 모르는 날을 센 날로 넘기지 않는다(옛 규칙 «칸 없는 줄 = 끊김 아님» 은 뒤집혔다).
+// 칸이 있는데 값을 모르면(null · 모양 오류) `… UNKNOWN` · 값 > 0 이면 `… N` -- 칸 없음과 값 모름은 다른 사실이라 낱말을 합치지 않는다.
+// 감사 칸(PERMISSION_AUDIT_KEYS)은 여기서 보지 않는다.
 function permissionBreakReasons(line) {
   const reasons = [];
   const labels = {
@@ -2206,7 +2208,10 @@ function permissionBreakReasons(line) {
     permissionUndecidable: "권한 판정 불가",
   };
   for (const key of PERMISSION_DAILY_KEYS) {
-    if (!Object.hasOwn(line, key)) continue;
+    if (!Object.hasOwn(line, key)) {
+      reasons.push(`${labels[key]} 칸 없음`);
+      continue;
+    }
     if (!isCount(line[key])) reasons.push(`${labels[key]} UNKNOWN`);
     else if (line[key] > 0) reasons.push(`${labels[key]} ${line[key]}`);
   }
@@ -2786,11 +2791,12 @@ function githubCarryOf(state, today) {
   };
 }
 
-// 연속 확인-0 끊김 사유(읽는 쪽) -- 새 칸이 «있는» 줄만 본다. 칸 없는 줄 = P3 이전에 마감된 날 = 옛 규칙 그대로. 칸이 있는데
-// 값을 모르면(null · 모양 오류) 0 이 아니라 사유다(빈틈 사유가 있으면 병기).
+// 연속 확인-0 끊김 사유(읽는 쪽) -- HYK-255-p2c-nofield-1(판정 2026-11-16 1404 ②): GitHub 칸이 «아예 없는» 줄 = 그날을 «모른다» = 끊김
+// (사유 1개 `… 칸 없음` · 옛 규칙 «칸 없는 줄 = 끊김 아님» 은 뒤집혔다). 칸이 있는데 값을 모르면(null · 모양 오류) 0 이 아니라
+// `… UNKNOWN` 사유(빈틈 사유가 있으면 병기) -- 칸 없음과 값 모름은 다른 사실이라 낱말을 합치지 않는다.
 function githubBreakReasons(line) {
-  if (!Object.hasOwn(line, GITHUB_DAILY_KEY)) return [];
   const label = "GitHub 사람 손 조작";
+  if (!Object.hasOwn(line, GITHUB_DAILY_KEY)) return [`${label} 칸 없음`];
   if (!isCount(line[GITHUB_DAILY_KEY])) {
     const gap =
       typeof line[GITHUB_GAP_KEY] === "string"

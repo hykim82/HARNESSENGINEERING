@@ -104,6 +104,10 @@ function dailyLine(day, overrides = {}) {
     concurrentTracksMax: 1,
     delivered: 3,
     uncountedRanges: LEGACY_UNCOUNTED_V3,
+    // HYK-255-p2c-nofield-1 -- 칸 없는 줄 = 끊김(판정 1404): 이 helper 의 «깨끗한 날» 은 권한 두 칸 + GitHub 칸이 있고 값 0 이다.
+    permissionHumanAnswers: 0,
+    permissionUndecidable: 0,
+    githubHumanActions: 0,
     ...overrides,
   };
 }
