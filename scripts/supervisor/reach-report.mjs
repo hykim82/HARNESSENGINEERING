@@ -47,6 +47,7 @@ import {
 import {
   formatPartialCountSection,
   parseExternalEvidenceCandidateLine,
+  parseQualificationLine,
 } from "./partial-count-core.mjs";
 
 export const DEFAULT_WATCH_LOG_PATH =
@@ -135,21 +136,91 @@ function decideExternalEvidenceChange({ previousState, fileText, now }) {
   };
 }
 
-// 받는함 통지 1장 -- 새 이상 전이(toNotify)와 외부 독립 증거 후보 N 변화
-// (externalChange)는 «같은 tick 에 겹쳐도 파일 1장»에 함께 싣는다. 둘 다
-// 없으면 파일도 폴더도 만들지 않고 null.
+// HYK-255-p2b-qual-1 (판정 2026-11-15 1804 ③) -- 보고서 «1-C 판정 자격» 줄이 «없음 -> 부분 있음» 으로 바뀐 «첫 회차» 에만 받는함 통지 1장(위와 같은 길 · 같은
+// notifyDir · 같은 파일 이름 규칙 · 같은 상태 파일). 상태 키 하나가 직전 상태({state: "none"|"partial"})를 기억한다. 같은 상태가 이어지면 0장 · «부분 있음 -> 없음» 은
+// 0장(아침 보고 줄이 알린다). 줄을 못 읽은 회차(줄 없음 · 보고서 없음 · 종류 설정 진단 줄이 있는 회차)는 상태 변화가 아니다 -- 통지 0장 · 직전 상태 기억 유지.
+// 처음 관측이 «부분 있음» 이면 이전 = 없음(P2b 이전 보고서는 항상 «없음») 으로 보고 통지한다(과소통지보다 과대통지 -- 위 원칙과 같다).
+export const QUALIFICATION_STATE_KEY = "__partialQualification";
+
+function decideQualificationChange({ previousState, fileText }) {
+  const prevEntry = previousState[QUALIFICATION_STATE_KEY];
+  const previous =
+    prevEntry?.state === "none" || prevEntry?.state === "partial"
+      ? prevEntry.state
+      : null;
+  const parsed = parseQualificationLine(fileText);
+  if (parsed.state !== "none" && parsed.state !== "partial") {
+    return { nextEntry: previous === null ? null : prevEntry, change: null };
+  }
+  return {
+    nextEntry: { state: parsed.state },
+    change:
+      parsed.state === "partial" && previous !== "partial"
+        ? { previous, line: parsed.line }
+        : null,
+  };
+}
+
+// 부분 계수 보고서 «텍스트» 에서 읽는 두 변화(외부 독립 증거 N 증가 · 1-C 판정 자격 전이)를 판정하고 상태 키를 nextState 에 기록한다 -> {externalChange, qualificationChange}.
+function decidePartialCountChanges({
+  previousState,
+  nextState,
+  fileText,
+  now,
+}) {
+  const external = decideExternalEvidenceChange({
+    previousState,
+    fileText,
+    now,
+  });
+  if (external.nextEntry) {
+    nextState[EXTERNAL_EVIDENCE_STATE_KEY] = external.nextEntry;
+  }
+  const qualification = decideQualificationChange({ previousState, fileText });
+  if (qualification.nextEntry) {
+    nextState[QUALIFICATION_STATE_KEY] = qualification.nextEntry;
+  }
+  return {
+    externalChange: external.change,
+    qualificationChange: qualification.change,
+  };
+}
+
+function qualificationChangeSectionLines(change) {
+  const before =
+    change.previous === null ? "이전 기록 없음(없음으로 봄)" : "없음";
+  return [
+    "부분 계수 보고서 «1-C 판정 자격» 줄이 «없음 -> 부분 있음» 으로 처음 바뀌었습니다(같은 상태가 계속되면 다시 오지 않고 «부분 있음 -> 없음» 은 통지하지 않습니다 -- 아침 보고 줄이 알립니다):",
+    "",
+    `- ${change.line}`,
+    `- 이전 상태: ${before}`,
+    "- 이 줄은 «ㄴ=0» 판정이 아닙니다 · 1단계 «완료» 선언도 아닙니다(선언 = P6 · 한용). 못 세는 종류의 목록 · 처리는 설정 파일(partial-count-uncountable-kinds.json)이 정하고 «알려진» 종류 수 K 는 하한입니다.",
+    "",
+  ];
+}
+
+// 받는함 통지 1장 -- 새 이상 전이(toNotify) · 외부 독립 증거 후보 N 변화(externalChange) · «1-C 판정 자격» 전이(qualificationChange)는
+// «같은 tick 에 겹쳐도 파일 1장»에 함께 싣는다. 모두 없으면 파일도 폴더도 만들지 않고 null.
 function writeNoticeFile({
   toNotify,
   externalChange,
+  qualificationChange,
   notifyDir,
   now,
   existsFn,
   mkdirFn,
   writeFn,
 }) {
-  if (toNotify.length === 0 && !externalChange) return null;
+  if (toNotify.length === 0 && !externalChange && !qualificationChange) {
+    return null;
+  }
   if (!existsFn(notifyDir)) mkdirFn(notifyDir, { recursive: true });
-  const noticeText = composeNoticeText({ toNotify, externalChange, now });
+  const noticeText = composeNoticeText({
+    toNotify,
+    externalChange,
+    qualificationChange,
+    now,
+  });
   const noticePath = path.join(notifyDir, buildNoticeFileName(now));
   writeFn(noticePath, noticeText, "utf8");
   return noticePath;
@@ -176,9 +247,14 @@ function externalEvidenceChangeSectionLines(change) {
 const ANOMALY_NOTICE_HEADER_PHRASE = "이상 전이 통지";
 const PARTIAL_COUNT_NOTICE_HEADER_PHRASE = "부분 계수 변화 통지";
 
-function composeNoticeText({ toNotify, externalChange, now }) {
+function composeNoticeText({
+  toNotify,
+  externalChange,
+  qualificationChange,
+  now,
+}) {
   const base = buildNoticeText({ toNotify, nowMs: now });
-  if (!externalChange) return base;
+  if (!externalChange && !qualificationChange) return base;
   const lines = base.split("\n");
   let closingIdx = lines.length - 1;
   while (closingIdx > 0 && lines[closingIdx].trim() === "") closingIdx -= 1;
@@ -191,7 +267,12 @@ function composeNoticeText({ toNotify, externalChange, now }) {
   lines.splice(
     closingIdx,
     0,
-    ...externalEvidenceChangeSectionLines(externalChange),
+    ...(externalChange
+      ? externalEvidenceChangeSectionLines(externalChange)
+      : []),
+    ...(qualificationChange
+      ? qualificationChangeSectionLines(qualificationChange)
+      : []),
   );
   return lines.join("\n");
 }
@@ -263,18 +344,16 @@ export function runReachOnce({
     openAnomalies: [...openAnomalies, ...openMeasurementFailures],
   });
 
-  const external = decideExternalEvidenceChange({
+  const partialChanges = decidePartialCountChanges({
     previousState,
+    nextState,
     fileText: partialCountText,
     now,
   });
-  if (external.nextEntry) {
-    nextState[EXTERNAL_EVIDENCE_STATE_KEY] = external.nextEntry;
-  }
 
   const noticePath = writeNoticeFile({
     toNotify,
-    externalChange: external.change,
+    ...partialChanges,
     notifyDir,
     now,
     existsFn,

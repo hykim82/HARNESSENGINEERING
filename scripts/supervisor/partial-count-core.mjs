@@ -706,6 +706,10 @@ export function buildPartialCountReport({
   // HYK-255-p2a-scope-1 -- 기본값 undefined -> 새 줄 0개(미결선 호출자 회귀 0). 값 = renderMachineScopeLine 결과(설정 파일 값 기준 ·
   // 보고 진입점이 렌더) -- «연속 확인-0 일수» 줄 바로 아래에 싣는다. 문턱 판정 · 통지 · 장 수 0(줄 1개 추가뿐).
   machineScopeLine,
+  // HYK-255-p2b-qual-1 -- 기본값 undefined -> «1-C 판정 자격» 줄 = 지금 상수 줄 그대로(바이트 무변). 값 = renderQualificationLine 결과(부분 있음일 때만 문자열) ·
+  // qualificationDiagLine = 종류 설정 읽기 실패 사유 한 줄(없으면 undefined = 새 줄 0개).
+  qualificationLine,
+  qualificationDiagLine,
   // HYK-255-p5a-perm-1 -- 기본값 undefined -> ㄴ 절 새 줄 0개 · 분자 합산 0(미결선 호출자 회귀 0). 값 =
   // summarizePermissionRecords 결과 + 수집 부가 칸(wire 의 collectPermissionAnswers) 또는 {known:false, reason}.
   permissionAnswers,
@@ -719,16 +723,18 @@ export function buildPartialCountReport({
   lines.push(
     `측정 기간: ${formatKst(windowStartMs)} ~ ${formatKst(windowEndMs)}`,
   );
-  lines.push("1-C 판정 자격: 없음 — 미계수 범위가 남아 있어 «ㄴ=0» 판정 불가");
-  if (
-    typeof confirmedZeroStreakLine === "string" &&
-    confirmedZeroStreakLine !== ""
-  ) {
-    lines.push(confirmedZeroStreakLine);
-  }
-  if (typeof machineScopeLine === "string" && machineScopeLine !== "") {
-    lines.push(machineScopeLine);
-  }
+  // 첫 줄 = «1-C 판정 자격»(부분 있음 줄 · 없으면 상수 줄) · 이어서 연속 확인-0 · 기계 계수 범위 기준 · 종류 설정 진단(각각 없으면 줄 0개).
+  const isLine = (v) => typeof v === "string" && v !== "";
+  lines.push(
+    isLine(qualificationLine)
+      ? qualificationLine
+      : ONE_C_QUALIFICATION_NONE_LINE,
+    ...[
+      confirmedZeroStreakLine,
+      machineScopeLine,
+      qualificationDiagLine,
+    ].filter(isLine),
+  );
   lines.push("");
   lines.push(
     `라운드 분모: 배달 ${renderCount(delivered)} / 소비 ${renderCount(consumed)} / 영수증 결손 ${renderCount(missingReceipts)}`,
@@ -1525,6 +1531,76 @@ export function renderMachineScopeLine(scope) {
     `센 날 ${range} · 마지막 끊김 ${brk.day} ${brk.reasons.join(", ")} — ` +
     "기계로 센 범위의 기준일 뿐 · 기계로 못 세는 개입 미포함"
   );
+}
+
+// ---------------------------------------------------------------------------
+// HYK-255-p2b-qual-1 (판정 2026-11-15 1804 ③ · 2026-11-16 1004) -- «1-C 판정 자격» 줄 계산(순수 함수 · I/O 0). 자격 «부분 있음» ⇔ P2a 기계 계수 범위 기준 «충족» ∧
+// 종류 설정(partial-count-uncountable-kinds.json)을 읽어 종류가 1개 이상 있고 모든 종류의 처리 값이 아는 값. 아니면 «없음» = 지금 상수 줄 바이트 그대로.
+// 종류 이름 · 수 · 처리는 코드에 없다 -- 설정에서 읽은 배열이 인자로 넘어온다(처리 값 세 낱말만 코드가 안다). 잠정 ⓒ(Q-4 한용 답 대기): 처리 방식은 분기가 아니라 값이라
+// 뒤집히면 설정과 문면만 바뀐다. ⚠️ 이 줄은 «ㄴ=0» 판정도 1단계 «완료» 선언도 아니다(선언 = P6 · 한용) -- 값 범위 표기이고 «알려진» = 열린 집합(K 는 하한).
+// ---------------------------------------------------------------------------
+
+export const ONE_C_QUALIFICATION_NONE_LINE =
+  "1-C 판정 자격: 없음 — 미계수 범위가 남아 있어 «ㄴ=0» 판정 불가";
+const ONE_C_QUALIFICATION_PREFIX = "1-C 판정 자격: ";
+export const QUALIFICATION_DIAG_PREFIX = "종류 설정 진단: ";
+
+export const UNCOUNTABLE_HANDLING = Object.freeze({
+  PREVENTION_PROOF: "prevention-proof",
+  PARTIAL_SCOPE: "partial-scope",
+  EXCLUDED_PROVISIONAL: "excluded-by-definition-provisional",
+});
+const UNCOUNTABLE_HANDLING_VALUES = new Set(
+  Object.values(UNCOUNTABLE_HANDLING),
+);
+export const isUncountableHandling = (v) => UNCOUNTABLE_HANDLING_VALUES.has(v);
+
+// {machineScope: computeMachineScope 결과, kinds: 설정 종류 배열 | null} -> {state:"none"} | {state:"partial", …값}.
+export function computeQualification({ machineScope, kinds }) {
+  const none = { state: "none" };
+  if (machineScope?.known !== true || machineScope.met !== true) return none;
+  if (!Array.isArray(kinds) || kinds.length === 0) return none;
+  const count = (h) => kinds.filter((k) => k?.handling === h).length;
+  const preventionProof = count(UNCOUNTABLE_HANDLING.PREVENTION_PROOF);
+  const partialScope = count(UNCOUNTABLE_HANDLING.PARTIAL_SCOPE);
+  const excluded = count(UNCOUNTABLE_HANDLING.EXCLUDED_PROVISIONAL);
+  // 모르는 처리 값이 섞인 목록은 부분 있음으로 세지 않는다(a + b + c = K 를 지킬 수 없다).
+  if (preventionProof + partialScope + excluded !== kinds.length) return none;
+  return {
+    state: "partial",
+    days: machineScope.days,
+    observationDays: machineScope.observationDays,
+    minConcurrentTracks: machineScope.minConcurrentTracks,
+    total: kinds.length,
+    preventionProof,
+    partialScope,
+    excluded,
+  };
+}
+
+// «없음» = 상수 줄(바이트 무변) · «부분 있음» = 값 범위 표기(긍정 문면 0 · «알려진» 낱말 필수).
+export function renderQualificationLine(qualification) {
+  if (qualification?.state !== "partial") return ONE_C_QUALIFICATION_NONE_LINE;
+  const q = qualification;
+  return (
+    `${ONE_C_QUALIFICATION_PREFIX}부분 있음 — 기계 계수 범위 기준 충족(연속 ${q.days}일 / 기준 ${q.observationDays}일 · 동시 배달 최대 ≥ ${q.minConcurrentTracks}) · ` +
+    `알려진 못 세는 종류 ${q.total} = 예방 증명 ${q.preventionProof} / 부분 범위 ${q.partialScope} / 정의상 제외(잠정) ${q.excluded} · «ㄴ=0» 판정 아님`
+  );
+}
+
+const QUALIFICATION_LINE_RE = /^1-C 판정 자격: (부분 있음|없음)(?: — .*)?$/m;
+const QUALIFICATION_DIAG_RE = /^종류 설정 진단: /m;
+
+// 보고서 «텍스트» 에서 자격 줄을 다시 읽는다(reach-report 가 수집기를 다시 돌리지 않고 이미 쓰인 보고서를 읽는다) -- 렌더와 파서의 정본이 이 파일 한 곳.
+// {state: "partial", line} | {state: "none"} | {state: "unreadable"}(종류 설정 진단 줄이 있는 회차 = 상태 변화 아님) | {state: "absent"}(줄 없음).
+export function parseQualificationLine(reportText) {
+  const text = typeof reportText === "string" ? reportText : "";
+  const m = text.match(QUALIFICATION_LINE_RE);
+  if (!m) return { state: "absent" };
+  if (QUALIFICATION_DIAG_RE.test(text)) return { state: "unreadable" };
+  return m[1] === "부분 있음"
+    ? { state: "partial", line: m[0] }
+    : { state: "none" };
 }
 
 // ---------------------------------------------------------------------------
