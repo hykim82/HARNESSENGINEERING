@@ -1,0 +1,5 @@
+{
+  "schema_version": "partial-count-machine-scope/v1",
+  "observationDays": 7,
+  "minConcurrentTracks": 2
+}

@@ -108,6 +108,8 @@ import {
   summarizeGithubList,
   summarizeChangeRequests,
   assembleGithubHumanActions,
+  computeMachineScope,
+  renderMachineScopeLine,
 } from "./partial-count-core.mjs";
 
 export const DEFAULT_DISPATCH_RECEIPTS_PATH =
@@ -1149,6 +1151,92 @@ async function readGithubBotLogins({ git, botAccountsPath }) {
     return { ok: false, reason: blob?.stderr || "git cat-file 실패" };
   }
   return parseGithubBotAccounts(String(blob.stdout));
+}
+
+// ---------------------------------------------------------------------------
+// HYK-255-p2a-scope-1 -- 기계 계수 범위 기준 설정(관측 일수 · 동시 배달 문턱). 값 7 · 2 는 코드에 없다 -- 새 설정 파일
+// partial-count-machine-scope.json 에서만 온다. 읽는 길 = 봇 목록(readGithubBotLogins)과 같은 방식: origin/master 판본(작업 폴더 판본은
+// 읽지 않는다). 못 읽거나(없음 · 깨짐 · 스키마 불일치) 값이 양의 정수가 아니면 «UNKNOWN(설정 읽기 실패)» -- 충족도 미충족도 아니고 기본값으로
+// 대체하지도 않는다. 일별 줄은 watch-run 일별 단계가 읽어 옵션으로 넘긴다(machineScopeDailyLines · 없음 = 미결선 = 줄 0개 · null = 못 읽음).
+// ---------------------------------------------------------------------------
+
+export const DEFAULT_MACHINE_SCOPE_PATH =
+  "scripts/supervisor/partial-count-machine-scope.json";
+const MACHINE_SCOPE_SCHEMA = "partial-count-machine-scope/v1";
+
+const isPositiveInteger = (v) => Number.isInteger(v) && v > 0;
+
+// 설정 파일 본문 -> {ok:true, observationDays, minConcurrentTracks} | {ok:false, reason}.
+function parseMachineScopeConfig(text) {
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch (err) {
+    return { ok: false, reason: `JSON 깨짐: ${err.message}` };
+  }
+  const wellFormed =
+    parsed?.schema_version === MACHINE_SCOPE_SCHEMA &&
+    isPositiveInteger(parsed.observationDays) &&
+    isPositiveInteger(parsed.minConcurrentTracks);
+  if (!wellFormed) {
+    return {
+      ok: false,
+      reason: `스키마 불일치(${MACHINE_SCOPE_SCHEMA} · observationDays · minConcurrentTracks 는 양의 정수)`,
+    };
+  }
+  return {
+    ok: true,
+    observationDays: parsed.observationDays,
+    minConcurrentTracks: parsed.minConcurrentTracks,
+  };
+}
+
+async function readMachineScopeConfig({ git, machineScopePath }) {
+  let blob;
+  try {
+    blob = await git.run([
+      "cat-file",
+      "blob",
+      `origin/master:${machineScopePath.split(path.sep).join("/")}`,
+    ]);
+  } catch (err) {
+    return { ok: false, reason: err?.message ?? String(err) };
+  }
+  if (!blob || blob.code !== 0) {
+    return { ok: false, reason: blob?.stderr || "git cat-file 실패" };
+  }
+  return parseMachineScopeConfig(String(blob.stdout));
+}
+
+// 보고 한 줄 -- 일별 줄 입력이 없으면(undefined = 미결선 호출자) 줄 0개. 값을 모르면 UNKNOWN(사유).
+async function resolveMachineScopeLine({
+  dailyLines,
+  git,
+  machineScopePath,
+  nowMs,
+}) {
+  if (dailyLines === undefined) return undefined;
+  const config = await readMachineScopeConfig({ git, machineScopePath });
+  if (!config.ok) {
+    return renderMachineScopeLine({
+      known: false,
+      reason: `설정 읽기 실패: ${oneLineReason(config.reason)}`,
+    });
+  }
+  if (!Array.isArray(dailyLines)) {
+    return renderMachineScopeLine({
+      known: false,
+      reason: "일별 파일 읽기 실패",
+    });
+  }
+  return renderMachineScopeLine(
+    computeMachineScope({
+      lines: dailyLines,
+      nowMs,
+      observationDays: config.observationDays,
+      minConcurrentTracks: config.minConcurrentTracks,
+    }),
+  );
 }
 
 // 목록 순번 -- 회차 시각에서만 정한다(상태 0): floor(시각 / 15분) % 3 에서 시작해 돌려 앞에서 몫만큼 부른다. 같은 시각 = 같은 순번 ·
@@ -2862,9 +2950,19 @@ function buildGithubHumanCollectorEntry(githubHumanActions) {
     ok: true,
     detail:
       `목록 ${okLists}/${GITHUB_LIST_KEYS.length} 조회 · 호출 ${g.calls}/${g.budget} · 항목 ${g.scanned}건 · 사람 ${g.humanTotal} · ` +
-      `봇 제외 ${g.botSkipped} · 창 밖 ${g.outOfWindow} · 중복 ${g.duplicates} · 판정 불가 ${g.undecidable} · ` +
-      `변경 요청 PR ${g.changeRequestPrs}건`,
+      `봇 제외 ${g.botSkipped} · 병합 PR 제외 ${githubMergedClosedTotal(g)} · 창 밖 ${g.outOfWindow} · 중복 ${g.duplicates} · ` +
+      `판정 불가 ${g.undecidable} · 변경 요청 PR ${g.changeRequestPrs}건`,
   };
+}
+
+// 진단 «병합 PR 제외 N» = 조회에 성공한 목록들의 목록별 mergedClosed 합(병합된 닫힌 PR 은 창 판정보다 먼저 빠진다 -- judgeClosedPr 가
+// 센 값 · 창 안팎 무관한 수라 «창 밖» 과 다른 칸이다). core 반환 칸(sums)을 늘리지 않고 목록별 값에서 «그리는 쪽» 이 합한다. 못 부른 목록 = 0.
+function githubMergedClosedTotal(g) {
+  return GITHUB_LIST_KEYS.reduce((sum, key) => {
+    const list = g.lists?.[key];
+    const n = list?.state === "ok" ? list.mergedClosed : 0;
+    return sum + (Number.isInteger(n) && n > 0 ? n : 0);
+  }, 0);
 }
 
 // HYK-255-g-aux-render-1 -- ㄱ 보조 관측 4칸의 «진단 줄»(관측 건강). 보고서 ㄱ 절
@@ -3033,6 +3131,8 @@ function resolveAuxDirOptions(options) {
     // 여기에 둔다). 시험 주입용 옵션이며 새 CLI 인자가 아니다.
     githubBotAccountsPath:
       options.githubBotAccountsPath ?? DEFAULT_GITHUB_BOT_ACCOUNTS_PATH,
+    // HYK-255-p2a-scope-1 -- 기계 계수 범위 기준 설정 파일 경로(기본 = 저장소 설정 파일 · 시험 주입용 옵션 · 새 CLI 인자 아님).
+    machineScopePath: options.machineScopePath ?? DEFAULT_MACHINE_SCOPE_PATH,
   };
 }
 
@@ -3139,12 +3239,15 @@ function assemblePartialCountReportText({
   aux,
   // HYK-255-p1-daily-1 -- watch-run 일별 단계가 만든 «연속 확인-0 일수» 줄(없으면 undefined = 새 줄 0개).
   confirmedZeroStreakLine,
+  // HYK-255-p2a-scope-1 -- 보고 진입점이 렌더한 «기계 계수 범위 기준» 한 줄(없으면 undefined = 새 줄 0개).
+  machineScopeLine,
 }) {
   const { outboxResult, relayResult, gateAux, permissionResult } = aux;
   return buildPartialCountReport({
     permissionAnswers: permissionResult ?? undefined,
     githubHumanActions,
     confirmedZeroStreakLine,
+    machineScopeLine,
     generatedAtMs: now,
     windowStartMs,
     windowEndMs,
@@ -3404,6 +3507,7 @@ export async function runPartialCountOnce(options = {}) {
     relayGlob,
     inboxDir,
     sessionHomeDir,
+    machineScopePath,
   } = resolveValueOptions(options);
   const {
     fetchJson,
@@ -3460,6 +3564,12 @@ export async function runPartialCountOnce(options = {}) {
     ...inputs,
     aux,
     confirmedZeroStreakLine: options.confirmedZeroStreakLine,
+    machineScopeLine: await resolveMachineScopeLine({
+      dailyLines: options.machineScopeDailyLines,
+      git,
+      machineScopePath,
+      nowMs: now,
+    }),
   });
 }
 
@@ -3478,6 +3588,7 @@ function buildPartialCountOnceResult({
   githubHumanActions,
   aux,
   confirmedZeroStreakLine,
+  machineScopeLine,
 }) {
   const reportText = assemblePartialCountReportText({
     now,
@@ -3491,6 +3602,7 @@ function buildPartialCountOnceResult({
     githubHumanActions,
     aux,
     confirmedZeroStreakLine,
+    machineScopeLine,
   });
   return {
     reportText,
