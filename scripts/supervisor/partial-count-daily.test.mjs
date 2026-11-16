@@ -751,10 +751,17 @@ test("(25) 실제 단계 종단: 단계가 연속 일수 줄을 «1-C 판정 자
     });
     const text = fs.readFileSync(join(dir, "partial-count-report.md"), "utf8");
     const lines = text.split("\n");
+    // HYK-255-p2d-nonecause-1 바뀐 단언(판정 2026-11-16 1804 상신 1): 옛 상수 줄 동등 -> 같은 «없음» 줄에 원인 1개가 들어간다.
+    // 이 합성 저장소는 origin/master 도 설정 파일도 없어 기계 계수 범위 기준을 못 읽는다 = 원인 «기준 판독 불가»(프로덕션 렌더 출력과 비교).
     const i1c = lines.indexOf(
-      "1-C 판정 자격: 없음 — 미계수 범위가 남아 있어 «ㄴ=0» 판정 불가",
+      core.renderQualificationLine(
+        core.computeQualification({
+          machineScope: undefined,
+          kinds: undefined,
+        }),
+      ),
     );
-    assert.ok(i1c >= 0, "1-C 판정 자격 줄 바이트 무변");
+    assert.ok(i1c >= 0, "1-C 판정 자격 줄(머리 — 원인 1개 — 꼬리) 위치 무변");
     assert.ok(lines[i1c + 1].startsWith(STREAK_PREFIX), lines[i1c + 1]);
     assert.match(
       lines[i1c + 1],

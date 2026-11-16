@@ -19,8 +19,13 @@ const NOW = Date.parse("2026-11-15T15:00:00+09:00");
 const CONFIG_PATH = "scripts/supervisor/partial-count-machine-scope.json";
 const SCHEMA = "partial-count-machine-scope/v1";
 const SCOPE_PREFIX = "기계 계수 범위 기준: ";
-const ONE_C_LINE =
-  "1-C 판정 자격: 없음 — 미계수 범위가 남아 있어 «ㄴ=0» 판정 불가";
+// HYK-255-p2d-nonecause-1 바뀐 단언(판정 2026-11-16 1804 상신 1): 옛 상수 줄 리터럴 -> 프로덕션 렌더 출력. 이 파일의 보고서는 기준 «충족» + 종류 설정 파일 없는 합성 저장소라
+// 자격 줄 원인 = 못 세는 종류 설정 읽기 실패(렌더 함수 출력과 비교 · 줄 자리 = 연속 확인-0 줄 바로 위는 무변).
+const ONE_C_LINE = core.renderQualificationLine({
+  state: "none",
+  cause: core.QUALIFICATION_NONE_CAUSE.KINDS_CONFIG,
+});
+const QUAL_PREFIX = "1-C 판정 자격: ";
 const STREAK_LINE =
   "연속 확인-0 일수: 2일(부분 — 마지막 끊김 2026-11-12 줄 없음)";
 const FAIL404 = { ok: false, status: 404, json: null, linkHeader: null };
@@ -362,14 +367,28 @@ test("일별 줄을 못 읽었으면(null) UNKNOWN(일별 파일 읽기 실패) 
   // 줄 1개를 빼면 입력 없는 보고서와 같다 -- 통지 · 장 수 · ㄴ 분자 · 1-C · 연속 확인-0 줄 전부 바이트 무변(줄만 1개 늘었다).
   // HYK-255-p2b-qual-1 -- 이 픽스처 저장소에는 종류 설정 파일이 없고 기준은 «충족» 이라, withLines 에는 «종류 설정 진단:» 줄이 하나 더 실린다(자격 줄은 «없음» 그대로).
   // 그래서 기준 줄과 진단 줄 둘 다 빼야 입력 없는 보고서와 같다(바뀐 단언: 줄 수 +1 -> +2).
+  // HYK-255-p2d-nonecause-1 바뀐 단언(판정 1804 상신 1): 자격 «없음» 줄이 원인에 따라 달라진다(입력 없음 · 못 읽음 = 판독 불가 / 충족 + 종류 설정 없음 = 종류 설정 읽기 실패) --
+  // 자격 줄도 strip 대상에 넣고 «자격 줄 1개씩 있다» 만 따로 단언한다(줄 수 +2 · 나머지 바이트 무변은 그대로).
   const DIAG_PREFIX = "종류 설정 진단: ";
   const stripScope = (text) =>
     text
       .split("\n")
-      .filter((l) => !l.startsWith(SCOPE_PREFIX) && !l.startsWith(DIAG_PREFIX))
+      .filter(
+        (l) =>
+          !l.startsWith(SCOPE_PREFIX) &&
+          !l.startsWith(DIAG_PREFIX) &&
+          !l.startsWith(QUAL_PREFIX),
+      )
       .join("\n");
-  assert.equal(stripScope(withLines.reportText), base.reportText);
-  assert.equal(stripScope(unreadable.reportText), base.reportText);
+  for (const r of [base, unreadable, withLines]) {
+    assert.equal(
+      r.reportText.split("\n").filter((l) => l.startsWith(QUAL_PREFIX)).length,
+      1,
+      "자격 줄 1개",
+    );
+  }
+  assert.equal(stripScope(withLines.reportText), stripScope(base.reportText));
+  assert.equal(stripScope(unreadable.reportText), stripScope(base.reportText));
   assert.equal(
     withLines.reportText.split("\n").length,
     base.reportText.split("\n").length + 2,

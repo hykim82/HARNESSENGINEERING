@@ -238,10 +238,18 @@ test("⑨ 일별 파일(mkdtemp 합성 · 11-14 꼴 + 11-15 꼴) -> parseDailyLi
   );
   const q = core.computeQualification({ machineScope: scope, kinds: KINDS });
   assert.equal(q.state, "none");
-  assert.equal(
-    core.renderQualificationLine(q),
+  // HYK-255-p2d-nonecause-1 바뀐 단언(판정 2026-11-16 1804 상신 1): 옛 «자격 줄 = 상수 줄 바이트 그대로» -> 같은 «없음» 줄에 원인 «기계 계수 범위 기준 미충족» 1개.
+  // 칸 없는 날이 센 날이 아니라 끊김 = 기준 미충족이라는 뜻(P2c)은 무변 -- 머리 · 꼬리는 옛 상수 줄과 같다.
+  assert.equal(q.cause, core.QUALIFICATION_NONE_CAUSE.SCOPE_UNMET);
+  const noneLine = core.renderQualificationLine(q);
+  assert.ok(
+    noneLine.startsWith("1-C 판정 자격: 없음 — 기계 계수 범위 기준 미충족 — "),
+  );
+  assert.ok(noneLine.endsWith(" — 미계수 범위가 남아 있어 «ㄴ=0» 판정 불가"));
+  assert.notEqual(
+    noneLine,
     core.ONE_C_QUALIFICATION_NONE_LINE,
-    "자격 줄 = 상수 줄 바이트 그대로",
+    "옛 상수 줄이 아니다",
   );
 });
 

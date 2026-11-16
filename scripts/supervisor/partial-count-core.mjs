@@ -706,8 +706,8 @@ export function buildPartialCountReport({
   // HYK-255-p2a-scope-1 -- 기본값 undefined -> 새 줄 0개(미결선 호출자 회귀 0). 값 = renderMachineScopeLine 결과(설정 파일 값 기준 ·
   // 보고 진입점이 렌더) -- «연속 확인-0 일수» 줄 바로 아래에 싣는다. 문턱 판정 · 통지 · 장 수 0(줄 1개 추가뿐).
   machineScopeLine,
-  // HYK-255-p2b-qual-1 -- 기본값 undefined -> «1-C 판정 자격» 줄 = 지금 상수 줄 그대로(바이트 무변). 값 = renderQualificationLine 결과(부분 있음일 때만 문자열) ·
-  // qualificationDiagLine = 종류 설정 읽기 실패 사유 한 줄(없으면 undefined = 새 줄 0개).
+  // HYK-255-p2b-qual-1 -- 기본값 undefined -> «1-C 판정 자격» 줄 = «없음 — 기계 계수 범위 기준 판독 불가(결선이 기준을 안 넘김) — 꼬리»(HYK-255-p2d-nonecause-1 · 옛 상수 줄이 아니다). 값 =
+  // renderQualificationLine 결과(부분 있음 · 또는 원인을 가진 «없음» 줄) · qualificationDiagLine = 종류 설정 읽기 실패 사유 한 줄(없으면 undefined = 새 줄 0개).
   qualificationLine,
   qualificationDiagLine,
   // HYK-255-p5a-perm-1 -- 기본값 undefined -> ㄴ 절 새 줄 0개 · 분자 합산 0(미결선 호출자 회귀 0). 값 =
@@ -726,9 +726,10 @@ export function buildPartialCountReport({
   // 첫 줄 = «1-C 판정 자격»(부분 있음 줄 · 없으면 상수 줄) · 이어서 연속 확인-0 · 기계 계수 범위 기준 · 종류 설정 진단(각각 없으면 줄 0개).
   const isLine = (v) => typeof v === "string" && v !== "";
   lines.push(
+    // 자격 줄 인자가 없으면(미결선 호출자) 기준을 넘기지 않은 것 = «기계 계수 범위 기준 판독 불가»(원인은 순수 함수가 고른다).
     isLine(qualificationLine)
       ? qualificationLine
-      : ONE_C_QUALIFICATION_NONE_LINE,
+      : renderQualificationLine(computeQualification({})),
     ...[
       confirmedZeroStreakLine,
       machineScopeLine,
@@ -1417,9 +1418,11 @@ function breakReasonsForDay(entries) {
   return dailyBreakReasons(entries[0]);
 }
 
-// 연속 확인-0 일수(읽는 쪽 · 순수 함수 · 문턱 0). 어제부터 거꾸로, 날마다
-//   미조회 0 ∧ 확인 0 ∧ 수집 실패 [] ∧ 관측 공백 0 인 날만 센다.
-// 줄 없는 날 · 같은 날 줄이 둘인 날 = 끊김. 오늘(미마감)은 세지 않는다(어제부터 시작).
+// 연속 확인-0 일수(읽는 쪽 · 순수 함수 · 문턱 0). 어제부터 거꾸로, 날마다 끊김 사유 0(dailyBreakReasons)인 날만 센다 =
+//   미조회 0 ∧ 확인 0 ∧ 수집 실패 [] ∧ 관측 공백 0 ∧ 권한 사유 0(권한 확인창 사람 답 · 권한 판정 불가가 0 이 아니거나 UNKNOWN 이거나 «칸 없음») ∧
+//   GitHub 사유 0(GitHub 사람 손이 0 이 아니거나 UNKNOWN 이거나 «칸 없음» · 빈틈 사유 병기).
+// 줄 없는 날 · 같은 날 줄이 둘인 날 = 끊김. 칸이 아예 없는 줄(권한 두 칸 · GitHub 칸)도 «센 날» 이 아니라 끊김이다(P2c · 모르는 날을 0 으로 접지 않는다).
+// 오늘(미마감)은 세지 않는다(어제부터 시작).
 export function computeConfirmedZeroStreak({ lines, nowMs }) {
   const byDay = groupDailyLinesByDay(lines);
   let day = addKstDays(kstDayOf(nowMs), -1);
@@ -1465,10 +1468,10 @@ export function renderConfirmedZeroStreakLine(streak) {
 
 // ---------------------------------------------------------------------------
 // HYK-255-p2a-scope-1 -- 기계 계수 범위 기준(읽는 쪽 · 순수 함수 · 문턱 값은 «인자»). 일별 줄에서 어제부터 거꾸로, 날마다
-//   끊김 사유 0(breakReasonsForDay -- 수집 실패 · 미조회 · 공백 · 줄 없음 · 줄 중복 = 끊김) ∧ 그날 동시 배달 최대 ≥ minConcurrentTracks
+//   끊김 사유 0(breakReasonsForDay -- 수집 실패 · 미조회 · 확인 · 공백 · 권한 사유 · GitHub 사유 · 줄 없음 · 줄 중복 = 끊김 · 권한 칸 · GitHub 칸이 아예 없는 줄(칸 없음)도 끊김) ∧ 그날 동시 배달 최대 ≥ minConcurrentTracks
 // 인 날만 센다(동시 배달 최대를 모르면(null · 칸 없음) 그날 끊김). 연속으로 센 날 수가 observationDays 이상이면 «충족», 아니면 «미충족».
 // 끊기면 연속은 그 뒤 날부터 다시 센다(상태 0 -- 거꾸로 세는 계산이 이미 그 뜻). 오늘(미마감)은 세지 않는다.
-// ⚠️ 이 기준은 «기계로 센 범위» 의 기준일 뿐이다 -- 기계로 못 세는 개입은 이 줄 밖이고, 1-C 줄(상수)은 이 계산이 바꾸지 않는다.
+// ⚠️ 이 기준은 «기계로 센 범위» 의 기준일 뿐이다 -- 기계로 못 세는 개입은 이 줄 밖이고, «1-C 판정 자격» 줄은 이 계산이 직접 바꾸지 않는다(자격 줄 = computeQualification 이 이 결과를 읽어 정한다).
 // 관측 일수 · 문턱의 값(7 · 2)은 코드에 없다 -- 설정 파일에서 읽어 인자로 넘어온다(partial-count-report.mjs).
 // ---------------------------------------------------------------------------
 
@@ -1535,14 +1538,31 @@ export function renderMachineScopeLine(scope) {
 
 // ---------------------------------------------------------------------------
 // HYK-255-p2b-qual-1 (판정 2026-11-15 1804 ③ · 2026-11-16 1004) -- «1-C 판정 자격» 줄 계산(순수 함수 · I/O 0). 자격 «부분 있음» ⇔ P2a 기계 계수 범위 기준 «충족» ∧
-// 종류 설정(partial-count-uncountable-kinds.json)을 읽어 종류가 1개 이상 있고 모든 종류의 처리 값이 아는 값. 아니면 «없음» = 지금 상수 줄 바이트 그대로.
+// 종류 설정(partial-count-uncountable-kinds.json)을 읽어 종류가 1개 이상 있고 모든 종류의 처리 값이 아는 값. 아니면 «없음» -- HYK-255-p2d-nonecause-1(판정 2026-11-16 1804 상신 1)부터
+// «없음» 줄은 머리와 꼬리 사이에 «실제 원인 1개» 를 적는다(원인 3종 · 고르는 곳 = 순수 함수 qualificationNoneCause 한 곳 · 렌더는 그 값만 문면으로).
 // 종류 이름 · 수 · 처리는 코드에 없다 -- 설정에서 읽은 배열이 인자로 넘어온다(처리 값 세 낱말만 코드가 안다). 잠정 ⓒ(Q-4 한용 답 대기): 처리 방식은 분기가 아니라 값이라
 // 뒤집히면 설정과 문면만 바뀐다. ⚠️ 이 줄은 «ㄴ=0» 판정도 1단계 «완료» 선언도 아니다(선언 = P6 · 한용) -- 값 범위 표기이고 «알려진» = 열린 집합(K 는 하한).
 // ---------------------------------------------------------------------------
 
-export const ONE_C_QUALIFICATION_NONE_LINE =
-  "1-C 판정 자격: 없음 — 미계수 범위가 남아 있어 «ㄴ=0» 판정 불가";
+// «없음» 줄의 머리 · 꼬리(뜻 무변). 옛 상수 줄(머리 — 꼬리) = ONE_C_QUALIFICATION_NONE_LINE -- 새 렌더는 쓰지 않고, 옛 보고서 · 상태 파일 호환(되읽기)과 시험의 «옛 문면» 기준으로만 남긴다.
+const ONE_C_QUALIFICATION_NONE_HEAD = "1-C 판정 자격: 없음";
+const ONE_C_QUALIFICATION_NONE_TAIL =
+  "미계수 범위가 남아 있어 «ㄴ=0» 판정 불가";
+export const ONE_C_QUALIFICATION_NONE_LINE = `${ONE_C_QUALIFICATION_NONE_HEAD} — ${ONE_C_QUALIFICATION_NONE_TAIL}`;
 const ONE_C_QUALIFICATION_PREFIX = "1-C 판정 자격: ";
+
+// «없음» 원인 3종(값) -- 기존 줄들의 어휘(«기계 계수 범위 기준» · «미충족» · «판독 불가» · «종류 설정 읽기 실패»)를 따른다.
+export const QUALIFICATION_NONE_CAUSE = Object.freeze({
+  SCOPE_UNMET: "scope-unmet",
+  SCOPE_UNREADABLE: "scope-unreadable",
+  KINDS_CONFIG: "kinds-config",
+});
+export const QUALIFICATION_NONE_CAUSE_TEXT = Object.freeze({
+  [QUALIFICATION_NONE_CAUSE.SCOPE_UNMET]: "기계 계수 범위 기준 미충족",
+  [QUALIFICATION_NONE_CAUSE.SCOPE_UNREADABLE]: "기계 계수 범위 기준 판독 불가",
+  [QUALIFICATION_NONE_CAUSE.KINDS_CONFIG]: "못 세는 종류 설정 읽기 실패",
+});
+const isNoneCause = (v) => Object.hasOwn(QUALIFICATION_NONE_CAUSE_TEXT, v);
 export const QUALIFICATION_DIAG_PREFIX = "종류 설정 진단: ";
 
 export const UNCOUNTABLE_HANDLING = Object.freeze({
@@ -1555,17 +1575,40 @@ const UNCOUNTABLE_HANDLING_VALUES = new Set(
 );
 export const isUncountableHandling = (v) => UNCOUNTABLE_HANDLING_VALUES.has(v);
 
-// {machineScope: computeMachineScope 결과, kinds: 설정 종류 배열 | null} -> {state:"none"} | {state:"partial", …값}.
-export function computeQualification({ machineScope, kinds }) {
-  const none = { state: "none" };
-  if (machineScope?.known !== true || machineScope.met !== true) return none;
-  if (!Array.isArray(kinds) || kinds.length === 0) return none;
-  const count = (h) => kinds.filter((k) => k?.handling === h).length;
-  const preventionProof = count(UNCOUNTABLE_HANDLING.PREVENTION_PROOF);
-  const partialScope = count(UNCOUNTABLE_HANDLING.PARTIAL_SCOPE);
-  const excluded = count(UNCOUNTABLE_HANDLING.EXCLUDED_PROVISIONAL);
-  // 모르는 처리 값이 섞인 목록은 부분 있음으로 세지 않는다(a + b + c = K 를 지킬 수 없다).
-  if (preventionProof + partialScope + excluded !== kinds.length) return none;
+const countHandling = (kinds, h) =>
+  kinds.filter((k) => k?.handling === h).length;
+
+// «없음» 원인을 고르는 순수 함수 -- 이 한 곳만 «없음 여부 + 원인» 을 정한다(계산 · 렌더 · 보고 결선은 이 값을 받아 쓴다). 원인 없음(null) = «부분 있음».
+// 순서 = 기준이 먼저: ① 기준을 모른다(결선이 기준을 안 넘김 · 설정 못 읽음 · 일별 줄 못 읽음 = known 아님) -> 판독 불가 ② 기준 known 인데 충족 아님 -> 미충족
+// ③ 기준 충족인데 종류 설정을 못 쓴다(읽기 실패 · 빈 목록 · 모르는 처리 값이 섞여 a + b + c = K 를 못 지킴) -> 종류 설정 읽기 실패.
+export function qualificationNoneCause({ machineScope, kinds } = {}) {
+  if (machineScope?.known !== true) {
+    return QUALIFICATION_NONE_CAUSE.SCOPE_UNREADABLE;
+  }
+  if (machineScope.met !== true) return QUALIFICATION_NONE_CAUSE.SCOPE_UNMET;
+  if (!Array.isArray(kinds) || kinds.length === 0) {
+    return QUALIFICATION_NONE_CAUSE.KINDS_CONFIG;
+  }
+  const known = Object.values(UNCOUNTABLE_HANDLING).reduce(
+    (sum, h) => sum + countHandling(kinds, h),
+    0,
+  );
+  return known === kinds.length ? null : QUALIFICATION_NONE_CAUSE.KINDS_CONFIG;
+}
+
+// {machineScope: computeMachineScope 결과, kinds: 설정 종류 배열 | null} -> {state:"none", cause} | {state:"partial", …값}.
+export function computeQualification({ machineScope, kinds } = {}) {
+  const cause = qualificationNoneCause({ machineScope, kinds });
+  if (cause !== null) return { state: "none", cause };
+  const preventionProof = countHandling(
+    kinds,
+    UNCOUNTABLE_HANDLING.PREVENTION_PROOF,
+  );
+  const partialScope = countHandling(kinds, UNCOUNTABLE_HANDLING.PARTIAL_SCOPE);
+  const excluded = countHandling(
+    kinds,
+    UNCOUNTABLE_HANDLING.EXCLUDED_PROVISIONAL,
+  );
   return {
     state: "partial",
     days: machineScope.days,
@@ -1578,9 +1621,14 @@ export function computeQualification({ machineScope, kinds }) {
   };
 }
 
-// «없음» = 상수 줄(바이트 무변) · «부분 있음» = 값 범위 표기(긍정 문면 0 · «알려진» 낱말 필수).
+// «없음» = 머리 — 원인 1개 — 꼬리(원인이 없거나 모르는 값이면 판독 불가로 -- 원인 없는 «없음» 렌더 0) · «부분 있음» = 값 범위 표기(긍정 문면 0 · «알려진» 낱말 필수 · 바이트 무변).
 export function renderQualificationLine(qualification) {
-  if (qualification?.state !== "partial") return ONE_C_QUALIFICATION_NONE_LINE;
+  if (qualification?.state !== "partial") {
+    const cause = isNoneCause(qualification?.cause)
+      ? qualification.cause
+      : QUALIFICATION_NONE_CAUSE.SCOPE_UNREADABLE;
+    return `${ONE_C_QUALIFICATION_NONE_HEAD} — ${QUALIFICATION_NONE_CAUSE_TEXT[cause]} — ${ONE_C_QUALIFICATION_NONE_TAIL}`;
+  }
   const q = qualification;
   return (
     `${ONE_C_QUALIFICATION_PREFIX}부분 있음 — 기계 계수 범위 기준 충족(연속 ${q.days}일 / 기준 ${q.observationDays}일 · 동시 배달 최대 ≥ ${q.minConcurrentTracks}) · ` +
