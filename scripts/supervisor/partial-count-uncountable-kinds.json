@@ -1,0 +1,95 @@
+{
+  "schema_version": "partial-count-uncountable-kinds/v1",
+  "kinds": [
+    {
+      "id": "k01",
+      "name": "전달 파일 밖 채팅 지시",
+      "handling": "partial-scope",
+      "source": "P4:30 · P5 설계:62-71 · partial-count-core.mjs:124"
+    },
+    {
+      "id": "k02",
+      "name": "빈 Enter 밀기",
+      "handling": "partial-scope",
+      "source": "P4:32 · partial-count-core.mjs:126"
+    },
+    {
+      "id": "k03",
+      "name": "멈춘 좌석 깨우기",
+      "handling": "partial-scope",
+      "source": "P4:33 · partial-count-core.mjs:127"
+    },
+    {
+      "id": "k04",
+      "name": "끝난 배달 손 닫기",
+      "handling": "partial-scope",
+      "source": "P4:34 · partial-count-core.mjs:128"
+    },
+    {
+      "id": "k05",
+      "name": "로그 경보 사람 발견·알림",
+      "handling": "partial-scope",
+      "source": "P4:35 · partial-count-core.mjs:129"
+    },
+    {
+      "id": "k06",
+      "name": "Linear 상태 전환(Done 밖)",
+      "handling": "partial-scope",
+      "source": "P4:36 · partial-count-core.mjs:130 · 배달 규칙 §3"
+    },
+    {
+      "id": "k07",
+      "name": "CI 재실행 버튼",
+      "handling": "partial-scope",
+      "source": "partial-count-report.mjs:1045-1046"
+    },
+    {
+      "id": "k08",
+      "name": "웹 화면만 본 행위(로그 읽기 등)",
+      "handling": "excluded-by-definition-provisional",
+      "source": "partial-count-report.mjs:1045 · partial-count-core.mjs:2432"
+    },
+    {
+      "id": "k09",
+      "name": "미병합 닫기 행위자 불명",
+      "handling": "partial-scope",
+      "source": "partial-count-core.mjs:2071-2072 · partial-count-report.mjs:1037"
+    },
+    {
+      "id": "k10",
+      "name": "세션 기록 삭제 가능성",
+      "handling": "partial-scope",
+      "source": "partial-count-report.mjs:2483 · P5 설계:95"
+    },
+    {
+      "id": "k11",
+      "name": "codex 좌석 미포함",
+      "handling": "partial-scope",
+      "source": "partial-count-report.mjs:2480 · P5 설계:93"
+    },
+    {
+      "id": "k12",
+      "name": "좌석 질문창에 사람이 답함",
+      "handling": "partial-scope",
+      "source": "worker-dispatch-rule.md:87"
+    },
+    {
+      "id": "k13",
+      "name": "통역 세션에 친 말",
+      "handling": "partial-scope",
+      "source": "P5 설계:72 · P5 근거-부록:61"
+    },
+    {
+      "id": "k14",
+      "name": "사람 로컬 git 조작(커밋·push)",
+      "handling": "partial-scope",
+      "source": "11-12 진단 근거-부록:55"
+    },
+    {
+      "id": "k15",
+      "name": "PC 위 직접 손 조작(관제실·설정 파일 손 편집 · Orca/감시 재시작 · 좌석 손 기동)",
+      "handling": "partial-scope",
+      "source": "북극성:113 · P4:18"
+    }
+  ]
+}

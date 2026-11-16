@@ -356,16 +356,19 @@ test("일별 줄을 못 읽었으면(null) UNKNOWN(일별 파일 읽기 실패) 
     root,
   );
   // 줄 1개를 빼면 입력 없는 보고서와 같다 -- 통지 · 장 수 · ㄴ 분자 · 1-C · 연속 확인-0 줄 전부 바이트 무변(줄만 1개 늘었다).
+  // HYK-255-p2b-qual-1 -- 이 픽스처 저장소에는 종류 설정 파일이 없고 기준은 «충족» 이라, withLines 에는 «종류 설정 진단:» 줄이 하나 더 실린다(자격 줄은 «없음» 그대로).
+  // 그래서 기준 줄과 진단 줄 둘 다 빼야 입력 없는 보고서와 같다(바뀐 단언: 줄 수 +1 -> +2).
+  const DIAG_PREFIX = "종류 설정 진단: ";
   const stripScope = (text) =>
     text
       .split("\n")
-      .filter((l) => !l.startsWith(SCOPE_PREFIX))
+      .filter((l) => !l.startsWith(SCOPE_PREFIX) && !l.startsWith(DIAG_PREFIX))
       .join("\n");
   assert.equal(stripScope(withLines.reportText), base.reportText);
   assert.equal(stripScope(unreadable.reportText), base.reportText);
   assert.equal(
     withLines.reportText.split("\n").length,
-    base.reportText.split("\n").length + 1,
+    base.reportText.split("\n").length + 2,
   );
   assert.deepEqual(Object.keys(withLines).sort(), Object.keys(base).sort());
   assert.deepEqual(withLines.dailyTick, base.dailyTick, "일별 칸 무변");

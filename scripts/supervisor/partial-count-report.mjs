@@ -110,6 +110,11 @@ import {
   assembleGithubHumanActions,
   computeMachineScope,
   renderMachineScopeLine,
+  computeQualification,
+  renderQualificationLine,
+  isUncountableHandling,
+  UNCOUNTABLE_HANDLING,
+  QUALIFICATION_DIAG_PREFIX,
 } from "./partial-count-core.mjs";
 
 export const DEFAULT_DISPATCH_RECEIPTS_PATH =
@@ -1208,35 +1213,165 @@ async function readMachineScopeConfig({ git, machineScopePath }) {
   return parseMachineScopeConfig(String(blob.stdout));
 }
 
-// 보고 한 줄 -- 일별 줄 입력이 없으면(undefined = 미결선 호출자) 줄 0개. 값을 모르면 UNKNOWN(사유).
-async function resolveMachineScopeLine({
+// ---------------------------------------------------------------------------
+// HYK-255-p2b-qual-1 -- 못 세는 개입 «알려진 종류» 설정(종류 이름 · 처리 · 증명 장치). 종류 이름 · 수 · 처리는 코드에 없다 -- 새 설정 파일
+// partial-count-uncountable-kinds.json 에서만 온다. 읽는 길 = 기계 계수 범위 기준 설정(readMachineScopeConfig)과 같은 방식: origin/master 판본.
+// 못 읽거나(없음 · 깨짐 · 스키마 불일치) 모양이 틀리면(빈 목록 · 모르는 처리 값 · id 꼴/중복 · 예방 증명인데 장치 없음/저장소에 없음) 기본 목록으로 대체하지 않고
+// «읽기 실패» -- 보고서 자격 줄은 지금 문면(«없음») 그대로이고 진단 줄 1개가 사유를 적는다.
+// ---------------------------------------------------------------------------
+
+export const DEFAULT_UNCOUNTABLE_KINDS_PATH =
+  "scripts/supervisor/partial-count-uncountable-kinds.json";
+const UNCOUNTABLE_KINDS_SCHEMA = "partial-count-uncountable-kinds/v1";
+// 종류 id 꼴 = k + 숫자 -- 설계 식별자(U · V · Q · P · ㄱ/ㄴ 번호)와 겹치지 않는다.
+const KIND_ID_RE = /^k\d+$/;
+
+const isNonEmptyString = (v) => typeof v === "string" && v.trim() !== "";
+
+// 저장소 상대 경로만(절대 경로 · 드라이브 · .. 이탈 금지).
+function isRepoRelativePath(p) {
+  if (!isNonEmptyString(p)) return false;
+  if (/^([A-Za-z]:|[\\/])/.test(p)) return false;
+  return !p.split(/[\\/]/).includes("..");
+}
+
+// 종류 한 행 -> 오류 사유 | null. seenIds 에 id 를 더한다.
+function kindRowProblem(kind, seenIds) {
+  if (!kind || typeof kind !== "object" || Array.isArray(kind)) {
+    return "행이 객체 아님";
+  }
+  if (!KIND_ID_RE.test(String(kind.id))) return `id 꼴 오류(${kind.id})`;
+  if (seenIds.has(kind.id)) return `id 중복(${kind.id})`;
+  seenIds.add(kind.id);
+  if (!isNonEmptyString(kind.name)) return `${kind.id}: name 없음`;
+  if (!isNonEmptyString(kind.source)) return `${kind.id}: source 없음`;
+  if (!isUncountableHandling(kind.handling)) {
+    return `${kind.id}: 모르는 handling(${kind.handling})`;
+  }
+  if (
+    kind.handling === UNCOUNTABLE_HANDLING.PREVENTION_PROOF &&
+    !isRepoRelativePath(kind.proofDevice)
+  ) {
+    return `${kind.id}: 예방 증명인데 proofDevice(저장소 상대 경로) 없음`;
+  }
+  return null;
+}
+
+// 설정 파일 본문 -> {ok:true, kinds} | {ok:false, reason}.
+function parseUncountableKindsConfig(text) {
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch (err) {
+    return { ok: false, reason: `JSON 깨짐: ${err.message}` };
+  }
+  if (
+    parsed?.schema_version !== UNCOUNTABLE_KINDS_SCHEMA ||
+    !Array.isArray(parsed.kinds)
+  ) {
+    return {
+      ok: false,
+      reason: `스키마 불일치(${UNCOUNTABLE_KINDS_SCHEMA} · kinds 는 배열)`,
+    };
+  }
+  if (parsed.kinds.length === 0)
+    return { ok: false, reason: "종류 목록 비어 있음" };
+  const seenIds = new Set();
+  for (const kind of parsed.kinds) {
+    const problem = kindRowProblem(kind, seenIds);
+    if (problem) return { ok: false, reason: problem };
+  }
+  return { ok: true, kinds: parsed.kinds };
+}
+
+async function gitBlob(git, ref) {
+  try {
+    const blob = await git.run(["cat-file", "blob", ref]);
+    if (!blob || blob.code !== 0) {
+      return { ok: false, reason: blob?.stderr || "git cat-file 실패" };
+    }
+    return { ok: true, text: String(blob.stdout) };
+  } catch (err) {
+    return { ok: false, reason: err?.message ?? String(err) };
+  }
+}
+
+// 예방 증명 행의 증명 장치가 origin/master 판본에 실재해야 «예방 증명» 으로 센다 -- 없으면 설정 오류(장치 없는 증명 주장 = 부풀림).
+async function missingProofDevice({ git, kinds }) {
+  for (const kind of kinds) {
+    if (kind.handling !== UNCOUNTABLE_HANDLING.PREVENTION_PROOF) continue;
+    const found = await gitBlob(
+      git,
+      `origin/master:${kind.proofDevice.split(path.sep).join("/")}`,
+    );
+    if (!found.ok)
+      return `${kind.id}: proofDevice 가 저장소에 없음(${kind.proofDevice})`;
+  }
+  return null;
+}
+
+async function readUncountableKindsConfig({ git, uncountableKindsPath }) {
+  const blob = await gitBlob(
+    git,
+    `origin/master:${uncountableKindsPath.split(path.sep).join("/")}`,
+  );
+  if (!blob.ok) return blob;
+  const parsed = parseUncountableKindsConfig(blob.text);
+  if (!parsed.ok) return parsed;
+  const missing = await missingProofDevice({ git, kinds: parsed.kinds });
+  return missing ? { ok: false, reason: missing } : parsed;
+}
+
+// 보고 줄들 -- 일별 줄 입력이 없으면(undefined = 미결선 호출자) 전부 없음(= 자격 줄 상수 · 새 줄 0개). 값을 모르면 기준 줄이 UNKNOWN(사유).
+// 종류 설정은 «기준 충족» 일 때만 읽는다 -- 미충족 · UNKNOWN 이면 자격은 어차피 «없음» 이라 읽기 실패 진단이 매 회차 소음이 되지 않는다.
+// -> {machineScopeLine?, qualificationLine?, qualificationDiagLine?}
+async function resolveMachineScope({
   dailyLines,
   git,
   machineScopePath,
+  // 못 세는 개입 종류 설정 파일 경로(기본 = 저장소 설정 파일 · 시험 주입용 옵션 · 새 CLI 인자 아님).
+  uncountableKindsPath = DEFAULT_UNCOUNTABLE_KINDS_PATH,
   nowMs,
 }) {
-  if (dailyLines === undefined) return undefined;
+  if (dailyLines === undefined) return {};
   const config = await readMachineScopeConfig({ git, machineScopePath });
   if (!config.ok) {
-    return renderMachineScopeLine({
-      known: false,
-      reason: `설정 읽기 실패: ${oneLineReason(config.reason)}`,
-    });
+    return {
+      machineScopeLine: renderMachineScopeLine({
+        known: false,
+        reason: `설정 읽기 실패: ${oneLineReason(config.reason)}`,
+      }),
+    };
   }
   if (!Array.isArray(dailyLines)) {
-    return renderMachineScopeLine({
-      known: false,
-      reason: "일별 파일 읽기 실패",
-    });
+    return {
+      machineScopeLine: renderMachineScopeLine({
+        known: false,
+        reason: "일별 파일 읽기 실패",
+      }),
+    };
   }
-  return renderMachineScopeLine(
-    computeMachineScope({
-      lines: dailyLines,
-      nowMs,
-      observationDays: config.observationDays,
-      minConcurrentTracks: config.minConcurrentTracks,
-    }),
-  );
+  const scope = computeMachineScope({
+    lines: dailyLines,
+    nowMs,
+    observationDays: config.observationDays,
+    minConcurrentTracks: config.minConcurrentTracks,
+  });
+  const machineScopeLine = renderMachineScopeLine(scope);
+  if (scope.met !== true) return { machineScopeLine };
+  const kinds = await readUncountableKindsConfig({ git, uncountableKindsPath });
+  if (!kinds.ok) {
+    return {
+      machineScopeLine,
+      qualificationDiagLine: `${QUALIFICATION_DIAG_PREFIX}종류 설정 읽기 실패(${oneLineReason(kinds.reason)}) — «1-C 판정 자격» 은 «없음» 그대로`,
+    };
+  }
+  return {
+    machineScopeLine,
+    qualificationLine: renderQualificationLine(
+      computeQualification({ machineScope: scope, kinds: kinds.kinds }),
+    ),
+  };
 }
 
 // 목록 순번 -- 회차 시각에서만 정한다(상태 0): floor(시각 / 15분) % 3 에서 시작해 돌려 앞에서 몫만큼 부른다. 같은 시각 = 같은 순번 ·
@@ -3240,14 +3375,17 @@ function assemblePartialCountReportText({
   // HYK-255-p1-daily-1 -- watch-run 일별 단계가 만든 «연속 확인-0 일수» 줄(없으면 undefined = 새 줄 0개).
   confirmedZeroStreakLine,
   // HYK-255-p2a-scope-1 -- 보고 진입점이 렌더한 «기계 계수 범위 기준» 한 줄(없으면 undefined = 새 줄 0개).
-  machineScopeLine,
+  // HYK-255-p2b-qual-1 -- 같은 결과 묶음이 «1-C 판정 자격» 줄(부분 있음일 때만) · 종류 설정 진단 줄(읽기 실패일 때만)도 싣는다(없으면 지금 문면 그대로).
+  machineScope = {},
 }) {
   const { outboxResult, relayResult, gateAux, permissionResult } = aux;
   return buildPartialCountReport({
     permissionAnswers: permissionResult ?? undefined,
     githubHumanActions,
     confirmedZeroStreakLine,
-    machineScopeLine,
+    machineScopeLine: machineScope.machineScopeLine,
+    qualificationLine: machineScope.qualificationLine,
+    qualificationDiagLine: machineScope.qualificationDiagLine,
     generatedAtMs: now,
     windowStartMs,
     windowEndMs,
@@ -3564,10 +3702,11 @@ export async function runPartialCountOnce(options = {}) {
     ...inputs,
     aux,
     confirmedZeroStreakLine: options.confirmedZeroStreakLine,
-    machineScopeLine: await resolveMachineScopeLine({
+    machineScope: await resolveMachineScope({
       dailyLines: options.machineScopeDailyLines,
       git,
       machineScopePath,
+      uncountableKindsPath: options.uncountableKindsPath,
       nowMs: now,
     }),
   });
@@ -3588,7 +3727,7 @@ function buildPartialCountOnceResult({
   githubHumanActions,
   aux,
   confirmedZeroStreakLine,
-  machineScopeLine,
+  machineScope,
 }) {
   const reportText = assemblePartialCountReportText({
     now,
@@ -3602,7 +3741,7 @@ function buildPartialCountOnceResult({
     githubHumanActions,
     aux,
     confirmedZeroStreakLine,
-    machineScopeLine,
+    machineScope,
   });
   return {
     reportText,
