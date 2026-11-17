@@ -47,11 +47,20 @@ function isNonEmptyString(v) {
 // 않는다). 관제실이 넘겨 주면(이 CLI가 이미 아는 role+dispatch_id로) 배달
 // 시점 각인(§3 아래 runDispatchReceiptCli)을 시도하고, 안 넘기면 그
 // 시도 자체를 건너뛴다(기존 배포/구 버전 관제실과 100% 호환).
+//
+// HYK-402 S1 (seat-role-s1-1): `--bound-seat-role`도 선택 필드다(위 `--harness-
+// dir`과 같은 규칙). 배달기가 «이 배달이 가 닿은 좌석의 등록부 역할»을 넘기면
+// 영수증에 `bound_seat_role` 칸이 덧붙고, `--role`(배달기가 요청한 역할)과
+// 다르면 아무것도 쓰지 않고 거부한다. 이 플래그가 «없으면» 이 CLI의 동작과
+// 출력은 한 글자도 바뀌지 않는다(배달기 결선(S2) 전이라 살아 있는 배달이
+// 바뀌면 안 된다). 사용법 문자열(USAGE)도 일부러 그대로 둔다 -- 인자 없는
+// 실패 출력까지 «지금과 똑같이» 유지하기 위해서다.
 const FLAG_TO_FIELD = Object.freeze({
   "--role": "role",
   "--task-label": "harnessTaskLabel",
   "--receipt-path": "receiptPath",
   "--harness-dir": "harnessDir",
+  "--bound-seat-role": "boundSeatRole",
 });
 
 function classifyFlag(arg) {
@@ -104,7 +113,32 @@ export function parseDispatchReceiptArgs(args, env = {}) {
   ) {
     return { ok: false, reason: `missing required field(s) -- ${USAGE}` };
   }
+  const bound = checkBoundSeatRole(args, parsed);
+  if (!bound.ok) return bound;
   return { ok: true, ...parsed };
+}
+
+// HYK-402 S1: `--bound-seat-role`이 «있을 때만» 검사한다(없으면 즉시 ok).
+// 값이 비면 거부, `--role`과 다르면(대소문자 무시) 거부 -- 거부는 영수증
+// append 이전이라 원장에 한 줄도 남지 않는다.
+function checkBoundSeatRole(args, parsed) {
+  if (!args.includes("--bound-seat-role")) return { ok: true };
+  if (!isNonEmptyString(parsed.boundSeatRole)) {
+    return {
+      ok: false,
+      reason: "dispatch-receipt: --bound-seat-role needs a non-empty value",
+    };
+  }
+  if (
+    parsed.boundSeatRole.trim().toUpperCase() !==
+    parsed.role.trim().toUpperCase()
+  ) {
+    return {
+      ok: false,
+      reason: `dispatch-receipt: --bound-seat-role '${parsed.boundSeatRole}' does not match --role '${parsed.role}' -- the seat reached is not the seat requested; nothing recorded`,
+    };
+  }
+  return { ok: true };
 }
 
 // 응답에서 반드시 있어야 하는 3필드 -- 하나라도 없으면(빈 문자열 포함)
@@ -197,6 +231,7 @@ export function buildReceiptRecord({
   envelope,
   role,
   harnessTaskLabel,
+  boundSeatRole,
   nowFn = () => new Date(),
 }) {
   return {
@@ -208,6 +243,10 @@ export function buildReceiptRecord({
     dispatch_timestamp_source: envelope.timestampSource,
     role,
     harness_task_label: harnessTaskLabel,
+    // HYK-402 S1: 인자가 있을 때만 칸이 생긴다(없으면 기존 8칸 그대로).
+    ...(isNonEmptyString(boundSeatRole)
+      ? { bound_seat_role: boundSeatRole }
+      : {}),
   };
 }
 
@@ -247,6 +286,7 @@ export function runDispatchReceiptCli(argv, opts = {}) {
     envelope,
     role: parsed.role,
     harnessTaskLabel: parsed.harnessTaskLabel,
+    boundSeatRole: parsed.boundSeatRole,
     nowFn,
   });
 
@@ -287,6 +327,7 @@ export function formatDispatchReceiptResult(result) {
     return (
       `RECORDED dispatch_id=${r.dispatch_id} runtime_task_id=${r.runtime_task_id} ` +
       `assignee_pane_key=${r.assignee_pane_key} role=${r.role} label=${r.harness_task_label} ` +
+      (r.bound_seat_role ? `bound_seat_role=${r.bound_seat_role} ` : "") +
       `timestamp_utc=${r.dispatch_timestamp_utc}(${r.dispatch_timestamp_source})${stampSuffix}`
     );
   }
