@@ -44,6 +44,14 @@ test.after(() => {
   for (const d of cleanups) fs.rmSync(d, { recursive: true, force: true });
 });
 
+// HYK-255-p2e-workday-2 바뀐 단언(판정 #20261117-2026 ③ · 2104 ②): 합성 기계 계수 범위 설정 = 일한 날 기준 판. 값은 실물 설정과 «다른» 합성 값(코드가 실물 값을 박았다면 이 시험이 잡는다).
+const SCOPE_CFG = {
+  observationDays: 7,
+  minDeliveredPerDay: 3,
+  lastTickCutoffKst: "23:15",
+  criterionChangedOn: "2026-11-01",
+};
+
 // ---- 합성 일별 줄 · 합성 저장소 ---------------------------------------------------------------------------------------
 const dayStr = (offset) =>
   new Date(Date.UTC(2026, 10, 15 + offset)).toISOString().slice(0, 10);
@@ -55,6 +63,8 @@ const dayLine = (offset, over = {}) => ({
   collectorFails: [],
   coverageGaps: { count: 0, totalMs: 0 },
   concurrentTracksMax: 2,
+  delivered: SCOPE_CFG.minDeliveredPerDay,
+  lastTickAtMs: Date.parse(`${dayStr(offset)}T23:58:00+09:00`),
   uncountedExampleIds: [],
   // HYK-255-p2c-nofield-1 -- 칸 없는 줄 = 끊김(판정 1404): «깨끗한 날» 은 권한 두 칸 + GitHub 칸이 있고 값 0 이다.
   permissionHumanAnswers: 0,
@@ -66,7 +76,7 @@ const dayLines = (from, to, over = () => ({})) =>
   Array.from({ length: to - from + 1 }, (_, i) =>
     dayLine(from + i, over(from + i)),
   );
-const MET_LINES = dayLines(-7, -1); // 7일 연속 · 동시 2 = 설정 7/2 에서 «충족»
+const MET_LINES = dayLines(-7, -1); // 7일 연속 · 배달 = 문턱 · 마지막 회차 23:58 = 합성 설정에서 «충족»
 const UNMET_LINES = dayLines(-6, -1); // 6일 = «미충족»
 
 function git(cwd, args) {
@@ -87,9 +97,8 @@ function git(cwd, args) {
 
 const scopeJson = (over = {}) =>
   JSON.stringify({
-    schema_version: "partial-count-machine-scope/v1",
-    observationDays: 7,
-    minConcurrentTracks: 2,
+    schema_version: "partial-count-machine-scope/v2",
+    ...SCOPE_CFG,
     ...over,
   });
 
@@ -160,11 +169,14 @@ const kindsOf = (line) =>
     .exec(line)
     ?.slice(1)
     .map(Number);
-const scopeOf = (line) =>
-  /연속 (\d+)일 \/ 기준 (\d+)일 · 동시 배달 최대 ≥ (\d+)\)/
-    .exec(line)
-    ?.slice(1)
-    .map(Number);
+// 바뀐 단언(판정 #20261117-2026 ③ · 2104 ②): «동시 배달 최대 ≥ K» -> «배달(24시간 창) ≥ K건 · 기준 변경 <날짜>» -- [연속 일수, 기준 일수, 배달 문턱, 기준 변경일].
+const scopeOf = (line) => {
+  const m =
+    /연속 (\d+)일 \/ 기준 (\d+)일 · 배달\(24시간 창\) ≥ (\d+)건 · 기준 변경 (\d{4}-\d{2}-\d{2})\)/.exec(
+      line,
+    );
+  return m ? [Number(m[1]), Number(m[2]), Number(m[3]), m[4]] : null;
+};
 
 // ---- ⑴ 기준 충족 + 종류 설정 읽기 성공 = 부분 있음 -----------------------------------------------------------------------
 
@@ -196,25 +208,35 @@ test("긍정 문면 금지: 부분 있음 줄에 «자격 있음» · «완료»
   }
 });
 
-test("N · D · C = P2a 기계 계수 범위 기준 줄의 값 그대로 -- 설정 3/1 이면 줄도 3/1 · 연속 3일 (코드 리터럴 0)", async () => {
-  const lines = dayLines(-3, -1, () => ({ concurrentTracksMax: 1 }));
+test("N · D · C = P2a 기계 계수 범위 기준 줄의 값 그대로 -- 설정 3일/배달 1건 이면 줄도 3/1 · 연속 3일 · 기준 변경일도 설정 값 (코드 리터럴 0)", async () => {
+  // 합성 일별 줄 = 배달 1건뿐(합성 기본 문턱 미만) -- 완화한 설정(문턱 1)에서만 센 날이 된다.
+  const lines = dayLines(-3, -1, () => ({ delivered: 1 }));
   const loose = await runReport(
     buildRepo(REAL_KINDS, {
-      scopeConfig: scopeJson({ observationDays: 3, minConcurrentTracks: 1 }),
+      scopeConfig: scopeJson({
+        observationDays: 3,
+        minDeliveredPerDay: 1,
+        criterionChangedOn: "2026-11-02",
+      }),
     }),
     { machineScopeDailyLines: lines },
   );
   const qual = qualOf(loose.reportText);
-  assert.deepEqual(scopeOf(qual), [3, 3, 1]);
+  assert.deepEqual(scopeOf(qual), [3, 3, 1, "2026-11-02"]);
   const scopeLine = linesOf(loose.reportText).find((l) =>
     l.startsWith(SCOPE_PREFIX),
   );
   assert.match(scopeLine, /충족/);
-  assert.match(scopeLine, /연속 3일 \/ 기준 3일\(동시 배달 최대 ≥ 1/);
+  assert.match(scopeLine, /연속 3일 \/ 기준 3일\(배달\(24시간 창\) ≥ 1건/);
   const strict = await runReport(buildRepo(REAL_KINDS), {
     machineScopeDailyLines: MET_LINES,
   });
-  assert.deepEqual(scopeOf(qualOf(strict.reportText)), [7, 7, 2]);
+  assert.deepEqual(scopeOf(qualOf(strict.reportText)), [
+    7,
+    7,
+    SCOPE_CFG.minDeliveredPerDay,
+    SCOPE_CFG.criterionChangedOn,
+  ]);
 });
 
 test("a + b + c = K = 설정 종류 수 -- 설정 3행(예방 증명 1 · 부분 범위 1 · 정의상 제외 1)이면 줄도 3 = 1 / 1 / 1 (코드 리터럴 0 증명)", async () => {

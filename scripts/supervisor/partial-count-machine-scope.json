@@ -1,5 +1,7 @@
 {
-  "schema_version": "partial-count-machine-scope/v1",
+  "schema_version": "partial-count-machine-scope/v2",
   "observationDays": 7,
-  "minConcurrentTracks": 2
+  "minDeliveredPerDay": 4,
+  "lastTickCutoffKst": "23:30",
+  "criterionChangedOn": "2026-11-17"
 }

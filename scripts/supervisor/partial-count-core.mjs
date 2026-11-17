@@ -1468,39 +1468,87 @@ export function renderConfirmedZeroStreakLine(streak) {
 
 // ---------------------------------------------------------------------------
 // HYK-255-p2a-scope-1 -- 기계 계수 범위 기준(읽는 쪽 · 순수 함수 · 문턱 값은 «인자»). 일별 줄에서 어제부터 거꾸로, 날마다
-//   끊김 사유 0(breakReasonsForDay -- 수집 실패 · 미조회 · 확인 · 공백 · 권한 사유 · GitHub 사유 · 줄 없음 · 줄 중복 = 끊김 · 권한 칸 · GitHub 칸이 아예 없는 줄(칸 없음)도 끊김) ∧ 그날 동시 배달 최대 ≥ minConcurrentTracks
-// 인 날만 센다(동시 배달 최대를 모르면(null · 칸 없음) 그날 끊김). 연속으로 센 날 수가 observationDays 이상이면 «충족», 아니면 «미충족».
+//   끊김 사유 0(breakReasonsForDay -- 수집 실패 · 미조회 · 확인 · 공백 · 권한 사유 · GitHub 사유 · 줄 없음 · 줄 중복 = 끊김 · 권한 칸 · GitHub 칸이 아예 없는 줄(칸 없음)도 끊김) ∧
+// 「일한 날」 인 날만 센다. 연속으로 센 날 수가 observationDays 이상이면 «충족», 아니면 «미충족».
 // 끊기면 연속은 그 뒤 날부터 다시 센다(상태 0 -- 거꾸로 세는 계산이 이미 그 뜻). 오늘(미마감)은 세지 않는다.
+//
+// HYK-255-p2e-workday-2 (한용 확정 + 책임자 판정 #20261117-2026 ③ · #20261117-2104 ② 안 A) -- 「일한 날」 기준(기준 변경일 = 설정 criterionChangedOn):
+//   종전 잠정 기준(그날 동시 배달 최대 ≥ minConcurrentTracks)은 폐기했다. 새 기준 =
+//   ⓐ 그날 일별 줄의 `delivered`(정수) ≥ minDeliveredPerDay · `delivered` 를 못 읽음(null · 칸 없음 · 정수 아님) = 끊김(사유 «배달 값 없음»).
+//      ⚠️ 값의 범위: 일별 줄 `delivered` 는 «달력일 개수» 가 아니라 «그날 마지막 회차 시각에서 거꾸로 24시간 창» 값이다(회차 창 = partial-count-report DEFAULT_WINDOW_HOURS · 일별 줄은 그날
+//      마지막 회차 값으로 덮어쓴다 -- recordDailyTick). 그래서 문면은 «배달(24시간 창) n건 · 기준 K건» 으로 값의 범위를 그대로 적는다(「하루 배달」 이라 쓰지 않는다).
+//   ⓑ 그날 마지막 회차 시각(`lastTickAtMs` · KST)이 lastTickCutoffKst(설정) 보다 이르면 끊김(사유 «마지막 회차가 자정 전에 끊김») -- 24시간 창이 달력일과 어긋나는 날을 끊긴 날로 센다.
+//      `lastTickAtMs` 칸이 없거나 숫자가 아닌 옛 줄 = 이 규칙을 적용하지 않는다(새 칸을 만들지 않는다 · 모르는 시각을 «이른 시각» 으로 읽지 않는다 -- 정직 한계).
+//   동시 배달 최대(`concurrentTracksMax`)는 계속 기록하되(쓰는 쪽 무변) 판정에는 쓰지 않는다. 지나간 날도 일별 줄에 이미 적힌 값으로 같은 기준에서 다시 센다(줄 · 원장 수정 0 · 순수 함수).
 // ⚠️ 이 기준은 «기계로 센 범위» 의 기준일 뿐이다 -- 기계로 못 세는 개입은 이 줄 밖이고, «1-C 판정 자격» 줄은 이 계산이 직접 바꾸지 않는다(자격 줄 = computeQualification 이 이 결과를 읽어 정한다).
-// 관측 일수 · 문턱의 값(7 · 2)은 코드에 없다 -- 설정 파일에서 읽어 인자로 넘어온다(partial-count-report.mjs).
+// 관측 일수 · 배달 문턱 · 마지막 회차 컷 · 기준 변경일의 값(7 · 4 · 23:30 · 2026-11-17)은 코드에 없다 -- 설정 파일에서 읽어 인자로 넘어온다(partial-count-report.mjs).
 // ---------------------------------------------------------------------------
 
 const MACHINE_SCOPE_LINE_PREFIX = "기계 계수 범위 기준: ";
 
-// 그날 줄들 -> 기계 계수 끊김 사유(없으면 []). 줄이 하나일 때만 동시 배달 최대를 본다(줄 없음 · 줄 중복은 그 사유가 이미 끊김).
-function machineScopeDayReasons(entries, minConcurrentTracks) {
-  const reasons = breakReasonsForDay(entries);
+// «HH:MM»(24시간 · 시 00-23 · 분 00-59) -> 그날 0시부터의 분(정수) | null. 설정 파일의 마지막 회차 컷을 읽는 한 곳(report 가 같은 함수로 검증한다).
+export function parseKstClockMinutes(text) {
+  if (typeof text !== "string") return null;
+  const m = /^([01]\d|2[0-3]):([0-5]\d)$/.exec(text);
+  return m ? Number(m[1]) * 60 + Number(m[2]) : null;
+}
+
+// «YYYY-MM-DD» 이면서 실제 달력에 있는 날 -> true. 설정 파일의 기준 변경일 검증(report 가 같은 함수로 검증한다).
+export function isCalendarDay(text) {
+  if (typeof text !== "string" || !DAY_RE.test(text)) return false;
+  const [y, mo, d] = text.split("-").map(Number);
+  const probe = new Date(Date.UTC(y, mo - 1, d));
+  return (
+    probe.getUTCFullYear() === y &&
+    probe.getUTCMonth() === mo - 1 &&
+    probe.getUTCDate() === d
+  );
+}
+
+// 그날 줄들 -> 기계 계수 끊김 사유(없으면 []). 줄이 하나일 때만 배달 · 마지막 회차를 본다(줄 없음 · 줄 중복은 그 사유가 이미 끊김).
+// 사유 순서 = 기존 사유 -> 배달 -> 마지막 회차. 사유 문면에 « — »(보고 줄 구분자)를 쓰지 않는다.
+function machineScopeDayReasons(entries, criteria) {
+  const reasons = [...breakReasonsForDay(entries)];
   if (!entries || entries.length !== 1) return reasons;
-  const max = entries[0].concurrentTracksMax;
-  if (!isCount(max)) return [...reasons, "동시 배달 최대 모름"];
-  return max >= minConcurrentTracks
-    ? reasons
-    : [...reasons, `동시 배달 최대 ${max} < 기준 ${minConcurrentTracks}`];
+  const { minDeliveredPerDay, lastTickCutoffKst } = criteria;
+  const delivered = entries[0].delivered;
+  if (!isCount(delivered)) {
+    reasons.push("배달 값 없음");
+  } else if (delivered < minDeliveredPerDay) {
+    reasons.push(
+      `배달(24시간 창) ${delivered}건 < 기준 ${minDeliveredPerDay}건`,
+    );
+  }
+  const lastTickAtMs = entries[0].lastTickAtMs;
+  const cutoffMin = parseKstClockMinutes(lastTickCutoffKst);
+  if (Number.isFinite(lastTickAtMs) && cutoffMin !== null) {
+    const msOfKstDay =
+      (((lastTickAtMs + KST_OFFSET_MS) % DAY_MS) + DAY_MS) % DAY_MS;
+    if (msOfKstDay < cutoffMin * 60 * 1000) {
+      reasons.push(
+        `마지막 회차가 자정 전에 끊김(마지막 회차 ${formatKst(lastTickAtMs).slice(11, 16)} < ${lastTickCutoffKst} KST)`,
+      );
+    }
+  }
+  return reasons;
 }
 
 export function computeMachineScope({
   lines,
   nowMs,
   observationDays,
-  minConcurrentTracks,
+  minDeliveredPerDay,
+  lastTickCutoffKst,
+  criterionChangedOn,
 }) {
   const byDay = groupDailyLinesByDay(lines);
   const toDay = addKstDays(kstDayOf(nowMs), -1);
+  const criteria = { minDeliveredPerDay, lastTickCutoffKst };
   let day = toDay;
   let days = 0;
   let fromDay = null;
   for (;;) {
-    const reasons = machineScopeDayReasons(byDay.get(day), minConcurrentTracks);
+    const reasons = machineScopeDayReasons(byDay.get(day), criteria);
     if (reasons.length > 0) {
       return {
         known: true,
@@ -1510,7 +1558,9 @@ export function computeMachineScope({
         fromDay,
         toDay: days > 0 ? toDay : null,
         observationDays,
-        minConcurrentTracks,
+        minDeliveredPerDay,
+        lastTickCutoffKst,
+        criterionChangedOn,
         lastBreak: { day, reasons },
       };
     }
@@ -1520,7 +1570,7 @@ export function computeMachineScope({
   }
 }
 
-// 보고 줄 -- «기계 계수 범위 기준: 충족|미충족 — 연속 N일 / 기준 M일(동시 배달 최대 ≥ K · 끊김 사유 0) · 센 날 <첫날>~<끝날> · 마지막 끊김 …».
+// 보고 줄 -- «기계 계수 범위 기준: 충족|미충족 — 연속 N일 / 기준 M일(배달(24시간 창) ≥ K건 · 마지막 회차 ≥ HH:MM KST · 끊김 사유 0) · 센 날 <첫날>~<끝날> · 마지막 끊김 … — … · 기준 변경 <날짜>».
 // 모르면(설정 · 일별 줄을 못 읽음) UNKNOWN(사유) -- 충족도 미충족도 아니다. 기준 숫자 · 날짜 범위는 계산이 쓴 값 그대로다.
 export function renderMachineScopeLine(scope) {
   if (!scope || scope.known !== true) {
@@ -1530,9 +1580,9 @@ export function renderMachineScopeLine(scope) {
   const brk = scope.lastBreak;
   return (
     `${MACHINE_SCOPE_LINE_PREFIX}${scope.met ? "충족" : "미충족"} — ` +
-    `연속 ${scope.days}일 / 기준 ${scope.observationDays}일(동시 배달 최대 ≥ ${scope.minConcurrentTracks} · 끊김 사유 0) · ` +
+    `연속 ${scope.days}일 / 기준 ${scope.observationDays}일(배달(24시간 창) ≥ ${scope.minDeliveredPerDay}건 · 마지막 회차 ≥ ${scope.lastTickCutoffKst} KST · 끊김 사유 0) · ` +
     `센 날 ${range} · 마지막 끊김 ${brk.day} ${brk.reasons.join(", ")} — ` +
-    "기계로 센 범위의 기준일 뿐 · 기계로 못 세는 개입 미포함"
+    `기계로 센 범위의 기준일 뿐 · 기계로 못 세는 개입 미포함 · 기준 변경 ${scope.criterionChangedOn}(지나간 날도 같은 기준으로 다시 셈)`
   );
 }
 
@@ -1613,7 +1663,8 @@ export function computeQualification({ machineScope, kinds } = {}) {
     state: "partial",
     days: machineScope.days,
     observationDays: machineScope.observationDays,
-    minConcurrentTracks: machineScope.minConcurrentTracks,
+    minDeliveredPerDay: machineScope.minDeliveredPerDay,
+    criterionChangedOn: machineScope.criterionChangedOn,
     total: kinds.length,
     preventionProof,
     partialScope,
@@ -1631,7 +1682,7 @@ export function renderQualificationLine(qualification) {
   }
   const q = qualification;
   return (
-    `${ONE_C_QUALIFICATION_PREFIX}부분 있음 — 기계 계수 범위 기준 충족(연속 ${q.days}일 / 기준 ${q.observationDays}일 · 동시 배달 최대 ≥ ${q.minConcurrentTracks}) · ` +
+    `${ONE_C_QUALIFICATION_PREFIX}부분 있음 — 기계 계수 범위 기준 충족(연속 ${q.days}일 / 기준 ${q.observationDays}일 · 배달(24시간 창) ≥ ${q.minDeliveredPerDay}건 · 기준 변경 ${q.criterionChangedOn}) · ` +
     `알려진 못 세는 종류 ${q.total} = 예방 증명 ${q.preventionProof} / 부분 범위 ${q.partialScope} / 정의상 제외(잠정) ${q.excluded} · «ㄴ=0» 판정 아님`
   );
 }
