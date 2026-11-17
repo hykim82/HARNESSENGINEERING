@@ -3,9 +3,12 @@
 // 영수증 줄이 진짜 배달 기록인지 «판정만 기록»한다. 그림자는 소비의 ok · 사유
 // · 반환값 · 종료 코드를 한 글자도 바꾸지 않는다(차단 0).
 //
-// 모든 시험 = 프로덕션 소비 진입점(checkRelayHandshake 함수 또는 실 CLI) 구동 +
-// 합성 원장(mkdtemp) + 주입 stub(실 orca 0). 각 시험은 두 단언을 함께 건다:
-// ⓐ 그림자 기록 값 ⓑ 소비 결과(ok · 사유)가 그림자 없는 소비와 같다.
+// 소스 스캔 시험 1건((파일) «그림자 구역 소스에 … 리터럴이 없다»)을 뺀 모든
+// 시험 = 프로덕션 소비 진입점(checkRelayHandshake 함수 또는 실 CLI) 구동 +
+// 합성 원장(mkdtemp) + 주입 stub(실 orca 0). 소비 «무변» 시험은 두 단언을 함께
+// 건다: ⓐ 그림자 기록 값 ⓑ 소비 결과가 «그림자 기록이 불가능한 같은 입력의
+// 두 번째 소비» 결과와 같다(assertShadowNeutral · 소비 사유 전체를 리터럴로
+// 단언하지 않는다 -- 자기 토막(ok · 라벨)만).
 //
 // ⛔이 파일은 일부러 relay-handshake.mjs 의 checkRelayHandshake «만» import
 // 한다 -- 그림자 모듈이 아직 없는 base 위에서도 로드되어 «그림자 기록이
@@ -21,6 +24,7 @@ import {
   readFileSync,
   readdirSync,
   existsSync,
+  renameSync,
   rmSync,
 } from "node:fs";
 import { join, dirname } from "node:path";
@@ -100,16 +104,16 @@ function g1Block({ runtimeId = RUNTIME_ID, pane = PANE } = {}) {
 
 function writeRound(
   w,
-  { g1 = g1Block(), prefix = "coder", roleName = "CODER" } = {},
+  { g1 = g1Block(), prefix = "coder", roleName = "CODER", label = LABEL } = {},
 ) {
   writeFileSync(
     join(w.harnessDir, `${prefix}-task.md`),
-    `task_id: ${LABEL}\ndropped_at: ${formatKst(DROPPED_MS)} KST\n`,
+    `task_id: ${label}\ndropped_at: ${formatKst(DROPPED_MS)} KST\n`,
     "utf8",
   );
   writeFileSync(
     join(w.harnessDir, `${prefix}.md`),
-    `task_id: ${LABEL}\n${g1}\n>>> DONE: ${roleName} @ ${formatKstSec(DONE_MS)}\ndone_stamped_by: finalize-done\n`,
+    `task_id: ${label}\n${g1}\n>>> DONE: ${roleName} @ ${formatKstSec(DONE_MS)}\ndone_stamped_by: finalize-done\n`,
     "utf8",
   );
 }
@@ -185,7 +189,41 @@ function readShadow(path) {
 }
 const shadowPathOf = (ledgerPath) => ledgerPath + SHADOW_SUFFIX;
 
-const OK_RESULT = { ok: true, reason: `relay handshake ok for ${LABEL}` };
+// 소비 무변 증명(P2-3): 같은 입력을 두 번 소비해 반환을 비교한다. 첫 번째 =
+// 호출자가 이미 한 «그림자 기록이 되는» 소비(res). 두 번째 = 그림자 기록 경로를
+// 디렉터리로 막고(appendFileSync -> EISDIR = 그림자가 아무것도 못 남기는
+// 기준선) 조회도 던지는 함수로 바꾼 같은 소비. 둘이 같아야 한다. 소비 사유
+// 문자열 «전체»는 단언하지 않는다 -- 자기 토막(ok · 이 라운드 라벨 포함)만.
+function assertShadowNeutral(
+  w,
+  res,
+  opts = {},
+  shadowPath = shadowPathOf(w.ledgerPath),
+) {
+  assert.equal(res.ok, true, `소비 ok:true 무변: ${res.reason}`);
+  assert.ok(
+    String(res.reason).includes(opts.label ?? LABEL),
+    "사유에 라벨 토막",
+  );
+  const keep = `${shadowPath}.keep`;
+  if (existsSync(shadowPath)) renameSync(shadowPath, keep);
+  mkdirSync(shadowPath);
+  let twin;
+  try {
+    const consumeOpts = { ...opts };
+    delete consumeOpts.label; // 라벨은 «사유 토막» 단언용 -- 소비 인자가 아니다
+    twin = consume(w, {
+      ...consumeOpts,
+      orcaDispatchLookup: () => {
+        throw new Error("twin lookup (shadow baseline)");
+      },
+    });
+  } finally {
+    rmSync(shadowPath, { recursive: true, force: true });
+    if (existsSync(keep)) renameSync(keep, shadowPath);
+  }
+  assert.deepEqual(res, twin, "그림자 있음/없음 두 번 소비 결과 동등");
+}
 
 // ---------------------------------------------------------------------------
 // T2 정상 줄 + 일치 stub -> AUTHENTIC · 소비 무변(무회귀)
@@ -196,7 +234,7 @@ test("(T2) 정상 줄 + 일치 stub -> 그림자 AUTHENTIC · 소비 ok:true 무
   writeLedger(w.ledgerPath, [receipt()]);
   const stub = recordingStub(found());
   const res = consume(w, { orcaDispatchLookup: stub });
-  assert.deepEqual(res, OK_RESULT, "소비 결과 무변");
+  assertShadowNeutral(w, res, { orcaDispatchLookup: stub });
   const rows = readShadow(shadowPathOf(w.ledgerPath));
   assert.equal(rows.length, 1, "그림자 기록 1줄");
   assert.equal(rows[0].verdict, V.AUTHENTIC);
@@ -221,7 +259,7 @@ test("(T1) 위조 줄(Orca 에 없는 dispatch) -> UNAUTHENTIC 기록 · 소비�
   ]);
   const stub = recordingStub({ ok: true, found: false });
   const res = consume(w, { orcaDispatchLookup: stub });
-  assert.deepEqual(res, OK_RESULT, "위조 줄도 소비는 지금과 같다(차단 0)");
+  assertShadowNeutral(w, res, { orcaDispatchLookup: stub });
   const rows = readShadow(shadowPathOf(w.ledgerPath));
   assert.equal(rows.length, 1);
   assert.equal(rows[0].verdict, V.UNAUTHENTIC);
@@ -244,7 +282,7 @@ for (const [name, dispatchOver, key] of [
     const res = consume(w, {
       orcaDispatchLookup: recordingStub(found({ dispatch: dispatchOver })),
     });
-    assert.deepEqual(res, OK_RESULT);
+    assertShadowNeutral(w, res);
     const rows = readShadow(shadowPathOf(w.ledgerPath));
     assert.equal(rows.length, 1);
     assert.equal(rows[0].verdict, V.UNAUTHENTIC);
@@ -265,7 +303,7 @@ test("(T4) 재생 줄(진짜 id 인데 task 본문에 이 라벨이 없음) -> U
       found({ top: { taskText: "go HYK-111-other-round\n본문 ..." } }),
     ),
   });
-  assert.deepEqual(res, OK_RESULT);
+  assertShadowNeutral(w, res);
   const rows = readShadow(shadowPathOf(w.ledgerPath));
   assert.equal(rows[0].verdict, V.UNAUTHENTIC);
   assert.deepEqual(rows[0].mismatch_keys, ["harness_task_label"]);
@@ -282,15 +320,15 @@ test("(T4b) task 본문에 이 라벨이 있으면 AUTHENTIC · 좌석 worktree 
       }),
     ),
   });
-  assert.deepEqual(ok, OK_RESULT);
   const bad = consume(w, {
     orcaDispatchLookup: recordingStub(
       found({ top: { worktreePath: join(w.root, "elsewhere") } }),
     ),
   });
-  assert.deepEqual(bad, OK_RESULT);
   const rows = readShadow(shadowPathOf(w.ledgerPath));
   assert.equal(rows.length, 2);
+  assertShadowNeutral(w, ok);
+  assertShadowNeutral(w, bad);
   assert.equal(rows[0].verdict, V.AUTHENTIC);
   assert.equal(rows[1].verdict, V.UNAUTHENTIC);
   assert.deepEqual(rows[1].mismatch_keys, ["worktree"]);
@@ -307,7 +345,7 @@ test("(T5a) 명시 원장 경로와 워커 포인터가 다르다 -> POINTER_MIS
   writePointer(w, join(w.wt, "my-own-ledger.jsonl"));
   const stub = recordingStub(found());
   const res = consume(w, { orcaDispatchLookup: stub });
-  assert.deepEqual(res, OK_RESULT, "포인터가 달라도 소비는 지금과 같다");
+  assertShadowNeutral(w, res, { orcaDispatchLookup: stub });
   const rows = readShadow(shadowPathOf(w.ledgerPath));
   assert.equal(rows.length, 1);
   assert.equal(rows[0].verdict, V.POINTER_MISMATCH);
@@ -324,7 +362,12 @@ test("(T5b) 포인터가 워크트리 «안» 위조 원장을 가리킨다(명�
     explicitLedger: undefined,
     orcaDispatchLookup: recordingStub({ ok: true, found: false }),
   });
-  assert.deepEqual(res, OK_RESULT, "위조 원장 포인터도 소비는 지금과 같다");
+  assertShadowNeutral(
+    w,
+    res,
+    { explicitLedger: undefined },
+    shadowPathOf(forged),
+  );
   const rows = readShadow(shadowPathOf(forged));
   assert.equal(rows.length, 1);
   assert.equal(rows[0].verdict, V.POINTER_MISMATCH);
@@ -337,7 +380,7 @@ test("(T5c) 포인터가 관제실 쪽(워크트리 밖)을 가리키고 명시 
   writeLedger(w.ledgerPath, [receipt()]);
   writePointer(w, w.ledgerPath);
   const res = consume(w, { orcaDispatchLookup: recordingStub(found()) });
-  assert.deepEqual(res, OK_RESULT);
+  assertShadowNeutral(w, res);
   const rows = readShadow(shadowPathOf(w.ledgerPath));
   assert.equal(rows[0].verdict, V.AUTHENTIC);
 });
@@ -374,7 +417,7 @@ for (const [name, stub, evidenceKey] of [
     writeRound(w);
     writeLedger(w.ledgerPath, [receipt()]);
     const res = consume(w, { orcaDispatchLookup: recordingStub(stub) });
-    assert.deepEqual(res, OK_RESULT, "조회가 실패해도 소비는 지금과 같다");
+    assertShadowNeutral(w, res);
     const rows = readShadow(shadowPathOf(w.ledgerPath));
     assert.equal(rows.length, 1);
     assert.equal(rows[0].verdict, V.LOOKUP_FAILED);
@@ -394,10 +437,12 @@ test("(T6-시한) 조회가 시한(timeoutMs)을 넘기면(주입 시계) LOOKUP
       nowMsFn: () => (t += 50),
     },
   });
-  assert.deepEqual(res, OK_RESULT);
   const rows = readShadow(shadowPathOf(w.ledgerPath));
   assert.equal(rows[0].verdict, V.LOOKUP_FAILED);
   assert.equal(rows[0].evidence.lookup_failure, "timeout");
+  assertShadowNeutral(w, res, {
+    authShadowOptions: { timeoutMs: 10, nowMsFn: () => (t += 50) },
+  });
 });
 
 test("(T6-미결선) 조회 함수를 안 주면 LOOKUP_FAILED(lookup_not_wired) · 소비 무변", () => {
@@ -405,10 +450,10 @@ test("(T6-미결선) 조회 함수를 안 주면 LOOKUP_FAILED(lookup_not_wired)
   writeRound(w);
   writeLedger(w.ledgerPath, [receipt()]);
   const res = consume(w);
-  assert.deepEqual(res, OK_RESULT);
   const rows = readShadow(shadowPathOf(w.ledgerPath));
   assert.equal(rows[0].verdict, V.LOOKUP_FAILED);
   assert.equal(rows[0].evidence.lookup_failure, "lookup_not_wired");
+  assertShadowNeutral(w, res);
 });
 
 // ---------------------------------------------------------------------------
@@ -424,7 +469,13 @@ test("(예외) 그림자 기록 쓰기가 예외를 내도(기록 경로가 디�
   assert.doesNotThrow(() => {
     res = consume(w, { orcaDispatchLookup: recordingStub(found()) });
   });
-  assert.deepEqual(res, OK_RESULT);
+  rmSync(shadowPathOf(w.ledgerPath), { recursive: true, force: true });
+  const withShadowOk = consume(w, {
+    orcaDispatchLookup: recordingStub(found()),
+  });
+  assert.equal(res.ok, true);
+  assert.deepEqual(res, withShadowOk, "기록이 깨져도 소비 결과 동일");
+  assert.equal(readShadow(shadowPathOf(w.ledgerPath)).length, 1);
 });
 
 test("(예외) 그림자가 예외를 내는 위치가 «거부» 소비 경로여도 거부 사유 무변(G1 불일치)", () => {
@@ -447,21 +498,123 @@ test("(예외) 그림자가 예외를 내는 위치가 «거부» 소비 경로�
 });
 
 // ---------------------------------------------------------------------------
-// T7 기존 손 정정 줄(correction* 키) -- 오탐으로 세지 않고 따로 표기
+// T7 기존 손 정정 줄 -- 판정 2026-11-17 21:04 ③(나) P2-1: 면제 대상은
+// 원장에 이미 있는 08-18 두 줄의 «고정 목록»(dispatch_id + harness_task_label)
+// 뿐이다. 목록 밖 correction* 키 줄은 일반 줄처럼 판정한다.
 // ---------------------------------------------------------------------------
-test("(T7) 최신 매칭 줄이 손 정정 줄(correction* 키) -> HAND_CORRECTION_EXISTING 별도 표기 · Orca 조회 0 · 소비 무변", () => {
+const FIXED_HAND_CORRECTIONS = [
+  { dispatch_id: "ctx_899b3d4cc47f", harness_task_label: "HYK-285-wake-1" },
+  {
+    dispatch_id: "ctx_fcdd887df48b",
+    harness_task_label: "HYK-285-wake-review-1",
+  },
+];
+const CORRECTION_KEYS = {
+  correction: true,
+  correction_authority: "hand",
+  correction_reason: "x",
+};
+
+// 판정 함수(runReceiptAuthenticityShadow = 소비가 부르는 그 함수)를 합성
+// 줄 1개로 직접 구동한다. 반환 = 기록된 그림자 줄.
+async function shadowRowFor(record, stub, { role = "CODER" } = {}) {
+  const mod = await import("./relay-handshake.mjs");
+  const w = makeWorld("t7d-");
+  writeLedger(w.ledgerPath, [record]);
+  mod.runReceiptAuthenticityShadow({
+    role,
+    taskId: record.harness_task_label,
+    nowMs: NOW_MS,
+    ledgerPath: w.ledgerPath,
+    explicitLedgerPath: w.ledgerPath,
+    pointerValue: undefined,
+    harnessDir: w.harnessDir,
+    latestRecord: record,
+    lookup: stub,
+  });
+  return readShadow(shadowPathOf(w.ledgerPath))[0];
+}
+
+for (const [i, fixed] of FIXED_HAND_CORRECTIONS.entries()) {
+  test(`(T7-고정목록 ${i + 1}) 08-18 손 정정 줄(${fixed.harness_task_label}) -> HAND_CORRECTION_EXISTING 별도 표기 · Orca 조회 0`, async () => {
+    const stub = recordingStub({ ok: true, found: false }); // 조회됐다면 UNAUTHENTIC
+    const row = await shadowRowFor(
+      receipt({
+        ...fixed,
+        role: i === 0 ? "CODER" : "REVIEW",
+        ...CORRECTION_KEYS,
+      }),
+      stub,
+      { role: i === 0 ? "CODER" : "REVIEW" },
+    );
+    assert.equal(row.verdict, V.HAND_CORRECTION);
+    assert.equal(stub.calls.length, 0);
+  });
+}
+
+// 목록 «밖» correction* 줄 = 일반 줄처럼 Orca 대조(불일치 stub 이라 UNAUTHENTIC).
+for (const [name, over] of [
+  [
+    "위조 id + correction 키(forged_with_correction_key)",
+    { dispatch_id: "forged-never-dispatched" },
+  ],
+  [
+    "목록의 dispatch_id 인데 라벨이 다르다",
+    { dispatch_id: "ctx_899b3d4cc47f" },
+  ],
+  [
+    "목록의 라벨인데 dispatch_id 가 다르다",
+    { harness_task_label: "HYK-285-wake-1" },
+  ],
+  [
+    "목록 dispatch_id 에 접미를 붙였다(접두 검사로는 통과하는 모양)",
+    {
+      dispatch_id: "ctx_899b3d4cc47f-copy",
+      harness_task_label: "HYK-285-wake-1",
+    },
+  ],
+  [
+    "목록 dispatch_id 앞에 접두를 붙였다",
+    { dispatch_id: "x-ctx_899b3d4cc47f", harness_task_label: "HYK-285-wake-1" },
+  ],
+]) {
+  test(`(T7-목록밖) correction* 키가 있어도 ${name} -> 일반 판정(UNAUTHENTIC) · 조회 1`, async () => {
+    const stub = recordingStub({ ok: true, found: false });
+    const row = await shadowRowFor(
+      receipt({ ...over, ...CORRECTION_KEYS }),
+      stub,
+    );
+    assert.notEqual(
+      row.verdict,
+      V.HAND_CORRECTION,
+      "손 정정으로 접히지 않는다",
+    );
+    assert.equal(row.verdict, V.UNAUTHENTIC);
+    assert.equal(stub.calls.length, 1, "Orca 조회를 실제로 했다");
+  });
+}
+
+test("(T7-키없음) 고정 목록의 두 값이어도 correction* 키가 없으면 일반 판정", async () => {
+  const stub = recordingStub({ ok: true, found: false });
+  const row = await shadowRowFor(
+    receipt({ ...FIXED_HAND_CORRECTIONS[0] }),
+    stub,
+  );
+  assert.equal(row.verdict, V.UNAUTHENTIC);
+  assert.equal(stub.calls.length, 1);
+});
+
+test("(T7) 최신 매칭 줄이 손 정정 줄(목록 안 · correction* 키) -> 소비 경로에서도 HAND_CORRECTION_EXISTING · Orca 조회 0 · 소비 무변", () => {
   const w = makeWorld("t7-");
-  writeRound(w);
-  writeLedger(w.ledgerPath, [
-    receipt({
-      correction: true,
-      correction_authority: "hand",
-      correction_reason: "x",
-    }),
-  ]);
+  const fixed = FIXED_HAND_CORRECTIONS[0];
+  writeRound(w, { label: fixed.harness_task_label });
+  writeLedger(w.ledgerPath, [receipt({ ...fixed, ...CORRECTION_KEYS })]);
   const stub = recordingStub({ ok: true, found: false }); // 불일치 stub: 조회됐다면 UNAUTHENTIC
   const res = consume(w, { orcaDispatchLookup: stub });
-  assert.deepEqual(res, OK_RESULT);
+  assertShadowNeutral(w, res, {
+    label: fixed.harness_task_label,
+    orcaDispatchLookup: stub,
+  });
   const rows = readShadow(shadowPathOf(w.ledgerPath));
   assert.equal(rows.length, 1);
   assert.equal(rows[0].verdict, V.HAND_CORRECTION);
@@ -490,11 +643,16 @@ test("(392) 원장 경로가 전혀 없다(명시 0 · 포인터 0 = 존재·G1 
     explicitLedger: undefined,
     orcaDispatchLookup: stub,
   });
-  assert.deepEqual(res, OK_RESULT, "skip 되는 소비도 지금과 같다");
   const rows = readShadow(join(w.harnessDir, SHADOW_FALLBACK_NAME));
   assert.equal(rows.length, 1);
   assert.equal(rows[0].verdict, V.POINTER_ABSENT);
   assert.equal(stub.calls.length, 0, "대조할 원장 줄이 없으니 조회 0");
+  assertShadowNeutral(
+    w,
+    res,
+    { explicitLedger: undefined },
+    join(w.harnessDir, SHADOW_FALLBACK_NAME),
+  );
 });
 
 // ---------------------------------------------------------------------------
@@ -613,8 +771,8 @@ test("(결선) configureAuthShadowDefaults 로 결선한 조회가 쓰이고, �
     const w = makeWorld("twire-");
     writeRound(w);
     writeLedger(w.ledgerPath, [receipt()]);
-    assert.deepEqual(consume(w), OK_RESULT);
-    assert.deepEqual(consume(w, { orcaDispatchLookup: explicit }), OK_RESULT);
+    const viaDefault = consume(w);
+    const viaExplicit = consume(w, { orcaDispatchLookup: explicit });
     const rows = readShadow(shadowPathOf(w.ledgerPath));
     assert.deepEqual(
       rows.map((r) => r.verdict),
@@ -622,9 +780,134 @@ test("(결선) configureAuthShadowDefaults 로 결선한 조회가 쓰이고, �
     );
     assert.equal(wired.calls.length, 1);
     assert.equal(explicit.calls.length, 1);
+    assert.equal(viaDefault.ok, true);
+    assert.deepEqual(
+      viaDefault,
+      viaExplicit,
+      "결선 기본값 vs 명시 조회 소비 동등",
+    );
   } finally {
     mod.configureAuthShadowDefaults(prev);
   }
+});
+
+// ---------------------------------------------------------------------------
+// P2-2 (판정 2026-11-17 21:04 ③(다)): 조회가 «비동기»(thenable)여도 거부(reject)
+// 와 시간 초과를 삼키고 소비 결과는 무변. 소비는 동기 함수라 결과를 기다릴 수
+// 없다 -> «조회 실패(lookup_not_sync)»로 기록하고, 나중에 거부돼도
+// unhandledRejection 이 나지 않게 처리기를 붙여 둔다.
+// ---------------------------------------------------------------------------
+async function settleTicks() {
+  await new Promise((r) => setTimeout(r, 0));
+  await new Promise((r) => setTimeout(r, 30));
+}
+
+async function consumeWithAsyncLookup(prefix, makeResult) {
+  const seen = [];
+  const onUnhandled = (reason) => seen.push(reason);
+  process.on("unhandledRejection", onUnhandled);
+  try {
+    const w = makeWorld(prefix);
+    writeRound(w);
+    writeLedger(w.ledgerPath, [receipt()]);
+    const stub = recordingStub(makeResult);
+    const res = consume(w, { orcaDispatchLookup: stub });
+    await settleTicks();
+    return { w, res, stub, unhandled: seen.slice() };
+  } finally {
+    process.off("unhandledRejection", onUnhandled);
+  }
+}
+
+for (const [name, makeResult] of [
+  ["거부되는 Promise", () => Promise.reject(new Error("async boom"))],
+  [
+    "ETIMEDOUT 로 거부되는 Promise(비동기 시간 초과)",
+    () => {
+      const e = new Error("async ETIMEDOUT");
+      e.code = "ETIMEDOUT";
+      return Promise.reject(e);
+    },
+  ],
+  [
+    "정상 응답으로 이행되는 Promise(기다릴 수 없다)",
+    () => Promise.resolve(found()),
+  ],
+  ["영원히 끝나지 않는 Promise", () => new Promise(() => {})],
+  [
+    "거부를 부르는 thenable 객체",
+    () => ({
+      then(_onOk, onErr) {
+        onErr(new Error("thenable boom"));
+      },
+    }),
+  ],
+  [
+    "then 이 던지는 thenable 객체",
+    () => ({
+      then() {
+        throw new Error("then threw");
+      },
+    }),
+  ],
+  [
+    "then 접근자가 던지는 객체",
+    () => ({
+      get then() {
+        throw new Error("then getter threw");
+      },
+    }),
+  ],
+]) {
+  test(`(P2-2) 비동기 조회: ${name} -> LOOKUP_FAILED(lookup_not_sync) · unhandledRejection 0 · 소비 무변`, async () => {
+    const { w, res, unhandled } = await consumeWithAsyncLookup(
+      "p22-",
+      makeResult,
+    );
+    assert.deepEqual(unhandled, [], "처리되지 않은 거부 0");
+    const rows = readShadow(shadowPathOf(w.ledgerPath));
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].verdict, V.LOOKUP_FAILED);
+    assert.equal(rows[0].evidence.lookup_failure, "lookup_not_sync");
+    assertShadowNeutral(w, res);
+  });
+}
+
+test("(P2-2) 비동기 조회의 거부는 «그림자 조회 반환값을 쓰는 모든 경로»에서 삼켜진다 -- 거부 소비 경로(G1 불일치)도 사유 무변", async () => {
+  const seen = [];
+  const onUnhandled = (reason) => seen.push(reason);
+  process.on("unhandledRejection", onUnhandled);
+  try {
+    const w = makeWorld("p22g1-");
+    writeRound(w, { g1: g1Block({ pane: OTHER_PANE }) });
+    writeLedger(w.ledgerPath, [receipt()]);
+    const withReject = consume(w, {
+      orcaDispatchLookup: () => Promise.reject(new Error("async boom")),
+    });
+    await settleTicks();
+    const withSync = consume(w, { orcaDispatchLookup: recordingStub(found()) });
+    assert.equal(withReject.ok, false);
+    assert.deepEqual(withReject, withSync, "거부 사유도 조회 방식과 무관");
+    assert.deepEqual(seen, []);
+  } finally {
+    process.off("unhandledRejection", onUnhandled);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 조회 대기 상한(판정 21:04 ③(바)) = 값 하나. 소비가 조회에 실어 보내는
+// timeoutMs 가 이 상수와 같아야 하고, 상수는 10초다(결과 파일에 값을 적는다).
+// ---------------------------------------------------------------------------
+test("(상한) 조회 대기 상한 상수 = 10000ms 하나 · 소비가 조회 요청에 같은 값을 싣는다", async () => {
+  const mod = await import("./relay-handshake.mjs");
+  assert.equal(mod.AUTH_SHADOW_DEFAULT_TIMEOUT_MS, 10_000);
+  const w = makeWorld("tcap-");
+  writeRound(w);
+  writeLedger(w.ledgerPath, [receipt()]);
+  const stub = recordingStub(found());
+  const res = consume(w, { orcaDispatchLookup: stub });
+  assert.equal(stub.calls[0].timeoutMs, mod.AUTH_SHADOW_DEFAULT_TIMEOUT_MS);
+  assertShadowNeutral(w, res);
 });
 
 // ---------------------------------------------------------------------------
