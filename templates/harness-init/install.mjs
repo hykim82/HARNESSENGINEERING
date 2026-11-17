@@ -1240,6 +1240,20 @@ export const ENFORCEMENT_CHECK_FILES = [
   // enforce.yml) itself already calls hook-sync-check.mjs, so an installed
   // solo-full target's CI will still red on this specific file until this
   // is resolved -- a real, known gap, not silently closed.
+  // HYK-209-ci-copylist-3 (item 10): enforce.yml also calls these two
+  // directly (`node scripts/check/nul-byte-guard.mjs` / `live-harness-
+  // scratch-guard.mjs`); neither was copied, so every solo-full target's CI
+  // was structurally red on those two steps. Their only sibling import is
+  // "./quality-check.mjs" (already above), so import closure stays closed.
+  // Their paired .test.mjs files are NOT copied here (see
+  // PAIR_TEST_EXCEPTIONS in install-copylist-closure.test.mjs). Placed after
+  // the hook-sync-check block on purpose so that block's line numbers (cited
+  // by that test's exclusion reason) do not move.
+  // Still NOT copied and still a known unresolved gap (HYK-209 follow-up):
+  // ambient-sweep-report.mjs -- the marker test it reads and the
+  // package.json copy are both unconfirmed on a target.
+  "nul-byte-guard.mjs",
+  "live-harness-scratch-guard.mjs",
   // HYK-209-frame-repair-1 ⓐ': the closure check below found these THREE
   // pre-existing gaps -- review-gate.mjs imports envelope-archive.mjs and
   // review-approval-binding.mjs; relay-handshake.test.mjs imports
