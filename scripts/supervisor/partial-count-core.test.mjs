@@ -28,6 +28,8 @@ import {
   renderRelayLedgerAuxLines,
   renderExternalEvidenceCandidateLine,
   parseExternalEvidenceCandidateLine,
+  computeQualification,
+  renderQualificationLine,
 } from "./partial-count-core.mjs";
 
 // 실물 watch.log 한 줄과 같은 형식(reach-report.test.mjs의 관례 재사용).
@@ -83,11 +85,13 @@ test("필수 문면 ⓐⓑ: 첫 줄이 정확히 PARTIAL 배너이고 1-C 판정
   const text = buildPartialCountReport(baseInput());
   const lines = text.split("\n");
   assert.equal(lines[0], "집계 성격: PARTIAL — 전수 아님");
+  // HYK-255-p2d-nonecause-1 바뀐 단언(판정 2026-11-16 1804 상신 1): 옛 «머리 — 꼬리» 한 줄 동등 -> 자격 줄 «머리 · 원인 1개 · 꼬리» 자기 토막.
+  // 이 입력은 자격 줄 인자가 없는 미결선 호출이라 원인 = 기계 계수 범위 기준 판독 불가(프로덕션 export 와 비교).
+  assert.ok(text.includes(renderQualificationLine(computeQualification({}))));
   assert.ok(
-    text.includes(
-      "1-C 판정 자격: 없음 — 미계수 범위가 남아 있어 «ㄴ=0» 판정 불가",
-    ),
+    text.includes("1-C 판정 자격: 없음 — 기계 계수 범위 기준 판독 불가 — "),
   );
+  assert.ok(text.includes(" — 미계수 범위가 남아 있어 «ㄴ=0» 판정 불가"));
   // 금지 해석 줄(PM 규격 마지막 줄)도 문면 그대로.
   assert.ok(
     text.includes(
@@ -614,11 +618,8 @@ test("필수 문면 ⓑ(보조 칸): buildPartialCountReport가 auxNote를 그�
       `- ORCH-writeable 보조 관측: ${auxNote} — 독립 계수에 미산입`,
     ),
   );
-  assert.ok(
-    text.includes(
-      "1-C 판정 자격: 없음 — 미계수 범위가 남아 있어 «ㄴ=0» 판정 불가",
-    ),
-  );
+  // HYK-255-p2d-nonecause-1 바뀐 단언: 옛 상수 줄 동등 -> 자격 줄은 보조 칸과 무관하게 «머리 · 원인(판독 불가) · 꼬리»(미결선 기본 경로) -- 보조 칸이 자격 줄을 바꾸지 않는다는 뜻은 무변.
+  assert.ok(text.includes(renderQualificationLine(computeQualification({}))));
 });
 
 test("formatPartialCountSection: 파일 없음/신선/오래됨/생성시각 불명이 각각 명시적으로 갈린다", () => {

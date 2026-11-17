@@ -1465,7 +1465,7 @@ test("⑺ 회차 값 모양 = 프로덕션 수집 결과와 같다 -- 시험 hel
   }
 });
 
-test("⑺ 연속 확인-0: 새 칸이 있는 줄에서 값 > 0 · null 이면 끊김 사유(빈틈 사유 병기) · 0 이면 이어짐 · 칸 없는 옛 줄은 옛 규칙 그대로", () => {
+test("⑺ 연속 확인-0: 새 칸이 있는 줄에서 값 > 0 · null 이면 끊김 사유(빈틈 사유 병기) · 0 이면 이어짐 · 칸 없는 옛 줄은 끊김(HYK-255-p2c-nofield-1 · 판정 1404)", () => {
   const base = (day, extra) => ({
     schema: core.DAILY_SCHEMA,
     day,
@@ -1474,6 +1474,9 @@ test("⑺ 연속 확인-0: 새 칸이 있는 줄에서 값 > 0 · null 이면 �
     collectorFails: [],
     coverageGaps: { count: 0, totalMs: 0 },
     uncountedExampleIds: [],
+    // 권한 칸은 이 시험의 관심 밖이라 «있고 0» 으로 둔다(GitHub 칸만 시험마다 넣거나 뺀다).
+    permissionHumanAnswers: 0,
+    permissionUndecidable: 0,
     ...extra,
   });
   const nowMs = kst("2026-11-14 09:00");
@@ -1483,7 +1486,13 @@ test("⑺ 연속 확인-0: 새 칸이 있는 줄에서 값 > 0 · null 이면 �
       nowMs,
     });
   assert.equal(streak({ githubHumanActions: 0 }).days, 1);
-  assert.equal(streak({}).days, 1, "칸 없는 옛 줄 = 무변");
+  const noField = streak({});
+  assert.equal(
+    noField.days,
+    0,
+    "GitHub 칸 없는 줄 = 끊김(옛 규칙 «무변» 이 뒤집혔다)",
+  );
+  assert.deepEqual(noField.lastBreak.reasons, ["GitHub 사람 손 조작 칸 없음"]);
   const positive = streak({ githubHumanActions: 3 });
   assert.equal(positive.days, 0);
   assert.deepEqual(positive.lastBreak.reasons, ["GitHub 사람 손 조작 3"]);

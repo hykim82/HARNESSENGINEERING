@@ -498,6 +498,10 @@ function line(day, extra = {}) {
     coverageGaps: { count: 0, totalMs: 0 },
     concurrentTracksMax: 1,
     delivered: 3,
+    // HYK-255-p2c-nofield-1 -- 칸 없는 줄 = 끊김(판정 1404): 이 시험의 관심은 «미계수 칸 이름» 이라 권한 두 칸 + GitHub 칸은 «있고 0» 으로 둔다.
+    permissionHumanAnswers: 0,
+    permissionUndecidable: 0,
+    githubHumanActions: 0,
     ...extra,
   };
 }
@@ -554,9 +558,11 @@ test("불변: 20분 기준 상수 무변 · 보고문의 1-C 판정 자격 줄 �
     confirmedZeroStreakLine:
       "연속 확인-0 일수: 0일(부분 — 마지막 끊김 2026-11-13 줄 없음)",
   });
+  // HYK-255-p2d-nonecause-1 바뀐 단언(판정 2026-11-16 1804 상신 1): 옛 상수 줄 + 개행 + 연속 줄 접두 -> 프로덕션 렌더 출력(자격 줄 인자 없음 = 판독 불가 원인) + 개행 + 연속 줄 접두.
+  // 뜻은 무변: 자격 줄 바로 아래에 연속 줄이 온다.
   assert.ok(
     text.includes(
-      "1-C 판정 자격: 없음 — 미계수 범위가 남아 있어 «ㄴ=0» 판정 불가\n연속 확인-0 일수:",
+      `${core.renderQualificationLine(core.computeQualification({}))}\n연속 확인-0 일수:`,
     ),
   );
   assert.ok(!/자격: 있음|충족|달성|통과/.test(text));

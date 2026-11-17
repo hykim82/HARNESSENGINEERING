@@ -29,7 +29,12 @@ import {
   DEFAULT_ARCHIVE_ROOT,
 } from "./partial-count-report.mjs";
 import { runReachOnce } from "./reach-report.mjs";
-import { formatKst, renderRelayLedgerAuxLines } from "./partial-count-core.mjs";
+import {
+  formatKst,
+  renderRelayLedgerAuxLines,
+  renderQualificationLine,
+  computeQualification,
+} from "./partial-count-core.mjs";
 
 const HOUR = 60 * 60 * 1000;
 const DAY = 24 * HOUR;
@@ -1216,11 +1221,9 @@ test("runPartialCountOnce: outboxDir을 주면 보조 관측 줄과 수집기 �
       ),
     );
     assert.ok(text.includes("보내는함보조수집기 OK(스캔 2건)"));
-    assert.ok(
-      text.includes(
-        "1-C 판정 자격: 없음 — 미계수 범위가 남아 있어 «ㄴ=0» 판정 불가",
-      ),
-    );
+    // HYK-255-p2d-nonecause-1 바뀐 단언(판정 2026-11-16 1804 상신 1): 옛 상수 줄 동등 -> 프로덕션 렌더 출력(일별 줄 입력 없는 미결선 호출 = 원인 «기계 계수 범위 기준 판독 불가»).
+    // 보조 관측 줄 · 미계수 예시가 자격 줄을 바꾸지 않는다는 뜻은 무변.
+    assert.ok(text.includes(renderQualificationLine(computeQualification({}))));
     assert.ok(text.includes("알려진 미계수 예시: 7개(uncounted-examples/v2)"));
     // HYK-255-outbox-aux-1-r2 (coder-task.md §2 ⓔ 변이 ⑵ "조건을 항상
     // v1로" 고정하면 이 단언이 RED) -- 결선된 실행에서는 8번 항목

@@ -855,6 +855,8 @@ function dailyLineFor(day, overrides = {}) {
     concurrentTracksMax: 1,
     delivered: 3,
     uncountedRanges: ["U1"],
+    // HYK-255-p2c-nofield-1 -- 칸 없는 줄 = 끊김(판정 1404): GitHub 칸은 이 파일의 관심 밖이라 «있고 0» 으로 둔다(권한 칸은 시험마다 넣는다).
+    githubHumanActions: 0,
     ...overrides,
   };
 }
@@ -909,22 +911,26 @@ test("일별: 칸이 있는데 값 모양이 틀리면 null(값 모름) -- 0 으
   assert.equal(tick.permissionUndecidable, null);
 });
 
-test("연속 확인-0: 사람 답 > 0 · 판정 불가 > 0 · 칸 null 인 날은 끊김 사유 · 0 · 0 인 날과 «칸 없는 옛 줄»은 이어진다", () => {
+test("연속 확인-0: 사람 답 > 0 · 판정 불가 > 0 · 칸 null 인 날은 끊김 사유 · 0 · 0 인 날은 이어진다 · «칸 없는 옛 줄» 은 끊긴다(HYK-255-p2c-nofield-1 · 판정 1404)", () => {
   const nowMs = kst("2026-11-14 09:00");
   const lines = [
     dailyLineFor("2026-11-13", {
       permissionHumanAnswers: 0,
       permissionUndecidable: 0,
     }),
-    dailyLineFor("2026-11-12"), // 옛 줄 -- 새 칸 없음
+    dailyLineFor("2026-11-12"), // 옛 줄 -- 권한 칸 없음 = 끊김(옛 규칙 «이어진다» 가 뒤집혔다)
     dailyLineFor("2026-11-11", {
       permissionHumanAnswers: 0,
       permissionUndecidable: 0,
     }),
   ];
   const ok = core.computeConfirmedZeroStreak({ lines, nowMs });
-  assert.equal(ok.days, 3);
-  assert.equal(ok.lastBreak.reasons[0], "줄 없음");
+  assert.equal(ok.days, 1, "11-13 만 센다 -- 칸 없는 11-12 에서 끊긴다");
+  assert.equal(ok.lastBreak.day, "2026-11-12");
+  assert.deepEqual(ok.lastBreak.reasons, [
+    "권한 확인창 사람 답 칸 없음",
+    "권한 판정 불가 칸 없음",
+  ]);
 
   const human = core.computeConfirmedZeroStreak({
     nowMs,

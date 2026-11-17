@@ -134,10 +134,13 @@ test("ORCH 정정 고정: 실제 생산 경로가 만든 부분 계수 파일에
 
     // ⓐ -- 부정문 2개는 «정직 장치»다(coder-task.md §0) -- 지워지면
     // 계약이 약해진다. 둘 중 하나라도 지워지면 이 assert가 빨간불이다.
+    // HYK-255-p2d-nonecause-1 바뀐 단언(판정 2026-11-16 1804 상신 1): 옛 상수 줄 포함 -> «머리 — 원인 — 꼬리» 의 머리 · 꼬리 토막. 부정문 1 의 뜻(«ㄴ=0» 판정 불가)은 꼬리에 그대로 있다.
+    const qualLine = written
+      .split("\n")
+      .find((line) => line.startsWith("1-C 판정 자격: "));
     assert.ok(
-      written.includes(
-        "1-C 판정 자격: 없음 — 미계수 범위가 남아 있어 «ㄴ=0» 판정 불가",
-      ),
+      qualLine?.startsWith("1-C 판정 자격: 없음 — ") &&
+        qualLine.endsWith(" — 미계수 범위가 남아 있어 «ㄴ=0» 판정 불가"),
       "부정문 1(«ㄴ=0» 판정 불가)이 실제 생산 출력에서 사라졌다",
     );
     assert.ok(
