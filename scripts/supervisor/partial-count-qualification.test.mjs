@@ -22,8 +22,15 @@ const KINDS_SCHEMA = "partial-count-uncountable-kinds/v1";
 const QUAL_PREFIX = "1-C 판정 자격: ";
 const DIAG_PREFIX = "종류 설정 진단: ";
 const SCOPE_PREFIX = "기계 계수 범위 기준: ";
-const NONE_LINE =
-  "1-C 판정 자격: 없음 — 미계수 범위가 남아 있어 «ㄴ=0» 판정 불가";
+// HYK-255-p2d-nonecause-1 바뀐 단언(판정 2026-11-16 1804 상신 1): 옛 단일 상수 줄 NONE_LINE -> «없음» 원인 3종의 프로덕션 렌더 출력(칸마다 실제 갈래의 원인을 단언).
+// 머리 · 꼬리 뜻 무변 -- 줄 원인 구분 시험 자체는 partial-count-nonecause.test.mjs.
+const noneLine = (cause) =>
+  core.renderQualificationLine({ state: "none", cause });
+const NONE_UNMET = noneLine(core.QUALIFICATION_NONE_CAUSE.SCOPE_UNMET);
+const NONE_UNREADABLE = noneLine(
+  core.QUALIFICATION_NONE_CAUSE.SCOPE_UNREADABLE,
+);
+const NONE_KINDS = noneLine(core.QUALIFICATION_NONE_CAUSE.KINDS_CONFIG);
 const PROOF_DEVICE = "scripts/synthetic-proof-device.mjs";
 const FAIL404 = { ok: false, status: 404, json: null, linkHeader: null };
 
@@ -49,6 +56,10 @@ const dayLine = (offset, over = {}) => ({
   coverageGaps: { count: 0, totalMs: 0 },
   concurrentTracksMax: 2,
   uncountedExampleIds: [],
+  // HYK-255-p2c-nofield-1 -- 칸 없는 줄 = 끊김(판정 1404): «깨끗한 날» 은 권한 두 칸 + GitHub 칸이 있고 값 0 이다.
+  permissionHumanAnswers: 0,
+  permissionUndecidable: 0,
+  githubHumanActions: 0,
   ...over,
 });
 const dayLines = (from, to, over = () => ({})) =>
@@ -250,7 +261,7 @@ test("기준 미충족(6일) + 설정 15행: «없음» 줄 바이트 그대로 
     { machineScopeDailyLines: UNMET_LINES },
     root,
   );
-  assert.equal(qualOf(withKinds.reportText), NONE_LINE);
+  assert.equal(qualOf(withKinds.reportText), NONE_UNMET); // 기준 미충족 6일 = 원인 미충족
   assert.equal(diagOf(withKinds.reportText), undefined);
   assert.equal(withKinds.reportText, withoutKinds.reportText);
 });
@@ -265,7 +276,8 @@ test("일별 줄 입력이 없거나(미결선) 못 읽었거나(null) 기계 �
     const { reportText } = await runReport(repo, {
       machineScopeDailyLines: lines,
     });
-    assert.equal(qualOf(reportText), NONE_LINE, String(lines?.length));
+    // 미결선 · 못 읽음 · 기계 계수 설정 깨짐 = 기준을 모른다 = 원인 판독 불가.
+    assert.equal(qualOf(reportText), NONE_UNREADABLE, String(lines?.length));
     assert.equal(diagOf(reportText), undefined);
   }
 });
@@ -316,7 +328,7 @@ test("종류 설정 없음 · 깨짐 · 스키마 불일치 · 모르는 handlin
     const { reportText } = await runReport(buildRepo(config, { files }), {
       machineScopeDailyLines: MET_LINES,
     });
-    assert.equal(qualOf(reportText), NONE_LINE, name);
+    assert.equal(qualOf(reportText), NONE_KINDS, name); // 기준 충족 + 종류 설정 읽기 실패 = 원인 종류 설정
     const diag = diagOf(reportText);
     assert.notEqual(diag, undefined, `${name}: 진단 줄`);
     assert.equal(
@@ -350,7 +362,7 @@ test("증명 장치가 저장소에 실재하면 예방 증명 1 -- 장치 경�
       ),
       { machineScopeDailyLines: MET_LINES },
     );
-    assert.equal(qualOf(reportText), NONE_LINE, bad);
+    assert.equal(qualOf(reportText), NONE_KINDS, bad);
     assert.notEqual(diagOf(reportText), undefined, bad);
   }
 });

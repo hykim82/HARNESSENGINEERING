@@ -716,6 +716,8 @@ function dailyLineFor(day, overrides = {}) {
     concurrentTracksMax: 1,
     delivered: 3,
     uncountedRanges: ["U1"],
+    // HYK-255-p2c-nofield-1 -- 칸 없는 줄 = 끊김(판정 1404): GitHub 칸은 이 파일의 관심 밖이라 «있고 0» 으로 둔다(권한 칸은 시험마다 넣는다).
+    githubHumanActions: 0,
     ...overrides,
   };
 }

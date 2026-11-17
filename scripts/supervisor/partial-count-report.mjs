@@ -1322,8 +1322,10 @@ async function readUncountableKindsConfig({ git, uncountableKindsPath }) {
   return missing ? { ok: false, reason: missing } : parsed;
 }
 
-// 보고 줄들 -- 일별 줄 입력이 없으면(undefined = 미결선 호출자) 전부 없음(= 자격 줄 상수 · 새 줄 0개). 값을 모르면 기준 줄이 UNKNOWN(사유).
+// 보고 줄들 -- 일별 줄 입력이 없으면(undefined = 미결선 호출자) 전부 없음(= 자격 줄은 보고서 머리 기본값 «기준 판독 불가» · 새 줄 0개). 값을 모르면 기준 줄이 UNKNOWN(사유) ·
+// 자격 줄도 기본값(판독 불가) 그대로다(설정 못 읽음 · 일별 줄 못 읽음 = 원인 «기계 계수 범위 기준 판독 불가»).
 // 종류 설정은 «기준 충족» 일 때만 읽는다 -- 미충족 · UNKNOWN 이면 자격은 어차피 «없음» 이라 읽기 실패 진단이 매 회차 소음이 되지 않는다.
+// HYK-255-p2d-nonecause-1 -- «없음» 원인은 core 의 순수 함수(computeQualification -> qualificationNoneCause)가 고른다: 기준 미충족 · 종류 설정 읽기 실패는 이 결선이 그 값을 줄로 렌더해 넘긴다.
 // -> {machineScopeLine?, qualificationLine?, qualificationDiagLine?}
 async function resolveMachineScope({
   dailyLines,
@@ -1358,11 +1360,21 @@ async function resolveMachineScope({
     minConcurrentTracks: config.minConcurrentTracks,
   });
   const machineScopeLine = renderMachineScopeLine(scope);
-  if (scope.met !== true) return { machineScopeLine };
+  if (scope.met !== true) {
+    return {
+      machineScopeLine,
+      qualificationLine: renderQualificationLine(
+        computeQualification({ machineScope: scope, kinds: null }),
+      ),
+    };
+  }
   const kinds = await readUncountableKindsConfig({ git, uncountableKindsPath });
   if (!kinds.ok) {
     return {
       machineScopeLine,
+      qualificationLine: renderQualificationLine(
+        computeQualification({ machineScope: scope, kinds: null }),
+      ),
       qualificationDiagLine: `${QUALIFICATION_DIAG_PREFIX}종류 설정 읽기 실패(${oneLineReason(kinds.reason)}) — «1-C 판정 자격» 은 «없음» 그대로`,
     };
   }
