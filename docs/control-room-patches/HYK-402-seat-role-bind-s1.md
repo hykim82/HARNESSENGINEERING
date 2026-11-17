@@ -43,7 +43,8 @@ $list = ($listRaw | ConvertFrom-Json)
 
 ```powershell
 # HYK-402 S2: 역할 결속 좌석 선별 -- 판단은 저장소 CLI(seat-role-bind-cli.mjs), 관제실은 호출 + 종료코드 분기.
-$seatBindCliPath = Join-Path $Worktree "scripts/relay/seat-role-bind-cli.mjs"
+$seatBindCliRel = "scripts/relay/seat-role-bind-cli.mjs"
+$seatBindCliPath = Join-Path $Worktree $seatBindCliRel
 if (-not (Test-Path $seatBindCliPath)) {
   # 열쇠를 적는다 (HYK-472 ENGINE_DETECT_CLI_MISSING 관례, 09-16 전 레인 잠김 전례).
   Write-Error "SEAT_ROLE_BIND_CLI_MISSING: $seatBindCliPath 가 없다 -- 좌석 역할을 대조할 수 없으므로 배달을 계속하지 않는다(HYK-402 기계 게이트, fail-closed). 열쇠 = 이 CLI 를 master 에 넣은 PR 이 병합됐는지 확인하고, 됐다면 «대상 워크트리를 그 master 로 리베이스»하라. ⛔이 게이트를 무르게 고치지 마라."
@@ -88,6 +89,15 @@ Write-Host "      [HYK-402] SELECTED pane=$($seat.tabId):$($seat.leafId) role=$b
 ```
 
 (`$boundSeatRole` 은 편집 ②에서 정해진 스크립트 범위 변수다. 편집 ②를 거치지 않은 경로가 없는지 S2 적용 때 확인한다 — 빈 값이면 영수증 CLI 가 `--bound-seat-role needs a non-empty value` 로 **거부**하므로 조용히 누락되지 않는다.)
+
+## ⛔S2 선행 조건 — 설치기 복사 목록 (이 라운드는 설치기를 건드리지 않았다)
+
+배달기가 이 CLI 를 «경로로 호출»하면, 설치된 하네스 워크트리에 그 파일이 있어야 한다. 현재 설치기 복사 목록(`templates/harness-init/install.mjs`)에서 실측한 것:
+
+- `scripts/relay/seat-role-bind-cli.mjs` · `scripts/relay/seat-role-bind-core.mjs` — ⛔**`ENFORCEMENT_RELAY_FILES` 에 없다**(이 라운드가 새로 만든 파일이다).
+- 이 둘이 import 하는 `scripts/check/seat-origin-registry.mjs` · `scripts/check/engine-profile.mjs` — 이미 `ENFORCEMENT_CHECK_FILES` 에 있다(`engine-profiles.json` 설정 파일의 설치는 HYK-153 쪽이 이미 다루는 것으로 보이나 **이 라운드는 확인하지 못했다**).
+
+그래서 위 편집 ②의 코드는 `Join-Path $Worktree "scripts/relay/…"` **한 줄 문면 대신 변수로 경로를 조립**했다. 이유: 설치기 가드 `scripts/check/installer-external-path-callers.test.mjs` 는 이 폴더의 문서에서 그 한 줄 문면을 «관제실 ps1 이 실제로 부르는 호출»로 읽고 복사 목록 누락을 빨강으로 만든다 — 그런데 이 문서는 **적용되지 않은 초안**이라 지금은 호출이 없다(거짓 호출을 가드에 보이면 안 된다). ⇒ **S2 에서 적용할 때**: ⑴ 먼저 `ENFORCEMENT_RELAY_FILES` 에 두 파일을 넣는다(설치기 변경 = S2 범위에서 책임자 판정) ⑵ 그 뒤 이 문서의 두 줄(`$seatBindCliRel` 대입 + `Join-Path`)을, 다른 패치 문서들처럼 `Join-Path $Worktree` 바로 뒤에 경로 문자열을 직접 적은 한 줄로 합쳐 가드가 켜지게 한다(이 문장에 그 한 줄을 그대로 적지 않은 것도 같은 이유다 -- 가드가 줄 단위 문면을 본다). ⛔순서를 바꾸면(문서만 먼저 한 줄로 합치면) 가드가 빨강이 되고, 가드를 우회해 ps1 만 먼저 적용하면 **설치된 워크트리에서 exit 9(CLI 없음)로 전 배달이 막힌다**.
 
 ## 적용 순서 · 배포 위험 (PM 설계 §다-주의 승계)
 

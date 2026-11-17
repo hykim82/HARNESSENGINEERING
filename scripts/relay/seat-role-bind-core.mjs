@@ -1,6 +1,8 @@
-// HYK-402 S1 (seat-role-s1-1) -- 역할 결속 좌석 선별 코어. 순수 함수 · I/O 0 ·
-// `orca` 호출 0 · 네트워크 0 (입력 = 이미 받아 둔 terminal list 객체 + 등록부
-// 레코드 배열).
+import { getBannerMarkerPattern } from "../check/engine-profile.mjs";
+
+// HYK-402 S1 (seat-role-s1-1) -- 역할 결속 좌석 선별 코어. 순수 함수 · 호출마다
+// I/O 0 (모듈 로드 때 엔진 설정 파일을 한 번 읽는다 -- 위 import) · `orca` 호출 0 ·
+// 네트워크 0 (입력 = 이미 받아 둔 terminal list 객체 + 등록부 레코드 배열).
 //
 // 왜 (HYK-402 본문): HYK-400 레인에서 CODER 2R · REVIEW 2R · CODER 3R 이 전부
 // 같은 좌석에 배정돼 «작성자와 검토자가 동일 세션»이 됐다. 배달기의 좌석
@@ -84,12 +86,22 @@ export function normalizeWorktreePath(p) {
   return p.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
 }
 
-// 배달기 Looks-Like-Agent 와 같은 판정(D12 + D15). 마커 문자열은 배달기와
-// 같은 목록이다 -- 이 목록이 늘면 배달기도 같이 늘려야 하지만, 이 함수는
-// 역할 판정에 쓰이지 않고 «에이전트처럼 보이는가»에만 쓰인다.
+// 배달기 Looks-Like-Agent 와 같은 «모양»의 판정(D12 + D15). 이 함수는 역할
+// 판정에 쓰이지 않고 «에이전트처럼 보이는가»에만 쓰인다.
+//
+// 배너 마커는 여기에 새로 적지 않는다 -- 저장소의 단일 설정(engine-profiles.json
+// bannerMarkerPatterns.seatCensusAgentBanner, HYK-153 piece B)에서 읽는다
+// (그래서 이 파일에는 엔진 이름 리터럴이 0이다 -- engine-name-literal 허용 목록을
+// 늘리지 않는다). 배달기 ps1 의 마커 목록과의 차이 2가지(실측 · 정직 한계):
+// ⑴ 설정판은 `Fable` 이 하나 더 있다 ⑵ 설정판은 대소문자를 무시한다 -- PowerShell
+// `-match` 도 기본이 대소문자 무시라서 ps1 쪽과 같은 방향이다.
+// 이 코어가 «에이전트처럼 보인다»를 배달기보다 조금 더 넓게 볼 수 있다는 뜻이다
+// (미등록 에이전트 거부 쪽으로 기운다 = 안전 쪽).
 const SHELL_PROMPT_TAIL_RE = /PS [A-Za-z]:\\[^\r\n]*>\s*$/;
-const AGENT_MARKER_RE =
-  /gpt-5\.6|Sonnet|Opus|\[CODER\]|\[REVIEW\]|bypass permissions|MCP startup|weekly \d/;
+const AGENT_MARKER_RE = new RegExp(
+  getBannerMarkerPattern("seatCensusAgentBanner"),
+  "i",
+);
 
 export function endsWithShellPrompt(preview) {
   return typeof preview === "string" && SHELL_PROMPT_TAIL_RE.test(preview);

@@ -592,6 +592,12 @@ test("코어: looksLikeAgentPreview 는 마커가 있어도 tail 이 PS 프롬�
   assert.equal(looksLikeAgentPreview(undefined), false);
 });
 
+test("코어: 에이전트 배너 마커는 저장소 단일 설정(seatCensusAgentBanner)에서 온다 -- 설정판의 Fable · 대소문자 무시를 따른다", () => {
+  assert.equal(looksLikeAgentPreview("FABLE 5.2 · weekly 12%"), true);
+  assert.equal(looksLikeAgentPreview("fable"), true);
+  assert.equal(looksLikeAgentPreview("just a plain scrollback line"), false);
+});
+
 test("코어: lookupRegisteredRole 은 asOf 이전 마지막 등록을 쓰고 이후 등록만 있으면 NOT_YET_REGISTERED", () => {
   const records = [
     regRecord("p:1", "CODER", "2026-11-01T00:00:00.000Z"),
