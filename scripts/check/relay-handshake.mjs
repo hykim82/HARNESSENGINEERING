@@ -3725,12 +3725,15 @@ function resolveAuthShadowContext({
 
 // HYK-434-lint-1: extracted from checkRelayHandshake (same ESLint max-lines-
 // per-function reason as this file's other HYK-257-done-stamp-lint-1/
-// HYK-398 extractions) -- composes the two checks that sit at this exact
-// spot in the pipeline (resolveDispatchRecordExistence then, only if that
-// passed, resolveG1DispatchVerificationVerdict) and returns the ok:false
+// HYK-398 extractions) -- composes the two rejecting checks that sit at this
+// exact spot in the pipeline (resolveDispatchRecordExistence then, only if
+// that passed, resolveG1DispatchVerificationVerdict) and returns the ok:false
 // verdict to return immediately, or null when neither rejects (proceed).
-// Order/reasons/behavior are byte-identical to the inline version this
-// replaces -- only moved.
+// Order/reasons of those two rejecting checks are byte-identical to the
+// inline version this replaces -- only moved. HYK-390/HYK-392 later put a
+// third, NON-rejecting step between them (runAuthShadowSafely: record-only
+// authenticity shadow) -- it never returns a verdict and never changes the
+// two checks' order, reasons or return values.
 function resolveDispatchAndG1Verdict({
   role,
   taskId,
