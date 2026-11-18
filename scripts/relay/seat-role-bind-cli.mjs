@@ -3,6 +3,8 @@ import { readRegistryDiagnostics } from "../check/seat-origin-registry.mjs";
 import {
   SEAT_BIND_REASON,
   KNOWN_SEAT_ROLES,
+  DELIVERY_BIND_VERDICT,
+  decideSeatBindAtDelivery,
   normalizeRole,
   parseTerminalListText,
   selectRoleBoundSeat,
@@ -25,6 +27,12 @@ import {
 // S1 만으로는 살아 있는 배달이 바뀌지 않는다: 이 CLI 를 배달기가 부르도록
 // 결선하는 일(S2 · 관제실 dispatch-worker.ps1 변경)은 이 라운드 범위 밖이다.
 // 칠 정확한 줄은 docs/control-room-patches/HYK-402-seat-role-bind-s1.md.
+//
+// HYK-402 S2 (seat-role-s2-1): `--record-only` 모드 -- 배달 «순간» 판정을 기록용으로만
+// 낸다. 종료코드는 «언제나 0» (사용법 오류 · 깨진 입력 · 예외도 0 -- 판정은 stdout
+// 한 줄 JSON `{"seat_bind":{verdict,reason,...}}` 의 verdict 가 말한다). 어떤 경우에도
+// 배달기를 막지 않는다: 판정 실패는 ERROR · 근거 없음은 UNDECIDABLE 로 «적힌다».
+// S1 의 거부 문면 대신 쓰는 패치는 docs/control-room-patches/HYK-402-seat-role-bind-s2.md.
 
 export const USAGE =
   "usage: seat-role-bind-cli.mjs --terminal-list <json file> --worktree <path> --role <CODER|REVIEW|VERIFY|PM> --registry-path <jsonl> [--handle <handle>]\n" +
@@ -248,10 +256,117 @@ function runAudit(p) {
   };
 }
 
+// ---- S2: 배달 순간 «기록만» 모드 ------------------------------------------------
+
+const RECORD_ONLY_FLAG_TO_FIELD = Object.freeze({
+  "--terminal-list": "terminalList",
+  "--worktree": "worktree",
+  "--role": "role",
+  "--registry-path": "registryPath",
+  "--handle": "handle",
+  "--delivered-at-ms": "deliveredAtMs",
+});
+
+function recordOnlyVerdict(verdict, reason, extra = {}) {
+  return {
+    exitCode: 0,
+    stdout: JSON.stringify({
+      seat_bind: { verdict, reason, candidates: "", ...extra },
+    }),
+    stderr: "",
+  };
+}
+
+function parseRecordOnlyArgv(argv) {
+  const parsed = {};
+  for (let i = 0; i < argv.length; i += 1) {
+    if (argv[i] === "--record-only") continue;
+    const field = RECORD_ONLY_FLAG_TO_FIELD[argv[i]];
+    if (!field) return { error: `unrecognized argument '${argv[i]}'` };
+    const value = argv[i + 1];
+    if (typeof value !== "string" || value === "" || value.startsWith("--")) {
+      return { error: `flag '${argv[i]}' needs a value` };
+    }
+    parsed[field] = value;
+    i += 1;
+  }
+  return { parsed };
+}
+
+function loadRecordOnlyRegistry(registryPath) {
+  if (!existsSync(registryPath)) {
+    return { fail: recordOnlyVerdict("UNDECIDABLE", "REGISTRY_ABSENT") };
+  }
+  try {
+    const { records, corruptedLineCount } =
+      readRegistryDiagnostics(registryPath);
+    return { records, corruptedLineCount };
+  } catch {
+    return { fail: recordOnlyVerdict("ERROR", "REGISTRY_UNREADABLE") };
+  }
+}
+
+function runRecordOnlyBody(argv) {
+  const { parsed, error } = parseRecordOnlyArgv(argv);
+  if (error) return recordOnlyVerdict("ERROR", "RECORD_ONLY_ARGS_INVALID");
+  const missing = ["terminalList", "worktree", "role", "registryPath"].filter(
+    (k) => !parsed[k],
+  );
+  if (missing.length > 0)
+    return recordOnlyVerdict("ERROR", "RECORD_ONLY_ARGS_MISSING");
+  let deliveredAtMs;
+  if (parsed.deliveredAtMs !== undefined) {
+    deliveredAtMs = Number(parsed.deliveredAtMs);
+    if (!Number.isFinite(deliveredAtMs) || deliveredAtMs <= 0)
+      return recordOnlyVerdict("ERROR", "DELIVERED_AT_INVALID");
+  } else {
+    deliveredAtMs = Date.now();
+  }
+  let listText;
+  try {
+    listText = readFileSync(parsed.terminalList, "utf8");
+  } catch {
+    return recordOnlyVerdict("ERROR", SEAT_BIND_REASON.TERMINAL_LIST_INVALID);
+  }
+  const list = parseTerminalListText(listText);
+  if (!list.ok)
+    return recordOnlyVerdict("ERROR", SEAT_BIND_REASON.TERMINAL_LIST_INVALID);
+  const registry = loadRecordOnlyRegistry(parsed.registryPath);
+  if (registry.fail) return registry.fail;
+  const d = decideSeatBindAtDelivery({
+    terminals: list.terminals,
+    worktree: parsed.worktree,
+    role: parsed.role,
+    registryRecords: registry.records,
+    handle: parsed.handle,
+    deliveredAtMs,
+  });
+  return recordOnlyVerdict(d.verdict, d.reason, {
+    candidates: d.candidates,
+    delivered_at_ms: deliveredAtMs,
+    registry_records: registry.records.length,
+    registry_corrupted_lines: registry.corruptedLineCount,
+    ...(d.selectReason ? { select_reason: d.selectReason } : {}),
+  });
+}
+
+// 어떤 예외도 «종료코드 0 + ERROR JSON» 으로 접는다(배달기를 막지 않는다).
+export function runRecordOnly(argv) {
+  try {
+    return runRecordOnlyBody(argv);
+  } catch {
+    return recordOnlyVerdict(
+      DELIVERY_BIND_VERDICT.ERROR,
+      "RECORD_ONLY_EXCEPTION",
+    );
+  }
+}
+
 // argv -> { exitCode, stdout, stderr }. 파일 읽기 외 부작용 0.
 export function runSeatRoleBindCli(argv) {
   if (argv.includes("--help"))
     return { exitCode: 0, stdout: USAGE, stderr: "" };
+  if (argv.includes("--record-only")) return runRecordOnly(argv);
   const { parsed, error } = parseArgv(argv);
   const problem = error ?? (parsed ? validateMode(parsed) : null);
   if (problem) {
@@ -267,7 +382,15 @@ const invokedDirectly =
     .replace(/\\/g, "/")
     .endsWith("scripts/relay/seat-role-bind-cli.mjs");
 if (invokedDirectly) {
-  const result = runSeatRoleBindCli(process.argv.slice(2));
+  const argv = process.argv.slice(2);
+  let result;
+  try {
+    result = runSeatRoleBindCli(argv);
+  } catch (err) {
+    // S1 모드의 예외는 지금까지처럼 터진다. record-only 만 «0 + ERROR» 로 접는다.
+    if (!argv.includes("--record-only")) throw err;
+    result = recordOnlyVerdict("ERROR", "RECORD_ONLY_EXCEPTION");
+  }
   if (result.stdout) console.log(result.stdout);
   if (result.stderr) console.error(result.stderr);
   process.exit(result.exitCode);
