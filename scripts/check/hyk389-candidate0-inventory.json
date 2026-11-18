@@ -159,6 +159,42 @@
       "confidence": "미확인"
     },
     {
+      "id": "launcher-memory-gate-terminal-create",
+      "actor": "human-or-orch",
+      "channel": "launcher-direct",
+      "adapter_mediated": false,
+      "command": "orca terminal create --worktree $WTID --command $cmd --title $Title --json",
+      "purpose": "HYK-389 조각 1 보강(관제실 라이브 파일 직접 대조) -- memory-gate.ps1 이 메모리 게이트를 통과한 뒤 좌석(터미널)을 «새로 만든다»: 쓰기 동사(terminal create) -- orca 기록 shim 의 기록 대상",
+      "legitimate": true,
+      "alternative": "없음 -- 어댑터를 거치지 않는 관제실 스크립트의 독립 직접 호출(조각 2 의 ORCH 런처 결선 전까지 기록 shim 이 PATH 에 얹히지 않으면 보이지 않는다)",
+      "source": "CONTROL_ROOM/memory-gate.ps1:233 (`$seat = & orca terminal create ...` · 2026-11-18 라이브 파일 읽기 전용 직접 대조 · 줄 번호 다시 잼)",
+      "confidence": "확실"
+    },
+    {
+      "id": "launcher-worktree-create-sibling-tab-close",
+      "actor": "human-or-orch",
+      "channel": "launcher-direct",
+      "adapter_mediated": false,
+      "command": "orca terminal close --terminal $t.handle --json",
+      "purpose": "HYK-389 조각 1 보강 -- orca-worktree-create.ps1 이 `orca worktree create` 직후 Orca 가 덤으로 띄운 빈 pwsh 형제 탭(D12 · B-15)을 «닫는다»: 쓰기 동사(terminal close) -- orca 기록 shim 의 기록 대상. 같은 파일의 :23 `terminal list` 와 :40 `worktree create` 는 이 목록 밖(조회 · shim 쓰기 동사 목록에 없는 도메인)",
+      "legitimate": true,
+      "alternative": "없음 -- 어댑터를 거치지 않는 관제실 스크립트의 독립 직접 호출",
+      "source": "CONTROL_ROOM/orca-worktree-create.ps1:50 (`$x = orca terminal close --terminal $t.handle --json ...` · 2026-11-18 라이브 파일 읽기 전용 직접 대조 · 줄 번호 다시 잼)",
+      "confidence": "확실"
+    },
+    {
+      "id": "launcher-dispatch-worker-terminal-send-live",
+      "actor": "human-or-orch",
+      "channel": "launcher-direct",
+      "adapter_mediated": false,
+      "command": "orca terminal send --terminal $handle --text $goText --json / orca terminal send --terminal $handle --enter --json",
+      "purpose": "HYK-389 조각 1 보강 -- dispatch-worker.ps1 이 워커 좌석에 기동 문구를 «붙여 넣고(--text)» 엔터를 «친다(--enter)»: 쓰기 동사(terminal send) 2회 -- orca 기록 shim 의 기록 대상(--text 는 길이만 기록). 앞서 등재된 launcher-seat-text-paste · launcher-seat-enter-submit 은 2026-08-20 스냅샷 fixture 줄 번호(519/521)이고 이 항목은 «라이브 파일» 줄 번호다",
+      "legitimate": true,
+      "alternative": "없음 -- 어댑터에 입력 빌더가 있어도 이 launcher 호출부는 그것을 거치지 않는 독립 직접 호출",
+      "source": "CONTROL_ROOM/dispatch-worker.ps1:676,678 (`& orca terminal send --terminal $handle --text $goText --json | Out-Null` / `--enter` · 2026-11-18 라이브 파일 읽기 전용 직접 대조 · 줄 번호 다시 잼 -- 스냅샷의 519/521 과 달라졌다)",
+      "confidence": "확실"
+    },
+    {
       "id": "manual-seat-teardown",
       "actor": "human-or-orch",
       "channel": "seat-direct",

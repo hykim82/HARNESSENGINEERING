@@ -23,6 +23,23 @@ export const LEGACY_EXEMPT = Object.freeze([
   "scripts/relay/orca-spike-live.mjs",
 ]);
 
+// HYK-389-shim-core-1 (조각 1): «명시 예외» -- 새 위임 지점. orca 기록 shim 의 CLI
+// 는 진짜 orca 바이너리를 «주입된 경로 변수»(HARNESS_ORCA_REAL_BIN)로 spawn 한다.
+// 이 정적 스캔은 문자열 리터럴 "orca" 호출만 잡으므로 그 변수 호출은 어차피
+// 스캔에 걸리지 않는다 -- 그래도 «어댑터 밖에 orca 를 실행하는 곳이 하나 더
+// 생겼다» 는 사실을 조용히 두지 않고 여기에 사유와 함께 등재한다(G9 정직).
+// ⚠️정직 한계: 이 등재는 허용이 아니라 «기록» 이다. 이 파일이 리터럴 "orca" 를
+// spawn 하면 PATH 앞의 shim 자신을 다시 불러 무한 재귀가 되므로, 그 금지는 경계
+// 시험의 별도 칸(orca-cli-boundary.test.mjs)이 고정한다. OBSERVER 의 위임
+// 지점이며 차단 장치가 아니다 -- 앵커 아님.
+export const DELEGATION_POINTS = Object.freeze([
+  Object.freeze({
+    path: "scripts/relay/orca-shim-cli.mjs",
+    reason:
+      'HYK-389 조각 1 -- orca 기록 shim 의 위임 지점: 쓰기 동사를 원장 1줄로 남긴 뒤 진짜 orca 바이너리(HARNESS_ORCA_REAL_BIN 주입 경로 · 리터럴 "orca" 아님)로 argv 를 그대로 넘긴다. 기록 단계 · OBSERVER · 앵커 아님.',
+  }),
+]);
+
 const EXEC_CALL_RE =
   /\b(?:spawnSync|spawn|execFileSync|execFile|execSync|exec)\s*\(\s*["'`]orca["'`]/;
 
@@ -30,9 +47,17 @@ const EXEC_CALL_RE =
 // 주입 가능), 실 파일시스템 순회는 scanRepoForOrcaExecCalls가 담당.
 export function scanForOrcaExecCalls(
   files,
-  { adapterPath = ADAPTER_PATH, legacyExempt = LEGACY_EXEMPT } = {},
+  {
+    adapterPath = ADAPTER_PATH,
+    legacyExempt = LEGACY_EXEMPT,
+    delegationPoints = DELEGATION_POINTS,
+  } = {},
 ) {
-  const exempt = new Set([adapterPath, ...legacyExempt]);
+  const exempt = new Set([
+    adapterPath,
+    ...legacyExempt,
+    ...delegationPoints.map((point) => point.path),
+  ]);
   const violations = [];
   for (const f of Array.isArray(files) ? files : []) {
     if (exempt.has(f.path)) continue;
