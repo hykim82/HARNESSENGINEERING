@@ -395,7 +395,21 @@
       "uncertain_exit": null,
       "owner": "ORCH",
       "claude_only": false,
-      "invocation_note": "Not hook-installed anywhere -- ORCH calls this directly (`node relay-handshake.mjs <role>`) at consume time. install_targets is empty by design; ALIVE here means 'script+test exist and pass', not 'wired into a hook'."
+      "invocation_note": "Not hook-installed anywhere -- ORCH calls this directly (`node relay-handshake.mjs <role>`) at consume time. install_targets is empty by design; ALIVE here means 'script+test exist and pass', not 'wired into a hook'. HYK-390-auth-shadow-2: this entry point never wires the Orca authenticity lookup (receipt shadow rows stay lookup_not_wired); the wired entry is `relay-consume` below."
+    },
+    {
+      "id": "relay-consume",
+      "substrate": "orch-direct",
+      "script": "scripts/relay/relay-consume.mjs",
+      "test": "scripts/relay/relay-consume.test.mjs",
+      "install_targets": [],
+      "expected_bad": "same as relay-handshake: a mismatched task_id / stale DONE / missing task file -> exit 1 with the identical stderr (the entry only wires the receipt-authenticity Orca lookup, then calls the same consumption function)",
+      "expected_good": "same as relay-handshake: a valid round -> exit 0, identical stdout/stderr, plus a record-only receipt-authenticity row (AUTHENTIC / DISPATCH_RECORD_UNAUTHENTIC / DISPATCH_AUTH_LOOKUP_FAILED) instead of lookup_not_wired",
+      "failure_exit": 1,
+      "uncertain_exit": null,
+      "owner": "ORCH",
+      "claude_only": false,
+      "invocation_note": "HYK-390-auth-shadow-2: not hook-installed -- ORCH calls `node scripts/relay/relay-consume.mjs <role> <harnessDir>` at consume time instead of `node relay-handshake.mjs <role>`. Record-only shadow: lookup failure, timeout or async rejection never changes the consumption result or exit code (blocking stays off)."
     },
     {
       "id": "pm-snapshot-gate",

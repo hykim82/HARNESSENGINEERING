@@ -4152,9 +4152,19 @@ export function removeArchivedWorktree(ctx, opts = {}) {
 // 유일한 지점 -- G9). run-step.mjs가 기본으로 이걸 쓰지만, 이 태스크에서는
 // 어디에서도 호출되지 않는다(비타협 제약: 실 orca 호출 0). 테스트는 전부
 // opts.execFn에 fake를 주입해 이 함수 자체를 실행하지 않는다.
-export function createOrcaExecFn({ spawnSyncFn = spawnSync } = {}) {
+// HYK-390 (영수증 진위 그림자): `timeoutMs` 를 주면 spawnSync 시한을 건다 --
+// 시한이 지나면 ETIMEDOUT 을 «던진다»(응답 없음 ≠ 빈 응답). 안 주면 옛 동작
+// 그대로(옵션 객체 모양도 그대로).
+export function createOrcaExecFn({ spawnSyncFn = spawnSync, timeoutMs } = {}) {
+  const hasTimeout = Number.isFinite(timeoutMs) && timeoutMs > 0;
+  const spawnOpts = hasTimeout
+    ? { shell: false, encoding: "utf8", timeout: timeoutMs }
+    : { shell: false, encoding: "utf8" };
   return function execFn(argv) {
-    const raw = spawnSyncFn("orca", argv, { shell: false, encoding: "utf8" });
+    const raw = spawnSyncFn("orca", argv, spawnOpts);
+    if (hasTimeout && isPlainObject(raw) && raw.error?.code === "ETIMEDOUT") {
+      throw raw.error;
+    }
     if (
       isPlainObject(raw) &&
       raw.error &&
@@ -4172,6 +4182,67 @@ export function createOrcaExecFn({ spawnSyncFn = spawnSync } = {}) {
         reason: `orca-adapter: stdout not valid JSON (${errText(err)})`,
       };
     }
+  };
+}
+
+// HYK-390 + HYK-392 (영수증 진위 그림자 판정): relay-handshake.mjs 의 소비
+// 경로가 «주입 함수»로 받는 Orca 조회의 실 구현. `dispatch-show --task
+// <runtime_task_id> --json` 1회만 부르는 읽기 전용 조회다(`orca` 실행은 이
+// 파일의 createOrcaExecFn 한 곳뿐 -- G9). 반환은 코어가 읽는 좁은 모양:
+//   {ok:true, found:false}                       Orca 에 그 dispatch 가 없다
+//   {ok:true, found:true, dispatch:{id,task_id,assignee_pane_key,status}}
+//   {ok:false, timedOut?:true, reason}           모른다(런타임 부재 · 시한 ·
+//                                                파싱 실패) -- «가짜»가 아니다
+// ⚠️정직 한계: dispatch-show 는 task 본문(라벨)도 좌석 worktree 도 주지 않아
+// 여기서는 `taskText`/`worktreePath` 를 싣지 않는다 -- 코어가 «못 쟀다»로 남긴다.
+export const DISPATCH_AUTH_LOOKUP_TIMEOUT_MS = 10_000;
+export function createDispatchAuthLookup({
+  execFn,
+  timeoutMs = DISPATCH_AUTH_LOOKUP_TIMEOUT_MS,
+} = {}) {
+  const exec =
+    typeof execFn === "function" ? execFn : createOrcaExecFn({ timeoutMs });
+  return function lookupDispatchForAuth({ runtimeTaskId } = {}) {
+    if (!isNonEmptyString(runtimeTaskId)) {
+      return {
+        ok: false,
+        reason: "orca-adapter: auth lookup -- runtimeTaskId missing",
+      };
+    }
+    let response;
+    try {
+      response = exec(buildDispatchShowCommand(runtimeTaskId));
+    } catch (err) {
+      return {
+        ok: false,
+        ...(err?.code === "ETIMEDOUT" ? { timedOut: true } : {}),
+        reason: `orca-adapter: auth lookup -- dispatch-show threw (${errText(err)})`,
+      };
+    }
+    if (!isPlainObject(response) || response.ok !== true) {
+      return {
+        ok: false,
+        reason: "orca-adapter: auth lookup -- dispatch-show not ok",
+      };
+    }
+    const dispatch = response.result?.dispatch;
+    if (dispatch === null) return { ok: true, found: false };
+    if (!isPlainObject(dispatch)) {
+      return {
+        ok: false,
+        reason: "orca-adapter: auth lookup -- dispatch-show malformed",
+      };
+    }
+    return {
+      ok: true,
+      found: true,
+      dispatch: {
+        id: dispatch.id,
+        task_id: dispatch.task_id,
+        assignee_pane_key: dispatch.assignee_pane_key,
+        status: dispatch.status,
+      },
+    };
   };
 }
 

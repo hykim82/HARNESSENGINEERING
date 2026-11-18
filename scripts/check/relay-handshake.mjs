@@ -5,8 +5,9 @@ import {
   readdirSync,
   mkdirSync,
   writeFileSync,
+  appendFileSync,
 } from "node:fs";
-import { join, dirname } from "node:path";
+import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execSync, execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -3355,14 +3356,449 @@ function resolveG1PaneMatchVerdict({
   return { ok: true };
 }
 
+// ===== HYK-390 + HYK-392 영수증 «진위 그림자 판정» BEGIN (판정 2026-11-17 14:05 ②③④) =====
+//
+// 소비(DONE 경로)가 HYK-387 존재 축을 통과한 «뒤», G1 대조 «앞»에서 그
+// 영수증 줄이 진짜 배달 기록인지(Orca 기록과 맞는지) 판정만 «기록»한다.
+// ⛔차단 0: 이 구역의 어떤 값도 소비의 ok · 사유 · 반환값 · 종료 코드를 바꾸지
+// 않는다 -- 호출부(runAuthShadowSafely)가 동기 예외를 전부 삼키고, 비동기
+// (thenable) 조회는 기다리지 않고 «조회 실패(lookup_not_sync)»로 기록하며 그
+// 거부를 삼키고(HYK-390-auth-shadow-2 P2-2), 판정이 Orca 조회에 실패 · 시한
+// 초과해도 기록만 달라진다. 실제 거부 전환은 관측 창이 끝나고 그림자 10건
+// 오탐 0 이 확인된 뒤 다시 판정한다.
+//
+// ⛔Orca 조회는 «주입 함수»로만 받는다(`orcaDispatchLookup`). 이 파일은
+// scripts/check/* 라 scripts/relay/* 를 import 할 수 없고(eslint 경계) `orca`
+// 를 직접 실행하지도 않는다(G9 경계) -- 실 조회 구현은
+// scripts/relay/adapters/orca-adapter.mjs 의 createDispatchAuthLookup 이고,
+// 그 결선(configureAuthShadowDefaults 호출)은 relay 쪽 소비 입구
+// scripts/relay/relay-consume.mjs 가 한다(HYK-390-auth-shadow-2). 옛 CLI(이
+// 파일을 직접 실행)는 결선하지 않으므로 늘 lookup_not_wired 로 남는다.
+//
+// 판정 값(새 사유 코드 3개 = «기록에만», 어떤 소비 사유에도 쓰지 않는다):
+//   AUTHENTIC · DISPATCH_RECORD_UNAUTHENTIC · DISPATCH_AUTH_LOOKUP_FAILED ·
+//   DISPATCH_LEDGER_POINTER_MISMATCH 그리고 «따로 표기»하는 두 값:
+//   LEDGER_POINTER_ABSENT(HYK-392 fail-open 자리 -- 포인터도 명시도 없어
+//   존재·G1 축이 skip 된다) · HAND_CORRECTION_EXISTING(원장에 이미 있는 08-18
+//   사람 손 정정 «두 줄»만 -- 고정 목록(dispatch_id + harness_task_label)에
+//   들고 `correction*` 키가 있는 줄. 오탐으로 세지 않는다. 목록 밖 줄은
+//   correction* 키가 있어도 일반 줄처럼 Orca 와 대조한다).
+//
+// 기록 = 한 줄 JSON 을 덧붙이는 파일 1개. 경로는 소비가 이미 받은 원장 경로
+// 옆의 새 이름(`<원장>.auth-shadow.jsonl`)이고, 원장 경로가 없을 때(=포인터
+// 부재)만 harnessDir 안 고정 이름으로 떨어진다. 관제실 절대 경로 · watch
+// 폴더 리터럴 0. 칸 = 시각 · 역할 · 라벨 · 판정 · 불일치 키 이름 · 식별자
+// (dispatch_id · runtime_task_id) · 근거. task 본문 · pane key 값은 쓰지 않는다.
+export const AUTH_SHADOW_VERDICT = Object.freeze({
+  AUTHENTIC: "AUTHENTIC",
+  UNAUTHENTIC: "DISPATCH_RECORD_UNAUTHENTIC",
+  LOOKUP_FAILED: "DISPATCH_AUTH_LOOKUP_FAILED",
+  POINTER_MISMATCH: "DISPATCH_LEDGER_POINTER_MISMATCH",
+  POINTER_ABSENT: "LEDGER_POINTER_ABSENT",
+  HAND_CORRECTION: "HAND_CORRECTION_EXISTING",
+});
+export const AUTH_SHADOW_LEDGER_SUFFIX = ".auth-shadow.jsonl";
+export const AUTH_SHADOW_FALLBACK_FILENAME =
+  "dispatch-receipt-auth-shadow.jsonl";
+// 조회 대기 상한 = 값 «하나»(판정 2026-11-17 21:04 ③(바)). 소비가 조회 요청에
+// 싣는 timeoutMs 도, relay 쪽 입구(relay-consume.mjs)가 실 조회의 spawn 시한에
+// 거는 값도 이 상수다(어댑터의 별도 기본값을 쓰지 않는다). 소비 1건이 조회에
+// 동기로 최대 이만큼 기다린다(못 잰 것: 실제 소비 1건의 평균 대기).
+export const AUTH_SHADOW_DEFAULT_TIMEOUT_MS = 10_000;
+const AUTH_SHADOW_ROLES = Object.freeze(["CODER", "REVIEW"]);
+
+// 원장에 «이미 있는» 08-18 사람 손 정정 두 줄(판정 2026-11-17 14:05 ② · 21:04
+// ③(나) P2-1). 줄 식별 = dispatch_id + harness_task_label 둘 다 일치(정확히
+// 같은 문자열 -- 접두 · 부분 일치 아님). 새 항목을 넣으려면 판정을 받아야 한다.
+export const AUTH_SHADOW_FIXED_HAND_CORRECTIONS = Object.freeze([
+  Object.freeze({
+    dispatch_id: "ctx_899b3d4cc47f",
+    harness_task_label: "HYK-285-wake-1",
+  }),
+  Object.freeze({
+    dispatch_id: "ctx_fcdd887df48b",
+    harness_task_label: "HYK-285-wake-review-1",
+  }),
+]);
+
+function isAuthShadowFixedHandCorrection(record) {
+  return AUTH_SHADOW_FIXED_HAND_CORRECTIONS.some(
+    (fixed) =>
+      record.dispatch_id === fixed.dispatch_id &&
+      record.harness_task_label === fixed.harness_task_label,
+  );
+}
+
+// relay 쪽 소비 입구(scripts/relay/relay-consume.mjs)가 실 조회
+// (createDispatchAuthLookup)를 한 번 결선하는 자리.
+// checkRelayHandshake 의 명시 인자가 항상 이긴다. 기본값 = 빈 객체(미결선).
+let authShadowDefaults = Object.freeze({});
+export function configureAuthShadowDefaults(next = {}) {
+  const previous = authShadowDefaults;
+  authShadowDefaults = Object.freeze({ ...next });
+  return previous;
+}
+
+function normalizeAuthShadowPath(p) {
+  return resolve(String(p))
+    .replace(/\\/g, "/")
+    .replace(/\/+$/, "")
+    .toLowerCase();
+}
+
+function isAuthShadowNonEmptyString(v) {
+  return typeof v === "string" && v.length > 0;
+}
+
+function isAuthShadowPlainObject(v) {
+  return v !== null && typeof v === "object" && !Array.isArray(v);
+}
+
+// 포인터 우회 근거만 모은다(비어 있으면 문제 없음). 하나라도 있으면
+// DISPATCH_LEDGER_POINTER_MISMATCH. ⓐ 소비 호출자가 명시로 넘긴 원장 경로와
+// 워커 포인터가 다르다 ⓑ 포인터가 «워크트리 안»을 가리킨다(진짜 원장은 좌석
+// 워크트리 밖에 있다 -- 워커가 자기 원장으로 돌린 흔적).
+function judgeAuthShadowPointer({
+  explicitLedgerPath,
+  pointerValue,
+  harnessDir,
+}) {
+  const evidence = {};
+  if (!isAuthShadowNonEmptyString(pointerValue)) return evidence;
+  const pointerNorm = normalizeAuthShadowPath(pointerValue);
+  if (
+    isAuthShadowNonEmptyString(explicitLedgerPath) &&
+    pointerNorm !== normalizeAuthShadowPath(explicitLedgerPath)
+  ) {
+    evidence.pointer_vs_explicit = "differ";
+  }
+  const worktreeNorm = normalizeAuthShadowPath(dirname(resolve(harnessDir)));
+  if (pointerNorm.startsWith(`${worktreeNorm}/`)) {
+    evidence.pointer_inside_worktree = true;
+  }
+  return evidence;
+}
+
+function isAuthShadowTimeoutError(err) {
+  return err?.code === "ETIMEDOUT" || err?.name === "TimeoutError";
+}
+
+// 조회가 비동기(thenable)인지. `then` 접근자가 던지면 «비동기 모양»으로 본다.
+function isAuthShadowThenable(value) {
+  if (value === null) return false;
+  if (typeof value !== "object" && typeof value !== "function") return false;
+  try {
+    return typeof value.then === "function";
+  } catch {
+    return true;
+  }
+}
+
+// 소비는 동기 함수라 비동기 조회의 결과를 기다릴 수 없다. 나중에 거부(또는
+// 그 어떤 던짐)가 나도 unhandledRejection 이 되지 않게 처리기를 붙여 둔다 --
+// Promise.resolve(thenable).then(noop, noop) 는 `then` 접근자가 던져도 · then
+// 이 던져도 · 거부해도 전부 여기서 삼킨다(새 거부를 만들지 않는다).
+function swallowAuthShadowAsyncRejection(thenable) {
+  try {
+    Promise.resolve(thenable).then(
+      () => {},
+      () => {},
+    );
+  } catch {
+    // 소비를 바꾸지 않는다(차단 0).
+  }
+}
+
+// Orca 조회 1회. 반환 = {ok:true, response} | {ok:false, failure}. 조회
+// 실패(미결선 · 예외 · 비동기 · 시한 초과 · 모양 불량 · ok:false)는 전부
+// «모른다»일 뿐 «가짜다»가 아니다 -- 호출부가 LOOKUP_FAILED 로 갈라 적는다.
+function invokeAuthShadowLookup({ lookup, request, timeoutMs, nowMsFn }) {
+  if (typeof lookup !== "function")
+    return { ok: false, failure: "lookup_not_wired" };
+  const startedMs = nowMsFn();
+  let response;
+  try {
+    response = lookup(request);
+  } catch (err) {
+    return {
+      ok: false,
+      failure: isAuthShadowTimeoutError(err) ? "timeout" : "threw",
+    };
+  }
+  if (isAuthShadowThenable(response)) {
+    swallowAuthShadowAsyncRejection(response);
+    return { ok: false, failure: "lookup_not_sync" };
+  }
+  if (nowMsFn() - startedMs > timeoutMs)
+    return { ok: false, failure: "timeout" };
+  if (!isAuthShadowPlainObject(response))
+    return { ok: false, failure: "malformed" };
+  if (response.timedOut === true) return { ok: false, failure: "timeout" };
+  if (response.ok !== true) return { ok: false, failure: "not_ok" };
+  return { ok: true, response };
+}
+
+// Orca 가 답한 dispatch 와 원장 줄을 키별로 맞춰 «어긋난 키 이름»만 모은다.
+// task 본문(taskText) · 좌석 worktree 는 조회가 실어 줄 때만 대조한다 -- 안
+// 실려 오면 «못 쟀다»를 근거 칸에 남기고 AUTHENTIC 으로 접는다.
+function compareAuthShadowDispatch({ response, record, label, harnessDir }) {
+  if (response.found === false) {
+    return { keys: ["dispatch_id"], evidence: { dispatch: "not_found" } };
+  }
+  const d = response.dispatch;
+  if (response.found !== true || !isAuthShadowPlainObject(d)) {
+    return { malformed: true };
+  }
+  const keys = [];
+  if (d.id !== record.dispatch_id) keys.push("dispatch_id");
+  if (d.task_id !== record.runtime_task_id) keys.push("runtime_task_id");
+  if (
+    String(d.assignee_pane_key).toLowerCase() !==
+    String(record.assignee_pane_key).toLowerCase()
+  ) {
+    keys.push("assignee_pane_key");
+  }
+  const optional = compareAuthShadowOptionalFields({
+    response,
+    label,
+    harnessDir,
+  });
+  return { keys: [...keys, ...optional.keys], evidence: optional.evidence };
+}
+
+// 조회가 «실어 줄 때만» 대조하는 두 칸(task 본문의 라벨 · 좌석 worktree).
+function compareAuthShadowOptionalFields({ response, label, harnessDir }) {
+  const keys = [];
+  const evidence = { label_check: "unavailable" };
+  if (typeof response.taskText === "string") {
+    const matched = response.taskText.includes(label);
+    evidence.label_check = matched ? "matched" : "mismatch";
+    if (!matched) keys.push("harness_task_label");
+  }
+  if (isAuthShadowNonEmptyString(response.worktreePath)) {
+    const same =
+      normalizeAuthShadowPath(response.worktreePath) ===
+      normalizeAuthShadowPath(dirname(resolve(harnessDir)));
+    evidence.worktree_check = same ? "matched" : "mismatch";
+    if (!same) keys.push("worktree");
+  }
+  return { keys, evidence };
+}
+
+function judgeAuthShadowAgainstOrca({
+  record,
+  label,
+  harnessDir,
+  lookup,
+  timeoutMs,
+  nowMsFn,
+}) {
+  const called = invokeAuthShadowLookup({
+    lookup,
+    request: {
+      runtimeTaskId: record.runtime_task_id,
+      dispatchId: record.dispatch_id,
+      timeoutMs,
+    },
+    timeoutMs,
+    nowMsFn,
+  });
+  const failed = (failure) => ({
+    verdict: AUTH_SHADOW_VERDICT.LOOKUP_FAILED,
+    mismatch_keys: [],
+    evidence: { lookup_failure: failure },
+  });
+  if (!called.ok) return failed(called.failure);
+  const cmp = compareAuthShadowDispatch({
+    response: called.response,
+    record,
+    label,
+    harnessDir,
+  });
+  if (cmp.malformed) return failed("malformed");
+  return {
+    verdict:
+      cmp.keys.length === 0
+        ? AUTH_SHADOW_VERDICT.AUTHENTIC
+        : AUTH_SHADOW_VERDICT.UNAUTHENTIC,
+    mismatch_keys: cmp.keys,
+    evidence: cmp.evidence,
+  };
+}
+
+// 판정 1건. 우선순위: 포인터 우회 > 손 정정 줄(고정 목록 두 줄) > 줄 자체
+// 불완전 > Orca 대조. 고정 목록의 손 정정 줄은 배달기가 만든 줄이 아니라
+// Orca 에 없는 게 «당연»하므로 조회 자체를 하지 않고 따로 표기한다(오탐으로
+// 세지 않음). 목록 밖 줄은 correction* 키가 있어도 일반 줄처럼 대조한다.
+function judgeReceiptAuthenticityShadow(input) {
+  const { record, explicitLedgerPath, pointerValue, harnessDir } = input;
+  const pointer = judgeAuthShadowPointer({
+    explicitLedgerPath,
+    pointerValue,
+    harnessDir,
+  });
+  if (Object.keys(pointer).length > 0) {
+    return {
+      verdict: AUTH_SHADOW_VERDICT.POINTER_MISMATCH,
+      mismatch_keys: ["ledger_pointer"],
+      evidence: pointer,
+    };
+  }
+  const correctionKeys = Object.keys(record).filter((k) =>
+    k.startsWith("correction"),
+  );
+  if (correctionKeys.length > 0 && isAuthShadowFixedHandCorrection(record)) {
+    return {
+      verdict: AUTH_SHADOW_VERDICT.HAND_CORRECTION,
+      mismatch_keys: [],
+      evidence: { correction_keys: correctionKeys },
+    };
+  }
+  const missing = [
+    "dispatch_id",
+    "runtime_task_id",
+    "assignee_pane_key",
+  ].filter((k) => !isAuthShadowNonEmptyString(record[k]));
+  if (missing.length > 0) {
+    return {
+      verdict: AUTH_SHADOW_VERDICT.UNAUTHENTIC,
+      mismatch_keys: missing,
+      evidence: { ledger_record: "incomplete" },
+    };
+  }
+  return judgeAuthShadowAgainstOrca(input);
+}
+
+function buildAuthShadowRow({ role, label, nowMs, judged, record }) {
+  const ms = Number.isFinite(nowMs) ? nowMs : Date.now();
+  const ident = (v) => (typeof v === "string" ? v.slice(0, 200) : null);
+  return {
+    shadow_version: 1,
+    ts: new Date(ms).toISOString(),
+    role: String(role),
+    label,
+    verdict: judged.verdict,
+    mismatch_keys: judged.mismatch_keys,
+    dispatch_id: ident(record?.dispatch_id),
+    runtime_task_id: ident(record?.runtime_task_id),
+    evidence: judged.evidence,
+  };
+}
+
+// 그림자 1건을 판정하고 한 줄 덧붙인다. 예외는 «여기서 삼키지 않는다» --
+// 삼키는 것은 호출부(runAuthShadowSafely) 한 곳의 책임이다.
+export function runReceiptAuthenticityShadow({
+  role,
+  taskId,
+  nowMs,
+  ledgerPath,
+  explicitLedgerPath,
+  pointerValue,
+  harnessDir,
+  latestRecord,
+  lookup,
+  options = {},
+}) {
+  if (!AUTH_SHADOW_ROLES.includes(String(role).toUpperCase())) {
+    return { recorded: false, reason: "role_out_of_scope" };
+  }
+  const timeoutMs = Number.isFinite(options.timeoutMs)
+    ? options.timeoutMs
+    : AUTH_SHADOW_DEFAULT_TIMEOUT_MS;
+  const nowMsFn =
+    typeof options.nowMsFn === "function" ? options.nowMsFn : Date.now;
+  const hasLedger = isAuthShadowNonEmptyString(ledgerPath);
+  const judged = hasLedger
+    ? judgeReceiptAuthenticityShadow({
+        record: latestRecord,
+        label: taskId,
+        explicitLedgerPath,
+        pointerValue,
+        harnessDir,
+        lookup,
+        timeoutMs,
+        nowMsFn,
+      })
+    : {
+        verdict: AUTH_SHADOW_VERDICT.POINTER_ABSENT,
+        mismatch_keys: [],
+        evidence: { ledger_path: "none" },
+      };
+  const row = buildAuthShadowRow({
+    role,
+    label: taskId,
+    nowMs,
+    judged,
+    record: latestRecord,
+  });
+  const recordPath = hasLedger
+    ? `${ledgerPath}${AUTH_SHADOW_LEDGER_SUFFIX}`
+    : join(harnessDir, AUTH_SHADOW_FALLBACK_FILENAME);
+  appendFileSync(recordPath, `${JSON.stringify(row)}\n`, "utf8");
+  return { recorded: true, verdict: row.verdict, recordPath };
+}
+
+// 소비 경로의 «유일한» 호출 자리. 어떤 «동기» 예외가 나도(판정 함수 · 기록
+// 쓰기 · 포인터 읽기) 소비 결과에 닿지 않게 전부 삼킨다 -- 콘솔 출력도 하지
+// 않는다(소비의 stderr 도 한 글자 바꾸지 않는다). 비동기 조회의 나중 거부는 이
+// try/catch 밖이라 invokeAuthShadowLookup 이 처리기를 붙여 따로 삼킨다.
+function runAuthShadowSafely({
+  role,
+  taskId,
+  dispatchLedgerPath,
+  harnessDir,
+  dispatchRecordVerdict,
+  authShadow,
+}) {
+  try {
+    const ctx = resolveAuthShadowContext(authShadow);
+    const ledgerPath = dispatchRecordVerdict.skipped
+      ? undefined
+      : resolveDispatchLedgerPath(dispatchLedgerPath, harnessDir);
+    runReceiptAuthenticityShadow({
+      role,
+      taskId,
+      nowMs: ctx.now,
+      ledgerPath,
+      explicitLedgerPath: dispatchLedgerPath,
+      pointerValue: readDispatchReceiptPointerFile(harnessDir),
+      harnessDir,
+      latestRecord:
+        resolveLatestDispatchRecord(dispatchRecordVerdict.matchRecords ?? []) ??
+        {},
+      lookup: ctx.lookup,
+      options: ctx.options,
+    });
+  } catch {
+    // 그림자는 소비를 바꾸지 않는다(차단 0).
+  }
+}
+
+// checkRelayHandshake 의 명시 인자 + relay 쪽 결선 기본값을 합친다.
+function resolveAuthShadowContext({
+  now,
+  orcaDispatchLookup,
+  authShadowOptions,
+}) {
+  return {
+    now,
+    lookup: orcaDispatchLookup ?? authShadowDefaults.orcaDispatchLookup,
+    options: { ...authShadowDefaults.options, ...authShadowOptions },
+  };
+}
+// ===== HYK-390 + HYK-392 영수증 «진위 그림자 판정» END =====
+
 // HYK-434-lint-1: extracted from checkRelayHandshake (same ESLint max-lines-
 // per-function reason as this file's other HYK-257-done-stamp-lint-1/
-// HYK-398 extractions) -- composes the two checks that sit at this exact
-// spot in the pipeline (resolveDispatchRecordExistence then, only if that
-// passed, resolveG1DispatchVerificationVerdict) and returns the ok:false
+// HYK-398 extractions) -- composes the two rejecting checks that sit at this
+// exact spot in the pipeline (resolveDispatchRecordExistence then, only if
+// that passed, resolveG1DispatchVerificationVerdict) and returns the ok:false
 // verdict to return immediately, or null when neither rejects (proceed).
-// Order/reasons/behavior are byte-identical to the inline version this
-// replaces -- only moved.
+// Order/reasons of those two rejecting checks are byte-identical to the
+// inline version this replaces -- only moved. HYK-390/HYK-392 later put a
+// third, NON-rejecting step between them (runAuthShadowSafely: record-only
+// authenticity shadow) -- it never returns a verdict and never changes the
+// two checks' order, reasons or return values.
 function resolveDispatchAndG1Verdict({
   role,
   taskId,
@@ -3370,6 +3806,7 @@ function resolveDispatchAndG1Verdict({
   doneAt,
   harnessDir,
   judgedRegion,
+  authShadow,
 }) {
   const dispatchRecordVerdict = resolveDispatchRecordExistence({
     role,
@@ -3379,6 +3816,17 @@ function resolveDispatchAndG1Verdict({
     harnessDir,
   });
   if (!dispatchRecordVerdict.ok) return dispatchRecordVerdict;
+
+  // HYK-390/HYK-392 그림자 판정: 387 존재 축 «뒤», G1 대조 «앞». 기록만 한다
+  // -- 반환값 · 사유 · 흐름을 바꾸지 않는다(차단 0, 위 구역 헤더 참조).
+  runAuthShadowSafely({
+    role,
+    taskId,
+    dispatchLedgerPath,
+    harnessDir,
+    dispatchRecordVerdict,
+    authShadow,
+  });
 
   // HYK-434: dispatchRecordVerdict와 같은 자리 원칙(§4 무회귀) -- 원장에
   // 이 라운드 배정 기록이 있다고 이미 확인된(ok:true) 뒤에만 G1 3줄을 그
@@ -4370,6 +4818,8 @@ export function checkRelayHandshake({
   now = Date.now(),
   dispatchId,
   dispatchLedgerPath,
+  orcaDispatchLookup,
+  authShadowOptions,
 }) {
   const core = resolveHandshakeCore({ role, harnessDir, now, dispatchId });
   if (!core.ok) return core.verdict;
@@ -4463,6 +4913,7 @@ export function checkRelayHandshake({
     doneAt,
     harnessDir,
     judgedRegion,
+    authShadow: { now, orcaDispatchLookup, authShadowOptions },
   });
   if (dispatchAndG1Verdict) return dispatchAndG1Verdict;
 
@@ -5044,7 +5495,15 @@ const invokedDirectly =
   process.argv[1]
     .replace(/\\/g, "/")
     .endsWith("scripts/check/relay-handshake.mjs");
-if (invokedDirectly) {
+// HYK-390-auth-shadow-2 (판정 2026-11-17 21:04 ③(가)): 옛 CLI 본문을 «빼내기만»
+// 했다 -- 아래 함수 본문은 이전의 `if (invokedDirectly) { ... }` 블록 본문과
+// 한 글자도 다르지 않다(HYK-189 (e) 변이 M1~M3 이 이 본문 텍스트를 고정한다).
+// 직접 실행(`node scripts/check/relay-handshake.mjs <role> [harnessDir]`)은 이
+// 함수를 그대로 부른다 -- 결선 없음(조회 미결선, 그림자 lookup_not_wired).
+// relay 쪽 입구 scripts/relay/relay-consume.mjs 는 조회를 결선한 뒤 이 «같은»
+// 함수를 부른다(인자 · 표준 출력 · 종료 코드가 같다). 이 함수는 끝에서
+// process.exit 를 부른다 -- 직접 실행과 입구 말고는 부르지 마라.
+export function runRelayHandshakeCli() {
   const role = process.argv[2];
   if (!role) {
     console.error("usage: node relay-handshake.mjs <role> [harnessDir]");
@@ -5094,4 +5553,8 @@ if (invokedDirectly) {
     console.error(result.reason);
     process.exit(1);
   }
+}
+
+if (invokedDirectly) {
+  runRelayHandshakeCli();
 }

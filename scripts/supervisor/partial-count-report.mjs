@@ -109,6 +109,8 @@ import {
   summarizeChangeRequests,
   assembleGithubHumanActions,
   computeMachineScope,
+  parseKstClockMinutes,
+  isCalendarDay,
   renderMachineScopeLine,
   computeQualification,
   renderQualificationLine,
@@ -1159,19 +1161,21 @@ async function readGithubBotLogins({ git, botAccountsPath }) {
 }
 
 // ---------------------------------------------------------------------------
-// HYK-255-p2a-scope-1 -- 기계 계수 범위 기준 설정(관측 일수 · 동시 배달 문턱). 값 7 · 2 는 코드에 없다 -- 새 설정 파일
+// HYK-255-p2a-scope-1 -- 기계 계수 범위 기준 설정. 값은 코드에 없다 -- 새 설정 파일
 // partial-count-machine-scope.json 에서만 온다. 읽는 길 = 봇 목록(readGithubBotLogins)과 같은 방식: origin/master 판본(작업 폴더 판본은
-// 읽지 않는다). 못 읽거나(없음 · 깨짐 · 스키마 불일치) 값이 양의 정수가 아니면 «UNKNOWN(설정 읽기 실패)» -- 충족도 미충족도 아니고 기본값으로
+// 읽지 않는다). 못 읽거나(없음 · 깨짐 · 스키마 불일치) 값이 모양에 안 맞으면 «UNKNOWN(설정 읽기 실패)» -- 충족도 미충족도 아니고 기본값으로
 // 대체하지도 않는다. 일별 줄은 watch-run 일별 단계가 읽어 옵션으로 넘긴다(machineScopeDailyLines · 없음 = 미결선 = 줄 0개 · null = 못 읽음).
+// HYK-255-p2e-workday-2 -- v2(일한 날 기준): 관측 일수 · 하루 배달 문턱 · 마지막 회차 컷(KST «HH:MM») · 기준 변경일(«YYYY-MM-DD») 이 «이 설정 한 곳» 에만 있다.
+//   옛 판(v1 · 동시 배달 문턱 minConcurrentTracks)은 스키마 불일치로 UNKNOWN -- 옛 키를 새 뜻으로 재사용하지 않는다.
 // ---------------------------------------------------------------------------
 
 export const DEFAULT_MACHINE_SCOPE_PATH =
   "scripts/supervisor/partial-count-machine-scope.json";
-const MACHINE_SCOPE_SCHEMA = "partial-count-machine-scope/v1";
+const MACHINE_SCOPE_SCHEMA = "partial-count-machine-scope/v2";
 
 const isPositiveInteger = (v) => Number.isInteger(v) && v > 0;
 
-// 설정 파일 본문 -> {ok:true, observationDays, minConcurrentTracks} | {ok:false, reason}.
+// 설정 파일 본문 -> {ok:true, observationDays, minDeliveredPerDay, lastTickCutoffKst, criterionChangedOn} | {ok:false, reason}.
 function parseMachineScopeConfig(text) {
   let parsed;
   try {
@@ -1182,17 +1186,21 @@ function parseMachineScopeConfig(text) {
   const wellFormed =
     parsed?.schema_version === MACHINE_SCOPE_SCHEMA &&
     isPositiveInteger(parsed.observationDays) &&
-    isPositiveInteger(parsed.minConcurrentTracks);
+    isPositiveInteger(parsed.minDeliveredPerDay) &&
+    parseKstClockMinutes(parsed.lastTickCutoffKst) !== null &&
+    isCalendarDay(parsed.criterionChangedOn);
   if (!wellFormed) {
     return {
       ok: false,
-      reason: `스키마 불일치(${MACHINE_SCOPE_SCHEMA} · observationDays · minConcurrentTracks 는 양의 정수)`,
+      reason: `스키마 불일치(${MACHINE_SCOPE_SCHEMA} · observationDays · minDeliveredPerDay 는 양의 정수 · lastTickCutoffKst 는 «HH:MM» · criterionChangedOn 은 «YYYY-MM-DD»)`,
     };
   }
   return {
     ok: true,
     observationDays: parsed.observationDays,
-    minConcurrentTracks: parsed.minConcurrentTracks,
+    minDeliveredPerDay: parsed.minDeliveredPerDay,
+    lastTickCutoffKst: parsed.lastTickCutoffKst,
+    criterionChangedOn: parsed.criterionChangedOn,
   };
 }
 
@@ -1357,7 +1365,9 @@ async function resolveMachineScope({
     lines: dailyLines,
     nowMs,
     observationDays: config.observationDays,
-    minConcurrentTracks: config.minConcurrentTracks,
+    minDeliveredPerDay: config.minDeliveredPerDay,
+    lastTickCutoffKst: config.lastTickCutoffKst,
+    criterionChangedOn: config.criterionChangedOn,
   });
   const machineScopeLine = renderMachineScopeLine(scope);
   if (scope.met !== true) {

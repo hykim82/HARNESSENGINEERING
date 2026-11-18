@@ -12,7 +12,14 @@ import { tmpdir } from "node:os";
 import * as core from "./partial-count-core.mjs";
 
 const NOW = Date.parse("2026-11-15T15:00:00+09:00");
-const CFG = { observationDays: 7, minConcurrentTracks: 2 };
+// HYK-255-p2e-workday-2 바뀐 단언(판정 #20261117-2026 ③ · 2104 ②): 합성 설정 = 일한 날 기준 판(배달 문턱 · 마지막 회차 시각 컷 · 기준 변경일). 값은 실물 설정과 «다른» 합성 값 --
+// 코드가 실물 값(4 · 23:30 · 2026-11-17)을 박았다면 이 시험이 잡는다. «깨끗한 날» 줄 = 배달 = 문턱 · 마지막 회차 23:58(컷 뒤) -- 칸 없음 시험이 새 기준 사유와 섞이지 않게.
+const CFG = {
+  observationDays: 7,
+  minDeliveredPerDay: 3,
+  lastTickCutoffKst: "23:15",
+  criterionChangedOn: "2026-11-01",
+};
 
 const NO_PERM_HUMAN = "권한 확인창 사람 답 칸 없음";
 const NO_PERM_UNDECIDABLE = "권한 판정 불가 칸 없음";
@@ -34,6 +41,8 @@ const fullLine = (offset, over = {}) => ({
   collectorFails: [],
   coverageGaps: { count: 0, totalMs: 0 },
   concurrentTracksMax: 2,
+  delivered: CFG.minDeliveredPerDay,
+  lastTickAtMs: Date.parse(`${dayStr(offset)}T23:58:00+09:00`),
   uncountedExampleIds: [],
   permissionHumanAnswers: 0,
   permissionUndecidable: 0,
