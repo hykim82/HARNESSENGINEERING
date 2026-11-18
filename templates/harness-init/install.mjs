@@ -1558,6 +1558,13 @@ export const ENFORCEMENT_RELAY_FILES = [
   "hyk171-cycle4b2c-fixtures.mjs",
   "dispatch-bound-seat-proof.mjs",
   "dispatch-bound-seat-proof.test.mjs",
+  // HYK-389-shim-core-1: orca 기록 shim 의 코어 + CLI(기록 단계 · OBSERVER · 앵커
+  // 아님). ⛔복사만 한다 -- templates/orca-shim/{orca,orca.ps1} 은 복사하지
+  // 않고 PATH · 프로필 · 사용자 환경도 건드리지 않는다: 이 두 파일이 설치돼도
+  // `orca` 라는 이름의 실행 파일이 PATH 에 없으면 아무 동작도 바꾸지 않는다
+  // (orca-shim.test.mjs «라이브 설치 0»). 좌석에 얹는 결선 = 조각 2.
+  "orca-shim-core.mjs",
+  "orca-shim-cli.mjs",
 ];
 
 // HYK-209-installer-closure-derive-1 (2R): the scripts/supervisor/*.mjs copy

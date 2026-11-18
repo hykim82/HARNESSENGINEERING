@@ -1,6 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import {
+  DELEGATION_POINTS,
   scanForOrcaExecCalls,
   scanRepoForOrcaExecCalls,
   ADAPTER_PATH,
@@ -113,5 +115,46 @@ test("scanRepoForOrcaExecCalls: real scripts/ tree has zero orca exec calls outs
     violations,
     [],
     `unexpected orca exec calls found: ${violations.join(", ")}`,
+  );
+});
+
+// HYK-389-shim-core-1 (조각 1): 새 위임 지점의 «명시 예외» 등재 + 재귀 금지 고정.
+// 기록 단계 · OBSERVER · 앵커 아님.
+test("HYK-389: DELEGATION_POINTS 에 orca 기록 shim CLI 가 사유와 함께 등재돼 있다", () => {
+  const point = DELEGATION_POINTS.find(
+    (p) => p.path === "scripts/relay/orca-shim-cli.mjs",
+  );
+  assert.ok(point, "shim CLI 위임 지점이 등재돼야 한다");
+  assert.ok(point.reason.trim().length > 0);
+  assert.ok(point.reason.includes("앵커 아님"));
+});
+
+test("HYK-389: 등재된 위임 지점은 경로로만 면제된다 -- 같은 내용이 다른 경로에 있으면 여전히 위반", () => {
+  const content = 'spawnSync("orca", argv);';
+  assert.deepEqual(
+    scanForOrcaExecCalls([
+      { path: "scripts/relay/orca-shim-cli.mjs", content },
+    ]),
+    [],
+  );
+  assert.deepEqual(
+    scanForOrcaExecCalls([
+      { path: "scripts/relay/other-shim-cli.mjs", content },
+    ]),
+    ["scripts/relay/other-shim-cli.mjs"],
+  );
+});
+
+test('HYK-389: shim CLI 는 리터럴 "orca" 를 spawn 하지 않는다(PATH 앞 shim 자기 재호출 = 무한 재귀 금지) -- 면제를 벗겨도 깨끗', () => {
+  const content = readFileSync(
+    new URL("../relay/orca-shim-cli.mjs", import.meta.url),
+    "utf8",
+  );
+  assert.deepEqual(
+    scanForOrcaExecCalls(
+      [{ path: "scripts/relay/orca-shim-cli.mjs", content }],
+      { delegationPoints: [] },
+    ),
+    [],
   );
 });

@@ -745,6 +745,20 @@
       "invocation_note": "★NOT hook-installed and NOT yet called by the control-room seat launcher -- honesty per coder-task.md §1/§5: this CLI (`node scripts/check/seat-preflight.mjs`, no arguments, reads the current worktree) is callable and fail-closed today (exit 0 only on IN_SYNC, everything else non-zero -- verified by real child-process spawns in seat-preflight.test.mjs, not just in-process calls), but nothing invokes it automatically yet. The seat launcher itself is a control-room file this track is explicitly barred from touching (coder-task.md §1 '너는 관제실 파일을 절대 건드리지 마라'); ORCH prepares the one line the launcher needs and 한용 attaches it by hand. Once that line is attached, and only then, does this become true: a worker seat whose worktree has a drifted/undecidable installed hook fails to start at all (fail-closed by construction, not by convention) -- until that attachment happens, this device only protects a seat if a human or ORCH remembers to run it by hand first, same limitation as hook-sync-check.mjs above. See docs/enforcement-known-gaps.md gap#91 for the tracked remainder."
     },
     {
+      "id": "orca-record-shim",
+      "substrate": "manual",
+      "script": "scripts/relay/orca-shim-cli.mjs",
+      "test": "scripts/relay/orca-shim.test.mjs",
+      "install_targets": [],
+      "expected_bad": "n/a -- this is an OBSERVER, not a gate and not an anchor. It never blocks an `orca` call: a write verb (terminal send/create/close/stop/rename/switch/split, orchestration dispatch/task-update/send) typed through a PATH-front shim is appended to a ledger as ONE line (timestamp, pane_key, HARNESS_ROLE, cwd, verb, target, caller script, --text LENGTH only -- never the body, actor=orch|unattributed) and then passed unchanged to the real orca binary. It sees only the habit/mistake path: an absolute-path orca.exe, a reset PATH, or a node spawn (the relay adapter) never reaches the shim and leaves no line. A failure to measure (ledger unwritable) is a warning on stderr (ORCA_SHIM_LEDGER_WRITE_FAILED) and the call is still delegated; a missing real binary delegates nothing and exits non-zero -- both distinct from 'no violation found'.",
+      "expected_good": "n/a -- run through the templates/orca-shim/{orca.ps1,orca} shims (or `node scripts/relay/orca-shim-cli.mjs <orca argv>`) with HARNESS_ORCA_REAL_BIN + HARNESS_ORCA_SHIM_LEDGER injected: a write verb -> exactly one ledger line + same argv + same exit code at the real binary; a read verb or a standalone --help -> zero lines + delegated. exits with the real binary's own code (127 only when the real binary path is missing, 126 when it cannot be started)",
+      "failure_exit": null,
+      "uncertain_exit": 127,
+      "owner": "ORCH",
+      "claude_only": false,
+      "self_registration_note": "HYK-389-shim-core-1 self-registration (OBSERVER convention, same as skip-review-usage above). HYK-389 slice 1 of 5 (owner ruling 2026-11-18 08:05, item 4: record first). Honesty: install_targets is EMPTY on purpose -- nothing places this shim on any seat's PATH yet (the install-copy of the two .mjs files changes nothing unless a PATH dir holds an `orca` shim; the ORCH launcher wiring is slice 2), so today no live seat's behavior is different. Not an anchor. See docs/enforcement-known-gaps.md gap#102 for the seven bypasses."
+    },
+    {
       "id": "control-room-live-drift",
       "substrate": "manual",
       "script": "scripts/check/selfcheck-inventory.mjs",
