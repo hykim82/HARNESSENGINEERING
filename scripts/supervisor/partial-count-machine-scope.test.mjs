@@ -1,5 +1,7 @@
-// HYK-255-p2a-scope-1 커밋 2 -- 보고서 «기계 계수 범위 기준» 한 줄: 일별 줄에서 연속 N일(날마다 동시 배달 최대 ≥ 설정 문턱 ∧ 끊김 사유 0)을 세어
-// «충족 | 미충족 | UNKNOWN» 으로 싣는다. 값(관측 일수 · 동시 문턱)은 설정 파일에서만 온다.
+// HYK-255-p2a-scope-1 커밋 2 -- 보고서 «기계 계수 범위 기준» 한 줄: 일별 줄에서 연속 N일(날마다 배달(24시간 창) ≥ 설정 문턱 ∧ 마지막 회차 ≥ 설정 시각(KST) ∧ 끊김 사유 0)을 세어
+// «충족 | 미충족 | UNKNOWN» 으로 싣는다. 값(관측 일수 · 배달 문턱 · 마지막 회차 컷 · 기준 변경일)은 설정 파일에서만 온다.
+// HYK-255-p2e-workday-2 바뀐 기준(한용 확정 + 판정 #20261117-2026 ③ · 2104 ②): 「동시 배달 최대 ≥ 2」 폐기 -> 「일한 날」 = 그날 일별 줄의 배달 값(마지막 회차에서 거꾸로 24시간 창) ≥ 문턱 ∧
+// 마지막 회차 시각 ≥ 컷(23:30 · 설정) · 배달 값 없음 = 끊김 · 동시 배달 최대는 계속 기록하되 판정 0. 합성 설정 값(문턱 · 컷 · 기준 변경일)은 실물 설정과 «다른» 값 -- 코드가 실물 값을 박았다면 이 파일이 잡는다.
 //
 // ⛔헛시험 금지: 프로덕션 export(computeMachineScope · renderMachineScopeLine · buildPartialCountReport · runPartialCountOnce ·
 // runPartialCountStep)를 직접 구동한다 -- 사본 import 0. 모든 칸은 입력(합성 일별 줄 · 합성 설정 파일)을 넣고 «값» 을 단언한다(표기 산수만 단언 0).
@@ -17,7 +19,8 @@ import { runPartialCountStep } from "./watch-run.mjs";
 
 const NOW = Date.parse("2026-11-15T15:00:00+09:00");
 const CONFIG_PATH = "scripts/supervisor/partial-count-machine-scope.json";
-const SCHEMA = "partial-count-machine-scope/v1";
+const SCHEMA = "partial-count-machine-scope/v2";
+const OLD_SCHEMA = "partial-count-machine-scope/v1";
 const SCOPE_PREFIX = "기계 계수 범위 기준: ";
 // HYK-255-p2d-nonecause-1 바뀐 단언(판정 2026-11-16 1804 상신 1): 옛 상수 줄 리터럴 -> 프로덕션 렌더 출력. 이 파일의 보고서는 기준 «충족» + 종류 설정 파일 없는 합성 저장소라
 // 자격 줄 원인 = 못 세는 종류 설정 읽기 실패(렌더 함수 출력과 비교 · 줄 자리 = 연속 확인-0 줄 바로 위는 무변).
@@ -40,10 +43,21 @@ test.after(() => {
   for (const d of cleanups) fs.rmSync(d, { recursive: true, force: true });
 });
 
+// 합성 기계 계수 범위 설정(일한 날 판) -- 실물 설정(문턱 · 컷 · 기준 변경일)과 일부러 다른 값.
+const SYNTH = {
+  observationDays: 7,
+  minDeliveredPerDay: 3,
+  lastTickCutoffKst: "23:15",
+  criterionChangedOn: "2026-11-01",
+};
+
 // ---- 합성 일별 줄 -----------------------------------------------------------------------------------------------------
 // offset = 오늘(2026-11-15) 기준 날 수(-1 = 어제).
 const dayStr = (offset) =>
   new Date(Date.UTC(2026, 10, 15 + offset)).toISOString().slice(0, 10);
+// 그날 KST 시각(HH:MM) -> epoch ms.
+const kstAt = (offset, hhmm) =>
+  Date.parse(`${dayStr(offset)}T${hhmm}:00+09:00`);
 const dayLine = (offset, over = {}) => ({
   schema: core.DAILY_SCHEMA,
   day: dayStr(offset),
@@ -52,6 +66,9 @@ const dayLine = (offset, over = {}) => ({
   collectorFails: [],
   coverageGaps: { count: 0, totalMs: 0 },
   concurrentTracksMax: 2,
+  // HYK-255-p2e-workday-2 -- «일한 날» 줄: 배달 = 합성 문턱(경계값) · 마지막 회차 = 그날 23:58 KST(컷 뒤).
+  delivered: SYNTH.minDeliveredPerDay,
+  lastTickAtMs: kstAt(offset, "23:58"),
   uncountedExampleIds: [],
   // HYK-255-p2c-nofield-1 -- 칸 없는 줄 = 끊김(판정 1404): «깨끗한 날» 은 권한 두 칸 + GitHub 칸이 있고 값 0 이다.
   permissionHumanAnswers: 0,
@@ -65,7 +82,6 @@ const dayLines = (from, to, over = () => ({})) =>
     dayLine(from + i, over(from + i)),
   );
 
-const SYNTH = { observationDays: 7, minConcurrentTracks: 2 };
 const scopeOf = (lines, cfg = SYNTH) =>
   core.computeMachineScope({ lines, nowMs: NOW, ...cfg });
 const renderScope = (lines, cfg = SYNTH) =>
@@ -74,19 +90,33 @@ const renderScope = (lines, cfg = SYNTH) =>
 // 자기 줄의 토막 읽기.
 const verdictOf = (line) => /^기계 계수 범위 기준: (\S+)/.exec(line)?.[1];
 const streakDays = (line) => Number(/연속 (\d+)일/.exec(line)?.[1]);
-const criterion = (line) =>
-  /기준 (\d+)일\(동시 배달 최대 ≥ (\d+)/.exec(line)?.slice(1).map(Number);
+// [기준 일수, 배달 문턱, 마지막 회차 컷(HH:MM)] -- 줄의 «기준» 토막.
+const criterion = (line) => {
+  const m =
+    /기준 (\d+)일\(배달\(24시간 창\) ≥ (\d+)건 · 마지막 회차 ≥ (\d{2}:\d{2}) KST/.exec(
+      line,
+    );
+  return m ? [Number(m[1]), Number(m[2]), m[3]] : null;
+};
+// 기준 변경 표기(날짜).
+const changedOn = (line) => /기준 변경 (\d{4}-\d{2}-\d{2})/.exec(line)?.[1];
 const countedRange = (line) => /센 날 (\S+)/.exec(line)?.[1];
 const lastBreak = (line) =>
   /마지막 끊김 (\d{4}-\d{2}-\d{2}) (.*?)(?: — |$)/.exec(line)?.slice(1);
 
 // ---- 계산 + 렌더(프로덕션 순수 함수 · 합성 일별 줄) -----------------------------------------------------------------
 
-test("7일 연속(동시 ≥ 2 · 끊김 0) = 충족 · 날짜 범위 = 실제로 센 7일(2026-11-08~2026-11-14) · 마지막 끊김 = 줄 없는 날", () => {
+test("7일 연속(배달 ≥ 문턱 · 마지막 회차 ≥ 컷 · 끊김 0) = 충족 · 날짜 범위 = 실제로 센 7일(2026-11-08~2026-11-14) · 마지막 끊김 = 줄 없는 날 · 문면에 값의 범위(24시간 창)와 기준 변경일", () => {
   const line = renderScope(dayLines(-7, -1));
   assert.equal(verdictOf(line), "충족");
   assert.equal(streakDays(line), 7);
-  assert.deepEqual(criterion(line), [7, 2]);
+  assert.deepEqual(criterion(line), [
+    7,
+    SYNTH.minDeliveredPerDay,
+    SYNTH.lastTickCutoffKst,
+  ]);
+  assert.equal(changedOn(line), SYNTH.criterionChangedOn);
+  assert.equal(line.includes("동시 배달"), false, "옛 기준 낱말 0");
   assert.equal(countedRange(line), "2026-11-08~2026-11-14");
   assert.deepEqual(lastBreak(line), ["2026-11-07", "줄 없음"]);
 });
@@ -99,30 +129,145 @@ test("6일 연속 = 미충족 · 범위 = 센 6일(2026-11-09~2026-11-14) · 7�
   assert.deepEqual(lastBreak(line), ["2026-11-08", "줄 없음"]);
 });
 
-test("7일 중 하루(11-11)만 동시 배달 최대 1 = 그날 끊김 -> 어제부터 3일(11-12~11-14) · 미충족 · 끊김 사유에 값과 문턱", () => {
-  const lines = dayLines(-7, -1, (o) =>
-    o === -4 ? { concurrentTracksMax: 1 } : {},
-  );
+test("7일 중 하루(11-11)만 배달 문턱 미만 = 그날 끊김 -> 어제부터 3일(11-12~11-14) · 미충족 · 끊김 사유에 값(24시간 창)과 문턱", () => {
+  const under = SYNTH.minDeliveredPerDay - 1;
+  const lines = dayLines(-7, -1, (o) => (o === -4 ? { delivered: under } : {}));
   const line = renderScope(lines);
   assert.equal(verdictOf(line), "미충족");
   assert.equal(streakDays(line), 3);
   assert.equal(countedRange(line), "2026-11-12~2026-11-14");
   const [day, reason] = lastBreak(line);
   assert.equal(day, "2026-11-11");
-  assert.match(reason, /동시 배달 최대 1 < 기준 2/);
+  assert.ok(
+    reason.includes(
+      `배달(24시간 창) ${under}건 < 기준 ${SYNTH.minDeliveredPerDay}건`,
+    ),
+    reason,
+  );
 });
 
-test("동시 배달 최대가 null · 칸 없음 = 모름 = 통과가 아니라 그날 끊김(사유 «동시 배달 최대 모름»)", () => {
+test("경계: 배달 = 문턱 = 센 날(≥) · 문턱 - 1 = 끊김 · 문턱을 훨씬 넘는 날 = 센 날", () => {
+  const K = SYNTH.minDeliveredPerDay;
+  assert.equal(
+    streakDays(renderScope(dayLines(-7, -1, () => ({ delivered: K })))),
+    7,
+  );
+  assert.equal(
+    streakDays(renderScope(dayLines(-7, -1, () => ({ delivered: K + 50 })))),
+    7,
+  );
+  assert.equal(
+    streakDays(renderScope(dayLines(-7, -1, () => ({ delivered: K - 1 })))),
+    0,
+  );
+});
+
+test("배달이 null · 칸 없음 · 숫자가 아님 = 모름 = 통과가 아니라 그날 끊김(사유 «배달 값 없음») -- 값을 0 으로 읽지도 않는다", () => {
   for (const over of [
-    { concurrentTracksMax: null },
-    { concurrentTracksMax: undefined },
+    { delivered: null },
+    { delivered: undefined },
+    { delivered: "17" },
+    { delivered: -1 },
+    { delivered: 3.5 },
   ]) {
     const lines = dayLines(-7, -1, (o) => (o === -3 ? over : {}));
     const line = renderScope(lines);
-    assert.equal(verdictOf(line), "미충족");
+    assert.equal(verdictOf(line), "미충족", JSON.stringify(over));
     assert.equal(streakDays(line), 2, "11-12 가 끊김 -> 11-14 · 11-13 두 날");
-    assert.deepEqual(lastBreak(line), ["2026-11-12", "동시 배달 최대 모름"]);
+    assert.deepEqual(lastBreak(line), ["2026-11-12", "배달 값 없음"]);
   }
+});
+
+test("동시 배달 최대는 판정에 쓰지 않는다 -- 1 · null · 칸 없음 · 큰 값이어도 배달이 문턱 이상이면 센 날 · 배달이 문턱 미만이면 동시 배달이 커도 끊김", () => {
+  const K = SYNTH.minDeliveredPerDay;
+  for (const concurrentTracksMax of [1, 0, null, undefined, 99]) {
+    const line = renderScope(dayLines(-7, -1, () => ({ concurrentTracksMax })));
+    assert.equal(verdictOf(line), "충족", String(concurrentTracksMax));
+    assert.equal(streakDays(line), 7);
+  }
+  const low = renderScope(
+    dayLines(-7, -1, () => ({ concurrentTracksMax: 99, delivered: K - 1 })),
+  );
+  assert.equal(streakDays(low), 0);
+  assert.match(lastBreak(low)[1], /배달\(24시간 창\)/);
+  assert.equal(lastBreak(low)[1].includes("동시 배달"), false);
+});
+
+test("마지막 회차 시각(KST) 규칙: 컷보다 이르면 그날 끊김(사유 «마지막 회차가 자정 전에 끊김») · 컷 정각 = 센 날 · 컷 뒤 = 센 날 -- 컷은 설정 값 · UTC 가 아니라 KST 로 읽는다", () => {
+  const cutoff = SYNTH.lastTickCutoffKst; // 23:15
+  const withTick = (hhmm) =>
+    renderScope(
+      dayLines(-7, -1, (o) =>
+        o === -2 ? { lastTickAtMs: kstAt(o, hhmm) } : {},
+      ),
+    );
+  // 컷보다 1분 이른 날 = 끊김(11-13 이 끊김 -> 11-14 한 날만 센다).
+  const early = withTick("23:14");
+  assert.equal(verdictOf(early), "미충족");
+  assert.equal(streakDays(early), 1);
+  const [day, reason] = lastBreak(early);
+  assert.equal(day, "2026-11-13");
+  assert.ok(reason.includes("마지막 회차가 자정 전에 끊김"), reason);
+  assert.ok(reason.includes(cutoff), "사유에 컷 값(설정)");
+  assert.ok(reason.includes("23:14"), "사유에 그날 마지막 회차 시각(KST)");
+  // 컷 정각 · 컷 뒤 · 자정 직전 = 센 날.
+  for (const hhmm of [cutoff, "23:16", "23:59"]) {
+    assert.equal(streakDays(withTick(hhmm)), 7, hhmm);
+  }
+  // 한참 이른 시각(오후)도 끊김.
+  assert.equal(streakDays(withTick("15:00")), 1);
+  // KST 로 읽는다: 14:20Z = 23:20 KST(컷 뒤 = 센 날). UTC 분으로 읽으면 14:20 < 23:15 라 끊김이 된다.
+  const kst2320 = Date.parse(`${dayStr(-2)}T14:20:00Z`);
+  const utcTrap = renderScope(
+    dayLines(-7, -1, (o) => (o === -2 ? { lastTickAtMs: kst2320 } : {})),
+  );
+  assert.equal(streakDays(utcTrap), 7, "23:20 KST = 컷(23:15) 뒤");
+  // 반대 함정: 23:20Z = 다음날 08:20 KST(컷 앞 = 끊김) -- UTC 분으로 읽으면 23:20 ≥ 컷 이라 센 날이 된다.
+  const kst0820 = Date.parse(`${dayStr(-2)}T23:20:00Z`);
+  const utcTrap2 = renderScope(
+    dayLines(-7, -1, (o) => (o === -2 ? { lastTickAtMs: kst0820 } : {})),
+  );
+  assert.equal(streakDays(utcTrap2), 1, "08:20 KST = 컷 앞 = 끊김");
+});
+
+test("마지막 회차 시각 칸이 없는 옛 줄(null · 칸 없음 · 숫자가 아님) = 이 규칙을 적용하지 않는다(새 칸을 만들지 않는다 · 정직 한계) -- 배달 · 다른 끊김 사유는 그대로 적용", () => {
+  for (const lastTickAtMs of [null, undefined, "x", Number.NaN]) {
+    const ok = renderScope(
+      dayLines(-7, -1, (o) => (o === -2 ? { lastTickAtMs } : {})),
+    );
+    assert.equal(streakDays(ok), 7, String(lastTickAtMs));
+    const low = renderScope(
+      dayLines(-7, -1, (o) =>
+        o === -2
+          ? { lastTickAtMs, delivered: SYNTH.minDeliveredPerDay - 1 }
+          : {},
+      ),
+    );
+    assert.equal(streakDays(low), 1, "배달 미만은 그대로 끊김");
+  }
+});
+
+test("한 날에 사유가 겹치면 모두 적는다(기존 사유 → 배달 → 마지막 회차 순)", () => {
+  const line = renderScope(
+    dayLines(-7, -1, (o) =>
+      o === -1
+        ? {
+            lnUnchecked: 1,
+            delivered: null,
+            lastTickAtMs: kstAt(o, "10:00"),
+          }
+        : {},
+    ),
+  );
+  const [day, reason] = lastBreak(line);
+  assert.equal(day, "2026-11-14");
+  const iUnchecked = reason.indexOf("미조회 1");
+  const iDelivered = reason.indexOf("배달 값 없음");
+  const iTick = reason.indexOf("마지막 회차가 자정 전에 끊김");
+  assert.ok(
+    iUnchecked >= 0 && iDelivered > iUnchecked && iTick > iDelivered,
+    reason,
+  );
 });
 
 test("끊김 사유가 있는 날(수집 실패 · 확인 > 0 · 미조회 · 관측 공백) = 그날 끊김 -- 동시 배달이 충분해도", () => {
@@ -177,19 +322,48 @@ test("오늘(미마감)은 세지 않는다 -- 오늘 줄이 있어도 범위 �
   assert.equal(countedRange(line), "2026-11-08~2026-11-14");
 });
 
-test("기준 숫자 · 문턱은 읽은 설정 값 그대로 -- 3일/동시 ≥ 1 설정이면 같은 줄(동시 1 · 3일)이 충족 · 7/2 설정이면 미충족 (코드 리터럴 0 증명)", () => {
-  const lines = dayLines(-3, -1, () => ({ concurrentTracksMax: 1 }));
+test("기준 숫자 · 문턱 · 컷 · 기준 변경일은 읽은 설정 값 그대로 -- 완화 설정(3일 · 배달 1건 · 컷 12:00)이면 같은 줄(배달 1 · 마지막 회차 13:00)이 충족 · 합성 기본 설정이면 미충족 (코드 리터럴 0 증명)", () => {
+  const lines = dayLines(-3, -1, (o) => ({
+    delivered: 1,
+    lastTickAtMs: kstAt(o, "13:00"),
+  }));
   const loose = renderScope(lines, {
     observationDays: 3,
-    minConcurrentTracks: 1,
+    minDeliveredPerDay: 1,
+    lastTickCutoffKst: "12:00",
+    criterionChangedOn: "2026-11-02",
   });
   assert.equal(verdictOf(loose), "충족");
-  assert.deepEqual(criterion(loose), [3, 1]);
+  assert.deepEqual(criterion(loose), [3, 1, "12:00"]);
+  assert.equal(changedOn(loose), "2026-11-02");
   assert.equal(countedRange(loose), "2026-11-12~2026-11-14");
   const strict = renderScope(lines);
   assert.equal(verdictOf(strict), "미충족");
-  assert.deepEqual(criterion(strict), [7, 2]);
-  assert.equal(streakDays(strict), 0, "동시 1 < 2 -> 어제부터 끊김");
+  assert.deepEqual(criterion(strict), [
+    7,
+    SYNTH.minDeliveredPerDay,
+    SYNTH.lastTickCutoffKst,
+  ]);
+  assert.equal(streakDays(strict), 0, "배달 1 < 문턱 -> 어제부터 끊김");
+  // 문턱만 바꾸면(컷 같음) 결과가 따라간다 · 컷만 바꾸면 따라간다.
+  const onlyK = renderScope(lines, { ...SYNTH, minDeliveredPerDay: 1 });
+  assert.equal(
+    lastBreak(onlyK)[1].includes("마지막 회차가 자정 전에 끊김"),
+    true,
+  );
+  const onlyCut = renderScope(lines, { ...SYNTH, lastTickCutoffKst: "12:00" });
+  assert.match(lastBreak(onlyCut)[1], /배달\(24시간 창\) 1건 < 기준/);
+});
+
+test("지나간 날 재계산: 일별 줄 입력을 바꾸지 않는다(쓰기 0) -- 동결한 줄로 구동해도 같은 값 · 입력 배열 · 줄 객체 불변", () => {
+  const lines = dayLines(-7, -1);
+  const frozen = lines.map((l) => Object.freeze({ ...l }));
+  Object.freeze(frozen);
+  const before = JSON.stringify(frozen);
+  const line = renderScope(frozen);
+  assert.equal(JSON.stringify(frozen), before);
+  assert.equal(line, renderScope(lines));
+  assert.equal(verdictOf(line), "충족");
 });
 
 test("설정을 못 읽은 결과(UNKNOWN) 렌더 = 충족도 미충족도 아니다 · 줄에 사유", () => {
@@ -242,8 +416,7 @@ function buildRepo(config) {
 const configJson = (over = {}) =>
   JSON.stringify({
     schema_version: SCHEMA,
-    observationDays: 7,
-    minConcurrentTracks: 2,
+    ...SYNTH,
     ...over,
   });
 
@@ -268,7 +441,7 @@ async function runReport(
 const scopeLineOf = (text) =>
   text.split("\n").find((l) => l.startsWith(SCOPE_PREFIX));
 
-test("보고서: 설정 7/2 + 7일 연속 줄 = 충족 한 줄 -- «연속 확인-0 일수» 줄 바로 아래 · «1-C 판정 자격: 없음» · 연속 확인-0 줄 바이트 무변", async () => {
+test("보고서: 합성 설정(7일 · 배달 문턱 · 컷) + 7일 연속 줄 = 충족 한 줄 -- «연속 확인-0 일수» 줄 바로 아래 · «1-C 판정 자격: 없음» · 연속 확인-0 줄 바이트 무변", async () => {
   const { reportText } = await runReport(buildRepo(configJson()), {
     confirmedZeroStreakLine: STREAK_LINE,
     machineScopeDailyLines: dayLines(-7, -1),
@@ -289,7 +462,12 @@ test("보고서: 설정 7/2 + 7일 연속 줄 = 충족 한 줄 -- «연속 확�
   );
   assert.equal(verdictOf(scope), "충족");
   assert.equal(streakDays(scope), 7);
-  assert.deepEqual(criterion(scope), [7, 2]);
+  assert.deepEqual(criterion(scope), [
+    7,
+    SYNTH.minDeliveredPerDay,
+    SYNTH.lastTickCutoffKst,
+  ]);
+  assert.equal(changedOn(scope), SYNTH.criterionChangedOn);
   assert.equal(countedRange(scope), "2026-11-08~2026-11-14");
   assert.equal(
     lines.filter((l) => l.startsWith(SCOPE_PREFIX)).length,
@@ -298,15 +476,26 @@ test("보고서: 설정 7/2 + 7일 연속 줄 = 충족 한 줄 -- «연속 확�
   );
 });
 
-test("보고서: 읽은 설정이 기준을 정한다 -- 설정 3/1 이면 3일 · 동시 ≥ 1 로 판정하고 줄의 기준 숫자도 그 값 (같은 줄 7/2 설정이면 미충족)", async () => {
-  const lines = dayLines(-3, -1, () => ({ concurrentTracksMax: 1 }));
+test("보고서: 읽은 설정이 기준을 정한다 -- 설정(3일 · 배달 1건 · 컷 12:00 · 기준 변경 11-02)이면 배달 1건 · 13:00 마지막 회차 줄이 충족하고 줄의 기준 숫자도 그 값 (합성 기본 설정이면 미충족)", async () => {
+  const lines = dayLines(-3, -1, (o) => ({
+    delivered: 1,
+    lastTickAtMs: kstAt(o, "13:00"),
+  }));
   const loose = await runReport(
-    buildRepo(configJson({ observationDays: 3, minConcurrentTracks: 1 })),
+    buildRepo(
+      configJson({
+        observationDays: 3,
+        minDeliveredPerDay: 1,
+        lastTickCutoffKst: "12:00",
+        criterionChangedOn: "2026-11-02",
+      }),
+    ),
     { machineScopeDailyLines: lines },
   );
   const looseLine = scopeLineOf(loose.reportText);
   assert.equal(verdictOf(looseLine), "충족");
-  assert.deepEqual(criterion(looseLine), [3, 1]);
+  assert.deepEqual(criterion(looseLine), [3, 1, "12:00"]);
+  assert.equal(changedOn(looseLine), "2026-11-02");
   assert.equal(countedRange(looseLine), "2026-11-12~2026-11-14");
   const strict = await runReport(buildRepo(configJson()), {
     machineScopeDailyLines: lines,
@@ -314,16 +503,90 @@ test("보고서: 읽은 설정이 기준을 정한다 -- 설정 3/1 이면 3일 
   assert.equal(verdictOf(scopeLineOf(strict.reportText)), "미충족");
 });
 
-test("설정 없음 · 깨짐 · 스키마 불일치 · 0 · 음수 · 소수 · 문자열 = UNKNOWN(설정 읽기 실패) -- 충족도 미충족도 아니고 기본값으로 대체하지도 않는다", async () => {
+test("보고서: 동시 배달 1 이면서 배달 ≥ 문턱 · 마지막 회차 ≥ 컷 인 7일 = 충족(옛 기준에서는 미충족이던 줄) -- 판정이 배달 건수로 바뀐 것을 진입점 끝에서 확인", async () => {
+  const { reportText } = await runReport(buildRepo(configJson()), {
+    machineScopeDailyLines: dayLines(-7, -1, () => ({
+      concurrentTracksMax: 1,
+    })),
+  });
+  const scope = scopeLineOf(reportText);
+  assert.equal(verdictOf(scope), "충족");
+  assert.equal(streakDays(scope), 7);
+});
+
+test("보고서: 배달 값 없음 · 문턱 미만 · 마지막 회차 컷 이전 = 각각 그 사유가 «마지막 끊김» 에 실린다(진입점 · 합성 설정)", async () => {
+  const run = async (over) =>
+    scopeLineOf(
+      (
+        await runReport(buildRepo(configJson()), {
+          machineScopeDailyLines: dayLines(-7, -1, (o) =>
+            o === -1 ? over(o) : {},
+          ),
+        })
+      ).reportText,
+    );
+  const none = await run(() => ({ delivered: null }));
+  assert.equal(verdictOf(none), "미충족");
+  assert.deepEqual(lastBreak(none), ["2026-11-14", "배달 값 없음"]);
+  const under = await run(() => ({
+    delivered: SYNTH.minDeliveredPerDay - 1,
+  }));
+  assert.ok(
+    lastBreak(under)[1].includes(
+      `배달(24시간 창) ${SYNTH.minDeliveredPerDay - 1}건 < 기준 ${SYNTH.minDeliveredPerDay}건`,
+    ),
+  );
+  const early = await run((o) => ({ lastTickAtMs: kstAt(o, "09:00") }));
+  assert.ok(lastBreak(early)[1].includes("마지막 회차가 자정 전에 끊김"));
+});
+
+test("설정 없음 · 깨짐 · 옛 판(v1) · 스키마 불일치 · 0 · 음수 · 소수 · 문자열 · 시각 · 날짜 모양 오류 = UNKNOWN(설정 읽기 실패) -- 충족도 미충족도 아니고 기본값으로 대체하지도 않는다", async () => {
   const goodLines = dayLines(-7, -1);
   const cases = [
     ["파일 없음", null],
     ["JSON 깨짐", "{not json"],
     ["스키마 불일치", configJson({ schema_version: "other/v9" })],
+    [
+      "옛 판 설정(v1 · 동시 배달 문턱)",
+      JSON.stringify({
+        schema_version: OLD_SCHEMA,
+        observationDays: 7,
+        minConcurrentTracks: 2,
+      }),
+    ],
+    ["옛 판 이름 + 새 칸", configJson({ schema_version: OLD_SCHEMA })],
     ["observationDays 0", configJson({ observationDays: 0 })],
     ["observationDays 음수", configJson({ observationDays: -7 })],
-    ["minConcurrentTracks 0", configJson({ minConcurrentTracks: 0 })],
-    ["minConcurrentTracks 소수", configJson({ minConcurrentTracks: 1.5 })],
+    ["minDeliveredPerDay 0", configJson({ minDeliveredPerDay: 0 })],
+    ["minDeliveredPerDay 소수", configJson({ minDeliveredPerDay: 1.5 })],
+    ["minDeliveredPerDay 문자열", configJson({ minDeliveredPerDay: "4" })],
+    [
+      "minDeliveredPerDay 칸 없음",
+      configJson({ minDeliveredPerDay: undefined }),
+    ],
+    [
+      "lastTickCutoffKst 시 범위 밖",
+      configJson({ lastTickCutoffKst: "24:00" }),
+    ],
+    [
+      "lastTickCutoffKst 분 범위 밖",
+      configJson({ lastTickCutoffKst: "23:60" }),
+    ],
+    ["lastTickCutoffKst 모양 오류", configJson({ lastTickCutoffKst: "2330" })],
+    ["lastTickCutoffKst 숫자", configJson({ lastTickCutoffKst: 2330 })],
+    ["lastTickCutoffKst 칸 없음", configJson({ lastTickCutoffKst: undefined })],
+    [
+      "criterionChangedOn 모양 오류",
+      configJson({ criterionChangedOn: "11-17" }),
+    ],
+    [
+      "criterionChangedOn 없는 날짜",
+      configJson({ criterionChangedOn: "2026-13-40" }),
+    ],
+    [
+      "criterionChangedOn 칸 없음",
+      configJson({ criterionChangedOn: undefined }),
+    ],
     ["observationDays 문자열", configJson({ observationDays: "7" })],
     ["칸 없음", JSON.stringify({ schema_version: SCHEMA })],
   ];
@@ -453,24 +716,102 @@ test("일별 단계: 읽은 일별 줄을 보고 단계 옵션 machineScopeDaily
 
 // ---- 설정 파일 · 코드 리터럴 -----------------------------------------------------------------------------------------
 
-test("설정 파일 = 스키마대로 · 관측 7일 · 동시 문턱 2 -- 코드(core · report)에는 그 값을 대입한 리터럴이 없다", () => {
-  const cfg = JSON.parse(
-    fs.readFileSync(
-      new URL("./partial-count-machine-scope.json", import.meta.url),
-      "utf8",
-    ),
+test("실물 설정 파일 = 스키마(v2)대로 · 문턱 · 컷 · 기준 변경일이 «이 한 파일» 에만 있다 -- 코드(core · report)에는 그 값을 대입한 리터럴이 없고 옛 키(minConcurrentTracks)는 설정에 없다", () => {
+  const raw = fs.readFileSync(
+    new URL("./partial-count-machine-scope.json", import.meta.url),
+    "utf8",
   );
+  const cfg = JSON.parse(raw);
   assert.equal(cfg.schema_version, SCHEMA);
-  assert.equal(cfg.observationDays, 7);
-  assert.equal(cfg.minConcurrentTracks, 2);
-  for (const file of ["partial-count-core.mjs", "partial-count-report.mjs"]) {
-    const src = fs
+  assert.ok(Number.isInteger(cfg.observationDays) && cfg.observationDays > 0);
+  assert.ok(
+    Number.isInteger(cfg.minDeliveredPerDay) && cfg.minDeliveredPerDay > 0,
+    "배달 문턱 = 양의 정수(값 자체는 단언하지 않는다 -- 설정 값)",
+  );
+  assert.match(cfg.lastTickCutoffKst, /^([01]\d|2[0-3]):[0-5]\d$/);
+  assert.match(cfg.criterionChangedOn, /^\d{4}-\d{2}-\d{2}$/);
+  assert.equal(
+    Object.hasOwn(cfg, "minConcurrentTracks"),
+    false,
+    "옛 키 재사용 0",
+  );
+  // 실물 설정이 합성 설정과 같은 파서로 읽힌다(합성 저장소에 실물 본문을 그대로 심는다).
+  const wellFormed = JSON.parse(raw);
+  assert.deepEqual(Object.keys(wellFormed).sort(), [
+    "criterionChangedOn",
+    "lastTickCutoffKst",
+    "minDeliveredPerDay",
+    "observationDays",
+    "schema_version",
+  ]);
+  const stripped = (file) =>
+    fs
       .readFileSync(new URL(`./${file}`, import.meta.url), "utf8")
       .replace(/\/\/.*$/gm, "");
+  for (const file of ["partial-count-core.mjs", "partial-count-report.mjs"]) {
+    const src = stripped(file);
     assert.equal(
-      /(observationDays|minConcurrentTracks)\s*[:=]\s*\d/.test(src),
+      /(observationDays|minDeliveredPerDay|minConcurrentTracks)\s*[:=]\s*\d/.test(
+        src,
+      ),
       false,
-      `${file} 에 관측 일수 · 동시 문턱 리터럴`,
+      `${file} 에 관측 일수 · 배달 문턱 리터럴`,
+    );
+    // 실물 설정의 컷 · 기준 변경일 · 문턱 값이 코드에 문자열/숫자 리터럴로 박혀 있지 않다(설정 값에서 읽어 비교).
+    for (const value of [cfg.lastTickCutoffKst, cfg.criterionChangedOn]) {
+      assert.equal(
+        src.includes(value),
+        false,
+        `${file} 에 설정 값 «${value}» 리터럴`,
+      );
+    }
+    assert.equal(
+      new RegExp(`\\b${cfg.minDeliveredPerDay}\\s*건`).test(src),
+      false,
+      `${file} 에 «${cfg.minDeliveredPerDay}건» 리터럴`,
     );
   }
+});
+
+test("실물 설정 본문을 합성 origin/master 에 심으면 같은 파서가 읽는다 -- 줄의 기준 숫자 · 컷 · 기준 변경일 = 설정 파일 값 그대로(값 단언은 파일에서 읽은 값과 비교)", async () => {
+  const raw = fs.readFileSync(
+    new URL("./partial-count-machine-scope.json", import.meta.url),
+    "utf8",
+  );
+  const cfg = JSON.parse(raw);
+  const K = cfg.minDeliveredPerDay;
+  const [h, m] = cfg.lastTickCutoffKst.split(":").map(Number);
+  const cutMin = h * 60 + m;
+  const hhmm = (min) =>
+    `${String(Math.floor(min / 60)).padStart(2, "0")}:${String(min % 60).padStart(2, "0")}`;
+  const lines = dayLines(-7, -1, (o) => ({
+    delivered: K,
+    lastTickAtMs: kstAt(o, hhmm(cutMin)),
+  }));
+  const { reportText } = await runReport(buildRepo(raw), {
+    machineScopeDailyLines: lines,
+  });
+  const scope = scopeLineOf(reportText);
+  assert.equal(verdictOf(scope), "충족");
+  assert.deepEqual(criterion(scope), [
+    cfg.observationDays,
+    K,
+    cfg.lastTickCutoffKst,
+  ]);
+  assert.equal(changedOn(scope), cfg.criterionChangedOn);
+  // 실물 컷 1분 전 = 끊김 · 문턱 - 1 = 끊김.
+  const early = await runReport(buildRepo(raw), {
+    machineScopeDailyLines: dayLines(-7, -1, (o) => ({
+      delivered: K,
+      lastTickAtMs: kstAt(o, hhmm(cutMin - 1)),
+    })),
+  });
+  assert.equal(verdictOf(scopeLineOf(early.reportText)), "미충족");
+  const under = await runReport(buildRepo(raw), {
+    machineScopeDailyLines: dayLines(-7, -1, (o) => ({
+      delivered: K - 1,
+      lastTickAtMs: kstAt(o, hhmm(cutMin)),
+    })),
+  });
+  assert.equal(verdictOf(scopeLineOf(under.reportText)), "미충족");
 });

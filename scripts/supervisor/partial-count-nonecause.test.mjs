@@ -40,19 +40,29 @@ const causesIn = (line) =>
     .filter(([, frag]) => line.includes(frag))
     .map(([name]) => name);
 
-// 부분 있음 줄 -- base 6b509dc 렌더 출력 바이트 그대로(합성 값 7/7/2 · 15 = 0/14/1) -- 이 조각이 건드리지 않는 줄.
+// HYK-255-p2e-workday-2 바뀐 단언(판정 #20261117-2026 ③ · 2104 ②): 합성 기계 계수 범위 설정 = 일한 날 기준 판(값은 실물 설정과 «다른» 합성 값).
+const SCOPE_CFG = {
+  observationDays: 7,
+  minDeliveredPerDay: 3,
+  lastTickCutoffKst: "23:15",
+  criterionChangedOn: "2026-11-01",
+};
+
+// 부분 있음 줄 -- 합성 값 7/7/(배달 문턱) · 15 = 0/14/1.
+// 바뀐 단언: 옛 줄 «(… · 동시 배달 최대 ≥ 2)» 바이트 고정(리터럴) -> 새 뜻 «(… · 배달(24시간 창) ≥ K건 · 기준 변경 날짜)» (판정 2026 ⑤ · «부분 있음» 줄 같은 뜻 바꿈) --
+// 고정 문면 비교는 프로덕션 렌더 출력과 하고(PARTIAL_LINE_BASE), 새 토막은 설정 값에서 만든 조각으로만 단언한다(문턱 숫자 리터럴 0).
 const PARTIAL_INPUT = {
   state: "partial",
   days: 7,
   observationDays: 7,
-  minConcurrentTracks: 2,
+  minDeliveredPerDay: SCOPE_CFG.minDeliveredPerDay,
+  criterionChangedOn: SCOPE_CFG.criterionChangedOn,
   total: 15,
   preventionProof: 0,
   partialScope: 14,
   excluded: 1,
 };
-const PARTIAL_LINE_BASE =
-  "1-C 판정 자격: 부분 있음 — 기계 계수 범위 기준 충족(연속 7일 / 기준 7일 · 동시 배달 최대 ≥ 2) · 알려진 못 세는 종류 15 = 예방 증명 0 / 부분 범위 14 / 정의상 제외(잠정) 1 · «ㄴ=0» 판정 아님";
+const PARTIAL_LINE_BASE = core.renderQualificationLine(PARTIAL_INPUT);
 
 const cleanups = [];
 function tmpDir(prefix) {
@@ -75,6 +85,8 @@ const dayLine = (offset, over = {}) => ({
   collectorFails: [],
   coverageGaps: { count: 0, totalMs: 0 },
   concurrentTracksMax: 2,
+  delivered: SCOPE_CFG.minDeliveredPerDay,
+  lastTickAtMs: Date.parse(`${dayStr(offset)}T23:58:00+09:00`),
   uncountedExampleIds: [],
   permissionHumanAnswers: 0,
   permissionUndecidable: 0,
@@ -104,9 +116,8 @@ function git(cwd, args) {
 
 const scopeJson = (over = {}) =>
   JSON.stringify({
-    schema_version: "partial-count-machine-scope/v1",
-    observationDays: 7,
-    minConcurrentTracks: 2,
+    schema_version: "partial-count-machine-scope/v2",
+    ...SCOPE_CFG,
     ...over,
   });
 
@@ -175,7 +186,8 @@ test("원인 고르기(순수 함수 qualificationNoneCause): 기준 모름 -> �
     met: true,
     days: 7,
     observationDays: 7,
-    minConcurrentTracks: 2,
+    minDeliveredPerDay: SCOPE_CFG.minDeliveredPerDay,
+    criterionChangedOn: SCOPE_CFG.criterionChangedOn,
   };
   const unmet = { ...met, met: false, days: 3 };
   assert.deepEqual(
@@ -229,7 +241,8 @@ test("computeQualification: «없음» 은 원인을 값으로 돌려준다(stat
     met: true,
     days: 7,
     observationDays: 7,
-    minConcurrentTracks: 2,
+    minDeliveredPerDay: SCOPE_CFG.minDeliveredPerDay,
+    criterionChangedOn: SCOPE_CFG.criterionChangedOn,
   };
   const unmet = { ...met, met: false, days: 3 };
   const C = core.QUALIFICATION_NONE_CAUSE;
@@ -309,10 +322,28 @@ test("renderQualificationLine: 원인 없는 none · 모르는 원인 · 상태 
   }
 });
 
-test("부분 있음 줄 바이트 무변: 합성 값으로 렌더한 줄이 base(6b509dc) 출력과 같고 원인 낱말 0 · 줄 수 1", () => {
+test("부분 있음 줄: 머리 · 꼬리 뜻 무변 · 기준 문면만 새 뜻(배달(24시간 창) ≥ K건 · 기준 변경 날짜) -- «동시 배달» 낱말 0 · 원인 낱말 0 · 줄 수 1", () => {
   const line = core.renderQualificationLine(PARTIAL_INPUT);
   assert.equal(line, PARTIAL_LINE_BASE);
+  assert.ok(
+    line.startsWith(
+      "1-C 판정 자격: 부분 있음 — 기계 계수 범위 기준 충족(연속 7일 / 기준 7일 · ",
+    ),
+  );
+  assert.ok(
+    line.includes(
+      `배달(24시간 창) ≥ ${PARTIAL_INPUT.minDeliveredPerDay}건 · 기준 변경 ${PARTIAL_INPUT.criterionChangedOn})`,
+    ),
+  );
+  assert.ok(
+    line.includes(
+      "알려진 못 세는 종류 15 = 예방 증명 0 / 부분 범위 14 / 정의상 제외(잠정) 1 · «ㄴ=0» 판정 아님",
+    ),
+    "꼬리 바이트 무변",
+  );
+  assert.equal(line.includes("동시 배달"), false);
   assert.deepEqual(causesIn(line), []);
+  assert.equal(line.includes("\n"), false);
 });
 
 // ---- ③ 보고서 머리: 결선 없는 기본 경로 = 판독 불가 --------------------------------------------------------------------
@@ -458,7 +489,8 @@ test("프로덕션 보고 진입점: 기준 충족 + 종류 설정 정상 = 부�
       state: "partial",
       days: 7,
       observationDays: 7,
-      minConcurrentTracks: 2,
+      minDeliveredPerDay: SCOPE_CFG.minDeliveredPerDay,
+      criterionChangedOn: SCOPE_CFG.criterionChangedOn,
       total: 3,
       preventionProof: 0,
       partialScope: 2,

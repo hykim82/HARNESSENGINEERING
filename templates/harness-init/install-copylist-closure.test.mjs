@@ -18,7 +18,16 @@
 // the same list.
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync, existsSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import {
+  readFileSync,
+  existsSync,
+  mkdtempSync,
+  mkdirSync,
+  realpathSync,
+  rmSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -461,6 +470,24 @@ const PAIR_TEST_EXCEPTIONS = [
     reason:
       "미편입 · 편입 후보 -- 짝 시험은 자기 자신(./concurrency-cap-adapter.mjs)만 import한다(차단 사유 없음) 〔직접〕; product_scope(생산 코드 0)가 편입을 막는다.",
   },
+  // HYK-209-ci-copylist-3 (판정 2026-11-17 08:18 ⑤ = 상신 2333 안 A): the two
+  // guards enforce.yml calls are now in ENFORCEMENT_CHECK_FILES, but their
+  // paired tests are deliberately not copied this round (copying them = 안 B,
+  // bundled with the ambient follow-up in candidate table round 2).
+  {
+    dir: "check",
+    main: "nul-byte-guard.mjs",
+    sibling: "nul-byte-guard.test.mjs",
+    reason:
+      "미편입 · 편입 후보 -- 짝 시험의 상대 import는 ./nul-byte-guard.mjs 하나뿐(nul-byte-guard.test.mjs:7)이고 이미 check 목록 안에서 닫혀 있다(차단 사유 없음) 〔직접〕; 이 조각의 범위(복사 목록 2줄 + 워크플로 참조 폐쇄 시험)가 짝 시험 편입을 막는다(안 B · 후보표 2차 몫).",
+  },
+  {
+    dir: "check",
+    main: "live-harness-scratch-guard.mjs",
+    sibling: "live-harness-scratch-guard.test.mjs",
+    reason:
+      "미편입 · 편입 후보 -- 짝 시험의 상대 import는 ./live-harness-scratch-guard.mjs 하나뿐(live-harness-scratch-guard.test.mjs:25-28)이고 이미 check 목록 안에서 닫혀 있다(차단 사유 없음 = import 기준 〔직접〕; 단 :74-86 의 scripts/ 전체 스캔과 :210 의 quality-check.mjs 읽기는 설치 대상에서 실행해 보지 않았다 〔못쟀다〕); 이 조각의 범위가 짝 시험 편입을 막는다(안 B · 후보표 2차 몫).",
+  },
 ];
 
 // Every non-test .mjs in `lists[dirKey]` whose sibling .test.mjs exists on
@@ -618,7 +645,7 @@ describe("HYK-209-install-pair-test-1: 짝 .test.mjs 목록 편입 관례 (ⓓ m
   // later round reading this file alone (not just the result file, which
   // will eventually rot out of the task's own history) can see the
   // candidate set without re-deriving it.
-  test("§2 ⓔ candidate-for-adoption subset of the exception list is exactly the 7 non-blocked entries (documents the candidate set this round measured but did not adopt)", () => {
+  test("§2 ⓔ candidate-for-adoption subset of the exception list is exactly the 9 non-blocked entries (documents the candidate set this round measured but did not adopt)", () => {
     const candidates = PAIR_TEST_EXCEPTIONS.filter((e) =>
       e.reason.startsWith("미편입 · 편입 후보"),
     ).map((e) => e.main);
@@ -632,9 +659,325 @@ describe("HYK-209-install-pair-test-1: 짝 .test.mjs 목록 편입 관례 (ⓓ m
         "admission-ledger-core.mjs",
         "admission-ledger-store.mjs",
         "concurrency-cap-adapter.mjs",
+        "nul-byte-guard.mjs",
+        "live-harness-scratch-guard.mjs",
       ],
       `candidate set changed -- update this list (and the result file's ⓔ table) if that is intentional: ${JSON.stringify(candidates)}`,
     );
+  });
+});
+
+// HYK-209-ci-copylist-3 (HYK-209 item 10): the "workflow reference" axis.
+//
+// The import-closure and pair-test axes above only see what a listed FILE
+// imports or is named after. They are blind to a reference that lives in a
+// YAML string: the installed `.github/workflows/enforce.yml` (install.mjs
+// copies the harness's own enforce.yml verbatim, `copyRawFile(REPO_ROOT/
+// .github/workflows/enforce.yml -> target)`) calls `node scripts/check/<x>
+// .mjs` for six scripts, and two of them (nul-byte-guard.mjs,
+// live-harness-scratch-guard.mjs) were never in ENFORCEMENT_CHECK_FILES --
+// so every solo-full target's CI was structurally red on those two steps.
+// This axis makes "every script the installed workflow calls is either
+// copied or sits in a reasoned exclusion list" a machine-checked property.
+//
+// EXACTLY two exclusions, by ruling (2026-11-16 23:05 · 2026-11-17 08:18):
+//   - hook-sync-check.mjs: INTENTIONAL (install.mjs's own comment).
+//   - ambient-sweep-report.mjs: a KNOWN, UNRESOLVED GAP -- NOT an intentional
+//     exclusion. Do not reword it as intentional.
+const WORKFLOW_SRC = path.join(
+  REPO_ROOT,
+  ".github",
+  "workflows",
+  "enforce.yml",
+);
+const INSTALLER_PATH = path.join(THIS_DIR, "install.mjs");
+
+const WORKFLOW_REF_EXCLUSIONS = [
+  {
+    main: "hook-sync-check.mjs",
+    kind: "intentional",
+    reason:
+      "의도적 제외 -- install.mjs:1192-1196 · :1215-1242 의 기존 주석이 근거(줄 번호는 base f3f6789 기준 · 안정 표지 = «hook-sync-check.mjs is DELIBERATELY LEFT OUT»): hook-sync-check.mjs 가 import 하는 selfcheck-inventory.mjs 가 이 머신 관제실 경로를 하드코드하고 있어 설치 대상으로 새므로 복사 목록에서 뺀다(그 주석이 스스로 설치 대상 CI 가 이 단계에서 빨강으로 남는다고 적고 있다).",
+  },
+  {
+    main: "ambient-sweep-report.mjs",
+    kind: "known-gap",
+    reason:
+      "알려진 미해결 — HYK-209 후속 등재 · 사유 = 마커 시험 미복사 + package.json 복사 미확인",
+  },
+];
+
+// `node scripts/check/<x>.mjs` as a command in the workflow text. Whole-line
+// YAML/shell comments are dropped first: a comment is not a call (the real
+// file's line 112 comment names isolated-suite-runner.mjs, which the
+// workflow actually reaches through `npm test`, not through a direct call).
+const WORKFLOW_CHECK_CALL_RE =
+  /\bnode\s+scripts\/check\/([A-Za-z0-9._-]+\.mjs)\b/g;
+
+function extractWorkflowCheckRefs(yamlText) {
+  const code = yamlText
+    .split(/\r?\n/)
+    .filter((line) => !/^\s*#/.test(line))
+    .join("\n");
+  const names = new Set();
+  WORKFLOW_CHECK_CALL_RE.lastIndex = 0;
+  let m;
+  while ((m = WORKFLOW_CHECK_CALL_RE.exec(code))) names.add(m[1]);
+  return [...names].sort();
+}
+
+// A called script is a violation unless it is in the copy list, or is in the
+// exclusion list WITH a non-blank reason.
+function findWorkflowRefViolations({ refs, copyList, exclusions }) {
+  const listSet = new Set(copyList);
+  const exMap = new Map(exclusions.map((e) => [e.main, e]));
+  const violations = [];
+  for (const name of refs) {
+    if (listSet.has(name)) continue;
+    const ex = exMap.get(name);
+    if (!ex) {
+      violations.push({
+        main: name,
+        why: "called by the workflow, but in neither the copy list nor the exclusion list",
+      });
+    } else if (typeof ex.reason !== "string" || ex.reason.trim() === "") {
+      violations.push({ main: name, why: "exclusion entry has no reason" });
+    }
+  }
+  return violations;
+}
+
+// Bidirectional staleness (same idea as findStaleExceptions): an exclusion
+// stops being true when the workflow no longer calls it, or when the script
+// has since been added to the copy list.
+function findStaleWorkflowExclusions({ refs, copyList, exclusions }) {
+  const stale = [];
+  for (const ex of exclusions) {
+    if (!refs.includes(ex.main)) {
+      stale.push({ main: ex.main, why: "workflow no longer calls it" });
+    } else if (copyList.includes(ex.main)) {
+      stale.push({ main: ex.main, why: "already in the copy list" });
+    }
+  }
+  return stale;
+}
+
+const REAL_WORKFLOW_REFS = extractWorkflowCheckRefs(
+  readFileSync(WORKFLOW_SRC, "utf8"),
+);
+const workflowCtx = (overrides = {}) => ({
+  refs: REAL_WORKFLOW_REFS,
+  copyList: ENFORCEMENT_CHECK_FILES,
+  exclusions: WORKFLOW_REF_EXCLUSIONS,
+  ...overrides,
+});
+
+describe("HYK-209-ci-copylist-3: 워크플로 참조 폐쇄 (enforce.yml 이 부르는 scripts/check 경로)", () => {
+  test("extractor: finds direct `node scripts/check/<x>.mjs` calls, ignores whole-line comments and `npm test` (synthetic YAML)", () => {
+    const yaml = [
+      "      # (node scripts/check/commented-out.mjs) is a comment, not a call",
+      "      - run: npm test",
+      "      - run: node scripts/check/aa.mjs --flag",
+      "        run: |",
+      "          node scripts/check/bb-cc.mjs a b",
+      "          node scripts/check/aa.mjs again",
+    ].join("\n");
+    assert.deepEqual(extractWorkflowCheckRefs(yaml), ["aa.mjs", "bb-cc.mjs"]);
+  });
+
+  test("extractor sees the real enforce.yml's direct callers (guards against a parser that silently reads nothing)", () => {
+    for (const name of [
+      "ambient-sweep-report.mjs",
+      "hook-sync-check.mjs",
+      "quality-check.mjs",
+      "nul-byte-guard.mjs",
+      "live-harness-scratch-guard.mjs",
+    ]) {
+      assert.ok(
+        REAL_WORKFLOW_REFS.includes(name),
+        `expected the workflow-reference parser to find ${name}; got ${JSON.stringify(REAL_WORKFLOW_REFS)}`,
+      );
+    }
+  });
+
+  test("every script the installed enforce.yml calls is in ENFORCEMENT_CHECK_FILES or in the reasoned exclusion list", () => {
+    const violations = findWorkflowRefViolations(workflowCtx());
+    assert.deepEqual(
+      violations,
+      [],
+      `the installed CI calls scripts a target never receives: ${JSON.stringify(violations, null, 2)}`,
+    );
+  });
+
+  test("the exclusion list is exactly 2 entries, and neither is stale", () => {
+    assert.deepEqual(WORKFLOW_REF_EXCLUSIONS.map((e) => e.main).sort(), [
+      "ambient-sweep-report.mjs",
+      "hook-sync-check.mjs",
+    ]);
+    assert.deepEqual(findStaleWorkflowExclusions(workflowCtx()), []);
+  });
+
+  test("exclusion reasons: hook-sync-check = intentional (points at install.mjs's own comment), ambient-sweep-report = known gap in the ruled wording, NOT 'intentional'", () => {
+    const byName = new Map(WORKFLOW_REF_EXCLUSIONS.map((e) => [e.main, e]));
+    const hook = byName.get("hook-sync-check.mjs");
+    assert.equal(hook.kind, "intentional");
+    assert.match(hook.reason, /install\.mjs:1192-1196/);
+    assert.match(hook.reason, /:1215-1242/);
+    const ambient = byName.get("ambient-sweep-report.mjs");
+    assert.equal(ambient.kind, "known-gap");
+    assert.equal(
+      ambient.reason,
+      "알려진 미해결 — HYK-209 후속 등재 · 사유 = 마커 시험 미복사 + package.json 복사 미확인",
+    );
+    assert.ok(
+      !ambient.reason.includes("의도적 제외"),
+      "a known gap must not be written up as an intentional exclusion",
+    );
+    // The reason's pointer must still be true: install.mjs still carries the
+    // comment the hook-sync-check reason cites.
+    const installerText = readFileSync(INSTALLER_PATH, "utf8");
+    assert.ok(
+      installerText.includes("hook-sync-check.mjs is DELIBERATELY LEFT OUT"),
+      "install.mjs no longer carries the comment the hook-sync-check exclusion reason cites",
+    );
+  });
+});
+
+describe("HYK-209-ci-copylist-3: 워크플로 참조 폐쇄 -- 음성 대조 (in-memory, no file mutation)", () => {
+  for (const removed of [
+    "nul-byte-guard.mjs",
+    "live-harness-scratch-guard.mjs",
+    "quality-check.mjs",
+  ]) {
+    test(`removing "${removed}" from the copy list goes RED`, () => {
+      const reduced = ENFORCEMENT_CHECK_FILES.filter((n) => n !== removed);
+      assert.equal(reduced.length, ENFORCEMENT_CHECK_FILES.length - 1);
+      const violations = findWorkflowRefViolations(
+        workflowCtx({ copyList: reduced }),
+      );
+      assert.ok(
+        violations.some((v) => v.main === removed),
+        `expected a violation naming ${removed}; got ${JSON.stringify(violations)}`,
+      );
+    });
+  }
+
+  test("dropping the ambient-sweep-report exclusion goes RED (nothing may be silently uncovered)", () => {
+    const reduced = WORKFLOW_REF_EXCLUSIONS.filter(
+      (e) => e.main !== "ambient-sweep-report.mjs",
+    );
+    const violations = findWorkflowRefViolations(
+      workflowCtx({ exclusions: reduced }),
+    );
+    assert.ok(violations.some((v) => v.main === "ambient-sweep-report.mjs"));
+  });
+
+  test("an exclusion with a blank reason goes RED (an exclusion needs its reason)", () => {
+    const blank = WORKFLOW_REF_EXCLUSIONS.map((e) =>
+      e.main === "hook-sync-check.mjs" ? { ...e, reason: "  " } : e,
+    );
+    const violations = findWorkflowRefViolations(
+      workflowCtx({ exclusions: blank }),
+    );
+    assert.ok(
+      violations.some(
+        (v) => v.main === "hook-sync-check.mjs" && /no reason/.test(v.why),
+      ),
+    );
+  });
+
+  test("a stale exclusion (script already in the copy list) is reported", () => {
+    const stale = findStaleWorkflowExclusions(
+      workflowCtx({
+        copyList: [...ENFORCEMENT_CHECK_FILES, "hook-sync-check.mjs"],
+      }),
+    );
+    assert.ok(
+      stale.some(
+        (s) =>
+          s.main === "hook-sync-check.mjs" &&
+          s.why === "already in the copy list",
+      ),
+    );
+  });
+});
+
+// Production-entry-point proof (not a helper-only test): run the REAL
+// installer (`node install.mjs --profile solo-full ...`) into a mkdtemp
+// synthetic target, then read the workflow the INSTALLER WROTE there and
+// check its callers against what the installer actually put on disk. Every
+// path the installer is told about lives inside the temp base -- no live
+// control room / ledger / team repo is touched.
+describe("HYK-209-ci-copylist-3: 워크플로 참조 폐쇄 -- 합성 대상 solo-full 실설치", () => {
+  test("the installed enforce.yml's direct callers all exist in the target, or are in the exclusion list (and the excluded ones really are absent)", () => {
+    const base = mkdtempSync(
+      path.join(realpathSync.native(tmpdir()), "hyk209-ci-copylist3-"),
+    );
+    try {
+      const targetRepo = path.join(base, "target-repo");
+      mkdirSync(targetRepo, { recursive: true });
+      execFileSync("git", ["-C", targetRepo, "init", "-q"]);
+      execFileSync(
+        process.execPath,
+        [
+          INSTALLER_PATH,
+          ...["--profile", "solo-full", "--repo-path", targetRepo],
+          ...["--control-room-path", path.join(base, "fake-control-room")],
+          ...["--github-repo", "someorg/somerepo", "--bot-account", "bot-x"],
+          ...[
+            "--verify-cmd",
+            "npm test",
+            "--notify-dir",
+            path.join(base, "notify"),
+          ],
+          ...["--approver-login", "approver-x", "--approver-id", "1"],
+          ...["--workspaces-root", path.join(base, "workspaces")],
+          ...["--main-repo-path", path.join(base, "main-repo")],
+        ],
+        { encoding: "utf8", stdio: "pipe", timeout: 120000 },
+      );
+      const installedYaml = path.join(
+        targetRepo,
+        ".github",
+        "workflows",
+        "enforce.yml",
+      );
+      assert.ok(
+        existsSync(installedYaml),
+        "the installer must write enforce.yml",
+      );
+      const installedRefs = extractWorkflowCheckRefs(
+        readFileSync(installedYaml, "utf8"),
+      );
+      assert.deepEqual(
+        installedRefs,
+        REAL_WORKFLOW_REFS,
+        "installer copies enforce.yml verbatim",
+      );
+      const excluded = new Set(WORKFLOW_REF_EXCLUSIONS.map((e) => e.main));
+      const checkDir = path.join(targetRepo, "scripts", "check");
+      const missing = installedRefs.filter(
+        (n) => !existsSync(path.join(checkDir, n)) && !excluded.has(n),
+      );
+      assert.deepEqual(
+        missing,
+        [],
+        `installed CI calls scripts absent from the target: ${JSON.stringify(missing)}`,
+      );
+      for (const name of excluded) {
+        assert.ok(
+          !existsSync(path.join(checkDir, name)),
+          `${name} is in the exclusion list but the installer shipped it -- the exclusion is stale`,
+        );
+      }
+    } finally {
+      rmSync(base, {
+        recursive: true,
+        force: true,
+        maxRetries: 5,
+        retryDelay: 200,
+      });
+    }
   });
 });
 
