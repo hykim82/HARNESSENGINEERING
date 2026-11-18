@@ -1542,6 +1542,18 @@ export const ENFORCEMENT_RELAY_FILES = [
   "finalize-done.test.mjs",
   "dispatch-receipt-cli.mjs",
   "dispatch-receipt-cli.test.mjs",
+  // HYK-402-seat-role-s2-1 (판정 2026-11-18 08:38 ⑤(라) · 378 폐쇄 시험 기준):
+  // 넣는다. 이유 ⑴ 배달기(관제실 ps1)가 설치된 워크트리에서 이 CLI 를 «경로로»
+  // 부른다(docs/control-room-patches/HYK-402-seat-role-bind-s2.md · 외부 경로 호출
+  // 가드가 그 줄을 읽는다) -- 설치본에 없으면 그 워크트리 배달마다 판정이
+  // SEAT_BIND_CLI_MISSING(UNDECIDABLE)로만 남아 관측 창이 설치 대상에서 비어
+  // 버린다. ⑵ 이 둘이 import 하는 check 파일(seat-origin-registry.mjs ·
+  // engine-profile.mjs + engine-profiles.json)은 이미 ENFORCEMENT_CHECK_FILES 에
+  // 있어 폐쇄가 새 항목을 요구하지 않는다. ⑶ 짝 시험(.test.mjs)은 #378 짝 시험
+  // 관례가 요구해 함께 넣는다. 중간 삽입 = 389 조각 1 의 목록 끝 추가와 병합 충돌 회피.
+  "seat-role-bind-core.mjs",
+  "seat-role-bind-cli.mjs",
+  "seat-role-bind-cli.test.mjs",
   "dispatch-worker-modal-check.mjs",
   "dispatch-worker-modal-check.test.mjs",
   // transitive: dispatch-worker-modal-check.test.mjs imports SAMPLES from

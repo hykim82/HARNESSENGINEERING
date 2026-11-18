@@ -170,9 +170,15 @@ export function parseTerminalListText(text) {
   return { ok: true, terminals };
 }
 
-function classifySeat(seat, registryRecords) {
+function classifySeat(seat, registryRecords, asOfMs) {
   const paneKey = paneKeyOf(seat);
-  const found = lookupRegisteredRole(registryRecords, paneKey);
+  // HYK-402 S2: asOfMs 는 «배달 순간» 판정(decideSeatBindAtDelivery)만 준다.
+  // 없으면 지금까지와 똑같이 «지금 기준 마지막 등록»(S1 동작 무변).
+  const found = lookupRegisteredRole(
+    registryRecords,
+    paneKey,
+    Number.isFinite(asOfMs) ? { asOfMs } : {},
+  );
   const base = { handle: seat.handle, paneKey };
   if (found.status === "FOUND") {
     return {
@@ -311,6 +317,7 @@ export function selectRoleBoundSeat({
   role,
   registryRecords,
   handle,
+  asOfMs,
 } = {}) {
   const wanted = normalizeRole(role);
   if (!KNOWN_SEAT_ROLES.includes(wanted)) {
@@ -338,8 +345,149 @@ export function selectRoleBoundSeat({
       [],
     );
   }
-  const seats = candidates.map((c) => classifySeat(c, registryRecords));
+  const seats = candidates.map((c) => classifySeat(c, registryRecords, asOfMs));
   return decide({ seats, role: wanted, handle });
+}
+
+// ---- 배달 순간 «기록만» 판정 (HYK-402 S2 · 판정 2026-11-18 08:38 ⑤) ------------
+//
+// 배달 «순간»의 등록부로 S1 선별(selectRoleBoundSeat)을 한 번 돌려, 그 결과를
+// 4종 판정으로 옮긴다. 이 함수는 «기록할 값»만 만든다 -- 배달 결과를 바꾸는
+// 경로(exit · 좌석 교체 · 배달 중단 · 영수증 기록 거부)는 이 파일 어디에도 없다.
+//
+//   MATCH       S1 선별이 이 배달을 받아들였다(등록 역할 = 요청 역할).
+//   MISMATCH    S1 선별이 «양의 증거»로 거부했다: 등록 역할이 요청과 다르다
+//               (ROLE_MISMATCH · HANDLE_ROLE_MISMATCH) 또는 등록된 살아 있는 에이전트
+//               좌석이 한 워크트리에 둘 이상이다(MULTI_AGENT_SEAT_IN_WORKTREE --
+//               «역할은 맞을 수 있으나 불변식이 깨졌다»; 사유 칸으로 가른다).
+//   UNDECIDABLE 판정할 근거가 없다: 등록부 공백 · 등록부 없음 · 그 pane 이 등록부에
+//               없음 · 등록이 배달보다 «늦다» · 에이전트 좌석 없음 · 미등록 에이전트
+//               좌석 · 죽은 셸. ⛔MATCH 로 접지 않는다(거부도 아니다).
+//   ERROR       입력이 깨졌다: 알 수 없는 역할 · 워크트리 비어 있음 · terminal list
+//               해석 불가 · 등록부 읽기 오류 · 매핑에 없는 거부 사유.
+//
+// ⛔correction 키 건너뛰기(classifyReceiptBinding)는 «지난 영수증 집계»에만 쓴다.
+// 이 함수는 영수증을 받지 않고, 입력에 correction* 키가 있어도 보지 않는다 --
+// 판정 2026-11-18 08:38 ⑤(다). 차단 전환의 선행 조건에 «이 규칙 닫기»가 있다.
+export const DELIVERY_BIND_VERDICT = Object.freeze({
+  MATCH: "MATCH",
+  MISMATCH: "MISMATCH",
+  UNDECIDABLE: "UNDECIDABLE",
+  ERROR: "ERROR",
+});
+
+const DELIVERY_VERDICT_BY_REFUSAL = Object.freeze({
+  [SEAT_BIND_REASON.ROLE_MISMATCH]: DELIVERY_BIND_VERDICT.MISMATCH,
+  [SEAT_BIND_REASON.HANDLE_ROLE_MISMATCH]: DELIVERY_BIND_VERDICT.MISMATCH,
+  [SEAT_BIND_REASON.MULTI_AGENT_SEAT_IN_WORKTREE]:
+    DELIVERY_BIND_VERDICT.MISMATCH,
+  [SEAT_BIND_REASON.UNREGISTERED_AGENT]: DELIVERY_BIND_VERDICT.UNDECIDABLE,
+  [SEAT_BIND_REASON.HANDLE_SEAT_UNREGISTERED]:
+    DELIVERY_BIND_VERDICT.UNDECIDABLE,
+  [SEAT_BIND_REASON.HANDLE_SEAT_NOT_LIVE_AGENT]:
+    DELIVERY_BIND_VERDICT.UNDECIDABLE,
+  [SEAT_BIND_REASON.HANDLE_NOT_IN_WORKTREE]: DELIVERY_BIND_VERDICT.UNDECIDABLE,
+  [SEAT_BIND_REASON.NO_AGENT_SEAT]: DELIVERY_BIND_VERDICT.UNDECIDABLE,
+  [SEAT_BIND_REASON.NO_SEAT_IN_WORKTREE]: DELIVERY_BIND_VERDICT.UNDECIDABLE,
+  [SEAT_BIND_REASON.REGISTRY_LOAD_FAILED]: DELIVERY_BIND_VERDICT.UNDECIDABLE,
+  [SEAT_BIND_REASON.TERMINAL_LIST_INVALID]: DELIVERY_BIND_VERDICT.ERROR,
+  [SEAT_BIND_REASON.INVALID_ROLE]: DELIVERY_BIND_VERDICT.ERROR,
+  [SEAT_BIND_REASON.INVALID_WORKTREE]: DELIVERY_BIND_VERDICT.ERROR,
+});
+
+// 영수증 `seat_bind_candidates` 칸 문자열: `<paneKey>=<ROLE|UNREGISTERED|NON_AGENT>/<STATE>`
+// 를 쉼표로 이은 것. 기록·사람 눈 확인용이며 판정에는 쓰이지 않는다.
+export function formatSeatCandidates(seats) {
+  return (Array.isArray(seats) ? seats : [])
+    .map((s) => `${s.paneKey || "(none)"}=${s.role}/${s.state}`)
+    .join(",");
+}
+
+// UNDECIDABLE 의 사유를 «왜 근거가 없는가»로 좁힌다(관측 때 7건 등록부 공백 ·
+// 1건 늦은 등록을 가르기 위해). 좁힐 수 없으면 S1 사유를 그대로 쓴다.
+function refineUndecidableReason({
+  selectReason,
+  registryRecords,
+  terminals,
+  worktree,
+  handle,
+  deliveredAtMs,
+}) {
+  const records = Array.isArray(registryRecords) ? registryRecords : [];
+  if (records.length === 0) return "REGISTRY_EMPTY";
+  if (!isNonEmptyString(handle)) return selectReason;
+  const seat = candidateSeats(
+    Array.isArray(terminals) ? terminals : [],
+    worktree,
+  ).find((s) => s.handle === handle);
+  if (!seat) return selectReason;
+  const found = lookupRegisteredRole(records, paneKeyOf(seat), {
+    asOfMs: deliveredAtMs,
+  });
+  if (found.status === "NOT_YET_REGISTERED")
+    return "PANE_REGISTERED_AFTER_DELIVERY";
+  if (found.status === "NOT_IN_REGISTRY") return "PANE_NOT_IN_REGISTRY";
+  return selectReason;
+}
+
+// -> { verdict, reason, selectReason, candidates, candidateSeats }
+// deliveredAtMs: «배달 순간»(밀리초). 없으면 호출 시각(Date.now) -- 이 함수는 배달기가
+// 배달 직전에 부르는 용도라 «지금»이 배달 순간이다. 이 시각 «뒤»에 찍힌 등록은
+// «아직 등록 안 됨»으로 본다(등록이 배달보다 늦음 = UNDECIDABLE).
+export function decideSeatBindAtDelivery({
+  terminals,
+  worktree,
+  role,
+  registryRecords,
+  handle,
+  deliveredAtMs,
+} = {}) {
+  const at = Number.isFinite(deliveredAtMs) ? deliveredAtMs : Date.now();
+  const decision = selectRoleBoundSeat({
+    terminals,
+    worktree,
+    role,
+    registryRecords,
+    handle,
+    asOfMs: at,
+  });
+  const seatsView = decision.seats ?? [];
+  const base = {
+    candidateSeats: seatsView,
+    candidates: formatSeatCandidates(seatsView),
+  };
+  if (decision.ok) {
+    return {
+      verdict: DELIVERY_BIND_VERDICT.MATCH,
+      reason: "ROLE_MATCH",
+      selectReason: null,
+      ...base,
+    };
+  }
+  const verdict =
+    DELIVERY_VERDICT_BY_REFUSAL[decision.reason] ?? DELIVERY_BIND_VERDICT.ERROR;
+  if (verdict === DELIVERY_BIND_VERDICT.ERROR) {
+    return {
+      verdict,
+      reason: DELIVERY_VERDICT_BY_REFUSAL[decision.reason]
+        ? decision.reason
+        : `UNMAPPED_REFUSAL_${String(decision.reason)}`,
+      selectReason: decision.reason,
+      ...base,
+    };
+  }
+  const reason =
+    verdict === DELIVERY_BIND_VERDICT.UNDECIDABLE
+      ? refineUndecidableReason({
+          selectReason: decision.reason,
+          registryRecords,
+          terminals,
+          worktree,
+          handle,
+          deliveredAtMs: at,
+        })
+      : decision.reason;
+  return { verdict, reason, selectReason: decision.reason, ...base };
 }
 
 // ---- 읽기 전용 집계: 지난 영수증 x 등록부 ---------------------------------
