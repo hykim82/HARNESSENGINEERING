@@ -61,7 +61,8 @@ try {
     $script:seatBindReason = "SEAT_BIND_CLI_MISSING"
   }
   else {
-    $seatBindListPath = Join-Path $env:TEMP "hyk402-seat-bind-$Task-terminal-list.json"
+    # 임시 폴더는 «플랫폼 중립» .NET 호출로 얻는다 -- `$env:TEMP` 는 Linux pwsh 에서 비어 있어 Join-Path 가 던진다(PR 383 CI 빨강 · BIND_CALL_FAILED).
+    $seatBindListPath = Join-Path ([System.IO.Path]::GetTempPath()) "hyk402-seat-bind-$Task-terminal-list.json"
     Set-Content -LiteralPath $seatBindListPath -Value ($list | ConvertTo-Json -Depth 10 -Compress) -Encoding utf8
     $seatBindRegistryPath = Join-Path $PSScriptRoot "seat-launch-registry.jsonl"
     $seatBindArgs = @($seatBindCliPath, "--record-only", "--terminal-list", $seatBindListPath, "--worktree", $Worktree, "--role", $Role, "--registry-path", $seatBindRegistryPath, "--handle", $handle)
@@ -146,6 +147,7 @@ Write-Host "      [HYK-402 기록만] seat_bind=$($script:seatBindVerdict) reaso
 ## 정직 한계
 
 - **이 문서는 적용되지 않았다.** 이 라운드 병합만으로는 어떤 배달도 영수증에 `seat_bind_*` 칸을 남기지 않는다(검증된 것은 «CLI 와 코어와 영수증 CLI 가 합성 입력에서 이렇게 동작하고, 패치 블록이 ps1 합성 사본에서 파서 오류 없이 돌며, 실제 CLI 에 연결된다»까지다).
+- **플랫폼 가정(2026-11-18 수리 · PR 383 CI 빨강)**: 편집 A 는 원래 `Join-Path $env:TEMP …` 로 임시 파일 경로를 만들었다 — Linux pwsh 에는 `$env:TEMP` 가 없어 `Join-Path` 가 «null 경로» 로 던지고 `catch` 가 `ERROR/BIND_CALL_FAILED` 로 적었다(기록 후 계속은 설계대로). 지금은 `[System.IO.Path]::GetTempPath()`(Windows = TMP · TEMP · USERPROFILE 순 · Linux = `TMPDIR` 없으면 `/tmp`)로 바꿨다 — 편집 B 에는 같은 가정이 없다(`$env:` 변수 · 임시 폴더를 쓰지 않는다). **Linux 실행은 못 쟀다** — 시험은 Windows 에서 `$env:TEMP`·`TMP`·`TMPDIR` 을 자식 pwsh 안에서 지워 «Linux 와 같은 모양»만 흉내 낸다.
 - 관제실 **실물** `dispatch-worker.ps1` 에 이 블록을 적용해 본 적이 없다 — 합성 사본(앵커 모양만 같은 껍데기)에서만 파서·실행을 확인했다. Windows PowerShell 5.1 에서의 `Start-Job` 동작은 **못 쟀다**(시험은 이 기계에서 찾은 `pwsh` 로 돌렸다).
 - `terminal list` 는 [1/3] 의 스냅샷이다(편집 A 는 그 `$list` 를 쓴다) — 그 뒤에 생긴 좌석은 보지 못한다(TOCTOU). 배달 «순간»의 것은 **등록부**(편집 A 시점에 다시 읽음)와 판정 시각뿐이다.
 - 등록부는 «런처가 정상적으로 기록했을 때»만 있고 죽은 pane 을 지우지 않는다. 손으로 띄운 좌석은 미등록 → `UNDECIDABLE` 로 남는다(차단이 아니라 기록).

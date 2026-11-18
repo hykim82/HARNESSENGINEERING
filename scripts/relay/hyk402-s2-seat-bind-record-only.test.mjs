@@ -775,6 +775,41 @@ test("합성 ps1 사본에 패치 블록을 적용하면 PowerShell 파서 오�
   });
 });
 
+// 블록 A 를 합성 ps1 조각으로 자식 pwsh 에서 «실행»한다(공용 -- 두 «실행» 칸이 같이 쓴다).
+// stripTempEnv = 자식 «안»에서만 TEMP · TMP · TMPDIR 을 지운다(Linux pwsh 와 같은 모양).
+// spawn 의 env 로 지우지 않는 이유: Windows 의 node(libuv)가 자식 env 에서 빠진 TEMP 를
+// 되살려 준다(2026-11-18 이 기계 실측) -- 그러면 가정이 안 깨져 헛시험이 된다. 네 셸 ·
+// 사용자 · 시스템 환경은 건드리지 않는다(자식 프로세스 env 만).
+function runBlockAChild(
+  exe,
+  blocks,
+  dir,
+  worktree,
+  { stripTempEnv = false } = {},
+) {
+  // 배달기와 같은 전제: terminal list 의 좌석 worktreePath 가 $Worktree 와 같다.
+  const terminals = {
+    ok: true,
+    result: { terminals: [{ ...SEAT_CODER, worktreePath: worktree }] },
+  };
+  const script = [
+    stripTempEnv
+      ? "foreach ($n in 'TEMP','TMP','TMPDIR') { Remove-Item -LiteralPath \"Env:$n\" -ErrorAction SilentlyContinue }"
+      : "",
+    `$Task='task_synth'; $Worktree='${worktree.replace(/'/g, "''")}'; $Role='CODER'; $handle='term_coder'`,
+    `$PSScriptRoot_override='${dir.replace(/'/g, "''")}'`,
+    `$list = '${JSON.stringify(terminals).replace(/'/g, "''")}' | ConvertFrom-Json`,
+    'Write-Output "ENV TEMP=[$($env:TEMP)] TMP=[$($env:TMP)] TMPDIR=[$($env:TMPDIR)]"',
+    blocks.A[1].replace(/\$PSScriptRoot/g, "$PSScriptRoot_override"),
+    'Write-Output "RESULT verdict=$($script:seatBindVerdict) reason=$($script:seatBindReason)"',
+    'Write-Output "CONTINUED"',
+  ].join("\n");
+  return spawnSync(exe, ["-NoProfile", "-NonInteractive", "-Command", script], {
+    encoding: "utf8",
+    timeout: 90_000,
+  });
+}
+
 test("합성 ps1 사본 · 블록 A 를 «실행»하면 판정이 변수에 담기고 CLI 부재는 UNDECIDABLE 로 기록 후 계속된다", (t) => {
   const exe = findPwsh();
   if (!exe) {
@@ -790,29 +825,7 @@ test("합성 ps1 사본 · 블록 A 를 «실행»하면 판정이 변수에 담
       [REG_CODER],
       "seat-launch-registry.jsonl",
     );
-    const runBlock = (worktree) => {
-      // 배달기와 같은 전제: terminal list 의 좌석 worktreePath 가 $Worktree 와 같다.
-      const terminals = {
-        ok: true,
-        result: { terminals: [{ ...SEAT_CODER, worktreePath: worktree }] },
-      };
-      const script = [
-        `$Task='task_synth'; $Worktree='${worktree.replace(/'/g, "''")}'; $Role='CODER'; $handle='term_coder'`,
-        `$PSScriptRoot_override='${dir.replace(/'/g, "''")}'`,
-        `$list = '${JSON.stringify(terminals).replace(/'/g, "''")}' | ConvertFrom-Json`,
-        blocks.A[1].replace(/\$PSScriptRoot/g, "$PSScriptRoot_override"),
-        'Write-Output "RESULT verdict=$($script:seatBindVerdict) reason=$($script:seatBindReason)"',
-        'Write-Output "CONTINUED"',
-      ].join("\n");
-      return spawnSync(
-        exe,
-        ["-NoProfile", "-NonInteractive", "-Command", script],
-        {
-          encoding: "utf8",
-          timeout: 90_000,
-        },
-      );
-    };
+    const runBlock = (worktree) => runBlockAChild(exe, blocks, dir, worktree);
     // (가) 실물 CLI 가 있는 워크트리(이 저장소) -- 등록부는 합성 사본(dir)
     const ok = runBlock(REPO_ROOT);
     assert.equal(ok.status, 0, `${ok.stdout}${ok.stderr}`);
@@ -830,7 +843,54 @@ test("합성 ps1 사본 · 블록 A 를 «실행»하면 판정이 변수에 담
   });
 });
 
-test("패치 문서 블록 B 를 «실행»하면 영수증 CLI 에 새 인자가 실려 영수증에 칸이 남는다 · 새 인자를 모르는 CLI 면 인자를 빼고 계속", (t) => {
+// PR 383 CI(ubuntu · pwsh) 빨강의 원인 칸 -- 블록 A 가 `$env:TEMP` 를 가정했다.
+// Linux pwsh 에는 TEMP · TMP 가 없다(TMPDIR 도 보통 없다). 그 모양을 Windows 에서
+// 자식 pwsh «안»에서 변수를 지워 만든다 -- Linux 실행은 못 한다(WSL 0), 모양 흉내만.
+// 기대값은 «값»으로 고정한다(조용한 skip 아님): 임시 폴더 변수가 없어도 MATCH/ROLE_MATCH.
+test("합성 ps1 사본 · 임시 폴더 환경 변수(TEMP · TMP · TMPDIR)가 없는 자식 pwsh(Linux 와 같은 모양)에서도 블록 A 가 MATCH 로 기록 후 계속된다", (t) => {
+  const exe = findPwsh();
+  if (!exe) {
+    t.skip(
+      "pwsh/powershell 이 이 기계에 없다 -- 실행 검증 불가(사유: 실행기 부재)",
+    );
+    return;
+  }
+  const blocks = readPatchBlocks();
+  withTempDir((dir) => {
+    writeRegistry(dir, [REG_CODER], "seat-launch-registry.jsonl");
+    const ok = runBlockAChild(exe, blocks, dir, REPO_ROOT, {
+      stripTempEnv: true,
+    });
+    assert.equal(ok.status, 0, `${ok.stdout}${ok.stderr}`);
+    // 가정이 «정말 깨졌는지» 먼저 확인한다(안 깨졌으면 이 칸은 헛시험이다).
+    assert.match(ok.stdout, /ENV TEMP=\[\] TMP=\[\] TMPDIR=\[\]/);
+    assert.match(ok.stdout, /RESULT verdict=MATCH reason=ROLE_MATCH/);
+    assert.ok(
+      !/BIND_CALL_FAILED/.test(ok.stdout),
+      "임시 폴더 변수 부재가 BIND_CALL_FAILED 로 떨어지면 안 된다",
+    );
+    assert.match(ok.stdout, /CONTINUED/);
+    // CLI 부재 갈래도 같은 조건에서 UNDECIDABLE 로 기록 후 계속(임시 폴더 코드에 닿기 전).
+    const noCli = runBlockAChild(
+      exe,
+      blocks,
+      dir,
+      join(dir, "empty-worktree"),
+      {
+        stripTempEnv: true,
+      },
+    );
+    assert.equal(noCli.status, 0, `${noCli.stdout}${noCli.stderr}`);
+    assert.match(noCli.stdout, /ENV TEMP=\[\] TMP=\[\] TMPDIR=\[\]/);
+    assert.match(
+      noCli.stdout,
+      /RESULT verdict=UNDECIDABLE reason=SEAT_BIND_CLI_MISSING/,
+    );
+    assert.match(noCli.stdout, /CONTINUED/);
+  });
+});
+
+test("패치 문서 블록 B를 «실행»하면 영수증 CLI 에 새 인자가 실려 영수증에 칸이 남는다 · 새 인자를 모르는 CLI 면 인자를 빼고 계속", (t) => {
   const exe = findPwsh();
   if (!exe) {
     t.skip(
