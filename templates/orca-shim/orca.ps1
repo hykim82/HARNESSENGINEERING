@@ -22,8 +22,24 @@ if (-not (Test-Path -LiteralPath $cli -PathType Leaf)) {
   [Console]::Error.WriteLine("ORCA_SHIM_CLI_MISSING: shim CLI 를 찾지 못했다 -- 위임하지 않았다. 조회 실패 ≠ 위반 없음.")
   exit 127
 }
-if ($MyInvocation.PSCommandPath) {
-  $env:HARNESS_ORCA_SHIM_CALLER = $MyInvocation.PSCommandPath
+# 호출자 스크립트 값은 «이 호출 동안만» 환경에 둔다: .ps1 은 호출한 셸과 «같은
+# 프로세스» 에서 돌므로 되돌리지 않으면 뒤이은 직접 호출 · 자식 프로세스가 앞
+# 스크립트 경로를 caller_script 로 단다(검토 1R P1-2). 이전 값을 저장 -> 호출 ->
+# finally 에서 되돌림(없던 값이면 제거). 직접 호출이면 바깥 값도 지운다.
+$prevCaller = $env:HARNESS_ORCA_SHIM_CALLER
+try {
+  if ($MyInvocation.PSCommandPath) {
+    $env:HARNESS_ORCA_SHIM_CALLER = $MyInvocation.PSCommandPath
+  } else {
+    Remove-Item -Path Env:HARNESS_ORCA_SHIM_CALLER -ErrorAction SilentlyContinue
+  }
+  & node $cli @args
+  $code = $LASTEXITCODE
+} finally {
+  if ($null -eq $prevCaller) {
+    Remove-Item -Path Env:HARNESS_ORCA_SHIM_CALLER -ErrorAction SilentlyContinue
+  } else {
+    $env:HARNESS_ORCA_SHIM_CALLER = $prevCaller
+  }
 }
-& node $cli @args
-exit $LASTEXITCODE
+exit $code

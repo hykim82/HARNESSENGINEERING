@@ -952,11 +952,16 @@ taskPath가 가리키는 실제 이슈의 진짜 원장(존재한다면 streak�
 
 1. **절대 경로 호출** — `<설치 경로>\orca.exe terminal send ...` 처럼 shim 을 거치지 않는 호출은 기록 0.
 2. **PATH 재설정** — 자식 셸이 PATH 를 새로 만들거나 shim 디렉터리를 PATH 에서 빼면 기록 0.
-3. **node spawn** — `spawnSync("orca", {shell:false})`(릴레이 어댑터 경로)는 Windows 에서 `.exe` 만 잡으므로 PATH 앞 shim 을 지나치고 기록되지 않는다(m1 〔직접〕 실측 — 어댑터 경로는 기록 대상이 아님을 시험 T6 이 고정). POSIX 에서는 execvp 가 실행 가능한 `orca` shim 을 먼저 잡아 오히려 **감싸질** 것으로 **추론**한다(Linux 는 못 쟀다 〔못쟀다〕).
+3. **node spawn** — `spawnSync("orca", {shell:false})`(릴레이 어댑터 경로)는 Windows 에서 `.exe` 만 잡으므로 PATH 앞 shim 을 지나치고 기록되지 않는다(m1 〔직접〕 실측 — 어댑터 경로는 기록 대상이 아님을 시험 T6 이 고정). POSIX 에서는 execvp 가 실행 가능한 `orca` shim 을 먼저 잡아 오히려 **감싸질** 것으로 **추론**한다(Linux 는 못 쟀다 〔못쟀다〕). 시험 T6 의 POSIX 분기는 복사본 sh shim 이 저장소 상대 구조 밖이라 CLI 를 못 찾으므로(`childEnv()` 가 `HARNESS_*` 를 걷어낸다) 자식 env 에 `HARNESS_ORCA_SHIM_CLI` 를 주입해 구동한다 — 검토 1R P1-1 수리. 그 «복사본 sh shim + 주입 env» 모양은 이 기계에서 Git bash 로 T6b 가 먼저 구동해 값(0 · 원장 1줄 · 주입 없으면 127)으로 고정했지만, **Linux CI 첫 실행 전까지 그 분기의 실제 값은 «흉내 + 추론»** 이다.
 4. **목록 밖 동사 · 도메인** — 쓰기 동사 목록(`WRITE_VERBS` 한 곳)에 없는 것(예: `orchestration ask` · `worktree create/rm`)은 «조회» 와 같이 기록 0. 목록 밖이 «무해» 라는 증명이 아니다.
 5. **`--help` 판정 한계** — 독립 토큰 `--help` 만 면제한다(`--text=--help` · `--text "a --help"` · `--text --help` 는 쓰기로 기록). 값을 받는 옵션 목록(`VALUE_OPTIONS`)에 없는 옵션이 값으로 정확히 `--help` 를 쥐면 도움말로 보아 기록 0 이다. `-h` 는 면제하지 않아 과기록한다.
 6. **기록 실패 · 원장 미설정은 경고뿐** — 원장 쓰기가 실패하거나 `HARNESS_ORCA_SHIM_LEDGER` 가 없으면 위임은 하고 stderr 에 `ORCA_SHIM_LEDGER_WRITE_FAILED` 만 남긴다. 그 경고를 아무도 읽지 않으면 기록 누락이 조용하다 — **«조회 실패 ≠ 위반 없음»**. (반대로 진짜 바이너리 경로가 없으면 위임 0 · 비0 · 기록 0 으로 멈춘다.)
 7. **shim 이 실행되지 않는 호출자 · 변조** — `cmd.exe` 등 `.ps1`/sh shim 을 실행 파일로 취급하지 않는 호출자(PATHEXT 동작은 이 라운드에서 `cmd.exe` 로 재지 않았다 〔못쟀다〕), 그리고 같은 권한의 행위자가 shim 파일을 바꾸거나 `HARNESS_ORCA_REAL_BIN` 을 다른 대역으로 돌리는 경우.
+
+**검토 1R 누락 2건(우회 7종 밖 · 같은 gap#102)**:
+
+- **(가) ps1 호출자 값 잔류 — 수리됨(조각 1 · 4R)**: `orca.ps1` 이 `HARNESS_ORCA_SHIM_CALLER` 를 프로세스 전역에 설정하고 되돌리지 않아, 스크립트가 `orca` 를 부른 뒤 같은 셸에서 직접 친 호출이 앞 스크립트 경로를 `caller_script` 로 달고 기록됐다(P1-2). 이제 이전 값을 저장 -> 호출 -> finally 에서 되돌린다(없던 값이면 제거 · 직접 호출이면 바깥 값도 호출 동안 지움). 시험 T7 · T7b 가 «같은 pwsh 에서 스크립트 경유 호출 -> 직접 호출» 순서로 고정한다. sh shim 은 이 변수를 설정하지 않고 `exec node` 로 대체되므로 같은 잔류가 없다(소스 대조). 단 **호출자 스크립트가 아닌 바깥이 미리 쥔 값**은 sh 경로에서 걷어내지 않는다.
+- **(나) 첫 토큰이 옵션인 호출은 «조회» 로 분류돼 무기록**: `orca --json terminal send ...` 처럼 도메인 앞에 옵션이 오면 `classifyArgv` 가 옵션 문자열을 domain 으로 읽어 쓰기 동사가 아닌 «조회» 로 본다 -> 원장 0줄. `orca` 가 그 순서를 받는지는 **〔못쟀다〕**(진짜 `orca` 실행 금지) — 받는다면 4번 «목록 밖» 과 같은 무기록이다. 분류 로직은 바꾸지 않았다.
 
 **이 라운드가 잰 것(합성 · 대역만 · 진짜 `orca` 0회)**: m1(Windows 에서 node spawn 은 `.exe` 만 잡는다) · m2(PowerShell 이 PATH 앞 `orca.ps1` 을 뒤쪽 `orca.exe` 보다 먼저 고른다 — 반대 순서면 `.exe`) · m3(이 좌석의 PowerShell · Bash 도구 셸은 좌석의 `ORCA_*` 환경을 물려받는다). **못 잰 것**: Linux · Node 20 · CI 러너의 pwsh 유무 · 실제 좌석 PATH 변경(금지).
 

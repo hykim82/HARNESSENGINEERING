@@ -91,6 +91,15 @@ function childEnv(box, extra = {}) {
   return env;
 }
 
+// «복사본» sh shim(저장소 상대 구조 밖)용 자식 env: childEnv() 가 HARNESS_* 를 걷어내므로
+// HARNESS_ORCA_SHIM_CLI(저장소 CLI 절대 경로)를 «명시적으로» 주입해야 shim 이 CLI 를 찾는다
+// (검토 1R P1-1 · 사유: shim 을 저장소 자리에서 구동하면 파일 모드 · 줄바꿈에 기대게 되어
+// 복사 + env 주입이 Linux CI 에서 더 결정적이다). T6 비-Windows 분기와 T6b 가 같이 쓴다.
+const ENV_SHIM_CLI = "HARNESS_ORCA_SHIM_CLI";
+function posixCopiedShimEnv(box, extra = {}) {
+  return childEnv(box, { [ENV_SHIM_CLI]: CLI_PATH, ...extra });
+}
+
 function findPwsh() {
   const probe = spawnSync(
     "pwsh",
@@ -332,7 +341,10 @@ for (const kind of KINDS) {
 // T6 — m1: node spawnSync("orca", {shell:false}) 는 shim 이 PATH 앞에 있어도
 // Windows 에서는 «.exe 만» 잡는다(CreateProcess 규칙) -> 어댑터 경로는 기록
 // 대상이 아니다. POSIX 는 execvp 가 실행 가능한 `orca` shim 을 먼저 잡는다
-// (이 분기는 이 기계에서 못 쟀다 〔못쟀다〕 -- 아래 단언은 추론 모양을 고정한 것).
+// (이 분기는 이 기계에서 못 쟀다 〔못쟀다〕 -- Linux 에서 처음 도는 칸이다. 복사본 shim 은
+// 저장소 상대 구조 밖이라 CLI 를 못 찾으므로 env 에 HARNESS_ORCA_SHIM_CLI 를 주입한다
+// (posixCopiedShimEnv). 그 «복사본 sh shim + 주입 env» 모양은 Git bash 로 T6b 가 이
+// 기계에서도 먼저 구동한다 -- 그러나 execvp 가 shim 을 먼저 잡는다는 쪽은 여전히 추론).
 test("T6(m1) node spawnSync('orca',{shell:false}) 가 PATH 앞 shim 디렉터리를 두고도 대역 실행 파일을 잡는다(Windows) / POSIX 는 shim 이 먼저(추론)", () =>
   withBox((box) => {
     const exeDir = path.join(box.root, "exe-dir");
@@ -377,7 +389,7 @@ test("T6(m1) node spawnSync('orca',{shell:false}) 가 PATH 앞 shim 디렉터리
         "orca",
         ["terminal", "send", "--terminal", "t1", "--text", "x"],
         {
-          env,
+          env: { ...posixCopiedShimEnv(box), PATH: env.PATH },
           encoding: "utf8",
           shell: false,
         },
@@ -389,6 +401,144 @@ test("T6(m1) node spawnSync('orca',{shell:false}) 가 PATH 앞 shim 디렉터리
         "POSIX: PATH 앞 shim 이 node spawn 도 감싼다(Linux 실측 못 함)",
       );
     }
+  }));
+
+// T6b — 복사본 sh shim 이 «CLI 를 어떻게 찾는가» 를 이 기계(Windows · Git bash)에서도
+// 값으로 고정한다(T6 의 비-Windows 분기는 Linux CI 에서만 돈다 -- 그 분기가 쓰는
+// env 모양을 같은 헬퍼로 여기서 먼저 구동한다). 복사본은 저장소 상대 구조(../../
+// scripts/relay/)가 없는 자리에 있으므로 HARNESS_ORCA_SHIM_CLI 없이는 CLI 를 못 찾아
+// 127 이다 -- childEnv() 가 HARNESS_* 를 걷어내므로 «명시적으로 주입» 해야 한다.
+test("T6b 복사본 sh shim: HARNESS_ORCA_SHIM_CLI 없으면 127(CLI 못 찾음) · 주입하면 0 + 원장 1줄(Linux 조건 흉내 · Git bash)", () =>
+  withBox((box) => {
+    if (SH === null) {
+      assert.equal(
+        KINDS.includes("sh"),
+        false,
+        "sh 없음 -> T6b 칸 없음(사유 분기 · skip 아님)",
+      );
+      return;
+    }
+    const shimDir = path.join(box.root, "copied-shim-dir");
+    mkdirSync(shimDir);
+    const copied = path.join(shimDir, "orca");
+    copyFileSync(path.join(SHIM_DIR, "orca"), copied);
+    chmodSync(copied, 0o755);
+    const args = ["terminal", "send", "--terminal", "t1", "--text", "x"];
+    const run = (env) =>
+      spawnSync(SH, [copied.replace(/\\/g, "/"), ...args], {
+        env,
+        cwd: box.root,
+        encoding: "utf8",
+        shell: false,
+      });
+    // (a) 주입 없음 = b9a4e00 의 T6 비-Windows env 모양 -> 127 · 위임 0 · 기록 0.
+    const bare = run(childEnv(box));
+    assert.equal(bare.status, 127, bare.stderr);
+    assert.ok(bare.stderr.includes("ORCA_SHIM_CLI_MISSING"), bare.stderr);
+    assert.equal(doubleCalls(box).length, 0);
+    assert.equal(ledgerLines(box).length, 0);
+    // (b) 주입 = T6 비-Windows 분기가 쓰는 env -> 0 · 위임 1 · 원장 1줄.
+    const injected = run(posixCopiedShimEnv(box));
+    assert.equal(injected.status, 0, injected.stderr);
+    assert.equal(doubleCalls(box).length, 1);
+    assert.equal(ledgerLines(box).length, 1);
+  }));
+
+// T7 — ps1 shim 은 호출자 스크립트 값을 «프로세스 전역에 남기지 않는다»(검토 1R P1-2).
+// 같은 pwsh 프로세스에서 «스크립트 경유 호출 1번 -> 직접 호출 1번» 을 차례로 한다
+// (shim 은 경로로 직접 호출 -> PATH 해석(OS 마다 다름)에 의존하지 않는다).
+function runPs1Session(box, extraEnv, statements) {
+  return spawnSync(
+    PWSH,
+    ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", statements],
+    {
+      env: childEnv(box, extraEnv),
+      cwd: box.root,
+      encoding: "utf8",
+      shell: false,
+    },
+  );
+}
+
+function psq(value) {
+  return `'${String(value).replace(/'/g, "''")}'`;
+}
+
+test("T7 ps1: 스크립트 경유 호출 뒤 같은 pwsh 의 직접 호출이 앞 caller_script 를 달지 않는다 · 호출 뒤 셸 env 에 값이 남지 않는다", () =>
+  withBox((box) => {
+    if (PWSH === null) {
+      assert.equal(
+        KINDS.includes("ps1"),
+        false,
+        "pwsh 없음 -> T7 칸 없음(사유 분기 · skip 아님)",
+      );
+      return;
+    }
+    const shimPs1 = path.join(SHIM_DIR, "orca.ps1");
+    const launcher = path.join(box.root, "fake-launcher.ps1");
+    writeFileSync(
+      launcher,
+      `& ${psq(shimPs1)} terminal send --terminal from-launcher --text x\n`,
+      "utf8",
+    );
+    const r = runPs1Session(
+      box,
+      {},
+      [
+        `& ${psq(launcher)}`,
+        `& ${psq(shimPs1)} terminal send --terminal typed-directly --text y`,
+        `Write-Output ('AFTER=[' + [string]$env:HARNESS_ORCA_SHIM_CALLER + ']')`,
+      ].join("; "),
+    );
+    assert.equal(r.status, 0, r.stderr);
+    const lines = ledgerLines(box);
+    assert.equal(lines.length, 2, JSON.stringify(lines));
+    assert.equal(lines[0].target, "from-launcher");
+    // tmpdir 의 8.3 단축 이름(Windows) · 심볼릭 링크(macOS)가 경로 문자열을 바꿀 수 있어 파일명으로 대조한다.
+    assert.equal(
+      path.basename(lines[0].caller_script ?? ""),
+      path.basename(launcher),
+      "스크립트 경유 호출은 그 스크립트 경로를 단다",
+    );
+    assert.equal(lines[1].target, "typed-directly");
+    assert.equal(
+      lines[1].caller_script,
+      null,
+      "직접 호출은 앞 스크립트 경로를 달면 안 된다",
+    );
+    assert.ok(
+      r.stdout.includes("AFTER=[]"),
+      `셸 env 에 값이 남았다: ${r.stdout}`,
+    );
+  }));
+
+test("T7b ps1: 바깥이 이미 쥔 HARNESS_ORCA_SHIM_CALLER 는 직접 호출에 새지 않고 · 호출 뒤 원래 값으로 되돌려진다", () =>
+  withBox((box) => {
+    if (PWSH === null) {
+      assert.equal(KINDS.includes("ps1"), false);
+      return;
+    }
+    const shimPs1 = path.join(SHIM_DIR, "orca.ps1");
+    const r = runPs1Session(
+      box,
+      { HARNESS_ORCA_SHIM_CALLER: "PRESET-OUTER-VALUE" },
+      [
+        `& ${psq(shimPs1)} terminal send --terminal typed-directly --text y`,
+        `Write-Output ('AFTER=[' + [string]$env:HARNESS_ORCA_SHIM_CALLER + ']')`,
+      ].join("; "),
+    );
+    assert.equal(r.status, 0, r.stderr);
+    const lines = ledgerLines(box);
+    assert.equal(lines.length, 1, JSON.stringify(lines));
+    assert.equal(
+      lines[0].caller_script,
+      null,
+      "직접 호출 때 바깥 값이 caller_script 로 새면 안 된다",
+    );
+    assert.ok(
+      r.stdout.includes("AFTER=[PRESET-OUTER-VALUE]"),
+      `호출 뒤 원래 값으로 되돌려져야 한다: ${r.stdout}`,
+    );
   }));
 
 // m2 — PowerShell 이 PATH 앞 `orca.ps1` 을 뒤쪽 `orca.exe` 보다 먼저 고르는가
