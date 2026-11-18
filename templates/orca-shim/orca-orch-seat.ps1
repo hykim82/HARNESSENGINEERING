@@ -77,7 +77,10 @@ try {
   $bootReason = 'BOOT_CLI_FAILED'
 }
 if (-not $shimEnabled) {
-  [Console]::Error.WriteLine("ORCH_SEAT_SHIM_DISABLED: $bootReason -- shim 없이 그대로 기동한다(이 세션의 orca 쓰기는 기록 밖). 조회 실패 ≠ 위반 없음.")
+  # stderr 문구는 ASCII 만 쓴다(검토 1R P2-6): Windows PowerShell 5.1 은 BOM 없는 UTF-8 파일을
+  # ANSI 로 읽고 [Console]::Error 는 콘솔 코드페이지로 쓰므로 한글 리터럴은 5.1 과 pwsh 에서
+  # 모두 깨질 수 있다(실측). BOM 은 읽는 쪽만 고치고 에디터가 지울 수 있어 택하지 않았다.
+  [Console]::Error.WriteLine("ORCH_SEAT_SHIM_DISABLED: $bootReason -- starting without the shim (this session's orca writes are outside the record). Lookup failure is not proof of no violation.")
 }
 
 # ── 2. 환경 구성 + 3. 명령 기동(항상) ──────────────────────────────────
@@ -109,7 +112,7 @@ try {
   & $command @args
   $code = $LASTEXITCODE
 } catch {
-  [Console]::Error.WriteLine("ORCH_SEAT_COMMAND_FAILED: 명령 '$command' 를 띄우지 못했다 -- $($_.Exception.Message)")
+  [Console]::Error.WriteLine("ORCH_SEAT_COMMAND_FAILED: could not start command '$command' -- $($_.Exception.Message)")
   $code = 127
 } finally {
   foreach ($name in $envNames) {

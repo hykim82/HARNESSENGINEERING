@@ -20,7 +20,9 @@
 //
 // ⭐⭐종료코드는 «언제나 0» 이다: 어떤 실패(진짜 경로 부재 · shim 부재 · 원장 쓰기
 // 실패 · 내부 예외)도 ORCH 기동을 막지 않는다(마비 금지). 실패는 JSON 의
-// `shim=disabled` · `reason` · `ledger=write_failed` 로만 알린다.
+// `shim=disabled` · `reason` · `ledger=write_failed` 로만 알린다. 형제 모듈(판정 코어 ·
+// 코어가 읽는 shim 코어)이 없는 배치도 같다 -- 정적 import 가 없어 모듈 해석 단계에서
+// 죽지 않고, `reason=BOOT_MODULE_MISSING` 으로 접어 부팅 줄을 남긴다(P2-3).
 //
 // ⚠️정직 한계: 이것은 OBSERVER 다 -- 부팅 판정이 기동을 거부하는 경로는 없다.
 // 런처를 거치지 않은 ORCH(옛 부팅줄 폴백 · 손 실행)는 이 줄이 없어 기록 밖이다.
@@ -30,18 +32,29 @@
 import { appendFileSync, statSync } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import { ENV_LEDGER, ENV_REAL_BIN } from "./orca-shim-cli.mjs";
-import {
-  LEDGER_NOT_CONFIGURED,
-  LEDGER_WRITE_FAILED,
-  LEDGER_WRITTEN,
-  SHIM_FILE_NAMES,
-  buildBootLedgerEntry,
-  buildBootResult,
-  buildInternalErrorResult,
-  decideBoot,
-  formatBootLedgerLine,
-} from "./orch-seat-boot-core.mjs";
+
+// ⭐형제 모듈을 «정적 import 하지 않는다»(HYK-389-orch-launch-2 · 검토 1R P2-3): ESM 정적
+// import 는 형제 파일이 없으면 모듈 해석 단계에서 node 가 종료 1 로 끝나 «종료 0 고정 ·
+// 부팅 줄 기록» 약속이 코드가 돌기도 전에 깨진다. 그래서 (1) 상수는 이 파일 안에 둔다
+// (아래 · 형제 원본과의 일치는 orch-seat-boot.test.mjs B11 이 지킨다) (2) 판정 코어는
+// 동적 import 로 읽고, 못 읽으면 `BOOT_MODULE_MISSING` 으로 접어 부팅 줄을 남긴다.
+export const ENV_REAL_BIN = "HARNESS_ORCA_REAL_BIN"; // = orca-shim-cli.mjs ENV_REAL_BIN
+export const ENV_LEDGER = "HARNESS_ORCA_SHIM_LEDGER"; // = orca-shim-cli.mjs ENV_LEDGER
+export const FALLBACK_LEDGER_SCHEMA = "orca-direct-ledger/1"; // = orca-shim-core.mjs LEDGER_SCHEMA
+export const FALLBACK_BOOT_EVENT = "orch_seat_boot"; // = orch-seat-boot-core.mjs BOOT_EVENT
+export const FALLBACK_RESULT_SCHEMA = "orch-seat-boot/1"; // = orch-seat-boot-core.mjs BOOT_RESULT_SCHEMA
+export const REASON_BOOT_MODULE_MISSING = "BOOT_MODULE_MISSING";
+export const LEDGER_WRITTEN = "written"; // = orch-seat-boot-core.mjs LEDGER_WRITTEN
+export const LEDGER_WRITE_FAILED = "write_failed"; // = ... LEDGER_WRITE_FAILED
+export const LEDGER_NOT_CONFIGURED = "not_configured"; // = ... LEDGER_NOT_CONFIGURED
+
+let core = null; // orch-seat-boot-core.mjs 의 export 묶음(못 읽으면 null)
+let coreLoadError = null;
+try {
+  core = await import("./orch-seat-boot-core.mjs");
+} catch (error) {
+  coreLoadError = error?.message ?? String(error);
+}
 
 export const ENV_SHIM_DIR = "HARNESS_ORCA_SHIM_DIR";
 export const ENV_SHIM_CLI = "HARNESS_ORCA_SHIM_CLI";
@@ -116,7 +129,7 @@ function collectFacts({ values, env, statFn }) {
   const shimFilesFound =
     shimDirPath === null
       ? []
-      : SHIM_FILE_NAMES.filter((name) =>
+      : core.SHIM_FILE_NAMES.filter((name) =>
           isFile(path.join(shimDirPath, name), statFn),
         );
   return {
@@ -134,7 +147,7 @@ function collectFacts({ values, env, statFn }) {
 function recordBoot({ ledgerPath, entry, appendFn }) {
   if (ledgerPath === null) return { state: LEDGER_NOT_CONFIGURED, error: null };
   try {
-    appendFn(ledgerPath, formatBootLedgerLine(entry), "utf8");
+    appendFn(ledgerPath, `${JSON.stringify(entry)}\n`, "utf8");
     return { state: LEDGER_WRITTEN, error: null };
   } catch (error) {
     return {
@@ -144,13 +157,71 @@ function recordBoot({ ledgerPath, entry, appendFn }) {
   }
 }
 
+// 판정 코어를 못 읽은 배치(형제 파일 부재)의 «접힘»: 판정 없이 disabled +
+// BOOT_MODULE_MISSING 으로 부팅 줄을 남긴다. 코어의 원본 문자열은 이 파일의 FALLBACK_*
+// 상수(B11 이 일치를 지킨다).
+function fallbackEntry({ values, env, cwd, nowIso }) {
+  const role = pick(values, env, "--role");
+  const mark = pick(values, env, "--mark");
+  return {
+    schema: FALLBACK_LEDGER_SCHEMA,
+    event: FALLBACK_BOOT_EVENT,
+    ts: nowIso,
+    shim: "disabled",
+    reason: REASON_BOOT_MODULE_MISSING,
+    reasons: [REASON_BOOT_MODULE_MISSING],
+    role,
+    launcher_mark: mark,
+    cwd: typeof cwd === "string" ? cwd : null,
+  };
+}
+
+function fallbackResult({ entry, recorded, ledgerPath, values, env }) {
+  return {
+    schema: FALLBACK_RESULT_SCHEMA,
+    shim: entry.shim,
+    reason: entry.reason,
+    reasons: entry.reasons,
+    ledger: recorded.state,
+    ledger_error: recorded.error,
+    module_error: coreLoadError,
+    real_bin: pick(values, env, "--real-bin"),
+    shim_dir: pick(values, env, "--shim-dir"),
+    shim_cli: pick(values, env, "--shim-cli"),
+    ledger_path: ledgerPath,
+    mark: entry.launcher_mark,
+  };
+}
+
+function reportLedgerFailure(recorded, stderr) {
+  if (recorded.state !== LEDGER_WRITE_FAILED) return;
+  stderr(
+    `ORCH_SEAT_BOOT_LEDGER_WRITE_FAILED: ${recorded.error} -- 부팅 줄을 남기지 못했다. 기동은 막지 않는다(조회 실패 ≠ 위반 없음).\n`,
+  );
+}
+
 // 판정 -> 원장 1줄 -> stdout JSON. 던질 수 있다(runBoot 이 삼킨다).
 function bootOnce({ argv, env, cwd, stdout, stderr, statFn, appendFn, nowFn }) {
   const values = parseArgs(Array.isArray(argv) ? argv : []);
+  if (core === null) {
+    const ledgerPath = pick(values, env, "--ledger");
+    const entry = fallbackEntry({
+      values,
+      env,
+      cwd,
+      nowIso: nowFn().toISOString(),
+    });
+    const recorded = recordBoot({ ledgerPath, entry, appendFn });
+    reportLedgerFailure(recorded, stderr);
+    stdout(
+      `${JSON.stringify(fallbackResult({ entry, recorded, ledgerPath, values, env }))}\n`,
+    );
+    return;
+  }
   const facts = collectFacts({ values, env, statFn });
-  const decision = decideBoot(facts);
+  const decision = core.decideBoot(facts);
   const mark = pick(values, env, "--mark");
-  const entry = buildBootLedgerEntry({
+  const entry = core.buildBootLedgerEntry({
     decision,
     role: pick(values, env, "--role"),
     mark,
@@ -162,14 +233,10 @@ function bootOnce({ argv, env, cwd, stdout, stderr, statFn, appendFn, nowFn }) {
     entry,
     appendFn,
   });
-  if (recorded.state === LEDGER_WRITE_FAILED) {
-    stderr(
-      `ORCH_SEAT_BOOT_LEDGER_WRITE_FAILED: ${recorded.error} -- 부팅 줄을 남기지 못했다. 기동은 막지 않는다(조회 실패 ≠ 위반 없음).\n`,
-    );
-  }
+  reportLedgerFailure(recorded, stderr);
   stdout(
     `${JSON.stringify(
-      buildBootResult({
+      core.buildBootResult({
         decision,
         ledgerState: recorded.state,
         ledgerError: recorded.error,
@@ -208,9 +275,18 @@ export function runBoot({
   } catch (error) {
     // 마지막 방어선: 어떤 예외도 기동을 막지 않는다.
     try {
-      stdout(
-        `${JSON.stringify(buildInternalErrorResult(error?.message ?? String(error)))}\n`,
-      );
+      const message = error?.message ?? String(error);
+      const result =
+        core === null
+          ? {
+              schema: FALLBACK_RESULT_SCHEMA,
+              shim: "disabled",
+              reason: "BOOT_INTERNAL_ERROR",
+              ledger_error: message,
+              module_error: coreLoadError,
+            }
+          : core.buildInternalErrorResult(message);
+      stdout(`${JSON.stringify(result)}\n`);
     } catch {
       // stdout 마저 못 쓰면 더 할 수 있는 것이 없다 -- 그래도 0 으로 끝낸다.
     }

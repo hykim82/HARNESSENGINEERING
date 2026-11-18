@@ -17,6 +17,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import {
+  copyFileSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -315,6 +316,118 @@ test("B8 조각 1 쓰기 줄과 부팅 줄이 «같은 파일» 에 섞여도 �
     assert.equal(lines[1].actor, "orch");
   }));
 
+// ── P2-3(HYK-389-orch-launch-2): 형제 모듈이 없어도 «종료 0 · 부팅 줄 기록» ──────────
+// 합성 디렉터리에 부팅 CLI «사본» 과 고른 형제 파일만 복사해 구동한다(저장소 파일 무변).
+function copyBatch(box, names) {
+  const dir = path.join(box.root, "copy-batch");
+  mkdirSync(dir, { recursive: true });
+  for (const name of names) {
+    copyFileSync(path.join(HERE, name), path.join(dir, name));
+  }
+  return path.join(dir, "orch-seat-boot.mjs");
+}
+
+function runCopy(box, cliPath, args) {
+  return spawnSync(process.execPath, [cliPath, ...args], {
+    env: cleanEnv(),
+    cwd: box.root,
+    encoding: "utf8",
+  });
+}
+
+test("B9 형제 `orca-shim-cli.mjs` 가 없는 배치 -> 종료 0 · 판정 그대로(enabled) · 부팅 줄 기록(정적 import 가 모듈 해석 단계에서 죽지 않는다)", () =>
+  withBox((box) => {
+    const cli = copyBatch(box, [
+      "orch-seat-boot.mjs",
+      "orch-seat-boot-core.mjs",
+      "orca-shim-core.mjs",
+    ]);
+    const r = runCopy(box, cli, goodArgs(box));
+    assert.equal(
+      r.status,
+      0,
+      `형제 파일 부재가 종료코드를 바꾸면 안 된다: ${r.stderr}`,
+    );
+    const result = parseResult(r);
+    assert.equal(result.shim, "enabled");
+    assert.equal(result.ledger, "written");
+    const lines = ledgerLines(box);
+    assert.equal(lines.length, 1);
+    assert.equal(lines[0].event, "orch_seat_boot");
+    assert.equal(lines[0].shim, "enabled");
+  }));
+
+test("B10 판정 코어 `orch-seat-boot-core.mjs` 가 없는 배치(CLI 사본만) -> 종료 0 · disabled + BOOT_MODULE_MISSING + 사유 문자열 · 부팅 줄 기록", () =>
+  withBox((box) => {
+    const cli = copyBatch(box, ["orch-seat-boot.mjs"]);
+    const r = runCopy(box, cli, goodArgs(box));
+    assert.equal(
+      r.status,
+      0,
+      `형제 파일 부재가 종료코드를 바꾸면 안 된다: ${r.stderr}`,
+    );
+    const result = parseResult(r);
+    assert.equal(result.shim, "disabled");
+    assert.equal(result.reason, "BOOT_MODULE_MISSING");
+    assert.equal(result.ledger, "written");
+    assert.ok(
+      typeof result.module_error === "string" && result.module_error !== "",
+      "형제 모듈을 못 읽은 사유가 값으로 있어야 한다",
+    );
+    const lines = ledgerLines(box);
+    assert.equal(lines.length, 1);
+    assert.equal(lines[0].schema, "orca-direct-ledger/1");
+    assert.equal(lines[0].event, "orch_seat_boot");
+    assert.equal(lines[0].shim, "disabled");
+    assert.equal(lines[0].reason, "BOOT_MODULE_MISSING");
+    assert.equal(lines[0].role, "ORCH");
+    assert.equal(lines[0].launcher_mark, "2026-11-18T12:00:00.000Z");
+  }));
+
+test("B10b 코어는 있고 코어의 형제(`orca-shim-core.mjs`)가 없는 배치 -> 같은 접힘(종료 0 · BOOT_MODULE_MISSING · 부팅 줄)", () =>
+  withBox((box) => {
+    const cli = copyBatch(box, [
+      "orch-seat-boot.mjs",
+      "orch-seat-boot-core.mjs",
+    ]);
+    const r = runCopy(box, cli, goodArgs(box));
+    assert.equal(r.status, 0, r.stderr);
+    const result = parseResult(r);
+    assert.equal(result.reason, "BOOT_MODULE_MISSING");
+    assert.equal(ledgerLines(box)[0].reason, "BOOT_MODULE_MISSING");
+  }));
+
+test("B10c 형제 부재 + 원장 쓰기도 불가 -> 그래도 종료 0 + ledger=write_failed + stderr 표지", () =>
+  withBox((box) => {
+    const dirAsLedger = path.join(box.root, "ledger-is-a-dir");
+    mkdirSync(dirAsLedger);
+    const cli = copyBatch(box, ["orch-seat-boot.mjs"]);
+    const r = runCopy(box, cli, goodArgs(box, { "--ledger": dirAsLedger }));
+    assert.equal(r.status, 0, r.stderr);
+    const result = parseResult(r);
+    assert.equal(result.reason, "BOOT_MODULE_MISSING");
+    assert.equal(result.ledger, "write_failed");
+    assert.ok(
+      r.stderr.includes("ORCH_SEAT_BOOT_LEDGER_WRITE_FAILED"),
+      r.stderr,
+    );
+  }));
+
+test("B11 CLI 안에 둔 상수(환경 변수 이름 · 원장 schema · 사유 코드)가 형제 모듈의 원본과 같다(복제 표류 방지)", async () => {
+  const cli = await import("./orch-seat-boot.mjs");
+  const shimCli = await import("./orca-shim-cli.mjs");
+  const shimCore = await import("./orca-shim-core.mjs");
+  const bootCore = await import("./orch-seat-boot-core.mjs");
+  assert.equal(cli.ENV_REAL_BIN, shimCli.ENV_REAL_BIN);
+  assert.equal(cli.ENV_LEDGER, shimCli.ENV_LEDGER);
+  assert.equal(cli.FALLBACK_LEDGER_SCHEMA, shimCore.LEDGER_SCHEMA);
+  assert.equal(cli.FALLBACK_BOOT_EVENT, bootCore.BOOT_EVENT);
+  assert.equal(cli.FALLBACK_RESULT_SCHEMA, bootCore.BOOT_RESULT_SCHEMA);
+  assert.equal(cli.LEDGER_WRITTEN, bootCore.LEDGER_WRITTEN);
+  assert.equal(cli.LEDGER_WRITE_FAILED, bootCore.LEDGER_WRITE_FAILED);
+  assert.equal(cli.LEDGER_NOT_CONFIGURED, bootCore.LEDGER_NOT_CONFIGURED);
+});
+
 // ── 런처 템플릿(pwsh 로 실제 구동) ───────────────────────────────────
 function launcherEnv(box, extra = {}) {
   return cleanEnv({
@@ -330,9 +443,9 @@ function launcherEnv(box, extra = {}) {
   });
 }
 
-function runLauncher(box, env, commandArgs) {
+function runLauncher(box, env, commandArgs, shell = PWSH) {
   return spawnSync(
-    PWSH,
+    shell,
     [
       "-NoLogo",
       "-NoProfile",
@@ -534,5 +647,99 @@ launcherTest(
     assert.equal(lineOf("AFTER_REAL"), box.fakeRealBin);
     assert.ok(lineOf("BEFORE_PATH"), "기준선 PATH 를 읽었어야 한다");
     assert.equal(lineOf("AFTER_PATH"), lineOf("BEFORE_PATH"));
+  },
+);
+
+// ── P2-6(HYK-389-orch-launch-2): 런처 오류 문구가 5.1 · pwsh 양쪽에서 깨지지 않는다 ──
+// 고른 방법 = stderr 문구 ASCII 화(BOM 아님): BOM 은 «파일을 읽는 쪽» 만 고치고 5.1 의
+// [Console]::Error 는 콘솔 코드페이지(OEM)로 쓰므로 한글이 여전히 깨질 수 있다 -- ASCII 는
+// 읽는 쪽 · 쓰는 쪽 · 에디터가 BOM 을 지우는 사고 셋을 다 피한다.
+const ASCII_ONLY = /^[\x20-\x7e\r\n\t]*$/;
+
+// 정적 가드(플랫폼 무관 · Linux CI 에서도 실행): 런처의 stderr 문자열 리터럴은 전부 ASCII.
+test("L8 런처가 stderr 로 쓰는 문자열 리터럴(`[Console]::Error.WriteLine`)은 전부 ASCII 다 -- 인코딩 가정에 기대지 않는다", () => {
+  const source = readFileSync(LAUNCHER, "utf8");
+  const literals = [
+    ...source.matchAll(
+      /\[Console\]::Error\.WriteLine\(\s*"((?:[^"`\\]|`.|\\.)*)"/g,
+    ),
+  ].map((m) => m[1]);
+  assert.ok(
+    literals.length >= 2,
+    `런처의 stderr 리터럴을 찾아야 한다(찾은 수 ${literals.length})`,
+  );
+  for (const literal of literals) {
+    assert.match(literal, ASCII_ONLY, `비-ASCII stderr 문구: ${literal}`);
+  }
+});
+
+function probeWindowsPowerShell51() {
+  if (!IS_WIN) return { exe: null, reason: "비-Windows" };
+  const probe = spawnSync(
+    "powershell.exe",
+    ["-NoLogo", "-NoProfile", "-Command", "$PSVersionTable.PSVersion.Major"],
+    { encoding: "utf8", env: ps51Env({}) },
+  );
+  if (probe.error || probe.status !== 0) {
+    return { exe: null, reason: "powershell.exe 없음" };
+  }
+  return probe.stdout.trim() === "5"
+    ? { exe: "powershell.exe", reason: null }
+    : { exe: null, reason: `powershell.exe 주 버전 ${probe.stdout.trim()}` };
+}
+
+// 5.1 자식은 부모(pwsh 7)의 PSModulePath 를 물려받으면 모듈 해석이 어긋날 수 있다 --
+// 지우면 5.1 이 자기 기본값을 다시 계산한다.
+function ps51Env(env) {
+  const copy = { ...env };
+  for (const key of Object.keys(copy)) {
+    if (key.toLowerCase() === "psmodulepath") delete copy[key];
+  }
+  return copy;
+}
+
+function checkDisabledStderr(shellName, r) {
+  assert.equal(r.status, 0, `${shellName}: ${r.stderr}`);
+  assert.ok(
+    r.stderr.includes("ORCH_SEAT_SHIM_DISABLED: REAL_BIN_MISSING"),
+    `${shellName}: ${r.stderr}`,
+  );
+  assert.ok(
+    r.stderr.includes("starting without the shim"),
+    `${shellName}: 문구가 읽혀야 한다: ${r.stderr}`,
+  );
+  assert.match(
+    r.stderr,
+    ASCII_ONLY,
+    `${shellName}: stderr 에 깨진 · 비-ASCII 문자가 없어야 한다: ${JSON.stringify(r.stderr)}`,
+  );
+  assert.ok(!r.stderr.includes("�"), `${shellName}: U+FFFD(깨짐)`);
+}
+
+launcherTest(
+  "L7 disabled 사유 문구 -- pwsh 와 Windows PowerShell 5.1(`powershell.exe -File`) 양쪽에서 같은 ASCII 문구 · 깨짐 없음 · 가짜 명령은 그래도 기동",
+  (box) => {
+    const env = launcherEnv(box, {
+      HARNESS_ORCA_REAL_BIN: path.join(box.root, "wrong-real-orca.exe"),
+    });
+    const viaPwsh = runLauncher(box, env, [box.fakeCommand, "zeta"]);
+    checkDisabledStderr("pwsh", viaPwsh);
+    readTrace(box);
+    rmSync(box.trace);
+    const ps51 = probeWindowsPowerShell51();
+    if (ps51.exe === null) {
+      // 조용한 skip 이 아니라 사유 있는 분기(5.1 이 없는 기계).
+      console.log(`# launcher-5.1-branch L7 구동 안 함: ${ps51.reason}`);
+      assert.ok(ps51.reason.length > 0);
+      return;
+    }
+    const via51 = runLauncher(
+      box,
+      ps51Env(env),
+      [box.fakeCommand, "zeta"],
+      ps51.exe,
+    );
+    checkDisabledStderr("powershell.exe 5.1", via51);
+    assert.deepEqual(readTrace(box).argv, ["zeta"]);
   },
 );
