@@ -773,6 +773,20 @@
       "self_registration_note": "HYK-389-shim-core-1 self-registration (OBSERVER convention, same as skip-review-usage above). HYK-389 slice 1 of 5 (owner ruling 2026-11-18 08:05, item 4: record first). Honesty: install_targets is EMPTY on purpose -- nothing places this shim on any seat's PATH yet (the install-copy of the two .mjs files changes nothing unless a PATH dir holds an `orca` shim; the ORCH launcher wiring is slice 2), so today no live seat's behavior is different. Not an anchor. See docs/enforcement-known-gaps.md gap#102 for the seven bypasses."
     },
     {
+      "id": "orch-seat-boot-observer",
+      "substrate": "manual",
+      "script": "scripts/relay/orch-seat-boot.mjs",
+      "test": "scripts/relay/orch-seat-boot.test.mjs",
+      "install_targets": [],
+      "expected_bad": "n/a -- this is an OBSERVER, not a gate and not an anchor. The ORCH seat boot decision never blocks or refuses an ORCH start: it stats the real orca path, the shim directory and the shim CLI, decides shim=enabled|disabled with a reason code (REAL_BIN_MISSING / SHIM_MISSING / CLI_MISSING / LEDGER_UNSET), appends ONE `event=orch_seat_boot` line to the shim ledger and prints a one-line JSON verdict -- and ALWAYS exits 0 (a ledger write failure is reported as ledger=write_failed, never as a non-zero exit). A wrong real orca path therefore yields disabled + REAL_BIN_MISSING and the launcher template still starts the seat command without the shim on PATH. An ORCH started without the launcher template (the old boot line, a hand-typed command) leaves no boot line and no write lines: it is outside the record.",
+      "expected_good": "n/a -- run through templates/orca-shim/orca-orch-seat.ps1 (or `node scripts/relay/orch-seat-boot.mjs --real-bin <orca> --shim-dir <dir> --shim-cli <cli> --ledger <jsonl> --mark <launch time> --role ORCH`): every input present -> shim=enabled, one boot line, stdout one-line JSON, exit 0; any input missing/wrong -> shim=disabled + reason, one boot line, exit 0. The morning report (reach-report.mjs) shows one line: ORCH boots N (enabled/disabled by reason) and direct write verbs outside the designed doors M; a missing or partly unreadable ledger is reported as unobservable and never folded to 0.",
+      "failure_exit": null,
+      "uncertain_exit": null,
+      "owner": "ORCH",
+      "claude_only": false,
+      "self_registration_note": "HYK-389-orch-launch-1 self-registration (OBSERVER convention, same as orca-record-shim above). HYK-389 slice 2, repository share only (owner ruling 2026-11-18 20:43 item 4). Honesty: install_targets is EMPTY on purpose -- the launcher template (templates/orca-shim/orca-orch-seat.ps1) is NOT copied to the control room and NO seat's boot line is changed by this round (control-room application = ORCH S7, after this share is merged and reviewed), so today no live ORCH seat's behavior is different. Not an anchor. See docs/enforcement-known-gaps.md gap#102 (slice 2 addendum)."
+    },
+    {
       "id": "control-room-live-drift",
       "substrate": "manual",
       "script": "scripts/check/selfcheck-inventory.mjs",

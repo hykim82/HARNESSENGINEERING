@@ -50,8 +50,20 @@ import {
   parseQualificationLine,
 } from "./partial-count-core.mjs";
 
+// HYK-389 조각 2 저장소 몫 -- «ORCH 좌석 직접 쓰기» 한 줄(shim 원장 · OBSERVER).
+// 판정·렌더링은 shim-ledger-report-core.mjs 의 순수 함수 몫이고, 이 wire 는 원장
+// 파일 하나를 읽어 넘길 뿐이다.
+import {
+  formatShimLedgerLine,
+  summarizeShimLedger,
+} from "./shim-ledger-report-core.mjs";
+
 export const DEFAULT_WATCH_LOG_PATH =
   "D:/문서관리/하네스-관제실/watch/watch.log";
+// CLI 직접 실행의 기본값(runReachOnce 자체는 기본 경로를 갖지 않는다 -- 아래
+// shimLedgerPath 기본 파생 참조).
+export const DEFAULT_SHIM_LEDGER_PATH =
+  "D:/문서관리/하네스-관제실/orca-direct-ledger.jsonl";
 export const DEFAULT_REPORT_OUT_PATH =
   "D:/문서관리/하네스-관제실/watch/morning-report.md";
 export const DEFAULT_STATE_PATH =
@@ -277,6 +289,47 @@ function composeNoticeText({
   return lines.join("\n");
 }
 
+// HYK-389 조각 2 -- shim 원장을 읽어 «ORCH 좌석 직접 쓰기» 요약으로 바꾼다. 원장을
+// 못 읽으면(없음 · 읽기 실패) text=null 로 넘겨 «관측 불가» 줄이 나온다 -- 0 으로
+// 접는 경로는 없다.
+function readShimLedgerSummary({ readFn, shimLedgerPath, now }) {
+  let text = null;
+  let readError = null;
+  try {
+    text = readFn(shimLedgerPath, "utf8");
+  } catch (err) {
+    readError = err && err.code ? err.code : String(err && err.message);
+  }
+  return summarizeShimLedger({ text, readError, nowMs: now });
+}
+
+function shimLedgerSection({ summary, shimLedgerPath }) {
+  return [
+    "## ORCH 좌석 직접 쓰기(shim 원장 · OBSERVER)",
+    formatShimLedgerLine(summary, { sourceLabel: shimLedgerPath }),
+  ].join("\n");
+}
+
+// HYK-389 조각 2 -- shim 원장 위치. 기본값 = 보고 파일 디렉터리(watch/)의 «위»
+// 디렉터리의 orca-direct-ledger.jsonl(운영 실경로에선 관제실 루트 = 상수
+// DEFAULT_SHIM_LEDGER_PATH 와 같은 곳) -- watch-run.mjs 의 기존 호출을 바꾸지 않고도
+// 실 아침 보고에 닿는 이유(partialCountPath 와 같은 파생 방식).
+function defaultShimLedgerPath(reportOutPath) {
+  return path.join(
+    path.dirname(path.dirname(reportOutPath)),
+    "orca-direct-ledger.jsonl",
+  );
+}
+
+// 아침 보고 본문 조립: 기존 보고 + 부분 계수 절 + (HYK-389 조각 2) shim 원장 절.
+function composeReportText({
+  morningReport,
+  partialCountSection,
+  shimSection,
+}) {
+  return `${morningReport}\n${partialCountSection.join("\n")}\n\n${shimSection}\n`;
+}
+
 // runReachOnce(...) -- 한 번의 실행. 모든 I/O가 주입 가능(시험이 실제
 // fs를 건드리지 않고 mkdtemp 경로만 명시적으로 쓰게 하기 위함,
 // coder-task.md §5 비타협).
@@ -293,6 +346,7 @@ export function runReachOnce({
     path.dirname(reportOutPath),
     "partial-count-report.md",
   ),
+  shimLedgerPath = defaultShimLedgerPath(reportOutPath),
   now = Date.now(),
   readFn = readFileSync,
   writeFn = writeFileSync,
@@ -312,16 +366,17 @@ export function runReachOnce({
     partialCountPath,
     now,
   });
-  const reportText =
-    formatMorningReport({
+  const shimLedger = readShimLedgerSummary({ readFn, shimLedgerPath, now });
+  const reportText = composeReportText({
+    morningReport: formatMorningReport({
       entries,
       nowMs: now,
       skipped,
       sourceLabel: watchLogPath,
-    }) +
-    "\n" +
-    partialCountSection.join("\n") +
-    "\n";
+    }),
+    partialCountSection,
+    shimSection: shimLedgerSection({ summary: shimLedger, shimLedgerPath }),
+  });
 
   const reportDir = path.dirname(reportOutPath);
   if (!existsFn(reportDir)) mkdirFn(reportDir, { recursive: true });
@@ -373,6 +428,7 @@ export function runReachOnce({
     toNotify,
     noticePath,
     skipped,
+    shimLedger,
   };
 }
 
@@ -388,8 +444,10 @@ if (invokedDirectly) {
   let statePath = DEFAULT_STATE_PATH;
   let notifyDir = DEFAULT_NOTIFY_DIR;
   let partialCountPath; // undefined면 runReachOnce 기본값(보고 파일 옆) 사용.
+  let shimLedgerPath = DEFAULT_SHIM_LEDGER_PATH;
   for (let i = 0; i < argv.length; i++) {
-    if (argv[i] === "--watch-log") watchLogPath = argv[++i];
+    if (argv[i] === "--shim-ledger") shimLedgerPath = argv[++i];
+    else if (argv[i] === "--watch-log") watchLogPath = argv[++i];
     else if (argv[i] === "--report-out") reportOutPath = argv[++i];
     else if (argv[i] === "--state-path") statePath = argv[++i];
     else if (argv[i] === "--notify-dir") notifyDir = argv[++i];
@@ -404,6 +462,7 @@ if (invokedDirectly) {
       statePath,
       notifyDir,
       partialCountPath,
+      shimLedgerPath,
     });
     console.log(result.reportText);
     process.exit(0);
