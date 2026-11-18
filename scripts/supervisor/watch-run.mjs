@@ -107,6 +107,11 @@ import { runAdmissionSweepTrigger } from "./admission-sweep-wire.mjs";
 // 경로 재사용"). 판정 로직 자체는 재구현하지 않고 이미 만든
 // rate-limit-stall-wire.mjs의 runRateLimitStallOnce를 그대로 부른다.
 import { runRateLimitStallOnce } from "./rate-limit-stall-wire.mjs";
+// HYK-406-usage-watch-1 (조각 A) -- 상태줄(HUD) 사용량 파일을 읽어 ORCH ctx/주간
+// 사용량 임계·낡음·관측 불가를 «띠에 들어설 때만» 받는함에 1장 통지한다.
+// ⛔OBSERVER · 앵커 아님(HUD 파일은 ORCH 도 쓸 수 있다 -- usage-threshold-core.mjs
+// 머리). opt-in(기본 null)이라 기존 호출자·기존 시험은 한 글자도 바뀌지 않는다.
+import { runUsageThresholdOnce } from "./usage-threshold-wire.mjs";
 // HYK-285-always-1 (coder-task.md §1 "같은 자리에 같은 방식으로 붙인다") --
 // 어제 병합된 각성 배선(wake-wire.mjs, HYK-285-wake-*)의 발동 주체를
 // admissionSweep과 같은 opt-in 원칙으로 이 기존 주기에 얹는다. 판정·전송·
@@ -1765,6 +1770,19 @@ function memoryReopenLogSegment(memoryReopen) {
   return `memory_reopen_sent=${sent} memory_reopen_reason=${reason}`;
 }
 
+// HYK-406-usage-watch-1 -- watch.log 한 줄 안의 `usage-threshold:` 구간.
+// 단계가 실행되지 않은(opt-in 아님 · notifyDir 없음) 호출자는 null 이라 로그
+// 줄이 한 글자도 달라지지 않는다(회귀 0). 실패는 «FAILED» 토큰으로 시끄럽게
+// 남는다(조용한 생략 금지).
+function usageThresholdLogSegment(result) {
+  if (!isPlainObject(result) || result.notRun === true) return null;
+  if (result.failed === true) {
+    const msg = sanitizeFailureToken(result.message, "unknown");
+    return `usage-threshold: FAILED reason=${truncateToken(msg, 120)}`;
+  }
+  return typeof result.segment === "string" ? result.segment : null;
+}
+
 // escalation 축의 사람이 읽는 사유(§4 요건2 "막힌 워커가 있으면 사유가
 // 사람이 읽을 수 있게 실려야 한다", HYK-210 전례와 동일 형식 -- 공백
 // 치환·길이 상한·건수 상한+N_more). wakeHuman 스코프 전부(새 것이든
@@ -2488,6 +2506,9 @@ export function buildLogLine({
   // null을 돌려주므로(filter(Boolean)) 로그 줄이 한 글자도 달라지지
   // 않는다(회귀 0).
   memoryReopen,
+  // HYK-406-usage-watch-1: 기존 호출자 전부는 이 인자를 안 주므로 undefined ->
+  // usageThresholdLogSegment 가 null -> 로그 줄이 한 글자도 달라지지 않는다.
+  usageThreshold,
 }) {
   if (detectorResult.runnerFailure) {
     return `${nowIso} RUNNER_FAILURE message=${detectorResult.message}`;
@@ -2617,6 +2638,9 @@ export function buildLogLine({
     // memoryReopenLogSegment가 null을 돌려주므로(filter(Boolean)) 로그
     // 줄이 한 글자도 달라지지 않는다(회귀 0).
     memoryReopenLogSegment(memoryReopen),
+    // HYK-406-usage-watch-1: 이 세그먼트도 지금 이 시점의 맨 끝이다 -- 앞선 모든
+    // 세그먼트의 필드·순서·값은 이 라운드가 손대지 않았다.
+    usageThresholdLogSegment(usageThreshold),
   ]
     .filter(Boolean)
     .join(" ");
@@ -2713,6 +2737,41 @@ function runRateLimitStallStep({
   try {
     return runRateLimitStallOnce({
       repoRoot,
+      watchDir,
+      notifyDir,
+      now,
+      readFn,
+      writeFn,
+      mkdirFn,
+      existsFn,
+    });
+  } catch (err) {
+    return {
+      notRun: false,
+      failed: true,
+      message: err && err.message ? err.message : String(err),
+    };
+  }
+}
+
+// HYK-406-usage-watch-1 (조각 A) -- 사용량 임계 단계. opt-in: `usageThreshold`
+// 객체(예 `{hudDir}`)가 없거나 notifyDir 이 없으면 아예 실행하지 않는다
+// (runRateLimitStallStep 과 같은 모양). ⛔이 단계 자신의 실패(예외)는 감시
+// 사이클 전체를 죽이지 않는다 -- 실패는 결과 객체와 watch.log 구간에 남는다.
+export function runUsageThresholdStep({
+  usageThreshold,
+  notifyDir,
+  watchDir,
+  now,
+  readFn,
+  writeFn,
+  mkdirFn,
+  existsFn,
+}) {
+  if (!isPlainObject(usageThreshold) || !notifyDir) return { notRun: true };
+  try {
+    return runUsageThresholdOnce({
+      ...usageThreshold,
       watchDir,
       notifyDir,
       now,
@@ -6147,6 +6206,40 @@ function resolveWatchOnceFsFns({
   };
 }
 
+// HYK-406-usage-watch-1 (max-lines-per-function 수리): finalizeWatchOnceCycle 에서
+// last-run.json(생존 기록) 쓰기 호출만 뽑았다 -- 필드·순서·값·주석 원문 그대로,
+// 이름과 위치만 옮겼다(HYK-228 4R 의 동일 관례).
+function writeCycleAliveRecord({
+  writeFn,
+  renameFn,
+  aliveRecordPath,
+  now,
+  detectorResult,
+  sweepResult,
+  unconsumedVanish,
+}) {
+  writeAliveRecordAtomic({
+    writeFn,
+    renameFn,
+    aliveRecordPath,
+    // HYK-228 coder-r2 rejection-2: `sweep`은 `...detectorResult` 뒤에 와서
+    // 그 필드와 충돌해도 이긴다. `recordedAtMs`가 여전히 유일한 신선도
+    // 판정 입력이라(watch-freshness-core.mjs 계약 불변) 기존 소비자는 이
+    // 형제 필드를 무시해도 무회귀다.
+    // HYK-341-vanished-unresolved (coder-task.md §4): `unconsumedVanished
+    // Worktrees`도 unconsumedWorstWorktrees(HYK-328)와 같은 이유로
+    // last-run.json에 기계가 읽는 정본으로 남긴다 -- watch.log의
+    // unconsumedVanishedDetail은 사람이 훑는 요약(상한+N_more)이라
+    // 전체 목록은 여기에만 있다.
+    record: {
+      recordedAtMs: now,
+      ...detectorResult,
+      sweep: sweepRecordField(sweepResult),
+      unconsumedVanishedWorktrees: unconsumedVanish?.vanishedPaths ?? [],
+    },
+  });
+}
+
 // runWatchOnceCore(...) -- runWatchOnce 본문 그 자체(HYK-228 4R,
 // max-lines-per-function 수리를 위해 얇은 기본값 래퍼 runWatchOnce에서
 // 추출). 모든 파라미터는 이미 해석된 값이며, 이 함수 자신은 기본값을
@@ -6180,6 +6273,8 @@ function finalizeWatchOnceCycle({
   // 그대로 싣는다(seatEscalation과 동일한 "결과를 직접 단언할 수 있게
   // 노출" 원칙).
   memoryReopen,
+  // HYK-406-usage-watch-1: 사용량 임계 단계 결과(opt-in 아니면 undefined).
+  usageThreshold,
 }) {
   const nowIso = new Date(now).toISOString();
   const logPath = path.join(watchDir, "watch.log");
@@ -6196,6 +6291,7 @@ function finalizeWatchOnceCycle({
     resourceResidueResult,
     seatEscalation,
     memoryReopen,
+    usageThreshold,
   });
   appendLogWithRotation({
     readFn,
@@ -6204,25 +6300,14 @@ function finalizeWatchOnceCycle({
     line,
     maxLines: maxLogLines,
   });
-  writeAliveRecordAtomic({
+  writeCycleAliveRecord({
     writeFn,
     renameFn,
     aliveRecordPath,
-    // HYK-228 coder-r2 rejection-2: `sweep`은 `...detectorResult` 뒤에 와서
-    // 그 필드와 충돌해도 이긴다. `recordedAtMs`가 여전히 유일한 신선도
-    // 판정 입력이라(watch-freshness-core.mjs 계약 불변) 기존 소비자는 이
-    // 형제 필드를 무시해도 무회귀다.
-    // HYK-341-vanished-unresolved (coder-task.md §4): `unconsumedVanished
-    // Worktrees`도 unconsumedWorstWorktrees(HYK-328)와 같은 이유로
-    // last-run.json에 기계가 읽는 정본으로 남긴다 -- watch.log의
-    // unconsumedVanishedDetail은 사람이 훑는 요약(상한+N_more)이라
-    // 전체 목록은 여기에만 있다.
-    record: {
-      recordedAtMs: now,
-      ...detectorResult,
-      sweep: sweepRecordField(sweepResult),
-      unconsumedVanishedWorktrees: unconsumedVanish?.vanishedPaths ?? [],
-    },
+    now,
+    detectorResult,
+    sweepResult,
+    unconsumedVanish,
   });
   return finalizeWatchOnceTail({
     repoRoot,
@@ -6245,6 +6330,7 @@ function finalizeWatchOnceCycle({
     resourceResidueResult,
     seatEscalation,
     memoryReopen,
+    usageThreshold,
   });
 }
 
@@ -6272,6 +6358,7 @@ function finalizeWatchOnceTail({
   resourceResidueResult,
   seatEscalation,
   memoryReopen,
+  usageThreshold,
 }) {
   const reachResult = runReachStep({
     notifyDir,
@@ -6308,6 +6395,7 @@ function finalizeWatchOnceTail({
     resourceResidueResult,
     seatEscalation,
     memoryReopen,
+    usageThreshold,
   };
 }
 
@@ -6331,6 +6419,10 @@ function computePreLogDedupeSteps({
   memoryReopenExecFn,
   memoryReopenSampleFn,
   memoryReopenSleepFn,
+  // HYK-406-usage-watch-1: opt-in 객체 + 받는함 + 시각(없으면 단계 미실행).
+  usageThreshold,
+  notifyDir,
+  now,
 }) {
   const escalationDedupe = runEscalationDedupeStep({
     scopes: detectorResult.escalationScopes,
@@ -6382,7 +6474,25 @@ function computePreLogDedupeSteps({
     sampleFn: memoryReopenSampleFn ?? defaultMemoryReopenFreeSampleMb,
     sleepFn: memoryReopenSleepFn ?? defaultMemoryReopenSleep,
   });
-  return { escalationDedupe, unconsumedVanish, seatEscalation, memoryReopen };
+  // HYK-406-usage-watch-1 (조각 A): 사용량 임계 단계도 «로그 줄 조립 전» 이다 --
+  // 결과가 watch.log 한 줄의 `usage-threshold:` 구간이 되어야 하기 때문이다.
+  const usageThresholdResult = runUsageThresholdStep({
+    usageThreshold,
+    notifyDir,
+    watchDir,
+    now,
+    readFn,
+    writeFn,
+    mkdirFn,
+    existsFn,
+  });
+  return {
+    escalationDedupe,
+    unconsumedVanish,
+    seatEscalation,
+    memoryReopen,
+    usageThresholdResult,
+  };
 }
 
 // runWatchOnceCore에서 분리(§6 eslint max-lines-per-function 상한 준수 --
@@ -6560,18 +6670,6 @@ function runWatchOnceCore(params) {
     // HYK-464-followup-1 축C: admissionSweep/wake와 동일한 opt-in 계약 --
     // 기본값 null이면(기존 호출자 전부) 이 단계는 아예 실행되지 않는다.
     resourceResidue = null,
-    // HYK-433-seat-escalation-push-1 (coder-task.md §2 product_scope ①):
-    // opt-in 객체가 아니다(escalationDedupe/unconsumedVanish와 동일 --
-    // 항상 돈다) -- 기본값 undefined면 computePreLogDedupeSteps가
-    // createOrcaExecFn()(실 orca 경로)로 낙하한다. 시험만 fake execFn을
-    // 명시로 준다.
-    seatEscalationExecFn,
-    // HYK-493-memory-reopen-1 (coder-task.md §2 product_scope): seatEscalation
-    // ExecFn과 동일한 계약(opt-in 객체 아님, 기본값 undefined면
-    // computePreLogDedupeSteps가 각자의 운영 기본값으로 낙하한다).
-    memoryReopenExecFn,
-    memoryReopenSampleFn,
-    memoryReopenSleepFn,
   } = params;
   mkdirFn(watchDir, { recursive: true });
   const detectorResult = runDetector({
@@ -6582,19 +6680,20 @@ function runWatchOnceCore(params) {
     watchDir,
   });
   const capResult = computeCapResult({ repoRoot, capPath, capReadFn });
-  const { escalationDedupe, unconsumedVanish, seatEscalation, memoryReopen } =
-    computePreLogDedupeSteps({
-      detectorResult,
-      watchDir,
-      readFn,
-      writeFn,
-      existsFn,
-      mkdirFn,
-      seatEscalationExecFn,
-      memoryReopenExecFn,
-      memoryReopenSampleFn,
-      memoryReopenSleepFn,
-    });
+  const {
+    escalationDedupe,
+    unconsumedVanish,
+    seatEscalation,
+    memoryReopen,
+    usageThresholdResult,
+  } = computePreLogDedupeSteps({
+    // HYK-406-usage-watch-1: 이 단계가 읽는 입력(seatEscalationExecFn ·
+    // memoryReopen*Fn · usageThreshold · notifyDir · now · fs 함수들)은 전부
+    // params 안에 이미 있다 -- 필드를 일일이 다시 나열하지 않고 그대로 넘긴다
+    // (runWatchOnce 의 매개변수 주석이 각 계약의 정본이다 · 값·순서 무변).
+    ...params,
+    detectorResult,
+  });
   const {
     sweepResult,
     wakeResult,
@@ -6630,6 +6729,7 @@ function runWatchOnceCore(params) {
     resourceResidueResult,
     seatEscalation,
     memoryReopen,
+    usageThreshold: usageThresholdResult,
   });
 }
 
@@ -6691,6 +6791,9 @@ export function runWatchOnce({
   memoryReopenExecFn,
   memoryReopenSampleFn,
   memoryReopenSleepFn,
+  // HYK-406-usage-watch-1 (조각 A): opt-in 객체 `{hudDir?, readdirFn?}`. 기본
+  // null 이면 단계가 아예 실행되지 않는다(기존 호출자·기존 시험 회귀 0).
+  usageThreshold = null,
 }) {
   const fsFns = resolveWatchOnceFsFns({
     readFn,
@@ -6723,6 +6826,7 @@ export function runWatchOnce({
     memoryReopenExecFn,
     memoryReopenSampleFn,
     memoryReopenSleepFn,
+    usageThreshold,
   });
 }
 
@@ -6747,6 +6851,19 @@ export function buildResourceResidueFromArgv(argv) {
   return resourceResidueRegistryPath
     ? { registryPath: resourceResidueRegistryPath, teardownShadow: {} }
     : null;
+}
+
+// HYK-406-usage-watch-1 (조각 A): CLI 인자 -> `usageThreshold` opt-in 객체.
+// 프로덕션 CLI 와 시험이 똑같이 부르는 자리로 뽑았다(buildResourceResidueFromArgv
+// 와 같은 이유). 기본값 = 켜짐(`{}` -> HUD 디렉터리는 홈 .claude/hud) · 예약
+// 작업 인자를 바꾸지 않고 라이브 반영하려는 것 · 끄기 = --no-usage-threshold.
+export function buildUsageThresholdFromArgv(argv) {
+  let hudDir = null;
+  for (let i = 0; i < argv.length; i++) {
+    if (argv[i] === "--no-usage-threshold") return null;
+    if (argv[i] === "--usage-hud-dir") hudDir = argv[++i];
+  }
+  return hudDir ? { hudDir } : {};
 }
 
 const invokedDirectly =
@@ -6915,6 +7032,9 @@ if (invokedDirectly) {
     now: cliNow,
     blockedTerminationScan,
     resourceResidue,
+    // HYK-406-usage-watch-1: 기본 켜짐 · 탈출구 --no-usage-threshold · HUD
+    // 디렉터리 재정의 --usage-hud-dir (buildUsageThresholdFromArgv 참조).
+    usageThreshold: buildUsageThresholdFromArgv(argv),
   });
   if (!noPartialCount) {
     // HYK-255-watch-wire-1 (coder-task.md §1 항2): 실패는 감시 로그 줄로
