@@ -63,6 +63,88 @@ const FLAG_TO_FIELD = Object.freeze({
   "--bound-seat-role": "boundSeatRole",
 });
 
+// HYK-402 S2 (seat-role-s2-1): «기록만» 인자 3개 -- 배달 순간 역할 결속 판정을
+// 영수증 새 칸 `seat_bind_verdict` · `seat_bind_reason` · `seat_bind_candidates`
+// 로 남긴다. 위 `--bound-seat-role` 과 달리 «어떤 값이어도 거부하지 않는다»:
+// 알 수 없는 판정값 · 값 누락 · `--flag=value` 문법 · 판정값 없이 사유만 와도
+// 영수증 줄은 남고(판정값은 ERROR 로 기록), 배달 결과(이 CLI 의 ok · exit)는
+// 바뀌지 않는다. 세 인자가 «전부 없으면» 이 CLI 의 동작과 영수증 바이트는 한 글자도
+// 바뀌지 않는다(사용법 문자열 USAGE 도 그대로 -- 살아 있는 배달 무변). 판정값 4종은
+// seat-role-bind-core.mjs 의 DELIVERY_BIND_VERDICT 와 같아야 한다(시험이 대조 --
+// 이 CLI 는 코어를 import 하지 않아 설치 폐쇄를 늘리지 않는다).
+const SEAT_BIND_FLAG_TO_FIELD = Object.freeze({
+  "--seat-bind-verdict": "seatBindVerdict",
+  "--seat-bind-reason": "seatBindReason",
+  "--seat-bind-candidates": "seatBindCandidates",
+});
+const SEAT_BIND_VERDICTS = Object.freeze([
+  "MATCH",
+  "MISMATCH",
+  "UNDECIDABLE",
+  "ERROR",
+]);
+const SEAT_BIND_MAX_REASON_CHARS = 120;
+const SEAT_BIND_MAX_CANDIDATES_CHARS = 400;
+
+// 이 토큰이 «기록만» 인자면 { field, inline? } -- 값은 호출자가 가져간다.
+function matchSeatBindFlag(arg) {
+  if (typeof arg !== "string" || !arg.startsWith("--seat-bind-")) return null;
+  const eq = arg.indexOf("=");
+  const name = eq === -1 ? arg : arg.slice(0, eq);
+  const field = SEAT_BIND_FLAG_TO_FIELD[name];
+  if (!field) return null;
+  return eq === -1 ? { field } : { field, inline: arg.slice(eq + 1) };
+}
+
+// args[i] 가 «기록만» 인자면 값을 parsed 에 담고 «마지막으로 쓴 인덱스»를 돌려준다
+// (값이 없거나 다음 토큰이 또 다른 플래그면 빈 값으로 두고 그 토큰은 소비하지 않는다).
+// «기록만» 인자가 아니면 null.
+function consumeSeatBindFlag(args, i, parsed) {
+  const flag = matchSeatBindFlag(args[i]);
+  if (!flag) return null;
+  parsed.seatBindPresent = true;
+  if (flag.inline !== undefined) {
+    parsed[flag.field] = flag.inline;
+    return i;
+  }
+  const next = args[i + 1];
+  if (typeof next === "string" && !next.startsWith("--")) {
+    parsed[flag.field] = next;
+    return i + 1;
+  }
+  parsed[flag.field] = "";
+  return i;
+}
+
+// 판정값 정규화. -> { verdict, reasonOverride? }. 어떤 입력도 «기록 가능한 값»이 된다.
+function normalizeSeatBindVerdict(raw) {
+  const text = typeof raw === "string" ? raw.trim().toUpperCase() : "";
+  if (SEAT_BIND_VERDICTS.includes(text)) return { verdict: text };
+  if (text === "") {
+    return { verdict: "ERROR", reasonOverride: "SEAT_BIND_VERDICT_MISSING" };
+  }
+  return {
+    verdict: "ERROR",
+    reasonOverride: `UNRECOGNIZED_VERDICT_${text.slice(0, 40)}`,
+  };
+}
+
+// parsed -> undefined(세 인자 모두 없음) | { verdict, reason?, candidates? }
+function resolveSeatBind(parsed) {
+  if (!parsed.seatBindPresent) return undefined;
+  const { verdict, reasonOverride } = normalizeSeatBindVerdict(
+    parsed.seatBindVerdict,
+  );
+  const reasonRaw = isNonEmptyString(parsed.seatBindReason)
+    ? parsed.seatBindReason.slice(0, SEAT_BIND_MAX_REASON_CHARS)
+    : "";
+  const reason = reasonRaw || reasonOverride || "";
+  const candidates = isNonEmptyString(parsed.seatBindCandidates)
+    ? parsed.seatBindCandidates.slice(0, SEAT_BIND_MAX_CANDIDATES_CHARS)
+    : "";
+  return { verdict, reason, candidates };
+}
+
 function classifyFlag(arg) {
   if (arg.startsWith("--") && arg.includes("=")) {
     const flagName = arg.slice(0, arg.indexOf("="));
@@ -92,14 +174,28 @@ const USAGE =
 
 // env는 호출자가 명시로 주입한다(direct-entry는 process.env) -- 순수 함수로
 // 유지해 시험이 실 환경을 건드리지 않게 한다.
-export function parseDispatchReceiptArgs(args, env = {}) {
-  if (args.includes("--help")) return { ok: true, help: true };
-  const parsed = {};
+// 인자 토큰 순회(S1 까지는 parseDispatchReceiptArgs 안 for 루프였다 -- S2 에서 «기록만»
+// 분기가 늘어 함수 복잡도 상한 때문에 «동작 그대로» 이 함수로 뺐다).
+function collectFlagValues(args, parsed) {
   for (let i = 0; i < args.length; i++) {
+    // HYK-402 S2: «기록만» 인자는 어떤 모양이어도 파싱 단계에서 거부하지 않는다.
+    const consumed = consumeSeatBindFlag(args, i, parsed);
+    if (consumed !== null) {
+      i = consumed;
+      continue;
+    }
     const classified = classifyFlag(args[i]);
     if (classified.error) return { ok: false, reason: classified.error };
     if (classified.field) parsed[classified.field] = args[++i];
   }
+  return { ok: true };
+}
+
+export function parseDispatchReceiptArgs(args, env = {}) {
+  if (args.includes("--help")) return { ok: true, help: true };
+  const parsed = {};
+  const collected = collectFlagValues(args, parsed);
+  if (!collected.ok) return collected;
   if (
     !isNonEmptyString(parsed.receiptPath) &&
     isNonEmptyString(env.DISPATCH_RECEIPT_PATH)
@@ -232,6 +328,7 @@ export function buildReceiptRecord({
   role,
   harnessTaskLabel,
   boundSeatRole,
+  seatBind,
   nowFn = () => new Date(),
 }) {
   return {
@@ -246,6 +343,17 @@ export function buildReceiptRecord({
     // HYK-402 S1: 인자가 있을 때만 칸이 생긴다(없으면 기존 8칸 그대로).
     ...(isNonEmptyString(boundSeatRole)
       ? { bound_seat_role: boundSeatRole }
+      : {}),
+    // HYK-402 S2: 「기록만」 칸 -- 인자가 하나라도 왔을 때만 생긴다(없으면 기존
+    // 칸 그대로 · 바이트 동일). 사유 · 후보는 비면 칸 자체를 만들지 않는다.
+    ...(seatBind
+      ? {
+          seat_bind_verdict: seatBind.verdict,
+          ...(seatBind.reason ? { seat_bind_reason: seatBind.reason } : {}),
+          ...(seatBind.candidates
+            ? { seat_bind_candidates: seatBind.candidates }
+            : {}),
+        }
       : {}),
   };
 }
@@ -287,6 +395,7 @@ export function runDispatchReceiptCli(argv, opts = {}) {
     role: parsed.role,
     harnessTaskLabel: parsed.harnessTaskLabel,
     boundSeatRole: parsed.boundSeatRole,
+    seatBind: resolveSeatBind(parsed),
     nowFn,
   });
 
@@ -328,6 +437,7 @@ export function formatDispatchReceiptResult(result) {
       `RECORDED dispatch_id=${r.dispatch_id} runtime_task_id=${r.runtime_task_id} ` +
       `assignee_pane_key=${r.assignee_pane_key} role=${r.role} label=${r.harness_task_label} ` +
       (r.bound_seat_role ? `bound_seat_role=${r.bound_seat_role} ` : "") +
+      (r.seat_bind_verdict ? `seat_bind=${r.seat_bind_verdict} ` : "") +
       `timestamp_utc=${r.dispatch_timestamp_utc}(${r.dispatch_timestamp_source})${stampSuffix}`
     );
   }
