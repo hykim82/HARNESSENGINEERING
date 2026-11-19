@@ -140,7 +140,7 @@ Write-Host "      [HYK-402 기록만] seat_bind=$($script:seatBindVerdict) reaso
 ## 적용 순서 · 배포 위험
 
 1. **S2 PR 병합 → 본체 ff → (열린 워크트리가 S2 이후 master 인지 확인) → S7(ORCH)이 두 편집을 적용.** 적용 전에는 아무것도 바뀌지 않는다.
-2. S2 이전 base 의 워크트리에 배달해도 **배달은 계속된다**: bind CLI 가 없으면 판정 `UNDECIDABLE/SEAT_BIND_CLI_MISSING` 을 화면에 찍고(영수증 CLI 가 새 인자를 모르면 영수증에는 칸이 안 생기고 «칸 없이 기록» 줄만 뜬다), exit 0 경로 그대로다.
+2. S2 이전 base 의 워크트리에 배달해도 **배달은 계속된다**(어느 경우든 exit 0 경로 그대로). 화면 판정은 그 워크트리가 어느 base 인지에 따라 갈린다: ⓐ S1(#379) 이후 ~ S2 이전 base 의 워크트리에는 S1 판 bind CLI 가 **있고** 그 CLI 는 `--record-only` 를 모른다 → 판정 `ERROR/BIND_OUTPUT_UNREADABLE` 을 화면에 찍는다(검토 1R 합성 실행 실측). ⓑ bind CLI 자체가 없는 S1 이전 base 의 워크트리만 `UNDECIDABLE/SEAT_BIND_CLI_MISSING` 이다. 두 경우 모두 영수증 CLI 가 S1 판이면 새 인자를 몰라 영수증에는 칸이 안 생기고 «칸 없이 기록» 줄만 뜬다. ⚠️S7 첫 실 배달 확인과 `ERROR` 건수 관측 때 «S2 이전 base 의 워크트리 = `ERROR/BIND_OUTPUT_UNREADABLE` 로 찍힌다»를 알고 봐야 한다.
 3. 설치기 복사 목록에 두 파일을 **넣었다**(`seat-role-bind-core.mjs` · `seat-role-bind-cli.mjs` + 짝 시험) — 설치된 워크트리에서도 판정이 CLI 부재로만 남지 않는다. 편집 A 의 `Join-Path` 한 줄은 `installer-external-path-callers.test.mjs` 가 읽는 «by-path 호출»이며 그 가드가 복사 목록 누락을 빨강으로 만든다.
 4. HYK-392 의 «포인터 기록 실패 fail-open» 수리 자리와 **같은 ps1** 이다 — 두 S7 패치는 **한 번에 하나씩** 적용한다. S3(인자 계약 등재)는 이 문서의 적용 **뒤**에 병합한다(등재가 앞서면 «등재된 CLI 를 ps1 이 안 부른다»가 된다).
 5. 되돌림: 편집 A·B 의 삽입 블록을 지우면 원상이다(다른 줄을 건드리지 않는다). 영수증에 이미 쓰인 새 칸은 append-only 라 남는다(읽는 쪽이 모르는 칸은 무시 — 390 그림자 대조 입력은 새 칸 이름을 읽지 않는다).
