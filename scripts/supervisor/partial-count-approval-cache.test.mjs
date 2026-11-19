@@ -16,6 +16,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { execFileSync } from "node:child_process";
 import * as report from "./partial-count-report.mjs";
+import * as core from "./partial-count-core.mjs";
 import { DEFAULT_CALL_BUDGET } from "./approval-authority-adapter.mjs";
 
 const MIN = 60 * 1000;
@@ -115,8 +116,11 @@ function buildRepo(prCount) {
 
 // 호출을 기록하는 가짜 fetchJson. behavior[sha] = "approved"(기본) | "notapproved" | "http500".
 // pullsFor = ㄱ-4 조회가 sha 별 «첫 호출»(/commits/<sha>/pulls)을 부른 순서 -- 조회 1건 = 이 배열에 1개.
+// 2R: behavior[sha] = "openpr"(PR 상세가 merged:false = 열린 PR) 도 줄 수 있고, extraReviews[PR 번호] = 그 PR 리뷰 응답에 덧붙일 리뷰들
+// (사람 CHANGES_REQUESTED 합성용 -- 승인자 hykim82 의 마지막 리뷰는 그대로라 판정은 변하지 않는다).
 function makeFetch(repo) {
   const behavior = {};
+  const extraReviews = {};
   const calls = { gate4: [], pullsFor: [], events: [], d1: [] };
   const mergeNumber = new Map(repo.mergeShas.map((s, i) => [s, i + 1]));
   const respond = (json) => ({ ok: true, status: 200, json, linkHeader: null });
@@ -150,9 +154,10 @@ function makeFetch(repo) {
       return respond(n ? [{ merge_commit_sha: pulls[1], number: n }] : []);
     }
     if (/^\/pulls\/\d+$/.test(path)) {
+      const num = Number(path.split("/").pop());
       return respond({
-        number: Number(path.split("/").pop()),
-        merged: true,
+        number: num,
+        merged: behavior[repo.mergeShas[num - 1]] !== "openpr",
         base: { ref: "master" },
         head: { sha: PULL_HEAD_SHA },
         user: { login: "harness-bot", id: 999 },
@@ -161,7 +166,8 @@ function makeFetch(repo) {
     const reviews = /^\/pulls\/(\d+)\/reviews\?per_page=100$/.exec(path);
     if (reviews) {
       const sha = repo.mergeShas[Number(reviews[1]) - 1];
-      if (behavior[sha] === "notapproved") return respond([]);
+      const extra = extraReviews[Number(reviews[1])] ?? [];
+      if (behavior[sha] === "notapproved") return respond([...extra]);
       return respond([
         {
           id: 1,
@@ -170,11 +176,12 @@ function makeFetch(repo) {
           commit_id: PULL_HEAD_SHA,
           submitted_at: "2026-11-13T09:00:00Z",
         },
+        ...extra,
       ]);
     }
     return { ok: false, status: 404, json: null, linkHeader: null };
   };
-  return { fetchJson, calls, behavior };
+  return { fetchJson, calls, behavior, extraReviews };
 }
 
 // 프로덕션 진입점 1회 -- ⛔기본 몫: maxMergeChecks 인자를 주지 않는다(예약 감시 watch-run.mjs 가 부르는 모양 그대로).
@@ -426,7 +433,12 @@ test("ⓒ GitHub 사람 손 목록 순번 · 다른 줄 무변: 캐시 켠 5회�
         .split("\n")
         .filter(
           (l) =>
-            !l.includes("ㄱ-4") && !l.includes("캐시") && !l.startsWith("생성"),
+            !l.includes("ㄱ-4") &&
+            !l.includes("캐시") &&
+            !l.startsWith("생성") &&
+            // 2R: ㄱ 머리 줄(캐시 재사용 표지) · ㄴ «GitHub 사람 손» 줄(이월 표기)은 새 표기가 붙는 줄이라 여기서 빼고, 값은 아래 2R 칸이 회차마다 비교한다.
+            !l.startsWith(ANCHOR_LINE) &&
+            !l.startsWith(GH_LINE),
         )
         .join("\n")
         // 두 장비(rig)의 합성 임시 폴더 이름만 다르다 -- 그 이름은 값이 아니다.
@@ -889,5 +901,437 @@ test("ⓖ 캐시 파일 표본: schema · 항목(sha → status · checkedAtMs �
     assert.equal(parsed.entries[rig.repo.mergeShas[0]].checkedAtMs, NOW + STEP);
   } finally {
     cleanup(rig);
+  }
+});
+
+// ====================================================================================================================
+// 2R (판정 #20261119-2020 · 검토 1R P1-1 수리) -- 캐시가 ㄴ «GitHub 사람 손» 변경 요청 분자를 낮추지 않는다.
+//
+// 1R 의 구멍: ㄴ 변경 요청은 ㄱ-4 가 그 회차에 «받은» /pulls/<n>/reviews 응답만 읽는다. 캐시가 이미 본 sha 의 조회를 건너뛰자 회차 2 부터
+// 그 응답이 사라져 분자가 1 -> 0(회차 4 · 5 는 «미수집») 으로 내려갔다. 1R 시험은 두 쪽이 같은 sha 를 보는 회차 1 만 비교해 못 봤다.
+// 수리: 양성(사람 변경 요청 사건 = 리뷰 식별자 + 제출 시각 + 작성자)만 캐시 항목에 실어 창 안에서 뒤 회차에도 센다 · «없다»는 이월하지
+// 않는다(건너뛴 조회 수 + «새 변경 요청 미수집» 표지) · 열린 PR(PR_NOT_MERGED)은 캐시로 건너뛰지 않는다 · ㄱ 머리 줄에 캐시 재사용 표지.
+// ⛔검토자 표(합성 3후보 · 가장 새 PR#3 에 창 안 사람 CHANGES_REQUESTED 1건 · 같은 입력 · 켬/끔 5회차)를 «회차마다» 비교한다.
+// ====================================================================================================================
+
+const LN_HEAD = "- 외부 독립 증거로 확인된 사건:";
+const GH_LINE = "- GitHub 사람 손 ";
+const ANCHOR_LINE = "- 외부 독립 앵커로 확인:";
+const CR_AT_ISO = "2026-11-13T09:30:00Z";
+const CR_REVIEW = {
+  id: 77,
+  user: { login: "human-rev", id: 4242 },
+  state: "CHANGES_REQUESTED",
+  commit_id: PULL_HEAD_SHA,
+  submitted_at: CR_AT_ISO,
+};
+const CR_EVENT_ID = `${core.DAILY_EVENT_PREFIX.GITHUB}cr:77`;
+const lineOf = (text, prefix) =>
+  text.split("\n").find((l) => l.startsWith(prefix)) ?? "";
+const ghNumerator = (text) =>
+  Number(/^- GitHub 사람 손 (\d+)건 이상/.exec(lineOf(text, GH_LINE))?.[1]);
+const offOpts = (rig) => ({
+  approvalCachePath: null,
+  watchLogPath: join(rig.root, "off.log"),
+});
+// 가장 새 병합(PR#3)에 창 안 사람 변경 요청 1건 -- 검토자 표의 입력.
+const withCr = (rig) => {
+  rig.fetch.extraReviews[3] = [CR_REVIEW];
+};
+
+// 같은 입력으로 캐시 켬 rig · 끔 rig 를 나란히 cycles 회차 돈다 -- 결과를 회차 순서대로 돌려준다.
+async function runPair(prCount, setup, cycles = 5) {
+  const on = makeRig(prCount);
+  const off = makeRig(prCount);
+  setup(on);
+  setup(off);
+  const rOn = [];
+  const rOff = [];
+  for (let i = 0; i < cycles; i++) {
+    rOn.push(await cycle(on, i));
+    rOff.push(await cycle(off, i, offOpts(off)));
+  }
+  return { on, off, rOn, rOff };
+}
+const cleanupPair = (p) => {
+  cleanup(p.on);
+  cleanup(p.off);
+};
+
+test("2R ⑴ 검토자 표 5회차: 같은 입력에서 캐시 켬 = 끔 -- ㄴ «GitHub 사람 손» 분자 · 변경 요청 수 · ㄴ 머리 줄이 회차 1~5 모두 같다(회차 2~5 에서 내려가지 않는다)", async () => {
+  const p = await runPair(3, withCr);
+  try {
+    for (let i = 0; i < 5; i++) {
+      const a = p.rOn[i];
+      const b = p.rOff[i];
+      assert.equal(b.githubHumanActions.changeRequest, 1, `끔 회차 ${i + 1}`);
+      assert.equal(
+        a.githubHumanActions.changeRequest,
+        b.githubHumanActions.changeRequest,
+        `회차 ${i + 1}: 변경 요청 수`,
+      );
+      assert.equal(
+        a.githubHumanActions.humanTotal,
+        b.githubHumanActions.humanTotal,
+        `회차 ${i + 1}: 사람 손 합계`,
+      );
+      assert.equal(
+        ghNumerator(a.reportText),
+        ghNumerator(b.reportText),
+        `회차 ${i + 1}: ㄴ GitHub 사람 손 분자`,
+      );
+      assert.equal(
+        lineOf(a.reportText, LN_HEAD),
+        lineOf(b.reportText, LN_HEAD),
+        `회차 ${i + 1}: ㄴ 머리 줄(분자 · 하한 토막)`,
+      );
+    }
+    // 끔 쪽 문면은 옛 그대로(캐시를 안 켠 회차는 새 표기가 없다).
+    assert.ok(
+      lineOf(p.rOff[0].reportText, GH_LINE).includes(
+        "변경 요청 1(ㄱ-4 가 읽은 PR 1건 한정)",
+      ),
+    );
+    assert.ok(!lineOf(p.rOff[0].reportText, GH_LINE).includes("이월"));
+  } finally {
+    cleanupPair(p);
+  }
+});
+
+test("2R ⑴ 한계 값 고정 ㉠: 끔이 안 읽는 PR(가장 오래된 PR#1)에 변경 요청이 있으면 켬은 그 PR 을 읽는 회차부터 «더 센다»(켬 ≥ 끔 · 내려가지 않는다) -- 그 사건은 «이번 회차 확인» 으로 표지된다", async () => {
+  const p = await runPair(3, (rig) => {
+    rig.fetch.extraReviews[1] = [CR_REVIEW];
+  });
+  try {
+    const on = p.rOn.map((r) => r.githubHumanActions.changeRequest ?? 0);
+    const off = p.rOff.map((r) => r.githubHumanActions.changeRequest ?? 0);
+    assert.deepEqual(
+      off,
+      [0, 0, 0, 0, 0],
+      "끔 = 가장 새 PR#3 만 읽어 PR#1 사건을 못 본다",
+    );
+    // 켬: 회차 3 에 PR#1 을 읽는다(그 회차 «이번 회차 확인» 1) -> 회차 4 · 5 는 그 사건을 이월로 센다.
+    assert.deepEqual(on, [0, 0, 1, 1, 1]);
+    on.forEach((n, i) => assert.ok(n >= off[i], `회차 ${i + 1}: 켬 ≥ 끔`));
+    assert.equal(p.rOn[2].githubHumanActions.changeRequestFresh, 1);
+    assert.equal(p.rOn[3].githubHumanActions.changeRequestCarried, 1);
+  } finally {
+    cleanupPair(p);
+  }
+});
+
+test("2R ⑴ 한계 값 고정 ㉡: 캐시가 건너뛴 PR 에 «나중에» 생긴 변경 요청은 못 읽는다 -- 끔(매 회차 가장 새 PR 을 읽음)보다 낮을 수 있고, 그때 줄이 «캐시로 조회 s건 건너뜀 · 새 변경 요청 미수집» 으로 그 사실을 보인다", async () => {
+  const p = await runPair(3, () => {}, 2);
+  try {
+    // 회차 3 부터 PR#3 에 변경 요청이 생긴다(회차 1 · 2 에는 없었다).
+    for (const rig of [p.on, p.off]) withCr(rig);
+    p.rOn.push(await cycle(p.on, 2));
+    p.rOff.push(await cycle(p.off, 2, offOpts(p.off)));
+    assert.equal(p.rOff[2].githubHumanActions.changeRequest, 1, "끔은 읽는다");
+    const g = p.rOn[2].githubHumanActions;
+    assert.ok(
+      (g.changeRequest ?? 0) < 1,
+      "켬은 PR#3 이 캐시 재사용이라 새 변경 요청을 못 읽는다(낮을 수 있는 방향)",
+    );
+    assert.equal(
+      g.changeRequestCacheSkipped,
+      2,
+      "건너뛴 조회 2건이 값으로 보인다",
+    );
+    assert.ok(
+      lineOf(p.rOn[2].reportText, GH_LINE).includes(
+        "캐시로 조회 2건 건너뜀 · 새 변경 요청 미수집",
+      ),
+      "표지 없이 조용히 낮아지지 않는다",
+    );
+  } finally {
+    cleanupPair(p);
+  }
+});
+
+test("2R ⑵ 이월 표기: «이번 회차 확인 m건 · 이전 회차 확인 이월 n건(캐시)» -- 양성 사건은 회차 1 에서 확인 · 뒤 회차에서는 이월로 따로 보이고 조회를 건너뛴 건수가 붙는다", async () => {
+  const p = await runPair(3, withCr);
+  try {
+    // 회차별 [이번 회차 확인 m, 이전 회차 확인 이월 n, ㄱ-4 가 읽은 PR 수, 캐시로 조회 건너뜀]
+    const expected = [
+      [1, 0, 1, 0],
+      [0, 1, 1, 1],
+      [0, 1, 1, 2],
+      [0, 1, 0, 3],
+      [0, 1, 0, 3],
+    ];
+    expected.forEach(([m, n, prs, skipped], i) => {
+      const tail =
+        skipped > 0
+          ? ` · 캐시로 조회 ${skipped}건 건너뜀 · 새 변경 요청 미수집`
+          : "";
+      // 회차 1(이월 0 · 건너뜀 0)은 캐시가 값에 닿지 않은 회차라 옛 문면 그대로.
+      const cell =
+        n === 0 && skipped === 0
+          ? `변경 요청 1(ㄱ-4 가 읽은 PR ${prs}건 한정)`
+          : `변경 요청 1(이번 회차 확인 ${m}건 · 이전 회차 확인 이월 ${n}건(캐시) · ㄱ-4 가 읽은 PR ${prs}건 한정${tail})`;
+      assert.ok(
+        lineOf(p.rOn[i].reportText, GH_LINE).includes(cell),
+        `회차 ${i + 1}: ${cell}\n실제: ${lineOf(p.rOn[i].reportText, GH_LINE)}`,
+      );
+      assert.equal(p.rOn[i].githubHumanActions.changeRequestCarried, n);
+      assert.equal(p.rOn[i].githubHumanActions.changeRequestFresh, m);
+    });
+  } finally {
+    cleanupPair(p);
+  }
+});
+
+test("2R ⑵ 이월은 «양성 · 창 안 · 사람» 만: 창 밖 제출 · 봇 계정은 이월 줄에서 세지 않는다(사건은 캐시 항목에 리뷰 식별자 · 제출 시각 · 작성자로 적힌다)", async () => {
+  const rig = makeRig(3);
+  try {
+    const crAtMs = Date.parse(CR_AT_ISO);
+    const entry = (n) => ({
+      status: "APPROVED",
+      checkedAtMs: NOW,
+      pullNumber: n,
+      reviewerLogin: "hykim82",
+    });
+    const entries = {
+      [rig.repo.mergeShas[2]]: {
+        ...entry(3),
+        changeRequests: [
+          { id: "501", login: "human-rev", atMs: crAtMs },
+          { id: "502", login: "human-rev", atMs: NOW - 30 * HOUR },
+          { id: "503", login: "bot-fixture-a", atMs: NOW - HOUR },
+        ],
+      },
+      [rig.repo.mergeShas[1]]: entry(2),
+      [rig.repo.mergeShas[0]]: entry(1),
+    };
+    fs.writeFileSync(
+      rig.cachePath,
+      JSON.stringify({ schema: "partial-count-approval-cache/v1", entries }),
+      "utf8",
+    );
+    const r = await cycle(rig, 0, { maxMergeChecks: 0 });
+    assert.equal(rig.fetch.calls.pullsFor.length, 0, "몫 0 = 조회 0");
+    assert.equal(r.githubHumanActions.changeRequest, 1, "창 안 사람 1건만");
+    assert.equal(r.githubHumanActions.changeRequestCarried, 1);
+    assert.equal(r.githubHumanActions.changeRequestFresh, 0);
+    assert.deepEqual(
+      r.githubHumanActions.humanEventIds.filter((id) => id.startsWith("cr:")),
+      ["cr:501"],
+    );
+  } finally {
+    cleanup(rig);
+  }
+});
+
+test("2R ⑶ 없다는 쪽은 이월하지 않는다: 변경 요청이 없던 입력에서 캐시 회차 4·5 는 «0» 이 아니라 «미수집» + 건너뛴 조회 수 + «새 변경 요청 미수집» · 셈 0 · 캐시 파일에 «없음» 이 기록되지 않는다", async () => {
+  const p = await runPair(3, () => {});
+  try {
+    for (let i = 0; i < 5; i++) {
+      assert.equal(
+        p.rOn[i].githubHumanActions.humanTotal,
+        p.rOff[i].githubHumanActions.humanTotal,
+        `회차 ${i + 1}: 분자 켬 = 끔`,
+      );
+      assert.equal(
+        lineOf(p.rOn[i].reportText, LN_HEAD),
+        lineOf(p.rOff[i].reportText, LN_HEAD),
+        `회차 ${i + 1}: ㄴ 머리 줄`,
+      );
+    }
+    for (const i of [3, 4]) {
+      const g = p.rOn[i].githubHumanActions;
+      assert.equal(g.changeRequest, null, `회차 ${i + 1}: 0 이 아니라 미수집`);
+      assert.equal(g.changeRequestCarried, 0, "없음은 이월하지 않는다");
+      assert.ok(
+        lineOf(p.rOn[i].reportText, GH_LINE).includes(
+          "변경 요청 미수집(ㄱ-4 리뷰 응답 없음 · 캐시로 조회 3건 건너뜀 · 새 변경 요청 미수집)",
+        ),
+        lineOf(p.rOn[i].reportText, GH_LINE),
+      );
+      assert.ok(
+        !lineOf(p.rOn[i].reportText, GH_LINE).includes("변경 요청 0("),
+        "0 으로 접지 않는다",
+      );
+    }
+    const parsed = JSON.parse(fs.readFileSync(p.on.cachePath, "utf8"));
+    for (const e of Object.values(parsed.entries)) {
+      assert.ok(
+        !Array.isArray(e.changeRequests) || e.changeRequests.length === 0,
+        "없다는 기록(빈 목록 · 0)을 사건처럼 적지 않는다",
+      );
+    }
+  } finally {
+    cleanupPair(p);
+  }
+});
+
+test("2R ⑷ 열린 PR 은 캐시로 건너뛰지 않는다: PR_NOT_MERGED(열린 PR) 항목은 캐시 재사용 0 · 매 회차 조회 · 조회 횟수(예산) 무변 -- 병합되면 다시 일반 순서", async () => {
+  const rig = makeRig(3);
+  try {
+    const [s1, s2, s3] = rig.repo.mergeShas;
+    rig.fetch.behavior[s2] = "openpr";
+    const rows = [];
+    for (let i = 0; i < 5; i++) {
+      if (i === 3) rig.fetch.behavior[s2] = "approved"; // 회차 4 에서 병합 처리됨
+      const mark = rig.fetch.calls.pullsFor.length;
+      const r = await cycle(rig, i);
+      assert.ok(
+        rig.fetch.calls.pullsFor.length - mark <= 1,
+        "회차당 조회 ≤ 몫 1(예산 무변)",
+      );
+      rows.push({
+        looked: lookedUpSince(rig, mark),
+        reusedUndecidable: r.gate4.cache.reusedUndecidable,
+        undecidable: r.gate4.undecidable,
+        approved: r.gate4.approved,
+        unchecked: r.gate4.uncheckedByBudget,
+      });
+    }
+    // 열린 s2 는 회차 2 에 처음 보인 뒤 병합될 때까지 «매 회차» 다시 조회된다(캐시 재사용 0) -- 병합 뒤 s1 이 일반 순서로 돌아온다.
+    assert.deepEqual(
+      rows.map((r) => r.looked),
+      [[s3], [s2], [s2], [s2], [s1]],
+    );
+    assert.deepEqual(
+      rows.map((r) => r.reusedUndecidable),
+      [0, 0, 0, 0, 0],
+      "열린 PR 판정은 캐시에서 재사용되지 않는다",
+    );
+    assert.deepEqual(
+      rows.map((r) => r.undecidable),
+      [0, 1, 1, 0, 0],
+      "열린 동안만 UNDECIDABLE(이번 회차 조회분)",
+    );
+    assert.deepEqual(
+      rows.map((r) => r.unchecked),
+      [2, 1, 1, 1, 0],
+      "조회하지 못한 s1 은 미조회(예산)로 남는다(캐시 재사용으로 접지 않음)",
+    );
+    assert.equal(
+      rig.fetch.calls.pullsFor.length,
+      5,
+      "5회차 조회 5건 = 캐시 끈 옛 동작(앞자리 5건)과 같은 횟수(예산 영향 0)",
+    );
+  } finally {
+    cleanup(rig);
+  }
+});
+
+test("2R ⑸ 일별 줄 합집합이 회차 1 사건을 잃지 않는다: 회차 4 에서 후보 수집이 실패해(그 회차 변경 요청 판독 재료 0) 사건이 안 보여도 오늘 합집합 · 사건 시각 장부에 cr 사건이 남고, 켬 = 끔", async () => {
+  const p = await runPair(3, withCr, 3);
+  try {
+    // 회차 4 = 두 쪽 모두 origin/master 없음(후보 수집 실패 · ㄱ-4 unknown) -> 그 회차 tick 에는 변경 요청 사건이 없다. 회차 5 = 복구.
+    for (const rig of [p.on, p.off]) {
+      git(rig.repo.dir, ["update-ref", "-d", "refs/remotes/origin/master"]);
+    }
+    p.rOn.push(await cycle(p.on, 3));
+    p.rOff.push(await cycle(p.off, 3, offOpts(p.off)));
+    for (const rig of [p.on, p.off]) {
+      git(rig.repo.dir, [
+        "update-ref",
+        "refs/remotes/origin/master",
+        rig.repo.headSha,
+      ]);
+    }
+    p.rOn.push(await cycle(p.on, 4));
+    p.rOff.push(await cycle(p.off, 4, offOpts(p.off)));
+    assert.equal(p.rOn[3].gate4.known, false);
+    assert.ok(
+      !p.rOn[3].dailyTick.confirmedEventIds.includes(CR_EVENT_ID),
+      "회차 4 tick 에는 사건이 없다(합집합이 살려야 하는 상황)",
+    );
+    let stOn = null;
+    let stOff = null;
+    const crAtMs = Date.parse(CR_AT_ISO);
+    for (let i = 0; i < 5; i++) {
+      const nowMs = NOW + i * STEP;
+      stOn = core.recordDailyTick({
+        state: stOn,
+        nowMs,
+        tick: p.rOn[i].dailyTick,
+        concurrentActive: 0,
+      });
+      stOff = core.recordDailyTick({
+        state: stOff,
+        nowMs,
+        tick: p.rOff[i].dailyTick,
+        concurrentActive: 0,
+      });
+      assert.ok(
+        stOn.confirmedEventIds.includes(CR_EVENT_ID),
+        `회차 ${i + 1} 뒤 켬 합집합에 회차 1 사건이 남아 있다`,
+      );
+      assert.equal(stOn.githubItemAtMs["cr:77"], crAtMs);
+      assert.deepEqual(
+        [...stOn.confirmedEventIds].sort(),
+        [...stOff.confirmedEventIds].sort(),
+        `회차 ${i + 1}: 일별 합집합 켬 = 끔`,
+      );
+    }
+  } finally {
+    cleanupPair(p);
+  }
+});
+
+test("2R ⑹ 캐시 항목 통째 삭제 -> 다음 회차에 다시 조회돼 사건이 «이번 회차 확인» 으로 되살아난다(이월 0) · 파일 통째 삭제도 같다", async () => {
+  for (const mode of ["entry", "file"]) {
+    const rig = makeRig(3);
+    try {
+      withCr(rig);
+      for (let i = 0; i < 3; i++) await cycle(rig, i);
+      const s3 = rig.repo.mergeShas[2];
+      const before = JSON.parse(fs.readFileSync(rig.cachePath, "utf8"));
+      assert.equal(
+        before.entries[s3].changeRequests?.length,
+        1,
+        "삭제 전: 양성 사건이 항목에 적혀 있다",
+      );
+      assert.deepEqual(
+        { ...before.entries[s3].changeRequests[0] },
+        { id: "77", login: "human-rev", atMs: Date.parse(CR_AT_ISO) },
+        "리뷰 식별자 · 제출 시각 · 작성자",
+      );
+      if (mode === "entry") {
+        delete before.entries[s3];
+        fs.writeFileSync(rig.cachePath, JSON.stringify(before), "utf8");
+      } else {
+        fs.rmSync(rig.cachePath);
+      }
+      const mark = rig.fetch.calls.pullsFor.length;
+      const r = await cycle(rig, 3);
+      assert.deepEqual(
+        lookedUpSince(rig, mark),
+        [s3],
+        `${mode} 삭제: 사라진 sha 가 다시 조회됨(가장 새 병합 = 캐시에 없는 sha 순서 첫째)`,
+      );
+      assert.equal(r.githubHumanActions.changeRequest, 1, "사건이 되살아남");
+      assert.equal(r.githubHumanActions.changeRequestFresh, 1);
+      assert.equal(r.githubHumanActions.changeRequestCarried, 0);
+    } finally {
+      cleanup(rig);
+    }
+  }
+});
+
+test("2R ⑺ ㄱ 머리 줄 «외부 독립 앵커로 확인: N건» 에 캐시 재사용 표지(k건) -- 끔 쪽 머리 줄은 옛 그대로", async () => {
+  const p = await runPair(3, () => {});
+  try {
+    const marks = p.rOn.map((r) => lineOf(r.reportText, ANCHOR_LINE));
+    assert.deepEqual(marks, [
+      "- 외부 독립 앵커로 확인: 1건 (캐시 재사용 0건)",
+      "- 외부 독립 앵커로 확인: 2건 (캐시 재사용 1건)",
+      "- 외부 독립 앵커로 확인: 3건 (캐시 재사용 2건)",
+      "- 외부 독립 앵커로 확인: 3건 (캐시 재사용 3건)",
+      "- 외부 독립 앵커로 확인: 3건 (캐시 재사용 3건)",
+    ]);
+    for (const r of p.rOff) {
+      assert.equal(
+        lineOf(r.reportText, ANCHOR_LINE),
+        "- 외부 독립 앵커로 확인: 1건",
+        "캐시를 안 켠 회차의 머리 줄은 표지 0",
+      );
+    }
+  } finally {
+    cleanupPair(p);
   }
 });

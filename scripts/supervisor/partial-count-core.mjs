@@ -403,6 +403,15 @@ function renderGate4HeadCounts(gate4) {
   return `중 캐시 포함 확인 ${confirmed} · 이번 회차 조회 ${gate4.checked}`;
 }
 
+// HYK-255-c1-approval-cache-2 (판정 #20261119-2020 ⑤) -- ㄱ 머리 줄 `외부 독립 앵커로 확인: N건` 의 N 은 캐시를 켠 회차에 «이번 회차 조회 + 캐시 재사용
+// APPROVED» 의 합이다. 머리 줄만 보는 독자가 재사용분을 이번 회차 조회로 읽지 않도록 «(캐시 재사용 k건)» 을 붙인다(k = N 중 캐시에서 온 APPROVED).
+// 캐시 없는 회차(gate4.cache 없음)는 옛 문면 그대로.
+function renderGate4AnchorCacheMark(gate4) {
+  return gate4.cache?.active === true
+    ? ` (캐시 재사용 ${gate4.cache.reusedApproved}건)`
+    : "";
+}
+
 function buildGate4CacheLines(gate4) {
   const c = gate4.cache;
   if (c?.active !== true) return [];
@@ -420,7 +429,9 @@ function buildGate4CacheLines(gate4) {
 function buildGaSection(gate4, auxNote, gateAux) {
   const lines = ["ㄱ 설계된 정지:"];
   if (gate4.known === true) {
-    lines.push(`- 외부 독립 앵커로 확인: ${gate4.approved}건`);
+    lines.push(
+      `- 외부 독립 앵커로 확인: ${gate4.approved}건${renderGate4AnchorCacheMark(gate4)}`,
+    );
     lines.push(
       `- ㄱ-4 후보 병합(측정 기간 내 origin/master): ${gate4.candidatesInWindow}건` +
         ` ${renderGate4HeadCounts(gate4)} · APPROVED ${gate4.approved} · NOT_APPROVED ${gate4.notApproved}` +
@@ -2513,10 +2524,15 @@ export function summarizeGithubList({
   return { ...tally, events };
 }
 
-// ㄱ-4 가 이미 받은 PR 리뷰 응답들(추가 조회 0) -> {count, prs, events}. count = 창 안 · 사람 · state CHANGES_REQUESTED(대소문자 무관) ·
-// 같은 리뷰 id 중복 1. prs = 읽은 PR 수(0 이면 «미수집» -- 0 건이 아니다). 응답 배열이 아닌 것은 건너뛴다.
+// ㄱ-4 가 이미 받은 PR 리뷰 응답들(추가 조회 0) -> {count, prs, events, fresh, carried}. count = 창 안 · 사람 · state CHANGES_REQUESTED
+// (대소문자 무관) · 같은 리뷰 id 중복 1. prs = «이번 회차에» 읽은 PR 수(0 이면 이번 회차 수집은 «미수집» -- 0 건이 아니다). 응답 배열이 아닌 것은
+// 건너뛴다.
+// HYK-255-c1-approval-cache-2 (판정 #20261119-2020) -- carriedRecords = 이전 회차에 REST 응답으로 «확인» 해 캐시 항목에 적어 둔 양성 사건
+// [{id, login, atMs}] (extractChangeRequestRecords 모양). 이번 회차 응답과 «같은 규칙»(창 안 · 사람 · 같은 id 중복 1)으로 세고, 이번 회차에
+// 이미 센 id 는 «이번 회차 확인»(fresh)이 가져간다. 센 것만 carried — «없다»는 기록은 입력에 아예 없다(양성만 이월).
 export function summarizeChangeRequests({
   reviewLists,
+  carriedRecords,
   botLogins,
   windowStartMs,
   windowEndMs,
@@ -2529,34 +2545,84 @@ export function summarizeChangeRequests({
   const seen = new Set();
   const events = [];
   let prs = 0;
+  const take = (hit) => {
+    if (hit === null || seen.has(hit.id)) return false;
+    seen.add(hit.id);
+    events.push({ id: `${GITHUB_CR_ID_PREFIX}${hit.id}`, atMs: hit.atMs });
+    return true;
+  };
   for (const reviews of Array.isArray(reviewLists) ? reviewLists : []) {
     if (!Array.isArray(reviews)) continue;
     prs += 1;
-    for (const review of reviews) {
-      const hit = readChangeRequest(review, ctx);
-      if (hit === null || seen.has(hit.id)) continue;
-      seen.add(hit.id);
-      events.push({ id: `${GITHUB_CR_ID_PREFIX}${hit.id}`, atMs: hit.atMs });
-    }
+    for (const review of reviews) take(readChangeRequest(review, ctx));
   }
-  return { count: events.length, prs, events };
+  const fresh = events.length;
+  for (const rec of Array.isArray(carriedRecords) ? carriedRecords : []) {
+    take(countedChangeRequest(rec, ctx));
+  }
+  return {
+    count: events.length,
+    prs,
+    events,
+    fresh,
+    carried: events.length - fresh,
+  };
 }
 
-// 리뷰 하나 -> {id, atMs}(센다: 창 안 · 사람 · state CHANGES_REQUESTED) | null.
-function readChangeRequest(review, ctx) {
+// 리뷰 하나 -> {id, login, atMs}(state CHANGES_REQUESTED · 식별자 · 작성자 · 제출 시각을 읽을 수 있음 -- 창 · 봇 판정 «전») | null.
+function readChangeRequestRecord(review) {
   if (!isRecord(review)) return null;
   const state = typeof review.state === "string" ? review.state : "";
   const atMs = githubTimeMs(review.submitted_at);
   const login = githubLoginOf(review);
   const id = githubItemId(review);
-  const counted =
+  const readable =
     state.toLowerCase() === GITHUB_CHANGES_REQUESTED &&
-    atMs >= ctx.windowStartMs &&
-    atMs <= ctx.windowEndMs &&
+    Number.isFinite(atMs) &&
     login !== null &&
-    id !== null &&
-    !ctx.bots.has(login.toLowerCase());
-  return counted ? { id, atMs } : null;
+    id !== null;
+  return readable ? { id, login, atMs } : null;
+}
+
+// 기록 하나 -> {id, atMs}(센다: 창 안 · 사람) | null. 이번 회차 응답과 캐시 이월 기록이 같은 규칙을 쓴다.
+function countedChangeRequest(rec, ctx) {
+  if (
+    !isRecord(rec) ||
+    typeof rec.id !== "string" ||
+    rec.id === "" ||
+    typeof rec.login !== "string" ||
+    rec.login === "" ||
+    !Number.isFinite(rec.atMs)
+  ) {
+    return null;
+  }
+  const counted =
+    rec.atMs >= ctx.windowStartMs &&
+    rec.atMs <= ctx.windowEndMs &&
+    !ctx.bots.has(rec.login.toLowerCase());
+  return counted ? { id: rec.id, atMs: rec.atMs } : null;
+}
+
+function readChangeRequest(review, ctx) {
+  return countedChangeRequest(readChangeRequestRecord(review), ctx);
+}
+
+// 리뷰 응답 배열들 -> 캐시 항목에 적을 양성 사건 기록 [{id, login, atMs}](state CHANGES_REQUESTED 인 것만 · 같은 id 중복 1 · 창 · 봇은
+// «세는 때» 판정한다). «변경 요청이 없다» 는 이 함수가 돌려주지 못한다 -- 빈 배열은 «없다는 기록» 이 아니라 «양성 0건» 일 뿐이고
+// 캐시는 그것을 항목에 적지 않는다(이월 0).
+export function extractChangeRequestRecords(reviewLists) {
+  const seen = new Set();
+  const out = [];
+  for (const reviews of Array.isArray(reviewLists) ? reviewLists : []) {
+    if (!Array.isArray(reviews)) continue;
+    for (const review of reviews) {
+      const rec = readChangeRequestRecord(review);
+      if (rec === null || seen.has(rec.id)) continue;
+      seen.add(rec.id);
+      out.push(rec);
+    }
+  }
+  return out;
 }
 
 const GITHUB_SUM_KEYS = [
@@ -2578,6 +2644,24 @@ const githubSkippedList = (result) => ({
   state: result?.state ?? "unchecked",
   reason: result?.reason ?? "",
 });
+
+// 변경 요청 칸들 -- 이번 회차에 읽은 PR 이 있거나 캐시 이월 양성 사건이 있을 때만 «수» · 둘 다 없으면 null(미수집 -- 0 아님 · 없다는 쪽은 이월하지
+// 않는다). HYK-255-c1-approval-cache-2 -- Fresh = 이번 회차 확인 m · Carried = 이전 회차 확인 이월 n(캐시) · CacheSkipped = 캐시로 조회를 건너뛴 건수
+// (캐시를 켠 회차만 수 · 아니면 null = 옛 문면).
+function changeRequestColumns(changeRequests) {
+  const cr = changeRequests ?? { count: 0, prs: 0, events: [] };
+  const carried = isCount(cr.carried) ? cr.carried : 0;
+  const known = cr.prs > 0 || carried > 0;
+  return {
+    changeRequest: known ? cr.count : null,
+    changeRequestPrs: cr.prs,
+    changeRequestFresh: isCount(cr.fresh) ? cr.fresh : cr.count,
+    changeRequestCarried: carried,
+    changeRequestCacheSkipped: isCount(cr.cacheSkipped)
+      ? cr.cacheSkipped
+      : null,
+  };
+}
 
 // 목록 결과 3 + 변경 요청 -> 회차 값. listResults[key] = {state:"ok", summary} | {state:"unchecked"|"failed", reason}. 한 목록이라도 ok 여야
 // 부른다(전부 못 불렀으면 wire 가 known:false 로 돌려준다). 못 부른 목록의 종류 칸 = null(0 아님) · 덮음 구간(listCover) = 성공 + 판정 불가 0 인
@@ -2615,20 +2699,17 @@ export function assembleGithubHumanActions({
       (r?.state === "failed" ? failedLists : uncheckedLists).push(key);
     }
   }
-  const cr = changeRequests ?? { count: 0, prs: 0, events: [] };
-  const crKnown = cr.prs > 0;
-  events.push(...(cr.events ?? []));
+  const crColumns = changeRequestColumns(changeRequests);
+  events.push(...(changeRequests?.events ?? []));
   const listTotal = GITHUB_LIST_KEYS.reduce(
     (sum, key) => sum + readCount(g[GITHUB_LIST_SPEC[key].field]),
     0,
   );
   return {
     ...g,
-    // 변경 요청 = ㄱ-4 리뷰 응답을 읽은 PR 이 있을 때만 수 · 아니면 null(미수집 -- 0 아님).
-    changeRequest: crKnown ? cr.count : null,
-    changeRequestPrs: cr.prs,
+    ...crColumns,
     ...sums,
-    humanTotal: listTotal + (crKnown ? cr.count : 0),
+    humanTotal: listTotal + readCount(crColumns.changeRequest),
     humanEventIds: events.map((e) => e.id),
     humanEvents: events,
     lists,
@@ -2687,10 +2768,29 @@ function githubListCell(g, key) {
 }
 
 // 변경 요청 표기 -- ㄱ-4 가 읽은 PR 이 있으면 «수(ㄱ-4 가 읽은 PR n건 한정)» · 없으면 «미수집(ㄱ-4 리뷰 응답 없음)» (0 아님).
+// HYK-255-c1-approval-cache-2 -- ㄱ-4 판정 캐시를 켠 회차(changeRequestCacheSkipped 가 수)는 «이번 회차 확인 m건 · 이전 회차 확인 이월 n건(캐시)»
+// 를 따로 적고, 캐시로 조회를 건너뛴 건이 있으면 «캐시로 조회 s건 건너뜀 · 새 변경 요청 미수집» 을 붙인다(건너뛴 조회의 새 변경 요청은 모른다 --
+// 없다고 적지도, 이월하지도 않는다). 캐시를 안 켠 회차 · 이월도 건너뜀도 없는 회차는 옛 문면 그대로.
 function githubChangeRequestCell(g) {
-  return isCount(g.changeRequest)
-    ? `${g.changeRequest}(ㄱ-4 가 읽은 PR ${readCount(g.changeRequestPrs)}건 한정)`
-    : "미수집(ㄱ-4 리뷰 응답 없음)";
+  const cacheOn = isCount(g.changeRequestCacheSkipped);
+  const skipTail =
+    cacheOn && g.changeRequestCacheSkipped > 0
+      ? ` · 캐시로 조회 ${g.changeRequestCacheSkipped}건 건너뜀 · 새 변경 요청 미수집`
+      : "";
+  if (!isCount(g.changeRequest)) {
+    return `미수집(ㄱ-4 리뷰 응답 없음${skipTail})`;
+  }
+  // 이월도 건너뜀도 없는 회차(캐시를 켰어도 이번 회차 응답만으로 센 값)는 옛 문면 그대로 -- 새 표기는 «캐시가 값에 닿은» 회차에만 붙는다.
+  if (
+    !cacheOn ||
+    (skipTail === "" && readCount(g.changeRequestCarried) === 0)
+  ) {
+    return `${g.changeRequest}(ㄱ-4 가 읽은 PR ${readCount(g.changeRequestPrs)}건 한정)`;
+  }
+  return (
+    `${g.changeRequest}(이번 회차 확인 ${readCount(g.changeRequestFresh)}건 · 이전 회차 확인 이월 ${readCount(g.changeRequestCarried)}건(캐시) · ` +
+    `ㄱ-4 가 읽은 PR ${readCount(g.changeRequestPrs)}건 한정${skipTail})`
+  );
 }
 
 // ㄴ 절 줄 -- «GitHub 사람 손 N건 이상(댓글 a · 리뷰 줄 댓글 b · 변경 요청 c · 미병합 닫기 d · 판정 불가 K)». 미결선 = null.
