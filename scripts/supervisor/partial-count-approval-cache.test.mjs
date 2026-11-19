@@ -566,6 +566,39 @@ test("ⓓ 항목 하나가 무효(status 오타)면 그 sha 만 «캐시에 없�
   }
 });
 
+test("ⓓ 캐시 읽기 «실패»(권한 등 · 없음/깨짐 아님) -> 지금과 같은 동작(앞자리 조회 · 미조회 그대로) + 사유 줄 + 기존 캐시 파일은 덮어쓰지 않는다", async () => {
+  const rig = makeRig(3);
+  try {
+    await cycle(rig, 0);
+    const before = fs.readFileSync(rig.cachePath, "utf8");
+    const mark = rig.fetch.calls.pullsFor.length;
+    const r = await cycle(rig, 1, {
+      readFn: (p, enc) => {
+        if (String(p).endsWith(CACHE_NAME)) {
+          const err = new Error("EACCES: permission denied");
+          err.code = "EACCES";
+          throw err;
+        }
+        return fs.readFileSync(p, enc);
+      },
+    });
+    assert.deepEqual(
+      lookedUpSince(rig, mark),
+      [rig.repo.mergeShas[2]],
+      "읽지 못했으니 앞자리(가장 새 병합)를 다시 조회",
+    );
+    assert.equal(r.gate4.uncheckedByBudget, 2, "미조회를 0 으로 접지 않는다");
+    assert.match(r.reportText, /캐시 읽기 실패\(EACCES/);
+    assert.equal(
+      fs.readFileSync(rig.cachePath, "utf8"),
+      before,
+      "읽기 실패 회차는 기존 캐시 바이트를 덮어쓰지 않는다",
+    );
+  } finally {
+    cleanup(rig);
+  }
+});
+
 test("ⓓ 캐시 저장 실패(경로가 파일 밑) -> 던지지 않고 그 회차 값은 정상 · 사유 줄 «캐시 저장 실패»", async () => {
   const rig = makeRig(3);
   try {
